@@ -1,0 +1,24 @@
+[package]
+name = "teseladb-auth"
+version = "0.1.0"
+description = "Authentication and authorization of TeselaDB: SCRAM, SASLprep, X.509, users, roles, privileges and auditing."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+teseladb-bson = { path = "../teseladb-bson" }
+teseladb-compress = { path = "../teseladb-compress" }
+teseladb-crypto = { path = "../teseladb-crypto" }
+teseladb-hash = { path = "../teseladb-hash" }
+teseladb-mql = { path = "../teseladb-mql" }
+teseladb-search = { path = "../teseladb-search" }
+teseladb-x509 = { path = "../teseladb-x509" }
+
+[dev-dependencies]
+teseladb-json = { path = "../teseladb-json" }
+teseladb-types = { path = "../teseladb-types" }

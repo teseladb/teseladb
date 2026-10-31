@@ -1,0 +1,160 @@
+{"$convert":{"input":"$i","to":{"type":"binData","subtype":10}}}	!! 4341107	In $convert, numeric value for 'subtype' does not correspond to a BinData type: 10
+{"$convert":{"input":"$i","to":{"type":"binData","subtype":200}}}	=> {"x":{"$binary":{"base64":"BQAAAA==","subType":"c8"}}}
+{"$convert":{"input":"$i","to":"binData","byteOrder":"little"}}	=> {"x":{"$binary":{"base64":"BQAAAA==","subType":"00"}}}
+{"$toBool":{"$numberDouble":"1.5"}}	=> {"x":true}
+{"$convert":{"input":{"$binary":{"base64":"/w==","subType":"00"}},"to":"int"}}	=> {"x":{"$numberInt":"-1"}}
+{"$convert":{"input":{"$binary":{"base64":"//8=","subType":"00"}},"to":"long"}}	=> {"x":{"$numberLong":"-1"}}
+{"$convert":{"input":{"$binary":{"base64":"AAECAwQFBgcICQoLDA0ODw==","subType":"05"}},"to":"int"}}	!! 241	Failed to convert 'BinData(5, "000102030405060708090A0B0C0D0E0F")' to number in $convert because of invalid length: 16
+{"$convert":{"input":{"$binary":{"base64":"AAECAwQFBgcICQoLDA0ODw==","subType":"05"}},"to":"string","format":"hex"}}	=> {"x":"000102030405060708090A0B0C0D0E0F"}
+{"$convert":{"input":{"$binary":{"base64":"AAECAwQFBgcICQoLDA0ODw==","subType":"00"}},"to":{"type":"binData","subtype":5}}}	!! 241	Conversions between different BinData subtypes are not supported
+{"$convert":{"input":{"$binary":{"base64":"AAECAwQFBgcICQoLDA0ODw==","subType":"05"}},"to":{"type":"binData","subtype":5}}}	=> {"x":{"$binary":{"base64":"AAECAwQFBgcICQoLDA0ODw==","subType":"05"}}}
+{"$convert":{"input":{"$numberLong":"1"},"to":{"type":"binData","subtype":5}}}	!! 13016802	$convert to BinData subtype 5 requires exactly 16 bytes
+{"$convert":{"input":"AAECAwQFBgcICQoLDA0ODw==","to":{"type":"binData","subtype":5},"format":"base64"}}	=> {"x":{"$binary":{"base64":"AAECAwQFBgcICQoLDA0ODw==","subType":"05"}}}
+{"$toLong":{"$numberDecimal":"-0.5"}}	=> {"x":{"$numberLong":"0"}}
+{"$toLong":{"$numberDecimal":"0.5"}}	=> {"x":{"$numberLong":"0"}}
+{"$toLong":{"$numberDecimal":"1E+3"}}	=> {"x":{"$numberLong":"1000"}}
+{"$toLong":{"$numberDecimal":"-1E+3"}}	=> {"x":{"$numberLong":"-1000"}}
+{"$toInt":"0X1F"}	!! 241	Illegal hexadecimal input in $convert with no onError value: 0X1F
+{"$toDouble":"0X1F"}	!! 241	Illegal hexadecimal input in $convert with no onError value: 0X1F
+{"$toDecimal":"0X1F"}	!! 241	Illegal hexadecimal input in $convert with no onError value: 0X1F
+{"$toDouble":{"$numberDecimal":"1E-400"}}	!! 241	Conversion would overflow target type in $convert with no onError value: 1E-400
+{"$toDouble":{"$numberDecimal":"-1E+400"}}	!! 241	Conversion would overflow target type in $convert with no onError value: -1E+400
+{"$toDouble":"1.5x"}	!! 241	Failed to parse number '1.5x' in $convert with no onError value: Did not consume whole string
+{"$toDouble":"1e5"}	=> {"x":{"$numberDouble":"100000.0"}}
+{"$toDouble":"0e-400"}	=> {"x":{"$numberDouble":"0.0"}}
+{"$toDouble":"0.0000"}	=> {"x":{"$numberDouble":"0.0"}}
+{"$toDecimal":"."}	!! 241	Failed to parse number '.' in $convert with no onError value: Failed to parse string to decimal
+{"$toDecimal":"-"}	!! 241	Failed to parse number '-' in $convert with no onError value: Failed to parse string to decimal
+{"$toDecimal":"1.2.3"}	!! 241	Failed to parse number '1.2.3' in $convert with no onError value: Failed to parse string to decimal
+{"$toDecimal":"e5"}	!! 241	Failed to parse number 'e5' in $convert with no onError value: Failed to parse string to decimal
+{"$toDecimal":"1e5e5"}	!! 241	Failed to parse number '1e5e5' in $convert with no onError value: Failed to parse string to decimal
+{"$toDecimal":"0.000"}	=> {"x":{"$numberDecimal":"0.000"}}
+{"$toDecimal":"00000"}	=> {"x":{"$numberDecimal":"0"}}
+{"$toDecimal":"1e6200"}	!! 241	Failed to parse number '1e6200' in $convert with no onError value: Conversion from string to decimal would overflow
+{"$toDecimal":"1234567890123456789012345678901234e6100"}	=> {"x":{"$numberDecimal":"1.234567890123456789012345678901234E+6133"}}
+{"$convert":{"input":{"$numberDouble":"NaN"},"to":"string","base":16}}	!! 241	Base conversion is not supported for non-integers in $convert with no onError value: 
+{"$convert":{"input":{"$numberDouble":"Infinity"},"to":"string","base":16}}	!! 241	Base conversion is not supported for non-integers in $convert with no onError value: 
+{"$convert":{"input":{"$numberDecimal":"255.5"},"to":"string","base":16}}	!! 241	Base conversion is not supported for non-integers in $convert with no onError value: 
+{"$convert":{"input":"_-8","to":"binData","format":"base64url"}}	=> {"x":{"$binary":{"base64":"/+8=","subType":"00"}}}
+{"$convert":{"input":"_-8!","to":"binData","format":"base64url"}}	!! 241	Failed to parse BinData '_-8!' in $convert with no onError value: Invalid base64 character
+{"$toString":{"$timestamp":{"t":1,"i":2}}}	=> {"x":"Timestamp(1, 2)"}
+{"$toString":{"$regularExpression":{"pattern":"a","options":""}}}	=> {"x":"/a/"}
+{"$convert":{"input":{"$minKey":1},"to":"string"}}	=> {"x":"MinKey"}
+{"$convert":{"input":{"$numberDecimal":"-0"},"to":"bool"}}	=> {"x":false}
+{"$convert":{"input":"$i","to":"binData","byteOrder":5}}	!! 9130001	$convert requires that 'byteOrder' be a string, found: int with value 5
+{"$convert":{"input":"$i","to":"binData","byteOrder":null}}	=> {"x":{"$binary":{"base64":"BQAAAA==","subType":"00"}}}
+{"$serializeEJSON":{"input":{"a":{"$oid":"0123456789abcdef01234567"}}}}	=> {"x":{"a":{"$oid":"0123456789abcdef01234567"}}}
+{"$serializeEJSON":{"input":{"$numberDouble":"1.5"},"relaxed":true}}	=> {"x":{"$numberDouble":"1.5"}}
+{"$serializeEJSON":{"input":{"$numberDouble":"Infinity"}}}	=> {"x":{"$numberDouble":"Infinity"}}
+{"$serializeEJSON":{"input":{"$numberDouble":"0.0"}}}	=> {"x":{"$numberDouble":"0.0"}}
+{"$deserializeEJSON":{"input":"$i","relaxed":true}}	!! 9	$deserializeEJSON found an unknown argument: relaxed
+{"$rand":{"a":1}}	!! 3040501	$rand does not currently accept arguments
+{"$rand":[1]}	!! 3040501	$rand does not currently accept arguments
+{"$createObjectId":{"a":1}}	!! 9	$createObjectId only accepts the empty object as argument. To convert a value to an ObjectId, use $toObjectId.
+{"$currentDate":{"a":1}}	!! 9428201	$currentDate does not currently accept arguments
+{"$atan2":[0,1]}	=> {"x":{"$numberDouble":"0.0"}}
+{"$atan2":[{"$numberDouble":"Infinity"},1]}	=> {"x":{"$numberDouble":"1.5707963267948966"}}
+{"$atan2":[1,{"$numberDouble":"-Infinity"}]}	=> {"x":{"$numberDouble":"3.141592653589793"}}
+{"$atan2":[-1,-1]}	=> {"x":{"$numberDouble":"-2.356194490192345"}}
+{"$sin":-0.0}	=> {"x":{"$numberDouble":"-0.0"}}
+{"$sin":{"$numberDouble":"-0.0"}}	=> {"x":{"$numberDouble":"-0.0"}}
+{"$similarityDotProduct":[{"$binary":{"base64":"AQI=","subType":"09"}},[1,2]]}	!! 10506600	Invalid dType for provided BinData vector. Valid options are 0x10 for PACKED_BIT, 0x03 for INT8, or 0x27 for FLOAT32.
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$date"},{"$arrayToObject":[[[{"$literal":"$numberLong"},"x"]]]}]]]}}}	!! 241	$numberLong value must be a string specifying an integer
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$date"},{"$arrayToObject":[[[{"$literal":"$numberLong"},5]]]}]]]}}}	!! 241	$date must be a 64-bit signed integer as a string
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$oid"},"0123456789abcdef0123456g"]]]}}}	!! 241	$oid value must be a valid objectId
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$timestamp"},{"t":{"$numberLong":"5000000000"},"i":1}]]]}}}	=> {"x":{"$timestamp":{"t":705032704,"i":1}}}
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$timestamp"},{"t":1,"i":"x"}]]]}}}	!! 241	$timestamp.i value must be of type int or long
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$binary"},{"base64":1,"subType":"00"}]]]}}}	!! 241	$binary.base64 value must be of type string
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$regularExpression"},{"pattern":1,"options":""}]]]}}}	!! 241	$regularExpression.pattern value must be of type string
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$dbPointer"},{"$arrayToObject":[[[{"$literal":"$ref"},"c"],[{"$literal":"$id"},{"$arrayToObject":[[[{"$literal":"$oid"},"0123456789abcdef01234567"]]]}]]]}]]]}}}	!! 241	$dbPointer.$id value must be of type string
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$dbPointer"},{"$arrayToObject":[[[{"$literal":"$ref"},1]]]}]]]}}}	!! 241	$dbPointer.$ref value must be of type string
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$dbPointer"},5]]]}}}	!! 241	$dbPointer value must be of type object
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$dbPointer"},{"$arrayToObject":[[[{"$literal":"$ref"},"c"],[{"$literal":"$id"},5]]]}]]]}}}	!! 241	$dbPointer.$id value must be of type string
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$code"},"c"],[{"$literal":"$scope"},5]]]}}}	!! 241	$scope value must be of type object
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$code"},"c"],[{"$literal":"$x"},5]]]}}}	!! 241	$code must be the first field in the object
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$maxKey"},{"$numberLong":"1"}]]]}}}	!! 241	$maxKey value must be of type int
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$numberDecimal"},5]]]}}}	!! 241	$numberDecimal value must be of type string
+{"$dateToParts":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"timezone":"$n"}}	=> {"x":null}
+{"$dateToParts":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"iso8601":"$n"}}	=> {"x":null}
+{"$dateToParts":{"timezone":"UTC"}}	!! 40522	Missing 'date' parameter to $dateToParts
+{"$dateFromParts":{"year":2026,"timezone":"$n"}}	=> {"x":null}
+{"$dateDiff":{"startDate":{"$date":"2026-03-29T01:30:45.678Z"},"endDate":{"$date":"2026-03-29T01:30:45.678Z"},"unit":"day","timezone":"$n"}}	=> {"x":null}
+{"$dateTrunc":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"unit":"day","timezone":"$n"}}	=> {"x":null}
+{"$dateTrunc":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"unit":"week","startOfWeek":"$n"}}	=> {"x":null}
+{"$dateTrunc":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"unit":"week","startOfWeek":1}}	!! 5439015	$dateTrunc requires 'startOfWeek' to be a string, but got int
+{"$dateDiff":{"startDate":{"$date":"2026-03-29T01:30:45.678Z"},"endDate":{"$date":"2026-03-29T01:30:45.678Z"},"unit":"week","startOfWeek":1}}	!! 5439015	$dateDiff requires 'startOfWeek' to be a string, but got int
+{"$dateDiff":{"startDate":{"$date":"2026-03-29T01:30:45.678Z"},"endDate":{"$date":"2026-03-29T01:30:45.678Z"},"unit":1}}	!! 5439013	$dateDiff requires 'unit' to be a string, but got int
+{"$dateToString":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"format":"%z","timezone":"-03:30"}}	=> {"x":"-0330"}
+{"$dateToString":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"format":{"$concat":["%","Y"]}}}	=> {"x":"2026"}
+{"$dateToString":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"format":{"$concat":["%","q"]}}}	!! 18536	Invalid format character '%q' in format string
+{"$hour":{"$literal":{"date":1}}}	!! 16006	can't convert from BSON type object to Date
+{"$hour":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"timezone":"+05:3"}}	!! 40485	unrecognized time zone identifier: "+05:3"
+{"$hour":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"timezone":"+05:300"}}	!! 40485	unrecognized time zone identifier: "+05:300"
+{"$hour":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"timezone":"+0a"}}	!! 40485	unrecognized time zone identifier: "+0a"
+{"$hour":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"timezone":"+123"}}	!! 40485	unrecognized time zone identifier: "+123"
+{"$dateFromString":{"dateString":"2026-03-29T01:30:45 A"}}	=> {"x":{"$date":{"$numberLong":"1774744245000"}}}
+{"$dateFromString":{"dateString":"2026-03-29T01:30:45 N"}}	=> {"x":{"$date":{"$numberLong":"1774751445000"}}}
+{"$dateFromString":{"dateString":"2026-03-29T01:30:45 J"}}	!! 241	Error parsing date string '2026-03-29T01:30:45 J'; 20: passing a time zone identifier as part of the string is not allowed 'J'
+{"$dateFromString":{"dateString":"2026-03-29T01:30:45 m"}}	=> {"x":{"$date":{"$numberLong":"1774704645000"}}}
+{"$dateFromString":{"dateString":"2026-03-29 Tx"}}	!! 241	Error parsing date string '2026-03-29 Tx'; 11: passing a time zone identifier as part of the string is not allowed 'T'
+{"$dateFromString":{"dateString":"2026-03-29T01:30:45Z x"}}	!! 241	Error parsing date string '2026-03-29T01:30:45Z x'; 21: Double timezone specification 'x'
+{"$dateFromString":{"dateString":"2026-03-29T01:30:45 +01 x"}}	!! 241	Error parsing date string '2026-03-29T01:30:45 +01 x'; 24: Double timezone specification 'x'
+{"$dateFromString":{"dateString":"2026/0329"}}	!! 241	Error parsing date string '2026/0329'; 4: Unexpected character '/'
+{"$dateFromString":{"dateString":"29 2026"}}	!! 241	Error parsing date string '29 2026'; 0: Unexpected character '2'; 1: Unexpected character '9'
+{"$dateFromString":{"dateString":"T01:30"}}	!! 241	an incomplete date/time string has been found, with elements missing: "T01:30"
+{"$dateFromString":{"dateString":"2026-03-29","format":"%Y-%m-%d%"}}	!! 18535	Unmatched '%' at end of format string
+{"$dateFromString":{"dateString":"2026-03-29x","format":"%Y-%m-%d%%"}}	!! 241	Error parsing date string '2026-03-29x'; 10: Format literal not found 'x'
+{"$dateFromString":{"dateString":"2026-03-29%","format":"%Y-%m-%d%%"}}	=> {"x":{"$date":{"$numberLong":"1774742400000"}}}
+{"$dateFromString":{"dateString":"2026-00-29","format":"%Y-%m-%d"}}	!! 241	Error parsing date string '2026-00-29'; 10: The parsed date was invalid ' '
+{"$dateFromString":{"dateString":"2026-03-x","format":"%Y-%m-%d"}}	!! 241	Error parsing date string '2026-03-x'; 8: Unexpected data found. 'x'; 8: A two digit day could not be found 'x'
+{"$dateFromString":{"dateString":"2026-0x-01","format":"%Y-%m-%d"}}	!! 241	Error parsing date string '2026-0x-01'; 6: Format literal not found 'x'; 7: Unexpected data found. '-'; 10: The parsed date was invalid ' '
+{"$dateFromString":{"dateString":"2026 x","format":"%Y %j"}}	!! 241	Error parsing date string '2026 x'; 5: Unexpected data found. 'x'; 5: A three digit day-of-year could not be found 'x'
+{"$dateFromString":{"dateString":"x 1","format":"%G %V"}}	!! 241	Error parsing date string 'x 1'; 3: Not enough data available to satisfy format ' '
+{"$dateFromString":{"dateString":"2026 x","format":"%G %u"}}	!! 241	Error parsing date string '2026 x'; 5: A single digit day of week could not be found 'x'
+{"$dateFromString":{"dateString":"2026-03-29 x","format":"%Y-%m-%d %H"}}	!! 241	Error parsing date string '2026-03-29 x'; 11: Unexpected data found. 'x'; 11: A two digit hour could not be found 'x'
+{"$dateFromString":{"dateString":"2026-03-29 1","format":"%Y-%m-%d %z"}}	!! 241	Error parsing date string '2026-03-29 1'; 11: passing a time zone identifier as part of the string is not allowed '1'
+{"$toArray":"{\"a\" 1}"}	!! 241	Input doesn't represent valid JSON
+{"$toArray":"[1 2]"}	!! 241	Input doesn't represent valid JSON
+{"$toArray":"[\"\\ud83d\"]"}	!! 241	Input doesn't represent valid JSON
+{"$toArray":"[\"\\ud83d\\u0041\"]"}	!! 241	Input doesn't represent valid JSON
+{"$toArray":"[1e]"}	!! 241	Input doesn't represent valid JSON
+{"$toArray":"[1e+5, -0, 0.5, false, \"\\b\\f\\r\\/\"]"}	=> {"x":[{"$numberDouble":"100000.0"},{"$numberInt":"0"},{"$numberDouble":"0.5"},false,"\b\f\r/"]}
+{"$toArray":"[\"\\u00zz\"]"}	!! 241	Input doesn't represent valid JSON
+{"$toObject":"{\"a\":1,}"}	!! 241	Input doesn't represent valid JSON
+{"$toObject":"{\"a\":1 \"b\":2}"}	!! 241	Input doesn't represent valid JSON
+{"$toString":{"$literal":{"b":true,"f":false,"s":"t\tr\rb\bf\f"}}}	=> {"x":"{\"b\":true,\"f\":false,\"s\":\"t\\tr\\rb\\bf\\f\"}"}
+{"$getField":{"field":"x","input":{"$literal":{"x":1,"y":2}}}}	=> {"x":{"$numberInt":"1"}}
+{"$setField":{"field":{"$literal":"x"},"input":"$o","value":1}}	=> {"x":{"x":{"$numberInt":"1"},"y":{"z":{"$numberInt":"2"}}}}
+{"$setField":{"field":{"$literal":"x","y":1},"input":"$o","value":1}}	!! 15983	An object representing an expression must have exactly one field: { $literal: "x", y: 1 }
+{"$arrayToObject":[[{"k":"p","w":1}]]}	!! 40393	$arrayToObject requires an object with keys 'k' and 'v'. Missing either or both keys from: {k: "p", w: 1}
+{"$arrayToObject":[[{"k":"p","v":1},["q",2]]]}	!! 40391	$arrayToObject requires a consistent input format. Elements mustall be arrays or all be objects. Object was detected, now found: array
+{"$let":{"vars":{"pa$b":1},"in":1}}	!! 9	'pa$b' contains an invalid character for a variable name: '$'
+{"$let":{"vars":{"éé":1},"in":"$$éé"}}	=> {"x":{"$numberInt":"1"}}
+{"$regexMatch":{"input":"a","regex":{"$regularExpression":{"pattern":"a","options":"i"}},"options":""}}	!! 51107	$regexMatch: found regex option(s) specified in both 'regex' and 'option' fields
+{"$replaceOne":{"input":"a","find":"$n","replacement":1}}	!! 10503902	$replaceOne requires that 'replacement' be a string, found: 1
+{"$substrBytes":["é",1,1]}	!! 28656	$substrBytes:  Invalid range, starting index is a UTF-8 continuation byte.
+{"$substrBytes":["abc",-1,1]}	!! 50752	$substrBytes:  starting index must be non-negative (got: -1)
+{"$substrCP":["abc",-1,1]}	!! 34455	$substrCP: the starting index must be nonnegative integer.
+{"$substrCP":["abc",1,-1]}	!! 34454	$substrCP: length must be a nonnegative integer.
+{"$indexOfCP":["abc","b",2,1]}	=> {"x":{"$numberInt":"-1"}}
+{"$indexOfCP":["abc","b",5]}	=> {"x":{"$numberInt":"-1"}}
+{"$toString":{"$numberDouble":"-Infinity"}}	=> {"x":"-Infinity"}
+{"$concat":["a",{"$numberDouble":"Infinity"}]}	!! 16702	$concat only supports strings, not double
+{"$sum":[{"$numberDouble":"Infinity"},{"$numberDecimal":"1"}]}	=> {"x":{"$numberDecimal":"Infinity"}}
+{"$atan2":["$nope",1]}	=> {"x":null}
+{"$pow":[-1,-2]}	=> {"x":{"$numberInt":"1"}}
+{"$pow":[{"$numberLong":"-1"},-3]}	=> {"x":{"$numberLong":"-1"}}
+{"$round":[{"$numberDecimal":"-1.5"}]}	=> {"x":{"$numberDecimal":"-2"}}
+{"$trunc":[{"$numberDecimal":"5"},-1]}	=> {"x":{"$numberDecimal":"0E+1"}}
+{"$round":[{"$numberDecimal":"Infinity"}]}	=> {"x":{"$numberDecimal":"Infinity"}}
+{"$ceil":{"$numberDecimal":"-0.5"}}	=> {"x":{"$numberDecimal":"-0"}}
+{"$floor":{"$numberDecimal":"0.5"}}	=> {"x":{"$numberDecimal":"0"}}
+{"$toBool":{"$numberDouble":"0.0"}}	=> {"x":false}
+{"$convert":{"input":{"$numberDouble":"NaN"},"to":"bool"}}	=> {"x":true}
+{"$convert":{"input":{"$numberDecimal":"NaN"},"to":"long"}}	!! 241	Attempt to convert NaN value to integer type in $convert with no onError value
+{"$toLong":{"$numberDecimal":"0.000001"}}	=> {"x":{"$numberLong":"0"}}
+{"$toDouble":"1e-320"}	=> {"x":{"$numberDouble":"1e-320"}}
+{"$toDouble":"abc"}	!! 241	Failed to parse number 'abc' in $convert with no onError value: Invalid number
+{"$convert":{"input":{"$numberDouble":"255.5"},"to":"string","base":16}}	!! 241	Base conversion is not supported for non-integers in $convert with no onError value: 
+{"$toUUID":"00010203-0405-0607-0809-0a0b0c0d0e0"}	!! 241	Failed to parse BinData '00010203-0405-0607-0809-0a0b0c0d0e0' in $convert with no onError value: Invalid UUID string: 00010203-0405-0607-0809-0a0b0c0d0e0
+{"$toUUID":"0001020304-05-0607-0809-0a0b0c0d0e0f"}	!! 241	Failed to parse BinData '0001020304-05-0607-0809-0a0b0c0d0e0f' in $convert with no onError value: Invalid UUID string: 0001020304-05-0607-0809-0a0b0c0d0e0f

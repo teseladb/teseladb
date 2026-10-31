@@ -1,0 +1,439 @@
+{"$sin":{"$numberDecimal":"1E+61"}}	=> {"x":{"$numberDecimal":"0.3646813137630093278974795763027287"}}
+{"$sin":{"$numberDecimal":"1E+70"}}	=> {"x":{"$numberDecimal":"-0.1480991313715503888389426819214873"}}
+{"$sin":{"$numberDecimal":"1E+100"}}	=> {"x":{"$numberDecimal":"-0.3723761236612766882620866955531643"}}
+{"$sin":{"$numberDecimal":"-1E+100"}}	=> {"x":{"$numberDecimal":"0.3723761236612766882620866955531643"}}
+{"$sin":{"$numberDecimal":"1.234567890123456789012345678901234E+300"}}	=> {"x":{"$numberDecimal":"0.8255781102672045660098302631652560"}}	DV-062 => {"x":{"$numberDecimal":"0.8255781102672045660098302631652559"}}
+{"$sin":{"$numberDecimal":"1E+6000"}}	=> {"x":{"$numberDecimal":"-0.7249266534376325863453460198136025"}}
+{"$sin":{"$numberDecimal":"9.999999999999999999999999999999999E+6144"}}	=> {"x":{"$numberDecimal":"0.5582907749092521238056875912416942"}}
+{"$sin":{"$numberDecimal":"1E+20"}}	=> {"x":{"$numberDecimal":"-0.6452512852657808442058117113125229"}}	DV-062 => {"x":{"$numberDecimal":"-0.6452512852657808442058117113125230"}}
+{"$sin":{"$numberDecimal":"123456789012345678901234567890"}}	=> {"x":{"$numberDecimal":"0.9640769308796986260027814932794282"}}
+{"$cos":{"$numberDecimal":"1E+61"}}	=> {"x":{"$numberDecimal":"-0.9311323962746036597380985297854213"}}	DV-062 => {"x":{"$numberDecimal":"-0.9311323962746036597380985297854214"}}
+{"$cos":{"$numberDecimal":"1E+70"}}	=> {"x":{"$numberDecimal":"0.9889725209969143826405778200668421"}}
+{"$cos":{"$numberDecimal":"1E+100"}}	=> {"x":{"$numberDecimal":"-0.9280819050746553434561946437769560"}}	DV-062 => {"x":{"$numberDecimal":"-0.9280819050746553434561946437769559"}}
+{"$cos":{"$numberDecimal":"-1E+100"}}	=> {"x":{"$numberDecimal":"-0.9280819050746553434561946437769560"}}	DV-062 => {"x":{"$numberDecimal":"-0.9280819050746553434561946437769559"}}
+{"$cos":{"$numberDecimal":"1.234567890123456789012345678901234E+300"}}	=> {"x":{"$numberDecimal":"0.5642878554847972436993540577224173"}}	DV-062 => {"x":{"$numberDecimal":"0.5642878554847972436993540577224174"}}
+{"$cos":{"$numberDecimal":"1E+6000"}}	=> {"x":{"$numberDecimal":"-0.6888260645008393834757008024508129"}}	DV-062 => {"x":{"$numberDecimal":"-0.6888260645008393834757008024508130"}}
+{"$cos":{"$numberDecimal":"9.999999999999999999999999999999999E+6144"}}	=> {"x":{"$numberDecimal":"-0.8296453523350967216289114223081674"}}	DV-062 => {"x":{"$numberDecimal":"-0.8296453523350967216289114223081673"}}
+{"$cos":{"$numberDecimal":"1E+20"}}	=> {"x":{"$numberDecimal":"0.7639704044417283004001468027378811"}}
+{"$cos":{"$numberDecimal":"123456789012345678901234567890"}}	=> {"x":{"$numberDecimal":"-0.2656231754677682447010952445222090"}}
+{"$tan":{"$numberDecimal":"1E+61"}}	=> {"x":{"$numberDecimal":"-0.3916535556297622665596825556155886"}}
+{"$tan":{"$numberDecimal":"1E+70"}}	=> {"x":{"$numberDecimal":"-0.1497505018868087049580893287241246"}}
+{"$tan":{"$numberDecimal":"1E+100"}}	=> {"x":{"$numberDecimal":"0.4012319619908143541857543436532949"}}	DV-062 => {"x":{"$numberDecimal":"0.4012319619908143541857543436532950"}}
+{"$tan":{"$numberDecimal":"-1E+100"}}	=> {"x":{"$numberDecimal":"-0.4012319619908143541857543436532949"}}	DV-062 => {"x":{"$numberDecimal":"-0.4012319619908143541857543436532950"}}
+{"$tan":{"$numberDecimal":"1.234567890123456789012345678901234E+300"}}	=> {"x":{"$numberDecimal":"1.463044264098019156136119129809769"}}
+{"$tan":{"$numberDecimal":"1E+6000"}}	=> {"x":{"$numberDecimal":"1.052408860229401513505574301283601"}}	DV-062 => {"x":{"$numberDecimal":"1.052408860229401513505574301283600"}}
+{"$tan":{"$numberDecimal":"9.999999999999999999999999999999999E+6144"}}	=> {"x":{"$numberDecimal":"-0.6729270203682844056779140311680750"}}	DV-062 => {"x":{"$numberDecimal":"-0.6729270203682844056779140311680751"}}
+{"$tan":{"$numberDecimal":"1E+20"}}	=> {"x":{"$numberDecimal":"-0.8446024630198842541840932340005534"}}	DV-062 => {"x":{"$numberDecimal":"-0.8446024630198842541840932340005536"}}
+{"$tan":{"$numberDecimal":"123456789012345678901234567890"}}	=> {"x":{"$numberDecimal":"-3.629491023070325023344793511671273"}}
+{"$atan":{"$numberDecimal":"1E+70"}}	=> {"x":{"$numberDecimal":"1.570796326794896619231321691639751"}}
+{"$atan":{"$numberDecimal":"-1E+70"}}	=> {"x":{"$numberDecimal":"-1.570796326794896619231321691639751"}}
+{"$atan":{"$numberDecimal":"1E+6144"}}	=> {"x":{"$numberDecimal":"1.570796326794896619231321691639751"}}
+{"$tanh":{"$numberDecimal":"1E+70"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$tanh":{"$numberDecimal":"-1E+70"}}	=> {"x":{"$numberDecimal":"-1"}}
+{"$tanh":{"$numberDecimal":"1E+6144"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$sigmoid":{"$numberDecimal":"1E+70"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$sigmoid":{"$numberDecimal":"-1E+70"}}	=> {"x":{"$numberDecimal":"0E-6176"}}
+{"$sigmoid":{"$numberDecimal":"1E+6144"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$asinh":{"$numberDecimal":"1E+70"}}	=> {"x":{"$numberDecimal":"161.8741036901431431906766339493637"}}
+{"$asinh":{"$numberDecimal":"-1E+70"}}	=> {"x":{"$numberDecimal":"-161.8741036901431431906766339493637"}}
+{"$asinh":{"$numberDecimal":"1E+6144"}}	=> {"x":{"$numberDecimal":"14147.77595853597662791595672970219"}}
+{"$acosh":{"$numberDecimal":"1E+70"}}	=> {"x":{"$numberDecimal":"161.8741036901431431906766339493637"}}
+{"$acosh":{"$numberDecimal":"-1E+70"}}	!! 50989	cannot apply $acosh to -1E+70, value must be in [1,inf]
+{"$acosh":{"$numberDecimal":"1E+6144"}}	=> {"x":{"$numberDecimal":"14147.77595853597662791595672970219"}}
+{"$sinh":{"$numberDecimal":"1E+70"}}	=> {"x":{"$numberDecimal":"Infinity"}}
+{"$sinh":{"$numberDecimal":"-1E+70"}}	=> {"x":{"$numberDecimal":"-Infinity"}}
+{"$sinh":{"$numberDecimal":"1E+6144"}}	=> {"x":{"$numberDecimal":"Infinity"}}
+{"$cosh":{"$numberDecimal":"1E+70"}}	=> {"x":{"$numberDecimal":"Infinity"}}
+{"$cosh":{"$numberDecimal":"-1E+70"}}	=> {"x":{"$numberDecimal":"Infinity"}}
+{"$cosh":{"$numberDecimal":"1E+6144"}}	=> {"x":{"$numberDecimal":"Infinity"}}
+{"$degreesToRadians":{"$numberDecimal":"1E+70"}}	=> {"x":{"$numberDecimal":"1.745329251994329576923690768488613E+68"}}
+{"$degreesToRadians":{"$numberDecimal":"-1E+70"}}	=> {"x":{"$numberDecimal":"-1.745329251994329576923690768488613E+68"}}
+{"$degreesToRadians":{"$numberDecimal":"1E+6144"}}	=> {"x":{"$numberDecimal":"1.745329251994329576923690768488613E+6142"}}
+{"$radiansToDegrees":{"$numberDecimal":"1E+70"}}	=> {"x":{"$numberDecimal":"5.729577951308232087679815481410517E+71"}}
+{"$radiansToDegrees":{"$numberDecimal":"-1E+70"}}	=> {"x":{"$numberDecimal":"-5.729577951308232087679815481410517E+71"}}
+{"$radiansToDegrees":{"$numberDecimal":"1E+6144"}}	=> {"x":{"$numberDecimal":"Infinity"}}
+{"$sin":{"$numberDecimal":"1E-20"}}	=> {"x":{"$numberDecimal":"9.999999999999999999999999999999999E-21"}}	DV-062 => {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-20"}}
+{"$cos":{"$numberDecimal":"1E-20"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$tan":{"$numberDecimal":"1E-20"}}	=> {"x":{"$numberDecimal":"9.999999999999999999999999999999999E-21"}}	DV-062 => {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-20"}}
+{"$atan":{"$numberDecimal":"1E-20"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-20"}}
+{"$tanh":{"$numberDecimal":"1E-20"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-20"}}
+{"$sigmoid":{"$numberDecimal":"1E-20"}}	=> {"x":{"$numberDecimal":"0.5000000000000000000025000000000000"}}
+{"$asinh":{"$numberDecimal":"1E-20"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-20"}}
+{"$sinh":{"$numberDecimal":"1E-20"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-20"}}
+{"$cosh":{"$numberDecimal":"1E-20"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$sin":{"$numberDecimal":"1E-40"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-40"}}
+{"$cos":{"$numberDecimal":"1E-40"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$tan":{"$numberDecimal":"1E-40"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-40"}}
+{"$atan":{"$numberDecimal":"1E-40"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-40"}}
+{"$tanh":{"$numberDecimal":"1E-40"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-40"}}
+{"$sigmoid":{"$numberDecimal":"1E-40"}}	=> {"x":{"$numberDecimal":"0.5"}}
+{"$asinh":{"$numberDecimal":"1E-40"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-40"}}
+{"$sinh":{"$numberDecimal":"1E-40"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-40"}}
+{"$cosh":{"$numberDecimal":"1E-40"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000"}}
+{"$sin":{"$numberDecimal":"-1E-30"}}	=> {"x":{"$numberDecimal":"-1.000000000000000000000000000000000E-30"}}
+{"$cos":{"$numberDecimal":"-1E-30"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$tan":{"$numberDecimal":"-1E-30"}}	=> {"x":{"$numberDecimal":"-1.000000000000000000000000000000000E-30"}}
+{"$atan":{"$numberDecimal":"-1E-30"}}	=> {"x":{"$numberDecimal":"-1.000000000000000000000000000000000E-30"}}
+{"$tanh":{"$numberDecimal":"-1E-30"}}	=> {"x":{"$numberDecimal":"-1.000000000000000000000000000000000E-30"}}
+{"$sigmoid":{"$numberDecimal":"-1E-30"}}	=> {"x":{"$numberDecimal":"0.4999999999999999999999999999997500"}}
+{"$asinh":{"$numberDecimal":"-1E-30"}}	=> {"x":{"$numberDecimal":"-1.000000000000000000000000000000000E-30"}}
+{"$sinh":{"$numberDecimal":"-1E-30"}}	=> {"x":{"$numberDecimal":"-1.000000000000000000000000000000000E-30"}}
+{"$cosh":{"$numberDecimal":"-1E-30"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$cos":{"$numberDecimal":"0"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000"}}
+{"$cos":{"$numberDecimal":"0E-10"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000"}}
+{"$sin":{"$numberDecimal":"0E+5"}}	=> {"x":{"$numberDecimal":"0E+5"}}
+{"$tanh":{"$numberDecimal":"0"}}	=> {"x":{"$numberDecimal":"0"}}
+{"$atan2":[{"$numberDecimal":"1E+70"},{"$numberDecimal":"1"}]}	=> {"x":{"$numberDecimal":"1.570796326794896619231321691639751"}}
+{"$atan2":[{"$numberDecimal":"1"},{"$numberDecimal":"1E+70"}]}	=> {"x":{"$numberDecimal":"1E-70"}}
+{"$cos":{"$numberDecimal":"1E-17"}}	=> {"x":{"$numberDecimal":"0.9999999999999999999999999999999999"}}	DV-062 => {"x":{"$numberDecimal":"1"}}
+{"$cosh":{"$numberDecimal":"1E-17"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$sigmoid":{"$numberDecimal":"1E-17"}}	=> {"x":{"$numberDecimal":"0.5000000000000000025000000000000000"}}
+{"$sin":{"$numberDecimal":"1E-17"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-17"}}
+{"$sinh":{"$numberDecimal":"1E-17"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-17"}}
+{"$atan":{"$numberDecimal":"1E-17"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-17"}}
+{"$tanh":{"$numberDecimal":"1E-17"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-17"}}
+{"$cos":{"$numberDecimal":"1E-18"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$cosh":{"$numberDecimal":"1E-18"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$sigmoid":{"$numberDecimal":"1E-18"}}	=> {"x":{"$numberDecimal":"0.5000000000000000002500000000000000"}}
+{"$sin":{"$numberDecimal":"1E-18"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-18"}}
+{"$sinh":{"$numberDecimal":"1E-18"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-18"}}
+{"$atan":{"$numberDecimal":"1E-18"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-18"}}
+{"$tanh":{"$numberDecimal":"1E-18"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-18"}}
+{"$cos":{"$numberDecimal":"1E-19"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$cosh":{"$numberDecimal":"1E-19"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$sigmoid":{"$numberDecimal":"1E-19"}}	=> {"x":{"$numberDecimal":"0.5000000000000000000250000000000000"}}
+{"$sin":{"$numberDecimal":"1E-19"}}	=> {"x":{"$numberDecimal":"9.999999999999999999999999999999999E-20"}}	DV-062 => {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-19"}}
+{"$sinh":{"$numberDecimal":"1E-19"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-19"}}
+{"$atan":{"$numberDecimal":"1E-19"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-19"}}
+{"$tanh":{"$numberDecimal":"1E-19"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-19"}}
+{"$cos":{"$numberDecimal":"1E-25"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$cosh":{"$numberDecimal":"1E-25"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$sigmoid":{"$numberDecimal":"1E-25"}}	=> {"x":{"$numberDecimal":"0.5000000000000000000000000250000000"}}
+{"$sin":{"$numberDecimal":"1E-25"}}	=> {"x":{"$numberDecimal":"9.999999999999999999999999999999999E-26"}}	DV-062 => {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-25"}}
+{"$sinh":{"$numberDecimal":"1E-25"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-25"}}
+{"$atan":{"$numberDecimal":"1E-25"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-25"}}
+{"$tanh":{"$numberDecimal":"1E-25"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-25"}}
+{"$cos":{"$numberDecimal":"1E-30"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$cosh":{"$numberDecimal":"1E-30"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$sigmoid":{"$numberDecimal":"1E-30"}}	=> {"x":{"$numberDecimal":"0.5000000000000000000000000000002500"}}
+{"$sin":{"$numberDecimal":"1E-30"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-30"}}
+{"$sinh":{"$numberDecimal":"1E-30"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-30"}}
+{"$atan":{"$numberDecimal":"1E-30"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-30"}}
+{"$tanh":{"$numberDecimal":"1E-30"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-30"}}
+{"$cos":{"$numberDecimal":"1E-32"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$cosh":{"$numberDecimal":"1E-32"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$sigmoid":{"$numberDecimal":"1E-32"}}	=> {"x":{"$numberDecimal":"0.5000000000000000000000000000000025"}}
+{"$sin":{"$numberDecimal":"1E-32"}}	=> {"x":{"$numberDecimal":"9.999999999999999999999999999999999E-33"}}	DV-062 => {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-32"}}
+{"$sinh":{"$numberDecimal":"1E-32"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-32"}}
+{"$atan":{"$numberDecimal":"1E-32"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-32"}}
+{"$tanh":{"$numberDecimal":"1E-32"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-32"}}
+{"$cos":{"$numberDecimal":"1E-33"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$cosh":{"$numberDecimal":"1E-33"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$sigmoid":{"$numberDecimal":"1E-33"}}	=> {"x":{"$numberDecimal":"0.5000000000000000000000000000000003"}}	DV-062 => {"x":{"$numberDecimal":"0.5000000000000000000000000000000002"}}
+{"$sin":{"$numberDecimal":"1E-33"}}	=> {"x":{"$numberDecimal":"9.999999999999999999999999999999999E-34"}}	DV-062 => {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-33"}}
+{"$sinh":{"$numberDecimal":"1E-33"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-33"}}
+{"$atan":{"$numberDecimal":"1E-33"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-33"}}
+{"$tanh":{"$numberDecimal":"1E-33"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-33"}}
+{"$cos":{"$numberDecimal":"1E-34"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$cosh":{"$numberDecimal":"1E-34"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$sigmoid":{"$numberDecimal":"1E-34"}}	=> {"x":{"$numberDecimal":"0.5"}}
+{"$sin":{"$numberDecimal":"1E-34"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-34"}}
+{"$sinh":{"$numberDecimal":"1E-34"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-34"}}
+{"$atan":{"$numberDecimal":"1E-34"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-34"}}
+{"$tanh":{"$numberDecimal":"1E-34"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-34"}}
+{"$cos":{"$numberDecimal":"1E-35"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$cosh":{"$numberDecimal":"1E-35"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$sigmoid":{"$numberDecimal":"1E-35"}}	=> {"x":{"$numberDecimal":"0.5"}}
+{"$sin":{"$numberDecimal":"1E-35"}}	=> {"x":{"$numberDecimal":"9.999999999999999999999999999999999E-36"}}	DV-062 => {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-35"}}
+{"$sinh":{"$numberDecimal":"1E-35"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-35"}}
+{"$atan":{"$numberDecimal":"1E-35"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-35"}}
+{"$tanh":{"$numberDecimal":"1E-35"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-35"}}
+{"$cos":{"$numberDecimal":"1E-36"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$cosh":{"$numberDecimal":"1E-36"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$sigmoid":{"$numberDecimal":"1E-36"}}	=> {"x":{"$numberDecimal":"0.5"}}
+{"$sin":{"$numberDecimal":"1E-36"}}	=> {"x":{"$numberDecimal":"9.999999999999999999999999999999999E-37"}}	DV-062 => {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-36"}}
+{"$sinh":{"$numberDecimal":"1E-36"}}	=> {"x":{"$numberDecimal":"9.999999999999999999999999999999999E-37"}}	DV-062 => {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-36"}}
+{"$atan":{"$numberDecimal":"1E-36"}}	=> {"x":{"$numberDecimal":"9.999999999999999999999999999999999E-37"}}	DV-062 => {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-36"}}
+{"$tanh":{"$numberDecimal":"1E-36"}}	=> {"x":{"$numberDecimal":"9.999999999999999999999999999999999E-37"}}	DV-062 => {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-36"}}
+{"$cos":{"$numberDecimal":"1E-37"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$cosh":{"$numberDecimal":"1E-37"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$sigmoid":{"$numberDecimal":"1E-37"}}	=> {"x":{"$numberDecimal":"0.5"}}
+{"$sin":{"$numberDecimal":"1E-37"}}	=> {"x":{"$numberDecimal":"9.999999999999999999999999999999999E-38"}}	DV-062 => {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-37"}}
+{"$sinh":{"$numberDecimal":"1E-37"}}	=> {"x":{"$numberDecimal":"9.999999999999999999999999999999999E-38"}}	DV-062 => {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-37"}}
+{"$atan":{"$numberDecimal":"1E-37"}}	=> {"x":{"$numberDecimal":"9.999999999999999999999999999999999E-38"}}	DV-062 => {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-37"}}
+{"$tanh":{"$numberDecimal":"1E-37"}}	=> {"x":{"$numberDecimal":"9.999999999999999999999999999999999E-38"}}	DV-062 => {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-37"}}
+{"$cos":{"$numberDecimal":"1E-38"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$cosh":{"$numberDecimal":"1E-38"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$sigmoid":{"$numberDecimal":"1E-38"}}	=> {"x":{"$numberDecimal":"0.5"}}
+{"$sin":{"$numberDecimal":"1E-38"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-38"}}
+{"$sinh":{"$numberDecimal":"1E-38"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-38"}}
+{"$atan":{"$numberDecimal":"1E-38"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-38"}}
+{"$tanh":{"$numberDecimal":"1E-38"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-38"}}
+{"$cos":{"$numberDecimal":"1E-39"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$cosh":{"$numberDecimal":"1E-39"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$sigmoid":{"$numberDecimal":"1E-39"}}	=> {"x":{"$numberDecimal":"0.5"}}
+{"$sin":{"$numberDecimal":"1E-39"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-39"}}
+{"$sinh":{"$numberDecimal":"1E-39"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-39"}}
+{"$atan":{"$numberDecimal":"1E-39"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-39"}}
+{"$tanh":{"$numberDecimal":"1E-39"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-39"}}
+{"$sin":{"$numberDecimal":"0E+3"}}	=> {"x":{"$numberDecimal":"0E+3"}}
+{"$sin":{"$numberDecimal":"-0E-3"}}	=> {"x":{"$numberDecimal":"-0.000"}}
+{"$cos":{"$numberDecimal":"0E+3"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000"}}
+{"$cos":{"$numberDecimal":"-0E-3"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000"}}
+{"$tan":{"$numberDecimal":"0E+3"}}	=> {"x":{"$numberDecimal":"0E-37"}}
+{"$tan":{"$numberDecimal":"-0E-3"}}	=> {"x":{"$numberDecimal":"-0E-43"}}
+{"$asin":{"$numberDecimal":"0E+3"}}	=> {"x":{"$numberDecimal":"0E-37"}}
+{"$asin":{"$numberDecimal":"-0E-3"}}	=> {"x":{"$numberDecimal":"-0E-43"}}
+{"$acos":{"$numberDecimal":"0E+3"}}	=> {"x":{"$numberDecimal":"1.570796326794896619231321691639751"}}
+{"$acos":{"$numberDecimal":"-0E-3"}}	=> {"x":{"$numberDecimal":"1.570796326794896619231321691639751"}}
+{"$atan":{"$numberDecimal":"0E+3"}}	=> {"x":{"$numberDecimal":"0E+3"}}
+{"$atan":{"$numberDecimal":"-0E-3"}}	=> {"x":{"$numberDecimal":"-0.000"}}
+{"$sinh":{"$numberDecimal":"0E+3"}}	=> {"x":{"$numberDecimal":"0E-37"}}
+{"$sinh":{"$numberDecimal":"-0E-3"}}	=> {"x":{"$numberDecimal":"-0E-43"}}
+{"$cosh":{"$numberDecimal":"0E+3"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000"}}
+{"$cosh":{"$numberDecimal":"-0E-3"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000"}}
+{"$tanh":{"$numberDecimal":"0E+3"}}	=> {"x":{"$numberDecimal":"0E+3"}}
+{"$tanh":{"$numberDecimal":"-0E-3"}}	=> {"x":{"$numberDecimal":"-0.000"}}
+{"$asinh":{"$numberDecimal":"0E+3"}}	=> {"x":{"$numberDecimal":"0E-6176"}}
+{"$asinh":{"$numberDecimal":"-0E-3"}}	=> {"x":{"$numberDecimal":"-0E-6176"}}
+{"$acosh":{"$numberDecimal":"0E+3"}}	!! 50989	cannot apply $acosh to 0E+3, value must be in [1,inf]
+{"$acosh":{"$numberDecimal":"-0E-3"}}	!! 50989	cannot apply $acosh to -0.000, value must be in [1,inf]
+{"$atanh":{"$numberDecimal":"0E+3"}}	=> {"x":{"$numberDecimal":"0E-6176"}}
+{"$atanh":{"$numberDecimal":"-0E-3"}}	=> {"x":{"$numberDecimal":"-0E-6176"}}
+{"$sigmoid":{"$numberDecimal":"0E+3"}}	=> {"x":{"$numberDecimal":"0.5"}}
+{"$sigmoid":{"$numberDecimal":"-0E-3"}}	=> {"x":{"$numberDecimal":"0.5"}}
+{"$degreesToRadians":{"$numberDecimal":"0E+3"}}	=> {"x":{"$numberDecimal":"0E-32"}}
+{"$degreesToRadians":{"$numberDecimal":"-0E-3"}}	=> {"x":{"$numberDecimal":"-0E-38"}}
+{"$radiansToDegrees":{"$numberDecimal":"0E+3"}}	=> {"x":{"$numberDecimal":"0E-29"}}
+{"$radiansToDegrees":{"$numberDecimal":"-0E-3"}}	=> {"x":{"$numberDecimal":"-0E-35"}}
+{"$atan2":[{"$numberDecimal":"1"},{"$numberDecimal":"1E+5"}]}	=> {"x":{"$numberDecimal":"0.000009999999999666666666686666666665238"}}
+{"$atan2":[{"$numberDecimal":"3"},{"$numberDecimal":"7E+5"}]}	=> {"x":{"$numberDecimal":"0.000004285714285688046647230609864937225"}}
+{"$atan2":[{"$numberDecimal":"1"},{"$numberDecimal":"1E+10"}]}	=> {"x":{"$numberDecimal":"9.999999999999999999966666666666667E-11"}}
+{"$atan2":[{"$numberDecimal":"3"},{"$numberDecimal":"7E+10"}]}	=> {"x":{"$numberDecimal":"4.285714285714285714283090379008746E-11"}}
+{"$atan2":[{"$numberDecimal":"1"},{"$numberDecimal":"1E+15"}]}	=> {"x":{"$numberDecimal":"9.999999999999999999999999999996666E-16"}}	DV-062 => {"x":{"$numberDecimal":"9.999999999999999999999999999996667E-16"}}
+{"$atan2":[{"$numberDecimal":"3"},{"$numberDecimal":"7E+15"}]}	=> {"x":{"$numberDecimal":"4.285714285714285714285714285714024E-16"}}	DV-062 => {"x":{"$numberDecimal":"4.285714285714285714285714285714023E-16"}}
+{"$atan2":[{"$numberDecimal":"1"},{"$numberDecimal":"1E+17"}]}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-17"}}
+{"$atan2":[{"$numberDecimal":"3"},{"$numberDecimal":"7E+17"}]}	=> {"x":{"$numberDecimal":"4.285714285714285714285714285714286E-18"}}
+{"$atan2":[{"$numberDecimal":"1"},{"$numberDecimal":"1E+18"}]}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-18"}}
+{"$atan2":[{"$numberDecimal":"3"},{"$numberDecimal":"7E+18"}]}	=> {"x":{"$numberDecimal":"4.285714285714285714285714285714286E-19"}}
+{"$atan2":[{"$numberDecimal":"1"},{"$numberDecimal":"1E+20"}]}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-20"}}
+{"$atan2":[{"$numberDecimal":"3"},{"$numberDecimal":"7E+20"}]}	=> {"x":{"$numberDecimal":"4.285714285714285714285714285714286E-21"}}
+{"$atan2":[{"$numberDecimal":"1"},{"$numberDecimal":"1E+30"}]}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-30"}}
+{"$atan2":[{"$numberDecimal":"3"},{"$numberDecimal":"7E+30"}]}	=> {"x":{"$numberDecimal":"4.285714285714285714285714285714286E-31"}}
+{"$atan2":[{"$numberDecimal":"1"},{"$numberDecimal":"1E+34"}]}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-34"}}
+{"$atan2":[{"$numberDecimal":"3"},{"$numberDecimal":"7E+34"}]}	=> {"x":{"$numberDecimal":"4.285714285714285714285714285714286E-35"}}
+{"$atan2":[{"$numberDecimal":"1"},{"$numberDecimal":"1E+35"}]}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-35"}}
+{"$atan2":[{"$numberDecimal":"3"},{"$numberDecimal":"7E+35"}]}	=> {"x":{"$numberDecimal":"4.285714285714285714285714285714286E-36"}}
+{"$atan2":[{"$numberDecimal":"1"},{"$numberDecimal":"1E+40"}]}	=> {"x":{"$numberDecimal":"1E-40"}}
+{"$atan2":[{"$numberDecimal":"3"},{"$numberDecimal":"7E+40"}]}	=> {"x":{"$numberDecimal":"4.285714285714285714285714285714286E-41"}}
+{"$atan2":[{"$numberDecimal":"0E+2"},{"$numberDecimal":"5"}]}	=> {"x":{"$numberDecimal":"0E-6176"}}
+{"$atan2":[{"$numberDecimal":"0"},{"$numberDecimal":"-5"}]}	=> {"x":{"$numberDecimal":"3.141592653589793238462643383279503"}}
+{"$sigmoid":{"$numberDecimal":"-40"}}	=> {"x":{"$numberDecimal":"4.248354255291588977280720904404506E-18"}}
+{"$tanh":{"$numberDecimal":"40"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$sigmoid":{"$numberDecimal":"40"}}	=> {"x":{"$numberDecimal":"0.9999999999999999957516457447084110"}}
+{"$sigmoid":{"$numberDecimal":"-50"}}	=> {"x":{"$numberDecimal":"1.928749847963917783016970808929410E-22"}}
+{"$tanh":{"$numberDecimal":"50"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$sigmoid":{"$numberDecimal":"50"}}	=> {"x":{"$numberDecimal":"0.9999999999999999999998071250152040"}}	DV-062 => {"x":{"$numberDecimal":"0.9999999999999999999998071250152036"}}
+{"$sigmoid":{"$numberDecimal":"-78"}}	=> {"x":{"$numberDecimal":"1.333614815502261341453014079127397E-34"}}
+{"$tanh":{"$numberDecimal":"78"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$sigmoid":{"$numberDecimal":"78"}}	=> {"x":{"$numberDecimal":"1"}}	DV-062 => {"x":{"$numberDecimal":"0.9999999999999999999999999999999999"}}
+{"$sigmoid":{"$numberDecimal":"-79"}}	=> {"x":{"$numberDecimal":"4.906094730649280566135387351928825E-35"}}	DV-062 => {"x":{"$numberDecimal":"4.906094730649280566135387351928824E-35"}}
+{"$tanh":{"$numberDecimal":"79"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$sigmoid":{"$numberDecimal":"79"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$sigmoid":{"$numberDecimal":"-80"}}	=> {"x":{"$numberDecimal":"1.804851387845415172312128357350027E-35"}}
+{"$tanh":{"$numberDecimal":"80"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$sigmoid":{"$numberDecimal":"80"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$sigmoid":{"$numberDecimal":"-90"}}	=> {"x":{"$numberDecimal":"8.194012623990515430361108213381942E-40"}}	DV-062 => {"x":{"$numberDecimal":"8.194012623990515430361108213381943E-40"}}
+{"$tanh":{"$numberDecimal":"90"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$sigmoid":{"$numberDecimal":"90"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$sigmoid":{"$numberDecimal":"-100"}}	=> {"x":{"$numberDecimal":"3.720075976020835962959695803863119E-44"}}	DV-062 => {"x":{"$numberDecimal":"3.720075976020835962959695803863118E-44"}}
+{"$tanh":{"$numberDecimal":"100"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$sigmoid":{"$numberDecimal":"100"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$sigmoid":{"$numberDecimal":"-1000"}}	=> {"x":{"$numberDecimal":"5.075958897549456765291809479574337E-435"}}
+{"$tanh":{"$numberDecimal":"1000"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$sigmoid":{"$numberDecimal":"1000"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$sin":{"$numberDecimal":"0.5"}}	=> {"x":{"$numberDecimal":"0.4794255386042030002732879352155714"}}
+{"$cos":{"$numberDecimal":"0.5"}}	=> {"x":{"$numberDecimal":"0.8775825618903727161162815826038297"}}
+{"$sin":{"$numberDecimal":"1"}}	=> {"x":{"$numberDecimal":"0.8414709848078965066525023216302991"}}	DV-062 => {"x":{"$numberDecimal":"0.8414709848078965066525023216302990"}}
+{"$acos":{"$numberDecimal":"2"}}	!! 50989	cannot apply $acos to 2, value must be in [-1,1]
+{"$atan2":[{"$numberDecimal":"1"},2]}	=> {"x":{"$numberDecimal":"0.4636476090008061162142562314612144"}}
+{"$degreesToRadians":{"$numberDecimal":"180"}}	=> {"x":{"$numberDecimal":"3.141592653589793238462643383279503"}}
+{"$radiansToDegrees":{"$numberDecimal":"1"}}	=> {"x":{"$numberDecimal":"57.29577951308232087679815481410517"}}
+{"$sigmoid":{"$numberDecimal":"1"}}	=> {"x":{"$numberDecimal":"0.7310585786300048792511592418218362"}}	DV-062 => {"x":{"$numberDecimal":"0.7310585786300048792511592418218363"}}
+{"$sigmoid":{"$numberDecimal":"-1"}}	=> {"x":{"$numberDecimal":"0.2689414213699951207488407581781638"}}	DV-062 => {"x":{"$numberDecimal":"0.2689414213699951207488407581781637"}}
+{"$sin":{"$numberDecimal":"0"}}	=> {"x":{"$numberDecimal":"0"}}
+{"$tan":{"$numberDecimal":"1"}}	=> {"x":{"$numberDecimal":"1.557407724654902230506974807458360"}}
+{"$cos":{"$numberDecimal":"1"}}	=> {"x":{"$numberDecimal":"0.5403023058681397174009366074429766"}}
+{"$asin":{"$numberDecimal":"0.5"}}	=> {"x":{"$numberDecimal":"0.5235987755982988730771072305465838"}}
+{"$acos":{"$numberDecimal":"0.5"}}	=> {"x":{"$numberDecimal":"1.047197551196597746154214461093168"}}
+{"$atan":{"$numberDecimal":"1"}}	=> {"x":{"$numberDecimal":"0.7853981633974483096156608458198757"}}
+{"$atan":{"$numberDecimal":"1E+40"}}	=> {"x":{"$numberDecimal":"1.570796326794896619231321691639751"}}
+{"$sinh":{"$numberDecimal":"1"}}	=> {"x":{"$numberDecimal":"1.175201193643801456882381850595601"}}
+{"$cosh":{"$numberDecimal":"1"}}	=> {"x":{"$numberDecimal":"1.543080634815243778477905620757062"}}
+{"$tanh":{"$numberDecimal":"1"}}	=> {"x":{"$numberDecimal":"0.7615941559557648881194582826047936"}}
+{"$asinh":{"$numberDecimal":"1"}}	=> {"x":{"$numberDecimal":"0.8813735870195430252326093249797923"}}
+{"$acosh":{"$numberDecimal":"2"}}	=> {"x":{"$numberDecimal":"1.316957896924816708625046347307968"}}
+{"$atanh":{"$numberDecimal":"0.5"}}	=> {"x":{"$numberDecimal":"0.5493061443340548456976226184612628"}}	DV-062 => {"x":{"$numberDecimal":"0.5493061443340548456976226184612629"}}
+{"$atanh":{"$numberDecimal":"1"}}	=> {"x":{"$numberDecimal":"Infinity"}}
+{"$sin":{"$numberDecimal":"100"}}	=> {"x":{"$numberDecimal":"-0.5063656411097587936565576104597853"}}	DV-062 => {"x":{"$numberDecimal":"-0.5063656411097587936565576104597854"}}
+{"$sin":{"$numberDecimal":"-3.5"}}	=> {"x":{"$numberDecimal":"0.3507832276896198481203688000436356"}}
+{"$atan2":[{"$numberDecimal":"-1"},{"$numberDecimal":"-2"}]}	=> {"x":{"$numberDecimal":"-2.677945044588987122248387151818289"}}	DV-062 => {"x":{"$numberDecimal":"-2.677945044588987122248387151818288"}}
+{"$atan2":[{"$numberDecimal":"0"},{"$numberDecimal":"-2"}]}	=> {"x":{"$numberDecimal":"3.141592653589793238462643383279503"}}
+{"$asin":{"$numberDecimal":"1"}}	=> {"x":{"$numberDecimal":"1.570796326794896619231321691639751"}}
+{"$acos":{"$numberDecimal":"-1"}}	=> {"x":{"$numberDecimal":"3.141592653589793238462643383279503"}}
+{"$degreesToRadians":{"$numberDecimal":"1"}}	=> {"x":{"$numberDecimal":"0.01745329251994329576923690768488613"}}
+{"$radiansToDegrees":{"$numberDecimal":"3.141592653589793238462643383279503"}}	=> {"x":{"$numberDecimal":"180.0000000000000000000000000000000"}}
+{"$sinh":{"$numberDecimal":"100"}}	=> {"x":{"$numberDecimal":"1.344058570908067724206312775790007E+43"}}
+{"$cosh":{"$numberDecimal":"-2"}}	=> {"x":{"$numberDecimal":"3.762195691083631459562213477773746"}}
+{"$asinh":{"$numberDecimal":"-1"}}	=> {"x":{"$numberDecimal":"-0.8813735870195430252326093249797923"}}
+{"$pow":[{"$numberDecimal":"2.5"},2]}	=> {"x":{"$numberDecimal":"6.249999999999999999999999999999999"}}	DV-062 => {"x":{"$numberDecimal":"6.250000000000000000000000000000000"}}
+{"$log":[8,{"$numberDecimal":"2.5"}]}	=> {"x":{"$numberDecimal":"2.269412392098090088296316082881421"}}	DV-062 => {"x":{"$numberDecimal":"2.269412392098090088296316082881420"}}
+{"$ln":{"$numberDecimal":"2.5"}}	=> {"x":{"$numberDecimal":"0.9162907318741550651835272117680110"}}	DV-062 => {"x":{"$numberDecimal":"0.9162907318741550651835272117680111"}}
+{"$log10":{"$numberDecimal":"2.5"}}	=> {"x":{"$numberDecimal":"0.3979400086720376095725222105510140"}}	DV-062 => {"x":{"$numberDecimal":"0.3979400086720376095725222105510139"}}
+{"$atan2":[{"$numberDecimal":"1"},{"$numberDecimal":"1E+36"}]}	=> {"x":{"$numberDecimal":"9.999999999999999999999999999999999E-37"}}	DV-062 => {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-36"}}
+{"$atan2":[{"$numberDecimal":"2"},{"$numberDecimal":"1E+36"}]}	=> {"x":{"$numberDecimal":"2.000000000000000000000000000000000E-36"}}
+{"$atan2":[{"$numberDecimal":"-1"},{"$numberDecimal":"3E+36"}]}	=> {"x":{"$numberDecimal":"-3.333333333333333333333333333333333E-37"}}
+{"$atan2":[{"$numberDecimal":"1"},{"$numberDecimal":"-1E+36"}]}	=> {"x":{"$numberDecimal":"3.141592653589793238462643383279503"}}
+{"$atan2":[{"$numberDecimal":"1"},{"$numberDecimal":"1E+37"}]}	=> {"x":{"$numberDecimal":"1E-37"}}
+{"$atan2":[{"$numberDecimal":"2"},{"$numberDecimal":"1E+37"}]}	=> {"x":{"$numberDecimal":"2E-37"}}
+{"$atan2":[{"$numberDecimal":"-1"},{"$numberDecimal":"3E+37"}]}	=> {"x":{"$numberDecimal":"-3.333333333333333333333333333333333E-38"}}
+{"$atan2":[{"$numberDecimal":"1"},{"$numberDecimal":"-1E+37"}]}	=> {"x":{"$numberDecimal":"3.141592653589793238462643383279503"}}
+{"$atan2":[{"$numberDecimal":"1"},{"$numberDecimal":"1E+38"}]}	=> {"x":{"$numberDecimal":"1E-38"}}
+{"$atan2":[{"$numberDecimal":"2"},{"$numberDecimal":"1E+38"}]}	=> {"x":{"$numberDecimal":"2E-38"}}
+{"$atan2":[{"$numberDecimal":"-1"},{"$numberDecimal":"3E+38"}]}	=> {"x":{"$numberDecimal":"-3.333333333333333333333333333333333E-39"}}
+{"$atan2":[{"$numberDecimal":"1"},{"$numberDecimal":"-1E+38"}]}	=> {"x":{"$numberDecimal":"3.141592653589793238462643383279503"}}
+{"$atan2":[{"$numberDecimal":"1"},{"$numberDecimal":"1E+39"}]}	=> {"x":{"$numberDecimal":"1E-39"}}
+{"$atan2":[{"$numberDecimal":"2"},{"$numberDecimal":"1E+39"}]}	=> {"x":{"$numberDecimal":"2E-39"}}
+{"$atan2":[{"$numberDecimal":"-1"},{"$numberDecimal":"3E+39"}]}	=> {"x":{"$numberDecimal":"-3.333333333333333333333333333333333E-40"}}
+{"$atan2":[{"$numberDecimal":"1"},{"$numberDecimal":"-1E+39"}]}	=> {"x":{"$numberDecimal":"3.141592653589793238462643383279503"}}
+{"$asin":{"$numberDecimal":"1E-39"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-39"}}
+{"$asinh":{"$numberDecimal":"1E-39"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-39"}}
+{"$atanh":{"$numberDecimal":"1E-39"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-39"}}
+{"$acos":{"$numberDecimal":"1E-39"}}	=> {"x":{"$numberDecimal":"1.570796326794896619231321691639751"}}
+{"$cosh":{"$numberDecimal":"5E-40"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$cos":{"$numberDecimal":"5E-40"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$sigmoid":{"$numberDecimal":"5E-40"}}	=> {"x":{"$numberDecimal":"0.5"}}
+{"$tanh":{"$numberDecimal":"5E-40"}}	=> {"x":{"$numberDecimal":"5.000000000000000000000000000000000E-40"}}
+{"$sin":{"$numberDecimal":"5E-40"}}	=> {"x":{"$numberDecimal":"5.000000000000000000000000000000000E-40"}}
+{"$atan":{"$numberDecimal":"5E-40"}}	=> {"x":{"$numberDecimal":"5.000000000000000000000000000000000E-40"}}
+{"$asin":{"$numberDecimal":"5E-40"}}	=> {"x":{"$numberDecimal":"5.000000000000000000000000000000000E-40"}}
+{"$asinh":{"$numberDecimal":"5E-40"}}	=> {"x":{"$numberDecimal":"5.000000000000000000000000000000000E-40"}}
+{"$atanh":{"$numberDecimal":"5E-40"}}	=> {"x":{"$numberDecimal":"5.000000000000000000000000000000000E-40"}}
+{"$acos":{"$numberDecimal":"5E-40"}}	=> {"x":{"$numberDecimal":"1.570796326794896619231321691639751"}}
+{"$asin":{"$numberDecimal":"1E-40"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-40"}}
+{"$atanh":{"$numberDecimal":"1E-40"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-40"}}
+{"$acos":{"$numberDecimal":"1E-40"}}	=> {"x":{"$numberDecimal":"1.570796326794896619231321691639751"}}
+{"$cosh":{"$numberDecimal":"9E-41"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000"}}
+{"$cos":{"$numberDecimal":"9E-41"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$sigmoid":{"$numberDecimal":"9E-41"}}	=> {"x":{"$numberDecimal":"0.5"}}
+{"$tanh":{"$numberDecimal":"9E-41"}}	=> {"x":{"$numberDecimal":"9.000000000000000000000000000000000E-41"}}
+{"$sin":{"$numberDecimal":"9E-41"}}	=> {"x":{"$numberDecimal":"9.000000000000000000000000000000000E-41"}}
+{"$atan":{"$numberDecimal":"9E-41"}}	=> {"x":{"$numberDecimal":"9.000000000000000000000000000000000E-41"}}
+{"$asin":{"$numberDecimal":"9E-41"}}	=> {"x":{"$numberDecimal":"9.000000000000000000000000000000000E-41"}}
+{"$asinh":{"$numberDecimal":"9E-41"}}	=> {"x":{"$numberDecimal":"9.000000000000000000000000000000000E-41"}}
+{"$atanh":{"$numberDecimal":"9E-41"}}	=> {"x":{"$numberDecimal":"9.000000000000000000000000000000000E-41"}}
+{"$acos":{"$numberDecimal":"9E-41"}}	=> {"x":{"$numberDecimal":"1.570796326794896619231321691639751"}}
+{"$cosh":{"$numberDecimal":"1E-41"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000"}}
+{"$cos":{"$numberDecimal":"1E-41"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$sigmoid":{"$numberDecimal":"1E-41"}}	=> {"x":{"$numberDecimal":"0.5"}}
+{"$tanh":{"$numberDecimal":"1E-41"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-41"}}
+{"$sin":{"$numberDecimal":"1E-41"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-41"}}
+{"$atan":{"$numberDecimal":"1E-41"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-41"}}
+{"$asin":{"$numberDecimal":"1E-41"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-41"}}
+{"$asinh":{"$numberDecimal":"1E-41"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-41"}}
+{"$atanh":{"$numberDecimal":"1E-41"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-41"}}
+{"$acos":{"$numberDecimal":"1E-41"}}	=> {"x":{"$numberDecimal":"1.570796326794896619231321691639751"}}
+{"$cosh":{"$numberDecimal":"1E-50"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000"}}
+{"$cos":{"$numberDecimal":"1E-50"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$sigmoid":{"$numberDecimal":"1E-50"}}	=> {"x":{"$numberDecimal":"0.5"}}
+{"$tanh":{"$numberDecimal":"1E-50"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-50"}}
+{"$sin":{"$numberDecimal":"1E-50"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-50"}}
+{"$atan":{"$numberDecimal":"1E-50"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-50"}}
+{"$asin":{"$numberDecimal":"1E-50"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-50"}}
+{"$asinh":{"$numberDecimal":"1E-50"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-50"}}
+{"$atanh":{"$numberDecimal":"1E-50"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-50"}}
+{"$acos":{"$numberDecimal":"1E-50"}}	=> {"x":{"$numberDecimal":"1.570796326794896619231321691639751"}}
+{"$cosh":{"$numberDecimal":"-1E-45"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000"}}
+{"$cos":{"$numberDecimal":"-1E-45"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$sigmoid":{"$numberDecimal":"-1E-45"}}	=> {"x":{"$numberDecimal":"0.5"}}
+{"$tanh":{"$numberDecimal":"-1E-45"}}	=> {"x":{"$numberDecimal":"-1.000000000000000000000000000000000E-45"}}
+{"$sin":{"$numberDecimal":"-1E-45"}}	=> {"x":{"$numberDecimal":"-1.000000000000000000000000000000000E-45"}}
+{"$atan":{"$numberDecimal":"-1E-45"}}	=> {"x":{"$numberDecimal":"-1.000000000000000000000000000000000E-45"}}
+{"$asin":{"$numberDecimal":"-1E-45"}}	=> {"x":{"$numberDecimal":"-1.000000000000000000000000000000000E-45"}}
+{"$asinh":{"$numberDecimal":"-1E-45"}}	=> {"x":{"$numberDecimal":"-1.000000000000000000000000000000000E-45"}}
+{"$atanh":{"$numberDecimal":"-1E-45"}}	=> {"x":{"$numberDecimal":"-1.000000000000000000000000000000000E-45"}}
+{"$acos":{"$numberDecimal":"-1E-45"}}	=> {"x":{"$numberDecimal":"1.570796326794896619231321691639751"}}
+{"$sin":{"$numberDecimal":"1E-6176"}}	=> {"x":{"$numberDecimal":"1E-6176"}}
+{"$atan":{"$numberDecimal":"1E-6176"}}	=> {"x":{"$numberDecimal":"1E-6176"}}
+{"$tan":{"$numberDecimal":"1E-6176"}}	=> {"x":{"$numberDecimal":"1E-6176"}}
+{"$sinh":{"$numberDecimal":"1E-6176"}}	=> {"x":{"$numberDecimal":"1E-6176"}}
+{"$sin":{"$numberDecimal":"1E-6000"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-6000"}}
+{"$atan":{"$numberDecimal":"1E-6000"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-6000"}}
+{"$tan":{"$numberDecimal":"1E-6000"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-6000"}}
+{"$sinh":{"$numberDecimal":"1E-6000"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000E-6000"}}
+{"$sin":{"$numberDecimal":"-1E-1000"}}	=> {"x":{"$numberDecimal":"-1.000000000000000000000000000000000E-1000"}}
+{"$atan":{"$numberDecimal":"-1E-1000"}}	=> {"x":{"$numberDecimal":"-1.000000000000000000000000000000000E-1000"}}
+{"$tan":{"$numberDecimal":"-1E-1000"}}	=> {"x":{"$numberDecimal":"-1.000000000000000000000000000000000E-1000"}}
+{"$sinh":{"$numberDecimal":"-1E-1000"}}	=> {"x":{"$numberDecimal":"-1.000000000000000000000000000000000E-1000"}}
+{"$sin":{"$numberDecimal":"2.0"}}	=> {"x":{"$numberDecimal":"0.9092974268256816953960198659117449"}}	DV-062 => {"x":{"$numberDecimal":"0.9092974268256816953960198659117448"}}
+{"$tan":{"$numberDecimal":"0.25"}}	=> {"x":{"$numberDecimal":"0.2553419212210362665044822364904736"}}	DV-062 => {"x":{"$numberDecimal":"0.2553419212210362665044822364904737"}}
+{"$cosh":{"$numberDecimal":"0"}}	=> {"x":{"$numberDecimal":"1.000000000000000000000000000000000"}}
+{"$sigmoid":{"$numberDecimal":"-1E+6144"}}	=> {"x":{"$numberDecimal":"0E-6176"}}
+{"$sigmoid":{"$numberDecimal":"-11400"}}	=> {"x":{"$numberDecimal":"1.103840445625287378228244125357971E-4951"}}
+{"$sigmoid":{"$numberDecimal":"-14200"}}	=> {"x":{"$numberDecimal":"0E-6176"}}	DV-062 => {"x":{"$numberDecimal":"1.043174528E-6167"}}
+{"$sin":{"$numberDecimal":"Infinity"}}	!! 50989	cannot apply $sin to Infinity, value must be in (-inf,inf)
+{"$sin":{"$numberDecimal":"-Infinity"}}	!! 50989	cannot apply $sin to -Infinity, value must be in (-inf,inf)
+{"$sin":{"$numberDecimal":"NaN"}}	=> {"x":{"$numberDecimal":"NaN"}}
+{"$cos":{"$numberDecimal":"Infinity"}}	!! 50989	cannot apply $cos to Infinity, value must be in (-inf,inf)
+{"$cos":{"$numberDecimal":"-Infinity"}}	!! 50989	cannot apply $cos to -Infinity, value must be in (-inf,inf)
+{"$cos":{"$numberDecimal":"NaN"}}	=> {"x":{"$numberDecimal":"NaN"}}
+{"$tan":{"$numberDecimal":"Infinity"}}	!! 50989	cannot apply $tan to Infinity, value must be in (-inf,inf)
+{"$tan":{"$numberDecimal":"-Infinity"}}	!! 50989	cannot apply $tan to -Infinity, value must be in (-inf,inf)
+{"$tan":{"$numberDecimal":"NaN"}}	=> {"x":{"$numberDecimal":"NaN"}}
+{"$asin":{"$numberDecimal":"Infinity"}}	!! 50989	cannot apply $asin to Infinity, value must be in [-1,1]
+{"$asin":{"$numberDecimal":"-Infinity"}}	!! 50989	cannot apply $asin to -Infinity, value must be in [-1,1]
+{"$asin":{"$numberDecimal":"NaN"}}	=> {"x":{"$numberDecimal":"NaN"}}
+{"$acos":{"$numberDecimal":"Infinity"}}	!! 50989	cannot apply $acos to Infinity, value must be in [-1,1]
+{"$acos":{"$numberDecimal":"-Infinity"}}	!! 50989	cannot apply $acos to -Infinity, value must be in [-1,1]
+{"$acos":{"$numberDecimal":"NaN"}}	=> {"x":{"$numberDecimal":"NaN"}}
+{"$atan":{"$numberDecimal":"Infinity"}}	=> {"x":{"$numberDecimal":"1.570796326794896619231321691639751"}}
+{"$atan":{"$numberDecimal":"-Infinity"}}	=> {"x":{"$numberDecimal":"-1.570796326794896619231321691639751"}}
+{"$atan":{"$numberDecimal":"NaN"}}	=> {"x":{"$numberDecimal":"NaN"}}
+{"$sinh":{"$numberDecimal":"Infinity"}}	=> {"x":{"$numberDecimal":"Infinity"}}
+{"$sinh":{"$numberDecimal":"-Infinity"}}	=> {"x":{"$numberDecimal":"-Infinity"}}
+{"$sinh":{"$numberDecimal":"NaN"}}	=> {"x":{"$numberDecimal":"NaN"}}
+{"$cosh":{"$numberDecimal":"Infinity"}}	=> {"x":{"$numberDecimal":"Infinity"}}
+{"$cosh":{"$numberDecimal":"-Infinity"}}	=> {"x":{"$numberDecimal":"Infinity"}}
+{"$cosh":{"$numberDecimal":"NaN"}}	=> {"x":{"$numberDecimal":"NaN"}}
+{"$tanh":{"$numberDecimal":"Infinity"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$tanh":{"$numberDecimal":"-Infinity"}}	=> {"x":{"$numberDecimal":"-1"}}
+{"$tanh":{"$numberDecimal":"NaN"}}	=> {"x":{"$numberDecimal":"NaN"}}
+{"$asinh":{"$numberDecimal":"Infinity"}}	=> {"x":{"$numberDecimal":"Infinity"}}
+{"$asinh":{"$numberDecimal":"-Infinity"}}	=> {"x":{"$numberDecimal":"-Infinity"}}
+{"$asinh":{"$numberDecimal":"NaN"}}	=> {"x":{"$numberDecimal":"NaN"}}
+{"$acosh":{"$numberDecimal":"Infinity"}}	=> {"x":{"$numberDecimal":"Infinity"}}
+{"$acosh":{"$numberDecimal":"-Infinity"}}	!! 50989	cannot apply $acosh to -Infinity, value must be in [1,inf]
+{"$acosh":{"$numberDecimal":"NaN"}}	=> {"x":{"$numberDecimal":"NaN"}}
+{"$atanh":{"$numberDecimal":"Infinity"}}	!! 50989	cannot apply $atanh to Infinity, value must be in [-1,1]
+{"$atanh":{"$numberDecimal":"-Infinity"}}	!! 50989	cannot apply $atanh to -Infinity, value must be in [-1,1]
+{"$atanh":{"$numberDecimal":"NaN"}}	=> {"x":{"$numberDecimal":"NaN"}}
+{"$sigmoid":{"$numberDecimal":"Infinity"}}	=> {"x":{"$numberDecimal":"1"}}
+{"$sigmoid":{"$numberDecimal":"-Infinity"}}	=> {"x":{"$numberDecimal":"0E-6176"}}
+{"$sigmoid":{"$numberDecimal":"NaN"}}	=> {"x":{"$numberDecimal":"NaN"}}
+{"$degreesToRadians":{"$numberDecimal":"Infinity"}}	=> {"x":{"$numberDecimal":"Infinity"}}
+{"$degreesToRadians":{"$numberDecimal":"-Infinity"}}	=> {"x":{"$numberDecimal":"-Infinity"}}
+{"$degreesToRadians":{"$numberDecimal":"NaN"}}	=> {"x":{"$numberDecimal":"NaN"}}
+{"$radiansToDegrees":{"$numberDecimal":"Infinity"}}	=> {"x":{"$numberDecimal":"Infinity"}}
+{"$radiansToDegrees":{"$numberDecimal":"-Infinity"}}	=> {"x":{"$numberDecimal":"-Infinity"}}
+{"$radiansToDegrees":{"$numberDecimal":"NaN"}}	=> {"x":{"$numberDecimal":"NaN"}}
+{"$atan2":[{"$numberDecimal":"Infinity"},{"$numberDecimal":"1"}]}	=> {"x":{"$numberDecimal":"1.570796326794896619231321691639751"}}
+{"$atan2":[{"$numberDecimal":"1"},{"$numberDecimal":"Infinity"}]}	=> {"x":{"$numberDecimal":"0E-6176"}}
+{"$atan2":[{"$numberDecimal":"Infinity"},{"$numberDecimal":"Infinity"}]}	=> {"x":{"$numberDecimal":"0.785398163397448309615660845819876"}}	DV-062 => {"x":{"$numberDecimal":"0.7853981633974483096156608458198757"}}
+{"$atan2":[{"$numberDecimal":"-Infinity"},{"$numberDecimal":"-1"}]}	=> {"x":{"$numberDecimal":"-1.570796326794896619231321691639751"}}
+{"$atan2":[{"$numberDecimal":"1"},{"$numberDecimal":"-Infinity"}]}	=> {"x":{"$numberDecimal":"3.141592653589793238462643383279503"}}
+{"$atan2":[{"$numberDecimal":"NaN"},{"$numberDecimal":"1"}]}	=> {"x":{"$numberDecimal":"NaN"}}
+{"$atan2":[{"$numberDecimal":"-1"},{"$numberDecimal":"Infinity"}]}	=> {"x":{"$numberDecimal":"-0E-6176"}}
+{"$atan2":[{"$numberDecimal":"Infinity"},{"$numberDecimal":"-Infinity"}]}	=> {"x":{"$numberDecimal":"2.356194490192344928846982537459627"}}
+{"$atan2":[{"$numberDecimal":"-Infinity"},{"$numberDecimal":"-Infinity"}]}	=> {"x":{"$numberDecimal":"-2.356194490192344928846982537459627"}}
+{"$atan2":[{"$numberDecimal":"0"},{"$numberDecimal":"Infinity"}]}	=> {"x":{"$numberDecimal":"0E-6176"}}
+{"$atan2":[{"$numberDecimal":"0"},{"$numberDecimal":"-Infinity"}]}	=> {"x":{"$numberDecimal":"3.141592653589793238462643383279503"}}

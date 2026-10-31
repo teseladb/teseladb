@@ -1,0 +1,4 @@
+# TeselaDB has no external dependencies: all the code is in this repository.
+# Cargo must not contact any registry.
+[net]
+offline = true

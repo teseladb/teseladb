@@ -1,0 +1,365 @@
+//! Reads that meet intents (008 T013, FR-003, FR-005): a read never waits for a transaction. An
+//! intent at or below its mark stops it with the intent's owner until the reader knows the
+//! transaction's state: pushed above the read (`PushTxn`, replicated), it reads the version below
+//! the intent; committed at or below its mark, the intent's value; aborted, the version below. A
+//! transaction reads its own intents. Once the reader resolves the intents of a finished
+//! transaction (lazy resolution), every read sees the result without knowing anything.
+
+mod txn_node;
+
+use std::collections::BTreeMap;
+
+use teseladb_hlc::Hlc;
+use teseladb_range::host::{RangeError, ReadSpec, Reply, TxnOp, TxnReq};
+use teseladb_range::intents::{
+    IntentOp, IntentOwner, Push, RecordOp, TxnId, TxnStatus, record_key, succ,
+};
+use teseladb_range::push::{Known, TxnView};
+use teseladb_range::read::ReadConcern;
+use txn_node::*;
+
+const C: &[u8] = b"\x01c";
+const D: &[u8] = b"\x01d";
+
+impl Node {
+    fn read(&mut self, key: &[u8], at: Option<Hlc>, view: TxnView) -> Result<Reply, RangeError> {
+        let spec = ReadSpec {
+            g: G,
+            key: key.to_vec(),
+            scan: None,
+            at,
+            concern: ReadConcern::Majority,
+            view,
+            uncertain_to: None,
+        };
+        let (now, wall) = (self.now, self.wall());
+        let id = self.host.read_with(&mut self.core, spec, now, wall);
+        self.answer(id)
+    }
+
+    fn scan_view(&mut self, at: Hlc, limit: usize, view: TxnView) -> Result<Reply, RangeError> {
+        let spec = ReadSpec {
+            g: G,
+            key: b"\x01".to_vec(),
+            scan: Some((b"\x02".to_vec(), limit)),
+            at: Some(at),
+            concern: ReadConcern::Majority,
+            view,
+            uncertain_to: None,
+        };
+        let (now, wall) = (self.now, self.wall());
+        let id = self.host.read_with(&mut self.core, spec, now, wall);
+        self.answer(id)
+    }
+}
+
+fn value(r: Result<Reply, RangeError>) -> Option<Vec<u8>> {
+    match r {
+        Ok(Reply::Value { value, .. }) => value.map(|(_, v)| v),
+        other => panic!("not a value: {other:?}"),
+    }
+}
+
+fn rows(r: Result<Reply, RangeError>) -> Vec<(Vec<u8>, Vec<u8>)> {
+    match r {
+        Ok(Reply::Batch(rows)) => rows.into_iter().map(|(k, (_, v))| (k, v)).collect(),
+        other => panic!("not rows: {other:?}"),
+    }
+}
+
+fn knowing(txn: TxnId, k: Known) -> TxnView {
+    TxnView { own: None, known: BTreeMap::from([(txn, k)]) }
+}
+
+#[test]
+fn a_read_that_meets_a_pending_intent_pushes_it_and_reads_below() {
+    let mut n = Node::new();
+    let old = n.write(A, b"old");
+    let at = intents_mark(n.txn(TxnOp::PutIntents {
+        txn: T1,
+        read_ts: old,
+        writes: vec![(A.to_vec(), put(b"new"))],
+    }));
+    // Below the intent nothing changes and nothing is pushed.
+    assert_eq!(value(n.read(A, Some(old), TxnView::default())), Some(b"old".to_vec()));
+    // At or above it, the read stops with the owner and its own mark.
+    let owner = IntentOwner { txn: T1, record_key: record_key(T1), key: A.to_vec(), ts: at };
+    let read_at = Hlc { physical: at.physical + 1, logical: 0 };
+    assert_eq!(
+        n.read(A, Some(read_at), TxnView::default()),
+        Err(RangeError::ReadIntent { owner, at: read_at })
+    );
+    // The reader pushes the transaction above its mark, which the record keeps.
+    let push = TxnOp::PushTxn { txn: T1, push: Push::To(succ(read_at)) };
+    let Ok(Reply::Record(rec)) = n.txn(push) else { panic!("no record") };
+    assert_eq!((rec.status, rec.min_commit_ts), (TxnStatus::Pending, succ(read_at)));
+    assert_eq!(value(n.read(A, Some(read_at), knowing(T1, Known::Pushed))), Some(b"old".to_vec()));
+    // The coordinator adopts the push: its commit goes above the read.
+    let Ok(Reply::Record(rec)) = n.txn(TxnOp::EndTxn {
+        txn: T1,
+        op: RecordOp::Begin { lsid: 1, txn_number: 1, read_ts: old },
+    }) else {
+        panic!("no record")
+    };
+    let commit = RecordOp::Commit { ts: at, spans: vec![] };
+    let Ok(Reply::Record(done)) = n.txn(TxnOp::EndTxn { txn: T1, op: commit }) else {
+        panic!("no record")
+    };
+    assert_eq!(rec.min_commit_ts, succ(read_at));
+    assert!(done.commit_ts > read_at, "the commit went above the pushed read");
+    // Committed above the read: still the old version; at or below it: the intent's value.
+    let committed = Known::Committed(done.commit_ts);
+    assert_eq!(value(n.read(A, Some(read_at), knowing(T1, committed))), Some(b"old".to_vec()));
+    let after = done.commit_ts;
+    assert_eq!(value(n.read(A, Some(after), knowing(T1, committed))), Some(b"new".to_vec()));
+    // Lazy resolution: then nobody needs to know.
+    intents_mark(n.txn(TxnOp::ResolveIntents {
+        txn: T1,
+        status: TxnStatus::Committed,
+        commit_ts: done.commit_ts,
+        keys: vec![A.to_vec()],
+    }));
+    assert_eq!(value(n.read(A, None, TxnView::default())), Some(b"new".to_vec()));
+    assert_eq!(n.get(A), Some(b"new".to_vec()));
+    assert_eq!(value(n.read(A, Some(read_at), TxnView::default())), Some(b"old".to_vec()));
+}
+
+#[test]
+fn aborted_intents_are_skipped_and_own_intents_are_read() {
+    let mut n = Node::new();
+    n.write(B, b"b");
+    n.delete(B);
+    let old = n.write(A, b"old");
+    let live = n.live();
+    let at = intents_mark(n.txn(intents(T1, old, &[(A, IntentOp::Delete), (C, put(b"c"))])));
+    assert_eq!(n.live(), live, "intents are not live data");
+    assert_eq!(value(n.read(B, None, knowing(T1, Known::Aborted))), None);
+    let read_at = Hlc { physical: at.physical + 5, logical: 0 };
+    assert_eq!(value(n.read(A, Some(read_at), knowing(T1, Known::Aborted))), Some(b"old".to_vec()));
+    assert_eq!(value(n.read(C, Some(read_at), knowing(T1, Known::Aborted))), None);
+    // The transaction itself, reading at its read mark below its intents, sees them.
+    let own = TxnView { own: Some(T1), known: BTreeMap::new() };
+    assert_eq!(value(n.read(A, Some(old), own.clone())), None, "its own deletion");
+    assert_eq!(value(n.read(C, Some(old), own.clone())), Some(b"c".to_vec()));
+    // Another transaction's own view does not cover it.
+    let other = TxnView { own: Some(T2), known: BTreeMap::new() };
+    assert!(matches!(n.read(C, Some(read_at), other), Err(RangeError::ReadIntent { .. })));
+}
+
+#[test]
+fn scans_apply_the_same_rules_key_by_key() {
+    let mut n = Node::new();
+    n.write(A, b"a0");
+    n.write(B, b"b0");
+    let old = n.write(D, b"d0");
+    intents_mark(n.txn(TxnOp::PutIntents {
+        txn: T1,
+        read_ts: old,
+        writes: vec![(B.to_vec(), put(b"b1")), (C.to_vec(), put(b"c1"))],
+    }));
+    let at = intents_mark(n.txn(TxnOp::PutIntents {
+        txn: T2,
+        read_ts: old,
+        writes: vec![(D.to_vec(), IntentOp::Delete)],
+    }));
+    let read_at = Hlc { physical: at.physical + 5, logical: 0 };
+    // Knowing nothing, the scan stops at the first intent, with its mark.
+    let r = n.scan_view(read_at, 10, TxnView::default());
+    let stopped = matches!(r, Err(RangeError::ReadIntent { owner: IntentOwner { txn: T1, .. }, at })
+        if at == read_at);
+    assert!(stopped, "{r:?}");
+    let view = TxnView {
+        own: None,
+        known: BTreeMap::from([(T1, Known::Committed(at)), (T2, Known::Pushed)]),
+    };
+    let got = rows(n.scan_view(read_at, 10, view.clone()));
+    let want = [(A, b"a0"), (B, b"b1"), (C, b"c1"), (D, b"d0")];
+    assert_eq!(got, want.iter().map(|(k, v)| (k.to_vec(), v.to_vec())).collect::<Vec<_>>());
+    assert_eq!(rows(n.scan_view(read_at, 2, view)).len(), 2);
+    // Transaction 1, at a mark above its intents, finds them in the scan itself.
+    let own = TxnView { own: Some(T1), known: BTreeMap::from([(T2, Known::Pushed)]) };
+    let got = rows(n.scan_view(read_at, 10, own));
+    let want = [(A, b"a0"), (B, b"b1"), (C, b"c1"), (D, b"d0")];
+    assert_eq!(got, want.iter().map(|(k, v)| (k.to_vec(), v.to_vec())).collect::<Vec<_>>());
+    // Transaction 2 reads its own deletion and, below its intents, T1's are above it: unseen.
+    let own = TxnView { own: Some(T2), known: BTreeMap::new() };
+    let got = rows(n.scan_view(old, 10, own));
+    let want = [(A, b"a0"), (B, b"b0")];
+    assert_eq!(got, want.iter().map(|(k, v)| (k.to_vec(), v.to_vec())).collect::<Vec<_>>());
+}
+
+#[test]
+fn a_read_at_a_mark_ahead_of_the_leaders_clock_waits_for_it() {
+    let mut n = Node::new();
+    n.write(A, b"v");
+    // 100 ms ahead: answered once the node's clock passes the mark, and later writes go above.
+    let ahead = Hlc { physical: n.wall() + 100, logical: 0 };
+    let spec = ReadSpec {
+        g: G,
+        key: A.to_vec(),
+        scan: None,
+        at: Some(ahead),
+        concern: ReadConcern::Majority,
+        view: TxnView::default(),
+        uncertain_to: None,
+    };
+    let (now, wall) = (n.now, n.wall());
+    let id = n.host.read_with(&mut n.core, spec.clone(), now, wall);
+    n.settle();
+    assert!(n.replies.iter().all(|(r, _)| *r != id), "answered before the clock reached the mark");
+    let start = n.wall();
+    while n.replies.iter().all(|(r, _)| *r != id) {
+        n.settle();
+        assert!(n.wall() < start + 1_000, "never answered");
+    }
+    assert!(n.wall() >= ahead.physical);
+    assert_eq!(value(n.answer(id)), Some(b"v".to_vec()));
+    assert!(n.write(A, b"w") > ahead);
+    // Further ahead than the clocks of a cluster can differ: refused at once.
+    let far = ReadSpec { at: Some(far()), ..spec };
+    let (now, wall) = (n.now, n.wall());
+    let id = n.host.read_with(&mut n.core, far, now, wall);
+    assert_eq!(n.answer(id), Err(RangeError::Timeout));
+}
+
+/// A read whose mark came from another node's clock checks its uncertainty window (008 FR-008,
+/// T023): a version of another writer in `(mark, window end]` stops it with that version's mark,
+/// in a point read and in a scan; above the window, or without one, it reads below as before, and
+/// its own transaction's intents are no other writer's.
+#[test]
+fn a_version_in_the_uncertainty_window_stops_the_read() {
+    let mut n = Node::new();
+    let old = n.write(A, b"old");
+    let new = n.write(A, b"new");
+    let mark = Hlc { physical: new.physical.saturating_sub(1), logical: 0 }.max(old);
+    let read = |n: &mut Node, scan: bool, window: Option<Hlc>, view: TxnView| {
+        let spec = ReadSpec {
+            g: G,
+            key: if scan { b"\x01".to_vec() } else { A.to_vec() },
+            scan: scan.then(|| (b"\x02".to_vec(), 10)),
+            at: Some(mark),
+            concern: ReadConcern::Majority,
+            view,
+            uncertain_to: window,
+        };
+        let (now, wall) = (n.now, n.wall());
+        let id = n.host.read_with(&mut n.core, spec, now, wall);
+        n.answer(id)
+    };
+    let window = Some(Hlc { physical: new.physical + 250, logical: u32::MAX });
+    for scan in [false, true] {
+        assert_eq!(
+            read(&mut n, scan, window, TxnView::default()),
+            Err(RangeError::ReadUncertain { ts: new }),
+            "scan {scan}"
+        );
+    }
+    // Without a window, or one that ends below the version: the version before.
+    assert_eq!(value(read(&mut n, false, None, TxnView::default())), Some(b"old".to_vec()));
+    let short =
+        Some(Hlc { physical: mark.physical, logical: mark.logical + 1 }).filter(|w| *w < new);
+    assert_eq!(value(read(&mut n, false, short, TxnView::default())), Some(b"old".to_vec()));
+    // The reader's own intent in the window does not stop it.
+    let mine = intents_mark(n.txn(TxnOp::PutIntents {
+        txn: T1,
+        read_ts: new,
+        writes: vec![(C.to_vec(), put(b"mine"))],
+    }));
+    let own = TxnView { own: Some(T1), known: BTreeMap::new() };
+    let spec = ReadSpec {
+        g: G,
+        key: C.to_vec(),
+        scan: None,
+        at: Some(mark),
+        concern: ReadConcern::Majority,
+        view: own,
+        uncertain_to: Some(Hlc { physical: mine.physical + 250, logical: 0 }),
+    };
+    let (now, wall) = (n.now, n.wall());
+    let id = n.host.read_with(&mut n.core, spec, now, wall);
+    assert_eq!(value(n.answer(id)), Some(b"mine".to_vec()));
+}
+
+/// A read below an intent whose transaction it learned committed above its mark but inside its
+/// window (008 FR-008): the commit may have been acknowledged before the read began, so the read
+/// stops at the commit's mark like it does for a resolved version there (`txn-append`, seed 489).
+#[test]
+fn a_known_commit_in_the_uncertainty_window_stops_the_read() {
+    let mut n = Node::new();
+    let old = n.write(A, b"old");
+    let at = intents_mark(n.txn(TxnOp::PutIntents {
+        txn: T1,
+        read_ts: old,
+        writes: vec![(A.to_vec(), put(b"new"))],
+    }));
+    let read_at = Hlc { physical: at.physical + 1, logical: 0 };
+    let commit = Hlc { physical: read_at.physical + 5, logical: 0 };
+    let read = |n: &mut Node, scan: bool, window: Option<Hlc>| {
+        let spec = ReadSpec {
+            g: G,
+            key: if scan { b"\x01".to_vec() } else { A.to_vec() },
+            scan: scan.then(|| (b"\x02".to_vec(), 10)),
+            at: Some(read_at),
+            concern: ReadConcern::Majority,
+            view: knowing(T1, Known::Committed(commit)),
+            uncertain_to: window,
+        };
+        let (now, wall) = (n.now, n.wall());
+        let id = n.host.read_with(&mut n.core, spec, now, wall);
+        n.answer(id)
+    };
+    let window = Some(Hlc { physical: read_at.physical + 250, logical: u32::MAX });
+    for scan in [false, true] {
+        assert_eq!(
+            read(&mut n, scan, window),
+            Err(RangeError::ReadUncertain { ts: commit }),
+            "scan {scan}"
+        );
+    }
+    // A window that ends below the commit, or none: the version below the intent.
+    let short = Some(Hlc { physical: commit.physical - 1, logical: 0 });
+    assert_eq!(value(read(&mut n, false, short)), Some(b"old".to_vec()));
+    assert_eq!(rows(read(&mut n, true, None)), vec![(A.to_vec(), b"old".to_vec())]);
+}
+
+/// `EndTxn(Commit)` and `PushTxn` on one record at the same time (008 T029, FR-003): the record's
+/// latch puts one after the other. A push that goes first lifts the commit above its mark; one
+/// that goes second finds the record committed and tells the reader where.
+#[test]
+fn a_commit_and_a_push_on_one_record_are_ordered() {
+    for push_first in [false, true] {
+        let mut n = Node::new();
+        let old = n.write(A, b"old");
+        let at = intents_mark(n.txn(TxnOp::PutIntents {
+            txn: T1,
+            read_ts: old,
+            writes: vec![(A.to_vec(), put(b"new"))],
+        }));
+        let begin = RecordOp::Begin { lsid: 1, txn_number: 1, read_ts: old };
+        assert!(matches!(n.txn(TxnOp::EndTxn { txn: T1, op: begin }), Ok(Reply::Record(_))));
+        let reader = Hlc { physical: at.physical + 50, logical: 0 };
+        let commit = TxnOp::EndTxn { txn: T1, op: RecordOp::Commit { ts: at, spans: vec![] } };
+        let push = TxnOp::PushTxn { txn: T1, push: Push::To(succ(reader)) };
+        let ops = if push_first { [push, commit] } else { [commit, push] };
+        let (now, wall) = (n.now, n.wall());
+        let ids =
+            ops.map(|op| n.host.txn(&mut n.core, TxnReq { g: G, op, wc: MAJORITY }, now, wall));
+        let answers = ids.map(|id| match n.answer(id) {
+            Ok(Reply::Record(rec)) => rec,
+            other => panic!("not a record: {other:?}"),
+        });
+        let (pushed, committed) =
+            if push_first { (&answers[0], &answers[1]) } else { (&answers[1], &answers[0]) };
+        assert_eq!(committed.status, TxnStatus::Committed, "push first {push_first}");
+        if push_first {
+            assert_eq!(pushed.status, TxnStatus::Pending);
+            assert!(committed.commit_ts >= succ(reader), "the commit went above the push");
+        } else {
+            assert_eq!(pushed.status, TxnStatus::Committed);
+            assert_eq!(
+                pushed.commit_ts, committed.commit_ts,
+                "the reader learns the commit's mark"
+            );
+        }
+    }
+}

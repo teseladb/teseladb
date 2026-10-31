@@ -1,0 +1,696 @@
+{"$dateFromString": {"dateString": "2008-07-01 10:00 a"}}	=> {"x":{"$date":{"$numberLong":"1214902800000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 acdt"}}	=> {"x":{"$date":{"$numberLong":"1214868600000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 acst"}}	=> {"x":{"$date":{"$numberLong":"1214872200000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 addt"}}	=> {"x":{"$date":{"$numberLong":"1214913600000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 adt"}}	=> {"x":{"$date":{"$numberLong":"1214917200000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 aedt"}}	=> {"x":{"$date":{"$numberLong":"1214866800000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 aest"}}	=> {"x":{"$date":{"$numberLong":"1214870400000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ago"}}	=> {"x":{"$date":{"$numberLong":"1214906400000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ahdt"}}	=> {"x":{"$date":{"$numberLong":"1214938800000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ahst"}}	=> {"x":{"$date":{"$numberLong":"1214942400000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 akdt"}}	=> {"x":{"$date":{"$numberLong":"1214935200000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 akst"}}	=> {"x":{"$date":{"$numberLong":"1214938800000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 am"}}	=> {"x":{"$date":{"$numberLong":"1214906400000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 amt"}}	=> {"x":{"$date":{"$numberLong":"1214920240000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 apt"}}	=> {"x":{"$date":{"$numberLong":"1214917200000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ast"}}	=> {"x":{"$date":{"$numberLong":"1214920800000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 awdt"}}	=> {"x":{"$date":{"$numberLong":"1214874000000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 awst"}}	=> {"x":{"$date":{"$numberLong":"1214877600000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 awt"}}	=> {"x":{"$date":{"$numberLong":"1214917200000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 b"}}	=> {"x":{"$date":{"$numberLong":"1214899200000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 bdst"}}	=> {"x":{"$date":{"$numberLong":"1214899200000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 bdt"}}	=> {"x":{"$date":{"$numberLong":"1214942400000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 bmt"}}	=> {"x":{"$date":{"$numberLong":"1214920709000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 bst"}}	=> {"x":{"$date":{"$numberLong":"1214902800000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 c"}}	=> {"x":{"$date":{"$numberLong":"1214895600000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 cast"}}	=> {"x":{"$date":{"$numberLong":"1214872200000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 cat"}}	=> {"x":{"$date":{"$numberLong":"1214899200000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 cdt"}}	=> {"x":{"$date":{"$numberLong":"1214924400000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 cemt"}}	=> {"x":{"$date":{"$numberLong":"1214895600000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 cest"}}	=> {"x":{"$date":{"$numberLong":"1214899200000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 cet"}}	=> {"x":{"$date":{"$numberLong":"1214902800000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 chst"}}	=> {"x":{"$date":{"$numberLong":"1214870400000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 cmt"}}	=> {"x":{"$date":{"$numberLong":"1214921808000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 cpt"}}	=> {"x":{"$date":{"$numberLong":"1214924400000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 cst"}}	=> {"x":{"$date":{"$numberLong":"1214928000000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 cwt"}}	=> {"x":{"$date":{"$numberLong":"1214924400000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 d"}}	=> {"x":{"$date":{"$numberLong":"1214892000000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 dmt"}}	=> {"x":{"$date":{"$numberLong":"1214907921000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 e"}}	=> {"x":{"$date":{"$numberLong":"1214888400000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 eat"}}	=> {"x":{"$date":{"$numberLong":"1214895600000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 edt"}}	=> {"x":{"$date":{"$numberLong":"1214920800000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 eest"}}	=> {"x":{"$date":{"$numberLong":"1214895600000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 eet"}}	=> {"x":{"$date":{"$numberLong":"1214899200000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 emt"}}	=> {"x":{"$date":{"$numberLong":"1214932648000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ept"}}	=> {"x":{"$date":{"$numberLong":"1214920800000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 est"}}	=> {"x":{"$date":{"$numberLong":"1214924400000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ewt"}}	=> {"x":{"$date":{"$numberLong":"1214920800000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 f"}}	=> {"x":{"$date":{"$numberLong":"1214884800000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ffmt"}}	=> {"x":{"$date":{"$numberLong":"1214921060000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 fmt"}}	=> {"x":{"$date":{"$numberLong":"1214910456000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 fri"}}	=> {"x":{"$date":{"$numberLong":"1215129600000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 g"}}	=> {"x":{"$date":{"$numberLong":"1214881200000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 gdt"}}	=> {"x":{"$date":{"$numberLong":"1214866800000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 gmt"}}	=> {"x":{"$date":{"$numberLong":"1214906400000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 gst"}}	=> {"x":{"$date":{"$numberLong":"1214870400000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 h"}}	=> {"x":{"$date":{"$numberLong":"1214877600000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 hdt"}}	=> {"x":{"$date":{"$numberLong":"1214940600000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 hkst"}}	=> {"x":{"$date":{"$numberLong":"1214874000000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 hkt"}}	=> {"x":{"$date":{"$numberLong":"1214877600000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 hmt"}}	=> {"x":{"$date":{"$numberLong":"1214926176000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 hpt"}}	=> {"x":{"$date":{"$numberLong":"1214940600000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 hst"}}	=> {"x":{"$date":{"$numberLong":"1214942400000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 hwt"}}	=> {"x":{"$date":{"$numberLong":"1214940600000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 i"}}	=> {"x":{"$date":{"$numberLong":"1214874000000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 iddt"}}	=> {"x":{"$date":{"$numberLong":"1214892000000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 idt"}}	=> {"x":{"$date":{"$numberLong":"1214895600000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 imt"}}	=> {"x":{"$date":{"$numberLong":"1214881375000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ist"}}	=> {"x":{"$date":{"$numberLong":"1214899200000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 jdt"}}	=> {"x":{"$date":{"$numberLong":"1214870400000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 jmt"}}	=> {"x":{"$date":{"$numberLong":"1214897960000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 jst"}}	=> {"x":{"$date":{"$numberLong":"1214874000000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 k"}}	=> {"x":{"$date":{"$numberLong":"1214870400000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 kdt"}}	=> {"x":{"$date":{"$numberLong":"1214870400000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 kmt"}}	=> {"x":{"$date":{"$numberLong":"1214900664000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 kst"}}	=> {"x":{"$date":{"$numberLong":"1214875800000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 l"}}	=> {"x":{"$date":{"$numberLong":"1214866800000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 lst"}}	=> {"x":{"$date":{"$numberLong":"1214897006000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 m"}}	=> {"x":{"$date":{"$numberLong":"1214863200000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 mdst"}}	=> {"x":{"$date":{"$numberLong":"1214890121000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 mdt"}}	=> {"x":{"$date":{"$numberLong":"1214928000000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 mest"}}	=> {"x":{"$date":{"$numberLong":"1214899200000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 met"}}	=> {"x":{"$date":{"$numberLong":"1214902800000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 mmt"}}	=> {"x":{"$date":{"$numberLong":"1214897383000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 mon"}}	=> {"x":{"$date":{"$numberLong":"1215388800000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 mpt"}}	=> {"x":{"$date":{"$numberLong":"1214928000000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 msd"}}	=> {"x":{"$date":{"$numberLong":"1214892000000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 msk"}}	=> {"x":{"$date":{"$numberLong":"1214895600000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 mst"}}	=> {"x":{"$date":{"$numberLong":"1214931600000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 mwt"}}	=> {"x":{"$date":{"$numberLong":"1214928000000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 n"}}	=> {"x":{"$date":{"$numberLong":"1214910000000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 nddt"}}	=> {"x":{"$date":{"$numberLong":"1214911800000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ndt"}}	=> {"x":{"$date":{"$numberLong":"1214915452000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 now"}}	=> {"x":{"$date":{"$numberLong":"1214906400000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 npt"}}	=> {"x":{"$date":{"$numberLong":"1214915400000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 nst"}}	=> {"x":{"$date":{"$numberLong":"1214919000000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 nwt"}}	=> {"x":{"$date":{"$numberLong":"1214915400000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 nzdt"}}	=> {"x":{"$date":{"$numberLong":"1214859600000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 nzmt"}}	=> {"x":{"$date":{"$numberLong":"1214865000000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 nzst"}}	=> {"x":{"$date":{"$numberLong":"1214863200000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 o"}}	=> {"x":{"$date":{"$numberLong":"1214913600000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 p"}}	=> {"x":{"$date":{"$numberLong":"1214917200000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 pdt"}}	=> {"x":{"$date":{"$numberLong":"1214931600000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 pkst"}}	=> {"x":{"$date":{"$numberLong":"1214884800000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 pkt"}}	=> {"x":{"$date":{"$numberLong":"1214888400000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 plmt"}}	=> {"x":{"$date":{"$numberLong":"1214880810000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 pm"}}	=> {"x":{"$date":{"$numberLong":"1214949600000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 pmt"}}	=> {"x":{"$date":{"$numberLong":"1214919636000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ppmt"}}	=> {"x":{"$date":{"$numberLong":"1214923740000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ppt"}}	=> {"x":{"$date":{"$numberLong":"1214931600000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 pst"}}	=> {"x":{"$date":{"$numberLong":"1214935200000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 pwt"}}	=> {"x":{"$date":{"$numberLong":"1214931600000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 q"}}	=> {"x":{"$date":{"$numberLong":"1214920800000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 qmt"}}	=> {"x":{"$date":{"$numberLong":"1214925240000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 r"}}	=> {"x":{"$date":{"$numberLong":"1214924400000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 rmt"}}	=> {"x":{"$date":{"$numberLong":"1214900606000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 s"}}	=> {"x":{"$date":{"$numberLong":"1214928000000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 sast"}}	=> {"x":{"$date":{"$numberLong":"1214899200000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 sat"}}	=> {"x":{"$date":{"$numberLong":"1215216000000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 sdmt"}}	=> {"x":{"$date":{"$numberLong":"1214923200000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 sjmt"}}	=> {"x":{"$date":{"$numberLong":"1214926573000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 smt"}}	=> {"x":{"$date":{"$numberLong":"1214920284000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 sst"}}	=> {"x":{"$date":{"$numberLong":"1214946000000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 sun"}}	=> {"x":{"$date":{"$numberLong":"1215302400000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 t"}}	=> {"x":{"$date":{"$numberLong":"1214931600000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 tbmt"}}	=> {"x":{"$date":{"$numberLong":"1214895649000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 thu"}}	=> {"x":{"$date":{"$numberLong":"1215043200000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 tmt"}}	=> {"x":{"$date":{"$numberLong":"1214894056000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 tue"}}	=> {"x":{"$date":{"$numberLong":"1214870400000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 u"}}	=> {"x":{"$date":{"$numberLong":"1214935200000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 uct"}}	=> {"x":{"$date":{"$numberLong":"1214906400000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 utc"}}	=> {"x":{"$date":{"$numberLong":"1214906400000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 v"}}	=> {"x":{"$date":{"$numberLong":"1214938800000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 w"}}	=> {"x":{"$date":{"$numberLong":"1214942400000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 wast"}}	=> {"x":{"$date":{"$numberLong":"1214899200000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 wat"}}	=> {"x":{"$date":{"$numberLong":"1214902800000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 wed"}}	=> {"x":{"$date":{"$numberLong":"1214956800000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 wemt"}}	=> {"x":{"$date":{"$numberLong":"1214899200000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 west"}}	=> {"x":{"$date":{"$numberLong":"1214902800000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 wet"}}	=> {"x":{"$date":{"$numberLong":"1214906400000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 wib"}}	=> {"x":{"$date":{"$numberLong":"1214881200000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 wit"}}	=> {"x":{"$date":{"$numberLong":"1214874000000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 wita"}}	=> {"x":{"$date":{"$numberLong":"1214877600000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 wmt"}}	=> {"x":{"$date":{"$numberLong":"1214901360000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 x"}}	=> {"x":{"$date":{"$numberLong":"1214946000000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 y"}}	=> {"x":{"$date":{"$numberLong":"1214949600000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 yddt"}}	=> {"x":{"$date":{"$numberLong":"1214931600000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ydt"}}	=> {"x":{"$date":{"$numberLong":"1214935200000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ypt"}}	=> {"x":{"$date":{"$numberLong":"1214935200000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 yst"}}	=> {"x":{"$date":{"$numberLong":"1214938800000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ywt"}}	=> {"x":{"$date":{"$numberLong":"1214935200000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 z"}}	=> {"x":{"$date":{"$numberLong":"1214906400000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 abl"}}	!! 241	Error parsing date string '2008-07-01 10:00 abl'; 17: passing a time zone identifier as part of the string is not allowed 'a'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 acx"}}	!! 241	Error parsing date string '2008-07-01 10:00 acx'; 17: passing a time zone identifier as part of the string is not allowed 'a'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 aej"}}	!! 241	Error parsing date string '2008-07-01 10:00 aej'; 17: passing a time zone identifier as part of the string is not allowed 'a'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 afw"}}	!! 241	Error parsing date string '2008-07-01 10:00 afw'; 17: passing a time zone identifier as part of the string is not allowed 'a'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ahj"}}	!! 241	Error parsing date string '2008-07-01 10:00 ahj'; 17: passing a time zone identifier as part of the string is not allowed 'a'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 aiw"}}	!! 241	Error parsing date string '2008-07-01 10:00 aiw'; 17: passing a time zone identifier as part of the string is not allowed 'a'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 aki"}}	!! 241	Error parsing date string '2008-07-01 10:00 aki'; 17: passing a time zone identifier as part of the string is not allowed 'a'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 alv"}}	!! 241	Error parsing date string '2008-07-01 10:00 alv'; 17: passing a time zone identifier as part of the string is not allowed 'a'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 anj"}}	!! 241	Error parsing date string '2008-07-01 10:00 anj'; 17: passing a time zone identifier as part of the string is not allowed 'a'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 aow"}}	!! 241	Error parsing date string '2008-07-01 10:00 aow'; 17: passing a time zone identifier as part of the string is not allowed 'a'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 aqj"}}	!! 241	Error parsing date string '2008-07-01 10:00 aqj'; 17: passing a time zone identifier as part of the string is not allowed 'a'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 arw"}}	!! 241	Error parsing date string '2008-07-01 10:00 arw'; 17: passing a time zone identifier as part of the string is not allowed 'a'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 atj"}}	!! 241	Error parsing date string '2008-07-01 10:00 atj'; 17: passing a time zone identifier as part of the string is not allowed 'a'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 auw"}}	!! 241	Error parsing date string '2008-07-01 10:00 auw'; 17: passing a time zone identifier as part of the string is not allowed 'a'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 awi"}}	!! 241	Error parsing date string '2008-07-01 10:00 awi'; 17: passing a time zone identifier as part of the string is not allowed 'a'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 axw"}}	!! 241	Error parsing date string '2008-07-01 10:00 axw'; 17: passing a time zone identifier as part of the string is not allowed 'a'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 azi"}}	!! 241	Error parsing date string '2008-07-01 10:00 azi'; 17: passing a time zone identifier as part of the string is not allowed 'a'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 bav"}}	!! 241	Error parsing date string '2008-07-01 10:00 bav'; 17: passing a time zone identifier as part of the string is not allowed 'b'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 bch"}}	!! 241	Error parsing date string '2008-07-01 10:00 bch'; 17: passing a time zone identifier as part of the string is not allowed 'b'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 bdv"}}	!! 241	Error parsing date string '2008-07-01 10:00 bdv'; 17: passing a time zone identifier as part of the string is not allowed 'b'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 bfh"}}	!! 241	Error parsing date string '2008-07-01 10:00 bfh'; 17: passing a time zone identifier as part of the string is not allowed 'b'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 bgu"}}	!! 241	Error parsing date string '2008-07-01 10:00 bgu'; 17: passing a time zone identifier as part of the string is not allowed 'b'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 big"}}	!! 241	Error parsing date string '2008-07-01 10:00 big'; 17: passing a time zone identifier as part of the string is not allowed 'b'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 bjt"}}	!! 241	Error parsing date string '2008-07-01 10:00 bjt'; 17: passing a time zone identifier as part of the string is not allowed 'b'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 blf"}}	!! 241	Error parsing date string '2008-07-01 10:00 blf'; 17: passing a time zone identifier as part of the string is not allowed 'b'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 bms"}}	!! 241	Error parsing date string '2008-07-01 10:00 bms'; 17: passing a time zone identifier as part of the string is not allowed 'b'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 bof"}}	!! 241	Error parsing date string '2008-07-01 10:00 bof'; 17: passing a time zone identifier as part of the string is not allowed 'b'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 bps"}}	!! 241	Error parsing date string '2008-07-01 10:00 bps'; 17: passing a time zone identifier as part of the string is not allowed 'b'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 bre"}}	!! 241	Error parsing date string '2008-07-01 10:00 bre'; 17: passing a time zone identifier as part of the string is not allowed 'b'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 bsr"}}	!! 241	Error parsing date string '2008-07-01 10:00 bsr'; 17: passing a time zone identifier as part of the string is not allowed 'b'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 bue"}}	!! 241	Error parsing date string '2008-07-01 10:00 bue'; 17: passing a time zone identifier as part of the string is not allowed 'b'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 bvr"}}	!! 241	Error parsing date string '2008-07-01 10:00 bvr'; 17: passing a time zone identifier as part of the string is not allowed 'b'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 bxd"}}	!! 241	Error parsing date string '2008-07-01 10:00 bxd'; 17: passing a time zone identifier as part of the string is not allowed 'b'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 byq"}}	!! 241	Error parsing date string '2008-07-01 10:00 byq'; 17: passing a time zone identifier as part of the string is not allowed 'b'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 cac"}}	!! 241	Error parsing date string '2008-07-01 10:00 cac'; 17: passing a time zone identifier as part of the string is not allowed 'c'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 cbq"}}	!! 241	Error parsing date string '2008-07-01 10:00 cbq'; 17: passing a time zone identifier as part of the string is not allowed 'c'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 cdc"}}	!! 241	Error parsing date string '2008-07-01 10:00 cdc'; 17: passing a time zone identifier as part of the string is not allowed 'c'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 cep"}}	!! 241	Error parsing date string '2008-07-01 10:00 cep'; 17: passing a time zone identifier as part of the string is not allowed 'c'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 cgc"}}	!! 241	Error parsing date string '2008-07-01 10:00 cgc'; 17: passing a time zone identifier as part of the string is not allowed 'c'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 chn"}}	!! 241	Error parsing date string '2008-07-01 10:00 chn'; 17: passing a time zone identifier as part of the string is not allowed 'c'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 cj"}}	!! 241	Error parsing date string '2008-07-01 10:00 cj'; 17: passing a time zone identifier as part of the string is not allowed 'c'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ckm"}}	!! 241	Error parsing date string '2008-07-01 10:00 ckm'; 17: passing a time zone identifier as part of the string is not allowed 'c'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 clz"}}	!! 241	Error parsing date string '2008-07-01 10:00 clz'; 17: passing a time zone identifier as part of the string is not allowed 'c'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 cnm"}}	!! 241	Error parsing date string '2008-07-01 10:00 cnm'; 17: passing a time zone identifier as part of the string is not allowed 'c'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 coz"}}	!! 241	Error parsing date string '2008-07-01 10:00 coz'; 17: passing a time zone identifier as part of the string is not allowed 'c'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 cqm"}}	!! 241	Error parsing date string '2008-07-01 10:00 cqm'; 17: passing a time zone identifier as part of the string is not allowed 'c'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 crz"}}	!! 241	Error parsing date string '2008-07-01 10:00 crz'; 17: passing a time zone identifier as part of the string is not allowed 'c'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ctm"}}	!! 241	Error parsing date string '2008-07-01 10:00 ctm'; 17: passing a time zone identifier as part of the string is not allowed 'c'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 cuy"}}	!! 241	Error parsing date string '2008-07-01 10:00 cuy'; 17: passing a time zone identifier as part of the string is not allowed 'c'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 cwk"}}	!! 241	Error parsing date string '2008-07-01 10:00 cwk'; 17: passing a time zone identifier as part of the string is not allowed 'c'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 cxy"}}	!! 241	Error parsing date string '2008-07-01 10:00 cxy'; 17: passing a time zone identifier as part of the string is not allowed 'c'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 czk"}}	!! 241	Error parsing date string '2008-07-01 10:00 czk'; 17: passing a time zone identifier as part of the string is not allowed 'c'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 dax"}}	!! 241	Error parsing date string '2008-07-01 10:00 dax'; 17: passing a time zone identifier as part of the string is not allowed 'd'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 dcj"}}	!! 241	Error parsing date string '2008-07-01 10:00 dcj'; 17: passing a time zone identifier as part of the string is not allowed 'd'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ddw"}}	!! 241	Error parsing date string '2008-07-01 10:00 ddw'; 17: passing a time zone identifier as part of the string is not allowed 'd'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 dfi"}}	!! 241	Error parsing date string '2008-07-01 10:00 dfi'; 17: passing a time zone identifier as part of the string is not allowed 'd'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 dgv"}}	!! 241	Error parsing date string '2008-07-01 10:00 dgv'; 17: passing a time zone identifier as part of the string is not allowed 'd'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 dih"}}	!! 241	Error parsing date string '2008-07-01 10:00 dih'; 17: passing a time zone identifier as part of the string is not allowed 'd'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 dju"}}	!! 241	Error parsing date string '2008-07-01 10:00 dju'; 17: passing a time zone identifier as part of the string is not allowed 'd'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 dlg"}}	!! 241	Error parsing date string '2008-07-01 10:00 dlg'; 17: passing a time zone identifier as part of the string is not allowed 'd'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 dmu"}}	!! 241	Error parsing date string '2008-07-01 10:00 dmu'; 17: passing a time zone identifier as part of the string is not allowed 'd'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 dog"}}	!! 241	Error parsing date string '2008-07-01 10:00 dog'; 17: passing a time zone identifier as part of the string is not allowed 'd'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 dpt"}}	!! 241	Error parsing date string '2008-07-01 10:00 dpt'; 17: passing a time zone identifier as part of the string is not allowed 'd'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 drf"}}	!! 241	Error parsing date string '2008-07-01 10:00 drf'; 17: passing a time zone identifier as part of the string is not allowed 'd'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 dss"}}	!! 241	Error parsing date string '2008-07-01 10:00 dss'; 17: passing a time zone identifier as part of the string is not allowed 'd'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 due"}}	!! 241	Error parsing date string '2008-07-01 10:00 due'; 17: passing a time zone identifier as part of the string is not allowed 'd'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 dvr"}}	!! 241	Error parsing date string '2008-07-01 10:00 dvr'; 17: passing a time zone identifier as part of the string is not allowed 'd'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 dxd"}}	!! 241	Error parsing date string '2008-07-01 10:00 dxd'; 17: passing a time zone identifier as part of the string is not allowed 'd'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 dyq"}}	!! 241	Error parsing date string '2008-07-01 10:00 dyq'; 17: passing a time zone identifier as part of the string is not allowed 'd'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 eac"}}	!! 241	Error parsing date string '2008-07-01 10:00 eac'; 17: passing a time zone identifier as part of the string is not allowed 'e'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ebo"}}	!! 241	Error parsing date string '2008-07-01 10:00 ebo'; 17: passing a time zone identifier as part of the string is not allowed 'e'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 eda"}}	!! 241	Error parsing date string '2008-07-01 10:00 eda'; 17: passing a time zone identifier as part of the string is not allowed 'e'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 eeo"}}	!! 241	Error parsing date string '2008-07-01 10:00 eeo'; 17: passing a time zone identifier as part of the string is not allowed 'e'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 egb"}}	!! 241	Error parsing date string '2008-07-01 10:00 egb'; 17: passing a time zone identifier as part of the string is not allowed 'e'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ehn"}}	!! 241	Error parsing date string '2008-07-01 10:00 ehn'; 17: passing a time zone identifier as part of the string is not allowed 'e'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 eiz"}}	!! 241	Error parsing date string '2008-07-01 10:00 eiz'; 17: passing a time zone identifier as part of the string is not allowed 'e'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ekl"}}	!! 241	Error parsing date string '2008-07-01 10:00 ekl'; 17: passing a time zone identifier as part of the string is not allowed 'e'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ely"}}	!! 241	Error parsing date string '2008-07-01 10:00 ely'; 17: passing a time zone identifier as part of the string is not allowed 'e'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 enl"}}	!! 241	Error parsing date string '2008-07-01 10:00 enl'; 17: passing a time zone identifier as part of the string is not allowed 'e'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 eoy"}}	!! 241	Error parsing date string '2008-07-01 10:00 eoy'; 17: passing a time zone identifier as part of the string is not allowed 'e'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 eql"}}	!! 241	Error parsing date string '2008-07-01 10:00 eql'; 17: passing a time zone identifier as part of the string is not allowed 'e'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ery"}}	!! 241	Error parsing date string '2008-07-01 10:00 ery'; 17: passing a time zone identifier as part of the string is not allowed 'e'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 etl"}}	!! 241	Error parsing date string '2008-07-01 10:00 etl'; 17: passing a time zone identifier as part of the string is not allowed 'e'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 euy"}}	!! 241	Error parsing date string '2008-07-01 10:00 euy'; 17: passing a time zone identifier as part of the string is not allowed 'e'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ewk"}}	!! 241	Error parsing date string '2008-07-01 10:00 ewk'; 17: passing a time zone identifier as part of the string is not allowed 'e'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 exy"}}	!! 241	Error parsing date string '2008-07-01 10:00 exy'; 17: passing a time zone identifier as part of the string is not allowed 'e'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ezk"}}	!! 241	Error parsing date string '2008-07-01 10:00 ezk'; 17: passing a time zone identifier as part of the string is not allowed 'e'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 fax"}}	!! 241	Error parsing date string '2008-07-01 10:00 fax'; 17: passing a time zone identifier as part of the string is not allowed 'f'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 fcj"}}	!! 241	Error parsing date string '2008-07-01 10:00 fcj'; 17: passing a time zone identifier as part of the string is not allowed 'f'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 fdw"}}	!! 241	Error parsing date string '2008-07-01 10:00 fdw'; 17: passing a time zone identifier as part of the string is not allowed 'f'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ffi"}}	!! 241	Error parsing date string '2008-07-01 10:00 ffi'; 17: passing a time zone identifier as part of the string is not allowed 'f'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 fgv"}}	!! 241	Error parsing date string '2008-07-01 10:00 fgv'; 17: passing a time zone identifier as part of the string is not allowed 'f'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 fih"}}	!! 241	Error parsing date string '2008-07-01 10:00 fih'; 17: passing a time zone identifier as part of the string is not allowed 'f'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 fju"}}	!! 241	Error parsing date string '2008-07-01 10:00 fju'; 17: passing a time zone identifier as part of the string is not allowed 'f'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 flg"}}	!! 241	Error parsing date string '2008-07-01 10:00 flg'; 17: passing a time zone identifier as part of the string is not allowed 'f'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 fmu"}}	!! 241	Error parsing date string '2008-07-01 10:00 fmu'; 17: passing a time zone identifier as part of the string is not allowed 'f'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 fog"}}	!! 241	Error parsing date string '2008-07-01 10:00 fog'; 17: passing a time zone identifier as part of the string is not allowed 'f'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 fpt"}}	!! 241	Error parsing date string '2008-07-01 10:00 fpt'; 17: passing a time zone identifier as part of the string is not allowed 'f'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 frf"}}	!! 241	Error parsing date string '2008-07-01 10:00 frf'; 17: passing a time zone identifier as part of the string is not allowed 'f'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 fst"}}	!! 241	Error parsing date string '2008-07-01 10:00 fst'; 17: passing a time zone identifier as part of the string is not allowed 'f'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 fuf"}}	!! 241	Error parsing date string '2008-07-01 10:00 fuf'; 17: passing a time zone identifier as part of the string is not allowed 'f'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 fvs"}}	!! 241	Error parsing date string '2008-07-01 10:00 fvs'; 17: passing a time zone identifier as part of the string is not allowed 'f'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 fxe"}}	!! 241	Error parsing date string '2008-07-01 10:00 fxe'; 17: passing a time zone identifier as part of the string is not allowed 'f'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 fyr"}}	!! 241	Error parsing date string '2008-07-01 10:00 fyr'; 17: passing a time zone identifier as part of the string is not allowed 'f'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 gad"}}	!! 241	Error parsing date string '2008-07-01 10:00 gad'; 17: passing a time zone identifier as part of the string is not allowed 'g'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 gbq"}}	!! 241	Error parsing date string '2008-07-01 10:00 gbq'; 17: passing a time zone identifier as part of the string is not allowed 'g'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 gdc"}}	!! 241	Error parsing date string '2008-07-01 10:00 gdc'; 17: passing a time zone identifier as part of the string is not allowed 'g'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 geq"}}	!! 241	Error parsing date string '2008-07-01 10:00 geq'; 17: passing a time zone identifier as part of the string is not allowed 'g'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ggc"}}	!! 241	Error parsing date string '2008-07-01 10:00 ggc'; 17: passing a time zone identifier as part of the string is not allowed 'g'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ghp"}}	!! 241	Error parsing date string '2008-07-01 10:00 ghp'; 17: passing a time zone identifier as part of the string is not allowed 'g'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 gjb"}}	!! 241	Error parsing date string '2008-07-01 10:00 gjb'; 17: passing a time zone identifier as part of the string is not allowed 'g'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 gko"}}	!! 241	Error parsing date string '2008-07-01 10:00 gko'; 17: passing a time zone identifier as part of the string is not allowed 'g'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 gma"}}	!! 241	Error parsing date string '2008-07-01 10:00 gma'; 17: passing a time zone identifier as part of the string is not allowed 'g'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 gno"}}	!! 241	Error parsing date string '2008-07-01 10:00 gno'; 17: passing a time zone identifier as part of the string is not allowed 'g'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 gpa"}}	!! 241	Error parsing date string '2008-07-01 10:00 gpa'; 17: passing a time zone identifier as part of the string is not allowed 'g'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 gqn"}}	!! 241	Error parsing date string '2008-07-01 10:00 gqn'; 17: passing a time zone identifier as part of the string is not allowed 'g'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 gs"}}	!! 241	Error parsing date string '2008-07-01 10:00 gs'; 17: passing a time zone identifier as part of the string is not allowed 'g'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 gtn"}}	!! 241	Error parsing date string '2008-07-01 10:00 gtn'; 17: passing a time zone identifier as part of the string is not allowed 'g'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 gv"}}	!! 241	Error parsing date string '2008-07-01 10:00 gv'; 17: passing a time zone identifier as part of the string is not allowed 'g'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 gwm"}}	!! 241	Error parsing date string '2008-07-01 10:00 gwm'; 17: passing a time zone identifier as part of the string is not allowed 'g'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 gxz"}}	!! 241	Error parsing date string '2008-07-01 10:00 gxz'; 17: passing a time zone identifier as part of the string is not allowed 'g'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 gzl"}}	!! 241	Error parsing date string '2008-07-01 10:00 gzl'; 17: passing a time zone identifier as part of the string is not allowed 'g'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 haw"}}	!! 241	Error parsing date string '2008-07-01 10:00 haw'; 17: passing a time zone identifier as part of the string is not allowed 'h'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 hci"}}	!! 241	Error parsing date string '2008-07-01 10:00 hci'; 17: passing a time zone identifier as part of the string is not allowed 'h'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 hdw"}}	!! 241	Error parsing date string '2008-07-01 10:00 hdw'; 17: passing a time zone identifier as part of the string is not allowed 'h'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 hfi"}}	!! 241	Error parsing date string '2008-07-01 10:00 hfi'; 17: passing a time zone identifier as part of the string is not allowed 'h'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 hgv"}}	!! 241	Error parsing date string '2008-07-01 10:00 hgv'; 17: passing a time zone identifier as part of the string is not allowed 'h'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 hih"}}	!! 241	Error parsing date string '2008-07-01 10:00 hih'; 17: passing a time zone identifier as part of the string is not allowed 'h'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 hju"}}	!! 241	Error parsing date string '2008-07-01 10:00 hju'; 17: passing a time zone identifier as part of the string is not allowed 'h'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 hlg"}}	!! 241	Error parsing date string '2008-07-01 10:00 hlg'; 17: passing a time zone identifier as part of the string is not allowed 'h'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 hmu"}}	!! 241	Error parsing date string '2008-07-01 10:00 hmu'; 17: passing a time zone identifier as part of the string is not allowed 'h'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 hog"}}	!! 241	Error parsing date string '2008-07-01 10:00 hog'; 17: passing a time zone identifier as part of the string is not allowed 'h'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 hps"}}	!! 241	Error parsing date string '2008-07-01 10:00 hps'; 17: passing a time zone identifier as part of the string is not allowed 'h'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 hrf"}}	!! 241	Error parsing date string '2008-07-01 10:00 hrf'; 17: passing a time zone identifier as part of the string is not allowed 'h'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 hss"}}	!! 241	Error parsing date string '2008-07-01 10:00 hss'; 17: passing a time zone identifier as part of the string is not allowed 'h'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 huf"}}	!! 241	Error parsing date string '2008-07-01 10:00 huf'; 17: passing a time zone identifier as part of the string is not allowed 'h'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 hvs"}}	!! 241	Error parsing date string '2008-07-01 10:00 hvs'; 17: passing a time zone identifier as part of the string is not allowed 'h'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 hxf"}}	!! 241	Error parsing date string '2008-07-01 10:00 hxf'; 17: passing a time zone identifier as part of the string is not allowed 'h'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 hys"}}	!! 241	Error parsing date string '2008-07-01 10:00 hys'; 17: passing a time zone identifier as part of the string is not allowed 'h'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 iae"}}	!! 241	Error parsing date string '2008-07-01 10:00 iae'; 17: passing a time zone identifier as part of the string is not allowed 'i'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ibr"}}	!! 241	Error parsing date string '2008-07-01 10:00 ibr'; 17: passing a time zone identifier as part of the string is not allowed 'i'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 idd"}}	!! 241	Error parsing date string '2008-07-01 10:00 idd'; 17: passing a time zone identifier as part of the string is not allowed 'i'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 iep"}}	!! 241	Error parsing date string '2008-07-01 10:00 iep'; 17: passing a time zone identifier as part of the string is not allowed 'i'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 igb"}}	!! 241	Error parsing date string '2008-07-01 10:00 igb'; 17: passing a time zone identifier as part of the string is not allowed 'i'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 iho"}}	!! 241	Error parsing date string '2008-07-01 10:00 iho'; 17: passing a time zone identifier as part of the string is not allowed 'i'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ija"}}	!! 241	Error parsing date string '2008-07-01 10:00 ija'; 17: passing a time zone identifier as part of the string is not allowed 'i'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ikn"}}	!! 241	Error parsing date string '2008-07-01 10:00 ikn'; 17: passing a time zone identifier as part of the string is not allowed 'i'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 im"}}	!! 241	Error parsing date string '2008-07-01 10:00 im'; 17: passing a time zone identifier as part of the string is not allowed 'i'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 inn"}}	!! 241	Error parsing date string '2008-07-01 10:00 inn'; 17: passing a time zone identifier as part of the string is not allowed 'i'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ip"}}	!! 241	Error parsing date string '2008-07-01 10:00 ip'; 17: passing a time zone identifier as part of the string is not allowed 'i'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 iqm"}}	!! 241	Error parsing date string '2008-07-01 10:00 iqm'; 17: passing a time zone identifier as part of the string is not allowed 'i'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 iry"}}	!! 241	Error parsing date string '2008-07-01 10:00 iry'; 17: passing a time zone identifier as part of the string is not allowed 'i'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 itk"}}	!! 241	Error parsing date string '2008-07-01 10:00 itk'; 17: passing a time zone identifier as part of the string is not allowed 'i'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 iux"}}	!! 241	Error parsing date string '2008-07-01 10:00 iux'; 17: passing a time zone identifier as part of the string is not allowed 'i'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 iwj"}}	!! 241	Error parsing date string '2008-07-01 10:00 iwj'; 17: passing a time zone identifier as part of the string is not allowed 'i'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ixw"}}	!! 241	Error parsing date string '2008-07-01 10:00 ixw'; 17: passing a time zone identifier as part of the string is not allowed 'i'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 izi"}}	!! 241	Error parsing date string '2008-07-01 10:00 izi'; 17: passing a time zone identifier as part of the string is not allowed 'i'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 jat"}}	!! 241	Error parsing date string '2008-07-01 10:00 jat'; 17: passing a time zone identifier as part of the string is not allowed 'j'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 jcf"}}	!! 241	Error parsing date string '2008-07-01 10:00 jcf'; 17: passing a time zone identifier as part of the string is not allowed 'j'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 jds"}}	!! 241	Error parsing date string '2008-07-01 10:00 jds'; 17: passing a time zone identifier as part of the string is not allowed 'j'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 jff"}}	!! 241	Error parsing date string '2008-07-01 10:00 jff'; 17: passing a time zone identifier as part of the string is not allowed 'j'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 jgs"}}	!! 241	Error parsing date string '2008-07-01 10:00 jgs'; 17: passing a time zone identifier as part of the string is not allowed 'j'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 jie"}}	!! 241	Error parsing date string '2008-07-01 10:00 jie'; 17: passing a time zone identifier as part of the string is not allowed 'j'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 jjr"}}	!! 241	Error parsing date string '2008-07-01 10:00 jjr'; 17: passing a time zone identifier as part of the string is not allowed 'j'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 jld"}}	!! 241	Error parsing date string '2008-07-01 10:00 jld'; 17: passing a time zone identifier as part of the string is not allowed 'j'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 jmq"}}	!! 241	Error parsing date string '2008-07-01 10:00 jmq'; 17: passing a time zone identifier as part of the string is not allowed 'j'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 jod"}}	!! 241	Error parsing date string '2008-07-01 10:00 jod'; 17: passing a time zone identifier as part of the string is not allowed 'j'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 jpq"}}	!! 241	Error parsing date string '2008-07-01 10:00 jpq'; 17: passing a time zone identifier as part of the string is not allowed 'j'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 jrc"}}	!! 241	Error parsing date string '2008-07-01 10:00 jrc'; 17: passing a time zone identifier as part of the string is not allowed 'j'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 jsp"}}	!! 241	Error parsing date string '2008-07-01 10:00 jsp'; 17: passing a time zone identifier as part of the string is not allowed 'j'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 juc"}}	!! 241	Error parsing date string '2008-07-01 10:00 juc'; 17: passing a time zone identifier as part of the string is not allowed 'j'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 jvp"}}	!! 241	Error parsing date string '2008-07-01 10:00 jvp'; 17: passing a time zone identifier as part of the string is not allowed 'j'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 jxb"}}	!! 241	Error parsing date string '2008-07-01 10:00 jxb'; 17: passing a time zone identifier as part of the string is not allowed 'j'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 jyo"}}	!! 241	Error parsing date string '2008-07-01 10:00 jyo'; 17: passing a time zone identifier as part of the string is not allowed 'j'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 kaa"}}	!! 241	Error parsing date string '2008-07-01 10:00 kaa'; 17: passing a time zone identifier as part of the string is not allowed 'k'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 kbn"}}	!! 241	Error parsing date string '2008-07-01 10:00 kbn'; 17: passing a time zone identifier as part of the string is not allowed 'k'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 kd"}}	!! 241	Error parsing date string '2008-07-01 10:00 kd'; 17: passing a time zone identifier as part of the string is not allowed 'k'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ken"}}	!! 241	Error parsing date string '2008-07-01 10:00 ken'; 17: passing a time zone identifier as part of the string is not allowed 'k'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 kg"}}	!! 241	Error parsing date string '2008-07-01 10:00 kg'; 17: passing a time zone identifier as part of the string is not allowed 'k'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 khm"}}	!! 241	Error parsing date string '2008-07-01 10:00 khm'; 17: passing a time zone identifier as part of the string is not allowed 'k'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 kiz"}}	!! 241	Error parsing date string '2008-07-01 10:00 kiz'; 17: passing a time zone identifier as part of the string is not allowed 'k'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 kkl"}}	!! 241	Error parsing date string '2008-07-01 10:00 kkl'; 17: passing a time zone identifier as part of the string is not allowed 'k'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 kly"}}	!! 241	Error parsing date string '2008-07-01 10:00 kly'; 17: passing a time zone identifier as part of the string is not allowed 'k'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 knl"}}	!! 241	Error parsing date string '2008-07-01 10:00 knl'; 17: passing a time zone identifier as part of the string is not allowed 'k'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 koy"}}	!! 241	Error parsing date string '2008-07-01 10:00 koy'; 17: passing a time zone identifier as part of the string is not allowed 'k'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 kqk"}}	!! 241	Error parsing date string '2008-07-01 10:00 kqk'; 17: passing a time zone identifier as part of the string is not allowed 'k'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 krx"}}	!! 241	Error parsing date string '2008-07-01 10:00 krx'; 17: passing a time zone identifier as part of the string is not allowed 'k'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ktk"}}	!! 241	Error parsing date string '2008-07-01 10:00 ktk'; 17: passing a time zone identifier as part of the string is not allowed 'k'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 kux"}}	!! 241	Error parsing date string '2008-07-01 10:00 kux'; 17: passing a time zone identifier as part of the string is not allowed 'k'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 kwj"}}	!! 241	Error parsing date string '2008-07-01 10:00 kwj'; 17: passing a time zone identifier as part of the string is not allowed 'k'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 kxw"}}	!! 241	Error parsing date string '2008-07-01 10:00 kxw'; 17: passing a time zone identifier as part of the string is not allowed 'k'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 kzi"}}	!! 241	Error parsing date string '2008-07-01 10:00 kzi'; 17: passing a time zone identifier as part of the string is not allowed 'k'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 lav"}}	!! 241	Error parsing date string '2008-07-01 10:00 lav'; 17: passing a time zone identifier as part of the string is not allowed 'l'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 lch"}}	!! 241	Error parsing date string '2008-07-01 10:00 lch'; 17: passing a time zone identifier as part of the string is not allowed 'l'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ldu"}}	!! 241	Error parsing date string '2008-07-01 10:00 ldu'; 17: passing a time zone identifier as part of the string is not allowed 'l'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 lfg"}}	!! 241	Error parsing date string '2008-07-01 10:00 lfg'; 17: passing a time zone identifier as part of the string is not allowed 'l'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 lgt"}}	!! 241	Error parsing date string '2008-07-01 10:00 lgt'; 17: passing a time zone identifier as part of the string is not allowed 'l'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 lic"}}	!! 241	Error parsing date string '2008-07-01 10:00 lic'; 17: passing a time zone identifier as part of the string is not allowed 'l'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ljp"}}	!! 241	Error parsing date string '2008-07-01 10:00 ljp'; 17: passing a time zone identifier as part of the string is not allowed 'l'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 llb"}}	!! 241	Error parsing date string '2008-07-01 10:00 llb'; 17: passing a time zone identifier as part of the string is not allowed 'l'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 lmo"}}	!! 241	Error parsing date string '2008-07-01 10:00 lmo'; 17: passing a time zone identifier as part of the string is not allowed 'l'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 loa"}}	!! 241	Error parsing date string '2008-07-01 10:00 loa'; 17: passing a time zone identifier as part of the string is not allowed 'l'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 lpn"}}	!! 241	Error parsing date string '2008-07-01 10:00 lpn'; 17: passing a time zone identifier as part of the string is not allowed 'l'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 lr"}}	!! 241	Error parsing date string '2008-07-01 10:00 lr'; 17: passing a time zone identifier as part of the string is not allowed 'l'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 lsm"}}	!! 241	Error parsing date string '2008-07-01 10:00 lsm'; 17: passing a time zone identifier as part of the string is not allowed 'l'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 lu"}}	!! 241	Error parsing date string '2008-07-01 10:00 lu'; 17: passing a time zone identifier as part of the string is not allowed 'l'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 lvm"}}	!! 241	Error parsing date string '2008-07-01 10:00 lvm'; 17: passing a time zone identifier as part of the string is not allowed 'l'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 lwz"}}	!! 241	Error parsing date string '2008-07-01 10:00 lwz'; 17: passing a time zone identifier as part of the string is not allowed 'l'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 lyl"}}	!! 241	Error parsing date string '2008-07-01 10:00 lyl'; 17: passing a time zone identifier as part of the string is not allowed 'l'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 lzy"}}	!! 241	Error parsing date string '2008-07-01 10:00 lzy'; 17: passing a time zone identifier as part of the string is not allowed 'l'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 mbk"}}	!! 241	Error parsing date string '2008-07-01 10:00 mbk'; 17: passing a time zone identifier as part of the string is not allowed 'm'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 mcx"}}	!! 241	Error parsing date string '2008-07-01 10:00 mcx'; 17: passing a time zone identifier as part of the string is not allowed 'm'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 mek"}}	!! 241	Error parsing date string '2008-07-01 10:00 mek'; 17: passing a time zone identifier as part of the string is not allowed 'm'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 mfy"}}	!! 241	Error parsing date string '2008-07-01 10:00 mfy'; 17: passing a time zone identifier as part of the string is not allowed 'm'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 mhk"}}	!! 241	Error parsing date string '2008-07-01 10:00 mhk'; 17: passing a time zone identifier as part of the string is not allowed 'm'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 mix"}}	!! 241	Error parsing date string '2008-07-01 10:00 mix'; 17: passing a time zone identifier as part of the string is not allowed 'm'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 mkj"}}	!! 241	Error parsing date string '2008-07-01 10:00 mkj'; 17: passing a time zone identifier as part of the string is not allowed 'm'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 mlw"}}	!! 241	Error parsing date string '2008-07-01 10:00 mlw'; 17: passing a time zone identifier as part of the string is not allowed 'm'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 mnj"}}	!! 241	Error parsing date string '2008-07-01 10:00 mnj'; 17: passing a time zone identifier as part of the string is not allowed 'm'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 mow"}}	!! 241	Error parsing date string '2008-07-01 10:00 mow'; 17: passing a time zone identifier as part of the string is not allowed 'm'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 mqj"}}	!! 241	Error parsing date string '2008-07-01 10:00 mqj'; 17: passing a time zone identifier as part of the string is not allowed 'm'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 mrw"}}	!! 241	Error parsing date string '2008-07-01 10:00 mrw'; 17: passing a time zone identifier as part of the string is not allowed 'm'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 mtl"}}	!! 241	Error parsing date string '2008-07-01 10:00 mtl'; 17: passing a time zone identifier as part of the string is not allowed 'm'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 muy"}}	!! 241	Error parsing date string '2008-07-01 10:00 muy'; 17: passing a time zone identifier as part of the string is not allowed 'm'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 mwk"}}	!! 241	Error parsing date string '2008-07-01 10:00 mwk'; 17: passing a time zone identifier as part of the string is not allowed 'm'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 mxy"}}	!! 241	Error parsing date string '2008-07-01 10:00 mxy'; 17: passing a time zone identifier as part of the string is not allowed 'm'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 mzk"}}	!! 241	Error parsing date string '2008-07-01 10:00 mzk'; 17: passing a time zone identifier as part of the string is not allowed 'm'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 naw"}}	!! 241	Error parsing date string '2008-07-01 10:00 naw'; 17: passing a time zone identifier as part of the string is not allowed 'n'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 nci"}}	!! 241	Error parsing date string '2008-07-01 10:00 nci'; 17: passing a time zone identifier as part of the string is not allowed 'n'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ndw"}}	!! 241	Error parsing date string '2008-07-01 10:00 ndw'; 17: passing a time zone identifier as part of the string is not allowed 'n'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 nfi"}}	!! 241	Error parsing date string '2008-07-01 10:00 nfi'; 17: passing a time zone identifier as part of the string is not allowed 'n'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ngv"}}	!! 241	Error parsing date string '2008-07-01 10:00 ngv'; 17: passing a time zone identifier as part of the string is not allowed 'n'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 nih"}}	!! 241	Error parsing date string '2008-07-01 10:00 nih'; 17: passing a time zone identifier as part of the string is not allowed 'n'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 nju"}}	!! 241	Error parsing date string '2008-07-01 10:00 nju'; 17: passing a time zone identifier as part of the string is not allowed 'n'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 nlg"}}	!! 241	Error parsing date string '2008-07-01 10:00 nlg'; 17: passing a time zone identifier as part of the string is not allowed 'n'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 nmt"}}	!! 241	Error parsing date string '2008-07-01 10:00 nmt'; 17: passing a time zone identifier as part of the string is not allowed 'n'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 nof"}}	!! 241	Error parsing date string '2008-07-01 10:00 nof'; 17: passing a time zone identifier as part of the string is not allowed 'n'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 npu"}}	!! 241	Error parsing date string '2008-07-01 10:00 npu'; 17: passing a time zone identifier as part of the string is not allowed 'n'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 nrg"}}	!! 241	Error parsing date string '2008-07-01 10:00 nrg'; 17: passing a time zone identifier as part of the string is not allowed 'n'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 nsu"}}	!! 241	Error parsing date string '2008-07-01 10:00 nsu'; 17: passing a time zone identifier as part of the string is not allowed 'n'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 nug"}}	!! 241	Error parsing date string '2008-07-01 10:00 nug'; 17: passing a time zone identifier as part of the string is not allowed 'n'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 nvt"}}	!! 241	Error parsing date string '2008-07-01 10:00 nvt'; 17: passing a time zone identifier as part of the string is not allowed 'n'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 nxg"}}	!! 241	Error parsing date string '2008-07-01 10:00 nxg'; 17: passing a time zone identifier as part of the string is not allowed 'n'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 nyt"}}	!! 241	Error parsing date string '2008-07-01 10:00 nyt'; 17: passing a time zone identifier as part of the string is not allowed 'n'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 oaf"}}	!! 241	Error parsing date string '2008-07-01 10:00 oaf'; 17: passing a time zone identifier as part of the string is not allowed 'o'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 obs"}}	!! 241	Error parsing date string '2008-07-01 10:00 obs'; 17: passing a time zone identifier as part of the string is not allowed 'o'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ode"}}	!! 241	Error parsing date string '2008-07-01 10:00 ode'; 17: passing a time zone identifier as part of the string is not allowed 'o'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 oer"}}	!! 241	Error parsing date string '2008-07-01 10:00 oer'; 17: passing a time zone identifier as part of the string is not allowed 'o'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ogd"}}	!! 241	Error parsing date string '2008-07-01 10:00 ogd'; 17: passing a time zone identifier as part of the string is not allowed 'o'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ohq"}}	!! 241	Error parsing date string '2008-07-01 10:00 ohq'; 17: passing a time zone identifier as part of the string is not allowed 'o'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ojc"}}	!! 241	Error parsing date string '2008-07-01 10:00 ojc'; 17: passing a time zone identifier as part of the string is not allowed 'o'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 okp"}}	!! 241	Error parsing date string '2008-07-01 10:00 okp'; 17: passing a time zone identifier as part of the string is not allowed 'o'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 omb"}}	!! 241	Error parsing date string '2008-07-01 10:00 omb'; 17: passing a time zone identifier as part of the string is not allowed 'o'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ono"}}	!! 241	Error parsing date string '2008-07-01 10:00 ono'; 17: passing a time zone identifier as part of the string is not allowed 'o'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 opa"}}	!! 241	Error parsing date string '2008-07-01 10:00 opa'; 17: passing a time zone identifier as part of the string is not allowed 'o'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 oqn"}}	!! 241	Error parsing date string '2008-07-01 10:00 oqn'; 17: passing a time zone identifier as part of the string is not allowed 'o'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 os"}}	!! 241	Error parsing date string '2008-07-01 10:00 os'; 17: passing a time zone identifier as part of the string is not allowed 'o'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 otm"}}	!! 241	Error parsing date string '2008-07-01 10:00 otm'; 17: passing a time zone identifier as part of the string is not allowed 'o'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ouz"}}	!! 241	Error parsing date string '2008-07-01 10:00 ouz'; 17: passing a time zone identifier as part of the string is not allowed 'o'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 owl"}}	!! 241	Error parsing date string '2008-07-01 10:00 owl'; 17: passing a time zone identifier as part of the string is not allowed 'o'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 oxy"}}	!! 241	Error parsing date string '2008-07-01 10:00 oxy'; 17: passing a time zone identifier as part of the string is not allowed 'o'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ozk"}}	!! 241	Error parsing date string '2008-07-01 10:00 ozk'; 17: passing a time zone identifier as part of the string is not allowed 'o'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 paw"}}	!! 241	Error parsing date string '2008-07-01 10:00 paw'; 17: passing a time zone identifier as part of the string is not allowed 'p'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 pci"}}	!! 241	Error parsing date string '2008-07-01 10:00 pci'; 17: passing a time zone identifier as part of the string is not allowed 'p'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 pdw"}}	!! 241	Error parsing date string '2008-07-01 10:00 pdw'; 17: passing a time zone identifier as part of the string is not allowed 'p'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 pfi"}}	!! 241	Error parsing date string '2008-07-01 10:00 pfi'; 17: passing a time zone identifier as part of the string is not allowed 'p'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 pgv"}}	!! 241	Error parsing date string '2008-07-01 10:00 pgv'; 17: passing a time zone identifier as part of the string is not allowed 'p'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 pih"}}	!! 241	Error parsing date string '2008-07-01 10:00 pih'; 17: passing a time zone identifier as part of the string is not allowed 'p'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 pju"}}	!! 241	Error parsing date string '2008-07-01 10:00 pju'; 17: passing a time zone identifier as part of the string is not allowed 'p'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 plh"}}	!! 241	Error parsing date string '2008-07-01 10:00 plh'; 17: passing a time zone identifier as part of the string is not allowed 'p'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 pmv"}}	!! 241	Error parsing date string '2008-07-01 10:00 pmv'; 17: passing a time zone identifier as part of the string is not allowed 'p'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 poh"}}	!! 241	Error parsing date string '2008-07-01 10:00 poh'; 17: passing a time zone identifier as part of the string is not allowed 'p'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ppu"}}	!! 241	Error parsing date string '2008-07-01 10:00 ppu'; 17: passing a time zone identifier as part of the string is not allowed 'p'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 prg"}}	!! 241	Error parsing date string '2008-07-01 10:00 prg'; 17: passing a time zone identifier as part of the string is not allowed 'p'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 psu"}}	!! 241	Error parsing date string '2008-07-01 10:00 psu'; 17: passing a time zone identifier as part of the string is not allowed 'p'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 pug"}}	!! 241	Error parsing date string '2008-07-01 10:00 pug'; 17: passing a time zone identifier as part of the string is not allowed 'p'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 pvt"}}	!! 241	Error parsing date string '2008-07-01 10:00 pvt'; 17: passing a time zone identifier as part of the string is not allowed 'p'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 pxg"}}	!! 241	Error parsing date string '2008-07-01 10:00 pxg'; 17: passing a time zone identifier as part of the string is not allowed 'p'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 pyt"}}	!! 241	Error parsing date string '2008-07-01 10:00 pyt'; 17: passing a time zone identifier as part of the string is not allowed 'p'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 qaf"}}	!! 241	Error parsing date string '2008-07-01 10:00 qaf'; 17: passing a time zone identifier as part of the string is not allowed 'q'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 qbs"}}	!! 241	Error parsing date string '2008-07-01 10:00 qbs'; 17: passing a time zone identifier as part of the string is not allowed 'q'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 qde"}}	!! 241	Error parsing date string '2008-07-01 10:00 qde'; 17: passing a time zone identifier as part of the string is not allowed 'q'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 qer"}}	!! 241	Error parsing date string '2008-07-01 10:00 qer'; 17: passing a time zone identifier as part of the string is not allowed 'q'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 qgd"}}	!! 241	Error parsing date string '2008-07-01 10:00 qgd'; 17: passing a time zone identifier as part of the string is not allowed 'q'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 qhq"}}	!! 241	Error parsing date string '2008-07-01 10:00 qhq'; 17: passing a time zone identifier as part of the string is not allowed 'q'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 qjc"}}	!! 241	Error parsing date string '2008-07-01 10:00 qjc'; 17: passing a time zone identifier as part of the string is not allowed 'q'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 qkp"}}	!! 241	Error parsing date string '2008-07-01 10:00 qkp'; 17: passing a time zone identifier as part of the string is not allowed 'q'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 qmb"}}	!! 241	Error parsing date string '2008-07-01 10:00 qmb'; 17: passing a time zone identifier as part of the string is not allowed 'q'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 qnp"}}	!! 241	Error parsing date string '2008-07-01 10:00 qnp'; 17: passing a time zone identifier as part of the string is not allowed 'q'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 qpb"}}	!! 241	Error parsing date string '2008-07-01 10:00 qpb'; 17: passing a time zone identifier as part of the string is not allowed 'q'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 qqo"}}	!! 241	Error parsing date string '2008-07-01 10:00 qqo'; 17: passing a time zone identifier as part of the string is not allowed 'q'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 qsa"}}	!! 241	Error parsing date string '2008-07-01 10:00 qsa'; 17: passing a time zone identifier as part of the string is not allowed 'q'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 qtn"}}	!! 241	Error parsing date string '2008-07-01 10:00 qtn'; 17: passing a time zone identifier as part of the string is not allowed 'q'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 qv"}}	!! 241	Error parsing date string '2008-07-01 10:00 qv'; 17: passing a time zone identifier as part of the string is not allowed 'q'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 qwm"}}	!! 241	Error parsing date string '2008-07-01 10:00 qwm'; 17: passing a time zone identifier as part of the string is not allowed 'q'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 qxz"}}	!! 241	Error parsing date string '2008-07-01 10:00 qxz'; 17: passing a time zone identifier as part of the string is not allowed 'q'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 qzl"}}	!! 241	Error parsing date string '2008-07-01 10:00 qzl'; 17: passing a time zone identifier as part of the string is not allowed 'q'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ray"}}	!! 241	Error parsing date string '2008-07-01 10:00 ray'; 17: passing a time zone identifier as part of the string is not allowed 'r'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 rck"}}	!! 241	Error parsing date string '2008-07-01 10:00 rck'; 17: passing a time zone identifier as part of the string is not allowed 'r'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 rdx"}}	!! 241	Error parsing date string '2008-07-01 10:00 rdx'; 17: passing a time zone identifier as part of the string is not allowed 'r'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 rfj"}}	!! 241	Error parsing date string '2008-07-01 10:00 rfj'; 17: passing a time zone identifier as part of the string is not allowed 'r'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 rgw"}}	!! 241	Error parsing date string '2008-07-01 10:00 rgw'; 17: passing a time zone identifier as part of the string is not allowed 'r'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 rii"}}	!! 241	Error parsing date string '2008-07-01 10:00 rii'; 17: passing a time zone identifier as part of the string is not allowed 'r'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 rjv"}}	!! 241	Error parsing date string '2008-07-01 10:00 rjv'; 17: passing a time zone identifier as part of the string is not allowed 'r'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 rlh"}}	!! 241	Error parsing date string '2008-07-01 10:00 rlh'; 17: passing a time zone identifier as part of the string is not allowed 'r'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 rmv"}}	!! 241	Error parsing date string '2008-07-01 10:00 rmv'; 17: passing a time zone identifier as part of the string is not allowed 'r'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 roh"}}	!! 241	Error parsing date string '2008-07-01 10:00 roh'; 17: passing a time zone identifier as part of the string is not allowed 'r'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 rpu"}}	!! 241	Error parsing date string '2008-07-01 10:00 rpu'; 17: passing a time zone identifier as part of the string is not allowed 'r'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 rrg"}}	!! 241	Error parsing date string '2008-07-01 10:00 rrg'; 17: passing a time zone identifier as part of the string is not allowed 'r'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 rst"}}	!! 241	Error parsing date string '2008-07-01 10:00 rst'; 17: passing a time zone identifier as part of the string is not allowed 'r'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ruf"}}	!! 241	Error parsing date string '2008-07-01 10:00 ruf'; 17: passing a time zone identifier as part of the string is not allowed 'r'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 rvs"}}	!! 241	Error parsing date string '2008-07-01 10:00 rvs'; 17: passing a time zone identifier as part of the string is not allowed 'r'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 rxe"}}	!! 241	Error parsing date string '2008-07-01 10:00 rxe'; 17: passing a time zone identifier as part of the string is not allowed 'r'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ryr"}}	!! 241	Error parsing date string '2008-07-01 10:00 ryr'; 17: passing a time zone identifier as part of the string is not allowed 'r'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 sad"}}	!! 241	Error parsing date string '2008-07-01 10:00 sad'; 17: passing a time zone identifier as part of the string is not allowed 's'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 sbr"}}	!! 241	Error parsing date string '2008-07-01 10:00 sbr'; 17: passing a time zone identifier as part of the string is not allowed 's'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 sdd"}}	!! 241	Error parsing date string '2008-07-01 10:00 sdd'; 17: passing a time zone identifier as part of the string is not allowed 's'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 seq"}}	!! 241	Error parsing date string '2008-07-01 10:00 seq'; 17: passing a time zone identifier as part of the string is not allowed 's'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 sgc"}}	!! 241	Error parsing date string '2008-07-01 10:00 sgc'; 17: passing a time zone identifier as part of the string is not allowed 's'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 shp"}}	!! 241	Error parsing date string '2008-07-01 10:00 shp'; 17: passing a time zone identifier as part of the string is not allowed 's'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 sjb"}}	!! 241	Error parsing date string '2008-07-01 10:00 sjb'; 17: passing a time zone identifier as part of the string is not allowed 's'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 sko"}}	!! 241	Error parsing date string '2008-07-01 10:00 sko'; 17: passing a time zone identifier as part of the string is not allowed 's'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 sma"}}	!! 241	Error parsing date string '2008-07-01 10:00 sma'; 17: passing a time zone identifier as part of the string is not allowed 's'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 sno"}}	!! 241	Error parsing date string '2008-07-01 10:00 sno'; 17: passing a time zone identifier as part of the string is not allowed 's'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 spa"}}	!! 241	Error parsing date string '2008-07-01 10:00 spa'; 17: passing a time zone identifier as part of the string is not allowed 's'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 sqn"}}	!! 241	Error parsing date string '2008-07-01 10:00 sqn'; 17: passing a time zone identifier as part of the string is not allowed 's'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ss"}}	!! 241	Error parsing date string '2008-07-01 10:00 ss'; 17: passing a time zone identifier as part of the string is not allowed 's'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 stn"}}	!! 241	Error parsing date string '2008-07-01 10:00 stn'; 17: passing a time zone identifier as part of the string is not allowed 's'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 sva"}}	!! 241	Error parsing date string '2008-07-01 10:00 sva'; 17: passing a time zone identifier as part of the string is not allowed 's'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 swn"}}	!! 241	Error parsing date string '2008-07-01 10:00 swn'; 17: passing a time zone identifier as part of the string is not allowed 's'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 sy"}}	!! 241	Error parsing date string '2008-07-01 10:00 sy'; 17: passing a time zone identifier as part of the string is not allowed 's'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 szm"}}	!! 241	Error parsing date string '2008-07-01 10:00 szm'; 17: passing a time zone identifier as part of the string is not allowed 's'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 taz"}}	!! 241	Error parsing date string '2008-07-01 10:00 taz'; 17: passing a time zone identifier as part of the string is not allowed 't'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 tcl"}}	!! 241	Error parsing date string '2008-07-01 10:00 tcl'; 17: passing a time zone identifier as part of the string is not allowed 't'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 tdy"}}	!! 241	Error parsing date string '2008-07-01 10:00 tdy'; 17: passing a time zone identifier as part of the string is not allowed 't'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 tfk"}}	!! 241	Error parsing date string '2008-07-01 10:00 tfk'; 17: passing a time zone identifier as part of the string is not allowed 't'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 tgx"}}	!! 241	Error parsing date string '2008-07-01 10:00 tgx'; 17: passing a time zone identifier as part of the string is not allowed 't'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 tik"}}	!! 241	Error parsing date string '2008-07-01 10:00 tik'; 17: passing a time zone identifier as part of the string is not allowed 't'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 tjx"}}	!! 241	Error parsing date string '2008-07-01 10:00 tjx'; 17: passing a time zone identifier as part of the string is not allowed 't'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 tlj"}}	!! 241	Error parsing date string '2008-07-01 10:00 tlj'; 17: passing a time zone identifier as part of the string is not allowed 't'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 tmx"}}	!! 241	Error parsing date string '2008-07-01 10:00 tmx'; 17: passing a time zone identifier as part of the string is not allowed 't'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 toj"}}	!! 241	Error parsing date string '2008-07-01 10:00 toj'; 17: passing a time zone identifier as part of the string is not allowed 't'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 tpw"}}	!! 241	Error parsing date string '2008-07-01 10:00 tpw'; 17: passing a time zone identifier as part of the string is not allowed 't'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 tri"}}	!! 241	Error parsing date string '2008-07-01 10:00 tri'; 17: passing a time zone identifier as part of the string is not allowed 't'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 tsv"}}	!! 241	Error parsing date string '2008-07-01 10:00 tsv'; 17: passing a time zone identifier as part of the string is not allowed 't'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 tui"}}	!! 241	Error parsing date string '2008-07-01 10:00 tui'; 17: passing a time zone identifier as part of the string is not allowed 't'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 tvu"}}	!! 241	Error parsing date string '2008-07-01 10:00 tvu'; 17: passing a time zone identifier as part of the string is not allowed 't'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 txg"}}	!! 241	Error parsing date string '2008-07-01 10:00 txg'; 17: passing a time zone identifier as part of the string is not allowed 't'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 tyt"}}	!! 241	Error parsing date string '2008-07-01 10:00 tyt'; 17: passing a time zone identifier as part of the string is not allowed 't'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 uaf"}}	!! 241	Error parsing date string '2008-07-01 10:00 uaf'; 17: passing a time zone identifier as part of the string is not allowed 'u'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ubs"}}	!! 241	Error parsing date string '2008-07-01 10:00 ubs'; 17: passing a time zone identifier as part of the string is not allowed 'u'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 udf"}}	!! 241	Error parsing date string '2008-07-01 10:00 udf'; 17: passing a time zone identifier as part of the string is not allowed 'u'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ues"}}	!! 241	Error parsing date string '2008-07-01 10:00 ues'; 17: passing a time zone identifier as part of the string is not allowed 'u'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 uge"}}	!! 241	Error parsing date string '2008-07-01 10:00 uge'; 17: passing a time zone identifier as part of the string is not allowed 'u'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 uhr"}}	!! 241	Error parsing date string '2008-07-01 10:00 uhr'; 17: passing a time zone identifier as part of the string is not allowed 'u'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ujd"}}	!! 241	Error parsing date string '2008-07-01 10:00 ujd'; 17: passing a time zone identifier as part of the string is not allowed 'u'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ukq"}}	!! 241	Error parsing date string '2008-07-01 10:00 ukq'; 17: passing a time zone identifier as part of the string is not allowed 'u'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 umc"}}	!! 241	Error parsing date string '2008-07-01 10:00 umc'; 17: passing a time zone identifier as part of the string is not allowed 'u'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 unp"}}	!! 241	Error parsing date string '2008-07-01 10:00 unp'; 17: passing a time zone identifier as part of the string is not allowed 'u'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 upb"}}	!! 241	Error parsing date string '2008-07-01 10:00 upb'; 17: passing a time zone identifier as part of the string is not allowed 'u'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 uqo"}}	!! 241	Error parsing date string '2008-07-01 10:00 uqo'; 17: passing a time zone identifier as part of the string is not allowed 'u'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 usa"}}	!! 241	Error parsing date string '2008-07-01 10:00 usa'; 17: passing a time zone identifier as part of the string is not allowed 'u'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 utn"}}	!! 241	Error parsing date string '2008-07-01 10:00 utn'; 17: passing a time zone identifier as part of the string is not allowed 'u'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 uv"}}	!! 241	Error parsing date string '2008-07-01 10:00 uv'; 17: passing a time zone identifier as part of the string is not allowed 'u'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 uwm"}}	!! 241	Error parsing date string '2008-07-01 10:00 uwm'; 17: passing a time zone identifier as part of the string is not allowed 'u'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 uxz"}}	!! 241	Error parsing date string '2008-07-01 10:00 uxz'; 17: passing a time zone identifier as part of the string is not allowed 'u'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 uzl"}}	!! 241	Error parsing date string '2008-07-01 10:00 uzl'; 17: passing a time zone identifier as part of the string is not allowed 'u'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 vay"}}	!! 241	Error parsing date string '2008-07-01 10:00 vay'; 17: passing a time zone identifier as part of the string is not allowed 'v'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 vck"}}	!! 241	Error parsing date string '2008-07-01 10:00 vck'; 17: passing a time zone identifier as part of the string is not allowed 'v'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 vdx"}}	!! 241	Error parsing date string '2008-07-01 10:00 vdx'; 17: passing a time zone identifier as part of the string is not allowed 'v'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 vfj"}}	!! 241	Error parsing date string '2008-07-01 10:00 vfj'; 17: passing a time zone identifier as part of the string is not allowed 'v'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 vgw"}}	!! 241	Error parsing date string '2008-07-01 10:00 vgw'; 17: passing a time zone identifier as part of the string is not allowed 'v'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 vii"}}	!! 241	Error parsing date string '2008-07-01 10:00 vii'; 17: passing a time zone identifier as part of the string is not allowed 'v'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 vjv"}}	!! 241	Error parsing date string '2008-07-01 10:00 vjv'; 17: passing a time zone identifier as part of the string is not allowed 'v'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 vlh"}}	!! 241	Error parsing date string '2008-07-01 10:00 vlh'; 17: passing a time zone identifier as part of the string is not allowed 'v'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 vmu"}}	!! 241	Error parsing date string '2008-07-01 10:00 vmu'; 17: passing a time zone identifier as part of the string is not allowed 'v'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 vog"}}	!! 241	Error parsing date string '2008-07-01 10:00 vog'; 17: passing a time zone identifier as part of the string is not allowed 'v'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 vpt"}}	!! 241	Error parsing date string '2008-07-01 10:00 vpt'; 17: passing a time zone identifier as part of the string is not allowed 'v'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 vrf"}}	!! 241	Error parsing date string '2008-07-01 10:00 vrf'; 17: passing a time zone identifier as part of the string is not allowed 'v'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 vss"}}	!! 241	Error parsing date string '2008-07-01 10:00 vss'; 17: passing a time zone identifier as part of the string is not allowed 'v'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 vue"}}	!! 241	Error parsing date string '2008-07-01 10:00 vue'; 17: passing a time zone identifier as part of the string is not allowed 'v'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 vvr"}}	!! 241	Error parsing date string '2008-07-01 10:00 vvr'; 17: passing a time zone identifier as part of the string is not allowed 'v'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 vxd"}}	!! 241	Error parsing date string '2008-07-01 10:00 vxd'; 17: passing a time zone identifier as part of the string is not allowed 'v'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 vyq"}}	!! 241	Error parsing date string '2008-07-01 10:00 vyq'; 17: passing a time zone identifier as part of the string is not allowed 'v'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 wac"}}	!! 241	Error parsing date string '2008-07-01 10:00 wac'; 17: passing a time zone identifier as part of the string is not allowed 'w'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 wbq"}}	!! 241	Error parsing date string '2008-07-01 10:00 wbq'; 17: passing a time zone identifier as part of the string is not allowed 'w'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 wdc"}}	!! 241	Error parsing date string '2008-07-01 10:00 wdc'; 17: passing a time zone identifier as part of the string is not allowed 'w'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 weq"}}	!! 241	Error parsing date string '2008-07-01 10:00 weq'; 17: passing a time zone identifier as part of the string is not allowed 'w'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 wgd"}}	!! 241	Error parsing date string '2008-07-01 10:00 wgd'; 17: passing a time zone identifier as part of the string is not allowed 'w'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 whq"}}	!! 241	Error parsing date string '2008-07-01 10:00 whq'; 17: passing a time zone identifier as part of the string is not allowed 'w'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 wje"}}	!! 241	Error parsing date string '2008-07-01 10:00 wje'; 17: passing a time zone identifier as part of the string is not allowed 'w'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 wkr"}}	!! 241	Error parsing date string '2008-07-01 10:00 wkr'; 17: passing a time zone identifier as part of the string is not allowed 'w'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 wmd"}}	!! 241	Error parsing date string '2008-07-01 10:00 wmd'; 17: passing a time zone identifier as part of the string is not allowed 'w'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 wnr"}}	!! 241	Error parsing date string '2008-07-01 10:00 wnr'; 17: passing a time zone identifier as part of the string is not allowed 'w'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 wpd"}}	!! 241	Error parsing date string '2008-07-01 10:00 wpd'; 17: passing a time zone identifier as part of the string is not allowed 'w'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 wqq"}}	!! 241	Error parsing date string '2008-07-01 10:00 wqq'; 17: passing a time zone identifier as part of the string is not allowed 'w'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 wsc"}}	!! 241	Error parsing date string '2008-07-01 10:00 wsc'; 17: passing a time zone identifier as part of the string is not allowed 'w'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 wtp"}}	!! 241	Error parsing date string '2008-07-01 10:00 wtp'; 17: passing a time zone identifier as part of the string is not allowed 'w'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 wvb"}}	!! 241	Error parsing date string '2008-07-01 10:00 wvb'; 17: passing a time zone identifier as part of the string is not allowed 'w'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 wwo"}}	!! 241	Error parsing date string '2008-07-01 10:00 wwo'; 17: passing a time zone identifier as part of the string is not allowed 'w'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 wya"}}	!! 241	Error parsing date string '2008-07-01 10:00 wya'; 17: passing a time zone identifier as part of the string is not allowed 'w'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 wzn"}}	!! 241	Error parsing date string '2008-07-01 10:00 wzn'; 17: passing a time zone identifier as part of the string is not allowed 'w'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 xb"}}	!! 241	Error parsing date string '2008-07-01 10:00 xb'; 17: passing a time zone identifier as part of the string is not allowed 'x'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 xcm"}}	!! 241	Error parsing date string '2008-07-01 10:00 xcm'; 17: passing a time zone identifier as part of the string is not allowed 'x'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 xdz"}}	!! 241	Error parsing date string '2008-07-01 10:00 xdz'; 17: passing a time zone identifier as part of the string is not allowed 'x'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 xfl"}}	!! 241	Error parsing date string '2008-07-01 10:00 xfl'; 17: passing a time zone identifier as part of the string is not allowed 'x'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 xgy"}}	!! 241	Error parsing date string '2008-07-01 10:00 xgy'; 17: passing a time zone identifier as part of the string is not allowed 'x'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 xik"}}	!! 241	Error parsing date string '2008-07-01 10:00 xik'; 17: passing a time zone identifier as part of the string is not allowed 'x'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 xjx"}}	!! 241	Error parsing date string '2008-07-01 10:00 xjx'; 17: passing a time zone identifier as part of the string is not allowed 'x'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 xlj"}}	!! 241	Error parsing date string '2008-07-01 10:00 xlj'; 17: passing a time zone identifier as part of the string is not allowed 'x'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 xmw"}}	!! 241	Error parsing date string '2008-07-01 10:00 xmw'; 17: passing a time zone identifier as part of the string is not allowed 'x'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 xoi"}}	!! 241	Error parsing date string '2008-07-01 10:00 xoi'; 17: passing a time zone identifier as part of the string is not allowed 'x'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 xpv"}}	!! 241	Error parsing date string '2008-07-01 10:00 xpv'; 17: passing a time zone identifier as part of the string is not allowed 'x'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 xrh"}}	!! 241	Error parsing date string '2008-07-01 10:00 xrh'; 17: passing a time zone identifier as part of the string is not allowed 'x'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 xsu"}}	!! 241	Error parsing date string '2008-07-01 10:00 xsu'; 17: passing a time zone identifier as part of the string is not allowed 'x'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 xug"}}	!! 241	Error parsing date string '2008-07-01 10:00 xug'; 17: passing a time zone identifier as part of the string is not allowed 'x'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 xvt"}}	!! 241	Error parsing date string '2008-07-01 10:00 xvt'; 17: passing a time zone identifier as part of the string is not allowed 'x'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 xxf"}}	!! 241	Error parsing date string '2008-07-01 10:00 xxf'; 17: passing a time zone identifier as part of the string is not allowed 'x'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 xys"}}	!! 241	Error parsing date string '2008-07-01 10:00 xys'; 17: passing a time zone identifier as part of the string is not allowed 'x'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 yae"}}	!! 241	Error parsing date string '2008-07-01 10:00 yae'; 17: passing a time zone identifier as part of the string is not allowed 'y'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ybr"}}	!! 241	Error parsing date string '2008-07-01 10:00 ybr'; 17: passing a time zone identifier as part of the string is not allowed 'y'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ydd"}}	!! 241	Error parsing date string '2008-07-01 10:00 ydd'; 17: passing a time zone identifier as part of the string is not allowed 'y'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 yeq"}}	!! 241	Error parsing date string '2008-07-01 10:00 yeq'; 17: passing a time zone identifier as part of the string is not allowed 'y'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ygc"}}	!! 241	Error parsing date string '2008-07-01 10:00 ygc'; 17: passing a time zone identifier as part of the string is not allowed 'y'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 yhp"}}	!! 241	Error parsing date string '2008-07-01 10:00 yhp'; 17: passing a time zone identifier as part of the string is not allowed 'y'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 yjb"}}	!! 241	Error parsing date string '2008-07-01 10:00 yjb'; 17: passing a time zone identifier as part of the string is not allowed 'y'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 yko"}}	!! 241	Error parsing date string '2008-07-01 10:00 yko'; 17: passing a time zone identifier as part of the string is not allowed 'y'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 yma"}}	!! 241	Error parsing date string '2008-07-01 10:00 yma'; 17: passing a time zone identifier as part of the string is not allowed 'y'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ynn"}}	!! 241	Error parsing date string '2008-07-01 10:00 ynn'; 17: passing a time zone identifier as part of the string is not allowed 'y'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 yp"}}	!! 241	Error parsing date string '2008-07-01 10:00 yp'; 17: passing a time zone identifier as part of the string is not allowed 'y'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 yqn"}}	!! 241	Error parsing date string '2008-07-01 10:00 yqn'; 17: passing a time zone identifier as part of the string is not allowed 'y'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ys"}}	!! 241	Error parsing date string '2008-07-01 10:00 ys'; 17: passing a time zone identifier as part of the string is not allowed 'y'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ytn"}}	!! 241	Error parsing date string '2008-07-01 10:00 ytn'; 17: passing a time zone identifier as part of the string is not allowed 'y'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 yv"}}	!! 241	Error parsing date string '2008-07-01 10:00 yv'; 17: passing a time zone identifier as part of the string is not allowed 'y'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ywm"}}	!! 241	Error parsing date string '2008-07-01 10:00 ywm'; 17: passing a time zone identifier as part of the string is not allowed 'y'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 yy"}}	!! 241	Error parsing date string '2008-07-01 10:00 yy'; 17: passing a time zone identifier as part of the string is not allowed 'y'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 yzm"}}	!! 241	Error parsing date string '2008-07-01 10:00 yzm'; 17: passing a time zone identifier as part of the string is not allowed 'y'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 zaz"}}	!! 241	Error parsing date string '2008-07-01 10:00 zaz'; 17: passing a time zone identifier as part of the string is not allowed 'z'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 zcl"}}	!! 241	Error parsing date string '2008-07-01 10:00 zcl'; 17: passing a time zone identifier as part of the string is not allowed 'z'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 zdy"}}	!! 241	Error parsing date string '2008-07-01 10:00 zdy'; 17: passing a time zone identifier as part of the string is not allowed 'z'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 zfk"}}	!! 241	Error parsing date string '2008-07-01 10:00 zfk'; 17: passing a time zone identifier as part of the string is not allowed 'z'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 zgx"}}	!! 241	Error parsing date string '2008-07-01 10:00 zgx'; 17: passing a time zone identifier as part of the string is not allowed 'z'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 zij"}}	!! 241	Error parsing date string '2008-07-01 10:00 zij'; 17: passing a time zone identifier as part of the string is not allowed 'z'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 zjw"}}	!! 241	Error parsing date string '2008-07-01 10:00 zjw'; 17: passing a time zone identifier as part of the string is not allowed 'z'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 zli"}}	!! 241	Error parsing date string '2008-07-01 10:00 zli'; 17: passing a time zone identifier as part of the string is not allowed 'z'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 zmv"}}	!! 241	Error parsing date string '2008-07-01 10:00 zmv'; 17: passing a time zone identifier as part of the string is not allowed 'z'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 zoh"}}	!! 241	Error parsing date string '2008-07-01 10:00 zoh'; 17: passing a time zone identifier as part of the string is not allowed 'z'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 zpu"}}	!! 241	Error parsing date string '2008-07-01 10:00 zpu'; 17: passing a time zone identifier as part of the string is not allowed 'z'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 zrg"}}	!! 241	Error parsing date string '2008-07-01 10:00 zrg'; 17: passing a time zone identifier as part of the string is not allowed 'z'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 zst"}}	!! 241	Error parsing date string '2008-07-01 10:00 zst'; 17: passing a time zone identifier as part of the string is not allowed 'z'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 zuf"}}	!! 241	Error parsing date string '2008-07-01 10:00 zuf'; 17: passing a time zone identifier as part of the string is not allowed 'z'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 zvr"}}	!! 241	Error parsing date string '2008-07-01 10:00 zvr'; 17: passing a time zone identifier as part of the string is not allowed 'z'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 zxd"}}	!! 241	Error parsing date string '2008-07-01 10:00 zxd'; 17: passing a time zone identifier as part of the string is not allowed 'z'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 zyq"}}	!! 241	Error parsing date string '2008-07-01 10:00 zyq'; 17: passing a time zone identifier as part of the string is not allowed 'z'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 acwdt"}}	!! 241	Error parsing date string '2008-07-01 10:00 acwdt'; 17: passing a time zone identifier as part of the string is not allowed 'a'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 acwst"}}	!! 241	Error parsing date string '2008-07-01 10:00 acwst'; 17: passing a time zone identifier as part of the string is not allowed 'a'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 aest"}}	=> {"x":{"$date":{"$numberLong":"1214870400000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 akpt"}}	!! 241	Error parsing date string '2008-07-01 10:00 akpt'; 17: passing a time zone identifier as part of the string is not allowed 'a'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 akwt"}}	!! 241	Error parsing date string '2008-07-01 10:00 akwt'; 17: passing a time zone identifier as part of the string is not allowed 'a'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 almt"}}	!! 241	Error parsing date string '2008-07-01 10:00 almt'; 17: passing a time zone identifier as part of the string is not allowed 'a'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 amdt"}}	!! 241	Error parsing date string '2008-07-01 10:00 amdt'; 17: passing a time zone identifier as part of the string is not allowed 'a'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ammt"}}	!! 241	Error parsing date string '2008-07-01 10:00 ammt'; 17: passing a time zone identifier as part of the string is not allowed 'a'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 amst"}}	!! 241	Error parsing date string '2008-07-01 10:00 amst'; 17: passing a time zone identifier as part of the string is not allowed 'a'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 aqtt"}}	!! 241	Error parsing date string '2008-07-01 10:00 aqtt'; 17: passing a time zone identifier as part of the string is not allowed 'a'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 awst"}}	=> {"x":{"$date":{"$numberLong":"1214877600000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 azost"}}	!! 241	Error parsing date string '2008-07-01 10:00 azost'; 17: passing a time zone identifier as part of the string is not allowed 'a'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 azot"}}	!! 241	Error parsing date string '2008-07-01 10:00 azot'; 17: passing a time zone identifier as part of the string is not allowed 'a'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 bdst"}}	=> {"x":{"$date":{"$numberLong":"1214899200000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 bmst"}}	!! 241	Error parsing date string '2008-07-01 10:00 bmst'; 17: passing a time zone identifier as part of the string is not allowed 'b'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 brst"}}	!! 241	Error parsing date string '2008-07-01 10:00 brst'; 17: passing a time zone identifier as part of the string is not allowed 'b'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 cemt"}}	=> {"x":{"$date":{"$numberLong":"1214895600000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 cest"}}	=> {"x":{"$date":{"$numberLong":"1214899200000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 chost"}}	!! 241	Error parsing date string '2008-07-01 10:00 chost'; 17: passing a time zone identifier as part of the string is not allowed 'c'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 chot"}}	!! 241	Error parsing date string '2008-07-01 10:00 chot'; 17: passing a time zone identifier as part of the string is not allowed 'c'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 chut"}}	!! 241	Error parsing date string '2008-07-01 10:00 chut'; 17: passing a time zone identifier as part of the string is not allowed 'c'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 clst"}}	!! 241	Error parsing date string '2008-07-01 10:00 clst'; 17: passing a time zone identifier as part of the string is not allowed 'c'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 cvst"}}	!! 241	Error parsing date string '2008-07-01 10:00 cvst'; 17: passing a time zone identifier as part of the string is not allowed 'c'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 davt"}}	!! 241	Error parsing date string '2008-07-01 10:00 davt'; 17: passing a time zone identifier as part of the string is not allowed 'd'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ddut"}}	!! 241	Error parsing date string '2008-07-01 10:00 ddut'; 17: passing a time zone identifier as part of the string is not allowed 'd'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 eadt"}}	!! 241	Error parsing date string '2008-07-01 10:00 eadt'; 17: passing a time zone identifier as part of the string is not allowed 'e'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 easst"}}	!! 241	Error parsing date string '2008-07-01 10:00 easst'; 17: passing a time zone identifier as part of the string is not allowed 'e'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 east"}}	!! 241	Error parsing date string '2008-07-01 10:00 east'; 17: passing a time zone identifier as part of the string is not allowed 'e'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 egst"}}	!! 241	Error parsing date string '2008-07-01 10:00 egst'; 17: passing a time zone identifier as part of the string is not allowed 'e'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 fjst"}}	!! 241	Error parsing date string '2008-07-01 10:00 fjst'; 17: passing a time zone identifier as part of the string is not allowed 'f'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 fkst"}}	!! 241	Error parsing date string '2008-07-01 10:00 fkst'; 17: passing a time zone identifier as part of the string is not allowed 'f'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 galt"}}	!! 241	Error parsing date string '2008-07-01 10:00 galt'; 17: passing a time zone identifier as part of the string is not allowed 'g'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 gamt"}}	!! 241	Error parsing date string '2008-07-01 10:00 gamt'; 17: passing a time zone identifier as part of the string is not allowed 'g'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 gilt"}}	!! 241	Error parsing date string '2008-07-01 10:00 gilt'; 17: passing a time zone identifier as part of the string is not allowed 'g'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 hkst"}}	=> {"x":{"$date":{"$numberLong":"1214874000000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 hovst"}}	!! 241	Error parsing date string '2008-07-01 10:00 hovst'; 17: passing a time zone identifier as part of the string is not allowed 'h'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 hovt"}}	!! 241	Error parsing date string '2008-07-01 10:00 hovt'; 17: passing a time zone identifier as part of the string is not allowed 'h'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 irdt"}}	!! 241	Error parsing date string '2008-07-01 10:00 irdt'; 17: passing a time zone identifier as part of the string is not allowed 'i'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 irkst"}}	!! 241	Error parsing date string '2008-07-01 10:00 irkst'; 17: passing a time zone identifier as part of the string is not allowed 'i'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 irkt"}}	!! 241	Error parsing date string '2008-07-01 10:00 irkt'; 17: passing a time zone identifier as part of the string is not allowed 'i'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 irst"}}	!! 241	Error parsing date string '2008-07-01 10:00 irst'; 17: passing a time zone identifier as part of the string is not allowed 'i'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 kost"}}	!! 241	Error parsing date string '2008-07-01 10:00 kost'; 17: passing a time zone identifier as part of the string is not allowed 'k'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 krast"}}	!! 241	Error parsing date string '2008-07-01 10:00 krast'; 17: passing a time zone identifier as part of the string is not allowed 'k'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 krat"}}	!! 241	Error parsing date string '2008-07-01 10:00 krat'; 17: passing a time zone identifier as part of the string is not allowed 'k'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 lhdt"}}	!! 241	Error parsing date string '2008-07-01 10:00 lhdt'; 17: passing a time zone identifier as part of the string is not allowed 'l'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 lhst"}}	!! 241	Error parsing date string '2008-07-01 10:00 lhst'; 17: passing a time zone identifier as part of the string is not allowed 'l'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 lint"}}	!! 241	Error parsing date string '2008-07-01 10:00 lint'; 17: passing a time zone identifier as part of the string is not allowed 'l'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 magst"}}	!! 241	Error parsing date string '2008-07-01 10:00 magst'; 17: passing a time zone identifier as part of the string is not allowed 'm'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 magt"}}	!! 241	Error parsing date string '2008-07-01 10:00 magt'; 17: passing a time zone identifier as part of the string is not allowed 'm'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 mart"}}	!! 241	Error parsing date string '2008-07-01 10:00 mart'; 17: passing a time zone identifier as part of the string is not allowed 'm'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 mawt"}}	!! 241	Error parsing date string '2008-07-01 10:00 mawt'; 17: passing a time zone identifier as part of the string is not allowed 'm'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 mest"}}	=> {"x":{"$date":{"$numberLong":"1214899200000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 mesz"}}	!! 241	Error parsing date string '2008-07-01 10:00 mesz'; 17: passing a time zone identifier as part of the string is not allowed 'm'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 nddt"}}	=> {"x":{"$date":{"$numberLong":"1214911800000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 novst"}}	!! 241	Error parsing date string '2008-07-01 10:00 novst'; 17: passing a time zone identifier as part of the string is not allowed 'n'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 novt"}}	!! 241	Error parsing date string '2008-07-01 10:00 novt'; 17: passing a time zone identifier as part of the string is not allowed 'n'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 nzmt"}}	=> {"x":{"$date":{"$numberLong":"1214865000000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 omsst"}}	!! 241	Error parsing date string '2008-07-01 10:00 omsst'; 17: passing a time zone identifier as part of the string is not allowed 'o'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 omst"}}	!! 241	Error parsing date string '2008-07-01 10:00 omst'; 17: passing a time zone identifier as part of the string is not allowed 'o'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 orat"}}	!! 241	Error parsing date string '2008-07-01 10:00 orat'; 17: passing a time zone identifier as part of the string is not allowed 'o'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 pett"}}	!! 241	Error parsing date string '2008-07-01 10:00 pett'; 17: passing a time zone identifier as part of the string is not allowed 'p'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 phot"}}	!! 241	Error parsing date string '2008-07-01 10:00 phot'; 17: passing a time zone identifier as part of the string is not allowed 'p'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 pmdt"}}	!! 241	Error parsing date string '2008-07-01 10:00 pmdt'; 17: passing a time zone identifier as part of the string is not allowed 'p'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 pmst"}}	!! 241	Error parsing date string '2008-07-01 10:00 pmst'; 17: passing a time zone identifier as part of the string is not allowed 'p'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 pont"}}	!! 241	Error parsing date string '2008-07-01 10:00 pont'; 17: passing a time zone identifier as part of the string is not allowed 'p'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 pyst"}}	!! 241	Error parsing date string '2008-07-01 10:00 pyst'; 17: passing a time zone identifier as part of the string is not allowed 'p'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 qyzt"}}	!! 241	Error parsing date string '2008-07-01 10:00 qyzt'; 17: passing a time zone identifier as part of the string is not allowed 'q'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 rott"}}	!! 241	Error parsing date string '2008-07-01 10:00 rott'; 17: passing a time zone identifier as part of the string is not allowed 'r'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 sakt"}}	!! 241	Error parsing date string '2008-07-01 10:00 sakt'; 17: passing a time zone identifier as part of the string is not allowed 's'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 sams"}}	!! 241	Error parsing date string '2008-07-01 10:00 sams'; 17: passing a time zone identifier as part of the string is not allowed 's'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 samt"}}	!! 241	Error parsing date string '2008-07-01 10:00 samt'; 17: passing a time zone identifier as part of the string is not allowed 's'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 sret"}}	!! 241	Error parsing date string '2008-07-01 10:00 sret'; 17: passing a time zone identifier as part of the string is not allowed 's'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 syot"}}	!! 241	Error parsing date string '2008-07-01 10:00 syot'; 17: passing a time zone identifier as part of the string is not allowed 's'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 taht"}}	!! 241	Error parsing date string '2008-07-01 10:00 taht'; 17: passing a time zone identifier as part of the string is not allowed 't'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ulast"}}	!! 241	Error parsing date string '2008-07-01 10:00 ulast'; 17: passing a time zone identifier as part of the string is not allowed 'u'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 ulat"}}	!! 241	Error parsing date string '2008-07-01 10:00 ulat'; 17: passing a time zone identifier as part of the string is not allowed 'u'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 uyst"}}	!! 241	Error parsing date string '2008-07-01 10:00 uyst'; 17: passing a time zone identifier as part of the string is not allowed 'u'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 vlast"}}	!! 241	Error parsing date string '2008-07-01 10:00 vlast'; 17: passing a time zone identifier as part of the string is not allowed 'v'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 vlat"}}	!! 241	Error parsing date string '2008-07-01 10:00 vlat'; 17: passing a time zone identifier as part of the string is not allowed 'v'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 vost"}}	!! 241	Error parsing date string '2008-07-01 10:00 vost'; 17: passing a time zone identifier as part of the string is not allowed 'v'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 wadt"}}	!! 241	Error parsing date string '2008-07-01 10:00 wadt'; 17: passing a time zone identifier as part of the string is not allowed 'w'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 wakt"}}	!! 241	Error parsing date string '2008-07-01 10:00 wakt'; 17: passing a time zone identifier as part of the string is not allowed 'w'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 wast"}}	=> {"x":{"$date":{"$numberLong":"1214899200000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 wemt"}}	=> {"x":{"$date":{"$numberLong":"1214899200000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 wgst"}}	!! 241	Error parsing date string '2008-07-01 10:00 wgst'; 17: passing a time zone identifier as part of the string is not allowed 'w'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 wita"}}	=> {"x":{"$date":{"$numberLong":"1214877600000"}}}
+{"$dateFromString": {"dateString": "2008-07-01 10:00 wsdt"}}	!! 241	Error parsing date string '2008-07-01 10:00 wsdt'; 17: passing a time zone identifier as part of the string is not allowed 'w'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 wsst"}}	!! 241	Error parsing date string '2008-07-01 10:00 wsst'; 17: passing a time zone identifier as part of the string is not allowed 'w'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 yakst"}}	!! 241	Error parsing date string '2008-07-01 10:00 yakst'; 17: passing a time zone identifier as part of the string is not allowed 'y'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 yakt"}}	!! 241	Error parsing date string '2008-07-01 10:00 yakt'; 17: passing a time zone identifier as part of the string is not allowed 'y'
+{"$dateFromString": {"dateString": "2008-07-01 10:00 zulu"}}	!! 241	Error parsing date string '2008-07-01 10:00 zulu'; 17: passing a time zone identifier as part of the string is not allowed 'z'

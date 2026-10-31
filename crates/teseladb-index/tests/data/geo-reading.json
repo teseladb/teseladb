@@ -1,0 +1,2422 @@
+{
+ "server": "9.0.4",
+ "image": "ref@sha256:452bdaf2127b8ff851e31410a267809b9829eded219979f2210e7c7efb85a058",
+ "date": "2026-10-30",
+ "method": "index: insert {_id: 1, loc: v} into a collection with {loc: \"2dsphere\"}, the errInfo's underlyingReason (null: accepted); query: find({loc: {$geoIntersects: {$geometry: v}}}) on a collection without an index, the code and errmsg (null: accepted)",
+ "cases": [
+  {
+   "v": "{\"v\": {\"type\": \"Point\"}}",
+   "index": [
+    510,
+    "Point must be an array or object, instead got type missing"
+   ],
+   "query": [
+    2,
+    "Point must be an array or object, instead got type missing"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": {\"$numberInt\": \"5\"}}}",
+   "index": [
+    510,
+    "Point must be an array or object, instead got type int"
+   ],
+   "query": [
+    2,
+    "Point must be an array or object, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": \"x\"}}",
+   "index": [
+    510,
+    "Point must be an array or object, instead got type string"
+   ],
+   "query": [
+    2,
+    "Point must be an array or object, instead got type string"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": []}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type missing"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type missing"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": [{\"$numberInt\": \"5\"}]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type missing"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type missing"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": [\"x\"]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type string"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type string"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": [[{\"$numberInt\": \"5\"}]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type array"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type array"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": [[]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type array"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type array"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": [[[{\"$numberInt\": \"5\"}]]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type array"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type array"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": [[[]]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type array"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type array"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": [[[[{\"$numberInt\": \"5\"}]]]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type array"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type array"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": [[[[]]]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type array"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type array"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": {}}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type missing"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type missing"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": {\"a\": {\"$numberInt\": \"1\"}}}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type missing"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type missing"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}, {\"$numberInt\": \"3\"}]}}",
+   "index": null,
+   "query": null
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": [{\"$numberInt\": \"1\"}]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type missing"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type missing"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": [{\"$numberInt\": \"1\"}, \"a\"]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type string"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type string"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": [\"a\", {\"$numberInt\": \"1\"}]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type string"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type string"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": [[{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type array"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type array"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": [[{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], [{\"$numberInt\": \"3\"}, {\"$numberInt\": \"4\"}]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type array"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type array"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": [[{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type array"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type array"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": [[[{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}]]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type array"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type array"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": [[[{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"1\"}], [{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}]]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type array"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type array"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": [[[[{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"1\"}], [{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}]]]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type array"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type array"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": [[[{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"1\"}], [{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}]], {\"$numberInt\": \"5\"}]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type array"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type array"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": [[[{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}]], [[{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}]]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type array"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type array"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": {\"a\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}]}}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type array"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type array"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": [[{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], {\"$numberInt\": \"5\"}]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type array"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type array"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": [[{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], []]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type array"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type array"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": [[{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], [{\"$numberInt\": \"1\"}]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type array"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type array"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"LineString\"}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array of coordinates, instead got type missing"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array of coordinates, instead got type missing"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"LineString\", \"coordinates\": {\"$numberInt\": \"5\"}}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array of coordinates, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array of coordinates, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"LineString\", \"coordinates\": \"x\"}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array of coordinates, instead got type string"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array of coordinates, instead got type string"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"LineString\", \"coordinates\": []}}",
+   "index": [
+    510,
+    "GeoJSON LineString must have at least 2 vertices, instead got 0 vertices: []"
+   ],
+   "query": [
+    2,
+    "GeoJSON LineString must have at least 2 vertices, instead got 0 vertices: []"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"LineString\", \"coordinates\": [{\"$numberInt\": \"5\"}]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"LineString\", \"coordinates\": [\"x\"]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array, instead got type string"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array, instead got type string"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"LineString\", \"coordinates\": [[{\"$numberInt\": \"5\"}]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type missing"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type missing"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"LineString\", \"coordinates\": [[]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type missing"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type missing"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"LineString\", \"coordinates\": [[[{\"$numberInt\": \"5\"}]]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type array"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type array"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"LineString\", \"coordinates\": [[[]]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type array"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type array"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"LineString\", \"coordinates\": [[[[{\"$numberInt\": \"5\"}]]]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type array"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type array"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"LineString\", \"coordinates\": [[[[]]]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type array"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type array"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"LineString\", \"coordinates\": {}}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array of coordinates, instead got type object"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array of coordinates, instead got type object"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"LineString\", \"coordinates\": {\"a\": {\"$numberInt\": \"1\"}}}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array of coordinates, instead got type object"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array of coordinates, instead got type object"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"LineString\", \"coordinates\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}, {\"$numberInt\": \"3\"}]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"LineString\", \"coordinates\": [{\"$numberInt\": \"1\"}]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"LineString\", \"coordinates\": [{\"$numberInt\": \"1\"}, \"a\"]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"LineString\", \"coordinates\": [\"a\", {\"$numberInt\": \"1\"}]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array, instead got type string"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array, instead got type string"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"LineString\", \"coordinates\": [[{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}]]}}",
+   "index": [
+    510,
+    "GeoJSON LineString must have at least 2 vertices, instead got 1 vertices: [ [ 1, 2 ] ]"
+   ],
+   "query": [
+    2,
+    "GeoJSON LineString must have at least 2 vertices, instead got 1 vertices: [ [ 1, 2 ] ]"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"LineString\", \"coordinates\": [[{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], [{\"$numberInt\": \"3\"}, {\"$numberInt\": \"4\"}]]}}",
+   "index": null,
+   "query": null
+  },
+  {
+   "v": "{\"v\": {\"type\": \"LineString\", \"coordinates\": [[{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}]]}}",
+   "index": [
+    510,
+    "GeoJSON LineString must have at least 2 vertices, instead got 1 vertices: [ [ 1, 2 ], [ 1, 2 ] ]"
+   ],
+   "query": [
+    2,
+    "GeoJSON LineString must have at least 2 vertices, instead got 1 vertices: [ [ 1, 2 ], [ 1, 2 ] ]"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"LineString\", \"coordinates\": [[[{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}]]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type array"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type array"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"LineString\", \"coordinates\": [[[{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"1\"}], [{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}]]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type array"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type array"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"LineString\", \"coordinates\": [[[[{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"1\"}], [{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}]]]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type array"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type array"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"LineString\", \"coordinates\": [[[{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"1\"}], [{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}]], {\"$numberInt\": \"5\"}]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type array"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type array"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"LineString\", \"coordinates\": [[[{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}]], [[{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}]]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type array"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type array"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"LineString\", \"coordinates\": {\"a\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}]}}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array of coordinates, instead got type object"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array of coordinates, instead got type object"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"LineString\", \"coordinates\": [[{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], {\"$numberInt\": \"5\"}]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"LineString\", \"coordinates\": [[{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], []]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type missing"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type missing"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"LineString\", \"coordinates\": [[{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], [{\"$numberInt\": \"1\"}]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type missing"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type missing"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Polygon\"}}",
+   "index": [
+    510,
+    "Polygon coordinates must be an array, instead got type missing"
+   ],
+   "query": [
+    2,
+    "Polygon coordinates must be an array, instead got type missing"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Polygon\", \"coordinates\": {\"$numberInt\": \"5\"}}}",
+   "index": [
+    510,
+    "Polygon coordinates must be an array, instead got type int"
+   ],
+   "query": [
+    2,
+    "Polygon coordinates must be an array, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Polygon\", \"coordinates\": \"x\"}}",
+   "index": [
+    510,
+    "Polygon coordinates must be an array, instead got type string"
+   ],
+   "query": [
+    2,
+    "Polygon coordinates must be an array, instead got type string"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Polygon\", \"coordinates\": []}}",
+   "index": [
+    510,
+    "Polygon has no loops."
+   ],
+   "query": [
+    2,
+    "Polygon has no loops."
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Polygon\", \"coordinates\": [{\"$numberInt\": \"5\"}]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array of coordinates, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array of coordinates, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Polygon\", \"coordinates\": [\"x\"]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array of coordinates, instead got type string"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array of coordinates, instead got type string"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Polygon\", \"coordinates\": [[{\"$numberInt\": \"5\"}]]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Polygon\", \"coordinates\": [[]]}}",
+   "index": [
+    510,
+    "Loop has no vertices: []"
+   ],
+   "query": [
+    2,
+    "Loop has no vertices: []"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Polygon\", \"coordinates\": [[[{\"$numberInt\": \"5\"}]]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type missing"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type missing"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Polygon\", \"coordinates\": [[[]]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type missing"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type missing"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Polygon\", \"coordinates\": [[[[{\"$numberInt\": \"5\"}]]]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type array"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type array"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Polygon\", \"coordinates\": [[[[]]]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type array"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type array"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Polygon\", \"coordinates\": {}}}",
+   "index": [
+    510,
+    "Polygon coordinates must be an array, instead got type object"
+   ],
+   "query": [
+    2,
+    "Polygon coordinates must be an array, instead got type object"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Polygon\", \"coordinates\": {\"a\": {\"$numberInt\": \"1\"}}}}",
+   "index": [
+    510,
+    "Polygon coordinates must be an array, instead got type object"
+   ],
+   "query": [
+    2,
+    "Polygon coordinates must be an array, instead got type object"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Polygon\", \"coordinates\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}, {\"$numberInt\": \"3\"}]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array of coordinates, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array of coordinates, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Polygon\", \"coordinates\": [{\"$numberInt\": \"1\"}]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array of coordinates, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array of coordinates, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Polygon\", \"coordinates\": [{\"$numberInt\": \"1\"}, \"a\"]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array of coordinates, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array of coordinates, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Polygon\", \"coordinates\": [\"a\", {\"$numberInt\": \"1\"}]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array of coordinates, instead got type string"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array of coordinates, instead got type string"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Polygon\", \"coordinates\": [[{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}]]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Polygon\", \"coordinates\": [[{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], [{\"$numberInt\": \"3\"}, {\"$numberInt\": \"4\"}]]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Polygon\", \"coordinates\": [[{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}]]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Polygon\", \"coordinates\": [[[{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}]]]}}",
+   "index": [
+    510,
+    "Loop must have at least 3 different vertices, 0 unique vertices were provided: [ [ 1, 2 ] ]"
+   ],
+   "query": [
+    2,
+    "Loop must have at least 3 different vertices, 0 unique vertices were provided: [ [ 1, 2 ] ]"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Polygon\", \"coordinates\": [[[{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"1\"}], [{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}]]]}}",
+   "index": null,
+   "query": null
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Polygon\", \"coordinates\": [[[[{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"1\"}], [{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}]]]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type array"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type array"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Polygon\", \"coordinates\": [[[{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"1\"}], [{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}]], {\"$numberInt\": \"5\"}]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array of coordinates, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array of coordinates, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Polygon\", \"coordinates\": [[[{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}]], [[{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}]]]}}",
+   "index": [
+    510,
+    "Loop must have at least 3 different vertices, 0 unique vertices were provided: [ [ 0, 0 ] ]"
+   ],
+   "query": [
+    2,
+    "Loop must have at least 3 different vertices, 0 unique vertices were provided: [ [ 0, 0 ] ]"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Polygon\", \"coordinates\": {\"a\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}]}}}",
+   "index": [
+    510,
+    "Polygon coordinates must be an array, instead got type object"
+   ],
+   "query": [
+    2,
+    "Polygon coordinates must be an array, instead got type object"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Polygon\", \"coordinates\": [[{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], {\"$numberInt\": \"5\"}]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Polygon\", \"coordinates\": [[{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], []]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Polygon\", \"coordinates\": [[{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], [{\"$numberInt\": \"1\"}]]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPoint\"}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array of coordinates, instead got type missing"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array of coordinates, instead got type missing"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPoint\", \"coordinates\": {\"$numberInt\": \"5\"}}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array of coordinates, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array of coordinates, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPoint\", \"coordinates\": \"x\"}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array of coordinates, instead got type string"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array of coordinates, instead got type string"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPoint\", \"coordinates\": []}}",
+   "index": [
+    510,
+    "MultiPoint coordinates must have at least 1 element"
+   ],
+   "query": [
+    2,
+    "MultiPoint coordinates must have at least 1 element"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPoint\", \"coordinates\": [{\"$numberInt\": \"5\"}]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPoint\", \"coordinates\": [\"x\"]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array, instead got type string"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array, instead got type string"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPoint\", \"coordinates\": [[{\"$numberInt\": \"5\"}]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type missing"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type missing"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPoint\", \"coordinates\": [[]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type missing"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type missing"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPoint\", \"coordinates\": [[[{\"$numberInt\": \"5\"}]]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type array"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type array"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPoint\", \"coordinates\": [[[]]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type array"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type array"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPoint\", \"coordinates\": [[[[{\"$numberInt\": \"5\"}]]]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type array"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type array"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPoint\", \"coordinates\": [[[[]]]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type array"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type array"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPoint\", \"coordinates\": {}}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array of coordinates, instead got type object"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array of coordinates, instead got type object"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPoint\", \"coordinates\": {\"a\": {\"$numberInt\": \"1\"}}}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array of coordinates, instead got type object"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array of coordinates, instead got type object"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPoint\", \"coordinates\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}, {\"$numberInt\": \"3\"}]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPoint\", \"coordinates\": [{\"$numberInt\": \"1\"}]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPoint\", \"coordinates\": [{\"$numberInt\": \"1\"}, \"a\"]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPoint\", \"coordinates\": [\"a\", {\"$numberInt\": \"1\"}]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array, instead got type string"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array, instead got type string"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPoint\", \"coordinates\": [[{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}]]}}",
+   "index": null,
+   "query": null
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPoint\", \"coordinates\": [[{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], [{\"$numberInt\": \"3\"}, {\"$numberInt\": \"4\"}]]}}",
+   "index": null,
+   "query": null
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPoint\", \"coordinates\": [[{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}]]}}",
+   "index": null,
+   "query": null
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPoint\", \"coordinates\": [[[{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}]]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type array"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type array"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPoint\", \"coordinates\": [[[{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"1\"}], [{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}]]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type array"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type array"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPoint\", \"coordinates\": [[[[{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"1\"}], [{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}]]]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type array"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type array"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPoint\", \"coordinates\": [[[{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"1\"}], [{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}]], {\"$numberInt\": \"5\"}]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type array"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type array"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPoint\", \"coordinates\": [[[{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}]], [[{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}]]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type array"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type array"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPoint\", \"coordinates\": {\"a\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}]}}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array of coordinates, instead got type object"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array of coordinates, instead got type object"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPoint\", \"coordinates\": [[{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], {\"$numberInt\": \"5\"}]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPoint\", \"coordinates\": [[{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], []]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type missing"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type missing"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPoint\", \"coordinates\": [[{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], [{\"$numberInt\": \"1\"}]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type missing"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type missing"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiLineString\"}}",
+   "index": [
+    510,
+    "MultiLineString coordinates must be an array, instead got type missing"
+   ],
+   "query": [
+    2,
+    "MultiLineString coordinates must be an array, instead got type missing"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiLineString\", \"coordinates\": {\"$numberInt\": \"5\"}}}",
+   "index": [
+    510,
+    "MultiLineString coordinates must be an array, instead got type int"
+   ],
+   "query": [
+    2,
+    "MultiLineString coordinates must be an array, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiLineString\", \"coordinates\": \"x\"}}",
+   "index": [
+    510,
+    "MultiLineString coordinates must be an array, instead got type string"
+   ],
+   "query": [
+    2,
+    "MultiLineString coordinates must be an array, instead got type string"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiLineString\", \"coordinates\": []}}",
+   "index": [
+    510,
+    "MultiLineString coordinates must have at least 1 element"
+   ],
+   "query": [
+    2,
+    "MultiLineString coordinates must have at least 1 element"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiLineString\", \"coordinates\": [{\"$numberInt\": \"5\"}]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array of coordinates, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array of coordinates, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiLineString\", \"coordinates\": [\"x\"]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array of coordinates, instead got type string"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array of coordinates, instead got type string"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiLineString\", \"coordinates\": [[{\"$numberInt\": \"5\"}]]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiLineString\", \"coordinates\": [[]]}}",
+   "index": [
+    510,
+    "GeoJSON LineString must have at least 2 vertices, instead got 0 vertices: []"
+   ],
+   "query": [
+    2,
+    "GeoJSON LineString must have at least 2 vertices, instead got 0 vertices: []"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiLineString\", \"coordinates\": [[[{\"$numberInt\": \"5\"}]]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type missing"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type missing"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiLineString\", \"coordinates\": [[[]]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type missing"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type missing"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiLineString\", \"coordinates\": [[[[{\"$numberInt\": \"5\"}]]]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type array"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type array"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiLineString\", \"coordinates\": [[[[]]]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type array"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type array"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiLineString\", \"coordinates\": {}}}",
+   "index": [
+    510,
+    "MultiLineString coordinates must be an array, instead got type object"
+   ],
+   "query": [
+    2,
+    "MultiLineString coordinates must be an array, instead got type object"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiLineString\", \"coordinates\": {\"a\": {\"$numberInt\": \"1\"}}}}",
+   "index": [
+    510,
+    "MultiLineString coordinates must be an array, instead got type object"
+   ],
+   "query": [
+    2,
+    "MultiLineString coordinates must be an array, instead got type object"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiLineString\", \"coordinates\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}, {\"$numberInt\": \"3\"}]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array of coordinates, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array of coordinates, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiLineString\", \"coordinates\": [{\"$numberInt\": \"1\"}]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array of coordinates, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array of coordinates, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiLineString\", \"coordinates\": [{\"$numberInt\": \"1\"}, \"a\"]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array of coordinates, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array of coordinates, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiLineString\", \"coordinates\": [\"a\", {\"$numberInt\": \"1\"}]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array of coordinates, instead got type string"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array of coordinates, instead got type string"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiLineString\", \"coordinates\": [[{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}]]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiLineString\", \"coordinates\": [[{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], [{\"$numberInt\": \"3\"}, {\"$numberInt\": \"4\"}]]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiLineString\", \"coordinates\": [[{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}]]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiLineString\", \"coordinates\": [[[{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}]]]}}",
+   "index": [
+    510,
+    "GeoJSON LineString must have at least 2 vertices, instead got 1 vertices: [ [ 1, 2 ] ]"
+   ],
+   "query": [
+    2,
+    "GeoJSON LineString must have at least 2 vertices, instead got 1 vertices: [ [ 1, 2 ] ]"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiLineString\", \"coordinates\": [[[{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"1\"}], [{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}]]]}}",
+   "index": null,
+   "query": null
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiLineString\", \"coordinates\": [[[[{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"1\"}], [{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}]]]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type array"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type array"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiLineString\", \"coordinates\": [[[{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"1\"}], [{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}]], {\"$numberInt\": \"5\"}]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array of coordinates, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array of coordinates, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiLineString\", \"coordinates\": [[[{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}]], [[{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}]]]}}",
+   "index": [
+    510,
+    "GeoJSON LineString must have at least 2 vertices, instead got 1 vertices: [ [ 0, 0 ] ]"
+   ],
+   "query": [
+    2,
+    "GeoJSON LineString must have at least 2 vertices, instead got 1 vertices: [ [ 0, 0 ] ]"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiLineString\", \"coordinates\": {\"a\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}]}}}",
+   "index": [
+    510,
+    "MultiLineString coordinates must be an array, instead got type object"
+   ],
+   "query": [
+    2,
+    "MultiLineString coordinates must be an array, instead got type object"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiLineString\", \"coordinates\": [[{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], {\"$numberInt\": \"5\"}]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiLineString\", \"coordinates\": [[{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], []]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiLineString\", \"coordinates\": [[{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], [{\"$numberInt\": \"1\"}]]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPolygon\"}}",
+   "index": [
+    510,
+    "MultiPolygon coordinates must be an array, instead got type missing"
+   ],
+   "query": [
+    2,
+    "MultiPolygon coordinates must be an array, instead got type missing"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPolygon\", \"coordinates\": {\"$numberInt\": \"5\"}}}",
+   "index": [
+    510,
+    "MultiPolygon coordinates must be an array, instead got type int"
+   ],
+   "query": [
+    2,
+    "MultiPolygon coordinates must be an array, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPolygon\", \"coordinates\": \"x\"}}",
+   "index": [
+    510,
+    "MultiPolygon coordinates must be an array, instead got type string"
+   ],
+   "query": [
+    2,
+    "MultiPolygon coordinates must be an array, instead got type string"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPolygon\", \"coordinates\": []}}",
+   "index": [
+    510,
+    "MultiPolygon coordinates must have at least 1 element"
+   ],
+   "query": [
+    2,
+    "MultiPolygon coordinates must have at least 1 element"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPolygon\", \"coordinates\": [{\"$numberInt\": \"5\"}]}}",
+   "index": [
+    510,
+    "Polygon coordinates must be an array, instead got type int"
+   ],
+   "query": [
+    2,
+    "Polygon coordinates must be an array, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPolygon\", \"coordinates\": [\"x\"]}}",
+   "index": [
+    510,
+    "Polygon coordinates must be an array, instead got type string"
+   ],
+   "query": [
+    2,
+    "Polygon coordinates must be an array, instead got type string"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPolygon\", \"coordinates\": [[{\"$numberInt\": \"5\"}]]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array of coordinates, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array of coordinates, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPolygon\", \"coordinates\": [[]]}}",
+   "index": [
+    510,
+    "Polygon has no loops."
+   ],
+   "query": [
+    2,
+    "Polygon has no loops."
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPolygon\", \"coordinates\": [[[{\"$numberInt\": \"5\"}]]]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPolygon\", \"coordinates\": [[[]]]}}",
+   "index": [
+    510,
+    "Loop has no vertices: []"
+   ],
+   "query": [
+    2,
+    "Loop has no vertices: []"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPolygon\", \"coordinates\": [[[[{\"$numberInt\": \"5\"}]]]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type missing"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type missing"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPolygon\", \"coordinates\": [[[[]]]]}}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type missing"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type missing"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPolygon\", \"coordinates\": {}}}",
+   "index": [
+    510,
+    "MultiPolygon coordinates must be an array, instead got type object"
+   ],
+   "query": [
+    2,
+    "MultiPolygon coordinates must be an array, instead got type object"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPolygon\", \"coordinates\": {\"a\": {\"$numberInt\": \"1\"}}}}",
+   "index": [
+    510,
+    "MultiPolygon coordinates must be an array, instead got type object"
+   ],
+   "query": [
+    2,
+    "MultiPolygon coordinates must be an array, instead got type object"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPolygon\", \"coordinates\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}, {\"$numberInt\": \"3\"}]}}",
+   "index": [
+    510,
+    "Polygon coordinates must be an array, instead got type int"
+   ],
+   "query": [
+    2,
+    "Polygon coordinates must be an array, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPolygon\", \"coordinates\": [{\"$numberInt\": \"1\"}]}}",
+   "index": [
+    510,
+    "Polygon coordinates must be an array, instead got type int"
+   ],
+   "query": [
+    2,
+    "Polygon coordinates must be an array, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPolygon\", \"coordinates\": [{\"$numberInt\": \"1\"}, \"a\"]}}",
+   "index": [
+    510,
+    "Polygon coordinates must be an array, instead got type int"
+   ],
+   "query": [
+    2,
+    "Polygon coordinates must be an array, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPolygon\", \"coordinates\": [\"a\", {\"$numberInt\": \"1\"}]}}",
+   "index": [
+    510,
+    "Polygon coordinates must be an array, instead got type string"
+   ],
+   "query": [
+    2,
+    "Polygon coordinates must be an array, instead got type string"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPolygon\", \"coordinates\": [[{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}]]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array of coordinates, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array of coordinates, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPolygon\", \"coordinates\": [[{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], [{\"$numberInt\": \"3\"}, {\"$numberInt\": \"4\"}]]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array of coordinates, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array of coordinates, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPolygon\", \"coordinates\": [[{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}]]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array of coordinates, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array of coordinates, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPolygon\", \"coordinates\": [[[{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}]]]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPolygon\", \"coordinates\": [[[{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"1\"}], [{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}]]]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPolygon\", \"coordinates\": [[[[{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"1\"}], [{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}]]]]}}",
+   "index": null,
+   "query": null
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPolygon\", \"coordinates\": [[[{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"1\"}], [{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}]], {\"$numberInt\": \"5\"}]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPolygon\", \"coordinates\": [[[{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}]], [[{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}]]]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPolygon\", \"coordinates\": {\"a\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}]}}}",
+   "index": [
+    510,
+    "MultiPolygon coordinates must be an array, instead got type object"
+   ],
+   "query": [
+    2,
+    "MultiPolygon coordinates must be an array, instead got type object"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPolygon\", \"coordinates\": [[{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], {\"$numberInt\": \"5\"}]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array of coordinates, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array of coordinates, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPolygon\", \"coordinates\": [[{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], []]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array of coordinates, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array of coordinates, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"MultiPolygon\", \"coordinates\": [[{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], [{\"$numberInt\": \"1\"}]]}}",
+   "index": [
+    510,
+    "GeoJSON coordinates must be an array of coordinates, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON coordinates must be an array of coordinates, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"GeometryCollection\"}}",
+   "index": [
+    510,
+    "GeometryCollection geometries must be an array, instead got type missing"
+   ],
+   "query": [
+    2,
+    "GeometryCollection geometries must be an array, instead got type missing"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"GeometryCollection\", \"geometries\": {\"$numberInt\": \"5\"}}}",
+   "index": [
+    510,
+    "GeometryCollection geometries must be an array, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeometryCollection geometries must be an array, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"GeometryCollection\", \"geometries\": \"x\"}}",
+   "index": [
+    510,
+    "GeometryCollection geometries must be an array, instead got type string"
+   ],
+   "query": [
+    2,
+    "GeometryCollection geometries must be an array, instead got type string"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"GeometryCollection\", \"geometries\": []}}",
+   "index": [
+    510,
+    "GeometryCollection geometries must have at least 1 element"
+   ],
+   "query": [
+    2,
+    "GeometryCollection geometries must have at least 1 element"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"GeometryCollection\", \"geometries\": [{\"$numberInt\": \"1\"}]}}",
+   "index": [
+    510,
+    "Element 0 of \"geometries\" must be an object, instead got type int: 1"
+   ],
+   "query": [
+    2,
+    "Element 0 of \"geometries\" must be an object, instead got type int: 1"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"GeometryCollection\", \"geometries\": [\"x\"]}}",
+   "index": [
+    510,
+    "Element 0 of \"geometries\" must be an object, instead got type string: \"x\""
+   ],
+   "query": [
+    2,
+    "Element 0 of \"geometries\" must be an object, instead got type string: \"x\""
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"GeometryCollection\", \"geometries\": [{}]}}",
+   "index": [
+    510,
+    "Unknown GeoJSON type: {}"
+   ],
+   "query": [
+    2,
+    "Unknown GeoJSON type: {}"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"GeometryCollection\", \"geometries\": [{\"type\": \"Point\"}]}}",
+   "index": [
+    510,
+    "Point must be an array or object, instead got type missing"
+   ],
+   "query": [
+    2,
+    "Point must be an array or object, instead got type missing"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"GeometryCollection\", \"geometries\": [[{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}]]}}",
+   "index": [
+    510,
+    "Element 0 of \"geometries\" must be an object, instead got type array: [ 1, 2 ]"
+   ],
+   "query": [
+    2,
+    "Element 0 of \"geometries\" must be an object, instead got type array: [ 1, 2 ]"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"GeometryCollection\", \"geometries\": [{\"type\": \"Point\", \"coordinates\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}]}, {\"$numberInt\": \"5\"}]}}",
+   "index": [
+    510,
+    "Element 1 of \"geometries\" must be an object, instead got type int: 5"
+   ],
+   "query": [
+    2,
+    "Element 1 of \"geometries\" must be an object, instead got type int: 5"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"GeometryCollection\", \"geometries\": {\"a\": {\"type\": \"Point\", \"coordinates\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}]}}}}",
+   "index": [
+    510,
+    "GeometryCollection geometries must be an array, instead got type object"
+   ],
+   "query": [
+    2,
+    "GeometryCollection geometries must be an array, instead got type object"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"GeometryCollection\", \"geometries\": [{\"type\": \"GeometryCollection\", \"geometries\": [{\"type\": \"Point\", \"coordinates\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}]}]}]}}",
+   "index": [
+    510,
+    "GeometryCollections cannot be nested: { type: \"GeometryCollection\", geometries: [ { type: \"Point\", coordinates: [ 1, 2 ] } ] }"
+   ],
+   "query": [
+    2,
+    "GeometryCollections cannot be nested: { type: \"GeometryCollection\", geometries: [ { type: \"Point\", coordinates: [ 1, 2 ] } ] }"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], \"crs\": {\"$numberInt\": \"5\"}}}",
+   "index": [
+    510,
+    "GeoJSON CRS must be an object, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON CRS must be an object, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Polygon\", \"coordinates\": [[[{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"1\"}], [{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}]]], \"crs\": {\"$numberInt\": \"5\"}}}",
+   "index": [
+    510,
+    "GeoJSON CRS must be an object, instead got type int"
+   ],
+   "query": [
+    2,
+    "GeoJSON CRS must be an object, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], \"crs\": \"x\"}}",
+   "index": [
+    510,
+    "GeoJSON CRS must be an object, instead got type string"
+   ],
+   "query": [
+    2,
+    "GeoJSON CRS must be an object, instead got type string"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Polygon\", \"coordinates\": [[[{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"1\"}], [{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}]]], \"crs\": \"x\"}}",
+   "index": [
+    510,
+    "GeoJSON CRS must be an object, instead got type string"
+   ],
+   "query": [
+    2,
+    "GeoJSON CRS must be an object, instead got type string"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], \"crs\": {}}}",
+   "index": [
+    510,
+    "GeoJSON CRS must have field \"type\": \"name\""
+   ],
+   "query": [
+    2,
+    "GeoJSON CRS must have field \"type\": \"name\""
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Polygon\", \"coordinates\": [[[{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"1\"}], [{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}]]], \"crs\": {}}}",
+   "index": [
+    510,
+    "GeoJSON CRS must have field \"type\": \"name\""
+   ],
+   "query": [
+    2,
+    "GeoJSON CRS must have field \"type\": \"name\""
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], \"crs\": {\"type\": \"x\"}}}",
+   "index": [
+    510,
+    "GeoJSON CRS must have field \"type\": \"name\""
+   ],
+   "query": [
+    2,
+    "GeoJSON CRS must have field \"type\": \"name\""
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Polygon\", \"coordinates\": [[[{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"1\"}], [{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}]]], \"crs\": {\"type\": \"x\"}}}",
+   "index": [
+    510,
+    "GeoJSON CRS must have field \"type\": \"name\""
+   ],
+   "query": [
+    2,
+    "GeoJSON CRS must have field \"type\": \"name\""
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], \"crs\": {\"type\": {\"$numberInt\": \"5\"}}}}",
+   "index": [
+    510,
+    "GeoJSON CRS must have field \"type\": \"name\""
+   ],
+   "query": [
+    2,
+    "GeoJSON CRS must have field \"type\": \"name\""
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Polygon\", \"coordinates\": [[[{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"1\"}], [{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}]]], \"crs\": {\"type\": {\"$numberInt\": \"5\"}}}}",
+   "index": [
+    510,
+    "GeoJSON CRS must have field \"type\": \"name\""
+   ],
+   "query": [
+    2,
+    "GeoJSON CRS must have field \"type\": \"name\""
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], \"crs\": {\"type\": \"name\"}}}",
+   "index": [
+    510,
+    "CRS must have field \"properties\" which is an object, instead got type missing"
+   ],
+   "query": [
+    2,
+    "CRS must have field \"properties\" which is an object, instead got type missing"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Polygon\", \"coordinates\": [[[{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"1\"}], [{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}]]], \"crs\": {\"type\": \"name\"}}}",
+   "index": [
+    510,
+    "CRS must have field \"properties\" which is an object, instead got type missing"
+   ],
+   "query": [
+    2,
+    "CRS must have field \"properties\" which is an object, instead got type missing"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], \"crs\": {\"type\": \"name\", \"properties\": {\"$numberInt\": \"5\"}}}}",
+   "index": [
+    510,
+    "CRS must have field \"properties\" which is an object, instead got type int"
+   ],
+   "query": [
+    2,
+    "CRS must have field \"properties\" which is an object, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Polygon\", \"coordinates\": [[[{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"1\"}], [{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}]]], \"crs\": {\"type\": \"name\", \"properties\": {\"$numberInt\": \"5\"}}}}",
+   "index": [
+    510,
+    "CRS must have field \"properties\" which is an object, instead got type int"
+   ],
+   "query": [
+    2,
+    "CRS must have field \"properties\" which is an object, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], \"crs\": {\"type\": \"name\", \"properties\": {}}}}",
+   "index": [
+    510,
+    "In CRS, \"properties.name\" must be a string, instead got type missing"
+   ],
+   "query": [
+    2,
+    "In CRS, \"properties.name\" must be a string, instead got type missing"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Polygon\", \"coordinates\": [[[{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"1\"}], [{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}]]], \"crs\": {\"type\": \"name\", \"properties\": {}}}}",
+   "index": [
+    510,
+    "In CRS, \"properties.name\" must be a string, instead got type missing"
+   ],
+   "query": [
+    2,
+    "In CRS, \"properties.name\" must be a string, instead got type missing"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], \"crs\": {\"type\": \"name\", \"properties\": {\"name\": {\"$numberInt\": \"5\"}}}}}",
+   "index": [
+    510,
+    "In CRS, \"properties.name\" must be a string, instead got type int"
+   ],
+   "query": [
+    2,
+    "In CRS, \"properties.name\" must be a string, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Polygon\", \"coordinates\": [[[{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"1\"}], [{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}]]], \"crs\": {\"type\": \"name\", \"properties\": {\"name\": {\"$numberInt\": \"5\"}}}}}",
+   "index": [
+    510,
+    "In CRS, \"properties.name\" must be a string, instead got type int"
+   ],
+   "query": [
+    2,
+    "In CRS, \"properties.name\" must be a string, instead got type int"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], \"crs\": {\"type\": \"name\", \"properties\": {\"name\": \"foo\"}}}}",
+   "index": [
+    510,
+    "Unknown CRS name: foo"
+   ],
+   "query": [
+    2,
+    "Unknown CRS name: foo"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Polygon\", \"coordinates\": [[[{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"1\"}], [{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}]]], \"crs\": {\"type\": \"name\", \"properties\": {\"name\": \"foo\"}}}}",
+   "index": [
+    510,
+    "Unknown CRS name: foo"
+   ],
+   "query": [
+    2,
+    "Unknown CRS name: foo"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], \"crs\": {\"type\": \"name\", \"properties\": {\"name\": \"urn:ogc:def:crs:OGC:1.3:CRS84\"}}}}",
+   "index": null,
+   "query": null
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Polygon\", \"coordinates\": [[[{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"1\"}], [{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}]]], \"crs\": {\"type\": \"name\", \"properties\": {\"name\": \"urn:ogc:def:crs:OGC:1.3:CRS84\"}}}}",
+   "index": null,
+   "query": null
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], \"crs\": {\"type\": \"name\", \"properties\": {\"name\": \"EPSG:4326\"}}}}",
+   "index": null,
+   "query": null
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Polygon\", \"coordinates\": [[[{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"1\"}], [{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}]]], \"crs\": {\"type\": \"name\", \"properties\": {\"name\": \"EPSG:4326\"}}}}",
+   "index": null,
+   "query": null
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], \"crs\": {\"type\": \"name\", \"properties\": {\"name\": \"urn:x-refdb:crs:strictwinding:EPSG:4326\"}}}}",
+   "index": [
+    510,
+    "Strict winding order CRS is only supported by polygon"
+   ],
+   "query": [
+    2,
+    "Strict winding order CRS is only supported by polygon"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Polygon\", \"coordinates\": [[[{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"1\"}], [{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}]]], \"crs\": {\"type\": \"name\", \"properties\": {\"name\": \"urn:x-refdb:crs:strictwinding:EPSG:4326\"}}}}",
+   "index": [
+    510,
+    "can't index geometry with strict winding order"
+   ],
+   "query": null
+  },
+  {
+   "v": "{\"v\": {\"coordinates\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], \"type\": \"Point\"}}",
+   "index": null,
+   "query": null
+  },
+  {
+   "v": "{\"v\": {\"type\": \"point\", \"coordinates\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}]}}",
+   "index": [
+    510,
+    "unknown GeoJSON type 'point'"
+   ],
+   "query": [
+    2,
+    "unknown GeoJSON type 'point'"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"\", \"coordinates\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}]}}",
+   "index": [
+    510,
+    "unknown GeoJSON type ''"
+   ],
+   "query": [
+    2,
+    "unknown GeoJSON type ''"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": [{\"$numberDecimal\": \"1\"}, {\"$numberLong\": \"2\"}]}}",
+   "index": null,
+   "query": null
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": {\"x\": {\"$numberInt\": \"1\"}, \"y\": {\"$numberInt\": \"2\"}}}}",
+   "index": null,
+   "query": null
+  },
+  {
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], \"extra\": {\"$numberInt\": \"5\"}}}",
+   "index": null,
+   "query": null
+  },
+  {
+   "v": "{\"v\": []}",
+   "index": null,
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type missing"
+   ]
+  },
+  {
+   "v": "{\"v\": [{\"$numberInt\": \"5\"}]}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type missing"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type missing"
+   ]
+  },
+  {
+   "v": "{\"v\": [\"a\"]}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type string"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type string"
+   ]
+  },
+  {
+   "v": "{\"v\": [{\"$numberInt\": \"1\"}, null]}",
+   "index": [
+    510,
+    "Point must only contain numeric elements, instead got type null"
+   ],
+   "query": [
+    2,
+    "Point must only contain numeric elements, instead got type null"
+   ]
+  },
+  {
+   "v": "{\"v\": {\"a\": {\"$numberInt\": \"1\"}, \"b\": {\"$numberInt\": \"2\"}, \"c\": {\"$numberInt\": \"3\"}}}",
+   "index": null,
+   "query": [
+    2,
+    "Point must only contain two numeric elements"
+   ]
+  }
+ ]
+}

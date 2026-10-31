@@ -1,0 +1,388 @@
+{"$type":"$i"}	=> {"x":"int"}
+{"$type":"$nope"}	=> {"x":"missing"}
+{"$type":"$n"}	=> {"x":"null"}
+{"$type":"$a"}	=> {"x":"array"}
+{"$type":"$o"}	=> {"x":"object"}
+{"$type":"$s"}	=> {"x":"string"}
+{"$type":"$f"}	=> {"x":"double"}
+{"$type":"$l"}	=> {"x":"long"}
+{"$type":"$nd"}	=> {"x":"decimal"}
+{"$type":"$dt"}	=> {"x":"date"}
+{"$type":"$ts"}	=> {"x":"timestamp"}
+{"$type":[1,2]}	!! 16020	Expression $type takes exactly 1 arguments. 2 were passed in.
+{"$type":[[1,2]]}	=> {"x":"array"}
+{"$type":{"$minKey":1}}	=> {"x":"minKey"}
+{"$type":{"$maxKey":1}}	=> {"x":"maxKey"}
+{"$type":{"$oid":"0123456789abcdef01234567"}}	=> {"x":"objectId"}
+{"$type":true}	=> {"x":"bool"}
+{"$type":{"$regularExpression":{"pattern":"a","options":""}}}	=> {"x":"regex"}
+{"$type":{"$binary":{"base64":"AA==","subType":"00"}}}	=> {"x":"binData"}
+{"$type":{"$code":"x"}}	=> {"x":"javascript"}
+{"$type":{"$symbol":"x"}}	=> {"x":"symbol"}
+{"$isNumber":"$i"}	=> {"x":true}
+{"$isNumber":"$s"}	=> {"x":false}
+{"$isNumber":"$nope"}	=> {"x":false}
+{"$isNumber":"$nd"}	=> {"x":true}
+{"$isNumber":[1,2]}	!! 16020	Expression $isNumber takes exactly 1 arguments. 2 were passed in.
+{"$toBool":"$i"}	=> {"x":true}
+{"$toBool":0}	=> {"x":false}
+{"$toBool":""}	=> {"x":true}
+{"$toBool":"false"}	=> {"x":true}
+{"$toBool":"$n"}	=> {"x":null}
+{"$toBool":"$nope"}	=> {"x":null}
+{"$toBool":"$a"}	=> {"x":true}
+{"$toBool":"$dt"}	=> {"x":true}
+{"$toBool":{"$numberDecimal":"0"}}	=> {"x":false}
+{"$toBool":{"$numberDouble":"NaN"}}	=> {"x":true}
+{"$toBool":{"$oid":"0123456789abcdef01234567"}}	=> {"x":true}
+{"$toBool":{"$minKey":1}}	=> {"x":true}
+{"$toBool":"$ts"}	=> {"x":true}
+{"$toInt":"$f"}	=> {"x":{"$numberInt":"2"}}
+{"$toInt":-2.5}	=> {"x":{"$numberInt":"-2"}}
+{"$toInt":"12"}	=> {"x":{"$numberInt":"12"}}
+{"$toInt":" 12"}	!! 241	Failed to parse number ' 12' in $convert with no onError value: Did not consume whole string.
+{"$toInt":"12.5"}	!! 241	Failed to parse number '12.5' in $convert with no onError value: Did not consume whole string.
+{"$toInt":"0x1F"}	!! 241	Illegal hexadecimal input in $convert with no onError value: 0x1F
+{"$toInt":"-0"}	=> {"x":{"$numberInt":"0"}}
+{"$toInt":"+5"}	=> {"x":{"$numberInt":"5"}}
+{"$toInt":"2147483648"}	!! 241	Failed to parse number '2147483648' in $convert with no onError value: Overflow
+{"$toInt":{"$numberLong":"2147483648"}}	!! 241	Conversion would overflow target type in $convert with no onError value: 
+{"$toInt":{"$numberDouble":"NaN"}}	!! 241	Attempt to convert NaN value to integer type in $convert with no onError value
+{"$toInt":{"$numberDouble":"Infinity"}}	!! 241	Attempt to convert infinity value to integer type in $convert with no onError value
+{"$toInt":{"$numberDecimal":"7.9"}}	=> {"x":{"$numberInt":"7"}}
+{"$toInt":{"$numberDecimal":"NaN"}}	!! 241	Attempt to convert NaN value to integer type in $convert with no onError value
+{"$toInt":true}	=> {"x":{"$numberInt":"1"}}
+{"$toInt":"$dt"}	!! 241	Unsupported conversion from date to int in $convert with no onError value
+{"$toInt":"$n"}	=> {"x":null}
+{"$toInt":"$nope"}	=> {"x":null}
+{"$toInt":"$a"}	!! 241	Unsupported conversion from array to int in $convert with no onError value
+{"$toInt":""}	!! 241	Failed to parse number '' in $convert with no onError value: No digits
+{"$toInt":"abc"}	!! 241	Failed to parse number 'abc' in $convert with no onError value: Did not consume whole string.
+{"$toLong":"$f"}	=> {"x":{"$numberLong":"2"}}
+{"$toLong":"9223372036854775807"}	=> {"x":{"$numberLong":"9223372036854775807"}}
+{"$toLong":"9223372036854775808"}	!! 241	Failed to parse number '9223372036854775808' in $convert with no onError value: Overflow
+{"$toLong":"$dt"}	=> {"x":{"$numberLong":"1767225600000"}}
+{"$toLong":9.3e18}	!! 241	Conversion would overflow target type in $convert with no onError value: 9.3e+18
+{"$toLong":{"$numberDecimal":"-12.7"}}	=> {"x":{"$numberLong":"-12"}}
+{"$toLong":false}	=> {"x":{"$numberLong":"0"}}
+{"$toLong":"1e3"}	!! 241	Failed to parse number '1e3' in $convert with no onError value: Did not consume whole string.
+{"$toLong":"$ts"}	!! 241	Unsupported conversion from timestamp to long in $convert with no onError value
+{"$toDouble":"$i"}	=> {"x":{"$numberDouble":"5.0"}}
+{"$toDouble":"1.5"}	=> {"x":{"$numberDouble":"1.5"}}
+{"$toDouble":"1e3"}	=> {"x":{"$numberDouble":"1000.0"}}
+{"$toDouble":" 1"}	!! 241	Failed to parse number ' 1' in $convert with no onError value: Leading whitespace
+{"$toDouble":"NaN"}	=> {"x":{"$numberDouble":"NaN"}}
+{"$toDouble":"-Infinity"}	=> {"x":{"$numberDouble":"-Infinity"}}
+{"$toDouble":"inf"}	=> {"x":{"$numberDouble":"Infinity"}}
+{"$toDouble":"0x10"}	!! 241	Illegal hexadecimal input in $convert with no onError value: 0x10
+{"$toDouble":"1.5abc"}	!! 241	Failed to parse number '1.5abc' in $convert with no onError value: Did not consume whole string
+{"$toDouble":"$dt"}	=> {"x":{"$numberDouble":"1767225600000.0"}}
+{"$toDouble":true}	=> {"x":{"$numberDouble":"1.0"}}
+{"$toDouble":{"$numberDecimal":"1.1"}}	=> {"x":{"$numberDouble":"1.1"}}
+{"$toDouble":{"$numberDecimal":"1E+400"}}	!! 241	Conversion would overflow target type in $convert with no onError value: 1E+400
+{"$toDouble":{"$numberLong":"9007199254740993"}}	=> {"x":{"$numberDouble":"9007199254740992.0"}}
+{"$toDouble":"$ts"}	!! 241	Unsupported conversion from timestamp to double in $convert with no onError value
+{"$toDecimal":"$f"}	=> {"x":{"$numberDecimal":"2.50000000000000"}}
+{"$toDecimal":0.1}	=> {"x":{"$numberDecimal":"0.100000000000000"}}
+{"$toDecimal":1e300}	=> {"x":{"$numberDecimal":"1.00000000000000E+300"}}
+{"$toDecimal":"$i"}	=> {"x":{"$numberDecimal":"5"}}
+{"$toDecimal":"1.50"}	=> {"x":{"$numberDecimal":"1.50"}}
+{"$toDecimal":"abc"}	!! 241	Failed to parse number 'abc' in $convert with no onError value: Failed to parse string to decimal
+{"$toDecimal":"$dt"}	=> {"x":{"$numberDecimal":"1767225600000"}}
+{"$toDecimal":true}	=> {"x":{"$numberDecimal":"1"}}
+{"$toDecimal":{"$numberLong":"7"}}	=> {"x":{"$numberDecimal":"7"}}
+{"$toDecimal":"1E+7000"}	!! 241	Failed to parse number '1E+7000' in $convert with no onError value: Conversion from string to decimal would overflow
+{"$toDecimal":{"$numberDouble":"-0.0"}}	=> {"x":{"$numberDecimal":"-0"}}
+{"$toString":"$f"}	=> {"x":"2.5"}
+{"$toString":"$nd"}	=> {"x":"1.5"}
+{"$toString":"$dt"}	=> {"x":"2026-01-01T00:00:00.000Z"}
+{"$toString":true}	=> {"x":"true"}
+{"$toString":{"$oid":"0123456789abcdef01234567"}}	=> {"x":"0123456789abcdef01234567"}
+{"$toString":"$a"}	=> {"x":"[1,2,3]"}
+{"$toString":"$o"}	=> {"x":"{\"x\":1,\"y\":{\"z\":2}}"}
+{"$toString":"$n"}	=> {"x":null}
+{"$toString":"$ts"}	=> {"x":"Timestamp(100, 3)"}
+{"$toString":{"$binary":{"base64":"AAE=","subType":"00"}}}	=> {"x":"AAE="}
+{"$toString":{"$binary":{"base64":"AAECAwQFBgcICQoLDA0ODw==","subType":"04"}}}	=> {"x":"00010203-0405-0607-0809-0a0b0c0d0e0f"}
+{"$toString":{"$regularExpression":{"pattern":"a","options":"i"}}}	=> {"x":"/a/i"}
+{"$toString":{"$minKey":1}}	=> {"x":"MinKey"}
+{"$toObjectId":"0123456789abcdef01234567"}	=> {"x":{"$oid":"0123456789abcdef01234567"}}
+{"$toObjectId":"0123456789ABCDEF01234567"}	=> {"x":{"$oid":"0123456789abcdef01234567"}}
+{"$toObjectId":"xyz"}	!! 241	Failed to parse objectId 'xyz' in $convert with no onError value: Invalid string length for parsing to OID, expected 24 but found 3
+{"$toObjectId":"$i"}	!! 241	Unsupported conversion from int to objectId in $convert with no onError value
+{"$toObjectId":"$n"}	=> {"x":null}
+{"$toObjectId":{"$oid":"0123456789abcdef01234567"}}	=> {"x":{"$oid":"0123456789abcdef01234567"}}
+{"$toDate":"$i"}	!! 241	Unsupported conversion from int to date in $convert with no onError value
+{"$toDate":"$l"}	=> {"x":{"$date":{"$numberLong":"7"}}}
+{"$toDate":"$f"}	=> {"x":{"$date":{"$numberLong":"2"}}}
+{"$toDate":"2026-01-02"}	=> {"x":{"$date":{"$numberLong":"1767312000000"}}}
+{"$toDate":"2026-01-02T03:04:05.678Z"}	=> {"x":{"$date":{"$numberLong":"1767323045678"}}}
+{"$toDate":"2026-01-02T03:04:05+0100"}	=> {"x":{"$date":{"$numberLong":"1767319445000"}}}
+{"$toDate":{"$oid":"0123456789abcdef01234567"}}	=> {"x":{"$date":{"$numberLong":"19088743000"}}}
+{"$toDate":"$ts"}	=> {"x":{"$date":{"$numberLong":"100000"}}}
+{"$toDate":{"$numberDecimal":"1.9"}}	=> {"x":{"$date":{"$numberLong":"1"}}}
+{"$toDate":true}	!! 241	Unsupported conversion from bool to date in $convert with no onError value
+{"$toDate":"$n"}	=> {"x":null}
+{"$toUUID":"00010203-0405-0607-0809-0a0b0c0d0e0f"}	=> {"x":{"$binary":{"base64":"AAECAwQFBgcICQoLDA0ODw==","subType":"04"}}}
+{"$toUUID":"xyz"}	!! 241	Failed to parse BinData 'xyz' in $convert with no onError value: Invalid UUID string: xyz
+{"$toUUID":"$n"}	=> {"x":null}
+{"$toUUID":"$i"}	=> {"x":{"$binary":{"base64":"BQAAAA==","subType":"04"}}}
+{"$toArray":"[1,2]"}	=> {"x":[{"$numberInt":"1"},{"$numberInt":"2"}]}
+{"$toArray":"$a"}	!! 241	Unsupported conversion from array to array in $convert with no onError value
+{"$toArray":"x"}	!! 241	Input doesn't represent valid JSON
+{"$toArray":"$n"}	=> {"x":null}
+{"$toArray":"$i"}	!! 241	Unsupported conversion from int to array in $convert with no onError value
+{"$toObject":"{\"a\":1}"}	=> {"x":{"a":{"$numberInt":"1"}}}
+{"$toObject":"$o"}	!! 241	Unsupported conversion from object to object in $convert with no onError value
+{"$toObject":"[1]"}	!! 241	Input doesn't match expected type 'object'
+{"$toObject":"$i"}	!! 241	Unsupported conversion from int to object in $convert with no onError value
+{"$convert":{"input":"$s","to":"int"}}	!! 241	Failed to parse number 'abc' in $convert with no onError value: Did not consume whole string.
+{"$convert":{"input":"$s","to":"int","onError":-1}}	=> {"x":{"$numberInt":"-1"}}
+{"$convert":{"input":"$nope","to":"int","onNull":0}}	=> {"x":{"$numberInt":"0"}}
+{"$convert":{"input":"$n","to":"int","onNull":0}}	=> {"x":{"$numberInt":"0"}}
+{"$convert":{"input":"$n","to":"int"}}	=> {"x":null}
+{"$convert":{"input":"$f","to":16}}	=> {"x":{"$numberInt":"2"}}
+{"$convert":{"input":"$f","to":{"$numberLong":"18"}}}	=> {"x":{"$numberLong":"2"}}
+{"$convert":{"input":"$f","to":2.0}}	=> {"x":"2.5"}
+{"$convert":{"input":"$f","to":"bogus"}}	!! 2	Unknown type name: bogus
+{"$convert":{"input":"$f","to":99}}	!! 9	In $convert, numeric value for 'to' does not correspond to a BSON type: 99
+{"$convert":{"input":"$f","to":"$n"}}	=> {"x":null}
+{"$convert":{"input":"$f","to":"$nope"}}	=> {"x":null}
+{"$convert":{"input":"$f"}}	!! 9	Missing 'to' parameter to $convert
+{"$convert":{"to":"int"}}	!! 9	Missing 'input' parameter to $convert
+{"$convert":{"input":"$f","to":"int","x":1}}	!! 9	$convert found an unknown argument: x
+{"$convert":"$f"}	!! 9	$convert expects an object of named arguments but found: string
+{"$convert":{"input":"$f","to":"int","onError":"$nope"}}	=> {"x":{"$numberInt":"2"}}
+{"$convert":{"input":"$i","to":{"type":"string"}}}	=> {"x":"5"}
+{"$convert":{"input":"$i","to":{"type":"binData","subtype":0}}}	=> {"x":{"$binary":{"base64":"BQAAAA==","subType":"00"}}}
+{"$convert":{"input":"$i","to":"binData"}}	=> {"x":{"$binary":{"base64":"BQAAAA==","subType":"00"}}}
+{"$convert":{"input":"$i","to":"binData","byteOrder":"big"}}	=> {"x":{"$binary":{"base64":"AAAABQ==","subType":"00"}}}
+{"$convert":{"input":"$l","to":"binData"}}	=> {"x":{"$binary":{"base64":"BwAAAAAAAAA=","subType":"00"}}}
+{"$convert":{"input":"$f","to":"binData"}}	=> {"x":{"$binary":{"base64":"AAAAAAAABEA=","subType":"00"}}}
+{"$convert":{"input":{"$binary":{"base64":"AQAAAA==","subType":"00"}},"to":"int"}}	=> {"x":{"$numberInt":"1"}}
+{"$convert":{"input":{"$binary":{"base64":"AAAAAQ==","subType":"00"}},"to":"int","byteOrder":"big"}}	=> {"x":{"$numberInt":"1"}}
+{"$convert":{"input":{"$binary":{"base64":"AQAAAA==","subType":"00"}},"to":"long"}}	=> {"x":{"$numberLong":"1"}}
+{"$convert":{"input":"$s","to":"binData","format":"base64"}}	!! 241	Failed to parse BinData 'abc' in $convert with no onError value: invalid base64
+{"$convert":{"input":"YWJj","to":"binData","format":"base64"}}	=> {"x":{"$binary":{"base64":"YWJj","subType":"00"}}}
+{"$convert":{"input":"YWJj","to":{"type":"binData","subtype":4},"format":"base64"}}	!! 241	Failed to parse BinData 'YWJj' in $convert with no onError value: Only the 'uuid' format is allowed with the UUID subtype
+{"$convert":{"input":"616263","to":"binData","format":"hex"}}	=> {"x":{"$binary":{"base64":"YWJj","subType":"00"}}}
+{"$convert":{"input":"abc","to":"binData","format":"utf8"}}	=> {"x":{"$binary":{"base64":"YWJj","subType":"00"}}}
+{"$convert":{"input":{"$binary":{"base64":"YWJj","subType":"00"}},"to":"string","format":"base64"}}	=> {"x":"YWJj"}
+{"$convert":{"input":{"$binary":{"base64":"YWJj","subType":"00"}},"to":"string","format":"hex"}}	=> {"x":"616263"}
+{"$convert":{"input":{"$binary":{"base64":"YWJj","subType":"00"}},"to":"string","format":"utf8"}}	=> {"x":"abc"}
+{"$convert":{"input":{"$binary":{"base64":"YWJj","subType":"00"}},"to":"string"}}	!! 4341115	Format must be speficied when converting from 'binData' to 'string'
+{"$convert":{"input":{"$binary":{"base64":"YWJj","subType":"00"}},"to":"string","format":"base64url"}}	=> {"x":"YWJj"}
+{"$convert":{"input":"$i","to":"string","format":"hex"}}	=> {"x":"5"}
+{"$convert":{"input":"$i","to":"double"}}	=> {"x":{"$numberDouble":"5.0"}}
+{"$convert":{"input":"$i","to":"array"}}	!! 241	Unsupported conversion from int to array in $convert with no onError value
+{"$convert":{"input":"$i","to":"object"}}	!! 241	Unsupported conversion from int to object in $convert with no onError value
+{"$convert":{"input":"$i","to":"date"}}	!! 241	Unsupported conversion from int to date in $convert with no onError value
+{"$convert":{"input":"$i","to":"objectId"}}	!! 241	Unsupported conversion from int to objectId in $convert with no onError value
+{"$convert":{"input":"$i","to":"bool"}}	=> {"x":true}
+{"$convert":{"input":"$i","to":"decimal"}}	=> {"x":{"$numberDecimal":"5"}}
+{"$convert":{"input":"$i","to":"long"}}	=> {"x":{"$numberLong":"5"}}
+{"$convert":{"input":"$i","to":"null"}}	!! 241	Unsupported conversion from int to null in $convert with no onError value
+{"$convert":{"input":"$i","to":"regex"}}	!! 241	Unsupported conversion from int to regex in $convert with no onError value
+{"$convert":{"input":"$i","to":"timestamp"}}	!! 241	Unsupported conversion from int to timestamp in $convert with no onError value
+{"$convert":{"input":"$i","to":"minKey"}}	!! 241	Unsupported conversion from int to minKey in $convert with no onError value
+{"$convert":{"input":"$i","to":"missing"}}	!! 241	Unsupported conversion from int to missing in $convert with no onError value
+{"$convert":{"input":"$i","to":"uuid"}}	!! 2	Unknown type name: uuid
+{"$convert":{"input":"$i","to":"number"}}	!! 2	Unknown type name: number
+{"$convert":{"input":"$i","to":"int","base":10}}	=> {"x":{"$numberInt":"5"}}
+{"$convert":{"input":"1F","to":"int","base":16}}	=> {"x":{"$numberInt":"31"}}
+{"$convert":{"input":"11","to":"int","base":2}}	=> {"x":{"$numberInt":"3"}}
+{"$convert":{"input":"z","to":"int","base":36}}	!! 3501301	In $convert, 'base' argument is not a valid base
+{"$convert":{"input":31,"to":"string","base":16}}	=> {"x":"1F"}
+{"$convert":{"input":-31,"to":"string","base":16}}	=> {"x":"-1F"}
+{"$convert":{"input":31.5,"to":"string","base":16}}	!! 241	Base conversion is not supported for non-integers in $convert with no onError value: 
+{"$convert":{"input":"1F","to":"long","base":16}}	=> {"x":{"$numberLong":"31"}}
+{"$convert":{"input":"1F","to":"double","base":16}}	=> {"x":{"$numberDouble":"31.0"}}
+{"$convert":{"input":"0x1F","to":"int","base":16}}	!! 241	Illegal hexadecimal input in $convert with no onError value: 0x1F
+{"$convert":{"input":"12","to":"int","base":"x"}}	!! 3501300	In $convert, 'base' argument is not an integer
+{"$convert":{"input":"12","to":"int","base":10.5}}	!! 3501300	In $convert, 'base' argument is not an integer
+{"$toString":[1.5,2]}	!! 50723	$toString requires a single argument, got 2
+{"$toString":{"$literal":{"a":{"$numberDouble":"NaN"},"b":{"$numberDouble":"Infinity"},"c":{"$binary":{"base64":"AA==","subType":"00"}},"d":{"$timestamp":{"t":1,"i":2}},"e":{"$regularExpression":{"pattern":"a","options":"i"}},"f":{"$minKey":1},"g":1e300,"h":-0.0}}}	=> {"x":"{\"a\":\"NaN\",\"b\":\"Infinity\",\"c\":\"AA==\",\"d\":\"Timestamp(1, 2)\",\"e\":\"/a/i\",\"f\":\"MinKey\",\"g\":1e+300,\"h\":-0}"}
+{"$toString":{"$literal":{"s":"quote\"back\\nl\nu\u0001é"}}}	=> {"x":"{\"s\":\"quote\\\"back\\\\nl\\nu\\u0001é\"}"}
+{"$toString":[]}	!! 50723	$toString requires a single argument, got 0
+{"$toString":{"$literal":{}}}	=> {"x":"{}"}
+{"$toString":{"$numberDouble":"1e21"}}	=> {"x":"1e+21"}
+{"$toString":{"$numberDouble":"1e-7"}}	=> {"x":"1e-07"}
+{"$toString":{"$numberDouble":"123456789012345678"}}	=> {"x":"1.2345678901234568e+17"}
+{"$toString":{"$numberDouble":"-0.0"}}	=> {"x":"-0"}
+{"$toString":{"$numberDecimal":"1E+3"}}	=> {"x":"1E+3"}
+{"$toString":{"$date":{"$numberLong":"-1"}}}	=> {"x":"1969-12-31T23:59:59.999Z"}
+{"$toString":{"$code":"x"}}	=> {"x":"x"}
+{"$toString":{"$maxKey":1}}	=> {"x":"MaxKey"}
+{"$toString":{"$binary":{"base64":"AAE=","subType":"80"}}}	=> {"x":"AAE="}
+{"$toString":{"$literal":[{"$numberDecimal":"1.50"},{"$date":{"$numberLong":"0"}},{"$oid":"0123456789abcdef01234567"},{"$numberDecimal":"NaN"},{"$numberLong":"5"},{"$code":"x"},{"$symbol":"y"},{"$maxKey":1},{"$binary":{"base64":"AAECAwQFBgcICQoLDA0ODw==","subType":"04"}}]}}	=> {"x":"[1.50,\"1970-01-01T00:00:00.000Z\",\"0123456789abcdef01234567\",\"NaN\",5,\"x\",\"y\",\"MaxKey\",\"00010203-0405-0607-0809-0a0b0c0d0e0f\"]"}
+{"$toString":{"$date":{"$numberLong":"253402300800000"}}}	!! 18537	Could not convert date to string: date component was outside the supported range of 0-9999: 10000
+{"$toString":{"$date":{"$numberLong":"-62167219200001"}}}	!! 18537	Could not convert date to string: date component was outside the supported range of 0-9999: -1
+{"$toString":{"$date":{"$numberLong":"-62135596800000"}}}	=> {"x":"0001-01-01T00:00:00.000Z"}
+{"$toArray":"[1,2.5,{\"$numberLong\":\"3\"},{\"a\":1}]"}	=> {"x":[{"$numberInt":"1"},{"$numberDouble":"2.5"},{"$numberLong":"3"},{"a":{"$numberInt":"1"}}]}
+{"$toArray":"[2147483648, 1e2, 1.0, 9223372036854775808]"}	=> {"x":[{"$numberLong":"2147483648"},{"$numberDouble":"100.0"},{"$numberDouble":"1.0"},{"$numberDouble":"9223372036854775808.0"}]}
+{"$toArray":" [1] "}	=> {"x":[{"$numberInt":"1"}]}
+{"$toArray":"[1,]"}	!! 241	Input doesn't represent valid JSON
+{"$toArray":"{}"}	!! 241	Input doesn't match expected type 'array'
+{"$toObject":"{\"d\":{\"$date\":\"2026-01-01T00:00:00Z\"}}"}	=> {"x":{"d":{"$date":"2026-01-01T00:00:00Z"}}}
+{"$toObject":"{\"a\":1,\"a\":2}"}	=> {"x":{"a":{"$numberInt":"2"}}}
+{"$toObject":""}	!! 241	Input doesn't represent valid JSON
+{"$toArray":"[true,null,\"s\\u00e9\\n\",[],{}]"}	=> {"x":[true,null,"sé\n",[],{}]}
+{"$toArray":"[1e400]"}	!! 241	Input doesn't represent valid JSON
+{"$toArray":"[-0, -0.0, 1E2, 12345678901234567890123]"}	=> {"x":[{"$numberInt":"0"},{"$numberDouble":"-0.0"},{"$numberDouble":"100.0"},{"$numberDouble":"1.2345678901234568e+22"}]}
+{"$toArray":"[\"\\ud83d\\ude00\"]"}	=> {"x":["😀"]}
+{"$toArray":"[NaN]"}	!! 241	Input doesn't represent valid JSON
+{"$toArray":"[\"a\" \"b\"]"}	!! 241	Input doesn't represent valid JSON
+{"$toArray":"[1] x"}	!! 241	Input doesn't represent valid JSON
+{"$toObject":"{\"a.b\":1,\"$c\":2,\"\":3}"}	=> {"x":{"a.b":{"$numberInt":"1"},"$c":{"$numberInt":"2"},"":{"$numberInt":"3"}}}
+{"$toObject":"{a:1}"}	!! 241	Input doesn't represent valid JSON
+{"$toArray":"[0123]"}	!! 241	Input doesn't represent valid JSON
+{"$toArray":"[1.]"}	!! 241	Input doesn't represent valid JSON
+{"$toArray":"[.5]"}	!! 241	Input doesn't represent valid JSON
+{"$toArray":"[+1]"}	!! 241	Input doesn't represent valid JSON
+{"$toArray":"[\"\\x41\"]"}	!! 241	Input doesn't represent valid JSON
+{"$toArray":"[\"tab\there\"]"}	!! 241	Input doesn't represent valid JSON
+{"$toInt":[1,2]}	!! 50723	$toInt requires a single argument, got 2
+{"$toObject":[]}	!! 50723	$toObject requires a single argument, got 0
+{"$toInt":[[1]]}	!! 241	Unsupported conversion from array to int in $convert with no onError value
+{"$toInt":"-2147483648"}	=> {"x":{"$numberInt":"-2147483648"}}
+{"$toInt":"1 "}	!! 241	Failed to parse number '1 ' in $convert with no onError value: Did not consume whole string.
+{"$toInt":"00012"}	=> {"x":{"$numberInt":"12"}}
+{"$toInt":"-"}	!! 241	Failed to parse number '-' in $convert with no onError value: No digits
+{"$toDouble":".5"}	=> {"x":{"$numberDouble":"0.5"}}
+{"$toDouble":"5."}	=> {"x":{"$numberDouble":"5.0"}}
+{"$toDouble":"-.5e-1"}	=> {"x":{"$numberDouble":"-0.05"}}
+{"$toDouble":"1e400"}	!! 241	Failed to parse number '1e400' in $convert with no onError value: Out of range
+{"$toDouble":"1e-400"}	!! 241	Failed to parse number '1e-400' in $convert with no onError value: Out of range
+{"$toDouble":"Infinity"}	=> {"x":{"$numberDouble":"Infinity"}}
+{"$toDouble":"-inf"}	=> {"x":{"$numberDouble":"-Infinity"}}
+{"$toDouble":"nan"}	=> {"x":{"$numberDouble":"NaN"}}
+{"$toDouble":"-NaN"}	=> {"x":{"$numberDouble":"NaN"}}
+{"$toDouble":"1 "}	!! 241	Failed to parse number '1 ' in $convert with no onError value: Did not consume whole string
+{"$toDouble":""}	!! 241	Failed to parse number '' in $convert with no onError value: Empty string
+{"$toDouble":"+1.5"}	=> {"x":{"$numberDouble":"1.5"}}
+{"$toDecimal":" 1"}	!! 241	Failed to parse number ' 1' in $convert with no onError value: Failed to parse string to decimal
+{"$toDecimal":"inf"}	=> {"x":{"$numberDecimal":"Infinity"}}
+{"$toDecimal":"-Infinity"}	=> {"x":{"$numberDecimal":"-Infinity"}}
+{"$toDecimal":"nan"}	=> {"x":{"$numberDecimal":"NaN"}}
+{"$toDecimal":"0x10"}	!! 241	Illegal hexadecimal input in $convert with no onError value: 0x10
+{"$toDecimal":".5"}	=> {"x":{"$numberDecimal":"0.5"}}
+{"$toDecimal":"1e-7000"}	!! 241	Failed to parse number '1e-7000' in $convert with no onError value: Conversion from string to decimal would underflow
+{"$toDecimal":"1.234567890123456789012345678901234567"}	=> {"x":{"$numberDecimal":"1.234567890123456789012345678901234"}}
+{"$toDecimal":{"$numberDouble":"NaN"}}	=> {"x":{"$numberDecimal":"NaN"}}
+{"$toDecimal":{"$numberDouble":"1.23456789012345678"}}	=> {"x":{"$numberDecimal":"1.23456789012346"}}
+{"$toLong":{"$numberDecimal":"9223372036854775808"}}	!! 241	Conversion would overflow target type in $convert with no onError value: 9223372036854775808
+{"$toLong":{"$numberDecimal":"Infinity"}}	!! 241	Attempt to convert infinity value to integer type in $convert with no onError value
+{"$toInt":{"$numberDecimal":"2147483648"}}	!! 241	Conversion would overflow target type in $convert with no onError value: 2147483648
+{"$toInt":{"$numberDecimal":"-2147483648.9"}}	=> {"x":{"$numberInt":"-2147483648"}}
+{"$toLong":{"$numberDouble":"-9223372036854775808"}}	=> {"x":{"$numberLong":"-9223372036854775808"}}
+{"$toLong":{"$numberDouble":"9223372036854775807"}}	!! 241	Conversion would overflow target type in $convert with no onError value: 9.22337e+18
+{"$toInt":{"$numberDouble":"-2147483648.9"}}	!! 241	Conversion would overflow target type in $convert with no onError value: -2.14748e+09
+{"$toInt":{"$numberDouble":"2147483647.9"}}	!! 241	Conversion would overflow target type in $convert with no onError value: 2.14748e+09
+{"$toDouble":{"$numberDecimal":"NaN"}}	=> {"x":{"$numberDouble":"NaN"}}
+{"$toDouble":{"$numberDecimal":"-1E-400"}}	!! 241	Conversion would overflow target type in $convert with no onError value: -1E-400
+{"$toDouble":{"$numberDecimal":"1.00000000000000000000000000000001"}}	=> {"x":{"$numberDouble":"1.0"}}
+{"$toBool":{"$numberDecimal":"-0"}}	=> {"x":false}
+{"$toDate":{"$numberDouble":"NaN"}}	!! 241	Attempt to convert NaN value to integer type in $convert with no onError value
+{"$toDate":{"$numberDouble":"1e300"}}	!! 241	Conversion would overflow target type in $convert with no onError value: 1e+300
+{"$toDate":{"$numberDecimal":"1E+300"}}	!! 241	Conversion would overflow target type in $convert with no onError value: 1E+300
+{"$toDate":{"$numberDouble":"-1.5"}}	=> {"x":{"$date":{"$numberLong":"-1"}}}
+{"$toObjectId":"0123456789abcdef0123456g"}	!! 241	Failed to parse objectId '0123456789abcdef0123456g' in $convert with no onError value: Invalid character found in hex string: g
+{"$toObjectId":""}	!! 241	Failed to parse objectId '' in $convert with no onError value: Invalid string length for parsing to OID, expected 24 but found 0
+{"$toUUID":"0001020304050607080900a0b0c0d0e0f"}	!! 241	Failed to parse BinData '0001020304050607080900a0b0c0d0e0f' in $convert with no onError value: Invalid UUID string: 0001020304050607080900a0b0c0d0e0f
+{"$toUUID":"00010203-0405-0607-0809-0A0B0C0D0E0F"}	=> {"x":{"$binary":{"base64":"AAECAwQFBgcICQoLDA0ODw==","subType":"04"}}}
+{"$toUUID":{"$binary":{"base64":"AAECAwQFBgcICQoLDA0ODw==","subType":"04"}}}	=> {"x":{"$binary":{"base64":"AAECAwQFBgcICQoLDA0ODw==","subType":"04"}}}
+{"$toUUID":{"$binary":{"base64":"AAE=","subType":"00"}}}	!! 241	Conversions between different BinData subtypes are not supported
+{"$toUUID":"$l"}	=> {"x":{"$binary":{"base64":"BwAAAAAAAAA=","subType":"04"}}}
+{"$toUUID":"$f"}	=> {"x":{"$binary":{"base64":"AAAAAAAABEA=","subType":"04"}}}
+{"$convert":{"input":"$s","to":"int","onError":"$nope"}}	=> {}
+{"$convert":{"input":"$s","to":"int","onError":"$n"}}	=> {"x":null}
+{"$convert":{"input":"$n","to":"int","onNull":"$nope"}}	=> {}
+{"$convert":{"input":"$a","to":"int","onError":{"$add":[1,1]}}}	=> {"x":{"$numberInt":"2"}}
+{"$convert":{"input":"$f","to":{"type":"binData"}}}	=> {"x":{"$binary":{"base64":"AAAAAAAABEA=","subType":"00"}}}
+{"$convert":{"input":"$f","to":{"type":"int","subtype":0}}}	=> {"x":{"$numberInt":"2"}}
+{"$convert":{"input":"$f","to":{"subtype":0}}}	!! 9	$convert's 'to' argument must be a string or number, but is missing
+{"$convert":{"input":"$f","to":{"type":"binData","subtype":"x"}}}	!! 4341108	For BinData, $convert's 'subtype' argument must be a number, but is string
+{"$convert":{"input":"$f","to":{"type":"binData","subtype":300}}}	!! 4341107	In $convert, numeric value for 'subtype' does not correspond to a BinData type: 300
+{"$convert":{"input":"$f","to":{"type":"binData","x":1}}}	=> {"x":{"$binary":{"base64":"AAAAAAAABEA=","subType":"00"}}}
+{"$convert":{"input":"AAECAwQFBgcICQoLDA0ODw==","to":{"type":"binData","subtype":4},"format":"base64"}}	!! 241	Failed to parse BinData 'AAECAwQFBgcICQoLDA0ODw==' in $convert with no onError value: Only the 'uuid' format is allowed with the UUID subtype
+{"$convert":{"input":"00010203-0405-0607-0809-0a0b0c0d0e0f","to":"binData","format":"uuid"}}	!! 241	Failed to parse BinData '00010203-0405-0607-0809-0a0b0c0d0e0f' in $convert with no onError value: Only the 'uuid' format is allowed with the UUID subtype
+{"$convert":{"input":"00010203-0405-0607-0809-0a0b0c0d0e0f","to":{"type":"binData","subtype":4},"format":"uuid"}}	=> {"x":{"$binary":{"base64":"AAECAwQFBgcICQoLDA0ODw==","subType":"04"}}}
+{"$convert":{"input":{"$binary":{"base64":"AAECAwQFBgcICQoLDA0ODw==","subType":"04"}},"to":"string","format":"uuid"}}	=> {"x":"00010203-0405-0607-0809-0a0b0c0d0e0f"}
+{"$convert":{"input":{"$binary":{"base64":"AAECAwQFBgcICQoLDA0ODw==","subType":"04"}},"to":"string","format":"hex"}}	=> {"x":"000102030405060708090A0B0C0D0E0F"}
+{"$convert":{"input":{"$binary":{"base64":"AAE=","subType":"00"}},"to":"string","format":"uuid"}}	!! 241	Failed to convert 'BinData(0, "0001")' to string in $convert with no onError value: BinData does not represent a valid UUID
+{"$convert":{"input":{"$binary":{"base64":"/+8=","subType":"00"}},"to":"string","format":"base64url"}}	=> {"x":"_-8"}
+{"$convert":{"input":{"$binary":{"base64":"/+8=","subType":"00"}},"to":"string","format":"utf8"}}	!! 241	Failed to convert 'BinData(0, "FFEF")' to string in $convert with no onError value: BinData does not represent a valid UTF-8 string
+{"$convert":{"input":"_-8","to":"binData","format":"base64url"}}	=> {"x":{"$binary":{"base64":"/+8=","subType":"00"}}}
+{"$convert":{"input":"6g","to":"binData","format":"hex"}}	!! 241	Failed to parse BinData '6g' in $convert with no onError value: The character \x67 failed to parse from hex.
+{"$convert":{"input":"616","to":"binData","format":"hex"}}	!! 241	Failed to parse BinData '616' in $convert with no onError value: Hex blob with odd digit count
+{"$convert":{"input":"abc","to":"binData","format":"x"}}	!! 4341125	Invalid 'format' argument for $convert: x
+{"$convert":{"input":"abc","to":"binData"}}	!! 4341115	Format must be speficied when converting from 'string' to 'binData'
+{"$convert":{"input":"abc","to":"string","format":"x"}}	!! 4341125	Invalid 'format' argument for $convert: x
+{"$convert":{"input":{"$binary":{"base64":"AQI=","subType":"00"}},"to":"int"}}	=> {"x":{"$numberInt":"513"}}
+{"$convert":{"input":{"$binary":{"base64":"AAAAAAAAAAAAAAAAAAAAAA==","subType":"00"}},"to":"long"}}	!! 241	Failed to convert 'BinData(0, "00000000000000000000000000000000")' to number in $convert because of invalid length: 16
+{"$convert":{"input":{"$binary":{"base64":"AAAAAAAA8D8=","subType":"00"}},"to":"double"}}	=> {"x":{"$numberDouble":"1.0"}}
+{"$convert":{"input":{"$binary":{"base64":"AACAPw==","subType":"00"}},"to":"double"}}	=> {"x":{"$numberDouble":"1.0"}}
+{"$convert":{"input":{"$binary":{"base64":"AACAPw==","subType":"00"}},"to":"double","byteOrder":"big"}}	=> {"x":{"$numberDouble":"4.600602988224807e-41"}}
+{"$convert":{"input":"$i","to":"binData","byteOrder":"x"}}	!! 9130002	Invalid 'byteOrder' argument for $convert: x
+{"$convert":{"input":"$nd","to":"binData"}}	!! 241	Unsupported conversion from decimal to binData in $convert with no onError value
+{"$convert":{"input":true,"to":"binData"}}	!! 241	Unsupported conversion from bool to binData in $convert with no onError value
+{"$convert":{"input":{"$binary":{"base64":"AQ==","subType":"00"}},"to":{"type":"binData","subtype":5}}}	!! 241	Conversions between different BinData subtypes are not supported
+{"$convert":{"input":{"$binary":{"base64":"AQ==","subType":"00"}},"to":"binData"}}	=> {"x":{"$binary":{"base64":"AQ==","subType":"00"}}}
+{"$convert":{"input":{"$binary":{"base64":"AQ==","subType":"02"}},"to":"binData"}}	!! 241	Conversions between different BinData subtypes are not supported
+{"$convert":{"input":"$i","to":"int","format":"hex"}}	=> {"x":{"$numberInt":"5"}}
+{"$convert":{"input":"$ts","to":"date"}}	=> {"x":{"$date":{"$numberLong":"100000"}}}
+{"$convert":{"input":"$i","to":"javascript"}}	!! 241	Unsupported conversion from int to javascript in $convert with no onError value
+{"$convert":{"input":"$s","to":"objectId","onError":"bad"}}	=> {"x":"bad"}
+{"$convert":{"input":"$i","to":-1}}	!! 241	Unsupported conversion from int to minKey in $convert with no onError value
+{"$convert":{"input":"$i","to":127}}	!! 241	Unsupported conversion from int to maxKey in $convert with no onError value
+{"$convert":{"input":"$i","to":"minKey","onError":1}}	=> {"x":{"$numberInt":"1"}}
+{"$convert":{"input":"$nope","to":"bogus"}}	!! 2	Unknown type name: bogus
+{"$convert":{"input":"$nope","to":"int","format":"x"}}	=> {"x":null}
+{"$convert":{"input":"abc","to":"binData","format":"base64","onError":0}}	=> {"x":{"$numberInt":"0"}}
+{"$convert":{"input":{"$binary":{"base64":"YWJj","subType":"00"}},"to":"string","onError":0}}	!! 4341115	Format must be speficied when converting from 'binData' to 'string'
+{"$convert":{"input":"12","to":"int","base":8}}	=> {"x":{"$numberInt":"10"}}
+{"$convert":{"input":"19","to":"int","base":8}}	!! 241	Failed to parse number '19' in $convert with no onError value: Did not consume whole string.
+{"$convert":{"input":"-1F","to":"int","base":16}}	=> {"x":{"$numberInt":"-31"}}
+{"$convert":{"input":"80000000","to":"int","base":16}}	!! 241	Conversion would overflow target type in $convert with no onError value: 
+{"$convert":{"input":"1.5","to":"double","base":10}}	!! 241	Failed to parse number '1.5' in $convert with no onError value: Did not consume whole string.
+{"$convert":{"input":"1F","to":"decimal","base":16}}	=> {"x":{"$numberDecimal":"31"}}
+{"$convert":{"input":{"$numberLong":"255"},"to":"string","base":8}}	=> {"x":"377"}
+{"$convert":{"input":{"$numberDecimal":"255"},"to":"string","base":16}}	=> {"x":"FF"}
+{"$convert":{"input":{"$numberDouble":"255.0"},"to":"string","base":16}}	=> {"x":"FF"}
+{"$convert":{"input":"$s","to":"string","base":16}}	=> {"x":"abc"}
+{"$convert":{"input":"12","to":"int","base":{"$numberLong":"16"}}}	=> {"x":{"$numberInt":"18"}}
+{"$convert":{"input":"12","to":"int","base":"$nope"}}	=> {"x":{"$numberInt":"12"}}
+{"$convert":{"input":{"$numberLong":"258"},"to":{"type":"binData","subtype":0},"byteOrder":"big"}}	=> {"x":{"$binary":{"base64":"AAAAAAAAAQI=","subType":"00"}}}
+{"$convert":{"input":{"$binary":{"base64":"AQ==","subType":"00"}},"to":"int"}}	=> {"x":{"$numberInt":"1"}}
+{"$convert":{"input":{"$binary":{"base64":"AQID","subType":"00"}},"to":"int"}}	!! 241	Failed to convert 'BinData(0, "010203")' to number in $convert because of invalid length: 3
+{"$convert":{"input":{"$binary":{"base64":"AQIDBAUGBwg=","subType":"00"}},"to":"int"}}	!! 241	Failed to convert 'BinData(0, "0102030405060708")' to number in $convert because of invalid length: 8
+{"$convert":{"input":{"$binary":{"base64":"AQIDBAUGBwg=","subType":"00"}},"to":"long"}}	=> {"x":{"$numberLong":"578437695752307201"}}
+{"$convert":{"input":{"$binary":{"base64":"AQI=","subType":"00"}},"to":"double"}}	!! 241	Failed to convert 'BinData(0, "0102")' to number in $convert because of invalid length: 2
+{"$convert":{"input":{"$binary":{"base64":"","subType":"00"}},"to":"int"}}	!! 241	Failed to convert 'BinData(0, "")' to number in $convert because of invalid length: 0
+{"$convert":{"input":{"$binary":{"base64":"AQI=","subType":"05"}},"to":"int"}}	!! 9	BinData subtype 5 requires exactly 16 bytes as an expression literal
+{"$convert":{"input":{"$binary":{"base64":"AQI=","subType":"80"}},"to":{"type":"binData","subtype":128}}}	=> {"x":{"$binary":{"base64":"AQI=","subType":"80"}}}
+{"$convert":{"input":"AQI=","to":{"type":"binData","subtype":128},"format":"base64"}}	=> {"x":{"$binary":{"base64":"AQI=","subType":"80"}}}
+{"$convert":{"input":"$i","to":{"type":"binData","subtype":4}}}	=> {"x":{"$binary":{"base64":"BQAAAA==","subType":"04"}}}
+{"$convert":{"input":"$i","to":{"type":"binData","subtype":5}}}	!! 13016802	$convert to BinData subtype 5 requires exactly 16 bytes
+{"$convert":{"input":"$i","to":{"type":"binData","subtype":-1}}}	!! 4341107	In $convert, numeric value for 'subtype' does not correspond to a BinData type: -1
+{"$convert":{"input":"$i","to":{"type":"binData","subtype":{"$numberLong":"7"}}}}	!! 12910300	$convert to BinData subtype Column (7) is not allowed
+{"$convert":{"input":"$i","to":{"type":5,"subtype":8}}}	=> {"x":{"$binary":{"base64":"BQAAAA==","subType":"08"}}}
+{"$convert":{"input":"$i","to":{"type":"$nope"}}}	!! 9	$convert's 'to' argument must be a string or number, but is missing
+{"$convert":{"input":"$i","to":{"type":null}}}	!! 9	$convert's 'to' argument must be a string or number, but is null
+{"$convert":{"input":"$i","to":["int"]}}	!! 9	$convert's 'to' argument must be a string or number, but is array
+{"$convert":{"input":"$i","to":true}}	!! 9	$convert's 'to' argument must be a string or number, but is bool
+{"$convert":{"input":"$i","to":{"$numberDecimal":"16"}}}	=> {"x":{"$numberInt":"5"}}
+{"$convert":{"input":"$i","to":16.5}}	!! 9	In $convert, numeric 'to' argument is not an integer
+{"$toObjectId":"$a"}	!! 241	Unsupported conversion from array to objectId in $convert with no onError value
+{"$convert":{"input":"YWJj","to":"binData","format":"auto"}}	!! 241	Failed to parse BinData 'YWJj' in $convert with no onError value: Invalid format 'auto'
+{"$convert":{"input":{"$binary":{"base64":"YWJj","subType":"00"}},"to":"string","format":"auto"}}	=> {"x":"YWJj"}
+{"$convert":{"input":"$i","to":"string","format":"x"}}	!! 4341125	Invalid 'format' argument for $convert: x
+{"$type":{"$binary":{"base64":"AQI=","subType":"05"}}}	!! 9	BinData subtype 5 requires exactly 16 bytes as an expression literal
+{"$toDecimal":"1.2345678901234567890123456789012349"}	=> {"x":{"$numberDecimal":"1.234567890123456789012345678901234"}}
+{"$toDecimal":"1.2345678901234567890123456789012345"}	=> {"x":{"$numberDecimal":"1.234567890123456789012345678901234"}}
+{"$toDecimal":"1.2345678901234567890123456789012335"}	=> {"x":{"$numberDecimal":"1.234567890123456789012345678901233"}}
+{"$toDecimal":"1.23456789012345678901234567890123451"}	=> {"x":{"$numberDecimal":"1.234567890123456789012345678901234"}}
+{"$toDecimal":"-1.2345678901234567890123456789012349"}	=> {"x":{"$numberDecimal":"-1.234567890123456789012345678901234"}}
+{"$toDecimal":"9999999999999999999999999999999999.9"}	=> {"x":{"$numberDecimal":"9999999999999999999999999999999999"}}
+{"$toDecimal":"12345678901234567890123456789012345678"}	=> {"x":{"$numberDecimal":"1.234567890123456789012345678901234E+37"}}
+{"$convert":{"input":"1.2345678901234567890123456789012349","to":"decimal"}}	=> {"x":{"$numberDecimal":"1.234567890123456789012345678901234"}}

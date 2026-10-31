@@ -1,0 +1,191 @@
+{"$setUnion":["$a","$b"]}	=> {"x":[{"$numberInt":"1"},{"$numberInt":"2"},{"$numberInt":"3"},{"$numberInt":"4"}]}
+{"$setUnion":["$a",[2,1,1]]}	=> {"x":[{"$numberInt":"1"},{"$numberInt":"2"},{"$numberInt":"3"}]}
+{"$setUnion":["$mix","$a"]}	=> {"x":[null,{"$numberInt":"1"},{"$numberInt":"2"},{"$numberInt":"3"},"a",{"x":{"$numberInt":"1"}},[{"$numberInt":"2"}]]}
+{"$setUnion":[]}	=> {"x":[]}
+{"$setUnion":["$a","$n"]}	=> {"x":null}
+{"$setUnion":["$a","$nope"]}	=> {"x":null}
+{"$setUnion":["$a","$s"]}	!! 17043	All operands of $setUnion must be arrays. One argument is of type: string
+{"$setUnion":"$a"}	=> {"x":[{"$numberInt":"1"},{"$numberInt":"2"},{"$numberInt":"3"}]}
+{"$setUnion":[[1,{"$numberLong":"1"},1.0,{"$numberDouble":"1.0"},{"$numberDecimal":"1.0"}]]}	=> {"x":[{"$numberInt":"1"}]}
+{"$setIntersection":["$a","$b"]}	=> {"x":[{"$numberInt":"3"}]}
+{"$setIntersection":["$a",[]]}	=> {"x":[]}
+{"$setIntersection":[]}	=> {"x":[]}
+{"$setIntersection":["$a","$n"]}	=> {"x":null}
+{"$setIntersection":["$a","$s"]}	!! 17047	All operands of $setIntersection must be arrays. One argument is of type: string
+{"$setIntersection":[[3,2,1,2],[2,3,9]]}	=> {"x":[{"$numberInt":"2"},{"$numberInt":"3"}]}
+{"$setIntersection":[[1],[{"$numberLong":"1"}]]}	=> {"x":[{"$numberInt":"1"}]}
+{"$setDifference":["$a","$b"]}	=> {"x":[{"$numberInt":"1"},{"$numberInt":"2"}]}
+{"$setDifference":[[3,1,1,2],[9]]}	=> {"x":[{"$numberInt":"3"},{"$numberInt":"1"},{"$numberInt":"2"}]}
+{"$setDifference":["$a","$n"]}	=> {"x":null}
+{"$setDifference":["$n","$a"]}	=> {"x":null}
+{"$setDifference":["$a","$s"]}	!! 17049	both operands of $setDifference must be arrays. Second argument is of type: string
+{"$setDifference":["$s","$a"]}	!! 17048	both operands of $setDifference must be arrays. First argument is of type: string
+{"$setDifference":["$a"]}	!! 16020	Expression $setDifference takes exactly 2 arguments. 1 were passed in.
+{"$setEquals":["$a",[3,2,1,1]]}	=> {"x":true}
+{"$setEquals":["$a","$b"]}	=> {"x":false}
+{"$setEquals":["$a","$n"]}	!! 17044	All operands of $setEquals must be arrays. 2-th argument is of type: null
+{"$setEquals":["$a"]}	!! 17045	$setEquals needs at least two arguments had: 1
+{"$setEquals":["$a","$a","$a"]}	=> {"x":true}
+{"$setEquals":["$a","$s"]}	!! 17044	All operands of $setEquals must be arrays. 2-th argument is of type: string
+{"$setIsSubset":[[1,2],"$a"]}	=> {"x":true}
+{"$setIsSubset":["$a",[1]]}	=> {"x":false}
+{"$setIsSubset":["$a","$n"]}	!! 17042	both operands of $setIsSubset must be arrays. Second argument is of type: null
+{"$setIsSubset":["$n","$a"]}	!! 17046	both operands of $setIsSubset must be arrays. First argument is of type: null
+{"$setIsSubset":["$s","$a"]}	!! 17046	both operands of $setIsSubset must be arrays. First argument is of type: string
+{"$setIsSubset":["$a","$s"]}	!! 17042	both operands of $setIsSubset must be arrays. Second argument is of type: string
+{"$setIsSubset":[[],[]]}	=> {"x":true}
+{"$allElementsTrue":["$a"]}	=> {"x":true}
+{"$allElementsTrue":[[1,0]]}	=> {"x":false}
+{"$allElementsTrue":[[]]}	=> {"x":true}
+{"$allElementsTrue":"$a"}	=> {"x":true}
+{"$allElementsTrue":["$n"]}	!! 17040	$allElementsTrue's argument must be an array, but is null
+{"$allElementsTrue":["$s"]}	!! 17040	$allElementsTrue's argument must be an array, but is string
+{"$allElementsTrue":[[null]]}	=> {"x":false}
+{"$allElementsTrue":["$a","$b"]}	!! 16020	Expression $allElementsTrue takes exactly 1 arguments. 2 were passed in.
+{"$anyElementTrue":[[0,null,false]]}	=> {"x":false}
+{"$anyElementTrue":[[0,[]]]}	=> {"x":true}
+{"$anyElementTrue":[[]]}	=> {"x":false}
+{"$anyElementTrue":["$nope"]}	!! 17041	$anyElementTrue's argument must be an array, but is missing
+{"$let":{"vars":{"p":1,"q":"$i"},"in":{"$add":["$$p","$$q"]}}}	=> {"x":{"$numberInt":"6"}}
+{"$let":{"vars":{"p":1},"in":{"$let":{"vars":{"p":2,"r":"$$p"},"in":["$$p","$$r"]}}}}	=> {"x":[{"$numberInt":"2"},{"$numberInt":"1"}]}
+{"$let":{"vars":{},"in":"$i"}}	=> {"x":{"$numberInt":"5"}}
+{"$let":{"vars":{"p":"$nope"},"in":"$$p"}}	=> {}
+{"$let":{"vars":{"p":"$o"},"in":"$$p.y.z"}}	=> {"x":{"$numberInt":"2"}}
+{"$let":{"vars":{"P":1},"in":"$$P"}}	!! 9	'P' starts with an invalid character for a user variable name
+{"$let":{"vars":{"_p":1},"in":"$$_p"}}	!! 9	'_p' starts with an invalid character for a user variable name
+{"$let":{"vars":{"p1":1},"in":"$$p1"}}	=> {"x":{"$numberInt":"1"}}
+{"$let":{"vars":{"ROOT":1},"in":"$$ROOT"}}	!! 9	'ROOT' starts with an invalid character for a user variable name
+{"$let":{"vars":{"CURRENT":"$o"},"in":"$x"}}	=> {"x":{"$numberInt":"1"}}
+{"$let":{"vars":{"p":1},"in":"$$q"}}	!! 17276	Use of undefined variable: q
+{"$let":{"vars":{"p":1}}}	!! 16877	Missing 'in' parameter to $let
+{"$let":{"in":1}}	!! 16876	Missing 'vars' parameter to $let
+{"$let":{"vars":{"p":1},"in":1,"x":2}}	!! 16875	Unrecognized parameter to $let: x
+{"$let":{"vars":1,"in":1}}	!! 10065	invalid parameter: expected an object (vars)
+{"$let":1}	!! 16874	$let only supports an object as its argument
+{"$let":{"vars":{"p.q":1},"in":1}}	!! 9	'p.q' contains an invalid character for a variable name: '.'
+{"$let":{"vars":{"":1},"in":1}}	!! 9	empty variable names are not allowed
+{"$let":{"vars":{"p-q":1},"in":1}}	!! 9	'p-q' contains an invalid character for a variable name: '-'
+{"$let":{"vars":{"pé":1},"in":"$$pé"}}	=> {"x":{"$numberInt":"1"}}
+{"$let":{"vars":{"NOW":1},"in":1}}	!! 9	'NOW' starts with an invalid character for a user variable name
+{"$let":{"vars":{"p":1},"in":"$$CURRENT.i"}}	=> {"x":{"$numberInt":"5"}}
+{"$map":{"input":"$a","as":"v","in":{"$multiply":["$$v",10]}}}	=> {"x":[{"$numberInt":"10"},{"$numberInt":"20"},{"$numberInt":"30"}]}
+{"$map":{"input":"$a","in":{"$multiply":["$$this",10]}}}	=> {"x":[{"$numberInt":"10"},{"$numberInt":"20"},{"$numberInt":"30"}]}
+{"$map":{"input":"$a","as":"v","in":"$$v.z"}}	=> {"x":[null,null,null]}
+{"$map":{"input":"$m","in":"$$this.k"}}	=> {"x":["a","b"]}
+{"$map":{"input":"$m","in":"$$this.nope"}}	=> {"x":[null,null]}
+{"$map":{"input":"$n","in":1}}	=> {"x":null}
+{"$map":{"input":"$nope","in":1}}	=> {"x":null}
+{"$map":{"input":"$s","in":1}}	!! 16883	input to $map must be an array not string
+{"$map":{"input":"$e","in":1}}	=> {"x":[]}
+{"$map":{"input":"$a"}}	!! 16882	Missing 'in' parameter to $map
+{"$map":{"in":1}}	!! 16880	Missing 'input' parameter to $map
+{"$map":{"input":"$a","in":1,"x":1}}	!! 16879	Unrecognized parameter to $map: x
+{"$map":{"input":"$a","as":"V","in":1}}	!! 9	'V' starts with an invalid character for a user variable name
+{"$map":{"input":"$a","as":1,"in":1}}	!! 9	empty variable names are not allowed
+{"$map":{"input":"$a","in":"$$v"}}	!! 17276	Use of undefined variable: v
+{"$map":{"input":"$a","as":"v","in":"$$this"}}	!! 17276	Use of undefined variable: this
+{"$map":{"input":"$a","in":"$i"}}	=> {"x":[{"$numberInt":"5"},{"$numberInt":"5"},{"$numberInt":"5"}]}
+{"$map":"$a"}	!! 16878	$map only supports an object as its argument
+{"$map":{"input":"$a","as":"v","in":{"$map":{"input":"$b","in":{"$add":["$$v","$$this"]}}}}}	=> {"x":[[{"$numberInt":"4"},{"$numberInt":"5"}],[{"$numberInt":"5"},{"$numberInt":"6"}],[{"$numberInt":"6"},{"$numberInt":"7"}]]}
+{"$map":{"input":"$a","arrayIndexAs":"ix","in":"$$ix"}}	=> {"x":[{"$numberInt":"0"},{"$numberInt":"1"},{"$numberInt":"2"}]}
+{"$filter":{"input":"$a","cond":{"$gt":["$$this",1]}}}	=> {"x":[{"$numberInt":"2"},{"$numberInt":"3"}]}
+{"$filter":{"input":"$a","as":"v","cond":{"$gt":["$$v",1]}}}	=> {"x":[{"$numberInt":"2"},{"$numberInt":"3"}]}
+{"$filter":{"input":"$a","cond":{"$gt":["$$this",1]},"limit":1}}	=> {"x":[{"$numberInt":"2"}]}
+{"$filter":{"input":"$a","cond":true,"limit":2}}	=> {"x":[{"$numberInt":"1"},{"$numberInt":"2"}]}
+{"$filter":{"input":"$a","cond":true,"limit":{"$numberLong":"2"}}}	=> {"x":[{"$numberInt":"1"},{"$numberInt":"2"}]}
+{"$filter":{"input":"$a","cond":true,"limit":{"$numberDouble":"2.0"}}}	=> {"x":[{"$numberInt":"1"},{"$numberInt":"2"}]}
+{"$filter":{"input":"$a","cond":true,"limit":1.5}}	!! 327391	$filter: limit must be represented as a 32-bit integral value: 1.5
+{"$filter":{"input":"$a","cond":true,"limit":0}}	!! 327392	$filter: limit must be greater than 0: 0
+{"$filter":{"input":"$a","cond":true,"limit":-1}}	!! 327392	$filter: limit must be greater than 0: -1
+{"$filter":{"input":"$a","cond":true,"limit":"x"}}	!! 327391	$filter: limit must be represented as a 32-bit integral value: "x"
+{"$filter":{"input":"$a","cond":true,"limit":"$n"}}	=> {"x":[{"$numberInt":"1"},{"$numberInt":"2"},{"$numberInt":"3"}]}
+{"$filter":{"input":"$a","cond":true,"limit":"$nope"}}	=> {"x":[{"$numberInt":"1"},{"$numberInt":"2"},{"$numberInt":"3"}]}
+{"$filter":{"input":"$a","cond":true,"limit":9}}	=> {"x":[{"$numberInt":"1"},{"$numberInt":"2"},{"$numberInt":"3"}]}
+{"$filter":{"input":"$n","cond":true}}	=> {"x":null}
+{"$filter":{"input":"$nope","cond":true}}	=> {"x":null}
+{"$filter":{"input":"$s","cond":true}}	!! 28651	input to $filter must be an array not string
+{"$filter":{"input":"$mix","cond":"$$this"}}	=> {"x":[{"$numberInt":"3"},"a",{"$numberInt":"1"},{"x":{"$numberInt":"1"}},[{"$numberInt":"2"}]]}
+{"$filter":{"input":"$a"}}	!! 28650	Missing 'cond' parameter to $filter
+{"$filter":{"cond":true}}	!! 28648	Missing 'input' parameter to $filter
+{"$filter":{"input":"$a","cond":true,"x":1}}	!! 28647	Unrecognized parameter to $filter: x
+{"$filter":{"input":"$a","as":"V","cond":true}}	!! 9	'V' starts with an invalid character for a user variable name
+{"$filter":"$a"}	!! 28646	$filter only supports an object as its argument
+{"$reduce":{"input":"$a","initialValue":0,"in":{"$add":["$$value","$$this"]}}}	=> {"x":{"$numberInt":"6"}}
+{"$reduce":{"input":"$a","initialValue":[],"in":{"$concatArrays":["$$value",["$$this"]]}}}	=> {"x":[{"$numberInt":"1"},{"$numberInt":"2"},{"$numberInt":"3"}]}
+{"$reduce":{"input":"$e","initialValue":7,"in":1}}	=> {"x":{"$numberInt":"7"}}
+{"$reduce":{"input":"$n","initialValue":0,"in":1}}	=> {"x":null}
+{"$reduce":{"input":"$nope","initialValue":0,"in":1}}	=> {"x":null}
+{"$reduce":{"input":"$s","initialValue":0,"in":1}}	!! 40080	$reduce requires that 'input' be an array, found: "abc"
+{"$reduce":{"input":"$a","initialValue":"$nope","in":"$$value"}}	=> {}
+{"$reduce":{"input":"$a","in":1}}	!! 40078	$reduce requires 'initialValue' to be specified
+{"$reduce":{"input":"$a","initialValue":0}}	!! 40079	$reduce requires 'in' to be specified
+{"$reduce":{"initialValue":0,"in":1}}	!! 40077	$reduce requires 'input' to be specified
+{"$reduce":{"input":"$a","initialValue":0,"in":1,"x":1}}	!! 40076	$reduce found an unknown argument: x
+{"$reduce":{"input":"$a","initialValue":0,"in":{"$add":["$$value","$$this","$i"]}}}	=> {"x":{"$numberInt":"21"}}
+{"$reduce":"$a"}	!! 40075	$reduce requires an object as an argument, found: string
+{"$reduce":{"input":"$a","initialValue":0,"in":"$$nope"}}	!! 17276	Use of undefined variable: nope
+{"$mergeObjects":["$o",{"x":9,"w":1}]}	=> {"x":{"x":{"$numberInt":"9"},"y":{"z":{"$numberInt":"2"}},"w":{"$numberInt":"1"}}}
+{"$mergeObjects":"$o"}	=> {"x":{"x":{"$numberInt":"1"},"y":{"z":{"$numberInt":"2"}}}}
+{"$mergeObjects":["$o","$n"]}	=> {"x":{"x":{"$numberInt":"1"},"y":{"z":{"$numberInt":"2"}}}}
+{"$mergeObjects":["$o","$nope"]}	=> {"x":{"x":{"$numberInt":"1"},"y":{"z":{"$numberInt":"2"}}}}
+{"$mergeObjects":[]}	=> {"x":{}}
+{"$mergeObjects":["$o","$s"]}	!! 40400	$mergeObjects requires object inputs, but input "abc" is of type string
+{"$mergeObjects":["$n"]}	=> {"x":{}}
+{"$mergeObjects":"$m"}	=> {"x":{"k":"b","v":{"$numberInt":"2"}}}
+{"$mergeObjects":[{"y":{"q":1}},{"y":{"r":2}}]}	=> {"x":{"y":{"r":{"$numberInt":"2"}}}}
+{"$mergeObjects":["$a"]}	!! 40400	$mergeObjects requires object inputs, but input 1 is of type int
+{"$getField":"s"}	=> {"x":"abc"}
+{"$getField":{"field":"x","input":"$o"}}	=> {"x":{"$numberInt":"1"}}
+{"$getField":{"field":"y","input":"$o"}}	=> {"x":{"z":{"$numberInt":"2"}}}
+{"$getField":{"field":"z","input":"$o"}}	=> {}
+{"$getField":{"field":"x","input":"$n"}}	=> {"x":null}
+{"$getField":{"field":"x","input":"$nope"}}	=> {}
+{"$getField":{"field":"x","input":"$s"}}	=> {}
+{"$getField":{"field":"x"}}	!! 3041703	$getField requires 'input' to be specified
+{"$getField":{"input":"$o"}}	!! 3041702	$getField requires 'field' to be specified
+{"$getField":{"field":1,"input":"$o"}}	!! 3041704	$getField requires 'field' to evaluate to type String, but got int
+{"$getField":{"field":"$s","input":"$o"}}	=> {}
+{"$getField":{"field":{"$literal":"$s"},"input":{"$literal":{"$s":1}}}}	=> {"x":{"$numberInt":"1"}}
+{"$getField":{"field":"a.b","input":{"$literal":{"a.b":1}}}}	=> {"x":{"$numberInt":"1"}}
+{"$getField":{"field":"x","input":"$o","z":1}}	!! 3041701	$getField found an unknown argument: z
+{"$getField":{"field":{"$concat":["x"]},"input":"$o"}}	=> {"x":{"$numberInt":"1"}}
+{"$getField":1}	!! 3041704	$getField requires 'field' to evaluate to type String, but got int
+{"$getField":{"field":"x","input":[1]}}	=> {}
+{"$setField":{"field":"w","input":"$o","value":5}}	=> {"x":{"x":{"$numberInt":"1"},"y":{"z":{"$numberInt":"2"}},"w":{"$numberInt":"5"}}}
+{"$setField":{"field":"x","input":"$o","value":5}}	=> {"x":{"x":{"$numberInt":"5"},"y":{"z":{"$numberInt":"2"}}}}
+{"$setField":{"field":"x","input":"$o","value":"$$REMOVE"}}	=> {"x":{"y":{"z":{"$numberInt":"2"}}}}
+{"$setField":{"field":"x","input":"$n","value":5}}	=> {"x":null}
+{"$setField":{"field":"x","input":"$nope","value":5}}	=> {"x":null}
+{"$setField":{"field":"x","input":"$s","value":5}}	!! 4161105	$setField requires 'input' to evaluate to type Object
+{"$setField":{"field":"x","input":"$o"}}	!! 4161103	$setField requires 'value' to be specified
+{"$setField":{"field":"x","value":5}}	!! 4161109	$setField requires 'input' to be specified
+{"$setField":{"input":"$o","value":5}}	!! 4161102	$setField requires 'field' to be specified
+{"$setField":{"field":1,"input":"$o","value":5}}	!! 4161107	$setField requires 'field' to evaluate to type String, but got int
+{"$setField":{"field":"$x","input":"$o","value":5}}	!! 4161108	'$CURRENT.x' is a field path reference which is not allowed in this context. Did you mean {$literal: '$CURRENT.x'}?
+{"$setField":{"field":{"$literal":"$x"},"input":"$o","value":5}}	=> {"x":{"x":{"$numberInt":"1"},"y":{"z":{"$numberInt":"2"}},"$x":{"$numberInt":"5"}}}
+{"$setField":{"field":"a.b","input":{},"value":5}}	=> {"x":{"a.b":{"$numberInt":"5"}}}
+{"$setField":{"field":"x","input":"$o","value":5,"q":1}}	!! 4161101	$setField found an unknown argument: q
+{"$setField":{"field":"x","input":"$o","value":"$nope"}}	=> {"x":{"y":{"z":{"$numberInt":"2"}}}}
+{"$unsetField":{"field":"x","input":"$o"}}	=> {"x":{"y":{"z":{"$numberInt":"2"}}}}
+{"$unsetField":{"field":"w","input":"$o"}}	=> {"x":{"x":{"$numberInt":"1"},"y":{"z":{"$numberInt":"2"}}}}
+{"$unsetField":{"field":"x","input":"$n"}}	=> {"x":null}
+{"$unsetField":{"field":"x","input":"$s"}}	!! 4161105	$setField requires 'input' to evaluate to type Object
+{"$unsetField":{"field":"x","input":"$o","value":1}}	!! 4161101	$unsetField found an unknown argument: value
+{"$unsetField":{"input":"$o"}}	!! 4161102	$unsetField requires 'field' to be specified
+{"$setUnion":[[5,1,4,2,3,"b","a",{"$numberLong":"0"},-1.5]]}	=> {"x":[{"$numberDouble":"-1.5"},{"$numberLong":"0"},{"$numberInt":"1"},{"$numberInt":"2"},{"$numberInt":"3"},{"$numberInt":"4"},{"$numberInt":"5"},"a","b"]}
+{"$setIntersection":[[5,1,4,2,3,"b","a"],[3,"b",5,1]]}	=> {"x":[{"$numberInt":"1"},{"$numberInt":"3"},{"$numberInt":"5"},"b"]}
+{"$filter":{"input":"$a","arrayIndexAs":"ix","cond":true}}	=> {"x":[{"$numberInt":"1"},{"$numberInt":"2"},{"$numberInt":"3"}]}
+{"$reduce":{"input":"$a","arrayIndexAs":"ix","initialValue":0,"in":1}}	=> {"x":{"$numberInt":"1"}}
+{"$map":{"input":"$a","arrayIndexAs":"IX","in":1}}	!! 9	'IX' starts with an invalid character for a user variable name
+{"$map":{"input":"$a","as":"v","arrayIndexAs":"v","in":"$$v"}}	!! 9375801	'as' and 'arrayIndexAs' cannot have the same name
+{"$let":{"vars":{"p":"$$q","q":1},"in":1}}	!! 17276	Use of undefined variable: q
+{"$let":{"vars":{"CURRENT":5},"in":"$x"}}	=> {}
+{"$mergeObjects":[{"a":1},[{"b":1}]]}	!! 40400	$mergeObjects requires object inputs, but input [{b: 1}] is of type array
+{"$getField":{"field":{"$concat":["$s"]},"input":{"abc":7}}}	=> {"x":{"$numberInt":"7"}}
+{"$getField":{"field":"$nope","input":"$o"}}	!! 3041704	$getField requires 'field' to evaluate to type String, but got missing
+{"$getField":{"field":{"$literal":1},"input":"$o"}}	!! 3041704	$getField requires 'field' to evaluate to type String, but got int
+{"$setField":{"field":{"$concat":["x"]},"input":"$o","value":1}}	!! 4161106	$setField requires 'field' to evaluate to a constant, but got a non-constant argument
+{"$setField":{"field":{"$literal":1},"input":"$o","value":1}}	!! 4161107	$setField requires 'field' to evaluate to type String, but got int
+{"$unsetField":{"field":"x"}}	!! 4161109	$unsetField requires 'input' to be specified
+{"$setField":"x"}	!! 4161100	$setField only supports an object as its argument
+{"$unsetField":1}	!! 4161100	$unsetField only supports an object as its argument

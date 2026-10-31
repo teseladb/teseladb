@@ -1,0 +1,182 @@
+{
+ "server": "9.0.4",
+ "image": "ref@sha256:452bdaf2127b8ff851e31410a267809b9829eded219979f2210e7c7efb85a058",
+ "date": "2026-10-30",
+ "method": "insert {_id: 1, ...doc} into a collection with the index, sparse and not, and read validate's keysPerIndex",
+ "cases": [
+  {
+   "key": "{\"a\":1}",
+   "doc": "{\"b\": {\"$numberInt\": \"1\"}, \"_id\": {\"$numberInt\": \"1\"}}",
+   "sparse": 0,
+   "dense": 1
+  },
+  {
+   "key": "{\"a\":1}",
+   "doc": "{\"a\": null, \"_id\": {\"$numberInt\": \"1\"}}",
+   "sparse": 1,
+   "dense": 1
+  },
+  {
+   "key": "{\"a\":1}",
+   "doc": "{\"a\": [], \"_id\": {\"$numberInt\": \"1\"}}",
+   "sparse": 1,
+   "dense": 1
+  },
+  {
+   "key": "{\"a\":1}",
+   "doc": "{\"a\": {\"x\": {\"$numberInt\": \"1\"}}, \"_id\": {\"$numberInt\": \"1\"}}",
+   "sparse": 1,
+   "dense": 1
+  },
+  {
+   "key": "{\"a\":1}",
+   "doc": "{\"a\": [null], \"_id\": {\"$numberInt\": \"1\"}}",
+   "sparse": 1,
+   "dense": 1
+  },
+  {
+   "key": "{\"a\":1}",
+   "doc": "{\"a\": {\"$numberInt\": \"5\"}, \"_id\": {\"$numberInt\": \"1\"}}",
+   "sparse": 1,
+   "dense": 1
+  },
+  {
+   "key": "{\"a\":1}",
+   "doc": "{\"a\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], \"_id\": {\"$numberInt\": \"1\"}}",
+   "sparse": 2,
+   "dense": 2
+  },
+  {
+   "key": "{\"a\":1,\"b\":1}",
+   "doc": "{\"b\": {\"$numberInt\": \"1\"}, \"_id\": {\"$numberInt\": \"1\"}}",
+   "sparse": 1,
+   "dense": 1
+  },
+  {
+   "key": "{\"a\":1,\"b\":1}",
+   "doc": "{\"c\": {\"$numberInt\": \"1\"}, \"_id\": {\"$numberInt\": \"1\"}}",
+   "sparse": 0,
+   "dense": 1
+  },
+  {
+   "key": "{\"a\":1,\"b\":1}",
+   "doc": "{\"a\": null, \"_id\": {\"$numberInt\": \"1\"}}",
+   "sparse": 1,
+   "dense": 1
+  },
+  {
+   "key": "{\"a\":1,\"b\":1}",
+   "doc": "{\"a\": {\"$numberInt\": \"1\"}, \"b\": {\"$numberInt\": \"2\"}, \"_id\": {\"$numberInt\": \"1\"}}",
+   "sparse": 1,
+   "dense": 1
+  },
+  {
+   "key": "{\"a\":1,\"b\":1}",
+   "doc": "{\"a\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], \"_id\": {\"$numberInt\": \"1\"}}",
+   "sparse": 2,
+   "dense": 2
+  },
+  {
+   "key": "{\"a\":1,\"b\":1}",
+   "doc": "{\"a\": [{\"x\": {\"$numberInt\": \"1\"}}], \"b\": null, \"_id\": {\"$numberInt\": \"1\"}}",
+   "sparse": 1,
+   "dense": 1
+  },
+  {
+   "key": "{\"a.b\":1}",
+   "doc": "{\"a\": {\"$numberInt\": \"1\"}, \"_id\": {\"$numberInt\": \"1\"}}",
+   "sparse": 0,
+   "dense": 1
+  },
+  {
+   "key": "{\"a.b\":1}",
+   "doc": "{\"a\": {\"c\": {\"$numberInt\": \"1\"}}, \"_id\": {\"$numberInt\": \"1\"}}",
+   "sparse": 0,
+   "dense": 1
+  },
+  {
+   "key": "{\"a.b\":1}",
+   "doc": "{\"a\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], \"_id\": {\"$numberInt\": \"1\"}}",
+   "sparse": 0,
+   "dense": 1
+  },
+  {
+   "key": "{\"a.b\":1}",
+   "doc": "{\"a\": [{\"c\": {\"$numberInt\": \"1\"}}], \"_id\": {\"$numberInt\": \"1\"}}",
+   "sparse": 0,
+   "dense": 1
+  },
+  {
+   "key": "{\"a.b\":1}",
+   "doc": "{\"a\": [{\"b\": {\"$numberInt\": \"1\"}}, {\"c\": {\"$numberInt\": \"1\"}}], \"_id\": {\"$numberInt\": \"1\"}}",
+   "sparse": 1,
+   "dense": 2
+  },
+  {
+   "key": "{\"a.b\":1}",
+   "doc": "{\"a\": [], \"_id\": {\"$numberInt\": \"1\"}}",
+   "sparse": 0,
+   "dense": 1
+  },
+  {
+   "key": "{\"a.b\":1}",
+   "doc": "{\"a\": [{\"b\": null}, {\"c\": {\"$numberInt\": \"1\"}}], \"_id\": {\"$numberInt\": \"1\"}}",
+   "sparse": 1,
+   "dense": 1
+  },
+  {
+   "key": "{\"a.b\":1}",
+   "doc": "{\"a\": {\"b\": []}, \"_id\": {\"$numberInt\": \"1\"}}",
+   "sparse": 1,
+   "dense": 1
+  },
+  {
+   "key": "{\"a.b\":1,\"a.c\":1}",
+   "doc": "{\"a\": [{\"b\": {\"$numberInt\": \"1\"}}, {\"c\": {\"$numberInt\": \"2\"}}, {\"d\": {\"$numberInt\": \"3\"}}], \"_id\": {\"$numberInt\": \"1\"}}",
+   "sparse": 2,
+   "dense": 3
+  },
+  {
+   "key": "{\"a.b\":1,\"a.c\":1}",
+   "doc": "{\"a\": [{\"$numberInt\": \"1\"}, {\"d\": {\"$numberInt\": \"3\"}}], \"_id\": {\"$numberInt\": \"1\"}}",
+   "sparse": 0,
+   "dense": 1
+  },
+  {
+   "key": "{\"a\":\"hashed\"}",
+   "doc": "{\"b\": {\"$numberInt\": \"1\"}, \"_id\": {\"$numberInt\": \"1\"}}",
+   "sparse": 0,
+   "dense": 1
+  },
+  {
+   "key": "{\"a\":\"hashed\"}",
+   "doc": "{\"a\": null, \"_id\": {\"$numberInt\": \"1\"}}",
+   "sparse": 1,
+   "dense": 1
+  },
+  {
+   "key": "{\"a\":1,\"b\":\"hashed\"}",
+   "doc": "{\"b\": {\"$numberInt\": \"1\"}, \"_id\": {\"$numberInt\": \"1\"}}",
+   "sparse": 1,
+   "dense": 1
+  },
+  {
+   "key": "{\"a\":1,\"b\":\"hashed\"}",
+   "doc": "{\"c\": {\"$numberInt\": \"1\"}, \"_id\": {\"$numberInt\": \"1\"}}",
+   "sparse": 0,
+   "dense": 1
+  },
+  {
+   "key": "{\"a\":-1}",
+   "doc": "{\"a\": [[]], \"_id\": {\"$numberInt\": \"1\"}}",
+   "sparse": 1,
+   "dense": 1
+  },
+  {
+   "key": "{\"a\":-1}",
+   "doc": "{\"x\": {\"a\": {\"$numberInt\": \"1\"}}, \"_id\": {\"$numberInt\": \"1\"}}",
+   "sparse": 0,
+   "dense": 1
+  }
+ ]
+}

@@ -1,0 +1,23 @@
+[package]
+name = "teseladb-exec"
+version = "0.1.0"
+description = "TeselaDB's query execution: the reads of time series over their buckets and, with 010, the operators of plans."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+teseladb-bson = { path = "../teseladb-bson" }
+teseladb-compress = { path = "../teseladb-compress" }
+teseladb-hash = { path = "../teseladb-hash" }
+teseladb-index = { path = "../teseladb-index" }
+teseladb-mql = { path = "../teseladb-mql" }
+teseladb-plan = { path = "../teseladb-plan" }
+teseladb-tz = { path = "../teseladb-tz" }
+
+[dev-dependencies]
+teseladb-collation = { path = "../teseladb-collation" }

@@ -1,0 +1,267 @@
+//! What one node asks another with a forwarded request (`PeerMsg::Forward`), and the answers: a
+//! Group 0 command for Group 0's leader (001 FR-023, 005 FR-016), a piece of a data range's
+//! snapshot for a replica that waits for it (005 FR-012), a request for the data range's leader
+//! or Group 0's (006 FR-014, FR-027), the sessions to kill on every node (006 FR-016), a replica's
+//! checksum for its range's leader and the leader's order to rebuild a replica (005 FR-014). The
+//! first byte tells them apart.
+
+use teseladb_meta::command::Group0Command;
+use teseladb_range::checksum::Report;
+use teseladb_range::snapshot::Chunk;
+use teseladb_types::{DecodeError, Decoder, Encoder, GroupId};
+use teseladb_wire::commands::session::KillScope;
+
+/// Tag of a Group 0 command.
+const GROUP0: u8 = 0;
+/// Tag of a snapshot fetch.
+const FETCH: u8 = 1;
+/// Tag of a request for the data range's leader.
+const DATA: u8 = 2;
+/// Tag of a catalog command for Group 0's leader, which answers with its result.
+const CATALOG: u8 = 3;
+/// Tag of the sessions to kill on the node that receives it.
+const KILL_SESSIONS: u8 = 4;
+/// Tag of a replica's checksum for its range's leader.
+const CHECKSUM: u8 = 5;
+/// Tag of the order to rebuild the replica of a range on the node that receives it.
+const REBUILD: u8 = 6;
+/// Tag of a merge's question to a node about its replica of the range absorbed.
+const MERGE_PROBE: u8 = 7;
+/// Tag of the answer "not ready yet".
+const NOT_READY: u8 = 0;
+/// Tag of the answer with a chunk.
+const CHUNK: u8 = 1;
+/// Tag of the answer "that snapshot is older than the range's last split".
+const STALE: u8 = 2;
+
+/// A piece of a range's snapshot: file `file` from byte `offset`, of the export for `index`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Fetch {
+    /// Range.
+    pub group: GroupId,
+    /// Index of the snapshot the replica waits for.
+    pub index: u64,
+    /// File of the export.
+    pub file: u32,
+    /// Where in the file.
+    pub offset: u64,
+}
+
+/// A forwarded request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Request {
+    /// A command for Group 0's leader.
+    Group0(Group0Command),
+    /// A piece of a snapshot.
+    Fetch(Fetch),
+    /// A write or scan for the data range's leader (`crate::data_wire::RemoteReq`, encoded).
+    Data(Vec<u8>),
+    /// A catalog command for Group 0's leader (a `Group0Command`, encoded).
+    Catalog(Vec<u8>),
+    /// Sessions whose cursors die on the node that receives it (`killSessions`).
+    KillSessions(KillScope),
+    /// A replica's sum for the leader of its range.
+    Checksum(Report),
+    /// The leader of the range marked the replica of the node that receives it for rebuild.
+    Rebuild(GroupId),
+    /// Whether the replica of `range` on the node that receives it is frozen for `merge` with its
+    /// data on disk (007 FR-009): the answer is one byte, 1 if so.
+    MergeProbe {
+        /// The range being absorbed.
+        range: GroupId,
+        /// The merge.
+        merge: u64,
+    },
+}
+
+impl Request {
+    /// Its encoding.
+    pub fn encode(&self) -> Vec<u8> {
+        match self {
+            Request::Group0(cmd) => [&[GROUP0][..], &cmd.encode()].concat(),
+            Request::Fetch(f) => {
+                let mut e = Encoder::new();
+                e.u8(FETCH).u64(f.group.0).u64(f.index).u32(f.file).u64(f.offset);
+                e.finish()
+            }
+            Request::Data(b) => [&[DATA][..], b].concat(),
+            Request::Catalog(b) => [&[CATALOG][..], b].concat(),
+            Request::KillSessions(scope) => {
+                let mut e = Encoder::new();
+                e.u8(KILL_SESSIONS);
+                match scope {
+                    KillScope::All => {
+                        e.bool(true);
+                    }
+                    KillScope::Sessions(ids) => {
+                        e.bool(false).var(ids.len() as u64);
+                        for id in ids {
+                            e.u128(*id);
+                        }
+                    }
+                }
+                e.finish()
+            }
+            Request::Checksum(r) => [&[CHECKSUM][..], &r.encode()].concat(),
+            Request::Rebuild(g) => {
+                let mut e = Encoder::new();
+                e.u8(REBUILD).u64(g.0);
+                e.finish()
+            }
+            Request::MergeProbe { range, merge } => {
+                let mut e = Encoder::new();
+                e.u8(MERGE_PROBE).u64(range.0).u64(*merge);
+                e.finish()
+            }
+        }
+    }
+
+    /// Decodes what [`Request::encode`] wrote.
+    pub fn decode(b: &[u8]) -> Result<Request, DecodeError> {
+        let mut d = Decoder::new(b);
+        match d.u8()? {
+            GROUP0 => Group0Command::decode(&b[1..]).map(Request::Group0),
+            FETCH => {
+                let f = Fetch {
+                    group: GroupId(d.u64()?),
+                    index: d.u64()?,
+                    file: d.u32()?,
+                    offset: d.u64()?,
+                };
+                d.finish()?;
+                Ok(Request::Fetch(f))
+            }
+            DATA => Ok(Request::Data(b[1..].to_vec())),
+            CATALOG => Ok(Request::Catalog(b[1..].to_vec())),
+            KILL_SESSIONS => {
+                let scope = if d.bool()? {
+                    KillScope::All
+                } else {
+                    let n = d.var()?;
+                    if n > d.remaining() as u64 / 16 {
+                        return Err(DecodeError::InvalidValue { offset: 2 });
+                    }
+                    let mut ids = Vec::new();
+                    for _ in 0..n {
+                        ids.push(d.u128()?);
+                    }
+                    KillScope::Sessions(ids)
+                };
+                d.finish()?;
+                Ok(Request::KillSessions(scope))
+            }
+            CHECKSUM => Report::decode(&b[1..]).map(Request::Checksum),
+            REBUILD => {
+                let g = GroupId(d.u64()?);
+                d.finish()?;
+                Ok(Request::Rebuild(g))
+            }
+            MERGE_PROBE => {
+                let (range, merge) = (GroupId(d.u64()?), d.u64()?);
+                d.finish()?;
+                Ok(Request::MergeProbe { range, merge })
+            }
+            _ => Err(DecodeError::InvalidValue { offset: 0 }),
+        }
+    }
+}
+
+/// The answer to a [`Fetch`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FetchReply {
+    /// This replica cannot give that piece yet (it has not applied the snapshot's index, or its
+    /// export is being written): ask again later or another replica.
+    NotReady,
+    /// The piece.
+    Chunk(Chunk),
+    /// This replica applied a split after the snapshot's index: no replica serves that snapshot
+    /// any more (D-067), and the one that waits for it needs a newer one from the leader.
+    Stale,
+}
+
+impl FetchReply {
+    /// Its encoding.
+    pub fn encode(&self) -> Vec<u8> {
+        match self {
+            FetchReply::NotReady => vec![NOT_READY],
+            FetchReply::Chunk(c) => [&[CHUNK][..], &c.encode()].concat(),
+            FetchReply::Stale => vec![STALE],
+        }
+    }
+
+    /// Decodes what [`FetchReply::encode`] wrote.
+    pub fn decode(b: &[u8]) -> Result<FetchReply, DecodeError> {
+        match b.split_first() {
+            Some((&NOT_READY, [])) => Ok(FetchReply::NotReady),
+            Some((&CHUNK, rest)) => Chunk::decode(rest).map(FetchReply::Chunk),
+            Some((&STALE, [])) => Ok(FetchReply::Stale),
+            _ => Err(DecodeError::InvalidValue { offset: 0 }),
+        }
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    use super::*;
+    use teseladb_types::NodeId;
+
+    #[test]
+    fn requests_and_answers_read_back() {
+        let reqs = [
+            Request::Group0(Group0Command::NodeBoot { node: NodeId(3), boot_epoch: 2 }),
+            Request::Fetch(Fetch { group: GroupId(1), index: 9, file: 2, offset: 1 << 20 }),
+            Request::Data(vec![1, 2]),
+            Request::Catalog(vec![3]),
+            Request::KillSessions(KillScope::All),
+            Request::KillSessions(KillScope::Sessions(vec![1, u128::MAX])),
+            Request::Checksum(Report {
+                range: GroupId(4),
+                index: 12,
+                at: teseladb_hlc::Hlc { physical: 7, logical: 3 },
+                node: NodeId(2),
+                sum: Some([5; 32]),
+            }),
+            Request::Rebuild(GroupId(4)),
+        ];
+        for r in reqs {
+            assert_eq!(Request::decode(&r.encode()), Ok(r));
+        }
+        // A rebuild order cut short, or with bytes after it.
+        let rebuild = Request::Rebuild(GroupId(4)).encode();
+        assert!(Request::decode(&rebuild[..rebuild.len() - 1]).is_err());
+        assert!(Request::decode(&[&rebuild[..], &[0]].concat()).is_err());
+        let chunk = Chunk {
+            range: GroupId(1),
+            index: 9,
+            file: 0,
+            files: 1,
+            offset: 0,
+            size: 3,
+            data: vec![1, 2, 3],
+        };
+        for a in [FetchReply::NotReady, FetchReply::Chunk(chunk), FetchReply::Stale] {
+            assert_eq!(FetchReply::decode(&a.encode()), Ok(a));
+        }
+    }
+
+    #[test]
+    fn what_is_not_a_request_or_an_answer_is_refused() {
+        assert!(Request::decode(&[]).is_err());
+        assert!(Request::decode(&[7]).is_err());
+        assert!(Request::decode(&[FETCH, 1]).is_err());
+        let mut long =
+            Request::Fetch(Fetch { group: GroupId(1), index: 1, file: 0, offset: 0 }).encode();
+        long.push(0);
+        assert!(Request::decode(&long).is_err());
+        assert!(Request::decode(&[GROUP0, 0xff, 0xff]).is_err());
+        assert!(Request::decode(&[KILL_SESSIONS]).is_err());
+        assert!(Request::decode(&[KILL_SESSIONS, 0, 2, 1]).is_err());
+        assert!(Request::decode(&[KILL_SESSIONS, 1, 0]).is_err());
+        assert!(FetchReply::decode(&[]).is_err());
+        assert!(FetchReply::decode(&[NOT_READY, 1]).is_err());
+        assert!(FetchReply::decode(&[STALE, 1]).is_err());
+        assert!(FetchReply::decode(&[CHUNK]).is_err());
+        assert!(FetchReply::decode(&[9]).is_err());
+    }
+}

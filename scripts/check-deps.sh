@@ -1,0 +1,218 @@
+#!/usr/bin/env bash
+# Gate of the constitution's principles II and V (001 FR-012), one message per finding:
+#  - Cargo.lock only holds workspace packages (no `source`: no registries and no git);
+#  - logic crates do not depend on the I/O crates nor use the network, files, threads, the system
+#    clock, the process, the environment or the standard input and output;
+#  - the Multi-Raft engine has no Git types and no crate links the test state machine;
+#  - every crate root forbids unsafe code, except the crates that talk to the system or to the CPU
+#    (FR-001);
+#  - the crates of the hot path share no lock between threads: no `Mutex`, `RwLock` or `Condvar`
+#    (012 FR-008);
+#  - the origin project of the copied code is only named in ORIGIN.md.
+#   scripts/check-deps.sh
+# Bash 3.2 (macOS) or later.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+# Crates whose job is I/O. Every other crate of `crates/` is a logic crate.
+IO_CRATES=(teseladb-io teseladb-sys teseladb-server)
+# Tools: the benchmark measures the real system, the Unicode generator reads the official files
+# and writes the collation tables, and the battery's comparator reads the runners' output files
+# (constitution, principle II); the simulator is logic except these files (artifacts, histories
+# and child processes).
+IO_TOOLS=(teseladb-bench teseladb-unicodegen teseladb-tzgen compat-compare)
+SIM_IO_FILES=(tools/teseladb-sim/src/main.rs tools/teseladb-sim/src/cli.rs)
+# Crates whose code runs on a core's thread for each operation (012 FR-008): no lock shared between
+# threads there.
+HOT_CRATES=(teseladb-sys teseladb-io teseladb-raft teseladb-raftlog teseladb-multiraft teseladb-lsm
+  teseladb-range teseladb-hlc teseladb-txn teseladb-index teseladb-meta teseladb-search teseladb-crypto)
+# Crates that may use unsafe code: system calls and CPU intrinsics.
+UNSAFE_CRATES=(teseladb-sys teseladb-hash teseladb-crypto)
+# Built in two halves so that this script does not contain the word itself.
+ORIGIN_WORD="raf""tree"
+
+fail=0
+finding() {
+  echo "check-deps: $*" >&2
+  fail=1
+}
+
+# Turns grep's `file:line:text` lines on stdin into findings `file:line: text (why)`.
+grep_findings() {
+  local why=$1 hit file line
+  while IFS= read -r hit; do
+    hit=${hit#./}
+    file=${hit%%:*}
+    line=${hit#*:}
+    finding "$file:${line%%:*}: ${line#*:} ($why)"
+  done
+}
+
+contains() {
+  local needle=$1
+  shift
+  for x in "$@"; do [[ $x == "$needle" ]] && return 0; done
+  return 1
+}
+
+check_lock() {
+  [[ -f Cargo.lock ]] || cargo metadata --offline --format-version 1 >/dev/null
+  while IFS= read -r name; do
+    finding "Cargo.lock: external package: $name"
+  done < <(awk '
+    /^\[\[package\]\]/ { name = "" }
+    /^name = / { name = $3; gsub(/"/, "", name) }
+    /^source = / { print name }
+  ' Cargo.lock)
+}
+
+# Prints `file:line: text` for every forbidden use in the given sources: paths written out in full
+# and names brought in by grouped imports (`use std::{fs, io::{Read, stdout}};`).
+forbidden_io() {
+  [[ $# -gt 0 ]] || return 0
+  awk '
+    function report(line, text) { printf "%s:%d: %s\n", FILENAME, line, text }
+    FNR == 1 { depth = 0 }
+    {
+      code = $0
+      sub(/\/\/.*/, "", code)
+      if (code ~ /std::(net|fs|thread|process|env)([^[:alnum:]_]|$)/ ||
+          code ~ /std::time::(Instant|SystemTime)/ ||
+          code ~ /(^|[^[:alnum:]_])(Instant|SystemTime)::now/ ||
+          code ~ /std::io::(stdin|stdout)([^[:alnum:]_]|$)/) {
+        report(FNR, $0)
+        next
+      }
+      if (depth == 0 && code ~ /use[[:space:]]+std::.*\{/) {
+        depth = 0
+        start = 1
+      }
+      if (start || depth > 0) {
+        if (code ~ /(^|[{,[:space:]])(net|fs|thread|process|env)([,}[:space:]]|::|$)/ ||
+            code ~ /(^|[^[:alnum:]_])(Instant|SystemTime|stdin|stdout)([^[:alnum:]_]|$)/) {
+          report(FNR, $0)
+        }
+        opened = gsub(/\{/, "{", code)
+        closed = gsub(/\}/, "}", code)
+        depth += opened - closed
+        start = 0
+      }
+    }
+  ' "$@"
+}
+
+rust_sources() {
+  [[ -d $1 ]] || return 0
+  find "$1" -name '*.rs' | sort
+}
+
+depends_on_io() {
+  local name=$1 manifest=$2
+  for io in "${IO_CRATES[@]}"; do
+    if grep -Eq "^[[:space:]]*${io}[[:space:]]*=" "$manifest"; then
+      finding "$name depends on the I/O crate $io"
+    fi
+  done
+}
+
+check_logic_crates() {
+  local dir name file sources hit
+  for dir in crates/*/; do
+    [[ -d $dir ]] || continue
+    name=$(basename "$dir")
+    contains "$name" "${IO_CRATES[@]}" && continue
+    [[ -f $dir/Cargo.toml ]] && depends_on_io "$name" "$dir/Cargo.toml"
+    sources=()
+    while IFS= read -r file; do sources+=("$file"); done < <(rust_sources "${dir%/}/src")
+    while IFS= read -r hit; do
+      finding "$hit (forbidden I/O in a logic crate)"
+    done < <(forbidden_io ${sources[@]+"${sources[@]}"})
+  done
+}
+
+check_tools() {
+  local dir name file sources=() hit
+  for dir in tools/*/; do
+    [[ -d $dir ]] || continue
+    name=$(basename "$dir")
+    contains "$name" "${IO_TOOLS[@]}" && continue
+    [[ -f $dir/Cargo.toml ]] && depends_on_io "$name" "$dir/Cargo.toml"
+    sources=()
+    while IFS= read -r file; do
+      contains "$file" "${SIM_IO_FILES[@]}" || sources+=("$file")
+    done < <(rust_sources "${dir%/}/src")
+    while IFS= read -r hit; do
+      finding "$hit (forbidden I/O in a logic tool)"
+    done < <(forbidden_io ${sources[@]+"${sources[@]}"})
+  done
+}
+
+# The Multi-Raft engine knows nothing of Git (001 FR-005): none of the origin's Git types or
+# mechanisms appear in its sources.
+check_engine_has_no_git() {
+  local dir=crates/teseladb-multiraft/src
+  [[ -d $dir ]] || return 0
+  grep_findings "Git type or mechanism in the Multi-Raft engine" < <(
+    grep -RnwE 'Oid|ObjectType|RepoId|PartitionId|RefValue|anchor|fork' "$dir" || true
+  )
+}
+
+# The test state machine is never linked into the binary (001 FR-008): only tools and dev
+# dependencies may use it.
+check_testkv_not_linked() {
+  local manifest name
+  for manifest in crates/*/Cargo.toml; do
+    [[ -f $manifest ]] || continue
+    name=$(basename "$(dirname "$manifest")")
+    if awk '
+      /^\[/ { section = $0 }
+      section ~ /^\[(target\..*\.)?dependencies\]$/ && /^[[:space:]]*teseladb-testkv[[:space:]]*=/ { found = 1 }
+      END { exit !found }
+    ' "$manifest"; then
+      finding "$name depends on teseladb-testkv (only dev-dependencies and tools may)"
+    fi
+  done
+}
+
+check_unsafe_forbidden() {
+  local root crate
+  for root in crates/*/src/lib.rs crates/*/src/main.rs tools/*/src/lib.rs tools/*/src/main.rs; do
+    [[ -f $root ]] || continue
+    crate=$(basename "$(dirname "$(dirname "$root")")")
+    contains "$crate" "${UNSAFE_CRATES[@]}" && continue
+    grep -q '^#!\[forbid(unsafe_code)\]' "$root" || finding "$root: no #![forbid(unsafe_code)]"
+  done
+}
+
+check_hot_path_locks() {
+  local crate files=()
+  for crate in "${HOT_CRATES[@]}"; do
+    [[ -d crates/$crate/src ]] || continue
+    while IFS= read -r f; do files+=("$f"); done < <(find "crates/$crate/src" -name '*.rs' | sort)
+  done
+  [[ ${#files[@]} -gt 0 ]] || return 0
+  # The code of each line without its comment.
+  grep_findings "a lock in a hot-path crate" < <(awk '
+    { code = $0; sub(/\/\/.*/, "", code) }
+    code ~ /(^|[^[:alnum:]_])(Mutex|RwLock|Condvar)([^[:alnum:]_]|$)/ {
+      printf "%s:%d: %s\n", FILENAME, FNR, $0
+    }
+  ' "${files[@]}")
+}
+
+check_origin_word() {
+  grep_findings "the origin project is only named in ORIGIN.md" < <(grep -RIni --exclude-dir=target --exclude-dir=.git --exclude-dir=.tools \
+    --exclude=ORIGIN.md -e "$ORIGIN_WORD" . || true)
+}
+
+check_lock
+check_logic_crates
+check_tools
+check_engine_has_no_git
+check_testkv_not_linked
+check_unsafe_forbidden
+check_hot_path_locks
+check_origin_word
+
+[[ $fail -eq 0 ]] || exit 1
+echo "check-deps: OK"

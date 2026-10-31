@@ -1,0 +1,10 @@
+# IANA list of top-level domains for the uaxUrlEmail tokenizer of the search analyzers (011 T007),
+# version 2026103000, downloaded on 30-10-2026. The copy the crate embeds is
+# crates/teseladb-search/data/tlds-alpha-by-domain.txt; tests/tlds.rs checks it against this
+# SHA-256. IANA updates the file in place, so a later download differs: refreshing the list means
+# replacing the copy and this line in the same change. Licence: the IANA and IETF joint statement
+# of 10-11-2021 (https://www.iana.org/help/licensing-terms) dedicates the registries to the public
+# domain under CC0 1.0.
+# source https://data.iana.org/TLD
+# dest .tools/iana
+5e4e779052eefa4d839366005b67983be85e1f785de2ef1599e1ec21c721aecb  tlds-alpha-by-domain.txt

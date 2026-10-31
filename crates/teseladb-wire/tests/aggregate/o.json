@@ -1,0 +1,8 @@
+[
+{"_id":10,"k":1,"name":"one","tags":["red","x"]},
+{"_id":11,"k":2,"name":"two","tags":["green"]},
+{"_id":12,"k":2,"name":"deux","tags":[]},
+{"_id":13,"k":null,"name":"none"},
+{"_id":14,"name":"missing","tags":["blue"]},
+{"_id":15,"k":[1,3],"name":"array","parent":10}
+]

@@ -1,0 +1,18 @@
+//! Real I/O for TeselaDB: [`FileDisk`], the executor of the engine's disk operations on real files
+//! the inter-node protocol ([`peer`], [`handshake`]) and the per-core event loop ([`runtime`])
+//! with its pieces.
+#![cfg_attr(coverage, feature(coverage_attribute))]
+#![forbid(unsafe_code)]
+
+pub mod disk_thread;
+mod file_disk;
+pub mod handshake;
+pub mod mailbox;
+pub mod peer;
+pub mod poller;
+pub mod runtime;
+pub mod secure;
+pub mod spsc;
+pub mod timer;
+
+pub use file_disk::FileDisk;

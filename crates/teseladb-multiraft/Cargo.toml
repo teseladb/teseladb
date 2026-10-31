@@ -1,0 +1,18 @@
+[package]
+name = "teseladb-multiraft"
+version = "0.1.0"
+description = "TeselaDB's per-core Multi-Raft engine, sans-I/O: Raft groups over the core's log, proposals, lease and ReadIndex reads, chunked snapshots and session forwarding, for any StateMachine."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+teseladb-hlc = { path = "../teseladb-hlc" }
+teseladb-types = { path = "../teseladb-types" }
+teseladb-raft = { path = "../teseladb-raft" }
+teseladb-raftlog = { path = "../teseladb-raftlog" }
+teseladb-hash = { path = "../teseladb-hash" }

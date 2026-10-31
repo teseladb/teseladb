@@ -1,0 +1,14 @@
+[package]
+name = "teseladb-hash"
+version = "0.1.0"
+description = "TeselaDB's hash functions and checksums: CRC32C, SHA-1, SHA-256 and Adler-32, portable and hardware-accelerated."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+teseladb-types = { path = "../teseladb-types" }

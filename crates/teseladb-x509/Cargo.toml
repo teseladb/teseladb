@@ -1,0 +1,17 @@
+[package]
+name = "teseladb-x509"
+version = "0.1.0"
+description = "X.509 certificates of TeselaDB: DER, PEM, chain validation, CRL and certificate generation."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+teseladb-crypto = { path = "../teseladb-crypto" }
+
+[dev-dependencies]
+teseladb-types = { path = "../teseladb-types" }

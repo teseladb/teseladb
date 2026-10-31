@@ -1,0 +1,379 @@
+{"$arrayElemAt":["$a",0]}	=> {"x":{"$numberInt":"1"}}
+{"$arrayElemAt":["$a",-1]}	=> {"x":{"$numberInt":"3"}}
+{"$arrayElemAt":["$a",5]}	=> {}
+{"$arrayElemAt":["$a",-5]}	=> {}
+{"$arrayElemAt":["$a",{"$numberLong":"1"}]}	=> {"x":{"$numberInt":"2"}}
+{"$arrayElemAt":["$a",{"$numberDouble":"1.0"}]}	=> {"x":{"$numberInt":"2"}}
+{"$arrayElemAt":["$a",1.5]}	!! 28691	$arrayElemAt's second argument must be representable as a 32-bit integer: 1.5
+{"$arrayElemAt":["$a",{"$numberDecimal":"2"}]}	=> {"x":{"$numberInt":"3"}}
+{"$arrayElemAt":["$nope",0]}	=> {"x":null}
+{"$arrayElemAt":["$n",0]}	=> {"x":null}
+{"$arrayElemAt":["$a","$n"]}	=> {"x":null}
+{"$arrayElemAt":["$s",0]}	!! 28689	$arrayElemAt's first argument must be an array, but is string
+{"$arrayElemAt":["$a","x"]}	!! 28690	$arrayElemAt's second argument must be a numeric value, but is string
+{"$arrayElemAt":["$a"]}	!! 16020	Expression $arrayElemAt takes exactly 2 arguments. 1 were passed in.
+{"$arrayElemAt":["$a",{"$numberLong":"9223372036854775807"}]}	!! 28691	$arrayElemAt's second argument must be representable as a 32-bit integer: 9.22337e+18
+{"$first":"$a"}	=> {"x":{"$numberInt":"1"}}
+{"$first":"$e"}	=> {}
+{"$first":"$n"}	=> {"x":null}
+{"$first":"$nope"}	=> {"x":null}
+{"$first":"$s"}	!! 28689	$first's argument must be an array, but is string
+{"$first":["$a"]}	=> {"x":{"$numberInt":"1"}}
+{"$last":"$a"}	=> {"x":{"$numberInt":"3"}}
+{"$last":"$e"}	=> {}
+{"$last":"$s"}	!! 28689	$last's argument must be an array, but is string
+{"$concatArrays":["$a","$b"]}	=> {"x":[{"$numberInt":"1"},{"$numberInt":"2"},{"$numberInt":"3"},{"$numberInt":"3"},{"$numberInt":"4"}]}
+{"$concatArrays":["$a","$n"]}	=> {"x":null}
+{"$concatArrays":["$a","$nope"]}	=> {"x":null}
+{"$concatArrays":["$a","$s"]}	!! 28664	$concatArrays only supports arrays, not string
+{"$concatArrays":[]}	=> {"x":[]}
+{"$concatArrays":"$a"}	=> {"x":[{"$numberInt":"1"},{"$numberInt":"2"},{"$numberInt":"3"}]}
+{"$concatArrays":[[1],[[2]]]}	=> {"x":[{"$numberInt":"1"},[{"$numberInt":"2"}]]}
+{"$in":[2,"$a"]}	=> {"x":true}
+{"$in":[9,"$a"]}	=> {"x":false}
+{"$in":[null,"$mix"]}	=> {"x":true}
+{"$in":[2,"$s"]}	!! 40081	$in requires an array as a second argument, found: string
+{"$in":[2,"$nope"]}	!! 40081	$in requires an array as a second argument, found: missing
+{"$in":["$nope","$a"]}	=> {"x":false}
+{"$in":[2]}	!! 16020	Expression $in takes exactly 2 arguments. 1 were passed in.
+{"$indexOfArray":["$a",2]}	=> {"x":{"$numberInt":"1"}}
+{"$indexOfArray":["$a",9]}	=> {"x":{"$numberInt":"-1"}}
+{"$indexOfArray":["$a",2,2]}	=> {"x":{"$numberInt":"-1"}}
+{"$indexOfArray":["$a",3,0,2]}	=> {"x":{"$numberInt":"-1"}}
+{"$indexOfArray":["$a",3,0,3]}	=> {"x":{"$numberInt":"2"}}
+{"$indexOfArray":["$a",1,5]}	=> {"x":{"$numberInt":"-1"}}
+{"$indexOfArray":["$n",1]}	=> {"x":null}
+{"$indexOfArray":["$nope",1]}	=> {"x":null}
+{"$indexOfArray":["$s",1]}	!! 40090	$indexOfArray requires an array as a first argument, found: string
+{"$indexOfArray":["$a",1,-1]}	!! 9711601	$indexOfArray requires a nonnegative starting index, found: -1
+{"$indexOfArray":["$a",1,1.5]}	!! 9711600	$indexOfArrayrequires an integral starting index, found a value of type: double, with value: 1.5
+{"$indexOfArray":["$a",1,"x"]}	!! 9711600	$indexOfArrayrequires an integral starting index, found a value of type: string, with value: "x"
+{"$indexOfArray":["$a",1,0,-1]}	!! 9711601	$indexOfArray requires a nonnegative ending index, found: -1
+{"$indexOfArray":["$a"]}	!! 28667	Expression $indexOfArray takes at least 2 arguments, and at most 4, but 1 were passed in.
+{"$indexOfArray":["$a",1,{"$numberLong":"0"}]}	=> {"x":{"$numberInt":"0"}}
+{"$isArray":"$a"}	=> {"x":true}
+{"$isArray":["$a"]}	=> {"x":true}
+{"$isArray":"$s"}	=> {"x":false}
+{"$isArray":"$nope"}	=> {"x":false}
+{"$isArray":[["$a"]]}	=> {"x":true}
+{"$isArray":["$a","$b"]}	!! 16020	Expression $isArray takes exactly 1 arguments. 2 were passed in.
+{"$size":"$a"}	=> {"x":{"$numberInt":"3"}}
+{"$size":"$e"}	=> {"x":{"$numberInt":"0"}}
+{"$size":"$n"}	!! 17124	The argument to $size must be an array, but was of type: null
+{"$size":"$nope"}	!! 17124	The argument to $size must be an array, but was of type: missing
+{"$size":"$s"}	!! 17124	The argument to $size must be an array, but was of type: string
+{"$size":["$a","$b"]}	!! 16020	Expression $size takes exactly 1 arguments. 2 were passed in.
+{"$reverseArray":"$a"}	=> {"x":[{"$numberInt":"3"},{"$numberInt":"2"},{"$numberInt":"1"}]}
+{"$reverseArray":"$e"}	=> {"x":[]}
+{"$reverseArray":"$n"}	=> {"x":null}
+{"$reverseArray":"$nope"}	=> {"x":null}
+{"$reverseArray":"$s"}	!! 34435	The argument to $reverseArray must be an array, but was of type: string
+{"$slice":["$a",2]}	=> {"x":[{"$numberInt":"1"},{"$numberInt":"2"}]}
+{"$slice":["$a",-2]}	=> {"x":[{"$numberInt":"2"},{"$numberInt":"3"}]}
+{"$slice":["$a",0]}	=> {"x":[]}
+{"$slice":["$a",9]}	=> {"x":[{"$numberInt":"1"},{"$numberInt":"2"},{"$numberInt":"3"}]}
+{"$slice":["$a",1,1]}	=> {"x":[{"$numberInt":"2"}]}
+{"$slice":["$a",-2,1]}	=> {"x":[{"$numberInt":"2"}]}
+{"$slice":["$a",-9,2]}	=> {"x":[{"$numberInt":"1"},{"$numberInt":"2"}]}
+{"$slice":["$a",9,2]}	=> {"x":[]}
+{"$slice":["$a",1,0]}	!! 28729	Third argument to $slice must be positive: 0
+{"$slice":["$a",1,-1]}	!! 28729	Third argument to $slice must be positive: -1
+{"$slice":["$a",1.5]}	!! 28726	Second argument to $slice can't be represented as a 32-bit integer: 1.5
+{"$slice":["$a","x"]}	!! 28725	Second argument to $slice must be a numeric value, but is of type: string
+{"$slice":["$s",1]}	!! 28724	First argument to $slice must be an array, but is of type: string
+{"$slice":["$n",1]}	=> {"x":null}
+{"$slice":["$a","$n"]}	=> {"x":null}
+{"$slice":["$a",1,"x"]}	!! 28727	Third argument to $slice must be numeric, but is of type: string
+{"$slice":["$a"]}	!! 28667	Expression $slice takes at least 2 arguments, and at most 3, but 1 were passed in.
+{"$slice":["$a",{"$numberLong":"2"}]}	=> {"x":[{"$numberInt":"1"},{"$numberInt":"2"}]}
+{"$range":[0,5]}	=> {"x":[{"$numberInt":"0"},{"$numberInt":"1"},{"$numberInt":"2"},{"$numberInt":"3"},{"$numberInt":"4"}]}
+{"$range":[0,5,2]}	=> {"x":[{"$numberInt":"0"},{"$numberInt":"2"},{"$numberInt":"4"}]}
+{"$range":[5,0,-2]}	=> {"x":[{"$numberInt":"5"},{"$numberInt":"3"},{"$numberInt":"1"}]}
+{"$range":[0,5,-1]}	=> {"x":[]}
+{"$range":[0,0]}	=> {"x":[]}
+{"$range":[0,5,0]}	!! 34449	$range requires a non-zero step value
+{"$range":[0.5,5]}	!! 34444	$range requires a starting value that can be represented as a 32-bit integer, found value: 0.5
+{"$range":[0,5.5]}	!! 34446	$range requires an ending value that can be represented as a 32-bit integer, found value: 5.5
+{"$range":[0,"x"]}	!! 34445	$range requires a numeric ending value, found value of type: string
+{"$range":[0,5,1.5]}	!! 34448	$range requires a step value that can be represented as a 32-bit integer, found value: 1.5
+{"$range":["$n",5]}	!! 34443	$range requires a numeric starting value, found value of type: null
+{"$range":[{"$numberLong":"0"},3]}	=> {"x":[{"$numberInt":"0"},{"$numberInt":"1"},{"$numberInt":"2"}]}
+{"$range":[0,3,{"$numberLong":"1"}]}	=> {"x":[{"$numberInt":"0"},{"$numberInt":"1"},{"$numberInt":"2"}]}
+{"$range":[0,{"$numberDouble":"1.0"}]}	=> {"x":[{"$numberInt":"0"}]}
+{"$range":[0]}	!! 28667	Expression $range takes at least 2 arguments, and at most 3, but 1 were passed in.
+{"$objectToArray":"$o"}	=> {"x":[{"k":"x","v":{"$numberInt":"1"}},{"k":"y","v":{"z":{"$numberInt":"2"}}}]}
+{"$objectToArray":"$n"}	=> {"x":null}
+{"$objectToArray":"$nope"}	=> {"x":null}
+{"$objectToArray":"$a"}	!! 40390	$objectToArray requires a document input, found: array
+{"$objectToArray":{}}	=> {"x":[]}
+{"$arrayToObject":"$m"}	=> {"x":{"a":{"$numberInt":"1"},"b":{"$numberInt":"2"}}}
+{"$arrayToObject":[[["p",1],["q",2]]]}	=> {"x":{"p":{"$numberInt":"1"},"q":{"$numberInt":"2"}}}
+{"$arrayToObject":[[["p",1],["p",2]]]}	=> {"x":{"p":{"$numberInt":"2"}}}
+{"$arrayToObject":[[{"k":"p","v":1},{"k":"p","v":2}]]}	=> {"x":{"p":{"$numberInt":"2"}}}
+{"$arrayToObject":[[]]}	=> {"x":{}}
+{"$arrayToObject":"$n"}	=> {"x":null}
+{"$arrayToObject":"$nope"}	=> {"x":null}
+{"$arrayToObject":"$s"}	!! 40386	$arrayToObject requires an array input, found: string
+{"$arrayToObject":[[["p",1],{"k":"q","v":2}]]}	!! 40396	$arrayToObject requires a consistent input format. Elements mustall be arrays or all be objects. Array was detected, now found: object
+{"$arrayToObject":[[["p"]]]}	!! 40397	$arrayToObject requires an array of size 2 arrays,found array of size: 1
+{"$arrayToObject":[[[1,2]]]}	!! 40395	$arrayToObject requires an array of key-value pairs, where the key must be of type string. Found key type: int
+{"$arrayToObject":[[{"k":"p"}]]}	!! 40392	$arrayToObject requires an object keys of 'k' and 'v'. Found incorrect number of keys:1
+{"$arrayToObject":[[{"k":"p","v":1,"w":2}]]}	!! 40392	$arrayToObject requires an object keys of 'k' and 'v'. Found incorrect number of keys:3
+{"$arrayToObject":[[{"k":1,"v":1}]]}	!! 40394	$arrayToObject requires an object with keys 'k' and 'v', where the value of 'k' must be of type string. Found type: int
+{"$arrayToObject":[[1]]}	!! 40398	Unrecognised input type format for $arrayToObject: int
+{"$arrayToObject":[[["a.b",1]]]}	=> {"x":{"a.b":{"$numberInt":"1"}}}
+{"$arrayToObject":[[["$a",1]]]}	!! 40395	$arrayToObject requires an array of key-value pairs, where the key must be of type string. Found key type: array
+{"$arrayToObject":[[["p\u0000q",1]]]}	!! 4940400	Key field cannot contain an embedded null byte
+{"$arrayToObject":[[{"v":1,"k":"p"}]]}	=> {"x":{"p":{"$numberInt":"1"}}}
+{"$zip":{"inputs":["$a","$b"]}}	=> {"x":[[{"$numberInt":"1"},{"$numberInt":"3"}],[{"$numberInt":"2"},{"$numberInt":"4"}]]}
+{"$zip":{"inputs":["$a","$b"],"useLongestLength":true}}	=> {"x":[[{"$numberInt":"1"},{"$numberInt":"3"}],[{"$numberInt":"2"},{"$numberInt":"4"}],[{"$numberInt":"3"},null]]}
+{"$zip":{"inputs":["$a","$b"],"useLongestLength":true,"defaults":[0,9]}}	=> {"x":[[{"$numberInt":"1"},{"$numberInt":"3"}],[{"$numberInt":"2"},{"$numberInt":"4"}],[{"$numberInt":"3"},{"$numberInt":"9"}]]}
+{"$zip":{"inputs":["$a","$b"],"defaults":[0,9]}}	!! 34466	cannot specify defaults unless useLongestLength is true
+{"$zip":{"inputs":["$a","$n"]}}	=> {"x":null}
+{"$zip":{"inputs":["$a","$nope"]}}	=> {"x":null}
+{"$zip":{"inputs":["$a","$s"]}}	!! 34468	$zip found a non-array expression in input: "abc"
+{"$zip":{"inputs":"$a"}}	!! 34461	inputs must be an array of expressions, found string
+{"$zip":{"inputs":[]}}	!! 34465	$zip requires at least one input array
+{"$zip":{"inputs":["$a"],"useLongestLength":1}}	!! 34463	useLongestLength must be a bool, found object
+{"$zip":{"inputs":["$a","$b"],"useLongestLength":true,"defaults":[0]}}	!! 34467	defaults and inputs must have the same length
+{"$zip":{"inputs":["$a"],"defaults":"x","useLongestLength":true}}	!! 34462	defaults must be an array of expressions, found string
+{"$zip":{"x":1}}	!! 34464	$zip found an unknown argument: x
+{"$zip":{}}	!! 34465	$zip requires at least one input array
+{"$zip":[]}	!! 34460	$zip only supports an object as an argument, found array
+{"$zip":{"inputs":["$a","$b"],"useLongestLength":false}}	=> {"x":[[{"$numberInt":"1"},{"$numberInt":"3"}],[{"$numberInt":"2"},{"$numberInt":"4"}]]}
+{"$sortArray":{"input":"$a","sortBy":-1}}	=> {"x":[{"$numberInt":"3"},{"$numberInt":"2"},{"$numberInt":"1"}]}
+{"$sortArray":{"input":"$mix","sortBy":1}}	=> {"x":[null,{"$numberInt":"1"},{"$numberInt":"3"},"a",{"x":{"$numberInt":"1"}},[{"$numberInt":"2"}]]}
+{"$sortArray":{"input":"$m","sortBy":{"v":-1}}}	=> {"x":[{"k":"b","v":{"$numberInt":"2"}},{"k":"a","v":{"$numberInt":"1"}}]}
+{"$sortArray":{"input":"$m","sortBy":{"k":1,"v":-1}}}	=> {"x":[{"k":"a","v":{"$numberInt":"1"}},{"k":"b","v":{"$numberInt":"2"}}]}
+{"$sortArray":{"input":"$n","sortBy":1}}	=> {"x":null}
+{"$sortArray":{"input":"$nope","sortBy":1}}	=> {"x":null}
+{"$sortArray":{"input":"$s","sortBy":1}}	!! 2942504	The input argument to $sortArray must be an array, but was of type: string
+{"$sortArray":{"input":"$a","sortBy":2}}	!! 2942506	The $sort element value must be either 1 or -1
+{"$sortArray":{"input":"$a"}}	!! 2942503	$sortArray requires 'sortBy' to be specified
+{"$sortArray":{"sortBy":1}}	!! 2942502	$sortArray requires 'input' to be specified
+{"$sortArray":{"input":"$a","sortBy":1,"x":1}}	!! 2942501	$sortArray found an unknown argument: x
+{"$sortArray":{"input":"$a","sortBy":{}}}	!! 2942505	BadValue: The sort pattern is empty when it should be a set of fields.
+{"$sortArray":{"input":"$a","sortBy":{"v":2}}}	!! 2942505	BadValue: The sort element value must be either 1 or -1
+{"$sortArray":"$a"}	!! 2942500	$sortArray requires an object as an argument, found: string
+{"$sortArray":{"input":"$a","sortBy":"x"}}	!! 2942507	The $sort is invalid: use 1/-1 to sort the whole element, or {field:1/-1} to sort embedded fields
+{"$sortArray":{"input":"$m","sortBy":{"v":{"$meta":"textScore"}}}}	!! 2942505	BadValue: The sort element value must be either 1 or -1
+{"$firstN":{"input":"$a","n":2}}	=> {"x":[{"$numberInt":"1"},{"$numberInt":"2"}]}
+{"$firstN":{"input":"$a","n":9}}	=> {"x":[{"$numberInt":"1"},{"$numberInt":"2"},{"$numberInt":"3"}]}
+{"$firstN":{"input":"$a","n":0}}	!! 5787908	'n' must be greater than 0, found 0
+{"$firstN":{"input":"$a","n":-1}}	!! 5787908	'n' must be greater than 0, found -1
+{"$firstN":{"input":"$a","n":1.5}}	!! 5787903	Value for 'n' must be of integral type, but found 1.5
+{"$firstN":{"input":"$a","n":{"$numberDouble":"2.0"}}}	=> {"x":[{"$numberInt":"1"},{"$numberInt":"2"}]}
+{"$firstN":{"input":"$a","n":"$n"}}	!! 5787902	Value for 'n' must be of integral type, but found null
+{"$firstN":{"input":"$n","n":2}}	!! 5788200	Input must be an array
+{"$firstN":{"input":"$nope","n":2}}	!! 5788200	Input must be an array
+{"$firstN":{"input":"$s","n":2}}	!! 5788200	Input must be an array
+{"$firstN":{"input":"$a"}}	!! 5787906	Missing value for 'n'
+{"$firstN":{"n":2}}	!! 5787907	Missing value for 'input'
+{"$firstN":{"input":"$a","n":2,"x":1}}	!! 5787901	Unknown argument for 'n' operator: x
+{"$firstN":"$a"}	!! 5787801	specification must be an object; found $firstN: "$a"
+{"$firstN":{"input":"$a","n":{"$numberLong":"2"}}}	=> {"x":[{"$numberInt":"1"},{"$numberInt":"2"}]}
+{"$lastN":{"input":"$a","n":2}}	=> {"x":[{"$numberInt":"2"},{"$numberInt":"3"}]}
+{"$lastN":{"input":"$a","n":9}}	=> {"x":[{"$numberInt":"1"},{"$numberInt":"2"},{"$numberInt":"3"}]}
+{"$lastN":{"input":"$s","n":2}}	!! 5788200	Input must be an array
+{"$maxN":{"input":"$mix","n":2}}	=> {"x":[[{"$numberInt":"2"}],{"x":{"$numberInt":"1"}}]}
+{"$maxN":{"input":"$a","n":2}}	=> {"x":[{"$numberInt":"3"},{"$numberInt":"2"}]}
+{"$minN":{"input":"$mix","n":3}}	=> {"x":[{"$numberInt":"1"},{"$numberInt":"3"},"a"]}
+{"$minN":{"input":"$a","n":2}}	=> {"x":[{"$numberInt":"1"},{"$numberInt":"2"}]}
+{"$minN":{"input":[null,1],"n":2}}	=> {"x":[{"$numberInt":"1"}]}
+{"$maxN":{"input":"$n","n":2}}	!! 5788200	Input must be an array
+{"$maxN":{"input":"$s","n":2}}	!! 5788200	Input must be an array
+{"$maxN":{"input":"$a","n":0}}	!! 5787908	'n' must be greater than 0, found 0
+{"$sum":"$a"}	=> {"x":{"$numberInt":"6"}}
+{"$sum":["$a"]}	=> {"x":{"$numberInt":"6"}}
+{"$sum":[1,2,"x"]}	=> {"x":{"$numberInt":"3"}}
+{"$sum":"$mix"}	=> {"x":{"$numberInt":"4"}}
+{"$sum":"$e"}	=> {"x":{"$numberInt":"0"}}
+{"$sum":"$nope"}	=> {"x":{"$numberInt":"0"}}
+{"$sum":"$s"}	=> {"x":{"$numberInt":"0"}}
+{"$sum":[1,{"$numberLong":"2"}]}	=> {"x":{"$numberLong":"3"}}
+{"$sum":[1,2.5]}	=> {"x":{"$numberDouble":"3.5"}}
+{"$sum":[1,{"$numberDecimal":"2"}]}	=> {"x":{"$numberDecimal":"3"}}
+{"$sum":[2147483647,1]}	=> {"x":{"$numberLong":"2147483648"}}
+{"$sum":[{"$numberLong":"9223372036854775807"},1]}	=> {"x":{"$numberDouble":"9223372036854775808.0"}}
+{"$sum":"$i"}	=> {"x":{"$numberInt":"5"}}
+{"$sum":["$a","$b"]}	=> {"x":{"$numberInt":"0"}}
+{"$avg":"$a"}	=> {"x":{"$numberDouble":"2.0"}}
+{"$avg":[1,2]}	=> {"x":{"$numberDouble":"1.5"}}
+{"$avg":"$mix"}	=> {"x":{"$numberDouble":"2.0"}}
+{"$avg":"$e"}	=> {"x":null}
+{"$avg":"$s"}	=> {"x":null}
+{"$avg":[{"$numberDecimal":"1"},2]}	=> {"x":{"$numberDecimal":"1.5"}}
+{"$avg":[{"$numberLong":"1"},{"$numberLong":"2"}]}	=> {"x":{"$numberDouble":"1.5"}}
+{"$avg":"$i"}	=> {"x":{"$numberDouble":"5.0"}}
+{"$max":"$a"}	=> {"x":{"$numberInt":"3"}}
+{"$max":"$mix"}	=> {"x":[{"$numberInt":"2"}]}
+{"$max":"$e"}	=> {"x":null}
+{"$max":[1,"a"]}	=> {"x":"a"}
+{"$max":"$i"}	=> {"x":{"$numberInt":"5"}}
+{"$max":[null,"$nope"]}	=> {"x":null}
+{"$min":"$a"}	=> {"x":{"$numberInt":"1"}}
+{"$min":"$mix"}	=> {"x":{"$numberInt":"1"}}
+{"$min":[null,1]}	=> {"x":{"$numberInt":"1"}}
+{"$min":"$e"}	=> {"x":null}
+{"$min":"$nope"}	=> {"x":null}
+{"$stdDevPop":"$a"}	=> {"x":{"$numberDouble":"0.816496580927726"}}
+{"$stdDevPop":[1,2,3,4]}	=> {"x":{"$numberDouble":"1.118033988749895"}}
+{"$stdDevPop":"$e"}	=> {"x":null}
+{"$stdDevPop":"$i"}	=> {"x":{"$numberDouble":"0.0"}}
+{"$stdDevSamp":"$a"}	=> {"x":{"$numberDouble":"1.0"}}
+{"$stdDevSamp":[1]}	=> {"x":null}
+{"$stdDevSamp":"$mix"}	=> {"x":{"$numberDouble":"1.4142135623730951"}}
+{"$stdDevPop":[{"$numberDecimal":"1"},{"$numberDecimal":"2"}]}	=> {"x":{"$numberDouble":"0.5"}}
+{"$median":{"input":"$a","method":"approximate"}}	=> {"x":{"$numberDouble":"2.0"}}
+{"$median":{"input":[1,2,3,4],"method":"approximate"}}	=> {"x":{"$numberDouble":"2.0"}}
+{"$median":{"input":"$mix","method":"approximate"}}	=> {"x":{"$numberDouble":"1.0"}}
+{"$median":{"input":"$e","method":"approximate"}}	=> {"x":null}
+{"$median":{"input":"$i","method":"approximate"}}	=> {"x":{"$numberDouble":"5.0"}}
+{"$median":{"input":"$a","method":"discrete"}}	!! 2	Currently only 'approximate' can be used as a percentile 'method'.
+{"$median":{"input":"$a","method":"continuous"}}	!! 2	Currently only 'approximate' can be used as a percentile 'method'.
+{"$median":{"input":[1,2,3,4],"method":"continuous"}}	!! 2	Currently only 'approximate' can be used as a percentile 'method'.
+{"$median":{"input":"$a"}}	!! 40414	BSON field '$median.method' is missing but a required field
+{"$median":{"input":"$a","method":"x"}}	!! 2	Currently only 'approximate' can be used as a percentile 'method'.
+{"$median":"$a"}	!! 7436201	specification must be an object; found $median: "$a"
+{"$median":{"input":"$s","method":"approximate"}}	=> {"x":null}
+{"$percentile":{"input":"$a","p":[0.5,0.9],"method":"approximate"}}	=> {"x":[{"$numberDouble":"2.0"},{"$numberDouble":"3.0"}]}
+{"$percentile":{"input":[1,2,3,4,5,6,7,8,9,10],"p":[0,0.1,0.25,0.5,0.75,0.95,1],"method":"approximate"}}	=> {"x":[{"$numberDouble":"1.0"},{"$numberDouble":"1.0"},{"$numberDouble":"3.0"},{"$numberDouble":"5.0"},{"$numberDouble":"8.0"},{"$numberDouble":"10.0"},{"$numberDouble":"10.0"}]}
+{"$percentile":{"input":[1,2,3,4,5,6,7,8,9,10],"p":[0,0.1,0.25,0.5,0.75,0.95,1],"method":"continuous"}}	!! 2	Currently only 'approximate' can be used as a percentile 'method'.
+{"$percentile":{"input":[1,2,3,4,5,6,7,8,9,10],"p":[0.25,0.5],"method":"discrete"}}	!! 2	Currently only 'approximate' can be used as a percentile 'method'.
+{"$percentile":{"input":"$a","p":[1.5],"method":"approximate"}}	!! 7750303	The $percentile 'p' field must be an array of numbers from [0.0, 1.0], but found: 1.5
+{"$percentile":{"input":"$a","p":0.5,"method":"approximate"}}	!! 7750301	The $percentile 'p' field must be an array of numbers from [0.0, 1.0], but found: 0.5
+{"$percentile":{"input":"$a","p":[],"method":"approximate"}}	!! 7750301	The $percentile 'p' field must be an array of numbers from [0.0, 1.0], but found: []
+{"$percentile":{"input":"$a","p":["x"],"method":"approximate"}}	!! 7750302	The $percentile 'p' field must be an array of numbers from [0.0, 1.0], but found: "x"
+{"$percentile":{"input":"$a","method":"approximate"}}	!! 40414	BSON field '$percentile.p' is missing but a required field
+{"$percentile":{"input":"$e","p":[0.5],"method":"approximate"}}	=> {"x":[null]}
+{"$percentile":{"input":"$a","p":[{"$numberDecimal":"0.5"}],"method":"approximate"}}	=> {"x":[{"$numberDouble":"2.0"}]}
+{"$percentile":{"input":[{"$numberDecimal":"1"},2.5,{"$numberLong":"3"}],"p":[0.5],"method":"approximate"}}	=> {"x":[{"$numberDouble":"2.5"}]}
+{"$top":{"output":"$a","sortBy":{"x":1}}}	!! 7212114	$top found an unknown argument: output
+{"$topN":{"n":2,"output":"$a","sortBy":{"x":1}}}	!! 721219	$topN found an unknown argument: output
+{"$bottom":{"output":"$a","sortBy":{"x":1}}}	!! 7212123	$bottom found an unknown argument: output
+{"$bottomN":{"n":2,"output":"$a","sortBy":{"x":1}}}	!! 7212118	$bottomN found an unknown argument: output
+{"$percentile":{"input":{"$range":[0,1000]},"p":[0.001,0.01,0.1,0.333,0.5,0.9,0.99,0.999],"method":"approximate"}}	=> {"x":[{"$numberDouble":"0.0"},{"$numberDouble":"9.0"},{"$numberDouble":"99.0"},{"$numberDouble":"332.0"},{"$numberDouble":"499.0"},{"$numberDouble":"899.0"},{"$numberDouble":"989.0"},{"$numberDouble":"998.0"}]}
+{"$percentile":{"input":{"$reverseArray":{"$range":[0,5000,3]}},"p":[0.001,0.01,0.1,0.333,0.5,0.9,0.99,0.999],"method":"approximate"}}	=> {"x":[{"$numberDouble":"3.0"},{"$numberDouble":"48.0"},{"$numberDouble":"498.0"},{"$numberDouble":"1665.0"},{"$numberDouble":"2499.0"},{"$numberDouble":"4500.0"},{"$numberDouble":"4950.0"},{"$numberDouble":"4995.0"}]}
+{"$median":{"input":{"$map":{"input":{"$range":[0,20001]},"in":{"$mod":[{"$multiply":["$$this",7919]},20011]}}},"method":"approximate"}}	=> {"x":{"$numberDouble":"10006.0"}}
+{"$percentile":{"input":{"$map":{"input":{"$range":[0,20001]},"in":{"$mod":[{"$multiply":["$$this",7919]},20011]}}},"p":[0.001,0.01,0.1,0.333,0.5,0.9,0.99,0.999],"method":"approximate"}}	=> {"x":[{"$numberDouble":"20.0"},{"$numberDouble":"200.0"},{"$numberDouble":"2002.0"},{"$numberDouble":"6664.0"},{"$numberDouble":"10006.0"},{"$numberDouble":"18010.0"},{"$numberDouble":"19810.0"},{"$numberDouble":"19990.0"}]}
+{"$percentile":{"input":[1,{"$numberDouble":"NaN"},2],"p":[0,0.5,1],"method":"approximate"}}	=> {"x":[{"$numberDouble":"1.0"},{"$numberDouble":"1.0"},{"$numberDouble":"2.0"}]}
+{"$percentile":{"input":[1,{"$numberDouble":"-Infinity"},{"$numberDouble":"Infinity"}],"p":[0,0.5,1],"method":"approximate"}}	=> {"x":[{"$numberDouble":"-Infinity"},{"$numberDouble":"1.0"},{"$numberDouble":"Infinity"}]}
+{"$minN":{"input":"$a","n":{"$numberDecimal":"2"}}}	=> {"x":[{"$numberInt":"1"},{"$numberInt":"2"}]}
+{"$minN":{"input":"$a","n":{"$numberLong":"2"}}}	=> {"x":[{"$numberInt":"1"},{"$numberInt":"2"}]}
+{"$sum":[1,{"$numberDouble":"NaN"}]}	=> {"x":{"$numberDouble":"NaN"}}
+{"$sum":[{"$numberDecimal":"1"},{"$numberDouble":"0.1"}]}	=> {"x":{"$numberDecimal":"1.100000000000000005551115123125783"}}
+{"$avg":[2147483647,2147483647]}	=> {"x":{"$numberDouble":"2147483647.0"}}
+{"$avg":[{"$numberLong":"9223372036854775807"},{"$numberLong":"9223372036854775807"}]}	=> {"x":{"$numberDouble":"9223372036854775808.0"}}
+{"$max":[{"$numberDouble":"NaN"},1]}	=> {"x":{"$numberInt":"1"}}
+{"$min":[{"$numberDouble":"NaN"},1]}	=> {"x":{"$numberDouble":"NaN"}}
+{"$stdDevPop":[1,"x",3]}	=> {"x":{"$numberDouble":"1.0"}}
+{"$stdDevSamp":[{"$numberDouble":"NaN"},1]}	=> {"x":{"$numberDouble":"NaN"}}
+{"$stdDevPop":[{"$numberDouble":"Infinity"},1]}	=> {"x":{"$numberDouble":"NaN"}}
+{"$topN":{"n":2,"input":"$a","sortBy":{"x":1}}}	=> {"x":[{"$numberInt":"1"},{"$numberInt":"2"}]}
+{"$sum":[]}	=> {"x":{"$numberInt":"0"}}
+{"$avg":[]}	=> {"x":null}
+{"$max":[]}	=> {"x":null}
+{"$sum":[[1,2]]}	=> {"x":{"$numberInt":"3"}}
+{"$sum":[[1,2],3]}	=> {"x":{"$numberInt":"3"}}
+{"$sum":[1,{"$numberLong":"2"},2.5]}	=> {"x":{"$numberDouble":"5.5"}}
+{"$sum":[{"$numberLong":"9223372036854775807"},{"$numberLong":"1"},{"$numberLong":"-1"}]}	=> {"x":{"$numberLong":"9223372036854775807"}}
+{"$sum":[1e308,1e308,-1e308]}	=> {"x":{"$numberDouble":"Infinity"}}
+{"$avg":[1e308,1e308]}	=> {"x":{"$numberDouble":"Infinity"}}
+{"$topN":"$a"}	!! 721218	$topN requires an object as an argument, found: string
+{"$topN":{"n":1,"sortBy":{"v":1}}}	!! 7212111	$topN requires 'input' to be specified
+{"$topN":{"n":1,"input":"$s","sortBy":{"v":1}}}	!! 721211	The input argument to $topN must be an array, but was of type: string
+{"$topN":{"n":1,"input":"$e","sortBy":{"v":1}}}	=> {"x":[]}
+{"$topN":{"n":1,"input":"$n","sortBy":{"v":1}}}	=> {"x":null}
+{"$topN":{"n":-1,"input":"$a","sortBy":{"v":1}}}	!! 721212	$topN requires 'n' to be non-negative
+{"$topN":{"n":"$n","input":"$a","sortBy":{"v":1}}}	=> {"x":null}
+{"$topN":{"n":{"$numberLong":"2"},"input":"$a","sortBy":{"v":1}}}	=> {"x":[{"$numberInt":"1"},{"$numberInt":"2"}]}
+{"$topN":{"n":{"$numberDouble":"2.0"},"input":"$a","sortBy":{"v":1}}}	=> {"x":[{"$numberInt":"1"},{"$numberInt":"2"}]}
+{"$topN":{"n":2,"input":"$a"}}	=> {"x":[{"$numberInt":"1"},{"$numberInt":"2"}]}
+{"$bottom":"$a"}	!! 7212122	$bottom requires an object as an argument, found: string
+{"$bottom":{"sortBy":{"v":1}}}	!! 7212124	$bottom requires 'input' to be specified
+{"$bottom":{"input":"$s","sortBy":{"v":1}}}	!! 721217	The input argument to $bottom must be an array, but was of type: string
+{"$bottom":{"input":"$e"}}	=> {"x":null}
+{"$bottomN":{"input":"$a","sortBy":{"v":1}}}	!! 7212119	$bottomN requires 'n' to be specified
+{"$bottomN":{"n":1,"sortBy":{"v":1}}}	!! 7212120	$bottomN requires 'input' to be specified
+{"$bottomN":{"n":1,"input":"$s","sortBy":{"v":1}}}	!! 721215	The input argument to $bottomN must be an array, but was of type: string
+{"$bottomN":{"n":"x","input":"$a","sortBy":{"v":1}}}	!! 721214	The 'n' argument to $bottomN must be an integer, but was of type: string
+{"$bottomN":{"n":2,"input":"$mix","sortBy":{"x":1}}}	=> {"x":[[{"$numberInt":"2"}],{"x":{"$numberInt":"1"}}]}
+{"$bottomN":{"n":2,"input":"$mix"}}	=> {"x":[{"x":{"$numberInt":"1"}},[{"$numberInt":"2"}]]}
+{"$topN":{"n":3,"input":"$mix","sortBy":1}}	=> {"x":[null,{"$numberInt":"1"},{"$numberInt":"3"}]}
+{"$top":{"input":"$a","sortBy":-1}}	=> {"x":{"$numberInt":"3"}}
+{"$top":{"input":"$a","sortBy":"x"}}	!! 2942507	The $sort is invalid: use 1/-1 to sort the whole element, or {field:1/-1} to sort embedded fields
+{"$top":{"input":"$a","sortBy":2}}	!! 2942506	The $sort element value must be either 1 or -1
+{"$median":{"input":"$a","method":"approximate","p":[0.5]}}	!! 40415	BSON field '$median.p' is an unknown field.
+{"$median":{}}	!! 40414	BSON field '$median.input' is missing but a required field
+{"$percentile":{}}	!! 40414	BSON field '$percentile.input' is missing but a required field
+{"$percentile":{"input":"$a","p":[0.5]}}	!! 40414	BSON field '$percentile.method' is missing but a required field
+{"$percentile":{"input":"$a","p":[{"$add":[0.1,0.2]}],"method":"approximate"}}	=> {"x":[{"$numberDouble":"1.0"}]}
+{"$percentile":{"input":"$a","p":[0.5,"$i"],"method":"approximate"}}	!! 7750300	The $percentile 'p' field must be an array of constant values, but found value: [ 0.5, "$i" ].
+{"$percentile":{"input":"$a","p":[{"$numberDecimal":"2"}],"method":"approximate"}}	!! 7750303	The $percentile 'p' field must be an array of numbers from [0.0, 1.0], but found: 2
+{"$percentile":{"input":"$a","p":[null],"method":"approximate"}}	!! 7750302	The $percentile 'p' field must be an array of numbers from [0.0, 1.0], but found: null
+{"$zip":{"inputs":["$a"],"defaults":[1],"useLongestLength":true,"x":1}}	!! 34464	$zip found an unknown argument: x
+{"$zip":{"inputs":[1],"useLongestLength":true}}	!! 34468	$zip found a non-array expression in input: 1
+{"$sortArray":{"input":"$a","sortBy":0}}	!! 2942506	The $sort element value must be either 1 or -1
+{"$sortArray":{"input":"$a","sortBy":{"v":1,"w":0}}}	!! 2942505	BadValue: The sort element value must be either 1 or -1
+{"$sortArray":{"input":"$a","sortBy":{"v":"x"}}}	!! 2942505	BadValue: The sort element value must be either 1 or -1
+{"$sortArray":{"input":"$a","sortBy":{"v":{"$numberDouble":"1.0"}}}}	=> {"x":[{"$numberInt":"1"},{"$numberInt":"2"},{"$numberInt":"3"}]}
+{"$sortArray":{"input":"$a","sortBy":{"$numberDecimal":"1"}}}	=> {"x":[{"$numberInt":"1"},{"$numberInt":"2"},{"$numberInt":"3"}]}
+{"$bottomN":{"n":-1,"input":"$a","sortBy":{"v":1}}}	!! 721216	$bottomN requires 'n' to be non-negative
+{"$top":{"input":"$m","sortBy":{"v":-1}}}	=> {"x":{"k":"b","v":{"$numberInt":"2"}}}
+{"$top":{"input":"$a","sortBy":{"v":-1}}}	=> {"x":{"$numberInt":"1"}}
+{"$topN":{"n":1,"input":"$m","sortBy":{"v":-1}}}	=> {"x":[{"k":"b","v":{"$numberInt":"2"}}]}
+{"$bottom":{"input":"$m","sortBy":{"v":-1}}}	=> {"x":{"k":"a","v":{"$numberInt":"1"}}}
+{"$bottomN":{"n":5,"input":"$m","sortBy":{"v":-1}}}	=> {"x":[{"k":"b","v":{"$numberInt":"2"}},{"k":"a","v":{"$numberInt":"1"}}]}
+{"$topN":{"n":2,"input":"$mix","sortBy":{"x":1}}}	=> {"x":[{"$numberInt":"3"},"a"]}
+{"$top":{"input":"$e","sortBy":{"v":1}}}	=> {"x":null}
+{"$top":{"input":"$n","sortBy":{"v":1}}}	=> {"x":null}
+{"$top":{"input":"$s","sortBy":{"v":1}}}	!! 721213	The input argument to $top must be an array, but was of type: string
+{"$top":{"sortBy":{"v":1}}}	!! 7212115	$top requires 'input' to be specified
+{"$top":{"input":"$a","sortBy":{}}}	!! 2942505	BadValue: The sort pattern is empty when it should be a set of fields.
+{"$top":{"n":1,"input":"$a","sortBy":{"v":1}}}	!! 7212114	$top found an unknown argument: n
+{"$topN":{"input":"$a","sortBy":{"v":1}}}	!! 7212110	$topN requires 'n' to be specified
+{"$topN":{"n":0,"input":"$a","sortBy":{"v":1}}}	=> {"x":[]}
+{"$topN":{"n":"x","input":"$a","sortBy":{"v":1}}}	!! 721210	The 'n' argument to $topN must be an integer, but was of type: string
+{"$topN":{"n":1.5,"input":"$a","sortBy":{"v":1}}}	!! 721210	The 'n' argument to $topN must be an integer, but was of type: double
+{"$top":"$a"}	!! 7212113	$top requires an object as an argument, found: string
+{"$bottomN":"$a"}	!! 7212117	$bottomN requires an object as an argument, found: string
+{"$median":{"input":"$a","method":"approximate","x":1}}	!! 40415	BSON field '$median.x' is an unknown field.
+{"$median":{"method":"approximate"}}	!! 40414	BSON field '$median.input' is missing but a required field
+{"$median":{"input":"$a","method":1}}	!! 14	BSON field '$median.method' is the wrong type 'int', expected type 'string'
+{"$percentile":{"input":"$a","p":"$a","method":"approximate"}}	!! 7750300	The $percentile 'p' field must be an array of constant values, but found value: "$a".
+{"$percentile":{"input":"$a","p":[-0.1],"method":"approximate"}}	!! 7750303	The $percentile 'p' field must be an array of numbers from [0.0, 1.0], but found: -0.1
+{"$percentile":{"input":"$n","p":[0.5],"method":"approximate"}}	=> {"x":[null]}
+{"$percentile":"$a"}	!! 7436200	specification must be an object; found $percentile: "$a"
+{"$median":{"input":[{"$numberDecimal":"2.5"},1,{"$numberDecimal":"NaN"}],"method":"approximate"}}	=> {"x":{"$numberDouble":"1.0"}}
+{"$sortArray":{"input":[{"v":[3,1]},{"v":2},{"v":[]},{"w":1},{"v":null}],"sortBy":{"v":1}}}	=> {"x":[{"w":{"$numberInt":"1"}},{"v":null},{"v":{"$numberInt":"2"}},{"v":[]},{"v":[{"$numberInt":"3"},{"$numberInt":"1"}]}]}
+{"$sortArray":{"input":[{"v":[3,1]},{"v":2},{"v":[]},{"w":1},{"v":null}],"sortBy":{"v":-1}}}	=> {"x":[{"v":[{"$numberInt":"3"},{"$numberInt":"1"}]},{"v":[]},{"v":{"$numberInt":"2"}},{"w":{"$numberInt":"1"}},{"v":null}]}
+{"$sortArray":{"input":[3,1,2],"sortBy":{"v":1}}}	=> {"x":[{"$numberInt":"3"},{"$numberInt":"1"},{"$numberInt":"2"}]}
+{"$sortArray":{"input":[{"v":{"w":2}},{"v":{"w":1}}],"sortBy":{"v.w":1}}}	=> {"x":[{"v":{"w":{"$numberInt":"1"}}},{"v":{"w":{"$numberInt":"2"}}}]}
+{"$zip":{"inputs":["$a"],"useLongestLength":null}}	!! 34463	useLongestLength must be a bool, found object
+{"$zip":{"inputs":[[1],[]],"useLongestLength":true}}	=> {"x":[[{"$numberInt":"1"},null]]}
+{"$zip":{"inputs":["$a",[1]],"useLongestLength":true,"defaults":["$i","$nope"]}}	=> {"x":[[{"$numberInt":"1"},{"$numberInt":"1"}],[{"$numberInt":"2"}],[{"$numberInt":"3"}]]}
+{"$firstN":{"input":"$a","n":"x"}}	!! 5787902	Value for 'n' must be of integral type, but found "x"
+{"$firstN":{"input":"$a","n":"$nope"}}	!! 5787902	Value for 'n' must be of integral type, but found MISSING
+{"$firstN":{"input":"$a","n":{"$numberLong":"9999999999"}}}	=> {"x":[{"$numberInt":"1"},{"$numberInt":"2"},{"$numberInt":"3"}]}
+{"$firstN":{"input":"$a","n":{"$numberDecimal":"1.5"}}}	!! 5787903	Value for 'n' must be of integral type, but found 1.5
+{"$firstN":{"input":"$s","n":0}}	!! 5787908	'n' must be greater than 0, found 0
+{"$maxN":{"input":[{"$numberDouble":"NaN"},1,null,{"$undefined":true}],"n":3}}	=> {"x":[{"$numberInt":"1"},{"$numberDouble":"NaN"}]}
+{"$minN":"$a"}	!! 5787900	specification must be an object; found $minN: "$a"
+{"$sum":[{"$numberDecimal":"1"},2.5]}	=> {"x":{"$numberDecimal":"3.5"}}
+{"$sum":[{"$numberDecimal":"0"},{"$numberDouble":"1.0"}]}	=> {"x":{"$numberDecimal":"1"}}
+{"$sum":[0.1,0.2,{"$numberDecimal":"0"}]}	=> {"x":{"$numberDecimal":"0.3000000000000000166533453693773481"}}
+{"$sum":[{"$numberDecimal":"1.50"},1]}	=> {"x":{"$numberDecimal":"2.50"}}
+{"$avg":[{"$numberDecimal":"1"},{"$numberDecimal":"2"},{"$numberDecimal":"4"}]}	=> {"x":{"$numberDecimal":"2.333333333333333333333333333333333"}}
+{"$avg":[{"$numberDecimal":"1"},0.1]}	=> {"x":{"$numberDecimal":"0.5500000000000000027755575615628915"}}
+{"$avg":[{"$numberDecimal":"1"},{"$numberDecimal":"3"}]}	=> {"x":{"$numberDecimal":"2"}}
+{"$stdDevPop":[1,{"$numberDecimal":"2.5"}]}	=> {"x":{"$numberDouble":"0.75"}}
+{"$sum":[0.1,0.2,0.3]}	=> {"x":{"$numberDouble":"0.6"}}
+{"$sum":[{"$numberLong":"10000000000000000"},1,{"$numberLong":"-10000000000000000"}]}	=> {"x":{"$numberLong":"1"}}
+{"$avg":[{"$numberLong":"10000000000000000"},1,{"$numberLong":"-10000000000000000"}]}	=> {"x":{"$numberDouble":"0.0"}}
+{"$sum":[{"$numberLong":"9007199254740993"},0.5]}	=> {"x":{"$numberDouble":"9007199254740994.0"}}
+{"$max":[{"$numberDouble":"NaN"},{"$numberDecimal":"NaN"}]}	=> {"x":{"$numberDouble":"NaN"}}
+{"$min":[{"$numberLong":"1"},1]}	=> {"x":{"$numberLong":"1"}}
+{"$max":[1,{"$numberLong":"1"}]}	=> {"x":{"$numberInt":"1"}}
+{"$max":[{"$undefined":true},null]}	=> {"x":null}
+{"$sum":[true,1]}	=> {"x":{"$numberInt":"1"}}
+{"$sum":[{"$numberDecimal":"1.0"},{"$numberDecimal":"2"}]}	=> {"x":{"$numberDecimal":"3.0"}}

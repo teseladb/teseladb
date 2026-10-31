@@ -1,0 +1,29 @@
+//! TeselaDB's replicated document range (specification 005): its commands, state machine and
+//! snapshots, on its leader the latches, the read cache, mutation evaluation, reads and write
+//! acknowledgements (the host of a core), and the client that finds each range's leader.
+#![forbid(unsafe_code)]
+
+pub mod ack;
+pub mod batch;
+pub mod capped;
+pub mod checksum;
+pub mod client;
+pub mod closed_ts;
+pub mod command;
+pub mod dedup;
+pub mod gc;
+pub mod host;
+pub mod intents;
+pub mod latch;
+pub mod load;
+pub mod local_keys;
+pub mod metrics;
+pub mod mutate;
+pub mod onepc;
+pub mod push;
+pub mod read;
+pub mod relocate;
+pub mod rollback;
+pub mod sm;
+pub mod snapshot;
+pub mod tscache;

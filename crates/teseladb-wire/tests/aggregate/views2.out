@@ -1,0 +1,30 @@
+{"insert":"orders","documents":[{"_id":0,"status":"A","qty":0,"item":"x0"},{"_id":1,"status":"B","qty":3,"item":"x1"}]}	=> {"n":{"$numberInt":"2"},"ok":{"$numberDouble":"1.0"}}
+{"create":"a","viewOn":"orders","pipeline":[{"$match":{"status":"A"}}]}	=> {"ok":{"$numberDouble":"1.0"}}
+{"create":"frv","viewOn":"orders","collation":{"locale":"fr","strength":1}}	=> {"ok":{"$numberDouble":"1.0"}}
+{"find":"frv","collation":{"locale":"fr","strength":1},"sort":{"_id":1}}	=> {"cursor":{"firstBatch":[{"_id":{"$numberInt":"0"},"status":"A","qty":{"$numberInt":"0"},"item":"x0"},{"_id":{"$numberInt":"1"},"status":"B","qty":{"$numberInt":"3"},"item":"x1"}],"id":{"$numberLong":"0"},"ns":"xa.frv"},"ok":{"$numberDouble":"1.0"}}
+{"find":"frv","collation":{"locale":"fr"}}	!! 167	OptionNotSupportedOnView	Cannot override a view's default collation
+{"find":"frv","collation":{"locale":"fr","strength":1,"caseLevel":false},"sort":{"_id":1}}	=> {"cursor":{"firstBatch":[{"_id":{"$numberInt":"0"},"status":"A","qty":{"$numberInt":"0"},"item":"x0"},{"_id":{"$numberInt":"1"},"status":"B","qty":{"$numberInt":"3"},"item":"x1"}],"id":{"$numberLong":"0"},"ns":"xa.frv"},"ok":{"$numberDouble":"1.0"}}
+{"find":"a","collation":{"locale":"simple"}}	=> {"cursor":{"firstBatch":[{"_id":{"$numberInt":"0"},"status":"A","qty":{"$numberInt":"0"},"item":"x0"}],"id":{"$numberLong":"0"},"ns":"xa.a"},"ok":{"$numberDouble":"1.0"}}
+{"find":"a","collation":{"locale":"en"}}	!! 167	OptionNotSupportedOnView	Cannot override a view's default collation
+{"count":"frv","collation":{"locale":"en"}}	!! 167	OptionNotSupportedOnView	failed on: sh1 :: caused by :: Cannot override a view's default collation
+{"count":"a","collation":{"locale":"simple"}}	=> {"n":{"$numberInt":"1"},"shards":{"sh1":{"$numberInt":"1"}},"ok":{"$numberDouble":"1.0"}}
+{"find":"a","returnKey":true}	!! 168	InvalidPipelineOperator	Option returnKey not supported in aggregation.
+{"find":"a","showRecordId":true}	!! 168	InvalidPipelineOperator	Option showRecordId not supported in aggregation.
+{"find":"a","max":{"_id":3},"hint":{"_id":1}}	!! 168	InvalidPipelineOperator	Option max not supported in aggregation.
+{"find":"a","noCursorTimeout":true}	!! 168	InvalidPipelineOperator	Option noCursorTimeout not supported in aggregation.
+{"find":"a","allowPartialResults":true}	=> {"cursor":{"firstBatch":[{"_id":{"$numberInt":"0"},"status":"A","qty":{"$numberInt":"0"},"item":"x0"}],"id":{"$numberLong":"0"},"ns":"xa.a"},"ok":{"$numberDouble":"1.0"}}
+{"find":"a","singleBatch":false}	=> {"cursor":{"firstBatch":[{"_id":{"$numberInt":"0"},"status":"A","qty":{"$numberInt":"0"},"item":"x0"}],"id":{"$numberLong":"0"},"ns":"xa.a"},"ok":{"$numberDouble":"1.0"}}
+{"find":"a","returnKey":false}	=> {"cursor":{"firstBatch":[{"_id":{"$numberInt":"0"},"status":"A","qty":{"$numberInt":"0"},"item":"x0"}],"id":{"$numberLong":"0"},"ns":"xa.a"},"ok":{"$numberDouble":"1.0"}}
+{"find":"a","filter":{"$and":[{"$text":{"$search":"x"}}]}}	!! 27	IndexNotFound	text index required for $text query (no such collection 'xa.a')
+{"find":"a","singleBatch":true,"min":{"_id":1}}	!! 168	InvalidPipelineOperator	Option min not supported in aggregation.
+{"find":"a","tailable":true,"singleBatch":true}	!! 2	BadValue	cannot use tailable option with the 'singleBatch' option
+{"find":"a","filter":{"$where":"true"},"singleBatch":true}	!! 168	InvalidPipelineOperator	Option singleBatch not supported in aggregation.
+{"find":"a","filter":{"a":{"$bad":1}}}	!! 2	BadValue	unknown operator: $bad
+{"count":"a","query":{"$where":"true"}}	!! 2	BadValue	failed on: sh1 :: caused by :: $where is not allowed in this context
+{"distinct":"a","key":"item","query":{"$where":"true"}}	!! 2	BadValue	$where is not allowed in this context
+{"count":"a","query":{"$text":{"$search":"x"}}}	!! 17313	Location17313	failed on: sh1 :: caused by :: $match with $text is only allowed as the first pipeline stage
+{"distinct":"frv","key":"status"}	=> {"values":["A","B"],"ok":{"$numberDouble":"1.0"}}
+{"distinct":"a","key":""}	!! 40352	Location40352	FieldPath cannot be constructed with empty string
+{"count":"a","skip":-1}	!! 2	BadValue	BSON field 'skip' value must be >= 0, actual value '-1'
+{"find":"a","projection":{"status.$":1},"filter":{"status":"A"}}	!! 31324	Location31324	Invalid $project :: caused by :: Cannot use positional projection in aggregation projection
+{"find":"a","batchSize":1,"sort":{"_id":1},"limit":1}	=> {"cursor":{"firstBatch":[{"_id":{"$numberInt":"0"},"status":"A","qty":{"$numberInt":"0"},"item":"x0"}],"id":{"$numberLong":"0"},"ns":"xa.a"},"ok":{"$numberDouble":"1.0"}}

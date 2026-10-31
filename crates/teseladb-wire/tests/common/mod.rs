@@ -1,0 +1,704 @@
+//! An in-memory node for the command tests: a catalog applied as Group 0 applies it, the
+//! documents in a map, and every write evaluated as the range's leader evaluates it.
+
+use std::collections::BTreeMap;
+
+use teseladb_auth::users::{RoleName, UserName};
+use teseladb_bson::{Document, Value};
+use teseladb_hlc::Hlc;
+use teseladb_meta::catalog::{Catalog, CatalogCommand, CatalogError, CollectionEntry, Namespace};
+use teseladb_meta::indexes::{IndexCommand, IndexEntry, Indexes};
+use teseladb_meta::security::{Principal, Security, SecurityError, SecurityOp};
+use teseladb_range::host::Mutation;
+use teseladb_range::read::ReadConcern;
+use teseladb_session::retry::StatementKey;
+use teseladb_wire::commands::mutation::Bound;
+use teseladb_wire::commands::session::KillScope;
+use teseladb_wire::commands::{Backend, Ctx, LdapLogin, Shared, WriteOp, run};
+use teseladb_wire::error::{
+    CommandError, DATABASE_DIFFER_CASE, INTERNAL_ERROR, NAMESPACE_EXISTS, NAMESPACE_NOT_FOUND,
+    UNSATISFIABLE_WRITE_CONCERN,
+};
+
+/// The node.
+#[derive(Default)]
+pub struct Mem {
+    pub catalog: Catalog,
+    pub data: BTreeMap<Vec<u8>, Vec<u8>>,
+    pub dedup: BTreeMap<StatementKey, Vec<u8>>,
+    pub index: u64,
+    pub now: u64,
+    /// The monotonic clock in milliseconds when it differs from the cluster time `now`.
+    pub mono: Option<u64>,
+    /// The last deadline an operation set.
+    pub last_deadline: Option<u64>,
+    pub rnd: u64,
+    /// Writes the range ran (not counting answers from the idempotence records).
+    pub writes: usize,
+    /// Replicas: a `w` above it is unsatisfiable.
+    pub replicas: u32,
+    /// The next write fails with this error.
+    pub fail_next: Option<CommandError>,
+    pub shared: Shared,
+    /// The kills sent to the other nodes; with `Some`, the next one fails with that error.
+    pub killed: Vec<KillScope>,
+    pub fail_kill: Option<CommandError>,
+    /// Milliseconds the clock moves with each read of the range.
+    pub tick: u64,
+    /// The users and passwords the LDAP server of the node takes (013 PLAIN).
+    pub ldap: Vec<(String, Vec<u8>)>,
+    /// The groups of each LDAP user, as roles, when the node authorizes by LDAP (013 FR-026).
+    pub ldap_groups: Option<Vec<(String, Vec<RoleName>)>>,
+    /// `invalidateUserCache` calls.
+    pub invalidations: usize,
+    /// Lookups of the mark at which a database was added.
+    pub database_marks: usize,
+    /// What the STS answers to REFDB-AWS (status and body); `None`: unreachable.
+    pub sts: Option<(u16, Vec<u8>)>,
+    /// `oidcIdentityProviders` and the JWKS each provider gives, as JSON.
+    pub oidc: Option<(String, Vec<u8>)>,
+    /// The JWKS reads, with whether each was a refresh.
+    pub jwks_reads: Vec<bool>,
+    /// The requests sent to the STS.
+    pub sts_requests: Vec<teseladb_auth::aws::StsRequest>,
+    /// The service keys of the node's keytab (GSSAPI).
+    pub kerberos: Vec<teseladb_auth::kerberos::ServiceKey>,
+    /// Runs before each read of the range (a `killOp` from another connection).
+    pub on_scan: Option<Box<dyn FnMut()>>,
+    /// The cluster parameters.
+    pub params: BTreeMap<String, Vec<u8>>,
+    /// The last deadline the commands set.
+    pub deadline: Option<u64>,
+    /// What `process` reports.
+    pub facts: teseladb_wire::commands::diagnostics::ProcessFacts,
+    /// The users and roles of Group 0.
+    pub security: Security,
+    /// The next this many security writes find a concurrent change (`usize::MAX`: all).
+    pub fail_security_writes: usize,
+    /// A user removed just before the next security write.
+    pub drop_before_write: Option<UserName>,
+    /// A role `(db, role)` removed just before the next security write.
+    pub drop_role_before_write: Option<(String, String)>,
+    /// The node lost its authorization lease (013 FR-012).
+    pub lease_lost: bool,
+    /// The warning lines the commands logged: identifier, message, attributes.
+    pub logged: Vec<(i32, String, Document)>,
+    /// The `message` of each certificate rotation that ran.
+    pub rotations: Vec<Option<String>>,
+    /// The next certificate rotation fails with this error.
+    pub fail_rotation: Option<CommandError>,
+    /// The secondary indexes of Group 0 (009).
+    pub indexes: Indexes,
+    /// The changes of the indexes the commands made, in order (009 FR-006).
+    pub index_log: Vec<IndexCommand>,
+    /// The write concern of each write the range ran.
+    pub concerns: Vec<teseladb_range::ack::WriteConcern>,
+    /// Operations that ended.
+    pub ended: usize,
+    /// Where a second range starts: a write whose outcome reaches the other side of it from its
+    /// first key is refused as the range refuses it (009 FR-003).
+    pub split: Option<Vec<u8>>,
+    /// The transactions across ranges that committed: their identifier and writes.
+    pub txns: Vec<(Option<teseladb_range::intents::TxnId>, Vec<Vec<u8>>)>,
+    /// The next this many transactions find a conflict.
+    pub conflicts: usize,
+    /// The intents of client transactions, by transaction (008).
+    pub intents: BTreeMap<u128, Vec<(Vec<u8>, teseladb_range::intents::IntentOp)>>,
+    /// The next `PutIntents` fail with this error.
+    pub intent_errors: Vec<teseladb_range::host::RangeError>,
+    /// The next commits of a record fail with this error.
+    pub commit_errors: Vec<teseladb_range::host::RangeError>,
+    /// The coordinator's memory budget for a client transaction, when not the node's.
+    pub txn_budget: Option<usize>,
+    /// The oldest mark the history keeps: a transaction's read below it is `SnapshotTooOld`.
+    pub history_from: Option<Hlc>,
+    /// The mark of the last read of a client transaction.
+    pub txn_read_at: Option<Hlc>,
+    /// A version the next read of a client transaction meets in its uncertainty window.
+    pub uncertain_once: Option<Hlc>,
+    /// The mark the running command's reads are served at (008 FR-012).
+    pub read_mark: Option<teseladb_txn::causal::ReadMark>,
+    /// The mark of the last scan.
+    pub scanned_at: Option<Option<Hlc>>,
+    /// Value types other than a document's, by key (written by transactions).
+    pub types: BTreeMap<Vec<u8>, u8>,
+    /// Runs before each read of the range with its first key and the data: another node's
+    /// write meanwhile (009, `prepareUnique`).
+    pub on_scan_data: Option<ScanHook>,
+}
+
+/// A change of the data before a read of `[start, …)`.
+pub type ScanHook = Box<dyn FnMut(&[u8], &mut BTreeMap<Vec<u8>, Vec<u8>>)>;
+
+impl Mem {
+    pub fn new() -> Mem {
+        Mem { now: 1_700_000_000_000, replicas: 3, ..Mem::default() }
+    }
+
+    /// Runs `cmd` on database `db`; the reply or the error document.
+    pub fn run(&mut self, db: &str, cmd: Document) -> Document {
+        let shared = std::mem::take(&mut self.shared);
+        let mut ctx = Ctx { backend: self, shared: &shared, db, cmd: &cmd };
+        let r = run(&mut ctx).expect("a command of the module");
+        self.shared = shared;
+        match r {
+            Ok(d) => d,
+            Err(e) => e.to_document(),
+        }
+    }
+}
+
+impl Mem {
+    /// A read of a client transaction at `at`: what the range answers below the history.
+    fn txn_read(&mut self, at: Hlc, window: Option<Hlc>) -> Result<(), CommandError> {
+        self.txn_read_at = Some(at);
+        if let (Some(ts), Some(end)) = (self.uncertain_once, window)
+            && at < ts
+            && ts <= end
+        {
+            self.uncertain_once = None;
+            let e = teseladb_range::host::RangeError::ReadUncertain { ts };
+            let ctx = teseladb_wire::error::RangeContext {
+                retryable_write: false,
+                max_time_expired: false,
+            };
+            return Err(teseladb_wire::error::from_range(&e, ctx));
+        }
+        if self.history_from.is_some_and(|from| at < from) {
+            let e = teseladb_range::host::RangeError::SnapshotTooOld;
+            let ctx = teseladb_wire::error::RangeContext {
+                retryable_write: false,
+                max_time_expired: false,
+            };
+            return Err(teseladb_wire::error::from_range(&e, ctx));
+        }
+        Ok(())
+    }
+}
+
+impl Backend for Mem {
+    fn collection(&mut self, ns: &Namespace) -> Result<Option<CollectionEntry>, CommandError> {
+        Ok(self.catalog.get(ns).cloned())
+    }
+
+    fn collections(&mut self) -> Result<Vec<(Namespace, CollectionEntry)>, CommandError> {
+        Ok(self.catalog.collections.iter().map(|(n, c)| (n.clone(), c.clone())).collect())
+    }
+
+    fn databases(&mut self) -> Result<Vec<String>, CommandError> {
+        Ok(self.catalog.databases_by_creation())
+    }
+
+    fn database_mark(&mut self, db: &str) -> Result<Option<Hlc>, CommandError> {
+        self.database_marks += 1;
+        Ok(self.catalog.db_marks.get(db).copied())
+    }
+
+    fn catalog_write(
+        &mut self,
+        cmd: CatalogCommand,
+    ) -> Result<Option<CollectionEntry>, CommandError> {
+        self.index += 1;
+        self.catalog.apply(self.index, &cmd).map_err(|e| match e {
+            CatalogError::NamespaceExists => CommandError::new(NAMESPACE_EXISTS, "exists"),
+            CatalogError::NamespaceNotFound => CommandError::new(NAMESPACE_NOT_FOUND, "not found"),
+            CatalogError::DatabaseDifferCase => CommandError::new(DATABASE_DIFFER_CASE, "case"),
+            other => CommandError::new(INTERNAL_ERROR, format!("{other:?}")),
+        })
+    }
+
+    fn indexes(&mut self, collection: u32) -> Result<Vec<IndexEntry>, CommandError> {
+        Ok(self.indexes.of(collection).cloned().collect())
+    }
+
+    fn voters(&mut self, _: &[u8], _: &[u8]) -> Result<usize, CommandError> {
+        Ok(self.replicas as usize)
+    }
+
+    fn end_operation(&mut self) {
+        self.ended += 1;
+    }
+
+    // One range, with no intents: a read sees the committed documents.
+    fn txn_pause(&mut self) -> bool {
+        false
+    }
+
+    /// The clock jumps to the commit's mark: the wait is over at once.
+    fn txn_wait_clock(&mut self, until_ms: u64) -> bool {
+        self.now = self.now.max(until_ms);
+        true
+    }
+
+    fn txn_route(&self, _key: &[u8]) -> Option<teseladb_types::GroupId> {
+        Some(teseladb_types::GroupId(1))
+    }
+
+    fn cluster_mark(&self) -> Hlc {
+        Hlc { physical: self.now, logical: 0 }
+    }
+
+    fn txn_memory_budget(&self) -> usize {
+        self.txn_budget.unwrap_or(teseladb_txn::coordinator::MEMORY_BUDGET)
+    }
+
+    fn txn_send(
+        &mut self,
+        _g: teseladb_types::GroupId,
+        op: teseladb_range::host::TxnOp,
+    ) -> Result<teseladb_range::host::Reply, teseladb_range::host::RangeError> {
+        use teseladb_range::host::{Reply, TxnOp};
+        use teseladb_range::intents::{RecordOp, TxnRecord, TxnStatus};
+        self.now += 1;
+        let ts = Hlc { physical: self.now, logical: 0 };
+        let record = |txn, status, commit_ts| TxnRecord {
+            txn,
+            lsid: 0,
+            txn_number: 0,
+            status,
+            read_ts: ts,
+            min_commit_ts: ts,
+            commit_ts,
+            heartbeat_ts: ts,
+            spans: Vec::new(),
+        };
+        match op {
+            TxnOp::PutIntents { txn, writes, .. } => {
+                if !self.intent_errors.is_empty() {
+                    return Err(self.intent_errors.remove(0));
+                }
+                let mine = self.intents.entry(txn.0).or_default();
+                for (k, w) in writes {
+                    mine.retain(|(m, _)| *m != k);
+                    mine.push((k, w));
+                }
+                Ok(Reply::Intents { ts })
+            }
+            TxnOp::EndTxn { txn, op: RecordOp::Commit { ts: at, .. } } => {
+                if !self.commit_errors.is_empty() {
+                    return Err(self.commit_errors.remove(0));
+                }
+                Ok(Reply::Record(record(txn, TxnStatus::Committed, at.max(ts))))
+            }
+            TxnOp::EndTxn { txn, op: RecordOp::Abort { .. } } => {
+                Ok(Reply::Record(record(txn, TxnStatus::Aborted, ts)))
+            }
+            TxnOp::EndTxn { txn, .. } | TxnOp::PushTxn { txn, .. } => {
+                Ok(Reply::Record(record(txn, TxnStatus::Pending, ts)))
+            }
+            TxnOp::ResolveIntents { txn, status, .. } => {
+                for (k, w) in self.intents.remove(&txn.0).unwrap_or_default() {
+                    if status != TxnStatus::Committed {
+                        continue;
+                    }
+                    match w {
+                        teseladb_range::intents::IntentOp::Put { value_type, value } => {
+                            self.types.insert(k.clone(), value_type);
+                            self.data.insert(k, value);
+                        }
+                        teseladb_range::intents::IntentOp::Delete => {
+                            self.types.remove(&k);
+                            self.data.remove(&k);
+                        }
+                    }
+                }
+                Ok(Reply::Intents { ts })
+            }
+            TxnOp::OnePhase { .. } => Ok(Reply::Intents { ts }),
+        }
+    }
+
+    // The committed documents, under the reader's own intents.
+    fn txn_get(
+        &mut self,
+        key: &[u8],
+        at: Hlc,
+        view: &teseladb_range::push::TxnView,
+        uncertain_to: Option<teseladb_hlc::Hlc>,
+    ) -> Result<Option<(u8, Vec<u8>)>, CommandError> {
+        use teseladb_range::intents::IntentOp;
+        self.txn_read(at, uncertain_to)?;
+        let own = view.own.and_then(|t| self.intents.get(&t.0));
+        if let Some((_, w)) = own.and_then(|o| o.iter().find(|(k, _)| k.as_slice() == key)) {
+            return Ok(match w {
+                IntentOp::Put { value_type, value } => Some((*value_type, value.clone())),
+                IntentOp::Delete => None,
+            });
+        }
+        let type_of = self.types.get(key).copied().unwrap_or(1);
+        Ok(self.data.get(key).map(|v| (type_of, v.clone())))
+    }
+
+    fn txn_scan(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        limit: usize,
+        at: Hlc,
+        view: &teseladb_range::push::TxnView,
+        uncertain_to: Option<teseladb_hlc::Hlc>,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
+        use teseladb_range::intents::IntentOp;
+        self.txn_read(at, uncertain_to)?;
+        let mut rows: BTreeMap<Vec<u8>, Vec<u8>> = self
+            .data
+            .range(start.to_vec()..end.to_vec())
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let own = view.own.and_then(|t| self.intents.get(&t.0)).cloned().unwrap_or_default();
+        for (k, w) in own.into_iter().filter(|(k, _)| start <= k.as_slice() && k.as_slice() < end) {
+            match w {
+                IntentOp::Put { value, .. } => rows.insert(k, value),
+                IntentOp::Delete => rows.remove(&k),
+            };
+        }
+        Ok(rows.into_iter().take(limit).collect())
+    }
+
+    fn read_versions(
+        &mut self,
+        keys: &[Vec<u8>],
+    ) -> Result<teseladb_wire::commands::Versions, CommandError> {
+        self.now += 1;
+        let ts = Hlc { physical: self.now, logical: 0 };
+        let type_of = |k: &[u8]| self.types.get(k).copied().unwrap_or(1);
+        Ok((ts, keys.iter().map(|k| self.data.get(k).map(|v| (type_of(k), v.clone()))).collect()))
+    }
+
+    fn transact(
+        &mut self,
+        _: Hlc,
+        writes: Vec<(Vec<u8>, teseladb_range::intents::IntentOp)>,
+        txn: Option<teseladb_range::intents::TxnId>,
+    ) -> Result<Hlc, CommandError> {
+        if self.conflicts > 0 {
+            self.conflicts -= 1;
+            return Err(CommandError::new(teseladb_wire::error::WRITE_CONFLICT, "conflict"));
+        }
+        self.now += 1;
+        let keys = writes.iter().map(|(k, _)| k.clone()).collect();
+        for (k, op) in writes {
+            match op {
+                teseladb_range::intents::IntentOp::Put { value_type, value } => {
+                    self.types.insert(k.clone(), value_type);
+                    self.data.insert(k, value);
+                }
+                teseladb_range::intents::IntentOp::Delete => {
+                    self.types.remove(&k);
+                    self.data.remove(&k);
+                }
+            }
+        }
+        self.txns.push((txn, keys));
+        Ok(Hlc { physical: self.now, logical: 0 })
+    }
+
+    fn index_write(&mut self, cmd: IndexCommand) -> Result<(), CommandError> {
+        self.index_log.push(cmd.clone());
+        let live: Vec<u32> = self.catalog.collections.values().map(|c| c.id).collect();
+        self.indexes.apply(&cmd, |c| live.contains(&c)).map(drop).map_err(|e| match e {
+            CatalogError::NamespaceNotFound => CommandError::new(NAMESPACE_NOT_FOUND, "not found"),
+            other => CommandError::new(INTERNAL_ERROR, format!("{other:?}")),
+        })
+    }
+
+    fn write(&mut self, op: WriteOp) -> Result<Vec<u8>, CommandError> {
+        if let Some(e) = self.fail_next.take() {
+            return Err(e);
+        }
+        if let teseladb_range::ack::W::Nodes(n) = op.wc.w
+            && n > self.replicas
+        {
+            return Err(CommandError::new(UNSATISFIABLE_WRITE_CONCERN, "unsatisfiable"));
+        }
+        if let Some(k) = op.dedup
+            && let Some(r) = self.dedup.get(&k)
+        {
+            return Ok(r.clone());
+        }
+        let bound = Bound::decode(&op.mutation)?;
+        assert_eq!(bound.latch_keys(), op.keys);
+        self.concerns.push(op.wc);
+        self.now += 1;
+        let ts = Hlc { physical: self.now, logical: 0 };
+        // As the range host does: the keys the mutation asks to read join its keys, and it is
+        // evaluated again with their current versions.
+        let mut keys = op.keys.clone();
+        let out = loop {
+            let values: Vec<Option<Vec<u8>>> =
+                keys.iter().map(|k| self.data.get(k).cloned()).collect();
+            let current: Vec<Option<(u8, &[u8])>> =
+                values.iter().map(|v| v.as_deref().map(|b| (1u8, b))).collect();
+            let out = bound
+                .eval_with(&keys, &current, ts)
+                .map_err(|e| CommandError::from_mutation(&e))?;
+            let unread: Vec<Vec<u8>> =
+                bound.reads(&out).into_iter().filter(|k| !keys.contains(k)).collect();
+            if unread.is_empty() {
+                break out;
+            }
+            keys.extend(unread);
+        };
+        if let Some(split) = &self.split {
+            let side = |k: &[u8]| k >= split.as_slice();
+            let home = keys.first().is_some_and(|k| side(k));
+            let reached = out
+                .puts
+                .iter()
+                .map(|p| p.key.as_slice())
+                .chain(out.deletes.iter().map(Vec::as_slice));
+            if reached.into_iter().any(|k| side(k) != home) {
+                let msg = format!("{}: past the split", teseladb_range::host::CROSSES_RANGES);
+                return Err(CommandError::new(INTERNAL_ERROR, msg));
+            }
+        }
+        self.writes += 1;
+        for p in out.puts {
+            self.types.insert(p.key.clone(), p.value_type);
+            self.data.insert(p.key, p.value);
+        }
+        for d in out.deletes {
+            self.types.remove(&d);
+            self.data.remove(&d);
+        }
+        if let Some(k) = op.dedup {
+            self.dedup.insert(k, out.result.clone());
+        }
+        Ok(out.result)
+    }
+
+    fn scan(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        limit: usize,
+        _: ReadConcern,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
+        self.scanned_at = Some(self.read_mark.map(|m| m.at));
+        if let Some(m) = self.read_mark {
+            self.txn_read(m.at, m.uncertain_to)?;
+        }
+        self.now += self.tick;
+        if let Some(f) = self.on_scan.as_mut() {
+            f();
+        }
+        if let Some(f) = self.on_scan_data.as_mut() {
+            f(start, &mut self.data);
+        }
+        Ok(self
+            .data
+            .range(start.to_vec()..end.to_vec())
+            .take(limit)
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect())
+    }
+
+    fn kill_everywhere(&mut self, scope: &KillScope) -> Result<(), CommandError> {
+        if let Some(e) = self.fail_kill.take() {
+            return Err(e);
+        }
+        self.killed.push(scope.clone());
+        Ok(())
+    }
+
+    fn cluster_parameters(&mut self) -> Result<BTreeMap<String, Vec<u8>>, CommandError> {
+        Ok(self.params.clone())
+    }
+
+    fn set_cluster_parameter(&mut self, name: &str, value: Vec<u8>) -> Result<(), CommandError> {
+        self.params.insert(name.to_owned(), value);
+        Ok(())
+    }
+
+    fn set_read_mark(&mut self, at: Option<teseladb_txn::causal::ReadMark>) {
+        self.read_mark = at;
+    }
+
+    fn read_mark(&self) -> Option<teseladb_txn::causal::ReadMark> {
+        self.read_mark
+    }
+
+    fn set_deadline(&mut self, at_ms: Option<u64>) {
+        self.deadline = at_ms;
+        self.last_deadline = at_ms.or(self.last_deadline);
+    }
+
+    fn now_ms(&self) -> u64 {
+        self.now
+    }
+
+    fn wall_ms(&self) -> u64 {
+        self.now
+    }
+
+    fn now_micros(&self) -> u64 {
+        self.mono.unwrap_or(self.now).saturating_mul(1000)
+    }
+
+    fn random(&mut self) -> u64 {
+        self.rnd = self.rnd.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.rnd
+    }
+
+    fn node(&self) -> u64 {
+        1
+    }
+
+    fn principal(
+        &mut self,
+        kind: Principal,
+        db: &str,
+        name: &str,
+    ) -> Result<Option<Vec<u8>>, CommandError> {
+        Ok(self.security.get(kind, db, name).map(<[u8]>::to_vec))
+    }
+
+    fn principals(
+        &mut self,
+        kind: Principal,
+        db: Option<&str>,
+    ) -> Result<Vec<Vec<u8>>, CommandError> {
+        Ok(self.security.list(kind, db).into_iter().map(<[u8]>::to_vec).collect())
+    }
+
+    fn security_write(
+        &mut self,
+        ops: Vec<SecurityOp>,
+    ) -> Result<Result<(), SecurityError>, CommandError> {
+        if self.fail_security_writes > 0 {
+            if self.fail_security_writes != usize::MAX {
+                self.fail_security_writes -= 1;
+            }
+            return Ok(Err(SecurityError::Conflict));
+        }
+        if let Some(n) = self.drop_before_write.take() {
+            self.security.remove(Principal::User, &n.db, &n.user);
+        }
+        if let Some(k) = self.drop_role_before_write.take() {
+            self.security.remove(Principal::Role, &k.0, &k.1);
+        }
+        Ok(self.security.apply(&ops))
+    }
+
+    fn authorization_lease(&self) -> bool {
+        !self.lease_lost
+    }
+
+    /// Deterministic bytes: the tests need nonces, not secrecy.
+    fn invalidate_user_cache(&mut self) {
+        self.invalidations += 1;
+    }
+
+    fn oidc_providers(&self) -> teseladb_auth::oidc::Providers {
+        self.oidc
+            .as_ref()
+            .map(|(p, _)| teseladb_auth::oidc::Providers::parse(p).unwrap())
+            .unwrap_or_default()
+    }
+
+    fn oidc_keys(
+        &mut self,
+        _issuer: &str,
+        refresh: bool,
+    ) -> Result<teseladb_auth::oidc::KeySet, CommandError> {
+        self.jwks_reads.push(refresh);
+        let (_, jwks) = self.oidc.as_ref().ok_or_else(|| {
+            CommandError::new(teseladb_wire::error::OPERATION_FAILED, "no provider")
+        })?;
+        Ok(teseladb_auth::oidc::KeySet::parse(jwks).unwrap())
+    }
+
+    fn kerberos_keys(&self) -> Vec<teseladb_auth::kerberos::ServiceKey> {
+        self.kerberos.clone()
+    }
+
+    fn aws_sts_url(&self) -> String {
+        "https://sts.test:8443".to_owned()
+    }
+
+    fn aws_sts(
+        &mut self,
+        req: &teseladb_auth::aws::StsRequest,
+    ) -> Result<(u16, Vec<u8>), CommandError> {
+        self.sts_requests.push(req.clone());
+        self.sts
+            .clone()
+            .ok_or_else(|| CommandError::new(teseladb_wire::error::OPERATION_FAILED, "unreachable"))
+    }
+
+    fn ldap_login(&mut self, user: &str, password: &[u8]) -> Result<LdapLogin, CommandError> {
+        if !self.ldap.iter().any(|(u, p)| u == user && p == password) {
+            return Ok(LdapLogin::Refused);
+        }
+        Ok(match &self.ldap_groups {
+            None => LdapLogin::LoggedIn,
+            Some(groups) => LdapLogin::Authorized(
+                groups.iter().find(|(u, _)| u == user).map(|(_, g)| g.clone()).unwrap_or_default(),
+            ),
+        })
+    }
+
+    fn ldap_groups(&mut self, user: &str) -> Result<Option<Vec<RoleName>>, CommandError> {
+        Ok(self.ldap_groups.as_ref().map(|groups| {
+            groups.iter().find(|(u, _)| u == user).map(|(_, g)| g.clone()).unwrap_or_default()
+        }))
+    }
+
+    fn secure_random(&mut self, out: &mut [u8]) -> Result<(), CommandError> {
+        for b in out.iter_mut() {
+            *b = self.random().to_le_bytes()[7];
+        }
+        Ok(())
+    }
+
+    fn log_warning(&mut self, id: i32, msg: &str, attr: &Document) {
+        self.logged.push((id, msg.to_owned(), attr.clone()));
+    }
+
+    fn process(&mut self) -> teseladb_wire::commands::diagnostics::ProcessFacts {
+        self.facts.clone()
+    }
+
+    fn rotate_certificates(&mut self, message: Option<&str>) -> Result<(), CommandError> {
+        if let Some(e) = self.fail_rotation.take() {
+            return Err(e);
+        }
+        self.rotations.push(message.map(str::to_owned));
+        Ok(())
+    }
+}
+
+/// `{k: v, …}` from pairs.
+pub fn doc(pairs: &[(&str, Value)]) -> Document {
+    let mut d = Document::new();
+    for (k, v) in pairs {
+        d.push(*k, v.clone());
+    }
+    d
+}
+
+/// A field of a reply.
+pub fn field<'a>(d: &'a Document, path: &str) -> &'a Value {
+    let mut cur = d;
+    let parts: Vec<&str> = path.split('.').collect();
+    for (i, p) in parts.iter().enumerate() {
+        let v = cur.get(p).unwrap_or_else(|| panic!("no {path} in {d:?}"));
+        if i + 1 == parts.len() {
+            return v;
+        }
+        match v {
+            Value::Document(x) => cur = x,
+            Value::Array(a) => {
+                let idx: usize = parts[i + 1].parse().expect("an index");
+                let rest = parts[i + 2..].join(".");
+                let item = &a[idx];
+                return match item {
+                    Value::Document(x) if !rest.is_empty() => field(x, &rest),
+                    other => other,
+                };
+            }
+            _ => panic!("{path} crosses a scalar in {d:?}"),
+        }
+    }
+    unreachable!("a path has a field")
+}

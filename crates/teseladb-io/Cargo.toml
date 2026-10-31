@@ -1,0 +1,33 @@
+[package]
+name = "teseladb-io"
+version = "0.1.0"
+description = "TeselaDB's real I/O: disk operation executor over files, inter-node protocol codec and the per-core event loop pieces."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+teseladb-types = { path = "../teseladb-types" }
+teseladb-raftlog = { path = "../teseladb-raftlog" }
+teseladb-sys = { path = "../teseladb-sys" }
+teseladb-raft = { path = "../teseladb-raft" }
+teseladb-deflate = { path = "../teseladb-deflate" }
+teseladb-keys = { path = "../teseladb-keys" }
+teseladb-tls = { path = "../teseladb-tls" }
+teseladb-x509 = { path = "../teseladb-x509" }
+
+[dev-dependencies]
+teseladb-crypto = { path = "../teseladb-crypto" }
+teseladb-lsm = { path = "../teseladb-lsm" }
+
+[[test]]
+name = "crash_real"
+harness = false
+
+[[test]]
+name = "crash_real_lsm"
+harness = false

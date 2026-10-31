@@ -1,0 +1,736 @@
+//! `relocate` workload (007 T020, FR-011, FR-023): one range of documents on every node moves
+//! from core to core of the nodes while clients read and write its documents and the fault plan
+//! crashes nodes, partitions the network, freezes cores, slows and fills disks and moves clocks.
+//! The workload plays Group 0: it records an intent (target core), the range's leader proposes
+//! `Relocate`, and once the leader runs on the target core the workload completes the change and
+//! gives the descriptor the new core. On each node it hands the range over as the server does
+//! (plan «Cambio de núcleo»):
+//!
+//! - a replica that applied `Relocate` to another core stops applying; its core exports the
+//!   range's two intervals, reads the files, closes the group and takes its Raft state, its state
+//!   and the entries past it;
+//! - the target core writes the files, ingests them (clearing first what its LSM kept of the
+//!   range) and writes the group whole to its log; once that is durable the old core removes its
+//!   group, and once that removal is durable the target core opens its copy;
+//! - a replica that missed the change (its node was down) hears its leader through the core
+//!   that runs the range on its node, which hands it the frames of the range (the world does as
+//!   the server does), applies `Relocate` there and is handed over the same way;
+//! - after a restart the old copy hands the range over again, and a copy imported and not started
+//!   is removed when the new hand-over arrives.
+//!
+//! Each document is a register of unique tags; the history goes to the progress, durability and
+//! linearizability checkers.
+
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
+use std::rc::Rc;
+
+use teseladb_keys::Hlc;
+use teseladb_lsm::{FileRef, Lsm, LsmError};
+use teseladb_multiraft::{Done, Durable, GroupDesc, GroupImport, OpError, OpId};
+use teseladb_raft::Role;
+use teseladb_raftlog::{Completions, Disk, FileId, IoDone};
+use teseladb_range::ack::{W, WriteConcern};
+use teseladb_range::command::Command;
+use teseladb_range::host::{RangeHost, ReqId, WriteReq};
+use teseladb_range::read::ReadConcern;
+use teseladb_range::sm::RangeSm;
+use teseladb_range::snapshot::write_ops;
+use teseladb_types::{GroupId, Nanos, NodeId};
+
+use crate::checkers::{Violation, durability, linearizable, liveness};
+use crate::history::{History, OpKind, OpRecord, OpResult};
+use crate::node::{NodeOutput, NodeSm};
+use crate::workloads::Workload;
+use crate::workloads::data_ship::Shipper;
+use crate::workloads::multirange::{SetTag, as_range, doc, key_name, record_answer, remove_tree};
+use crate::world::{Event, World};
+
+const G: GroupId = GroupId(1);
+const START: &[u8] = b"\x01";
+const END: &[u8] = b"\x02";
+/// Documents, spread over the range.
+const DOCS: u64 = 8;
+const CLIENTS: u32 = 4;
+/// Pause between two core changes, in ms.
+const MOVE_EVERY: (u64, u64) = (300, 1500);
+/// Pause between two sends of the same proposal.
+const RESEND_EVERY: Nanos = Nanos::from_millis(500);
+const MAJORITY: WriteConcern = WriteConcern { w: W::Majority, j: true };
+const NEWEST: Hlc = Hlc { physical: u64::MAX, logical: u32::MAX };
+/// Handles of the files of a hand-over, apart from the LSM's and the snapshots'.
+const HANDOVER_FILES: u32 = 1 << 21;
+
+/// A hand-over of the range on one node, from core `from` to core `to`.
+enum Move {
+    /// The old core exports the range's intervals.
+    Exporting { jobs: Vec<u64>, files: Vec<FileRef>, dir: String },
+    /// The target core removes a copy imported before a restart and never started.
+    Dropping { imp: GroupImport, bytes: Vec<Vec<u8>> },
+    /// The target core empties what its LSM kept of the range.
+    Clearing { imp: GroupImport, refs: Vec<FileRef>, job: u64 },
+    /// The target core ingests the files.
+    Ingesting { imp: GroupImport, refs: Vec<FileRef>, job: u64 },
+    /// The target core writes the group to its log.
+    Importing,
+    /// The old core removes its group.
+    Retiring,
+}
+
+/// The `relocate` workload.
+pub struct RelocateWorkload {
+    nodes: u32,
+    cores: u16,
+    history: History,
+    pending: BTreeMap<(u32, ReqId), usize>,
+    /// Each node's host, on the core its replica runs on.
+    hosts: BTreeMap<u32, (u16, RangeHost)>,
+    prefer: BTreeMap<u32, u32>,
+    started: Vec<u64>,
+    heal_at: Option<Nanos>,
+    /// Group 0's descriptor core and the change in progress (target core and intent).
+    core: u16,
+    intent: Option<(u16, u64)>,
+    next_intent: u64,
+    next_move: Nanos,
+    resend_at: Nanos,
+    /// The proposals of `Relocate`: their answers are nobody's.
+    proposals: BTreeSet<(u32, u16, OpId)>,
+    /// The hand-overs in progress, by node: the old core, the target core and the step.
+    moves: BTreeMap<u32, (u16, u16, Move)>,
+    /// What each core made durable and nobody took yet.
+    durable: BTreeMap<(u32, u16), Vec<Durable>>,
+    attempt: u64,
+    shipper: Shipper,
+    /// Core changes completed.
+    pub done: u64,
+    /// The range was created on every node: a replica created later gets it as a snapshot.
+    born: bool,
+}
+
+impl RelocateWorkload {
+    /// The workload over `nodes` nodes of `cores` cores.
+    pub fn boxed(nodes: u32, cores: u16) -> Box<dyn Workload> {
+        Box::new(RelocateWorkload::new(nodes, cores))
+    }
+
+    fn new(nodes: u32, cores: u16) -> RelocateWorkload {
+        RelocateWorkload {
+            nodes,
+            cores,
+            history: History::default(),
+            pending: BTreeMap::new(),
+            hosts: BTreeMap::new(),
+            prefer: BTreeMap::new(),
+            started: vec![0; CLIENTS as usize],
+            heal_at: None,
+            core: 0,
+            intent: None,
+            next_intent: 0,
+            next_move: Nanos::from_millis(MOVE_EVERY.1),
+            resend_at: Nanos::ZERO,
+            proposals: BTreeSet::new(),
+            moves: BTreeMap::new(),
+            durable: BTreeMap::new(),
+            attempt: 0,
+            shipper: Shipper::new(0),
+            done: 0,
+            born: false,
+        }
+    }
+
+    fn times(w: &World, node: u32) -> (Nanos, u64) {
+        (w.local(node), w.nodes[node as usize].clock.wall_ms(w.now()))
+    }
+
+    fn next_turn(w: &mut World, client: u32) {
+        let at = w.now() + Nanos::from_millis(w.rng.range(30, 120));
+        w.schedule(at, Event::Client { client });
+    }
+
+    fn voters(&self) -> Vec<NodeId> {
+        (1..=u64::from(self.nodes)).map(NodeId).collect()
+    }
+
+    /// The core whose group of the range runs on `node`.
+    fn running(&self, w: &mut World, node: u32) -> Option<u16> {
+        (0..self.cores).find(|c| w.paused_core(node, *c).is_some_and(|x| x.status(G).is_some()))
+    }
+
+    fn lsm(w: &World, node: u32, core: u16) -> Option<Rc<RefCell<Lsm>>> {
+        w.nodes[node as usize].cores[core as usize].lsm.clone()
+    }
+
+    /// Opens the LSM of every core of `node`: each core may take the range.
+    fn open_lsms(&self, w: &mut World, node: u32) {
+        let cfg = w.range_lsm.clone().expect("set at the start");
+        for c in &mut w.nodes[node as usize].cores {
+            if c.lsm.is_none()
+                && let Ok((lsm, _)) = Lsm::recover(&cfg, &mut c.disk)
+            {
+                c.lsm = Some(Rc::new(RefCell::new(lsm)));
+            }
+        }
+    }
+
+    /// Opens the range on `node` where the server would: on the only core that has it in its log,
+    /// on the old core when both have it (it hands the range over again), and on the
+    /// descriptor's core when none has it (the node never made its creation durable).
+    fn open(&mut self, w: &mut World, node: u32) {
+        if !w.nodes[node as usize].alive || self.moves.contains_key(&node) {
+            return;
+        }
+        if let Some(c) = self.running(w, node) {
+            self.shipper.set_core(node, c);
+            if self.hosts.get(&node).is_none_or(|(hc, _)| *hc != c) {
+                self.open_host(w, node, c);
+            }
+            return;
+        }
+        let holders: Vec<u16> = (0..self.cores)
+            .filter(|c| w.paused_core(node, *c).is_some_and(|x| x.store().group(G).is_some()))
+            .collect();
+        let mut chosen = None;
+        for c in &holders {
+            let Some(lsm) = Self::lsm(w, node, *c) else { return };
+            let Ok(Some(mut sm)) = RangeSm::try_open(G, START.to_vec(), END.to_vec(), lsm) else {
+                return;
+            };
+            sm.set_core(*c);
+            // A copy imported here waits while another core holds the range.
+            let imported = sm.relocated().is_some_and(|(t, _)| t == *c);
+            if holders.len() == 1 || !imported {
+                chosen = Some((*c, sm));
+                break;
+            }
+        }
+        let (c, sm) = match (chosen, holders.is_empty()) {
+            (Some(x), _) => x,
+            (None, true) => {
+                let c = self.core;
+                let Some(lsm) = Self::lsm(w, node, c) else { return };
+                let Ok(Some(mut sm)) = RangeSm::try_open(G, START.to_vec(), END.to_vec(), lsm)
+                else {
+                    return;
+                };
+                sm.set_core(c);
+                if self.born {
+                    sm.expect_snapshot();
+                }
+                (c, sm)
+            }
+            (None, false) => return,
+        };
+        let desc = GroupDesc { group: G, voters: self.voters(), learners: vec![] };
+        let Some(x) = w.cluster_core(node, c) else { return };
+        if x.create_group(desc, NodeSm::Range(sm)).is_err() {
+            return;
+        }
+        w.settle(node, c);
+        self.shipper.set_core(node, c);
+        self.open_host(w, node, c);
+    }
+
+    /// A host for `node` over core `core`; the requests of the one it replaces are lost.
+    fn open_host(&mut self, w: &mut World, node: u32, core: u16) {
+        self.lose(w, node);
+        let Some(lsm) = Self::lsm(w, node, core) else { return };
+        let mut host = RangeHost::new(lsm, w.nodes[node as usize].hlc.clone());
+        host.add_range(G, START.to_vec(), END.to_vec());
+        self.hosts.insert(node, (core, host));
+    }
+
+    /// The requests in flight on `node` lose their answer.
+    fn lose(&mut self, w: &World, node: u32) {
+        let lost: Vec<usize> =
+            self.pending.iter().filter(|((n, _), _)| *n == node).map(|(_, &i)| i).collect();
+        self.pending.retain(|(n, _), _| *n != node);
+        let now = w.now();
+        for i in lost {
+            let rec = &mut self.history.ops[i];
+            rec.result = OpResult::Unknown;
+            rec.error = Some("NodeCrashed".into());
+            rec.ended = Some(now);
+        }
+        self.hosts.remove(&node);
+    }
+
+    fn act(&mut self, w: &mut World, client: u32) {
+        let node = match self.prefer.get(&client) {
+            Some(&n) if w.nodes[n as usize].alive && !w.rng.chance(0.2) => n,
+            _ => w.rng.range(0, u64::from(self.nodes)) as u32,
+        };
+        let Some((core, _)) = self.hosts.get(&node) else { return };
+        let core = *core;
+        if !w.nodes[node as usize].alive {
+            return;
+        }
+        let k = w.rng.range(0, DOCS);
+        self.started[client as usize] += 1;
+        let id = self.started[client as usize];
+        let read = w.rng.chance(0.4);
+        let tag = format!("c{client}-{id}");
+        let rec = OpRecord {
+            client,
+            op_id: id,
+            kind: if read { OpKind::Read } else { OpKind::Write },
+            group: "docs".into(),
+            key: key_name(k),
+            expected: None,
+            new: (!read).then(|| tag.clone()),
+            invoke: w.now(),
+            complete: None,
+            result: OpResult::Unknown,
+            node,
+            error: None,
+            ended: None,
+            w1: false,
+        };
+        let (now, wall) = Self::times(w, node);
+        let Some((_, host)) = self.hosts.get_mut(&node) else { return };
+        let Some(c) = w.cluster_core(node, core) else { return };
+        let req = if read {
+            host.get(c, G, &doc(k), ReadConcern::Linearizable, now, wall)
+        } else {
+            let m = Box::new(SetTag(doc(k), tag));
+            host.mutate(
+                c,
+                WriteReq { g: G, keys: vec![doc(k)], m, dedup: None, wc: MAJORITY },
+                now,
+                wall,
+            )
+        };
+        self.history.ops.push(rec);
+        self.pending.insert((node, req), self.history.ops.len() - 1);
+        self.pump(w, node);
+        w.settle(node, core);
+    }
+
+    fn pump(&mut self, w: &mut World, node: u32) {
+        let (now, wall) = Self::times(w, node);
+        let Some((core, host)) = self.hosts.get_mut(&node) else { return };
+        let Some(c) = w.cluster_core(node, *core) else { return };
+        host.poll(c, now, wall);
+        host.follow_state(c);
+        let _ = host.take_checksum_reports();
+        let _ = host.take_splits();
+        for (req, r) in host.take_replies() {
+            if let Some(i) = self.pending.remove(&(node, req)) {
+                record_answer(&mut self.history.ops[i], &mut self.prefer, (node, w.now()), r);
+            }
+        }
+    }
+
+    fn on_done(
+        &mut self,
+        w: &mut World,
+        node: u32,
+        core: u16,
+        op: OpId,
+        r: Result<Done<NodeOutput>, OpError>,
+    ) {
+        if self.proposals.remove(&(node, core, op)) {
+            return;
+        }
+        let Some((hc, host)) = self.hosts.get_mut(&node) else { return };
+        if *hc != core {
+            return;
+        }
+        let Some(c) = w.paused_core(node, core) else { return };
+        host.on_done(c, op, r);
+    }
+
+    /// Group 0's side: starts a core change now and then, has the leader propose it and completes
+    /// it once the leader runs on the target core.
+    fn lead(&mut self, w: &mut World) {
+        let now = w.now();
+        if self.cores < 2 {
+            return;
+        }
+        let Some((target, intent)) = self.intent else {
+            if now >= self.next_move && self.moves.is_empty() {
+                self.next_intent += 1;
+                self.intent = Some(((self.core + 1) % self.cores, self.next_intent));
+            }
+            return;
+        };
+        let alive: Vec<u32> = (0..self.nodes).filter(|n| w.nodes[*n as usize].alive).collect();
+        let leader = alive.into_iter().find_map(|n| {
+            let c = self.running(w, n)?;
+            let x = w.cluster_core(n, c)?;
+            let leads = x.status(G).is_some_and(|s| s.role == Role::Leader);
+            leads.then_some((n, c))
+        });
+        let Some((node, core)) = leader else { return };
+        let Some(x) = w.cluster_core(node, core) else { return };
+        let Some(sm) = x.state_machine(G).and_then(as_range) else { return };
+        let (relocated, halted) = (sm.relocated(), sm.halted());
+        if relocated == Some((target, intent)) {
+            if core == target {
+                self.core = target;
+                self.intent = None;
+                self.done += 1;
+                self.next_move = now + Nanos::from_millis(w.rng.range(MOVE_EVERY.0, MOVE_EVERY.1));
+            }
+            return;
+        }
+        if halted || now < self.resend_at {
+            return;
+        }
+        self.resend_at = now + RESEND_EVERY;
+        let payload = Command::Relocate { core: target, intent }.encode();
+        let local = w.local(node);
+        let Some(x) = w.cluster_core(node, core) else { return };
+        let zero = Hlc { physical: 0, logical: 0 };
+        if let Ok((op, _)) =
+            x.propose_at(G, zero, local, |_| Ok::<_, std::convert::Infallible>(payload))
+        {
+            self.proposals.insert((node, core, op));
+        }
+        w.settle(node, core);
+    }
+
+    /// A leader that applied `Relocate` to another core applies nothing more: it hands its
+    /// leadership to the next voter, as the server does, so that a replica on the target core
+    /// leads and the old one closes.
+    fn step_down(&mut self, w: &mut World, node: u32) {
+        let Some(c) = self.running(w, node) else { return };
+        let Some(x) = w.cluster_core(node, c) else { return };
+        let leads = x.status(G).is_some_and(|s| s.role == Role::Leader);
+        let halted = x.state_machine(G).and_then(as_range).is_some_and(RangeSm::halted);
+        if leads && halted {
+            let next = NodeId(u64::from((node + 1) % self.nodes) + 1);
+            x.transfer_leader(G, next);
+            w.settle(node, c);
+        }
+    }
+
+    /// Takes what every core of `node` made durable.
+    fn collect_durable(&mut self, w: &mut World, node: u32) {
+        for c in 0..self.cores {
+            if let Some(x) = w.cluster_core(node, c) {
+                let d = x.take_durable();
+                self.durable.entry((node, c)).or_default().extend(d);
+            }
+        }
+    }
+
+    fn took(&mut self, node: u32, core: u16, what: Durable) -> bool {
+        let list = self.durable.entry((node, core)).or_default();
+        match list.iter().position(|d| *d == what) {
+            Some(i) => {
+                list.remove(i);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Starts a hand-over on `node` when its replica applied `Relocate` to another core, or runs
+    /// on another core than the descriptor's with no change in progress.
+    fn start_move(&mut self, w: &mut World, node: u32) {
+        if self.moves.contains_key(&node) {
+            return;
+        }
+        let Some(from) = self.running(w, node) else { return };
+        let Some(x) = w.cluster_core(node, from) else { return };
+        let Some(sm) = x.state_machine(G).and_then(as_range) else { return };
+        let intervals = sm.intervals();
+        let to = match sm.relocated() {
+            Some((t, _)) if sm.halted() => t,
+            _ => return,
+        };
+        let Some(lsm) = Self::lsm(w, node, from) else { return };
+        self.attempt += 1;
+        let dir = format!("handover-n{node}-{}", self.attempt);
+        let jobs = intervals
+            .iter()
+            .map(|(s, e)| lsm.borrow_mut().export(s, e, NEWEST, dir.clone().into()))
+            .collect();
+        self.moves.insert(node, (from, to, Move::Exporting { jobs, files: vec![], dir }));
+        w.pump(node, from);
+    }
+
+    /// The target core could not take the hand-over: the old core opens its group again and
+    /// hands the range over anew.
+    fn fail(&mut self, node: u32) {
+        self.moves.remove(&node);
+    }
+
+    fn move_step(&mut self, w: &mut World, node: u32) {
+        let Some((from, to, m)) = self.moves.remove(&node) else { return };
+        // A frozen core moves on when it thaws.
+        if w.frozen(node, from) || w.frozen(node, to) {
+            self.moves.insert(node, (from, to, m));
+            return;
+        }
+        let next = match m {
+            Move::Exporting { mut jobs, mut files, dir } => {
+                let done = &mut w.nodes[node as usize].cores[from as usize].lsm_done.exported;
+                for (id, f) in std::mem::take(done) {
+                    match jobs.iter().position(|j| *j == id) {
+                        Some(i) => {
+                            jobs.remove(i);
+                            files.extend(f);
+                        }
+                        None => done.push((id, f)),
+                    }
+                }
+                if !jobs.is_empty() {
+                    Some(Move::Exporting { jobs, files, dir })
+                } else {
+                    self.hand(w, node, (from, to), (files, dir))
+                }
+            }
+            Move::Dropping { imp, bytes } => {
+                if self.took(node, to, Durable::Removed(G)) {
+                    let lsm = Self::lsm(w, node, to).expect("open");
+                    let job = lsm.borrow_mut().clear_range(G, Self::intervals());
+                    let refs = self.write(w, node, to, &bytes);
+                    w.pump(node, to);
+                    refs.map(|refs| Move::Clearing { imp, refs, job })
+                } else {
+                    Some(Move::Dropping { imp, bytes })
+                }
+            }
+            Move::Clearing { imp, refs, job } => {
+                let done = &mut w.nodes[node as usize].cores[to as usize].lsm_done.cleared;
+                match done.iter().position(|i| *i == job) {
+                    None => Some(Move::Clearing { imp, refs, job }),
+                    Some(i) => {
+                        done.remove(i);
+                        Some(self.ingest(w, node, to, imp, refs))
+                    }
+                }
+            }
+            Move::Ingesting { imp, refs, job } => {
+                let done = &mut w.nodes[node as usize].cores[to as usize].lsm_done.ingested;
+                let mine = done.iter().position(|(i, _)| *i == job).map(|i| done.remove(i).1);
+                match mine {
+                    None => Some(Move::Ingesting { imp, refs, job }),
+                    Some(Ok(())) => {
+                        let c = w.cluster_core(node, to).expect("powered on and not frozen");
+                        let r = c.import_group(G, imp);
+                        w.settle(node, to);
+                        r.ok().map(|()| Move::Importing)
+                    }
+                    Some(Err(LsmError::IngestOverlap)) => {
+                        let lsm = Self::lsm(w, node, to).expect("open");
+                        let job = lsm.borrow_mut().clear_range(G, Self::intervals());
+                        w.pump(node, to);
+                        Some(Move::Clearing { imp, refs, job })
+                    }
+                    Some(Err(_)) => None,
+                }
+            }
+            Move::Importing => {
+                if self.took(node, to, Durable::Imported(G)) {
+                    let c = w.cluster_core(node, from).expect("powered on and not frozen");
+                    let r = c.retire_group(G);
+                    w.settle(node, from);
+                    match r {
+                        Ok(()) => Some(Move::Retiring),
+                        Err(_) => None,
+                    }
+                } else {
+                    Some(Move::Importing)
+                }
+            }
+            Move::Retiring => {
+                if self.took(node, from, Durable::Removed(G)) {
+                    let lsm = Self::lsm(w, node, from).expect("open");
+                    lsm.borrow_mut().clear_range(G, Self::intervals());
+                    w.pump(node, from);
+                    None
+                } else {
+                    Some(Move::Retiring)
+                }
+            }
+        };
+        match next {
+            Some(m) => {
+                self.moves.insert(node, (from, to, m));
+            }
+            None => self.fail(node),
+        }
+    }
+
+    fn intervals() -> Vec<(Vec<u8>, Vec<u8>)> {
+        vec![teseladb_range::snapshot::local_interval(G), (START.to_vec(), END.to_vec())]
+    }
+
+    /// The old core's files are exported: it reads them, closes its group if it still runs, and
+    /// hands everything to the target core.
+    fn hand(
+        &mut self,
+        w: &mut World,
+        node: u32,
+        (from, to): (u16, u16),
+        (files, dir): (Vec<FileRef>, String),
+    ) -> Option<Move> {
+        let c = w.cluster_core(node, from).expect("powered on and not frozen");
+        // Restored from its snapshot, its state does not move it: it runs on there.
+        if !c.state_machine(G).and_then(as_range).is_some_and(RangeSm::halted) {
+            remove_tree(&mut w.nodes[node as usize].cores[from as usize].disk, &dir);
+            return None;
+        }
+        let c = w.cluster_core(node, from).expect("powered on and not frozen");
+        // Something of the group is in flight with the disk: it goes on the next turn.
+        let Ok(imp) = c.export_group(G) else {
+            return Some(Move::Exporting { jobs: vec![], files, dir });
+        };
+        if let Some((_, host)) = self.hosts.get_mut(&node) {
+            host.remove_range(G);
+        }
+        w.settle(node, from);
+        let disk = &mut w.nodes[node as usize].cores[from as usize].disk;
+        let bytes: Vec<Vec<u8>> =
+            files.iter().map(|f| disk.read_all(&f.path).expect("an exported file")).collect();
+        remove_tree(disk, &dir);
+        let target = w.cluster_core(node, to).expect("powered on and not frozen");
+        if target.store().group(G).is_some() {
+            // A copy imported before a restart and never started: it goes first.
+            let r = target.retire_group(G);
+            w.settle(node, to);
+            return r.ok().map(|()| Move::Dropping { imp, bytes });
+        }
+        let refs = self.write(w, node, to, &bytes)?;
+        let lsm = Self::lsm(w, node, to).expect("open");
+        if lsm.borrow().flushed_index(G) > 0 {
+            let job = lsm.borrow_mut().clear_range(G, Self::intervals());
+            w.pump(node, to);
+            return Some(Move::Clearing { imp, refs, job });
+        }
+        Some(self.ingest(w, node, to, imp, refs))
+    }
+
+    /// Writes the files of a hand-over on core `to` of `node`; `None` if a write failed.
+    fn write(
+        &mut self,
+        w: &mut World,
+        node: u32,
+        to: u16,
+        bytes: &[Vec<u8>],
+    ) -> Option<Vec<FileRef>> {
+        self.attempt += 1;
+        let dir = format!("incoming-handover-{}", self.attempt);
+        let c = &mut w.nodes[node as usize].cores[to as usize];
+        let (ops, refs) = write_ops(bytes, Path::new(&dir), FileId(HANDOVER_FILES));
+        let done: Vec<IoDone> = ops.into_iter().map(|op| c.disk.execute(op)).collect();
+        if done.iter().any(|d| matches!(d, IoDone::Err { .. })) {
+            remove_tree(&mut c.disk, &dir);
+            return None;
+        }
+        Some(refs)
+    }
+
+    fn ingest(
+        &mut self,
+        w: &mut World,
+        node: u32,
+        to: u16,
+        imp: GroupImport,
+        refs: Vec<FileRef>,
+    ) -> Move {
+        let lsm = Self::lsm(w, node, to).expect("open");
+        let job = lsm.borrow_mut().ingest_range(refs.clone(), Self::intervals(), (G, imp.index));
+        w.pump(node, to);
+        Move::Ingesting { imp, refs, job }
+    }
+
+    /// Everything that moves after a core's completions.
+    fn step(&mut self, w: &mut World) {
+        self.lead(w);
+        for node in 0..self.nodes {
+            if !w.nodes[node as usize].alive {
+                continue;
+            }
+            self.collect_durable(w, node);
+            self.step_down(w, node);
+            self.move_step(w, node);
+            self.start_move(w, node);
+            self.open(w, node);
+            self.pump(w, node);
+        }
+        self.shipper.step(w);
+    }
+}
+
+impl Workload for RelocateWorkload {
+    fn name(&self) -> &'static str {
+        "relocate"
+    }
+
+    fn cluster(&self) -> bool {
+        true
+    }
+
+    fn start(&mut self, w: &mut World) {
+        w.range_lsm = Some(teseladb_lsm::LsmConfig {
+            dir: "range-lsm".into(),
+            memtable_bytes: 16 << 10,
+            block_bytes: 4096,
+            target_file_bytes: 64 << 10,
+            l1_bytes: 256 << 10,
+            cache_bytes: 64 << 10,
+            ..teseladb_lsm::LsmConfig::default()
+        });
+        for node in 0..self.nodes {
+            if w.nodes[node as usize].alive {
+                self.open_lsms(w, node);
+                self.open(w, node);
+            }
+        }
+        self.born = true;
+        for client in 0..CLIENTS {
+            Self::next_turn(w, client);
+        }
+    }
+
+    fn on_client(&mut self, w: &mut World, client: u32) {
+        if self.pending.values().all(|&i| self.history.ops[i].client != client) {
+            self.act(w, client);
+        }
+        Self::next_turn(w, client);
+    }
+
+    fn on_completions(&mut self, w: &mut World, _node: u32, _core: u16, _c: Completions) {
+        for (node, core, op, r) in std::mem::take(&mut w.events) {
+            self.on_done(w, node, core, op, r);
+        }
+        self.step(w);
+    }
+
+    fn on_crash(&mut self, w: &mut World, node: u32) {
+        self.on_completions(w, node, 0, Completions::default());
+        self.lose(w, node);
+        self.moves.remove(&node);
+        self.durable.retain(|(n, _), _| *n != node);
+        self.proposals.retain(|(n, _, _)| *n != node);
+        self.shipper.on_crash(node);
+    }
+
+    fn on_restart(&mut self, w: &mut World, node: u32) -> Result<(), Violation> {
+        self.open_lsms(w, node);
+        for core in 0..self.cores {
+            w.settle(node, core);
+        }
+        self.open(w, node);
+        Ok(())
+    }
+
+    fn on_heal(&mut self, w: &mut World) {
+        self.heal_at = Some(w.now());
+    }
+
+    fn history(&self) -> Option<&History> {
+        Some(&self.history)
+    }
+
+    fn finish(&mut self, _w: &mut World) -> Result<(), Violation> {
+        liveness::check(&self.history, self.heal_at, liveness::WINDOW)?;
+        durability::check(&self.history)?;
+        linearizable::check(&self.history)
+    }
+}

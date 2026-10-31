@@ -1,0 +1,36 @@
+[package]
+name = "teseladb-wire"
+version = "0.1.0"
+description = "TeselaDB's RefDb wire protocol: messages, compression, the handshake, command dispatch and errors, without I/O."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+teseladb-auth = { path = "../teseladb-auth" }
+teseladb-bson = { path = "../teseladb-bson" }
+teseladb-changestream = { path = "../teseladb-changestream" }
+teseladb-compress = { path = "../teseladb-compress" }
+teseladb-deflate = { path = "../teseladb-deflate" }
+teseladb-hash = { path = "../teseladb-hash" }
+teseladb-collation = { path = "../teseladb-collation" }
+teseladb-hlc = { path = "../teseladb-hlc" }
+teseladb-index = { path = "../teseladb-index" }
+teseladb-keys = { path = "../teseladb-keys" }
+teseladb-meta = { path = "../teseladb-meta" }
+teseladb-exec = { path = "../teseladb-exec" }
+teseladb-mql = { path = "../teseladb-mql" }
+teseladb-plan = { path = "../teseladb-plan" }
+teseladb-range = { path = "../teseladb-range" }
+teseladb-router = { path = "../teseladb-router" }
+teseladb-session = { path = "../teseladb-session" }
+teseladb-txn = { path = "../teseladb-txn" }
+teseladb-types = { path = "../teseladb-types" }
+teseladb-x509 = { path = "../teseladb-x509" }
+
+[dev-dependencies]
+teseladb-crypto = { path = "../teseladb-crypto" }

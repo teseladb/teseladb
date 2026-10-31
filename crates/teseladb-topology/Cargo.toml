@@ -1,0 +1,15 @@
+[package]
+name = "teseladb-topology"
+version = "0.1.0"
+description = "TeselaDB's RefDb topologies (specification 018): the replica set presentation and the format of local.oplog.rs, without I/O."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+teseladb-bson = { path = "../teseladb-bson" }
+teseladb-wire = { path = "../teseladb-wire" }

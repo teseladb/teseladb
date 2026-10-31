@@ -1,0 +1,21 @@
+[package]
+name = "teseladb-txn"
+version = "0.1.0"
+description = "TeselaDB's distributed transactions: the coordinator of a transaction over its ranges, RefDb's transaction semantics and the reaper of abandoned transactions."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+teseladb-hlc = { path = "../teseladb-hlc" }
+teseladb-range = { path = "../teseladb-range" }
+teseladb-types = { path = "../teseladb-types" }
+
+[dev-dependencies]
+teseladb-lsm = { path = "../teseladb-lsm" }
+teseladb-multiraft = { path = "../teseladb-multiraft" }
+teseladb-raftlog = { path = "../teseladb-raftlog" }

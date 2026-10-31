@@ -1,0 +1,185 @@
+{"$bitAnd":[12,10]}	=> {"x":{"$numberInt":"8"}}
+{"$bitAnd":[12,{"$numberLong":"10"}]}	=> {"x":{"$numberLong":"8"}}
+{"$bitAnd":[]}	=> {"x":{"$numberInt":"-1"}}
+{"$bitAnd":[12]}	=> {"x":{"$numberInt":"12"}}
+{"$bitAnd":12}	=> {"x":{"$numberInt":"12"}}
+{"$bitAnd":[12,"$n"]}	=> {"x":null}
+{"$bitAnd":[12,"$nope"]}	=> {"x":null}
+{"$bitAnd":[12,{"$numberDouble":"1.0"}]}	!! 14	$bitAnd only supports int and long operands.
+{"$bitAnd":[12,"x"]}	!! 14	$bitAnd only supports int and long operands.
+{"$bitAnd":[12,{"$numberDecimal":"1"}]}	!! 14	$bitAnd only supports int and long operands.
+{"$bitOr":[12,10]}	=> {"x":{"$numberInt":"14"}}
+{"$bitOr":[]}	=> {"x":{"$numberInt":"0"}}
+{"$bitXor":[12,10]}	=> {"x":{"$numberInt":"6"}}
+{"$bitXor":[]}	=> {"x":{"$numberInt":"0"}}
+{"$bitNot":12}	=> {"x":{"$numberInt":"-13"}}
+{"$bitNot":{"$numberLong":"12"}}	=> {"x":{"$numberLong":"-13"}}
+{"$bitNot":"$n"}	=> {"x":null}
+{"$bitNot":"$nope"}	=> {"x":null}
+{"$bitNot":1.5}	!! 14	$bitNot only supports int and long, not: double.
+{"$bitNot":[1,2]}	!! 16020	Expression $bitNot takes exactly 1 arguments. 2 were passed in.
+{"$sin":0}	=> {"x":{"$numberDouble":"0.0"}}
+{"$sin":1}	=> {"x":{"$numberDouble":"0.8414709848078965"}}
+{"$sin":"$n"}	=> {"x":null}
+{"$sin":"$nope"}	=> {"x":null}
+{"$sin":"x"}	!! 28765	$sin only supports numeric types, not string
+{"$sin":{"$numberDouble":"Infinity"}}	!! 50989	cannot apply $sin to inf, value must be in (-inf,inf)
+{"$cos":1}	=> {"x":{"$numberDouble":"0.5403023058681398"}}
+{"$tan":1}	=> {"x":{"$numberDouble":"1.5574077246549023"}}
+{"$asin":0.5}	=> {"x":{"$numberDouble":"0.5235987755982989"}}
+{"$asin":2}	!! 50989	cannot apply $asin to 2, value must be in [-1,1]
+{"$acos":0.5}	=> {"x":{"$numberDouble":"1.0471975511965979"}}
+{"$atan":1}	=> {"x":{"$numberDouble":"0.7853981633974483"}}
+{"$atan2":[1,2]}	=> {"x":{"$numberDouble":"0.4636476090008061"}}
+{"$atan2":[1]}	!! 16020	Expression $atan2 takes exactly 2 arguments. 1 were passed in.
+{"$atan2":[1,"$n"]}	=> {"x":null}
+{"$atan2":[1,"x"]}	!! 51045	$atan2 only supports numeric types, not string
+{"$asinh":1}	=> {"x":{"$numberDouble":"0.881373587019543"}}
+{"$acosh":2}	=> {"x":{"$numberDouble":"1.3169578969248168"}}
+{"$acosh":0.5}	!! 50989	cannot apply $acosh to 0.5, value must be in [1,inf]
+{"$atanh":0.5}	=> {"x":{"$numberDouble":"0.5493061443340549"}}
+{"$atanh":1}	=> {"x":{"$numberDouble":"Infinity"}}
+{"$atanh":2}	!! 50989	cannot apply $atanh to 2, value must be in [-1,1]
+{"$sinh":1}	=> {"x":{"$numberDouble":"1.1752011936438014"}}
+{"$cosh":1}	=> {"x":{"$numberDouble":"1.5430806348152437"}}
+{"$tanh":1}	=> {"x":{"$numberDouble":"0.7615941559557649"}}
+{"$degreesToRadians":180}	=> {"x":{"$numberDouble":"3.141592653589793"}}
+{"$radiansToDegrees":3.141592653589793}	=> {"x":{"$numberDouble":"180.0"}}
+{"$sin":{"$numberLong":"2"}}	=> {"x":{"$numberDouble":"0.9092974268256817"}}
+{"$sin":[1,2]}	!! 16020	Expression $sin takes exactly 1 arguments. 2 were passed in.
+{"$cos":{"$numberDecimal":"Infinity"}}	!! 50989	cannot apply $cos to Infinity, value must be in (-inf,inf)
+{"$asin":{"$numberDouble":"NaN"}}	=> {"x":{"$numberDouble":"NaN"}}
+{"$sigmoid":0}	=> {"x":{"$numberDouble":"0.5"}}
+{"$sigmoid":1}	=> {"x":{"$numberDouble":"0.7310585786300049"}}
+{"$sigmoid":"$n"}	=> {"x":null}
+{"$sigmoid":"$nope"}	=> {"x":null}
+{"$sigmoid":"x"}	!! 14	$sigmoid only supports numeric types, not string
+{"$sigmoid":{"$numberDouble":"-Infinity"}}	=> {"x":{"$numberDouble":"0.0"}}
+{"$sigmoid":[1,2]}	!! 14	$sigmoid only supports numeric types, not array
+{"$sigmoid":{"input":1}}	!! 14	$multiply only supports numeric types, not object
+{"$binarySize":"abc"}	=> {"x":{"$numberInt":"3"}}
+{"$binarySize":"é"}	=> {"x":{"$numberInt":"2"}}
+{"$binarySize":{"$binary":{"base64":"AAEC","subType":"00"}}}	=> {"x":{"$numberInt":"3"}}
+{"$binarySize":"$n"}	=> {"x":null}
+{"$binarySize":"$nope"}	=> {"x":null}
+{"$binarySize":1}	!! 51276	$binarySize requires a string or BinData argument, found: int
+{"$bsonSize":"$o"}	=> {"x":{"$numberInt":"27"}}
+{"$bsonSize":"$$ROOT"}	=> {"x":{"$numberInt":"358"}}
+{"$bsonSize":{}}	=> {"x":{"$numberInt":"5"}}
+{"$bsonSize":"$n"}	=> {"x":null}
+{"$bsonSize":"$nope"}	=> {"x":null}
+{"$bsonSize":1}	!! 31393	$bsonSize requires a document input, found: int
+{"$bsonSize":[1]}	!! 31393	$bsonSize requires a document input, found: int
+{"$tsSecond":"$ts"}	=> {"x":{"$numberLong":"100"}}
+{"$tsIncrement":"$ts"}	=> {"x":{"$numberLong":"3"}}
+{"$tsSecond":"$n"}	=> {"x":null}
+{"$tsSecond":"$nope"}	=> {"x":null}
+{"$tsSecond":1}	!! 5687301	 Argument to $tsSecond must be a timestamp, but is int
+{"$tsIncrement":"x"}	!! 5687302	 Argument to $tsIncrement must be a timestamp, but is string
+{"$tsSecond":{"$timestamp":{"t":4294967295,"i":4294967295}}}	=> {"x":{"$numberLong":"4294967295"}}
+{"$tsIncrement":{"$timestamp":{"t":4294967295,"i":4294967295}}}	=> {"x":{"$numberLong":"4294967295"}}
+{"$subtype":{"$binary":{"base64":"AAEC","subType":"80"}}}	=> {"x":{"$numberInt":"128"}}
+{"$subtype":"$n"}	=> {"x":null}
+{"$subtype":"$nope"}	=> {"x":null}
+{"$subtype":1}	!! 10389300	Provided value: 1, does not have a subtype, but $subtype was used.
+{"$subtype":"x"}	!! 10389300	Provided value: "x", does not have a subtype, but $subtype was used.
+{"$hash":{"input":"abc","algorithm":"md5"}}	=> {"x":{"$binary":{"base64":"kAFQmDzST7DWlj99KOF/cg==","subType":"00"}}}
+{"$hash":{"input":"abc","algorithm":"sha256"}}	=> {"x":{"$binary":{"base64":"ungWv48Bz+pBQUDeXa4iI7ADYaOWF3qctBD/YfIAFa0=","subType":"00"}}}
+{"$hash":{"input":"abc","algorithm":"xxh64"}}	=> {"x":{"$binary":{"base64":"RLws9a13CZk=","subType":"00"}}}
+{"$hash":{"input":"abc","algorithm":"sha1"}}	!! 10754002	Currently, the only supported algorithms for $hash are 'md5', 'sha256' and 'xxh64', found: sha1
+{"$hash":{"input":{"$binary":{"base64":"AAEC","subType":"00"}},"algorithm":"md5"}}	=> {"x":{"$binary":{"base64":"uV9n9h67A2GWIteY9F/C0w==","subType":"00"}}}
+{"$hash":{"input":"$n","algorithm":"md5"}}	=> {"x":null}
+{"$hash":{"input":"$nope","algorithm":"md5"}}	=> {"x":null}
+{"$hash":{"input":1,"algorithm":"md5"}}	!! 10754000	$hash requires that 'input' be a valid UTF-8 string or binData, found: int with value 1
+{"$hash":{"input":"abc","algorithm":"x"}}	!! 10754002	Currently, the only supported algorithms for $hash are 'md5', 'sha256' and 'xxh64', found: x
+{"$hash":{"input":"abc"}}	!! 9	Missing 'algorithm' parameter to $hash
+{"$hash":{"algorithm":"md5"}}	!! 9	Missing 'input' parameter to $hash
+{"$hash":{"input":"abc","algorithm":"md5","x":1}}	!! 9	$hash found an unknown argument: x
+{"$hash":"abc"}	!! 9	$hash expects an object of named arguments but found: string
+{"$hexHash":{"input":"abc","algorithm":"md5"}}	=> {"x":"900150983CD24FB0D6963F7D28E17F72"}
+{"$hexHash":{"input":"abc","algorithm":"sha256"}}	=> {"x":"BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD"}
+{"$hexHash":{"input":"abc","algorithm":"xxh64"}}	=> {"x":"44BC2CF5AD770999"}
+{"$hexHash":{"input":"","algorithm":"xxh64"}}	=> {"x":"EF46DB3751D8E999"}
+{"$hexHash":{"input":"$n","algorithm":"md5"}}	=> {"x":null}
+{"$toHashedIndexKey":"abc"}	=> {"x":{"$numberLong":"8478485326885698097"}}
+{"$toHashedIndexKey":1}	=> {"x":{"$numberLong":"5902408780260971510"}}
+{"$toHashedIndexKey":{"$numberLong":"1"}}	=> {"x":{"$numberLong":"5902408780260971510"}}
+{"$toHashedIndexKey":1.0}	=> {"x":{"$numberLong":"5902408780260971510"}}
+{"$toHashedIndexKey":{"$numberDouble":"1.5"}}	=> {"x":{"$numberLong":"5902408780260971510"}}
+{"$toHashedIndexKey":"$n"}	=> {"x":{"$numberLong":"2338878944348059895"}}
+{"$toHashedIndexKey":"$nope"}	=> {"x":{"$numberLong":"2338878944348059895"}}
+{"$toHashedIndexKey":"$o"}	=> {"x":{"$numberLong":"8268851237486005600"}}
+{"$toHashedIndexKey":[1]}	=> {"x":{"$numberLong":"2057342063119257436"}}
+{"$similarityDotProduct":[[1,2],[3,4]]}	=> {"x":{"$numberDouble":"11.0"}}
+{"$similarityDotProduct":{"vectors":[[1,2],[3,4]],"score":false}}	=> {"x":{"$numberDouble":"11.0"}}
+{"$similarityCosine":[[1,0],[1,1]]}	=> {"x":{"$numberDouble":"0.7071067811865475"}}
+{"$similarityCosine":{"vectors":[[1,0],[1,1]],"score":true}}	=> {"x":{"$numberDouble":"0.8535533905932737"}}
+{"$similarityEuclidean":[[0,0],[3,4]]}	=> {"x":{"$numberDouble":"5.0"}}
+{"$similarityEuclidean":{"vectors":[[0,0],[3,4]],"score":true}}	=> {"x":{"$numberDouble":"0.16666666666666666"}}
+{"$similarityDotProduct":{"vectors":[[1,2],[3,4]],"score":true}}	=> {"x":{"$numberDouble":"6.0"}}
+{"$similarityDotProduct":[[1,2],[3]]}	!! 10413202	Arguments to $similarityDotProduct must be the same size, but the first is of size 2 and the second is of size 1
+{"$similarityDotProduct":[[1,2]]}	!! 10413209	$similarityDotProduct requires exactly two vectors
+{"$similarityDotProduct":[[1,"x"],[3,4]]}	!! 10413203	All elements in the first argument to $similarityDotProduct must be numeric or boolean
+{"$similarityDotProduct":[[1,2],"$n"]}	=> {"x":null}
+{"$similarityDotProduct":[[],[]]}	=> {"x":{"$numberDouble":"0.0"}}
+{"$similarityCosine":[[0,0],[1,1]]}	=> {"x":{"$numberDouble":"0.0"}}
+{"$similarityDotProduct":[[{"$numberLong":"1"},{"$numberDecimal":"2"}],[3,4]]}	=> {"x":{"$numberDouble":"11.0"}}
+{"$similarityDotProduct":{"vectors":[[1,2],[3,4]],"x":1}}	!! 10413207	$similarityDotProduct found an unknown argument: x
+{"$similarityDotProduct":"x"}	!! 10413208	$similarityDotProduct only supports an object or array as an argument, but foundstring
+{"$similarityDotProduct":[{"$binary":{"base64":"AwAAAIA/AAAAQA==","subType":"09"}},{"$binary":{"base64":"AwAAAIA/AAAAQA==","subType":"09"}}]}	=> {"x":{"$numberDouble":"24449.0"}}
+{"$literal":"$x"}	=> {"x":"$x"}
+{"$literal":[1,"$a"]}	=> {"x":[{"$numberInt":"1"},"$a"]}
+{"$currentDate":1}	!! 10065	invalid parameter: expected an object ($currentDate)
+{"$createObjectId":[]}	!! 9	$createObjectId only accepts the empty object as argument. To convert a value to an ObjectId, use $toObjectId.
+{"$rand":1}	!! 10065	invalid parameter: expected an object ($rand)
+{"$meta":"textScore"}	!! 40218	query requires text score metadata, but it is not available
+{"$meta":"x"}	!! 17308	Unsupported $meta field: x
+{"$meta":"randVal"}	=> {}
+{"$meta":"searchScore"}	!! 40218	query requires $search score metadata, but it is not available
+{"$meta":1}	!! 17307	$meta only supports string arguments
+{"$similarityDotProduct":[[1,2],[3,"x"]]}	!! 10413204	All elements in the second argument to $similarityDotProduct must be numeric or boolean
+{"$similarityDotProduct":[[1,2],"x"]}	!! 10413200	Arguments to $similarityDotProduct must be arrays or binData vectors, but found type: string
+{"$similarityDotProduct":["x",[1,2]]}	!! 10413200	Arguments to $similarityDotProduct must be arrays or binData vectors, but found type: string
+{"$similarityDotProduct":[[true,false],[3,4]]}	=> {"x":{"$numberDouble":"3.0"}}
+{"$similarityDotProduct":{"vectors":[[1,2],[3,4]],"score":1}}	!! 10413206	score must be a boolean, but found object
+{"$similarityDotProduct":{"score":true}}	!! 10413209	$similarityDotProduct requires exactly two vectors
+{"$similarityDotProduct":{"vectors":"x"}}	!! 10413205	vectors must be an array of expressions, but found string
+{"$similarityDotProduct":[[1,2],[3,4],[5,6]]}	!! 10413209	$similarityDotProduct requires exactly two vectors
+{"$similarityCosine":[[1,2],[3,4]]}	=> {"x":{"$numberDouble":"0.9838699100999074"}}
+{"$similarityEuclidean":[[1,2],[{"$numberDouble":"NaN"},4]]}	=> {"x":{"$numberDouble":"NaN"}}
+{"$similarityDotProduct":[{"$binary":{"base64":"JwAAAIA/AAAAQA==","subType":"09"}},[1,2]]}	=> {"x":{"$numberDouble":"5.0"}}
+{"$similarityDotProduct":[{"$binary":{"base64":"JwAAAIA/AAAAQA==","subType":"09"}},{"$binary":{"base64":"JwAAAIA/AAAAQA==","subType":"09"}}]}	=> {"x":{"$numberDouble":"5.0"}}
+{"$similarityDotProduct":[{"$binary":{"base64":"EADw","subType":"09"}},{"$binary":{"base64":"EADw","subType":"09"}}]}	=> {"x":{"$numberDouble":"4.0"}}
+{"$similarityDotProduct":[{"$binary":{"base64":"AQI=","subType":"00"}},[1,2]]}	!! 10413200	Arguments to $similarityDotProduct must be arrays or binData vectors, but found type: binData
+{"$similarityDotProduct":[{"$binary":{"base64":"JwAAAIA/AAAAQA==","subType":"09"}},{"$binary":{"base64":"AwABAg==","subType":"09"}}]}	=> {"x":{"$numberDouble":"5.0"}}
+{"$sigmoid":"$s"}	!! 14	$multiply only supports numeric types, not string
+{"$sigmoid":"$a"}	!! 14	$multiply only supports numeric types, not array
+{"$sigmoid":true}	!! 14	$multiply only supports numeric types, not bool
+{"$sigmoid":{"$numberLong":"2"}}	=> {"x":{"$numberDouble":"0.8807970779778823"}}
+{"$sigmoid":1000}	=> {"x":{"$numberDouble":"1.0"}}
+{"$hexHash":{"input":1,"algorithm":"md5"}}	!! 10754000	$hash requires that 'input' be a valid UTF-8 string or binData, found: int with value 1
+{"$hexHash":{"input":"a","algorithm":1}}	!! 10754001	$hash requires that 'algorithm' be a string, found: int with value 1
+{"$hexHash":{"input":"a","algorithm":"x"}}	!! 10754002	Currently, the only supported algorithms for $hash are 'md5', 'sha256' and 'xxh64', found: x
+{"$hexHash":"a"}	!! 9	$hexHash expects an object of named arguments but found: string
+{"$hexHash":{"input":"a"}}	!! 9	Missing 'algorithm' parameter to $hexHash
+{"$hash":{"input":"$s","algorithm":"md5","onError":1}}	!! 9	$hash found an unknown argument: onError
+{"$bitOr":[1,"$n","x"]}	!! 14	$bitOr only supports int and long operands.
+{"$bitOr":["x","$n"]}	=> {"x":null}
+{"$bitAnd":[{"$numberLong":"12"}]}	=> {"x":{"$numberLong":"12"}}
+{"$atan2":[0,-2]}	=> {"x":{"$numberDouble":"3.141592653589793"}}
+{"$atan2":[1,0]}	=> {"x":{"$numberDouble":"1.5707963267948966"}}
+{"$sinh":1000}	=> {"x":{"$numberDouble":"Infinity"}}
+{"$sin":{"$numberDecimal":"NaN"}}	=> {"x":{"$numberDecimal":"NaN"}}
+{"$sin":{"$numberDouble":"NaN"}}	=> {"x":{"$numberDouble":"NaN"}}
+{"$acosh":{"$numberDouble":"Infinity"}}	=> {"x":{"$numberDouble":"Infinity"}}
+{"$asin":{"$numberDouble":"-Infinity"}}	!! 50989	cannot apply $asin to -inf, value must be in [-1,1]
+{"$atanh":-1}	=> {"x":{"$numberDouble":"-Infinity"}}
+{"$tan":1.5707963267948966}	=> {"x":{"$numberDouble":"16331239353195370.0"}}
+{"$radiansToDegrees":"x"}	!! 28765	$radiansToDegrees only supports numeric types, not string
+{"$degreesToRadians":"$n"}	=> {"x":null}
+{"$atan2":["x",1]}	!! 51044	$atan2 only supports numeric types, not string
+{"$atan2":["$n","x"]}	=> {"x":null}
+{"$tsSecond":[1,2]}	!! 16020	Expression $tsSecond takes exactly 1 arguments. 2 were passed in.
+{"$subtype":{"$binary":{"base64":"AAECAwQFBgcICQoLDA0ODw==","subType":"04"}}}	=> {"x":{"$numberInt":"4"}}
+{"$binarySize":"$o"}	!! 51276	$binarySize requires a string or BinData argument, found: object
+{"$bsonSize":"$a"}	!! 31393	$bsonSize requires a document input, found: array

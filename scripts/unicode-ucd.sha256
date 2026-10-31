@@ -1,0 +1,10 @@
+# Unicode 8.0.0 character database files for collation: decompositions, combining classes,
+# Unified_Ideograph and blocks (implicit weights), scripts and their codes (script reordering), the
+# UCD version of ICU 57.1 (decision D-043).
+# source https://www.unicode.org/Public/8.0.0/ucd
+# dest .tools/unicode/ucd-8.0.0
+38b17e1118206489a7e0ab5d29d7932212d38838df7d3ec025ecb58e8798ec20  UnicodeData.txt
+70d40297f1bf91397fbdab5a770c12100733e67c5c3398446c5e950715d5e535  PropList.txt
+288fc7b85c76bda296e296c8465f1f4baeb456cb814430dfaa0f546bfbe86b4a  Blocks.txt
+79fbd73ad82c30fdb67d36a349d12667bd58d3e9da6a8ce7dd26383b637ba85f  Scripts.txt
+03a440f2a4b9151043a6bb53d4a4e528b73238079f9d686dc2a5846e6895588a  PropertyValueAliases.txt

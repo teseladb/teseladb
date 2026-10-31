@@ -1,0 +1,9 @@
+# PCRE2 10.43 test data (tag pcre2-10.43 of PCRE2Project/pcre2, BSD-3-Clause, LICENCE below), read by
+# crates/teseladb-mql/tests/pcre2.rs; not copied into the repository. Pinned on 30-10-2026.
+# source https://raw.githubusercontent.com/PCRE2Project/pcre2/pcre2-10.43
+# dest .tools/pcre2/pcre2-10.43
+030087e2e8dd7c1bdd26057d25d4ded8f45bbf01ad458d68665ad04b8b0fbedf  LICENCE
+f716077b286ab1243a7bc6b9918735dc6d4e7a489acddd11b9cf531a39e8feac  testdata/testoutput1
+ae1099d5942e7b0f5080a86a615d1147ad1de7b36b16595a06dc16520749a977  testdata/testoutput2
+96dd22514a60a26d5c59d3fe5f1df4f89f5e0c3f665da976291361fae9c2973a  testdata/testoutput4
+8fcb64b2e6d9b9ee7867a755bc53a0fe8c9d26b65c5098d0de0b108670cd147d  testdata/testoutput5

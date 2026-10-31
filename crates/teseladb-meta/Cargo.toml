@@ -1,0 +1,22 @@
+[package]
+name = "teseladb-meta"
+version = "0.1.0"
+description = "TeselaDB's Group 0, sans-I/O: nodes, joins, liveness, clock reports, cluster settings, the replica and leader balancer and range descriptors with opaque bounds, as a StateMachine of the Multi-Raft engine."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+teseladb-bson = { path = "../teseladb-bson" }
+teseladb-hlc = { path = "../teseladb-hlc" }
+teseladb-types = { path = "../teseladb-types" }
+teseladb-keys = { path = "../teseladb-keys" }
+teseladb-raft = { path = "../teseladb-raft" }
+teseladb-multiraft = { path = "../teseladb-multiraft" }
+
+[dev-dependencies]
+teseladb-raftlog = { path = "../teseladb-raftlog" }

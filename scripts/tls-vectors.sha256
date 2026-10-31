@@ -1,0 +1,10 @@
+# Test vectors of teseladb-tls (013 T008), stored in crates/teseladb-tls/tests/data/ and checked by
+# tests/integrity.rs against this list. Written on 2026-10-30.
+# rfc8448.tsv: every value with a length of the traces of sections 3 to 7 of
+#   https://www.rfc-editor.org/rfc/rfc8448.txt (SHA-256 6564d1376d1ec744fc7a9993da15ebc1b9be361908b166091f47ef605c537fba),
+#   one per line as section, side, step, label and hex, in the RFC's order.
+# cavp/tls.rsp: the TLS key derivation vectors of NIST SP 800-135 (CAVP, public domain), tls.rsp of
+#   https://csrc.nist.gov/CSRC/media/Projects/Cryptographic-Algorithm-Validation-Program/documents/components/800-135testvectors/tls.zip
+#   (SHA-256 5944b3affa6bfccd1fc4b2876ab273526910447aa754effae0db9fe7c8412793), unchanged; downloaded on 2026-10-31.
+006e47616f4dd6a783d549f917a48cf16eabf873973f2e2ad747ad866239154e  cavp/tls.rsp
+986e81fff1d9dda7953577cd255a1d1d58e2f948bf6be1a716444b23d78b6e2c  rfc8448.tsv

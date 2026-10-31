@@ -1,0 +1,19 @@
+[package]
+name = "teseladb-keys"
+version = "0.1.0"
+description = "TeselaDB's keys: values encoded so that their bytes keep RefDb's order, type bits, key spaces, buckets and versions."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+teseladb-bson = { path = "../teseladb-bson" }
+teseladb-hash = { path = "../teseladb-hash" }
+
+[dev-dependencies]
+teseladb-collation = { path = "../teseladb-collation" }
+teseladb-types = { path = "../teseladb-types" }

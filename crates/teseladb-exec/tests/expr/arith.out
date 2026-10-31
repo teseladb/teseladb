@@ -1,0 +1,325 @@
+{"$add":[2,1]}	=> {"x":{"$numberInt":"3"}}
+{"$add":[2,{"$numberLong":"7"}]}	=> {"x":{"$numberLong":"9"}}
+{"$add":[2,{"$numberDouble":"2.5"}]}	=> {"x":{"$numberDouble":"4.5"}}
+{"$add":[2,{"$numberDecimal":"2.5"}]}	=> {"x":{"$numberDecimal":"4.5"}}
+{"$add":[2,"$n"]}	=> {"x":null}
+{"$add":[2,"$nope"]}	=> {"x":null}
+{"$add":[2,"x"]}	!! 14	$add only supports numeric or date types, not string
+{"$add":[2,{"$date":"2026-01-01T00:00:00Z"}]}	=> {"x":{"$date":{"$numberLong":"1767225600002"}}}
+{"$multiply":[2,1]}	=> {"x":{"$numberInt":"2"}}
+{"$multiply":[2,{"$numberLong":"7"}]}	=> {"x":{"$numberLong":"14"}}
+{"$multiply":[2,{"$numberDouble":"2.5"}]}	=> {"x":{"$numberDouble":"5.0"}}
+{"$multiply":[2,{"$numberDecimal":"2.5"}]}	=> {"x":{"$numberDecimal":"5.0"}}
+{"$multiply":[2,"$n"]}	=> {"x":null}
+{"$multiply":[2,"$nope"]}	=> {"x":null}
+{"$multiply":[2,"x"]}	!! 14	$multiply only supports numeric types, not string
+{"$multiply":[2,{"$date":"2026-01-01T00:00:00Z"}]}	!! 14	$multiply only supports numeric types, not date
+{"$multiply":[2147483647,2]}	=> {"x":{"$numberLong":"4294967294"}}
+{"$multiply":[{"$numberLong":"9223372036854775807"},2]}	=> {"x":{"$numberDouble":"18446744073709551616.0"}}
+{"$multiply":[]}	=> {"x":{"$numberInt":"1"}}
+{"$add":[]}	=> {"x":{"$numberInt":"0"}}
+{"$add":[{"$date":"2026-01-01T00:00:00Z"},{"$date":"2026-01-01T00:00:00Z"}]}	!! 16612	only one date allowed in an $add expression
+{"$add":[{"$date":"2026-01-01T00:00:00Z"},1.5]}	=> {"x":{"$date":{"$numberLong":"1767225600002"}}}
+{"$add":[{"$date":"2026-01-01T00:00:00Z"},{"$numberDecimal":"2.5"}]}	=> {"x":{"$date":{"$numberLong":"1767225600002"}}}
+{"$subtract":[8,1]}	=> {"x":{"$numberInt":"7"}}
+{"$subtract":[1,2]}	=> {"x":{"$numberInt":"-1"}}
+{"$subtract":[8,0]}	=> {"x":{"$numberInt":"8"}}
+{"$subtract":[0,2]}	=> {"x":{"$numberInt":"-2"}}
+{"$subtract":[8,{"$numberLong":"7"}]}	=> {"x":{"$numberLong":"1"}}
+{"$subtract":[{"$numberLong":"7"},2]}	=> {"x":{"$numberLong":"5"}}
+{"$subtract":[8,{"$numberDouble":"2.5"}]}	=> {"x":{"$numberDouble":"5.5"}}
+{"$subtract":[{"$numberDouble":"2.5"},2]}	=> {"x":{"$numberDouble":"0.5"}}
+{"$subtract":[8,{"$numberDecimal":"2.5"}]}	=> {"x":{"$numberDecimal":"5.5"}}
+{"$subtract":[{"$numberDecimal":"2.5"},2]}	=> {"x":{"$numberDecimal":"0.5"}}
+{"$subtract":[8,"$n"]}	=> {"x":null}
+{"$subtract":["$n",2]}	=> {"x":null}
+{"$subtract":[8,"$nope"]}	=> {"x":null}
+{"$subtract":["$nope",2]}	=> {"x":null}
+{"$subtract":[8,"x"]}	!! 14	can't $subtract string from int
+{"$subtract":["x",2]}	!! 14	can't $subtract int from string
+{"$subtract":[8,{"$date":"2026-01-01T00:00:00Z"}]}	!! 14	can't $subtract date from int
+{"$subtract":[{"$date":"2026-01-01T00:00:00Z"},2]}	=> {"x":{"$date":{"$numberLong":"1767225599998"}}}
+{"$subtract":[8,-1]}	=> {"x":{"$numberInt":"9"}}
+{"$subtract":[-1,2]}	=> {"x":{"$numberInt":"-3"}}
+{"$divide":[8,1]}	=> {"x":{"$numberDouble":"8.0"}}
+{"$divide":[1,2]}	=> {"x":{"$numberDouble":"0.5"}}
+{"$divide":[8,0]}	!! 2	can't $divide by zero
+{"$divide":[0,2]}	=> {"x":{"$numberDouble":"0.0"}}
+{"$divide":[8,{"$numberLong":"7"}]}	=> {"x":{"$numberDouble":"1.1428571428571428"}}
+{"$divide":[{"$numberLong":"7"},2]}	=> {"x":{"$numberDouble":"3.5"}}
+{"$divide":[8,{"$numberDouble":"2.5"}]}	=> {"x":{"$numberDouble":"3.2"}}
+{"$divide":[{"$numberDouble":"2.5"},2]}	=> {"x":{"$numberDouble":"1.25"}}
+{"$divide":[8,{"$numberDecimal":"2.5"}]}	=> {"x":{"$numberDecimal":"3.2"}}
+{"$divide":[{"$numberDecimal":"2.5"},2]}	=> {"x":{"$numberDecimal":"1.25"}}
+{"$divide":[8,"$n"]}	=> {"x":null}
+{"$divide":["$n",2]}	=> {"x":null}
+{"$divide":[8,"$nope"]}	=> {"x":null}
+{"$divide":["$nope",2]}	=> {"x":null}
+{"$divide":[8,"x"]}	!! 14	$divide only supports numeric types, not int and string
+{"$divide":["x",2]}	!! 14	$divide only supports numeric types, not string and int
+{"$divide":[8,{"$date":"2026-01-01T00:00:00Z"}]}	!! 14	$divide only supports numeric types, not int and date
+{"$divide":[{"$date":"2026-01-01T00:00:00Z"},2]}	!! 14	$divide only supports numeric types, not date and int
+{"$divide":[8,-1]}	=> {"x":{"$numberDouble":"-8.0"}}
+{"$divide":[-1,2]}	=> {"x":{"$numberDouble":"-0.5"}}
+{"$mod":[8,1]}	=> {"x":{"$numberInt":"0"}}
+{"$mod":[1,2]}	=> {"x":{"$numberInt":"1"}}
+{"$mod":[8,0]}	!! 16610	can't $mod by zero
+{"$mod":[0,2]}	=> {"x":{"$numberInt":"0"}}
+{"$mod":[8,{"$numberLong":"7"}]}	=> {"x":{"$numberLong":"1"}}
+{"$mod":[{"$numberLong":"7"},2]}	=> {"x":{"$numberLong":"1"}}
+{"$mod":[8,{"$numberDouble":"2.5"}]}	=> {"x":{"$numberDouble":"0.5"}}
+{"$mod":[{"$numberDouble":"2.5"},2]}	=> {"x":{"$numberDouble":"0.5"}}
+{"$mod":[8,{"$numberDecimal":"2.5"}]}	=> {"x":{"$numberDecimal":"0.5"}}
+{"$mod":[{"$numberDecimal":"2.5"},2]}	=> {"x":{"$numberDecimal":"0.5"}}
+{"$mod":[8,"$n"]}	=> {"x":null}
+{"$mod":["$n",2]}	=> {"x":null}
+{"$mod":[8,"$nope"]}	=> {"x":null}
+{"$mod":["$nope",2]}	=> {"x":null}
+{"$mod":[8,"x"]}	!! 16611	$mod only supports numeric types, not int and string
+{"$mod":["x",2]}	!! 16611	$mod only supports numeric types, not string and int
+{"$mod":[8,{"$date":"2026-01-01T00:00:00Z"}]}	!! 16611	$mod only supports numeric types, not int and date
+{"$mod":[{"$date":"2026-01-01T00:00:00Z"},2]}	!! 16611	$mod only supports numeric types, not date and int
+{"$mod":[8,-1]}	=> {"x":{"$numberInt":"0"}}
+{"$mod":[-1,2]}	=> {"x":{"$numberInt":"-1"}}
+{"$pow":[8,1]}	=> {"x":{"$numberInt":"8"}}
+{"$pow":[1,2]}	=> {"x":{"$numberInt":"1"}}
+{"$pow":[8,0]}	=> {"x":{"$numberInt":"1"}}
+{"$pow":[0,2]}	=> {"x":{"$numberInt":"0"}}
+{"$pow":[8,{"$numberLong":"7"}]}	=> {"x":{"$numberLong":"2097152"}}
+{"$pow":[{"$numberLong":"7"},2]}	=> {"x":{"$numberLong":"49"}}
+{"$pow":[8,{"$numberDouble":"2.5"}]}	=> {"x":{"$numberDouble":"181.01933598375618"}}
+{"$pow":[{"$numberDouble":"2.5"},2]}	=> {"x":{"$numberDouble":"6.25"}}
+{"$pow":[8,{"$numberDecimal":"2.5"}]}	=> {"x":{"$numberDecimal":"181.0193359837561662466161566988414"}}
+{"$pow":[8,"$n"]}	=> {"x":null}
+{"$pow":["$n",2]}	=> {"x":null}
+{"$pow":[8,"$nope"]}	=> {"x":null}
+{"$pow":["$nope",2]}	=> {"x":null}
+{"$pow":[8,"x"]}	!! 28763	$pow's exponent must be numeric, not string
+{"$pow":["x",2]}	!! 28762	$pow's base must be numeric, not string
+{"$pow":[8,{"$date":"2026-01-01T00:00:00Z"}]}	!! 28763	$pow's exponent must be numeric, not date
+{"$pow":[{"$date":"2026-01-01T00:00:00Z"},2]}	!! 28762	$pow's base must be numeric, not date
+{"$pow":[8,-1]}	=> {"x":{"$numberDouble":"0.125"}}
+{"$pow":[-1,2]}	=> {"x":{"$numberInt":"1"}}
+{"$log":[8,1]}	!! 28759	$log's base must be a positive number not equal to 1, but is 1
+{"$log":[1,2]}	=> {"x":{"$numberDouble":"0.0"}}
+{"$log":[8,0]}	!! 28759	$log's base must be a positive number not equal to 1, but is 0
+{"$log":[0,2]}	!! 28758	$log's argument must be a positive number, but is 0
+{"$log":[8,{"$numberLong":"7"}]}	=> {"x":{"$numberDouble":"1.0686215613240664"}}
+{"$log":[{"$numberLong":"7"},2]}	=> {"x":{"$numberDouble":"2.807354922057604"}}
+{"$log":[8,{"$numberDouble":"2.5"}]}	=> {"x":{"$numberDouble":"2.26941239209809"}}
+{"$log":[{"$numberDouble":"2.5"},2]}	=> {"x":{"$numberDouble":"1.3219280948873624"}}
+{"$log":[{"$numberDecimal":"2.5"},2]}	=> {"x":{"$numberDecimal":"1.321928094887362347870319429489390"}}
+{"$log":[8,"$n"]}	=> {"x":null}
+{"$log":["$n",2]}	=> {"x":null}
+{"$log":[8,"$nope"]}	=> {"x":null}
+{"$log":["$nope",2]}	=> {"x":null}
+{"$log":[8,"x"]}	!! 28757	$log's base must be numeric, not string
+{"$log":["x",2]}	!! 28756	$log's argument must be numeric, not string
+{"$log":[8,{"$date":"2026-01-01T00:00:00Z"}]}	!! 28757	$log's base must be numeric, not date
+{"$log":[{"$date":"2026-01-01T00:00:00Z"},2]}	!! 28756	$log's argument must be numeric, not date
+{"$log":[8,-1]}	!! 28759	$log's base must be a positive number not equal to 1, but is -1
+{"$log":[-1,2]}	!! 28758	$log's argument must be a positive number, but is -1
+{"$subtract":[{"$date":"2026-01-01T00:00:00Z"},{"$date":"2026-01-01T00:00:00Z"}]}	=> {"x":{"$numberLong":"0"}}
+{"$subtract":[{"$date":"2026-01-01T00:00:00Z"},1000]}	=> {"x":{"$date":{"$numberLong":"1767225599000"}}}
+{"$subtract":[{"$date":"2026-01-01T00:00:00Z"},{"$numberDecimal":"2.5"}]}	=> {"x":{"$date":{"$numberLong":"1767225599998"}}}
+{"$subtract":[{"$date":"2026-01-01T00:00:00Z"},"x"]}	!! 14	can't $subtract string from Date
+{"$subtract":[{"$numberLong":"-9223372036854775808"},1]}	=> {"x":{"$numberDouble":"-9223372036854775808.0"}}
+{"$mod":[-7,2]}	=> {"x":{"$numberInt":"-1"}}
+{"$mod":[7.5,2]}	=> {"x":{"$numberDouble":"1.5"}}
+{"$mod":[{"$numberLong":"7"},0]}	!! 16610	can't $mod by zero
+{"$mod":[7,0.0]}	!! 16610	can't $mod by zero
+{"$pow":[0,-1]}	!! 28764	$pow cannot take a base of 0 and a negative exponent
+{"$pow":[2,-1]}	=> {"x":{"$numberDouble":"0.5"}}
+{"$pow":[2,62]}	=> {"x":{"$numberLong":"4611686018427387904"}}
+{"$pow":[2,63]}	=> {"x":{"$numberDouble":"9223372036854775808.0"}}
+{"$pow":[{"$numberLong":"2"},62]}	=> {"x":{"$numberLong":"4611686018427387904"}}
+{"$pow":[-1,0.5]}	=> {"x":{"$numberDouble":"NaN"}}
+{"$pow":[0,0]}	=> {"x":{"$numberInt":"1"}}
+{"$pow":[1,-5]}	=> {"x":{"$numberInt":"1"}}
+{"$pow":[-1,-3]}	=> {"x":{"$numberInt":"-1"}}
+{"$abs":1}	=> {"x":{"$numberInt":"1"}}
+{"$abs":-2.5}	=> {"x":{"$numberDouble":"2.5"}}
+{"$abs":0}	=> {"x":{"$numberInt":"0"}}
+{"$abs":{"$numberLong":"7"}}	=> {"x":{"$numberLong":"7"}}
+{"$abs":{"$numberDouble":"2.5"}}	=> {"x":{"$numberDouble":"2.5"}}
+{"$abs":{"$numberDecimal":"2.5"}}	=> {"x":{"$numberDecimal":"2.5"}}
+{"$abs":"$n"}	=> {"x":null}
+{"$abs":"$nope"}	=> {"x":null}
+{"$abs":"x"}	!! 28765	$abs only supports numeric types, not string
+{"$abs":-2147483648}	=> {"x":{"$numberLong":"2147483648"}}
+{"$abs":{"$numberLong":"-9223372036854775808"}}	!! 28680	can't take $abs of long long min
+{"$abs":{"$numberDouble":"NaN"}}	=> {"x":{"$numberDouble":"NaN"}}
+{"$abs":{"$numberDouble":"-Infinity"}}	=> {"x":{"$numberDouble":"Infinity"}}
+{"$ceil":1}	=> {"x":{"$numberInt":"1"}}
+{"$ceil":-2.5}	=> {"x":{"$numberDouble":"-2.0"}}
+{"$ceil":0}	=> {"x":{"$numberInt":"0"}}
+{"$ceil":{"$numberLong":"7"}}	=> {"x":{"$numberLong":"7"}}
+{"$ceil":{"$numberDouble":"2.5"}}	=> {"x":{"$numberDouble":"3.0"}}
+{"$ceil":{"$numberDecimal":"2.5"}}	=> {"x":{"$numberDecimal":"3"}}
+{"$ceil":"$n"}	=> {"x":null}
+{"$ceil":"$nope"}	=> {"x":null}
+{"$ceil":"x"}	!! 28765	$ceil only supports numeric types, not string
+{"$ceil":-2147483648}	=> {"x":{"$numberInt":"-2147483648"}}
+{"$ceil":{"$numberLong":"-9223372036854775808"}}	=> {"x":{"$numberLong":"-9223372036854775808"}}
+{"$ceil":{"$numberDouble":"NaN"}}	=> {"x":{"$numberDouble":"NaN"}}
+{"$ceil":{"$numberDouble":"-Infinity"}}	=> {"x":{"$numberDouble":"-Infinity"}}
+{"$floor":1}	=> {"x":{"$numberInt":"1"}}
+{"$floor":-2.5}	=> {"x":{"$numberDouble":"-3.0"}}
+{"$floor":0}	=> {"x":{"$numberInt":"0"}}
+{"$floor":{"$numberLong":"7"}}	=> {"x":{"$numberLong":"7"}}
+{"$floor":{"$numberDouble":"2.5"}}	=> {"x":{"$numberDouble":"2.0"}}
+{"$floor":{"$numberDecimal":"2.5"}}	=> {"x":{"$numberDecimal":"2"}}
+{"$floor":"$n"}	=> {"x":null}
+{"$floor":"$nope"}	=> {"x":null}
+{"$floor":"x"}	!! 28765	$floor only supports numeric types, not string
+{"$floor":-2147483648}	=> {"x":{"$numberInt":"-2147483648"}}
+{"$floor":{"$numberLong":"-9223372036854775808"}}	=> {"x":{"$numberLong":"-9223372036854775808"}}
+{"$floor":{"$numberDouble":"NaN"}}	=> {"x":{"$numberDouble":"NaN"}}
+{"$floor":{"$numberDouble":"-Infinity"}}	=> {"x":{"$numberDouble":"-Infinity"}}
+{"$sqrt":1}	=> {"x":{"$numberDouble":"1.0"}}
+{"$sqrt":-2.5}	!! 28714	$sqrt's argument must be greater than or equal to 0
+{"$sqrt":0}	=> {"x":{"$numberDouble":"0.0"}}
+{"$sqrt":{"$numberLong":"7"}}	=> {"x":{"$numberDouble":"2.6457513110645907"}}
+{"$sqrt":{"$numberDouble":"2.5"}}	=> {"x":{"$numberDouble":"1.5811388300841898"}}
+{"$sqrt":{"$numberDecimal":"2.5"}}	=> {"x":{"$numberDecimal":"1.581138830084189665999446772216359"}}
+{"$sqrt":"$n"}	=> {"x":null}
+{"$sqrt":"$nope"}	=> {"x":null}
+{"$sqrt":"x"}	!! 28765	$sqrt only supports numeric types, not string
+{"$sqrt":-2147483648}	!! 28714	$sqrt's argument must be greater than or equal to 0
+{"$sqrt":{"$numberLong":"-9223372036854775808"}}	!! 28714	$sqrt's argument must be greater than or equal to 0
+{"$sqrt":{"$numberDouble":"NaN"}}	=> {"x":{"$numberDouble":"NaN"}}
+{"$sqrt":{"$numberDouble":"-Infinity"}}	!! 28714	$sqrt's argument must be greater than or equal to 0
+{"$exp":1}	=> {"x":{"$numberDouble":"2.718281828459045"}}
+{"$exp":-2.5}	=> {"x":{"$numberDouble":"0.0820849986238988"}}
+{"$exp":0}	=> {"x":{"$numberDouble":"1.0"}}
+{"$exp":{"$numberLong":"7"}}	=> {"x":{"$numberDouble":"1096.6331584284585"}}
+{"$exp":{"$numberDouble":"2.5"}}	=> {"x":{"$numberDouble":"12.182493960703473"}}
+{"$exp":{"$numberDecimal":"2.5"}}	=> {"x":{"$numberDecimal":"12.18249396070347343807017595116797"}}
+{"$exp":"$n"}	=> {"x":null}
+{"$exp":"$nope"}	=> {"x":null}
+{"$exp":"x"}	!! 28765	$exp only supports numeric types, not string
+{"$exp":-2147483648}	=> {"x":{"$numberDouble":"0.0"}}
+{"$exp":{"$numberLong":"-9223372036854775808"}}	=> {"x":{"$numberDouble":"0.0"}}
+{"$exp":{"$numberDouble":"NaN"}}	=> {"x":{"$numberDouble":"NaN"}}
+{"$exp":{"$numberDouble":"-Infinity"}}	=> {"x":{"$numberDouble":"0.0"}}
+{"$ln":1}	=> {"x":{"$numberDouble":"0.0"}}
+{"$ln":-2.5}	!! 28766	$ln's argument must be a positive number, but is -2.5
+{"$ln":0}	!! 28766	$ln's argument must be a positive number, but is 0
+{"$ln":{"$numberLong":"7"}}	=> {"x":{"$numberDouble":"1.9459101490553132"}}
+{"$ln":{"$numberDouble":"2.5"}}	=> {"x":{"$numberDouble":"0.9162907318741551"}}
+{"$ln":"$n"}	=> {"x":null}
+{"$ln":"$nope"}	=> {"x":null}
+{"$ln":"x"}	!! 28765	$ln only supports numeric types, not string
+{"$ln":-2147483648}	!! 28766	$ln's argument must be a positive number, but is -2.14748e+09
+{"$ln":{"$numberLong":"-9223372036854775808"}}	!! 28766	$ln's argument must be a positive number, but is -9.22337e+18
+{"$ln":{"$numberDouble":"NaN"}}	=> {"x":{"$numberDouble":"NaN"}}
+{"$ln":{"$numberDouble":"-Infinity"}}	!! 28766	$ln's argument must be a positive number, but is -inf
+{"$log10":1}	=> {"x":{"$numberDouble":"0.0"}}
+{"$log10":-2.5}	!! 28761	$log10's argument must be a positive number, but is -2.5
+{"$log10":0}	!! 28761	$log10's argument must be a positive number, but is 0
+{"$log10":{"$numberLong":"7"}}	=> {"x":{"$numberDouble":"0.8450980400142568"}}
+{"$log10":{"$numberDouble":"2.5"}}	=> {"x":{"$numberDouble":"0.3979400086720376"}}
+{"$log10":"$n"}	=> {"x":null}
+{"$log10":"$nope"}	=> {"x":null}
+{"$log10":"x"}	!! 28765	$log10 only supports numeric types, not string
+{"$log10":-2147483648}	!! 28761	$log10's argument must be a positive number, but is -2.14748e+09
+{"$log10":{"$numberLong":"-9223372036854775808"}}	!! 28761	$log10's argument must be a positive number, but is -9.22337e+18
+{"$log10":{"$numberDouble":"NaN"}}	=> {"x":{"$numberDouble":"NaN"}}
+{"$log10":{"$numberDouble":"-Infinity"}}	!! 28761	$log10's argument must be a positive number, but is -inf
+{"$round":1}	=> {"x":{"$numberInt":"1"}}
+{"$round":-2.5}	=> {"x":{"$numberDouble":"-2.0"}}
+{"$round":0}	=> {"x":{"$numberInt":"0"}}
+{"$round":{"$numberLong":"7"}}	=> {"x":{"$numberLong":"7"}}
+{"$round":{"$numberDouble":"2.5"}}	=> {"x":{"$numberDouble":"2.0"}}
+{"$round":{"$numberDecimal":"2.5"}}	=> {"x":{"$numberDecimal":"2"}}
+{"$round":"$n"}	=> {"x":null}
+{"$round":"$nope"}	=> {"x":null}
+{"$round":"x"}	!! 51081	$round only supports numeric types, not string
+{"$round":-2147483648}	=> {"x":{"$numberInt":"-2147483648"}}
+{"$round":{"$numberLong":"-9223372036854775808"}}	=> {"x":{"$numberLong":"-9223372036854775808"}}
+{"$round":{"$numberDouble":"NaN"}}	=> {"x":{"$numberDouble":"NaN"}}
+{"$round":{"$numberDouble":"-Infinity"}}	=> {"x":{"$numberDouble":"-Infinity"}}
+{"$trunc":1}	=> {"x":{"$numberInt":"1"}}
+{"$trunc":-2.5}	=> {"x":{"$numberDouble":"-2.0"}}
+{"$trunc":0}	=> {"x":{"$numberInt":"0"}}
+{"$trunc":{"$numberLong":"7"}}	=> {"x":{"$numberLong":"7"}}
+{"$trunc":{"$numberDouble":"2.5"}}	=> {"x":{"$numberDouble":"2.0"}}
+{"$trunc":{"$numberDecimal":"2.5"}}	=> {"x":{"$numberDecimal":"2"}}
+{"$trunc":"$n"}	=> {"x":null}
+{"$trunc":"$nope"}	=> {"x":null}
+{"$trunc":"x"}	!! 51081	$trunc only supports numeric types, not string
+{"$trunc":-2147483648}	=> {"x":{"$numberInt":"-2147483648"}}
+{"$trunc":{"$numberLong":"-9223372036854775808"}}	=> {"x":{"$numberLong":"-9223372036854775808"}}
+{"$trunc":{"$numberDouble":"NaN"}}	=> {"x":{"$numberDouble":"NaN"}}
+{"$trunc":{"$numberDouble":"-Infinity"}}	=> {"x":{"$numberDouble":"-Infinity"}}
+{"$round":[1234.5678,-2]}	=> {"x":{"$numberDouble":"1200.0"}}
+{"$trunc":[1234.5678,-2]}	=> {"x":{"$numberDouble":"1200.0"}}
+{"$round":[{"$numberLong":"12345"},-2]}	=> {"x":{"$numberLong":"12300"}}
+{"$round":[12345,-2]}	=> {"x":{"$numberInt":"12300"}}
+{"$round":[{"$numberDecimal":"1234.5678"},-2]}	=> {"x":{"$numberDecimal":"1.2E+3"}}
+{"$round":[1234.5678,-1]}	=> {"x":{"$numberDouble":"1230.0"}}
+{"$trunc":[1234.5678,-1]}	=> {"x":{"$numberDouble":"1230.0"}}
+{"$round":[{"$numberLong":"12345"},-1]}	=> {"x":{"$numberLong":"12340"}}
+{"$round":[12345,-1]}	=> {"x":{"$numberInt":"12340"}}
+{"$round":[{"$numberDecimal":"1234.5678"},-1]}	=> {"x":{"$numberDecimal":"1.23E+3"}}
+{"$round":[1234.5678,0]}	=> {"x":{"$numberDouble":"1235.0"}}
+{"$trunc":[1234.5678,0]}	=> {"x":{"$numberDouble":"1234.0"}}
+{"$round":[{"$numberLong":"12345"},0]}	=> {"x":{"$numberLong":"12345"}}
+{"$round":[12345,0]}	=> {"x":{"$numberInt":"12345"}}
+{"$round":[{"$numberDecimal":"1234.5678"},0]}	=> {"x":{"$numberDecimal":"1235"}}
+{"$round":[1234.5678,1]}	=> {"x":{"$numberDouble":"1234.6"}}
+{"$trunc":[1234.5678,1]}	=> {"x":{"$numberDouble":"1234.5"}}
+{"$round":[{"$numberLong":"12345"},1]}	=> {"x":{"$numberLong":"12345"}}
+{"$round":[12345,1]}	=> {"x":{"$numberInt":"12345"}}
+{"$round":[{"$numberDecimal":"1234.5678"},1]}	=> {"x":{"$numberDecimal":"1234.6"}}
+{"$round":[1234.5678,2]}	=> {"x":{"$numberDouble":"1234.57"}}
+{"$trunc":[1234.5678,2]}	=> {"x":{"$numberDouble":"1234.56"}}
+{"$round":[{"$numberLong":"12345"},2]}	=> {"x":{"$numberLong":"12345"}}
+{"$round":[12345,2]}	=> {"x":{"$numberInt":"12345"}}
+{"$round":[{"$numberDecimal":"1234.5678"},2]}	=> {"x":{"$numberDecimal":"1234.57"}}
+{"$round":[1234.5678,101]}	!! 51083	cannot apply $round with precision value 101 value must be in [-20, 100]
+{"$trunc":[1234.5678,101]}	!! 51083	cannot apply $trunc with precision value 101 value must be in [-20, 100]
+{"$round":[{"$numberLong":"12345"},101]}	!! 51083	cannot apply $round with precision value 101 value must be in [-20, 100]
+{"$round":[12345,101]}	!! 51083	cannot apply $round with precision value 101 value must be in [-20, 100]
+{"$round":[{"$numberDecimal":"1234.5678"},101]}	!! 51083	cannot apply $round with precision value 101 value must be in [-20, 100]
+{"$round":[1234.5678,-21]}	!! 51083	cannot apply $round with precision value -21 value must be in [-20, 100]
+{"$trunc":[1234.5678,-21]}	!! 51083	cannot apply $trunc with precision value -21 value must be in [-20, 100]
+{"$round":[{"$numberLong":"12345"},-21]}	!! 51083	cannot apply $round with precision value -21 value must be in [-20, 100]
+{"$round":[12345,-21]}	!! 51083	cannot apply $round with precision value -21 value must be in [-20, 100]
+{"$round":[{"$numberDecimal":"1234.5678"},-21]}	!! 51083	cannot apply $round with precision value -21 value must be in [-20, 100]
+{"$round":[1234.5678,{"$numberLong":"1"}]}	=> {"x":{"$numberDouble":"1234.6"}}
+{"$trunc":[1234.5678,{"$numberLong":"1"}]}	=> {"x":{"$numberDouble":"1234.5"}}
+{"$round":[{"$numberLong":"12345"},{"$numberLong":"1"}]}	=> {"x":{"$numberLong":"12345"}}
+{"$round":[12345,{"$numberLong":"1"}]}	=> {"x":{"$numberInt":"12345"}}
+{"$round":[{"$numberDecimal":"1234.5678"},{"$numberLong":"1"}]}	=> {"x":{"$numberDecimal":"1234.6"}}
+{"$round":[1234.5678,1.5]}	!! 51082	precision argument to  $round must be a integral value
+{"$trunc":[1234.5678,1.5]}	!! 51082	precision argument to  $trunc must be a integral value
+{"$round":[{"$numberLong":"12345"},1.5]}	!! 51082	precision argument to  $round must be a integral value
+{"$round":[12345,1.5]}	!! 51082	precision argument to  $round must be a integral value
+{"$round":[{"$numberDecimal":"1234.5678"},1.5]}	!! 51082	precision argument to  $round must be a integral value
+{"$round":[1234.5678,"x"]}	!! 16004	can't convert from BSON type string to long
+{"$trunc":[1234.5678,"x"]}	!! 16004	can't convert from BSON type string to long
+{"$round":[{"$numberLong":"12345"},"x"]}	!! 16004	can't convert from BSON type string to long
+{"$round":[12345,"x"]}	!! 16004	can't convert from BSON type string to long
+{"$round":[{"$numberDecimal":"1234.5678"},"x"]}	!! 16004	can't convert from BSON type string to long
+{"$round":[1234.5678,"$n"]}	=> {"x":null}
+{"$trunc":[1234.5678,"$n"]}	=> {"x":null}
+{"$round":[{"$numberLong":"12345"},"$n"]}	=> {"x":null}
+{"$round":[12345,"$n"]}	=> {"x":null}
+{"$round":[{"$numberDecimal":"1234.5678"},"$n"]}	=> {"x":null}
+{"$round":[2.5]}	=> {"x":{"$numberDouble":"2.0"}}
+{"$round":[3.5]}	=> {"x":{"$numberDouble":"4.0"}}
+{"$round":[-2.5]}	=> {"x":{"$numberDouble":"-2.0"}}
+{"$round":[{"$numberDecimal":"2.5"}]}	=> {"x":{"$numberDecimal":"2"}}
+{"$round":[{"$numberDecimal":"-3.5"}]}	=> {"x":{"$numberDecimal":"-4"}}
+{"$trunc":[{"$numberDecimal":"-3.5"}]}	=> {"x":{"$numberDecimal":"-3"}}
+{"$ceil":{"$numberDecimal":"-3.5"}}	=> {"x":{"$numberDecimal":"-3"}}
+{"$floor":{"$numberDecimal":"-3.5"}}	=> {"x":{"$numberDecimal":"-4"}}
+{"$ceil":{"$numberDecimal":"3.0001"}}	=> {"x":{"$numberDecimal":"4"}}
+{"$log":[8]}	!! 16020	Expression $log takes exactly 2 arguments. 1 were passed in.
+{"$log":[8,1]}	!! 28759	$log's base must be a positive number not equal to 1, but is 1
+{"$log":[-8,2]}	!! 28758	$log's argument must be a positive number, but is -8
+{"$log":[{"$numberDecimal":"8"},{"$numberDecimal":"-2"}]}	!! 28759	$log's base must be a positive number not equal to 1, but is -2
+{"$divide":[{"$numberDecimal":"1"},0]}	!! 2	can't $divide by zero
+{"$divide":[1,{"$numberDecimal":"0"}]}	!! 2	can't $divide by zero
+{"$divide":[{"$numberLong":"1"},3]}	=> {"x":{"$numberDouble":"0.3333333333333333"}}

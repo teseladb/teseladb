@@ -1,0 +1,15 @@
+[package]
+name = "teseladb-changestream"
+version = "0.1.0"
+description = "TeselaDB's change streams: the order in which the events of the ranges merge."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+teseladb-hlc = { path = "../teseladb-hlc" }
+teseladb-bson = { path = "../teseladb-bson" }

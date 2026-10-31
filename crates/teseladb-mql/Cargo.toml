@@ -1,0 +1,17 @@
+[package]
+name = "teseladb-mql"
+version = "0.1.0"
+description = "TeselaDB's MQL: query filters and their matcher, projections, update operators and upserts, schema validation with $jsonSchema and its own PCRE-compatible regular expressions."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+teseladb-bson = { path = "../teseladb-bson" }
+
+[dev-dependencies]
+teseladb-collation = { path = "../teseladb-collation" }

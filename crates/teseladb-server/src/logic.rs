@@ -1,0 +1,2418 @@
+//! The logic of a core over the I/O runtime (001 FR-018, 005 FR-015 and FR-016, 007 FR-003): a
+//! [`MultiRaftCore`] whose core 0 holds Group 0 and whose every core holds the data ranges Group 0
+//! places on it ([`DataCore`]); core 0 hands them Group 0's ranges and publishes the routing
+//! table the client workers read. The founder proposes `Bootstrap`; Group 0's leader takes the joins (`AddNode`,
+//! then `AddLearner`) and promotes a learner to voter once it has caught up, up to
+//! [`GROUP0_MAX_VOTERS`]. A node whose name or addresses changed updates them with `SetNodeAddrs`
+//! (FR-023), and every node records its start with `NodeBoot`, forwarding them to the leader
+//! when it does not lead. Group 0's leader creates the data range (`CreateRange`) and, every
+//! [`BALANCE_EVERY`], runs the balancer, whose replica changes the range's leader carries out.
+//!
+//! The core's disk operations, the log's, the rollback files', the LSM's and the snapshot
+//! transfers', go to one disk thread whose results come back in submission order: a queue
+//! remembers whose each one is. The entries of a range this replica drops in a rollback go to
+//! the rollback files ([`RollbackWriter`]).
+
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::Arc;
+use std::sync::mpsc::Sender;
+
+use teseladb_io::handshake::JoinRequest;
+use teseladb_io::mailbox::SendError;
+use teseladb_io::peer::{JoinAccepted, PeerMsg};
+use teseladb_io::runtime::{CoreInput, CoreLogic, CoreSender};
+use teseladb_meta::balancer::{BALANCE_EVERY, Decision, View, plan};
+use teseladb_meta::bootstrap::{create_data_range, data_range, needs_data_range};
+use teseladb_meta::command::{Group0Command, NodeAddrs, NodeState};
+use teseladb_meta::group0::{GROUP0, Group0Result, Group0Sm, RangeDesc};
+use teseladb_meta::liveness::{DEAD_AFTER, DEAD_AFTER_SETTING, dead_after};
+use teseladb_multiraft::{Done, MultiRaftCore, OpError, OpId, PeerFrame, route_stray};
+use teseladb_raft::{ConfChange, ConfChangeKind, Role};
+use teseladb_raftlog::{IoDone, IoOp};
+use teseladb_range::host::RangeError;
+use teseladb_range::rollback::rollback_files;
+use teseladb_types::{Bytes, Nanos, NodeId};
+use teseladb_wire::commands::Shared;
+use teseladb_wire::commands::session::{KillScope, kill_local};
+
+use crate::authz_lease::{AuthGate, AuthLeaseDriver};
+use crate::catalog_ops::{CatalogAnswer, CatalogOps, CatalogReq, CatalogSender};
+use crate::clustertime_keys::KeyDriver;
+use crate::coresm::{CoreOutput, CoreSm, Group0Holder};
+use crate::data::{DataCore, DataReq, DataSender, IoOwner};
+use crate::forward::Request;
+use crate::frames::{from_wire, to_wire};
+use crate::liveness::{LivenessDriver, SharedLoads, core_load};
+use crate::node::FOUNDER;
+use crate::ranges::Ranges;
+use crate::relocations::RelocateMsg;
+use crate::rollback::RollbackWriter;
+use crate::rollback::ref_layout;
+use crate::routes::SharedRoutes;
+use crate::sessions_ops::{KillSender, SessionOps};
+use teseladb_meta::drain::DrainError;
+
+use crate::client_listener::NodePresence;
+use teseladb_meta::security::{Expect, Principal, SecurityOp};
+
+/// Time between two proposals of the `root` user while the cluster has none (013).
+const ROOT_RETRY: Nanos = Nanos::from_millis(2_000);
+
+/// Whose a disk operation in flight is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IoSlot {
+    /// The log's.
+    Log,
+    /// The rollback files'.
+    Rollback,
+    /// The data range's (its LSM or its transfers).
+    Data(IoOwner),
+}
+
+/// Group 0 voters at most; the other nodes stay learners.
+pub const GROUP0_MAX_VOTERS: usize = 5;
+
+/// Certificate fingerprint of a node in `--insecure` mode: derived from its inter-node address, so
+/// that joining again from the same address gives back the same node.
+pub fn insecure_fingerprint(peer_addr: &str) -> [u8; 32] {
+    teseladb_hash::sha256(peer_addr.as_bytes())
+}
+
+/// What a core's copy of Group 0 shows.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Group0View {
+    /// The cluster exists (`Bootstrap` applied).
+    pub bootstrapped: bool,
+    /// Cluster identifier.
+    pub cluster_id: [u8; 16],
+    /// Role of this replica (`None` if this core has no Group 0).
+    pub role: Option<Role>,
+    /// Known leader (0 = none).
+    pub leader: NodeId,
+    /// Voters.
+    pub voters: Vec<NodeId>,
+    /// Learners.
+    pub learners: Vec<NodeId>,
+    /// Nodes of the cluster.
+    pub nodes: Vec<NodeId>,
+    /// Group 0 has this node's current name and addresses (always true without them).
+    pub addrs_current: bool,
+    /// Group 0's descriptor of the data range, once created (005 FR-016).
+    pub data_range: Option<RangeDesc>,
+}
+
+/// Messages a core takes from the rest of the process.
+#[derive(Debug)]
+pub enum NodeMsg {
+    /// A node asks to join the cluster (core 0, which holds Group 0).
+    Join(JoinRequest, Sender<Result<JoinAccepted, String>>),
+    /// This core's view of Group 0.
+    View(Sender<Group0View>),
+    /// The Group 0 command that drains (`true`) or removes a node, from core 0's Group 0 (007
+    /// FR-015); the port proposes it. `None`: this core has no Group 0.
+    Drain(NodeId, bool, Sender<Option<Result<Group0Command, DrainError>>>),
+    /// A request of the node's handle for a data range (on the range's core).
+    Data(DataReq, DataSender),
+    /// The mailboxes of the node's cores, in core order (sent once at start).
+    Cores(Vec<CoreSender<NodeMsg>>),
+    /// Group 0's ranges, from core 0 to the other cores.
+    Ranges(Ranges),
+    /// A Group 0 command of a range's core for core 0 (`ReplicasSettled`, `SplitRange`,
+    /// `CompleteSplit`).
+    Group0(Group0Command),
+    /// The inter-node addresses of the cluster's nodes, from core 0 to the cores without Group 0.
+    Peers(BTreeMap<NodeId, String>),
+    /// A catalog request of the node's handle (core 0, 006 FR-027).
+    Catalog(CatalogReq, CatalogSender),
+    /// Sessions to kill on the other nodes (core 0, 006 FR-016).
+    KillSessions(KillScope, KillSender),
+    /// A core change between two cores of the node (007 FR-011).
+    Relocate(RelocateMsg),
+    /// A frame another core of the node received for a range this core runs (007 FR-011: the
+    /// range moved between cores), with the node that sent it.
+    Stray(NodeId, PeerFrame),
+}
+
+/// Step of a join waiting for an operation.
+#[derive(Debug)]
+enum JoinStep {
+    /// Waiting for `AddNode`.
+    AddNode,
+    /// Waiting for the `AddLearner` of this node.
+    Learner(NodeId),
+}
+
+type JoinReply = Sender<Result<JoinAccepted, String>>;
+
+/// Logic of one core.
+pub struct NodeLogic {
+    core: MultiRaftCore<CoreSm>,
+    /// Pending `Bootstrap` of the founder: the cluster and the first node.
+    founder: Option<([u8; 16], NodeAddrs)>,
+    bootstrap: Option<OpId>,
+    /// This node and its current name and addresses (core 0).
+    me: Option<(NodeId, NodeAddrs)>,
+    /// Pending `SetNodeAddrs`, proposed or forwarded.
+    addr_update: Option<OpId>,
+    /// Without a known leader, `SetNodeAddrs` goes to Group 0's voters in turn: the next one.
+    addr_probe: usize,
+    joins: BTreeMap<OpId, (JoinStep, JoinReply)>,
+    promoting: Option<OpId>,
+    outbound: Vec<(NodeId, PeerMsg)>,
+    /// Node heartbeats and clock reports (core 0).
+    liveness: LivenessDriver,
+    /// The authorization lease and fence (core 0, 013).
+    authz: AuthLeaseDriver,
+    /// The `root` user to create while the cluster has none, and when to try next (core 0, 013).
+    root_user: Option<(Vec<u8>, Nanos)>,
+    /// The `$clusterTime` signing keys (core 0 of a node with authentication, 013).
+    clustertime_keys: Option<KeyDriver>,
+    now: Nanos,
+    /// Wall clock at the last tick (Unix ms).
+    wall_ms: u64,
+    /// The data ranges of this core.
+    data: Option<DataCore>,
+    /// Whose each disk operation in flight is.
+    io: VecDeque<IoSlot>,
+    /// Rollback files being written.
+    rollback: RollbackWriter,
+    /// The node's cores (empty until [`NodeMsg::Cores`]).
+    cores: Vec<CoreSender<NodeMsg>>,
+    /// This start's `boot_epoch` (core 0), recorded in Group 0 with `NodeBoot`.
+    boot_epoch: Option<u32>,
+    boot_op: Option<OpId>,
+    /// The tags this node started with (`--tags`, core 0), recorded with `SetNodeTags` (007
+    /// FR-013).
+    tags: Vec<(String, String)>,
+    tags_op: Option<OpId>,
+    /// The nodes' tags last published for the client workers.
+    sent_tags: Option<crate::routes::NodeTags>,
+    create_op: Option<OpId>,
+    balance_op: Option<OpId>,
+    balance_at: Nanos,
+    /// Group 0 commands of the range's core, proposed or forwarded.
+    group0_ops: BTreeSet<OpId>,
+    /// Group 0's ranges last given to the cores (core 0).
+    sent_ranges: Option<Ranges>,
+    /// The routing table the client workers read (core 0 writes it).
+    routes: Option<SharedRoutes>,
+    /// The nodes' inter-node addresses: given to the other cores by core 0, which has them in
+    /// Group 0.
+    peers: BTreeMap<NodeId, String>,
+    /// Catalog requests in flight (core 0).
+    catalog: CatalogOps,
+    /// Kills of sessions sent to the other nodes (core 0).
+    kills: SessionOps,
+    /// The node's cursors and sessions, where the other nodes' kills land (core 0).
+    sessions: Option<Arc<Shared>>,
+    /// This core's index and where it publishes its load for core 0's heartbeat (007 FR-010).
+    loads: Option<(usize, Arc<SharedLoads>)>,
+    /// Where core 0 tells the clients' port the node's state in Group 0 (007 FR-015).
+    presence: Option<Arc<NodePresence>>,
+}
+
+impl NodeLogic {
+    /// Logic over `core`; `founder` is set on core 0 of the node that creates the cluster, and `me`
+    /// on core 0 of every node.
+    pub fn new(
+        core: MultiRaftCore<CoreSm>,
+        founder: Option<([u8; 16], NodeAddrs)>,
+        me: Option<(NodeId, NodeAddrs)>,
+    ) -> NodeLogic {
+        NodeLogic {
+            core,
+            founder,
+            bootstrap: None,
+            me,
+            addr_update: None,
+            addr_probe: 0,
+            joins: BTreeMap::new(),
+            promoting: None,
+            outbound: Vec::new(),
+            liveness: LivenessDriver::default(),
+            authz: AuthLeaseDriver::default(),
+            root_user: None,
+            clustertime_keys: None,
+            now: Nanos::ZERO,
+            wall_ms: 0,
+            data: None,
+            io: VecDeque::new(),
+            rollback: RollbackWriter::default(),
+            cores: Vec::new(),
+            boot_epoch: None,
+            boot_op: None,
+            tags: Vec::new(),
+            tags_op: None,
+            sent_tags: None,
+            create_op: None,
+            balance_op: None,
+            balance_at: Nanos::ZERO,
+            group0_ops: BTreeSet::new(),
+            sent_ranges: None,
+            routes: None,
+            peers: BTreeMap::new(),
+            catalog: CatalogOps::default(),
+            kills: SessionOps::default(),
+            sessions: None,
+            loads: None,
+            presence: None,
+        }
+    }
+
+    /// Core 0 publishes the node's state in Group 0 for the clients' port.
+    pub fn with_presence(self, presence: Arc<NodePresence>) -> NodeLogic {
+        NodeLogic { presence: Some(presence), ..self }
+    }
+
+    /// The node's `topologyVersion` counter, and whether it drained (it holds nothing and was
+    /// asked to drain, or it is removed): then its clients' port closes (007 FR-015).
+    fn publish_presence(&self) {
+        let (Some(presence), Some((me, _)), Some(sm)) = (&self.presence, &self.me, self.group0())
+        else {
+            return;
+        };
+        let Some(state) = sm.nodes.get(me).map(|n| n.state) else { return };
+        let voters = self.core.conf(GROUP0).map(|c| c.voters.clone()).unwrap_or_default();
+        // A node that left Group 0 may never learn it: the port closes once its data is gone.
+        let closed = match state {
+            NodeState::Active => false,
+            NodeState::Draining => teseladb_meta::drain::progress(sm, &voters, *me).replicas == 0,
+            NodeState::Removed => true,
+        };
+        presence.set(teseladb_meta::drain::topology_counter(state), closed);
+    }
+
+    /// Core `core` publishes its load in `loads` at every tick; core 0 sends the node's.
+    pub fn with_loads(self, core: u16, loads: Arc<SharedLoads>) -> NodeLogic {
+        NodeLogic { loads: Some((usize::from(core), loads)), ..self }
+    }
+
+    /// The node's load for the heartbeat, after publishing this core's: the operations of its
+    /// data ranges' leaders count.
+    fn node_load(&self) -> teseladb_meta::liveness::NodeLoad {
+        let ops = self.data.as_ref().map_or(0, |d| d.ops(&self.core));
+        let mine = core_load(&self.core, ops);
+        match &self.loads {
+            Some((core, loads)) => {
+                loads.publish(*core, mine);
+                loads.node()
+            }
+            None => mine,
+        }
+    }
+
+    /// The node's cursors and sessions, for the kills other nodes send (core 0).
+    pub fn with_sessions(self, sessions: Arc<Shared>) -> NodeLogic {
+        NodeLogic { sessions: Some(sessions), ..self }
+    }
+
+    /// Sends the sessions of `scope` to every other node of the cluster; `reply` learns when all
+    /// answered.
+    fn kill_sessions(&mut self, scope: KillScope, reply: KillSender) {
+        let me = self.me.as_ref().map_or(NodeId(0), |(id, _)| *id);
+        let body = Request::KillSessions(scope).encode();
+        let others: Vec<NodeId> = self.peers.keys().copied().filter(|n| *n != me).collect();
+        let ops = others
+            .into_iter()
+            .map(|to| self.core.forward(to, Bytes::from_vec(body.clone()), self.now))
+            .collect();
+        self.kills.start(ops, reply);
+    }
+
+    /// This core holds data ranges.
+    pub fn with_data(self, data: DataCore) -> NodeLogic {
+        NodeLogic { data: Some(data), ..self }
+    }
+
+    /// Core 0 writes the routing table the client workers read.
+    pub fn with_routes(self, routes: SharedRoutes) -> NodeLogic {
+        NodeLogic { routes: Some(routes), ..self }
+    }
+
+    /// This node started with `boot_epoch` (core 0): Group 0 records it (`NodeBoot`), which makes
+    /// the node eligible for replicas.
+    pub fn with_boot_epoch(self, boot_epoch: u32) -> NodeLogic {
+        NodeLogic { boot_epoch: Some(boot_epoch), ..self }
+    }
+
+    /// This node started with `tags`, sorted by name (core 0): Group 0 records them
+    /// (`SetNodeTags`), and reads with a `readPreference` match them (007 FR-013).
+    pub fn with_tags(self, tags: Vec<(String, String)>) -> NodeLogic {
+        NodeLogic { tags, ..self }
+    }
+
+    /// Core 0 creates user `doc` (the BSON of `admin.system.users`) while the cluster has no
+    /// user: the `root` of the first start (013 FR-004).
+    pub fn with_root_user(self, doc: Vec<u8>) -> NodeLogic {
+        NodeLogic { root_user: Some((doc, Nanos::ZERO)), ..self }
+    }
+
+    /// Proposes the `root` user while Group 0 is bootstrapped and has no user; a proposal that
+    /// fails or races with another node's is tried again after [`ROOT_RETRY`].
+    fn create_root(&mut self) {
+        let Some((doc, at)) = &self.root_user else { return };
+        let Some(sm) = self.group0() else { return };
+        if !sm.bootstrapped() {
+            return;
+        }
+        if !sm.security.list(Principal::User, None).is_empty() {
+            self.root_user = None;
+            return;
+        }
+        if self.now < *at {
+            return;
+        }
+        let Ok(op) = SecurityOp::put(Principal::User, Expect::Absent, doc.clone()) else {
+            self.root_user = None;
+            return;
+        };
+        self.root_user = Some((doc.clone(), self.now + ROOT_RETRY));
+        let (tx, _rx) = std::sync::mpsc::channel();
+        self.catalog_change(Group0Command::Security(vec![op]).encode(), tx);
+    }
+
+    /// Core 0 publishes the `$clusterTime` signing keys with `keys` and, while it leads Group 0,
+    /// makes and drops them (013 FR-014).
+    pub fn with_clustertime_keys(self, keys: KeyDriver) -> NodeLogic {
+        NodeLogic { clustertime_keys: Some(keys), ..self }
+    }
+
+    /// Publishes Group 0's signing keys when they changed and, on its leader, proposes the keys
+    /// due and the drops of the old ones; Group 0 takes a key only on the state it was made on,
+    /// so a lost race is made again at the next look.
+    fn clustertime_keys(&mut self) {
+        let Some(mut driver) = self.clustertime_keys.take() else { return };
+        let leads = self.is_leader();
+        let (now, wall_ms) = (self.now, self.wall_ms);
+        let mut proposals = Vec::new();
+        if let Some(sm) = self.group0().filter(|sm| sm.bootstrapped()) {
+            let unopened = driver.publish(&sm.clustertime_keys);
+            if unopened > 0 {
+                // TeselaDB's own line: it has no RefDb identifier.
+                crate::log::defer(crate::log::Pending {
+                    id: 0,
+                    msg: "$clusterTime signing keys that this node's master key does not open"
+                        .to_owned(),
+                    attr: format!("{{\"keys\":{unopened}}}"),
+                });
+            }
+            if leads {
+                proposals = driver.propose(&sm.clustertime_keys, now, wall_ms);
+            }
+        }
+        for cmd in proposals {
+            // A proposal that fails is made again at the next look.
+            let _ = self.core.propose(GROUP0, &cmd.encode(), now);
+        }
+        self.clustertime_keys = Some(driver);
+    }
+
+    /// Core 0 publishes the node's authorization lease in `gate` for its client workers (013).
+    pub fn with_auth_gate(self, gate: Arc<AuthGate>) -> NodeLogic {
+        NodeLogic { authz: AuthLeaseDriver::with_gate(gate), ..self }
+    }
+
+    /// Group 0's state, on the core that holds it.
+    fn group0(&self) -> Option<&Group0Sm> {
+        self.core.state_machine(GROUP0).and_then(Group0Holder::group0)
+    }
+
+    /// This core's view of Group 0.
+    pub fn view(&self) -> Group0View {
+        let Some(sm) = self.group0() else { return Group0View::default() };
+        let status = self.core.status(GROUP0);
+        let conf = self.core.conf(GROUP0);
+        Group0View {
+            bootstrapped: sm.bootstrapped(),
+            cluster_id: sm.cluster_id,
+            role: status.as_ref().map(|s| s.role),
+            leader: status.map_or(NodeId(0), |s| s.leader),
+            voters: conf.map(|c| c.voters.clone()).unwrap_or_default(),
+            learners: conf.map(|c| c.learners.clone()).unwrap_or_default(),
+            nodes: sm.nodes.keys().copied().collect(),
+            addrs_current: self.addrs_current(),
+            data_range: data_range(sm).cloned(),
+        }
+    }
+
+    /// Whether Group 0 has this node's current name and addresses (true without `me`).
+    fn addrs_current(&self) -> bool {
+        let Some((id, mine)) = &self.me else { return true };
+        let Some(n) = self.group0().and_then(|sm| sm.nodes.get(id)) else {
+            return false;
+        };
+        let a = &n.addrs;
+        (&a.name, &a.peer_addr, &a.http_addr, &a.native_addr)
+            == (&mine.name, &mine.peer_addr, &mine.http_addr, &mine.native_addr)
+    }
+
+    /// Proposes this node's `SetNodeAddrs` when Group 0 has other ones, or forwards it to the
+    /// leader; one at a time, tried again on the next tick if it did not take. Without a known
+    /// leader it goes to the voters in turn: a node back on another port that cannot be reached
+    /// (a learner does not campaign) dials them, and the leader learns its port from the
+    /// connection.
+    fn update_addrs(&mut self) {
+        let Some((id, mine)) = &self.me else { return };
+        let known = self.group0().is_some_and(|sm| sm.nodes.contains_key(id));
+        if self.addr_update.is_some() || !known || self.addrs_current() {
+            return;
+        }
+        let cmd = Group0Command::SetNodeAddrs { node: *id, addrs: mine.clone() };
+        self.addr_update = self.send_group0(cmd);
+    }
+
+    /// Proposes `cmd` on Group 0's leader, or forwards it there; without a known leader it goes to
+    /// the voters in turn.
+    fn send_group0(&mut self, cmd: Group0Command) -> Option<OpId> {
+        if self.is_leader() {
+            return self.core.propose(GROUP0, &cmd.encode(), self.now).ok();
+        }
+        let leader = self.core.status(GROUP0).map_or(NodeId(0), |s| s.leader);
+        let me = self.me.as_ref().map_or(NodeId(0), |(id, _)| *id);
+        let to = if leader != NodeId(0) { Some(leader) } else { self.next_voter(me) };
+        let body = Bytes::from_vec(Request::Group0(cmd).encode());
+        to.map(|to| self.core.forward(to, body, self.now))
+    }
+
+    /// Records this start in Group 0 (`NodeBoot`) once Group 0 knows the node; one at a time.
+    fn announce_boot(&mut self) {
+        let (Some(epoch), Some((id, _))) = (self.boot_epoch, &self.me) else { return };
+        let id = *id;
+        let behind =
+            self.group0().and_then(|sm| sm.nodes.get(&id)).is_some_and(|n| n.boot_epoch < epoch);
+        if behind && self.boot_op.is_none() {
+            self.boot_op =
+                self.send_group0(Group0Command::NodeBoot { node: id, boot_epoch: epoch });
+        }
+    }
+
+    /// Records this node's tags in Group 0 (`SetNodeTags`) while they differ there; one at a time.
+    fn announce_tags(&mut self) {
+        let Some((id, _)) = &self.me else { return };
+        let id = *id;
+        let differ =
+            self.group0().and_then(|sm| sm.nodes.get(&id)).is_some_and(|n| n.tags != self.tags);
+        if differ && self.tags_op.is_none() {
+            let cmd = Group0Command::SetNodeTags { node: id, tags: self.tags.clone() };
+            self.tags_op = self.send_group0(cmd);
+        }
+    }
+
+    /// Group 0's leader creates the data range once the cluster exists (005 FR-016).
+    fn create_range(&mut self) {
+        let leads = self.is_leader() && self.create_op.is_none();
+        if leads && self.group0().is_some_and(needs_data_range) {
+            let cmd = create_data_range(FOUNDER).encode();
+            self.create_op = self.core.propose(GROUP0, &cmd, self.now).ok();
+        }
+    }
+
+    /// Every [`BALANCE_EVERY`], Group 0's leader runs the balancer and proposes its first replica,
+    /// node-state or leader decision; the ranges' leaders carry out the leader moves (007 FR-010).
+    /// Group 0's own membership stays with [`NodeLogic::promote`] (001), which also takes a
+    /// draining node out of the voters.
+    fn balance(&mut self) {
+        if !self.is_leader() || self.now < self.balance_at || self.balance_op.is_some() {
+            return;
+        }
+        self.balance_at = self.now + BALANCE_EVERY;
+        let me = self.me.as_ref().map_or(NodeId(0), |(id, _)| *id);
+        let now = self.now;
+        let conf = self.core.conf(GROUP0).cloned().unwrap_or_default();
+        let conf_in_flight = self.promoting.is_some();
+        let sm = self
+            .core
+            .state_machine(GROUP0)
+            .and_then(Group0Holder::group0)
+            .expect("Group 0's leader holds it");
+        let Some(table) = self.liveness.table_mut() else { return };
+        let nodes: Vec<NodeId> =
+            sm.nodes.values().filter(|n| n.state != NodeState::Removed).map(|n| n.id).collect();
+        let limit = dead_after(sm.settings.get(DEAD_AFTER_SETTING).map(Vec::as_slice), DEAD_AFTER);
+        table.check(&nodes, now, limit);
+        let states = table.states().into_iter().collect();
+        let loads = nodes.iter().filter_map(|n| Some((*n, table.get(*n)?.load))).collect();
+        let view = View {
+            group0: sm,
+            voters: &conf.voters,
+            learners: &conf.learners,
+            leader: me,
+            states: &states,
+            loads: &loads,
+            conf_in_flight,
+            skewed: &[],
+        };
+        let cmd = plan(&view).into_iter().find_map(|d| match d {
+            Decision::Command(
+                c @ (Group0Command::SetReplicas { .. }
+                | Group0Command::SetNodeState { .. }
+                | Group0Command::SetLeaderHint { .. }),
+            ) => Some(c),
+            Decision::Command(_) | Decision::Group0Conf(_) => None,
+        });
+        if let Some(cmd) = cmd {
+            self.balance_op = self.core.propose(GROUP0, &cmd.encode(), now).ok();
+        }
+    }
+
+    /// Gives the other cores the nodes' addresses when they change (core 0).
+    fn sync_peers(&mut self) {
+        let Some(sm) = self.group0() else { return };
+        let peers: BTreeMap<NodeId, String> = sm
+            .nodes
+            .values()
+            .map(|n| (n.id, String::from_utf8_lossy(&n.addrs.peer_addr).into_owned()))
+            .collect();
+        if peers == self.peers || self.cores.is_empty() {
+            return;
+        }
+        // A core that is stopping drops it; one whose mailbox is full gets them again on the next
+        // turn (012 FR-005: a core never waits for another one).
+        let full = self.cores[1..]
+            .iter()
+            .filter(|tx| {
+                matches!(
+                    tx.send(CoreInput::App(NodeMsg::Peers(peers.clone()))),
+                    Err(SendError::Full(_))
+                )
+            })
+            .count();
+        if full == 0 {
+            self.peers = peers;
+        }
+    }
+
+    /// Publishes the nodes' tags for the client workers when Group 0's change (core 0, FR-013).
+    fn sync_tags(&mut self) {
+        let (Some(routes), Some(sm)) = (&self.routes, self.group0()) else { return };
+        let tags: crate::routes::NodeTags =
+            sm.nodes.iter().map(|(id, n)| (*id, n.tags.clone())).collect();
+        if self.sent_tags.as_ref() != Some(&tags) {
+            routes.publish_tags(tags.clone());
+            self.sent_tags = Some(tags);
+        }
+    }
+
+    /// Gives every core Group 0's ranges when they change, and publishes the routing table
+    /// (core 0).
+    fn sync_desc(&mut self) {
+        let Some(ranges) = self.group0().map(Ranges::of) else { return };
+        if self.sent_ranges.as_ref() == Some(&ranges) {
+            return;
+        }
+        if let Some(routes) = &self.routes {
+            routes.publish(&ranges.descs);
+        }
+        if let Some(data) = &mut self.data {
+            data.set_ranges(&ranges);
+        }
+        // As with the peers: sent again on the next turn to a core whose mailbox is full.
+        let full = self
+            .cores
+            .iter()
+            .skip(1)
+            .filter(|tx| {
+                matches!(
+                    tx.send(CoreInput::App(NodeMsg::Ranges(ranges.clone()))),
+                    Err(SendError::Full(_))
+                )
+            })
+            .count();
+        if full == 0 {
+            self.sent_ranges = Some(ranges);
+        }
+    }
+
+    /// The core changes' messages go to their cores; one whose mailbox is full goes on a later
+    /// turn.
+    fn forward_relocations(&mut self) {
+        let Some(data) = &mut self.data else { return };
+        for (to, msg) in data.take_relocate_msgs() {
+            let Some(tx) = self.cores.get(usize::from(to)) else {
+                data.requeue_relocate(to, msg);
+                continue;
+            };
+            if let Err(SendError::Full(CoreInput::App(NodeMsg::Relocate(msg)))) =
+                tx.send(CoreInput::App(NodeMsg::Relocate(msg)))
+            {
+                data.requeue_relocate(to, msg);
+            }
+        }
+    }
+
+    /// The frames this core received for ranges another core of the node runs go to that core;
+    /// a core that is stopping or whose mailbox is full drops them, as the network may.
+    fn forward_strays(&mut self) {
+        let strays = self.core.take_strays();
+        let Some(data) = &self.data else { return };
+        for (from, frame) in strays {
+            for (core, f) in route_stray(frame, |g| data.holder(g)) {
+                if let Some(tx) = self.cores.get(usize::from(core)) {
+                    let _ = tx.send(CoreInput::App(NodeMsg::Stray(from, f)));
+                }
+            }
+        }
+    }
+
+    /// The data range's Group 0 commands go to Group 0: from here on core 0, or through core 0.
+    fn forward_group0(&mut self) {
+        let Some(data) = &mut self.data else { return };
+        for cmd in data.take_group0() {
+            if self.me.is_some() {
+                if let Some(op) = self.send_group0(cmd) {
+                    self.group0_ops.insert(op);
+                }
+            } else if let Some(tx) = self.cores.first() {
+                // A core that is stopping or whose mailbox is full drops it; the range sends it
+                // again.
+                let _ = tx.send(CoreInput::App(NodeMsg::Group0(cmd)));
+            }
+        }
+    }
+
+    /// Moves the data range and sends what it produced.
+    fn data_step(&mut self) {
+        if let Some(data) = &mut self.data {
+            data.poll(&mut self.core, (self.now, self.wall_ms));
+        }
+        self.pump();
+        self.forward_group0();
+        self.forward_relocations();
+        let applied = self.group0().map_or(0, |sm| sm.applied);
+        self.catalog.poll(applied, self.authz.fenced());
+    }
+
+    /// A catalog request of the handle: read the local copy, or change it through Group 0's
+    /// leader.
+    fn catalog_request(&mut self, req: CatalogReq, reply: CatalogSender) {
+        match req {
+            CatalogReq::Read => {
+                let a = match self.group0() {
+                    Some(sm) if sm.bootstrapped() => {
+                        CatalogAnswer::Catalog(Arc::clone(&sm.catalog))
+                    }
+                    Some(_) | None => CatalogAnswer::Unavailable,
+                };
+                let _ = reply.send(a);
+            }
+            CatalogReq::Settings => {
+                let a = match self.group0() {
+                    Some(sm) if sm.bootstrapped() => CatalogAnswer::Settings(sm.settings.clone()),
+                    Some(_) | None => CatalogAnswer::Unavailable,
+                };
+                let _ = reply.send(a);
+            }
+            CatalogReq::Indexes(collection) => {
+                let a = match self.group0() {
+                    // The read is pinned here, before any acknowledgement can pass its index
+                    // (009 FR-006).
+                    Some(sm) if sm.bootstrapped() => CatalogAnswer::Indexes(
+                        sm.indexes.of(collection).cloned().collect(),
+                        self.authz.pins().pin(sm.applied),
+                    ),
+                    Some(_) | None => CatalogAnswer::Unavailable,
+                };
+                let _ = reply.send(a);
+            }
+            CatalogReq::Principal { kind, db, name } => {
+                let a = match self.group0() {
+                    Some(sm) if sm.bootstrapped() => CatalogAnswer::Principals(
+                        sm.security.get(kind, &db, &name).map(<[u8]>::to_vec).into_iter().collect(),
+                    ),
+                    Some(_) | None => CatalogAnswer::Unavailable,
+                };
+                let _ = reply.send(a);
+            }
+            CatalogReq::Principals { kind, db } => {
+                let a = match self.group0() {
+                    Some(sm) if sm.bootstrapped() => CatalogAnswer::Principals(
+                        sm.security
+                            .list(kind, db.as_deref())
+                            .into_iter()
+                            .map(<[u8]>::to_vec)
+                            .collect(),
+                    ),
+                    Some(_) | None => CatalogAnswer::Unavailable,
+                };
+                let _ = reply.send(a);
+            }
+            CatalogReq::Security(cmd) => {
+                let fence = takes_away(&cmd);
+                self.catalog_change(cmd.encode(), reply);
+                if fence {
+                    self.catalog.fence_last();
+                }
+            }
+            CatalogReq::Write(cmd) => self.catalog_change(CatalogOps::payload(cmd), reply),
+            // Every change of the indexes waits for the barrier (009 FR-006): no node may still
+            // run a write that read the indexes before it.
+            CatalogReq::Index(cmd) => {
+                self.catalog_change(Group0Command::Indexes(cmd).encode(), reply);
+                self.catalog.fence_last();
+            }
+            CatalogReq::SetSetting { key, value } => {
+                self.catalog_change(Group0Command::SetSetting { key, value }.encode(), reply);
+            }
+        }
+    }
+
+    /// A change of Group 0 of the handle (the catalog or a setting): proposed as its leader, or
+    /// forwarded to it.
+    fn catalog_change(&mut self, payload: Vec<u8>, reply: CatalogSender) {
+        if self.is_leader() {
+            let op = self.core.propose(GROUP0, &payload, self.now);
+            self.catalog.local(op, false, reply);
+            return;
+        }
+        let leader = self.core.status(GROUP0).map_or(NodeId(0), |s| s.leader);
+        let me = self.me.as_ref().map_or(NodeId(0), |(id, _)| *id);
+        let to = if leader != NodeId(0) { Some(leader) } else { self.next_voter(me) };
+        match to {
+            Some(to) => {
+                let body = Bytes::from_vec(Request::Catalog(payload).encode());
+                let op = self.core.forward(to, body, self.now);
+                self.catalog.local(Ok(op), true, reply);
+            }
+            None => drop(reply.send(CatalogAnswer::Unavailable)),
+        }
+    }
+
+    /// The next voter of Group 0 other than `me`, in turn.
+    fn next_voter(&mut self, me: NodeId) -> Option<NodeId> {
+        let voters: Vec<NodeId> =
+            self.core.conf(GROUP0)?.voters.iter().copied().filter(|v| *v != me).collect();
+        let to = *voters.get(self.addr_probe % voters.len().max(1))?;
+        self.addr_probe = self.addr_probe.wrapping_add(1);
+        Some(to)
+    }
+
+    /// A forwarded Group 0 command: its leader takes a node's `SetNodeAddrs` and `NodeBoot` for
+    /// that node only, and what a range's leader asks of Group 0, which checks it.
+    fn take_forward(&mut self, from: NodeId, cmd: Group0Command) {
+        if forward_allowed(&cmd, from) && self.is_leader() {
+            // A failed proposal is sent again by the node on its next tick.
+            let _ = self.core.propose(GROUP0, &cmd.encode(), self.now);
+        }
+    }
+
+    fn is_leader(&self) -> bool {
+        self.core.status(GROUP0).is_some_and(|s| s.role == Role::Leader)
+    }
+
+    /// Proposes the founder's `Bootstrap` until it is applied (a failed proposal is tried again on
+    /// the next tick; applying it twice only answers `AlreadyBootstrapped`).
+    fn bootstrap(&mut self) {
+        let Some((cluster_id, first_node)) = &self.founder else { return };
+        if self.group0().is_some_and(Group0Sm::bootstrapped) {
+            self.founder = None;
+            return;
+        }
+        if self.bootstrap.is_some() {
+            return;
+        }
+        let cmd = Group0Command::Bootstrap {
+            cluster_id: *cluster_id,
+            first_node: first_node.clone(),
+            cert_fingerprint: insecure_fingerprint(&String::from_utf8_lossy(&first_node.peer_addr)),
+        };
+        self.bootstrap = self.core.propose(GROUP0, &cmd.encode(), self.now).ok();
+    }
+
+    /// Group 0's leader promotes a learner that has caught up with the commit index.
+    fn promote(&mut self) {
+        if self.promoting.is_some() {
+            return;
+        }
+        let Some(status) = self.core.status(GROUP0).filter(|s| s.role == Role::Leader) else {
+            return;
+        };
+        let conf =
+            self.core.conf(GROUP0).expect("a group with a status has a configuration").clone();
+        if self.drain_vote(&conf.voters) {
+            return;
+        }
+        if conf.voters.len() >= GROUP0_MAX_VOTERS {
+            return;
+        }
+        let commit = status.hard_state.commit;
+        let active = |n: &NodeId| {
+            self.group0()
+                .is_some_and(|sm| sm.nodes.get(n).is_some_and(|i| i.state == NodeState::Active))
+        };
+        let ready = conf
+            .learners
+            .iter()
+            .copied()
+            .filter(|l| active(l))
+            .find(|l| status.progress.iter().any(|(n, matched)| n == l && *matched >= commit));
+        if let Some(node) = ready {
+            let cc = ConfChange { kind: ConfChangeKind::PromoteLearner, node };
+            self.promoting = self.core.propose_conf_change(GROUP0, cc, self.now).ok();
+        }
+    }
+
+    /// A draining or removed node leaves Group 0's voters once it holds no range replica (007
+    /// FR-015), if an active voter is left; Group 0's leader hands its own leadership to an active
+    /// voter first. `true` if it did something.
+    fn drain_vote(&mut self, voters: &[NodeId]) -> bool {
+        let me = self.me.as_ref().map_or(NodeId(0), |(id, _)| *id);
+        let Some(sm) = self.group0() else { return false };
+        let active = |n: &NodeId| sm.nodes.get(n).is_some_and(|i| i.state == NodeState::Active);
+        let holds = |n: NodeId| teseladb_meta::drain::progress(sm, voters, n).replicas > 0;
+        let leaving = voters.iter().copied().find(|v| !active(v) && !holds(*v));
+        let Some(n) = leaving else { return false };
+        let Some(&other) = voters.iter().find(|v| active(v)) else { return false };
+        if n == me {
+            return self.core.transfer_leader(GROUP0, other);
+        }
+        let cc = ConfChange { kind: ConfChangeKind::Remove, node: n };
+        self.promoting = self.core.propose_conf_change(GROUP0, cc, self.now).ok();
+        self.promoting.is_some()
+    }
+
+    /// Starts a join: only Group 0's leader takes it; the others answer `not_leader` with the
+    /// leader's address when they know it.
+    fn join(&mut self, req: JoinRequest, reply: JoinReply) {
+        let Some(sm) = self.group0().filter(|_| self.is_leader()) else {
+            let leader = self.core.status(GROUP0).map_or(NodeId(0), |s| s.leader);
+            let hint = self
+                .group0()
+                .and_then(|sm| sm.nodes.get(&leader))
+                .map(|n| String::from_utf8_lossy(&n.addrs.peer_addr).into_owned());
+            let _ = reply.send(Err(match hint {
+                Some(a) => format!("not_leader {a}"),
+                None => "not_leader".to_owned(),
+            }));
+            return;
+        };
+        // Every node of a cluster has the founder's cores (data model §1).
+        let cores = sm.nodes.values().next().map_or(req.cores, |n| n.addrs.cores);
+        let node = NodeAddrs {
+            name: req.name.into_bytes(),
+            peer_addr: req.peer_addr.clone().into_bytes(),
+            http_addr: req.http_addr.into_bytes(),
+            native_addr: req.native_addr.into_bytes(),
+            cores,
+        };
+        let cmd =
+            Group0Command::AddNode { node, cert_fingerprint: insecure_fingerprint(&req.peer_addr) };
+        match self.core.propose(GROUP0, &cmd.encode(), self.now) {
+            Ok(op) => {
+                self.joins.insert(op, (JoinStep::AddNode, reply));
+            }
+            Err(e) => {
+                let _ = reply.send(Err(format!("{e:?}")));
+            }
+        }
+    }
+
+    /// Next step of a join once its operation ended.
+    fn join_step(
+        &mut self,
+        step: JoinStep,
+        reply: JoinReply,
+        result: Result<Done<CoreOutput>, OpError>,
+    ) {
+        let node = match (step, result) {
+            (JoinStep::AddNode, Ok(Done::Applied(CoreOutput::Group0(Group0Result::Node(n))))) => {
+                let member = self.core.conf(GROUP0).is_some_and(|c| c.members().any(|m| m == n));
+                if !member {
+                    let cc = ConfChange { kind: ConfChangeKind::AddLearner, node: n };
+                    match self.core.propose_conf_change(GROUP0, cc, self.now) {
+                        Ok(op) => {
+                            self.joins.insert(op, (JoinStep::Learner(n), reply));
+                        }
+                        Err(e) => {
+                            let _ = reply.send(Err(format!("{e:?}")));
+                        }
+                    }
+                    return;
+                }
+                n
+            }
+            (JoinStep::Learner(n), Ok(Done::ConfChanged(_))) => n,
+            (_, other) => {
+                let _ = reply.send(Err(format!("{other:?}")));
+                return;
+            }
+        };
+        let _ = reply.send(Ok(self.accepted(node)));
+    }
+
+    /// The answer to a node that joined: its identifier, the cluster and Group 0's voters.
+    fn accepted(&self, node: NodeId) -> JoinAccepted {
+        let sm = self.group0().expect("Group 0 on the leader of a join");
+        let voters = self
+            .core
+            .conf(GROUP0)
+            .map(|c| c.voters.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|v| (v, sm.nodes.get(&v).map_or([0; 32], |n| n.cert_fingerprint)))
+            .collect();
+        JoinAccepted {
+            node_id: node,
+            cluster_id: sm.cluster_id,
+            cores: sm.nodes.get(&node).map_or(0, |n| n.addrs.cores),
+            voters,
+            denied: Vec::new(),
+        }
+    }
+
+    /// Takes what the core produced: frames for other nodes and operations that ended. Handling an
+    /// operation can produce more (the `AddLearner` of a join, the answer to a forward), so it
+    /// goes on until the core has nothing left.
+    fn pump(&mut self) {
+        loop {
+            let actions = self.core.drain_actions();
+            let idle = actions.send.is_empty()
+                && actions.done.is_empty()
+                && actions.forwarded.is_empty()
+                && actions.snapshot_data.is_empty();
+            if idle {
+                return;
+            }
+            self.outbound.extend(actions.send.into_iter().map(|(to, f)| (to, to_wire(f))));
+            self.roll_back();
+            // Only a range parks a snapshot (Group 0's data is its snapshot).
+            if let Some(data) = &mut self.data {
+                for (g, index) in actions.snapshot_data {
+                    data.snapshot_data(&self.core, g, index, self.now);
+                }
+            }
+            for (op, result) in actions.done {
+                self.op_done(op, result);
+            }
+            for f in actions.forwarded {
+                match (Request::decode(&f.body), &mut self.data) {
+                    // The range's core answers once it has the piece.
+                    (Ok(Request::Fetch(fetch)), Some(data)) => {
+                        data.on_fetch(&mut self.core, (f.from, f.req), fetch, self.now);
+                    }
+                    // An empty answer ends the sender's wait.
+                    (Ok(Request::Group0(cmd)), _) => {
+                        self.take_forward(f.from, cmd);
+                        self.core.answer_forward(f.from, f.req, Bytes::new());
+                    }
+                    (Ok(Request::Data(body)), Some(data)) => {
+                        let at = (self.now, self.wall_ms);
+                        data.request_remote(&mut self.core, (f.from, f.req), &body, at);
+                    }
+                    (Ok(Request::Catalog(body)), _) => {
+                        let op = match self.is_leader() {
+                            true => self.core.propose(GROUP0, &body, self.now).ok(),
+                            false => None,
+                        };
+                        if let Some(answer) = self.catalog.remote(op, (f.from, f.req)) {
+                            self.core.answer_forward(f.from, f.req, Bytes::from_vec(answer));
+                        }
+                    }
+                    (Ok(Request::KillSessions(scope)), _) => {
+                        if let Some(sessions) = &self.sessions {
+                            kill_local(sessions, &scope);
+                        }
+                        self.core.answer_forward(f.from, f.req, Bytes::new());
+                    }
+                    (Ok(Request::Checksum(r)), Some(data)) => {
+                        data.on_checksum_report(&r);
+                        self.core.answer_forward(f.from, f.req, Bytes::new());
+                    }
+                    (Ok(Request::Rebuild(g)), Some(data)) => {
+                        data.rebuild(g);
+                        self.core.answer_forward(f.from, f.req, Bytes::new());
+                    }
+                    // An empty answer is a "no" (a core without the ranges).
+                    (Ok(Request::MergeProbe { range, merge }), Some(data)) => {
+                        data.on_merge_probe(&mut self.core, (f.from, f.req), (range, merge));
+                    }
+                    (
+                        Ok(
+                            Request::Fetch(_)
+                            | Request::Data(_)
+                            | Request::Checksum(_)
+                            | Request::Rebuild(_)
+                            | Request::MergeProbe { .. },
+                        )
+                        | Err(_),
+                        _,
+                    ) => {
+                        self.core.answer_forward(f.from, f.req, Bytes::new());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Writes what the ranges of this core dropped in a rollback to their rollback files; Group 0
+    /// has none (its entries are no data).
+    fn roll_back(&mut self) {
+        let rolled = self.core.take_rolled_back();
+        if rolled.is_empty() {
+            return;
+        }
+        let ranges: Vec<_> = rolled
+            .into_iter()
+            .filter(|(g, _)| self.core.state_machine(*g).and_then(CoreSm::range).is_some())
+            .collect();
+        let internal = rollback_files(&ranges, self.wall_ms);
+        let empty = BTreeMap::new();
+        let uuids = self.data.as_ref().map_or(&empty, DataCore::collections);
+        self.rollback.add(ref_layout(internal, uuids));
+    }
+
+    /// An operation of the core ended.
+    fn op_done(&mut self, op: OpId, result: Result<Done<CoreOutput>, OpError>) {
+        let mine = |slot: &mut Option<OpId>| {
+            let hit = *slot == Some(op);
+            if hit {
+                *slot = None;
+            }
+            hit
+        };
+        if mine(&mut self.bootstrap)
+            || mine(&mut self.promoting)
+            || mine(&mut self.addr_update)
+            || mine(&mut self.boot_op)
+            || mine(&mut self.tags_op)
+            || mine(&mut self.create_op)
+            || mine(&mut self.balance_op)
+            || self.group0_ops.remove(&op)
+        {
+            return;
+        }
+        if self.kills.owns(op) {
+            self.kills.on_done(op, matches!(result, Ok(Done::Forwarded(_))));
+            return;
+        }
+        if let Some((step, reply)) = self.joins.remove(&op) {
+            self.join_step(step, reply, result);
+            return;
+        }
+        if self.catalog.owns(op) {
+            let commit = self.core.status(GROUP0).map_or(0, |s| s.hard_state.commit);
+            let applied = self.group0().map_or(0, |sm| sm.applied);
+            if let Some(Some((node, req, body))) = self.catalog.on_done(op, result, commit, applied)
+            {
+                self.core.answer_forward(node, req, body);
+            }
+            return;
+        }
+        if let Some(data) = &mut self.data {
+            data.on_done(&mut self.core, op, result, self.now);
+        }
+    }
+}
+
+/// Whether a change of users and roles may take privileges away (013 FR-012): any that changes
+/// or removes an existing user or role, so that it answers only once fenced. Creating one does not.
+fn takes_away(cmd: &Group0Command) -> bool {
+    match cmd {
+        Group0Command::Idempotent { cmd, .. } => takes_away(cmd),
+        Group0Command::Security(ops) => ops.iter().any(|op| op.expect != Expect::Absent),
+        _ => false,
+    }
+}
+
+/// Whether Group 0's leader takes `cmd` forwarded by node `from`: a node's own `SetNodeAddrs`,
+/// `NodeBoot` and `SetNodeTags`, a range leader's `ReplicasSettled`, `SplitRange` and `CompleteSplit` (Group 0
+/// checks the epoch, the bounds and the recorded intent), and a range leader's publication of
+/// itself (`SetLeaderHint` with its term; a request, term 0, is the balancer's).
+fn forward_allowed(cmd: &Group0Command, from: NodeId) -> bool {
+    match cmd {
+        Group0Command::SetNodeAddrs { node, .. }
+        | Group0Command::NodeBoot { node, .. }
+        | Group0Command::SetNodeTags { node, .. } => *node == from,
+        Group0Command::SetLeaderHint { node, term, .. } => *node == from && *term > 0,
+        Group0Command::ReplicasSettled { .. }
+        | Group0Command::SplitRange { .. }
+        | Group0Command::CompleteSplit { .. } => true,
+        _ => false,
+    }
+}
+
+impl CoreLogic for NodeLogic {
+    type Msg = NodeMsg;
+
+    fn tick(&mut self, now: Nanos, wall_ms: u64) {
+        self.now = now;
+        self.wall_ms = wall_ms;
+        self.core.on_tick(now, wall_ms);
+        let load = self.node_load();
+        self.publish_presence();
+        if let Some((me, _)) = &self.me {
+            let out = self.liveness.tick_with(&mut self.core, (*me, load), now, wall_ms);
+            self.outbound.extend(out);
+            let out = self.authz.tick(&mut self.core, *me, now);
+            self.outbound.extend(out);
+        }
+        self.bootstrap();
+        self.create_root();
+        self.clustertime_keys();
+        self.update_addrs();
+        self.announce_boot();
+        self.announce_tags();
+        self.sync_tags();
+        self.create_range();
+        self.balance();
+        self.promote();
+        self.rollback.tick(now);
+        self.data_step();
+        self.sync_desc();
+        self.sync_peers();
+    }
+
+    fn poll_io(&mut self, now: Nanos) -> Option<IoOp> {
+        self.now = now;
+        // The log drops the entries of a rollback only once their files are durable (005
+        // FR-010): until then the core issues no disk operation.
+        if self.rollback.idle() {
+            self.core.rollback_durable();
+        }
+        if let Some(op) = self.core.poll_io(now) {
+            self.io.push_back(IoSlot::Log);
+            return Some(op);
+        }
+        if let Some(op) = self.rollback.poll_io() {
+            self.io.push_back(IoSlot::Rollback);
+            return Some(op);
+        }
+        let data = self.data.as_mut()?;
+        let next = data.poll_io(&mut self.core, now);
+        // Completions that came with it (an export, an ingestion) may have moved the core.
+        self.pump();
+        let (op, owner) = next?;
+        self.io.push_back(IoSlot::Data(owner));
+        Some(op)
+    }
+
+    fn on_io_done(&mut self, done: IoDone, now: Nanos) {
+        self.now = now;
+        match self.io.pop_front().expect("a disk operation in flight") {
+            IoSlot::Log => self.core.on_io_done(done, now),
+            IoSlot::Rollback => self.rollback.on_io_done(&done, now),
+            IoSlot::Data(owner) => {
+                let data = self.data.as_mut().expect("the owner of a data operation");
+                data.on_io_done(&mut self.core, owner, done, now);
+            }
+        }
+        self.data_step();
+    }
+
+    fn next_deadline(&self) -> Option<Nanos> {
+        self.core.next_deadline()
+    }
+
+    fn on_peer(&mut self, from: NodeId, msg: PeerMsg, now: Nanos) {
+        self.now = now;
+        let msg = match &self.me {
+            Some((me, _)) => {
+                let me = *me;
+                let msg = match self.authz.on_peer(&self.core, msg, now) {
+                    Ok(out) => {
+                        self.outbound.extend(out);
+                        return self.pump();
+                    }
+                    Err(m) => m,
+                };
+                match self.liveness.on_peer(&mut self.core, me, msg, now, self.wall_ms) {
+                    Some(m) => m,
+                    None => return self.pump(),
+                }
+            }
+            None => msg,
+        };
+        if let Some(frame) = from_wire(msg) {
+            self.core.on_peer_message(from, frame, now);
+            self.forward_strays();
+            self.data_step();
+        }
+    }
+
+    fn on_message(&mut self, msg: NodeMsg, now: Nanos) {
+        self.now = now;
+        match msg {
+            NodeMsg::Join(req, reply) => self.join(req, reply),
+            NodeMsg::View(reply) => {
+                let _ = reply.send(self.view());
+            }
+            NodeMsg::Drain(node, drain, reply) => {
+                let voters = self.core.conf(GROUP0).map(|c| c.voters.clone()).unwrap_or_default();
+                let cmd = self.group0().map(|sm| match drain {
+                    true => teseladb_meta::drain::drain(sm, node),
+                    false => teseladb_meta::drain::remove(sm, &voters, node),
+                });
+                let _ = reply.send(cmd);
+            }
+            NodeMsg::Data(req, reply) => match &mut self.data {
+                Some(data) => data.request(&mut self.core, req, reply, (now, self.wall_ms)),
+                None => {
+                    let _ = reply.send(Err(RangeError::OutOfRange));
+                }
+            },
+            NodeMsg::Cores(cores) => {
+                self.cores = cores;
+                self.sent_ranges = None;
+                self.sync_desc();
+                self.sync_peers();
+            }
+            NodeMsg::Peers(peers) => self.peers = peers,
+            NodeMsg::Catalog(req, reply) => self.catalog_request(req, reply),
+            NodeMsg::KillSessions(scope, reply) => self.kill_sessions(scope, reply),
+            NodeMsg::Ranges(ranges) => {
+                if let Some(data) = &mut self.data {
+                    data.set_ranges(&ranges);
+                }
+            }
+            NodeMsg::Group0(cmd) => {
+                if let Some(op) = self.send_group0(cmd) {
+                    self.group0_ops.insert(op);
+                }
+            }
+            NodeMsg::Relocate(msg) => {
+                if let Some(data) = &mut self.data {
+                    data.on_relocate(&mut self.core, msg);
+                }
+            }
+            NodeMsg::Stray(from, frame) => self.core.on_stray(from, frame, now),
+        }
+        self.data_step();
+    }
+
+    fn take_outbound(&mut self, out: &mut Vec<(NodeId, PeerMsg)>) {
+        out.append(&mut self.outbound);
+    }
+
+    fn peer_addr(&self, node: NodeId) -> Option<String> {
+        match self.group0() {
+            Some(sm) => {
+                let n = sm.nodes.get(&node)?;
+                Some(String::from_utf8_lossy(&n.addrs.peer_addr).into_owned())
+            }
+            None => self.peers.get(&node).cloned(),
+        }
+    }
+
+    fn peer_unreachable(&mut self, node: NodeId) {
+        self.core.report_unreachable(node);
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::mpsc::{Receiver, channel};
+
+    use teseladb_auth::fence::AUTH_LEASE_MS;
+    use teseladb_meta::group0::{GROUP0, Group0Error};
+    use teseladb_meta::indexes::{IndexCommand, IndexState};
+    use teseladb_meta::liveness::NODE_HEARTBEAT;
+    use teseladb_meta::security::{Expect, Principal, SecurityOp};
+    use teseladb_multiraft::{CoreConfig, GroupDesc};
+    use teseladb_raftlog::{CoreStore, Disk, MemDisk, StorageConfig};
+
+    use super::*;
+
+    const TICK: Nanos = Nanos::from_millis(10);
+
+    fn addr(id: u64) -> String {
+        format!("127.0.0.1:{}", 7000 + id)
+    }
+
+    fn addrs(id: u64) -> NodeAddrs {
+        NodeAddrs {
+            name: addr(id).into_bytes(),
+            peer_addr: addr(id).into_bytes(),
+            cores: 1,
+            ..NodeAddrs::default()
+        }
+    }
+
+    fn request(id: u64, name: &str) -> JoinRequest {
+        JoinRequest {
+            name: name.to_owned(),
+            peer_addr: addr(id),
+            http_addr: String::new(),
+            native_addr: String::new(),
+            cores: 0,
+        }
+    }
+
+    /// Nodes of one core each, over `MemDisk`, in logical time; frames go straight to their node,
+    /// except to a node restarted on another port: as with the real transport, only a node that has
+    /// its new address in Group 0, or that heard from it (its `Hello` on an incoming connection),
+    /// reaches it.
+    struct Cluster {
+        nodes: Vec<(NodeId, NodeLogic, MemDisk)>,
+        now: Nanos,
+        /// Nodes restarted on another port, with that port.
+        moved: BTreeMap<NodeId, String>,
+        /// Nodes cut off from the rest: their frames, both ways, are dropped without closing any
+        /// connection (a partition with iptables `DROP`).
+        cut: BTreeSet<NodeId>,
+        /// (who, whom): `who` has had a message from `whom`, so it knows where `whom` listens.
+        heard: BTreeSet<(NodeId, NodeId)>,
+    }
+
+    impl Cluster {
+        fn new() -> Cluster {
+            Cluster {
+                nodes: Vec::new(),
+                now: Nanos::ZERO,
+                moved: BTreeMap::new(),
+                cut: BTreeSet::new(),
+                heard: BTreeSet::new(),
+            }
+        }
+
+        fn add(&mut self, id: u64, group0: Option<GroupDesc>, founder: bool) {
+            let mut disk = MemDisk::new();
+            let (store, _) = CoreStore::recover(&StorageConfig::default(), 0, &mut disk).unwrap();
+            let mut core = MultiRaftCore::new(CoreConfig::new(NodeId(id), 0), store, id);
+            if let Some(desc) = group0 {
+                core.create_group(desc, CoreSm::Group0(Group0Sm::default())).unwrap();
+            }
+            let founder = founder.then(|| ([7; 16], addrs(id)));
+            self.nodes.push((NodeId(id), NodeLogic::new(core, founder, None), disk));
+        }
+
+        /// Adds node `id` with a data core over its disk (one core: Group 0 and the ranges).
+        fn add_with_data(&mut self, id: u64, group0: GroupDesc, founder: bool) {
+            use std::cell::RefCell;
+            use std::rc::Rc;
+            let mut disk = MemDisk::new();
+            let (store, _) = CoreStore::recover(&StorageConfig::default(), 0, &mut disk).unwrap();
+            let cfg = CoreConfig::new(NodeId(id), 0);
+            let clock = cfg.clock.clone();
+            let mut core = MultiRaftCore::new(cfg, store, id);
+            core.create_group(group0, CoreSm::Group0(Group0Sm::default())).unwrap();
+            let lcfg = teseladb_lsm::LsmConfig { dir: "core-00/lsm".into(), ..Default::default() };
+            let lsm =
+                Rc::new(RefCell::new(teseladb_lsm::Lsm::recover(&lcfg, &mut disk).unwrap().0));
+            let transfers = crate::transfer::Transfers::new(NodeId(id), "core-00/t".into(), id);
+            let data = DataCore::new(NodeId(id), 0, lsm, clock, transfers, 1 << 30);
+            let founder = founder.then(|| ([7; 16], addrs(id)));
+            let logic = NodeLogic::new(core, founder, None).with_data(data);
+            self.nodes.push((NodeId(id), logic, disk));
+        }
+
+        /// Asks node `id`'s data core and runs the cluster until it answers.
+        fn data(&mut self, id: u64, req: DataReq) -> Result<crate::data::DataReply, RangeError> {
+            let (tx, rx) = channel();
+            let now = self.now;
+            self.logic(id).on_message(NodeMsg::Data(req, tx), now);
+            for _ in 0..500 {
+                if let Ok(r) = rx.try_recv() {
+                    return r;
+                }
+                self.step();
+            }
+            panic!("no answer");
+        }
+
+        /// Restarts node `id` from its disk, listening now at `peer` (`me` set, as in a node).
+        fn restart(&mut self, id: u64, peer: &str) {
+            let at = self.nodes.iter().position(|(n, ..)| n.0 == id).expect("a node");
+            let (_, _, mut disk) = self.nodes.remove(at);
+            let (store, _) = CoreStore::recover(&StorageConfig::default(), 0, &mut disk).unwrap();
+            let mut core = MultiRaftCore::new(CoreConfig::new(NodeId(id), 0), store, id + 50);
+            let recovered = GroupDesc { group: GROUP0, voters: Vec::new(), learners: Vec::new() };
+            core.create_group(recovered, CoreSm::Group0(Group0Sm::default())).unwrap();
+            let me = NodeAddrs {
+                name: addr(id).into_bytes(),
+                peer_addr: peer.into(),
+                cores: 1,
+                ..NodeAddrs::default()
+            };
+            self.nodes.push((NodeId(id), NodeLogic::new(core, None, Some((NodeId(id), me))), disk));
+            self.moved.insert(NodeId(id), peer.to_owned());
+            self.heard.retain(|(_, whom)| whom.0 != id);
+        }
+
+        /// The inter-node address Group 0 has for `of`, as node `at` sees it.
+        fn peer_of(&mut self, at: u64, of: u64) -> Option<String> {
+            self.logic(at).peer_addr(NodeId(of))
+        }
+
+        fn found(&mut self) {
+            let desc = GroupDesc { group: GROUP0, voters: vec![NodeId(1)], learners: Vec::new() };
+            self.add(1, Some(desc), true);
+        }
+
+        fn logic(&mut self, id: u64) -> &mut NodeLogic {
+            &mut self.nodes.iter_mut().find(|(n, ..)| n.0 == id).expect("a node").1
+        }
+
+        /// Delivers a message to a node and runs its I/O.
+        fn deliver(&mut self, to: NodeId, msg: PeerMsg, from: NodeId) {
+            if self.cut.contains(&to) || self.cut.contains(&from) {
+                return;
+            }
+            if let Some(port) = self.moved.get(&to).cloned()
+                && !self.heard.contains(&(from, to))
+                && self.peer_of(from.0, to.0).as_deref() != Some(port.as_str())
+            {
+                return;
+            }
+            self.heard.insert((to, from));
+            let now = self.now;
+            if let Some((_, l, _)) = self.nodes.iter_mut().find(|(n, ..)| *n == to) {
+                l.on_peer(from, msg, now);
+            }
+        }
+
+        fn step(&mut self) {
+            self.now = self.now + TICK;
+            let now = self.now;
+            let mut sent = Vec::new();
+            for (id, l, disk) in &mut self.nodes {
+                l.tick(now, now.0 / 1_000_000);
+                while let Some(op) = l.poll_io(now) {
+                    let done = disk.execute(op);
+                    l.on_io_done(done, now);
+                }
+                let mut out = Vec::new();
+                l.take_outbound(&mut out);
+                sent.extend(out.into_iter().map(|(to, m)| (*id, to, m)));
+            }
+            for (from, to, m) in sent {
+                self.deliver(to, m, from);
+            }
+        }
+
+        fn run_until(&mut self, mut ok: impl FnMut(&mut Cluster) -> bool) {
+            for _ in 0..2_000 {
+                if ok(self) {
+                    return;
+                }
+                self.step();
+            }
+            panic!("never happened");
+        }
+
+        fn join(&mut self, at: u64, req: JoinRequest) -> Receiver<Result<JoinAccepted, String>> {
+            let (tx, rx) = channel();
+            let now = self.now;
+            self.logic(at).on_message(NodeMsg::Join(req, tx), now);
+            rx
+        }
+
+        fn answer(
+            &mut self,
+            rx: &Receiver<Result<JoinAccepted, String>>,
+        ) -> Result<JoinAccepted, String> {
+            let mut got = None;
+            self.run_until(|_| {
+                got = rx.try_recv().ok();
+                got.is_some()
+            });
+            got.expect("an answer")
+        }
+
+        /// Joins node `id` through `at` and adds it with the voters it was given.
+        fn join_node(&mut self, at: u64, id: u64) -> JoinAccepted {
+            let rx = self.join(at, request(id, &addr(id)));
+            let a = self.answer(&rx).expect("accepted");
+            let voters = a.voters.iter().map(|(n, _)| *n).collect();
+            self.add(
+                id,
+                Some(GroupDesc { group: GROUP0, voters, learners: vec![a.node_id] }),
+                false,
+            );
+            a
+        }
+    }
+
+    /// A core that wakes nobody: the test drains its mailbox by hand.
+    struct Quiet;
+
+    impl teseladb_io::mailbox::Notify for Quiet {
+        fn notify(&self) {}
+    }
+
+    /// Core 0 never waits for another core (012 FR-005): when the other core's mailbox is full it
+    /// keeps what did not go and sends it on a later turn.
+    #[test]
+    fn core_zero_sends_again_what_a_full_mailbox_gave_back() {
+        let mut c = Cluster::new();
+        c.found();
+        c.run_until(|c| c.logic(1).view().bootstrapped);
+        let (own, _own_rx) = teseladb_io::mailbox::channel(std::sync::Arc::new(Quiet));
+        // Room for one message: the ranges go, the peers come back full.
+        let (other, mut other_rx) =
+            teseladb_io::mailbox::channel_with(1, std::sync::Arc::new(Quiet));
+        let now = c.now;
+        c.logic(1).on_message(NodeMsg::Cores(vec![own, other]), now);
+        let mut got = Vec::new();
+        other_rx.drain_into(&mut got);
+        assert!(matches!(got.as_slice(), [CoreInput::App(NodeMsg::Ranges(_))]), "{got:?}");
+        got.clear();
+        c.run_until(|_| {
+            other_rx.drain_into(&mut got);
+            got.iter().any(|m| matches!(m, CoreInput::App(NodeMsg::Peers(_))))
+        });
+    }
+
+    #[test]
+    fn every_node_records_its_tags_in_group_0() {
+        let mut c = Cluster::new();
+        c.found();
+        c.run_until(|c| c.logic(1).view().bootstrapped);
+        let east = vec![("dc".to_owned(), "east".to_owned())];
+        // The harness starts nodes without knowing their own number, as a node that joins does
+        // until it is accepted.
+        c.logic(1).me = Some((NodeId(1), addrs(1)));
+        c.logic(1).tags = east.clone();
+        c.run_until(|c| c.logic(1).group0().is_some_and(|sm| sm.nodes[&NodeId(1)].tags == east));
+        // A node that is not Group 0's leader forwards its own.
+        c.join_node(1, 2);
+        c.run_until(|c| c.logic(2).view().bootstrapped);
+        let west = vec![("dc".to_owned(), "west".to_owned()), ("rack".to_owned(), "r2".to_owned())];
+        c.logic(2).me = Some((NodeId(2), addrs(2)));
+        c.logic(2).tags = west.clone();
+        c.run_until(|c| {
+            c.logic(1)
+                .group0()
+                .and_then(|sm| sm.nodes.get(&NodeId(2)))
+                .is_some_and(|n| n.tags == west)
+        });
+    }
+
+    #[test]
+    fn the_founder_creates_the_cluster_and_nodes_join_and_become_voters() {
+        let mut c = Cluster::new();
+        c.found();
+        c.run_until(|c| c.logic(1).view().bootstrapped);
+        let v = c.logic(1).view();
+        assert_eq!((v.cluster_id, v.role, v.leader), ([7; 16], Some(Role::Leader), NodeId(1)));
+        assert_eq!(c.logic(1).peer_addr(NodeId(1)), Some(addr(1)));
+        assert_eq!(c.logic(1).peer_addr(NodeId(9)), None);
+
+        let a = c.join_node(1, 2);
+        assert_eq!((a.node_id, a.cluster_id, a.cores), (NodeId(2), [7; 16], 1));
+        assert_eq!(a.voters, vec![(NodeId(1), insecure_fingerprint(&addr(1)))]);
+        c.run_until(|c| c.logic(1).view().voters == [NodeId(1), NodeId(2)]);
+        c.run_until(|c| c.logic(2).view().bootstrapped);
+
+        // Joining again from the same address gives back the same node, already a member.
+        let rx = c.join(1, request(2, &addr(2)));
+        assert_eq!(c.answer(&rx).expect("accepted").node_id, NodeId(2));
+    }
+
+    #[test]
+    fn catalog_requests_without_a_cluster_or_a_leader_and_forwards_to_the_leader() {
+        use crate::catalog_ops::CatalogAnswer;
+        // A replica of Group 0 that has not seen the cluster created answers that it cannot.
+        let mut c = Cluster::new();
+        let lone = GroupDesc {
+            group: GROUP0,
+            voters: vec![NodeId(1), NodeId(9)],
+            learners: vec![NodeId(5)],
+        };
+        c.add(5, Some(lone), false);
+        let now = c.now;
+        for req in [CatalogReq::Read, CatalogReq::Settings, CatalogReq::Indexes(1)] {
+            let (tx, rx) = channel();
+            c.logic(5).on_message(NodeMsg::Catalog(req, tx), now);
+            assert!(matches!(rx.try_recv(), Ok(CatalogAnswer::Unavailable)));
+        }
+        // Without a known leader a change goes to a voter in turn.
+        let (tx, _rx) = channel();
+        let set = CatalogReq::SetSetting { key: b"k".to_vec(), value: b"v".to_vec() };
+        c.logic(5).on_message(NodeMsg::Catalog(set.clone(), tx), now);
+        let mut out = Vec::new();
+        c.logic(5).take_outbound(&mut out);
+
+        // On a cluster, a change asked on another node is forwarded to the leader, which answers
+        // once it applied it; sessions killed on a node without any are answered all the same.
+        let mut c = Cluster::new();
+        c.found();
+        c.run_until(|c| c.logic(1).view().bootstrapped);
+        c.join_node(1, 2);
+        c.run_until(|c| c.logic(2).view().bootstrapped);
+        let (tx, rx) = channel();
+        let now = c.now;
+        c.logic(2).on_message(NodeMsg::Catalog(set, tx), now);
+        let mut done = None;
+        c.run_until(|_| {
+            done = rx.try_recv().ok();
+            done.is_some()
+        });
+        assert!(matches!(done, Some(CatalogAnswer::Done(None))), "{done:?}");
+        let (tx, rx) = channel();
+        c.logic(1).on_message(NodeMsg::KillSessions(KillScope::All, tx), now);
+        c.run_until(|_| rx.try_recv().is_ok());
+        // Users and roles: a user created through Group 0 is read and listed on every node.
+        let user_doc = |name: &str| {
+            teseladb_bson::Document::new()
+                .with("_id", format!("admin.{name}"))
+                .with("user", name)
+                .with("db", "admin")
+                .to_bytes()
+                .unwrap()
+        };
+        let user = SecurityOp::put(Principal::User, Expect::Absent, user_doc("ana")).unwrap();
+        let (tx, rx) = channel();
+        let create = CatalogReq::Security(Group0Command::Security(vec![user.clone()]));
+        c.logic(1).on_message(NodeMsg::Catalog(create, tx), now);
+        c.run_until(|_| rx.try_recv().is_ok());
+        let one = || CatalogReq::Principal {
+            kind: Principal::User,
+            db: "admin".to_owned(),
+            name: "ana".to_owned(),
+        };
+        let all = || CatalogReq::Principals { kind: Principal::User, db: None };
+        c.run_until(|c| {
+            let (tx, rx) = channel();
+            let now = c.now;
+            c.logic(2).on_message(NodeMsg::Catalog(all(), tx), now);
+            matches!(rx.try_recv(), Ok(CatalogAnswer::Principals(d)) if d.len() == 1)
+        });
+        let (tx, rx) = channel();
+        c.logic(2).on_message(NodeMsg::Catalog(one(), tx), now);
+        assert_eq!(rx.try_recv().unwrap(), CatalogAnswer::Principals(vec![user_doc("ana")]));
+        // Removing a user takes privileges away: its answer waits for the authorization fence,
+        // proposed on the leader or forwarded to it (013 FR-012).
+        // Core 0 of every real node knows itself; the nodes of this harness do not.
+        for id in [1, 2] {
+            if c.logic(id).me.is_none() {
+                c.logic(id).me = Some((NodeId(id), NodeAddrs::default()));
+            }
+        }
+        let start = c.now;
+        for (node, name) in [(1, "bea"), (2, "ana")] {
+            if name == "bea" {
+                let add = SecurityOp::put(Principal::User, Expect::Absent, user_doc(name)).unwrap();
+                let (tx, rx) = channel();
+                let req = CatalogReq::Security(Group0Command::Security(vec![add]));
+                c.logic(1).on_message(NodeMsg::Catalog(req, tx), now);
+                c.run_until(|_| rx.try_recv().is_ok());
+            }
+            let drop = SecurityOp::remove(Principal::User, user_doc(name)).unwrap();
+            let (tx, rx) = channel();
+            let req = CatalogReq::Security(Group0Command::Security(vec![drop]));
+            let now = c.now;
+            c.logic(node).on_message(NodeMsg::Catalog(req, tx), now);
+            let mut answer = None;
+            c.run_until(|_| {
+                answer = rx.try_recv().ok();
+                answer.is_some()
+            });
+            assert!(matches!(answer, Some(CatalogAnswer::Done(None))), "{answer:?}");
+        }
+        // Both nodes acknowledge at their next request: no lease has to run out.
+        assert!(c.now < start + Nanos::from_millis(2 * AUTH_LEASE_MS), "{:?}", c.now);
+        // A change of the indexes waits for the fence too, and a node holds the fence back while
+        // an operation that read the indexes before the change still runs (009 FR-006).
+        let (tx, rx) = channel();
+        c.logic(2).on_message(NodeMsg::Catalog(CatalogReq::Indexes(1), tx), now);
+        let Ok(CatalogAnswer::Indexes(_, pin)) = rx.try_recv() else { panic!("an answer") };
+        let (tx, rx) = channel();
+        let index = IndexCommand::SetState { id: 1, state: IndexState::Ready };
+        let now = c.now;
+        c.logic(1).on_message(NodeMsg::Catalog(CatalogReq::Index(index), tx), now);
+        let held = c.now;
+        while c.now < held + NODE_HEARTBEAT + NODE_HEARTBEAT + NODE_HEARTBEAT {
+            c.step();
+            assert!(rx.try_recv().is_err(), "answered while a read before it runs");
+        }
+        c.logic(2).authz.pins().release(pin);
+        let mut answer = None;
+        c.run_until(|_| {
+            answer = rx.try_recv().ok();
+            answer.is_some()
+        });
+        assert!(matches!(answer, Some(CatalogAnswer::Refused(_))), "{answer:?}");
+        // A catalog change or a kill forwarded to a node that does not lead Group 0 (and has no
+        // sessions) is answered at once.
+        let l = c.logic(2);
+        let change = Request::Catalog(Group0Command::ClusterTick { cluster_time_ms: 1 }.encode());
+        for (req, body) in
+            [(7, change.encode()), (8, Request::KillSessions(KillScope::All).encode())]
+        {
+            l.on_peer(
+                NodeId(1),
+                PeerMsg::Forward { req, deadline_ms: 100, body: Bytes::from_vec(body) },
+                now,
+            );
+            let mut out = Vec::new();
+            l.take_outbound(&mut out);
+            assert!(
+                out.iter().any(|(to, m)| *to == NodeId(1)
+                    && matches!(m, PeerMsg::ForwardResp { req: r, .. } if *r == req)),
+                "{out:?}"
+            );
+        }
+        // Without a cluster, users and roles cannot be read.
+        let mut c = Cluster::new();
+        c.add(5, None, false);
+        for req in [one(), all()] {
+            let (tx, rx) = channel();
+            c.logic(5).on_message(NodeMsg::Catalog(req, tx), now);
+            assert_eq!(rx.try_recv().unwrap(), CatalogAnswer::Unavailable);
+        }
+    }
+
+    #[test]
+    fn a_balancer_decision_in_flight_holds_the_next_round() {
+        let mut c = Cluster::new();
+        c.found();
+        c.run_until(|c| c.logic(1).view().bootstrapped);
+        let l = c.logic(1);
+        l.balance_op = Some(OpId(4242));
+        l.balance_at = Nanos::ZERO;
+        l.balance();
+        assert_eq!((l.balance_op, l.balance_at), (Some(OpId(4242)), Nanos::ZERO));
+    }
+
+    #[test]
+    fn group0_takes_what_a_range_leader_on_another_node_asks() {
+        let g = teseladb_types::GroupId(4);
+        let split = Group0Command::SplitRange { group: g, at: vec![1, 5] };
+        let complete = Group0Command::CompleteSplit { group: g, at: vec![1, 5], at_index: 9 };
+        let settled = Group0Command::ReplicasSettled { group: g, epoch: 2 };
+        for cmd in [split, complete, settled] {
+            assert!(forward_allowed(&cmd, NodeId(3)), "{cmd:?}");
+        }
+        let hint = Group0Command::SetLeaderHint { group: g, node: NodeId(3), term: 0 };
+        assert!(!forward_allowed(&hint, NodeId(3)), "a request is the balancer's");
+        let mine = Group0Command::SetLeaderHint { group: g, node: NodeId(3), term: 5 };
+        assert!(forward_allowed(&mine, NodeId(3)), "a leader publishes itself");
+        assert!(!forward_allowed(&mine, NodeId(2)), "only itself");
+    }
+
+    #[test]
+    fn requests_reach_the_range_leader_from_a_node_without_a_replica() {
+        use crate::data::DataReply;
+        use crate::data_wire::{RemoteReply, RemoteReq};
+        use teseladb_meta::bootstrap::DATA_RANGE;
+        use teseladb_range::read::ReadConcern;
+        use teseladb_types::GroupId;
+        let mut c = Cluster::new();
+        let one = GroupDesc { group: GROUP0, voters: vec![NodeId(1)], learners: Vec::new() };
+        c.add_with_data(1, one, true);
+        c.run_until(|c| {
+            let r = c.data(1, DataReq::Status(DATA_RANGE));
+            matches!(r, Ok(DataReply::Status(s)) if s.role == Some(Role::Leader))
+        });
+        let wc =
+            teseladb_range::ack::WriteConcern { w: teseladb_range::ack::W::Nodes(1), j: false };
+        let put = DataReq::Put { key: vec![1, 7], value: vec![9], wc };
+        assert!(matches!(c.data(1, put), Ok(DataReply::Put(_))));
+        assert_eq!(c.data(1, DataReq::Get { key: vec![1, 7] }), Ok(DataReply::Get(Some(vec![9]))));
+        // Keys outside every range of the core, and a range nobody holds.
+        assert_eq!(c.data(1, DataReq::Get { key: vec![9] }), Err(RangeError::OutOfRange));
+        let put = DataReq::Put { key: vec![9], value: vec![1], wc };
+        assert_eq!(c.data(1, put), Err(RangeError::OutOfRange));
+        let scan = RemoteReq::Scan {
+            start: vec![1],
+            end: vec![2],
+            limit: 10,
+            concern: ReadConcern::Local,
+        };
+        let nobody = c.data(1, DataReq::Remote(GroupId(77), scan.clone()));
+        assert_eq!(nobody, Err(RangeError::NotLeader { hint: NodeId(0) }));
+
+        // A second node without a replica (one replica below three nodes) sends its requests to
+        // the range's leader, and answers a forwarded request for a range it lacks with the
+        // leader it knows.
+        let rx = c.join(1, request(2, &addr(2)));
+        let a = c.answer(&rx).expect("accepted");
+        let voters = a.voters.iter().map(|(n, _)| *n).collect();
+        let desc = GroupDesc { group: GROUP0, voters, learners: vec![NodeId(2)] };
+        c.add_with_data(2, desc, false);
+        c.run_until(|c| c.logic(2).sent_ranges.as_ref().is_some_and(|r| !r.descs.is_empty()));
+        let rows = c.data(2, DataReq::Remote(DATA_RANGE, scan.clone()));
+        assert_eq!(rows, Ok(DataReply::Remote(RemoteReply::Rows(vec![(vec![1, 7], vec![9])]))));
+        // With its connection to the leader just dropped, node 2 sends nothing and says so at
+        // once (005 SC-004); once it hears from node 1 again, the request goes.
+        c.logic(2).core.report_unreachable(NodeId(1));
+        let now = c.now;
+        let (tx, rx) = channel();
+        let req = DataReq::Remote(DATA_RANGE, scan.clone());
+        c.logic(2).on_message(NodeMsg::Data(req, tx), now);
+        c.step();
+        assert_eq!(rx.try_recv(), Ok(Err(RangeError::NotLeader { hint: NodeId(0) })));
+        for _ in 0..20 {
+            c.step();
+        }
+        let rows = c.data(2, DataReq::Remote(DATA_RANGE, scan.clone()));
+        assert_eq!(rows, Ok(DataReply::Remote(RemoteReply::Rows(vec![(vec![1, 7], vec![9])]))));
+        // Forwarded requests node 2 cannot run: a range it lacks, and an undecodable body.
+        let now = (c.now, 0);
+        let l = c.logic(2);
+        let data = l.data.as_mut().expect("a data core");
+        let body = crate::data_wire::encode_for(DATA_RANGE, &scan);
+        data.request_remote(&mut l.core, (NodeId(1), 900), &body, now);
+        data.request_remote(&mut l.core, (NodeId(1), 901), &[0xff], now);
+        c.step();
+    }
+
+    /// The state of node `id`'s replica of the data range.
+    fn range_status(c: &mut Cluster, id: u64) -> crate::data::DataStatus {
+        use crate::data::DataReply;
+        match c.data(id, DataReq::Status(teseladb_meta::bootstrap::DATA_RANGE)) {
+            Ok(DataReply::Status(s)) => s,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Three nodes with data cores whose data range has a voter on each.
+    fn three_with_data() -> Cluster {
+        use teseladb_meta::bootstrap::DATA_RANGE;
+        let mut c = Cluster::new();
+        let one = GroupDesc { group: GROUP0, voters: vec![NodeId(1)], learners: Vec::new() };
+        c.add_with_data(1, one, true);
+        c.run_until(|c| range_status(c, 1).role == Some(Role::Leader));
+        for id in [2, 3] {
+            let rx = c.join(1, request(id, &addr(id)));
+            let a = c.answer(&rx).expect("accepted");
+            let voters = a.voters.iter().map(|(n, _)| *n).collect();
+            let desc = GroupDesc { group: GROUP0, voters, learners: vec![NodeId(id)] };
+            c.add_with_data(id, desc, false);
+        }
+        // The two new nodes join the range (as the balancer of a cluster whose nodes boot does).
+        c.run_until(|c| c.logic(3).sent_ranges.as_ref().is_some_and(|r| !r.descs.is_empty()));
+        let l = c.logic(1);
+        let sm = l.core.state_machine(GROUP0).and_then(Group0Holder::group0).unwrap();
+        let epoch = sm.ranges[&DATA_RANGE].replica_epoch;
+        let add = vec![NodeId(2), NodeId(3)];
+        let cmd = Group0Command::SetReplicas { group: DATA_RANGE, epoch, add, remove: Vec::new() };
+        let now = c.now;
+        c.logic(1).core.propose(GROUP0, &cmd.encode(), now).unwrap();
+        c.run_until(|c| {
+            let s = range_status(c, 1);
+            s.voters.len() == 3 && s.learners.is_empty()
+        });
+        c
+    }
+
+    #[test]
+    fn a_scan_with_a_read_preference_runs_on_its_candidates_in_turn() {
+        use crate::data::DataReply;
+        use crate::data_wire::{RemoteReply, RemoteReq};
+        use teseladb_meta::bootstrap::DATA_RANGE;
+        use teseladb_range::ack::{W, WriteConcern};
+        let mut c = three_with_data();
+        let wc = WriteConcern { w: W::Majority, j: true };
+        for k in 0..4u8 {
+            let put = DataReq::Put { key: vec![1, k], value: vec![k], wc };
+            assert!(matches!(c.data(1, put), Ok(DataReply::Put(_))));
+        }
+        // Past the lag and a mark the log carries: the followers read the writes.
+        for _ in 0..1_000 {
+            c.step();
+        }
+        let l = (1..=3).find(|id| range_status(&mut c, *id).role == Some(Role::Leader)).unwrap();
+        let f = (1..=3).find(|id| *id != l).unwrap();
+        let scan = |nodes: Vec<(u64, bool)>, max_stale_ms| {
+            let nodes = nodes.into_iter().map(|(n, leads)| (NodeId(n), leads)).collect();
+            let r = RemoteReq::FollowerScan {
+                start: vec![1],
+                end: vec![2],
+                limit: 10,
+                max_stale_ms,
+                nodes,
+            };
+            DataReq::Remote(DATA_RANGE, r)
+        };
+        let rows = |r: Result<DataReply, RangeError>| match r {
+            Ok(DataReply::Remote(RemoteReply::Rows(rows))) => rows.len(),
+            other => panic!("{other:?}"),
+        };
+        // On the follower that asks, and forwarded from the leader to it.
+        assert_eq!(rows(c.data(f, scan(vec![(f, false)], None))), 4);
+        assert_eq!(rows(c.data(l, scan(vec![(f, false)], None))), 4);
+        // Its mark is older than a millisecond: the next candidate, the leader, scans.
+        assert_eq!(rows(c.data(f, scan(vec![(f, false), (l, true)], Some(1)))), 4);
+        assert_eq!(rows(c.data(l, scan(vec![(f, false), (l, true)], Some(1)))), 4);
+        // No candidate left: the last refusal goes back.
+        let refused = c.data(f, scan(vec![(f, false)], Some(1)));
+        assert!(matches!(refused, Err(RangeError::NotLeader { .. })), "{refused:?}");
+        assert!(matches!(c.data(f, scan(vec![], None)), Err(RangeError::NotLeader { .. })));
+    }
+
+    #[test]
+    fn two_cold_neighbours_merge_and_the_right_ones_replicas_go() {
+        use crate::data::DataReply;
+        use teseladb_meta::bootstrap::DATA_RANGE;
+        use teseladb_range::ack::{W, WriteConcern};
+        let mut c = three_with_data();
+        // Ranges merge once no write reached them for 2 s; each node knows itself, as a started
+        // node does, so that its data core's Group 0 commands go through core 0.
+        for id in 1..=3 {
+            let l = c.logic(id);
+            l.data = l.data.take().map(|d| d.with_merges(16 << 20, Nanos::from_secs(2)));
+            l.me = Some((NodeId(id), addrs(id)));
+        }
+        let wc = WriteConcern { w: W::Majority, j: true };
+        for k in 0..8u8 {
+            let put = DataReq::Put { key: vec![1, k], value: vec![k], wc };
+            assert!(matches!(c.data(1, put), Ok(DataReply::Put(_))));
+        }
+        let ranges = |c: &mut Cluster| c.logic(1).group0().map_or(0, |sm| sm.ranges.len());
+        let settled = |c: &mut Cluster| {
+            c.logic(1).group0().is_some_and(|sm| sm.ranges.values().all(|d| !d.settling))
+        };
+        c.run_until(settled);
+        let split = Group0Command::SplitRange { group: DATA_RANGE, at: vec![1, 4] };
+        c.logic(1).send_group0(split);
+        c.run_until(|c| ranges(c) == 2);
+        let right = c.logic(1).group0().unwrap().range_for(&[1, 6]).unwrap().group;
+        assert_ne!(right, DATA_RANGE);
+        // Cold and small, the two halves merge back: Group 0 keeps the left one, every node
+        // drops its replica of the right one, and both sides' documents are read from the left.
+        c.run_until(|c| ranges(c) == 1);
+        c.run_until(|c| (1..=3).all(|id| c.logic(id).core.state_machine(right).is_none()));
+        c.run_until(|c| {
+            (1..=3).all(|id| {
+                let sm = c.logic(id).group0().unwrap();
+                sm.merges.is_empty() && sm.range_for(&[1, 6]).unwrap().group == DATA_RANGE
+            })
+        });
+        for id in 1..=3 {
+            assert!(c.logic(id).core.recovered_groups().is_empty());
+        }
+        // Read and written through the merged range's leader.
+        c.run_until(|c| (1..=3).any(|id| range_status(c, id).role == Some(Role::Leader)));
+        let l = (1..=3).find(|id| range_status(&mut c, *id).role == Some(Role::Leader)).unwrap();
+        for k in [1u8, 6] {
+            let got = c.data(l, DataReq::Get { key: vec![1, k] });
+            assert_eq!(got, Ok(DataReply::Get(Some(vec![k]))), "{k}");
+        }
+        let put = DataReq::Put { key: vec![1, 7], value: vec![70], wc };
+        assert!(matches!(c.data(l, put), Ok(DataReply::Put(_))));
+        assert_eq!(c.data(l, DataReq::Get { key: vec![1, 7] }), Ok(DataReply::Get(Some(vec![70]))));
+    }
+
+    #[test]
+    fn a_merge_a_cut_off_node_cannot_confirm_is_given_up_and_retried_once_it_is_back() {
+        use crate::data::DataReply;
+        use teseladb_meta::bootstrap::DATA_RANGE;
+        use teseladb_range::ack::{W, WriteConcern};
+        let mut c = three_with_data();
+        for id in 1..=3 {
+            let l = c.logic(id);
+            l.data = l.data.take().map(|d| d.with_merges(16 << 20, Nanos::from_secs(2)));
+            l.me = Some((NodeId(id), addrs(id)));
+        }
+        let wc = WriteConcern { w: W::Majority, j: true };
+        let put = DataReq::Put { key: vec![1, 6], value: vec![6], wc };
+        assert!(matches!(c.data(1, put), Ok(DataReply::Put(_))));
+        let ranges = |c: &mut Cluster| c.logic(1).group0().map_or(0, |sm| sm.ranges.len());
+        c.run_until(|c| {
+            c.logic(1).group0().is_some_and(|sm| sm.ranges.values().all(|d| !d.settling))
+        });
+        c.logic(1).send_group0(Group0Command::SplitRange { group: DATA_RANGE, at: vec![1, 4] });
+        c.run_until(|c| ranges(c) == 2);
+        let right = c.logic(1).group0().unwrap().range_for(&[1, 6]).unwrap().group;
+        // Node 3 is cut off: its replica of the right range never confirms the freeze, and the
+        // left range's leader gives the merge up in its log; Group 0 aborts it and the right range
+        // thaws.
+        c.cut.insert(NodeId(3));
+        let gave_up = |c: &mut Cluster| {
+            (1..=2).any(|id| {
+                let l = c.logic(id);
+                l.core
+                    .state_machine(DATA_RANGE)
+                    .and_then(CoreSm::range)
+                    .is_some_and(|sm| sm.abandoned() > 0)
+            })
+        };
+        let thawed = |c: &mut Cluster| {
+            (1..=2).all(|id| {
+                let l = c.logic(id);
+                l.core
+                    .state_machine(right)
+                    .and_then(CoreSm::range)
+                    .is_some_and(|sm| sm.frozen_for().is_none())
+            })
+        };
+        for _ in 0..3 {
+            if gave_up(&mut c) {
+                break;
+            }
+            for _ in 0..2_000 {
+                if gave_up(&mut c) {
+                    break;
+                }
+                c.step();
+            }
+        }
+        assert!(gave_up(&mut c));
+        c.run_until(|c| thawed(c) || ranges(c) == 1);
+        assert_eq!(ranges(&mut c), 2);
+        // Back, node 3 confirms the next intent and the ranges merge.
+        c.cut.clear();
+        c.run_until(|c| ranges(c) == 1);
+        c.run_until(|c| (1..=3).all(|id| c.logic(id).core.state_machine(right).is_none()));
+    }
+
+    #[test]
+    fn an_idle_range_whose_leader_is_cut_off_without_a_dropped_connection_elects_again() {
+        use crate::data::DataReply;
+        use teseladb_range::ack::{W, WriteConcern};
+        let mut c = three_with_data();
+        let wc = WriteConcern { w: W::Majority, j: true };
+        let put = DataReq::Put { key: vec![1, 1], value: vec![1], wc };
+        assert!(matches!(c.data(1, put), Ok(DataReply::Put(_))));
+        // Idle long enough for the range and Group 0 to go quiet.
+        for _ in 0..400 {
+            c.step();
+        }
+        let leader = (1..=3).find(|id| range_status(&mut c, *id).role == Some(Role::Leader));
+        let leader = leader.expect("a leader");
+        c.cut.insert(NodeId(leader));
+        let others: Vec<u64> = (1..=3).filter(|id| *id != leader).collect();
+        // Within about a second (100 steps of 10 ms) one of the other two leads.
+        let mut elected = None;
+        for _ in 0..150 {
+            c.step();
+            elected = others
+                .iter()
+                .copied()
+                .find(|id| range_status(&mut c, *id).role == Some(Role::Leader));
+            if elected.is_some() {
+                break;
+            }
+        }
+        let n = elected.expect("the majority elects a new leader");
+        let put = DataReq::Put { key: vec![1, 2], value: vec![2], wc };
+        assert!(matches!(c.data(n, put), Ok(DataReply::Put(_))));
+    }
+
+    #[test]
+    fn a_replica_whose_checksum_differs_is_rebuilt_from_the_others() {
+        use crate::data::DataReply;
+        use teseladb_hlc::Hlc;
+        use teseladb_lsm::Lookup;
+        use teseladb_meta::bootstrap::DATA_RANGE;
+        use teseladb_range::ack::{W, WriteConcern};
+        const STRAY: &[u8] = &[1, 99];
+        let status = |c: &mut Cluster, id: u64| match c.data(id, DataReq::Status(DATA_RANGE)) {
+            Ok(DataReply::Status(s)) => s,
+            other => panic!("{other:?}"),
+        };
+        // The stray version, read straight from node `id`'s LSM.
+        let stray = |c: &mut Cluster, id: u64| loop {
+            let lsm = c.logic(id).data.as_ref().expect("a data core").lsm().clone();
+            let view = lsm.borrow().view();
+            let newest = Hlc { physical: u64::MAX, logical: u32::MAX };
+            match view.get(&mut lsm.borrow_mut(), STRAY, newest) {
+                Lookup::Hit(_) => return true,
+                Lookup::NotFound => return false,
+                Lookup::Miss(_) => c.step(),
+                Lookup::Failed(e) => panic!("{e:?}"),
+            }
+        };
+        let mut c = three_with_data();
+        let wc = WriteConcern { w: W::Majority, j: true };
+        for k in 0..8u8 {
+            let put = DataReq::Put { key: vec![1, k], value: vec![k], wc };
+            assert!(matches!(c.data(1, put), Ok(DataReply::Put(_))));
+        }
+        let leader = (1..=3).find(|id| status(&mut c, *id).role == Some(Role::Leader)).unwrap();
+        let victim = (1..=3).find(|id| *id != leader).unwrap();
+        c.run_until(|c| status(c, victim).applied == status(c, leader).applied);
+        // A version only the victim has: its sum differs from the other two.
+        let applied = status(&mut c, victim).applied;
+        let lsm = c.logic(victim).data.as_ref().unwrap().lsm().clone();
+        let old = Hlc { physical: 1, logical: 0 };
+        lsm.borrow_mut().put(DATA_RANGE, applied, STRAY, old, b"stray").unwrap();
+        assert!(stray(&mut c, victim));
+        let l = c.logic(leader);
+        let data = l.data.as_mut().unwrap();
+        data.check(&l.core, DATA_RANGE).expect("the leader takes a checksum");
+        c.run_until(|c| {
+            let s = status(c, victim);
+            s.rebuilt == 1 && !s.rebuilding && s.role.is_some() && !s.waiting_data
+        });
+        c.run_until(|c| status(c, victim).applied >= status(c, leader).applied);
+        assert!(!stray(&mut c, victim), "the stray version went with the rebuild");
+        for k in 0..8u8 {
+            let lsm = c.logic(victim).data.as_ref().unwrap().lsm().clone();
+            let view = lsm.borrow().view();
+            let newest = Hlc { physical: u64::MAX, logical: u32::MAX };
+            assert!(matches!(view.get(&mut lsm.borrow_mut(), &[1, k], newest), Lookup::Hit(_)));
+        }
+        // The replicas agree now: another checksum rebuilds nothing, and the cluster still writes.
+        let l = c.logic(leader);
+        let data = l.data.as_mut().unwrap();
+        data.check(&l.core, DATA_RANGE).expect("the leader takes a checksum");
+        for _ in 0..300 {
+            c.step();
+        }
+        assert!((1..=3).all(|id| status(&mut c, id).rebuilt == u64::from(id == victim)));
+        let put = DataReq::Put { key: vec![1, 50], value: vec![1], wc };
+        assert!(matches!(c.data(leader, put), Ok(DataReply::Put(_))));
+        // The leader may be the one marked: it rebuilds its own replica, and the others elect.
+        let applied = status(&mut c, leader).applied;
+        let lsm = c.logic(leader).data.as_ref().unwrap().lsm().clone();
+        lsm.borrow_mut().put(DATA_RANGE, applied, STRAY, old, b"stray").unwrap();
+        let l = c.logic(leader);
+        let data = l.data.as_mut().unwrap();
+        data.check(&l.core, DATA_RANGE).expect("the leader takes a checksum");
+        c.run_until(|c| {
+            let s = status(c, leader);
+            s.rebuilt == 1 && !s.rebuilding && s.role.is_some() && !s.waiting_data
+        });
+        assert!(!stray(&mut c, leader));
+    }
+
+    #[test]
+    fn group0_keeps_five_voters_and_the_rest_learners() {
+        let mut c = Cluster::new();
+        c.found();
+        c.run_until(|c| c.logic(1).view().bootstrapped);
+        for id in 2..=6 {
+            c.join_node(1, id);
+            let want = (id as usize).min(GROUP0_MAX_VOTERS);
+            c.run_until(|c| c.logic(1).view().voters.len() == want);
+        }
+        for _ in 0..200 {
+            c.step();
+        }
+        let v = c.logic(1).view();
+        assert_eq!(v.voters.len(), GROUP0_MAX_VOTERS);
+        assert_eq!(v.learners, [NodeId(6)]);
+        assert_eq!(v.nodes.len(), 6);
+    }
+
+    #[test]
+    fn joins_are_refused_where_they_cannot_be_taken() {
+        let mut c = Cluster::new();
+        c.found();
+        c.run_until(|c| c.logic(1).view().bootstrapped);
+        c.join_node(1, 2);
+        // A follower that knows the leader but has not applied Group 0 yet has no address for it.
+        c.run_until(|c| c.logic(2).view().leader == NodeId(1));
+        if !c.logic(2).view().bootstrapped {
+            let rx = c.join(2, request(3, &addr(3)));
+            assert_eq!(rx.try_recv().unwrap(), Err("not_leader".to_owned()));
+        }
+        // Once applied, a follower names the leader.
+        c.run_until(|c| c.logic(2).view().bootstrapped);
+        let rx = c.join(2, request(3, &addr(3)));
+        assert_eq!(rx.try_recv().unwrap(), Err(format!("not_leader {}", addr(1))));
+        // A core without Group 0 knows no leader.
+        c.add(9, None, false);
+        assert_eq!(c.logic(9).view(), Group0View::default());
+        assert_eq!(c.logic(9).peer_addr(NodeId(1)), None);
+        let rx = c.join(9, request(3, &addr(3)));
+        assert_eq!(rx.try_recv().unwrap(), Err("not_leader".to_owned()));
+        // A name another node has is refused by Group 0.
+        let rx = c.join(1, request(4, &addr(1)));
+        let e = c.answer(&rx).unwrap_err();
+        assert!(e.contains(&format!("{:?}", Group0Error::NameOrAddrTaken)), "{e}");
+    }
+
+    #[test]
+    fn messages_outside_the_core_and_forwards_are_answered() {
+        let mut c = Cluster::new();
+        c.found();
+        c.run_until(|c| c.logic(1).view().bootstrapped);
+        let now = c.now;
+        let l = c.logic(1);
+        l.on_peer(NodeId(2), PeerMsg::RangeRetire { group: GROUP0 }, now);
+        let (tx, rx) = channel();
+        l.on_message(NodeMsg::View(tx), now);
+        assert!(rx.try_recv().unwrap().bootstrapped);
+        // An idle core waits for nothing.
+        assert_eq!(l.next_deadline(), None);
+        l.peer_unreachable(NodeId(2));
+        // A forwarded request gets an empty answer.
+        let fwd = PeerMsg::Forward { req: 3, deadline_ms: 100, body: Bytes::new() };
+        l.on_peer(NodeId(2), fwd, now);
+        let mut out = Vec::new();
+        l.take_outbound(&mut out);
+        assert!(
+            out.iter().any(|(to, m)| *to == NodeId(2)
+                && matches!(m, PeerMsg::ForwardResp { req: 3, body } if body.is_empty())),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn a_core_without_group0_or_the_range_drops_what_is_not_its() {
+        let mut c = Cluster::new();
+        c.add(9, None, false);
+        let now = c.now;
+        let l = c.logic(9);
+        let desc = RangeDesc {
+            group: teseladb_meta::bootstrap::DATA_RANGE,
+            start: vec![1],
+            end: vec![4],
+            core: 0,
+            replicas: Vec::new(),
+            replica_epoch: 1,
+            generation: 1,
+            leader_hint: None,
+            leader_term: 0,
+            pending_split: None,
+            settling: false,
+        };
+        l.on_message(NodeMsg::Ranges(Ranges { descs: vec![desc], ..Ranges::default() }), now);
+        // No leader and no voters to send it to.
+        let cmd = Group0Command::ReplicasSettled { group: teseladb_types::GroupId(1), epoch: 1 };
+        l.on_message(NodeMsg::Group0(cmd), now);
+        assert!(l.group0_ops.is_empty());
+        let (tx, rx) = channel();
+        l.on_message(NodeMsg::Data(DataReq::Status(teseladb_types::GroupId(1)), tx), now);
+        assert_eq!(rx.try_recv().unwrap(), Err(RangeError::OutOfRange));
+        l.on_message(NodeMsg::Peers(BTreeMap::from([(NodeId(1), addr(1))])), now);
+        assert_eq!(l.peer_addr(NodeId(1)), Some(addr(1)));
+    }
+
+    /// Three nodes whose Group 0 has every node as a voter.
+    fn three_voters() -> Cluster {
+        let mut c = Cluster::new();
+        c.found();
+        c.run_until(|c| c.logic(1).view().bootstrapped);
+        c.join_node(1, 2);
+        c.join_node(1, 3);
+        let all = [NodeId(1), NodeId(2), NodeId(3)];
+        c.run_until(|c| (1..=3).all(|i| c.logic(i).view().voters == all));
+        c
+    }
+
+    #[test]
+    fn a_follower_back_on_another_port_updates_its_address_through_the_leader() {
+        let mut c = three_voters();
+        c.restart(2, "127.0.0.1:9002");
+        assert!(!c.logic(2).view().addrs_current, "Group 0 still has the old port");
+        c.run_until(|c| c.peer_of(1, 2).as_deref() == Some("127.0.0.1:9002"));
+        c.run_until(|c| c.logic(2).view().addrs_current);
+        assert_eq!(c.peer_of(3, 2).as_deref(), Some("127.0.0.1:9002"));
+    }
+
+    #[test]
+    fn a_learner_back_on_another_port_that_knows_no_leader_finds_it() {
+        let mut c = Cluster::new();
+        c.found();
+        c.run_until(|c| c.logic(1).view().bootstrapped);
+        c.join_node(1, 2);
+        c.run_until(|c| (1..=2).all(|i| c.logic(i).view().voters == [NodeId(1), NodeId(2)]));
+        c.join_node(1, 3);
+        // Node 3 has applied Group 0 up to its own entry but stops before it applies its
+        // promotion: it comes back a learner, on another port, without a leader; the leader still
+        // dials the old port.
+        c.run_until(|c| c.logic(3).view().nodes.contains(&NodeId(3)));
+        assert_eq!(c.logic(3).view().role, Some(Role::Learner));
+        c.restart(3, "127.0.0.1:9003");
+        let v = c.logic(3).view();
+        assert_eq!((v.role, v.leader, v.addrs_current), (Some(Role::Learner), NodeId(0), false));
+        c.run_until(|c| c.logic(3).view().addrs_current);
+        c.run_until(|c| (1..=3).all(|i| c.peer_of(i, 3).as_deref() == Some("127.0.0.1:9003")));
+    }
+
+    #[test]
+    fn the_founder_back_on_another_port_updates_its_address() {
+        let mut c = three_voters();
+        c.restart(1, "127.0.0.1:9001");
+        c.run_until(|c| (1..=3).all(|i| c.peer_of(i, 1).as_deref() == Some("127.0.0.1:9001")));
+        assert!(c.logic(1).view().addrs_current);
+    }
+
+    #[test]
+    fn a_node_only_changes_its_own_addresses() {
+        let mut c = three_voters();
+        let mut other = addrs(3);
+        other.peer_addr = b"127.0.0.1:6666".to_vec();
+        let cmd =
+            Request::Group0(Group0Command::SetNodeAddrs { node: NodeId(3), addrs: other }).encode();
+        let fwd = PeerMsg::Forward { req: 1, deadline_ms: 100, body: Bytes::from_vec(cmd) };
+        c.deliver(NodeId(1), fwd, NodeId(2));
+        for _ in 0..50 {
+            c.step();
+        }
+        assert_eq!(c.peer_of(1, 3), Some(addr(3)));
+    }
+
+    #[test]
+    fn core_zero_creates_root_while_the_cluster_has_no_user() {
+        let mut c = Cluster::new();
+        c.found();
+        let doc = teseladb_bson::Document::new()
+            .with("_id", "admin.root")
+            .with("user", "root")
+            .with("db", "admin")
+            .to_bytes()
+            .unwrap();
+        c.logic(1).root_user = Some((doc.clone(), Nanos::ZERO));
+        c.run_until(|c| {
+            c.logic(1).group0().is_some_and(|sm| {
+                sm.security.get(Principal::User, "admin", crate::pki::ROOT_USER).is_some()
+            })
+        });
+        let users = |c: &mut Cluster| {
+            c.logic(1).group0().map_or(0, |sm| sm.security.list(Principal::User, None).len())
+        };
+        c.run_until(|c| c.logic(1).root_user.is_none());
+        assert_eq!(users(&mut c), 1);
+        // With a user already there, another node's `root` is not created.
+        c.logic(1).root_user = Some((doc, Nanos::ZERO));
+        c.run_until(|c| c.logic(1).root_user.is_none());
+        assert_eq!(users(&mut c), 1);
+        // A document without `_id` is not proposed.
+        let mut c = Cluster::new();
+        c.found();
+        c.logic(1).root_user = Some((vec![5, 0, 0, 0, 0], Nanos::ZERO));
+        c.run_until(|c| c.logic(1).root_user.is_none());
+        assert_eq!(users(&mut c), 0);
+    }
+
+    #[test]
+    fn group0s_leader_makes_the_clustertime_keys_and_every_node_opens_them() {
+        use crate::clustertime_keys::{KeyDriver, KeySlot};
+        use teseladb_auth::clustertime::KeySealer;
+        let mut c = Cluster::new();
+        c.found();
+        c.run_until(|c| c.logic(1).view().bootstrapped);
+        c.join_node(1, 2);
+        let slots = [Arc::new(KeySlot::default()), Arc::new(KeySlot::default())];
+        for (id, slot) in [1u64, 2].into_iter().zip(&slots) {
+            let sealer = KeySealer::new(&[4; 32]).unwrap();
+            let driver = KeyDriver::new(sealer, slot.clone(), &[id as u8; 48]);
+            c.logic(id).clustertime_keys = Some(driver);
+        }
+        c.run_until(|_| slots.iter().all(|s| s.ring().keys.len() == 2));
+        // Two keys only, the same on both nodes, sealed in Group 0.
+        for _ in 0..300 {
+            c.step();
+        }
+        let sm_keys = c.logic(2).group0().map(|sm| sm.clustertime_keys.clone()).unwrap();
+        assert_eq!(sm_keys.keys.len(), 2);
+        assert_eq!(*slots[0].ring(), *slots[1].ring());
+        let ring = slots[0].ring();
+        for k in &ring.keys {
+            let sealed = &sm_keys.keys[&k.id].sealed;
+            assert!(!sealed.windows(4).any(|w| k.key.windows(4).any(|x| x == w)));
+        }
+        // A node with another master key opens none and signs with zeros.
+        let stranger = Arc::new(KeySlot::default());
+        let sealer = KeySealer::new(&[9; 32]).unwrap();
+        c.logic(2).clustertime_keys = Some(KeyDriver::new(sealer, stranger.clone(), &[3; 48]));
+        c.step();
+        assert!(stranger.ring().keys.is_empty());
+        assert_eq!(c.logic(1).group0().unwrap().clustertime_keys.keys.len(), 2);
+    }
+
+    #[test]
+    fn a_node_not_in_group0_yet_proposes_nothing() {
+        let mut c = Cluster::new();
+        c.found();
+        c.run_until(|c| c.logic(1).view().bootstrapped);
+        c.restart(1, "127.0.0.1:9001");
+        // A learner of a cluster it is not in: no record, no proposal, not current.
+        let desc = GroupDesc { group: GROUP0, voters: vec![NodeId(1)], learners: vec![NodeId(8)] };
+        c.add(8, Some(desc), false);
+        let at = c.nodes.iter().position(|(n, ..)| n.0 == 8).unwrap();
+        c.nodes[at].1.me = Some((NodeId(8), addrs(8)));
+        for _ in 0..30 {
+            c.step();
+        }
+        let v = c.logic(8).view();
+        assert!(!v.addrs_current);
+        assert_eq!(c.logic(8).addr_update, None);
+    }
+}

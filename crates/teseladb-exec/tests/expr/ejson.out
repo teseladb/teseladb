@@ -1,0 +1,107 @@
+{"$deserializeEJSON":{"input":{"$numberLong":"5"}}}	=> {"x":{"$numberLong":"5"}}
+{"$deserializeEJSON":{"input":{"$numberDecimal":"1.5"}}}	!! 241	Extended JSON cannot contain BSON-only types: decimal is not available in JSON
+{"$deserializeEJSON":{"input":{"$oid":"0123456789abcdef01234567"}}}	!! 241	Extended JSON cannot contain BSON-only types: objectId is not available in JSON
+{"$deserializeEJSON":{"input":{"$binary":{"base64":"AA==","subType":"00"}}}}	!! 241	Extended JSON cannot contain BSON-only types: binData is not available in JSON
+{"$deserializeEJSON":{"input":{"$regularExpression":{"pattern":"a","options":""}}}}	!! 241	Extended JSON cannot contain BSON-only types: regex is not available in JSON
+{"$deserializeEJSON":{"input":{"$minKey":1}}}	!! 241	Extended JSON cannot contain BSON-only types: minKey is not available in JSON
+{"$deserializeEJSON":{"input":{"$code":"x"}}}	!! 241	Extended JSON cannot contain BSON-only types: javascript is not available in JSON
+{"$deserializeEJSON":{"input":{"$symbol":"x"}}}	!! 241	Extended JSON cannot contain BSON-only types: symbol is not available in JSON
+{"$deserializeEJSON":{"input":{"$numberDouble":"1.5"}}}	=> {"x":{"$numberDouble":"1.5"}}
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$numberLong"},5]]]}}}	!! 241	$numberLong value must be of type string
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$numberInt"},"x"]]]}}}	!! 241	$numberInt value must be a string specifying an integer
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$numberInt"},"9999999999"]]]}}}	!! 241	$numberInt value must be a string specifying an integer
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$numberDouble"},"x"]]]}}}	!! 241	$numberDouble value must be a string specifying a number, NaN, Infinity or -Infinity
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$numberDouble"},"Infinity"]]]}}}	=> {"x":{"$numberDouble":"Infinity"}}
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$numberDouble"},1.5]]]}}}	!! 241	$numberDouble value must be of type string
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$numberDecimal"},"x"]]]}}}	!! 241	$numberDecimal value must be a string specifying a number, NaN, Infinity or -Infinity
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$numberDecimal"},"1.50"]]]}}}	=> {"x":{"$numberDecimal":"1.50"}}
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$date"},"bad"]]]}}}	!! 241	$date must be a valid ISO-8601 string
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$date"},5]]]}}}	!! 241	$date value must be of type object or string
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$date"},{"x":1}]]]}}}	!! 241	$date must be a 64-bit signed integer as a string
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$oid"},5]]]}}}	!! 241	$oid value must be of type string
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$uuid"},"x"]]]}}}	!! 241	$uuid value must be a valid UUID string
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$symbol"},5]]]}}}	!! 241	$symbol value must be of type string
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$code"},5]]]}}}	!! 241	$code value must be of type string
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$code"},"c"],[{"$literal":"$scope"},{"a":1}]]]}}}	=> {"x":{"$code":"c","$scope":{"a":{"$numberInt":"1"}}}}
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$undefined"},false]]]}}}	!! 241	$undefined value must be true
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$maxKey"},1]]]}}}	=> {"x":{"$maxKey":1}}
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$timestamp"},{"t":1,"i":2}]]]}}}	=> {"x":{"$timestamp":{"t":1,"i":2}}}
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$timestamp"},{"t":"x","i":2}]]]}}}	!! 241	$timestamp.t value must be of type int or long
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$timestamp"},5]]]}}}	!! 241	$timestamp value must be of type object
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$binary"},{"base64":"AA==","subType":"80"}]]]}}}	=> {"x":{"$binary":{"base64":"AA==","subType":"80"}}}
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$binary"},{"base64":"A","subType":"00"}]]]}}}	!! 241	$binary.base64 must be a valid base64 encoded string
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$binary"},{"base64":"AA==","subType":"zz"}]]]}}}	!! 241	$binary.subType must be a hex representation of a single byte
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$binary"},{"base64":"AA=="}]]]}}}	!! 241	$binary.subType value must be of type string
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$binary"},"AA=="],[{"$literal":"$type"},"00"]]]}}}	!! 241	$binary value must be of type object
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$regularExpression"},{"pattern":"a","options":"zi"}]]]}}}	=> {"x":{"$regularExpression":{"pattern":"a","options":"i"}}}
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$regularExpression"},{"pattern":"a"}]]]}}}	!! 241	$regularExpression.options value must be of type string
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$regex"},"a"],[{"$literal":"$options"},"i"]]]}}}	=> {"x":{"$regex":"a","$options":"i"}}
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$numberLong"},"5"]]]}}}	=> {"x":{"$numberLong":"5"}}
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[["a",1],[{"$literal":"$numberLong"},"5"]]]}}}	!! 241	$numberLong must be the first field in the object
+{"$serializeEJSON":{"input":"$o"}}	=> {"x":{"x":{"$numberInt":"1"},"y":{"z":{"$numberInt":"2"}}}}
+{"$serializeEJSON":{"input":"$$ROOT"}}	=> {"x":{"_id":{"$numberInt":"1"},"a":[{"$numberInt":"1"},{"$numberInt":"2"},{"$numberInt":"3"}],"b":[{"$numberInt":"3"},{"$numberInt":"4"}],"n":null,"s":"abc","o":{"x":{"$numberInt":"1"},"y":{"z":{"$numberInt":"2"}}},"m":[{"k":"a","v":{"$numberInt":"1"}},{"k":"b","v":{"$numberInt":"2"}}],"e":[],"i":{"$numberInt":"5"},"f":{"$numberDouble":"2.5"},"l":{"$numberLong":"7"},"nd":{"$numberDecimal":"1.5"},"dt":{"$date":"2026-01-01T00:00:00.000Z"},"ts":{"$timestamp":{"t":{"$numberLong":"100"},"i":{"$numberLong":"3"}}},"aa":[[{"$numberInt":"1"},{"$numberInt":"2"}],[{"$numberInt":"3"}]],"mix":[{"$numberInt":"3"},"a",null,{"$numberInt":"1"},{"x":{"$numberInt":"1"}},[{"$numberInt":"2"}]]}}
+{"$serializeEJSON":{"input":"$$ROOT","relaxed":false}}	=> {"x":{"_id":{"$numberInt":"1"},"a":[{"$numberInt":"1"},{"$numberInt":"2"},{"$numberInt":"3"}],"b":[{"$numberInt":"3"},{"$numberInt":"4"}],"n":null,"s":"abc","o":{"x":{"$numberInt":"1"},"y":{"z":{"$numberInt":"2"}}},"m":[{"k":"a","v":{"$numberInt":"1"}},{"k":"b","v":{"$numberInt":"2"}}],"e":[],"i":{"$numberInt":"5"},"f":{"$numberDouble":"2.5"},"l":{"$numberLong":"7"},"nd":{"$numberDecimal":"1.5"},"dt":{"$date":{"$numberLong":"1767225600000"}},"ts":{"$timestamp":{"t":{"$numberLong":"100"},"i":{"$numberLong":"3"}}},"aa":[[{"$numberInt":"1"},{"$numberInt":"2"}],[{"$numberInt":"3"}]],"mix":[{"$numberInt":"3"},"a",null,{"$numberInt":"1"},{"x":{"$numberInt":"1"}},[{"$numberInt":"2"}]]}}
+{"$serializeEJSON":{"input":"$dt"}}	=> {"x":{"$date":"2026-01-01T00:00:00.000Z"}}
+{"$serializeEJSON":{"input":"$n"}}	=> {"x":null}
+{"$serializeEJSON":{"input":"$nope"}}	=> {"x":null}
+{"$serializeEJSON":{"input":"$nope","onError":1}}	=> {"x":null}
+{"$serializeEJSON":{"input":1,"relaxed":"x"}}	!! 2	Unexpected value for relaxed: "x"
+{"$serializeEJSON":{"relaxed":true}}	!! 9	Missing 'input' parameter to $serializeEJSON
+{"$serializeEJSON":{"input":1,"x":1}}	!! 9	$serializeEJSON found an unknown argument: x
+{"$serializeEJSON":"$o"}	!! 9	$serializeEJSON expects an object of named arguments but found: string
+{"$deserializeEJSON":{"input":{"a":{"$numberLong":"5"}}}}	=> {"x":{"a":{"$numberLong":"5"}}}
+{"$deserializeEJSON":{"input":"x"}}	=> {"x":"x"}
+{"$deserializeEJSON":{"input":"$n"}}	=> {"x":null}
+{"$deserializeEJSON":{"input":"$nope"}}	=> {"x":null}
+{"$deserializeEJSON":"x"}	!! 9	$deserializeEJSON expects an object of named arguments but found: string
+{"$type":{"$serializeEJSON":{"input":"$l"}}}	=> {"x":"long"}
+{"$type":{"$serializeEJSON":{"input":"$l","relaxed":false}}}	=> {"x":"object"}
+{"$type":{"$serializeEJSON":{"input":"$f"}}}	=> {"x":"double"}
+{"$type":{"$serializeEJSON":{"input":"$i"}}}	=> {"x":"int"}
+{"$type":{"$serializeEJSON":{"input":"$nd"}}}	=> {"x":"object"}
+{"$serializeEJSON":{"input":"$i","relaxed":false}}	=> {"x":{"$numberInt":"5"}}
+{"$serializeEJSON":{"input":"$f","relaxed":false}}	=> {"x":{"$numberDouble":"2.5"}}
+{"$serializeEJSON":{"input":"$l"}}	=> {"x":{"$numberLong":"7"}}
+{"$serializeEJSON":{"input":"$nd"}}	=> {"x":{"$numberDecimal":"1.5"}}
+{"$serializeEJSON":{"input":"$ts"}}	=> {"x":{"$timestamp":{"t":{"$numberLong":"100"},"i":{"$numberLong":"3"}}}}
+{"$serializeEJSON":{"input":{"$numberDouble":"NaN"}}}	=> {"x":{"$numberDouble":"NaN"}}
+{"$serializeEJSON":{"input":{"$numberDouble":"1e300"}}}	=> {"x":{"$numberDouble":"1e+300"}}
+{"$serializeEJSON":{"input":{"$date":{"$numberLong":"-1"}}}}	=> {"x":{"$date":{"$numberLong":"-1"}}}
+{"$serializeEJSON":{"input":{"$oid":"0123456789abcdef01234567"}}}	=> {"x":{"$oid":"0123456789abcdef01234567"}}
+{"$serializeEJSON":{"input":{"$binary":{"base64":"AAE=","subType":"00"}}}}	=> {"x":{"$binary":{"base64":"AAE=","subType":"0"}}}
+{"$serializeEJSON":{"input":{"$regularExpression":{"pattern":"a","options":"i"}}}}	=> {"x":{"$regularExpression":{"pattern":"a","options":"i"}}}
+{"$serializeEJSON":{"input":{"$minKey":1}}}	=> {"x":{"$minKey":{"$numberInt":"1"}}}
+{"$serializeEJSON":{"input":{"$binary":{"base64":"AAECAwQFBgcICQoLDA0ODw==","subType":"04"}}}}	=> {"x":{"$uuid":"00010203-0405-0607-0809-0a0b0c0d0e0f"}}
+{"$serializeEJSON":{"input":{"$code":"x"}}}	=> {"x":{"$code":"x"}}
+{"$serializeEJSON":{"input":{"$symbol":"x"}}}	=> {"x":{"$symbol":"x"}}
+{"$type":{"$serializeEJSON":{"input":{"$numberDouble":"1e300"}}}}	=> {"x":"double"}
+{"$type":{"$serializeEJSON":{"input":"$f","relaxed":false}}}	=> {"x":"object"}
+{"$type":{"$serializeEJSON":{"input":{"$numberDouble":"NaN"}}}}	=> {"x":"object"}
+{"$serializeEJSON":{"input":{"$date":{"$numberLong":"253402300800000"}}}}	=> {"x":{"$date":{"$numberLong":"253402300800000"}}}
+{"$serializeEJSON":{"input":{"$numberDouble":"-0.0"}}}	=> {"x":{"$numberDouble":"-0.0"}}
+{"$serializeEJSON":{"input":{"$numberDouble":"-0.0"},"relaxed":false}}	=> {"x":{"$numberDouble":"-0"}}
+{"$serializeEJSON":{"input":{"$date":{"$numberLong":"1"}}}}	=> {"x":{"$date":"1970-01-01T00:00:00.001Z"}}
+{"$serializeEJSON":{"input":{"$binary":{"base64":"AAE=","subType":"80"}}}}	=> {"x":{"$binary":{"base64":"AAE=","subType":"80"}}}
+{"$serializeEJSON":{"input":"$o","relaxed":false}}	=> {"x":{"x":{"$numberInt":"1"},"y":{"z":{"$numberInt":"2"}}}}
+{"$serializeEJSON":{"input":[1,{"$numberLong":"2"}],"relaxed":false}}	=> {"x":[{"$numberInt":"1"},{"$numberLong":"2"}]}
+{"$serializeEJSON":{"input":{"$maxKey":1}}}	=> {"x":{"$maxKey":{"$numberInt":"1"}}}
+{"$serializeEJSON":{"input":{"$timestamp":{"t":1,"i":2}},"relaxed":false}}	=> {"x":{"$timestamp":{"t":{"$numberLong":"1"},"i":{"$numberLong":"2"}}}}
+{"$serializeEJSON":{"input":"$i","relaxed":null}}	!! 2	Unexpected value for relaxed: null
+{"$serializeEJSON":{"input":"$i","relaxed":"$nope"}}	!! 2	Unexpected value for relaxed: MISSING
+{"$deserializeEJSON":{"input":"$dt"}}	!! 241	Extended JSON cannot contain BSON-only types: date is not available in JSON
+{"$deserializeEJSON":{"input":"$i"}}	=> {"x":{"$numberInt":"5"}}
+{"$deserializeEJSON":{"input":"$ts"}}	!! 241	Extended JSON cannot contain BSON-only types: timestamp is not available in JSON
+{"$deserializeEJSON":{"input":1,"x":1}}	!! 9	$deserializeEJSON found an unknown argument: x
+{"$deserializeEJSON":{"onError":1}}	!! 9	Missing 'input' parameter to $deserializeEJSON
+{"$deserializeEJSON":{"input":{"$numberDecimal":"1.5"}}}	!! 241	Extended JSON cannot contain BSON-only types: decimal is not available in JSON
+{"$deserializeEJSON":{"input":{"$oid":"0123456789abcdef01234567"}}}	!! 241	Extended JSON cannot contain BSON-only types: objectId is not available in JSON
+{"$deserializeEJSON":{"input":"$dt","onError":7}}	=> {"x":{"$numberInt":"7"}}
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$date"},"2026-01-01T00:00:00Z"]]]}}}	=> {"x":{"$date":{"$numberLong":"1767225600000"}}}
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$oid"},"zz"]]]}}}	!! 241	$oid must be a 24 character hexadecimal string
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$oid"},"zz"]]]},"onError":"bad"}}	=> {"x":"bad"}
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$numberLong"},"x"]]]}}}	!! 241	$numberLong value must be a string specifying an integer
+{"$type":{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$numberDouble"},"1.5"]]]}}}}	=> {"x":"double"}
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$x"},"1"]]]}}}	=> {"x":{"$x":"1"}}
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$numberLong"},"1"],["b",1]]]}}}	!! 241	$numberLong object contains additional fields
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$uuid"},"00010203-0405-0607-0809-0a0b0c0d0e0f"]]]}}}	=> {"x":{"$binary":{"base64":"AAECAwQFBgcICQoLDA0ODw==","subType":"04"}}}
+{"$deserializeEJSON":{"input":{"$arrayToObject":[[[{"$literal":"$minKey"},2]]]}}}	!! 241	$minKey value must be the integer 1

@@ -1,0 +1,30 @@
+[package]
+name = "teseladb-bench"
+version = "0.1.0"
+description = "TeselaDB's benchmarks: scenarios with measurable targets (contract `bench-cli.md` of 002: each specification registers its own; 005 also adds the runner and the baselines)."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+teseladb-types = { path = "../../crates/teseladb-types" }
+teseladb-auth = { path = "../../crates/teseladb-auth" }
+teseladb-tls = { path = "../../crates/teseladb-tls" }
+teseladb-x509 = { path = "../../crates/teseladb-x509" }
+teseladb-json = { path = "../../crates/teseladb-json" }
+teseladb-server = { path = "../../crates/teseladb-server" }
+teseladb-wire = { path = "../../crates/teseladb-wire" }
+teseladb-raftlog = { path = "../../crates/teseladb-raftlog" }
+teseladb-io = { path = "../../crates/teseladb-io" }
+teseladb-deflate = { path = "../../crates/teseladb-deflate" }
+teseladb-bson = { path = "../../crates/teseladb-bson" }
+teseladb-keys = { path = "../../crates/teseladb-keys" }
+teseladb-lsm = { path = "../../crates/teseladb-lsm" }
+teseladb-collation = { path = "../../crates/teseladb-collation" }
+teseladb-multiraft = { path = "../../crates/teseladb-multiraft" }
+teseladb-raft = { path = "../../crates/teseladb-raft" }
+teseladb-range = { path = "../../crates/teseladb-range" }

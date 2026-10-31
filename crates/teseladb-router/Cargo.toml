@@ -1,0 +1,18 @@
+[package]
+name = "teseladb-router"
+version = "0.1.0"
+description = "TeselaDB's router (specification 007), sans-I/O: key to range to leader from the node's copy of Group 0, the leader cache, retries on OutOfRange and NotLeader, dispatch to the node and core of the leader and the read preferences."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+teseladb-types = { path = "../teseladb-types" }
+teseladb-meta = { path = "../teseladb-meta" }
+
+[dev-dependencies]
+teseladb-multiraft = { path = "../teseladb-multiraft" }

@@ -1,0 +1,16 @@
+[package]
+name = "teseladb-http"
+version = "0.1.0"
+description = "HTTP/1.1 of TeselaDB without I/O: the client of AWS STS and JWKS (013); 019 adds the server and HTTP/2."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+teseladb-types = { path = "../teseladb-types" }

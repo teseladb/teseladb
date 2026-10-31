@@ -1,0 +1,15 @@
+[package]
+name = "teseladb-plan"
+version = "0.1.0"
+description = "TeselaDB's query planning: the aggregation stages, the resolution of views and the planner."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+teseladb-bson = { path = "../teseladb-bson" }
+teseladb-meta = { path = "../teseladb-meta" }

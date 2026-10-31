@@ -1,0 +1,10 @@
+[
+{"_id":1,"g":"a","n":{"$numberInt":"5"},"x":{"$numberDouble":"1.5"},"s":"apple","t":["red","green"],"d":{"$date":{"$numberLong":"1214870400000"}},"o":{"k":1,"v":[1,2]}},
+{"_id":2,"g":"b","n":{"$numberInt":"3"},"x":{"$numberDouble":"2.5"},"s":"Banana","t":["yellow"],"d":{"$date":{"$numberLong":"1217548800000"}},"o":{"k":2,"v":[]}},
+{"_id":3,"g":"a","n":{"$numberLong":"7"},"x":null,"s":"cherry","t":[],"d":{"$date":{"$numberLong":"1220227200000"}},"o":{"k":3}},
+{"_id":4,"g":"c","n":{"$numberDecimal":"2.5"},"s":"date","t":"single","o":{"k":1,"v":[3,[4,5]]}},
+{"_id":5,"g":"b","n":{"$numberInt":"-1"},"x":{"$numberDouble":"0.25"},"t":["red",null,{"c":"blue"}],"d":{"$date":{"$numberLong":"1222819200000"}}},
+{"_id":6,"g":null,"n":"10","x":{"$numberDouble":"NaN"},"s":"fig","t":["green","green"],"o":null},
+{"_id":7,"n":{"$numberInt":"0"},"x":{"$numberDouble":"-3"},"s":"grape","t":[["a","b"],"c"],"d":{"$date":{"$numberLong":"1225497600000"}},"o":{"k":2,"v":[2,1]}},
+{"_id":8,"g":"a","n":{"$numberInt":"5"},"x":{"$numberDouble":"1.5"},"s":"apple","t":["red"],"o":{"k":1,"v":[1]}}
+]

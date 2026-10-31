@@ -1,0 +1,467 @@
+//! Exporting and ingesting (004 story 4, T021, FR-009): an interval exported at a timestamp and
+//! ingested into an empty LSM reads the same at every timestamp up to it; ingesting where there
+//! is data is refused until a range tombstone and a compaction clear it.
+
+mod common;
+
+use common::{get, open, scan, small, ts};
+use teseladb_keys::Hlc;
+use teseladb_lsm::{Commit, FileRef, GcTable, Kind, Lsm, LsmConfig, LsmError};
+use teseladb_raftlog::{Disk, FileId, IoOp, MemDisk};
+use teseladb_types::{Bytes, GroupId, Nanos};
+
+const G: GroupId = GroupId(1);
+
+fn key(i: u64) -> Vec<u8> {
+    format!("k{i:06}").into_bytes()
+}
+
+/// Runs the export and returns its files.
+fn export(lsm: &mut Lsm, disk: &mut MemDisk, start: &[u8], end: &[u8], at: Hlc) -> Vec<FileRef> {
+    let id = lsm.export(start, end, at, "export".into());
+    let done = lsm.run_io(disk, Nanos::ZERO);
+    let (got, files) = done.exported.into_iter().next().expect("the export finished");
+    assert_eq!(got, id);
+    files
+}
+
+/// Copies files to another disk, as a snapshot travels to another node.
+fn send(files: &[FileRef], from: &mut MemDisk, to: &mut MemDisk) -> Vec<FileRef> {
+    files
+        .iter()
+        .enumerate()
+        .map(|(i, f)| {
+            let data = from.read_all(&f.path).unwrap();
+            assert_eq!(data.len() as u64, f.size);
+            let path = std::path::PathBuf::from("incoming").join(f.path.file_name().unwrap());
+            let id = FileId(900 + i as u32);
+            to.execute(IoOp::Create { file: id, path: path.clone(), prealloc: 0 });
+            to.execute(IoOp::WriteAt {
+                file: id,
+                offset: 0,
+                data: Bytes::from_vec(data),
+                batch: 0,
+            });
+            to.execute(IoOp::Sync { file: id, batch: 0 });
+            to.execute(IoOp::Close { file: id });
+            FileRef { path, size: f.size }
+        })
+        .collect()
+}
+
+fn ingest(
+    lsm: &mut Lsm,
+    disk: &mut MemDisk,
+    files: Vec<FileRef>,
+    start: &[u8],
+    end: &[u8],
+) -> Result<(), LsmError> {
+    let id = lsm.ingest(files, start, end);
+    let done = lsm.run_io(disk, Nanos::ZERO);
+    let (got, result) = done.ingested.into_iter().next().expect("the ingestion finished");
+    assert_eq!(got, id);
+    result
+}
+
+#[test]
+fn an_exported_interval_reads_the_same_after_ingestion() {
+    let cfg = LsmConfig {
+        memtable_bytes: 8 << 20,
+        target_file_bytes: 8 << 20,
+        l1_bytes: 32 << 20,
+        cache_bytes: 16 << 20,
+        // The export waits for a running compaction; here time stands still, so no throttle.
+        compaction_bytes_per_sec: 1 << 40,
+        ..small()
+    };
+    let (mut a_disk, mut b_disk) = (MemDisk::new(), MemDisk::new());
+    let mut a = open(&cfg, &mut a_disk);
+    // About 64 MB: 30 000 keys with two versions of 1 KiB, deletions, an intent, a tombstone,
+    // and writes after the export timestamp that must not travel.
+    let mut index = 0;
+    for round in 0..2u64 {
+        for i in 0..30_000u64 {
+            index += 1;
+            let mut v = vec![(i % 251) as u8; 1024];
+            v[0] = round as u8;
+            a.put(G, index, &key(i), ts(10 + round * 10, 0), &v).unwrap();
+        }
+    }
+    for i in (0..30_000u64).step_by(97) {
+        index += 1;
+        a.delete(G, index, &key(i), ts(25, 0)).unwrap();
+    }
+    a.put_intent(G, index + 1, &key(7), ts(26, 0), b"txn").unwrap();
+    a.delete_range(G, index + 2, &key(100), &key(200), ts(27, 0)).unwrap();
+    a.put(G, index + 3, &key(8), ts(40, 0), b"after").unwrap();
+    a.run_io(&mut a_disk, Nanos::ZERO);
+    let at = ts(30, 0);
+    let files = export(&mut a, &mut a_disk, &key(0), &key(30_000), at);
+    let exported: u64 = files.iter().map(|f| f.size).sum();
+    assert!(exported >= 60 << 20, "{exported} bytes");
+    let sent = send(&files, &mut a_disk, &mut b_disk);
+    let mut b = open(&cfg, &mut b_disk);
+    ingest(&mut b, &mut b_disk, sent, &key(0), &key(30_000)).unwrap();
+    // The same at every timestamp up to the export's, after a restart too.
+    drop(b);
+    let mut b = open(&cfg, &mut b_disk);
+    let (va, vb) = (a.view(), b.view());
+    for read in [ts(5, 0), ts(15, 0), ts(25, 0), ts(26, 0), at] {
+        let left = scan(&mut a, &mut a_disk, &va, &key(0), &key(30_000), read);
+        let right = scan(&mut b, &mut b_disk, &vb, &key(0), &key(30_000), read);
+        assert_eq!(left.len(), right.len(), "at {read:?}");
+        assert!(left == right, "at {read:?}");
+    }
+    assert_eq!(
+        get(&mut b, &mut b_disk, &vb, &key(8), ts(50, 0)).unwrap().3[0],
+        1,
+        "the later write stayed"
+    );
+    let intent = get(&mut b, &mut b_disk, &vb, &key(7), ts(28, 0)).unwrap();
+    assert_eq!(intent.2, Kind::Intent);
+}
+
+#[test]
+fn ingesting_where_there_is_data_is_refused_until_it_is_cleared() {
+    let (mut a_disk, mut b_disk) = (MemDisk::new(), MemDisk::new());
+    let mut a = open(&small(), &mut a_disk);
+    for i in 0..50 {
+        a.put(G, i + 1, &key(i), ts(10, 0), b"from a").unwrap();
+    }
+    let files = export(&mut a, &mut a_disk, &key(0), &key(50), ts(20, 0));
+    let mut b = open(&small(), &mut b_disk);
+    b.put(G, 1, &key(25), ts(5, 0), b"local").unwrap();
+    let sent = send(&files, &mut a_disk, &mut b_disk);
+    // In the memtable.
+    assert_eq!(
+        ingest(&mut b, &mut b_disk, sent.clone(), &key(0), &key(50)),
+        Err(LsmError::IngestOverlap)
+    );
+    // In a file.
+    b.flush();
+    b.run_io(&mut b_disk, Nanos::ZERO);
+    assert_eq!(
+        ingest(&mut b, &mut b_disk, sent.clone(), &key(0), &key(50)),
+        Err(LsmError::IngestOverlap)
+    );
+    // A tombstone alone still counts; once a compaction past the threshold removes it all, the
+    // ingestion goes through.
+    b.delete_range(G, 2, &key(0), &key(50), ts(6, 0)).unwrap();
+    b.flush();
+    b.run_io(&mut b_disk, Nanos::ZERO);
+    assert_eq!(
+        ingest(&mut b, &mut b_disk, sent.clone(), &key(0), &key(50)),
+        Err(LsmError::IngestOverlap)
+    );
+    b.set_gc_thresholds(GcTable::new(vec![(key(0), key(50), ts(7, 0))]));
+    b.compact_all();
+    b.run_io(&mut b_disk, Nanos::ZERO);
+    assert_eq!(b.metrics().files, 0);
+    ingest(&mut b, &mut b_disk, sent, &key(0), &key(50)).unwrap();
+    let v = b.view();
+    assert_eq!(scan(&mut b, &mut b_disk, &v, b"", b"z", ts(30, 0)).len(), 50);
+}
+
+#[test]
+fn a_file_outside_the_range_or_broken_is_refused() {
+    let (mut a_disk, mut b_disk) = (MemDisk::new(), MemDisk::new());
+    let mut a = open(&small(), &mut a_disk);
+    for i in 0..10 {
+        a.put(G, i + 1, &key(i), ts(10, 0), b"v").unwrap();
+    }
+    let files = export(&mut a, &mut a_disk, &key(0), &key(10), ts(20, 0));
+    let sent = send(&files, &mut a_disk, &mut b_disk);
+    let mut b = open(&small(), &mut b_disk);
+    assert_eq!(
+        ingest(&mut b, &mut b_disk, sent.clone(), &key(3), &key(10)),
+        Err(LsmError::IngestOverlap)
+    );
+    let wrong_size = vec![FileRef { path: sent[0].path.clone(), size: sent[0].size - 1 }];
+    assert!(matches!(
+        ingest(&mut b, &mut b_disk, wrong_size, &key(0), &key(10)),
+        Err(LsmError::Corrupt { .. })
+    ));
+    let short = vec![FileRef { path: sent[0].path.clone(), size: 4096 }];
+    assert!(matches!(
+        ingest(&mut b, &mut b_disk, short, &key(0), &key(10)),
+        Err(LsmError::Corrupt { .. })
+    ));
+    // The refusals changed nothing: the right ingestion still works.
+    ingest(&mut b, &mut b_disk, sent, &key(0), &key(10)).unwrap();
+    assert_eq!(b.metrics().files, 1);
+}
+
+#[test]
+fn an_export_of_part_of_the_keys_takes_only_that_part() {
+    let mut disk = MemDisk::new();
+    let mut a = open(&small(), &mut disk);
+    for i in 0..300 {
+        a.put(G, i + 1, &key(i), ts(10, 0), &[3; 200]).unwrap();
+    }
+    a.put_intent(G, 400, &key(150), ts(12, 0), b"txn").unwrap();
+    a.flush();
+    a.run_io(&mut disk, Nanos::ZERO);
+    a.resolve_intent(
+        G,
+        401,
+        &key(150),
+        ts(12, 0),
+        Some(Commit { ts: ts(13, 0), kind: Kind::Delete, value: b"" }),
+    )
+    .unwrap();
+    let files = export(&mut a, &mut disk, &key(100), &key(200), ts(20, 0));
+    let mut other = MemDisk::new();
+    let sent = send(&files, &mut disk, &mut other);
+    let mut b = open(&small(), &mut other);
+    ingest(&mut b, &mut other, sent, &key(100), &key(200)).unwrap();
+    let v = b.view();
+    let rows = scan(&mut b, &mut other, &v, b"", b"z", ts(20, 0));
+    assert_eq!(rows.len(), 99, "100 keys, one deleted by the commit");
+    assert!(rows.iter().all(|r| r.0 >= key(100) && r.0 < key(200)));
+    let empty = export(&mut a, &mut disk, b"x", b"y", ts(20, 0));
+    assert!(empty.is_empty());
+}
+
+#[test]
+fn an_export_waits_for_the_flush_a_rotation_held_back() {
+    let cfg = LsmConfig { manifest_rotate_bytes: 2 * 4096, ..small() };
+    let mut disk = MemDisk::new();
+    let mut lsm = open(&cfg, &mut disk);
+    // The first page of the manifest is its snapshot; two flushes take it past two pages, and
+    // the rotation starts right after the second one.
+    for i in 0..2 {
+        lsm.put(G, i + 1, &key(i), ts(10, 0), b"v").unwrap();
+        lsm.flush();
+    }
+    loop {
+        let op = lsm.poll_io(Nanos::ZERO).expect("work until the rotation");
+        let rotation = matches!(&op, IoOp::Create { path, .. }
+            if path.file_name().is_some_and(|n| n.to_string_lossy().starts_with("MANIFEST-")));
+        let done = disk.execute(op);
+        lsm.on_io_done(done, Nanos::ZERO);
+        if rotation {
+            break;
+        }
+    }
+    // While the rotation runs, a memtable is frozen and an export asked for.
+    lsm.put(G, 10, &key(10), ts(11, 0), b"last").unwrap();
+    let id = lsm.export(&key(0), &key(20), ts(20, 0), "export".into());
+    let done = lsm.run_io(&mut disk, Nanos::ZERO);
+    let (got, files) = done.exported.into_iter().next().expect("the export finished");
+    assert_eq!(got, id);
+    let mut other = MemDisk::new();
+    let sent = send(&files, &mut disk, &mut other);
+    let mut b = open(&small(), &mut other);
+    ingest(&mut b, &mut other, sent, &key(0), &key(20)).unwrap();
+    let v = b.view();
+    assert_eq!(
+        get(&mut b, &mut other, &v, &key(10), ts(20, 0)).unwrap().3,
+        b"last",
+        "the frozen memtable went in"
+    );
+}
+
+#[test]
+fn an_export_does_not_wait_for_the_compaction_budget() {
+    let cfg = LsmConfig { compaction_bytes_per_sec: 4096, ..small() };
+    let mut disk = MemDisk::new();
+    let mut lsm = open(&cfg, &mut disk);
+    for i in 0..200 {
+        lsm.put(G, i + 1, &key(i), ts(10, 0), &[1; 100]).unwrap();
+    }
+    lsm.flush();
+    lsm.run_io(&mut disk, Nanos::ZERO);
+    lsm.compact_all();
+    // The compaction spends its second of budget and stops; once it ends a second later, the
+    // budget is below zero and the export still runs.
+    let mut now = Nanos::ZERO;
+    while lsm.metrics().compactions_total == 0 {
+        lsm.run_io(&mut disk, now);
+        now = now + Nanos::from_secs(1);
+    }
+    let id = lsm.export(&key(0), &key(200), ts(20, 0), "export".into());
+    let done = lsm.run_io(&mut disk, now);
+    assert_eq!(done.exported.first().map(|e| e.0), Some(id));
+}
+
+#[test]
+fn a_range_snapshot_ingests_two_intervals_and_its_flushed_index_at_once() {
+    // 005 FR-012: a range's local keys and its data are two intervals; they arrive in one
+    // ingestion with the snapshot's index as the range's flushed index.
+    let cfg = LsmConfig { compaction_bytes_per_sec: 1 << 40, ..small() };
+    let (mut a_disk, mut b_disk) = (MemDisk::new(), MemDisk::new());
+    let mut a = open(&cfg, &mut a_disk);
+    a.put(G, 1, b"\x00g1-local", ts(10, 0), b"mark").unwrap();
+    for i in 0..200u64 {
+        a.put(G, 2 + i, &key(i), ts(20, 0), b"doc").unwrap();
+    }
+    let local = (b"\x00g1".to_vec(), b"\x00g2".to_vec());
+    let data = (b"k".to_vec(), b"l".to_vec());
+    let mut files = export(&mut a, &mut a_disk, &local.0, &local.1, ts(99, 0));
+    files.extend(export(&mut a, &mut a_disk, &data.0, &data.1, ts(99, 0)));
+    let files = send(&files, &mut a_disk, &mut b_disk);
+    let mut b = open(&cfg, &mut b_disk);
+    let id = b.ingest_range(files.clone(), vec![local.clone(), data.clone()], (G, 201));
+    let done = b.run_io(&mut b_disk, Nanos::ZERO);
+    assert_eq!(done.ingested, vec![(id, Ok(()))]);
+    assert_eq!(b.flushed_index(G), 201);
+    let v = b.view();
+    assert_eq!(
+        get(&mut b, &mut b_disk, &v, b"\x00g1-local", ts(99, 0)).map(|r| r.3),
+        Some(b"mark".to_vec())
+    );
+    assert_eq!(scan(&mut b, &mut b_disk, &v, &data.0, &data.1, ts(99, 0)).len(), 200);
+    // After a restart the files and the flushed index are there.
+    drop(b);
+    let mut b = open(&cfg, &mut b_disk);
+    assert_eq!(b.flushed_index(G), 201);
+    // Again over the same intervals: refused, nothing changes.
+    let again =
+        send(&export(&mut a, &mut a_disk, &data.0, &data.1, ts(99, 0)), &mut a_disk, &mut b_disk);
+    let id = b.ingest_range(again, vec![local.clone(), data.clone()], (G, 300));
+    let done = b.run_io(&mut b_disk, Nanos::ZERO);
+    assert_eq!(done.ingested, vec![(id, Err(LsmError::IngestOverlap))]);
+    assert_eq!(b.flushed_index(G), 201);
+}
+
+#[test]
+fn a_file_outside_every_interval_is_refused() {
+    let cfg = LsmConfig { compaction_bytes_per_sec: 1 << 40, ..small() };
+    let (mut a_disk, mut b_disk) = (MemDisk::new(), MemDisk::new());
+    let mut a = open(&cfg, &mut a_disk);
+    a.put(G, 1, b"m-outside", ts(10, 0), b"x").unwrap();
+    let files = send(&export(&mut a, &mut a_disk, b"m", b"n", ts(99, 0)), &mut a_disk, &mut b_disk);
+    let mut b = open(&cfg, &mut b_disk);
+    let id = b.ingest_range(
+        files,
+        vec![(b"a".to_vec(), b"b".to_vec()), (b"k".to_vec(), b"l".to_vec())],
+        (G, 5),
+    );
+    let done = b.run_io(&mut b_disk, Nanos::ZERO);
+    assert_eq!(done.ingested, vec![(id, Err(LsmError::IngestOverlap))]);
+    assert_eq!(b.flushed_index(G), 0);
+}
+
+#[test]
+fn an_embedder_that_runs_the_io_gets_what_finished_inside_poll_io() {
+    // A job may end inside `poll_io` (an export whose last step needs no I/O): its completion
+    // waits there until `take_completions`, so an idle LSM does not keep it forever.
+    let cfg = LsmConfig { compaction_bytes_per_sec: 1 << 40, ..small() };
+    let mut disk = MemDisk::new();
+    let mut lsm = open(&cfg, &mut disk);
+    lsm.put(G, 1, &key(1), ts(10, 0), b"v").unwrap();
+    let id = lsm.export(b"a", b"z", ts(99, 0), "export".into());
+    let mut seen = Vec::new();
+    while let Some(op) = lsm.poll_io(Nanos::ZERO) {
+        let done = disk.execute(op);
+        seen.extend(lsm.on_io_done(done, Nanos::ZERO).exported);
+    }
+    seen.extend(lsm.take_completions().exported);
+    assert_eq!(seen.iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![id]);
+    assert_eq!(lsm.take_completions(), teseladb_lsm::Completions::default(), "taken once");
+}
+
+#[test]
+fn clearing_a_range_lowers_its_flushed_index_first_and_lets_its_snapshot_in() {
+    // 005 FR-012: a replica that held old data of a range empties it before ingesting the
+    // range's snapshot. Its flushed index goes back to 0 before anything is deleted, so a crash in
+    // between never leaves an index that promises data no longer there.
+    let cfg = LsmConfig { compaction_bytes_per_sec: 1 << 40, ..small() };
+    let other = GroupId(2);
+    let (mut a_disk, mut b_disk) = (MemDisk::new(), MemDisk::new());
+    let mut a = open(&cfg, &mut a_disk);
+    let mut b = open(&cfg, &mut b_disk);
+    for i in 0..300u64 {
+        a.put(G, i + 1, &key(i), ts(10, 0), b"new").unwrap();
+        b.put(G, i + 1, &key(i), ts(5, 0), b"old").unwrap();
+    }
+    b.put(G, 400, b"\x00g1-local", ts(5, 0), b"mark").unwrap();
+    b.put(other, 7, b"m-other", ts(5, 0), b"kept").unwrap();
+    b.flush();
+    b.run_io(&mut b_disk, Nanos::ZERO);
+    assert_eq!(b.flushed_index(G), 400);
+    let intervals = vec![(b"\x00g1".to_vec(), b"\x00g2".to_vec()), (b"k".to_vec(), b"l".to_vec())];
+    let id = b.clear_range(G, intervals.clone());
+    let done = b.run_io(&mut b_disk, Nanos::ZERO);
+    assert_eq!(done.cleared, vec![id]);
+    assert_eq!(b.flushed_index(G), 0);
+    // A restart keeps the lowered index and the other range.
+    drop(b);
+    let mut b = open(&cfg, &mut b_disk);
+    assert_eq!((b.flushed_index(G), b.flushed_index(other)), (0, 7));
+    let v = b.view();
+    assert_eq!(get(&mut b, &mut b_disk, &v, &key(3), ts(99, 0)), None, "the old data is gone");
+    assert_eq!(
+        get(&mut b, &mut b_disk, &v, b"m-other", ts(99, 0)).map(|r| r.3),
+        Some(b"kept".to_vec())
+    );
+    // The snapshot goes in.
+    let files = export(&mut a, &mut a_disk, b"k", b"l", ts(99, 0));
+    let files = send(&files, &mut a_disk, &mut b_disk);
+    let id = b.ingest_range(files, intervals, (G, 300));
+    assert_eq!(b.run_io(&mut b_disk, Nanos::ZERO).ingested, vec![(id, Ok(()))]);
+    assert_eq!(b.flushed_index(G), 300);
+    let v = b.view();
+    assert_eq!(
+        get(&mut b, &mut b_disk, &v, &key(3), ts(99, 0)).map(|r| r.3),
+        Some(b"new".to_vec())
+    );
+}
+
+/// Runs the I/O of `lsm` until the reset of a clearing of `G` is installed: its flushed index is
+/// back at 0, its tombstones wait for their flush and their compaction has not started.
+fn until_reset(lsm: &mut Lsm, disk: &mut MemDisk) {
+    while lsm.flushed_index(G) != 0 {
+        let op = lsm.poll_io(Nanos::ZERO).expect("the clearing goes on");
+        let done = disk.execute(op);
+        lsm.on_io_done(done, Nanos::ZERO);
+    }
+}
+
+#[test]
+fn a_threshold_handed_while_a_range_clears_waits_for_its_ingest() {
+    // 005 FR-012, FR-013: the host hands the thresholds of the core's ranges whenever one goes up,
+    // also while another clearing runs. The clearing still removes everything, and the threshold
+    // handed meanwhile holds over the ingested snapshot, the clearing's own no longer.
+    let cfg = LsmConfig { compaction_bytes_per_sec: 1 << 40, ..small() };
+    let intervals = vec![(b"k".to_vec(), b"l".to_vec())];
+    for whole_table in [false, true] {
+        let (mut a_disk, mut b_disk) = (MemDisk::new(), MemDisk::new());
+        let mut a = open(&cfg, &mut a_disk);
+        let mut b = open(&cfg, &mut b_disk);
+        let mut index = 0;
+        for t in [10u64, 20, 30] {
+            for i in 0..50u64 {
+                index += 1;
+                a.put(G, index, &key(i), ts(t, 0), format!("v{t}").as_bytes()).unwrap();
+            }
+        }
+        for i in 0..50u64 {
+            b.put(G, i + 1, &key(i), ts(5, 0), b"old").unwrap();
+        }
+        b.flush();
+        b.run_io(&mut b_disk, Nanos::ZERO);
+        b.clear_range(G, intervals.clone());
+        until_reset(&mut b, &mut b_disk);
+        if whole_table {
+            b.set_gc_thresholds(GcTable::new(vec![(key(0), key(50), ts(25, 0))]));
+        } else {
+            b.set_range_gc_threshold(&intervals, ts(25, 0));
+        }
+        b.run_io(&mut b_disk, Nanos::ZERO);
+        assert_eq!(b.metrics().files, 0, "the clearing removed everything");
+        let files = export(&mut a, &mut a_disk, b"k", b"l", ts(99, 0));
+        let files = send(&files, &mut a_disk, &mut b_disk);
+        let id = b.ingest_range(files, intervals.clone(), (G, index));
+        assert_eq!(b.run_io(&mut b_disk, Nanos::ZERO).ingested, vec![(id, Ok(()))]);
+        // The threshold of 25 drops v10 only: v20 is the newest version at or below it.
+        b.compact_all();
+        b.run_io(&mut b_disk, Nanos::ZERO);
+        let v = b.view();
+        let at =
+            |b: &mut Lsm, disk: &mut MemDisk, t| get(b, disk, &v, &key(3), ts(t, 0)).map(|r| r.3);
+        assert_eq!(at(&mut b, &mut b_disk, 15), None, "{whole_table}");
+        assert_eq!(at(&mut b, &mut b_disk, 22), Some(b"v20".to_vec()), "{whole_table}");
+        assert_eq!(at(&mut b, &mut b_disk, 35), Some(b"v30".to_vec()), "{whole_table}");
+    }
+}

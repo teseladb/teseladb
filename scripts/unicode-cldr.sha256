@@ -1,0 +1,8 @@
+# CLDR 29 collation data: the root collation in ICU's form (FractionalUCA.txt, with ICU's weights, anchors
+# and script groups) and its conformance tests, the version of ICU 57.1, which RefDb 9.0 bundles
+# (decision D-043). Unicode License (unicode-license.txt in CLDR).
+# source https://raw.githubusercontent.com/unicode-org/cldr/release-29
+# dest .tools/unicode/cldr-29
+bf665233cc792cb0ab743b7727fa75a2947970bc44d1973c20b71474a39fe45b  common/uca/CollationTest_CLDR_NON_IGNORABLE.txt
+7e2f0a67d340109e258505c3da2b77368fbc532f564eed5dad3589a3871e9724  common/uca/CollationTest_CLDR_SHIFTED.txt
+a9317c9e888bb252569a53aef5cd46dcc73496fccddb36050dcc89d6bee1c420  common/uca/FractionalUCA.txt

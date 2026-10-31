@@ -1,0 +1,21 @@
+[package]
+name = "teseladb-range"
+version = "0.1.0"
+description = "TeselaDB's replicated document range: its state machine over the core's LSM, latches, read cache, reads and writes."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+teseladb-hash = { path = "../teseladb-hash" }
+teseladb-hlc = { path = "../teseladb-hlc" }
+teseladb-lsm = { path = "../teseladb-lsm" }
+teseladb-multiraft = { path = "../teseladb-multiraft" }
+teseladb-raft = { path = "../teseladb-raft" }
+teseladb-raftlog = { path = "../teseladb-raftlog" }
+teseladb-types = { path = "../teseladb-types" }
+

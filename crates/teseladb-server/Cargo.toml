@@ -1,0 +1,48 @@
+[package]
+name = "teseladb-server"
+version = "0.1.0"
+description = "The teseladb binary: command line, logging, node start-up with Group 0 on core 0 and the data range over its core's LSM, the inter-node port, joins, snapshot transfers and the in-process development cluster."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "teseladb"
+path = "src/main.rs"
+
+# Its own `main`: the same binary is the test and, in node mode, the cluster's processes.
+[[test]]
+name = "cluster_local"
+harness = false
+
+[dependencies]
+teseladb-types = { path = "../teseladb-types" }
+teseladb-hlc = { path = "../teseladb-hlc" }
+teseladb-hash = { path = "../teseladb-hash" }
+teseladb-sys = { path = "../teseladb-sys" }
+teseladb-raft = { path = "../teseladb-raft" }
+teseladb-raftlog = { path = "../teseladb-raftlog" }
+teseladb-io = { path = "../teseladb-io" }
+teseladb-multiraft = { path = "../teseladb-multiraft" }
+teseladb-meta = { path = "../teseladb-meta" }
+teseladb-router = { path = "../teseladb-router" }
+teseladb-lsm = { path = "../teseladb-lsm" }
+teseladb-range = { path = "../teseladb-range" }
+teseladb-keys = { path = "../teseladb-keys" }
+teseladb-json = { path = "../teseladb-json" }
+teseladb-rest = { path = "../teseladb-rest" }
+teseladb-wire = { path = "../teseladb-wire" }
+teseladb-auth = { path = "../teseladb-auth" }
+teseladb-bson = { path = "../teseladb-bson" }
+teseladb-crypto = { path = "../teseladb-crypto" }
+teseladb-x509 = { path = "../teseladb-x509" }
+teseladb-tls = { path = "../teseladb-tls" }
+teseladb-http = { path = "../teseladb-http" }
+teseladb-txn = { path = "../teseladb-txn" }
+
+[dev-dependencies]
+teseladb-session = { path = "../teseladb-session" }

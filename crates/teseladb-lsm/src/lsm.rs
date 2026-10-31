@@ -1,0 +1,332 @@
+//! The LSM of a core (`lsm-api.md`): writes into memtables, reads over views, and background jobs
+//! that write through [`Lsm::poll_io`] and [`Lsm::on_io_done`] with no I/O of their own (FR-001).
+//!
+//! Jobs run one at a time, each with one operation in flight; reads of blocks go out before
+//! them. A full disk keeps the write that failed and retries it every second, and meanwhile the
+//! core is read-only (FR-015); any other I/O error stops the core.
+
+mod io;
+mod requests;
+mod schedule;
+mod write;
+
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::rc::Rc;
+
+use teseladb_keys::Hlc;
+use teseladb_raftlog::{Disk, IoOp};
+use teseladb_types::{GroupId, Nanos};
+
+use crate::compaction::{CompactJob, ExportSpec};
+use crate::config::LsmConfig;
+use crate::entry::Kind;
+use crate::error::LsmError;
+use crate::gc::GcTable;
+use crate::ingest::{FileRef, IngestJob};
+use crate::jobs::{FlushJob, ManifestFile, Script};
+use crate::manifest::State;
+use crate::memtable::Memtable;
+use crate::read::Reader;
+use crate::recovery;
+use crate::sst::MAX_FILE_NUMBER;
+use crate::sst::reader::Table;
+use crate::version::{Version, View};
+
+/// The commit of a resolved intent: the version 008 takes out of the intent's value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Commit<'a> {
+    /// Commit timestamp.
+    pub ts: Hlc,
+    /// [`Kind::Put`] or [`Kind::Delete`].
+    pub kind: Kind,
+    /// The value written.
+    pub value: &'a [u8],
+}
+
+/// One version of an entry written with [`Lsm::write_entry`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EntryWrite<'a> {
+    /// Logical key.
+    pub key: &'a [u8],
+    /// [`Kind::Put`] or [`Kind::Delete`].
+    pub kind: Kind,
+    /// The value written (empty for a deletion).
+    pub value: &'a [u8],
+}
+
+/// One version of an entry written with [`Lsm::write_versions`], at its own timestamp: 008's
+/// entries write intents, retract them and write their commits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VersionWrite<'a> {
+    /// Logical key.
+    pub key: &'a [u8],
+    /// Timestamp.
+    pub ts: Hlc,
+    /// Any [`Kind`].
+    pub kind: Kind,
+    /// The value written (empty for a deletion or a `Retract`).
+    pub value: &'a [u8],
+}
+
+/// Write pressure for the leader (FR-012).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pressure {
+    /// Nothing to do.
+    Normal,
+    /// Slow down new proposals.
+    Slow,
+    /// Reject new proposals with `Overloaded`.
+    Reject,
+}
+
+/// Timestamp of the tombstones of a clearing: above every version.
+pub(crate) const CLEARED: Hlc = Hlc { physical: u64::MAX, logical: u32::MAX };
+
+/// What finished since the last call.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Completions {
+    /// Ranges whose flushed index moved, with the new index.
+    pub flushed: Vec<(GroupId, u64)>,
+    /// Finished exports: their identifier and the files written.
+    pub exported: Vec<(u64, Vec<FileRef>)>,
+    /// Finished ingestions: their identifier and the result.
+    pub ingested: Vec<(u64, Result<(), LsmError>)>,
+    /// Ranges cleared by [`Lsm::clear_range`]: their identifier.
+    pub cleared: Vec<u64>,
+}
+
+impl Completions {
+    fn extend(&mut self, other: Completions) {
+        self.flushed.extend(other.flushed);
+        self.exported.extend(other.exported);
+        self.ingested.extend(other.ingested);
+        self.cleared.extend(other.cleared);
+    }
+}
+
+/// Counters behind [`Lsm::metrics`].
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Counters {
+    pub(crate) user_bytes: u64,
+    pub(crate) written_bytes: u64,
+    pub(crate) compactions: u64,
+    pub(crate) stalls: u64,
+    pub(crate) rejects: u64,
+}
+
+/// Where a job runs: flushes beside one background job, one operation in flight at a time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Slot {
+    Flush,
+    Background,
+}
+
+/// A background job.
+#[derive(Debug)]
+enum Job {
+    /// Deleting unused files.
+    Delete(Script),
+    /// Manifest rotation: no flush starts while it runs.
+    Rotate(Script),
+    Compact(Box<CompactJob>),
+    Ingest(Box<IngestJob>),
+    /// The flushed index of a range going back to 0 before its data is cleared.
+    Reset(Script),
+}
+
+/// An export or an ingestion waiting for its turn.
+#[derive(Debug)]
+enum Request {
+    Export(ExportSpec),
+    Ingest {
+        id: u64,
+        files: Vec<FileRef>,
+        intervals: Vec<(Vec<u8>, Vec<u8>)>,
+        flushed: Option<(GroupId, u64)>,
+    },
+    Clear {
+        id: u64,
+        range: GroupId,
+        intervals: Vec<(Vec<u8>, Vec<u8>)>,
+    },
+}
+
+/// The LSM of a core.
+#[derive(Debug)]
+pub struct Lsm {
+    pub(crate) cfg: LsmConfig,
+    pub(crate) version: Rc<Version>,
+    pub(crate) reader: Reader,
+    pub(crate) state: State,
+    pub(crate) manifest: ManifestFile,
+    pub(crate) next_file: u64,
+    flush_job: Option<FlushJob>,
+    bg_job: Option<Job>,
+    inflight: Option<(Slot, IoOp)>,
+    retry: Option<(Slot, IoOp)>,
+    full_until: Option<Nanos>,
+    /// The GC thresholds compactions apply: those handed, with [`CLEARED`] over `clearing`.
+    gc: GcTable,
+    /// The GC thresholds handed by the embedder (FR-007).
+    gc_handed: GcTable,
+    /// Intervals of clearings whose snapshot is not ingested yet: their threshold stays
+    /// [`CLEARED`] whatever is handed meanwhile.
+    clearing: Vec<(Vec<u8>, Vec<u8>)>,
+    /// Intervals of the ingestion that runs, by its identifier.
+    ingesting: BTreeMap<u64, Vec<(Vec<u8>, Vec<u8>)>>,
+    pointers: Vec<Vec<u8>>,
+    compact_all: bool,
+    /// Clearings whose tombstones wait for their flush.
+    clears: Vec<u64>,
+    /// Clearings whose compaction is running.
+    clears_compacting: Vec<u64>,
+    budget: i64,
+    budget_at: Option<Nanos>,
+    requests: std::collections::VecDeque<Request>,
+    next_request: u64,
+    pub(crate) obsolete: Vec<Rc<Table>>,
+    done: Completions,
+    pub(crate) counters: Counters,
+}
+
+impl Lsm {
+    /// Opens the LSM of `cfg.dir`, creating it if it does not exist. Returns it with the flushed
+    /// index of each range: the log of each range is replayed from the next one (FR-010).
+    pub fn recover(
+        cfg: &LsmConfig,
+        disk: &mut dyn Disk,
+    ) -> Result<(Lsm, BTreeMap<GroupId, u64>), LsmError> {
+        assert!(
+            (4096..=32 << 10).contains(&cfg.block_bytes),
+            "data blocks are 4 to 32 KiB (FR-003)"
+        );
+        let r = recovery::recover(cfg, disk)?;
+        let mut v = Version::empty(cfg.levels);
+        let mut reader = Reader::new(cfg.cache_bytes);
+        for (level, t) in r.tables {
+            reader.cache.pin_meta(t.number, t.meta.clone());
+            let level = usize::from(level).min(cfg.levels);
+            v.levels[level].push(Rc::new(t));
+        }
+        v.levels[0].sort_by_key(|t| std::cmp::Reverse(t.number));
+        for level in &mut v.levels[1..] {
+            level.sort_by(|a, b| a.props.lo.cmp(&b.props.lo));
+        }
+        let flushed = r.state.flushed.clone();
+        let lsm = Lsm {
+            cfg: cfg.clone(),
+            version: Rc::new(v),
+            reader,
+            next_file: r.state.next_file,
+            state: r.state,
+            manifest: ManifestFile {
+                number: r.manifest,
+                tail: r.manifest_tail,
+                encryption: cfg.encryption.clone(),
+            },
+            flush_job: None,
+            bg_job: None,
+            inflight: None,
+            retry: None,
+            full_until: None,
+            gc: GcTable::default(),
+            gc_handed: GcTable::default(),
+            clearing: Vec::new(),
+            ingesting: BTreeMap::new(),
+            pointers: vec![Vec::new(); cfg.levels + 1],
+            compact_all: false,
+            clears: Vec::new(),
+            clears_compacting: Vec::new(),
+            budget: i64::try_from(cfg.compaction_bytes_per_sec).unwrap_or(i64::MAX),
+            budget_at: None,
+            requests: std::collections::VecDeque::new(),
+            next_request: 1,
+            obsolete: Vec::new(),
+            done: Completions::default(),
+            counters: Counters::default(),
+        };
+        Ok((lsm, flushed))
+    }
+
+    fn writable(&self) -> Result<(), LsmError> {
+        match &self.reader.failure {
+            Some(e) => Err(e.clone()),
+            None => Ok(()),
+        }
+    }
+
+    /// Freezes the active memtable so the next jobs flush it.
+    fn freeze(&mut self) {
+        let active = self.version.memtables[0].clone();
+        if active.borrow().is_empty() && active.borrow().applied.is_empty() {
+            return;
+        }
+        active.borrow_mut().freeze();
+        let mut v = self.version.clone_shallow();
+        v.memtables.insert(0, Rc::new(RefCell::new(Memtable::default())));
+        self.version = Rc::new(v);
+    }
+
+    /// Freezes the active memtable now (before a shutdown, an export or a test).
+    pub fn flush(&mut self) {
+        self.freeze();
+    }
+
+    /// A view of the current memtables and files.
+    pub fn view(&self) -> View {
+        View { version: self.version.clone() }
+    }
+
+    /// The flushed index of `range`: its log is replayed from the next entry after a restart.
+    pub fn flushed_index(&self, range: GroupId) -> u64 {
+        self.state.flushed.get(&range).copied().unwrap_or(0)
+    }
+
+    /// The highest log index of `range` the LSM no longer needs, or `None` if every entry it
+    /// applied is in a file (FR-011). Entries up to the flushed index are in a file even when a
+    /// memtable holds them again (a range replays its log after a restart, 005 FR-015).
+    pub fn release_floor(&self, range: GroupId) -> Option<u64> {
+        let flushed = self.flushed_index(range);
+        self.version
+            .memtables
+            .iter()
+            .filter_map(|m| m.borrow().applied.get(&range).copied())
+            .filter(|a| a.last > flushed)
+            .map(|a| a.first)
+            .min()
+            .map(|first| first.saturating_sub(1).max(flushed))
+    }
+
+    /// Write pressure (FR-012).
+    pub fn pressure(&self) -> Pressure {
+        let l0 = self.version.levels[0].len();
+        let frozen = self.version.memtables.len() - 1;
+        if self.full_until.is_some()
+            || l0 >= self.cfg.l0_reject
+            || frozen >= 2 * self.cfg.max_frozen
+        {
+            Pressure::Reject
+        } else if l0 >= self.cfg.l0_slow || frozen >= self.cfg.max_frozen {
+            Pressure::Slow
+        } else {
+            Pressure::Normal
+        }
+    }
+
+    /// `Ok` while the core works; the error when it is read-only, corrupt or stopped.
+    pub fn health(&self) -> Result<(), LsmError> {
+        self.writable()?;
+        match self.full_until {
+            Some(_) => Err(LsmError::ReadOnly),
+            None => Ok(()),
+        }
+    }
+
+    pub(crate) fn alloc_file(&mut self) -> u64 {
+        let n = self.next_file;
+        assert!(n <= MAX_FILE_NUMBER, "file numbers exhausted");
+        self.next_file += 1;
+        n
+    }
+}

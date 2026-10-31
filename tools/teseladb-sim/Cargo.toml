@@ -1,0 +1,30 @@
+[package]
+name = "teseladb-sim"
+version = "0.1.0"
+description = "TeselaDB's deterministic simulator: nodes running the production code over simulated disks, network and clocks, fault plans and checkers."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+teseladb-types = { path = "../../crates/teseladb-types" }
+teseladb-hash = { path = "../../crates/teseladb-hash" }
+teseladb-raftlog = { path = "../../crates/teseladb-raftlog" }
+teseladb-lsm = { path = "../../crates/teseladb-lsm" }
+teseladb-keys = { path = "../../crates/teseladb-keys" }
+teseladb-mql = { path = "../../crates/teseladb-mql" }
+teseladb-bson = { path = "../../crates/teseladb-bson" }
+teseladb-index = { path = "../../crates/teseladb-index" }
+teseladb-json = { path = "../../crates/teseladb-json" }
+teseladb-raft = { path = "../../crates/teseladb-raft" }
+teseladb-multiraft = { path = "../../crates/teseladb-multiraft" }
+teseladb-meta = { path = "../../crates/teseladb-meta" }
+teseladb-testkv = { path = "../../crates/teseladb-testkv" }
+teseladb-range = { path = "../../crates/teseladb-range" }
+teseladb-txn = { path = "../../crates/teseladb-txn" }
+teseladb-wire = { path = "../../crates/teseladb-wire" }
+teseladb-hlc = { path = "../../crates/teseladb-hlc" }

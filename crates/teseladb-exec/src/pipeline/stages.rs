@@ -1,0 +1,867 @@
+//! The other stages of a pipeline (measured on a `refrouter` 9.0.4): `$match`, `$limit`, `$skip`,
+//! `$count`, `$unwind`, `$sample`, `$redact`, `$facet`, `$lookup`, `$unionWith` and
+//! `$documents`.
+
+use std::sync::Arc;
+
+use teseladb_bson::{Document, RawDoc, RawValue, Value};
+use teseladb_mql::{ErrorCode, Extensions, Filter, FilterUse, GeoQuery, MqlError, TextQuery};
+
+use super::errors::{
+    BAD_VALUE, COUNT_DOLLAR, COUNT_DOT, COUNT_EMPTY, COUNT_ID, COUNT_TYPE, FACET_ARRAY,
+    FACET_EMPTY, FACET_STAGE, FAILED_TO_PARSE, LIMIT_ARGUMENT, LIMIT_ZERO, MATCH_NOT_OBJECT,
+    MISSING_FIELD, NEAR_IN_MATCH, REDACT_RESULT, SAMPLE_MISSING, SAMPLE_SIZE, SKIP_ARGUMENT,
+    TYPE_MISMATCH, UNKNOWN_FIELD, UNWIND_INDEX_PREFIX, UNWIND_NO_PATH, UNWIND_OPTION,
+    UNWIND_PREFIX, UNWIND_PRESERVE, error,
+};
+use super::sort::check_path;
+use super::{Env, Pipeline};
+use crate::expr::arith::raw_type_name;
+use crate::expr::values::display;
+use crate::expr::{Ctx, Expr, Scope, truthy};
+
+/// RefDb's message for a geospatial sort inside `$match`.
+const NEAR_MESSAGE: &str = "$geoNear, $near, and $nearSphere are not allowed in this context, as these operators require sorting geospatial data. If you do not need sort, consider using $geoWithin instead. Check out https://dochub.refdb.org/core/near-sort-operation and https://dochub.refdb.org/core/nearSphere-sort-operationfor more details.";
+
+/// A document as raw BSON, for the matcher.
+fn raw_bytes(doc: &Document) -> Result<Vec<u8>, MqlError> {
+    doc.to_bytes().map_err(|e| error(BAD_VALUE, e.to_string()))
+}
+
+use super::scoped::matches;
+
+/// A `$match`.
+#[derive(Clone, Debug)]
+pub struct Match {
+    filter: Arc<Filter>,
+}
+
+/// Whether filter `d` names `$where` among its clauses.
+fn uses_where(d: RawDoc<'_>) -> bool {
+    d.iter().any(|(k, v)| match (k, v) {
+        ("$where", _) => true,
+        ("$and" | "$or" | "$nor", RawValue::Array(a)) => {
+            a.iter().any(|x| matches!(x, RawValue::Document(c) if uses_where(c)))
+        }
+        _ => false,
+    })
+}
+
+impl Match {
+    /// Reads a `$match`.
+    pub fn parse(v: RawValue<'_>) -> Result<Match, MqlError> {
+        let RawValue::Document(d) = v else {
+            return Err(error(
+                MATCH_NOT_OBJECT,
+                "the match filter must be an expression in an object",
+            ));
+        };
+        if uses_where(d) {
+            return Err(error(BAD_VALUE, "$where is not allowed in this context"));
+        }
+        let filter = Filter::parse(d, FilterUse::Query)?;
+        if filter.uses_near() {
+            return Err(error(NEAR_IN_MATCH, NEAR_MESSAGE));
+        }
+        Ok(Match { filter: Arc::new(filter) })
+    }
+
+    /// The documents of `docs` that match.
+    pub fn run(&self, docs: Vec<Document>, env: &dyn Env) -> Result<Vec<Document>, MqlError> {
+        let mut out = Vec::new();
+        for d in docs {
+            if matches(&self.filter, &d, env)? {
+                out.push(d);
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// The argument of `$limit` or `$skip` (`stage`): a whole number of 64 bits.
+fn count_argument(v: RawValue<'_>, stage: &str, code: ErrorCode) -> Result<u64, MqlError> {
+    let shown = display(&Value::from(v));
+    let bad = |why: &str| {
+        error(code, format!("invalid argument to {stage} stage: {why}{stage}: {shown}"))
+    };
+    let n: i64 = match v {
+        RawValue::Int32(n) => i64::from(n),
+        RawValue::Int64(n) => n,
+        RawValue::Double(x) if x.fract() == 0.0 && x.is_finite() => x as i64,
+        RawValue::Double(_) => return Err(bad("Expected an integer: ")),
+        RawValue::Decimal128(d) => match teseladb_mql::decimal_exact(d) {
+            Some(n) => n,
+            None => return Err(bad("Expected an integer: ")),
+        },
+        _ => return Err(bad("Expected a number in: ")),
+    };
+    u64::try_from(n).map_err(|_| bad("Expected a non-negative number in: "))
+}
+
+/// The argument of `$limit`, which may not be 0.
+pub fn limit(v: RawValue<'_>) -> Result<u64, MqlError> {
+    let n = count_argument(v, "$limit", LIMIT_ARGUMENT)?;
+    if n == 0 {
+        return Err(error(LIMIT_ZERO, "the limit must be positive"));
+    }
+    Ok(n)
+}
+
+/// The argument of `$skip`.
+pub fn skip(v: RawValue<'_>) -> Result<u64, MqlError> {
+    count_argument(v, "$skip", SKIP_ARGUMENT)
+}
+
+/// The field of `$count`.
+pub fn count(v: RawValue<'_>) -> Result<String, MqlError> {
+    let RawValue::String(s) = v else {
+        return Err(error(COUNT_TYPE, "the count field must be a non-empty string"));
+    };
+    if s.is_empty() {
+        return Err(error(COUNT_EMPTY, "the count field must be a non-empty string"));
+    }
+    if s.starts_with('$') {
+        return Err(error(COUNT_DOLLAR, "the count field cannot be a $-prefixed path"));
+    }
+    if s.contains('.') {
+        return Err(error(COUNT_DOT, "the count field cannot contain '.'"));
+    }
+    if s == "_id" {
+        return Err(error(COUNT_ID, "the count field cannot be '_id'"));
+    }
+    Ok(s.to_owned())
+}
+
+/// The result of `$count` over `n` documents: none for none.
+pub fn run_count(field: &str, n: usize) -> Vec<Document> {
+    if n == 0 {
+        return Vec::new();
+    }
+    let v = i32::try_from(n).map_or_else(|_| Value::Int64(n as i64), Value::Int32);
+    vec![Document::new().with(field, v)]
+}
+
+/// An `$unwind`.
+#[derive(Clone, Debug)]
+pub struct Unwind {
+    path: Vec<String>,
+    index: Option<String>,
+    preserve: bool,
+}
+
+impl Unwind {
+    /// Reads an `$unwind`: `"$path"` or `{path, includeArrayIndex, preserveNullAndEmptyArrays}`.
+    pub fn parse(v: RawValue<'_>) -> Result<Unwind, MqlError> {
+        let (mut path, mut index, mut preserve) = (None, None, false);
+        match v {
+            RawValue::String(s) => path = Some(s.to_owned()),
+            RawValue::Document(d) => {
+                for (k, x) in d.iter() {
+                    match (k, x) {
+                        ("path", RawValue::String(s)) => path = Some(s.to_owned()),
+                        ("includeArrayIndex", RawValue::String(s)) => {
+                            if s.starts_with('$') {
+                                return Err(error(
+                                    UNWIND_INDEX_PREFIX,
+                                    format!(
+                                        "includeArrayIndex option to $unwind stage should not be prefixed with a '$': {s}"
+                                    ),
+                                ));
+                            }
+                            index = Some(s.to_owned());
+                        }
+                        ("preserveNullAndEmptyArrays", RawValue::Boolean(b)) => preserve = b,
+                        ("preserveNullAndEmptyArrays", other) => {
+                            return Err(error(
+                                UNWIND_PRESERVE,
+                                format!(
+                                    "expected a boolean for the preserveNullAndEmptyArrays option to $unwind stage, got {}",
+                                    raw_type_name(other)
+                                ),
+                            ));
+                        }
+                        (other, _) => {
+                            return Err(error(
+                                UNWIND_OPTION,
+                                format!("unrecognized option to $unwind stage: {other}"),
+                            ));
+                        }
+                    }
+                }
+            }
+            _ => {
+                return Err(error(
+                    super::errors::UNWIND_NOT_OBJECT,
+                    format!(
+                        "expected either a string or an object as specification for $unwind stage, got {}",
+                        crate::expr::arith::raw_type_name(v)
+                    ),
+                ));
+            }
+        }
+        let path =
+            path.ok_or_else(|| error(UNWIND_NO_PATH, "no path specified to $unwind stage"))?;
+        let Some(p) = path.strip_prefix('$') else {
+            return Err(error(
+                UNWIND_PREFIX,
+                format!("path option to $unwind stage should be prefixed with a '$': {path}"),
+            ));
+        };
+        check_path(p)?;
+        Ok(Unwind { path: p.split('.').map(str::to_owned).collect(), index, preserve })
+    }
+
+    /// One document per element of the array at the path; any other value stays as it is.
+    pub fn run(&self, docs: Vec<Document>) -> Vec<Document> {
+        let segs: Vec<&str> = self.path.iter().map(String::as_str).collect();
+        let mut out = Vec::new();
+        for d in docs {
+            match get_path(&d, &segs) {
+                Some(Value::Array(items)) if !items.is_empty() => {
+                    for (i, x) in items.into_iter().enumerate() {
+                        let mut e = d.clone();
+                        put_path(&mut e, &segs, Some(x));
+                        if let Some(f) = &self.index {
+                            e.insert(f.clone(), Value::Int64(i as i64));
+                        }
+                        out.push(e);
+                    }
+                }
+                Some(Value::Array(_)) => {
+                    if self.preserve {
+                        let mut e = d;
+                        put_path(&mut e, &segs, None);
+                        self.with_null_index(&mut e);
+                        out.push(e);
+                    }
+                }
+                None | Some(Value::Null) => {
+                    if self.preserve {
+                        let mut e = d;
+                        self.with_null_index(&mut e);
+                        out.push(e);
+                    }
+                }
+                Some(_) => {
+                    let mut e = d;
+                    self.with_null_index(&mut e);
+                    out.push(e);
+                }
+            }
+        }
+        out
+    }
+
+    fn with_null_index(&self, d: &mut Document) {
+        if let Some(f) = &self.index {
+            d.insert(f.clone(), Value::Null);
+        }
+    }
+}
+
+/// The value at `segs` through documents only.
+fn get_path(d: &Document, segs: &[&str]) -> Option<Value> {
+    let (first, rest) = segs.split_first()?;
+    let v = d.get(first)?;
+    if rest.is_empty() {
+        return Some(v.clone());
+    }
+    match v {
+        Value::Document(sub) => get_path(sub, rest),
+        _ => None,
+    }
+}
+
+/// Sets (or removes) the value at `segs`, through documents.
+fn put_path(d: &mut Document, segs: &[&str], v: Option<Value>) {
+    let Some((first, rest)) = segs.split_first() else { return };
+    if rest.is_empty() {
+        match v {
+            Some(v) => {
+                d.insert(*first, v);
+            }
+            None => {
+                d.remove(first);
+            }
+        }
+        return;
+    }
+    let mut sub = match d.get(first) {
+        Some(Value::Document(s)) => s.clone(),
+        _ => Document::new(),
+    };
+    put_path(&mut sub, rest, v);
+    d.insert(*first, Value::Document(sub));
+}
+
+/// A `$sample`.
+#[derive(Clone, Debug)]
+pub struct Sample {
+    size: usize,
+}
+
+impl Sample {
+    /// Reads `{size: n}`.
+    pub fn parse(v: RawValue<'_>) -> Result<Sample, MqlError> {
+        let RawValue::Document(d) = v else {
+            return Err(error(
+                super::errors::SAMPLE_NOT_OBJECT,
+                "the $sample stage specification must be an object",
+            ));
+        };
+        let mut size = None;
+        for (k, x) in d.iter() {
+            match k {
+                "size" => {
+                    let n = crate::expr::values::int64_of(&Value::from(x))
+                        .filter(|n| *n > 0)
+                        .and_then(|n| usize::try_from(n).ok());
+                    size = Some(n.ok_or_else(|| {
+                        error(SAMPLE_SIZE, "size argument to $sample must be a positive integer")
+                    })?);
+                }
+                other => {
+                    return Err(error(
+                        UNKNOWN_FIELD,
+                        format!("unrecognized option to $sample: {other}"),
+                    ));
+                }
+            }
+        }
+        let size =
+            size.ok_or_else(|| error(SAMPLE_MISSING, "$sample stage must specify a size"))?;
+        Ok(Sample { size })
+    }
+
+    /// `size` documents of `docs` at random, in random order.
+    pub fn run(&self, mut docs: Vec<Document>, env: &dyn Env) -> Vec<Document> {
+        for i in (1..docs.len()).rev() {
+            let j = ((env.random() * (i + 1) as f64) as usize).min(i);
+            docs.swap(i, j);
+        }
+        docs.truncate(self.size);
+        docs
+    }
+}
+
+/// The values `$redact`'s expression may give (`$$KEEP`, `$$PRUNE`, `$$DESCEND`).
+const KEEP: &str = "keep";
+const PRUNE: &str = "prune";
+const DESCEND: &str = "descend";
+
+/// The documents of `$redact`: each level kept, pruned or descended into.
+pub fn run_redact(e: &Expr, docs: Vec<Document>, env: &dyn Env) -> Result<Vec<Document>, MqlError> {
+    let mut out = Vec::new();
+    for d in docs {
+        let mut scope = env.scope(&d);
+        for (name, v) in [("KEEP", KEEP), ("PRUNE", PRUNE), ("DESCEND", DESCEND)] {
+            scope.vars.insert(name.to_owned(), Some(Value::String(v.to_owned())));
+        }
+        if let Some(r) = redact(e, &d, &scope)? {
+            out.push(r);
+        }
+    }
+    Ok(out)
+}
+
+fn redact(e: &Expr, d: &Document, scope: &Scope) -> Result<Option<Document>, MqlError> {
+    match e.eval(d, scope)? {
+        Some(Value::String(s)) if s == KEEP => Ok(Some(d.clone())),
+        Some(Value::String(s)) if s == PRUNE => Ok(None),
+        Some(Value::String(s)) if s == DESCEND => {
+            let mut out = Document::new();
+            for (k, v) in d.iter() {
+                match v {
+                    Value::Document(sub) => {
+                        if let Some(r) = redact(e, sub, scope)? {
+                            out.push(k, Value::Document(r));
+                        }
+                    }
+                    Value::Array(items) => {
+                        out.push(k, Value::Array(redact_array(e, items, scope)?))
+                    }
+                    other => out.push(k, other.clone()),
+                }
+            }
+            Ok(Some(out))
+        }
+        other => Err(error(
+            REDACT_RESULT,
+            format!(
+                "$redact's expression should not return anything aside from the variables $$KEEP, $$DESCEND, and $$PRUNE, but returned {}",
+                other.as_ref().map(display).unwrap_or_else(|| "MISSING".to_owned())
+            ),
+        )),
+    }
+}
+
+fn redact_array(e: &Expr, items: &[Value], scope: &Scope) -> Result<Vec<Value>, MqlError> {
+    let mut out = Vec::new();
+    for v in items {
+        match v {
+            Value::Document(sub) => {
+                if let Some(r) = redact(e, sub, scope)? {
+                    out.push(Value::Document(r));
+                }
+            }
+            Value::Array(inner) => out.push(Value::Array(redact_array(e, inner, scope)?)),
+            other => out.push(other.clone()),
+        }
+    }
+    Ok(out)
+}
+
+/// The stages a `$facet` may not have.
+const NOT_IN_FACET: [&str; 10] = [
+    "$out",
+    "$merge",
+    "$facet",
+    "$collStats",
+    "$indexStats",
+    "$geoNear",
+    "$search",
+    "$searchMeta",
+    "$vectorSearch",
+    "$changeStream",
+];
+
+/// A `$facet`.
+#[derive(Clone, Debug)]
+pub struct Facet {
+    facets: Vec<(String, Pipeline)>,
+}
+
+impl Facet {
+    /// Reads `{name: [stages]}`.
+    pub fn parse(v: RawValue<'_>, ctx: &Ctx) -> Result<Facet, MqlError> {
+        let shown = display(&Value::from(v));
+        let empty = || {
+            error(
+                FACET_EMPTY,
+                format!(
+                    "the $facet specification must be a non-empty object, but found: $facet: {shown}"
+                ),
+            )
+        };
+        let RawValue::Document(d) = v else { return Err(empty()) };
+        let mut facets = Vec::new();
+        for (k, x) in d.iter() {
+            check_path(k)?;
+            let RawValue::Array(a) = x else {
+                return Err(error(
+                    FACET_ARRAY,
+                    format!("arguments to $facet must be arrays, {k} is type {}", raw_type_name(x)),
+                ));
+            };
+            let stages: Vec<RawValue<'_>> = a.iter().collect();
+            for s in &stages {
+                if let RawValue::Document(sd) = s
+                    && let Some((name, _)) = sd.iter().next()
+                    && NOT_IN_FACET.contains(&name)
+                {
+                    return Err(error(
+                        FACET_STAGE,
+                        format!("{name} is not allowed to be used within a $facet stage"),
+                    ));
+                }
+            }
+            facets.push((k.to_owned(), Pipeline::parse(&stages, ctx)?));
+        }
+        if facets.is_empty() {
+            return Err(empty());
+        }
+        Ok(Facet { facets })
+    }
+
+    /// One document with each facet's results.
+    pub fn run(&self, docs: Vec<Document>, env: &dyn Env) -> Result<Vec<Document>, MqlError> {
+        let mut out = Document::new();
+        for (name, p) in &self.facets {
+            let results = p.run_in(docs.clone(), env, false)?;
+            out.push(
+                name.clone(),
+                Value::Array(results.into_iter().map(Value::Document).collect()),
+            );
+        }
+        Ok(vec![out])
+    }
+}
+
+/// The variables of `$lookup`'s `let`: those bound to a value, and those bound to a missing one
+/// (`$$kk` of a missing field is missing, not `null`).
+#[derive(Clone, Debug, Default)]
+struct LetVars {
+    set: Document,
+    missing: Vec<String>,
+}
+
+impl LetVars {
+    /// A scope over `doc` with these variables.
+    fn scope(&self, doc: &Document) -> Scope {
+        let mut s = Scope::new(doc.clone(), Some(&self.set));
+        for n in &self.missing {
+            s.vars.insert(n.clone(), None);
+        }
+        s
+    }
+}
+
+/// The extensions of a sub-pipeline: `$expr` and expressions see the `let` variables, missing
+/// ones included; the rest as the pipeline's.
+struct LetExtensions<'a> {
+    inner: &'a dyn Extensions,
+    vars: &'a LetVars,
+}
+
+impl Extensions for LetExtensions<'_> {
+    fn expr(
+        &self,
+        e: RawValue<'_>,
+        doc: RawDoc<'_>,
+        _: Option<&Document>,
+    ) -> Result<bool, MqlError> {
+        let d = Document::from(doc);
+        Ok(truthy(&Expr::parse(e)?.eval(&d, &self.vars.scope(&d))?))
+    }
+
+    fn where_js(&self, code: RawValue<'_>, doc: RawDoc<'_>) -> Result<bool, MqlError> {
+        self.inner.where_js(code, doc)
+    }
+
+    fn text(&self, query: &TextQuery, doc: RawDoc<'_>) -> Result<bool, MqlError> {
+        self.inner.text(query, doc)
+    }
+
+    fn geo(&self, query: &GeoQuery, value: RawValue<'_>) -> Result<bool, MqlError> {
+        self.inner.geo(query, value)
+    }
+
+    fn random(&self) -> f64 {
+        self.inner.random()
+    }
+
+    fn meta(&self, name: &str, doc: RawDoc<'_>) -> Result<Option<Value>, MqlError> {
+        self.inner.meta(name, doc)
+    }
+
+    fn eval(
+        &self,
+        e: RawValue<'_>,
+        doc: RawDoc<'_>,
+        _: Option<&Document>,
+    ) -> Result<Option<Value>, MqlError> {
+        let d = Document::from(doc);
+        Expr::parse(e)?.eval(&d, &self.vars.scope(&d))
+    }
+
+    fn update_pipeline(
+        &self,
+        pipeline: RawValue<'_>,
+        doc: RawDoc<'_>,
+        vars: Option<&Document>,
+    ) -> Result<Document, MqlError> {
+        self.inner.update_pipeline(pipeline, doc, vars)
+    }
+}
+
+/// An environment with more variables (`$lookup`'s `let`).
+struct WithVars<'a> {
+    inner: &'a dyn Env,
+    ext: LetExtensions<'a>,
+    vars: &'a LetVars,
+}
+
+impl Env for WithVars<'_> {
+    fn ext(&self) -> &dyn Extensions {
+        &self.ext
+    }
+
+    fn vars(&self) -> Option<&Document> {
+        Some(&self.vars.set)
+    }
+
+    fn scope(&self, doc: &Document) -> Scope {
+        self.vars.scope(doc).with_collation(self.inner.collation())
+    }
+
+    fn collation(&self) -> crate::collation::Collation {
+        self.inner.collation()
+    }
+
+    fn collection(&self, name: &str) -> Result<Vec<Document>, MqlError> {
+        self.inner.collection(name)
+    }
+
+    fn random(&self) -> f64 {
+        self.inner.random()
+    }
+}
+
+/// A `$lookup`.
+#[derive(Clone, Debug)]
+pub struct Lookup {
+    from: Option<String>,
+    local: Option<String>,
+    foreign: Option<String>,
+    as_path: Vec<String>,
+    lets: Vec<(String, Expr)>,
+    pipeline: Option<Pipeline>,
+}
+
+impl Lookup {
+    /// Whether it joins by `localField` and `foreignField` alone, without a pipeline.
+    pub(super) fn is_equality(&self) -> bool {
+        self.pipeline.is_none()
+    }
+
+    /// Reads a `$lookup`.
+    pub fn parse(v: RawValue<'_>, ctx: &Ctx) -> Result<Lookup, MqlError> {
+        let RawValue::Document(d) = v else {
+            return Err(error(
+                FAILED_TO_PARSE,
+                format!(
+                    "the $lookup stage specification must be an object, but found {}",
+                    crate::expr::arith::raw_type_name(v)
+                ),
+            ));
+        };
+        let (mut from, mut local, mut foreign, mut as_name) = (None, None, None, None);
+        let (mut lets, mut stages) = (Vec::new(), None);
+        for (k, x) in d.iter() {
+            match (k, x) {
+                ("from", RawValue::String(s)) => from = Some(s.to_owned()),
+                ("localField", RawValue::String(s)) => local = Some(s.to_owned()),
+                ("foreignField", RawValue::String(s)) => foreign = Some(s.to_owned()),
+                ("as", RawValue::String(s)) => as_name = Some(s.to_owned()),
+                ("let", RawValue::Document(l)) => {
+                    for (n, e) in l.iter() {
+                        lets.push((n.to_owned(), Expr::parse_in(e, ctx)?));
+                    }
+                }
+                ("pipeline", RawValue::Array(a)) => stages = Some(a.iter().collect::<Vec<_>>()),
+                (other, _) => {
+                    return Err(error(
+                        UNKNOWN_FIELD,
+                        format!("unknown argument to $lookup: {other}"),
+                    ));
+                }
+            }
+        }
+        if from.is_none() && stages.is_none() {
+            return Err(error(FAILED_TO_PARSE, "must specify 'pipeline' when 'from' is empty"));
+        }
+        if stages.is_none() && (local.is_none() || foreign.is_none()) {
+            return Err(error(
+                FAILED_TO_PARSE,
+                "$lookup requires either 'pipeline' or both 'localField' and 'foreignField' to be specified",
+            ));
+        }
+        let as_name = as_name.ok_or_else(|| {
+            error(MISSING_FIELD, "BSON field '$lookup.as' is missing but a required field")
+        })?;
+        check_path(&as_name)?;
+        let inner = ctx.with(lets.iter().map(|(n, _)| n.as_str()));
+        let pipeline = match stages {
+            Some(s) => Some(Pipeline::parse(&s, &inner)?),
+            None => None,
+        };
+        let as_path = as_name.split('.').map(str::to_owned).collect();
+        Ok(Lookup { from, local, foreign, as_path, lets, pipeline })
+    }
+
+    /// Each document with the documents it joins.
+    pub fn run(&self, docs: Vec<Document>, env: &dyn Env) -> Result<Vec<Document>, MqlError> {
+        let foreign_docs = match &self.from {
+            Some(f) => env.collection(f)?,
+            None => Vec::new(),
+        };
+        let segs: Vec<&str> = self.as_path.iter().map(String::as_str).collect();
+        let mut out = Vec::with_capacity(docs.len());
+        for d in docs {
+            // Without `from`, the equality applies to what the pipeline's `$documents` gives,
+            // before its other stages (measured on a `refrouter` 9.0.4).
+            let join = match (&self.local, &self.foreign) {
+                (Some(l), Some(f)) => Some((l, f)),
+                _ => None,
+            };
+            let mut joined = match join {
+                Some((l, f)) if self.from.is_some() => equal_join(&d, l, f, &foreign_docs, env)?,
+                _ => foreign_docs.clone(),
+            };
+            if let Some(p) = &self.pipeline {
+                let scope = env.scope(&d);
+                let mut vars =
+                    LetVars { set: env.vars().cloned().unwrap_or_default(), missing: Vec::new() };
+                for (n, e) in &self.lets {
+                    match e.eval(&d, &scope)? {
+                        Some(v) => {
+                            vars.set.insert(n.clone(), v);
+                        }
+                        None => vars.missing.push(n.clone()),
+                    }
+                }
+                let ext = LetExtensions { inner: env.ext(), vars: &vars };
+                let sub = WithVars { inner: env, ext, vars: &vars };
+                joined = match join.filter(|_| self.from.is_none()) {
+                    Some((l, f)) => {
+                        p.run_split(joined, &sub, |docs| equal_join(&d, l, f, &docs, env))?
+                    }
+                    None => p.run_in(joined, &sub, false)?,
+                };
+            }
+            let mut e = d;
+            let found = Value::Array(joined.into_iter().map(Value::Document).collect());
+            super::shape_set(&mut e, &segs, found);
+            out.push(e);
+        }
+        Ok(out)
+    }
+}
+
+/// The foreign documents whose `foreign` field equals a value of `local` in `d` (an array's
+/// elements; a missing field or an empty array as `null`).
+fn equal_join(
+    d: &Document,
+    local: &str,
+    foreign: &str,
+    docs: &[Document],
+    env: &dyn Env,
+) -> Result<Vec<Document>, MqlError> {
+    let mut values: Vec<Value> = Vec::new();
+    let segs: Vec<&str> = local.split('.').collect();
+    collect_local(&Value::Document(d.clone()), &segs, &mut values);
+    if values.is_empty() {
+        values.push(Value::Null);
+    }
+    let spec = Document::new().with(foreign, Document::new().with("$in", Value::Array(values)));
+    let bytes = raw_bytes(&spec)?;
+    let raw = RawDoc::from_bytes(&bytes).map_err(|e| error(BAD_VALUE, e.to_string()))?;
+    let filter = Filter::parse(raw, FilterUse::Query)?;
+    let mut out = Vec::new();
+    for f in docs {
+        if matches(&filter, f, env)? {
+            out.push(f.clone());
+        }
+    }
+    Ok(out)
+}
+
+/// The values a local path reaches: through documents and arrays of documents, an array's
+/// elements at the end.
+fn collect_local(v: &Value, segs: &[&str], out: &mut Vec<Value>) {
+    let Some((first, rest)) = segs.split_first() else {
+        match v {
+            Value::Array(items) => out.extend(items.iter().cloned()),
+            other => out.push(other.clone()),
+        }
+        return;
+    };
+    match v {
+        Value::Document(d) => {
+            if let Some(x) = d.get(first) {
+                collect_local(x, rest, out);
+            }
+        }
+        Value::Array(items) => {
+            for x in items {
+                if matches!(x, Value::Document(_)) {
+                    collect_local(x, segs, out);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A `$unionWith`.
+#[derive(Clone, Debug)]
+pub struct UnionWith {
+    coll: Option<String>,
+    pipeline: Pipeline,
+}
+
+impl UnionWith {
+    /// Reads `"coll"` or `{coll, pipeline}`.
+    pub fn parse(v: RawValue<'_>, ctx: &Ctx) -> Result<UnionWith, MqlError> {
+        match v {
+            RawValue::String(s) => {
+                Ok(UnionWith { coll: Some(s.to_owned()), pipeline: Pipeline::default() })
+            }
+            RawValue::Document(d) => {
+                let (mut coll, mut stages) = (None, Vec::new());
+                for (k, x) in d.iter() {
+                    match (k, x) {
+                        ("coll", RawValue::String(s)) => coll = Some(s.to_owned()),
+                        ("pipeline", RawValue::Array(a)) => stages = a.iter().collect(),
+                        (other, _) => {
+                            return Err(error(
+                                UNKNOWN_FIELD,
+                                format!("BSON field '$unionWith.{other}' is an unknown field."),
+                            ));
+                        }
+                    }
+                }
+                let pipeline = Pipeline::parse(&stages, ctx)?;
+                if coll.is_none() && !pipeline.starts_with_documents() {
+                    return Err(error(
+                        FAILED_TO_PARSE,
+                        "$unionWith stage without explicit collection must have a pipeline with $documents as first stage",
+                    ));
+                }
+                Ok(UnionWith { coll, pipeline })
+            }
+            _ => Err(error(
+                FAILED_TO_PARSE,
+                format!(
+                    "the $unionWith stage specification must be an object or string, but found {}",
+                    crate::expr::arith::raw_type_name(v)
+                ),
+            )),
+        }
+    }
+
+    /// `docs` and then the results of the other collection's pipeline.
+    pub fn run(&self, mut docs: Vec<Document>, env: &dyn Env) -> Result<Vec<Document>, MqlError> {
+        let input = match &self.coll {
+            Some(c) => env.collection(c)?,
+            None => Vec::new(),
+        };
+        docs.extend(self.pipeline.run(input, env)?);
+        Ok(docs)
+    }
+}
+
+/// The expression of `$documents`, which must be the first stage.
+pub fn documents(v: RawValue<'_>, index: usize, ctx: &Ctx) -> Result<Expr, MqlError> {
+    if index != 0 {
+        return Err(error(BAD_VALUE, "$documents is only valid as the first stage in a pipeline"));
+    }
+    Expr::parse_in(v, ctx)
+}
+
+/// The documents `$documents` gives: its expression's array, evaluated once.
+pub fn run_documents(e: &Expr, env: &dyn Env) -> Result<Vec<Document>, MqlError> {
+    let empty = Document::new();
+    match e.eval(&empty, &env.scope(&empty))? {
+        Some(Value::Array(items)) => items
+            .into_iter()
+            .map(|x| match x {
+                Value::Document(d) => Ok(d),
+                other => Err(error(
+                    TYPE_MISMATCH,
+                    format!(
+                        "$documents must evaluate to an array of objects, found {}",
+                        display(&other)
+                    ),
+                )),
+            })
+            .collect(),
+        other => Err(error(
+            TYPE_MISMATCH,
+            format!(
+                "an array is expected, found {}",
+                other.as_ref().map(display).unwrap_or_else(|| "MISSING".to_owned())
+            ),
+        )),
+    }
+}

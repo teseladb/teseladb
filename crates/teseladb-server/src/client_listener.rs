@@ -1,0 +1,1079 @@
+//! The clients' port (006 FR-005): an acceptor that hands each connection to one of the node's
+//! client workers in turn, one worker per core, each with its own poller; the protocol is
+//! `teseladb-wire`'s, which turns bytes into requests and replies into bytes.
+//!
+//! A worker only reads, writes and parses: a command of a node runs on one of the worker's
+//! executor threads, which waits for the cores, so a command that waits (for a majority, a
+//! leader or its `maxTimeMS`) never holds up the worker's other connections. A connection has at
+//! most one command running; what arrives meanwhile waits in its backlog, in order.
+//!
+//! Beyond `--maxConns` open connections a new one is closed at once, as `refnode` does with
+//! `net.maxIncomingConnections`. An awaitable `hello` waits in its worker until its deadline (or
+//! until the node changes state), and with `exhaustAllowed` keeps answering that way.
+
+use std::collections::BTreeMap;
+use std::io::{self, ErrorKind, Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use teseladb_hlc::to_timestamp;
+use teseladb_io::mailbox::{self, Mailbox, MailboxSender};
+use teseladb_io::poller::{Interest, Poller, WAKE_TOKEN, Waker};
+use teseladb_multiraft::NodeClock;
+use teseladb_txn::reaper::Reaper;
+use teseladb_wire::commands::registry::{REFRESH_INTERVAL_MS, refresh};
+use teseladb_wire::commands::{
+    Backend, NodeSessions, REAP_INTERVAL_MS, Shared, Timeouts, lock, reap,
+};
+use teseladb_wire::compressed::Compressor;
+use teseladb_wire::connection::{Connection, Request};
+use teseladb_wire::dispatch::{
+    Action, ClusterTime, NodeInfo, Topology, answers_without_waiting, dispatch_with,
+    hello_after_wait,
+};
+
+use crate::backend::{NodeHandle, SCAN_EVERY, ServerBackend};
+use crate::certs::Certificates;
+use crate::clustertime_keys::KeySlot;
+use crate::diag::{Diag, PortStats, ProcessConfig};
+use crate::tls_port::{TlsPort, Transport};
+use teseladb_wire::error::{CommandError, SHUTDOWN_IN_PROGRESS};
+use teseladb_wire::hello::HelloRequest;
+
+/// RefDb's default `net.maxIncomingConnections`.
+pub const DEFAULT_MAX_CONNECTIONS: usize = 1_000_000;
+/// Bytes read from a socket at a time.
+const READ_CHUNK: usize = 64 * 1024;
+
+/// What the clients' port needs to know.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClientConfig {
+    /// Addresses to listen on (`--bind_ip` with `--port`).
+    pub addrs: Vec<SocketAddr>,
+    /// Most open connections (`--maxConns`).
+    pub max_connections: usize,
+    /// Compressors the node takes (`--networkMessageCompressors`).
+    pub compressors: Vec<Compressor>,
+    /// How long cursors and sessions live without use.
+    pub timeouts: Timeouts,
+    /// Time between two reapings of expired cursors and sessions.
+    pub reap_every: Duration,
+    /// Time between two refreshes of the node's sessions in `config.system.sessions`.
+    pub refresh_every: Duration,
+    /// `enableTestCommands`: `configureFailPoint` answers.
+    pub test_commands: bool,
+    /// `--redactClientLogData` (013 FR-027): the value the node starts with.
+    pub redact_client_log_data: bool,
+    /// `--setParameter auditAuthorizationSuccess` of a node without an audit log (with one, the
+    /// auditor's configuration has it).
+    pub audit_authorization_success: bool,
+    /// `ocspEnabled` (013 FR-031).
+    pub ocsp_enabled: bool,
+    /// `useInternalAuthzForX509` (013 FR-033).
+    pub use_internal_authz_for_x509: bool,
+    /// `clusterAuthMode` at start (013 FR-034).
+    pub cluster_auth_mode: teseladb_wire::commands::server_params::ClusterAuthMode,
+    /// TLS on the port, which the modes of `clusterAuthMode` past `keyFile` need.
+    pub tls_enabled: bool,
+    /// `transactionLifetimeLimitSeconds` (008 FR-010).
+    pub transaction_lifetime_secs: i64,
+    /// `maxConcurrentMultiDocumentTransactions` (008 FR-020).
+    pub max_concurrent_transactions: i64,
+    /// The command line and data directory the diagnostic commands report.
+    pub process: ProcessConfig,
+    /// TLS on the port (`--tlsMode` and the certificate options, 013).
+    pub tls: TlsPort,
+    /// Clients authenticate before running commands (a node started without `--insecure`, 013).
+    pub auth: bool,
+    /// What `rotateCertificates` loads again (013 FR-006); `None` on a node without a PKI.
+    pub certificates: Option<Arc<Certificates>>,
+    /// The audit log (013 FR-016).
+    pub audit: Option<crate::audit_log::AuditLog>,
+    /// The LDAP server of PLAIN logins (013 FR-025).
+    pub ldap: Option<crate::ldap_client::SharedLdap>,
+    /// The STS of REFDB-AWS logins (013 FR-025).
+    pub sts: Option<Arc<crate::sts_client::Sts>>,
+    /// The identity providers of REFDB-OIDC logins (013 FR-025).
+    pub oidc: Option<Arc<crate::oidc_client::Oidc>>,
+    /// The keytab of GSSAPI logins (013 FR-025).
+    pub kerberos: Option<Arc<Vec<teseladb_auth::kerberos::ServiceKey>>>,
+    /// `authenticationMechanisms`; empty, RefDb's default.
+    pub mechanisms: Vec<teseladb_auth::sasl::SaslMechanism>,
+}
+
+impl ClientConfig {
+    /// The node's empty cursor and session tables for this port.
+    pub fn sessions(&self) -> NodeSessions {
+        let mut s = NodeSessions::new(self.timeouts);
+        s.audit = self.audit.as_ref().map(crate::audit_log::AuditLog::for_node);
+        s.params.monitor_ms = i64::try_from(self.reap_every.as_millis()).unwrap_or(i64::MAX);
+        s.params.redact_client_log_data = self.redact_client_log_data;
+        s.params.audit_authorization_success = self.audit_authorization_success;
+        s.params.ocsp_enabled = self.ocsp_enabled;
+        s.params.use_internal_authz_for_x509 = self.use_internal_authz_for_x509;
+        s.params.cluster_auth_mode = self.cluster_auth_mode;
+        s.params.tls_enabled = self.tls_enabled;
+        s.params.transaction_lifetime_secs = self.transaction_lifetime_secs;
+        s.params.max_concurrent_transactions = self.max_concurrent_transactions;
+        if self.test_commands { s.with_test_commands() } else { s }
+    }
+
+    /// The port on `addrs` with RefDb's defaults.
+    pub fn new(addrs: Vec<SocketAddr>) -> ClientConfig {
+        ClientConfig {
+            addrs,
+            max_connections: DEFAULT_MAX_CONNECTIONS,
+            compressors: crate::cli::DEFAULT_COMPRESSORS.to_vec(),
+            timeouts: Timeouts::default(),
+            reap_every: Duration::from_millis(REAP_INTERVAL_MS),
+            refresh_every: Duration::from_millis(REFRESH_INTERVAL_MS),
+            test_commands: false,
+            redact_client_log_data: false,
+            audit_authorization_success: false,
+            ocsp_enabled: true,
+            use_internal_authz_for_x509: false,
+            cluster_auth_mode: teseladb_wire::commands::server_params::ClusterAuthMode::Undefined,
+            tls_enabled: true,
+            transaction_lifetime_secs:
+                teseladb_wire::commands::server_params::TRANSACTION_LIFETIME_DEFAULT_SECS,
+            max_concurrent_transactions:
+                teseladb_wire::commands::server_params::MAX_CONCURRENT_TRANSACTIONS_DEFAULT,
+            process: ProcessConfig::default(),
+            tls: TlsPort::default(),
+            auth: false,
+            certificates: None,
+            audit: None,
+            ldap: None,
+            sts: None,
+            oidc: None,
+            kerberos: None,
+            mechanisms: Vec::new(),
+        }
+    }
+}
+
+/// Where replies get the node's state from.
+pub trait NodeState: Send + Sync + 'static {
+    /// The node's `topologyVersion`, cluster time and wall clock now.
+    fn info(&self) -> NodeInfo;
+
+    /// How the data commands reach the node's cores; `None` answers only the handshake and
+    /// `ping` (a port without a node behind it).
+    fn handle(&self) -> Option<NodeHandle> {
+        None
+    }
+
+    /// The node drained and closed its clients' port (007 FR-015): new connections are dropped
+    /// and every request gets `ShutdownInProgress` before its connection closes.
+    fn closed(&self) -> bool {
+        false
+    }
+}
+
+/// What core 0 tells the clients' port of the node's state in Group 0 (007 FR-015): the
+/// `topologyVersion` counter and whether the port is closed.
+#[derive(Debug, Default)]
+pub struct NodePresence {
+    counter: AtomicI64,
+    closed: AtomicBool,
+}
+
+impl NodePresence {
+    /// The counter of the node's state, and whether it drained.
+    pub fn set(&self, counter: i64, closed: bool) {
+        self.counter.store(counter, Ordering::Release);
+        self.closed.store(closed, Ordering::Release);
+    }
+
+    /// The `topologyVersion` counter.
+    pub fn counter(&self) -> i64 {
+        self.counter.load(Ordering::Acquire)
+    }
+
+    /// Whether the port is closed.
+    pub fn closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+}
+
+/// [`NodeState`] of a running node: its process id and its HLC.
+#[derive(Debug)]
+pub struct NodeClockState {
+    process_id: [u8; 12],
+    clock: NodeClock,
+    handle: Option<NodeHandle>,
+    /// The `$clusterTime` signing keys, on a node with authentication (013 FR-014).
+    keys: Option<Arc<KeySlot>>,
+    /// The node's state in Group 0 as core 0 publishes it (007 FR-015).
+    presence: Arc<NodePresence>,
+}
+
+fn wall_ms() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
+}
+
+impl NodeClockState {
+    /// The state of a node whose HLC is `clock`; `random` makes its `processId`.
+    pub fn new(clock: NodeClock, random: u64) -> NodeClockState {
+        // An ObjectId: seconds since 1970, then random bytes.
+        let mut process_id = [0u8; 12];
+        process_id[..4].copy_from_slice(&((wall_ms() / 1000) as u32).to_be_bytes());
+        process_id[4..].copy_from_slice(&random.to_be_bytes());
+        NodeClockState {
+            process_id,
+            clock,
+            handle: None,
+            keys: None,
+            presence: Arc::new(NodePresence::default()),
+        }
+    }
+
+    /// The state of a node that signs and checks `$clusterTime` with the keys of `keys`.
+    pub fn with_keys(self, keys: Arc<KeySlot>) -> NodeClockState {
+        NodeClockState { keys: Some(keys), ..self }
+    }
+
+    /// The state with the node's cores behind it, for the data commands.
+    pub fn with_handle(self, handle: NodeHandle) -> NodeClockState {
+        NodeClockState { handle: Some(handle), ..self }
+    }
+
+    /// Where core 0 publishes the node's state in Group 0.
+    pub fn with_presence(self, presence: Arc<NodePresence>) -> NodeClockState {
+        NodeClockState { presence, ..self }
+    }
+}
+
+impl NodeState for NodeClockState {
+    fn info(&self) -> NodeInfo {
+        let (time, increment) = to_timestamp(self.clock.0.peek());
+        NodeInfo {
+            topology: Topology { process_id: self.process_id, counter: self.presence.counter() },
+            cluster_time: ClusterTime { time, increment },
+            now_ms: wall_ms(),
+            keys: self.keys.as_ref().map(|k| k.ring()),
+        }
+    }
+
+    fn handle(&self) -> Option<NodeHandle> {
+        self.handle.clone()
+    }
+
+    fn closed(&self) -> bool {
+        self.presence.closed()
+    }
+}
+
+/// A request of connection `token` for an executor, with the connection it runs on.
+struct Job {
+    token: u64,
+    conn: Connection,
+    req: Request,
+}
+
+/// What an executor gives back: the connection and the request's action.
+struct Finished {
+    token: u64,
+    conn: Connection,
+    req: Request,
+    action: Action,
+    /// The executor, idle again.
+    executor: usize,
+}
+
+/// A worker's executors: threads that run the commands of its connections against the node,
+/// started when none is idle and kept for the next ones.
+struct Pool {
+    handle: NodeHandle,
+    shared: Arc<Shared>,
+    state: Arc<dyn NodeState>,
+    diag: Arc<Diag>,
+    done: MailboxSender<WorkerMsg>,
+    /// Name of the worker, for its executors' threads.
+    worker: u16,
+    executors: Vec<mpsc::Sender<Job>>,
+    idle: Vec<usize>,
+}
+
+impl Pool {
+    /// Hands `job` to an idle executor, starting one if none is; the job back if no thread
+    /// could start.
+    fn run(&mut self, job: Job) -> Result<(), Box<Job>> {
+        let k = match self.idle.pop() {
+            Some(k) => k,
+            None => match self.start() {
+                Some(k) => k,
+                None => return Err(Box::new(job)),
+            },
+        };
+        self.executors[k].send(job).map_err(|mpsc::SendError(job)| Box::new(job))
+    }
+
+    fn start(&mut self) -> Option<usize> {
+        let k = self.executors.len();
+        let (tx, rx) = mpsc::channel::<Job>();
+        let seed = seed(self.worker) ^ ((k as u64) << 32);
+        let mut backend =
+            ServerBackend::new(self.handle.clone(), seed).with_diag(self.diag.clone());
+        let (shared, state, diag, done) =
+            (self.shared.clone(), self.state.clone(), self.diag.clone(), self.done.clone());
+        let name = format!("client-{}-run-{k}", self.worker);
+        let run = move || {
+            for Job { token, mut conn, req } in rx {
+                let info = state.info();
+                diag.stats.active.fetch_add(1, Ordering::Relaxed);
+                let action = dispatch_with(&mut conn, &req, &info, Some((&mut backend, &*shared)));
+                diag.stats.active.fetch_sub(1, Ordering::Relaxed);
+                let finished = Finished { token, conn, req, action, executor: k };
+                if done.send_waiting(WorkerMsg::Done(Box::new(finished))).is_err() {
+                    return;
+                }
+                // With the answer on its way, the intents of a transaction it ended (008 FR-005).
+                teseladb_wire::commands::txn::resolve_queued(&mut backend, &shared);
+            }
+        };
+        // The thread ends when the worker drops its sender; it is not joined, since a command
+        // may still be waiting for its deadline when the port stops.
+        thread::Builder::new().name(name).spawn(run).ok()?;
+        self.executors.push(tx);
+        Some(k)
+    }
+}
+
+/// What a worker's connections run the commands with: its executors when a node is behind the
+/// port, except for the commands that never wait, which the worker runs with its own backend.
+struct Cmds<'a> {
+    pool: Option<&'a mut Pool>,
+    inline: Option<&'a mut ServerBackend>,
+    shared: &'a Shared,
+    state: &'a dyn NodeState,
+}
+
+/// The seed of worker `k`'s random numbers: the clock and the worker.
+fn seed(k: u16) -> u64 {
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
+    nanos ^ (u64::from(k) << 48) ^ 0x9e37_79b9_7f4a_7c15
+}
+
+/// A connection for a worker, or a command an executor finished.
+enum WorkerMsg {
+    Conn(TcpStream, i32),
+    Done(Box<Finished>),
+}
+
+/// The running clients' port.
+pub struct ClientListener {
+    addrs: Vec<SocketAddr>,
+    stop: Arc<AtomicBool>,
+    acceptor: (Arc<Waker>, JoinHandle<()>),
+    workers: Vec<(Arc<Waker>, JoinHandle<()>)>,
+    /// The thread that reaps and refreshes the node's sessions, with a node behind the port.
+    keeper: Option<JoinHandle<()>>,
+    open: Arc<AtomicUsize>,
+}
+
+impl std::fmt::Debug for ClientListener {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientListener").field("addrs", &self.addrs).finish()
+    }
+}
+
+impl ClientListener {
+    /// Listens on `cfg.addrs` with `workers` workers.
+    pub fn spawn(
+        cfg: &ClientConfig,
+        workers: u16,
+        state: Arc<dyn NodeState>,
+    ) -> io::Result<ClientListener> {
+        let listeners = cfg.addrs.iter().map(TcpListener::bind).collect::<io::Result<Vec<_>>>()?;
+        let addrs =
+            listeners.iter().map(TcpListener::local_addr).collect::<io::Result<Vec<_>>>()?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let open = Arc::new(AtomicUsize::new(0));
+        let port = addrs.first().map_or(0, SocketAddr::port);
+        let diag = Arc::new(
+            Diag::new(cfg.process.clone(), port, open.clone(), cfg.max_connections)
+                .with_certificates(cfg.certificates.clone())
+                .with_ldap(cfg.ldap.clone())
+                .with_sts(cfg.sts.clone())
+                .with_oidc(cfg.oidc.clone())
+                .with_kerberos(cfg.kerberos.clone()),
+        );
+        let shared: Arc<Shared> = match state.handle() {
+            Some(h) => h.sessions,
+            None => Arc::new(Mutex::new(cfg.sessions())),
+        };
+        let mut handles = Vec::new();
+        let mut senders = Vec::new();
+        for k in 0..workers.max(1) {
+            let poller = Poller::new()?;
+            let waker = Arc::new(poller.waker());
+            let (tx, rx) = mailbox::channel(waker.clone());
+            let pool = state.handle().map(|handle| Pool {
+                handle,
+                shared: shared.clone(),
+                state: state.clone(),
+                diag: diag.clone(),
+                done: tx.clone(),
+                worker: k,
+                executors: Vec::new(),
+                idle: Vec::new(),
+            });
+            let w = Worker {
+                poller,
+                mailbox: rx,
+                conns: BTreeMap::new(),
+                awaits: BTreeMap::new(),
+                next_token: 1,
+                state: state.clone(),
+                pool,
+                inline: state
+                    .handle()
+                    .map(|h| ServerBackend::new(h, seed(k)).with_diag(diag.clone())),
+                shared: shared.clone(),
+                diag: diag.clone(),
+                compressors: cfg.compressors.clone(),
+                tls: cfg.tls.clone(),
+                auth: cfg.auth,
+                mechanisms: cfg.mechanisms.clone(),
+                open: open.clone(),
+                stop: stop.clone(),
+            };
+            let t = thread::Builder::new().name(format!("client-{k}")).spawn(move || w.run())?;
+            handles.push((waker, t));
+            senders.push(tx);
+        }
+        let poller = Poller::new()?;
+        for (i, l) in listeners.iter().enumerate() {
+            l.set_nonblocking(true)?;
+            poller.register(l, i as u64, Interest::READ)?;
+        }
+        let waker = Arc::new(poller.waker());
+        let acceptor = Acceptor {
+            poller,
+            listeners,
+            workers: senders,
+            max: cfg.max_connections,
+            open: open.clone(),
+            stop: stop.clone(),
+            next_id: 1,
+            diag: diag.clone(),
+            state: state.clone(),
+        };
+        let t =
+            thread::Builder::new().name("client-accept".into()).spawn(move || acceptor.run())?;
+        let keeper = match state.handle() {
+            Some(h) => {
+                let k = Keeper {
+                    backend: ServerBackend::new(h, seed(workers)),
+                    shared,
+                    refresh_every: cfg.refresh_every,
+                    stop: stop.clone(),
+                    reapers: BTreeMap::new(),
+                };
+                Some(thread::Builder::new().name("client-sessions".into()).spawn(move || k.run())?)
+            }
+            None => None,
+        };
+        Ok(ClientListener { addrs, stop, acceptor: (waker, t), workers: handles, keeper, open })
+    }
+
+    /// The addresses it listens on (with the ports the system chose for port 0).
+    pub fn addrs(&self) -> &[SocketAddr] {
+        &self.addrs
+    }
+
+    /// Connections open now.
+    pub fn open_connections(&self) -> usize {
+        self.open.load(Ordering::Acquire)
+    }
+
+    /// Stops accepting, closes every connection and waits for the threads.
+    pub fn stop(self) {
+        self.stop.store(true, Ordering::Release);
+        let threads = std::iter::once(self.acceptor).chain(self.workers);
+        for (waker, t) in threads {
+            // A thread that already ended needs no wake-up, and its end is all `join` waits for.
+            let _ = waker.wake();
+            let _ = t.join();
+        }
+        if let Some(k) = self.keeper {
+            k.thread().unpark();
+            let _ = k.join();
+        }
+    }
+}
+
+/// Reaps the node's expired cursors and sessions, writes the sessions it used to
+/// `config.system.sessions`, runs the TTL monitor and the reapers of abandoned transactions, each
+/// on its own period, at the node's cluster time.
+struct Keeper {
+    backend: ServerBackend,
+    shared: Arc<Shared>,
+    refresh_every: Duration,
+    stop: Arc<AtomicBool>,
+    /// The reapers of abandoned transactions, one per core (008 FR-007).
+    reapers: BTreeMap<u16, Reaper>,
+}
+
+impl Keeper {
+    /// The reaping period: `clientCursorMonitorFrequencySecs` as `setParameter` left it, at
+    /// least a millisecond.
+    fn reap_period(&self) -> Duration {
+        let ms = lock(&self.shared).params.monitor_ms;
+        Duration::from_millis(u64::try_from(ms).unwrap_or(0).max(1))
+    }
+
+    fn run(mut self) {
+        let start = Instant::now();
+        let (mut next_reap, mut next_refresh) =
+            (start + self.reap_period(), start + self.refresh_every);
+        // The TTL monitor (009 FR-010): every `ttlMonitorSleepSecs` at the cluster time.
+        let ttl_every = Duration::from_secs(teseladb_wire::commands::ttl::TTL_MONITOR_SECS);
+        let mut next_ttl = start + ttl_every;
+        let mut next_txn = start + SCAN_EVERY;
+        // Sessions used from this cluster time on go in the next refresh.
+        let mut since = 0;
+        while !self.stop.load(Ordering::Acquire) {
+            let now = Instant::now();
+            if now >= next_reap {
+                reap(&self.shared, self.backend.now_ms());
+                next_reap = now + self.reap_period();
+            }
+            if now >= next_refresh {
+                let at = self.backend.now_ms();
+                // A refresh that fails (no leader for the range) goes again at the next one.
+                if refresh(&mut self.backend, &self.shared, since, at).is_ok() {
+                    since = at;
+                }
+                self.backend.end_operation();
+                next_refresh = now + self.refresh_every;
+            }
+            if now >= next_ttl {
+                let at = i64::try_from(self.backend.now_ms()).unwrap_or(i64::MAX);
+                // A pass that fails (no leader for a range) goes again at the next one.
+                let _ = teseladb_wire::commands::ttl::pass(&mut self.backend, &self.shared, at);
+                // Its reads of the indexes no longer hold back their changes (009 FR-006).
+                self.backend.end_operation();
+                next_ttl = now + ttl_every;
+            }
+            if now >= next_txn {
+                self.backend.reap_transactions(&mut self.reapers);
+                // The heartbeats of the client transactions between their statements.
+                teseladb_wire::commands::txn::tick_idle(&mut self.backend, &self.shared);
+                self.backend.end_operation();
+                next_txn = now + SCAN_EVERY;
+            }
+            let next = next_reap.min(next_refresh).min(next_ttl).min(next_txn);
+            thread::park_timeout(next.saturating_duration_since(Instant::now()));
+        }
+    }
+}
+
+struct Acceptor {
+    poller: Poller,
+    listeners: Vec<TcpListener>,
+    workers: Vec<MailboxSender<WorkerMsg>>,
+    max: usize,
+    open: Arc<AtomicUsize>,
+    stop: Arc<AtomicBool>,
+    next_id: i32,
+    diag: Arc<Diag>,
+    state: Arc<dyn NodeState>,
+}
+
+impl Acceptor {
+    fn run(mut self) {
+        let mut ready = Vec::new();
+        while !self.stop.load(Ordering::Acquire) {
+            match self.poller.poll(None) {
+                Ok(events) => ready.extend(events.iter().map(|e| e.token)),
+                Err(_) => return,
+            }
+            for token in ready.drain(..).filter(|&t| t != WAKE_TOKEN) {
+                self.accept(token as usize);
+            }
+        }
+    }
+
+    /// Accepts every pending connection of listener `i` (non-blocking: it stops when none is
+    /// left).
+    fn accept(&mut self, i: usize) {
+        while let Ok((stream, _)) = self.listeners[i].accept() {
+            // A drained node's port takes no connection (007 FR-015).
+            if self.state.closed() {
+                continue;
+            }
+            // Over the limit the connection is closed at once, as `refnode` does.
+            if self.open.load(Ordering::Acquire) >= self.max {
+                PortStats::add(&self.diag.stats.rejected, 1);
+                continue;
+            }
+            self.open.fetch_add(1, Ordering::AcqRel);
+            PortStats::add(&self.diag.stats.total_created, 1);
+            let id = self.next_id;
+            self.next_id = self.next_id.wrapping_add(1).max(1);
+            let worker = &self.workers[id as usize % self.workers.len()];
+            // A worker only goes away when the listener stops, after this thread.
+            let _ = worker.send_waiting(WorkerMsg::Conn(stream, id));
+        }
+    }
+}
+
+/// An awaitable `hello` waiting for its answer, or a request the failpoint holds
+/// (`blockConnection`) until its deadline.
+struct Pending {
+    req: Request,
+    /// The `hello`; `None` for a held request, dispatched again at the deadline.
+    hello: Option<HelloRequest>,
+    deadline: Instant,
+    every: Duration,
+    exhaust: bool,
+    /// The message the next reply answers (the request, then the previous reply of the stream).
+    response_to: i32,
+}
+
+/// One client connection of a worker. Its socket is non-blocking: reads and writes end with
+/// `WouldBlock`, never with `Interrupted`.
+struct Client {
+    stream: TcpStream,
+    /// Plain or TLS between the socket and `conn`.
+    transport: Transport,
+    /// The connection; `None` while an executor runs one of its commands.
+    conn: Option<Connection>,
+    /// What arrived while the connection was with an executor.
+    backlog: Vec<u8>,
+    /// Its token in the worker.
+    token: u64,
+    /// When it was accepted, until its TLS handshake is counted (`None` after, or in clear).
+    handshake_from: Option<Instant>,
+    out: Vec<u8>,
+    pos: usize,
+    /// Whether the poller watches it for writing.
+    watching_write: bool,
+    /// An awaitable `hello` is waiting: later requests wait behind it.
+    waiting: bool,
+    /// The awaitable `hello` [`Client::serve`] just found, for the worker to schedule.
+    new_wait: Option<Pending>,
+    /// The port's counters.
+    diag: Arc<Diag>,
+    /// The subject of the port's certificate, when it names an organization, unit or domain
+    /// component: a client certificate with the same ones is a member's (013 FR-034).
+    member_subject: Option<Arc<teseladb_x509::Name>>,
+}
+
+impl Client {
+    /// Reads what arrived; `false` if the peer closed or the socket failed.
+    fn read(&mut self) -> bool {
+        let mut chunk = [0u8; READ_CHUNK];
+        loop {
+            match self.stream.read(&mut chunk) {
+                Ok(0) => return false,
+                Ok(n) => {
+                    PortStats::add(&self.diag.stats.physical_in, n);
+                    let mut plain = Vec::new();
+                    if !self.transport.incoming(&chunk[..n], &mut plain, &mut self.out) {
+                        // The TLS alert goes out before the connection closes.
+                        let _ = self.write();
+                        return false;
+                    }
+                    match self.conn.as_mut() {
+                        Some(conn) => conn.receive(&plain),
+                        None => self.backlog.extend_from_slice(&plain),
+                    }
+                    self.note_handshake();
+                    self.note_certificate();
+                }
+                Err(e) => return e.kind() == ErrorKind::WouldBlock,
+            }
+        }
+    }
+
+    /// Counts the TLS handshake once it has finished (`transportSecurity`).
+    fn note_handshake(&mut self) {
+        if let Some(from) = self.handshake_from
+            && self.transport.tls_established()
+        {
+            self.handshake_from = None;
+            let ms = usize::try_from(from.elapsed().as_millis()).unwrap_or(usize::MAX);
+            PortStats::add(&self.diag.stats.tls_handshakes, 1);
+            PortStats::add(&self.diag.stats.tls_handshake_ms, ms);
+        }
+    }
+
+    /// Records the REFDB-X509 user of the client certificate once the TLS handshake has it.
+    fn note_certificate(&mut self) {
+        if let Some(conn) = self.conn.as_mut()
+            && conn.auth.peer_user.is_none()
+            && let Some(leaf) = self.transport.peer_certificates().first()
+        {
+            conn.auth.peer_user = Some(leaf.subject.x509_user_name());
+            conn.auth.peer_member = self
+                .member_subject
+                .as_deref()
+                .is_some_and(|node| crate::cluster_auth::is_member(&leaf.subject, node));
+        }
+    }
+
+    /// Runs the requests that arrived, in order, until one waits; `false` if the connection
+    /// must close. The data commands run on `cmds`, waiting for the cores.
+    fn serve(&mut self, info: &NodeInfo, cmds: &mut Cmds<'_>) -> bool {
+        while !self.waiting {
+            let Some(conn) = self.conn.as_mut() else { return true };
+            let req = match conn.next_request() {
+                Ok(Some(r)) => r,
+                Ok(None) => return true,
+                Err(_) => return false,
+            };
+            if !self.handle(req, info, cmds) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Runs what arrived and writes the replies; the replies of the requests before a fault still
+    /// go out before the connection closes, as `refnode` answers each message before reading the
+    /// next. `false` if the connection must close.
+    fn flush_after(&mut self, info: &NodeInfo, cmds: &mut Cmds<'_>) -> bool {
+        let served = self.serve(info, cmds);
+        self.write() && served
+    }
+
+    /// Runs request `req`: on an executor, whose action comes back to [`Client::finish`], or
+    /// here when no node is behind the port. `false` if the connection must close.
+    fn handle(&mut self, req: Request, info: &NodeInfo, cmds: &mut Cmds<'_>) -> bool {
+        let stats = &self.diag.stats;
+        PortStats::add(&stats.requests, 1);
+        PortStats::add(&stats.bytes_in, usize::try_from(req.header.length).unwrap_or(0));
+        // A drained node answers every request with `ShutdownInProgress` and closes the
+        // connection after the reply (007 FR-015).
+        if cmds.state.closed() {
+            let e = CommandError::new(SHUTDOWN_IN_PROGRESS, "the node is drained");
+            self.apply(req, Action::Reply(e.to_document()));
+            return false;
+        }
+        let Some(mut conn) = self.conn.take() else { return false };
+        let pool = cmds.pool.as_deref_mut().filter(|_| !answers_without_waiting(&req));
+        match pool {
+            Some(pool) => match pool.run(Job { token: self.token, conn, req }) {
+                Ok(()) => true,
+                // No thread could start: the connection closes, as when it cannot be served.
+                Err(job) => {
+                    self.conn = Some(job.conn);
+                    false
+                }
+            },
+            None => {
+                stats.active.fetch_add(1, Ordering::Relaxed);
+                let fresh;
+                let (info, commands) = match cmds.inline.as_deref_mut() {
+                    Some(b) => {
+                        // A write moves the cluster time: each reply reads it after its command.
+                        fresh = cmds.state.info();
+                        (&fresh, Some((b, cmds.shared)))
+                    }
+                    None => (info, None),
+                };
+                let action = dispatch_with(&mut conn, &req, info, commands);
+                stats.active.fetch_sub(1, Ordering::Relaxed);
+                self.conn = Some(conn);
+                self.apply(req, action)
+            }
+        }
+    }
+
+    /// Takes back the connection an executor ran `req` on, with what arrived meanwhile, and
+    /// queues the request's action; `false` if the connection must close.
+    fn finish(&mut self, mut conn: Connection, req: Request, action: Action) -> bool {
+        if !self.backlog.is_empty() {
+            conn.receive(&std::mem::take(&mut self.backlog));
+        }
+        self.conn = Some(conn);
+        self.note_certificate();
+        self.apply(req, action)
+    }
+
+    /// Queues the reply of `req`, or the wait it asks for; `false` if the connection must close.
+    fn apply(&mut self, req: Request, action: Action) -> bool {
+        let Some(conn) = self.conn.as_mut() else { return false };
+        match action {
+            Action::Reply(doc) if req.more_to_come() => drop(doc),
+            Action::Reply(doc) => {
+                let bytes = conn.reply(&req, &doc, false);
+                PortStats::add(&self.diag.stats.bytes_out, bytes.len());
+                if !self.transport.outgoing(&bytes, &mut self.out) {
+                    return false;
+                }
+            }
+            Action::Await { max_await_ms, exhaust, hello } => {
+                let every = Duration::from_millis(max_await_ms);
+                let response_to = req.header.request_id;
+                let deadline = Instant::now() + every;
+                self.waiting = true;
+                self.new_wait = Some(Pending {
+                    req,
+                    hello: Some(hello),
+                    deadline,
+                    every,
+                    exhaust,
+                    response_to,
+                });
+            }
+            Action::Delay { ms } => {
+                let every = Duration::from_millis(ms);
+                let deadline = Instant::now() + every;
+                let response_to = req.header.request_id;
+                self.waiting = true;
+                self.new_wait = Some(Pending {
+                    req,
+                    hello: None,
+                    deadline,
+                    every,
+                    exhaust: false,
+                    response_to,
+                });
+            }
+            Action::Close => return false,
+        }
+        true
+    }
+
+    /// Answers its awaitable `hello` `p`, due at `p.deadline`; with exhaust, the next one of the
+    /// stream.
+    fn fire(&mut self, mut p: Pending, hello: &HelloRequest, info: &NodeInfo) -> Option<Pending> {
+        // A waiting connection is never with an executor.
+        let conn = self.conn.as_mut()?;
+        let doc = hello_after_wait(conn, hello, info);
+        let (bytes, id) = conn.reply_to(p.response_to, &p.req, &doc, p.exhaust);
+        // A TLS failure here shows on the next read, which closes the connection.
+        let _ = self.transport.outgoing(&bytes, &mut self.out);
+        self.waiting = p.exhaust;
+        p.response_to = id;
+        p.deadline += p.every;
+        p.exhaust.then_some(p)
+    }
+
+    /// Writes what it can; `false` if the socket failed.
+    fn write(&mut self) -> bool {
+        while self.pos < self.out.len() {
+            match self.stream.write(&self.out[self.pos..]) {
+                Ok(n) => {
+                    PortStats::add(&self.diag.stats.physical_out, n);
+                    self.pos += n;
+                }
+                Err(e) => return e.kind() == ErrorKind::WouldBlock,
+            }
+        }
+        self.out.clear();
+        self.pos = 0;
+        true
+    }
+
+    /// Watches the socket for writing while replies wait to go out; `false` if the poller
+    /// refused.
+    fn watch(&mut self, poller: &Poller, token: u64) -> bool {
+        let want = self.pos < self.out.len();
+        if want == self.watching_write {
+            return true;
+        }
+        self.watching_write = want;
+        let interest = if want { Interest::BOTH } else { Interest::READ };
+        poller.reregister(&self.stream, token, interest).is_ok()
+    }
+}
+
+struct Worker {
+    poller: Poller,
+    mailbox: Mailbox<WorkerMsg>,
+    conns: BTreeMap<u64, Client>,
+    /// Deadlines of the awaitable `hello`s with their connection; an entry whose connection
+    /// closed or already answered is skipped.
+    awaits: BTreeMap<(Instant, u64), Pending>,
+    next_token: u64,
+    state: Arc<dyn NodeState>,
+    /// The executors of the commands, if a node is behind the port.
+    pool: Option<Pool>,
+    /// The backend of the commands the worker runs itself ([`answers_without_waiting`]).
+    inline: Option<ServerBackend>,
+    /// The node's cursors and sessions, shared by its workers.
+    shared: Arc<Shared>,
+    compressors: Vec<Compressor>,
+    tls: TlsPort,
+    /// Clients authenticate before running commands.
+    auth: bool,
+    /// `authenticationMechanisms`.
+    mechanisms: Vec<teseladb_auth::sasl::SaslMechanism>,
+    open: Arc<AtomicUsize>,
+    /// The port's counters.
+    diag: Arc<Diag>,
+    stop: Arc<AtomicBool>,
+}
+
+impl Worker {
+    fn run(mut self) {
+        let mut inbox = Vec::new();
+        let mut events = Vec::new();
+        while !self.stop.load(Ordering::Acquire) {
+            let next = self.awaits.first_key_value().map(|(&(d, _), _)| d);
+            let timeout = next.map(|d| d.saturating_duration_since(Instant::now()));
+            match self.poller.poll(timeout) {
+                Ok(ev) => events.extend(ev.iter().filter(|e| e.token != WAKE_TOKEN).copied()),
+                Err(_) => break,
+            }
+            let info = self.state.info();
+            for e in events.drain(..) {
+                self.on_event(e.token, e.readable || e.hangup, &info);
+            }
+            self.mailbox.drain_into(&mut inbox);
+            for msg in inbox.drain(..) {
+                match msg {
+                    WorkerMsg::Conn(stream, id) => self.add(stream, id),
+                    WorkerMsg::Done(f) => self.done(*f, &info),
+                }
+            }
+            self.fire_awaits(&info);
+        }
+        let tokens: Vec<u64> = self.conns.keys().copied().collect();
+        for t in tokens {
+            self.close(t);
+        }
+    }
+
+    fn add(&mut self, stream: TcpStream, id: i32) {
+        let token = self.next_token;
+        self.next_token += 1;
+        let transport = Transport::new(&self.tls);
+        let ready = stream
+            .set_nonblocking(true)
+            .and_then(|()| stream.set_nodelay(true))
+            .and_then(|()| self.poller.register(&stream, token, Interest::READ));
+        match (ready, transport) {
+            (Ok(()), Some(transport)) => {
+                let mut conn = Connection::with_compressors(id, &self.compressors);
+                conn.peer = stream.peer_addr().ok().map(|a| a.to_string());
+                conn.auth.required = self.auth;
+                conn.auth.mechanisms.clone_from(&self.mechanisms);
+                conn.auth.client_addr = conn.peer.clone();
+                conn.auth.server_addr = stream.local_addr().ok().map(|a| a.to_string());
+                let c = Client {
+                    stream,
+                    transport,
+                    conn: Some(conn),
+                    backlog: Vec::new(),
+                    token,
+                    handshake_from: Some(Instant::now()),
+                    out: Vec::new(),
+                    pos: 0,
+                    watching_write: false,
+                    waiting: false,
+                    new_wait: None,
+                    diag: self.diag.clone(),
+                    member_subject: crate::cluster_auth::member_subject(&self.tls),
+                };
+                self.conns.insert(token, c);
+            }
+            (Ok(()), None) => {
+                let _ = self.poller.deregister(&stream);
+                self.open.fetch_sub(1, Ordering::AcqRel);
+            }
+            (Err(_), _) => {
+                self.open.fetch_sub(1, Ordering::AcqRel);
+            }
+        }
+    }
+
+    fn close(&mut self, token: u64) {
+        if let Some(mut c) = self.conns.remove(&token) {
+            if let (Some(conn), Some(backend)) = (c.conn.as_mut(), self.inline.as_mut()) {
+                teseladb_wire::commands::audit::on_close(&self.shared, conn, backend);
+            }
+            let _ = self.poller.deregister(&c.stream);
+            self.open.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+
+    /// An event of connection `token` (one per token and wait): reads if `readable`, runs what
+    /// arrived and writes.
+    fn on_event(&mut self, token: u64, readable: bool, info: &NodeInfo) {
+        let poller = &self.poller;
+        let alive = self.conns.get_mut(&token).is_some_and(|c| {
+            let mut cmds = Cmds {
+                pool: self.pool.as_mut(),
+                inline: self.inline.as_mut(),
+                shared: &self.shared,
+                state: &*self.state,
+            };
+            (!readable || c.read()) && c.flush_after(info, &mut cmds) && c.watch(poller, token)
+        });
+        self.settle(token, alive);
+    }
+
+    /// A command an executor finished: the executor is idle again and its connection, if still
+    /// open, gets the reply and runs what arrived meanwhile.
+    fn done(&mut self, f: Finished, info: &NodeInfo) {
+        let Finished { token, conn, req, action, executor } = f;
+        if let Some(pool) = self.pool.as_mut() {
+            pool.idle.push(executor);
+        }
+        let poller = &self.poller;
+        let Some(c) = self.conns.get_mut(&token) else { return };
+        let mut cmds = Cmds {
+            pool: self.pool.as_mut(),
+            inline: self.inline.as_mut(),
+            shared: &self.shared,
+            state: &*self.state,
+        };
+        let alive =
+            c.finish(conn, req, action) && c.flush_after(info, &mut cmds) && c.watch(poller, token);
+        self.settle(token, alive);
+    }
+
+    /// Closes connection `token` if it is not `alive`; otherwise schedules the awaitable `hello`
+    /// it just received, if any.
+    fn settle(&mut self, token: u64, alive: bool) {
+        match self.conns.get_mut(&token).filter(|_| alive) {
+            Some(c) => {
+                if let Some(p) = c.new_wait.take() {
+                    self.awaits.insert((p.deadline, token), p);
+                }
+            }
+            None => self.close(token),
+        }
+    }
+
+    /// Answers the awaitable `hello`s whose deadline passed (those of closed connections are
+    /// dropped).
+    fn fire_awaits(&mut self, info: &NodeInfo) {
+        let now = Instant::now();
+        while let Some(entry) = self.awaits.first_entry()
+            && entry.key().0 <= now
+        {
+            let ((_, token), p) = entry.remove_entry();
+            let poller = &self.poller;
+            let Some(c) = self.conns.get_mut(&token) else { continue };
+            let mut cmds = Cmds {
+                pool: self.pool.as_mut(),
+                inline: self.inline.as_mut(),
+                shared: &self.shared,
+                state: &*self.state,
+            };
+            let resumed = match p.hello.clone() {
+                Some(hello) => {
+                    c.new_wait = c.fire(p, &hello, info);
+                    true
+                }
+                // The held request runs now, with what the failpoint does next.
+                None => {
+                    c.waiting = false;
+                    c.handle(p.req, info, &mut cmds)
+                }
+            };
+            let alive = c.flush_after(info, &mut cmds) && resumed && c.watch(poller, token);
+            self.settle(token, alive);
+        }
+    }
+}

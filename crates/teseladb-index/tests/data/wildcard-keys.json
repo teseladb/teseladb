@@ -1,0 +1,659 @@
+{
+ "server": "9.0.4",
+ "image": "ref@sha256:452bdaf2127b8ff851e31410a267809b9829eded219979f2210e7c7efb85a058",
+ "date": "2026-10-30",
+ "method": "createIndex(key, options) on an empty collection, insert the document, keysPerIndex of validate as total; keys found with equality, $type (null, array, object) and $exists queries on every path and value of the document with hint + returnKey, read as raw BSON (undefined kept); the prefix fields of a compound index are added to each query; keys in index order, numbers as relaxed JSON",
+ "cases": [
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": {\"$numberInt\": \"1\"}, \"b\": {\"c\": {\"$numberInt\": \"2\"}, \"d\": [{\"$numberInt\": \"3\"}, {\"$numberInt\": \"4\"}]}, \"e\": [{\"f\": {\"$numberInt\": \"5\"}}, {\"f\": [{\"$numberInt\": \"6\"}, {\"$numberInt\": \"7\"}]}, {\"$numberInt\": \"8\"}], \"g\": [[{\"$numberInt\": \"9\"}, {\"$numberInt\": \"10\"}]], \"h\": [], \"i\": {}, \"j\": null}",
+   "keys": "{\"k\": [[\"a\", 1], [\"b.c\", 2], [\"b.d\", 3], [\"b.d\", 4], [\"e\", 8], [\"e.f\", 5], [\"e.f\", 6], [\"e.f\", 7], [\"g\", [9, 10]], [\"h\", {\"$undefined\": true}], [\"i\", {}], [\"j\", null]]}",
+   "total": 17
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": [{}, [], {\"b\": []}]}",
+   "keys": "{\"k\": [[\"a\", {}], [\"a\", []], [\"a.b\", {\"$undefined\": true}]]}",
+   "total": 5
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{}",
+   "doc": "{\"_id\": {\"x\": {\"$numberInt\": \"1\"}}, \"a\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"1\"}]}",
+   "keys": "{\"k\": [[\"a\", 1]]}",
+   "total": 2
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}}",
+   "keys": "{\"k\": []}",
+   "total": 0
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": {\"b\": {\"c\": {\"d\": \"x\"}}}}",
+   "keys": "{\"k\": [[\"a.b.c.d\", \"x\"]]}",
+   "total": 1
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": [[{\"$numberInt\": \"1\"}, [{\"$numberInt\": \"2\"}]], {\"b\": [[{\"$numberInt\": \"3\"}]]}]}",
+   "keys": "{\"k\": [[\"a\", [1, [2]]], [\"a.b\", [3]]]}",
+   "total": 4
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": [{\"b\": {\"$numberInt\": \"1\"}}, {\"b\": {\"$numberInt\": \"1\"}}, {\"b\": {\"$numberInt\": \"2\"}}], \"c\": {\"$numberDecimal\": \"1.0\"}, \"d\": {\"$numberLong\": \"1\"}, \"e\": {\"$numberDouble\": \"1.0\"}}",
+   "keys": "{\"k\": [[\"a.b\", 1], [\"a.b\", 2], [\"c\", {\"$numberDecimal\": \"1.0\"}], [\"d\", 1], [\"e\", 1.0]]}",
+   "total": 6
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": {\"0\": {\"$numberInt\": \"5\"}, \"1\": [{\"2\": {\"$numberInt\": \"6\"}}]}}",
+   "keys": "{\"k\": [[\"a.0\", 5], [\"a.1.2\", 6]]}",
+   "total": 3
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": [{\"b\": {\"c\": [{\"d\": {\"$numberInt\": \"1\"}}, {\"d\": [{\"$numberInt\": \"2\"}, {\"e\": {\"$numberInt\": \"3\"}}]}]}}]}",
+   "keys": "{\"k\": [[\"a.b.c.d\", 1], [\"a.b.c.d\", 2], [\"a.b.c.d.e\", 3]]}",
+   "total": 6
+  },
+  {
+   "key": "{\"$**\": -1}",
+   "options": "{}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": {\"$numberInt\": \"1\"}, \"b\": [{\"$numberInt\": \"2\"}, {\"$numberInt\": \"3\"}], \"c\": \"x\"}",
+   "keys": "{\"k\": [[\"a\", 1], [\"b\", 3], [\"b\", 2], [\"c\", \"x\"]]}",
+   "total": 5
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a\": {\"$numberInt\": \"1\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"7\"}, \"a\": {\"x\": {\"$numberInt\": \"1\"}, \"y\": [{\"$numberInt\": \"2\"}, {\"z\": {\"$numberInt\": \"3\"}}]}, \"b\": {\"c\": {\"$numberInt\": \"4\"}, \"d\": {\"$numberInt\": \"5\"}}, \"e\": {\"$numberInt\": \"6\"}}",
+   "keys": "{\"k\": [[\"a.x\", 1], [\"a.y\", 2], [\"a.y.z\", 3]]}",
+   "total": 4
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a.y\": {\"$numberInt\": \"1\"}, \"e\": {\"$numberInt\": \"1\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"7\"}, \"a\": {\"x\": {\"$numberInt\": \"1\"}, \"y\": [{\"$numberInt\": \"2\"}, {\"z\": {\"$numberInt\": \"3\"}}]}, \"b\": {\"c\": {\"$numberInt\": \"4\"}, \"d\": {\"$numberInt\": \"5\"}}, \"e\": {\"$numberInt\": \"6\"}}",
+   "keys": "{\"k\": [[\"a.y\", 2], [\"a.y.z\", 3], [\"e\", 6]]}",
+   "total": 4
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a\": {\"$numberInt\": \"0\"}, \"b.c\": {\"$numberInt\": \"0\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"7\"}, \"a\": {\"x\": {\"$numberInt\": \"1\"}, \"y\": [{\"$numberInt\": \"2\"}, {\"z\": {\"$numberInt\": \"3\"}}]}, \"b\": {\"c\": {\"$numberInt\": \"4\"}, \"d\": {\"$numberInt\": \"5\"}}, \"e\": {\"$numberInt\": \"6\"}}",
+   "keys": "{\"k\": [[\"b.d\", 5], [\"e\", 6]]}",
+   "total": 2
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"_id\": {\"$numberInt\": \"1\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"7\"}, \"a\": {\"x\": {\"$numberInt\": \"1\"}, \"y\": [{\"$numberInt\": \"2\"}, {\"z\": {\"$numberInt\": \"3\"}}]}, \"b\": {\"c\": {\"$numberInt\": \"4\"}, \"d\": {\"$numberInt\": \"5\"}}, \"e\": {\"$numberInt\": \"6\"}}",
+   "keys": "{\"k\": [[\"_id\", 7]]}",
+   "total": 1
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"_id\": {\"$numberInt\": \"1\"}, \"e\": {\"$numberInt\": \"1\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"7\"}, \"a\": {\"x\": {\"$numberInt\": \"1\"}, \"y\": [{\"$numberInt\": \"2\"}, {\"z\": {\"$numberInt\": \"3\"}}]}, \"b\": {\"c\": {\"$numberInt\": \"4\"}, \"d\": {\"$numberInt\": \"5\"}}, \"e\": {\"$numberInt\": \"6\"}}",
+   "keys": "{\"k\": [[\"_id\", 7], [\"e\", 6]]}",
+   "total": 2
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"_id\": {\"$numberInt\": \"0\"}, \"e\": {\"$numberInt\": \"1\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"7\"}, \"a\": {\"x\": {\"$numberInt\": \"1\"}, \"y\": [{\"$numberInt\": \"2\"}, {\"z\": {\"$numberInt\": \"3\"}}]}, \"b\": {\"c\": {\"$numberInt\": \"4\"}, \"d\": {\"$numberInt\": \"5\"}}, \"e\": {\"$numberInt\": \"6\"}}",
+   "keys": "{\"k\": [[\"e\", 6]]}",
+   "total": 1
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"_id\": {\"$numberInt\": \"1\"}, \"a\": {\"$numberInt\": \"0\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"7\"}, \"a\": {\"x\": {\"$numberInt\": \"1\"}, \"y\": [{\"$numberInt\": \"2\"}, {\"z\": {\"$numberInt\": \"3\"}}]}, \"b\": {\"c\": {\"$numberInt\": \"4\"}, \"d\": {\"$numberInt\": \"5\"}}, \"e\": {\"$numberInt\": \"6\"}}",
+   "keys": "{\"k\": [[\"_id\", 7], [\"b.c\", 4], [\"b.d\", 5], [\"e\", 6]]}",
+   "total": 4
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a.y.z\": {\"$numberInt\": \"1\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"7\"}, \"a\": {\"x\": {\"$numberInt\": \"1\"}, \"y\": [{\"$numberInt\": \"2\"}, {\"z\": {\"$numberInt\": \"3\"}}]}, \"b\": {\"c\": {\"$numberInt\": \"4\"}, \"d\": {\"$numberInt\": \"5\"}}, \"e\": {\"$numberInt\": \"6\"}}",
+   "keys": "{\"k\": [[\"a.y.z\", 3]]}",
+   "total": 2
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a.y.z\": {\"$numberInt\": \"1\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"7\"}, \"a\": {\"y\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}]}}",
+   "keys": "{\"k\": []}",
+   "total": 2
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a\": {\"x\": {\"$numberInt\": \"1\"}}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"7\"}, \"a\": {\"x\": {\"$numberInt\": \"1\"}, \"y\": [{\"$numberInt\": \"2\"}, {\"z\": {\"$numberInt\": \"3\"}}]}, \"b\": {\"c\": {\"$numberInt\": \"4\"}, \"d\": {\"$numberInt\": \"5\"}}, \"e\": {\"$numberInt\": \"6\"}}",
+   "keys": "{\"k\": [[\"a.x\", 1]]}",
+   "total": 1
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a\": true, \"e\": true}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"7\"}, \"a\": {\"x\": {\"$numberInt\": \"1\"}, \"y\": [{\"$numberInt\": \"2\"}, {\"z\": {\"$numberInt\": \"3\"}}]}, \"b\": {\"c\": {\"$numberInt\": \"4\"}, \"d\": {\"$numberInt\": \"5\"}}, \"e\": {\"$numberInt\": \"6\"}}",
+   "keys": "{\"k\": [[\"a.x\", 1], [\"a.y\", 2], [\"a.y.z\", 3], [\"e\", 6]]}",
+   "total": 5
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"_id\": {\"$numberInt\": \"1\"}}}",
+   "doc": "{\"_id\": {\"p\": {\"$numberInt\": \"1\"}, \"q\": [{\"$numberInt\": \"2\"}]}, \"a\": {\"$numberInt\": \"1\"}}",
+   "keys": "{\"k\": [[\"_id.p\", 1], [\"_id.q\", 2]]}",
+   "total": 3
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a.b\": {\"$numberInt\": \"0\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": [{\"b\": {\"$numberInt\": \"1\"}, \"c\": {\"$numberInt\": \"2\"}}, {\"b\": [{\"$numberInt\": \"3\"}]}]}",
+   "keys": "{\"k\": [[\"a\", {}], [\"a.c\", 2]]}",
+   "total": 3
+  },
+  {
+   "key": "{\"a.$**\": 1}",
+   "options": "{}",
+   "doc": "{\"_id\": {\"$numberInt\": \"7\"}, \"a\": {\"x\": {\"$numberInt\": \"1\"}, \"y\": [{\"$numberInt\": \"2\"}, {\"z\": {\"$numberInt\": \"3\"}}]}, \"b\": {\"c\": {\"$numberInt\": \"4\"}, \"d\": {\"$numberInt\": \"5\"}}, \"e\": {\"$numberInt\": \"6\"}}",
+   "keys": "{\"k\": [[\"a.x\", 1], [\"a.y\", 2], [\"a.y.z\", 3]]}",
+   "total": 4
+  },
+  {
+   "key": "{\"a.y.$**\": 1}",
+   "options": "{}",
+   "doc": "{\"_id\": {\"$numberInt\": \"7\"}, \"a\": {\"x\": {\"$numberInt\": \"1\"}, \"y\": [{\"$numberInt\": \"2\"}, {\"z\": {\"$numberInt\": \"3\"}}]}, \"b\": {\"c\": {\"$numberInt\": \"4\"}, \"d\": {\"$numberInt\": \"5\"}}, \"e\": {\"$numberInt\": \"6\"}}",
+   "keys": "{\"k\": [[\"a.y\", 2], [\"a.y.z\", 3]]}",
+   "total": 3
+  },
+  {
+   "key": "{\"a.x.$**\": 1}",
+   "options": "{}",
+   "doc": "{\"_id\": {\"$numberInt\": \"7\"}, \"a\": {\"x\": {\"$numberInt\": \"1\"}, \"y\": [{\"$numberInt\": \"2\"}, {\"z\": {\"$numberInt\": \"3\"}}]}, \"b\": {\"c\": {\"$numberInt\": \"4\"}, \"d\": {\"$numberInt\": \"5\"}}, \"e\": {\"$numberInt\": \"6\"}}",
+   "keys": "{\"k\": [[\"a.x\", 1]]}",
+   "total": 1
+  },
+  {
+   "key": "{\"a.$**\": 1}",
+   "options": "{}",
+   "doc": "{\"_id\": {\"$numberInt\": \"7\"}, \"a\": {\"$numberInt\": \"5\"}}",
+   "keys": "{\"k\": [[\"a\", 5]]}",
+   "total": 1
+  },
+  {
+   "key": "{\"a.$**\": 1}",
+   "options": "{}",
+   "doc": "{\"_id\": {\"$numberInt\": \"7\"}, \"a\": [{\"$numberInt\": \"1\"}, {\"b\": {\"$numberInt\": \"2\"}}]}",
+   "keys": "{\"k\": [[\"a\", 1], [\"a.b\", 2]]}",
+   "total": 3
+  },
+  {
+   "key": "{\"a.$**\": 1}",
+   "options": "{}",
+   "doc": "{\"_id\": {\"$numberInt\": \"7\"}, \"a\": {}}",
+   "keys": "{\"k\": [[\"a\", {}]]}",
+   "total": 1
+  },
+  {
+   "key": "{\"a.$**\": 1}",
+   "options": "{}",
+   "doc": "{\"_id\": {\"$numberInt\": \"7\"}, \"b\": {\"$numberInt\": \"1\"}}",
+   "keys": "{\"k\": []}",
+   "total": 0
+  },
+  {
+   "key": "{\"a\": 1, \"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a\": {\"$numberInt\": \"0\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": {\"$numberInt\": \"1\"}, \"b\": {\"c\": {\"$numberInt\": \"2\"}}, \"c\": [{\"$numberInt\": \"3\"}]}",
+   "keys": "{\"k\": [[1, \"b.c\", 2], [1, \"c\", 3]]}",
+   "total": 3
+  },
+  {
+   "key": "{\"a\": 1, \"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a\": {\"$numberInt\": \"0\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": {\"$numberInt\": \"1\"}}",
+   "keys": "{\"k\": [[1, {\"$minKey\": 1}, {\"$minKey\": 1}]]}",
+   "total": 1
+  },
+  {
+   "key": "{\"a\": 1, \"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a\": {\"$numberInt\": \"0\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], \"b\": {\"$numberInt\": \"1\"}}",
+   "err": 7246301,
+   "msg": "field a cannot be indexed as an array (multikey)"
+  },
+  {
+   "key": "{\"a\": 1, \"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"b\": {\"$numberInt\": \"1\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": {\"$numberInt\": \"1\"}, \"b\": {\"c\": {\"$numberInt\": \"2\"}}, \"c\": [{\"$numberInt\": \"3\"}]}",
+   "keys": "{\"k\": [[1, \"b.c\", 2]]}",
+   "total": 1
+  },
+  {
+   "key": "{\"a\": 1, \"b.$**\": 1}",
+   "options": "{}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": \"k\", \"b\": {\"c\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], \"d\": {\"$numberInt\": \"3\"}}}",
+   "keys": "{\"k\": [[\"k\", \"b.c\", 1], [\"k\", \"b.c\", 2], [\"k\", \"b.d\", 3]]}",
+   "total": 4
+  },
+  {
+   "key": "{\"b.$**\": 1, \"a\": -1}",
+   "options": "{}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": \"k\", \"b\": {\"c\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], \"d\": {\"$numberInt\": \"3\"}}}",
+   "keys": "{\"k\": [[\"b.c\", 1, \"k\"], [\"b.c\", 2, \"k\"], [\"b.d\", 3, \"k\"]]}",
+   "total": 4
+  },
+  {
+   "key": "{\"a\": 1, \"b.$**\": 1, \"z\": 1}",
+   "options": "{}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": \"k\", \"b\": [{\"c\": {\"$numberInt\": \"1\"}}], \"z\": true}",
+   "keys": "{\"k\": [[\"k\", \"b.c\", 1, true]]}",
+   "total": 2
+  },
+  {
+   "key": "{\"a\": 1, \"$**\": 1}",
+   "options": "{}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": {\"$numberInt\": \"1\"}}",
+   "create_err": 67,
+   "msg": "Error in specification { name: \"a_1_$**_1\", key: { a: 1, $**: 1 } } :: caused by :: Compound wildcard indexes on all fields must also specify 'wildcardProjection' option"
+  },
+  {
+   "key": "{\"a.$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a.x\": {\"$numberInt\": \"1\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}}",
+   "create_err": 9,
+   "msg": "Error in specification { wildcardProjection: { a.x: 1 }, name: \"a.$**_1\", key: { a.$**: 1 } } :: caused by :: The field 'wildcardProjection' is only allowed when 'key' is {\"$**\": \u00b11}"
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}}",
+   "create_err": 9,
+   "msg": "Error in specification { wildcardProjection: {}, name: \"$**_1\", key: { $**: 1 } } :: caused by :: The 'wildcardProjection' field can't be an empty object"
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a\": {\"$numberInt\": \"1\"}, \"b\": {\"$numberInt\": \"0\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}}",
+   "create_err": 31254,
+   "msg": "Error in specification { wildcardProjection: { a: 1, b: 0 }, name: \"$**_1\", key: { $**: 1 } } :: caused by :: Failed to parse projection: wildcardProjection :: caused by :: Cannot do exclusion on field b in inclusion projection"
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a\": \"x\"}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}}",
+   "create_err": 51271,
+   "msg": "Error in specification { wildcardProjection: { a: \"x\" }, name: \"$**_1\", key: { $**: 1 } } :: caused by :: Failed to parse projection: wildcardProjection :: caused by :: Bad projection specification, cannot use computed fields when parsing a spec in kBanComputedFields mode"
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a\": {\"$numberInt\": \"2\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": {\"$numberInt\": \"1\"}, \"b\": {\"$numberInt\": \"2\"}}",
+   "keys": "{\"k\": [[\"a\", 1]]}",
+   "total": 1
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a\": {\"$numberInt\": \"-1\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": {\"$numberInt\": \"1\"}, \"b\": {\"$numberInt\": \"2\"}}",
+   "keys": "{\"k\": [[\"a\", 1]]}",
+   "total": 1
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a\": {\"$numberInt\": \"0\"}, \"_id\": {\"$numberInt\": \"0\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": {\"$numberInt\": \"1\"}, \"b\": {\"$numberInt\": \"2\"}}",
+   "keys": "{\"k\": [[\"b\", 2]]}",
+   "total": 1
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a.$**\": {\"$numberInt\": \"1\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}}",
+   "create_err": 16410,
+   "msg": "Error in specification { wildcardProjection: { a.$**: 1 }, name: \"$**_1\", key: { $**: 1 } } :: caused by :: Failed to parse projection: wildcardProjection :: caused by :: Consider using $getField or $setField for a field path with '.' or '$'. :: caused by :: FieldPath field names may not start with '$', given '$**'."
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"unique\": true}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}}",
+   "create_err": 67,
+   "msg": "Error in specification { unique: true, name: \"$**_1\", key: { $**: 1 }, v: 2 } :: caused by :: Index type 'wildcard' does not support the 'unique' option"
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"sparse\": true}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": {\"$numberInt\": \"1\"}}",
+   "create_err": 67,
+   "msg": "Error in specification { sparse: true, name: \"$**_1\", key: { $**: 1 }, v: 2 } :: caused by :: Index type 'wildcard' does not support the 'sparse' option"
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"expireAfterSeconds\": {\"$numberInt\": \"10\"}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}}",
+   "create_err": 67,
+   "msg": "Error in specification { expireAfterSeconds: 10, name: \"$**_1\", key: { $**: 1 }, v: 2 } :: caused by :: cannot make a TTL index :: caused by :: Index type 'wildcard' does not support the 'expireAfterSeconds' option"
+  },
+  {
+   "key": "{\"$**\": \"hashed\"}",
+   "options": "{}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}}",
+   "create_err": 67,
+   "msg": "Error in specification { name: \"$**_hashed\", key: { $**: \"hashed\" } } :: caused by :: Index key contains an illegal field name: field name starts with '$'."
+  },
+  {
+   "key": "{\"a.$**\": 1, \"b.$**\": 1}",
+   "options": "{}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}}",
+   "create_err": 7246201,
+   "msg": "Error in specification { name: \"a.$**_1_b.$**_1\", key: { a.$**: 1, b.$**: 1 } } :: caused by :: Index Key can contain only one wildcard index field"
+  },
+  {
+   "key": "{\"$**\": 1, \"a\": \"hashed\"}",
+   "options": "{\"wildcardProjection\": {\"a\": {\"$numberInt\": \"0\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}}",
+   "create_err": 67,
+   "msg": "Error in specification { wildcardProjection: { a: 0 }, name: \"$**_1_a_hashed\", key: { $**: 1, a: \"hashed\" } } :: caused by :: Can't use more than one index plugin for a single index."
+  },
+  {
+   "key": "{\"$**\": 1, \"a\": \"2dsphere\"}",
+   "options": "{\"wildcardProjection\": {\"a\": {\"$numberInt\": \"0\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}}",
+   "create_err": 67,
+   "msg": "Error in specification { wildcardProjection: { a: 0 }, name: \"$**_1_a_2dsphere\", key: { $**: 1, a: \"2dsphere\" } } :: caused by :: Can't use more than one index plugin for a single index."
+  },
+  {
+   "key": "{\"a\": 1, \"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"b\": {\"$numberInt\": \"0\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}}",
+   "create_err": 7246209,
+   "msg": "Error in specification { wildcardProjection: { b: 0 }, name: \"a_1_$**_1\", key: { a: 1, $**: 1 } } :: caused by :: wildcardProjection paths must exclude all regular index fields, however 'a'is not excluded"
+  },
+  {
+   "key": "{\"a\": 1, \"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a\": {\"$numberInt\": \"1\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}}",
+   "create_err": 7246208,
+   "msg": "Error in specification { wildcardProjection: { a: 1 }, name: \"a_1_$**_1\", key: { a: 1, $**: 1 } } :: caused by :: Index Key and Wildcard Projection cannot contain overlapping fields, however 'a' index field is overlapping with 'a' wildcardProjection path"
+  },
+  {
+   "key": "{\"a.b\": 1, \"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a\": {\"$numberInt\": \"0\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": {\"b\": {\"$numberInt\": \"1\"}, \"c\": {\"$numberInt\": \"2\"}}, \"d\": {\"$numberInt\": \"3\"}}",
+   "keys": "{\"k\": [[1, \"d\", 3]]}",
+   "total": 1
+  },
+  {
+   "key": "{\"a.$**\": 1}",
+   "options": "{\"partialFilterExpression\": {\"a.x\": {\"$gt\": {\"$numberInt\": \"0\"}}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": {\"x\": {\"$numberInt\": \"1\"}}}",
+   "keys": "{\"k\": [[\"a.x\", 1]]}",
+   "total": 1
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a.y.z\": {\"$numberInt\": \"1\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": {\"y\": {\"$numberInt\": \"5\"}}}",
+   "keys": "{\"k\": []}",
+   "total": 1
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a.y.z\": {\"$numberInt\": \"1\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": {\"y\": {\"w\": {\"$numberInt\": \"1\"}}}}",
+   "keys": "{\"k\": []}",
+   "total": 1
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a.b\": {\"$numberInt\": \"1\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": [{\"$numberInt\": \"1\"}, {\"b\": {\"$numberInt\": \"2\"}}, [{\"b\": {\"$numberInt\": \"3\"}}], {\"c\": {\"$numberInt\": \"4\"}}]}",
+   "keys": "{\"k\": [[\"a.b\", 2]]}",
+   "total": 3
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a.b\": {\"$numberInt\": \"0\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": [{\"$numberInt\": \"1\"}, {\"b\": {\"$numberInt\": \"2\"}}, [{\"b\": {\"$numberInt\": \"3\"}}], {\"c\": {\"$numberInt\": \"4\"}}]}",
+   "keys": "{\"k\": [[\"a\", 1], [\"a.c\", 4]]}",
+   "total": 5
+  },
+  {
+   "key": "{\"a.b.$**\": 1}",
+   "options": "{}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": [{\"$numberInt\": \"1\"}, {\"b\": {\"$numberInt\": \"2\"}}, [{\"b\": {\"$numberInt\": \"3\"}}], {\"c\": {\"$numberInt\": \"4\"}}]}",
+   "keys": "{\"k\": [[\"a.b\", 2]]}",
+   "total": 3
+  },
+  {
+   "key": "{\"a\": 1, \"b.$**\": 1}",
+   "options": "{}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"b\": {\"c\": {\"$numberInt\": \"1\"}}}",
+   "keys": "{\"k\": []}",
+   "total": 1
+  },
+  {
+   "key": "{\"a.x\": 1, \"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a\": {\"$numberInt\": \"0\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": [{\"x\": {\"$numberInt\": \"1\"}}], \"b\": {\"$numberInt\": \"2\"}}",
+   "err": 7246301,
+   "msg": "field a.x cannot be indexed as an array (multikey)"
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a.b\": {\"$numberInt\": \"1\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": [[{\"b\": {\"$numberInt\": \"3\"}}]]}",
+   "keys": "{\"k\": []}",
+   "total": 2
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a.b\": {\"$numberInt\": \"1\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": [{\"c\": {\"$numberInt\": \"4\"}}]}",
+   "keys": "{\"k\": []}",
+   "total": 2
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a.b\": {\"$numberInt\": \"1\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": [{\"b\": {\"$numberInt\": \"2\"}}, {\"c\": {\"$numberInt\": \"4\"}}]}",
+   "keys": "{\"k\": [[\"a.b\", 2]]}",
+   "total": 3
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a.b\": {\"$numberInt\": \"1\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": [{\"$numberInt\": \"1\"}]}",
+   "keys": "{\"k\": []}",
+   "total": 2
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a.b\": {\"$numberInt\": \"1\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": []}",
+   "keys": "{\"k\": []}",
+   "total": 2
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a.b\": {\"$numberInt\": \"1\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": {\"c\": {\"$numberInt\": \"1\"}}}",
+   "keys": "{\"k\": []}",
+   "total": 1
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a.b\": {\"$numberInt\": \"1\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": [[{\"$numberInt\": \"1\"}]]}",
+   "keys": "{\"k\": []}",
+   "total": 2
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a.b\": {\"$numberInt\": \"1\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": [{\"b\": []}]}",
+   "keys": "{\"k\": [[\"a.b\", {\"$undefined\": true}]]}",
+   "total": 3
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a.b\": {\"$numberInt\": \"1\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": [{\"b\": {\"$numberInt\": \"2\"}}, [{\"b\": {\"$numberInt\": \"3\"}}]]}",
+   "keys": "{\"k\": [[\"a.b\", 2]]}",
+   "total": 2
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a.b\": {\"$numberInt\": \"1\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": [{\"c\": {\"$numberInt\": \"4\"}}, {\"d\": {\"$numberInt\": \"5\"}}]}",
+   "keys": "{\"k\": []}",
+   "total": 2
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a.b\": {\"$numberInt\": \"1\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": [{}, {}]}",
+   "keys": "{\"k\": []}",
+   "total": 2
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a.b\": {\"$numberInt\": \"0\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": [[{\"b\": {\"$numberInt\": \"3\"}, \"c\": {\"$numberInt\": \"1\"}}]]}",
+   "keys": "{\"k\": [[\"a\", [{\"b\": 3, \"c\": 1}]]]}",
+   "total": 2
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a.b\": {\"$numberInt\": \"0\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": [{\"b\": {\"$numberInt\": \"4\"}}]}",
+   "keys": "{\"k\": [[\"a\", {}]]}",
+   "total": 2
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a.b\": {\"$numberInt\": \"0\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": [[{\"c\": {\"$numberInt\": \"3\"}}]]}",
+   "keys": "{\"k\": [[\"a\", [{\"c\": 3}]]]}",
+   "total": 2
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a.b\": {\"$numberInt\": \"0\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": {\"b\": {\"$numberInt\": \"1\"}}}",
+   "keys": "{\"k\": [[\"a\", {}]]}",
+   "total": 1
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": [{}, {}]}",
+   "keys": "{\"k\": [[\"a\", {}]]}",
+   "total": 2
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"_id.p\": {\"$numberInt\": \"1\"}}}",
+   "doc": "{\"_id\": {\"p\": {\"$numberInt\": \"1\"}, \"q\": {\"$numberInt\": \"2\"}}, \"a\": {\"$numberInt\": \"1\"}}",
+   "keys": "{\"k\": [[\"_id.p\", 1]]}",
+   "total": 1
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"_id.p\": {\"$numberInt\": \"0\"}}}",
+   "doc": "{\"_id\": {\"p\": {\"$numberInt\": \"1\"}, \"q\": {\"$numberInt\": \"2\"}}, \"a\": {\"$numberInt\": \"1\"}}",
+   "keys": "{\"k\": [[\"_id.q\", 2], [\"a\", 1]]}",
+   "total": 2
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a\": {\"$numberLong\": \"0\"}, \"b\": {\"$numberDouble\": \"0.0\"}, \"c\": {\"$numberDecimal\": \"0\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": {\"$numberInt\": \"1\"}, \"b\": {\"$numberInt\": \"2\"}, \"c\": {\"$numberInt\": \"3\"}, \"d\": {\"$numberInt\": \"4\"}}",
+   "keys": "{\"k\": [[\"d\", 4]]}",
+   "total": 1
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a\": {\"$numberLong\": \"3\"}, \"b\": {\"$numberDouble\": \"0.5\"}, \"c\": {\"$numberDecimal\": \"-1\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": {\"$numberInt\": \"1\"}, \"b\": {\"$numberInt\": \"2\"}, \"c\": {\"$numberInt\": \"3\"}, \"d\": {\"$numberInt\": \"4\"}}",
+   "keys": "{\"k\": [[\"a\", 1], [\"b\", 2], [\"c\", 3]]}",
+   "total": 3
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a\": {\"$literal\": {\"$numberInt\": \"1\"}}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}}",
+   "create_err": 51271,
+   "msg": "Error in specification { wildcardProjection: { a: { $literal: 1 } }, name: \"$**_1\", key: { $**: 1 } } :: caused by :: Failed to parse projection: wildcardProjection :: caused by :: Bad projection specification, cannot use computed fields when parsing a spec in kBanComputedFields mode"
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a\": {\"$x\": {\"$numberInt\": \"1\"}}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}}",
+   "create_err": 31325,
+   "msg": "Error in specification { wildcardProjection: { a: { $x: 1 } }, name: \"$**_1\", key: { $**: 1 } } :: caused by :: Failed to parse projection: wildcardProjection :: caused by :: Unknown expression $x"
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a\": {\"b\": {\"$numberInt\": \"1\"}, \"$x\": {\"$numberInt\": \"1\"}}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}}",
+   "create_err": 16410,
+   "msg": "Error in specification { wildcardProjection: { a: { b: 1, $x: 1 } }, name: \"$**_1\", key: { $**: 1 } } :: caused by :: Failed to parse projection: wildcardProjection :: caused by :: Consider using $getField or $setField for a field path with '.' or '$'. :: caused by :: FieldPath field names may not start with '$', given '$x'."
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"b\": {\"$numberInt\": \"0\"}, \"a\": {\"$numberInt\": \"1\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}}",
+   "create_err": 31253,
+   "msg": "Error in specification { wildcardProjection: { b: 0, a: 1 }, name: \"$**_1\", key: { $**: 1 } } :: caused by :: Failed to parse projection: wildcardProjection :: caused by :: Cannot do inclusion on field a in exclusion projection"
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"a\": null}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}}",
+   "create_err": 51271,
+   "msg": "Error in specification { wildcardProjection: { a: null }, name: \"$**_1\", key: { $**: 1 } } :: caused by :: Failed to parse projection: wildcardProjection :: caused by :: Bad projection specification, cannot use computed fields when parsing a spec in kBanComputedFields mode"
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"sparse\": true, \"unique\": true}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}}",
+   "create_err": 67,
+   "msg": "Error in specification { sparse: true, unique: true, name: \"$**_1\", key: { $**: 1 }, v: 2 } :: caused by :: Index type 'wildcard' does not support the 'sparse' option"
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"unique\": true, \"expireAfterSeconds\": {\"$numberInt\": \"5\"}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}}",
+   "create_err": 67,
+   "msg": "Error in specification { unique: true, expireAfterSeconds: 5, name: \"$**_1\", key: { $**: 1 }, v: 2 } :: caused by :: Index type 'wildcard' does not support the 'unique' option"
+  },
+  {
+   "key": "{\"a.$**\": \"hashed\"}",
+   "options": "{}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}}",
+   "create_err": 67,
+   "msg": "Error in specification { name: \"a.$**_hashed\", key: { a.$**: \"hashed\" } } :: caused by :: Index key contains an illegal field name: field name starts with '$'."
+  },
+  {
+   "key": "{\"$**\": 1}",
+   "options": "{\"wildcardProjection\": {\"_id\": {\"$numberInt\": \"0\"}}}",
+   "doc": "{\"_id\": {\"$numberInt\": \"1\"}, \"a\": {\"$numberInt\": \"1\"}}",
+   "keys": "{\"k\": [[\"a\", 1]]}",
+   "total": 1
+  }
+ ]
+}

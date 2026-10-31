@@ -1,0 +1,13 @@
+//! Text analysis (FR-007, FR-019): Unicode tables, word segmentation and normalization, and the
+//! character filters, tokenizers and token filters of custom analyzers.
+
+pub mod charfilters;
+pub mod jregex;
+pub mod normalize;
+pub mod props;
+pub mod snowball;
+pub mod tokenfilters;
+pub mod tokenizers;
+pub mod uax29;
+pub mod unicode;
+pub mod urlemail;

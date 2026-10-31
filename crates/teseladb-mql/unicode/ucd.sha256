@@ -1,0 +1,14 @@
+# Unicode 16.0.0 character database files for the regular expression engine: general categories,
+# scripts and script extensions, binary properties and bidi classes (`\p`), grapheme cluster breaks and
+# extended pictographics (`\X`).
+# source https://www.unicode.org/Public/16.0.0/ucd
+# dest .tools/unicode/ucd-16.0.0
+ff58e5823bd095166564a006e47d111130813dcf8bf234ef79fa51a870edb48f  UnicodeData.txt
+9e88f0a677df47311106340be8ede2ecdacd9c1c931831218d2be6d5508e0039  Scripts.txt
+049117ce26b9769fe2749b06eef51a50a89faef4a97764dd2d81daa715980700  ScriptExtensions.txt
+440fd3e5460b9bfe31da67b6f923992e1989d31fe2ed91e091c4b8f8e2620bf9  PropertyValueAliases.txt
+c29360bd6f7132811d701d29069541e827eb44bfc4c8fbde8c370d6982689dc1  auxiliary/GraphemeBreakProperty.txt
+f1365a5173eee18e1f98b240cdc492e84a25f1ce7e0c9d1094eb29c41a22696a  emoji/emoji-data.txt
+53d614508e2a0b2305a8aa21cd60d993de9326cdf65993660dfcce4503548583  PropList.txt
+39d35161f2954497f69e08bdb9e701493f476a3d30222de20028feda36c1dabd  DerivedCoreProperties.txt
+71ed943a49c58568d8d92e80ecc2ba2f06e62aee9c8ebb0e6e8bd2c3ed8b180e  extracted/DerivedBidiClass.txt

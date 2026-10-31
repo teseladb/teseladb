@@ -1,0 +1,11 @@
+target/
+*.profraw
+/teseladb-data/
+/.sim-artifacts/
+/.tools/
+# TLC state dumps (scripts/tlc.sh)
+/states/
+# Compatibility battery: report, client packages and the Python environment (tests/compat/run.sh)
+/tests/compat/out/
+/tests/compat/.venv/
+/tests/compat/runners/*/node_modules/

@@ -1,0 +1,43 @@
+{"aggregate":"c","pipeline":[]}	!! 9	FailedToParse	The 'cursor' option is required, except for aggregate with the explain argument
+{"aggregate":"c","pipeline":[{"$sort":{"_id":1}},{"$match":{"_id":1}},{"$project":{"g":1}}],"cursor":{}}	=> {"cursor":{"id":{"$numberLong":"0"},"ns":"xa.c","firstBatch":[{"_id":{"$numberInt":"1"},"g":"a"}]},"ok":{"$numberDouble":"1.0"}}
+{"aggregate":"c","pipeline":[{"$sort":{"_id":1}},{"$project":{"g":1}}],"cursor":{"batchSize":2}}	=> {"cursor":{"id":{"$numberLong":"8449889597135965537"},"ns":"xa.c","firstBatch":[{"_id":{"$numberInt":"1"},"g":"a"},{"_id":{"$numberInt":"2"},"g":"b"}]},"ok":{"$numberDouble":"1.0"}}
+{"aggregate":"c","pipeline":[{"$sort":{"_id":1}},{"$project":{"g":1}}],"cursor":{"batchSize":0}}	=> {"cursor":{"id":{"$numberLong":"5885685856621567536"},"ns":"xa.c","firstBatch":[]},"ok":{"$numberDouble":"1.0"}}
+{"aggregate":"c","pipeline":[],"cursor":{"batchSize":-1}}	!! 2	BadValue	BSON field 'batchSize' value must be >= 0, actual value '-1'
+{"aggregate":"c","pipeline":[],"cursor":{"batchSize":"2"}}	!! 14	TypeMismatch	BSON field 'cursor.batchSize' is the wrong type 'string', expected types '[int, decimal, long, double]'
+{"aggregate":"c","pipeline":[],"cursor":{"x":1}}	!! 40415	IDLUnknownField	BSON field 'cursor.x' is an unknown field.
+{"aggregate":"c","pipeline":[],"cursor":1}	!! 14	TypeMismatch	cursor field must be missing or an object
+{"aggregate":"c","cursor":{}}	!! 40414	IDLFailedToParse	BSON field 'aggregate.pipeline' is missing but a required field
+{"aggregate":"c","pipeline":{},"cursor":{}}	!! 14	TypeMismatch	A pipeline must be an array of objects
+{"aggregate":"c","pipeline":[1],"cursor":{}}	!! 14	TypeMismatch	Each element of the 'pipeline' array must be an object
+{"aggregate":"c","pipeline":[],"cursor":{},"foo":1}	!! 40415	IDLUnknownField	BSON field 'aggregate.foo' is an unknown field.
+{"aggregate":1,"pipeline":[{"$documents":[{"a":1}]}],"cursor":{}}	=> {"cursor":{"firstBatch":[{"a":{"$numberInt":"1"}}],"id":{"$numberLong":"0"},"ns":"xa.$cmd.aggregate"},"ok":{"$numberDouble":"1.0"}}
+{"aggregate":1,"pipeline":[],"cursor":{}}	!! 73	InvalidNamespace	{aggregate: 1} is not valid for an empty pipeline.
+{"aggregate":1,"pipeline":[{"$match":{}}],"cursor":{}}	!! 73	InvalidNamespace	{aggregate: 1} is not valid for '$match'; a collection is required.
+{"aggregate":2,"pipeline":[],"cursor":{}}	!! 2	BadValue	Invalid command format: the 'aggregate' field must specify a collection name or 1
+{"aggregate":true,"pipeline":[],"cursor":{}}	!! 73	InvalidNamespace	Collection name has invalid type bool
+{"aggregate":"nothere","pipeline":[],"cursor":{}}	=> {"cursor":{"id":{"$numberLong":"0"},"ns":"xa.nothere","firstBatch":[]},"ok":{"$numberDouble":"1.0"}}
+{"aggregate":"nothere","pipeline":[{"$count":"n"}],"cursor":{}}	=> {"cursor":{"id":{"$numberLong":"0"},"ns":"xa.nothere","firstBatch":[]},"ok":{"$numberDouble":"1.0"}}
+{"aggregate":"c","pipeline":[{"$sort":{"_id":1}},{"$project":{"x":{"$add":["$s",1]}}}],"cursor":{}}	!! 14	TypeMismatch	Executor error during aggregate command on namespace: xa.c :: caused by :: $add only supports numeric or date types, not string
+{"aggregate":"c","pipeline":[{"$group":{"_id":{"$add":["$s",1]}}}],"cursor":{}}	!! 7157723	Location7157723	Executor error during aggregate command on namespace: xa.c :: caused by :: only numbers and dates are allowed in an $add expression
+{"aggregate":"c","pipeline":[{"$foo":1}],"cursor":{}}	!! 40324	Location40324	Unrecognized pipeline stage name: '$foo'
+{"aggregate":"c","pipeline":[{"$replaceWith":"$s"}],"cursor":{}}	!! 40228	Location40228	Executor error during aggregate command on namespace: xa.c :: caused by :: 'newRoot' expression  must evaluate to an object, but resulting value was: "apple". Type of resulting value: 'string'. Input document: {s: "apple"}
+{"aggregate":"c","pipeline":[{"$sort":{"_id":1}},{"$match":{"$expr":{"$eq":["$_id","$$v"]}}},{"$project":{"_id":1}}],"cursor":{},"let":{"v":2}}	=> {"cursor":{"id":{"$numberLong":"0"},"ns":"xa.c","firstBatch":[{"_id":{"$numberInt":"2"}}]},"ok":{"$numberDouble":"1.0"}}
+{"aggregate":"c","pipeline":[{"$sort":{"_id":1}},{"$project":{"_id":1,"now":{"$type":"$$NOW"}}},{"$limit":1}],"cursor":{}}	=> {"cursor":{"id":{"$numberLong":"0"},"ns":"xa.c","firstBatch":[{"_id":{"$numberInt":"1"},"now":"date"}]},"ok":{"$numberDouble":"1.0"}}
+{"aggregate":"c","pipeline":[{"$sort":{"_id":1}},{"$limit":1},{"$project":{"_id":1}}],"cursor":{},"allowDiskUse":true}	=> {"cursor":{"id":{"$numberLong":"0"},"ns":"xa.c","firstBatch":[{"_id":{"$numberInt":"1"}}]},"ok":{"$numberDouble":"1.0"}}
+{"aggregate":"c","pipeline":[{"$sort":{"_id":1}},{"$limit":1},{"$project":{"_id":1}}],"cursor":{},"allowDiskUse":1}	!! 14	TypeMismatch	Field 'allowDiskUse' should be a boolean value, but found: int
+{"aggregate":"c","pipeline":[{"$sort":{"_id":1}},{"$limit":1},{"$project":{"_id":1}}],"cursor":{},"comment":"hi"}	=> {"cursor":{"id":{"$numberLong":"0"},"ns":"xa.c","firstBatch":[{"_id":{"$numberInt":"1"}}]},"ok":{"$numberDouble":"1.0"}}
+{"aggregate":"c","pipeline":[{"$sort":{"_id":1}},{"$limit":1},{"$project":{"_id":1}}],"cursor":{},"maxTimeMS":1000}	=> {"cursor":{"id":{"$numberLong":"0"},"ns":"xa.c","firstBatch":[{"_id":{"$numberInt":"1"}}]},"ok":{"$numberDouble":"1.0"}}
+{"aggregate":"c","pipeline":[{"$sort":{"_id":1}},{"$limit":1},{"$project":{"_id":1}}],"cursor":{},"hint":{"_id":1}}	=> {"cursor":{"id":{"$numberLong":"0"},"ns":"xa.c","firstBatch":[{"_id":{"$numberInt":"1"}}]},"ok":{"$numberDouble":"1.0"}}
+{"aggregate":"c","pipeline":[{"$sort":{"_id":1}},{"$limit":1},{"$project":{"_id":1}}],"cursor":{},"bypassDocumentValidation":true}	=> {"cursor":{"id":{"$numberLong":"0"},"ns":"xa.c","firstBatch":[{"_id":{"$numberInt":"1"}}]},"ok":{"$numberDouble":"1.0"}}
+{"aggregate":"c","pipeline":[{"$sort":{"_id":1}},{"$limit":1},{"$project":{"_id":1}}],"cursor":{},"readConcern":{"level":"local"}}	=> {"cursor":{"id":{"$numberLong":"0"},"ns":"xa.c","firstBatch":[{"_id":{"$numberInt":"1"}}]},"ok":{"$numberDouble":"1.0"}}
+{"aggregate":"c","pipeline":[],"cursor":{},"let":1}	!! 14	TypeMismatch	BSON field 'aggregate.let' is the wrong type 'int', expected type 'object'
+{"aggregate":"c","pipeline":[],"cursor":{},"let":{"$x":1}}	!! 9	FailedToParse	Invalid 'let' parameter :: caused by :: '$x' starts with an invalid character for a user variable name
+{"aggregate":"","pipeline":[],"cursor":{}}	!! 73	InvalidNamespace	Invalid namespace specified: xa
+{"aggregate":"a$b","pipeline":[],"cursor":{}}	=> {"cursor":{"id":{"$numberLong":"0"},"ns":"xa.a$b","firstBatch":[]},"ok":{"$numberDouble":"1.0"}}
+{"aggregate":"system.views","pipeline":[],"cursor":{}}	=> {"cursor":{"id":{"$numberLong":"0"},"ns":"xa.system.views","firstBatch":[]},"ok":{"$numberDouble":"1.0"}}
+{"aggregate":"c","pipeline":[{"$documents":[{"a":1}]}],"cursor":{}}	!! 73	InvalidNamespace	'$documents' can only be run with database or cluster-level aggregation {aggregate: 1}
+{"aggregate":"c","pipeline":[{"$sort":{"s":1,"_id":1}},{"$project":{"s":1}}],"cursor":{},"collation":{"locale":"en","strength":2}}	=> {"cursor":{"id":{"$numberLong":"0"},"ns":"xa.c","firstBatch":[{"_id":{"$numberInt":"5"}},{"_id":{"$numberInt":"1"},"s":"apple"},{"_id":{"$numberInt":"8"},"s":"apple"},{"_id":{"$numberInt":"2"},"s":"Banana"},{"_id":{"$numberInt":"3"},"s":"cherry"},{"_id":{"$numberInt":"4"},"s":"date"},{"_id":{"$numberInt":"6"},"s":"fig"},{"_id":{"$numberInt":"7"},"s":"grape"}]},"ok":{"$numberDouble":"1.0"}}
+{"aggregate":"c","pipeline":[{"$project":{"s.$":1}}],"cursor":{}}	!! 31324	Location31324	Invalid $project :: caused by :: Cannot use positional projection in aggregation projection
+{"aggregate":"c","pipeline":[{"$project":{"a":{"b.$":1}}}],"cursor":{}}	!! 31324	Location31324	Invalid $project :: caused by :: Cannot use positional projection in aggregation projection
+{"aggregate":"c","pipeline":[{"$match":{"x":1}},{"$match":{"$text":{"$search":"x"}}}],"cursor":{}}	!! 17313	Location17313	$match with $text is only allowed as the first pipeline stage
+{"aggregate":"c","pipeline":[{"$limit":1},{"$match":{"$or":[{"$text":{"$search":"x"}},{"a":1}]}}],"cursor":{}}	!! 17313	Location17313	$match with $text is only allowed as the first pipeline stage

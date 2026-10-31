@@ -1,0 +1,17 @@
+[package]
+name = "teseladb-mcp"
+version = "0.1.0"
+description = "TeselaDB's Model Context Protocol server (specification 019): JSON-RPC, protocol revisions and the wrapping of untrusted data, without I/O."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+teseladb-json = { path = "../teseladb-json" }
+
+[dev-dependencies]
+teseladb-types = { path = "../teseladb-types" }

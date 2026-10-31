@@ -1,0 +1,16 @@
+[package]
+name = "teseladb-index"
+version = "0.1.0"
+description = "TeselaDB's secondary indexes: key generation, index deltas, uniqueness, builds, TTL and the planner's view."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+teseladb-bson = { path = "../teseladb-bson" }
+teseladb-hash = { path = "../teseladb-hash" }
+teseladb-keys = { path = "../teseladb-keys" }

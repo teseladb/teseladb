@@ -1,0 +1,11 @@
+[package]
+name = "teseladb-session"
+version = "0.1.0"
+description = "TeselaDB's logical sessions, cursors and retryable writes of the wire protocol, without I/O."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,98 @@
+{"$trim":{"input":"  a b  "}}	=> {"x":"a b"}
+{"$trim":{"input":"\t\n a \u000b\f\r"}}	=> {"x":"a"}
+{"$trim":{"input":" a "}}	=> {"x":"a"}
+{"$trim":{"input":"\u0000a\u0000"}}	=> {"x":"a"}
+{"$trim":{"input":"xxaxx","chars":"x"}}	=> {"x":"a"}
+{"$trim":{"input":"abcba","chars":"ab"}}	=> {"x":"c"}
+{"$trim":{"input":"éaé","chars":"é"}}	=> {"x":"a"}
+{"$trim":{"input":"aaa","chars":"a"}}	=> {"x":""}
+{"$trim":{"input":"aaa","chars":""}}	=> {"x":"aaa"}
+{"$ltrim":{"input":"  a  "}}	=> {"x":"a  "}
+{"$rtrim":{"input":"  a  "}}	=> {"x":"  a"}
+{"$ltrim":{"input":"xxaxx","chars":"x"}}	=> {"x":"axx"}
+{"$rtrim":{"input":"xxaxx","chars":"x"}}	=> {"x":"xxa"}
+{"$trim":{"input":"$n"}}	=> {"x":null}
+{"$trim":{"input":"$nope"}}	=> {"x":null}
+{"$trim":{"input":"a","chars":"$n"}}	=> {"x":null}
+{"$trim":{"input":1}}	!! 50699	$trim requires its input to be a string, got 1 (of type int) instead.
+{"$trim":{"input":"a","chars":1}}	!! 50700	$trim requires 'chars' to be a string, got 1 (of type int) instead.
+{"$trim":{"chars":"a"}}	!! 50695	$trim requires an 'input' field
+{"$trim":{"input":"a","x":1}}	!! 50694	$trim found an unknown argument: x
+{"$trim":"a"}	!! 50696	$trim only supports an object as an argument, found string
+{"$ltrim":"a"}	!! 50696	$ltrim only supports an object as an argument, found string
+{"$rtrim":{"input":1}}	!! 50699	$rtrim requires its input to be a string, got 1 (of type int) instead.
+{"$trim":{"input":"$dt"}}	!! 50699	$trim requires its input to be a string, got 2026-01-01T00:00:00.000Z (of type date) instead.
+{"$regexMatch":{"input":"abc","regex":"B","options":"i"}}	=> {"x":true}
+{"$regexMatch":{"input":"abc","regex":"x"}}	=> {"x":false}
+{"$regexMatch":{"input":"abc","regex":{"$regularExpression":{"pattern":"B","options":"i"}}}}	=> {"x":true}
+{"$regexMatch":{"input":"abc","regex":{"$regularExpression":{"pattern":"B","options":"i"}},"options":"m"}}	!! 51107	$regexMatch: found regex option(s) specified in both 'regex' and 'option' fields
+{"$regexMatch":{"input":"abc","regex":{"$regularExpression":{"pattern":"B","options":""}},"options":"i"}}	=> {"x":true}
+{"$regexMatch":{"input":"$n","regex":"a"}}	=> {"x":false}
+{"$regexMatch":{"input":"$nope","regex":"a"}}	=> {"x":false}
+{"$regexMatch":{"input":"a","regex":"$n"}}	=> {"x":false}
+{"$regexMatch":{"input":1,"regex":"a"}}	!! 51104	$regexMatch needs 'input' to be of type string
+{"$regexMatch":{"input":"a","regex":1}}	!! 51105	$regexMatch needs 'regex' to be of type string or regex
+{"$regexMatch":{"input":"a","regex":"("}}	!! 51111	Invalid Regex in $regexMatch: missing closing parenthesis
+{"$regexMatch":{"input":"a","regex":"a","options":"z"}}	!! 51108	$regexMatch invalid flag in regex options: z
+{"$regexMatch":{"input":"a","regex":"a","options":1}}	!! 51106	$regexMatch needs 'options' to be of type string
+{"$regexMatch":{"input":"a"}}	!! 31023	$regexMatch requires 'regex' parameter
+{"$regexMatch":{"regex":"a"}}	!! 31022	$regexMatch requires 'input' parameter
+{"$regexMatch":{"input":"a","regex":"a","x":1}}	!! 31024	$regexMatch found an unknown argument: x
+{"$regexMatch":"a"}	!! 51103	$regexMatch expects an object of named arguments but found: string
+{"$regexMatch":{"input":"a","regex":"a\u0000"}}	!! 51109	$regexMatch: regular expression cannot contain an embedded null byte
+{"$regexFind":{"input":"abcabc","regex":"(b)(c)"}}	=> {"x":{"match":"bc","idx":{"$numberInt":"1"},"captures":["b","c"]}}
+{"$regexFind":{"input":"abcabc","regex":"(?<n>b)(x)?"}}	=> {"x":{"match":"b","idx":{"$numberInt":"1"},"captures":["b",null]}}
+{"$regexFind":{"input":"héllo","regex":"l+"}}	=> {"x":{"match":"ll","idx":{"$numberInt":"2"},"captures":[]}}
+{"$regexFind":{"input":"abc","regex":"x"}}	=> {"x":null}
+{"$regexFind":{"input":"$n","regex":"x"}}	=> {"x":null}
+{"$regexFind":{"input":"abc","regex":""}}	=> {"x":{"match":"","idx":{"$numberInt":"0"},"captures":[]}}
+{"$regexFindAll":{"input":"abcabc","regex":"(b)(c)"}}	=> {"x":[{"match":"bc","idx":{"$numberInt":"1"},"captures":["b","c"]},{"match":"bc","idx":{"$numberInt":"4"},"captures":["b","c"]}]}
+{"$regexFindAll":{"input":"abc","regex":""}}	=> {"x":[{"match":"","idx":{"$numberInt":"0"},"captures":[]},{"match":"","idx":{"$numberInt":"1"},"captures":[]},{"match":"","idx":{"$numberInt":"2"},"captures":[]}]}
+{"$regexFindAll":{"input":"aaa","regex":"a*"}}	=> {"x":[{"match":"aaa","idx":{"$numberInt":"0"},"captures":[]}]}
+{"$regexFindAll":{"input":"héé","regex":"é"}}	=> {"x":[{"match":"é","idx":{"$numberInt":"1"},"captures":[]},{"match":"é","idx":{"$numberInt":"2"},"captures":[]}]}
+{"$regexFindAll":{"input":"abc","regex":"x"}}	=> {"x":[]}
+{"$regexFindAll":{"input":"$n","regex":"x"}}	=> {"x":[]}
+{"$regexFindAll":{"input":"a\nb","regex":"^.","options":"m"}}	=> {"x":[{"match":"a","idx":{"$numberInt":"0"},"captures":[]},{"match":"b","idx":{"$numberInt":"2"},"captures":[]}]}
+{"$regexFindAll":{"input":"a\nb","regex":"a.b","options":"s"}}	=> {"x":[{"match":"a\nb","idx":{"$numberInt":"0"},"captures":[]}]}
+{"$regexFindAll":{"input":"ab","regex":"a b","options":"x"}}	=> {"x":[{"match":"ab","idx":{"$numberInt":"0"},"captures":[]}]}
+{"$regexFindAll":{"input":"😀a😀","regex":"a"}}	=> {"x":[{"match":"a","idx":{"$numberInt":"1"},"captures":[]}]}
+{"$replaceOne":{"input":"abcabc","find":"b","replacement":"X"}}	=> {"x":"aXcabc"}
+{"$replaceAll":{"input":"abcabc","find":"b","replacement":"X"}}	=> {"x":"aXcaXc"}
+{"$replaceAll":{"input":"abc","find":"","replacement":"-"}}	=> {"x":"-a-b-c-"}
+{"$replaceOne":{"input":"abc","find":"","replacement":"-"}}	=> {"x":"-abc"}
+{"$replaceAll":{"input":"aaa","find":"aa","replacement":"b"}}	=> {"x":"ba"}
+{"$replaceOne":{"input":"$n","find":"a","replacement":"b"}}	=> {"x":null}
+{"$replaceOne":{"input":"$nope","find":"a","replacement":"b"}}	=> {"x":null}
+{"$replaceOne":{"input":"a","find":"$n","replacement":"b"}}	=> {"x":null}
+{"$replaceOne":{"input":"a","find":"a","replacement":"$nope"}}	=> {"x":null}
+{"$replaceOne":{"input":1,"find":"a","replacement":"b"}}	!! 10503904	$replaceOne requires that 'input' be a string, found: 1
+{"$replaceOne":{"input":"a","find":1,"replacement":"b"}}	!! 10503903	$replaceOne requires that 'find' be a string or regular expression, found: 1
+{"$replaceOne":{"input":"a","find":"a","replacement":1}}	!! 10503902	$replaceOne requires that 'replacement' be a string, found: 1
+{"$replaceOne":{"input":"a","find":"a"}}	!! 51747	$replaceOne requires 'replacement' to be specified
+{"$replaceOne":{"find":"a","replacement":"b"}}	!! 51749	$replaceOne requires 'input' to be specified
+{"$replaceOne":{"input":"a","replacement":"b"}}	!! 51748	$replaceOne requires 'find' to be specified
+{"$replaceOne":{"input":"a","find":"a","replacement":"b","x":1}}	!! 51750	$replaceOne found an unknown argument: x
+{"$replaceOne":"a"}	!! 51751	$replaceOne requires an object as an argument, found: string
+{"$replaceAll":{"input":"aXbxc","find":{"$regularExpression":{"pattern":"x","options":"i"}},"replacement":"-"}}	=> {"x":"a-b-c"}
+{"$replaceOne":{"input":"aXbxc","find":{"$regularExpression":{"pattern":"x","options":"i"}},"replacement":"-"}}	=> {"x":"a-bxc"}
+{"$replaceAll":{"input":"abc","find":{"$regularExpression":{"pattern":"(b)","options":""}},"replacement":"[$1]"}}	=> {"x":"a[$1]c"}
+{"$replaceAll":{"input":"abc","find":{"$regularExpression":{"pattern":"","options":""}},"replacement":"-"}}	=> {"x":"-a-b-c-"}
+{"$replaceAll":{"input":1,"find":{"$regularExpression":{"pattern":"x","options":""}},"replacement":"-"}}	!! 10503904	$replaceAll requires that 'input' be a string, found: 1
+{"$replaceAll":{"input":"é","find":"é","replacement":"e"}}	=> {"x":"e"}
+{"$concat":["a","$s",{"$toString":1}]}	=> {"x":"aabc1"}
+{"$concat":["a","$n"]}	=> {"x":null}
+{"$concat":["a",1]}	!! 16702	$concat only supports strings, not int
+{"$concat":[]}	=> {"x":""}
+{"$toLower":"ÀB"}	=> {"x":"Àb"}
+{"$toUpper":"àb"}	=> {"x":"àB"}
+{"$strLenCP":"😀é"}	=> {"x":{"$numberInt":"2"}}
+{"$strLenBytes":"😀é"}	=> {"x":{"$numberInt":"6"}}
+{"$substrCP":["😀é",1,1]}	=> {"x":"é"}
+{"$split":["a,b,,c",","]}	=> {"x":["a","b","","c"]}
+{"$indexOfCP":["a😀b","b"]}	=> {"x":{"$numberInt":"2"}}
+{"$strcasecmp":["ÀB","àb"]}	=> {"x":{"$numberInt":"-1"}}
+{"$regexFindAll":{"input":"","regex":""}}	=> {"x":[{"match":"","idx":{"$numberInt":"0"},"captures":[]}]}
+{"$regexFindAll":{"input":"ab","regex":"b|$"}}	=> {"x":[{"match":"b","idx":{"$numberInt":"1"},"captures":[]}]}
+{"$regexFind":{"input":"","regex":""}}	=> {"x":{"match":"","idx":{"$numberInt":"0"},"captures":[]}}
+{"$replaceAll":{"input":"","find":"","replacement":"-"}}	=> {"x":"-"}
+{"$replaceAll":{"input":"ab","find":{"$regularExpression":{"pattern":"$","options":""}},"replacement":"-"}}	=> {"x":"ab-"}

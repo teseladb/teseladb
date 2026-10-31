@@ -1,0 +1,355 @@
+{"$year":"$dt"}	=> {"x":{"$numberInt":"2026"}}
+{"$month":"$dt"}	=> {"x":{"$numberInt":"1"}}
+{"$dayOfMonth":"$dt"}	=> {"x":{"$numberInt":"1"}}
+{"$hour":{"$date":"2026-03-29T01:30:45.678Z"}}	=> {"x":{"$numberInt":"1"}}
+{"$minute":{"$date":"2026-03-29T01:30:45.678Z"}}	=> {"x":{"$numberInt":"30"}}
+{"$second":{"$date":"2026-03-29T01:30:45.678Z"}}	=> {"x":{"$numberInt":"45"}}
+{"$millisecond":{"$date":"2026-03-29T01:30:45.678Z"}}	=> {"x":{"$numberInt":"678"}}
+{"$dayOfYear":{"$date":"2026-03-29T01:30:45.678Z"}}	=> {"x":{"$numberInt":"88"}}
+{"$dayOfWeek":{"$date":"2026-03-29T01:30:45.678Z"}}	=> {"x":{"$numberInt":"1"}}
+{"$isoDayOfWeek":{"$date":"2026-03-29T01:30:45.678Z"}}	=> {"x":{"$numberInt":"7"}}
+{"$week":{"$date":"2026-03-29T01:30:45.678Z"}}	=> {"x":{"$numberInt":"13"}}
+{"$isoWeek":{"$date":"2026-03-29T01:30:45.678Z"}}	=> {"x":{"$numberInt":"13"}}
+{"$isoWeekYear":{"$date":"2026-03-29T01:30:45.678Z"}}	=> {"x":{"$numberLong":"2026"}}
+{"$year":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"timezone":"Europe/Madrid"}}	=> {"x":{"$numberInt":"2026"}}
+{"$hour":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"timezone":"Europe/Madrid"}}	=> {"x":{"$numberInt":"3"}}
+{"$hour":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"timezone":"+05:30"}}	=> {"x":{"$numberInt":"7"}}
+{"$hour":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"timezone":"-0400"}}	=> {"x":{"$numberInt":"21"}}
+{"$hour":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"timezone":"+03"}}	=> {"x":{"$numberInt":"4"}}
+{"$hour":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"timezone":"+3"}}	!! 40485	unrecognized time zone identifier: "+3"
+{"$hour":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"timezone":"Bad/Zone"}}	!! 40485	unrecognized time zone identifier: "Bad/Zone"
+{"$hour":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"timezone":"$n"}}	=> {"x":null}
+{"$hour":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"timezone":1}}	!! 40517	timezone must evaluate to a string, found int
+{"$hour":{"date":"$n"}}	=> {"x":null}
+{"$hour":"$n"}	=> {"x":null}
+{"$hour":"$nope"}	=> {"x":null}
+{"$hour":"$s"}	!! 16006	can't convert from BSON type string to Date
+{"$hour":"$i"}	!! 16006	can't convert from BSON type int to Date
+{"$hour":"$ts"}	=> {"x":{"$numberInt":"0"}}
+{"$hour":{"$oid":"0123456789abcdef01234567"}}	=> {"x":{"$numberInt":"22"}}
+{"$hour":[{"$date":"2026-03-29T01:30:45.678Z"}]}	=> {"x":{"$numberInt":"1"}}
+{"$hour":[{"$date":"2026-03-29T01:30:45.678Z"},1]}	!! 40536	$hour accepts exactly one argument if given an array, but was given 2
+{"$hour":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"x":1}}	!! 40535	unrecognized option to $hour: "x"
+{"$hour":{"timezone":"UTC"}}	!! 40539	missing 'date' argument to $hour, provided: $hour: { timezone: "UTC" }
+{"$year":{"$date":{"$numberLong":"-62135596800000"}}}	=> {"x":{"$numberInt":"1"}}
+{"$year":{"$date":{"$numberLong":"-62198755200000"}}}	=> {"x":{"$numberInt":"-1"}}
+{"$year":{"$date":{"$numberLong":"253402300800000"}}}	=> {"x":{"$numberInt":"10000"}}
+{"$week":{"$date":"2026-01-01T00:00:00Z"}}	=> {"x":{"$numberInt":"0"}}
+{"$week":{"$date":"2026-01-04T00:00:00Z"}}	=> {"x":{"$numberInt":"1"}}
+{"$isoWeek":{"$date":"2026-01-01T00:00:00Z"}}	=> {"x":{"$numberInt":"1"}}
+{"$isoWeekYear":{"$date":"2027-01-01T00:00:00Z"}}	=> {"x":{"$numberLong":"2026"}}
+{"$isoWeek":{"$date":"2020-12-31T00:00:00Z"}}	=> {"x":{"$numberInt":"53"}}
+{"$week":{"$date":"2023-12-31T00:00:00Z"}}	=> {"x":{"$numberInt":"53"}}
+{"$dayOfWeek":{"$date":"1969-12-31T23:59:59.999Z"}}	=> {"x":{"$numberInt":"4"}}
+{"$millisecond":{"$date":{"$numberLong":"-1"}}}	=> {"x":{"$numberInt":"999"}}
+{"$dateToString":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"format":"%Y-%m-%dT%H:%M:%S.%LZ"}}	=> {"x":"2026-03-29T01:30:45.678Z"}
+{"$dateToString":{"date":{"$date":"2026-03-29T01:30:45.678Z"}}}	=> {"x":"2026-03-29T01:30:45.678Z"}
+{"$dateToString":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"timezone":"Europe/Madrid"}}	=> {"x":"2026-03-29T03:30:45.678"}
+{"$dateToString":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"format":"%j %w %u %U %V %G %Z %z %%"}}	=> {"x":"088 1 7 13 13 2026 0 +0000 %"}
+{"$dateToString":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"format":"%Z %z","timezone":"Europe/Madrid"}}	=> {"x":"120 +0200"}
+{"$dateToString":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"format":"%Z %z","timezone":"+05:30"}}	=> {"x":"330 +0530"}
+{"$dateToString":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"format":"%b %B %a %A %e %p %y %C %I %h %n %t %D %T %R %F"}}	!! 18536	Invalid format character '%a' in format string
+{"$dateToString":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"format":"%q"}}	!! 18536	Invalid format character '%q' in format string
+{"$dateToString":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"format":"abc%"}}	!! 18535	Unmatched '%' at end of format string
+{"$dateToString":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"format":1}}	!! 18533	$dateToString requires that 'format' be a string, found: int with value 1
+{"$dateToString":{"date":"$n"}}	=> {"x":null}
+{"$dateToString":{"date":"$n","onNull":"x"}}	=> {"x":"x"}
+{"$dateToString":{"date":"$nope","onNull":"$nope"}}	=> {}
+{"$dateToString":{"date":"$s"}}	!! 16006	can't convert from BSON type string to Date
+{"$dateToString":{"format":"%Y"}}	!! 18628	Missing 'date' parameter to $dateToString
+{"$dateToString":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"x":1}}	!! 18534	Unrecognized argument to $dateToString: x
+{"$dateToString":"x"}	!! 18629	$dateToString only supports an object as its argument
+{"$dateToString":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"format":"$n"}}	=> {"x":null}
+{"$dateToString":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"timezone":"$n"}}	=> {"x":null}
+{"$dateToString":{"date":"$ts"}}	=> {"x":"1970-01-01T00:01:40.000Z"}
+{"$dateToString":{"date":{"$oid":"0123456789abcdef01234567"}}}	=> {"x":"1970-08-09T22:25:43.000Z"}
+{"$dateToString":{"date":{"$date":{"$numberLong":"-62198755200000"}},"format":"%Y"}}	!! 18537	Could not convert date to string: date component was outside the supported range of 0-9999: -1
+{"$dateToParts":{"date":{"$date":"2026-03-29T01:30:45.678Z"}}}	=> {"x":{"year":{"$numberInt":"2026"},"month":{"$numberInt":"3"},"day":{"$numberInt":"29"},"hour":{"$numberInt":"1"},"minute":{"$numberInt":"30"},"second":{"$numberInt":"45"},"millisecond":{"$numberInt":"678"}}}
+{"$dateToParts":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"iso8601":true}}	=> {"x":{"isoWeekYear":{"$numberInt":"2026"},"isoWeek":{"$numberInt":"13"},"isoDayOfWeek":{"$numberInt":"7"},"hour":{"$numberInt":"1"},"minute":{"$numberInt":"30"},"second":{"$numberInt":"45"},"millisecond":{"$numberInt":"678"}}}
+{"$dateToParts":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"timezone":"Europe/Madrid"}}	=> {"x":{"year":{"$numberInt":"2026"},"month":{"$numberInt":"3"},"day":{"$numberInt":"29"},"hour":{"$numberInt":"3"},"minute":{"$numberInt":"30"},"second":{"$numberInt":"45"},"millisecond":{"$numberInt":"678"}}}
+{"$dateToParts":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"iso8601":1}}	!! 40521	iso8601 must evaluate to a bool, found int
+{"$dateToParts":{"date":"$n"}}	=> {"x":null}
+{"$dateToParts":{"x":1}}	!! 40520	Unrecognized argument to $dateToParts: x
+{"$dateToParts":"x"}	!! 40524	$dateToParts only supports an object as its argument
+{"$dateFromParts":{"year":2026,"month":3,"day":29,"hour":2,"minute":30,"timezone":"Europe/Madrid"}}	=> {"x":{"$date":{"$numberLong":"1774747800000"}}}
+{"$dateFromParts":{"year":2026,"month":10,"day":25,"hour":2,"minute":30,"timezone":"Europe/Madrid"}}	=> {"x":{"$date":{"$numberLong":"1792891800000"}}}
+{"$dateFromParts":{"year":2026,"month":10,"day":25,"hour":1,"minute":30,"timezone":"Europe/Madrid"}}	=> {"x":{"$date":{"$numberLong":"1792884600000"}}}
+{"$dateFromParts":{"year":2026,"month":10,"day":25,"hour":3,"minute":30,"timezone":"Europe/Madrid"}}	=> {"x":{"$date":{"$numberLong":"1792895400000"}}}
+{"$dateFromParts":{"year":2026,"month":3,"day":29,"hour":3,"minute":30,"timezone":"Europe/Madrid"}}	=> {"x":{"$date":{"$numberLong":"1774747800000"}}}
+{"$dateFromParts":{"year":2026}}	=> {"x":{"$date":{"$numberLong":"1767225600000"}}}
+{"$dateFromParts":{"year":2026,"month":14,"day":40,"hour":25,"minute":-5,"second":70,"millisecond":-1}}	=> {"x":{"$date":{"$numberLong":"1804899369999"}}}
+{"$dateFromParts":{"year":2026,"month":0}}	=> {"x":{"$date":{"$numberLong":"1764547200000"}}}
+{"$dateFromParts":{"year":0}}	!! 40523	'year' must evaluate to an integer in the range 1 to 9999, found 0
+{"$dateFromParts":{"year":10000}}	!! 40523	'year' must evaluate to an integer in the range 1 to 9999, found 10000
+{"$dateFromParts":{"year":-1}}	!! 40523	'year' must evaluate to an integer in the range 1 to 9999, found -1
+{"$dateFromParts":{"year":2026,"month":-1000}}	=> {"x":{"$date":{"$numberLong":"-865296000000"}}}
+{"$dateFromParts":{"year":2026,"month":32768}}	!! 31034	'month' must evaluate to a value in the range [-32768, 32767]; value 32768 is not in range
+{"$dateFromParts":{"year":2026,"month":1.5}}	!! 40515	'month' must evaluate to an integer, found double with value 1.5
+{"$dateFromParts":{"year":2026,"month":"x"}}	!! 40515	'month' must evaluate to an integer, found string with value "x"
+{"$dateFromParts":{"year":"$n"}}	=> {"x":null}
+{"$dateFromParts":{"year":2026,"month":"$n"}}	=> {"x":null}
+{"$dateFromParts":{"year":2026,"month":2.0}}	=> {"x":{"$date":{"$numberLong":"1769904000000"}}}
+{"$dateFromParts":{"year":2026,"month":{"$numberLong":"2"}}}	=> {"x":{"$date":{"$numberLong":"1769904000000"}}}
+{"$dateFromParts":{"year":2026,"month":{"$numberDecimal":"2"}}}	=> {"x":{"$date":{"$numberLong":"1769904000000"}}}
+{"$dateFromParts":{"isoWeekYear":2026,"isoWeek":1,"isoDayOfWeek":1}}	=> {"x":{"$date":{"$numberLong":"1766966400000"}}}
+{"$dateFromParts":{"isoWeekYear":2026,"isoWeek":53,"isoDayOfWeek":8}}	=> {"x":{"$date":{"$numberLong":"1799020800000"}}}
+{"$dateFromParts":{"isoWeekYear":2026}}	=> {"x":{"$date":{"$numberLong":"1766966400000"}}}
+{"$dateFromParts":{"year":2026,"isoWeek":1}}	!! 40489	$dateFromParts does not allow mixing natural dates with ISO dates
+{"$dateFromParts":{"month":1}}	!! 40516	$dateFromParts requires either 'year' or 'isoWeekYear' to be present
+{"$dateFromParts":{"year":2026,"x":1}}	!! 40518	Unrecognized argument to $dateFromParts: x
+{"$dateFromParts":"x"}	!! 40519	$dateFromParts only supports an object as its argument
+{"$dateFromParts":{"year":2026,"timezone":"+01:00"}}	=> {"x":{"$date":{"$numberLong":"1767222000000"}}}
+{"$dateFromParts":{"year":2026,"timezone":"Bad"}}	!! 40485	unrecognized time zone identifier: "Bad"
+{"$dateFromParts":{"year":2026,"month":2,"day":29}}	=> {"x":{"$date":{"$numberLong":"1772323200000"}}}
+{"$dateFromParts":{"year":2026,"hour":24}}	=> {"x":{"$date":{"$numberLong":"1767312000000"}}}
+{"$dateFromParts":{"year":2026,"millisecond":1000}}	=> {"x":{"$date":{"$numberLong":"1767225601000"}}}
+{"$dateFromParts":{"year":2026,"day":0}}	=> {"x":{"$date":{"$numberLong":"1767139200000"}}}
+{"$dateFromParts":{"year":2026,"day":-32768}}	=> {"x":{"$date":{"$numberLong":"-1064016000000"}}}
+{"$dateFromParts":{"year":2026,"day":32767}}	=> {"x":{"$date":{"$numberLong":"4598208000000"}}}
+{"$dateFromParts":{"year":2026,"hour":-32769}}	!! 31034	'hour' must evaluate to a value in the range [-32768, 32767]; value -32769 is not in range
+{"$dateToString":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"format":"%b"}}	=> {"x":"Mar"}
+{"$dateToString":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"format":"%B"}}	=> {"x":"March"}
+{"$dateToString":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"format":"%e"}}	!! 18536	Invalid format character '%e' in format string
+{"$dateToString":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"format":"%y"}}	!! 18536	Invalid format character '%y' in format string
+{"$dateToString":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"format":"%I %p"}}	!! 18536	Invalid format character '%I' in format string
+{"$dateToString":{"date":{"$date":"2026-01-01T05:06:07.008Z"},"format":"%d/%m/%Y %H:%M:%S.%L %j %U %V %G %w %u"}}	=> {"x":"01/01/2026 05:06:07.008 001 00 01 2026 5 4"}
+{"$dateAdd":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"unit":"month","amount":1}}	=> {"x":{"$date":{"$numberLong":"1772272800000"}}}
+{"$dateAdd":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"unit":"month","amount":-2}}	=> {"x":{"$date":{"$numberLong":"1764496800000"}}}
+{"$dateAdd":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"unit":"year","amount":1}}	=> {"x":{"$date":{"$numberLong":"1801389600000"}}}
+{"$dateAdd":{"startDate":{"$date":"2024-02-29T00:00:00Z"},"unit":"year","amount":1}}	=> {"x":{"$date":{"$numberLong":"1740700800000"}}}
+{"$dateAdd":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"unit":"quarter","amount":1}}	=> {"x":{"$date":{"$numberLong":"1777543200000"}}}
+{"$dateAdd":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"unit":"week","amount":1}}	=> {"x":{"$date":{"$numberLong":"1770458400000"}}}
+{"$dateAdd":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"unit":"day","amount":1}}	=> {"x":{"$date":{"$numberLong":"1769940000000"}}}
+{"$dateAdd":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"unit":"hour","amount":1}}	=> {"x":{"$date":{"$numberLong":"1769857200000"}}}
+{"$dateAdd":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"unit":"minute","amount":1}}	=> {"x":{"$date":{"$numberLong":"1769853660000"}}}
+{"$dateAdd":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"unit":"second","amount":1}}	=> {"x":{"$date":{"$numberLong":"1769853601000"}}}
+{"$dateAdd":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"unit":"millisecond","amount":1}}	=> {"x":{"$date":{"$numberLong":"1769853600001"}}}
+{"$dateAdd":{"startDate":{"$date":"2026-03-28T12:00:00Z"},"unit":"day","amount":1,"timezone":"Europe/Madrid"}}	=> {"x":{"$date":{"$numberLong":"1774782000000"}}}
+{"$dateAdd":{"startDate":{"$date":"2026-03-28T12:00:00Z"},"unit":"hour","amount":24,"timezone":"Europe/Madrid"}}	=> {"x":{"$date":{"$numberLong":"1774785600000"}}}
+{"$dateAdd":{"startDate":{"$date":"2026-03-29T00:30:00Z"},"unit":"hour","amount":1,"timezone":"Europe/Madrid"}}	=> {"x":{"$date":{"$numberLong":"1774747800000"}}}
+{"$dateAdd":{"startDate":{"$date":"2026-03-28T01:30:00Z"},"unit":"day","amount":1,"timezone":"Europe/Madrid"}}	=> {"x":{"$date":{"$numberLong":"1774747800000"}}}
+{"$dateAdd":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"unit":"month","amount":1.5}}	!! 5166405	$dateAdd expects integer amount of time units
+{"$dateAdd":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"unit":"month","amount":{"$numberDouble":"2.0"}}}	=> {"x":{"$date":{"$numberLong":"1774951200000"}}}
+{"$dateAdd":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"unit":"month","amount":{"$numberLong":"2"}}}	=> {"x":{"$date":{"$numberLong":"1774951200000"}}}
+{"$dateAdd":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"unit":"month","amount":"x"}}	!! 5166405	$dateAdd expects integer amount of time units
+{"$dateAdd":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"unit":"bogus","amount":1}}	!! 9	unknown time unit value: bogus
+{"$dateAdd":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"unit":1,"amount":1}}	!! 5439013	$dateAdd requires 'unit' to be a string, but got int
+{"$dateAdd":{"startDate":"x","unit":"day","amount":1}}	!! 5166403	$dateAdd requires startDate to be convertible to a date
+{"$dateAdd":{"startDate":"$n","unit":"day","amount":1}}	=> {"x":null}
+{"$dateAdd":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"unit":"$n","amount":1}}	=> {"x":null}
+{"$dateAdd":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"unit":"day","amount":"$n"}}	=> {"x":null}
+{"$dateAdd":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"unit":"day","amount":1,"timezone":"$n"}}	=> {"x":null}
+{"$dateAdd":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"unit":"day"}}	!! 5166402	$dateAdd requires startDate, unit, and amount to be present
+{"$dateAdd":{"unit":"day","amount":1}}	!! 5166402	$dateAdd requires startDate, unit, and amount to be present
+{"$dateAdd":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"amount":1}}	!! 5166402	$dateAdd requires startDate, unit, and amount to be present
+{"$dateAdd":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"unit":"day","amount":1,"x":1}}	!! 5166401	Unrecognized argument to $dateAdd: x. Expected arguments are startDate, unit, amount, and optionally timezone.
+{"$dateAdd":"x"}	!! 5166400	$dateAdd expects an object as its argument
+{"$dateAdd":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"unit":"year","amount":100000}}	=> {"x":{"$date":{"$numberLong":"3157465053600000"}}}
+{"$dateAdd":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"unit":"millisecond","amount":{"$numberLong":"9223372036854775807"}}}	!! 159	Overflow while adding 9223372036854775807ms to -9223370267001175809ms
+{"$dateAdd":{"startDate":"$ts","unit":"day","amount":1}}	=> {"x":{"$date":{"$numberLong":"86500000"}}}
+{"$dateAdd":{"startDate":{"$oid":"0123456789abcdef01234567"},"unit":"day","amount":1}}	=> {"x":{"$date":{"$numberLong":"19175143000"}}}
+{"$dateSubtract":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"unit":"month","amount":1}}	=> {"x":{"$date":{"$numberLong":"1767175200000"}}}
+{"$dateSubtract":{"startDate":{"$date":"2026-03-31T00:00:00Z"},"unit":"month","amount":1}}	=> {"x":{"$date":{"$numberLong":"1772236800000"}}}
+{"$dateSubtract":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"unit":"day","amount":1,"x":1}}	!! 5166401	Unrecognized argument to $dateSubtract: x. Expected arguments are startDate, unit, amount, and optionally timezone.
+{"$dateDiff":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"endDate":{"$date":"2026-03-29T01:30:45.678Z"},"unit":"day"}}	=> {"x":{"$numberLong":"57"}}
+{"$dateDiff":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"endDate":{"$date":"2026-03-29T01:30:45.678Z"},"unit":"month"}}	=> {"x":{"$numberLong":"2"}}
+{"$dateDiff":{"startDate":{"$date":"2026-03-29T01:30:45.678Z"},"endDate":{"$date":"2026-01-31T10:00:00Z"},"unit":"month"}}	=> {"x":{"$numberLong":"-2"}}
+{"$dateDiff":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"endDate":{"$date":"2026-03-29T01:30:45.678Z"},"unit":"week"}}	=> {"x":{"$numberLong":"9"}}
+{"$dateDiff":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"endDate":{"$date":"2026-03-29T01:30:45.678Z"},"unit":"week","startOfWeek":"monday"}}	=> {"x":{"$numberLong":"8"}}
+{"$dateDiff":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"endDate":{"$date":"2026-03-29T01:30:45.678Z"},"unit":"week","startOfWeek":"SUN"}}	=> {"x":{"$numberLong":"9"}}
+{"$dateDiff":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"endDate":{"$date":"2026-03-29T01:30:45.678Z"},"unit":"week","startOfWeek":"x"}}	!! 5439016	$dateDiff parameter 'startOfWeek' value cannot be recognized as a day of a week: x
+{"$dateDiff":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"endDate":{"$date":"2026-03-29T01:30:45.678Z"},"unit":"quarter"}}	=> {"x":{"$numberLong":"0"}}
+{"$dateDiff":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"endDate":{"$date":"2026-03-29T01:30:45.678Z"},"unit":"year"}}	=> {"x":{"$numberLong":"0"}}
+{"$dateDiff":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"endDate":{"$date":"2026-03-29T01:30:45.678Z"},"unit":"hour"}}	=> {"x":{"$numberLong":"1359"}}
+{"$dateDiff":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"endDate":{"$date":"2026-03-29T01:30:45.678Z"},"unit":"minute"}}	=> {"x":{"$numberLong":"81570"}}
+{"$dateDiff":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"endDate":{"$date":"2026-03-29T01:30:45.678Z"},"unit":"second"}}	=> {"x":{"$numberLong":"4894245"}}
+{"$dateDiff":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"endDate":{"$date":"2026-03-29T01:30:45.678Z"},"unit":"millisecond"}}	=> {"x":{"$numberLong":"4894245678"}}
+{"$dateDiff":{"startDate":{"$date":"2026-03-28T23:30:00Z"},"endDate":{"$date":"2026-03-29T00:30:00Z"},"unit":"day"}}	=> {"x":{"$numberLong":"1"}}
+{"$dateDiff":{"startDate":{"$date":"2026-03-28T23:30:00Z"},"endDate":{"$date":"2026-03-29T00:30:00Z"},"unit":"day","timezone":"Europe/Madrid"}}	=> {"x":{"$numberLong":"0"}}
+{"$dateDiff":{"startDate":{"$date":"2026-03-28T22:00:00Z"},"endDate":{"$date":"2026-03-29T22:00:00Z"},"unit":"hour","timezone":"Europe/Madrid"}}	=> {"x":{"$numberLong":"24"}}
+{"$dateDiff":{"startDate":"$n","endDate":{"$date":"2026-03-29T01:30:45.678Z"},"unit":"day"}}	=> {"x":null}
+{"$dateDiff":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"endDate":{"$date":"2026-03-29T01:30:45.678Z"},"unit":"$n"}}	=> {"x":null}
+{"$dateDiff":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"endDate":{"$date":"2026-03-29T01:30:45.678Z"},"unit":"week","startOfWeek":"$n"}}	=> {"x":null}
+{"$dateDiff":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"endDate":"x","unit":"day"}}	!! 5166307	$dateDiff requires 'endDate' to be a date, but got string
+{"$dateDiff":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"endDate":{"$date":"2026-03-29T01:30:45.678Z"}}}	!! 5166305	Missing 'unit' parameter to $dateDiff
+{"$dateDiff":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"unit":"day"}}	!! 5166304	Missing 'endDate' parameter to $dateDiff
+{"$dateDiff":{"endDate":{"$date":"2026-01-31T10:00:00Z"},"unit":"day"}}	!! 5166303	Missing 'startDate' parameter to $dateDiff
+{"$dateDiff":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"endDate":{"$date":"2026-03-29T01:30:45.678Z"},"unit":"day","x":1}}	!! 5166302	Unrecognized argument to $dateDiff: x
+{"$dateDiff":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"endDate":{"$date":"2026-03-29T01:30:45.678Z"},"unit":"day","startOfWeek":"x"}}	=> {"x":{"$numberLong":"57"}}
+{"$dateDiff":{"startDate":{"$date":"2026-01-31T10:00:00Z"},"endDate":{"$date":"2026-03-29T01:30:45.678Z"},"unit":"x"}}	!! 9	unknown time unit value: x
+{"$dateTrunc":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"unit":"day"}}	=> {"x":{"$date":{"$numberLong":"1774742400000"}}}
+{"$dateTrunc":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"unit":"month"}}	=> {"x":{"$date":{"$numberLong":"1772323200000"}}}
+{"$dateTrunc":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"unit":"quarter"}}	=> {"x":{"$date":{"$numberLong":"1767225600000"}}}
+{"$dateTrunc":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"unit":"year"}}	=> {"x":{"$date":{"$numberLong":"1767225600000"}}}
+{"$dateTrunc":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"unit":"week"}}	=> {"x":{"$date":{"$numberLong":"1774742400000"}}}
+{"$dateTrunc":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"unit":"week","startOfWeek":"monday"}}	=> {"x":{"$date":{"$numberLong":"1774224000000"}}}
+{"$dateTrunc":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"unit":"hour","binSize":2}}	=> {"x":{"$date":{"$numberLong":"1774742400000"}}}
+{"$dateTrunc":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"unit":"minute","binSize":15}}	=> {"x":{"$date":{"$numberLong":"1774747800000"}}}
+{"$dateTrunc":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"unit":"day","binSize":7}}	=> {"x":{"$date":{"$numberLong":"1774656000000"}}}
+{"$dateTrunc":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"unit":"month","binSize":5}}	=> {"x":{"$date":{"$numberLong":"1761955200000"}}}
+{"$dateTrunc":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"unit":"day","timezone":"Europe/Madrid"}}	=> {"x":{"$date":{"$numberLong":"1774738800000"}}}
+{"$dateTrunc":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"unit":"hour","timezone":"+05:30"}}	=> {"x":{"$date":{"$numberLong":"1774747800000"}}}
+{"$dateTrunc":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"unit":"millisecond","binSize":100}}	=> {"x":{"$date":{"$numberLong":"1774747845600"}}}
+{"$dateTrunc":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"unit":"second","binSize":0}}	!! 5439018	$dateTrunc requires 'binSize' to be greater than 0, but got value 0
+{"$dateTrunc":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"unit":"second","binSize":1.5}}	!! 5439017	$dateTrunc requires 'binSize' to be a 64-bit integer, but got value '1.5' of type double
+{"$dateTrunc":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"unit":"second","binSize":"x"}}	!! 5439017	$dateTrunc requires 'binSize' to be a 64-bit integer, but got value '"x"' of type string
+{"$dateTrunc":{"date":"$n","unit":"day"}}	=> {"x":null}
+{"$dateTrunc":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"unit":"$n"}}	=> {"x":null}
+{"$dateTrunc":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"unit":"day","binSize":"$n"}}	=> {"x":null}
+{"$dateTrunc":{"date":"x","unit":"day"}}	!! 5166307	$dateTrunc requires 'date' to be a date, but got string
+{"$dateTrunc":{"date":{"$date":"2026-03-29T01:30:45.678Z"}}}	!! 5439010	Missing 'unit' parameter to $dateTrunc
+{"$dateTrunc":{"unit":"day"}}	!! 5439009	Missing 'date' parameter to $dateTrunc
+{"$dateTrunc":{"date":{"$date":"2026-03-29T01:30:45.678Z"},"unit":"day","x":1}}	!! 5439008	Unrecognized argument to $dateTrunc: x. Expected arguments are date, unit, and optionally, binSize, timezone, startOfWeek
+{"$dateTrunc":{"date":"$ts","unit":"day"}}	=> {"x":{"$date":{"$numberLong":"0"}}}
+{"$dateTrunc":{"date":{"$date":"1969-12-31T23:00:00Z"},"unit":"day","binSize":3}}	=> {"x":{"$date":{"$numberLong":"-172800000"}}}
+{"$dateTrunc":{"date":{"$date":"2026-10-25T01:30:00Z"},"unit":"hour","timezone":"Europe/Madrid"}}	=> {"x":{"$date":{"$numberLong":"1792890000000"}}}
+{"$dateTrunc":{"date":{"$date":"2026-10-25T00:30:00Z"},"unit":"hour","timezone":"Europe/Madrid"}}	=> {"x":{"$date":{"$numberLong":"1792886400000"}}}
+{"$dateTrunc":{"date":{"$date":"2026-10-25T01:30:00Z"},"unit":"day","timezone":"Europe/Madrid"}}	=> {"x":{"$date":{"$numberLong":"1792879200000"}}}
+{"$dateFromString":{"dateString":"2026-03-29"}}	=> {"x":{"$date":{"$numberLong":"1774742400000"}}}
+{"$dateFromString":{"dateString":"2026-03-29T01:30:45.678Z"}}	=> {"x":{"$date":{"$numberLong":"1774747845678"}}}
+{"$dateFromString":{"dateString":"2026-03-29T01:30:45.678"}}	=> {"x":{"$date":{"$numberLong":"1774747845678"}}}
+{"$dateFromString":{"dateString":"2026-03-29 01:30:45"}}	=> {"x":{"$date":{"$numberLong":"1774747845000"}}}
+{"$dateFromString":{"dateString":"2026-03-29T01:30:45+05:30"}}	=> {"x":{"$date":{"$numberLong":"1774728045000"}}}
+{"$dateFromString":{"dateString":"2026-03-29T01:30:45+0530"}}	=> {"x":{"$date":{"$numberLong":"1774728045000"}}}
+{"$dateFromString":{"dateString":"2026-03-29T01:30:45+05"}}	=> {"x":{"$date":{"$numberLong":"1774729845000"}}}
+{"$dateFromString":{"dateString":"2026-03-29T01:30:45 GMT"}}	=> {"x":{"$date":{"$numberLong":"1774747845000"}}}
+{"$dateFromString":{"dateString":"2026-03-29T01:30:45 Europe/Madrid"}}	!! 241	Error parsing date string '2026-03-29T01:30:45 Europe/Madrid'; 20: passing a time zone identifier as part of the string is not allowed 'E'
+{"$dateFromString":{"dateString":"2026-03-29T01:30"}}	=> {"x":{"$date":{"$numberLong":"1774747800000"}}}
+{"$dateFromString":{"dateString":"2026-03-29T01"}}	=> {"x":{"$date":{"$numberLong":"1774746000000"}}}
+{"$dateFromString":{"dateString":"2026-3-9"}}	=> {"x":{"$date":{"$numberLong":"1773014400000"}}}
+{"$dateFromString":{"dateString":"20260329"}}	=> {"x":{"$date":{"$numberLong":"1774742400000"}}}
+{"$dateFromString":{"dateString":"2026/03/29"}}	=> {"x":{"$date":{"$numberLong":"1774742400000"}}}
+{"$dateFromString":{"dateString":"29 March 2026"}}	=> {"x":{"$date":{"$numberLong":"1774742400000"}}}
+{"$dateFromString":{"dateString":"March 29, 2026"}}	=> {"x":{"$date":{"$numberLong":"1774742400000"}}}
+{"$dateFromString":{"dateString":"Mar 29 2026 10:00"}}	=> {"x":{"$date":{"$numberLong":"1774778400000"}}}
+{"$dateFromString":{"dateString":"2026-03-29T25:00:00"}}	!! 241	Error parsing date string '2026-03-29T25:00:00'; 12: Double time specification '5'
+{"$dateFromString":{"dateString":"2026-02-30"}}	!! 241	Error parsing date string '2026-02-30'; 11: The parsed date was invalid ' '
+{"$dateFromString":{"dateString":"2026-13-01"}}	!! 241	Error parsing date string '2026-13-01'; 6: Unexpected character '3'
+{"$dateFromString":{"dateString":"xx"}}	!! 241	Error parsing date string 'xx'; 0: passing a time zone identifier as part of the string is not allowed 'x'
+{"$dateFromString":{"dateString":""}}	!! 241	Error parsing date string ''; 0: Empty string ' '
+{"$dateFromString":{"dateString":"2026-03-29T01:30:45.6789Z"}}	=> {"x":{"$date":{"$numberLong":"1774747845678"}}}
+{"$dateFromString":{"dateString":"2026-03-29T01:30:45.1Z"}}	=> {"x":{"$date":{"$numberLong":"1774747845100"}}}
+{"$dateFromString":{"dateString":"Sun, 29 Mar 2026 01:30:45 +0000"}}	=> {"x":{"$date":{"$numberLong":"1774747845000"}}}
+{"$dateFromString":{"dateString":"2026-W13-7"}}	=> {"x":{"$date":{"$numberLong":"1774742400000"}}}
+{"$dateFromString":{"dateString":"2026-088"}}	!! 241	Error parsing date string '2026-088'; 9: The parsed date was invalid ' '
+{"$dateFromString":{"dateString":"1969-12-31T23:59:59.999Z"}}	=> {"x":{"$date":{"$numberLong":"-1"}}}
+{"$dateFromString":{"dateString":"0001-01-01"}}	=> {"x":{"$date":{"$numberLong":"-62135596800000"}}}
+{"$dateFromString":{"dateString":"9999-12-31T23:59:59.999Z"}}	=> {"x":{"$date":{"$numberLong":"253402300799999"}}}
+{"$dateFromString":{"dateString":"2026-03-29T02:30:00"}}	=> {"x":{"$date":{"$numberLong":"1774751400000"}}}
+{"$dateFromString":{"dateString":"  2026-03-29  "}}	=> {"x":{"$date":{"$numberLong":"1774742400000"}}}
+{"$dateFromString":{"dateString":"2026-03-29Z"}}	=> {"x":{"$date":{"$numberLong":"1774742400000"}}}
+{"$dateFromString":{"dateString":"2026-03-29T01:30:45z"}}	=> {"x":{"$date":{"$numberLong":"1774747845000"}}}
+{"$dateFromString":{"dateString":"2026-03-29T01:30:45UTC"}}	=> {"x":{"$date":{"$numberLong":"1774747845000"}}}
+{"$dateFromString":{"dateString":"2026-03-29T01:30:45 CET"}}	=> {"x":{"$date":{"$numberLong":"1774744245000"}}}
+{"$dateFromString":{"dateString":"2026-03-29T01:30:45 EST"}}	=> {"x":{"$date":{"$numberLong":"1774765845000"}}}
+{"$dateFromString":{"dateString":"tomorrow"}}	!! 241	an incomplete date/time string has been found, with elements missing: "tomorrow"
+{"$dateFromString":{"dateString":"now"}}	!! 241	an incomplete date/time string has been found, with elements missing: "now"
+{"$dateFromString":{"dateString":"2026-03-29T01:30:45+25:00"}}	!! 241	Error parsing date string '2026-03-29T01:30:45+25:00'; 22: Unexpected character ':'; 23: Unexpected character '0'; 24: Unexpected character '0'
+{"$dateFromString":{"dateString":"12/31/2026"}}	=> {"x":{"$date":{"$numberLong":"1798675200000"}}}
+{"$dateFromString":{"dateString":"2026-03-29T02:30:00","timezone":"Europe/Madrid"}}	=> {"x":{"$date":{"$numberLong":"1774747800000"}}}
+{"$dateFromString":{"dateString":"2026-03-29T02:30:00Z","timezone":"Europe/Madrid"}}	!! 241	you cannot pass in a date/time string with time zone information ('Z') together with a timezone argument
+{"$dateFromString":{"dateString":"2026-03-29T02:30:00+01:00","timezone":"Europe/Madrid"}}	!! 241	you cannot pass in a date/time string with GMT offset together with a timezone argument
+{"$dateFromString":{"dateString":"2026-03-29 Europe/Madrid","timezone":"UTC"}}	!! 241	Error parsing date string '2026-03-29 Europe/Madrid'; 11: passing a time zone identifier as part of the string is not allowed 'E'
+{"$dateFromString":{"dateString":"29/03/2026","format":"%d/%m/%Y"}}	=> {"x":{"$date":{"$numberLong":"1774742400000"}}}
+{"$dateFromString":{"dateString":"29/03/2026 10:11:12.345","format":"%d/%m/%Y %H:%M:%S.%L"}}	=> {"x":{"$date":{"$numberLong":"1774779072345"}}}
+{"$dateFromString":{"dateString":"2026-088","format":"%Y-%j"}}	=> {"x":{"$date":{"$numberLong":"1774828800000"}}}
+{"$dateFromString":{"dateString":"2026-W13-7","format":"%G-W%V-%u"}}	=> {"x":{"$date":{"$numberLong":"1774742400000"}}}
+{"$dateFromString":{"dateString":"2026 13 1","format":"%G %V %u"}}	=> {"x":{"$date":{"$numberLong":"1774224000000"}}}
+{"$dateFromString":{"dateString":"Mar 29 2026","format":"%b %d %Y"}}	=> {"x":{"$date":{"$numberLong":"1774742400000"}}}
+{"$dateFromString":{"dateString":"March 29 2026","format":"%B %d %Y"}}	=> {"x":{"$date":{"$numberLong":"1774742400000"}}}
+{"$dateFromString":{"dateString":"29/03/2026","format":"%Y-%m-%d"}}	!! 241	Error parsing date string '29/03/2026'; 2: Format literal not found '/'; 5: Format literal not found '/'; 8: Trailing data '2'
+{"$dateFromString":{"dateString":"29/03/2026 +0200","format":"%d/%m/%Y %z"}}	=> {"x":{"$date":{"$numberLong":"1774735200000"}}}
+{"$dateFromString":{"dateString":"29/03/2026 120","format":"%d/%m/%Y %Z"}}	!! 241	Error parsing date string '29/03/2026 120'; 11: Invalid timezone offset in minutes '1'; 11: Trailing data '1'
+{"$dateFromString":{"dateString":"29/03/2026 Europe/Madrid","format":"%d/%m/%Y %Z"}}	!! 241	Error parsing date string '29/03/2026 Europe/Madrid'; 11: Invalid timezone offset in minutes 'E'; 11: Trailing data 'E'
+{"$dateFromString":{"dateString":"29/03/2026","format":"%d/%m/%Y %q"}}	!! 18536	Invalid format character '%q' in format string
+{"$dateFromString":{"dateString":"29/03/2026","format":1}}	!! 40684	$dateFromString requires that 'format' be a string, found: int with value 1
+{"$dateFromString":{"dateString":"29%03","format":"%d%%%m"}}	!! 241	an incomplete date/time string has been found, with elements missing: "29%03"
+{"$dateFromString":{"dateString":"29/3/2026","format":"%d/%m/%Y"}}	=> {"x":{"$date":{"$numberLong":"1774742400000"}}}
+{"$dateFromString":{"dateString":"xx","onError":"bad"}}	=> {"x":"bad"}
+{"$dateFromString":{"dateString":"xx","onError":"$nope"}}	=> {}
+{"$dateFromString":{"dateString":"$n"}}	=> {"x":null}
+{"$dateFromString":{"dateString":"$n","onNull":"z"}}	=> {"x":"z"}
+{"$dateFromString":{"dateString":"$nope","onNull":"z"}}	=> {"x":"z"}
+{"$dateFromString":{"dateString":1}}	!! 241	$dateFromString requires that 'dateString' be a string, found: int with value 1
+{"$dateFromString":{"dateString":1,"onError":"bad"}}	=> {"x":"bad"}
+{"$dateFromString":{"dateString":"2026-03-29","timezone":"Bad"}}	!! 40485	unrecognized time zone identifier: "Bad"
+{"$dateFromString":{"dateString":"2026-03-29","timezone":"Bad","onError":"bad"}}	!! 40485	unrecognized time zone identifier: "Bad"
+{"$dateFromString":{"dateString":"2026-03-29","timezone":"$n"}}	=> {"x":null}
+{"$dateFromString":{"dateString":"2026-03-29","format":"$n"}}	=> {"x":null}
+{"$dateFromString":{"dateString":"2026-03-29","x":1}}	!! 40541	Unrecognized argument to $dateFromString: x
+{"$dateFromString":{"format":"%Y"}}	!! 40542	Missing 'dateString' parameter to $dateFromString
+{"$dateFromString":"x"}	!! 40540	$dateFromString only supports an object as an argument, found: string
+{"$toDate":"xx"}	!! 241	Error parsing date string 'xx'; 0: passing a time zone identifier as part of the string is not allowed 'x'
+{"$toDate":"2026-03-29 Europe/Madrid"}	!! 241	Error parsing date string '2026-03-29 Europe/Madrid'; 11: passing a time zone identifier as part of the string is not allowed 'E'
+{"$toDate":"29 March 2026"}	=> {"x":{"$date":{"$numberLong":"1774742400000"}}}
+{"$convert":{"input":"xx","to":"date","onError":1}}	=> {"x":{"$numberInt":"1"}}
+{"$toDate":"2026-01-02"}	=> {"x":{"$date":{"$numberLong":"1767312000000"}}}
+{"$toDate":"2026-01-02T03:04:05.678Z"}	=> {"x":{"$date":{"$numberLong":"1767323045678"}}}
+{"$toDate":"2026-01-02T03:04:05+0100"}	=> {"x":{"$date":{"$numberLong":"1767319445000"}}}
+{"$dateFromString":{"dateString":"2026-03-29T"}}	=> {"x":{"$date":{"$numberLong":"1774767600000"}}}
+{"$dateFromString":{"dateString":"2026-03-29T01:"}}	!! 241	Error parsing date string '2026-03-29T01:'; 13: Unexpected character ':'
+{"$dateFromString":{"dateString":"2026-03-29T01:30:"}}	!! 241	Error parsing date string '2026-03-29T01:30:'; 16: Unexpected character ':'
+{"$dateFromString":{"dateString":"2026-03-29T01:30:45."}}	=> {"x":{"$date":{"$numberLong":"1774747845000"}}}
+{"$dateFromString":{"dateString":"2026-03-29T01:30:45+"}}	!! 241	Error parsing date string '2026-03-29T01:30:45+'; 19: Unexpected character '+'
+{"$dateFromString":{"dateString":"2026-03-29T01:30:45+0"}}	=> {"x":{"$date":{"$numberLong":"1774747845000"}}}
+{"$dateFromString":{"dateString":"2026-03-29T01:30:45+123"}}	=> {"x":{"$date":{"$numberLong":"1774742865000"}}}
+{"$dateFromString":{"dateString":"2026-03-29T01:30:45+05:"}}	!! 241	Error parsing date string '2026-03-29T01:30:45+05:'; 22: Unexpected character ':'
+{"$dateFromString":{"dateString":"2026-03-29T01:30:45-0530"}}	=> {"x":{"$date":{"$numberLong":"1774767645000"}}}
+{"$dateFromString":{"dateString":"29 xx 2026"}}	!! 241	Error parsing date string '29 xx 2026'; 0: Unexpected character '2'; 1: Unexpected character '9'; 3: passing a time zone identifier as part of the string is not allowed 'x'
+{"$dateFromString":{"dateString":"29 March"}}	!! 241	an incomplete date/time string has been found, with elements missing: "29 March"
+{"$dateFromString":{"dateString":"March"}}	!! 241	Error parsing date string 'March'; 6: The parsed date was invalid ' '
+{"$dateFromString":{"dateString":"March 29,"}}	!! 241	an incomplete date/time string has been found, with elements missing: "March 29,"
+{"$dateFromString":{"dateString":"Sun, 29 March"}}	!! 241	an incomplete date/time string has been found, with elements missing: "Sun, 29 March"
+{"$dateFromString":{"dateString":"2026-"}}	!! 241	Error parsing date string '2026-'; 4: Unexpected character '-'
+{"$dateFromString":{"dateString":"2026-03-"}}	!! 241	Error parsing date string '2026-03-'; 7: Unexpected character '-'
+{"$dateFromString":{"dateString":"2026-W"}}	!! 241	Error parsing date string '2026-W'; 4: Unexpected character '-'
+{"$dateFromString":{"dateString":"2026-W13"}}	=> {"x":{"$date":{"$numberLong":"1774224000000"}}}
+{"$dateFromString":{"dateString":"2026-W13-"}}	!! 241	Error parsing date string '2026-W13-'; 8: Unexpected character '-'
+{"$dateFromString":{"dateString":"2026-03"}}	=> {"x":{"$date":{"$numberLong":"1772323200000"}}}
+{"$dateFromString":{"dateString":"2026/03"}}	!! 241	Error parsing date string '2026/03'; 4: Unexpected character '/'; 5: Unexpected character '0'; 6: Unexpected character '3'
+{"$dateFromString":{"dateString":"2026/03/"}}	!! 241	Error parsing date string '2026/03/'; 4: Unexpected character '/'; 5: Unexpected character '0'; 6: Unexpected character '3'; 7: Unexpected character '/'
+{"$dateFromString":{"dateString":"03/29/"}}	!! 241	Error parsing date string '03/29/'; 5: Unexpected character '/'
+{"$dateFromString":{"dateString":"03/29"}}	!! 241	an incomplete date/time string has been found, with elements missing: "03/29"
+{"$dateFromString":{"dateString":"29 "}}	!! 241	Error parsing date string '29 '; 0: Unexpected character '2'; 1: Unexpected character '9'
+{"$dateFromString":{"dateString":"1 2"}}	!! 241	Error parsing date string '1 2'; 0: Unexpected character '1'; 2: Unexpected character '2'
+{"$dateFromString":{"dateString":"12345"}}	!! 241	Error parsing date string '12345'; 4: Unexpected character '5'
+{"$dateFromString":{"dateString":"abc 2026"}}	!! 241	Error parsing date string 'abc 2026'; 0: passing a time zone identifier as part of the string is not allowed 'a'
+{"$dateFromString":{"dateString":"2026-03-29T01:30:45 cest"}}	=> {"x":{"$date":{"$numberLong":"1774740645000"}}}
+{"$dateFromString":{"dateString":"2026-03-29T01:30:45 PDT"}}	=> {"x":{"$date":{"$numberLong":"1774773045000"}}}
+{"$dateFromString":{"dateString":"2026-03-29 T01:30"}}	=> {"x":{"$date":{"$numberLong":"1774747800000"}}}
+{"$dateFromString":{"dateString":"2026-03-29t01:30"}}	=> {"x":{"$date":{"$numberLong":"1774747800000"}}}
+{"$dateFromString":{"dateString":"-2026-03-29"}}	=> {"x":{"$date":{"$numberLong":"-126094060800000"}}}
+{"$dateFromString":{"dateString":"+2026-03-29"}}	=> {"x":{"$date":{"$numberLong":"1774742400000"}}}
+{"$dateFromString":{"dateString":"2026-03-29T01:30:45.123456789"}}	=> {"x":{"$date":{"$numberLong":"1774747845123"}}}
+{"$dateFromString":{"dateString":"2026-03-29 01:30:45 +01:00 x"}}	!! 241	Error parsing date string '2026-03-29 01:30:45 +01:00 x'; 27: Double timezone specification 'x'
+{"$dateFromString":{"dateString":"2026-02-29"}}	!! 241	Error parsing date string '2026-02-29'; 11: The parsed date was invalid ' '
+{"$dateFromString":{"dateString":"2024-02-29"}}	=> {"x":{"$date":{"$numberLong":"1709164800000"}}}
+{"$dateFromString":{"dateString":"2026-04-31"}}	!! 241	Error parsing date string '2026-04-31'; 11: The parsed date was invalid ' '
+{"$dateFromString":{"dateString":"2026-00-10"}}	!! 241	Error parsing date string '2026-00-10'; 11: The parsed date was invalid ' '
+{"$dateFromString":{"dateString":"2026-03-00"}}	!! 241	Error parsing date string '2026-03-00'; 11: The parsed date was invalid ' '
+{"$dateFromString":{"dateString":"Mon 2026-03-29"}}	=> {"x":{"$date":{"$numberLong":"1774828800000"}}}
+{"$dateFromString":{"dateString":"Monday, March 29, 2026"}}	=> {"x":{"$date":{"$numberLong":"1774828800000"}}}
+{"$dateFromString":{"dateString":"29-Mar-2026"}}	=> {"x":{"$date":{"$numberLong":"1774742400000"}}}
+{"$dateFromString":{"dateString":"2026-03-29T01:30:45GMT+2"}}	=> {"x":{"$date":{"$numberLong":"1774740645000"}}}
+{"$dateFromString":{"dateString":"2026/03/29","format":"%Y/%m/%d %H"}}	!! 241	Error parsing date string '2026/03/29'; 10: Not enough data available to satisfy format ' '
+{"$dateFromString":{"dateString":"2026","format":"%Y"}}	!! 241	an incomplete date/time string has been found, with elements missing: "2026"
+{"$dateFromString":{"dateString":"2026-1-2","format":"%Y-%m-%d"}}	=> {"x":{"$date":{"$numberLong":"1767312000000"}}}
+{"$dateFromString":{"dateString":"x2026","format":"%Y"}}	!! 241	Error parsing date string 'x2026'; 0: Unexpected data found. 'x'
+{"$dateFromString":{"dateString":"2026 +05:30","format":"%Y %z"}}	!! 241	an incomplete date/time string has been found, with elements missing: "2026 +05:30"
+{"$dateFromString":{"dateString":"2026 -0530","format":"%Y %z"}}	!! 241	an incomplete date/time string has been found, with elements missing: "2026 -0530"
+{"$dateFromString":{"dateString":"2026 +5","format":"%Y %z"}}	!! 241	an incomplete date/time string has been found, with elements missing: "2026 +5"
+{"$dateFromString":{"dateString":"2026 +120","format":"%Y %Z"}}	!! 241	an incomplete date/time string has been found, with elements missing: "2026 +120"
+{"$dateFromString":{"dateString":"2026 -90","format":"%Y %Z"}}	!! 241	an incomplete date/time string has been found, with elements missing: "2026 -90"
+{"$dateFromString":{"dateString":"2026 Jan","format":"%Y %b"}}	!! 241	an incomplete date/time string has been found, with elements missing: "2026 Jan"
+{"$dateFromString":{"dateString":"2026 xyz","format":"%Y %b"}}	!! 241	Error parsing date string '2026 xyz'; 5: A textual month could not be found 'x'
+{"$dateFromString":{"dateString":"2026 %","format":"%Y %%"}}	!! 241	an incomplete date/time string has been found, with elements missing: "2026 %"
+{"$dateFromString":{"dateString":"2026 1:2:3.4","format":"%Y %H:%M:%S.%L"}}	!! 241	Error parsing date string '2026 1:2:3.4'; 7: A two digit minute could not be found '2'; 9: A two digit second could not be found '3'
+{"$dateFromString":{"dateString":"2026 7","format":"%G %u"}}	=> {"x":{"$date":{"$numberLong":"1767484800000"}}}
+{"$dateFromString":{"dateString":"2026 54","format":"%G %V"}}	!! 241	Error parsing date string '2026 54'; 5: ISO Week must be between 1 and 53 '5'
+{"$dateFromString":{"dateString":"29 2026","format":"%d %Y"}}	!! 241	an incomplete date/time string has been found, with elements missing: "29 2026"
+{"$dateFromString":{"dateString":"2026 400","format":"%Y %j"}}	=> {"x":{"$date":{"$numberLong":"1801785600000"}}}
+{"$dateFromString":{"dateString":"2026-13-01","format":"%Y-%m-%d"}}	!! 241	Error parsing date string '2026-13-01'; 10: The parsed date was invalid ' '
+{"$dateFromString":{"dateString":"2026-02-30","format":"%Y-%m-%d"}}	!! 241	Error parsing date string '2026-02-30'; 10: The parsed date was invalid ' '
+{"$dateFromString":{"dateString":"2026-03-29T01:30:45Z","format":"%Y-%m-%dT%H:%M:%SZ"}}	=> {"x":{"$date":{"$numberLong":"1774747845000"}}}
+{"$dateFromString":{"dateString":"2026-03-29 12:00","format":"%Y-%m-%d %H:%M","timezone":"Europe/Madrid"}}	=> {"x":{"$date":{"$numberLong":"1774778400000"}}}
+{"$dateFromString":{"dateString":"2026-03-29 +0100","format":"%Y-%m-%d %z","timezone":"Europe/Madrid"}}	!! 241	you cannot pass in a date/time string with GMT offset together with a timezone argument

@@ -1,0 +1,1061 @@
+//! Diagnostic commands with RefDb's shapes and TeselaDB's data (FR-023): `buildInfo`,
+//! `hostInfo`, `serverStatus`, `connectionStatus`, `listCommands`, `getCmdLineOpts`, `getLog`,
+//! `dbStats` and `collStats` (`whatsmyuri` answers in the dispatch, which knows the connection).
+//! Shapes, types and messages measured against a `refrouter` 9.0.4 on 30-10-2026; the sections
+//! that describe parts TeselaDB does not have (RefEngine, anotherproduct, shards) are left out, as
+//! the divergences of 006 record.
+
+use teseladb_bson::{Document, Value};
+use teseladb_meta::collection_types::CollectionKind;
+use teseladb_range::read::ReadConcern;
+
+use super::admin::admin_only;
+use super::args::uuid_value;
+use super::catalog::collection_size;
+use super::names::{self, full};
+use super::query::{SCAN_CHUNK, documents_of};
+use super::{Backend, Ctx, lock, new_uuid};
+use crate::MAX_BSON_OBJECT_SIZE;
+use crate::error::{BAD_VALUE, CommandError, INVALID_NAMESPACE, OPERATION_FAILED};
+use crate::types::{type_name, wrong_type, wrong_types};
+
+/// `buildInfo`.
+pub const BUILD_INFO: &str = "buildInfo";
+/// `hostInfo`.
+pub const HOST_INFO: &str = "hostInfo";
+/// `serverStatus`.
+pub const SERVER_STATUS: &str = "serverStatus";
+/// `connectionStatus`.
+pub const CONNECTION_STATUS: &str = "connectionStatus";
+/// `whatsmyuri`.
+pub const WHATS_MY_URI: &str = "whatsmyuri";
+/// `listCommands`.
+pub const LIST_COMMANDS: &str = "listCommands";
+/// `getCmdLineOpts`.
+pub const GET_CMD_LINE_OPTS: &str = "getCmdLineOpts";
+/// `getLog`.
+pub const GET_LOG: &str = "getLog";
+/// `dbStats`.
+pub const DB_STATS: &str = "dbStats";
+/// `collStats`.
+pub const COLL_STATS: &str = "collStats";
+
+/// The RefDb version TeselaDB announces (D-024), the one its behaviour was measured against.
+pub const ANNOUNCED_VERSION: &str = "9.0.4";
+/// The announced version as `buildInfo`'s `versionArray`.
+const VERSION_ARRAY: [i32; 4] = [9, 0, 4, 0];
+/// What `serverStatus` calls the process: TeselaDB presents itself as a `refrouter` (D-024).
+const PROCESS_NAME: &str = "refrouter";
+/// The port after which RefDb writes `host:port` instead of the bare host name.
+const DEFAULT_PORT: u16 = 27017;
+/// The log `getLog` names with `'*'`, as a `refrouter` 9.0.4 lists them.
+const GLOBAL_LOG: &str = "global";
+/// The log of the warnings written at startup.
+const STARTUP_WARNINGS: &str = "startupWarnings";
+/// Bytes in a megabyte, for `mem`.
+const MB: u64 = 1 << 20;
+
+/// Counters of the connections of the node's client port.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ConnectionCounts {
+    /// Open now.
+    pub current: i64,
+    /// More it may still open (`--maxConns` minus `current`).
+    pub available: i64,
+    /// Opened since the start.
+    pub total_created: i64,
+    /// Refused because the port was full.
+    pub rejected: i64,
+    /// Running a command now.
+    pub active: i64,
+}
+
+/// Bytes and messages of the client port.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NetworkCounts {
+    /// Bytes received, after decompression.
+    pub bytes_in: i64,
+    /// Bytes sent, before compression.
+    pub bytes_out: i64,
+    /// Bytes read from the sockets.
+    pub physical_bytes_in: i64,
+    /// Bytes written to the sockets.
+    pub physical_bytes_out: i64,
+    /// Requests received.
+    pub requests: i64,
+    /// TLS handshakes completed with clients (TLS 1.3).
+    pub tls_handshakes: i64,
+    /// Milliseconds they took, summed.
+    pub tls_handshake_ms: i64,
+}
+
+/// What `getrusage(2)` and the operating system say of the process.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ResourceUse {
+    /// Resident memory, in bytes.
+    pub resident_bytes: u64,
+    /// Virtual memory, in bytes.
+    pub virtual_bytes: u64,
+    /// CPU time in user mode, in microseconds.
+    pub user_time_us: i64,
+    /// CPU time in system mode, in microseconds.
+    pub system_time_us: i64,
+    /// Largest resident set, in kilobytes.
+    pub max_resident_kb: i64,
+    /// Blocks read.
+    pub input_blocks: i64,
+    /// Blocks written.
+    pub output_blocks: i64,
+    /// Page faults served without I/O.
+    pub page_reclaims: i64,
+    /// Page faults that needed I/O.
+    pub page_faults: i64,
+    /// Context switches the process asked for.
+    pub voluntary_switches: i64,
+    /// Context switches it was forced into.
+    pub involuntary_switches: i64,
+    /// Threads of the process.
+    pub threads: i64,
+}
+
+/// The host as `hostInfo` describes it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HostFacts {
+    /// Host name.
+    pub hostname: String,
+    /// Processor architecture (`aarch64`, `x86_64`).
+    pub cpu_arch: String,
+    /// Logical processors.
+    pub num_cores: i32,
+    /// Logical processors the process may use.
+    pub num_cores_available: i32,
+    /// Physical memory, in megabytes.
+    pub mem_size_mb: i64,
+    /// Bytes of a memory page.
+    pub page_size: i64,
+    /// Pages of physical memory.
+    pub num_pages: i64,
+    /// Most open files of the process.
+    pub max_open_files: i64,
+    /// Operating system kind (`Linux`, `Darwin`).
+    pub os_type: String,
+    /// Its name.
+    pub os_name: String,
+    /// Its version.
+    pub os_version: String,
+    /// The kernel's release.
+    pub kernel_version: String,
+    /// The kernel's full version string.
+    pub version_string: String,
+}
+
+/// The node's log as `getLog` shows it: its most recent lines and how many it ever wrote.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LogTail {
+    /// Lines written since the start.
+    pub total: i64,
+    /// The last lines, oldest first.
+    pub lines: Vec<String>,
+}
+
+/// What the diagnostic commands report of the process and its host; the server fills it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ProcessFacts {
+    /// The client port's number.
+    pub port: u16,
+    /// Process identifier.
+    pub pid: i64,
+    /// Wall clock at the start, in milliseconds since the Unix epoch.
+    pub start_ms: u64,
+    /// Wall clock now, in milliseconds since the Unix epoch.
+    pub now_ms: u64,
+    /// The command line.
+    pub argv: Vec<String>,
+    /// The options the node runs with, as `getCmdLineOpts` names them.
+    pub parsed: Document,
+    /// TeselaDB's own version.
+    pub build: String,
+    /// The architecture and operating system TeselaDB was built for (`aarch64`, `linux`).
+    pub build_target: (String, String),
+    /// The host.
+    pub host: HostFacts,
+    /// The client port's connections.
+    pub connections: ConnectionCounts,
+    /// Its traffic.
+    pub network: NetworkCounts,
+    /// The process's use of the machine.
+    pub resources: ResourceUse,
+    /// Bytes used and total of the file system of the data directory.
+    pub fs_used: u64,
+    /// See `fs_used`.
+    pub fs_total: u64,
+    /// The `global` log.
+    pub log: LogTail,
+    /// The `startupWarnings` log.
+    pub startup_warnings: LogTail,
+}
+
+impl ProcessFacts {
+    /// The host as RefDb names it: `host`, or `host:port` off the default port.
+    pub fn host_name(&self) -> String {
+        match self.port {
+            0 | DEFAULT_PORT => self.host.hostname.clone(),
+            p => format!("{}:{p}", self.host.hostname),
+        }
+    }
+}
+
+/// What the node counted of its commands since it started (`serverStatus`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OpCounters {
+    /// Documents inserted.
+    pub insert: i64,
+    /// `find` commands.
+    pub query: i64,
+    /// Update statements.
+    pub update: i64,
+    /// Delete statements.
+    pub delete: i64,
+    /// `getMore` commands.
+    pub getmore: i64,
+    /// Other commands.
+    pub command: i64,
+    /// `aggregate` commands.
+    pub aggregate: i64,
+    /// Commands that failed (`asserts.user`).
+    pub user_asserts: i64,
+}
+
+impl OpCounters {
+    /// Counts `cmd`, named `name`, as RefDb's `opcounters` do, and whether it failed.
+    pub fn count(&mut self, name: &str, cmd: &Document, failed: bool) {
+        let statements = |field: &str| match cmd.get(field) {
+            Some(Value::Array(a)) => i64::try_from(a.len()).unwrap_or(i64::MAX),
+            _ => 0,
+        };
+        match name {
+            "insert" => self.insert += statements("documents"),
+            "update" => self.update += statements("updates"),
+            "delete" => self.delete += statements("deletes"),
+            "find" => self.query += 1,
+            "getMore" => self.getmore += 1,
+            "aggregate" => self.aggregate += 1,
+            _ => self.command += 1,
+        }
+        if failed {
+            self.user_asserts += 1;
+        }
+    }
+}
+
+/// A whole number as RefDb's `appendNumber` writes it: `int` when it fits, `long` otherwise.
+fn number(n: i64) -> Value {
+    i32::try_from(n).map_or(Value::Int64(n), Value::Int32)
+}
+
+/// `buildInfo`.
+pub fn build_info<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
+    let facts = ctx.backend.process();
+    let env = Document::new()
+        .with("distmod", "")
+        .with("distarch", facts.build_target.0.as_str())
+        .with("cc", "rustc")
+        .with("ccflags", "")
+        .with("cxx", "")
+        .with("cxxflags", "")
+        .with("linkflags", "")
+        .with("target_arch", facts.build_target.0.as_str())
+        .with("target_os", facts.build_target.1.as_str())
+        .with("cppdefines", "");
+    let version_array: Vec<Value> = VERSION_ARRAY.iter().map(|n| Value::Int32(*n)).collect();
+    Ok(Document::new()
+        .with("version", ANNOUNCED_VERSION)
+        .with("versionArray", version_array)
+        .with("gitVersion", facts.build.as_str())
+        .with("modules", Vec::<Value>::new())
+        .with("allocator", "system")
+        .with("javascriptEngine", "none")
+        .with("sysinfo", "deprecated")
+        .with("buildEnvironment", env)
+        .with("bits", 64)
+        .with("debug", cfg!(debug_assertions))
+        .with("maxBsonObjectSize", Value::Int64(MAX_BSON_OBJECT_SIZE as i64))
+        .with("opentelemetry", false)
+        .with("ok", 1.0))
+}
+
+/// `hostInfo`.
+pub fn host_info<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
+    let facts = ctx.backend.process();
+    let h = &facts.host;
+    let system = Document::new()
+        .with("currentTime", Value::DateTime(i64::try_from(facts.now_ms).unwrap_or(i64::MAX)))
+        .with("hostname", facts.host_name())
+        .with("cpuAddrSize", 64)
+        .with("memSizeMB", Value::Int64(h.mem_size_mb))
+        .with("memLimitMB", Value::Int64(h.mem_size_mb))
+        .with("numCores", h.num_cores)
+        .with("numCoresAvailableToProcess", h.num_cores_available)
+        .with("numPhysicalCores", h.num_cores)
+        .with("numCpuSockets", 1)
+        .with("cpuArch", h.cpu_arch.as_str())
+        .with("numaEnabled", false)
+        .with("numNumaNodes", 1);
+    let os = Document::new()
+        .with("type", h.os_type.as_str())
+        .with("name", h.os_name.as_str())
+        .with("version", h.os_version.as_str());
+    let extra = Document::new()
+        .with("versionString", h.version_string.as_str())
+        .with("kernelVersion", h.kernel_version.as_str())
+        .with("pageSize", Value::Int64(h.page_size))
+        .with("numPages", number(h.num_pages))
+        .with("maxOpenFiles", number(h.max_open_files));
+    Ok(Document::new().with("system", system).with("os", os).with("extra", extra).with("ok", 1.0))
+}
+
+/// Whether `serverStatus` shows `section`: every section unless the command sets it to a false
+/// value.
+fn shown(cmd: &Document, section: &str) -> bool {
+    cmd.get(section).and_then(crate::types::truthy).unwrap_or(true)
+}
+
+/// `serverStatus`.
+pub fn server_status<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
+    let facts = ctx.backend.process();
+    let (counters, status, sessions, cursors) = {
+        let g = lock(ctx.shared);
+        (g.counters, super::txn_stats::status(&g), g.sessions.len(), g.cursors.len())
+    };
+    let count = |n: usize| i64::try_from(n).unwrap_or(i64::MAX);
+    let now = i64::try_from(facts.now_ms).unwrap_or(i64::MAX);
+    let started = i64::try_from(facts.start_ms).unwrap_or(i64::MAX);
+    let uptime_ms = facts.now_ms.saturating_sub(facts.start_ms);
+    let mut d = Document::new()
+        .with("host", facts.host_name())
+        .with("version", ANNOUNCED_VERSION)
+        .with("process", PROCESS_NAME)
+        .with("pid", Value::Int64(facts.pid))
+        .with("uptime", (uptime_ms / 1000) as f64)
+        .with("uptimeMillis", Value::Int64(i64::try_from(uptime_ms).unwrap_or(i64::MAX)))
+        .with("uptimeEstimate", Value::Int64(i64::try_from(uptime_ms / 1000).unwrap_or(i64::MAX)))
+        .with("localTime", Value::DateTime(i64::try_from(facts.now_ms).unwrap_or(i64::MAX)));
+    // In a `refrouter` 9.0.4's order; the sections that cannot apply to TeselaDB are in DV-038.
+    let sections = [
+        ("asserts", asserts(&counters)),
+        ("connections", connections(&facts.connections)),
+        ("defaultRWConcern", default_rw_concern(now)),
+        ("extra_info", extra_info(&facts.resources)),
+        (
+            "health",
+            Document::new()
+                .with("state", "Ok")
+                .with("enteredStateAtTime", Value::DateTime(started)),
+        ),
+        ("internalTransactions", status.internal_transactions()),
+        ("logicalSessionRecordCache", status.session_cache(count(sessions))),
+        ("network", network(&facts.network)),
+        ("opLatencies", status.latencies()),
+        ("opWorkingTime", status.latencies()),
+        ("opcounters", opcounters(&counters)),
+        ("security", status.security()),
+        ("transactions", status.transactions()),
+        ("transportSecurity", transport_security(&facts.network)),
+        ("mem", mem(&facts.resources)),
+        ("metrics", metrics(&status, &facts.network, count(cursors), self_tests(ctx.shared))),
+    ];
+    for (name, section) in sections {
+        if shown(ctx.cmd, name) {
+            d.push(name, section);
+        }
+    }
+    d.push("ok", 1.0);
+    Ok(d)
+}
+
+/// Whether the node runs with `enableTestCommands` (`configureFailPoint` is one of its commands).
+fn self_tests(shared: &super::Shared) -> bool {
+    lock(shared).failpoint.is_some()
+}
+
+/// `defaultRWConcern`: the defaults TeselaDB applies when no `setDefaultRWConcern` set others
+/// (007), read as of `now`.
+fn default_rw_concern(now: i64) -> Document {
+    Document::new()
+        .with("defaultReadConcern", Document::new().with("level", "local"))
+        .with("defaultWriteConcern", Document::new().with("w", "majority").with("wtimeout", 0))
+        .with("defaultWriteConcernSource", "implicit")
+        .with("defaultReadConcernSource", "implicit")
+        .with("localUpdateWallClockTime", Value::DateTime(now))
+}
+
+/// `transportSecurity`: connections by TLS version; the client port speaks TLS 1.3 only.
+fn transport_security(n: &NetworkCounts) -> Document {
+    Document::new()
+        .with("1.0", Value::Int64(0))
+        .with("1.1", Value::Int64(0))
+        .with("1.2", Value::Int64(0))
+        .with("1.3", Value::Int64(n.tls_handshakes))
+        .with("unknown", Value::Int64(0))
+}
+
+/// `metrics`: the subsections TeselaDB has data for, in a `refrouter` 9.0.4's order.
+fn metrics(
+    s: &super::status::StatusCounters,
+    n: &NetworkCounts,
+    open_cursors: i64,
+    tests: bool,
+) -> Document {
+    let names =
+        COMMANDS.iter().map(|c| c.name).filter(|name| tests || *name != "configureFailPoint");
+    let network = Document::new()
+        .with("totalIngressTLSConnections", Value::Int64(n.tls_handshakes))
+        .with("totalIngressTLSHandshakeTimeMillis", Value::Int64(n.tls_handshake_ms));
+    Document::new()
+        .with("apiVersions", s.api_versions_section())
+        .with("cursor", s.cursor_section(open_cursors))
+        .with("commands", s.commands_section(names))
+        .with("getLastError", s.write_concern_section())
+        .with("network", network)
+        .with("operation", s.operation_section())
+        .with("queryExecutor", s.query_executor_section())
+}
+
+fn asserts(c: &OpCounters) -> Document {
+    Document::new()
+        .with("regular", 0)
+        .with("warning", 0)
+        .with("msg", 0)
+        .with("user", number(c.user_asserts))
+        .with("tripwire", 0)
+        .with("rollovers", 0)
+}
+
+fn connections(c: &ConnectionCounts) -> Document {
+    let rate = Document::new()
+        .with("rejected", 0)
+        .with("exempted", 0)
+        .with("interruptedDueToClientDisconnect", 0);
+    Document::new()
+        .with("current", number(c.current))
+        .with("available", number(c.available))
+        .with("totalCreated", number(c.total_created))
+        .with("rejected", number(c.rejected))
+        .with("active", number(c.active))
+        .with("queuedForEstablishment", 0)
+        .with("establishmentRateLimit", rate)
+        .with("threaded", number(c.current))
+        .with("exhaustIsMaster", Value::Int64(0))
+        .with("exhaustHello", Value::Int64(0))
+        .with("awaitingTopologyChanges", Value::Int64(0))
+        .with("loadBalanced", 0)
+        .with("priority", 0)
+}
+
+fn network(n: &NetworkCounts) -> Document {
+    Document::new()
+        .with("bytesIn", Value::Int64(n.bytes_in))
+        .with("bytesOut", Value::Int64(n.bytes_out))
+        .with("physicalBytesIn", Value::Int64(n.physical_bytes_in))
+        .with("physicalBytesOut", Value::Int64(n.physical_bytes_out))
+        .with("numSlowDNSOperations", Value::Int64(0))
+        .with("numSlowSSLOperations", Value::Int64(0))
+        .with("numRequests", Value::Int64(n.requests))
+}
+
+fn opcounters(c: &OpCounters) -> Document {
+    Document::new()
+        .with("insert", Value::Int64(c.insert))
+        .with("query", Value::Int64(c.query))
+        .with("update", Value::Int64(c.update))
+        .with("delete", Value::Int64(c.delete))
+        .with("getmore", Value::Int64(c.getmore))
+        .with("command", Value::Int64(c.command))
+        .with("aggregate", Value::Int64(c.aggregate))
+}
+
+fn mem(r: &ResourceUse) -> Document {
+    let mb = |bytes: u64| number(i64::try_from(bytes / MB).unwrap_or(i64::MAX));
+    Document::new()
+        .with("bits", 64)
+        .with("resident", mb(r.resident_bytes))
+        .with("virtual", mb(r.virtual_bytes))
+        .with("supported", true)
+}
+
+fn extra_info(r: &ResourceUse) -> Document {
+    Document::new()
+        .with("note", "fields vary by platform")
+        .with("user_time_us", Value::Int64(r.user_time_us))
+        .with("system_time_us", Value::Int64(r.system_time_us))
+        .with("maximum_resident_set_kb", Value::Int64(r.max_resident_kb))
+        .with("input_blocks", Value::Int64(r.input_blocks))
+        .with("output_blocks", Value::Int64(r.output_blocks))
+        .with("page_reclaims", Value::Int64(r.page_reclaims))
+        .with("page_faults", Value::Int64(r.page_faults))
+        .with("voluntary_context_switches", Value::Int64(r.voluntary_switches))
+        .with("involuntary_context_switches", Value::Int64(r.involuntary_switches))
+        .with("threads", Value::Int64(r.threads))
+}
+
+/// `connectionStatus`: no user is authenticated until 013; a new UUID on each call, as 9.0.4.
+pub fn connection_status<B: Backend + ?Sized>(
+    ctx: &mut Ctx<'_, B>,
+) -> Result<Document, CommandError> {
+    let privileges = ctx.cmd.get("showPrivileges").and_then(crate::types::truthy) == Some(true);
+    let (mut users, mut roles) = (Vec::<Value>::new(), Vec::<Value>::new());
+    if let Some(name) = ctx.backend.authenticated_user() {
+        let direct = match ctx.backend.authenticated_roles() {
+            // `__system` lists no role (measured on `refnode` 9.0.4, 013 FR-034).
+            _ if super::auth::is_internal(&name) => Vec::new(),
+            Some(r) => r,
+            None => ctx.backend.user(&name)?.map(|u| u.roles).unwrap_or_default(),
+        };
+        // Its direct roles, then those they inherit, as RefDb 9.0.4 lists them.
+        let inherited = super::roles::Graph::new(&mut *ctx.backend).inherit(&direct, None)?.roles;
+        let mut all = direct;
+        for r in inherited {
+            if !all.contains(&r) {
+                all.push(r);
+            }
+        }
+        roles = all
+            .iter()
+            .map(|r| Value::Document(Document::new().with("role", &*r.role).with("db", &*r.db)))
+            .collect();
+        users.push(Value::Document(Document::new().with("user", name.user).with("db", name.db)));
+    }
+    let mut auth =
+        Document::new().with("authenticatedUsers", users).with("authenticatedUserRoles", roles);
+    if privileges {
+        auth.push("authenticatedUserPrivileges", Vec::<Value>::new());
+    }
+    let uuid = new_uuid(ctx.backend);
+    Ok(Document::new()
+        .with("authInfo", auth)
+        .with("uuid", uuid_value(u128::from_be_bytes(uuid)))
+        .with("ok", 1.0))
+}
+
+/// `getCmdLineOpts`.
+pub fn get_cmd_line_opts<B: Backend + ?Sized>(
+    ctx: &mut Ctx<'_, B>,
+) -> Result<Document, CommandError> {
+    admin_only(GET_CMD_LINE_OPTS, ctx.db)?;
+    let facts = ctx.backend.process();
+    let argv: Vec<Value> = facts.argv.iter().map(|a| Value::from(a.as_str())).collect();
+    Ok(Document::new().with("argv", argv).with("parsed", facts.parsed).with("ok", 1.0))
+}
+
+/// `getLog`: `'*'` names the logs, `global` and `startupWarnings` give their last lines.
+pub fn get_log<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
+    admin_only(GET_LOG, ctx.db)?;
+    let Value::String(which) = ctx.first().clone() else {
+        return Err(wrong_type(&format!("{GET_LOG}.{GET_LOG}"), ctx.first(), "string"));
+    };
+    let facts = ctx.backend.process();
+    if which == "*" {
+        // RefDb's in-memory logs are created on first use: `startupWarnings` exists once a
+        // warning was logged at start (as the warning of the insecure mode).
+        let mut names = vec![Value::from(GLOBAL_LOG)];
+        if facts.startup_warnings.total > 0 {
+            names.push(Value::from(STARTUP_WARNINGS));
+        }
+        return Ok(Document::new().with("names", names).with("ok", 1.0));
+    }
+    let tail = match which.as_str() {
+        GLOBAL_LOG => facts.log,
+        STARTUP_WARNINGS => facts.startup_warnings,
+        other => {
+            let msg = format!("No log named '{other}'");
+            return Err(CommandError::new(OPERATION_FAILED, msg));
+        }
+    };
+    let lines: Vec<Value> = tail.lines.into_iter().map(Value::from).collect();
+    Ok(Document::new()
+        .with("totalLinesWritten", number(tail.total))
+        .with("log", lines)
+        .with("ok", 1.0))
+}
+
+/// The numeric types of `scale`, in a `refrouter` 9.0.4's order.
+const SCALE_TYPES: [&str; 4] = ["int", "decimal", "double", "long"];
+
+/// The `scale` of `dbStats` and `collStats`: a positive whole number, 1 by default.
+fn scale(cmd: &Document, name: &str) -> Result<i64, CommandError> {
+    let s = match cmd.get("scale") {
+        None => return Ok(1),
+        Some(v @ (Value::Int32(_) | Value::Int64(_) | Value::Double(_) | Value::Decimal128(_))) => {
+            crate::types::number(v).map_or(0, |x| x as i64)
+        }
+        Some(v) => return Err(wrong_types(&format!("{name}.scale"), v, &SCALE_TYPES)),
+    };
+    if s <= 0 {
+        return Err(CommandError::new(BAD_VALUE, "Scale must be greater than zero"));
+    }
+    Ok(s)
+}
+
+/// Documents and their bytes in a collection.
+fn tally<B: Backend + ?Sized>(
+    backend: &mut B,
+    c: &teseladb_meta::catalog::CollectionEntry,
+) -> Result<(i64, u64), CommandError> {
+    let (mut start, end) = documents_of(c);
+    let (mut count, mut bytes) = (0i64, 0u64);
+    loop {
+        let chunk = backend.scan(&start, &end, SCAN_CHUNK, ReadConcern::Local)?;
+        let Some((last, _)) = chunk.last() else { break };
+        let next = [last.as_slice(), &[0]].concat();
+        for (_, doc) in &chunk {
+            count += 1;
+            bytes += doc.len() as u64;
+        }
+        if chunk.len() < SCAN_CHUNK {
+            break;
+        }
+        start = next;
+    }
+    Ok((count, bytes))
+}
+
+/// `dbStats`. The sizes are TeselaDB's (DV-037); views arrive with 010.
+pub fn db_stats<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
+    let scale = scale(ctx.cmd, DB_STATS)?;
+    let db = ctx.db.to_owned();
+    let (mut collections, mut objects, mut data, mut storage) = (0i64, 0i64, 0u64, 0u64);
+    for (ns, c) in ctx.backend.collections()? {
+        if ns.db != db {
+            continue;
+        }
+        let (n, bytes) = tally(ctx.backend, &c)?;
+        let (start, end) = documents_of(&c);
+        collections += 1;
+        objects += n;
+        data += bytes;
+        storage += collection_size(ctx.backend.stored_bytes(&start, &end)?) - INDEX_BYTES;
+    }
+    let facts = ctx.backend.process();
+    let index = INDEX_BYTES * u64::try_from(collections).unwrap_or(0);
+    let scaled = |b: u64| b as f64 / scale as f64;
+    let avg = if objects > 0 { data as f64 / objects as f64 } else { 0.0 };
+    let (fs_used, fs_total) = match collections {
+        0 => (0, 0),
+        _ => (facts.fs_used, facts.fs_total),
+    };
+    Ok(Document::new()
+        .with("db", db)
+        .with("collections", number(collections))
+        .with("views", 0)
+        .with("objects", number(objects))
+        .with("avgObjSize", avg)
+        .with("dataSize", scaled(data))
+        .with("storageSize", scaled(storage))
+        .with("indexes", number(collections))
+        .with("indexSize", scaled(index))
+        .with("totalSize", scaled(storage + index))
+        .with("scaleFactor", number(scale))
+        .with("fsUsedSize", scaled(fs_used))
+        .with("fsTotalSize", scaled(fs_total))
+        .with("ok", 1.0))
+}
+
+/// The `storageStats` of `$collStats` for collection `c` of `ns`, sizes divided by `scale`, in
+/// the order of a `refrouter` 9.0.4 (measured 31-10-2026): a capped collection shows its limits, a
+/// time series its buckets instead of documents, and the index of a time series is on its
+/// `metaField` and `timeField`. Like `collStats` it has no `refengine`, `indexDetails` nor
+/// `indexBuilds` (DV-038).
+pub(crate) fn storage_stats<B: Backend + ?Sized>(
+    backend: &mut B,
+    shared: &super::Shared,
+    ns: &teseladb_meta::catalog::Namespace,
+    c: &teseladb_meta::catalog::CollectionEntry,
+    scale: i64,
+) -> Result<Document, CommandError> {
+    let (count, bytes) = tally(backend, c)?;
+    let (start, end) = documents_of(c);
+    let storage = collection_size(backend.stored_bytes(&start, &end)?) - INDEX_BYTES;
+    let scaled =
+        |b: u64| number(i64::try_from(b / u64::try_from(scale).unwrap_or(1)).unwrap_or(i64::MAX));
+    let kind = super::kinds::kind_of(c)?;
+    let mut d = Document::new().with("size", scaled(bytes));
+    let mut index_sizes = Document::new();
+    let index_bytes = match &kind {
+        CollectionKind::TimeSeries(ts) => {
+            let avg_bucket = if count > 0 { bytes / u64::try_from(count).unwrap_or(1) } else { 0 };
+            let stats = lock(shared).timeseries.get(&c.id).cloned().unwrap_or_default();
+            let mut series = Document::new()
+                .with("bucketsNs", full(ns))
+                .with("bucketCount", number(count))
+                .with("avgBucketSize", number(i64::try_from(avg_bucket).unwrap_or(i64::MAX)));
+            for (k, v) in stats.fields() {
+                series.push(k, number(v));
+            }
+            d.push("timeseries", series);
+            match &ts.meta_field {
+                Some(m) => {
+                    index_sizes.push(format!("{m}_1_{}_1", ts.time_field), scaled(INDEX_BYTES));
+                    INDEX_BYTES
+                }
+                None => 0,
+            }
+        }
+        CollectionKind::Clustered { .. } => {
+            d.push("count", number(count));
+            d.push(
+                "avgObjSize",
+                number(if count > 0 { i64::try_from(bytes).unwrap_or(0) / count } else { 0 }),
+            );
+            0
+        }
+        _ => {
+            d.push("count", number(count));
+            d.push(
+                "avgObjSize",
+                number(if count > 0 { i64::try_from(bytes).unwrap_or(0) / count } else { 0 }),
+            );
+            index_sizes.push("_id_", scaled(INDEX_BYTES));
+            INDEX_BYTES
+        }
+    };
+    d.push("numOrphanDocs", 0);
+    d.push("storageSize", scaled(storage));
+    d.push("freeStorageSize", 0);
+    d.push("capped", matches!(kind, CollectionKind::Capped { .. }));
+    if let CollectionKind::Capped { size, max } = &kind {
+        d.push("max", number(max.map_or(0, |m| i64::try_from(m).unwrap_or(i64::MAX))));
+        d.push("maxSize", scaled(*size));
+    }
+    let nindexes = i64::try_from(index_sizes.len()).unwrap_or(0);
+    Ok(d.with("nindexes", number(nindexes))
+        .with("totalIndexSize", scaled(index_bytes))
+        .with("indexSizes", index_sizes)
+        .with("totalSize", scaled(storage + index_bytes))
+        .with("scaleFactor", number(scale)))
+}
+
+/// Bytes TeselaDB counts for the `_id` index of a collection (DV-037).
+const INDEX_BYTES: u64 = super::catalog::BLOCK_BYTES;
+
+/// `collStats` (obsolete in 9.0 but still sent by tools, DV-021).
+pub fn coll_stats<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
+    let coll = match ctx.first() {
+        Value::String(s) => s.clone(),
+        other => {
+            let msg = format!("Collection name has invalid type {}", type_name(other));
+            return Err(CommandError::new(INVALID_NAMESPACE, msg));
+        }
+    };
+    let scale = scale(ctx.cmd, COLL_STATS)?;
+    if coll.is_empty() {
+        let msg = format!("Invalid namespace specified '{}'", ctx.db);
+        return Err(CommandError::new(INVALID_NAMESPACE, msg));
+    }
+    let ns = names::ns(ctx.db, &coll);
+    names::check(&ns)?;
+    let scaled =
+        |b: u64| number(i64::try_from(b / u64::try_from(scale).unwrap_or(1)).unwrap_or(i64::MAX));
+    let mut d = Document::new().with("sharded", false);
+    let Some(c) = ctx.backend.collection(&ns)? else {
+        // In a database the catalog does not have, `refrouter` 9.0.4 fails (measured).
+        if !super::catalog::has_database(ctx.backend, &ns.db)? {
+            return Err(super::catalog::missing_namespace(ctx.backend, &ns, String::new())?);
+        }
+        return Ok(d
+            .with("ns", full(&ns))
+            .with("count", 0)
+            .with("size", 0)
+            .with("storageSize", 0)
+            .with("totalIndexSize", 0)
+            .with("totalSize", 0)
+            .with("indexSizes", Document::new())
+            .with("avgObjSize", 0.0)
+            .with("maxSize", 0)
+            .with("nindexes", 0)
+            .with("scaleFactor", number(scale))
+            .with("nchunks", 1)
+            .with("ok", 1.0));
+    };
+    super::kinds::not_a_view(&ns, &c)?;
+    let (count, bytes) = tally(ctx.backend, &c)?;
+    let (start, end) = documents_of(&c);
+    let storage = collection_size(ctx.backend.stored_bytes(&start, &end)?) - INDEX_BYTES;
+    let avg = if count > 0 { (bytes / u64::try_from(count).unwrap_or(1)) as f64 } else { 0.0 };
+    // Each kind with its shape (015 FR-010, measured on a `refrouter` 9.0.4): a capped collection
+    // shows its limits, a clustered one has no `_id_` index of its own, and a time series counts
+    // buckets instead of documents.
+    let kind = super::kinds::kind_of(&c)?;
+    d.push("capped", matches!(kind, CollectionKind::Capped { .. }));
+    let mut max_size = 0;
+    if let CollectionKind::Capped { size, max } = &kind {
+        d.push("max", number(max.map_or(0, |m| i64::try_from(m).unwrap_or(i64::MAX))));
+        max_size = i64::try_from(*size).unwrap_or(i64::MAX);
+    }
+    d.push("ns", full(&ns));
+    let series = matches!(kind, CollectionKind::TimeSeries(_));
+    if !series {
+        d.push("count", number(count));
+    }
+    d.push("size", scaled(bytes));
+    d.push("storageSize", scaled(storage));
+    // A clustered collection has no `_id_` index of its own; a time series has one on its
+    // `metaField` and `timeField` when it has a `metaField`, and none otherwise (measured).
+    let index_name = match &kind {
+        CollectionKind::Clustered { .. } => None,
+        CollectionKind::TimeSeries(ts) => {
+            ts.meta_field.as_ref().map(|m| format!("{m}_1_{}_1", ts.time_field))
+        }
+        _ => Some("_id_".to_owned()),
+    };
+    let index_bytes = if index_name.is_some() { INDEX_BYTES } else { 0 };
+    d.push("totalIndexSize", scaled(index_bytes));
+    d.push("totalSize", scaled(storage + index_bytes));
+    if series {
+        let avg_bucket = if count > 0 { bytes / u64::try_from(count).unwrap_or(1) } else { 0 };
+        // The bucket counters of this node since it started, as RefDb's catalog counts them.
+        let stats = lock(ctx.shared).timeseries.get(&c.id).cloned().unwrap_or_default();
+        let mut ts = Document::new()
+            .with("bucketsNs", full(&ns))
+            .with("avgBucketSize", number(i64::try_from(avg_bucket).unwrap_or(i64::MAX)));
+        let mut counters = stats.fields();
+        counters.push(("bucketCount", count));
+        counters.sort_by_key(|(k, _)| *k);
+        for (k, v) in counters {
+            ts.push(k, number(v));
+        }
+        d.push("timeseries", ts);
+    }
+    let index_sizes = match &index_name {
+        None => Document::new(),
+        Some(n) => Document::new().with(n.clone(), scaled(INDEX_BYTES)),
+    };
+    let avg_value = if series { Value::Int32(0) } else { Value::Double(avg) };
+    Ok(d.with("indexSizes", index_sizes)
+        .with("avgObjSize", avg_value)
+        .with("maxSize", number(max_size))
+        .with("nindexes", i32::from(index_name.is_some()))
+        .with("scaleFactor", number(scale))
+        .with("nchunks", 1)
+        .with("ok", 1.0))
+}
+
+/// One command of `listCommands`, with the fields a `refrouter` 9.0.4 gives it.
+struct CommandInfo {
+    name: &'static str,
+    help: &'static str,
+    requires_auth: bool,
+    requires_authz_checks: bool,
+    secondary_ok: bool,
+    admin_only: bool,
+    api_v1: bool,
+}
+
+const NO_HELP: &str = "no help defined";
+const HELLO_HELP: &str = "Status information for clients negotiating a connection with this server";
+
+const fn info(
+    name: &'static str,
+    help: &'static str,
+    flags: [bool; 4],
+    api_v1: bool,
+) -> CommandInfo {
+    let [requires_auth, requires_authz_checks, secondary_ok, admin_only] = flags;
+    CommandInfo {
+        name,
+        help,
+        requires_auth,
+        requires_authz_checks,
+        secondary_ok,
+        admin_only,
+        api_v1,
+    }
+}
+
+/// The commands TeselaDB answers, in name order, as `listCommands` of a `refrouter` 9.0.4 shows
+/// them; the help of `getParameter` and `setParameter` lists TeselaDB's parameters.
+const COMMANDS: [CommandInfo; 53] = [
+    info(BUILD_INFO, NO_HELP, [true, false, true, false], false),
+    info(
+        "bulkWrite",
+        "command to apply inserts, updates and deletes in bulk",
+        [true, true, false, true],
+        true,
+    ),
+    info("collMod", NO_HELP, [true, true, false, false], true),
+    info(COLL_STATS, NO_HELP, [true, true, true, false], false),
+    info(
+        "configureFailPoint",
+        "modifies the settings of a fail point",
+        [false, false, true, true],
+        false,
+    ),
+    info(
+        super::maintenance::CONN_POOL_STATS,
+        "stats about connections between servers in a replica set or sharded cluster.",
+        [true, true, true, false],
+        false,
+    ),
+    info(CONNECTION_STATUS, NO_HELP, [false, false, true, false], false),
+    info(super::capped::CONVERT_TO_CAPPED, NO_HELP, [true, true, false, false], false),
+    info("count", NO_HELP, [true, true, true, false], true),
+    info("create", NO_HELP, [true, true, false, false], true),
+    info("currentOp", NO_HELP, [true, true, true, true], false),
+    info(super::maintenance::DATA_SIZE, NO_HELP, [true, true, true, false], false),
+    info(DB_STATS, NO_HELP, [true, true, true, false], false),
+    info("delete", "delete documents", [true, true, false, false], true),
+    info(
+        "distinct",
+        "{ distinct : 'collection name' , key : 'a.b' , query : {} }",
+        [true, true, true, false],
+        false,
+    ),
+    info("drop", NO_HELP, [true, true, true, false], true),
+    info(
+        super::maintenance::DROP_CONNECTIONS,
+        "Drop egress connections to specified host and port",
+        [true, true, true, true],
+        false,
+    ),
+    info("dropDatabase", NO_HELP, [true, true, true, false], true),
+    info("endSessions", "end a set of logical sessions", [true, false, true, false], true),
+    info("find", "query for documents", [true, true, false, false], true),
+    info("findAndModify", NO_HELP, [true, true, true, false], true),
+    info(
+        "getClusterParameter",
+        "Refresh and get cached cluster server parameter value from refrouter.",
+        [true, true, true, true],
+        false,
+    ),
+    info(GET_CMD_LINE_OPTS, NO_HELP, [true, true, true, true], false),
+    info(GET_LOG, "{ getLog : '*' }  OR { getLog : 'global' }", [true, true, true, true], false),
+    info("getMore", "retrieve more documents for a cursor id", [true, true, true, false], true),
+    info("getParameter", "", [true, true, true, true], false),
+    info("hello", HELLO_HELP, [false, true, true, false], true),
+    info(HOST_INFO, NO_HELP, [true, true, true, false], false),
+    info("insert", "insert documents", [true, true, false, false], true),
+    info("isMaster", HELLO_HELP, [false, true, true, false], false),
+    info(super::maintenance::IS_DB_GRID, NO_HELP, [true, true, true, false], false),
+    info(
+        "killAllSessions",
+        "kill all logical sessions, for a user, and their operations",
+        [true, true, true, false],
+        false,
+    ),
+    info("killCursors", "Kill a list of cursor ids", [true, false, true, false], true),
+    info("killOp", NO_HELP, [true, true, true, true], false),
+    info(
+        super::session::KILL_ALL_SESSIONS_BY_PATTERN,
+        "kill logical sessions by pattern",
+        [true, true, true, false],
+        false,
+    ),
+    info(
+        "killSessions",
+        "kill a logical session and its operations",
+        [true, false, true, false],
+        false,
+    ),
+    info("listCollections", NO_HELP, [true, true, true, false], true),
+    info(LIST_COMMANDS, "get a list of all db commands", [false, false, true, false], false),
+    info("listDatabases", NO_HELP, [true, true, true, true], true),
+    info("listIndexes", NO_HELP, [true, true, true, false], true),
+    info(super::maintenance::LOCK_INFO, NO_HELP, [true, true, true, true], false),
+    info(super::maintenance::LOG_ROTATE, NO_HELP, [true, true, true, true], false),
+    info(
+        "ping",
+        "a way to check that the server is alive. responds immediately even if server is in a db lock.",
+        [false, false, true, false],
+        true,
+    ),
+    info("refreshSessions", "renew a set of logical sessions", [true, false, true, false], true),
+    info("renameCollection", NO_HELP, [true, true, false, true], true),
+    info(
+        super::admin::REPL_SET_GET_STATUS,
+        "Not supported through refrouter",
+        [true, true, true, true],
+        false,
+    ),
+    info(
+        super::maintenance::ROTATE_CERTIFICATES,
+        "Rotate certificates for new SSL connections",
+        [true, true, true, true],
+        false,
+    ),
+    info(
+        SERVER_STATUS,
+        "returns lots of administrative server statistics. Optionally set {..., all: 1} to retrieve all server status sections.",
+        [true, true, true, false],
+        false,
+    ),
+    info(
+        "setClusterParameter",
+        "Set a cluster wide parameter on every node",
+        [true, true, false, true],
+        false,
+    ),
+    info("setParameter", "", [true, true, true, true], false),
+    info("startSession", "start a logical session", [true, false, true, false], false),
+    info("update", "update documents", [true, true, false, false], true),
+    info(WHATS_MY_URI, "{whatsmyuri:1}", [true, true, true, false], false),
+];
+
+/// The help of `getParameter`, as 9.0.4 writes it, with TeselaDB's parameters.
+fn get_parameter_help() -> String {
+    let mut h = String::from(
+        "get administrative option(s)\nexample:\n{ getParameter:1, notablescan:1 }\npass a document as the value for getParameter to request options\nexample:\n{ getParameter:{showDetails: true}, notablescan:1}\nsupported:\n",
+    );
+    for name in super::server_params::names() {
+        h.push_str(&format!("  {name}\n"));
+    }
+    h.push_str(
+        "{ getParameter:'*' } or { getParameter:{allParameters: true} } to get everything\n",
+    );
+    h
+}
+
+/// The help of `setParameter`, as 9.0.4 writes it, with the parameters settable at runtime.
+fn set_parameter_help() -> String {
+    let mut h = String::from(
+        "set administrative option(s)\n{ setParameter:1, <param>:<value> }\nsupported:\n",
+    );
+    for name in super::server_params::runtime_names() {
+        h.push_str(&format!("  {name}\n"));
+    }
+    h
+}
+
+/// `listCommands`: `configureFailPoint` only on a node with `enableTestCommands`.
+pub fn list_commands<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
+    let tests = lock(ctx.shared).failpoint.is_some();
+    let mut commands = Document::new();
+    for c in &COMMANDS {
+        if c.name == "configureFailPoint" && !tests {
+            continue;
+        }
+        let help = match c.name {
+            "getParameter" => get_parameter_help(),
+            "setParameter" => set_parameter_help(),
+            _ => c.help.to_owned(),
+        };
+        let mut entry = Document::new()
+            .with("help", help)
+            .with("requiresAuth", c.requires_auth)
+            .with("requiresAuthzChecks", c.requires_authz_checks)
+            .with("secondaryOk", c.secondary_ok)
+            .with("adminOnly", c.admin_only);
+        if c.name == "find" {
+            entry.push("secondaryOverrideOk", true);
+        }
+        let api: Vec<Value> = if c.api_v1 { vec![Value::from("1")] } else { Vec::new() };
+        entry.push("apiVersions", api);
+        entry.push("deprecatedApiVersions", Vec::<Value>::new());
+        commands.push(c.name, entry);
+    }
+    Ok(Document::new().with("commands", commands).with("ok", 1.0))
+}
+
+/// Whether TeselaDB's `listCommands` names `name`, so tests can check the table against the
+/// commands the dispatch runs.
+pub fn listed(name: &str) -> bool {
+    COMMANDS.iter().any(|c| c.name == name)
+}

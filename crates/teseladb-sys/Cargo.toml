@@ -1,0 +1,11 @@
+[package]
+name = "teseladb-sys"
+version = "0.1.0"
+description = "TeselaDB's minimal FFI with the operating system: file locking, space reservation, epoll/kqueue and CPU pinning."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true

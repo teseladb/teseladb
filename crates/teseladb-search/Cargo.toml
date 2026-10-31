@@ -1,0 +1,18 @@
+[package]
+name = "teseladb-search"
+version = "0.1.0"
+description = "TeselaDB's full-text and vector search: analyzers, segments, BM25 scoring and top-k retrieval."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+teseladb-crypto = { path = "../teseladb-crypto" }
+teseladb-hash = { path = "../teseladb-hash" }
+teseladb-keys = { path = "../teseladb-keys" }
+teseladb-mql = { path = "../teseladb-mql" }
+teseladb-types = { path = "../teseladb-types" }

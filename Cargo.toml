@@ -1,0 +1,48 @@
+[workspace]
+resolver = "3"
+# tools/* joins when teseladb-sim and teseladb-bench are copied (001 T029, T030).
+members = ["crates/*", "tools/*"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.98"
+publish = false
+license = "LicenseRef-TeselaDB"
+
+[workspace.lints.rust]
+# Logic crates add `#![forbid(unsafe_code)]`; teseladb-sys and the CPU-intrinsics modules of teseladb-hash and
+# teseladb-crypto allow it locally and document every block with `// SAFETY:`.
+unsafe_code = "deny"
+missing_docs = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(teseladb_bug, values(any()))', 'cfg(coverage)'] }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "deny"
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+
+[profile.dev]
+# Property and simulator tests walk millions of cases: optimize the workspace's crates without losing debug
+# assertions.
+opt-level = 1
+
+[profile.dev.package.teseladb-crypto]
+# The timing tests of teseladb-crypto (013 T005) measure optimized code: at opt-level 1 the
+# unoptimized harness loops show a class bias of their own on Apple cores.
+opt-level = 3
+
+[profile.release]
+debug = 1
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+[profile.dist]
+inherits = "release"
+lto = "fat"
+
+[profile.bench]
+inherits = "release"
+lto = "fat"

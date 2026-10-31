@@ -1,0 +1,179 @@
+{"$abs":[]}	!! 16020	Expression $abs takes exactly 1 arguments. 0 were passed in.
+{"$acos":[]}	!! 16020	Expression $acos takes exactly 1 arguments. 0 were passed in.
+{"$acosh":[]}	!! 16020	Expression $acosh takes exactly 1 arguments. 0 were passed in.
+{"$add":[]}	=> {"x":{"$numberInt":"0"}}
+{"$allElementsTrue":[]}	!! 16020	Expression $allElementsTrue takes exactly 1 arguments. 0 were passed in.
+{"$and":[]}	=> {"x":true}
+{"$anyElementTrue":[]}	!! 16020	Expression $anyElementTrue takes exactly 1 arguments. 0 were passed in.
+{"$arrayElemAt":[]}	!! 16020	Expression $arrayElemAt takes exactly 2 arguments. 0 were passed in.
+{"$arrayToObject":[]}	!! 16020	Expression $arrayToObject takes exactly 1 arguments. 0 were passed in.
+{"$asin":[]}	!! 16020	Expression $asin takes exactly 1 arguments. 0 were passed in.
+{"$asinh":[]}	!! 16020	Expression $asinh takes exactly 1 arguments. 0 were passed in.
+{"$atan":[]}	!! 16020	Expression $atan takes exactly 1 arguments. 0 were passed in.
+{"$atanh":[]}	!! 16020	Expression $atanh takes exactly 1 arguments. 0 were passed in.
+{"$avg":[]}	=> {"x":null}
+{"$binarySize":[]}	!! 16020	Expression $binarySize takes exactly 1 arguments. 0 were passed in.
+{"$bitAnd":[]}	=> {"x":{"$numberInt":"-1"}}
+{"$bitNot":[]}	!! 16020	Expression $bitNot takes exactly 1 arguments. 0 were passed in.
+{"$bitOr":[]}	=> {"x":{"$numberInt":"0"}}
+{"$bitXor":[]}	=> {"x":{"$numberInt":"0"}}
+{"$bottom":[]}	!! 7212122	$bottom requires an object as an argument, found: array
+{"$bottomN":[]}	!! 7212117	$bottomN requires an object as an argument, found: array
+{"$bsonSize":[]}	!! 16020	Expression $bsonSize takes exactly 1 arguments. 0 were passed in.
+{"$ceil":[]}	!! 16020	Expression $ceil takes exactly 1 arguments. 0 were passed in.
+{"$cmp":[]}	!! 16020	Expression $cmp takes exactly 2 arguments. 0 were passed in.
+{"$concat":[]}	=> {"x":""}
+{"$concatArrays":[]}	=> {"x":[]}
+{"$cond":[]}	!! 16020	Expression $cond takes exactly 3 arguments. 0 were passed in.
+{"$convert":[]}	!! 9	$convert expects an object of named arguments but found: array
+{"$cos":[]}	!! 16020	Expression $cos takes exactly 1 arguments. 0 were passed in.
+{"$cosh":[]}	!! 16020	Expression $cosh takes exactly 1 arguments. 0 were passed in.
+{"$covariancePop":[]}	!! 168	Unrecognized expression '$covariancePop'
+{"$covarianceSamp":[]}	!! 168	Unrecognized expression '$covarianceSamp'
+{"$dateAdd":[]}	!! 5166400	$dateAdd expects an object as its argument
+{"$dateDiff":[]}	!! 5166301	$dateDiff only supports an object as its argument
+{"$dateFromParts":[]}	!! 40519	$dateFromParts only supports an object as its argument
+{"$dateFromString":[]}	!! 40540	$dateFromString only supports an object as an argument, found: array
+{"$dateSubtract":[]}	!! 5166400	$dateSubtract expects an object as its argument
+{"$dateToParts":[]}	!! 40524	$dateToParts only supports an object as its argument
+{"$dateToString":[]}	!! 18629	$dateToString only supports an object as its argument
+{"$dateTrunc":[]}	!! 5439007	$dateTrunc only supports an object as its argument
+{"$dayOfMonth":[]}	!! 40536	$dayOfMonth accepts exactly one argument if given an array, but was given 0
+{"$dayOfWeek":[]}	!! 40536	$dayOfWeek accepts exactly one argument if given an array, but was given 0
+{"$dayOfYear":[]}	!! 40536	$dayOfYear accepts exactly one argument if given an array, but was given 0
+{"$degreesToRadians":[]}	!! 16020	Expression $degreesToRadians takes exactly 1 arguments. 0 were passed in.
+{"$denseRank":[]}	!! 168	Unrecognized expression '$denseRank'
+{"$derivative":[]}	!! 168	Unrecognized expression '$derivative'
+{"$deserializeEJSON":[]}	!! 9	$deserializeEJSON expects an object of named arguments but found: array
+{"$divide":[]}	!! 16020	Expression $divide takes exactly 2 arguments. 0 were passed in.
+{"$documentNumber":[]}	!! 168	Unrecognized expression '$documentNumber'
+{"$eq":[]}	!! 16020	Expression $eq takes exactly 2 arguments. 0 were passed in.
+{"$exp":[]}	!! 16020	Expression $exp takes exactly 1 arguments. 0 were passed in.
+{"$expMovingAvg":[]}	!! 168	Unrecognized expression '$expMovingAvg'
+{"$filter":[]}	!! 28646	$filter only supports an object as its argument
+{"$first":[]}	!! 16020	Expression $first takes exactly 1 arguments. 0 were passed in.
+{"$firstN":[]}	!! 5787801	specification must be an object; found $firstN: []
+{"$floor":[]}	!! 16020	Expression $floor takes exactly 1 arguments. 0 were passed in.
+{"$getField":[]}	!! 3041704	$getField requires 'field' to evaluate to type String, but got array
+{"$group":[]}	!! 168	Unrecognized expression '$group'
+{"$gt":[]}	!! 16020	Expression $gt takes exactly 2 arguments. 0 were passed in.
+{"$gte":[]}	!! 16020	Expression $gte takes exactly 2 arguments. 0 were passed in.
+{"$hash":[]}	!! 9	$hash expects an object of named arguments but found: array
+{"$hexHash":[]}	!! 9	$hexHash expects an object of named arguments but found: array
+{"$hour":[]}	!! 40536	$hour accepts exactly one argument if given an array, but was given 0
+{"$ifNull":[]}	!! 1257300	$ifNull needs at least two arguments, had: 0
+{"$in":[]}	!! 16020	Expression $in takes exactly 2 arguments. 0 were passed in.
+{"$indexOfArray":[]}	!! 28667	Expression $indexOfArray takes at least 2 arguments, and at most 4, but 0 were passed in.
+{"$indexOfBytes":[]}	!! 28667	Expression $indexOfBytes takes at least 2 arguments, and at most 4, but 0 were passed in.
+{"$indexOfCP":[]}	!! 28667	Expression $indexOfCP takes at least 2 arguments, and at most 4, but 0 were passed in.
+{"$integral":[]}	!! 168	Unrecognized expression '$integral'
+{"$isArray":[]}	!! 16020	Expression $isArray takes exactly 1 arguments. 0 were passed in.
+{"$isNumber":[]}	!! 16020	Expression $isNumber takes exactly 1 arguments. 0 were passed in.
+{"$isoDayOfWeek":[]}	!! 40536	$isoDayOfWeek accepts exactly one argument if given an array, but was given 0
+{"$isoWeek":[]}	!! 40536	$isoWeek accepts exactly one argument if given an array, but was given 0
+{"$isoWeekYear":[]}	!! 40536	$isoWeekYear accepts exactly one argument if given an array, but was given 0
+{"$last":[]}	!! 16020	Expression $last takes exactly 1 arguments. 0 were passed in.
+{"$lastN":[]}	!! 5787801	specification must be an object; found $lastN: []
+{"$let":[]}	!! 16874	$let only supports an object as its argument
+{"$linearFill":[]}	!! 168	Unrecognized expression '$linearFill'
+{"$literal":[]}	=> {"x":[]}
+{"$ln":[]}	!! 16020	Expression $ln takes exactly 1 arguments. 0 were passed in.
+{"$locf":[]}	!! 168	Unrecognized expression '$locf'
+{"$log":[]}	!! 16020	Expression $log takes exactly 2 arguments. 0 were passed in.
+{"$lt":[]}	!! 16020	Expression $lt takes exactly 2 arguments. 0 were passed in.
+{"$lte":[]}	!! 16020	Expression $lte takes exactly 2 arguments. 0 were passed in.
+{"$ltrim":[]}	!! 50696	$ltrim only supports an object as an argument, found array
+{"$map":[]}	!! 16878	$map only supports an object as its argument
+{"$max":[]}	=> {"x":null}
+{"$maxN":[]}	!! 5787900	specification must be an object; found $maxN: []
+{"$median":[]}	!! 7436201	specification must be an object; found $median: []
+{"$mergeObjects":[]}	=> {"x":{}}
+{"$meta":[]}	!! 17307	$meta only supports string arguments
+{"$millisecond":[]}	!! 40536	$millisecond accepts exactly one argument if given an array, but was given 0
+{"$min":[]}	=> {"x":null}
+{"$minMaxScaler":[]}	!! 168	Unrecognized expression '$minMaxScaler'
+{"$minN":[]}	!! 5787900	specification must be an object; found $minN: []
+{"$minute":[]}	!! 40536	$minute accepts exactly one argument if given an array, but was given 0
+{"$mod":[]}	!! 16020	Expression $mod takes exactly 2 arguments. 0 were passed in.
+{"$month":[]}	!! 40536	$month accepts exactly one argument if given an array, but was given 0
+{"$multiply":[]}	=> {"x":{"$numberInt":"1"}}
+{"$ne":[]}	!! 16020	Expression $ne takes exactly 2 arguments. 0 were passed in.
+{"$not":[]}	!! 16020	Expression $not takes exactly 1 arguments. 0 were passed in.
+{"$objectToArray":[]}	!! 16020	Expression $objectToArray takes exactly 1 arguments. 0 were passed in.
+{"$or":[]}	=> {"x":false}
+{"$percentile":[]}	!! 7436200	specification must be an object; found $percentile: []
+{"$pow":[]}	!! 16020	Expression $pow takes exactly 2 arguments. 0 were passed in.
+{"$radiansToDegrees":[]}	!! 16020	Expression $radiansToDegrees takes exactly 1 arguments. 0 were passed in.
+{"$range":[]}	!! 28667	Expression $range takes at least 2 arguments, and at most 3, but 0 were passed in.
+{"$rank":[]}	!! 168	Unrecognized expression '$rank'
+{"$reduce":[]}	!! 40075	$reduce requires an object as an argument, found: array
+{"$regexFind":[]}	!! 51103	$regexFind expects an object of named arguments but found: array
+{"$regexFindAll":[]}	!! 51103	$regexFindAll expects an object of named arguments but found: array
+{"$regexMatch":[]}	!! 51103	$regexMatch expects an object of named arguments but found: array
+{"$replaceAll":[]}	!! 51751	$replaceAll requires an object as an argument, found: array
+{"$replaceOne":[]}	!! 51751	$replaceOne requires an object as an argument, found: array
+{"$reverseArray":[]}	!! 16020	Expression $reverseArray takes exactly 1 arguments. 0 were passed in.
+{"$round":[]}	!! 28667	Expression $round takes at least 1 arguments, and at most 2, but 0 were passed in.
+{"$rtrim":[]}	!! 50696	$rtrim only supports an object as an argument, found array
+{"$sampleRate":[]}	!! 168	Unrecognized expression '$sampleRate'
+{"$score":[]}	!! 168	Unrecognized expression '$score'
+{"$second":[]}	!! 40536	$second accepts exactly one argument if given an array, but was given 0
+{"$serializeEJSON":[]}	!! 9	$serializeEJSON expects an object of named arguments but found: array
+{"$setDifference":[]}	!! 16020	Expression $setDifference takes exactly 2 arguments. 0 were passed in.
+{"$setEquals":[]}	!! 17045	$setEquals needs at least two arguments had: 0
+{"$setField":[]}	!! 4161100	$setField only supports an object as its argument
+{"$setIntersection":[]}	=> {"x":[]}
+{"$setIsSubset":[]}	!! 16020	Expression $setIsSubset takes exactly 2 arguments. 0 were passed in.
+{"$setUnion":[]}	=> {"x":[]}
+{"$setWindowFields":[]}	!! 168	Unrecognized expression '$setWindowFields'
+{"$shift":[]}	!! 168	Unrecognized expression '$shift'
+{"$sigmoid":[]}	!! 14	$sigmoid only supports numeric types, not array
+{"$similarityCosine":[]}	!! 10413209	$similarityCosine requires exactly two vectors
+{"$similarityDotProduct":[]}	!! 10413209	$similarityDotProduct requires exactly two vectors
+{"$similarityEuclidean":[]}	!! 10413209	$similarityEuclidean requires exactly two vectors
+{"$sin":[]}	!! 16020	Expression $sin takes exactly 1 arguments. 0 were passed in.
+{"$sinh":[]}	!! 16020	Expression $sinh takes exactly 1 arguments. 0 were passed in.
+{"$size":[]}	!! 16020	Expression $size takes exactly 1 arguments. 0 were passed in.
+{"$slice":[]}	!! 28667	Expression $slice takes at least 2 arguments, and at most 3, but 0 were passed in.
+{"$sortArray":[]}	!! 2942500	$sortArray requires an object as an argument, found: array
+{"$split":[]}	!! 16020	Expression $split takes exactly 2 arguments. 0 were passed in.
+{"$sqrt":[]}	!! 16020	Expression $sqrt takes exactly 1 arguments. 0 were passed in.
+{"$stdDevPop":[]}	=> {"x":null}
+{"$stdDevSamp":[]}	=> {"x":null}
+{"$strLenBytes":[]}	!! 16020	Expression $strLenBytes takes exactly 1 arguments. 0 were passed in.
+{"$strLenCP":[]}	!! 16020	Expression $strLenCP takes exactly 1 arguments. 0 were passed in.
+{"$strcasecmp":[]}	!! 16020	Expression $strcasecmp takes exactly 2 arguments. 0 were passed in.
+{"$substr":[]}	!! 16020	Expression $substrBytes takes exactly 3 arguments. 0 were passed in.
+{"$substrBytes":[]}	!! 16020	Expression $substrBytes takes exactly 3 arguments. 0 were passed in.
+{"$substrCP":[]}	!! 16020	Expression $substrCP takes exactly 3 arguments. 0 were passed in.
+{"$subtract":[]}	!! 16020	Expression $subtract takes exactly 2 arguments. 0 were passed in.
+{"$subtype":[]}	!! 16020	Expression $subtype takes exactly 1 arguments. 0 were passed in.
+{"$sum":[]}	=> {"x":{"$numberInt":"0"}}
+{"$switch":[]}	!! 40060	$switch requires an object as an argument, found: array
+{"$tan":[]}	!! 16020	Expression $tan takes exactly 1 arguments. 0 were passed in.
+{"$tanh":[]}	!! 16020	Expression $tanh takes exactly 1 arguments. 0 were passed in.
+{"$toArray":[]}	!! 50723	$toArray requires a single argument, got 0
+{"$toBool":[]}	!! 50723	$toBool requires a single argument, got 0
+{"$toDate":[]}	!! 50723	$toDate requires a single argument, got 0
+{"$toDecimal":[]}	!! 50723	$toDecimal requires a single argument, got 0
+{"$toDouble":[]}	!! 50723	$toDouble requires a single argument, got 0
+{"$toHashedIndexKey":[]}	=> {"x":{"$numberLong":"8849948234993459283"}}
+{"$toInt":[]}	!! 50723	$toInt requires a single argument, got 0
+{"$toLong":[]}	!! 50723	$toLong requires a single argument, got 0
+{"$toLower":[]}	!! 16020	Expression $toLower takes exactly 1 arguments. 0 were passed in.
+{"$toObject":[]}	!! 50723	$toObject requires a single argument, got 0
+{"$toObjectId":[]}	!! 50723	$toObjectId requires a single argument, got 0
+{"$toString":[]}	!! 50723	$toString requires a single argument, got 0
+{"$toUUID":[]}	!! 50723	$toUUID requires a single argument, got 0
+{"$toUpper":[]}	!! 16020	Expression $toUpper takes exactly 1 arguments. 0 were passed in.
+{"$top":[]}	!! 7212113	$top requires an object as an argument, found: array
+{"$topN":[]}	!! 721218	$topN requires an object as an argument, found: array
+{"$trim":[]}	!! 50696	$trim only supports an object as an argument, found array
+{"$trunc":[]}	!! 28667	Expression $trunc takes at least 1 arguments, and at most 2, but 0 were passed in.
+{"$tsIncrement":[]}	!! 16020	Expression $tsIncrement takes exactly 1 arguments. 0 were passed in.
+{"$tsSecond":[]}	!! 16020	Expression $tsSecond takes exactly 1 arguments. 0 were passed in.
+{"$type":[]}	!! 16020	Expression $type takes exactly 1 arguments. 0 were passed in.
+{"$unsetField":[]}	!! 4161100	$unsetField only supports an object as its argument
+{"$week":[]}	!! 40536	$week accepts exactly one argument if given an array, but was given 0
+{"$year":[]}	!! 40536	$year accepts exactly one argument if given an array, but was given 0
+{"$zip":[]}	!! 34460	$zip only supports an object as an argument, found array

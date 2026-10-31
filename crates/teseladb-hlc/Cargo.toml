@@ -1,0 +1,15 @@
+[package]
+name = "teseladb-hlc"
+version = "0.1.0"
+description = "TeselaDB's hybrid logical clock: one per node, shared by its cores, never going back, and its conversion to BSON timestamps."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+teseladb-types = { path = "../teseladb-types" }
+teseladb-keys = { path = "../teseladb-keys" }

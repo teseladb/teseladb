@@ -1,0 +1,19 @@
+[package]
+name = "teseladb-lsm"
+version = "0.1.0"
+description = "TeselaDB's per-core MVCC LSM: memtables, SST files, manifest, compaction and range GC, with no I/O of its own."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+teseladb-crypto = { path = "../teseladb-crypto" }
+teseladb-deflate = { path = "../teseladb-deflate" }
+teseladb-hash = { path = "../teseladb-hash" }
+teseladb-keys = { path = "../teseladb-keys" }
+teseladb-raftlog = { path = "../teseladb-raftlog" }
+teseladb-types = { path = "../teseladb-types" }
