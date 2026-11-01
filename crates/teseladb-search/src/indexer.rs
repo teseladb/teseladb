@@ -7,8 +7,9 @@
 
 use teseladb_bson::Document;
 
+use crate::analysis::ANALYZERS_VERSION;
 use crate::definition::Definition;
-use crate::index::{IndexError, MemIndex, Stats};
+use crate::index::{Contents, IndexError, MemIndex, Stats};
 use crate::query::search::{self, SearchError};
 
 /// The segment of one range `[start, end)` (an empty `end` has no upper bound).
@@ -50,6 +51,17 @@ impl Indexer {
             definition,
             segments: vec![Segment { start: Vec::new(), end: Vec::new(), index }],
         }
+    }
+
+    /// The version of the analyzers that make the terms of every segment: each replica analyzes
+    /// the documents itself, and replicas of one version make the same segments (FR-011).
+    pub fn analyzers_version(&self) -> u32 {
+        ANALYZERS_VERSION
+    }
+
+    /// Each segment's range and contents, in key order.
+    pub fn contents(&self) -> Vec<(Vec<u8>, Vec<u8>, Contents)> {
+        self.segments.iter().map(|s| (s.start.clone(), s.end.clone(), s.index.contents())).collect()
     }
 
     /// Number of segments.

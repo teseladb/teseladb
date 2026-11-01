@@ -97,6 +97,8 @@ pub struct Built {
 #[derive(Clone, Debug, Default)]
 pub struct SearchIndexes {
     built: BTreeMap<[u8; 12], Built>,
+    /// The indexes whose build failed on this node, with the version that failed.
+    failed: BTreeMap<[u8; 12], Served>,
 }
 
 /// What `statusDetail` says of an index this node built: the version it serves, when it was
@@ -109,21 +111,26 @@ pub struct Served {
     pub defined_ms: i64,
     /// The definition completed with its defaults.
     pub definition: Document,
+    /// Why building it failed: the index is then `FAILED` and cannot be queried.
+    pub failure: Option<String>,
 }
 
 impl SearchIndexes {
-    /// What this node serves of index `id`.
+    /// What this node serves of index `id`, or the version it failed to build.
     pub fn served(&self, id: &[u8; 12]) -> Option<Served> {
-        self.built.get(id).map(|b| Served {
+        let built = self.built.get(id).map(|b| Served {
             version: b.version,
             defined_ms: b.defined_ms,
             definition: b.definition.clone(),
-        })
+            failure: None,
+        });
+        built.or_else(|| self.failed.get(id).cloned())
     }
 
     /// Forgets index `id` (dropped).
     pub fn forget(&mut self, id: &[u8; 12]) {
         self.built.remove(id);
+        self.failed.remove(id);
     }
 }
 
@@ -163,9 +170,11 @@ pub fn with_index<B: Backend + ?Sized, R>(
     f: impl FnOnce(&Segments, &BTreeMap<Vec<u8>, Document>) -> R,
 ) -> Result<R, CommandError> {
     let taken = lock(shared).search.built.remove(&entry.id);
+    let mut fresh = false;
     let mut built = match taken {
         Some(b) if b.version == entry.version && b.collection == coll.id => b,
         _ => {
+            fresh = true;
             let (indexer, definition, view) = definition_of(entry)?;
             Built {
                 collection: coll.id,
@@ -179,9 +188,24 @@ pub fn with_index<B: Backend + ?Sized, R>(
             }
         }
     };
-    catch_up(backend, coll, &mut built)?;
+    if let Err(e) = catch_up(backend, coll, &mut built) {
+        // A document the definition cannot analyze fails the build: the index is `FAILED`
+        // (measured: `replication failed (action=drop): minGram must be greater than zero`).
+        if fresh && e.code == UNKNOWN_ERROR {
+            let failed = Served {
+                version: built.version,
+                defined_ms: built.defined_ms,
+                definition: built.definition,
+                failure: Some(format!("replication failed (action=drop): {}", e.errmsg)),
+            };
+            lock(shared).search.failed.insert(entry.id, failed);
+        }
+        return Err(e);
+    }
     let out = f(&built.indexer, &built.stored);
-    lock(shared).search.built.insert(entry.id, built);
+    let mut indexes = lock(shared);
+    indexes.search.failed.remove(&entry.id);
+    indexes.search.built.insert(entry.id, built);
     Ok(out)
 }
 
@@ -302,6 +326,10 @@ pub fn source<B: Backend + ?Sized>(
         Some(e) if !serves(&e, view.as_deref())? => return Ok(missing(meta_only)),
         Some(e) => e,
     };
+    let failed = lock(shared).search.served(&entry.id);
+    if failed.is_some_and(|s| s.version == entry.version && s.failure.is_some()) {
+        return Err(query_error(failed_state(&entry, &coll, ns)));
+    }
     let found = with_index(backend, shared, &coll, &entry, |ix, stored| match (ix, meta_only) {
         (Segments::Search(ix), true) => ix.meta(spec).map(|d| vec![plain(d)]),
         (Segments::Search(ix), false) => {
@@ -310,6 +338,18 @@ pub fn source<B: Backend + ?Sized>(
         (Segments::Vector(_), _) => Err(vector_search::not_search(&name)),
     })?;
     found.map_err(|e| query_error(e.0))
+}
+
+/// The error of a query on an index that failed to build (measured).
+fn failed_state(entry: &SearchIndexEntry, coll: &CollectionEntry, ns: &Namespace) -> String {
+    let id: String = entry.id.iter().map(|b| format!("{b:02x}")).collect();
+    let u: String = coll.uuid.iter().map(|b| format!("{b:02x}")).collect();
+    let uuid = format!("{}-{}-{}-{}-{}", &u[..8], &u[8..12], &u[12..16], &u[16..20], &u[20..]);
+    format!(
+        "cannot query search index {id} (index {} collection {} ({uuid}) in database {}) while in \
+         state FAILED",
+        entry.name, ns.coll, ns.db
+    )
 }
 
 /// What a search stage finds without an index: nothing, and `$searchMeta` counts no document.
@@ -425,14 +465,21 @@ pub fn status_detail(host: u64, served: &Served) -> Document {
     let version = Document::new()
         .with("version", i32::try_from(served.version).unwrap_or(i32::MAX))
         .with("createdAt", Value::DateTime(created));
-    let main = Document::new()
-        .with("status", "READY")
-        .with("queryable", true)
+    let (status, queryable) = match served.failure {
+        Some(_) => ("FAILED", false),
+        None => ("READY", true),
+    };
+    let mut main = Document::new()
+        .with("status", status)
+        .with("queryable", queryable)
         .with("definitionVersion", version)
         .with("definition", served.definition.clone());
+    if let Some(message) = &served.failure {
+        main.push("message", message.as_str());
+    }
     Document::new()
         .with("hostname", format!("{host:024x}"))
-        .with("status", "READY")
-        .with("queryable", true)
+        .with("status", status)
+        .with("queryable", queryable)
         .with("mainIndex", main)
 }

@@ -429,9 +429,14 @@ pub fn described(
     let (status, queryable, detail) = match served {
         Some(s) => {
             let mut d = search_ops::status_detail(host, s);
-            let status = if s.version == e.version { "READY" } else { "BUILDING" };
+            let status = match (&s.failure, s.version == e.version) {
+                (Some(_), _) => "FAILED",
+                (None, true) => "READY",
+                (None, false) => "BUILDING",
+            };
+            let queryable = s.failure.is_none();
             d.insert("status", status);
-            (status, true, vec![Value::Document(d)])
+            (status, queryable, vec![Value::Document(d)])
         }
         None => (status_name(e.status), queryable(e), Vec::new()),
     };

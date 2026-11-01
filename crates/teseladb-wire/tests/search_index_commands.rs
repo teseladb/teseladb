@@ -793,3 +793,36 @@ fn indexes_on_views_follow_the_view_stages() {
     let analyzer = field(&listed[0], "latestDefinition.analyzer");
     assert_eq!(analyzer, &Value::from("reflib.standard"));
 }
+
+/// A custom analyzer with `nGram` `minGram: 0` passes the definition and fails when it first
+/// analyzes a text (measured: `FAILED`, `replication failed (action=drop): minGram must be greater
+/// than zero`, and a query names the index and its state); unused, it is never built.
+#[test]
+fn an_analyzer_that_cannot_be_built_fails_the_index() {
+    let mut m = with_collection();
+    let grams = doc(&[("type", "nGram".into()), ("minGram", 0.into()), ("maxGram", 2.into())]);
+    let analyzer = doc(&[("name", "a".into()), ("tokenizer", grams.into())]);
+    let defined = |used: bool| {
+        let d = dynamic(true).with("analyzers", arr(vec![analyzer.clone()]));
+        if used { d.with("analyzer", "a") } else { d }
+    };
+    create(&mut m, "c", vec![index("bad", defined(true)), index("unused", defined(false))]);
+    let listed = batch(&list(&mut m, &[]));
+    assert_eq!(field(&listed[0], "status"), &Value::from("FAILED"));
+    assert_eq!(field(&listed[0], "queryable"), &Value::Boolean(false));
+    let Value::Array(detail) = field(&listed[0], "statusDetail") else { panic!("{listed:?}") };
+    let Some(Value::Document(detail)) = detail.first() else { panic!("{listed:?}") };
+    assert_eq!(field(detail, "mainIndex.status"), &Value::from("FAILED"));
+    let message = "replication failed (action=drop): minGram must be greater than zero";
+    assert_eq!(field(detail, "mainIndex.message"), &Value::from(message));
+    assert_eq!(field(&listed[1], "status"), &Value::from("READY"));
+    let (code, msg) = error(&search(&mut m, "c", "$search", text("hola").with("index", "bad")));
+    assert_eq!(code, 8);
+    let Value::String(id) = field(&listed[0], "id") else { panic!("{listed:?}") };
+    let start = format!("cannot query search index {id} (index bad collection c (");
+    assert!(msg.starts_with(&start), "{msg}");
+    assert!(msg.ends_with(") in database t) while in state FAILED"), "{msg}");
+    assert!(
+        batch(&search(&mut m, "c", "$search", text("hola").with("index", "unused"))).len() == 1
+    );
+}
