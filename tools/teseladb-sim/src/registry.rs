@@ -6,9 +6,9 @@ use crate::history::History;
 use crate::workloads::{
     Workload, indexes::Indexes, kv::KvWorkload, lsm::LsmWorkload, lsm_ingest::LsmIngest,
     meta2::Meta2Workload, multirange::MultiRangeWorkload, queries::Queries,
-    range_docs::RangeDocsWorkload,
-    relocate::RelocateWorkload, special_collections::SpecialCollections, splits::SplitsWorkload,
-    storage::StorageWorkload, txn_append::Append, txn_bank::Bank,
+    range_docs::RangeDocsWorkload, relocate::RelocateWorkload,
+    special_collections::SpecialCollections, splits::SplitsWorkload, storage::StorageWorkload,
+    txn_append::Append, txn_bank::Bank,
 };
 use crate::world::World;
 
