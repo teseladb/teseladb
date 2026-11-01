@@ -27,6 +27,7 @@ pub mod config_db;
 pub mod config_settings;
 pub mod cross_range;
 pub mod crud;
+pub mod diagnostic_data;
 pub mod diagnostics;
 pub mod engines;
 pub mod explain;
@@ -67,6 +68,7 @@ pub mod txn_stats;
 pub mod users;
 pub mod users_info;
 pub mod uuid;
+pub mod validate;
 pub mod views;
 pub mod write_block;
 
@@ -689,7 +691,7 @@ impl<B: Backend + ?Sized> Ctx<'_, B> {
 }
 
 /// The commands of this module.
-const NAMES: [&str; 70] = [
+const NAMES: [&str; 72] = [
     aggregate::AGGREGATE,
     plan_cache::PLAN_CACHE_CLEAR,
     explain::EXPLAIN,
@@ -760,6 +762,8 @@ const NAMES: [&str; 70] = [
     diagnostics::DB_STATS,
     diagnostics::COLL_STATS,
     profile::PROFILE,
+    validate::VALIDATE,
+    diagnostic_data::GET_DIAGNOSTIC_DATA,
 ];
 
 /// Whether `name` is one of this module's commands.
@@ -828,6 +832,8 @@ fn command<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comman
         diagnostics::DB_STATS => diagnostics::db_stats(ctx),
         diagnostics::COLL_STATS => diagnostics::coll_stats(ctx),
         profile::PROFILE => profile::profile(ctx),
+        validate::VALIDATE => validate::validate(ctx),
+        diagnostic_data::GET_DIAGNOSTIC_DATA => diagnostic_data::get_diagnostic_data(ctx),
         admin::CURRENT_OP => admin::current_op(ctx),
         admin::REPL_SET_GET_STATUS => admin::repl_set_get_status(ctx),
         crud::INSERT => crud::insert(ctx),

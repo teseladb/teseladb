@@ -48,6 +48,11 @@ impl Key {
     pub fn with_version(&self, ts: Hlc) -> VersionedKey {
         VersionedKey::new(&self.0, ts)
     }
+
+    /// A key as the store gives it back in a scan.
+    pub fn from_stored(bytes: Vec<u8>) -> Key {
+        Key(bytes)
+    }
 }
 
 /// The primary key of a document, which ends its index entries.
