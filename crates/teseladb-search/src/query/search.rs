@@ -115,6 +115,24 @@ pub fn run(index: &MemIndex, spec: &Document) -> Result<Vec<Hit>, SearchError> {
     Ok(index.hits(scores))
 }
 
+/// The document of `$searchMeta` (and `$$SEARCH_META`) for `spec`: the count of the documents
+/// it selects, as `lowerBound` unless `count.type` is `total` (measured: the count is exact).
+pub fn meta(index: &MemIndex, spec: &Document) -> Result<Document, SearchError> {
+    let total = match spec.get("count") {
+        None => false,
+        Some(Value::Document(c)) => match c.get("type") {
+            None => false,
+            Some(Value::String(t)) if t == "lowerBound" => false,
+            Some(Value::String(t)) if t == "total" => true,
+            Some(_) => return Err(shape("count.type", "must be one of [lowerBound, total]")),
+        },
+        Some(_) => return Err(shape("count", "must be a document")),
+    };
+    let n = i64::try_from(run(index, spec)?.len()).unwrap_or(i64::MAX);
+    let name = if total { "total" } else { "lowerBound" };
+    Ok(Document::new().with("count", Document::new().with(name, n)))
+}
+
 fn parse_root(index: &MemIndex, spec: &Document) -> Result<Operator, SearchError> {
     let ops: Vec<(&str, &Value)> = spec.iter().filter(|(k, _)| OPERATORS.contains(k)).collect();
     match ops.as_slice() {

@@ -293,3 +293,30 @@ fn exists_scores_one_as_refsearch() {
         Err(SearchError("\"exists\" unrecognized field \"foo\"".to_owned()))
     );
 }
+
+#[test]
+fn search_meta_counts_as_refsearch() {
+    let idx = index();
+    let spec = |count: Option<Document>| {
+        let mut d =
+            Document::new().with("text", Document::new().with("query", "gato").with("path", "t"));
+        if let Some(c) = count {
+            d.push("count", c);
+        }
+        d
+    };
+    let lower = |n: i64| Document::new().with("count", Document::new().with("lowerBound", n));
+    assert_eq!(meta(&idx, &spec(None)), Ok(lower(5)));
+    assert_eq!(
+        meta(&idx, &spec(Some(Document::new().with("type", "total")))),
+        Ok(Document::new().with("count", Document::new().with("total", 5i64)))
+    );
+    let threshold = Document::new().with("type", "lowerBound").with("threshold", 2);
+    assert_eq!(meta(&idx, &spec(Some(threshold))), Ok(lower(5)));
+    let none = Document::new().with("text", Document::new().with("query", "zzz").with("path", "t"));
+    assert_eq!(meta(&idx, &none), Ok(lower(0)));
+    assert_eq!(
+        meta(&idx, &spec(Some(Document::new().with("type", "x")))),
+        Err(SearchError("\"count.type\" must be one of [lowerBound, total]".to_owned()))
+    );
+}
