@@ -111,6 +111,31 @@ fn storage_stats(section: RawDoc<'_>) -> Result<(), MqlError> {
     Ok(())
 }
 
+/// The options of `$listClusterCatalog`, each a flag.
+const CLUSTER_CATALOG_FLAGS: [&str; 3] = ["shards", "balancingConfiguration", "tracked"];
+
+/// RefDb's code for a `$listClusterCatalog` that is no object.
+const CLUSTER_CATALOG_OBJECT: teseladb_mql::ErrorCode =
+    teseladb_mql::ErrorCode { code: 9_621_302, name: "Location9621302" };
+
+/// Checks the specification of `$listClusterCatalog`: an object of its flags (measured on a
+/// `refrouter` 9.0.4).
+pub fn cluster_catalog(v: RawValue<'_>) -> Result<Document, MqlError> {
+    let RawValue::Document(d) = v else {
+        return Err(error(
+            CLUSTER_CATALOG_OBJECT,
+            format!(
+                "$listClusterCatalog must take an object but found: $listClusterCatalog: {}",
+                display(&Value::from(v))
+            ),
+        ));
+    };
+    if let Some((k, _)) = d.iter().find(|(k, _)| !CLUSTER_CATALOG_FLAGS.contains(k)) {
+        return Err(unknown_field("$listClusterCatalog", k));
+    }
+    Ok(Document::from(d))
+}
+
 /// Checks the specification of `$planCacheStats`: an object whose only field may be
 /// `allHosts` (measured on a `refrouter` 9.0.4).
 pub fn plan_cache_stats(v: RawValue<'_>) -> Result<Document, MqlError> {

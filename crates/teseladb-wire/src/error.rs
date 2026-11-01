@@ -90,6 +90,8 @@ codes! {
     PROJECTION_INCLUSION_IN_EXCLUSION = 31_253, "Location31253";
     /// An exclusion in an inclusion projection.
     PROJECTION_EXCLUSION_IN_INCLUSION = 31_254, "Location31254";
+    /// `$listClusterCatalog` on a collection.
+    CLUSTER_CATALOG_ON_COLLECTION = 9_621_301, "Location9621301";
     /// `$planCacheStats` of a collection that does not exist.
     PLAN_CACHE_NO_COLLECTION = 50_933, "Location50933";
     /// Invalid combination of options.

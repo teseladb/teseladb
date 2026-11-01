@@ -422,6 +422,9 @@ fn parse_stage(d: RawDoc<'_>, ctx: &Ctx) -> Result<Stage, MqlError> {
         }
         "$listSessions" => Stage::System("$listSessions", system::sessions("$listSessions", arg)?),
         "$planCacheStats" => Stage::System("$planCacheStats", system::plan_cache_stats(arg)?),
+        "$listClusterCatalog" => {
+            Stage::System("$listClusterCatalog", system::cluster_catalog(arg)?)
+        }
         out_merge::OUT => {
             Stage::Write(Box::new(out_merge::Write::Out(out_merge::Out::parse(arg)?)))
         }

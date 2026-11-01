@@ -449,3 +449,43 @@ fn geo_near_answers_as_refdb() {
         assert!(wrong.is_empty(), "{} differ:\n{}", wrong.len(), wrong.join("\n"));
     }
 }
+
+/// `$listClusterCatalog` (`tests/aggregate/cluster_catalog.out`, 010 T046): the collections and
+/// views of the database with their namespace, options, UUID and `_id` index, none sharded, its
+/// flags and its errors, as a `refrouter` 9.0.4 answers; the UUIDs are the node's own.
+#[test]
+fn cluster_catalog_answers_as_refdb() {
+    let mut m = Mem::new();
+    load(&mut m, "c", C);
+    load(&mut m, "o", O);
+    let uuids = |text: &str| -> String {
+        let mut out = String::new();
+        let mut rest = text;
+        while let Some(i) = rest.find("\"uuid\":{\"$binary\":{\"base64\":\"") {
+            let start = i + "\"uuid\":{\"$binary\":{\"base64\":\"".len();
+            out.push_str(&rest[..start]);
+            rest = &rest[start..];
+            let end = rest.find('"').unwrap_or(0);
+            out.push_str("UUID");
+            rest = &rest[end..];
+        }
+        out.push_str(rest);
+        out.replace("\"sh1\"", "\"node1\"")
+    };
+    let mut wrong = Vec::new();
+    for line in include_str!("aggregate/cluster_catalog.out").lines().filter(|l| !l.is_empty()) {
+        let (cmd, want) = line.split_once('\t').expect("a command and its reply");
+        let got = uuids(&ours(&mut m, cmd));
+        let want = match want.strip_prefix("=> ") {
+            Some(json) => {
+                format!("=> {}", canonical(&normal(extjson::parse(json).expect("reply"))))
+            }
+            None => want.to_owned(),
+        };
+        let want = uuids(&want);
+        if got != want {
+            wrong.push(format!("{cmd}\n   got  {got}\n   want {want}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{} differ:\n{}", wrong.len(), wrong.join("\n"));
+}

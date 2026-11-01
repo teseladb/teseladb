@@ -105,6 +105,58 @@ impl<B: Backend + ?Sized> WireEnv<'_, B> {
         Ok((names::full(ns), out))
     }
 
+    /// `$listClusterCatalog`: every collection and view of the command's database (of every
+    /// database on `admin`), as `listCollections` writes them with their namespace and database,
+    /// none sharded; `shards` names the node and `tracked` says none is (measured on a `refrouter`
+    /// 9.0.4).
+    fn cluster_catalog(&self, spec: &Document) -> Result<Vec<Document>, CommandError> {
+        let mut backend = self.backend.borrow_mut();
+        let node = super::shard_name(backend.node());
+        let mut found = backend.collections()?;
+        found.retain(|(ns, _)| self.db == super::admin::ADMIN_DB || ns.db == self.db);
+        // Views first, as RefDb lists them; the collections in namespace order (RefDb's own
+        // follows its catalog's hash table).
+        let is_view = |c: &teseladb_meta::catalog::CollectionEntry| {
+            matches!(super::kinds::kind_of(c), Ok(CollectionKind::View { .. }))
+        };
+        found.sort_by(|a, b| {
+            (!is_view(&a.1), names::full(&a.0)).cmp(&(!is_view(&b.1), names::full(&b.0)))
+        });
+        let flag = |k: &str| matches!(spec.get(k), Some(Value::Boolean(true)));
+        let mut out = Vec::new();
+        for (ns, c) in found {
+            let kind = super::kinds::kind_of(&c)?;
+            let mut d = Document::new()
+                .with("ns", names::full(&ns))
+                .with("db", ns.db.as_str())
+                .with("type", kind.type_name())
+                .with("options", super::catalog::options_of(&c)?);
+            match kind {
+                CollectionKind::View { .. } => {
+                    d.push("info", Document::new().with("readOnly", true))
+                }
+                _ => d.push(
+                    "info",
+                    Document::new()
+                        .with("readOnly", false)
+                        .with("uuid", Value::Binary { subtype: 4, bytes: c.uuid.to_vec() }),
+                ),
+            }
+            if matches!(kind, CollectionKind::Normal | CollectionKind::Capped { .. }) {
+                d.push("idIndex", super::catalog::id_index(&c)?);
+            }
+            d.push("sharded", false);
+            if flag("shards") && !matches!(kind, CollectionKind::View { .. }) {
+                d.push("shards", vec![Value::String(node.clone())]);
+            }
+            if flag("tracked") {
+                d.push("tracked", false);
+            }
+            out.push(d);
+        }
+        Ok(out)
+    }
+
     /// `$planCacheStats`: the entries of the node's plan cache for the aggregated collection,
     /// which must exist (50933).
     fn plan_cache_stats(&self) -> Result<Vec<Document>, CommandError> {
@@ -258,6 +310,7 @@ impl<B: Backend + ?Sized> Env for WireEnv<'_, B> {
             "$listLocalSessions" => self.local_sessions(spec).map_err(to_mql),
             "$listSessions" => self.recorded_sessions(spec).map_err(to_mql),
             "$planCacheStats" => self.plan_cache_stats().map_err(to_mql),
+            "$listClusterCatalog" => self.cluster_catalog(spec).map_err(to_mql),
             other => Err(MqlError::new(
                 teseladb_mql::ErrorCode { code: BAD_VALUE.code, name: BAD_VALUE.name },
                 format!("{other} is not supported by this node"),
@@ -565,7 +618,11 @@ pub fn aggregate<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
     let batch: Vec<Value> = batch.into_iter().map(Value::Document).collect();
     // The fields of the cursor come in this order on a collection, and the other way for
     // `aggregate: 1` (measured).
-    let cursor = if on_collection {
+    // The stages a `refrouter` sends to a shard or the config server answer in the order of a
+    // collection's cursor (measured).
+    let forwarded =
+        matches!(pipeline.system_stage(), Some("$listClusterCatalog" | "$querySettings"));
+    let cursor = if on_collection || forwarded {
         Document::new().with("id", id).with("ns", ns_text).with("firstBatch", batch)
     } else {
         Document::new().with("firstBatch", batch).with("id", id).with("ns", ns_text)
@@ -660,6 +717,10 @@ fn check_system_namespace(
         Some("$listLocalSessions") if on_collection => Err(CommandError::new(
             INVALID_NAMESPACE,
             "$listLocalSessions must be run against the database with {aggregate: 1}, not a collection",
+        )),
+        Some("$listClusterCatalog") if on_collection => Err(CommandError::new(
+            crate::error::CLUSTER_CATALOG_ON_COLLECTION,
+            "The $listClusterCatalog stage must run on a database, not a collection.",
         )),
         Some("$listSessions") if !sessions => Err(CommandError::new(
             INVALID_NAMESPACE,
