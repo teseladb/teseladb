@@ -130,6 +130,12 @@ pub trait AdminBackend: Send + Sync {
     fn privileges(&self, user: &UserName) -> Result<Vec<Privilege>, AdminError>;
     /// A step of a backup or a restore (007 FR-021).
     fn backup(&self, op: crate::backup::Op) -> Answer;
+    /// `{tenants: [{_id, name}]}` (007 FR-025).
+    fn tenants(&self) -> Answer;
+    /// Creates tenant `name`: `{_id}`.
+    fn create_tenant(&self, name: &str) -> Answer;
+    /// Drops tenant `name`, which has no database and no user left.
+    fn drop_tenant(&self, name: &str) -> Answer;
 }
 
 /// The built-in role whose privileges `/metrics` asks for (013 FR-017).
@@ -191,6 +197,9 @@ pub fn route(req: &HttpRequest, b: &dyn AdminBackend) -> HttpResponse {
         HEALTHZ | METRICS | NODES | RANGES | TOKENS | CERT_ROTATE => wrong_method(),
         _ => {
             if let Some(answer) = crate::backup::route(req, |op| b.backup(op)) {
+                return answer;
+            }
+            if let Some(answer) = crate::admin_tenants::route(path, req, b) {
                 return answer;
             }
             if let Some(rest) = path.strip_prefix(RANGE) {
@@ -289,11 +298,8 @@ pub struct NodeAdmin {
 }
 
 impl NodeAdmin {
-    pub(crate) fn ask<T>(
-        &self,
-        core: usize,
-        msg: impl FnOnce(mpsc::Sender<T>) -> NodeMsg,
-    ) -> Option<T> {
+    /// Sends `msg` to core `core` and waits for its answer, as long as [`CORE_WAIT`].
+    pub fn ask<T>(&self, core: usize, msg: impl FnOnce(mpsc::Sender<T>) -> NodeMsg) -> Option<T> {
         let (tx, rx) = mpsc::channel();
         self.handle.senders.get(core)?.sender().send(CoreInput::App(msg(tx))).ok()?;
         rx.recv_timeout(CORE_WAIT).ok()
@@ -456,10 +462,11 @@ impl AdminBackend for NodeAdmin {
         let interval = match ns {
             None => None,
             Some(ns) => {
-                let id = self.collection(ns)?.id;
-                // Tenant 0 until 007 T038 resolves each request's tenant.
-                let start = teseladb_keys::KeyBuilder::collection_start(0, id).as_bytes().to_vec();
-                let end = teseladb_keys::KeyBuilder::collection_end(0, id).as_bytes().to_vec();
+                // `db.c` of the default tenant, the one the administration port works in.
+                let c = self.collection(ns)?;
+                let (t, id) = (c.tenant, c.id);
+                let start = teseladb_keys::KeyBuilder::collection_start(t, id).as_bytes().to_vec();
+                let end = teseladb_keys::KeyBuilder::collection_end(t, id).as_bytes().to_vec();
                 Some((start, end))
             }
         };
@@ -534,6 +541,18 @@ impl AdminBackend for NodeAdmin {
         }
         self.group0(Group0Command::RelocateRange { group: range, core })?;
         Ok(Document::new().with("ok", 1.0).with("core", Value::Int32(i32::from(core))))
+    }
+
+    fn tenants(&self) -> Answer {
+        crate::admin_tenants::list(self)
+    }
+
+    fn create_tenant(&self, name: &str) -> Answer {
+        crate::admin_tenants::create(self, name)
+    }
+
+    fn drop_tenant(&self, name: &str) -> Answer {
+        crate::admin_tenants::drop(self, name)
     }
 
     fn drain(&self, node: NodeId, drain: bool) -> Answer {
@@ -660,6 +679,8 @@ pub enum AdminAction {
         /// Where the backup is.
         from: String,
     },
+    /// `tenant create|list|drop` (007 FR-025).
+    Tenant(crate::admin_tenants::TenantAction),
 }
 
 /// Options of `teseladb admin`.
@@ -816,7 +837,10 @@ pub fn parse(args: &[String]) -> Result<AdminOpts, String> {
             let ttl = opt("ttl").map_or(Ok(DEFAULT_TTL), |t| duration(&t))?;
             AdminAction::TokenCreate { ttl }
         }
-        _ => return Err(ADMIN_USAGE.to_owned()),
+        words => match crate::admin_tenants::parse(words) {
+            Some(t) => allow(&[]).map(|()| AdminAction::Tenant(t))?,
+            None => return Err(ADMIN_USAGE.to_owned()),
+        },
     };
     Ok(AdminOpts { node, json, action, tls })
 }
@@ -839,7 +863,7 @@ fn duration(text: &str) -> Result<Duration, String> {
 }
 
 /// Percent-encodes a path segment or query value.
-fn component(text: &str) -> String {
+pub(crate) fn component(text: &str) -> String {
     text.bytes().fold(String::new(), |mut s, b| {
         if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
             s.push(char::from(b));
@@ -866,7 +890,10 @@ usage: teseladb admin [--node <ip:port>] [--format text|json] [--dbpath <dir>]
   token create [--ttl <90s|30m|1h|2d>]
   cert rotate
   backup [--at <seconds.increment|now>] --out <dir>
-  restore --from <dir>";
+  restore --from <dir>
+  tenant create <name>
+  tenant list
+  tenant drop <name>";
 
 /// Runs `teseladb admin` against the node's port; the exit code: 0 correct, 1 error.
 pub fn run(o: &AdminOpts, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
@@ -905,6 +932,10 @@ pub fn run(o: &AdminOpts, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
         }
         AdminAction::Restore { from } => {
             return crate::backup::run(o, Err(std::path::Path::new(from)), None, out, err);
+        }
+        AdminAction::Tenant(t) => {
+            let (method, target) = crate::admin_tenants::request(t);
+            (method, target, String::new())
         }
     };
     let tls = match o.tls.client() {
@@ -999,6 +1030,7 @@ fn text(action: &AdminAction, doc: Option<&Document>, raw: &[u8]) -> String {
         AdminAction::Node { node, drain: false } => {
             let _ = writeln!(out, "node {node} removed");
         }
+        AdminAction::Tenant(t) => out.push_str(&crate::admin_tenants::text(t, doc)),
         AdminAction::Split { .. }
         | AdminAction::Merge { .. }
         | AdminAction::Relocate { .. }
@@ -1125,6 +1157,15 @@ mod tests {
         }
         fn backup(&self, op: crate::backup::Op) -> Answer {
             self.called(format!("backup {op:?}"))
+        }
+        fn tenants(&self) -> Answer {
+            self.called("tenants".into())
+        }
+        fn create_tenant(&self, name: &str) -> Answer {
+            self.called(format!("create tenant {name}"))
+        }
+        fn drop_tenant(&self, name: &str) -> Answer {
+            self.called(format!("drop tenant {name}"))
         }
 
         fn privileges(&self, user: &UserName) -> Result<Vec<Privilege>, AdminError> {

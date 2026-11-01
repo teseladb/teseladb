@@ -81,9 +81,10 @@ fn answer(r: &Group0Result) -> Answer {
         Group0Result::Meta1(h) => Answer::Moved(h.group),
         Group0Result::Err(Group0Error::NoSuchGroup) => Answer::Unknown,
         Group0Result::Err(Group0Error::RangeBusy) => Answer::Busy,
-        Group0Result::Err(_) | Group0Result::Collection(_) | Group0Result::Index(_) => {
-            Answer::Refused
-        }
+        Group0Result::Err(_)
+        | Group0Result::Collection(_)
+        | Group0Result::Index(_)
+        | Group0Result::Tenant(_) => Answer::Refused,
     }
 }
 

@@ -148,9 +148,13 @@ fn malformed() -> CommandError {
 }
 
 impl Maintainer {
-    /// The indexes `rules` of collection `collection` (tenant 0) of namespace `ns`; `text`
-    /// indexes have no entries here (011 keeps them).
-    pub fn new(ns: &str, collection: u32, rules: &[IndexRule]) -> Result<Maintainer, CommandError> {
+    /// The indexes `rules` of collection `collection` of tenant `tenant` of namespace `ns`;
+    /// `text` indexes have no entries here (011 keeps them).
+    pub fn new(
+        ns: &str,
+        (tenant, collection): (u32, u32),
+        rules: &[IndexRule],
+    ) -> Result<Maintainer, CommandError> {
         let mut sets = Vec::new();
         for r in rules {
             let bytes = r.spec.to_bytes()?;
@@ -160,7 +164,7 @@ impl Maintainer {
             let unique = def.unique;
             // A stored specification has `prepareUnique: true` or none (`createIndexes`).
             let prepared = !unique && spec.get(PREPARE_UNIQUE) == Some(RawValue::Boolean(true));
-            let set = IndexSet { tenant: 0, collection, indexes: vec![(r.id, def)] };
+            let set = IndexSet { tenant, collection, indexes: vec![(r.id, def)] };
             let name = match spec.get(NAME) {
                 Some(RawValue::String(n)) => n.to_string(),
                 _ => return Err(malformed()),

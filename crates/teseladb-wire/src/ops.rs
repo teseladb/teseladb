@@ -18,6 +18,7 @@ use teseladb_meta::security::{Principal, SecurityError, SecurityOp};
 use teseladb_range::read::ReadConcern;
 
 use crate::commands::session::KillScope;
+use crate::commands::tenants;
 use crate::commands::{Backend, Shared, WriteOp, lock};
 use crate::error::{BAD_VALUE, CommandError, FAILED_TO_PARSE, INTERRUPTED, MAX_TIME_MS_EXPIRED};
 use crate::types::wrong_types;
@@ -169,6 +170,8 @@ pub struct Op {
     pub killed: bool,
     /// The user its connection authenticated as (013).
     pub user: Option<UserName>,
+    /// The tenant it runs in (007 FR-025): its user's, or the one `$tenant` named.
+    pub tenant: u32,
     /// The user's privileges when the node authorizes commands; `None` without authorization.
     pub privileges: Option<Vec<Privilege>>,
     /// The user's roles when they come from LDAP groups (013 FR-026); `None` when they are
@@ -250,6 +253,9 @@ pub struct Guarded<'a, B: Backend + ?Sized> {
     shared: &'a Shared,
     id: u32,
     deadline_ms: Option<u64>,
+    /// The tenant the operation works in (007 FR-025): it sees its databases by their names,
+    /// and the node by their qualified names.
+    tenant: u32,
     /// The audit events of the catalog changes the operation made (013 FR-016).
     audit: crate::commands::audit::Pending,
 }
@@ -257,9 +263,10 @@ pub struct Guarded<'a, B: Backend + ?Sized> {
 impl<'a, B: Backend + ?Sized> Guarded<'a, B> {
     /// Operation `id` of `shared`'s table, over `inner`, with its deadline.
     pub fn new(inner: &'a mut B, shared: &'a Shared, id: u32) -> Guarded<'a, B> {
-        let deadline_ms = lock(shared).ops.get(id).and_then(|o| o.deadline_ms);
+        let (deadline_ms, tenant) =
+            lock(shared).ops.get(id).map_or((None, 0), |o| (o.deadline_ms, o.tenant));
         inner.set_deadline(deadline_ms);
-        Guarded { inner, shared, id, deadline_ms, audit: Vec::new() }
+        Guarded { inner, shared, id, deadline_ms, tenant, audit: Vec::new() }
     }
 
     /// The audit events of the catalog changes made so far, taken.
@@ -308,20 +315,24 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         if crate::commands::txn_ddl::is_scratch(ns) {
             return Ok(None);
         }
-        self.call(|b| b.collection(ns))
+        let (tenant, ns) = (self.tenant, tenants::qualified(self.tenant, ns));
+        Ok(self.call(|b| b.collection(&ns))?.map(|c| tenants::owned(tenant, c)))
     }
 
     fn collections(&mut self) -> Result<Vec<(Namespace, CollectionEntry)>, CommandError> {
         let all = self.call(|b| b.collections())?;
-        Ok(all.into_iter().filter(|(ns, _)| !crate::commands::txn_ddl::is_scratch(ns)).collect())
+        let ours = tenants::own_collections(self.tenant, all);
+        Ok(ours.into_iter().filter(|(ns, _)| !crate::commands::txn_ddl::is_scratch(ns)).collect())
     }
 
     fn databases(&mut self) -> Result<Vec<String>, CommandError> {
-        self.call(|b| b.databases())
+        let all = self.call(|b| b.databases())?;
+        Ok(tenants::own_databases(self.tenant, all))
     }
 
     fn database_mark(&mut self, db: &str) -> Result<Option<teseladb_hlc::Hlc>, CommandError> {
-        self.call(|b| b.database_mark(db))
+        let db = teseladb_meta::tenants::qualified_db(self.tenant, db);
+        self.call(|b| b.database_mark(&db))
     }
 
     fn catalog_write(
@@ -329,13 +340,24 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         cmd: CatalogCommand,
     ) -> Result<Option<CollectionEntry>, CommandError> {
         use crate::commands::audit;
+        let tenant = self.tenant;
+        let qualified = tenants::qualified_command(tenant, &cmd);
         if !audit::enabled(self.shared) {
-            return self.call(|b| b.catalog_write(cmd));
+            let entry = self.call(|b| b.catalog_write(qualified))?;
+            return Ok(entry.map(|c| tenants::owned(tenant, c)));
         }
         let before = audit::before_catalog(self, &cmd)?;
-        let entry = self.call(|b| b.catalog_write(cmd))?;
+        let entry = self.call(|b| b.catalog_write(qualified))?.map(|c| tenants::owned(tenant, c));
         self.audit.extend(audit::after_catalog(before, entry.as_ref()));
         Ok(entry)
+    }
+
+    fn tenant(&self) -> u32 {
+        self.tenant
+    }
+
+    fn tenant_named(&mut self, name: &str) -> Result<Option<u32>, CommandError> {
+        self.call(|b| b.tenant_named(name))
     }
 
     fn indexes(&mut self, collection: u32) -> Result<Vec<IndexEntry>, CommandError> {
@@ -491,7 +513,8 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
     }
 
     fn config_documents(&mut self, coll: &str) -> Result<Vec<Document>, CommandError> {
-        self.call(|b| b.config_documents(coll))
+        let all = self.call(|b| b.config_documents(coll))?;
+        Ok(tenants::own_config_documents(self.tenant, all))
     }
 
     fn config_settings_write(
@@ -636,6 +659,7 @@ mod tests {
             deadline_ms: None,
             killed: false,
             user: None,
+            tenant: 0,
             privileges: None,
             roles: None,
             desc: None,

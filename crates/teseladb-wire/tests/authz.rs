@@ -91,6 +91,7 @@ fn conn(user: &str) -> Connection {
         mechanism: SaslMechanism::ScramSha256,
         login_ms: 0,
         roles: None,
+        tenant: 0,
     });
     c
 }

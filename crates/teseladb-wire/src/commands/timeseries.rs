@@ -144,7 +144,7 @@ pub fn bucket_key(coll: &CollectionEntry, id: [u8; 12]) -> Result<Vec<u8>, Comma
     let holder = teseladb_bson::Document::new().with("_id", Value::ObjectId(id)).to_bytes()?;
     let raw = RawDoc::from_bytes(&holder)?;
     let id = raw.get("_id").ok_or_else(|| CommandError::new(INTERNAL_ERROR, "an _id"))?;
-    Ok(KeyBuilder::document_clustered(0, coll.id, id).as_bytes().to_vec())
+    Ok(KeyBuilder::document_clustered(coll.tenant, coll.id, id).as_bytes().to_vec())
 }
 
 /// The keys of the buckets of `coll` a read within `bounds` may need: buckets are in `_id`

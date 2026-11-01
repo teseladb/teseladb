@@ -341,6 +341,7 @@ pub fn rules_of(
         bypass,
         collation: collation.or_else(|| options_collation(coll)),
         collection: coll.id,
+        tenant: coll.tenant,
         indexes,
         vars: None,
         attempt: 0,
@@ -359,7 +360,9 @@ pub fn doc_key(coll: &CollectionEntry, id: &Value) -> Result<Vec<u8>, CommandErr
     let raw = RawDoc::from_bytes(&bytes)?;
     let id = raw.get("_id").ok_or(CommandError::new(BAD_VALUE, "bad _id"))?;
     let key = match super::kinds::kind_of(coll)? {
-        CollectionKind::Clustered { .. } => KeyBuilder::document_clustered(0, coll.id, id),
+        CollectionKind::Clustered { .. } => {
+            KeyBuilder::document_clustered(coll.tenant, coll.id, id)
+        }
         // Its documents are keyed by insertion order: the `_id_` index says where one is.
         CollectionKind::Capped { .. } => {
             return Err(CommandError::new(
@@ -368,7 +371,7 @@ pub fn doc_key(coll: &CollectionEntry, id: &Value) -> Result<Vec<u8>, CommandErr
             ));
         }
         CollectionKind::Normal | CollectionKind::View { .. } | CollectionKind::TimeSeries(_) => {
-            KeyBuilder::document(0, coll.id, id)
+            KeyBuilder::document(coll.tenant, coll.id, id)
         }
     };
     Ok(key.as_bytes().to_vec())

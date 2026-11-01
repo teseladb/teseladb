@@ -373,6 +373,7 @@ fn the_check_comes_after_the_generic_arguments_and_before_authorization() {
         mechanism: SaslMechanism::ScramSha256,
         login_ms: 0,
         roles: None,
+        tenant: 0,
     });
     assert_eq!(code(&run(&mut nobody, find())).0, TIME_PROOF_MISMATCH.code);
     // A bad generic argument first.

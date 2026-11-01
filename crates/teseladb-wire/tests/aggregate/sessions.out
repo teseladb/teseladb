@@ -1,0 +1,18 @@
+{"aggregate":1,"pipeline":[{"$listLocalSessions":{"users":[{"user":"a","db":"b"}]}}],"cursor":{}}	=> {"cursor":{"firstBatch":[],"id":{"$numberLong":"0"},"ns":"xa.$cmd.aggregate"},"ok":{"$numberDouble":"1.0"}}
+{"aggregate":1,"pipeline":[{"$listLocalSessions":{"bogus":1}}],"cursor":{}}	!! 40415	IDLUnknownField	BSON field '$listLocalSessions.bogus' is an unknown field.
+{"aggregate":1,"pipeline":[{"$listLocalSessions":1}],"cursor":{}}	!! 14	TypeMismatch	$listLocalSessions options must be specified in an object, but found: int
+{"aggregate":1,"pipeline":[{"$match":{}},{"$listLocalSessions":{}}],"cursor":{}}	!! 73	InvalidNamespace	{aggregate: 1} is not valid for '$match'; a collection is required.
+{"aggregate":"c","pipeline":[{"$listLocalSessions":{}}],"cursor":{}}	!! 73	InvalidNamespace	$listLocalSessions must be run against the database with {aggregate: 1}, not a collection
+{"db":"config","cmd":{"aggregate":"system.sessions","pipeline":[{"$listSessions":{"bogus":1}}],"cursor":{}}}	!! 40415	IDLUnknownField	BSON field '$listSessions.bogus' is an unknown field.
+{"db":"config","cmd":{"aggregate":"system.sessions","pipeline":[{"$match":{}},{"$listSessions":{}}],"cursor":{}}}	!! 40602	Location40602	$listSessions is only valid as the first stage in a pipeline
+{"aggregate":1,"pipeline":[{"$listLocalSessions":{"allUsers":1}}],"cursor":{}}	!! 14	TypeMismatch	BSON field '$listLocalSessions.allUsers' is the wrong type 'int', expected type 'bool'
+{"aggregate":1,"pipeline":[{"$listLocalSessions":{"users":"x"}}],"cursor":{}}	!! 14	TypeMismatch	BSON field '$listLocalSessions.users' is the wrong type 'string', expected type 'array'
+{"aggregate":1,"pipeline":[{"$listLocalSessions":{"users":[1]}}],"cursor":{}}	!! 14	TypeMismatch	BSON field '$listLocalSessions.users.0' is the wrong type 'int', expected type 'object'
+{"aggregate":1,"pipeline":[{"$listLocalSessions":{"users":[{"user":"a"}]}}],"cursor":{}}	!! 40414	IDLFailedToParse	BSON field '$listLocalSessions.users.db' is missing but a required field
+{"aggregate":1,"pipeline":[{"$listLocalSessions":{"users":[{"user":"a","db":"b","x":1}]}}],"cursor":{}}	!! 40415	IDLUnknownField	BSON field '$listLocalSessions.users.x' is an unknown field.
+{"aggregate":1,"pipeline":[{"$listLocalSessions":{"allUsers":true,"users":[{"user":"a","db":"b"}]}}],"cursor":{}}	!! 12	UnsupportedFormat	$listLocalSessions may not specify {allUsers:true} and {users:[...]} at the same time
+{"db":"config","cmd":{"aggregate":"system.sessions","pipeline":[{"$listSessions":1}],"cursor":{}}}	!! 14	TypeMismatch	$listSessions options must be specified in an object, but found: int
+{"db":"config","cmd":{"aggregate":"system.sessions","pipeline":[{"$listSessions":{"users":[{"user":"a","db":"b"}]}}],"cursor":{}}}	=> {"cursor":{"id":{"$numberLong":"0"},"ns":"config.system.sessions","firstBatch":[]},"ok":{"$numberDouble":"1.0"}}
+{"db":"config","cmd":{"aggregate":"system.sessions","pipeline":[{"$listSessions":{"allUsers":true,"users":[{"user":"a","db":"b"}]}}],"cursor":{}}}	!! 12	UnsupportedFormat	$listSessions may not specify {allUsers:true} and {users:[...]} at the same time
+{"db":"admin","cmd":{"aggregate":1,"pipeline":[{"$listSessions":{}}],"cursor":{}}}	!! 73	InvalidNamespace	$listSessions may only be run against config.system.sessions
+{"db":"config","cmd":{"aggregate":1,"pipeline":[{"$listSessions":{}}],"cursor":{}}}	!! 73	InvalidNamespace	$listSessions may only be run against config.system.sessions

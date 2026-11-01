@@ -1,6 +1,6 @@
 //! The window functions of `$setWindowFields` that are no accumulator (measured on a `refrouter`
 //! 9.0.4): `$expMovingAvg`, `$derivative`, `$integral`, `$covariancePop`, `$covarianceSamp`,
-//! `$locf` and `$linearFill`.
+//! `$locf`, `$linearFill` and `$minMaxScaler`.
 //!
 //! `$expMovingAvg` and the covariances compute in decimal, as RefDb does, and give a double
 //! unless a decimal came in; `$derivative` and `$integral` compute in doubles.
@@ -326,4 +326,35 @@ pub(super) fn linear_fill(values: &[Option<Value>], xs: &[f64]) -> Result<Vec<Va
         });
     }
     Ok(out)
+}
+
+/// `x` scaled from the range of `window` (its least and greatest values in BSON order, `NaN`
+/// first) to `[min, max]` with the engine's arithmetic: `min` itself when the window holds one
+/// value (measured on a `refrouter` 9.0.4).
+pub(super) fn min_max_scaled(
+    x: &Value,
+    window: &[Value],
+    (min, max): (&Value, &Value),
+) -> Result<Value, MqlError> {
+    let mut ends: Option<(&Value, &Value)> = None;
+    for v in window {
+        ends = Some(match ends {
+            None => (v, v),
+            Some((lo, hi)) => {
+                (if before(v, lo)? { v } else { lo }, if before(hi, v)? { v } else { hi })
+            }
+        });
+    }
+    let Some((lo, hi)) = ends.filter(|(lo, hi)| !matches!(before(lo, hi), Ok(false))) else {
+        return Ok(min.clone());
+    };
+    let some = |v: &Value| Some(v.clone());
+    let share = divide(&subtract(&some(x), &some(lo))?, &subtract(&some(hi), &some(lo))?)?;
+    let scaled = multiply(&[share, subtract(&some(max), &some(min))?])?;
+    Ok(add(&[scaled, some(min)])?.unwrap_or(Value::Null))
+}
+
+/// Whether `a` comes before `b` in BSON order.
+fn before(a: &Value, b: &Value) -> Result<bool, MqlError> {
+    Ok(crate::expr::order(&Some(a.clone()), &Some(b.clone()), None)?.is_lt())
 }

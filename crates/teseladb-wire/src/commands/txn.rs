@@ -1357,6 +1357,14 @@ impl Backend for TxnBackend<'_> {
         self.inner.gate_everywhere(want)
     }
 
+    fn tenant(&self) -> u32 {
+        self.inner.tenant()
+    }
+
+    fn tenant_named(&mut self, name: &str) -> Result<Option<u32>, CommandError> {
+        self.inner.tenant_named(name)
+    }
+
     fn write(&mut self, op: WriteOp) -> Result<Vec<u8>, CommandError> {
         let bound = Bound::decode(&op.mutation)?;
         if bound.rules().capped.is_some() {

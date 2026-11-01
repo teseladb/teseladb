@@ -78,7 +78,7 @@ pub fn id_key<B: Backend + ?Sized>(
         .ok()
         .flatten()
         .ok_or_else(|| CommandError::new(INTERNAL_ERROR, "the _id_ index has no definition"))?;
-    let set = IndexSet { tenant: 0, collection: coll.id, indexes: vec![(ID_INDEX, def)] };
+    let set = IndexSet { tenant: coll.tenant, collection: coll.id, indexes: vec![(ID_INDEX, def)] };
     let holder = Document::new().with("_id", id.clone()).to_bytes()?;
     let doc = RawDoc::from_bytes(&holder)?;
     let pk = PrimaryKey::seq(0);
@@ -94,7 +94,7 @@ pub fn id_key<B: Backend + ?Sized>(
         split_unique_value(&value).map_err(|e| CommandError::new(INTERNAL_ERROR, e.to_string()))?;
     let seq = <[u8; 8]>::try_from(seq)
         .map_err(|_| CommandError::new(INTERNAL_ERROR, "a capped _id_ entry without its seq"))?;
-    Ok(Some(cap::doc_key(0, coll.id, u64::from_be_bytes(seq))))
+    Ok(Some(cap::doc_key(coll.tenant, coll.id, u64::from_be_bytes(seq))))
 }
 
 /// The error of capped write `bound` in a transaction, as a `refrouter` 9.0.4's shard answers it
@@ -140,11 +140,12 @@ fn laid_out(bound: &Bound, collection: u32, oldest: Vec<Vec<u8>>) -> Result<Boun
             return Err(CommandError::new(INTERNAL_ERROR, "not a capped write"));
         }
     };
+    let tenant = rules.tenant;
     let rule = rules.capped.as_mut().ok_or_else(|| {
         CommandError::new(INTERNAL_ERROR, "a capped write of a collection that is not capped")
     })?;
     rule.oldest = oldest.len();
-    let keys = std::iter::once(cap::state_key(0, collection))
+    let keys = std::iter::once(cap::state_key(tenant, collection))
         .chain(oldest)
         .chain(bound.keys.iter().cloned())
         .collect();
@@ -186,12 +187,14 @@ pub fn purge<B: Backend + ?Sized>(
     if rule_of(c)?.is_none() {
         return Ok(());
     }
-    let start = teseladb_keys::KeyBuilder::index_prefix(0, c.id, ID_INDEX).as_bytes().to_vec();
-    let end = teseladb_keys::KeyBuilder::collection_end(0, c.id).as_bytes().to_vec();
+    let start =
+        teseladb_keys::KeyBuilder::index_prefix(c.tenant, c.id, ID_INDEX).as_bytes().to_vec();
+    let end = teseladb_keys::KeyBuilder::collection_end(c.tenant, c.id).as_bytes().to_vec();
     let mut w = Writer::internal();
     let rules = super::mutation::Rules {
         ns: full(ns),
         collection: c.id,
+        tenant: c.tenant,
         unlogged: true,
         ..Default::default()
     };

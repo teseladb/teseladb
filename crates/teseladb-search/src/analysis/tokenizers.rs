@@ -105,6 +105,10 @@ pub enum Tokenizer {
     Kuromoji,
     /// The Korean dictionary tokenizer of `reflib.nori` (morphemes, readings, stop tags dropped).
     Nori,
+    /// The Thai dictionary tokenizer of `reflib.thai`.
+    Thai,
+    /// The Chinese tokenizer of `reflib.smartcn`.
+    SmartCn,
     /// Every run of `min..=max` characters.
     NGram {
         /// Shortest gram.
@@ -408,6 +412,16 @@ impl Tokenizer {
             ),
             Tokenizer::Nori => {
                 e.emit_morph(text.char_indices().map(|(i, c)| (c, i)).collect(), morph::nori)
+            }
+            Tokenizer::Thai => {
+                for (from, to) in super::thai::thai_words(text) {
+                    e.emit(from, to);
+                }
+            }
+            Tokenizer::SmartCn => {
+                for (from, to) in super::smartcn::smartcn_words(text) {
+                    e.emit(from, to);
+                }
             }
             &Tokenizer::NGram { min, max } => {
                 e.grams(text.char_indices().map(|(i, _)| i), min, max);

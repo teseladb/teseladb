@@ -5,7 +5,8 @@ use teseladb_bson::{Document, RawDoc, RawValue, Value};
 use teseladb_mql::MqlError;
 
 use super::errors::{
-    BAD_VALUE, COLL_STATS_OBJECT, TYPE_MISMATCH, error, unknown_field, wrong_type,
+    BAD_VALUE, COLL_STATS_OBJECT, TYPE_MISMATCH, UNSUPPORTED_FORMAT, error, missing_field,
+    unknown_field, wrong_type,
 };
 use crate::expr::arith::raw_type_name;
 use crate::expr::values::{display, display_bson};
@@ -105,6 +106,73 @@ fn storage_stats(section: RawDoc<'_>) -> Result<(), MqlError> {
                 BAD_VALUE,
                 format!("BSON field 'scale' value must be >= 1, actual value '{n}'"),
             ));
+        }
+    }
+    Ok(())
+}
+
+/// Checks the specification of `$listLocalSessions` or `$listSessions` (`name`): an object with
+/// `allUsers` (a boolean) or `users` (an array of `{user, db}`), not both (measured on a `refrouter`
+/// 9.0.4).
+pub fn sessions(name: &str, v: RawValue<'_>) -> Result<Document, MqlError> {
+    let RawValue::Document(d) = v else {
+        return Err(error(
+            TYPE_MISMATCH,
+            format!(
+                "{name} options must be specified in an object, but found: {}",
+                raw_type_name(v)
+            ),
+        ));
+    };
+    let mut all = false;
+    let mut users = 0;
+    for (k, x) in d.iter() {
+        match (k, x) {
+            ("allUsers", RawValue::Boolean(b)) => all = b,
+            ("allUsers", other) => {
+                return Err(wrong_type(&format!("{name}.allUsers"), other, "type 'bool'"));
+            }
+            ("users", RawValue::Array(list)) => {
+                for (i, u) in list.iter().enumerate() {
+                    session_user(name, i, u)?;
+                    users += 1;
+                }
+            }
+            ("users", other) => {
+                return Err(wrong_type(&format!("{name}.users"), other, "type 'array'"));
+            }
+            (other, _) => return Err(unknown_field(name, other)),
+        }
+    }
+    if all && users > 0 {
+        return Err(error(
+            UNSUPPORTED_FORMAT,
+            format!(
+                "{name} may not specify {{allUsers:true}} and {{users:[...]}} at the same time"
+            ),
+        ));
+    }
+    Ok(Document::from(d))
+}
+
+/// Checks user `i` of the `users` of a sessions stage: `{user, db}`, both strings.
+fn session_user(name: &str, i: usize, u: RawValue<'_>) -> Result<(), MqlError> {
+    let RawValue::Document(user) = u else {
+        return Err(wrong_type(&format!("{name}.users.{i}"), u, "type 'object'"));
+    };
+    let path = format!("{name}.users");
+    for (k, x) in user.iter() {
+        match (k, x) {
+            ("user" | "db", RawValue::String(_)) => {}
+            ("user" | "db", other) => {
+                return Err(wrong_type(&format!("{path}.{k}"), other, "type 'string'"));
+            }
+            (other, _) => return Err(unknown_field(&path, other)),
+        }
+    }
+    for k in ["user", "db"] {
+        if user.get(k).is_none() {
+            return Err(missing_field(&path, k));
         }
     }
     Ok(())

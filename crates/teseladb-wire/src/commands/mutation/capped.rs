@@ -45,6 +45,7 @@ fn internal(msg: &str) -> CommandError {
 
 /// What every capped write reads first: the state and the oldest documents.
 struct Read<'k, 'a> {
+    tenant: u32,
     collection: u32,
     rule: CappedRule,
     state: CappedState,
@@ -60,11 +61,11 @@ fn read<'k, 'a>(
     lookup: &Lookup<'a>,
 ) -> Result<Read<'k, 'a>, CommandError> {
     let rule = rules.capped.ok_or_else(|| internal("not a capped write"))?;
-    let collection = rules.collection;
+    let (tenant, collection) = (rules.tenant, rules.collection);
     let Some((state_key, rest)) = keys.split_first() else {
         return Err(internal("a capped write without its state"));
     };
-    if *state_key != cap::state_key(0, collection) || rest.len() < rule.oldest {
+    if *state_key != cap::state_key(tenant, collection) || rest.len() < rule.oldest {
         return Err(internal("malformed capped write"));
     }
     let state = match lookup(state_key) {
@@ -76,10 +77,10 @@ fn read<'k, 'a>(
     for k in oldest_keys {
         // A document deleted since the scan.
         let Some((_, doc)) = lookup(k) else { return Err(refusal(CappedError::Stale)) };
-        let seq = cap::seq_of(0, collection, k).ok_or_else(|| internal("not a capped key"))?;
+        let seq = cap::seq_of(tenant, collection, k).ok_or_else(|| internal("not a capped key"))?;
         oldest.push((seq, doc));
     }
-    Ok(Read { collection, rule, state, oldest, own })
+    Ok(Read { tenant, collection, rule, state, oldest, own })
 }
 
 /// Evaluates an insert, update or delete of a capped collection.
@@ -125,8 +126,8 @@ pub(super) fn eval(
     }
 }
 
-fn state_put(collection: u32, state: CappedState) -> Put {
-    Put { key: cap::state_key(0, collection), value_type: STATE, value: state.encode() }
+fn state_put((tenant, collection): (u32, u32), state: CappedState) -> Put {
+    Put { key: cap::state_key(tenant, collection), value_type: STATE, value: state.encode() }
 }
 
 /// The puts and deletes that add document `bytes` at the next `seq` of state `state`, evict the
@@ -138,7 +139,7 @@ fn admit(
     checker: &Checker,
     lookup: &Lookup<'_>,
 ) -> Result<(Vec<Put>, Vec<Vec<u8>>), CommandError> {
-    let key = cap::doc_key(0, r.collection, state.next);
+    let key = cap::doc_key(r.tenant, r.collection, state.next);
     // The new document first: a unique value an evicted one holds is still a duplicate.
     let (mut puts, mut deletes) = checker.entries_at(Some(&key), None, Some(&bytes), lookup)?;
     let size = bytes.len() as u64;
@@ -162,14 +163,14 @@ fn evict(
     let plan = plan_insert(state, r.rule.limits, size, &sizes).map_err(refusal)?;
     let (mut puts, mut deletes) = (Vec::new(), Vec::new());
     for (seq, doc) in &r.oldest[..plan.evict.len()] {
-        let k = cap::doc_key(0, r.collection, *seq);
+        let k = cap::doc_key(r.tenant, r.collection, *seq);
         let old = RawDoc::from_bytes(doc)?;
         let (p, d) = checker.entries_at(Some(&k), Some(old), None, lookup)?;
         puts.extend(p);
         deletes.push(k);
         deletes.extend(d);
     }
-    puts.push(state_put(r.collection, plan.state));
+    puts.push(state_put((r.tenant, r.collection), plan.state));
     Ok((puts, deletes))
 }
 
@@ -182,7 +183,7 @@ fn change(
     checker: &Checker,
     lookup: &Lookup<'_>,
 ) -> Result<Evaluated, CommandError> {
-    let upsert_key = cap::doc_key(0, r.collection, r.state.next);
+    let upsert_key = cap::doc_key(r.tenant, r.collection, r.state.next);
     let mut keys = r.own.to_vec();
     if matches!(m, DocMutation::Update { upsert: Some(_), .. }) {
         keys.push(upsert_key.clone());
@@ -199,7 +200,7 @@ fn change(
         }
     }
     if result.upserted.is_none() {
-        puts.push(state_put(r.collection, state));
+        puts.push(state_put((r.tenant, r.collection), state));
         return Ok((puts, deletes, result));
     }
     // The upsert wrote its document and entries at the next `seq`: it evicts like an insert.

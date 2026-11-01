@@ -147,6 +147,8 @@ pub struct Mem {
     pub fcv_limit: Option<String>,
     /// Answers of the other nodes that do not apply the write gates yet (007 FR-029).
     pub gate_lagging: usize,
+    /// The tenants Group 0 knows, by number and name (007 FR-025).
+    pub tenants: Vec<(u32, String)>,
 }
 
 /// A change of the data before a read of `[start, …)`.
@@ -249,6 +251,10 @@ impl Backend for Mem {
 
     fn end_operation(&mut self) {
         self.ended += 1;
+    }
+
+    fn tenant_named(&mut self, name: &str) -> Result<Option<u32>, CommandError> {
+        Ok(self.tenants.iter().find(|(_, n)| n == name).map(|(id, _)| *id))
     }
 
     fn gate_everywhere(
