@@ -27,6 +27,7 @@ mod cjk;
 mod delimiter;
 mod folding;
 mod grams;
+mod greek;
 mod indic;
 mod inflection;
 mod light;
@@ -37,6 +38,7 @@ use arabic_script::{persian_normal, persian_stem, sorani_normal, sorani_stem};
 use brazilian::brazilian_stem;
 pub(crate) use cjk::cjk_width_offsets;
 use cjk::{cjk_bigrams, cjk_width};
+use greek::{greek_lowercase, greek_stem};
 use indic::{bengali_normal, bengali_stem, hindi_normal, hindi_stem, indic_normal};
 use inflection::{bulgarian_stem, czech_stem, indonesian_stem, latvian_stem};
 use light::{
@@ -226,6 +228,10 @@ pub enum TokenFilter {
     BengaliStemming,
     /// The stemmer of the Brazilian Portuguese analyzer.
     BrazilianStemming,
+    /// Lower-cases Greek without tonos or dialytika and with final sigma as `σ` (Greek analyzer).
+    GreekLowercase,
+    /// The stemmer of the Greek analyzer.
+    GreekStemming,
     /// Drops the final prolonged sound mark of Katakana words of 4 or more characters
     /// (Japanese analyzer).
     JapaneseKatakanaStemming,
@@ -617,6 +623,8 @@ impl TokenFilter {
             TokenFilter::BengaliNormalization => rewrite(tokens, false, bengali_normal),
             TokenFilter::BengaliStemming => rewrite(tokens, true, bengali_stem),
             TokenFilter::BrazilianStemming => rewrite(tokens, true, brazilian_stem),
+            TokenFilter::GreekLowercase => rewrite(tokens, false, greek_lowercase),
+            TokenFilter::GreekStemming => rewrite(tokens, true, greek_stem),
             TokenFilter::JapaneseKatakanaStemming => rewrite(tokens, true, katakana_stem),
             TokenFilter::SoraniNormalization => rewrite(tokens, false, sorani_normal),
             TokenFilter::SoraniStemming => rewrite(tokens, true, sorani_stem),
