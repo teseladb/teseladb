@@ -52,6 +52,8 @@ pub struct TsStats {
     pub closed_by_count: i64,
     /// `numBucketsClosedDueToSize`.
     pub closed_by_size: i64,
+    /// `numBucketsClosedDueToSchemaChange`.
+    pub closed_by_schema: i64,
     /// `numBucketsClosedDueToTimeForward`.
     pub closed_time_forward: i64,
     /// `numBucketsKeptOpenDueToLargeMeasurements`.
@@ -64,6 +66,11 @@ pub struct TsStats {
     pub measurements: i64,
     /// The last window of each meta value (the five bytes of its hash in a bucket's `_id`).
     last_window: BTreeMap<[u8; 5], [u8; 4]>,
+    /// The open bucket of each window and meta value (the first nine bytes of a bucket's `_id`):
+    /// where the next insert starts, as RefDb's bucket catalog keeps it in memory. A bucket
+    /// closed for a field of another type stays behind it; without an entry (after a restart)
+    /// an insert starts at the first bucket, as RefDb reopens one.
+    open: BTreeMap<[u8; 9], u32>,
 }
 
 impl TsStats {
@@ -77,6 +84,7 @@ impl TsStats {
             ("numBucketUpdates", self.bucket_updates),
             ("numBucketsArchivedDueToTimeBackward", self.archived_time_backward),
             ("numBucketsClosedDueToCount", self.closed_by_count),
+            ("numBucketsClosedDueToSchemaChange", self.closed_by_schema),
             ("numBucketsClosedDueToSize", self.closed_by_size),
             ("numBucketsClosedDueToTimeForward", self.closed_time_forward),
             ("numBucketsKeptOpenDueToLargeMeasurements", self.kept_open_large),
@@ -89,6 +97,7 @@ impl TsStats {
     /// Counts a commit of `taken` measurements into bucket `id` (number `n` of its window and
     /// meta value), which `existed` or not; `closing` is why the bucket before it stopped.
     fn commit(&mut self, id: [u8; 12], n: u32, existed: bool, closing: Option<Full>, taken: i64) {
+        self.open.insert(window_meta(id), n);
         self.commits += 1;
         self.measurements += taken;
         if existed {
@@ -101,6 +110,8 @@ impl TsStats {
         match (n, closing, self.last_window.get(&meta)) {
             (1.., Some(Full::Count), _) => self.closed_by_count += 1,
             (1.., Some(Full::Size), _) => self.closed_by_size += 1,
+            // Counted when the bucket closed ([`TsStats::closed_for_schema`]).
+            (1.., Some(Full::Schema), _) => {}
             (_, _, None) => self.opened_for_meta += 1,
             (_, _, Some(last)) if window > *last => self.closed_time_forward += 1,
             (_, _, Some(last)) if window < *last => self.archived_time_backward += 1,
@@ -108,6 +119,25 @@ impl TsStats {
         }
         self.last_window.insert(meta, window);
     }
+}
+
+impl TsStats {
+    /// Counts bucket `n` of window and meta value `key` closed because a measurement has a
+    /// field of another type: the next insert starts after it.
+    fn closed_for_schema(&mut self, key: [u8; 9], n: u32) {
+        self.closed_by_schema += 1;
+        self.open.insert(key, n + 1);
+    }
+
+    /// The bucket an insert into window and meta value `key` starts at.
+    fn open_bucket(&self, key: [u8; 9]) -> u32 {
+        self.open.get(&key).copied().unwrap_or(0)
+    }
+}
+
+/// The first nine bytes of bucket `id`: its window and meta value.
+fn window_meta(id: [u8; 12]) -> [u8; 9] {
+    std::array::from_fn(|i| id[i])
 }
 
 /// Most buckets of one window and meta value an insert tries before it gives up.
@@ -207,78 +237,141 @@ pub fn write<B: Backend + ?Sized>(
         let first = spec
             .bucket_id(t, spec.meta_of(doc), 0)
             .map_err(|e| CommandError::new(INTERNAL_ERROR, format!("{e:?}")))?;
-        match groups.iter_mut().find(|(id, _)| *id == first) {
+        // In order, a run of measurements of one bucket goes together; the next bucket starts a
+        // new run, as an ordered insert takes nothing after its first failure.
+        let joined = match ordered {
+            true => groups.last_mut().filter(|(id, _)| *id == first),
+            false => groups.iter_mut().find(|(id, _)| *id == first),
+        };
+        match joined {
             Some((_, g)) => g.push((index, doc.clone())),
             None => groups.push((first, vec![(index, doc.clone())])),
         }
     }
-    for (_, group) in groups {
-        let mut pending = group.as_slice();
-        let (t, meta) = (spec.time_of(&pending[0].1), spec.meta_of(&pending[0].1).cloned());
-        let t = t.map_err(|e| CommandError::new(INTERNAL_ERROR, format!("{e:?}")))?;
-        let mut n = 0;
-        let mut closing = None;
-        while !pending.is_empty() {
-            if n == MAX_BUCKETS {
-                return Err(CommandError::new(
-                    WRITE_CONFLICT,
-                    "every bucket of the window is full",
-                ));
-            }
-            let bucket = spec
-                .bucket_id(t, meta.as_ref(), n)
-                .map_err(|e| CommandError::new(INTERNAL_ERROR, format!("{e:?}")))?;
-            let mut rules = rules.clone();
-            rules.timeseries = Some(TimeSeriesRule { spec: spec.clone(), bucket });
-            let docs = pending.iter().map(|(_, d)| d.clone()).collect();
-            let mutation = DocMutation::Insert { docs, ordered, rules };
-            let b = Bound { mutation, keys: vec![bucket_key(coll, bucket)?] };
-            // Each write of the statement its own number: that of its first measurement.
-            let first = u32::try_from(pending[0].0).unwrap_or(u32::MAX);
-            let r = match w.write(backend, &b, stmt.saturating_add(first)) {
-                Err(e) if super::mutation::timeseries::is_refusal(&e) => {
-                    closing = super::mutation::timeseries::refusal(&e);
-                    n += 1;
-                    continue;
-                }
-                written => written?,
-            };
-            if r.n > 0 && !r.retried {
-                use super::mutation::timeseries::{
-                    BUCKET_EXISTED, KEPT_OPEN_LARGE, STOPPED_BY_COUNT, STOPPED_BY_SIZE,
-                };
-                let existed = r.n_modified & BUCKET_EXISTED != 0;
-                let mut g = super::lock(shared);
-                let stats = g.timeseries.entry(coll.id).or_default();
-                stats.commit(bucket, n, existed, closing, r.n);
-                if r.n_modified & KEPT_OPEN_LARGE != 0 {
-                    stats.kept_open_large += 1;
-                }
-                drop(g);
-                closing = match r.n_modified {
-                    f if f & STOPPED_BY_COUNT != 0 => Some(Full::Count),
-                    f if f & STOPPED_BY_SIZE != 0 => Some(Full::Size),
-                    _ => None,
-                };
-            }
-            total.n += r.n;
-            total.retried |= r.retried;
-            total.warnings.extend(r.warnings);
-            if let Some(e) = r.errors.into_iter().next() {
-                total.errors.push(WriteError { index: pending[e.index].0, error: e.error });
-                pending = &pending[e.index + 1..];
-                if ordered {
-                    break;
-                }
-                continue;
-            }
-            let taken = usize::try_from(r.n).unwrap_or(0).min(pending.len());
-            pending = &pending[taken..];
-            n += 1;
+    let batch = Batch { coll, spec, ordered, rules, stmt };
+    for (first, group) in groups {
+        let failed = write_group(backend, shared, w, &batch, (&group, first), &mut total)?;
+        if failed && ordered {
+            break;
         }
     }
-    total.errors.sort_by_key(|e| e.index);
+    // An ordered insert fails at its first failure only.
+    if ordered {
+        total.errors.sort_by_key(|e| e.index);
+        total.errors.truncate(1);
+    }
     Ok(total)
+}
+
+/// What every group of an insert of measurements shares: the collection, its buckets, the
+/// insert's order, the write's rules and its statement number.
+#[derive(Clone, Copy)]
+struct Batch<'a> {
+    coll: &'a CollectionEntry,
+    spec: &'a BucketSpec,
+    ordered: bool,
+    rules: &'a super::mutation::Rules,
+    stmt: u32,
+}
+
+/// Writes `group`, measurements of one window and meta value whose first bucket is `first`,
+/// into `total`: in its buckets from the open one on, each write the measurements one bucket
+/// takes, which go in or fail together (measured on a `refnode` 9.0.4 on 02-11-2026). Unordered,
+/// a failed write fails the rest of the group with its error; ordered, the measurements before
+/// the failing one go in and it fails alone, as the update of their bucket. Whether one failed.
+fn write_group<B: Backend + ?Sized>(
+    backend: &mut B,
+    shared: &super::Shared,
+    w: &mut Writer,
+    batch: &Batch<'_>,
+    (group, first): (&[(usize, Document)], [u8; 12]),
+    total: &mut MutationResult,
+) -> Result<bool, CommandError> {
+    let Batch { coll, spec, ordered, rules, stmt } = *batch;
+    use super::mutation::timeseries::{
+        BUCKET_EXISTED, KEPT_OPEN_LARGE, STOPPED_BY_COUNT, STOPPED_BY_SCHEMA, STOPPED_BY_SIZE,
+        UPDATE_FAILED,
+    };
+    let mut pending = group;
+    let (t, meta) = (spec.time_of(&pending[0].1), spec.meta_of(&pending[0].1).cloned());
+    let t = t.map_err(|e| CommandError::new(INTERNAL_ERROR, format!("{e:?}")))?;
+    let key = window_meta(first);
+    let mut n = super::lock(shared).timeseries.entry(coll.id).or_default().open_bucket(key);
+    let mut closing = None;
+    // Ordered, the failure that waits for the measurements before it to go in.
+    let mut failure: Option<WriteError> = None;
+    while !pending.is_empty() {
+        if n == MAX_BUCKETS {
+            return Err(CommandError::new(WRITE_CONFLICT, "every bucket of the window is full"));
+        }
+        let bucket = spec
+            .bucket_id(t, meta.as_ref(), n)
+            .map_err(|e| CommandError::new(INTERNAL_ERROR, format!("{e:?}")))?;
+        let mut rules = rules.clone();
+        rules.timeseries = Some(TimeSeriesRule { spec: spec.clone(), bucket });
+        let docs = pending.iter().map(|(_, d)| d.clone()).collect();
+        let mutation = DocMutation::Insert { docs, ordered, rules };
+        let b = Bound { mutation, keys: vec![bucket_key(coll, bucket)?] };
+        // Each write of the statement its own number: that of its first measurement.
+        let at = u32::try_from(pending[0].0).unwrap_or(u32::MAX);
+        let r = match w.write(backend, &b, stmt.saturating_add(at)) {
+            Err(e) if super::mutation::timeseries::is_refusal(&e) => {
+                closing = super::mutation::timeseries::refusal(&e);
+                if closing == Some(Full::Schema) {
+                    super::lock(shared)
+                        .timeseries
+                        .entry(coll.id)
+                        .or_default()
+                        .closed_for_schema(key, n);
+                }
+                n += 1;
+                continue;
+            }
+            written => written?,
+        };
+        if r.n > 0 && !r.retried {
+            let existed = r.n_modified & BUCKET_EXISTED != 0;
+            let mut g = super::lock(shared);
+            let stats = g.timeseries.entry(coll.id).or_default();
+            stats.commit(bucket, n, existed, closing, r.n);
+            if r.n_modified & KEPT_OPEN_LARGE != 0 {
+                stats.kept_open_large += 1;
+            }
+            closing = match r.n_modified {
+                f if f & STOPPED_BY_COUNT != 0 => Some(Full::Count),
+                f if f & STOPPED_BY_SIZE != 0 => Some(Full::Size),
+                f if f & STOPPED_BY_SCHEMA != 0 => {
+                    stats.closed_for_schema(key, n);
+                    Some(Full::Schema)
+                }
+                _ => None,
+            };
+        }
+        total.n += r.n;
+        total.retried |= r.retried;
+        total.warnings.extend(r.warnings);
+        if let Some(e) = r.errors.into_iter().next() {
+            if ordered {
+                let mut error = e.error;
+                if e.index > 0 && !error.errmsg.starts_with(UPDATE_FAILED) {
+                    error.errmsg = format!("{UPDATE_FAILED}{}", error.errmsg);
+                }
+                failure = Some(WriteError { index: pending[e.index].0, error });
+                pending = &pending[..e.index];
+                continue;
+            }
+            for (index, _) in pending {
+                total.errors.push(WriteError { index: *index, error: e.error.clone() });
+            }
+            return Ok(true);
+        }
+        let taken = usize::try_from(r.n).unwrap_or(0).min(pending.len());
+        pending = &pending[taken..];
+        n += 1;
+    }
+    let failed = failure.is_some();
+    total.errors.extend(failure);
+    Ok(failed)
 }
 
 /// Whether `filter` names only the meta field (`m` or `m.<path>`), also inside `$and`, `$or` and

@@ -183,6 +183,14 @@ impl From<RawValue<'_>> for Value {
 }
 
 impl Value {
+    /// The document this value is, if it is one.
+    pub fn as_document(&self) -> Option<&Document> {
+        match self {
+            Value::Document(d) => Some(d),
+            _ => None,
+        }
+    }
+
     /// The value's BSON element type.
     pub fn element_type(&self) -> u8 {
         match self {

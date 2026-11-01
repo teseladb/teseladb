@@ -17,6 +17,8 @@ use crate::error::{BAD_VALUE, CommandError, INTERNAL_ERROR, WRITE_CONFLICT};
 pub const FULL_COUNT: &str = "time series bucket is full: count";
 /// See [`FULL_COUNT`].
 pub const FULL_SIZE: &str = "time series bucket is full: size";
+/// See [`FULL_COUNT`]: the measurement has a field of another type than the bucket's.
+pub const FULL_SCHEMA: &str = "time series bucket is closed: schema change";
 
 /// The flags of a result's `n_modified` for a time series insert, which the command counts for
 /// `collStats` (015 FR-010): the bucket was there, and the bucket stopped taking measurements by
@@ -28,12 +30,19 @@ pub const STOPPED_BY_COUNT: i64 = 2;
 pub const STOPPED_BY_SIZE: i64 = 4;
 /// See [`BUCKET_EXISTED`]: it stayed open past its size for a large measurement.
 pub const KEPT_OPEN_LARGE: i64 = 8;
+/// See [`BUCKET_EXISTED`]: it stopped for a measurement with a field of another type.
+pub const STOPPED_BY_SCHEMA: i64 = 16;
+
+/// The message prefix of a measurement refused into a bucket that was there: RefDb writes it
+/// as an update of the bucket (measured on a `refnode` 9.0.4 on 02-11-2026).
+pub const UPDATE_FAILED: &str = "Plan executor error during update :: caused by :: ";
 
 /// Why `e` refuses a write because its bucket is full, if it does.
 pub fn refusal(e: &CommandError) -> Option<Full> {
     match (e.code.code == WRITE_CONFLICT.code, e.errmsg.as_str()) {
         (true, FULL_COUNT) => Some(Full::Count),
         (true, FULL_SIZE) => Some(Full::Size),
+        (true, FULL_SCHEMA) => Some(Full::Schema),
         _ => None,
     }
 }
@@ -48,13 +57,16 @@ fn ts_error(e: TsError) -> CommandError {
         TsError::NoTime(msg) => CommandError::new(BAD_VALUE, msg),
         TsError::Full(Full::Count) => CommandError::new(WRITE_CONFLICT, FULL_COUNT),
         TsError::Full(Full::Size) => CommandError::new(WRITE_CONFLICT, FULL_SIZE),
+        TsError::Full(Full::Schema) => CommandError::new(WRITE_CONFLICT, FULL_SCHEMA),
         TsError::Malformed(msg) => CommandError::new(INTERNAL_ERROR, msg),
     }
 }
 
 /// Evaluates the insert of measurements `docs` into the bucket at `keys[0]`, whose `_id` is
-/// `id`, in order: until the bucket is full (the result's `n` says how many it took; none at all
-/// is [`is_refusal`]), or until one fails, whose error the result carries at its place.
+/// `id`, in order, until the bucket stops taking them (the result's `n` says how many it took;
+/// none at all is [`is_refusal`]). The measurements it takes go in together: when one of them
+/// fails, none does and the result carries that error at its place (measured on a `refnode`
+/// 9.0.4 on 02-11-2026).
 pub(super) fn insert(
     keys: &[Vec<u8>],
     docs: &[Document],
@@ -67,40 +79,41 @@ pub(super) fn insert(
         return Err(CommandError::new(INTERNAL_ERROR, "a time series write without its bucket"));
     };
     let old = lookup(key).map(|(_, v)| RawDoc::from_bytes(v)).transpose()?;
-    // A measurement the bucket's indexes refuse (a geometry, 511) fails alone: its own bucket's
-    // entries are checked before it goes in.
+    // A measurement the bucket's indexes refuse (a geometry, 511) is found alone: its own
+    // bucket's entries are checked before it goes in.
     let alone = |doc: &Document| -> Result<(), CommandError> {
         let one = spec.append(id, None, doc).map_err(ts_error)?.to_bytes()?;
         checker.entries_at(Some(key), None, Some(&one), lookup).map(|_| ())
     };
     let mut r = MutationResult::default();
-    let mut valid = Vec::with_capacity(docs.len());
+    let mut filled = Vec::with_capacity(docs.len());
+    let mut refused = None;
     for (index, doc) in docs.iter().enumerate() {
-        let filled = fill_timestamps(doc, ts).unwrap_or_else(|| doc.clone());
-        let checked = stored_bytes(&filled, Stored::Insert)
+        let one = fill_timestamps(doc, ts).unwrap_or_else(|| doc.clone());
+        let checked = stored_bytes(&one, Stored::Insert)
             .and_then(|b| checker.check(&b, None))
-            .and_then(|()| alone(&filled));
-        match checked {
-            Ok(()) => valid.push(filled),
-            Err(error) => {
-                r.errors.push(WriteError { index, error });
-                break;
-            }
+            .and_then(|()| alone(&one));
+        filled.push(one);
+        if let Err(error) = checked {
+            refused = Some(WriteError { index, error });
+            break;
         }
     }
-    if valid.is_empty() {
+    let (bucket, taken, stopped) = spec.append_all(id, old, &filled).map_err(ts_error)?;
+    if let Some(mut e) = refused.filter(|e| e.index < taken) {
+        // The bucket takes the refused measurement: none of them goes in.
+        if old.is_some() {
+            e.error.errmsg = format!("{UPDATE_FAILED}{}", e.error.errmsg);
+        }
+        r.errors.push(e);
         return Ok((Vec::new(), Vec::new(), r));
-    }
-    let (bucket, taken, stopped) = spec.append_all(id, old, &valid).map_err(ts_error)?;
-    if taken < valid.len() {
-        // The bucket filled up: what it did not take goes to the next one, not an error.
-        r.errors.clear();
     }
     r.n = i64::try_from(taken).unwrap_or(i64::MAX);
     r.n_modified = if old.is_some() { BUCKET_EXISTED } else { 0 }
         | match stopped.full {
             Some(Full::Count) => STOPPED_BY_COUNT,
             Some(Full::Size) => STOPPED_BY_SIZE,
+            Some(Full::Schema) => STOPPED_BY_SCHEMA,
             None => 0,
         }
         | if stopped.kept_open { KEPT_OPEN_LARGE } else { 0 };

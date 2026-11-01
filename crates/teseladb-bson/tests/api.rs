@@ -133,3 +133,11 @@ fn the_empty_document_is_valid_and_has_no_fields() {
     assert!(empty.is_empty());
     assert_eq!(teseladb_bson::RawDoc::from_bytes(empty.as_bytes()), Ok(empty));
 }
+
+#[test]
+fn only_a_document_value_gives_its_document() {
+    let d = Document::new().with("a", 1i32);
+    assert_eq!(Value::Document(d.clone()).as_document(), Some(&d));
+    assert_eq!(Value::Array(vec![Value::Document(d)]).as_document(), None);
+    assert_eq!(Value::Int32(1).as_document(), None);
+}

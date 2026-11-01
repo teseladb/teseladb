@@ -45,38 +45,60 @@ fn refuse(shown: Document, why: Why) -> CommandError {
     )
 }
 
-/// The numeric code of a `$type` name, as RefDb shows `$type` in its normalized form.
-fn type_code(v: &Value) -> Value {
-    const NAMES: [(&str, i32); 13] = [
-        ("double", 1),
-        ("string", 2),
-        ("object", 3),
-        ("array", 4),
-        ("binData", 5),
-        ("objectId", 7),
-        ("bool", 8),
-        ("date", 9),
-        ("null", 10),
-        ("regex", 11),
-        ("int", 16),
-        ("timestamp", 17),
-        ("long", 18),
-    ];
-    match v {
-        Value::String(s) => {
-            NAMES.iter().find(|(n, _)| n == s).map_or_else(|| v.clone(), |(_, c)| Value::Int32(*c))
+/// The types of a `$type` as RefDb shows them: `"number"` first when asked, then the codes
+/// once each in ascending order (measured on a `refnode` 9.0.4).
+fn type_set(v: &Value) -> Value {
+    use teseladb_mql::types::{TypeSpec, by_alias, by_code};
+    let items = match v {
+        Value::Array(items) => items.clone(),
+        one => vec![one.clone()],
+    };
+    // A `$type` that names no type is refused before (the filter is parsed first).
+    let specs = items.iter().filter_map(|i| match i {
+        Value::String(s) => by_alias(s),
+        other => crate::types::number(other).and_then(|n| by_code(n as i32)),
+    });
+    let mut number = false;
+    let mut codes = Vec::new();
+    for spec in specs {
+        match spec {
+            TypeSpec::Number => number = true,
+            // RefDb numbers the minimum key -1.
+            TypeSpec::Element(e) => codes.push(i32::from(i8::from_ne_bytes([e]))),
         }
-        other => other.clone(),
+    }
+    codes.sort_unstable();
+    codes.dedup();
+    let shown = codes.into_iter().map(Value::Int32);
+    Value::Array(number.then(|| Value::from("number")).into_iter().chain(shown).collect())
+}
+
+/// The condition of an `$elemMatch` as RefDb shows it: operators on the element as they are;
+/// conditions on its fields one predicate each, alone or in `$and` (measured on a `refnode` 9.0.4).
+fn elem_match_shown(inner: &Document) -> Document {
+    if inner.iter().next().is_some_and(|(k, _)| k.starts_with('$')) {
+        return normalized(&Value::Document(inner.clone()));
+    }
+    let mut preds: Vec<Document> = Vec::new();
+    for (k, x) in inner.iter() {
+        for (op, v) in normalized(x).iter() {
+            preds.push(Document::new().with(k, Document::new().with(op, v.clone())));
+        }
+    }
+    match <[Document; 1]>::try_from(preds) {
+        Ok([one]) => one,
+        Err(preds) => Document::new()
+            .with("$and", Value::Array(preds.into_iter().map(Value::Document).collect())),
     }
 }
 
 /// Condition `cond` on `path` as RefDb normalizes it in a message.
-fn normalized(cond: &Value) -> Value {
+fn normalized(cond: &Value) -> Document {
     let Value::Document(ops) = cond else {
-        return Value::Document(Document::new().with("$eq", cond.clone()));
+        return Document::new().with("$eq", cond.clone());
     };
     if ops.iter().next().is_none_or(|(k, _)| !k.starts_with('$')) {
-        return Value::Document(Document::new().with("$eq", cond.clone()));
+        return Document::new().with("$eq", cond.clone());
     }
     let mut out = Document::new();
     for (op, v) in ops.iter() {
@@ -86,22 +108,9 @@ fn normalized(cond: &Value) -> Value {
             ("$exists", v) if !crate::types::truthy(v).unwrap_or(true) => {
                 Document::new().with("$not", Document::new().with("$exists", true))
             }
-            ("$type", v) => {
-                let codes = match v {
-                    Value::Array(items) => items.iter().map(type_code).collect(),
-                    one => vec![type_code(one)],
-                };
-                Document::new().with("$type", Value::Array(codes))
-            }
+            ("$type", v) => Document::new().with("$type", type_set(v)),
             ("$elemMatch", Value::Document(inner)) => {
-                let mut e = Document::new();
-                for (k, x) in inner.iter() {
-                    match normalized(x) {
-                        Value::Document(d) if !k.starts_with('$') => e.push(k, d),
-                        other => e.push(k, other),
-                    }
-                }
-                Document::new().with("$elemMatch", e)
+                Document::new().with("$elemMatch", elem_match_shown(inner))
             }
             (op, v) => Document::new().with(op, v.clone()),
         };
@@ -109,23 +118,14 @@ fn normalized(cond: &Value) -> Value {
             out.push(k, x.clone());
         }
     }
-    Value::Document(out)
+    out
 }
 
 /// The conditions on `control.min.<f>`/`control.max.<f>` of one operator on measurement or time
 /// field `f`.
 fn bounds(spec: &BucketSpec, f: &str, op: &str, v: &Value) -> Option<Vec<Cond>> {
     let (min, max) = (format!("control.min.{f}"), format!("control.max.{f}"));
-    let cmp = |path: &str, internal: &str, x: Value| {
-        (path.to_owned(), Value::Document(Document::new().with(internal, x)))
-    };
-    let time = f == spec.time_field;
-    let shifted = |x: &Value, sign: i64| match x {
-        Value::DateTime(t) if time => {
-            Some(Value::DateTime(t.saturating_add(sign * spec.max_span_seconds * 1000)))
-        }
-        _ => None,
-    };
+    let shifted = |x: &Value, sign: i64| shifted(spec, f, x, sign);
     Some(match op {
         "$gt" | "$gte" => {
             let internal = if op == "$gt" { "$_internalExprGt" } else { "$_internalExprGte" };
@@ -139,19 +139,40 @@ fn bounds(spec: &BucketSpec, f: &str, op: &str, v: &Value) -> Option<Vec<Cond>> 
             out.extend(shifted(v, 1).map(|s| cmp(&max, internal, s)));
             out
         }
-        "$eq" => {
-            let mut out = vec![cmp(&min, "$_internalExprLte", v.clone())];
-            out.extend(shifted(v, -1).map(|s| cmp(&min, "$_internalExprGte", s)));
-            out.push(cmp(&max, "$_internalExprGte", v.clone()));
-            out.extend(shifted(v, 1).map(|s| cmp(&max, "$_internalExprLte", s)));
-            out
-        }
+        "$eq" => eq_bounds(spec, f, v),
         "$exists" if crate::types::truthy(v) == Some(true) => vec![
             (min, Value::Document(Document::new().with("$exists", true))),
             (max, Value::Document(Document::new().with("$exists", true))),
         ],
         _ => return None,
     })
+}
+
+/// `path: {internal: x}`.
+fn cmp(path: &str, internal: &str, x: Value) -> Cond {
+    (path.to_owned(), Value::Document(Document::new().with(internal, x)))
+}
+
+/// A time bound `x` on time field `f` moved by the bucket span in direction `sign`; `None` on a
+/// measurement or a value that is no date.
+fn shifted(spec: &BucketSpec, f: &str, x: &Value, sign: i64) -> Option<Value> {
+    match x {
+        Value::DateTime(t) if f == spec.time_field => {
+            Some(Value::DateTime(t.saturating_add(sign * spec.max_span_seconds * 1000)))
+        }
+        _ => None,
+    }
+}
+
+/// The conditions on `control.min.<f>`/`control.max.<f>` of `f: {$eq: v}`.
+fn eq_bounds(spec: &BucketSpec, f: &str, v: &Value) -> Vec<Cond> {
+    let (min, max) = (format!("control.min.{f}"), format!("control.max.{f}"));
+    let shifted = |x: &Value, sign: i64| shifted(spec, f, x, sign);
+    let mut out = vec![cmp(&min, "$_internalExprLte", v.clone())];
+    out.extend(shifted(v, -1).map(|s| cmp(&min, "$_internalExprGte", s)));
+    out.push(cmp(&max, "$_internalExprGte", v.clone()));
+    out.extend(shifted(v, 1).map(|s| cmp(&max, "$_internalExprLte", s)));
+    out
 }
 
 /// The conditions of `path: cond` over the buckets, and whether they are on the meta value.
@@ -165,7 +186,12 @@ fn field(spec: &BucketSpec, path: &str, cond: &Value) -> Result<(Vec<Cond>, bool
         };
         return Ok((vec![(m, c)], true));
     }
-    let shown = || Document::new().with(path, normalized(cond));
+    // The predicate refused is shown alone, as RefDb splits a path's operators (measured on a
+    // `refnode` 9.0.4).
+    let shown_op = |op: &str, v: &Value| {
+        Document::new()
+            .with(path, normalized(&Value::Document(Document::new().with(op, v.clone()))))
+    };
     let ops: Vec<(String, Value)> = match cond {
         Value::Document(d) if d.iter().next().is_some_and(|(k, _)| k.starts_with('$')) => {
             d.iter().map(|(k, v)| (k.to_owned(), v.clone())).collect()
@@ -174,6 +200,7 @@ fn field(spec: &BucketSpec, path: &str, cond: &Value) -> Result<(Vec<Cond>, bool
     };
     let mut out = Vec::new();
     for (op, v) in &ops {
+        let shown = || shown_op(op, v);
         let compares = matches!(op.as_str(), "$eq" | "$gt" | "$gte" | "$lt" | "$lte");
         // A comparison to null is refused, shown alone (measured on a `refnode` 9.0.4).
         if compares && matches!(v, Value::Null) {
@@ -183,18 +210,15 @@ fn field(spec: &BucketSpec, path: &str, cond: &Value) -> Result<(Vec<Cond>, bool
         if compares && matches!(v, Value::Document(_) | Value::Array(_)) {
             return Err(refuse(shown(), Why::Operand));
         }
-        if op == "$in" {
-            let Value::Array(items) = v else { return Err(refuse(shown(), Why::Predicate)) };
-            let mut branches = Vec::new();
+        // The filter is parsed first: an `$in` holds an array.
+        if let ("$in", Value::Array(items)) = (op.as_str(), v) {
             if items.iter().any(|i| matches!(i, Value::Null)) {
                 return Err(refuse(shown(), Why::NullInIn));
             }
-            for item in items {
-                let conds = bounds(spec, path, "$eq", item)
-                    .ok_or_else(|| refuse(shown(), Why::Predicate))?;
-                branches.push(Value::Document(assemble(conds, false)));
-            }
-            out.push(("$or".to_owned(), Value::Array(branches)));
+            let branches = items
+                .iter()
+                .map(|item| Value::Document(assemble(eq_bounds(spec, path, item), false)));
+            out.push(("$or".to_owned(), Value::Array(branches.collect())));
             continue;
         }
         out.extend(bounds(spec, path, op, v).ok_or_else(|| refuse(shown(), Why::Predicate))?);
@@ -226,16 +250,14 @@ fn conditions(
     for (k, v) in filter.iter() {
         match (k, v) {
             ("$and", Value::Array(items)) => {
-                for item in items {
-                    if let Value::Document(d) = item {
-                        conditions(spec, d, meta, measured)?;
-                    }
+                // The filter is parsed first: its `$and` holds documents only.
+                for d in items.iter().filter_map(Value::as_document) {
+                    conditions(spec, d, meta, measured)?;
                 }
             }
             ("$or", Value::Array(items)) => {
                 let mut branches = Vec::new();
-                for item in items {
-                    let Value::Document(d) = item else { continue };
+                for d in items.iter().filter_map(Value::as_document) {
                     branches.push(Value::Document(bucket_filter(spec, d)?));
                 }
                 measured.push(("$or".to_owned(), Value::Array(branches)));
