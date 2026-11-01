@@ -826,3 +826,19 @@ fn an_analyzer_that_cannot_be_built_fails_the_index() {
         batch(&search(&mut m, "c", "$search", text("hola").with("index", "unused"))).len() == 1
     );
 }
+
+/// Segments left a whole history retention behind start over from what the ranges hold, so a
+/// deletion the GC dropped is not missed (T049).
+#[test]
+fn segments_behind_the_history_retention_start_over() {
+    let mut m = with_collection();
+    insert(&mut m, vec![doc(&[("_id", 2.into()), ("t", "adios mundo cruel".into())])]);
+    create(&mut m, "c", vec![index("default", dynamic(true))]);
+    assert_eq!(batch(&search(&mut m, "c", "$search", text("mundo"))).len(), 2);
+    m.now += 25 * 60 * 60 * 1000;
+    let del = Document::new().with("q", doc(&[("_id", 1.into())])).with("limit", 1);
+    m.run(DB, Document::new().with("delete", "c").with("deletes", arr(vec![del])));
+    let pipeline = vec![Document::new().with("$search", text("mundo")), scored()];
+    let got = batch(&agg(&mut m, "c".into(), pipeline));
+    assert_eq!(got, vec![doc(&[("_id", 2.into()), ("s", Value::Double(0.13076457381248474))])]);
+}

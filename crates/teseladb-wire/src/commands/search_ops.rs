@@ -50,6 +50,16 @@ pub enum Segments {
 }
 
 impl Segments {
+    /// Empty segments of the same definition.
+    fn emptied(&self) -> Segments {
+        match self {
+            Segments::Search(ix) => {
+                Segments::Search(Box::new(Indexer::new(ix.definition().clone())))
+            }
+            Segments::Vector(ix) => Segments::Vector(VectorIndexer::new(ix.definition().clone())),
+        }
+    }
+
     fn reshape(&mut self, bounds: &[(Vec<u8>, Vec<u8>)]) -> Result<(), CommandError> {
         match self {
             Segments::Search(ix) => ix.reshape(bounds).map_err(index_error),
@@ -216,6 +226,13 @@ fn catch_up<B: Backend + ?Sized>(
     built: &mut Built,
 ) -> Result<(), CommandError> {
     let (start, end) = documents_of(coll);
+    if behind_history(built.applied, history_floor(backend)?) {
+        // The ranges may have dropped the deletions after the mark: start over from a scan of
+        // what they hold now (T049).
+        built.indexer = built.indexer.emptied();
+        built.applied = Hlc { physical: 0, logical: 0 };
+        built.stored.clear();
+    }
     // The search waits until every range's segments reach the read's mark, its
     // `search_applied_ts` (FR-010), no longer than the command's `maxTimeMS`.
     let target = backend.read_mark().map_or_else(|| backend.cluster_mark(), |m| m.at);
@@ -257,6 +274,22 @@ fn catch_up<B: Backend + ?Sized>(
     built.indexer.apply(newest)?;
     built.applied = resolved;
     Ok(())
+}
+
+/// The oldest mark whose versions the ranges still keep: the wall clock less the history
+/// retention (`teselaHistoryRetention`, D-020); the GC threshold of every range is at or below it.
+fn history_floor<B: Backend + ?Sized>(backend: &mut B) -> Result<u64, CommandError> {
+    let params = backend.cluster_parameters()?;
+    let stored = params.get(super::parameters::HISTORY_RETENTION).map(Vec::as_slice);
+    let retention = super::parameters::history_retention_ms(stored);
+    Ok(backend.wall_ms().saturating_sub(retention))
+}
+
+/// Whether segments that applied the versions up to `applied` can no longer catch up: the GC
+/// may have dropped a deletion above their mark, so reading the changes would keep a document
+/// that no longer exists. Segments that applied nothing scan the whole state anyway.
+pub(crate) fn behind_history(applied: Hlc, floor_ms: u64) -> bool {
+    applied.physical != 0 && applied.physical < floor_ms
 }
 
 /// The changed documents of an index on a view: each one through the view's stages (`None`
@@ -482,4 +515,18 @@ pub fn status_detail(host: u64, served: &Served) -> Document {
         .with("status", status)
         .with("queryable", queryable)
         .with("mainIndex", main)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn segments_behind_the_history_floor_start_over() {
+        let at = |physical| Hlc { physical, logical: 0 };
+        assert!(!behind_history(at(0), 5_000));
+        assert!(behind_history(at(4_999), 5_000));
+        assert!(!behind_history(at(5_000), 5_000));
+        assert!(!behind_history(at(9_000), 5_000));
+    }
 }

@@ -53,6 +53,11 @@ impl Indexer {
         }
     }
 
+    /// The definition of the index.
+    pub fn definition(&self) -> &Definition {
+        &self.definition
+    }
+
     /// The version of the analyzers that make the terms of every segment: each replica analyzes
     /// the documents itself, and replicas of one version make the same segments (FR-011).
     pub fn analyzers_version(&self) -> u32 {
