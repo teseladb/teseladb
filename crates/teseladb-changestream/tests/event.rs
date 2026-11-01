@@ -134,3 +134,49 @@ fn every_type_has_refdb_s_operation_type() {
         assert_eq!(event(kind).kind(), kind);
     }
 }
+
+/// An event from a range's change (014 FR-002, D-114): its token is its place in the merge, its
+/// times the commit mark, and the transaction and the description come from the version's meta.
+#[test]
+fn an_event_comes_from_its_change() {
+    use teseladb_changestream::changes::Change;
+    use teseladb_changestream::meta::{ChangeMeta, TxnInfo, lsid_document};
+    use teseladb_changestream::update_desc::UpdateDescription;
+    let ts = Hlc { physical: 1_730_198_400_123, logical: 2 };
+    let txn = TxnInfo { id: 3, lsid: 4, uid: [5; 32], txn_number: 6 };
+    let update = UpdateDescription {
+        updated: vec![("a".into(), Value::Int32(1))],
+        ..UpdateDescription::default()
+    };
+    let doc = Document::new().with("_id", 1).with("a", 1);
+    let change = Change {
+        event: EventKey { ts, txn: 3, op: 2, key: b"k".to_vec() },
+        kind: EventKind::Update,
+        doc: Some(doc.to_bytes().unwrap()),
+        meta: Some(ChangeMeta {
+            txn: Some(txn),
+            op: 2,
+            update: Some(update.clone()),
+            replace: false,
+        }),
+    };
+    let ns = Namespace { db: "shop".into(), coll: Some("orders".into()) };
+    let key = Document::new().with("_id", 1);
+    let e = ChangeEvent::of(&change, ns.clone(), Some(key.clone()), false).unwrap();
+    assert_eq!(e.token, ResumeToken { event: change.event.clone(), kind: EventKind::Update });
+    assert_eq!((e.cluster_time, e.wall_ms), (ts, 1_730_198_400_123));
+    assert_eq!(e.txn, Some((lsid_document(4, &[5; 32]), 6)));
+    assert_eq!(e.update_description, Some(update.to_document(false)));
+    assert_eq!((e.document_key, e.full_document, e.ns), (Some(key.clone()), None, ns.clone()));
+    // An insert carries its document; a deletion nothing but its key.
+    let insert = Change { kind: EventKind::Insert, meta: None, ..change.clone() };
+    let e = ChangeEvent::of(&insert, ns.clone(), Some(key.clone()), true).unwrap();
+    assert_eq!(e.full_document, Some(Value::Document(doc)));
+    assert_eq!((e.txn, e.update_description), (None, None));
+    let delete = Change { kind: EventKind::Delete, doc: None, meta: None, ..change.clone() };
+    let e = ChangeEvent::of(&delete, ns.clone(), Some(key), true).unwrap();
+    assert_eq!(e.full_document, None);
+    // A stored document that does not read back stops the stream.
+    let broken = Change { kind: EventKind::Insert, doc: Some(vec![1, 2]), ..change };
+    assert!(ChangeEvent::of(&broken, ns, None, true).is_err());
+}

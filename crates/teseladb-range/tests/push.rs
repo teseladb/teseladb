@@ -363,3 +363,106 @@ fn a_commit_and_a_push_on_one_record_are_ordered() {
         }
     }
 }
+
+/// Writes a document and, next to it, a version that only serves the history (014).
+struct Described(Vec<u8>, Vec<u8>);
+
+impl teseladb_range::host::Mutation for Described {
+    fn eval(
+        &self,
+        _: &[Option<(u8, &[u8])>],
+        _: Hlc,
+    ) -> Result<teseladb_range::mutate::Outcome, teseladb_range::host::MutationError> {
+        use teseladb_range::command::Put;
+        let history = [&self.0[..], &[0][..]].concat();
+        Ok(teseladb_range::mutate::Outcome {
+            puts: vec![
+                Put { key: self.0.clone(), value_type: 1, value: self.1.clone() },
+                Put { key: history, value_type: teseladb_range::HISTORY_VALUE, value: vec![7; 9] },
+            ],
+            deletes: vec![],
+            change: vec![],
+            result: vec![],
+        })
+    }
+}
+
+/// The versions that only serve the history of a document (014 FR-009) are not documents: no scan
+/// returns them, written by a write or committed by a transaction, and they are not live data.
+#[test]
+fn history_versions_are_neither_rows_nor_live_data() {
+    use teseladb_range::host::WriteReq;
+    let mut n = Node::new();
+    let live = n.live();
+    let (now, wall) = (n.now, n.wall());
+    let m = Box::new(Described(A.to_vec(), b"a0".to_vec()));
+    let w = WriteReq { g: G, keys: vec![A.to_vec()], m, dedup: None, wc: MAJORITY };
+    let id = n.host.mutate(&mut n.core, w, now, wall);
+    let at = match n.answer(id) {
+        Ok(Reply::Mutated { ts, .. }) => ts,
+        other => panic!("not written: {other:?}"),
+    };
+    assert_eq!(n.live(), live + (A.len() as u64 + 1 + 2));
+    let read_at = Hlc { physical: at.physical + 5, logical: 0 };
+    let got = rows(n.scan_view(read_at, 10, TxnView::default()));
+    assert_eq!(got, vec![(A.to_vec(), b"a0".to_vec())]);
+    // A transaction's history intent, read by the transaction and once committed.
+    let history = [B, &[0][..]].concat();
+    let op = IntentOp::Put { value_type: teseladb_range::HISTORY_VALUE, value: vec![1; 4] };
+    let mark = intents_mark(n.txn(intents(T1, at, &[(B, put(b"bb")), (&history, op)])));
+    let own = TxnView { own: Some(T1), known: BTreeMap::new() };
+    let got = rows(n.scan_view(at, 10, own));
+    assert_eq!(got, vec![(A.to_vec(), b"a0".to_vec()), (B.to_vec(), b"bb".to_vec())]);
+    // The reaper finds the history intent too, so that it resolves it with the document's.
+    let find = TxnOp::FindIntents { txn: T1, start: b"\x01".to_vec(), end: b"\x02".to_vec() };
+    let found: Vec<Vec<u8>> = match n.txn(find) {
+        Ok(Reply::Batch(rows)) => rows.into_iter().map(|(k, _)| k).collect(),
+        other => panic!("not rows: {other:?}"),
+    };
+    assert_eq!(found, vec![B.to_vec(), history.clone()]);
+    let live = n.live();
+    let resolve = TxnOp::ResolveIntents {
+        txn: T1,
+        status: TxnStatus::Committed,
+        commit_ts: mark,
+        keys: vec![B.to_vec(), history.clone()],
+    };
+    intents_mark(n.txn(resolve));
+    assert_eq!(n.live(), live + (B.len() as u64 + 1 + 2));
+    let read_at = Hlc { physical: mark.physical + 5, logical: 0 };
+    let got = rows(n.scan_view(read_at, 10, TxnView::default()));
+    assert_eq!(got, vec![(A.to_vec(), b"a0".to_vec()), (B.to_vec(), b"bb".to_vec())]);
+}
+
+#[test]
+/// What a change stream reads of a range (014 FR-003, FR-004): every version of `(from, to]` with
+/// its value type, the deletions, and the mark of the oldest intent still pending there, which
+/// holds the range's resolved mark below it.
+fn a_range_gives_its_versions_and_its_oldest_pending_intent() {
+    use teseladb_range::changes::{ChangeRows, Versioned, change_rows};
+    let mut n = Node::new();
+    let zero = Hlc { physical: 0, logical: 0 };
+    let a = n.write(A, b"a0");
+    let b = n.delete(A);
+    let rows = |n: &Node, from: Hlc, to: Hlc| loop {
+        if let Some(r) = change_rows(n.host.lsm(), (b"\x01", b"\x02"), (from, to)) {
+            break r.unwrap();
+        }
+    };
+    let got = rows(&n, zero, far());
+    let want = ChangeRows {
+        rows: vec![
+            Versioned { key: A.to_vec(), ts: b, value: None },
+            Versioned { key: A.to_vec(), ts: a, value: Some((1, b"a0".to_vec())) },
+        ],
+        oldest_intent: None,
+    };
+    assert_eq!(got, want);
+    // Only `(from, to]`.
+    assert_eq!(rows(&n, a, b).rows.len(), 1);
+    assert!(rows(&n, b, far()).rows.is_empty());
+    // A pending intent shows as its mark, not as a row.
+    let at = intents_mark(n.txn(intents(T1, b, &[(C, put(b"c"))])));
+    let got = rows(&n, b, far());
+    assert_eq!((got.rows.len(), got.oldest_intent), (0, Some(at)));
+}

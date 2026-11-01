@@ -11,6 +11,8 @@
 //! - at or below the threshold, the newest version that is not an intent stays, unless a range
 //!   tombstone at or below the threshold hides it, or it is a deletion and nothing older is left
 //!   below the output (bottommost); every older one goes;
+//! - a version that only serves the history ([`crate::HISTORY_VALUE`]) goes at or below the
+//!   threshold, also the newest: it is read only at its own mark, above the threshold;
 //! - the intent a `Retract` hides goes when they meet; the `Retract` stays until the bottommost
 //!   level, because an older version with the same timestamp (one the intent replaced) may still
 //!   be below and must stay hidden.
@@ -100,6 +102,16 @@ pub(crate) struct Candidate {
     pub(crate) kind: Kind,
     /// An older input had a copy at the same timestamp (for a `Retract`: its intent).
     pub(crate) shadowed: bool,
+    /// A value that only serves the history ([`crate::HISTORY_VALUE`]).
+    pub(crate) history: bool,
+}
+
+impl Candidate {
+    /// A version of kind `kind` at `ts` with stored value `value`.
+    pub(crate) fn new(ts: Hlc, kind: Kind, value: &[u8]) -> Candidate {
+        let history = kind == Kind::Put && value.first() == Some(&crate::HISTORY_VALUE);
+        Candidate { ts, kind, shadowed: false, history }
+    }
 }
 
 /// Which of a key's versions (newest first) stay.
@@ -124,6 +136,9 @@ pub(crate) fn keep(
                 let Some(g) = threshold.filter(|g| v.ts <= *g) else {
                     return true;
                 };
+                if v.history {
+                    return false;
+                }
                 if answered_below {
                     return false;
                 }
@@ -154,7 +169,7 @@ mod tests {
     }
 
     fn c(p: u64, kind: Kind) -> Candidate {
-        Candidate { ts: ts(p), kind, shadowed: false }
+        Candidate { ts: ts(p), kind, shadowed: false, history: false }
     }
 
     #[test]

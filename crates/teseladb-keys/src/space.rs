@@ -105,6 +105,12 @@ pub fn cut_outside(
 ) -> Option<Vec<u8>> {
     let inside = |k: &[u8]| start < k && (end.is_empty() || k < end);
     let word = |i: usize| Some(u32::from_be_bytes(at.get(i..i + 4)?.try_into().ok()?));
+    // A key past a document's ending in `00` may be its change meta (014), the next key after it:
+    // the cut goes before the document so that both stay in one range.
+    let at = match (at.first(), word(9), at.split_last()) {
+        (Some(&DATA), Some(DOCUMENTS), Some((0, doc))) if doc.len() > 13 => doc,
+        _ => at,
+    };
     let (Some(&DATA), Some(t), Some(c)) = (at.first(), word(1), word(5)) else {
         return inside(at).then(|| at.to_vec());
     };

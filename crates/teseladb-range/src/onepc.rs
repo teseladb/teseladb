@@ -6,7 +6,7 @@ use teseladb_hlc::Hlc;
 
 use crate::command::{Command, Put};
 use crate::intents::{Conflict, IntentOp, Latest, TxnId, check_put};
-use crate::mutate::live_size;
+use crate::mutate::live_size_of;
 
 /// The newest version of a key as the leader read it, with its value stored as `type · value`.
 pub type Newest = Option<Latest>;
@@ -29,10 +29,10 @@ pub fn one_phase(
             .as_ref()
             .filter(|l| !l.intent)
             .and_then(|l| l.value.split_first())
-            .map_or(0, |(_, v)| live_size(key, v));
+            .map_or(0, |(t, v)| live_size_of(key, *t, v));
         match op {
             IntentOp::Put { value_type, value } => {
-                live_delta += live_size(key, value) - old;
+                live_delta += live_size_of(key, *value_type, value) - old;
                 puts.push(Put { key: key.clone(), value_type: *value_type, value: value.clone() });
             }
             IntentOp::Delete => {
