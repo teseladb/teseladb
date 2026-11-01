@@ -83,26 +83,11 @@ impl Group {
         env: &dyn Env,
         sbe: bool,
     ) -> Result<Vec<Document>, MqlError> {
-        self.run_scored(docs, None, env, sbe)
-    }
-
-    /// The groups of `docs`, whose expressions read each document's metadata (`metas`, one per
-    /// document) with `$meta` (measured: `$max: {$meta: "searchScore"}` after `$search`).
-    pub(crate) fn run_scored(
-        &self,
-        docs: Vec<Document>,
-        metas: Option<Vec<super::meta::Meta>>,
-        env: &dyn Env,
-        sbe: bool,
-    ) -> Result<Vec<Document>, MqlError> {
         let collation = env.collation();
         let col = collation.get();
         let mut groups: Groups = Groups::default();
-        for (i, doc) in docs.into_iter().enumerate() {
-            let scope = match metas.as_ref().and_then(|m| m.get(i)) {
-                Some(meta) => group_scope(&super::meta::MetaEnv { inner: env, meta }, &doc, sbe),
-                None => group_scope(env, &doc, sbe),
-            };
+        for doc in docs {
+            let scope = group_scope(env, &doc, sbe);
             let key = self.id.eval(&doc, &scope)?.unwrap_or(Value::Null);
             let states = groups.entry(key, &self.outputs, col)?;
             for ((_, acc), st) in self.outputs.iter().zip(states.iter_mut()) {

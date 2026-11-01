@@ -47,6 +47,7 @@ use teseladb_mql::{ErrorCode, MqlError};
 
 pub(crate) use logic::sort_by_values;
 pub use logic::{order, truthy, try_sort_by};
+pub(crate) use misc::SORT_KEY;
 pub use path::field_path;
 
 /// The result of an expression: a value, or nothing (a missing field).
@@ -243,6 +244,11 @@ pub enum Op {
     FromString(Box<date_parse::FromString>),
 }
 
+/// Whether metadata `name` must come from a stage before the one that reads it.
+pub(crate) fn meta_is_required(name: &str) -> bool {
+    misc::missing_meta_error(name).is_some()
+}
+
 /// The error of metadata `name` that no stage before gives.
 pub(crate) fn missing_meta(name: &str) -> MqlError {
     misc::missing_meta_error(name).unwrap_or_else(|| {
@@ -271,9 +277,6 @@ pub struct Scope {
     pub collation: crate::collation::Collation,
     /// The engine of `$function` and `$accumulator` (016), `None` without one.
     pub js: Option<Rc<dyn js::JsEngine>>,
-    /// Required metadata names that give nothing when the document has none: what a search
-    /// stage gave before a stage that makes new documents (011, measured on 9.0.4).
-    pub meta_missing_ok: Vec<String>,
 }
 
 impl Scope {

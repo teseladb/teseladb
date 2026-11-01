@@ -241,3 +241,43 @@ fn a_merge_given_up_never_applies_and_bad_merges_stop_the_range() {
     let itself = Command::Merge { right: L, merge: 91, absorb: Some(a) };
     assert!(apply(&mut l, L, 4, ts(50), &itself).is_err());
 }
+
+#[test]
+fn a_cut_is_known_by_its_new_range_and_not_by_the_end_it_left() {
+    // 007 A007-3-1: a split at `AT`, a merge that undoes it and a second split at the same key.
+    // A replica that applied only the first cut ends at `AT` too, but it has not applied the
+    // second one: Group 0 completes a split on the cut into its own new range, never on an end
+    // that happens to match.
+    let mut core = Core::new();
+    let mut l = core.open(L, START, END);
+    let first = Command::Split { at: AT.to_vec(), new_range: R, records: vec![], right_live: 0 };
+    apply(&mut l, L, 1, ts(10), &first).unwrap();
+    assert_eq!(l.last_cut(), Some(R));
+    assert!(l.applied_split(AT, R));
+    // The stale replica stays here, with the same end the second split will leave.
+    let stale =
+        RangeSm::try_open(L, START.to_vec(), END.to_vec(), core.lsm.clone()).unwrap().unwrap();
+    let mut r = core.open(R, AT, END);
+    apply(&mut r, R, 1, ts(20), &Command::MergeFreeze { merge: MERGE }).unwrap();
+    let merge = absorb(&mut core, &r);
+    apply(&mut l, L, 2, ts(30), &merge).unwrap();
+    assert_eq!(l.bounds(), (START, END));
+    const AGAIN: GroupId = GroupId(5);
+    let second =
+        Command::Split { at: AT.to_vec(), new_range: AGAIN, records: vec![], right_live: 0 };
+    assert!(!l.applied_split(AT, AGAIN), "the merged range has not cut again");
+    apply(&mut l, L, 3, ts(40), &second).unwrap();
+    assert!(l.applied_split(AT, AGAIN));
+    // The replica as it was after the first cut ends at `AT`, but not by this split.
+    assert_eq!(stale.bounds(), (START, AT));
+    assert!(!stale.applied_split(AT, AGAIN));
+    assert!(stale.applied_split(AT, R));
+    // The cut survives a restart and travels in the snapshots.
+    let snap = l.snapshot();
+    let mut core = core.restart();
+    let reopened = core.open(L, START, END);
+    assert_eq!(reopened.last_cut(), Some(AGAIN));
+    let mut copy = core.open(L, START, END);
+    copy.restore(&snap).unwrap();
+    assert!(copy.applied_split(AT, AGAIN));
+}

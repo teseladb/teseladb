@@ -26,7 +26,7 @@ pub use shape::projected_expr;
 pub use stages::check_exprs;
 pub use system::{LIST_SEARCH_INDEXES, scale_of};
 
-use teseladb_bson::{Document, RawDoc, RawValue};
+use teseladb_bson::{Document, RawDoc, RawValue, Value};
 use teseladb_mql::{Extensions, MqlError};
 use teseladb_plan::stages::named;
 
@@ -143,6 +143,8 @@ pub struct Pipeline {
     stages: Vec<Stage>,
     /// For each stage, whether its specification names only operators SBE runs.
     sbe_specs: Vec<bool>,
+    /// Whether a stage reads `{$meta: "sortKey"}`, which each `$sort` then sets.
+    reads_sort_key: bool,
 }
 
 impl Pipeline {
@@ -330,25 +332,21 @@ impl Pipeline {
         sbe: bool,
     ) -> Result<(Vec<Document>, Option<Vec<meta::Meta>>), MqlError> {
         let mut sbe = sbe && !self.starts_with_documents();
-        // The scores search stages gave, which read as nothing once a stage made new documents.
-        let mut searched: Vec<String> = Vec::new();
-        let mut missing_ok: Vec<String> = Vec::new();
         for (st, spec) in self.stages.iter().zip(&self.sbe_specs) {
             sbe = sbe && *spec && sbe_capable(st);
-            let quiet = meta::MissingOkEnv { inner: env, names: &missing_ok };
-            let env: &dyn Env = if missing_ok.is_empty() { env } else { &quiet };
-            if let Stage::Search(name, spec) = st {
-                let scored = env.search_source(name, spec)?;
-                searched.extend(meta::search_score_of(name).map(str::to_owned));
-                let own = meta::search_score_of(name);
-                let (found, scores): (Vec<Document>, Vec<meta::Meta>) =
-                    scored.into_iter().map(|s| (s.doc, meta::with_score(s.meta, own))).unzip();
-                (docs, metas) = (found, Some(scores));
-                continue;
-            }
             if let Stage::Fusion(f) = st {
                 let (fused, scores) = f.run(docs, env)?;
                 (docs, metas) = (fused, Some(scores));
+                continue;
+            }
+            if let Stage::Search(name, spec) = st {
+                let own = meta::search_score_of(name);
+                let (found, scores): (Vec<Document>, Vec<meta::Meta>) = env
+                    .search_source(name, spec)?
+                    .into_iter()
+                    .map(|s| (s.doc, meta::with_score(s.meta, own)))
+                    .unzip();
+                (docs, metas) = (found, Some(scores));
                 continue;
             }
             if let Stage::Score(s) = st {
@@ -356,14 +354,13 @@ impl Pipeline {
                 metas = Some(s.run(&docs, &own, env)?);
                 continue;
             }
+            if self.reads_sort_key && metas.is_none() && matches!(st, Stage::Sort(_)) {
+                metas = Some(vec![meta::Meta::new(); docs.len()]);
+            }
             (docs, metas) = match metas {
                 None => (run_stage(st, docs, env, sbe)?, None),
                 Some(m) => run_stage_meta(st, docs, m, env, sbe)?,
             };
-            // The stage itself still reads the scores (measured: `$group` accumulates them).
-            if makes_new_documents(st) {
-                missing_ok.extend(searched.iter().cloned());
-            }
         }
         Ok((docs, metas))
     }
@@ -427,7 +424,10 @@ fn parse_stages(pipeline: &[RawValue<'_>], ctx: &Ctx) -> Result<Pipeline, MqlErr
         stages.push(parse_stage(*d, ctx)?);
         sbe_specs.push(d.iter().all(|(name, arg)| sbe::spec_runs_in_sbe(name, arg)));
     }
-    Ok(Pipeline { stages, sbe_specs })
+    let mut read = Vec::new();
+    pipeline.iter().for_each(|v| meta::metas_read(*v, &mut read));
+    let reads_sort_key = read.iter().any(|n| n == crate::expr::SORT_KEY);
+    Ok(Pipeline { stages, sbe_specs, reads_sort_key })
 }
 
 fn parse_stage(d: RawDoc<'_>, ctx: &Ctx) -> Result<Stage, MqlError> {
@@ -559,7 +559,7 @@ fn plan_code_name(code: i32) -> &'static str {
 }
 
 /// Whether filter `m` holds `$text`, at its top level or inside `$and`, `$or` or `$nor`.
-fn has_text(m: RawDoc<'_>) -> bool {
+pub(crate) fn has_text(m: RawDoc<'_>) -> bool {
     m.iter().any(|(k, v)| match (k, v) {
         ("$text", _) => true,
         ("$and" | "$or" | "$nor", RawValue::Array(items)) => {
@@ -618,19 +618,6 @@ fn sbe_capable(st: &Stage) -> bool {
         | Stage::Search(..)
         | Stage::Write(_) => false,
     }
-}
-
-/// Whether `st` makes new documents from many, after which the scores of a search stage read
-/// as nothing (measured on 9.0.4).
-fn makes_new_documents(st: &Stage) -> bool {
-    matches!(
-        st,
-        Stage::Group(_)
-            | Stage::Bucket(_)
-            | Stage::BucketAuto(_)
-            | Stage::SortByCount(_)
-            | Stage::Count(_)
-    )
 }
 
 fn run_stage(
@@ -695,9 +682,16 @@ fn run_stage(
     })
 }
 
-/// The field that marks a document's place while a window reorders documents with metadata (a
-/// name that starts with a control character, taken off before the next stage).
-const META_MARK: &str = "\u{1}meta";
+/// `docs`, each marked with its place.
+fn marked(docs: Vec<Document>) -> Vec<Document> {
+    docs.into_iter()
+        .enumerate()
+        .map(|(i, mut d)| {
+            d.push(meta::MARK, i as i64);
+            d
+        })
+        .collect()
+}
 
 /// Runs stage `st` over documents with metadata (`metas`): a stage that changes, filters,
 /// reorders, unwinds or joins documents runs over each with its metadata in scope and keeps it;
@@ -712,7 +706,7 @@ fn run_stage_meta(
     let each = |docs: Vec<Document>, metas: Vec<meta::Meta>| -> Result<_, MqlError> {
         let mut out = (Vec::new(), Vec::new());
         for (d, m) in docs.into_iter().zip(metas) {
-            let menv = meta::MetaEnv { inner: env, meta: &m };
+            let menv = meta::MetaEnv { inner: env, meta: &m, marked: &[] };
             for r in run_stage(st, vec![d], &menv, sbe)? {
                 out.0.push(r);
                 out.1.push(m.clone());
@@ -741,8 +735,10 @@ fn run_stage_meta(
         Stage::Sort(s) => {
             let col = env.collation();
             let mut keyed = Vec::with_capacity(docs.len());
-            for (d, m) in docs.into_iter().zip(metas) {
-                keyed.push((s.key_with(&d, col.get(), &m)?, d, m));
+            for (d, mut m) in docs.into_iter().zip(metas) {
+                let key = s.key_with(&d, col.get(), &m)?;
+                m.insert(crate::expr::SORT_KEY.to_owned(), Value::Array(key.clone()));
+                keyed.push((key, d, m));
             }
             crate::expr::try_sort_by(&mut keyed, |(a, _, _), (b, _, _)| {
                 s.compare(a, b, col.get())
@@ -757,7 +753,7 @@ fn run_stage_meta(
             let picked = s.run(marks, env);
             let mut out = (Vec::new(), Vec::new());
             for p in picked {
-                if let Some(teseladb_bson::Value::Int64(i)) = p.get("i")
+                if let Some(Value::Int64(i)) = p.get("i")
                     && let Ok(i) = usize::try_from(*i)
                 {
                     out.0.push(docs[i].clone());
@@ -769,26 +765,28 @@ fn run_stage_meta(
         Stage::Facet(f) => (f.run_with_meta(docs, metas, env)?, None),
         // A window keeps each document and reorders them: a mark finds each one's metadata.
         Stage::SetWindowFields(_) => {
-            let marked: Vec<Document> = docs
-                .into_iter()
-                .enumerate()
-                .map(|(i, mut d)| {
-                    d.push(META_MARK, i as i64);
-                    d
-                })
-                .collect();
+            let empty = meta::Meta::new();
+            let menv = meta::MetaEnv { inner: env, meta: &empty, marked: &metas };
             let mut out = (Vec::new(), Vec::new());
-            for mut d in run_stage(st, marked, env, sbe)? {
-                if let Some(teseladb_bson::Value::Int64(i)) = d.remove(META_MARK)
+            for mut d in run_stage(st, marked(docs), &menv, sbe)? {
+                if let Some(Value::Int64(i)) = d.remove(meta::MARK)
                     && let Some(m) = usize::try_from(i).ok().and_then(|i| metas.get(i))
                 {
                     out.1.push(m.clone());
                 }
+                meta::unmark_doc(&mut d);
                 out.0.push(d);
             }
             (out.0, Some(out.1))
         }
-        Stage::Group(g) => (g.run_scored(docs, Some(metas), env, sbe)?, None),
+        // A stage that makes documents from many reads each one's metadata and drops it.
+        Stage::Group(_) | Stage::Bucket(_) | Stage::BucketAuto(_) | Stage::SortByCount(_) => {
+            let empty = meta::Meta::new();
+            let menv = meta::MetaEnv { inner: env, meta: &empty, marked: &metas };
+            let mut out = run_stage(st, marked(docs), &menv, sbe)?;
+            out.iter_mut().for_each(meta::unmark_doc);
+            (out, None)
+        }
         _ => (run_stage(st, docs, env, sbe)?, None),
     })
 }

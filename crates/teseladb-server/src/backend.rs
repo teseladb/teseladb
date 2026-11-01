@@ -211,7 +211,8 @@ impl ServerBackend {
                     | RemoteReply::Intents { .. }
                     | RemoteReply::Record(_)
                     | RemoteReply::Piece { .. }
-                    | RemoteReply::Restored { .. },
+                    | RemoteReply::Restored { .. }
+                    | RemoteReply::Changes { .. },
                 ) => {
                     return Err(CommandError::new(INTERNAL_ERROR, "a scan answered with no rows"));
                 }
@@ -563,7 +564,8 @@ impl Backend for ServerBackend {
             | RemoteReply::Intents { .. }
             | RemoteReply::Record(_)
             | RemoteReply::Piece { .. }
-            | RemoteReply::Restored { .. } => {
+            | RemoteReply::Restored { .. }
+            | RemoteReply::Changes { .. } => {
                 Err(CommandError::new(INTERNAL_ERROR, "a write answered with no result"))
             }
         }
@@ -603,6 +605,29 @@ impl Backend for ServerBackend {
         }
     }
 
+    fn other_operations(&mut self) -> Result<Vec<teseladb_bson::Document>, CommandError> {
+        let until = Instant::now() + self.deadline;
+        let Some(Some(answers)) = self.ask(0, NodeMsg::CurrentOps, until) else {
+            return Err(CommandError::new(
+                NETWORK_TIMEOUT,
+                "a node of the cluster did not answer the list of its operations",
+            ));
+        };
+        let mut ops = Vec::new();
+        for a in answers {
+            let doc = teseladb_bson::RawDoc::from_bytes(&a)
+                .map(teseladb_bson::Document::from)
+                .map_err(|_| CommandError::new(NETWORK_TIMEOUT, "a node answered a bad list"))?;
+            if let Some(teseladb_bson::Value::Array(items)) = doc.get("ops") {
+                ops.extend(items.iter().filter_map(|v| match v {
+                    teseladb_bson::Value::Document(d) => Some(d.clone()),
+                    _ => None,
+                }));
+            }
+        }
+        Ok(ops)
+    }
+
     fn voters(&mut self, start: &[u8], end: &[u8]) -> Result<usize, CommandError> {
         let overlaps = |e: &RouteEntry| {
             (e.end.is_empty() || start < e.end.as_slice()) && e.start.as_slice() < end
@@ -619,6 +644,45 @@ impl Backend for ServerBackend {
 
     fn end_operation(&mut self) {
         self.release_pins();
+    }
+
+    fn changes(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        from: Hlc,
+    ) -> Result<teseladb_wire::commands::ChangeBatch, CommandError> {
+        // Range by range in key order, each read on its leader (014 FR-003); the batch is
+        // resolved up to the lowest resolved mark of its ranges (FR-004, FR-005).
+        let mut rows = Vec::new();
+        let mut resolved: Option<Hlc> = None;
+        let mut at = start.to_vec();
+        while at.as_slice() < end {
+            let stop = |e: &RouteEntry| match e.end.is_empty() || end <= e.end.as_slice() {
+                true => end.to_vec(),
+                false => e.end.clone(),
+            };
+            let key = at.clone();
+            let build =
+                |e: &RouteEntry, _| RemoteReq::Changes { start: key.clone(), end: stop(e), from };
+            match self.data(&at, false, build)? {
+                (e, RemoteReply::Changes { rows: more, to, oldest_intent }) => {
+                    let mark = teseladb_changestream::resolved::resolved(to, oldest_intent);
+                    resolved = Some(resolved.map_or(mark, |r| r.min(mark)));
+                    rows.extend(more);
+                    at = stop(&e);
+                }
+                _ => {
+                    return Err(CommandError::new(
+                        INTERNAL_ERROR,
+                        "a change stream's read answered with something else",
+                    ));
+                }
+            }
+        }
+        let resolved = resolved.unwrap_or(from).max(from);
+        rows.retain(|r: &teseladb_range::changes::Versioned| r.ts <= resolved);
+        Ok((rows, resolved))
     }
 
     fn txn_pause(&mut self) -> bool {
@@ -1034,6 +1098,22 @@ impl Backend for ServerBackend {
         teseladb_sys::fill_random(out).map_err(|e| {
             CommandError::new(INTERNAL_ERROR, format!("the system gave no random bytes: {e}"))
         })
+    }
+
+    fn log_slow_query(&mut self, attr: &teseladb_bson::Document) {
+        let attr = attr
+            .to_bytes()
+            .ok()
+            .and_then(|b| {
+                teseladb_bson::RawDoc::from_bytes(&b).ok().map(teseladb_bson::extjson::to_relaxed)
+            })
+            .unwrap_or_default();
+        let line = crate::log::Pending {
+            id: teseladb_wire::commands::profile::SLOW_QUERY_ID,
+            msg: "Slow query".to_owned(),
+            attr,
+        };
+        crate::log::defer_at(crate::log::Level::Info, line);
     }
 
     fn log_warning(&mut self, id: i32, msg: &str, attr: &teseladb_bson::Document) {

@@ -11,6 +11,7 @@ pub mod meta;
 pub mod order;
 pub mod range_feed;
 pub mod resolved;
+pub mod stage;
 pub mod token;
 pub mod update_desc;
 

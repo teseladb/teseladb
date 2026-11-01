@@ -50,7 +50,7 @@ use crate::relocations::RelocateMsg;
 use crate::rollback::RollbackWriter;
 use crate::rollback::ref_layout;
 use crate::routes::SharedRoutes;
-use crate::sessions_ops::{KillSender, SessionOps};
+use crate::sessions_ops::{AnswersSender, KillSender, NodeQueries, SessionOps};
 use teseladb_meta::drain::DrainError;
 
 use crate::client_listener::NodePresence;
@@ -130,6 +130,9 @@ pub enum NodeMsg {
     /// Whether every other node not removed applies write gates `want`; one that cannot be
     /// reached does not count (core 0, 007 FR-029).
     GateEverywhere(teseladb_wire::commands::write_block::WriteGate, KillSender),
+    /// The operations in progress on every other node, each node's answer (core 0, 010
+    /// FR-016).
+    CurrentOps(AnswersSender),
     /// A core change between two cores of the node (007 FR-011).
     Relocate(RelocateMsg),
     /// A frame another core of the node received for a range this core runs (007 FR-011: the
@@ -211,6 +214,8 @@ pub struct NodeLogic {
     kills: SessionOps,
     /// Questions to the other nodes about the write gates they apply (core 0, 007 FR-029).
     gates: SessionOps,
+    /// Questions to the other nodes about their operations in progress (core 0, 010 FR-016).
+    op_lists: NodeQueries,
     /// The node's cursors and sessions, where the other nodes' kills land (core 0).
     sessions: Option<Arc<Shared>>,
     /// This core's index and where it publishes its load for core 0's heartbeat (007 FR-010).
@@ -269,6 +274,7 @@ impl NodeLogic {
             catalog: CatalogOps::default(),
             kills: SessionOps::default(),
             gates: SessionOps::default(),
+            op_lists: NodeQueries::default(),
             sessions: None,
             loads: None,
             presence: None,
@@ -343,6 +349,42 @@ impl NodeLogic {
             .map(|to| self.core.forward(to, Bytes::from_vec(body.clone()), self.now))
             .collect();
         self.kills.start(ops, reply);
+    }
+
+    /// Asks every other node for its operations in progress (010 FR-016).
+    fn current_ops(&mut self, reply: AnswersSender) {
+        let me = self.me.as_ref().map_or(NodeId(0), |(id, _)| *id);
+        let body = Request::CurrentOps.encode();
+        let others: Vec<NodeId> = self.group0().map_or_else(Vec::new, |sm| {
+            sm.nodes
+                .values()
+                .filter(|n| n.id != me && n.state != NodeState::Removed)
+                .map(|n| n.id)
+                .collect()
+        });
+        let ops = others
+            .into_iter()
+            .map(|to| self.core.forward(to, Bytes::from_vec(body.clone()), self.now))
+            .collect();
+        self.op_lists.start(ops, reply);
+    }
+
+    /// The node's operations in progress as `currentOp` describes them, in the answer to
+    /// [`Request::CurrentOps`]: a document whose `ops` holds them.
+    fn own_operations(&self) -> Vec<u8> {
+        let (node, host) = self.me.as_ref().map_or((0, String::new()), |(id, a)| {
+            (id.0, String::from_utf8_lossy(&a.native_addr).into_owned())
+        });
+        let ops: Vec<teseladb_bson::Value> = self.sessions.as_ref().map_or_else(Vec::new, |s| {
+            teseladb_wire::commands::admin::node_operations(s, node, &host, crate::clock::wall_ms())
+                .into_iter()
+                .map(teseladb_bson::Value::Document)
+                .collect()
+        });
+        teseladb_bson::Document::new()
+            .with("ops", teseladb_bson::Value::Array(ops))
+            .to_bytes()
+            .unwrap_or_default()
     }
 
     /// Asks every other node not removed whether it applies write gates `want` (007 FR-029).
@@ -1205,6 +1247,10 @@ impl NodeLogic {
                         }
                         self.core.answer_forward(f.from, f.req, Bytes::new());
                     }
+                    (Ok(Request::CurrentOps), _) => {
+                        let answer = self.own_operations();
+                        self.core.answer_forward(f.from, f.req, Bytes::from_vec(answer));
+                    }
                     (Ok(Request::Gate(want)), _) => {
                         let held = self.routes.as_ref().is_some_and(|r| r.gate() == want);
                         let answer = vec![if held { GATE_HELD } else { GATE_BEHIND }];
@@ -1268,6 +1314,14 @@ impl NodeLogic {
         }
         if self.kills.owns(op) {
             self.kills.on_done(op, matches!(result, Ok(Done::Forwarded(_))));
+            return;
+        }
+        if self.op_lists.owns(op) {
+            let answer = match &result {
+                Ok(Done::Forwarded(b)) => Some(b[..].to_vec()),
+                _ => None,
+            };
+            self.op_lists.on_done(op, answer);
             return;
         }
         // A node that answers 0 is behind; one that does not answer is down, and one that answers
@@ -1456,6 +1510,7 @@ impl CoreLogic for NodeLogic {
             NodeMsg::Catalog(req, reply) => self.catalog_request(req, reply),
             NodeMsg::KillSessions(scope, reply) => self.kill_sessions(scope, reply),
             NodeMsg::GateEverywhere(want, reply) => self.gate_everywhere(want, reply),
+            NodeMsg::CurrentOps(reply) => self.current_ops(reply),
             NodeMsg::Ranges(ranges) => {
                 if let Some(data) = &mut self.data {
                     data.set_ranges(&ranges);
@@ -1880,6 +1935,51 @@ mod tests {
         let (tx, rx) = channel();
         c.logic(1).on_message(NodeMsg::KillSessions(KillScope::Op { node: 2, op: 7 }, tx), now);
         c.run_until(|_| rx.try_recv().is_ok());
+        // `currentOp` asks every other node for its operations: node 2 answers with its own.
+        let shared = Arc::new(Shared::default());
+        teseladb_wire::commands::lock(&shared).ops.begin(teseladb_wire::ops::Op {
+            conn: 4,
+            client: None,
+            metadata: None,
+            app_name: None,
+            op: "query",
+            ns: "d.c".to_owned(),
+            command: teseladb_bson::Document::new().with("find", "c"),
+            started_ms: 0,
+            deadline_ms: None,
+            killed: false,
+            user: None,
+            tenant: 0,
+            privileges: None,
+            roles: None,
+            desc: None,
+            progress: None,
+        });
+        c.logic(2).sessions = Some(shared);
+        c.logic(2).me = Some((NodeId(2), addrs(2)));
+        let (tx, rx) = channel();
+        c.logic(1).on_message(NodeMsg::CurrentOps(tx), now);
+        let mut answers = None;
+        c.run_until(|_| {
+            answers = rx.try_recv().ok();
+            answers.is_some()
+        });
+        let answers = answers.flatten().expect("every node answered");
+        let ops: Vec<teseladb_bson::Value> = answers
+            .iter()
+            .flat_map(|a| {
+                let doc = teseladb_bson::Document::from(
+                    teseladb_bson::RawDoc::from_bytes(a).expect("a document"),
+                );
+                match doc.get("ops") {
+                    Some(teseladb_bson::Value::Array(ops)) => ops.clone(),
+                    other => panic!("{other:?}"),
+                }
+            })
+            .collect();
+        let [teseladb_bson::Value::Document(op)] = &ops[..] else { panic!("{ops:?}") };
+        assert_eq!(op.get("opid"), Some(&teseladb_bson::Value::from("node2:1")));
+        assert_eq!(op.get("op"), Some(&teseladb_bson::Value::from("query")));
         // Users and roles: a user created through Group 0 is read and listed on every node.
         let user_doc = |name: &str| {
             teseladb_bson::Document::new()

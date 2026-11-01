@@ -111,6 +111,10 @@ variants!(
     ("resolve_before_durable_commit", "snapshot-isolation", Default, 1000),
     ("resolved_intent_reappears", "lsm", Default, 1000),
     ("rollback_unrecorded", "rollback", Default, 1000),
+    // A split completed on an end that matches its cut (007 A007-3-1): with a merge that undid an
+    // earlier cut at the same key, a replica behind that merge ends there too, Group 0 records a
+    // range that no split made, and the replicas past the merge still hold its keys.
+    ("split_done_by_end", "range_bounds", Heavy, 1000),
     // The split retracts the intents of the half that moves (007 T017): a transaction that commits
     // loses its write there, and `splits` reads an older value at a mark above its commit.
     ("split_loses_intents", "intents", Default, 1000),

@@ -77,6 +77,14 @@ impl Backend for Bare {
         Ok(1)
     }
     fn end_operation(&mut self) {}
+    fn changes(
+        &mut self,
+        _start: &[u8],
+        _end: &[u8],
+        _from: teseladb_hlc::Hlc,
+    ) -> Result<teseladb_wire::commands::ChangeBatch, CommandError> {
+        Err(none())
+    }
     fn txn_pause(&mut self) -> bool {
         false
     }
@@ -180,6 +188,8 @@ impl Backend for Bare {
         true
     }
     fn log_warning(&mut self, _id: i32, _msg: &str, _attr: &Document) {}
+
+    fn log_slow_query(&mut self, _attr: &Document) {}
     fn rotate_certificates(&mut self, _message: Option<&str>) -> Result<(), CommandError> {
         Ok(())
     }

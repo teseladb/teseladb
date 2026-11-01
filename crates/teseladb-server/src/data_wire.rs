@@ -5,6 +5,7 @@
 
 use teseladb_hlc::Hlc;
 use teseladb_range::ack::{W, WriteConcern};
+use teseladb_range::changes::Versioned;
 use teseladb_range::command::DedupKey;
 use teseladb_range::host::{MutationError, RangeError, TxnOp};
 use teseladb_range::intents::{IntentOwner, TxnId, TxnRecord};
@@ -111,6 +112,23 @@ pub enum RemoteReq {
         /// How many files the restore has.
         files: u32,
     },
+    /// A change stream's read of `[start, end)` after mark `from` (014 FR-003), on the leader.
+    Changes {
+        /// First key.
+        start: Vec<u8>,
+        /// End (excluded).
+        end: Vec<u8>,
+        /// The stream read the range up to this mark.
+        from: Hlc,
+    },
+}
+
+fn put_mark(e: &mut Encoder, ts: Hlc) {
+    e.u64(ts.physical).u32(ts.logical);
+}
+
+fn get_mark(d: &mut Decoder<'_>) -> Result<Hlc, DecodeError> {
+    Ok(Hlc { physical: d.u64()?, logical: d.u32()? })
 }
 
 /// A [`RemoteReq`] for range `group`, as it travels to the range's leader (007 FR-003).
@@ -170,6 +188,16 @@ pub enum RemoteReply {
         /// The files are ingested.
         done: bool,
     },
+    /// What a change stream read of the range (014 FR-003): the versions of `(from, to]` and the
+    /// oldest intent pending there.
+    Changes {
+        /// The versions and deletions.
+        rows: Vec<Versioned>,
+        /// The end of the interval read.
+        to: Hlc,
+        /// The mark of the oldest pending intent.
+        oldest_intent: Option<Hlc>,
+    },
 }
 
 const WRITE: u8 = 0;
@@ -181,6 +209,7 @@ const FOLLOWER_SCAN: u8 = 5;
 const BACKUP_FETCH: u8 = 6;
 const RESTORE_PIECE: u8 = 7;
 const RESTORE_INGEST: u8 = 8;
+const CHANGES: u8 = 9;
 
 fn put_hlc(e: &mut Encoder, ts: Hlc) {
     e.u64(ts.physical).u32(ts.logical);
@@ -341,6 +370,10 @@ impl RemoteReq {
             RemoteReq::RestoreIngest { files } => {
                 e.u8(RESTORE_INGEST).u32(*files);
             }
+            RemoteReq::Changes { start, end, from } => {
+                e.u8(CHANGES).bytes(start).bytes(end);
+                put_mark(&mut e, *from);
+            }
         }
         e.finish()
     }
@@ -422,6 +455,11 @@ impl RemoteReq {
                 data: d.bytes()?.to_vec(),
             },
             RESTORE_INGEST => RemoteReq::RestoreIngest { files: d.u32()? },
+            CHANGES => RemoteReq::Changes {
+                start: d.bytes()?.to_vec(),
+                end: d.bytes()?.to_vec(),
+                from: get_mark(&mut d)?,
+            },
             _ => return Err(DecodeError::InvalidValue { offset: at }),
         };
         d.finish()?;
@@ -437,6 +475,7 @@ const OK_INTENTS: u8 = 4;
 const OK_RECORD: u8 = 5;
 const OK_PIECE: u8 = 6;
 const OK_RESTORED: u8 = 7;
+const OK_CHANGES: u8 = 8;
 
 fn put_error(e: &mut Encoder, err: &RangeError) {
     let (tag, hint, text): (u8, u64, &str) = match err {
@@ -541,6 +580,20 @@ pub fn encode_reply(r: &Result<RemoteReply, RangeError>) -> Vec<u8> {
         Ok(RemoteReply::Restored { done }) => {
             e.u8(OK_RESTORED).bool(*done);
         }
+        Ok(RemoteReply::Changes { rows, to, oldest_intent }) => {
+            e.u8(OK_CHANGES).var(rows.len() as u64);
+            for r in rows {
+                e.bytes(&r.key);
+                put_mark(&mut e, r.ts);
+                e.bool(r.value.is_some());
+                if let Some((t, v)) = &r.value {
+                    e.u8(*t).bytes(v);
+                }
+            }
+            put_mark(&mut e, *to);
+            e.bool(oldest_intent.is_some());
+            put_mark(&mut e, oldest_intent.unwrap_or(Hlc { physical: 0, logical: 0 }));
+        }
         Err(err) => {
             e.u8(ERR);
             put_error(&mut e, err);
@@ -596,6 +649,22 @@ pub fn decode_reply(b: &[u8]) -> Result<Result<RemoteReply, RangeError>, DecodeE
             Ok(RemoteReply::Piece { ready, sizes, data: d.bytes()?.to_vec() })
         }
         OK_RESTORED => Ok(RemoteReply::Restored { done: d.bool()? }),
+        OK_CHANGES => {
+            let n = d.var()?;
+            if n > d.remaining() as u64 {
+                return Err(DecodeError::InvalidValue { offset: at });
+            }
+            let mut rows = Vec::new();
+            for _ in 0..n {
+                let key = d.bytes()?.to_vec();
+                let ts = get_mark(&mut d)?;
+                let value = if d.bool()? { Some((d.u8()?, d.bytes()?.to_vec())) } else { None };
+                rows.push(Versioned { key, ts, value });
+            }
+            let to = get_mark(&mut d)?;
+            let (some, intent) = (d.bool()?, get_mark(&mut d)?);
+            Ok(RemoteReply::Changes { rows, to, oldest_intent: some.then_some(intent) })
+        }
         ERR => Err(get_error(&mut d)?),
         _ => return Err(DecodeError::InvalidValue { offset: at }),
     };
@@ -700,6 +769,11 @@ mod tests {
             },
             RemoteReq::RestorePiece { file: 1, offset: 9, data: vec![1, 2, 3] },
             RemoteReq::RestoreIngest { files: 3 },
+            RemoteReq::Changes {
+                start: vec![1],
+                end: vec![2],
+                from: Hlc { physical: 7, logical: 3 },
+            },
         ];
         for r in reqs {
             assert_eq!(RemoteReq::decode(&r.encode()), Ok(r));
@@ -723,6 +797,23 @@ mod tests {
                 value: Some((2, vec![3])),
             }),
             Ok(RemoteReply::Intents { ts: Hlc { physical: 6, logical: 0 } }),
+            Ok(RemoteReply::Changes {
+                rows: vec![
+                    Versioned { key: vec![1], ts: Hlc { physical: 4, logical: 1 }, value: None },
+                    Versioned {
+                        key: vec![2],
+                        ts: Hlc { physical: 5, logical: 0 },
+                        value: Some((1, vec![9])),
+                    },
+                ],
+                to: Hlc { physical: 6, logical: 0 },
+                oldest_intent: Some(Hlc { physical: 7, logical: 0 }),
+            }),
+            Ok(RemoteReply::Changes {
+                rows: vec![],
+                to: Hlc { physical: 6, logical: 0 },
+                oldest_intent: None,
+            }),
             Ok(RemoteReply::Record(TxnRecord {
                 txn: TxnId(8),
                 lsid: 0,

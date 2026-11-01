@@ -49,6 +49,8 @@ const MERGED: u8 = 0x09;
 const ABANDONED: u8 = 0x0A;
 /// Local key of the core the range moved to and the intent that moved it (007 FR-011).
 const RELOCATED: u8 = 0x0B;
+/// Local key of the range the last `Split` gave the upper part to (007 FR-007, A007-3-1).
+const CUT: u8 = 0x0C;
 /// The mark of a range nothing was written to.
 const ZERO: Hlc = Hlc { physical: 0, logical: 0 };
 /// The newest mark: reads of local keys see their last version.
@@ -239,6 +241,9 @@ pub struct RangeSm {
     relocated: Option<(u16, u64)>,
     /// The core this replica runs on, as its embedder said (`None`: not told).
     core: Option<u16>,
+    /// The range the last `Split` applied gave the upper part to: what tells a split Group 0
+    /// recorded from an earlier cut at the same key that a merge undid (A007-3-1).
+    cut: Option<GroupId>,
 }
 
 /// A read of a local key at its last version that does not wait: `Ok(None)` when it needs a
@@ -264,6 +269,7 @@ struct SnapState {
     live: u64,
     merges: MergeState,
     relocated: Option<(u16, u64)>,
+    cut: Option<GroupId>,
 }
 
 /// What a range keeps of merges: the merge it is frozen for, the last range it absorbed and the
@@ -290,6 +296,7 @@ struct LocalState {
     live: u64,
     merges: MergeState,
     relocated: Option<(u16, u64)>,
+    cut: Option<GroupId>,
 }
 
 /// The value of local key `0B`: the target core (u16) and the intent (u64).
@@ -313,8 +320,19 @@ fn read_state(
 ) -> Result<Option<LocalState>, LsmError> {
     let corrupt = || LsmError::Corrupt { file: 0, offset: 0 };
     let mut values = Vec::new();
-    let subs =
-        [GC_THRESHOLD, LAST_MARK, END, PARENT, GENESIS, LIVE, FROZEN, MERGED, ABANDONED, RELOCATED];
+    let subs = [
+        GC_THRESHOLD,
+        LAST_MARK,
+        END,
+        PARENT,
+        GENESIS,
+        LIVE,
+        FROZEN,
+        MERGED,
+        ABANDONED,
+        RELOCATED,
+        CUT,
+    ];
     for sub in subs {
         match read(&local_key(range, sub))? {
             Some(v) => values.push(v),
@@ -349,6 +367,10 @@ fn read_state(
         },
         relocated: match &values[9] {
             Some(v) => Some(decode_relocated(v).ok_or_else(corrupt)?),
+            None => None,
+        },
+        cut: match &values[10] {
+            Some(v) => Some(GroupId(decode_u64(v).ok_or_else(corrupt)?)),
             None => None,
         },
     }))
@@ -438,6 +460,7 @@ impl RangeSm {
             closed: None,
             relocated: s.relocated,
             core: None,
+            cut: s.cut,
         }
     }
 
@@ -472,6 +495,22 @@ impl RangeSm {
     /// data a replica that waits for it ingests ends there (D-067).
     pub fn snapshot_end(&self, snap: &[u8]) -> Option<Vec<u8>> {
         self.decode_snapshot(snap).ok().map(|s| s.end)
+    }
+
+    /// The range the last `Split` applied gave the upper part to (`None`: none applied).
+    pub fn last_cut(&self) -> Option<GroupId> {
+        self.cut
+    }
+
+    /// Whether this replica applied the split Group 0 recorded at `at` into `new_range`: its last
+    /// cut is the one into `new_range`. Its end alone does not tell: a replica that applied an
+    /// earlier cut at the same key, and not the merge that undid it, ends there too (A007-3-1).
+    pub fn applied_split(&self, at: &[u8], new_range: GroupId) -> bool {
+        // Faulty variant (007 A007-3-1): the end decides, and a stale replica completes the split.
+        if cfg!(teseladb_bug = "split_done_by_end") {
+            return self.end == at;
+        }
+        self.cut == Some(new_range) && self.end == at
     }
 
     /// The merge the range is frozen for (007 FR-009): it serves and writes nothing.
@@ -648,6 +687,7 @@ impl RangeSm {
         let left_live = self.live.saturating_sub(right_live);
         let (own_live_key, own_live) = (live_key(self.range), left_live.to_be_bytes());
         let (new_live_key, new_live) = (live_key(new_range), right_live.to_be_bytes());
+        let (cut_key, cut) = (local_key(self.range, CUT), new_range.0.to_be_bytes());
         let writes: Vec<EntryWrite<'_>> = born
             .iter()
             .map(|(k, v)| EntryWrite { key: k, kind: Kind::Put, value: v })
@@ -656,12 +696,14 @@ impl RangeSm {
                 EntryWrite { key: &parent_key, kind: Kind::Put, value: &parent },
                 EntryWrite { key: &own_live_key, kind: Kind::Put, value: &own_live },
                 EntryWrite { key: &new_live_key, kind: Kind::Put, value: &new_live },
+                EntryWrite { key: &cut_key, kind: Kind::Put, value: &cut },
             ])
             .collect();
         self.write(ctx.index, ctx.ts, &writes)?;
         self.end = at.to_vec();
         self.live = left_live;
         self.last_split = ctx.index;
+        self.cut = Some(new_range);
         Ok(())
     }
 
@@ -756,8 +798,13 @@ impl RangeSm {
                 (intent != 0).then_some((core, intent))
             }
         };
+        // So do those taken before the last cut was kept (A007-3-1); a range number is never 0.
+        let cut = match d.remaining() {
+            0 => None,
+            _ => Some(d.u64()?).filter(|g| *g != 0).map(GroupId),
+        };
         d.finish()?;
-        Ok(SnapState { applied, last_write, gc, mark, end, live, merges, relocated })
+        Ok(SnapState { applied, last_write, gc, mark, end, live, merges, relocated, cut })
     }
 }
 
@@ -927,11 +974,12 @@ impl StateMachine for RangeSm {
         e.u64(right).u64(merge).u64(self.abandoned);
         let (core, intent) = self.relocated.unwrap_or((0, 0));
         e.u16(core).u64(intent);
+        e.u64(self.cut.map_or(0, |g| g.0));
         e.finish()
     }
 
     fn restore(&mut self, snap: &[u8]) -> Result<(), RestoreError> {
-        let SnapState { applied, last_write, gc, mark, end, live, merges, relocated } = self
+        let SnapState { applied, last_write, gc, mark, end, live, merges, relocated, cut } = self
             .decode_snapshot(snap)
             .map_err(|e| RestoreError(format!("range {}: {e}", self.range.0)))?;
         let flushed = self.lsm.borrow().flushed_index(self.range);
@@ -950,6 +998,7 @@ impl StateMachine for RangeSm {
         (self.frozen, self.merged, self.abandoned) =
             (merges.frozen, merges.merged, merges.abandoned);
         self.relocated = relocated;
+        self.cut = cut;
         // A split below the snapshot's index may be the last one: none below it leaves.
         self.last_split = applied;
         self.log_floor = applied;

@@ -292,6 +292,14 @@ fn metadata_follows_the_documents_as_refdb() {
     check(include_str!("agg/meta.out"));
 }
 
+/// Each `$meta` name in `$project`, `$addFields`, `$sort`, `$expr` and an accumulator of a
+/// pipeline that sets no metadata: the names a stage must set fail with 40218 when the pipeline
+/// is parsed, the others read their default, and `$sort` takes only the sortable ones (31138).
+#[test]
+fn meta_names_without_their_stage_match_refdb() {
+    check(include_str!("agg/meta_names.out"));
+}
+
 /// `$rankFusion` and `$scoreFusion` (010 T042): their scores, their order and their errors.
 #[test]
 fn fusion_stages_match_refdb() {

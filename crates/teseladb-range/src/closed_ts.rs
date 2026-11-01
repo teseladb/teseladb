@@ -16,10 +16,14 @@ pub const CLOSE_EVERY: Nanos = Nanos::from_millis(200);
 /// How often a leader writes its closed mark in the log.
 pub const LOG_EVERY: Nanos = Nanos::from_secs(5);
 
-/// The mark a leader whose clock reads `mark` closes; none while the clock is within
-/// [`CLOSED_LAG_MS`] of its start.
-pub fn closing(mark: Hlc) -> Option<Hlc> {
-    let physical = mark.physical.checked_sub(CLOSED_LAG_MS).filter(|p| *p > 0)?;
+/// How far behind its clock a leader closes marks while change streams read its range (014
+/// FR-004, `ClosedTimestamp.tla` with `Streams`).
+pub const STREAM_CLOSE_LAG_MS: u64 = 200;
+
+/// The mark a leader whose clock reads `mark` closes `lag_ms` behind it ([`CLOSED_LAG_MS`], or
+/// [`STREAM_CLOSE_LAG_MS`] with streams); none while the clock is within the lag of its start.
+pub fn closing(mark: Hlc, lag_ms: u64) -> Option<Hlc> {
+    let physical = mark.physical.checked_sub(lag_ms).filter(|p| *p > 0)?;
     Some(Hlc { physical, logical: 0 })
 }
 

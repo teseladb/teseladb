@@ -4,7 +4,9 @@ use teseladb_multiraft::{MultiRaftCore, StateMachine};
 use teseladb_types::{GroupId, Nanos, NodeId};
 
 use super::{GetReq, GetState, RangeError, RangeHost, ReadSpec, Req, ReqId};
-use crate::closed_ts::{CLOSE_EVERY, LOG_EVERY, closing, follower_mark};
+use crate::closed_ts::{
+    CLOSE_EVERY, CLOSED_LAG_MS, LOG_EVERY, STREAM_CLOSE_LAG_MS, closing, follower_mark,
+};
 use crate::command::Command;
 use crate::push::ScanState;
 use crate::sm::RangeState;
@@ -98,7 +100,14 @@ impl RangeHost {
         }
         l.close_at = now + CLOSE_EVERY;
         // The clock the core's clock rule checked (005 FR-006).
-        let Some(c) = core.read_mark(now).and_then(closing) else { return false };
+        // With change streams reading the range, 200 ms behind (014 FR-004); a mark never goes
+        // below one closed before with that lag.
+        let lag = if now < l.streams_until { STREAM_CLOSE_LAG_MS } else { CLOSED_LAG_MS };
+        let Some(c) = core.read_mark(now).and_then(|m| closing(m, lag)) else { return false };
+        let c = c.max(l.last_closed.0);
+        if c > l.last_closed.0 {
+            l.last_closed = (c, core.status(g).map_or(0, |s| s.last_index));
+        }
         // The heartbeats carry it only within the lease (the core checks it): a deposed leader
         // could reach a follower with it. The log does not need the lease: the entry commits only
         // while this term holds a quorum, and comes after every write at or below the mark. It

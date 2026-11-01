@@ -25,10 +25,60 @@ pub const SCORE: &str = "score";
 /// The name of the metadata of a score's details.
 pub const SCORE_DETAILS: &str = "scoreDetails";
 
+/// The score `$search` gives each document.
+pub const SEARCH_SCORE: &str = "searchScore";
+/// The score `$vectorSearch` gives each document.
+pub const VECTOR_SEARCH_SCORE: &str = "vectorSearchScore";
+
+/// The score metadata search stage `name` gives, if it scores documents.
+pub fn search_score_of(name: &str) -> Option<&'static str> {
+    match name {
+        "$search" => Some(SEARCH_SCORE),
+        "$vectorSearch" => Some(VECTOR_SEARCH_SCORE),
+        _ => None,
+    }
+}
+
+/// The metadata of a document a search stage gave: `score` is the stage's score `own` unless
+/// the stage set it (measured: `$meta: "score"` after `$search` is its `searchScore`).
+pub fn with_score(mut m: Meta, own: Option<&str>) -> Meta {
+    if let Some(v) = own.and_then(|o| m.get(o)).cloned() {
+        m.entry(SCORE.to_owned()).or_insert(v);
+    }
+    m
+}
+
 /// An environment whose scopes carry one document's metadata.
 pub(crate) struct MetaEnv<'a> {
     pub(crate) inner: &'a dyn Env,
     pub(crate) meta: &'a Meta,
+    /// The metadata of documents marked with their place ([`MARK`]), for stages that see many
+    /// documents at once: a marked document's scope has its own metadata, without the mark.
+    pub(crate) marked: &'a [Meta],
+}
+
+/// The field that marks a document's place while a stage that sees many documents runs over
+/// documents with metadata (a name that starts with a control character, taken off after it).
+pub(crate) const MARK: &str = "\u{1}meta";
+
+/// Takes the marks off `v` and the documents and arrays in it.
+pub(crate) fn unmark(v: &mut Value) {
+    match v {
+        Value::Document(d) => unmark_doc(d),
+        Value::Array(a) => a.iter_mut().for_each(unmark),
+        _ => {}
+    }
+}
+
+/// Takes the marks off `d` and the documents and arrays in it.
+pub(crate) fn unmark_doc(d: &mut Document) {
+    d.remove(MARK);
+    let keys: Vec<String> = d.iter().map(|(k, _)| k.to_owned()).collect();
+    for k in keys {
+        if let Some(v) = d.get_mut(&k) {
+            unmark(v);
+        }
+    }
 }
 
 impl Env for MetaEnv<'_> {
@@ -69,8 +119,19 @@ impl Env for MetaEnv<'_> {
     }
 
     fn scope(&self, doc: &Document) -> Scope {
-        let mut s = self.inner.scope(doc);
-        s.meta.extend(self.meta.iter().map(|(k, v)| (k.clone(), v.clone())));
+        let place = match doc.get(MARK) {
+            Some(Value::Int64(i)) => usize::try_from(*i).ok(),
+            _ => None,
+        };
+        let Some(own) = place.and_then(|i| self.marked.get(i)) else {
+            let mut s = self.inner.scope(doc);
+            s.meta.extend(self.meta.iter().map(|(k, v)| (k.clone(), v.clone())));
+            return s;
+        };
+        let mut root = doc.clone();
+        root.remove(MARK);
+        let mut s = self.inner.scope(&root);
+        s.meta.extend(own.iter().map(|(k, v)| (k.clone(), v.clone())));
         s
     }
 }
@@ -191,7 +252,7 @@ impl Score {
     ) -> Result<Vec<Meta>, MqlError> {
         let mut raw = Vec::with_capacity(docs.len());
         for (d, m) in docs.iter().zip(metas) {
-            let menv = MetaEnv { inner: env, meta: m };
+            let menv = MetaEnv { inner: env, meta: m, marked: &[] };
             let v = self.score.eval(d, &menv.scope(d))?;
             let x = match &v {
                 Some(n) if crate::expr::values::is_number(n) => {
@@ -267,156 +328,83 @@ pub(crate) fn shown_expression(x: RawValue<'_>) -> Result<String, MqlError> {
 /// RefDb's code for metadata a stage asks for and no stage before gives.
 pub const META_MISSING: ErrorCode = ErrorCode { code: 40_218, name: "Location40218" };
 
-/// The metadata `$score` sets, which a pipeline checks before it runs.
-const OWN: [&str; 2] = [SCORE, SCORE_DETAILS];
-
-/// The score `$search` gives each document.
-pub const SEARCH_SCORE: &str = "searchScore";
-/// The score `$vectorSearch` gives each document.
-pub const VECTOR_SEARCH_SCORE: &str = "vectorSearchScore";
-/// The metadata of `returnScope` searches, which no stage of this engine gives.
-const SEARCH_ROOT_DOCUMENT_ID: &str = "searchRootDocumentId";
-/// The metadata a pipeline refuses unless a search stage before gave it, whatever stages
-/// follow (measured on 9.0.4: after `$group` a read of it gives nothing).
-const SEARCH_OWN: [&str; 3] = [SEARCH_SCORE, VECTOR_SEARCH_SCORE, SEARCH_ROOT_DOCUMENT_ID];
-
-/// The score metadata search stage `name` gives, if it scores documents.
-pub fn search_score_of(name: &str) -> Option<&'static str> {
-    match name {
-        "$search" => Some(SEARCH_SCORE),
-        "$vectorSearch" => Some(VECTOR_SEARCH_SCORE),
-        _ => None,
-    }
-}
-
-/// The metadata of a document a search stage gave: `score` is the stage's score `own` unless
-/// the stage set it (measured: `$meta: "score"` after `$search` is its `searchScore`).
-pub fn with_score(mut m: Meta, own: Option<&str>) -> Meta {
-    if let Some(v) = own.and_then(|o| m.get(o)).cloned() {
-        m.entry(SCORE.to_owned()).or_insert(v);
-    }
-    m
-}
-
-/// An environment whose scopes give nothing, not an error, for the metadata `names`.
-pub(crate) struct MissingOkEnv<'a> {
-    pub(crate) inner: &'a dyn Env,
-    pub(crate) names: &'a [String],
-}
-
-impl Env for MissingOkEnv<'_> {
-    fn ext(&self) -> &dyn Extensions {
-        self.inner.ext()
-    }
-
-    fn vars(&self) -> Option<&Document> {
-        self.inner.vars()
-    }
-
-    fn collection(&self, name: &str) -> Result<Vec<Document>, MqlError> {
-        self.inner.collection(name)
-    }
-
-    fn random(&self) -> f64 {
-        self.inner.random()
-    }
-
-    fn system_stage(&self, name: &str, spec: &Document) -> Result<Vec<Document>, MqlError> {
-        self.inner.system_stage(name, spec)
-    }
-
-    fn search_source(
-        &self,
-        stage: &str,
-        spec: &Document,
-    ) -> Result<Vec<super::search::Scored>, MqlError> {
-        self.inner.search_source(stage, spec)
-    }
-
-    fn collation(&self) -> crate::collation::Collation {
-        self.inner.collation()
-    }
-
-    fn geo_indexes(&self) -> Result<(String, Vec<super::geo_near::GeoIndex>), MqlError> {
-        self.inner.geo_indexes()
-    }
-
-    fn js(&self) -> Option<std::rc::Rc<dyn crate::expr::js::JsEngine>> {
-        self.inner.js()
-    }
-
-    fn allow_disk_use(&self) -> bool {
-        self.inner.allow_disk_use()
-    }
-
-    fn scope(&self, doc: &Document) -> Scope {
-        let mut s = self.inner.scope(doc);
-        s.meta_missing_ok.extend(self.names.iter().cloned());
-        s
-    }
-}
-
 /// The stages after which documents have no metadata.
 const DROPPING: [&str; 6] =
     ["$group", "$bucket", "$bucketAuto", "$sortByCount", "$count", "$unionWith"];
 
-/// Refuses a stage that reads `score` or `scoreDetails` with `$meta` where no `$score` before it
-/// gives them (40218, measured on a `refrouter` 9.0.4).
-pub(crate) fn check_available(stages: &[RawValue<'_>]) -> Result<(), MqlError> {
-    let mut available: Vec<&str> = Vec::new();
-    let mut searched: Vec<&str> = Vec::new();
-    let usable = |n: &str, available: &[&str], searched: &[&str]| {
-        if OWN.contains(&n) {
-            available.contains(&n)
-        } else if SEARCH_OWN.contains(&n) {
-            searched.contains(&n)
-        } else {
-            true
+/// The metadata a stage gives its documents (`$match` only with `$text`, which goes first).
+fn given_by(name: &str, arg: RawValue<'_>) -> Vec<&'static str> {
+    let details = matches!(arg, RawValue::Document(s)
+        if s.get("scoreDetails").is_some_and(|v| crate::expr::truthy(&Some(Value::from(v)))));
+    let mut given = match name {
+        "$score" | "$rankFusion" | "$scoreFusion" => vec![SCORE],
+        // `searchRootDocumentId` needs `returnScope`, which no stage of this engine runs
+        // (measured on 9.0.4: 40218 after `$search`).
+        "$search" => vec![SEARCH_SCORE, SCORE],
+        "$vectorSearch" => vec![VECTOR_SEARCH_SCORE, SCORE],
+        "$geoNear" => vec!["geoNearDistance", "geoNearPoint"],
+        "$match" if matches!(arg, RawValue::Document(m) if super::has_text(m)) => {
+            vec!["textScore", SCORE]
         }
+        _ => Vec::new(),
     };
+    if details && !given.is_empty() {
+        given.push(SCORE_DETAILS);
+    }
+    given
+}
+
+/// Refuses a stage that reads with `$meta` metadata that no stage before it gives (40218,
+/// measured on a `refrouter` 9.0.4 for every name): `$facet`'s pipelines see the metadata of the
+/// stage's input, those of `$lookup` and `$unionWith` start without any, and `$redact` reads a
+/// missing value instead.
+pub(crate) fn check_available(stages: &[RawValue<'_>]) -> Result<(), MqlError> {
+    check_pipeline(stages, Vec::new())
+}
+
+fn check_pipeline(stages: &[RawValue<'_>], mut available: Vec<&str>) -> Result<(), MqlError> {
     for st in stages {
         let RawValue::Document(d) = st else { continue };
         let Some((name, arg)) = d.iter().next() else { continue };
-        let mut read = Vec::new();
-        metas_read(arg, &mut read);
-        for r in &read {
-            if !usable(r, &available, &searched) {
-                return Err(crate::expr::missing_meta(r));
-            }
-        }
-        if let Some(score) = search_score_of(name) {
-            available.push(SCORE);
-            searched.push(score);
-        }
-        if matches!(name, "$score" | "$rankFusion" | "$scoreFusion") {
-            available.push(SCORE);
-            if let RawValue::Document(s) = arg
-                && s.get("scoreDetails").is_some_and(|v| crate::expr::truthy(&Some(Value::from(v))))
-            {
-                available.push(SCORE_DETAILS);
-            }
-        }
-        if DROPPING.contains(&name) {
-            available.clear();
-        }
-        // A `$sort` by metadata reads it too.
-        if name == "$sort"
-            && let RawValue::Document(s) = arg
-        {
-            for (_, x) in s.iter() {
-                if let RawValue::Document(m) = x
-                    && let Some(RawValue::String(n)) = m.get("$meta")
-                    && !usable(n, &available, &searched)
-                {
-                    return Err(crate::expr::missing_meta(n));
+        match name {
+            "$facet" => {
+                if let RawValue::Document(f) = arg {
+                    for (_, p) in f.iter() {
+                        if let RawValue::Array(p) = p {
+                            check_pipeline(&p.iter().collect::<Vec<_>>(), available.clone())?;
+                        }
+                    }
                 }
             }
+            "$lookup" | "$unionWith" => {
+                if let RawValue::Document(l) = arg
+                    && let Some(RawValue::Array(p)) = l.get("pipeline")
+                {
+                    check_pipeline(&p.iter().collect::<Vec<_>>(), Vec::new())?;
+                }
+            }
+            "$redact" => {}
+            _ => {
+                let mut read = Vec::new();
+                metas_read(arg, &mut read);
+                for r in &read {
+                    if crate::expr::meta_is_required(r) && !available.contains(&r.as_str()) {
+                        return Err(crate::expr::missing_meta(r));
+                    }
+                }
+            }
+        }
+        available.extend(given_by(name, arg));
+        if DROPPING.contains(&name) {
+            // The scores of a search stage stay readable, as nothing (measured on 9.0.4 after
+            // `$group`); the other metadata goes.
+            available.retain(|n| *n == SEARCH_SCORE || *n == VECTOR_SEARCH_SCORE);
         }
     }
     Ok(())
 }
 
-/// The required metadata names `v` reads with `$meta` (anywhere in a stage's specification).
+/// The metadata names `v` reads with `$meta` (anywhere in a stage's specification).
 pub(crate) fn metas_read(v: RawValue<'_>, out: &mut Vec<String>) {
     match v {
         RawValue::Document(d) => {

@@ -9,7 +9,9 @@ use std::cmp::Ordering;
 use teseladb_bson::{Document, RawDoc, RawValue, Value};
 use teseladb_mql::MqlError;
 
-use super::errors::{FIELD_DOLLAR, PATH_DOT_END, SORT_EMPTY, SORT_NOT_OBJECT, SORT_ORDER, error};
+use super::errors::{
+    FIELD_DOLLAR, PATH_DOT_END, SORT_EMPTY, SORT_ILLEGAL_META, SORT_NOT_OBJECT, SORT_ORDER, error,
+};
 use crate::expr::order;
 
 /// A sort specification: field paths and whether each ascends.
@@ -19,6 +21,10 @@ pub struct SortSpec {
     /// The metadata each key sorts by instead of its path (`{f: {$meta: "score"}}`, descending).
     metas: Vec<Option<String>>,
 }
+
+/// The metadata a sort can sort by (measured on a `refrouter` 9.0.4: any other is 31138).
+const SORTABLE_METAS: [&str; 6] =
+    ["textScore", "randVal", "searchScore", "geoNearDistance", "vectorSearchScore", "score"];
 
 /// Checks a field path of a sort or projection.
 pub(crate) fn check_path(path: &str) -> Result<(), MqlError> {
@@ -36,6 +42,16 @@ pub(crate) fn check_path(path: &str) -> Result<(), MqlError> {
     Ok(())
 }
 
+/// The key of metadata `name` in `meta`: `null` for a random value no stage set, an error for
+/// metadata a stage must give.
+fn meta_key(meta: &super::meta::Meta, name: &str) -> Result<Value, MqlError> {
+    match meta.get(name) {
+        Some(v) => Ok(v.clone()),
+        None if crate::expr::meta_is_required(name) => Err(crate::expr::missing_meta(name)),
+        None => Ok(Value::Null),
+    }
+}
+
 impl SortSpec {
     /// Reads the specification of a `$sort` stage.
     pub fn parse(v: RawValue<'_>) -> Result<SortSpec, MqlError> {
@@ -47,8 +63,17 @@ impl SortSpec {
         for (k, x) in d.iter() {
             check_path(k)?;
             if let RawValue::Document(m) = x
-                && let Some(RawValue::String(name)) = m.get("$meta")
+                && let Some(meta) = m.get("$meta")
             {
+                let name = match meta {
+                    RawValue::String(name) if SORTABLE_METAS.contains(&name) => name,
+                    other => {
+                        return Err(error(
+                            SORT_ILLEGAL_META,
+                            format!("Illegal $meta sort: $meta: {}", teseladb_mql::shell(other)),
+                        ));
+                    }
+                };
                 keys.push((k.to_owned(), false));
                 metas.push(Some(name.to_owned()));
                 continue;
@@ -84,7 +109,7 @@ impl SortSpec {
         let mut keys = self.path_keys(doc, col)?;
         for (k, m) in keys.iter_mut().zip(&self.metas) {
             if let Some(name) = m {
-                *k = meta.get(name).cloned().ok_or_else(|| crate::expr::missing_meta(name))?;
+                *k = meta_key(meta, name)?;
             }
         }
         Ok(keys)
@@ -96,10 +121,7 @@ impl SortSpec {
         doc: &Document,
         col: Option<&dyn teseladb_bson::Collator>,
     ) -> Result<Vec<Value>, MqlError> {
-        if let Some(Some(name)) = self.metas.iter().find(|m| m.is_some()) {
-            return Err(crate::expr::missing_meta(name));
-        }
-        self.path_keys(doc, col)
+        self.key_with(doc, col, &super::meta::Meta::new())
     }
 
     /// The keys of `doc` by the paths of the specification (a key by metadata reads `null`).

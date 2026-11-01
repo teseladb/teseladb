@@ -70,6 +70,8 @@ const INCOMING_FILES: u32 = 1 << 20;
 const DOC_TYPE: u8 = 1;
 /// First byte of a write's result: the document had a tag (followed by it) or none.
 const HAD_TAG: u8 = 1;
+/// The checker of the ranges' bounds against Group 0's table (A007-3-1).
+pub(crate) const RANGE_BOUNDS: &str = "range_bounds";
 
 pub(crate) fn doc(k: u64) -> Vec<u8> {
     vec![1, (k * 16 + 8) as u8]
@@ -201,6 +203,11 @@ pub struct MultiRangeWorkload {
     idle: BTreeMap<u32, (u64, Nanos, bool)>,
     /// Answers to requests this workload did not send, for the one built on it.
     pub(crate) foreign: Vec<(u32, ReqId, Result<Reply, RangeError>)>,
+    /// By range, the index from which its replicas hold the bounds of the table: the index of a
+    /// replica that applied the last split or merge Group 0 completed for it (0: none).
+    settled: BTreeMap<GroupId, u64>,
+    /// The first time a replica past that index had other bounds than Group 0 records.
+    bounds_violation: Option<Violation>,
 }
 
 impl MultiRangeWorkload {
@@ -242,6 +249,8 @@ impl MultiRangeWorkload {
             unserved: BTreeMap::new(),
             stale: BTreeMap::new(),
             foreign: Vec::new(),
+            settled: BTreeMap::new(),
+            bounds_violation: None,
         }
     }
 
@@ -590,12 +599,13 @@ impl MultiRangeWorkload {
             let alive = (0..self.nodes).all(|n| w.nodes[n as usize].alive);
             if self.profile.adverse {
                 // A split, then a merge of other ranges, at once; the faults hit both while they
-                // run. A merge starts with every node up, as in `multirange`.
+                // run, and a merge may start with a node down: it waits for that node's freeze
+                // and is given up if it does not come in time.
                 if may_split {
                     self.start_split(w);
                 }
                 let merges = self.profile.merges && self.table.len() > 1;
-                if self.merge.is_none() && merges && alive {
+                if self.merge.is_none() && merges {
                     self.start_merge(w, now);
                 }
             } else if may_split && (ranges == 1 || !may_merge || w.rng.chance(0.5)) {
@@ -613,6 +623,42 @@ impl MultiRangeWorkload {
         self.overlapping = self.split.is_some() && self.merge.is_some();
         self.split_step(w);
         self.merge_step(w);
+        if self.bounds_violation.is_none() {
+            self.bounds_violation = self.check_bounds(w).err();
+        }
+    }
+
+    /// Each range of Group 0's table that no split or merge is changing has the bounds the table
+    /// records on every replica past the index of its last split or merge (A007-3-1): a split
+    /// completed that no replica applied leaves the table with a range whose keys another one
+    /// still holds.
+    fn check_bounds(&self, w: &mut World) -> Result<(), Violation> {
+        let changing = |g: GroupId| {
+            self.split.as_ref().is_some_and(|(s, _, _)| *s == g)
+                || self.merge.is_some_and(|m| m.left == g || m.right == g)
+        };
+        for (g, (start, end)) in &self.table {
+            if changing(*g) {
+                continue;
+            }
+            let since = self.settled.get(g).copied().unwrap_or(0);
+            let off = (0..self.nodes).find_map(|n| {
+                let sm = self.sm(w, n, *g).filter(|sm| !sm.needs_snapshot())?;
+                let (s, e) = sm.bounds();
+                let index = sm.snapshot_state_index();
+                (index >= since && (s, e) != (start.as_slice(), end.as_slice()))
+                    .then(|| (index, n, s.to_vec(), e.to_vec()))
+            });
+            if let Some((index, node, s, e)) = off {
+                let detail = format!(
+                    "range {}: Group 0 records [{start:?}, {end:?}), its replica on node {node} \
+                     at index {index} holds [{s:?}, {e:?})",
+                    g.0
+                );
+                return Err(Violation::safety(RANGE_BOUNDS, detail));
+            }
+        }
+        Ok(())
     }
 
     /// Starts a split of a range drawn at random, at a key drawn in it, unless the range merges.
@@ -647,15 +693,33 @@ impl MultiRangeWorkload {
         }
     }
 
+    /// The lowest applied index of the replicas of `g` where `done` holds, if any.
+    fn first_index(
+        &self,
+        w: &mut World,
+        g: GroupId,
+        done: impl Fn(&RangeSm) -> bool,
+    ) -> Option<u64> {
+        let mut first = None;
+        for n in 0..self.nodes {
+            if let Some(sm) = self.sm(w, n, g).filter(|sm| done(sm)) {
+                first = Some(first.map_or(sm.applied_index(), |f: u64| f.min(sm.applied_index())));
+            }
+        }
+        first
+    }
+
     fn split_step(&mut self, w: &mut World) {
         let Some((g, at, new)) = self.split.clone() else { return };
-        // The cut applied on some replica: Group 0 completes it.
-        let cut = (0..self.nodes)
-            .any(|n| self.sm(w, n, g).is_some_and(|sm| sm.bounds().1 == at.as_slice()));
-        if cut {
+        // The cut into the new range applied on some replica: Group 0 completes it. Not an end
+        // that matches: a replica behind a merge that undid an earlier cut at the same key ends
+        // there too (A007-3-1).
+        let cut = self.first_index(w, g, |sm| sm.applied_split(&at, new));
+        if let Some(index) = cut {
             let end = self.table.get(&g).map(|(_, e)| e.clone()).unwrap_or_default();
             self.table.entry(g).and_modify(|b| b.1.clone_from(&at));
             self.table.insert(new, (at, end));
+            self.settled.insert(g, index);
             self.split = None;
             self.done.0 += 1;
             return;
@@ -669,12 +733,12 @@ impl MultiRangeWorkload {
     fn merge_step(&mut self, w: &mut World) {
         let Some(m) = self.merge else { return };
         let core = self.core();
-        let absorbed = (0..self.nodes).any(|n| {
-            self.sm(w, n, m.left).is_some_and(|sm| sm.absorbed() == Some((m.right, m.id)))
-        });
-        if absorbed {
+        let absorbed = self.first_index(w, m.left, |sm| sm.absorbed() == Some((m.right, m.id)));
+        if let Some(index) = absorbed {
             let end = self.table.remove(&m.right).map(|(_, e)| e).unwrap_or_default();
             self.table.entry(m.left).and_modify(|b| b.1 = end);
+            self.settled.remove(&m.right);
+            self.settled.insert(m.left, index);
             self.merge = None;
             self.done.1 += 1;
             return;
@@ -1070,14 +1134,14 @@ pub(crate) fn record_answer(
             prefer.insert(rec.client, node);
         }
         Ok(Reply::Batch(_)) => rec.result = OpResult::Unknown,
-        Ok(Reply::Intents { .. } | Reply::Record(_))
+        Ok(Reply::Intents { .. } | Reply::Record(_) | Reply::Changes { .. })
         | Err(
             RangeError::WriteConflict
             | RangeError::IntentConflict(_)
             | RangeError::ReadIntent { .. }
             | RangeError::ReadUncertain { .. }
             | RangeError::NoSuchTransaction,
-        ) => unreachable!("the workload runs no transactions"),
+        ) => unreachable!("the workload runs no transactions nor change streams"),
         // Refused before anything was proposed: it imposes nothing.
         Err(RangeError::NotLeader { hint }) => {
             rec.result = OpResult::Rejected;
@@ -1231,6 +1295,9 @@ impl Workload for MultiRangeWorkload {
     }
 
     fn finish(&mut self, _w: &mut World) -> Result<(), Violation> {
+        if let Some(v) = self.bounds_violation.take() {
+            return Err(v);
+        }
         liveness::check(&self.history, self.heal_at, liveness::WINDOW)?;
         durability::check(&self.history)?;
         linearizable::check(&self.history)
@@ -1289,6 +1356,31 @@ mod tests {
             wl.table.iter().map(|(g, (s, _))| (s.clone(), *g)).collect();
         by_start.sort();
         (by_start[0].1, by_start[1].1)
+    }
+
+    #[test]
+    fn a_range_whose_replicas_past_its_last_change_hold_other_bounds_is_reported() {
+        // 007 A007-3-1: Group 0 records an end no replica of the range holds.
+        // Before the first split.
+        let (mut w, mut wl) = world(1);
+        assert_eq!(wl.table.len(), 1);
+        assert!(wl.check_bounds(&mut w).is_ok());
+        let wrong = vec![1, 9];
+        wl.table.entry(FIRST).and_modify(|b| b.1.clone_from(&wrong));
+        let v = wl.check_bounds(&mut w).unwrap_err();
+        assert_eq!(v.checker, RANGE_BOUNDS);
+        assert!(!v.liveness && v.detail.starts_with("range 1: Group 0 records"), "{}", v.detail);
+        // A replica behind the change that set those bounds is not held to them, nor is a range
+        // a split is changing.
+        wl.settled.insert(FIRST, u64::MAX);
+        assert!(wl.check_bounds(&mut w).is_ok());
+        wl.settled.clear();
+        wl.split = Some((FIRST, wrong, GroupId(9)));
+        assert!(wl.check_bounds(&mut w).is_ok());
+        // The first violation is the one the run reports.
+        wl.split = None;
+        wl.resize(&mut w);
+        assert_eq!(wl.finish(&mut w).unwrap_err().checker, RANGE_BOUNDS);
     }
 
     #[test]

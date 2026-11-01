@@ -1099,13 +1099,19 @@ fn history_puts(
     change: &[u8],
     replaced: &[Vec<u8>],
 ) -> Result<Vec<Put>, MutationError> {
-    use teseladb_changestream::meta::history;
-    let updates = UpdateDescription::decode_all(change)
+    use teseladb_changestream::meta::{DocWrite, history};
+    let mut updates = UpdateDescription::decode_all(change)
         .map_err(|e| MutationError(format!("change description: {e:?}")))?;
-    let docs = written_docs(keys, puts, deletes);
-    let replaced: Vec<Vec<u8>> =
-        replaced.iter().filter(|k| !updates.iter().any(|(u, _)| u == *k)).cloned().collect();
-    history(&docs, (&updates, &replaced), None)
+    let writes: Vec<DocWrite> = written_docs(keys, puts, deletes)
+        .into_iter()
+        .map(|key| {
+            let update = updates.iter().position(|(u, _)| *u == key).map(|i| updates.remove(i).1);
+            let put = puts.iter().any(|p| p.key == key);
+            let replace = update.is_none() && replaced.contains(&key);
+            DocWrite { delete: !put, replace, update, doc: None, key }
+        })
+        .collect();
+    history(&writes, None)
         .into_iter()
         .map(|(key, meta)| {
             let value = meta.encode().map_err(|e| MutationError(e.to_string()))?;

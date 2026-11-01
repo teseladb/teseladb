@@ -75,6 +75,24 @@ fn the_seeds_that_found_defects_pass() {
     }
 }
 
+/// `split-merge` (007 T036, A007-3-1): heavy seeds 211 and 288, with merges that start with a
+/// node down, completed a second split at the key of a first one that a merge had undone, because
+/// a replica behind that merge ended there too: Group 0 recorded a range no split had made, whose
+/// keys the left range still held, and the writes stopped after the heal.
+#[test]
+fn the_split_merge_seeds_that_found_a_split_completed_by_its_end_pass() {
+    let cfg = SimConfig {
+        workload: "split-merge".into(),
+        faults: FaultPlan::Heavy,
+        ..SimConfig::default()
+    };
+    for seed in [211, 288] {
+        let r = run_seed(&cfg, seed);
+        assert_eq!(r.verdict, Verdict::Pass, "seed {seed}");
+        assert!(r.events > 10_000, "seed {seed}: {} events", r.events);
+    }
+}
+
 #[test]
 fn without_faults_every_operation_is_answered() {
     for seed in 1..=5 {
