@@ -414,7 +414,7 @@ fn deletes_take_one_or_all() {
     let all = d(&[("q", d(&[])), ("limit", 0.into())]);
     let r = m.run("db", doc(&[("delete", s("c")), ("deletes", Value::Array(vec![one, all]))]));
     assert_eq!(field(&r, "n"), &Value::Int32(5));
-    assert!(m.stored().is_empty());
+    assert!(m.stored(..).is_empty());
 }
 
 /// A statement the parser rejects fails the whole command before any delete runs, with the
@@ -474,7 +474,7 @@ fn a_malformed_delete_statement_fails_the_command() {
         assert_eq!(code(&r), code_of);
         assert_eq!(field(&r, "errmsg"), &s(msg));
     }
-    assert_eq!(m.stored().len(), 3, "nothing was deleted");
+    assert_eq!(m.stored(..).len(), 3, "nothing was deleted");
     let bad = d(&[("q", d(&[("$bad", 1.into())])), ("limit", 1.into())]);
     let cmd = doc(&[
         ("delete", s("c")),
@@ -497,10 +497,10 @@ fn a_malformed_delete_statement_fails_the_command() {
     }
     for limit in [Value::Double(-0.0), Value::Boolean(true), s("x"), Value::Null] {
         insert(&mut m, "c", ids(10..12));
-        let all = i32::try_from(m.stored().len()).unwrap();
+        let all = i32::try_from(m.stored(..).len()).unwrap();
         let r = delete(&mut m, &limit);
         assert_eq!(field(&r, "n"), &Value::Int32(all), "{limit:?}");
-        assert!(m.stored().is_empty());
+        assert!(m.stored(..).is_empty());
     }
 }
 
@@ -700,7 +700,7 @@ fn the_catalog_commands_answer_as_refrouter() {
     assert_eq!(code(&m.run("admin", rename("nodot", "db.e", false))), 73);
     assert_eq!(field(&m.run("admin", rename("db.c", "db.v", true)), "ok"), &Value::Double(1.0));
     // The dropped target's documents are deleted.
-    assert!(m.stored().is_empty());
+    assert!(m.stored(..).is_empty());
     assert!(m.catalog.dropped.is_empty());
     let r = m.run("admin", doc(&[("listDatabases", 1.into()), ("nameOnly", true.into())]));
     let names = ["admin", "config", "db"].map(|n| d(&[("name", s(n))]));
@@ -709,10 +709,10 @@ fn the_catalog_commands_answer_as_refrouter() {
     insert(&mut m, "x", ids(0..3));
     assert_eq!(field(&m.run("db", doc(&[("drop", s("x"))])), "ok"), &Value::Double(1.0));
     assert_eq!(field(&m.run("db", doc(&[("drop", s("x"))])), "ok"), &Value::Double(1.0));
-    assert!(m.stored().is_empty());
+    assert!(m.stored(..).is_empty());
     insert(&mut m, "y", ids(0..3));
     assert_eq!(field(&m.run("db", doc(&[("dropDatabase", 1.into())])), "ok"), &Value::Double(1.0));
-    assert!(m.catalog.collections.is_empty() && m.stored().is_empty());
+    assert!(m.catalog.collections.is_empty() && m.stored(..).is_empty());
     assert_eq!(field(&m.run("db", doc(&[("dropDatabase", 1.into())])), "ok"), &Value::Double(1.0));
 }
 

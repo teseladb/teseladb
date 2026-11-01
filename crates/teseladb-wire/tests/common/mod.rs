@@ -174,11 +174,14 @@ impl Mem {
         self.history.push(teseladb_range::changes::Versioned { key: key.to_vec(), ts, value });
     }
 
-    /// The stored versions a range's scans return: all but those that only serve the history of
-    /// a document (014).
-    pub fn stored(&self) -> BTreeMap<&Vec<u8>, &Vec<u8>> {
+    /// The stored versions of the keys in `range` a range's scans return: all but those that only
+    /// serve the history of a document (014).
+    pub fn stored(
+        &self,
+        range: impl std::ops::RangeBounds<Vec<u8>>,
+    ) -> BTreeMap<&Vec<u8>, &Vec<u8>> {
         let history = |k: &Vec<u8>| self.types.get(k) == Some(&teseladb_range::HISTORY_VALUE);
-        self.data.iter().filter(|(k, _)| !history(k)).collect()
+        self.data.range(range).filter(|(k, _)| !history(k)).collect()
     }
 
     /// Runs `cmd` on database `db`; the reply or the error document.
@@ -623,11 +626,9 @@ impl Backend for Mem {
         if start >= end {
             return Ok(Vec::new());
         }
-        let history = |k: &Vec<u8>| self.types.get(k) == Some(&teseladb_range::HISTORY_VALUE);
         Ok(self
-            .data
-            .range(start.to_vec()..end.to_vec())
-            .filter(|(k, _)| !history(k))
+            .stored(start.to_vec()..end.to_vec())
+            .into_iter()
             .take(limit)
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect())

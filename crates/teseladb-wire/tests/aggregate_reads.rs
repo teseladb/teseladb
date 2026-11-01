@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{Mem, field};
+use common::{Mem, doc, field};
 use teseladb_bson::{Document, Value, extjson};
 
 fn json(text: &str) -> Document {
@@ -50,10 +50,18 @@ fn a_leading_match_reads_views_missing_collections_and_empty_matches() {
     assert_eq!(batch(&r), vec![json(r#"{"_id":3,"a":3,"b":"x"}"#)], "{r:?}");
     let r = run(&mut m, "r", r#"{"aggregate":"nope","pipeline":[{"$match":{"a":1}}],"cursor":{}}"#);
     assert_eq!(batch(&r), Vec::<Document>::new(), "{r:?}");
-    let r = run(
-        &mut m,
+    let empty_in = doc(&[("$in", Value::Array(Vec::new()))]);
+    let pipeline = vec![Value::Document(doc(&[(
+        "$match",
+        Value::Document(doc(&[("a", Value::Document(empty_in))])),
+    )]))];
+    let r = m.run(
         "r",
-        r#"{"aggregate":"c","pipeline":[{"$match":{"a":{"$in":[]}}}],"cursor":{}}"#,
+        doc(&[
+            ("aggregate", Value::from("c")),
+            ("pipeline", Value::Array(pipeline)),
+            ("cursor", Value::Document(Document::new())),
+        ]),
     );
     assert_eq!(batch(&r), Vec::<Document>::new(), "{r:?}");
 }

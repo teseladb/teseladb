@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{Mem, field};
+use common::{Mem, doc, field};
 use teseladb_bson::{Document, Value, extjson};
 
 const T0: i64 = 1_767_225_600_000; // 2026-01-01T00:00:00Z
@@ -121,7 +121,7 @@ fn batches_stop_at_sixteen_mebibytes() {
     let first = docs_at(&r, "cursor.firstBatch");
     assert_eq!(first.len(), 5);
     let Value::Int64(id) = field(&r, "cursor.id") else { panic!("{r:?}") };
-    let r = m.run("q", Document::new().with("getMore", *id).with("collection", "c"));
+    let r = m.run("q", doc(&[("getMore", Value::Int64(*id)), ("collection", Value::from("c"))]));
     let rest = docs_at(&r, "cursor.nextBatch");
     // Documents without a shard key go in the order of their `_id` hash (D-008).
     let mut ids: Vec<i32> = first
