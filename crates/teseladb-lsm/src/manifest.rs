@@ -12,6 +12,7 @@
 //! replaced by an atomic rename when the manifest rotates.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use teseladb_crypto::at_rest::{KeyRing, TRAILER_LEN, WRAPPED_KEY_LEN};
 use teseladb_hash::crc32c;
@@ -28,6 +29,10 @@ const RANGE_FLUSHED: u8 = 5;
 const NEXT_FILE: u8 = 6;
 /// The flushed index of a range goes back to 0 (005 FR-012: before its data is replaced).
 const RANGE_RESET: u8 = 7;
+/// A dictionary of a collection (004 FR-022).
+const DICTIONARY: u8 = 8;
+/// A dictionary no file uses any more.
+const DROP_DICTIONARY: u8 = 9;
 
 /// Name of manifest `number`.
 pub(crate) fn manifest_name(number: u64) -> String {
@@ -60,6 +65,15 @@ pub(crate) struct FileMeta {
     pub(crate) max_ts: Hlc,
 }
 
+/// A dictionary as the manifest keeps it: its version, the prefix of the collection whose blocks
+/// it compresses and its raw content.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Dictionary {
+    pub(crate) version: u64,
+    pub(crate) prefix: Vec<u8>,
+    pub(crate) content: Arc<[u8]>,
+}
+
 /// One atomic change.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Edit {
@@ -70,6 +84,10 @@ pub(crate) struct Edit {
     pub(crate) resets: Vec<GroupId>,
     /// The file counter after the edit (every edit carries it).
     pub(crate) next_file: u64,
+    /// Dictionaries trained by the compaction of the edit.
+    pub(crate) dictionaries: Vec<Dictionary>,
+    /// Versions of the dictionaries no file uses any more.
+    pub(crate) dropped: Vec<u64>,
 }
 
 fn record(out: &mut Vec<u8>, kind: u8, body: &[u8]) {
@@ -160,6 +178,18 @@ impl Edit {
             put_varint(&mut b, *index);
             record(&mut out, RANGE_FLUSHED, &b);
         }
+        for d in &self.dictionaries {
+            let mut b = Vec::new();
+            put_varint(&mut b, d.version);
+            put_bytes(&mut b, &d.prefix);
+            put_bytes(&mut b, &d.content);
+            record(&mut out, DICTIONARY, &b);
+        }
+        for version in &self.dropped {
+            let mut b = Vec::new();
+            put_varint(&mut b, *version);
+            record(&mut out, DROP_DICTIONARY, &b);
+        }
         let mut b = Vec::new();
         put_varint(&mut b, self.next_file);
         record(&mut out, NEXT_FILE, &b);
@@ -195,6 +225,13 @@ impl Edit {
             }
             RANGE_RESET => self.resets.push(GroupId(get_varint(body, &mut at)?)),
             NEXT_FILE => self.next_file = get_varint(body, &mut at)?,
+            DICTIONARY => {
+                let version = get_varint(body, &mut at)?;
+                let prefix = get_bytes(body, &mut at)?.to_vec();
+                let content = Arc::from(get_bytes(body, &mut at)?);
+                self.dictionaries.push(Dictionary { version, prefix, content });
+            }
+            DROP_DICTIONARY => self.dropped.push(get_varint(body, &mut at)?),
             _ => return Err(Bad),
         }
         if at != body.len() { Err(Bad) } else { Ok(()) }
@@ -318,12 +355,14 @@ pub(crate) fn read(b: &[u8], ring: Option<&KeyRing>) -> Result<(Vec<Edit>, u64),
     Ok((edits, at as u64))
 }
 
-/// The state the edits build: files by number, flushed index per range, next file number.
+/// The state the edits build: files by number, flushed index per range, next file number and
+/// the dictionaries by version.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct State {
     pub(crate) files: BTreeMap<u64, FileMeta>,
     pub(crate) flushed: BTreeMap<GroupId, u64>,
     pub(crate) next_file: u64,
+    pub(crate) dictionaries: BTreeMap<u64, Dictionary>,
 }
 
 impl State {
@@ -343,6 +382,26 @@ impl State {
             *v = (*v).max(*index);
         }
         self.next_file = self.next_file.max(e.next_file);
+        for d in &e.dictionaries {
+            self.dictionaries.insert(d.version, d.clone());
+        }
+        for version in &e.dropped {
+            self.dictionaries.remove(version);
+        }
+    }
+
+    /// The newest dictionary of each collection, by prefix: the one new blocks use.
+    pub(crate) fn current_dictionaries(&self) -> BTreeMap<Vec<u8>, (u64, Arc<[u8]>)> {
+        let mut current = BTreeMap::new();
+        for d in self.dictionaries.values() {
+            current.insert(d.prefix.clone(), (d.version, d.content.clone()));
+        }
+        current
+    }
+
+    /// The content of each dictionary, by version.
+    pub(crate) fn dictionary_contents(&self) -> BTreeMap<u64, Arc<[u8]>> {
+        self.dictionaries.iter().map(|(v, d)| (*v, d.content.clone())).collect()
     }
 
     /// One edit that rebuilds this state (the first edit of a new manifest).
@@ -353,6 +412,8 @@ impl State {
             flushed: self.flushed.iter().map(|(r, i)| (*r, *i)).collect(),
             resets: Vec::new(),
             next_file: self.next_file,
+            dictionaries: self.dictionaries.values().cloned().collect(),
+            dropped: Vec::new(),
         }
     }
 }
@@ -381,6 +442,12 @@ mod tests {
             flushed: vec![(GroupId(3), n * 10)],
             resets: if n.is_multiple_of(2) { vec![GroupId(4)] } else { Vec::new() },
             next_file: n + 1,
+            dictionaries: vec![Dictionary {
+                version: n,
+                prefix: vec![1, 0, 0, 0, 1, 0, 0, 0, 7],
+                content: Arc::from(&b"field names"[..]),
+            }],
+            dropped: if n > 2 { vec![n - 1] } else { Vec::new() },
         }
     }
 
@@ -403,6 +470,11 @@ mod tests {
         assert_eq!(s.files.keys().copied().collect::<Vec<_>>(), vec![5]);
         assert_eq!(s.flushed[&GroupId(3)], 50);
         assert_eq!(s.next_file, 6);
+        // Each edit drops the dictionary the one before trained.
+        assert_eq!(s.dictionaries.keys().copied().collect::<Vec<_>>(), vec![5]);
+        let current = s.current_dictionaries();
+        assert_eq!(current[&vec![1, 0, 0, 0, 1, 0, 0, 0, 7]].0, 5);
+        assert_eq!(&*s.dictionary_contents()[&5], b"field names");
         let mut again = State::default();
         again.apply(&s.snapshot());
         assert_eq!(again, s);

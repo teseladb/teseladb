@@ -29,6 +29,7 @@ pub mod crud;
 pub mod diagnostics;
 pub mod engines;
 pub mod explain;
+pub mod fcv;
 pub mod hints;
 pub mod index_build;
 pub mod index_maintenance;
@@ -61,6 +62,7 @@ pub mod users;
 pub mod users_info;
 pub mod uuid;
 pub mod views;
+pub mod write_block;
 
 use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard};
@@ -259,6 +261,22 @@ pub trait Backend {
     }
     /// The cluster parameters as Group 0 keeps them: name and the BSON document of its value.
     fn cluster_parameters(&mut self) -> Result<BTreeMap<String, Vec<u8>>, CommandError>;
+    /// The cluster's write gates (007 FR-029), from the cluster parameters unless the backend
+    /// keeps them closer at hand.
+    fn write_gate(&mut self) -> Result<write_block::WriteGate, CommandError> {
+        Ok(write_block::gate_of(&self.cluster_parameters()?))
+    }
+    /// Whether every other live node of the cluster already applies write gates `want` (007
+    /// FR-029: `fsync` and `setUserWriteBlockMode` answer once every node has them, as a `refrouter`
+    /// answers once every shard did); a node alone has no other.
+    fn gate_everywhere(&mut self, _want: write_block::WriteGate) -> Result<bool, CommandError> {
+        Ok(true)
+    }
+    /// The highest feature compatibility version every node of the cluster runs (007 FR-027),
+    /// if one runs less than this binary's latest.
+    fn fcv_limit(&mut self) -> Result<Option<String>, CommandError> {
+        Ok(None)
+    }
     /// Sets a cluster parameter in Group 0 and waits until this node's copy applied it.
     fn set_cluster_parameter(&mut self, name: &str, value: Vec<u8>) -> Result<(), CommandError>;
     /// The time, on the monotonic clock of [`Backend::now_micros`] in milliseconds, at which the
@@ -612,7 +630,7 @@ impl<B: Backend + ?Sized> Ctx<'_, B> {
 }
 
 /// The commands of this module.
-const NAMES: [&str; 61] = [
+const NAMES: [&str; 64] = [
     aggregate::AGGREGATE,
     explain::EXPLAIN,
     audit::LOG_APPLICATION_MESSAGE,
@@ -624,6 +642,9 @@ const NAMES: [&str; 61] = [
     cluster_admin::GET_DEFAULT_RW_CONCERN,
     cluster_admin::SET_DEFAULT_RW_CONCERN,
     cluster_admin::FSYNC,
+    write_block::FSYNC_UNLOCK,
+    write_block::SET_USER_WRITE_BLOCK_MODE,
+    fcv::SET_FCV,
     cluster_admin::COMPACT,
     cluster_admin::AUTO_COMPACT,
     cluster_admin::SHUTDOWN,
@@ -720,6 +741,9 @@ fn command<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comman
         cluster_admin::GET_DEFAULT_RW_CONCERN => cluster_admin::get_default_rw_concern(ctx),
         cluster_admin::SET_DEFAULT_RW_CONCERN => cluster_admin::set_default_rw_concern(ctx),
         cluster_admin::FSYNC => cluster_admin::fsync(ctx),
+        write_block::FSYNC_UNLOCK => write_block::fsync_unlock(ctx),
+        write_block::SET_USER_WRITE_BLOCK_MODE => write_block::set_user_write_block_mode(ctx),
+        fcv::SET_FCV => fcv::set_fcv(ctx),
         cluster_admin::COMPACT => cluster_admin::compact(ctx),
         cluster_admin::AUTO_COMPACT => cluster_admin::auto_compact(ctx),
         cluster_admin::SHUTDOWN => cluster_admin::shutdown(ctx),

@@ -23,6 +23,7 @@ use std::sync::Arc;
 
 use super::charfilters::Filtered;
 use super::jregex::{JavaRegex, RegexError};
+use super::morph;
 use super::props::category;
 use super::tokenfilters::is_java_whitespace;
 use super::uax29::word_segments;
@@ -99,6 +100,11 @@ pub enum Tokenizer {
     },
     /// The whole text.
     Keyword,
+    /// The Japanese dictionary tokenizer of `reflib.kuromoji` (width-folded text, base forms,
+    /// stop tags dropped).
+    Kuromoji,
+    /// The Korean dictionary tokenizer of `reflib.nori` (morphemes, readings, stop tags dropped).
+    Nori,
     /// Every run of `min..=max` characters.
     NGram {
         /// Shortest gram.
@@ -187,6 +193,36 @@ impl Emitter<'_> {
                 (true, None) => start = Some(i),
                 _ => {}
             }
+        }
+    }
+
+    /// Emits the tokens a dictionary tokenizer gives for `chars` (each with the byte offset of
+    /// the filtered text it comes from); a dropped token keeps its position.
+    fn emit_morph(
+        &mut self,
+        chars: Vec<(char, usize)>,
+        tokenize: impl Fn(&[u16]) -> Vec<Option<morph::MorphToken>>,
+    ) {
+        let mut units = Vec::with_capacity(chars.len());
+        let mut offsets = Vec::with_capacity(chars.len() + 1);
+        for &(c, at) in &chars {
+            let mut buf = [0u16; 2];
+            for &u in c.encode_utf16(&mut buf).iter() {
+                units.push(u);
+                offsets.push(at);
+            }
+        }
+        offsets.push(self.input.text.len());
+        for (position, token) in tokenize(&units).into_iter().enumerate() {
+            let Some(t) = token else { continue };
+            self.out.push(Token {
+                text: t.text,
+                start: self.input.original(offsets[t.start]),
+                end: self.input.original(offsets[t.end]),
+                position: position as u32,
+                length: 1,
+                keyword: false,
+            });
         }
     }
 
@@ -365,6 +401,13 @@ impl Tokenizer {
                 if !text.is_empty() {
                     e.emit(0, text.len());
                 }
+            }
+            Tokenizer::Kuromoji => e.emit_morph(
+                crate::analysis::tokenfilters::cjk_width_offsets(text),
+                morph::kuromoji,
+            ),
+            Tokenizer::Nori => {
+                e.emit_morph(text.char_indices().map(|(i, c)| (c, i)).collect(), morph::nori)
             }
             &Tokenizer::NGram { min, max } => {
                 e.grams(text.char_indices().map(|(i, _)| i), min, max);

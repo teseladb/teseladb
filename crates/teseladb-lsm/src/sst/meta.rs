@@ -45,6 +45,9 @@ pub struct Props {
     pub versions: u64,
     /// Range tombstones.
     pub tombstones: Vec<RangeTombstone>,
+    /// Version of the dictionary of its blocks with code 3 (0: none; 004 FR-022). A file written
+    /// before dictionaries existed ends its properties without it.
+    pub dictionary: u64,
 }
 
 fn put_ts(out: &mut Vec<u8>, ts: Hlc) {
@@ -72,6 +75,7 @@ impl Props {
             put_bytes(&mut out, &t.end);
             put_ts(&mut out, t.ts);
         }
+        put_varint(&mut out, self.dictionary);
         out
     }
 
@@ -91,10 +95,11 @@ impl Props {
             let ts = get_ts(b, &mut at)?;
             tombstones.push(RangeTombstone { start, end, ts });
         }
+        let dictionary = if at == b.len() { 0 } else { get_varint(b, &mut at)? };
         if at != b.len() || lo > hi || min_ts > max_ts {
             return Err(Bad);
         }
-        Ok(Props { lo, hi, min_ts, max_ts, versions, tombstones })
+        Ok(Props { lo, hi, min_ts, max_ts, versions, tombstones, dictionary })
     }
 }
 
@@ -191,13 +196,17 @@ mod tests {
                 end: b"c".to_vec(),
                 ts: ts(5),
             }],
+            dictionary: 7,
         };
         let b = p.encode();
         assert_eq!(Props::decode(&b), Ok(p.clone()));
         let mut longer = b.clone();
         longer.push(0);
         assert_eq!(Props::decode(&longer), Err(Bad));
-        assert_eq!(Props::decode(&b[..b.len() - 1]), Err(Bad));
+        // Without the dictionary's varint: a file written before dictionaries (004 FR-022).
+        let old = Props { dictionary: 0, ..p.clone() };
+        assert_eq!(Props::decode(&b[..b.len() - 1]), Ok(old));
+        assert_eq!(Props::decode(&b[..b.len() - 2]), Err(Bad));
         let upside_down = Props { lo: b"z".to_vec(), ..p.clone() };
         assert_eq!(Props::decode(&upside_down.encode()), Err(Bad));
         let backwards = Props { min_ts: ts(10), ..p };

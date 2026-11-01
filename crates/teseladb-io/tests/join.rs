@@ -10,7 +10,7 @@ use teseladb_io::handshake::{
     Acceptor, HandshakeError, Inbound, JoinHandler, JoinRequest, request_join,
 };
 use teseladb_io::mailbox::{Notify, channel};
-use teseladb_io::peer::{Hello, JoinAccepted, PeerMsg, decode_frame, encode_frame};
+use teseladb_io::peer::{Hello, JoinAccepted, PeerMsg, Versions, decode_frame, encode_frame};
 use teseladb_types::NodeId;
 
 const CLUSTER: [u8; 16] = [7; 16];
@@ -30,6 +30,7 @@ fn hello(node: u64, addr: &str) -> Hello {
         peer_addr: addr.into(),
         http_addr: String::new(),
         native_addr: String::new(),
+        versions: Versions::OWN,
     }
 }
 

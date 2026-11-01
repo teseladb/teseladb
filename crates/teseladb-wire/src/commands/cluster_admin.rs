@@ -277,7 +277,7 @@ const LOCK_TYPES: [&str; 5] = ["decimal", "int", "long", "bool", "double"];
 const TIMEOUT_TYPES: [&str; 4] = ["long", "decimal", "double", "int"];
 
 /// Each node as a `refrouter` names a shard in `fsync`'s `raw`: `<shard>/<host>`.
-fn raw_names<B: Backend + ?Sized>(backend: &mut B) -> Result<Vec<String>, CommandError> {
+pub(crate) fn raw_names<B: Backend + ?Sized>(backend: &mut B) -> Result<Vec<String>, CommandError> {
     Ok(backend
         .config_documents("shards")?
         .iter()
@@ -315,7 +315,8 @@ fn generic(k: &str) -> bool {
 }
 
 /// `fsync`: every write a node acknowledged is already on its disk, so there is nothing to
-/// flush; the answer has each node as a `refrouter` has each shard. `lock` is 007 T042.
+/// flush; the answer has each node as a `refrouter` has each shard. With `lock` it takes one more of
+/// the cluster's locks against writes ([`super::write_block::lock`]).
 pub fn fsync<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     admin_only(FSYNC, ctx.db)?;
     let mut lock = false;
@@ -337,8 +338,7 @@ pub fn fsync<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comm
         }
     }
     if lock {
-        let msg = "fsync with lock, which blocks the cluster's writes, is 007 T042";
-        return Err(CommandError::new(crate::error::COMMAND_NOT_SUPPORTED, msg));
+        return super::write_block::lock(ctx.backend);
     }
     let each = Document::new().with("numFiles", 1).with("ok", 1);
     let raw =

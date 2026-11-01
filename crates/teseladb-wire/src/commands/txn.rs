@@ -1286,6 +1286,17 @@ impl Backend for TxnBackend<'_> {
         self.inner.index_write(cmd)
     }
 
+    fn write_gate(&mut self) -> Result<super::write_block::WriteGate, CommandError> {
+        self.inner.write_gate()
+    }
+
+    fn gate_everywhere(
+        &mut self,
+        want: super::write_block::WriteGate,
+    ) -> Result<bool, CommandError> {
+        self.inner.gate_everywhere(want)
+    }
+
     fn write(&mut self, op: WriteOp) -> Result<Vec<u8>, CommandError> {
         let bound = Bound::decode(&op.mutation)?;
         if bound.rules().capped.is_some() {

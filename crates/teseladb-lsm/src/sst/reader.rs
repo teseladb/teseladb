@@ -3,6 +3,7 @@
 //!
 //! Opening needs two reads: the last page (footer) and the bytes from the filter to the end.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use teseladb_crypto::at_rest::{FileKey, KeyRing};
@@ -29,7 +30,23 @@ pub struct Table {
     pub(crate) meta: Bytes,
     /// The data key of an encrypted file (013 FR-015).
     key: Option<Arc<FileKey>>,
+    /// The dictionary of its blocks with code 3 (004 FR-022).
+    dict: Option<Arc<[u8]>>,
+    /// What its data blocks took, for a file this LSM just wrote.
+    pub(crate) written: BlockStats,
 }
+
+/// Data blocks written: how many with each compression code, and their bytes before and after
+/// compression (the latter framed, without the padding to the page).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct BlockStats {
+    pub(crate) codes: [u64; 4],
+    pub(crate) raw: u64,
+    pub(crate) stored: u64,
+}
+
+/// Dictionaries by version.
+pub(crate) type Dictionaries = BTreeMap<u64, Arc<[u8]>>;
 
 impl Table {
     /// The footer, from the last page of a file.
@@ -39,13 +56,15 @@ impl Table {
     }
 
     /// Opens a file of `size` bytes from `meta`, its bytes from `meta_start` (the filter's
-    /// offset) to the end; an encrypted file opens with its data key from `ring`.
+    /// offset) to the end; an encrypted file opens with its data key from `ring`, and a file whose
+    /// blocks use a dictionary with that dictionary from `dicts` (one it does not have makes the
+    /// file unreadable).
     pub(crate) fn from_meta(
         number: u64,
         size: u64,
         meta_start: u64,
         meta: &Bytes,
-        ring: Option<&KeyRing>,
+        (ring, dicts): (Option<&KeyRing>, &Dictionaries),
     ) -> Result<Table, Bad> {
         let footer = Table::footer(meta)?;
         let key = match (footer.wrapped, ring) {
@@ -53,16 +72,18 @@ impl Table {
             (Some(w), Some(r)) => Some(Arc::new(r.open_file_key(&w).map_err(|_| Bad)?)),
             (Some(_), None) => return Err(Bad),
         };
-        Table::with_key(number, size, meta_start, meta, key)
+        Table::with_key(number, size, meta_start, meta, key, &|v| dicts.get(&v).cloned())
     }
 
-    /// [`Table::from_meta`] with the file's data key already open.
+    /// [`Table::from_meta`] with the file's data key already open, and its dictionary from
+    /// `dict_of`.
     pub(crate) fn with_key(
         number: u64,
         size: u64,
         meta_start: u64,
         meta: &Bytes,
         key: Option<Arc<FileKey>>,
+        dict_of: &dyn Fn(u64) -> Option<Arc<[u8]>>,
     ) -> Result<Table, Bad> {
         if !size.is_multiple_of(ALIGN as u64) || meta_start + meta.len() as u64 != size {
             return Err(Bad);
@@ -81,7 +102,7 @@ impl Table {
                 return Err(Bad);
             }
             let stored = meta.slice((h.offset - meta_start) as usize..(end - meta_start) as usize);
-            unframe_with(&stored, key.as_deref().map(|k| (k, h.offset)))
+            unframe_with(&stored, key.as_deref().map(|k| (k, h.offset)), None)
         };
         if footer.filter.offset != meta_start {
             return Err(Bad);
@@ -90,6 +111,10 @@ impl Table {
         let pinned = Bytes::from_vec([&filter_payload[..], &index_payload[..]].concat());
         let filter = Filter::parse(&pinned.slice(..filter_payload.len()))?;
         let props = Props::decode(&block(footer.props)?)?;
+        let dict = match props.dictionary {
+            0 => None,
+            v => Some(dict_of(v).ok_or(Bad)?),
+        };
         let mut cursor = BlockCursor::first(Block::parse(index_payload)?)?;
         let mut index: Vec<(Box<[u8]>, Handle)> = Vec::new();
         let mut next_free = 0;
@@ -112,7 +137,17 @@ impl Table {
             index.push((cursor.key().into(), h));
             cursor.advance()?;
         }
-        Ok(Table { number, size, props, index, filter, meta: pinned, key })
+        Ok(Table {
+            number,
+            size,
+            props,
+            index,
+            filter,
+            meta: pinned,
+            key,
+            dict,
+            written: BlockStats::default(),
+        })
     }
 
     /// Each data block's last internal key and its length.
@@ -148,7 +183,7 @@ impl Table {
             return Err(Bad);
         }
         let key = self.key.as_deref().map(|k| (k, h.offset));
-        let payload = unframe_with(&read.slice(..h.len as usize), key)?;
+        let payload = unframe_with(&read.slice(..h.len as usize), key, self.dict.as_deref())?;
         Block::parse(payload.clone())?;
         Ok(payload)
     }
@@ -169,8 +204,8 @@ mod tests {
     use crate::sst::meta::{Footer, Handle, Props};
     use crate::sst::writer::TableWriter;
 
-    fn file(n: u32, compress: bool) -> (Vec<u8>, Table) {
-        let mut w = TableWriter::new(4096, compress);
+    fn file(n: u32, codec: crate::config::Codec) -> (Vec<u8>, Table) {
+        let mut w = TableWriter::new(4096, codec);
         let mut bytes = Vec::new();
         for i in 0..n {
             let key = entry::internal_key(
@@ -196,13 +231,21 @@ mod tests {
         let size = bytes.len() as u64;
         let footer = Table::footer(&bytes[bytes.len() - ALIGN..])?;
         let start = footer.filter.offset;
-        Table::from_meta(3, size, start, &Bytes::from_vec(bytes[start as usize..].to_vec()), None)
+        Table::from_meta(
+            3,
+            size,
+            start,
+            &Bytes::from_vec(bytes[start as usize..].to_vec()),
+            (None, &Dictionaries::new()),
+        )
     }
 
     #[test]
     fn reopens_what_it_wrote_and_finds_every_key() {
-        for compress in [false, true] {
-            let (bytes, written) = file(500, compress);
+        for codec in
+            [crate::config::Codec::None, crate::config::Codec::Zlib, crate::config::Codec::Zstd]
+        {
+            let (bytes, written) = file(500, codec);
             let t = open(&bytes).unwrap();
             assert_eq!(t.props, written.props);
             assert_eq!(t.blocks(), written.blocks());
@@ -231,7 +274,7 @@ mod tests {
 
     #[test]
     fn a_broken_file_does_not_open() {
-        let (bytes, _) = file(50, false);
+        let (bytes, _) = file(50, crate::config::Codec::None);
         assert!(open(&bytes[..bytes.len() - 1]).is_err());
         // Every byte of the meta part matters: a flip anywhere is caught.
         let footer = Table::footer(&bytes[bytes.len() - ALIGN..]).unwrap();
@@ -249,11 +292,36 @@ mod tests {
         assert!(Table::footer(&[0; 10]).is_err());
         let size = bytes.len() as u64;
         let meta = Bytes::from_vec(bytes[footer.filter.offset as usize..].to_vec());
-        assert!(Table::from_meta(3, size + 1, footer.filter.offset, &meta, None).is_err());
-        assert!(Table::from_meta(3, size, footer.filter.offset + 1, &meta, None).is_err());
+        assert!(
+            Table::from_meta(
+                3,
+                size + 1,
+                footer.filter.offset,
+                &meta,
+                (None, &Dictionaries::new())
+            )
+            .is_err()
+        );
+        assert!(
+            Table::from_meta(
+                3,
+                size,
+                footer.filter.offset + 1,
+                &meta,
+                (None, &Dictionaries::new())
+            )
+            .is_err()
+        );
         let short = Bytes::from_vec(bytes[footer.filter.offset as usize + ALIGN..].to_vec());
         assert!(
-            Table::from_meta(3, size, footer.filter.offset + ALIGN as u64, &short, None).is_err()
+            Table::from_meta(
+                3,
+                size,
+                footer.filter.offset + ALIGN as u64,
+                &short,
+                (None, &Dictionaries::new())
+            )
+            .is_err()
         );
         let block = Bytes::from_vec(vec![0; 10]);
         let t = open(&bytes).unwrap();
@@ -271,7 +339,7 @@ mod tests {
         use crate::sst::{PAD, pad};
         let mut out = Vec::new();
         let put = |payload: &[u8], out: &mut Vec<u8>| {
-            let framed = frame(payload, false);
+            let framed = frame(payload, crate::sst::block::Method::None);
             let h = Handle { offset: meta_start + out.len() as u64, len: framed.len() as u64 };
             out.extend_from_slice(&framed);
             pad(out);
@@ -286,6 +354,7 @@ mod tests {
             max_ts: at,
             versions: 1,
             tombstones: Vec::new(),
+            dictionary: 0,
         };
         let pr = put(&props.encode(), &mut out);
         let mut index = BlockBuilder::new(1);
@@ -315,7 +384,7 @@ mod tests {
         let ok = |f, p, i| Footer { filter: f, props: p, index: i, wrapped: None };
         let good = vec![(ikey(b"m"), handle(0, 100))];
         let (size, meta) = crafted(start, &good, ok);
-        assert!(Table::from_meta(1, size, start, &meta, None).is_ok());
+        assert!(Table::from_meta(1, size, start, &meta, (None, &Dictionaries::new())).is_ok());
         let footers: [&dyn Fn(Handle, Handle, Handle) -> Footer; 3] = [
             &|f, p: Handle, i| Footer {
                 filter: f,
@@ -339,7 +408,7 @@ mod tests {
         for (n, footer) in footers.iter().enumerate() {
             let (size, meta) = crafted(start, &good, footer);
             assert_eq!(
-                Table::from_meta(1, size, start, &meta, None).err(),
+                Table::from_meta(1, size, start, &meta, (None, &Dictionaries::new())).err(),
                 Some(Bad),
                 "footer {n}"
             );
@@ -356,7 +425,11 @@ mod tests {
         ];
         for (n, index) in indexes.iter().enumerate() {
             let (size, meta) = crafted(start, index, ok);
-            assert_eq!(Table::from_meta(1, size, start, &meta, None).err(), Some(Bad), "index {n}");
+            assert_eq!(
+                Table::from_meta(1, size, start, &meta, (None, &Dictionaries::new())).err(),
+                Some(Bad),
+                "index {n}"
+            );
         }
     }
 }
