@@ -4,6 +4,7 @@
 
 mod arabic;
 mod basque;
+mod catalan;
 mod dutch;
 mod english;
 mod estonian;
@@ -55,6 +56,7 @@ macro_rules! stemmers {
 stemmers! {
     Arabic => "arabic", arabic::stem;
     Basque => "basque", basque::stem;
+    Catalan => "catalan", catalan::stem;
     Danish => "danish", nordic::danish;
     Dutch => "dutch", dutch::stem;
     English => "english", english::stem;
