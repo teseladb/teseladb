@@ -688,5 +688,8 @@ fn phrase_freq(places: &[Vec<i64>], slop: i64) -> f32 {
     }
 }
 
+mod dump;
+pub use dump::{DumpError, applied_of};
+
 #[cfg(test)]
 mod tests;

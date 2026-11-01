@@ -842,3 +842,97 @@ fn segments_behind_the_history_retention_start_over() {
     let got = batch(&agg(&mut m, "c".into(), pipeline));
     assert_eq!(got, vec![doc(&[("_id", 2.into()), ("s", Value::Double(0.13076457381248474))])]);
 }
+
+fn id_bytes(hex: &str) -> [u8; 12] {
+    let mut out = [0u8; 12];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).expect("hex");
+    }
+    out
+}
+
+/// A new replica receives the segment files with the SST files of the ranges and serves them,
+/// catching up from the mark they cover instead of analyzing every document again (FR-012,
+/// FR-013).
+#[test]
+fn segment_files_shipped_with_the_ranges_are_served_without_a_rebuild() {
+    use teseladb_search::definition::Definition;
+    use teseladb_search::indexer::{Indexer, SegmentFile};
+    use teseladb_wire::commands::lock;
+    use teseladb_wire::commands::search_ops::Shipped;
+
+    let mut m = with_collection();
+    insert(&mut m, vec![doc(&[("_id", 2.into()), ("t", "adios mundo cruel".into())])]);
+    let id = id_bytes(&id_of(&create(&mut m, "c", vec![index("default", dynamic(true))]), 0));
+    let pipeline = vec![Document::new().with("$search", text("mundo")), scored()];
+    let before = batch(&agg(&mut m, "c".into(), pipeline.clone()));
+    let shipped = lock(&m.shared).search.ship(&id).expect("built");
+    assert_eq!(shipped.files.len(), 1);
+
+    // The replica serves the files it received: the same answer.
+    lock(&m.shared).search.receive(id, shipped.clone());
+    assert_eq!(batch(&agg(&mut m, "c".into(), pipeline.clone())), before);
+
+    // Files whose mark is ahead of a later write prove the index came from them: a rebuild from
+    // the ranges would see the write, the catch-up from their mark does not read it.
+    let def = Definition::parse(&dynamic(true)).expect("valid");
+    let ix = Indexer::load(def, &shipped.files).expect("read back");
+    let ahead = teseladb_keys::Hlc { physical: u64::MAX / 2, logical: 0 };
+    let files: Vec<SegmentFile> = ix.dump(ahead);
+    lock(&m.shared).search.receive(id, Shipped { files, ..shipped.clone() });
+    insert(&mut m, vec![doc(&[("_id", 3.into()), ("t", "mundo mundo".into())])]);
+    assert_eq!(batch(&agg(&mut m, "c".into(), pipeline.clone())), before);
+
+    // Files of another version, or damaged ones, are not served: the index is built again.
+    let mut damaged = shipped.clone();
+    let n = damaged.files[0].bytes.len();
+    damaged.files[0].bytes[n - 5] ^= 1;
+    for wrong in [Shipped { version: shipped.version + 1, ..shipped.clone() }, damaged] {
+        lock(&m.shared).search.receive(id, wrong);
+        assert_eq!(batch(&agg(&mut m, "c".into(), pipeline.clone())).len(), 3);
+    }
+    // The file of the range snapshot that carries them.
+    let carried = shipped.encode(&id);
+    assert_eq!(Shipped::decode(&carried), Ok((id, shipped.clone())));
+    assert!(Shipped::decode(&carried[..carried.len() - 1]).is_err());
+    assert!(Shipped::decode(&carried[1..]).is_err());
+    // A dropped index forgets what it received.
+    lock(&m.shared).search.receive(id, shipped);
+    lock(&m.shared).search.forget(&id);
+    assert!(lock(&m.shared).search.ship(&id).is_none());
+}
+
+/// The segments of an index are written to a file of the node's directory when it is built,
+/// and after a restart they are served from it (FR-012); a damaged file is removed and a drop
+/// removes the index's file.
+#[test]
+fn segments_are_written_to_the_node_directory_and_read_back() {
+    use teseladb_wire::commands::lock;
+    use teseladb_wire::commands::search_ops::SearchIndexes;
+
+    let dir = std::env::temp_dir().join(format!("tesela-seg-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut m = with_collection();
+    lock(&m.shared).search.open_dir(dir.clone()).expect("directory");
+    let id = id_bytes(&id_of(&create(&mut m, "c", vec![index("default", dynamic(true))]), 0));
+    let pipeline = vec![Document::new().with("$search", text("mundo")), scored()];
+    let before = batch(&agg(&mut m, "c".into(), pipeline.clone()));
+    let files: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()).collect();
+    assert_eq!(files.len(), 1, "{files:?}");
+    let written = std::fs::read(&files[0]).unwrap();
+    assert_eq!(written, lock(&m.shared).search.ship(&id).unwrap().encode(&id));
+
+    // A restart reads the file back and serves it.
+    let mut restarted = SearchIndexes::default();
+    std::fs::write(dir.join("other.txt"), b"not a segment").unwrap();
+    std::fs::write(dir.join("broken.seg"), b"broken").unwrap();
+    restarted.open_dir(dir.clone()).expect("read back");
+    assert!(!dir.join("broken.seg").exists(), "a damaged file is removed");
+    lock(&m.shared).search = restarted;
+    assert_eq!(batch(&agg(&mut m, "c".into(), pipeline)), before);
+    lock(&m.shared).search.forget(&id);
+    assert!(!files[0].exists(), "a dropped index loses its file");
+    // A directory that cannot be made is an error.
+    assert!(SearchIndexes::default().open_dir(dir.join("other.txt").join("x")).is_err());
+    std::fs::remove_dir_all(&dir).unwrap();
+}

@@ -9,8 +9,10 @@ use teseladb_bson::Document;
 
 use crate::analysis::ANALYZERS_VERSION;
 use crate::definition::Definition;
+pub use crate::index::DumpError;
 use crate::index::{Contents, IndexError, MemIndex, Stats};
 use crate::query::search::{self, SearchError};
+use teseladb_keys::Hlc;
 
 /// The segment of one range `[start, end)` (an empty `end` has no upper bound).
 #[derive(Clone, Debug)]
@@ -29,6 +31,17 @@ pub struct Found {
     pub score: f32,
     /// The document as the index has it.
     pub doc: Document,
+}
+
+/// A segment written as an immutable file (FR-012): its range `[start, end)` and the bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SegmentFile {
+    /// First key of the range.
+    pub start: Vec<u8>,
+    /// Key after the range (empty: no upper bound).
+    pub end: Vec<u8>,
+    /// The file.
+    pub bytes: Vec<u8>,
 }
 
 /// The segments of one index.
@@ -116,6 +129,43 @@ impl Indexer {
         }
         self.refresh_stats();
         Ok(())
+    }
+
+    /// Every segment as an immutable file covering the versions up to `mark`, in key order: what
+    /// a node keeps and what a new replica receives with the SST files of the ranges (FR-012,
+    /// FR-013).
+    pub fn dump(&self, mark: Hlc) -> Vec<SegmentFile> {
+        let file = |s: &Segment| SegmentFile {
+            start: s.start.clone(),
+            end: s.end.clone(),
+            bytes: s.index.dump(mark),
+        };
+        self.segments.iter().map(file).collect()
+    }
+
+    /// The index of `definition` that the files of [`Indexer::dump`] hold, without analyzing the
+    /// documents again; no file gives one empty segment over every key.
+    pub fn load(definition: Definition, files: &[SegmentFile]) -> Result<Indexer, DumpError> {
+        if files.is_empty() {
+            return Ok(Indexer::new(definition));
+        }
+        let chained = files.windows(2).all(|w| w[0].end == w[1].start && !w[0].end.is_empty());
+        if !chained {
+            return Err(DumpError::Ranges);
+        }
+        let mut segments = Vec::with_capacity(files.len());
+        for f in files {
+            let index = MemIndex::load(definition.clone(), &f.bytes)?;
+            segments.push(Segment { start: f.start.clone(), end: f.end.clone(), index });
+        }
+        let mut ix = Indexer { definition, segments };
+        ix.refresh_stats();
+        Ok(ix)
+    }
+
+    /// The mark the segment file `bytes` covers.
+    pub fn applied_of(bytes: &[u8]) -> Result<Hlc, DumpError> {
+        crate::index::applied_of(bytes)
     }
 
     /// The segment whose range holds `key`.

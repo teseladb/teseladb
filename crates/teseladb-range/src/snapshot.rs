@@ -6,6 +6,11 @@
 //! snapshot or a file announced above [`MAX_FILE_BYTES`] is refused, and the sender starts over.
 //! The export comes from any live replica that applied up to the snapshot (plan «Instantáneas de
 //! un rango»).
+//!
+//! The segment files of the search indexes of the range travel in the same snapshot (011
+//! FR-013), so a new replica serves them instead of analyzing the documents again: [`bundle`]
+//! puts them after the SST files with a last file that says how many of each there are, and
+//! [`unbundle`] separates them again. Their content is opaque here.
 
 use std::path::Path;
 
@@ -99,6 +104,45 @@ pub fn split(range: GroupId, index: u64, files: &[Vec<u8>]) -> Vec<Chunk> {
         }
     }
     out
+}
+
+/// Magic bytes of the last file of a bundle.
+const BUNDLE_MAGIC: &[u8; 8] = b"TSLSNAPB";
+
+/// The files of a snapshot: the SST files of the range's intervals and the segment files of its
+/// search indexes.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Bundle {
+    /// SST files, ready for [`write_ops`] and `Lsm::ingest_range`.
+    pub ssts: Vec<Vec<u8>>,
+    /// Segment files of the search indexes, each as the search layer encoded it.
+    pub segments: Vec<Vec<u8>>,
+}
+
+/// The files [`split`] sends for `b`: the SST files, the segment files and a last file with
+/// [`BUNDLE_MAGIC`] and the number of each.
+pub fn bundle(b: &Bundle) -> Vec<Vec<u8>> {
+    let mut last = BUNDLE_MAGIC.to_vec();
+    last.extend_from_slice(&(b.ssts.len() as u32).to_le_bytes());
+    last.extend_from_slice(&(b.segments.len() as u32).to_le_bytes());
+    let mut files = b.ssts.clone();
+    files.extend(b.segments.iter().cloned());
+    files.push(last);
+    files
+}
+
+/// The bundle that the files [`Assembler::add`] rebuilt hold; `None` when they are not one.
+pub fn unbundle(mut files: Vec<Vec<u8>>) -> Option<Bundle> {
+    let last = files.pop()?;
+    let rest = last.strip_prefix(BUNDLE_MAGIC.as_slice())?;
+    let &[a, b, c, d, e, f, g, h] = rest else { return None };
+    let ssts = u32::from_le_bytes([a, b, c, d]) as usize;
+    let segments = u32::from_le_bytes([e, f, g, h]) as usize;
+    if ssts.checked_add(segments)? != files.len() {
+        return None;
+    }
+    let segments = files.split_off(ssts);
+    Some(Bundle { ssts: files, segments })
 }
 
 /// Why a chunk was refused.
