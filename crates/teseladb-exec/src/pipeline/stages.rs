@@ -504,6 +504,24 @@ impl Facet {
         Ok(Facet { facets })
     }
 
+    /// [`Facet::run`] over documents with metadata, which each facet's stages see.
+    pub(crate) fn run_with_meta(
+        &self,
+        docs: Vec<Document>,
+        metas: Vec<super::meta::Meta>,
+        env: &dyn Env,
+    ) -> Result<Vec<Document>, MqlError> {
+        let mut out = Document::new();
+        for (name, p) in &self.facets {
+            let (results, _) = p.run_with_meta(docs.clone(), Some(metas.clone()), env, false)?;
+            out.push(
+                name.clone(),
+                Value::Array(results.into_iter().map(Value::Document).collect()),
+            );
+        }
+        Ok(vec![out])
+    }
+
     /// One document with each facet's results.
     pub fn run(&self, docs: Vec<Document>, env: &dyn Env) -> Result<Vec<Document>, MqlError> {
         let mut out = Document::new();
@@ -650,6 +668,11 @@ impl Lookup {
             None => Vec::new(),
         };
         let segs: Vec<&str> = self.as_path.iter().map(String::as_str).collect();
+        // The foreign documents by the values of their field, read once for every document.
+        let by_value = match (&self.from, &self.foreign) {
+            (Some(_), Some(f)) => Some(ForeignIndex::new(&foreign_docs, f, env)),
+            _ => None,
+        };
         let mut out = Vec::with_capacity(docs.len());
         for d in docs {
             // Without `from`, the equality applies to what the pipeline's `$documents` gives,
@@ -659,7 +682,10 @@ impl Lookup {
                 _ => None,
             };
             let mut joined = match join {
-                Some((l, f)) if self.from.is_some() => equal_join(&d, l, f, &foreign_docs, env)?,
+                Some((l, f)) if self.from.is_some() => match &by_value {
+                    Some(index) => index.join(&d, (l, f), &foreign_docs, env)?,
+                    None => equal_join(&d, l, f, &foreign_docs, env)?,
+                },
                 _ => foreign_docs.clone(),
             };
             if let Some(p) = &self.pipeline {
@@ -688,6 +714,95 @@ impl Lookup {
             out.push(e);
         }
         Ok(out)
+    }
+}
+
+/// The foreign documents of an equality `$lookup` by the values their field reaches (each element
+/// of an array and the array itself), as group keys in the command's collation (010 FR-009,
+/// T023): a document's candidates are those of its local values, then the equality decides.
+struct ForeignIndex {
+    by_key: std::collections::HashMap<Vec<u8>, Vec<usize>>,
+}
+
+impl ForeignIndex {
+    fn new(docs: &[Document], foreign: &str, env: &dyn Env) -> ForeignIndex {
+        let collation = env.collation();
+        let segs: Vec<&str> = foreign.split('.').collect();
+        let mut by_key: std::collections::HashMap<Vec<u8>, Vec<usize>> =
+            std::collections::HashMap::new();
+        for (i, d) in docs.iter().enumerate() {
+            let mut values = Vec::new();
+            collect_foreign(&Value::Document(d.clone()), &segs, &mut values);
+            for v in values {
+                let list = by_key.entry(super::group_key(&v, collation.get())).or_default();
+                if list.last() != Some(&i) {
+                    list.push(i);
+                }
+            }
+        }
+        ForeignIndex { by_key }
+    }
+
+    /// The foreign documents that join `d`, in their order. A local value the index cannot look
+    /// up (`null`, which also matches a missing field, or a regular expression) reads them all.
+    fn join(
+        &self,
+        d: &Document,
+        (local, foreign): (&str, &str),
+        docs: &[Document],
+        env: &dyn Env,
+    ) -> Result<Vec<Document>, MqlError> {
+        let mut values: Vec<Value> = Vec::new();
+        let segs: Vec<&str> = local.split('.').collect();
+        collect_local(&Value::Document(d.clone()), &segs, &mut values);
+        let unindexed = values.is_empty()
+            || values
+                .iter()
+                .any(|v| matches!(v, Value::Null | Value::Undefined | Value::Regex { .. }));
+        if unindexed {
+            return equal_join(d, local, foreign, docs, env);
+        }
+        let collation = env.collation();
+        let mut picked: Vec<usize> = values
+            .iter()
+            .flat_map(|v| {
+                self.by_key.get(&super::group_key(v, collation.get())).cloned().unwrap_or_default()
+            })
+            .collect();
+        picked.sort_unstable();
+        picked.dedup();
+        let candidates: Vec<Document> = picked.into_iter().map(|i| docs[i].clone()).collect();
+        equal_join(d, local, foreign, &candidates, env)
+    }
+}
+
+/// The values `segs` reaches in a foreign document: each array on the way crossed, and at the
+/// end an array itself and each of its elements; a numeric segment also picks an element.
+fn collect_foreign(v: &Value, segs: &[&str], out: &mut Vec<Value>) {
+    let Some((first, rest)) = segs.split_first() else {
+        if let Value::Array(items) = v {
+            out.extend(items.iter().cloned());
+        }
+        out.push(v.clone());
+        return;
+    };
+    match v {
+        Value::Document(d) => {
+            if let Some(x) = d.get(first) {
+                collect_foreign(x, rest, out);
+            }
+        }
+        Value::Array(items) => {
+            if let Ok(i) = first.parse::<usize>()
+                && let Some(x) = items.get(i)
+            {
+                collect_foreign(x, rest, out);
+            }
+            for x in items {
+                collect_foreign(x, segs, out);
+            }
+        }
+        _ => {}
     }
 }
 

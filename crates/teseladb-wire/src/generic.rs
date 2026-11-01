@@ -323,6 +323,7 @@ fn own_fields(name: &str) -> Option<&'static [&'static str]> {
         "dbStats" => &["scale", "freeStorage"],
         "_mergeAuthzCollections" => &["tempUsersCollection", "tempRolesCollection", "drop", "db"],
         "collStats" => &["scale", "verbose", "waitForLock", "numericOnly"],
+        "planCacheClear" => &["query", "sort", "projection", "collation"],
         "dropDatabase" | "endSessions" | "refreshSessions" | "ping" | "buildInfo" | "hostInfo"
         | "getCmdLineOpts" | "getLog" | "logRotate" | "lockInfo" => &[],
         _ => return None,

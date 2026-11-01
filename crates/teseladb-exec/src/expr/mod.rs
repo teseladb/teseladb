@@ -243,6 +243,13 @@ pub enum Op {
     FromString(Box<date_parse::FromString>),
 }
 
+/// The error of metadata `name` that no stage before gives.
+pub(crate) fn missing_meta(name: &str) -> MqlError {
+    misc::missing_meta_error(name).unwrap_or_else(|| {
+        error(codes::BAD_VALUE, format!("query requires {name} metadata, but it is not available"))
+    })
+}
+
 /// The variables an evaluation sees.
 #[derive(Clone, Debug, Default)]
 pub struct Scope {

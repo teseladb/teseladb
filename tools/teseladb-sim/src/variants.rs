@@ -83,6 +83,9 @@ variants!(
     ("multirange_write_without_index_delta", "index_consistency", Default, 1000),
     ("no_latch_inc", "durability", Default, 1000),
     ("no_timer_after_lost_vote", "liveness", Heavy, 1000),
+    // A coordinator that combines one range's partial group twice (010 T026): the `queries`
+    // workload's next group differs from the reference evaluator's.
+    ("partial_double_count", "queries-oracle", Default, 1000),
     ("plain_write_fails_on_intent", "plain_writes", Default, 1000),
     ("read_before_term_commit", "raft_safety", Default, 1000),
     ("read_skips_inflight_write", "mvcc", Default, 1000),

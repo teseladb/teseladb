@@ -5,8 +5,8 @@ use teseladb_bson::{Document, RawDoc, RawValue, Value};
 use teseladb_mql::MqlError;
 
 use super::errors::{
-    BAD_VALUE, COLL_STATS_OBJECT, TYPE_MISMATCH, UNSUPPORTED_FORMAT, error, missing_field,
-    unknown_field, wrong_type,
+    BAD_VALUE, COLL_STATS_OBJECT, FAILED_TO_PARSE, TYPE_MISMATCH, UNSUPPORTED_FORMAT, error,
+    missing_field, unknown_field, wrong_type,
 };
 use crate::expr::arith::raw_type_name;
 use crate::expr::values::{display, display_bson};
@@ -109,6 +109,92 @@ fn storage_stats(section: RawDoc<'_>) -> Result<(), MqlError> {
         }
     }
     Ok(())
+}
+
+/// The options of `$currentOp`, each a boolean.
+const CURRENT_OP_FLAGS: [&str; 8] = [
+    "allUsers",
+    "idleConnections",
+    "idleCursors",
+    "idleSessions",
+    "localOps",
+    "backtrace",
+    "targetAllNodes",
+    "truncateOps",
+];
+
+/// Checks the specification of `$currentOp`: an object of boolean options (measured on a
+/// `refrouter` 9.0.4).
+pub fn current_op(v: RawValue<'_>) -> Result<Document, MqlError> {
+    let RawValue::Document(d) = v else {
+        return Err(error(
+            TYPE_MISMATCH,
+            format!(
+                "$currentOp options must be specified in an object, but found: {}",
+                raw_type_name(v)
+            ),
+        ));
+    };
+    for (k, x) in d.iter() {
+        if !CURRENT_OP_FLAGS.contains(&k) {
+            return Err(unknown_field("$currentOp", k));
+        }
+        if !matches!(x, RawValue::Boolean(_)) {
+            return Err(error(
+                TYPE_MISMATCH,
+                format!(
+                    "The '{k}' parameter of the $currentOp stage must be a boolean value, but found: {}",
+                    raw_type_name(x)
+                ),
+            ));
+        }
+    }
+    Ok(Document::from(d))
+}
+
+/// The options of `$listClusterCatalog`, each a flag.
+const CLUSTER_CATALOG_FLAGS: [&str; 3] = ["shards", "balancingConfiguration", "tracked"];
+
+/// RefDb's code for a `$listClusterCatalog` that is no object.
+const CLUSTER_CATALOG_OBJECT: teseladb_mql::ErrorCode =
+    teseladb_mql::ErrorCode { code: 9_621_302, name: "Location9621302" };
+
+/// Checks the specification of `$listClusterCatalog`: an object of its flags (measured on a
+/// `refrouter` 9.0.4).
+pub fn cluster_catalog(v: RawValue<'_>) -> Result<Document, MqlError> {
+    let RawValue::Document(d) = v else {
+        return Err(error(
+            CLUSTER_CATALOG_OBJECT,
+            format!(
+                "$listClusterCatalog must take an object but found: $listClusterCatalog: {}",
+                display(&Value::from(v))
+            ),
+        ));
+    };
+    if let Some((k, _)) = d.iter().find(|(k, _)| !CLUSTER_CATALOG_FLAGS.contains(k)) {
+        return Err(unknown_field("$listClusterCatalog", k));
+    }
+    Ok(Document::from(d))
+}
+
+/// Checks the specification of `$planCacheStats`: an object whose only field may be
+/// `allHosts` (measured on a `refrouter` 9.0.4).
+pub fn plan_cache_stats(v: RawValue<'_>) -> Result<Document, MqlError> {
+    let RawValue::Document(d) = v else {
+        return Err(error(
+            FAILED_TO_PARSE,
+            format!("$planCacheStats value must be an object. Found: {}", raw_type_name(v)),
+        ));
+    };
+    if let Some((k, _)) = d.iter().find(|(k, _)| *k != "allHosts") {
+        return Err(error(
+            FAILED_TO_PARSE,
+            format!(
+                "$planCacheStats parameters object may contain only 'allHosts' field. Found: {k}"
+            ),
+        ));
+    }
+    Ok(Document::from(d))
 }
 
 /// Checks the specification of `$listLocalSessions` or `$listSessions` (`name`): an object with

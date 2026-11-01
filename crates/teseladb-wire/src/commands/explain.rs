@@ -79,6 +79,8 @@ struct Stage {
     inputs: Vec<Stage>,
     /// Its number in a plan of RefDb's slot-based engine (`planNodeId`).
     id: Option<u32>,
+    /// The plan comes from an active entry of the plan cache (`isCached`).
+    cached: bool,
 }
 
 impl Stage {
@@ -93,6 +95,7 @@ impl Stage {
             input: None,
             inputs: Vec::new(),
             id: None,
+            cached: false,
         }
     }
 
@@ -397,7 +400,7 @@ fn reply<B: Backend + ?Sized>(
     ] {
         section.push(k, false);
     }
-    let mut winning = Document::new().with("isCached", false);
+    let mut winning = Document::new().with("isCached", e.plan.cached);
     extend(&mut winning, &e.plan.planned());
     section.push("winningPlan", winning);
     section
@@ -755,7 +758,20 @@ fn find<B: Backend + ?Sized>(
                 let access = planned_access(ns, &shown, &indexes, r, run, covered);
                 tail.over(access, sorted(r))
             };
-            let plan = shape(&winner, run);
+            let mut plan = shape(&winner, run);
+            let no_doc = Document::new();
+            let read_shape = super::plan_cache::read_shape(
+                &shown,
+                sort.as_ref().or(Some(&no_doc)),
+                projection.as_ref().or(Some(&no_doc)),
+                None,
+            );
+            let catalog = super::plan_cache::catalog_signature(c, &indexes);
+            plan.cached = super::lock(ctx.shared).plan_cache.is_active(
+                &names::full(ns),
+                &read_shape,
+                &catalog,
+            );
             let rejected = others
                 .iter()
                 .map(|r| {
@@ -942,6 +958,96 @@ fn planned_write<B: Backend + ?Sized>(
     }
     chosen.winner = chosen.winner.at_trial();
     Ok(Some((indexes, chosen)))
+}
+
+/// What the trial of `chosen`'s plans teaches the plan cache (010 FR-002): the plan that won and
+/// each plan's trial, without the namespace, as `$planCacheStats` writes them; `None` when no
+/// plans competed.
+pub(crate) fn learned(
+    ns: &Namespace,
+    shown: &Document,
+    indexes: &[super::plan_exec::PlanIndex],
+    chosen: &super::plan_exec::Chosen,
+    (from, shape): (Document, String),
+) -> Option<super::plan_cache::Learned> {
+    if chosen.others.is_empty() {
+        return None;
+    }
+    let won = chosen.winner.tried?;
+    // The read's sort and projection over the scans, as `find` runs them.
+    let doc_of = |k: &str| match from.get(k) {
+        Some(Value::Document(d)) if !d.is_empty() => Some(d.clone()),
+        _ => None,
+    };
+    let (sort, projection) = (doc_of("sort"), doc_of("projection"));
+    let tail = Tail { sort: sort.as_ref(), skip: 0, limit: None, projection: projection.as_ref() };
+    let shape_of = |r: &super::plan_exec::Ran, run: bool| {
+        tail.over(planned_access(ns, shown, indexes, r, run, None), sorted(r))
+    };
+    let plan = without_nss(shape_of(&chosen.winner, false).planned());
+    let all: Vec<&super::plan_exec::Ran> =
+        std::iter::once(&chosen.winner).chain(&chosen.others).collect();
+    let trials = all
+        .iter()
+        .filter_map(|r| {
+            let t = r.tried?;
+            // A plan that sorts what it read gives, in its trial, every document it fetched to
+            // the sort and the trial's own count from it.
+            let mut at = r.at_trial();
+            let blocking = sort.is_some() && !sorted(r);
+            if blocking {
+                let fetched = usize::try_from(t.docs).unwrap_or(usize::MAX);
+                at.found = r.found.iter().take(fetched).cloned().collect();
+            }
+            let mut stage = shape_of(&at, true);
+            if blocking {
+                stage.returned = t.returned;
+            }
+            Some(
+                Document::new()
+                    .with("nReturned", long(t.returned))
+                    .with("executionTimeMillisEstimate", 0)
+                    .with("totalKeysExamined", long(t.keys))
+                    .with("totalDocsExamined", long(t.docs))
+                    .with("executionStages", without_nss(stage.executed())),
+            )
+        })
+        .collect();
+    let scores = all.iter().filter_map(|r| r.tried.map(|t| t.score)).collect();
+    Some(super::plan_cache::Learned {
+        shape,
+        catalog: String::new(),
+        from,
+        works: won.works,
+        reads: won.keys + won.docs,
+        plan,
+        trials,
+        scores,
+    })
+}
+
+/// `d` without the `nss` of its stages.
+fn without_nss(d: Document) -> Document {
+    let mut out = Document::new();
+    for (k, v) in d.iter() {
+        let v = match v {
+            Value::Document(x) => Value::Document(without_nss(x.clone())),
+            Value::Array(items) => Value::Array(
+                items
+                    .iter()
+                    .map(|i| match i {
+                        Value::Document(x) => Value::Document(without_nss(x.clone())),
+                        other => other.clone(),
+                    })
+                    .collect(),
+            ),
+            other => other.clone(),
+        };
+        if k != "nss" {
+            out.push(k, v);
+        }
+    }
+    out
 }
 
 /// The plans `ran` as `rejectedPlans` lists them: what reads, without what writes.

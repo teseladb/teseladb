@@ -7,6 +7,7 @@
 
 pub(crate) mod accum;
 pub mod collation;
+pub mod distribute;
 pub mod expr;
 pub mod pipeline;
 pub(crate) mod raw;
