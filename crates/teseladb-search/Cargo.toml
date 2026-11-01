@@ -11,6 +11,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+teseladb-bson = { path = "../teseladb-bson" }
 teseladb-crypto = { path = "../teseladb-crypto" }
 teseladb-deflate = { path = "../teseladb-deflate" }
 teseladb-hash = { path = "../teseladb-hash" }

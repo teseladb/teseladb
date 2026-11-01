@@ -5,8 +5,8 @@ use teseladb_bson::{Document, RawDoc, RawValue, Value};
 use teseladb_mql::MqlError;
 
 use super::errors::{
-    BAD_VALUE, COLL_STATS_OBJECT, FAILED_TO_PARSE, TYPE_MISMATCH, UNSUPPORTED_FORMAT, error,
-    missing_field, unknown_field, wrong_type,
+    BAD_VALUE, COLL_STATS_OBJECT, FAILED_TO_PARSE, INVALID_OPTIONS, TYPE_MISMATCH,
+    UNSUPPORTED_FORMAT, error, missing_field, unknown_field, wrong_type,
 };
 use crate::expr::arith::raw_type_name;
 use crate::expr::values::{display, display_bson};
@@ -20,6 +20,40 @@ const STORAGE_FLAGS: &[&str] = &["verbose", "waitForLock", "numericOnly"];
 
 /// The sections `$collStats` may ask for, each an object.
 const COLL_STATS_SECTIONS: [&str; 4] = ["latencyStats", "storageStats", "count", "queryExecStats"];
+
+/// The stage that lists a collection's search indexes (011 FR-008).
+pub const LIST_SEARCH_INDEXES: &str = "$listSearchIndexes";
+
+/// Checks the specification of `$listSearchIndexes`: an object with at most one of `id` and
+/// `name`, both strings (measured on a 9.0.4 replica set with `refsearch` 1.70.6). Whether `id` is
+/// an `ObjectId` is checked when the stage runs, as RefDb does.
+pub fn list_search_indexes(v: RawValue<'_>) -> Result<Document, MqlError> {
+    let RawValue::Document(d) = v else {
+        return Err(error(
+            FAILED_TO_PARSE,
+            format!(
+                "The {LIST_SEARCH_INDEXES} stage specification must be an object. Found: {}",
+                raw_type_name(v)
+            ),
+        ));
+    };
+    for (k, x) in d.iter() {
+        if k != "id" && k != "name" {
+            return Err(unknown_field(LIST_SEARCH_INDEXES, k));
+        }
+        if !matches!(x, RawValue::String(_)) {
+            return Err(wrong_type(&format!("{LIST_SEARCH_INDEXES}.{k}"), x, "type 'string'"));
+        }
+    }
+    let spec = Document::from(d);
+    if spec.get("id").is_some() && spec.get("name").is_some() {
+        return Err(error(
+            INVALID_OPTIONS,
+            format!("Cannot set both 'name' and 'id' for {LIST_SEARCH_INDEXES}."),
+        ));
+    }
+    Ok(spec)
+}
 
 /// Checks the specification of `$collStats`: an object whose fields are its sections, each an
 /// object (`storageStats.scale` at least 1).

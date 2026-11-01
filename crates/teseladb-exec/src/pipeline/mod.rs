@@ -24,7 +24,7 @@ mod system;
 
 pub use shape::projected_expr;
 pub use stages::check_exprs;
-pub use system::scale_of;
+pub use system::{LIST_SEARCH_INDEXES, scale_of};
 
 use teseladb_bson::{Document, RawDoc, RawValue, Value};
 use teseladb_mql::{Extensions, MqlError};
@@ -351,6 +351,16 @@ impl Pipeline {
                 (docs, metas) = (fused, Some(scores));
                 continue;
             }
+            if let Stage::Search(name, spec) = st {
+                let own = meta::search_score_of(name);
+                let (found, scores): (Vec<Document>, Vec<meta::Meta>) = env
+                    .search_source(name, spec)?
+                    .into_iter()
+                    .map(|s| (s.doc, meta::with_score(s.meta, own)))
+                    .unzip();
+                (docs, metas) = (found, Some(scores));
+                continue;
+            }
             if let Stage::Score(s) = st {
                 let own = metas.take().unwrap_or_else(|| vec![meta::Meta::new(); docs.len()]);
                 metas = Some(s.run(&docs, &own, env)?);
@@ -473,6 +483,9 @@ fn parse_stage(d: RawDoc<'_>, ctx: &Ctx) -> Result<Stage, MqlError> {
         "$fill" => Stage::Fill(Box::new(fill::Fill::parse(arg, ctx)?)),
         "$graphLookup" => Stage::GraphLookup(Box::new(fill::GraphLookup::parse(arg, ctx)?)),
         "$collStats" => Stage::System("$collStats", system::coll_stats(arg)?),
+        LIST_SEARCH_INDEXES => {
+            Stage::System(LIST_SEARCH_INDEXES, system::list_search_indexes(arg)?)
+        }
         "$geoNear" => Stage::GeoNear(Box::new(geo_near::GeoNear::parse(arg, ctx)?)),
         "$score" => Stage::Score(Box::new(meta::Score::parse(arg, ctx)?)),
         "$rankFusion" | "$scoreFusion" => {

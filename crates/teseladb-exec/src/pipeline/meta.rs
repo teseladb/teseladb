@@ -27,6 +27,29 @@ pub const RAND_VAL: &str = "randVal";
 /// The name of the metadata of a score's details.
 pub const SCORE_DETAILS: &str = "scoreDetails";
 
+/// The score `$search` gives each document.
+pub const SEARCH_SCORE: &str = "searchScore";
+/// The score `$vectorSearch` gives each document.
+pub const VECTOR_SEARCH_SCORE: &str = "vectorSearchScore";
+
+/// The score metadata search stage `name` gives, if it scores documents.
+pub fn search_score_of(name: &str) -> Option<&'static str> {
+    match name {
+        "$search" => Some(SEARCH_SCORE),
+        "$vectorSearch" => Some(VECTOR_SEARCH_SCORE),
+        _ => None,
+    }
+}
+
+/// The metadata of a document a search stage gave: `score` is the stage's score `own` unless
+/// the stage set it (measured: `$meta: "score"` after `$search` is its `searchScore`).
+pub fn with_score(mut m: Meta, own: Option<&str>) -> Meta {
+    if let Some(v) = own.and_then(|o| m.get(o)).cloned() {
+        m.entry(SCORE.to_owned()).or_insert(v);
+    }
+    m
+}
+
 /// An environment whose scopes carry one document's metadata.
 pub(crate) struct MetaEnv<'a> {
     pub(crate) inner: &'a dyn Env,
@@ -317,8 +340,10 @@ fn given_by(name: &str, arg: RawValue<'_>) -> Vec<&'static str> {
         if s.get("scoreDetails").is_some_and(|v| crate::expr::truthy(&Some(Value::from(v)))));
     let mut given = match name {
         "$score" | "$rankFusion" | "$scoreFusion" => vec![SCORE],
-        "$search" => vec!["searchScore", "searchRootDocumentId", SCORE],
-        "$vectorSearch" => vec!["vectorSearchScore", SCORE],
+        // `searchRootDocumentId` needs `returnScope`, which no stage of this engine runs
+        // (measured on 9.0.4: 40218 after `$search`).
+        "$search" => vec![SEARCH_SCORE, SCORE],
+        "$vectorSearch" => vec![VECTOR_SEARCH_SCORE, SCORE],
         "$geoNear" => vec!["geoNearDistance", "geoNearPoint"],
         "$match" if matches!(arg, RawValue::Document(m) if super::has_text(m)) => {
             vec!["textScore", SCORE]
@@ -390,7 +415,9 @@ fn check_pipeline(
         leading = leading && matches!(name, "$match" | "$sort");
         available.extend(given_by(name, arg));
         if DROPPING.contains(&name) {
-            available.clear();
+            // The scores of a search stage stay readable, as nothing (measured on 9.0.4 after
+            // `$group`); the other metadata goes.
+            available.retain(|n| *n == SEARCH_SCORE || *n == VECTOR_SEARCH_SCORE);
         }
     }
     Ok(())

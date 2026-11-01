@@ -23,6 +23,7 @@ teseladb-index = { path = "../teseladb-index" }
 teseladb-keys = { path = "../teseladb-keys" }
 teseladb-meta = { path = "../teseladb-meta" }
 teseladb-exec = { path = "../teseladb-exec" }
+teseladb-search = { path = "../teseladb-search" }
 teseladb-mql = { path = "../teseladb-mql" }
 teseladb-plan = { path = "../teseladb-plan" }
 teseladb-range = { path = "../teseladb-range" }

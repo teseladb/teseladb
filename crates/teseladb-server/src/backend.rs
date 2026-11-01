@@ -267,6 +267,7 @@ impl ServerBackend {
                     CatalogAnswer::Catalog(_)
                     | CatalogAnswer::Settings(_)
                     | CatalogAnswer::Indexes(..)
+                    | CatalogAnswer::SearchIndexes(_)
                     | CatalogAnswer::Principals(_)
                     | CatalogAnswer::Documents(_)
                     | CatalogAnswer::Dump(_)
@@ -796,6 +797,23 @@ impl Backend for ServerBackend {
                 self.ask(0, |tx| NodeMsg::Catalog(CatalogReq::Indexes(collection), tx), until)
             {
                 self.pins.push(pin);
+                return Ok(all);
+            }
+            if Instant::now() >= until {
+                return Err(unavailable());
+            }
+            thread::sleep(RETRY_PAUSE);
+        }
+    }
+
+    fn search_indexes(
+        &mut self,
+        collection: u32,
+    ) -> Result<Vec<teseladb_meta::indexes::SearchIndexEntry>, CommandError> {
+        let until = self.until();
+        loop {
+            let ask = |tx| NodeMsg::Catalog(CatalogReq::SearchIndexes(collection), tx);
+            if let Some(CatalogAnswer::SearchIndexes(all)) = self.ask(0, ask, until) {
                 return Ok(all);
             }
             if Instant::now() >= until {

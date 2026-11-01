@@ -135,6 +135,8 @@ fn search_indexes_have_a_name_a_type_a_definition_and_a_status() {
     let a = collection(&mut sm, 2, ns("db", "a"));
     let create = |name: &str, kind| {
         Group0Command::Indexes(IndexCommand::CreateSearch {
+            id: [name.len() as u8; 12],
+            at_ms: 1_000,
             collection: a,
             name: name.into(),
             kind,
@@ -148,6 +150,8 @@ fn search_indexes_have_a_name_a_type_a_definition_and_a_status() {
         Group0Result::Err(Group0Error::IndexExists)
     );
     let missing = Group0Command::Indexes(IndexCommand::CreateSearch {
+        id: [0; 12],
+        at_ms: 0,
         collection: 77,
         name: "s".into(),
         kind: SearchIndexKind::Search,
@@ -169,14 +173,21 @@ fn search_indexes_have_a_name_a_type_a_definition_and_a_status() {
         assert_eq!(sm.indexes.search[&(a, "vec".to_owned())].status, status);
         assert_eq!(restored(&sm), sm);
     }
-    let update =
-        IndexCommand::UpdateSearch { collection: a, name: "vec".into(), definition: vec![1, 1] };
+    let vec = &sm.indexes.search[&(a, "vec".to_owned())];
+    assert_eq!((vec.id, vec.version, vec.defined_ms), ([3; 12], 0, 1_000));
+    let update = IndexCommand::UpdateSearch {
+        at_ms: 2_000,
+        collection: a,
+        name: "vec".into(),
+        definition: vec![1, 1],
+    };
     assert_eq!(apply(&mut sm, 20, Group0Command::Indexes(update)), Group0Result::Ok);
     let vec = &sm.indexes.search[&(a, "vec".to_owned())];
     assert_eq!(
-        (vec.definition.as_slice(), vec.status),
-        (&[1u8, 1][..], SearchIndexStatus::Pending)
+        (vec.definition.as_slice(), vec.status, vec.version, vec.defined_ms),
+        (&[1u8, 1][..], SearchIndexStatus::Pending, 1, 2_000)
     );
+    assert_eq!(restored(&sm), sm);
     let names: Vec<&str> = sm.indexes.search_of(a).map(|s| s.name.as_str()).collect();
     assert_eq!(names, ["default", "vec"]);
     let drop = |name: &str| {
@@ -184,8 +195,12 @@ fn search_indexes_have_a_name_a_type_a_definition_and_a_status() {
     };
     assert_eq!(apply(&mut sm, 21, drop("vec")), Group0Result::Ok);
     assert_eq!(apply(&mut sm, 22, drop("vec")), Group0Result::Err(Group0Error::IndexNotFound));
-    let update =
-        IndexCommand::UpdateSearch { collection: a, name: "vec".into(), definition: vec![] };
+    let update = IndexCommand::UpdateSearch {
+        at_ms: 0,
+        collection: a,
+        name: "vec".into(),
+        definition: vec![],
+    };
     assert_eq!(
         apply(&mut sm, 23, Group0Command::Indexes(update)),
         Group0Result::Err(Group0Error::IndexNotFound)
