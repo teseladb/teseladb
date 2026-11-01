@@ -62,6 +62,8 @@ version = "0.1.0"
 dependencies = [
  "teseladb-bson",
  "teseladb-hlc",
+ "teseladb-keys",
+ "teseladb-lsm",
 ]
 
 [[package]]
@@ -332,6 +334,7 @@ name = "teseladb-sim"
 version = "0.1.0"
 dependencies = [
  "teseladb-bson",
+ "teseladb-exec",
  "teseladb-hash",
  "teseladb-hlc",
  "teseladb-index",

@@ -1,6 +1,7 @@
 //! The error codes of pipelines and their stages, with RefDb's names (measured on a `refrouter`
 //! 9.0.4).
 
+use teseladb_bson::Document;
 use teseladb_bson::RawValue;
 use teseladb_mql::{ErrorCode, MqlError};
 
@@ -134,6 +135,61 @@ pub const MERGE_NO_MATCH: ErrorCode =
     ErrorCode { code: 13113, name: "MergeStageNoMatchingDocument" };
 /// `InvalidOptions`: a stage an update's pipeline does not take.
 pub const INVALID_OPTIONS: ErrorCode = ErrorCode { code: 72, name: "InvalidOptions" };
+/// RefDb's `QueryExceededMemoryLimitNoDiskUseAllowed` (292).
+pub const NO_DISK_USE: ErrorCode =
+    ErrorCode { code: 292, name: "QueryExceededMemoryLimitNoDiskUseAllowed" };
+
+/// The memory a stage may hold (`internalQueryMaxBlockingSortMemoryUsageBytes` and the limit of
+/// `$group`, 100 MiB).
+pub const STAGE_MEMORY_LIMIT: usize = 104_857_600;
+
+/// The bytes of `docs` in BSON, whatever their size.
+pub(crate) fn bytes_of(docs: &[Document]) -> usize {
+    docs.iter().map(document_size).sum()
+}
+
+/// The bytes of document `d` in BSON.
+pub(crate) fn document_size(d: &Document) -> usize {
+    5 + d.iter().map(|(k, v)| 2 + k.len() + value_size(v)).sum::<usize>()
+}
+
+/// The bytes of value `v` in BSON (without its type byte and name).
+pub(crate) fn value_size(v: &teseladb_bson::Value) -> usize {
+    use teseladb_bson::Value as V;
+    match v {
+        V::Double(_) | V::Int64(_) | V::DateTime(_) | V::Timestamp { .. } => 8,
+        V::Int32(_) => 4,
+        V::Decimal128(_) => 16,
+        V::Boolean(_) => 1,
+        V::ObjectId(_) => 12,
+        V::String(s) | V::Symbol(s) | V::JavaScript(s) => 5 + s.len(),
+        V::Binary { bytes, .. } => 5 + bytes.len(),
+        V::Document(d) => document_size(d),
+        V::Array(items) => {
+            5 + items
+                .iter()
+                .enumerate()
+                .map(|(i, x)| 2 + i.to_string().len() + value_size(x))
+                .sum::<usize>()
+        }
+        _ => 16,
+    }
+}
+
+/// The 292 of a sort over more than [`STAGE_MEMORY_LIMIT`] bytes of `docs` when the command does
+/// not allow writing to disk (measured on a `refrouter` 9.0.4).
+pub(crate) fn check_sort_memory(docs: &[Document], allow_disk_use: bool) -> Result<(), MqlError> {
+    if allow_disk_use || bytes_of(docs) <= STAGE_MEMORY_LIMIT {
+        return Ok(());
+    }
+    Err(error(
+        NO_DISK_USE,
+        format!(
+            "Sort exceeded memory limit of {STAGE_MEMORY_LIMIT} bytes, but did not opt in to external sorting."
+        ),
+    ))
+}
+
 /// RefDb's `UnsupportedFormat` (12).
 pub const UNSUPPORTED_FORMAT: ErrorCode = ErrorCode { code: 12, name: "UnsupportedFormat" };
 

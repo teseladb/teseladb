@@ -231,3 +231,19 @@ fn the_document_of_a_primary_key_is_that_of_its_id() {
         assert_eq!(KeyBuilder::document_of_pk(3, 9, pk.as_bytes()), KeyBuilder::document(3, 9, id));
     }
 }
+
+/// A document's change meta (014) is its key followed by `00`, the very next key: a cut there
+/// would leave the meta in another range than its document, so it moves to the document.
+#[test]
+fn a_split_key_never_parts_a_document_from_its_meta() {
+    let none = |_: u32, _: u32| false;
+    let doc = KeyBuilder::document(0, 3, RawValue::Int32(5)).as_bytes().to_vec();
+    let meta = [&doc[..], &[0][..]].concat();
+    let whole = (&[][..], &[][..]);
+    assert_eq!(space::cut_outside(&meta, whole, none), Some(doc.clone()));
+    // At the start of the range the document is already there: no cut.
+    assert_eq!(space::cut_outside(&meta, (&doc, &[][..]), none), None);
+    // An index entry ending in `00` is no meta.
+    let entry = [KeyBuilder::index_prefix(0, 3, 1).as_bytes(), &[4, 0]].concat();
+    assert_eq!(space::cut_outside(&entry, whole, none), Some(entry.clone()));
+}

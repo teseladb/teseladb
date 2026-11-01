@@ -564,10 +564,10 @@ impl CompactJob {
                 // Faulty variant (004 T032): the intent survives the `Retract` that resolved it.
                 #[cfg(teseladb_bug = "resolved_intent_reappears")]
                 Some((last, v)) if last.ts == ts && last.kind == Kind::Retract => {
-                    (*last, *v) = (Candidate { ts, kind, shadowed: false }, value);
+                    (*last, *v) = (Candidate::new(ts, kind, &value), value);
                 }
                 Some((last, _)) if last.ts == ts => last.shadowed = true,
-                _ => self.versions.push((Candidate { ts, kind, shadowed: false }, value)),
+                _ => self.versions.push((Candidate::new(ts, kind, &value), value)),
             }
             self.lanes[i].advance()?;
             if !self.queued.is_empty() {

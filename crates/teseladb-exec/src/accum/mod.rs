@@ -188,6 +188,12 @@ impl Accumulator {
         }))
     }
 
+    /// Whether this collects its values in an array (`$push`, `$addToSet`), whose memory RefDb's
+    /// slot-based engine counts against a stage's limit.
+    pub(crate) fn collects(&self) -> bool {
+        matches!(self, Accumulator::Unary(Unary::Push | Unary::AddToSet, _))
+    }
+
     /// Whether this is `$mergeObjects`, which a window that drops documents cannot take.
     pub(crate) fn is_merge_objects(&self) -> bool {
         matches!(self, Accumulator::Unary(Unary::MergeObjects, _))

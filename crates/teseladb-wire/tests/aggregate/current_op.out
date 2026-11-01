@@ -1,0 +1,6 @@
+{"db":"admin","cmd":{"aggregate":1,"pipeline":[{"$currentOp":{"bogus":1}}],"cursor":{}}}	!! 40415	IDLUnknownField	BSON field '$currentOp.bogus' is an unknown field.
+{"db":"admin","cmd":{"aggregate":1,"pipeline":[{"$currentOp":1}],"cursor":{}}}	!! 14	TypeMismatch	$currentOp options must be specified in an object, but found: int
+{"db":"admin","cmd":{"aggregate":1,"pipeline":[{"$currentOp":{"allUsers":1}}],"cursor":{}}}	!! 14	TypeMismatch	The 'allUsers' parameter of the $currentOp stage must be a boolean value, but found: int
+{"db":"admin","cmd":{"aggregate":1,"pipeline":[{"$match":{}},{"$currentOp":{}}],"cursor":{}}}	!! 73	InvalidNamespace	{aggregate: 1} is not valid for '$match'; a collection is required.
+{"aggregate":1,"pipeline":[{"$currentOp":{"bogus":1}}],"cursor":{}}	!! 73	InvalidNamespace	$currentOp must be run against the 'admin' database with {aggregate: 1}
+{"aggregate":"c","pipeline":[{"$currentOp":{}}],"cursor":{}}	!! 73	InvalidNamespace	$currentOp must be run against the 'admin' database with {aggregate: 1}

@@ -284,6 +284,20 @@ fn ties_follow_the_engine_refdb_chooses() {
     check(include_str!("agg/sbe.out"));
 }
 
+/// The metadata of each document (010 T046, with 011): `$score` sets it, the stages that change,
+/// filter, reorder, unwind or join documents keep it, those that group drop it, `$meta` reads
+/// it and `$sort` sorts by it.
+#[test]
+fn metadata_follows_the_documents_as_refdb() {
+    check(include_str!("agg/meta.out"));
+}
+
+/// `$rankFusion` and `$scoreFusion` (010 T042): their scores, their order and their errors.
+#[test]
+fn fusion_stages_match_refdb() {
+    check(include_str!("agg/fusion.out"));
+}
+
 /// The arguments of `$function` and `$accumulator` (010 T012), checked before any JavaScript
 /// runs; this node has no engine.
 #[test]

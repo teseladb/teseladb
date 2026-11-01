@@ -656,7 +656,8 @@ pub(crate) fn find_args<B: Backend + ?Sized>(
         tailable: tailable.then_some(await_data),
         natural,
         no_timeout: args::boolean(cmd, FIND, "noCursorTimeout")?.unwrap_or(false),
-        allow_disk_use: args::boolean(cmd, FIND, "allowDiskUse")?.unwrap_or(false),
+        // True by default since 6.0 (measured on a `refrouter` 9.0.4: 110 MiB sort without it).
+        allow_disk_use: args::boolean(cmd, FIND, "allowDiskUse")?.unwrap_or(true),
         collation: find_object(cmd, "collation")?,
         concern: args::read_concern(cmd, FIND)?,
         vars: command_let(backend, cmd, FIND)?,
@@ -811,7 +812,22 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
             concern: a.concern,
             intersect: super::lock(ctx.shared).params.hash_intersection,
         };
-        super::plan_exec::planned_documents(ctx.backend, &coll, &read).map_err(executor)?
+        let sort_doc = match ctx.cmd.get("sort") {
+            Some(Value::Document(s)) => s.clone(),
+            _ => Document::new(),
+        };
+        let projection = a.projection.clone().unwrap_or_default();
+        let note = super::plan_exec::CacheNote {
+            shared: ctx.shared,
+            ns: &ns,
+            from: Document::new()
+                .with("query", a.filter.clone())
+                .with("sort", sort_doc.clone())
+                .with("projection", projection.clone()),
+            shape: super::plan_cache::read_shape(&parsed, Some(&sort_doc), Some(&projection), None),
+        };
+        super::plan_exec::planned_documents(ctx.backend, &coll, &read, Some(note))
+            .map_err(executor)?
     } else {
         None
     };
@@ -1215,7 +1231,7 @@ fn sorted<B: Backend + ?Sized>(
         if memory > SORT_MEMORY_LIMIT && !a.allow_disk_use {
             err = Some(CommandError::new(
                 QUERY_EXCEEDED_MEMORY_LIMIT,
-                "Executor error during find command :: caused by :: Sort exceeded memory limit of 104857600 bytes, but did not opt in to external sorting.",
+                "Sort exceeded memory limit of 104857600 bytes, but did not opt in to external sorting.",
             ));
             return Ok(false);
         }
@@ -1516,7 +1532,7 @@ fn count_on_node<B: Backend + ?Sized>(
             let ns_text = full(ns);
             // An index plan that wins counts its documents (T019).
             if collation.is_none()
-                && let Some(docs) = planned(ctx, &c, &filter, bound, concern)
+                && let Some(docs) = planned(ctx, (ns, &c), &filter, bound, concern, None)
                     .map_err(|e| executor_error(COUNT, &ns_text, e))?
             {
                 let n = u64::try_from(docs.len()).unwrap_or(u64::MAX);
@@ -1665,7 +1681,7 @@ pub fn distinct<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, C
             let ns_text = full(&ns);
             // An index plan that wins gives the documents (T019).
             let through = if collation_doc.is_none() {
-                planned(ctx, &c, &filter, None, concern)
+                planned(ctx, (&ns, &c), &filter, None, concern, Some(&key))
                     .map_err(|e| executor_error(DISTINCT, &ns_text, e))?
             } else {
                 None
@@ -1720,10 +1736,11 @@ fn sorted_values(
 /// most), or `None` when the collection scan wins.
 fn planned<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
-    coll: &CollectionEntry,
+    (ns, coll): (&Namespace, &CollectionEntry),
     filter: &Document,
     bound: Option<u64>,
     concern: ReadConcern,
+    distinct: Option<&str>,
 ) -> Result<Option<Vec<Vec<u8>>>, CommandError> {
     let indexes = super::plan_exec::plan_indexes(ctx.backend, coll)?;
     if indexes.is_empty() {
@@ -1740,5 +1757,20 @@ fn planned<B: Backend + ?Sized>(
         concern,
         intersect: super::lock(ctx.shared).params.hash_intersection,
     };
-    super::plan_exec::planned_documents(ctx.backend, coll, &read)
+    let note = super::plan_exec::CacheNote {
+        shared: ctx.shared,
+        ns,
+        from: {
+            let d = Document::new()
+                .with("query", filter.clone())
+                .with("sort", Document::new())
+                .with("projection", Document::new());
+            match distinct {
+                Some(k) => d.with("distinct", Document::new().with("key", k)),
+                None => d,
+            }
+        },
+        shape: super::plan_cache::read_shape(&parsed, None, None, distinct),
+    };
+    super::plan_exec::planned_documents(ctx.backend, coll, &read, Some(note))
 }
