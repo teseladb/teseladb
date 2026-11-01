@@ -690,10 +690,15 @@ fn bucket_key_of(spec: &BucketSpec, key: &Document) -> Result<(Document, bool), 
             (None, other) => {
                 let shown = super::display(other);
                 let spec_text = super::display(&Value::Document(key.clone()));
+                let allowed = if is_time {
+                    "the time field must be ascending or descending (numbers only)"
+                } else {
+                    "measurement fields must be ascending or descending (numbers only), or '2dsphere'"
+                };
                 return Err(CommandError::new(
                     crate::error::CANNOT_CREATE_INDEX,
                     format!(
-                        "BadValue: Invalid index spec for time-series collection: {spec_text}. Indexes on measurement fields must be ascending or descending (numbers only), or '2dsphere': {path}: {shown}"
+                        "BadValue: Invalid index spec for time-series collection: {spec_text}. Indexes on {allowed}: {path}: {shown}"
                     ),
                 ));
             }
@@ -720,6 +725,11 @@ pub fn bucket_index(spec: &BucketSpec, index: &Document) -> Result<Document, Com
         Some(Value::Document(f)) => Some(f),
         _ => None,
     };
+    // The filter parses as a filter before it is translated to the buckets (`$in` without an
+    // array is RefDb's parse error, measured on a `refnode` 9.0.4).
+    if let Some(f) = partial {
+        super::partial_filter::parse_error(f)?;
+    }
     let on_meta = |f: &Document| f.iter().all(|(k, _)| meta_path(spec, k).is_some());
     if index.get("expireAfterSeconds").is_some() && !partial.is_some_and(on_meta) {
         let msg = "TTL indexes on time-series collections require a partialFilterExpression on the metaField";
@@ -728,7 +738,31 @@ pub fn bucket_index(spec: &BucketSpec, index: &Document) -> Result<Document, Com
     let Some(Value::Document(key)) = index.get("key") else {
         return Err(CommandError::new(INTERNAL_ERROR, "an index without key"));
     };
+    if index.get("expireAfterSeconds").is_some() {
+        if key.len() > 1 {
+            let msg = format!(
+                "TTL indexes are single-field indexes, compound indexes do not support TTL. Index spec: {}",
+                super::display(&Value::Document(key.clone()))
+            );
+            return Err(CommandError::new(crate::error::CANNOT_CREATE_INDEX, msg));
+        }
+        if key.iter().any(|(path, _)| path != spec.time_field) {
+            let msg = "TTL indexes on non-time fields are not supported on time-series collections";
+            return Err(CommandError::new(INVALID_OPTIONS, msg));
+        }
+    }
     let (bucket_key, measured) = bucket_key_of(spec, key)?;
+    if measured && index.get("sparse").is_some() {
+        let msg = "Sparse indexes are not supported on time-series measurements";
+        return Err(CommandError::new(INVALID_OPTIONS, msg));
+    }
+    // A TTL index reads the earliest time of each bucket (measured on a `refnode` 9.0.4).
+    let bucket_key = match (index.get("expireAfterSeconds"), key.iter().next()) {
+        (Some(_), Some((path, dir))) => {
+            Document::new().with(format!("control.min.{path}"), dir.clone())
+        }
+        _ => bucket_key,
+    };
     let mut out = Document::new();
     for (k, v) in index.iter() {
         match k {
@@ -767,7 +801,8 @@ pub fn user_index(spec: &BucketSpec, stored: &Document) -> Document {
                 out.push(k, v.clone());
             }
         }
-        return out;
+        // Shown in the order RefDb stores an index's fields, as `listIndexes` gives it.
+        return super::indexes::in_stored_order(&out);
     }
     let mut out = Document::new();
     for (k, v) in stored.iter() {
