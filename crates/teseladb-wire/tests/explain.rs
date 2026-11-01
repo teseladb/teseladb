@@ -391,3 +391,128 @@ fn check_on(m: &mut Mem, file: &str, fresh: bool) {
     }
     assert!(wrong.is_empty(), "{} differ:\n{}", wrong.len(), wrong.join("\n"));
 }
+
+/// The fields of a plan cache entry that belong to the moment or to RefDb's own hashes and
+/// sizes, and the work counters of each stage, left out of the comparison.
+const CACHE_VOLATILE: [&str; 22] = [
+    "totalDataSizeSorted",
+    "timeOfCreation",
+    "queryHash",
+    "planCacheShapeHash",
+    "planCacheKey",
+    "estimatedSizeBytes",
+    "solutionHash",
+    "host",
+    "shard",
+    "executionTimeMillisEstimate",
+    "works",
+    "advanced",
+    "needTime",
+    "needYield",
+    "saveState",
+    "restoreState",
+    "isEOF",
+    "seeks",
+    "peakTrackedMemBytes",
+    "operationTime",
+    "$clusterTime",
+    "multiKeyPaths",
+];
+
+/// `v` without [`CACHE_VOLATILE`], except an entry's own `works`, and with a `refrouter`'s part
+/// of shard `sh1` as the node's `node1` (D-102).
+fn cache_normal(v: &Value, entry: bool) -> Value {
+    match v {
+        Value::Document(d) => {
+            let is_entry = d.get("cachedPlan").is_some();
+            let mut out = Document::new();
+            for (k, x) in d.iter() {
+                if k == "sh1" && matches!(x, Value::Document(p) if p.get("ok").is_some()) {
+                    out.push("node1", Document::new().with("ok", 1.0));
+                    continue;
+                }
+                if CACHE_VOLATILE.contains(&k) && !(k == "works" && is_entry) {
+                    continue;
+                }
+                let x = if k == "ok" { Value::Double(1.0) } else { x.clone() };
+                out.push(k, cache_normal(&x, entry || is_entry));
+            }
+            Value::Document(out)
+        }
+        Value::Array(items) => Value::Array(items.iter().map(|i| cache_normal(i, entry)).collect()),
+        Value::Int64(n) if !entry => Value::Int64(*n),
+        other => other.clone(),
+    }
+}
+
+/// The plan cache (`tests/explain/plan_cache*.out`, 010 FR-002, T017): a read whose plans
+/// competed leaves an inactive entry of its shape that the next read activates, `explain`
+/// leaves none, `planCacheClear` drops one shape or all, building an index drops them, and
+/// `$planCacheStats` lists them with their plan and trials, as a `refrouter` 9.0.4 does.
+#[test]
+fn plan_cache_answers_as_refdb() {
+    for file in [include_str!("explain/plan_cache.out"), include_str!("explain/plan_cache2.out")] {
+        let mut m = Mem::new();
+        load(&mut m);
+        let mut wrong = Vec::new();
+        let mut text = String::new();
+        let mut lines: Vec<String> = Vec::new();
+        for line in file.lines() {
+            if line.starts_with("{\"") && !text.is_empty() {
+                lines.push(std::mem::take(&mut text));
+            }
+            if !text.is_empty() {
+                text.push_str("\\n");
+            }
+            text.push_str(line);
+        }
+        lines.push(text);
+        for line in lines.iter().filter(|l| !l.is_empty()) {
+            let (cmd, want) = line.split_once('\t').expect("a command and its reply");
+            let c = extjson::parse(cmd).expect("command");
+            let name = c.iter().next().map(|(k, _)| k.to_owned()).unwrap_or_default();
+            let got = match teseladb_wire::generic::parse(&c, &name) {
+                Err(e) => e.to_document(),
+                Ok(_) => m.run(DB, c),
+            };
+            if cmd.starts_with("{\"explain\"") {
+                let want = match want.strip_prefix("=> ") {
+                    Some(json) => shown(&extjson::parse(json).expect("reply")),
+                    None => want.to_owned(),
+                };
+                let got = shown(&got);
+                if got != want {
+                    wrong.push(format!("{cmd}\n   got  {got}\n   want {want}"));
+                }
+                continue;
+            }
+            let got = match (got.get("code"), got.get("codeName"), got.get("errmsg")) {
+                (Some(Value::Int32(code)), Some(Value::String(n)), Some(Value::String(e))) => {
+                    format!("!! {code}\t{n}\t{e}")
+                }
+                _ => canonical_value(&cache_normal(&Value::Document(got), false)),
+            };
+            let want = want
+                .replace("sh1/lc12-sh1:27018", "node1/:0")
+                .replace("\"shards\":{\"sh1\"", "\"shards\":{\"node1\"");
+            let want = match want.strip_prefix("=> ") {
+                Some(json) => canonical_value(&cache_normal(
+                    &Value::Document(extjson::parse(json).expect("reply")),
+                    false,
+                )),
+                None => want.to_owned(),
+            };
+            if got != want {
+                wrong.push(format!("{cmd}\n   got  {got}\n   want {want}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{} differ:\n{}", wrong.len(), wrong.join("\n"));
+    }
+}
+
+fn canonical_value(v: &Value) -> String {
+    match v {
+        Value::Document(d) => format!("=> {}", canonical(d)),
+        other => format!("{other:?}"),
+    }
+}

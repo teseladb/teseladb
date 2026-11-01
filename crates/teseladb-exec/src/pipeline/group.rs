@@ -94,7 +94,47 @@ impl Group {
                 acc.add(st, &doc, &scope)?;
             }
         }
-        groups.finish("_id", &self.outputs, col, sbe)
+        let out = groups.finish("_id", &self.outputs, col, sbe)?;
+        self.check_memory(&out, env.allow_disk_use(), sbe)?;
+        Ok(out)
+    }
+
+    /// The 292 of a group over [`STAGE_MEMORY_LIMIT`] bytes when the command does not allow
+    /// writing to disk: the classic engine counts the groups' keys and values, the slot-based one
+    /// the arrays of `$push` and `$addToSet` (measured on a `refrouter` 9.0.4).
+    fn check_memory(
+        &self,
+        out: &[Document],
+        allow_disk_use: bool,
+        sbe: bool,
+    ) -> Result<(), MqlError> {
+        if allow_disk_use {
+            return Ok(());
+        }
+        let held = match sbe {
+            false => super::errors::bytes_of(out),
+            true => out
+                .iter()
+                .map(|d| {
+                    self.outputs
+                        .iter()
+                        .filter(|(_, a)| a.collects())
+                        .filter_map(|(f, _)| d.get(f))
+                        .map(super::errors::value_size)
+                        .sum::<usize>()
+                })
+                .sum(),
+        };
+        if held <= super::errors::STAGE_MEMORY_LIMIT {
+            return Ok(());
+        }
+        let name = if sbe { "group" } else { "$group" };
+        Err(error(
+            super::errors::NO_DISK_USE,
+            format!(
+                "Exceeded memory limit for {name}, but didn't allow external spilling; pass allowDiskUse:true to opt in"
+            ),
+        ))
     }
 }
 

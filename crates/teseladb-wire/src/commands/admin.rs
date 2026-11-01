@@ -237,6 +237,17 @@ fn describe(id: u32, op: &Op, now_ms: u64, (shard, host): (&str, &str)) -> Docum
     d
 }
 
+/// The operations running on the node, as `currentOp` describes them (010 T033).
+pub(crate) fn current_operations<B: Backend + ?Sized>(
+    backend: &mut B,
+    shared: &super::Shared,
+) -> Result<Vec<Document>, CommandError> {
+    let now = backend.now_ms();
+    let shard = super::shard_name(backend.node());
+    let host = super::host_port(backend);
+    Ok(lock(shared).ops.iter().map(|(id, op)| describe(id, op, now, (&shard, &host))).collect())
+}
+
 /// `currentOp`: the node's operations in progress that match the command's other fields.
 pub fn current_op<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     admin_only(CURRENT_OP, ctx.db)?;

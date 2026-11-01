@@ -270,7 +270,9 @@ fn coll_stats_of_a_time_series_shows_its_index() {
 /// the node an error came from, `node<N>` for `sh<N>` (D-102).
 fn unsharded(want: &str) -> String {
     if let Some(json) = want.strip_prefix("=> ") {
-        let mut r = extjson::parse(json).expect("reply");
+        // A shard's part of an index command's `raw` is the node's (D-102).
+        let json = json.replace("sh1/lc12-sh1:27018", "node1/:0");
+        let mut r = extjson::parse(&json).expect("reply");
         if let Some(Value::Document(s)) = r.get("shards").cloned() {
             let mut nodes = Document::new();
             for (k, v) in s.iter() {
@@ -359,7 +361,11 @@ fn check_files(files: &[&str]) {
 fn session_stages_answer_as_refdb() {
     let mut m = Mem::new();
     let mut wrong = Vec::new();
-    for line in include_str!("aggregate/sessions.out").lines().filter(|l| !l.is_empty()) {
+    // And `$currentOp` (T033), on `admin` only.
+    let lines = include_str!("aggregate/sessions.out")
+        .lines()
+        .chain(include_str!("aggregate/current_op.out").lines());
+    for line in lines.filter(|l| !l.is_empty()) {
         let (cmd, want) = line.split_once('\t').expect("a command and its reply");
         let spec = extjson::parse(cmd).expect("command");
         let got = match (spec.get("db"), spec.get("cmd")) {
@@ -448,4 +454,52 @@ fn geo_near_answers_as_refdb() {
         }
         assert!(wrong.is_empty(), "{} differ:\n{}", wrong.len(), wrong.join("\n"));
     }
+}
+
+/// `$listClusterCatalog` (`tests/aggregate/cluster_catalog.out`, 010 T046): the collections and
+/// views of the database with their namespace, options, UUID and `_id` index, none sharded, its
+/// flags and its errors, as a `refrouter` 9.0.4 answers; the UUIDs are the node's own.
+#[test]
+fn cluster_catalog_answers_as_refdb() {
+    let mut m = Mem::new();
+    load(&mut m, "c", C);
+    load(&mut m, "o", O);
+    let uuids = |text: &str| -> String {
+        let mut out = String::new();
+        let mut rest = text;
+        while let Some(i) = rest.find("\"uuid\":{\"$binary\":{\"base64\":\"") {
+            let start = i + "\"uuid\":{\"$binary\":{\"base64\":\"".len();
+            out.push_str(&rest[..start]);
+            rest = &rest[start..];
+            let end = rest.find('"').unwrap_or(0);
+            out.push_str("UUID");
+            rest = &rest[end..];
+        }
+        out.push_str(rest);
+        out.replace("\"sh1\"", "\"node1\"")
+    };
+    let mut wrong = Vec::new();
+    for line in include_str!("aggregate/cluster_catalog.out").lines().filter(|l| !l.is_empty()) {
+        let (cmd, want) = line.split_once('\t').expect("a command and its reply");
+        let got = uuids(&ours(&mut m, cmd));
+        let want = match want.strip_prefix("=> ") {
+            Some(json) => {
+                format!("=> {}", canonical(&normal(extjson::parse(json).expect("reply"))))
+            }
+            None => want.to_owned(),
+        };
+        let want = uuids(&want);
+        if got != want {
+            wrong.push(format!("{cmd}\n   got  {got}\n   want {want}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{} differ:\n{}", wrong.len(), wrong.join("\n"));
+}
+
+/// Sorts by array fields (`tests/aggregate/array_sort.out`, 010 T045, FR-025): ascending by an
+/// array's least element and descending by its greatest, the empty array before `null` and a
+/// missing field, with and without a multikey index, as a `refrouter` 9.0.4 sorts.
+#[test]
+fn array_sorts_answer_as_refdb() {
+    check_files(&[include_str!("aggregate/array_sort.out")]);
 }

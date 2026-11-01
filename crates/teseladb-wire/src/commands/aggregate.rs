@@ -45,6 +45,8 @@ struct WireEnv<'a, B: Backend + ?Sized> {
     concern: ReadConcern,
     /// The collation strings compare with (010 FR-014).
     collation: Collation,
+    /// `allowDiskUse` (010 FR-010).
+    allow_disk_use: bool,
     /// The node's shared state and the aggregated collection, for the stages the node answers
     /// itself (`$collStats`); `None` inside a view's pipeline.
     node: Option<(&'a super::Shared, Namespace)>,
@@ -101,6 +103,86 @@ impl<B: Backend + ?Sized> WireEnv<'_, B> {
             }
         }
         Ok((names::full(ns), out))
+    }
+
+    /// `$listClusterCatalog`: every collection and view of the command's database (of every
+    /// database on `admin`), as `listCollections` writes them with their namespace and database,
+    /// none sharded; `shards` names the node and `tracked` says none is (measured on a `refrouter`
+    /// 9.0.4).
+    fn cluster_catalog(&self, spec: &Document) -> Result<Vec<Document>, CommandError> {
+        let mut backend = self.backend.borrow_mut();
+        let node = super::shard_name(backend.node());
+        let mut found = backend.collections()?;
+        found.retain(|(ns, _)| self.db == super::admin::ADMIN_DB || ns.db == self.db);
+        // Views first, as RefDb lists them; the collections in namespace order (RefDb's own
+        // follows its catalog's hash table).
+        let is_view = |c: &teseladb_meta::catalog::CollectionEntry| {
+            matches!(super::kinds::kind_of(c), Ok(CollectionKind::View { .. }))
+        };
+        found.sort_by(|a, b| {
+            (!is_view(&a.1), names::full(&a.0)).cmp(&(!is_view(&b.1), names::full(&b.0)))
+        });
+        let flag = |k: &str| matches!(spec.get(k), Some(Value::Boolean(true)));
+        let mut out = Vec::new();
+        for (ns, c) in found {
+            let kind = super::kinds::kind_of(&c)?;
+            let mut d = Document::new()
+                .with("ns", names::full(&ns))
+                .with("db", ns.db.as_str())
+                .with("type", kind.type_name())
+                .with("options", super::catalog::options_of(&c)?);
+            match kind {
+                CollectionKind::View { .. } => {
+                    d.push("info", Document::new().with("readOnly", true))
+                }
+                _ => d.push(
+                    "info",
+                    Document::new()
+                        .with("readOnly", false)
+                        .with("uuid", Value::Binary { subtype: 4, bytes: c.uuid.to_vec() }),
+                ),
+            }
+            if matches!(kind, CollectionKind::Normal | CollectionKind::Capped { .. }) {
+                d.push("idIndex", super::catalog::id_index(&c)?);
+            }
+            d.push("sharded", false);
+            if flag("shards") && !matches!(kind, CollectionKind::View { .. }) {
+                d.push("shards", vec![Value::String(node.clone())]);
+            }
+            if flag("tracked") {
+                d.push("tracked", false);
+            }
+            out.push(d);
+        }
+        Ok(out)
+    }
+
+    /// `$currentOp`: the operations running on the node, as `currentOp` describes them.
+    fn current_ops(&self) -> Result<Vec<Document>, CommandError> {
+        let Some((shared, _)) = &self.node else { return Ok(Vec::new()) };
+        let mut backend = self.backend.borrow_mut();
+        super::admin::current_operations(&mut **backend, shared)
+    }
+
+    /// `$planCacheStats`: the entries of the node's plan cache for the aggregated collection,
+    /// which must exist (50933).
+    fn plan_cache_stats(&self) -> Result<Vec<Document>, CommandError> {
+        let Some((shared, ns)) = &self.node else { return Ok(Vec::new()) };
+        let mut backend = self.backend.borrow_mut();
+        let ns_text = names::full(ns);
+        let Some(coll) = backend.collection(ns)? else {
+            return Err(CommandError::new(
+                crate::error::PLAN_CACHE_NO_COLLECTION,
+                format!("collection '{ns_text}' does not exist"),
+            ));
+        };
+        let indexes = super::plan_exec::plan_indexes(&mut **backend, &coll)?;
+        let catalog = super::plan_cache::catalog_signature(&coll, &indexes);
+        super::lock(shared).plan_cache.forget_other(&ns_text, &catalog);
+        let facts = backend.process();
+        let host = format!("{}:{}", facts.host.hostname, facts.port);
+        let shard = super::shard_name(backend.node());
+        Ok(super::lock(shared).plan_cache.stats(&ns_text, (&host, &shard)))
     }
 
     /// `$listSessions`: the records of `config.system.sessions` for the users `spec` asks for.
@@ -200,6 +282,10 @@ impl<B: Backend + ?Sized> Env for WireEnv<'_, B> {
         &NodeExtensions
     }
 
+    fn allow_disk_use(&self) -> bool {
+        self.allow_disk_use
+    }
+
     fn vars(&self) -> Option<&Document> {
         Some(&self.vars)
     }
@@ -230,6 +316,9 @@ impl<B: Backend + ?Sized> Env for WireEnv<'_, B> {
             "$collStats" => self.coll_stats(spec).map_err(to_mql),
             "$listLocalSessions" => self.local_sessions(spec).map_err(to_mql),
             "$listSessions" => self.recorded_sessions(spec).map_err(to_mql),
+            "$planCacheStats" => self.plan_cache_stats().map_err(to_mql),
+            "$currentOp" => self.current_ops().map_err(to_mql),
+            "$listClusterCatalog" => self.cluster_catalog(spec).map_err(to_mql),
             other => Err(MqlError::new(
                 teseladb_mql::ErrorCode { code: BAD_VALUE.code, name: BAD_VALUE.name },
                 format!("{other} is not supported by this node"),
@@ -334,6 +423,7 @@ pub(crate) fn read_through_staged<B: Backend + ?Sized>(
         vars,
         concern,
         collation,
+        allow_disk_use: true,
         node: None,
     };
     let sbe = pipeline.runs_in_sbe();
@@ -343,6 +433,8 @@ pub(crate) fn read_through_staged<B: Backend + ?Sized>(
 /// The arguments of `aggregate` besides its pipeline.
 struct AggregateArgs {
     batch_size: Option<usize>,
+    /// `allowDiskUse`, true by default.
+    allow_disk_use: bool,
     /// The command's `collation`.
     collation: Option<Document>,
     vars: Option<Document>,
@@ -431,6 +523,7 @@ fn aggregate_args<B: Backend + ?Sized>(
     let collation = args::doc(cmd, AGGREGATE, "collation")?.cloned();
     Ok(AggregateArgs {
         batch_size,
+        allow_disk_use: !matches!(cmd.get("allowDiskUse"), Some(Value::Boolean(false))),
         collation,
         vars: command_let(backend, cmd, AGGREGATE)?,
         concern: args::read_concern(cmd, AGGREGATE)?,
@@ -476,6 +569,17 @@ pub fn aggregate<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
     let vars = a.vars.clone().unwrap_or_default();
     let names: Vec<String> = vars.iter().map(|(k, _)| k.to_owned()).collect();
     let ctx_vars = ExprCtx::checked(names.iter().map(String::as_str));
+    // `$currentOp` answers its namespace before its arguments (measured).
+    let first_name = match stages.first() {
+        Some(RawValue::Document(d)) => d.iter().next().map(|(k, _)| k),
+        _ => None,
+    };
+    if first_name == Some("$currentOp") && (on_collection || ns.db != super::admin::ADMIN_DB) {
+        return Err(CommandError::new(
+            INVALID_NAMESPACE,
+            "$currentOp must be run against the 'admin' database with {aggregate: 1}",
+        ));
+    }
     let pipeline = Pipeline::parse_command(&stages, &ctx_vars, on_collection).map_err(from_mql)?;
     teseladb_exec::pipeline::optimize::optimize_stages(&stages, a.vars.as_ref())
         .map_err(from_mql)?;
@@ -499,6 +603,7 @@ pub fn aggregate<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
         vars,
         concern: a.concern,
         collation,
+        allow_disk_use: a.allow_disk_use,
         node: Some((ctx.shared, ns.clone())),
     };
     let executor = |mut err: CommandError| {
@@ -532,7 +637,22 @@ pub fn aggregate<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
     let batch: Vec<Value> = batch.into_iter().map(Value::Document).collect();
     // The fields of the cursor come in this order on a collection, and the other way for
     // `aggregate: 1` (measured).
-    let cursor = if on_collection {
+    // The stages a `refrouter` sends to a shard or the config server answer in the order of a
+    // collection's cursor (measured).
+    // `$currentOp` with `localOps` answers on the `refrouter` itself (measured).
+    let local_ops = matches!(
+        stages.first(),
+        Some(RawValue::Document(d)) if matches!(
+            d.get("$currentOp"),
+            Some(RawValue::Document(o)) if matches!(o.get("localOps"), Some(RawValue::Boolean(true)))
+        )
+    );
+    let forwarded = match pipeline.system_stage() {
+        Some("$listClusterCatalog" | "$querySettings") => true,
+        Some("$currentOp") => !local_ops,
+        _ => false,
+    };
+    let cursor = if on_collection || forwarded {
         Document::new().with("id", id).with("ns", ns_text).with("firstBatch", batch)
     } else {
         Document::new().with("firstBatch", batch).with("id", id).with("ns", ns_text)
@@ -593,7 +713,17 @@ fn planned_read<B: Backend + ?Sized>(
     if indexes.is_empty() || super::explain::matches_nothing(&parsed) {
         return Ok(None);
     }
-    let Some(found) = super::plan_exec::planned_documents(ctx.backend, &coll, &read)? else {
+    let note = super::plan_exec::CacheNote {
+        shared: ctx.shared,
+        ns,
+        from: Document::new()
+            .with("query", filter.clone())
+            .with("sort", sort.clone().unwrap_or_default())
+            .with("projection", Document::new()),
+        shape: super::plan_cache::read_shape(&parsed, sort.as_ref(), None, None),
+    };
+    let Some(found) = super::plan_exec::planned_documents(ctx.backend, &coll, &read, Some(note))?
+    else {
         return Ok(None);
     };
     found
@@ -617,6 +747,16 @@ fn check_system_namespace(
         Some("$listLocalSessions") if on_collection => Err(CommandError::new(
             INVALID_NAMESPACE,
             "$listLocalSessions must be run against the database with {aggregate: 1}, not a collection",
+        )),
+        Some("$currentOp") if on_collection || ns.db != super::admin::ADMIN_DB => {
+            Err(CommandError::new(
+                INVALID_NAMESPACE,
+                "$currentOp must be run against the 'admin' database with {aggregate: 1}",
+            ))
+        }
+        Some("$listClusterCatalog") if on_collection => Err(CommandError::new(
+            crate::error::CLUSTER_CATALOG_ON_COLLECTION,
+            "The $listClusterCatalog stage must run on a database, not a collection.",
         )),
         Some("$listSessions") if !sessions => Err(CommandError::new(
             INVALID_NAMESPACE,

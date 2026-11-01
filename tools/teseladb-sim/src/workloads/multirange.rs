@@ -115,11 +115,30 @@ pub(crate) struct Profile {
     pub max_ranges: usize,
     /// The first bytes a cut may start with: a cut is one of them and a random byte.
     pub cuts: &'static [u8],
+    /// A split and a merge of other ranges run at the same time, while the faults come
+    /// (`split-merge`, 007 T036): the adverse cases of the third audit pass.
+    pub adverse: bool,
 }
 
 /// The profile of `multirange`.
-const MULTIRANGE: Profile =
-    Profile { name: "multirange", end: END, merges: true, max_ranges: MAX_RANGES, cuts: &[1] };
+const MULTIRANGE: Profile = Profile {
+    name: "multirange",
+    end: END,
+    merges: true,
+    max_ranges: MAX_RANGES,
+    cuts: &[1],
+    adverse: false,
+};
+
+/// The profile of `split-merge`: `multirange` with a split and a merge at once.
+const SPLIT_MERGE: Profile = Profile {
+    name: "split-merge",
+    end: END,
+    merges: true,
+    max_ranges: MAX_RANGES,
+    cuts: &[1],
+    adverse: true,
+};
 
 /// A range's first key and the first key past it.
 type Bounds = (Vec<u8>, Vec<u8>);
@@ -170,6 +189,10 @@ pub struct MultiRangeWorkload {
     attempt: u64,
     /// Splits and merges completed, merges given up.
     pub done: (u64, u64, u64),
+    /// Times a split and a merge were in progress at once (`split-merge`).
+    pub overlaps: u64,
+    /// Whether they are now.
+    overlapping: bool,
     /// Since when each replica `(node, range)` has waited for a snapshot no replica serves.
     stale: BTreeMap<(u32, GroupId), Nanos>,
     /// Since when each replica `(node, range)` has waited for a snapshot with none on its way.
@@ -184,6 +207,11 @@ impl MultiRangeWorkload {
     /// The workload over `nodes` nodes of `cores` cores.
     pub fn boxed(nodes: u32, cores: u16) -> Box<dyn Workload> {
         Box::new(MultiRangeWorkload::new(nodes, cores, MULTIRANGE))
+    }
+
+    /// The `split-merge` workload over `nodes` nodes of `cores` cores (007 T036).
+    pub fn split_merge(nodes: u32, cores: u16) -> Box<dyn Workload> {
+        Box::new(MultiRangeWorkload::new(nodes, cores, SPLIT_MERGE))
     }
 
     /// The workload of `profile` over `nodes` nodes of `cores` cores.
@@ -208,6 +236,8 @@ impl MultiRangeWorkload {
             waiting: BTreeMap::new(),
             attempt: 0,
             done: (0, 0, 0),
+            overlaps: 0,
+            overlapping: false,
             idle: BTreeMap::new(),
             unserved: BTreeMap::new(),
             stale: BTreeMap::new(),
@@ -543,44 +573,78 @@ impl MultiRangeWorkload {
         }
     }
 
-    /// Starts a split or a merge now and then, and moves the one in progress.
+    /// Starts a split or a merge now and then, and moves the one in progress. With an adverse
+    /// profile a split and a merge of other ranges may be in progress at once.
     fn resize(&mut self, w: &mut World) {
         let now = w.now();
-        if self.split.is_none() && self.merge.is_none() && now >= self.next_resize {
+        let idle = match self.profile.adverse {
+            true => self.split.is_none() || self.merge.is_none(),
+            false => self.split.is_none() && self.merge.is_none(),
+        };
+        if idle && now >= self.next_resize {
             self.next_resize =
                 now + Nanos::from_millis(w.rng.range(RESIZE_EVERY.0, RESIZE_EVERY.1));
-            let ranges: Vec<GroupId> = self.table.keys().copied().collect();
-            if ranges.len() < self.profile.max_ranges && (ranges.len() == 1 || w.rng.chance(0.5)) {
-                let g = ranges[w.rng.range(0, ranges.len() as u64) as usize];
-                let (s, e) = self.table[&g].clone();
-                // A single first byte draws nothing, so that a profile's seeds keep their runs.
-                let space = match self.profile.cuts {
-                    [one] => *one,
-                    many => many[w.rng.range(0, many.len() as u64) as usize],
-                };
-                let at = vec![space, w.rng.range(1, 256) as u8];
-                if s < at && at < e {
-                    self.next_group += u64::from(self.cores);
-                    self.split = Some((g, at.clone(), GroupId(self.next_group)));
+            let ranges = self.table.len();
+            let may_split = self.split.is_none() && ranges < self.profile.max_ranges;
+            let may_merge = self.merge.is_none() && self.profile.merges && ranges > 1;
+            let alive = (0..self.nodes).all(|n| w.nodes[n as usize].alive);
+            if self.profile.adverse {
+                // A split, then a merge of other ranges, at once; the faults hit both while they
+                // run. A merge starts with every node up, as in `multirange`.
+                if may_split {
+                    self.start_split(w);
                 }
-            } else if self.profile.merges
-                && ranges.len() > 1
-                && (0..self.nodes).all(|n| w.nodes[n as usize].alive)
-            {
+                let merges = self.profile.merges && self.table.len() > 1;
+                if self.merge.is_none() && merges && alive {
+                    self.start_merge(w, now);
+                }
+            } else if may_split && (ranges == 1 || !may_merge || w.rng.chance(0.5)) {
+                self.start_split(w);
+            } else if may_merge && alive {
                 // A node that is down cannot confirm the freeze: the server merges cold ranges
                 // only, while here the frozen range would keep the clients' writes waiting until
                 // the merge is given up.
-                let i = w.rng.range(1, ranges.len() as u64) as usize;
-                let mut by_start: Vec<(Vec<u8>, GroupId)> =
-                    self.table.iter().map(|(g, (s, _))| (s.clone(), *g)).collect();
-                by_start.sort();
-                self.next_merge += 1;
-                let (left, right) = (by_start[i - 1].1, by_start[i].1);
-                self.merge = Some(Merge { left, right, id: self.next_merge, since: now });
+                self.start_merge(w, now);
             }
         }
+        if self.split.is_some() && self.merge.is_some() && !self.overlapping {
+            self.overlaps += 1;
+        }
+        self.overlapping = self.split.is_some() && self.merge.is_some();
         self.split_step(w);
         self.merge_step(w);
+    }
+
+    /// Starts a split of a range drawn at random, at a key drawn in it, unless the range merges.
+    fn start_split(&mut self, w: &mut World) {
+        let ranges: Vec<GroupId> = self.table.keys().copied().collect();
+        let g = ranges[w.rng.range(0, ranges.len() as u64) as usize];
+        let (s, e) = self.table[&g].clone();
+        // A single first byte draws nothing, so that a profile's seeds keep their runs.
+        let space = match self.profile.cuts {
+            [one] => *one,
+            many => many[w.rng.range(0, many.len() as u64) as usize],
+        };
+        let at = vec![space, w.rng.range(1, 256) as u8];
+        let merging = self.merge.is_some_and(|m| m.left == g || m.right == g);
+        if s < at && at < e && !merging {
+            self.next_group += u64::from(self.cores);
+            self.split = Some((g, at.clone(), GroupId(self.next_group)));
+        }
+    }
+
+    /// Starts a merge of two neighbours drawn at random, unless one of them splits.
+    fn start_merge(&mut self, w: &mut World, now: Nanos) {
+        let i = w.rng.range(1, self.table.len() as u64) as usize;
+        let mut by_start: Vec<(Vec<u8>, GroupId)> =
+            self.table.iter().map(|(g, (s, _))| (s.clone(), *g)).collect();
+        by_start.sort();
+        let (left, right) = (by_start[i - 1].1, by_start[i].1);
+        let splitting = |g: GroupId| self.split.as_ref().is_some_and(|s| s.0 == g);
+        if !splitting(left) && !splitting(right) {
+            self.next_merge += 1;
+            self.merge = Some(Merge { left, right, id: self.next_merge, since: now });
+        }
     }
 
     fn split_step(&mut self, w: &mut World) {
@@ -1189,6 +1253,17 @@ mod tests {
 
     fn freeze(w: &mut World, node: u32, core: u16) {
         w.nodes[node as usize].cores[core as usize].frozen_until = w.now() + Nanos::from_secs(1);
+    }
+
+    #[test]
+    fn split_merge_runs_a_split_and_a_merge_at_once() {
+        // 007 T036: the adverse cases of the third pass.
+        let mut wl = MultiRangeWorkload::new(3, 2, SPLIT_MERGE);
+        let mut w = World::with_clocks(3, 3, 2, false, true, wl.clocks());
+        wl.start(&mut w);
+        crate::drive_until(&mut w, &mut wl, Nanos::from_secs(30), |_| false);
+        assert!(wl.overlaps > 0, "no split and merge at once in {:?}", wl.done);
+        assert!(wl.done.0 > 0 && wl.done.1 > 0, "{:?}", wl.done);
     }
 
     /// [`world`] driven until Group 0 has two ranges or more and no split or merge goes on.
