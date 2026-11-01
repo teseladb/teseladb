@@ -36,7 +36,7 @@ pub struct Registry {
 
 impl Registry {
     /// The workloads of 001 (`storage`, `testkv`), 004 (`lsm`), 005 (`range-docs`), 007
-    /// (`multirange`, `splits`, `follower-reads`, `relocate`, `meta2`), 008 (`txn-append`), 009 (`indexes`) and 015 (`special-collections`), in the order `--workload all` runs them, and no
+    /// (`multirange`, `splits`, `split-merge`, `follower-reads`, `relocate`, `meta2`), 008 (`txn-append`), 009 (`indexes`) and 015 (`special-collections`), in the order `--workload all` runs them, and no
     /// extra checkers: the generic ones live in the workloads and the world.
     pub fn builtin() -> Registry {
         let mut r = Registry::default();
@@ -46,6 +46,7 @@ impl Registry {
         r.register_workload("range-docs", RangeDocsWorkload::boxed).expect("a new name");
         r.register_workload("multirange", MultiRangeWorkload::boxed).expect("a new name");
         r.register_workload("splits", SplitsWorkload::boxed).expect("a new name");
+        r.register_workload("split-merge", MultiRangeWorkload::split_merge).expect("a new name");
         r.register_workload("follower-reads", RangeDocsWorkload::follower_reads)
             .expect("a new name");
         r.register_workload("relocate", RelocateWorkload::boxed).expect("a new name");

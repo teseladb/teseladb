@@ -39,8 +39,14 @@ use crate::world::World;
 /// Name of the checker in its violations.
 pub const NAME: &str = "intents";
 /// The space the ranges split: data keys and, past `02`, the transaction records.
-const PROFILE: Profile =
-    Profile { name: "splits", end: b"\x03", merges: false, max_ranges: 8, cuts: &[1, 2] };
+const PROFILE: Profile = Profile {
+    name: "splits",
+    end: b"\x03",
+    merges: false,
+    max_ranges: 8,
+    cuts: &[1, 2],
+    adverse: false,
+};
 /// Keys the transactions write, spread over the data keys and never a single document's.
 const TXN_KEYS: u64 = 8;
 /// Writers and readers of transactions.
