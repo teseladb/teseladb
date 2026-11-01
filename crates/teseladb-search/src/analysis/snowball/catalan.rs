@@ -1047,6 +1047,7 @@ const EXCEPTIONS: &[(&str, &str)] = &[
     ("estrela", "est"),
     ("estreles", "est"),
     ("estrepsirinis", "estreps"),
+    ("estàvem", "est"),
     ("exitoses", "ex"),
     ("exitosos", "ex"),
     ("expressionistes", "expres"),
@@ -1395,6 +1396,7 @@ const EXCEPTIONS: &[(&str, &str)] = &[
     ("pulsacions", "pulsacion"),
     ("qaisites", "qais"),
     ("quefer", "quef"),
+    ("quines", "quin"),
     ("quiral", "quir"),
     ("quirals", "quir"),
     ("quirats", "quir"),
@@ -1502,6 +1504,7 @@ const EXCEPTIONS: &[(&str, &str)] = &[
     ("tisores", "tis"),
     ("tornados", "torn"),
     ("toràciques", "toracic"),
+    ("totes", "tot"),
     ("touriste", "tour"),
     ("traves", "trave"),
     ("traïció", "traic"),
@@ -1582,6 +1585,7 @@ const EXCEPTIONS: &[(&str, &str)] = &[
     ("xofer", "xof"),
     ("àries", "ar"),
     ("èsima", "es"),
+    ("érem", "er"),
     ("últimos", "ult"),
 ];
 
