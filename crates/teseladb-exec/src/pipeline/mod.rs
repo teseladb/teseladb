@@ -152,6 +152,8 @@ pub struct Pipeline {
     sbe_specs: Vec<bool>,
     /// Whether a stage reads `{$meta: "sortKey"}`, which each `$sort` then sets.
     reads_sort_key: bool,
+    /// Whether a stage reads `{$meta: "indexKey"}`, which the index scan of the read gives.
+    reads_index_key: bool,
     /// The error of planning its `$sort` by a random value on an existing collection
     /// ([`sort::check_random_sort`]).
     random_sort: Option<MqlError>,
@@ -302,6 +304,12 @@ impl Pipeline {
             self.stages.first(),
             Some(Stage::Documents(_) | Stage::System(..) | Stage::Search(..))
         )
+    }
+
+    /// Whether a stage reads `{$meta: "indexKey"}`, the key of the index entry each document of
+    /// the collection was read by.
+    pub fn reads_index_key(&self) -> bool {
+        self.reads_index_key
     }
 
     /// Runs the pipeline over `docs`.
@@ -459,7 +467,8 @@ fn parse_stages(pipeline: &[RawValue<'_>], ctx: &Ctx) -> Result<Pipeline, MqlErr
     let mut read = Vec::new();
     pipeline.iter().for_each(|v| meta::metas_read(*v, &mut read));
     let reads_sort_key = read.iter().any(|n| n == crate::expr::SORT_KEY);
-    Ok(Pipeline { stages, sbe_specs, reads_sort_key, random_sort: None })
+    let reads_index_key = read.iter().any(|n| n == meta::INDEX_KEY);
+    Ok(Pipeline { stages, sbe_specs, reads_sort_key, reads_index_key, random_sort: None })
 }
 
 fn parse_stage(d: RawDoc<'_>, ctx: &Ctx) -> Result<Stage, MqlError> {
@@ -514,6 +523,7 @@ fn parse_stage(d: RawDoc<'_>, ctx: &Ctx) -> Result<Stage, MqlError> {
         }
         "$listSessions" => Stage::System("$listSessions", system::sessions("$listSessions", arg)?),
         "$planCacheStats" => Stage::System("$planCacheStats", system::plan_cache_stats(arg)?),
+        "$indexStats" => Stage::System("$indexStats", system::index_stats(arg)?),
         "$currentOp" => Stage::System("$currentOp", system::current_op(arg)?),
         "$listClusterCatalog" => {
             Stage::System("$listClusterCatalog", system::cluster_catalog(arg)?)

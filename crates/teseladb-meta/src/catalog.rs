@@ -90,6 +90,9 @@ pub enum CatalogCommand {
         ns: Namespace,
         /// New options.
         options: Vec<u8>,
+        /// What `collMod` asked for, as a BSON document (empty: not known), for the `modify`
+        /// event of change streams (014 FR-014).
+        description: Vec<u8>,
     },
     /// Drops every collection of a database.
     DropDatabase {
@@ -117,15 +120,15 @@ const DROP_DATABASE: u8 = 4;
 const PURGED: u8 = 5;
 const CREATE_DATABASE: u8 = 6;
 
-fn put_ns(e: &mut Encoder, ns: &Namespace) {
+pub(crate) fn put_ns(e: &mut Encoder, ns: &Namespace) {
     e.str(&ns.db).str(&ns.coll);
 }
 
-fn get_ns(d: &mut Decoder<'_>) -> Result<Namespace, DecodeError> {
+pub(crate) fn get_ns(d: &mut Decoder<'_>) -> Result<Namespace, DecodeError> {
     Ok(Namespace { db: d.str()?.to_owned(), coll: d.str()?.to_owned() })
 }
 
-fn get_uuid(d: &mut Decoder<'_>) -> Result<[u8; 16], DecodeError> {
+pub(crate) fn get_uuid(d: &mut Decoder<'_>) -> Result<[u8; 16], DecodeError> {
     let mut u = [0u8; 16];
     u.copy_from_slice(d.raw(16)?);
     Ok(u)
@@ -150,10 +153,10 @@ impl CatalogCommand {
                 put_ns(e, to);
                 e.bool(*drop_target).raw(uuid);
             }
-            CatalogCommand::Modify { ns, options } => {
+            CatalogCommand::Modify { ns, options, description } => {
                 e.u8(MODIFY);
                 put_ns(e, ns);
-                e.bytes(options);
+                e.bytes(options).bytes(description);
             }
             CatalogCommand::DropDatabase { db } => {
                 e.u8(DROP_DATABASE).str(db);
@@ -184,7 +187,15 @@ impl CatalogCommand {
                 drop_target: d.bool()?,
                 uuid: get_uuid(d)?,
             },
-            MODIFY => CatalogCommand::Modify { ns: get_ns(d)?, options: d.bytes()?.to_vec() },
+            MODIFY => CatalogCommand::Modify {
+                ns: get_ns(d)?,
+                options: d.bytes()?.to_vec(),
+                // An entry written before the description has none.
+                description: match d.remaining() {
+                    0 => Vec::new(),
+                    _ => d.bytes()?.to_vec(),
+                },
+            },
             DROP_DATABASE => CatalogCommand::DropDatabase { db: d.str()?.to_owned() },
             PURGED => CatalogCommand::Purged { id: d.u32()? },
             CREATE_DATABASE => CatalogCommand::CreateDatabase { db: d.str()?.to_owned() },
@@ -318,7 +329,7 @@ impl Catalog {
                 self.add_db(&to.db, (index, mark));
                 Ok(None)
             }
-            CatalogCommand::Modify { ns, options } => match self.collections.get_mut(ns) {
+            CatalogCommand::Modify { ns, options, .. } => match self.collections.get_mut(ns) {
                 Some(c) => {
                     c.options = options.clone();
                     Ok(None)

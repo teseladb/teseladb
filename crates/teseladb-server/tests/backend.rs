@@ -931,3 +931,28 @@ fn a_change_read_walks_every_range_and_resolves_at_the_lowest_mark() {
     let mut b = backend(vec![written(b"x")], vec![]);
     assert_eq!(b.changes(&[1], &[2], ts(10)).unwrap_err().code.code, 1);
 }
+
+#[test]
+fn a_change_stream_reads_the_catalog_changes_and_moves_a_quiet_group_0() {
+    // 014 FR-014: the copy's changes and its last mark; a mark far behind the node's clock asks
+    // Group 0 for an empty entry and reads again.
+    let fresh = Hlc { physical: wall_ms() + 60_000, logical: 0 };
+    let old = Hlc { physical: 1, logical: 0 };
+    let floor = Hlc { physical: 0, logical: 0 };
+    let answer = |at| CatalogAnswer::Ddl(Vec::new(), floor, at);
+    let mut b = backend(vec![], vec![CatalogAnswer::Unavailable, answer(fresh)]);
+    let batch = b.catalog_changes(floor).unwrap();
+    assert_eq!((batch.records.len(), batch.floor, batch.resolved), (0, floor, fresh));
+    thread::sleep(Duration::from_millis(60));
+    let mut b = backend(vec![], vec![answer(old), CatalogAnswer::Done(None), answer(fresh)]);
+    assert_eq!(b.catalog_changes(floor).unwrap().resolved, fresh, "after the empty entry");
+    // Another read at once does not ask again: it answers what the copy has.
+    let mut b = backend(vec![], vec![answer(old)]);
+    assert_eq!(b.catalog_changes(floor).unwrap().resolved, old);
+    thread::sleep(Duration::from_millis(60));
+    let refused = CatalogAnswer::Refused(Group0Error::NotBootstrapped);
+    let mut b = backend(vec![], vec![answer(old), refused]);
+    assert_eq!(b.catalog_changes(floor).unwrap_err().code.code, 1);
+    let mut b = backend(vec![], vec![]);
+    assert_eq!(b.catalog_changes(floor).unwrap_err().code.code, 10107);
+}

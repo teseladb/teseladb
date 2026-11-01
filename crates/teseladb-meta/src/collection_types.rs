@@ -5,7 +5,7 @@
 use teseladb_bson::{RawDoc, RawValue};
 
 /// Options of the kinds.
-const VIEW_ON: &str = "viewOn";
+pub(crate) const VIEW_ON: &str = "viewOn";
 const PIPELINE: &str = "pipeline";
 const COLLATION: &str = "collation";
 const CAPPED: &str = "capped";

@@ -293,7 +293,15 @@ fn trials_choose_as_refdb_scores() {
 #[test]
 fn intervals_follow_refdb() {
     assert_eq!(intervals("$eq", &Value::Array(Vec::new())), None);
-    assert_eq!(intervals("$exists", &Value::Boolean(true)), None);
+    // `$exists` scans every key of a non-sparse index, `$not: {$exists: true}` its nulls; the
+    // documents decide both (measured on a `refrouter` 9.0.4, 01-11-2026).
+    let (b, exact) = intervals("$exists", &Value::Boolean(true)).expect("every key");
+    assert_eq!((b, exact), (vec![Bound::all()], false));
+    let missing = Value::Document(doc(r#"{"$exists":true}"#));
+    let (b, exact) = intervals("$not", &missing).expect("the nulls");
+    assert_eq!((b, exact), (vec![Bound::point(Value::Null)], false));
+    assert_eq!(intervals("$not", &Value::Document(doc(r#"{"$gt":1}"#))), None);
+    assert_eq!(intervals("$exists", &Value::Boolean(false)), None);
     assert_eq!(intervals("$in", &Value::Int32(1)), None);
     assert_eq!(intervals("$in", &Value::Array(vec![Value::Array(Vec::new())])), None);
     let (b, exact) = intervals("$in", &Value::Array(vec![Value::Null])).expect("an $in");
@@ -373,6 +381,26 @@ fn clauses_and_paths_of_a_parsed_filter() {
 
 /// The branches the measured cases leave: clauses no index answers, arrays, hints over `$or`,
 /// intervals that touch.
+#[test]
+fn existence_scans_the_whole_index() {
+    let c = catalog();
+    assert_eq!(
+        plans(r#"{"t":{"$exists":true}}"#, &[], &c),
+        [r#"t_1: t["[MinKey, MaxKey]"] | {"t":{"$exists":true}}"#]
+    );
+    assert_eq!(
+        plans(r#"{"t":{"$not":{"$exists":true}}}"#, &[], &c),
+        [r#"t_1: t["[null, null]"] | {"t":{"$not":{"$exists":true}}}"#]
+    );
+    assert_eq!(
+        plans(r#"{"g":{"$exists":true}}"#, &[], &c),
+        [
+            r#"g_1: g["[MinKey, MaxKey]"] | {"g":{"$exists":true}}"#,
+            r#"g_1_n_1: g["[MinKey, MaxKey]"] n["[MinKey, MaxKey]"] | {"g":{"$exists":true}}"#,
+        ]
+    );
+}
+
 #[test]
 fn edges_of_the_rules() {
     let c = catalog();

@@ -158,6 +158,14 @@ pub struct Mem {
     pub gate_lagging: usize,
     /// The tenants Group 0 knows, by number and name (007 FR-025).
     pub tenants: Vec<(u32, String)>,
+    /// The catalog changes, at the node's clock (014 FR-014).
+    pub ddl: teseladb_meta::ddl_log::DdlLog,
+    /// The documents of `config.settings` Group 0 keeps (007 FR-017), if the node is part of a
+    /// cluster that keeps them (`None`: it refuses, as a node alone does).
+    pub settings: Option<Vec<Document>>,
+    /// Changes of `config.settings` that find another change before them: each answers that a
+    /// document is no longer as it was read.
+    pub settings_conflicts: usize,
 }
 
 /// A change of the data before a read of `[start, …)`.
@@ -168,16 +176,24 @@ impl Mem {
         Mem { now: 1_700_000_000_000, replicas: 3, ..Mem::default() }
     }
 
+    /// The node's mark now: its clock, as its writes and catalog changes get it.
+    pub fn mark(&self) -> Hlc {
+        Hlc { physical: self.now, logical: 0 }
+    }
+
     /// Notes a version of `key` written at `ts` for the change streams.
     fn record(&mut self, key: &[u8], ts: Hlc, value: Option<(u8, Vec<u8>)>) {
         self.history.push(teseladb_range::changes::Versioned { key: key.to_vec(), ts, value });
     }
 
-    /// The stored versions a range's scans return: all but those that only serve the history of
-    /// a document (014).
-    pub fn stored(&self) -> BTreeMap<&Vec<u8>, &Vec<u8>> {
+    /// The stored versions of the keys in `range` a range's scans return: all but those that only
+    /// serve the history of a document (014).
+    pub fn stored(
+        &self,
+        range: impl std::ops::RangeBounds<Vec<u8>>,
+    ) -> BTreeMap<&Vec<u8>, &Vec<u8>> {
         let history = |k: &Vec<u8>| self.types.get(k) == Some(&teseladb_range::HISTORY_VALUE);
-        self.data.iter().filter(|(k, _)| !history(k)).collect()
+        self.data.range(range).filter(|(k, _)| !history(k)).collect()
     }
 
     /// Runs `cmd` on database `db`; the reply or the error document.
@@ -247,12 +263,15 @@ impl Backend for Mem {
         cmd: CatalogCommand,
     ) -> Result<Option<CollectionEntry>, CommandError> {
         self.index += 1;
-        self.catalog.apply(self.index, &cmd).map_err(|e| match e {
+        let changes = teseladb_meta::ddl_log::catalog_changes(&self.catalog, &cmd);
+        let r = self.catalog.apply(self.index, &cmd).map_err(|e| match e {
             CatalogError::NamespaceExists => CommandError::new(NAMESPACE_EXISTS, "exists"),
             CatalogError::NamespaceNotFound => CommandError::new(NAMESPACE_NOT_FOUND, "not found"),
             CatalogError::DatabaseDifferCase => CommandError::new(DATABASE_DIFFER_CASE, "case"),
             other => CommandError::new(INTERNAL_ERROR, format!("{other:?}")),
-        })
+        })?;
+        self.ddl.record_applied(self.mark(), changes, r.as_ref());
+        Ok(r)
     }
 
     fn indexes(&mut self, collection: u32) -> Result<Vec<IndexEntry>, CommandError> {
@@ -296,6 +315,17 @@ impl Backend for Mem {
             .cloned()
             .collect();
         Ok((rows, Hlc { physical: self.now - lag, logical: 0 }))
+    }
+
+    fn catalog_changes(
+        &mut self,
+        from: Hlc,
+    ) -> Result<teseladb_wire::commands::DdlBatch, CommandError> {
+        Ok(teseladb_wire::commands::DdlBatch {
+            records: self.ddl.after(from),
+            floor: self.ddl.floor,
+            resolved: self.mark(),
+        })
     }
 
     fn tenant_named(&mut self, name: &str) -> Result<Option<u32>, CommandError> {
@@ -465,10 +495,12 @@ impl Backend for Mem {
             });
         }
         let type_of = self.types.get(key).copied().unwrap_or(1);
-        if let Some(v) = self.data.get(key) {
+        // A version written after `at` hides the current one: the read goes to the history.
+        let newer = self.history.iter().any(|v| v.key.as_slice() == key && v.ts > at);
+        if let Some(v) = self.data.get(key).filter(|_| !newer) {
             return Ok(Some((type_of, v.clone())));
         }
-        // A document gone since: its version at `at`, as a range's MVCC keeps it.
+        // A document gone or changed since: its version at `at`, as a range's MVCC keeps it.
         Ok(self
             .history
             .iter()
@@ -550,11 +582,14 @@ impl Backend for Mem {
 
     fn index_write(&mut self, cmd: IndexCommand) -> Result<(), CommandError> {
         self.index_log.push(cmd.clone());
+        let changes = teseladb_meta::ddl_log::index_changes(&self.catalog, &self.indexes, &cmd);
         let live: Vec<u32> = self.catalog.collections.values().map(|c| c.id).collect();
         self.indexes.apply(&cmd, |c| live.contains(&c)).map(drop).map_err(|e| match e {
             CatalogError::NamespaceNotFound => CommandError::new(NAMESPACE_NOT_FOUND, "not found"),
             other => CommandError::new(INTERNAL_ERROR, format!("{other:?}")),
-        })
+        })?;
+        self.ddl.record_applied(self.mark(), changes, None);
+        Ok(())
     }
 
     fn write(&mut self, op: WriteOp) -> Result<Vec<u8>, CommandError> {
@@ -643,10 +678,12 @@ impl Backend for Mem {
             f(start, &mut self.data);
         }
         // As a range's scan: the versions that only serve the history are no documents.
+        if start >= end {
+            return Ok(Vec::new());
+        }
         Ok(self
-            .stored()
+            .stored(start.to_vec()..end.to_vec())
             .into_iter()
-            .filter(|(k, _)| start <= k.as_slice() && k.as_slice() < end)
             .take(limit)
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect())
@@ -655,10 +692,52 @@ impl Backend for Mem {
     fn config_documents(&mut self, coll: &str) -> Result<Vec<Document>, CommandError> {
         Ok(match coll {
             teseladb_wire::commands::config_db::SHARDS => {
-                self.shards.iter().map(|s| Document::new().with("_id", s.as_str())).collect()
+                // As Group 0 lists them: the name and the address of the node.
+                let host = |s: &str| format!("{s}.cluster:27018");
+                let shard =
+                    |s: &String| Document::new().with("_id", s.as_str()).with("host", host(s));
+                self.shards.iter().map(shard).collect()
+            }
+            teseladb_wire::commands::config_settings::SETTINGS => {
+                self.settings.clone().unwrap_or_default()
             }
             _ => Vec::new(),
         })
+    }
+
+    fn config_settings_write(
+        &mut self,
+        writes: Vec<teseladb_wire::commands::config_settings::SettingsWrite>,
+    ) -> Result<bool, CommandError> {
+        let Some(settings) = self.settings.as_mut() else {
+            let msg = "this node keeps no cluster settings";
+            return Err(CommandError::new(teseladb_wire::error::ILLEGAL_OPERATION, msg));
+        };
+        if self.settings_conflicts > 0 {
+            self.settings_conflicts -= 1;
+            return Ok(false);
+        }
+        let at = |settings: &[Document], id: &Value| {
+            settings.iter().position(|d| d.get("_id") == Some(id))
+        };
+        // Every document as it was read, or none of the change goes.
+        for w in &writes {
+            if at(settings, &w.id).map(|i| &settings[i]) != w.read.as_ref() {
+                return Ok(false);
+            }
+        }
+        for w in writes {
+            let i = at(settings, &w.id);
+            match (i, w.now) {
+                (Some(i), Some(d)) => settings[i] = d,
+                (Some(i), None) => {
+                    settings.remove(i);
+                }
+                (None, Some(d)) => settings.push(d),
+                (None, None) => {}
+            }
+        }
+        Ok(true)
     }
 
     fn kill_everywhere(&mut self, scope: &KillScope) -> Result<(), CommandError> {

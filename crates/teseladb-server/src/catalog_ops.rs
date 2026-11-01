@@ -65,6 +65,10 @@ pub enum CatalogReq {
     Dump,
     /// The tenants of this node's copy (007 FR-025).
     Tenants,
+    /// The catalog changes of this node's copy above a mark (014 FR-014).
+    Ddl(teseladb_hlc::Hlc),
+    /// An empty Group 0 entry, so that this node's copy reaches a newer mark (014 FR-014).
+    Tick,
 }
 
 /// The answer to a [`CatalogReq`].
@@ -87,6 +91,9 @@ pub enum CatalogAnswer {
     Documents(Vec<Vec<u8>>),
     /// The tenants, by number and name.
     Tenants(Vec<(u32, String)>),
+    /// The catalog changes above a mark, the mark below which they are incomplete and the mark
+    /// of the last entry applied.
+    Ddl(Vec<teseladb_meta::ddl_log::DdlRecord>, teseladb_hlc::Hlc, teseladb_hlc::Hlc),
     /// The change was applied: the collection it created or found.
     Done(Option<CollectionEntry>),
     /// Group 0 refused the change.

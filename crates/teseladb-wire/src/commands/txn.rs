@@ -1311,6 +1311,10 @@ impl Backend for TxnBackend<'_> {
         self.inner.changes(start, end, from)
     }
 
+    fn catalog_changes(&mut self, from: Hlc) -> Result<super::DdlBatch, CommandError> {
+        self.inner.catalog_changes(from)
+    }
+
     fn range_changes(
         &mut self,
         start: &[u8],

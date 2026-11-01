@@ -16,6 +16,7 @@ use crate::command::snapshot_codec::{
     get_addrs, get_bytes_array, get_node_list, get_state, put_addrs, put_node_list, state_code,
 };
 use crate::command::{Group0Command, NodeAddrs, NodeState};
+use crate::ddl_log::{DdlChange, DdlLog};
 use crate::descriptors::RangeIndex;
 use crate::enroll_tokens::{EnrollTokens, TokenError};
 use crate::indexes::{IndexEntry, Indexes};
@@ -24,8 +25,10 @@ use crate::request::Requests;
 use crate::security::{Principal, Security, SecurityError};
 use crate::tenants::Tenants;
 
-/// Version of the snapshot format (16: tenants, 007 FR-025).
-pub const SNAPSHOT_VERSION: u8 = 16;
+/// Version of the snapshot format (17: the catalog changes of change streams, 014 FR-014).
+pub const SNAPSHOT_VERSION: u8 = 17;
+/// The snapshot before the catalog changes (01-11-2026), still read: none recorded.
+pub const SNAPSHOT_VERSION_WITHOUT_DDL: u8 = 16;
 /// The snapshot before tenants (01-11-2026), still read: no tenant but the default one.
 pub const SNAPSHOT_VERSION_WITHOUT_TENANTS: u8 = 15;
 /// The snapshot before `config.changelog` (01-11-2026), still read: no change recorded.
@@ -257,6 +260,8 @@ pub struct Group0Sm {
     pub changelog: Changelog,
     /// The tenants (007 FR-025), boxed to keep Group 0's state small.
     pub tenants: Box<Tenants>,
+    /// The catalog changes change streams read (014 FR-014), boxed for the same reason.
+    pub ddl: Box<DdlLog>,
 }
 
 impl Group0Sm {
@@ -588,20 +593,27 @@ impl Group0Sm {
                 self.table().0.complete_relocate(*group, *core).map(|()| Group0Result::Ok)
             }
             Group0Command::Catalog(c) => {
+                let ddl = crate::ddl_log::catalog_changes(&self.catalog, c);
                 if let CatalogCommand::Purged { id } = c {
                     self.indexes.forget_collection(*id);
                 }
-                Arc::make_mut(&mut self.catalog)
+                let r = Arc::make_mut(&mut self.catalog)
                     .apply_at(index, mark, c)
                     .map_err(catalog_error)
-                    .map(|entry| entry.map_or(Group0Result::Ok, Group0Result::Collection))
+                    .map(|entry| entry.map_or(Group0Result::Ok, Group0Result::Collection));
+                self.record_ddl(mark, &r, ddl);
+                r
             }
             Group0Command::Indexes(c) => {
+                let ddl = crate::ddl_log::index_changes(&self.catalog, &self.indexes, c);
                 let live: BTreeSet<u32> = self.catalog.collections.values().map(|e| e.id).collect();
-                self.indexes
+                let r = self
+                    .indexes
                     .apply(c, |id| live.contains(&id))
                     .map_err(catalog_error)
-                    .map(|entry| entry.map_or(Group0Result::Ok, Group0Result::Index))
+                    .map(|entry| entry.map_or(Group0Result::Ok, Group0Result::Index));
+                self.record_ddl(mark, &r, ddl);
+                r
             }
             Group0Command::Security(ops) => {
                 self.security.apply(ops).map(|()| Group0Result::Ok).map_err(|e| match e {
@@ -646,12 +658,27 @@ impl Group0Sm {
                 if let Some(done) = self.requests.get(*req) {
                     return done.clone();
                 }
-                let done = self.apply_command(index, cmd);
+                let done = self.apply_command_at(index, mark, cmd);
                 self.requests.record(*req, done.clone());
                 return done;
             }
         };
         r.unwrap_or_else(Group0Result::Err)
+    }
+
+    /// Records `changes` of the entry at `mark` when its command applied (`r`).
+    fn record_ddl(
+        &mut self,
+        mark: Option<teseladb_hlc::Hlc>,
+        r: &Result<Group0Result, Group0Error>,
+        changes: Vec<DdlChange>,
+    ) {
+        let (Some(mark), Ok(result)) = (mark, r) else { return };
+        let created = match result {
+            Group0Result::Collection(c) => Some(c),
+            _ => None,
+        };
+        self.ddl.record_applied(mark, changes, created);
     }
 
     fn encode_snapshot(&self) -> Vec<u8> {
@@ -714,6 +741,9 @@ impl Group0Sm {
         }
         if version > SNAPSHOT_VERSION_WITHOUT_CHANGELOG {
             self.changelog.encode(&mut e);
+        }
+        if version > SNAPSHOT_VERSION_WITHOUT_DDL {
+            self.ddl.encode(&mut e);
         }
         if version > SNAPSHOT_VERSION_WITHOUT_TENANTS {
             self.tenants.encode(&mut e);
@@ -788,6 +818,9 @@ impl Group0Sm {
         }
         if version > SNAPSHOT_VERSION_WITHOUT_CHANGELOG {
             sm.changelog = Changelog::decode(&mut d)?;
+        }
+        if version > SNAPSHOT_VERSION_WITHOUT_DDL {
+            sm.ddl = Box::new(DdlLog::decode(&mut d)?);
         }
         if version > SNAPSHOT_VERSION_WITHOUT_TENANTS {
             sm.tenants = Box::new(Tenants::decode(&mut d)?);
@@ -872,6 +905,7 @@ impl StateMachine for Group0Sm {
     fn apply(&mut self, payload: &[u8], ctx: &ApplyCtx) -> Result<Group0Result, ApplyError> {
         let cmd = Group0Command::decode(payload).map_err(|e| ApplyError(format!("{e:?}")))?;
         self.applied = ctx.index;
+        self.ddl.applied_mark = self.ddl.applied_mark.max(Some(ctx.ts));
         self.cluster_time_ms = self.cluster_time_ms.max(ctx.ts.physical);
         Ok(self.apply_command_at(ctx.index, Some(ctx.ts), &cmd))
     }

@@ -73,7 +73,7 @@ fn sizes_count_the_stored_documents_of_each_collection() {
     let dbs = databases(&r);
     let names: Vec<&Value> = dbs.iter().map(|x| field(x, "name")).collect();
     assert_eq!(names, vec![&s("admin"), &s("beta"), &s("config"), &s("zeta")]);
-    let stored: u64 = m.stored().iter().map(|(k, v)| (k.len() + v.len()) as u64).sum();
+    let stored: u64 = m.stored(..).iter().map(|(k, v)| (k.len() + v.len()) as u64).sum();
     let d_bytes: u64 =
         m.data.iter().filter(|(_, v)| v.len() < 100).map(|(k, v)| (k.len() + v.len()) as u64).sum();
     let beta = collection_size(stored - d_bytes) + collection_size(d_bytes);
@@ -105,7 +105,7 @@ fn sizes_read_large_collections_in_chunks() {
     let mut m = Mem::new();
     let docs = (0..2_500).map(|i| d(&[("_id", Value::Int32(i))])).collect();
     m.run("db", doc(&[("insert", s("c")), ("documents", Value::Array(docs))]));
-    let stored: u64 = m.stored().iter().map(|(k, v)| (k.len() + v.len()) as u64).sum();
+    let stored: u64 = m.stored(..).iter().map(|(k, v)| (k.len() + v.len()) as u64).sum();
     let r = list(&mut m, &[("filter", d(&[("name", s("db"))]))]);
     let size = collection_size(stored) as i64;
     assert_eq!(

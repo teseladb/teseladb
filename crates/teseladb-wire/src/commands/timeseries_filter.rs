@@ -20,8 +20,20 @@ use crate::error::{CommandError, TIMESERIES_PREDICATE};
 /// One condition of the bucket filter: its path and condition, or a whole expression.
 type Cond = (String, Value);
 
-fn refuse(shown: Document, null: bool) -> CommandError {
-    let what = if null { "can't handle comparison to null" } else { "can't handle this predicate" };
+/// Why a condition cannot go to the buckets, as RefDb words it.
+#[derive(Clone, Copy)]
+enum Why {
+    Predicate,
+    Null,
+    Operand,
+}
+
+fn refuse(shown: Document, why: Why) -> CommandError {
+    let what = match why {
+        Why::Predicate => "can't handle this predicate",
+        Why::Null => "can't handle comparison to null",
+        Why::Operand => "operand can't be an object or array",
+    };
     CommandError::new(
         TIMESERIES_PREDICATE,
         format!(
@@ -161,20 +173,24 @@ fn field(spec: &BucketSpec, path: &str, cond: &Value) -> Result<(Vec<Cond>, bool
     let mut out = Vec::new();
     for (op, v) in &ops {
         if matches!(v, Value::Null) && op == "$eq" {
-            return Err(refuse(shown(), true));
+            return Err(refuse(shown(), Why::Null));
+        }
+        let compares = matches!(op.as_str(), "$eq" | "$gt" | "$gte" | "$lt" | "$lte");
+        if compares && matches!(v, Value::Document(_) | Value::Array(_)) {
+            return Err(refuse(shown(), Why::Operand));
         }
         if op == "$in" {
-            let Value::Array(items) = v else { return Err(refuse(shown(), false)) };
+            let Value::Array(items) = v else { return Err(refuse(shown(), Why::Predicate)) };
             let mut branches = Vec::new();
             for item in items {
-                let conds =
-                    bounds(spec, path, "$eq", item).ok_or_else(|| refuse(shown(), false))?;
+                let conds = bounds(spec, path, "$eq", item)
+                    .ok_or_else(|| refuse(shown(), Why::Predicate))?;
                 branches.push(Value::Document(assemble(conds, false)));
             }
             out.push(("$or".to_owned(), Value::Array(branches)));
             continue;
         }
-        out.extend(bounds(spec, path, op, v).ok_or_else(|| refuse(shown(), false))?);
+        out.extend(bounds(spec, path, op, v).ok_or_else(|| refuse(shown(), Why::Predicate))?);
     }
     Ok((out, false))
 }
@@ -234,7 +250,7 @@ fn conditions(
                     ),
                     other => other.clone(),
                 };
-                return Err(refuse(Document::new().with(k, shown), false));
+                return Err(refuse(Document::new().with(k, shown), Why::Predicate));
             }
             (path, cond) => {
                 let (conds, on_meta) = field(spec, path, cond)?;

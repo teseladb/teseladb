@@ -173,14 +173,7 @@ pub(super) fn aggregate<B: Backend + ?Sized>(
     let pipeline = checked(&stages)?;
     let steps = swapped(stages.into_iter().map(Step::new).collect());
     let engine_from = query_part(&steps, true);
-    // A filter that matches nothing leaves the classic plan (`EOF`, measured).
-    let nothing = match steps.first().map(|s| &s.kind) {
-        Some(Kind::Match(d)) => parsed(d, None).is_ok_and(|p| matches_nothing(&p)),
-        _ => false,
-    };
-    let engine = !nothing
-        && pipeline.sbe_prefix() > engine_from
-        && steps.get(engine_from).is_some_and(starts_engine);
+    let engine = engine_runs(&pipeline, &steps, engine_from);
     let first = if engine { engine_from } else { query_part(&steps, false) };
     let i = leading_matches(&steps);
     let mut filter = Document::new();
@@ -216,6 +209,7 @@ pub(super) fn aggregate<B: Backend + ?Sized>(
         vars: None,
         concern: teseladb_range::read::ReadConcern::Local,
         intersect: super::super::lock(ctx.shared).params.hash_intersection,
+        index_keys: false,
     };
     let chosen = super::planned_read(ctx, coll.as_ref(), &plan_read, None)?;
     let access = chosen.as_ref().map(|(indexes, c)| {
@@ -747,6 +741,33 @@ fn through<B: Backend + ?Sized>(
 }
 
 /// The pipeline, parsed and optimised as the command would.
+/// Whether the slot-based engine runs the query plan of `steps` of `pipeline`, from step
+/// `engine_from` on: a `$group` or an equality `$lookup` there, every stage before it in the
+/// engine, and a filter that may match something (one that matches nothing is the classic
+/// `EOF`, measured).
+fn engine_runs(pipeline: &Pipeline, steps: &[Step], engine_from: usize) -> bool {
+    let nothing = match steps.first().map(|s| &s.kind) {
+        Some(Kind::Match(d)) => parsed(d, None).is_ok_and(|p| matches_nothing(&p)),
+        _ => false,
+    };
+    !nothing
+        && pipeline.sbe_prefix() > engine_from
+        && steps.get(engine_from).is_some_and(starts_engine)
+}
+
+/// The framework that runs pipeline `stages` on a collection, as the profiler's
+/// `queryFramework` names it: `sbe` when the slot-based engine runs its query plan, `classic`
+/// otherwise (measured on a `refnode` 9.0.4, 01-11-2026).
+pub(crate) fn query_framework(stages: &[Document]) -> &'static str {
+    let Ok(pipeline) = checked(stages) else { return "classic" };
+    let steps = swapped(stages.iter().cloned().map(Step::new).collect());
+    let engine_from = query_part(&steps, true);
+    match engine_runs(&pipeline, &steps, engine_from) {
+        true => "sbe",
+        false => "classic",
+    }
+}
+
 fn checked(stages: &[Document]) -> Result<Pipeline, CommandError> {
     let holder = Document::new()
         .with("p", Value::Array(stages.iter().cloned().map(Value::Document).collect()));

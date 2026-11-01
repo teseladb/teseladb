@@ -5,6 +5,7 @@
 
 pub mod changes;
 pub mod cursor;
+pub mod ddl;
 pub mod describe;
 pub mod event;
 pub mod merge;
@@ -12,6 +13,7 @@ pub mod meta;
 pub mod order;
 pub mod range_feed;
 pub mod resolved;
+pub mod split_large;
 pub mod stage;
 pub mod token;
 pub mod update_desc;
