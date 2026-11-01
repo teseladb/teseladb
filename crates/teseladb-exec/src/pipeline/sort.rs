@@ -16,6 +16,8 @@ use crate::expr::order;
 #[derive(Clone, Debug, PartialEq)]
 pub struct SortSpec {
     keys: Vec<(String, bool)>,
+    /// The metadata each key sorts by instead of its path (`{f: {$meta: "score"}}`, descending).
+    metas: Vec<Option<String>>,
 }
 
 /// Checks a field path of a sort or projection.
@@ -41,8 +43,16 @@ impl SortSpec {
             return Err(error(SORT_NOT_OBJECT, "the $sort key specification must be an object"));
         };
         let mut keys = Vec::new();
+        let mut metas = Vec::new();
         for (k, x) in d.iter() {
             check_path(k)?;
+            if let RawValue::Document(m) = x
+                && let Some(RawValue::String(name)) = m.get("$meta")
+            {
+                keys.push((k.to_owned(), false));
+                metas.push(Some(name.to_owned()));
+                continue;
+            }
             let asc = match x {
                 RawValue::Int32(1) | RawValue::Int64(1) => true,
                 RawValue::Int32(-1) | RawValue::Int64(-1) => false,
@@ -56,15 +66,44 @@ impl SortSpec {
                 }
             };
             keys.push((k.to_owned(), asc));
+            metas.push(None);
         }
         if keys.is_empty() {
             return Err(error(SORT_EMPTY, "$sort stage must have at least one sort key"));
         }
-        Ok(SortSpec { keys })
+        Ok(SortSpec { keys, metas })
+    }
+
+    /// The sort key of `doc` with metadata `meta`, strings in collation `col`.
+    pub(crate) fn key_with(
+        &self,
+        doc: &Document,
+        col: Option<&dyn teseladb_bson::Collator>,
+        meta: &super::meta::Meta,
+    ) -> Result<Vec<Value>, MqlError> {
+        let mut keys = self.path_keys(doc, col)?;
+        for (k, m) in keys.iter_mut().zip(&self.metas) {
+            if let Some(name) = m {
+                *k = meta.get(name).cloned().ok_or_else(|| crate::expr::missing_meta(name))?;
+            }
+        }
+        Ok(keys)
     }
 
     /// The sort key of `doc`, strings in collation `col`.
     pub fn key(
+        &self,
+        doc: &Document,
+        col: Option<&dyn teseladb_bson::Collator>,
+    ) -> Result<Vec<Value>, MqlError> {
+        if let Some(Some(name)) = self.metas.iter().find(|m| m.is_some()) {
+            return Err(crate::expr::missing_meta(name));
+        }
+        self.path_keys(doc, col)
+    }
+
+    /// The keys of `doc` by the paths of the specification (a key by metadata reads `null`).
+    fn path_keys(
         &self,
         doc: &Document,
         col: Option<&dyn teseladb_bson::Collator>,

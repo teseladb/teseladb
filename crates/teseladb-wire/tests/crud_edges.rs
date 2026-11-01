@@ -718,10 +718,29 @@ fn limits_of_batches_sorts_and_options() {
     let docs: Vec<Value> = (0..100_001).map(|_| d(&[])).collect();
     let r = m.run("db", doc(&[("insert", s("c")), ("documents", Value::Array(docs))]));
     assert_eq!(field(&r, "code"), &Value::Int32(16));
-    // Sorting more than 100 MiB needs `allowDiskUse`.
+    // Sorting more than 100 MiB with `allowDiskUse: false` fails; without it, it is allowed
+    // (measured on a `refrouter` 9.0.4).
     m.run("db", doc(&[("insert", s("big")), ("documents", many(8, 14 << 20))]));
-    let r = m.run("db", doc(&[("find", s("big")), ("sort", d(&[("_id", 1.into())]))]));
+    let r = m.run(
+        "db",
+        doc(&[
+            ("find", s("big")),
+            ("sort", d(&[("_id", 1.into())])),
+            ("allowDiskUse", false.into()),
+        ]),
+    );
     assert_eq!(field(&r, "code"), &Value::Int32(292));
+    assert_eq!(
+        field(&r, "errmsg"),
+        &Value::from(
+            "Executor error during find command: db.big :: caused by :: Sort exceeded memory limit of 104857600 bytes, but did not opt in to external sorting."
+        )
+    );
+    let r = m.run(
+        "db",
+        doc(&[("find", s("big")), ("sort", d(&[("_id", 1.into())])), ("batchSize", 1.into())]),
+    );
+    assert_eq!(field(&r, "cursor.firstBatch.0._id"), &Value::Int32(0));
     let r = m.run(
         "db",
         doc(&[

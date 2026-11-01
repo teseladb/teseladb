@@ -45,6 +45,8 @@ struct WireEnv<'a, B: Backend + ?Sized> {
     concern: ReadConcern,
     /// The collation strings compare with (010 FR-014).
     collation: Collation,
+    /// `allowDiskUse` (010 FR-010).
+    allow_disk_use: bool,
     /// The node's shared state and the aggregated collection, for the stages the node answers
     /// itself (`$collStats`); `None` inside a view's pipeline.
     node: Option<(&'a super::Shared, Namespace)>,
@@ -101,6 +103,27 @@ impl<B: Backend + ?Sized> WireEnv<'_, B> {
             }
         }
         Ok((names::full(ns), out))
+    }
+
+    /// `$planCacheStats`: the entries of the node's plan cache for the aggregated collection,
+    /// which must exist (50933).
+    fn plan_cache_stats(&self) -> Result<Vec<Document>, CommandError> {
+        let Some((shared, ns)) = &self.node else { return Ok(Vec::new()) };
+        let mut backend = self.backend.borrow_mut();
+        let ns_text = names::full(ns);
+        let Some(coll) = backend.collection(ns)? else {
+            return Err(CommandError::new(
+                crate::error::PLAN_CACHE_NO_COLLECTION,
+                format!("collection '{ns_text}' does not exist"),
+            ));
+        };
+        let indexes = super::plan_exec::plan_indexes(&mut **backend, &coll)?;
+        let catalog = super::plan_cache::catalog_signature(&coll, &indexes);
+        super::lock(shared).plan_cache.forget_other(&ns_text, &catalog);
+        let facts = backend.process();
+        let host = format!("{}:{}", facts.host.hostname, facts.port);
+        let shard = super::shard_name(backend.node());
+        Ok(super::lock(shared).plan_cache.stats(&ns_text, (&host, &shard)))
     }
 
     /// `$listSessions`: the records of `config.system.sessions` for the users `spec` asks for.
@@ -200,6 +223,10 @@ impl<B: Backend + ?Sized> Env for WireEnv<'_, B> {
         &NodeExtensions
     }
 
+    fn allow_disk_use(&self) -> bool {
+        self.allow_disk_use
+    }
+
     fn vars(&self) -> Option<&Document> {
         Some(&self.vars)
     }
@@ -230,6 +257,7 @@ impl<B: Backend + ?Sized> Env for WireEnv<'_, B> {
             "$collStats" => self.coll_stats(spec).map_err(to_mql),
             "$listLocalSessions" => self.local_sessions(spec).map_err(to_mql),
             "$listSessions" => self.recorded_sessions(spec).map_err(to_mql),
+            "$planCacheStats" => self.plan_cache_stats().map_err(to_mql),
             other => Err(MqlError::new(
                 teseladb_mql::ErrorCode { code: BAD_VALUE.code, name: BAD_VALUE.name },
                 format!("{other} is not supported by this node"),
@@ -334,6 +362,7 @@ pub(crate) fn read_through_staged<B: Backend + ?Sized>(
         vars,
         concern,
         collation,
+        allow_disk_use: true,
         node: None,
     };
     let sbe = pipeline.runs_in_sbe();
@@ -343,6 +372,8 @@ pub(crate) fn read_through_staged<B: Backend + ?Sized>(
 /// The arguments of `aggregate` besides its pipeline.
 struct AggregateArgs {
     batch_size: Option<usize>,
+    /// `allowDiskUse`, true by default.
+    allow_disk_use: bool,
     /// The command's `collation`.
     collation: Option<Document>,
     vars: Option<Document>,
@@ -431,6 +462,7 @@ fn aggregate_args<B: Backend + ?Sized>(
     let collation = args::doc(cmd, AGGREGATE, "collation")?.cloned();
     Ok(AggregateArgs {
         batch_size,
+        allow_disk_use: !matches!(cmd.get("allowDiskUse"), Some(Value::Boolean(false))),
         collation,
         vars: command_let(backend, cmd, AGGREGATE)?,
         concern: args::read_concern(cmd, AGGREGATE)?,
@@ -499,6 +531,7 @@ pub fn aggregate<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
         vars,
         concern: a.concern,
         collation,
+        allow_disk_use: a.allow_disk_use,
         node: Some((ctx.shared, ns.clone())),
     };
     let executor = |mut err: CommandError| {
@@ -593,7 +626,17 @@ fn planned_read<B: Backend + ?Sized>(
     if indexes.is_empty() || super::explain::matches_nothing(&parsed) {
         return Ok(None);
     }
-    let Some(found) = super::plan_exec::planned_documents(ctx.backend, &coll, &read)? else {
+    let note = super::plan_exec::CacheNote {
+        shared: ctx.shared,
+        ns,
+        from: Document::new()
+            .with("query", filter.clone())
+            .with("sort", sort.clone().unwrap_or_default())
+            .with("projection", Document::new()),
+        shape: super::plan_cache::read_shape(&parsed, sort.as_ref(), None, None),
+    };
+    let Some(found) = super::plan_exec::planned_documents(ctx.backend, &coll, &read, Some(note))?
+    else {
         return Ok(None);
     };
     found

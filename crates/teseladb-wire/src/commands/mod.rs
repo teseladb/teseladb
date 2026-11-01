@@ -43,6 +43,7 @@ pub mod names;
 pub mod out_merge;
 pub mod parameters;
 pub mod partial_filter;
+pub(crate) mod plan_cache;
 pub(crate) mod plan_exec;
 pub mod query;
 pub mod registry;
@@ -510,6 +511,8 @@ pub struct NodeSessions {
     pub rw_defaults: cluster_admin::Defaults,
     /// The node's part of the ObjectIds it makes.
     pub object_ids: ObjectIds,
+    /// The plans the node's reads chose, by shape (010 FR-002).
+    pub plan_cache: plan_cache::PlanCache,
 }
 
 /// What a node puts after the seconds of each ObjectId it makes (ObjectId specification): five
@@ -556,6 +559,7 @@ impl NodeSessions {
             txns: txn::Transactions::new(),
             rw_defaults: cluster_admin::Defaults::default(),
             object_ids: ObjectIds::default(),
+            plan_cache: plan_cache::PlanCache::default(),
             pushes: teseladb_txn::push_cache::PushCache::new(),
             push_settled: std::sync::Arc::default(),
             txn_scratch: std::collections::BTreeSet::new(),
@@ -630,8 +634,9 @@ impl<B: Backend + ?Sized> Ctx<'_, B> {
 }
 
 /// The commands of this module.
-const NAMES: [&str; 64] = [
+const NAMES: [&str; 65] = [
     aggregate::AGGREGATE,
+    plan_cache::PLAN_CACHE_CLEAR,
     explain::EXPLAIN,
     audit::LOG_APPLICATION_MESSAGE,
     authz_collections::MERGE_AUTHZ_COLLECTIONS,
@@ -768,6 +773,7 @@ fn command<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comman
         crud::BULK_WRITE => crud::bulk_write(ctx),
         query::FIND => query::find(ctx),
         aggregate::AGGREGATE => aggregate::aggregate(ctx),
+        plan_cache::PLAN_CACHE_CLEAR => plan_cache::plan_cache_clear(ctx),
         explain::EXPLAIN => explain::explain(ctx),
         query::GET_MORE => query::get_more(ctx),
         query::KILL_CURSORS => query::kill_cursors(ctx),
