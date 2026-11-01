@@ -1291,6 +1291,15 @@ impl Backend for TxnBackend<'_> {
         self.inner.end_operation();
     }
 
+    fn changes(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        from: Hlc,
+    ) -> Result<super::ChangeBatch, CommandError> {
+        self.inner.changes(start, end, from)
+    }
+
     fn txn_route(&self, key: &[u8]) -> Option<teseladb_types::GroupId> {
         self.inner.txn_route(key)
     }

@@ -388,6 +388,15 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         self.inner.end_operation();
     }
 
+    fn changes(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        from: teseladb_hlc::Hlc,
+    ) -> Result<crate::commands::ChangeBatch, CommandError> {
+        self.call(|b| b.changes(start, end, from))
+    }
+
     fn set_read_preference(&mut self, pref: Option<teseladb_router::read_pref::ReadPreference>) {
         self.inner.set_read_preference(pref);
     }

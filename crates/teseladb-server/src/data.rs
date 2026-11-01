@@ -25,8 +25,8 @@ use teseladb_range::ack::{W, WriteConcern};
 use teseladb_range::checksum::Report;
 use teseladb_range::command::Put;
 use teseladb_range::host::{
-    Mutation, MutationError, RangeError, RangeHost, ReadSpec, Reply, ReqId, ScanReq, TxnReq,
-    WriteReq,
+    ChangesReq, Mutation, MutationError, RangeError, RangeHost, ReadSpec, Reply, ReqId, ScanReq,
+    TxnReq, WriteReq,
 };
 use teseladb_range::mutate::Outcome;
 use teseladb_range::read::ReadConcern;
@@ -572,6 +572,10 @@ impl DataCore {
                     None => self.host.txn(core, req, now, wall_ms),
                 }
             }
+            // A change stream's read, on the leader (014 FR-003).
+            RemoteReq::Changes { start, end, from } => {
+                self.host.changes(core, ChangesReq { g, start, end, from }, now)
+            }
             // A backup's or a restore's request (007 FR-021).
             r @ (RemoteReq::BackupFetch { .. }
             | RemoteReq::RestorePiece { .. }
@@ -659,6 +663,8 @@ impl DataCore {
                         }
                         Reply::Intents { ts } => DataReply::Put(ts),
                         Reply::Record(record) => DataReply::Get(Some(record.encode())),
+                        // A stream's read comes as a remote request, never from the handle.
+                        Reply::Changes { .. } => DataReply::Get(None),
                     });
                     let _ = to.send(r);
                 }
@@ -1055,6 +1061,9 @@ fn remote_reply(reply: Reply) -> RemoteReply {
         Reply::Value { ts, value } => RemoteReply::Value { ts, value },
         Reply::Intents { ts } => RemoteReply::Intents { ts },
         Reply::Record(record) => RemoteReply::Record(record),
+        Reply::Changes { rows, to, oldest_intent } => {
+            RemoteReply::Changes { rows, to, oldest_intent }
+        }
     }
 }
 
@@ -1200,6 +1209,31 @@ mod tests {
         let r = ask(&mut core, &mut d, RemoteReq::RestoreIngest { files: 1 });
         assert!(matches!(&r, Err(RangeError::Mutation(m)) if m.0.contains("failed")), "{r:?}");
         assert_eq!(core.snapshot_index(G), before);
+    }
+
+    /// A change stream's read reaches the leader's host and comes back with its rows (014 FR-003).
+    #[test]
+    fn a_change_streams_read_runs_on_the_leader() {
+        let (mut core, mut d, mut disk) = setup_disk(&[1]);
+        let from = Hlc { physical: 1, logical: 0 };
+        let changes = RemoteReq::Changes { start: vec![1], end: vec![4], from };
+        let mut answer = None;
+        for ms in (1_000..30_000).step_by(10) {
+            let now = Nanos::from_millis(ms);
+            run_io(&mut core, &mut d, &mut disk, now);
+            d.poll(&mut core, (now, ms));
+            let (tx, rx) = channel();
+            d.request(&mut core, DataReq::Remote(G, changes.clone()), tx, (now, ms));
+            d.poll(&mut core, (now, ms));
+            if let Ok(Ok(DataReply::Remote(r))) = rx.try_recv() {
+                answer = Some(r);
+                break;
+            }
+        }
+        match answer {
+            Some(RemoteReply::Changes { rows, to, .. }) => assert!(rows.is_empty() && to >= from),
+            other => panic!("no changes: {other:?}"),
+        }
     }
 
     #[test]

@@ -73,7 +73,8 @@ pub(super) fn pin(req: RemoteReq, pinned: Option<&(Hlc, TxnView)>) -> RemoteReq 
         | RemoteReq::Txn { .. }
         | RemoteReq::BackupFetch { .. }
         | RemoteReq::RestorePiece { .. }
-        | RemoteReq::RestoreIngest { .. }) => other,
+        | RemoteReq::RestoreIngest { .. }
+        | RemoteReq::Changes { .. }) => other,
     }
 }
 

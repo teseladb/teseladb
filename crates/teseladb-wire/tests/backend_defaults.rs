@@ -70,6 +70,14 @@ impl Backend for Bare {
         Ok(1)
     }
     fn end_operation(&mut self) {}
+    fn changes(
+        &mut self,
+        _start: &[u8],
+        _end: &[u8],
+        _from: teseladb_hlc::Hlc,
+    ) -> Result<teseladb_wire::commands::ChangeBatch, CommandError> {
+        Err(none())
+    }
     fn txn_pause(&mut self) -> bool {
         false
     }

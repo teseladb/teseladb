@@ -122,6 +122,8 @@ pub struct Mem {
     pub scanned_at: Option<Option<Hlc>>,
     /// Value types other than a document's, by key (written by transactions).
     pub types: BTreeMap<Vec<u8>, u8>,
+    /// Every version written, at its mark: what a change stream reads (014).
+    pub history: Vec<teseladb_range::changes::Versioned>,
     /// Runs before each read of the range with its first key and the data: another node's
     /// write meanwhile (009, `prepareUnique`).
     pub on_scan_data: Option<ScanHook>,
@@ -157,6 +159,11 @@ pub type ScanHook = Box<dyn FnMut(&[u8], &mut BTreeMap<Vec<u8>, Vec<u8>>)>;
 impl Mem {
     pub fn new() -> Mem {
         Mem { now: 1_700_000_000_000, replicas: 3, ..Mem::default() }
+    }
+
+    /// Notes a version of `key` written at `ts` for the change streams.
+    fn record(&mut self, key: &[u8], ts: Hlc, value: Option<(u8, Vec<u8>)>) {
+        self.history.push(teseladb_range::changes::Versioned { key: key.to_vec(), ts, value });
     }
 
     /// The stored versions a range's scans return: all but those that only serve the history of
@@ -251,6 +258,22 @@ impl Backend for Mem {
 
     fn end_operation(&mut self) {
         self.ended += 1;
+    }
+
+    fn changes(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        from: Hlc,
+    ) -> Result<teseladb_wire::commands::ChangeBatch, CommandError> {
+        // Every write of this node is applied at once: resolved up to its clock.
+        let rows = self
+            .history
+            .iter()
+            .filter(|v| v.ts > from && start <= v.key.as_slice() && v.key.as_slice() < end)
+            .cloned()
+            .collect();
+        Ok((rows, Hlc { physical: self.now, logical: 0 }))
     }
 
     fn tenant_named(&mut self, name: &str) -> Result<Option<u32>, CommandError> {
@@ -371,7 +394,7 @@ impl Backend for Mem {
             TxnOp::EndTxn { txn, .. } | TxnOp::PushTxn { txn, .. } => {
                 Ok(Reply::Record(record(txn, TxnStatus::Pending, ts)))
             }
-            TxnOp::ResolveIntents { txn, status, .. } => {
+            TxnOp::ResolveIntents { txn, status, commit_ts, .. } => {
                 if !self.resolve_errors.is_empty() {
                     return Err(self.resolve_errors.remove(0));
                 }
@@ -381,10 +404,12 @@ impl Backend for Mem {
                     }
                     match w {
                         teseladb_range::intents::IntentOp::Put { value_type, value } => {
+                            self.record(&k, commit_ts, Some((value_type, value.clone())));
                             self.types.insert(k.clone(), value_type);
                             self.data.insert(k, value);
                         }
                         teseladb_range::intents::IntentOp::Delete => {
+                            self.record(&k, commit_ts, None);
                             self.types.remove(&k);
                             self.data.remove(&k);
                         }
@@ -472,14 +497,17 @@ impl Backend for Mem {
             return Err(CommandError::new(teseladb_wire::error::WRITE_CONFLICT, "conflict"));
         }
         self.now += 1;
+        let ts = Hlc { physical: self.now, logical: 0 };
         let keys = writes.iter().map(|(k, _)| k.clone()).collect();
         for (k, op) in writes {
             match op {
                 teseladb_range::intents::IntentOp::Put { value_type, value } => {
+                    self.record(&k, ts, Some((value_type, value.clone())));
                     self.types.insert(k.clone(), value_type);
                     self.data.insert(k, value);
                 }
                 teseladb_range::intents::IntentOp::Delete => {
+                    self.record(&k, ts, None);
                     self.types.remove(&k);
                     self.data.remove(&k);
                 }
@@ -550,10 +578,12 @@ impl Backend for Mem {
         }
         self.writes += 1;
         for p in out.puts {
+            self.record(&p.key, ts, Some((p.value_type, p.value.clone())));
             self.types.insert(p.key.clone(), p.value_type);
             self.data.insert(p.key, p.value);
         }
         for d in out.deletes {
+            self.record(&d, ts, None);
             self.types.remove(&d);
             self.data.remove(&d);
         }

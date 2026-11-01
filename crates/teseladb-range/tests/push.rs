@@ -466,3 +466,50 @@ fn a_range_gives_its_versions_and_its_oldest_pending_intent() {
     let got = rows(&n, b, far());
     assert_eq!((got.rows.len(), got.oldest_intent), (0, Some(at)));
 }
+
+/// What the leader gives a change stream (014 FR-003, FR-004): the versions of the range up to
+/// its closed mark, which it closes 200 ms behind its clock while streams read it, and the oldest
+/// intent pending there, which holds the stream's resolved mark below it.
+#[test]
+fn the_leader_gives_a_stream_its_versions_up_to_the_closed_mark() {
+    use teseladb_range::host::ChangesReq;
+    use teseladb_types::Nanos;
+    let mut n = Node::new();
+    let a = n.write(A, b"a0");
+    let from = Hlc { physical: a.physical - 1, logical: 0 };
+    let ask = |n: &mut Node, from: Hlc| {
+        let req = ChangesReq { g: G, start: b"\x01".to_vec(), end: b"\x02".to_vec(), from };
+        let now = n.now;
+        let id = n.host.changes(&mut n.core, req, now);
+        n.answer(id)
+    };
+    // Nothing closed above the write yet: no rows, and nothing resolved past the start.
+    match ask(&mut n, from) {
+        Ok(Reply::Changes { rows, to, .. }) => assert!(rows.is_empty() && to == from),
+        other => panic!("not changes: {other:?}"),
+    }
+    // With a stream open the leader closes 200 ms behind its clock.
+    for _ in 0..60 {
+        n.now = n.now + Nanos::from_millis(10);
+        n.settle();
+    }
+    match ask(&mut n, from) {
+        Ok(Reply::Changes { rows, to, oldest_intent }) => {
+            assert!(to >= a, "closed at {to:?}, the write at {a:?}");
+            assert_eq!(rows.len(), 1);
+            assert_eq!((rows[0].key.as_slice(), rows[0].ts), (A, a));
+            assert_eq!(oldest_intent, None);
+        }
+        other => panic!("not changes: {other:?}"),
+    }
+    // A pending intent shows its mark.
+    let at = intents_mark(n.txn(intents(T1, a, &[(b"\x01c", put(b"c"))])));
+    for _ in 0..60 {
+        n.now = n.now + Nanos::from_millis(10);
+        n.settle();
+    }
+    match ask(&mut n, a) {
+        Ok(Reply::Changes { oldest_intent, .. }) => assert_eq!(oldest_intent, Some(at)),
+        other => panic!("not changes: {other:?}"),
+    }
+}
