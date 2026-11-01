@@ -359,3 +359,27 @@ fn a_purge_search_takes_a_batch_of_expired_records_and_skips_the_rest() {
     assert!(!batch.contains(&dedup_key(G, 7, 1, 0)), "the deleted record is not purged again");
     assert!(!batch.contains(&dedup_key(G, 7, 1, u32::MAX)), "the newer record stays");
 }
+
+/// 007 FR-012: a closed mark never goes back; a `SetClosedTs` at or below the one kept leaves it.
+#[test]
+fn a_closed_mark_at_or_below_the_kept_one_leaves_it() {
+    use teseladb_range::sm::RangeState;
+    let mut r = Replica::new();
+    r.apply(1, ts(10), &Command::SetClosedTs { closed: ts(8) }).unwrap();
+    r.apply(2, ts(11), &Command::SetClosedTs { closed: ts(5) }).unwrap();
+    r.apply(3, ts(12), &Command::SetClosedTs { closed: ts(8) }).unwrap();
+    assert_eq!(r.sm.closed_mark(), Some((ts(8), 1)));
+}
+
+/// 005 FR-011: a purge names only the range's idempotence records; a key past them is a fault of
+/// the log, as one before them is.
+#[test]
+fn a_purge_of_a_key_past_the_range_s_records_is_refused() {
+    let mut r = Replica::new();
+    let (start, end) = teseladb_range::sm::dedup_interval(G);
+    let before = start[..start.len() - 1].to_vec();
+    for key in [end, before] {
+        let e = r.apply(1, ts(10), &Command::PurgeDedup { keys: vec![key] }).unwrap_err();
+        assert!(e.contains("not one of its idempotence records"), "{e}");
+    }
+}
