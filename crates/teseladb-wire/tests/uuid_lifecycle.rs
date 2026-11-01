@@ -5,7 +5,7 @@
 
 mod common;
 
-use common::{Mem, doc};
+use common::{Mem, doc, field};
 use teseladb_bson::{Document, Value};
 
 fn uuid_of(m: &mut Mem, db: &str, coll: &str) -> Option<Value> {
@@ -30,10 +30,10 @@ fn the_uuid_stays_inside_its_database_and_is_new_elsewhere_or_when_created_again
     let first = uuid_of(&mut m, "u", "a").expect("a uuid");
     assert!(matches!(first, Value::Binary { subtype: 4, .. }), "{first:?}");
     let r = rename(&mut m, "u.a", "u.b");
-    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+    assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
     assert_eq!(uuid_of(&mut m, "u", "b"), Some(first.clone()), "same database: same uuid");
     let r = rename(&mut m, "u.b", "v.c");
-    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+    assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
     let moved = uuid_of(&mut m, "v", "c").expect("a uuid");
     assert_ne!(moved, first, "another database: a new uuid");
     m.run("v", doc(&[("drop", Value::from("c"))]));
