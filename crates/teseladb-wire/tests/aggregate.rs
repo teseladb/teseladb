@@ -616,3 +616,22 @@ fn record_ids_are_left_out_everywhere() {
 fn missing_metadata_first_answers_as_refdb() {
     check_files(&[include_str!("aggregate/meta_sort.out")]);
 }
+
+/// `{$meta: "indexKey"}` (`tests/aggregate/index_key.out`, measured on a `refrouter` 9.0.4 on
+/// 01-11-2026): the key of the index entry each document was read by, field by field as the key
+/// pattern names them, through `aggregate` and `find`; the first entry of a multikey document in
+/// the scan's order, `{_id: v}` through the index of `_id`, and nothing after a collection scan
+/// or a read of one `_id`.
+#[test]
+fn index_key_metadata_answers_as_refdb() {
+    check_files(&[include_str!("aggregate/index_key.out")]);
+}
+
+/// `$indexStats` (`tests/aggregate/index_stats.out`, measured on a `refrouter` 9.0.4 on
+/// 01-11-2026): each index of the collection with its key, specification, host, shard and how
+/// many reads its plans scanned it (`accesses.ops`, since `accesses.since`); an empty object as
+/// its only argument, first in the pipeline, on a collection.
+#[test]
+fn index_stats_answer_as_refdb() {
+    check_files(&[include_str!("aggregate/index_stats.out")]);
+}

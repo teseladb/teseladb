@@ -183,3 +183,23 @@ fn search_meta_gives_its_document() {
         [Document::new().with("count", Document::new().with("lowerBound", 2i64))]
     );
 }
+
+#[test]
+fn documents_that_did_not_come_from_the_search_stage_refuse_its_score() {
+    // Measured on 9.0.4: a document `$unionWith` or `$lookup` brings in has no `searchScore`,
+    // and reading it is the 40218 while the pipeline runs; `$facet` sees the search's documents.
+    let union = Document::new().with("$unionWith", Document::new().with("coll", "c"));
+    assert_eq!(
+        message(run(vec![search(), union, meta("x", "searchScore")])),
+        (40218, SEARCH_MISSING.to_owned())
+    );
+    let inner = Value::Array(vec![meta("x", "searchScore").into()]);
+    let lookup = Document::new().with(
+        "$lookup",
+        Document::new().with("from", "c").with("pipeline", inner.clone()).with("as", "j"),
+    );
+    assert_eq!(message(run(vec![search(), lookup])), (40218, SEARCH_MISSING.to_owned()));
+    let facet = Document::new().with("$facet", Document::new().with("a", inner));
+    let want = Document::new().with("a", Value::Array(vec![x(2, 0.5).into(), x(1, 0.25).into()]));
+    assert_eq!(run(vec![search(), facet]).unwrap(), [want]);
+}

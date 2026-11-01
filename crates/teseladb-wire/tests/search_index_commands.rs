@@ -87,14 +87,28 @@ fn indexes_are_created_listed_and_given_back_when_asked_again() {
     let first = &all[0];
     let version =
         Document::new().with("version", 0).with("createdAt", Value::DateTime(1_793_559_095_000));
+    // Built over the collection's documents when created: `READY`, with what this node serves
+    // (measured: the definition completed with `fields: {}`).
+    let completed = Document::new()
+        .with("mappings", Document::new().with("dynamic", true).with("fields", Document::new()));
+    let main = Document::new()
+        .with("status", "READY")
+        .with("queryable", true)
+        .with("definitionVersion", version.clone())
+        .with("definition", completed);
+    let detail = Document::new()
+        .with("hostname", "000000000000000000000001")
+        .with("status", "READY")
+        .with("queryable", true)
+        .with("mainIndex", main);
     let want = Document::new()
         .with("id", id.clone())
         .with("name", "i1")
-        .with("status", "PENDING")
-        .with("queryable", false)
+        .with("status", "READY")
+        .with("queryable", true)
         .with("latestDefinitionVersion", version)
         .with("latestDefinition", dynamic(true))
-        .with("statusDetail", Value::Array(vec![]));
+        .with("statusDetail", Value::Array(vec![Value::Document(detail)]));
     assert_eq!(first, &want);
     assert_eq!(field(&list(&mut m, &[]), "cursor.ns"), &Value::from("t.c"));
     assert_eq!(field(&list(&mut m, &[]), "cursor.id"), &Value::Int64(0));
@@ -339,7 +353,11 @@ fn an_update_makes_a_new_version_and_a_drop_removes_the_index() {
     let version =
         Document::new().with("version", 1).with("createdAt", Value::DateTime(1_793_559_112_000));
     assert_eq!(after[0].get("latestDefinitionVersion"), Some(&Value::Document(version)));
-    assert_eq!(after[0].get("status"), Some(&Value::from("PENDING")));
+    assert_eq!(after[0].get("status"), Some(&Value::from("READY")));
+    assert_eq!(
+        field(&after[0], "statusDetail.0.mainIndex.definitionVersion.version"),
+        &Value::Int32(1)
+    );
     let bad = Document::new()
         .with("updateSearchIndex", "c")
         .with("name", "b")
@@ -468,4 +486,81 @@ fn the_list_stage_gives_the_same_documents_and_its_errors() {
                 .to_owned()
         )
     );
+}
+
+fn search(m: &mut Mem, coll: &str, stage: &str, spec: Document) -> Document {
+    agg(m, coll.into(), vec![Document::new().with(stage, spec)])
+}
+
+fn text(q: &str) -> Document {
+    Document::new().with("text", Document::new().with("query", q).with("path", "t"))
+}
+
+fn scored() -> Document {
+    let s = Document::new().with("$meta", "searchScore");
+    Document::new().with("$project", Document::new().with("s", s))
+}
+
+fn insert(m: &mut Mem, docs: Vec<Document>) {
+    m.run(DB, Document::new().with("insert", "c").with("documents", arr(docs)));
+}
+
+/// The measured run of 01-11-2026: documents `{_id: 1, t: "hola mundo"}` and
+/// `{_id: 2, t: "adios mundo cruel"}`, index `default` `{mappings: {dynamic: true}}`.
+#[test]
+fn search_serves_the_index_with_refsearch_scores_and_follows_the_writes() {
+    let mut m = with_collection();
+    insert(&mut m, vec![doc(&[("_id", 2.into()), ("t", "adios mundo cruel".into())])]);
+    // Before the index exists a query finds nothing and `$searchMeta` counts no document.
+    assert!(batch(&search(&mut m, "c", "$search", text("mundo"))).is_empty());
+    let none = Document::new().with("count", Document::new().with("total", 0i64));
+    assert_eq!(batch(&search(&mut m, "c", "$searchMeta", text("mundo"))), vec![none]);
+    create(&mut m, "c", vec![index("default", dynamic(true))]);
+    let pipeline = vec![Document::new().with("$search", text("mundo")), scored()];
+    let got = batch(&agg(&mut m, "c".into(), pipeline.clone()));
+    let want = |id: i32, s: f64| doc(&[("_id", id.into()), ("s", Value::Double(s))]);
+    assert_eq!(got, vec![want(1, 0.09025818854570389), want(2, 0.07660569995641708)]);
+    // A write is seen by the next query (FR-020), with the scores `refsearch` gives once it has it.
+    insert(&mut m, vec![doc(&[("_id", 3.into()), ("t", "mundo mundo".into())])]);
+    let got = batch(&agg(&mut m, "c".into(), pipeline.clone()));
+    assert_eq!(
+        got,
+        vec![
+            want(3, 0.08695067465305328),
+            want(1, 0.06446342915296555),
+            want(2, 0.05434416979551315)
+        ]
+    );
+    let del = Document::new().with("q", doc(&[("_id", 1.into())])).with("limit", 1);
+    m.run(DB, Document::new().with("delete", "c").with("deletes", arr(vec![del])));
+    let got = batch(&agg(&mut m, "c".into(), pipeline));
+    assert_eq!(got, vec![want(3, 0.12074275314807892), want(2, 0.07660569995641708)]);
+    // The whole documents, and `$searchMeta`'s count.
+    let docs = batch(&search(&mut m, "c", "$search", text("cruel")));
+    assert_eq!(docs, vec![doc(&[("_id", 2.into()), ("t", "adios mundo cruel".into())])]);
+    let two = Document::new().with("count", Document::new().with("lowerBound", 2i64));
+    assert_eq!(batch(&search(&mut m, "c", "$searchMeta", text("mundo"))), vec![two]);
+}
+
+#[test]
+fn search_errors_and_missing_indexes_answer_as_measured() {
+    let mut m = with_collection();
+    create(&mut m, "c", vec![index("default", dynamic(true))]);
+    let named = |n: Value| text("hola").with("index", n);
+    assert!(batch(&search(&mut m, "c", "$search", named("nope".into()))).is_empty());
+    assert!(batch(&search(&mut m, "zz", "$search", text("hola"))).is_empty());
+    assert!(batch(&search(&mut m, "zz", "$searchMeta", text("hola"))).is_empty());
+    let r = search(&mut m, "c", "$search", named(5.into()));
+    assert_eq!(error(&r), (8, "\"index\" must be a string".to_owned()));
+    let nopath = Document::new().with("text", Document::new().with("query", "a"));
+    assert_eq!(
+        error(&search(&mut m, "c", "$search", nopath)),
+        (8, "\"text.path\" is required".to_owned())
+    );
+    // The vector indexes are not served by the indexer: `$vectorSearch` answers as without search.
+    let vector = Document::new().with("path", "v").with("limit", 1);
+    assert_eq!(error(&search(&mut m, "c", "$vectorSearch", vector)).0, 31082);
+    // A dropped index is forgotten and serves nothing.
+    m.run(DB, Document::new().with("dropSearchIndex", "c").with("name", "default"));
+    assert!(batch(&search(&mut m, "c", "$search", text("hola"))).is_empty());
 }

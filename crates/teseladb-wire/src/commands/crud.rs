@@ -734,6 +734,8 @@ fn candidates<B: Backend + ?Sized>(
     collation: Option<&Document>,
 ) -> Result<Vec<Vec<u8>>, CommandError> {
     if let Some(id) = id_equality(&m.filter) {
+        // The write reads its document through the index of `_id` (`$indexStats` counts it).
+        backend.note_plan(super::plan_exec::used_id_index(true));
         return Ok(id_doc_key(backend, coll, &id)?.into_iter().collect());
     }
     // An index plan that wins gives the documents, and a write of one takes its first (T019).
@@ -1446,6 +1448,7 @@ pub(crate) fn project(doc: &Document, spec: &Document) -> Result<Value, CommandE
         matcher: MatchContext { collation: None, ext: &super::engines::NodeExtensions, vars: None },
         position: None,
         sort_key: None,
+        index_key: None,
     };
     Ok(Value::Document(p.apply(RawDoc::from_bytes(&db)?, &ctx).map_err(from_mql)?))
 }

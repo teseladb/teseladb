@@ -21,7 +21,7 @@ fn a_resumed_stream_returns_exactly_the_events_after_its_token() {
         key(6, 0, 0, "a"),
     ];
     for (i, at) in events.iter().enumerate() {
-        let token = ResumeToken { event: at.clone(), kind: EventKind::Update };
+        let token = ResumeToken::new(at.clone(), EventKind::Update);
         // The token travels as its `_data` string, to any node.
         let start = Position::decode(&Position::Event(token).encode()).unwrap();
         let p = StreamPosition::new(&Start::ResumeAfter(start), Hlc { physical: 99, logical: 0 });

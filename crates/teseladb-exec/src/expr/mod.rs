@@ -277,6 +277,10 @@ pub struct Scope {
     pub collation: crate::collation::Collation,
     /// The engine of `$function` and `$accumulator` (016), `None` without one.
     pub js: Option<Rc<dyn js::JsEngine>>,
+    /// Metadata the pipeline's check found given (by a search stage) whose absence in a document
+    /// is the 40218 when it runs, as for a document `$unionWith` or `$lookup` brought in
+    /// (measured on 9.0.4).
+    pub meta_required: Vec<String>,
 }
 
 impl Scope {

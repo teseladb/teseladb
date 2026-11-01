@@ -11,7 +11,8 @@ use teseladb_meta::indexes::{IndexCommand, SearchIndexEntry, SearchIndexKind, Se
 
 use teseladb_search::definition::{Definition, DefinitionError, VectorDefinition};
 
-use super::{Backend, Ctx, args, names, views};
+use super::search_ops::{self, Served};
+use super::{Backend, Ctx, Shared, args, lock, names, views};
 use crate::error::{
     COMMAND_FAILED, CommandError, INDEX_ALREADY_EXISTS, INDEX_NOT_FOUND, INVALID_NAMESPACE,
     INVALID_OPTIONS, NAMESPACE_NOT_FOUND, UNKNOWN_ERROR,
@@ -257,11 +258,32 @@ pub fn create<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
         ctx.backend.index_write(cmd)?;
         created.push((id, w.name));
     }
+    build(ctx, &t.coll)?;
     let list: Vec<Value> = created
         .into_iter()
         .map(|(id, name)| Document::new().with(ID, hex_id(&id)).with(NAME, name).into())
         .collect();
     Ok(Document::new().with("indexesCreated", list).with("ok", 1.0))
+}
+
+/// Builds this node's segments of the `search` indexes of `coll` whose definition version it
+/// does not serve yet, over the documents already written (FR-014). An index whose documents
+/// cannot be analyzed stays `PENDING`; its queries give the error.
+fn build<B: Backend + ?Sized>(
+    ctx: &mut Ctx<'_, B>,
+    coll: &CollectionEntry,
+) -> Result<(), CommandError> {
+    for e in ctx.backend.search_indexes(coll.id)? {
+        let served = lock(ctx.shared).search.served(&e.id).map(|s| s.version);
+        if e.kind == SearchIndexKind::Search && served != Some(e.version) {
+            match search_ops::with_index(ctx.backend, ctx.shared, coll, &e, |_| ()) {
+                Ok(()) => {}
+                Err(err) if err.code == UNKNOWN_ERROR => {}
+                Err(err) => return Err(err),
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The status name `$listSearchIndexes` shows.
@@ -288,35 +310,56 @@ fn queryable(e: &SearchIndexEntry) -> bool {
     }
 }
 
-/// The document of an index that `listSearchIndexes` and `$listSearchIndexes` give.
-pub fn described(e: &SearchIndexEntry) -> Result<Document, CommandError> {
+/// The document of an index that `listSearchIndexes` and `$listSearchIndexes` give, with what
+/// node `host` serves of it: `READY` when it serves the latest definition, `BUILDING` (and still
+/// queryable) while it serves an older one, and the catalog's status with no `statusDetail` when
+/// it serves none.
+pub fn described(
+    e: &SearchIndexEntry,
+    host: u64,
+    served: Option<&Served>,
+) -> Result<Document, CommandError> {
     // `createdAt` keeps whole seconds (measured).
     let created = e.defined_ms - e.defined_ms.rem_euclid(1000);
     let version = Document::new()
         .with("version", i32::try_from(e.version).unwrap_or(i32::MAX))
         .with("createdAt", Value::DateTime(created));
+    let (status, queryable, detail) = match served {
+        Some(s) => {
+            let mut d = search_ops::status_detail(host, s);
+            let status = if s.version == e.version { "READY" } else { "BUILDING" };
+            d.insert("status", status);
+            (status, true, vec![Value::Document(d)])
+        }
+        None => (status_name(e.status), queryable(e), Vec::new()),
+    };
     Ok(Document::new()
         .with(ID, hex_id(&e.id))
         .with(NAME, e.name.clone())
-        .with("status", status_name(e.status))
-        .with("queryable", queryable(e))
+        .with("status", status)
+        .with("queryable", queryable)
         .with("latestDefinitionVersion", version)
         .with("latestDefinition", Document::from(teseladb_bson::RawDoc::from_bytes(&e.definition)?))
-        .with("statusDetail", Vec::<Value>::new()))
+        .with("statusDetail", detail))
 }
 
 /// The indexes of `coll` that `id` or `name` of `filter` pick, described.
 pub fn listed<B: Backend + ?Sized>(
     backend: &mut B,
+    shared: &Shared,
     coll: u32,
     which: Option<&Pick>,
 ) -> Result<Vec<Value>, CommandError> {
     let mut all = backend.search_indexes(coll)?;
     // In the order they were created (measured), which is their identifiers' order.
     all.sort_by_key(|e| e.id);
+    let host = backend.node();
     all.iter()
         .filter(|e| which.is_none_or(|w| matches(e, w)))
-        .map(|e| described(e).map(Value::from))
+        .map(|e| {
+            let served = lock(shared).search.served(&e.id);
+            described(e, host, served.as_ref()).map(Value::from)
+        })
         .collect()
 }
 
@@ -325,7 +368,7 @@ pub fn list<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
     let t = target(ctx)?;
     only(ctx.cmd, LIST_SEARCH_INDEXES, &[ID, NAME])?;
     let which = pick(ctx.cmd, LIST_SEARCH_INDEXES, USER_COMMAND, BOTH)?;
-    let batch = listed(ctx.backend, t.coll.id, which.as_ref())?;
+    let batch = listed(ctx.backend, ctx.shared, t.coll.id, which.as_ref())?;
     let cursor = Document::new()
         .with("id", Value::Int64(0))
         .with("ns", format!("{}.{}", t.ns.db, t.ns.coll))
@@ -360,6 +403,7 @@ pub fn update<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
         name: e.name,
         definition: definition.to_bytes()?,
     })?;
+    build(ctx, &t.coll)?;
     Ok(Document::new().with("ok", 1.0))
 }
 
@@ -372,6 +416,7 @@ pub fn drop<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
     })?;
     let e = find(ctx.backend, &t, &which)?;
     ctx.backend.index_write(IndexCommand::DropSearch { collection: t.coll.id, name: e.name })?;
+    lock(ctx.shared).search.forget(&e.id);
     Ok(Document::new().with("ok", 1.0))
 }
 
@@ -379,6 +424,7 @@ pub fn drop<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
 /// by the pipeline): none when the collection does not exist (measured).
 pub fn stage<B: Backend + ?Sized>(
     backend: &mut B,
+    shared: &Shared,
     ns: &Namespace,
     spec: &Document,
 ) -> Result<Vec<Document>, CommandError> {
@@ -389,7 +435,7 @@ pub fn stage<B: Backend + ?Sized>(
         None => ns.clone(),
     };
     let Some(coll) = backend.collection(&coll_ns)? else { return Ok(Vec::new()) };
-    listed(backend, coll.id, which.as_ref())?
+    listed(backend, shared, coll.id, which.as_ref())?
         .into_iter()
         .map(|v| match v {
             Value::Document(d) => Ok(d),

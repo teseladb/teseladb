@@ -145,7 +145,7 @@ pub fn op_type(name: &str) -> &'static str {
 }
 
 /// The index a data key belongs to (`01 · tenant · collection · index`): 0 for a document.
-fn space_of(key: &[u8]) -> Option<u32> {
+pub(crate) fn space_of(key: &[u8]) -> Option<u32> {
     match key {
         [teseladb_keys::space::DATA, _, _, _, _, _, _, _, _, a, b, c, d, ..] => {
             Some(u32::from_be_bytes([*a, *b, *c, *d]))
@@ -204,6 +204,11 @@ pub struct OpReport {
     /// The plan its read ran, as the planner reported it: `planSummary`, `execStats` and the
     /// hashes of its shape.
     pub plan: Option<Document>,
+    /// Index keys its writes added and removed (`keysInserted`, `keysDeleted`).
+    pub keys_written: (u64, u64),
+    /// The indexes of its collection the winning plans of its writes scanned (`$indexStats`;
+    /// a read counts its own uses).
+    pub used: Vec<String>,
 }
 
 /// The node's commands in progress, by operation id.
@@ -472,6 +477,24 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         self.call(|b| b.changes(start, end, from))
     }
 
+    fn catalog_changes(
+        &mut self,
+        from: teseladb_hlc::Hlc,
+    ) -> Result<crate::commands::DdlBatch, CommandError> {
+        let mut batch = self.call(|b| b.catalog_changes(from))?;
+        batch.records = tenants::own_ddl(self.tenant, batch.records);
+        Ok(batch)
+    }
+
+    fn range_changes(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        from: teseladb_hlc::Hlc,
+    ) -> Result<Vec<crate::commands::RangeBatch>, CommandError> {
+        self.call(|b| b.range_changes(start, end, from))
+    }
+
     fn set_read_preference(&mut self, pref: Option<teseladb_router::read_pref::ReadPreference>) {
         self.inner.set_read_preference(pref);
     }
@@ -541,7 +564,22 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
     }
 
     fn note_plan(&mut self, plan: Document) {
-        lock(self.shared).ops.report_mut(self.id).plan = Some(plan);
+        let mut plan = plan;
+        let mut g = lock(self.shared);
+        let report = g.ops.report_mut(self.id);
+        if let Some(Value::Document(used)) = plan.remove(crate::commands::plan_exec::USED_INDEXES)
+            && let Some(Value::Array(names)) = used.get("names")
+        {
+            let names = names.iter().filter_map(|n| match n {
+                Value::String(n) => Some(n.clone()),
+                _ => None,
+            });
+            report.used.extend(names);
+        }
+        // A note of the indexes alone leaves the plan as it was.
+        if plan.iter().next().is_some() {
+            report.plan = Some(plan);
+        }
     }
 
     fn audit_event(&mut self, atype: teseladb_auth::audit::AuditType, param: Document) {
@@ -566,7 +604,18 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
     }
 
     fn write(&mut self, op: WriteOp) -> Result<Vec<u8>, CommandError> {
-        self.call(|b| b.write(op))
+        let result = self.call(|b| b.write(op))?;
+        // What the write's index keys were, for the profiler (a result that does not read as a
+        // mutation's counts nothing).
+        if let Ok(r) = crate::commands::mutation::MutationResult::decode(&result)
+            && r.keys != (0, 0)
+        {
+            let mut g = lock(self.shared);
+            let k = &mut g.ops.report_mut(self.id).keys_written;
+            k.0 += u64::try_from(r.keys.0).unwrap_or(0);
+            k.1 += u64::try_from(r.keys.1).unwrap_or(0);
+        }
+        Ok(result)
     }
 
     fn write_gate(&mut self) -> Result<crate::commands::write_block::WriteGate, CommandError> {

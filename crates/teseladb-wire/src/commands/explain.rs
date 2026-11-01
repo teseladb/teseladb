@@ -21,7 +21,7 @@ use crate::error::{
 };
 use crate::types::wrong_type;
 
-mod aggregate;
+pub(crate) mod aggregate;
 mod forms;
 mod moves;
 mod steps;
@@ -743,8 +743,9 @@ fn find<B: Backend + ?Sized>(
             vars: a.vars.as_ref(),
             concern: a.concern,
             intersect: super::lock(ctx.shared).params.hash_intersection,
+            index_keys: false,
         };
-        if let Some(super::plan_exec::Chosen { winner, others }) =
+        if let Some(super::plan_exec::Chosen { winner, others, .. }) =
             super::plan_exec::choose(ctx.backend, c, &indexes, &read)?
         {
             let shape = |r: &super::plan_exec::Ran, run: bool| {
@@ -1485,6 +1486,7 @@ fn count_plan<B: Backend + ?Sized>(
         vars: None,
         concern,
         intersect: super::lock(ctx.shared).params.hash_intersection,
+        index_keys: false,
     };
     if let Some((indexes, chosen)) =
         planned_read(ctx, coll.as_ref(), &plan_read, collation.as_ref())?
@@ -1617,6 +1619,7 @@ fn distinct<B: Backend + ?Sized>(
         vars: None,
         concern,
         intersect: super::lock(ctx.shared).params.hash_intersection,
+        index_keys: false,
     };
     let planned = match query.is_empty() {
         true => None,
@@ -1891,6 +1894,7 @@ fn update_on_node<B: Backend + ?Sized>(
         vars,
         concern: teseladb_range::read::ReadConcern::Local,
         intersect: super::lock(ctx.shared).params.hash_intersection,
+        index_keys: false,
     };
     if let Some((indexes, chosen)) = planned_write(ctx, coll, &plan_read, collation)? {
         let plan = s.over(planned_access(ns, &shown, &indexes, &chosen.winner, run, None));
@@ -2003,6 +2007,7 @@ fn delete_on_node<B: Backend + ?Sized>(
         vars,
         concern: teseladb_range::read::ReadConcern::Local,
         intersect: super::lock(ctx.shared).params.hash_intersection,
+        index_keys: false,
     };
     if let Some((indexes, chosen)) = planned_write(ctx, coll, &plan_read, collation)? {
         let plan = s.over(planned_access(ns, &shown, &indexes, &chosen.winner, run, None));
@@ -2075,6 +2080,7 @@ fn find_and_modify<B: Backend + ?Sized>(
         vars: vars.as_ref(),
         concern: teseladb_range::read::ReadConcern::Local,
         intersect: super::lock(ctx.shared).params.hash_intersection,
+        index_keys: false,
     };
     let planned = match sort.is_some() {
         true => planned_read(ctx, coll.as_ref(), &plan_read, collation.as_ref())?,

@@ -343,6 +343,9 @@ fn version_13_snapshots_still_restore_without_meta1() {
     assert_eq!(old[0], 13);
     let mut back = Group0Sm::default();
     back.restore(&old).unwrap();
+    // Nor the catalog changes of change streams, nor the mark of the last entry (version 17).
+    assert_eq!(back.ddl.applied_mark, None);
+    back.ddl = sm.ddl.clone();
     assert_eq!(back, sm);
     let (sm, _, _) = handed_off();
     let mut back = Group0Sm::default();

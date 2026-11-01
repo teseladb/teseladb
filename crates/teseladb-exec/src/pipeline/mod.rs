@@ -72,6 +72,13 @@ pub trait Env {
         Err(search::not_enabled())
     }
 
+    /// Sends a search stage's query to the search indexes while the pipeline is planned, as
+    /// `refnode` does with `refsearch`: its errors are those of planning, not of running (measured on
+    /// 9.0.4). Nothing to check without search.
+    fn check_search(&self, _stage: &str, _spec: &Document) -> Result<(), MqlError> {
+        Ok(())
+    }
+
     /// The collation strings compare with (010 FR-014): the binary order by default.
     fn collation(&self) -> crate::collation::Collation {
         crate::collation::Collation::default()
@@ -145,6 +152,8 @@ pub struct Pipeline {
     sbe_specs: Vec<bool>,
     /// Whether a stage reads `{$meta: "sortKey"}`, which each `$sort` then sets.
     reads_sort_key: bool,
+    /// Whether a stage reads `{$meta: "indexKey"}`, which the index scan of the read gives.
+    reads_index_key: bool,
     /// The error of planning its `$sort` by a random value on an existing collection
     /// ([`sort::check_random_sort`]).
     random_sort: Option<MqlError>,
@@ -261,8 +270,10 @@ impl Pipeline {
     /// `$geoNear`).
     pub fn check_plan(&self, env: &dyn Env) -> Result<(), MqlError> {
         for st in &self.stages {
-            if let Stage::GeoNear(g) = st {
-                g.check_plan(env)?;
+            match st {
+                Stage::GeoNear(g) => g.check_plan(env)?,
+                Stage::Search(name, spec) => env.check_search(name, spec)?,
+                _ => {}
             }
         }
         Ok(())
@@ -293,6 +304,12 @@ impl Pipeline {
             self.stages.first(),
             Some(Stage::Documents(_) | Stage::System(..) | Stage::Search(..))
         )
+    }
+
+    /// Whether a stage reads `{$meta: "indexKey"}`, the key of the index entry each document of
+    /// the collection was read by.
+    pub fn reads_index_key(&self) -> bool {
+        self.reads_index_key
     }
 
     /// Runs the pipeline over `docs`.
@@ -344,8 +361,13 @@ impl Pipeline {
         sbe: bool,
     ) -> Result<(Vec<Document>, Option<Vec<meta::Meta>>), MqlError> {
         let mut sbe = sbe && !self.starts_with_documents();
+        // The scores search stages gave: a document without them is an error until a stage
+        // makes new documents, after which they read as nothing (measured on 9.0.4).
+        let mut required: Vec<String> = Vec::new();
         for (st, spec) in self.stages.iter().zip(&self.sbe_specs) {
             sbe = sbe && *spec && sbe_capable(st);
+            let strict = meta::RequiredEnv { inner: env, names: &required };
+            let env: &dyn Env = if required.is_empty() { env } else { &strict };
             if let Stage::Fusion(f) = st {
                 let (fused, scores) = f.run(docs, env)?;
                 (docs, metas) = (fused, Some(scores));
@@ -359,6 +381,7 @@ impl Pipeline {
                     .map(|s| (s.doc, meta::with_score(s.meta, own)))
                     .unzip();
                 (docs, metas) = (found, Some(scores));
+                required.extend(own.map(str::to_owned));
                 continue;
             }
             if let Stage::Score(s) = st {
@@ -375,6 +398,9 @@ impl Pipeline {
                 None => (run_stage(st, docs, env, sbe)?, None),
                 Some(m) => run_stage_meta(st, docs, m, env, sbe)?,
             };
+            if makes_new_documents(st) {
+                required.clear();
+            }
         }
         Ok((docs, metas))
     }
@@ -441,7 +467,8 @@ fn parse_stages(pipeline: &[RawValue<'_>], ctx: &Ctx) -> Result<Pipeline, MqlErr
     let mut read = Vec::new();
     pipeline.iter().for_each(|v| meta::metas_read(*v, &mut read));
     let reads_sort_key = read.iter().any(|n| n == crate::expr::SORT_KEY);
-    Ok(Pipeline { stages, sbe_specs, reads_sort_key, random_sort: None })
+    let reads_index_key = read.iter().any(|n| n == meta::INDEX_KEY);
+    Ok(Pipeline { stages, sbe_specs, reads_sort_key, reads_index_key, random_sort: None })
 }
 
 fn parse_stage(d: RawDoc<'_>, ctx: &Ctx) -> Result<Stage, MqlError> {
@@ -496,6 +523,7 @@ fn parse_stage(d: RawDoc<'_>, ctx: &Ctx) -> Result<Stage, MqlError> {
         }
         "$listSessions" => Stage::System("$listSessions", system::sessions("$listSessions", arg)?),
         "$planCacheStats" => Stage::System("$planCacheStats", system::plan_cache_stats(arg)?),
+        "$indexStats" => Stage::System("$indexStats", system::index_stats(arg)?),
         "$currentOp" => Stage::System("$currentOp", system::current_op(arg)?),
         "$listClusterCatalog" => {
             Stage::System("$listClusterCatalog", system::cluster_catalog(arg)?)
@@ -632,6 +660,19 @@ fn sbe_capable(st: &Stage) -> bool {
         | Stage::Search(..)
         | Stage::Write(_) => false,
     }
+}
+
+/// Whether `st` makes new documents from many, after which a search stage's scores read as
+/// nothing (measured on 9.0.4).
+fn makes_new_documents(st: &Stage) -> bool {
+    matches!(
+        st,
+        Stage::Group(_)
+            | Stage::Bucket(_)
+            | Stage::BucketAuto(_)
+            | Stage::SortByCount(_)
+            | Stage::Count(_)
+    )
 }
 
 fn run_stage(

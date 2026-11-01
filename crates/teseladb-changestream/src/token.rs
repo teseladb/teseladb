@@ -8,8 +8,11 @@ use teseladb_hlc::Hlc;
 
 use crate::order::EventKey;
 
-/// Version of the format this module writes.
+/// Version of the format of a whole event's token.
 pub const TOKEN_VERSION: u8 = 1;
+/// Version of the format of a fragment's token (`$changeStreamSplitLargeEvent`, FR-011): the
+/// fragment's number (varint) after the type.
+pub const FRAGMENT_TOKEN_VERSION: u8 = 2;
 
 /// Type of an event (014 FR-002), as the token stores it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -78,6 +81,8 @@ pub struct ResumeToken {
     pub event: EventKey,
     /// The event's type.
     pub kind: EventKind,
+    /// The fragment of the event, from 1, when `$changeStreamSplitLargeEvent` split it.
+    pub fragment: Option<u32>,
 }
 
 /// A point of the merge a stream can resume from: after an event, or after every event up to a
@@ -108,12 +113,13 @@ impl Position {
 
     /// Reads a `_data` string.
     pub fn decode(data: &str) -> Result<Position, TokenError> {
-        let (event, kind) = parse(data)?;
-        if kind == HIGH_WATER && event.key.is_empty() && event.txn == 0 && event.op == 0 {
+        let (event, kind, fragment) = parse_fragment(data)?;
+        let plain = event.key.is_empty() && event.txn == 0 && event.op == 0;
+        if kind == HIGH_WATER && plain && fragment.is_none() {
             return Ok(Position::HighWater(event.ts));
         }
         let kind = EventKind::from_byte(kind).ok_or(TokenError::Kind(kind))?;
-        Ok(Position::Event(ResumeToken { event, kind }))
+        Ok(Position::Event(ResumeToken { event, kind, fragment }))
     }
 
     /// The mark of the point.
@@ -139,36 +145,65 @@ pub enum TokenError {
 }
 
 impl ResumeToken {
+    /// The token of a whole event.
+    pub fn new(event: EventKey, kind: EventKind) -> ResumeToken {
+        ResumeToken { event, kind, fragment: None }
+    }
+
     /// The `_data` string.
     pub fn encode(&self) -> String {
-        hex(&raw(&self.event, self.kind as u8))
+        hex(&raw_fragment(&self.event, self.kind as u8, self.fragment))
     }
 
     /// Reads a `_data` string of an event.
     pub fn decode(data: &str) -> Result<ResumeToken, TokenError> {
-        let (event, kind) = parse(data)?;
+        let (event, kind, fragment) = parse_fragment(data)?;
         let kind = EventKind::from_byte(kind).ok_or(TokenError::Kind(kind))?;
-        Ok(ResumeToken { event, kind })
+        Ok(ResumeToken { event, kind, fragment })
     }
 }
 
 fn raw(e: &EventKey, kind: u8) -> Vec<u8> {
-    let mut b = Vec::with_capacity(32 + e.key.len());
-    b.push(TOKEN_VERSION);
-    b.extend_from_slice(&e.ts.physical.to_be_bytes());
-    b.extend_from_slice(&e.ts.logical.to_be_bytes());
-    b.extend_from_slice(&e.txn.to_be_bytes());
-    let mut op = u64::from(e.op);
+    raw_fragment(e, kind, None)
+}
+
+fn put_var(b: &mut Vec<u8>, n: u32) {
+    let mut n = u64::from(n);
     loop {
-        let low = (op & 0x7f) as u8;
-        op >>= 7;
-        if op == 0 {
+        let low = (n & 0x7f) as u8;
+        n >>= 7;
+        if n == 0 {
             b.push(low);
-            break;
+            return;
         }
         b.push(low | 0x80);
     }
+}
+
+fn get_var(mut rest: &[u8]) -> Result<(u32, &[u8]), TokenError> {
+    let mut n: u64 = 0;
+    for shift in (0..35).step_by(7) {
+        let (&byte, r) = rest.split_first().ok_or(TokenError::Truncated)?;
+        rest = r;
+        n |= u64::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            break;
+        }
+    }
+    Ok((u32::try_from(n).map_err(|_| TokenError::Truncated)?, rest))
+}
+
+fn raw_fragment(e: &EventKey, kind: u8, fragment: Option<u32>) -> Vec<u8> {
+    let mut b = Vec::with_capacity(32 + e.key.len());
+    b.push(if fragment.is_some() { FRAGMENT_TOKEN_VERSION } else { TOKEN_VERSION });
+    b.extend_from_slice(&e.ts.physical.to_be_bytes());
+    b.extend_from_slice(&e.ts.logical.to_be_bytes());
+    b.extend_from_slice(&e.txn.to_be_bytes());
+    put_var(&mut b, e.op);
     b.push(kind);
+    if let Some(f) = fragment {
+        put_var(&mut b, f);
+    }
     b.extend_from_slice(&e.key);
     b
 }
@@ -177,29 +212,26 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02X}")).collect()
 }
 
-/// The fields of a token: its place in the merge and its event type byte.
-fn parse(data: &str) -> Result<(EventKey, u8), TokenError> {
+/// The fields of a token and its fragment, if it is a fragment's.
+fn parse_fragment(data: &str) -> Result<(EventKey, u8, Option<u32>), TokenError> {
     let b = unhex(data)?;
     let (&version, rest) = b.split_first().ok_or(TokenError::Truncated)?;
-    if version != TOKEN_VERSION {
+    if version != TOKEN_VERSION && version != FRAGMENT_TOKEN_VERSION {
         return Err(TokenError::Version(version));
     }
     let (physical, rest) = take::<8>(rest)?;
     let (logical, rest) = take::<4>(rest)?;
-    let (txn, mut rest) = take::<16>(rest)?;
-    let mut op: u64 = 0;
-    for shift in (0..35).step_by(7) {
-        let (&byte, r) = rest.split_first().ok_or(TokenError::Truncated)?;
-        rest = r;
-        op |= u64::from(byte & 0x7f) << shift;
-        if byte & 0x80 == 0 {
-            break;
-        }
+    let (txn, rest) = take::<16>(rest)?;
+    let (op, rest) = get_var(rest)?;
+    let (&kind, mut key) = rest.split_first().ok_or(TokenError::Truncated)?;
+    let mut fragment = None;
+    if version == FRAGMENT_TOKEN_VERSION {
+        let (f, k) = get_var(key)?;
+        fragment = Some(f);
+        key = k;
     }
-    let op = u32::try_from(op).map_err(|_| TokenError::Truncated)?;
-    let (&kind, key) = rest.split_first().ok_or(TokenError::Truncated)?;
     let ts = Hlc { physical: u64::from_be_bytes(physical), logical: u32::from_be_bytes(logical) };
-    Ok((EventKey { ts, txn: u128::from_be_bytes(txn), op, key: key.to_vec() }, kind))
+    Ok((EventKey { ts, txn: u128::from_be_bytes(txn), op, key: key.to_vec() }, kind, fragment))
 }
 
 fn take<const N: usize>(b: &[u8]) -> Result<([u8; N], &[u8]), TokenError> {
@@ -221,6 +253,7 @@ mod tests {
 
     fn token(op: u32) -> ResumeToken {
         ResumeToken {
+            fragment: None,
             event: EventKey {
                 ts: Hlc { physical: 1_730_198_400_123, logical: 7 },
                 txn: 0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10,
@@ -252,7 +285,7 @@ mod tests {
         assert_eq!(ResumeToken::decode("0"), Err(TokenError::NotHex));
         assert_eq!(ResumeToken::decode("zz"), Err(TokenError::NotHex));
         assert_eq!(ResumeToken::decode(""), Err(TokenError::Truncated));
-        assert_eq!(ResumeToken::decode(&format!("02{}", &data[2..])), Err(TokenError::Version(2)));
+        assert_eq!(ResumeToken::decode(&format!("03{}", &data[2..])), Err(TokenError::Version(3)));
         // Cut inside the mark, inside the varint, and before the type.
         assert_eq!(ResumeToken::decode(&data[..10]), Err(TokenError::Truncated));
         assert_eq!(ResumeToken::decode(&data[..(1 + 12 + 16) * 2 + 2]), Err(TokenError::Truncated));
@@ -279,5 +312,23 @@ mod tests {
         let keyed = format!("{data}AB");
         assert_eq!(Position::decode(&keyed), Err(TokenError::Kind(0)));
         assert_eq!(Position::decode("zz"), Err(TokenError::NotHex));
+    }
+
+    #[test]
+    fn a_fragments_token_carries_its_number_and_the_place_of_its_event() {
+        for f in [1, 2, 300] {
+            let t = ResumeToken { fragment: Some(f), ..token(128) };
+            let data = t.encode();
+            assert!(data.starts_with("02"));
+            assert_eq!(ResumeToken::decode(&data), Ok(t.clone()));
+            assert_eq!(Position::decode(&data), Ok(Position::Event(t.clone())));
+            assert_eq!(Position::Event(t.clone()).ts(), t.event.ts);
+        }
+        let whole = token(5).encode();
+        assert!(whole.starts_with("01"));
+        // A fragment number cut short.
+        let cut = format!("02{}", &whole[2..(1 + 12 + 16 + 1 + 1) * 2]);
+        assert_eq!(ResumeToken::decode(&format!("{cut}80")), Err(TokenError::Truncated));
+        assert_eq!(ResumeToken::decode("03"), Err(TokenError::Version(3)));
     }
 }

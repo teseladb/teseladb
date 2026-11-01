@@ -22,6 +22,7 @@ pub mod authz_writes;
 pub mod capped;
 pub mod catalog;
 pub mod change_stream;
+pub mod change_stream_ddl;
 pub mod cluster_admin;
 pub mod config_db;
 pub mod config_settings;
@@ -36,6 +37,7 @@ pub mod index_build;
 pub mod index_maintenance;
 pub mod index_mod;
 pub mod index_spec;
+pub(crate) mod index_usage;
 pub mod indexes;
 pub mod kinds;
 pub mod maintenance;
@@ -51,6 +53,7 @@ pub mod query;
 pub mod registry;
 pub mod roles;
 pub mod search_indexes;
+pub mod search_ops;
 pub mod server_params;
 pub mod session;
 pub mod sort;
@@ -120,6 +123,31 @@ pub enum LdapLogin {
 
 /// What a change stream read of an interval: the versions up to the resolved mark, and the mark.
 pub type ChangeBatch = (Vec<teseladb_range::changes::Versioned>, teseladb_hlc::Hlc);
+
+/// What a change stream reads of the catalog changes after a mark (014 FR-014).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DdlBatch {
+    /// The changes above the mark, oldest first.
+    pub records: Vec<teseladb_meta::ddl_log::DdlRecord>,
+    /// At or below this mark the changes are no longer complete.
+    pub floor: teseladb_hlc::Hlc,
+    /// No change at or below this mark appears later.
+    pub resolved: teseladb_hlc::Hlc,
+}
+
+/// What one range of an interval gives after a mark (011 FR-009): its bounds within the
+/// interval, its versions up to its resolved mark and that mark.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RangeBatch {
+    /// First key of the range within the interval.
+    pub start: Vec<u8>,
+    /// End of the range within the interval (exclusive).
+    pub end: Vec<u8>,
+    /// Its versions after the mark, up to `resolved`.
+    pub rows: Vec<teseladb_range::changes::Versioned>,
+    /// The range's resolved mark: no version at or below it appears later.
+    pub resolved: teseladb_hlc::Hlc,
+}
 
 /// What the commands need from the node: Group 0's catalog, the ranges and the cluster time.
 /// The server's implementation finds the leaders and forwards; errors come translated.
@@ -232,6 +260,21 @@ pub trait Backend {
         end: &[u8],
         from: teseladb_hlc::Hlc,
     ) -> Result<ChangeBatch, CommandError>;
+    /// The catalog changes Group 0 recorded above mark `from` (014 FR-014), as the node's copy has
+    /// them, with the mark up to which that copy is complete.
+    fn catalog_changes(&mut self, from: teseladb_hlc::Hlc) -> Result<DdlBatch, CommandError>;
+
+    /// [`Backend::changes`] range by range, each up to its own resolved mark, for the search
+    /// indexes' segments (011 FR-009, FR-013). A backend of one range gives the interval as one.
+    fn range_changes(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        from: teseladb_hlc::Hlc,
+    ) -> Result<Vec<RangeBatch>, CommandError> {
+        let (rows, resolved) = self.changes(start, end, from)?;
+        Ok(vec![RangeBatch { start: start.to_vec(), end: end.to_vec(), rows, resolved }])
+    }
     /// Reads at most `limit` documents of `[start, end)` in key order: `(key, document)`.
     fn scan(
         &mut self,
@@ -561,8 +604,12 @@ pub struct NodeSessions {
     pub object_ids: ObjectIds,
     /// The plans the node's reads chose, by shape (010 FR-002).
     pub plan_cache: plan_cache::PlanCache,
+    /// How often each index served a query plan, and since when (`$indexStats`, 010 FR-018).
+    pub index_usage: index_usage::IndexUsage,
     /// The profiler's settings (010 FR-015).
     pub profiler: profile::Profiler,
+    /// The search indexes this node built (011 FR-009).
+    pub search: search_ops::SearchIndexes,
 }
 
 /// What a node puts after the seconds of each ObjectId it makes (ObjectId specification): five
@@ -603,6 +650,7 @@ impl NodeSessions {
             sessions: SessionTable::with_timeout(t.session_ms),
             failpoint: None,
             profiler: profile::Profiler::default(),
+            search: search_ops::SearchIndexes::default(),
             ops: OpTable::default(),
             counters: diagnostics::OpCounters::default(),
             status: status::StatusCounters::default(),
@@ -611,6 +659,7 @@ impl NodeSessions {
             rw_defaults: cluster_admin::Defaults::default(),
             object_ids: ObjectIds::default(),
             plan_cache: plan_cache::PlanCache::default(),
+            index_usage: index_usage::IndexUsage::default(),
             pushes: teseladb_txn::push_cache::PushCache::new(),
             push_settled: std::sync::Arc::default(),
             txn_scratch: std::collections::BTreeSet::new(),

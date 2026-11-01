@@ -80,6 +80,8 @@ mod f {
     pub const ERRMSG: &str = "errmsg";
     pub const ERR_INFO: &str = "errInfo";
     pub const WARNINGS: &str = "warnings";
+    pub const KEYS_INSERTED: &str = "keysInserted";
+    pub const KEYS_DELETED: &str = "keysDeleted";
     /// The identifier of a log line of validation (`id` in RefDb's log).
     pub const LOG_ID: &str = "id";
     /// The document of a log line of validation.
@@ -260,6 +262,9 @@ pub struct MutationResult {
     pub attempt: i64,
     /// Set by the writer, not encoded: the range answered with the result of an earlier send.
     pub retried: bool,
+    /// Index keys the write added and removed, the `_id` of each document it inserted or
+    /// deleted counted as one (the profiler's `keysInserted` and `keysDeleted`).
+    pub keys: (i64, i64),
 }
 
 fn rules_doc(r: &Rules, d: &mut Document, attempt: i64) {
@@ -542,6 +547,10 @@ impl MutationResult {
             .collect();
         d.push(f::ERRORS, errors);
         d.push(f::WARNINGS, self.warnings.iter().cloned().map(Value::Document).collect::<Vec<_>>());
+        if self.keys != (0, 0) {
+            d.push(f::KEYS_INSERTED, self.keys.0);
+            d.push(f::KEYS_DELETED, self.keys.1);
+        }
         Ok(d.to_bytes_with(MUTATION_LIMITS)?)
     }
 
@@ -559,6 +568,7 @@ impl MutationResult {
             upserted: d.get(f::UPSERTED).map(Value::from),
             value: get_doc(d, f::VALUE),
             attempt: num(f::ATTEMPT),
+            keys: (num(f::KEYS_INSERTED), num(f::KEYS_DELETED)),
             ..MutationResult::default()
         };
         if let Some(RawValue::Array(a)) = d.get(f::ERRORS) {
@@ -1041,6 +1051,9 @@ impl Mutation for Bound {
         }
         let attempt = self.rules().attempt;
         result.attempt = attempt;
+        if applied {
+            result.keys = key_counts((&puts, &deletes), &lookup, self.rules().capped.is_some());
+        }
         let mut puts = puts;
         // An update that writes a document it found, without a description, replaced it.
         let replaced: Vec<Vec<u8>> = match &self.mutation {
@@ -1070,6 +1083,30 @@ impl Mutation for Bound {
 }
 
 type Evaluated = (Vec<Put>, Vec<Vec<u8>>, MutationResult);
+
+/// The index keys a write adds and removes (`keysInserted`, `keysDeleted` of a `refnode` 9.0.4,
+/// measured 01-11-2026): its entries in the collection's indexes, and the key of `_id` of each
+/// document it inserts or deletes, which is the document's own key here (a capped collection
+/// keeps an index of `_id` of its own, counted among the others).
+pub fn key_counts(
+    (puts, deletes): (&[Put], &[Vec<u8>]),
+    lookup: &Lookup<'_>,
+    capped: bool,
+) -> (i64, i64) {
+    let index = |k: &[u8]| {
+        crate::ops::space_of(k).is_some_and(|s| {
+            s != teseladb_keys::space::DOCUMENTS && s < index_maintenance::MULTIKEY_MARKS
+        })
+    };
+    let document =
+        |k: &[u8]| !capped && crate::ops::space_of(k) == Some(teseladb_keys::space::DOCUMENTS);
+    let added = puts
+        .iter()
+        .filter(|p| index(&p.key) || (document(&p.key) && lookup(&p.key).is_none()))
+        .count();
+    let removed = deletes.iter().filter(|k| index(k) || document(k)).count();
+    (i64::try_from(added).unwrap_or(i64::MAX), i64::try_from(removed).unwrap_or(i64::MAX))
+}
 
 /// The documents a write changes, in the write's order: its document keys that it puts as
 /// documents or deletes, then the documents it puts under other keys (a capped collection's).

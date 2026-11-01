@@ -329,24 +329,36 @@ fn old_token(m: &Mem, age_ms: u64) -> Value {
 
 #[test]
 fn resuming_past_the_history_retention_loses_the_history() {
+    // Measured on 01-11 after the oplog rolled over: the open succeeds, the `getMore` fails.
     let mut m = Mem::new();
     create(&mut m, "c");
     let lost = |m: &mut Mem, spec: Document| {
-        let r = open(m, DB, "c".into(), stream(spec, vec![]));
-        (code(&r), r.get("errmsg").cloned())
+        let id = id_of(&open(m, DB, "c".into(), stream(spec, vec![])));
+        let r = get_more(m, DB, id, "c", Document::new());
+        (code(&r), r.get("errmsg").cloned(), r.get("errorLabels").cloned())
     };
-    let msg = Some(Value::from(
-        "Resume of change stream was not possible, as the resume point may no longer be in the oplog.",
-    ));
+    let message = |ts: teseladb_hlc::Hlc| {
+        let (t, i) = teseladb_hlc::to_timestamp(ts);
+        Some(Value::from(format!(
+            "Executor error during getMore :: caused by :: Resume of change stream was not possible, as the resume point may no longer be in the oplog (resumeTimestamp: Timestamp({t}, {i}))"
+        )))
+    };
+    let label = Some(Value::Array(vec![Value::from("NonResumableChangeStreamError")]));
+    let old = teseladb_hlc::Hlc { physical: m.now - DAY_MS - 1_000, logical: 0 };
     let spec = Document::new().with("resumeAfter", old_token(&m, DAY_MS + 1_000));
-    assert_eq!(lost(&mut m, spec), (286, msg.clone()));
+    assert_eq!(lost(&mut m, spec), (286, message(old), label.clone()));
     let (time, _) =
         teseladb_hlc::to_timestamp(teseladb_hlc::Hlc { physical: m.now - 2 * DAY_MS, logical: 0 });
     let at = Document::new().with("startAtOperationTime", Value::Timestamp { time, increment: 1 });
-    assert_eq!(lost(&mut m, at), (286, msg));
-    // Within the window, and with a longer retention, the stream opens.
+    let at_ts = teseladb_hlc::from_timestamp((time, 1));
+    assert_eq!(lost(&mut m, at), (286, message(at_ts), label));
+    // Within the window, and with a longer retention, the stream reads.
+    let read = |m: &mut Mem, spec: Document| {
+        let id = id_of(&open(m, DB, "c".into(), stream(spec, vec![])));
+        get_more(m, DB, id, "c", Document::new()).get("ok").cloned()
+    };
     let recent = Document::new().with("startAfter", old_token(&m, DAY_MS - 60_000));
-    assert_ne!(id_of(&open(&mut m, DB, "c".into(), stream(recent, vec![]))), 0);
+    assert_eq!(read(&mut m, recent), Some(Value::Double(1.0)));
     let longer = Document::new().with(
         "setClusterParameter",
         doc(&[("teselaHistoryRetention", doc(&[("seconds", Value::Int32(3 * 86_400))]).into())]),
@@ -354,7 +366,7 @@ fn resuming_past_the_history_retention_loses_the_history() {
     let r = m.run("admin", longer);
     assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
     let spec = Document::new().with("resumeAfter", old_token(&m, DAY_MS + 1_000));
-    assert_ne!(id_of(&open(&mut m, DB, "c".into(), stream(spec, vec![]))), 0);
+    assert_eq!(read(&mut m, spec), Some(Value::Double(1.0)));
 }
 
 #[test]
@@ -377,5 +389,6 @@ fn a_cursor_that_falls_behind_the_retention_or_a_failed_read_ends_resumable() {
     m.now += DAY_MS + 1_000;
     let r = get_more(&mut m, DB, id, "c", Document::new());
     assert_eq!(code(&r), 286, "{r:?}");
-    assert!(r.get("errorLabels").is_none());
+    let label = Value::Array(vec![Value::from("NonResumableChangeStreamError")]);
+    assert_eq!(r.get("errorLabels"), Some(&label));
 }

@@ -13,7 +13,7 @@ fn event(kind: EventKind) -> ChangeEvent {
     let mut key = Document::new();
     key.push("_id", 1);
     ChangeEvent {
-        token: ResumeToken { event: EventKey { ts, txn: 0, op: 0, key: b"k".to_vec() }, kind },
+        token: ResumeToken::new(EventKey { ts, txn: 0, op: 0, key: b"k".to_vec() }, kind),
         cluster_time: ts,
         wall_ms: 1_730_198_400_123,
         ns: Namespace { db: "shop".into(), coll: Some("orders".into()) },
@@ -23,6 +23,10 @@ fn event(kind: EventKind) -> ChangeEvent {
         full_document: None,
         before: None,
         txn: None,
+        to: None,
+        operation_description: None,
+        state_before: None,
+        ns_type: None,
     }
 }
 
@@ -91,6 +95,15 @@ fn an_update_has_its_description_and_then_the_documents_asked_for() {
     ];
     assert_eq!(keys(&d), measured);
     assert_eq!(d.get("txnNumber"), Some(&Value::Int64(7)));
+    // Both: the pre-image first (measured on 01-11); a replacement's comes last.
+    e.full_document = Some(Value::Null);
+    let both = e.to_document(false);
+    assert_eq!(keys(&both)[8..], ["updateDescription", "fullDocumentBeforeChange", "fullDocument"]);
+    let mut r = event(EventKind::Replace);
+    r.full_document = Some(Value::Document(Document::new()));
+    r.before = Some(Value::Null);
+    let tail = ["fullDocument", "ns", "documentKey", "fullDocumentBeforeChange"];
+    assert_eq!(keys(&r.to_document(false))[4..], tail);
 }
 
 #[test]
@@ -165,7 +178,7 @@ fn an_event_comes_from_its_change() {
     let ns = Namespace { db: "shop".into(), coll: Some("orders".into()) };
     let key = Document::new().with("_id", 1);
     let e = ChangeEvent::of(&change, ns.clone(), Some(key.clone()), false).unwrap();
-    assert_eq!(e.token, ResumeToken { event: change.event.clone(), kind: EventKind::Update });
+    assert_eq!(e.token, ResumeToken::new(change.event.clone(), EventKind::Update));
     assert_eq!((e.cluster_time, e.wall_ms), (ts, 1_730_198_400_123));
     assert_eq!(e.txn, Some((lsid_document(4, &[5; 32]), 6)));
     assert_eq!(e.update_description, Some(update.to_document(false)));
@@ -181,4 +194,58 @@ fn an_event_comes_from_its_change() {
     // A stored document that does not read back stops the stream.
     let broken = Change { kind: EventKind::Insert, doc: Some(vec![1, 2]), ..change };
     assert!(ChangeEvent::of(&broken, ns, None, true).is_err());
+}
+
+#[test]
+fn catalog_events_have_the_fields_of_refrouter_in_its_order() {
+    use teseladb_changestream::event::Namespace as Ns;
+    let ts = Hlc { physical: 1_730_198_400_123, logical: 2 };
+    let token = |kind| ResumeToken::new(EventKey { ts, txn: 0, op: 1, key: Vec::new() }, kind);
+    let ns = Ns { db: "shop".into(), coll: Some("orders".into()) };
+    let mut rename = ChangeEvent::catalog(token(EventKind::Rename), ns.clone());
+    rename.to = Some(Ns { db: "shop".into(), coll: Some("old".into()) });
+    rename.collection_uuid = Some([1; 16]);
+    rename.operation_description = Some(Document::new().with("to", 1));
+    assert_eq!(
+        keys(&rename.to_document(true)),
+        [
+            "to",
+            "_id",
+            "operationType",
+            "clusterTime",
+            "collectionUUID",
+            "wallTime",
+            "ns",
+            "operationDescription"
+        ]
+    );
+    assert_eq!(
+        keys(&rename.to_document(false)),
+        ["to", "_id", "operationType", "clusterTime", "wallTime", "ns"]
+    );
+    let mut create = ChangeEvent::catalog(token(EventKind::Create), ns.clone());
+    create.operation_description = Some(Document::new());
+    create.state_before = Some(Document::new());
+    create.ns_type = Some("view");
+    assert_eq!(
+        keys(&create.to_document(true)),
+        [
+            "_id",
+            "operationType",
+            "clusterTime",
+            "wallTime",
+            "ns",
+            "operationDescription",
+            "stateBeforeChange",
+            "nsType"
+        ]
+    );
+    let db =
+        ChangeEvent::catalog(token(EventKind::DropDatabase), Ns { db: "shop".into(), coll: None });
+    let d = db.to_document(true);
+    assert_eq!(keys(&d), ["_id", "operationType", "clusterTime", "wallTime", "ns"]);
+    assert_eq!(d.get("ns"), Some(&Value::Document(Document::new().with("db", "shop"))));
+    assert_eq!(d.get("wallTime"), Some(&Value::DateTime(1_730_198_400_123)));
+    let inv = ChangeEvent::catalog(token(EventKind::Invalidate), ns);
+    assert_eq!(keys(&inv.to_document(true)), ["_id", "operationType", "clusterTime", "wallTime"]);
 }

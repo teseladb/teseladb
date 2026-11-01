@@ -965,6 +965,25 @@ impl NodeLogic {
             CatalogReq::SetSetting { key, value } => {
                 self.catalog_change(Group0Command::SetSetting { key, value }.encode(), reply);
             }
+            CatalogReq::Ddl(from) => {
+                let zero = teseladb_hlc::Hlc { physical: 0, logical: 0 };
+                let a = match self.group0() {
+                    Some(sm) if sm.bootstrapped() => CatalogAnswer::Ddl(
+                        sm.ddl.after(from),
+                        sm.ddl.floor,
+                        sm.ddl.applied_mark.unwrap_or(zero),
+                    ),
+                    Some(_) | None => CatalogAnswer::Unavailable,
+                };
+                let _ = reply.send(a);
+            }
+            CatalogReq::Tick => {
+                // `cluster_time_ms` 0 leaves the cluster time as it is.
+                self.catalog_change(
+                    Group0Command::ClusterTick { cluster_time_ms: 0 }.encode(),
+                    reply,
+                );
+            }
         }
     }
 
@@ -1899,6 +1918,7 @@ mod tests {
             CatalogReq::Principal { kind: user, db: "admin".into(), name: "u".into() },
             CatalogReq::Principals { kind: user, db: None },
             CatalogReq::Config("shards".into()),
+            CatalogReq::Ddl(teseladb_hlc::Hlc { physical: 0, logical: 0 }),
         ];
         for req in unbootstrapped {
             let (tx, rx) = channel();
@@ -1928,6 +1948,28 @@ mod tests {
             done.is_some()
         });
         assert!(matches!(done, Some(CatalogAnswer::Done(None))), "{done:?}");
+        // A change stream's empty entry moves node 2's last mark, which its catalog changes give
+        // (014 FR-014).
+        let zero = teseladb_hlc::Hlc { physical: 0, logical: 0 };
+        let mark_of = |c: &mut Cluster| {
+            let (tx, rx) = channel();
+            c.logic(2).on_message(NodeMsg::Catalog(CatalogReq::Ddl(zero), tx), now);
+            match rx.try_recv() {
+                Ok(CatalogAnswer::Ddl(_, floor, mark)) => (floor, mark),
+                other => panic!("{other:?}"),
+            }
+        };
+        let (floor, before) = mark_of(&mut c);
+        assert_eq!(floor, zero);
+        let (tx, rx) = channel();
+        c.logic(2).on_message(NodeMsg::Catalog(CatalogReq::Tick, tx), now);
+        let mut ticked = None;
+        c.run_until(|_| {
+            ticked = rx.try_recv().ok();
+            ticked.is_some()
+        });
+        assert!(matches!(ticked, Some(CatalogAnswer::Done(None))), "{ticked:?}");
+        assert!(mark_of(&mut c).1 > before);
         let (tx, rx) = channel();
         c.logic(1).on_message(NodeMsg::KillSessions(KillScope::All, tx), now);
         c.run_until(|_| rx.try_recv().is_ok());
