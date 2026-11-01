@@ -1,0 +1,17 @@
+[{"$project":{"y":{"$function":{"body":"function(a){return a*2}","args":["$n"]}}}}]	!! 31418	The lang field must be specified.
+[{"$project":{"y":{"$function":{"body":"function(a){return a*2}","lang":"js"}}}}]	!! 31263	The args field must be specified.
+[{"$project":{"y":{"$function":{"args":[],"lang":"js"}}}}]	!! 31261	The body function must be specified.
+[{"$project":{"y":{"$function":{"body":1,"args":[],"lang":"js"}}}}]	!! 31262	The body function must evaluate to type string or code
+[{"$project":{"y":{"$function":{"body":"x","args":5,"lang":"js"}}}}]	!! 31266	The args field must be of type array
+[{"$project":{"y":{"$function":{"body":"x","args":[],"lang":"py"}}}}]	!! 31419	Currently the only supported language specifier is 'js'.
+[{"$project":{"y":{"$function":1}}}]	!! 31260	$function requires an object as an argument, found: int
+[{"$group":{"_id":null,"t":{"$accumulator":{"init":"function(){return 0}","accumulate":"function(s,n){return s+1}","accumulateArgs":["$n"],"lang":"js"}}}}]	!! 4544709	$accumulator missing required argument 'merge'
+[{"$group":{"_id":null,"t":{"$accumulator":{"init":"function(){return 0}","accumulate":"function(s,n){return s+1}","merge":"function(a,b){return a+b}","lang":"js"}}}}]	!! 4544710	$accumulator missing required argument 'accumulateArgs'
+[{"$group":{"_id":null,"t":{"$accumulator":{"accumulate":"function(s,n){return s+1}","accumulateArgs":["$n"],"merge":"function(a,b){return a+b}","lang":"js"}}}}]	!! 4544707	$accumulator missing required argument 'init'
+[{"$group":{"_id":null,"t":{"$accumulator":{"init":"x","accumulate":"x","accumulateArgs":["$n"],"merge":"x","lang":"js","bogus":1}}}}]	!! 4544706	$accumulator got an unexpected field: bogus
+[{"$group":{"_id":null,"t":{"$accumulator":1}}}]	!! 4544703	$accumulator expects an object as an argument; found: int
+[{"$group":{"_id":null,"t":{"$accumulator":{"init":"x","accumulate":"x","accumulateArgs":["$n"],"merge":"x","lang":"rb"}}}}]	!! 4544705	$accumulator only supports lang: 'js'
+[{"$group":{"_id":null,"t":{"$accumulator":{"init":"x","accumulate":"x","accumulateArgs":["$n"],"merge":"x","lang":"js","initArgs":"$x"}}}}]	!! 4544711	$accumulator initArgs must evaluate to an array: MISSING
+[{"$setWindowFields":{"output":{"t":{"$accumulator":{"init":"function(){return 0}","accumulate":"function(s,n){return s+1}","accumulateArgs":["$n"],"merge":"function(a,b){return a+b}","lang":"js"}}}}}]	!! 9	Unrecognized window function, $accumulator
+[{"$group":{"_id":"$g","t":{"$accumulator":{"init":"x","accumulate":"x","accumulateArgs":["$n"],"merge":"x","lang":"js","initArgs":"$_id"}}}}]	!! 4544711	$accumulator initArgs must evaluate to an array: MISSING
+[{"$group":{"_id":"$g","t":{"$accumulator":{"init":"x","accumulate":"x","accumulateArgs":["$n"],"merge":"x","lang":"js","initArgs":"$$ROOT"}}}}]	!! 4544711	$accumulator initArgs must evaluate to an array: {}

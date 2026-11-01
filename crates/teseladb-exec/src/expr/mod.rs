@@ -23,6 +23,7 @@ mod dates;
 pub(crate) mod dates_arith;
 mod ejson;
 pub(crate) mod forms;
+pub mod js;
 mod json;
 mod logic;
 mod misc;
@@ -261,6 +262,8 @@ pub struct Scope {
     random: Rc<Cell<u64>>,
     /// The collation strings compare with (010 FR-014).
     pub collation: crate::collation::Collation,
+    /// The engine of `$function` and `$accumulator` (016), `None` without one.
+    pub js: Option<Rc<dyn js::JsEngine>>,
 }
 
 impl Scope {
@@ -278,6 +281,11 @@ impl Scope {
     /// This scope comparing strings with `collation`.
     pub fn with_collation(self, collation: crate::collation::Collation) -> Scope {
         Scope { collation, ..self }
+    }
+
+    /// This scope calling JavaScript through `js`.
+    pub fn with_js(self, js: Option<Rc<dyn js::JsEngine>>) -> Scope {
+        Scope { js, ..self }
     }
 
     /// This scope with `$rand` and `$createObjectId` drawing from `seed`.
