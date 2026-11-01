@@ -4,4 +4,5 @@ pub mod bm25;
 pub mod fuzzy;
 pub mod postings;
 pub mod regex;
+pub mod search;
 pub mod wand;

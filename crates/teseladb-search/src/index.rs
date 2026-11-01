@@ -39,6 +39,7 @@ pub enum IndexError {
 pub struct MemIndex {
     definition: Definition,
     keys: Vec<Option<Vec<u8>>>,
+    docs: Vec<Option<Document>>,
     by_key: BTreeMap<Vec<u8>, u32>,
     fields: BTreeMap<String, TextField>,
 }
@@ -60,7 +61,13 @@ fn analyzer(name: &str) -> Result<Analyzer, IndexError> {
 impl MemIndex {
     /// An empty index of `definition`.
     pub fn new(definition: Definition) -> MemIndex {
-        MemIndex { definition, keys: Vec::new(), by_key: BTreeMap::new(), fields: BTreeMap::new() }
+        MemIndex {
+            definition,
+            keys: Vec::new(),
+            docs: Vec::new(),
+            by_key: BTreeMap::new(),
+            fields: BTreeMap::new(),
+        }
     }
 
     /// The index analyzer of the fields without their own.
@@ -73,6 +80,7 @@ impl MemIndex {
         self.delete(key);
         let id = u32::try_from(self.keys.len()).unwrap_or(u32::MAX);
         self.keys.push(Some(key.to_vec()));
+        self.docs.push(Some(doc.clone()));
         self.by_key.insert(key.to_vec(), id);
         let mut texts: Vec<(String, String, String, String)> = Vec::new();
         let mapping = self.definition.mappings.clone();
@@ -178,6 +186,9 @@ impl MemIndex {
         if let Some(k) = self.keys.get_mut(id as usize) {
             *k = None;
         }
+        if let Some(d) = self.docs.get_mut(id as usize) {
+            *d = None;
+        }
         for field in self.fields.values_mut() {
             field.lengths.remove(&id);
             field.postings.retain(|_, docs| {
@@ -213,6 +224,16 @@ impl MemIndex {
         paths: &[String],
         boost: f32,
     ) -> Result<Vec<Hit>, IndexError> {
+        Ok(self.hits(self.text_scores(query, paths, boost)?))
+    }
+
+    /// [`MemIndex::text`] by document number.
+    pub(crate) fn text_scores(
+        &self,
+        query: &[String],
+        paths: &[String],
+        boost: f32,
+    ) -> Result<BTreeMap<u32, f32>, IndexError> {
         let mut scores: BTreeMap<u32, f32> = BTreeMap::new();
         for path in paths {
             let Some(field) = self.fields.get(path) else { continue };
@@ -226,6 +247,26 @@ impl MemIndex {
                 }
             }
         }
+        Ok(scores)
+    }
+
+    /// The numbers of the documents indexed.
+    pub(crate) fn live(&self) -> impl Iterator<Item = u32> + '_ {
+        self.by_key.values().copied()
+    }
+
+    /// The document of number `id`.
+    pub fn document(&self, id: u32) -> Option<&Document> {
+        self.docs.get(id as usize)?.as_ref()
+    }
+
+    /// The document of `key`.
+    pub fn document_of(&self, key: &[u8]) -> Option<&Document> {
+        self.document(*self.by_key.get(key)?)
+    }
+
+    /// The scored documents, best first (equal scores by key).
+    pub(crate) fn hits(&self, scores: BTreeMap<u32, f32>) -> Vec<Hit> {
         let mut hits: Vec<Hit> = scores
             .into_iter()
             .filter_map(|(doc, score)| {
@@ -234,7 +275,7 @@ impl MemIndex {
             })
             .collect();
         hits.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.key.cmp(&b.key)));
-        Ok(hits)
+        hits
     }
 }
 
