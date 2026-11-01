@@ -429,3 +429,65 @@ fn index_stats_count_reads_and_writes() {
     );
     assert_eq!(field(&r, "cursor.firstBatch"), want.get("b").expect("batch"), "{r:?}");
 }
+
+/// A `getMore` is profiled with the command that opened its cursor, that cursor's id and the
+/// framework that runs it; the command that leaves its cursor open gives the id too (measured on
+/// a `refnode` 9.0.4, 01-11-2026: a `$group` runs on the slot-based engine, a `find` on the
+/// classic one).
+#[test]
+fn get_more_is_profiled_with_its_originating_command() {
+    let mut m = node();
+    run(
+        &mut m,
+        DB,
+        json(r#"{"insert":"c","documents":[{"_id":1,"a":1},{"_id":2,"a":2},{"_id":3,"a":3}]}"#),
+    );
+    run(&mut m, DB, json(r#"{"profile":2}"#));
+    let group =
+        json(r#"{"aggregate":"c","pipeline":[{"$group":{"_id":"$a"}}],"cursor":{"batchSize":1}}"#);
+    let r = run(&mut m, DB, group);
+    let agg_id = field(&r, "cursor.id").clone();
+    run(&mut m, DB, Document::new().with("getMore", agg_id.clone()).with("collection", "c"));
+    let r = run(&mut m, DB, json(r#"{"find":"c","batchSize":1}"#));
+    let find_id = field(&r, "cursor.id").clone();
+    run(&mut m, DB, Document::new().with("getMore", find_id.clone()).with("collection", "c"));
+    run(&mut m, DB, json(r#"{"find":"c","batchSize":10}"#));
+    run(&mut m, DB, json(r#"{"profile":0}"#));
+    let docs = profiled(&mut m);
+    let shown: Vec<String> = docs
+        .iter()
+        .map(|d| {
+            let keys: Vec<&str> = d.iter().map(|(k, _)| k).collect();
+            let origin = match d.get("originatingCommand") {
+                Some(Value::Document(o)) => o.iter().next().map_or("", |(k, _)| k).to_owned(),
+                _ => "-".to_owned(),
+            };
+            let id = match d.get("cursorid") {
+                Some(v) if *v == agg_id => "agg",
+                Some(v) if *v == find_id => "find",
+                Some(_) => "other",
+                None => "-",
+            };
+            let framework = match d.get("queryFramework") {
+                Some(Value::String(s)) => s.as_str(),
+                _ => "-",
+            };
+            format!("{:?} {origin} {id} {framework} {:?}", d.get("op"), &keys[..keys.len().min(5)])
+        })
+        .collect();
+    let s = |v: &str| v.to_owned();
+    let want = [
+        s(r#"Some(String("command")) - agg sbe ["op", "ns", "command", "opid", "cursorid"]"#),
+        s(
+            r#"Some(String("getmore")) aggregate agg sbe ["op", "ns", "command", "originatingCommand", "opid"]"#,
+        ),
+        s(r#"Some(String("query")) - find classic ["op", "ns", "command", "opid", "cursorid"]"#),
+        s(
+            r#"Some(String("getmore")) find find classic ["op", "ns", "command", "originatingCommand", "opid"]"#,
+        ),
+        s(r#"Some(String("query")) - - classic ["op", "ns", "command", "opid", "keysExamined"]"#),
+    ];
+    assert_eq!(shown, want, "{docs:?}");
+    // What the `getMore` of the pipeline read was read when it opened (measured: 0 and 0).
+    assert_eq!(docs[1].get("docsExamined"), Some(&Value::Int64(0)));
+}

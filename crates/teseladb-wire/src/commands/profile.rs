@@ -270,7 +270,10 @@ fn read_parts(e: &Ended<'_>, returned: u64) -> ReadParts {
 /// examined, as the `EXPRESS` plan of a `refnode` 9.0.4 counts them (measured).
 fn examined(e: &Ended<'_>) -> (Value, Value) {
     let own = |n: u64| Value::Int64(i64::try_from(n).unwrap_or(i64::MAX));
-    if let Some(p) = e.report.plan.as_ref().filter(|p| p.get("planSummary").is_some()) {
+    // A `getMore` carries its cursor's plan, whose counters are those of the command that
+    // opened it.
+    let planned = e.report.plan.as_ref().filter(|_| e.op != "getmore");
+    if let Some(p) = planned.filter(|p| p.get("planSummary").is_some()) {
         return (
             p.get("keysExamined").cloned().unwrap_or(own(0)),
             p.get("docsExamined").cloned().unwrap_or(own(0)),
@@ -295,7 +298,13 @@ fn examined(e: &Ended<'_>) -> (Value, Value) {
 fn describe(e: &Ended<'_>, now_ms: i64) -> Document {
     let mut d =
         Document::new().with("op", e.op).with("ns", e.ns).with("command", e.command.clone());
+    if let Some(Value::Document(origin)) = origin(e) {
+        d.push(super::query::ORIGINATING_COMMAND, origin.clone());
+    }
     d.push("opid", i32::try_from(e.opid).unwrap_or(i32::MAX));
+    if let Some(id) = cursor_id(e) {
+        d.push("cursorid", id);
+    }
     let reply = match e.reply {
         Some(Ok(r)) => Some(r),
         _ => None,
@@ -439,10 +448,14 @@ const FIND_AND_MODIFY: [&str; 2] = ["findAndModify", "findandmodify"];
 /// pipeline whose query plan it runs, the classic engine for the other reads with a cursor and
 /// `distinct`; none for a write (measured on a `refnode` 9.0.4, 01-11-2026).
 fn query_framework(e: &Ended<'_>, name: &str) -> Option<&'static str> {
+    let command = match origin(e) {
+        Some(Value::Document(o)) => o,
+        _ => e.command,
+    };
+    let name = command.iter().next().map_or(name, |(k, _)| k);
     match (e.op, name) {
-        ("query" | "getmore", _) | (_, "distinct" | "count") => Some("classic"),
         (_, "aggregate") => {
-            let stages: Vec<Document> = match e.command.get("pipeline") {
+            let stages: Vec<Document> = match command.get("pipeline") {
                 Some(Value::Array(items)) => items
                     .iter()
                     .filter_map(|v| match v {
@@ -454,8 +467,14 @@ fn query_framework(e: &Ended<'_>, name: &str) -> Option<&'static str> {
             };
             Some(super::explain::aggregate::query_framework(&stages))
         }
+        ("query" | "getmore", _) | (_, "distinct" | "count") => Some("classic"),
         _ => None,
     }
+}
+
+/// The command that opened the cursor a `getMore` read.
+fn origin<'a>(e: &'a Ended<'_>) -> Option<&'a Value> {
+    e.report.plan.as_ref()?.get(super::query::ORIGINATING_COMMAND)
 }
 
 /// Whether `doc` matches filter `f`.
@@ -467,6 +486,7 @@ fn matches(f: &Document, doc: &Document) -> bool {
 /// `sampleRate`) say so, and logs it when it is slow.
 pub fn after_command<B: Backend + ?Sized>(backend: &mut B, shared: &super::Shared, e: &Ended<'_>) {
     let name = e.command.iter().next().map_or("", |(k, _)| k);
+    keep_origin(shared, e);
     // A password is never profiled; the slow query log hides it.
     if NOT_PROFILED.contains(&name) && !WITH_PASSWORD.contains(&name) {
         return;
@@ -504,6 +524,39 @@ pub fn after_command<B: Backend + ?Sized>(backend: &mut B, shared: &super::Share
     if profiled && !e.ns.ends_with(SYSTEM_PROFILE) {
         // The profiler records what it can: a failed write of the profile is not the command's.
         let _ = write(backend, shared, e.db, doc);
+    }
+}
+
+/// The id of the cursor `e` opened and left open, or of the cursor a `getMore` read.
+fn cursor_id(e: &Ended<'_>) -> Option<i64> {
+    if e.op == "getmore" {
+        return match e.command.iter().next() {
+            Some((_, Value::Int64(id))) => Some(*id),
+            _ => None,
+        };
+    }
+    let Some(Ok(reply)) = e.reply else { return None };
+    match reply.get("cursor") {
+        Some(Value::Document(c)) => match c.get("id") {
+            Some(Value::Int64(id)) if *id != 0 => Some(*id),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Keeps with the cursor `e` left open the command and its plan, which the profile of each
+/// `getMore` of it shows (measured on a `refnode` 9.0.4, 01-11-2026).
+fn keep_origin(shared: &super::Shared, e: &Ended<'_>) {
+    if e.op == "getmore" {
+        return;
+    }
+    let Some(id) = cursor_id(e) else { return };
+    let mut g = lock(shared);
+    if let Some(c) = g.cursors.get_mut(id) {
+        let origin =
+            super::query::Origin { command: e.command.clone(), plan: e.report.plan.clone() };
+        c.state.origin = Some(Box::new(origin));
     }
 }
 

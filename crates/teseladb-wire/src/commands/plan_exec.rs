@@ -766,7 +766,12 @@ impl PlanIndex {
         };
         let decoded = teseladb_keys::decode(values, &bits, &self.dirs).ok()?;
         let names = self.pattern.iter().map(|(k, _)| k);
-        Some(names.zip(decoded).fold(Document::new(), |d, (k, v)| d.with(k, v)))
+        // The key of an empty array is `undefined`; RefDb gives it back as `null` (measured).
+        let shown = decoded.into_iter().map(|v| match v {
+            Value::Undefined => Value::Null,
+            other => other,
+        });
+        Some(names.zip(shown).fold(Document::new(), |d, (k, v)| d.with(k, v)))
     }
 }
 

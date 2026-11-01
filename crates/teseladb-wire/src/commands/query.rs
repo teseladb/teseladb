@@ -97,6 +97,21 @@ pub struct QueryCursor {
     pub read_mark: Option<teseladb_txn::causal::ReadMark>,
     /// The change stream it reads (014 FR-013).
     pub stream: Option<Box<super::change_stream::ChangeStream>>,
+    /// The command that opened it and the plan that command ran, which the profiler writes for
+    /// each `getMore` (010 FR-015).
+    pub origin: Option<Box<Origin>>,
+}
+
+/// The field of a `getMore`'s profile with the command that opened its cursor.
+pub const ORIGINATING_COMMAND: &str = "originatingCommand";
+
+/// The command that opened a cursor, as the profiler shows it with each `getMore`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Origin {
+    /// The command (`originatingCommand`).
+    pub command: Document,
+    /// What the planner reported of its read (`planSummary`, the hashes of its shape).
+    pub plan: Option<Document>,
 }
 
 pub(crate) fn collation_of(doc: Option<&Document>) -> Result<Option<Collation>, CommandError> {
@@ -406,6 +421,7 @@ impl QueryCursor {
             tail: None,
             read_mark: None,
             stream: None,
+            origin: None,
         }
     }
 
@@ -872,6 +888,7 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
             tail: a.tailable.map(Tail::new),
             read_mark: None,
             stream: None,
+            origin: None,
         },
         Some(sort) => {
             sorted(ctx.backend, &coll, &a, sort, collation.as_ref(), planned).map_err(executor)?
@@ -1346,6 +1363,12 @@ pub fn get_more<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, C
     };
     // At the mark of the command that opened it (008 FR-012).
     ctx.backend.set_read_mark(c.state.read_mark);
+    // The profiler writes the command that opened it and that command's plan (010 FR-015).
+    if let Some(origin) = &c.state.origin {
+        let mut plan = origin.plan.clone().unwrap_or_default();
+        plan.push(ORIGINATING_COMMAND, origin.command.clone());
+        ctx.backend.note_plan(plan);
+    }
     // `maxTimeMS` of a `getMore` is only the wait of a tailable `awaitData` cursor. The cursor
     // was taken: like a `refrouter` 9.0.4, the error kills it (measured).
     let awaits = c.state.stream.is_some() || c.state.tail.as_ref().is_some_and(|t| t.await_data);

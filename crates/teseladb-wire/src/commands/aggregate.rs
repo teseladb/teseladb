@@ -703,6 +703,7 @@ pub fn aggregate<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
         tail: None,
         read_mark: ctx.backend.read_mark(),
         stream: None,
+        origin: None,
     };
     let size = Some(a.batch_size.unwrap_or(DEFAULT_FIRST_BATCH));
     let (batch, short) = state.batch(ctx.backend, size)?;
