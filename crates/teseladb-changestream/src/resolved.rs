@@ -32,6 +32,7 @@ pub fn resolved(closed: Hlc, intents: impl IntoIterator<Item = Hlc>) -> Hlc {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
 

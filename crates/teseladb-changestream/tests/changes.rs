@@ -158,3 +158,17 @@ fn a_document_key_names_its_tenant_and_collection() {
     assert_eq!(collection_of(&entry(1)), None);
     assert_eq!(collection_of(&[1, 0]), None);
 }
+
+#[test]
+fn keys_of_another_space_and_history_versions_that_are_no_meta_give_nothing() {
+    use teseladb_changestream::changes::{collection_of, is_document_key};
+    let mut other = doc(1);
+    other[0] = 2;
+    assert!(!is_document_key(&other) && collection_of(&other).is_none());
+    // A history version whose key does not end as a meta's: no change.
+    let mut odd = doc(2);
+    odd.extend_from_slice(&[9, 0, 0, 0, 1]);
+    let bytes = meta(&m(None, 0, None, false));
+    let found = changes(vec![put(odd, 10, HISTORY_VALUE, &bytes)]).unwrap();
+    assert!(found.is_empty());
+}

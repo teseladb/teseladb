@@ -68,6 +68,7 @@ fn what_the_ranges_cannot_decide_reads_everything() {
     for filter in [
         d(&[("ns.coll", d(&[("$regex", "^a".into())]).into())]),
         d(&[("ns.coll", 5.into())]),
+        d(&[("ns.coll", d(&[("$eq", "a".into()), ("$ne", "b".into())]).into())]),
         d(&[("ns.coll", d(&[("$in", Value::Array(vec![5.into()]))]).into())]),
         d(&[("ns", "t.a".into())]),
         d(&[("ns", d(&[("db", "t".into())]).into())]),

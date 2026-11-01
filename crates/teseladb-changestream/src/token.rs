@@ -248,6 +248,7 @@ fn unhex(s: &str) -> Result<Vec<u8>, TokenError> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
 
