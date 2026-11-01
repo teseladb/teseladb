@@ -27,6 +27,7 @@ const STOPWORDS: &[(&str, &str)] = &[
     ("english", include_str!("stopwords/english.txt")),
     ("finnish", include_str!("stopwords/finnish.txt")),
     ("french", include_str!("stopwords/french.txt")),
+    ("galician", include_str!("stopwords/galician.txt")),
     ("german", include_str!("stopwords/german.txt")),
     ("greek", include_str!("stopwords/greek.txt")),
     ("hindi", include_str!("stopwords/hindi.txt")),
@@ -183,6 +184,7 @@ pub fn language(language: &str) -> Option<(Vec<CharFilter>, Tokenizer, Vec<Token
         ],
         "polish" => vec![TokenFilter::Lowercase, stop, TokenFilter::Stempel],
         "brazilian" => vec![TokenFilter::Lowercase, stop, TokenFilter::BrazilianStemming],
+        "galician" => vec![TokenFilter::Lowercase, stop, TokenFilter::GalicianStemming],
         "greek" => vec![TokenFilter::GreekLowercase, stop, TokenFilter::GreekStemming],
         _ if cjk => {
             vec![TokenFilter::CjkWidth, TokenFilter::Lowercase, TokenFilter::CjkBigram, stop]
