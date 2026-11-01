@@ -5,7 +5,7 @@
 
 mod common;
 
-use common::{Mem, doc};
+use common::{Mem, doc, field};
 use teseladb_bson::{Document, Value};
 
 fn arr(items: Vec<Value>) -> Value {
@@ -38,9 +38,7 @@ fn collection() -> Mem {
 
 /// The winning plan of the only shard.
 fn plan(r: &Document) -> Document {
-    let Some(Value::Document(qp)) = r.get("queryPlanner") else { panic!("{r:?}") };
-    let Some(Value::Document(w)) = qp.get("winningPlan") else { panic!("{r:?}") };
-    let Some(Value::Array(shards)) = w.get("shards") else { panic!("{r:?}") };
+    let Value::Array(shards) = field(r, "queryPlanner.winningPlan.shards") else { panic!("{r:?}") };
     let Some(Value::Document(shard)) = shards.first() else { panic!("{r:?}") };
     match shard.get("winningPlan") {
         Some(Value::Document(p)) => p.clone(),
