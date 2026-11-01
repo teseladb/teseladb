@@ -10,6 +10,7 @@ pub mod kv;
 pub mod lsm;
 pub mod meta2;
 pub mod multirange;
+pub mod queries;
 pub mod range_docs;
 pub mod relocate;
 pub mod special_collections;
