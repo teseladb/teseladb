@@ -1008,8 +1008,8 @@ fn unknown_field(d: &Document, name: &str, known: &[&str]) -> Result<(), Command
 /// rejects fails the whole command (measured).
 /// What an update statement says beyond its `Modify`, checked when the statement runs.
 pub(crate) struct UpdateFlags {
-    /// It has constants (`c`).
-    constants: bool,
+    /// Its constants (`c`), which its pipeline reads as variables.
+    constants: Option<Document>,
     /// `upsertSupplied: true`.
     upsert_supplied: bool,
 }
@@ -1024,7 +1024,7 @@ pub(crate) fn update_statement(v: &Value, i: usize) -> Result<(Modify, UpdateFla
     let update = d.get("u").cloned().ok_or_else(|| missing(name, "u"))?;
     let multi = args::bool_field(d, name, "multi")?.unwrap_or(false);
     let flags = UpdateFlags {
-        constants: d.get("c").is_some(),
+        constants: args::doc(d, name, "c")?.cloned(),
         upsert_supplied: args::bool_field(d, name, "upsertSupplied")?.unwrap_or(false),
     };
     let m = Modify {
@@ -1052,7 +1052,7 @@ pub(crate) fn check_update_statement(
 ) -> Result<(), CommandError> {
     let pipeline = matches!(m.update, Some(Value::Array(_)));
     let replacement = matches!(&m.update, Some(Value::Document(u)) if u.iter().next().is_none_or(|(k, _)| !k.starts_with('$')));
-    if flags.constants && !pipeline {
+    if flags.constants.is_some() && !pipeline {
         return Err(CommandError::new(
             CONSTANTS_ONLY_FOR_PIPELINE,
             "Constant values may only be specified for pipeline updates",
@@ -1073,7 +1073,25 @@ pub(crate) fn check_update_statement(
             "cannot specify 'upsertSupplied: true' for a non-upsert operation",
         ));
     }
+    // A pipeline is parsed with the statement: its stages and variables (measured).
+    if let Some(u @ Value::Array(_)) = &m.update {
+        super::engines::check_update_pipeline(u, m.vars.as_ref()).map_err(from_mql)?;
+    }
     Ok(())
+}
+
+/// The variables of an update statement: the command's `let`, then its constants (`c`).
+fn statement_vars(vars: Option<&Document>, flags: &UpdateFlags) -> Option<Document> {
+    match (vars, &flags.constants) {
+        (v, None) => v.cloned(),
+        (v, Some(c)) => {
+            let mut all = v.cloned().unwrap_or_default();
+            for (k, x) in c.iter() {
+                all.insert(k, x.clone());
+            }
+            Some(all)
+        }
+    }
 }
 
 /// A `refrouter` 9.0 refuses the whole command when an update is neither a document nor a
@@ -1105,7 +1123,10 @@ pub fn update<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
     let statements: Vec<(Modify, UpdateFlags)> = items
         .iter()
         .enumerate()
-        .map(|(i, v)| update_statement(v, i).map(|(m, f)| (Modify { vars: vars.clone(), ..m }, f)))
+        .map(|(i, v)| {
+            update_statement(v, i)
+                .map(|(m, f)| (Modify { vars: statement_vars(vars.as_ref(), &f), ..m }, f))
+        })
         .collect::<Result<_, _>>()?;
     let expected_uuid = uuid::expected(ctx.cmd, UPDATE)?;
     let mut w = Writer::new(ctx, UPDATE)?;

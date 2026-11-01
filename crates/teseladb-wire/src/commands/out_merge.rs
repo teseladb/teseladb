@@ -23,27 +23,6 @@ const ADMIN: &str = "admin";
 const NO_UNIQUE_INDEX: crate::error::Code =
     crate::error::Code { code: 51190, name: "Location51190" };
 
-/// The command's variables, for the pipeline of `whenMatched`.
-struct Vars(Document);
-
-impl Env for Vars {
-    fn ext(&self) -> &dyn teseladb_mql::Extensions {
-        &teseladb_mql::NoExtensions
-    }
-
-    fn vars(&self) -> Option<&Document> {
-        Some(&self.0)
-    }
-
-    fn collection(&self, _name: &str) -> Result<Vec<Document>, teseladb_mql::MqlError> {
-        Ok(Vec::new())
-    }
-
-    fn random(&self) -> f64 {
-        0.0
-    }
-}
-
 /// Writes `docs`, which reached stage `w` of an `aggregate` on database `ctx.db` with
 /// variables `vars`; `executor` turns an error of the writes into the command's.
 pub(super) fn write<B: Backend + ?Sized>(
@@ -53,7 +32,7 @@ pub(super) fn write<B: Backend + ?Sized>(
     vars: Document,
     executor: impl Fn(CommandError) -> CommandError,
 ) -> Result<(), CommandError> {
-    let env = Vars(vars);
+    let env = super::engines::VarsEnv(vars);
     match w {
         Write::Out(out) => {
             out.check(ctx.db).map_err(from_mql)?;
