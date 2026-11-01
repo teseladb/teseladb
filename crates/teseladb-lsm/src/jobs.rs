@@ -76,6 +76,8 @@ pub(crate) enum Outcome {
         edit: Edit,
         /// Bytes written per collection since its dictionary, after the edit.
         dict_written: Option<crate::dict::Written>,
+        /// It made room for an ingestion (FR-024).
+        ingest: bool,
     },
     /// Export `id` wrote `files` (they are not part of the LSM).
     Exported { id: u64, files: Vec<crate::ingest::FileRef> },

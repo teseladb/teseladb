@@ -47,6 +47,9 @@ pub(crate) struct Plan {
     pub(crate) output_level: usize,
     /// Nothing below the output level touches the inputs' keys.
     pub(crate) bottommost: bool,
+    /// Logical keys, in order, where an output file ends before the first key at or past each
+    /// one (an ingestion's intervals, FR-024).
+    pub(crate) cuts: Vec<Vec<u8>>,
 }
 
 fn span(inputs: &[(u8, Rc<Table>)]) -> (Vec<u8>, Vec<u8>) {
@@ -59,7 +62,7 @@ fn plan(v: &Version, inputs: Vec<(u8, Rc<Table>)>, output_level: usize) -> Plan 
     let (lo, hi) = span(&inputs);
     let bottommost =
         (output_level + 1..v.levels.len()).all(|l| v.overlapping(l, &lo, &hi).is_empty());
-    Plan { inputs, output_level, bottommost }
+    Plan { inputs, output_level, bottommost, cuts: Vec::new() }
 }
 
 /// The size each level may reach before it gives a file to the next one (research R3). The
@@ -124,6 +127,36 @@ pub(crate) fn pick(
         return Some(plan(v, inputs, n + 1));
     }
     None
+}
+
+/// The compaction an ingestion into `intervals` needs before it starts (FR-024), if any: when
+/// every level below level 0 has a file that spans one of the intervals, the ingested files would
+/// all go to level 0, and the compaction that takes them out of it rewrites every one. Instead the
+/// files of the last level that span the intervals are rewritten in that level, cut at the edges
+/// of the intervals, and the ingestion finds the last level free.
+pub(crate) fn room_for_ingest(v: &Version, intervals: &[(Vec<u8>, Vec<u8>)]) -> Option<Plan> {
+    let spanning = |level: usize| -> Vec<Rc<Table>> {
+        let files = v.levels[level].iter();
+        files
+            .filter(|t| {
+                intervals.iter().any(|(start, end)| {
+                    t.props.lo.as_slice() < end.as_slice()
+                        && start.as_slice() <= t.props.hi.as_slice()
+                })
+            })
+            .cloned()
+            .collect()
+    };
+    let last = v.levels.len() - 1;
+    if (1..=last).any(|level| spanning(level).is_empty()) {
+        return None;
+    }
+    let inputs = spanning(last).into_iter().map(|t| (last as u8, t)).collect();
+    let mut cuts: Vec<Vec<u8>> =
+        intervals.iter().flat_map(|(start, end)| [start.clone(), end.clone()]).collect();
+    cuts.sort();
+    cuts.dedup();
+    Some(Plan { cuts, ..plan(v, inputs, last) })
 }
 
 /// An export: every version of `[start, end)` up to `ts`, into files of `dir` (FR-009).
@@ -255,6 +288,10 @@ pub(crate) struct CompactJob {
     /// The key ring of encrypted outputs (013 FR-015).
     encryption: Option<crate::config::Encryption>,
     target: u64,
+    /// The cuts of the plan already passed by the keys written.
+    passed_cuts: usize,
+    /// It makes room for an ingestion: it spends the ingestions' budget (FR-024).
+    for_ingest: bool,
 }
 
 impl CompactJob {
@@ -300,7 +337,29 @@ impl CompactJob {
             dict_written: None,
             encryption: cfg.encryption.clone(),
             target: cfg.target_file_bytes,
+            passed_cuts: 0,
+            for_ingest: false,
         }
+    }
+
+    /// The compaction marked as the one an ingestion needs.
+    pub(crate) fn for_ingest(self) -> CompactJob {
+        CompactJob { for_ingest: true, ..self }
+    }
+
+    /// Whether it makes room for an ingestion.
+    pub(crate) fn is_for_ingest(&self) -> bool {
+        self.for_ingest
+    }
+
+    /// Whether `key`, the next one written, is past a cut that the keys before it were not.
+    fn passes_cut(&mut self, key: &[u8]) -> bool {
+        let before = self.passed_cuts;
+        let cuts = &self.plan.cuts;
+        while self.passed_cuts < cuts.len() && cuts[self.passed_cuts].as_slice() <= key {
+            self.passed_cuts += 1;
+        }
+        self.passed_cuts > before
     }
 
     /// The compaction writing with the collections' dictionaries and training them.
@@ -322,7 +381,7 @@ impl CompactJob {
             .cloned()
             .collect();
         let surviving = range_tombstone::pieces(&tombstones, Some(&spec.start), Some(&spec.end));
-        let plan = Plan { inputs, output_level: 0, bottommost: false };
+        let plan = Plan { inputs, output_level: 0, bottommost: false, cuts: Vec::new() };
         let mut job = CompactJob::new(cfg, plan, GcTable::default());
         for lane in &mut job.lanes {
             lane.next_block = lane.table.find_block(&first).unwrap_or(lane.table.blocks());
@@ -414,7 +473,8 @@ impl CompactJob {
             }
             if first {
                 first = false;
-                if self.out.as_ref().is_some_and(|o| o.writer.size() >= self.target) {
+                let cut = self.passes_cut(&key);
+                if self.out.as_ref().is_some_and(|o| cut || o.writer.size() >= self.target) {
                     self.finish_output(Some(&key));
                 }
                 if self.out.is_none() {
@@ -573,7 +633,8 @@ impl CompactJob {
                     let removed = self.plan.inputs.iter().map(|(_, t)| t.number).collect();
                     let edit = self.edit.take().expect("written in the edit stage");
                     let dict_written = self.dict_written.take();
-                    let o = Outcome::Changed { added, removed, edit, dict_written };
+                    let ingest = self.for_ingest;
+                    let o = Outcome::Changed { added, removed, edit, dict_written, ingest };
                     return Ok(Next::Done(Box::new(o)));
                 }
             }

@@ -41,16 +41,23 @@ impl Lsm {
                 Job::Delete(s) | Job::Rotate(s) | Job::Reset(s) => s.next(),
                 Job::Ingest(j) => j.next(&mut self.manifest, self.next_file, &self.version),
                 Job::Compact(c) => {
-                    if self.budget <= 0 && !c.is_export() {
+                    // An export is not held back; a compaction for an ingestion spends its own.
+                    let budget = match (c.is_export(), c.is_for_ingest()) {
+                        (true, _) => None,
+                        (false, true) => Some(&mut self.ingest_budget),
+                        (false, false) => Some(&mut self.budget),
+                    };
+                    if budget.as_ref().is_some_and(|b| **b <= 0) {
                         return None;
                     }
                     match c.next(&mut self.manifest, &mut self.next_file) {
                         Ok(n) => {
-                            if let Next::Op(op) = &n
-                                && !c.is_export()
-                            {
+                            if let (Next::Op(op), Some(budget)) = (&n, budget) {
                                 let cost = CompactJob::takes_budget(op);
-                                self.budget -= i64::try_from(cost).unwrap_or(i64::MAX);
+                                *budget -= i64::try_from(cost).unwrap_or(i64::MAX);
+                                if c.is_for_ingest() {
+                                    self.counters.ingest_compaction_bytes += cost;
+                                }
                             }
                             n
                         }
