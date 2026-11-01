@@ -149,6 +149,12 @@ pub struct Mem {
     pub gate_lagging: usize,
     /// The tenants Group 0 knows, by number and name (007 FR-025).
     pub tenants: Vec<(u32, String)>,
+    /// The documents of `config.settings` Group 0 keeps (007 FR-017), if the node is part of a
+    /// cluster that keeps them (`None`: it refuses, as a node alone does).
+    pub settings: Option<Vec<Document>>,
+    /// Changes of `config.settings` that find another change before them: each answers that a
+    /// document is no longer as it was read.
+    pub settings_conflicts: usize,
 }
 
 /// A change of the data before a read of `[start, …)`.
@@ -594,10 +600,52 @@ impl Backend for Mem {
     fn config_documents(&mut self, coll: &str) -> Result<Vec<Document>, CommandError> {
         Ok(match coll {
             teseladb_wire::commands::config_db::SHARDS => {
-                self.shards.iter().map(|s| Document::new().with("_id", s.as_str())).collect()
+                // As Group 0 lists them: the name and the address of the node.
+                let host = |s: &str| format!("{s}.cluster:27018");
+                let shard =
+                    |s: &String| Document::new().with("_id", s.as_str()).with("host", host(s));
+                self.shards.iter().map(shard).collect()
+            }
+            teseladb_wire::commands::config_settings::SETTINGS => {
+                self.settings.clone().unwrap_or_default()
             }
             _ => Vec::new(),
         })
+    }
+
+    fn config_settings_write(
+        &mut self,
+        writes: Vec<teseladb_wire::commands::config_settings::SettingsWrite>,
+    ) -> Result<bool, CommandError> {
+        let Some(settings) = self.settings.as_mut() else {
+            let msg = "this node keeps no cluster settings";
+            return Err(CommandError::new(teseladb_wire::error::ILLEGAL_OPERATION, msg));
+        };
+        if self.settings_conflicts > 0 {
+            self.settings_conflicts -= 1;
+            return Ok(false);
+        }
+        let at = |settings: &[Document], id: &Value| {
+            settings.iter().position(|d| d.get("_id") == Some(id))
+        };
+        // Every document as it was read, or none of the change goes.
+        for w in &writes {
+            if at(settings, &w.id).map(|i| &settings[i]) != w.read.as_ref() {
+                return Ok(false);
+            }
+        }
+        for w in writes {
+            let i = at(settings, &w.id);
+            match (i, w.now) {
+                (Some(i), Some(d)) => settings[i] = d,
+                (Some(i), None) => {
+                    settings.remove(i);
+                }
+                (None, Some(d)) => settings.push(d),
+                (None, None) => {}
+            }
+        }
+        Ok(true)
     }
 
     fn kill_everywhere(&mut self, scope: &KillScope) -> Result<(), CommandError> {
