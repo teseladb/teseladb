@@ -337,6 +337,11 @@ impl<B: Backend + ?Sized> Env for WireEnv<'_, B> {
     }
 
     fn check_search(&self, stage: &str, spec: &Document) -> Result<(), MqlError> {
+        // Only `$search` asks `refsearch` while the pipeline is planned (measured on 9.0.4: the
+        // errors of `$searchMeta` and `$vectorSearch` carry the executor's prefix).
+        if stage != "$search" {
+            return Ok(());
+        }
         let Some((shared, ns)) = &self.node else { return Ok(()) };
         let mut backend = self.backend.borrow_mut();
         let found =
@@ -466,6 +471,32 @@ pub(crate) fn read_through_staged<B: Backend + ?Sized>(
     };
     let sbe = pipeline.runs_in_sbe();
     Ok(pipeline.run(docs, &env).map(|out| (out, sbe)).map_err(from_mql))
+}
+
+/// Runs `stages` (BSON documents) of database `db` over `docs`, as the stages of a view run
+/// (no search stages, simple collation).
+pub(crate) fn run_stages<B: Backend + ?Sized>(
+    backend: &mut B,
+    db: &str,
+    stages: &[Vec<u8>],
+    docs: Vec<Document>,
+) -> Result<Vec<Document>, CommandError> {
+    let raws: Vec<RawDoc<'_>> =
+        stages.iter().map(|b| RawDoc::from_bytes(b)).collect::<Result<_, _>>()?;
+    let values: Vec<RawValue<'_>> = raws.into_iter().map(RawValue::Document).collect();
+    let pipeline = Pipeline::parse(&values, &ExprCtx::checked(std::iter::empty::<&str>()))
+        .map_err(from_mql)?;
+    let env = WireEnv {
+        backend: RefCell::new(backend),
+        db,
+        vars: Document::new(),
+        concern: ReadConcern::Local,
+        collation: collation_value(None)?,
+        allow_disk_use: true,
+        node: None,
+        searched: RefCell::new(Vec::new()),
+    };
+    pipeline.run(docs, &env).map_err(from_mql)
 }
 
 /// The arguments of `aggregate` besides its pipeline.

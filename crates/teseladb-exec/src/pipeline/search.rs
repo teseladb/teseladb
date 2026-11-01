@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 use teseladb_bson::{Document, RawValue, Value};
-use teseladb_mql::{ErrorCode, MqlError};
+use teseladb_mql::{ErrorCode, Filter, FilterUse, MqlError};
 
 use super::errors::{FAILED_TO_PARSE, error};
 use crate::expr::arith::raw_type_name;
@@ -44,6 +44,50 @@ pub fn parse(name: &str, arg: RawValue<'_>) -> Result<Document, MqlError> {
             format!("{name} value must be an object. Found: {}", raw_type_name(other)),
         )),
     }
+}
+
+/// RefDb's error when `$vectorSearch`'s `limit` is not a number.
+const LIMIT_NOT_NUMBER: ErrorCode = ErrorCode { code: 8_575_100, name: "Location8575100" };
+/// RefDb's error when `$vectorSearch`'s `limit` is not positive.
+const LIMIT_NOT_POSITIVE: ErrorCode = ErrorCode { code: 7_912_700, name: "Location7912700" };
+/// RefDb's error when `$vectorSearch`'s `filter` is not an object.
+const FILTER_NOT_OBJECT: ErrorCode = ErrorCode { code: 10_065, name: "Location10065" };
+
+/// Checks the argument of `$vectorSearch` as `refnode` does before it asks `refsearch`: an object
+/// whose `limit`, when given, is a positive number and whose `filter`, when given, is a valid
+/// query filter (measured on 9.0.4: `refsearch` checks everything else, and a missing `limit` is
+/// its error).
+pub fn parse_vector(arg: RawValue<'_>) -> Result<Document, MqlError> {
+    let spec = parse("$vectorSearch", arg)?;
+    let RawValue::Document(raw) = arg else { return Ok(spec) };
+    match raw.get("limit") {
+        None => {}
+        Some(v) => {
+            let n = match v {
+                RawValue::Int32(n) => f64::from(n),
+                RawValue::Int64(n) => n as f64,
+                RawValue::Double(d) => d,
+                RawValue::Decimal128(d) => teseladb_mql::decimal_to_f64(d),
+                _ => {
+                    return Err(error(
+                        LIMIT_NOT_NUMBER,
+                        "Expected limit field to be a number in $vectorSearch",
+                    ));
+                }
+            };
+            if n.is_nan() || n <= 0.0 {
+                return Err(error(LIMIT_NOT_POSITIVE, "Expected limit to be positive"));
+            }
+        }
+    }
+    match raw.get("filter") {
+        None => {}
+        Some(RawValue::Document(f)) => drop(Filter::parse(f, FilterUse::Query)?),
+        Some(_) => {
+            return Err(error(FILTER_NOT_OBJECT, "invalid parameter: expected an object (filter)"));
+        }
+    }
+    Ok(spec)
 }
 
 /// The stage name RefDb gives when a search stage is not first: `$search` runs as

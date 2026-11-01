@@ -364,7 +364,7 @@ fn parse_compound(index: &MemIndex, d: &Document, path: &str) -> Result<Operator
 }
 
 /// The value at dotted `path` of `doc`.
-fn value_at<'a>(doc: &'a Document, path: &str) -> Option<&'a Value> {
+pub(crate) fn value_at<'a>(doc: &'a Document, path: &str) -> Option<&'a Value> {
     let mut parts = path.split('.');
     let mut cur = doc.get(parts.next()?)?;
     for part in parts {

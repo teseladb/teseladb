@@ -28,3 +28,4 @@ pub mod indexer;
 pub mod query;
 pub mod segment;
 pub mod vector;
+pub mod vector_indexer;
