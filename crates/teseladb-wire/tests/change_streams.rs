@@ -426,3 +426,48 @@ fn a_get_more_returns_every_event_written_before_it_started() {
     assert!(m.now - at <= 150, "bounded by maxTimeMS");
     assert!(short.len() >= 2, "{short:?}");
 }
+
+#[test]
+fn a_first_match_on_namespaces_or_catalog_events_reads_fewer_ranges() {
+    // 014 FR-012: the ranges of the collections the `$match` leaves out are not read, and the
+    // events are those the whole `$match` lets through.
+    let mut m = Mem::new();
+    create(&mut m, "a");
+    create(&mut m, "b");
+    let only_a = Document::new().with("$match", Document::new().with("ns.coll", "a"));
+    let id = id_of(&open(&mut m, DB, 1.into(), stream(Document::new(), vec![only_a])));
+    let all = id_of(&open(&mut m, DB, 1.into(), stream(Document::new(), vec![])));
+    let drops = Document::new().with("$match", Document::new().with("operationType", "drop"));
+    let ddl = id_of(&open(&mut m, DB, 1.into(), stream(Document::new(), vec![drops])));
+    m.now += 10;
+    insert(&mut m, "a", vec![doc(&[("_id", 1.into())])]);
+    insert(&mut m, "b", vec![doc(&[("_id", 2.into())])]);
+    m.now += 10;
+    let before = m.change_reads;
+    let got = batch(&get_more(&mut m, DB, id, "$cmd.aggregate", Document::new()));
+    assert_eq!(m.change_reads - before, 1, "only the ranges of `a`");
+    let colls: Vec<&Value> = got.iter().map(|e| field(e, "ns.coll")).collect();
+    assert_eq!(colls, [&Value::from("a")]);
+    let before = m.change_reads;
+    assert_eq!(batch(&get_more(&mut m, DB, all, "$cmd.aggregate", Document::new())).len(), 2);
+    assert_eq!(m.change_reads - before, 2);
+    let before = m.change_reads;
+    assert!(batch(&get_more(&mut m, DB, ddl, "$cmd.aggregate", Document::new())).is_empty());
+    assert_eq!(m.change_reads, before, "catalog events only: no document reads");
+}
+
+#[test]
+fn the_node_counts_its_open_streams_and_the_events_they_return() {
+    // 014 FR-018 (other tests of this binary open streams at the same time: only lower bounds).
+    use teseladb_wire::commands::change_stream::stream_metrics;
+    let mut m = Mem::new();
+    create(&mut m, "c");
+    let id = id_of(&open(&mut m, DB, "c".into(), stream(Document::new(), vec![])));
+    let (open_now, events) = stream_metrics();
+    assert!(open_now >= 1);
+    m.now += 10;
+    insert(&mut m, "c", vec![doc(&[("_id", 1.into())]), doc(&[("_id", 2.into())])]);
+    m.now += 10;
+    assert_eq!(batch(&get_more(&mut m, DB, id, "c", Document::new())).len(), 2);
+    assert!(stream_metrics().1 >= events + 2);
+}

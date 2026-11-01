@@ -20,6 +20,10 @@ pub fn below(ts: Hlc) -> Option<Hlc> {
 
 /// The resolved mark with closed mark `closed` and pending intents at `intents`.
 pub fn resolved(closed: Hlc, intents: impl IntoIterator<Item = Hlc>) -> Hlc {
+    // Faulty variant (014 T020): the pending intents do not hold the mark, so a transaction that
+    // commits at its intents' mark lands below what the cursor already read past.
+    #[cfg(teseladb_bug = "emit_above_resolved")]
+    let intents = intents.into_iter().filter(|_| false);
     let zero = Hlc { physical: 0, logical: 0 };
     match intents.into_iter().min() {
         Some(oldest) => closed.min(below(oldest).unwrap_or(zero)),

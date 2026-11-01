@@ -57,6 +57,13 @@ impl RangeHost {
             self.reply(id, Err(RangeError::OutOfRange));
             return id;
         };
+        // Faulty variant (014 T020): a range a split shrank answers the part of the interval it
+        // still holds, and the cursor takes the rest as read.
+        #[cfg(teseladb_bug = "lose_events_on_split")]
+        let end = match range.end.is_empty() || end <= range.end {
+            true => end,
+            false => range.end.clone(),
+        };
         if start < range.start || (!range.end.is_empty() && end > range.end) || start >= end {
             self.reply(id, Err(RangeError::OutOfRange));
             return id;

@@ -8,6 +8,7 @@
 //! event whose `_id` the stages changed kills the cursor with `ChangeStreamFatalError`.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use teseladb_bson::{Document, RawDoc, RawValue, Value};
 use teseladb_changestream::changes::{Change, Versioned, changes, collection_of};
@@ -15,6 +16,7 @@ use teseladb_changestream::cursor::StreamPosition;
 use teseladb_changestream::ddl::{ddl_key, invalidate_of};
 use teseladb_changestream::event::{ChangeEvent, Namespace as EventNs};
 use teseladb_changestream::order::EventKey;
+use teseladb_changestream::pushdown::Pushdown;
 use teseladb_changestream::resolved::below;
 use teseladb_changestream::stage::{
     BeforeChange, CHANGE_STREAM, ChangeStreamSpec, FullDocument, SPLIT_LARGE_EVENT, Scope,
@@ -47,9 +49,49 @@ const MAJORITY: &str = "majority";
 /// Characters of a string a fatal error's message shows before `...` (measured).
 const SHOWN_STRING: usize = 150;
 
+/// Change stream cursors open on this node (014 FR-018).
+static OPEN_STREAMS: AtomicU64 = AtomicU64::new(0);
+/// Events this node's change stream cursors returned (014 FR-018).
+static EVENTS_RETURNED: AtomicU64 = AtomicU64::new(0);
+
+/// The change stream metrics of the node (014 FR-018): cursors open and events returned.
+pub fn stream_metrics() -> (u64, u64) {
+    (OPEN_STREAMS.load(Ordering::Relaxed), EVENTS_RETURNED.load(Ordering::Relaxed))
+}
+
+/// Counts a cursor among the open ones while it exists.
+#[derive(Debug)]
+struct OpenGuard;
+
+impl OpenGuard {
+    fn new() -> OpenGuard {
+        OPEN_STREAMS.fetch_add(1, Ordering::Relaxed);
+        OpenGuard
+    }
+}
+
+impl Clone for OpenGuard {
+    fn clone(&self) -> OpenGuard {
+        OpenGuard::new()
+    }
+}
+
+impl PartialEq for OpenGuard {
+    fn eq(&self, _: &OpenGuard) -> bool {
+        true
+    }
+}
+
+impl Drop for OpenGuard {
+    fn drop(&mut self) {
+        OPEN_STREAMS.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 /// A change stream cursor.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChangeStream {
+    _open: OpenGuard,
     scope: Scope,
     /// Database it was opened on (empty for the cluster).
     db: String,
@@ -63,6 +105,8 @@ pub struct ChangeStream {
     stages: Vec<Document>,
     /// `$changeStreamSplitLargeEvent` ends the pipeline (014 FR-011).
     split: bool,
+    /// What the first `$match` lets the reads of the ranges leave out (014 FR-012).
+    pushdown: Pushdown,
     /// The mark the stream starts at, which `ChangeStreamHistoryLost` names.
     resume_ts: Hlc,
     /// The stream resumes after this fragment of this event.
@@ -246,12 +290,14 @@ pub fn open<B: Backend + ?Sized>(
     };
     let token = position.token().encode();
     let mut stream = ChangeStream {
+        _open: OpenGuard::new(),
         scope,
         db: if scope == Scope::Cluster { String::new() } else { ns.db.clone() },
         coll: on_collection.then(|| ns.coll.clone()),
         spec,
         position,
         pending: VecDeque::new(),
+        pushdown: Pushdown::of(&rest),
         stages: rest,
         split,
         resume_fragment,
@@ -313,6 +359,7 @@ pub fn more<B: Backend + ?Sized>(
             break;
         }
     }
+    EVENTS_RETURNED.fetch_add(out.len() as u64, Ordering::Relaxed);
     if let Some(end) = stream.invalidated.as_ref().filter(|_| stream.pending.is_empty()) {
         let pbrt = Document::new().with("_data", end.encode());
         return Ok((out, pbrt, true));
@@ -419,10 +466,14 @@ impl Watched {
         images_enabled(options)
     }
 
+    /// Its names in the window: the one it has now and those of its renames.
+    fn names(&self) -> impl Iterator<Item = &Namespace> {
+        std::iter::once(&self.ns).chain(self.renames.iter().flat_map(|(_, a, b)| [a, b]))
+    }
+
     /// Whether any of its names is one `stream` reads.
     fn ever_in(&self, stream: &ChangeStream) -> bool {
-        ns_in_scope(stream, &self.ns)
-            || self.renames.iter().any(|(_, a, b)| ns_in_scope(stream, a) || ns_in_scope(stream, b))
+        self.names().any(|ns| ns_in_scope(stream, ns))
     }
 }
 
@@ -531,7 +582,12 @@ fn poll<B: Backend + ?Sized>(
     let colls = watched_of(stream, now, &records);
     let mut resolved = ddl.resolved;
     let mut rows = Vec::new();
-    for w in &colls {
+    // The ranges of the collections the first `$match` leaves out are not read (FR-012).
+    let pushed = &stream.pushdown;
+    let read = |w: &&Watched| {
+        pushed.reads_documents() && w.names().any(|ns| pushed.reads(&ns.db, &ns.coll))
+    };
+    for w in colls.iter().filter(read) {
         let (start, end) = documents_of(&w.entry);
         let (more, mark) = backend.changes(&start, &end, from)?;
         resolved = resolved.min(mark);
@@ -750,7 +806,7 @@ fn event_of<B: Backend + ?Sized>(
                 Some(as_value(change.doc.as_ref())?)
             }
             FullDocument::WhenAvailable => Some(Value::Null),
-            FullDocument::Required => return Err(no_image(&event, "post", "update")),
+            FullDocument::Required => return Err(no_image(backend, &event, "post", "update")),
         };
     }
     if change.kind != EventKind::Insert {
@@ -763,7 +819,7 @@ fn event_of<B: Backend + ?Sized>(
             }
             BeforeChange::WhenAvailable => Some(Value::Null),
             BeforeChange::Required => {
-                return Err(no_image(&event, "pre", "update, delete and replace"));
+                return Err(no_image(backend, &event, "pre", "update, delete and replace"));
             }
         };
     }
@@ -771,13 +827,21 @@ fn event_of<B: Backend + ?Sized>(
 }
 
 /// The error of a stream that requires an image its event has not (measured on 01-11).
-fn no_image(event: &ChangeEvent, which: &str, kinds: &str) -> CommandError {
+/// Error 47 of a required image that is not there, with the shard prefix a `refrouter` 9.0.4 puts
+/// before it (measured on 01-11): the node that read the event names itself.
+fn no_image<B: Backend + ?Sized>(
+    backend: &mut B,
+    event: &ChangeEvent,
+    which: &str,
+    kinds: &str,
+) -> CommandError {
     let (time, increment) = teseladb_hlc::to_timestamp(event.cluster_time);
     let coll = event.ns.coll.as_deref().unwrap_or_default();
+    let host = super::host_port(backend);
     CommandError::new(
         error::NO_MATCHING_DOCUMENT,
         format!(
-            "Executor error during getMore :: caused by :: Change stream was configured to require a {which}-image for all {kinds} events, but the {which}-image was not found for event: {{operationType: \"{}\", ns: {{db: \"{}\", coll: \"{coll}\"}}, clusterTime: Timestamp({time}, {increment})}}",
+            "Error on remote shard {host} :: caused by :: Executor error during getMore :: caused by :: Change stream was configured to require a {which}-image for all {kinds} events, but the {which}-image was not found for event: {{operationType: \"{}\", ns: {{db: \"{}\", coll: \"{coll}\"}}, clusterTime: Timestamp({time}, {increment})}}",
             teseladb_changestream::event::operation_type(event.kind()),
             event.ns.db,
         ),

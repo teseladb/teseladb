@@ -54,7 +54,13 @@ impl StreamPosition {
 
     /// Whether the event at `key` was not returned yet.
     pub fn wants(&self, key: &EventKey) -> bool {
-        key.ts > self.from && self.after.as_ref().is_none_or(|a| key > a)
+        // Faulty variant (014 T020): a stream resumed inside a transaction takes the token's mark
+        // for the whole transaction and drops the rest of its events.
+        #[cfg(teseladb_bug = "split_txn_events")]
+        let later = |a: &EventKey| key.ts > a.ts;
+        #[cfg(not(teseladb_bug = "split_txn_events"))]
+        let later = |a: &EventKey| key > a;
+        key.ts > self.from && self.after.as_ref().is_none_or(later)
     }
 
     /// A read reached `resolved`: nothing at or below it comes again.

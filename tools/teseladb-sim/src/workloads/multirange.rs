@@ -281,6 +281,11 @@ impl MultiRangeWorkload {
             .map(|(g, _)| *g)
     }
 
+    /// The bounds Group 0 records for range `g`.
+    pub(crate) fn bounds(&self, g: GroupId) -> Option<&(Vec<u8>, Vec<u8>)> {
+        self.table.get(&g)
+    }
+
     /// The state machine of range `g` on `node`, if it is open there.
     fn sm<'a>(&self, w: &'a mut World, node: u32, g: GroupId) -> Option<&'a RangeSm> {
         let core = self.core();

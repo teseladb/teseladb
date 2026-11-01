@@ -100,7 +100,11 @@ fn check_transactions(known: &BTreeSet<&Change>, c: &CursorLog) -> Result<(), St
             return Err(format!("transaction {t} split by other changes"));
         }
         let all = known.iter().filter(|k| k.txn == Some(t)).count();
-        if all != idx.len() {
+        // A batch that ended inside the transaction, as the cursor's last, owes the rest while
+        // the cursor has not resolved past it.
+        let last = idx.last().is_some_and(|i| *i + 1 == c.emitted.len());
+        let owed = last && c.emitted[idx[0]].change.ts > c.resolved;
+        if all != idx.len() && !owed {
             return Err(format!(
                 "transaction {t} emitted in part ({} of {all} changes)",
                 idx.len()

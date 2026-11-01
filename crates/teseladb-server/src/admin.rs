@@ -395,6 +395,23 @@ fn txn_metrics(out: &mut String, t: &teseladb_wire::commands::status::TxnCounts)
     let _ = writeln!(out, "# TYPE {name} gauge\n{name} {}", t.unresolved_intents);
 }
 
+/// The change streams' metrics (014 FR-018): cursors open, events returned and, by range, how far
+/// behind the clock its resolved mark was at the last read of a stream.
+fn stream_metrics(out: &mut String, (open, events): (u64, u64), lags: &[(u64, u64)]) {
+    let name = "teseladb_changestream_cursors";
+    let _ = writeln!(out, "# HELP {name} Change stream cursors open.");
+    let _ = writeln!(out, "# TYPE {name} gauge\n{name} {open}");
+    let name = "teseladb_changestream_events_total";
+    let _ = writeln!(out, "# HELP {name} Events change stream cursors returned.");
+    let _ = writeln!(out, "# TYPE {name} counter\n{name} {events}");
+    let name = "teseladb_changestream_range_lag_ms";
+    let _ = writeln!(out, "# HELP {name} How far behind the clock a range's resolved mark was.");
+    let _ = writeln!(out, "# TYPE {name} gauge");
+    for (g, lag) in lags {
+        let _ = writeln!(out, "{name}{{range=\"{g}\"}} {lag}");
+    }
+}
+
 impl AdminBackend for NodeAdmin {
     fn healthy(&self) -> bool {
         self.ask(0, NodeMsg::View).is_some_and(|v| v.bootstrapped && v.addrs_current)
@@ -431,6 +448,8 @@ impl AdminBackend for NodeAdmin {
             &self.handle.sessions,
         ));
         txn_metrics(&mut out, &status.txn);
+        let lags = crate::backend::range_lags(crate::clock::wall_ms());
+        stream_metrics(&mut out, teseladb_wire::commands::change_stream::stream_metrics(), &lags);
         if let Some(m) = &self.memory {
             m.metrics(&mut out);
         }
@@ -1070,6 +1089,20 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn the_change_stream_metrics_give_cursors_events_and_the_lag_of_each_range() {
+        let mut out = String::new();
+        stream_metrics(&mut out, (2, 7), &[(4, 180), (9, 230)]);
+        for line in [
+            "teseladb_changestream_cursors 2",
+            "teseladb_changestream_events_total 7",
+            "teseladb_changestream_range_lag_ms{range=\"4\"} 180",
+            "teseladb_changestream_range_lag_ms{range=\"9\"} 230",
+        ] {
+            assert!(out.lines().any(|l| l == line), "{line} in {out}");
+        }
+    }
 
     #[test]
     fn the_transactions_metrics_name_each_counter_and_each_cause() {

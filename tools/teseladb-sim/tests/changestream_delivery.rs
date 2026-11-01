@@ -99,6 +99,21 @@ fn a_transaction_emitted_in_part_or_split_is_reported() {
 }
 
 #[test]
+fn a_batch_that_ends_inside_a_transaction_above_the_last_mark_owes_the_rest() {
+    // A batch may end inside a transaction: its rest comes in the next batch, so a cursor whose
+    // last resolved mark is below the transaction has not emitted it in part yet.
+    let all = committed();
+    let mut c = cursor(0, &all[..3], 20);
+    c.resolved = ts(15);
+    assert_eq!(check(&all, &[c.clone()]), Ok(()));
+    // Not when other changes come after the part, nor once the cursor resolved past it.
+    c.emitted.push(Emitted { change: all[4].clone(), resolved: ts(30) });
+    assert!(check(&all, &[c]).is_err());
+    let v = check(&all, &[cursor(0, &all[..3], 20)]).unwrap_err();
+    assert!(v.detail.contains("in part"), "{v:?}");
+}
+
+#[test]
 fn a_change_emitted_above_the_resolved_mark_is_reported() {
     let all = committed();
     let mut c = cursor(0, &all, 40);

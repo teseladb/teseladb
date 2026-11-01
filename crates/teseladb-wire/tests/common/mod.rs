@@ -161,6 +161,8 @@ pub struct Mem {
     pub resolved_lag_ms: u64,
     /// Milliseconds the clock moves on at each pause of a waiting command.
     pub pause_ms: u64,
+    /// The change stream reads of ranges so far (014 FR-012).
+    pub change_reads: usize,
 }
 
 /// A change of the data before a read of `[start, …)`.
@@ -293,6 +295,7 @@ impl Backend for Mem {
         end: &[u8],
         from: Hlc,
     ) -> Result<teseladb_wire::commands::ChangeBatch, CommandError> {
+        self.change_reads += 1;
         if let Some(e) = self.fail_changes.take() {
             return Err(e);
         }

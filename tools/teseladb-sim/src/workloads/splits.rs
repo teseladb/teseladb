@@ -33,6 +33,7 @@ use teseladb_types::{GroupId, NodeId};
 use crate::checkers::Violation;
 use crate::history::History;
 use crate::workloads::Workload;
+use crate::workloads::changestream::{self, CURSORS, Cursor};
 use crate::workloads::multirange::{CLIENTS, MultiRangeWorkload, Profile};
 use crate::world::World;
 
@@ -47,6 +48,8 @@ const PROFILE: Profile = Profile {
     cuts: &[1, 2],
     adverse: false,
 };
+/// The `changestream` workload: the same space and cuts, with merges (014 T003).
+const STREAMS: Profile = Profile { name: "changestream", merges: true, ..PROFILE };
 /// Keys the transactions write, spread over the data keys and never a single document's.
 const TXN_KEYS: u64 = 8;
 /// Writers and readers of transactions.
@@ -100,6 +103,8 @@ enum Asker {
     Coord(u32, ReqNo),
     Read(u32),
     Push(u32),
+    /// A cursor's read of a range.
+    Feed(u32),
     /// A lazy resolution nobody waits for.
     Nobody,
 }
@@ -125,6 +130,11 @@ pub struct SplitsWorkload {
     /// The keys each tag was written on.
     keys: BTreeMap<u64, Vec<Vec<u8>>>,
     seen: Vec<Seen>,
+    /// The key of each transaction key: a document's with cursors.
+    key_of: fn(u64) -> Vec<u8>,
+    /// The change stream cursors, by client (`changestream`).
+    cursors: BTreeMap<u32, Cursor>,
+    streams: bool,
 }
 
 impl SplitsWorkload {
@@ -133,8 +143,20 @@ impl SplitsWorkload {
         Box::new(SplitsWorkload::new(nodes, cores))
     }
 
+    /// The `changestream` workload over `nodes` nodes of `cores` cores (014 T003).
+    pub fn streams(nodes: u32, cores: u16) -> Box<dyn Workload> {
+        let mut wl = SplitsWorkload::new(nodes, cores);
+        wl.engine = MultiRangeWorkload::new(nodes, cores, STREAMS);
+        wl.key_of = changestream::doc_key;
+        wl.streams = true;
+        Box::new(wl)
+    }
+
     fn new(nodes: u32, cores: u16) -> SplitsWorkload {
         SplitsWorkload {
+            key_of: txn_key,
+            cursors: BTreeMap::new(),
+            streams: false,
             engine: MultiRangeWorkload::new(nodes, cores, PROFILE),
             writers: BTreeMap::new(),
             readers: BTreeMap::new(),
@@ -161,7 +183,8 @@ impl SplitsWorkload {
         // takes the cluster time from the server it asks: a leader gives marks under the clock
         // rule (005 FR-006). A node out of margin or cut off from its peers gives none here, which
         // would carry the HLC of the ranges it reads ahead of every clock.
-        let first = txn_key(if read { 0 } else { a });
+        let key_of = self.key_of;
+        let first = key_of(if read { 0 } else { a });
         let Some(node) = self.leader_of(w, &first) else { return };
         let local = w.local(node);
         let core = self.engine.core();
@@ -174,12 +197,20 @@ impl SplitsWorkload {
         let tag = self.next_tag;
         self.next_tag += 1;
         self.fates.insert(tag, Fate::Unknown);
-        self.keys.insert(tag, vec![txn_key(a), txn_key(b)]);
+        self.keys.insert(tag, vec![key_of(a), key_of(b)]);
         // The tag's low byte goes first, so that the records spread over the cuts of `02`.
         let txn = TxnId(u128::from(tag).rotate_right(8));
         let mut coord = Coordinator::new(txn, (u128::from(client) + 1, 1), at, local);
         let put = || IntentOp::Put { value_type: VALUE_TYPE, value: tag_value(tag) };
-        let writes = vec![(txn_key(a), put()), (txn_key(b), put())];
+        let mut writes = vec![(key_of(a), put()), (key_of(b), put())];
+        if self.streams {
+            // The meta of each write, as the server's transactions write it (014 D-114).
+            for (op, key) in [key_of(a), key_of(b)].iter().enumerate() {
+                let (k, value) = changestream::meta_write(key, tag, op as u32);
+                let value_type = teseladb_changestream::HISTORY_VALUE;
+                writes.push((k, IntentOp::Put { value_type, value }));
+            }
+        }
         if coord.write(&Table(&self.engine), writes).is_err() {
             self.fates.insert(tag, Fate::Not);
             return;
@@ -267,7 +298,7 @@ impl SplitsWorkload {
             self.readers.remove(&client);
             return;
         }
-        let key = txn_key(r.next);
+        let key = (self.key_of)(r.next);
         let spec = |g| ReadSpec {
             g,
             key: key.clone(),
@@ -296,8 +327,9 @@ impl SplitsWorkload {
     }
 
     fn read_done(&mut self, w: &mut World, client: u32, r: Result<Reply, RangeError>) {
+        let key_of = self.key_of;
         let Some(rd) = self.readers.get_mut(&client) else { return };
-        let key = txn_key(rd.next);
+        let key = key_of(rd.next);
         match r {
             Ok(Reply::Value { value, .. }) => {
                 let tag = value.map(|(_, v)| tag_of(&v).unwrap_or(0));
@@ -328,7 +360,7 @@ impl SplitsWorkload {
             return;
         };
         rd.view.known.insert(rec.txn, learn(&rec));
-        let key = txn_key(rd.next);
+        let key = (self.key_of)(rd.next);
         if let Some(op) = lazy_resolve(&rec, vec![key.clone()])
             && let Some(g) = self.engine.range_of(&key)
         {
@@ -348,6 +380,13 @@ impl SplitsWorkload {
             }
             Asker::Read(client) => self.read_done(w, client, r),
             Asker::Push(client) => self.push_done(w, client, r),
+            Asker::Feed(client) => {
+                let batch = w.rng.range(1, 4);
+                let now = self.mark_now(w);
+                if let Some(c) = self.cursors.get_mut(&client) {
+                    c.answered(r, batch, now);
+                }
+            }
         }
     }
 
@@ -423,6 +462,68 @@ impl SplitsWorkload {
         Ok(())
     }
 
+    /// A mark from a leader's clock, for a cursor that resumes.
+    fn mark_now(&mut self, w: &mut World) -> Hlc {
+        let zero = Hlc { physical: 0, logical: 0 };
+        let Some(node) = self.leader_of(w, changestream::START) else { return zero };
+        let local = w.local(node);
+        let core = self.engine.core();
+        w.cluster_core(node, core).and_then(|c| c.read_mark(local)).unwrap_or(zero)
+    }
+
+    /// A cursor's turn: it opens at a leader's mark, then reads its next range at its leader.
+    fn cursor_turn(&mut self, w: &mut World, client: u32) {
+        if !self.cursors.contains_key(&client) {
+            let at = self.mark_now(w);
+            if at.physical > 0 {
+                self.cursors.insert(client, Cursor::new(format!("c{client}"), at));
+            }
+            return;
+        }
+        let Some(c) = self.cursors.get_mut(&client) else { return };
+        if c.busy() {
+            return;
+        }
+        let Some(key) = c.next() else { return };
+        let Some(g) = self.engine.range_of(&key) else { return };
+        let Some(range_end) = self.engine.bounds(g).map(|(_, e)| e.clone()) else { return };
+        let Some(node) = self.engine.leader(w, g) else { return };
+        let (now, _) = MultiRangeWorkload::times(w, node);
+        let core = self.engine.core();
+        let c = self.cursors.get_mut(&client).expect("the cursor found above");
+        c.sent(&range_end);
+        let stop = c.stop_key();
+        let (Some(host), Some(cc)) = (self.engine.host(node), w.cluster_core(node, core)) else {
+            if let Some(c) = self.cursors.get_mut(&client) {
+                c.lost();
+            }
+            return;
+        };
+        let from = self.cursors[&client].from();
+        let req = teseladb_range::host::ChangesReq { g, start: key, end: stop, from };
+        let id = host.changes(cc, req, now);
+        self.pending.insert((node, id), Asker::Feed(client));
+        self.engine.pump(w, node);
+        w.settle(node, core);
+    }
+
+    /// The `changestream_delivery` checker over the cursors.
+    fn check_streams(&self) -> Result<(), Violation> {
+        let mut committed = Vec::new();
+        let mut unknown = Vec::new();
+        for (tag, fate) in &self.fates {
+            match fate {
+                Fate::Committed(ts) => {
+                    committed.extend(changestream::committed(*tag, *ts, &self.keys_of(*tag)))
+                }
+                Fate::Unknown => unknown.push((*tag, self.keys_of(*tag))),
+                Fate::Not => {}
+            }
+        }
+        let logs: Vec<_> = self.cursors.values().map(|c| &c.log).collect();
+        changestream::check(&committed, &unknown, &logs)
+    }
+
     /// The keys tag `tag` was written on.
     fn keys_of(&self, tag: u64) -> Vec<Vec<u8>> {
         self.keys.get(&tag).cloned().unwrap_or_default()
@@ -431,7 +532,7 @@ impl SplitsWorkload {
 
 impl Workload for SplitsWorkload {
     fn name(&self) -> &'static str {
-        PROFILE.name
+        if self.streams { STREAMS.name } else { PROFILE.name }
     }
 
     fn cluster(&self) -> bool {
@@ -440,7 +541,8 @@ impl Workload for SplitsWorkload {
 
     fn start(&mut self, w: &mut World) {
         self.engine.start(w);
-        for client in CLIENTS..CLIENTS + TXN_CLIENTS {
+        let cursors = if self.streams { CURSORS } else { 0 };
+        for client in CLIENTS..CLIENTS + TXN_CLIENTS + cursors {
             MultiRangeWorkload::next_turn(w, client);
         }
     }
@@ -448,6 +550,9 @@ impl Workload for SplitsWorkload {
     fn on_client(&mut self, w: &mut World, client: u32) {
         if client < CLIENTS {
             self.engine.on_client(w, client);
+        } else if client >= CLIENTS + TXN_CLIENTS {
+            self.cursor_turn(w, client);
+            MultiRangeWorkload::next_turn(w, client);
         } else {
             let busy = self.writers.contains_key(&client) || self.readers.contains_key(&client);
             if !busy {
@@ -489,7 +594,8 @@ impl Workload for SplitsWorkload {
 
     fn finish(&mut self, w: &mut World) -> Result<(), Violation> {
         self.engine.finish(w)?;
-        self.check()
+        self.check()?;
+        if self.streams { self.check_streams() } else { Ok(()) }
     }
 }
 
