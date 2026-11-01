@@ -54,6 +54,8 @@ codes! {
     AUTHENTICATION_FAILED = 18, "AuthenticationFailed";
     /// Invalid BSON.
     INVALID_BSON = 22, "InvalidBSON";
+    /// Already set up, differently (`shardCollection` with another key, 018).
+    ALREADY_INITIALIZED = 23, "AlreadyInitialized";
     /// Collection missing where one is required.
     NAMESPACE_NOT_FOUND = 26, "NamespaceNotFound";
     /// Cursor expired, killed or of another node.

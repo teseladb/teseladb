@@ -92,6 +92,7 @@ fn options_from(cmd: &Document) -> Document {
 pub(crate) fn options_of(c: &CollectionEntry) -> Result<Document, CommandError> {
     let mut options = stored_options(c)?;
     options.remove(ID_INDEX_VERSION);
+    options.remove(super::sharding::SHARD_KEY);
     Ok(options)
 }
 
@@ -597,8 +598,11 @@ pub fn coll_mod<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, C
     if prepared && !upgrade {
         options.push(PREPARE_CONSTRAINT, true);
     }
-    if let Some(version) = stored_options(&c)?.get(ID_INDEX_VERSION) {
-        options.push(ID_INDEX_VERSION, version.clone());
+    let stored = stored_options(&c)?;
+    for hidden in [ID_INDEX_VERSION, super::sharding::SHARD_KEY] {
+        if let Some(v) = stored.get(hidden) {
+            options.push(hidden, v.clone());
+        }
     }
     let bytes = options.to_bytes()?;
     super::write_block::ddl(ctx.backend, &ns.db)?;

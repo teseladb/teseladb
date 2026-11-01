@@ -12,8 +12,10 @@ use teseladb_meta::security::{Principal, Security, SecurityError, SecurityOp};
 use teseladb_range::host::Mutation;
 use teseladb_range::read::ReadConcern;
 use teseladb_session::retry::StatementKey;
+use teseladb_wire::commands::config_db::COLLECTIONS;
 use teseladb_wire::commands::mutation::Bound;
 use teseladb_wire::commands::session::KillScope;
+use teseladb_wire::commands::sharding;
 use teseladb_wire::commands::{Backend, Ctx, LdapLogin, Shared, WriteOp, run};
 use teseladb_wire::error::{
     CommandError, DATABASE_DIFFER_CASE, INTERNAL_ERROR, NAMESPACE_EXISTS, NAMESPACE_NOT_FOUND,
@@ -694,6 +696,15 @@ impl Backend for Mem {
             }
             teseladb_wire::commands::config_settings::SETTINGS => {
                 self.settings.clone().unwrap_or_default()
+            }
+            COLLECTIONS => {
+                let mut out = Vec::new();
+                for (ns, c) in &self.catalog.collections {
+                    if let Some(k) = sharding::shard_key_of(c)? {
+                        out.push(sharding::config_entry(ns, c, &k));
+                    }
+                }
+                out
             }
             _ => Vec::new(),
         })
