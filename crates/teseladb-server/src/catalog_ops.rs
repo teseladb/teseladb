@@ -29,6 +29,8 @@ pub enum CatalogReq {
     Indexes(u32),
     /// A change of the secondary indexes (009).
     Index(IndexCommand),
+    /// Settings changed together, each as it was read (`config.settings`, 007 FR-017).
+    SetSettings(Vec<teseladb_meta::command::SettingChange>),
     /// A change of a cluster setting.
     SetSetting {
         /// Key.
@@ -54,6 +56,11 @@ pub enum CatalogReq {
     },
     /// A batch of changes of the users and roles, made idempotent by the caller (013).
     Security(Group0Command),
+    /// The documents of a collection of `config` generated from this node's copy (007).
+    Config(String),
+    /// The catalog and the index definitions of this node's copy, encoded as
+    /// `RestoreCatalog` carries them, for a backup (007 FR-021).
+    Dump,
 }
 
 /// The answer to a [`CatalogReq`].
@@ -68,6 +75,10 @@ pub enum CatalogAnswer {
     Indexes(Vec<IndexEntry>, u64),
     /// Documents of users or roles.
     Principals(Vec<Vec<u8>>),
+    /// The catalog and the index definitions, encoded (`CatalogReq::Dump`).
+    Dump(Vec<u8>),
+    /// Documents of a generated collection of `config`, in BSON.
+    Documents(Vec<Vec<u8>>),
     /// The change was applied: the collection it created or found.
     Done(Option<CollectionEntry>),
     /// Group 0 refused the change.
@@ -177,10 +188,12 @@ fn applied(index: u64, r: Result<Done<CoreOutput>, OpError>) -> Option<Applied> 
             let result = match res {
                 Group0Result::Collection(c) => Ok(Some(c)),
                 Group0Result::Err(e) => Err(e),
+                // A catalog change is never an order on a descriptor: `Meta1` never answers it.
                 Group0Result::Ok
                 | Group0Result::Node(_)
                 | Group0Result::Range(_)
-                | Group0Result::Index(_) => Ok(None),
+                | Group0Result::Index(_)
+                | Group0Result::Meta1(_) => Ok(None),
             };
             Some(Applied { index, result })
         }

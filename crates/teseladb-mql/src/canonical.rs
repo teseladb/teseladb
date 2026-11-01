@@ -6,8 +6,11 @@
 
 use crate::parse::{BitsOp, CmpOp, Expr, Pred};
 
+/// The rank of `$in`.
+pub(crate) const IN_RANK: u8 = 13;
+
 /// The rank of a predicate's kind, in the order of RefDb's `MatchType`.
-fn pred_rank(p: &Pred) -> u8 {
+pub(crate) fn pred_rank(p: &Pred) -> u8 {
     match p {
         Pred::And(_) => 0,
         Pred::ElemMatchDoc(_) => 2,
@@ -21,7 +24,7 @@ fn pred_rank(p: &Pred) -> u8 {
         Pred::Regex(_) => 10,
         Pred::Mod { .. } => 11,
         Pred::Exists => 12,
-        Pred::In(_) => 13,
+        Pred::In(_) => IN_RANK,
         Pred::Bits(BitsOp::AllSet, _) => 14,
         Pred::Bits(BitsOp::AllClear, _) => 15,
         Pred::Bits(BitsOp::AnySet, _) => 16,
@@ -31,14 +34,15 @@ fn pred_rank(p: &Pred) -> u8 {
         Pred::Geo(g) if g.near => 27,
         Pred::Geo(_) => 21,
         // After every user-facing kind, as RefDb's internal match types.
-        Pred::ExprCmp(CmpOp::Gt, _) => 28,
-        Pred::ExprCmp(CmpOp::Gte, _) => 29,
-        Pred::ExprCmp(CmpOp::Lt, _) => 30,
-        Pred::ExprCmp(CmpOp::Lte, _) => 31,
+        Pred::ExprEq(_) => 28,
+        Pred::ExprCmp(CmpOp::Gt, _) => 29,
+        Pred::ExprCmp(CmpOp::Gte, _) => 30,
+        Pred::ExprCmp(CmpOp::Lt, _) => 31,
+        Pred::ExprCmp(CmpOp::Lte, _) => 32,
     }
 }
 
-fn expr_rank(e: &Expr) -> (u8, &str) {
+pub(crate) fn expr_rank(e: &Expr) -> (u8, &str) {
     match e {
         Expr::And(_) => (0, ""),
         Expr::Or(_) => (1, ""),
@@ -49,7 +53,7 @@ fn expr_rank(e: &Expr) -> (u8, &str) {
         Expr::False => (24, ""),
         Expr::True => (25, ""),
         Expr::Text(_) => (26, ""),
-        Expr::JsonSchema(_) => (28, ""),
+        Expr::JsonSchema(_) => (33, ""),
     }
 }
 

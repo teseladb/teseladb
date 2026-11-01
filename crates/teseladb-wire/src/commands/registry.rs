@@ -64,6 +64,7 @@ fn statement(filter: Document, update: Option<Value>, multi: bool) -> Modify {
         sort: None,
         image: Image::None,
         vars: None,
+        hint: None,
     }
 }
 

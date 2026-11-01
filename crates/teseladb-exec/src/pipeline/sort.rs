@@ -26,7 +26,9 @@ pub(crate) fn check_path(path: &str) -> Result<(), MqlError> {
     if let Some(seg) = path.split('.').find(|s| s.starts_with('$')) {
         return Err(error(
             FIELD_DOLLAR,
-            format!("FieldPath field names may not start with '$', given '{seg}'."),
+            format!(
+                "Consider using $getField or $setField for a field path with '.' or '$'. :: caused by :: FieldPath field names may not start with '$', given '{seg}'."
+            ),
         ));
     }
     Ok(())
@@ -67,9 +69,8 @@ impl SortSpec {
         doc: &Document,
         col: Option<&dyn teseladb_bson::Collator>,
     ) -> Result<Vec<Value>, MqlError> {
-        let bytes = doc.to_bytes().map_err(|e| error(super::errors::BAD_VALUE, e.to_string()))?;
-        let raw = RawDoc::from_bytes(&bytes)
-            .map_err(|e| error(super::errors::BAD_VALUE, e.to_string()))?;
+        let bytes = crate::raw::bytes_of(doc)?;
+        let raw = RawDoc::from_bytes(&bytes).map_err(crate::raw::bad)?;
         let mut keys = Vec::with_capacity(self.keys.len());
         let mut arrays = 0;
         for (path, asc) in &self.keys {
@@ -113,17 +114,8 @@ impl SortSpec {
             .into_iter()
             .map(|d| Ok((self.key(&d, col)?, d)))
             .collect::<Result<_, MqlError>>()?;
-        let mut failure = None;
-        keyed.sort_by(|(a, _), (b, _)| {
-            self.compare(a, b, col).unwrap_or_else(|e| {
-                failure.get_or_insert(e);
-                Ordering::Equal
-            })
-        });
-        match failure {
-            Some(e) => Err(e),
-            None => Ok(keyed.into_iter().map(|(_, d)| d).collect()),
-        }
+        crate::expr::try_sort_by(&mut keyed, |(a, _), (b, _)| self.compare(a, b, col))?;
+        Ok(keyed.into_iter().map(|(_, d)| d).collect())
     }
 }
 

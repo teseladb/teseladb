@@ -8,6 +8,38 @@ use teseladb_exec::expr::{Expr, Scope};
 use teseladb_index::geo::query::{GeoOperator, matches, parse_query};
 use teseladb_mql::{Extensions, GeoQuery, MqlError, NoExtensions, Result, TextQuery, codes};
 
+/// The shape of a `$geoWithin` or `$geoIntersects`; every error of a shape is a `BadValue`
+/// (`teseladb_index::geo::query::BAD_VALUE`).
+fn geo_shape(op: GeoOperator, query: &GeoQuery) -> Result<teseladb_index::geo::query::Shape> {
+    parse_query(op, query.spec.get()).map_err(|e| MqlError::new(codes::BAD_VALUE, e.message))
+}
+
+/// Checks the shapes of the geospatial operators of `filter` before any document is read, as
+/// RefDb parses them with the query.
+pub fn check_geo(filter: &teseladb_mql::Filter) -> Result<()> {
+    use teseladb_mql::{Expr as F, Pred};
+    fn pred(p: &Pred) -> Result<()> {
+        match p {
+            Pred::Geo(g) => match GeoOperator::of(&g.operator) {
+                Some(op) if !g.near => geo_shape(op, g).map(|_| ()),
+                _ => Ok(()),
+            },
+            Pred::And(ps) => ps.iter().try_for_each(pred),
+            Pred::Not(p) | Pred::ElemMatchValue(p) => pred(p),
+            Pred::ElemMatchDoc(e) => walk(e),
+            _ => Ok(()),
+        }
+    }
+    fn walk(e: &F) -> Result<()> {
+        match e {
+            F::And(items) | F::Or(items) | F::Nor(items) => items.iter().try_for_each(walk),
+            F::Field { pred: p, .. } => pred(p),
+            _ => Ok(()),
+        }
+    }
+    walk(filter.expr())
+}
+
 /// The node's extensions.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NodeExtensions;
@@ -32,10 +64,7 @@ impl Extensions for NodeExtensions {
             Some(op) if !query.near => op,
             _ => return NoExtensions.geo(query, value),
         };
-        // Every error of a shape is a `BadValue` (`teseladb_index::geo::query::BAD_VALUE`).
-        let shape = parse_query(op, query.spec.get())
-            .map_err(|e| MqlError::new(codes::BAD_VALUE, e.message))?;
-        Ok(matches(&shape, value))
+        Ok(matches(&geo_shape(op, query)?, value))
     }
 
     fn random(&self) -> f64 {
@@ -53,6 +82,18 @@ impl Extensions for NodeExtensions {
         vars: Option<&Document>,
     ) -> Result<Option<Value>> {
         let (expr, d) = (Expr::parse(e)?, Document::from(doc));
+        expr.eval(&d, &Scope::new(d.clone(), vars))
+    }
+
+    fn eval_projection(
+        &self,
+        e: RawValue<'_>,
+        doc: RawDoc<'_>,
+        vars: Option<&Document>,
+    ) -> Result<Option<Value>> {
+        let expr =
+            teseladb_exec::pipeline::projected_expr(e, &teseladb_exec::expr::Ctx::default())?;
+        let d = Document::from(doc);
         expr.eval(&d, &Scope::new(d.clone(), vars))
     }
 

@@ -107,14 +107,16 @@ impl Bounds {
             return Ok(false);
         }
         let Some(want) = &self.meta else { return Ok(true) };
-        let holder = Document::new()
-            .with("v", want.clone())
-            .to_bytes()
-            .map_err(|e| TsError::Malformed(e.to_string()))?;
-        let want = RawDoc::from_bytes(&holder).map_err(|e| TsError::Malformed(e.to_string()))?;
+        let holder = Document::new().with("v", want.clone()).to_bytes().map_err(malformed)?;
+        let want = RawDoc::from_bytes(&holder).map_err(malformed)?;
         Ok(match (bucket.get(META), want.get("v")) {
             (Some(have), Some(want)) => compare(have, want, None) == Ordering::Equal,
             _ => false,
         })
     }
+}
+
+/// A meta bound that cannot be written as BSON (past its depth) cannot be compared.
+fn malformed(e: teseladb_bson::BsonError) -> TsError {
+    TsError::Malformed(e.to_string())
 }

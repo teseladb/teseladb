@@ -544,3 +544,26 @@ fn a_split_keeps_versions_and_intents_on_their_side_and_loses_nothing() {
     assert_eq!(core.get(b"\x01c", ts(95)), Some(vec![b'c']));
     assert_eq!(core.get(b"\x01r", ts(95)), Some(vec![b'r']));
 }
+
+/// Data a restore ingested (018) is not in the log: from the index the range applied then, no
+/// replica rebuilds it from the entries, and the snapshot that leaves holds it. A replica opened
+/// over its LSM, or restored from a snapshot, takes what it holds as that index.
+#[test]
+fn data_ingested_without_the_log_raises_the_log_floor() {
+    let mut core = Core::new();
+    let mut g = core.open(G, START, END);
+    assert_eq!(g.log_floor(), 0, "the whole log rebuilds a new range");
+    apply(&mut g, G, 1, ts(10), &write(b"\x01b", 1, 1)).unwrap();
+    apply(&mut g, G, 2, ts(20), &write(b"\x01c", 1, 2)).unwrap();
+    g.data_ingested();
+    assert_eq!((g.log_floor(), g.snapshot_floor()), (2, 2));
+    apply(&mut g, G, 3, ts(30), &write(b"\x01d", 1, 3)).unwrap();
+    assert_eq!(g.log_floor(), 2, "a write does not move it");
+    let snap = g.snapshot();
+    core.lsm.borrow_mut().flush();
+    core.lsm.borrow_mut().run_io(&mut core.disk, Nanos::ZERO);
+    let (mut other, _) = try_open_running_io(&mut core, G, END);
+    assert_eq!(other.log_floor(), 3, "what the LSM flushed");
+    other.restore(&snap).unwrap();
+    assert_eq!(other.log_floor(), 3, "the snapshot's index");
+}

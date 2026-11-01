@@ -9,5 +9,6 @@ pub(crate) mod accum;
 pub mod collation;
 pub mod expr;
 pub mod pipeline;
+pub(crate) mod raw;
 pub mod timeseries_read;
 pub(crate) mod window;

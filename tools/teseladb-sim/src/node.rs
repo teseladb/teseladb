@@ -26,6 +26,10 @@ pub trait RegisteredSm {
     fn restore(&mut self, snap: &[u8]) -> Result<(), RestoreError>;
     /// Index of the last entry applied or skipped.
     fn applied_index(&self) -> u64;
+    /// Its state, for a workload that reads it (007: a Meta2 range).
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        None
+    }
 }
 
 /// Builds an empty registered state machine.
@@ -113,6 +117,14 @@ impl NodeSm {
     pub fn kv(&self) -> Option<&TestKv> {
         match self {
             NodeSm::Kv(sm) => Some(sm),
+            _ => None,
+        }
+    }
+
+    /// A registered state machine's state of type `T`, if it is one and shows it.
+    pub fn registered<T: 'static>(&self) -> Option<&T> {
+        match self {
+            NodeSm::Registered(sm) => sm.as_any()?.downcast_ref(),
             _ => None,
         }
     }

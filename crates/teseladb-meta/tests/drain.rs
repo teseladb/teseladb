@@ -104,6 +104,10 @@ fn only_a_node_that_holds_nothing_is_removed() {
     sm.nodes.get_mut(&n(4)).unwrap().state = NodeState::Draining;
     let err = remove(&sm, &[n(1), n(2), n(4)], n(4)).unwrap_err();
     assert!(err.to_string().contains("votes in Group 0"), "{err}");
+    let err = DrainError::StillHolds { node: n(3), replicas: 2, group0_voter: false };
+    assert_eq!(err.to_string(), "node 3 still holds 2 replicas: drain it first");
+    assert_eq!(DrainError::UnknownNode(n(9)).to_string(), "node 9 is not in the cluster");
+    assert_eq!(DrainError::Removed(n(4)).to_string(), "node 4 is already removed");
 }
 
 #[test]

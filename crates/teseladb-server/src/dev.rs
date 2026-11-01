@@ -21,6 +21,15 @@ const READY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Starts the development cluster; `seed` fixes the elections.
 pub fn start(o: &DevOpts, seed: Option<u64>) -> Result<Vec<Node<MemDisk>>, NodeError> {
+    start_within(o, seed, READY_TIMEOUT)
+}
+
+/// [`start`], with `ready` for the first node to create the cluster.
+pub fn start_within(
+    o: &DevOpts,
+    seed: Option<u64>,
+    ready: Duration,
+) -> Result<Vec<Node<MemDisk>>, NodeError> {
     let cfg = |join: Vec<String>, k: u16| NodeConfig {
         cores: Some(o.cores),
         join,
@@ -36,7 +45,7 @@ pub fn start(o: &DevOpts, seed: Option<u64>) -> Result<Vec<Node<MemDisk>>, NodeE
         ..NodeConfig::default()
     };
     let founder = Node::start(cfg(Vec::new(), 0), || Ok(MemDisk::new()), None)?;
-    if !founder.wait_ready(READY_TIMEOUT) {
+    if !founder.wait_ready(ready) {
         founder.stop();
         return Err(NodeError::Join("the first node did not create the cluster".into()));
     }
@@ -73,14 +82,9 @@ pub fn run(o: &DevOpts, out: &mut dyn Write, err: &mut dyn Write, stop: &dyn Fn(
             &n.peer_addr().to_string(),
         );
         let _ = out.write_all(line.as_bytes());
-        for a in n.client_addrs() {
-            log.info("clients' port", &[("node_id", &n.node_id().0), ("addr", &a.to_string())]);
-        }
-        if let Some(a) = n.admin_addr() {
-            log.info(
-                "administration port",
-                &[("node_id", &n.node_id().0), ("addr", &a.to_string())],
-            );
+        let clients = n.client_addrs().iter().map(|&a| ("clients' port", a));
+        for (port, a) in clients.chain(n.admin_addr().map(|a| ("administration port", a))) {
+            log.info(port, &[("node_id", &n.node_id().0), ("addr", &a.to_string())]);
         }
     }
     let _ = out.flush();

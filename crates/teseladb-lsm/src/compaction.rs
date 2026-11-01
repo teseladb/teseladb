@@ -290,7 +290,7 @@ impl CompactJob {
             dir: cfg.dir.clone(),
             chunk: cfg.io_chunk_bytes,
             block_bytes: cfg.block_bytes,
-            compress: cfg.compress,
+            compress: cfg.codec == crate::config::Codec::Zlib,
             encryption: cfg.encryption.clone(),
             target: cfg.target_file_bytes,
         }

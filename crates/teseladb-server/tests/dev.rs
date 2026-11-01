@@ -90,3 +90,62 @@ fn one_node_is_a_cluster_of_its_own() {
     assert_eq!((v[0].role, v[0].voters.as_slice()), (Some(Role::Leader), &[NodeId(1)][..]));
     nodes.into_iter().for_each(|n| drop(n.stop()));
 }
+
+/// A node after the first one that cannot start stops the ones already started and fails the
+/// cluster with its error: node 2 of a cluster on base port P takes P + 1, which another process
+/// holds, while the first node alone starts on P.
+#[test]
+fn a_node_that_cannot_start_stops_the_cluster() {
+    let (base, busy) = two_ports();
+    let o = |nodes| DevOpts { nodes, cores: 1, port: base, test_commands: false };
+    let alone = dev::start(&o(1), Some(3)).expect("the first node alone starts on P");
+    alone.into_iter().for_each(|n| drop(n.stop()));
+    match dev::start(&o(2), Some(3)) {
+        Err(teseladb_server::node::NodeError::Io(e)) => {
+            assert_eq!(e.kind(), std::io::ErrorKind::AddrInUse, "{e}");
+        }
+        Err(e) => panic!("{e}"),
+        Ok(_) => panic!("node 2 started on a port in use"),
+    }
+    // The first node let its port go.
+    drop(std::net::TcpListener::bind(("127.0.0.1", base)).expect("P is free again"));
+    drop(busy);
+}
+
+/// A free port P and a listener on P + 1. The system hands out its ports in order, so a port
+/// next to one it just gave may be another test's: both are held until P is needed.
+fn two_ports() -> (u16, std::net::TcpListener) {
+    use std::net::TcpListener;
+    for _ in 0..100 {
+        let first = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = first.local_addr().unwrap().port();
+        let Some(next) = port.checked_add(1) else { continue };
+        if let Ok(busy) = TcpListener::bind(("127.0.0.1", next)) {
+            return (port, busy);
+        }
+    }
+    panic!("no two free ports in a row on loopback");
+}
+
+/// A first node that does not create the cluster in time is stopped and the cluster fails.
+#[test]
+fn a_first_node_not_ready_in_time_fails_the_cluster() {
+    let o = DevOpts { nodes: 2, cores: 1, port: 0, test_commands: false };
+    match dev::start_within(&o, Some(3), Duration::ZERO) {
+        Err(e) => assert_eq!(e.to_string(), "the first node did not create the cluster"),
+        Ok(_) => panic!("ready in no time"),
+    }
+}
+
+/// `teseladb dev` whose first node cannot start ends with 1 and says why, before any ready line.
+#[test]
+fn the_development_cluster_that_cannot_start_ends_with_1() {
+    let busy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = busy.local_addr().unwrap().port();
+    let o = DevOpts { nodes: 1, cores: 1, port, test_commands: false };
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    assert_eq!(dev::run(&o, &mut out, &mut err, &|| true), 1);
+    assert!(out.is_empty());
+    let err = String::from_utf8(err).unwrap();
+    assert!(err.starts_with("teseladb: ") && err.ends_with('\n'), "{err}");
+}

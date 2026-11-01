@@ -30,7 +30,7 @@ pub fn parse_error(filter: &Document) -> Result<(), CommandError> {
         }
     }
     let bytes = filter.to_bytes()?;
-    Filter::parse(RawDoc::from_bytes(&bytes)?, FilterUse::Query)
+    Filter::parse(RawDoc::from_bytes(&bytes)?, FilterUse::Index)
         .map(drop)
         .map_err(super::mutation::from_mql)
 }

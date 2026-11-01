@@ -4,11 +4,11 @@
 //! `pattern` in the syntax of `java.util.regex.Pattern`, see [`super::jregex`]) and the behaviour
 //! measured on `refsearch` 1.70.6 (`tests/fixtures/refsearch/tokenizers/`).
 //!
-//! `standard` keeps the UAX #29 word segments that hold a letter, a number (word-break classes
-//! ALetter, Hebrew_Letter, Numeric, Katakana), a pair of regional indicators, a pictograph, an
-//! ideograph or a Hiragana character, without the characters before the first of them (a `_` or
-//! a ZWJ before a pictograph stays) and cut before a pictograph a ZWJ joins to a word; runs of
-//! Thai, Lao, Myanmar, Khmer and the Tai scripts stay one token. A word longer than
+//! `standard` keeps the UAX #29 word segments, by the Unicode 12.1 classes, that hold a letter, a
+//! number (word-break classes ALetter, Hebrew_Letter, Numeric, Katakana), a pair of regional
+//! indicators, a pictograph, a Han or a Hiragana character, without the characters before the
+//! first of them (a `_` or a ZWJ before a pictograph stays) and cut before a pictograph a ZWJ
+//! joins to a word; runs of Line_Break=SA (Thai, Lao, Myanmar, Khmer and others) stay one token. A word longer than
 //! `maxTokenLength` UTF-16 code units is cut there and the text after the cut is segmented anew.
 //! `whitespace` cuts at Java's white space (not at no-break spaces) and ends a token once it holds
 //! `maxTokenLength` units. `nGram` emits every run of `minGram` to `maxGram` characters of the
@@ -19,14 +19,16 @@
 //! `regexCaptureGroup` emits the non-empty text of group `group` of each match (0 for the whole
 //! match) and skips matches where the group takes no part.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use super::charfilters::Filtered;
 use super::jregex::{JavaRegex, RegexError};
-use super::props::{Binary, has, script, script_names};
+use super::props::category;
 use super::tokenfilters::is_java_whitespace;
 use super::uax29::word_segments;
-use super::unicode::{WordBreak, is_pictographic, word_break};
+use super::unicode::{
+    WordBreak, is_complex_context, is_han, is_hiragana, is_pictographic, word_break,
+};
 use super::urlemail::{email, url};
 
 /// The default and documented `maxTokenLength`.
@@ -90,6 +92,11 @@ pub enum Tokenizer {
         /// Longest token, in characters.
         max_token_length: usize,
     },
+    /// Runs of letters (general category L), the tokenizer of `reflib.simple`.
+    Letter {
+        /// Longest token, in characters.
+        max_token_length: usize,
+    },
     /// The whole text.
     Keyword,
     /// Every run of `min..=max` characters.
@@ -141,6 +148,7 @@ pub fn check(tokenizer: Tokenizer) -> Result<Tokenizer, TokenizerError> {
     match tokenizer {
         Tokenizer::Standard { max_token_length }
         | Tokenizer::Whitespace { max_token_length }
+        | Tokenizer::Letter { max_token_length }
         | Tokenizer::UaxUrlEmail { max_token_length }
             if max_token_length == 0 =>
         {
@@ -164,6 +172,24 @@ struct Emitter<'a> {
 }
 
 impl Emitter<'_> {
+    /// Emits the runs of characters that `in_token` accepts, cut into pieces of at most `max`
+    /// characters.
+    fn emit_runs(&mut self, in_token: impl Fn(char) -> bool, max: usize) {
+        let text = &self.input.text;
+        let mut start = None;
+        for (i, c) in text.char_indices().chain([(text.len(), '\0')]) {
+            let inside = i < text.len() && in_token(c);
+            match (inside, start) {
+                (false, Some(s)) => {
+                    self.emit_chunks(s, i, max);
+                    start = None;
+                }
+                (true, None) => start = Some(i),
+                _ => {}
+            }
+        }
+    }
+
     /// Emits filtered bytes `from..to`.
     fn emit(&mut self, from: usize, to: usize) {
         let position = self.out.len() as u32;
@@ -330,17 +356,10 @@ impl Tokenizer {
                 }
             }
             &Tokenizer::Whitespace { max_token_length } => {
-                let mut start = None;
-                for (i, c) in text.char_indices().chain([(text.len(), ' ')]) {
-                    match (is_java_whitespace(c), start) {
-                        (true, Some(s)) => {
-                            e.emit_chunks(s, i, max_token_length);
-                            start = None;
-                        }
-                        (false, None) => start = Some(i),
-                        _ => {}
-                    }
-                }
+                e.emit_runs(|c| !is_java_whitespace(c), max_token_length);
+            }
+            &Tokenizer::Letter { max_token_length } => {
+                e.emit_runs(|c| matches!(category(c), 1..=5), max_token_length);
             }
             Tokenizer::Keyword => {
                 if !text.is_empty() {
@@ -373,48 +392,28 @@ fn cut_point(word: &str, max: usize) -> Option<usize> {
     None
 }
 
-/// Scripts written without spaces whose runs stay one token (Unicode's line-break class SA).
-const SOUTH_EAST_ASIAN: &[&str] =
-    &["Thai", "Lao", "Myanmar", "Khmer", "Tai_Le", "New_Tai_Lue", "Tai_Tham", "Tai_Viet"];
-
-/// Scripts whose characters are one token each.
-const ONE_PER_CHARACTER: &[&str] = &["Hiragana"];
-
-/// The indexes in [`script_names`] of `names`.
-fn script_set(names: &[&str]) -> Vec<usize> {
-    script_names()
-        .iter()
-        .enumerate()
-        .filter(|(_, aliases)| aliases.split(';').any(|a| names.contains(&a)))
-        .map(|(i, _)| i)
-        .collect()
-}
-
-fn in_scripts(c: char, set: &OnceLock<Vec<usize>>, names: &[&str]) -> bool {
-    script(c).is_some_and(|s| set.get_or_init(|| script_set(names)).contains(&s))
-}
-
-fn south_east_asian(c: char) -> bool {
-    static SET: OnceLock<Vec<usize>> = OnceLock::new();
-    in_scripts(c, &SET, SOUTH_EAST_ASIAN)
+/// Whether `c` is an emoji skin-tone modifier.
+fn emoji_modifier(c: char) -> bool {
+    matches!(c, '\u{1F3FB}'..='\u{1F3FF}')
 }
 
 /// Whether a segment holding `c` is a token: letters, numbers, Katakana, regional indicators,
-/// pictographs, ideographs, Hiragana and the scripts of [`SOUTH_EAST_ASIAN`]. A segment of
-/// other characters (punctuation, symbols, `½`, `²`) is not.
+/// pictographs, emoji skin-tone modifiers, Han, Hiragana and the characters of Line_Break=SA. A
+/// segment of other characters (punctuation, symbols, `½`, `²`) is not.
 fn token_character(c: char) -> bool {
-    static HIRAGANA: OnceLock<Vec<usize>> = OnceLock::new();
-    matches!(
-        word_break(c),
-        WordBreak::ALetter
-            | WordBreak::HebrewLetter
-            | WordBreak::Numeric
-            | WordBreak::Katakana
-            | WordBreak::RegionalIndicator
-    ) || is_pictographic(c)
-        || has(c, Binary::Ideographic)
-        || in_scripts(c, &HIRAGANA, ONE_PER_CHARACTER)
-        || south_east_asian(c)
+    emoji_modifier(c)
+        || matches!(
+            word_break(c),
+            WordBreak::ALetter
+                | WordBreak::HebrewLetter
+                | WordBreak::Numeric
+                | WordBreak::Katakana
+                | WordBreak::RegionalIndicator
+        )
+        || is_pictographic(c)
+        || is_han(c)
+        || is_hiragana(c)
+        || is_complex_context(c)
 }
 
 /// Prepended_Concatenation_Mark (PropList.txt of Unicode 15.1.0): Numeric to UAX #29, yet no
@@ -462,7 +461,7 @@ fn trim_and_split(at: usize, w: &str) -> Vec<(usize, &str)> {
             from = offset;
             word = false;
         }
-        if token_character(c) && !is_pictographic(c) {
+        if token_character(c) && !is_pictographic(c) && !emoji_modifier(c) {
             word = true;
         }
     }
@@ -470,13 +469,33 @@ fn trim_and_split(at: usize, w: &str) -> Vec<(usize, &str)> {
     out
 }
 
+/// `w` cut at each text presentation selector (U+FE0E) that follows a pictograph, with the
+/// selector left out: the pictograph ends its token there and the rest is a segment of its own.
+fn text_presentation_pieces(w: &str) -> Vec<(usize, &str)> {
+    const TEXT_PRESENTATION: char = '\u{FE0E}';
+    let mut out = Vec::new();
+    let mut from = 0;
+    let mut last = None;
+    for (i, c) in w.char_indices() {
+        if c == TEXT_PRESENTATION && last.is_some_and(is_pictographic) {
+            out.push((from, &w[from..i]));
+            from = i + c.len_utf8();
+        }
+        if !matches!(word_break(c), WordBreak::Extend | WordBreak::Format) {
+            last = Some(c);
+        }
+    }
+    out.push((from, &w[from..]));
+    out
+}
+
 /// The UAX #29 segments of `text` that are tokens, with each run of segments of
-/// [`SOUTH_EAST_ASIAN`] scripts joined into one.
+/// characters of Line_Break=SA (Thai, Lao, Myanmar, Khmer and others) joined into one.
 fn words(text: &str) -> Vec<(usize, &str)> {
     let mut out: Vec<(usize, &str)> = Vec::new();
     let mut last_asian = false;
     for (at, w) in word_segments(text) {
-        let asian = w.chars().all(south_east_asian);
+        let asian = w.chars().all(is_complex_context);
         if asian
             && last_asian
             && let Some(prev) = out.last_mut()
@@ -493,7 +512,9 @@ fn words(text: &str) -> Vec<(usize, &str)> {
                     .chars()
                     .any(|c| token_character(c) && word_break(c) != WordBreak::RegionalIndicator);
         if w.chars().any(token_character) && !lone_flag {
-            out.extend(trim_and_split(at, w));
+            for (from, piece) in text_presentation_pieces(w) {
+                out.extend(trim_and_split(at + from, piece));
+            }
         } else {
             last_asian = false;
         }

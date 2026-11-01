@@ -21,11 +21,12 @@ use teseladb_meta::catalog::{CatalogCommand, CollectionEntry, Namespace};
 use teseladb_meta::indexes::{IndexCommand, IndexEntry};
 use teseladb_meta::security::{Principal, SecurityError, SecurityOp};
 use teseladb_range::host::RangeError;
-use teseladb_range::intents::{IntentOp, TxnId};
+use teseladb_range::intents::IntentOp;
 use teseladb_range::push::TxnView;
 use teseladb_range::read::ReadConcern;
 use teseladb_txn::commit_retry::{CommitAnswer, commit_answer};
 use teseladb_txn::coordinator::{Coordinator, Event, Outcome, Route, TxnError};
+use teseladb_txn::recovery::{Decision, Recovery, client_txn_id};
 use teseladb_txn::session_txn::{Ask, SessionError, SessionTxn, Verdict};
 use teseladb_types::{GroupId, Nanos};
 
@@ -37,13 +38,15 @@ use super::txn_ddl::{self, Created};
 use super::txn_stats;
 use super::{ANONYMOUS_UID, Backend, Shared, WriteOp, lock, uuid_text};
 use crate::error::{
-    CONFLICTING_OPERATION_IN_PROGRESS, CommandError, INTERNAL_ERROR, INVALID_OPTIONS,
-    MAX_TIME_MS_EXPIRED, NO_SUCH_TRANSACTION, OPERATION_NOT_SUPPORTED_IN_TRANSACTION, RangeContext,
-    TOO_MANY_OPEN_TRANSACTIONS, TRANSACTION_COMMITTED, TRANSACTION_TOO_LARGE, TRANSACTION_TOO_OLD,
-    TRANSIENT_TRANSACTION_ERROR, UNKNOWN_TRANSACTION_COMMIT_RESULT, WRITE_CONFLICT,
+    CONFLICTING_OPERATION_IN_PROGRESS, CommandError, FAILED_TO_SATISFY_READ_PREFERENCE,
+    INTERNAL_ERROR, INVALID_OPTIONS, MAX_TIME_MS_EXPIRED, NO_SUCH_TRANSACTION,
+    NOT_A_RETRYABLE_WRITE_COMMAND, OPERATION_NOT_SUPPORTED_IN_TRANSACTION, RECOVERY_TOKEN_REQUIRED,
+    RangeContext, SHARD_NOT_FOUND, TOO_MANY_OPEN_TRANSACTIONS, TRANSACTION_COMMITTED,
+    TRANSACTION_TOO_LARGE, TRANSACTION_TOO_OLD, TRANSIENT_TRANSACTION_ERROR,
+    TXN_NUMBER_NOT_ALLOWED, UNAUTHORIZED, UNKNOWN_TRANSACTION_COMMIT_RESULT, WRITE_CONFLICT,
     WRITE_CONFLICT_MESSAGE, from_range,
 };
-use crate::ops::TIME_LIMIT_MESSAGE;
+use crate::ops::{MAX_TIME_MS, TIME_LIMIT_MESSAGE};
 use teseladb_txn::uncertainty::{OnUncertain, on_uncertain, window_end};
 
 /// `commitTransaction`.
@@ -121,6 +124,8 @@ pub struct SessionTxns {
     reaped: Option<i64>,
     /// The last transaction that started, and whether a write ran in it: its `recoveryToken`.
     token: Option<(i64, bool)>,
+    /// A transaction a statement's error ended (008), until a command of it fails.
+    failed: Option<i64>,
 }
 
 impl SessionTxns {
@@ -158,21 +163,74 @@ fn flag(cmd: &Document, name: &str) -> Result<Option<bool>, CommandError> {
 }
 
 /// The transaction fields of `cmd`, `None` for a command outside a transaction.
+///
+/// The session fields are checked as a `refrouter` 9.0.4 checks them (measured): a `txnNumber`
+/// needs a session, `autocommit` needs a `txnNumber`, and a commit or an abort needs both.
 pub fn fields(name: &str, cmd: &Document) -> Result<Option<TxnFields>, CommandError> {
     let autocommit = flag(cmd, AUTOCOMMIT)?;
-    let start = flag(cmd, START_TRANSACTION)?.unwrap_or(false);
-    let ends = name == COMMIT_TRANSACTION || name == ABORT_TRANSACTION;
-    if autocommit.is_none() && !start && !ends {
+    let start = flag(cmd, START_TRANSACTION)?;
+    let ends = ends(name);
+    let (lsid, txn_number) = (super::args::lsid(cmd)?, super::args::txn_number(cmd)?);
+    let invalid = |msg: String| Err(CommandError::new(INVALID_OPTIONS, msg));
+    if txn_number.is_some() && lsid.is_none() {
+        return invalid(NUMBER_WITHOUT_SESSION.to_owned());
+    }
+    if autocommit.is_some() && txn_number.is_none() {
+        return invalid(AUTOCOMMIT_WITHOUT_NUMBER.to_owned());
+    }
+    if start.is_some() && autocommit.is_none() {
+        return invalid(teseladb_txn::session_txn::START_WITHOUT_AUTOCOMMIT.to_owned());
+    }
+    let (Some(lsid), Some(txn_number)) = (lsid, txn_number) else {
+        return match ends {
+            true => invalid(format!("{name} can only be run within a session")),
+            false => Ok(None),
+        };
+    };
+    if autocommit.is_none() && !ends {
         return Ok(None);
     }
-    let (Some(lsid), Some(txn_number)) = (super::args::lsid(cmd)?, super::args::txn_number(cmd)?)
-    else {
-        return Err(CommandError::new(
-            INVALID_OPTIONS,
-            "Transaction fields require a session id and a txnNumber",
-        ));
-    };
+    let start = start.unwrap_or(false);
     Ok(Some(TxnFields { lsid, txn_number, autocommit, start }))
+}
+
+/// Whether command `name` ends a transaction: `commitTransaction` or `abortTransaction`.
+pub fn ends(name: &str) -> bool {
+    name == COMMIT_TRANSACTION || name == ABORT_TRANSACTION
+}
+
+/// `errmsg` of a `txnNumber` without a session (measured on a `refrouter` 9.0.4).
+const NUMBER_WITHOUT_SESSION: &str =
+    "Transaction number requires a session ID to also be specified";
+/// `errmsg` of `autocommit` without a `txnNumber` (measured on a `refrouter` 9.0.4).
+const AUTOCOMMIT_WITHOUT_NUMBER: &str =
+    "'autocommit' field requires a transaction number to also be specified";
+
+/// The error of a `txnNumber` sent without `autocommit: false` to command `name`, as a `refrouter`
+/// 9.0.4 answers it (measured): only a retryable write takes it; the commands of
+/// [`ROUTER_COMMANDS`] take none at all.
+fn bare_txn_number(name: &str, cmd: &Document) -> Option<CommandError> {
+    let bare = cmd.get("lsid").is_some()
+        && cmd.get("txnNumber").is_some()
+        && cmd.get(AUTOCOMMIT).is_none()
+        && cmd.get(START_TRANSACTION).is_none();
+    if !bare || WRITES.contains(&name) {
+        return None;
+    }
+    if ROUTER_COMMANDS.contains(&name) {
+        return Some(CommandError::new(
+            TXN_NUMBER_NOT_ALLOWED,
+            "It is illegal to provide a txnNumber for this command",
+        ));
+    }
+    Some(CommandError::new(
+        NOT_A_RETRYABLE_WRITE_COMMAND,
+        format!(
+            "txnNumber may only be provided for multi-document transactions and retryable write \
+             commands. autocommit:false was not provided, and {name} is not a retryable write \
+             command."
+        ),
+    ))
 }
 
 /// The commands a statement of a transaction can be (measured on a `refrouter` 9.0.4; `count` has a
@@ -235,6 +293,9 @@ pub fn refused_at_once(name: &str) -> bool {
 /// run, as a `refrouter` 9.0.4 answers it (measured); `None` for a command that is no statement or
 /// that a transaction runs.
 pub fn refused(name: &str, cmd: &Document) -> Option<CommandError> {
+    if let Some(e) = bare_txn_number(name, cmd) {
+        return Some(e);
+    }
     let f = fields(name, cmd).ok()??;
     let refuse = |msg: String| Some(CommandError::new(OPERATION_NOT_SUPPORTED_IN_TRANSACTION, msg));
     if name == KILL_CURSORS && f.start {
@@ -243,7 +304,9 @@ pub fn refused(name: &str, cmd: &Document) -> Option<CommandError> {
     if IN_TRANSACTION.contains(&name) || name == COUNT {
         return None;
     }
-    if ROUTER_COMMANDS.contains(&name) {
+    // `configureFailPoint` as the router refuses its own commands (measured on a `refrouter` 9.0.4
+    // with test commands; without them it does not exist, `dispatch`).
+    if ROUTER_COMMANDS.contains(&name) || name == crate::failpoint::CONFIGURE_FAIL_POINT {
         return refuse(NOT_SUPPORTED_IN_TRANSACTION.to_owned());
     }
     refuse(format!("Cannot run '{name}' in a multi-document transaction."))
@@ -268,11 +331,18 @@ fn session_error(e: SessionError, lsid: u128) -> CommandError {
             CONFLICTING_OPERATION_IN_PROGRESS,
             format!("txnNumber {n} txnRetryCounter 0 for session {session} already started"),
         ),
-        SessionError::NoSuchTransaction(n) => CommandError::new(
-            NO_SUCH_TRANSACTION,
-            format!("cannot continue txnId {n} for session {session} with txnRetryCounter 0"),
-        )
-        .with_label(TRANSIENT_TRANSACTION_ERROR),
+        SessionError::NoSuchTransaction { last } => {
+            let n = last.unwrap_or(-1);
+            CommandError::new(
+                NO_SUCH_TRANSACTION,
+                format!("cannot continue txnId {n} for session {session} with txnRetryCounter 0"),
+            )
+            .with_label(TRANSIENT_TRANSACTION_ERROR)
+        }
+        // Answered with the command's `recoveryToken` (`unrecorded`).
+        SessionError::Unrecorded { .. } => {
+            CommandError::new(RECOVERY_TOKEN_REQUIRED, RECOVERY_TOKEN_MISSING)
+        }
         SessionError::Committed(n) => CommandError::new(
             TRANSACTION_COMMITTED,
             format!("Transaction with {{ txnNumber: {n} }} has been committed."),
@@ -280,15 +350,18 @@ fn session_error(e: SessionError, lsid: u128) -> CommandError {
     }
 }
 
-/// The error of a statement or a commit that failed in the coordinator.
-fn txn_error(e: TxnError) -> CommandError {
+/// The error of a statement or a commit of transaction `txn_number` that failed in the
+/// coordinator.
+fn txn_error(e: TxnError, txn_number: i64) -> CommandError {
     match e {
         TxnError::WriteConflict => CommandError::new(WRITE_CONFLICT, WRITE_CONFLICT_MESSAGE)
             .with_label(TRANSIENT_TRANSACTION_ERROR),
-        TxnError::NoSuchTransaction => {
-            CommandError::new(NO_SUCH_TRANSACTION, "the transaction has been aborted")
-                .with_label(TRANSIENT_TRANSACTION_ERROR)
-        }
+        // As the shard answers through a `refrouter` 9.0.4 (measured on 01-11-2026).
+        TxnError::NoSuchTransaction => CommandError::new(
+            NO_SUCH_TRANSACTION,
+            format!("Transaction with {{ txnNumber: {txn_number} }} has been aborted."),
+        )
+        .with_label(TRANSIENT_TRANSACTION_ERROR),
         TxnError::TooLarge => CommandError::new(
             TRANSACTION_TOO_LARGE,
             "the transaction's state passed the coordinator's memory budget",
@@ -386,7 +459,9 @@ impl TxnBackend<'_> {
 
     /// Writes `writes` as one statement of the transaction.
     fn statement(&mut self, writes: Vec<(Vec<u8>, IntentOp)>) -> Result<(), CommandError> {
-        let stmt = self.run.coord.write(&Via(&*self.inner), writes).map_err(txn_error)?;
+        let number = self.run.txn_number;
+        let stmt =
+            self.run.coord.write(&Via(&*self.inner), writes).map_err(|e| txn_error(e, number))?;
         let is_answer = |e: &Event| matches!(e, Event::Written { stmt: s, .. } if *s == stmt);
         let events =
             drive(&mut *self.inner, &mut self.run.coord, is_answer).map_err(|e| range_error(&e))?;
@@ -396,7 +471,7 @@ impl TxnBackend<'_> {
         });
         match answer {
             Some(Ok(())) => Ok(()),
-            Some(Err(e)) => Err(txn_error(e)),
+            Some(Err(e)) => Err(txn_error(e, number)),
             None => Err(CommandError::new(INTERNAL_ERROR, "the statement got no answer")),
         }
     }
@@ -504,6 +579,9 @@ fn run_command(
         _ if f.start => Ask::Start,
         _ => Ask::Continue,
     };
+    if ask == Ask::Commit && db != ADMIN {
+        return Some(Err(CommandError::new(UNAUTHORIZED, COMMIT_OUTSIDE_ADMIN)));
+    }
     if let Err(e) = statement_rules(name, ask, cmd) {
         return Some(Err(e));
     }
@@ -523,13 +601,23 @@ fn run_command(
             return Some(Err(CommandError::new(MAX_TIME_MS_EXPIRED, TIME_LIMIT_MESSAGE)));
         }
     }
-    let verdict = {
+    let checked = {
         let mut g = lock(shared);
         let s = g.txns.entry(f.lsid).or_default();
-        match s.rules.check(f.txn_number, f.autocommit, ask) {
-            Ok(v) => v,
-            Err(e) => return Some(Err(session_error(e, f.lsid))),
+        s.rules.check(f.txn_number, f.autocommit, ask)
+    };
+    let verdict = match checked {
+        Ok(v) => v,
+        Err(SessionError::Unrecorded { asked, last }) => {
+            return Some(unrecorded(backend, shared, cmd, f.lsid, (asked, last)));
         }
+        // As the shard answers through a `refrouter` 9.0.4 (measured on 01-11-2026).
+        Err(SessionError::NoSuchTransaction { .. })
+            if lock(shared).txns.get(&f.lsid).is_some_and(|s| s.failed == Some(f.txn_number)) =>
+        {
+            return Some(Err(txn_error(TxnError::NoSuchTransaction, f.txn_number)));
+        }
+        Err(e) => return Some(Err(session_error(e, f.lsid))),
     };
     let ok = || Document::new().with("ok", 1.0);
     match verdict {
@@ -538,7 +626,8 @@ fn run_command(
                 return Some(refused_write(backend, name, e));
             }
             lock(shared).txns.entry(f.lsid).or_default().token = Some((f.txn_number, false));
-            let txn = TxnId((u128::from(backend.random()) << 64) | u128::from(backend.random()));
+            // Any node finds its record from the session and the number (`Recovery`).
+            let txn = client_txn_id(f.lsid, f.txn_number);
             let (read_ts, uncertain_to) = match begin_at {
                 Some(at) => at,
                 None => {
@@ -578,6 +667,130 @@ fn run_command(
         Verdict::Commit => Some(end(backend, shared, f, true).map(|()| ok())),
         Verdict::Abort => Some(end(backend, shared, f, false).map(|()| ok())),
     }
+}
+
+/// The only database `commitTransaction` runs on, and its error elsewhere (measured on a
+/// `refrouter` 9.0.4; `abortTransaction` runs on any).
+const ADMIN: &str = "admin";
+const COMMIT_OUTSIDE_ADMIN: &str = "commitTransaction may only be run against the admin database.";
+/// `errmsg` of a commit of a transaction the node has no record of, without `recoveryToken`.
+const RECOVERY_TOKEN_MISSING: &str =
+    "Cannot recover the transaction decision without a recoveryToken";
+
+/// The answer to a commit of transaction `asked` that session `lsid` has no record of, as a
+/// `refrouter` 9.0.4 gives it from the command's `recoveryToken` (measured on 01-11-2026 through two
+/// routers): without one it cannot recover the decision; an empty one says the transaction only
+/// read; one that names a node of `config.shards` gets the decision from the transaction's
+/// record, which Raft keeps in its range and any node finds from the session and the number
+/// ([`Recovery`]): committed answers `ok`, a running one aborts, and a number the session never
+/// began is stopped there. A name `config.shards` does not list is not found; a record that does
+/// not answer by the deadline fails as a shard that cannot be reached. The session's running
+/// transaction, of a lower number, is over.
+fn unrecorded(
+    backend: &mut dyn Backend,
+    shared: &Shared,
+    cmd: &Document,
+    lsid: u128,
+    (asked, last): (i64, Option<i64>),
+) -> Result<Document, CommandError> {
+    let superseded = lock(shared).txns.get_mut(&lsid).and_then(|s| s.running.take());
+    if let Some(run) = superseded {
+        end_abandoned(backend, shared, run);
+    }
+    let token = match cmd.get(RECOVERY_TOKEN) {
+        Some(Value::Document(t)) => t,
+        _ => return Err(CommandError::new(RECOVERY_TOKEN_REQUIRED, RECOVERY_TOKEN_MISSING)),
+    };
+    let unknown = |msg: String| {
+        CommandError::new(NO_SUCH_TRANSACTION, msg).with_label(TRANSIENT_TRANSACTION_ERROR)
+    };
+    let shard = match token.get("recoveryShardId") {
+        None => {
+            return Err(unknown(
+                "Recovery token is empty, meaning the transaction only performed reads and can \
+                 be safely retried"
+                    .to_owned(),
+            ));
+        }
+        Some(Value::String(shard)) => shard.clone(),
+        Some(other) => format!("{other:?}"),
+    };
+    check_shard(backend, &shard)?;
+    let Some(decision) = recover(backend, lsid, asked) else {
+        return Err(match cmd.get(MAX_TIME_MS) {
+            Some(_) => CommandError::new(MAX_TIME_MS_EXPIRED, TIME_LIMIT_MESSAGE),
+            None => CommandError::new(
+                FAILED_TO_SATISFY_READ_PREFERENCE,
+                format!(
+                    "Could not find host matching read preference {{ mode: \"primary\" }} for \
+                     set {shard}"
+                ),
+            ),
+        });
+    };
+    let empty = Document::new();
+    let mut e = match decision {
+        Decision::Committed(_) => {
+            return Ok(Document::new().with("ok", 1.0).with(RECOVERY_TOKEN, empty));
+        }
+        Decision::Aborted => {
+            unknown("Recovering the transaction's outcome found the transaction aborted".into())
+        }
+        Decision::Unknown => unknown(format!(
+            "Given transaction number {asked} on session {} using txnRetryCounter 0 does not \
+             match any in-progress transactions. The active transaction number is {}",
+            session_name(lsid),
+            last.unwrap_or(-1)
+        )),
+    };
+    e.extra.push(RECOVERY_TOKEN, empty);
+    Err(e)
+}
+
+/// The decision on transaction `txn_number` of session `lsid` from its record (`None` if the
+/// record's range did not answer before the operation's deadline).
+fn recover(backend: &mut dyn Backend, lsid: u128, txn_number: i64) -> Option<Decision> {
+    let mut r = Recovery::new(lsid, txn_number);
+    loop {
+        r.tick(&Via(&*backend));
+        for req in r.take_requests() {
+            let answer = backend.txn_send(req.g, req.op);
+            r.on_reply(req.id, answer);
+        }
+        if let Some(d) = r.decision() {
+            return Some(d);
+        }
+        if !backend.txn_pause() {
+            return None;
+        }
+    }
+}
+
+/// That a `recoveryShardId` names this node or one `config.shards` lists.
+fn check_shard(backend: &mut dyn Backend, shard: &str) -> Result<(), CommandError> {
+    if shard == super::shard_name(backend.node()) {
+        return Ok(());
+    }
+    let listed = backend.config_documents(super::config_db::SHARDS)?;
+    match listed.iter().any(|d| matches!(d.get("_id"), Some(Value::String(s)) if s == shard)) {
+        true => Ok(()),
+        false => Err(CommandError::new(SHARD_NOT_FOUND, format!("Shard {shard} not found"))),
+    }
+}
+
+/// Aborts transaction `run`, which no command will end any more (too old, or one of a higher
+/// number replaced it): its intents resolved as far as one round goes, the reaper and the readers
+/// resolve the rest, and the collections it created are dropped.
+fn end_abandoned(backend: &mut dyn Backend, shared: &Shared, mut run: Running) {
+    run.coord.abort();
+    for r in run.coord.take_requests() {
+        let answer = backend.txn_send(r.g, r.op);
+        run.coord.on_reply(&Via(&*backend), r.id, answer);
+    }
+    if run.published {
+        txn_ddl::unpublish(backend, &run.created);
+    }
+    txn_ddl::discard(backend, shared, &run.created);
 }
 
 /// `TooManyOpenTransactions` for a transaction that would pass the node's
@@ -622,6 +835,19 @@ fn refused_write(
     Ok(reply.with("writeErrors", Value::Array(vec![Value::Document(error)])).with("ok", 1.0))
 }
 
+/// A statement's `WriteConflict` as a `refrouter` 9.0.4 relays it from the shard (measured, DV-031,
+/// D-102): with the node's host and port where it names the shard's.
+fn from_participant(backend: &mut dyn Backend, mut e: CommandError) -> CommandError {
+    if e.code == WRITE_CONFLICT {
+        let host = super::host_port(backend);
+        e.errmsg = format!(
+            "Encountered error from {host} during a transaction :: caused by :: cluster write results unavailable from {host} :: caused by :: {}",
+            e.errmsg
+        );
+    }
+    e
+}
+
 /// The ranges a transaction contacted: those it read and those it wrote.
 fn participants(run: &Running) -> usize {
     let written = run.coord.written_ranges();
@@ -646,7 +872,8 @@ fn take(shared: &Shared, f: TxnFields) -> Result<Running, CommandError> {
         }
         other => {
             s.running = other;
-            Err(session_error(SessionError::NoSuchTransaction(f.txn_number), f.lsid))
+            let last = s.rules.last();
+            Err(session_error(SessionError::NoSuchTransaction { last }, f.lsid))
         }
     }
 }
@@ -654,7 +881,7 @@ fn take(shared: &Shared, f: TxnFields) -> Result<Running, CommandError> {
 /// A reply whose first write error ends the transaction for the driver to repeat it: as RefDb
 /// does in a transaction, the command fails with that error and `TransientTransactionError`
 /// (measured on 9.0.4 for `WriteConflict`).
-fn transient_on_top(reply: Document) -> Result<Document, CommandError> {
+fn transient_on_top(reply: Document, txn_number: i64) -> Result<Document, CommandError> {
     let Some(Value::Array(errors)) = reply.get("writeErrors") else { return Ok(reply) };
     let code = match errors.first() {
         Some(Value::Document(e)) => e.get("code").cloned(),
@@ -662,10 +889,10 @@ fn transient_on_top(reply: Document) -> Result<Document, CommandError> {
     };
     match code {
         Some(Value::Int32(c)) if c == WRITE_CONFLICT.code => {
-            Err(txn_error(TxnError::WriteConflict))
+            Err(txn_error(TxnError::WriteConflict, txn_number))
         }
         Some(Value::Int32(c)) if c == NO_SUCH_TRANSACTION.code => {
-            Err(txn_error(TxnError::NoSuchTransaction))
+            Err(txn_error(TxnError::NoSuchTransaction, txn_number))
         }
         _ => Ok(reply),
     }
@@ -715,8 +942,9 @@ fn with_running(
             })
         })
         .map(|r| {
-            r.and_then(transient_on_top)
+            r.and_then(|reply| transient_on_top(reply, f.txn_number))
                 .map_err(|e| snapshot_error(e, (f.lsid, f.txn_number), number, at))
+                .map_err(|e| from_participant(&mut *backend, e))
         });
     if let Some(cause) = result.as_ref().and_then(txn_stats::failure_cause) {
         run.coord.abort();
@@ -726,7 +954,9 @@ fn with_running(
         let mut g = lock(shared);
         txn_stats::aborted(&mut g, &cause);
         txn_stats::ended(&mut g, participants(&run), run.requests, false);
-        g.txns.entry(f.lsid).or_default().rules.aborted(f.txn_number);
+        let s = g.txns.entry(f.lsid).or_default();
+        s.rules.aborted(f.txn_number);
+        s.failed = Some(f.txn_number);
     }
     store(shared, f.lsid, run);
     result
@@ -806,13 +1036,13 @@ fn end(
         }
         (CommitAnswer::Committed(_), false) | (CommitAnswer::Unknown(_), _) => {}
     }
-    let mut run = Some(run);
-    if !resolved
-        && !matches!(answer, CommitAnswer::Unknown(_))
-        && let Some(r) = run.take()
-    {
-        g.txn_resolving.push(r.coord);
-    }
+    let run = match !resolved && !matches!(answer, CommitAnswer::Unknown(_)) {
+        true => {
+            g.txn_resolving.push(run.coord);
+            None
+        }
+        false => Some(run),
+    };
     let s = g.txns.entry(f.lsid).or_default();
     s.in_use = false;
     match (answer, commit) {
@@ -831,11 +1061,11 @@ fn end(
         }
         (CommitAnswer::NoSuchTransaction, true) => {
             s.rules.aborted(f.txn_number);
-            Err(txn_error(TxnError::NoSuchTransaction))
+            Err(txn_error(TxnError::NoSuchTransaction, f.txn_number))
         }
         (CommitAnswer::WriteConflict, true) => {
             s.rules.aborted(f.txn_number);
-            Err(txn_error(TxnError::WriteConflict))
+            Err(txn_error(TxnError::WriteConflict, f.txn_number))
         }
         // The commit may have been applied: the driver asks again, and the coordinator with it.
         (CommitAnswer::Unknown(e), _) => {
@@ -898,21 +1128,13 @@ pub fn tick_idle(backend: &mut dyn Backend, shared: &Shared) {
         let limit_ms = lock(shared).params.transaction_lifetime_secs.saturating_mul(1000);
         let age = backend.now_ms().saturating_sub(run.started_ms);
         if age > u64::try_from(limit_ms).unwrap_or(u64::MAX) {
-            // Too old: aborted, its intents resolved as far as one round goes; the reaper and
-            // the readers resolve the rest. Its next statement finds no transaction.
-            run.coord.abort();
-            for r in run.coord.take_requests() {
-                let answer = backend.txn_send(r.g, r.op);
-                run.coord.on_reply(&Via(&*backend), r.id, answer);
-            }
-            if run.published {
-                txn_ddl::unpublish(backend, &run.created);
-            }
-            txn_ddl::discard(backend, shared, &run.created);
+            // Too old: aborted; its next statement finds no transaction.
+            let number = run.txn_number;
+            end_abandoned(backend, shared, run);
             let mut g = lock(shared);
             let s = g.txns.entry(lsid).or_default();
-            s.rules.aborted(run.txn_number);
-            s.reaped = Some(run.txn_number);
+            s.rules.aborted(number);
+            s.reaped = Some(number);
             s.in_use = false;
             continue;
         }
@@ -1093,6 +1315,21 @@ impl Backend for TxnBackend<'_> {
         self.inner.kill_everywhere(scope)
     }
 
+    fn config_documents(&mut self, coll: &str) -> Result<Vec<Document>, CommandError> {
+        self.inner.config_documents(coll)
+    }
+
+    fn config_settings_write(
+        &mut self,
+        writes: Vec<super::config_settings::SettingsWrite>,
+    ) -> Result<bool, CommandError> {
+        self.inner.config_settings_write(writes)
+    }
+
+    fn request_shutdown(&mut self) -> Result<(), CommandError> {
+        self.inner.request_shutdown()
+    }
+
     fn cluster_parameters(&mut self) -> Result<BTreeMap<String, Vec<u8>>, CommandError> {
         self.inner.cluster_parameters()
     }
@@ -1187,6 +1424,7 @@ impl Backend for TxnBackend<'_> {
 mod tests {
     use super::*;
     use crate::commands::{NodeSessions, Timeouts, txn_stats};
+    use teseladb_range::intents::TxnId;
 
     /// A session whose transaction a command runs counts as open and active; the coordinators that
     /// still resolve count their intents (FR-019).

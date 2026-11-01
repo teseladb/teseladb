@@ -38,7 +38,7 @@ done
 
 known=()
 while IFS= read -r v; do known+=("$v"); done < <(
-  grep -rhoE 'teseladb_bug = "[a-z_]+"' crates 2>/dev/null | sed -E 's/.*"([a-z_]+)"/\1/' | sort -u
+  grep -rhoE 'teseladb_bug = "[a-z0-9_]+"' crates 2>/dev/null | sed -E 's/.*"([a-z0-9_]+)"/\1/' | sort -u
 )
 if [[ ${#known[@]} -eq 0 ]]; then
   echo "sim-mutants: the code has no faulty variants"

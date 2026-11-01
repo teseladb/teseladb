@@ -96,6 +96,8 @@ fn examples_measured_on_refsearch() {
     assert_eq!(texts(&[dm(Original::Include)], "x"), ["500000", "x"]);
     let minimal = [TokenFilter::EnglishMinimalStemming, TokenFilter::SpanishPluralStemming];
     assert_eq!(texts(&minimal, "ponies"), ["pony"]);
+    assert_eq!(texts(&[TokenFilter::KStemming], "abandoning"), ["abandon"]);
+    assert_eq!(texts(&[TokenFilter::Stempel], "aaronem"), ["aaron"]);
     let snowball = TokenFilter::SnowballStemming(Stemmer::English);
     assert_eq!(texts(&[TokenFilter::KeywordRepeat, snowball], "cats"), ["cats", "cat"]);
 }
@@ -160,4 +162,150 @@ fn word_delimiter_graph() {
     assert_eq!(texts(&[protected], "wi-fi Ha-Ha"), ["wi-fi", "Ha", "Ha"]);
     let keywords = DelimiterOptions { ignore_keywords: true, ..DelimiterOptions::default() };
     assert_eq!(texts(&[TokenFilter::KeywordRepeat, wdg(keywords)], "a-b"), ["a-b", "a", "b"]);
+}
+
+#[test]
+fn language_filters_override_cut_at_apostrophes_and_lowercase_turkish() {
+    let map = [("kind", "kinder")].iter().map(|&(k, v)| (k.to_string(), v.to_string())).collect();
+    let over = TokenFilter::StemmerOverride { map };
+    let stem = TokenFilter::SnowballStemming(Stemmer::Dutch);
+    // The override marks its token as a keyword, so the stemmer leaves it.
+    assert_eq!(texts(&[over, stem], "kind fietsen"), ["kinder", "fiets"]);
+    assert_eq!(
+        texts(&[TokenFilter::Apostrophe], "ankara'da'ki ankara’da 'x a"),
+        ["ankara", "ankara", "", "a"]
+    );
+    assert_eq!(
+        texts(&[TokenFilter::TurkishLowercase], "ISPARTA İstanbul Iğdır"),
+        ["ısparta", "istanbul", "ığdır"]
+    );
+}
+
+#[test]
+fn arabic_filters_normalize_and_strip_light_affixes() {
+    let norm = TokenFilter::ArabicNormalization;
+    let stem = TokenFilter::ArabicStemming;
+    assert_eq!(texts(std::slice::from_ref(&norm), "آلهة إلى ـمدّ"), ["الهه", "الي", "مد"]);
+    // One prefix, then each suffix once in list order; `و` needs three letters after it
+    // (measured on `refsearch` with `reflib.arabic`).
+    assert_eq!(
+        texts(&[norm, stem], "آلات الجبهة أذربيجانية وأي واد وادين"),
+        ["ات", "جبه", "اذربيجان", "وا", "واد", "اد"]
+    );
+    assert_eq!(texts(&[TokenFilter::DecimalDigit], "٣٤ ۵x"), ["34", "5x"]);
+}
+
+#[test]
+fn romance_light_stemmers_and_elision_match_refsearch() {
+    // Measured on `refsearch` with `reflib.spanish` and `reflib.italian`.
+    let spanish = TokenFilter::SpanishLightStemming;
+    assert_eq!(
+        texts(&[spanish], "abandonadas actrices acné antigüedad abandonamos casas"),
+        ["abandonad", "actriz", "acné", "antiguedad", "abandonam", "cas"]
+    );
+    let italian = TokenFilter::ItalianLightStemming;
+    assert_eq!(
+        texts(&[italian], "berisha pancho abbaia abbagliato amore perché"),
+        ["berish", "panch", "abba", "abbagliat", "amore", "perc"]
+    );
+    let articles = ["l", "dell"].iter().map(|a| a.to_string()).collect();
+    let elision = TokenFilter::Elision { articles };
+    assert_eq!(
+        texts(&[elision], "dell'amore L'amore quest'amore l’uno"),
+        ["amore", "amore", "quest'amore", "uno"]
+    );
+}
+
+#[test]
+fn portuguese_light_stemmer_matches_refsearch() {
+    // Measured on `refsearch` with `reflib.portuguese`.
+    assert_eq!(
+        texts(
+            &[TokenFilter::PortugueseLightStemming],
+            "abdicação abordagens simplesmente abertamente abandona fezes algas abandoná cais \
+             abomináveis adesões casa"
+        ),
+        [
+            "abdicaca",
+            "abordagem",
+            "simples",
+            "abert",
+            "abanda",
+            "fez",
+            "alga",
+            "abandona",
+            "cai",
+            "abominavel",
+            "adesa",
+            "casa"
+        ]
+    );
+}
+
+#[test]
+fn german_normalization_and_light_stemmer_match_refsearch() {
+    // Measured on `refsearch` with `reflib.german`.
+    let filters = [TokenFilter::GermanNormalization, TokenFilter::GermanLightStemming];
+    assert_eq!(
+        texts(
+            &filters,
+            "abenteuer abgehauen ackers bäuerin besäen müesst straße kindern fastest häuser"
+        ),
+        [
+            "abenteu", "abgehau", "ackers", "bauerin", "besa", "muesst", "strass", "kind", "fast",
+            "haus"
+        ]
+    );
+}
+
+#[test]
+fn french_light_stemmer_matches_refsearch() {
+    // Measured on `refsearch` with `reflib.french`.
+    let words = "abaissement applaudissements abaissant activement certificatrice certificateur \
+                 provocatrice prédicateur cantatrice accusateur actrice centième chanteuses \
+                 acteurs affreuse adultère actives archifolle molle cannelle constitutionnels \
+                 achète académique abbesse jardinage actualisation autorisation colonisateur \
+                 abnégation acquisition chevaux agneaux deux fax prix naïveté garçonnière";
+    assert_eq!(
+        texts(&[TokenFilter::FrenchLightStemming], words),
+        [
+            "abai",
+            "aplaudi",
+            "abai",
+            "actif",
+            "certifi",
+            "certifi",
+            "provoqu",
+            "prediqu",
+            "cant",
+            "acus",
+            "acteu",
+            "cent",
+            "chant",
+            "acteu",
+            "afreu",
+            "adulter",
+            "activ",
+            "archifou",
+            "mou",
+            "canel",
+            "constitution",
+            "achet",
+            "academ",
+            "abes",
+            "jardin",
+            "actuel",
+            "auto",
+            "colonis",
+            "abneg",
+            "acquis",
+            "cheval",
+            "agneau",
+            "deu",
+            "fax",
+            "pri",
+            "naïvet",
+            "garconi"
+        ]
+    );
 }

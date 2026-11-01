@@ -330,6 +330,9 @@ pub enum RecordOp {
         /// Intervals with intents.
         spans: Vec<(Vec<u8>, Vec<u8>)>,
     },
+    /// Every intent of a final record is resolved (the reaper, 008 record GC): it forgets its
+    /// intervals, which lets it go once it is old enough.
+    Resolved,
 }
 
 /// Why `EndTxn` was refused.
@@ -379,7 +382,10 @@ pub fn end_txn(
         {
             Ok(TxnRecord { lsid, txn_number, read_ts, heartbeat_ts: at, ..r })
         }
-        (None, RecordOp::Heartbeat { .. } | RecordOp::Commit { .. }) => {
+        (Some(r), RecordOp::Resolved) if r.status.is_final() => {
+            Ok(TxnRecord { spans: Vec::new(), ..r })
+        }
+        (_, RecordOp::Resolved) | (None, RecordOp::Heartbeat { .. } | RecordOp::Commit { .. }) => {
             Err(RecordError::NoSuchTransaction)
         }
         (None, RecordOp::Abort { spans }) => {
@@ -419,6 +425,17 @@ pub enum Push {
         /// Mark of the intent the writer found.
         intent_ts: Hlc,
     },
+    /// A recovery of a client transaction's commit on another node (008): a running record aborts
+    /// at once, as a shard of a `refrouter` 9.0.4 aborts an open transaction whose decision another
+    /// router recovers (measured); one that does not exist is created aborted, which stops its
+    /// coordinator's `Begin` or `Commit` arriving after. That record carries the transaction's
+    /// session and number, so that it lives as long as a client transaction's record does.
+    Abort {
+        /// The transaction's session.
+        lsid: u128,
+        /// Its number.
+        txn_number: i64,
+    },
 }
 
 /// Evaluates `PushTxn(push)` on the record of `txn` at mark `at`: the record to write and to
@@ -443,7 +460,11 @@ pub fn push_txn(
                 pending
             }
         }
+        (None, Push::Abort { lsid, txn_number }) => {
+            TxnRecord { lsid, txn_number, ..fresh(txn, TxnStatus::Aborted, at) }
+        }
         (Some(r), _) if r.status.is_final() => r,
+        (Some(r), Push::Abort { .. }) => TxnRecord { status: TxnStatus::Aborted, ..r },
         (Some(r), Push::To(to)) => TxnRecord { min_commit_ts: to.max(r.min_commit_ts), ..r },
         (Some(r), Push::AbortIfAbandoned { .. }) if r.abandoned_at(at) => {
             TxnRecord { status: TxnStatus::Aborted, ..r }

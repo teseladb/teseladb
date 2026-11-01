@@ -1,0 +1,433 @@
+//! The collections of `config` that show the cluster (007 FR-017, contract `config-db.md`),
+//! generated from this node's copy of Group 0 with the fields of a `refrouter` 9.0.4 (measured):
+//!
+//! - `shards`: one document per node that is not removed, `_id` its shard name (`node<n>`, the
+//!   one of a transaction's `recoveryToken`), `host` its client address, `state` 1 and `node` its
+//!   number; a node being drained says `draining: true`;
+//! - `databases`: one per database of the catalog, in creation order, with `primary` the first
+//!   active node (018 gives each database its own) and `version` with the mark that created it;
+//! - `refrouter`: one per node that is not removed, as a router;
+//! - `version`: `{_id: 1, clusterId}`, the cluster's identifier as an ObjectId;
+//! - `settings`: the documents Group 0 keeps for `config.settings` (the defaults of
+//!   `setDefaultRWConcern` among them), which [`teseladb_wire::commands::config_settings`]
+//!   writes;
+//! - `changelog`: the splits, merges, replica changes and core changes Group 0 recorded (T045),
+//!   with the fields of a `refrouter` 9.0.4 (measured): a split is `split` with its range `before`
+//!   and its `left` and `right` halves, a merge `merge` with the `min` and `max` of the range
+//!   it left, a replica change `moveChunk.commit` with the shards `added` and `removed`, and a
+//!   core change `relocate` with its `core`; a range's bounds are its keys as binary data, the
+//!   ranges of TeselaDB not being chunks of a shard key (D-008);
+//! - `collections`, `chunks` and `tags`: the collections with a shard key, their chunks and
+//!   zones, which 018 adds; none before.
+
+use teseladb_bson::{Document, RawDoc, Value};
+use teseladb_meta::changelog::{Change, ChangeKind};
+use teseladb_meta::command::{NodeState, SettingChange};
+use teseladb_meta::group0::Group0Sm;
+use teseladb_meta::meta2::Meta2Sm;
+use teseladb_types::NodeId;
+use teseladb_wire::commands::cluster_admin::RW_DEFAULTS;
+use teseladb_wire::commands::config_settings::{SETTINGS, SettingsWrite};
+use teseladb_wire::commands::diagnostics::ANNOUNCED_VERSION;
+use teseladb_wire::commands::shard_name;
+use teseladb_wire::error::{BAD_VALUE, CommandError};
+
+use teseladb_meta::config_settings::PREFIX as SETTINGS_PREFIX;
+
+use crate::backend::PARAMETER_PREFIX;
+
+/// The documents of collection `coll` of `config`, in their order, from this node's copies of
+/// Group 0 and of the `Meta2` ranges (007 FR-014: they record the changes of the descriptors
+/// they hold).
+pub fn documents_with(sm: &Group0Sm, meta2: &[&Meta2Sm], coll: &str) -> Vec<Document> {
+    if coll != "changelog" {
+        return documents(sm, coll);
+    }
+    let mut all: Vec<&Change> = sm.changelog.changes.iter().collect();
+    all.extend(meta2.iter().flat_map(|m| m.changelog.changes.iter()));
+    all.sort_by_key(|c| c.time_ms);
+    all.into_iter().map(|c| change(sm, c)).collect()
+}
+
+/// The documents of collection `coll` of `config`, in their order.
+pub fn documents(sm: &Group0Sm, coll: &str) -> Vec<Document> {
+    match coll {
+        "shards" => shards(sm),
+        "databases" => databases(sm),
+        "refrouter" => routers(sm),
+        "version" => vec![version(sm)],
+        SETTINGS => settings(sm),
+        "changelog" => sm.changelog.changes.iter().map(|c| change(sm, c)).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The key of the Group 0 setting that keeps the document of `config.settings` with `_id` `id`.
+fn setting_key(id: &str) -> Vec<u8> {
+    match id == RW_DEFAULTS {
+        true => [PARAMETER_PREFIX, RW_DEFAULTS.as_bytes()].concat(),
+        false => [SETTINGS_PREFIX, id.as_bytes()].concat(),
+    }
+}
+
+/// A document as Group 0 keeps it: the defaults without their `_id`, the others whole.
+fn stored(id: &str, doc: &Document) -> Result<Vec<u8>, CommandError> {
+    if id != RW_DEFAULTS {
+        return Ok(doc.to_bytes()?);
+    }
+    let mut d = doc.clone();
+    d.remove("_id");
+    Ok(d.to_bytes()?)
+}
+
+/// The Group 0 change of a document of `config.settings` that a command changed.
+pub fn setting_change(w: &SettingsWrite) -> Result<SettingChange, CommandError> {
+    let Value::String(id) = &w.id else {
+        return Err(CommandError::new(BAD_VALUE, "a document of config.settings without a name"));
+    };
+    let as_stored = |d: &Option<Document>| d.as_ref().map(|d| stored(id, d)).transpose();
+    Ok(SettingChange {
+        key: setting_key(id),
+        expect: as_stored(&w.read)?,
+        value: as_stored(&w.now)?,
+    })
+}
+
+fn settings(sm: &Group0Sm) -> Vec<Document> {
+    let doc = |id: &str, bytes: &[u8]| -> Option<Document> {
+        let d = Document::from(RawDoc::from_bytes(bytes).ok()?);
+        Some(match id == RW_DEFAULTS {
+            true => {
+                let mut with_id = Document::new().with("_id", RW_DEFAULTS);
+                for (k, v) in d.iter() {
+                    with_id.push(k, v.clone());
+                }
+                with_id
+            }
+            false => d,
+        })
+    };
+    let defaults = sm.settings.get(&setting_key(RW_DEFAULTS)).and_then(|b| doc(RW_DEFAULTS, b));
+    let others = sm.settings.iter().filter_map(|(k, v)| {
+        let id = std::str::from_utf8(k.strip_prefix(SETTINGS_PREFIX)?).ok()?;
+        doc(id, v)
+    });
+    defaults.into_iter().chain(others).collect()
+}
+
+/// The bound `key` of a range: its key as binary data, `MaxKey` for the end of the last range.
+fn bound(key: &[u8], end: bool) -> Value {
+    match end && key.is_empty() {
+        true => Value::MaxKey,
+        false => Value::Binary { subtype: 0, bytes: key.to_vec() },
+    }
+}
+
+fn span(start: &[u8], end: &[u8]) -> Document {
+    Document::new().with("min", bound(start, false)).with("max", bound(end, true))
+}
+
+fn shard_of(n: Option<NodeId>) -> String {
+    n.map_or_else(|| "config".to_owned(), |n| shard_name(n.0))
+}
+
+/// The `config.changelog` document of change `c`.
+fn change(sm: &Group0Sm, c: &Change) -> Document {
+    let server = sm
+        .nodes
+        .get(&c.leader.unwrap_or(NodeId(0)))
+        .map_or_else(|| "config".to_owned(), |n| text(&n.addrs.name));
+    let time = crate::log::timestamp(c.time_ms).replace('Z', "+00:00");
+    let id = format!("{server}-{time}-{:08x}{:016x}", c.time_ms / 1_000, c.seq);
+    let owner = shard_of(c.leader);
+    let (what, details) = match &c.kind {
+        ChangeKind::Split { at, .. } => (
+            "split",
+            Document::new()
+                .with("before", span(&c.start, &c.end))
+                .with("left", span(&c.start, at))
+                .with("right", span(at, &c.end))
+                .with("owningShard", owner),
+        ),
+        ChangeKind::Merge { .. } => (
+            "merge",
+            Document::new()
+                .with("owningShard", owner)
+                .with("min", bound(&c.start, false))
+                .with("max", bound(&c.end, true))
+                .with("numChunks", 2),
+        ),
+        ChangeKind::Replicas { added, removed } => {
+            let names = |ns: &[NodeId]| -> Vec<Value> {
+                ns.iter().map(|n| Value::from(shard_name(n.0))).collect()
+            };
+            let d =
+                span(&c.start, &c.end).with("added", names(added)).with("removed", names(removed));
+            ("moveChunk.commit", d)
+        }
+        ChangeKind::Core { core } => (
+            "relocate",
+            span(&c.start, &c.end).with("owningShard", owner).with("core", i32::from(*core)),
+        ),
+    };
+    let ms = i64::try_from(c.time_ms).unwrap_or(i64::MAX);
+    Document::new()
+        .with("_id", id)
+        .with("server", server)
+        .with("shard", "config")
+        .with("clientAddr", "")
+        .with("time", Value::DateTime(ms))
+        .with("what", what)
+        .with("ns", "")
+        .with("details", details)
+}
+
+fn live(sm: &Group0Sm) -> impl Iterator<Item = &teseladb_meta::group0::NodeInfo> {
+    sm.nodes.values().filter(|n| n.state != NodeState::Removed)
+}
+
+fn text(b: &[u8]) -> String {
+    String::from_utf8_lossy(b).into_owned()
+}
+
+fn shards(sm: &Group0Sm) -> Vec<Document> {
+    live(sm)
+        .map(|n| {
+            let mut d = Document::new()
+                .with("_id", shard_name(n.id.0))
+                .with("host", text(&n.addrs.native_addr))
+                .with("state", 1)
+                .with("node", n.id.0 as i64);
+            if n.state == NodeState::Draining {
+                d.push("draining", true);
+            }
+            d
+        })
+        .collect()
+}
+
+fn databases(sm: &Group0Sm) -> Vec<Document> {
+    let primary = sm.active_nodes().first().map_or_else(|| shard_name(1), |n| shard_name(n.0));
+    sm.catalog
+        .databases_by_creation()
+        .into_iter()
+        .map(|db| {
+            let zero = teseladb_hlc::Hlc { physical: 0, logical: 0 };
+            let mark = sm.catalog.db_marks.get(&db).copied().unwrap_or(zero);
+            let time = u32::try_from(mark.physical / 1_000).unwrap_or(u32::MAX);
+            let version = Document::new()
+                .with("timestamp", Value::Timestamp { time, increment: mark.logical })
+                .with("lastMod", 1);
+            Document::new()
+                .with("_id", db)
+                .with("primary", primary.clone())
+                .with("version", version)
+        })
+        .collect()
+}
+
+fn routers(sm: &Group0Sm) -> Vec<Document> {
+    let now = i64::try_from(sm.cluster_time_ms).unwrap_or(i64::MAX);
+    live(sm)
+        .map(|n| {
+            Document::new()
+                .with("_id", text(&n.addrs.native_addr))
+                .with("advisoryHostFQDNs", Value::Array(Vec::new()))
+                .with("refVersion", ANNOUNCED_VERSION)
+                .with("ping", Value::DateTime(now))
+                .with("waiting", true)
+        })
+        .collect()
+}
+
+fn version(sm: &Group0Sm) -> Document {
+    let mut id = [0u8; 12];
+    id.copy_from_slice(&sm.cluster_id[..12]);
+    Document::new().with("_id", 1).with("clusterId", Value::ObjectId(id))
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    use super::*;
+    use teseladb_meta::catalog::{CatalogCommand, Namespace};
+    use teseladb_meta::command::{Group0Command, NodeAddrs};
+    use teseladb_meta::group0::Group0Result;
+
+    fn addrs(i: u64) -> NodeAddrs {
+        NodeAddrs {
+            name: format!("n{i}").into_bytes(),
+            peer_addr: format!("n{i}:7421").into_bytes(),
+            http_addr: format!("n{i}:8080").into_bytes(),
+            native_addr: format!("n{i}:27017").into_bytes(),
+            cores: 2,
+        }
+    }
+
+    fn cluster() -> Group0Sm {
+        let mut sm = Group0Sm::default();
+        let boot = Group0Command::Bootstrap {
+            cluster_id: [9; 16],
+            first_node: addrs(1),
+            cert_fingerprint: [1; 32],
+        };
+        sm.apply_command(1, &boot);
+        for i in 2..=3u64 {
+            let add = Group0Command::AddNode { node: addrs(i), cert_fingerprint: [i as u8; 32] };
+            sm.apply_command(i, &add);
+        }
+        let ns = Namespace { db: "app".into(), coll: "c".into() };
+        let create =
+            CatalogCommand::Create { ns, uuid: [3; 16], options: Vec::new(), if_absent: false };
+        sm.apply_command(4, &Group0Command::Catalog(create));
+        sm
+    }
+
+    #[test]
+    fn every_node_is_a_shard_and_a_router_and_each_database_is_listed() {
+        let mut sm = cluster();
+        let drain = Group0Command::SetNodeState {
+            node: teseladb_types::NodeId(2),
+            state: NodeState::Draining,
+        };
+        sm.apply_command(5, &drain);
+        let remove = Group0Command::SetNodeState {
+            node: teseladb_types::NodeId(3),
+            state: NodeState::Removed,
+        };
+        sm.apply_command(6, &remove);
+        let shards = documents(&sm, "shards");
+        assert_eq!(shards.len(), 2, "the removed node is no shard");
+        assert_eq!(shards[0].get("_id"), Some(&Value::from("node1")));
+        assert_eq!(shards[0].get("host"), Some(&Value::from("n1:27017")));
+        assert_eq!(shards[0].get("draining"), None);
+        assert_eq!(shards[1].get("draining"), Some(&Value::Boolean(true)));
+        let dbs = documents(&sm, "databases");
+        assert_eq!(dbs.len(), 1);
+        assert_eq!(dbs[0].get("_id"), Some(&Value::from("app")));
+        assert_eq!(dbs[0].get("primary"), Some(&Value::from("node1")));
+        let routers = documents(&sm, "refrouter");
+        assert_eq!(routers.len(), 2);
+        assert_eq!(routers[1].get("refVersion"), Some(&Value::from(ANNOUNCED_VERSION)));
+        let v = documents(&sm, "version");
+        assert_eq!(v[0].get("clusterId"), Some(&Value::ObjectId([9; 12])));
+        for none in ["collections", "chunks", "tags", "changelog", SETTINGS] {
+            assert!(documents(&sm, none).is_empty(), "{none}");
+        }
+    }
+
+    fn details(d: &Document) -> &Document {
+        match d.get("details") {
+            Some(Value::Document(d)) => d,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_changelog_shows_each_change_as_a_refrouter_writes_it() {
+        let mut sm = cluster();
+        let replicas = vec![NodeId(1), NodeId(2)];
+        let create = Group0Command::CreateRange { start: vec![1], end: vec![4], replicas };
+        let Group0Result::Range(g) = sm.apply_command(10, &create) else { panic!() };
+        let hint = Group0Command::SetLeaderHint { group: g, node: NodeId(2), term: 1 };
+        sm.apply_command(11, &hint);
+        sm.apply_command(12, &Group0Command::SplitRange { group: g, at: vec![2] });
+        let complete = Group0Command::CompleteSplit { group: g, at: vec![2], at_index: 0 };
+        let Group0Result::Range(right) = sm.apply_command(13, &complete) else { panic!() };
+        let add = Group0Command::SetReplicas {
+            group: right,
+            epoch: 1,
+            add: vec![NodeId(3)],
+            remove: vec![],
+        };
+        sm.apply_command(14, &add);
+        let core = 1 - sm.ranges[&g].core;
+        sm.apply_command(15, &Group0Command::RelocateRange { group: g, core });
+        sm.apply_command(16, &Group0Command::CompleteRelocate { group: g, core });
+        sm.apply_command(
+            17,
+            &Group0Command::SetReplicas { group: right, epoch: 1, add: vec![], remove: vec![] },
+        );
+        let log = documents(&sm, "changelog");
+        let what: Vec<&Value> = log.iter().filter_map(|d| d.get("what")).collect();
+        assert_eq!(
+            what,
+            [&Value::from("split"), &Value::from("moveChunk.commit"), &Value::from("relocate")]
+        );
+        let split = &log[0];
+        assert_eq!(split.get("server"), Some(&Value::from("n2")), "the leader's node");
+        assert_eq!(split.get("shard"), Some(&Value::from("config")));
+        assert_eq!(split.get("ns"), Some(&Value::from("")));
+        let Some(Value::String(id)) = split.get("_id") else { panic!() };
+        assert!(id.starts_with("n2-1970-01-01T00:00:00.000+00:00-"), "{id}");
+        let d = details(split);
+        assert_eq!(d.get("owningShard"), Some(&Value::from("node2")));
+        let left = match d.get("left") {
+            Some(Value::Document(l)) => l,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(left.get("max"), Some(&Value::Binary { subtype: 0, bytes: vec![2] }));
+        let moved = details(&log[1]);
+        assert_eq!(moved.get("added"), Some(&Value::Array(vec![Value::from("node3")])));
+        let relocated = details(&log[2]);
+        assert_eq!(relocated.get("core"), Some(&Value::Int32(i32::from(core))));
+        // A merge, of a range whose leader is unknown, over the last range: up to `MaxKey`.
+        let mut sm = cluster();
+        let create = Group0Command::CreateRange {
+            start: vec![1],
+            end: Vec::new(),
+            replicas: vec![NodeId(1)],
+        };
+        let Group0Result::Range(g) = sm.apply_command(10, &create) else { panic!() };
+        sm.apply_command(11, &Group0Command::SplitRange { group: g, at: vec![2] });
+        let complete = Group0Command::CompleteSplit { group: g, at: vec![2], at_index: 0 };
+        let Group0Result::Range(right) = sm.apply_command(12, &complete) else { panic!() };
+        sm.apply_command(13, &Group0Command::MergeRanges { left: g, right });
+        sm.apply_command(14, &Group0Command::CompleteMerge { left: g, right });
+        let log = documents(&sm, "changelog");
+        assert_eq!(log[1].get("what"), Some(&Value::from("merge")));
+        assert_eq!(log[1].get("server"), Some(&Value::from("config")));
+        assert_eq!(details(&log[1]).get("max"), Some(&Value::MaxKey));
+        assert_eq!(details(&log[1]).get("owningShard"), Some(&Value::from("config")));
+    }
+
+    #[test]
+    fn settings_show_the_defaults_first_and_skip_what_does_not_read() {
+        let mut sm = cluster();
+        let defaults = Document::new().with("defaultWriteConcern", Document::new().with("w", 1));
+        let key = [PARAMETER_PREFIX, RW_DEFAULTS.as_bytes()].concat();
+        sm.settings.insert(key, defaults.to_bytes().unwrap());
+        let chunks = Document::new().with("_id", "chunksize").with("value", 8);
+        sm.settings.insert([SETTINGS_PREFIX, b"chunksize"].concat(), chunks.to_bytes().unwrap());
+        sm.settings.insert([SETTINGS_PREFIX, b"broken"].concat(), vec![1]);
+        let docs = documents(&sm, SETTINGS);
+        assert_eq!(docs.len(), 2);
+        assert_eq!(docs[0].get("_id"), Some(&Value::from(RW_DEFAULTS)));
+        assert_eq!(docs[1], chunks);
+        // A write whose document has no name is refused.
+        let w = SettingsWrite { id: Value::Int32(1), read: None, now: Some(Document::new()) };
+        assert_eq!(setting_change(&w).unwrap_err().code, BAD_VALUE);
+        // The defaults are kept without their `_id`.
+        let w = SettingsWrite {
+            id: Value::from(RW_DEFAULTS),
+            read: None,
+            now: Some(Document::new().with("_id", RW_DEFAULTS).with("x", 1)),
+        };
+        let change = setting_change(&w).unwrap();
+        assert_eq!(change.value, Some(Document::new().with("x", 1).to_bytes().unwrap()));
+    }
+
+    #[test]
+    fn without_active_nodes_the_primary_is_node_one() {
+        let mut sm = cluster();
+        for n in 1..=3u64 {
+            let off = Group0Command::SetNodeState {
+                node: teseladb_types::NodeId(n),
+                state: NodeState::Draining,
+            };
+            sm.apply_command(10 + n, &off);
+        }
+        let dbs = documents(&sm, "databases");
+        assert_eq!(dbs[0].get("primary"), Some(&Value::from("node1")));
+    }
+}

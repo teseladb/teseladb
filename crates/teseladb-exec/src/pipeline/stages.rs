@@ -5,28 +5,23 @@
 use std::sync::Arc;
 
 use teseladb_bson::{Document, RawDoc, RawValue, Value};
-use teseladb_mql::{ErrorCode, Extensions, Filter, FilterUse, GeoQuery, MqlError, TextQuery};
+use teseladb_mql::{ErrorCode, Extensions, Filter, FilterUse, MqlError};
 
 use super::errors::{
     BAD_VALUE, COUNT_DOLLAR, COUNT_DOT, COUNT_EMPTY, COUNT_ID, COUNT_TYPE, FACET_ARRAY,
     FACET_EMPTY, FACET_STAGE, FAILED_TO_PARSE, LIMIT_ARGUMENT, LIMIT_ZERO, MATCH_NOT_OBJECT,
     MISSING_FIELD, NEAR_IN_MATCH, REDACT_RESULT, SAMPLE_MISSING, SAMPLE_SIZE, SKIP_ARGUMENT,
-    TYPE_MISMATCH, UNKNOWN_FIELD, UNWIND_INDEX_PREFIX, UNWIND_NO_PATH, UNWIND_OPTION,
-    UNWIND_PREFIX, UNWIND_PRESERVE, error,
+    UNKNOWN_FIELD, UNWIND_INDEX_PREFIX, UNWIND_NO_PATH, UNWIND_OPTION, UNWIND_PREFIX,
+    UNWIND_PRESERVE, error,
 };
 use super::sort::check_path;
 use super::{Env, Pipeline};
 use crate::expr::arith::raw_type_name;
 use crate::expr::values::display;
-use crate::expr::{Ctx, Expr, Scope, truthy};
+use crate::expr::{Ctx, Expr, Scope};
 
 /// RefDb's message for a geospatial sort inside `$match`.
 const NEAR_MESSAGE: &str = "$geoNear, $near, and $nearSphere are not allowed in this context, as these operators require sorting geospatial data. If you do not need sort, consider using $geoWithin instead. Check out https://dochub.refdb.org/core/near-sort-operation and https://dochub.refdb.org/core/nearSphere-sort-operationfor more details.";
-
-/// A document as raw BSON, for the matcher.
-fn raw_bytes(doc: &Document) -> Result<Vec<u8>, MqlError> {
-    doc.to_bytes().map_err(|e| error(BAD_VALUE, e.to_string()))
-}
 
 use super::scoped::matches;
 
@@ -48,8 +43,9 @@ fn uses_where(d: RawDoc<'_>) -> bool {
 }
 
 impl Match {
-    /// Reads a `$match`.
-    pub fn parse(v: RawValue<'_>) -> Result<Match, MqlError> {
+    /// Reads a `$match`; the expressions of its `$expr`s are checked here, as RefDb parses them
+    /// with the stage.
+    pub fn parse(v: RawValue<'_>, ctx: &Ctx) -> Result<Match, MqlError> {
         let RawValue::Document(d) = v else {
             return Err(error(
                 MATCH_NOT_OBJECT,
@@ -63,6 +59,7 @@ impl Match {
         if filter.uses_near() {
             return Err(error(NEAR_IN_MATCH, NEAR_MESSAGE));
         }
+        check_exprs(d, ctx)?;
         Ok(Match { filter: Arc::new(filter) })
     }
 
@@ -78,20 +75,53 @@ impl Match {
     }
 }
 
+/// Parses the `$expr`s of filter `d` (its top level and its `$and`, `$or` and `$nor`) for their
+/// errors.
+pub fn check_exprs(d: RawDoc<'_>, ctx: &Ctx) -> Result<(), MqlError> {
+    for (k, v) in d.iter() {
+        match (k, v) {
+            ("$expr", e) => {
+                Expr::parse_in(e, ctx)?;
+            }
+            ("$and" | "$or" | "$nor", RawValue::Array(a)) => {
+                for x in a.iter() {
+                    if let RawValue::Document(f) = x {
+                        check_exprs(f, ctx)?;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// The argument of `$limit` or `$skip` (`stage`): a whole number of 64 bits.
 fn count_argument(v: RawValue<'_>, stage: &str, code: ErrorCode) -> Result<u64, MqlError> {
     let shown = display(&Value::from(v));
     let bad = |why: &str| {
         error(code, format!("invalid argument to {stage} stage: {why}{stage}: {shown}"))
     };
+    // The least double past the 64-bit integers, 2^63.
+    const PAST_I64: f64 = 9_223_372_036_854_775_808.0;
+    // Why a number that is no 64-bit integer is refused.
+    let not_whole = |x: f64| -> MqlError {
+        if x.is_nan() {
+            bad("Expected an integer, but found NaN in: ")
+        } else if !(-PAST_I64..PAST_I64).contains(&x) {
+            bad("Cannot represent as a 64-bit integer: ")
+        } else {
+            bad("Expected an integer: ")
+        }
+    };
     let n: i64 = match v {
         RawValue::Int32(n) => i64::from(n),
         RawValue::Int64(n) => n,
-        RawValue::Double(x) if x.fract() == 0.0 && x.is_finite() => x as i64,
-        RawValue::Double(_) => return Err(bad("Expected an integer: ")),
+        RawValue::Double(x) if x.fract() == 0.0 && (-PAST_I64..PAST_I64).contains(&x) => x as i64,
+        RawValue::Double(x) => return Err(not_whole(x)),
         RawValue::Decimal128(d) => match teseladb_mql::decimal_exact(d) {
             Some(n) => n,
-            None => return Err(bad("Expected an integer: ")),
+            None => return Err(not_whole(teseladb_mql::decimal_to_f64(d))),
         },
         _ => return Err(bad("Expected a number in: ")),
     };
@@ -137,7 +167,7 @@ pub fn run_count(field: &str, n: usize) -> Vec<Document> {
     if n == 0 {
         return Vec::new();
     }
-    let v = i32::try_from(n).map_or_else(|_| Value::Int64(n as i64), Value::Int32);
+    let v = i32::try_from(n).map_or(Value::Int64(n as i64), Value::Int32);
     vec![Document::new().with(field, v)]
 }
 
@@ -389,7 +419,7 @@ fn redact(e: &Expr, d: &Document, scope: &Scope) -> Result<Option<Document>, Mql
             REDACT_RESULT,
             format!(
                 "$redact's expression should not return anything aside from the variables $$KEEP, $$DESCEND, and $$PRUNE, but returned {}",
-                other.as_ref().map(display).unwrap_or_else(|| "MISSING".to_owned())
+                crate::expr::values::display_eval(&other)
             ),
         )),
     }
@@ -412,7 +442,8 @@ fn redact_array(e: &Expr, items: &[Value], scope: &Scope) -> Result<Vec<Value>, 
 }
 
 /// The stages a `$facet` may not have.
-const NOT_IN_FACET: [&str; 10] = [
+const NOT_IN_FACET: [&str; 11] = [
+    "$documents",
     "$out",
     "$merge",
     "$facet",
@@ -506,74 +537,15 @@ impl LetVars {
     }
 }
 
-/// The extensions of a sub-pipeline: `$expr` and expressions see the `let` variables, missing
-/// ones included; the rest as the pipeline's.
-struct LetExtensions<'a> {
-    inner: &'a dyn Extensions,
-    vars: &'a LetVars,
-}
-
-impl Extensions for LetExtensions<'_> {
-    fn expr(
-        &self,
-        e: RawValue<'_>,
-        doc: RawDoc<'_>,
-        _: Option<&Document>,
-    ) -> Result<bool, MqlError> {
-        let d = Document::from(doc);
-        Ok(truthy(&Expr::parse(e)?.eval(&d, &self.vars.scope(&d))?))
-    }
-
-    fn where_js(&self, code: RawValue<'_>, doc: RawDoc<'_>) -> Result<bool, MqlError> {
-        self.inner.where_js(code, doc)
-    }
-
-    fn text(&self, query: &TextQuery, doc: RawDoc<'_>) -> Result<bool, MqlError> {
-        self.inner.text(query, doc)
-    }
-
-    fn geo(&self, query: &GeoQuery, value: RawValue<'_>) -> Result<bool, MqlError> {
-        self.inner.geo(query, value)
-    }
-
-    fn random(&self) -> f64 {
-        self.inner.random()
-    }
-
-    fn meta(&self, name: &str, doc: RawDoc<'_>) -> Result<Option<Value>, MqlError> {
-        self.inner.meta(name, doc)
-    }
-
-    fn eval(
-        &self,
-        e: RawValue<'_>,
-        doc: RawDoc<'_>,
-        _: Option<&Document>,
-    ) -> Result<Option<Value>, MqlError> {
-        let d = Document::from(doc);
-        Expr::parse(e)?.eval(&d, &self.vars.scope(&d))
-    }
-
-    fn update_pipeline(
-        &self,
-        pipeline: RawValue<'_>,
-        doc: RawDoc<'_>,
-        vars: Option<&Document>,
-    ) -> Result<Document, MqlError> {
-        self.inner.update_pipeline(pipeline, doc, vars)
-    }
-}
-
 /// An environment with more variables (`$lookup`'s `let`).
 struct WithVars<'a> {
     inner: &'a dyn Env,
-    ext: LetExtensions<'a>,
     vars: &'a LetVars,
 }
 
 impl Env for WithVars<'_> {
     fn ext(&self) -> &dyn Extensions {
-        &self.ext
+        self.inner.ext()
     }
 
     fn vars(&self) -> Option<&Document> {
@@ -609,9 +581,9 @@ pub struct Lookup {
 }
 
 impl Lookup {
-    /// Whether it joins by `localField` and `foreignField` alone, without a pipeline.
+    /// Whether it joins by `localField` and `foreignField` alone, with no or an empty pipeline.
     pub(super) fn is_equality(&self) -> bool {
-        self.pipeline.is_none()
+        self.local.is_some() && self.pipeline.as_ref().is_none_or(Pipeline::is_empty)
     }
 
     /// Reads a `$lookup`.
@@ -661,9 +633,10 @@ impl Lookup {
         })?;
         check_path(&as_name)?;
         let inner = ctx.with(lets.iter().map(|(n, _)| n.as_str()));
-        let pipeline = match stages {
-            Some(s) => Some(Pipeline::parse(&s, &inner)?),
-            None => None,
+        let pipeline = match (stages, &from) {
+            (Some(s), Some(_)) => Some(Pipeline::parse(&s, &inner)?),
+            (Some(s), None) => Some(Pipeline::parse_from_documents(&s, &inner, "$lookup")?),
+            (None, _) => None,
         };
         let as_path = as_name.split('.').map(str::to_owned).collect();
         Ok(Lookup { from, local, foreign, as_path, lets, pipeline })
@@ -700,8 +673,7 @@ impl Lookup {
                         None => vars.missing.push(n.clone()),
                     }
                 }
-                let ext = LetExtensions { inner: env.ext(), vars: &vars };
-                let sub = WithVars { inner: env, ext, vars: &vars };
+                let sub = WithVars { inner: env, vars: &vars };
                 joined = match join.filter(|_| self.from.is_none()) {
                     Some((l, f)) => {
                         p.run_split(joined, &sub, |docs| equal_join(&d, l, f, &docs, env))?
@@ -734,9 +706,7 @@ fn equal_join(
         values.push(Value::Null);
     }
     let spec = Document::new().with(foreign, Document::new().with("$in", Value::Array(values)));
-    let bytes = raw_bytes(&spec)?;
-    let raw = RawDoc::from_bytes(&bytes).map_err(|e| error(BAD_VALUE, e.to_string()))?;
-    let filter = Filter::parse(raw, FilterUse::Query)?;
+    let filter = crate::raw::with_raw_doc(&spec, |raw| Filter::parse(raw, FilterUse::Query))?;
     let mut out = Vec::new();
     for f in docs {
         if matches(&filter, f, env)? {
@@ -801,13 +771,10 @@ impl UnionWith {
                         }
                     }
                 }
-                let pipeline = Pipeline::parse(&stages, ctx)?;
-                if coll.is_none() && !pipeline.starts_with_documents() {
-                    return Err(error(
-                        FAILED_TO_PARSE,
-                        "$unionWith stage without explicit collection must have a pipeline with $documents as first stage",
-                    ));
-                }
+                let pipeline = match coll {
+                    Some(_) => Pipeline::parse(&stages, ctx)?,
+                    None => Pipeline::parse_from_documents(&stages, ctx, "$unionWith")?,
+                };
                 Ok(UnionWith { coll, pipeline })
             }
             _ => Err(error(
@@ -831,13 +798,8 @@ impl UnionWith {
     }
 }
 
-/// The expression of `$documents`, which must be the first stage.
-pub fn documents(v: RawValue<'_>, index: usize, ctx: &Ctx) -> Result<Expr, MqlError> {
-    if index != 0 {
-        return Err(error(BAD_VALUE, "$documents is only valid as the first stage in a pipeline"));
-    }
-    Expr::parse_in(v, ctx)
-}
+/// RefDb's code for a `$documents` that is no array.
+const DOCUMENTS_ARRAY: ErrorCode = ErrorCode { code: 5_858_203, name: "Location5858203" };
 
 /// The documents `$documents` gives: its expression's array, evaluated once.
 pub fn run_documents(e: &Expr, env: &dyn Env) -> Result<Vec<Document>, MqlError> {
@@ -848,20 +810,16 @@ pub fn run_documents(e: &Expr, env: &dyn Env) -> Result<Vec<Document>, MqlError>
             .map(|x| match x {
                 Value::Document(d) => Ok(d),
                 other => Err(error(
-                    TYPE_MISMATCH,
+                    super::errors::NEW_ROOT,
                     format!(
-                        "$documents must evaluate to an array of objects, found {}",
-                        display(&other)
+                        "elements within the array passed to $documents must evaluate to an object, but resulting value was: {}. Type of resulting value: '{}'. Input document: {{_tempDocumentsField: {}}}",
+                        display(&other),
+                        crate::expr::arith::type_name_of(&other),
+                        crate::expr::values::display_bson(&other)
                     ),
                 )),
             })
             .collect(),
-        other => Err(error(
-            TYPE_MISMATCH,
-            format!(
-                "an array is expected, found {}",
-                other.as_ref().map(display).unwrap_or_else(|| "MISSING".to_owned())
-            ),
-        )),
+        _ => Err(error(DOCUMENTS_ARRAY, "an array is expected")),
     }
 }

@@ -72,6 +72,16 @@ const FOLLOWER_SHARE: f64 = 0.3;
 const FOLLOWER_AT_MARK: f64 = 0.5;
 /// Share of the writes that go with [`W1`].
 const W1_SHARE: f64 = 0.1;
+/// While a leader at the edge of the clock margin is cut off (`LeaderClockEdge`, heavy plan), its
+/// clients go on reading through it until its lease ends, and then write the documents they read
+/// there through the leader that follows it, as soon as there is one: a write below those reads
+/// shows at once (005 FR-005, variant `write_below_read`). Share of the turns that do so.
+const EDGE_SHARE: f64 = 0.8;
+/// How long after the cut the clients write the documents read through the cut-off leader.
+const EDGE_WRITE_WINDOW: Nanos = Nanos::from_millis(600);
+/// Least and greatest wait, in ms, between a client's turns meanwhile; the other turns do nothing
+/// then, so that the documents stay within the linearizability checker's operations.
+const EDGE_TURN_MS: (u64, u64) = (5, 15);
 /// `error` of the history op of a write acknowledged with [`W1`]: an `info`, since it may be
 /// rolled back.
 pub use crate::history::W1_ACKNOWLEDGED;
@@ -292,6 +302,17 @@ pub struct RangeDocsWorkload {
     follower_reads: Option<BTreeMap<(u32, ReqId), (u32, u64)>>,
     /// Reads on followers answered with a version or its absence.
     follower_served: u64,
+    /// Documents read through the leader at the edge of the clock margin cut off at that time.
+    edge_docs: (Nanos, Vec<u64>),
+}
+
+/// A client's turn while a leader at the edge of the clock margin is cut off.
+#[derive(Clone, Copy)]
+enum EdgeTurn {
+    /// A read through the cut-off leader, during its lease.
+    Read(u32),
+    /// A write of a document read through it, through the leader that follows it.
+    Write(u32, u64),
 }
 
 impl RangeDocsWorkload {
@@ -348,12 +369,42 @@ impl RangeDocsWorkload {
             name: "range-docs",
             follower_reads: None,
             follower_served: 0,
+            edge_docs: (Nanos::ZERO, Vec::new()),
         }
     }
 
     fn next_turn(w: &mut World, client: u32) {
-        let at = w.now() + Nanos::from_millis(w.rng.range(30, 120));
+        let edge = w.edge_cut_at.is_some_and(|(_, at)| w.now() < at + EDGE_WRITE_WINDOW);
+        let (lo, hi) = if edge { EDGE_TURN_MS } else { (30, 120) };
+        let at = w.now() + Nanos::from_millis(w.rng.range(lo, hi));
         w.schedule(at, Event::Client { client });
+    }
+
+    /// The turn of a client while a leader at the edge of the clock margin is cut off: a read
+    /// through it until its lease ends, then a write of a document read there through the leader
+    /// that follows it, within [`EDGE_WRITE_WINDOW`] of the cut.
+    fn edge_turn(&mut self, w: &mut World) -> Option<EdgeTurn> {
+        let (edge, at) = w.edge_cut_at?;
+        if self.edge_docs.0 != at {
+            self.edge_docs = (at, Vec::new());
+        }
+        let now = w.now();
+        let lease = teseladb_raft::RaftConfig::new(NodeId(1)).lease_dur;
+        if now < at + lease {
+            return Some(EdgeTurn::Read(edge));
+        }
+        if now >= at + EDGE_WRITE_WINDOW || self.edge_docs.1.is_empty() {
+            return None;
+        }
+        let next = (0..self.nodes).find(|&n| {
+            n != edge
+                && w.nodes[n as usize].alive
+                && w.cluster_core(n, self.core)
+                    .and_then(|c| c.status(G))
+                    .is_some_and(|s| s.role == teseladb_raft::Role::Leader)
+        })?;
+        let k = self.edge_docs.1[w.rng.range(0, self.edge_docs.1.len() as u64) as usize];
+        Some(EdgeTurn::Write(next, k))
     }
 
     fn busy(&self, client: u32) -> bool {
@@ -377,11 +428,17 @@ impl RangeDocsWorkload {
     }
 
     fn act(&mut self, w: &mut World, client: u32) {
+        let in_window = w.edge_cut_at.is_some_and(|(_, at)| w.now() < at + EDGE_WRITE_WINDOW);
+        let edge = self.edge_turn(w).filter(|_| w.rng.chance(EDGE_SHARE));
+        if in_window && edge.is_none() {
+            return;
+        }
         // Mostly the node it believes leads; sometimes any node, as clients that reach several
         // nodes do (a partition then has clients on both sides).
         let wander = w.rng.chance(0.2);
-        let node = match self.prefer.get(&client) {
-            Some(&n) if w.nodes[n as usize].alive && !wander => n,
+        let node = match (edge, self.prefer.get(&client)) {
+            (Some(EdgeTurn::Read(n) | EdgeTurn::Write(n, _)), _) => n,
+            (None, Some(&n)) if w.nodes[n as usize].alive && !wander => n,
             _ => w.rng.range(0, u64::from(self.nodes)) as u32,
         };
         // A frozen core takes no request: the client waits for its next turn.
@@ -389,6 +446,9 @@ impl RangeDocsWorkload {
             return;
         }
         let k = w.rng.range(0, DOCS);
+        if let Some(turn) = edge {
+            return self.act_on(w, client, node, Some(turn), k);
+        }
         if self.follower_reads.is_some() && w.rng.chance(FOLLOWER_SHARE) {
             return self.read_on_follower(w, client, node, k);
         }
@@ -406,18 +466,35 @@ impl RangeDocsWorkload {
             w.settle(node, self.core);
             return;
         }
-        // The draws first: the core borrows the world below.
-        let read = w.rng.chance(0.4).then(|| match w.rng.range(0, 3) {
-            0 => ReadConcern::Majority,
-            1 => ReadConcern::Linearizable,
-            _ => ReadConcern::Local,
-        });
+        self.act_on(w, client, node, None, k);
+    }
+
+    /// A read or a write of document `k` (or, in an [`EdgeTurn`], the one it names) through
+    /// `node`.
+    fn act_on(&mut self, w: &mut World, client: u32, node: u32, edge: Option<EdgeTurn>, k: u64) {
+        // The draws first: the core borrows the world below. Through a cut-off leader only its
+        // lease reads answer.
+        let read = match edge {
+            Some(EdgeTurn::Read(_)) => {
+                Some(if w.rng.chance(0.5) { ReadConcern::Majority } else { ReadConcern::Local })
+            }
+            Some(EdgeTurn::Write(..)) => None,
+            None => w.rng.chance(0.4).then(|| match w.rng.range(0, 3) {
+                0 => ReadConcern::Majority,
+                1 => ReadConcern::Linearizable,
+                _ => ReadConcern::Local,
+            }),
+        };
         // A write often updates the document its client just read, as an application reads a
         // document and then changes it.
-        let k = match self.last_read.remove(&client) {
-            Some(j) if read.is_none() && w.rng.chance(READ_THEN_WRITE) => j,
+        let k = match (edge, self.last_read.remove(&client)) {
+            (Some(EdgeTurn::Write(_, j)), _) => j,
+            (None, Some(j)) if read.is_none() && w.rng.chance(READ_THEN_WRITE) => j,
             _ => k,
         };
+        if matches!(edge, Some(EdgeTurn::Read(_))) && !self.edge_docs.1.contains(&k) {
+            self.edge_docs.1.push(k);
+        }
         self.started[client as usize] += 1;
         let id = self.started[client as usize];
         let rec = OpRecord {
@@ -1325,5 +1402,153 @@ impl RangeDocsWorkload {
         // The core answered before it froze, if it is frozen now: the answer is not lost.
         let Some(c) = w.paused_core(node, core) else { return };
         host.on_done(c, op, r);
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    use super::*;
+
+    fn workload() -> RangeDocsWorkload {
+        RangeDocsWorkload::new(3, 2, Rc::new(Cell::new(RetryStats::default())))
+    }
+
+    /// A `range-docs` world of three nodes of two cores after `secs` seconds without faults.
+    fn world(secs: u64) -> (World, RangeDocsWorkload) {
+        let mut wl = workload();
+        let mut w = World::with_clocks(9, 3, 2, false, true, wl.clocks());
+        wl.start(&mut w);
+        crate::drive_until(&mut w, &mut wl, Nanos::from_secs(secs), |_| false);
+        (w, wl)
+    }
+
+    fn mark(physical: u64) -> Hlc {
+        Hlc { physical, logical: 0 }
+    }
+
+    fn at(ms: u64) -> Nanos {
+        Nanos::from_millis(ms)
+    }
+
+    #[test]
+    fn a_write_at_or_below_an_earlier_read_or_write_breaks_mvcc() {
+        let mut wl = workload();
+        wl.served.insert(1, vec![(at(10), mark(50), None)]);
+        wl.above_reads(1, at(20), mark(60));
+        assert!(wl.mvcc.is_none(), "above the read");
+        wl.above_reads(1, at(20), mark(50));
+        assert!(wl.mvcc.take().is_some());
+        wl.committed.insert(1, vec![(at(10), mark(50), Some("a".into()))]);
+        wl.above_writes(1, at(20), mark(51));
+        assert!(wl.mvcc.is_none());
+        wl.above_writes(1, at(20), mark(50));
+        assert!(wl.mvcc.take().is_some());
+        wl.read_above_writes(1, at(20), mark(50));
+        assert!(wl.mvcc.is_none(), "a read at the write's mark sees it");
+        wl.read_above_writes(1, at(20), mark(49));
+        assert!(wl.mvcc.take().is_some());
+    }
+
+    #[test]
+    fn a_version_seen_below_a_read_answered_before_its_write_breaks_mvcc() {
+        let mut wl = workload();
+        wl.served.insert(1, vec![(at(10), mark(50), None)]);
+        // A tag whose write is not known: nothing to judge.
+        wl.seen_below_reads(1, "x", mark(40));
+        assert!(wl.mvcc.is_none());
+        wl.begun.insert("x".into(), at(20));
+        wl.seen_below_reads(1, "x", mark(60));
+        assert!(wl.mvcc.is_none(), "above the read");
+        wl.seen_below_reads(1, "x", mark(40));
+        assert!(wl.mvcc.take().is_some());
+    }
+
+    #[test]
+    fn a_read_that_missed_a_version_below_its_mark_fails_the_run() {
+        let mut wl = workload();
+        wl.versions.insert("old".into(), mark(10));
+        wl.served.insert(1, vec![(at(5), mark(50), Some("old".into())), (at(6), mark(9), None)]);
+        wl.committed.insert(1, vec![(at(4), mark(60), Some("new".into()))]);
+        assert!(wl.missed_versions().is_ok(), "the newer one is above the read");
+        wl.committed.get_mut(&1).expect("set").push((at(4), mark(30), Some("mid".into())));
+        assert!(wl.missed_versions().is_err());
+        let mut w = World::with_clocks(1, 3, 2, false, true, wl.clocks());
+        wl.mvcc = Some(Violation::safety("mvcc", "test"));
+        assert!(wl.finish(&mut w).is_err());
+    }
+
+    #[test]
+    fn a_read_again_at_a_mark_that_sees_another_version_breaks_mvcc() {
+        let (mut w, mut wl) = world(1);
+        let req: ReqId = u64::MAX;
+        wl.rereads.insert((0, req), (0, 1, mark(5), Some("a".into()), 1));
+        let value = Some((1, b"b|1".to_vec()));
+        wl.answer(&mut w, 0, req, Ok(Reply::Value { ts: mark(5), value }));
+        assert!(wl.mvcc.take().is_some());
+    }
+
+    #[test]
+    fn a_replica_marked_for_rebuild_goes_down_without_its_data_and_comes_back() {
+        let (mut w, mut wl) = world(1);
+        w.nodes[2].alive = false;
+        wl.rebuild(&mut w, 2);
+        assert_eq!(wl.rebuilt, 0, "a node that is down is left");
+        w.nodes[2].alive = true;
+        wl.rebuild(&mut w, 1);
+        assert_eq!(wl.rebuilt, 1);
+        assert!(!w.nodes[1].alive && !wl.hosts.contains_key(&1));
+        let back = |w: &mut World| w.nodes[1].alive;
+        let until = w.now() + Nanos::from_secs(1);
+        assert!(crate::drive_until(&mut w, &mut wl, until, back));
+    }
+
+    #[test]
+    fn checks_and_answers_a_node_cannot_take_are_dropped() {
+        let (mut w, mut wl) = world(1);
+        // No leader: no check.
+        let alive: Vec<bool> = w.nodes.iter().map(|n| n.alive).collect();
+        for n in &mut w.nodes {
+            n.alive = false;
+        }
+        wl.next_check = Nanos::ZERO;
+        wl.check(&mut w);
+        for (n, a) in w.nodes.iter_mut().zip(alive) {
+            n.alive = a;
+        }
+        // A leader without host: no check either.
+        let l = wl.leader(&mut w).expect("a leader");
+        let host = wl.hosts.remove(&l).expect("a host");
+        wl.next_check = Nanos::ZERO;
+        wl.check(&mut w);
+        wl.hosts.insert(l, host);
+        // Answers of another core, of a node without host, of a core that is gone.
+        let core = wl.core;
+        let r = || Err(OpError::Timeout);
+        wl.on_done(&mut w, 0, 1 - core, OpId(1), r());
+        let host = wl.hosts.remove(&0).expect("a host");
+        wl.on_done(&mut w, 0, core, OpId(1), r());
+        wl.hosts.insert(0, host);
+        let cluster = w.nodes[0].cores[core as usize].cluster.take();
+        wl.on_done(&mut w, 0, core, OpId(1), r());
+        w.nodes[0].cores[core as usize].cluster = cluster;
+    }
+
+    #[test]
+    fn a_crashed_source_s_exports_are_asked_for_again_and_removed_once_it_is_back() {
+        let (mut w, mut wl) = world(1);
+        let exporting = |leader| Transfer::Exporting {
+            leader,
+            exports: vec![u64::MAX],
+            files: vec![],
+            dir: format!("export-test-{leader}"),
+        };
+        wl.transfers.insert(1, (5, exporting(0)));
+        wl.transfers.insert(2, (5, Transfer::Ingesting { id: u64::MAX, files: vec![] }));
+        wl.on_crash(&mut w, 0);
+        w.crash_node(0);
+        assert_eq!(wl.waiting.get(&1), Some(&5));
+        assert!(matches!(wl.transfers.get(&2), Some((5, Transfer::Ingesting { .. }))));
+        assert_eq!(wl.orphans, vec![(0, "export-test-0".to_owned())]);
     }
 }

@@ -5,6 +5,7 @@
 //! that describe parts TeselaDB does not have (RefEngine, anotherproduct, shards) are left out, as
 //! the divergences of 006 record.
 
+use teseladb_auth::users::RoleName;
 use teseladb_bson::{Document, Value};
 use teseladb_meta::collection_types::CollectionKind;
 use teseladb_range::read::ReadConcern;
@@ -498,6 +499,28 @@ fn extra_info(r: &ResourceUse) -> Document {
         .with("threads", Value::Int64(r.threads))
 }
 
+/// The roles of the running command's user: its direct roles, then those they inherit, as
+/// RefDb 9.0.4 lists them in `connectionStatus`; none without a user.
+pub(crate) fn authenticated_roles<B: Backend + ?Sized>(
+    backend: &mut B,
+) -> Result<Vec<RoleName>, CommandError> {
+    let Some(name) = backend.authenticated_user() else { return Ok(Vec::new()) };
+    let direct = match backend.authenticated_roles() {
+        // `__system` lists no role (measured on `refnode` 9.0.4, 013 FR-034).
+        _ if super::auth::is_internal(&name) => Vec::new(),
+        Some(r) => r,
+        None => backend.user(&name)?.map(|u| u.roles).unwrap_or_default(),
+    };
+    let inherited = super::roles::Graph::new(&mut *backend).inherit(&direct, None)?.roles;
+    let mut all = direct;
+    for r in inherited {
+        if !all.contains(&r) {
+            all.push(r);
+        }
+    }
+    Ok(all)
+}
+
 /// `connectionStatus`: no user is authenticated until 013; a new UUID on each call, as 9.0.4.
 pub fn connection_status<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
@@ -505,21 +528,7 @@ pub fn connection_status<B: Backend + ?Sized>(
     let privileges = ctx.cmd.get("showPrivileges").and_then(crate::types::truthy) == Some(true);
     let (mut users, mut roles) = (Vec::<Value>::new(), Vec::<Value>::new());
     if let Some(name) = ctx.backend.authenticated_user() {
-        let direct = match ctx.backend.authenticated_roles() {
-            // `__system` lists no role (measured on `refnode` 9.0.4, 013 FR-034).
-            _ if super::auth::is_internal(&name) => Vec::new(),
-            Some(r) => r,
-            None => ctx.backend.user(&name)?.map(|u| u.roles).unwrap_or_default(),
-        };
-        // Its direct roles, then those they inherit, as RefDb 9.0.4 lists them.
-        let inherited = super::roles::Graph::new(&mut *ctx.backend).inherit(&direct, None)?.roles;
-        let mut all = direct;
-        for r in inherited {
-            if !all.contains(&r) {
-                all.push(r);
-            }
-        }
-        roles = all
+        roles = authenticated_roles(&mut *ctx.backend)?
             .iter()
             .map(|r| Value::Document(Document::new().with("role", &*r.role).with("db", &*r.db)))
             .collect();
@@ -643,21 +652,31 @@ pub fn db_stats<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, C
         0 => (0, 0),
         _ => (facts.fs_used, facts.fs_total),
     };
-    Ok(Document::new()
-        .with("db", db)
-        .with("collections", number(collections))
-        .with("views", 0)
-        .with("objects", number(objects))
-        .with("avgObjSize", avg)
-        .with("dataSize", scaled(data))
-        .with("storageSize", scaled(storage))
-        .with("indexes", number(collections))
-        .with("indexSize", scaled(index))
-        .with("totalSize", scaled(storage + index))
-        .with("scaleFactor", number(scale))
-        .with("fsUsedSize", scaled(fs_used))
-        .with("fsTotalSize", scaled(fs_total))
-        .with("ok", 1.0))
+    // The shard's own reply goes first under `raw`, its counts as 64-bit integers (measured).
+    let stats = |count: &dyn Fn(i64) -> Value| {
+        Document::new()
+            .with("db", db.as_str())
+            .with("collections", count(collections))
+            .with("views", count(0))
+            .with("objects", count(objects))
+            .with("avgObjSize", avg)
+            .with("dataSize", scaled(data))
+            .with("storageSize", scaled(storage))
+            .with("indexes", count(collections))
+            .with("indexSize", scaled(index))
+            .with("totalSize", scaled(storage + index))
+            .with("scaleFactor", count(scale))
+            .with("fsUsedSize", scaled(fs_used))
+            .with("fsTotalSize", scaled(fs_total))
+            .with("ok", 1.0)
+    };
+    let raw = stats(&Value::Int64);
+    let mut out =
+        Document::new().with("raw", Document::new().with(super::raw_name(ctx.backend), raw));
+    for (k, v) in stats(&number).iter() {
+        out.push(k, v.clone());
+    }
+    Ok(out)
 }
 
 /// The `storageStats` of `$collStats` for collection `c` of `ns`, sizes divided by `scale`, in
@@ -873,7 +892,7 @@ const fn info(
 
 /// The commands TeselaDB answers, in name order, as `listCommands` of a `refrouter` 9.0.4 shows
 /// them; the help of `getParameter` and `setParameter` lists TeselaDB's parameters.
-const COMMANDS: [CommandInfo; 53] = [
+const COMMANDS: [CommandInfo; 58] = [
     info(BUILD_INFO, NO_HELP, [true, false, true, false], false),
     info(
         "bulkWrite",
@@ -883,6 +902,7 @@ const COMMANDS: [CommandInfo; 53] = [
     ),
     info("collMod", NO_HELP, [true, true, false, false], true),
     info(COLL_STATS, NO_HELP, [true, true, true, false], false),
+    info("compact", NO_HELP, [true, true, true, false], false),
     info(
         "configureFailPoint",
         "modifies the settings of a fail point",
@@ -921,6 +941,12 @@ const COMMANDS: [CommandInfo; 53] = [
     info("find", "query for documents", [true, true, false, false], true),
     info("findAndModify", NO_HELP, [true, true, true, false], true),
     info(
+        "fsync",
+        "invoke fsync on all shards belonging to the cluster",
+        [true, true, true, true],
+        false,
+    ),
+    info(
         "getClusterParameter",
         "Refresh and get cached cluster server parameter value from refrouter.",
         [true, true, true, true],
@@ -928,6 +954,12 @@ const COMMANDS: [CommandInfo; 53] = [
     ),
     info(GET_CMD_LINE_OPTS, NO_HELP, [true, true, true, true], false),
     info(GET_LOG, "{ getLog : '*' }  OR { getLog : 'global' }", [true, true, true, true], false),
+    info(
+        "getDefaultRWConcern",
+        "Gets the default read or write concern for a cluster",
+        [true, true, false, true],
+        false,
+    ),
     info("getMore", "retrieve more documents for a cursor id", [true, true, true, false], true),
     info("getParameter", "", [true, true, true, true], false),
     info("hello", HELLO_HELP, [false, true, true, false], true),
@@ -993,7 +1025,19 @@ const COMMANDS: [CommandInfo; 53] = [
         [true, true, false, true],
         false,
     ),
+    info(
+        "setDefaultRWConcern",
+        "Sets the default read or write concern for a cluster",
+        [true, true, false, true],
+        false,
+    ),
     info("setParameter", "", [true, true, true, true], false),
+    info(
+        "shutdown",
+        "Shuts down the refrouter. Must be run against the admin database and either (1) run from localhost or (2) run while authenticated with the shutdown privilege. Spends 'timeoutSecs' in quiesce mode, where the refrouter continues to allow operations to run, but directs clients to route new operations to other refrouter nodes.",
+        [true, true, true, true],
+        false,
+    ),
     info("startSession", "start a logical session", [true, false, true, false], false),
     info("update", "update documents", [true, true, false, false], true),
     info(WHATS_MY_URI, "{whatsmyuri:1}", [true, true, true, false], false),

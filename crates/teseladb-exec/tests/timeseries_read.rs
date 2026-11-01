@@ -113,3 +113,17 @@ fn a_bucket_without_control_is_refused() {
     let meta = Bounds { meta: Some(Value::Int32(1)), ..Bounds::default() };
     assert_eq!(meta.may_match(&spec(), RawDoc::from_bytes(&bytes).expect("a bucket")), Ok(false));
 }
+
+/// Two upper bounds keep the lower one; a meta bound past BSON's depth cannot be compared.
+#[test]
+fn bounds_narrow_and_an_unwritable_meta_is_refused() {
+    let at = |ms: i64| format!(r#"{{"$date":{{"$numberLong":"{ms}"}}}}"#);
+    let f = format!(r#"{{"t":{{"$lte":{},"$lt":{}}}}}"#, at(T0 + 10), at(T0 + 5));
+    assert_eq!(Bounds::of(&spec(), &filter(&f)).before, Some(T0 + 4));
+    let deep = (0..teseladb_bson::MAX_DEPTH)
+        .fold(Value::Int32(1), |v, _| Value::Document(Document::new().with("a", v)));
+    let b = Bounds { meta: Some(deep), ..Bounds::default() };
+    let bytes = bucket("a", &[1000]);
+    let r = b.may_match(&spec(), RawDoc::from_bytes(&bytes).expect("a bucket"));
+    assert!(matches!(r, Err(TsError::Malformed(_))));
+}

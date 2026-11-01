@@ -475,6 +475,21 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         self.inner.kill_everywhere(scope)
     }
 
+    fn config_documents(&mut self, coll: &str) -> Result<Vec<Document>, CommandError> {
+        self.call(|b| b.config_documents(coll))
+    }
+
+    fn config_settings_write(
+        &mut self,
+        writes: Vec<crate::commands::config_settings::SettingsWrite>,
+    ) -> Result<bool, CommandError> {
+        self.call(|b| b.config_settings_write(writes))
+    }
+
+    fn request_shutdown(&mut self) -> Result<(), CommandError> {
+        self.call(|b| b.request_shutdown())
+    }
+
     fn cluster_parameters(&mut self) -> Result<BTreeMap<String, Vec<u8>>, CommandError> {
         self.call(|b| b.cluster_parameters())
     }

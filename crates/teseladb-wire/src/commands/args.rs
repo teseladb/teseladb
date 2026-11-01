@@ -135,9 +135,11 @@ pub fn write_concern(cmd: &Document, name: &str) -> Result<WriteConcernArgs, Com
     Ok(WriteConcernArgs::parse(cmd, name)?.unwrap_or_else(concerns::default_write_concern))
 }
 
-/// The range's read for the command's `readConcern` (`local` without one).
+/// The range's read for the command's `readConcern` (without one, the cluster's default level,
+/// `local` unless `setDefaultRWConcern` set another).
 pub fn read_concern(cmd: &Document, name: &str) -> Result<ReadConcern, CommandError> {
-    Ok(ReadConcernArgs::parse(cmd, name)?.map_or(ReadConcern::Local, |rc| rc.to_range()))
+    let implicit = || concerns::default_read_level().to_range();
+    Ok(ReadConcernArgs::parse(cmd, name)?.map_or_else(implicit, |rc| rc.to_range()))
 }
 
 /// The session id of the command (`lsid.id`, a UUID), if any.

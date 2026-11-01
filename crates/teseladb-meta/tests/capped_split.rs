@@ -105,3 +105,42 @@ fn a_range_that_holds_only_a_capped_collection_does_not_split() {
     let inside = KeyBuilder::document_capped(0, capped, 9).as_bytes().to_vec();
     assert_eq!(split(&mut sm, inside), Err(Group0Result::Err(Group0Error::BadSplit)));
 }
+
+#[test]
+fn a_cut_in_another_tenant_with_the_capped_number_stays() {
+    let (mut sm, capped, _) = cluster();
+    let inside = KeyBuilder::document_capped(1, capped, 9).as_bytes().to_vec();
+    assert_eq!(split(&mut sm, inside.clone()), Ok(inside));
+}
+
+/// Splits range 1 at `at` and completes it: the new range's number.
+fn cut(sm: &mut Group0Sm, at: Vec<u8>) -> GroupId {
+    let left = sm.range_for(&at).expect("a range").group;
+    let pending = match run(sm, Group0Command::SplitRange { group: left, at }) {
+        Group0Result::Range(_) => sm.ranges[&left].pending_split.clone().expect("pending"),
+        other => panic!("{other:?}"),
+    };
+    let done = Group0Command::CompleteSplit { group: left, at: pending.clone(), at_index: 9 };
+    assert!(matches!(run(sm, done), Group0Result::Range(_)));
+    sm.range_for(&pending).expect("a range").group
+}
+
+#[test]
+fn a_range_with_a_capped_collection_never_merges_with_its_neighbours() {
+    // 007 FR-009: the capped collection keeps a range of its own.
+    let (mut sm, capped, plain) = cluster();
+    let own = cut(&mut sm, KeyBuilder::collection_start(0, capped).as_bytes().to_vec());
+    let after = cut(&mut sm, KeyBuilder::collection_end(0, capped).as_bytes().to_vec());
+    let before = sm.range_for(&[]).expect("the first range").group;
+    for (left, right) in [(before, own), (own, after)] {
+        let merge = Group0Command::MergeRanges { left, right };
+        assert_eq!(run(&mut sm, merge), Group0Result::Err(Group0Error::BadBounds));
+    }
+    // Two ranges without one merge.
+    let (l, r) = if plain < capped {
+        (before, cut(&mut sm, KeyBuilder::collection_start(0, plain).as_bytes().to_vec()))
+    } else {
+        (after, cut(&mut sm, KeyBuilder::collection_end(0, plain).as_bytes().to_vec()))
+    };
+    assert_eq!(run(&mut sm, Group0Command::MergeRanges { left: l, right: r }), Group0Result::Ok);
+}

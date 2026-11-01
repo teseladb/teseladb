@@ -12,15 +12,16 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
-use teseladb_bson::{Document, RawDoc, RawValue, Value};
+use teseladb_bson::{Document, RawValue, Value};
 use teseladb_mql::{ErrorCode, Filter, FilterUse, MqlError};
 
-use super::errors::{BAD_VALUE, FAILED_TO_PARSE, MISSING_FIELD, UNKNOWN_FIELD, error};
+use super::errors::{FAILED_TO_PARSE, error, missing_field, unknown_field, wrong_type};
 use super::sort::check_path;
 use super::{Env, shape_set};
-use crate::expr::dates_arith::add_unit;
+use crate::expr::dates_arith::{add_unit, check_unit};
 use crate::expr::values::{display, display_bson, int64_of};
 use crate::expr::{Ctx, Expr, field_path, order};
+use crate::raw::with_raw_doc;
 use crate::window::SetWindowFields;
 
 /// A location code.
@@ -31,11 +32,22 @@ macro_rules! loc {
 }
 
 const STEP: ErrorCode = loc!(5733401);
+const STEP_WHOLE: ErrorCode = loc!(6586400);
 const BOUNDS_ARRAY: ErrorCode = loc!(5733402);
+const BOUNDS_SIZE: ErrorCode = loc!(5733403);
+const BOUNDS_KIND: ErrorCode = loc!(5733404);
+const BOUNDS_DATES: ErrorCode = loc!(5733405);
+const BOUNDS_NUMBERS: ErrorCode = loc!(5733406);
+const NUMERIC_BOUNDS_UNIT: ErrorCode = loc!(5733409);
+const DATE_BOUNDS_UNIT: ErrorCode = loc!(5733410);
+const BOUNDS_VALUES: ErrorCode = loc!(5946800);
+const BOUNDS_TYPES: ErrorCode = loc!(5876900);
+const PARTITION_HOLDS_FIELD: ErrorCode = loc!(8993000);
 const BOUNDS_PARTITION: ErrorCode = loc!(5733408);
 const BOUNDS_STRING: ErrorCode = loc!(5946802);
 const FIELD_TYPE: ErrorCode = loc!(5733201);
 const NUMERIC_WITH_UNIT: ErrorCode = loc!(6053600);
+const FILL_NOT_OBJECT: ErrorCode = loc!(6050200);
 const FILL_BOTH: ErrorCode = loc!(6050201);
 const FILL_METHOD: ErrorCode = loc!(6050202);
 const FILL_EMPTY: ErrorCode = loc!(6050203);
@@ -62,9 +74,10 @@ pub struct Densify {
     bounds: Bounds,
 }
 
-fn missing(stage: &str, field: &str) -> MqlError {
-    error(MISSING_FIELD, format!("BSON field '{stage}.{field}' is missing but a required field"))
-}
+/// The expected types of a stage argument, as `TypeMismatch` messages write them.
+const STRING: &str = "type 'string'";
+const OBJECT: &str = "type 'object'";
+const NUMBERS: &str = "types '[decimal, long, int, double]'";
 
 /// Whether `v` is a number.
 fn numeric(v: &Value) -> bool {
@@ -103,7 +116,9 @@ fn add(a: &Value, b: &Value) -> Value {
 }
 
 impl Densify {
-    /// Reads `{field, partitionByFields, range: {step, unit, bounds}}`.
+    /// Reads `{field, partitionByFields, range: {step, unit, bounds}}`, checked in RefDb's
+    /// order: the arguments' types in document order, the missing ones, the paths, the step,
+    /// the unit and then the bounds.
     pub fn parse(v: RawValue<'_>) -> Result<Densify, MqlError> {
         let RawValue::Document(d) = v else {
             return Err(error(
@@ -118,70 +133,69 @@ impl Densify {
         for (k, x) in d.iter() {
             match (k, x) {
                 ("field", RawValue::String(s)) => field = Some(s.to_owned()),
+                ("field", x) => return Err(wrong_type("$densify.field", x, STRING)),
                 ("partitionByFields", RawValue::Array(a)) => {
-                    for p in a.iter() {
-                        if let RawValue::String(s) = p {
-                            partitions.push(s.to_owned());
+                    for (i, p) in a.iter().enumerate() {
+                        match p {
+                            RawValue::String(s) => partitions.push(s.to_owned()),
+                            p => {
+                                let at = format!("$densify.partitionByFields.{i}");
+                                return Err(wrong_type(&at, p, STRING));
+                            }
                         }
                     }
                 }
-                ("range", RawValue::Document(r)) => range = Some(r),
-                (other, _) => {
-                    return Err(error(
-                        UNKNOWN_FIELD,
-                        format!("BSON field '$densify.{other}' is an unknown field."),
-                    ));
+                ("partitionByFields", x) => {
+                    return Err(wrong_type("$densify.partitionByFields", x, "type 'array'"));
                 }
+                ("range", RawValue::Document(r)) => range = Some(r),
+                ("range", x) => return Err(wrong_type("$densify.range", x, OBJECT)),
+                (other, _) => return Err(unknown_field("$densify", other)),
             }
         }
-        let field = field.ok_or_else(|| missing("$densify", "field"))?;
-        check_path(&field)?;
-        let range = range.ok_or_else(|| missing("$densify", "range"))?;
+        let field = field.ok_or_else(|| missing_field("$densify", "field"))?;
+        let range = range.ok_or_else(|| missing_field("$densify", "range"))?;
         let (mut step, mut unit, mut bounds) = (None, None, None);
         for (k, x) in range.iter() {
             match (k, x) {
-                ("step", x) => step = Some(Value::from(x)),
+                ("step", x) if numeric(&Value::from(x)) => step = Some(Value::from(x)),
+                ("step", x) => return Err(wrong_type("$densify.range.step", x, NUMBERS)),
                 ("unit", RawValue::String(s)) => unit = Some(s.to_owned()),
-                ("bounds", RawValue::String("full")) => bounds = Some(Bounds::Full),
-                ("bounds", RawValue::String("partition")) => bounds = Some(Bounds::Partition),
-                ("bounds", RawValue::String(_)) => {
-                    return Err(error(
-                        BOUNDS_STRING,
-                        "Bounds string must either be 'full' or 'partition'",
-                    ));
-                }
-                ("bounds", RawValue::Array(a)) => {
-                    let items: Vec<Value> = a.iter().map(Value::from).collect();
-                    let ok = items.len() == 2
-                        && (items.iter().all(numeric)
-                            || items.iter().all(|x| matches!(x, Value::DateTime(_))))
-                        && !less(&items[1], &items[0])?;
-                    if !ok {
-                        return Err(error(
-                            BOUNDS_ARRAY,
-                            "A bounding array must be an ascending array of either two dates or two numbers",
-                        ));
-                    }
-                    bounds = Some(Bounds::Between(items[0].clone(), items[1].clone()));
-                }
-                (other, _) => {
-                    return Err(error(
-                        UNKNOWN_FIELD,
-                        format!("BSON field '$densify.range.{other}' is an unknown field."),
-                    ));
-                }
+                ("unit", x) => return Err(wrong_type("$densify.range.unit", x, STRING)),
+                ("bounds", x) => bounds = Some(Value::from(x)),
+                (other, _) => return Err(unknown_field("$densify.range", other)),
             }
         }
-        let step = step.ok_or_else(|| missing("$densify.range", "step"))?;
-        let positive =
-            numeric(&step) && crate::expr::values::f64_of(&step).is_some_and(|s| s > 0.0);
-        if !positive {
+        let step = step.ok_or_else(|| missing_field("$densify.range", "step"))?;
+        let bounds = bounds.ok_or_else(|| missing_field("$densify.range", "bounds"))?;
+        check_path(&field)?;
+        for p in &partitions {
+            check_path(p)?;
+            if *p == field {
+                return Err(error(
+                    PARTITION_HOLDS_FIELD,
+                    format!(
+                        "partitionByFields '{p}' cannot include field '{field}' that is being densified."
+                    ),
+                ));
+            }
+        }
+        if crate::expr::values::f64_of(&step).is_none_or(|s| s.is_nan() || s <= 0.0) {
             return Err(error(
                 STEP,
                 "The step parameter in a range statement must be a strictly positive numeric value",
             ));
         }
-        let bounds = bounds.ok_or_else(|| missing("$densify.range", "bounds"))?;
+        if let Some(u) = &unit {
+            if crate::expr::values::f64_of(&step).is_none_or(|s| s.fract() != 0.0) {
+                return Err(error(
+                    STEP_WHOLE,
+                    "The step parameter in a range statement must be a whole number when densifying a date range",
+                ));
+            }
+            check_unit(u)?;
+        }
+        let bounds = Self::bounds(bounds, &step, unit.is_some())?;
         if matches!(bounds, Bounds::Partition) && partitions.is_empty() {
             return Err(error(
                 BOUNDS_PARTITION,
@@ -189,6 +203,72 @@ impl Densify {
             ));
         }
         Ok(Densify { field, partitions, step, unit, bounds })
+    }
+
+    /// Reads `bounds`: `full`, `partition`, or two ascending numbers of the step's type (no
+    /// `unit`) or two dates (with a `unit`).
+    fn bounds(bounds: Value, step: &Value, has_unit: bool) -> Result<Bounds, MqlError> {
+        let items = match bounds {
+            Value::String(s) if s == "full" => return Ok(Bounds::Full),
+            Value::String(s) if s == "partition" => return Ok(Bounds::Partition),
+            Value::String(_) => {
+                return Err(error(
+                    BOUNDS_STRING,
+                    "Bounds string must either be 'full' or 'partition'",
+                ));
+            }
+            Value::Array(items) => items,
+            _ => {
+                return Err(error(
+                    BOUNDS_KIND,
+                    "The bounds in a range statement must be the string 'full', 'partition', or an ascending array of two numbers or two dates",
+                ));
+            }
+        };
+        let [lo, hi] = <[Value; 2]>::try_from(items).map_err(|_| {
+            error(
+                BOUNDS_SIZE,
+                "A bounding array in a range statement must have exactly two elements",
+            )
+        })?;
+        if less(&hi, &lo)? {
+            return Err(error(
+                BOUNDS_ARRAY,
+                "A bounding array must be an ascending array of either two dates or two numbers",
+            ));
+        }
+        const MIXED: &str = "A bounding array must contain either both dates or both numeric types";
+        if numeric(&lo) {
+            if !numeric(&hi) {
+                return Err(error(BOUNDS_NUMBERS, MIXED));
+            }
+            if has_unit {
+                return Err(error(
+                    NUMERIC_BOUNDS_UNIT,
+                    "Numeric bounds may not have unit parameter",
+                ));
+            }
+            let kind = std::mem::discriminant;
+            if kind(&lo) != kind(&hi) || kind(&lo) != kind(step) {
+                return Err(error(
+                    BOUNDS_TYPES,
+                    "Upper bound, lower bound, and step must all have the same type",
+                ));
+            }
+        } else if matches!(lo, Value::DateTime(_)) {
+            if !matches!(hi, Value::DateTime(_)) {
+                return Err(error(BOUNDS_DATES, MIXED));
+            }
+            if !has_unit {
+                return Err(error(
+                    DATE_BOUNDS_UNIT,
+                    "A bounding array of dates must specify a unit",
+                ));
+            }
+        } else {
+            return Err(error(BOUNDS_VALUES, "Explicit bounds must be numeric or dates"));
+        }
+        Ok(Bounds::Between(lo, hi))
     }
 
     /// The value after `v`.
@@ -245,8 +325,15 @@ impl Densify {
             parts[i].0 = key;
             parts[i].1.push((v, d));
         }
+        // Explicit bounds without partitions are filled even when no document holds the field.
+        if parts.is_empty()
+            && self.partitions.is_empty()
+            && matches!(self.bounds, Bounds::Between(..))
+        {
+            parts.push((Vec::new(), Vec::new()));
+        }
         for (_, docs) in &mut parts {
-            sort_by_value(docs)?;
+            crate::expr::sort_by_values(docs, None)?;
         }
         let (mut low, mut high): (Option<Value>, Option<Value>) = (None, None);
         for (_, docs) in &parts {
@@ -277,14 +364,9 @@ impl Densify {
                     break;
                 }
                 // The documents below the generated value come first.
-                while let Some((v, _)) = existing.peek() {
-                    if less(v, &cur)? {
-                        if let Some((_, d)) = existing.next() {
-                            out.push(d);
-                        }
-                    } else {
-                        break;
-                    }
+                // Densify values are numbers or dates, which always compare.
+                while let Some((_, d)) = existing.next_if(|(v, _)| less(v, &cur).unwrap_or(false)) {
+                    out.push(d);
                 }
                 let present = existing.peek().is_some_and(|(v, _)| {
                     order(&Some(v.clone()), &Some(cur.clone()), None).ok() == Some(Ordering::Equal)
@@ -305,17 +387,6 @@ impl Densify {
         }
         Ok(out)
     }
-}
-
-fn sort_by_value(docs: &mut [(Value, Document)]) -> Result<(), MqlError> {
-    let mut failure = None;
-    docs.sort_by(|(a, _), (b, _)| {
-        order(&Some(a.clone()), &Some(b.clone()), None).unwrap_or_else(|e| {
-            failure.get_or_insert(e);
-            Ordering::Equal
-        })
-    });
-    failure.map_or(Ok(()), Err)
 }
 
 /// A `$fill`.
@@ -346,17 +417,34 @@ impl Fill {
         };
         let (mut sort, mut partition, mut fields, mut output) = (None, None, None, None);
         for (k, x) in d.iter() {
-            match k {
-                "sortBy" => sort = Some(x),
-                "partitionBy" => partition = Some(Expr::parse_in(x, ctx)?),
-                "partitionByFields" => fields = Some(x),
-                "output" => output = Some(x),
-                other => {
-                    return Err(error(
-                        UNKNOWN_FIELD,
-                        format!("BSON field '$fill.{other}' is an unknown field."),
-                    ));
+            match (k, x) {
+                ("sortBy", RawValue::Document(s)) => sort = Some(s),
+                ("sortBy", x) => return Err(wrong_type("$fill.sortBy", x, OBJECT)),
+                ("partitionBy", RawValue::Document(_) | RawValue::String(_)) => {
+                    partition = Some(Expr::parse_in(x, ctx)?);
                 }
+                ("partitionBy", x) => {
+                    return Err(wrong_type("$fill.partitionBy", x, "types '[object, string]'"));
+                }
+                ("partitionByFields", RawValue::Array(a)) => {
+                    let mut names = Vec::new();
+                    for (i, f) in a.iter().enumerate() {
+                        match f {
+                            RawValue::String(s) => names.push(s.to_owned()),
+                            f => {
+                                let at = format!("$fill.partitionByFields.{i}");
+                                return Err(wrong_type(&at, f, STRING));
+                            }
+                        }
+                    }
+                    fields = Some(names);
+                }
+                ("partitionByFields", x) => {
+                    return Err(wrong_type("$fill.partitionByFields", x, "type 'array'"));
+                }
+                ("output", RawValue::Document(o)) => output = Some(o),
+                ("output", x) => return Err(wrong_type("$fill.output", x, OBJECT)),
+                (other, _) => return Err(unknown_field("$fill", other)),
             }
         }
         if partition.is_some() && fields.is_some() {
@@ -365,26 +453,27 @@ impl Fill {
                 "Maximum one of 'partitionBy' and 'partitionByFields can be specified in '$fill'",
             ));
         }
-        if let Some(RawValue::Array(a)) = fields {
+        if let Some(names) = fields {
             let mut obj = Document::new();
-            for f in a.iter() {
-                if let RawValue::String(s) = f {
-                    obj.push(s, Value::String(format!("${s}")));
-                }
+            for s in names {
+                obj.push(&s, Value::String(format!("${s}")));
             }
-            let bytes = obj.to_bytes().map_err(|e| error(BAD_VALUE, e.to_string()))?;
-            let raw = RawDoc::from_bytes(&bytes).map_err(|e| error(BAD_VALUE, e.to_string()))?;
-            partition = Some(Expr::parse_in(RawValue::Document(raw), ctx)?);
+            partition =
+                Some(with_raw_doc(&obj, |raw| Expr::parse_in(RawValue::Document(raw), ctx))?);
         }
-        let Some(RawValue::Document(out)) = output else {
-            return Err(missing("$fill", "output"));
-        };
+        let out = output.ok_or_else(|| missing_field("$fill", "output"))?;
+        if out.iter().next().is_none() {
+            return Err(error(
+                FILL_EMPTY,
+                "The output field in '$fill' must contain an object with at least one element",
+            ));
+        }
         let (mut methods, mut values) = (Vec::new(), Vec::new());
         for (field, spec) in out.iter() {
             let RawValue::Document(s) = spec else {
                 return Err(error(
-                    FILL_BOTH,
-                    "Each fill output specification must have exactly one of 'method' or 'value' fields, not both",
+                    FILL_NOT_OBJECT,
+                    "Each fill output specification must be an object with exactly one field",
                 ));
             };
             let (mut method, mut value) = (None, None);
@@ -393,22 +482,28 @@ impl Fill {
                     ("method", RawValue::String(m)) if m == "locf" || m == "linear" => {
                         method = Some(m.to_owned())
                     }
-                    ("method", _) => {
+                    ("method", RawValue::String(_)) => {
                         return Err(error(FILL_METHOD, "Method must be either locf or linear"));
                     }
-                    ("value", x) => value = Some(Expr::parse_in(x, ctx)?),
-                    (other, _) => {
-                        return Err(error(
-                            UNKNOWN_FIELD,
-                            format!("BSON field '$fill.output.{other}' is an unknown field."),
-                        ));
+                    ("method", x) => return Err(wrong_type("$fill.method", x, STRING)),
+                    ("value", x) => {
+                        // `$fill` sets values with an `$addFields`, which words the errors.
+                        value = Some(
+                            Expr::parse_in(x, ctx).map_err(|e| super::invalid("$addFields", e))?,
+                        );
                     }
+                    (other, _) => return Err(unknown_field("$fill", other)),
                 }
             }
             match (method, value) {
                 (Some(m), None) => methods.push((field.to_owned(), m)),
-                (None, Some(e)) => values.push((field.to_owned(), e)),
-                _ => {
+                (None, Some(e)) => {
+                    check_path(field).map_err(|e| super::invalid("$addFields", e))?;
+                    values.push((field.to_owned(), e));
+                }
+                // An empty specification fills nothing.
+                (None, None) => {}
+                (Some(_), Some(_)) => {
                     return Err(error(
                         FILL_BOTH,
                         "Each fill output specification must have exactly one of 'method' or 'value' fields, not both",
@@ -416,16 +511,10 @@ impl Fill {
                 }
             }
         }
-        if methods.is_empty() && values.is_empty() {
-            return Err(error(
-                FILL_EMPTY,
-                "The output field in '$fill' must contain an object with at least one element",
-            ));
-        }
         let window = if methods.is_empty() {
             None
         } else {
-            Some(SetWindowFields::for_fill(partition, sort, &methods)?)
+            Some(SetWindowFields::for_fill(partition, sort, &methods, ctx)?)
         };
         Ok(Fill { window, values })
     }
@@ -543,7 +632,9 @@ impl GraphLookup {
                 format!("$graphLookup is missing required field(s): {}", lacking.join(", ")),
             ));
         };
-        check_path(&as_name)?;
+        for path in [&cf, &ct, &as_name].into_iter().chain(depth_field.as_ref()) {
+            check_path(path)?;
+        }
         Ok(GraphLookup {
             from,
             start,
@@ -560,12 +651,7 @@ impl GraphLookup {
     pub fn run(&self, docs: Vec<Document>, env: &dyn Env) -> Result<Vec<Document>, MqlError> {
         let foreign = env.collection(&self.from)?;
         let restrict = match &self.restrict {
-            Some(r) => {
-                let bytes = r.to_bytes().map_err(|e| error(BAD_VALUE, e.to_string()))?;
-                let raw =
-                    RawDoc::from_bytes(&bytes).map_err(|e| error(BAD_VALUE, e.to_string()))?;
-                Some(Filter::parse(raw, FilterUse::Query)?)
-            }
+            Some(r) => Some(with_raw_doc(r, |raw| Filter::parse(raw, FilterUse::Query))?),
             None => None,
         };
         let segs: Vec<&str> = self.as_path.iter().map(String::as_str).collect();
@@ -609,10 +695,8 @@ impl GraphLookup {
                 if seen[i] {
                     continue;
                 }
-                let fb = f.to_bytes().map_err(|e| error(BAD_VALUE, e.to_string()))?;
-                let fr = RawDoc::from_bytes(&fb).map_err(|e| error(BAD_VALUE, e.to_string()))?;
                 if !connects(f, &self.connect_to, &frontier, col)?
-                    || !restrict.map_or(Ok(true), |r| super::scoped::matches_raw(r, fr, env))?
+                    || !restrict.map_or(Ok(true), |r| super::scoped::matches(r, f, env))?
                 {
                     continue;
                 }

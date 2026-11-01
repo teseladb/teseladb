@@ -26,6 +26,14 @@ use crate::error::{self, CommandError, DUPLICATE_KEY, INTERNAL_ERROR, WRITE_CONF
 /// Value type of an index entry (a document is [`super::mutation::DOCUMENT`]).
 pub const INDEX_ENTRY: u8 = 2;
 
+/// Value type of the mark that an index is multikey on a path (009 FR-001, 010 FR-001): one
+/// entry per field and path through an array, which the planner reads.
+pub const MULTIKEY_MARK: u8 = 4;
+
+/// The index numbers the marks of index `n` go under (`MULTIKEY_MARKS + n`), outside every index
+/// and the documents.
+pub const MULTIKEY_MARKS: u32 = 0x8000_0000;
+
 /// Field of the specification with the index's own collation.
 const COLLATION: &str = "collation";
 /// Field of the specification with the filter of a partial index (FR-008).
@@ -163,7 +171,7 @@ impl Maintainer {
             };
             let partial = match spec.get(PARTIAL) {
                 Some(RawValue::Document(f)) => Some(
-                    teseladb_mql::Filter::parse(f, teseladb_mql::FilterUse::Query)
+                    teseladb_mql::Filter::parse(f, teseladb_mql::FilterUse::Index)
                         .map_err(super::mutation::from_mql)?,
                 ),
                 _ => None,
@@ -285,6 +293,9 @@ impl Maintainer {
                 value_type: INDEX_ENTRY,
                 value,
             }));
+            if let Some(v) = after {
+                puts.extend(multikey_marks(&kept.set, &kept.pattern, v.doc));
+            }
         }
         guard.admit(&removed, &added, stored).map_err(|e| self.refused(e, new))?;
         Ok((puts, deletes))
@@ -358,6 +369,61 @@ impl Maintainer {
 }
 
 /// The empty document, for an error without a document.
+/// The marks of the paths of `doc` that go through an array on the fields of the index of
+/// `set` (key pattern `pattern`).
+fn multikey_marks(set: &IndexSet, pattern: &Document, doc: RawDoc<'_>) -> Vec<Put> {
+    let Some((id, _)) = set.indexes.first() else { return Vec::new() };
+    let mut out = Vec::new();
+    for (field, _) in pattern.iter() {
+        let parts: Vec<&str> = field.split('.').collect();
+        let mut prefixes = Vec::new();
+        array_prefixes(RawValue::Document(doc), &parts, 0, &mut prefixes);
+        prefixes.sort_unstable();
+        prefixes.dedup();
+        for n in prefixes {
+            out.push(Put {
+                key: multikey_key(set.tenant, set.collection, *id, field, &parts[..n].join(".")),
+                value_type: MULTIKEY_MARK,
+                value: Vec::new(),
+            });
+        }
+    }
+    out
+}
+
+/// The key of the mark that the index `id` is multikey on `field` through the array at `path`.
+pub fn multikey_key(tenant: u32, collection: u32, id: u32, field: &str, path: &str) -> Vec<u8> {
+    let mut key = teseladb_keys::KeyBuilder::index_prefix(tenant, collection, MULTIKEY_MARKS + id)
+        .as_bytes()
+        .to_vec();
+    key.extend_from_slice(field.as_bytes());
+    key.push(0);
+    key.extend_from_slice(path.as_bytes());
+    key
+}
+
+/// The lengths of the prefixes of `parts` (from `at`) whose value in `v` is an array.
+fn array_prefixes(v: RawValue<'_>, parts: &[&str], at: usize, out: &mut Vec<usize>) {
+    match v {
+        RawValue::Array(a) => {
+            out.push(at);
+            if at < parts.len() {
+                for item in a.iter() {
+                    if let RawValue::Document(_) = item {
+                        array_prefixes(item, parts, at, out);
+                    }
+                }
+            }
+        }
+        RawValue::Document(d) if at < parts.len() => {
+            if let Some(next) = d.get(parts[at]) {
+                array_prefixes(next, parts, at + 1, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn empty() -> RawDoc<'static> {
     const EMPTY: [u8; 5] = [5, 0, 0, 0, 0];
     RawDoc::from_bytes(&EMPTY).expect("the empty document")

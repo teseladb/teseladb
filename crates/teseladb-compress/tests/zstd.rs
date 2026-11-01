@@ -5,6 +5,11 @@
 //! The `.zst` files of `tests/data` were made with `zstd` 1.5 from the `.bin` inputs next to them
 //! (`zstd -3`, `-19`, `-1 --no-check`, `-c < input` for a frame without content size and
 //! `--ultra -22 --long=27`); `repeat`, `zeros`, `hello` and `empty` are rebuilt below.
+//!
+//! Raw content dictionaries (RFC 8878 §5, 004 FR-022): `dict.raw` is forty JSON documents,
+//! `docs.dict.zst` and `doc.dict19.zst` were made with `zstd -3 -D dict.raw docs.bin` and
+//! `zstd -19 -D dict.raw doc.bin` (1.5.7), and `zstd -d -D dict.raw` decodes this crate's frames
+//! with that dictionary (checked when the vectors were made).
 
 use teseladb_compress::{Error, zstd};
 use teseladb_types::Rng;
@@ -224,4 +229,107 @@ fn rle_literals_and_rle_then_repeated_tables() {
     let mut bad = rle_block;
     bad[3] |= 1;
     assert!(zstd::decompress(&handmade(13, &[(true, bad)]), LIMIT).is_err());
+}
+
+fn documents(seed: u64, n: usize) -> Vec<Vec<u8>> {
+    let mut rng = Rng::new(seed);
+    let cities = ["Madrid", "Sevilla", "Bilbao", "Valencia"];
+    (0..n)
+        .map(|i| {
+            let city = cities[rng.range(0, 4) as usize];
+            format!(
+                r#"{{"_id": {i}, "name": "customer-{}", "email": "user{}@example.org", "address": {{"street": "{} Main Street", "city": "{city}", "zip": "{:05}"}}, "active": {}}}"#,
+                rng.range(0, 10_000),
+                rng.range(0, 100_000),
+                rng.range(1, 1_000),
+                rng.range(0, 100_000),
+                rng.range(0, 2) == 1
+            )
+            .into_bytes()
+        })
+        .collect()
+}
+
+#[test]
+fn decodes_reference_frames_with_a_raw_content_dictionary() {
+    let file = |f: &str| std::fs::read(format!("{}/tests/data/{f}", env!("CARGO_MANIFEST_DIR")));
+    let dict = file("dict.raw").unwrap();
+    for (frame_file, input) in [("docs.dict.zst", "docs.bin"), ("doc.dict19.zst", "doc.bin")] {
+        let got = zstd::decompress_with_dict(&file(frame_file).unwrap(), LIMIT, &dict).unwrap();
+        assert_eq!(got, file(input).unwrap(), "{frame_file}");
+    }
+    // Without the dictionary its matches reach before the frame.
+    assert!(zstd::decompress(&file("docs.dict.zst").unwrap(), LIMIT).is_err());
+}
+
+#[test]
+fn round_trips_with_a_dictionary() {
+    let docs = documents(21, 200);
+    let samples: Vec<&[u8]> = docs[..150].iter().map(Vec::as_slice).collect();
+    let dict = zstd::train_dict(&samples, 4096);
+    assert!(!dict.is_empty() && dict.len() <= 4096, "{}", dict.len());
+    let mut plain = 0;
+    let mut with = 0;
+    for d in &docs[150..] {
+        let c = zstd::compress_with_dict(d, &dict);
+        assert_eq!(&zstd::decompress_with_dict(&c, LIMIT, &dict).unwrap(), d);
+        plain += zstd::compress(d).len();
+        with += c.len();
+    }
+    // Small documents of one shape: the dictionary pays.
+    assert!(with * 10 < plain * 8, "{with} with the dictionary, {plain} without");
+    // Any data, also larger than a block, round trips; an empty dictionary is no dictionary.
+    for d in [Vec::new(), data("text"), data("repeat"), data("mixed")] {
+        let c = zstd::compress_with_dict(&d, &dict);
+        assert_eq!(zstd::decompress_with_dict(&c, LIMIT, &dict).unwrap(), d);
+        assert_eq!(zstd::compress_with_dict(&d, &[]), zstd::compress(&d));
+    }
+    // Another dictionary does not decode it.
+    let c = zstd::compress_with_dict(&docs[160], &dict);
+    let other = zstd::train_dict(&[b"something else entirely, nothing alike".as_slice()], 64);
+    assert!(zstd::decompress_with_dict(&c, LIMIT, &other).is_err());
+    assert_eq!(zstd::decompress_with_dict(&c, 10, &dict), Err(Error::TooLarge));
+    // Only one frame goes with a dictionary.
+    let mut two = c.clone();
+    two.extend_from_slice(&c);
+    assert!(matches!(zstd::decompress_with_dict(&two, LIMIT, &dict), Err(Error::Corrupt(_))));
+    assert!(matches!(
+        zstd::decompress_with_dict(&[1, 2, 3, 4], LIMIT, &dict),
+        Err(Error::Corrupt(_))
+    ));
+}
+
+#[test]
+fn training_keeps_what_the_samples_repeat() {
+    // Nothing to learn from: no dictionary.
+    assert!(zstd::train_dict(&[], 1024).is_empty());
+    assert!(zstd::train_dict(&[b"tiny".as_slice()], 1024).is_empty());
+    let docs = documents(22, 300);
+    let samples: Vec<&[u8]> = docs.iter().map(Vec::as_slice).collect();
+    let dict = zstd::train_dict(&samples, 2048);
+    assert!(dict.len() <= 2048);
+    assert_eq!(dict, zstd::train_dict(&samples, 2048), "deterministic");
+    let text = String::from_utf8_lossy(&dict);
+    for field in ["\"address\"", "Main Street", "@example.org"] {
+        assert!(text.contains(field), "{field} in {text}");
+    }
+    // A capacity smaller than a segment still gives one segment's worth at most.
+    assert!(zstd::train_dict(&samples, 16).len() <= 16);
+}
+
+#[test]
+fn corrupt_frames_with_a_dictionary_never_panic() {
+    let mut rng = Rng::new(23);
+    let docs = documents(24, 60);
+    let samples: Vec<&[u8]> = docs.iter().map(Vec::as_slice).collect();
+    let dict = zstd::train_dict(&samples, 2048);
+    let frames: Vec<Vec<u8>> = docs.iter().map(|d| zstd::compress_with_dict(d, &dict)).collect();
+    for i in 0..5_000 {
+        let mut s = frames[i % frames.len()].clone();
+        for _ in 0..rng.range(1, 6) {
+            let at = rng.range(4, s.len() as u64) as usize;
+            s[at] ^= 1 << rng.range(0, 8);
+        }
+        let _ = zstd::decompress_with_dict(&s, 1 << 20, &dict);
+    }
 }

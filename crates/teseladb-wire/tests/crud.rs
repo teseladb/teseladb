@@ -763,7 +763,7 @@ fn write_concern_errors_come_with_the_write() {
     assert_eq!(
         field(&r, "writeConcernError.errmsg"),
         &s(
-            "Not enough data-bearing nodes; Error details: { writeConcern: { w: 5, wtimeout: 0, provenance: \"clientSupplied\" } }"
+            "UnsatisfiableWriteConcern: Not enough data-bearing nodes; Error details: { writeConcern: { w: 5, wtimeout: 0, provenance: \"clientSupplied\" } } at node1"
         )
     );
     // An unknown tag writes and reports it, with the concern as given (measured in 9.0.4).
@@ -775,7 +775,7 @@ fn write_concern_errors_come_with_the_write() {
     assert_eq!(
         field(&r, "writeConcernError.errmsg"),
         &s(
-            "No write concern mode named 'tagged' found in replica set configuration; Error details: { writeConcern: { w: \"tagged\", j: true, wtimeout: 7, provenance: \"clientSupplied\" } }"
+            "UnknownReplWriteConcern: No write concern mode named 'tagged' found in replica set configuration; Error details: { writeConcern: { w: \"tagged\", j: true, wtimeout: 7, provenance: \"clientSupplied\" } } at node1"
         )
     );
     assert_eq!(field(&r, "writeConcernError.errInfo"), &d(&[]));

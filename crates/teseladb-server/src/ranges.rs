@@ -18,11 +18,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use teseladb_lsm::Lsm;
 use teseladb_meta::command::Group0Command;
 use teseladb_meta::group0::{Group0Sm, RangeDesc, ReplicaRole};
+use teseladb_meta::meta2::{Meta2Sm, in_interval};
 use teseladb_multiraft::{GroupDesc, MultiRaftCore, OpId, StateMachine};
 use teseladb_raft::{Role, Status};
 use teseladb_range::host::RangeHost;
 use teseladb_range::sm::RangeSm;
 use teseladb_types::{GroupId, Nanos, NodeId};
+use teseladb_wire::commands::parameters;
 
 use crate::coresm::CoreSm;
 use crate::hosting::Hosting;
@@ -71,9 +73,57 @@ pub struct Ranges {
     pub collections: BTreeMap<u32, [u8; 16]>,
     /// The core changes recorded (007 FR-011): the target core and the intent, by range.
     pub relocations: BTreeMap<GroupId, (u16, u64)>,
+    /// The history each range keeps, in milliseconds, once `teselaHistoryRetention` was set
+    /// (007 FR-019); `None`: the hosts keep theirs.
+    pub history_ms: Option<u64>,
+    /// The load split threshold, once `teselaLoadSplitOpsPerSecond` was set (D-075).
+    pub load_split_ops: Option<u64>,
+    /// `config.settings` turned automatic merges off (007 FR-017).
+    pub automerge_off: bool,
+    /// The last number each `Meta2` range gave from its block, by that range's group (007
+    /// FR-014): a lower number of the block it no longer has was merged away.
+    pub last_ids: BTreeMap<u64, u64>,
+    /// The `Meta2` ranges, which are no data ranges.
+    pub meta2_groups: BTreeSet<GroupId>,
+    /// The capped collections, each of which has a range of its own (007 FR-009).
+    pub capped: BTreeSet<u32>,
+}
+
+/// The stored value of cluster parameter `name` in a copy of Group 0.
+fn parameter<'a>(sm: &'a Group0Sm, name: &str) -> Option<&'a [u8]> {
+    let mut key = crate::backend::PARAMETER_PREFIX.to_vec();
+    key.extend_from_slice(name.as_bytes());
+    sm.settings.get(&key).map(Vec::as_slice)
 }
 
 impl Ranges {
+    /// The ranges of a copy of Group 0 and of the copies of the `Meta2` ranges (007 FR-014): a
+    /// `Meta2` range that applied its seed holds the descriptors of its interval, which replace
+    /// those Group 0 still has.
+    pub fn of_all(sm: &Group0Sm, meta2: &[&Meta2Sm]) -> Ranges {
+        let mut r = Ranges::of(sm);
+        r.meta2_groups = sm.meta1.iter().flat_map(|m| m.ranges.iter().map(|x| x.group)).collect();
+        for m in meta2.iter().filter(|m| m.seeded) {
+            let moved: BTreeSet<GroupId> = r
+                .descs
+                .iter()
+                .filter(|d| in_interval(&d.end, &m.start, &m.end))
+                .map(|d| d.group)
+                .collect();
+            r.descs.retain(|d| !moved.contains(&d.group));
+            r.splits.retain(|g, _| !moved.contains(g));
+            r.merges.retain(|g, _| !moved.contains(g));
+            r.relocations.retain(|g, _| !moved.contains(g));
+            r.descs.extend(m.ranges.values().cloned());
+            r.splits.extend(m.split_ids.iter().map(|(a, b)| (*a, *b)));
+            r.merges.extend(m.merges.iter().map(|(a, b)| (*a, *b)));
+            r.relocations.extend(m.relocations.iter().map(|(a, b)| (*a, *b)));
+            r.last_ids.insert(m.group.0, m.last_id);
+        }
+        r.descs.sort_by_key(|d| d.group);
+        r
+    }
+
     /// The ranges of a copy of Group 0.
     pub fn of(sm: &Group0Sm) -> Ranges {
         Ranges {
@@ -83,6 +133,14 @@ impl Ranges {
             last_group: sm.last_group,
             collections: sm.catalog.collections.values().map(|c| (c.id, c.uuid)).collect(),
             relocations: sm.relocations.clone(),
+            history_ms: parameter(sm, parameters::HISTORY_RETENTION)
+                .map(|v| parameters::history_retention_ms(Some(v))),
+            load_split_ops: parameter(sm, parameters::LOAD_SPLIT_OPS)
+                .map(|v| parameters::load_split_ops(Some(v))),
+            automerge_off: !teseladb_meta::config_settings::automerge(&sm.settings),
+            last_ids: BTreeMap::new(),
+            meta2_groups: BTreeSet::new(),
+            capped: sm.capped_collections(),
         }
     }
 }
@@ -97,7 +155,7 @@ pub struct Replicas {
     splits: BTreeMap<GroupId, GroupId>,
     merges: BTreeMap<GroupId, (GroupId, u64)>,
     /// Every range Group 0 has, on any node and core, and the last number it gave.
-    known: (BTreeSet<GroupId>, u64),
+    known: (BTreeSet<GroupId>, u64, BTreeMap<u64, u64>),
     /// Replicas created and opened.
     open: BTreeSet<GroupId>,
     /// Replicas closed while their data is rebuilt (005 FR-014): not opened again until released.
@@ -115,6 +173,8 @@ pub struct Replicas {
     hosting: (Hosting, u64),
     /// Every descriptor of Group 0, which `descs` filters.
     all: Vec<RangeDesc>,
+    /// The capped collections, cut out into ranges of their own.
+    capped: BTreeSet<u32>,
 }
 
 impl Replicas {
@@ -127,7 +187,7 @@ impl Replicas {
             descs: BTreeMap::new(),
             splits: BTreeMap::new(),
             merges: BTreeMap::new(),
-            known: (BTreeSet::new(), 0),
+            known: (BTreeSet::new(), 0, BTreeMap::new()),
             open: BTreeSet::new(),
             held: BTreeSet::new(),
             retired: BTreeSet::new(),
@@ -136,6 +196,7 @@ impl Replicas {
             check_at: Nanos::ZERO,
             hosting: (Hosting::default(), 0),
             all: Vec::new(),
+            capped: BTreeSet::new(),
         }
     }
 
@@ -174,15 +235,22 @@ impl Replicas {
         self.refresh();
         self.splits = ranges.splits.clone();
         self.merges = ranges.merges.clone();
-        self.known = (ranges.descs.iter().map(|d| d.group).collect(), ranges.last_group);
+        self.capped.clone_from(&ranges.capped);
+        let ids = ranges.descs.iter().map(|d| d.group).chain(ranges.meta2_groups.iter().copied());
+        self.known = (ids.collect(), ranges.last_group, ranges.last_ids.clone());
     }
 
     /// Whether Group 0 merged range `g` away: it gave its number and no longer has it (a range
     /// leaves Group 0 only by a completed merge). A copy of Group 0 behind the range's creation
     /// does not say so.
     pub fn merged_away(&self, g: GroupId) -> bool {
-        let (ids, last) = &self.known;
-        g.0 <= *last && !ids.contains(&g)
+        let (ids, last, blocks) = &self.known;
+        // A range numbered by a `Meta2` range carries that range's group in its high bits.
+        let given = match g.0 >> 32 {
+            0 => g.0 <= *last,
+            owner => blocks.get(&owner).is_some_and(|l| g.0 & u64::from(u32::MAX) <= *l),
+        };
+        given && !ids.contains(&g)
     }
 
     /// Group 0's descriptors of the ranges this node holds on this core.
@@ -432,6 +500,11 @@ impl Replicas {
         if !measure || desc.settling || *end != desc.end {
             return;
         }
+        // A capped collection gets a range of its own first (FR-009).
+        if let Some(at) = capped_cut(start, end, &self.capped) {
+            out.push(Group0Command::SplitRange { group: g, at });
+            return;
+        }
         let size = lsm.interval_size(start, end);
         let disk_limit = self.split_bytes.saturating_mul(SPLIT_DISK_FACTOR);
         // By size (FR-005) at the files' middle key, or else by load (FR-006) at the median of the
@@ -452,6 +525,20 @@ impl Replicas {
         self.conf_ops.remove(&g);
         true
     }
+}
+
+/// The first edge of a capped collection of `capped` strictly inside `[start, end)` (an empty
+/// `end`: no end), where the range is cut so that the collection has a range of its own
+/// (007 FR-009).
+fn capped_cut(start: &[u8], end: &[u8], capped: &BTreeSet<u32>) -> Option<Vec<u8>> {
+    use teseladb_keys::KeyBuilder;
+    let inside = |k: &[u8]| start < k && (end.is_empty() || k < end);
+    capped
+        .iter()
+        .flat_map(|&c| [KeyBuilder::collection_start(0, c), KeyBuilder::collection_end(0, c)])
+        .map(|k| k.as_bytes().to_vec())
+        .filter(|k| inside(k))
+        .min()
 }
 
 #[cfg(test)]
@@ -488,6 +575,58 @@ mod tests {
             pending_split: None,
             settling: false,
         }
+    }
+
+    #[test]
+    fn the_seeded_meta2_copies_replace_group0s_descriptors_and_number_their_blocks() {
+        let mut g0 = Group0Sm::default();
+        for d in [desc(1, &[1], &[2]), desc(2, &[2], &[4])] {
+            g0.insert_range(d);
+        }
+        g0.split_ids.insert(GroupId(1), GroupId(5));
+        g0.merges.insert(GroupId(2), (GroupId(6), 1));
+        g0.relocations.insert(GroupId(1), (1, 1));
+        g0.last_group = 9;
+        g0.meta1 = Some(teseladb_meta::meta2::Meta1 {
+            ranges: vec![teseladb_meta::meta2::Meta2Range {
+                end: Vec::new(),
+                group: GroupId(9),
+                replicas: vec![(ME, ReplicaRole::Voter)],
+                core: 0,
+            }],
+            facts: teseladb_meta::meta2::Meta2Cluster::default(),
+            seeded: BTreeSet::new(),
+        });
+        let mut m = Meta2Sm::new(GroupId(9));
+        m.start = vec![];
+        m.end = vec![];
+        let born = GroupId((9 << 32) | 3);
+        m.ranges.insert(GroupId(1), desc(1, &[1], &[3]));
+        m.ranges.insert(born, desc(born.0, &[3], &[4]));
+        m.split_ids.insert(GroupId(1), GroupId((9 << 32) | 4));
+        m.merges.insert(GroupId(1), (born, 2));
+        m.relocations.insert(born, (1, 2));
+        m.last_id = 4;
+        let unseeded = Meta2Sm::new(GroupId(9));
+        // Before its seed the copy says nothing.
+        let r = Ranges::of_all(&g0, &[&unseeded]);
+        assert_eq!(r.descs.len(), 2);
+        assert!(r.meta2_groups.contains(&GroupId(9)));
+        m.seeded = true;
+        let r = Ranges::of_all(&g0, &[&m]);
+        let groups: Vec<GroupId> = r.descs.iter().map(|d| d.group).collect();
+        assert_eq!(groups, vec![GroupId(1), born]);
+        assert_eq!(r.splits.get(&GroupId(1)), Some(&GroupId((9 << 32) | 4)));
+        assert!(!r.merges.contains_key(&GroupId(2)) && r.relocations.contains_key(&born));
+        assert_eq!(r.last_ids.get(&9), Some(&4));
+        // A number of the block that the copy no longer has was merged away; a higher one
+        // was never given, and the Meta2 range itself is no data range that went.
+        let mut replicas = Replicas::new(ME, 0, 1 << 30);
+        replicas.set(&r);
+        assert!(replicas.merged_away(GroupId((9 << 32) | 2)));
+        assert!(!replicas.merged_away(GroupId((9 << 32) | 7)));
+        assert!(!replicas.merged_away(GroupId((8 << 32) | 1)), "a block nobody gave");
+        assert!(!replicas.merged_away(GroupId(9)) && replicas.merged_away(GroupId(2)));
     }
 
     impl One {
@@ -527,6 +666,38 @@ mod tests {
             let lsm = self.lsm.clone();
             self.r.lead(&mut self.core, &mut self.host, &lsm.borrow(), self.now)
         }
+    }
+
+    #[test]
+    fn a_leader_cuts_its_range_at_the_edges_of_a_capped_collection() {
+        // 007 FR-009: a capped collection gets a range of its own.
+        use teseladb_keys::KeyBuilder;
+        const CAPPED: u32 = 7;
+        let start = KeyBuilder::collection_start(0, CAPPED).as_bytes().to_vec();
+        let end = KeyBuilder::collection_end(0, CAPPED).as_bytes().to_vec();
+        let mut o = One::new();
+        let capped = BTreeSet::from([CAPPED]);
+        let descs = vec![desc(1, &[1], &[4])];
+        o.r.set(&Ranges { descs, capped: capped.clone(), ..Ranges::default() });
+        let lsm = o.lsm.clone();
+        o.r.open(&mut o.core, &mut o.host, &lsm);
+        let mut asked = Vec::new();
+        for _ in 0..200 {
+            o.run(20);
+            asked = o.lead();
+            if !asked.is_empty() {
+                break;
+            }
+            o.lsm.borrow_mut().flush();
+        }
+        assert_eq!(asked, vec![Group0Command::SplitRange { group: G, at: start.clone() }]);
+        // The edge inside a range, the first one: a range that starts at the collection is cut
+        // at its end, and one that holds the collection alone is not cut.
+        assert_eq!(capped_cut(&start, &[4], &capped), Some(end.clone()));
+        assert_eq!(capped_cut(&[1], &start, &capped), None);
+        assert_eq!(capped_cut(&start, &end, &capped), None);
+        assert_eq!(capped_cut(&end, &[], &capped), None);
+        assert_eq!(capped_cut(&[1], &[], &capped), Some(start));
     }
 
     #[test]
@@ -864,5 +1035,21 @@ mod tests {
             matches!(asked.as_slice(), [Group0Command::SplitRange { group: G, .. }]),
             "{asked:?}"
         );
+    }
+
+    #[test]
+    fn the_cluster_parameters_of_007_reach_the_ranges() {
+        let mut sm = Group0Sm::default();
+        assert_eq!((Ranges::of(&sm).history_ms, Ranges::of(&sm).load_split_ops), (None, None));
+        let mut key = crate::backend::PARAMETER_PREFIX.to_vec();
+        key.extend_from_slice(parameters::HISTORY_RETENTION.as_bytes());
+        let v = teseladb_bson::Document::new().with("seconds", 60i64);
+        sm.settings.insert(key, v.to_bytes().unwrap());
+        let mut key = crate::backend::PARAMETER_PREFIX.to_vec();
+        key.extend_from_slice(parameters::LOAD_SPLIT_OPS.as_bytes());
+        let v = teseladb_bson::Document::new().with("opsPerSecond", 9i64);
+        sm.settings.insert(key, v.to_bytes().unwrap());
+        let r = Ranges::of(&sm);
+        assert_eq!((r.history_ms, r.load_split_ops), (Some(60_000), Some(9)));
     }
 }

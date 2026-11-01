@@ -417,6 +417,9 @@ pub struct World {
     /// be cut off for this long as soon as a follower answers its heartbeats, which renews its
     /// lease (D-044).
     pub edge_cut: Option<(u32, i64, Nanos)>,
+    /// The last node at the edge of the clock margin cut off while it led, and when: its lease
+    /// reads go on until the lease ends, and workloads may read through it meanwhile.
+    pub edge_cut_at: Option<(u32, Nanos)>,
     /// Snapshots `(node, core, group, index)` waiting for their data (005 FR-012).
     pub snapshot_waits: Vec<(u32, u16, GroupId, u64)>,
     /// The pending `Bootstrap` of Group 0: node, core and operation.
@@ -539,6 +542,7 @@ impl World {
             range_lsm: None,
             healed: false,
             edge_cut: None,
+            edge_cut_at: None,
             snapshot_waits: Vec::new(),
             bootstrap_op: None,
             bootstrap_closed: false,
@@ -618,6 +622,18 @@ impl World {
     pub fn schedule(&mut self, at: Nanos, ev: Event) {
         self.seq += 1;
         self.queue.push(Pending { at: at.max(self.now), seq: self.seq, ev });
+    }
+
+    /// When the next event happens, without taking it.
+    #[cfg(test)]
+    pub(crate) fn next_at(&self) -> Option<Nanos> {
+        self.queue.peek().map(|p| p.at)
+    }
+
+    /// How many events are due.
+    #[cfg(test)]
+    pub(crate) fn queue_len(&self) -> usize {
+        self.queue.len()
     }
 
     /// Next event (advances the clock), with its sequence number.

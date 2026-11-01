@@ -97,7 +97,12 @@ fn a_collection_and_its_indexes_are_one_interval() {
     let (start, end) = (KeyBuilder::collection_start(1, 5), KeyBuilder::collection_end(1, 5));
     for (c, k) in &keys {
         assert_eq!(*c == 5, *k >= start && *k < end, "{k:?}");
+        // Documents and index entries share the collection's prefix (004 FR-022).
+        let prefix = space::collection_of(k.as_bytes()).expect("a data key");
+        assert_eq!(prefix, &KeyBuilder::collection_start(1, *c).as_bytes()[..9], "{k:?}");
     }
+    assert_eq!(space::collection_of(&[space::DATA, 0, 0]), None, "too short");
+    assert_eq!(space::collection_of(&[space::SYSTEM, 0, 0, 0, 1, 0, 0, 0, 5, 0]), None);
 }
 
 #[test]
@@ -215,4 +220,14 @@ fn a_split_key_never_cuts_a_collection_kept_whole() {
     let k = KeyBuilder::document_capped(u32::MAX, u32::MAX, 3).as_bytes().to_vec();
     let from = [&[1u8][..], &[0xff; 8]].concat();
     assert_eq!(space::cut_outside(&k, (&from, &[][..]), last), Some(vec![2]));
+}
+
+/// The document of an index entry's primary key is the document of its `_id` (010 FR-001): the
+/// planner fetches it from the entry alone.
+#[test]
+fn the_document_of_a_primary_key_is_that_of_its_id() {
+    for id in [RawValue::Int32(7), RawValue::String("x"), RawValue::Double(2.5)] {
+        let pk = PrimaryKey::id(id);
+        assert_eq!(KeyBuilder::document_of_pk(3, 9, pk.as_bytes()), KeyBuilder::document(3, 9, id));
+    }
 }

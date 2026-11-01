@@ -64,6 +64,50 @@ pub enum TxnOp {
         /// Keys with its intents.
         keys: Vec<Vec<u8>>,
     },
+    /// Finds the keys of `[start, end)` this range holds with an intent of `txn`, at most
+    /// [`FIND_BATCH`] (the reaper, for an interval its record could not list key by key, 008
+    /// record GC). It answers with [`Reply::Batch`] of those keys, with empty values, followed by
+    /// [`continues`] if the interval goes on past the range's end. It writes nothing.
+    FindIntents {
+        /// The transaction.
+        txn: TxnId,
+        /// First key.
+        start: Vec<u8>,
+        /// End (excluded).
+        end: Vec<u8>,
+    },
+    /// Reads the record of `txn` without writing anything: it answers with the record, or
+    /// `NoSuchTransaction` (the reaper looks for a session's next transaction, 008 record GC).
+    ReadRecord {
+        /// The transaction.
+        txn: TxnId,
+    },
+    /// Removes the record of `txn` if it is final, has no intervals left (every intent resolved,
+    /// [`RecordOp::Resolved`]) and its last activity is below `before` (008 record GC); a record
+    /// that is still needed is refused with [`RangeError::WriteConflict`].
+    ForgetRecord {
+        /// The transaction.
+        txn: TxnId,
+        /// The record's last heartbeat or commit has to be below this mark.
+        before: Hlc,
+    },
+}
+
+/// Most keys one [`TxnOp::FindIntents`] answers.
+pub const FIND_BATCH: usize = 1_000;
+
+/// Value of the row that ends a [`TxnOp::FindIntents`] answer when its interval goes on past the
+/// range's end (the rows of the keys found have none): the row's key is where it goes on.
+pub const CONTINUES: &[u8] = b"continues";
+
+/// The row of a [`TxnOp::FindIntents`] answer that says where its interval goes on.
+pub fn continues(at: Vec<u8>) -> Row {
+    (at, (0, CONTINUES.to_vec()))
+}
+
+/// The last mark at which record `r` showed activity: its last heartbeat or its commit.
+pub fn last_activity(r: &TxnRecord) -> Hlc {
+    r.heartbeat_ts.max(r.commit_ts)
 }
 
 impl TxnOp {
@@ -73,8 +117,12 @@ impl TxnOp {
             TxnOp::PutIntents { writes, .. } | TxnOp::OnePhase { writes, .. } => {
                 writes.iter().map(|(k, _)| k.clone()).collect()
             }
-            TxnOp::EndTxn { txn, .. } | TxnOp::PushTxn { txn, .. } => vec![record_key(*txn)],
+            TxnOp::EndTxn { txn, .. }
+            | TxnOp::PushTxn { txn, .. }
+            | TxnOp::ForgetRecord { txn, .. }
+            | TxnOp::ReadRecord { txn } => vec![record_key(*txn)],
             TxnOp::ResolveIntents { keys, .. } => keys.clone(),
+            TxnOp::FindIntents { start, .. } => vec![start.clone()],
         }
     }
 }
@@ -220,7 +268,34 @@ fn evaluate_txn(
         TxnOp::PushTxn { txn, push } => {
             let stored = versions.first().and_then(|v| stored_record(v));
             let record = push_txn(stored, *txn, *push, ts).map_err(record_error)?;
+            // Faulty variant (008): a recovery answers «aborted» for a record that does not exist
+            // and leaves none, so its slow coordinator may still begin and commit it.
+            #[cfg(teseladb_bug = "record_not_fenced")]
+            if stored.is_none() && matches!(push, Push::Abort { .. }) {
+                let none = Command::Write {
+                    puts: Vec::new(),
+                    deletes: Vec::new(),
+                    dedup: None,
+                    live_delta: 0,
+                };
+                return Ok((none, Some(record)));
+            }
             Ok((Command::PushTxn { record: record.clone() }, Some(record)))
+        }
+        TxnOp::ForgetRecord { txn, before } => {
+            let stored = versions.first().and_then(|v| stored_record(v));
+            let record = TxnRecord::decode(stored.ok_or(RangeError::NoSuchTransaction)?)
+                .map_err(|_| RangeError::Unavailable)?;
+            let gone = record.status.is_final()
+                && record.spans.is_empty()
+                && last_activity(&record) < *before;
+            match gone {
+                true => Ok((Command::ForgetRecord { txn: *txn }, None)),
+                false => Err(RangeError::WriteConflict),
+            }
+        }
+        TxnOp::FindIntents { .. } | TxnOp::ReadRecord { .. } => {
+            unreachable!("answered without a proposal (`step_txn`)")
         }
         TxnOp::ResolveIntents { txn, status, commit_ts, .. } => {
             let (resolutions, live_delta) = resolutions(*txn, *status, keys, versions)?;
@@ -298,6 +373,42 @@ impl RangeHost {
         if !m.keys.iter().all(|k| self.covers(m.g, k)) {
             self.release(m.g, m.term, latch);
             self.reply(id, Err(RangeError::OutOfRange));
+            return true;
+        }
+        let Work::Txn(op) = &m.work else { unreachable!("a transaction's request") };
+        if let TxnOp::ReadRecord { .. } = &**op {
+            let stored = versions.first().and_then(|v| stored_record(v));
+            let answer = match stored.map(TxnRecord::decode) {
+                None => Err(RangeError::NoSuchTransaction),
+                Some(Ok(rec)) => Ok(Reply::Record(rec)),
+                Some(Err(_)) => Err(RangeError::Unavailable),
+            };
+            self.release(m.g, m.term, latch);
+            self.reply(id, answer);
+            return true;
+        }
+        if let TxnOp::FindIntents { txn, start, end } = &**op {
+            let range_end = self.ranges.get(&m.g).map(|r| r.end.clone()).unwrap_or_default();
+            let past = !range_end.is_empty() && (end.is_empty() || *end > range_end);
+            let stop = if past { range_end.clone() } else { end.clone() };
+            let found = match crate::push::intent_keys(&self.lsm, (start, &stop), *txn, FIND_BATCH)
+            {
+                None => {
+                    self.reqs.insert(id, Req::Mut(m));
+                    return moved;
+                }
+                Some(Err(_)) => Err(RangeError::Unavailable),
+                Some(Ok(keys)) => {
+                    let mut rows: Vec<Row> =
+                        keys.into_iter().map(|k| (k, (0, Vec::new()))).collect();
+                    if rows.is_empty() && past {
+                        rows.push(continues(range_end));
+                    }
+                    Ok(Reply::Batch(rows))
+                }
+            };
+            self.release(m.g, m.term, latch);
+            self.reply(id, found);
             return true;
         }
         self.propose_txn(core, id, m, latch, &versions, now)

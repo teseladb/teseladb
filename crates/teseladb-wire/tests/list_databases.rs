@@ -114,6 +114,7 @@ fn sizes_read_large_collections_in_chunks() {
             ("name", s("db")),
             ("sizeOnDisk", Value::Int64(size)),
             ("empty", Value::Boolean(false)),
+            ("shards", d(&[("node1", Value::Int64(size))])),
         ])]
     );
 }
@@ -203,4 +204,40 @@ fn a_database_without_collections_is_listed_empty_until_drop_database() {
         &Value::Double(1.0)
     );
     assert!(!has_empty(&mut m, &[]));
+}
+
+/// Each database with data names where it is (measured on a `refrouter` 9.0.4, DV-031, D-102):
+/// `admin` and `config` on the config server, the others on the node; the filter does not see
+/// it, and an empty database and `nameOnly` have none.
+#[test]
+fn each_database_names_its_shard_after_the_filter() {
+    let mut m = Mem::new();
+    let one = Value::Array(vec![d(&[("a", 1.into())])]);
+    m.run("d", doc(&[("insert", s("c")), ("documents", one)]));
+    m.run("e", doc(&[("create", s("c"))]));
+    m.run("e", doc(&[("drop", s("c"))]));
+    let r = list(&mut m, &[]);
+    let shards: Vec<(Value, Option<Value>)> = databases(&r)
+        .iter()
+        .map(|x| {
+            let on = x.get("shards").cloned();
+            (field(x, "name").clone(), on)
+        })
+        .collect();
+    let size = |name: &str| -> Value {
+        let found = databases(&r).into_iter().find(|x| field(x, "name") == &s(name));
+        field(&found.unwrap(), "sizeOnDisk").clone()
+    };
+    let at = |shard: &str, name: &str| Some(d(&[(shard, size(name))]));
+    let want = vec![
+        (s("admin"), at("config", "admin")),
+        (s("config"), at("config", "config")),
+        (s("d"), at("node1", "d")),
+        (s("e"), None),
+    ];
+    assert_eq!(shards, want);
+    let r = list(&mut m, &[("filter", d(&[("shards.node1", d(&[("$exists", true.into())]))]))]);
+    assert!(databases(&r).is_empty(), "{r:?}");
+    let r = list(&mut m, &[("nameOnly", true.into())]);
+    assert!(databases(&r).iter().all(|x| x.get("shards").is_none()), "{r:?}");
 }

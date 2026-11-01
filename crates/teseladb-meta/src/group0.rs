@@ -10,6 +10,7 @@ use teseladb_types::{DecodeError, Decoder, Encoder, GroupId, NodeId};
 
 use crate::catalog::CatalogCommand;
 use crate::catalog::{Catalog, CatalogError, CollectionEntry};
+use crate::changelog::Changelog;
 use crate::clustertime_keys::ClusterTimeKeys;
 use crate::command::snapshot_codec::{
     get_addrs, get_bytes_array, get_node_list, get_state, put_addrs, put_node_list, state_code,
@@ -18,11 +19,16 @@ use crate::command::{Group0Command, NodeAddrs, NodeState};
 use crate::descriptors::RangeIndex;
 use crate::enroll_tokens::{EnrollTokens, TokenError};
 use crate::indexes::{IndexEntry, Indexes};
+use crate::meta2::{Meta1, Meta2Range};
 use crate::request::Requests;
 use crate::security::{Principal, Security, SecurityError};
 
-/// Version of the snapshot format (12: the core changes in progress, 007 FR-011).
-pub const SNAPSHOT_VERSION: u8 = 13;
+/// Version of the snapshot format (15: `config.changelog`, 007 FR-017).
+pub const SNAPSHOT_VERSION: u8 = 15;
+/// The snapshot before `config.changelog` (01-11-2026), still read: no change recorded.
+pub const SNAPSHOT_VERSION_WITHOUT_CHANGELOG: u8 = 14;
+/// The previous version, still read: it has no `Meta1`.
+pub const SNAPSHOT_VERSION_WITHOUT_META1: u8 = 13;
 /// The previous version, still read: its users and roles are kept by database and name, in name
 /// order, and the order becomes the insertion order when read.
 pub const SNAPSHOT_VERSION_WITH_NAMED_SECURITY: u8 = 12;
@@ -145,6 +151,8 @@ pub enum Group0Error {
     PrincipalNotFound(Principal),
     /// A user or role change computed from a document that changed since (013).
     SecurityConflict,
+    /// A change of settings computed from a value that changed since (007 FR-017).
+    SettingConflict,
     /// A signing key proposed on a state that changed since, or one to drop that is gone (013).
     ClusterTimeKeyRaced,
     /// An enrollment token that does not exist, whose secret does not match, or whose id is
@@ -160,6 +168,12 @@ pub enum Group0Error {
     IndexNotFound,
     /// A database whose name differs only in case from one of the catalog (D-077).
     DatabaseDifferCase,
+    /// The descriptors were already handed over to Meta2 (007 FR-014).
+    HandedOff,
+    /// No range number is left: Group 0 gives numbers below 2^32, a Meta2 range 2^32 per range.
+    OutOfGroupIds,
+    /// A restore into a catalog that has collections or indexes (007 FR-021).
+    NotEmpty,
 }
 
 /// Result of applying a Group 0 command.
@@ -175,6 +189,9 @@ pub enum Group0Result {
     Collection(CollectionEntry),
     /// The index created (kind 41).
     Index(IndexEntry),
+    /// Refused: the descriptor is held by this Meta2 range (007 FR-014), where the sender
+    /// repeats the order.
+    Meta1(Meta2Range),
     /// Nothing changed.
     Err(Group0Error),
 }
@@ -222,6 +239,10 @@ pub struct Group0Sm {
     pub clustertime_keys: Box<ClusterTimeKeys>,
     /// The node enrollment tokens (013 FR-005), boxed for the same reason.
     pub enroll_tokens: Box<EnrollTokens>,
+    /// The Meta2 ranges, once the descriptors were handed over to them (007 FR-014).
+    pub meta1: Option<Meta1>,
+    /// The history of the changes of its descriptors (`config.changelog`).
+    pub changelog: Changelog,
 }
 
 impl Group0Sm {
@@ -294,144 +315,14 @@ impl Group0Sm {
         id
     }
 
-    fn good_replicas(&self, nodes: &[NodeId]) -> bool {
-        let mut sorted = nodes.to_vec();
-        sorted.sort_unstable();
-        sorted.dedup();
-        !nodes.is_empty()
-            && sorted.len() == nodes.len()
-            && nodes.iter().all(|n| self.nodes.get(n).is_some_and(|i| i.state == NodeState::Active))
-    }
-
-    fn overlaps(&self, start: &[u8], end: &[u8]) -> bool {
-        self.ranges.values().any(|r| {
-            let before_end = r.end.is_empty() || start < r.end.as_slice();
-            let after_start = end.is_empty() || end > r.start.as_slice();
-            before_end && after_start
-        })
-    }
-
-    fn range_mut(&mut self, g: GroupId) -> Result<&mut RangeDesc, Group0Error> {
-        self.ranges.get_mut(&g).ok_or(Group0Error::NoSuchGroup)
-    }
-
-    fn create_range(
-        &mut self,
-        start: &[u8],
-        end: &[u8],
-        replicas: &[NodeId],
-    ) -> Result<GroupId, Group0Error> {
-        if !self.good_replicas(replicas) {
-            return Err(Group0Error::BadReplicas);
-        }
-        if (!end.is_empty() && end <= start) || self.overlaps(start, end) {
-            return Err(Group0Error::BadBounds);
-        }
-        self.last_group += 1;
-        let group = GroupId(self.last_group);
-        // Every replica runs it on the same core: the smallest core count of its nodes bounds it.
-        let cores = replicas.iter().map(|n| self.nodes[n].addrs.cores.max(1)).min().unwrap_or(1);
-        let mut nodes = replicas.to_vec();
-        nodes.sort_unstable();
-        let core = self.least_loaded_core(&nodes, cores);
-        let desc = RangeDesc {
-            group,
-            start: start.to_vec(),
-            end: end.to_vec(),
-            core,
-            replicas: nodes.into_iter().map(|n| (n, ReplicaRole::Voter)).collect(),
-            replica_epoch: 1,
-            generation: 1,
-            leader_hint: None,
-            leader_term: 0,
-            pending_split: None,
-            settling: false,
-        };
-        self.insert_range(desc);
-        Ok(group)
-    }
-
-    fn set_replicas(
-        &mut self,
-        g: GroupId,
-        epoch: u64,
-        add: &[NodeId],
-        remove: &[NodeId],
-    ) -> Result<(), Group0Error> {
-        let known = |n: &NodeId| self.nodes.get(n).is_some_and(|i| i.state == NodeState::Active);
-        let all_known = add.iter().all(known);
-        let merging = self.in_change(g);
-        let r = self.range_mut(g)?;
-        if merging || r.settling || r.replica_epoch != epoch || r.pending_split.is_some() {
-            return Err(Group0Error::RangeBusy);
-        }
-        let held = r.nodes();
-        let bad_add = !all_known || add.iter().any(|n| held.contains(n));
-        let bad_remove = remove.iter().any(|n| !held.contains(n));
-        let left = (held.len() + add.len()).saturating_sub(remove.len());
-        if bad_add || bad_remove || left == 0 || (add.is_empty() && remove.is_empty()) {
-            return Err(Group0Error::BadReplicas);
-        }
-        r.replicas.retain(|(n, _)| !remove.contains(n));
-        r.replicas.extend(add.iter().map(|n| (*n, ReplicaRole::Learner)));
-        r.replicas.sort_unstable_by_key(|(n, _)| *n);
-        r.replica_epoch += 1;
-        r.settling = true;
-        Ok(())
-    }
-
-    fn settle(&mut self, g: GroupId, epoch: u64) -> Result<(), Group0Error> {
-        let r = self.range_mut(g)?;
-        if !r.settling || r.replica_epoch != epoch {
-            return Err(Group0Error::RangeBusy);
-        }
-        r.settling = false;
-        for (_, role) in &mut r.replicas {
-            *role = ReplicaRole::Voter;
-        }
-        Ok(())
-    }
-
-    /// A leader that published itself in `term`, or with term 0 the balancer's request; a
-    /// publication of a term older than the one recorded changes nothing (007 FR-010).
-    fn leader_hint(&mut self, g: GroupId, node: NodeId, term: u64) -> Result<(), Group0Error> {
-        let r = self.range_mut(g)?;
-        if !r.nodes().contains(&node) {
-            return Err(Group0Error::BadReplicas);
-        }
-        if term == 0 || term >= r.leader_term {
-            r.leader_hint = Some(node);
-            r.leader_term = term;
-        }
-        Ok(())
-    }
-
-    /// Records the intent of splitting `g` at `at` and gives the new range its number now: the
-    /// range's `Split` entry writes the new range's state under it (007 FR-007).
-    fn split(&mut self, g: GroupId, at: &[u8]) -> Result<GroupId, Group0Error> {
-        let merging = self.in_change(g);
-        let capped = self.capped_collections();
-        let r = self.range_mut(g)?;
-        if merging || r.pending_split.is_some() || r.settling {
-            return Err(Group0Error::RangeBusy);
-        }
-        if at <= r.start.as_slice() || !r.contains(at) {
-            return Err(Group0Error::BadSplit);
-        }
-        // A capped collection stays in one range (015 research R1): the cut moves to its edge.
-        let at = teseladb_keys::space::cut_outside(at, (&r.start, &r.end), |t, c| {
-            t == 0 && capped.contains(&c)
-        })
-        .ok_or(Group0Error::BadSplit)?;
-        r.pending_split = Some(at);
-        self.last_group += 1;
-        let new = GroupId(self.last_group);
-        self.split_ids.insert(g, new);
-        Ok(new)
+    /// The merge that absorbs range `g`, if one is recorded: the range that absorbs it and the
+    /// index of the intent.
+    pub fn merging(&self, g: GroupId) -> Option<(GroupId, u64)> {
+        crate::descriptors::merging_in(&self.merges, g)
     }
 
     /// The numbers of the capped collections in the catalog.
-    fn capped_collections(&self) -> BTreeSet<u32> {
+    pub fn capped_collections(&self) -> BTreeSet<u32> {
         self.catalog
             .collections
             .values()
@@ -445,105 +336,110 @@ impl Group0Sm {
             .collect()
     }
 
-    fn complete_split(&mut self, g: GroupId, at: &[u8]) -> Result<GroupId, Group0Error> {
-        let id = self.split_ids.get(&g).copied();
-        let r = self.range_mut(g)?;
-        let Some(id) = id.filter(|_| r.pending_split.as_deref() == Some(at)) else {
-            return Err(Group0Error::BadSplit);
+    /// An order on a data descriptor after the handoff to Meta2 (007 FR-014): the Meta2 range
+    /// that holds the descriptor, if Group 0 still has it, or `NoSuchGroup`; `None` for any
+    /// other command, which Group 0 applies.
+    fn handed_off(&self, cmd: &Group0Command) -> Option<Group0Result> {
+        // Faulty variant (007 T028): Group 0 goes on taking orders on the descriptors it handed
+        // over, a stale route the Meta2 ranges never see.
+        #[cfg(teseladb_bug = "meta2_stale_route")]
+        let m1 = None::<&Meta1>?;
+        #[cfg(not(teseladb_bug = "meta2_stale_route"))]
+        let m1 = self.meta1.as_ref()?;
+        let by_group = |g: &GroupId| match self.ranges.get(g) {
+            Some(r) => {
+                m1.holder_of(&r.end).map_or(Group0Result::Err(Group0Error::NoSuchGroup), |h| {
+                    Group0Result::Meta1(h.clone())
+                })
+            }
+            None => Group0Result::Err(Group0Error::NoSuchGroup),
         };
-        let mut new = r.clone();
-        r.end = at.to_vec();
-        r.generation += 1;
-        r.pending_split = None;
-        self.split_ids.remove(&g);
-        new.group = id;
-        new.start = at.to_vec();
-        new.generation = 1;
-        new.pending_split = None;
-        new.leader_hint = None;
-        let group = new.group;
-        self.insert_range(new);
-        Ok(group)
+        Some(match cmd {
+            Group0Command::CreateRange { end, .. } => {
+                m1.holder_of(end).map_or(Group0Result::Err(Group0Error::BadBounds), |h| {
+                    Group0Result::Meta1(h.clone())
+                })
+            }
+            Group0Command::SetReplicas { group, .. }
+            | Group0Command::ReplicasSettled { group, .. }
+            | Group0Command::SetLeaderHint { group, .. }
+            | Group0Command::SplitRange { group, .. }
+            | Group0Command::CompleteSplit { group, .. }
+            | Group0Command::RelocateRange { group, .. }
+            | Group0Command::CompleteRelocate { group, .. } => by_group(group),
+            Group0Command::MergeRanges { left, .. }
+            | Group0Command::CompleteMerge { left, .. }
+            | Group0Command::AbortMerge { left, .. } => by_group(left),
+            _ => return None,
+        })
     }
 
-    /// The merge that absorbs range `g`, if one is recorded: the range that absorbs it and the
-    /// index of the intent.
-    pub fn merging(&self, g: GroupId) -> Option<(GroupId, u64)> {
-        self.merges.iter().find(|(_, (r, _))| *r == g).map(|(l, (_, at))| (*l, *at))
-    }
-
-    /// Whether range `g` is either side of a recorded merge, or moves to another core: neither
-    /// lets it split, merge or change replicas.
-    fn in_change(&self, g: GroupId) -> bool {
-        self.merges.contains_key(&g)
-            || self.merging(g).is_some()
-            || self.relocations.contains_key(&g)
-    }
-
-    /// Records the intent of moving range `g` to core `core` of every node (007 FR-011): a core
-    /// other than its own that every node of the range has, with no split, merge, replica change
-    /// or other core change in progress.
-    fn relocate(&mut self, index: u64, g: GroupId, core: u16) -> Result<(), Group0Error> {
-        let r = self.ranges.get(&g).ok_or(Group0Error::NoSuchGroup)?;
-        if r.settling || r.pending_split.is_some() || self.in_change(g) {
-            return Err(Group0Error::RangeBusy);
+    /// `HandoffMeta2` (007 FR-014): the Meta2 ranges that split space `04`, numbered here.
+    fn handoff(&mut self, ranges: &[Meta2Range]) -> Result<Group0Result, Group0Error> {
+        if self.meta1.is_some() {
+            return Err(Group0Error::HandedOff);
         }
-        let cores = r.nodes().iter().map(|n| self.nodes.get(n).map_or(0, |i| i.addrs.cores)).min();
-        if core == r.core || cores.is_none_or(|c| core >= c.max(1)) {
-            return Err(Group0Error::BadCore);
-        }
-        self.relocations.insert(g, (core, index));
-        Ok(())
-    }
-
-    /// Every replica of `g` runs on `core`, the target of its recorded core change.
-    fn complete_relocate(&mut self, g: GroupId, core: u16) -> Result<(), Group0Error> {
-        if self.relocations.get(&g).is_none_or(|(c, _)| *c != core) {
-            return Err(Group0Error::NoSuchRelocation);
-        }
-        self.relocations.remove(&g);
-        self.range_mut(g)?.core = core;
-        Ok(())
-    }
-
-    /// Records the intent of merging `right` into its left neighbour `left` (007 FR-009): both on
-    /// the same core and replicas, with no split, replica change or other merge in progress.
-    fn merge(&mut self, index: u64, left: GroupId, right: GroupId) -> Result<(), Group0Error> {
-        let (l, r) = match (self.ranges.get(&left), self.ranges.get(&right)) {
-            (Some(l), Some(r)) => (l, r),
-            _ => return Err(Group0Error::NoSuchGroup),
-        };
-        if l.end.is_empty() || l.end != r.start {
+        if !crate::meta2::partitions(ranges) {
             return Err(Group0Error::BadBounds);
         }
-        if l.core != r.core || l.replicas != r.replicas {
+        let good = |r: &Meta2Range| {
+            let nodes: Vec<NodeId> = r.replicas.iter().map(|(n, _)| *n).collect();
+            crate::descriptors::good_replicas(&nodes, &self.nodes)
+                && r.replicas.iter().any(|(_, role)| *role == ReplicaRole::Voter)
+        };
+        if !ranges.iter().all(good) {
             return Err(Group0Error::BadReplicas);
         }
-        let busy = |d: &RangeDesc| d.settling || d.pending_split.is_some();
-        if busy(l) || busy(r) || self.in_change(left) || self.in_change(right) {
-            return Err(Group0Error::RangeBusy);
+        let n = ranges.len() as u64;
+        if self.last_group + n >= crate::descriptors::BLOCK_BASE {
+            return Err(Group0Error::OutOfGroupIds);
         }
-        self.merges.insert(left, (right, index));
-        Ok(())
+        let numbered = ranges
+            .iter()
+            .zip(self.last_group + 1..)
+            .map(|(r, g)| Meta2Range { group: GroupId(g), ..r.clone() })
+            .collect();
+        self.last_group += n;
+        let facts = crate::meta2::Meta2Cluster::of(self);
+        self.meta1 = Some(Meta1 { ranges: numbered, facts, seeded: BTreeSet::new() });
+        Ok(Group0Result::Ok)
     }
 
-    /// The merge of `right` into `left` as recorded, which `CompleteMerge` and `AbortMerge` end.
-    fn end_merge(&mut self, left: GroupId, right: GroupId) -> Result<(), Group0Error> {
-        if self.merges.get(&left).is_none_or(|(r, _)| *r != right) {
-            return Err(Group0Error::NoSuchMerge);
+    /// `Meta2Seeded` (007 FR-014): Meta2 range `g` committed its first entry, so Group 0 drops
+    /// the descriptors of its interval with their changes in progress.
+    fn seeded(&mut self, g: GroupId) -> Result<Group0Result, Group0Error> {
+        let m1 = self.meta1.as_mut().ok_or(Group0Error::NoSuchGroup)?;
+        let (start, end) = m1.interval(g).ok_or(Group0Error::NoSuchGroup)?;
+        m1.seeded.insert(g);
+        let inside = |r: &RangeDesc| crate::meta2::in_interval(&r.end, &start, &end);
+        let (gone, kept) =
+            std::mem::take(&mut self.ranges).into_iter().partition(|(_, r)| inside(r));
+        self.ranges = kept;
+        let gone: BTreeMap<GroupId, RangeDesc> = gone;
+        for (g, r) in gone {
+            self.range_index.remove(&r.start);
+            self.split_ids.remove(&g);
+            self.merges.remove(&g);
+            self.relocations.remove(&g);
         }
-        self.merges.remove(&left);
-        Ok(())
+        Ok(Group0Result::Ok)
     }
 
-    fn complete_merge(&mut self, left: GroupId, right: GroupId) -> Result<(), Group0Error> {
-        self.end_merge(left, right)?;
-        let gone = self.ranges.remove(&right).ok_or(Group0Error::NoSuchGroup)?;
-        self.range_index.remove(&gone.start);
-        let l = self.range_mut(left)?;
-        l.end = gone.end;
-        l.generation += 1;
-        Ok(())
+    /// `SetSettings`: every change or none, if each setting is as its change expects.
+    fn set_settings(
+        &mut self,
+        changes: &[crate::command::SettingChange],
+    ) -> Result<Group0Result, Group0Error> {
+        if changes.iter().any(|c| self.settings.get(&c.key) != c.expect.as_ref()) {
+            return Err(Group0Error::SettingConflict);
+        }
+        for c in changes {
+            match &c.value {
+                Some(v) => self.settings.insert(c.key.clone(), v.clone()),
+                None => self.settings.remove(&c.key),
+            };
+        }
+        Ok(Group0Result::Ok)
     }
 
     /// Applies a decoded command at `index`.
@@ -561,6 +457,9 @@ impl Group0Sm {
     ) -> Group0Result {
         if !self.bootstrapped() && !matches!(cmd, Group0Command::Bootstrap { .. }) {
             return Group0Result::Err(Group0Error::NotBootstrapped);
+        }
+        if let Some(r) = self.handed_off(cmd) {
+            return r;
         }
         let r = match cmd {
             Group0Command::Bootstrap { cluster_id, first_node, cert_fingerprint } => {
@@ -607,38 +506,44 @@ impl Group0Sm {
                 self.settings.insert(key.clone(), value.clone());
                 Ok(Group0Result::Ok)
             }
+            Group0Command::SetSettings(changes) => self.set_settings(changes),
             Group0Command::CreateRange { start, end, replicas } => {
-                self.create_range(start, end, replicas).map(Group0Result::Range)
+                let (mut t, nodes) = self.table();
+                t.create_range(start, end, replicas, nodes).map(Group0Result::Range)
             }
             Group0Command::SetReplicas { group, epoch, add, remove } => {
-                self.set_replicas(*group, *epoch, add, remove).map(|()| Group0Result::Ok)
+                let (mut t, nodes) = self.table();
+                t.set_replicas(*group, *epoch, add, remove, nodes).map(|()| Group0Result::Ok)
             }
             Group0Command::ReplicasSettled { group, epoch } => {
-                self.settle(*group, *epoch).map(|()| Group0Result::Ok)
+                self.table().0.settle(*group, *epoch).map(|()| Group0Result::Ok)
             }
             Group0Command::SetLeaderHint { group, node, term } => {
-                self.leader_hint(*group, *node, *term).map(|()| Group0Result::Ok)
+                self.table().0.leader_hint(*group, *node, *term).map(|()| Group0Result::Ok)
             }
             Group0Command::SplitRange { group, at } => {
-                self.split(*group, at).map(Group0Result::Range)
+                let capped = self.capped_collections();
+                self.table().0.split(*group, at, &capped).map(Group0Result::Range)
             }
             Group0Command::CompleteSplit { group, at, .. } => {
-                self.complete_split(*group, at).map(Group0Result::Range)
+                self.table().0.complete_split(*group, at).map(Group0Result::Range)
             }
             Group0Command::MergeRanges { left, right } => {
-                self.merge(index, *left, *right).map(|()| Group0Result::Ok)
+                let capped = self.capped_collections();
+                self.table().0.merge(index, (*left, *right), &capped).map(|()| Group0Result::Ok)
             }
             Group0Command::CompleteMerge { left, right } => {
-                self.complete_merge(*left, *right).map(|()| Group0Result::Ok)
+                self.table().0.complete_merge(*left, *right).map(|()| Group0Result::Ok)
             }
             Group0Command::AbortMerge { left, right } => {
-                self.end_merge(*left, *right).map(|()| Group0Result::Ok)
+                self.table().0.end_merge(*left, *right).map(|()| Group0Result::Ok)
             }
             Group0Command::RelocateRange { group, core } => {
-                self.relocate(index, *group, *core).map(|()| Group0Result::Ok)
+                let (mut t, nodes) = self.table();
+                t.relocate(index, *group, *core, nodes).map(|()| Group0Result::Ok)
             }
             Group0Command::CompleteRelocate { group, core } => {
-                self.complete_relocate(*group, *core).map(|()| Group0Result::Ok)
+                self.table().0.complete_relocate(*group, *core).map(|()| Group0Result::Ok)
             }
             Group0Command::Catalog(c) => {
                 if let CatalogCommand::Purged { id } = c {
@@ -684,6 +589,17 @@ impl Group0Sm {
                     TokenError::Used => Group0Error::EnrollTokenUsed,
                     TokenError::Expired => Group0Error::EnrollTokenExpired,
                 }),
+            Group0Command::HandoffMeta2 { ranges } => self.handoff(ranges),
+            Group0Command::Meta2Seeded { group } => self.seeded(*group),
+            Group0Command::RestoreCatalog { catalog, indexes } => {
+                if !self.catalog.collections.is_empty() || !self.indexes.indexes.is_empty() {
+                    Err(Group0Error::NotEmpty)
+                } else {
+                    self.catalog = Arc::new((**catalog).clone());
+                    self.indexes = (**indexes).clone();
+                    Ok(Group0Result::Ok)
+                }
+            }
             Group0Command::Idempotent { req, cmd } => {
                 if let Some(done) = self.requests.get(*req) {
                     return done.clone();
@@ -718,19 +634,7 @@ impl Group0Sm {
         }
         e.var(self.ranges.len() as u64);
         for r in self.ranges.values() {
-            e.u64(r.group.0).bytes(&r.start).bytes(&r.end).u16(r.core);
-            put_node_list(&mut e, &r.nodes());
-            let learners: Vec<NodeId> = r
-                .replicas
-                .iter()
-                .filter(|(_, role)| *role == ReplicaRole::Learner)
-                .map(|(n, _)| *n)
-                .collect();
-            put_node_list(&mut e, &learners);
-            e.u64(r.replica_epoch).u64(r.generation).u64(r.leader_hint.map_or(0, |n| n.0));
-            e.u64(r.leader_term);
-            e.bool(r.pending_split.is_some()).bytes(r.pending_split.as_deref().unwrap_or(&[]));
-            e.bool(r.settling);
+            put_range(&mut e, r);
         }
         e.var(self.settings.len() as u64);
         for (k, v) in &self.settings {
@@ -759,6 +663,15 @@ impl Group0Sm {
             for (g, (core, at)) in &self.relocations {
                 e.u64(g.0).u16(*core).u64(*at);
             }
+        }
+        if version > SNAPSHOT_VERSION_WITHOUT_META1 {
+            e.bool(self.meta1.is_some());
+            if let Some(m) = &self.meta1 {
+                m.encode(&mut e);
+            }
+        }
+        if version > SNAPSHOT_VERSION_WITHOUT_CHANGELOG {
+            self.changelog.encode(&mut e);
         }
         e.finish()
     }
@@ -792,38 +705,8 @@ impl Group0Sm {
             sm.nodes.insert(id, info);
         }
         for _ in 0..d.var()? {
-            let group = GroupId(d.u64()?);
-            let (start, end, core) = (d.bytes()?.to_vec(), d.bytes()?.to_vec(), d.u16()?);
-            let (nodes, learners) = (get_node_list(&mut d)?, get_node_list(&mut d)?);
-            let replicas = nodes
-                .into_iter()
-                .map(|n| {
-                    let role = if learners.contains(&n) {
-                        ReplicaRole::Learner
-                    } else {
-                        ReplicaRole::Voter
-                    };
-                    (n, role)
-                })
-                .collect();
-            let (replica_epoch, generation, hint) = (d.u64()?, d.u64()?, d.u64()?);
-            let leader_term = d.u64()?;
-            let split = d.bool()?;
-            let at = d.bytes()?.to_vec();
-            let desc = RangeDesc {
-                group,
-                start,
-                end,
-                core,
-                replicas,
-                replica_epoch,
-                generation,
-                leader_hint: (hint != 0).then_some(NodeId(hint)),
-                leader_term,
-                pending_split: split.then_some(at),
-                settling: d.bool()?,
-            };
-            sm.ranges.insert(group, desc);
+            let desc = get_range(&mut d)?;
+            sm.ranges.insert(desc.group, desc);
         }
         sm.reindex();
         for _ in 0..d.var()? {
@@ -854,9 +737,74 @@ impl Group0Sm {
                 sm.relocations.insert(g, (core, at));
             }
         }
+        if version > SNAPSHOT_VERSION_WITHOUT_META1 && d.bool()? {
+            sm.meta1 = Some(Meta1::decode(&mut d)?);
+        }
+        if version > SNAPSHOT_VERSION_WITHOUT_CHANGELOG {
+            sm.changelog = Changelog::decode(&mut d)?;
+        }
         d.finish()?;
         Ok(sm)
     }
+}
+
+/// A descriptor as the snapshots of Group 0 and of the Meta2 ranges write it.
+pub(crate) fn put_range(e: &mut Encoder, r: &RangeDesc) {
+    e.u64(r.group.0).bytes(&r.start).bytes(&r.end).u16(r.core);
+    put_replicas(e, &r.replicas);
+    e.u64(r.replica_epoch).u64(r.generation).u64(r.leader_hint.map_or(0, |n| n.0));
+    e.u64(r.leader_term);
+    e.bool(r.pending_split.is_some()).bytes(r.pending_split.as_deref().unwrap_or(&[]));
+    e.bool(r.settling);
+}
+
+/// Replicas as every node, then the learners.
+pub(crate) fn put_replicas(e: &mut Encoder, replicas: &[(NodeId, ReplicaRole)]) {
+    let nodes: Vec<NodeId> = replicas.iter().map(|(n, _)| *n).collect();
+    put_node_list(e, &nodes);
+    let learners: Vec<NodeId> = replicas
+        .iter()
+        .filter(|(_, role)| *role == ReplicaRole::Learner)
+        .map(|(n, _)| *n)
+        .collect();
+    put_node_list(e, &learners);
+}
+
+/// Replicas written by [`put_replicas`].
+pub(crate) fn get_replicas(d: &mut Decoder<'_>) -> Result<Vec<(NodeId, ReplicaRole)>, DecodeError> {
+    let (nodes, learners) = (get_node_list(d)?, get_node_list(d)?);
+    Ok(nodes
+        .into_iter()
+        .map(|n| {
+            let role =
+                if learners.contains(&n) { ReplicaRole::Learner } else { ReplicaRole::Voter };
+            (n, role)
+        })
+        .collect())
+}
+
+/// A descriptor written by [`put_range`].
+pub(crate) fn get_range(d: &mut Decoder<'_>) -> Result<RangeDesc, DecodeError> {
+    let group = GroupId(d.u64()?);
+    let (start, end, core) = (d.bytes()?.to_vec(), d.bytes()?.to_vec(), d.u16()?);
+    let replicas = get_replicas(d)?;
+    let (replica_epoch, generation, hint) = (d.u64()?, d.u64()?, d.u64()?);
+    let leader_term = d.u64()?;
+    let split = d.bool()?;
+    let at = d.bytes()?.to_vec();
+    Ok(RangeDesc {
+        group,
+        start,
+        end,
+        core,
+        replicas,
+        replica_epoch,
+        generation,
+        leader_hint: (hint != 0).then_some(NodeId(hint)),
+        leader_term,
+        pending_split: split.then_some(at),
+        settling: d.bool()?,
+    })
 }
 
 fn catalog_error(e: CatalogError) -> Group0Error {

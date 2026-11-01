@@ -15,11 +15,11 @@ use teseladb_mql::{ErrorCode, MqlError};
 use crate::accum::Accumulator;
 use crate::expr::arith::type_name_of;
 use crate::expr::dates_arith::{add_unit, fixed_unit_ms};
-use crate::expr::values::{display, f64_of, int64_of};
+use crate::expr::values::{display, display_bson, f64_of, int64_of};
 use crate::expr::{Ctx, Expr, Scope, order};
 use crate::pipeline::Env;
 use crate::pipeline::errors::{
-    FAILED_TO_PARSE, FIELD_DOLLAR, MISSING_FIELD, TYPE_MISMATCH, UNKNOWN_FIELD, error,
+    FAILED_TO_PARSE, TYPE_MISMATCH, error, missing_field, unknown_field, wrong_type,
 };
 use crate::pipeline::sort::{SortSpec, check_path};
 use funcs::{Point, Weight};
@@ -38,9 +38,28 @@ const RANGE_ASCENDING: ErrorCode = loc!(8947401);
 const RANGE_NUMBER: ErrorCode = loc!(5429414);
 const RANGE_DATE: ErrorCode = loc!(5429513);
 const RANGE_UNIT: ErrorCode = loc!(5429413);
-const DERIVATIVE_UNIT: ErrorCode = loc!(5624901);
 const REMOVABLE: ErrorCode = loc!(5461500);
 const LINEAR_SORT: ErrorCode = loc!(605001);
+const EMPTY_PATH: ErrorCode = loc!(40352);
+const LINEAR_REPEATED: ErrorCode = loc!(6050106);
+
+/// The window functions that are no accumulator.
+const WINDOW_ONLY: [&str; 11] = [
+    "$rank",
+    "$denseRank",
+    "$documentNumber",
+    "$shift",
+    "$expMovingAvg",
+    "$derivative",
+    "$integral",
+    "$covariancePop",
+    "$covarianceSamp",
+    "$locf",
+    "$linearFill",
+];
+
+/// The expected type of an object argument, as `TypeMismatch` messages write it.
+const OBJECT: &str = "type 'object'";
 
 /// One end of a window.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -67,11 +86,28 @@ enum Func {
     Rank,
     DenseRank,
     DocumentNumber,
-    Shift { output: Expr, by: i64, default: Value },
-    Ema { input: Expr, weight: Weight },
-    Derivative { input: Expr, unit: Option<String> },
-    Integral { input: Expr, unit: Option<String> },
-    Covariance { x: Expr, y: Expr, sample: bool },
+    Shift {
+        output: Expr,
+        by: i64,
+        default: Value,
+    },
+    Ema {
+        input: Expr,
+        weight: Weight,
+    },
+    Derivative {
+        input: Expr,
+        unit: Option<String>,
+    },
+    Integral {
+        input: Expr,
+        unit: Option<String>,
+    },
+    /// An expression giving each document's pair of numbers.
+    Covariance {
+        pair: Expr,
+        sample: bool,
+    },
     Locf(Expr),
     LinearFill(Expr),
 }
@@ -90,14 +126,21 @@ fn failed(msg: impl Into<String>) -> MqlError {
     error(FAILED_TO_PARSE, msg)
 }
 
-/// Reads a bound of a window.
+/// Reads a bound of a window: `unbounded`, `current`, an integer (`documents`) or a number
+/// (`range`).
 fn bound(v: RawValue<'_>, documents: bool) -> Result<Bound, MqlError> {
     Ok(match v {
         RawValue::String("unbounded") => Bound::Unbounded,
         RawValue::String("current") => Bound::Current,
+        RawValue::String(_) => {
+            return Err(failed("Window bounds must be 'unbounded', 'current', or a number."));
+        }
         other => match f64_of(&Value::from(other)) {
             Some(x) if !documents || x.fract() == 0.0 => Bound::At(x),
-            _ => return Err(failed("Window bounds must be 'unbounded', 'current', or a number.")),
+            _ if documents => {
+                return Err(failed("Numeric document-based bounds must be an integer"));
+            }
+            _ => return Err(failed("Range-based bounds expression must be a number")),
         },
     })
 }
@@ -112,57 +155,112 @@ fn bound_value(b: Bound, low: bool) -> f64 {
     }
 }
 
-/// Reads `window`.
+/// Reads `window`: `{documents}`, `{range, unit}` or `{}` (the whole partition).
 fn window(v: RawValue<'_>) -> Result<Window, MqlError> {
-    let bad = || {
-        failed(
-            "'window' field can only contain 'documents' as the only argument or 'range' with an optional 'unit' field",
-        )
-    };
-    let RawValue::Document(d) = v else { return Err(bad()) };
-    let (mut docs, mut range, mut unit) = (None, None, None);
+    let RawValue::Document(d) = v else { return Err(failed("'window' field must be an object")) };
+    let (mut docs, mut range, mut unit, mut others) = (None, None, None, false);
     for (k, x) in d.iter() {
         match k {
             "documents" => docs = Some(x),
             "range" => range = Some(x),
-            "unit" => match x {
-                RawValue::String(s) => unit = Some(s.to_owned()),
-                _ => return Err(bad()),
-            },
-            _ => return Err(bad()),
+            "unit" => unit = Some(x),
+            _ => others = true,
         }
     }
-    let pair = |x: RawValue<'_>, documents: bool| -> Result<(Bound, Bound), MqlError> {
-        let RawValue::Array(a) = x else { return Err(bad()) };
-        let items: Vec<RawValue<'_>> = a.iter().collect();
-        let [lo, hi] = items.as_slice() else { return Err(bad()) };
-        let (lo, hi) = (bound(*lo, documents)?, bound(*hi, documents)?);
-        if bound_value(lo, true) > bound_value(hi, false) {
-            return Err(error(
-                BOUNDS_ORDER,
-                format!(
-                    "Lower bound must not exceed upper bound: [{}, {}]",
-                    display(&Value::from(items[0])),
-                    display(&Value::from(items[1]))
-                ),
+    let only_range_unit =
+        || failed("Window bounds can only specify 'unit' with range-based bounds.");
+    if let Some(x) = docs {
+        if range.is_some() {
+            return Err(failed(
+                "Window bounds can specify either 'documents' or 'unit', not both.",
             ));
         }
-        Ok((lo, hi))
-    };
-    match (docs, range) {
-        (Some(_), Some(_)) | (Some(_), None) if unit.is_some() || range.is_some() => {
-            Err(failed("Window bounds can specify either 'documents' or 'unit', not both."))
+        if unit.is_some() {
+            return Err(only_range_unit());
         }
-        (Some(x), None) => {
-            let (lo, hi) = pair(x, true)?;
-            Ok(Window::Documents(lo, hi))
+        if others {
+            return Err(failed("'window' field that specifies documents cannot have other fields"));
         }
-        (None, Some(x)) => {
-            let (lo, hi) = pair(x, false)?;
-            Ok(Window::Range(lo, hi, unit))
-        }
-        _ => Err(bad()),
+        let (lo, hi) = bounds(x, true)?;
+        return Ok(Window::Documents(lo, hi));
     }
+    if others {
+        return Err(failed(
+            "'window' field can only contain 'documents' as the only argument or 'range' with an optional 'unit' field",
+        ));
+    }
+    let Some(x) = range else {
+        return match unit {
+            Some(_) => Err(only_range_unit()),
+            None => Ok(WHOLE),
+        };
+    };
+    let unit = match unit {
+        Some(RawValue::String(s)) => Some(s.to_owned()),
+        Some(_) => return Err(failed("'unit' must be a string")),
+        None => None,
+    };
+    let (lo, hi) = bounds(x, false)?;
+    Ok(Window::Range(lo, hi, unit))
+}
+
+/// Reads the two bounds of `documents` (`documents` set) or `range`, the lower first.
+fn bounds(x: RawValue<'_>, documents: bool) -> Result<(Bound, Bound), MqlError> {
+    let items: Vec<RawValue<'_>> = match x {
+        RawValue::Array(a) => a.iter().collect(),
+        _ => Vec::new(),
+    };
+    let [lo, hi] = items.as_slice() else {
+        return Err(failed(format!(
+            "Window bounds must be a 2-element array: {}: {}",
+            if documents { "documents" } else { "range" },
+            display_bson(&Value::from(x))
+        )));
+    };
+    let (l, h) = (bound(*lo, documents)?, bound(*hi, documents)?);
+    if bound_value(l, true) > bound_value(h, false) {
+        return Err(error(
+            BOUNDS_ORDER,
+            format!(
+                "Lower bound must not exceed upper bound: [{}, {}]",
+                display(&Value::from(*lo)),
+                display(&Value::from(*hi))
+            ),
+        ));
+    }
+    Ok((l, h))
+}
+
+/// The `N` of `$expMovingAvg`: a whole number above zero.
+fn ema_n(v: &Value) -> Result<Weight, MqlError> {
+    let Some(x) = f64_of(v) else {
+        return Err(failed(format!(
+            "'N' field must be an integer, but found type {}",
+            type_name_of(v)
+        )));
+    };
+    let n = int64_of(v).filter(|_| x.fract() == 0.0).ok_or_else(|| {
+        failed(format!(
+            "'N' field must be an integer, but found  N: {}. To use a non-integer, use the 'alpha' argument instead",
+            display(v)
+        ))
+    })?;
+    if n <= 0 {
+        return Err(failed(format!("'N' must be greater than zero. Got {n}")));
+    }
+    Ok(Weight::N(n))
+}
+
+/// The `alpha` of `$expMovingAvg`: a number between 0 and 1, both left out.
+fn ema_alpha(v: &Value) -> Result<Weight, MqlError> {
+    let Some(a) = f64_of(v) else { return Err(failed("'alpha' must be a number")) };
+    if a <= 0.0 || a >= 1.0 {
+        return Err(failed(format!(
+            "'alpha' must be between 0 and 1 (exclusive), found alpha: {}",
+            display(v)
+        )));
+    }
+    Ok(Weight::Alpha(a))
 }
 
 /// The fields of a sub-object argument (`$shift`, `$expMovingAvg`…).
@@ -187,67 +285,69 @@ impl SetWindowFields {
         };
         let (mut partition, mut sort, mut sort_field, mut output) = (None, None, None, None);
         for (k, x) in d.iter() {
-            match k {
-                "partitionBy" => partition = Some(Expr::parse_in(x, ctx)?),
-                "sortBy" => {
-                    sort = Some(SortSpec::parse(x)?);
-                    if let RawValue::Document(s) = x {
-                        let fields: Vec<(&str, RawValue<'_>)> = s.iter().collect();
-                        if let [(f, dir)] = fields.as_slice() {
-                            let asc = f64_of(&Value::from(*dir)).is_some_and(|n| n > 0.0);
-                            sort_field = Some(((*f).to_owned(), asc));
-                        }
+            match (k, x) {
+                ("partitionBy", x) => partition = Some(Expr::parse_in(x, ctx)?),
+                ("sortBy", RawValue::Document(s)) => {
+                    // An empty `sortBy` sorts nothing.
+                    if s.iter().next().is_some() {
+                        sort = Some(SortSpec::parse(x)?);
+                    }
+                    let fields: Vec<(&str, RawValue<'_>)> = s.iter().collect();
+                    if let [(f, dir)] = fields.as_slice() {
+                        let asc = f64_of(&Value::from(*dir)).is_some_and(|n| n > 0.0);
+                        sort_field = Some(((*f).to_owned(), asc));
                     }
                 }
-                "output" => output = Some(x),
-                other => {
-                    return Err(error(
-                        UNKNOWN_FIELD,
-                        format!("BSON field '$setWindowFields.{other}' is an unknown field."),
-                    ));
-                }
+                ("sortBy", x) => return Err(wrong_type("$setWindowFields.sortBy", x, OBJECT)),
+                ("output", RawValue::Document(o)) => output = Some(o),
+                ("output", x) => return Err(wrong_type("$setWindowFields.output", x, OBJECT)),
+                (other, _) => return Err(unknown_field("$setWindowFields", other)),
             }
         }
-        let output = output.ok_or_else(|| {
-            error(
-                MISSING_FIELD,
-                "BSON field '$setWindowFields.output' is missing but a required field",
-            )
-        })?;
-        let RawValue::Document(out) = output else {
-            return Err(error(TYPE_MISMATCH, "the 'output' field must be an object"));
-        };
+        let out = output.ok_or_else(|| missing_field("$setWindowFields", "output"))?;
         let mut s = SetWindowFields { partition, sort, sort_field, outputs: Vec::new() };
         for (field, spec) in out.iter() {
-            if let Some(seg) = field.split('.').find(|x| x.starts_with('$')) {
-                return Err(error(
-                    FIELD_DOLLAR,
-                    format!("FieldPath field names may not start with '$', given '{seg}'."),
-                ));
+            if field.is_empty() {
+                return Err(error(EMPTY_PATH, "FieldPath cannot be constructed with empty string"));
             }
             check_path(field)?;
-            let (func, win) = s.output(spec, ctx)?;
+            let (func, win) = s.output(field, spec, ctx)?;
             s.outputs.push((field.to_owned(), func, win));
         }
         Ok(s)
     }
 
     /// Reads one output field's function and window.
-    fn output(&self, spec: RawValue<'_>, ctx: &Ctx) -> Result<(Func, Window), MqlError> {
+    fn output(
+        &self,
+        field: &str,
+        spec: RawValue<'_>,
+        ctx: &Ctx,
+    ) -> Result<(Func, Window), MqlError> {
         let RawValue::Document(d) = spec else {
-            return Err(failed("Expected a window function in each output field"));
+            return Err(failed(format!("The field '{field}' must be an object")));
         };
-        let (mut func, mut win) = (None, None);
-        for (k, x) in d.iter() {
-            if k == "window" {
-                win = Some(window(x)?);
-            } else if func.is_none() {
-                func = Some((k, x));
+        let mut fields = d.iter();
+        let Some((name, arg)) = fields.next() else {
+            return Err(failed("Expected a $-prefixed window function"));
+        };
+        if !name.starts_with('$') {
+            return Err(failed(format!("Expected a $-prefixed window function, {name}")));
+        }
+        let mut win = None;
+        for (k, x) in fields {
+            match k {
+                "window" => win = Some(x),
+                k if k.starts_with('$') => {
+                    return Err(failed("Cannot specify two functions in window function spec"));
+                }
+                k => return Err(failed(format!("Window function found an unknown argument: {k}"))),
             }
         }
-        let Some((name, arg)) = func else {
-            return Err(failed("Expected a window function in each output field"));
-        };
+        if !WINDOW_ONLY.contains(&name) && !Accumulator::is_name(name) {
+            return Err(failed(format!("Unrecognized window function, {name}")));
+        }
+        let win = win.map(window).transpose()?;
         let sorted_one = self.sort.is_some() && self.sort_field.is_some();
         if let Some(Window::Range(..)) = &win {
             match &self.sort_field {
@@ -330,12 +430,15 @@ impl SetWindowFields {
                 }
                 let (mut input, mut weight) = (None, None);
                 for (k, x) in fields {
-                    let v = Value::from(x);
                     match k {
                         "input" => input = Some(Expr::parse_in(x, ctx)?),
-                        "N" => weight = int64_of(&v).map(Weight::N),
-                        "alpha" => weight = f64_of(&v).map(Weight::Alpha),
-                        _ => return Err(failed(two)),
+                        "N" => weight = Some(ema_n(&Value::from(x))?),
+                        "alpha" => weight = Some(ema_alpha(&Value::from(x))?),
+                        _ => {
+                            return Err(failed(format!(
+                                "Got unrecognized field in $expMovingAvg{two}"
+                            )));
+                        }
                     }
                 }
                 let (Some(input), Some(weight)) = (input, weight) else { return Err(failed(two)) };
@@ -370,20 +473,10 @@ impl SetWindowFields {
                     Func::Integral { input, unit }
                 }
             }
-            "$covariancePop" | "$covarianceSamp" => {
-                let RawValue::Array(a) = arg else {
-                    return Err(failed(format!("{name} requires an array of two expressions")));
-                };
-                let items: Vec<RawValue<'_>> = a.iter().collect();
-                let [x, y] = items.as_slice() else {
-                    return Err(failed(format!("{name} requires an array of two expressions")));
-                };
-                Func::Covariance {
-                    x: Expr::parse_in(*x, ctx)?,
-                    y: Expr::parse_in(*y, ctx)?,
-                    sample: name == "$covarianceSamp",
-                }
-            }
+            "$covariancePop" | "$covarianceSamp" => Func::Covariance {
+                pair: Expr::parse_in(arg, ctx)?,
+                sample: name == "$covarianceSamp",
+            },
             "$locf" => {
                 no_window(name)?;
                 Func::Locf(Expr::parse_in(arg, ctx)?)
@@ -423,26 +516,26 @@ impl SetWindowFields {
     /// the whole partition.
     pub(crate) fn for_fill(
         partition: Option<Expr>,
-        sort: Option<RawValue<'_>>,
+        sort: Option<RawDoc<'_>>,
         methods: &[(String, String)],
+        ctx: &Ctx,
     ) -> Result<SetWindowFields, MqlError> {
         let mut sort_field = None;
         let sort = match sort {
-            Some(v) => {
-                if let RawValue::Document(s) = v {
-                    let fields: Vec<(&str, RawValue<'_>)> = s.iter().collect();
-                    if let [(f, dir)] = fields.as_slice() {
-                        let asc = f64_of(&Value::from(*dir)).is_some_and(|n| n > 0.0);
-                        sort_field = Some(((*f).to_owned(), asc));
-                    }
+            Some(s) => {
+                let fields: Vec<(&str, RawValue<'_>)> = s.iter().collect();
+                if let [(f, dir)] = fields.as_slice() {
+                    let asc = f64_of(&Value::from(*dir)).is_some_and(|n| n > 0.0);
+                    sort_field = Some(((*f).to_owned(), asc));
                 }
-                Some(SortSpec::parse(v)?)
+                Some(SortSpec::parse(RawValue::Document(s))?)
             }
             None => None,
         };
         let mut outputs = Vec::with_capacity(methods.len());
         for (field, method) in methods {
-            let path = Expr::parse(RawValue::String(&format!("${field}")))?;
+            // RefDb reads `$` and the field as an expression: `$x` becomes a variable.
+            let path = Expr::parse_in(RawValue::String(&format!("${field}")), ctx)?;
             let func = if method == "linear" {
                 if sort_field.is_none() {
                     return Err(error(
@@ -501,16 +594,7 @@ impl SetWindowFields {
                 }
             }
         }
-        let mut failure = None;
-        parts.sort_by(|(a, _), (b, _)| {
-            order(&Some(a.clone()), &Some(b.clone()), col).unwrap_or_else(|e| {
-                failure.get_or_insert(e);
-                Ordering::Equal
-            })
-        });
-        if let Some(e) = failure {
-            return Err(e);
-        }
+        crate::expr::sort_by_values(&mut parts, col)?;
         let mut out = Vec::with_capacity(parts.len());
         for (_, docs) in parts {
             out.push(match &self.sort {
@@ -577,8 +661,7 @@ impl SetWindowFields {
             Func::LinearFill(e) => {
                 let values: Vec<Option<Value>> =
                     (0..n).map(|i| eval(e, i)).collect::<Result<_, _>>()?;
-                let xs: Vec<f64> =
-                    (0..n).map(|i| self.position(&docs[i]).unwrap_or(i as f64)).collect();
+                let xs = self.linear_positions(docs)?;
                 funcs::linear_fill(&values, &xs)?
             }
             _ => {
@@ -592,13 +675,51 @@ impl SetWindowFields {
         })
     }
 
-    /// The numeric sort value of `doc` (a date as milliseconds), for `$linearFill`.
-    fn position(&self, doc: &Document) -> Option<f64> {
-        let (field, _) = self.sort_field.as_ref()?;
-        match crate::expr::field_path(&Value::Document(doc.clone()), field)? {
-            Value::DateTime(ms) => Some(ms as f64),
-            v => f64_of(&v),
+    /// The sort values of a sorted partition as numbers (dates as milliseconds), for
+    /// `$linearFill`: each a number or a date, all of one kind and no two equal (measured on a
+    /// `refrouter` 9.0.4).
+    fn linear_positions(&self, docs: &[Document]) -> Result<Vec<f64>, MqlError> {
+        let field = self.sort_field.as_ref().map_or("", |(f, _)| f.as_str());
+        let mut out = Vec::with_capacity(docs.len());
+        let mut previous: Option<Value> = None;
+        for d in docs {
+            let v = crate::expr::field_path(&Value::Document(d.clone()), field);
+            let x = match &v {
+                Some(Value::DateTime(ms)) => *ms as f64,
+                Some(n) if crate::expr::values::is_number(n) => f64_of(n).unwrap_or(0.0),
+                other => {
+                    return Err(error(
+                        TYPE_MISMATCH,
+                        format!(
+                            "Value of the sortBy field must be numeric or a date, but found {}",
+                            other.as_ref().map_or("missing", type_name_of)
+                        ),
+                    ));
+                }
+            };
+            let v = v.unwrap_or(Value::Null);
+            if let Some(p) = &previous {
+                if matches!(p, Value::DateTime(_)) != matches!(v, Value::DateTime(_)) {
+                    return Err(error(
+                        TYPE_MISMATCH,
+                        format!(
+                            "Conflicting sort value types, previously received type {}, but found {}",
+                            type_name_of(p),
+                            type_name_of(&v)
+                        ),
+                    ));
+                }
+                if order(&Some(p.clone()), &Some(v.clone()), None)? == Ordering::Equal {
+                    return Err(error(
+                        LINEAR_REPEATED,
+                        "There can be no repeated values in the sort field in the same partition",
+                    ));
+                }
+            }
+            previous = Some(v);
+            out.push(x);
         }
+        Ok(out)
     }
 
     /// `$rank`, `$denseRank` and `$documentNumber` over a sorted partition.
@@ -727,48 +848,41 @@ impl SetWindowFields {
                 }
                 acc.finish(st, scopes.first().and_then(Scope::collator), false)
             }
-            Func::Covariance { x, y, sample } => {
+            Func::Covariance { pair, sample } => {
                 let mut pairs = Vec::with_capacity(hi - lo);
                 for i in lo..hi {
-                    pairs.push((x.eval(&docs[i], &scopes[i])?, y.eval(&docs[i], &scopes[i])?));
+                    // Anything but an array of two values counts as no pair.
+                    pairs.push(match pair.eval(&docs[i], &scopes[i])? {
+                        Some(Value::Array(xy)) if xy.len() == 2 => {
+                            let mut xy = xy.into_iter();
+                            (xy.next(), xy.next())
+                        }
+                        _ => (None, None),
+                    });
                 }
                 Ok(funcs::covariance(&pairs, *sample))
             }
             Func::Derivative { input, unit } | Func::Integral { input, unit } => {
                 let field = self.sort_field.as_ref().map(|(f, _)| f.as_str()).unwrap_or("");
-                let mut points: Vec<Point> = Vec::with_capacity(hi - lo);
-                let mut dates = false;
-                for i in lo..hi {
-                    let x = match crate::expr::field_path(&Value::Document(docs[i].clone()), field)
-                    {
-                        Some(Value::DateTime(ms)) => {
-                            dates = true;
-                            ms as f64
-                        }
-                        Some(v) => f64_of(&v).unwrap_or(0.0),
-                        None => 0.0,
-                    };
-                    let y = input.eval(&docs[i], &scopes[i])?.as_ref().and_then(f64_of);
-                    points.push((x, y));
-                }
+                let point = |i: usize| -> Result<Point, MqlError> {
+                    let x = crate::expr::field_path(&Value::Document(docs[i].clone()), field);
+                    Ok((x, input.eval(&docs[i], &scopes[i])?))
+                };
                 let unit_ms = match unit {
                     Some(u) => Some(
                         fixed_unit_ms(u)
-                            .map(|m| m as f64)
                             .ok_or_else(|| failed(format!("unknown time unit value: {u}")))?,
                     ),
                     None => None,
                 };
                 if matches!(func, Func::Derivative { .. }) {
-                    if dates && unit_ms.is_none() {
-                        return Err(error(
-                            DERIVATIVE_UNIT,
-                            "$derivative where the sortBy is a Date requires an 'unit'",
-                        ));
+                    if lo >= hi {
+                        return Ok(Value::Null);
                     }
-                    Ok(funcs::derivative(&points, unit_ms.unwrap_or(1.0)))
+                    funcs::derivative(&point(lo)?, &point(hi - 1)?, unit_ms)
                 } else {
-                    Ok(funcs::integral(&points, unit_ms))
+                    let points = (lo..hi).map(point).collect::<Result<Vec<_>, _>>()?;
+                    funcs::integral(&points, unit_ms)
                 }
             }
             _ => Ok(Value::Null),

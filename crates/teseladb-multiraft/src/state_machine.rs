@@ -115,6 +115,15 @@ pub trait StateMachine {
         false
     }
 
+    /// The index at or below which the log no longer rebuilds this replica's state (0: the whole
+    /// log does): data entered without an entry there, as a restore's ingest does (018). As the
+    /// leader, the core sends a replica whose log ends below it a snapshot past it, never those
+    /// entries, even while the log still holds them. It is at most
+    /// [`StateMachine::snapshot_floor`], so that the snapshot sent holds that data.
+    fn log_floor(&self) -> u64 {
+        0
+    }
+
     /// Whether it applies nothing more on this core (007 FR-011: a range that moved to another
     /// core). The core stops handing it committed entries; they stay in the log, which the layer
     /// above hands over with the group.

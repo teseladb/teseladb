@@ -39,6 +39,17 @@ pub trait Extensions {
         vars: Option<&Document>,
     ) -> Result<Option<Value>>;
 
+    /// [`Extensions::eval`] for a computed field of a `find` projection, where RefDb words an
+    /// unknown operator as 31325 (`Unknown expression`) instead of 168.
+    fn eval_projection(
+        &self,
+        expr: RawValue<'_>,
+        doc: RawDoc<'_>,
+        vars: Option<&Document>,
+    ) -> Result<Option<Value>> {
+        self.eval(expr, doc, vars)
+    }
+
     /// Runs the aggregation pipeline of a pipeline-style update on `doc` with the command's `let`
     /// variables (010).
     fn update_pipeline(

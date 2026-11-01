@@ -22,6 +22,9 @@ pub enum FilterUse {
     Validator,
     /// An `arrayFilters` document or the condition of `$pull`.
     Nested,
+    /// The partial filter of an index: the operators of a query, and it evaluates the
+    /// `$_internalExpr…` comparisons a query leaves out (the bucket indexes of a time series, 015).
+    Index,
 }
 
 /// A parsed filter.
@@ -65,8 +68,12 @@ pub enum Pred {
     Cmp(CmpOp, OwnedValue),
     /// Ordered against the value as an expression compares (`$_internalExprGt` and the others
     /// that the partial filters of a time series' bucket indexes use, 015): in RefDb's order
-    /// across types, on the whole value; a missing value never matches.
+    /// across types, on the whole value; an array on the path matches, and a missing value
+    /// sorts before every value (measured on 9.0.4).
     ExprCmp(CmpOp, OwnedValue),
+    /// Equal to the value as an expression compares (`$_internalExprEq`): on the whole value; an
+    /// array on the path matches, and a missing value never does.
+    ExprEq(OwnedValue),
     /// Equal to one of the values or matching one of the expressions.
     In(Vec<InItem>),
     /// A string matching the expression.
@@ -212,8 +219,10 @@ impl Parser {
             });
         }
         Ok(match items.len() {
-            0 => Expr::True,
-            1 => items.pop().unwrap_or(Expr::True),
+            // An empty filter is an empty conjunction: `explain` writes it `{}` where it writes
+            // `$alwaysTrue` as given.
+            0 => Expr::And(Vec::new()),
+            1 => items.pop().unwrap_or(Expr::And(Vec::new())),
             _ => Expr::And(items),
         })
     }
@@ -250,7 +259,7 @@ impl Parser {
             }
             ops::WHERE => {
                 self.top_only(key)?;
-                if self.usage != FilterUse::Query {
+                if !matches!(self.usage, FilterUse::Query | FilterUse::Index) {
                     return Err(bad_value("$where is not allowed in this context"));
                 }
                 if !matches!(
@@ -265,7 +274,7 @@ impl Parser {
             }
             ops::TEXT => {
                 self.top_only(key)?;
-                if self.usage != FilterUse::Query {
+                if !matches!(self.usage, FilterUse::Query | FilterUse::Index) {
                     return Err(bad_value("$text is not allowed in this context"));
                 }
                 Expr::Text(text(value)?)
@@ -285,7 +294,7 @@ impl Parser {
                 }
                 Expr::SampleRate(rate)
             }
-            ops::COMMENT => Expr::True,
+            ops::COMMENT => Expr::And(Vec::new()),
             ops::NOT => {
                 return Err(bad_value(
                     "unknown top level operator: $not. If you are trying to negate an entire \
@@ -337,7 +346,7 @@ impl Parser {
     fn operators(&self, path: &str, doc: RawDoc<'_>) -> Result<Pred> {
         if let Some((key, value)) = doc.iter().find(|(k, _)| geo_filter::is_geo(k)) {
             let near = geo_filter::is_near(key);
-            if near && self.usage != FilterUse::Query {
+            if near && !matches!(self.usage, FilterUse::Query | FilterUse::Index) {
                 return Err(bad_value(format!("{key} is not allowed in this context")));
             }
             let g = if near {
@@ -405,8 +414,9 @@ impl Parser {
                     ops::EXPR_LT => CmpOp::Lt,
                     _ => CmpOp::Lte,
                 };
-                Pred::ExprCmp(op, comparable(value)?)
+                Pred::ExprCmp(op, internal_operand(key, value)?)
             }
+            ops::EXPR_EQ => Pred::ExprEq(internal_operand(key, value)?),
             ops::IN => Pred::In(in_list(key, value)?),
             ops::NIN => Pred::Not(Box::new(Pred::In(in_list(key, value)?))),
             ops::EXISTS => {
@@ -538,6 +548,14 @@ fn failed(message: String) -> MqlError {
 fn comparable(v: RawValue<'_>) -> Result<OwnedValue> {
     if v == RawValue::Undefined {
         return Err(bad_value("cannot compare to undefined"));
+    }
+    OwnedValue::from_raw(v)
+}
+
+/// The operand of a `$_internalExpr…` comparison: any value but an array (measured on 9.0.4).
+fn internal_operand(key: &str, v: RawValue<'_>) -> Result<OwnedValue> {
+    if let RawValue::Array(_) = v {
+        return Err(bad_value(format!("{key} cannot be used to compare to type: array")));
     }
     OwnedValue::from_raw(v)
 }

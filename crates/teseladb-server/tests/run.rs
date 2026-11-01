@@ -10,7 +10,7 @@ use std::time::Duration;
 use teseladb_server::cli::USAGE;
 use teseladb_server::log::{Format, Level, Logger};
 use teseladb_server::node::{Node, NodeConfig, lock_dir};
-use teseladb_server::{ready_line, run, serve, version_text};
+use teseladb_server::{program, ready_line, run, serve, version_text};
 
 /// A directory removed when the test ends.
 struct Dir(PathBuf);
@@ -169,4 +169,21 @@ fn start_with_only_a_configuration_file() {
     assert_eq!((code, err.as_str()), (0, ""));
     assert!(out.starts_with("ready node_id=1 "), "{out}");
     assert!(d.0.join("data").join("node.meta").exists());
+}
+
+/// The program installs its stop handler before it runs anything; one it cannot install ends it
+/// with 1 and says why (001 FR-017).
+#[test]
+fn the_program_stops_when_it_cannot_handle_stop_signals() {
+    let args = vec!["--version".to_string()];
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let ok = || Ok(());
+    assert_eq!(program(&args, &mut out, &mut err, &ok, &|| true), 0);
+    assert_eq!(String::from_utf8(out).unwrap(), version_text());
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let refused = || Err(std::io::Error::other("refused"));
+    assert_eq!(program(&args, &mut out, &mut err, &refused, &|| true), 1);
+    assert!(out.is_empty());
+    let err = String::from_utf8(err).unwrap();
+    assert_eq!(err, "teseladb: cannot handle stop signals: refused\n");
 }

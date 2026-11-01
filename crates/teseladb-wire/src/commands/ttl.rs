@@ -79,6 +79,7 @@ fn expire<B: Backend + ?Sized>(
         sort: None,
         image: Image::None,
         vars: None,
+        hint: None,
     };
     // A time series' buckets go whole, as they are stored.
     let cmd = Document::new().with("delete", ns.coll.as_str()).with("rawData", true);

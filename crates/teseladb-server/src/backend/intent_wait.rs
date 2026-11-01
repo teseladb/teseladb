@@ -9,12 +9,13 @@
 //! with what it learned. The node's readers share their pushes (`PushCache`, SC-005): one push
 //! goes for all of them, and those that meet the owner while it is on the way wait for it.
 
+use std::sync::PoisonError;
 use std::thread;
 use std::time::Instant;
 
 use teseladb_hlc::Hlc;
 use teseladb_range::host::TxnOp;
-use teseladb_range::intents::{IntentOwner, Push, TxnStatus};
+use teseladb_range::intents::{IntentOwner, Push};
 use teseladb_range::push::{Known, TxnView};
 use teseladb_range::read::ReadConcern;
 use teseladb_txn::push_cache::Lookup;
@@ -68,7 +69,11 @@ pub(super) fn pin(req: RemoteReq, pinned: Option<&(Hlc, TxnView)>) -> RemoteReq 
         RemoteReq::ReadWith { key, scan, concern, view, uncertain_to, .. } => {
             RemoteReq::ReadWith { key, scan, at, concern, view: with(&view), uncertain_to }
         }
-        other @ (RemoteReq::Write { .. } | RemoteReq::Txn { .. }) => other,
+        other @ (RemoteReq::Write { .. }
+        | RemoteReq::Txn { .. }
+        | RemoteReq::BackupFetch { .. }
+        | RemoteReq::RestorePiece { .. }
+        | RemoteReq::RestoreIngest { .. }) => other,
     }
 }
 
@@ -82,8 +87,8 @@ impl ServerBackend {
         let record = self.h.routes.lookup(&owner.record_key).map(|e| e.group);
         txn_stats::pushed(&mut lock(&self.h.sessions));
         let answer = record.map(|g| self.ask_range(g, push));
+        // A pending owner has nothing to resolve: the write waits a pause.
         if let Some(Ok(RemoteReply::Record(rec))) = answer
-            && rec.status != TxnStatus::Pending
             && let Some(op) = lazy_resolve(&rec, vec![key.to_vec()])
             && let Some(g) = self.h.routes.lookup(key).map(|e| e.group)
             && self.ask_range(g, op).is_ok()
@@ -94,9 +99,15 @@ impl ServerBackend {
     }
 
     /// Pushes the owner of the intent a read at `at` met above that mark: what the read knows of
-    /// it then, after resolving the intent of a finished one; `None` if the push failed.
-    pub(super) fn push_for_read(&mut self, owner: &IntentOwner, at: Hlc) -> Option<Known> {
-        let to = match self.push_turn(owner, at)? {
+    /// it then, after resolving the intent of a finished one; `None` if the push failed or the
+    /// operation's deadline `until` passed while it waited for another reader's push.
+    pub(super) fn push_for_read(
+        &mut self,
+        owner: &IntentOwner,
+        at: Hlc,
+        until: Instant,
+    ) -> Option<Known> {
+        let to = match self.push_turn(owner, at, until)? {
             Ok(known) => return Some(known),
             Err(to) => to,
         };
@@ -125,8 +136,13 @@ impl ServerBackend {
 
     /// What a read at `at` that met `owner`'s intent knows from the node's pushes (`Ok`), or the
     /// mark it pushes the owner to (`Err`), after waiting for a push of another reader on the
-    /// way; `None` once the operation's deadline passed while it waited.
-    fn push_turn(&mut self, owner: &IntentOwner, at: Hlc) -> Option<Result<Known, Hlc>> {
+    /// way; `None` once the operation's deadline `until` passed while it waited.
+    fn push_turn(
+        &mut self,
+        owner: &IntentOwner,
+        at: Hlc,
+        until: Instant,
+    ) -> Option<Result<Known, Hlc>> {
         let sessions = self.h.sessions.clone();
         let cv = lock(&sessions).push_settled.clone();
         let mut g = lock(&sessions);
@@ -135,14 +151,12 @@ impl ServerBackend {
                 Lookup::Known(known) => return Some(Ok(known)),
                 Lookup::Push(to) => return Some(Err(to)),
                 Lookup::Wait => {
-                    let left = self.until().saturating_duration_since(Instant::now());
+                    let left = until.saturating_duration_since(Instant::now());
                     if left.is_zero() {
                         return None;
                     }
-                    g = match cv.wait_timeout(g, left.min(RETRY_PAUSE)) {
-                        Ok((g, _)) => g,
-                        Err(poisoned) => poisoned.into_inner().0,
-                    };
+                    let waited = cv.wait_timeout(g, left.min(RETRY_PAUSE));
+                    g = waited.unwrap_or_else(PoisonError::into_inner).0;
                 }
             }
         }
@@ -174,6 +188,25 @@ mod tests {
                 scan: Some((vec![2], 5)),
                 at: Some(ts(7)),
                 concern: ReadConcern::Local,
+                view: learned.1.clone(),
+                uncertain_to: None,
+            }
+        );
+        // A follower's scan goes to the leader, at the mark the follower read at.
+        let follower = RemoteReq::FollowerScan {
+            start: vec![1],
+            end: vec![2],
+            limit: 5,
+            max_stale_ms: Some(90_000),
+            nodes: vec![(teseladb_types::NodeId(2), true)],
+        };
+        assert_eq!(
+            pin(follower, Some(&learned)),
+            RemoteReq::ReadWith {
+                key: vec![1],
+                scan: Some((vec![2], 5)),
+                at: Some(ts(7)),
+                concern: ReadConcern::Majority,
                 view: learned.1.clone(),
                 uncertain_to: None,
             }

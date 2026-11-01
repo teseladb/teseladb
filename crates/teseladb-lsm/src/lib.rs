@@ -64,7 +64,7 @@ pub mod sst;
 mod time_iter;
 mod version;
 
-pub use config::{Encryption, LsmConfig};
+pub use config::{Codec, Encryption, LsmConfig};
 pub use entry::{Kind, RangeTombstone};
 pub use error::LsmError;
 pub use gc::GcTable;

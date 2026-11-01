@@ -26,7 +26,13 @@ pub const GC_EVERY_MS: u64 = 60_000;
 
 /// The threshold at cluster time `now_ms`: «now − gc_ttl», `None` within the clock's first day.
 pub fn threshold(now_ms: u64) -> Option<Hlc> {
-    now_ms.checked_sub(GC_TTL_MS).map(|physical| Hlc { physical, logical: 0 })
+    threshold_with(now_ms, GC_TTL_MS)
+}
+
+/// The threshold at cluster time `now_ms` with `ttl_ms` of history (the cluster parameter
+/// `teselaHistoryRetention`, 007 FR-019): `None` while the clock is below it.
+pub fn threshold_with(now_ms: u64, ttl_ms: u64) -> Option<Hlc> {
+    now_ms.checked_sub(ttl_ms).map(|physical| Hlc { physical, logical: 0 })
 }
 
 /// The intervals a range's threshold covers: its local keys and its data `[start, end)`.
@@ -123,7 +129,7 @@ impl RangeHost {
         if !l.caught_up(core, g) || !l.round(kind).due(now_ms) || core.read_mark(now).is_none() {
             return false;
         }
-        let gc = threshold(now_ms);
+        let gc = threshold_with(now_ms, self.gc_ttl_ms);
         let build = |ts| {
             let command = match (kind, gc) {
                 (Periodic::Gc, Some(t)) => Command::SetGcThreshold { ts: t },

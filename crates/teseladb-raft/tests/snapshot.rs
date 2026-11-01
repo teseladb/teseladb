@@ -94,7 +94,7 @@ fn behind_a_lost_snapshot(seed: u64) -> (Net, teseladb_types::NodeId, teseladb_t
         node.store.compact(SnapshotMeta { index: applied, term, conf });
     }
     net.heal();
-    net.drop_types.insert(Net::msg_type(MessageType::SnapshotReq));
+    net.drop_types.insert(MessageType::SnapshotReq as u8);
     net.ticks(3);
     assert_eq!(net.snapshots_sent, 0, "the first send is lost");
     (net, l, f)
@@ -197,4 +197,52 @@ fn acknowledgements_while_a_snapshot_is_being_sent() {
     assert_eq!(matched(&net), snapshot_at);
     net.propose(l, b"after the snapshot").unwrap();
     assert_eq!(net.data(f).last().unwrap(), b"after the snapshot");
+}
+
+/// A leader whose state no longer follows from its log at or below the log floor (data entered
+/// without an entry) sends a follower behind it no entry, even while its log holds them, and no
+/// snapshot below the floor; one past it goes. Without the floor the same log reaches the
+/// follower.
+#[test]
+fn a_follower_below_the_log_floor_gets_no_entries() {
+    let mut net = Net::new(3, 0, 43);
+    let l = net.elect(300);
+    let f = (1..=3).map(id).find(|&n| n != l).unwrap();
+    net.isolate(f);
+    for i in 0..5u8 {
+        net.propose(l, &[i]).unwrap();
+    }
+    net.ticks(3);
+    let floor = net.nodes[&l].applied.last().unwrap().index;
+    net.nodes.get_mut(&l).unwrap().raw.set_log_floor(floor);
+    net.heal();
+    net.ticks(10);
+    assert!(!net.data(f).contains(&vec![4]), "no entry below the floor");
+    assert_eq!(net.snapshots_sent, 0, "nor a snapshot below it");
+    net.nodes.get_mut(&l).unwrap().raw.set_log_floor(0);
+    net.ticks(10);
+    assert!(net.data(f).contains(&vec![4]), "the log reaches it without the floor");
+}
+
+/// With a snapshot at the log floor, the follower below it receives that snapshot.
+#[test]
+fn a_follower_below_the_log_floor_gets_the_snapshot_past_it() {
+    let mut net = Net::new(3, 0, 47);
+    let l = net.elect(300);
+    let f = (1..=3).map(id).find(|&n| n != l).unwrap();
+    net.isolate(f);
+    for i in 0..5u8 {
+        net.propose(l, &[i]).unwrap();
+    }
+    net.ticks(3);
+    let node = net.nodes.get_mut(&l).unwrap();
+    let floor = node.applied.last().unwrap().index;
+    let term = node.store.term(floor).unwrap();
+    let conf = node.raw.conf().clone();
+    node.store.compact(SnapshotMeta { index: floor, term, conf });
+    node.raw.set_log_floor(floor);
+    net.heal();
+    net.ticks(10);
+    assert!(net.snapshots_sent >= 1);
+    assert_eq!(net.nodes[&f].snapshot_data.as_ref().unwrap(), &Bytes::from("snapshot state"));
 }

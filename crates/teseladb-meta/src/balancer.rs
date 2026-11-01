@@ -54,6 +54,9 @@ pub enum Decision {
 pub struct View<'a> {
     /// Group 0's state.
     pub group0: &'a Group0Sm,
+    /// Every range's descriptor: Group 0's, and after the handoff the `Meta2` ranges' (007
+    /// FR-014).
+    pub ranges: &'a BTreeMap<GroupId, RangeDesc>,
     /// Group 0's voters.
     pub voters: &'a [NodeId],
     /// Group 0's learners.
@@ -68,6 +71,9 @@ pub struct View<'a> {
     pub conf_in_flight: bool,
     /// Nodes whose clock keeps them from leading ranges.
     pub skewed: &'a [NodeId],
+    /// Seconds east of UTC of this node's local time, the time `config.settings` gives the
+    /// balancer's window in.
+    pub local_offset_s: i32,
 }
 
 /// The factor of the setting's text (`auto` when it is missing or not one of the four).
@@ -145,7 +151,7 @@ impl View<'_> {
 
     /// Replicas Group 0's table gives `n`.
     fn replicas(&self, n: NodeId) -> usize {
-        self.group0.ranges.values().filter(|r| r.nodes().contains(&n)).count()
+        self.ranges.values().filter(|r| r.nodes().contains(&n)).count()
     }
 
     /// How a node ranks as a receiver: one with room first, then fewest bytes, fewest replicas
@@ -162,7 +168,7 @@ impl View<'_> {
 
     /// Ranges that may move now: no change in progress and no split being cut.
     fn movable(&self) -> impl Iterator<Item = &RangeDesc> {
-        self.group0.ranges.values().filter(|r| !r.settling && r.pending_split.is_none())
+        self.ranges.values().filter(|r| !r.settling && r.pending_split.is_none())
     }
 }
 
@@ -176,7 +182,7 @@ pub fn plan(v: &View<'_>) -> Vec<Decision> {
     let eligible = v.eligible_nodes();
     let f = factor(v.group0.settings.get(FACTOR_SETTING).map(Vec::as_slice));
     let wanted = target(f, usable);
-    for r in v.group0.ranges.values() {
+    for r in v.ranges.values() {
         // A change in progress, or a split being cut: the range waits.
         if r.settling || r.pending_split.is_some() {
             continue;
@@ -187,20 +193,26 @@ pub fn plan(v: &View<'_>) -> Vec<Decision> {
             out.push(Decision::Command(cmd));
         }
     }
-    let quiet = !out.iter().any(|d| matches!(d, Decision::Command(_)))
-        && v.group0.ranges.values().all(|r| !r.settling && r.pending_split.is_none());
+    // `config.settings` can stop the moves for balance; the repairs above go on.
+    let offset_ms = i64::from(v.local_offset_s) * 1_000;
+    let local_ms = v.group0.cluster_time_ms.saturating_add_signed(offset_ms);
+    let balancing = crate::config_settings::balancing(&v.group0.settings, local_ms);
+    let quiet = balancing
+        && !out.iter().any(|d| matches!(d, Decision::Command(_)))
+        && v.ranges.values().all(|r| !r.settling && r.pending_split.is_none());
     if let Some((group, add, remove)) =
         quiet.then(|| space_move(v).or_else(|| count_move(v))).flatten()
     {
-        let epoch = v.group0.ranges.get(&group).map_or(0, |r| r.replica_epoch);
+        let epoch = v.ranges.get(&group).map_or(0, |r| r.replica_epoch);
         let cmd = Group0Command::SetReplicas { group, epoch, add: vec![add], remove: vec![remove] };
         out.push(Decision::Command(cmd));
     }
-    if let Some((group, node)) = leader_move(v).or_else(|| load_leader_move(v)) {
+    let leaders = balancing.then(|| leader_move(v).or_else(|| load_leader_move(v))).flatten();
+    if let Some((group, node)) = leaders {
         out.push(Decision::Command(Group0Command::SetLeaderHint { group, node, term: 0 }));
     }
     for (id, info) in &v.group0.nodes {
-        let holds = v.group0.ranges.values().any(|r| r.nodes().contains(id));
+        let holds = v.ranges.values().any(|r| r.nodes().contains(id));
         if info.state == NodeState::Draining && !holds && !v.voters.contains(id) {
             let cmd = Group0Command::SetNodeState { node: *id, state: NodeState::Removed };
             out.push(Decision::Command(cmd));
@@ -321,7 +333,7 @@ fn leaders(v: &View<'_>) -> Vec<(NodeId, usize)> {
     v.eligible_nodes()
         .into_iter()
         .filter(|n| !v.skewed.contains(n))
-        .map(|n| (n, v.group0.ranges.values().filter(|r| r.leader_hint == Some(n)).count()))
+        .map(|n| (n, v.ranges.values().filter(|r| r.leader_hint == Some(n)).count()))
         .collect()
 }
 
@@ -337,7 +349,7 @@ fn leader_move(v: &View<'_>) -> Option<(GroupId, NodeId)> {
     let led = leaders(v);
     let (busiest, most) = *led.iter().max_by_key(|(n, c)| (*c, core::cmp::Reverse(*n)))?;
     let (idlest, fewest) = *led.iter().min_by_key(|(n, c)| (*c, *n))?;
-    let total = v.group0.ranges.values().filter(|r| r.leader_hint.is_some()).count();
+    let total = v.ranges.values().filter(|r| r.leader_hint.is_some()).count();
     let allowed = total.div_ceil(10).max(1);
     if most <= fewest + allowed {
         return None;
@@ -365,10 +377,11 @@ fn load_leader_move(v: &View<'_>) -> Option<(GroupId, NodeId)> {
     let all: Vec<u64> = led.iter().map(|(n, _)| ops(*n)).collect();
     let (busiest, busy_led) = *led.iter().max_by_key(|(n, _)| (ops(*n), core::cmp::Reverse(*n)))?;
     let (idlest, idle_led) = *led.iter().min_by_key(|(n, _)| (ops(*n), *n))?;
-    if !load::too_busy(ops(busiest), ops(idlest), &all) {
+    // The busiest node may lead nothing (it has just joined, or it is being drained).
+    if busy_led == 0 || !load::too_busy(ops(busiest), ops(idlest), &all) {
         return None;
     }
-    let total = v.group0.ranges.values().filter(|r| r.leader_hint.is_some()).count();
+    let total = v.ranges.values().filter(|r| r.leader_hint.is_some()).count();
     let allowed = total.div_ceil(10).max(1);
     // After the move every node stays within `allowed` of every other.
     let after = |n: NodeId, c: usize| match n {
@@ -378,7 +391,7 @@ fn load_leader_move(v: &View<'_>) -> Option<(GroupId, NodeId)> {
     };
     let counts: Vec<usize> = led.iter().map(|(n, c)| after(*n, *c)).collect();
     let spread = counts.iter().max()? - counts.iter().min()?;
-    if busy_led == 0 || spread > allowed {
+    if spread > allowed {
         return None;
     }
     v.movable()

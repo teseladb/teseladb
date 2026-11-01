@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# Tests of scripts/coverage.sh (001 FR-014) on a throwaway workspace with four crates: `full`, whose
+# Tests of scripts/coverage.sh (001 FR-014) on a throwaway workspace with six crates: `full`, whose
 # tests cover every line, function and branch; `half`, whose tests leave a function and a branch
 # unexecuted; `moving`, whose test breaks its own source while it runs, as another agent editing
-# the tree in the middle of a run would; and `failing`, with a test that fails. The script must
-# pass `full` and `moving` alone, fail on the workspace naming `half`, and fail naming the test
-# binary of `failing` after reporting its coverage.
+# the tree in the middle of a run would; `failing`, with a test that fails; and `generic`, whose
+# generic function runs one arm in each of its two instantiations, so that each source line runs
+# in one of them; and `program`, whose `main` only runs in the program its test starts. The script
+# must pass `full`, `moving`, `generic` and `program` alone, fail on the workspace naming `half`, and
+# fail naming the test binary of `failing` after reporting its coverage.
 #   scripts/tests/coverage_test.sh
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -16,7 +18,8 @@ passed=0
 failed=0
 
 mkdir -p "$WORK/scripts" "$WORK/crates/full/src" "$WORK/crates/half/src" "$WORK/crates/moving/src" \
-  "$WORK/crates/failing/src"
+  "$WORK/crates/failing/src" "$WORK/crates/generic/src" "$WORK/crates/program/src" \
+  "$WORK/crates/program/tests"
 cp "$SCRIPT" "$WORK/scripts/coverage.sh"
 cat > "$WORK/Cargo.toml" <<'EOF'
 [workspace]
@@ -26,7 +29,7 @@ members = ["crates/*"]
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(coverage)"] }
 EOF
-for c in full half moving failing; do
+for c in full half moving failing generic program; do
   printf '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "2024"\n\n[lints]\nworkspace = true\n' "$c" \
     > "$WORK/crates/$c/Cargo.toml"
 done
@@ -92,6 +95,41 @@ mod tests {
     }
 }
 EOF
+cat > "$WORK/crates/generic/src/lib.rs" <<'EOF'
+pub fn pick<T: Default + PartialEq>(x: T) -> &'static str {
+    if x == T::default() {
+        "zero"
+    } else {
+        "other"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn one_arm_in_each_instantiation() {
+        assert_eq!(super::pick(0_i32), "zero");
+        assert_eq!(super::pick(String::from("a")), "other");
+    }
+}
+EOF
+cat > "$WORK/crates/program/src/lib.rs" <<'EOF'
+pub fn greeting() -> &'static str {
+    "hi"
+}
+EOF
+cat > "$WORK/crates/program/src/main.rs" <<'EOF'
+fn main() {
+    println!("{}", program::greeting());
+}
+EOF
+cat > "$WORK/crates/program/tests/run.rs" <<'EOF'
+#[test]
+fn the_program_greets() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_program")).output().unwrap();
+    assert_eq!(out.stdout, b"hi\n");
+}
+EOF
 
 # expect NAME CODE PATTERN ARGS...: runs the script with ARGS and checks the exit code and output.
 expect() {
@@ -114,6 +152,10 @@ expect "untaken branch side of the crate below" 1 "^  crates/half/src/lib.rs:2:[
 expect "function never run of the crate below" 1 "^  crates/half/src/lib.rs:5:1: function never run$" full half
 expect "a source edited during the run does not change what is measured" 0 \
   "^moving +lines 100.00 % +functions 100.00 % +branches 100.00 %" moving
+expect "a line run by another instantiation of its generic function counts" 0 \
+  "^generic +lines 100.00 % +functions 100.00 % +branches 100.00 %" generic
+expect "what only the program its test starts runs counts" 0 \
+  "^program +lines 100.00 % +functions 100.00 % +branches 100.00 %" program
 expect "a failing test fails the run naming its binary" 1 "^coverage: tests failed: .*failing-[0-9a-f]+$" failing
 expect "the coverage of a run with a failing test is still reported" 1 "^failing +lines" failing
 

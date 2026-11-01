@@ -52,10 +52,8 @@ impl SessionOps {
             return;
         }
         let all = !self.failed.remove(&id);
-        // A handle that gave up no longer listens.
-        if let Some(r) = self.replies.remove(&id) {
-            let _ = r.send(all);
-        }
+        // A handle that gave up no longer listens: its send fails, and that is fine.
+        let _ = self.replies.remove(&id).map(|r| r.send(all));
     }
 }
 

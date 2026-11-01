@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use common::{Mem, doc, field};
 use teseladb_bson::{Decimal128, Document, Value};
+use teseladb_wire::commands::session::KillScope;
 use teseladb_wire::commands::{NodeSessions, Shared, Timeouts, lock};
 use teseladb_wire::connection::{Connection, Request};
 use teseladb_wire::dispatch::{Action, ClusterTime, NodeInfo, Topology, dispatch_with};
@@ -371,10 +372,12 @@ fn current_op_lists_and_filters_the_node_operations() {
     assert_eq!(
         keys,
         [
+            "shard",
             "type",
+            "host",
             "desc",
             "connectionId",
-            "client",
+            "client_s",
             "appName",
             "clientMetadata",
             "active",
@@ -391,7 +394,9 @@ fn current_op_lists_and_filters_the_node_operations() {
             "waitingForLock"
         ]
     );
-    assert_eq!(first.get("opid"), Some(&Value::Int32(i32::try_from(id).unwrap())));
+    // As a `refrouter` names a shard's operation (measured, DV-031, D-102).
+    assert_eq!(first.get("shard"), Some(&Value::from("node1")));
+    assert_eq!(first.get("opid"), Some(&Value::from(format!("node1:{id}"))));
     assert_eq!(first.get("secs_running"), Some(&Value::Int64(2)));
     assert_eq!(first.get("currentOpTime"), Some(&Value::from("2023-11-14T22:13:20.000+00:00")));
     assert_eq!(first.get("op"), Some(&Value::from("query")));
@@ -474,6 +479,67 @@ fn kill_op_reads_its_op_as_a_refrouter_does() {
     let as_decimal = Value::Decimal128(Decimal128::from_parts(false, u128::from(id), 0).unwrap());
     assert!(ok(&run(&mut m, &mut conn, "admin", kill(as_decimal))));
     assert!(lock(&m.shared).ops.get(id).unwrap().killed);
+}
+
+/// `killOp` with a `shardid:opid` as a `refrouter` 9.0.4 reads it (measured, DV-031, D-102): the
+/// shard first (70 when no node has that name; `config` is one), then the number (9 when it is
+/// not one, 15 when it does not fit 32 bits); the reply names the shard and the number, and the
+/// operation stops on its node.
+#[test]
+fn kill_op_takes_a_node_and_its_operation() {
+    let mut m = node(0);
+    m.shards = vec!["node1".to_owned(), "node2".to_owned()];
+    let id = lock(&m.shared).ops.begin(op(7));
+    let mut conn = Connection::new(1);
+    let kill = |v: &str| Document::new().with("killOp", 1).with("op", v);
+    let cases: [(&str, i32, &str); 12] = [
+        (
+            "node1",
+            28625,
+            "The op argument to killOp must be of the format shardid:opid but found \"node1\"",
+        ),
+        (
+            "node1:",
+            28625,
+            "The op argument to killOp must be of the format shardid:opid but found \"node1:\"",
+        ),
+        (
+            ":",
+            28625,
+            "The op argument to killOp must be of the format shardid:opid but found \":\"",
+        ),
+        ("nope:1", 70, "Shard nope not found"),
+        ("nope:x", 70, "Shard nope not found"),
+        ("node1:x", 9, "Did not consume whole string."),
+        ("node1:1.5", 9, "Did not consume whole string."),
+        ("node1: 5", 9, "Did not consume whole string."),
+        ("node1:5:6", 9, "Did not consume whole string."),
+        ("node1:0x10", 9, "Did not consume whole string."),
+        ("node1:2147483648", 15, "Overflow"),
+        ("node2:-2147483649", 15, "Overflow"),
+    ];
+    for (v, code, msg) in cases {
+        assert_eq!(error(&run(&mut m, &mut conn, "admin", kill(v))), (code, msg.to_owned()), "{v}");
+    }
+    let answer = |shard: &str, n: i32| {
+        Document::new().with("shard", shard).with("shardid", Value::Int32(n)).with("ok", 1.0)
+    };
+    for (v, shard, n) in
+        [("node1:-5", "node1", -5), ("node1:007", "node1", 7), ("config:1", "config", 1)]
+    {
+        assert_eq!(run(&mut m, &mut conn, "admin", kill(v)), answer(shard, n), "{v}");
+    }
+    assert!(!lock(&m.shared).ops.get(id).unwrap().killed);
+    assert!(m.killed.is_empty());
+    // An operation of another node: that node stops it.
+    assert_eq!(run(&mut m, &mut conn, "admin", kill("node2:+12")), answer("node2", 12));
+    assert_eq!(m.killed, vec![KillScope::Op { node: 2, op: 12 }]);
+    // One of this node.
+    let mine = format!("node1:{id}");
+    let n = i32::try_from(id).unwrap();
+    assert_eq!(run(&mut m, &mut conn, "admin", kill(&mine)), answer("node1", n));
+    assert!(lock(&m.shared).ops.get(id).unwrap().killed);
+    assert_eq!(m.killed.len(), 1);
 }
 
 #[test]
@@ -682,6 +748,17 @@ fn server_parameters_are_read_and_set_as_a_refrouter_does() {
     };
     assert_eq!(r.get("localLogicalSessionTimeoutMinutes"), Some(&expect(Value::Int32(30), false)));
     assert_eq!(r.get("enableTestCommands"), Some(&expect(Value::Boolean(false), false)));
+    // `internalQueryPlannerEnableHashIntersection` takes any value as true or false, as a
+    // `refrouter` 9.0.4 (measured: a string sets it, `0` clears it).
+    let hash = "internalQueryPlannerEnableHashIntersection";
+    let r = run(&mut m, &mut conn, "admin", get(hash));
+    assert_eq!(r.get(hash), Some(&Value::Boolean(false)), "{r:?}");
+    let r = run(&mut m, &mut conn, "admin", set(hash, Value::from("x")));
+    assert_eq!(r.get("was"), Some(&Value::Boolean(false)), "{r:?}");
+    let r = run(&mut m, &mut conn, "admin", set(hash, Value::Int32(0)));
+    assert_eq!(r.get("was"), Some(&Value::Boolean(true)), "{r:?}");
+    let r = run(&mut m, &mut conn, "admin", get(hash));
+    assert_eq!(r.get(hash), Some(&Value::Boolean(false)), "{r:?}");
     let r = run(&mut m, &mut conn, "admin", Document::new().with("getParameter", "*"));
     let names: Vec<&str> = r.iter().map(|(k, _)| k).collect();
     // `auditAuthorizationSuccess` is RefDb Enterprise's, the OCSP ones, `authSchemaVersion` and
@@ -696,6 +773,7 @@ fn server_parameters_are_read_and_set_as_a_refrouter_does() {
             "clusterAuthMode",
             "cursorTimeoutMillis",
             "enableTestCommands",
+            "internalQueryPlannerEnableHashIntersection",
             "localLogicalSessionTimeoutMinutes",
             "maxConcurrentMultiDocumentTransactions",
             "ocspEnabled",

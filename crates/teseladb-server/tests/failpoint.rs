@@ -53,6 +53,18 @@ fn a_failpoint_closes_or_holds_only_its_connection() {
     let r = held.receive();
     assert!(start.elapsed() >= Duration::from_millis(400));
     assert_eq!(batch(&r, "firstBatch").len(), 2);
+    // What the held client sends meanwhile follows the held request, in order.
+    let block = Document::new()
+        .with("failCommands", names("find"))
+        .with("blockConnection", true)
+        .with("blockTimeMS", 200);
+    assert!(ok(&admin.run("admin", fail(block))));
+    let mut queued = Client::new(&node);
+    queued.send("app", Document::new().with("find", "c"));
+    std::thread::sleep(Duration::from_millis(50));
+    queued.send("admin", Document::new().with("ping", 1));
+    assert_eq!(batch(&queued.receive(), "firstBatch").len(), 2);
+    assert!(ok(&queued.receive()));
     // Held, then closed.
     let both = Document::new()
         .with("failCommands", names("find"))
@@ -65,6 +77,18 @@ fn a_failpoint_closes_or_holds_only_its_connection() {
     closing.send("app", Document::new().with("find", "c"));
     assert!(matches!(closing.s.read(&mut b), Ok(0) | Err(_)));
     assert!(start.elapsed() >= Duration::from_millis(200));
+    // A command the worker runs itself, held and then closed.
+    let both = Document::new()
+        .with("failCommands", names("ping"))
+        .with("blockConnection", true)
+        .with("blockTimeMS", 200)
+        .with("closeConnection", true);
+    assert!(ok(&admin.run("admin", fail(both))));
+    let mut pinged = Client::new(&node);
+    let start = Instant::now();
+    pinged.send("admin", Document::new().with("ping", 1));
+    assert!(matches!(pinged.s.read(&mut b), Ok(0) | Err(_)));
+    assert!(start.elapsed() >= Duration::from_millis(200));
     // A held client that goes away is forgotten at the deadline.
     let block = Document::new()
         .with("failCommands", names("find"))
@@ -73,6 +97,7 @@ fn a_failpoint_closes_or_holds_only_its_connection() {
     assert!(ok(&admin.run("admin", fail(block))));
     let mut gone = Client::new(&node);
     gone.send("app", Document::new().with("find", "c"));
+    std::thread::sleep(Duration::from_millis(50));
     drop(gone);
     std::thread::sleep(Duration::from_millis(400));
     assert!(ok(&admin.run("admin", Document::new().with("ping", 1))));

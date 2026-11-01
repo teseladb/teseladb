@@ -9,6 +9,7 @@ use crate::enroll_tokens::{
     EnrollToken, SECRET_HASH_LEN, TOKEN_ID_LEN, decode_token, decode_use, encode_token,
 };
 use crate::indexes::IndexCommand;
+use crate::meta2::Meta2Range;
 use crate::request::RequestId;
 use crate::security::{SecurityOp, decode_ops, encode_ops};
 
@@ -68,6 +69,14 @@ pub mod kind {
     pub const CREATE_ENROLL_TOKEN: u16 = 46;
     /// [`super::Group0Command::ConsumeEnrollToken`].
     pub const CONSUME_ENROLL_TOKEN: u16 = 47;
+    /// [`super::Group0Command::HandoffMeta2`].
+    pub const HANDOFF_META2: u16 = 48;
+    /// [`super::Group0Command::Meta2Seeded`].
+    pub const META2_SEEDED: u16 = 49;
+    /// [`super::Group0Command::RestoreCatalog`].
+    pub const RESTORE_CATALOG: u16 = 50;
+    /// [`super::Group0Command::SetSettings`].
+    pub const SET_SETTINGS: u16 = 51;
 }
 
 /// Addresses, name and cores of a node.
@@ -161,7 +170,7 @@ pub enum Group0Command {
         /// State.
         state: NodeState,
     },
-    /// A node that came back with another name or other addresses (001 FR-023); its cores do not
+    /// A node that came back with another name or other addresses (001 FR-022); its cores do not
     /// change.
     SetNodeAddrs {
         /// Node.
@@ -319,6 +328,51 @@ pub enum Group0Command {
         /// SHA-256 of the secret the node gave.
         secret_hash: [u8; SECRET_HASH_LEN],
     },
+    /// The descriptors go to these Meta2 ranges, which split space `04` in order, the last with
+    /// no end (007 FR-014); Group 0 numbers them when it applies the entry.
+    HandoffMeta2 {
+        /// The Meta2 ranges.
+        ranges: Vec<Meta2Range>,
+    },
+    /// Meta2 range `group` committed its first entry: Group 0 drops its interval's descriptors.
+    Meta2Seeded {
+        /// The Meta2 range.
+        group: GroupId,
+    },
+    /// A backup's catalog and index definitions, whole, with their numbers (007 FR-021); only
+    /// into a catalog without collections or indexes.
+    RestoreCatalog {
+        /// The catalog.
+        catalog: Box<crate::catalog::Catalog>,
+        /// The index definitions.
+        indexes: Box<crate::indexes::Indexes>,
+    },
+    /// Settings changed together (007 FR-017, the documents of `config.settings`): each one
+    /// expects its value as it was read (`None`: absent), and none changes unless all are so;
+    /// a value `None` removes the setting.
+    SetSettings(Vec<SettingChange>),
+}
+
+/// A setting of [`Group0Command::SetSettings`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SettingChange {
+    /// The setting.
+    pub key: Vec<u8>,
+    /// Its value as it was read (`None`: absent).
+    pub expect: Option<Vec<u8>>,
+    /// Its new value (`None`: removed).
+    pub value: Option<Vec<u8>>,
+}
+
+fn put_opt(e: &mut Encoder, v: Option<&[u8]>) {
+    e.bool(v.is_some());
+    if let Some(b) = v {
+        e.bytes(b);
+    }
+}
+
+fn get_opt(d: &mut Decoder<'_>) -> Result<Option<Vec<u8>>, DecodeError> {
+    Ok(if d.bool()? { Some(d.bytes()?.to_vec()) } else { None })
 }
 
 fn put_nodes(e: &mut Encoder, nodes: &[NodeId]) {
@@ -397,6 +451,10 @@ impl Group0Command {
             Group0Command::ExpireClusterTimeKey { .. } => kind::EXPIRE_CLUSTER_TIME_KEY,
             Group0Command::CreateEnrollToken(_) => kind::CREATE_ENROLL_TOKEN,
             Group0Command::ConsumeEnrollToken { .. } => kind::CONSUME_ENROLL_TOKEN,
+            Group0Command::HandoffMeta2 { .. } => kind::HANDOFF_META2,
+            Group0Command::Meta2Seeded { .. } => kind::META2_SEEDED,
+            Group0Command::RestoreCatalog { .. } => kind::RESTORE_CATALOG,
+            Group0Command::SetSettings(_) => kind::SET_SETTINGS,
         }
     }
 
@@ -466,6 +524,27 @@ impl Group0Command {
             }
             Group0Command::Catalog(c) => c.encode(&mut e),
             Group0Command::Indexes(c) => c.encode(&mut e),
+            Group0Command::HandoffMeta2 { ranges } => {
+                e.var(ranges.len() as u64);
+                for r in ranges {
+                    r.encode(&mut e);
+                }
+            }
+            Group0Command::Meta2Seeded { group } => {
+                e.u64(group.0);
+            }
+            Group0Command::RestoreCatalog { catalog, indexes } => {
+                catalog.encode(&mut e);
+                indexes.encode(&mut e);
+            }
+            Group0Command::SetSettings(changes) => {
+                e.var(changes.len() as u64);
+                for c in changes {
+                    e.bytes(&c.key);
+                    put_opt(&mut e, c.expect.as_deref());
+                    put_opt(&mut e, c.value.as_deref());
+                }
+            }
             Group0Command::Idempotent { req, cmd } => {
                 e.u64(req.origin.0).u64(req.id).raw(&cmd.encode());
             }
@@ -561,6 +640,31 @@ impl Group0Command {
             }
             kind::COMPLETE_RELOCATE => {
                 Group0Command::CompleteRelocate { group: GroupId(d.u64()?), core: d.u16()? }
+            }
+            kind::HANDOFF_META2 => {
+                // Grown one by one: a count read from the entry reserves nothing.
+                let mut ranges = Vec::new();
+                for _ in 0..d.var()? {
+                    ranges.push(Meta2Range::decode(&mut d)?);
+                }
+                Group0Command::HandoffMeta2 { ranges }
+            }
+            kind::META2_SEEDED => Group0Command::Meta2Seeded { group: GroupId(d.u64()?) },
+            kind::RESTORE_CATALOG => Group0Command::RestoreCatalog {
+                catalog: Box::new(crate::catalog::Catalog::decode(&mut d)?),
+                indexes: Box::new(crate::indexes::Indexes::decode(&mut d)?),
+            },
+            kind::SET_SETTINGS => {
+                let mut changes = Vec::new();
+                for _ in 0..d.var()? {
+                    let key = d.bytes()?.to_vec();
+                    changes.push(SettingChange {
+                        key,
+                        expect: get_opt(&mut d)?,
+                        value: get_opt(&mut d)?,
+                    });
+                }
+                Group0Command::SetSettings(changes)
             }
             kind::CATALOG => Group0Command::Catalog(CatalogCommand::decode(&mut d)?),
             kind::INDEXES => Group0Command::Indexes(IndexCommand::decode(&mut d)?),

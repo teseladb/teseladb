@@ -722,6 +722,7 @@ pub fn list_databases<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Docum
     let mut total = 0u64;
     for db in order {
         let size = sizes.get(&db).copied().flatten();
+        let on_config = ALWAYS_LISTED.contains(&db.as_str());
         let entry = if name_only {
             Document::new().with("name", db)
         } else if let Some(size) = size {
@@ -736,8 +737,18 @@ pub fn list_databases<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Docum
         };
         if passes(filter.as_ref(), &entry)? {
             // `totalSize` counts only what the filter lets through (measured).
-            if !name_only {
-                total += size.map_or(0, |s| s.max(collection_size(0)));
+            let mut entry = entry;
+            if let (false, Some(size)) = (name_only, size) {
+                let size = size.max(collection_size(0));
+                total += size;
+                // Where its data is, after the filter (measured): `admin` and `config` on the
+                // config server, the others on the node (D-102).
+                let shard = match on_config {
+                    true => super::admin::CONFIG_SHARD.to_owned(),
+                    false => super::shard_name(ctx.backend.node()),
+                };
+                let at = i64::try_from(size).unwrap_or(i64::MAX);
+                entry.push("shards", Document::new().with(shard.as_str(), at));
             }
             out.push(Value::Document(entry));
         }
@@ -805,6 +816,16 @@ pub fn list_collections<B: Backend + ?Sized>(
                 d.push("idIndex", g.indexes().remove(0));
             }
             if passes(filter.as_ref(), &d)? {
+                docs.push(d);
+            }
+        }
+    }
+    // The collections of `config` that show the cluster, generated from Group 0 (007 FR-017).
+    if db == super::config_db::CONFIG_DB {
+        for name in super::config_db::LISTED {
+            let shown = super::authorize::collection_shown(only.as_deref(), &db, name);
+            let d = super::config_db::listed(name, name_only);
+            if shown && passes(filter.as_ref(), &d)? {
                 docs.push(d);
             }
         }

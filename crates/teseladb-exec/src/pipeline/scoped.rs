@@ -5,7 +5,6 @@ use teseladb_bson::{Document, RawDoc, RawValue, Value};
 use teseladb_mql::{Extensions, Filter, GeoQuery, MatchContext, MqlError, TextQuery};
 
 use super::Env;
-use super::errors::{BAD_VALUE, error};
 use crate::expr::{Expr, truthy};
 
 /// The extensions of `env` with expressions evaluated in its scopes.
@@ -66,9 +65,7 @@ impl Extensions for ScopedExtensions<'_> {
 
 /// Whether `filter` matches `doc` in the environment `env`.
 pub(super) fn matches(filter: &Filter, doc: &Document, env: &dyn Env) -> Result<bool, MqlError> {
-    let bytes = doc.to_bytes().map_err(|e| error(BAD_VALUE, e.to_string()))?;
-    let raw = RawDoc::from_bytes(&bytes).map_err(|e| error(BAD_VALUE, e.to_string()))?;
-    matches_raw(filter, raw, env)
+    crate::raw::with_raw_doc(doc, |raw| matches_raw(filter, raw, env))
 }
 
 /// [`matches`] over a document already in BSON.
@@ -84,6 +81,7 @@ pub(super) fn matches_raw(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
 mod tests {
     use teseladb_bson::{Document, RawDoc, RawValue, Value};
     use teseladb_mql::{Extensions, Filter, FilterUse, GeoQuery, MqlError, TextQuery};

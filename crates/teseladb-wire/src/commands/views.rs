@@ -6,7 +6,7 @@
 use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_collation::{CollationSpec, ParsedCollation, parse_collation};
 use teseladb_meta::catalog::Namespace;
-use teseladb_plan::views::Resolved;
+use teseladb_plan::views::{Resolved, ViewError};
 
 use super::{Backend, names};
 use crate::error::{
@@ -19,24 +19,20 @@ pub fn resolve<B: Backend + ?Sized>(
     backend: &mut B,
     ns: &Namespace,
 ) -> Result<Option<Resolved>, CommandError> {
-    let mut failure: Option<CommandError> = None;
-    let resolved = teseladb_plan::views::resolve(&ns.coll, |name| {
-        let entry = backend.collection(&names::ns(&ns.db, name));
-        let kind = entry.and_then(|c| c.map(|c| super::kinds::kind_of(&c)).transpose());
-        kind.unwrap_or_else(|e| {
-            failure.get_or_insert(e);
-            None
-        })
-    });
-    if let Some(e) = failure {
-        return Err(e);
+    teseladb_plan::views::resolve(&ns.coll, |name| {
+        let entry = backend.collection(&names::ns(&ns.db, name))?;
+        entry.map(|c| super::kinds::kind_of(&c)).transpose()
+    })
+}
+
+impl From<ViewError> for CommandError {
+    fn from(e: ViewError) -> CommandError {
+        CommandError::new(crate::error::code(e.code).unwrap_or(BAD_VALUE), e.message)
     }
-    resolved
-        .map_err(|e| CommandError::new(crate::error::code(e.code).unwrap_or(BAD_VALUE), e.message))
 }
 
 /// The complete form of a collation document, `None` for the simple one or none.
-fn spec_of(collation: Option<&Document>) -> Result<Option<CollationSpec>, CommandError> {
+pub(crate) fn spec_of(collation: Option<&Document>) -> Result<Option<CollationSpec>, CommandError> {
     let Some(d) = collation else { return Ok(None) };
     let bytes = d.to_bytes()?;
     match parse_collation(RawDoc::from_bytes(&bytes)?) {

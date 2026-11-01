@@ -122,6 +122,25 @@ impl Accumulator {
             .ok_or_else(|| error(GROUP_UNKNOWN, format!("unknown group operator '{name}'")))
     }
 
+    /// Whether `name` is an accumulator.
+    pub(crate) fn is_name(name: &str) -> bool {
+        UNARY.iter().any(|(n, _)| *n == name)
+            || matches!(
+                name,
+                "$count"
+                    | "$firstN"
+                    | "$lastN"
+                    | "$minN"
+                    | "$maxN"
+                    | "$top"
+                    | "$bottom"
+                    | "$topN"
+                    | "$bottomN"
+                    | "$median"
+                    | "$percentile"
+            )
+    }
+
     /// The accumulator `name` with argument `arg`; `None` when `name` is none.
     pub(crate) fn parse_op(
         name: &str,

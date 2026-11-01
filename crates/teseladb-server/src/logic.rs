@@ -26,12 +26,13 @@ use teseladb_meta::bootstrap::{create_data_range, data_range, needs_data_range};
 use teseladb_meta::command::{Group0Command, NodeAddrs, NodeState};
 use teseladb_meta::group0::{GROUP0, Group0Result, Group0Sm, RangeDesc};
 use teseladb_meta::liveness::{DEAD_AFTER, DEAD_AFTER_SETTING, dead_after};
+use teseladb_meta::meta2::Meta2Command;
 use teseladb_multiraft::{Done, MultiRaftCore, OpError, OpId, PeerFrame, route_stray};
 use teseladb_raft::{ConfChange, ConfChangeKind, Role};
 use teseladb_raftlog::{IoDone, IoOp};
 use teseladb_range::host::RangeError;
 use teseladb_range::rollback::rollback_files;
-use teseladb_types::{Bytes, Nanos, NodeId};
+use teseladb_types::{Bytes, GroupId, Nanos, NodeId};
 use teseladb_wire::commands::Shared;
 use teseladb_wire::commands::session::{KillScope, kill_local};
 
@@ -209,6 +210,10 @@ pub struct NodeLogic {
     loads: Option<(usize, Arc<SharedLoads>)>,
     /// Where core 0 tells the clients' port the node's state in Group 0 (007 FR-015).
     presence: Option<Arc<NodePresence>>,
+    /// The duties of core 0 for the `Meta2` ranges (007 FR-014).
+    meta2: crate::meta2_ops::Meta2Ops,
+    /// The node's time zone, where the balancer reads its window (core 0, 007 FR-017).
+    zone: Option<teseladb_tz::Zone>,
 }
 
 impl NodeLogic {
@@ -247,6 +252,8 @@ impl NodeLogic {
             create_op: None,
             balance_op: None,
             balance_at: Nanos::ZERO,
+            meta2: crate::meta2_ops::Meta2Ops::default(),
+            zone: None,
             group0_ops: BTreeSet::new(),
             sent_ranges: None,
             routes: None,
@@ -306,12 +313,22 @@ impl NodeLogic {
         NodeLogic { sessions: Some(sessions), ..self }
     }
 
-    /// Sends the sessions of `scope` to every other node of the cluster; `reply` learns when all
-    /// answered.
+    /// Sends the sessions of `scope` to every other node of the cluster (an operation, to its
+    /// node); `reply` learns when all answered.
     fn kill_sessions(&mut self, scope: KillScope, reply: KillSender) {
         let me = self.me.as_ref().map_or(NodeId(0), |(id, _)| *id);
+        // An operation goes to its node alone.
+        let only = match &scope {
+            KillScope::Op { node, .. } => Some(NodeId(*node)),
+            KillScope::All | KillScope::Sessions(_) => None,
+        };
         let body = Request::KillSessions(scope).encode();
-        let others: Vec<NodeId> = self.peers.keys().copied().filter(|n| *n != me).collect();
+        let others: Vec<NodeId> = self
+            .peers
+            .keys()
+            .copied()
+            .filter(|n| *n != me && only.is_none_or(|o| o == *n))
+            .collect();
         let ops = others
             .into_iter()
             .map(|to| self.core.forward(to, Bytes::from_vec(body.clone()), self.now))
@@ -339,6 +356,12 @@ impl NodeLogic {
     /// (`SetNodeTags`), and reads with a `readPreference` match them (007 FR-013).
     pub fn with_tags(self, tags: Vec<(String, String)>) -> NodeLogic {
         NodeLogic { tags, ..self }
+    }
+
+    /// The node's time zone (core 0), where the balancer reads the window of `config.settings`
+    /// (007 FR-017).
+    pub fn with_zone(self, zone: Option<teseladb_tz::Zone>) -> NodeLogic {
+        NodeLogic { zone, ..self }
     }
 
     /// Core 0 creates user `doc` (the BSON of `admin.system.users`) while the cluster has no
@@ -464,6 +487,10 @@ impl NodeLogic {
     /// Proposes `cmd` on Group 0's leader, or forwards it there; without a known leader it goes to
     /// the voters in turn.
     fn send_group0(&mut self, cmd: Group0Command) -> Option<OpId> {
+        // After the handoff, an order on a descriptor goes to the `Meta2` range that holds it.
+        if let Some(g) = crate::meta2_ops::Meta2Ops::holder(&self.core, &cmd) {
+            return self.send_meta2(g, Meta2Command::Descriptor(cmd));
+        }
         if self.is_leader() {
             return self.core.propose(GROUP0, &cmd.encode(), self.now).ok();
         }
@@ -472,6 +499,38 @@ impl NodeLogic {
         let to = if leader != NodeId(0) { Some(leader) } else { self.next_voter(me) };
         let body = Bytes::from_vec(Request::Group0(cmd).encode());
         to.map(|to| self.core.forward(to, body, self.now))
+    }
+
+    /// Sends `cmd` to the leader of `Meta2` range `g`: proposed here if this node leads it,
+    /// forwarded to its leader or, without a known one, to a voter.
+    fn send_meta2(&mut self, g: GroupId, cmd: Meta2Command) -> Option<OpId> {
+        let status = self.core.status(g)?;
+        if status.role == Role::Leader {
+            return self.core.propose(g, &cmd.encode(), self.now).ok();
+        }
+        let me = self.me.as_ref().map_or(NodeId(0), |(id, _)| *id);
+        let voter = self.core.conf(g).and_then(|c| c.voters.iter().copied().find(|v| *v != me));
+        let to = Some(status.leader).filter(|l| *l != NodeId(0) && *l != me).or(voter)?;
+        let body = Request::Meta2 { group: g, entry: cmd.encode() }.encode();
+        Some(self.core.forward(to, Bytes::from_vec(body), self.now))
+    }
+
+    /// The duties of core 0 for the `Meta2` ranges: their replicas, seeds, `Meta2Seeded`, cluster
+    /// facts and the handoff (007 FR-014).
+    fn meta2_step(&mut self) {
+        if self.me.is_none() {
+            return;
+        }
+        self.meta2.open(&mut self.core);
+        for send in self.meta2.step(&mut self.core, self.now) {
+            let op = match send {
+                crate::meta2_ops::Send::Group0(cmd) => self.send_group0(cmd),
+                crate::meta2_ops::Send::Meta2(g, cmd) => self.send_meta2(g, cmd),
+            };
+            if let Some(op) = op {
+                self.group0_ops.insert(op);
+            }
+        }
     }
 
     /// Records this start in Group 0 (`NodeBoot`) once Group 0 knows the node; one at a time.
@@ -532,8 +591,19 @@ impl NodeLogic {
         table.check(&nodes, now, limit);
         let states = table.states().into_iter().collect();
         let loads = nodes.iter().filter_map(|n| Some((*n, table.get(*n)?.load))).collect();
+        // After the handoff the descriptors are in the `Meta2` ranges' copies too.
+        let merged: BTreeMap<GroupId, RangeDesc>;
+        let ranges = match sm.meta1 {
+            None => &sm.ranges,
+            Some(_) => {
+                let all = Ranges::of_all(sm, &crate::meta2_ops::copies(&self.core));
+                merged = all.descs.into_iter().map(|d| (d.group, d)).collect();
+                &merged
+            }
+        };
         let view = View {
             group0: sm,
+            ranges,
             voters: &conf.voters,
             learners: &conf.learners,
             leader: me,
@@ -541,6 +611,7 @@ impl NodeLogic {
             loads: &loads,
             conf_in_flight,
             skewed: &[],
+            local_offset_s: crate::local_zone::offset_s(self.zone, sm.cluster_time_ms),
         };
         let cmd = plan(&view).into_iter().find_map(|d| match d {
             Decision::Command(
@@ -551,7 +622,7 @@ impl NodeLogic {
             Decision::Command(_) | Decision::Group0Conf(_) => None,
         });
         if let Some(cmd) = cmd {
-            self.balance_op = self.core.propose(GROUP0, &cmd.encode(), now).ok();
+            self.balance_op = self.send_group0(cmd);
         }
     }
 
@@ -596,7 +667,8 @@ impl NodeLogic {
     /// Gives every core Group 0's ranges when they change, and publishes the routing table
     /// (core 0).
     fn sync_desc(&mut self) {
-        let Some(ranges) = self.group0().map(Ranges::of) else { return };
+        let copies = crate::meta2_ops::copies(&self.core);
+        let Some(ranges) = self.group0().map(|sm| Ranges::of_all(sm, &copies)) else { return };
         if self.sent_ranges.as_ref() == Some(&ranges) {
             return;
         }
@@ -695,6 +767,18 @@ impl NodeLogic {
                 };
                 let _ = reply.send(a);
             }
+            CatalogReq::Dump => {
+                let a = match self.group0() {
+                    Some(sm) if sm.bootstrapped() => {
+                        let mut e = teseladb_types::Encoder::new();
+                        sm.catalog.encode(&mut e);
+                        sm.indexes.encode(&mut e);
+                        CatalogAnswer::Dump(e.finish())
+                    }
+                    Some(_) | None => CatalogAnswer::Unavailable,
+                };
+                let _ = reply.send(a);
+            }
             CatalogReq::Settings => {
                 let a = match self.group0() {
                     Some(sm) if sm.bootstrapped() => CatalogAnswer::Settings(sm.settings.clone()),
@@ -736,6 +820,19 @@ impl NodeLogic {
                 };
                 let _ = reply.send(a);
             }
+            CatalogReq::Config(coll) => {
+                let a = match self.group0() {
+                    Some(sm) if sm.bootstrapped() => {
+                        let copies = crate::meta2_ops::copies(&self.core);
+                        let docs = crate::config_db::documents_with(sm, &copies, &coll);
+                        CatalogAnswer::Documents(
+                            docs.iter().filter_map(|d| d.to_bytes().ok()).collect(),
+                        )
+                    }
+                    Some(_) | None => CatalogAnswer::Unavailable,
+                };
+                let _ = reply.send(a);
+            }
             CatalogReq::Security(cmd) => {
                 let fence = takes_away(&cmd);
                 self.catalog_change(cmd.encode(), reply);
@@ -749,6 +846,9 @@ impl NodeLogic {
             CatalogReq::Index(cmd) => {
                 self.catalog_change(Group0Command::Indexes(cmd).encode(), reply);
                 self.catalog.fence_last();
+            }
+            CatalogReq::SetSettings(changes) => {
+                self.catalog_change(Group0Command::SetSettings(changes).encode(), reply);
             }
             CatalogReq::SetSetting { key, value } => {
                 self.catalog_change(Group0Command::SetSetting { key, value }.encode(), reply);
@@ -1025,6 +1125,16 @@ impl NodeLogic {
                     (Ok(Request::MergeProbe { range, merge }), Some(data)) => {
                         data.on_merge_probe(&mut self.core, (f.from, f.req), (range, merge));
                     }
+                    // A `Meta2` range's leader takes it; anyone else drops it and the sender
+                    // tries again.
+                    (Ok(Request::Meta2 { group, entry }), _) => {
+                        if self.core.status(group).is_some_and(|s| s.role == Role::Leader)
+                            && Meta2Command::decode(&entry).is_ok()
+                        {
+                            let _ = self.core.propose(group, &entry, self.now);
+                        }
+                        self.core.answer_forward(f.from, f.req, Bytes::new());
+                    }
                     (
                         Ok(
                             Request::Fetch(_)
@@ -1155,6 +1265,7 @@ impl CoreLogic for NodeLogic {
         self.create_range();
         self.balance();
         self.promote();
+        self.meta2_step();
         self.rollback.tick(now);
         self.data_step();
         self.sync_desc();
@@ -1611,7 +1722,16 @@ mod tests {
         };
         c.add(5, Some(lone), false);
         let now = c.now;
-        for req in [CatalogReq::Read, CatalogReq::Settings, CatalogReq::Indexes(1)] {
+        let user = teseladb_meta::security::Principal::User;
+        let unbootstrapped = [
+            CatalogReq::Read,
+            CatalogReq::Settings,
+            CatalogReq::Indexes(1),
+            CatalogReq::Principal { kind: user, db: "admin".into(), name: "u".into() },
+            CatalogReq::Principals { kind: user, db: None },
+            CatalogReq::Config("shards".into()),
+        ];
+        for req in unbootstrapped {
             let (tx, rx) = channel();
             c.logic(5).on_message(NodeMsg::Catalog(req, tx), now);
             assert!(matches!(rx.try_recv(), Ok(CatalogAnswer::Unavailable)));
@@ -1641,6 +1761,10 @@ mod tests {
         assert!(matches!(done, Some(CatalogAnswer::Done(None))), "{done:?}");
         let (tx, rx) = channel();
         c.logic(1).on_message(NodeMsg::KillSessions(KillScope::All, tx), now);
+        c.run_until(|_| rx.try_recv().is_ok());
+        // An operation's kill goes to its node alone, which answers.
+        let (tx, rx) = channel();
+        c.logic(1).on_message(NodeMsg::KillSessions(KillScope::Op { node: 2, op: 7 }, tx), now);
         c.run_until(|_| rx.try_recv().is_ok());
         // Users and roles: a user created through Group 0 is read and listed on every node.
         let user_doc = |name: &str| {
@@ -1885,6 +2009,84 @@ mod tests {
             s.voters.len() == 3 && s.learners.is_empty()
         });
         c
+    }
+
+    #[test]
+    fn group0_hands_the_descriptors_to_a_meta2_range_that_every_node_holds() {
+        use crate::data::DataReply;
+        use teseladb_meta::bootstrap::DATA_RANGE;
+        use teseladb_meta::meta2::SNAPSHOT_BYTES_SETTING;
+        use teseladb_range::ack::{W, WriteConcern};
+        let mut c = three_with_data();
+        for id in 1..=3 {
+            c.logic(id).me = Some((NodeId(id), addrs(id)));
+        }
+        let wc = WriteConcern { w: W::Majority, j: true };
+        let put = DataReq::Put { key: vec![1, 1], value: vec![1], wc };
+        assert!(matches!(c.data(1, put), Ok(DataReply::Put(_))));
+        // A one-byte threshold: Group 0's leader hands its descriptors over at once.
+        let set = Group0Command::SetSetting {
+            key: SNAPSHOT_BYTES_SETTING.to_vec(),
+            value: b"1".to_vec(),
+        };
+        let now = c.now;
+        c.logic(1).core.propose(GROUP0, &set.encode(), now).unwrap();
+        let handed = |c: &mut Cluster, id: u64| {
+            c.logic(id)
+                .group0()
+                .and_then(|sm| sm.meta1.as_ref())
+                .is_some_and(|m| !m.seeded.is_empty())
+        };
+        c.run_until(|c| (1..=3).all(|id| handed(c, id)));
+        let m2 = c.logic(1).group0().unwrap().meta1.as_ref().unwrap().ranges[0].group;
+        // Group 0 no longer has the descriptors; every node holds the Meta2 range, seeded, and
+        // routes with it.
+        c.run_until(|c| {
+            (1..=3).all(|id| {
+                let l = c.logic(id);
+                let seeded =
+                    l.core.state_machine(m2).and_then(CoreSm::meta2).is_some_and(|m| m.seeded);
+                seeded
+                    && l.group0().is_some_and(|sm| sm.ranges.is_empty())
+                    && l.sent_ranges
+                        .as_ref()
+                        .is_some_and(|r| r.descs.iter().any(|d| d.group == DATA_RANGE))
+            })
+        });
+        assert!(c.logic(2).sent_ranges.as_ref().unwrap().meta2_groups.contains(&m2));
+        // An order on the descriptor goes to the Meta2 range: the range splits there.
+        // As a range's leader does, the order is sent again until it is applied.
+        let split = Group0Command::SplitRange { group: DATA_RANGE, at: vec![1, 4] };
+        let halves = |c: &mut Cluster, id: u64| {
+            c.logic(id).core.state_machine(m2).and_then(CoreSm::meta2).map_or(0, |m| m.ranges.len())
+        };
+        let mut turn = 0u32;
+        c.run_until(|c| {
+            turn += 1;
+            if turn % 50 == 1 {
+                c.logic(2).send_group0(split.clone());
+            }
+            (1..=3).all(|id| halves(c, id) == 2)
+        });
+        c.run_until(|c| c.logic(3).sent_ranges.as_ref().is_some_and(|r| r.descs.len() == 2));
+        // The split is in the history `config.changelog` shows.
+        let (tx, rx) = channel();
+        let now = c.now;
+        c.logic(1).on_message(NodeMsg::Catalog(CatalogReq::Config("changelog".into()), tx), now);
+        let Ok(crate::catalog_ops::CatalogAnswer::Documents(docs)) = rx.try_recv() else {
+            panic!()
+        };
+        // The replica change of the start in Group 0, then the split in the Meta2 range.
+        let what = |b: &Vec<u8>| {
+            let d = teseladb_bson::Document::from(teseladb_bson::RawDoc::from_bytes(b).unwrap());
+            d.get("what").cloned()
+        };
+        let whats: Vec<_> = docs.iter().map(what).collect();
+        assert_eq!(whats.last(), Some(&Some(teseladb_bson::Value::from("split"))), "{whats:?}");
+        assert_eq!(whats.len(), 2, "{whats:?}");
+        // The data still reads, through the range's leader.
+        let get = DataReq::Get { key: vec![1, 1] };
+        c.run_until(|c| matches!(c.data(1, get.clone()), Ok(DataReply::Get(Some(_)))));
     }
 
     #[test]

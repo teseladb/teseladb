@@ -1,0 +1,14 @@
+{"find":"c","filter":{"$expr":{"$divide":[1,0]}}}	!! 2	BadValue	Failed to optimize expression :: caused by :: can't $divide by zero
+{"find":"c","filter":{"$expr":{"$divide":["$n",0]}}}	!! 2	BadValue	Executor error during find command: xa.c :: caused by :: can't $divide by zero
+{"aggregate":"c","pipeline":[{"$project":{"z":{"$divide":[1,0]}}}],"cursor":{}}	!! 2	BadValue	Failed to optimize pipeline :: caused by :: can't $divide by zero
+{"aggregate":"c","pipeline":[{"$match":{"$expr":{"$divide":[1,0]}}}],"cursor":{}}	!! 2	BadValue	Failed to optimize pipeline :: caused by :: Failed to optimize expression :: caused by :: can't $divide by zero
+{"aggregate":"c","pipeline":[{"$group":{"_id":"$g","x":{"$sum":{"$divide":[1,0]}}}}],"cursor":{}}	!! 2	BadValue	Failed to optimize pipeline :: caused by :: can't $divide by zero
+{"aggregate":"c","pipeline":[{"$group":{"_id":{"$divide":[1,0]}}}],"cursor":{}}	!! 2	BadValue	Failed to optimize pipeline :: caused by :: can't $divide by zero
+{"count":"c","query":{"$expr":{"$divide":[1,0]}}}	!! 2	BadValue	failed on: sh1 :: caused by :: Failed to optimize expression :: caused by :: can't $divide by zero
+{"distinct":"c","key":"g","query":{"$expr":{"$divide":[1,0]}}}	!! 2	BadValue	Failed to optimize expression :: caused by :: can't $divide by zero
+{"update":"c","updates":[{"q":{"$expr":{"$divide":[1,0]}},"u":{"$set":{"a":1}}}]}	=> {"nModified":{"$numberInt":"0"},"n":{"$numberInt":"0"},"writeErrors":[{"index":{"$numberInt":"0"},"code":{"$numberInt":"2"},"errmsg":"Failed to optimize expression :: caused by :: can't $divide by zero"}],"ok":{"$numberDouble":"1.0"}}
+{"delete":"c","deletes":[{"q":{"$expr":{"$divide":[1,0]}},"limit":0}]}	=> {"n":{"$numberInt":"0"},"writeErrors":[{"index":{"$numberInt":"0"},"code":{"$numberInt":"2"},"errmsg":"Failed to optimize expression :: caused by :: can't $divide by zero"}],"ok":{"$numberDouble":"1.0"}}
+{"findAndModify":"c","query":{"$expr":{"$divide":[1,0]}},"remove":true}	!! 2	BadValue	Failed to optimize expression :: caused by :: can't $divide by zero
+{"find":"c","projection":{"z":{"$divide":[1,0]}}}	!! 2	BadValue	can't $divide by zero
+{"aggregate":"c","pipeline":[{"$addFields":{"z":{"$divide":[1,0]}}}],"cursor":{}}	!! 2	BadValue	Failed to optimize pipeline :: caused by :: can't $divide by zero
+{"aggregate":"c","pipeline":[{"$limit":1},{"$project":{"z":{"$divide":[1,0]}}}],"cursor":{}}	!! 2	BadValue	Failed to optimize pipeline :: caused by :: can't $divide by zero

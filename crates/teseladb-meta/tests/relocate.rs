@@ -108,6 +108,13 @@ fn a_range_busy_with_another_change_does_not_move() {
     let other = 1 - core;
     run(&mut sm, Group0Command::SplitRange { group: G, at: b"m".to_vec() });
     assert_eq!(run(&mut sm, relocate(other)), Group0Result::Err(Group0Error::RangeBusy));
+    // A replica change that has not settled holds it too.
+    let (mut sm, core) = cluster();
+    let epoch = sm.ranges[&G].replica_epoch;
+    let change =
+        Group0Command::SetReplicas { group: G, epoch, add: vec![], remove: vec![NodeId(3)] };
+    assert_eq!(run(&mut sm, change), Group0Result::Ok);
+    assert_eq!(run(&mut sm, relocate(1 - core)), Group0Result::Err(Group0Error::RangeBusy));
 }
 
 #[test]

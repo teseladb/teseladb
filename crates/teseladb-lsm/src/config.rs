@@ -4,6 +4,22 @@ use std::path::PathBuf;
 
 pub use teseladb_crypto::at_rest::Encryption;
 
+/// How data blocks are compressed (004 FR-022, `sst-format.md` «Bloques»): the code each block
+/// carries. A block that the codec does not shrink stays plain (code 0).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Codec {
+    /// Code 0.
+    #[default]
+    None,
+    /// Code 1.
+    Zlib,
+    /// Code 2.
+    Zstd,
+    /// Code 3: zstd with the dictionary of the block's collection, code 2 while the collection has
+    /// none (a compaction trains it).
+    ZstdDict,
+}
+
 /// Configuration.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LsmConfig {
@@ -19,8 +35,13 @@ pub struct LsmConfig {
     pub block_bytes: usize,
     /// Target size of a file written by a compaction.
     pub target_file_bytes: u64,
-    /// zlib compression of data blocks.
-    pub compress: bool,
+    /// Compression of data blocks.
+    pub codec: Codec,
+    /// Largest dictionary trained for a collection ([`Codec::ZstdDict`]).
+    pub dict_bytes: usize,
+    /// Bytes of a collection's versions that compactions write with its dictionary before one of
+    /// them trains a newer one.
+    pub dict_renew_bytes: u64,
     /// Files in level 0 that start a compaction.
     pub l0_trigger: usize,
     /// Files in level 0 that ask writers to slow down.
@@ -44,6 +65,11 @@ pub struct LsmConfig {
     pub encryption: Option<Encryption>,
 }
 
+/// Default size of a dictionary: zstd's own default for trained dictionaries.
+const DICT_BYTES: usize = 110 << 10;
+/// Default bytes written with a dictionary before it is renewed.
+const DICT_RENEW_BYTES: u64 = 1 << 30;
+
 impl Default for LsmConfig {
     fn default() -> LsmConfig {
         LsmConfig {
@@ -53,7 +79,9 @@ impl Default for LsmConfig {
             cache_bytes: 256 << 20,
             block_bytes: 16 << 10,
             target_file_bytes: 16 << 20,
-            compress: false,
+            codec: Codec::None,
+            dict_bytes: DICT_BYTES,
+            dict_renew_bytes: DICT_RENEW_BYTES,
             l0_trigger: 4,
             l0_slow: 20,
             l0_reject: 36,

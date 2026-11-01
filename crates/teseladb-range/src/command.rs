@@ -39,6 +39,8 @@ pub const KIND_PUSH_TXN: u16 = 12;
 pub const KIND_PURGE_DEDUP: u16 = 13;
 /// `kind` of [`Command::Relocate`] (007).
 pub const KIND_RELOCATE: u16 = 14;
+/// `kind` of [`Command::ForgetRecord`] (008).
+pub const KIND_FORGET_RECORD: u16 = 15;
 
 /// The statement a retryable write belongs to (FR-011): the driver sends it again with the same
 /// key after a lost answer.
@@ -160,6 +162,11 @@ pub enum Command {
     ComputeChecksum {
         /// Mark the checksum is computed at.
         at: Hlc,
+    },
+    /// Deletes the record of a finished transaction no one needs any more (008 record GC).
+    ForgetRecord {
+        /// The transaction.
+        txn: crate::intents::TxnId,
     },
     /// Deletes idempotence records the leader found expired (FR-011).
     PurgeDedup {
@@ -302,6 +309,7 @@ impl Command {
             Command::SetClosedTs { .. } => KIND_SET_CLOSED_TS,
             Command::ComputeChecksum { .. } => KIND_COMPUTE_CHECKSUM,
             Command::PurgeDedup { .. } => KIND_PURGE_DEDUP,
+            Command::ForgetRecord { .. } => KIND_FORGET_RECORD,
             Command::Relocate { .. } => KIND_RELOCATE,
             Command::Split { .. } => KIND_SPLIT,
             Command::SplitGenesis { .. } => KIND_SPLIT_GENESIS,
@@ -346,6 +354,9 @@ impl Command {
             }
             Command::Relocate { core, intent } => {
                 e.u16(*core).u64(*intent);
+            }
+            Command::ForgetRecord { txn } => {
+                e.u128(txn.0);
             }
             Command::Split { at, new_range, records, right_live } => {
                 e.bytes(at).u64(new_range.0);
@@ -434,6 +445,7 @@ impl Command {
                 Command::PurgeDedup { keys }
             }
             KIND_RELOCATE => Command::Relocate { core: d.u16()?, intent: d.u64()? },
+            KIND_FORGET_RECORD => Command::ForgetRecord { txn: crate::intents::TxnId(d.u128()?) },
             KIND_SPLIT => {
                 let at = d.bytes()?.to_vec();
                 let new_range = GroupId(d.u64()?);

@@ -88,6 +88,8 @@ pub struct Merges {
     resend_at: BTreeMap<(GroupId, Act), Nanos>,
     /// When each left range may probe each node again.
     probe_at: BTreeMap<(GroupId, NodeId), Nanos>,
+    /// `config.settings` turned automatic merges off.
+    off: bool,
 }
 
 /// The state machine of range `g` on this core.
@@ -126,7 +128,14 @@ impl Merges {
             pending: BTreeMap::new(),
             resend_at: BTreeMap::new(),
             probe_at: BTreeMap::new(),
+            off: false,
         }
+    }
+
+    /// Turns the merges this core's leaders ask for off or on (`config.settings`, 007 FR-017);
+    /// the merges Group 0 already recorded go on.
+    pub fn set_off(&mut self, off: bool) {
+        self.off = off;
     }
 
     fn may(&mut self, g: GroupId, act: Act, now: Nanos) -> bool {
@@ -268,6 +277,9 @@ impl Merges {
         now: Nanos,
         out: &mut Vec<Group0Command>,
     ) {
+        if self.off {
+            return;
+        }
         let Some(right) = replicas.descs().find(|r| !d.end.is_empty() && r.start == d.end) else {
             return;
         };
@@ -448,5 +460,175 @@ mod tests {
         assert!(!replica_ready(Some(&sm), written - 1, false, MERGE), "not on disk yet");
         assert!(!replica_ready(Some(&sm), written, false, MERGE + 1), "another merge");
         assert!(!replica_ready(None, written, false, MERGE), "no replica");
+    }
+
+    mod intents {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        use teseladb_hlc::Hlc;
+        use teseladb_lsm::{Lsm, LsmConfig};
+        use teseladb_meta::command::Group0Command;
+        use teseladb_meta::group0::{RangeDesc, ReplicaRole};
+        use teseladb_multiraft::{
+            ApplyCtx, CoreConfig, GroupDesc, MultiRaftCore, NodeClock, OpId, StateMachine,
+        };
+        use teseladb_raftlog::{CoreStore, MemDisk, StorageConfig};
+        use teseladb_range::command::{Absorbed, Command};
+        use teseladb_range::host::RangeHost;
+        use teseladb_range::sm::RangeSm;
+        use teseladb_types::{GroupId, Nanos, NodeId};
+
+        use super::super::{Merges, READY};
+        use crate::coresm::CoreSm;
+        use crate::ranges::{Ranges, Replicas};
+
+        const ME: NodeId = NodeId(1);
+
+        fn desc(g: u64, start: &[u8], end: &[u8]) -> RangeDesc {
+            RangeDesc {
+                group: GroupId(g),
+                start: start.to_vec(),
+                end: end.to_vec(),
+                core: 0,
+                replicas: vec![(ME, ReplicaRole::Voter)],
+                replica_epoch: 1,
+                generation: 1,
+                leader_hint: None,
+                leader_term: 0,
+                pending_split: None,
+                settling: false,
+            }
+        }
+
+        fn core() -> MultiRaftCore<CoreSm> {
+            let mut disk = MemDisk::new();
+            let (store, _) = CoreStore::recover(&StorageConfig::default(), 0, &mut disk).unwrap();
+            MultiRaftCore::new(CoreConfig::new(ME, 0), store, 1)
+        }
+
+        #[test]
+        fn a_range_with_no_end_or_a_busy_neighbour_asks_for_no_merge() {
+            let core = core();
+            let mut busy = desc(2, b"m", b"");
+            busy.pending_split = Some(b"q".to_vec());
+            let descs = vec![desc(1, b"a", b"m"), busy];
+            let mut r = Replicas::new(ME, 0, 1 << 30);
+            r.set(&Ranges { descs: descs.clone(), ..Ranges::default() });
+            assert_eq!(r.descs().count(), 2, "both ranges are this core's");
+            let mut m = Merges::new(ME, 1 << 20, Nanos::ZERO);
+            let mut out = Vec::new();
+            // The last range has no right neighbour; the first one's neighbour is splitting.
+            m.intent(&core, &r, &descs[1], Nanos::from_secs(9), &mut out);
+            m.intent(&core, &r, &descs[0], Nanos::from_secs(9), &mut out);
+            assert!(out.is_empty());
+        }
+
+        /// A core whose two ranges `[01, 02)` and `[02, 04)` are open, with their host, replicas and
+        /// LSM; `edit` changes the ranges before they are opened.
+        fn opened(
+            edit: impl FnOnce(&mut Ranges),
+        ) -> (MultiRaftCore<CoreSm>, RangeHost, Replicas, Rc<RefCell<Lsm>>, Ranges) {
+            let mut core = core();
+            let mut disk = MemDisk::new();
+            let cfg = LsmConfig { dir: "lsm".into(), ..LsmConfig::default() };
+            let lsm = Rc::new(RefCell::new(Lsm::recover(&cfg, &mut disk).unwrap().0));
+            let mut host = RangeHost::new(lsm.clone(), NodeClock::for_node(ME));
+            let mut ranges = Ranges {
+                descs: vec![desc(1, &[1], &[2]), desc(2, &[2], &[4])],
+                ..Ranges::default()
+            };
+            edit(&mut ranges);
+            let mut r = Replicas::new(ME, 0, 1 << 30);
+            r.set(&ranges);
+            r.open(&mut core, &mut host, &lsm);
+            assert!(r.is_open(GroupId(1)) && r.is_open(GroupId(2)), "both ranges open");
+            (core, host, r, lsm, ranges)
+        }
+
+        #[test]
+        fn neighbours_settling_absorbed_or_written_lately_ask_for_no_merge() {
+            let now = Nanos::from_secs(9);
+            // The left range settles its replicas.
+            let (core, _, r, _, ranges) = opened(|g| g.descs[0].settling = true);
+            let mut m = Merges::new(ME, 1 << 20, Nanos::from_secs(5));
+            let mut out = Vec::new();
+            m.intent(&core, &r, &ranges.descs[0], now, &mut out);
+            // The right range is being absorbed by another one.
+            let (core, _, r, _, ranges) = opened(|g| {
+                g.merges.insert(GroupId(7), (GroupId(2), 3));
+            });
+            m.intent(&core, &r, &ranges.descs[0], now, &mut out);
+            // Both small, but written less than `cold_for` ago.
+            let (core, _, r, _, ranges) = opened(|_| {});
+            m.track(&core, &r, now);
+            m.intent(&core, &r, &ranges.descs[0], now, &mut out);
+            assert!(out.is_empty(), "{out:?}");
+            // Once cold, the merge is asked for, unless `config.settings` turned merges off.
+            let cold = now + Nanos::from_secs(5);
+            m.set_off(true);
+            m.intent(&core, &r, &ranges.descs[0], cold, &mut out);
+            assert!(out.is_empty());
+            m.set_off(false);
+            m.intent(&core, &r, &ranges.descs[0], cold, &mut out);
+            assert_eq!(
+                out,
+                vec![Group0Command::MergeRanges { left: GroupId(1), right: GroupId(2) }]
+            );
+        }
+
+        #[test]
+        fn a_probe_answered_long_ago_is_sent_again() {
+            let (mut core, mut host, mut r, lsm, mut ranges) = opened(|g| {
+                g.descs[0].replicas.push((NodeId(2), ReplicaRole::Voter));
+            });
+            ranges.merges.insert(GroupId(1), (GroupId(2), 3));
+            r.set(&ranges);
+            let mut m = Merges::new(ME, 1 << 20, Nanos::ZERO);
+            let mut out = Vec::new();
+            let d = ranges.descs[0].clone();
+            let now = Nanos::from_secs(1);
+            m.left_side(&mut core, &mut host, &r, (&d, &lsm.borrow()), now, &mut out);
+            let (op, _) = m.probes.iter().next().map(|(o, v)| (*o, *v)).expect("a probe");
+            assert!(m.on_done(op, None));
+            // Answered, but not before its time: none; past it, again.
+            m.left_side(&mut core, &mut host, &r, (&d, &lsm.borrow()), now, &mut out);
+            assert!(m.probes.is_empty());
+            let later = now + Nanos::from_secs(1);
+            m.left_side(&mut core, &mut host, &r, (&d, &lsm.borrow()), later, &mut out);
+            assert_eq!(m.probes.len(), 1);
+            assert!(out.is_empty());
+        }
+
+        #[test]
+        fn an_absorbed_replica_open_here_without_its_group_is_retired() {
+            let (mut core, mut host, mut r, lsm, _) = opened(|_| {});
+            // The left range absorbed the right one, whose group is already gone.
+            core.remove_group(GroupId(2)).unwrap();
+            core.remove_group(GroupId(1)).unwrap();
+            let mut disk = MemDisk::new();
+            let mut left =
+                RangeSm::open(GroupId(1), vec![1], vec![2], lsm.clone(), &mut disk).unwrap();
+            let zero = Hlc { physical: 0, logical: 0 };
+            let absorb = Absorbed { end: vec![4], gc: zero, mark: zero, live: 0, records: vec![] };
+            let merge = Command::Merge { right: GroupId(2), merge: 3, absorb: Some(absorb) };
+            let ctx = ApplyCtx { group: GroupId(1), index: 1, term: 1, ts: zero };
+            left.apply(&merge.encode(), &ctx).unwrap();
+            assert!(left.absorbed().is_some());
+            let g = GroupDesc { group: GroupId(1), voters: vec![ME], learners: Vec::new() };
+            core.create_group(g, CoreSm::Range(left)).unwrap();
+            let mut m = Merges::new(ME, 1 << 20, Nanos::ZERO);
+            m.retire(&mut core, &mut host, &mut r, &lsm);
+            assert!(!r.is_open(GroupId(2)), "retired");
+        }
+
+        #[test]
+        fn a_probe_answer_for_a_merge_no_longer_pending_changes_nothing() {
+            let mut m = Merges::new(ME, 1 << 20, Nanos::ZERO);
+            m.probes.insert(OpId(4), (GroupId(1), NodeId(2)));
+            assert!(m.on_done(OpId(4), Some(&[READY][..])));
+            assert!(m.pending.is_empty() && m.probes.is_empty());
+            assert!(!m.on_done(OpId(4), Some(&[READY][..])), "answered already");
+        }
     }
 }

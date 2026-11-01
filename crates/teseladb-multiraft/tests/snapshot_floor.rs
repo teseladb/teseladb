@@ -42,6 +42,8 @@ struct Cutter {
     /// Its state runs this many entries ahead of what it applied, and so does its floor (a range
     /// restarted over an LSM that flushed entries its commit index does not cover yet).
     ahead: Rc<Cell<u64>>,
+    /// Data that entered without the log (a restore's ingest), and the index it entered at.
+    bulk: Rc<Cell<(u64, u64)>>,
 }
 
 impl StateMachine for Cutter {
@@ -66,7 +68,8 @@ impl StateMachine for Cutter {
     }
 
     fn snapshot(&self) -> Vec<u8> {
-        [self.applied.to_le_bytes(), self.entries.to_le_bytes()].concat()
+        let bulk = self.bulk.get().0;
+        [self.applied.to_le_bytes(), self.entries.to_le_bytes(), bulk.to_le_bytes()].concat()
     }
 
     fn restore(&mut self, snap: &[u8]) -> Result<(), RestoreError> {
@@ -77,6 +80,7 @@ impl StateMachine for Cutter {
                 .ok_or_else(|| RestoreError("short snapshot".into()))
         };
         (self.applied, self.entries) = (word(0)?, word(1)?);
+        self.bulk.set((word(2)?, self.applied));
         self.cut = self.applied;
         self.needs.set(false);
         Ok(())
@@ -87,10 +91,15 @@ impl StateMachine for Cutter {
     }
 
     fn snapshot_floor(&self) -> u64 {
-        match self.ahead.get() {
+        let floor = match self.ahead.get() {
             0 => self.cut,
             ahead => self.cut.max(self.applied + ahead),
-        }
+        };
+        floor.max(self.log_floor())
+    }
+
+    fn log_floor(&self) -> u64 {
+        self.bulk.get().1
     }
 
     fn snapshot_state_index(&self) -> u64 {
@@ -112,6 +121,7 @@ struct Node {
     release: Rc<Cell<Option<u64>>>,
     missing: Rc<Cell<bool>>,
     ahead: Rc<Cell<u64>>,
+    bulk: Rc<Cell<(u64, u64)>>,
     data: Vec<(GroupId, u64)>,
 }
 
@@ -150,16 +160,18 @@ impl Cluster {
             let (release, missing) = (Rc::new(Cell::new(None)), Rc::new(Cell::new(false)));
             let needs = Rc::new(Cell::new(waiting.contains(&NodeId(i))));
             let ahead = Rc::new(Cell::new(0));
+            let bulk = Rc::new(Cell::new((0, 0)));
             let sm = Cutter {
                 release: release.clone(),
                 missing: missing.clone(),
                 needs,
                 ahead: ahead.clone(),
+                bulk: bulk.clone(),
                 ..Cutter::default()
             };
             let desc = GroupDesc { group: G, voters: voters.clone(), learners: vec![] };
             core.create_group(desc, sm).unwrap();
-            let node = Node { core, disk, release, missing, ahead, data: Vec::new() };
+            let node = Node { core, disk, release, missing, ahead, bulk, data: Vec::new() };
             c.nodes.insert(NodeId(i), node);
         }
         c.settle();
@@ -525,4 +537,71 @@ fn a_leader_without_a_snapshot_takes_one_for_a_replica_that_needs_it() {
     c.ticks(20);
     assert!(c.nodes[&l].core.snapshot_index(G).unwrap() > 0, "the leader took a snapshot");
     assert!(c.chunks.iter().any(|(to, _)| *to == WAITING[0]), "and sent it");
+}
+
+#[test]
+fn an_own_snapshot_waiting_for_the_floor_goes_once_a_newer_one_is_installed() {
+    let mut c = Cluster::new(3);
+    let l = c.elect();
+    let f = *c.nodes.keys().find(|&&n| n != l).unwrap();
+    // The follower's memtable holds the cut: its own snapshot past the floor waits, taken.
+    let held = c.applied(f);
+    c.nodes[&f].release.set(Some(held));
+    c.propose(l, CUT);
+    c.ticks(3);
+    let own = c.applied(f);
+    assert!(c.nodes[&f].core.snapshot_index(G).unwrap() < own, "waiting for the floor");
+    // Away, it misses the leader's next snapshots; back, it installs one past its own.
+    c.cut.insert(f);
+    for i in 0..AWAY_ENTRIES {
+        c.propose(l, &[i]);
+    }
+    c.propose(l, CUT);
+    c.ticks(5);
+    c.cut.clear();
+    c.ticks(50);
+    assert_eq!(c.applied(f), c.applied(l), "caught up");
+    let installed = c.nodes[&f].core.snapshot_index(G).unwrap();
+    assert!(installed > own, "{installed} past {own}");
+    // Its own one, older, is dropped rather than saved over it.
+    c.nodes[&f].release.set(None);
+    c.ticks(3);
+    assert!(c.nodes[&f].core.snapshot_index(G).unwrap() >= installed);
+}
+
+/// Lane 4's measure (018): a replica away while a restore ingested data on the others, and whose
+/// log the leader still holds from where it stopped, comes back with that data. Replaying the
+/// entries would leave it without it: the leader sends its snapshot past the ingest.
+#[test]
+fn a_replica_behind_data_that_entered_without_the_log_receives_a_snapshot() {
+    let mut c = Cluster::new(1_000);
+    let l = c.elect();
+    let f = *c.nodes.keys().find(|&&n| n != l).unwrap();
+    c.cut.insert(f);
+    for i in 0..AWAY_ENTRIES {
+        c.propose(l, &[i]);
+    }
+    c.ticks(3);
+    // The leader's memtable holds its last entries: the snapshot past the ingest waits, and the
+    // log keeps every entry the follower lacks.
+    c.nodes[&l].release.set(Some(c.applied(l)));
+    c.propose(l, b"held");
+    let floor = c.applied(l);
+    for (&id, n) in &mut c.nodes {
+        if id != f {
+            let applied = n.core.status(G).unwrap().applied;
+            assert!(n.core.data_entered(G, |sm| sm.bulk.set((100, applied))), "{id:?}");
+        }
+    }
+    assert!(!c.nodes.get_mut(&l).unwrap().core.data_entered(GroupId(99), |_| ()));
+    c.ticks(3);
+    assert!(c.nodes[&l].core.snapshot_index(G).unwrap() < floor, "not saved yet");
+    c.cut.clear();
+    c.ticks(50);
+    assert!(c.applied(f) < floor, "the follower takes no entry up to the ingest");
+    c.nodes[&l].release.set(None);
+    c.ticks(50);
+    assert_eq!(c.applied(f), c.applied(l), "caught up");
+    assert_eq!(c.nodes[&f].bulk.get().0, 100, "with the data the log does not have");
+    assert!(c.chunks.iter().all(|(to, i)| *to == f && *i >= floor), "{:?}", c.chunks);
 }

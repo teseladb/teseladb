@@ -1,7 +1,8 @@
 //! Cluster parameters (006 FR-020): `setClusterParameter` and `getClusterParameter`, kept in
 //! Group 0 so every node reads the same value, with the forms and errors of a `refrouter` 9.0.4
-//! (measured). Each specification adds its parameters to [`KNOWN`]; 006 has `defaultMaxTimeMS`
-//! and 013 `auditConfig` (FR-031). Each read and change goes to the audit log as on RefDb
+//! (measured). Each specification adds its parameters to [`KNOWN`]; 006 has `defaultMaxTimeMS`,
+//! 013 `auditConfig` (FR-031) and 007 TeselaDB's own `teselaHistoryRetention` (FR-019, DV-016)
+//! and `teselaLoadSplitOpsPerSecond` (D-075). Each read and change goes to the audit log as on RefDb
 //! Enterprise 9.0.4: `getClusterParameter` with the names asked for, `setClusterParameter` and
 //! `updateCachedClusterServerParameter` with the value before and the one given.
 
@@ -45,7 +46,7 @@ struct Known {
 }
 
 /// The cluster parameters TeselaDB has, in name order.
-const KNOWN: [Known; 2] = [
+const KNOWN: [Known; 4] = [
     Known {
         name: audit_log::AUDIT_CONFIG,
         default: audit_log::audit_config_default,
@@ -62,7 +63,103 @@ const KNOWN: [Known; 2] = [
         prefixed: true,
         nested: false,
     },
+    Known {
+        name: HISTORY_RETENTION,
+        default: history_default,
+        parse: history_parse,
+        idl: "ClusterServerParameter",
+        prefixed: true,
+        nested: false,
+    },
+    Known {
+        name: LOAD_SPLIT_OPS,
+        default: load_split_default,
+        parse: load_split_parse,
+        idl: "ClusterServerParameter",
+        prefixed: true,
+        nested: false,
+    },
 ];
+
+/// `teselaHistoryRetention` (007 FR-019, DV-016): `{seconds}` of history every range keeps for
+/// reads at an earlier mark; 24 hours without a value.
+pub const HISTORY_RETENTION: &str = "teselaHistoryRetention";
+/// `teselaLoadSplitOpsPerSecond` (007 FR-006, D-075): `{opsPerSecond}` a range has to serve for
+/// 10 seconds in a row to split by load; 2,500 without a value.
+pub const LOAD_SPLIT_OPS: &str = "teselaLoadSplitOpsPerSecond";
+const SECONDS: &str = "seconds";
+const OPS_PER_SECOND: &str = "opsPerSecond";
+/// History kept without a value, in seconds.
+pub const DEFAULT_HISTORY_SECONDS: i64 = 24 * 60 * 60;
+/// Load split threshold without a value.
+pub const DEFAULT_LOAD_SPLIT_OPS: i64 = 2_500;
+
+fn history_default() -> Document {
+    Document::new().with(SECONDS, DEFAULT_HISTORY_SECONDS)
+}
+
+fn load_split_default() -> Document {
+    Document::new().with(OPS_PER_SECOND, DEFAULT_LOAD_SPLIT_OPS)
+}
+
+/// A document with one field `field`, a whole number of at least 1 (a double is truncated).
+fn positive_field(v: &Document, field: &str) -> Result<Document, (Code, String)> {
+    let mut n = None;
+    for (k, x) in v.iter() {
+        if k != field {
+            let why = format!("BSON field 'ClusterServerParameter.{k}' is an unknown field.");
+            return Err((IDL_UNKNOWN_FIELD, why));
+        }
+        let Some(x) = number(x) else {
+            let path = format!("ClusterServerParameter.{field}");
+            let e = wrong_types(&path, x, &["long", "int", "double", "decimal"]);
+            return Err((e.code, e.errmsg));
+        };
+        if x.trunc() < 1.0 {
+            let why =
+                format!("BSON field '{field}' value must be >= 1, actual value '{}'", x.trunc());
+            return Err((BAD_VALUE, why));
+        }
+        n = Some(x.trunc() as i64);
+    }
+    let n = n.ok_or_else(|| {
+        (
+            crate::error::IDL_FAILED_TO_PARSE,
+            format!("BSON field 'ClusterServerParameter.{field}' is missing but a required field"),
+        )
+    })?;
+    Ok(Document::new().with(field, n))
+}
+
+fn history_parse(v: &Document) -> Result<Document, (Code, String)> {
+    positive_field(v, SECONDS)
+}
+
+fn load_split_parse(v: &Document) -> Result<Document, (Code, String)> {
+    positive_field(v, OPS_PER_SECOND)
+}
+
+/// The whole number `field` of a stored value, if it has one.
+fn stored_number(stored: Option<&[u8]>, field: &str) -> Option<u64> {
+    let doc = RawDoc::from_bytes(stored?).ok()?;
+    match Document::from(doc).get(field)? {
+        Value::Int64(n) => u64::try_from(*n).ok(),
+        Value::Int32(n) => u64::try_from(*n).ok(),
+        _ => None,
+    }
+}
+
+/// The history every range keeps, in milliseconds, from the stored value of
+/// `teselaHistoryRetention` (`None`: not set).
+pub fn history_retention_ms(stored: Option<&[u8]>) -> u64 {
+    let secs = stored_number(stored, SECONDS).unwrap_or(DEFAULT_HISTORY_SECONDS as u64);
+    secs.saturating_mul(1_000)
+}
+
+/// The load split threshold from the stored value of `teselaLoadSplitOpsPerSecond`.
+pub fn load_split_ops(stored: Option<&[u8]>) -> u64 {
+    stored_number(stored, OPS_PER_SECOND).unwrap_or(DEFAULT_LOAD_SPLIT_OPS as u64)
+}
 
 fn default_max_time_default() -> Document {
     Document::new().with(READ_OPERATIONS, 0i64)

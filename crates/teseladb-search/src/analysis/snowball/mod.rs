@@ -2,6 +2,8 @@
 //! of snowballstem.org (research R7) and checked word by word against the stems `refsearch` gives
 //! for the Snowball vocabularies (`tests/fixtures/refsearch/stem/`).
 
+mod arabic;
+mod basque;
 mod dutch;
 mod english;
 mod estonian;
@@ -9,13 +11,17 @@ mod finnish;
 mod french;
 mod german;
 mod hungarian;
+mod irish;
 mod italian;
+mod lithuanian;
 mod nordic;
 mod porter;
 mod portuguese;
 mod romanian;
 mod russian;
 mod spanish;
+mod table;
+mod turkish;
 mod word;
 
 pub use word::Word;
@@ -47,6 +53,8 @@ macro_rules! stemmers {
 }
 
 stemmers! {
+    Arabic => "arabic", arabic::stem;
+    Basque => "basque", basque::stem;
     Danish => "danish", nordic::danish;
     Dutch => "dutch", dutch::stem;
     English => "english", english::stem;
@@ -56,7 +64,9 @@ stemmers! {
     German => "german", |w| german::stem(w, true);
     German2 => "german2", |w| german::stem(w, true);
     Hungarian => "hungarian", hungarian::stem;
+    Irish => "irish", irish::stem;
     Italian => "italian", italian::stem;
+    Lithuanian => "lithuanian", lithuanian::stem;
     Norwegian => "norwegian", nordic::norwegian;
     Porter => "porter", |w| porter::stem(w, porter::Variant::Snowball);
     Portuguese => "portuguese", portuguese::stem;
@@ -64,6 +74,7 @@ stemmers! {
     Russian => "russian", russian::stem;
     Spanish => "spanish", spanish::stem;
     Swedish => "swedish", nordic::swedish;
+    Turkish => "turkish", turkish::stem;
 }
 
 impl Stemmer {

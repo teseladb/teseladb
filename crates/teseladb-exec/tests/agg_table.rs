@@ -1,4 +1,5 @@
-//! Pipelines against what a `refrouter` 9.0.4 gave for each one on 31-10-2026 (010 T008, T010).
+//! Pipelines against what a `refrouter` 9.0.4 gave for each one on 31-10 and 01-11-2026 (010 T008,
+//! T010).
 //! Each file of `tests/agg/` holds one request per line — a pipeline, or `{coll, pipeline}` — a
 //! tab, and the result: `=> ` and the documents in canonical extended JSON, or `!! `, the error
 //! code, a tab and the message. The pipelines read collection `c` (`tests/agg/c.json`) unless
@@ -195,11 +196,11 @@ fn compare(spec: &str, want: &str) -> Option<String> {
     let stages: Vec<RawValue<'_>> = pipeline.iter().collect();
     let env = TestEnv { random: std::cell::Cell::new(7), collation: collation_of(options) };
     // An `aggregate` on a collection, as each measurement ran.
-    let result = Pipeline::parse(&stages, &Ctx::checked([])).and_then(|p| {
-        p.check_target(!coll.is_empty())?;
-        let input = if coll.is_empty() { Vec::new() } else { env.collection(&coll)? };
-        p.run(input, &env)
-    });
+    let result =
+        Pipeline::parse_command(&stages, &Ctx::checked([]), !coll.is_empty()).and_then(|p| {
+            let input = if coll.is_empty() { Vec::new() } else { env.collection(&coll)? };
+            p.run(input, &env)
+        });
     let sorts_after = spec.rfind("\"$sort\"").unwrap_or(0)
         > spec.rfind("\"$group\"").unwrap_or(0).max(spec.rfind("\"$sortByCount\"").unwrap_or(0));
     let unordered =
@@ -275,8 +276,68 @@ fn collation_matches_refdb() {
     check(include_str!("agg/collation.out"));
 }
 
+/// How `$group` and its accumulators keep equal values, as SBE (the last one) or the classic
+/// engine (the first one) does: the operators and stages that send a pipeline to the classic
+/// engine (010 FR-004).
+#[test]
+fn ties_follow_the_engine_refdb_chooses() {
+    check(include_str!("agg/sbe.out"));
+}
+
 /// The errors of each stage's and accumulator's arguments (010 FR-001).
 #[test]
 fn argument_errors_match_refdb() {
     check(include_str!("agg/errors.out"));
+}
+
+/// Parses pipeline `json` (an array) as an `aggregate` on a collection.
+fn pipeline(json: &str) -> Result<Pipeline, MqlError> {
+    let holder = extjson::parse(&format!(r#"{{"p":{json}}}"#)).expect("json");
+    let bytes = holder.to_bytes().expect("small");
+    let raw = RawDoc::from_bytes(&bytes).expect("a document");
+    let Some(RawValue::Array(a)) = raw.get("p") else { panic!("not an array: {json}") };
+    let stages: Vec<RawValue<'_>> = a.iter().collect();
+    Pipeline::parse(&stages, &Ctx::checked([]))
+}
+
+/// What a pipeline reads and where it runs, as the server asks before running it.
+#[test]
+fn pipelines_say_what_they_read_and_whether_they_stay_in_sbe() {
+    let p = pipeline(r#"[{"$match":{}},{"$group":{"_id":"$g"}}]"#).expect("valid");
+    assert!(p.reads_collection() && p.runs_in_sbe() && !p.is_empty());
+    let p = pipeline(r#"[{"$collStats":{}}]"#).expect("valid");
+    assert!(!p.reads_collection() && !p.runs_in_sbe());
+    // The options RefDb 9.0.4 takes (a decimal scale rounded, unknown options ignored).
+    pipeline(
+        r#"[{"$collStats":{"storageStats":{"scale":{"$numberDecimal":"0.9"},"verbose":true,
+            "bogus":1},"latencyStats":{"histograms":true},"count":{},"queryExecStats":{}}}]"#,
+    )
+    .expect("valid");
+    pipeline(r#"[{"$collStats":{"storageStats":{"scale":{"$numberLong":"2"}}}}]"#).expect("valid");
+    pipeline(r#"[{"$collStats":{"storageStats":{"scale":2.0}}}]"#).expect("valid");
+    let p = pipeline(r#"[{"$documents":[]}]"#).expect("valid");
+    assert!(!p.reads_collection() && !p.runs_in_sbe());
+    let p = pipeline(r#"[{"$project":{"z":{"$toString":"$n"}}}]"#).expect("valid");
+    assert!(p.reads_collection() && !p.runs_in_sbe());
+    assert!(pipeline("[]").expect("valid").is_empty());
+}
+
+/// An environment without the node's own stages refuses them.
+#[test]
+fn an_environment_without_system_stages_refuses_them() {
+    let env = TestEnv { random: std::cell::Cell::new(7), collation: Collation::default() };
+    let p = pipeline(r#"[{"$collStats":{}}]"#).expect("valid");
+    let e = p.run(Vec::new(), &env).expect_err("no system stages");
+    assert_eq!(e.code.code, 2);
+    assert_eq!(format!("{:?}", Collation::default()), "Collation(simple)");
+    let c = collation_of(Some(RawValue::Document(
+        RawDoc::from_bytes(
+            &extjson::parse(r#"{"collation":{"locale":"es"}}"#)
+                .expect("json")
+                .to_bytes()
+                .expect("small"),
+        )
+        .expect("a document"),
+    )));
+    assert_eq!(format!("{c:?}"), "Collation(collator)");
 }

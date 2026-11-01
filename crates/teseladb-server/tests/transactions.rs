@@ -311,3 +311,49 @@ fn a_document_whose_index_entries_pass_one_entry_is_written_in_parts() {
         assert_eq!(found, vec![Value::Document(Document::new().with("_id", 1))], "index i{i}");
     }
 }
+
+/// A commit asked of another node, with the transaction's `recoveryToken`, recovers its decision
+/// from the transaction's record, which Raft keeps in its range, as a second `refrouter` 9.0.4
+/// recovers it from the shard (008, measured on 01-11-2026 through two routers): a committed one
+/// answers `ok`, an open one is aborted and its own commit on its node fails after, and a record
+/// whose range cannot answer fails at the command's `maxTimeMS`.
+#[test]
+fn a_commit_on_another_node_recovers_the_decision_from_the_token() {
+    let first = node();
+    let second =
+        Node::start(config(vec![first.peer_addr().to_string()]), || Ok(MemDisk::new()), None)
+            .unwrap();
+    assert!(second.wait_ready(READY));
+    let (mut a, mut b) = (Client::new(&first), Client::new(&second));
+    let r = a.run(DB, stmt(insert(1), 60, 1, true));
+    assert!(ok(&r), "{r:?}");
+    let token = r.get("recoveryToken").cloned().expect("the transaction's token");
+    let with = |cmd: Document, t: &Value| cmd.with("recoveryToken", t.clone());
+    assert!(ok(&a.run("admin", end("commitTransaction", 60, 1))));
+    let empty = Some(Value::Document(Document::new()));
+    let r = b.run("admin", with(end("commitTransaction", 60, 1), &token));
+    assert!(ok(&r), "{r:?}");
+    assert_eq!(r.get("recoveryToken").cloned(), empty);
+    // Open on the first node: the recovery aborts it.
+    assert!(ok(&a.run(DB, stmt(insert(2), 61, 1, true))));
+    let r = b.run("admin", with(end("commitTransaction", 61, 1), &token));
+    assert_eq!(code(&r), Some(&Value::Int32(251)), "{r:?}");
+    assert_eq!(
+        r.get("errmsg"),
+        Some(&Value::from("Recovering the transaction's outcome found the transaction aborted"))
+    );
+    let r = a.run("admin", end("commitTransaction", 61, 1));
+    assert_eq!(
+        r.get("errmsg"),
+        Some(&Value::from("Transaction with { txnNumber: 1 } has been aborted.")),
+        "{r:?}"
+    );
+    assert_eq!(find_all(&mut b, find()).len(), 1, "2 never wrote");
+    // The first node is gone: the question waits until the command's limit.
+    assert!(ok(&a.run(DB, stmt(insert(3), 62, 1, true))));
+    drop(first.stop());
+    let limited = with(end("commitTransaction", 62, 1), &token).with("maxTimeMS", 2_000);
+    let r = b.run("admin", limited);
+    assert_eq!(code(&r), Some(&Value::Int32(50)), "{r:?}");
+    drop(second.stop());
+}

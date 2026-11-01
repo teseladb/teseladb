@@ -92,6 +92,14 @@ pub(super) fn variable(s: &str, ctx: &Ctx) -> Result<Expr, MqlError> {
     Ok(Expr::Variable(name.to_owned(), rest.map(str::to_owned)))
 }
 
+/// The system variables a command sets (or not, as `IS_MR` and `JS_SCOPE` outside
+/// map-reduce and JavaScript): one it did not set is RefDb's 51144.
+const BUILTINS: [&str; 5] = ["NOW", "CLUSTER_TIME", "USER_ROLES", "IS_MR", "JS_SCOPE"];
+
+/// `Builtin variable ... is not available`.
+const BUILTIN_NOT_AVAILABLE: teseladb_mql::ErrorCode =
+    teseladb_mql::ErrorCode { code: 51144, name: "Location51144" };
+
 /// The value of variable `name` (with `path` under it) for current document `doc`.
 pub(super) fn eval_variable(
     name: &str,
@@ -106,6 +114,12 @@ pub(super) fn eval_variable(
         other => match scope.vars.get(other) {
             Some(Some(v)) => v.clone(),
             Some(None) => return Ok(None),
+            None if BUILTINS.contains(&other) => {
+                return Err(error(
+                    BUILTIN_NOT_AVAILABLE,
+                    format!("Builtin variable '$${other}' is not available"),
+                ));
+            }
             None => {
                 return Err(error(
                     codes::UNDEFINED_VARIABLE,

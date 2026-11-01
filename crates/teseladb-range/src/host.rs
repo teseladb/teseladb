@@ -43,7 +43,7 @@ mod write;
 
 pub use merge::MergeSource;
 pub use split::SplitDone;
-pub use txn::{TxnOp, TxnReq};
+pub use txn::{CONTINUES, FIND_BATCH, TxnOp, TxnReq, continues, last_activity};
 
 /// The lowest mark.
 const ZERO: Hlc = Hlc { physical: 0, logical: 0 };
@@ -474,6 +474,8 @@ pub struct RangeHost {
     pub(crate) rebuilds: Vec<Rebuild>,
     /// Operations per second above which a range splits by load (007 FR-006).
     load_split_ops: u64,
+    /// History each range keeps, in cluster time (007 FR-019).
+    pub(crate) gc_ttl_ms: u64,
 }
 
 fn op_error(e: OpError) -> RangeError {
@@ -544,6 +546,7 @@ impl RangeHost {
             reports: Vec::new(),
             rebuilds: Vec::new(),
             load_split_ops: crate::load::LOAD_SPLIT_OPS,
+            gc_ttl_ms: crate::gc::GC_TTL_MS,
         }
     }
 
@@ -551,6 +554,12 @@ impl RangeHost {
     /// from now on count with it.
     pub fn set_load_split_ops(&mut self, ops: u64) {
         self.load_split_ops = ops;
+    }
+
+    /// History each range this host leads keeps (`teselaHistoryRetention`, 007 FR-019): its next
+    /// GC threshold is «now − ttl»; a threshold already raised never goes down.
+    pub fn set_gc_ttl_ms(&mut self, ttl_ms: u64) {
+        self.gc_ttl_ms = ttl_ms;
     }
 
     /// Counts an operation of range `g` on `key` if this host leads it.

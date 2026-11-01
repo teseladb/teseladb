@@ -72,10 +72,7 @@ impl Ejson {
             Some(e) => match e.eval(doc, scope)? {
                 Some(Value::Boolean(b)) => b,
                 other => {
-                    let shown = match &other {
-                        None => "MISSING".to_owned(),
-                        v => display_eval(v),
-                    };
+                    let shown = display_eval(&other);
                     return Err(error(
                         codes::BAD_VALUE,
                         format!("Unexpected value for relaxed: {shown}"),
@@ -119,9 +116,7 @@ fn serialize(v: &Value, relaxed: bool) -> Value {
             wrap("$date", date_text(*ms))
         }
         Value::DateTime(ms) => wrap("$date", wrap("$numberLong", ms.to_string())),
-        Value::ObjectId(id) => {
-            wrap("$oid", id.iter().map(|b| format!("{b:02x}")).collect::<String>())
-        }
+        Value::ObjectId(id) => wrap("$oid", bin::object_id_text(id)),
         Value::Binary { subtype, bytes } if *subtype == UUID_SUBTYPE && bytes.len() == 16 => {
             wrap("$uuid", bin::uuid_text(bytes).unwrap_or_default())
         }
@@ -153,10 +148,8 @@ fn serialize(v: &Value, relaxed: bool) -> Value {
         Value::Undefined => wrap("$undefined", true),
         Value::DbPointer { namespace, id } => wrap(
             "$dbPointer",
-            Document::new().with("$ref", namespace.clone()).with(
-                "$id",
-                wrap("$oid", id.iter().map(|b| format!("{b:02x}")).collect::<String>()),
-            ),
+            // The ObjectId's text, as RefDb 9.0.4 writes it.
+            Document::new().with("$ref", namespace.clone()).with("$id", bin::object_id_text(id)),
         ),
         Value::Document(d) => {
             let mut out = Document::new();
@@ -400,10 +393,16 @@ fn dbpointer(v: &Value) -> Result<Value, String> {
     let Some(Value::String(hex)) = d.get("$id") else {
         return Err("$dbPointer.$id value must be of type string".to_owned());
     };
-    let bytes = (hex.len() == 24)
-        .then(|| bin::from_hex(hex).ok())
-        .flatten()
-        .ok_or_else(|| "$dbPointer.$id value must be a valid objectId".to_owned())?;
+    if d.iter().count() > 2 {
+        return Err(
+            "$dbPointer object contains additional fields, expected $ref and $id only".to_owned()
+        );
+    }
+    if hex.len() != 24 {
+        return Err("$id must be a 24 character hexadecimal string".to_owned());
+    }
+    let bytes = bin::from_hex(hex)
+        .map_err(|_| "$dbPointer value must contain a valid $ref and $id".to_owned())?;
     let mut id = [0u8; 12];
     id.copy_from_slice(&bytes);
     Ok(Value::DbPointer { namespace: namespace.clone(), id })

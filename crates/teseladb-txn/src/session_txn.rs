@@ -45,8 +45,21 @@ pub enum SessionError {
     },
     /// `startTransaction` again with the running number (117, `ConflictingOperationInProgress`).
     AlreadyStarted(i64),
-    /// No running transaction with that number (251, `NoSuchTransaction`).
-    NoSuchTransaction(i64),
+    /// No running transaction with that number (251, `NoSuchTransaction`); RefDb's message names
+    /// the session's last transaction number, `last` (none before the first).
+    NoSuchTransaction {
+        /// The session's last transaction number.
+        last: Option<i64>,
+    },
+    /// `commitTransaction` of a number the session has no record of: a `refrouter` 9.0.4 recovers its
+    /// decision with the `recoveryToken` (measured). The number becomes the session's last, and
+    /// `last` is the one before it.
+    Unrecorded {
+        /// The number asked.
+        asked: i64,
+        /// The session's last transaction number before it.
+        last: Option<i64>,
+    },
     /// `abortTransaction` of a committed transaction (256, `TransactionCommitted`).
     Committed(i64),
 }
@@ -91,6 +104,7 @@ impl SessionTxn {
         let current = self.state.filter(|s| match s {
             State::Running(n) | State::Committed(n) | State::Aborted(n) => *n == txn_number,
         });
+        let last = self.highest;
         match (ask, current) {
             (Ask::Start, Some(_)) => Err(SessionError::AlreadyStarted(txn_number)),
             (Ask::Start, None) => {
@@ -103,10 +117,19 @@ impl SessionTxn {
             (Ask::Commit, Some(State::Committed(_))) => Ok(Verdict::RetryCommit),
             (Ask::Abort, Some(State::Running(_))) => Ok(Verdict::Abort),
             (Ask::Abort, Some(State::Committed(_))) => Err(SessionError::Committed(txn_number)),
+            (Ask::Commit, None) => {
+                self.highest = Some(txn_number);
+                Err(SessionError::Unrecorded { asked: txn_number, last })
+            }
             (Ask::Continue | Ask::Commit | Ask::Abort, _) => {
-                Err(SessionError::NoSuchTransaction(txn_number))
+                Err(SessionError::NoSuchTransaction { last })
             }
         }
+    }
+
+    /// The session's last transaction number, if it ever had one.
+    pub fn last(&self) -> Option<i64> {
+        self.highest
     }
 
     /// The running transaction committed.
@@ -144,7 +167,10 @@ mod tests {
             s.check(5, None, Ask::Start),
             Err(SessionError::InvalidOptions(START_WITHOUT_AUTOCOMMIT))
         );
-        assert_eq!(s.check(5, Some(false), Ask::Continue), Err(SessionError::NoSuchTransaction(5)));
+        assert_eq!(
+            s.check(5, Some(false), Ask::Continue),
+            Err(SessionError::NoSuchTransaction { last: None })
+        );
         assert_eq!(s.check(5, Some(false), Ask::Start), Ok(Verdict::Begin));
         assert_eq!(s.running(), Some(5));
         assert_eq!(s.check(5, Some(false), Ask::Start), Err(SessionError::AlreadyStarted(5)));
@@ -153,18 +179,37 @@ mod tests {
             s.check(4, Some(false), Ask::Continue),
             Err(SessionError::TooOld { asked: 4, last: 5 })
         );
-        assert_eq!(s.check(6, Some(false), Ask::Continue), Err(SessionError::NoSuchTransaction(6)));
+        assert_eq!(
+            s.check(6, Some(false), Ask::Continue),
+            Err(SessionError::NoSuchTransaction { last: Some(5) })
+        );
         assert_eq!(s.check(5, Some(false), Ask::Commit), Ok(Verdict::Commit));
         s.committed(5);
         assert_eq!(s.running(), None);
         assert_eq!(s.check(5, Some(false), Ask::Commit), Ok(Verdict::RetryCommit));
         assert_eq!(s.check(5, Some(false), Ask::Abort), Err(SessionError::Committed(5)));
-        assert_eq!(s.check(5, Some(false), Ask::Continue), Err(SessionError::NoSuchTransaction(5)));
+        assert_eq!(
+            s.check(5, Some(false), Ask::Continue),
+            Err(SessionError::NoSuchTransaction { last: Some(5) })
+        );
         assert_eq!(s.check(7, Some(false), Ask::Start), Ok(Verdict::Begin));
         assert_eq!(s.check(7, Some(false), Ask::Abort), Ok(Verdict::Abort));
         s.aborted(7);
-        assert_eq!(s.check(7, Some(false), Ask::Abort), Err(SessionError::NoSuchTransaction(7)));
-        assert_eq!(s.check(7, Some(false), Ask::Commit), Err(SessionError::NoSuchTransaction(7)));
+        let gone = Err(SessionError::NoSuchTransaction { last: Some(7) });
+        assert_eq!(s.check(7, Some(false), Ask::Abort), gone);
+        assert_eq!(s.check(7, Some(false), Ask::Commit), gone);
         assert_eq!(s.running(), None);
+        // A commit of a number it never ran makes that number its last.
+        assert_eq!(
+            s.check(9, Some(false), Ask::Commit),
+            Err(SessionError::Unrecorded { asked: 9, last: Some(7) })
+        );
+        assert_eq!(s.last(), Some(9));
+        assert_eq!(
+            s.check(8, Some(false), Ask::Start),
+            Err(SessionError::TooOld { asked: 8, last: 9 })
+        );
+        let fresh = SessionTxn::default().check(3, Some(false), Ask::Commit);
+        assert_eq!(fresh, Err(SessionError::Unrecorded { asked: 3, last: None }));
     }
 }

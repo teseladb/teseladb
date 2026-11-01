@@ -60,6 +60,9 @@ pub const MAX_CONCURRENT_TRANSACTIONS_DEFAULT: i64 = 10_000;
 /// How members of the cluster authenticate (013 FR-034): set at startup with
 /// `--clusterAuthMode` and moved one step at a time at runtime.
 pub const CLUSTER_AUTH_MODE: &str = "clusterAuthMode";
+/// Index intersection by hashing (`AND_HASH` plans, 010 FR-001): off by default, as on a
+/// `refrouter` 9.0.4 (measured).
+pub const HASH_INTERSECTION: &str = "internalQueryPlannerEnableHashIntersection";
 /// `getParameter: "*"`.
 const ALL: &str = "*";
 
@@ -154,6 +157,8 @@ pub struct ServerParams {
     pub cluster_auth_mode: ClusterAuthMode,
     /// Whether the node has TLS: the modes other than `keyFile` need it.
     pub tls_enabled: bool,
+    /// `internalQueryPlannerEnableHashIntersection`.
+    pub hash_intersection: bool,
 }
 
 impl Default for ServerParams {
@@ -170,19 +175,21 @@ impl Default for ServerParams {
             use_internal_authz_for_x509: false,
             cluster_auth_mode: ClusterAuthMode::Undefined,
             tls_enabled: true,
+            hash_intersection: false,
         }
     }
 }
 
 /// The parameters TeselaDB has, in name order: name, settable at runtime, settable at startup
 /// with `--setParameter` (`redactClientLogData` starts with its own option, measured).
-const KNOWN: [(&str, bool, bool); 16] = [
+const KNOWN: [(&str, bool, bool); 17] = [
     (AUDIT_AUTHORIZATION_SUCCESS, true, true),
     (AUTH_SCHEMA_VERSION, false, false),
     (CLIENT_CURSOR_MONITOR_FREQUENCY_SECS, true, true),
     (CLUSTER_AUTH_MODE, true, false),
     (CURSOR_TIMEOUT_MILLIS, true, true),
     (ENABLE_TEST_COMMANDS, false, true),
+    (HASH_INTERSECTION, true, true),
     (LOCAL_LOGICAL_SESSION_TIMEOUT_MINUTES, false, true),
     (MAX_CONCURRENT_MULTI_DOCUMENT_TRANSACTIONS, true, true),
     (OCSP_ENABLED, false, true),
@@ -222,6 +229,7 @@ fn value_of(name: &str, s: &NodeSessions) -> Value {
         TLS_OCSP_VERIFY_TIMEOUT_SECS => Value::Int32(TLS_OCSP_VERIFY_TIMEOUT_DEFAULT),
         REDACT_CLIENT_LOG_DATA => Value::Boolean(s.params.redact_client_log_data),
         USE_INTERNAL_AUTHZ_FOR_X509 => Value::Boolean(s.params.use_internal_authz_for_x509),
+        HASH_INTERSECTION => Value::Boolean(s.params.hash_intersection),
         TRANSACTION_LIFETIME_LIMIT_SECONDS => {
             Value::Int32(clamp_i32(s.params.transaction_lifetime_secs))
         }
@@ -365,7 +373,7 @@ pub fn set_parameter<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Docume
             return Err(CommandError::new(ILLEGAL_OPERATION, msg));
         }
         let n = match *name {
-            REDACT_CLIENT_LOG_DATA | USE_INTERNAL_AUTHZ_FOR_X509 => {
+            REDACT_CLIENT_LOG_DATA | USE_INTERNAL_AUTHZ_FOR_X509 | HASH_INTERSECTION => {
                 i64::from(crate::types::bson_true(v))
             }
             AUDIT_AUTHORIZATION_SUCCESS => audit_authorization_success(ctx.shared, v)?,
@@ -399,6 +407,7 @@ pub fn set_parameter<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Docume
             }
             REDACT_CLIENT_LOG_DATA => g.params.redact_client_log_data = n != 0,
             USE_INTERNAL_AUTHZ_FOR_X509 => g.params.use_internal_authz_for_x509 = n != 0,
+            HASH_INTERSECTION => g.params.hash_intersection = n != 0,
             CLUSTER_AUTH_MODE => g.params.cluster_auth_mode = ClusterAuthMode::from_index(n),
             AUDIT_AUTHORIZATION_SUCCESS => match g.audit.as_ref() {
                 Some(a) => {

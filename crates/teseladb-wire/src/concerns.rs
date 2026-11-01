@@ -31,6 +31,8 @@ const PROVENANCES: [&str; 5] = [
 ];
 /// The provenance of a write concern without `w`.
 const IMPLICIT_DEFAULT: &str = "implicitDefault";
+/// The provenance of the cluster's default write concern.
+const CUSTOM_DEFAULT: &str = "customDefault";
 /// The types of the `safeBool` fields of a write concern (`j`, `fsync`), in a `refrouter` 9.0's
 /// order (measured).
 const WC_SAFE_BOOL_TYPES: [&str; 5] = ["decimal", "int", "bool", "long", "double"];
@@ -66,6 +68,11 @@ impl Level {
         (Level::Linearizable, "linearizable"),
         (Level::Snapshot, "snapshot"),
     ];
+
+    /// The level named `name`.
+    pub fn from_name(name: &str) -> Option<Level> {
+        Level::ALL.iter().find(|(_, n)| *n == name).map(|(l, _)| *l)
+    }
 
     /// The level's name.
     pub fn name(self) -> &'static str {
@@ -287,6 +294,8 @@ pub struct WriteConcernArgs {
     pub sync: Sync,
     /// `wtimeout` in milliseconds (0 = no limit).
     pub wtimeout: i32,
+    /// It is the cluster's default (`setDefaultRWConcern`, 007 FR-018), not the command's.
+    pub custom: bool,
 }
 
 /// Truncation of a number to an integer, saturating, as RefDb reads `w` and tag counts.
@@ -376,7 +385,7 @@ impl WriteConcernArgs {
 
     fn from_doc(d: &Document) -> Result<WriteConcernArgs, CommandError> {
         const OWNER: &str = "WriteConcernOptions";
-        let mut wc = WriteConcernArgs { w: None, sync: Sync::Unset, wtimeout: 0 };
+        let mut wc = WriteConcernArgs { w: None, sync: Sync::Unset, wtimeout: 0, custom: false };
         let (mut j, mut fsync, mut foreign_provenance) = (None, false, false);
         for (k, v) in d.iter() {
             match k {
@@ -466,29 +475,71 @@ impl WriteConcernArgs {
         if self.sync == Sync::Fsync {
             fields.push(String::from("fsync: true"));
         }
-        let source = if self.w.is_none() { IMPLICIT_DEFAULT } else { CLIENT_SUPPLIED };
+        let source = match (self.custom, self.w.is_none()) {
+            (true, _) => CUSTOM_DEFAULT,
+            (false, true) => IMPLICIT_DEFAULT,
+            (false, false) => CLIENT_SUPPLIED,
+        };
         fields.push(format!("provenance: \"{source}\""));
         format!("{{ {} }}", fields.join(", "))
     }
 }
 
-/// The write concern of a command without `writeConcern`, as its errors print it.
+/// The write concern of a command without `writeConcern`, as its errors print it: the cluster's
+/// default while one applies to the running command ([`with_defaults`]), else the implicit one.
 pub fn default_write_concern() -> WriteConcernArgs {
-    WriteConcernArgs { w: None, sync: Sync::Unset, wtimeout: 0 }
+    let custom = DEFAULTS.with(|d| d.borrow().1.clone());
+    custom
+        .map_or(WriteConcernArgs { w: None, sync: Sync::Unset, wtimeout: 0, custom: false }, |wc| {
+            WriteConcernArgs { custom: true, ..wc }
+        })
 }
 
-/// The `writeConcernError` of `e` for write concern `wc`.
-pub fn write_concern_error(e: &CommandError, wc: &WriteConcernArgs) -> Document {
+/// The read concern level of a command without `readConcern`: the cluster's default while one
+/// applies to the running command, else `local`.
+pub fn default_read_level() -> Level {
+    DEFAULTS.with(|d| d.borrow().0).unwrap_or(Level::Local)
+}
+
+std::thread_local! {
+    /// The cluster's default concerns for the command running on this thread (007 FR-018).
+    static DEFAULTS: std::cell::RefCell<(Option<Level>, Option<WriteConcernArgs>)> =
+        const { std::cell::RefCell::new((None, None)) };
+}
+
+/// Runs `f`, a command, with the cluster's default read level and write concern; the previous
+/// ones come back after it, also when it unwinds.
+pub fn with_defaults<T>(
+    read: Option<Level>,
+    write: Option<WriteConcernArgs>,
+    f: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<(Option<Level>, Option<WriteConcernArgs>)>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            if let Some(prev) = self.0.take() {
+                DEFAULTS.with(|d| *d.borrow_mut() = prev);
+            }
+        }
+    }
+    let prev = DEFAULTS.with(|d| std::mem::replace(&mut *d.borrow_mut(), (read, write)));
+    let _restore = Restore(Some(prev));
+    f()
+}
+
+/// The `writeConcernError` of `e` for write concern `wc`, as a `refrouter` relays its shard's: the
+/// code's name first and `relayed` after (` at node<N>`, D-102; measured on 9.0.4).
+pub fn write_concern_error(e: &CommandError, wc: &WriteConcernArgs, relayed: &str) -> Document {
     let details = format!("{{ writeConcern: {} }}", wc.describe());
     Document::new()
         .with("code", e.code.code)
         .with("codeName", e.code.name)
-        .with("errmsg", format!("{}; Error details: {details}", e.errmsg))
+        .with("errmsg", format!("{}: {}; Error details: {details}{relayed}", e.code.name, e.errmsg))
         .with("errInfo", Document::new())
 }
 
 /// The commands that take `writeConcern` (measured).
-const WRITE_CONCERN_COMMANDS: [&str; 30] = [
+const WRITE_CONCERN_COMMANDS: [&str; 31] = [
     "insert",
     "update",
     "delete",
@@ -502,6 +553,7 @@ const WRITE_CONCERN_COMMANDS: [&str; 30] = [
     "dropIndexes",
     "dropDatabase",
     "renameCollection",
+    "setDefaultRWConcern",
     "bulkWrite",
     "commitTransaction",
     "createUser",

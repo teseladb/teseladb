@@ -7,7 +7,7 @@ mod common;
 
 use common::*;
 use teseladb_lsm::Step;
-use teseladb_range::gc::{GC_EVERY_MS, GC_TTL_MS, Round, table, threshold};
+use teseladb_range::gc::{GC_EVERY_MS, GC_TTL_MS, Round, table, threshold, threshold_with};
 use teseladb_range::snapshot::local_interval;
 
 const ZERO: Hlc = Hlc { physical: 0, logical: 0 };
@@ -235,4 +235,27 @@ fn a_read_below_the_gc_threshold_fails_with_snapshot_too_old() {
     c.settle();
     assert_eq!(c.reply(l, old), Some(Err(RangeError::SnapshotTooOld)));
     assert!(matches!(c.reply(l, at), Some(Ok(Reply::Value { .. }))));
+}
+
+/// 007 FR-019: `teselaHistoryRetention` sets the history kept; with two rounds of it, the first
+/// threshold after two rounds of cluster time passes a version the default day keeps.
+#[test]
+fn a_shorter_retention_raises_the_threshold_sooner() {
+    let ttl = 2 * GC_EVERY_MS;
+    assert_eq!(
+        threshold_with(10 * GC_EVERY_MS, ttl),
+        Some(Hlc { physical: 8 * GC_EVERY_MS, logical: 0 })
+    );
+    assert_eq!(threshold_with(ttl - 1, ttl), None);
+    let mut c = cluster();
+    for n in c.nodes.values_mut() {
+        n.host.set_gc_ttl_ms(ttl);
+    }
+    let l = c.elect();
+    let old = write(&mut c, l, 1);
+    c.wall_ahead = 4 * GC_EVERY_MS;
+    c.ticks_following(JUMP_TICKS);
+    let raised = gc_threshold(&c, l);
+    assert!(raised > old, "the threshold {raised:?} passed the version {old:?}");
+    assert!(raised.physical <= c.wall() - ttl);
 }

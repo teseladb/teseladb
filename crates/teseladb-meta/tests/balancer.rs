@@ -60,6 +60,7 @@ struct World {
     loads: BTreeMap<NodeId, NodeLoad>,
     conf_in_flight: bool,
     skewed: Vec<NodeId>,
+    local_offset_s: i32,
 }
 
 impl World {
@@ -73,12 +74,14 @@ impl World {
             loads: BTreeMap::new(),
             conf_in_flight: false,
             skewed: vec![],
+            local_offset_s: 0,
         }
     }
 
     fn plan(&self) -> Vec<Decision> {
         plan(&View {
             group0: &self.sm,
+            ranges: &self.sm.ranges,
             voters: &self.voters,
             learners: &self.learners,
             leader: n(1),
@@ -86,6 +89,7 @@ impl World {
             loads: &self.loads,
             conf_in_flight: self.conf_in_flight,
             skewed: &self.skewed,
+            local_offset_s: self.local_offset_s,
         })
     }
 
@@ -452,4 +456,65 @@ fn the_leader_of_a_busy_node_moves_to_an_idle_one_within_the_count_rule() {
     assert_eq!(hint(&w), Some((GroupId(1), n(3))));
     w.sm.settings.insert(BALANCE_LEADERS_SETTING.to_vec(), b"off".to_vec());
     assert_eq!(hint(&w), None);
+}
+
+#[test]
+fn a_stopped_balancer_moves_nothing_for_balance_but_still_repairs() {
+    let stopped = teseladb_bson::Document::new().with("_id", "balancer").with("stopped", true);
+    let key = teseladb_meta::config_settings::BALANCER_KEY.to_vec();
+    // A new node would take a replica, and node 1's leaders would even out.
+    let mut sm = cluster(4);
+    for g in 1..=6 {
+        add_range(&mut sm, g, &[1, 2, 3]);
+        sm.ranges.get_mut(&GroupId(g)).unwrap().leader_hint = Some(n(1));
+    }
+    sm.settings.insert(key.clone(), stopped.to_bytes().unwrap());
+    let w = World::new(sm, &[1, 2, 3]);
+    assert!(w.plan().iter().all(|d| !matches!(d, Decision::Command(_))), "{:?}", w.plan());
+    // A range that misses a replica gets it all the same.
+    let mut sm = cluster(4);
+    add_range(&mut sm, 1, &[1, 2]);
+    sm.settings.insert(key, stopped.to_bytes().unwrap());
+    assert_eq!(World::new(sm, &[1, 2, 3]).replica_changes().len(), 1);
+}
+
+#[test]
+fn the_balancers_window_is_in_the_leaders_local_time() {
+    // 13:23 UTC, 22:23 in Tokyo (+09:00): a window from 22:00 to 23:00 is open there only.
+    let window = teseladb_bson::Document::new().with("_id", "balancer").with(
+        "activeWindow",
+        teseladb_bson::Document::new().with("start", "22:00").with("stop", "23:00"),
+    );
+    let key = teseladb_meta::config_settings::BALANCER_KEY.to_vec();
+    let mut sm = cluster(4);
+    for g in 1..=6 {
+        add_range(&mut sm, g, &[1, 2, 3]);
+        sm.ranges.get_mut(&GroupId(g)).unwrap().leader_hint = Some(n(1));
+    }
+    sm.settings.insert(key, window.to_bytes().unwrap());
+    sm.cluster_time_ms = ((13 * 60 + 23) * 60) * 1000;
+    let mut w = World::new(sm, &[1, 2, 3]);
+    assert!(w.plan().iter().all(|d| !matches!(d, Decision::Command(_))), "UTC: closed");
+    w.local_offset_s = 9 * 3600;
+    assert!(w.plan().iter().any(|d| matches!(d, Decision::Command(_))), "Tokyo: open");
+}
+
+#[test]
+fn the_busiest_node_leading_nothing_moves_no_leader() {
+    // Node 4 serves the most operations but leads no range (it has just joined, or it is being
+    // drained): no leader moves for load, and the plan does not fail.
+    let mut sm = cluster(4);
+    add_range(&mut sm, 1, &[1, 2, 3]);
+    sm.ranges.get_mut(&GroupId(1)).unwrap().leader_hint = Some(n(1));
+    let ops = |o| NodeLoad { ops: o, ..NodeLoad::default() };
+    let mut w = World::new(sm, &[1, 2, 3]);
+    w.loads.insert(n(1), ops(100));
+    w.loads.insert(n(2), ops(100));
+    w.loads.insert(n(3), ops(100));
+    w.loads.insert(n(4), ops(5_000));
+    let hints = w
+        .plan()
+        .into_iter()
+        .filter(|d| matches!(d, Decision::Command(Group0Command::SetLeaderHint { .. })));
+    assert_eq!(hints.count(), 0);
 }

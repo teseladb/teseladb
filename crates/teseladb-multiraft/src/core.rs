@@ -1630,6 +1630,7 @@ impl<S: StateMachine> MultiRaftCore<S> {
         if let Some(e) = last {
             self.groups.get_mut(&g).expect("group").raw.on_applied(e.index);
             self.applied_reads(g, e.index);
+            self.note_log_floor(g);
             self.declare_floor(g);
             self.maybe_snapshot(g, e.index, e.term);
         }
@@ -1896,6 +1897,13 @@ impl<S: StateMachine> MultiRaftCore<S> {
         }
     }
 
+    /// Hands Raft the state machine's log floor, which an applied entry or a restored snapshot
+    /// may have moved.
+    fn note_log_floor(&mut self, g: GroupId) {
+        let grp = self.groups.get_mut(&g).expect("group");
+        grp.raw.set_log_floor(grp.sm.log_floor());
+    }
+
     /// Restores a group's state machine from a snapshot file; `false` if it stopped.
     fn restore(&mut self, g: GroupId, data: &[u8]) -> bool {
         let grp = self.groups.get_mut(&g).expect("a group of this core");
@@ -1907,6 +1915,7 @@ impl<S: StateMachine> MultiRaftCore<S> {
                 grp.terms = terms;
                 // The snapshot restored is the latest one (at open, or the one being installed).
                 grp.snap_state = grp.sm.snapshot_state_index();
+                grp.raw.set_log_floor(grp.sm.log_floor());
                 // The snapshot keeps the milliseconds: the last mark of that millisecond bounds
                 // every mark of the entries it covers.
                 let bound = Hlc { physical: ms, logical: (1 << LOGICAL_BITS) - 1 };
@@ -2048,17 +2057,23 @@ impl<S: StateMachine> MultiRaftCore<S> {
     }
 
     /// Raft asked to send a snapshot to `to`: its file is read and sent in chunks.
-    /// `false` if the snapshot is below the state machine's floor: it is not sent, and Raft asks
-    /// again until the newer one, taken when the floor passed it, is saved.
+    /// `false` if the snapshot is below the state machine's floor or not on the disk yet: it is
+    /// not sent, and Raft asks again until the newer one, taken when the floor passed it, is
+    /// saved.
     fn start_snapshot_send(&mut self, g: GroupId, to: NodeId) -> bool {
         let grp = self.groups.get_mut(&g).expect("a group of this core");
-        if grp.snap_state < grp.sm.snapshot_floor() {
+        // Raft asks for one once the log was compacted, which needs one, or for a follower below
+        // the log floor, whose snapshot past it may still be on its way to the disk.
+        let loaded = if grp.snap_state < grp.sm.snapshot_floor() {
+            None
+        } else {
+            self.store.load_snapshot(g)
+        };
+        let Some((_, token)) = loaded else {
             grp.raw.report_snapshot(to, false);
             self.refused.insert((g, to));
             return false;
-        }
-        // Raft only asks for a snapshot once the log was compacted, which needs one.
-        let (_, token) = self.store.load_snapshot(g).expect("a compacted log has a snapshot");
+        };
         self.loads.insert(token, Load::Send { group: g, to });
         self.sending.entry(g).or_default().insert(to, (self.now, 0));
         true
@@ -2144,6 +2159,16 @@ impl<S: StateMachine> MultiRaftCore<S> {
         self.groups.get(&g).map(|grp| grp.snap_index)
     }
 
+    /// Data entered `g`'s state machine without an entry (018: a restore's ingest): `enter`
+    /// records it there, Raft takes the state machine's new log floor, and a snapshot past it is
+    /// taken now (see [`MultiRaftCore::snapshot_now`]). `false` if `g` is unknown or no snapshot
+    /// was taken.
+    pub fn data_entered(&mut self, g: GroupId, enter: impl FnOnce(&mut S)) -> bool {
+        let Some(grp) = self.groups.get_mut(&g) else { return false };
+        enter(&mut grp.sm);
+        self.snapshot_now(g)
+    }
+
     /// Takes a snapshot of `g` at its last applied entry now, however few entries passed since
     /// the last one (007: a range born from a split compacts its log at once, so that a replica
     /// added later receives the data the split left in the core's LSM as a snapshot and never the
@@ -2151,8 +2176,11 @@ impl<S: StateMachine> MultiRaftCore<S> {
     /// release floor passes it. `false` if `g` is unknown, applied nothing past its last
     /// snapshot, or a snapshot is already waiting.
     pub fn snapshot_now(&mut self, g: GroupId) -> bool {
+        let Some(grp) = self.groups.get_mut(&g) else { return false };
+        // An ingest just before may have raised it (018).
+        grp.raw.set_log_floor(grp.sm.log_floor());
         self.save_pending_snapshot_if_any(g);
-        let Some(grp) = self.groups.get(&g) else { return false };
+        let grp = &self.groups[&g];
         let index = grp.sm.applied_index();
         if grp.pending_snap.is_some() || index <= grp.snap_index || grp.loading || grp.own.is_some()
         {

@@ -158,3 +158,37 @@
 {"$convert":{"input":{"$numberDouble":"255.5"},"to":"string","base":16}}	!! 241	Base conversion is not supported for non-integers in $convert with no onError value: 
 {"$toUUID":"00010203-0405-0607-0809-0a0b0c0d0e0"}	!! 241	Failed to parse BinData '00010203-0405-0607-0809-0a0b0c0d0e0' in $convert with no onError value: Invalid UUID string: 00010203-0405-0607-0809-0a0b0c0d0e0
 {"$toUUID":"0001020304-05-0607-0809-0a0b0c0d0e0f"}	!! 241	Failed to parse BinData '0001020304-05-0607-0809-0a0b0c0d0e0f' in $convert with no onError value: Invalid UUID string: 0001020304-05-0607-0809-0a0b0c0d0e0f
+{"$toString": {"$code": "f", "$scope": {}}}	=> {"x":"CodeWScope(\"f\", {})"}
+{"$convert": {"input": {"$code": "f", "$scope": {}}, "to": "string"}}	=> {"x":"CodeWScope(\"f\", {})"}
+{"$percentile": {"input": [1, 2], "p": [{"a": 1}], "method": "approximate"}}	!! 7750302	The $percentile 'p' field must be an array of numbers from [0.0, 1.0], but found: {a: 1}
+{"$percentile": {"input": [1, 2], "p": [{"a": "$x"}], "method": "approximate"}}	!! 7750300	The $percentile 'p' field must be an array of constant values, but found value: [ { a: "$x" } ].
+{"$sum": [{"$numberDecimal": "1"}, {"$numberLong": "2"}]}	=> {"x":{"$numberDecimal":"3"}}
+{"$avg": [{"$numberDecimal": "1"}, {"$numberLong": "2"}]}	=> {"x":{"$numberDecimal":"1.5"}}
+{"$hash": {"input": "a", "algorithm": "$nope"}}	!! 10754001	$hash requires that 'algorithm' be a string, found: missing with value MISSING
+{"$reduce": {"input": "$nope", "initialValue": 0, "in": 1}}	=> {"x":null}
+{"$indexOfArray": [[1, 2], 1, "$nope"]}	!! 9711600	$indexOfArrayrequires an integral starting index, found a value of type: missing, with value: MISSING
+{"$zip": {"inputs": ["$nope"]}}	=> {"x":null}
+{"$serializeEJSON": {"input": 1, "relaxed": "$nope"}}	!! 2	Unexpected value for relaxed: MISSING
+{"$toString": {"$convert": {"input": "000102", "to": {"type": "binData", "subtype": 4}, "format": "hex"}}}	!! 241	Failed to parse BinData '000102' in $convert with no onError value: Only the 'uuid' format is allowed with the UUID subtype
+{"$convert": {"input": {"$convert": {"input": "000102", "to": {"type": "binData", "subtype": 4}, "format": "hex"}}, "to": "string", "format": "auto"}}	!! 241	Failed to parse BinData '000102' in $convert with no onError value: Only the 'uuid' format is allowed with the UUID subtype
+{"$deserializeEJSON": {"input": {"$toObject": "{\"$dbPointer\": {\"$ref\": \"a.b\", \"$id\": \"zzzzzzzzzzzzzzzzzzzzzzzz\"}}"}}}	!! 241	$dbPointer value must contain a valid $ref and $id
+{"$deserializeEJSON": {"input": {"$toObject": "{\"$dbPointer\": {\"$ref\": \"a.b\", \"$id\": \"abc\"}}"}}}	!! 241	$id must be a 24 character hexadecimal string
+{"$toString": {"$deserializeEJSON": {"input": {"$toObject": "{\"$dbPointer\": {\"$ref\": \"a.b\", \"$id\": \"0123456789abcdef01234567\"}}"}}}}	=> {"x":"DBRef(\"a.b\", 0123456789abcdef01234567)"}
+{"$toString": {"$code": "f(\"x\")", "$scope": {"a": 1, "b": "x", "c": [1, {"d": 2.5}]}}}	=> {"x":"CodeWScope(\"f(\"x\")\", { a: 1, b: \"x\", c: [ 1, { d: 2.5 } ] })"}
+{"$toString": {"$undefined": true}}	=> {"x":null}
+{"$convert": {"input": {"$undefined": true}, "to": "string"}}	=> {"x":null}
+{"$toString": {"$deserializeEJSON": {"input": {"$toObject": "{\"$dbPointer\": {\"$ref\": \"a.b\", \"$id\": \"0123456789ABCDEF01234567\"}}"}}}}	=> {"x":"DBRef(\"a.b\", 0123456789abcdef01234567)"}
+{"$deserializeEJSON": {"input": {"$toObject": "{\"$dbPointer\": {\"$ref\": 1, \"$id\": \"0123456789abcdef01234567\"}}"}}}	!! 241	$dbPointer.$ref value must be of type string
+{"$deserializeEJSON": {"input": {"$toObject": "{\"$dbPointer\": {\"$ref\": \"a.b\", \"$id\": 1}}"}}}	!! 241	$dbPointer.$id value must be of type string
+{"$deserializeEJSON": {"input": {"$toObject": "{\"$dbPointer\": {\"$ref\": \"a.b\"}}"}}}	!! 241	$dbPointer.$id value must be of type string
+{"$deserializeEJSON": {"input": {"$toObject": "{\"$dbPointer\": {\"$ref\": \"a.b\", \"$id\": \"0123456789abcdef01234567\", \"x\": 1}}"}}}	!! 241	$dbPointer object contains additional fields, expected $ref and $id only
+{"$type": {"$deserializeEJSON": {"input": {"$toObject": "{\"$dbPointer\": {\"$ref\": \"a.b\", \"$id\": \"0123456789abcdef01234567\"}}"}}}}	=> {"x":"dbPointer"}
+{"$toString": {"a": {"$deserializeEJSON": {"input": {"$toObject": "{\"$dbPointer\": {\"$ref\": \"a.b\", \"$id\": \"0123456789abcdef01234567\"}}"}}}}}	=> {"x":"{\"a\":\"DBRef(\\\"a.b\\\", 0123456789abcdef01234567)\"}"}
+{"$toString": {"a": {"$literal": {"$code": "f", "$scope": {"x": 1}}}}}	=> {"x":"{\"a\":\"CodeWScope(\\\"f\\\", { x: 1 })\"}"}
+{"$toString": {"a": {"$literal": {"$undefined": true}}}}	=> {"x":"{\"a\":null}"}
+{"$toString": [[{"$deserializeEJSON": {"input": {"$toObject": "{\"$dbPointer\": {\"$ref\": \"a.b\", \"$id\": \"0123456789abcdef01234567\"}}"}}}]]}	=> {"x":"[\"DBRef(\\\"a.b\\\", 0123456789abcdef01234567)\"]"}
+{"$toString": {"a": {"$literal": {"$code": "f"}}}}	=> {"x":"{\"a\":\"f\"}"}
+{"$toString": {"a": {"$literal": {"$symbol": "s"}}}}	=> {"x":"{\"a\":\"s\"}"}
+{"$toString": {"$serializeEJSON": {"input": {"$deserializeEJSON": {"input": {"$toObject": "{\"$dbPointer\": {\"$ref\": \"a.b\", \"$id\": \"0123456789abcdef01234567\"}}"}}}}}}	=> {"x":"{\"$dbPointer\":{\"$ref\":\"a.b\",\"$id\":\"0123456789abcdef01234567\"}}"}
+{"$toString": {"$serializeEJSON": {"input": {"$deserializeEJSON": {"input": {"$toObject": "{\"$dbPointer\": {\"$ref\": \"a.b\", \"$id\": \"0123456789abcdef01234567\"}}"}}}, "relaxed": false}}}	=> {"x":"{\"$dbPointer\":{\"$ref\":\"a.b\",\"$id\":\"0123456789abcdef01234567\"}}"}
+{"$toString": {"$serializeEJSON": {"input": {"$toObjectId": "0123456789ABCDEF01234567"}}}}	=> {"x":"{\"$oid\":\"0123456789abcdef01234567\"}"}

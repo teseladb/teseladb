@@ -36,9 +36,17 @@ pub fn code_name(code: i32) -> String {
 /// The cause of a statement's failure: its error, or its first write error.
 pub fn failure_cause(result: &Result<Document, CommandError>) -> Option<String> {
     let reply = match result {
+        // An error of the router's parse leaves the transaction running (measured on 9.0.4).
+        Err(e) if e.origin == crate::error::ErrorOrigin::Router => return None,
         Err(e) => return Some(e.code.name.to_owned()),
         Ok(reply) => reply,
     };
+    // An error answered as a reply (the index commands answer theirs so).
+    if reply.get("ok") == Some(&Value::Double(0.0))
+        && let Some(Value::Int32(c)) = reply.get("code")
+    {
+        return Some(code_name(*c));
+    }
     let Some(Value::Array(errors)) = reply.get("writeErrors") else { return None };
     match errors.first() {
         Some(Value::Document(e)) => match e.get("code") {

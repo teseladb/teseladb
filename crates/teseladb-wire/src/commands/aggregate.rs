@@ -24,23 +24,13 @@ use super::query::{
     target,
 };
 use super::{Backend, Ctx, args, names};
-use crate::error::{BAD_VALUE, CommandError, FAILED_TO_PARSE, INVALID_NAMESPACE, TYPE_MISMATCH};
+use crate::error::{BAD_VALUE, CommandError, FAILED_TO_PARSE, TYPE_MISMATCH};
 
 /// The command's name.
 pub const AGGREGATE: &str = super::status::AGGREGATE;
 
 /// The collection of an `aggregate: 1`.
 const COLLECTIONLESS: &str = "$cmd.aggregate";
-
-/// The stages an `aggregate: 1` may start with: they read no collection.
-const COLLECTIONLESS_STAGES: [&str; 6] = [
-    "$documents",
-    "$currentOp",
-    "$listLocalSessions",
-    "$changeStream",
-    "$listClusterCatalog",
-    "$querySettings",
-];
 
 /// What the pipeline reads besides its input, from the node.
 struct WireEnv<'a, B: Backend + ?Sized> {
@@ -101,12 +91,7 @@ impl<B: Backend + ?Sized> WireEnv<'_, B> {
         }
         if let Some(Value::Document(st)) = spec.get("storageStats") {
             let c = needs("storageStats")?;
-            let scale = st.get("scale").and_then(|v| match v {
-                Value::Int32(n) => Some(i64::from(*n)),
-                Value::Int64(n) => Some(*n),
-                Value::Double(x) => Some(*x as i64),
-                _ => None,
-            });
+            let scale = st.get("scale").and_then(teseladb_exec::pipeline::scale_of);
             let stats = super::diagnostics::storage_stats(
                 &mut **backend,
                 shared,
@@ -195,6 +180,16 @@ fn read<B: Backend + ?Sized>(
     read_through(backend, ns, &[], None, concern)
 }
 
+/// [`read`], and whether the stages of the views it read through all run in RefDb's
+/// slot-based engine (the stages that follow them may then run there too).
+fn read_engine<B: Backend + ?Sized>(
+    backend: &mut B,
+    ns: &Namespace,
+    concern: ReadConcern,
+) -> Result<(Vec<Document>, bool), CommandError> {
+    read_through_engine(backend, ns, &[], None, concern)
+}
+
 /// The documents of `ns` read through its views as [`read`] does, then through `extra`, the
 /// stages a read on a view becomes (015 FR-001), with the variables `vars` of its `let`.
 pub(crate) fn read_through<B: Backend + ?Sized>(
@@ -204,9 +199,31 @@ pub(crate) fn read_through<B: Backend + ?Sized>(
     vars: Option<&Document>,
     concern: ReadConcern,
 ) -> Result<Vec<Document>, CommandError> {
+    read_through_engine(backend, ns, extra, vars, concern).map(|(docs, _)| docs)
+}
+
+/// [`read_through`], and whether its stages all run in RefDb's slot-based engine.
+fn read_through_engine<B: Backend + ?Sized>(
+    backend: &mut B,
+    ns: &Namespace,
+    extra: &[Document],
+    vars: Option<&Document>,
+    concern: ReadConcern,
+) -> Result<(Vec<Document>, bool), CommandError> {
+    read_through_staged(backend, ns, (extra, vars), concern)?
+}
+
+/// [`read_through_engine`] with the errors of running the stages apart from those of reading
+/// and parsing them (the outer error).
+pub(crate) fn read_through_staged<B: Backend + ?Sized>(
+    backend: &mut B,
+    ns: &Namespace,
+    (extra, vars): (&[Document], Option<&Document>),
+    concern: ReadConcern,
+) -> Result<Result<(Vec<Document>, bool), CommandError>, CommandError> {
     // `admin.system.users`, `.roles` and `.version` come from Group 0 (013 FR-030).
     if let Some(docs) = super::authz_collections::documents(backend, ns)? {
-        return Ok(docs);
+        return Ok(Ok((docs, true)));
     }
     let view = super::views::resolve(backend, ns)?;
     let own = view.as_ref().and_then(|v| v.collation.as_deref()).map(RawDoc::from_bytes);
@@ -215,7 +232,7 @@ pub(crate) fn read_through<B: Backend + ?Sized>(
         Some(v) => names::ns(&ns.db, &v.collection),
         None => ns.clone(),
     };
-    let Some(coll) = backend.collection(&base)? else { return Ok(Vec::new()) };
+    let Some(coll) = backend.collection(&base)? else { return Ok(Ok((Vec::new(), true))) };
     let mut docs = Vec::new();
     for_each_match_with(
         backend,
@@ -234,7 +251,7 @@ pub(crate) fn read_through<B: Backend + ?Sized>(
         stages.push(d.to_bytes()?);
     }
     if stages.is_empty() {
-        return Ok(docs);
+        return Ok(Ok((docs, true)));
     }
     let raws: Vec<RawDoc<'_>> =
         stages.iter().map(|b| RawDoc::from_bytes(b)).collect::<Result<_, _>>()?;
@@ -251,7 +268,8 @@ pub(crate) fn read_through<B: Backend + ?Sized>(
         collation,
         node: None,
     };
-    pipeline.run(docs, &env).map_err(from_mql)
+    let sbe = pipeline.runs_in_sbe();
+    Ok(pipeline.run(docs, &env).map(|out| (out, sbe)).map_err(from_mql))
 }
 
 /// The arguments of `aggregate` besides its pipeline.
@@ -314,7 +332,10 @@ fn cursor_batch_size(cmd: &Document) -> Result<Option<usize>, CommandError> {
     Ok(size)
 }
 
-fn aggregate_args(cmd: &Document) -> Result<AggregateArgs, CommandError> {
+fn aggregate_args<B: Backend + ?Sized>(
+    backend: &mut B,
+    cmd: &Document,
+) -> Result<AggregateArgs, CommandError> {
     match cmd.get("pipeline") {
         None => {
             return Err(CommandError::new(
@@ -343,7 +364,7 @@ fn aggregate_args(cmd: &Document) -> Result<AggregateArgs, CommandError> {
     Ok(AggregateArgs {
         batch_size,
         collation,
-        vars: command_let(cmd, AGGREGATE)?,
+        vars: command_let(backend, cmd, AGGREGATE)?,
         concern: args::read_concern(cmd, AGGREGATE)?,
     })
 }
@@ -376,25 +397,22 @@ pub fn aggregate<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
     let ns_text = names::full(&ns);
     let cmd_bytes = ctx.cmd.to_bytes()?;
     let raw_cmd = RawDoc::from_bytes(&cmd_bytes)?;
-    let a = aggregate_args(ctx.cmd)?;
+    let a = aggregate_args(&mut *ctx.backend, ctx.cmd)?;
     let stages: Vec<RawValue<'_>> = match raw_cmd.get("pipeline") {
         Some(RawValue::Array(p)) => p.iter().collect(),
         _ => Vec::new(),
     };
-    let mut vars = a.vars.clone().unwrap_or_default();
+    let vars = a.vars.clone().unwrap_or_default();
     let names: Vec<String> = vars.iter().map(|(k, _)| k.to_owned()).collect();
-    vars.insert("NOW", Value::DateTime(ctx.backend.now_ms() as i64));
-    let pipeline = Pipeline::parse(&stages, &ExprCtx::checked(names.iter().map(String::as_str)))
+    let ctx_vars = ExprCtx::checked(names.iter().map(String::as_str));
+    let pipeline = Pipeline::parse_command(&stages, &ctx_vars, on_collection).map_err(from_mql)?;
+    teseladb_exec::pipeline::optimize::optimize_stages(&stages, a.vars.as_ref())
         .map_err(from_mql)?;
-    if !on_collection {
-        collectionless(&stages)?;
-    }
-    pipeline.check_target(on_collection).map_err(from_mql)?;
     let collation = command_collation(&mut *ctx.backend, &ns, on_collection, a.collation.as_ref())?;
-    let docs = if on_collection && pipeline.reads_collection() {
-        read(&mut *ctx.backend, &ns, a.concern)?
+    let (docs, sbe) = if on_collection && pipeline.reads_collection() {
+        read_engine(&mut *ctx.backend, &ns, a.concern)?
     } else {
-        Vec::new()
+        (Vec::new(), true)
     };
     let env = WireEnv {
         backend: RefCell::new(&mut *ctx.backend),
@@ -404,7 +422,7 @@ pub fn aggregate<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
         collation,
         node: Some((ctx.shared, ns.clone())),
     };
-    let results = pipeline.run(docs, &env).map_err(|e| {
+    let results = pipeline.run_in(docs, &env, sbe).map_err(|e| {
         let mut err = from_mql(e);
         err.errmsg = format!(
             "Executor error during aggregate command on namespace: {ns_text} :: caused by :: {}",
@@ -464,22 +482,4 @@ fn command_collation<B: Backend + ?Sized>(
     }
     let default = backend.collection(ns)?.and_then(|c| super::query::options_collation(&c));
     collation_value(given.or(default.as_ref()))
-}
-
-/// Checks the first stage of an `aggregate: 1`, which must read no collection.
-fn collectionless(stages: &[RawValue<'_>]) -> Result<(), CommandError> {
-    let Some(RawValue::Document(first)) = stages.first() else {
-        return Err(CommandError::new(
-            INVALID_NAMESPACE,
-            "{aggregate: 1} is not valid for an empty pipeline.",
-        ));
-    };
-    let name = first.iter().next().map(|(k, _)| k).unwrap_or("");
-    if !COLLECTIONLESS_STAGES.contains(&name) {
-        return Err(CommandError::new(
-            INVALID_NAMESPACE,
-            format!("{{aggregate: 1}} is not valid for '{name}'; a collection is required."),
-        ));
-    }
-    Ok(())
 }

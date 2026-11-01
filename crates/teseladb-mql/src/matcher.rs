@@ -31,23 +31,34 @@ pub struct Filter {
     /// The same filter with its conjunctions in RefDb's order, when that order differs, for the
     /// position of `$` ([`crate::canonical`]); the upsert and the validators follow `expr`.
     ordered: Option<Expr>,
+    /// The tree a query evaluates, in RefDb's order, when it leaves out `$_internalExpr…`
+    /// comparisons ([`crate::implied`]).
+    run: Option<Expr>,
 }
 
 impl Filter {
     /// Reads `doc` as a filter used in `usage`.
     pub fn parse(doc: RawDoc<'_>, usage: FilterUse) -> Result<Filter> {
         let expr = parse::parse(doc, usage)?;
-        let ordered = if usage == FilterUse::Query && crate::canonical::reorders(&expr) {
+        let query = usage == FilterUse::Query;
+        let reorders = query && crate::canonical::reorders(&expr);
+        let ordered = if reorders {
             Some(crate::canonical::canonical(parse::parse(doc, usage)?))
         } else {
             None
         };
-        Ok(Filter { expr, ordered })
+        let run = if query && crate::implied::has_implied(&expr) {
+            let stripped = crate::implied::strip(parse::parse(doc, usage)?);
+            Some(if reorders { crate::canonical::canonical(stripped) } else { stripped })
+        } else {
+            None
+        };
+        Ok(Filter { expr, ordered, run })
     }
 
     /// Whether `doc` matches.
     pub fn matches(&self, doc: RawDoc<'_>, ctx: &MatchContext<'_>) -> Result<bool> {
-        Eval::new(ctx, false).expr(&self.expr, doc)
+        Eval::new(ctx, false).expr(self.run.as_ref().unwrap_or(&self.expr), doc)
     }
 
     /// Whether `doc` matches and, if it does, the position in the first array the match went
@@ -58,13 +69,18 @@ impl Filter {
         ctx: &MatchContext<'_>,
     ) -> Result<Option<Option<usize>>> {
         let eval = Eval::new(ctx, true);
-        let expr = self.ordered.as_ref().unwrap_or(&self.expr);
+        let expr = self.run.as_ref().or(self.ordered.as_ref()).unwrap_or(&self.expr);
         Ok(eval.expr(expr, doc)?.then(|| eval.pos.get()))
     }
 
     /// The parsed tree.
     pub fn expr(&self) -> &Expr {
         &self.expr
+    }
+
+    /// The tree with its conjunctions in RefDb's order ([`crate::canonical`]).
+    pub(crate) fn ordered_expr(&self) -> &Expr {
+        self.ordered.as_ref().unwrap_or(&self.expr)
     }
 
     /// Whether the filter has `$text`.
@@ -102,6 +118,20 @@ impl Filter {
 /// The value of the first field named `name`.
 pub(crate) fn field<'a>(doc: RawDoc<'a>, name: &str) -> Option<RawValue<'a>> {
     doc.iter().find(|(k, _)| *k == name).map(|(_, v)| v)
+}
+
+/// The value a `$_internalExpr…` comparison reads at `path`: the first array on the way stands
+/// for the whole path (it matches), and a path that leaves the documents is missing.
+fn internal_value<'d>(doc: RawDoc<'d>, path: &str) -> Option<RawValue<'d>> {
+    let mut cur = RawValue::Document(doc);
+    for seg in path.split('.') {
+        cur = match cur {
+            RawValue::Document(d) => field(d, seg)?,
+            RawValue::Array(_) => return Some(cur),
+            _ => return None,
+        };
+    }
+    Some(cur)
 }
 
 /// A path segment that is an array position: digits without a leading zero.
@@ -198,6 +228,7 @@ impl<'c, 'a> Eval<'c, 'a> {
                 Ok(true)
             }
             Pred::Not(p) => Ok(!self.quiet().path(p, doc, path)?),
+            Pred::ExprEq(_) | Pred::ExprCmp(..) => self.single(pred, internal_value(doc, path)),
             _ => {
                 let segments: Vec<&str> = path.split('.').collect();
                 self.walk(pred, Some(RawValue::Document(doc)), &segments, None)
@@ -314,15 +345,17 @@ impl<'c, 'a> Eval<'c, 'a> {
         Ok(match pred {
             Pred::Eq(t) => eq(v, t.get(), coll),
             Pred::Cmp(op, t) => compare(*op, v, t.get(), coll),
-            Pred::ExprCmp(op, t) => v.is_some_and(|v| {
-                let o = cmp(v, t.get(), coll);
+            Pred::ExprEq(_) | Pred::ExprCmp(..) if matches!(v, Some(RawValue::Array(_))) => true,
+            Pred::ExprEq(t) => v.is_some_and(|v| cmp(v, t.get(), coll) == Ordering::Equal),
+            Pred::ExprCmp(op, t) => {
+                let o = v.map_or(Ordering::Less, |v| cmp(v, t.get(), coll));
                 match op {
                     CmpOp::Gt => o == Ordering::Greater,
                     CmpOp::Gte => o != Ordering::Less,
                     CmpOp::Lt => o == Ordering::Less,
                     CmpOp::Lte => o != Ordering::Greater,
                 }
-            }),
+            }
             Pred::In(items) => {
                 for item in items {
                     let hit = match item {

@@ -227,6 +227,50 @@ fn pushes_raise_the_minimum_or_abort_the_abandoned() {
     assert_eq!(push_txn(Some(b""), T1, Push::To(ts(1)), ts(1)), Err(RecordError::Corrupt));
 }
 
+/// A recovery of a client transaction's commit on another node (008) aborts its record: a running
+/// one at once, whatever its heartbeat; a final one stays as it is; and one that does not exist is
+/// created aborted, so that the transaction's coordinator, slow, cannot begin or commit it after.
+#[test]
+fn a_recovery_push_aborts_a_running_record_and_fences_a_missing_one() {
+    let live = record(T1, TxnStatus::Pending);
+    let at = ts(150);
+    let recover = Push::Abort { lsid: 7, txn_number: 3 };
+    let aborted = push_txn(Some(&live.encode()), T1, recover, at).unwrap();
+    assert_eq!(aborted, TxnRecord { status: TxnStatus::Aborted, ..live.clone() });
+    for status in [TxnStatus::Committed, TxnStatus::Aborted] {
+        let r = record(T1, status);
+        assert_eq!(push_txn(Some(&r.encode()), T1, recover, at), Ok(r.clone()));
+    }
+    // The fence carries its transaction's session, so that it lives as long as one (008).
+    let fence = push_txn(None, T2, recover, at).unwrap();
+    assert_eq!(
+        (fence.txn, fence.status, fence.lsid, fence.txn_number),
+        (T2, TxnStatus::Aborted, 7, 3)
+    );
+    assert_eq!(fence.read_ts, ts(0), "never begun");
+    let begin = RecordOp::Begin { lsid: 7, txn_number: 1, read_ts: ts(100) };
+    assert_eq!(end_txn(Some(&fence.encode()), T2, begin, at), Err(RecordError::NoSuchTransaction));
+    let commit = RecordOp::Commit { ts: ts(160), spans: Vec::new() };
+    assert_eq!(end_txn(Some(&fence.encode()), T2, commit, at), Err(RecordError::NoSuchTransaction));
+}
+
+/// A final record whose intents are all resolved forgets its intervals (008, record GC): only
+/// then may it go; a running one, or one that does not exist, refuses.
+#[test]
+fn a_final_record_forgets_its_intervals_once_resolved() {
+    let at = ts(150);
+    for status in [TxnStatus::Committed, TxnStatus::Aborted] {
+        let r = record(T1, status);
+        assert!(!r.spans.is_empty(), "the test's record keeps intervals");
+        let done = end_txn(Some(&r.encode()), T1, RecordOp::Resolved, at).unwrap();
+        assert_eq!(done, TxnRecord { spans: Vec::new(), ..r });
+    }
+    let live = record(T1, TxnStatus::Pending);
+    let refused = end_txn(Some(&live.encode()), T1, RecordOp::Resolved, at);
+    assert_eq!(refused, Err(RecordError::NoSuchTransaction));
+    assert_eq!(end_txn(None, T1, RecordOp::Resolved, at), Err(RecordError::NoSuchTransaction));
+}
+
 #[test]
 fn transaction_commands_round_trip() {
     let commands = [

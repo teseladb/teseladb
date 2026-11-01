@@ -28,3 +28,35 @@
 {"count":"a","skip":-1}	!! 2	BadValue	BSON field 'skip' value must be >= 0, actual value '-1'
 {"find":"a","projection":{"status.$":1},"filter":{"status":"A"}}	!! 31324	Location31324	Invalid $project :: caused by :: Cannot use positional projection in aggregation projection
 {"find":"a","batchSize":1,"sort":{"_id":1},"limit":1}	=> {"cursor":{"firstBatch":[{"_id":{"$numberInt":"0"},"status":"A","qty":{"$numberInt":"0"},"item":"x0"}],"id":{"$numberLong":"0"},"ns":"xa.a"},"ok":{"$numberDouble":"1.0"}}
+{"create":"vcov","viewOn":"c","pipeline":[{"$project":{"s":1}}]}	=> {"ok":{"$numberDouble":"1.0"}}
+{"find":"vcov","filter":{"$or":[{"s":"apple"},{"s":"fig"}]},"sort":{"_id":1}}	=> {"cursor":{"firstBatch":[{"_id":{"$numberInt":"1"},"s":"apple"},{"_id":{"$numberInt":"6"},"s":"fig"},{"_id":{"$numberInt":"8"},"s":"apple"}],"id":{"$numberLong":"0"},"ns":"xa.vcov"},"ok":{"$numberDouble":"1.0"}}
+{"find":"vcov","filter":{},"sort":{"_id":1},"limit":2}	=> {"cursor":{"firstBatch":[{"_id":{"$numberInt":"1"},"s":"apple"},{"_id":{"$numberInt":"2"},"s":"Banana"}],"id":{"$numberLong":"0"},"ns":"xa.vcov"},"ok":{"$numberDouble":"1.0"}}
+{"find":"vcov","filter":{"_id":{"$lte":2}},"sort":{"$natural":1}}	=> {"cursor":{"firstBatch":[{"_id":{"$numberInt":"1"},"s":"apple"},{"_id":{"$numberInt":"2"},"s":"Banana"}],"id":{"$numberLong":"0"},"ns":"xa.vcov"},"ok":{"$numberDouble":"1.0"}}
+{"count":"vcov","query":{}}	=> {"n":{"$numberInt":"8"},"shards":{"sh1":{"$numberInt":"8"}},"ok":{"$numberDouble":"1.0"}}
+{"find":"vcov","collation":{"locale":"xx"}}	!! 2	BadValue	Field 'locale' is invalid in: { locale: "xx" }
+{"find":"vcov","collation":1}	!! 14	TypeMismatch	Expected field collation to be of type object
+{"aggregate":"c","pipeline":[{"$limit":1},{"$project":{"_id":0,"x":"$$KEEP"}}],"cursor":{}}	!! 17276	Location17276	Invalid $project :: caused by :: Use of undefined variable: KEEP
+{"aggregate":"c","pipeline":[{"$limit":1},{"$project":{"_id":0,"x":"$$PRUNE"}}],"cursor":{}}	!! 17276	Location17276	Invalid $project :: caused by :: Use of undefined variable: PRUNE
+{"aggregate":"c","pipeline":[{"$limit":1},{"$project":{"_id":0,"x":"$$DESCEND"}}],"cursor":{}}	!! 17276	Location17276	Invalid $project :: caused by :: Use of undefined variable: DESCEND
+{"update":"c","updates":[{"q":{"$expr":{"$eq":["$_id","$$k"]}},"u":{"$set":{"z":1}}}],"let":{"k":2}}	=> {"nModified":{"$numberInt":"1"},"n":{"$numberInt":"1"},"ok":{"$numberDouble":"1.0"}}
+{"find":"c","filter":{"z":1},"projection":{"z":1}}	=> {"cursor":{"firstBatch":[{"_id":{"$numberInt":"2"},"z":{"$numberInt":"1"}}],"id":{"$numberLong":"0"},"ns":"xa.c"},"ok":{"$numberDouble":"1.0"}}
+{"delete":"c","deletes":[{"q":{"$expr":{"$eq":["$_id","$$k"]}},"limit":1}],"let":{"k":2}}	=> {"n":{"$numberInt":"1"},"ok":{"$numberDouble":"1.0"}}
+{"find":"c","filter":{"$expr":{"$eq":[{"$type":"$$NOW"},"date"]}},"projection":{"_id":1},"sort":{"_id":1},"limit":1}	=> {"cursor":{"firstBatch":[{"_id":{"$numberInt":"1"}}],"id":{"$numberLong":"0"},"ns":"xa.c"},"ok":{"$numberDouble":"1.0"}}
+{"count":"c","query":{"$expr":{"$eq":[{"$type":"$$NOW"},"date"]}}}	!! 51144	Location51144	failed on: sh1 :: caused by :: Executor error during count command on namespace: xa.c :: caused by :: Builtin variable '$$NOW' is not available
+{"distinct":"c","key":"g","query":{"$expr":{"$eq":[{"$type":"$$CLUSTER_TIME"},"timestamp"]}}}	!! 51144	Location51144	Executor error during distinct command on namespace: xa.c :: caused by :: Builtin variable '$$CLUSTER_TIME' is not available
+{"find":"c","filter":{"$expr":{"$gt":[{"$add":["$s",1]},0]}}}	!! 14	TypeMismatch	Executor error during find command: xa.c :: caused by :: $add only supports numeric or date types, not string
+{"count":"c","query":{"$expr":{"$gt":[{"$add":["$s",1]},0]}}}	!! 14	TypeMismatch	failed on: sh1 :: caused by :: Executor error during count command on namespace: xa.c :: caused by :: $add only supports numeric or date types, not string
+{"distinct":"c","key":"g","query":{"$expr":{"$gt":[{"$add":["$s",1]},0]}}}	!! 14	TypeMismatch	Executor error during distinct command on namespace: xa.c :: caused by :: $add only supports numeric or date types, not string
+{"find":"c","filter":{"$expr":{"$foo":1}}}	!! 168	InvalidPipelineOperator	Unrecognized expression '$foo'
+{"count":"c","query":{"$expr":{"$foo":1}}}	!! 168	InvalidPipelineOperator	Unrecognized expression '$foo'
+{"distinct":"c","key":"g","query":{"$expr":{"$foo":1}}}	!! 168	InvalidPipelineOperator	Unrecognized expression '$foo'
+{"count":"c","query":{"$expr":"$$nope"}}	!! 17276	Location17276	Use of undefined variable: nope
+{"distinct":"c","key":"g","query":{"$expr":"$$nope"}}	!! 17276	Location17276	Use of undefined variable: nope
+{"find":"c","filter":{"$expr":"$$nope"}}	!! 17276	Location17276	Use of undefined variable: nope
+{"find":"c","filter":{},"projection":{"z":{"$add":["$s",1]}}}	!! 14	TypeMismatch	Executor error during find command: xa.c :: caused by :: $add only supports numeric or date types, not string
+{"aggregate":"c","pipeline":[{"$match":{"_id":1}},{"$redact":{"$cond":[true,"$$KEEP","$$PRUNE"]}},{"$project":{"_id":1}}],"cursor":{}}	=> {"cursor":{"id":{"$numberLong":"0"},"ns":"xa.c","firstBatch":[{"_id":{"$numberInt":"1"}}]},"ok":{"$numberDouble":"1.0"}}
+{"count":"c","query":{"$expr":{"$eq":[{"$type":"$$USER_ROLES"},"array"]}}}	!! 51144	Location51144	failed on: sh1 :: caused by :: Executor error during count command on namespace: xa.c :: caused by :: Builtin variable '$$USER_ROLES' is not available
+{"find":"c","filter":{"p":{"$geoWithin":{"$center":[[0,0],-1]}}}}	!! 2	BadValue	Radius must be a non-negative number: -1
+{"count":"c","query":{"p":{"$geoWithin":{"$center":[[0,0],-1]}}}}	!! 2	BadValue	Radius must be a non-negative number: -1
+{"find":"c","filter":{"s":{"$regex":"("}}}	!! 51091	Location51091	Regular expression is invalid: missing closing parenthesis
+{"count":"c","query":{"s":{"$regex":"("}}}	!! 51091	Location51091	Regular expression is invalid: missing closing parenthesis

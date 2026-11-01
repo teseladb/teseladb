@@ -128,6 +128,16 @@ impl KeyBuilder {
         Key(out)
     }
 
+    /// The document of primary key `pk` (an index entry's end) in a collection without a shard
+    /// key, clustering or capping: its bucket comes from the key's bytes, as [`Self::document`]
+    /// takes it from the `_id`'s encoding.
+    pub fn document_of_pk(tenant: u32, collection: u32, pk: &[u8]) -> Key {
+        let mut out = data(tenant, collection, DOCUMENTS);
+        out.push(bucket_of_bytes(pk, DOCUMENT_BUCKETS));
+        out.extend_from_slice(pk);
+        Key(out)
+    }
+
     /// A document of a collection with a shard key, without bucket: its order is the shard key's.
     /// A hashed field of the shard key comes already hashed (009, 018).
     pub fn document_sharded(
@@ -377,6 +387,16 @@ fn data(tenant: u32, collection: u32, index: u32) -> Vec<u8> {
 
 /// Room for a key's prefix and a few short values without growing.
 const KEY_CAPACITY: usize = 96;
+
+/// Bytes of `01 · tenant · collection`.
+const COLLECTION_PREFIX_LEN: usize = 9;
+
+/// The `01 · tenant · collection` a key of the data space starts with: what its collection's
+/// documents and index entries share (004 FR-022, the dictionary of the collection); `None`
+/// outside that space.
+pub fn collection_of(key: &[u8]) -> Option<&[u8]> {
+    key.get(..COLLECTION_PREFIX_LEN).filter(|p| p[0] == DATA)
+}
 
 /// `01 · tenant · collection`.
 fn collection_prefix(tenant: u32, collection: u32) -> Vec<u8> {

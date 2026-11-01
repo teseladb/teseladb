@@ -211,6 +211,11 @@ pub struct RangeSm {
     /// past it (007, D-067). The log of a range born from a split lacks the data its parent left
     /// in the LSM, so whichever replica leads it later sends a snapshot and never that log.
     last_split: u64,
+    /// The index at or below which the log no longer rebuilds the range (018: a restore ingested
+    /// data without an entry): a replica whose log ends below it receives a snapshot, never those
+    /// entries. At the opening it is the LSM's flushed index, which holds whatever was ingested
+    /// before; a restored snapshot sets it to its own index.
+    log_floor: u64,
     /// Opened with nothing of the range for a replica added to it: it waits for a snapshot and
     /// takes no entry before (007).
     expects_snapshot: bool,
@@ -424,6 +429,7 @@ impl RangeSm {
             live: s.live,
             // No split below what the LSM flushed is known: no snapshot below it leaves.
             last_split: applied,
+            log_floor: applied,
             expects_snapshot: false,
             in_lsm: applied,
             frozen: s.merges.frozen,
@@ -433,6 +439,12 @@ impl RangeSm {
             relocated: s.relocated,
             core: None,
         }
+    }
+
+    /// Data entered the range without an entry, at what it applied (018: a restore's ingest): the
+    /// log up to here no longer rebuilds it.
+    pub fn data_ingested(&mut self) {
+        self.log_floor = self.applied;
     }
 
     /// Whether the range keeps its end in a local key (a split or a merge moved it, or it was
@@ -867,6 +879,10 @@ impl StateMachine for RangeSm {
                 self.apply_record(&record, ctx)?;
                 RangeOutput::Applied { ts: ctx.ts }
             }
+            Command::ForgetRecord { txn } => {
+                self.apply_forget(txn, ctx)?;
+                RangeOutput::Applied { ts: ctx.ts }
+            }
             Command::ResolveIntents { txn: _, status, commit_ts, resolutions, live_delta } => {
                 self.apply_resolve((status, commit_ts), &resolutions, live_delta, ctx)?;
                 RangeOutput::Applied { ts: ctx.ts }
@@ -936,6 +952,7 @@ impl StateMachine for RangeSm {
         self.relocated = relocated;
         // A split below the snapshot's index may be the last one: none below it leaves.
         self.last_split = applied;
+        self.log_floor = applied;
         self.expects_snapshot = false;
         // The entries past the snapshot rebuild the state from it.
         self.in_lsm = applied;
@@ -943,7 +960,11 @@ impl StateMachine for RangeSm {
     }
 
     fn snapshot_floor(&self) -> u64 {
-        self.last_split
+        self.last_split.max(self.log_floor)
+    }
+
+    fn log_floor(&self) -> u64 {
+        self.log_floor
     }
 
     fn snapshot_state_index(&self) -> u64 {

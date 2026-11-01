@@ -11,7 +11,7 @@
 
 use std::collections::VecDeque;
 
-use teseladb_bson::{Document, RawDoc, Value};
+use teseladb_bson::{Document, RawDoc, RawValue, Value};
 use teseladb_collation::{Collation, ParsedCollation, parse_collation};
 use teseladb_keys::{DOCUMENTS, KeyBuilder};
 use teseladb_meta::catalog::{CollectionEntry, Namespace};
@@ -97,7 +97,7 @@ pub struct QueryCursor {
     pub read_mark: Option<teseladb_txn::causal::ReadMark>,
 }
 
-fn collation_of(doc: Option<&Document>) -> Result<Option<Collation>, CommandError> {
+pub(crate) fn collation_of(doc: Option<&Document>) -> Result<Option<Collation>, CommandError> {
     let Some(d) = doc else { return Ok(None) };
     let bytes = d.to_bytes()?;
     let raw = RawDoc::from_bytes(&bytes)?;
@@ -221,29 +221,45 @@ pub fn for_each_match<B: Backend + ?Sized>(
 /// [`for_each_match`] with the command's `let` variables.
 pub fn for_each_match_with<B: Backend + ?Sized>(
     backend: &mut B,
+    range: (Vec<u8>, Vec<u8>),
+    filter: &Document,
+    collation: Option<&Document>,
+    vars: Option<&Document>,
+    concern: ReadConcern,
+    each: impl FnMut(Vec<u8>, &[u8]) -> Result<bool, CommandError>,
+) -> Result<(), CommandError> {
+    for_each_match_counted(backend, range, filter, collation, vars, concern, each).map(|_| ())
+}
+
+/// [`for_each_match_with`], giving the number of documents it read (`docsExamined` of
+/// `explain`).
+pub(crate) fn for_each_match_counted<B: Backend + ?Sized>(
+    backend: &mut B,
     (start, end): (Vec<u8>, Vec<u8>),
     filter: &Document,
     collation: Option<&Document>,
     vars: Option<&Document>,
     concern: ReadConcern,
     mut each: impl FnMut(Vec<u8>, &[u8]) -> Result<bool, CommandError>,
-) -> Result<(), CommandError> {
+) -> Result<u64, CommandError> {
     let plan = Plan::new(filter, None, collation)?.with_vars(vars);
     let ctx = plan.ctx();
     let mut next = start;
+    let mut examined = 0u64;
     loop {
         let rows = backend.scan(&next, &end, SCAN_CHUNK, concern)?;
         let short = rows.len() < SCAN_CHUNK;
         for (key, bytes) in rows {
             next = after(&key);
+            examined += 1;
             // A stored document always parses: one that does not is a fault, not a miss.
             let doc = RawDoc::from_bytes(&bytes)?;
             if plan.filter.matches(doc, &ctx).map_err(from_mql)? && !each(key, &bytes)? {
-                return Ok(());
+                return Ok(examined);
             }
         }
         if short {
-            return Ok(());
+            return Ok(examined);
         }
     }
 }
@@ -473,31 +489,61 @@ impl QueryCursor {
 }
 
 /// What `find` reads.
-struct FindArgs {
-    filter: Document,
-    projection: Option<Document>,
+pub(crate) struct FindArgs {
+    pub(crate) filter: Document,
+    pub(crate) projection: Option<Document>,
     sort: Option<SortSpec>,
-    skip: u64,
-    limit: Option<u64>,
+    pub(crate) skip: u64,
+    pub(crate) limit: Option<u64>,
     batch_size: Option<usize>,
     single_batch: bool,
     /// `tailable`, with `awaitData`.
     tailable: Option<bool>,
     /// A `$natural` sort: `true` forward, `false` backward.
-    natural: Option<bool>,
+    pub(crate) natural: Option<bool>,
     no_timeout: bool,
     allow_disk_use: bool,
-    collation: Option<Document>,
-    concern: ReadConcern,
+    pub(crate) collation: Option<Document>,
+    pub(crate) concern: ReadConcern,
     /// `let`, resolved.
-    vars: Option<Document>,
+    pub(crate) vars: Option<Document>,
 }
 
 /// The `let` of command `name`, checked and resolved (FR-032): the variables of its filter,
 /// projection and update.
-pub(crate) fn command_let(cmd: &Document, name: &str) -> Result<Option<Document>, CommandError> {
-    let Some(l) = args::doc(cmd, name, "let")? else { return Ok(None) };
-    teseladb_mql::vars::resolve_let(l, &super::engines::NodeExtensions).map(Some).map_err(from_mql)
+pub(crate) fn command_let<B: Backend + ?Sized>(
+    backend: &mut B,
+    cmd: &Document,
+    name: &str,
+) -> Result<Option<Document>, CommandError> {
+    // The `let` is resolved before the system variables exist: `$$NOW` there is 51144.
+    let mut vars = match args::doc(cmd, name, "let")? {
+        Some(l) => {
+            teseladb_mql::vars::resolve_let(l, &super::engines::NodeExtensions).map_err(from_mql)?
+        }
+        None => Document::new(),
+    };
+    vars.insert("NOW", Value::DateTime(backend.now_ms() as i64));
+    let (time, increment) = teseladb_hlc::to_timestamp(backend.cluster_mark());
+    vars.insert("CLUSTER_TIME", Value::Timestamp { time, increment });
+    vars.insert("USER_ROLES", user_roles(backend)?);
+    Ok(Some(vars))
+}
+
+/// `$$USER_ROLES`: the user's roles, direct and inherited, as `{_id: "db.role", role, db}` in the
+/// order of their `_id` (measured on a `refrouter` 9.0.4).
+fn user_roles<B: Backend + ?Sized>(backend: &mut B) -> Result<Value, CommandError> {
+    let mut roles: Vec<(String, Document)> = super::diagnostics::authenticated_roles(backend)?
+        .into_iter()
+        .map(|r| {
+            let id = format!("{}.{}", r.db, r.role);
+            let d =
+                Document::new().with("_id", id.as_str()).with("role", &*r.role).with("db", &*r.db);
+            (id, d)
+        })
+        .collect();
+    roles.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(Value::Array(roles.into_iter().map(|(_, d)| Value::Document(d)).collect()))
 }
 
 fn non_negative(v: Option<i64>, field: &str) -> Result<Option<u64>, CommandError> {
@@ -532,28 +578,41 @@ fn natural_sort(sort: Option<&Value>) -> Result<Option<bool>, CommandError> {
     }
 }
 
-fn find_args(cmd: &Document) -> Result<FindArgs, CommandError> {
-    let filter = match cmd.get("filter") {
-        None => Document::new(),
-        Some(Value::Document(f)) => f.clone(),
-        Some(_) => {
-            return Err(CommandError::new(
-                crate::error::TYPE_MISMATCH,
-                "Expected field filter to be of type object",
-            ));
+/// An object option of `find`, refused with `find`'s own message when it is another type.
+fn find_object(cmd: &Document, field: &str) -> Result<Option<Document>, CommandError> {
+    match cmd.get(field) {
+        None => Ok(None),
+        Some(Value::Document(d)) => Ok(Some(d.clone())),
+        // The router's parse of the command (008, as a `refrouter` 9.0.4 raises it).
+        Some(_) => Err(CommandError::new(
+            crate::error::TYPE_MISMATCH,
+            format!("Expected field {field} to be of type object"),
+        )
+        .parsed()),
+    }
+}
+
+pub(crate) fn find_args<B: Backend + ?Sized>(
+    backend: &mut B,
+    cmd: &Document,
+) -> Result<FindArgs, CommandError> {
+    let filter = find_object(cmd, "filter")?.unwrap_or_default();
+    let projection = find_object(cmd, "projection")?;
+    // A `$natural` hint reads in that direction when nothing sorts (measured).
+    let hinted = match cmd.get("hint") {
+        Some(h @ Value::Document(d)) if d.get(NATURAL).is_some() => {
+            natural_sort(Some(h)).map_err(|_| {
+                CommandError::new(
+                    BAD_VALUE,
+                    "$natural hint cannot be set to a value other than -1 or 1.",
+                )
+            })?
         }
+        _ => None,
     };
-    let projection = match cmd.get("projection") {
-        None => None,
-        Some(Value::Document(p)) => Some(p.clone()),
-        Some(_) => {
-            return Err(CommandError::new(
-                crate::error::TYPE_MISMATCH,
-                "Expected field projection to be of type object",
-            ));
-        }
-    };
-    let natural = natural_sort(cmd.get("sort"))?;
+    let natural = natural_sort(cmd.get("sort"))?
+        .or(hinted
+            .filter(|_| !matches!(cmd.get("sort"), Some(Value::Document(s)) if !s.is_empty())));
     let sort = match cmd.get("sort") {
         Some(Value::Document(_)) if natural.is_some() => None,
         Some(Value::Document(s)) if !s.is_empty() => Some(SortSpec::parse(s)?),
@@ -565,10 +624,7 @@ fn find_args(cmd: &Document) -> Result<FindArgs, CommandError> {
             ));
         }
     };
-    if !matches!(cmd.get("hint"), None | Some(Value::String(_) | Value::Document(_))) {
-        let msg = "Hint must be a string or an object";
-        return Err(CommandError::new(crate::error::FAILED_TO_PARSE, msg));
-    }
+    super::hints::check_hint_type(cmd)?;
     let tailable = args::boolean(cmd, FIND, "tailable")?.unwrap_or(false);
     let await_data = args::boolean(cmd, FIND, "awaitData")?.unwrap_or(false);
     if await_data && !tailable {
@@ -601,9 +657,9 @@ fn find_args(cmd: &Document) -> Result<FindArgs, CommandError> {
         natural,
         no_timeout: args::boolean(cmd, FIND, "noCursorTimeout")?.unwrap_or(false),
         allow_disk_use: args::boolean(cmd, FIND, "allowDiskUse")?.unwrap_or(false),
-        collation: args::doc(cmd, FIND, "collation")?.cloned(),
+        collation: find_object(cmd, "collation")?,
         concern: args::read_concern(cmd, FIND)?,
-        vars: command_let(cmd, FIND)?,
+        vars: command_let(backend, cmd, FIND)?,
     })
 }
 
@@ -666,7 +722,7 @@ pub(crate) fn count_scan(shared: &super::Shared, ns: &Namespace) {
 /// `find`.
 pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     let ns = target(ctx)?;
-    let a = find_args(ctx.cmd)?;
+    let a = find_args(ctx.backend, ctx.cmd)?;
     if let Some(u) = super::uuid::expected(ctx.cmd, FIND)? {
         super::uuid::check(ctx.backend, &ns, u)?;
     }
@@ -697,7 +753,22 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
     if a.tailable.is_some() {
         check_tailable(&ns, &coll, &a)?;
     }
-    let executor = |e: CommandError| executor_error(&ns_text, e);
+    check_filter(&a.filter, collation.as_ref(), a.vars.as_ref())?;
+    if let Some(p) = &a.projection {
+        check_projection(p, a.vars.as_ref())?;
+    }
+    let sort_doc = match ctx.cmd.get("sort") {
+        Some(Value::Document(s)) => Some(s),
+        _ => None,
+    };
+    let hinted = super::hints::Hinted {
+        filter: &a.filter,
+        sort: sort_doc,
+        projection: a.projection.as_ref(),
+        vars: a.vars.as_ref(),
+    };
+    super::hints::check_hint(ctx.backend, (&ns, &coll), ctx.cmd, &hinted)?;
+    let executor = |e: CommandError| executor_error(FIND, &ns_text, e);
     // An `_id` equality without a collation reads that document's key alone.
     let range = match super::crud::id_equality(&a.filter).filter(|_| collation.is_none()) {
         Some(id) => match super::crud::id_doc_key(ctx.backend, &coll, &id)? {
@@ -715,9 +786,41 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
         count_scan(ctx.shared, &ns);
     }
     let measured = measurements_of(&coll, ctx.cmd)?.is_some();
+    // The planner's index plan, when one wins: its documents in its order (010 FR-001).
+    let plannable = !measured
+        && collation.is_none()
+        && a.natural.is_none()
+        && a.tailable.is_none()
+        && range == documents_of(&coll);
+    let planned = if plannable {
+        let parsed = super::plan_exec::parsed_filter(&a.filter, a.vars.as_ref())?;
+        let sort = match ctx.cmd.get("sort") {
+            Some(Value::Document(s)) => sort_directions(s),
+            _ => Vec::new(),
+        };
+        let read = super::plan_exec::ReadPlan {
+            filter: &a.filter,
+            parsed: &parsed,
+            sort,
+            limit: a.limit.map(|l| a.skip.saturating_add(l)),
+            hint: {
+                let indexes = super::plan_exec::plan_indexes(ctx.backend, &coll)?;
+                super::hints::position(ctx.cmd.get("hint"), &indexes)?
+            },
+            vars: a.vars.as_ref(),
+            concern: a.concern,
+            intersect: super::lock(ctx.shared).params.hash_intersection,
+        };
+        super::plan_exec::planned_documents(ctx.backend, &coll, &read).map_err(executor)?
+    } else {
+        None
+    };
     let mut state = match &a.sort {
         _ if measured => measurements_cursor(ctx.backend, (&coll, ctx.cmd), &a, collation.as_ref())
             .map_err(executor)?,
+        None if planned.is_some() => {
+            planned_cursor(planned.unwrap_or_default(), &a, collation.as_ref()).map_err(executor)?
+        }
         None if a.natural == Some(false) => {
             backward(ctx.backend, range, &a, collation.as_ref()).map_err(executor)?
         }
@@ -737,7 +840,9 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
             tail: a.tailable.map(Tail::new),
             read_mark: None,
         },
-        Some(sort) => sorted(ctx.backend, &coll, &a, sort, collation.as_ref()).map_err(executor)?,
+        Some(sort) => {
+            sorted(ctx.backend, &coll, &a, sort, collation.as_ref(), planned).map_err(executor)?
+        }
     };
     state.read_mark = ctx.backend.read_mark();
     let size = Some(a.batch_size.unwrap_or(DEFAULT_FIRST_BATCH));
@@ -805,6 +910,42 @@ fn query_tree(filter: &Document) -> String {
     }
 }
 
+/// The fields and directions of a sort document.
+fn sort_directions(sort: &Document) -> Vec<(String, i32)> {
+    sort.iter()
+        .filter(|(k, _)| *k != "$natural")
+        .map(|(k, v)| {
+            let neg = match v {
+                Value::Int32(n) => *n < 0,
+                Value::Int64(n) => *n < 0,
+                Value::Double(x) => *x < 0.0,
+                _ => false,
+            };
+            (k.to_owned(), if neg { -1 } else { 1 })
+        })
+        .collect()
+}
+
+/// The documents an index plan found, in its order, skipped, limited and projected.
+fn planned_cursor(
+    rows: Vec<Vec<u8>>,
+    a: &FindArgs,
+    collation: Option<&Document>,
+) -> Result<QueryCursor, CommandError> {
+    let plan = Plan::new(&a.filter, a.projection.as_ref(), collation)?.with_vars(a.vars.as_ref());
+    let skip = usize::try_from(a.skip).unwrap_or(usize::MAX);
+    let take = a.limit.map_or(usize::MAX, |l| usize::try_from(l).unwrap_or(usize::MAX));
+    let mut docs = Vec::new();
+    for bytes in rows.iter().skip(skip).take(take) {
+        if let Some(d) = plan.apply(RawDoc::from_bytes(bytes)?, None)? {
+            docs.push(d);
+        }
+    }
+    let mut c = QueryCursor::buffered(docs);
+    c.left = a.limit;
+    Ok(c)
+}
+
 /// The matching documents of `range` from the newest key to the oldest (`$natural: -1`),
 /// skipped, limited and projected.
 fn backward<B: Backend + ?Sized>(
@@ -840,7 +981,6 @@ fn backward<B: Backend + ?Sized>(
     Ok(c)
 }
 
-/// An error of the projection while `find` runs, with the words of a `refrouter` 9.0.4 (measured).
 /// `find` on `system.views`: the definitions of the database's views from the catalog (015
 /// FR-002), filtered, skipped, limited and projected; in the catalog's order, which is the
 /// order of their `_id`.
@@ -935,12 +1075,114 @@ fn buffered_reply<B: Backend + ?Sized>(
     Ok(cursor_reply(id, ns_text, "firstBatch", first))
 }
 
-fn executor_error(ns: &str, mut e: CommandError) -> CommandError {
-    use teseladb_mql::projection::{POSITIONAL_MISMATCH, POSITIONAL_NO_MATCH};
-    if [POSITIONAL_NO_MATCH.code, POSITIONAL_MISMATCH.code].contains(&e.code.code) {
-        e.errmsg = format!("Executor error during find command: {ns} :: caused by :: {}", e.errmsg);
+/// An error found while command `command` (`find`, `count`, `distinct`) reads `ns`, as RefDb
+/// words it once the command was parsed (measured on a `refrouter` 9.0.4); a time limit, an
+/// interruption and a read preference no replica satisfies (the router's own error, measured
+/// 01-11-2026 on `find`, `count` and `distinct`) keep their own message.
+fn executor_error(command: &str, ns: &str, mut e: CommandError) -> CommandError {
+    if outside_executor(&e) {
+        return e;
     }
+    e.errmsg = if command == FIND {
+        format!("Executor error during find command: {ns} :: caused by :: {}", e.errmsg)
+    } else {
+        format!(
+            "Executor error during {command} command on namespace: {ns} :: caused by :: {}",
+            e.errmsg
+        )
+    };
     e
+}
+
+/// Whether `e` keeps its own message instead of the executor's (time limit, interruption, read
+/// preference).
+fn outside_executor(e: &CommandError) -> bool {
+    [
+        crate::error::MAX_TIME_MS_EXPIRED.code,
+        crate::error::INTERRUPTED.code,
+        crate::error::FAILED_TO_SATISFY_READ_PREFERENCE.code,
+    ]
+    .contains(&e.code.code)
+}
+
+/// Checks the shape of a `find` projection as the command parses it (inclusion and exclusion
+/// together, positional operators…).
+pub(crate) fn check_projection_shape(projection: &Document) -> Result<(), CommandError> {
+    Plan::new(&Document::new(), Some(projection), None).map(|_| ())
+}
+
+/// The operators of a `find` projection that are no expression.
+const PROJECTION_OPERATORS: [&str; 3] = ["$slice", "$elemMatch", "$meta"];
+
+/// Checks the computed fields of a `find` projection before any document is read, as RefDb
+/// parses them with the command (an unknown operator is 31325 there).
+pub(crate) fn check_projection(
+    projection: &Document,
+    vars: Option<&Document>,
+) -> Result<(), CommandError> {
+    let names: Vec<&str> = vars.map(|v| v.iter().map(|(k, _)| k).collect()).unwrap_or_default();
+    let ctx = teseladb_exec::expr::Ctx::checked(names);
+    let bytes = projection.to_bytes()?;
+    check_computed(RawDoc::from_bytes(&bytes)?, &ctx)
+}
+
+fn check_computed(fields: RawDoc<'_>, ctx: &teseladb_exec::expr::Ctx) -> Result<(), CommandError> {
+    for (_, v) in fields.iter() {
+        match v {
+            RawValue::Document(d) => match d.iter().next() {
+                Some((op, _)) if PROJECTION_OPERATORS.contains(&op) => {}
+                Some((op, _)) if op.starts_with('$') => {
+                    teseladb_exec::pipeline::projected_expr(v, ctx).map_err(from_mql)?;
+                    optimized(v, ctx)?;
+                }
+                _ => check_computed(d, ctx)?,
+            },
+            RawValue::String(s) if s.starts_with('$') => {
+                teseladb_exec::pipeline::projected_expr(v, ctx).map_err(from_mql)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// A computed field of a projection as RefDb optimises it when it parses it: a constant that
+/// fails fails the command with its own message.
+fn optimized(v: RawValue<'_>, ctx: &teseladb_exec::expr::Ctx) -> Result<(), CommandError> {
+    let scope = teseladb_exec::expr::Scope::default();
+    teseladb_exec::expr::optimize::optimize(&Value::from(v), ctx, &scope).map_err(from_mql)?;
+    Ok(())
+}
+
+/// Checks the filter of a read before any document is read, as RefDb parses it with the
+/// command: its operators, the expressions of its `$expr`s with the variables `vars`, and
+/// their constants.
+pub(crate) fn check_filter(
+    filter: &Document,
+    collation: Option<&Document>,
+    vars: Option<&Document>,
+) -> Result<(), CommandError> {
+    check_filter_syntax(filter, collation, vars)?;
+    // A constant of an `$expr` that fails fails the command before any document is read.
+    teseladb_exec::expr::optimize::optimize_filter(filter, vars).map_err(from_mql)?;
+    Ok(())
+}
+
+/// Checks the filter of a read as RefDb parses it, before it optimises its `$expr`s.
+pub(crate) fn check_filter_syntax(
+    filter: &Document,
+    collation: Option<&Document>,
+    vars: Option<&Document>,
+) -> Result<(), CommandError> {
+    let plan = Plan::new(filter, None, collation)?;
+    super::engines::check_geo(&plan.filter).map_err(from_mql)?;
+    let names: Vec<&str> = vars.map(|v| v.iter().map(|(k, _)| k).collect()).unwrap_or_default();
+    let bytes = filter.to_bytes()?;
+    teseladb_exec::pipeline::check_exprs(
+        RawDoc::from_bytes(&bytes)?,
+        &teseladb_exec::expr::Ctx::checked(names),
+    )
+    .map_err(from_mql)
 }
 
 /// The collation in a collection's options.
@@ -958,6 +1200,7 @@ fn sorted<B: Backend + ?Sized>(
     a: &FindArgs,
     sort: &SortSpec,
     collation: Option<&Document>,
+    planned: Option<Vec<Vec<u8>>>,
 ) -> Result<QueryCursor, CommandError> {
     let plan = Plan::new(&a.filter, a.projection.as_ref(), collation)?.with_vars(a.vars.as_ref());
     let coll_collation = collation_of(collation)?;
@@ -967,7 +1210,7 @@ fn sorted<B: Backend + ?Sized>(
     let mut err = None;
     let range = documents_of(coll);
     let vars = a.vars.as_ref();
-    for_each_match_with(backend, range, &a.filter, collation, vars, a.concern, |_, bytes| {
+    let mut keep = |bytes: &[u8]| -> Result<bool, CommandError> {
         memory += bytes.len();
         if memory > SORT_MEMORY_LIMIT && !a.allow_disk_use {
             err = Some(CommandError::new(
@@ -979,7 +1222,22 @@ fn sorted<B: Backend + ?Sized>(
         let raw = RawDoc::from_bytes(bytes)?;
         rows.push((sort.keys(raw, col), Document::from(raw)));
         Ok(true)
-    })?;
+    };
+    match planned {
+        // The plan's documents, in its order (an index that gives the sort's order keeps it).
+        Some(docs) => {
+            for d in &docs {
+                if !keep(d)? {
+                    break;
+                }
+            }
+        }
+        None => {
+            for_each_match_with(backend, range, &a.filter, collation, vars, a.concern, |_, b| {
+                keep(b)
+            })?;
+        }
+    }
     if let Some(e) = err {
         return Err(e);
     }
@@ -1183,29 +1441,88 @@ pub fn count<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comm
     .filter(|&l| l > 0);
     let concern = args::read_concern(ctx.cmd, COUNT)?;
     let collation = args::doc(ctx.cmd, COUNT, "collation")?.cloned();
-    if let Some(view) = super::views::resolve(ctx.backend, &ns)? {
+    super::hints::check_hint_type(ctx.cmd)?;
+    // A `refrouter` parses the filter and the collation itself; what fails after that fails on its
+    // shard and comes back after the shard's name, here the node's (D-102).
+    check_filter_syntax(&filter, collation.as_ref(), None)?;
+    let node = ctx.backend.node();
+    let asked = CountArgs { filter, skip, limit, concern, collation };
+    count_on_node(ctx, &ns, asked)
+        .map_err(|e| if outside_executor(&e) { e } else { super::failed_on(node, e) })
+}
+
+/// What `count` asks once parsed.
+struct CountArgs {
+    filter: Document,
+    skip: u64,
+    limit: Option<u64>,
+    concern: ReadConcern,
+    collation: Option<Document>,
+}
+
+/// The part of `count` a shard runs.
+fn count_on_node<B: Backend + ?Sized>(
+    ctx: &mut Ctx<'_, B>,
+    ns: &Namespace,
+    a: CountArgs,
+) -> Result<Document, CommandError> {
+    let CountArgs { filter, skip, limit, concern, collation } = a;
+    let node = ctx.backend.node();
+    // A `refrouter` asks its shard for `skip + limit` documents and skips them itself: the shard's
+    // count is the matches up to that bound.
+    let bound = limit.map(|l| l.saturating_add(skip));
+    if let Some(view) = super::views::resolve(ctx.backend, ns)? {
         super::views::check_collation(&view, collation.as_ref())?;
-        let stages = super::views::count_stages(ctx.cmd);
-        let docs = super::aggregate::read_through(ctx.backend, &ns, &stages, None, concern)?;
-        let n = i32::try_from(docs.len()).unwrap_or(i32::MAX);
-        return Ok(Document::new().with("n", n).with("ok", 1.0));
+        let mut stages = super::views::distinct_stages(&filter);
+        if let Some(b) = bound {
+            stages.push(Document::new().with("$limit", i64::try_from(b).unwrap_or(i64::MAX)));
+        }
+        // The view's pipeline fails as it parses with its own error, and as it runs as the
+        // aggregation a `refrouter` makes of the count (measured).
+        let (docs, _) =
+            super::aggregate::read_through_staged(ctx.backend, ns, (&stages, None), concern)?
+                .map_err(|e| {
+                    if outside_executor(&e) {
+                        return e;
+                    }
+                    let mut e = executor_error(super::aggregate::AGGREGATE, &full(ns), e);
+                    e.code = crate::error::COUNT_ON_VIEW_FAILED;
+                    e
+                })?;
+        let matched = u64::try_from(docs.len()).unwrap_or(u64::MAX);
+        return Ok(counted(node, matched, skip, limit));
     }
-    let mut n: u64 = 0;
-    let generated = super::authz_collections::documents(ctx.backend, &ns)?;
-    match ctx.backend.collection(&ns)? {
+    let mut matched: u64 = 0;
+    let generated = match super::authz_collections::documents(ctx.backend, ns)? {
+        None if ns.coll == super::kinds::SYSTEM_VIEWS => {
+            Some(super::kinds::view_documents(ctx.backend, &ns.db)?)
+        }
+        other => other,
+    };
+    match ctx.backend.collection(ns)? {
         _ if generated.is_some() => {
             let plan = Plan::new(&filter, None, collation.as_ref())?;
             let all = generated_matches(&plan, generated.as_deref().unwrap_or_default())?;
-            let left = u64::try_from(all.len()).unwrap_or(u64::MAX).saturating_sub(skip);
-            n = limit.map_or(left, |l| left.min(l));
+            let all = u64::try_from(all.len()).unwrap_or(u64::MAX);
+            matched = bound.map_or(all, |b| all.min(b));
         }
-        None => {
-            Plan::new(&filter, None, collation.as_ref())?;
-        }
+        None => {}
         Some(c) => {
             let collation = collation.or_else(|| options_collation(&c));
-            count_scan(ctx.shared, &ns);
-            let mut seen: u64 = 0;
+            check_filter(&filter, collation.as_ref(), None)?;
+            let hinted =
+                super::hints::Hinted { filter: &filter, sort: None, projection: None, vars: None };
+            super::hints::check_hint(ctx.backend, (ns, &c), ctx.cmd, &hinted)?;
+            let ns_text = full(ns);
+            // An index plan that wins counts its documents (T019).
+            if collation.is_none()
+                && let Some(docs) = planned(ctx, &c, &filter, bound, concern)
+                    .map_err(|e| executor_error(COUNT, &ns_text, e))?
+            {
+                let n = u64::try_from(docs.len()).unwrap_or(u64::MAX);
+                return Ok(counted(node, bound.map_or(n, |b| n.min(b)), skip, limit));
+            }
+            count_scan(ctx.shared, ns);
             for_each_doc(
                 ctx.backend,
                 (&c, ctx.cmd),
@@ -1214,17 +1531,26 @@ pub fn count<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comm
                 None,
                 concern,
                 |_, _| {
-                    seen += 1;
-                    if seen > skip {
-                        n += 1;
-                    }
-                    Ok(limit.is_none_or(|l| n < l))
+                    matched += 1;
+                    Ok(bound.is_none_or(|b| matched < b))
                 },
-            )?;
+            )
+            .map_err(|e| executor_error(COUNT, &ns_text, e))?;
         }
     }
-    let n = i32::try_from(n).unwrap_or(i32::MAX);
-    Ok(Document::new().with("n", n).with("ok", 1.0))
+    Ok(counted(node, matched, skip, limit))
+}
+
+/// The reply of `count`: `n` after the skip and the limit, and the node's own count of
+/// `matched` under `shards`, as a `refrouter` gives its shard's.
+fn counted(node: u64, matched: u64, skip: u64, limit: Option<u64>) -> Document {
+    let left = matched.saturating_sub(skip);
+    let n = limit.map_or(left, |l| left.min(l));
+    let int = |v: u64| i32::try_from(v).unwrap_or(i32::MAX);
+    Document::new()
+        .with("n", int(n))
+        .with("shards", Document::new().with(super::shard_name(node), int(matched)))
+        .with("ok", 1.0)
 }
 
 /// Adds to `found` the values at `key` of document `bytes` that it does not hold yet (an array
@@ -1309,6 +1635,7 @@ pub fn distinct<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, C
         None => return Err(missing(DISTINCT, "key")),
     };
     let filter = args::doc(ctx.cmd, DISTINCT, "query")?.cloned().unwrap_or_default();
+    super::hints::check_hint_type(ctx.cmd)?;
     let concern = args::read_concern(ctx.cmd, DISTINCT)?;
     let collation_doc = args::doc(ctx.cmd, DISTINCT, "collation")?.cloned();
     let spec = SortSpec { fields: vec![(String::from("v"), true)], metas: Vec::new() };
@@ -1331,6 +1658,26 @@ pub fn distinct<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, C
             let collation_doc = collation_doc.or_else(|| options_collation(&c));
             let collation = collation_of(collation_doc.as_ref())?;
             let col: Option<&dyn teseladb_bson::Collator> = collation.as_ref().map(|c| c as _);
+            check_filter(&filter, collation_doc.as_ref(), None)?;
+            let hinted =
+                super::hints::Hinted { filter: &filter, sort: None, projection: None, vars: None };
+            super::hints::check_hint(ctx.backend, (&ns, &c), ctx.cmd, &hinted)?;
+            let ns_text = full(&ns);
+            // An index plan that wins gives the documents (T019).
+            let through = if collation_doc.is_none() {
+                planned(ctx, &c, &filter, None, concern)
+                    .map_err(|e| executor_error(DISTINCT, &ns_text, e))?
+            } else {
+                None
+            };
+            if let Some(docs) = through {
+                for bytes in &docs {
+                    add_distinct(&mut found, bytes, &key, &spec, col)?;
+                }
+                return Ok(Document::new()
+                    .with("values", sorted_values(found, &spec, col))
+                    .with("ok", 1.0));
+            }
             count_scan(ctx.shared, &ns);
             for_each_doc(
                 ctx.backend,
@@ -1343,7 +1690,8 @@ pub fn distinct<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, C
                     add_distinct(&mut found, bytes, &key, &spec, col)?;
                     Ok(true)
                 },
-            )?;
+            )
+            .map_err(|e| executor_error(DISTINCT, &ns_text, e))?;
             collation_doc
         }
         (None, None) => {
@@ -1353,9 +1701,44 @@ pub fn distinct<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, C
     };
     let collation = collation_of(collation_doc.as_ref())?;
     let col: Option<&dyn teseladb_bson::Collator> = collation.as_ref().map(|c| c as _);
+    Ok(Document::new().with("values", sorted_values(found, &spec, col)).with("ok", 1.0))
+}
+
+/// The values `distinct` found, in its order.
+fn sorted_values(
+    mut found: Vec<(SortKey, Value)>,
+    spec: &SortSpec,
+    col: Option<&dyn teseladb_bson::Collator>,
+) -> Vec<Value> {
     found.sort_by(|a, b| {
         spec.compare_keys(std::slice::from_ref(&a.0), std::slice::from_ref(&b.0), col)
     });
-    let values: Vec<Value> = found.into_iter().map(|(_, v)| v).collect();
-    Ok(Document::new().with("values", values).with("ok", 1.0))
+    found.into_iter().map(|(_, v)| v).collect()
+}
+
+/// The documents of `coll` matching `filter` that the winning index plan reads (`bound` at
+/// most), or `None` when the collection scan wins.
+fn planned<B: Backend + ?Sized>(
+    ctx: &mut Ctx<'_, B>,
+    coll: &CollectionEntry,
+    filter: &Document,
+    bound: Option<u64>,
+    concern: ReadConcern,
+) -> Result<Option<Vec<Vec<u8>>>, CommandError> {
+    let indexes = super::plan_exec::plan_indexes(ctx.backend, coll)?;
+    if indexes.is_empty() {
+        return Ok(None);
+    }
+    let parsed = super::plan_exec::parsed_filter(filter, None)?;
+    let read = super::plan_exec::ReadPlan {
+        filter,
+        parsed: &parsed,
+        sort: Vec::new(),
+        limit: bound,
+        hint: super::hints::position(ctx.cmd.get("hint"), &indexes)?,
+        vars: None,
+        concern,
+        intersect: super::lock(ctx.shared).params.hash_intersection,
+    };
+    super::plan_exec::planned_documents(ctx.backend, coll, &read)
 }

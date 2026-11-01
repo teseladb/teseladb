@@ -44,8 +44,12 @@ pub(super) fn reply_of(r: RemoteReply) -> Result<Reply, RangeError> {
         RemoteReply::Value { ts, value } => Ok(Reply::Value { ts, value }),
         RemoteReply::Intents { ts } => Ok(Reply::Intents { ts }),
         RemoteReply::Record(record) => Ok(Reply::Record(record)),
-        // A transaction's request never answers with rows.
-        RemoteReply::Rows(_) => Err(RangeError::Unavailable),
+        // What `FindIntents` found (the reaper, 008 record GC).
+        RemoteReply::Rows(rows) => {
+            Ok(Reply::Batch(rows.into_iter().map(|(k, v)| (k, (0, v))).collect()))
+        }
+        // A backup's or a restore's answer is never one of a transaction's.
+        RemoteReply::Piece { .. } | RemoteReply::Restored { .. } => Err(RangeError::Unavailable),
     }
 }
 

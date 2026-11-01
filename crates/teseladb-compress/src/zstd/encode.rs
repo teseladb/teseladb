@@ -38,6 +38,12 @@ fn hash(data: &[u8], i: usize) -> usize {
 
 /// Compresses `data` into one frame.
 pub fn compress(data: &[u8]) -> Vec<u8> {
+    compress_with_dict(data, &[])
+}
+
+/// Compresses `data` into one frame whose matches may also reach into the raw content dictionary
+/// `dict` (RFC 8878 §5): the decoder needs the same dictionary, which the frame does not name.
+pub fn compress_with_dict(data: &[u8], dict: &[u8]) -> Vec<u8> {
     let mut out = MAGIC.to_le_bytes().to_vec();
     let n = data.len() as u64;
     let (flag, size): (u8, Vec<u8>) = match n {
@@ -53,11 +59,17 @@ pub fn compress(data: &[u8]) -> Vec<u8> {
     let ml = Table::spread(&ML_DEFAULT, ML_DEFAULT_LOG);
     let enc = (Encoder::new(&ll), Encoder::new(&of), Encoder::new(&ml));
     let mut table = vec![0u32; 1 << HASH_BITS];
+    // The dictionary is the history before the content: its positions are in the table.
+    let buf: Vec<u8> = [dict, data].concat();
+    let base = dict.len();
+    for k in 0..base.saturating_sub(MIN_MATCH - 1) {
+        table[hash(&buf, k)] = (k + 1) as u32;
+    }
     let mut start = 0;
     loop {
         let end = (start + BLOCK_MAX).min(data.len());
         let last = end == data.len();
-        let seqs = find(data, (start, end), &mut table, MAX_OFFSET);
+        let seqs = find(&buf, (base + start, base + end), &mut table, MAX_OFFSET);
         let body = block(&data[start..end], &seqs, &enc);
         let (kind, content) = match body {
             Some(b) if b.len() < end - start => (BLOCK_COMPRESSED, b),

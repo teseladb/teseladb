@@ -8,7 +8,7 @@
 //! A double or integer argument gives a double, a decimal one a decimal (computed by
 //! `teseladb_mql::decimal_trig`); `null` or a missing argument gives `null`.
 
-use teseladb_bson::{Decimal128, Document, RawDoc, RawValue, Value};
+use teseladb_bson::{Decimal128, Document, RawValue, Value};
 use teseladb_mql::decimal_trig::{Trig, atan2 as decimal_atan2, trig};
 use teseladb_mql::{ErrorCode, MqlError, stream_double};
 
@@ -398,10 +398,7 @@ impl Misc {
             },
             Misc::BsonSize(e) => match at(e)? {
                 ref v if nullish(v) => Ok(Some(Value::Null)),
-                Some(Value::Document(d)) => {
-                    let bytes = d.to_bytes().map_err(|e| error(codes::BAD_VALUE, e.to_string()))?;
-                    Ok(Some(int(bytes.len())))
-                }
+                Some(Value::Document(d)) => Ok(Some(int(crate::raw::bytes_of(&d)?.len()))),
                 Some(other) => Err(error(
                     BSON_SIZE,
                     format!("$bsonSize requires a document input, found: {}", type_name_of(&other)),
@@ -448,11 +445,9 @@ impl Misc {
             Misc::HashedKey(e) => {
                 let v = at(e)?.unwrap_or(Value::Null);
                 let holder = Document::new().with("v", v);
-                let bytes =
-                    holder.to_bytes().map_err(|e| error(codes::BAD_VALUE, e.to_string()))?;
-                let raw = RawDoc::from_bytes(&bytes)
-                    .map_err(|e| error(codes::BAD_VALUE, e.to_string()))?;
-                let key = raw.get("v").map_or(0, teseladb_index::keygen::hashed_key);
+                let key = crate::raw::with_raw_doc(&holder, |raw| {
+                    Ok(raw.get("v").map_or(0, teseladb_index::keygen::hashed_key))
+                })?;
                 Ok(Some(Value::Int64(key)))
             }
             Misc::Similarity { kind, vectors, score } => {

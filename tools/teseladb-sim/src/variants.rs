@@ -48,7 +48,13 @@ variants!(
     // A capped insert that evicts only past `max`: the `special-collections` workload's next read
     // finds the collection over `size` with several documents (015 T010).
     ("capped_exceeds_size", "capped", Default, 1000),
-    ("commit_below_push", "intents", Default, 1000),
+    // A commit below a push (008 T024): seed 6 of `txn-bank` reads every account at a mark the
+    // transfer committed below, and the total is off; `intents` in `splits` finds it later.
+    ("commit_below_push", "bank-total", Default, 1000),
+    // A recovery that looks for another transaction's record (008): it finds none, answers that
+    // the transaction never began and leaves that record aborted; the transaction itself goes on
+    // and commits, and `txn_recovery` finds the recovery that answered «not committed».
+    ("decision_not_durable", "txn_recovery", Default, 1000),
     ("follower_local_read", "linearizable", Default, 1000),
     ("follower_read_above_closed", "mvcc", Default, 1000),
     ("fsync_retry_success", "recovery", Default, 1000),
@@ -62,6 +68,10 @@ variants!(
     // A range frozen for a merge goes on writing (007 T017): a write the right range acknowledged
     // after its state went to the left one is missing on the replicas that had not applied it.
     ("merge_without_freeze", "durability", Default, 1000),
+    // Group 0 goes on taking orders on the descriptors it handed over to the Meta2 ranges (007
+    // T028): a change it acknowledged afterwards is missing from the Meta2 range that holds the
+    // descriptor, and the next lookup there sees an older term.
+    ("meta2_stale_route", "meta2", Default, 1000),
     // Writes that do not wait for each other's latches: two read-modify-writes of one document read
     // the same version and both succeed. Each answer names the value its write found (a fresh
     // evaluation gives it as its result), so the history holds two writes over the same value:
@@ -76,13 +86,26 @@ variants!(
     ("plain_write_fails_on_intent", "plain_writes", Default, 1000),
     ("read_before_term_commit", "raft_safety", Default, 1000),
     ("read_skips_inflight_write", "mvcc", Default, 1000),
-    ("reader_ignores_intent", "intents", Default, 1000),
+    // A reader that ignores an intent (008 T024): in seed 1 the index maintenance of `indexes`
+    // reads past an intent and leaves an entry missing, before `intents` in `splits` sees it.
+    ("reader_ignores_intent", "index_consistency", Default, 1000),
     // A reader that ignores what its push found (008 T029): it reads below the intent of a
-    // transaction that committed at or below its mark, and `txn-bank`'s read of every account
-    // misses one side of a transfer (seed 1).
-    ("reader_ignores_push_result", "bank-total", Default, 1000),
+    // transaction that committed at or below its mark. Seed 1 fails in two workloads: `indexes`,
+    // whose index maintenance reads the old document and leaves entries no document needs, and
+    // `txn-bank`, whose read of every account misses one side of a transfer. `scripts/sim-mutants.sh`
+    // takes the first workload by name within the lowest seed, so `indexes` decides.
+    ("reader_ignores_push_result", "index_consistency", Default, 1000),
+    // A recovery that answers «aborted» for a record that does not exist and leaves none (008):
+    // the transaction's coordinator, whose first write comes after it, begins and commits it.
+    // A reaper that removes a client transaction's record as soon as it is final (008 record GC):
+    // `txn_recovery` finds a removal with no later transaction of its session and its session's
+    // time not over.
+    ("record_forgotten_early", "txn_recovery", Default, 1000),
+    ("record_not_fenced", "txn_recovery", Default, 1000),
     ("release_log_before_flush", "lsm", Default, 1000),
-    ("resolve_before_durable_commit", "intents", Default, 1000),
+    // Intents resolved before the commit is durable (008 T024): in seed 1 of `txn-append` a
+    // transaction reads a list in an order no other one saw, before `intents` in `splits`.
+    ("resolve_before_durable_commit", "snapshot-isolation", Default, 1000),
     ("resolved_intent_reappears", "lsm", Default, 1000),
     ("rollback_unrecorded", "rollback", Default, 1000),
     // The split retracts the intents of the half that moves (007 T017): a transaction that commits
@@ -106,13 +129,15 @@ variants!(
     // R3e): the next leader writes below them unless the read cache's floor holds it. The voters
     // carry the old leader's clock to the new one (D-069), so only a write within the edge's
     // 90-110 ms of the last lease read shows it, and the election guard (150 ms) comes 40 ms after
-    // the lease (110 ms): about 2 seeds in 1 000 have one, so it gets 3 000. The variant also
-    // leaves out the raise of the new leader's clock to the cache's minimum (005 research R12):
-    // every read takes its mark from the leader's clock or puts it in the clock, so its own later
-    // writes go above it anyway, and the cache starts afresh each term, so its minimum is all the
-    // floor carries from one leader to the next; the raise covers that minimum, and the variant
-    // without it went undetected in 3 000 seeds (D-083, the same rule as `HlcLease.tla`).
-    ("write_below_read", "mvcc", Heavy, 3000),
+    // the lease (110 ms). `range-docs` makes that write: while such a leader is cut off its
+    // clients read through it until its lease ends and then write the same documents through the
+    // next leader as soon as it leads (75 seeds in 1 000 caught, the first at seed 11). The
+    // variant also leaves out the raise of the new leader's clock to the cache's minimum (005
+    // research R12): every read takes its mark from the leader's clock or puts it in the clock, so
+    // its own later writes go above it anyway, and the cache starts afresh each term, so its
+    // minimum is all the floor carries from one leader to the next (D-083, the same rule as
+    // `HlcLease.tla`).
+    ("write_below_read", "mvcc", Heavy, 1000),
     // Reads without the uncertainty window (008 FR-008): a transaction that begins on a node whose
     // clock is behind, after another's commit on a node whose clock is ahead was acknowledged,
     // reads below that commit and misses it; the real-time order of `txn-append` finds the cycle

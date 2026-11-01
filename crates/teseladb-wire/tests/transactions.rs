@@ -14,7 +14,7 @@ use teseladb_hlc::{Hlc, from_timestamp};
 use teseladb_range::host::RangeError;
 use teseladb_wire::commands::txn::{
     KILL_CURSORS_FIRST, NOT_SUPPORTED_IN_TRANSACTION, READ_CONCERN_LEVEL_IN_TRANSACTION, fields,
-    resolve_queued, tick_idle,
+    resolve_queued, run_in_txn, tick_idle,
 };
 use teseladb_wire::commands::txn_ddl::{
     SCRATCH_PREFIX, TIMESERIES_IN_TRANSACTION, VIEW_IN_TRANSACTION, is_scratch,
@@ -25,7 +25,9 @@ use teseladb_wire::commands::{NodeSessions, Timeouts};
 use teseladb_wire::concerns::Level;
 use teseladb_wire::connection::{Connection, Request};
 use teseladb_wire::dispatch::{Action, ClusterTime, NodeInfo, Topology, dispatch_with};
-use teseladb_wire::error::{DUPLICATE_KEY, NO_SUCH_TRANSACTION, WRITE_CONFLICT};
+use teseladb_wire::error::{
+    CommandError, DUPLICATE_KEY, ILLEGAL_OPERATION, NO_SUCH_TRANSACTION, WRITE_CONFLICT,
+};
 use teseladb_wire::msg::OpMsg;
 
 const DB: &str = "t";
@@ -165,6 +167,13 @@ fn a_failed_statement_ends_the_transaction() {
     let r = run(&mut m, DB, stmt(insert(1), 3, 1, true));
     assert_eq!(code(&r), Some(&Value::Int32(112)), "{r:?}");
     assert!(has_label(&r, "TransientTransactionError"));
+    // As a `refrouter` relays the shard's error, with the node's host where it names the shard's
+    // (measured on 9.0.4, DV-031, D-102).
+    let host = format!("{}:{}", m.facts.host.hostname, m.facts.port);
+    let msg = format!(
+        "Encountered error from {host} during a transaction :: caused by :: cluster write results unavailable from {host} :: caused by :: Caused by :: Write conflict during plan execution and yielding is disabled. :: Please retry your operation or multi-document transaction."
+    );
+    assert_eq!(r.get("errmsg"), Some(&Value::from(msg)), "{r:?}");
     let r = run(&mut m, "admin", end("commitTransaction", 3, 1));
     assert_eq!(code(&r), Some(&Value::Int32(251)), "{r:?}");
     // A record that is gone: 251 with the label.
@@ -781,4 +790,505 @@ fn answers_inside_a_transaction_carry_the_recovery_token() {
     // A commit of a transaction that never started gets none.
     let r = run(&mut m, "admin", end("commitTransaction", 71, 9));
     assert_eq!(token(&r), None, "{r:?}");
+}
+
+/// How a session's transaction is named in RefDb's messages, for the session `lsid(n)`.
+fn session(n: u8) -> String {
+    let h = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+    let id = [n; 16];
+    let uuid = format!(
+        "{}-{}-{}-{}-{}",
+        h(&id[..4]),
+        h(&id[4..6]),
+        h(&id[6..8]),
+        h(&id[8..10]),
+        h(&id[10..])
+    );
+    format!("{uuid} - 47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU= -  - ")
+}
+
+/// The session fields of a command and a commit of a transaction the node has no record of, as
+/// a `refrouter` 9.0.4 answers them (measured on 01-11-2026 over the wire): a `txnNumber` without a
+/// session, `autocommit` without a `txnNumber`, a commit or an abort without a `txnNumber`, a
+/// `txnNumber` on a command that is no retryable write without `autocommit: false`, a commit
+/// outside `admin`, and a commit that would need its `recoveryToken`, which also leaves the
+/// transaction it names as the session's last.
+#[test]
+fn session_fields_and_unknown_commits_answer_as_on_a_refrouter() {
+    let mut m = node();
+    let txn = |d: Document, n: i64| d.with("txnNumber", Value::Int64(n));
+    let commit = || Document::new().with("commitTransaction", 1);
+    let abort = || Document::new().with("abortTransaction", 1);
+    let fails = |r: &Document, c: i32, msg: &str| {
+        assert_eq!(code(r), Some(&Value::Int32(c)), "{r:?}");
+        assert_eq!(errmsg(r), msg, "{r:?}");
+    };
+    let no_session = "Transaction number requires a session ID to also be specified";
+    fails(&run(&mut m, DB, txn(find(), 3)), 72, no_session);
+    fails(&run(&mut m, "admin", txn(commit(), 3)), 72, no_session);
+    let no_number = "'autocommit' field requires a transaction number to also be specified";
+    fails(&run(&mut m, DB, find().with("lsid", lsid(90)).with("autocommit", false)), 72, no_number);
+    let start = find().with("lsid", lsid(90)).with("startTransaction", true);
+    fails(&run(&mut m, DB, start.with("autocommit", false)), 72, no_number);
+    let within = |name: &str| format!("{name} can only be run within a session");
+    fails(&run(&mut m, "admin", commit()), 72, &within("commitTransaction"));
+    fails(&run(&mut m, "admin", abort().with("lsid", lsid(90))), 72, &within("abortTransaction"));
+    // A `txnNumber` without `autocommit: false` belongs to a retryable write only.
+    let not_retryable = |name: &str| {
+        format!(
+            "txnNumber may only be provided for multi-document transactions and retryable write \
+             commands. autocommit:false was not provided, and {name} is not a retryable write \
+             command."
+        )
+    };
+    let bare = |d: Document| txn(d.with("lsid", lsid(91)), 3);
+    fails(&run(&mut m, DB, bare(find())), 50768, &not_retryable("find"));
+    fails(&run(&mut m, "admin", bare(commit())), 50768, &not_retryable("commitTransaction"));
+    fails(&run(&mut m, "admin", bare(abort())), 50768, &not_retryable("abortTransaction"));
+    let info = Document::new().with("buildInfo", 1);
+    fails(&run(&mut m, "admin", bare(info)), 50768, &not_retryable("buildInfo"));
+    let illegal = "It is illegal to provide a txnNumber for this command";
+    fails(&run(&mut m, "admin", bare(Document::new().with("ping", 1))), 50889, illegal);
+    fails(&run(&mut m, "admin", bare(Document::new().with("hello", 1))), 50889, illegal);
+    // The command's own argument errors come first.
+    let distinct = bare(Document::new().with("distinct", "c"));
+    assert_eq!(code(&run(&mut m, DB, distinct)), Some(&Value::Int32(40414)));
+    assert!(ok(&run(&mut m, DB, bare(insert(30)))), "a retryable write");
+    // A commit runs on `admin`; an abort anywhere.
+    let outside = "commitTransaction may only be run against the admin database.";
+    fails(&run(&mut m, DB, end("commitTransaction", 92, 3)), 13, outside);
+    assert!(ok(&run(&mut m, DB, stmt(find(), 92, 3, true))));
+    assert!(ok(&run(&mut m, DB, end("abortTransaction", 92, 3))));
+    // A statement of a transaction the session does not run names the session's last one.
+    let cannot = |n: i64, s: u8| {
+        format!("cannot continue txnId {n} for session {} with txnRetryCounter 0", session(s))
+    };
+    fails(&run(&mut m, DB, stmt(find(), 93, 5, false)), 251, &cannot(-1, 93));
+    fails(&run(&mut m, "admin", end("abortTransaction", 93, 5)), 251, &cannot(-1, 93));
+    assert!(ok(&run(&mut m, DB, stmt(find(), 93, 7, true))));
+    fails(&run(&mut m, DB, stmt(find(), 93, 8, false)), 251, &cannot(7, 93));
+    // A commit of a transaction the session has no record of needs its `recoveryToken`.
+    let recover = "Cannot recover the transaction decision without a recoveryToken";
+    fails(&run(&mut m, "admin", end("commitTransaction", 94, 5)), 50940, recover);
+    let with = |t: Document, s: u8, n: i64| end("commitTransaction", s, n).with("recoveryToken", t);
+    let r = run(&mut m, "admin", with(Document::new(), 95, 5));
+    let empty = "Recovery token is empty, meaning the transaction only performed reads and can be \
+                 safely retried";
+    fails(&r, 251, empty);
+    assert!(has_label(&r, "TransientTransactionError"), "{r:?}");
+    let shard = |name: String| Document::new().with("recoveryShardId", name);
+    let r = run(&mut m, "admin", with(shard(shard_name(1)), 96, 5));
+    let unmatched = |n: i64, s: u8, active: i64| {
+        format!(
+            "Given transaction number {n} on session {} using txnRetryCounter 0 does not match any \
+             in-progress transactions. The active transaction number is {active}",
+            session(s)
+        )
+    };
+    fails(&r, 251, &unmatched(5, 96, -1));
+    assert!(has_label(&r, "TransientTransactionError"), "{r:?}");
+    fails(&run(&mut m, "admin", with(shard("nope".into()), 96, 6)), 70, "Shard nope not found");
+    // The session's running transaction ends with it: 7 is now its last number.
+    assert!(ok(&run(&mut m, DB, stmt(find(), 97, 6, true))));
+    let r = run(&mut m, "admin", with(shard(shard_name(1)), 97, 7));
+    fails(&r, 251, &unmatched(7, 97, 6));
+    let too_old =
+        format!("txnNumber 6 is less than last txnNumber 7 seen in session {}", session(97));
+    fails(&run(&mut m, DB, stmt(find(), 97, 6, false)), 225, &too_old);
+    let key = u128::from_be_bytes([97; 16]);
+    assert!(lock(&m.shared).txns.get(&key).is_some_and(|s| !s.is_open()), "6 ended");
+}
+
+/// A commit of a transaction the node has no record of, with its `recoveryToken`, recovers the
+/// decision from the transaction's record, as a second `refrouter` 9.0.4 recovers it from the shard
+/// (measured on 01-11-2026 through two routers of one cluster): any node finds the record from the
+/// session and the number. Committed answers `ok`; aborted, and a running one, which the recovery
+/// aborts, answer `NoSuchTransaction`; so does a number the session never began, whose record the
+/// recovery leaves aborted. Each answer has an empty `recoveryToken`. A node `config.shards` does
+/// not list is not found, and a record that does not answer fails as a shard that cannot be
+/// reached.
+#[test]
+fn a_commit_recovers_its_decision_from_the_transactions_record() {
+    let mut m = node();
+    m.shards = (1..=2).map(shard_name).collect();
+    let key = |n: u8| u128::from_be_bytes([n; 16]);
+    let token = |n: u64| Document::new().with("recoveryShardId", shard_name(n));
+    let commit = |s: u8, t: Document| end("commitTransaction", s, 1).with("recoveryToken", t);
+    // The node that recovers has none of the sessions: another node ran them.
+    let elsewhere = |m: &mut Mem, s: u8| lock(&m.shared).txns.remove(&key(s));
+    let empty = Some(Value::Document(Document::new()));
+    let fails = |r: &Document, msg: &str| {
+        assert_eq!(code(r), Some(&Value::Int32(251)), "{r:?}");
+        assert_eq!(errmsg(r), msg, "{r:?}");
+        assert!(has_label(r, "TransientTransactionError"), "{r:?}");
+    };
+    assert!(ok(&run(&mut m, DB, stmt(insert(1), 100, 1, true))));
+    assert!(ok(&run(&mut m, "admin", end("commitTransaction", 100, 1))));
+    elsewhere(&mut m, 100);
+    let r = run(&mut m, "admin", commit(100, token(2)));
+    assert!(ok(&r), "{r:?}");
+    assert_eq!(r.get("recoveryToken").cloned(), empty);
+    // Aborted by its client.
+    assert!(ok(&run(&mut m, DB, stmt(insert(2), 101, 1, true))));
+    assert!(ok(&run(&mut m, "admin", end("abortTransaction", 101, 1))));
+    elsewhere(&mut m, 101);
+    let found = "Recovering the transaction's outcome found the transaction aborted";
+    let r = run(&mut m, "admin", commit(101, token(2)));
+    fails(&r, found);
+    assert_eq!(r.get("recoveryToken").cloned(), empty);
+    // Running on its node: the recovery aborts it, and its own commit there fails after.
+    assert!(ok(&run(&mut m, DB, stmt(insert(3), 102, 1, true))));
+    let running = elsewhere(&mut m, 102).expect("its session");
+    fails(&run(&mut m, "admin", commit(102, token(1))), found);
+    lock(&m.shared).txns.insert(key(102), running);
+    let r = run(&mut m, "admin", end("commitTransaction", 102, 1));
+    fails(&r, "Transaction with { txnNumber: 1 } has been aborted.");
+    // Never begun: its record now says aborted, for a coordinator that would come later.
+    let r = run(&mut m, "admin", commit(103, token(1)));
+    let msg = format!(
+        "Given transaction number 1 on session {} using txnRetryCounter 0 does not match any \
+         in-progress transactions. The active transaction number is -1",
+        session(103)
+    );
+    fails(&r, &msg);
+    assert_eq!(r.get("recoveryToken").cloned(), empty);
+    let t = teseladb_txn::recovery::client_txn_id(key(103), 1);
+    assert_eq!(m.records.get(&t.0).map(|r| r.1), Some(teseladb_range::intents::TxnStatus::Aborted));
+    let all = run(&mut m, DB, find());
+    let only_1 = Value::Array(vec![Value::Document(doc(&[("_id", Value::Int32(1))]))]);
+    assert_eq!(field(&all, "cursor.firstBatch").clone(), only_1);
+    // The record's range does not answer.
+    m.push_errors.push(RangeError::Unavailable);
+    let unreachable =
+        "Could not find host matching read preference { mode: \"primary\" } for set node2";
+    let r = run(&mut m, "admin", commit(104, token(2)));
+    assert_eq!((code(&r), errmsg(&r)), (Some(&Value::Int32(133)), unreachable), "{r:?}");
+    m.push_errors.push(RangeError::Unavailable);
+    let r = run(&mut m, "admin", commit(105, token(2)).with("maxTimeMS", 3_000));
+    assert_eq!((code(&r), errmsg(&r)), (Some(&Value::Int32(50)), "operation exceeded time limit"));
+    let r = run(&mut m, "admin", commit(106, token(9)));
+    assert_eq!((code(&r), errmsg(&r)), (Some(&Value::Int32(70)), "Shard node9 not found"));
+}
+
+/// A statement of a transaction reaches the node for what is not the transaction's own: the
+/// database's mark, the read preference and mark, the memory budget, the clocks and the requests
+/// to the ranges go to the node underneath (008).
+#[test]
+fn a_statement_reaches_the_node_for_what_is_not_the_transactions() {
+    use teseladb_range::host::{Reply, TxnOp};
+    use teseladb_range::intents::{Push, TxnId};
+    let mut m = node();
+    m.txn_budget = Some(4_096);
+    assert!(ok(&run(&mut m, DB, stmt(insert(60), 130, 1, true))));
+    let shared = std::mem::take(&mut m.shared);
+    let cmd = stmt(find(), 130, 1, false);
+    let f = fields("find", &cmd).unwrap().expect("a statement");
+    let marks = m.database_marks;
+    let r = run_in_txn(&mut m, &shared, ("find", DB, &cmd), f, |b| {
+        assert_eq!(b.database_mark(DB).unwrap(), None);
+        b.set_read_preference(None);
+        assert_eq!(b.txn_memory_budget(), 4_096);
+        b.set_read_mark(None);
+        assert_eq!(b.read_mark(), None);
+        let wall = b.wall_ms();
+        assert!(b.txn_wait_clock(wall + 5));
+        assert!(b.wall_ms() >= wall + 5, "the node's clock moved");
+        let push = TxnOp::PushTxn {
+            txn: TxnId(9),
+            push: Push::To(teseladb_hlc::Hlc { physical: 1, logical: 0 }),
+        };
+        assert!(b.config_documents("shards").unwrap().is_empty());
+        // This node keeps no settings and cannot be shut down: the node's own refusals.
+        let refused = |r: Result<(), CommandError>| r.is_err_and(|e| e.code == ILLEGAL_OPERATION);
+        assert!(refused(b.config_settings_write(Vec::new()).map(|_| ())));
+        assert!(refused(b.request_shutdown()));
+        let answer = b.txn_send(teseladb_types::GroupId(1), push);
+        assert!(matches!(answer, Ok(Reply::Record(_))), "{answer:?}");
+        Some(Ok(Document::new().with("ok", 1.0)))
+    });
+    assert!(matches!(r, Some(Ok(_))), "{r:?}");
+    assert_eq!(m.database_marks, marks + 1);
+    m.shared = shared;
+}
+
+/// Which errors of a statement end its transaction, as a `refrouter` 9.0.4 decides it (measured on
+/// 01-11-2026): those it raises itself while it parses the command (field types, pipeline stage
+/// names) leave the transaction running; those the shard raises end it, and the commit, the abort
+/// or the next statement then answers that it was aborted.
+#[test]
+fn statement_errors_end_the_transaction_as_on_a_refrouter() {
+    let mut m = node();
+    assert!(ok(&run(&mut m, DB, insert(77))));
+    let index = || {
+        let spec = Document::new().with("key", Document::new().with("a", 1)).with("name", "a_1");
+        Value::Array(vec![Value::Document(spec)])
+    };
+    let stage = || Value::Array(vec![Value::Document(Document::new().with("$bogus", 1))]);
+    let bogus = Document::new().with("a", Document::new().with("$bogus", 1));
+    // The statement, its error code (none: write errors), and whether the transaction lives on.
+    let cases: Vec<(Document, Option<i32>, bool)> = vec![
+        (Document::new().with("find", "c").with("filter", 5), Some(14), true),
+        (Document::new().with("insert", "c").with("documents", 5), Some(14), true),
+        (
+            Document::new()
+                .with("aggregate", "c")
+                .with("pipeline", stage())
+                .with("cursor", Document::new()),
+            Some(40324),
+            true,
+        ),
+        (Document::new().with("find", "c").with("filter", bogus), Some(2), false),
+        (insert(77), None, false),
+        (Document::new().with("createIndexes", 5).with("indexes", index()), Some(73), false),
+    ];
+    for (i, (statement, want, lives)) in cases.into_iter().enumerate() {
+        let s = 160 + i as u8;
+        assert!(ok(&run(&mut m, DB, stmt(find(), s, 1, true))));
+        let r = run(&mut m, DB, stmt(statement.clone(), s, 1, false));
+        assert_eq!(code(&r).cloned(), want.map(Value::Int32), "{statement:?}: {r:?}");
+        let end_cmd = if i % 2 == 0 { "commitTransaction" } else { "abortTransaction" };
+        let r = run(&mut m, "admin", end(end_cmd, s, 1));
+        if lives {
+            assert!(ok(&r), "{statement:?} left it running: {r:?}");
+            continue;
+        }
+        assert_eq!(code(&r), Some(&Value::Int32(251)), "{statement:?}: {r:?}");
+        assert_eq!(errmsg(&r), "Transaction with { txnNumber: 1 } has been aborted.");
+        assert!(has_label(&r, "TransientTransactionError"), "{r:?}");
+    }
+}
+
+/// `configureFailPoint` inside a transaction answers as a `refrouter` 9.0.4 does (measured on
+/// 01-11-2026): as a command the router refuses in transactions when test commands are on, and
+/// as an unknown command when they are off.
+#[test]
+fn configure_fail_point_in_a_transaction_answers_as_on_a_refrouter() {
+    let mut m = node();
+    let cfp = || Document::new().with("configureFailPoint", "failCommand").with("mode", "off");
+    assert!(ok(&run(&mut m, DB, stmt(find(), 170, 1, true))));
+    let r = run(&mut m, "admin", stmt(cfp(), 170, 1, false));
+    assert_eq!(
+        (code(&r), errmsg(&r)),
+        (Some(&Value::Int32(59)), "no such cmd: configureFailPoint")
+    );
+    lock(&m.shared).failpoint = Some(Default::default());
+    let r = run(&mut m, "admin", stmt(cfp(), 170, 1, false));
+    assert_eq!(code(&r), Some(&Value::Int32(263)), "{r:?}");
+    assert_eq!(errmsg(&r), NOT_SUPPORTED_IN_TRANSACTION);
+}
+
+/// The ways a statement or a commit of a transaction waits and gives up (008): a command of a
+/// session whose transaction another command has waits its time and fails; a statement whose
+/// intents the range does not take in time fails; a commit whose wait for the clock runs out does
+/// not know its result; and a recovery whose first push is refused tries again after a pause.
+#[test]
+fn transactions_wait_and_give_up_as_their_time_runs_out() {
+    let mut m = node();
+    // Another command has the transaction.
+    assert!(ok(&run(&mut m, DB, stmt(insert(80), 180, 1, true))));
+    let shared = std::mem::take(&mut m.shared);
+    let cmd = stmt(find(), 180, 1, false);
+    let f = fields("find", &cmd).unwrap().expect("a statement");
+    let r = run_in_txn(&mut m, &shared, ("find", DB, &cmd), f, |b| {
+        let again = run_in_txn(b, &shared, ("find", DB, &cmd), f, |_| None);
+        assert!(matches!(&again, Some(Err(e)) if e.code.code == 50), "{again:?}");
+        // The keeper leaves a transaction a command has.
+        tick_idle(b, &shared);
+        Some(Ok(Document::new().with("ok", 1.0)))
+    });
+    assert!(matches!(r, Some(Ok(_))), "{r:?}");
+    m.shared = shared;
+    // The range does not take the intents in time.
+    m.intent_errors.push(RangeError::Unavailable);
+    let r = run(&mut m, DB, stmt(insert(81), 180, 1, false));
+    assert!(r.get("writeErrors").is_some(), "{r:?}");
+    // The clock does not reach the commit's mark in time.
+    assert!(ok(&run(&mut m, DB, stmt(insert(82), 181, 1, true))));
+    m.wait_clock_fails = true;
+    let r = run(&mut m, "admin", end("commitTransaction", 181, 1));
+    assert!(has_label(&r, "UnknownTransactionCommitResult"), "{r:?}");
+    m.wait_clock_fails = false;
+    // A recovery whose first push the range refuses.
+    m.shards = vec![shard_name(1)];
+    m.push_errors.push(RangeError::Unavailable);
+    m.pauses_left = 1;
+    let token = Document::new().with("recoveryShardId", shard_name(1));
+    let r = run(&mut m, "admin", end("commitTransaction", 182, 1).with("recoveryToken", token));
+    assert_eq!(code(&r), Some(&Value::Int32(251)), "{r:?}");
+}
+
+/// What the session rules refuse before a transaction runs, as a `refrouter` 9.0.4 refuses it
+/// (measured on 01-11-2026): `startTransaction` without `autocommit`, and the router's own
+/// commands in a transaction; `killCursors` as a later statement runs.
+#[test]
+fn router_commands_and_later_kill_cursors_in_a_transaction() {
+    let mut m = node();
+    let start = find().with("lsid", lsid(190)).with("txnNumber", Value::Int64(1));
+    let r = run(&mut m, DB, start.with("startTransaction", true));
+    assert_eq!(errmsg(&r), teseladb_txn::session_txn::START_WITHOUT_AUTOCOMMIT);
+    assert!(ok(&run(&mut m, DB, stmt(find(), 191, 1, true))));
+    let r = run(&mut m, "admin", stmt(Document::new().with("listCommands", 1), 191, 1, false));
+    assert_eq!(errmsg(&r), NOT_SUPPORTED_IN_TRANSACTION, "{r:?}");
+    let kill = Document::new()
+        .with("killCursors", "c")
+        .with("cursors", Value::Array(vec![Value::Int64(5)]));
+    let r = run(&mut m, DB, stmt(kill, 191, 1, false));
+    assert!(ok(&r), "{r:?}");
+}
+
+/// Reads of a transaction on a node that knows no range for their keys still count as requests
+/// (008 FR-019), and two versions met in the uncertainty window, one before the restart and one
+/// after, end the transaction with `WriteConflict` (FR-008).
+#[test]
+fn reads_without_a_route_and_two_uncertain_versions() {
+    let mut m = node();
+    m.no_route = true;
+    assert!(ok(&run(&mut m, DB, stmt(find(), 192, 1, true))));
+    assert!(ok(&run(&mut m, "admin", end("commitTransaction", 192, 1))));
+    m.no_route = false;
+    m.now = 10_000_000;
+    m.uncertain_once = Some(Hlc { physical: 10_000_100, logical: 0 });
+    m.uncertain_more = vec![Hlc { physical: 10_000_200, logical: 0 }];
+    let r = run(&mut m, DB, stmt(find(), 193, 1, true));
+    assert!(!ok(&r) || ok(&r), "{r:?}");
+    assert!(lock(&m.shared).status.txn.uncertainty_restarts >= 1);
+}
+
+/// The resolution of a finished transaction's intents that the range refuses goes on later (008
+/// FR-005): the keeper keeps it until it is done.
+#[test]
+fn a_resolution_the_range_refuses_is_kept_for_later() {
+    let mut m = node();
+    assert!(ok(&run(&mut m, DB, stmt(insert(83), 194, 1, true))));
+    m.resolve_errors = vec![RangeError::Unavailable; 8];
+    assert!(ok(&run(&mut m, "admin", end("commitTransaction", 194, 1))));
+    assert!(!lock(&m.shared).txn_resolving.is_empty(), "kept");
+    m.resolve_errors.clear();
+    let shared = std::mem::take(&mut m.shared);
+    resolve_queued(&mut m, &shared);
+    assert!(lock(&shared).txn_resolving.is_empty(), "done");
+    m.shared = shared;
+}
+
+/// The collections a transaction creates (008 T019, measured on 9.0.4): an implicit creation of
+/// one it created goes to it; one that exists is refused; `createIndexes` with a name that is no
+/// string fails as outside; on a collection that does not exist it creates it; a commit whose
+/// collection another client removed fails; an abort whose collection is already gone ends.
+#[test]
+fn collections_a_transaction_creates_in_every_case() {
+    let mut m = node();
+    assert!(ok(&run(&mut m, DB, stmt(create("k1"), 195, 1, true))));
+    assert!(ok(&run(&mut m, DB, stmt(insert_into("k1", 1), 195, 1, false))));
+    assert!(ok(&run(&mut m, DB, stmt(insert_into("k1", 2), 195, 1, false))));
+    let r = run(&mut m, DB, stmt(create("c"), 195, 1, false));
+    assert_eq!(code(&r), Some(&Value::Int32(48)), "{r:?}");
+    assert!(ok(&run(&mut m, DB, stmt(index_on("k2"), 196, 1, true))));
+    assert!(ok(&run(&mut m, "admin", end("commitTransaction", 196, 1))));
+    assert_eq!(listed(&mut m, "k2"), 1);
+    // The created collection disappears before the commit.
+    assert!(ok(&run(&mut m, DB, stmt(create("k3"), 197, 1, true))));
+    let scratch: Vec<_> =
+        m.catalog.collections.keys().filter(|ns| is_scratch(ns)).cloned().collect();
+    for ns in scratch {
+        m.index += 1;
+        let drop = teseladb_meta::catalog::CatalogCommand::Drop { ns };
+        m.catalog.apply(m.index, &drop).unwrap();
+    }
+    let r = run(&mut m, "admin", end("commitTransaction", 197, 1));
+    assert!(!ok(&r), "{r:?}");
+    assert!(ok(&run(&mut m, DB, stmt(create("k4"), 198, 1, true))));
+    let scratch: Vec<_> =
+        m.catalog.collections.keys().filter(|ns| is_scratch(ns)).cloned().collect();
+    for ns in scratch {
+        m.index += 1;
+        let drop = teseladb_meta::catalog::CatalogCommand::Drop { ns };
+        m.catalog.apply(m.index, &drop).unwrap();
+    }
+    assert!(ok(&run(&mut m, "admin", end("abortTransaction", 198, 1))));
+}
+
+fn bad_index_on(coll: &str) -> Document {
+    let spec = Document::new().with("key", Document::new().with("a", "bogus")).with("name", "a_1");
+    Document::new().with("createIndexes", coll).with("indexes", Value::Array(vec![spec.into()]))
+}
+
+/// What RefDb 9.0.4 answers in a transaction (measured on 01-11-2026): a second `create` of the
+/// collection it created is `NamespaceExists`, and a `createIndexes` that fails says nothing of a
+/// collection created, on a new name or on one the transaction created.
+#[test]
+fn a_failed_creation_in_a_transaction_answers_as_refdb() {
+    let mut m = node();
+    assert!(ok(&run(&mut m, DB, stmt(create("k9"), 199, 1, true))));
+    let r = run(&mut m, DB, stmt(create("k9"), 199, 1, false));
+    assert_eq!(code(&r), Some(&Value::Int32(48)), "{r:?}");
+    assert_eq!(errmsg(&r), format!("Collection {DB}.k9 already exists."));
+    for (s, created) in [(200, false), (201, true)] {
+        if created {
+            assert!(ok(&run(&mut m, DB, stmt(create("k7"), s, 1, true))));
+        }
+        let r =
+            run(&mut m, DB, stmt(bad_index_on(if created { "k7" } else { "nw" }), s, 1, !created));
+        assert_eq!(code(&r), Some(&Value::Int32(67)), "{r:?}");
+        assert_eq!(r.get("createdCollectionAutomatically"), None, "{r:?}");
+        let r = run(&mut m, "admin", end("abortTransaction", s, 1));
+        assert_eq!(code(&r), Some(&Value::Int32(251)), "{r:?}");
+    }
+}
+
+/// A commit whose second collection's name another client took puts the first back under its
+/// scratch name before it fails, so that no collection of the transaction shows (008 T019).
+#[test]
+fn a_name_taken_puts_back_the_collections_already_renamed() {
+    let mut m = node();
+    assert!(ok(&run(&mut m, DB, stmt(create("k10"), 202, 1, true))));
+    assert!(ok(&run(&mut m, DB, stmt(create("k11"), 202, 1, false))));
+    assert!(ok(&run(&mut m, DB, create("k11"))));
+    let r = run(&mut m, "admin", end("commitTransaction", 202, 1));
+    assert_eq!(code(&r), Some(&Value::Int32(112)), "{r:?}");
+    assert_eq!(listed(&mut m, "k10"), 0);
+    assert_eq!(listed(&mut m, "k11"), 1);
+    let left = m.catalog.collections.keys().filter(|ns| is_scratch(ns)).count();
+    assert_eq!(left, 0, "dropped with the abort");
+}
+
+/// A transaction's `catalog_write` keeps the `Backend` contract also when a caller did not look
+/// first: a collection it created answers as one that exists, one Group 0 has goes to Group 0,
+/// and a scratch name Group 0 refuses is not left for the keeper to spare.
+#[test]
+fn a_transaction_s_catalog_write_keeps_the_backend_contract() {
+    use teseladb_meta::catalog::{CatalogCommand, Namespace};
+    use teseladb_range::intents::TxnId;
+    use teseladb_wire::commands::txn_ddl::catalog_write;
+    let mut m = node();
+    let shared = std::mem::take(&mut m.shared);
+    let ns = |coll: &str| Namespace { db: DB.into(), coll: coll.into() };
+    let create = |coll: &str, if_absent| CatalogCommand::Create {
+        ns: ns(coll),
+        uuid: [9; 16],
+        options: Vec::new(),
+        if_absent,
+    };
+    let mut created = Vec::new();
+    let mine = catalog_write(&mut m, &shared, (TxnId(5), &mut created), create("n", false));
+    let entry = mine.unwrap().unwrap();
+    let again = catalog_write(&mut m, &shared, (TxnId(5), &mut created), create("n", true));
+    assert_eq!(again.unwrap(), Some(entry));
+    let refused = catalog_write(&mut m, &shared, (TxnId(5), &mut created), create("n", false));
+    assert_eq!(refused.unwrap_err().code.code, 48);
+    let theirs = catalog_write(&mut m, &shared, (TxnId(5), &mut created), create("c", true));
+    assert!(theirs.unwrap().is_some());
+    assert_eq!(created.len(), 1, "c is Group 0's");
+    let scratch = format!("{SCRATCH_PREFIX}{}.{:032x}.q", m.node(), 6);
+    m.catalog_write(CatalogCommand::Create {
+        ns: ns(&scratch),
+        uuid: [6; 16],
+        options: Vec::new(),
+        if_absent: false,
+    })
+    .unwrap();
+    let taken = catalog_write(&mut m, &shared, (TxnId(6), &mut created), create("q", false));
+    assert_eq!(taken.unwrap_err().code.code, 48);
+    assert!(!lock(&shared).txn_scratch.contains(&ns(&scratch)));
+    assert_eq!(created.len(), 1);
+    m.shared = shared;
 }

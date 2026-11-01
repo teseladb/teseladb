@@ -590,8 +590,11 @@ impl Run<'_, '_, '_> {
                     }
                 }
                 Node::Leaf(Action::Computed(expr)) => {
-                    let v =
-                        self.ctx.matcher.ext.eval(expr.get(), self.root, self.ctx.matcher.vars)?;
+                    let v = self.ctx.matcher.ext.eval_projection(
+                        expr.get(),
+                        self.root,
+                        self.ctx.matcher.vars,
+                    )?;
                     // An expression that gives nothing leaves the field out, as RefDb does.
                     if let Some(v) = v {
                         out.insert(k.as_str(), v);

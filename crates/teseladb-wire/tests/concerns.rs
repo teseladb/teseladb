@@ -407,9 +407,9 @@ fn write_concern_errors_describe_the_concern() {
     let mode = wc(&[("w", "x".into()), ("wtimeout", (-1).into())]);
     let e = mode.error_after_write().expect("an unknown mode");
     assert_eq!(
-        write_concern_error(&e, &mode).get("errmsg"),
+        write_concern_error(&e, &mode, " at node1").get("errmsg"),
         Some(&Value::from(
-            "No write concern mode named 'x' found in replica set configuration; Error details: { writeConcern: { w: \"x\", wtimeout: -1, provenance: \"clientSupplied\" } }"
+            "UnknownReplWriteConcern: No write concern mode named 'x' found in replica set configuration; Error details: { writeConcern: { w: \"x\", wtimeout: -1, provenance: \"clientSupplied\" } } at node1"
         ))
     );
 }

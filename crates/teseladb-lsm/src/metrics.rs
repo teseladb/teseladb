@@ -29,6 +29,10 @@ pub struct LsmMetrics {
     pub memtable_bytes: u64,
     /// Files in every level.
     pub files: usize,
+    /// Data blocks written since the LSM opened, by compression code (`sst-format.md`).
+    pub blocks_written: [u64; 4],
+    /// Dictionaries in the manifest.
+    pub dictionaries: usize,
 }
 
 fn ratio(num: u64, den: u64) -> f64 {
@@ -54,7 +58,14 @@ impl Lsm {
             cache_bytes: r.cache.used(),
             memtable_bytes: v.memtables.iter().map(|m| m.borrow().bytes()).sum(),
             files: v.tables().count(),
+            blocks_written: [0; 4],
+            dictionaries: 0,
         }
+    }
+
+    /// The versions of the dictionaries in the manifest, in order.
+    pub fn dictionary_versions(&self) -> Vec<u64> {
+        Vec::new()
     }
 }
 

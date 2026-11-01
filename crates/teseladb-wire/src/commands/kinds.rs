@@ -585,10 +585,6 @@ pub fn not_a_view(ns: &Namespace, c: &CollectionEntry) -> Result<(), CommandErro
     }
 }
 
-fn plan_error(e: views::ViewError) -> CommandError {
-    CommandError::new(crate::error::code(e.code).unwrap_or(BAD_VALUE), e.message)
-}
-
 fn bytes_of(d: &Document) -> Result<Vec<u8>, CommandError> {
     Ok(d.to_bytes()?)
 }
@@ -616,7 +612,7 @@ pub fn check_view_definition<B: Backend + ?Sized>(
         collation: collation.as_deref(),
     };
     let lookup = |name: &str| kinds.iter().find(|(n, _)| n == name).map(|(_, k)| k.clone());
-    views::check_definition(&ns.db, &def, lookup).map_err(plan_error)
+    views::check_definition(&ns.db, &def, lookup).map_err(CommandError::from)
 }
 
 /// Creates `system.views` of `db` with the first view of the database.

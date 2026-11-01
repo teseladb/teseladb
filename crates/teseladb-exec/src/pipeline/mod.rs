@@ -4,15 +4,22 @@
 //! What a pipeline reads besides its input — other collections, the command's variables, the
 //! extensions of the matcher — comes from its [`Env`].
 
+pub mod deps;
 pub mod errors;
 mod fill;
 mod granularity;
 mod group;
+pub mod optimize;
+mod sbe;
 mod scoped;
 mod shape;
 pub mod sort;
 mod stages;
 mod system;
+
+pub use shape::projected_expr;
+pub use stages::check_exprs;
+pub use system::scale_of;
 
 use teseladb_bson::{Document, RawDoc, RawValue};
 use teseladb_mql::{Extensions, MqlError};
@@ -94,28 +101,81 @@ enum Stage {
 #[derive(Clone, Debug, Default)]
 pub struct Pipeline {
     stages: Vec<Stage>,
+    /// For each stage, whether its specification names only operators SBE runs.
+    sbe_specs: Vec<bool>,
 }
 
 impl Pipeline {
     /// Parses the stages of `pipeline` (an array's elements) with variables `ctx`.
     pub fn parse(pipeline: &[RawValue<'_>], ctx: &Ctx) -> Result<Pipeline, MqlError> {
-        let mut stages = Vec::with_capacity(pipeline.len());
-        for (i, v) in pipeline.iter().enumerate() {
-            let RawValue::Document(d) = v else {
-                return Err(error(
-                    TYPE_MISMATCH,
-                    "Each element of the 'pipeline' array must be an object",
-                ));
-            };
-            if i > 0 && matches!(d.get("$match"), Some(RawValue::Document(m)) if has_text(m)) {
-                return Err(error(
-                    errors::TEXT_NOT_FIRST,
-                    "$match with $text is only allowed as the first pipeline stage",
-                ));
-            }
-            stages.push(parse_stage(*d, i, ctx)?);
+        let pipeline = parse_stages(pipeline, ctx)?;
+        pipeline.check_positions()?;
+        Ok(pipeline)
+    }
+
+    /// Parses the pipeline of a `$lookup` or `$unionWith` (`stage`) without a collection, which
+    /// must start with `$documents`.
+    pub(crate) fn parse_from_documents(
+        pipeline: &[RawValue<'_>],
+        ctx: &Ctx,
+        stage: &str,
+    ) -> Result<Pipeline, MqlError> {
+        let pipeline = parse_stages(pipeline, ctx)?;
+        if !pipeline.starts_with_documents() {
+            return Err(error(
+                errors::FAILED_TO_PARSE,
+                format!(
+                    "{stage} stage without explicit collection must have a pipeline with $documents as first stage"
+                ),
+            ));
         }
-        Ok(Pipeline { stages })
+        pipeline.check_positions()?;
+        Ok(pipeline)
+    }
+
+    /// Parses the pipeline of an `aggregate` command, on a collection or (`aggregate: 1`) on
+    /// none, checked in RefDb's order: each stage's arguments, the first stage of an
+    /// `aggregate: 1` (it must read no collection), the stages that only go first, and then
+    /// `$documents` on a collection.
+    pub fn parse_command(
+        pipeline: &[RawValue<'_>],
+        ctx: &Ctx,
+        on_collection: bool,
+    ) -> Result<Pipeline, MqlError> {
+        let parsed = parse_stages(pipeline, ctx)?;
+        if !on_collection {
+            collectionless(pipeline)?;
+        }
+        let pipeline = parsed;
+        pipeline.check_positions()?;
+        if on_collection && pipeline.starts_with_documents() {
+            return Err(error(
+                errors::INVALID_NAMESPACE,
+                "'$documents' can only be run with database or cluster-level aggregation {aggregate: 1}",
+            ));
+        }
+        Ok(pipeline)
+    }
+
+    /// Refuses `$documents` and the stages the node answers itself anywhere but first.
+    fn check_positions(&self) -> Result<(), MqlError> {
+        for st in self.stages.iter().skip(1) {
+            let name = match st {
+                Stage::Documents(_) => "$documents",
+                Stage::System(name, _) => name,
+                _ => continue,
+            };
+            return Err(error(
+                errors::FIRST_STAGE,
+                format!("{name} is only valid as the first stage in a pipeline"),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Whether the pipeline has no stage.
+    pub fn is_empty(&self) -> bool {
+        self.stages.is_empty()
     }
 
     /// Whether the pipeline starts with `$documents` (it then reads no collection).
@@ -129,35 +189,44 @@ impl Pipeline {
         !matches!(self.stages.first(), Some(Stage::Documents(_) | Stage::System(..)))
     }
 
-    /// Checks where the pipeline runs: `$documents` reads no collection, so an `aggregate` on one
-    /// may not start with it.
-    pub fn check_target(&self, on_collection: bool) -> Result<(), MqlError> {
-        if on_collection && self.starts_with_documents() {
-            return Err(error(
-                errors::INVALID_NAMESPACE,
-                "'$documents' can only be run with database or cluster-level aggregation {aggregate: 1}",
-            ));
-        }
-        Ok(())
-    }
-
     /// Runs the pipeline over `docs`.
     pub fn run(&self, docs: Vec<Document>, env: &dyn Env) -> Result<Vec<Document>, MqlError> {
         self.run_in(docs, env, true)
     }
 
+    /// Whether RefDb runs every stage with its slot-based engine, so that stages that follow
+    /// them in the same pipeline (a read through a view, then the user's) can too.
+    pub fn runs_in_sbe(&self) -> bool {
+        !self.starts_with_documents()
+            && self.stages.iter().zip(&self.sbe_specs).all(|(st, spec)| *spec && sbe_capable(st))
+    }
+
+    /// How many of the leading stages RefDb runs with its slot-based engine, each with all the
+    /// stages before it (`explain` shows them in one query plan).
+    pub fn sbe_prefix(&self) -> usize {
+        if self.starts_with_documents() {
+            return 0;
+        }
+        self.stages
+            .iter()
+            .zip(&self.sbe_specs)
+            .take_while(|(st, spec)| **spec && sbe_capable(st))
+            .count()
+    }
+
     /// Runs the pipeline over `docs`; `sbe` when RefDb could run it with its slot-based
-    /// engine (a pipeline over a collection, not a sub-pipeline of `$facet` or `$lookup`). Its
-    /// stages run there while each before them can, and `$documents` cannot.
-    pub(crate) fn run_in(
+    /// engine (a pipeline over a collection whose stages before it all run there, not a
+    /// sub-pipeline of `$facet` or `$lookup`). Its stages run there while each before them can,
+    /// and `$documents` cannot.
+    pub fn run_in(
         &self,
         mut docs: Vec<Document>,
         env: &dyn Env,
         sbe: bool,
     ) -> Result<Vec<Document>, MqlError> {
         let mut sbe = sbe && !self.starts_with_documents();
-        for (i, st) in self.stages.iter().enumerate() {
-            sbe = sbe && sbe_capable(st, i == 0);
+        for (st, spec) in self.stages.iter().zip(&self.sbe_specs) {
+            sbe = sbe && *spec && sbe_capable(st);
             docs = run_stage(st, docs, env, sbe)?;
         }
         Ok(docs)
@@ -180,7 +249,52 @@ impl Pipeline {
     }
 }
 
-fn parse_stage(d: RawDoc<'_>, index: usize, ctx: &Ctx) -> Result<Stage, MqlError> {
+/// RefDb's code for `$$SEARCH_META` with no `$search` before it.
+const SEARCH_META_WITHOUT_SEARCH: teseladb_mql::ErrorCode =
+    teseladb_mql::ErrorCode { code: 6_347_902, name: "Location6347902" };
+
+/// Whether a stage specification reads `$$SEARCH_META` (a `$literal`'s value is no expression).
+fn reads_search_meta(v: RawValue<'_>) -> bool {
+    match v {
+        RawValue::String(s) => s
+            .strip_prefix("$$SEARCH_META")
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('.')),
+        RawValue::Document(d) => d.iter().any(|(k, x)| k != "$literal" && reads_search_meta(x)),
+        RawValue::Array(a) => a.iter().any(reads_search_meta),
+        _ => false,
+    }
+}
+
+/// The stages of `pipeline`, each one's arguments checked.
+fn parse_stages(pipeline: &[RawValue<'_>], ctx: &Ctx) -> Result<Pipeline, MqlError> {
+    let mut stages = Vec::with_capacity(pipeline.len());
+    let mut sbe_specs = Vec::with_capacity(pipeline.len());
+    for (i, v) in pipeline.iter().enumerate() {
+        let RawValue::Document(d) = v else {
+            return Err(error(
+                TYPE_MISMATCH,
+                "Each element of the 'pipeline' array must be an object",
+            ));
+        };
+        if i > 0 && matches!(d.get("$match"), Some(RawValue::Document(m)) if has_text(m)) {
+            return Err(error(
+                errors::TEXT_NOT_FIRST,
+                "$match with $text is only allowed as the first pipeline stage",
+            ));
+        }
+        if reads_search_meta(RawValue::Document(*d)) {
+            return Err(error(
+                SEARCH_META_WITHOUT_SEARCH,
+                "Can't access $$SEARCH_META without a $search stage earlier in the pipeline",
+            ));
+        }
+        stages.push(parse_stage(*d, ctx)?);
+        sbe_specs.push(d.iter().all(|(name, arg)| sbe::spec_runs_in_sbe(name, arg)));
+    }
+    Ok(Pipeline { stages, sbe_specs })
+}
+
+fn parse_stage(d: RawDoc<'_>, ctx: &Ctx) -> Result<Stage, MqlError> {
     let names: Vec<&str> = d.iter().map(|(k, _)| k).collect();
     let (name, _) = named(&names).map_err(|e| {
         MqlError::new(
@@ -192,10 +306,12 @@ fn parse_stage(d: RawDoc<'_>, index: usize, ctx: &Ctx) -> Result<Stage, MqlError
         return Err(error(TYPE_MISMATCH, "a stage without its argument"));
     };
     Ok(match name {
-        "$match" => Stage::Match(Match::parse(arg)?),
-        "$project" => Stage::Project(Projection::parse(arg, ctx)?),
-        "$addFields" | "$set" => Stage::AddFields(AddFields::parse(name, arg, ctx)?),
-        "$unset" => Stage::Project(Projection::unset(arg)?),
+        "$match" => Stage::Match(Match::parse(arg, ctx)?),
+        "$project" => Stage::Project(Projection::parse(arg, ctx).map_err(|e| invalid(name, e))?),
+        "$addFields" | "$set" => {
+            Stage::AddFields(AddFields::parse(name, arg, ctx).map_err(|e| invalid(name, e))?)
+        }
+        "$unset" => Stage::Project(Projection::unset(arg).map_err(|e| invalid(name, e))?),
         "$replaceRoot" => Stage::ReplaceRoot(ReplaceRoot::parse(arg, false, ctx)?),
         "$replaceWith" => Stage::ReplaceRoot(ReplaceRoot::parse(arg, true, ctx)?),
         "$sort" => Stage::Sort(SortSpec::parse(arg)?),
@@ -212,14 +328,11 @@ fn parse_stage(d: RawDoc<'_>, index: usize, ctx: &Ctx) -> Result<Stage, MqlError
         "$facet" => Stage::Facet(Facet::parse(arg, ctx)?),
         "$lookup" => Stage::Lookup(Box::new(Lookup::parse(arg, ctx)?)),
         "$unionWith" => Stage::UnionWith(Box::new(UnionWith::parse(arg, ctx)?)),
-        "$documents" => Stage::Documents(stages::documents(arg, index, ctx)?),
+        "$documents" => Stage::Documents(Expr::parse_in(arg, ctx)?),
         "$densify" => Stage::Densify(Box::new(fill::Densify::parse(arg)?)),
         "$fill" => Stage::Fill(Box::new(fill::Fill::parse(arg, ctx)?)),
         "$graphLookup" => Stage::GraphLookup(Box::new(fill::GraphLookup::parse(arg, ctx)?)),
-        "$collStats" => {
-            first_stage("$collStats", index)?;
-            Stage::System("$collStats", system::coll_stats(arg)?)
-        }
+        "$collStats" => Stage::System("$collStats", system::coll_stats(arg)?),
         "$setWindowFields" => {
             Stage::SetWindowFields(Box::new(crate::window::SetWindowFields::parse(arg, ctx)?))
         }
@@ -232,12 +345,35 @@ fn parse_stage(d: RawDoc<'_>, index: usize, ctx: &Ctx) -> Result<Stage, MqlError
     })
 }
 
-/// Refuses stage `name` anywhere but first.
-fn first_stage(name: &str, index: usize) -> Result<(), MqlError> {
-    if index != 0 {
+/// An error of the arguments of stage `name` as the stages that parse their fields as a
+/// projection write it (`$project`, `$unset`, `$addFields`, `$set`).
+pub(crate) fn invalid(name: &str, e: MqlError) -> MqlError {
+    MqlError::new(e.code, format!("Invalid {name} :: caused by :: {}", e.message))
+}
+
+/// The stages an `aggregate: 1` may start with: they read no collection.
+const COLLECTIONLESS_STAGES: [&str; 6] = [
+    "$documents",
+    "$currentOp",
+    "$listLocalSessions",
+    "$changeStream",
+    "$listClusterCatalog",
+    "$querySettings",
+];
+
+/// Checks the first stage of an `aggregate: 1`, which must read no collection.
+fn collectionless(stages: &[RawValue<'_>]) -> Result<(), MqlError> {
+    let Some(RawValue::Document(first)) = stages.first() else {
         return Err(error(
-            errors::FIRST_STAGE,
-            format!("{name} is only valid as the first stage in a pipeline"),
+            errors::INVALID_NAMESPACE,
+            "{aggregate: 1} is not valid for an empty pipeline.",
+        ));
+    };
+    let name = first.iter().next().map(|(k, _)| k).unwrap_or_default();
+    if !COLLECTIONLESS_STAGES.contains(&name) {
+        return Err(error(
+            errors::INVALID_NAMESPACE,
+            format!("{{aggregate: 1}} is not valid for '{name}'; a collection is required."),
         ));
     }
     Ok(())
@@ -277,11 +413,11 @@ pub(crate) fn shape_set(doc: &mut Document, segs: &[&str], v: teseladb_bson::Val
     shape::set_path_value(doc, segs, v);
 }
 
-/// Whether RefDb's slot-based engine runs `st` (measured on a `refrouter` 9.0.4 by how a later
-/// `$group` keeps equal values): the stages it cannot run send the rest of the pipeline to the
-/// classic engine; `$sample` stays there only as the first stage, sampling the collection.
-/// Whether it supports each expression is not modelled (DV-064).
-fn sbe_capable(st: &Stage, first: bool) -> bool {
+/// Whether RefDb's slot-based engine runs a stage of `st`'s kind (measured on a `refrouter`
+/// 9.0.4 by the shard's `explainVersion`): the stages it cannot run send the rest of the
+/// pipeline to the classic engine, as the operators of [`sbe`] do. A `$lookup` runs there with
+/// `localField` and `foreignField` and an empty or no `pipeline`.
+fn sbe_capable(st: &Stage) -> bool {
     match st {
         Stage::Match(_)
         | Stage::Project(_)
@@ -294,10 +430,10 @@ fn sbe_capable(st: &Stage, first: bool) -> bool {
         | Stage::Group(_)
         | Stage::SortByCount(_)
         | Stage::Bucket(_) => true,
-        Stage::Sample(_) => first,
         Stage::Lookup(l) => l.is_equality(),
         Stage::Fill(f) => f.is_values_only(),
-        Stage::Unwind(_)
+        Stage::Sample(_)
+        | Stage::Unwind(_)
         | Stage::BucketAuto(_)
         | Stage::Redact(_)
         | Stage::Facet(_)

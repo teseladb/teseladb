@@ -52,6 +52,11 @@ fn names(m: &mut Mem) -> Vec<Value> {
         .collect()
 }
 
+/// The key of the node's part of a reply under `raw`: `node<N>/host:port`.
+fn raw_name(m: &Mem) -> String {
+    format!("node1/{}:{}", m.facts.host.hostname, m.facts.port)
+}
+
 #[test]
 fn an_index_is_built_over_the_documents_and_kept_by_the_writes() {
     let mut m = Mem::new();
@@ -59,15 +64,18 @@ fn an_index_is_built_over_the_documents_and_kept_by_the_writes() {
     m.run(DB, Document::new().with("insert", "c").with("documents", arr(docs)));
     let c = m.catalog.collections.values().next().unwrap().id;
     let r = create(&mut m, vec![spec(a1(), "a_1")]);
-    assert_eq!(
-        r,
-        Document::new()
-            .with("numIndexesBefore", 1)
-            .with("numIndexesAfter", 2)
-            .with("createdCollectionAutomatically", false)
-            .with("commitQuorum", "votingMembers")
-            .with("ok", 1.0)
-    );
+    // The node's own reply goes first under `raw`, as a `refrouter` gives its shard's (D-102).
+    let own = Document::new()
+        .with("numIndexesBefore", 1)
+        .with("numIndexesAfter", 2)
+        .with("createdCollectionAutomatically", false)
+        .with("commitQuorum", "votingMembers")
+        .with("ok", 1.0);
+    let mut want = Document::new().with("raw", Document::new().with(raw_name(&m), own.clone()));
+    for (k, v) in own.iter() {
+        want.push(k, v.clone());
+    }
+    assert_eq!(r, want);
     assert_eq!(entries(&m, c), 5, "one entry per document");
     assert_eq!(names(&mut m), vec![Value::from("_id_"), Value::from("a_1")]);
     m.run(
@@ -149,7 +157,8 @@ fn drops_remove_the_entries_and_the_catalog_entry() {
         m.run(DB, Document::new().with("dropIndexes", "c").with("index", which))
     };
     let r = drop(&mut m, Value::from("a_1"));
-    assert_eq!(r, Document::new().with("nIndexesWas", 3).with("ok", 1.0));
+    let own = Document::new().with("nIndexesWas", 3).with("ok", 1.0);
+    assert_eq!(r, own.clone().with("raw", Document::new().with(raw_name(&m), own)));
     assert_eq!(entries(&m, c), 3);
     assert_eq!(names(&mut m), vec![Value::from("_id_"), Value::from("b_-1")]);
     let r = drop(&mut m, Value::from("nope"));

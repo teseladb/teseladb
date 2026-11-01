@@ -89,6 +89,7 @@ fn cores(data: DataScript, catalog: CatalogScript, kills: KillScript) -> NodeHan
         sessions: Arc::default(),
         routes,
         auth: Arc::default(),
+        shutdown: Arc::default(),
     }
 }
 
@@ -612,4 +613,280 @@ fn a_read_in_its_uncertainty_window_goes_again_above_the_version() {
     }
     let e = b.scan(&[1], &[2], 10, ReadConcern::Majority).unwrap_err();
     assert_eq!(e.code.code, 112, "{e:?}");
+}
+
+fn owner(key: &[u8]) -> teseladb_range::intents::IntentOwner {
+    use teseladb_range::intents::{IntentOwner, TxnId};
+    IntentOwner {
+        txn: TxnId(6),
+        record_key: vec![1, 5],
+        key: key.to_vec(),
+        ts: Hlc { physical: 1, logical: 0 },
+    }
+}
+
+fn record(status: teseladb_range::intents::TxnStatus) -> Result<DataReply, RangeError> {
+    use teseladb_range::intents::{TxnId, TxnRecord};
+    let ts = Hlc { physical: 5, logical: 0 };
+    Ok(DataReply::Remote(RemoteReply::Record(TxnRecord {
+        txn: TxnId(6),
+        lsid: 0,
+        txn_number: 0,
+        status,
+        read_ts: ts,
+        min_commit_ts: ts,
+        commit_ts: ts,
+        heartbeat_ts: ts,
+        spans: vec![],
+    })))
+}
+
+/// A write outside a transaction that meets an intent waits a pause and goes again (008 FR-002)
+/// whenever the intent is not resolved: the push has no record, the owner is running, the intent's
+/// key has no range in the table, or its range refuses the resolution; once the owner is finished
+/// and the intent resolved, it goes again at once.
+#[test]
+fn a_write_waits_for_an_intent_until_it_is_resolved() {
+    use teseladb_range::intents::TxnStatus;
+    let conflict = |key: &[u8]| Err(RangeError::IntentConflict(owner(key)));
+    let rows = Ok(DataReply::Remote(RemoteReply::Rows(vec![])));
+    let data = vec![
+        conflict(&[1, 1]),
+        rows.clone(),
+        conflict(&[1, 1]),
+        record(TxnStatus::Pending),
+        conflict(&[9]),
+        record(TxnStatus::Committed),
+        conflict(&[1, 1]),
+        record(TxnStatus::Aborted),
+        Ok(DataReply::Put(Hlc { physical: 1, logical: 0 })),
+        conflict(&[1, 1]),
+        record(TxnStatus::Committed),
+        rows,
+        written(&[7]),
+    ];
+    let h = cores(Arc::new(Mutex::new(data.into())), Arc::default(), Arc::default());
+    let mut b = ServerBackend::new(h, 7).with_deadline(Duration::from_secs(5));
+    assert_eq!(b.write(op(false)), Ok(vec![7]));
+}
+
+/// A read whose push of the intent's owner has no record forgets the push, so that the next reader
+/// pushes again, and reads again at its mark (008 FR-003).
+#[test]
+fn a_read_whose_push_has_no_record_reads_again() {
+    use teseladb_txn::push_cache::Lookup;
+    let at = Hlc { physical: 1_000, logical: 0 };
+    let rows = vec![(vec![1, 1], vec![9])];
+    let data: DataScript = Arc::new(Mutex::new(
+        vec![
+            Err(RangeError::ReadIntent { owner: owner(&[1, 1]), at }),
+            Ok(DataReply::Remote(RemoteReply::Rows(vec![]))),
+            Ok(DataReply::Remote(RemoteReply::Rows(rows.clone()))),
+        ]
+        .into(),
+    ));
+    let h = cores(data, Arc::default(), Arc::default());
+    let sessions = h.sessions.clone();
+    let mut b = ServerBackend::new(h, 7).with_deadline(Duration::from_secs(5));
+    assert_eq!(b.scan(&[1], &[2], 10, ReadConcern::Majority), Ok(rows));
+    let mut g = teseladb_wire::commands::lock(&sessions);
+    assert!(matches!(g.pushes.lookup(owner(&[1, 1]).txn, at), Lookup::Push(_)));
+}
+
+/// A read that meets an owner another reader of the node is pushing waits for that push, and gives
+/// up at its deadline if it never settles (008 SC-005).
+#[test]
+fn a_read_waits_for_another_reader_s_push_until_its_deadline() {
+    use teseladb_txn::push_cache::Lookup;
+    let at = Hlc { physical: 1_000, logical: 0 };
+    let data: DataScript = Arc::new(Mutex::new(
+        vec![Err(RangeError::ReadIntent { owner: owner(&[1, 1]), at })].into(),
+    ));
+    let h = cores(data, Arc::default(), Arc::default());
+    let sessions = h.sessions.clone();
+    let on_the_way = teseladb_wire::commands::lock(&sessions).pushes.lookup(owner(&[1, 1]).txn, at);
+    assert!(matches!(on_the_way, Lookup::Push(_)));
+    let mut b = ServerBackend::new(h, 7).with_deadline(Duration::from_millis(100));
+    let started = std::time::Instant::now();
+    let e = b.scan(&[1], &[2], 10, ReadConcern::Majority).unwrap_err();
+    assert_eq!(e.code.code, 89, "{e:?}");
+    // The deadline is the operation's, not one that moves on with each round of waiting.
+    assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+}
+
+/// A read whose push finds the owner still running has nothing to resolve: it reads again at its
+/// mark knowing the owner was pushed above it (008 FR-003).
+#[test]
+fn a_read_that_pushes_a_running_owner_reads_again_past_it() {
+    use teseladb_range::intents::TxnStatus;
+    let at = Hlc { physical: 1_000, logical: 0 };
+    let rows = vec![(vec![1, 1], vec![9])];
+    let data: DataScript = Arc::new(Mutex::new(
+        vec![
+            Err(RangeError::ReadIntent { owner: owner(&[1, 1]), at }),
+            record(TxnStatus::Pending),
+            Ok(DataReply::Remote(RemoteReply::Rows(rows.clone()))),
+        ]
+        .into(),
+    ));
+    let h = cores(data, Arc::default(), Arc::default());
+    let mut b = ServerBackend::new(h, 7).with_deadline(Duration::from_secs(5));
+    assert_eq!(b.scan(&[1], &[2], 10, ReadConcern::Majority), Ok(rows));
+}
+
+/// What Group 0 refuses, and what it answers late, through the backend (006 FR-014).
+#[test]
+fn group0_refusals_and_late_answers() {
+    use teseladb_meta::indexes::IndexCommand;
+    let create = CatalogCommand::CreateDatabase { db: "D".into() };
+    let mut b = backend(vec![], vec![CatalogAnswer::Refused(Group0Error::DatabaseDifferCase)]);
+    assert_eq!(b.catalog_write(create).unwrap_err().code.code, 13297);
+    let mut catalog = Catalog::default();
+    catalog
+        .collections
+        .insert(ns(), CollectionEntry { id: 1, uuid: [2; 16], options: vec![], created_index: 3 });
+    let mut b = backend(vec![], vec![CatalogAnswer::Catalog(Arc::new(catalog))]);
+    assert_eq!(b.databases(), Ok(vec![]));
+    for (answer, code) in [
+        (Group0Error::NamespaceNotFound, 26),
+        (Group0Error::IndexNotFound, 27),
+        (Group0Error::BadSplit, 1),
+    ] {
+        let mut b = backend(vec![], vec![CatalogAnswer::Refused(answer)]);
+        let e = b.index_write(IndexCommand::Drop { id: 4 }).unwrap_err();
+        assert_eq!(e.code.code, code, "{e:?}");
+    }
+    // The documents of `config` once core 0 has them, or none at the deadline.
+    let mut b = backend(vec![], vec![CatalogAnswer::Unavailable, CatalogAnswer::Documents(vec![])]);
+    assert_eq!(b.config_documents("shards"), Ok(vec![]));
+    let mut b = backend(vec![], vec![]);
+    assert_eq!(b.config_documents("shards").unwrap_err().code.code, 10107);
+}
+
+/// A transaction's reads through the backend (008 FR-003): a scan over two ranges at one mark up to
+/// its limit, an answer of the wrong kind, an intent a transaction's read meets, and the pause
+/// between its retries.
+#[test]
+fn a_transaction_s_reads_across_ranges_and_their_failures() {
+    use teseladb_range::push::TxnView;
+    let at = Hlc { physical: 1_000, logical: 0 };
+    let view = TxnView::default();
+    let rows = |r: &[(&[u8], &[u8])]| {
+        let r = r.iter().map(|(k, v)| (k.to_vec(), v.to_vec())).collect();
+        Ok(DataReply::Remote(RemoteReply::Rows(r)))
+    };
+    let mut b = backend(vec![rows(&[(&[1, 1], &[7])]), rows(&[(&[2, 1], &[8])])], vec![]);
+    let both = b.txn_scan(&[1], &[3], 10, at, &view, None).unwrap();
+    assert_eq!(both, vec![(vec![1, 1], vec![7]), (vec![2, 1], vec![8])]);
+    // Within one range, and stopped at the limit before the end.
+    let mut b = backend(vec![rows(&[(&[2, 1], &[8])])], vec![]);
+    assert_eq!(b.txn_scan(&[2], &[3], 1, at, &view, None).unwrap().len(), 1);
+    let mut b = backend(vec![written(&[1])], vec![]);
+    assert_eq!(b.txn_scan(&[2], &[3], 1, at, &view, None).unwrap_err().code.code, 1);
+    let mut b = backend(vec![rows(&[])], vec![]);
+    assert_eq!(b.txn_get(&[1, 1], at, &view, None).unwrap_err().code.code, 1);
+    // A transaction's read that meets an intent answers it: the transaction decides.
+    let mut b = backend(vec![Err(RangeError::IntentConflict(owner(&[1, 1])))], vec![]);
+    assert!(b.txn_get(&[1, 1], at, &view, None).is_err());
+    let mut b = backend(vec![], vec![]);
+    assert!(b.txn_pause());
+    // A write without keys has no range.
+    let mut no_keys = op(false);
+    no_keys.keys.clear();
+    assert_eq!(b.write(no_keys).unwrap_err().code.code, 1);
+}
+
+/// The node's services through the backend (013): without them each answers as RefDb does
+/// without the option, and with them their failures are refusals, with the reason in the log.
+#[test]
+fn the_node_s_services_answer_with_or_without_them() {
+    use teseladb_server::diag::Diag;
+    use teseladb_server::ldap_client::{LdapOpts, LdapServer, SharedLdap};
+    use teseladb_wire::commands::LdapLogin;
+    let mut b = backend(vec![], vec![]);
+    assert!(b.kerberos_keys().is_empty());
+    assert_eq!(b.oidc_keys("https://idp", false).unwrap_err().code.code, 96);
+    assert_eq!(b.aws_sts_url(), teseladb_auth::aws::DEFAULT_STS_URL);
+    let req =
+        teseladb_auth::aws::StsRequest { headers: vec![], body: teseladb_auth::aws::STS_BODY };
+    assert_eq!(b.aws_sts(&req).unwrap_err().code.code, 96);
+    assert_eq!(b.ldap_login("u", b"p"), Ok(LdapLogin::Refused));
+    assert_eq!(b.ldap_groups("u"), Ok(None));
+    b.invalidate_user_cache();
+    assert_eq!(b.rotate_certificates(None), Ok(()));
+    // Services on a port nothing listens on.
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+    let opts = LdapOpts {
+        servers: Some(closed.to_string()),
+        transport: Some("none".into()),
+        timeout_ms: Some(500),
+        authz_query_template: Some("{USER}?memberOf".into()),
+        ..LdapOpts::default()
+    };
+    let ldap = LdapServer::from_opts(&opts).unwrap().expect("a server");
+    let sts = teseladb_server::sts_client::Sts::from_url(Some(&format!("https://{closed}")), false)
+        .unwrap();
+    let diag = Diag::new(Default::default(), 0, Arc::default(), 1)
+        .with_kerberos(Some(Arc::new(vec![])))
+        .with_sts(Some(Arc::new(sts)))
+        .with_ldap(Some(SharedLdap(Arc::new(ldap))));
+    let mut b = backend(vec![], vec![]).with_diag(Arc::new(diag));
+    assert!(b.kerberos_keys().is_empty());
+    assert_eq!(b.aws_sts_url(), format!("https://{closed}"));
+    assert_eq!(b.ldap_login("u", b"p"), Ok(LdapLogin::Refused));
+    assert_eq!(b.ldap_groups("u").unwrap_err().code.code, 18);
+    b.invalidate_user_cache();
+}
+
+/// The last range of the table has no end: a transaction's scan and the count of voters read to the
+/// end of what they ask for there; a scan stops at its limit before its end; a primary read
+/// selects no replica (008 FR-003, 007 FR-003).
+#[test]
+fn reads_up_to_the_last_range_and_to_the_limit() {
+    use teseladb_range::push::TxnView;
+    use teseladb_router::read_pref::{Mode, ReadPreference};
+    let at = Hlc { physical: 1_000, logical: 0 };
+    let view = TxnView::default();
+    let rows = |r: Vec<(Vec<u8>, Vec<u8>)>| Ok(DataReply::Remote(RemoteReply::Rows(r)));
+    let data: DataScript = Arc::new(Mutex::new(vec![rows(vec![(vec![2, 1], vec![8])])].into()));
+    let h = cores(data, Arc::default(), Arc::default());
+    h.routes.publish(&[range(1, &[1], &[2]), range(2, &[2], &[])]);
+    let mut b = ServerBackend::new(h, 7).with_deadline(Duration::from_millis(300));
+    assert_eq!(b.txn_scan(&[2], &[9], 10, at, &view, None).unwrap().len(), 1);
+    assert_eq!(b.voters(&[2], &[9]), Ok(1));
+    let mut b = backend(vec![rows(vec![(vec![1, 1], vec![7])])], vec![]);
+    assert_eq!(b.txn_scan(&[1], &[3], 1, at, &view, None).unwrap().len(), 1);
+    let primary = ReadPreference { mode: Mode::Primary, max_staleness_ms: None, tag_sets: vec![] };
+    let mut b = backend(vec![rows(vec![])], vec![]);
+    b.set_read_preference(Some(primary));
+    assert_eq!(b.scan(&[1], &[2], 10, ReadConcern::Local), Ok(vec![]));
+}
+
+/// A commit's wait for the clock to reach its mark (008 FR-008): at once for a mark behind, after
+/// a pause for one just ahead, and not past the operation's deadline.
+#[test]
+fn a_commit_waits_for_the_clock_up_to_its_deadline() {
+    let mut b = backend(vec![], vec![]);
+    assert!(b.txn_wait_clock(wall_ms() - 1));
+    assert!(b.txn_wait_clock(wall_ms() + 20));
+    assert!(!b.txn_wait_clock(wall_ms() + 60_000));
+}
+
+/// A finished owner whose intent's key has no range in the table is left to the next reader; the
+/// read goes on knowing the owner (008 FR-003).
+#[test]
+fn a_read_leaves_an_intent_without_a_range_to_the_next_reader() {
+    use teseladb_range::intents::TxnStatus;
+    let at = Hlc { physical: 1_000, logical: 0 };
+    let data: DataScript = Arc::new(Mutex::new(
+        vec![
+            Err(RangeError::ReadIntent { owner: owner(&[9]), at }),
+            record(TxnStatus::Committed),
+            Ok(DataReply::Remote(RemoteReply::Rows(vec![]))),
+        ]
+        .into(),
+    ));
+    let h = cores(data, Arc::default(), Arc::default());
+    let mut b = ServerBackend::new(h, 7).with_deadline(Duration::from_secs(5));
+    assert_eq!(b.scan(&[1], &[2], 10, ReadConcern::Majority), Ok(vec![]));
 }

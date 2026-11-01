@@ -4,8 +4,8 @@
 use crate::checkers::Violation;
 use crate::history::History;
 use crate::workloads::{
-    Workload, indexes::Indexes, kv::KvWorkload, lsm::LsmWorkload, multirange::MultiRangeWorkload,
-    range_docs::RangeDocsWorkload, relocate::RelocateWorkload,
+    Workload, indexes::Indexes, kv::KvWorkload, lsm::LsmWorkload, meta2::Meta2Workload,
+    multirange::MultiRangeWorkload, range_docs::RangeDocsWorkload, relocate::RelocateWorkload,
     special_collections::SpecialCollections, splits::SplitsWorkload, storage::StorageWorkload,
     txn_append::Append, txn_bank::Bank,
 };
@@ -36,7 +36,7 @@ pub struct Registry {
 
 impl Registry {
     /// The workloads of 001 (`storage`, `testkv`), 004 (`lsm`), 005 (`range-docs`), 007
-    /// (`multirange`, `splits`, `follower-reads`, `relocate`), 008 (`txn-append`), 009 (`indexes`) and 015 (`special-collections`), in the order `--workload all` runs them, and no
+    /// (`multirange`, `splits`, `follower-reads`, `relocate`, `meta2`), 008 (`txn-append`), 009 (`indexes`) and 015 (`special-collections`), in the order `--workload all` runs them, and no
     /// extra checkers: the generic ones live in the workloads and the world.
     pub fn builtin() -> Registry {
         let mut r = Registry::default();
@@ -49,6 +49,7 @@ impl Registry {
         r.register_workload("follower-reads", RangeDocsWorkload::follower_reads)
             .expect("a new name");
         r.register_workload("relocate", RelocateWorkload::boxed).expect("a new name");
+        r.register_workload("meta2", Meta2Workload::boxed).expect("a new name");
         r.register_workload("txn-bank", Bank::boxed).expect("a new name");
         r.register_workload("txn-append", Append::boxed).expect("a new name");
         r.register_workload("indexes", Indexes::boxed).expect("a new name");

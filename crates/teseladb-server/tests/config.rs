@@ -1,4 +1,4 @@
-//! `teseladb start --config <file.yaml>` (001 FR-022): the keys of the `refnode` file and the
+//! `teseladb start --config <file.yaml>` (001 FR-021): the keys of the `refnode` file and the
 //! `teseladb.*` section, the command line over the file, and unknown keys as usage errors.
 
 use std::io;

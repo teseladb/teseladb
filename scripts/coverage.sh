@@ -40,21 +40,29 @@ PROF=$(cd "$OUT/prof" && pwd)
 export LLVM_PROFILE_FILE="$PROF/%p-%m.profraw"
 export CARGO_TARGET_DIR=$BASE/coverage-build
 
-# One line per test binary: `<executable> <package folder> <package name>`, from a single build.
+# One line per test binary: `<executable> <package folder> <package name>`, from a single build;
+# and in bins.txt the programs of the packages, which their tests start (`CARGO_BIN_EXE_<name>`):
+# what only the program runs, its `main`, is measured from its own object.
 cargo +"$TOOLCHAIN" test --offline -q "${pkgs[@]}" --no-run --message-format=json >"$OUT/build.json"
-python3 - "$OUT/build.json" >"$OUT/tests.txt" <<'PY'
+python3 - "$OUT/build.json" "$OUT/bins.txt" >"$OUT/tests.txt" <<'PY'
 import json
 import os
 import sys
 
+bins = open(sys.argv[2], "w", encoding="utf-8")
 for line in open(sys.argv[1], encoding="utf-8"):
     m = json.loads(line)
-    if m.get("reason") == "compiler-artifact" and m.get("executable") and m["profile"]["test"]:
-        package = os.path.dirname(m["manifest_path"])
-        # `path+file:///…/<folder>#<version>`, or `…#<name>@<version>` when the name differs.
-        fragment = m["package_id"].rpartition("#")[2]
-        name = fragment.partition("@")[0] if "@" in fragment else os.path.basename(package)
-        print(m["executable"], package, name, sep="\t")
+    if m.get("reason") != "compiler-artifact" or not m.get("executable"):
+        continue
+    if not m["profile"]["test"]:
+        if "bin" in m["target"]["kind"]:
+            print(m["executable"], file=bins)
+        continue
+    package = os.path.dirname(m["manifest_path"])
+    # `path+file:///…/<folder>#<version>`, or `…#<name>@<version>` when the name differs.
+    fragment = m["package_id"].rpartition("#")[2]
+    name = fragment.partition("@")[0] if "@" in fragment else os.path.basename(package)
+    print(m["executable"], package, name, sep="\t")
 PY
 
 # Each binary runs in its package's folder with the variables cargo gives a test at run time;
@@ -72,6 +80,7 @@ while IFS=$'\t' read -r exe package name; do
     failures+=("$exe")
   fi
 done <"$OUT/tests.txt"
+while IFS= read -r exe; do objects+=(-object "$exe"); done <"$OUT/bins.txt"
 
 "$BIN/llvm-profdata" merge -sparse "$OUT"/prof/*.profraw -o "$OUT/merged.profdata"
 
@@ -102,14 +111,45 @@ def relative(path):
     return path[len(root):] if path.startswith(root) else path
 
 
+def line_counts(segments):
+    """Whether each line of a file ran, from the file's segments, which hold every instantiation of
+    its generic functions: the rule of llvm's `LineCoverageStats`, the one `llvm-cov show` prints.
+    A segment is `[line, column, count, has_count, is_region_entry, is_gap_region]`. llvm's file
+    summary instead keeps, for each generic function, its single best-covered instantiation, and
+    misses the lines another instantiation ran."""
+    ran = {}
+    wrapped = None
+    i = 0
+    while i < len(segments):
+        line = segments[i][0]
+        starts = []
+        while i < len(segments) and segments[i][0] == line:
+            starts.append(segments[i])
+            i += 1
+        entries = [s for s in starts if s[3] and s[4] and not s[5]]
+        skipped = not starts[0][3] and starts[0][4]
+        if not skipped and ((wrapped is not None and wrapped[3]) or entries):
+            count = wrapped[2] if wrapped is not None else 0
+            for s in entries:
+                count = max(count, s[2])
+            ran[line] = count > 0
+        wrapped = starts[-1]
+        # The lines up to the next segment are inside the last one of this line.
+        nxt = segments[i][0] if i < len(segments) else line + 1
+        if wrapped[3]:
+            for between in range(line + 1, nxt):
+                ran[between] = wrapped[2] > 0
+    return ran
+
+
 stats = {c: {"lines": [0, 0], "functions": {}, "branches": {}} for c in crates}
 for f in data["files"]:
     c = crate_of(f["filename"])
     if c is None:
         continue
-    lines = f["summary"]["lines"]
-    stats[c]["lines"][0] += lines["covered"]
-    stats[c]["lines"][1] += lines["count"]
+    ran = line_counts(f["segments"])
+    stats[c]["lines"][0] += sum(ran.values())
+    stats[c]["lines"][1] += len(ran)
     # A function compiled into two binaries with different hashes (the lib in its unit tests and as
     # a dependency) shows up twice and llvm-cov does not merge its branches: a side counts as taken
     # if it is taken in either of them.

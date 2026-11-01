@@ -464,6 +464,39 @@ fn connection_status_shows_the_user_and_its_roles() {
     assert_eq!(field(&info, "authenticatedUsers"), &Value::Array(vec![me]));
 }
 
+/// `$$USER_ROLES` lists the user's roles as `{_id: "db.role", role, db}` in the order of their
+/// `_id` (measured on a `refrouter` 9.0.4, 010 FR-006).
+#[test]
+fn user_roles_variable_lists_the_roles_by_id() {
+    let (mut m, mut c) = (node(), conn(true));
+    let mut cert = User::new(UserName::new(CERT_USER, EXTERNAL_DB));
+    cert.roles = vec![RoleName::new("readWrite", "xa"), RoleName::new("read", "admin")];
+    m.security.users.clear();
+    add_user(&mut m, &cert);
+    let roles = |m: &mut Mem, c: &mut Connection| {
+        let docs = Value::Array(vec![Value::Document(doc(&[("r", s("$$USER_ROLES"))]))]);
+        let pipeline = Value::Array(vec![Value::Document(doc(&[("$documents", docs)]))]);
+        let cmd = doc(&[
+            ("aggregate", 1.into()),
+            ("pipeline", pipeline),
+            ("cursor", Value::Document(Document::new())),
+        ]);
+        let r = run(m, c, "xa", cmd);
+        field(&r, "cursor.firstBatch.0.r").clone()
+    };
+    let x509 = doc(&[(AUTHENTICATE, 1.into()), ("mechanism", s("REFDB-X509"))]);
+    let r = run(&mut m, &mut c, EXTERNAL_DB, x509);
+    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+    let role = |db: &str, name: &str| {
+        let id = format!("{db}.{name}");
+        Value::Document(doc(&[("_id", s(&id)), ("role", s(name)), ("db", s(db))]))
+    };
+    assert_eq!(
+        roles(&mut m, &mut c),
+        Value::Array(vec![role("admin", "read"), role("xa", "readWrite")])
+    );
+}
+
 #[test]
 fn x509_with_authenticate_and_sasl_start() {
     let ok = doc(&[("dbname", s(EXTERNAL_DB)), ("user", s(CERT_USER)), ("ok", 1.0.into())]);

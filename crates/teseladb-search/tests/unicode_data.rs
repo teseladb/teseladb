@@ -1,6 +1,8 @@
-//! The Unicode data of the analyzers against the pinned Unicode 15.1.0 files: the embedded tables
-//! (`data/unicode.bin`) rebuilt from the character database, and the conformance tests of word
-//! boundaries and normalization. With `TESELADB_WRITE_TABLES=1` the rebuilt tables are written.
+//! The Unicode data of the analyzers against the pinned files: the embedded tables
+//! (`data/unicode.bin`) rebuilt from the character database (the word-break classes of the
+//! tokenizer from Unicode 12.1.0, the rest from 15.1.0), and the conformance tests of word
+//! boundaries (12.1.0) and normalization (15.1.0). With `TESELADB_WRITE_TABLES=1` the rebuilt
+//! tables are written.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -13,17 +15,31 @@ use teseladb_search::analysis::unicode::WordBreak;
 const PICTOGRAPHIC: u32 = 0x80;
 /// Word-break record bit of letters and numbers.
 const ALPHANUMERIC: u32 = 0x40;
+/// Word-break record bits of Script=Han, Script=Hiragana, Script=Hangul and Line_Break=SA.
+const HAN: u32 = 0x100;
+const HIRAGANA: u32 = 0x200;
+const HANGUL: u32 = 0x400;
+const COMPLEX_CONTEXT: u32 = 0x800;
 /// Magic of the tables.
 const MAGIC: &[u8; 8] = b"TSLUNI01";
 
-/// The directory `scripts/fetch-pinned.sh scripts/unicode-search.sha256` downloads into.
-fn ucd(name: &str) -> String {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../.tools/unicode/ucd-15.1.0")
-        .join(name);
+/// `name` in the directory `scripts/fetch-pinned.sh <list>` downloads into.
+fn pinned(dir: &str, list: &str, name: &str) -> String {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.tools/unicode").join(dir);
+    let path = path.join(name);
     std::fs::read_to_string(&path).unwrap_or_else(|e| {
-        panic!("{}: {e}; run scripts/fetch-pinned.sh scripts/unicode-search.sha256", path.display())
+        panic!("{}: {e}; run scripts/fetch-pinned.sh scripts/{list}", path.display())
     })
+}
+
+/// A file of the Unicode 15.1.0 database.
+fn ucd(name: &str) -> String {
+    pinned("ucd-15.1.0", "unicode-search.sha256", name)
+}
+
+/// A file of the Unicode 12.1.0 database, that of the standard tokenizer.
+fn ucd12(name: &str) -> String {
+    pinned("ucd-12.1.0", "unicode-tokenizer.sha256", name)
 }
 
 fn hex(s: &str) -> u32 {
@@ -64,13 +80,30 @@ fn ranges(values: &[u32]) -> Vec<[u32; 3]> {
 fn build() -> Vec<u8> {
     let size = 0x11_0000;
     let mut wb = vec![0_u32; size];
-    for (a, b, v) in property_lines(&ucd("auxiliary/WordBreakProperty.txt")) {
-        let class = WordBreak::ALL.iter().position(|w| w.ucd_name() == v).unwrap() as u32;
-        wb[a as usize..=b as usize].iter_mut().for_each(|x| *x = class);
+    let mut mark = |a: u32, b: u32, bits: u32| {
+        wb[a as usize..=b as usize].iter_mut().for_each(|x| *x |= bits);
+    };
+    for (a, b, v) in property_lines(&ucd12("auxiliary/WordBreakProperty.txt")) {
+        mark(a, b, WordBreak::ALL.iter().position(|w| w.ucd_name() == v).unwrap() as u32);
     }
-    for (a, b, v) in property_lines(&ucd("emoji/emoji-data.txt")) {
+    let emoji = pinned("emoji-12.1", "unicode-emoji-tokenizer.sha256", "emoji-data.txt");
+    for (a, b, v) in property_lines(&emoji) {
         if v == "Extended_Pictographic" {
-            wb[a as usize..=b as usize].iter_mut().for_each(|x| *x |= PICTOGRAPHIC);
+            mark(a, b, PICTOGRAPHIC);
+        }
+    }
+    for (a, b, v) in property_lines(&ucd12("Scripts.txt")) {
+        let bits = match v.as_str() {
+            "Han" => HAN,
+            "Hiragana" => HIRAGANA,
+            "Hangul" => HANGUL,
+            _ => 0,
+        };
+        mark(a, b, bits);
+    }
+    for (a, b, v) in property_lines(&ucd12("LineBreak.txt")) {
+        if v == "SA" {
+            mark(a, b, COMPLEX_CONTEXT);
         }
     }
     let mut ccc = vec![0_u32; size];
@@ -170,7 +203,7 @@ fn field(f: &str) -> String {
 #[test]
 fn conformance_with_word_break_test() {
     let mut cases = 0;
-    for line in ucd("auxiliary/WordBreakTest.txt").lines() {
+    for line in ucd12("auxiliary/WordBreakTest.txt").lines() {
         let data = line.split('#').next().unwrap().trim();
         if data.is_empty() {
             continue;

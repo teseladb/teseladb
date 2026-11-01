@@ -9,6 +9,7 @@ pub mod at_rest;
 pub mod audit_log;
 pub mod authz_lease;
 pub mod backend;
+pub mod backup;
 pub mod catalog_ops;
 pub mod certs;
 pub mod checksums;
@@ -18,6 +19,7 @@ pub mod clock;
 pub mod cluster_auth;
 pub mod clustertime_keys;
 pub mod config;
+pub mod config_db;
 pub mod coresm;
 pub mod data;
 pub mod data_wire;
@@ -32,10 +34,12 @@ pub mod kmip;
 pub mod ldap_client;
 pub mod leaders;
 pub mod liveness;
+pub mod local_zone;
 pub mod log;
 pub mod logic;
 pub mod memory;
 pub mod merges;
+pub mod meta2_ops;
 pub mod metrics_http;
 pub mod node;
 pub mod ocsp_staple;
@@ -99,6 +103,22 @@ pub fn ready_line(format: Format, node_id: u64, cluster_id: &[u8; 16], peer: &st
             )
         }
     }
+}
+
+/// The program `teseladb`: installs the stop handler with `install`, then runs `args` (see [`run`]);
+/// a handler that cannot be installed ends it with 1.
+pub fn program(
+    args: &[String],
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    install: &dyn Fn() -> io::Result<()>,
+    stop: &dyn Fn() -> bool,
+) -> i32 {
+    if let Err(e) = install() {
+        let _ = writeln!(err, "teseladb: cannot handle stop signals: {e}");
+        return 1;
+    }
+    run(args, out, err, stop)
 }
 
 /// Runs the command line `args` (without the program name) and returns the exit code: 0 correct,
@@ -736,7 +756,7 @@ pub fn serve<D: teseladb_raftlog::Disk + Send + 'static>(
     // election went (005 SC-004).
     let (mut voter, mut leading) = (false, false);
     let mut role = None;
-    while !stop() {
+    while !stop() && !node.shutdown_requested() {
         if let Some(v) = node.view(STOP_POLL) {
             let now_voter = v.voters.contains(&node.node_id());
             if now_voter != voter {

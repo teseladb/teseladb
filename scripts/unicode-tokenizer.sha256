@@ -1,0 +1,12 @@
+# Unicode 12.1.0 character database files for the standard tokenizer of the search analyzers (011
+# FR-019): `refsearch` 1.70.6 splits words by the Unicode 12.1 word-break classes, takes ideographs by
+# Script=Han, one token per Hiragana character by Script=Hiragana, Hangul words by Script=Hangul and
+# the runs of Thai, Lao, Myanmar and Khmer by Line_Break=SA (measured on every assigned code point,
+# 011 T009). The word-break conformance test of the same version checks the segmentation.
+# Unicode License v3 (https://www.unicode.org/license.txt).
+# source https://www.unicode.org/Public/12.1.0/ucd
+# dest .tools/unicode/ucd-12.1.0
+f221f89fe3bb3becc00de726d5694c4b7f464c316baff6d339b2ff3900bcb96c  auxiliary/WordBreakProperty.txt
+3e3320bbbe775de7f1a0b9a30021eb949116a9b05cb461c90596c5ecf1743831  auxiliary/WordBreakTest.txt
+e6313a8edfd24f36c7a006fbcf1d1b7245b5dd009c6dde80441f0da08b822c43  Scripts.txt
+961f842fc70b5afd1d82c6645e68c10d1f701382aed38ae38cb2ff27f671903c  LineBreak.txt

@@ -12,6 +12,12 @@ const END_TXN: u8 = 1;
 const PUSH_TXN: u8 = 2;
 const ONE_PHASE: u8 = 3;
 const RESOLVE: u8 = 4;
+/// Tag of `TxnOp::FindIntents`.
+const FIND_INTENTS: u8 = 5;
+/// Tag of `TxnOp::ForgetRecord`.
+const FORGET_RECORD: u8 = 6;
+/// Tag of `TxnOp::ReadRecord`.
+const READ_RECORD: u8 = 7;
 
 const OP_PUT: u8 = 0;
 const OP_DELETE: u8 = 1;
@@ -20,9 +26,13 @@ const BEGIN: u8 = 0;
 const HEARTBEAT: u8 = 1;
 const COMMIT: u8 = 2;
 const ABORT: u8 = 3;
+/// Code of `RecordOp::Resolved`.
+const RESOLVED: u8 = 4;
 
 const PUSH_TO: u8 = 0;
 const ABORT_IF_ABANDONED: u8 = 1;
+/// Code of `Push::Abort`.
+const PUSH_ABORT: u8 = 2;
 
 fn put_hlc(e: &mut Encoder, ts: Hlc) {
     e.u64(ts.physical).u32(ts.logical);
@@ -116,6 +126,9 @@ fn put_record_op(e: &mut Encoder, op: &RecordOp) {
             e.u8(ABORT);
             put_spans(e, spans);
         }
+        RecordOp::Resolved => {
+            e.u8(RESOLVED);
+        }
     }
 }
 
@@ -126,6 +139,7 @@ fn get_record_op(d: &mut Decoder<'_>) -> Result<RecordOp, DecodeError> {
         HEARTBEAT => RecordOp::Heartbeat { spans: get_spans(d)? },
         COMMIT => RecordOp::Commit { ts: get_hlc(d)?, spans: get_spans(d)? },
         ABORT => RecordOp::Abort { spans: get_spans(d)? },
+        RESOLVED => RecordOp::Resolved,
         _ => return Err(DecodeError::InvalidValue { offset: at }),
     })
 }
@@ -154,12 +168,25 @@ pub fn put_op(e: &mut Encoder, op: &TxnOp) {
                     e.u8(ABORT_IF_ABANDONED);
                     put_hlc(e, *intent_ts);
                 }
+                Push::Abort { lsid, txn_number } => {
+                    e.u8(PUSH_ABORT).u128(*lsid).i64(*txn_number);
+                }
             }
         }
         TxnOp::ResolveIntents { txn, status, commit_ts, keys } => {
             e.u8(RESOLVE).u128(txn.0).u8(status.code());
             put_hlc(e, *commit_ts);
             put_keys(e, keys);
+        }
+        TxnOp::FindIntents { txn, start, end } => {
+            e.u8(FIND_INTENTS).u128(txn.0).bytes(start).bytes(end);
+        }
+        TxnOp::ForgetRecord { txn, before } => {
+            e.u8(FORGET_RECORD).u128(txn.0);
+            put_hlc(e, *before);
+        }
+        TxnOp::ReadRecord { txn } => {
+            e.u8(READ_RECORD).u128(txn.0);
         }
     }
 }
@@ -178,6 +205,7 @@ pub fn get_op(d: &mut Decoder<'_>) -> Result<TxnOp, DecodeError> {
             let push = match d.u8()? {
                 PUSH_TO => Push::To(get_hlc(d)?),
                 ABORT_IF_ABANDONED => Push::AbortIfAbandoned { intent_ts: get_hlc(d)? },
+                PUSH_ABORT => Push::Abort { lsid: d.u128()?, txn_number: d.i64()? },
                 _ => return Err(DecodeError::InvalidValue { offset: at }),
             };
             TxnOp::PushTxn { txn, push }
@@ -188,6 +216,11 @@ pub fn get_op(d: &mut Decoder<'_>) -> Result<TxnOp, DecodeError> {
                 TxnStatus::from_code(d.u8()?).ok_or(DecodeError::InvalidValue { offset: at })?;
             TxnOp::ResolveIntents { txn, status, commit_ts: get_hlc(d)?, keys: get_keys(d)? }
         }
+        FIND_INTENTS => {
+            TxnOp::FindIntents { txn, start: d.bytes()?.to_vec(), end: d.bytes()?.to_vec() }
+        }
+        FORGET_RECORD => TxnOp::ForgetRecord { txn, before: get_hlc(d)? },
+        READ_RECORD => TxnOp::ReadRecord { txn },
         _ => return Err(DecodeError::InvalidValue { offset: at }),
     })
 }
@@ -224,6 +257,11 @@ mod tests {
             TxnOp::EndTxn { txn, op: RecordOp::Abort { spans } },
             TxnOp::PushTxn { txn, push: Push::To(ts) },
             TxnOp::PushTxn { txn, push: Push::AbortIfAbandoned { intent_ts: ts } },
+            TxnOp::PushTxn { txn, push: Push::Abort { lsid: 9, txn_number: -2 } },
+            TxnOp::EndTxn { txn, op: RecordOp::Resolved },
+            TxnOp::FindIntents { txn, start: vec![1, 2], end: vec![3] },
+            TxnOp::ForgetRecord { txn, before: ts },
+            TxnOp::ReadRecord { txn },
             TxnOp::ResolveIntents {
                 txn,
                 status: TxnStatus::Committed,

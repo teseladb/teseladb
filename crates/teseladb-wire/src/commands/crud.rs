@@ -76,6 +76,9 @@ pub struct Writer {
     pub retried: Vec<i32>,
     /// `redactClientLogData` when the command began (013 FR-027).
     redact: bool,
+    /// What follows the message of a `writeConcernError`: the node it came from, as a `refrouter`
+    /// names the shard (D-102).
+    relayed: String,
 }
 
 impl Writer {
@@ -88,6 +91,7 @@ impl Writer {
             args: concerns::default_write_concern(),
             retried: Vec::new(),
             redact: false,
+            relayed: String::new(),
         }
     }
 
@@ -97,7 +101,15 @@ impl Writer {
         // shard's (measured in `refrouter` 9.0.4).
         let wc_args = args::write_concern(ctx.cmd, name)?;
         let wc = wc_args.to_range();
-        let wc_error = wc_args.error_after_write().map(|e| write_concern_error(&e, &wc_args));
+        // `findAndModify` adds its own empty details (measured).
+        let at = format!(" at {}", super::shard_name(ctx.backend.node()));
+        let relayed = if name == FIND_AND_MODIFY || name == FIND_AND_MODIFY_LEGACY {
+            format!("; Error details: <none>{at}")
+        } else {
+            at
+        };
+        let wc_error =
+            wc_args.error_after_write().map(|e| write_concern_error(&e, &wc_args, &relayed));
         let lsid = args::lsid(ctx.cmd)?;
         let txn = args::txn_number(ctx.cmd)?;
         let now = ctx.backend.now_ms();
@@ -122,7 +134,7 @@ impl Writer {
             (None, _) => None,
         };
         let redact = lock(ctx.shared).params.redact_client_log_data;
-        Ok(Writer { wc, retry, wc_error, args: wc_args, retried: Vec::new(), redact })
+        Ok(Writer { wc, retry, wc_error, args: wc_args, retried: Vec::new(), redact, relayed })
     }
 
     /// Runs one mutation: its statement is `stmt` within the command.
@@ -194,7 +206,7 @@ impl Writer {
             Err(e) if e.code == UNSATISFIABLE_WRITE_CONCERN => {
                 // As a shard does: the write goes ahead and the reply carries the error.
                 let e = CommandError::new(e.code, "Not enough data-bearing nodes");
-                self.wc_error = Some(write_concern_error(&e, &self.args));
+                self.wc_error = Some(write_concern_error(&e, &self.args, &self.relayed));
                 let op = WriteOp { wc: WriteConcern { w: W::Majority, j: true }, ..op };
                 MutationResult::decode(&backend.write(op)?)?
             }
@@ -460,7 +472,12 @@ pub(crate) fn write_error(index: usize, e: &CommandError) -> Value {
     Value::Document(d)
 }
 
-fn batch<'a>(cmd: &'a Document, name: &str, field: &str) -> Result<&'a [Value], CommandError> {
+/// The statements of a write batch, between one and the most a batch takes.
+pub(crate) fn batch<'a>(
+    cmd: &'a Document,
+    name: &str,
+    field: &str,
+) -> Result<&'a [Value], CommandError> {
     let items = args::array(cmd, name, field)?.ok_or_else(|| missing(name, field))?;
     if items.is_empty() || items.len() > MAX_WRITE_BATCH_SIZE as usize {
         return Err(CommandError::new(
@@ -493,6 +510,25 @@ pub fn count(n: i64) -> i32 {
     i32::try_from(n).unwrap_or(i32::MAX)
 }
 
+/// The results of `statements` on a collection kept in Group 0 (the users and roles, and
+/// `config.settings`), which runs the whole command as one batch; `None` for any other
+/// collection.
+fn direct_modify<B: Backend + ?Sized>(
+    ctx: &mut Ctx<'_, B>,
+    ns: &Namespace,
+    statements: impl FnOnce() -> Vec<Result<Modify, CommandError>>,
+    ordered: bool,
+    bypass: bool,
+) -> Result<Option<Vec<Result<MutationResult, CommandError>>>, CommandError> {
+    if let Some(kind) = super::authz_writes::kind_of(ns) {
+        return super::authz_writes::modify(ctx, kind, &statements(), ordered).map(Some);
+    }
+    if super::config_settings::is_settings(ns) {
+        return super::config_settings::modify(ctx, &statements(), ordered, bypass).map(Some);
+    }
+    Ok(None)
+}
+
 /// `insert`.
 pub fn insert<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     // A required field that is missing fails before the collection name (measured).
@@ -508,11 +544,18 @@ pub fn insert<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
         let reply = super::authz_writes::insert(ctx, kind, &docs, ordered)?;
         return Ok(w.finish(reply));
     }
+    if super::config_settings::is_settings(&ns) {
+        let reply = super::config_settings::insert(ctx, &docs, ordered, bypass)?;
+        return Ok(w.finish(reply));
+    }
     let mut errors: Vec<Value> = Vec::new();
-    let checked = names::check_writable(&ns).and_then(|()| match expected_uuid {
-        Some(u) => uuid::check(ctx.backend, &ns, u),
-        None => Ok(()),
-    });
+    let host = super::host_port(ctx.backend);
+    let refused = names::cannot_write(&ns, &host).map_or(Ok(()), Err);
+    let checked =
+        refused.and_then(|()| names::check_writable(&ns)).and_then(|()| match expected_uuid {
+            Some(u) => uuid::check(ctx.backend, &ns, u),
+            None => Ok(()),
+        });
     let coll = match checked.and_then(|()| ensure_collection(ctx, &ns)) {
         Ok(c) => c,
         Err(e) if fails_command(&e) => return Err(e),
@@ -654,6 +697,10 @@ fn candidates<B: Backend + ?Sized>(
     if let Some(id) = id_equality(&m.filter) {
         return Ok(id_doc_key(backend, coll, &id)?.into_iter().collect());
     }
+    // An index plan that wins gives the documents, and a write of one takes its first (T019).
+    if let Some(keys) = super::plan_exec::planned_keys(backend, coll, m)? {
+        return Ok(keys);
+    }
     let mut keys = Vec::new();
     let (range, vars) = (documents_of(coll), m.vars.as_ref());
     for_each_match_with(backend, range, &m.filter, collation, vars, ReadConcern::Local, |k, _| {
@@ -777,6 +824,8 @@ pub struct Modify {
     pub image: Image,
     /// The command's `let` variables, resolved (FR-032).
     pub vars: Option<Document>,
+    /// The index `hint` names (a name or a key pattern).
+    pub hint: Option<Value>,
 }
 
 /// Runs one update or delete statement: the sum of its mutations' results.
@@ -795,6 +844,13 @@ pub fn modify<B: Backend + ?Sized>(
         RawDoc::from_bytes_with(&pb, command_limits()).ok().and_then(|d| d.get("q"))
     {
         Filter::parse(q, FilterUse::Query).map_err(from_mql)?;
+        // A constant of an `$expr` that fails fails the statement before any document is read.
+        teseladb_exec::expr::optimize::optimize_filter(&m.filter, m.vars.as_ref())
+            .map_err(from_mql)?;
+    }
+    let host = super::host_port(ctx.backend);
+    if let Some(e) = names::cannot_write(ns, &host) {
+        return Err(e);
     }
     let existing = ctx.backend.collection(ns)?;
     let coll = match (existing, m.upsert && m.update.is_some()) {
@@ -951,14 +1007,14 @@ fn unknown_field(d: &Document, name: &str, known: &[&str]) -> Result<(), Command
 /// What the parser of an update statement checks: its fields and their types. A statement it
 /// rejects fails the whole command (measured).
 /// What an update statement says beyond its `Modify`, checked when the statement runs.
-struct UpdateFlags {
+pub(crate) struct UpdateFlags {
     /// It has constants (`c`).
     constants: bool,
     /// `upsertSupplied: true`.
     upsert_supplied: bool,
 }
 
-fn update_statement(v: &Value, i: usize) -> Result<(Modify, UpdateFlags), CommandError> {
+pub(crate) fn update_statement(v: &Value, i: usize) -> Result<(Modify, UpdateFlags), CommandError> {
     let Value::Document(d) = v else {
         return Err(wrong_type(&format!("update.updates.{i}"), v, "object"));
     };
@@ -985,12 +1041,15 @@ fn update_statement(v: &Value, i: usize) -> Result<(Modify, UpdateFlags), Comman
         },
         image: Image::None,
         vars: None,
+        hint: d.get("hint").cloned(),
     };
     Ok((m, flags))
 }
 
 /// What an update statement checks when it runs; a failure is that statement's write error.
-fn check_update_statement((m, flags): &(Modify, UpdateFlags)) -> Result<(), CommandError> {
+pub(crate) fn check_update_statement(
+    (m, flags): &(Modify, UpdateFlags),
+) -> Result<(), CommandError> {
     let pipeline = matches!(m.update, Some(Value::Array(_)));
     let replacement = matches!(&m.update, Some(Value::Document(u)) if u.iter().next().is_none_or(|(k, _)| !k.starts_with('$')));
     if flags.constants && !pipeline {
@@ -1042,7 +1101,7 @@ pub fn update<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
     let bypass =
         args::safe_bool(ctx.cmd, UPDATE, "bypassDocumentValidation", &WRITE_SAFE_BOOL_TYPES)?
             .unwrap_or(false);
-    let vars = super::query::command_let(ctx.cmd, UPDATE)?;
+    let vars = super::query::command_let(ctx.backend, ctx.cmd, UPDATE)?;
     let statements: Vec<(Modify, UpdateFlags)> = items
         .iter()
         .enumerate()
@@ -1057,17 +1116,11 @@ pub fn update<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
         Some(c) => super::timeseries::spec_of(&c)?,
         None => None,
     };
-    // The users and roles of Group 0 run the whole command as one batch.
-    let mut direct = match super::authz_writes::kind_of(&ns) {
-        Some(kind) => {
-            let checked: Vec<Result<Modify, CommandError>> = statements
-                .iter()
-                .map(|st| check_update_statement(st).map(|()| st.0.clone()))
-                .collect();
-            Some(super::authz_writes::modify(ctx, kind, &checked, ordered)?.into_iter())
-        }
-        None => None,
+    // The users and roles of Group 0 and `config.settings` run the whole command as one batch.
+    let checked = || -> Vec<Result<Modify, CommandError>> {
+        statements.iter().map(|st| check_update_statement(st).map(|()| st.0.clone())).collect()
     };
+    let mut direct = direct_modify(ctx, &ns, checked, ordered, bypass)?.map(Vec::into_iter);
     for (i, statement) in statements.iter().enumerate() {
         let r = match direct.as_mut() {
             Some(results) => match results.next() {
@@ -1112,7 +1165,7 @@ pub fn update<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
 /// The fields of a statement in `deletes` (`DeleteOpEntry`, measured in `refrouter` 9.0.4).
 const DELETE_STATEMENT_FIELDS: [&str; 5] = ["q", "limit", "collation", "hint", "sampleId"];
 
-fn delete_statement(v: &Value, i: usize) -> Result<Modify, CommandError> {
+pub(crate) fn delete_statement(v: &Value, i: usize) -> Result<Modify, CommandError> {
     let Value::Document(d) = v else {
         return Err(wrong_type(&format!("delete.deletes.{i}"), v, "object"));
     };
@@ -1141,6 +1194,7 @@ fn delete_statement(v: &Value, i: usize) -> Result<Modify, CommandError> {
         sort: None,
         image: Image::None,
         vars: None,
+        hint: d.get("hint").cloned(),
     })
 }
 
@@ -1160,7 +1214,7 @@ pub fn delete<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
     let ns = target(ctx)?;
     let ordered = args::bool_field(ctx.cmd, DELETE, "ordered")?.unwrap_or(true);
     // A statement the parser rejects fails the whole command before any delete runs.
-    let vars = super::query::command_let(ctx.cmd, DELETE)?;
+    let vars = super::query::command_let(ctx.backend, ctx.cmd, DELETE)?;
     let statements: Vec<Modify> = items
         .iter()
         .enumerate()
@@ -1170,14 +1224,8 @@ pub fn delete<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
     let mut w = Writer::new(ctx, DELETE)?;
     let mut n = 0i64;
     let mut errors: Vec<Value> = Vec::new();
-    let mut direct = match super::authz_writes::kind_of(&ns) {
-        Some(kind) => {
-            let all: Vec<Result<Modify, CommandError>> =
-                statements.iter().cloned().map(Ok).collect();
-            Some(super::authz_writes::modify(ctx, kind, &all, ordered)?.into_iter())
-        }
-        None => None,
-    };
+    let all = || statements.iter().cloned().map(Ok).collect();
+    let mut direct = direct_modify(ctx, &ns, all, ordered, false)?.map(Vec::into_iter);
     for (i, m) in statements.iter().enumerate() {
         let r = match direct.as_mut() {
             Some(results) => match results.next() {
@@ -1266,15 +1314,14 @@ pub fn find_and_modify<B: Backend + ?Sized>(
             _ => None,
         },
         image: if new { Image::After } else { Image::Before },
-        vars: super::query::command_let(cmd, name)?,
+        vars: super::query::command_let(ctx.backend, cmd, name)?,
+        hint: cmd.get("hint").cloned(),
     };
     let bypass = args::safe_bool(cmd, name, "bypassDocumentValidation", &WRITE_SAFE_BOOL_TYPES)?
         .unwrap_or(false);
     let mut w = Writer::new(ctx, name)?;
-    let r = match super::authz_writes::kind_of(&ns) {
-        Some(kind) => super::authz_writes::modify(ctx, kind, &[Ok(m.clone())], true)?
-            .pop()
-            .unwrap_or_else(|| Ok(MutationResult::default()))?,
+    let r = match direct_modify(ctx, &ns, || vec![Ok(m.clone())], true, bypass)? {
+        Some(mut results) => results.pop().unwrap_or_else(|| Ok(MutationResult::default()))?,
         None => modify(ctx, &mut w, &ns, &m, bypass, stmt_id(ctx.cmd, 0)).map_err(routing_error)?,
     };
     let mut last = Document::new().with("n", if r.upserted.is_some() { 1 } else { r.n as i32 });
@@ -1334,9 +1381,11 @@ pub fn bulk_write<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document,
         names::check(&ns)?;
         spaces.push(ns);
     }
-    let vars = super::query::command_let(ctx.cmd, name)?;
+    let vars = super::query::command_let(ctx.backend, ctx.cmd, name)?;
     let with_vars = |(kind, ns, body): (BulkKind, Namespace, BulkBody)| match body {
-        BulkBody::Modify(m) => (kind, ns, BulkBody::Modify(Modify { vars: vars.clone(), ..m })),
+        BulkBody::Modify(m) => {
+            (kind, ns, BulkBody::Modify(Box::new(Modify { vars: vars.clone(), ..*m })))
+        }
         insert => (kind, ns, insert),
     };
     let parsed: Vec<(BulkKind, Namespace, BulkBody)> = ops
@@ -1455,7 +1504,7 @@ const BULK_INDEX_TYPES: [&str; 4] = ["int", "double", "long", "decimal"];
 /// A `bulkWrite` operation once the parser has read it.
 enum BulkBody {
     Insert(Document),
-    Modify(Modify),
+    Modify(Box<Modify>),
 }
 
 /// Reads operation `idx` of a `bulkWrite`; what it refuses fails the whole command.
@@ -1508,6 +1557,7 @@ fn parse_bulk_op(
                 sort: None,
                 image: Image::None,
                 vars: None,
+                hint: d.get("hint").cloned(),
             })
         };
     let body = match kind {
@@ -1518,11 +1568,11 @@ fn parse_bulk_op(
             let mods = d.get("updateMods").cloned().ok_or_else(|| missing(name, "updateMods"))?;
             let multi = args::bool_field(d, name, "multi")?.unwrap_or(false);
             let upsert = args::bool_field(d, name, "upsert")?.unwrap_or(false);
-            BulkBody::Modify(modify(Some(mods), multi, upsert)?)
+            BulkBody::Modify(Box::new(modify(Some(mods), multi, upsert)?))
         }
         BulkKind::Delete => {
             let multi = args::bool_field(d, name, "multi")?.unwrap_or(false);
-            BulkBody::Modify(modify(None, multi, false)?)
+            BulkBody::Modify(Box::new(modify(None, multi, false)?))
         }
     };
     let ns = spaces.get(index).cloned().ok_or_else(|| {

@@ -86,6 +86,8 @@ pub struct NodeHandle {
     pub routes: SharedRoutes,
     /// The node's authorization lease, which core 0 renews (013 FR-012).
     pub auth: Arc<AuthGate>,
+    /// Set by `shutdown` (007 FR-018): the node stops once its loop sees it.
+    pub shutdown: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// The [`Backend`] of one client worker.
@@ -207,7 +209,9 @@ impl ServerBackend {
                     RemoteReply::Written { .. }
                     | RemoteReply::Value { .. }
                     | RemoteReply::Intents { .. }
-                    | RemoteReply::Record(_),
+                    | RemoteReply::Record(_)
+                    | RemoteReply::Piece { .. }
+                    | RemoteReply::Restored { .. },
                 ) => {
                     return Err(CommandError::new(INTERNAL_ERROR, "a scan answered with no rows"));
                 }
@@ -263,6 +267,8 @@ impl ServerBackend {
                     | CatalogAnswer::Settings(_)
                     | CatalogAnswer::Indexes(..)
                     | CatalogAnswer::Principals(_)
+                    | CatalogAnswer::Documents(_)
+                    | CatalogAnswer::Dump(_)
                     | CatalogAnswer::Unavailable,
                 )
                 | None => {}
@@ -409,7 +415,7 @@ impl ServerBackend {
                 // A read pushes the owner above its mark and reads again knowing it (008 FR-003).
                 RangeError::ReadIntent { owner, at } => {
                     let (owner, at) = (owner.clone(), *at);
-                    let known = self.push_for_read(&owner, at);
+                    let known = self.push_for_read(&owner, at, until);
                     let (mark, view) = pinned.get_or_insert_with(|| (at, TxnView::default()));
                     *mark = at;
                     match known {
@@ -532,7 +538,9 @@ impl Backend for ServerBackend {
             RemoteReply::Rows(_)
             | RemoteReply::Value { .. }
             | RemoteReply::Intents { .. }
-            | RemoteReply::Record(_) => {
+            | RemoteReply::Record(_)
+            | RemoteReply::Piece { .. }
+            | RemoteReply::Restored { .. } => {
                 Err(CommandError::new(INTERNAL_ERROR, "a write answered with no result"))
             }
         }
@@ -722,6 +730,48 @@ impl Backend for ServerBackend {
             }
             Err(e) => Err(CommandError::new(INTERNAL_ERROR, format!("{e:?}"))),
         }
+    }
+
+    fn config_documents(
+        &mut self,
+        coll: &str,
+    ) -> Result<Vec<teseladb_bson::Document>, CommandError> {
+        let until = self.until();
+        loop {
+            let req = CatalogReq::Config(coll.to_owned());
+            if let Some(CatalogAnswer::Documents(docs)) =
+                self.ask(0, |tx| NodeMsg::Catalog(req, tx), until)
+            {
+                let raw = docs.iter().map(|b| teseladb_bson::RawDoc::from_bytes(b));
+                return raw
+                    .map(|d| d.map(teseladb_bson::Document::from).map_err(Into::into))
+                    .collect();
+            }
+            if Instant::now() >= until {
+                return Err(unavailable());
+            }
+            thread::sleep(RETRY_PAUSE);
+        }
+    }
+
+    fn config_settings_write(
+        &mut self,
+        writes: Vec<teseladb_wire::commands::config_settings::SettingsWrite>,
+    ) -> Result<bool, CommandError> {
+        let changes =
+            writes.iter().map(crate::config_db::setting_change).collect::<Result<_, _>>()?;
+        match self.group0_change(CatalogReq::SetSettings(changes))? {
+            Ok(_) => Ok(true),
+            Err(Group0Error::SettingConflict) => Ok(false),
+            Err(e) => {
+                Err(CommandError::new(INTERNAL_ERROR, format!("Group 0 refused the change: {e:?}")))
+            }
+        }
+    }
+
+    fn request_shutdown(&mut self) -> Result<(), CommandError> {
+        self.h.shutdown.store(true, std::sync::atomic::Ordering::Release);
+        Ok(())
     }
 
     fn cluster_parameters(&mut self) -> Result<BTreeMap<String, Vec<u8>>, CommandError> {

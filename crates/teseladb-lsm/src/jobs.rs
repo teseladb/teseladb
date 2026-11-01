@@ -140,7 +140,8 @@ impl FlushJob {
             chunk: cfg.io_chunk_bytes,
             writer: has_data.then(|| {
                 let ring = cfg.encryption.as_ref().map(|e| &*e.0);
-                TableWriter::new(cfg.block_bytes, cfg.compress).sealed(ring)
+                TableWriter::new(cfg.block_bytes, cfg.codec == crate::config::Codec::Zlib)
+                    .sealed(ring)
             }),
             next_entry: 0,
             table: None,

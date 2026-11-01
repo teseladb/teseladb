@@ -1,5 +1,5 @@
 //! What one node asks another with a forwarded request (`PeerMsg::Forward`), and the answers: a
-//! Group 0 command for Group 0's leader (001 FR-023, 005 FR-016), a piece of a data range's
+//! Group 0 command for Group 0's leader (001 FR-022, 005 FR-016), a piece of a data range's
 //! snapshot for a replica that waits for it (005 FR-012), a request for the data range's leader
 //! or Group 0's (006 FR-014, FR-027), the sessions to kill on every node (006 FR-016), a replica's
 //! checksum for its range's leader and the leader's order to rebuild a replica (005 FR-014). The
@@ -21,12 +21,19 @@ const DATA: u8 = 2;
 const CATALOG: u8 = 3;
 /// Tag of the sessions to kill on the node that receives it.
 const KILL_SESSIONS: u8 = 4;
+/// What a [`KILL_SESSIONS`] request kills: the sessions it lists, every session, or one
+/// operation of the node that receives it.
+const KILL_LISTED: u8 = 0;
+const KILL_ALL: u8 = 1;
+const KILL_OP: u8 = 2;
 /// Tag of a replica's checksum for its range's leader.
 const CHECKSUM: u8 = 5;
 /// Tag of the order to rebuild the replica of a range on the node that receives it.
 const REBUILD: u8 = 6;
 /// Tag of a merge's question to a node about its replica of the range absorbed.
 const MERGE_PROBE: u8 = 7;
+/// Tag of [`Request::Meta2`].
+const META2: u8 = 8;
 /// Tag of the answer "not ready yet".
 const NOT_READY: u8 = 0;
 /// Tag of the answer with a chunk.
@@ -72,6 +79,13 @@ pub enum Request {
         /// The merge.
         merge: u64,
     },
+    /// An entry for the leader of `Meta2` range `group` (a `Meta2Command`, encoded; 007 FR-014).
+    Meta2 {
+        /// The `Meta2` range.
+        group: GroupId,
+        /// The entry.
+        entry: Vec<u8>,
+    },
 }
 
 impl Request {
@@ -91,13 +105,16 @@ impl Request {
                 e.u8(KILL_SESSIONS);
                 match scope {
                     KillScope::All => {
-                        e.bool(true);
+                        e.u8(KILL_ALL);
                     }
                     KillScope::Sessions(ids) => {
-                        e.bool(false).var(ids.len() as u64);
+                        e.u8(KILL_LISTED).var(ids.len() as u64);
                         for id in ids {
                             e.u128(*id);
                         }
+                    }
+                    KillScope::Op { node, op } => {
+                        e.u8(KILL_OP).u64(*node).u32(*op);
                     }
                 }
                 e.finish()
@@ -111,6 +128,11 @@ impl Request {
             Request::MergeProbe { range, merge } => {
                 let mut e = Encoder::new();
                 e.u8(MERGE_PROBE).u64(range.0).u64(*merge);
+                e.finish()
+            }
+            Request::Meta2 { group, entry } => {
+                let mut e = Encoder::new();
+                e.u8(META2).u64(group.0).bytes(entry);
                 e.finish()
             }
         }
@@ -134,18 +156,21 @@ impl Request {
             DATA => Ok(Request::Data(b[1..].to_vec())),
             CATALOG => Ok(Request::Catalog(b[1..].to_vec())),
             KILL_SESSIONS => {
-                let scope = if d.bool()? {
-                    KillScope::All
-                } else {
-                    let n = d.var()?;
-                    if n > d.remaining() as u64 / 16 {
-                        return Err(DecodeError::InvalidValue { offset: 2 });
+                let scope = match d.u8()? {
+                    KILL_ALL => KillScope::All,
+                    KILL_LISTED => {
+                        let n = d.var()?;
+                        if n > d.remaining() as u64 / 16 {
+                            return Err(DecodeError::InvalidValue { offset: 2 });
+                        }
+                        let mut ids = Vec::new();
+                        for _ in 0..n {
+                            ids.push(d.u128()?);
+                        }
+                        KillScope::Sessions(ids)
                     }
-                    let mut ids = Vec::new();
-                    for _ in 0..n {
-                        ids.push(d.u128()?);
-                    }
-                    KillScope::Sessions(ids)
+                    KILL_OP => KillScope::Op { node: d.u64()?, op: d.u32()? },
+                    _ => return Err(DecodeError::InvalidValue { offset: 1 }),
                 };
                 d.finish()?;
                 Ok(Request::KillSessions(scope))
@@ -160,6 +185,11 @@ impl Request {
                 let (range, merge) = (GroupId(d.u64()?), d.u64()?);
                 d.finish()?;
                 Ok(Request::MergeProbe { range, merge })
+            }
+            META2 => {
+                let (group, entry) = (GroupId(d.u64()?), d.bytes()?.to_vec());
+                d.finish()?;
+                Ok(Request::Meta2 { group, entry })
             }
             _ => Err(DecodeError::InvalidValue { offset: 0 }),
         }
@@ -215,6 +245,7 @@ mod tests {
             Request::Catalog(vec![3]),
             Request::KillSessions(KillScope::All),
             Request::KillSessions(KillScope::Sessions(vec![1, u128::MAX])),
+            Request::KillSessions(KillScope::Op { node: 3, op: u32::MAX }),
             Request::Checksum(Report {
                 range: GroupId(4),
                 index: 12,
@@ -255,6 +286,8 @@ mod tests {
         long.push(0);
         assert!(Request::decode(&long).is_err());
         assert!(Request::decode(&[GROUP0, 0xff, 0xff]).is_err());
+        // A kill of no known kind.
+        assert!(Request::decode(&[KILL_SESSIONS, 3]).is_err());
         assert!(Request::decode(&[KILL_SESSIONS]).is_err());
         assert!(Request::decode(&[KILL_SESSIONS, 0, 2, 1]).is_err());
         assert!(Request::decode(&[KILL_SESSIONS, 1, 0]).is_err());

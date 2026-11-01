@@ -252,6 +252,18 @@ fn errors_say_what_failed() {
     let cfg = NodeConfig { listen_peer: busy.local_addr().unwrap(), ..NodeConfig::default() };
     let e = Node::start(cfg, || Ok(teseladb_raftlog::MemDisk::new()), None).unwrap_err();
     assert!(matches!(e, NodeError::Io(_)), "{e}");
+    // No disk to open, and a disk whose first write fails (the data format file).
+    let open_failed = || Err::<teseladb_raftlog::MemDisk, _>(std::io::Error::other("no disk"));
+    let e = Node::start(NodeConfig::default(), open_failed, None);
+    assert_eq!(e.map(|_| ()).unwrap_err().to_string(), "no disk");
+    let mut full = teseladb_raftlog::MemDisk::new();
+    full.inject_error("write", teseladb_raftlog::IoErrno::NoSpace);
+    let mut disks = vec![full];
+    let open = || Ok(disks.pop().unwrap_or_default());
+    let e = Node::start(NodeConfig::default(), open, None).map(|_| ()).unwrap_err();
+    assert!(matches!(e, NodeError::Storage(_)), "{e}");
+    let lsm = NodeError::Lsm(teseladb_lsm::LsmError::IngestOverlap);
+    assert!(lsm.to_string().starts_with("LSM: "), "{lsm}");
 }
 
 struct Quiet;

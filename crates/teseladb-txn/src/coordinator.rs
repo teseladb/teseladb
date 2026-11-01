@@ -292,6 +292,11 @@ impl Coordinator {
         self.txn
     }
 
+    /// The session and number of the transaction.
+    pub fn session(&self) -> (u128, i64) {
+        (self.lsid, self.txn_number)
+    }
+
     /// Its read mark.
     pub fn read_ts(&self) -> Hlc {
         self.read_ts
@@ -1000,6 +1005,9 @@ mod tests {
             TxnOp::EndTxn { .. } | TxnOp::PushTxn { .. } => Ok(Reply::Record(record.clone())),
             TxnOp::PutIntents { .. } | TxnOp::ResolveIntents { .. } | TxnOp::OnePhase { .. } => {
                 Ok(Reply::Intents { ts: ts(5) })
+            }
+            TxnOp::FindIntents { .. } | TxnOp::ForgetRecord { .. } | TxnOp::ReadRecord { .. } => {
+                panic!("only the reaper sends {:?}", r.op)
             }
         }
     }

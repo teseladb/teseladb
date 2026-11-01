@@ -94,6 +94,11 @@ const WRITE_BASE: [&str; 11] = [
 /// field.
 fn own_fields(name: &str) -> Option<&'static [&'static str]> {
     Some(match name {
+        "explain" => &["explain", "verbosity"],
+        "getDefaultRWConcern" => &["getDefaultRWConcern", "inMemory"],
+        "setDefaultRWConcern" => {
+            &["setDefaultRWConcern", "defaultReadConcern", "defaultWriteConcern"]
+        }
         "aggregate" => &[
             "pipeline",
             "explain",

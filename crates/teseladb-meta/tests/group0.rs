@@ -500,3 +500,17 @@ fn a_node_records_its_tags_and_they_survive_a_snapshot() {
     let removed = Group0Command::SetNodeTags { node: NodeId(3), tags: vec![] };
     assert_eq!(run(&mut sm, removed), Group0Result::Err(Group0Error::NoSuchNode));
 }
+
+#[test]
+fn tags_that_cannot_be_read_are_refused() {
+    let set = Group0Command::SetNodeTags { node: NodeId(2), tags: vec![("dc".into(), "e".into())] };
+    let good = set.encode();
+    // kind (2), node (8), then the count of pairs.
+    let mut many = good.clone();
+    many[10] = 0x7f;
+    assert!(Group0Command::decode(&many).is_err(), "more pairs than bytes left");
+    let mut not_utf8 = good.clone();
+    not_utf8[12] = 0xff;
+    assert!(Group0Command::decode(&not_utf8).is_err(), "a name that is not UTF-8");
+    assert_eq!(Group0Command::decode(&good), Ok(set));
+}

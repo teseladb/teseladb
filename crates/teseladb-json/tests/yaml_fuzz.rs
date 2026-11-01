@@ -1,4 +1,4 @@
-//! Deterministic fuzzing of the YAML subset (001 T047): random configurations written as YAML
+//! Deterministic fuzzing of the YAML subset (001 T046): random configurations written as YAML
 //! read back as the same value, and arbitrary or mutated texts never panic.
 
 use teseladb_json::{Number, Object, Value, parse_yaml};

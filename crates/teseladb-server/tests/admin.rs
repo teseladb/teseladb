@@ -57,9 +57,15 @@ fn current_op_shows_the_running_command_and_kill_op_takes_numbers() {
     let Some(Value::Array(ops)) = r.get("inprog") else { panic!("{r:?}") };
     assert_eq!(ops.len(), 1, "{r:?}");
     let Value::Document(op) = &ops[0] else { panic!() };
-    let Some(Value::String(client)) = op.get("client") else { panic!("{op:?}") };
+    let Some(Value::String(client)) = op.get("client_s") else { panic!("{op:?}") };
     assert!(client.starts_with("127.0.0.1:"), "{client}");
     assert_eq!(op.get("ns"), Some(&Value::from("admin.$cmd")));
+    // Named as a `refrouter` names a shard's operation (DV-031, D-102), which `killOp` takes.
+    let Some(Value::String(shard)) = op.get("shard") else { panic!("{op:?}") };
+    let Some(Value::String(opid)) = op.get("opid") else { panic!("{op:?}") };
+    assert!(opid.starts_with(&format!("{shard}:")), "{opid}");
+    let r = c.run("admin", Document::new().with("killOp", 1).with("op", opid.as_str()));
+    assert_eq!(r.get("shard"), Some(&Value::from(shard.as_str())), "{r:?}");
     let r = c.run("admin", Document::new().with("killOp", 1).with("op", 12345));
     assert!(ok(&r), "{r:?}");
     let r = c.run("db", Document::new().with("find", "c").with("maxTimeMS", -1));

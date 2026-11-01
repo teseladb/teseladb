@@ -12,7 +12,7 @@ use teseladb_mql::{ErrorCode, MqlError, decimal_to_f64, stream_double, to_decima
 use super::arith::type_name_of;
 use super::convert_bin::{self as bin, Format, UUID_SUBTYPE};
 use super::string::{date_text, double_text};
-use super::values::{f64_of, int64_of};
+use super::values::{display_bson, f64_of, int64_of};
 use super::{Ctx, Eval, Expr, Scope, arguments, codes, count, error};
 
 macro_rules! code {
@@ -786,16 +786,24 @@ pub(super) fn scalar_text(v: &Value) -> Option<String> {
         Value::Decimal128(d) => d.to_string(),
         Value::Boolean(b) => b.to_string(),
         Value::DateTime(ms) => date_string(*ms).ok()?,
-        Value::ObjectId(id) => id.iter().map(|b| format!("{b:02x}")).collect(),
+        Value::ObjectId(id) => bin::object_id_text(id),
         Value::Regex { pattern, options } => format!("/{pattern}/{options}"),
         Value::Timestamp { time, increment } => format!("Timestamp({time}, {increment})"),
         Value::MinKey => "MinKey".to_owned(),
         Value::MaxKey => "MaxKey".to_owned(),
-        Value::Binary { subtype, bytes } if *subtype == UUID_SUBTYPE => {
-            bin::uuid_text(bytes).unwrap_or_else(|| bin::base64(bytes, false))
-        }
+        Value::Binary { subtype, bytes } if *subtype == UUID_SUBTYPE => match bin::uuid_text(bytes)
+        {
+            Some(text) => text,
+            None => bin::base64(bytes, false),
+        },
         Value::Binary { bytes, .. } => bin::base64(bytes, false),
-        _ => return None,
+        Value::DbPointer { namespace, id } => {
+            format!("DBRef(\"{namespace}\", {})", bin::object_id_text(id))
+        }
+        Value::JavaScriptWithScope { code, scope } => {
+            format!("CodeWScope(\"{code}\", {})", display_bson(&Value::Document(scope.clone())))
+        }
+        Value::Null | Value::Undefined | Value::Array(_) | Value::Document(_) => return None,
     })
 }
 
@@ -833,7 +841,10 @@ fn to_string(v: &Value, o: &Options) -> Result<String, MqlError> {
         Value::DateTime(ms) => date_string(*ms),
         Value::Array(_) | Value::Document(_) => Ok(super::json::write(v)),
         Value::Binary { subtype, bytes } => binary_text(*subtype, bytes, o),
-        other => scalar_text(other).ok_or_else(|| unsupported(other, STRING)),
+        other => match scalar_text(other) {
+            Some(text) => Ok(text),
+            None => Err(unsupported(other, STRING)),
+        },
     }
 }
 
@@ -846,9 +857,10 @@ fn binary_text(subtype: u8, bytes: &[u8], o: &Options) -> Result<String, MqlErro
             FORMAT_REQUIRED,
             "Format must be speficied when converting from 'binData' to 'string'",
         )),
-        Some(Format::Auto) if subtype == UUID_SUBTYPE => {
-            Ok(bin::uuid_text(bytes).unwrap_or_else(|| bin::base64(bytes, false)))
-        }
+        Some(Format::Auto) if subtype == UUID_SUBTYPE => Ok(match bin::uuid_text(bytes) {
+            Some(text) => text,
+            None => bin::base64(bytes, false),
+        }),
         Some(Format::Base64 | Format::Auto) => Ok(bin::base64(bytes, false)),
         Some(Format::Base64Url) => Ok(bin::base64(bytes, true)),
         Some(Format::Hex) => Ok(bin::hex(bytes)),

@@ -85,6 +85,11 @@ pub(super) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02X}")).collect()
 }
 
+/// An ObjectId's text: its bytes in lowercase hexadecimal.
+pub(super) fn object_id_text(id: &[u8]) -> String {
+    id.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// The bytes of hexadecimal text, or RefDb's reason why not.
 pub(super) fn from_hex(text: &str) -> Result<Vec<u8>, String> {
     if !text.len().is_multiple_of(2) {

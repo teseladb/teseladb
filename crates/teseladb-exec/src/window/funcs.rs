@@ -6,9 +6,12 @@
 //! unless a decimal came in; `$derivative` and `$integral` compute in doubles.
 
 use teseladb_bson::{Decimal128, Value};
-use teseladb_mql::{DecOp, MqlError, dec_binary, to_decimal128};
+use teseladb_mql::{DecOp, ErrorCode, MqlError, dec_binary, to_decimal128};
 
-use crate::expr::arith::type_name_of;
+use crate::expr::arith::{add, divide, multiply, subtract, type_name_of};
+use crate::expr::codes::BAD_DIVISION;
+use crate::expr::stats::Total;
+use crate::expr::values::is_number;
 use crate::pipeline::errors::{TYPE_MISMATCH, error};
 
 /// A number as a decimal (a double with 15 digits, as RefDb converts it).
@@ -161,34 +164,114 @@ pub(super) fn covariance(pairs: &[(Option<Value>, Option<Value>)], sample: bool)
     num(&c, &Value::Int64(divisor), NumOp::Div)
 }
 
-/// A point of `$derivative` and `$integral`: the sort value (a number, or a date in ms) and the
-/// input.
-pub(super) type Point = (f64, Option<f64>);
+/// A point of `$derivative` and `$integral`: the sort field's value and the input's.
+pub(super) type Point = (Option<Value>, Option<Value>);
 
-/// The rate of change between the first and last points per `unit` ms, `null` with fewer than
-/// two.
-pub(super) fn derivative(points: &[Point], unit: f64) -> Value {
-    let (Some((x0, Some(y0))), Some((x1, Some(y1)))) = (points.first(), points.last()) else {
-        return Value::Null;
+/// A location code.
+macro_rules! loc {
+    ($n:literal) => {
+        ErrorCode { code: $n, name: concat!("Location", $n) }
     };
-    if points.len() < 2 || x1 == x0 {
-        return Value::Null;
-    }
-    Value::Double((y1 - y0) / ((x1 - x0) / unit))
 }
 
-/// The area under the points by trapezoids, per `unit` ms; one point gives 0 (an integer
-/// without a unit, as RefDb starts its sum).
-pub(super) fn integral(points: &[Point], unit: Option<f64>) -> Value {
-    let pts: Vec<(f64, f64)> = points.iter().filter_map(|(x, y)| y.map(|y| (*x, y))).collect();
-    if pts.len() < 2 {
-        return if unit.is_some() { Value::Double(0.0) } else { Value::Int32(0) };
+const DERIVATIVE_NOT_DATE: ErrorCode = loc!(5624900);
+const DERIVATIVE_UNIT: ErrorCode = loc!(5624901);
+const DERIVATIVE_NOT_NUMERIC: ErrorCode = loc!(5624902);
+const DERIVATIVE_NULL: ErrorCode = loc!(5624903);
+const INTEGRAL_VECTOR: ErrorCode = loc!(5423900);
+const INTEGRAL_NOT_DATE: ErrorCode = loc!(5423901);
+const INTEGRAL_NOT_NUMERIC: ErrorCode = loc!(5423902);
+
+fn is_date(v: &Option<Value>) -> bool {
+    matches!(v, Some(Value::DateTime(_)))
+}
+
+fn is_numeric(v: &Option<Value>) -> bool {
+    v.as_ref().is_some_and(is_number)
+}
+
+/// `$derivative` between the first point `left` and the last `right` of a window, per `unit`
+/// ms (both sort values dates) or per unit of the numeric sort values: the inputs' difference
+/// over the sort values' with `$subtract` and `$divide`, `null` when the sort values are equal.
+pub(super) fn derivative(
+    left: &Point,
+    right: &Point,
+    unit: Option<i64>,
+) -> Result<Value, MqlError> {
+    if unit.is_some() {
+        if !(is_date(&left.0) && is_date(&right.0)) {
+            return Err(error(
+                DERIVATIVE_NOT_DATE,
+                "$derivative with 'unit' expects the sortBy field to be a Date",
+            ));
+        }
+    } else {
+        if is_date(&left.0) || is_date(&right.0) {
+            return Err(error(
+                DERIVATIVE_UNIT,
+                "$derivative where the sortBy is a Date requires an 'unit'",
+            ));
+        }
+        if !(is_numeric(&left.0) && is_numeric(&right.0)) {
+            return Err(error(
+                DERIVATIVE_NOT_NUMERIC,
+                "$derivative (with no 'unit') expects the sortBy field to be numeric",
+            ));
+        }
     }
-    let mut area = 0.0;
-    for w in pts.windows(2) {
-        area += (w[1].0 - w[0].0) * (w[0].1 + w[1].1) / 2.0;
+    let run = subtract(&right.0, &left.0)?;
+    let rise = subtract(&right.1, &left.1)?;
+    if matches!(rise, None | Some(Value::Null | Value::Undefined)) {
+        return Err(error(DERIVATIVE_NULL, "$derivative input must not be null or missing"));
     }
-    Value::Double(area / unit.unwrap_or(1.0))
+    let result = match divide(&rise, &run) {
+        // A window of one document has no run.
+        Err(e) if e.code == BAD_DIVISION => return Ok(Value::Null),
+        other => other?,
+    };
+    let result = match unit {
+        Some(ms) => multiply(&[result, Some(Value::Int64(ms))])?,
+        None => result,
+    };
+    Ok(result.unwrap_or(Value::Null))
+}
+
+/// `$integral` of a window's points by trapezoids, summed as `$sum` adds (an integer 0 for one
+/// point), divided by `unit` ms when the sort values are dates.
+pub(super) fn integral(points: &[Point], unit: Option<i64>) -> Result<Value, MqlError> {
+    for (x, y) in points {
+        if !is_numeric(y) || !(is_numeric(x) || is_date(x)) {
+            return Err(error(
+                INTEGRAL_VECTOR,
+                "The input value of $integral window function must be a vector of 2 value, the first value must be numeric or date type and the second must be numeric.",
+            ));
+        }
+        if unit.is_some() && !is_date(x) {
+            return Err(error(
+                INTEGRAL_NOT_DATE,
+                "$integral with 'unit' expects the sortBy field to be a Date",
+            ));
+        }
+        if unit.is_none() && is_date(x) {
+            return Err(error(
+                INTEGRAL_NOT_NUMERIC,
+                "$integral (with no 'unit') expects the sortBy field to be numeric",
+            ));
+        }
+    }
+    let mut total = Total::default();
+    for w in points.windows(2) {
+        let height = add(&[w[0].1.clone(), w[1].1.clone()])?;
+        let width = subtract(&w[1].0, &w[0].0)?;
+        let area = divide(&multiply(&[height, width])?, &Some(Value::Double(2.0)))?;
+        total.add(&area.unwrap_or(Value::Null));
+    }
+    let sum = Some(total.sum());
+    Ok(match unit {
+        Some(ms) => divide(&sum, &Some(Value::Int64(ms)))?,
+        None => sum,
+    }
+    .unwrap_or(Value::Null))
 }
 
 /// `$locf`: each value, or the last value before it that is neither `null` nor missing.

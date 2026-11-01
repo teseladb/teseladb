@@ -21,18 +21,33 @@
 //!   `regex` replacement that names a group the pattern lacks: both are rejected here.
 //! - `doubleMetaphone`, in the documentation, is not a filter `refsearch` 1.70.6 accepts.
 
+mod arabic_script;
+mod cjk;
 mod delimiter;
 mod folding;
 mod grams;
+mod indic;
+mod inflection;
+mod light;
 mod soundex;
 mod stemmers;
 
-use std::collections::BTreeSet;
+use arabic_script::{persian_normal, persian_stem, sorani_normal, sorani_stem};
+use cjk::{cjk_bigrams, cjk_width};
+use indic::{bengali_normal, bengali_stem, hindi_normal, hindi_stem, indic_normal};
+use inflection::{bulgarian_stem, czech_stem, indonesian_stem, latvian_stem};
+use light::{
+    french_light, german_light, german_normal, italian_light, portuguese_light, spanish_light,
+};
+pub use stemmers::{k_stemming, stempel};
+
+use std::collections::{BTreeMap, BTreeSet};
 
 pub use delimiter::DelimiterOptions;
 
 use super::jregex::RegexError;
 use super::normalize::{Form, normalize};
+use super::props::category;
 use super::snowball::{Stemmer, porter_stemming};
 use super::tokenizers::{Pattern, Token};
 use super::unicode::lowercase;
@@ -108,6 +123,8 @@ pub enum TokenFilter {
         /// The form.
         form: Form,
     },
+    /// Krovetz stemming of English words (`kStemming`).
+    KStemming,
     /// Each token twice, the first marked as a keyword that stemmers leave alone.
     KeywordRepeat,
     /// Keeps tokens of `min..=max` UTF-16 code units.
@@ -135,6 +152,71 @@ pub enum TokenFilter {
     },
     /// The Porter stemmer.
     PorterStemming,
+    /// Removes an apostrophe (`'` or `’`) and what follows it (Turkish analyzer).
+    Apostrophe,
+    /// Replaces whole tokens by their listed stems and marks them as keywords (Dutch analyzer).
+    StemmerOverride {
+        /// Token to stem.
+        map: BTreeMap<String, String>,
+    },
+    /// Lowercases with the Turkish dotted and dotless `i` (Turkish analyzer).
+    TurkishLowercase,
+    /// Folds Arabic letter variants and removes diacritics and tatweel (Arabic analyzer).
+    ArabicNormalization,
+    /// Removes one Arabic article or conjunction and the common suffixes (Arabic analyzer).
+    ArabicStemming,
+    /// Turns decimal digits of any script into ASCII digits (Arabic analyzer).
+    DecimalDigit,
+    /// Removes an article and its apostrophe from the start of a token (French, Italian,
+    /// Catalan and Irish analyzers).
+    Elision {
+        /// The articles, lowercase.
+        articles: BTreeSet<String>,
+    },
+    /// The light Spanish stemmer of the Spanish analyzer.
+    SpanishLightStemming,
+    /// The light Italian stemmer of the Italian analyzer.
+    ItalianLightStemming,
+    /// The light Portuguese stemmer of the Portuguese analyzer.
+    PortugueseLightStemming,
+    /// Folds umlauts and `ß`, and drops the `e` of `ae`, `oe` and `ue` (German analyzer).
+    GermanNormalization,
+    /// The light German stemmer of the German analyzer.
+    GermanLightStemming,
+    /// The light French stemmer of the French analyzer.
+    FrenchLightStemming,
+    /// The light Czech stemmer of the Czech analyzer.
+    CzechStemming,
+    /// The light Bulgarian stemmer of the Bulgarian analyzer.
+    BulgarianStemming,
+    /// The Latvian stemmer of the Latvian analyzer.
+    LatvianStemming,
+    /// The Indonesian stemmer of the Indonesian analyzer.
+    IndonesianStemming,
+    /// Folds the Persian letter variants into the Arabic letters (Persian analyzer).
+    PersianNormalization,
+    /// Removes the Persian plural, comparative and other endings (Persian analyzer).
+    PersianStemming,
+    /// Full-width ASCII and half-width Katakana to their usual widths (CJK analyzer).
+    CjkWidth,
+    /// Bigrams of the Han, Hiragana, Katakana and Hangul characters of touching tokens (CJK
+    /// analyzer).
+    CjkBigram,
+    /// Writes decomposed Indic vowels and nukta letters as single letters (Hindi and Bengali
+    /// analyzers).
+    IndicNormalization,
+    /// Folds the Hindi spelling variants (Hindi analyzer).
+    HindiNormalization,
+    /// The light Hindi stemmer of the Hindi analyzer.
+    HindiStemming,
+    /// Folds the Bengali spelling variants (Bengali analyzer).
+    BengaliNormalization,
+    /// The Bengali stemmer of the Bengali analyzer.
+    BengaliStemming,
+    /// Writes Sorani in one spelling (Sorani analyzer).
+    SoraniNormalization,
+    /// Removes the Sorani postpositions, possessives and noun endings (Sorani analyzer).
+    SoraniStemming,
     /// Replaces matches of a pattern in each token.
     Regex {
         /// The expression.
@@ -159,6 +241,8 @@ pub enum TokenFilter {
     SnowballStemming(Stemmer),
     /// Removes Spanish plural endings.
     SpanishPluralStemming,
+    /// Polish stemming (`stempel`).
+    Stempel,
     /// Removes the tokens listed.
     Stopword {
         /// The tokens, lowercased when `ignore_case`.
@@ -253,6 +337,106 @@ fn rewrite(tokens: Vec<Token>, skip_keywords: bool, f: impl Fn(&str) -> String) 
         .collect()
 }
 
+/// `text` with the Arabic alef variants as plain alef, `ى` as `ي`, `ة` as `ه`, and without
+/// diacritics (U+064B to U+0652) or tatweel.
+fn arabic_normal(text: &str) -> String {
+    text.chars()
+        .filter(|&c| !matches!(c, '\u{640}' | '\u{64b}'..='\u{652}'))
+        .map(|c| match c {
+            '\u{622}' | '\u{623}' | '\u{625}' => '\u{627}',
+            '\u{649}' => '\u{64a}',
+            '\u{629}' => '\u{647}',
+            c => c,
+        })
+        .collect()
+}
+
+/// The prefixes the Arabic analyzer removes (one, the first that matches) with the letters that
+/// must be left after it.
+const ARABIC_PREFIXES: &[(&str, usize)] = &[
+    ("\u{648}\u{627}\u{644}", 2),
+    ("\u{628}\u{627}\u{644}", 2),
+    ("\u{643}\u{627}\u{644}", 2),
+    ("\u{641}\u{627}\u{644}", 2),
+    ("\u{644}\u{644}", 2),
+    ("\u{627}\u{644}", 2),
+    ("\u{648}", 3),
+];
+
+/// The suffixes the Arabic analyzer removes, each at most once and in this order, when two
+/// letters are left.
+const ARABIC_SUFFIXES: &[&str] = &[
+    "\u{647}\u{627}",
+    "\u{627}\u{646}",
+    "\u{627}\u{62a}",
+    "\u{648}\u{646}",
+    "\u{64a}\u{646}",
+    "\u{64a}\u{647}",
+    "\u{64a}\u{629}",
+    "\u{647}",
+    "\u{629}",
+    "\u{64a}",
+];
+
+/// The light stem of a normalized Arabic word.
+fn arabic_stem(text: &str) -> String {
+    let len = |s: &str| s.chars().count();
+    let mut w = text;
+    if let Some(&(p, _)) =
+        ARABIC_PREFIXES.iter().find(|&&(p, left)| w.starts_with(p) && len(w) - len(p) >= left)
+    {
+        w = &w[p.len()..];
+    }
+    for s in ARABIC_SUFFIXES {
+        if w.ends_with(s) && len(w) - len(s) >= 2 {
+            w = &w[..w.len() - s.len()];
+        }
+    }
+    w.to_string()
+}
+
+/// `text` with every decimal digit (general category Nd) as its ASCII digit.
+fn ascii_digits(text: &str) -> String {
+    const ND: usize = 9;
+    text.chars()
+        .map(|c| {
+            if c.is_ascii_digit() || category(c) != ND {
+                return c;
+            }
+            // Decimal digits come in runs of tens that start at zero: count from the start of
+            // the run.
+            let code = u32::from(c);
+            let mut start = code;
+            while let Some(p) = start.checked_sub(1).and_then(char::from_u32)
+                && category(p) == ND
+            {
+                start -= 1;
+            }
+            let value = (code - start) % 10;
+            char::from_digit(value, 10).unwrap_or(c)
+        })
+        .collect()
+}
+
+/// `text` without a leading article from `articles` and the apostrophe after it.
+fn elide(text: &str, articles: &BTreeSet<String>) -> String {
+    match text.find(['\'', '\u{2019}']) {
+        Some(at) if articles.contains(&lower(&text[..at])) => text[at..].chars().skip(1).collect(),
+        _ => text.to_string(),
+    }
+}
+
+/// `text` lowercased with the Turkish `I` → `ı` and `İ` → `i`.
+fn turkish_lower(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            'I' => 'ı',
+            '\u{130}' => 'i',
+            c => lowercase(c),
+        })
+        .collect()
+}
+
 /// Replaces each token with the texts `f` gives at its position, followed by the token itself
 /// when `original` is `Include` and it is not among them.
 fn expand(tokens: Vec<Token>, original: Original, f: impl Fn(&str) -> Vec<String>) -> Vec<Token> {
@@ -335,6 +519,7 @@ impl TokenFilter {
             TokenFilter::FlattenGraph => tokens,
             TokenFilter::IcuFolding => rewrite(tokens, false, folding::icu),
             &TokenFilter::IcuNormalizer { form } => rewrite(tokens, false, |t| normalize(t, form)),
+            TokenFilter::KStemming => rewrite(tokens, true, k_stemming),
             TokenFilter::KeywordRepeat => {
                 let mut out = Vec::with_capacity(tokens.len() * 2);
                 for t in tokens {
@@ -349,6 +534,44 @@ impl TokenFilter {
             &TokenFilter::LimitTokenCount { max } => tokens.into_iter().take(max).collect(),
             TokenFilter::Lowercase => rewrite(tokens, false, lower),
             TokenFilter::PorterStemming => rewrite(tokens, true, porter_stemming),
+            TokenFilter::Apostrophe => rewrite(tokens, false, |t| {
+                t.find(['\'', '\u{2019}']).map_or(t, |at| &t[..at]).to_string()
+            }),
+            TokenFilter::StemmerOverride { map } => tokens
+                .into_iter()
+                .map(|t| match map.get(&t.text) {
+                    Some(stem) if !t.keyword => {
+                        Token { keyword: true, ..with_text(&t, stem.clone()) }
+                    }
+                    _ => t,
+                })
+                .collect(),
+            TokenFilter::TurkishLowercase => rewrite(tokens, false, turkish_lower),
+            TokenFilter::ArabicNormalization => rewrite(tokens, false, arabic_normal),
+            TokenFilter::ArabicStemming => rewrite(tokens, true, arabic_stem),
+            TokenFilter::DecimalDigit => rewrite(tokens, false, ascii_digits),
+            TokenFilter::Elision { articles } => rewrite(tokens, false, |t| elide(t, articles)),
+            TokenFilter::SpanishLightStemming => rewrite(tokens, true, spanish_light),
+            TokenFilter::ItalianLightStemming => rewrite(tokens, true, italian_light),
+            TokenFilter::PortugueseLightStemming => rewrite(tokens, true, portuguese_light),
+            TokenFilter::GermanNormalization => rewrite(tokens, false, german_normal),
+            TokenFilter::GermanLightStemming => rewrite(tokens, true, german_light),
+            TokenFilter::FrenchLightStemming => rewrite(tokens, true, french_light),
+            TokenFilter::CzechStemming => rewrite(tokens, true, czech_stem),
+            TokenFilter::BulgarianStemming => rewrite(tokens, true, bulgarian_stem),
+            TokenFilter::LatvianStemming => rewrite(tokens, true, latvian_stem),
+            TokenFilter::IndonesianStemming => rewrite(tokens, true, indonesian_stem),
+            TokenFilter::PersianNormalization => rewrite(tokens, false, persian_normal),
+            TokenFilter::PersianStemming => rewrite(tokens, true, persian_stem),
+            TokenFilter::CjkWidth => rewrite(tokens, false, cjk_width),
+            TokenFilter::CjkBigram => cjk_bigrams(tokens),
+            TokenFilter::IndicNormalization => rewrite(tokens, false, indic_normal),
+            TokenFilter::HindiNormalization => rewrite(tokens, false, hindi_normal),
+            TokenFilter::HindiStemming => rewrite(tokens, true, hindi_stem),
+            TokenFilter::BengaliNormalization => rewrite(tokens, false, bengali_normal),
+            TokenFilter::BengaliStemming => rewrite(tokens, true, bengali_stem),
+            TokenFilter::SoraniNormalization => rewrite(tokens, false, sorani_normal),
+            TokenFilter::SoraniStemming => rewrite(tokens, true, sorani_stem),
             TokenFilter::Regex { pattern, replacement, matches } => {
                 let all = *matches == Matches::All;
                 let mut out = Vec::with_capacity(tokens.len());
@@ -376,6 +599,7 @@ impl TokenFilter {
             &TokenFilter::Shingle { min, max } => grams::shingles(&tokens, min, max, *end),
             &TokenFilter::SnowballStemming(stemmer) => rewrite(tokens, true, |t| stemmer.stem(t)),
             TokenFilter::SpanishPluralStemming => rewrite(tokens, true, stemmers::spanish_plural),
+            TokenFilter::Stempel => rewrite(tokens, true, stempel),
             TokenFilter::Stopword { tokens: words, ignore_case } => tokens
                 .into_iter()
                 .filter(|t| {

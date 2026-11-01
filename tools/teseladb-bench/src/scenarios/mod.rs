@@ -1,14 +1,16 @@
 //! Scenarios (contract `bench-cli.md` of 002): 001 registers `raftlog`, its `raftlog-recover`
 //! variant and the copied `deflate`; 003 adds `bson` and `keys`; 004 adds `lsm`; 005 adds `write`, `read` and
-//! `failover`; 006 adds `wire` and `crud`; 007 adds `follower-read`; 008 adds `txn`, `txn-readers` and `contention`; 013 adds
+//! `failover`; 006 adds `wire` and `crud`; 007 adds `follower-read`, `group0-limits`, `split`, `add-node` and `rebalance`; 008 adds `txn`, `txn-readers` and `contention`; 013 adds
 //! `tls-handshake` and `scram`; 015 adds `timeseries`; every specification
 //! adds its own.
 
 pub mod bson;
+pub mod cluster;
 pub mod crud;
 pub mod deflate;
 pub mod failover;
 pub mod follower_read;
+pub mod group0_limits;
 pub mod keys;
 pub mod lsm;
 pub mod raftlog;
@@ -145,6 +147,10 @@ pub fn run(args: &Args) -> Result<Report, String> {
         "read" => read::run(args),
         "failover" => failover::run(args),
         "follower-read" => follower_read::run(args),
+        "group0-limits" => group0_limits::run(args),
+        "split" => cluster::split(args),
+        "add-node" => cluster::add_node(args),
+        "rebalance" => cluster::rebalance(args),
         "reference" => reference::run(args),
         "wire" => wire::run(args),
         "crud" => crud::run(args),
@@ -159,7 +165,7 @@ pub fn run(args: &Args) -> Result<Report, String> {
         }
         other => Err(format!(
             "unknown scenario: {other} (available: raftlog, raftlog-recover, deflate, bson, keys, lsm, lsm-sustained, \
-             write, read, failover, follower-read, reference, wire, crud, txn, txn-readers, contention, tls-handshake, scram, ycsb-a … ycsb-f)"
+             write, read, failover, follower-read, group0-limits, split, add-node, rebalance, reference, wire, crud, txn, txn-readers, contention, tls-handshake, scram, ycsb-a … ycsb-f)"
         )),
     }
 }

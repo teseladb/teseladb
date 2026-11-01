@@ -12,9 +12,9 @@ use super::Env;
 use super::errors::{
     BUCKET_AUTO_BUCKETS, BUCKET_AUTO_INT, BUCKET_AUTO_NUMERIC, BUCKET_AUTO_OUTPUT,
     BUCKET_AUTO_REQUIRED, BUCKET_BOUNDARIES_ARRAY, BUCKET_DEFAULT, BUCKET_FEW, BUCKET_GROUP_BY,
-    BUCKET_NO_MATCH, BUCKET_OUTPUT, BUCKET_REQUIRED, BUCKET_TYPES, BUCKET_UNSORTED, GROUP_DOLLAR,
-    GROUP_DOT, GROUP_ID, SORT_BY_COUNT_FIELD, SORT_BY_COUNT_OBJECT, TYPE_MISMATCH, UNKNOWN_FIELD,
-    error,
+    BUCKET_NO_MATCH, BUCKET_NO_MATCH_CLASSIC, BUCKET_OUTPUT, BUCKET_REQUIRED, BUCKET_TYPES,
+    BUCKET_UNSORTED, GROUP_DOLLAR, GROUP_DOT, GROUP_ID, SORT_BY_COUNT_FIELD, SORT_BY_COUNT_OBJECT,
+    UNKNOWN_FIELD, error,
 };
 use super::granularity::Granularity;
 use crate::accum::{Accumulator, State};
@@ -295,13 +295,10 @@ fn count_output(
         Some(other) => Err(not_object(crate::expr::arith::raw_type_name(other))),
         None => {
             let spec = Document::new().with("$sum", 1);
-            let bytes = spec.to_bytes().map_err(|e| error(TYPE_MISMATCH, e.to_string()))?;
-            let raw = teseladb_bson::RawDoc::from_bytes(&bytes)
-                .map_err(|e| error(TYPE_MISMATCH, e.to_string()))?;
-            Ok(vec![(
-                "count".to_owned(),
-                Accumulator::parse("count", RawValue::Document(raw), ctx)?,
-            )])
+            let count = crate::raw::with_raw_doc(&spec, |raw| {
+                Accumulator::parse("count", RawValue::Document(raw), ctx)
+            })?;
+            Ok(vec![("count".to_owned(), count)])
         }
     }
 }
@@ -433,9 +430,10 @@ impl Bucket {
             let i = match (slot, &self.default) {
                 (Some(i), _) => i,
                 (None, Some(_)) => n,
+                // The slot-based engine and the classic one fail with codes of their own.
                 (None, None) => {
                     return Err(error(
-                        BUCKET_NO_MATCH,
+                        if sbe { BUCKET_NO_MATCH } else { BUCKET_NO_MATCH_CLASSIC },
                         "$switch could not find a matching branch for an input, and no default was specified.",
                     ));
                 }
@@ -540,16 +538,7 @@ impl BucketAuto {
             }
             keyed.push((v, doc));
         }
-        let mut failure = None;
-        keyed.sort_by(|(a, _), (b, _)| {
-            order(&Some(a.clone()), &Some(b.clone()), col).unwrap_or_else(|e| {
-                failure.get_or_insert(e);
-                std::cmp::Ordering::Equal
-            })
-        });
-        if let Some(e) = failure {
-            return Err(e);
-        }
+        crate::expr::sort_by_values(&mut keyed, col)?;
         let total = keyed.len();
         let size = ((total as f64) / (self.buckets as f64)).round().max(1.0) as usize;
         // Each bucket: its range of `keyed` and its upper boundary.

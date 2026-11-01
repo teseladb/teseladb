@@ -184,6 +184,7 @@ pub(crate) fn multiset_n<T>(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
 

@@ -34,6 +34,7 @@ use teseladb_router::route::{Answer, Router};
 use teseladb_types::{Bytes, GroupId, Nanos, NodeId};
 use teseladb_wire::commands::mutation::Bound;
 
+use crate::backup::source::Backups;
 use crate::checksums::Checksums;
 use crate::coresm::{CoreOutput, CoreSm};
 use crate::data_wire::{
@@ -84,6 +85,9 @@ pub enum DataReq {
     /// A write or a scan of the CRUD commands (006 FR-014) for a range: run here if this replica
     /// leads it, or forwarded to its leader.
     Remote(GroupId, RemoteReq),
+    /// A request for the replica of a range on node `.0` (a restore's, 007 FR-021): run here if
+    /// it is this node, or forwarded to it.
+    At(NodeId, GroupId, RemoteReq),
 }
 
 /// What this node's replica of a range looks like.
@@ -177,6 +181,8 @@ pub enum IoOwner {
     Transfer,
     /// The core changes' (007 FR-011).
     Relocate,
+    /// The backups' and restores' (007 FR-021).
+    Backup,
 }
 
 /// The data ranges of a core.
@@ -219,6 +225,12 @@ pub struct DataCore {
     stale: BTreeMap<GroupId, Nanos>,
     /// The core changes of this core's ranges (007 FR-011).
     relocations: Relocations,
+    /// Backups and restores of the ranges this core leads (007 FR-021).
+    backups: Backups,
+    /// Who waits for each answer of `backups`.
+    backup_clients: BTreeMap<u64, Client>,
+    /// The identifier of the next request of `backups`.
+    backup_next: u64,
 }
 
 impl DataCore {
@@ -252,6 +264,9 @@ impl DataCore {
             unserved: BTreeMap::new(),
             stale: BTreeMap::new(),
             relocations: Relocations::new(core, PathBuf::from("relocate"), Hosting::default()),
+            backups: Backups::new(PathBuf::from("backup"), 0),
+            backup_clients: BTreeMap::new(),
+            backup_next: 0,
         }
     }
 
@@ -262,6 +277,28 @@ impl DataCore {
         self.replicas.set_hosting(hosting.clone());
         self.relocations = Relocations::new(core, dir, hosting);
         self
+    }
+
+    /// Backups and restores with their files under `dir`; `nonce` tells this life's file names
+    /// from an earlier one's (007 FR-021).
+    pub fn with_backups(mut self, dir: PathBuf, nonce: u64) -> DataCore {
+        self.backups = Backups::new(dir, nonce);
+        self
+    }
+
+    /// Runs a backup's or a restore's request `r` for range `g` for `client`.
+    fn backup_request(
+        &mut self,
+        core: &mut MultiRaftCore<CoreSm>,
+        (g, r): (GroupId, RemoteReq),
+        client: Client,
+        at: (Nanos, u64),
+    ) {
+        self.backup_next += 1;
+        let id = self.backup_next;
+        self.backup_clients.insert(id, client);
+        self.backups.request((core, &mut self.host), id, (g, r), at);
+        self.answer(core, at.0);
     }
 
     /// A core change message from another core of the node.
@@ -316,6 +353,13 @@ impl DataCore {
         self.replicas.set(ranges);
         self.relocations.set_intents(&ranges.relocations);
         self.collections.clone_from(&ranges.collections);
+        if let Some(ms) = ranges.history_ms {
+            self.host.set_gc_ttl_ms(ms);
+        }
+        if let Some(ops) = ranges.load_split_ops {
+            self.host.set_load_split_ops(ops);
+        }
+        self.merges.set_off(ranges.automerge_off);
     }
 
     /// The Group 0 commands for core 0 since the last call.
@@ -366,15 +410,18 @@ impl DataCore {
                 self.follower_scan(core, g, r, reply, (now, wall_ms));
                 return;
             }
-            DataReq::Remote(g, r) => {
+            DataReq::At(node, g, r) if node != self.me => {
+                self.forward(core, g, r, reply, node, now);
+                return;
+            }
+            DataReq::At(_, g, r) | DataReq::Remote(g, r) => {
                 if !self.host_has(g) {
                     // No replica here (or not open yet): straight to the leader the router knows.
                     self.forward(core, g, r, reply, NodeId(0), now);
                     return;
                 }
-                let id = self.run(core, g, r.clone(), (now, wall_ms));
-                self.clients.insert(id, Client::Local(reply, Some((g, r))));
-                self.answer(core, now);
+                let client = Client::Local(reply, Some((g, r.clone())));
+                self.run(core, (g, r), client, (now, wall_ms));
                 return;
             }
         };
@@ -419,7 +466,11 @@ impl DataCore {
         reply: DataSender,
         (now, wall_ms): (Nanos, u64),
     ) {
-        let RemoteReq::FollowerScan { nodes, .. } = &mut r else { return };
+        // A request without candidates goes where any other request of the range goes.
+        let RemoteReq::FollowerScan { nodes, .. } = &mut r else {
+            self.request(core, DataReq::Remote(g, r), reply, (now, wall_ms));
+            return;
+        };
         while nodes.first().is_some_and(|(n, _)| *n == self.me) && !self.host_has(g) {
             nodes.remove(0);
         }
@@ -428,9 +479,8 @@ impl DataCore {
             return;
         };
         if node == self.me {
-            let id = self.run(core, g, r.clone(), (now, wall_ms));
-            self.clients.insert(id, Client::Local(reply, Some((g, r))));
-            self.answer(core, now);
+            let client = Client::Local(reply, Some((g, r.clone())));
+            self.run(core, (g, r), client, (now, wall_ms));
             return;
         }
         let body = Request::Data(encode_for(g, &r)).encode();
@@ -455,11 +505,11 @@ impl DataCore {
     fn run(
         &mut self,
         core: &mut MultiRaftCore<CoreSm>,
-        g: GroupId,
-        r: RemoteReq,
+        (g, r): (GroupId, RemoteReq),
+        client: Client,
         (now, wall_ms): (Nanos, u64),
-    ) -> ReqId {
-        match r {
+    ) {
+        let id = match r {
             RemoteReq::Write { keys, mutation, dedup, wc, deadline } => {
                 let m: Box<dyn Mutation> = match Bound::decode(&mutation) {
                     Ok(m) => Box::new(m),
@@ -522,7 +572,16 @@ impl DataCore {
                     None => self.host.txn(core, req, now, wall_ms),
                 }
             }
-        }
+            // A backup's or a restore's request (007 FR-021).
+            r @ (RemoteReq::BackupFetch { .. }
+            | RemoteReq::RestorePiece { .. }
+            | RemoteReq::RestoreIngest { .. }) => {
+                self.backup_request(core, (g, r), client, (now, wall_ms));
+                return;
+            }
+        };
+        self.clients.insert(id, client);
+        self.answer(core, now);
     }
 
     /// A request another node forwarded to this replica (as the range's leader). A range this
@@ -537,9 +596,7 @@ impl DataCore {
         self.wall_ms = wall_ms;
         match decode_for(body) {
             Ok((g, r)) if self.host_has(g) => {
-                let id = self.run(core, g, r, (now, wall_ms));
-                self.clients.insert(id, Client::Remote(from.0, from.1));
-                self.answer(core, now);
+                self.run(core, (g, r), Client::Remote(from.0, from.1), (now, wall_ms));
             }
             Ok((g, _)) => {
                 let hint = self.router.route_group(g).map_or(NodeId(0), |t| t.node);
@@ -579,22 +636,20 @@ impl DataCore {
     /// Sends the host's answers to whoever asked; a request of the handle that this replica
     /// does not lead goes once to the leader it names, or to the one the router knows.
     fn answer(&mut self, core: &mut MultiRaftCore<CoreSm>, now: Nanos) {
-        for (id, r) in self.host.take_replies() {
+        let replies = self.host.take_replies();
+        let lsm = self.lsm.clone();
+        let replies: Vec<_> = replies
+            .into_iter()
+            .filter(|(id, r)| !self.backups.on_host_reply(&mut lsm.borrow_mut(), *id, r))
+            .collect();
+        let backups: Vec<_> = self.backups.take_replies();
+        for (id, r) in backups {
+            let Some(client) = self.backup_clients.remove(&id) else { continue };
+            self.send_answer(core, client, r, now);
+        }
+        for (id, r) in replies {
             let Some(client) = self.clients.remove(&id) else { continue };
             match client {
-                Client::Local(to, Some((g, req @ RemoteReq::FollowerScan { .. }))) => match r {
-                    Err(RangeError::NotLeader { .. }) => {
-                        let wall_ms = self.wall_ms;
-                        self.follower_scan(core, g, Self::next_candidate(req), to, (now, wall_ms));
-                    }
-                    r => drop(to.send(r.map(remote_reply).map(DataReply::Remote))),
-                },
-                Client::Local(to, Some((g, req))) => match r {
-                    Err(RangeError::NotLeader { hint }) => {
-                        self.forward(core, g, req, to, hint, now);
-                    }
-                    r => drop(to.send(r.map(remote_reply).map(DataReply::Remote))),
-                },
                 Client::Local(to, None) => {
                     let r = r.map(|reply| match reply {
                         Reply::Mutated { ts, .. } => DataReply::Put(ts),
@@ -607,10 +662,38 @@ impl DataCore {
                     });
                     let _ = to.send(r);
                 }
-                Client::Remote(node, req) => {
-                    let body = encode_reply(&r.map(remote_reply));
-                    core.answer_forward(node, req, Bytes::from_vec(body));
+                client => self.send_answer(core, client, r.map(remote_reply), now),
+            }
+        }
+    }
+
+    /// Sends a leader's answer `r` to `client`: a request of the handle that this replica does
+    /// not lead goes once to the leader it names, or to the one the router knows.
+    fn send_answer(
+        &mut self,
+        core: &mut MultiRaftCore<CoreSm>,
+        client: Client,
+        r: Result<RemoteReply, RangeError>,
+        now: Nanos,
+    ) {
+        match client {
+            Client::Local(to, Some((g, req @ RemoteReq::FollowerScan { .. }))) => match r {
+                Err(RangeError::NotLeader { .. }) => {
+                    let wall_ms = self.wall_ms;
+                    self.follower_scan(core, g, Self::next_candidate(req), to, (now, wall_ms));
                 }
+                r => drop(to.send(r.map(DataReply::Remote))),
+            },
+            Client::Local(to, Some((g, req))) => match r {
+                Err(RangeError::NotLeader { hint }) => {
+                    self.forward(core, g, req, to, hint, now);
+                }
+                r => drop(to.send(r.map(DataReply::Remote))),
+            },
+            Client::Local(to, None) => drop(to.send(r.map(DataReply::Remote))),
+            Client::Remote(node, req) => {
+                let body = encode_reply(&r);
+                core.answer_forward(node, req, Bytes::from_vec(body));
             }
         }
     }
@@ -652,6 +735,7 @@ impl DataCore {
         if !merging {
             self.transfers.tick(core, &nodes, now);
         }
+        self.backups.tick(now);
         self.fetch_unserved(core, now);
         self.stale.retain(|g, _| core.awaited_snapshot(*g).is_some());
         for g in self.transfers.take_stale() {
@@ -868,6 +952,9 @@ impl DataCore {
         if let Some(op) = self.transfers.poll_io() {
             return Some((op, IoOwner::Transfer));
         }
+        if let Some(op) = self.backups.poll_io() {
+            return Some((op, IoOwner::Backup));
+        }
         self.relocations.poll_io().map(|op| (op, IoOwner::Relocate))
     }
 
@@ -892,18 +979,36 @@ impl DataCore {
                 let lsm = self.lsm.clone();
                 self.relocations.on_io_done(&lsm, done);
             }
+            IoOwner::Backup => {
+                let lsm = self.lsm.clone();
+                self.backups.on_io_done(core, &mut lsm.borrow_mut(), done);
+                self.answer(core, now);
+            }
         }
     }
 
     fn lsm_done(&mut self, core: &mut MultiRaftCore<CoreSm>, c: Completions, now: Nanos) {
         let lsm = self.lsm.clone();
         for (id, files) in c.exported {
-            if let Err(files) = self.relocations.on_exported(id, files) {
+            let Err(files) = self.relocations.on_exported(id, files) else { continue };
+            if let Err(files) = self.backups.on_exported(id, files) {
                 self.transfers.on_exported(id, files);
             }
         }
         for (id, r) in c.ingested {
             let Err(r) = self.relocations.on_ingested(core, &lsm, id, r) else { continue };
+            let r = match self.backups.on_ingested(id, r) {
+                Ok(restored) => {
+                    if let Some(g) = restored {
+                        // The log no longer rebuilds what was ingested: a replica behind it gets
+                        // a snapshot past it.
+                        let ingested = teseladb_range::sm::RangeSm::data_ingested;
+                        core.data_entered(g, |sm| sm.range_mut().into_iter().for_each(ingested));
+                    }
+                    continue;
+                }
+                Err(r) => r,
+            };
             let ready = self.transfers.on_ingested(core, &mut lsm.borrow_mut(), id, r, now);
             match ready {
                 // The range as its split left it: the replica opens again with it.
@@ -969,6 +1074,9 @@ mod tests {
     use teseladb_multiraft::CoreConfig;
     use teseladb_raftlog::{CoreStore, MemDisk, StorageConfig};
 
+    use crate::forward::FetchReply;
+    use crate::transfer::FETCH_RETRY;
+
     const ME: NodeId = NodeId(1);
     const G: GroupId = GroupId(4);
 
@@ -989,6 +1097,12 @@ mod tests {
     }
 
     fn setup(voters: &[u64]) -> (MultiRaftCore<CoreSm>, DataCore) {
+        let (core, d, _) = setup_disk(voters);
+        (core, d)
+    }
+
+    /// [`setup`] with the disk the core's LSM is on.
+    fn setup_disk(voters: &[u64]) -> (MultiRaftCore<CoreSm>, DataCore, MemDisk) {
         let mut disk = MemDisk::new();
         let (store, _) = CoreStore::recover(&StorageConfig::default(), 0, &mut disk).unwrap();
         let core = MultiRaftCore::new(CoreConfig::new(ME, 0), store, 1);
@@ -997,7 +1111,162 @@ mod tests {
         let t = Transfers::new(ME, "core-00/t".into(), 1);
         let mut d = DataCore::new(ME, 0, lsm, NodeClock::for_node(ME), t, 1 << 20);
         d.set_ranges(&Ranges { descs: vec![desc(voters)], ..Ranges::default() });
-        (core, d)
+        (core, d, disk)
+    }
+
+    /// Answers the forward in flight with `reply`; the request it answered was the core's.
+    fn answer_forward(
+        core: &mut MultiRaftCore<CoreSm>,
+        d: &mut DataCore,
+        reply: &[u8],
+        now: Nanos,
+    ) {
+        let done = || Ok(Done::Forwarded(Bytes::from_vec(reply.to_vec())));
+        let answered = (0..256).any(|op| d.on_done(core, OpId(op), done(), now));
+        assert!(answered, "a forward in flight");
+    }
+
+    /// Runs the disk operations of the core's LSM and transfers until none is left.
+    fn run_io(core: &mut MultiRaftCore<CoreSm>, d: &mut DataCore, disk: &mut MemDisk, now: Nanos) {
+        use teseladb_raftlog::Disk;
+        while let Some((op, owner)) = d.poll_io(core, now) {
+            let done = disk.execute(op);
+            d.on_io_done(core, owner, done, now);
+        }
+    }
+
+    #[test]
+    fn group0s_history_and_load_settings_reach_the_host() {
+        let (_, mut d) = setup(&[1]);
+        let ranges = Ranges {
+            descs: vec![desc(&[1])],
+            history_ms: Some(5_000),
+            load_split_ops: Some(70),
+            ..Ranges::default()
+        };
+        // The host's setters are tested in `teseladb-range`; here the ranges still apply.
+        d.set_ranges(&ranges);
+        assert_eq!(d.replicas.descs().count(), 1);
+    }
+
+    #[test]
+    fn a_follower_scan_without_candidates_left_goes_as_any_request() {
+        let (mut core, mut d) = setup(&[2, 3]);
+        let (tx, _rx) = channel();
+        d.follower_scan(&mut core, G, scan(), tx, (Nanos::ZERO, 0));
+        assert_eq!(d.forwarded.len(), 1, "to the range's leader");
+    }
+
+    #[test]
+    fn a_replica_no_snapshot_reaches_asks_for_its_range_and_the_stale_answers_are_rejected() {
+        let (mut core, mut d, _disk) = setup_disk(&[1, 2]);
+        let t0 = Nanos::from_secs(1);
+        d.poll(&mut core, (t0, 0));
+        assert!(core.state_machine(G).is_some_and(StateMachine::needs_snapshot));
+        assert!(!d.transfers.waiting(), "not before UNSERVED_FETCH");
+        let t1 = t0 + UNSERVED_FETCH;
+        d.poll(&mut core, (t1, 0));
+        assert!(d.transfers.waiting_for(G), "the range as its split left it");
+        d.poll(&mut core, (t1, 0));
+        // The other replica applied a split since: no replica serves it.
+        answer_forward(&mut core, &mut d, &FetchReply::Stale.encode(), t1);
+        d.poll(&mut core, (t1, 0));
+        assert!(core.state_machine(G).is_some(), "not closed before UNSERVED_FETCH");
+        assert_eq!(d.stale.get(&G), Some(&t1), "rejected since now");
+        // The core does not wait for that snapshot: the rejection is forgotten.
+        d.poll(&mut core, (t1 + FETCH_RETRY, 0));
+        assert!(d.stale.is_empty());
+    }
+
+    #[test]
+    fn a_restore_whose_file_the_lsm_refuses_ends_in_an_error_and_takes_no_snapshot() {
+        let (mut core, mut d, mut disk) = setup_disk(&[1]);
+        let now = Nanos::from_secs(1);
+        d.poll(&mut core, (now, 0));
+        let ask = |core: &mut MultiRaftCore<CoreSm>, d: &mut DataCore, r: RemoteReq| {
+            let (tx, rx) = channel();
+            d.request(core, DataReq::At(ME, G, r), tx, (now, 0));
+            rx.try_recv().expect("answered at once")
+        };
+        let piece = RemoteReq::RestorePiece { file: 0, offset: 0, data: b"not an sst".to_vec() };
+        assert!(ask(&mut core, &mut d, piece).is_ok());
+        assert!(ask(&mut core, &mut d, RemoteReq::RestoreIngest { files: 1 }).is_ok());
+        let before = core.snapshot_index(G);
+        run_io(&mut core, &mut d, &mut disk, now);
+        let r = ask(&mut core, &mut d, RemoteReq::RestoreIngest { files: 1 });
+        assert!(matches!(&r, Err(RangeError::Mutation(m)) if m.0.contains("failed")), "{r:?}");
+        assert_eq!(core.snapshot_index(G), before);
+    }
+
+    #[test]
+    fn a_read_at_a_mark_runs_on_the_replica_here() {
+        let (mut core, mut d) = setup(&[1]);
+        d.poll(&mut core, (Nanos::from_secs(1), 0));
+        assert!(d.host_has(G), "the replica is open");
+        let (tx, rx) = channel();
+        let at = Hlc { physical: 5, logical: 0 };
+        let read = RemoteReq::Read { key: vec![1, 1], at: Some(at) };
+        d.request(&mut core, DataReq::Remote(G, read), tx, (Nanos::from_secs(1), 0));
+        d.poll(&mut core, (Nanos::from_secs(1), 0));
+        // The replica waits for its range's data: the read waits on the host with it.
+        assert!(rx.try_recv().is_err());
+        assert_eq!(d.clients.len(), 1);
+    }
+
+    #[test]
+    fn a_follower_scan_that_got_no_answer_goes_to_the_next_candidate() {
+        let (mut core, mut d) = setup(&[2, 3]);
+        let (tx, _rx) = channel();
+        let r = follower(&[(2, true), (3, false)]);
+        d.request(&mut core, DataReq::Remote(G, r), tx, (Nanos::ZERO, 0));
+        let op = *d.follower_forwards.keys().next().unwrap();
+        assert!(d.on_done(&mut core, op, Err(OpError::Timeout), Nanos::ZERO));
+        let (_, (_, _, sent)) =
+            d.follower_forwards.iter().next().map(|(o, v)| (*o, v.clone())).unwrap();
+        assert_eq!(sent, follower(&[(3, false)]));
+    }
+
+    #[test]
+    fn the_range_its_split_left_reopens_the_replica_once_ingested() {
+        for close_first in [false, true] {
+            let (mut core, mut d, mut disk) = setup_disk(&[1, 2]);
+            let t0 = Nanos::from_secs(1);
+            d.poll(&mut core, (t0, 0));
+            let t1 = t0 + UNSERVED_FETCH;
+            d.poll(&mut core, (t1, 0));
+            d.poll(&mut core, (t1, 0));
+            // An empty range: no file, ingested at once.
+            let empty = teseladb_range::snapshot::Chunk {
+                range: G,
+                index: 0,
+                file: 0,
+                files: 0,
+                offset: 0,
+                size: 0,
+                data: Vec::new(),
+            };
+            answer_forward(&mut core, &mut d, &FetchReply::Chunk(empty).encode(), t1);
+            if close_first {
+                core.close_group(G).unwrap();
+            }
+            run_io(&mut core, &mut d, &mut disk, t1);
+            assert_eq!(d.transfers.ingested(), 1);
+            assert!(core.state_machine(G).is_none(), "closed to open again with it");
+        }
+    }
+
+    #[test]
+    fn a_snapshot_of_a_range_merged_away_waits_for_the_merge() {
+        let (mut core, mut d, _disk) = setup_disk(&[1, 2]);
+        let t0 = Nanos::from_secs(1);
+        d.poll(&mut core, (t0, 0));
+        d.poll(&mut core, (t0 + UNSERVED_FETCH, 0));
+        assert!(d.transfers.waiting_for(G));
+        // Group 0 no longer has the range, and gave a higher number since.
+        let gone = Ranges { last_group: G.0 + 1, ..Ranges::default() };
+        d.set_ranges(&gone);
+        d.poll(&mut core, (t0 + UNSERVED_FETCH, 0));
+        assert!(!(0..256).any(|op| d.forwarded.contains_key(&OpId(op))));
     }
 
     fn scan() -> RemoteReq {
@@ -1101,5 +1370,47 @@ mod tests {
         d.request(&mut core, DataReq::Status(G), tx, (Nanos::ZERO, 0));
         let Ok(DataReply::Status(s)) = rx.recv().unwrap() else { panic!() };
         assert_eq!((s.role, s.bounds), (None, (Vec::new(), Vec::new())));
+    }
+
+    fn follower(nodes: &[(u64, bool)]) -> RemoteReq {
+        RemoteReq::FollowerScan {
+            start: vec![1],
+            end: vec![2],
+            limit: 1,
+            max_stale_ms: None,
+            nodes: nodes.iter().map(|(n, l)| (NodeId(*n), *l)).collect(),
+        }
+    }
+
+    #[test]
+    fn a_hint_naming_this_node_goes_to_another_voter() {
+        let (mut core, mut d) = setup(&[1, 2, 3]);
+        let (tx, _rx) = channel();
+        d.forward(&mut core, G, scan(), tx, ME, Nanos::ZERO);
+        let (_, (_, _, node)) = d.forwarded.iter().next().map(|(o, v)| (*o, v.clone())).unwrap();
+        assert_ne!(node, ME);
+    }
+
+    #[test]
+    fn a_follower_scan_skips_this_node_when_it_has_no_replica() {
+        let (mut core, mut d) = setup(&[1, 2]);
+        let (tx, _rx) = channel();
+        let r = follower(&[(1, false), (2, true)]);
+        d.request(&mut core, DataReq::Remote(G, r), tx, (Nanos::ZERO, 0));
+        let (_, (_, g, sent)) =
+            d.follower_forwards.iter().next().map(|(o, v)| (*o, v.clone())).unwrap();
+        assert_eq!(g, G);
+        assert_eq!(sent, follower(&[(2, true)]), "forwarded without this node");
+        // The candidate after the last one: none; any other request stays as it is.
+        assert_eq!(DataCore::next_candidate(follower(&[])), follower(&[]));
+        assert_eq!(DataCore::next_candidate(scan()), scan());
+    }
+
+    #[test]
+    fn a_core_change_message_that_could_not_leave_goes_with_the_next_ones() {
+        let (_, mut d) = setup(&[1]);
+        d.requeue_relocate(1, RelocateMsg::Imported { group: G });
+        let msgs = d.take_relocate_msgs();
+        assert!(matches!(msgs[..], [(1, RelocateMsg::Imported { group: G })]));
     }
 }

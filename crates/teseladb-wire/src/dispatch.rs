@@ -430,9 +430,7 @@ fn run_command<B: Backend + ?Sized>(
         audit_authentication(conn, &mut **backend, shared, before.as_ref(), code);
         return Ok(Action::Reply(with_cluster_time(r?, node)));
     }
-    if let (Some((backend, shared)), false) =
-        (cmds, is_hello(name) || name == PING || name == WHATS_MY_URI)
-    {
+    if let (Some((backend, shared)), false) = (cmds, name == PING || name == WHATS_MY_URI) {
         if name == CONFIGURE_FAIL_POINT {
             let mut g = lock(shared);
             let fp = g.failpoint.as_mut().ok_or_else(not_found)?;
@@ -508,6 +506,8 @@ fn run_op<B: Backend + ?Sized>(
         let (db, cmd) = (req.db.as_str(), &req.command);
         // A statement of a client transaction runs inside it (008 FR-009).
         let result = match (refusal, txn::fields(name, cmd)) {
+            // The commit and the abort are no command of the module: nothing to read first.
+            (Some(refused), _) if txn::ends(name) => Some(Err(refused)),
             (Some(refused), _) => match run(&mut Ctx { backend: &mut guarded, shared, db, cmd }) {
                 Some(Err(e)) if e.code != INTERRUPTED => Some(Err(e)),
                 Some(_) | None => Some(Err(refused)),

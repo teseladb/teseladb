@@ -467,10 +467,7 @@ fn eval_n(
             )
         })?,
         other => {
-            let shown = match other {
-                None => "MISSING".to_owned(),
-                Some(v) => display(v),
-            };
+            let shown = display_eval(other);
             return Err(error(
                 N_NOT_INTEGRAL,
                 format!("Value for 'n' must be of integral type, but found {shown}"),
@@ -652,7 +649,7 @@ fn parse_ps(v: RawValue<'_>, ctx: &Ctx) -> Result<Vec<f64>, MqlError> {
     for e in &exprs {
         let v = e.eval(&empty, &Scope::default())?;
         let x = v.as_ref().and_then(f64_of).ok_or_else(|| {
-            error(P_NUMBER, format!("{p_text}{}", display_eval(&v).replace("missing", "null")))
+            error(P_NUMBER, format!("{p_text}{}", display(&v.clone().unwrap_or(Value::Null))))
         })?;
         if !(0.0..=1.0).contains(&x) {
             return Err(error(

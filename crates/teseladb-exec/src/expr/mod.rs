@@ -27,6 +27,7 @@ mod json;
 mod logic;
 mod misc;
 mod object;
+pub mod optimize;
 mod path;
 mod sbe;
 mod sets;
@@ -43,7 +44,8 @@ use std::rc::Rc;
 use teseladb_bson::{Document, RawValue, Value};
 use teseladb_mql::{ErrorCode, MqlError};
 
-pub use logic::{order, truthy};
+pub(crate) use logic::sort_by_values;
+pub use logic::{order, truthy, try_sort_by};
 pub use path::field_path;
 
 /// The result of an expression: a value, or nothing (a missing field).
@@ -164,8 +166,17 @@ const MD5_SUBTYPE: u8 = 5;
 const MD5_LEN: usize = 16;
 
 /// The variables RefDb defines itself.
-const SYSTEM_VARIABLES: [&str; 8] =
-    ["ROOT", "CURRENT", "REMOVE", "NOW", "CLUSTER_TIME", "USER_ROLES", "SEARCH_META", "IS_MR"];
+const SYSTEM_VARIABLES: [&str; 9] = [
+    "ROOT",
+    "CURRENT",
+    "REMOVE",
+    "NOW",
+    "CLUSTER_TIME",
+    "USER_ROLES",
+    "SEARCH_META",
+    "IS_MR",
+    "JS_SCOPE",
+];
 
 impl Ctx {
     /// A context that checks variables, with the command's `let` variables `names`.
@@ -381,7 +392,8 @@ impl Expr {
 
     /// Parses operator `name` with argument `arg`.
     fn operator(name: &str, arg: RawValue<'_>, ctx: &Ctx) -> Result<Expr, MqlError> {
-        if name == "$literal" {
+        // `$const` is the name RefDb writes `$literal` back with, and it parses it as well.
+        if name == "$literal" || name == "$const" {
             return Ok(Expr::Literal(Value::from(arg)));
         }
         if name == "$switch" {

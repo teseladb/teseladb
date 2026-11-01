@@ -38,7 +38,7 @@ pub fn wrong_type(path: &str, v: &Value, expected: &str) -> CommandError {
         "BSON field '{path}' is the wrong type '{}', expected type '{expected}'",
         type_name(v)
     );
-    CommandError::new(TYPE_MISMATCH, msg)
+    CommandError::new(TYPE_MISMATCH, msg).parsed()
 }
 
 /// `TypeMismatch` for field `path` holding `v` where one of `expected` was wanted, as a
@@ -49,7 +49,7 @@ pub fn wrong_types(path: &str, v: &Value, expected: &[&str]) -> CommandError {
         type_name(v),
         expected.join(", ")
     );
-    CommandError::new(TYPE_MISMATCH, msg)
+    CommandError::new(TYPE_MISMATCH, msg).parsed()
 }
 
 /// The numeric types a "safe" number field takes, in RefDb's order.

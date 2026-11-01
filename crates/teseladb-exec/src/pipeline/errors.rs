@@ -1,7 +1,10 @@
 //! The error codes of pipelines and their stages, with RefDb's names (measured on a `refrouter`
 //! 9.0.4).
 
+use teseladb_bson::RawValue;
 use teseladb_mql::{ErrorCode, MqlError};
+
+use crate::expr::arith::raw_type_name;
 
 /// A location code: its number and `LocationNNNNN`.
 macro_rules! location {
@@ -89,6 +92,7 @@ location!(
     BUCKET_TYPES = 40193,
     BUCKET_DEFAULT = 40199,
     BUCKET_NO_MATCH = 7_158_303,
+    BUCKET_NO_MATCH_CLASSIC = 40066,
     BUCKET_AUTO_BUCKETS = 40243,
     BUCKET_AUTO_NUMERIC = 40241,
     BUCKET_AUTO_INT = 40242,
@@ -114,4 +118,26 @@ location!(
 /// An error with `code` and `msg`.
 pub fn error(code: ErrorCode, msg: impl Into<String>) -> MqlError {
     MqlError::new(code, msg)
+}
+
+/// The `TypeMismatch` of a stage argument `field` holding `v` where `expected` (`"type
+/// 'string'"`, `"types '[object, string]'"`) was due.
+pub fn wrong_type(field: &str, v: RawValue<'_>, expected: &str) -> MqlError {
+    error(
+        TYPE_MISMATCH,
+        format!(
+            "BSON field '{field}' is the wrong type '{}', expected {expected}",
+            raw_type_name(v)
+        ),
+    )
+}
+
+/// The `40414` of a missing required argument `field` of `stage`.
+pub fn missing_field(stage: &str, field: &str) -> MqlError {
+    error(MISSING_FIELD, format!("BSON field '{stage}.{field}' is missing but a required field"))
+}
+
+/// The `40415` of an argument `field` of `stage` it does not know.
+pub fn unknown_field(stage: &str, field: &str) -> MqlError {
+    error(UNKNOWN_FIELD, format!("BSON field '{stage}.{field}' is an unknown field."))
 }

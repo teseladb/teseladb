@@ -6,8 +6,6 @@ use std::cmp::Ordering;
 use teseladb_bson::{Document, RawDoc, RawValue, Value, compare, shell};
 use teseladb_mql::{MqlError, decimal_to_f64};
 
-use super::{codes, error};
-
 /// `v` as RefDb writes a value of an expression in a message (its `Value` printer): strings
 /// in double quotes, `{a: 1}`, `[1, 2]`, doubles as C++ streams write them (`1.5`, `9.22337e+18`).
 pub(crate) fn display(v: &Value) -> String {
@@ -42,9 +40,12 @@ pub(crate) fn display_bson(v: &Value) -> String {
     }
 }
 
-/// A result as [`display`] writes it, `missing` for nothing.
-pub(super) fn display_eval(v: &Option<Value>) -> String {
-    v.as_ref().map_or_else(|| "missing".to_owned(), display)
+/// A result as [`display`] writes it, `MISSING` for nothing.
+pub(crate) fn display_eval(v: &Option<Value>) -> String {
+    match v {
+        Some(x) => display(x),
+        None => "MISSING".to_owned(),
+    }
 }
 
 /// A number as a 32-bit integer when it is one exactly (`2`, `2.0`, `NumberLong(2)`,
@@ -87,12 +88,8 @@ pub(crate) fn f64_of(v: &Value) -> Option<f64> {
 }
 
 /// Whether `v` is a number.
-pub(super) fn is_number(v: &Value) -> bool {
+pub(crate) fn is_number(v: &Value) -> bool {
     matches!(v, Value::Int32(_) | Value::Int64(_) | Value::Double(_) | Value::Decimal128(_))
-}
-
-fn bad(e: teseladb_bson::BsonError) -> MqlError {
-    error(codes::BAD_VALUE, e.to_string())
 }
 
 /// Runs `f` over the raw forms of the values of each list.
@@ -104,8 +101,8 @@ pub(super) fn with_raw<R>(
     for (i, l) in lists.iter().enumerate() {
         holder.push(i.to_string().as_str(), Value::Array(l.to_vec()));
     }
-    let bytes = holder.to_bytes().map_err(bad)?;
-    let raw = RawDoc::from_bytes(&bytes).map_err(bad)?;
+    let bytes = crate::raw::bytes_of(&holder)?;
+    let raw = RawDoc::from_bytes(&bytes).map_err(crate::raw::bad)?;
     let raws: Vec<Vec<RawValue<'_>>> = raw
         .iter()
         .map(|(_, v)| match v {

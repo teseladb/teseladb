@@ -137,7 +137,7 @@ fn random_histories_match_the_model() {
 
 #[test]
 fn random_histories_match_the_model_with_compression_and_a_tiny_cache() {
-    let cfg = LsmConfig { compress: true, cache_bytes: 16 << 10, ..small() };
+    let cfg = LsmConfig { codec: teseladb_lsm::Codec::Zlib, cache_bytes: 16 << 10, ..small() };
     for seed in 100..104 {
         let mut disk = MemDisk::new();
         let mut lsm = open(&cfg, &mut disk);

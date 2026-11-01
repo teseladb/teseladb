@@ -227,16 +227,17 @@ fn a_definition_stands_on_at_most_twenty_views() {
 #[test]
 fn a_query_resolves_the_chain_innermost_first() {
     let cat = chain(3);
-    let got = resolve("d2", |n| cat.get(n).cloned()).expect("resolves");
+    let got = resolve("d2", |n| Ok::<_, ViewError>(cat.get(n).cloned())).expect("resolves");
     let want = Resolved {
         collection: "b".to_owned(),
         pipeline: stages_of(r#"[{"$match":{"n":0}},{"$match":{"n":1}},{"$match":{"n":2}}]"#),
         collation: None,
     };
     assert_eq!(got, Some(want));
-    assert_eq!(resolve("b", |n| cat.get(n).cloned()), Ok(None));
+    assert_eq!(resolve("b", |n| Ok::<_, ViewError>(cat.get(n).cloned())), Ok(None));
     let with_collation = catalog(&[("fr", view("b", "[]", Some(fr())))]);
-    let fr_view = resolve("fr", |n| with_collation.get(n).cloned()).expect("resolves");
+    let fr_view =
+        resolve("fr", |n| Ok::<_, ViewError>(with_collation.get(n).cloned())).expect("resolves");
     assert_eq!(fr_view.and_then(|r| r.collation), Some(fr()));
 }
 
@@ -244,13 +245,13 @@ fn a_query_resolves_the_chain_innermost_first() {
 fn a_query_refuses_a_chain_of_twenty_views() {
     let cat = chain(20);
     assert_eq!(
-        resolve("d19", |n| cat.get(n).cloned()),
+        resolve("d19", |n| Ok::<_, ViewError>(cat.get(n).cloned())),
         Err(ViewError {
             code: VIEW_DEPTH_LIMIT_EXCEEDED,
             message: "View depth too deep or view cycle detected; maximum depth is 20".to_owned(),
         })
     );
-    assert!(resolve("d18", |n| cat.get(n).cloned()).is_ok());
+    assert!(resolve("d18", |n| Ok::<_, ViewError>(cat.get(n).cloned())).is_ok());
 }
 
 #[test]

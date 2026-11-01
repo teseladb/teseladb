@@ -3,7 +3,7 @@
 //! `$type` beside each expression).
 
 use teseladb_bson::{Decimal128, Document, Value, extjson};
-use teseladb_exec::expr::{Expr, Scope};
+use teseladb_exec::expr::{Expr, Scope, order, try_sort_by};
 
 fn json(text: &str) -> Document {
     extjson::parse(text).unwrap_or_else(|e| panic!("{text}: {e:?}"))
@@ -235,4 +235,23 @@ fn arithmetic_refuses_what_refdb_refuses() {
         "$switch expected each branch to be an object, found: int"
     );
     assert_eq!(error(r#"{"$subtract":[1]}"#).0, 16020);
+}
+
+/// A value nested `levels` documents deep.
+fn nested(levels: usize) -> Value {
+    (0..levels).fold(Value::Int32(1), |v, _| Value::Document(Document::new().with("a", v)))
+}
+
+/// Values past BSON's depth do not compare: the sort that meets them gives the error.
+#[test]
+fn sorting_values_that_do_not_compare_gives_the_error() {
+    let mut ok = vec![3, 1, 2];
+    try_sort_by(&mut ok, |a, b| Ok(a.cmp(b))).expect("comparable");
+    assert_eq!(ok, [1, 2, 3]);
+    let deep = Some(nested(teseladb_bson::MAX_DEPTH));
+    let e = order(&deep, &Some(Value::Int32(1)), None).expect_err("too deep");
+    assert_eq!(e.code.code, 2);
+    let mut values = vec![deep.clone(), Some(Value::Int32(1))];
+    let e = try_sort_by(&mut values, |a, b| order(a, b, None)).expect_err("too deep");
+    assert_eq!(e.code.code, 2);
 }

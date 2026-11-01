@@ -77,6 +77,11 @@ fn unit_of(s: &str) -> Result<Unit, MqlError> {
     })
 }
 
+/// Checks that `s` names a unit of time (`9 unknown time unit value`).
+pub(crate) fn check_unit(s: &str) -> Result<(), MqlError> {
+    unit_of(s).map(|_| ())
+}
+
 impl Unit {
     /// The length of a unit of time, for hours and smaller.
     fn length(self) -> Option<i64> {

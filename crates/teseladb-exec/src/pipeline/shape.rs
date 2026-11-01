@@ -127,7 +127,7 @@ impl Projection {
             if k.ends_with(".$") {
                 return Err(error(
                     super::errors::PROJECT_POSITIONAL,
-                    "Invalid $project :: caused by :: Cannot use positional projection in aggregation projection",
+                    "Cannot use positional projection in aggregation projection",
                 ));
             }
             check_path(k)?;
@@ -141,7 +141,7 @@ impl Projection {
                         }
                         Item::Include
                     } else {
-                        set_mode(mode, keep, &full)?;
+                        set_mode(mode, keep, k)?;
                         if keep { Item::Include } else { Item::Exclude }
                     }
                 }
@@ -155,7 +155,7 @@ impl Projection {
                             ));
                         }
                         Some(n) if n.starts_with('$') => {
-                            set_mode(mode, true, &full)?;
+                            set_mode(mode, true, k)?;
                             Item::Compute(projected_expr(v, ctx)?)
                         }
                         Some(_) => {
@@ -165,7 +165,7 @@ impl Projection {
                     }
                 }
                 (None, other) => {
-                    set_mode(mode, true, &full)?;
+                    set_mode(mode, true, k)?;
                     Item::Compute(projected_expr(other, ctx)?)
                 }
             };
@@ -230,7 +230,7 @@ impl Projection {
 }
 
 /// An expression of a projection: an unknown operator is 31325 there (168 elsewhere).
-fn projected_expr(v: RawValue<'_>, ctx: &Ctx) -> Result<Expr, MqlError> {
+pub fn projected_expr(v: RawValue<'_>, ctx: &Ctx) -> Result<Expr, MqlError> {
     Expr::parse_in(v, ctx).map_err(|e| match e.message.strip_prefix("Unrecognized expression '") {
         Some(rest) if e.code.code == 168 => {
             error(UNKNOWN_EXPRESSION, format!("Unknown expression {}", rest.trim_end_matches('\'')))
@@ -243,7 +243,8 @@ fn unset_type() -> MqlError {
     error(UNSET_TYPE, "$unset specification must be a string or an array")
 }
 
-/// Records whether the projection includes (`keep`), refusing a change of mind.
+/// Records whether the projection includes (`keep`), refusing a change of mind; the error names
+/// the field as written in its document, without the path of a nested one (measured).
 fn set_mode(mode: &mut Option<bool>, keep: bool, field: &str) -> Result<(), MqlError> {
     match *mode {
         None => *mode = Some(keep),

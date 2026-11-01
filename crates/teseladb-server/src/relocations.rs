@@ -18,7 +18,7 @@
 //!
 //! After a restart the old copy, whose state says the range moved, hands it over again; a copy
 //! imported and not started is not opened while another core holds the range, and is dropped
-//! when the hand-over comes again ([`relocate::step`]). A target core that cannot take a
+//! when the hand-over comes again ([`teseladb_range::relocate::step`]). A target core that cannot take a
 //! hand-over says so ([`RelocateMsg::Failed`]) and the old core opens its group again to hand it
 //! over anew.
 
@@ -34,7 +34,6 @@ use teseladb_raft::Role;
 use teseladb_raftlog::{FileId, IoDone, IoOp};
 use teseladb_range::command::Command;
 use teseladb_range::host::RangeHost;
-use teseladb_range::relocate::{self, Copy, Step};
 use teseladb_range::sm::RangeSm;
 use teseladb_range::snapshot::write_ops;
 use teseladb_types::{GroupId, Nanos};
@@ -238,16 +237,15 @@ impl Relocations {
             .filter(|(_, sm)| sm.halted())
             .filter_map(|(g, sm)| sm.relocated().map(|(t, _)| (g, t, sm.intervals())))
             .collect();
+        // A halted replica is a running copy whose state moves it to another core: it is handed
+        // over (`relocate::step` gives `Hand`).
         for (g, target, intervals) in halted {
-            let step = relocate::step(self.core, Some(target), Copy::Running, None);
-            if step == Step::Hand {
-                let dir = self.name("out", g);
-                let jobs = intervals
-                    .iter()
-                    .map(|(start, end)| lsm.borrow_mut().export(start, end, NEWEST, dir.clone()))
-                    .collect();
-                self.out.insert(g, Out::Exporting { target, jobs, files: Vec::new() });
-            }
+            let dir = self.name("out", g);
+            let jobs = intervals
+                .iter()
+                .map(|(start, end)| lsm.borrow_mut().export(start, end, NEWEST, dir.clone()))
+                .collect();
+            self.out.insert(g, Out::Exporting { target, jobs, files: Vec::new() });
         }
         self.send_read(core, host, replicas);
         self.retire(core, replicas);
@@ -256,26 +254,27 @@ impl Relocations {
 
     /// The old core removes the groups the target core imported.
     fn retire(&mut self, core: &mut MultiRaftCore<CoreSm>, replicas: &mut Replicas) {
-        let imported: Vec<GroupId> = self
+        let imported: Vec<(GroupId, Intervals)> = self
             .out
             .iter()
-            .filter(|(_, o)| matches!(o, Out::Imported { .. }))
-            .map(|(g, _)| *g)
+            .filter_map(|(g, o)| match o {
+                Out::Imported { intervals } => Some((*g, intervals.clone())),
+                _ => None,
+            })
             .collect();
-        for g in imported {
-            let gone = match core.retire_group(g) {
-                Ok(()) => false,
+        for (g, intervals) in imported {
+            match core.retire_group(g) {
+                Ok(()) => {
+                    self.out.insert(g, Out::Retiring { intervals });
+                }
                 // Nothing of it is left on this core.
-                Err(OpError::GroupNotFound) => true,
+                Err(OpError::GroupNotFound) => {
+                    self.out.remove(&g);
+                    self.hosting.remove(g, self.core);
+                    replicas.release(g);
+                }
                 // The store stopped: nothing more happens on this core.
-                Err(_) => continue,
-            };
-            let Some(Out::Imported { intervals }) = self.out.remove(&g) else { continue };
-            if gone {
-                self.hosting.remove(g, self.core);
-                replicas.release(g);
-            } else {
-                self.out.insert(g, Out::Retiring { intervals });
+                Err(_) => {}
             }
         }
     }
@@ -424,13 +423,9 @@ impl Relocations {
         if core.store().group(g).is_some() {
             // A copy imported before a restart and never started: the old core still holds the
             // range, so it goes first.
-            let step = relocate::step(
-                self.core,
-                Some(self.core),
-                Copy::Imported { this_run: false },
-                Some(true),
-            );
-            if step == Step::Drop && core.retire_group(g).is_ok() {
+            // `relocate::step` of an imported copy from an earlier run while the old core holds
+            // the range: `Drop`.
+            if core.retire_group(g).is_ok() {
                 self.inbound.insert(g, In::Dropping(h));
             } else {
                 self.msgs.push((h.from, RelocateMsg::Failed { group: g }));
@@ -451,16 +446,17 @@ impl Relocations {
         let (ops, refs) = write_ops(&h.files, &dir, first);
         let left = ops.len();
         self.ops.extend(ops.into_iter().map(|op| (op, Tag::Write(g))));
-        self.inbound.insert(g, In::Writing { h, refs, left, failed: false });
         if left == 0 {
-            self.written(lsm, g);
+            self.written(lsm, h, refs, false);
+        } else {
+            self.inbound.insert(g, In::Writing { h, refs, left, failed: false });
         }
     }
 
     /// The files of `g` are written: its intervals are cleared if this core's LSM has something
     /// of the range, and the files ingested.
-    fn written(&mut self, lsm: &RefCell<Lsm>, g: GroupId) {
-        let Some(In::Writing { h, refs, failed, .. }) = self.inbound.remove(&g) else { return };
+    fn written(&mut self, lsm: &RefCell<Lsm>, h: Box<Handover>, refs: Vec<FileRef>, failed: bool) {
+        let g = h.group;
         if failed {
             self.fail(h.from, g);
             return;
@@ -486,13 +482,12 @@ impl Relocations {
     /// An LSM export finished; the files back if it is not one of this module's.
     pub fn on_exported(&mut self, id: u64, written: Vec<FileRef>) -> Result<(), Vec<FileRef>> {
         let found = self.out.iter_mut().find_map(|(g, o)| match o {
-            Out::Exporting { jobs, .. } if jobs.contains(&id) => Some(*g),
+            Out::Exporting { target, jobs, files } if jobs.contains(&id) => {
+                Some((*g, target, jobs, files))
+            }
             _ => None,
         });
-        let Some(g) = found else { return Err(written) };
-        let Some(Out::Exporting { target, jobs, files }) = self.out.get_mut(&g) else {
-            return Ok(());
-        };
+        let Some((g, target, jobs, files)) = found else { return Err(written) };
         jobs.retain(|j| *j != id);
         files.extend(written);
         if !jobs.is_empty() {
@@ -524,12 +519,11 @@ impl Relocations {
         id: u64,
         r: Result<(), LsmError>,
     ) -> Result<(), Result<(), LsmError>> {
-        let found = self.inbound.iter().find_map(|(g, i)| match i {
-            In::Ingesting { job, .. } if *job == id => Some(*g),
-            _ => None,
-        });
-        let Some(g) = found else { return Err(r) };
-        let Some(In::Ingesting { h, refs, .. }) = self.inbound.remove(&g) else { return Ok(()) };
+        let mine = |_: &GroupId, i: &mut In| matches!(i, In::Ingesting { job, .. } if *job == id);
+        let Some((g, In::Ingesting { h, refs, .. })) = self.inbound.extract_if(.., mine).next()
+        else {
+            return Err(r);
+        };
         // The files are kept for the ingestion that follows a clearing.
         if r != Err(LsmError::IngestOverlap) {
             for f in &refs {
@@ -558,12 +552,11 @@ impl Relocations {
 
     /// An LSM clearing finished; `false` if it is not one of this module's.
     pub fn on_cleared(&mut self, lsm: &RefCell<Lsm>, id: u64) -> bool {
-        let found = self.inbound.iter().find_map(|(g, i)| match i {
-            In::Clearing { job, .. } if *job == id => Some(*g),
-            _ => None,
-        });
-        let Some(g) = found else { return false };
-        let Some(In::Clearing { h, refs, .. }) = self.inbound.remove(&g) else { return true };
+        let mine = |_: &GroupId, i: &mut In| matches!(i, In::Clearing { job, .. } if *job == id);
+        let Some((_, In::Clearing { h, refs, .. })) = self.inbound.extract_if(.., mine).next()
+        else {
+            return false;
+        };
         self.ingest(lsm, h, refs);
         true
     }
@@ -583,13 +576,15 @@ impl Relocations {
             Tag::Read { g, i } => self.read(g, i, done),
             Tag::Write(g) => {
                 let ok = matches!(done, IoDone::Ok(_));
-                let Some(In::Writing { left, failed, .. }) = self.inbound.get_mut(&g) else {
+                // Every write of `g` finds it writing: it leaves that state with its last one.
+                let Some(In::Writing { h, refs, left, failed }) = self.inbound.remove(&g) else {
                     return;
                 };
-                *left = left.saturating_sub(1);
-                *failed |= !ok;
-                if *left == 0 {
-                    self.written(lsm, g);
+                let (left, failed) = (left.saturating_sub(1), failed || !ok);
+                if left == 0 {
+                    self.written(lsm, h, refs, failed);
+                } else {
+                    self.inbound.insert(g, In::Writing { h, refs, left, failed });
                 }
             }
         }
@@ -940,5 +935,152 @@ mod tests {
         c.rel.on_message(&mut c.core, &mut c.r, &c.lsm, RelocateMsg::Handover(Box::new(h)));
         let msgs = c.rel.take_msgs();
         assert!(matches!(msgs[..], [(1, RelocateMsg::Imported { group: G })]));
+    }
+
+    fn handover(g: GroupId, files: Vec<Vec<u8>>) -> Box<Handover> {
+        let imp = GroupImport {
+            conf: Default::default(),
+            hard: Default::default(),
+            index: 0,
+            term: 0,
+            state: Vec::new(),
+            entries: Vec::new(),
+        };
+        Box::new(Handover { group: g, from: 0, imp, intervals: vec![(vec![1], vec![4])], files })
+    }
+
+    #[test]
+    fn the_holder_is_the_other_core_that_has_the_range() {
+        let n = Node::new();
+        assert_eq!(n.cores[1].rel.holder(G), Some(0));
+        assert_eq!(n.cores[0].rel.holder(G), None, "this core");
+        assert_eq!(n.cores[1].rel.holder(GroupId(55)), None, "nobody");
+    }
+
+    #[test]
+    fn an_imported_range_already_gone_from_the_old_core_leaves_at_once() {
+        let mut n = Node::new();
+        let gone = GroupId(55);
+        n.hosting.add(gone, 0);
+        let c = &mut n.cores[0];
+        c.rel.out.insert(gone, Out::Imported { intervals: Vec::new() });
+        let lsm = c.lsm.clone();
+        c.rel.step(&mut c.core, &mut c.host, &mut c.r, &lsm, Nanos::from_secs(9));
+        assert!(!c.rel.out.contains_key(&gone) && !n.hosting.holds(gone, 0));
+        // Durable steps of ranges this module is not moving change nothing.
+        let c = &mut n.cores[0];
+        c.rel.out.insert(gone, Out::Sent { intervals: Vec::new() });
+        c.rel.durable(&mut c.r, &lsm, Durable::Imported(gone));
+        c.rel.durable(&mut c.r, &lsm, Durable::Removed(gone));
+        assert!(matches!(c.rel.out.get(&gone), Some(Out::Sent { .. })));
+        assert!(!n.hosting.holds(gone, 0));
+    }
+
+    #[test]
+    fn a_hand_over_on_its_way_is_not_taken_twice() {
+        let mut n = Node::new();
+        let c = &mut n.cores[1];
+        let g = GroupId(56);
+        c.rel.on_message(
+            &mut c.core,
+            &mut c.r,
+            &c.lsm,
+            RelocateMsg::Handover(handover(g, vec![vec![7; 16]])),
+        );
+        let left = |r: &Relocations| match r.inbound.get(&g) {
+            Some(In::Writing { left, .. }) => *left,
+            _ => 0,
+        };
+        let first = left(&c.rel);
+        assert!(first > 0);
+        c.rel.on_message(
+            &mut c.core,
+            &mut c.r,
+            &c.lsm,
+            RelocateMsg::Handover(handover(g, Vec::new())),
+        );
+        assert_eq!(left(&c.rel), first, "the first stays");
+        assert!(c.rel.take_msgs().is_empty());
+        // A hand-over without files goes straight to its ingestion.
+        let empty = GroupId(57);
+        c.rel.on_message(
+            &mut c.core,
+            &mut c.r,
+            &c.lsm,
+            RelocateMsg::Handover(handover(empty, Vec::new())),
+        );
+        assert!(matches!(c.rel.inbound.get(&empty), Some(In::Ingesting { .. })));
+    }
+
+    #[test]
+    fn job_completions_of_other_jobs_go_back() {
+        let mut n = Node::new();
+        let c = &mut n.cores[1];
+        c.rel
+            .out
+            .insert(GroupId(55), Out::Exporting { target: 0, jobs: vec![5], files: Vec::new() });
+        c.rel.inbound.insert(
+            GroupId(56),
+            In::Ingesting { h: handover(GroupId(56), Vec::new()), refs: Vec::new(), job: 5 },
+        );
+        c.rel.inbound.insert(
+            GroupId(57),
+            In::Clearing { h: handover(GroupId(57), Vec::new()), refs: Vec::new(), job: 6 },
+        );
+        assert_eq!(c.rel.on_exported(999, Vec::new()), Err(Vec::new()));
+        assert!(c.rel.on_ingested(&mut c.core, &c.lsm, 999, Ok(())).is_err());
+        assert!(!c.rel.on_cleared(&c.lsm, 999));
+        // The right ones move their range on.
+        assert_eq!(c.rel.on_exported(5, Vec::new()), Ok(()));
+        assert!(matches!(c.rel.out.get(&GroupId(55)), Some(Out::Read { target: 0, .. })));
+        assert!(c.rel.on_cleared(&c.lsm, 6));
+        assert!(matches!(c.rel.inbound.get(&GroupId(57)), Some(In::Ingesting { .. })));
+    }
+
+    #[test]
+    fn a_range_with_data_flushed_on_the_target_core_is_cleared_before_the_ingestion() {
+        let mut n = Node::new();
+        let value = [1u8; 8];
+        let w = [EntryWrite { key: &[3, b'x'], kind: Kind::Put, value: &value }];
+        let ts = Hlc { physical: 1, logical: 0 };
+        n.cores[1].lsm.borrow_mut().write_entry(G, 1, ts, &w).unwrap();
+        n.cores[1].lsm.borrow_mut().flush();
+        let mut faults = [Fault::None; 2];
+        n.run_until(|n| n.cores[1].lsm.borrow().flushed_index(G) > 0, &mut faults);
+        n.relocate(&mut faults);
+    }
+
+    #[test]
+    fn a_read_export_waits_while_its_group_is_busy_with_the_disk() {
+        let mut n = Node::new();
+        n.set(&BTreeMap::from([(G, (1, 7))]));
+        let halted = |n: &Node| range_sm(&n.cores[0].core, G).is_some_and(RangeSm::halted);
+        n.run_until(halted, &mut [Fault::None; 2]);
+        let c = &mut n.cores[0];
+        c.rel.out.insert(G, Out::Read { target: 1, files: Vec::new() });
+        // An entry on its way to the disk: the group cannot close yet.
+        let payload = Command::Relocate { core: 1, intent: 7 }.encode();
+        let build = |_| Ok::<_, std::convert::Infallible>(payload);
+        let now = n.now + Nanos::from_millis(1);
+        let _ = c.core.propose_at(G, Hlc { physical: 0, logical: 0 }, now, build);
+        let lsm = c.lsm.clone();
+        c.rel.step(&mut c.core, &mut c.host, &mut c.r, &lsm, now);
+        assert!(matches!(c.rel.out.get(&G), Some(Out::Read { .. })), "it waits");
+        assert!(c.rel.take_msgs().is_empty() && c.core.status(G).is_some());
+    }
+
+    #[test]
+    fn a_leader_halted_for_an_earlier_intent_proposes_nothing_for_a_newer_one() {
+        let mut n = Node::new();
+        n.set(&BTreeMap::from([(G, (1, 7))]));
+        let halted = |n: &Node| range_sm(&n.cores[0].core, G).is_some_and(RangeSm::halted);
+        n.run_until(halted, &mut [Fault::None; 2]);
+        let c = &mut n.cores[0];
+        assert!(c.core.status(G).is_some_and(|s| s.role == Role::Leader), "the only voter");
+        let last = c.core.store().group(G).map(|l| l.last_index());
+        c.rel.set_intents(&BTreeMap::from([(G, (1, 8))]));
+        c.rel.lead(&mut c.core, &c.r, Nanos::from_secs(60));
+        assert_eq!(c.core.store().group(G).map(|l| l.last_index()), last, "no new entry");
+        assert!(c.rel.take_group0().is_empty());
     }
 }

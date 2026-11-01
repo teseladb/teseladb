@@ -1,0 +1,50 @@
+{"count":"c"}	=> {"n":{"$numberInt":"8"},"shards":{"sh1":{"$numberInt":"8"}},"ok":{"$numberDouble":"1.0"}}
+{"count":"c","query":{"g":"a"}}	=> {"n":{"$numberInt":"3"},"shards":{"sh1":{"$numberInt":"3"}},"ok":{"$numberDouble":"1.0"}}
+{"count":"c","query":{"$expr":{"$divide":["$n",0]}}}	!! 2	BadValue	failed on: sh1 :: caused by :: Executor error during count command on namespace: xa.c :: caused by :: can't $divide by zero
+{"count":"nothere"}	=> {"n":{"$numberInt":"0"},"shards":{"sh1":{"$numberInt":"0"}},"ok":{"$numberDouble":"1.0"}}
+{"create":"v","viewOn":"c","pipeline":[{"$match":{"g":"a"}}]}	=> {"ok":{"$numberDouble":"1.0"}}
+{"count":"v"}	=> {"n":{"$numberInt":"3"},"shards":{"sh1":{"$numberInt":"3"}},"ok":{"$numberDouble":"1.0"}}
+{"count":"v","query":{"n":5}}	=> {"n":{"$numberInt":"2"},"shards":{"sh1":{"$numberInt":"2"}},"ok":{"$numberDouble":"1.0"}}
+{"count":"c","query":{"$foo":1}}	!! 2	BadValue	unknown top level operator: $foo. If you have a field name that starts with a '$' symbol, consider using $getField or $setField.
+{"count":"c","query":{"n":{"$gt":0}},"skip":1,"limit":2}	=> {"n":{"$numberInt":"2"},"shards":{"sh1":{"$numberInt":"3"}},"ok":{"$numberDouble":"1.0"}}
+{"count":"c","skip":-1}	!! 2	BadValue	BSON field 'skip' value must be >= 0, actual value '-1'
+{"count":"c","query":{"$expr":{"$divide":["$n",0]}},"limit":1}	!! 2	BadValue	failed on: sh1 :: caused by :: Executor error during count command on namespace: xa.c :: caused by :: can't $divide by zero
+{"count":"v","query":{"$expr":{"$divide":["$n",0]}}}	!! 4848401	Location4848401	failed on: sh1 :: caused by :: Executor error during aggregate command on namespace: xa.v :: caused by :: can't $divide by zero
+{"count":"c","hint":"nope_1"}	!! 2	BadValue	failed on: sh1 :: caused by :: error enumerating plans for query: ns=xa.cTree: $and\nSort: {}\nProj: {}\n planner returned error :: caused by :: hint provided does not correspond to an existing index
+{"count":"c","collation":{"locale":"zz"}}	!! 2	BadValue	Field 'locale' is invalid in: { locale: "zz" }
+{"count":"system.views"}	=> {"n":{"$numberInt":"1"},"shards":{"sh1":{"$numberInt":"1"}},"ok":{"$numberDouble":"1.0"}}
+{"count":"v","skip":1,"limit":1}	=> {"n":{"$numberInt":"1"},"shards":{"sh1":{"$numberInt":"2"}},"ok":{"$numberDouble":"1.0"}}
+{"count":"v","skip":1}	=> {"n":{"$numberInt":"2"},"shards":{"sh1":{"$numberInt":"3"}},"ok":{"$numberDouble":"1.0"}}
+{"count":"c","skip":2}	=> {"n":{"$numberInt":"6"},"shards":{"sh1":{"$numberInt":"8"}},"ok":{"$numberDouble":"1.0"}}
+{"count":"c","skip":20}	=> {"n":{"$numberInt":"0"},"shards":{"sh1":{"$numberInt":"8"}},"ok":{"$numberDouble":"1.0"}}
+{"count":"c","limit":-3}	=> {"n":{"$numberInt":"3"},"shards":{"sh1":{"$numberInt":"3"}},"ok":{"$numberDouble":"1.0"}}
+{"count":"system.users"}	=> {"n":{"$numberInt":"0"},"shards":{"sh1":{"$numberInt":"0"}},"ok":{"$numberDouble":"1.0"}}
+{"count":"c","query":{"g":"a"},"hint":"nope_1"}	!! 2	BadValue	failed on: sh1 :: caused by :: error enumerating plans for query: ns=xa.cTree: g $eq "a"\nSort: {}\nProj: {}\n planner returned error :: caused by :: hint provided does not correspond to an existing index
+{"count":"c","query":{"g":"a","n":{"$gt":1}},"hint":{"zz":1}}	!! 2	BadValue	failed on: sh1 :: caused by :: error enumerating plans for query: ns=xa.cTree: $and\n    g $eq "a"\n    n $gt 1\nSort: {}\nProj: {}\n planner returned error :: caused by :: hint provided does not correspond to an existing index
+{"count":"c","query":{"$or":[{"g":"a"},{"n":{"$in":[1,2]}}]},"hint":"nope_1"}	!! 2	BadValue	failed on: sh1 :: caused by :: error enumerating plans for query: ns=xa.cTree: $or\n    g $eq "a"\n    n $in [ 1 2]\nSort: {}\nProj: {}\n planner returned error :: caused by :: hint provided does not correspond to an existing index
+{"count":"c","query":{"t":{"$elemMatch":{"$gt":"a"}},"o.k":{"$exists":true}},"hint":"nope_1"}	!! 2	BadValue	failed on: sh1 :: caused by :: error enumerating plans for query: ns=xa.cTree: $and\n    t $elemMatch (value)\n         $gt "a"\n    o.k exists\nSort: {}\nProj: {}\n planner returned error :: caused by :: hint provided does not correspond to an existing index
+{"count":"c","query":{"g":{"$ne":"a"},"s":{"$regex":"^a","$options":"i"}},"hint":"nope_1"}	!! 2	BadValue	failed on: sh1 :: caused by :: error enumerating plans for query: ns=xa.cTree: $and\n    s regex /^a/i\n    $not\n        g $eq "a"\nSort: {}\nProj: {}\n planner returned error :: caused by :: hint provided does not correspond to an existing index
+{"count":"c","query":{"$expr":{"$eq":["$g","a"]}},"hint":"nope_1"}	!! 2	BadValue	failed on: sh1 :: caused by :: error enumerating plans for query: ns=xa.cTree: $and\n    $expr {$eq: ["$g", {$const: "a"}]}\n    g $_internalExprEq "a"\nSort: {}\nProj: {}\n planner returned error :: caused by :: hint provided does not correspond to an existing index
+{"count":"c","query":{"n":{"$type":"int"},"x":{"$size":2},"g":{"$nin":["a"]}},"hint":"nope_1"}	!! 2	BadValue	failed on: sh1 :: caused by :: error enumerating plans for query: ns=xa.cTree: $and\n    x $size : 2\n    $not\n        g $eq "a"\n    n $type: { 0: 16 }\nSort: {}\nProj: {}\n planner returned error :: caused by :: hint provided does not correspond to an existing index
+{"find":"c","filter":{"g":"a"},"hint":"nope_1"}	!! 2	BadValue	error enumerating plans for query: ns=xa.cTree: g $eq "a"\nSort: {}\nProj: {}\n planner returned error :: caused by :: hint provided does not correspond to an existing index
+{"find":"c","filter":{},"hint":{"zz":1}}	!! 2	BadValue	error enumerating plans for query: ns=xa.cTree: $and\nSort: {}\nProj: {}\n planner returned error :: caused by :: hint provided does not correspond to an existing index
+{"find":"c","filter":{"g":"a"},"sort":{"n":1},"projection":{"g":1},"hint":"nope_1"}	!! 2	BadValue	error enumerating plans for query: ns=xa.cTree: g $eq "a"\nSort: { n: 1 }\nProj: { g: 1 }\n planner returned error :: caused by :: hint provided does not correspond to an existing index
+{"count":"c","hint":{"$natural":1}}	=> {"n":{"$numberInt":"8"},"shards":{"sh1":{"$numberInt":"8"}},"ok":{"$numberDouble":"1.0"}}
+{"count":"c","hint":"_id_"}	=> {"n":{"$numberInt":"8"},"shards":{"sh1":{"$numberInt":"8"}},"ok":{"$numberDouble":"1.0"}}
+{"count":"c","query":{"d":{"$lt":{"$date":"2020-01-01T00:00:00Z"}},"x":null,"o":{"k":1}},"hint":"nope_1"}	!! 2	BadValue	failed on: sh1 :: caused by :: error enumerating plans for query: ns=xa.cTree: $and\n    o $eq { k: 1 }\n    x $eq null\n    d $lt new Date(1577836800000)\nSort: {}\nProj: {}\n planner returned error :: caused by :: hint provided does not correspond to an existing index
+{"distinct":"c","key":"g","hint":"nope_1"}	!! 2	BadValue	error enumerating plans for query: ns=xa.cTree: $and\nSort: {}\nProj: {}\n planner returned error :: caused by :: hint provided does not correspond to an existing index
+{"count":"c","query":{"$nor":[{"g":"a"}],"n":{"$not":{"$gt":3}}},"hint":"nope_1"}	!! 2	BadValue	failed on: sh1 :: caused by :: error enumerating plans for query: ns=xa.cTree: $and\n    $not\n        g $eq "a"\n    $not\n        n $gt 3\nSort: {}\nProj: {}\n planner returned error :: caused by :: hint provided does not correspond to an existing index
+{"createIndexes":"c","indexes":[{"key":{"g":1},"name":"g_1"}]}	=> {"raw":{"sh1/lc12-sh1:27018":{"numIndexesBefore":{"$numberInt":"1"},"numIndexesAfter":{"$numberInt":"2"},"createdCollectionAutomatically":false,"commitQuorum":"votingMembers","ok":{"$numberDouble":"1.0"}}},"numIndexesBefore":{"$numberInt":"1"},"numIndexesAfter":{"$numberInt":"2"},"createdCollectionAutomatically":false,"commitQuorum":"votingMembers","ok":{"$numberDouble":"1.0"}}
+{"find":"c","filter":{"g":"a"},"hint":"g_1","projection":{"_id":1}}	=> {"cursor":{"firstBatch":[{"_id":{"$numberInt":"1"}},{"_id":{"$numberInt":"3"}},{"_id":{"$numberInt":"8"}}],"id":{"$numberLong":"0"},"ns":"xa.c"},"ok":{"$numberDouble":"1.0"}}
+{"find":"c","filter":{"g":"a"},"hint":{"g":1},"projection":{"_id":1}}	=> {"cursor":{"firstBatch":[{"_id":{"$numberInt":"1"}},{"_id":{"$numberInt":"3"}},{"_id":{"$numberInt":"8"}}],"id":{"$numberLong":"0"},"ns":"xa.c"},"ok":{"$numberDouble":"1.0"}}
+{"count":"c","hint":{"g":1}}	=> {"n":{"$numberInt":"8"},"shards":{"sh1":{"$numberInt":"8"}},"ok":{"$numberDouble":"1.0"}}
+{"count":"c","hint":{}}	=> {"n":{"$numberInt":"8"},"shards":{"sh1":{"$numberInt":"8"}},"ok":{"$numberDouble":"1.0"}}
+{"count":"c","hint":{"_id":1}}	=> {"n":{"$numberInt":"8"},"shards":{"sh1":{"$numberInt":"8"}},"ok":{"$numberDouble":"1.0"}}
+{"distinct":"c","key":"g","hint":"g_1"}	=> {"values":[null,"a","b","c"],"ok":{"$numberDouble":"1.0"}}
+{"count":"c","hint":5}	!! 9	FailedToParse	Hint must be a string or an object
+{"distinct":"c","key":"g","hint":{"zz":1}}	!! 2	BadValue	error enumerating plans for query: ns=xa.cTree: $and\nSort: {}\nProj: {}\n planner returned error :: caused by :: hint provided does not correspond to an existing index
+{"find":"c","filter":{"_id":{"$in":[3]}},"hint":{"$natural":-1},"projection":{"_id":1}}	=> {"cursor":{"firstBatch":[{"_id":{"$numberInt":"3"}}],"id":{"$numberLong":"0"},"ns":"xa.c"},"ok":{"$numberDouble":"1.0"}}
+{"find":"c","filter":{"g":"a"},"hint":{"$natural":2}}	!! 2	BadValue	$natural hint cannot be set to a value other than -1 or 1.
+{"find":"c","hint":{"$natural":-1},"sort":{"_id":1},"projection":{"_id":1},"limit":2}	=> {"cursor":{"firstBatch":[{"_id":{"$numberInt":"1"}},{"_id":{"$numberInt":"2"}}],"id":{"$numberLong":"0"},"ns":"xa.c"},"ok":{"$numberDouble":"1.0"}}
+{"distinct":"c","key":"g","hint":5}	!! 9	FailedToParse	Hint must be a string or an object
+{"find":"c","hint":5}	!! 9	FailedToParse	Hint must be a string or an object

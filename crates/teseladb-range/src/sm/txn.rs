@@ -108,6 +108,14 @@ impl RangeSm {
         self.write_txn_entry(versions, None, ctx)
     }
 
+    /// Deletes the record of `txn` at the entry's mark (008 record GC).
+    pub(super) fn apply_forget(&mut self, txn: TxnId, ctx: &ApplyCtx) -> Result<(), ApplyError> {
+        let key = record_key(txn);
+        self.check_txn_keys([key.as_slice()], ctx)?;
+        let versions = vec![VersionWrite { key: &key, ts: ctx.ts, kind: Kind::Delete, value: &[] }];
+        self.write_txn_entry(versions, None, ctx)
+    }
+
     pub(super) fn apply_resolve(
         &mut self,
         (status, commit_ts): (TxnStatus, teseladb_hlc::Hlc),

@@ -11,6 +11,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+teseladb-hash = { path = "../teseladb-hash" }
 teseladb-hlc = { path = "../teseladb-hlc" }
 teseladb-range = { path = "../teseladb-range" }
 teseladb-types = { path = "../teseladb-types" }

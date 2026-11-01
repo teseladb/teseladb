@@ -288,7 +288,7 @@ impl RelocateWorkload {
             w1: false,
         };
         let (now, wall) = Self::times(w, node);
-        let Some((_, host)) = self.hosts.get_mut(&node) else { return };
+        let (_, host) = self.hosts.get_mut(&node).expect("checked above");
         let Some(c) = w.cluster_core(node, core) else { return };
         let req = if read {
             host.get(c, G, &doc(k), ReadConcern::Linearizable, now, wall)
@@ -363,8 +363,9 @@ impl RelocateWorkload {
             leads.then_some((n, c))
         });
         let Some((node, core)) = leader else { return };
-        let Some(x) = w.cluster_core(node, core) else { return };
-        let Some(sm) = x.state_machine(G).and_then(as_range) else { return };
+        // A leader's core answered above: it is not frozen, and its group is the range.
+        let x = w.cluster_core(node, core).expect("a leader's core");
+        let sm = x.state_machine(G).and_then(as_range).expect("the range");
         let (relocated, halted) = (sm.relocated(), sm.halted());
         if relocated == Some((target, intent)) {
             if core == target {
@@ -381,7 +382,7 @@ impl RelocateWorkload {
         self.resend_at = now + RESEND_EVERY;
         let payload = Command::Relocate { core: target, intent }.encode();
         let local = w.local(node);
-        let Some(x) = w.cluster_core(node, core) else { return };
+        let x = w.cluster_core(node, core).expect("a leader's core");
         let zero = Hlc { physical: 0, logical: 0 };
         if let Ok((op, _)) =
             x.propose_at(G, zero, local, |_| Ok::<_, std::convert::Infallible>(payload))
@@ -435,7 +436,8 @@ impl RelocateWorkload {
         }
         let Some(from) = self.running(w, node) else { return };
         let Some(x) = w.cluster_core(node, from) else { return };
-        let Some(sm) = x.state_machine(G).and_then(as_range) else { return };
+        // `running` found the group there: it is the range.
+        let sm = x.state_machine(G).and_then(as_range).expect("the range");
         let intervals = sm.intervals();
         let to = match sm.relocated() {
             Some((t, _)) if sm.halted() => t,
@@ -676,11 +678,10 @@ impl Workload for RelocateWorkload {
             cache_bytes: 64 << 10,
             ..teseladb_lsm::LsmConfig::default()
         });
+        // Every node is up at the start.
         for node in 0..self.nodes {
-            if w.nodes[node as usize].alive {
-                self.open_lsms(w, node);
-                self.open(w, node);
-            }
+            self.open_lsms(w, node);
+            self.open(w, node);
         }
         self.born = true;
         for client in 0..CLIENTS {
@@ -732,5 +733,168 @@ impl Workload for RelocateWorkload {
         liveness::check(&self.history, self.heal_at, liveness::WINDOW)?;
         durability::check(&self.history)?;
         linearizable::check(&self.history)
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    use teseladb_multiraft::StateMachine;
+
+    use super::*;
+
+    /// A `relocate` world of three nodes of `cores` cores after `secs` seconds without faults.
+    fn world(cores: u16, secs: u64) -> (World, RelocateWorkload) {
+        let mut wl = RelocateWorkload::new(3, cores);
+        let mut w = World::with_clocks(5, 3, cores, false, true, wl.clocks());
+        wl.start(&mut w);
+        crate::drive_until(&mut w, &mut wl, Nanos::from_secs(secs), |_| false);
+        (w, wl)
+    }
+
+    fn freeze(w: &mut World, node: u32, core: u16) {
+        w.nodes[node as usize].cores[core as usize].frozen_until = w.now() + Nanos::from_secs(1);
+    }
+
+    #[test]
+    fn lsms_open_once_and_one_that_cannot_recover_stays_shut() {
+        let (mut w, wl) = world(2, 1);
+        let open = w.nodes[0].cores[0].lsm.clone().expect("open");
+        w.nodes[0].cores[1].lsm = None;
+        // Its files damaged: it does not recover.
+        let disk = &mut w.nodes[0].cores[1].disk;
+        for f in disk.list(Path::new("range-lsm")).expect("its folder") {
+            disk.corrupt(&f, 0);
+        }
+        wl.open_lsms(&mut w, 0);
+        let same = w.nodes[0].cores[0].lsm.as_ref().is_some_and(|l| Rc::ptr_eq(l, &open));
+        assert!(same, "an open LSM is kept");
+        assert!(w.nodes[0].cores[1].lsm.is_none(), "a full disk keeps it shut");
+    }
+
+    #[test]
+    fn a_node_down_moving_or_already_open_is_left_as_it_is() {
+        let (mut w, mut wl) = world(2, 1);
+        let host_core = |wl: &RelocateWorkload, n| wl.hosts.get(&n).map(|(c, _)| *c);
+        let before = host_core(&wl, 0);
+        wl.open(&mut w, 0);
+        assert_eq!(host_core(&wl, 0), before, "its host stays");
+        w.nodes[1].alive = false;
+        wl.hosts.remove(&1);
+        wl.open(&mut w, 1);
+        w.nodes[1].alive = true;
+        assert_eq!(host_core(&wl, 1), None);
+        wl.moves.insert(1, (0, 1, Move::Retiring));
+        wl.open(&mut w, 1);
+        wl.moves.remove(&1);
+        assert_eq!(host_core(&wl, 1), None);
+    }
+
+    #[test]
+    fn a_restarted_replica_opens_again_where_its_lsm_and_core_let_it() {
+        let (mut w, mut wl) = world(2, 1);
+        let core = wl.running(&mut w, 2).expect("running");
+        // Back from a crash, before the workload opens anything: its log has the range.
+        wl.on_crash(&mut w, 2);
+        w.crash_node(2);
+        w.start_node(2).expect("started");
+        assert_eq!(wl.running(&mut w, 2), None);
+        // No LSM open yet: nothing opens.
+        wl.open(&mut w, 2);
+        assert_eq!(wl.running(&mut w, 2), None);
+        // Its core frozen: nothing opens until it thaws.
+        wl.open_lsms(&mut w, 2);
+        freeze(&mut w, 2, core);
+        wl.open(&mut w, 2);
+        assert_eq!(wl.running(&mut w, 2), None);
+        w.nodes[2].cores[core as usize].frozen_until = Nanos::ZERO;
+        wl.open(&mut w, 2);
+        assert_eq!(wl.running(&mut w, 2), Some(core));
+        assert!(wl.hosts.contains_key(&2));
+        // A host over a core whose LSM is shut cannot open.
+        let lsm = w.nodes[2].cores[core as usize].lsm.take();
+        wl.open_host(&mut w, 2, core);
+        assert!(!wl.hosts.contains_key(&2));
+        w.nodes[2].cores[core as usize].lsm = lsm;
+    }
+
+    #[test]
+    fn a_node_that_never_held_the_range_creates_it_on_the_descriptors_core() {
+        let (mut w, mut wl) = world(2, 1);
+        let core = wl.running(&mut w, 2).expect("running");
+        w.cluster_core(2, core).expect("up").remove_group(G).expect("removed");
+        let now = w.now();
+        crate::drive_until(&mut w, &mut wl, now, |_| false);
+        wl.hosts.remove(&2);
+        let lsm = w.nodes[2].cores[wl.core as usize].lsm.take();
+        wl.open(&mut w, 2);
+        assert_eq!(wl.running(&mut w, 2), None, "no LSM on the descriptor's core");
+        w.nodes[2].cores[wl.core as usize].lsm = lsm;
+        wl.open(&mut w, 2);
+        assert_eq!(wl.running(&mut w, 2), Some(wl.core));
+        let sm = w.paused_core(2, wl.core).and_then(|c| c.state_machine(G)).and_then(as_range);
+        assert!(sm.is_some_and(RangeSm::needs_snapshot), "born: it waits for a snapshot");
+    }
+
+    #[test]
+    fn requests_and_answers_a_node_cannot_take_are_dropped() {
+        let (mut w, mut wl) = world(2, 1);
+        let ops = wl.history.ops.len();
+        // Every node down while its host stays: no request goes.
+        for n in 0..3 {
+            w.nodes[n].alive = false;
+        }
+        for client in 0..CLIENTS {
+            wl.act(&mut w, client);
+        }
+        for n in 0..3 {
+            w.nodes[n].alive = true;
+        }
+        assert_eq!(wl.history.ops.len(), ops);
+        // Answers to requests nobody waits for any more.
+        for client in 0..CLIENTS {
+            wl.act(&mut w, client);
+        }
+        wl.pending.clear();
+        let until = w.now() + Nanos::from_millis(500);
+        crate::drive_until(&mut w, &mut wl, until, |_| false);
+        // Answers of a node without host, of another core, or of a core that is gone.
+        let r = || Err(OpError::Timeout);
+        let (hc, host) = wl.hosts.remove(&0).expect("a host");
+        wl.on_done(&mut w, 0, hc, OpId(1), r());
+        wl.hosts.insert(0, (hc, host));
+        wl.on_done(&mut w, 0, 1 - hc, OpId(1), r());
+        let cluster = w.nodes[0].cores[hc as usize].cluster.take();
+        wl.on_done(&mut w, 0, hc, OpId(1), r());
+        w.nodes[0].cores[hc as usize].cluster = cluster;
+    }
+
+    #[test]
+    fn one_core_never_moves_and_a_move_needs_an_open_lsm() {
+        let (mut w, mut wl) = world(1, 1);
+        wl.next_move = Nanos::ZERO;
+        wl.lead(&mut w);
+        assert!(wl.intent.is_none(), "no other core");
+        let (mut w, mut wl) = world(2, 3);
+        // A halted replica that applied `Relocate` starts no hand-over without its LSM.
+        let until = Nanos::from_secs(20);
+        let halted = |w: &mut World| {
+            (0..3u32).find(|n| {
+                (0..2).any(|c| {
+                    w.cluster_core(*n, c)
+                        .and_then(|x| x.state_machine(G))
+                        .and_then(as_range)
+                        .is_some_and(RangeSm::halted)
+                })
+            })
+        };
+        assert!(crate::drive_until(&mut w, &mut wl, until, |w| halted(w).is_some()));
+        let n = halted(&mut w).expect("halted");
+        wl.moves.remove(&n);
+        let from = wl.running(&mut w, n).expect("running");
+        let lsm = w.nodes[n as usize].cores[from as usize].lsm.take();
+        wl.start_move(&mut w, n);
+        w.nodes[n as usize].cores[from as usize].lsm = lsm;
+        assert!(!wl.moves.contains_key(&n));
     }
 }

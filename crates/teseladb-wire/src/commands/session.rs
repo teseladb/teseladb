@@ -71,9 +71,17 @@ pub enum KillScope {
     Sessions(Vec<u128>),
     /// Every session (`killAllSessions`).
     All,
+    /// One operation of one node (`killOp` of `node<N>:<op>`, 010 FR-016): only that node
+    /// gets it.
+    Op {
+        /// The node.
+        node: u64,
+        /// The operation's number in the node's table.
+        op: u32,
+    },
 }
 
-/// Ends the sessions of `scope` on this node and kills their cursors.
+/// Ends the sessions of `scope` on this node and kills their cursors, or marks its operation.
 pub fn kill_local(shared: &Shared, scope: &KillScope) {
     let mut g = lock(shared);
     match scope {
@@ -84,6 +92,9 @@ pub fn kill_local(shared: &Shared, scope: &KillScope) {
         KillScope::All => {
             g.sessions.end_all();
             g.cursors.kill_all_sessions();
+        }
+        KillScope::Op { op, .. } => {
+            g.ops.kill(*op);
         }
     }
 }

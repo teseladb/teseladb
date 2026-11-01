@@ -43,6 +43,7 @@ teseladb-x509 = { path = "../teseladb-x509" }
 teseladb-tls = { path = "../teseladb-tls" }
 teseladb-http = { path = "../teseladb-http" }
 teseladb-txn = { path = "../teseladb-txn" }
+teseladb-tz = { path = "../teseladb-tz" }
 
 [dev-dependencies]
 teseladb-session = { path = "../teseladb-session" }

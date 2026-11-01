@@ -223,6 +223,28 @@ fn lookup(d: &Document, path: &str) -> Option<Value> {
 
 /// `collStats` of a time series as a `refrouter` 9.0.4 shows it (015 FR-010): its index is on the
 /// `metaField` and `timeField` (none without a `metaField`), and `avgObjSize` is the integer 0.
+/// `storageStats.scale` as a number of any type: a double truncated, a decimal rounded half to
+/// even (`scaleFactor` measured on a `refrouter` 9.0.4).
+#[test]
+fn coll_stats_scale_takes_every_numeric_type() {
+    let mut m = Mem::new();
+    load(&mut m, "c", C);
+    for (scale, want) in [
+        (r#"{"$numberDecimal":"2"}"#, 2),
+        (r#"{"$numberDecimal":"2.5"}"#, 2),
+        (r#"{"$numberDecimal":"1.5"}"#, 2),
+        ("2.9", 2),
+        (r#"{"$numberLong":"3"}"#, 3),
+    ] {
+        let cmd = format!(
+            r#"{{"aggregate":"c","pipeline":[{{"$collStats":{{"storageStats":{{"scale":{scale}}}}}}},
+                {{"$project":{{"_id":0,"f":"$storageStats.scaleFactor"}}}}],"cursor":{{}}}}"#
+        );
+        let r = m.run(DB, extjson::parse(&cmd).expect("command"));
+        assert_eq!(first_doc(&r).get("f"), Some(&Value::Int32(want)), "{scale}: {r:?}");
+    }
+}
+
 #[test]
 fn coll_stats_of_a_time_series_shows_its_index() {
     let mut m = Mem::new();
@@ -244,15 +266,21 @@ fn coll_stats_of_a_time_series_shows_its_index() {
     assert_eq!(field(&without, "nindexes"), &Value::Int32(0));
 }
 
-/// A reply of a `refrouter` without what only a sharded cluster gives: the documents counted by
-/// shard, and the shard an error came from (TeselaDB has no shards).
+/// A reply of a `refrouter` with the node in place of the shard: the documents counted by node and
+/// the node an error came from, `node<N>` for `sh<N>` (D-102).
 fn unsharded(want: &str) -> String {
     if let Some(json) = want.strip_prefix("=> ") {
         let mut r = extjson::parse(json).expect("reply");
-        r.remove("shards");
+        if let Some(Value::Document(s)) = r.get("shards").cloned() {
+            let mut nodes = Document::new();
+            for (k, v) in s.iter() {
+                nodes.push(k.replacen("sh", "node", 1), v.clone());
+            }
+            r.insert("shards", nodes);
+        }
         return format!("=> {}", canonical(&normal(r)));
     }
-    want.replace("failed on: sh1 :: caused by :: ", "")
+    want.replace("failed on: sh1 :: caused by :: ", "failed on: node1 :: caused by :: ")
 }
 
 /// Reads on views against a `refrouter` 9.0.4 (`tests/aggregate/views.out` and `views2.out`, 015
@@ -275,6 +303,13 @@ fn collation_answers_as_refdb() {
         include_str!("aggregate/sbe2.out"),
         include_str!("aggregate/mintie.out"),
     ]);
+}
+
+/// Constants that fail in a filter or a pipeline fail the command before any document is read,
+/// as RefDb optimises its expressions when it parses them (`optimize.out`, 010 FR-005).
+#[test]
+fn failing_constants_answer_as_refdb() {
+    check_files(&[include_str!("aggregate/optimize.out")]);
 }
 
 /// Runs each file's commands on a node of its own over `c` and `o`, against the replies of a

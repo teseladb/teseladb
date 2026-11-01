@@ -11,6 +11,7 @@ use teseladb_types::{DecodeError, Decoder, Encoder, GroupId, NodeId};
 use crate::catalog::CollectionEntry;
 use crate::group0::{Group0Error, Group0Result};
 use crate::indexes::{IndexCommand, IndexEntry};
+use crate::meta2::Meta2Range;
 use crate::security::Principal;
 
 /// Results remembered per origin node.
@@ -74,7 +75,7 @@ impl Requests {
     }
 }
 
-const ERRORS: [Group0Error; 27] = [
+const ERRORS: [Group0Error; 31] = [
     Group0Error::AlreadyBootstrapped,
     Group0Error::NotBootstrapped,
     Group0Error::NameOrAddrTaken,
@@ -102,6 +103,10 @@ const ERRORS: [Group0Error; 27] = [
     Group0Error::InvalidTags,
     Group0Error::BadCore,
     Group0Error::NoSuchRelocation,
+    Group0Error::HandedOff,
+    Group0Error::OutOfGroupIds,
+    Group0Error::NotEmpty,
+    Group0Error::SettingConflict,
 ];
 
 /// The code of an error in the snapshot: its position in [`ERRORS`].
@@ -134,6 +139,10 @@ fn error_code(e: Group0Error) -> u8 {
         Group0Error::InvalidTags => 24,
         Group0Error::BadCore => 25,
         Group0Error::NoSuchRelocation => 26,
+        Group0Error::HandedOff => 27,
+        Group0Error::OutOfGroupIds => 28,
+        Group0Error::NotEmpty => 29,
+        Group0Error::SettingConflict => 30,
     }
 }
 
@@ -143,6 +152,7 @@ const RANGE: u8 = 2;
 const COLLECTION: u8 = 3;
 const INDEX: u8 = 4;
 const ERR: u8 = 5;
+const META1: u8 = 6;
 
 fn put_result(e: &mut Encoder, r: &Group0Result) {
     match r {
@@ -170,6 +180,10 @@ fn put_result(e: &mut Encoder, r: &Group0Result) {
         }
         Group0Result::Err(x) => {
             e.u8(ERR).u8(error_code(*x));
+        }
+        Group0Result::Meta1(r) => {
+            e.u8(META1);
+            r.encode(e);
         }
     }
 }
@@ -202,6 +216,7 @@ fn get_result(d: &mut Decoder<'_>) -> Result<Group0Result, DecodeError> {
             let c = usize::from(d.u8()?);
             Group0Result::Err(*ERRORS.get(c).ok_or(DecodeError::InvalidValue { offset: at })?)
         }
+        META1 => Group0Result::Meta1(Meta2Range::decode(d)?),
         _ => return Err(DecodeError::InvalidValue { offset: at }),
     })
 }

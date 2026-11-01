@@ -201,6 +201,34 @@ struct OwnScan {
     done: bool,
 }
 
+/// The keys of `[start, end)` that hold an intent of `txn`, in key order, at most `limit` of them
+/// (the reaper's search of an interval it cannot list key by key, 008 record GC); `None` while a
+/// block is being read.
+pub fn intent_keys(
+    lsm: &RefCell<Lsm>,
+    (start, end): (&[u8], &[u8]),
+    txn: TxnId,
+    limit: usize,
+) -> Option<Result<Vec<Vec<u8>>, ReadFault>> {
+    let zero = Hlc { physical: 0, logical: 0 };
+    let mut scan = lsm.borrow().view().scan_time(start, end, zero, NEWEST);
+    let mut keys: Vec<Vec<u8>> = Vec::new();
+    while keys.len() < limit {
+        match scan.next(&mut lsm.borrow_mut()) {
+            Step::Item(i) if i.kind == Kind::Intent => match Intent::decode(&i.value) {
+                Ok(intent) if intent.txn == txn && keys.last() != Some(&i.key) => keys.push(i.key),
+                Ok(_) => {}
+                Err(_) => return Some(Err(ReadFault::Unavailable)),
+            },
+            Step::Item(_) => {}
+            Step::Done => break,
+            Step::Miss(_) => return None,
+            Step::Failed(_) => return Some(Err(ReadFault::Unavailable)),
+        }
+    }
+    Some(Ok(keys))
+}
+
 /// A scan in progress for a reader with a [`TxnView`]: the LSM's scan at the read mark, where
 /// each intent is decided as a point read is, merged with the reader's own intents above the mark.
 pub struct ScanState {

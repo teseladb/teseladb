@@ -69,8 +69,28 @@ pub fn check_writable(ns: &Namespace) -> Result<(), CommandError> {
     if ns.coll.contains(".system.") {
         return Err(CommandError::new(BAD_VALUE, format!("Invalid namespace: {full}")));
     }
+    if super::config_db::generated(ns) {
+        return Err(super::config_db::not_writable(ns));
+    }
     Ok(())
 }
+
+/// The collections no command writes (`system.views`, `system.profile`): RefDb's refusal, as a
+/// `refrouter` relays it from the shard at `host` (measured on 9.0.4).
+pub fn cannot_write(ns: &Namespace, host: &str) -> Option<CommandError> {
+    [super::kinds::SYSTEM_VIEWS, SYSTEM_PROFILE].contains(&ns.coll.as_str()).then(|| {
+        CommandError::new(
+            INVALID_NAMESPACE,
+            format!(
+                "cluster write results unavailable from {host} :: caused by :: cannot write to {}.{}",
+                ns.db, ns.coll
+            ),
+        )
+    })
+}
+
+/// The profiler's collection.
+const SYSTEM_PROFILE: &str = "system.profile";
 
 /// `db.coll` from a command's database and collection name.
 pub fn ns(db: &str, coll: &str) -> Namespace {

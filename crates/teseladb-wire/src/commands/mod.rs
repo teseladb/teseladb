@@ -21,10 +21,15 @@ pub mod authz_collections;
 pub mod authz_writes;
 pub mod capped;
 pub mod catalog;
+pub mod cluster_admin;
+pub mod config_db;
+pub mod config_settings;
 pub mod cross_range;
 pub mod crud;
 pub mod diagnostics;
 pub mod engines;
+pub mod explain;
+pub mod hints;
 pub mod index_build;
 pub mod index_maintenance;
 pub mod index_mod;
@@ -36,6 +41,7 @@ pub mod mutation;
 pub mod names;
 pub mod parameters;
 pub mod partial_filter;
+pub(crate) mod plan_exec;
 pub mod query;
 pub mod registry;
 pub mod roles;
@@ -229,6 +235,27 @@ pub trait Backend {
     fn kill_everywhere(&mut self, _scope: &session::KillScope) -> Result<(), CommandError> {
         Ok(())
     }
+    /// The documents of collection `coll` of `config` that the node generates from its copy of
+    /// Group 0 (007 FR-017, [`config_db`]); a backend without a cluster has none.
+    fn config_documents(&mut self, _coll: &str) -> Result<Vec<Document>, CommandError> {
+        Ok(Vec::new())
+    }
+    /// Changes documents of `config.settings` in Group 0 together (007 FR-017,
+    /// [`config_settings`]); `Ok(false)` if one of them is no longer as it was read. A backend
+    /// without a cluster keeps no settings.
+    fn config_settings_write(
+        &mut self,
+        _writes: Vec<config_settings::SettingsWrite>,
+    ) -> Result<bool, CommandError> {
+        Err(CommandError::new(
+            crate::error::ILLEGAL_OPERATION,
+            "this node keeps no cluster settings",
+        ))
+    }
+    /// Asks the node to stop (`shutdown`, 007 FR-018); a backend that cannot stop refuses.
+    fn request_shutdown(&mut self) -> Result<(), CommandError> {
+        Err(CommandError::new(crate::error::ILLEGAL_OPERATION, "this node cannot be shut down"))
+    }
     /// The cluster parameters as Group 0 keeps them: name and the BSON document of its value.
     fn cluster_parameters(&mut self) -> Result<BTreeMap<String, Vec<u8>>, CommandError>;
     /// Sets a cluster parameter in Group 0 and waits until this node's copy applied it.
@@ -396,11 +423,35 @@ pub const REAP_INTERVAL_MS: u64 = 4_000;
 /// base64 of the SHA-256 of the empty user name.
 pub const ANONYMOUS_UID: &str = "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=";
 
+/// What a node's name in `config.shards` starts with, before its number.
+pub const SHARD_PREFIX: &str = "node";
+
 /// The name of node `node` as `config.shards` lists it (`_id`, 007 `config-db.md`): the shard a
 /// client sees in a transaction's `recoveryToken` and in the errors a write gets as through a
 /// `refrouter` (008).
 pub fn shard_name(node: u64) -> String {
-    format!("node{node}")
+    format!("{SHARD_PREFIX}{node}")
+}
+
+/// The name a `refrouter` gives a shard's part of a reply (`raw`), here the node's:
+/// `node<N>/host:port` (D-102).
+pub fn raw_name<B: Backend + ?Sized>(backend: &mut B) -> String {
+    let facts = backend.process();
+    format!("{}/{}:{}", shard_name(backend.node()), facts.host.hostname, facts.port)
+}
+
+/// The host and port of the node, as a `refrouter` names the shard whose writes it could not
+/// relay.
+pub fn host_port<B: Backend + ?Sized>(backend: &mut B) -> String {
+    let facts = backend.process();
+    format!("{}:{}", facts.host.hostname, facts.port)
+}
+
+/// Error `e` of node `node` as a `refrouter` relays a shard's: «failed on: node<N> :: caused by ::»
+/// before its message (D-102).
+pub fn failed_on(node: u64, mut e: crate::error::CommandError) -> crate::error::CommandError {
+    e.errmsg = format!("failed on: {} :: caused by :: {}", shard_name(node), e.errmsg);
+    e
 }
 
 /// The cursors and sessions of a node, shared by its client workers.
@@ -436,6 +487,8 @@ pub struct NodeSessions {
     pub txn_resolving: Vec<teseladb_txn::coordinator::Coordinator>,
     /// The bucket counters of each time series this node wrote, by collection (015 FR-010).
     pub timeseries: BTreeMap<u32, timeseries::TsStats>,
+    /// The cluster's default concerns as this node last read them (007 FR-018).
+    pub rw_defaults: cluster_admin::Defaults,
 }
 
 impl NodeSessions {
@@ -455,6 +508,7 @@ impl NodeSessions {
             status: status::StatusCounters::default(),
             audit: None,
             txns: txn::Transactions::new(),
+            rw_defaults: cluster_admin::Defaults::default(),
             pushes: teseladb_txn::push_cache::PushCache::new(),
             push_settled: std::sync::Arc::default(),
             txn_scratch: std::collections::BTreeSet::new(),
@@ -529,14 +583,21 @@ impl<B: Backend + ?Sized> Ctx<'_, B> {
 }
 
 /// The commands of this module.
-const NAMES: [&str; 54] = [
+const NAMES: [&str; 61] = [
     aggregate::AGGREGATE,
+    explain::EXPLAIN,
     audit::LOG_APPLICATION_MESSAGE,
     authz_collections::MERGE_AUTHZ_COLLECTIONS,
     server_params::GET_PARAMETER,
     server_params::SET_PARAMETER,
     parameters::SET_CLUSTER_PARAMETER,
     parameters::GET_CLUSTER_PARAMETER,
+    cluster_admin::GET_DEFAULT_RW_CONCERN,
+    cluster_admin::SET_DEFAULT_RW_CONCERN,
+    cluster_admin::FSYNC,
+    cluster_admin::COMPACT,
+    cluster_admin::AUTO_COMPACT,
+    cluster_admin::SHUTDOWN,
     admin::KILL_OP,
     admin::CURRENT_OP,
     admin::REPL_SET_GET_STATUS,
@@ -600,7 +661,11 @@ pub fn run<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Option<Result<Document,
     if !is_data_command(ctx.name()) {
         return None;
     }
-    Some(session_info(ctx).and_then(|()| command(ctx)))
+    Some(session_info(ctx).and_then(|()| {
+        // The cluster's default concerns apply to the commands without their own (007 FR-018).
+        let d = cluster_admin::current(ctx)?;
+        crate::concerns::with_defaults(d.read, d.write, || command(ctx))
+    }))
 }
 
 /// Reads the command's session fields, as every command does, and records the session's use.
@@ -623,6 +688,12 @@ fn command<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comman
         authz_collections::MERGE_AUTHZ_COLLECTIONS => authz_collections::merge(ctx),
         parameters::SET_CLUSTER_PARAMETER => parameters::set_cluster_parameter(ctx),
         parameters::GET_CLUSTER_PARAMETER => parameters::get_cluster_parameter(ctx),
+        cluster_admin::GET_DEFAULT_RW_CONCERN => cluster_admin::get_default_rw_concern(ctx),
+        cluster_admin::SET_DEFAULT_RW_CONCERN => cluster_admin::set_default_rw_concern(ctx),
+        cluster_admin::FSYNC => cluster_admin::fsync(ctx),
+        cluster_admin::COMPACT => cluster_admin::compact(ctx),
+        cluster_admin::AUTO_COMPACT => cluster_admin::auto_compact(ctx),
+        cluster_admin::SHUTDOWN => cluster_admin::shutdown(ctx),
         server_params::GET_PARAMETER => server_params::get_parameter(ctx),
         server_params::SET_PARAMETER => server_params::set_parameter(ctx),
         admin::KILL_OP => admin::kill_op(ctx),
@@ -644,6 +715,7 @@ fn command<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comman
         crud::BULK_WRITE => crud::bulk_write(ctx),
         query::FIND => query::find(ctx),
         aggregate::AGGREGATE => aggregate::aggregate(ctx),
+        explain::EXPLAIN => explain::explain(ctx),
         query::GET_MORE => query::get_more(ctx),
         query::KILL_CURSORS => query::kill_cursors(ctx),
         query::COUNT => query::count(ctx),

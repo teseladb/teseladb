@@ -12,12 +12,17 @@ use teseladb_lsm::{Lsm, LsmConfig};
 use teseladb_multiraft::{CoreConfig, GroupDesc, MultiRaftCore, NodeClock};
 use teseladb_raftlog::{CoreStore, MemDisk, StorageConfig};
 use teseladb_range::ack::{W, WriteConcern};
-use teseladb_range::host::{RangeError, RangeHost, Reply, ReqId, SplitDone, TxnReq};
-use teseladb_range::intents::{IntentOp, TxnId, TxnRecord, TxnStatus, record_key};
+use teseladb_range::host::{
+    RangeError, RangeHost, ReadSpec, Reply, ReqId, SplitDone, TxnOp, TxnReq,
+};
+use teseladb_range::intents::{
+    IntentOp, RecordOp, TXN_SPACE, TxnId, TxnRecord, TxnStatus, record_key,
+};
 use teseladb_range::read::ReadConcern;
 use teseladb_range::sm::{RangeSm, RangeState};
 use teseladb_txn::coordinator::{Coordinator, Event, Outcome, ReqNo, Route, StmtId, TxnError};
-use teseladb_txn::record::HEARTBEAT_EVERY_MS;
+use teseladb_txn::reaper::Reaper;
+use teseladb_txn::record::{HEARTBEAT_EVERY_MS, Spans};
 use teseladb_types::{GroupId, Nanos, NodeId};
 
 const G1: GroupId = GroupId(7);
@@ -247,6 +252,45 @@ impl Node {
         }
     }
 
+    /// Sends `op` to its range and waits for the answer.
+    fn ask(&mut self, g: GroupId, op: TxnOp) -> Result<Reply, RangeError> {
+        let (now, wall) = (self.now, self.wall());
+        let id = self.host.txn(&mut self.core, TxnReq { g, op, wc: MAJORITY }, now, wall);
+        self.settle();
+        let at = self.replies.iter().position(|(r, _)| *r == id).expect("answered");
+        self.replies.remove(at).1
+    }
+
+    /// One pass of `reaper` over the records, its requests run until it is idle.
+    fn reap(&mut self, reaper: &mut Reaper) {
+        let (now, wall) = (self.now, self.wall());
+        let spec = ReadSpec {
+            g: G2,
+            key: vec![TXN_SPACE],
+            scan: Some((vec![TXN_SPACE + 1], usize::MAX)),
+            at: None,
+            concern: ReadConcern::Local,
+            view: Default::default(),
+            uncertain_to: None,
+        };
+        let id = self.host.read_with(&mut self.core, spec, now, wall);
+        self.settle();
+        let at = self.replies.iter().position(|(r, _)| *r == id).expect("answered");
+        let Ok(Reply::Batch(rows)) = self.replies.remove(at).1 else { panic!("no records") };
+        let records = rows.iter().filter_map(|(_, (_, v))| TxnRecord::decode_row(v).ok());
+        reaper.scan(&self.route, self.clock(), records);
+        loop {
+            let reqs = reaper.take_requests();
+            if reqs.is_empty() {
+                return;
+            }
+            for q in reqs {
+                let answer = self.ask(q.g, q.op);
+                reaper.on_reply(&self.route, q.id, answer);
+            }
+        }
+    }
+
     fn record(&mut self, txn: TxnId) -> TxnRecord {
         let stored = self.get(&record_key(txn)).expect("a record");
         TxnRecord::decode(&[&[stored.0][..], &stored.1].concat()).expect("decodes")
@@ -452,4 +496,37 @@ fn a_split_in_the_middle_of_a_transaction_sends_its_requests_to_the_new_ranges()
     assert_eq!((n.get(H), n.get(I), n.get(A)), (doc(b"h1"), doc(b"i1"), doc(b"a1")));
     let rec = n.record(TxnId(1));
     assert_eq!((rec.status, rec.commit_ts), (TxnStatus::Committed, ts));
+}
+
+/// The reaper removes a committed record whose coordinator died before resolving its intents
+/// (008, record GC) once its session has expired, and only after resolving them: also the intent
+/// of a key longer than the record keeps, which its interval gives only as a prefix and the range
+/// finds with `FindIntents`. Removed before that, a reader would take the intent's transaction
+/// for abandoned and the committed value would be lost.
+#[test]
+fn the_reaper_removes_a_finished_record_only_after_resolving_every_intent() {
+    let mut n = Node::new();
+    let long: Vec<u8> = [b"\x01p".as_slice(), &[b'k'; 2_000]].concat();
+    let txn = TxnId(70);
+    n.begin(1, txn);
+    n.write(1, &[(A, put(b"a")), (long.as_slice(), put(b"long"))]).unwrap();
+    // The coordinator dies; its commit reached the record, its resolutions did not.
+    n.coords.remove(&1);
+    let mut spans = Spans::default();
+    spans.add(A);
+    spans.add(&long);
+    let intervals = spans.intervals();
+    assert!(intervals.iter().any(|(s, _)| s.len() < long.len()), "the long key is cut");
+    let commit = RecordOp::Commit { ts: n.clock(), spans: intervals };
+    let committed = n.ask(G2, TxnOp::EndTxn { txn, op: commit });
+    assert!(matches!(committed, Ok(Reply::Record(r)) if r.status == TxnStatus::Committed));
+    let mut reaper = Reaper::with_session_ttl(1_000);
+    n.reap(&mut reaper);
+    assert_eq!(reaper.forgotten(), 0, "its session has not expired");
+    n.advance(2_000, &[]);
+    n.reap(&mut reaper);
+    assert_eq!(reaper.forgotten(), 1);
+    assert_eq!(n.get(&record_key(txn)), None, "removed");
+    assert_eq!(n.get(A), doc(b"a"));
+    assert_eq!(n.get(&long), doc(b"long"), "resolved before the removal");
 }

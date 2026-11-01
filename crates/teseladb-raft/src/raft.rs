@@ -152,6 +152,9 @@ pub struct RawNode {
     /// apply, the node does not campaign, and it installs the snapshot it waits for also at or
     /// below the commit index (007 T016).
     awaiting_snapshot: bool,
+    /// The index at or below which the log does not rebuild the state machine's state (data
+    /// entered without an entry): a follower whose log ends below it gets a snapshot.
+    log_floor: u64,
 }
 
 impl RawNode {
@@ -194,6 +197,7 @@ impl RawNode {
             idle_ticks: 0,
             may_lead: true,
             awaiting_snapshot: false,
+            log_floor: 0,
             reads: Vec::new(),
             read_states: Vec::new(),
             msgs: Vec::new(),
@@ -237,6 +241,13 @@ impl RawNode {
     /// snapshot it waits for is installed also at or below the commit index.
     pub fn set_awaiting_snapshot(&mut self, on: bool) {
         self.awaiting_snapshot = on;
+    }
+
+    /// The state machine's state no longer follows from the log at or below `index` (data entered
+    /// without an entry, as a restore's ingest): as the leader, a follower whose log ends below it
+    /// is sent the snapshot, never those entries, even while the log holds them.
+    pub fn set_log_floor(&mut self, index: u64) {
+        self.log_floor = index;
     }
 
     /// `peer` waits for a snapshot and cannot use its log (its state machine lacks the data of the
@@ -905,6 +916,14 @@ impl RawNode {
             return;
         }
         let next = pr.next;
+        if next <= self.log_floor {
+            // Only a snapshot past the floor rebuilds the follower: until one is saved, it waits
+            // (each answer of the follower comes back here).
+            if store.snapshot_meta().index >= self.log_floor {
+                self.send_snapshot(to, store);
+            }
+            return;
+        }
         let last = self.log.last_index(store);
         let prev_term = self.log.term(store, next - 1);
         let entries = self.log.entries(store, next, last + 1, self.cfg.max_msg_bytes as u64);

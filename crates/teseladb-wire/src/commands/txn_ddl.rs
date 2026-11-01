@@ -103,16 +103,14 @@ pub fn catalog_write(
     });
     let entry = match made {
         Ok(Some(entry)) => entry,
-        Ok(None) => {
+        failed => {
             lock(shared).txn_scratch.remove(&scratch);
-            return Err(CommandError::new(
-                crate::error::INTERNAL_ERROR,
-                "Group 0 created no collection",
-            ));
-        }
-        Err(e) => {
-            lock(shared).txn_scratch.remove(&scratch);
-            return Err(e);
+            return Err(match failed {
+                Err(e) => e,
+                Ok(_) => {
+                    CommandError::new(crate::error::INTERNAL_ERROR, "Group 0 created no collection")
+                }
+            });
         }
     };
     created.push(Created { real: ns, scratch, entry: entry.clone() });

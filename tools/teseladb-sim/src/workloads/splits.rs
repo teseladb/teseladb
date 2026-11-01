@@ -233,7 +233,7 @@ impl SplitsWorkload {
         // Its node's clock as the rule lets it give a mark; without one, the intents' marks.
         let (local, core) = (w.local(node), self.engine.core());
         let clock = w.cluster_core(node, core).and_then(|c| c.read_mark(local));
-        let Some(wr) = self.writers.get_mut(&client) else { return };
+        let wr = self.writers.get_mut(&client).expect("the writer found above");
         match e {
             Event::Written { result: Ok(()), .. } => {
                 wr.coord.commit(clock.unwrap_or(Hlc { physical: 0, logical: 0 }));
@@ -491,6 +491,7 @@ impl Workload for SplitsWorkload {
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
+    use teseladb_range::intents::IntentOwner;
 
     fn at(p: u64) -> Hlc {
         Hlc { physical: p, logical: 0 }
@@ -552,6 +553,31 @@ mod tests {
         let mut wl = workload(vec![(at(25), txn_key(0), None)]);
         wl.fates.retain(|_, f| !matches!(f, Fate::Committed(_)));
         assert!(wl.check().unwrap_err().liveness);
+    }
+
+    #[test]
+    fn answers_and_events_for_clients_that_left_change_nothing() {
+        let mut w = World::new(1, 3, 2, false);
+        let mut wl = SplitsWorkload::new(3, 2);
+        // No writer, reader or pusher is client 7 any more.
+        wl.event(&mut w, 7, Event::Resolved);
+        wl.read_next(&mut w, 7);
+        wl.read_done(&mut w, 7, Err(RangeError::Unavailable));
+        wl.push_done(&mut w, 7, Err(RangeError::Unavailable));
+        wl.answer(&mut w, Asker::Coord(7, 1), Err(RangeError::Unavailable));
+        assert!(wl.writers.is_empty() && wl.readers.is_empty() && wl.pending.is_empty());
+    }
+
+    #[test]
+    fn a_reader_stopped_by_an_intent_whose_record_no_range_holds_ends() {
+        let mut w = World::new(1, 3, 2, false);
+        let mut wl = SplitsWorkload::new(3, 2);
+        wl.readers.insert(7, Reader { at: at(30), next: 0, view: TxnView::default() });
+        // A record outside the data space: no range holds it.
+        let owner =
+            IntentOwner { txn: TxnId(1), record_key: vec![0xff], key: txn_key(0), ts: at(20) };
+        wl.read_done(&mut w, 7, Err(RangeError::ReadIntent { owner, at: at(30) }));
+        assert!(wl.readers.is_empty());
     }
 
     #[test]

@@ -125,6 +125,24 @@ pub struct Mem {
     /// Runs before each read of the range with its first key and the data: another node's
     /// write meanwhile (009, `prepareUnique`).
     pub on_scan_data: Option<ScanHook>,
+    /// The nodes `config.shards` lists, by name.
+    pub shards: Vec<String>,
+    /// The transactions' records, as their range keeps them (008): session, state and commit mark.
+    pub records: BTreeMap<u128, (u128, teseladb_range::intents::TxnStatus, Hlc)>,
+    /// The records a coordinator began (a recovery's own record was not).
+    pub begun: std::collections::BTreeSet<u128>,
+    /// The next pushes of a record fail with this error (its range cannot be reached).
+    pub push_errors: Vec<teseladb_range::host::RangeError>,
+    /// Versions the reads of client transactions meet in their windows after `uncertain_once`.
+    pub uncertain_more: Vec<Hlc>,
+    /// Pauses a waiting command takes before its time runs out (none: it runs out at once).
+    pub pauses_left: usize,
+    /// The next resolutions of intents fail with this error.
+    pub resolve_errors: Vec<teseladb_range::host::RangeError>,
+    /// A commit's wait for the clock runs out.
+    pub wait_clock_fails: bool,
+    /// The node knows no range for any key.
+    pub no_route: bool,
 }
 
 /// A change of the data before a read of `[start, …)`.
@@ -152,6 +170,9 @@ impl Mem {
     /// A read of a client transaction at `at`: what the range answers below the history.
     fn txn_read(&mut self, at: Hlc, window: Option<Hlc>) -> Result<(), CommandError> {
         self.txn_read_at = Some(at);
+        if self.uncertain_once.is_none() && !self.uncertain_more.is_empty() {
+            self.uncertain_once = Some(self.uncertain_more.remove(0));
+        }
         if let (Some(ts), Some(end)) = (self.uncertain_once, window)
             && at < ts
             && ts <= end
@@ -221,17 +242,19 @@ impl Backend for Mem {
 
     // One range, with no intents: a read sees the committed documents.
     fn txn_pause(&mut self) -> bool {
-        false
+        let left = self.pauses_left > 0;
+        self.pauses_left = self.pauses_left.saturating_sub(1);
+        left
     }
 
     /// The clock jumps to the commit's mark: the wait is over at once.
     fn txn_wait_clock(&mut self, until_ms: u64) -> bool {
         self.now = self.now.max(until_ms);
-        true
+        !self.wait_clock_fails
     }
 
     fn txn_route(&self, _key: &[u8]) -> Option<teseladb_types::GroupId> {
-        Some(teseladb_types::GroupId(1))
+        (!self.no_route).then_some(teseladb_types::GroupId(1))
     }
 
     fn cluster_mark(&self) -> Hlc {
@@ -278,15 +301,54 @@ impl Backend for Mem {
                 if !self.commit_errors.is_empty() {
                     return Err(self.commit_errors.remove(0));
                 }
+                // A recovery aborted it first.
+                let kept = self.records.get(&txn.0).copied();
+                if kept.is_some_and(|(_, s, _)| s == TxnStatus::Aborted) {
+                    return Err(teseladb_range::host::RangeError::NoSuchTransaction);
+                }
+                let lsid = kept.map_or(0, |(l, ..)| l);
+                self.records.insert(txn.0, (lsid, TxnStatus::Committed, at.max(ts)));
                 Ok(Reply::Record(record(txn, TxnStatus::Committed, at.max(ts))))
             }
             TxnOp::EndTxn { txn, op: RecordOp::Abort { .. } } => {
+                let lsid = self.records.get(&txn.0).map_or(0, |(l, ..)| *l);
+                self.records
+                    .insert(txn.0, (lsid, TxnStatus::Aborted, Hlc { physical: 0, logical: 0 }));
                 Ok(Reply::Record(record(txn, TxnStatus::Aborted, ts)))
+            }
+            TxnOp::EndTxn { txn, op: RecordOp::Begin { lsid, .. } } => {
+                self.begun.insert(txn.0);
+                self.records.entry(txn.0).or_insert((
+                    lsid,
+                    TxnStatus::Pending,
+                    Hlc { physical: 0, logical: 0 },
+                ));
+                Ok(Reply::Record(record(txn, TxnStatus::Pending, ts)))
+            }
+            TxnOp::PushTxn { txn, push: teseladb_range::intents::Push::Abort { .. } } => {
+                if !self.push_errors.is_empty() {
+                    return Err(self.push_errors.remove(0));
+                }
+                let (lsid, status, at) =
+                    self.records.get(&txn.0).copied().unwrap_or((0, TxnStatus::Pending, ts));
+                let status = match status {
+                    TxnStatus::Pending => TxnStatus::Aborted,
+                    s => s,
+                };
+                self.records.insert(txn.0, (lsid, status, at));
+                let read_ts = match self.begun.contains(&txn.0) {
+                    true => ts,
+                    false => Hlc { physical: 0, logical: 0 },
+                };
+                Ok(Reply::Record(TxnRecord { lsid, read_ts, ..record(txn, status, at) }))
             }
             TxnOp::EndTxn { txn, .. } | TxnOp::PushTxn { txn, .. } => {
                 Ok(Reply::Record(record(txn, TxnStatus::Pending, ts)))
             }
             TxnOp::ResolveIntents { txn, status, .. } => {
+                if !self.resolve_errors.is_empty() {
+                    return Err(self.resolve_errors.remove(0));
+                }
                 for (k, w) in self.intents.remove(&txn.0).unwrap_or_default() {
                     if status != TxnStatus::Committed {
                         continue;
@@ -305,6 +367,10 @@ impl Backend for Mem {
                 Ok(Reply::Intents { ts })
             }
             TxnOp::OnePhase { .. } => Ok(Reply::Intents { ts }),
+            // Only the reaper sends these, and this node has none.
+            TxnOp::FindIntents { .. } => Ok(Reply::Batch(Vec::new())),
+            TxnOp::ForgetRecord { .. } => Err(teseladb_range::host::RangeError::WriteConflict),
+            TxnOp::ReadRecord { .. } => Err(teseladb_range::host::RangeError::NoSuchTransaction),
         }
     }
 
@@ -491,6 +557,15 @@ impl Backend for Mem {
             .take(limit)
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect())
+    }
+
+    fn config_documents(&mut self, coll: &str) -> Result<Vec<Document>, CommandError> {
+        Ok(match coll {
+            teseladb_wire::commands::config_db::SHARDS => {
+                self.shards.iter().map(|s| Document::new().with("_id", s.as_str())).collect()
+            }
+            _ => Vec::new(),
+        })
     }
 
     fn kill_everywhere(&mut self, scope: &KillScope) -> Result<(), CommandError> {

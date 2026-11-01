@@ -147,7 +147,8 @@ pub fn documents<B: Backend + ?Sized>(
 ) -> Result<Option<Vec<Document>>, CommandError> {
     match Generated::of(ns) {
         Some(g) => g.documents(backend).map(Some),
-        None => Ok(None),
+        // The collections of `config` that show the cluster (007 FR-017).
+        None => super::config_db::documents(backend, ns),
     }
 }
 

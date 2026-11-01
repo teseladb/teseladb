@@ -214,6 +214,9 @@ pub struct NodeConfig {
     /// Bytes of memory the node may use (`--memory-limit`, 012 FR-013); `None`: three quarters of
     /// the memory the process has.
     pub memory_limit: Option<u64>,
+    /// How the clients' port starts its executors and runs the TTL monitor; a test changes them.
+    #[doc(hidden)]
+    pub client_hooks: crate::client_listener::Hooks,
 }
 
 impl Default for NodeConfig {
@@ -242,6 +245,7 @@ impl Default for NodeConfig {
             data_dir: None,
             tags: Vec::new(),
             memory_limit: None,
+            client_hooks: crate::client_listener::Hooks::default(),
         }
     }
 }
@@ -415,6 +419,7 @@ fn open_data<D: Disk>(spec: &CoreSpec, disk: &mut D) -> Result<DataCore, NodeErr
     let transfers = Transfers::new(spec.node_id, transfer_dir(&dir), random_u64());
     let clock = spec.clock.clone();
     let data = DataCore::new(spec.node_id, spec.core, lsm, clock, transfers, spec.split_bytes);
+    let data = data.with_backups(dir.join("backup"), random_u64());
     Ok(data.with_relocations(dir.join("relocate"), spec.hosting.clone()))
 }
 
@@ -444,7 +449,8 @@ fn build_core<D: Disk>(spec: &CoreSpec, disk: &mut D) -> Result<NodeLogic, NodeE
     let mut logic = match node0 {
         Some((founder, me, boot_epoch, tags)) => NodeLogic::new(core, founder, Some(me))
             .with_boot_epoch(boot_epoch)
-            .with_tags(tags.clone()),
+            .with_tags(tags.clone())
+            .with_zone(crate::local_zone::local_zone()),
         None => NodeLogic::new(core, None, None),
     };
     logic = logic.with_data(data);
@@ -525,6 +531,8 @@ pub struct Node<D> {
     memory: Option<crate::memory::MemoryBudget>,
     /// Each core's LSM configuration.
     lsm: LsmConfig,
+    /// Set by a client's `shutdown` (007 FR-018).
+    shutdown: Arc<std::sync::atomic::AtomicBool>,
     _lock: Option<FileLock>,
 }
 
@@ -833,6 +841,7 @@ impl<D: Disk + Send + 'static> Node<D> {
                 return Err(NodeError::Io(e));
             }
         };
+        let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let client = match &cfg.client {
             None => None,
             Some(c) => {
@@ -843,6 +852,7 @@ impl<D: Disk + Send + 'static> Node<D> {
                     sessions: sessions.clone(),
                     routes: routes.clone(),
                     auth: auth.clone(),
+                    shutdown: shutdown.clone(),
                 };
                 let mut state = NodeClockState::new(clock.clone(), random_u64())
                     .with_handle(handle)
@@ -851,7 +861,7 @@ impl<D: Disk + Send + 'static> Node<D> {
                     state = state.with_keys(slot.clone());
                 }
                 let state = Arc::new(state);
-                match ClientListener::spawn(c, cores, state) {
+                match ClientListener::spawn_with(c, cores, state, cfg.client_hooks) {
                     Ok(l) => Some(l),
                     Err(e) => {
                         acceptor.stop();
@@ -872,6 +882,7 @@ impl<D: Disk + Send + 'static> Node<D> {
                         sessions: sessions.clone(),
                         routes: routes.clone(),
                         auth: auth.clone(),
+                        shutdown: shutdown.clone(),
                     },
                     enroller: cfg.enroller.clone(),
                     certificates: cfg.client.as_ref().and_then(|c| c.certificates.clone()),
@@ -906,6 +917,7 @@ impl<D: Disk + Send + 'static> Node<D> {
             enroller: cfg.enroller.clone(),
             memory,
             lsm,
+            shutdown,
             _lock: lock,
         })
     }
@@ -927,6 +939,11 @@ impl<D: Disk + Send + 'static> Node<D> {
     pub fn create_enroll_token(&self, ttl: Duration) -> Result<String, String> {
         let e = self.enroller.as_ref().ok_or("this node has no PKI (--insecure)")?;
         enroll_token(e, &self.senders[0].sender(), ttl)
+    }
+
+    /// Whether a client asked the node to stop (`shutdown`, 007 FR-018).
+    pub fn shutdown_requested(&self) -> bool {
+        self.shutdown.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Where the administration port listens, if the node opened it.
@@ -990,7 +1007,7 @@ impl<D: Disk + Send + 'static> Node<D> {
             DataReq::Put { key, .. } | DataReq::Get { key } => {
                 self.routes.lookup(key).map(|e| e.group)
             }
-            DataReq::Status(g) | DataReq::Remote(g, _) => Some(*g),
+            DataReq::Status(g) | DataReq::Remote(g, _) | DataReq::At(_, g, _) => Some(*g),
         };
         let (tx, rx) = mpsc::channel();
         let core = usize::from(self.core_of(g.unwrap_or(DATA_RANGE)));
@@ -1082,4 +1099,66 @@ fn stop_cores<D>(senders: &[CoreSender<NodeMsg>], threads: Vec<CoreThread<D>>) -
         let _ = s.send_waiting(CoreInput::Stop);
     }
     threads.into_iter().map(|t| t.join().ok().and_then(Result::ok).flatten()).collect()
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    use std::sync::Arc;
+
+    use teseladb_io::mailbox::{Notify, channel};
+
+    use super::*;
+
+    struct Quiet;
+
+    impl Notify for Quiet {
+        fn notify(&self) {}
+    }
+
+    /// A core 0 that answers the first catalog request it gets with `answer`.
+    fn answering(answer: fn() -> CatalogAnswer) -> CoreSender<NodeMsg> {
+        let (tx, mut mailbox) = channel::<CoreInput<NodeMsg>>(Arc::new(Quiet));
+        thread::spawn(move || {
+            let mut got = Vec::new();
+            let deadline = Instant::now() + ENROLL_WAIT;
+            while Instant::now() < deadline {
+                mailbox.drain_into(&mut got);
+                if let Some(CoreInput::App(NodeMsg::Catalog(_, reply))) = got.pop() {
+                    let _ = reply.send(answer());
+                    return;
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+        });
+        tx
+    }
+
+    #[test]
+    fn group0s_refusals_of_a_token_say_why() {
+        let tick = || Group0Command::ClusterTick { cluster_time_ms: 1 };
+        let cases: [(fn() -> CatalogAnswer, &str); 6] = [
+            (|| CatalogAnswer::Done(None), ""),
+            (|| CatalogAnswer::Refused(Group0Error::EnrollTokenUsed), "already used"),
+            (|| CatalogAnswer::Refused(Group0Error::EnrollTokenExpired), "expired"),
+            (|| CatalogAnswer::Refused(Group0Error::EnrollTokenUnknown), "not known"),
+            (|| CatalogAnswer::Refused(Group0Error::NoSuchNode), "Group 0 refused it"),
+            (|| CatalogAnswer::Unavailable, "did not answer"),
+        ];
+        for (answer, says) in cases {
+            let core0 = answering(answer);
+            match group0_change(&core0, tick()) {
+                Ok(()) => assert!(says.is_empty()),
+                Err(e) => assert!(!says.is_empty() && e.contains(says), "{e}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_group0_change_to_a_core_that_stopped_says_so() {
+        let (tx, mailbox) = channel::<CoreInput<NodeMsg>>(Arc::new(Quiet));
+        drop(mailbox);
+        let cmd = Group0Command::ClusterTick { cluster_time_ms: 1 };
+        assert_eq!(group0_change(&tx, cmd), Err("the node is stopping".to_owned()));
+    }
 }

@@ -16,12 +16,14 @@ use teseladb_range::command::Put;
 use teseladb_range::host::{
     Mutation, MutationError, RangeError, RangeHost, ReadSpec, Reply, ReqId, TxnOp, TxnReq, WriteReq,
 };
-use teseladb_range::intents::{IntentOp, Push, TxnId};
+use teseladb_range::intents::{IntentOp, Push};
 use teseladb_range::mutate::Outcome as Change;
 use teseladb_range::push::TxnView;
 use teseladb_range::read::ReadConcern;
 use teseladb_txn::coordinator::{Coordinator, Event, Outcome, ReqNo, Route};
 use teseladb_txn::read::{lazy_resolve, learn, push_for};
+use teseladb_txn::reaper::Reaper;
+use teseladb_txn::recovery::{Decision, Recovery, client_txn_id};
 use teseladb_types::{GroupId, Nanos, NodeId};
 
 use teseladb_raftlog::Completions;
@@ -62,6 +64,22 @@ pub enum Step {
 
 /// Name of the check that no plain write fails because of an intent (008 FR-002, T032).
 pub const PLAIN_WRITES: &str = "plain_writes";
+/// Checker of the commits recovered on another node (008): a recovery that answered «not
+/// committed» for a transaction that committed, or «committed» for one that did not.
+pub const TXN_RECOVERY: &str = "txn_recovery";
+/// Share of the transactions whose commit another client recovers while they run, as a driver
+/// that sends `commitTransaction` again to another router (008): the recovery may come before the
+/// record exists, while it runs or after it ended.
+const RECOVERY_RACE: f64 = 0.1;
+/// How often the reaper reads the records (008 FR-007 and record GC), in the run's time.
+const REAP_EVERY: Nanos = Nanos::from_millis(500);
+/// How long a client transaction's record stays after its last activity: RefDb's 30 minutes
+/// would outlast a run, so the reaper also removes records by age within it; most go earlier,
+/// once their session's next transaction exists. The checkers run with them gone.
+const RECORD_TTL_MS: u64 = 10_000;
+/// How far the reaper's clock may be from the run's real time when it judges a record's age: the
+/// heavy plan jumps clocks by up to 2 s.
+const CLOCK_SLACK: Nanos = Nanos::from_millis(3_000);
 
 /// A plain write that rewrites key `.0` with the value it has.
 struct Touch(Vec<u8>);
@@ -189,6 +207,12 @@ enum Asker {
     Mutate(u32),
     /// A lazy resolution nobody waits for.
     Nobody,
+    /// A recovery of a transaction's decision, and its request.
+    Recover(u64, ReqNo),
+    /// The reaper's read of the records.
+    ReapScan,
+    /// A request of the reaper.
+    Reap(ReqNo),
 }
 
 /// The driver of a transaction workload.
@@ -212,6 +236,27 @@ pub struct TxnDriver {
     /// the run: a jump of the `heavy` plan. The marks taken after it promise no real-time order,
     /// and the timestamps a jumped clock gave stay in the ranges' clocks after it comes back.
     clocks_apart: bool,
+    /// Recoveries of transactions' decisions in flight, by number, with the transaction's session
+    /// and number.
+    recoveries: BTreeMap<u64, (Recovery, (u128, i64))>,
+    next_recovery: u64,
+    /// What the recoveries found, and how each transaction that wrote ended (committed or not;
+    /// unknown ends are left out), by session and number.
+    recovered: BTreeMap<(u128, i64), Decision>,
+    ended: BTreeMap<(u128, i64), bool>,
+    /// The reaper of the records' range, and when it next reads them (`None` while it does).
+    reaper: Reaper,
+    next_reap: Option<Nanos>,
+    /// Transactions whose records the reaper removed: a recovery after that finds none and
+    /// answers as for a number the session never began, as a `refrouter` does once the session
+    /// expired, so the checker leaves those recoveries out.
+    forgotten: std::collections::BTreeSet<teseladb_range::intents::TxnId>,
+    /// When each transaction began and, if it did, ended; and each session's last number.
+    began: BTreeMap<(u128, i64), Nanos>,
+    ended_at: BTreeMap<(u128, i64), Nanos>,
+    last_number: BTreeMap<u128, i64>,
+    /// The first record the reaper removed without a rule that allows it.
+    early: Option<String>,
 }
 
 impl TxnDriver {
@@ -232,6 +277,17 @@ impl TxnDriver {
             counts: (0, 0, 0),
             shipper: Shipper::new((first.0 % u64::from(cores)) as u16),
             clocks_apart: false,
+            recoveries: BTreeMap::new(),
+            next_recovery: 0,
+            recovered: BTreeMap::new(),
+            ended: BTreeMap::new(),
+            reaper: Reaper::with_session_ttl(RECORD_TTL_MS),
+            next_reap: Some(REAP_EVERY),
+            forgotten: std::collections::BTreeSet::new(),
+            began: BTreeMap::new(),
+            ended_at: BTreeMap::new(),
+            last_number: BTreeMap::new(),
+            early: None,
         }
     }
 
@@ -312,9 +368,16 @@ impl TxnDriver {
         }
         self.watch_clocks(w);
         let read_ts = Hlc { physical: w.wall_ms(node), logical: 0 };
-        let txn = TxnId(self.next_txn);
+        // A client's session, and one number per transaction, which gives its identifier.
+        let owner = (u128::from(client) + 1, self.next_txn as i64);
         self.next_txn += 1;
-        let coord = Coordinator::new(txn, (u128::from(client) + 1, 1), read_ts, w.local(node));
+        let txn = client_txn_id(owner.0, owner.1);
+        let coord = Coordinator::new(txn, owner, read_ts, w.local(node));
+        self.began.insert(owner, w.now());
+        self.last_number.insert(owner.0, owner.1);
+        if w.rng.chance(RECOVERY_RACE) {
+            self.recover(owner);
+        }
         let view = TxnView { own: Some(txn), known: BTreeMap::new() };
         let done = Finished {
             ops: Vec::new(),
@@ -604,6 +667,7 @@ impl TxnDriver {
 
     fn event(&mut self, w: &mut World, client: u32, e: Event, script: &mut dyn Script) {
         let Some(c) = self.clients.get_mut(&client) else { return };
+        let mut settled = None;
         match e {
             Event::Written { result: Ok(()), .. } => {
                 c.waiting = Waiting::Nothing;
@@ -613,6 +677,16 @@ impl TxnDriver {
             Event::Ended(outcome) => {
                 c.ended = true;
                 c.done.outcome = outcome.clone();
+                let owner = c.coord.session();
+                // A transaction that only read has no decision to recover: its client's
+                // `recoveryToken` is empty (008).
+                let wrote = c.done.ops.iter().any(|o| matches!(o, Op::Write(..)));
+                let committed = match &outcome {
+                    Outcome::Committed(_) => Some(true),
+                    Outcome::Aborted | Outcome::Failed(_) => Some(false),
+                    Outcome::Unknown(_) => None,
+                };
+                settled = wrote.then_some((owner, committed));
                 match outcome {
                     Outcome::Committed(_) => {
                         c.done.acked = Some(w.now());
@@ -623,6 +697,18 @@ impl TxnDriver {
                 }
             }
             Event::Resolved => {}
+        }
+        if let Some((owner, _)) = settled {
+            self.ended_at.insert(owner, w.now());
+        }
+        if let Some((owner, committed)) = settled {
+            match committed {
+                Some(c) => {
+                    self.ended.insert(owner, c);
+                }
+                // Its client asks again on another node, as a driver does.
+                None => self.recover(owner),
+            }
         }
         self.retire(client, script);
     }
@@ -652,6 +738,16 @@ impl TxnDriver {
                 if let Some(c) = self.clients.get_mut(&client) {
                     c.coord.on_reply(&Ranges(self.ranges.0, self.ranges.1, self.cut), no, r);
                     self.flush(w, client, script);
+                }
+            }
+            Asker::ReapScan => self.reap_scanned(w, r),
+            Asker::Reap(no) => {
+                self.reaper.on_reply(&self.route(), no, r);
+                self.reap_send(w);
+            }
+            Asker::Recover(id, no) => {
+                if let Some((rec, _)) = self.recoveries.get_mut(&id) {
+                    rec.on_reply(no, r);
                 }
             }
             Asker::Read(client) => self.read_done(w, client, r, script),
@@ -740,6 +836,8 @@ impl TxnDriver {
                 }
             }
         }
+        self.step_recoveries(w);
+        self.reap(w);
         let clients: Vec<u32> = self.clients.keys().copied().collect();
         for client in clients {
             let route = self.route();
@@ -787,6 +885,146 @@ impl TxnDriver {
             w.settle(node, core);
         }
         self.open_host(w, node);
+    }
+
+    /// Reads the records on their range's leader when it is time.
+    fn reap(&mut self, w: &mut World) {
+        if self.next_reap.is_none_or(|at| w.now() < at) {
+            return;
+        }
+        let g = self.ranges.1;
+        let Some(node) = self.leader(w, g) else { return };
+        self.next_reap = None;
+        let spec = ReadSpec {
+            g,
+            key: vec![teseladb_range::intents::TXN_SPACE],
+            scan: Some((vec![teseladb_range::intents::TXN_SPACE + 1], usize::MAX)),
+            at: None,
+            concern: ReadConcern::Local,
+            view: TxnView::default(),
+            uncertain_to: None,
+        };
+        let (now, wall) = Self::times(w, node);
+        let host = self.hosts.get_mut(&node).expect("a live node has its host");
+        let core = w.cluster_core(node, self.core).expect("alive");
+        let id = host.read_with(core, spec, now, wall);
+        self.pending.insert((node, id), Asker::ReapScan);
+    }
+
+    /// The records read: the reaper looks at them at the reading node's clock.
+    fn reap_scanned(&mut self, w: &mut World, r: Result<Reply, RangeError>) {
+        self.next_reap = Some(w.now() + REAP_EVERY);
+        let Ok(Reply::Batch(rows)) = r else { return };
+        let records = rows
+            .iter()
+            .filter_map(|(_, (_, v))| teseladb_range::intents::TxnRecord::decode_row(v).ok());
+        let node = self.leader(w, self.ranges.1).unwrap_or(0);
+        let now = Hlc { physical: w.wall_ms(node), logical: 0 };
+        self.reaper.scan(&self.route(), now, records);
+        self.reap_send(w);
+    }
+
+    /// Sends what the reaper asks; an answer that comes at once goes back to it.
+    fn reap_send(&mut self, w: &mut World) {
+        loop {
+            for txn in self.reaper.take_forgotten() {
+                self.check_removal(w, txn);
+                self.forgotten.insert(txn);
+            }
+            let reqs = self.reaper.take_requests();
+            if reqs.is_empty() {
+                return;
+            }
+            for q in reqs {
+                if let Some((_, answer)) = self.send(w, q.g, q.op, Asker::Reap(q.id)) {
+                    self.reaper.on_reply(&self.route(), q.id, answer);
+                }
+            }
+        }
+    }
+
+    /// Record GC (008): a client transaction's record goes only once its session has a later
+    /// transaction or its session's time has passed since the transaction's last known activity.
+    fn check_removal(&mut self, w: &World, txn: teseladb_range::intents::TxnId) {
+        if self.early.is_some() {
+            return;
+        }
+        let Some(&owner) = self.began.keys().find(|&&(l, n)| client_txn_id(l, n) == txn) else {
+            return;
+        };
+        let later = self.last_number.get(&owner.0).is_some_and(|n| *n > owner.1);
+        let last = self.ended_at.get(&owner).or(self.began.get(&owner)).copied();
+        let ttl = Nanos::from_millis(RECORD_TTL_MS);
+        let expired = last.is_some_and(|at| w.now() + CLOCK_SLACK >= at + ttl);
+        if !later && !expired {
+            self.early = Some(format!(
+                "the record of transaction {} of session {} went at {} ms with no later \
+                 transaction of its session and its session's time not over",
+                owner.1,
+                owner.0,
+                w.now().as_millis()
+            ));
+        }
+    }
+
+    /// Starts the recovery of the decision on transaction `owner` (session and number).
+    fn recover(&mut self, owner: (u128, i64)) {
+        let id = self.next_recovery;
+        self.next_recovery += 1;
+        self.recoveries.insert(id, (Recovery::new(owner.0, owner.1), owner));
+    }
+
+    /// Sends what the recoveries ask and keeps what they found.
+    fn step_recoveries(&mut self, w: &mut World) {
+        let route = self.route();
+        let ids: Vec<u64> = self.recoveries.keys().copied().collect();
+        for id in ids {
+            let Some((rec, owner)) = self.recoveries.get_mut(&id) else { continue };
+            if let Some(d) = rec.decision() {
+                let owner = *owner;
+                self.recoveries.remove(&id);
+                // A record removed by a rule that allows it is found by no recovery after: it
+                // answers «unknown», as a `refrouter` does once the session expired.
+                let gone = self.forgotten.contains(&client_txn_id(owner.0, owner.1));
+                if !(gone && d == Decision::Unknown) {
+                    self.recovered.insert(owner, d);
+                }
+                continue;
+            }
+            rec.tick(&route);
+            for r in rec.take_requests() {
+                if let Some((_, answer)) = self.send(w, r.g, r.op, Asker::Recover(id, r.id))
+                    && let Some((rec, _)) = self.recoveries.get_mut(&id)
+                {
+                    rec.on_reply(r.id, answer);
+                }
+            }
+        }
+    }
+
+    /// FR-009, the commit recovered on another node: every recovery agrees with how its
+    /// transaction ended, where both are known.
+    pub fn check_recoveries(&self) -> Result<(), Violation> {
+        if let Some(detail) = &self.early {
+            return Err(Violation {
+                checker: TXN_RECOVERY,
+                detail: detail.clone(),
+                liveness: false,
+            });
+        }
+        for (owner, d) in &self.recovered {
+            let Some(&committed) = self.ended.get(owner) else { continue };
+            if matches!(d, Decision::Committed(_)) != committed {
+                let detail = format!(
+                    "transaction {} of session {}: the recovery found {d:?}, and it {}",
+                    owner.1,
+                    owner.0,
+                    if committed { "committed" } else { "did not commit" }
+                );
+                return Err(Violation { checker: TXN_RECOVERY, detail, liveness: false });
+            }
+        }
+        Ok(())
     }
 
     /// Schedules a client's next turn.
@@ -877,6 +1115,7 @@ impl<S: Script> Workload for TxnWorkload<S> {
                 liveness: false,
             });
         }
+        self.driver.check_recoveries()?;
         self.script.finish()
     }
 }

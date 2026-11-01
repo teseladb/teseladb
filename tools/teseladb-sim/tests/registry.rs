@@ -94,6 +94,7 @@ fn names_are_unique_and_the_builtin_workloads_are_there() {
             "splits",
             "follower-reads",
             "relocate",
+            "meta2",
             "txn-bank",
             "txn-append",
             "indexes",

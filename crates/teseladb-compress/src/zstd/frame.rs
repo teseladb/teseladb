@@ -56,9 +56,25 @@ pub fn decompress(src: &[u8], limit: usize) -> Result<Vec<u8>, Error> {
         if magic != MAGIC {
             return Err(Error::Corrupt("unknown frame magic number"));
         }
-        at += frame(&src[at..], &mut out, limit)?;
+        at += frame(&src[at..], &mut out, limit, 0)?;
     }
     Ok(out)
+}
+
+/// Decompresses the one frame of `src`, made with the raw content dictionary `dict` (RFC 8878
+/// §5), which must produce at most `limit` bytes.
+pub fn decompress_with_dict(src: &[u8], limit: usize, dict: &[u8]) -> Result<Vec<u8>, Error> {
+    let mut at = 0;
+    if le(take(src, &mut at, 4)?) as u32 != MAGIC {
+        return Err(Error::Corrupt("unknown frame magic number"));
+    }
+    // The dictionary goes before the content, as the history its matches reach into.
+    let mut out = dict.to_vec();
+    at += frame(&src[at..], &mut out, limit.saturating_add(dict.len()), dict.len())?;
+    if at != src.len() {
+        return Err(Error::Corrupt("data after the frame"));
+    }
+    Ok(out.split_off(dict.len()))
 }
 
 /// The repeat offsets of a frame.
@@ -89,8 +105,9 @@ impl Repeats {
     }
 }
 
-/// One frame after its magic number; the bytes it took.
-fn frame(src: &[u8], out: &mut Vec<u8>, limit: usize) -> Result<usize, Error> {
+/// One frame after its magic number, whose matches may reach `history` bytes before it in `out`
+/// (a dictionary's); the bytes it took.
+fn frame(src: &[u8], out: &mut Vec<u8>, limit: usize, history: usize) -> Result<usize, Error> {
     let mut at = 0;
     let desc = take(src, &mut at, 1)?[0];
     if desc & RESERVED != 0 {
@@ -150,7 +167,7 @@ fn frame(src: &[u8], out: &mut Vec<u8>, limit: usize) -> Result<usize, Error> {
             BLOCK_COMPRESSED => {
                 let body = take(src, &mut at, size)?;
                 let before = out.len();
-                block(body, &mut tables, &mut reps, (out, start), limit)?;
+                block(body, &mut tables, &mut reps, (out, start - history), limit)?;
                 if out.len() - before > block_max {
                     return Err(Error::Corrupt("block content larger than its maximum"));
                 }
@@ -173,7 +190,8 @@ fn frame(src: &[u8], out: &mut Vec<u8>, limit: usize) -> Result<usize, Error> {
     Ok(at)
 }
 
-/// A compressed block appended to `out`, whose frame starts at `start`.
+/// A compressed block appended to `out`, whose matches reach back to `start` (the frame's start,
+/// or its dictionary's).
 fn block(
     src: &[u8],
     tables: &mut Tables,
@@ -194,7 +212,7 @@ fn block(
         lit += ll as usize;
         let offset = reps.resolve(of, ll)?;
         if offset > (out.len() - start) as u64 {
-            return Err(Error::Corrupt("match offset before the frame"));
+            return Err(Error::Corrupt("match offset before the frame and its dictionary"));
         }
         let from = out.len() - offset as usize;
         for k in 0..ml as usize {

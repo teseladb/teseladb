@@ -44,9 +44,35 @@ const UPDATE: &str = "update";
 const REMOVE: &str = "remove";
 
 /// A document of the collection as the command sees it: as it was read and as it is now.
-struct Entry {
-    read: Option<Vec<u8>>,
-    now: Option<Document>,
+pub(crate) struct Entry {
+    pub(crate) read: Option<Vec<u8>>,
+    pub(crate) now: Option<Document>,
+}
+
+/// The documents of a collection kept in Group 0 while a command works on a copy of them
+/// (`admin.system.users` and `admin.system.roles` here, `config.settings` in
+/// [`super::config_settings`]).
+pub(crate) trait Staged {
+    /// The documents, in their order.
+    fn entries(&mut self) -> &mut Vec<Entry>;
+    /// The error RefDb answers if `bytes` cannot join the documents other than `skip`.
+    fn check(&self, bytes: &[u8], skip: Option<usize>) -> Result<(), CommandError>;
+    /// A document inserted, updated or removed by `operation`.
+    fn note(&mut self, operation: &'static str, doc: &Document);
+}
+
+impl Staged for Sim {
+    fn entries(&mut self) -> &mut Vec<Entry> {
+        &mut self.entries
+    }
+
+    fn check(&self, bytes: &[u8], skip: Option<usize>) -> Result<(), CommandError> {
+        Sim::check(self, bytes, skip)
+    }
+
+    fn note(&mut self, operation: &'static str, doc: &Document) {
+        Sim::note(self, operation, doc);
+    }
 }
 
 /// The documents of one collection while a command works on them.
@@ -315,9 +341,9 @@ fn parsed_update(m: &Modify) -> Result<Option<Update>, CommandError> {
 }
 
 /// One update or delete statement on the documents.
-fn statement<B: Backend + ?Sized>(
+pub(crate) fn statement<B: Backend + ?Sized, S: Staged>(
     backend: &mut B,
-    sim: &mut Sim,
+    sim: &mut S,
     m: &Modify,
 ) -> Result<MutationResult, CommandError> {
     let filter = parsed_filter(&m.filter)?;
@@ -329,11 +355,11 @@ fn statement<B: Backend + ?Sized>(
         vars: m.vars.as_ref(),
     };
     let mut order: Vec<usize> =
-        (0..sim.entries.len()).filter(|i| sim.entries[*i].now.is_some()).collect();
+        (0..sim.entries().len()).filter(|i| sim.entries()[*i].now.is_some()).collect();
     if let Some(sort) = &m.sort {
         let mut keyed = Vec::new();
         for i in order {
-            let bytes = sim.entries[i].now.as_ref().map(Document::to_bytes).transpose()?;
+            let bytes = sim.entries()[i].now.as_ref().map(Document::to_bytes).transpose()?;
             let bytes = bytes.unwrap_or_default();
             keyed.push((sort.keys(RawDoc::from_bytes(&bytes)?, None), i));
         }
@@ -342,7 +368,7 @@ fn statement<B: Backend + ?Sized>(
     }
     let mut r = MutationResult::default();
     for i in order {
-        let Some(doc) = sim.entries[i].now.clone() else { continue };
+        let Some(doc) = sim.entries()[i].now.clone() else { continue };
         let bytes = doc.to_bytes()?;
         let raw = RawDoc::from_bytes(&bytes)?;
         let position = filter.match_position(raw, &mctx).map_err(from_mql);
@@ -355,7 +381,7 @@ fn statement<B: Backend + ?Sized>(
         match &update {
             None => {
                 sim.note(REMOVE, &doc);
-                sim.entries[i].now = None;
+                sim.entries()[i].now = None;
                 if m.image != Image::None {
                     r.value = Some(doc);
                 }
@@ -368,7 +394,7 @@ fn statement<B: Backend + ?Sized>(
                     let new = stored_bytes(&out.doc, Stored::Update).map_err(&during)?;
                     sim.check(&new, Some(i)).map_err(&during)?;
                     sim.note(UPDATE, &out.doc);
-                    sim.entries[i].now = Some(out.doc.clone());
+                    sim.entries()[i].now = Some(out.doc.clone());
                     r.n_modified += 1;
                 }
                 r.value = match m.image {
@@ -392,7 +418,7 @@ fn statement<B: Backend + ?Sized>(
         if m.image == Image::After {
             r.value = Some(doc.clone());
         }
-        sim.entries.push(Entry { read: None, now: Some(doc) });
+        sim.entries().push(Entry { read: None, now: Some(doc) });
     }
     Ok(r)
 }

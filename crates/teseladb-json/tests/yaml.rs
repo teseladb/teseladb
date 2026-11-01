@@ -1,4 +1,4 @@
-//! The YAML subset of `refnode` configuration files (001 FR-022): block mappings and sequences,
+//! The YAML subset of `refnode` configuration files (001 FR-021): block mappings and sequences,
 //! flow sequences of scalars, plain and quoted scalars with the YAML 1.2 core types, and comments;
 //! everything else is an error with its line and column.
 

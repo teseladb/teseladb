@@ -450,7 +450,7 @@ fn create<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Command
         reply.push("numIndexesAfter", before as i32);
         reply.push("commitQuorum", quorum.shown);
         reply.push("note", "all indexes already exist");
-        return Ok(reply.with("ok", 1.0));
+        return Ok(with_raw_first(ctx.backend, reply.with("ok", 1.0)));
     }
     build(ctx, &ns, &coll, &new, quorum.asked)?;
     reply.push("numIndexesAfter", (before + new.len()) as i32);
@@ -459,7 +459,17 @@ fn create<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Command
     if new.len() < specs.len() {
         reply.push("note", "index already exists");
     }
-    Ok(reply.with("ok", 1.0))
+    Ok(with_raw_first(ctx.backend, reply.with("ok", 1.0)))
+}
+
+/// Reply `reply` after the node's own under `raw`, as a `refrouter` gives its shard's (measured).
+fn with_raw_first<B: Backend + ?Sized>(backend: &mut B, reply: Document) -> Document {
+    let mut out =
+        Document::new().with("raw", Document::new().with(super::raw_name(backend), reply.clone()));
+    for (k, v) in reply.iter() {
+        out.push(k, v.clone());
+    }
+    out
 }
 
 /// Creates index `index` of time series `coll` (as asked: its bucket specification is made
@@ -635,7 +645,10 @@ fn drop<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandEr
     if matches!(&which, Value::String(s) if s == ALL) {
         reply.push("msg", "non-_id indexes dropped for collection");
     }
-    Ok(reply.with("ok", 1.0))
+    // A `refrouter` gives its shard's reply last, under `raw` (measured).
+    let reply = reply.with("ok", 1.0);
+    let raw = Document::new().with(super::raw_name(ctx.backend), reply.clone());
+    Ok(reply.with("raw", raw))
 }
 
 /// The secondary indexes `listIndexes` shows: the ready ones, as stored.

@@ -128,6 +128,8 @@ pub trait AdminBackend: Send + Sync {
     fn rotate_certificates(&self) -> Answer;
     /// The privileges of `user`, with those of the roles it inherits; none if it does not exist.
     fn privileges(&self, user: &UserName) -> Result<Vec<Privilege>, AdminError>;
+    /// A step of a backup or a restore (007 FR-021).
+    fn backup(&self, op: crate::backup::Op) -> Answer;
 }
 
 /// The built-in role whose privileges `/metrics` asks for (013 FR-017).
@@ -188,6 +190,9 @@ pub fn route(req: &HttpRequest, b: &dyn AdminBackend) -> HttpResponse {
         CERT_ROTATE if !get => json(b.rotate_certificates()),
         HEALTHZ | METRICS | NODES | RANGES | TOKENS | CERT_ROTATE => wrong_method(),
         _ => {
+            if let Some(answer) = crate::backup::route(req, |op| b.backup(op)) {
+                return answer;
+            }
             if let Some(rest) = path.strip_prefix(RANGE) {
                 return range_route(rest, req, b);
             }
@@ -258,7 +263,7 @@ fn body_doc(req: &HttpRequest) -> Result<Option<Document>, AdminError> {
 }
 
 /// An answer as relaxed Extended JSON: the document, or `{error}` with its status.
-fn json(a: Answer) -> HttpResponse {
+pub(crate) fn json(a: Answer) -> HttpResponse {
     let (status, doc) = match a {
         Ok(d) => (200, d),
         Err(e) => (e.status, Document::new().with("error", e.message)),
@@ -284,7 +289,11 @@ pub struct NodeAdmin {
 }
 
 impl NodeAdmin {
-    fn ask<T>(&self, core: usize, msg: impl FnOnce(mpsc::Sender<T>) -> NodeMsg) -> Option<T> {
+    pub(crate) fn ask<T>(
+        &self,
+        core: usize,
+        msg: impl FnOnce(mpsc::Sender<T>) -> NodeMsg,
+    ) -> Option<T> {
         let (tx, rx) = mpsc::channel();
         self.handle.senders.get(core)?.sender().send(CoreInput::App(msg(tx))).ok()?;
         rx.recv_timeout(CORE_WAIT).ok()
@@ -298,7 +307,7 @@ impl NodeAdmin {
             .ok_or_else(|| AdminError::unavailable("the node has no cores"))
     }
 
-    fn catalog(&self) -> Result<Arc<Catalog>, AdminError> {
+    pub(crate) fn catalog(&self) -> Result<Arc<Catalog>, AdminError> {
         match self.ask(0, |tx| NodeMsg::Catalog(CatalogReq::Read, tx)) {
             Some(CatalogAnswer::Catalog(c)) => Ok(c),
             _ => Err(AdminError::unavailable("the catalog did not answer")),
@@ -326,7 +335,7 @@ impl NodeAdmin {
         }
     }
 
-    fn group0(&self, cmd: Group0Command) -> Result<(), AdminError> {
+    pub(crate) fn group0(&self, cmd: Group0Command) -> Result<(), AdminError> {
         crate::node::group0_change(&self.core0()?, cmd).map_err(AdminError::unavailable)
     }
 
@@ -459,12 +468,7 @@ impl AdminBackend for NodeAdmin {
             .routes
             .entries()
             .into_iter()
-            .filter(|e| {
-                interval.as_ref().is_none_or(|(s, en)| {
-                    (e.end.is_empty() || e.end.as_slice() > s.as_slice())
-                        && e.start.as_slice() < en.as_slice()
-                })
-            })
+            .filter(|e| interval.as_ref().is_none_or(|(s, en)| overlaps((&e.start, &e.end), s, en)))
             .map(|e| {
                 let voters = e.voters.iter().map(|n| node_value(*n)).collect();
                 Value::Document(
@@ -502,9 +506,7 @@ impl AdminBackend for NodeAdmin {
                 )
             })?,
         };
-        let inside = key.as_slice() > entry.start.as_slice()
-            && (entry.end.is_empty() || key.as_slice() < entry.end.as_slice());
-        if !inside {
+        if !strictly_inside(&key, &entry.start, &entry.end) {
             return Err(AdminError::bad(format!("the key is not inside range {}", range.0)));
         }
         self.group0(Group0Command::SplitRange { group: range, at: key.clone() })?;
@@ -579,6 +581,10 @@ impl AdminBackend for NodeAdmin {
         Ok(Document::new().with("rotated", true))
     }
 
+    fn backup(&self, op: crate::backup::Op) -> Answer {
+        crate::backup::run_op(self, op)
+    }
+
     fn privileges(&self, user: &UserName) -> Result<Vec<Privilege>, AdminError> {
         let mut backend = ServerBackend::new(self.handle.clone(), self.handle.node.0);
         let unavailable = |e: teseladb_wire::error::CommandError| AdminError::unavailable(e.errmsg);
@@ -641,6 +647,18 @@ pub enum AdminAction {
     TokenCreate {
         /// How long it lives.
         ttl: Duration,
+    },
+    /// `backup --at <mark|now> --out <dir>` (007 FR-021).
+    Backup {
+        /// The mark (`seconds.increment`), or `now`.
+        at: Option<String>,
+        /// Where the backup goes.
+        out: String,
+    },
+    /// `restore --from <dir>` (007 FR-021).
+    Restore {
+        /// Where the backup is.
+        from: String,
     },
 }
 
@@ -741,7 +759,9 @@ pub fn parse(args: &[String]) -> Result<AdminOpts, String> {
                     other => return Err(format!("--format: text or json, not {other}")),
                 }
             }
-            "collection" | "at" | "ttl" | "core" => opts.push((name.to_owned(), value)),
+            "collection" | "at" | "ttl" | "core" | "out" | "from" => {
+                opts.push((name.to_owned(), value));
+            }
             other => return Err(format!("unknown option --{other}")),
         }
     }
@@ -782,6 +802,15 @@ pub fn parse(args: &[String]) -> Result<AdminOpts, String> {
             value: (*value).to_owned(),
         })?,
         ["cert", "rotate"] => allow(&[]).map(|()| AdminAction::CertRotate)?,
+        ["backup"] => {
+            allow(&["at", "out"])?;
+            let out = opt("out").ok_or("backup needs --out <dir>")?;
+            AdminAction::Backup { at: opt("at"), out }
+        }
+        ["restore"] => {
+            allow(&["from"])?;
+            AdminAction::Restore { from: opt("from").ok_or("restore needs --from <dir>")? }
+        }
         ["token", "create"] => {
             allow(&["ttl"])?;
             let ttl = opt("ttl").map_or(Ok(DEFAULT_TTL), |t| duration(&t))?;
@@ -835,7 +864,9 @@ usage: teseladb admin [--node <ip:port>] [--format text|json] [--dbpath <dir>]
   config get <parameter>
   config set <parameter> '<Extended JSON document>'
   token create [--ttl <90s|30m|1h|2d>]
-  cert rotate";
+  cert rotate
+  backup [--at <seconds.increment|now>] --out <dir>
+  restore --from <dir>";
 
 /// Runs `teseladb admin` against the node's port; the exit code: 0 correct, 1 error.
 pub fn run(o: &AdminOpts, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
@@ -867,6 +898,13 @@ pub fn run(o: &AdminOpts, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
         AdminAction::CertRotate => (Method::Post, CERT_ROTATE.to_owned(), String::new()),
         AdminAction::TokenCreate { ttl } => {
             (Method::Post, format!("{TOKENS}?ttl={}", ttl.as_secs()), String::new())
+        }
+        AdminAction::Backup { at, out: dir } => {
+            let dir = std::path::Path::new(dir);
+            return crate::backup::run(o, Ok(dir), at.as_deref(), out, err);
+        }
+        AdminAction::Restore { from } => {
+            return crate::backup::run(o, Err(std::path::Path::new(from)), None, out, err);
         }
     };
     let tls = match o.tls.client() {
@@ -965,16 +1003,40 @@ fn text(action: &AdminAction, doc: Option<&Document>, raw: &[u8]) -> String {
         | AdminAction::Merge { .. }
         | AdminAction::Relocate { .. }
         | AdminAction::ConfigGet { .. }
-        | AdminAction::ConfigSet { .. } => {
+        | AdminAction::ConfigSet { .. }
+        | AdminAction::Backup { .. }
+        | AdminAction::Restore { .. } => {
             let _ = writeln!(out, "{}", String::from_utf8_lossy(raw));
         }
     }
     out
 }
 
+/// Whether a range `[start, end)` (`end` empty: no end) holds some key of `[from, to)`.
+fn overlaps((start, end): (&[u8], &[u8]), from: &[u8], to: &[u8]) -> bool {
+    (end.is_empty() || end > from) && start < to
+}
+
+/// Whether `key` is inside `[start, end)` past its first key: a cut there leaves both sides
+/// with keys.
+fn strictly_inside(key: &[u8], start: &[u8], end: &[u8]) -> bool {
+    key > start && (end.is_empty() || key < end)
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
+    #[test]
+    fn bounds_without_an_end_reach_every_key_past_the_start() {
+        assert!(super::overlaps((b"m", b""), b"a", b"z"), "no end");
+        assert!(super::overlaps((b"a", b"m"), b"b", b"c"));
+        assert!(!super::overlaps((b"a", b"m"), b"m", b"z"), "ends where the interval starts");
+        assert!(!super::overlaps((b"m", b""), b"a", b"m"), "starts where the interval ends");
+        assert!(super::strictly_inside(b"q", b"m", b""), "no end");
+        assert!(!super::strictly_inside(b"m", b"m", b""), "its first key");
+        assert!(!super::strictly_inside(b"q", b"a", b"q"), "its end");
+    }
+
     use super::*;
 
     #[test]
@@ -1061,6 +1123,10 @@ mod tests {
         fn rotate_certificates(&self) -> Answer {
             self.called("rotate".into())
         }
+        fn backup(&self, op: crate::backup::Op) -> Answer {
+            self.called(format!("backup {op:?}"))
+        }
+
         fn privileges(&self, user: &UserName) -> Result<Vec<Privilege>, AdminError> {
             match user.user.as_str() {
                 "CN=broken" => Err(AdminError::unavailable("Group 0 did not answer")),

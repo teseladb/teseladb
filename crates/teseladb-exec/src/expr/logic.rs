@@ -5,7 +5,7 @@
 
 use std::cmp::Ordering;
 
-use teseladb_bson::{Document, RawDoc, RawValue, Value, compare};
+use teseladb_bson::{Document, RawValue, Value, compare};
 use teseladb_mql::MqlError;
 
 use super::{Ctx, Eval, Expr, Op, Scope, arguments, codes, count, error};
@@ -53,16 +53,37 @@ pub fn order(
         (None, Some(_)) => Ok(Ordering::Less),
         (Some(_), None) => Ok(Ordering::Greater),
         (Some(x), Some(y)) => {
-            let bad = |e: teseladb_bson::BsonError| error(codes::BAD_VALUE, e.to_string());
             let holder = Document::new().with("a", x.clone()).with("b", y.clone());
-            let bytes = holder.to_bytes().map_err(bad)?;
-            let raw = RawDoc::from_bytes(&bytes).map_err(bad)?;
-            match (raw.get("a"), raw.get("b")) {
+            crate::raw::with_raw_doc(&holder, |raw| match (raw.get("a"), raw.get("b")) {
                 (Some(p), Some(q)) => Ok(compare(p, q, col)),
                 _ => Err(error(codes::BAD_VALUE, "values that do not compare")),
-            }
+            })
         }
     }
+}
+
+/// Sorts `items` stably by `cmp`, which may fail; the first failure is the result.
+pub fn try_sort_by<T>(
+    items: &mut [T],
+    mut cmp: impl FnMut(&T, &T) -> Result<Ordering, MqlError>,
+) -> Result<(), MqlError> {
+    let mut failure = None;
+    items.sort_by(|a, b| match cmp(a, b) {
+        Ok(o) => o,
+        Err(e) => {
+            failure.get_or_insert(e);
+            Ordering::Equal
+        }
+    });
+    failure.map_or(Ok(()), Err)
+}
+
+/// Sorts pairs stably by their values in RefDb's [`order`], strings in collation `col`.
+pub(crate) fn sort_by_values<T>(
+    items: &mut [(Value, T)],
+    col: Option<&dyn teseladb_bson::Collator>,
+) -> Result<(), MqlError> {
+    try_sort_by(items, |(a, _), (b, _)| order(&Some(a.clone()), &Some(b.clone()), col))
 }
 
 /// Whether a result counts as true.

@@ -1,0 +1,9 @@
+# Morfologik dictionaries of the reflib.morfologik and reflib.ukrainian analyzers (011 T009, D-109),
+# the versions RefLib 9 uses: morfologik-polish 2.1.9 (PoliMorf 2.1, BSD 2-clause, copyright
+# Marcin Miłkowski) and morfologik-ukrainian-search 4.9.1 (from the dict_uk project, Apache License
+# 2.0). tests/morfologik_data.rs reads the dictionaries out of the jars and writes the tables in
+# data/ with its own format.
+# source https://repo1.maven.org/maven2
+# dest .tools/morfologik
+e503682b3f4e8bb7a5d05820b0e2a4a19d4bad43dae20f64741786658a9cf478  org/carrot2/morfologik-polish/2.1.9/morfologik-polish-2.1.9.jar
+463d9054b8d4cfacb9cd69566395826a6fe32fb6e7da91dbf79d37ddf7d56ba0  ua/net/nlp/morfologik-ukrainian-search/4.9.1/morfologik-ukrainian-search-4.9.1.jar

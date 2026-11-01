@@ -1,11 +1,12 @@
 //! The state machine of a core's groups (005 FR-015, FR-016): one `MultiRaftCore` per core runs
 //! one state machine type, so a core that holds Group 0 and a data range runs [`CoreSm`], with a
-//! variant for each.
+//! variant for each; core 0 also runs the `Meta2` ranges (007 FR-014).
 
 use std::fmt;
 
 use teseladb_hlc::Hlc;
 use teseladb_meta::group0::{Group0Result, Group0Sm};
+use teseladb_meta::meta2::Meta2Sm;
 use teseladb_multiraft::{ApplyCtx, ApplyError, RestoreError, StateMachine};
 use teseladb_range::sm::{RangeOutput, RangeSm, RangeState};
 
@@ -30,6 +31,8 @@ pub enum CoreSm {
     Group0(Group0Sm),
     /// A data range over its core's LSM.
     Range(RangeSm),
+    /// A `Meta2` range: descriptors Group 0 handed over (core 0, 007 FR-014).
+    Meta2(Box<Meta2Sm>),
 }
 
 impl fmt::Debug for CoreSm {
@@ -37,6 +40,7 @@ impl fmt::Debug for CoreSm {
         match self {
             CoreSm::Group0(_) => f.write_str("Group0"),
             CoreSm::Range(_) => f.write_str("Range"),
+            CoreSm::Meta2(_) => f.write_str("Meta2"),
         }
     }
 }
@@ -46,7 +50,23 @@ impl CoreSm {
     pub fn range(&self) -> Option<&RangeSm> {
         match self {
             CoreSm::Range(sm) => Some(sm),
-            CoreSm::Group0(_) => None,
+            CoreSm::Group0(_) | CoreSm::Meta2(_) => None,
+        }
+    }
+
+    /// The range's state to change, if this is a range.
+    pub fn range_mut(&mut self) -> Option<&mut RangeSm> {
+        match self {
+            CoreSm::Range(sm) => Some(sm),
+            CoreSm::Group0(_) | CoreSm::Meta2(_) => None,
+        }
+    }
+
+    /// The `Meta2` range's state, if this is one.
+    pub fn meta2(&self) -> Option<&Meta2Sm> {
+        match self {
+            CoreSm::Meta2(sm) => Some(sm),
+            CoreSm::Group0(_) | CoreSm::Range(_) => None,
         }
     }
 }
@@ -55,7 +75,7 @@ impl Group0Holder for CoreSm {
     fn group0(&self) -> Option<&Group0Sm> {
         match self {
             CoreSm::Group0(sm) => Some(sm),
-            CoreSm::Range(_) => None,
+            CoreSm::Range(_) | CoreSm::Meta2(_) => None,
         }
     }
 }
@@ -105,6 +125,7 @@ impl StateMachine for CoreSm {
         match self {
             CoreSm::Group0(sm) => sm.apply(payload, ctx).map(CoreOutput::Group0),
             CoreSm::Range(sm) => sm.apply(payload, ctx).map(CoreOutput::Range),
+            CoreSm::Meta2(sm) => sm.apply(payload, ctx).map(CoreOutput::Group0),
         }
     }
 
@@ -112,6 +133,7 @@ impl StateMachine for CoreSm {
         match self {
             CoreSm::Group0(sm) => sm.skip(index),
             CoreSm::Range(sm) => sm.skip(index),
+            CoreSm::Meta2(sm) => sm.skip(index),
         }
     }
 
@@ -119,6 +141,7 @@ impl StateMachine for CoreSm {
         match self {
             CoreSm::Group0(sm) => sm.snapshot(),
             CoreSm::Range(sm) => sm.snapshot(),
+            CoreSm::Meta2(sm) => sm.snapshot(),
         }
     }
 
@@ -126,6 +149,7 @@ impl StateMachine for CoreSm {
         match self {
             CoreSm::Group0(sm) => sm.restore(snap),
             CoreSm::Range(sm) => sm.restore(snap),
+            CoreSm::Meta2(sm) => sm.restore(snap),
         }
     }
 
@@ -137,10 +161,15 @@ impl StateMachine for CoreSm {
         self.range().map_or(0, StateMachine::snapshot_floor)
     }
 
+    fn log_floor(&self) -> u64 {
+        self.range().map_or(0, StateMachine::log_floor)
+    }
+
     fn snapshot_state_index(&self) -> u64 {
         match self {
             CoreSm::Group0(sm) => sm.snapshot_state_index(),
             CoreSm::Range(sm) => sm.snapshot_state_index(),
+            CoreSm::Meta2(sm) => sm.snapshot_state_index(),
         }
     }
 
@@ -152,12 +181,13 @@ impl StateMachine for CoreSm {
         match self {
             CoreSm::Group0(sm) => sm.applied_index(),
             CoreSm::Range(sm) => sm.applied_index(),
+            CoreSm::Meta2(sm) => sm.applied_index(),
         }
     }
 
     fn halted(&self) -> bool {
         match self {
-            CoreSm::Group0(_) => false,
+            CoreSm::Group0(_) | CoreSm::Meta2(_) => false,
             CoreSm::Range(sm) => StateMachine::halted(sm),
         }
     }
@@ -194,6 +224,22 @@ mod tests {
         g.restore(&snap).unwrap();
         g.skip(4);
         assert_eq!((g.applied_index(), g.snapshot_state_index()), (4, 4));
+    }
+
+    #[test]
+    fn a_meta2_range_answers_with_its_own_state_and_no_range_state() {
+        let mut m = CoreSm::Meta2(Box::new(Meta2Sm::new(teseladb_types::GroupId(9))));
+        assert_eq!(format!("{m:?}"), "Meta2");
+        assert!(m.meta2().is_some() && m.group0().is_none() && m.range().is_none());
+        assert!(!m.halted() && m.has_data_for(&[]));
+        let snap = m.snapshot();
+        m.restore(&snap).unwrap();
+        m.skip(5);
+        assert_eq!((m.applied_index(), m.snapshot_state_index()), (5, 5));
+        let seed = teseladb_meta::meta2::Meta2Command::Seed(snap).encode();
+        let ctx = ApplyCtx { group: teseladb_types::GroupId(9), index: 6, term: 1, ts: ZERO };
+        assert!(matches!(m.apply(&seed, &ctx), Ok(CoreOutput::Group0(_))));
+        assert!(CoreSm::Group0(Group0Sm::default()).meta2().is_none() && range().meta2().is_none());
     }
 
     #[test]

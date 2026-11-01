@@ -23,6 +23,7 @@ teseladb-io = { path = "../../crates/teseladb-io" }
 teseladb-deflate = { path = "../../crates/teseladb-deflate" }
 teseladb-bson = { path = "../../crates/teseladb-bson" }
 teseladb-keys = { path = "../../crates/teseladb-keys" }
+teseladb-meta = { path = "../../crates/teseladb-meta" }
 teseladb-lsm = { path = "../../crates/teseladb-lsm" }
 teseladb-collation = { path = "../../crates/teseladb-collation" }
 teseladb-multiraft = { path = "../../crates/teseladb-multiraft" }

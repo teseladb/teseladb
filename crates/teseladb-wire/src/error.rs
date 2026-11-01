@@ -333,6 +333,14 @@ codes! {
     CLUSTERED_CAPPED_SIZE = 6_049_200, "Location6049200";
     /// A clustered capped collection, a test feature of RefDb (015 FR-009).
     CLUSTERED_CAPPED_TEST = 6_127_800, "Location6127800";
+    /// A `txnNumber` without `autocommit: false` on a command that is no retryable write (008).
+    NOT_A_RETRYABLE_WRITE_COMMAND = 50768, "NotARetryableWriteCommand";
+    /// A `txnNumber` on a command that takes none, such as `hello` (008).
+    TXN_NUMBER_NOT_ALLOWED = 50889, "Location50889";
+    /// A commit of a transaction the node has no record of, without its `recoveryToken` (008).
+    RECOVERY_TOKEN_REQUIRED = 50940, "Location50940";
+    /// A `count` on a view whose pipeline fails on the shard, as a `refrouter` relays it.
+    COUNT_ON_VIEW_FAILED = 4_848_401, "Location4848401";
 }
 
 /// Label of a write the driver may retry.
@@ -356,12 +364,52 @@ pub struct CommandError {
     pub labels: Vec<&'static str>,
     /// Fields after `codeName` (such as `keyPattern` and `keyValue`, or `errInfo`).
     pub extra: Document,
+    /// Who raises it, as a `refrouter` would: what decides whether it ends a transaction (008).
+    pub origin: ErrorOrigin,
+}
+
+/// Who raises an error of a command, as a `refrouter` 9.0.4 and its shard share the work (measured on
+/// 01-11-2026): an error of a statement of a transaction ends the transaction only if the shard
+/// raised it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ErrorOrigin {
+    /// The router, while it parses the command: the command's fields and their types, and the
+    /// names of the pipeline's stages.
+    Router,
+    /// The shard: everything else.
+    Shard,
+}
+
+/// The codes only the parse of a command gives: IDL's and an unknown pipeline stage.
+const ROUTER_CODES: [Code; 4] =
+    [IDL_FAILED_TO_PARSE, IDL_UNKNOWN_FIELD, IDL_DUPLICATE_FIELD, UNRECOGNIZED_STAGE];
+
+impl ErrorOrigin {
+    /// The origin of an error of `code`, unless its site says otherwise
+    /// ([`CommandError::parsed`]).
+    pub fn of(code: Code) -> ErrorOrigin {
+        match ROUTER_CODES.contains(&code) {
+            true => ErrorOrigin::Router,
+            false => ErrorOrigin::Shard,
+        }
+    }
 }
 
 impl CommandError {
     /// An error with `code` and `errmsg`, without labels.
     pub fn new(code: Code, errmsg: impl Into<String>) -> CommandError {
-        CommandError { code, errmsg: errmsg.into(), labels: Vec::new(), extra: Document::new() }
+        CommandError {
+            code,
+            errmsg: errmsg.into(),
+            labels: Vec::new(),
+            extra: Document::new(),
+            origin: ErrorOrigin::of(code),
+        }
+    }
+
+    /// The error, raised while the router parses the command ([`ErrorOrigin::Router`]).
+    pub fn parsed(self) -> CommandError {
+        CommandError { origin: ErrorOrigin::Router, ..self }
     }
 
     /// The error with the mark of a version in its read's uncertainty window (008 FR-008), which

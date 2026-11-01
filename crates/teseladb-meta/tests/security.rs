@@ -6,6 +6,7 @@ use teseladb_bson::Document;
 use teseladb_meta::command::{Group0Command, NodeAddrs};
 use teseladb_meta::group0::{
     Group0Error, Group0Result, Group0Sm, SNAPSHOT_VERSION, SNAPSHOT_VERSION_WITH_NAMED_SECURITY,
+    SNAPSHOT_VERSION_WITHOUT_META1,
 };
 use teseladb_meta::request::RequestId;
 use teseladb_meta::security::{Expect, Principal, SecurityOp};
@@ -109,7 +110,7 @@ fn the_previous_snapshot_version_restores_its_users_and_roles_in_name_order() {
     let mut copy = Group0Sm::default();
     copy.restore(&sm.encode_snapshot_as(SNAPSHOT_VERSION)).unwrap();
     assert_eq!(order(&copy), inserted);
-    assert_eq!(SNAPSHOT_VERSION, SNAPSHOT_VERSION_WITH_NAMED_SECURITY + 1);
+    assert_eq!(SNAPSHOT_VERSION_WITHOUT_META1, SNAPSHOT_VERSION_WITH_NAMED_SECURITY + 1);
     let mut old = Group0Sm::default();
     old.restore(&sm.encode_snapshot_as(SNAPSHOT_VERSION_WITH_NAMED_SECURITY)).unwrap();
     let by_name: Vec<Vec<u8>> = ["aa", "mm", "zz"].iter().map(|n| doc(u, n, "")).collect();

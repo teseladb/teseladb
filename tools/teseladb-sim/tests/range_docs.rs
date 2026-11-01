@@ -104,3 +104,15 @@ fn lost_writes_are_retried_with_their_key() {
     }
     assert!(total.retried > 0 && total.definite > 0 && total.from_record > 0, "{total:?}");
 }
+
+/// Seeds chosen by coverage (01-11-2026): each takes the workload through a guard of the
+/// harness (a dead, frozen or restarted replica, an export or ingestion that has to wait or start
+/// again) that no other seed of these tests reaches.
+#[test]
+fn the_seeds_that_reach_the_harness_rare_paths_pass() {
+    let seeds = [(FaultPlan::Heavy, 166)];
+    for (plan, seed) in seeds {
+        let r = run_seed(&cfg(plan), seed);
+        assert_eq!(r.verdict, Verdict::Pass, "seed {seed} with {plan:?}");
+    }
+}

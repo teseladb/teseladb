@@ -335,6 +335,27 @@ fn group0_survives(w: &mut World, wl: &mut dyn workloads::Workload) -> Result<()
     Ok(())
 }
 
+/// Runs the events of `w` for `wl`, without a fault plan, until `stop` holds after one of them
+/// (`true`) or the next one comes after `until` (`false`): the workloads' tests build their worlds
+/// with it before they take the harness down a rare path.
+#[cfg(test)]
+pub(crate) fn drive_until(
+    w: &mut World,
+    wl: &mut dyn workloads::Workload,
+    until: Nanos,
+    mut stop: impl FnMut(&mut World) -> bool,
+) -> bool {
+    let mut restarting = vec![false; w.nodes.len()];
+    while w.next_at().is_some_and(|at| at <= until) {
+        let (_, _, ev) = w.pop().expect("an event is due");
+        dispatch(w, wl, ev, &mut restarting).expect("no violation");
+        if stop(w) {
+            return true;
+        }
+    }
+    false
+}
+
 fn dispatch(
     w: &mut World,
     wl: &mut dyn workloads::Workload,
@@ -650,6 +671,7 @@ fn edge_cut(w: &mut World, wl: &mut dyn workloads::Workload) {
     }
     w.schedule(now + dur, Event::Fault(again));
     apply_fault(w, wl, FaultAction::Partition { side: vec![node], dur });
+    w.edge_cut_at = Some((node, now));
     let (lo, hi) = EDGE_DIE_PAST_LEASE_MS;
     let after = RaftConfig::new(NodeId(1)).lease_dur + Nanos::from_millis(w.rng.range(lo, hi));
     if after < dur {

@@ -1,4 +1,4 @@
-//! `englishMinimalStemming` and `spanishPluralStemming`.
+//! `englishMinimalStemming`, `spanishPluralStemming`, `kStemming` and `stempel`.
 //!
 //! `englishMinimalStemming` is the S stemmer of Harman ("How effective is suffixing?", JASIS 42(1),
 //! 1991): the first of `ies`, `es` and `s` the word ends in decides, `ies` becomes `y` unless `eies`
@@ -11,6 +11,13 @@
 //! words under four characters stay as they are; longer words lose the acute accent and the
 //! diaeresis of their vowels and then a plural ending, by the rules of [`spanish_plural`]. The
 //! words that keep their `s` are the ones observed (`INVARIANT`).
+//!
+//! `kStemming` and `stempel` are tables of word endings learned from the stems `refsearch` gives
+//! (D-051), with the words of their fixtures that the endings alone get wrong; how each table was
+//! measured is at its function.
+
+use std::collections::HashMap;
+use std::sync::OnceLock;
 
 /// Words that end in `s` and keep it, as observed, without accents.
 const INVARIANT: &[&str] = &[
@@ -144,6 +151,52 @@ pub(super) fn spanish_plural(word: &str) -> String {
     }
 }
 
+/// A stemmer learned from the stems `refsearch` gives (D-051): word endings with the rewrite each
+/// one calls for, and whole words (written `^word`) whose rewrite the endings do not give. A word
+/// takes the rewrite of its whole-word entry or else of the longest ending it has; without either
+/// it stays as it is.
+struct Rewrites(HashMap<&'static str, (usize, &'static str)>);
+
+impl Rewrites {
+    /// The table of `text`: one entry per line, the ending, the characters it removes from the
+    /// end of the word and what it appends, separated by tabs.
+    fn parse(text: &'static str) -> Rewrites {
+        let entry = |line: &'static str| {
+            let mut parts = line.split('\t');
+            let key = parts.next()?;
+            let cut = parts.next()?.parse().ok()?;
+            Some((key, (cut, parts.next().unwrap_or_default())))
+        };
+        Rewrites(text.lines().filter_map(entry).collect())
+    }
+
+    fn stem(&self, word: &str) -> String {
+        let whole = self.0.get(format!("^{word}").as_str());
+        let ending =
+            || word.char_indices().map(|(i, _)| &word[i..]).chain([""]).find_map(|e| self.0.get(e));
+        let Some(&(cut, add)) = whole.or_else(ending) else { return word.to_owned() };
+        let keep = word.chars().count().saturating_sub(cut);
+        word.chars().take(keep).chain(add.chars()).collect()
+    }
+}
+
+/// The stem `kStemming` gives `word`: the table learned from the 42 649 words of the English
+/// Snowball vocabulary and 200 000 words made by joining the start of one of them to the end of
+/// another, all stemmed by `refsearch` 1.70.6 (`data/kStemming.tsv`).
+pub fn k_stemming(word: &str) -> String {
+    static TABLE: OnceLock<Rewrites> = OnceLock::new();
+    TABLE.get_or_init(|| Rewrites::parse(include_str!("data/kStemming.tsv"))).stem(word)
+}
+
+/// The stem `stempel` gives `word`: the table learned from the 62 576 Polish words of the fixture,
+/// the 12 003 other words of the Polish analyzer vocabulary and 300 000 words made by joining the
+/// start of one of them to the end of another, all stemmed by `refsearch` 1.70.6
+/// (`data/stempel.tsv`).
+pub fn stempel(word: &str) -> String {
+    static TABLE: OnceLock<Rewrites> = OnceLock::new();
+    TABLE.get_or_init(|| Rewrites::parse(include_str!("data/stempel.tsv"))).stem(word)
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
@@ -164,5 +217,17 @@ mod tests {
         assert_eq!(spanish_plural("clubes"), "club");
         assert_eq!(spanish_plural("croquis"), "croqui");
         assert_eq!(spanish_plural("llamáis"), "llamay");
+    }
+
+    #[test]
+    fn rewrite_tables_skip_bad_lines_and_keep_unknown_words() {
+        let table = Rewrites::parse("ing\t3\t\n^sing\t0\t\nbad\nnum\tx\t\nies\t3\ty");
+        assert_eq!(table.stem("walking"), "walk");
+        assert_eq!(table.stem("sing"), "sing");
+        assert_eq!(table.stem("ponies"), "pony");
+        assert_eq!(table.stem("bad"), "bad");
+        assert_eq!(table.stem("num"), "num");
+        let root = Rewrites::parse("\t1\t");
+        assert_eq!(root.stem("cats"), "cat");
     }
 }

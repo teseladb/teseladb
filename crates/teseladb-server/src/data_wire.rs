@@ -1,6 +1,7 @@
 //! The encoding of the data range's requests and answers that travel to the range's leader on
 //! another node as forwarded requests (006 FR-014, D-048's `Forward`): a write with its mutation
-//! and a scan, and their results with the range's errors.
+//! and a scan, and their results with the range's errors; and the pieces of a backup and a
+//! restore (007 FR-021).
 
 use teseladb_hlc::Hlc;
 use teseladb_range::ack::{W, WriteConcern};
@@ -86,6 +87,30 @@ pub enum RemoteReq {
         /// The mark's physical part past which the leader no longer evaluates it (009 FR-006).
         deadline: Option<u64>,
     },
+    /// A piece of the range's backup at mark `at` (007 FR-021): file `file` from byte `offset`.
+    BackupFetch {
+        /// The backup's mark.
+        at: Hlc,
+        /// File of the export.
+        file: u32,
+        /// Where in the file.
+        offset: u64,
+    },
+    /// A piece of a restore's file `file` from byte `offset` (007 FR-021), which the leader
+    /// keeps until the files are ingested.
+    RestorePiece {
+        /// File.
+        file: u32,
+        /// Where in the file.
+        offset: u64,
+        /// The bytes.
+        data: Vec<u8>,
+    },
+    /// Ingests the `files` files of the restore into the range (007 FR-021).
+    RestoreIngest {
+        /// How many files the restore has.
+        files: u32,
+    },
 }
 
 /// A [`RemoteReq`] for range `group`, as it travels to the range's leader (007 FR-003).
@@ -129,6 +154,22 @@ pub enum RemoteReply {
     },
     /// The transaction record a record change or a push left.
     Record(TxnRecord),
+    /// A piece of a backup: not ready yet, or the sizes of the export's files and the bytes
+    /// asked for.
+    Piece {
+        /// The export is ready.
+        ready: bool,
+        /// Sizes of the files of the export, in order.
+        sizes: Vec<u64>,
+        /// The bytes.
+        data: Vec<u8>,
+    },
+    /// A restore's piece kept, or its files ingested (`done`); `false` while the ingestion goes
+    /// on.
+    Restored {
+        /// The files are ingested.
+        done: bool,
+    },
 }
 
 const WRITE: u8 = 0;
@@ -137,6 +178,9 @@ const READ: u8 = 2;
 const TXN: u8 = 3;
 const READ_WITH: u8 = 4;
 const FOLLOWER_SCAN: u8 = 5;
+const BACKUP_FETCH: u8 = 6;
+const RESTORE_PIECE: u8 = 7;
+const RESTORE_INGEST: u8 = 8;
 
 fn put_hlc(e: &mut Encoder, ts: Hlc) {
     e.u64(ts.physical).u32(ts.logical);
@@ -286,6 +330,17 @@ impl RemoteReq {
                 e.bool(uncertain_to.is_some());
                 put_hlc(&mut e, uncertain_to.unwrap_or(Hlc { physical: 0, logical: 0 }));
             }
+            RemoteReq::BackupFetch { at, file, offset } => {
+                e.u8(BACKUP_FETCH);
+                put_hlc(&mut e, *at);
+                e.u32(*file).u64(*offset);
+            }
+            RemoteReq::RestorePiece { file, offset, data } => {
+                e.u8(RESTORE_PIECE).u32(*file).u64(*offset).bytes(data);
+            }
+            RemoteReq::RestoreIngest { files } => {
+                e.u8(RESTORE_INGEST).u32(*files);
+            }
         }
         e.finish()
     }
@@ -358,6 +413,15 @@ impl RemoteReq {
                 let (at, uncertain_to) = (some.then_some(mark), window.then_some(to));
                 RemoteReq::ReadWith { key, scan, at, concern, view, uncertain_to }
             }
+            BACKUP_FETCH => {
+                RemoteReq::BackupFetch { at: get_hlc(&mut d)?, file: d.u32()?, offset: d.u64()? }
+            }
+            RESTORE_PIECE => RemoteReq::RestorePiece {
+                file: d.u32()?,
+                offset: d.u64()?,
+                data: d.bytes()?.to_vec(),
+            },
+            RESTORE_INGEST => RemoteReq::RestoreIngest { files: d.u32()? },
             _ => return Err(DecodeError::InvalidValue { offset: at }),
         };
         d.finish()?;
@@ -371,6 +435,8 @@ const ERR: u8 = 2;
 const OK_VALUE: u8 = 3;
 const OK_INTENTS: u8 = 4;
 const OK_RECORD: u8 = 5;
+const OK_PIECE: u8 = 6;
+const OK_RESTORED: u8 = 7;
 
 fn put_error(e: &mut Encoder, err: &RangeError) {
     let (tag, hint, text): (u8, u64, &str) = match err {
@@ -465,6 +531,16 @@ pub fn encode_reply(r: &Result<RemoteReply, RangeError>) -> Vec<u8> {
         Ok(RemoteReply::Record(record)) => {
             e.u8(OK_RECORD).bytes(&record.encode());
         }
+        Ok(RemoteReply::Piece { ready, sizes, data }) => {
+            e.u8(OK_PIECE).bool(*ready).var(sizes.len() as u64);
+            for s in sizes {
+                e.u64(*s);
+            }
+            e.bytes(data);
+        }
+        Ok(RemoteReply::Restored { done }) => {
+            e.u8(OK_RESTORED).bool(*done);
+        }
         Err(err) => {
             e.u8(ERR);
             put_error(&mut e, err);
@@ -507,6 +583,19 @@ pub fn decode_reply(b: &[u8]) -> Result<Result<RemoteReply, RangeError>, DecodeE
                 .map_err(|_| DecodeError::InvalidValue { offset: at })?;
             Ok(RemoteReply::Record(record))
         }
+        OK_PIECE => {
+            let ready = d.bool()?;
+            let n = d.var()?;
+            let mut sizes = Vec::new();
+            for _ in 0..n.min(d.remaining() as u64 / 8) {
+                sizes.push(d.u64()?);
+            }
+            if sizes.len() as u64 != n {
+                return Err(DecodeError::InvalidValue { offset: d.position() });
+            }
+            Ok(RemoteReply::Piece { ready, sizes, data: d.bytes()?.to_vec() })
+        }
+        OK_RESTORED => Ok(RemoteReply::Restored { done: d.bool()? }),
         ERR => Err(get_error(&mut d)?),
         _ => return Err(DecodeError::InvalidValue { offset: at }),
     };
@@ -604,6 +693,13 @@ mod tests {
                 },
                 deadline: Some(7),
             },
+            RemoteReq::BackupFetch {
+                at: Hlc { physical: 5, logical: 1 },
+                file: 2,
+                offset: 1 << 20,
+            },
+            RemoteReq::RestorePiece { file: 1, offset: 9, data: vec![1, 2, 3] },
+            RemoteReq::RestoreIngest { files: 3 },
         ];
         for r in reqs {
             assert_eq!(RemoteReq::decode(&r.encode()), Ok(r));
@@ -665,6 +761,9 @@ mod tests {
                 },
                 at: Hlc { physical: 4, logical: 2 },
             }),
+            Ok(RemoteReply::Piece { ready: false, sizes: vec![], data: vec![] }),
+            Ok(RemoteReply::Piece { ready: true, sizes: vec![3, 4], data: vec![7; 3] }),
+            Ok(RemoteReply::Restored { done: true }),
         ];
         for r in replies {
             assert_eq!(decode_reply(&encode_reply(&r)), Ok(r));
@@ -676,6 +775,7 @@ mod tests {
         assert!(RemoteReq::decode(&[]).is_err());
         assert!(RemoteReq::decode(&[9]).is_err());
         assert!(decode_reply(&[OK_RECORD, 1, 9]).is_err(), "a record that does not decode");
+        assert!(decode_reply(&[OK_PIECE, 1, 2, 0, 0, 0, 0, 0, 0, 0, 1]).is_err(), "sizes missing");
         assert!(RemoteReq::decode(&[WRITE, 200]).is_err());
         let mut bad_wc = RemoteReq::Write {
             keys: vec![],

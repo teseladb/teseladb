@@ -303,12 +303,14 @@ pub struct Resolved {
     pub collation: Option<Vec<u8>>,
 }
 
-/// Resolves `name` of a database through the views `lookup` gives: `None` if it is not a view.
-pub fn resolve<F: FnMut(&str) -> Option<CollectionKind>>(
-    name: &str,
-    mut lookup: F,
-) -> Result<Option<Resolved>, ViewError> {
-    let Some(CollectionKind::View { view_on, pipeline, collation }) = lookup(name) else {
+/// Resolves `name` of a database through the views `lookup` gives (which may fail with the
+/// caller's error): `None` if it is not a view.
+pub fn resolve<E, F>(name: &str, mut lookup: F) -> Result<Option<Resolved>, E>
+where
+    E: From<ViewError>,
+    F: FnMut(&str) -> Result<Option<CollectionKind>, E>,
+{
+    let Some(CollectionKind::View { view_on, pipeline, collation }) = lookup(name)? else {
         return Ok(None);
     };
     let mut chain = vec![pipeline];
@@ -320,9 +322,10 @@ pub fn resolve<F: FnMut(&str) -> Option<CollectionKind>>(
                 message: format!(
                     "View depth too deep or view cycle detected; maximum depth is {MAX_VIEW_DEPTH}"
                 ),
-            });
+            }
+            .into());
         }
-        match lookup(&current) {
+        match lookup(&current)? {
             Some(CollectionKind::View { view_on, pipeline, .. }) => {
                 chain.push(pipeline);
                 current = view_on;

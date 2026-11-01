@@ -143,6 +143,9 @@ fn refused_subcommands_say_why() {
     let right = two.lines().nth(1).unwrap().split('\t').next().unwrap().to_owned();
     let below = refused(&["range", "split", &right, "--at", r#"{"ns": "db.c", "_id": 1}"#]);
     assert!(below.contains(&format!("not inside range {right}")), "{below}");
+    // Range 1 now ends at the cut: the cut itself is past its end.
+    let above = refused(&["range", "split", "1", "--at", r#"{"ns": "db.c", "_id": 5}"#]);
+    assert!(above.contains("not inside range 1"), "{above}");
     assert_eq!(refused(&["range", "merge", "77"]), "teseladb admin: no range 77\n");
     n.stop();
 }

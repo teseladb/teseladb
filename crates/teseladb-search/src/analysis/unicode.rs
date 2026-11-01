@@ -1,7 +1,9 @@
-//! Unicode character properties the analyzers need (FR-019), from the Unicode 15.1.0 character
-//! database that `scripts/unicode-search.sha256` pins: word-break classes (UAX #29) and
-//! Extended_Pictographic, letters and numbers, combining classes, decompositions, canonical
-//! compositions, NFKC_Casefold and simple lowercase mappings.
+//! Unicode character properties the analyzers need (FR-019). From the Unicode 12.1.0 database that
+//! `scripts/unicode-tokenizer.sha256` and `scripts/unicode-emoji-tokenizer.sha256` pin, the version
+//! `refsearch` 1.70.6 tokenizes by: word-break classes (UAX #29), Extended_Pictographic, Script=Han,
+//! Script=Hiragana, Script=Hangul and Line_Break=SA. From the Unicode 15.1.0 database that
+//! `scripts/unicode-search.sha256` pins: letters and numbers, combining classes, decompositions,
+//! canonical compositions, NFKC_Casefold and simple lowercase mappings.
 //!
 //! The tables live in `data/unicode.bin`, embedded in the binary. `tests/unicode_data.rs` rebuilds
 //! them from the pinned files and fails if they differ; `TESELADB_WRITE_TABLES=1` writes them.
@@ -111,6 +113,11 @@ impl WordBreak {
 const PICTOGRAPHIC: u32 = 0x80;
 /// Bit of a word-break record: the character is a letter or a number (general category L or N).
 const ALPHANUMERIC: u32 = 0x40;
+/// Bits of a word-break record: Script=Han, Script=Hiragana, Script=Hangul, Line_Break=SA.
+const HAN: u32 = 0x100;
+const HIRAGANA: u32 = 0x200;
+const HANGUL: u32 = 0x400;
+const COMPLEX_CONTEXT: u32 = 0x800;
 /// Mask of the class in a word-break record.
 const CLASS: u32 = 0x3F;
 
@@ -188,6 +195,27 @@ pub fn word_break(c: char) -> WordBreak {
 /// Whether `c` is Extended_Pictographic.
 pub fn is_pictographic(c: char) -> bool {
     word_record(c) & PICTOGRAPHIC != 0
+}
+
+/// Whether `c` is of the Han script (Unicode 12.1).
+pub fn is_han(c: char) -> bool {
+    word_record(c) & HAN != 0
+}
+
+/// Whether `c` is of the Hiragana script (Unicode 12.1).
+pub fn is_hiragana(c: char) -> bool {
+    word_record(c) & HIRAGANA != 0
+}
+
+/// Whether `c` is of the Hangul script (Unicode 12.1).
+pub fn is_hangul(c: char) -> bool {
+    word_record(c) & HANGUL != 0
+}
+
+/// Whether `c` has Line_Break=SA, the scripts written without spaces between words (Unicode
+/// 12.1).
+pub fn is_complex_context(c: char) -> bool {
+    word_record(c) & COMPLEX_CONTEXT != 0
 }
 
 /// Whether `c` is a letter or a number (general category L or N).

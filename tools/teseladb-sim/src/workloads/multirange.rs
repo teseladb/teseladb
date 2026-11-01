@@ -263,6 +263,12 @@ impl MultiRangeWorkload {
             .map(|(_, n)| n)
     }
 
+    /// The node whose replica leads range `g`, if it has a host to send it requests: a node whose
+    /// LSM did not open has none.
+    fn hosted_leader(&self, w: &mut World, g: GroupId) -> Option<u32> {
+        self.leader(w, g).filter(|n| self.hosts.contains_key(n))
+    }
+
     /// A host for `node` with every range open on its core.
     fn open_host(&mut self, w: &mut World, node: u32) {
         let core = self.core();
@@ -325,7 +331,8 @@ impl MultiRangeWorkload {
             let born = sm.born();
             let voters: Vec<NodeId> = (1..=u64::from(self.nodes)).map(NodeId).collect();
             let desc = GroupDesc { group: g, voters, learners: vec![] };
-            let Some(c) = w.cluster_core(node, core) else { return };
+            // Not frozen: a core thaws only as time passes.
+            let c = w.cluster_core(node, core).expect("checked above");
             if c.create_group(desc, NodeSm::Range(sm)).is_err() {
                 return;
             }
@@ -357,7 +364,7 @@ impl MultiRangeWorkload {
             .collect();
         let recovered = c.recovered_groups();
         let Some(lsm) = w.nodes[node as usize].cores[core as usize].lsm.clone() else { return };
-        let Some(c) = w.cluster_core(node, core) else { return };
+        let c = w.cluster_core(node, core).expect("checked above");
         let gone: Vec<GroupId> = c
             .group_ids()
             .into_iter()
@@ -385,7 +392,7 @@ impl MultiRangeWorkload {
             }) {
                 continue;
             }
-            let Some(c) = w.cluster_core(node, core) else { return };
+            let c = w.cluster_core(node, core).expect("checked above");
             if recovered.contains(&right)
                 && let Ok(Some(sm)) = RangeSm::try_open(right, start, end, lsm.clone())
             {
@@ -463,7 +470,7 @@ impl MultiRangeWorkload {
             return;
         }
         let k = w.rng.range(0, DOCS);
-        let Some(g) = self.range_of(&doc(k)) else { return };
+        let g = self.range_of(&doc(k)).expect("the table covers every document");
         self.started[client as usize] += 1;
         let id = self.started[client as usize];
         let read = w.rng.chance(0.4);
@@ -589,10 +596,8 @@ impl MultiRangeWorkload {
             self.done.0 += 1;
             return;
         }
-        if let Some(l) = self.leader(w, g)
-            && let Some(h) = self.hosts.get_mut(&l)
-        {
-            h.split(g, &at, new);
+        if let Some(l) = self.hosted_leader(w, g) {
+            self.hosts.get_mut(&l).expect("hosted").split(g, &at, new);
             self.pump(w, l);
         }
     }
@@ -621,22 +626,21 @@ impl MultiRangeWorkload {
                 self.done.2 += 1;
                 return;
             }
-            if let Some(r) = self.leader(w, m.right)
-                && let local = w.local(r)
-                && let Some(h) = self.hosts.get_mut(&r)
-                && let Some(c) = w.cluster_core(r, core)
-            {
+            if let Some(r) = self.hosted_leader(w, m.right) {
+                let local = w.local(r);
+                let h = self.hosts.get_mut(&r).expect("hosted");
+                // A leader's core answered `leader`: it is not frozen.
+                let c = w.cluster_core(r, core).expect("a leader's core");
                 h.thaw(c, m.right, local);
                 self.pump(w, r);
             }
             return;
         }
         // Freeze the right range, and flush where its frozen data is not on disk yet.
-        if let Some(r) = self.leader(w, m.right)
+        if let Some(r) = self.hosted_leader(w, m.right)
             && self.sm(w, r, m.right).is_some_and(|sm| sm.frozen_for() != Some(m.id))
-            && let Some(h) = self.hosts.get_mut(&r)
         {
-            h.freeze(m.right, m.id);
+            self.hosts.get_mut(&r).expect("hosted").freeze(m.right, m.id);
             self.pump(w, r);
         }
         let mut ready = 0;
@@ -663,7 +667,7 @@ impl MultiRangeWorkload {
                 w.pump(n, core);
             }
         }
-        let Some(l) = self.leader(w, m.left) else { return };
+        let Some(l) = self.hosted_leader(w, m.left) else { return };
         if ready == self.nodes {
             let source = self.sm(w, l, m.right).map(|r| MergeSource {
                 right: m.right,
@@ -673,17 +677,14 @@ impl MultiRangeWorkload {
                 mark: r.last_mark(),
                 live: r.live_bytes(),
             });
-            if let Some(source) = source
-                && let Some(h) = self.hosts.get_mut(&l)
-            {
-                h.absorb(m.left, source);
+            if let Some(source) = source {
+                self.hosts.get_mut(&l).expect("hosted").absorb(m.left, source);
                 self.pump(w, l);
             }
-        } else if now.saturating_since(m.since) >= GIVE_UP
-            && let local = w.local(l)
-            && let Some(h) = self.hosts.get_mut(&l)
-            && let Some(c) = w.cluster_core(l, core)
-        {
+        } else if now.saturating_since(m.since) >= GIVE_UP {
+            let local = w.local(l);
+            let h = self.hosts.get_mut(&l).expect("hosted");
+            let c = w.cluster_core(l, core).expect("a leader's core");
             h.give_up(c, m.left, (m.right, m.id), local);
             self.pump(w, l);
         }
@@ -795,19 +796,19 @@ impl MultiRangeWorkload {
                 let since = self.stale.get(&(node, g)).copied();
                 let reopen = stale_everywhere
                     && since.is_some_and(|t| now.saturating_since(t) >= UNSERVED_FETCH);
-                if let Some(c) = w.cluster_core(node, core) {
-                    if since.is_none() {
-                        c.reject_awaited(g);
+                // Not frozen: it gave the bounds above.
+                let c = w.cluster_core(node, core).expect("its core");
+                if since.is_none() {
+                    c.reject_awaited(g);
+                }
+                if reopen && c.close_group(g).is_ok() {
+                    self.stale.remove(&(node, g));
+                    if let Some(h) = self.hosts.get_mut(&node) {
+                        h.remove_range(g);
                     }
-                    if reopen && c.close_group(g).is_ok() {
-                        self.stale.remove(&(node, g));
-                        if let Some(h) = self.hosts.get_mut(&node) {
-                            h.remove_range(g);
-                        }
-                        self.open_ranges(w, node);
-                        w.settle(node, core);
-                        continue;
-                    }
+                    self.open_ranges(w, node);
+                    w.settle(node, core);
+                    continue;
                 }
                 self.stale.entry((node, g)).or_insert(now);
                 w.settle(node, core);
@@ -917,17 +918,17 @@ impl MultiRangeWorkload {
                     None => Some(Transfer::Ingesting { id, files }),
                     Some(Ok(())) => {
                         let now = w.local(node);
-                        if let Some(c) = w.cluster_core(node, core) {
-                            if c.awaited_snapshot(g).is_some() {
-                                c.snapshot_data_ready(g, now);
-                            } else if c.close_group(g).is_ok() {
-                                // The range as its split left it: the replica opens again
-                                // with it, born from the split.
-                                if let Some(h) = self.hosts.get_mut(&node) {
-                                    h.remove_range(g);
-                                }
-                                self.open_ranges(w, node);
+                        // Not frozen: the arm above takes a frozen core.
+                        let c = w.cluster_core(node, core).expect("its core");
+                        if c.awaited_snapshot(g).is_some() {
+                            c.snapshot_data_ready(g, now);
+                        } else if c.close_group(g).is_ok() {
+                            // The range as its split left it: the replica opens again with it,
+                            // born from the split.
+                            if let Some(h) = self.hosts.get_mut(&node) {
+                                h.remove_range(g);
                             }
+                            self.open_ranges(w, node);
                         }
                         w.settle(node, core);
                         None
@@ -1078,10 +1079,9 @@ impl Workload for MultiRangeWorkload {
             GroupDesc { group: FIRST, voters, learners: vec![] },
             SmKind::Range(START, self.profile.end),
         );
+        // Every node is up at the start.
         for node in 0..self.nodes {
-            if w.nodes[node as usize].alive {
-                self.open_host(w, node);
-            }
+            self.open_host(w, node);
         }
         for client in 0..CLIENTS {
             Self::next_turn(w, client);
@@ -1170,5 +1170,229 @@ impl Workload for MultiRangeWorkload {
         liveness::check(&self.history, self.heal_at, liveness::WINDOW)?;
         durability::check(&self.history)?;
         linearizable::check(&self.history)
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    use super::*;
+
+    /// A `multirange` world of three nodes of two cores after `secs` seconds without faults.
+    fn world(secs: u64) -> (World, MultiRangeWorkload) {
+        let mut wl = MultiRangeWorkload::new(3, 2, MULTIRANGE);
+        let mut w = World::with_clocks(3, 3, 2, false, true, wl.clocks());
+        wl.start(&mut w);
+        crate::drive_until(&mut w, &mut wl, Nanos::from_secs(secs), |_| false);
+        (w, wl)
+    }
+
+    fn freeze(w: &mut World, node: u32, core: u16) {
+        w.nodes[node as usize].cores[core as usize].frozen_until = w.now() + Nanos::from_secs(1);
+    }
+
+    /// [`world`] driven until Group 0 has two ranges or more and no split or merge goes on.
+    fn split_world() -> (World, MultiRangeWorkload) {
+        let (mut w, mut wl) = world(1);
+        let done = |w: &mut World, wl: &MultiRangeWorkload| {
+            let _ = w;
+            wl.table.len() >= 2 && wl.split.is_none() && wl.merge.is_none()
+        };
+        while !done(&mut w, &wl) {
+            let until = w.now() + Nanos::from_millis(50);
+            crate::drive_until(&mut w, &mut wl, until, |_| false);
+            assert!(w.now() < Nanos::from_secs(30), "no split");
+        }
+        // Nothing more starts by itself.
+        wl.next_resize = Nanos::from_secs(3600);
+        (w, wl)
+    }
+
+    /// The first two ranges of the table, in key order.
+    fn neighbours(wl: &MultiRangeWorkload) -> (GroupId, GroupId) {
+        let mut by_start: Vec<(Vec<u8>, GroupId)> =
+            wl.table.iter().map(|(g, (s, _))| (s.clone(), *g)).collect();
+        by_start.sort();
+        (by_start[0].1, by_start[1].1)
+    }
+
+    #[test]
+    fn a_split_or_a_merge_whose_leader_has_no_host_waits_for_one() {
+        let (mut w, mut wl) = split_world();
+        let core = wl.core();
+        let (left, right) = neighbours(&wl);
+        wl.next_merge += 1;
+        let m = Merge { left, right, id: wl.next_merge, since: w.now() };
+        wl.merge = Some(m);
+        let hosts = std::mem::take(&mut wl.hosts);
+        wl.merge_step(&mut w);
+        let frozen = |w: &mut World, wl: &MultiRangeWorkload| {
+            (0..3).any(|n| wl.sm(w, n, right).is_some_and(|sm| sm.frozen_for().is_some()))
+        };
+        assert!(!frozen(&mut w, &wl), "no leader to freeze it");
+        // A node whose LSM is shut is not counted as ready.
+        wl.hosts = hosts;
+        let lsm = w.nodes[0].cores[core as usize].lsm.take();
+        wl.merge_step(&mut w);
+        w.nodes[0].cores[core as usize].lsm = lsm;
+        assert_eq!(wl.merge.map(|m| m.id), Some(m.id), "still under way");
+        assert!(!wl.merge_completed(right, m.id + 1), "a merge Group 0 has not given");
+        assert!(!wl.merge_completed(left, m.id), "the left range stays");
+        // A split whose leader has no host waits too.
+        wl.merge = None;
+        let (start, end) = wl.table[&left].clone();
+        let cut = [start.clone(), vec![0]].concat();
+        assert!(start < cut && cut < end);
+        let new = GroupId(wl.next_group + u64::from(wl.cores));
+        wl.split = Some((left, cut, new));
+        let hosts = std::mem::take(&mut wl.hosts);
+        wl.split_step(&mut w);
+        wl.hosts = hosts;
+        assert!(wl.split.is_some() && !wl.table.contains_key(&new));
+    }
+
+    #[test]
+    fn a_merge_not_ready_in_time_is_given_up_by_the_left_leader() {
+        let (mut w, mut wl) = split_world();
+        let core = wl.core();
+        let (left, right) = neighbours(&wl);
+        wl.next_merge += 1;
+        let m = Merge { left, right, id: wl.next_merge, since: Nanos::ZERO };
+        wl.merge = Some(m);
+        // Node 2 cannot flush: the merge is never ready.
+        let lsm = w.nodes[2].cores[core as usize].lsm.take();
+        for _ in 0..40 {
+            wl.merge_step(&mut w);
+            let until = w.now() + Nanos::from_millis(50);
+            crate::drive_until(&mut w, &mut wl, until, |_| false);
+            if wl.merge_given_up(&mut w, m) {
+                break;
+            }
+        }
+        w.nodes[2].cores[core as usize].lsm = lsm;
+        assert!(wl.merge_given_up(&mut w, m));
+    }
+
+    #[test]
+    fn waits_and_transfers_that_cannot_go_on_stay_or_are_asked_for_again() {
+        let (mut w, mut wl) = split_world();
+        let core = wl.core();
+        let (g, _) = neighbours(&wl);
+        let ingesting = |id| (5, (vec![1], vec![2]), Transfer::Ingesting { id, files: vec![] });
+        // A wait of another core, or of a replica already served, starts nothing new.
+        wl.transfers.insert((0, g), ingesting(900));
+        w.snapshot_waits = vec![(1, 1 - core, g, 5), (0, core, g, 5)];
+        // A wait of a node that is down is dropped.
+        wl.waiting.insert((2, g), 5);
+        w.nodes[2].alive = false;
+        wl.transfer(&mut w);
+        w.nodes[2].alive = true;
+        assert!(wl.waiting.is_empty() && !wl.transfers.contains_key(&(1, g)));
+        assert!(matches!(wl.transfers[&(0, g)].2, Transfer::Ingesting { id: 900, .. }));
+        // A frozen core takes its ingestion when it thaws.
+        freeze(&mut w, 0, core);
+        wl.transfer_step(&mut w, (0, g));
+        assert!(matches!(wl.transfers[&(0, g)].2, Transfer::Ingesting { id: 900, .. }));
+        w.nodes[0].cores[core as usize].frozen_until = Nanos::ZERO;
+        // An export whose source went down is asked for again.
+        let t = Transfer::Exporting { source: 1, exports: vec![1], files: vec![], dir: "d".into() };
+        wl.transfers.insert((0, g), (5, (vec![1], vec![2]), t));
+        w.nodes[1].alive = false;
+        wl.transfer_step(&mut w, (0, g));
+        w.nodes[1].alive = true;
+        assert_eq!(wl.waiting.remove(&(0, g)), Some(5));
+        // Ingested for a range the core does not have: nothing to close.
+        let gone = GroupId(999);
+        wl.transfers.insert((0, gone), ingesting(901));
+        w.nodes[0].cores[core as usize].lsm_done.ingested.push((901, Ok(())));
+        wl.transfer_step(&mut w, (0, gone));
+        assert!(!wl.transfers.contains_key(&(0, gone)));
+        // Ingested for a range a host-less node does not wait for: it closes and opens again.
+        let host = wl.hosts.remove(&0);
+        wl.transfers.insert((0, g), ingesting(902));
+        w.nodes[0].cores[core as usize].lsm_done.ingested.push((902, Ok(())));
+        wl.transfer_step(&mut w, (0, g));
+        wl.hosts.insert(0, host.expect("a host"));
+        assert!(!wl.transfers.contains_key(&(0, g)));
+    }
+
+    #[test]
+    fn a_frozen_core_a_shut_lsm_or_a_node_without_host_is_left_as_it_is() {
+        let (mut w, mut wl) = world(3);
+        let core = wl.core();
+        let applied = |w: &mut World, n: u32| {
+            w.paused_core(n, core).map(|c| {
+                c.group_ids()
+                    .into_iter()
+                    .filter_map(|g| c.state_machine(g).map(StateMachine::applied_index))
+                    .sum::<u64>()
+            })
+        };
+        // Node 0 frozen: no host opens over it, and nothing reaches its core.
+        freeze(&mut w, 0, core);
+        let host = wl.hosts.remove(&0);
+        wl.open_host(&mut w, 0);
+        assert!(!wl.hosts.contains_key(&0));
+        wl.open_ranges(&mut w, 0);
+        wl.pump(&mut w, 0);
+        wl.hosts.insert(0, host.expect("a host"));
+        let before = applied(&mut w, 0);
+        wl.retire(&mut w, 0);
+        wl.flush_idle(&mut w, 0);
+        wl.pump(&mut w, 0);
+        assert_eq!(applied(&mut w, 0), before);
+        // Node 1 with its LSM shut (a recovery that failed).
+        let lsm = w.nodes[1].cores[core as usize].lsm.take();
+        let host = wl.hosts.remove(&1);
+        wl.open_host(&mut w, 1);
+        assert!(!wl.hosts.contains_key(&1));
+        wl.hosts.insert(1, host.expect("a host"));
+        let groups = w.paused_core(1, core).map(|c| c.group_ids().len());
+        wl.open_ranges(&mut w, 1);
+        wl.retire(&mut w, 1);
+        wl.flush_idle(&mut w, 1);
+        assert_eq!(w.paused_core(1, core).map(|c| c.group_ids().len()), groups);
+        w.nodes[1].cores[core as usize].lsm = lsm;
+        // Node 2 down: nothing opens there.
+        w.nodes[2].alive = false;
+        wl.open_ranges(&mut w, 2);
+    }
+
+    #[test]
+    fn a_client_whose_node_cannot_take_its_request_sends_nothing() {
+        let (mut w, mut wl) = world(1);
+        let core = wl.core();
+        let ops = wl.history.ops.len();
+        // No node has a host.
+        let hosts = std::mem::take(&mut wl.hosts);
+        for client in 0..CLIENTS {
+            wl.act(&mut w, client);
+        }
+        assert_eq!(wl.history.ops.len(), ops);
+        wl.hosts = hosts;
+        // Every core frozen.
+        for n in 0..3 {
+            freeze(&mut w, n, core);
+        }
+        for client in 0..CLIENTS {
+            wl.act(&mut w, client);
+        }
+        assert_eq!(wl.history.ops.len(), ops);
+    }
+
+    #[test]
+    fn answers_of_another_core_or_of_a_node_without_host_or_core_are_dropped() {
+        let (mut w, mut wl) = world(1);
+        let core = wl.core();
+        let other = 1 - core;
+        let r = || Err(OpError::Timeout);
+        wl.on_done(&mut w, 0, other, OpId(1), r());
+        let host = wl.hosts.remove(&0).expect("a host");
+        wl.on_done(&mut w, 0, core, OpId(1), r());
+        wl.hosts.insert(0, host);
+        let cluster = w.nodes[0].cores[core as usize].cluster.take();
+        wl.on_done(&mut w, 0, core, OpId(1), r());
+        w.nodes[0].cores[core as usize].cluster = cluster;
+        assert!(wl.foreign.is_empty());
     }
 }

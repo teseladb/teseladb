@@ -219,7 +219,8 @@ impl Arith {
     }
 }
 
-fn add(vals: &[Eval]) -> Result<Eval, MqlError> {
+/// `$add` over `vals`.
+pub(crate) fn add(vals: &[Eval]) -> Result<Eval, MqlError> {
     let mut sum = Num::Int(0);
     let mut date: Option<i64> = None;
     let mut null = false;
@@ -270,7 +271,8 @@ fn round_half_even(x: f64) -> f64 {
     if (x - x.trunc()).abs() == 0.5 && r % 2.0 != 0.0 { r - x.signum() } else { r }
 }
 
-fn multiply(vals: &[Eval]) -> Result<Eval, MqlError> {
+/// `$multiply` over `vals`.
+pub(crate) fn multiply(vals: &[Eval]) -> Result<Eval, MqlError> {
     let mut product = Num::Int(1);
     let mut null = false;
     for v in vals {
@@ -292,7 +294,8 @@ fn multiply(vals: &[Eval]) -> Result<Eval, MqlError> {
     Ok(Some(if null { Value::Null } else { product.value() }))
 }
 
-fn subtract(a: &Eval, b: &Eval) -> Result<Eval, MqlError> {
+/// `$subtract` of `b` from `a`.
+pub(crate) fn subtract(a: &Eval, b: &Eval) -> Result<Eval, MqlError> {
     let (Some(x), Some(y)) = (a, b) else { return Ok(Some(Value::Null)) };
     if nullish(a) || nullish(b) {
         return Ok(Some(Value::Null));
@@ -345,7 +348,8 @@ fn is_zero(n: Num) -> bool {
     }
 }
 
-fn divide(a: &Eval, b: &Eval) -> Result<Eval, MqlError> {
+/// `$divide` of `a` by `b`.
+pub(crate) fn divide(a: &Eval, b: &Eval) -> Result<Eval, MqlError> {
     let (Some(x), Some(y)) = (a, b) else { return Ok(Some(Value::Null)) };
     if nullish(a) || nullish(b) {
         return Ok(Some(Value::Null));
