@@ -35,13 +35,6 @@ pub struct ShardKey {
     pub unique: bool,
 }
 
-impl ShardKey {
-    /// The hashed field, if the key has one.
-    pub fn hashed(&self) -> Option<&str> {
-        self.key.iter().find(|(_, v)| matches!(v, Value::String(s) if s == HASHED)).map(|(k, _)| k)
-    }
-}
-
 /// The shard key of `coll`, if it has one.
 pub fn shard_key_of(coll: &CollectionEntry) -> Result<Option<ShardKey>, CommandError> {
     let options = RawDoc::from_bytes(&coll.options)?;

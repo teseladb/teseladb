@@ -196,3 +196,23 @@ fn a_collection_with_documents_needs_its_index() {
     let Value::Array(b) = field(&r, "cursor.firstBatch") else { panic!("{r:?}") };
     assert_eq!(b.len(), 3);
 }
+
+/// A unique key over an existing unique index and a hashed `_id` key are accepted (measured on
+/// the same `refrouter`); the hashed key gets an index of its own, with RefDb's default name.
+#[test]
+fn a_unique_index_serves_a_unique_key_and_a_hashed_id_gets_its_index() {
+    let mut m = Mem::new();
+    run(&mut m, "shk", r#"{"insert":"u2","documents":[{"_id":1,"a":1}]}"#);
+    let r = run(
+        &mut m,
+        "shk",
+        r#"{"createIndexes":"u2","indexes":[{"key":{"a":1},"name":"a_1","unique":true}]}"#,
+    );
+    assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+    let r = shard(&mut m, r#"{"shardCollection":"shk.u2","key":{"a":1},"unique":true}"#);
+    assert_eq!(field(&r, "collectionsharded"), &Value::from("shk.u2"), "{r:?}");
+    let r = shard(&mut m, r#"{"shardCollection":"shk.id","key":{"_id":"hashed"}}"#);
+    assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+    let hashed = json(r#"{"key":{"_id":"hashed"},"name":"_id_hashed"}"#);
+    assert_eq!(index_keys(&mut m, "id").get(1), Some(&hashed));
+}
