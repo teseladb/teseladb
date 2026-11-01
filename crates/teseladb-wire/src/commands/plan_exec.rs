@@ -451,6 +451,8 @@ fn run<B: Backend + ?Sized>(
     let mut last_past = false;
     'scans: for s in &scans {
         let index = &indexes[s.index];
+        // This scan's counters: the last of each list.
+        let child = ran.child_keys.len();
         ran.child_keys.push(0);
         ran.child_past.push(0);
         ran.child_given.push(0);
@@ -461,24 +463,18 @@ fn run<B: Backend + ?Sized>(
                 break 'scans;
             }
             ran.keys += 1;
-            if let Some(k) = ran.child_keys.last_mut() {
-                *k += 1;
-            }
+            ran.child_keys[child] += 1;
             last_past = entry.is_none();
             let Some(pk) = entry else {
                 ran.past += 1;
-                if let Some(p) = ran.child_past.last_mut() {
-                    *p += 1;
-                }
+                ran.child_past[child] += 1;
                 continue;
             };
             // A scan without filter gives its entries to the `OR`, which drops those it has
             // seen; one with a filter fetches each document first.
             let seen_before = seen.contains(&pk);
             if residual.is_none() {
-                if let Some(g) = ran.child_given.last_mut() {
-                    *g += 1;
-                }
+                ran.child_given[child] += 1;
                 if seen_before {
                     continue;
                 }
@@ -496,11 +492,8 @@ fn run<B: Backend + ?Sized>(
                 Some(f) => f.matches(RawDoc::from_bytes(&bytes)?, &ctx).map_err(from_mql)?,
                 None => true,
             };
-            if keep
-                && residual.is_some()
-                && let Some(g) = ran.child_given.last_mut()
-            {
-                *g += 1;
+            if keep && residual.is_some() {
+                ran.child_given[child] += 1;
             }
             if keep && !seen_before {
                 seen.insert(pk);
@@ -571,19 +564,14 @@ fn intersected<B: Backend + ?Sized>(
         ran.child_past.push(past);
         sets.push(pks);
     }
-    ran.child_keys.push(0);
-    ran.child_past.push(0);
+    let (mut last_keys, mut last_past) = (0, 0);
     for entry in entries(backend, (coll.tenant, coll.id), &indexes[last.index], last, read.concern)?
     {
         ran.keys += 1;
-        if let Some(k) = ran.child_keys.last_mut() {
-            *k += 1;
-        }
+        last_keys += 1;
         let Some(pk) = entry else {
             ran.past += 1;
-            if let Some(p) = ran.child_past.last_mut() {
-                *p += 1;
-            }
+            last_past += 1;
             continue;
         };
         if !sets.iter().all(|set| set.contains(&pk)) {
@@ -608,6 +596,8 @@ fn intersected<B: Backend + ?Sized>(
             ran.given_at.push(ran.keys + 1);
         }
     }
+    ran.child_keys.push(last_keys);
+    ran.child_past.push(last_past);
     let advanced = u64::try_from(ran.found.len()).unwrap_or(u64::MAX);
     let sorts = !read.sort.is_empty() && !last.sorts;
     ran.trial =

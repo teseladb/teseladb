@@ -82,3 +82,50 @@ fn a_validator_that_only_warns_logs_the_document_and_an_empty_one_checks_nothing
     };
     assert!(options.get("validationAction").is_none(), "{options:?}");
 }
+
+/// `upsertSupplied` without `upsert` is a write error of the statement, and an empty validator
+/// checks nothing (`refnode` 9.0.4, 01-11-2026).
+#[test]
+fn upsert_supplied_needs_an_upsert_and_an_empty_validator_checks_nothing() {
+    let mut m = Mem::new();
+    let one = doc(&[("_id", Value::Int32(1))]);
+    let r = m.run(
+        "u",
+        doc(&[
+            ("insert", Value::from("c")),
+            ("documents", Value::Array(vec![Value::Document(one.clone())])),
+        ]),
+    );
+    assert_eq!(field(&r, "n"), &Value::Int32(1), "{r:?}");
+    let stmt = doc(&[
+        ("q", Value::Document(one.clone())),
+        ("u", Value::Document(doc(&[("$set", Value::Document(doc(&[("a", Value::Int32(1))])))]))),
+        ("upsert", Value::Boolean(false)),
+        ("upsertSupplied", Value::Boolean(true)),
+    ]);
+    let r = m.run(
+        "u",
+        doc(&[
+            ("update", Value::from("c")),
+            ("updates", Value::Array(vec![Value::Document(stmt)])),
+        ]),
+    );
+    assert_eq!(field(&r, "writeErrors.0.code"), &Value::Int32(9), "{r:?}");
+    assert_eq!(
+        field(&r, "writeErrors.0.errmsg"),
+        &Value::from("cannot specify 'upsertSupplied: true' for a non-upsert operation")
+    );
+    let r = m.run(
+        "u",
+        doc(&[("create", Value::from("v")), ("validator", Value::Document(Document::new()))]),
+    );
+    assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+    let r = m.run(
+        "u",
+        doc(&[
+            ("insert", Value::from("v")),
+            ("documents", Value::Array(vec![Value::Document(one)])),
+        ]),
+    );
+    assert_eq!(field(&r, "n"), &Value::Int32(1), "{r:?}");
+}

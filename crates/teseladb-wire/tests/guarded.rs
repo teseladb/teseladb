@@ -58,8 +58,15 @@ fn a_live_operation_reaches_the_node_with_each_call() {
     let _ = g.process();
     g.log_warning(1, "w", &Document::new());
     g.rotate_certificates(Some("now")).unwrap();
+    assert!(g.search_indexes(1).unwrap().is_empty());
+    let zero = teseladb_hlc::Hlc { physical: 0, logical: 0 };
+    assert!(g.changes(b"a", b"b", zero).is_ok());
+    g.set_read_preference(None);
+    let refused = g.request_shutdown().unwrap_err();
+    assert_eq!(refused.errmsg, "this node cannot be shut down");
+    g.log_slow_query(&Document::new().with("ns", "db.c"));
     drop(g);
-    assert_eq!((m.database_marks, m.logged.len(), m.rotations.len()), (1, 1, 1));
+    assert_eq!((m.database_marks, m.logged.len(), m.rotations.len()), (1, 2, 1));
     // The operation ended: the node takes the next command.
     let r = m.run("db", doc(&[("find", Value::from("c"))]));
     assert_eq!(field(&r, "ok"), &Value::Double(1.0));
