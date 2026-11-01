@@ -105,10 +105,11 @@ pub fn cut_outside(
 ) -> Option<Vec<u8>> {
     let inside = |k: &[u8]| start < k && (end.is_empty() || k < end);
     let word = |i: usize| Some(u32::from_be_bytes(at.get(i..i + 4)?.try_into().ok()?));
-    // A key past a document's ending in `00` may be its change meta (014), the next key after it:
-    // the cut goes before the document so that both stay in one range.
-    let at = match (at.first(), word(9), at.split_last()) {
-        (Some(&DATA), Some(DOCUMENTS), Some((0, doc))) if doc.len() > 13 => doc,
+    // A change meta of a document (014, `document · 00 · position`) goes right after it: a cut
+    // there goes before the document so that they stay in one range.
+    let capped = |t, c| whole(t, c);
+    let at = match (word(1), word(5)) {
+        (Some(t), Some(c)) => meta_document(at, capped(t, c)).unwrap_or(at),
         _ => at,
     };
     let (Some(&DATA), Some(t), Some(c)) = (at.first(), word(1), word(5)) else {
@@ -120,6 +121,38 @@ pub fn cut_outside(
     }
     let after = KeyBuilder::collection_end(t, c).0;
     [span, after].into_iter().find(|k| inside(k))
+}
+
+/// Bytes of a data key before the rest of a document: space, tenant, collection and index.
+const DOC_PREFIX: usize = 13;
+/// Bytes a change meta adds to its document's key: `00` and the position.
+const META_TAIL: usize = 5;
+/// Bytes of a capped collection's document after its prefix: the insertion number.
+const CAPPED_SEQ: usize = 8;
+
+/// The document of `key` if `key` is one of its change metas (014): a document's key, complete,
+/// then `00` and four bytes. An encoded value never starts with `00`, so after whole values the
+/// byte `00` is no other key's.
+fn meta_document(key: &[u8], capped: bool) -> Option<&[u8]> {
+    if key.first() != Some(&DATA) || key.get(9..DOC_PREFIX)? != DOCUMENTS.to_be_bytes() {
+        return None;
+    }
+    let doc_len = key.len().checked_sub(META_TAIL)?;
+    let rest = key.get(DOC_PREFIX..doc_len)?;
+    if rest.is_empty() || key[doc_len] != 0 {
+        return None;
+    }
+    let whole = |mut b: &[u8]| {
+        while !b.is_empty() {
+            match crate::decode::values_len(b, &[Direction::Ascending]) {
+                Ok(n) if n > 0 && n <= b.len() => b = &b[n..],
+                _ => return false,
+            }
+        }
+        true
+    };
+    let complete = if capped { rest.len() == CAPPED_SEQ } else { whole(rest) || whole(&rest[1..]) };
+    complete.then(|| &key[..doc_len])
 }
 
 /// Builders of every kind of key.

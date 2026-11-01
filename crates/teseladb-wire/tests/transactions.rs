@@ -1323,3 +1323,72 @@ fn a_transaction_leaves_its_session_and_order_next_to_each_document() {
         assert_eq!(x.update.is_some(), x.op == 1);
     }
 }
+
+/// A transaction that writes a document several times leaves one meta per write, with its type
+/// and the document it left, as a `refrouter` 9.0.4 gives one event per write (measured on 01-11:
+/// insert, update and replace of `_id: 1`, two updates of `_id: 0` and the deletion of `_id: 1`
+/// give six events in that order).
+#[test]
+fn each_write_of_a_document_in_a_transaction_keeps_its_own_meta() {
+    use teseladb_changestream::meta::ChangeMeta;
+    let mut m = node();
+    assert!(ok(&run(&mut m, DB, insert(0))));
+    let one = |id: i32, u: Document| {
+        Document::new().with("q", doc(&[("_id", Value::Int32(id))])).with("u", u)
+    };
+    let update =
+        |u: Document| Document::new().with("update", "c").with("updates", vec![Value::Document(u)]);
+    let set = |f: &str| Document::new().with("$set", doc(&[(f, Value::Int32(1))]));
+    let delete = Document::new().with("delete", "c").with(
+        "deletes",
+        vec![Value::Document(
+            Document::new().with("q", doc(&[("_id", Value::Int32(1))])).with("limit", 1),
+        )],
+    );
+    let statements = [
+        insert(1),
+        update(one(1, set("a"))),
+        update(one(1, doc(&[("v", Value::Int32(5))]))),
+        update(one(0, set("a"))),
+        update(one(0, set("b"))),
+        delete,
+    ];
+    for (i, s) in statements.into_iter().enumerate() {
+        let r = run(&mut m, DB, stmt(s, 1, 8, i == 0));
+        assert!(ok(&r), "{r:?}");
+    }
+    assert!(ok(&run(&mut m, "admin", end("commitTransaction", 1, 8))));
+    let mut metas: Vec<ChangeMeta> = m
+        .types
+        .iter()
+        .filter(|(_, t)| **t == teseladb_range::HISTORY_VALUE)
+        .map(|(k, _)| ChangeMeta::decode(&m.data[k]).unwrap())
+        .collect();
+    metas.sort_by_key(|x| x.op);
+    let got: Vec<(u32, bool, bool, bool, Option<Document>)> = metas
+        .iter()
+        .map(|x| {
+            let d = x
+                .doc
+                .as_ref()
+                .map(|b| Document::from(teseladb_bson::RawDoc::from_bytes(b).unwrap()));
+            (x.op, x.update.is_some(), x.replace, x.delete, d)
+        })
+        .collect();
+    let d = |pairs: &[(&str, Value)]| Some(doc(pairs));
+    let want = vec![
+        (0, false, false, false, d(&[("_id", Value::Int32(1))])),
+        (1, true, false, false, d(&[("_id", Value::Int32(1)), ("a", Value::Int32(1))])),
+        (2, false, true, false, d(&[("_id", Value::Int32(1)), ("v", Value::Int32(5))])),
+        (3, true, false, false, d(&[("_id", Value::Int32(0)), ("a", Value::Int32(1))])),
+        (
+            4,
+            true,
+            false,
+            false,
+            d(&[("_id", Value::Int32(0)), ("a", Value::Int32(1)), ("b", Value::Int32(1))]),
+        ),
+        (5, false, false, true, None),
+    ];
+    assert_eq!(got, want);
+}
