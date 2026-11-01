@@ -265,6 +265,12 @@ pub trait Backend {
     fn write_gate(&mut self) -> Result<write_block::WriteGate, CommandError> {
         Ok(write_block::gate_of(&self.cluster_parameters()?))
     }
+    /// Whether every other live node of the cluster already applies write gates `want` (007
+    /// FR-029: `fsync` and `setUserWriteBlockMode` answer once every node has them, as a `refrouter`
+    /// answers once every shard did); a node alone has no other.
+    fn gate_everywhere(&mut self, _want: write_block::WriteGate) -> Result<bool, CommandError> {
+        Ok(true)
+    }
     /// The highest feature compatibility version every node of the cluster runs (007 FR-027),
     /// if one runs less than this binary's latest.
     fn fcv_limit(&mut self) -> Result<Option<String>, CommandError> {

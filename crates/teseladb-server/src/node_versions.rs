@@ -1,5 +1,5 @@
-//! The versions each node runs (007 FR-027): at start, a node records in Group 0 its protocol
-//! version, its format version and the latest feature compatibility version it runs, as a
+//! The versions each node runs (007 FR-027): at start, a node records in Group 0 the lowest and
+//! highest protocol versions it speaks, its format version and the latest feature compatibility version it runs, as a
 //! setting of its own; while some node that is not removed runs less than this binary's latest,
 //! `setFeatureCompatibilityVersion` cannot go past it, so new features turn on once every node
 //! has them.
@@ -13,6 +13,7 @@ use teseladb_wire::commands::fcv::VERSIONS;
 /// Prefix of the Group 0 settings with each node's versions.
 pub const PREFIX: &[u8] = b"nodeVersions.";
 const PROTOCOL: &str = "protocol";
+const PROTOCOL_MIN: &str = "protocolMin";
 const FORMAT: &str = "format";
 const FCV: &str = "fcv";
 
@@ -26,6 +27,7 @@ pub fn key(node: NodeId) -> Vec<u8> {
 pub fn ours() -> Vec<u8> {
     let d = Document::new()
         .with(PROTOCOL, i64::from(teseladb_io::peer::PROTOCOL_VERSION))
+        .with(PROTOCOL_MIN, i64::from(teseladb_io::peer::PROTOCOL_MIN))
         .with(FORMAT, i64::from(teseladb_meta::group0::SNAPSHOT_VERSION))
         .with(FCV, VERSIONS[0]);
     d.to_bytes().unwrap_or_default()
@@ -96,6 +98,10 @@ mod tests {
     #[test]
     fn this_binary_records_its_own_versions() {
         assert_eq!(fcv_of(&ours()), Some(VERSIONS[0].to_owned()));
+        // The range of protocol versions it speaks, from the lowest to the highest.
+        let d = Document::from(RawDoc::from_bytes(&ours()).unwrap());
+        let range = (d.get(PROTOCOL_MIN).cloned(), d.get(PROTOCOL).cloned());
+        assert_eq!(range, (Some(Value::Int64(4)), Some(Value::Int64(5))));
         assert_eq!(fcv_of(b"x"), None);
         assert_eq!(key(NodeId(12)), b"nodeVersions.12".to_vec());
     }

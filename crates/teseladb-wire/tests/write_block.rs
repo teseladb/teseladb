@@ -156,3 +156,23 @@ fn set_user_write_block_mode_checks_its_fields() {
     let blocked = Value::from("User writes blocked, reason: Unspecified");
     assert_eq!(first_write_error(&r), (&Value::Int32(371), &blocked));
 }
+
+#[test]
+fn the_gates_answer_once_every_node_applies_them() {
+    let mut m = Mem::new();
+    // Two answers of a node still behind: the command waits for it, as a `refrouter` waits for
+    // every shard.
+    for cmd in [lock(), unlock(), block(true), block(false)] {
+        m.gate_lagging = 2;
+        m.pauses_left = 5;
+        let r = m.run("admin", cmd);
+        assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+        assert_eq!(m.gate_lagging, 0, "it answered before every node applied the gate");
+    }
+    // A node that never catches up: the command runs out of time.
+    m.gate_lagging = usize::MAX;
+    m.pauses_left = 3;
+    let r = m.run("admin", lock());
+    let msg = Value::from("operation exceeded time limit");
+    assert_eq!(err(&r), (Some(&Value::Int32(50)), Some(&msg)));
+}

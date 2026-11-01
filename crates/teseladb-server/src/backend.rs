@@ -795,6 +795,14 @@ impl Backend for ServerBackend {
         Ok(self.h.routes.gate())
     }
 
+    fn gate_everywhere(
+        &mut self,
+        want: teseladb_wire::commands::write_block::WriteGate,
+    ) -> Result<bool, CommandError> {
+        let until = self.until();
+        Ok(self.ask(0, |tx| NodeMsg::GateEverywhere(want, tx), until) == Some(true))
+    }
+
     fn fcv_limit(&mut self) -> Result<Option<String>, CommandError> {
         Ok(self.h.routes.fcv_limit())
     }

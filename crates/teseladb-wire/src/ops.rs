@@ -461,6 +461,13 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         self.call(|b| b.write_gate())
     }
 
+    fn gate_everywhere(
+        &mut self,
+        want: crate::commands::write_block::WriteGate,
+    ) -> Result<bool, CommandError> {
+        self.call(|b| b.gate_everywhere(want))
+    }
+
     fn fcv_limit(&mut self) -> Result<Option<String>, CommandError> {
         self.call(|b| b.fcv_limit())
     }

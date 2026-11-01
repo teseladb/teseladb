@@ -145,6 +145,8 @@ pub struct Mem {
     pub no_route: bool,
     /// The highest feature compatibility version some node runs (007 FR-027).
     pub fcv_limit: Option<String>,
+    /// Answers of the other nodes that do not apply the write gates yet (007 FR-029).
+    pub gate_lagging: usize,
 }
 
 /// A change of the data before a read of `[start, …)`.
@@ -240,6 +242,15 @@ impl Backend for Mem {
 
     fn end_operation(&mut self) {
         self.ended += 1;
+    }
+
+    fn gate_everywhere(
+        &mut self,
+        _want: teseladb_wire::commands::write_block::WriteGate,
+    ) -> Result<bool, CommandError> {
+        let behind = self.gate_lagging > 0;
+        self.gate_lagging = self.gate_lagging.saturating_sub(1);
+        Ok(!behind)
     }
 
     // One range, with no intents: a read sees the committed documents.

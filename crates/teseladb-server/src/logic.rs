@@ -41,7 +41,7 @@ use crate::catalog_ops::{CatalogAnswer, CatalogOps, CatalogReq, CatalogSender};
 use crate::clustertime_keys::KeyDriver;
 use crate::coresm::{CoreOutput, CoreSm, Group0Holder};
 use crate::data::{DataCore, DataReq, DataSender, IoOwner};
-use crate::forward::Request;
+use crate::forward::{GATE_BEHIND, GATE_HELD, Request};
 use crate::frames::{from_wire, to_wire};
 use crate::liveness::{LivenessDriver, SharedLoads, core_load};
 use crate::node::FOUNDER;
@@ -127,6 +127,9 @@ pub enum NodeMsg {
     Catalog(CatalogReq, CatalogSender),
     /// Sessions to kill on the other nodes (core 0, 006 FR-016).
     KillSessions(KillScope, KillSender),
+    /// Whether every other node not removed applies write gates `want`; one that cannot be
+    /// reached does not count (core 0, 007 FR-029).
+    GateEverywhere(teseladb_wire::commands::write_block::WriteGate, KillSender),
     /// A core change between two cores of the node (007 FR-011).
     Relocate(RelocateMsg),
     /// A frame another core of the node received for a range this core runs (007 FR-011: the
@@ -206,6 +209,8 @@ pub struct NodeLogic {
     catalog: CatalogOps,
     /// Kills of sessions sent to the other nodes (core 0).
     kills: SessionOps,
+    /// Questions to the other nodes about the write gates they apply (core 0, 007 FR-029).
+    gates: SessionOps,
     /// The node's cursors and sessions, where the other nodes' kills land (core 0).
     sessions: Option<Arc<Shared>>,
     /// This core's index and where it publishes its load for core 0's heartbeat (007 FR-010).
@@ -263,6 +268,7 @@ impl NodeLogic {
             peers: BTreeMap::new(),
             catalog: CatalogOps::default(),
             kills: SessionOps::default(),
+            gates: SessionOps::default(),
             sessions: None,
             loads: None,
             presence: None,
@@ -337,6 +343,28 @@ impl NodeLogic {
             .map(|to| self.core.forward(to, Bytes::from_vec(body.clone()), self.now))
             .collect();
         self.kills.start(ops, reply);
+    }
+
+    /// Asks every other node not removed whether it applies write gates `want` (007 FR-029).
+    fn gate_everywhere(
+        &mut self,
+        want: teseladb_wire::commands::write_block::WriteGate,
+        reply: KillSender,
+    ) {
+        let me = self.me.as_ref().map_or(NodeId(0), |(id, _)| *id);
+        let others: Vec<NodeId> = self.group0().map_or_else(Vec::new, |sm| {
+            sm.nodes
+                .values()
+                .filter(|n| n.id != me && n.state != NodeState::Removed)
+                .map(|n| n.id)
+                .collect()
+        });
+        let body = Request::Gate(want).encode();
+        let ops = others
+            .into_iter()
+            .map(|to| self.core.forward(to, Bytes::from_vec(body.clone()), self.now))
+            .collect();
+        self.gates.start(ops, reply);
     }
 
     /// This core holds data ranges.
@@ -1159,6 +1187,11 @@ impl NodeLogic {
                         }
                         self.core.answer_forward(f.from, f.req, Bytes::new());
                     }
+                    (Ok(Request::Gate(want)), _) => {
+                        let held = self.routes.as_ref().is_some_and(|r| r.gate() == want);
+                        let answer = vec![if held { GATE_HELD } else { GATE_BEHIND }];
+                        self.core.answer_forward(f.from, f.req, Bytes::from_vec(answer));
+                    }
                     (
                         Ok(
                             Request::Fetch(_)
@@ -1217,6 +1250,13 @@ impl NodeLogic {
         }
         if self.kills.owns(op) {
             self.kills.on_done(op, matches!(result, Ok(Done::Forwarded(_))));
+            return;
+        }
+        // A node that answers 0 is behind; one that does not answer is down, and one that answers
+        // nothing speaks a protocol without the question: neither counts.
+        if self.gates.owns(op) {
+            let behind = matches!(&result, Ok(Done::Forwarded(b)) if b[..] == [GATE_BEHIND]);
+            self.gates.on_done(op, !behind);
             return;
         }
         if let Some((step, reply)) = self.joins.remove(&op) {
@@ -1397,6 +1437,7 @@ impl CoreLogic for NodeLogic {
             NodeMsg::Peers(peers) => self.peers = peers,
             NodeMsg::Catalog(req, reply) => self.catalog_request(req, reply),
             NodeMsg::KillSessions(scope, reply) => self.kill_sessions(scope, reply),
+            NodeMsg::GateEverywhere(want, reply) => self.gate_everywhere(want, reply),
             NodeMsg::Ranges(ranges) => {
                 if let Some(data) = &mut self.data {
                     data.set_ranges(&ranges);

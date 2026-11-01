@@ -75,15 +75,15 @@ fn current<B: Backend + ?Sized>(b: &mut B) -> Result<WriteGate, CommandError> {
     Ok(gate_of(&b.cluster_parameters()?))
 }
 
-/// Stores gate `name` with `v`, then waits until the node's gate is `want`, so that the writes
-/// this node takes after the answer see it.
+/// Stores gate `name` with `v`, then waits until this node's gate and every other live node's is
+/// `want`, so that the writes any node takes after the answer see it.
 fn store<B: Backend + ?Sized>(
     b: &mut B,
     (name, v): (&str, Value),
     want: WriteGate,
 ) -> Result<(), CommandError> {
     b.set_cluster_parameter(name, Document::new().with(VALUE, v).to_bytes()?)?;
-    while b.write_gate()? != want {
+    while b.write_gate()? != want || !b.gate_everywhere(want)? {
         if !b.txn_pause() {
             return Err(CommandError::new(MAX_TIME_MS_EXPIRED, crate::ops::TIME_LIMIT_MESSAGE));
         }

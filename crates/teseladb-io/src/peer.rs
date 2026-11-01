@@ -23,8 +23,28 @@ pub const HEADER_LEN: usize = 8;
 pub(crate) const LEN_COVERED: usize = 4;
 /// Handshake marker.
 pub const MAGIC: &[u8; 8] = b"TSLPEER1";
-/// Protocol version: 4 since a heartbeat carries its range's closed mark (007 FR-012).
-pub const PROTOCOL_VERSION: u16 = 4;
+/// The highest protocol version this binary speaks: 5 since a forwarded request asks a node
+/// whether it applies the cluster's write gates (007 FR-029). 4 since a heartbeat carries its
+/// range's closed mark (007 FR-012).
+pub const PROTOCOL_VERSION: u16 = 5;
+/// The lowest protocol version this binary speaks: a node that does not know a forwarded request
+/// of 5 answers it with nothing, and the asker counts it as down (007 FR-027).
+pub const PROTOCOL_MIN: u16 = 4;
+
+/// The protocol versions a node speaks, from `min` to `max` (007 FR-027): two nodes speak the
+/// highest both have, so a cluster upgrades node by node.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Versions {
+    /// Lowest.
+    pub min: u16,
+    /// Highest.
+    pub max: u16,
+}
+
+impl Versions {
+    /// This binary's.
+    pub const OWN: Versions = Versions { min: PROTOCOL_MIN, max: PROTOCOL_VERSION };
+}
 /// `flags`: payload compressed with DEFLATE.
 pub const FLAG_DEFLATE: u8 = 1;
 
@@ -99,6 +119,8 @@ pub struct Hello {
     pub http_addr: String,
     /// Native protocol address.
     pub native_addr: String,
+    /// Protocol versions it speaks.
+    pub versions: Versions,
 }
 
 /// Coalesced heartbeat of a group.
@@ -396,7 +418,7 @@ impl PeerMsg {
     fn encode_payload(&self, e: &mut Encoder) {
         match self {
             PeerMsg::Hello(h) => {
-                e.raw(MAGIC).u16(PROTOCOL_VERSION).raw(&h.cluster_id).u64(h.node_id.0);
+                e.raw(MAGIC).u16(h.versions.min).raw(&h.cluster_id).u64(h.node_id.0);
                 e.u16(h.core).u16(h.cores).str(&h.peer_addr).str(&h.http_addr).str(&h.native_addr);
             }
             PeerMsg::RaftBatch { wall_ms, hlc, msgs: ms } => {
@@ -511,7 +533,9 @@ impl PeerMsg {
                     return Err(DecodeError::InvalidValue { offset: at });
                 }
                 let at = d.position();
-                if d.u16()? != PROTOCOL_VERSION {
+                // The lowest version; the highest goes in the header ([`decode_frame`]).
+                let version = d.u16()?;
+                if version == 0 {
                     return Err(DecodeError::InvalidValue { offset: at });
                 }
                 PeerMsg::Hello(Hello {
@@ -522,6 +546,7 @@ impl PeerMsg {
                     peer_addr: d.str()?.to_owned(),
                     http_addr: d.str()?.to_owned(),
                     native_addr: d.str()?.to_owned(),
+                    versions: Versions { min: version, max: version },
                 })
             }
             0x02 => {
@@ -751,7 +776,13 @@ pub fn encode_frame(msg: &PeerMsg, compress: bool, out: &mut Vec<u8>) -> Result<
     }
     out.reserve(HEADER_LEN + payload.len());
     out.extend_from_slice(&((payload.len() + LEN_COVERED) as u32).to_le_bytes());
-    out.extend_from_slice(&[msg.kind(), flags, 0, 0]);
+    // A `Hello` carries the highest version it speaks in the header's spare bytes, where a node
+    // that only speaks 4 does not look (007 FR-027).
+    let spare = match msg {
+        PeerMsg::Hello(h) => h.versions.max.to_le_bytes(),
+        _ => [0, 0],
+    };
+    out.extend_from_slice(&[msg.kind(), flags, spare[0], spare[1]]);
     out.extend_from_slice(&payload);
     Ok(())
 }
@@ -799,8 +830,22 @@ pub fn decode_frame(buf: &[u8]) -> Result<Option<(PeerMsg, usize)>, FrameError> 
     let mut d = Decoder::new(payload);
     let msg = PeerMsg::decode_payload(kind, &mut d)
         .and_then(|m| d.finish().map(|()| m))
+        .and_then(|m| with_highest(m, u16::from_le_bytes([frame[6], frame[7]])))
         .map_err(|err| FrameError::Malformed { kind, err })?;
     Ok(Some((msg, total)))
+}
+
+/// A `Hello` with the highest version of the header's spare bytes: zeros (a node that only speaks
+/// one version) leave the lowest; one below the lowest is no range.
+fn with_highest(msg: PeerMsg, max: u16) -> Result<PeerMsg, DecodeError> {
+    match msg {
+        PeerMsg::Hello(h) if max == 0 => Ok(PeerMsg::Hello(h)),
+        PeerMsg::Hello(h) if max < h.versions.min => Err(DecodeError::InvalidValue { offset: 2 }),
+        PeerMsg::Hello(h) => {
+            Ok(PeerMsg::Hello(Hello { versions: Versions { max, ..h.versions }, ..h }))
+        }
+        m => Ok(m),
+    }
 }
 
 fn inflate_limited(data: &[u8]) -> Result<Vec<u8>, FrameError> {

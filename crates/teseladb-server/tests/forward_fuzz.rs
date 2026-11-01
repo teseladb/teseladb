@@ -13,6 +13,7 @@ use teseladb_server::data_wire::{
 };
 use teseladb_server::forward::{Fetch, FetchReply, Request};
 use teseladb_types::{GroupId, NodeId, Rng};
+use teseladb_wire::commands::write_block::WriteGate;
 
 fn requests() -> Vec<RemoteReq> {
     let at = Hlc { physical: 7, logical: 1 };
@@ -69,6 +70,7 @@ fn forwards() -> Vec<Request> {
         Request::Rebuild(GroupId(9)),
         Request::MergeProbe { range: GroupId(5), merge: 12 },
         Request::Meta2 { group: GroupId(7), entry: vec![1, 2, 3] },
+        Request::Gate(WriteGate { fsync_locks: 2, user_writes_blocked: true }),
     ]
 }
 
