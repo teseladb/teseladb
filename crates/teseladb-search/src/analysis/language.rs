@@ -46,6 +46,7 @@ const STOPWORDS: &[(&str, &str)] = &[
     ("sorani", include_str!("stopwords/sorani.txt")),
     ("spanish", include_str!("stopwords/spanish.txt")),
     ("swedish", include_str!("stopwords/swedish.txt")),
+    ("thai", include_str!("stopwords/thai.txt")),
     ("turkish", include_str!("stopwords/turkish.txt")),
     ("ukrainian", include_str!("stopwords/ukrainian.txt")),
 ];
@@ -99,6 +100,15 @@ pub fn language(language: &str) -> Option<(Vec<CharFilter>, Tokenizer, Vec<Token
             return Some((vec![], Tokenizer::Kuromoji, filters));
         }
         "nori" => return Some((vec![], Tokenizer::Nori, vec![TokenFilter::Lowercase])),
+        "smartcn" => {
+            let filters = vec![TokenFilter::Lowercase, TokenFilter::PorterStemming];
+            return Some((vec![], Tokenizer::SmartCn, filters));
+        }
+        "thai" => {
+            let stop = TokenFilter::Stopword { tokens: stopwords(language)?, ignore_case: false };
+            let filters = vec![TokenFilter::Lowercase, TokenFilter::DecimalDigit, stop];
+            return Some((vec![], Tokenizer::Thai, filters));
+        }
         _ => {}
     }
     let cjk = CJK_ANALYZERS.contains(&language);
