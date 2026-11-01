@@ -166,6 +166,37 @@ pub(super) fn aggregate<B: Backend + ?Sized>(
     let (examined, matched) =
         if run { scan(ctx, coll.as_ref(), &read, stop, |_| Ok(()))? } else { (0, 0) };
     let shown = parsed(&filter, None)?;
+    // Without a sort, the planner chooses how the filter reads (measured: an `_id` range
+    // through its index).
+    let sorted = steps[i..first].iter().any(|s| matches!(s.kind, Kind::Sort(_)));
+    let plan_read = super::super::plan_exec::ReadPlan {
+        filter: &filter,
+        parsed: &shown,
+        sort: Vec::new(),
+        limit: None,
+        hint: None,
+        vars: None,
+        concern: teseladb_range::read::ReadConcern::Local,
+        intersect: super::super::lock(ctx.shared).params.hash_intersection,
+    };
+    let chosen = match sorted {
+        true => None,
+        false => super::planned_read(ctx, coll.as_ref(), &plan_read, None)?,
+    };
+    let access = chosen.as_ref().and_then(|(indexes, c)| match c.winner.access {
+        teseladb_plan::rules::Access::Collscan => None,
+        _ => Some((
+            super::planned_access(ns, &shown, indexes, &c.winner, run, None),
+            c.others
+                .iter()
+                .map(|r| super::planned_access(ns, &shown, indexes, r, false, None))
+                .collect::<Vec<Stage>>(),
+        )),
+    });
+    let (mut input, rejected) = match access {
+        Some((a, r)) => (Some(a), r),
+        None => (None, Vec::new()),
+    };
     let counted = Run { examined, matched };
     let mut ids = Ids { next: engine.then_some(1) };
     let mut foreign = Vec::new();
@@ -178,10 +209,10 @@ pub(super) fn aggregate<B: Backend + ?Sized>(
         }
     }
     let (plan, last, extra) = if engine {
-        let base = query_plan(ns, &steps, (i, first), &shown, &counted, &mut ids);
+        let base = query_plan(ns, &steps, (i, first), &shown, &counted, &mut ids, input.take());
         engine_plan(ns, &steps, (first, &foreign), base, &mut ids)?
     } else {
-        let mut plan = query_plan(ns, &steps, (i, first), &shown, &counted, &mut ids);
+        let mut plan = query_plan(ns, &steps, (i, first), &shown, &counted, &mut ids, input.take());
         if makes_sort_keys(&steps[first..]) {
             let mut keys = Stage::new("SORT_KEY_GENERATOR");
             keys.returned = plan.returned;
@@ -201,7 +232,7 @@ pub(super) fn aggregate<B: Backend + ?Sized>(
     }
     let mut planner = Document::new()
         .with("namespace", names::full(ns))
-        .with("parsedQuery", shown)
+        .with("parsedQuery", shown.clone())
         .with("indexFilterSet", false)
         .with("optimizationTimeMillis", 0);
     if remaining.is_empty() {
@@ -224,7 +255,19 @@ pub(super) fn aggregate<B: Backend + ?Sized>(
         extend(&mut winning, &plan.planned());
     }
     planner.push("winningPlan", winning);
-    planner.push("rejectedPlans", Vec::<Value>::new());
+    // Each plan the planner rejected, under the query's own stages.
+    let rejected: Vec<Value> = rejected
+        .into_iter()
+        .map(|access| {
+            let mut none = Ids { next: None };
+            let other =
+                query_plan(ns, &steps, (i, first), &shown, &counted, &mut none, Some(access));
+            let mut d = Document::new().with("isCached", false);
+            extend(&mut d, &other.planned());
+            Value::Document(d)
+        })
+        .collect();
+    planner.push("rejectedPlans", rejected);
     let mut cursor = Document::new().with("queryPlanner", planner);
     let returned =
         if run && engine { through(ctx, ns, &docs(&steps[..last]))? } else { plan.returned };
@@ -689,10 +732,15 @@ fn query_plan(
     shown: &Document,
     counted: &Run,
     ids: &mut Ids,
+    access: Option<Stage>,
 ) -> Stage {
     let engine = ids.next.is_some();
-    let scan_id = ids.take();
-    let mut plan = collscan(ns, shown, counted.examined, counted.matched);
+    let indexed = access.is_some();
+    let scan_id = if indexed { None } else { ids.take() };
+    let mut plan = match access {
+        Some(a) => number_chain(a, ids),
+        None => collscan(ns, shown, counted.examined, counted.matched),
+    };
     if matches_nothing(shown) {
         plan.id = scan_id;
         return plan;
@@ -705,8 +753,10 @@ fn query_plan(
             None
         }
     };
-    plan.id = scan_id;
-    if engine && plan.head.get("filter").is_none() {
+    if !indexed {
+        plan.id = scan_id;
+    }
+    if engine && !indexed && plan.head.get("filter").is_none() {
         plan.head.push("filter", Document::new());
     }
     let mut sort: Option<Document> = None;
@@ -815,6 +865,16 @@ fn query_plan(
         }
         None => plan,
     }
+}
+
+/// `stage` and the stages under it numbered from the bottom, as the engine numbers an index
+/// scan and its fetch.
+fn number_chain(mut stage: Stage, ids: &mut Ids) -> Stage {
+    if let Some(input) = stage.input.take() {
+        stage.input = Some(Box::new(number_chain(*input, ids)));
+    }
+    stage.id = ids.take();
+    stage
 }
 
 /// Whether projection `p`, which only keeps or drops fields, leaves the fields of sort `s` as

@@ -274,6 +274,13 @@ fn explain_edges_answer_as_refdb() {
     check_in(include_str!("explain/edges.out"), false);
 }
 
+/// `aggregate` whose leading `$match` reads through an index (`tests/explain/agg_index.out`,
+/// 010 FR-001): the planner's plan under the stages after it, with the plans it rejected.
+#[test]
+fn aggregate_reads_through_index_plans_as_refdb() {
+    check_in(include_str!("explain/agg_index.out"), false);
+}
+
 /// More replies that name a `refrouter`'s shards (`tests/explain/shards2.out`, DV-031, D-102): the
 /// index commands' `raw`, keyed `node<N>/host:port`, and a `writeConcernError` ` at node<N>`.
 #[test]
