@@ -13,6 +13,7 @@ pub mod optimize;
 pub mod out_merge;
 mod sbe;
 mod scoped;
+pub mod search;
 mod shape;
 pub mod sort;
 mod stages;
@@ -57,6 +58,17 @@ pub trait Env {
         ))
     }
 
+    /// The documents of a search stage (`$search`, `$searchMeta` or `$vectorSearch`) with its
+    /// specification, from the node's search indexes (011 FR-022). Without search, RefDb's
+    /// `SearchNotEnabled`.
+    fn search_source(
+        &self,
+        _stage: &str,
+        _spec: &Document,
+    ) -> Result<Vec<search::Scored>, MqlError> {
+        Err(search::not_enabled())
+    }
+
     /// The collation strings compare with (010 FR-014): the binary order by default.
     fn collation(&self) -> crate::collation::Collation {
         crate::collation::Collation::default()
@@ -96,6 +108,8 @@ enum Stage {
     GraphLookup(Box<fill::GraphLookup>),
     /// A stage the node answers itself, first in its pipeline.
     System(&'static str, Document),
+    /// A search stage, first in its pipeline (011 FR-022).
+    Search(&'static str, Document),
     /// `$out` or `$merge`, last: the node writes what reaches it.
     Write(Box<out_merge::Write>),
 }
@@ -172,6 +186,7 @@ impl Pipeline {
             let name = match st {
                 Stage::Documents(_) => "$documents",
                 Stage::System(name, _) => name,
+                Stage::Search(name, _) => search::first_stage_name(name),
                 _ => continue,
             };
             return Err(error(
@@ -195,7 +210,10 @@ impl Pipeline {
     /// Whether the pipeline reads its collection: not when it starts with `$documents` or a
     /// stage the node answers itself.
     pub fn reads_collection(&self) -> bool {
-        !matches!(self.stages.first(), Some(Stage::Documents(_) | Stage::System(..)))
+        !matches!(
+            self.stages.first(),
+            Some(Stage::Documents(_) | Stage::System(..) | Stage::Search(..))
+        )
     }
 
     /// Runs the pipeline over `docs`.
@@ -342,6 +360,9 @@ fn parse_stage(d: RawDoc<'_>, ctx: &Ctx) -> Result<Stage, MqlError> {
         "$fill" => Stage::Fill(Box::new(fill::Fill::parse(arg, ctx)?)),
         "$graphLookup" => Stage::GraphLookup(Box::new(fill::GraphLookup::parse(arg, ctx)?)),
         "$collStats" => Stage::System("$collStats", system::coll_stats(arg)?),
+        "$search" => Stage::Search("$search", search::parse(name, arg)?),
+        "$searchMeta" => Stage::Search("$searchMeta", search::parse(name, arg)?),
+        "$vectorSearch" => Stage::Search("$vectorSearch", search::parse(name, arg)?),
         out_merge::OUT => {
             Stage::Write(Box::new(out_merge::Write::Out(out_merge::Out::parse(arg)?)))
         }
@@ -458,6 +479,7 @@ fn sbe_capable(st: &Stage) -> bool {
         | Stage::Densify(_)
         | Stage::GraphLookup(_)
         | Stage::System(..)
+        | Stage::Search(..)
         | Stage::Write(_) => false,
     }
 }
@@ -503,6 +525,9 @@ fn run_stage(
         Stage::Fill(f) => f.run(docs, env)?,
         Stage::GraphLookup(g) => g.run(docs, env)?,
         Stage::System(name, spec) => env.system_stage(name, spec)?,
+        Stage::Search(name, spec) => {
+            env.search_source(name, spec)?.into_iter().map(|s| s.doc).collect()
+        }
         // The node writes what reaches it (`out_merge`).
         Stage::Write(_) => docs,
     })
