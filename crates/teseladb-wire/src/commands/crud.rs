@@ -623,6 +623,34 @@ pub fn insert<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
     Ok(w.finish(reply))
 }
 
+/// Inserts `docs` in `ns` for the node itself (the profiler's `system.profile`, which no
+/// client command writes): the first write error is the result.
+pub(crate) fn insert_internal<B: Backend + ?Sized>(
+    ctx: &mut Ctx<'_, B>,
+    ns: &Namespace,
+    docs: Vec<Document>,
+) -> Result<(), CommandError> {
+    let mut w = Writer::new(ctx, INSERT)?;
+    let Some(coll) = ctx.backend.collection(ns)? else {
+        return Err(CommandError::new(crate::error::INTERNAL_ERROR, "no collection to write"));
+    };
+    let rules = rules_of(ns, &coll, true, None, index_rules(ctx.backend, &coll)?)?;
+    let mut chunk = Vec::new();
+    for (i, d) in docs.into_iter().enumerate() {
+        let doc = with_id(ctx.backend, ctx.shared, &d)?;
+        let key = insert_key(&coll, doc.get("_id").unwrap_or(&Value::Null))?;
+        chunk.push((i, doc, key));
+    }
+    let (mut n, mut errors) = (0, Vec::new());
+    flush(ctx, &mut w, (&coll, &rules), true, &mut chunk, &mut n, &mut errors);
+    match errors.into_iter().next() {
+        None => Ok(()),
+        Some(e) => {
+            Err(CommandError::new(crate::error::INTERNAL_ERROR, crate::commands::display(&e)))
+        }
+    }
+}
+
 /// Writes the documents gathered; `true` if an ordered insert has to stop.
 fn flush<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,

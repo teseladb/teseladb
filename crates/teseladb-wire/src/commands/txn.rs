@@ -1433,6 +1433,10 @@ impl Backend for TxnBackend<'_> {
         self.inner.process()
     }
 
+    fn log_slow_query(&mut self, attr: &teseladb_bson::Document) {
+        self.inner.log_slow_query(attr)
+    }
+
     fn log_warning(&mut self, id: i32, msg: &str, attr: &teseladb_bson::Document) {
         self.inner.log_warning(id, msg, attr);
     }

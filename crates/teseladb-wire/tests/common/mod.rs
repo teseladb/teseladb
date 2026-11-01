@@ -759,6 +759,14 @@ impl Backend for Mem {
         self.logged.push((id, msg.to_owned(), attr.clone()));
     }
 
+    fn log_slow_query(&mut self, attr: &Document) {
+        self.logged.push((
+            teseladb_wire::commands::profile::SLOW_QUERY_ID,
+            "Slow query".to_owned(),
+            attr.clone(),
+        ));
+    }
+
     fn process(&mut self) -> teseladb_wire::commands::diagnostics::ProcessFacts {
         self.facts.clone()
     }

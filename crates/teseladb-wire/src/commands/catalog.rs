@@ -163,7 +163,7 @@ pub(crate) fn id_index(c: &CollectionEntry) -> Result<Document, CommandError> {
 /// `create`.
 pub fn create<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     let ns = target(ctx)?;
-    names::check_writable(&ns)?;
+    names::check_creatable(&ns)?;
     let mut options = options_from(ctx.cmd);
     let asked = kinds::check(&ns, &options)?;
     let given_collation = match options.get(COLLATION) {

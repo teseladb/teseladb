@@ -1041,6 +1041,22 @@ impl Backend for ServerBackend {
         })
     }
 
+    fn log_slow_query(&mut self, attr: &teseladb_bson::Document) {
+        let attr = attr
+            .to_bytes()
+            .ok()
+            .and_then(|b| {
+                teseladb_bson::RawDoc::from_bytes(&b).ok().map(teseladb_bson::extjson::to_relaxed)
+            })
+            .unwrap_or_default();
+        let line = crate::log::Pending {
+            id: teseladb_wire::commands::profile::SLOW_QUERY_ID,
+            msg: "Slow query".to_owned(),
+            attr,
+        };
+        crate::log::defer_at(crate::log::Level::Info, line);
+    }
+
     fn log_warning(&mut self, id: i32, msg: &str, attr: &teseladb_bson::Document) {
         // A line that does not encode says so instead of its attributes.
         let attr = match attr.to_bytes() {
