@@ -6,11 +6,14 @@ use std::collections::BTreeMap;
 use teseladb_keys::Hlc;
 use teseladb_search::query::bm25::{Bm25, FieldStats};
 use teseladb_search::query::wand::{Cursor, top_k};
-use teseladb_search::segment::data::{DocEntry, FieldData, Occurrence, PostingEntry, SegmentData};
+use teseladb_search::segment::data::{
+    DocEntry, FieldData, Occurrence, PostingEntry, SegmentData, VectorData,
+};
 use teseladb_search::segment::file::{Segment, build};
 use teseladb_search::segment::manifest::{Op, encode, replay};
 use teseladb_search::segment::merge::merge;
 use teseladb_search::segment::norms;
+use teseladb_search::vector::{Quantization, Similarity};
 use teseladb_types::GroupId;
 
 fn ts(physical: u64) -> Hlc {
@@ -204,4 +207,43 @@ fn a_sealed_segment_hides_its_text_and_opens_with_its_master_key() {
     // A clear segment comes back as it is.
     let clear = build(&data);
     assert_eq!(open_sealed(&clear, None).unwrap(), clear);
+}
+
+#[test]
+fn vector_fields_are_written_reopened_and_merged() {
+    let with_vectors = |prefix: &str, values: Vec<Option<Vec<f32>>>| {
+        let texts: Vec<&str> = values.iter().map(|_| "a").collect();
+        let mut s = segment(prefix, &texts, 1);
+        s.vectors.insert(
+            "v".to_owned(),
+            VectorData {
+                dims: 2,
+                similarity: Similarity::Euclidean,
+                quantization: Quantization::None,
+                values,
+            },
+        );
+        s
+    };
+    let a = with_vectors("a", vec![Some(vec![0.0, 0.0]), None, Some(vec![1.0, 0.0])]);
+    let bytes = build(&a);
+    let seg = Segment::open(&bytes).expect("open");
+    let g = seg.vectors("v").expect("graph");
+    let top: Vec<u32> = g.search(&[0.9, 0.0], 10, 2, |_| true).iter().map(|s| s.doc).collect();
+    assert_eq!(top, [2, 0]);
+    assert!(seg.vectors("w").is_none());
+    assert_eq!(seg.to_data().expect("data").vectors, a.vectors);
+    // A merge with a segment without the field keeps every document's place.
+    let b = segment("b", &["a", "a"], 2);
+    let mut deletes = BTreeMap::new();
+    deletes.insert(0u32, ts(5));
+    let (m, _) = merge(&[(a, deletes), (b, BTreeMap::new())], ts(9));
+    assert_eq!(m.vectors["v"].values, [None, Some(vec![1.0, 0.0]), None, None]);
+    let bytes = build(&m);
+    let seg = Segment::open(&bytes).expect("open merged");
+    let g = seg.vectors("v").expect("graph");
+    assert_eq!(
+        g.search(&[0.0, 0.0], 10, 10, |_| true).iter().map(|s| s.doc).collect::<Vec<_>>(),
+        [1]
+    );
 }

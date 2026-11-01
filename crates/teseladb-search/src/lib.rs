@@ -14,9 +14,12 @@
 //! - [`query::fuzzy`] and [`query::regex`]: Levenshtein, prefix, regex and wildcard automata run
 //!   over that dictionary to expand `fuzzy`, `autocomplete`, `regex` and `wildcard` queries
 //!   (FR-018).
+//! - [`vector`] and [`segment::hnsw`]: the similarities and scores of `$vectorSearch` and the
+//!   HNSW graph of each vector field of a segment (FR-005, FR-017).
 #![forbid(unsafe_code)]
 #![cfg_attr(coverage, feature(coverage_attribute))]
 
 pub mod analysis;
 pub mod query;
 pub mod segment;
+pub mod vector;
