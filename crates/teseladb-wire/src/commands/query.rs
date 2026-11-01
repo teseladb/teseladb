@@ -95,6 +95,8 @@ pub struct QueryCursor {
     pub tail: Option<Tail>,
     /// The mark its reads are served at, and whether its replies give it (008 FR-012).
     pub read_mark: Option<teseladb_txn::causal::ReadMark>,
+    /// The change stream it reads (014 FR-013).
+    pub stream: Option<Box<super::change_stream::ChangeStream>>,
 }
 
 pub(crate) fn collation_of(doc: Option<&Document>) -> Result<Option<Collation>, CommandError> {
@@ -392,6 +394,7 @@ impl QueryCursor {
             left: None,
             tail: None,
             read_mark: None,
+            stream: None,
         }
     }
 
@@ -855,6 +858,7 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
             left: a.limit,
             tail: a.tailable.map(Tail::new),
             read_mark: None,
+            stream: None,
         },
         Some(sort) => {
             sorted(ctx.backend, &coll, &a, sort, collation.as_ref(), planned).map_err(executor)?
@@ -1301,9 +1305,21 @@ pub fn get_more<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, C
     ctx.backend.set_read_mark(c.state.read_mark);
     // `maxTimeMS` of a `getMore` is only the wait of a tailable `awaitData` cursor. The cursor
     // was taken: like a `refrouter` 9.0.4, the error kills it (measured).
-    if max_time.is_some() && !c.state.tail.as_ref().is_some_and(|t| t.await_data) {
+    let awaits = c.state.stream.is_some() || c.state.tail.as_ref().is_some_and(|t| t.await_data);
+    if max_time.is_some() && !awaits {
         let msg = "maxTimeMS can only be used with getMore for tailable, awaitData cursors";
         return Err(CommandError::new(crate::error::BAD_VALUE, msg));
+    }
+    if let Some(stream) = c.state.stream.as_mut() {
+        let (docs, token) = super::change_stream::more(ctx.backend, stream, batch, max_time)?;
+        lock(ctx.shared).cursors.put(id, c);
+        let docs: Vec<Value> = docs.into_iter().map(Value::Document).collect();
+        let cursor = Document::new()
+            .with("id", id)
+            .with("ns", ns_text)
+            .with("nextBatch", docs)
+            .with("postBatchResumeToken", token);
+        return Ok(Document::new().with("cursor", cursor).with("ok", 1.0));
     }
     if c.state.tail.is_some() {
         let docs = tail_more(ctx.backend, &mut c.state, batch, max_time)?;

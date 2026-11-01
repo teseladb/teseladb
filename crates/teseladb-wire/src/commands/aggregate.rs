@@ -566,6 +566,12 @@ pub fn aggregate<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
         Some(RawValue::Array(p)) => p.iter().collect(),
         _ => Vec::new(),
     };
+    if super::change_stream::first_stage(&stages)
+        == Some(teseladb_changestream::stage::CHANGE_STREAM)
+    {
+        return super::change_stream::open(ctx, &ns, on_collection, &stages);
+    }
+    super::change_stream::not_first(&stages)?;
     let vars = a.vars.clone().unwrap_or_default();
     let names: Vec<String> = vars.iter().map(|(k, _)| k.to_owned()).collect();
     let ctx_vars = ExprCtx::checked(names.iter().map(String::as_str));
@@ -629,6 +635,7 @@ pub fn aggregate<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
         left: None,
         tail: None,
         read_mark: ctx.backend.read_mark(),
+        stream: None,
     };
     let size = Some(a.batch_size.unwrap_or(DEFAULT_FIRST_BATCH));
     let (batch, short) = state.batch(ctx.backend, size)?;

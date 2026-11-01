@@ -4,7 +4,7 @@
 use teseladb_bson::Value;
 use teseladb_hlc::{Hlc, from_timestamp};
 
-use crate::token::{ResumeToken, TokenError};
+use crate::token::{Position, TokenError};
 
 /// The stage's name.
 pub const CHANGE_STREAM: &str = "$changeStream";
@@ -38,6 +38,10 @@ pub mod codes {
     pub const NOT_FIRST: i32 = 40602;
     /// Both `resumeAfter` and `startAfter`.
     pub const BOTH_STARTS: i32 = 50865;
+    /// A resume token without a string `_data`.
+    pub const BAD_TOKEN: i32 = 40647;
+    /// A token and `startAtOperationTime` together.
+    pub const SEVERAL_STARTS: i32 = 40674;
     /// The stage's argument is no document.
     pub const NOT_AN_OBJECT: i32 = 6188500;
     /// `$changeStreamSplitLargeEvent` not last.
@@ -90,9 +94,9 @@ pub enum Start {
     #[default]
     Now,
     /// After the event of a token.
-    ResumeAfter(ResumeToken),
+    ResumeAfter(Position),
     /// After the event of a token, also past an `invalidate`.
-    StartAfter(ResumeToken),
+    StartAfter(Position),
     /// At a mark (`startAtOperationTime`).
     At(Hlc),
 }
@@ -138,9 +142,10 @@ const BEFORE_VALUES: [(&str, BeforeChange); 3] = [
 fn enumeration<T: Copy>(v: &Value, field: &str, values: &[(&str, T)]) -> Result<T, StageError> {
     let shown = match v {
         Value::String(s) => s.as_str(),
-        _ => {
+        other => {
             let msg = format!(
-                "BSON field '$changeStream.{field}' is the wrong type, expected type 'string'"
+                "BSON field '$changeStream.{field}' is the wrong type '{}', expected type 'string'",
+                type_name(other)
             );
             return Err(error(codes::TYPE_MISMATCH, msg));
         }
@@ -153,21 +158,35 @@ fn enumeration<T: Copy>(v: &Value, field: &str, values: &[(&str, T)]) -> Result<
     })
 }
 
-fn token(v: &Value, field: &str) -> Result<ResumeToken, StageError> {
+fn token(v: &Value, field: &str) -> Result<Position, StageError> {
     let Value::Document(d) = v else {
-        let msg =
-            format!("BSON field '$changeStream.{field}' is the wrong type, expected type 'object'");
+        let msg = format!(
+            "BSON field '$changeStream.{field}' is the wrong type '{}', expected type 'object'",
+            type_name(v)
+        );
         return Err(error(codes::TYPE_MISMATCH, msg));
     };
     let Some(Value::String(data)) = d.get(DATA) else {
-        return Err(error(codes::FAILED_TO_PARSE, "resume token must contain a _data field"));
+        let msg = format!(
+            "Bad resume token: _data of missing or of wrong type. Expected string, got {}",
+            compact(d)
+        );
+        return Err(error(codes::BAD_TOKEN, msg));
     };
-    ResumeToken::decode(data).map_err(|e| match e {
+    Position::decode(data).map_err(|e| match e {
         TokenError::NotHex => {
             error(codes::FAILED_TO_PARSE, "resume token string was not a valid hex string")
         }
         _ => error(codes::FAILED_TO_PARSE, "resume token was not a valid resume token"),
     })
+}
+
+/// `d` as the message of a bad token writes it: `{_data: 1}`.
+fn compact(d: &teseladb_bson::Document) -> String {
+    let bytes = d.to_bytes().unwrap_or_default();
+    let shown = teseladb_bson::RawDoc::from_bytes(&bytes)
+        .map_or_else(|_| String::from("{}"), teseladb_bson::shell::shell_doc);
+    shown.replace("{ ", "{").replace(" }", "}")
 }
 
 fn boolean(v: &Value, field: &str) -> Result<bool, StageError> {
@@ -241,8 +260,12 @@ impl ChangeStreamSpec {
                     "Do not specify both 'resumeAfter' and 'startAfter' in a $changeStream stage";
                 return Err(error(codes::BOTH_STARTS, msg));
             }
-            (Some(v), None) => spec.start = Start::ResumeAfter(token(v, RESUME_AFTER)?),
-            (None, Some(v)) => spec.start = Start::StartAfter(token(v, START_AFTER)?),
+            (Some(v), None) => {
+                spec.start = several(&spec, Start::ResumeAfter(token(v, RESUME_AFTER)?))?
+            }
+            (None, Some(v)) => {
+                spec.start = several(&spec, Start::StartAfter(token(v, START_AFTER)?))?
+            }
             (None, None) => {}
         }
         if spec.all_for_cluster != (scope == Scope::Cluster) {
@@ -254,6 +277,17 @@ impl ChangeStreamSpec {
             }
         }
         Ok(spec)
+    }
+}
+
+/// `start`, unless `spec` already starts at a mark.
+fn several(spec: &ChangeStreamSpec, start: Start) -> Result<Start, StageError> {
+    match spec.start {
+        Start::At(_) => Err(error(
+            codes::SEVERAL_STARTS,
+            "Only one type of resume option is allowed, but multiple were found",
+        )),
+        _ => Ok(start),
     }
 }
 

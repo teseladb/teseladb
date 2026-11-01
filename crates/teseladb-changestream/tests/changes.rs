@@ -148,3 +148,13 @@ fn a_transaction_gives_one_change_per_write_of_a_document() {
     assert_eq!(kinds, want);
     assert!(got.iter().all(|c| c.event.txn == 5 && c.event.ts == ts(50)));
 }
+
+#[test]
+fn a_document_key_names_its_tenant_and_collection() {
+    use teseladb_changestream::changes::collection_of;
+    let mut k = doc(1);
+    k[4] = 3;
+    assert_eq!(collection_of(&k), Some((3, 7)));
+    assert_eq!(collection_of(&entry(1)), None);
+    assert_eq!(collection_of(&[1, 0]), None);
+}

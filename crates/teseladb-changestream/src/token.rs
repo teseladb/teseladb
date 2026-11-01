@@ -80,6 +80,51 @@ pub struct ResumeToken {
     pub kind: EventKind,
 }
 
+/// A point of the merge a stream can resume from: after an event, or after every event up to a
+/// mark (a high-water mark, what `postBatchResumeToken` gives when no event is left to return).
+/// A high-water mark is written as a token with event type 0 and no key.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Position {
+    /// After this event.
+    Event(ResumeToken),
+    /// After every event at or below this mark.
+    HighWater(Hlc),
+}
+
+/// Event type byte of a high-water mark.
+const HIGH_WATER: u8 = 0;
+
+impl Position {
+    /// The `_data` string.
+    pub fn encode(&self) -> String {
+        match self {
+            Position::Event(t) => t.encode(),
+            Position::HighWater(ts) => {
+                let event = EventKey { ts: *ts, txn: 0, op: 0, key: Vec::new() };
+                hex(&raw(&event, HIGH_WATER))
+            }
+        }
+    }
+
+    /// Reads a `_data` string.
+    pub fn decode(data: &str) -> Result<Position, TokenError> {
+        let (event, kind) = parse(data)?;
+        if kind == HIGH_WATER && event.key.is_empty() && event.txn == 0 && event.op == 0 {
+            return Ok(Position::HighWater(event.ts));
+        }
+        let kind = EventKind::from_byte(kind).ok_or(TokenError::Kind(kind))?;
+        Ok(Position::Event(ResumeToken { event, kind }))
+    }
+
+    /// The mark of the point.
+    pub fn ts(&self) -> Hlc {
+        match self {
+            Position::Event(t) => t.event.ts,
+            Position::HighWater(ts) => *ts,
+        }
+    }
+}
+
 /// Why a token does not decode (the command answers `InvalidResumeToken`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TokenError {
@@ -96,54 +141,65 @@ pub enum TokenError {
 impl ResumeToken {
     /// The `_data` string.
     pub fn encode(&self) -> String {
-        let e = &self.event;
-        let mut b = Vec::with_capacity(32 + e.key.len());
-        b.push(TOKEN_VERSION);
-        b.extend_from_slice(&e.ts.physical.to_be_bytes());
-        b.extend_from_slice(&e.ts.logical.to_be_bytes());
-        b.extend_from_slice(&e.txn.to_be_bytes());
-        let mut op = u64::from(e.op);
-        loop {
-            let low = (op & 0x7f) as u8;
-            op >>= 7;
-            if op == 0 {
-                b.push(low);
-                break;
-            }
-            b.push(low | 0x80);
-        }
-        b.push(self.kind as u8);
-        b.extend_from_slice(&e.key);
-        b.iter().map(|x| format!("{x:02X}")).collect()
+        hex(&raw(&self.event, self.kind as u8))
     }
 
-    /// Reads a `_data` string.
+    /// Reads a `_data` string of an event.
     pub fn decode(data: &str) -> Result<ResumeToken, TokenError> {
-        let b = unhex(data)?;
-        let (&version, rest) = b.split_first().ok_or(TokenError::Truncated)?;
-        if version != TOKEN_VERSION {
-            return Err(TokenError::Version(version));
-        }
-        let (physical, rest) = take::<8>(rest)?;
-        let (logical, rest) = take::<4>(rest)?;
-        let (txn, mut rest) = take::<16>(rest)?;
-        let mut op: u64 = 0;
-        for shift in (0..35).step_by(7) {
-            let (&byte, r) = rest.split_first().ok_or(TokenError::Truncated)?;
-            rest = r;
-            op |= u64::from(byte & 0x7f) << shift;
-            if byte & 0x80 == 0 {
-                break;
-            }
-        }
-        let op = u32::try_from(op).map_err(|_| TokenError::Truncated)?;
-        let (&kind, key) = rest.split_first().ok_or(TokenError::Truncated)?;
+        let (event, kind) = parse(data)?;
         let kind = EventKind::from_byte(kind).ok_or(TokenError::Kind(kind))?;
-        let ts =
-            Hlc { physical: u64::from_be_bytes(physical), logical: u32::from_be_bytes(logical) };
-        let event = EventKey { ts, txn: u128::from_be_bytes(txn), op, key: key.to_vec() };
         Ok(ResumeToken { event, kind })
     }
+}
+
+fn raw(e: &EventKey, kind: u8) -> Vec<u8> {
+    let mut b = Vec::with_capacity(32 + e.key.len());
+    b.push(TOKEN_VERSION);
+    b.extend_from_slice(&e.ts.physical.to_be_bytes());
+    b.extend_from_slice(&e.ts.logical.to_be_bytes());
+    b.extend_from_slice(&e.txn.to_be_bytes());
+    let mut op = u64::from(e.op);
+    loop {
+        let low = (op & 0x7f) as u8;
+        op >>= 7;
+        if op == 0 {
+            b.push(low);
+            break;
+        }
+        b.push(low | 0x80);
+    }
+    b.push(kind);
+    b.extend_from_slice(&e.key);
+    b
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02X}")).collect()
+}
+
+/// The fields of a token: its place in the merge and its event type byte.
+fn parse(data: &str) -> Result<(EventKey, u8), TokenError> {
+    let b = unhex(data)?;
+    let (&version, rest) = b.split_first().ok_or(TokenError::Truncated)?;
+    if version != TOKEN_VERSION {
+        return Err(TokenError::Version(version));
+    }
+    let (physical, rest) = take::<8>(rest)?;
+    let (logical, rest) = take::<4>(rest)?;
+    let (txn, mut rest) = take::<16>(rest)?;
+    let mut op: u64 = 0;
+    for shift in (0..35).step_by(7) {
+        let (&byte, r) = rest.split_first().ok_or(TokenError::Truncated)?;
+        rest = r;
+        op |= u64::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            break;
+        }
+    }
+    let op = u32::try_from(op).map_err(|_| TokenError::Truncated)?;
+    let (&kind, key) = rest.split_first().ok_or(TokenError::Truncated)?;
+    let ts = Hlc { physical: u64::from_be_bytes(physical), logical: u32::from_be_bytes(logical) };
+    Ok((EventKey { ts, txn: u128::from_be_bytes(txn), op, key: key.to_vec() }, kind))
 }
 
 fn take<const N: usize>(b: &[u8]) -> Result<([u8; N], &[u8]), TokenError> {
@@ -206,5 +262,22 @@ mod tests {
         // A position wider than 32 bits.
         let wide = format!("{}FFFFFFFF7F04", &data[..(1 + 12 + 16) * 2]);
         assert_eq!(ResumeToken::decode(&wide), Err(TokenError::Truncated));
+    }
+
+    #[test]
+    fn a_high_water_mark_reads_back_and_is_no_event() {
+        let ts = Hlc { physical: 9, logical: 3 };
+        let data = Position::HighWater(ts).encode();
+        assert_eq!(Position::decode(&data), Ok(Position::HighWater(ts)));
+        assert_eq!(Position::HighWater(ts).ts(), ts);
+        assert_eq!(ResumeToken::decode(&data), Err(TokenError::Kind(0)));
+        let t = token(4);
+        assert_eq!(Position::decode(&t.encode()), Ok(Position::Event(t.clone())));
+        assert_eq!(Position::Event(t.clone()).encode(), t.encode());
+        assert_eq!(Position::Event(t.clone()).ts(), t.event.ts);
+        // Type 0 with a key is no high-water mark, and no event either.
+        let keyed = format!("{data}AB");
+        assert_eq!(Position::decode(&keyed), Err(TokenError::Kind(0)));
+        assert_eq!(Position::decode("zz"), Err(TokenError::NotHex));
     }
 }
