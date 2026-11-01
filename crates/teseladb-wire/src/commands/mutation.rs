@@ -59,6 +59,7 @@ mod f {
     pub const VARS: &str = "let";
     pub const ATTEMPT: &str = "attempt";
     pub const UNLOGGED: &str = "unlogged";
+    pub const SHARD_KEY: &str = "shardKey";
     pub const PROBES: &str = "probes";
     pub const CAPPED: &str = "capped";
     pub const CAPPED_SIZE: &str = "size";
@@ -157,6 +158,9 @@ pub struct Rules {
     /// A write no change stream sees (014): the purge of a dropped collection, whose drop is the
     /// event. It keeps no history next to the documents.
     pub unlogged: bool,
+    /// The collection's shard key (018 FR-001): its documents are keyed by it and their `_id`,
+    /// which their index entries end in.
+    pub shard_key: Option<Document>,
 }
 
 /// The buckets of a time series and the one an insert goes to.
@@ -298,6 +302,9 @@ fn rules_doc(r: &Rules, d: &mut Document, attempt: i64) {
     if r.unlogged {
         d.push(f::UNLOGGED, true);
     }
+    if let Some(k) = &r.shard_key {
+        d.push(f::SHARD_KEY, k.clone());
+    }
     if let Some(c) = &r.capped {
         let saturated = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
         let mut cd = Document::new().with(f::CAPPED_SIZE, saturated(c.limits.size));
@@ -318,6 +325,22 @@ fn rules_doc(r: &Rules, d: &mut Document, attempt: i64) {
         d.push(f::TIMESERIES, td);
     }
 }
+
+/// Refuses an update of `old` into `new` that changes the values of shard key `key`, as a
+/// `refrouter` 9.0.4 refuses it outside a transaction or a retryable write (measured on
+/// 02-11-2026): the document's key is its shard key.
+fn same_shard_key(key: &Document, old: RawDoc<'_>, new: &Document) -> Result<(), CommandError> {
+    let before = super::sharding::shard_values(key, &Document::from(old))?;
+    if before == super::sharding::shard_values(key, new)? {
+        return Ok(());
+    }
+    let msg = "Must run update to shard key field in a multi-statement transaction or with retryWrites: true.";
+    Err(CommandError::new(crate::error::ILLEGAL_OPERATION, msg))
+}
+
+/// Bytes of a document's key before its primary key in a collection with a shard key: space,
+/// tenant, collection and index.
+const DOC_PREFIX: usize = 13;
 
 /// The time series rule a mutation carries.
 fn read_timeseries(d: RawDoc<'_>) -> Result<Option<TimeSeriesRule>, CommandError> {
@@ -419,6 +442,7 @@ fn read_rules(d: RawDoc<'_>) -> Result<Rules, CommandError> {
         capped: read_capped(d)?,
         timeseries: read_timeseries(d)?,
         unlogged: get_bool(d, f::UNLOGGED),
+        shard_key: get_doc(d, f::SHARD_KEY),
     })
 }
 
@@ -715,6 +739,11 @@ struct Checker {
     vars: Option<Document>,
     /// The collection, when it is capped: its index entries end in the document's `seq`.
     capped: Option<(u32, u32)>,
+    /// The collection has a shard key: its index entries end in its documents' keys after
+    /// their prefix.
+    sharded: bool,
+    /// Its shard key, which an update cannot change.
+    shard_key: Option<Document>,
     /// The description of each document the write updated with operators, by its key (005
     /// FR-008, 014 FR-009).
     changes: std::cell::RefCell<Vec<(Vec<u8>, UpdateDescription)>>,
@@ -757,6 +786,8 @@ impl Checker {
             unique: std::cell::RefCell::default(),
             vars: r.vars.clone(),
             capped: r.capped.map(|_| (r.tenant, r.collection)),
+            sharded: r.shard_key.is_some(),
+            shard_key: r.shard_key.clone(),
             changes: std::cell::RefCell::default(),
         })
     }
@@ -799,19 +830,10 @@ impl Checker {
         }
     }
 
-    /// The index entries to write and delete when version `old` becomes the bytes `new`;
-    /// `lookup` gives the stored versions the leader read, for the unique keys.
-    fn entries<'a>(
-        &self,
-        old: Option<RawDoc<'a>>,
-        new: Option<&'a [u8]>,
-        lookup: &Lookup<'_>,
-    ) -> Result<(Vec<Put>, Vec<Vec<u8>>), CommandError> {
-        self.entries_at(None, old, new, lookup)
-    }
-
-    /// [`Checker::entries`] of the document at `key`: in a capped collection its entries end in
-    /// the `seq` of the key instead of the `_id`.
+    /// The index entries to write and delete when version `old` of the document at `key` becomes
+    /// the bytes `new`; `lookup` gives the stored versions the leader read, for the unique keys.
+    /// The entries end in the document's `_id`, in a capped collection in the `seq` of its key,
+    /// and in a collection with a shard key in its key after the prefix.
     fn entries_at<'a>(
         &self,
         key: Option<&[u8]>,
@@ -829,6 +851,9 @@ impl Checker {
                         CommandError::new(INTERNAL_ERROR, "not a capped document key")
                     })?,
             ),
+            (None, Some(k)) if self.sharded => Some(teseladb_keys::PrimaryKey::from_bytes(
+                k.get(DOC_PREFIX..).unwrap_or_default().to_vec(),
+            )),
             _ => None,
         };
         self.indexes.changes(old, new, pk.as_ref(), &mut self.unique.borrow_mut(), &stored)
@@ -1199,7 +1224,7 @@ fn insert(
         } else {
             stored_bytes(doc, Stored::Insert)
                 .and_then(|b| checker.check(&b, None).map(|()| b))
-                .and_then(|b| checker.entries(None, Some(&b), lookup).map(|e| (b, e)))
+                .and_then(|b| checker.entries_at(Some(key), None, Some(&b), lookup).map(|e| (b, e)))
         };
         match outcome {
             Ok((bytes, (entries, gone))) => {
@@ -1333,6 +1358,9 @@ fn modify(
                         let touches: Vec<Touch> = changes.into_iter().map(touch).collect();
                         let d = describe(&Document::from(doc), &out.doc, &touches, position);
                         checker.changes.borrow_mut().push((key.clone(), d));
+                    }
+                    if let Some(k) = &checker.shard_key {
+                        same_shard_key(k, doc, &out.doc).map_err(&during)?;
                     }
                     let new = stored_bytes(&out.doc, Stored::Update).map_err(&during)?;
                     checker.check(&new, Some(doc)).map_err(&during)?;

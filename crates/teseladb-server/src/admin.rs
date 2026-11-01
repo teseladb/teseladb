@@ -19,7 +19,6 @@ use teseladb_meta::drain::DrainError;
 use teseladb_rest::media::{self, Format};
 use teseladb_tls::{CertifiedKey, ClientConfig, Trust};
 use teseladb_types::{GroupId, NodeId};
-use teseladb_wire::commands::crud::doc_key;
 use teseladb_wire::commands::parameters::{GET_CLUSTER_PARAMETER, SET_CLUSTER_PARAMETER};
 use teseladb_wire::commands::roles::Graph;
 use teseladb_wire::commands::{Backend, Ctx, Shared, run as run_command};
@@ -522,9 +521,9 @@ impl AdminBackend for NodeAdmin {
                 let Some(Value::String(ns)) = at.get("ns") else {
                     return Err(AdminError::bad("--at needs {\"ns\": \"db.c\", \"_id\": …}"));
                 };
-                let id = at.get("_id").ok_or_else(|| AdminError::bad("--at needs an _id"))?;
                 let coll = self.collection(ns)?;
-                doc_key(&coll, id).map_err(|e| AdminError::bad(e.errmsg))?
+                teseladb_wire::commands::sharding::split_point(&coll, &at)
+                    .map_err(|e| AdminError::bad(e.errmsg))?
             }
             None => self.status(range).and_then(|s| s.cut).ok_or_else(|| {
                 AdminError::unavailable(

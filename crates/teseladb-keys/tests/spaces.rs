@@ -142,6 +142,10 @@ fn an_index_entry_ends_with_its_primary_key() {
     let a = with(1, |s| with(9, |id| KeyBuilder::document_sharded(2, 3, &[s], id)));
     let b = with(2, |s| with(0, |id| KeyBuilder::document_sharded(2, 3, &[s], id)));
     assert!(a < b);
+    // An index entry's primary key gives back its sharded document's key.
+    let pk = with(1, |s| with(9, |id| PrimaryKey::sharded(&[s], id)));
+    assert_eq!(KeyBuilder::document_of_sharded_pk(2, 3, pk.as_bytes()), a);
+    assert_eq!(PrimaryKey::from_bytes(pk.as_bytes().to_vec()), pk);
     let (c1, c2) = (
         with(1, |id| KeyBuilder::document_clustered(2, 3, id)),
         with(2, |id| KeyBuilder::document_clustered(2, 3, id)),

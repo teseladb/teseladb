@@ -72,6 +72,12 @@ impl PrimaryKey {
         PrimaryKey(out)
     }
 
+    /// The primary key a document's key ends in, after the documents' prefix of a collection
+    /// with a shard key ([`KeyBuilder::document_of_sharded_pk`]).
+    pub fn from_bytes(bytes: Vec<u8>) -> PrimaryKey {
+        PrimaryKey(bytes)
+    }
+
     /// The insertion number, for capped collections (015).
     pub fn seq(seq: u64) -> PrimaryKey {
         PrimaryKey(seq.to_be_bytes().to_vec())
@@ -188,6 +194,14 @@ impl KeyBuilder {
     ) -> Key {
         let mut out = data(tenant, collection, DOCUMENTS);
         out.extend(PrimaryKey::sharded(shard_key, id).0);
+        Key(out)
+    }
+
+    /// The document of primary key `pk` (an index entry's end) in a collection with a shard key:
+    /// the key's bytes after the documents' prefix, without bucket ([`Self::document_sharded`]).
+    pub fn document_of_sharded_pk(tenant: u32, collection: u32, pk: &[u8]) -> Key {
+        let mut out = data(tenant, collection, DOCUMENTS);
+        out.extend_from_slice(pk);
         Key(out)
     }
 

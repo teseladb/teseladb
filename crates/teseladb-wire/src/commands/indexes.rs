@@ -552,7 +552,9 @@ fn rules_of(
     // A capped collection's entries end in the document's `seq` (015 FR-003).
     let capped = super::capped::rule_of(coll)?;
     let (collection, tenant) = (coll.id, coll.tenant);
-    Ok(Rules { ns: full(ns), collection, tenant, indexes, capped, ..Rules::default() })
+    // A collection with a shard key's entries end in the document's key (018 FR-001).
+    let shard_key = super::sharding::shard_key_of(coll)?.map(|k| k.key);
+    Ok(Rules { ns: full(ns), collection, tenant, indexes, capped, shard_key, ..Rules::default() })
 }
 
 /// Writes the entries of `indexes` for every document of the collection, with the writes of

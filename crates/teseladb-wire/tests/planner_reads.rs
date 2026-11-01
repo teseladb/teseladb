@@ -238,3 +238,15 @@ fn or_clauses_on_one_index_count_one_access() {
     let Some(Value::Document(a)) = b.first() else { panic!("{r:?}") };
     assert_eq!(field(a, "accesses.ops"), &Value::Int64(1), "{r:?}");
 }
+
+/// A unique index keeps its document's primary key in the entry's value: a plan on it finds the
+/// documents (it failed with "an index entry without its document").
+#[test]
+fn a_unique_index_plan_finds_its_documents() {
+    let mut m = loaded(20);
+    index(&mut m, r#"{"key":{"b":1,"_id":1},"name":"b_id","unique":true}"#);
+    let r = run(&mut m, r#"{"find":"c","filter":{"b":3}}"#);
+    assert_eq!(ids(&r), expected(20, |i| i % 7 == 3));
+    let r = run(&mut m, r#"{"find":"c","filter":{"b":{"$gte":5}},"sort":{"b":1}}"#);
+    assert_eq!(ids(&r), expected(20, |i| i % 7 >= 5));
+}

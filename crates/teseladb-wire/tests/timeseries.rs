@@ -528,6 +528,18 @@ fn partial_filters_list_over_the_buckets_as_refdb_writes_them() {
             r#"{"v":{"$elemMatch":{"a":1,"b":{"$gt":2,"$lt":5}}}}"#,
             "can't handle this predicate: { v: { $elemMatch: { $and: [ { a: { $eq: 1 } }, { b: { $gt: 2 } }, { b: { $lt: 5 } } ] } } }",
         ),
+        (
+            r#"{"v":{"$elemMatch":{"a":{"b":1}}}}"#,
+            "can't handle this predicate: { v: { $elemMatch: { a: { $eq: { b: 1 } } } } }",
+        ),
+        (
+            r#"{"v":{"$elemMatch":{"a":{"$exists":true}}}}"#,
+            "can't handle this predicate: { v: { $elemMatch: { a: { $exists: true } } } }",
+        ),
+        (
+            r#"{"v":{"$elemMatch":{"a":{"$exists":false}}}}"#,
+            "can't handle this predicate: { v: { $elemMatch: { a: { $not: { $exists: true } } } } }",
+        ),
     ];
     for (bad, code, msg) in [
         (r#"{"v":{"$in":5}}"#, 2, "$in needs an array"),

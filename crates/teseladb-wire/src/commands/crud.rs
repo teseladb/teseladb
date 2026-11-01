@@ -309,8 +309,9 @@ pub fn index_rules<B: Backend + ?Sized>(
             Ok(IndexRule { id: e.id, spec, buckets: e.buckets, delete_only })
         })
         .collect::<Result<Vec<_>, CommandError>>()?;
-    // A capped collection keeps `_id` unique in an index of its own (015 FR-003).
-    if super::capped::rule_of(coll)?.is_some() {
+    // A capped collection keeps `_id` unique in an index of its own (015 FR-003), and so does
+    // one with a shard key, whose documents are keyed by it (018 FR-001).
+    if super::capped::rule_of(coll)?.is_some() || super::sharding::is_sharded(coll) {
         rules.push(super::capped::id_index_rule(coll));
     }
     Ok(rules)
@@ -349,6 +350,7 @@ pub fn rules_of(
         capped: super::capped::rule_of(coll)?,
         timeseries: None,
         unlogged: false,
+        shard_key: super::sharding::shard_key_of(coll)?.map(|k| k.key),
     })
 }
 
@@ -377,11 +379,15 @@ pub fn doc_key(coll: &CollectionEntry, id: &Value) -> Result<Vec<u8>, CommandErr
     Ok(key.as_bytes().to_vec())
 }
 
-/// The keys an insert of a document with `_id` `id` latches in `coll`: its own, or none in a
-/// capped collection, which takes the next `seq` on the range.
-fn insert_key(coll: &CollectionEntry, id: &Value) -> Result<Vec<u8>, CommandError> {
+/// The keys an insert of document `doc` latches in `coll`: its own (by its shard key and its
+/// `_id` in a collection with one, 018 FR-001), or none in a capped collection, which takes the
+/// next `seq` on the range.
+fn insert_key(coll: &CollectionEntry, doc: &Document) -> Result<Vec<u8>, CommandError> {
+    if let Some(k) = super::sharding::shard_key_of(coll)? {
+        return super::sharding::document_key(coll, &k.key, doc);
+    }
     match (super::capped::rule_of(coll)?, super::timeseries::spec_of(coll)?) {
-        (None, None) => doc_key(coll, id),
+        (None, None) => doc_key(coll, doc.get("_id").unwrap_or(&Value::Null)),
         _ => Ok(Vec::new()),
     }
 }
@@ -392,9 +398,9 @@ pub(crate) fn id_doc_key<B: Backend + ?Sized>(
     coll: &CollectionEntry,
     id: &Value,
 ) -> Result<Option<Vec<u8>>, CommandError> {
-    match super::capped::rule_of(coll)? {
-        Some(_) => super::capped::id_key(backend, coll, id),
-        None => doc_key(coll, id).map(Some),
+    match (super::capped::rule_of(coll)?, super::sharding::is_sharded(coll)) {
+        (Some(_), _) | (None, true) => super::capped::id_key(backend, coll, id),
+        (None, false) => doc_key(coll, id).map(Some),
     }
 }
 
@@ -580,10 +586,8 @@ pub fn insert<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
     let mut stop = false;
     for (i, d) in docs.iter().enumerate() {
         let prepared = match d {
-            Value::Document(d) => with_id(ctx.backend, ctx.shared, d).and_then(|doc| {
-                let id = doc.get("_id").cloned().unwrap_or(Value::Null);
-                insert_key(&coll, &id).map(|k| (doc, k))
-            }),
+            Value::Document(d) => with_id(ctx.backend, ctx.shared, d)
+                .and_then(|doc| insert_key(&coll, &doc).map(|k| (doc, k))),
             other => Err(wrong_type(&format!("insert.documents.{i}"), other, "object")),
         };
         let prepared = prepared.and_then(|(doc, key)| {
@@ -643,7 +647,7 @@ pub(crate) fn insert_internal<B: Backend + ?Sized>(
     let rules = rules_of(ns, &coll, true, None, indexes)?;
     let mut chunk = Vec::new();
     for (i, d) in docs.into_iter().enumerate() {
-        let key = insert_key(&coll, d.get("_id").unwrap_or(&Value::Null))?;
+        let key = insert_key(&coll, &d)?;
         chunk.push((i, d, key));
     }
     let (mut n, mut errors) = (0, Vec::new());
@@ -965,7 +969,7 @@ pub fn modify<B: Backend + ?Sized>(
         // routed by the collection's state.
         let capped = rules.capped.is_some();
         if let Some(d) = up.as_ref().filter(|_| !capped) {
-            chunk.push(doc_key(&coll, d.get("_id").unwrap_or(&Value::Null))?);
+            chunk.push(insert_key(&coll, d)?);
         }
         // Nothing matched: the write still goes to the collection's range, which applies nothing
         // and answers with the write concern, as RefDb does (a write needs a key to be routed).
@@ -1696,7 +1700,7 @@ fn bulk_op<B: Backend + ?Sized>(
             names::check_writable(ns)?;
             let coll = ensure_collection(ctx, ns)?;
             let doc = with_id(ctx.backend, ctx.shared, doc)?;
-            let key = insert_key(&coll, doc.get("_id").unwrap_or(&Value::Null))?;
+            let key = insert_key(&coll, &doc)?;
             let rules = rules_of(ns, &coll, bypass, None, index_rules(ctx.backend, &coll)?)?;
             let keys = if key.is_empty() { Vec::new() } else { vec![key] };
             let bound = Bound {

@@ -233,3 +233,53 @@ fn a_field_of_another_type_closes_the_bucket() {
     }
     assert_eq!(buckets(&mut m, "s"), (3, 2));
 }
+
+/// The counters of `collStats.timeseries` named `names`.
+fn counters(m: &mut Mem, name: &str, names: &[&str]) -> Vec<i64> {
+    let r = m.run("g", doc(&[("collStats", Value::from(name))]));
+    names
+        .iter()
+        .map(|k| match field(&r, &format!("timeseries.{k}")) {
+            Value::Int32(n) => i64::from(*n),
+            Value::Int64(n) => *n,
+            other => panic!("{k}: {other:?}"),
+        })
+        .collect()
+}
+
+const COUNTED: [&str; 6] = [
+    "bucketCount",
+    "numCommits",
+    "numBucketInserts",
+    "numBucketUpdates",
+    "numBucketsClosedDueToCount",
+    "numMeasurementsCommitted",
+];
+
+#[test]
+fn one_insert_past_a_bucket_count_fills_two_buckets() {
+    let mut m = Mem::new();
+    series(&mut m, "s", false);
+    let docs: Vec<String> =
+        (0..1005).map(|i| format!(r#"{{"t":{},"m":1,"v":{i}}}"#, date(T0 + i))).collect();
+    assert_eq!(insert(&mut m, "s", &docs, true).0, 1005);
+    assert_eq!(counters(&mut m, "s", &COUNTED), vec![2, 2, 2, 0, 1, 1005]);
+}
+
+#[test]
+fn a_retried_insert_commits_nothing_again() {
+    let mut m = Mem::new();
+    series(&mut m, "r", false);
+    let cmd = format!(
+        r#"{{"insert":"r","documents":[{},{}],"lsid":{{"id":{{"$binary":{{"base64":"AQEBAQEBAQEBAQEBAQEBAQ==","subType":"04"}}}}}},"txnNumber":{{"$numberLong":"1"}}}}"#,
+        at(0, 1, "1"),
+        at(1, 1, "2")
+    );
+    for _ in 0..2 {
+        let r = run(&mut m, &cmd);
+        assert_eq!(field(&r, "n"), &Value::Int32(2), "{r:?}");
+        assert_eq!(counters(&mut m, "r", &COUNTED[..3]), vec![1, 1, 1]);
+    }
+    let r = run(&mut m, r#"{"count":"r"}"#);
+    assert_eq!(field(&r, "n"), &Value::Int32(2), "{r:?}");
+}

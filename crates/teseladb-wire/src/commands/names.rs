@@ -11,7 +11,7 @@ pub const MAX_DB_NAME: usize = 63;
 /// Longest `db.collection`, in bytes.
 pub const MAX_NAMESPACE: usize = 255;
 /// Characters a database name cannot have (Unix rules, as RefDb on Linux).
-const DB_FORBIDDEN: [char; 5] = ['/', '\\', ' ', '"', '\0'];
+pub const DB_FORBIDDEN: [char; 5] = ['/', '\\', ' ', '"', '\0'];
 /// Prefix of the collections RefDb reserves.
 const SYSTEM_PREFIX: &str = "system.";
 
