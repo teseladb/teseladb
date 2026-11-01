@@ -620,10 +620,14 @@ impl Backend for Mem {
             f(start, &mut self.data);
         }
         // As a range's scan: the versions that only serve the history are no documents.
+        if start >= end {
+            return Ok(Vec::new());
+        }
+        let history = |k: &Vec<u8>| self.types.get(k) == Some(&teseladb_range::HISTORY_VALUE);
         Ok(self
-            .stored()
-            .into_iter()
-            .filter(|(k, _)| start <= k.as_slice() && k.as_slice() < end)
+            .data
+            .range(start.to_vec()..end.to_vec())
+            .filter(|(k, _)| !history(k))
             .take(limit)
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect())
