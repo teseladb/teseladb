@@ -58,6 +58,7 @@ pub mod search_indexes;
 pub mod search_ops;
 pub mod server_params;
 pub mod session;
+pub mod sharding;
 pub mod sort;
 pub mod status;
 pub mod tenants;
@@ -759,6 +760,8 @@ const NAMES: [&str; 72] = [
     admin::KILL_OP,
     admin::CURRENT_OP,
     admin::REPL_SET_GET_STATUS,
+    sharding::ENABLE_SHARDING,
+    sharding::SHARD_COLLECTION,
     crud::INSERT,
     crud::UPDATE,
     crud::DELETE,
@@ -882,6 +885,8 @@ fn command<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comman
         diagnostic_data::GET_DIAGNOSTIC_DATA => diagnostic_data::get_diagnostic_data(ctx),
         admin::CURRENT_OP => admin::current_op(ctx),
         admin::REPL_SET_GET_STATUS => admin::repl_set_get_status(ctx),
+        sharding::ENABLE_SHARDING => sharding::enable_sharding(ctx),
+        sharding::SHARD_COLLECTION => sharding::shard_collection(ctx),
         crud::INSERT => crud::insert(ctx),
         crud::UPDATE => crud::update(ctx),
         crud::DELETE => crud::delete(ctx),

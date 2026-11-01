@@ -27,9 +27,11 @@ use teseladb_meta::group0::Group0Sm;
 use teseladb_meta::meta2::Meta2Sm;
 use teseladb_types::NodeId;
 use teseladb_wire::commands::cluster_admin::RW_DEFAULTS;
+use teseladb_wire::commands::config_db::COLLECTIONS;
 use teseladb_wire::commands::config_settings::{SETTINGS, SettingsWrite};
 use teseladb_wire::commands::diagnostics::ANNOUNCED_VERSION;
 use teseladb_wire::commands::shard_name;
+use teseladb_wire::commands::sharding;
 use teseladb_wire::error::{BAD_VALUE, CommandError};
 
 use teseladb_meta::config_settings::PREFIX as SETTINGS_PREFIX;
@@ -54,6 +56,7 @@ pub fn documents(sm: &Group0Sm, coll: &str) -> Vec<Document> {
     match coll {
         "shards" => shards(sm),
         "databases" => databases(sm),
+        COLLECTIONS => sharded_collections(sm),
         "refrouter" => routers(sm),
         "version" => vec![version(sm)],
         SETTINGS => settings(sm),
@@ -226,6 +229,18 @@ fn databases(sm: &Group0Sm) -> Vec<Document> {
         .collect()
 }
 
+/// The collections with a shard key (018 FR-001), in namespace order.
+fn sharded_collections(sm: &Group0Sm) -> Vec<Document> {
+    sm.catalog
+        .collections
+        .iter()
+        .filter_map(|(ns, c)| {
+            let key = sharding::shard_key_of(c).ok().flatten()?;
+            Some(sharding::config_entry(ns, c, &key))
+        })
+        .collect()
+}
+
 fn routers(sm: &Group0Sm) -> Vec<Document> {
     let now = i64::try_from(sm.cluster_time_ms).unwrap_or(i64::MAX);
     live(sm)
@@ -284,6 +299,22 @@ mod tests {
     }
 
     #[test]
+    fn a_collection_with_a_shard_key_is_listed_in_config_collections() {
+        let mut sm = cluster();
+        let shard_key =
+            Document::new().with("key", Document::new().with("tienda", 1)).with("unique", false);
+        let options = Document::new().with(sharding::SHARD_KEY, shard_key).to_bytes().unwrap();
+        let ns = Namespace { db: "app".into(), coll: "s".into() };
+        let create = CatalogCommand::Create { ns, uuid: [5; 16], options, if_absent: false };
+        sm.apply_command(5, &Group0Command::Catalog(create));
+        let listed = documents(&sm, COLLECTIONS);
+        assert_eq!(listed.len(), 1, "app.c has no shard key");
+        assert_eq!(listed[0].get("_id"), Some(&Value::from("app.s")));
+        assert_eq!(listed[0].get("key"), Some(&Value::Document(Document::new().with("tienda", 1))));
+        assert_eq!(listed[0].get("unique"), Some(&Value::Boolean(false)));
+    }
+
+    #[test]
     fn every_node_is_a_shard_and_a_router_and_each_database_is_listed() {
         let mut sm = cluster();
         let drain = Group0Command::SetNodeState {
@@ -311,7 +342,7 @@ mod tests {
         assert_eq!(routers[1].get("refVersion"), Some(&Value::from(ANNOUNCED_VERSION)));
         let v = documents(&sm, "version");
         assert_eq!(v[0].get("clusterId"), Some(&Value::ObjectId([9; 12])));
-        for none in ["collections", "chunks", "tags", "changelog", SETTINGS] {
+        for none in [COLLECTIONS, "chunks", "tags", "changelog", SETTINGS] {
             assert!(documents(&sm, none).is_empty(), "{none}");
         }
     }

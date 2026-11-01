@@ -192,14 +192,13 @@ fn multikey_paths<B: Backend + ?Sized>(
     let end = KeyBuilder::index_prefix(tenant, collection, MULTIKEY_MARKS + entry.id + 1);
     let head = start.as_bytes().len();
     let rows = backend.scan(start.as_bytes(), end.as_bytes(), usize::MAX, ReadConcern::Local)?;
+    // A mark is the field, a zero byte and the path, for a field of the index: the writes of the
+    // index leave no other.
     for (key, _) in rows {
-        let rest = key.get(head..).unwrap_or_default();
-        let Some(cut) = rest.iter().position(|b| *b == 0) else { continue };
-        let field = String::from_utf8_lossy(&rest[..cut]).into_owned();
-        let path = String::from_utf8_lossy(&rest[cut + 1..]).into_owned();
-        if let Some((_, paths)) = out.iter_mut().find(|(f, _)| *f == field) {
-            paths.push(path);
-        }
+        let mut parts = key.get(head..).unwrap_or_default().splitn(2, |b| *b == 0);
+        let field = String::from_utf8_lossy(parts.next().unwrap_or_default()).into_owned();
+        let path = String::from_utf8_lossy(parts.next().unwrap_or_default()).into_owned();
+        out.iter_mut().filter(|(f, _)| *f == field).for_each(|(_, paths)| paths.push(path.clone()));
     }
     Ok(out)
 }
@@ -279,24 +278,27 @@ pub(crate) struct Tried {
 }
 
 impl Ran {
-    /// The plan as its trial left it (`allPlansExecution`).
-    pub fn at_trial(&self) -> Ran {
+    /// The plan as trial `t` left it (`allPlansExecution`).
+    pub fn at_trial(&self, t: Tried) -> Ran {
         let mut r = self.clone();
-        if let Some(t) = self.tried {
-            r.keys = t.keys;
-            r.docs = t.docs;
-            // The scans of an intersection read one after the other.
-            let mut left = t.keys;
-            for k in &mut r.child_keys {
-                let took = (*k).min(left);
-                *k = took;
-                left -= took;
-            }
-            let kept = usize::try_from(t.returned).unwrap_or(usize::MAX);
-            r.found = self.found.iter().take(kept).cloned().collect();
-            r.index_keys.truncate(kept);
+        r.keys = t.keys;
+        r.docs = t.docs;
+        // The scans of an intersection read one after the other.
+        let mut left = t.keys;
+        for k in &mut r.child_keys {
+            let took = (*k).min(left);
+            *k = took;
+            left -= took;
         }
+        let kept = usize::try_from(t.returned).unwrap_or(usize::MAX);
+        r.found = self.found.iter().take(kept).cloned().collect();
+        r.index_keys.truncate(kept);
         r
+    }
+
+    /// The plan as its trial left it, or as it ran when it had no trial.
+    pub fn tried_view(&self) -> Ran {
+        self.tried.map_or_else(|| self.clone(), |t| self.at_trial(t))
     }
 }
 
@@ -538,13 +540,7 @@ fn run<B: Backend + ?Sized>(
                     continue;
                 }
             }
-            let key = KeyBuilder::document_of_pk(coll.tenant, coll.id, &pk);
-            let next = [key.as_bytes(), &[0]].concat();
-            let Some((dk, bytes)) =
-                backend.scan(key.as_bytes(), &next, 1, read.concern)?.into_iter().next()
-            else {
-                continue;
-            };
+            let (dk, bytes) = indexed_document(backend, coll, &pk, read.concern)?;
             ran.docs += 1;
             ran.docs_at.push(ran.keys);
             let keep = match &residual {
@@ -589,6 +585,23 @@ fn run<B: Backend + ?Sized>(
     Ok(ran)
 }
 
+/// The document an index entry with primary key `pk` names, with its key. An index entry and its
+/// document are written in the same write, so a read sees both or neither.
+fn indexed_document<B: Backend + ?Sized>(
+    backend: &mut B,
+    coll: &CollectionEntry,
+    pk: &[u8],
+    concern: ReadConcern,
+) -> Result<(Vec<u8>, Vec<u8>), CommandError> {
+    let key = KeyBuilder::document_of_pk(coll.tenant, coll.id, pk);
+    let next = [key.as_bytes(), &[0]].concat();
+    backend
+        .scan(key.as_bytes(), &next, 1, concern)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| CommandError::new(INTERNAL_ERROR, "an index entry without its document"))
+}
+
 /// Runs an intersection of index scans (`AND_HASH`): the primary keys of all but the last scan
 /// held, the last one's entries streamed in its order, and each document found in all of them
 /// read and filtered.
@@ -615,7 +628,9 @@ fn intersected<B: Backend + ?Sized>(
         }
         None => None,
     };
-    let Some((last, held)) = scans.split_last() else { return Ok(ran) };
+    let (last, held) = scans
+        .split_last()
+        .ok_or_else(|| CommandError::new(INTERNAL_ERROR, "an intersection without scans"))?;
     let mut sets: Vec<std::collections::BTreeSet<Vec<u8>>> = Vec::new();
     for s in held {
         let read_entries =
@@ -646,13 +661,7 @@ fn intersected<B: Backend + ?Sized>(
         if !sets.iter().all(|set| set.contains(&pk)) {
             continue;
         }
-        let key = KeyBuilder::document_of_pk(coll.tenant, coll.id, &pk);
-        let next = [key.as_bytes(), &[0]].concat();
-        let Some((dk, bytes)) =
-            backend.scan(key.as_bytes(), &next, 1, read.concern)?.into_iter().next()
-        else {
-            continue;
-        };
+        let (dk, bytes) = indexed_document(backend, coll, &pk, read.concern)?;
         // A document both scans hold comes out of the intersection one unit of work later.
         ran.docs += 1;
         ran.docs_at.push(ran.keys + 1);
@@ -934,7 +943,7 @@ fn in_bucket(docs: &[u8], bucket: u8, (from, to): (&[u8], &[u8])) -> (Vec<u8>, V
     let at = |k: &[u8]| -> Vec<u8> {
         match k.strip_prefix(docs) {
             Some(rest) => [docs, &[bucket], rest].concat(),
-            None if k < docs => [docs, &[bucket]].concat(),
+            // The span of the index ends at the next index's prefix, after every bucket.
             None => [docs, &[bucket + 1]].concat(),
         }
     };
@@ -1082,7 +1091,7 @@ pub(crate) fn planned_documents<B: Backend + ?Sized>(
     backend: &mut B,
     coll: &CollectionEntry,
     read: &ReadPlan<'_>,
-    note: Option<CacheNote<'_>>,
+    note: CacheNote<'_>,
 ) -> Result<Option<Vec<Vec<u8>>>, CommandError> {
     Ok(planned_keyed(backend, coll, read, note)?.map(|(docs, _)| docs))
 }
@@ -1093,20 +1102,18 @@ pub(crate) fn planned_keyed<B: Backend + ?Sized>(
     backend: &mut B,
     coll: &CollectionEntry,
     read: &ReadPlan<'_>,
-    note: Option<CacheNote<'_>>,
+    note: CacheNote<'_>,
 ) -> Result<Option<Planned>, CommandError> {
     let indexes = plan_indexes(backend, coll)?;
     // The hashes of the read's shape, as `$planCacheStats` shows them, for the profiler.
-    let hashes = note.as_ref().map(|n| {
-        let ns = super::names::full(n.ns);
-        let hash = super::plan_cache::hex(&n.shape);
-        Document::new()
-            .with("planCacheShapeHash", hash.clone())
-            .with("queryHash", hash)
-            .with("planCacheKey", super::plan_cache::hex(&format!("{}{ns}", n.shape)))
-    });
+    let hash = super::plan_cache::hex(&note.shape);
+    let ns = super::names::full(note.ns);
+    let hashes = Document::new()
+        .with("planCacheShapeHash", hash.clone())
+        .with("queryHash", hash)
+        .with("planCacheKey", super::plan_cache::hex(&format!("{}{ns}", note.shape)));
     let report = |plan: Option<Document>, planning: u64| {
-        let mut d = hashes.clone().unwrap_or_default();
+        let mut d = hashes.clone();
         d.push("filter", read.parsed.clone());
         for (k, v) in plan.unwrap_or_default().iter() {
             d.push(k, v.clone());
@@ -1125,23 +1132,21 @@ pub(crate) fn planned_keyed<B: Backend + ?Sized>(
         backend.note_plan(report(None, planning));
         return Ok(None);
     };
-    if let Some(n) = &note {
-        let plan = super::explain::plan_report(n.ns, read.parsed, &indexes, &chosen.winner);
-        backend.note_plan(report(Some(plan), chosen.planning_micros));
-        let now = i64::try_from(backend.wall_ms()).unwrap_or(i64::MAX);
-        let ns = super::names::full(n.ns);
-        let mut g = super::lock(n.shared);
+    let plan = super::explain::plan_report(note.ns, read.parsed, &indexes, &chosen.winner);
+    backend.note_plan(report(Some(plan), chosen.planning_micros));
+    let now = i64::try_from(backend.wall_ms()).unwrap_or(i64::MAX);
+    {
+        let mut g = super::lock(note.shared);
         for name in scanned(&indexes, &chosen.winner.access) {
             g.index_usage.used(&ns, &name, now);
         }
     }
-    if let Some(n) = note
-        && let Some(mut learned) =
-            super::explain::learned(n.ns, read.parsed, &indexes, &chosen, (n.from, n.shape))
+    if let Some(mut learned) =
+        super::explain::learned(note.ns, read.parsed, &indexes, &chosen, (note.from, note.shape))
     {
         learned.catalog = super::plan_cache::catalog_signature(coll, &indexes);
         let now = i64::try_from(backend.now_ms()).unwrap_or(i64::MAX);
-        super::lock(n.shared).plan_cache.learn(&super::names::full(n.ns), learned, now);
+        super::lock(note.shared).plan_cache.learn(&ns, learned, now);
     }
     let keys = chosen.winner.index_keys;
     Ok(Some((chosen.winner.found.into_iter().map(|(_, d)| d).collect(), keys)))

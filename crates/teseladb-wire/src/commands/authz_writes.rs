@@ -413,7 +413,7 @@ pub(crate) fn statement<B: Backend + ?Sized, S: Staged>(
     }
     if let (0, true, Some(u)) = (r.n, m.upsert, &m.update) {
         let op = executor_of(m.image);
-        let doc = upsert_doc(backend, shared, op, &m.filter, u, m.array_filters.as_deref())?;
+        let doc = upsert_doc(backend, shared, op, m, u)?;
         let bytes = stored_bytes(&doc, Stored::Upsert).map_err(&during)?;
         sim.check(&bytes, None).map_err(&during)?;
         sim.note(INSERT, &doc);

@@ -32,7 +32,7 @@ fn filter(text: &str) -> Document {
 
 fn matches(f: &str, b: &[u8]) -> bool {
     let bounds = Bounds::of(&spec(), &filter(f));
-    bounds.may_match(&spec(), RawDoc::from_bytes(b).expect("a bucket")).expect("a bucket")
+    bounds.may_match(&spec(), RawDoc::from_bytes(b).expect("a bucket"), None).expect("a bucket")
 }
 
 #[test]
@@ -102,7 +102,7 @@ fn a_bucket_without_control_is_refused() {
         Document::new().with("control", Document::new().with("min", 1)),
     ] {
         let bytes = bad.to_bytes().expect("small");
-        let r = b.may_match(&spec(), RawDoc::from_bytes(&bytes).expect("a document"));
+        let r = b.may_match(&spec(), RawDoc::from_bytes(&bytes).expect("a document"), None);
         assert!(matches!(r, Err(TsError::Malformed(_))), "{bad:?}");
     }
     // A bucket without meta never matches a meta bound.
@@ -111,7 +111,10 @@ fn a_bucket_without_control_is_refused() {
     let id = s.bucket_id(T0, None, 0).expect("an id");
     let bytes = s.build(id, None, &rows).expect("a bucket").to_bytes().expect("bytes");
     let meta = Bounds { meta: Some(Value::Int32(1)), ..Bounds::default() };
-    assert_eq!(meta.may_match(&spec(), RawDoc::from_bytes(&bytes).expect("a bucket")), Ok(false));
+    assert_eq!(
+        meta.may_match(&spec(), RawDoc::from_bytes(&bytes).expect("a bucket"), None),
+        Ok(false)
+    );
 }
 
 /// Two upper bounds keep the lower one; a meta bound past BSON's depth cannot be compared.
@@ -124,6 +127,6 @@ fn bounds_narrow_and_an_unwritable_meta_is_refused() {
         .fold(Value::Int32(1), |v, _| Value::Document(Document::new().with("a", v)));
     let b = Bounds { meta: Some(deep), ..Bounds::default() };
     let bytes = bucket("a", &[1000]);
-    let r = b.may_match(&spec(), RawDoc::from_bytes(&bytes).expect("a bucket"));
+    let r = b.may_match(&spec(), RawDoc::from_bytes(&bytes).expect("a bucket"), None);
     assert!(matches!(r, Err(TsError::Malformed(_))));
 }

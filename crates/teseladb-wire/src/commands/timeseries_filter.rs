@@ -25,6 +25,7 @@ type Cond = (String, Value);
 enum Why {
     Predicate,
     Null,
+    NullInIn,
     Operand,
 }
 
@@ -32,6 +33,7 @@ fn refuse(shown: Document, why: Why) -> CommandError {
     let what = match why {
         Why::Predicate => "can't handle this predicate",
         Why::Null => "can't handle comparison to null",
+        Why::NullInIn => "can't handle {$eq: null} predicate (inside $in predicate)",
         Why::Operand => "operand can't be an object or array",
     };
     CommandError::new(
@@ -172,16 +174,21 @@ fn field(spec: &BucketSpec, path: &str, cond: &Value) -> Result<(Vec<Cond>, bool
     };
     let mut out = Vec::new();
     for (op, v) in &ops {
-        if matches!(v, Value::Null) && op == "$eq" {
-            return Err(refuse(shown(), Why::Null));
-        }
         let compares = matches!(op.as_str(), "$eq" | "$gt" | "$gte" | "$lt" | "$lte");
+        // A comparison to null is refused, shown alone (measured on a `refnode` 9.0.4).
+        if compares && matches!(v, Value::Null) {
+            let one = Document::new().with(path, Document::new().with(op.as_str(), Value::Null));
+            return Err(refuse(one, Why::Null));
+        }
         if compares && matches!(v, Value::Document(_) | Value::Array(_)) {
             return Err(refuse(shown(), Why::Operand));
         }
         if op == "$in" {
             let Value::Array(items) = v else { return Err(refuse(shown(), Why::Predicate)) };
             let mut branches = Vec::new();
+            if items.iter().any(|i| matches!(i, Value::Null)) {
+                return Err(refuse(shown(), Why::NullInIn));
+            }
             for item in items {
                 let conds = bounds(spec, path, "$eq", item)
                     .ok_or_else(|| refuse(shown(), Why::Predicate))?;

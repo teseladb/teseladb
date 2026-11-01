@@ -16,7 +16,9 @@ pub const CONFIG_DB: &str = "config";
 
 /// The collections of `config` generated from Group 0, in name order.
 pub const GENERATED: [&str; 8] =
-    ["changelog", "chunks", "collections", "databases", "refrouter", SHARDS, "tags", "version"];
+    ["changelog", "chunks", COLLECTIONS, "databases", "refrouter", SHARDS, "tags", "version"];
+/// `config.collections`: one document per sharded collection with its shard key (018).
+pub const COLLECTIONS: &str = "collections";
 /// `config.shards`: one document per node, whose `_id` is the node's name (`super::shard_name`).
 pub const SHARDS: &str = "shards";
 /// The collections of `config` that `listCollections` shows, in name order: the generated ones
@@ -24,7 +26,7 @@ pub const SHARDS: &str = "shards";
 pub const LISTED: [&str; 9] = [
     "changelog",
     "chunks",
-    "collections",
+    COLLECTIONS,
     "databases",
     "refrouter",
     super::config_settings::SETTINGS,
