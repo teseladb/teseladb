@@ -447,11 +447,12 @@ fn dollar_free_id(d: &Document) -> Result<(), CommandError> {
 /// The document as stored: `_id` first, generated if missing.
 pub(crate) fn with_id<B: Backend + ?Sized>(
     backend: &mut B,
+    shared: &super::Shared,
     doc: &Document,
 ) -> Result<Document, CommandError> {
     let id = match doc.get("_id") {
         Some(v) => v.clone(),
-        None => Value::ObjectId(new_object_id(backend)),
+        None => Value::ObjectId(new_object_id(backend, shared)),
     };
     check_id(&id)?;
     let mut out = Document::new().with("_id", id);
@@ -572,7 +573,7 @@ pub fn insert<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
     let mut stop = false;
     for (i, d) in docs.iter().enumerate() {
         let prepared = match d {
-            Value::Document(d) => with_id(ctx.backend, d).and_then(|doc| {
+            Value::Document(d) => with_id(ctx.backend, ctx.shared, d).and_then(|doc| {
                 let id = doc.get("_id").cloned().unwrap_or(Value::Null);
                 insert_key(&coll, &id).map(|k| (doc, k))
             }),
@@ -766,6 +767,7 @@ fn raw(d: &Document) -> Result<Vec<u8>, CommandError> {
 /// The document an upsert inserts for `filter` and `update`.
 pub(crate) fn upsert_doc<B: Backend + ?Sized>(
     backend: &mut B,
+    shared: &super::Shared,
     op: &str,
     filter: &Document,
     update: &Value,
@@ -794,7 +796,7 @@ pub(crate) fn upsert_doc<B: Backend + ?Sized>(
         now: now_of(backend),
         insert: true,
     };
-    let oid = new_object_id(backend);
+    let oid = new_object_id(backend, shared);
     let during = executor_error(op);
     let doc = upsert(&f, &u, &ctx, || Value::ObjectId(oid)).map_err(from_mql).map_err(&during)?;
     if let Some(id) = doc.get("_id") {
@@ -886,7 +888,7 @@ pub fn modify<B: Backend + ?Sized>(
     let upsert_doc = match (&m.update, m.upsert) {
         (Some(u), true) => {
             let op = executor_of(m.image);
-            Some(upsert_doc(ctx.backend, op, &m.filter, u, m.array_filters.as_deref())?)
+            Some(upsert_doc(ctx.backend, ctx.shared, op, &m.filter, u, m.array_filters.as_deref())?)
         }
         _ => None,
     };
@@ -1618,7 +1620,7 @@ fn bulk_op<B: Backend + ?Sized>(
         BulkBody::Insert(doc) => {
             names::check_writable(ns)?;
             let coll = ensure_collection(ctx, ns)?;
-            let doc = with_id(ctx.backend, doc)?;
+            let doc = with_id(ctx.backend, ctx.shared, doc)?;
             let key = insert_key(&coll, doc.get("_id").unwrap_or(&Value::Null))?;
             let rules = rules_of(ns, &coll, bypass, None, index_rules(ctx.backend, &coll)?)?;
             let keys = if key.is_empty() { Vec::new() } else { vec![key] };

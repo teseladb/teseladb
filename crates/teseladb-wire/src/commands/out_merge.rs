@@ -113,7 +113,11 @@ fn fill<B: Backend + ?Sized>(
     tmp: &str,
     docs: Vec<Document>,
 ) -> Result<(), CommandError> {
-    let docs = with_ids(ctx.backend, docs);
+    // Each without `_id` gets one now, in the pipeline's order.
+    let docs = docs
+        .iter()
+        .map(|d| super::crud::with_id(ctx.backend, ctx.shared, d))
+        .collect::<Result<Vec<_>, _>>()?;
     let indexes = target_indexes(ctx, ns)?;
     if !indexes.is_empty() {
         let create = Document::new().with("createIndexes", tmp).with("indexes", indexes);
@@ -125,31 +129,6 @@ fn fill<B: Backend + ?Sized>(
         run(ctx, &ns.db, &insert, super::crud::insert)?;
     }
     Ok(())
-}
-
-/// `docs`, each without `_id` given an ObjectId as RefDb makes them: the seconds, five random
-/// bytes and a counter that grows by one, so that they keep the documents' order (measured).
-fn with_ids<B: Backend + ?Sized>(backend: &mut B, docs: Vec<Document>) -> Vec<Document> {
-    let secs = u32::try_from(backend.now_ms() / 1000).unwrap_or(u32::MAX);
-    let random = backend.random().to_be_bytes();
-    let mut counter = u32::from_be_bytes([0, random[5], random[6], random[7]]);
-    docs.into_iter()
-        .map(|d| {
-            if d.get("_id").is_some() {
-                return d;
-            }
-            let mut id = [0u8; 12];
-            id[..4].copy_from_slice(&secs.to_be_bytes());
-            id[4..9].copy_from_slice(&random[..5]);
-            id[9..].copy_from_slice(&counter.to_be_bytes()[1..]);
-            counter = counter.wrapping_add(1) & 0x00ff_ffff;
-            let mut out = Document::new().with("_id", Value::ObjectId(id));
-            for (k, v) in d.iter() {
-                out.push(k, v.clone());
-            }
-            out
-        })
-        .collect()
 }
 
 /// The indexes of `ns` other than `_id`'s, as `listIndexes` gives them (none when it does not

@@ -490,6 +490,33 @@ pub struct NodeSessions {
     pub timeseries: BTreeMap<u32, timeseries::TsStats>,
     /// The cluster's default concerns as this node last read them (007 FR-018).
     pub rw_defaults: cluster_admin::Defaults,
+    /// The node's part of the ObjectIds it makes.
+    pub object_ids: ObjectIds,
+}
+
+/// What a node puts after the seconds of each ObjectId it makes (ObjectId specification): five
+/// random bytes drawn once and a three-byte counter that grows from a random start. Both come
+/// from the node's random source, so a simulated node with a seed makes the same ones.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ObjectIds {
+    /// The random bytes and the next counter, once drawn.
+    state: Option<([u8; 5], u32)>,
+}
+
+impl ObjectIds {
+    /// The ObjectId made at `secs`; `random` draws the node's part the first time.
+    pub fn next(&mut self, secs: u32, random: impl FnOnce() -> u64) -> [u8; 12] {
+        let (bytes, counter) = *self.state.get_or_insert_with(|| {
+            let r = random().to_be_bytes();
+            ([r[0], r[1], r[2], r[3], r[4]], u32::from_be_bytes([0, r[5], r[6], r[7]]))
+        });
+        self.state = Some((bytes, (counter + 1) & 0x00ff_ffff));
+        let mut id = [0u8; 12];
+        id[..4].copy_from_slice(&secs.to_be_bytes());
+        id[4..9].copy_from_slice(&bytes);
+        id[9..].copy_from_slice(&counter.to_be_bytes()[1..]);
+        id
+    }
 }
 
 impl NodeSessions {
@@ -510,6 +537,7 @@ impl NodeSessions {
             audit: None,
             txns: txn::Transactions::new(),
             rw_defaults: cluster_admin::Defaults::default(),
+            object_ids: ObjectIds::default(),
             pushes: teseladb_txn::push_cache::PushCache::new(),
             push_settled: std::sync::Arc::default(),
             txn_scratch: std::collections::BTreeSet::new(),
@@ -796,11 +824,9 @@ pub fn new_uuid<B: Backend + ?Sized>(b: &mut B) -> [u8; 16] {
     u
 }
 
-/// A fresh ObjectId: seconds of the cluster time, then random bytes.
-pub fn new_object_id<B: Backend + ?Sized>(b: &mut B) -> [u8; 12] {
-    let mut id = [0u8; 12];
+/// A fresh ObjectId of the node: seconds of the cluster time, then the node's part
+/// ([`ObjectIds`]).
+pub fn new_object_id<B: Backend + ?Sized>(b: &mut B, shared: &Shared) -> [u8; 12] {
     let secs = u32::try_from(b.now_ms() / 1000).unwrap_or(u32::MAX);
-    id[..4].copy_from_slice(&secs.to_be_bytes());
-    id[4..].copy_from_slice(&b.random().to_be_bytes());
-    id
+    lock(shared).object_ids.next(secs, || b.random())
 }
