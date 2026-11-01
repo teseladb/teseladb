@@ -191,3 +191,63 @@ fn dictionaries_are_renewed_and_dropped_once_no_file_uses_them() {
     assert_eq!(lsm.dictionaries(), kept);
     check_all(&mut lsm, &mut disk, &model, clock + 1);
 }
+
+/// The manifest at `dir` with the version of its first dictionary moved by `by`: its records are
+/// walked edit by edit (each starts on a page), the record rewritten and its CRC computed again.
+fn move_dictionary_version(disk: &mut teseladb_raftlog::SimDisk, dir: &std::path::Path, by: u8) {
+    use teseladb_raftlog::{FileId, IoOp};
+    let manifest = disk
+        .list(dir)
+        .unwrap()
+        .into_iter()
+        .find(|p| p.file_name().unwrap().to_string_lossy().starts_with("MANIFEST-"))
+        .unwrap();
+    let mut b = disk.read_all(&manifest).unwrap();
+    let mut page = 0;
+    let found = 'edits: loop {
+        assert!(page < b.len(), "no dictionary in the manifest");
+        let mut at = page;
+        loop {
+            let len = u32::from_le_bytes(b[at..at + 4].try_into().unwrap()) as usize;
+            let kind = b[at + 4];
+            if kind == 8 {
+                break 'edits (at, len);
+            }
+            at += 5 + len + 4;
+            if kind == 2 {
+                break;
+            }
+        }
+        page = at.next_multiple_of(4096);
+    };
+    let (at, len) = found;
+    // The version is a one-byte varint at the start of the body.
+    b[at + 5] += by;
+    let crc = teseladb_hash::crc32c(&b[at..at + 5 + len]);
+    b[at + 5 + len..at + 9 + len].copy_from_slice(&crc.to_le_bytes());
+    let file = FileId(9_999);
+    disk.execute(IoOp::Open { file, path: manifest });
+    disk.execute(IoOp::WriteAt { file, offset: 0, data: b.into(), batch: 0 });
+    disk.execute(IoOp::Sync { file, batch: 0 });
+    disk.execute(IoOp::Close { file });
+}
+
+#[test]
+fn a_file_whose_dictionary_the_manifest_does_not_have_marks_the_core_corrupt() {
+    let cfg = with(Codec::ZstdDict);
+    let mut disk = teseladb_raftlog::SimDisk::default();
+    let mut lsm = open(&cfg, &mut disk);
+    let (mut model, mut clock) = (Model::default(), 0);
+    write_docs(&mut lsm, &mut disk, &mut model, (7, 0, 400), &mut clock);
+    compact_all(&mut lsm, &mut disk);
+    write_docs(&mut lsm, &mut disk, &mut model, (7, 400, 800), &mut clock);
+    compact_all(&mut lsm, &mut disk);
+    assert!(lsm.metrics().blocks_written[3] > 0);
+    drop(lsm);
+    // The files name the dictionary's version; the manifest now has it under another one.
+    move_dictionary_version(&mut disk, &cfg.dir, 50);
+    match Lsm::recover(&cfg, &mut disk) {
+        Err(teseladb_lsm::LsmError::Corrupt { .. }) => {}
+        other => panic!("{:?}", other.map(|_| ())),
+    }
+}
