@@ -78,3 +78,39 @@ fn a_field_without_intervals_matches_no_key() {
     let w = walk(&f, &keys());
     assert!(w.visits.is_empty());
 }
+
+#[test]
+fn a_middle_field_before_its_interval_seeks_with_the_later_fields_starts() {
+    // `{g: {$exists: true}, n: 5, x: 1}` over `{g, n, x}`: `a/3/1` is before `n`'s interval, the
+    // scan seeks to `a/5/1` and gives it; `b/9/1` is past it and goes to the next `g`.
+    let five = Value::Int32(5);
+    let f = [all(true), field("$eq", five.clone(), true), field("$eq", Value::Int32(1), true)];
+    let s = |x: &str| Value::String(x.to_owned());
+    let k = vec![
+        vec![s("a"), Value::Int32(3), Value::Int32(1)],
+        vec![s("a"), five.clone(), Value::Int32(1)],
+        vec![s("b"), Value::Int32(9), Value::Int32(1)],
+    ];
+    let w = walk(&f, &k);
+    assert_eq!(w.visits, [Visit::Outside(0), Visit::Within(1), Visit::Outside(2)]);
+    assert_eq!(w.seeks, 3);
+    assert!(!w.done);
+}
+
+#[test]
+fn a_key_past_the_leading_field_ends_the_walk() {
+    let a = Value::String("a".to_owned());
+    let f = [field("$eq", a.clone(), true), all(true)];
+    let k = vec![vec![a, Value::Int32(1)], vec![Value::String("b".to_owned()), Value::Int32(1)]];
+    let w = walk(&f, &k);
+    assert_eq!(w.visits, [Visit::Within(0), Visit::Outside(1)]);
+    assert!(w.done);
+}
+
+#[test]
+fn a_key_without_values_counts_as_reached_and_within() {
+    let f = [all(true), field("$gt", Value::Int32(0), true)];
+    let k = vec![vec![Value::Null, Value::Int32(0)], Vec::new()];
+    let w = walk(&f, &k);
+    assert_eq!(w.visits, [Visit::Outside(0), Visit::Within(1)]);
+}

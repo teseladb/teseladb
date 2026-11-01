@@ -537,3 +537,71 @@ fn intervals_join_where_they_meet() {
     assert_eq!(shown(union(&[b(1, true, 3, false)], &[b(1, true, 3, true)])), ["[1, 3]"]);
     assert_eq!(shown(union(&[b(5, true, 5, true)], &[b(1, true, 1, true)])), ["[1, 1]", "[5, 5]"]);
 }
+
+#[test]
+fn edges_of_intervals_and_their_display() {
+    let open = Bound {
+        low: Value::Int32(1),
+        low_inclusive: false,
+        high: Value::Int32(1),
+        high_inclusive: true,
+    };
+    assert!(!open.is_point());
+    assert_eq!(shown_value(&Value::Document(Document::new())), "{}");
+    assert_eq!(shown_value(&Value::Array(Vec::new())), "[]");
+    // `$not` of more than `$exists`, or of `$exists: 0`, has no intervals.
+    assert_eq!(intervals("$not", &Value::Document(doc(r#"{"$exists":true,"$gt":1}"#))), None);
+    assert_eq!(intervals("$not", &Value::Document(doc(r#"{"$exists":0}"#))), None);
+    for v in [Value::Int64(1), Value::Double(1.0), Value::String("x".to_owned())] {
+        assert!(intervals("$exists", &v).is_some(), "{v:?}");
+    }
+    for v in [Value::Int64(0), Value::Double(0.0), Value::Null, Value::Undefined] {
+        assert!(intervals("$exists", &v).is_none(), "{v:?}");
+    }
+    // Two intervals with the same upper end keep it in only if both do.
+    let a = Bound {
+        low: Value::Int32(0),
+        low_inclusive: true,
+        high: Value::Int32(5),
+        high_inclusive: true,
+    };
+    let b = Bound {
+        low: Value::Int32(1),
+        low_inclusive: true,
+        high: Value::Int32(5),
+        high_inclusive: false,
+    };
+    assert_eq!(intersect(&[a.clone()], &[b.clone()])[0].shown(), "[1, 5)");
+    // Intervals that meet at an end left open on both sides stay apart.
+    let c = Bound {
+        low: Value::Int32(5),
+        low_inclusive: false,
+        high: Value::Int32(9),
+        high_inclusive: true,
+    };
+    assert_eq!(union(&[b], &[c]).len(), 2);
+    let empty = Bound {
+        low: Value::Int32(5),
+        low_inclusive: false,
+        high: Value::Int32(5),
+        high_inclusive: true,
+    };
+    assert!(intersect(&[a], &[empty]).is_empty());
+}
+
+#[test]
+fn a_trial_that_does_not_end_scores_without_its_bonus() {
+    let base =
+        Trial { works: 10, advanced: 5, fetches: true, sorts: false, intersects: false, eof: true };
+    assert!(score(&base) > score(&Trial { eof: false, ..base }));
+}
+
+#[test]
+fn a_hint_takes_no_intersection() {
+    let c = catalog();
+    let parsed = doc(r#"{"$and":[{"g":{"$eq":"a"}},{"s":{"$eq":"x"}}]}"#);
+    let request = Request { parsed: Some(&parsed), sort: &[], hint: Some(0), intersect: true };
+    let found = candidates(&request, &c);
+    assert_eq!(found.len(), 1);
+    assert!(matches!(found[0], Access::Index(_)));
+}
