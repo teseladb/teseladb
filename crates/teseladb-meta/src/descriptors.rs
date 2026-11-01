@@ -305,7 +305,7 @@ impl DescTable<'_> {
         &mut self,
         g: GroupId,
         at: &[u8],
-        capped: &BTreeSet<u32>,
+        capped: &BTreeSet<(u32, u32)>,
     ) -> Result<GroupId, Group0Error> {
         let merging = self.in_change(g);
         let r = self.ranges.get(&g).ok_or(Group0Error::NoSuchGroup)?;
@@ -316,7 +316,7 @@ impl DescTable<'_> {
             return Err(Group0Error::BadSplit);
         }
         let at = teseladb_keys::space::cut_outside(at, (&r.start, &r.end), |t, c| {
-            t == 0 && capped.contains(&c)
+            capped.contains(&(t, c))
         })
         .ok_or(Group0Error::BadSplit)?;
         let new = self.ids.next().ok_or(Group0Error::OutOfGroupIds)?;
@@ -396,7 +396,7 @@ impl DescTable<'_> {
         &mut self,
         index: u64,
         (left, right): (GroupId, GroupId),
-        capped: &BTreeSet<u32>,
+        capped: &BTreeSet<(u32, u32)>,
     ) -> Result<(), Group0Error> {
         let (l, r) = match (self.ranges.get(&left), self.ranges.get(&right)) {
             (Some(l), Some(r)) => (l, r),
@@ -499,12 +499,14 @@ impl Group0Sm {
     }
 }
 
-/// Whether range `d` holds a key of a capped collection of `capped` (tenant 0, as
-/// [`DescTable::split`] judges them).
-fn holds_capped(d: &RangeDesc, capped: &BTreeSet<u32>) -> bool {
-    capped.iter().any(|&c| {
-        let start = teseladb_keys::KeyBuilder::collection_start(0, c);
-        let end = teseladb_keys::KeyBuilder::collection_end(0, c);
+/// The capped collections, by tenant and number (015 FR-003, 007 FR-025).
+pub type CappedSet = BTreeSet<(u32, u32)>;
+
+/// Whether range `d` holds a key of a capped collection of `capped`, by tenant and number.
+fn holds_capped(d: &RangeDesc, capped: &BTreeSet<(u32, u32)>) -> bool {
+    capped.iter().any(|&(t, c)| {
+        let start = teseladb_keys::KeyBuilder::collection_start(t, c);
+        let end = teseladb_keys::KeyBuilder::collection_end(t, c);
         d.start.as_slice() < end.as_bytes()
             && (d.end.is_empty() || start.as_bytes() < d.end.as_slice())
     })

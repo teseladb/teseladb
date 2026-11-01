@@ -75,7 +75,7 @@ impl Requests {
     }
 }
 
-const ERRORS: [Group0Error; 31] = [
+const ERRORS: [Group0Error; 34] = [
     Group0Error::AlreadyBootstrapped,
     Group0Error::NotBootstrapped,
     Group0Error::NameOrAddrTaken,
@@ -107,6 +107,9 @@ const ERRORS: [Group0Error; 31] = [
     Group0Error::OutOfGroupIds,
     Group0Error::NotEmpty,
     Group0Error::SettingConflict,
+    Group0Error::TenantExists,
+    Group0Error::TenantNotFound,
+    Group0Error::InvalidTenantName,
 ];
 
 /// The code of an error in the snapshot: its position in [`ERRORS`].
@@ -143,6 +146,9 @@ fn error_code(e: Group0Error) -> u8 {
         Group0Error::OutOfGroupIds => 28,
         Group0Error::NotEmpty => 29,
         Group0Error::SettingConflict => 30,
+        Group0Error::TenantExists => 31,
+        Group0Error::TenantNotFound => 32,
+        Group0Error::InvalidTenantName => 33,
     }
 }
 
@@ -153,6 +159,7 @@ const COLLECTION: u8 = 3;
 const INDEX: u8 = 4;
 const ERR: u8 = 5;
 const META1: u8 = 6;
+const TENANT: u8 = 7;
 
 fn put_result(e: &mut Encoder, r: &Group0Result) {
     match r {
@@ -185,6 +192,9 @@ fn put_result(e: &mut Encoder, r: &Group0Result) {
             e.u8(META1);
             r.encode(e);
         }
+        Group0Result::Tenant(t) => {
+            e.u8(TENANT).u32(*t);
+        }
     }
 }
 
@@ -199,7 +209,13 @@ fn get_result(d: &mut Decoder<'_>) -> Result<Group0Result, DecodeError> {
             let mut uuid = [0u8; 16];
             uuid.copy_from_slice(d.raw(16)?);
             let options = d.bytes()?.to_vec();
-            Group0Result::Collection(CollectionEntry { id, uuid, options, created_index: d.u64()? })
+            Group0Result::Collection(CollectionEntry {
+                id,
+                uuid,
+                options,
+                created_index: d.u64()?,
+                tenant: 0,
+            })
         }
         INDEX => {
             let id = d.u32()?;
@@ -217,6 +233,7 @@ fn get_result(d: &mut Decoder<'_>) -> Result<Group0Result, DecodeError> {
             Group0Result::Err(*ERRORS.get(c).ok_or(DecodeError::InvalidValue { offset: at })?)
         }
         META1 => Group0Result::Meta1(Meta2Range::decode(d)?),
+        TENANT => Group0Result::Tenant(d.u32()?),
         _ => return Err(DecodeError::InvalidValue { offset: at }),
     })
 }

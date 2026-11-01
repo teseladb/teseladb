@@ -162,7 +162,14 @@ pub struct User {
     pub restrictions: Option<Vec<Value>>,
     /// `customData`.
     pub custom_data: Option<Document>,
+    /// Its tenant (TeselaDB 007 FR-025): the one of the session that created it, 0 without
+    /// tenants. Its document keeps it in [`TENANT_FIELD`] only when it is not 0.
+    pub tenant: u32,
 }
+
+/// The field of a user document with its tenant, when it is not the default one (the field
+/// `teseladb_meta::tenants::TENANT_FIELD` names too).
+pub const TENANT_FIELD: &str = "tenantId";
 
 /// A stored user document that RefDb would not use.
 pub type BadUserDocument = BadDocument;
@@ -178,6 +185,7 @@ impl User {
             roles: Vec::new(),
             restrictions: None,
             custom_data: None,
+            tenant: 0,
         }
     }
 
@@ -229,6 +237,9 @@ impl User {
             .with("user", self.name.user.as_str())
             .with("db", self.name.db.as_str())
             .with("credentials", self.credentials_document());
+        if self.tenant != 0 {
+            d.push(TENANT_FIELD, i64::from(self.tenant));
+        }
         if let Some(r) = &self.restrictions {
             d.push("authenticationRestrictions", Value::Array(r.clone()));
         }
@@ -296,6 +307,11 @@ impl User {
         u.custom_data = match d.get("customData") {
             Some(Value::Document(c)) => Some(c.clone()),
             _ => None,
+        };
+        u.tenant = match d.get(TENANT_FIELD) {
+            Some(Value::Int32(t)) => u32::try_from(*t).unwrap_or(0),
+            Some(Value::Int64(t)) => u32::try_from(*t).unwrap_or(0),
+            _ => 0,
         };
         u.roles = parse_roles(d)?;
         Ok(u)

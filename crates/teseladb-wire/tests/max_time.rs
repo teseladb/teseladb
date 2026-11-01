@@ -347,6 +347,7 @@ fn op(conn: i32) -> Op {
         deadline_ms: None,
         killed: false,
         user: None,
+        tenant: 0,
         privileges: None,
         roles: None,
         desc: None,

@@ -337,7 +337,8 @@ mod tests {
         let key = |coll: u32, id: i32| {
             // The options of a plain collection, as `create` stores them: an empty document.
             let options = Document::new().to_bytes().unwrap();
-            let c = CollectionEntry { id: coll, uuid: [0; 16], options, created_index: 1 };
+            let c =
+                CollectionEntry { id: coll, uuid: [0; 16], options, created_index: 1, tenant: 0 };
             doc_key(&c, &Value::Int32(id)).unwrap()
         };
         let put = |key: Vec<u8>, value_type: u8, value: Vec<u8>| Put { key, value_type, value };
