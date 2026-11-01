@@ -19,8 +19,8 @@ impl Lsm {
     /// every frozen memtable is flushed, an edit takes the range's flushed index back to 0; then
     /// tombstones cover the intervals, their GC threshold goes above them and every file is
     /// compacted, which removes the data and the tombstones. The identifier comes back in
-    /// [`Completions::cleared`](super::Completions::cleared) once that compaction ends, and then [`Lsm::ingest_range`] finds
-    /// the intervals empty. Nothing may be written to the range meanwhile.
+    /// [`Completions::cleared`](super::Completions::cleared) once that compaction ends, and then
+    /// [`Lsm::ingest_range`] finds the intervals empty. Nothing may be written to the range meanwhile.
     pub fn clear_range(&mut self, range: GroupId, intervals: Vec<(Vec<u8>, Vec<u8>)>) -> u64 {
         self.freeze();
         let id = self.next_request;
@@ -57,8 +57,8 @@ impl Lsm {
     }
 
     /// Exports every version of `[start, end)` up to `ts` as SST files in `dir` (FR-009). The
-    /// memtable is flushed first; the files come in [`Completions::exported`](super::Completions::exported) with the returned
-    /// identifier. Writes up to `ts` must all be applied before.
+    /// memtable is flushed first; the files come in
+    /// [`Completions::exported`](super::Completions::exported) with the returned identifier. Writes up to `ts` must all be applied before.
     pub fn export(&mut self, start: &[u8], end: &[u8], ts: Hlc, dir: std::path::PathBuf) -> u64 {
         self.freeze();
         let id = self.next_request;
@@ -69,7 +69,9 @@ impl Lsm {
     }
 
     /// Ingests `files` (from an export) into `[start, end)`, which must hold no local data
-    /// (FR-009). The result comes in [`Completions::ingested`](super::Completions::ingested) with the returned identifier.
+    /// (FR-009). The result comes in [`Completions::ingested`](super::Completions::ingested) with
+    /// the returned identifier. When every level below level 0 has a file that spans the interval,
+    /// a compaction of its own budget first makes room in the last level (FR-024).
     pub fn ingest(&mut self, files: Vec<FileRef>, start: &[u8], end: &[u8]) -> u64 {
         self.push_ingest(files, vec![(start.to_vec(), end.to_vec())], None)
     }
@@ -94,7 +96,7 @@ impl Lsm {
     ) -> u64 {
         let id = self.next_request;
         self.next_request += 1;
-        self.requests.push_back(Request::Ingest { id, files, intervals, flushed });
+        self.requests.push_back(Request::Ingest { id, files, intervals, flushed, room: false });
         id
     }
 
@@ -125,7 +127,21 @@ impl Lsm {
                     .collect();
                 Some(Job::Compact(Box::new(CompactJob::export(&self.cfg, inputs, spec))))
             }
-            Request::Ingest { id, files, intervals, flushed } => {
+            Request::Ingest { id, files, intervals, flushed, room: false } => {
+                let room = crate::compaction::room_for_ingest(&self.version, &intervals);
+                self.requests.push_front(Request::Ingest {
+                    id,
+                    files,
+                    intervals,
+                    flushed,
+                    room: true,
+                });
+                match room {
+                    Some(plan) => Some(Job::Compact(Box::new(self.compaction(plan).for_ingest()))),
+                    None => self.take_request(),
+                }
+            }
+            Request::Ingest { id, files, intervals, flushed, room: true } => {
                 self.ingesting.insert(id, intervals.clone());
                 let job = IngestJob::new(
                     &self.cfg,

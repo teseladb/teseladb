@@ -202,6 +202,7 @@ fn refused_commands_are_recorded_without_document_values() {
         mechanism: teseladb_auth::sasl::SaslMechanism::ScramSha256,
         login_ms: 0,
         roles: None,
+        tenant: 0,
     });
     let insert = doc(&[
         ("insert", s("p")),
@@ -543,6 +544,7 @@ fn nodes_without_an_audit_log_record_nothing() {
         mechanism: teseladb_auth::sasl::SaslMechanism::ScramSha256,
         login_ms: 0,
         roles: None,
+        tenant: 0,
     });
     let shared = std::mem::take(&mut m.shared);
     audit::on_close(&shared, &mut c, &mut m);

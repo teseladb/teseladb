@@ -551,7 +551,8 @@ fn rules_of(
         .collect::<Result<Vec<_>, CommandError>>()?;
     // A capped collection's entries end in the document's `seq` (015 FR-003).
     let capped = super::capped::rule_of(coll)?;
-    Ok(Rules { ns: full(ns), collection: coll.id, indexes, capped, ..Rules::default() })
+    let (collection, tenant) = (coll.id, coll.tenant);
+    Ok(Rules { ns: full(ns), collection, tenant, indexes, capped, ..Rules::default() })
 }
 
 /// Writes the entries of `indexes` for every document of the collection, with the writes of
@@ -575,12 +576,16 @@ pub(super) fn drop_one<B: Backend + ?Sized>(
     e: &IndexEntry,
 ) -> Result<(), CommandError> {
     backend.index_write(IndexCommand::SetState { id: e.id, state: IndexState::Dropping })?;
-    let rules = Rules { ns: full(ns), collection: coll.id, ..Rules::default() };
+    let rules =
+        Rules { ns: full(ns), collection: coll.id, tenant: coll.tenant, ..Rules::default() };
     let mut w = Writer::internal();
     // Its entries, then the guards of `prepareUnique` (009 FR-004).
     for id in [e.id, teseladb_index::prepared::guards_of(e.id)] {
-        let start = teseladb_keys::KeyBuilder::index_prefix(0, coll.id, id).as_bytes().to_vec();
-        let end = teseladb_keys::KeyBuilder::index_prefix(0, coll.id, id + 1).as_bytes().to_vec();
+        let start =
+            teseladb_keys::KeyBuilder::index_prefix(coll.tenant, coll.id, id).as_bytes().to_vec();
+        let end = teseladb_keys::KeyBuilder::index_prefix(coll.tenant, coll.id, id + 1)
+            .as_bytes()
+            .to_vec();
         loop {
             let rows = backend.scan(&start, &end, MODIFY_CHUNK_KEYS, ReadConcern::Local)?;
             if rows.is_empty() {

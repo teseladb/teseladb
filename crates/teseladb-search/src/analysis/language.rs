@@ -27,7 +27,9 @@ const STOPWORDS: &[(&str, &str)] = &[
     ("english", include_str!("stopwords/english.txt")),
     ("finnish", include_str!("stopwords/finnish.txt")),
     ("french", include_str!("stopwords/french.txt")),
+    ("galician", include_str!("stopwords/galician.txt")),
     ("german", include_str!("stopwords/german.txt")),
+    ("greek", include_str!("stopwords/greek.txt")),
     ("hindi", include_str!("stopwords/hindi.txt")),
     ("hungarian", include_str!("stopwords/hungarian.txt")),
     ("indonesian", include_str!("stopwords/indonesian.txt")),
@@ -45,6 +47,7 @@ const STOPWORDS: &[(&str, &str)] = &[
     ("sorani", include_str!("stopwords/sorani.txt")),
     ("spanish", include_str!("stopwords/spanish.txt")),
     ("swedish", include_str!("stopwords/swedish.txt")),
+    ("thai", include_str!("stopwords/thai.txt")),
     ("turkish", include_str!("stopwords/turkish.txt")),
     ("ukrainian", include_str!("stopwords/ukrainian.txt")),
 ];
@@ -98,6 +101,15 @@ pub fn language(language: &str) -> Option<(Vec<CharFilter>, Tokenizer, Vec<Token
             return Some((vec![], Tokenizer::Kuromoji, filters));
         }
         "nori" => return Some((vec![], Tokenizer::Nori, vec![TokenFilter::Lowercase])),
+        "smartcn" => {
+            let filters = vec![TokenFilter::Lowercase, TokenFilter::PorterStemming];
+            return Some((vec![], Tokenizer::SmartCn, filters));
+        }
+        "thai" => {
+            let stop = TokenFilter::Stopword { tokens: stopwords(language)?, ignore_case: false };
+            let filters = vec![TokenFilter::Lowercase, TokenFilter::DecimalDigit, stop];
+            return Some((vec![], Tokenizer::Thai, filters));
+        }
         _ => {}
     }
     let cjk = CJK_ANALYZERS.contains(&language);
@@ -172,6 +184,8 @@ pub fn language(language: &str) -> Option<(Vec<CharFilter>, Tokenizer, Vec<Token
         ],
         "polish" => vec![TokenFilter::Lowercase, stop, TokenFilter::Stempel],
         "brazilian" => vec![TokenFilter::Lowercase, stop, TokenFilter::BrazilianStemming],
+        "galician" => vec![TokenFilter::Lowercase, stop, TokenFilter::GalicianStemming],
+        "greek" => vec![TokenFilter::GreekLowercase, stop, TokenFilter::GreekStemming],
         _ if cjk => {
             vec![TokenFilter::CjkWidth, TokenFilter::Lowercase, TokenFilter::CjkBigram, stop]
         }

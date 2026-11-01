@@ -7,6 +7,9 @@ use crate::lsm::Lsm;
 pub struct LsmMetrics {
     /// `lsm_level_bytes{level}`: bytes of the files of each level, level 0 first.
     pub level_bytes: Vec<u64>,
+    /// `lsm_level_files{level}`: files of each level, level 0 first (write pressure counts those
+    /// of level 0, FR-012).
+    pub level_files: Vec<usize>,
     /// `lsm_write_amp`: bytes written to files per byte written by the callers.
     pub write_amp: f64,
     /// `lsm_read_files_per_get`: files searched per point read that finished.
@@ -36,6 +39,11 @@ pub struct LsmMetrics {
     pub block_bytes_written: [u64; 2],
     /// Dictionaries in the manifest.
     pub dictionaries: usize,
+    /// `lsm_ingest_compactions_total`: compactions that made room for an ingestion (FR-024).
+    pub ingest_compactions_total: u64,
+    /// `lsm_ingest_compaction_bytes_total`: bytes those compactions read and wrote, out of their
+    /// own budget.
+    pub ingest_compaction_bytes_total: u64,
 }
 
 fn ratio(num: u64, den: u64) -> f64 {
@@ -50,6 +58,7 @@ impl Lsm {
         let c = &self.counters;
         LsmMetrics {
             level_bytes: v.levels.iter().map(|l| l.iter().map(|t| t.size).sum()).collect(),
+            level_files: v.levels.iter().map(Vec::len).collect(),
             write_amp: ratio(c.written_bytes, c.user_bytes),
             read_files_per_get: ratio(r.probes, r.gets),
             gets_total: r.gets,
@@ -64,6 +73,8 @@ impl Lsm {
             blocks_written: c.blocks,
             block_bytes_written: c.block_bytes,
             dictionaries: self.state.dictionaries.len(),
+            ingest_compactions_total: c.ingest_compactions,
+            ingest_compaction_bytes_total: c.ingest_compaction_bytes,
         }
     }
 

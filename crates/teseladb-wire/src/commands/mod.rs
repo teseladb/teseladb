@@ -52,6 +52,7 @@ pub mod server_params;
 pub mod session;
 pub mod sort;
 pub mod status;
+pub mod tenants;
 pub mod timeseries;
 pub mod timeseries_filter;
 pub mod ttl;
@@ -266,6 +267,15 @@ pub trait Backend {
     /// keeps them closer at hand.
     fn write_gate(&mut self) -> Result<write_block::WriteGate, CommandError> {
         Ok(write_block::gate_of(&self.cluster_parameters()?))
+    }
+    /// The tenant the running command works in (007 FR-025); the default one outside an
+    /// operation, where a backend sees every tenant's databases with their qualified names.
+    fn tenant(&self) -> u32 {
+        teseladb_meta::tenants::DEFAULT_TENANT
+    }
+    /// The number of tenant `name` (007 FR-025); `None` if there is none.
+    fn tenant_named(&mut self, _name: &str) -> Result<Option<u32>, CommandError> {
+        Ok(None)
     }
     /// Whether every other live node of the cluster already applies write gates `want` (007
     /// FR-029: `fsync` and `setUserWriteBlockMode` answer once every node has them, as a `refrouter`

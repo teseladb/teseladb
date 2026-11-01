@@ -109,8 +109,24 @@ pub fn dispatch_with<B: Backend + ?Sized>(
         },
         Kind::Msg => {
             let started = cmds.as_ref().map(|(b, _)| b.now_micros());
+            // The tenant it runs in, and the command without the `$tenant` that named it, which
+            // no command knows (007 FR-025).
+            let own = conn.auth.user.as_ref().map_or(0, |u| u.tenant);
+            let resolved = match cmds.as_mut() {
+                Some((b, _)) => crate::commands::tenants::of_request(own, &req.command, &mut **b),
+                None => Ok((own, None)),
+            };
+            let stripped;
+            let (req, resolved) = match resolved {
+                Ok((tenant, cmd)) => {
+                    conn.tenant = tenant;
+                    stripped = cmd.map(|command| Request { command, ..req.clone() });
+                    (stripped.as_ref().unwrap_or(req), Ok(()))
+                }
+                Err(e) => (req, Err(e)),
+            };
             let inner = cmds.as_mut().map(|(b, s)| (&mut **b, *s));
-            let action = match command(conn, req, node, inner) {
+            let action = match resolved.and_then(|()| command(conn, req, node, inner)) {
                 Ok(a) => a,
                 Err(e) => error(&e, node),
             };
@@ -495,6 +511,7 @@ fn run_op<B: Backend + ?Sized>(
         deadline_ms: limit.map(|ms| (backend.now_micros() / 1000).saturating_add(ms)),
         killed: refusal.is_some(),
         user: conn.auth.user.as_ref().map(|u| u.name.clone()),
+        tenant: conn.tenant,
         privileges,
         roles: conn.auth.user.as_ref().and_then(|u| u.roles.clone()),
         desc: None,

@@ -465,3 +465,125 @@ fn a_threshold_handed_while_a_range_clears_waits_for_its_ingest() {
         assert_eq!(at(&mut b, &mut b_disk, 35), Some(b"v30".to_vec()), "{whole_table}");
     }
 }
+
+/// Sizes for the ingestions under write pressure (004 T039): two levels, every flush compacted.
+fn pressure_cfg() -> LsmConfig {
+    LsmConfig {
+        levels: 2,
+        l0_trigger: 1,
+        target_file_bytes: 16 << 10,
+        compaction_bytes_per_sec: 1 << 40,
+        ingest_compaction_bytes_per_sec: 1 << 40,
+        ..small()
+    }
+}
+
+/// An LSM with keys `a…` and `z…` in its last level and, if `upper`, more of them in level 1:
+/// with `upper`, every level below level 0 has a file that spans `[m, n)`.
+fn around_m(cfg: &LsmConfig, disk: &mut MemDisk, upper: bool) -> Lsm {
+    let mut lsm = open(cfg, disk);
+    let mut index = 0;
+    let mut write = |lsm: &mut Lsm, disk: &mut MemDisk, n: u64| {
+        for i in 0..n {
+            for side in ["a", "z"] {
+                index += 1;
+                let k = format!("{side}{i:05}");
+                lsm.put(G, index, k.as_bytes(), ts(index, 0), &[side.as_bytes()[0]; 200]).unwrap();
+            }
+        }
+        lsm.flush();
+        lsm.run_io(disk, Nanos::ZERO);
+    };
+    write(&mut lsm, disk, 500);
+    lsm.compact_all();
+    lsm.run_io(disk, Nanos::ZERO);
+    if upper {
+        write(&mut lsm, disk, 20);
+    }
+    lsm
+}
+
+/// The interval `[m, n)` exported from an LSM of its own, in more files than the level 0 limit.
+fn m_files(cfg: &LsmConfig, to: &mut MemDisk) -> Vec<FileRef> {
+    let mut disk = MemDisk::new();
+    let mut src = open(&LsmConfig { memtable_bytes: 8 << 20, ..cfg.clone() }, &mut disk);
+    for i in 0..2000u64 {
+        src.put(G, i + 1, format!("m{i:05}").as_bytes(), ts(i + 1, 0), &[b'm'; 200]).unwrap();
+    }
+    let files = export(&mut src, &mut disk, b"m", b"n", ts(5000, 0));
+    assert!(files.len() > cfg.l0_slow, "{} files", files.len());
+    send(&files, &mut disk, to)
+}
+
+/// Every key the test wrote reads back: `m…` from the ingestion, `a…` and `z…` from before.
+fn reads_everything(lsm: &mut Lsm, disk: &mut MemDisk) {
+    let v = lsm.view();
+    let rows = scan(lsm, disk, &v, b"a", b"zz", ts(u64::MAX >> 1, 0));
+    let count = |p: u8| rows.iter().filter(|r| r.0[0] == p).count();
+    assert_eq!((count(b'a'), count(b'm'), count(b'z')), (500, 2000, 500));
+}
+
+#[test]
+fn an_ingestion_where_every_level_spans_its_interval_makes_room_in_the_last_level() {
+    let cfg = pressure_cfg();
+    let mut disk = MemDisk::new();
+    let mut lsm = around_m(&cfg, &mut disk, true);
+    let before = lsm.metrics();
+    assert!(before.level_files[1] >= 1 && before.level_files[2] >= 1, "{before:?}");
+    let files = m_files(&cfg, &mut disk);
+    let n = files.len();
+    ingest(&mut lsm, &mut disk, files, b"m", b"n").unwrap();
+    let after = lsm.metrics();
+    // The files went to the last level, beside the pieces of the file that spanned them.
+    assert_eq!(after.level_files[0], 0, "{after:?}");
+    assert!(after.level_files[2] >= before.level_files[2] + n, "{after:?}");
+    assert_eq!(after.ingest_compactions_total, 1);
+    assert!(after.ingest_compaction_bytes_total > 0);
+    reads_everything(&mut lsm, &mut disk);
+    drop(lsm);
+    let mut lsm = open(&cfg, &mut disk);
+    reads_everything(&mut lsm, &mut disk);
+}
+
+#[test]
+fn an_ingestion_with_a_free_level_needs_no_compaction() {
+    let cfg = pressure_cfg();
+    let mut disk = MemDisk::new();
+    let mut lsm = around_m(&cfg, &mut disk, false);
+    let files = m_files(&cfg, &mut disk);
+    ingest(&mut lsm, &mut disk, files, b"m", b"n").unwrap();
+    // The files went to level 1, the deepest free one, and from there down as it filled up.
+    let after = lsm.metrics();
+    assert_eq!(after.level_files[0], 0, "{after:?}");
+    assert_eq!((after.ingest_compactions_total, after.ingest_compaction_bytes_total), (0, 0));
+    reads_everything(&mut lsm, &mut disk);
+}
+
+#[test]
+fn the_compaction_for_an_ingestion_spends_its_own_budget() {
+    let rate = 4096;
+    let cfg = LsmConfig { ingest_compaction_bytes_per_sec: rate, ..pressure_cfg() };
+    let mut disk = MemDisk::new();
+    let mut lsm = around_m(&cfg, &mut disk, true);
+    let files = m_files(&cfg, &mut disk);
+    let id = lsm.ingest(files, b"m", b"n");
+    // The other compactions have budget to spare; this one moves `rate` bytes per second.
+    let mut seconds = 0u64;
+    let result = loop {
+        let done = lsm.run_io(&mut disk, Nanos::from_secs(seconds));
+        if let Some((got, r)) = done.ingested.into_iter().next() {
+            assert_eq!(got, id);
+            break r;
+        }
+        seconds += 1;
+        assert!(seconds < 10_000, "the ingestion never ended");
+    };
+    result.unwrap();
+    let moved = lsm.metrics().ingest_compaction_bytes_total;
+    // Each second adds `rate`, on top of the first second's; the last operation may overdraw it.
+    assert!(
+        moved.div_ceil(rate) >= seconds && seconds + 1 >= moved / rate - 1,
+        "{moved} {seconds}"
+    );
+    reads_everything(&mut lsm, &mut disk);
+}

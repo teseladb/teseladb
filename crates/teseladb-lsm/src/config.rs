@@ -57,6 +57,9 @@ pub struct LsmConfig {
     pub levels: usize,
     /// I/O budget of compactions per second.
     pub compaction_bytes_per_sec: u64,
+    /// I/O budget per second of the compactions an ingestion needs (FR-024), apart from the one
+    /// of the other compactions.
+    pub ingest_compaction_bytes_per_sec: u64,
     /// Largest write or read a flush or a compaction issues at once.
     pub io_chunk_bytes: usize,
     /// Manifest size that starts a rotation.
@@ -89,6 +92,7 @@ impl Default for LsmConfig {
             level_ratio: 10,
             levels: 6,
             compaction_bytes_per_sec: 64 << 20,
+            ingest_compaction_bytes_per_sec: 64 << 20,
             io_chunk_bytes: 1 << 20,
             manifest_rotate_bytes: 64 << 20,
             encryption: None,

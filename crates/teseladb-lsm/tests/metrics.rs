@@ -25,6 +25,7 @@ fn every_metric_follows_what_happened() {
     lsm.run_io(&mut disk, Nanos::ZERO);
     let one = lsm.metrics();
     assert_eq!((one.files, one.memtable_bytes), (1, 0));
+    assert_eq!(one.level_files[..2], [1, 0]);
     assert!(one.level_bytes[0] > 0 && one.cache_bytes > 0, "{one:?}");
     assert!(one.write_amp > 1.0, "a file is larger than the bytes written: {one:?}");
     // With two files in level 0 the next write is made while the LSM asks to slow down.
@@ -39,6 +40,7 @@ fn every_metric_follows_what_happened() {
     let compacted = lsm.metrics();
     assert_eq!(compacted.compactions_total, 1);
     assert_eq!(compacted.level_bytes[0], 0);
+    assert_eq!(compacted.level_files[..2], [0, 1]);
     assert!(compacted.level_bytes[1] > 0);
     // A point read searches one file; the second read of the same block finds it cached.
     let v = lsm.view();

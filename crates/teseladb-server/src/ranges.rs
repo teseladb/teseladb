@@ -86,7 +86,7 @@ pub struct Ranges {
     /// The `Meta2` ranges, which are no data ranges.
     pub meta2_groups: BTreeSet<GroupId>,
     /// The capped collections, each of which has a range of its own (007 FR-009).
-    pub capped: BTreeSet<u32>,
+    pub capped: BTreeSet<(u32, u32)>,
 }
 
 /// The stored value of cluster parameter `name` in a copy of Group 0.
@@ -174,7 +174,7 @@ pub struct Replicas {
     /// Every descriptor of Group 0, which `descs` filters.
     all: Vec<RangeDesc>,
     /// The capped collections, cut out into ranges of their own.
-    capped: BTreeSet<u32>,
+    capped: BTreeSet<(u32, u32)>,
 }
 
 impl Replicas {
@@ -530,12 +530,12 @@ impl Replicas {
 /// The first edge of a capped collection of `capped` strictly inside `[start, end)` (an empty
 /// `end`: no end), where the range is cut so that the collection has a range of its own
 /// (007 FR-009).
-fn capped_cut(start: &[u8], end: &[u8], capped: &BTreeSet<u32>) -> Option<Vec<u8>> {
+fn capped_cut(start: &[u8], end: &[u8], capped: &BTreeSet<(u32, u32)>) -> Option<Vec<u8>> {
     use teseladb_keys::KeyBuilder;
     let inside = |k: &[u8]| start < k && (end.is_empty() || k < end);
     capped
         .iter()
-        .flat_map(|&c| [KeyBuilder::collection_start(0, c), KeyBuilder::collection_end(0, c)])
+        .flat_map(|&(t, c)| [KeyBuilder::collection_start(t, c), KeyBuilder::collection_end(t, c)])
         .map(|k| k.as_bytes().to_vec())
         .filter(|k| inside(k))
         .min()
@@ -676,7 +676,7 @@ mod tests {
         let start = KeyBuilder::collection_start(0, CAPPED).as_bytes().to_vec();
         let end = KeyBuilder::collection_end(0, CAPPED).as_bytes().to_vec();
         let mut o = One::new();
-        let capped = BTreeSet::from([CAPPED]);
+        let capped = BTreeSet::from([(0, CAPPED)]);
         let descs = vec![desc(1, &[1], &[4])];
         o.r.set(&Ranges { descs, capped: capped.clone(), ..Ranges::default() });
         let lsm = o.lsm.clone();

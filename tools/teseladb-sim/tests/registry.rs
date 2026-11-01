@@ -89,6 +89,7 @@ fn names_are_unique_and_the_builtin_workloads_are_there() {
             "storage",
             "testkv",
             "lsm",
+            "lsm-ingest",
             "range-docs",
             "multirange",
             "splits",

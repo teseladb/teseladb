@@ -65,7 +65,26 @@ pub struct SegmentData {
     pub geo: BTreeMap<String, Vec<Vec<u64>>>,
     /// The `storedSource` fields of each document (a BSON document), when the index keeps them.
     pub stored: Vec<Option<Vec<u8>>>,
+    /// Vector fields by path, each with its vector per document.
+    pub vectors: BTreeMap<String, VectorData>,
 }
+
+/// A vector field of a segment: its definition and each document's vector.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VectorData {
+    /// `numDimensions`.
+    pub dims: usize,
+    /// `similarity`.
+    pub similarity: crate::vector::Similarity,
+    /// `quantization`.
+    pub quantization: crate::vector::Quantization,
+    /// The vector of each document, by number.
+    pub values: Vec<Option<Vec<f32>>>,
+}
+
+/// Equality compares the components; [`crate::segment::hnsw::Hnsw::build`] leaves out vectors with
+/// a non-finite component, and two segments built from the same documents compare equal.
+impl Eq for VectorData {}
 
 impl SegmentData {
     /// An empty segment of `index` in `range`.
@@ -80,6 +99,7 @@ impl SegmentData {
             columns: BTreeMap::new(),
             geo: BTreeMap::new(),
             stored: Vec::new(),
+            vectors: BTreeMap::new(),
         }
     }
 

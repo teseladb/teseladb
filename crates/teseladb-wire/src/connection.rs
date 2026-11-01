@@ -107,6 +107,8 @@ pub struct Connection {
     pub bypass_default_max_time: bool,
     /// Its authentication (013).
     pub auth: AuthState,
+    /// The tenant the request being run works in (007 FR-025).
+    pub tenant: u32,
 }
 
 impl Connection {
@@ -127,6 +129,7 @@ impl Connection {
             peer: None,
             bypass_default_max_time: true,
             auth: AuthState::default(),
+            tenant: 0,
         }
     }
 

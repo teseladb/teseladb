@@ -193,8 +193,8 @@ impl Plan {
 
 /// The documents interval of collection `c`.
 pub fn documents_of(c: &CollectionEntry) -> (Vec<u8>, Vec<u8>) {
-    let start = KeyBuilder::index_prefix(0, c.id, DOCUMENTS).as_bytes().to_vec();
-    let end = KeyBuilder::index_prefix(0, c.id, DOCUMENTS + 1).as_bytes().to_vec();
+    let start = KeyBuilder::index_prefix(c.tenant, c.id, DOCUMENTS).as_bytes().to_vec();
+    let end = KeyBuilder::index_prefix(c.tenant, c.id, DOCUMENTS + 1).as_bytes().to_vec();
     (start, end)
 }
 

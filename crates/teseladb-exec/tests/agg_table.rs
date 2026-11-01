@@ -362,3 +362,24 @@ fn an_environment_without_system_stages_refuses_them() {
     )));
     assert_eq!(format!("{c:?}"), "Collation(collator)");
 }
+
+/// The search stages on a deployment without search (measured on a `refrouter` 9.0.4).
+#[test]
+fn search_stages_without_search_match_refdb() {
+    check(include_str!("agg/search.out"));
+}
+
+/// A search stage that is not first, as a deployment with search refuses it (measured on
+/// `refsearch` 1.70.6): `$search` runs as `$_internalSearchRefSearchRemote`.
+#[test]
+fn search_stages_go_first() {
+    for (stage, name) in [
+        ("$search", "$_internalSearchRefSearchRemote"),
+        ("$searchMeta", "$searchMeta"),
+        ("$vectorSearch", "$vectorSearch"),
+    ] {
+        let spec = format!(r#"[{{"$match":{{}}}},{{"{stage}":{{}}}}]"#);
+        let want = format!("!! 40602\t{name} is only valid as the first stage in a pipeline");
+        assert_eq!(compare(&spec, &want), None);
+    }
+}

@@ -318,8 +318,8 @@ pub(super) fn violations<B: Backend + ?Sized>(
     // A text index keeps no entries here (011).
     let Some(def) = def else { return Ok(Vec::new()) };
     let dirs: Vec<_> = def.key_spec().fields.iter().map(|f| f.direction).collect();
-    let start = KeyBuilder::index_prefix(0, coll.id, entry.id).as_bytes().to_vec();
-    let end = KeyBuilder::index_prefix(0, coll.id, entry.id + 1).as_bytes().to_vec();
+    let start = KeyBuilder::index_prefix(coll.tenant, coll.id, entry.id).as_bytes().to_vec();
+    let end = KeyBuilder::index_prefix(coll.tenant, coll.id, entry.id + 1).as_bytes().to_vec();
     let head = start.len() + usize::from(def.buckets > 0);
     let malformed = || CommandError::new(INTERNAL_ERROR, "an index entry that does not decode");
     let mut groups: Vec<(Vec<u8>, Vec<Vec<u8>>)> = Vec::new();

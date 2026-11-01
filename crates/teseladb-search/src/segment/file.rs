@@ -19,7 +19,8 @@
 //! A field section holds the term dictionary ([`Fst`], term → offset of its postings), the norms
 //! (exact length as four bytes and the norm byte per document) and the postings. The docmap holds
 //! per document the indexed version's timestamp and its key; columns, geographic cells and
-//! `storedSource` are per-document tables. The HNSW section comes with T031.
+//! `storedSource` are per-document tables. A vector field's section is its HNSW graph with the
+//! vectors ([`Hnsw::encode`]), built when the segment is written.
 
 use std::collections::BTreeMap;
 
@@ -29,8 +30,9 @@ use teseladb_keys::Hlc;
 use teseladb_types::GroupId;
 
 use crate::query::bm25::TermScorer;
-use crate::segment::data::{DocEntry, FieldData, SegmentData};
+use crate::segment::data::{DocEntry, FieldData, SegmentData, VectorData};
 use crate::segment::fst::{Builder, Fst};
+use crate::segment::hnsw::{DEFAULT_M, Hnsw};
 use crate::segment::postings::{self, DiskCursor};
 use crate::segment::table::{self, Table};
 use crate::segment::{Corrupt, norms, varint};
@@ -55,11 +57,12 @@ enum Kind {
     Column = 3,
     Geo = 4,
     Stored = 5,
+    Hnsw = 6,
 }
 
 impl Kind {
     fn from_byte(b: u8) -> Option<Kind> {
-        [Kind::Docmap, Kind::Field, Kind::Column, Kind::Geo, Kind::Stored]
+        [Kind::Docmap, Kind::Field, Kind::Column, Kind::Geo, Kind::Stored, Kind::Hnsw]
             .into_iter()
             .find(|k| *k as u8 == b)
     }
@@ -178,6 +181,11 @@ fn parts(data: &SegmentData) -> (Vec<u8>, Vec<Section>, u64, Hlc, Hlc) {
             cells.iter().map(|c| c.iter().flat_map(|v| v.to_le_bytes()).collect()).collect();
         let geo = tabled(enc.iter().map(|c| Some(c.as_slice())));
         sections.push((Kind::Geo as u8, name.clone(), geo));
+    }
+    for (name, v) in &data.vectors {
+        assert_eq!(v.values.len(), n, "one vector entry per document");
+        let graph = Hnsw::build(v.dims, v.similarity, v.quantization, DEFAULT_M, v.values.clone());
+        sections.push((Kind::Hnsw as u8, name.clone(), graph.encode()));
     }
     let stored = tabled(data.stored.iter().map(|s| s.as_deref()));
     sections.push((Kind::Stored as u8, String::new(), stored));
@@ -372,6 +380,7 @@ pub struct Segment<'a> {
     fields: BTreeMap<String, FieldReader<'a>>,
     columns: BTreeMap<String, Table<'a>>,
     geo: BTreeMap<String, Table<'a>>,
+    hnsw: BTreeMap<String, &'a [u8]>,
 }
 
 struct Cur<'a> {
@@ -449,6 +458,7 @@ impl<'a> Segment<'a> {
             fields: BTreeMap::new(),
             columns: BTreeMap::new(),
             geo: BTreeMap::new(),
+            hnsw: BTreeMap::new(),
         };
         let mut t = Cur { b: table_bytes, pos: 0 };
         let count = varint::get(table_bytes, &mut t.pos).ok_or(Corrupt("segment: table"))?;
@@ -519,6 +529,12 @@ impl<'a> Segment<'a> {
                     let map = if kind == Kind::Column { &mut seg.columns } else { &mut seg.geo };
                     map.insert(name, t);
                 }
+                Kind::Hnsw => {
+                    if Hnsw::decode(payload)?.vectors().len() != n {
+                        return Err(Corrupt("segment: vector count"));
+                    }
+                    seg.hnsw.insert(name, payload);
+                }
                 Kind::Docmap | Kind::Stored => {}
             }
         }
@@ -554,6 +570,11 @@ impl<'a> Segment<'a> {
         Some(b.as_chunks::<8>().0.iter().map(|c| u64::from_le_bytes(*c)).collect())
     }
 
+    /// The HNSW graph of the vector field at `path`.
+    pub fn vectors(&self, path: &str) -> Option<Hnsw> {
+        self.hnsw.get(path).and_then(|p| Hnsw::decode(p).ok())
+    }
+
     /// The `storedSource` of `doc`.
     pub fn stored(&self, doc: u32) -> Option<&'a [u8]> {
         self.stored.get(doc as usize)
@@ -579,6 +600,18 @@ impl<'a> Segment<'a> {
             data.geo.insert(
                 name.clone(),
                 (0..n).map(|d| self.geo(name, d).unwrap_or_default()).collect(),
+            );
+        }
+        for (name, payload) in &self.hnsw {
+            let g = Hnsw::decode(payload)?;
+            data.vectors.insert(
+                name.clone(),
+                VectorData {
+                    dims: g.dims(),
+                    similarity: g.similarity(),
+                    quantization: g.quantization(),
+                    values: g.vectors().to_vec(),
+                },
             );
         }
         Ok(data)

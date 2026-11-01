@@ -5,6 +5,7 @@ mod bitpack;
 pub mod data;
 pub mod file;
 pub mod fst;
+pub mod hnsw;
 pub mod manifest;
 pub mod merge;
 pub mod norms;

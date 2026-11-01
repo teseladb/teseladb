@@ -269,6 +269,7 @@ impl ServerBackend {
                     | CatalogAnswer::Principals(_)
                     | CatalogAnswer::Documents(_)
                     | CatalogAnswer::Dump(_)
+                    | CatalogAnswer::Tenants(_)
                     | CatalogAnswer::Unavailable,
                 )
                 | None => {}
@@ -512,7 +513,28 @@ impl Backend for ServerBackend {
         &mut self,
         cmd: CatalogCommand,
     ) -> Result<Option<CollectionEntry>, CommandError> {
-        self.catalog_change(CatalogReq::Write(cmd))
+        // A forwarded change's answer has no tenant: the namespace's qualified name gives it.
+        let tenant = match &cmd {
+            CatalogCommand::Create { ns, .. } => teseladb_meta::tenants::split_db(&ns.db).0,
+            _ => teseladb_meta::tenants::DEFAULT_TENANT,
+        };
+        let entry = self.catalog_change(CatalogReq::Write(cmd))?;
+        Ok(entry.map(|c| CollectionEntry { tenant, ..c }))
+    }
+
+    fn tenant_named(&mut self, name: &str) -> Result<Option<u32>, CommandError> {
+        let until = self.until();
+        loop {
+            if let Some(CatalogAnswer::Tenants(all)) =
+                self.ask(0, |tx| NodeMsg::Catalog(CatalogReq::Tenants, tx), until)
+            {
+                return Ok(all.into_iter().find(|(_, n)| n == name).map(|(id, _)| id));
+            }
+            if Instant::now() >= until {
+                return Err(unavailable());
+            }
+            thread::sleep(RETRY_PAUSE);
+        }
     }
 
     fn write(&mut self, op: WriteOp) -> Result<Vec<u8>, CommandError> {

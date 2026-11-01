@@ -1,5 +1,5 @@
 //! Workloads: `storage` (local logs with crashes), `testkv` (a Multi-Raft cluster under
-//! compare-and-swap), `lsm` (each core's log with its LSM, 004) and `range-docs` (replicated
+//! compare-and-swap), `lsm` (each core's log with its LSM, 004), `lsm-ingest` (an ingestion under sustained writes, 004) and `range-docs` (replicated
 //! document ranges, 005), `multirange`, `splits`, `relocate` and `meta2` (007) and `txn-bank` and `txn-append` (transactions
 //! across two ranges, 008), `indexes` (documents and their index entries in two ranges, 009) and
 //! `special-collections` (a capped collection, 015).
@@ -8,6 +8,7 @@ pub mod data_ship;
 pub mod indexes;
 pub mod kv;
 pub mod lsm;
+pub mod lsm_ingest;
 pub mod meta2;
 pub mod multirange;
 pub mod queries;

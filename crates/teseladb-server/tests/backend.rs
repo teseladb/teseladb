@@ -193,7 +193,8 @@ fn scans_return_rows() {
 
 #[test]
 fn the_catalog_is_read_and_changed_through_core_zero() {
-    let entry = CollectionEntry { id: 1, uuid: [2; 16], options: vec![], created_index: 3 };
+    let entry =
+        CollectionEntry { id: 1, uuid: [2; 16], options: vec![], created_index: 3, tenant: 0 };
     let mut catalog = Catalog::default();
     catalog.collections.insert(ns(), entry.clone());
     let mut b = backend(
@@ -742,9 +743,10 @@ fn group0_refusals_and_late_answers() {
     let mut b = backend(vec![], vec![CatalogAnswer::Refused(Group0Error::DatabaseDifferCase)]);
     assert_eq!(b.catalog_write(create).unwrap_err().code.code, 13297);
     let mut catalog = Catalog::default();
-    catalog
-        .collections
-        .insert(ns(), CollectionEntry { id: 1, uuid: [2; 16], options: vec![], created_index: 3 });
+    catalog.collections.insert(
+        ns(),
+        CollectionEntry { id: 1, uuid: [2; 16], options: vec![], created_index: 3, tenant: 0 },
+    );
     let mut b = backend(vec![], vec![CatalogAnswer::Catalog(Arc::new(catalog))]);
     assert_eq!(b.databases(), Ok(vec![]));
     for (answer, code) in [
