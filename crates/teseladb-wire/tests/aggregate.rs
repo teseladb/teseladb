@@ -270,7 +270,9 @@ fn coll_stats_of_a_time_series_shows_its_index() {
 /// the node an error came from, `node<N>` for `sh<N>` (D-102).
 fn unsharded(want: &str) -> String {
     if let Some(json) = want.strip_prefix("=> ") {
-        let mut r = extjson::parse(json).expect("reply");
+        // A shard's part of an index command's `raw` is the node's (D-102).
+        let json = json.replace("sh1/lc12-sh1:27018", "node1/:0");
+        let mut r = extjson::parse(&json).expect("reply");
         if let Some(Value::Document(s)) = r.get("shards").cloned() {
             let mut nodes = Document::new();
             for (k, v) in s.iter() {
@@ -488,4 +490,12 @@ fn cluster_catalog_answers_as_refdb() {
         }
     }
     assert!(wrong.is_empty(), "{} differ:\n{}", wrong.len(), wrong.join("\n"));
+}
+
+/// Sorts by array fields (`tests/aggregate/array_sort.out`, 010 T045, FR-025): ascending by an
+/// array's least element and descending by its greatest, the empty array before `null` and a
+/// missing field, with and without a multikey index, as a `refrouter` 9.0.4 sorts.
+#[test]
+fn array_sorts_answer_as_refdb() {
+    check_files(&[include_str!("aggregate/array_sort.out")]);
 }
