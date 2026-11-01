@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 
 use teseladb_bson::{Document, Value};
 
+use super::plan_exec::PLANNING_TIME;
 use super::{Backend, Ctx, lock};
 use crate::error::{BAD_VALUE, CommandError};
 use crate::types::{number, wrong_types};
@@ -171,6 +172,8 @@ pub struct Ended<'a> {
     pub app_name: Option<&'a str>,
     /// Its user, as `user@db`.
     pub user: Option<String>,
+    /// Its operation id (`opid`), as `currentOp` and `killOp` know it.
+    pub opid: u32,
 }
 
 /// The commands the profiler never records: itself, the handshake, and those that carry a
@@ -287,11 +290,12 @@ fn examined(e: &Ended<'_>) -> (Value, Value) {
 
 /// The document of `e` as `system.profile` and the slow query log write it, with the fields of a
 /// `refnode` 9.0.4 that TeselaDB has (measured 01-11-2026). `locks`, `flowControl`, `queues`,
-/// `planRanker`, `queryFramework`, `planningTimeMicros` and `isFromPriorityPortConnection` are
-/// RefEngine's and the classic engine's and have no counterpart here (DV-038).
+/// `planRanker` and `isFromPriorityPortConnection` are RefEngine's and the classic engine's and
+/// have no counterpart here (DV-038).
 fn describe(e: &Ended<'_>, now_ms: i64) -> Document {
     let mut d =
         Document::new().with("op", e.op).with("ns", e.ns).with("command", e.command.clone());
+    d.push("opid", i32::try_from(e.opid).unwrap_or(i32::MAX));
     let reply = match e.reply {
         Some(Ok(r)) => Some(r),
         _ => None,
@@ -312,6 +316,10 @@ fn describe(e: &Ended<'_>, now_ms: i64) -> Document {
         let (keys, docs) = examined(e);
         d.push("keysExamined", keys);
         d.push("docsExamined", docs);
+        // TeselaDB answers each `find` and `getMore` in one batch of its own.
+        if matches!(e.op, "query" | "getmore") {
+            d.push("nBatches", 1);
+        }
     }
     if let Some(c) = cursor {
         d.push("cursorExhausted", matches!(c.get("id"), Some(Value::Int64(0))));
@@ -326,6 +334,7 @@ fn describe(e: &Ended<'_>, now_ms: i64) -> Document {
         if let Some(n) = r.get("nModified") {
             d.push("nModified", n.clone());
         }
+        push_key_counts(&mut d, e, r);
     }
     if reading {
         // TeselaDB never yields an operation.
@@ -336,6 +345,9 @@ fn describe(e: &Ended<'_>, now_ms: i64) -> Document {
     }
     for (k, v) in parts.hashes.iter() {
         d.push(k, v.clone());
+    }
+    if let Some(framework) = query_framework(e, name) {
+        d.push("queryFramework", framework);
     }
     if let Some(r) = reply {
         let size = r.to_bytes().map_or(0, |b| b.len());
@@ -356,6 +368,11 @@ fn describe(e: &Ended<'_>, now_ms: i64) -> Document {
     if let Some(summary) = parts.summary {
         d.push("planSummary", summary);
     }
+    if plans(e.op, name) {
+        // A read or write the planner had nothing to choose for spent no time planning.
+        let t = e.report.plan.as_ref().and_then(|p| p.get(PLANNING_TIME));
+        d.push(PLANNING_TIME, t.cloned().unwrap_or(Value::Int64(0)));
+    }
     if let Some(stats) = parts.stats {
         d.push("execStats", stats);
     }
@@ -373,6 +390,72 @@ fn describe(e: &Ended<'_>, now_ms: i64) -> Document {
     d.push("allUsers", users);
     d.push("user", e.user.clone().unwrap_or_default());
     d
+}
+
+/// `nUpserted`, `keysInserted` and `keysDeleted` of a write that replied `r`, as a `refnode`
+/// 9.0.4 writes them (measured 01-11-2026): an insert its keys inserted, a delete its keys
+/// deleted, an update and a `findAndModify` how many documents they upserted and the keys
+/// inserted, and the keys deleted unless they upserted.
+fn push_key_counts(d: &mut Document, e: &Ended<'_>, r: &Document) {
+    let (inserted, deleted) = e.report.keys_written;
+    let long = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
+    let modify = e.command.iter().next().is_some_and(|(k, _)| FIND_AND_MODIFY.contains(&k));
+    match e.op {
+        "insert" => d.push("keysInserted", long(inserted)),
+        "remove" => d.push("keysDeleted", long(deleted)),
+        "update" | "command" if e.op == "update" || modify => {
+            let upserted = match (r.get("upserted"), r.get("lastErrorObject")) {
+                (Some(Value::Array(a)), _) => a.len(),
+                (_, Some(Value::Document(l))) => usize::from(l.get("upserted").is_some()),
+                _ => 0,
+            };
+            d.push("nUpserted", i64::try_from(upserted).unwrap_or(i64::MAX));
+            d.push("keysInserted", long(inserted));
+            if upserted == 0 {
+                d.push("keysDeleted", long(deleted));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Whether an operation `op` of command `name` plans its read, so that the profiler shows how
+/// long that took (`planningTimeMicros`): `find`, the writes but `insert`, and the commands that
+/// read through a query (measured on a `refnode` 9.0.4, 01-11-2026).
+fn plans(op: &str, name: &str) -> bool {
+    match op {
+        "query" | "update" | "remove" => true,
+        "command" => {
+            FIND_AND_MODIFY.contains(&name) || matches!(name, "aggregate" | "distinct" | "count")
+        }
+        _ => false,
+    }
+}
+
+/// The names of `findAndModify`.
+const FIND_AND_MODIFY: [&str; 2] = ["findAndModify", "findandmodify"];
+
+/// The framework of a read that profiles one (`queryFramework`): the slot-based engine for a
+/// pipeline whose query plan it runs, the classic engine for the other reads with a cursor and
+/// `distinct`; none for a write (measured on a `refnode` 9.0.4, 01-11-2026).
+fn query_framework(e: &Ended<'_>, name: &str) -> Option<&'static str> {
+    match (e.op, name) {
+        ("query" | "getmore", _) | (_, "distinct" | "count") => Some("classic"),
+        (_, "aggregate") => {
+            let stages: Vec<Document> = match e.command.get("pipeline") {
+                Some(Value::Array(items)) => items
+                    .iter()
+                    .filter_map(|v| match v {
+                        Value::Document(d) => Some(d.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            Some(super::explain::aggregate::query_framework(&stages))
+        }
+        _ => None,
+    }
 }
 
 /// Whether `doc` matches filter `f`.

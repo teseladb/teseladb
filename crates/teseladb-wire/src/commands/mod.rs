@@ -36,6 +36,7 @@ pub mod index_build;
 pub mod index_maintenance;
 pub mod index_mod;
 pub mod index_spec;
+pub(crate) mod index_usage;
 pub mod indexes;
 pub mod kinds;
 pub mod maintenance;
@@ -561,6 +562,8 @@ pub struct NodeSessions {
     pub object_ids: ObjectIds,
     /// The plans the node's reads chose, by shape (010 FR-002).
     pub plan_cache: plan_cache::PlanCache,
+    /// How often each index served a query plan, and since when (`$indexStats`, 010 FR-018).
+    pub index_usage: index_usage::IndexUsage,
     /// The profiler's settings (010 FR-015).
     pub profiler: profile::Profiler,
 }
@@ -611,6 +614,7 @@ impl NodeSessions {
             rw_defaults: cluster_admin::Defaults::default(),
             object_ids: ObjectIds::default(),
             plan_cache: plan_cache::PlanCache::default(),
+            index_usage: index_usage::IndexUsage::default(),
             pushes: teseladb_txn::push_cache::PushCache::new(),
             push_settled: std::sync::Arc::default(),
             txn_scratch: std::collections::BTreeSet::new(),

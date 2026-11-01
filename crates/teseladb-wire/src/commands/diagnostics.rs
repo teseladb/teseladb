@@ -649,13 +649,14 @@ fn in_blocks(stored: u64) -> u64 {
 /// collection is clustered or a time series, then each secondary index (010 FR-018).
 fn index_sizes<B: Backend + ?Sized>(
     backend: &mut B,
-    c: &teseladb_meta::catalog::CollectionEntry,
+    (ns, c): (&teseladb_meta::catalog::Namespace, &teseladb_meta::catalog::CollectionEntry),
     kind: &CollectionKind,
     key_bytes: u64,
 ) -> Result<Vec<(String, u64)>, CommandError> {
     let prefix = |id: u32| KeyBuilder::index_prefix(c.tenant, c.id, id).as_bytes().to_vec();
     let mut out = Vec::new();
     match kind {
+        _ if !super::catalog::has_id_index(ns) => {}
         CollectionKind::Clustered { .. } | CollectionKind::TimeSeries(_) => {}
         CollectionKind::Capped { .. } => {
             let start = prefix(teseladb_range::capped::ID_INDEX);
@@ -691,7 +692,7 @@ pub fn db_stats<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, C
         data += t.bytes;
         storage += collection_size(ctx.backend.stored_bytes(&start, &end)?) - INDEX_BYTES;
         let kind = super::kinds::kind_of(&c)?;
-        let sizes = index_sizes(ctx.backend, &c, &kind, t.key_bytes)?;
+        let sizes = index_sizes(ctx.backend, (&ns, &c), &kind, t.key_bytes)?;
         indexes += i64::try_from(sizes.len()).unwrap_or(0);
         index += sizes.iter().map(|(_, b)| b).sum::<u64>();
     }
@@ -747,7 +748,7 @@ pub(crate) fn storage_stats<B: Backend + ?Sized>(
     let scaled =
         |b: u64| number(i64::try_from(b / u64::try_from(scale).unwrap_or(1)).unwrap_or(i64::MAX));
     let kind = super::kinds::kind_of(c)?;
-    let sizes = index_sizes(backend, c, &kind, key_bytes)?;
+    let sizes = index_sizes(backend, (ns, c), &kind, key_bytes)?;
     let mut d = Document::new().with("size", scaled(bytes));
     match &kind {
         CollectionKind::TimeSeries(_) => {
@@ -857,7 +858,7 @@ pub fn coll_stats<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document,
     d.push("storageSize", scaled(storage));
     // A clustered collection and a time series have no `_id_` index of their own; a time series
     // has one on its `metaField` and `timeField` when it has a `metaField` (measured).
-    let sizes = index_sizes(ctx.backend, &c, &kind, key_bytes)?;
+    let sizes = index_sizes(ctx.backend, (&ns, &c), &kind, key_bytes)?;
     let index_bytes: u64 = sizes.iter().map(|(_, b)| b).sum();
     d.push("totalIndexSize", scaled(index_bytes));
     d.push("totalSize", scaled(storage + index_bytes));

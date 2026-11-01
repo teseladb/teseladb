@@ -167,6 +167,17 @@ impl Plan {
         doc: RawDoc<'_>,
         sort_key: Option<&[Value]>,
     ) -> Result<Option<Document>, CommandError> {
+        self.apply_keyed(doc, sort_key, None)
+    }
+
+    /// [`Plan::apply`] with the key of the index entry the document was read by
+    /// (`{$meta: "indexKey"}`).
+    fn apply_keyed(
+        &self,
+        doc: RawDoc<'_>,
+        sort_key: Option<&[Value]>,
+        index_key: Option<&Document>,
+    ) -> Result<Option<Document>, CommandError> {
         let ctx = self.ctx();
         let Some(position) = self.filter.match_position(doc, &ctx).map_err(from_mql)? else {
             return Ok(None);
@@ -174,7 +185,7 @@ impl Plan {
         match &self.projection {
             None => Ok(Some(Document::from(doc))),
             Some(p) => {
-                let pctx = ProjectionContext { matcher: ctx, position, sort_key };
+                let pctx = ProjectionContext { matcher: ctx, position, sort_key, index_key };
                 p.apply(doc, &pctx).map(Some).map_err(from_mql)
             }
         }
@@ -776,7 +787,9 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
     // An `_id` equality without a collation reads that document's key alone.
     let range = match super::crud::id_equality(&a.filter).filter(|_| collation.is_none()) {
         Some(id) => match super::crud::id_doc_key(ctx.backend, &coll, &id)? {
+            // The read goes through the index of `_id` (`$indexStats` counts it).
             Some(key) => {
+                ctx.backend.note_plan(super::plan_exec::used_id_index(false));
                 let end = after(&key);
                 (key, end)
             }
@@ -814,6 +827,7 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
             vars: a.vars.as_ref(),
             concern: a.concern,
             intersect: super::lock(ctx.shared).params.hash_intersection,
+            index_keys: reads_index_key(a.projection.as_ref()) && !id_point(&a.filter),
         };
         let sort_doc = match ctx.cmd.get("sort") {
             Some(Value::Document(s)) => s.clone(),
@@ -829,8 +843,7 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
                 .with("projection", projection.clone()),
             shape: super::plan_cache::read_shape(&parsed, Some(&sort_doc), Some(&projection), None),
         };
-        super::plan_exec::planned_documents(ctx.backend, &coll, &read, Some(note))
-            .map_err(executor)?
+        super::plan_exec::planned_keyed(ctx.backend, &coll, &read, Some(note)).map_err(executor)?
     } else {
         None
     };
@@ -948,7 +961,7 @@ fn sort_directions(sort: &Document) -> Vec<(String, i32)> {
 
 /// The documents an index plan found, in its order, skipped, limited and projected.
 fn planned_cursor(
-    rows: Vec<Vec<u8>>,
+    (rows, keys): super::plan_exec::Planned,
     a: &FindArgs,
     collation: Option<&Document>,
 ) -> Result<QueryCursor, CommandError> {
@@ -956,8 +969,9 @@ fn planned_cursor(
     let skip = usize::try_from(a.skip).unwrap_or(usize::MAX);
     let take = a.limit.map_or(usize::MAX, |l| usize::try_from(l).unwrap_or(usize::MAX));
     let mut docs = Vec::new();
-    for bytes in rows.iter().skip(skip).take(take) {
-        if let Some(d) = plan.apply(RawDoc::from_bytes(bytes)?, None)? {
+    for (i, bytes) in rows.iter().enumerate().skip(skip).take(take) {
+        let key = keys.get(i).and_then(Option::as_ref);
+        if let Some(d) = plan.apply_keyed(RawDoc::from_bytes(bytes)?, None, key)? {
             docs.push(d);
         }
     }
@@ -1220,17 +1234,17 @@ fn sorted<B: Backend + ?Sized>(
     a: &FindArgs,
     sort: &SortSpec,
     collation: Option<&Document>,
-    planned: Option<Vec<Vec<u8>>>,
+    planned: Option<super::plan_exec::Planned>,
 ) -> Result<QueryCursor, CommandError> {
     let plan = Plan::new(&a.filter, a.projection.as_ref(), collation)?.with_vars(a.vars.as_ref());
     let coll_collation = collation_of(collation)?;
     let col: Option<&dyn teseladb_bson::Collator> = coll_collation.as_ref().map(|c| c as _);
-    let mut rows: Vec<(Vec<SortKey>, Document)> = Vec::new();
+    let mut rows: Vec<(Vec<SortKey>, Document, Option<Document>)> = Vec::new();
     let mut memory = 0usize;
     let mut err = None;
     let range = documents_of(coll);
     let vars = a.vars.as_ref();
-    let mut keep = |bytes: &[u8]| -> Result<bool, CommandError> {
+    let mut keep = |bytes: &[u8], index_key: Option<Document>| -> Result<bool, CommandError> {
         memory += bytes.len();
         if memory > SORT_MEMORY_LIMIT && !a.allow_disk_use {
             err = Some(CommandError::new(
@@ -1240,21 +1254,22 @@ fn sorted<B: Backend + ?Sized>(
             return Ok(false);
         }
         let raw = RawDoc::from_bytes(bytes)?;
-        rows.push((sort.keys(raw, col), Document::from(raw)));
+        rows.push((sort.keys(raw, col), Document::from(raw), index_key));
         Ok(true)
     };
     match planned {
         // The plan's documents, in its order (an index that gives the sort's order keeps it).
-        Some(docs) => {
+        Some((docs, keys)) => {
+            let mut keys = keys.into_iter();
             for d in &docs {
-                if !keep(d)? {
+                if !keep(d, keys.next().flatten())? {
                     break;
                 }
             }
         }
         None => {
             for_each_match_with(backend, range, &a.filter, collation, vars, a.concern, |_, b| {
-                keep(b)
+                keep(b, None)
             })?;
         }
     }
@@ -1265,17 +1280,45 @@ fn sorted<B: Backend + ?Sized>(
     let skip = usize::try_from(a.skip).unwrap_or(usize::MAX);
     let take = a.limit.map_or(usize::MAX, |l| usize::try_from(l).unwrap_or(usize::MAX));
     let mut docs = Vec::new();
-    for (key, d) in rows.into_iter().skip(skip).take(take) {
+    for (key, d, index_key) in rows.into_iter().skip(skip).take(take) {
         let bytes = raw_bytes(&d)?;
         let raw = RawDoc::from_bytes(&bytes)?;
         let key: Vec<Value> = key.into_iter().map(|k| k.0).collect();
-        if let Some(p) = plan.apply(raw, Some(&key))? {
+        if let Some(p) = plan.apply_keyed(raw, Some(&key), index_key.as_ref())? {
             docs.push(p);
         }
     }
     let mut c = QueryCursor::buffered(docs);
     c.left = a.limit;
     Ok(c)
+}
+
+/// Whether `filter` reads one `_id` by equality to a value that is not a document, an array or
+/// a regular expression, which RefDb answers without the planner (`EXPRESS`): it gives no
+/// index key then (measured).
+pub(crate) fn id_point(filter: &Document) -> bool {
+    let mut fields = filter.iter();
+    match (fields.next(), fields.next()) {
+        (Some(("_id", v)), None) => {
+            !matches!(v, Value::Document(_) | Value::Array(_) | Value::Regex { .. })
+        }
+        _ => false,
+    }
+}
+
+/// Whether projection `p` reads `{$meta: "indexKey"}`, at any depth.
+fn reads_index_key(p: Option<&Document>) -> bool {
+    fn reads(v: &Value) -> bool {
+        match v {
+            Value::Document(d) => {
+                matches!(d.get("$meta"), Some(Value::String(m)) if m == "indexKey")
+                    || d.iter().any(|(_, v)| reads(v))
+            }
+            Value::Array(a) => a.iter().any(reads),
+            _ => false,
+        }
+    }
+    p.is_some_and(|d| d.iter().any(|(_, v)| reads(v)))
 }
 
 /// `getMore`.
@@ -1772,6 +1815,7 @@ fn planned<B: Backend + ?Sized>(
         vars: None,
         concern,
         intersect: super::lock(ctx.shared).params.hash_intersection,
+        index_keys: false,
     };
     let note = super::plan_exec::CacheNote {
         shared: ctx.shared,

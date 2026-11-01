@@ -30,6 +30,43 @@ use crate::error::{CommandError, INTERNAL_ERROR};
 /// The entries an index scan reads at a time.
 const KEY_CHUNK: usize = 256;
 
+/// The field of the profiler that holds how long planning took (`planningTimeMicros`).
+pub(crate) const PLANNING_TIME: &str = "planningTimeMicros";
+
+/// The field of a noted plan that lists the indexes its winner scans, for `$indexStats`
+/// ([`crate::ops::OpReport::used`]) of a write, which knows no namespace but the command's:
+/// `{names}`. A control character starts it, so that no field of RefDb's can be it.
+pub(crate) const USED_INDEXES: &str = "\u{1}used";
+
+/// What a read or write of one `_id` notes: the index of `_id`, used without planning (with
+/// `planned`, the time it spent planning, none, as a write's plan).
+pub(crate) fn used_id_index(planned: bool) -> Document {
+    let names = vec![Value::from(ID_INDEX)];
+    let used = Document::new().with(USED_INDEXES, Document::new().with("names", names));
+    match planned {
+        true => used.with(PLANNING_TIME, 0i64),
+        false => used,
+    }
+}
+
+/// The names of the indexes `access` scans.
+fn scanned(indexes: &[PlanIndex], access: &Access) -> Vec<String> {
+    let scans: Vec<&IndexScan> = match access {
+        Access::Collscan => Vec::new(),
+        Access::Index(s) => vec![s],
+        Access::Or(list) => list.iter().collect(),
+        Access::AndHash { scans, .. } => scans.iter().collect(),
+    };
+    let mut names: Vec<String> = Vec::new();
+    for s in scans {
+        let name = indexes[s.index].entry.name.clone();
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
 /// The name of the index of `_id`.
 const ID_INDEX: &str = "_id_";
 
@@ -184,6 +221,8 @@ pub(crate) struct ReadPlan<'a> {
     pub concern: ReadConcern,
     /// Whether plans may intersect index scans (`internalQueryPlannerEnableHashIntersection`).
     pub intersect: bool,
+    /// Whether the read wants the index key each document was found by (`{$meta: "indexKey"}`).
+    pub index_keys: bool,
 }
 
 /// A plan and what running it counted.
@@ -202,6 +241,9 @@ pub(crate) struct Ran {
     pub docs: u64,
     /// Documents found, in order.
     pub found: Vec<(Vec<u8>, Vec<u8>)>,
+    /// The index key each of them was found by, when the read wants them
+    /// ([`ReadPlan::index_keys`]): none for a collection scan or an intersection.
+    pub index_keys: Vec<Option<Document>>,
     /// The unit of work at which the plan gave each document.
     given_at: Vec<u64>,
     /// What its trial counted, when plans competed.
@@ -248,6 +290,7 @@ impl Ran {
             }
             let kept = usize::try_from(t.returned).unwrap_or(usize::MAX);
             r.found = self.found.iter().take(kept).cloned().collect();
+            r.index_keys.truncate(kept);
         }
         r
     }
@@ -261,6 +304,7 @@ pub(crate) fn choose<B: Backend + ?Sized>(
     indexes: &[PlanIndex],
     read: &ReadPlan<'_>,
 ) -> Result<Option<Chosen>, CommandError> {
+    let started = backend.now_micros();
     let metas: Vec<IndexMeta> = indexes.iter().map(|i| i.meta.clone()).collect();
     let request = Request {
         parsed: Some(read.parsed),
@@ -280,8 +324,9 @@ pub(crate) fn choose<B: Backend + ?Sized>(
         let Some(access) = plans.pop().filter(|a| *a != Access::Collscan) else {
             return Ok(None);
         };
+        let planning_micros = backend.now_micros().saturating_sub(started);
         let winner = run(backend, coll, indexes, read, access, None)?;
-        return Ok(Some(Chosen { winner, others: Vec::new() }));
+        return Ok(Some(Chosen { winner, others: Vec::new(), planning_micros }));
     }
     let documents = count_documents(backend, coll, read.concern)?;
     let budget = trial_works(documents);
@@ -305,16 +350,20 @@ pub(crate) fn choose<B: Backend + ?Sized>(
     // Two plans or more: the first of the order wins, and runs again without a budget.
     let order = ranked(&trials.iter().map(|t| t.trial).collect::<Vec<_>>());
     let best = &trials[order[0]];
+    let planning_micros = backend.now_micros().saturating_sub(started);
     let mut winner = run(backend, coll, indexes, read, best.access.clone(), None)?;
     winner.tried = best.tried;
     let others = order[1..].iter().map(|i| trials[*i].clone()).collect();
-    Ok(Some(Chosen { winner, others }))
+    Ok(Some(Chosen { winner, others, planning_micros }))
 }
 
 /// The plan the planner chose, and the others it tried, best first.
 pub(crate) struct Chosen {
     pub(crate) winner: Ran,
     pub(crate) others: Vec<Ran>,
+    /// How long choosing the winner took, its trials included, in microseconds
+    /// (`planningTimeMicros`).
+    pub(crate) planning_micros: u64,
 }
 
 /// The scan of each clause of a rooted `$or` that wins its own trial (`SUBPLAN`).
@@ -337,6 +386,7 @@ fn subplanned<B: Backend + ?Sized>(
         vars: read.vars,
         concern: read.concern,
         intersect: false,
+        index_keys: false,
     };
     for scans in branches {
         if scans.len() < 2 {
@@ -402,6 +452,7 @@ fn run<B: Backend + ?Sized>(
         past: 0,
         docs: 0,
         found: Vec::new(),
+        index_keys: Vec::new(),
         given_at: Vec::new(),
         tried: None,
         docs_at: Vec::new(),
@@ -455,7 +506,8 @@ fn run<B: Backend + ?Sized>(
         ran.child_past.push(0);
         ran.child_given.push(0);
         let residual = s.residual.as_ref().map(&plan_filter).transpose()?;
-        for entry in entries(backend, (coll.tenant, coll.id), index, s, read.concern)? {
+        let decode = read.index_keys && !index.id_index;
+        for entry in entries(backend, (coll.tenant, coll.id), index, s, read.concern, decode)? {
             if budget.is_some_and(|b| ran.keys >= b) {
                 ended = false;
                 break 'scans;
@@ -465,7 +517,7 @@ fn run<B: Backend + ?Sized>(
                 *k += 1;
             }
             last_past = entry.is_none();
-            let Some(pk) = entry else {
+            let Some(Entry { pk, key: index_key }) = entry else {
                 ran.past += 1;
                 if let Some(p) = ran.child_past.last_mut() {
                     *p += 1;
@@ -504,6 +556,13 @@ fn run<B: Backend + ?Sized>(
             }
             if keep && !seen_before {
                 seen.insert(pk);
+                if read.index_keys {
+                    let key = match index.id_index {
+                        true => id_key(&bytes)?,
+                        false => index_key,
+                    };
+                    ran.index_keys.push(key);
+                }
                 ran.found.push((dk, bytes));
                 ran.given_at.push(ran.keys);
                 let n = u64::try_from(ran.found.len()).unwrap_or(u64::MAX);
@@ -560,11 +619,12 @@ fn intersected<B: Backend + ?Sized>(
     let mut sets: Vec<std::collections::BTreeSet<Vec<u8>>> = Vec::new();
     for s in held {
         let read_entries =
-            entries(backend, (coll.tenant, coll.id), &indexes[s.index], s, read.concern)?;
+            entries(backend, (coll.tenant, coll.id), &indexes[s.index], s, read.concern, false)?;
         let n = u64::try_from(read_entries.len()).unwrap_or(u64::MAX);
         let outside = read_entries.iter().filter(|e| e.is_none()).count();
         let past = u64::try_from(outside).unwrap_or(u64::MAX);
-        let pks: std::collections::BTreeSet<Vec<u8>> = read_entries.into_iter().flatten().collect();
+        let pks: std::collections::BTreeSet<Vec<u8>> =
+            read_entries.into_iter().flatten().map(|e| e.pk).collect();
         ran.keys += n;
         ran.past += past;
         ran.child_keys.push(n);
@@ -573,13 +633,13 @@ fn intersected<B: Backend + ?Sized>(
     }
     ran.child_keys.push(0);
     ran.child_past.push(0);
-    for entry in entries(backend, (coll.tenant, coll.id), &indexes[last.index], last, read.concern)?
-    {
+    let last_index = &indexes[last.index];
+    for entry in entries(backend, (coll.tenant, coll.id), last_index, last, read.concern, false)? {
         ran.keys += 1;
         if let Some(k) = ran.child_keys.last_mut() {
             *k += 1;
         }
-        let Some(pk) = entry else {
+        let Some(Entry { pk, .. }) = entry else {
             ran.past += 1;
             if let Some(p) = ran.child_past.last_mut() {
                 *p += 1;
@@ -626,12 +686,13 @@ fn entries<B: Backend + ?Sized>(
     index: &PlanIndex,
     scan: &IndexScan,
     concern: ReadConcern,
-) -> Result<Vec<Option<Vec<u8>>>, CommandError> {
+    decode: bool,
+) -> Result<Vec<Option<Entry>>, CommandError> {
     let ranges = key_ranges((tenant, collection), index, &scan.bounds)?;
     let (first, past) = index_span((tenant, collection), index);
     let mut lists = Vec::new();
     for r in &ranges {
-        let mut pks = range_entries(backend, (tenant, collection), index, r, concern)?;
+        let mut pks = range_entries(backend, (tenant, collection), index, r, (concern, decode))?;
         if scan.backward {
             pks.reverse();
         }
@@ -681,6 +742,34 @@ pub(crate) fn key_after<B: Backend + ?Sized>(
     Ok(from < to && any_entry(backend, coll.tenant, index, (&from, &to), ReadConcern::Local)?)
 }
 
+/// An entry an index scan reads: the document's primary key and, when the read wants it, the
+/// entry's key as `{$meta: "indexKey"}` gives it.
+pub(crate) struct Entry {
+    pk: Vec<u8>,
+    key: Option<Document>,
+}
+
+/// The key of a document in the index of `_id`: `{_id: value}`.
+fn id_key(doc: &[u8]) -> Result<Option<Document>, CommandError> {
+    let doc = RawDoc::from_bytes(doc)?;
+    Ok(doc.get("_id").map(|id| Document::new().with("_id", Value::from(id))))
+}
+
+impl PlanIndex {
+    /// The key of an entry of this index whose values are `values` and whose stored value is
+    /// `stored` (type bits, after the primary key in a unique index), each field with its value
+    /// as RefDb gives `{$meta: "indexKey"}`; `None` when it does not decode (a collation's).
+    fn key_of(&self, values: &[u8], stored: &[u8]) -> Option<Document> {
+        let bits = match self.catalog.unique {
+            true => teseladb_keys::space::split_unique_value(stored).ok()?.1,
+            false => teseladb_keys::TypeBits::from_bytes(stored.to_vec()),
+        };
+        let decoded = teseladb_keys::decode(values, &bits, &self.dirs).ok()?;
+        let names = self.pattern.iter().map(|(k, _)| k);
+        Some(names.zip(decoded).fold(Document::new(), |d, (k, v)| d.with(k, v)))
+    }
+}
+
 /// The first key of `index` and the first key after it.
 fn index_span((tenant, collection): (u32, u32), index: &PlanIndex) -> (Vec<u8>, Vec<u8>) {
     let id = index.entry.id;
@@ -696,12 +785,13 @@ fn range_entries<B: Backend + ?Sized>(
     (tenant, collection): (u32, u32),
     index: &PlanIndex,
     r: &KeyRange,
-    concern: ReadConcern,
-) -> Result<Vec<Vec<u8>>, CommandError> {
+    (concern, decode): (ReadConcern, bool),
+) -> Result<Vec<Entry>, CommandError> {
     let (_, past) = index_span((tenant, collection), index);
     let end = r.end.clone().unwrap_or(past);
     if index.id_index {
-        return id_entries(backend, (tenant, collection), (&r.start, &end), concern);
+        let pks = id_entries(backend, (tenant, collection), (&r.start, &end), concern)?;
+        return Ok(pks.into_iter().map(|pk| Entry { pk, key: None }).collect());
     }
     let head = KeyBuilder::index_prefix(tenant, collection, index.entry.id).as_bytes().len();
     let malformed = || CommandError::new(INTERNAL_ERROR, "an index entry that does not decode");
@@ -710,10 +800,14 @@ fn range_entries<B: Backend + ?Sized>(
     loop {
         let rows = backend.scan(&from, &end, KEY_CHUNK, concern)?;
         let short = rows.len() < KEY_CHUNK;
-        for (key, _) in &rows {
+        for (key, value) in &rows {
             let rest = key.get(head..).ok_or_else(malformed)?;
             let cut = head + values_len(rest, &index.dirs).map_err(|_| malformed())?;
-            pks.push(key[cut..].to_vec());
+            let found = match decode {
+                true => index.key_of(&key[head..cut], value),
+                false => None,
+            };
+            pks.push(Entry { pk: key[cut..].to_vec(), key: found });
         }
         match rows.last() {
             Some((k, _)) if !short => from = [k.as_slice(), &[0]].concat(),
@@ -846,10 +940,23 @@ pub(crate) fn planned_keys<B: Backend + ?Sized>(
         vars: m.vars.as_ref(),
         concern: ReadConcern::Local,
         intersect: false,
+        index_keys: false,
     };
     let take = if m.multi { usize::MAX } else { 1 };
-    Ok(choose(backend, coll, &indexes, &read)?
-        .map(|c| c.winner.found.into_iter().take(take).map(|(k, _)| k).collect()))
+    let started = backend.now_micros();
+    let chosen = choose(backend, coll, &indexes, &read)?;
+    let planning = chosen
+        .as_ref()
+        .map_or_else(|| backend.now_micros().saturating_sub(started), |c| c.planning_micros);
+    let mut noted =
+        Document::new().with(PLANNING_TIME, i64::try_from(planning).unwrap_or(i64::MAX));
+    if let Some(c) = &chosen {
+        let names: Vec<Value> =
+            scanned(&indexes, &c.winner.access).into_iter().map(Value::from).collect();
+        noted.push(USED_INDEXES, Document::new().with("names", names));
+    }
+    backend.note_plan(noted);
+    Ok(chosen.map(|c| c.winner.found.into_iter().take(take).map(|(k, _)| k).collect()))
 }
 
 /// Filter `filter` as RefDb writes it back after parsing it, each `$expr` optimised.
@@ -887,6 +994,17 @@ pub(crate) fn planned_documents<B: Backend + ?Sized>(
     read: &ReadPlan<'_>,
     note: Option<CacheNote<'_>>,
 ) -> Result<Option<Vec<Vec<u8>>>, CommandError> {
+    Ok(planned_keyed(backend, coll, read, note)?.map(|(docs, _)| docs))
+}
+
+/// [`planned_documents`] with the index key each document was found by, when `read` wants them
+/// ([`ReadPlan::index_keys`]; empty otherwise).
+pub(crate) fn planned_keyed<B: Backend + ?Sized>(
+    backend: &mut B,
+    coll: &CollectionEntry,
+    read: &ReadPlan<'_>,
+    note: Option<CacheNote<'_>>,
+) -> Result<Option<Planned>, CommandError> {
     let indexes = plan_indexes(backend, coll)?;
     // The hashes of the read's shape, as `$planCacheStats` shows them, for the profiler.
     let hashes = note.as_ref().map(|n| {
@@ -897,25 +1015,35 @@ pub(crate) fn planned_documents<B: Backend + ?Sized>(
             .with("queryHash", hash)
             .with("planCacheKey", super::plan_cache::hex(&format!("{}{ns}", n.shape)))
     });
-    let report = |plan: Option<Document>| {
+    let report = |plan: Option<Document>, planning: u64| {
         let mut d = hashes.clone().unwrap_or_default();
         d.push("filter", read.parsed.clone());
         for (k, v) in plan.unwrap_or_default().iter() {
             d.push(k, v.clone());
         }
+        d.push(PLANNING_TIME, i64::try_from(planning).unwrap_or(i64::MAX));
         d
     };
+    let started = backend.now_micros();
     if indexes.is_empty() {
-        backend.note_plan(report(None));
+        let planning = backend.now_micros().saturating_sub(started);
+        backend.note_plan(report(None, planning));
         return Ok(None);
     }
     let Some(chosen) = choose(backend, coll, &indexes, read)? else {
-        backend.note_plan(report(None));
+        let planning = backend.now_micros().saturating_sub(started);
+        backend.note_plan(report(None, planning));
         return Ok(None);
     };
     if let Some(n) = &note {
         let plan = super::explain::plan_report(n.ns, read.parsed, &indexes, &chosen.winner);
-        backend.note_plan(report(Some(plan)));
+        backend.note_plan(report(Some(plan), chosen.planning_micros));
+        let now = i64::try_from(backend.wall_ms()).unwrap_or(i64::MAX);
+        let ns = super::names::full(n.ns);
+        let mut g = super::lock(n.shared);
+        for name in scanned(&indexes, &chosen.winner.access) {
+            g.index_usage.used(&ns, &name, now);
+        }
     }
     if let Some(n) = note
         && let Some(mut learned) =
@@ -925,5 +1053,9 @@ pub(crate) fn planned_documents<B: Backend + ?Sized>(
         let now = i64::try_from(backend.now_ms()).unwrap_or(i64::MAX);
         super::lock(n.shared).plan_cache.learn(&super::names::full(n.ns), learned, now);
     }
-    Ok(Some(chosen.winner.found.into_iter().map(|(_, d)| d).collect()))
+    let keys = chosen.winner.index_keys;
+    Ok(Some((chosen.winner.found.into_iter().map(|(_, d)| d).collect(), keys)))
 }
+
+/// The documents a plan found, in order, and the index key of each when the read wants them.
+pub(crate) type Planned = (Vec<Vec<u8>>, Vec<Option<Document>>);

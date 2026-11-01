@@ -24,6 +24,8 @@ pub type Meta = BTreeMap<String, Value>;
 pub const SCORE: &str = "score";
 /// The name of the random value `$sample` gives each document it takes.
 pub const RAND_VAL: &str = "randVal";
+/// The name of the key of the index entry a document was read by.
+pub const INDEX_KEY: &str = "indexKey";
 /// The name of the metadata of a score's details.
 pub const SCORE_DETAILS: &str = "scoreDetails";
 

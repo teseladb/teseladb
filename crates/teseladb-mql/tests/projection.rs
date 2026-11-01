@@ -15,6 +15,7 @@ fn project_at(spec: &str, doc: &str, position: Option<usize>) -> String {
         matcher: MatchContext { collation: None, ext: &ext, vars: None },
         position,
         sort_key: None,
+        index_key: None,
     };
     let s = bytes(spec);
     let d = bytes(doc);
@@ -172,6 +173,7 @@ fn positional() {
         matcher: MatchContext { collation: None, ext: &NoExtensions, vars: None },
         position: None,
         sort_key: None,
+        index_key: None,
     };
     let s = bytes(r#"{"g.$": 1}"#);
     let doc = bytes(d);
@@ -237,6 +239,7 @@ fn meta_and_expressions() {
         matcher: MatchContext { collation: None, ext: &NoExtensions, vars: None },
         position: None,
         sort_key: None,
+        index_key: None,
     };
     let s = bytes(r#"{"x": "$a"}"#);
     let doc = bytes(d);
@@ -249,6 +252,7 @@ fn meta_and_expressions() {
         matcher: MatchContext { collation: None, ext: &ext, vars: None },
         position: None,
         sort_key: None,
+        index_key: None,
     };
     let s = bytes(r#"{"x": {"$fail": 1}}"#);
     assert!(Projection::parse(raw(&s)).unwrap().apply(raw(&doc), &ctx).is_err());
@@ -378,6 +382,7 @@ fn sort_key_and_metadata_checks() {
         matcher: MatchContext { collation: None, ext: &NoExtensions, vars: None },
         position: None,
         sort_key: Some(&key),
+        index_key: None,
     };
     let apply = |spec: &str, doc: &str| {
         let (s, d) = (bytes(spec), bytes(doc));

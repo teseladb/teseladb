@@ -143,6 +143,13 @@ fn check_validation(o: &Document, cmd: &str) -> Result<(), CommandError> {
 /// The `collation` option of a collection.
 const COLLATION: &str = "collation";
 
+/// Whether collection `ns` has an index of `_id`: all but a `system.profile`, which a `refnode`
+/// 9.0.4 creates without one (measured 01-11-2026: no index in `listIndexes`, `collStats` nor
+/// `listCollections`).
+pub(crate) fn has_id_index(ns: &Namespace) -> bool {
+    ns.coll != super::profile::SYSTEM_PROFILE
+}
+
 /// The `_id` index of collection `c`, with the collection's collation (`listCollections`'
 /// `idIndex`, `listIndexes`).
 pub(crate) fn id_index(c: &CollectionEntry) -> Result<Document, CommandError> {
@@ -796,7 +803,9 @@ pub fn list_collections<B: Backend + ?Sized>(
                 }
                 _ => d.push("info", Document::new().with("readOnly", false).with("uuid", uuid)),
             }
-            if matches!(kind, CollectionKind::Normal | CollectionKind::Capped { .. }) {
+            if matches!(kind, CollectionKind::Normal | CollectionKind::Capped { .. })
+                && has_id_index(&ns)
+            {
                 d.push("idIndex", id_index(&c)?);
             }
         }
@@ -892,7 +901,10 @@ pub fn list_indexes<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Documen
             .map(|s| if raw { s } else { super::timeseries::user_index(&ts, &s) })
             .collect(),
         None => {
-            let mut specs = vec![id_index(&c)?];
+            let mut specs = match has_id_index(&ns) {
+                true => vec![id_index(&c)?],
+                false => Vec::new(),
+            };
             specs.extend(super::indexes::listed(ctx.backend, &c)?);
             specs
         }

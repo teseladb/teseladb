@@ -30,6 +30,8 @@ pub const META_NAMES: [&str; 14] = [
 
 /// The `$meta` of the values the document was sorted by.
 const SORT_KEY: &str = "sortKey";
+/// The `$meta` name of the key of the index entry a document was read by.
+const INDEX_KEY: &str = "indexKey";
 
 /// Codes of the projection errors.
 mod code {
@@ -78,6 +80,8 @@ pub struct ProjectionContext<'a> {
     pub position: Option<usize>,
     /// The values the document was sorted by, for `{$meta: "sortKey"}`.
     pub sort_key: Option<&'a [Value]>,
+    /// The key of the index entry the document was read by, for `{$meta: "indexKey"}`.
+    pub index_key: Option<&'a Document>,
 }
 
 /// A parsed projection.
@@ -582,6 +586,11 @@ impl Run<'_, '_, '_> {
                     let v = self.root.get(k.as_str());
                     if let Some(e) = v.map(|v| self.first_match(pred, v)).transpose()?.flatten() {
                         out.insert(k.as_str(), vec![e]);
+                    }
+                }
+                Node::Leaf(Action::Meta(name)) if name == INDEX_KEY => {
+                    if let Some(key) = self.ctx.index_key {
+                        out.insert(k.as_str(), key.clone());
                     }
                 }
                 Node::Leaf(Action::Meta(name)) if name == SORT_KEY => {

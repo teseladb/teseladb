@@ -224,19 +224,15 @@ fn a_filter_decides_what_is_profiled() {
 
 /// The fields of a `system.profile` document that TeselaDB has no counterpart of: RefEngine's
 /// locks and queues, the classic engine's planner and the priority port (DV-038).
-const NOT_OURS: [&str; 13] = [
+const NOT_OURS: [&str; 9] = [
     "isFromPriorityPortConnection",
     // The test's connection sends no application name.
     "appName",
-    "opid",
-    "nBatches",
     "queryShapeHash",
-    "queryFramework",
     "planRanker",
     "locks",
     "flowControl",
     "queues",
-    "planningTimeMicros",
     "totalOplogSlotDurationMicros",
     "cpuNanos",
 ];
@@ -321,4 +317,115 @@ fn passwords_are_neither_profiled_nor_logged() {
     for a in slow {
         assert_eq!(field(a, "command.pwd"), &Value::from("xxx"), "{a:?}");
     }
+}
+
+/// What the profiler counts of each operation, as a `refnode` 9.0.4 writes it at level 2
+/// (measured 01-11-2026 with an index `a_1`): `opid`, one batch per `find` and `getMore`, the
+/// index keys each write inserted and deleted (`_id`'s among them), the documents an update
+/// upserted, the framework of each read and how long its planning took.
+#[test]
+fn profiled_operations_count_what_they_did() {
+    let mut m = node();
+    run(
+        &mut m,
+        DB,
+        json(r#"{"insert":"c","documents":[{"_id":1,"a":1},{"_id":2,"a":2},{"_id":3,"a":3}]}"#),
+    );
+    run(&mut m, DB, json(r#"{"createIndexes":"c","indexes":[{"key":{"a":1},"name":"a_1"}]}"#));
+    run(&mut m, DB, json(r#"{"profile":2}"#));
+    run(&mut m, DB, json(r#"{"find":"c","filter":{"a":{"$gte":1}}}"#));
+    run(&mut m, DB, json(r#"{"insert":"c","documents":[{"_id":4,"a":4}]}"#));
+    run(
+        &mut m,
+        DB,
+        json(r#"{"update":"c","updates":[{"q":{"_id":9},"u":{"$set":{"a":9}},"upsert":true}]}"#),
+    );
+    run(&mut m, DB, json(r#"{"update":"c","updates":[{"q":{"_id":1},"u":{"$set":{"a":10}}}]}"#));
+    run(&mut m, DB, json(r#"{"delete":"c","deletes":[{"q":{"_id":2},"limit":1}]}"#));
+    run(
+        &mut m,
+        DB,
+        json(r#"{"aggregate":"c","pipeline":[{"$match":{"a":{"$gt":0}}}],"cursor":{}}"#),
+    );
+    run(&mut m, DB, json(r#"{"aggregate":"c","pipeline":[{"$group":{"_id":"$a"}}],"cursor":{}}"#));
+    run(&mut m, DB, json(r#"{"profile":0}"#));
+    let docs = profiled(&mut m);
+    let fields = ["opid", "nBatches", "keysInserted", "keysDeleted", "nUpserted", "queryFramework"];
+    let got: Vec<String> = docs
+        .iter()
+        .map(|d| {
+            let shown: Vec<String> = fields
+                .iter()
+                .filter_map(|k| {
+                    d.get(k).map(|v| match (*k, v) {
+                        ("opid", Value::Int32(n)) if *n > 0 => "opid".to_owned(),
+                        (_, Value::String(s)) => format!("{k}={s}"),
+                        (_, v) => {
+                            format!("{k}={}", teseladb_wire::types::number(v).unwrap_or(-1.0))
+                        }
+                    })
+                })
+                .collect();
+            let planned = matches!(d.get("planningTimeMicros"), Some(Value::Int64(n)) if *n >= 0);
+            format!(
+                "{} {} {planned}",
+                d.get("op").map(|v| format!("{v:?}")).unwrap_or_default(),
+                shown.join(",")
+            )
+        })
+        .collect();
+    let want = [
+        r#"String("query") opid,nBatches=1,queryFramework=classic true"#,
+        r#"String("insert") opid,keysInserted=2 false"#,
+        r#"String("update") opid,keysInserted=2,nUpserted=1 true"#,
+        r#"String("update") opid,keysInserted=1,keysDeleted=1,nUpserted=0 true"#,
+        r#"String("remove") opid,keysDeleted=2 true"#,
+        r#"String("command") opid,queryFramework=classic true"#,
+        r#"String("command") opid,queryFramework=sbe true"#,
+    ];
+    assert_eq!(got, want, "{docs:?}");
+}
+
+/// `system.profile` has no index of `_id` (measured on a `refnode` 9.0.4, 01-11-2026):
+/// `listIndexes` lists none, `collStats` counts none and `listCollections` shows no `idIndex`.
+#[test]
+fn system_profile_has_no_id_index() {
+    let mut m = node();
+    run(&mut m, DB, json(r#"{"profile":2}"#));
+    run(&mut m, DB, json(r#"{"find":"c","filter":{}}"#));
+    run(&mut m, DB, json(r#"{"profile":0}"#));
+    let r = run(&mut m, DB, json(r#"{"listIndexes":"system.profile"}"#));
+    assert_eq!(field(&r, "cursor.firstBatch"), &Value::Array(Vec::new()), "{r:?}");
+    let r = run(&mut m, DB, json(r#"{"collStats":"system.profile"}"#));
+    assert_eq!(r.get("nindexes").and_then(teseladb_wire::types::number), Some(0.0), "{r:?}");
+    assert_eq!(r.get("totalIndexSize").and_then(teseladb_wire::types::number), Some(0.0));
+    assert_eq!(r.get("indexSizes"), Some(&Value::Document(Document::new())), "{r:?}");
+    let r = run(&mut m, DB, json(r#"{"listCollections":1,"filter":{"name":"system.profile"}}"#));
+    let Value::Array(colls) = field(&r, "cursor.firstBatch") else { panic!("{r:?}") };
+    let Some(Value::Document(c)) = colls.first() else { panic!("{r:?}") };
+    assert!(c.get("idIndex").is_none(), "{c:?}");
+}
+
+/// `$indexStats` counts the reads and the writes whose plan scanned each index, those by one
+/// `_id` among them (measured on a `refnode` 9.0.4, 01-11-2026: `_id_` 2 and `a_1` 2 after
+/// these statements).
+#[test]
+fn index_stats_count_reads_and_writes() {
+    let mut m = node();
+    run(&mut m, DB, json(r#"{"insert":"c","documents":[{"_id":1,"a":1},{"_id":2,"a":2}]}"#));
+    run(&mut m, DB, json(r#"{"createIndexes":"c","indexes":[{"key":{"a":1},"name":"a_1"}]}"#));
+    run(&mut m, DB, json(r#"{"update":"c","updates":[{"q":{"a":1},"u":{"$set":{"b":1}}}]}"#));
+    run(&mut m, DB, json(r#"{"delete":"c","deletes":[{"q":{"a":2},"limit":1}]}"#));
+    run(&mut m, DB, json(r#"{"update":"c","updates":[{"q":{"_id":1},"u":{"$set":{"b":2}}}]}"#));
+    run(&mut m, DB, json(r#"{"find":"c","filter":{"_id":1}}"#));
+    let pipeline = r#"[{"$indexStats":{}},{"$project":{"_id":0,"name":1,"o":"$accesses.ops"}},{"$sort":{"name":1}}]"#;
+    let r = run(
+        &mut m,
+        DB,
+        json(&format!(r#"{{"aggregate":"c","pipeline":{pipeline},"cursor":{{}}}}"#)),
+    );
+    let want = json(
+        r#"{"b":[{"name":"_id_","o":{"$numberLong":"2"}},{"name":"a_1","o":{"$numberLong":"2"}}]}"#,
+    );
+    assert_eq!(field(&r, "cursor.firstBatch"), want.get("b").expect("batch"), "{r:?}");
 }
