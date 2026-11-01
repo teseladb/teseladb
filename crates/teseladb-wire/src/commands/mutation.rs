@@ -34,7 +34,7 @@ pub const MUTATION_LIMITS: Limits =
     Limits { max_size: 64 << 20, max_depth: crate::msg::MAX_COMMAND_DEPTH + 4 };
 
 /// Value type of a stored document.
-pub const DOCUMENT: u8 = 1;
+pub const DOCUMENT: u8 = teseladb_changestream::DOCUMENT_VALUE;
 
 /// Field names of the encoded mutation and of its result, each declared once.
 mod f {
@@ -57,6 +57,7 @@ mod f {
     pub const INDEXES: &str = "indexes";
     pub const VARS: &str = "let";
     pub const ATTEMPT: &str = "attempt";
+    pub const UNLOGGED: &str = "unlogged";
     pub const PROBES: &str = "probes";
     pub const CAPPED: &str = "capped";
     pub const CAPPED_SIZE: &str = "size";
@@ -148,6 +149,9 @@ pub struct Rules {
     pub capped: Option<CappedRule>,
     /// The collection is a time series (015 FR-006): an insert goes into bucket `bucket`.
     pub timeseries: Option<TimeSeriesRule>,
+    /// A write no change stream sees (014): the purge of a dropped collection, whose drop is the
+    /// event. It keeps no history next to the documents.
+    pub unlogged: bool,
 }
 
 /// The buckets of a time series and the one an insert goes to.
@@ -280,6 +284,9 @@ fn rules_doc(r: &Rules, d: &mut Document, attempt: i64) {
     if !r.probes.is_empty() {
         d.push(f::PROBES, index_maintenance::probes_value(&r.probes));
     }
+    if r.unlogged {
+        d.push(f::UNLOGGED, true);
+    }
     if let Some(c) = &r.capped {
         let saturated = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
         let mut cd = Document::new().with(f::CAPPED_SIZE, saturated(c.limits.size));
@@ -394,6 +401,7 @@ fn read_rules(d: RawDoc<'_>) -> Result<Rules, CommandError> {
         probes: index_maintenance::read_probes(d.get(f::PROBES))?,
         capped: read_capped(d)?,
         timeseries: read_timeseries(d)?,
+        unlogged: get_bool(d, f::UNLOGGED),
     })
 }
 
@@ -1021,6 +1029,21 @@ impl Mutation for Bound {
         }
         let attempt = self.rules().attempt;
         result.attempt = attempt;
+        let mut puts = puts;
+        // An update that writes a document it found, without a description, replaced it.
+        let replaced: Vec<Vec<u8>> = match &self.mutation {
+            DocMutation::Update { .. } => puts
+                .iter()
+                .filter(|p| p.value_type == DOCUMENT && lookup(&p.key).is_some())
+                .map(|p| p.key.clone())
+                .collect(),
+            _ => Vec::new(),
+        };
+        // An erase removes what a dropped index or collection left: it changes no document.
+        let erase = matches!(self.mutation, DocMutation::Erase { .. });
+        if !self.rules().unlogged && !erase {
+            puts.extend(history_puts(&self.keys, (&puts, &deletes), &change, &replaced)?);
+        }
         match result.encode() {
             Ok(result) => Ok(Outcome { puts, deletes, change, result }),
             // A result past the limits of an entry writes nothing and answers with that error.
@@ -1035,6 +1058,49 @@ impl Mutation for Bound {
 }
 
 type Evaluated = (Vec<Put>, Vec<Vec<u8>>, MutationResult);
+
+/// The documents a write changes, in the write's order: its document keys that it puts as
+/// documents or deletes, then the documents it puts under other keys (a capped collection's).
+pub fn written_docs(keys: &[Vec<u8>], puts: &[Put], deletes: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    use teseladb_changestream::changes::is_document_key;
+    let put_doc = |k: &[u8]| puts.iter().any(|p| p.value_type == DOCUMENT && p.key == k);
+    let mut docs: Vec<Vec<u8>> = Vec::new();
+    for k in keys.iter().filter(|k| is_document_key(k)) {
+        if (put_doc(k) || deletes.contains(k)) && !docs.contains(k) {
+            docs.push(k.clone());
+        }
+    }
+    let doc_puts = puts.iter().filter(|p| p.value_type == DOCUMENT && is_document_key(&p.key));
+    for p in doc_puts {
+        if !docs.contains(&p.key) {
+            docs.push(p.key.clone());
+        }
+    }
+    docs
+}
+
+/// The versions next to each document a write changes with what its event needs (014 FR-005,
+/// FR-009): its position in the write and the description of an update by operators.
+fn history_puts(
+    keys: &[Vec<u8>],
+    (puts, deletes): (&[Put], &[Vec<u8>]),
+    change: &[u8],
+    replaced: &[Vec<u8>],
+) -> Result<Vec<Put>, MutationError> {
+    use teseladb_changestream::meta::history;
+    let updates = UpdateDescription::decode_all(change)
+        .map_err(|e| MutationError(format!("change description: {e:?}")))?;
+    let docs = written_docs(keys, puts, deletes);
+    let replaced: Vec<Vec<u8>> =
+        replaced.iter().filter(|k| !updates.iter().any(|(u, _)| u == *k)).cloned().collect();
+    history(&docs, (&updates, &replaced), None)
+        .into_iter()
+        .map(|(key, meta)| {
+            let value = meta.encode().map_err(|e| MutationError(e.to_string()))?;
+            Ok(Put { key, value_type: teseladb_range::HISTORY_VALUE, value })
+        })
+        .collect()
+}
 type Lookup<'a> = dyn Fn(&[u8]) -> Option<(u8, &'a [u8])> + 'a;
 
 /// `doc` with each top-level `Timestamp(0, 0)` other than `_id` set to the write's time, one

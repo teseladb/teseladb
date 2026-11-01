@@ -347,6 +347,7 @@ pub fn rules_of(
         probes: Vec::new(),
         capped: super::capped::rule_of(coll)?,
         timeseries: None,
+        unlogged: false,
     })
 }
 

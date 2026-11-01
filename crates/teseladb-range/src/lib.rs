@@ -6,6 +6,7 @@
 pub mod ack;
 pub mod batch;
 pub mod capped;
+pub mod changes;
 pub mod checksum;
 pub mod client;
 pub mod closed_ts;
@@ -27,3 +28,7 @@ pub mod rollback;
 pub mod sm;
 pub mod snapshot;
 pub mod tscache;
+
+/// First byte of the stored value of a version that only serves the history of its key (014): no
+/// scan returns it and it is not live data.
+pub use teseladb_lsm::HISTORY_VALUE;

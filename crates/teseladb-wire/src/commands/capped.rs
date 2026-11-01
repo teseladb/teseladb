@@ -189,7 +189,12 @@ pub fn purge<B: Backend + ?Sized>(
     let start = teseladb_keys::KeyBuilder::index_prefix(0, c.id, ID_INDEX).as_bytes().to_vec();
     let end = teseladb_keys::KeyBuilder::collection_end(0, c.id).as_bytes().to_vec();
     let mut w = Writer::internal();
-    let rules = super::mutation::Rules { ns: full(ns), collection: c.id, ..Default::default() };
+    let rules = super::mutation::Rules {
+        ns: full(ns),
+        collection: c.id,
+        unlogged: true,
+        ..Default::default()
+    };
     loop {
         let rows =
             backend.scan(&start, &end, super::crud::MODIFY_CHUNK_KEYS, ReadConcern::Local)?;

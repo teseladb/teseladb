@@ -144,3 +144,22 @@ fn a_range_threshold_replaces_its_intervals_and_leaves_the_rest() {
     assert_eq!(value(&mut lsm, &mut disk, b"m", 15), None, "m@10 went at 25");
     assert_eq!(value(&mut lsm, &mut disk, b"m", 22), Some(b"m20".to_vec()));
 }
+
+/// A version that only serves the history (014 FR-007, the change description a document's
+/// version carries) is read at its own mark and never below the threshold: at or below it, every
+/// one goes, also the newest.
+#[test]
+fn history_versions_at_or_below_the_threshold_all_go() {
+    let mut disk = MemDisk::new();
+    let mut lsm = open(&small(), &mut disk);
+    let history = |s: &str| [&[teseladb_lsm::HISTORY_VALUE][..], s.as_bytes()].concat();
+    lsm.put(G, 1, b"h", ts(5, 0), &history("h5")).unwrap();
+    lsm.put(G, 2, b"h", ts(8, 0), &history("h8")).unwrap();
+    lsm.put(G, 3, b"h", ts(12, 0), &history("h12")).unwrap();
+    lsm.put(G, 4, b"k", ts(5, 0), b"\x01doc").unwrap();
+    lsm.set_gc_thresholds(GcTable::new(vec![(b"a".to_vec(), b"z".to_vec(), ts(10, 0))]));
+    compact(&mut lsm, &mut disk);
+    assert_eq!(value(&mut lsm, &mut disk, b"h", 9), None, "h@8 went too");
+    assert_eq!(value(&mut lsm, &mut disk, b"h", 12), Some(history("h12")));
+    assert_eq!(value(&mut lsm, &mut disk, b"k", 9), Some(b"\x01doc".to_vec()), "a document stays");
+}

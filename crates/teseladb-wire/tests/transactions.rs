@@ -1292,3 +1292,34 @@ fn a_transaction_s_catalog_write_keeps_the_backend_contract() {
     assert_eq!(created.len(), 1);
     m.shared = shared;
 }
+
+/// Each document a transaction writes keeps, next to its version, its transaction and its position
+/// in it, and the description of an update by operators (014 FR-002, FR-005, FR-009), as a
+/// `refrouter` 9.0.4 gives its events `lsid`, `txnNumber` and their order (measured on 01-11).
+#[test]
+fn a_transaction_leaves_its_session_and_order_next_to_each_document() {
+    use teseladb_changestream::meta::ChangeMeta;
+    let mut m = node();
+    assert!(ok(&run(&mut m, DB, insert(0))));
+    assert!(ok(&run(&mut m, DB, stmt(insert(1), 1, 7, true))));
+    let set = Document::new().with("$set", doc(&[("a", Value::Int32(1))]));
+    let update = Document::new().with("q", doc(&[("_id", Value::Int32(0))])).with("u", set);
+    let cmd = Document::new().with("update", "c").with("updates", vec![Value::Document(update)]);
+    assert!(ok(&run(&mut m, DB, stmt(cmd, 1, 7, false))));
+    assert!(ok(&run(&mut m, "admin", end("commitTransaction", 1, 7))));
+    let metas: Vec<ChangeMeta> = m
+        .types
+        .iter()
+        .filter(|(_, t)| **t == teseladb_range::HISTORY_VALUE)
+        .map(|(k, _)| ChangeMeta::decode(&m.data[k]).unwrap())
+        .collect();
+    let mut ops: Vec<u32> = metas.iter().map(|x| x.op).collect();
+    ops.sort_unstable();
+    assert_eq!(ops, [0, 1], "{metas:?}");
+    for x in &metas {
+        let t = x.txn.as_ref().expect("in the transaction");
+        assert_eq!((t.lsid, t.txn_number), (u128::from_be_bytes([1; 16]), 7));
+        assert_eq!(t.uid, teseladb_hash::sha256(b""));
+        assert_eq!(x.update.is_some(), x.op == 1);
+    }
+}

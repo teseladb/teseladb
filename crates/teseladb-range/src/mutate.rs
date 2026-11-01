@@ -107,6 +107,12 @@ pub fn live_size(key: &[u8], value: &[u8]) -> i64 {
     i64::try_from(key.len() + 1 + value.len()).unwrap_or(i64::MAX)
 }
 
+/// Bytes a live version of `key` with a value of type `value_type` takes: none for a version that
+/// only serves the history ([`crate::HISTORY_VALUE`], 014), which is not live data.
+pub fn live_size_of(key: &[u8], value_type: u8, value: &[u8]) -> i64 {
+    if value_type == crate::HISTORY_VALUE { 0 } else { live_size(key, value) }
+}
+
 /// The change of the range's live bytes that a write makes (007 FR-005, D-068): the new
 /// versions' sizes minus the sizes of the versions they replace or delete, which the leader read
 /// (`current`, in the order of `read`).
@@ -119,12 +125,12 @@ fn live_delta(
     let data = |k: &[u8]| k.first().is_some_and(|b| *b != 0);
     let old = |k: &[u8]| {
         let at = read.iter().position(|r| r.as_slice() == k);
-        at.and_then(|i| current.get(i).copied().flatten()).map_or(0, |(_, v)| live_size(k, v))
+        at.and_then(|i| current.get(i).copied().flatten()).map_or(0, |(t, v)| live_size_of(k, t, v))
     };
     let added: i64 = puts
         .iter()
         .filter(|p| data(&p.key))
-        .map(|p| live_size(&p.key, &p.value) - old(&p.key))
+        .map(|p| live_size_of(&p.key, p.value_type, &p.value) - old(&p.key))
         .sum();
     let removed: i64 = deletes.iter().filter(|k| data(k)).map(|k| old(k)).sum();
     added - removed

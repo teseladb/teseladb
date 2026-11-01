@@ -365,7 +365,8 @@ impl ScanState {
                     }
                 }
             };
-            if let Some(v) = visible {
+            // A version that only serves the history (014) is no document.
+            if let Some(v) = visible.filter(|(t, _)| *t != crate::HISTORY_VALUE) {
                 self.rows.push((key, v));
             }
         }
