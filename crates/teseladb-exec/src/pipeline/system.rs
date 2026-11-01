@@ -111,6 +111,47 @@ fn storage_stats(section: RawDoc<'_>) -> Result<(), MqlError> {
     Ok(())
 }
 
+/// The options of `$currentOp`, each a boolean.
+const CURRENT_OP_FLAGS: [&str; 8] = [
+    "allUsers",
+    "idleConnections",
+    "idleCursors",
+    "idleSessions",
+    "localOps",
+    "backtrace",
+    "targetAllNodes",
+    "truncateOps",
+];
+
+/// Checks the specification of `$currentOp`: an object of boolean options (measured on a
+/// `refrouter` 9.0.4).
+pub fn current_op(v: RawValue<'_>) -> Result<Document, MqlError> {
+    let RawValue::Document(d) = v else {
+        return Err(error(
+            TYPE_MISMATCH,
+            format!(
+                "$currentOp options must be specified in an object, but found: {}",
+                raw_type_name(v)
+            ),
+        ));
+    };
+    for (k, x) in d.iter() {
+        if !CURRENT_OP_FLAGS.contains(&k) {
+            return Err(unknown_field("$currentOp", k));
+        }
+        if !matches!(x, RawValue::Boolean(_)) {
+            return Err(error(
+                TYPE_MISMATCH,
+                format!(
+                    "The '{k}' parameter of the $currentOp stage must be a boolean value, but found: {}",
+                    raw_type_name(x)
+                ),
+            ));
+        }
+    }
+    Ok(Document::from(d))
+}
+
 /// The options of `$listClusterCatalog`, each a flag.
 const CLUSTER_CATALOG_FLAGS: [&str; 3] = ["shards", "balancingConfiguration", "tracked"];
 

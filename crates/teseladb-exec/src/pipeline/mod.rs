@@ -443,6 +443,7 @@ fn parse_stage(d: RawDoc<'_>, ctx: &Ctx) -> Result<Stage, MqlError> {
         }
         "$listSessions" => Stage::System("$listSessions", system::sessions("$listSessions", arg)?),
         "$planCacheStats" => Stage::System("$planCacheStats", system::plan_cache_stats(arg)?),
+        "$currentOp" => Stage::System("$currentOp", system::current_op(arg)?),
         "$listClusterCatalog" => {
             Stage::System("$listClusterCatalog", system::cluster_catalog(arg)?)
         }

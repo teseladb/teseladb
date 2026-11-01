@@ -609,10 +609,12 @@ pub fn default_read_ms(params: &BTreeMap<String, Vec<u8>>) -> u64 {
 }
 
 /// The namespace `currentOp` shows for a command: `db.coll` when its first field names a
-/// collection, `db.$cmd` otherwise.
+/// collection, `db.$cmd.aggregate` for an `aggregate: 1`, `db.$cmd` otherwise.
 pub fn op_ns(db: &str, cmd: &Document) -> String {
     match cmd.iter().next() {
         Some((_, Value::String(coll))) if !coll.is_empty() => format!("{db}.{coll}"),
+        // An `aggregate: 1` runs on the database's own namespace (measured on a `refrouter` 9.0.4).
+        Some(("aggregate", _)) => format!("{db}.$cmd.aggregate"),
         _ => format!("{db}.$cmd"),
     }
 }

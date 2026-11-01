@@ -157,6 +157,13 @@ impl<B: Backend + ?Sized> WireEnv<'_, B> {
         Ok(out)
     }
 
+    /// `$currentOp`: the operations running on the node, as `currentOp` describes them.
+    fn current_ops(&self) -> Result<Vec<Document>, CommandError> {
+        let Some((shared, _)) = &self.node else { return Ok(Vec::new()) };
+        let mut backend = self.backend.borrow_mut();
+        super::admin::current_operations(&mut **backend, shared)
+    }
+
     /// `$planCacheStats`: the entries of the node's plan cache for the aggregated collection,
     /// which must exist (50933).
     fn plan_cache_stats(&self) -> Result<Vec<Document>, CommandError> {
@@ -310,6 +317,7 @@ impl<B: Backend + ?Sized> Env for WireEnv<'_, B> {
             "$listLocalSessions" => self.local_sessions(spec).map_err(to_mql),
             "$listSessions" => self.recorded_sessions(spec).map_err(to_mql),
             "$planCacheStats" => self.plan_cache_stats().map_err(to_mql),
+            "$currentOp" => self.current_ops().map_err(to_mql),
             "$listClusterCatalog" => self.cluster_catalog(spec).map_err(to_mql),
             other => Err(MqlError::new(
                 teseladb_mql::ErrorCode { code: BAD_VALUE.code, name: BAD_VALUE.name },
@@ -561,6 +569,17 @@ pub fn aggregate<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
     let vars = a.vars.clone().unwrap_or_default();
     let names: Vec<String> = vars.iter().map(|(k, _)| k.to_owned()).collect();
     let ctx_vars = ExprCtx::checked(names.iter().map(String::as_str));
+    // `$currentOp` answers its namespace before its arguments (measured).
+    let first_name = match stages.first() {
+        Some(RawValue::Document(d)) => d.iter().next().map(|(k, _)| k),
+        _ => None,
+    };
+    if first_name == Some("$currentOp") && (on_collection || ns.db != super::admin::ADMIN_DB) {
+        return Err(CommandError::new(
+            INVALID_NAMESPACE,
+            "$currentOp must be run against the 'admin' database with {aggregate: 1}",
+        ));
+    }
     let pipeline = Pipeline::parse_command(&stages, &ctx_vars, on_collection).map_err(from_mql)?;
     teseladb_exec::pipeline::optimize::optimize_stages(&stages, a.vars.as_ref())
         .map_err(from_mql)?;
@@ -620,8 +639,19 @@ pub fn aggregate<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
     // `aggregate: 1` (measured).
     // The stages a `refrouter` sends to a shard or the config server answer in the order of a
     // collection's cursor (measured).
-    let forwarded =
-        matches!(pipeline.system_stage(), Some("$listClusterCatalog" | "$querySettings"));
+    // `$currentOp` with `localOps` answers on the `refrouter` itself (measured).
+    let local_ops = matches!(
+        stages.first(),
+        Some(RawValue::Document(d)) if matches!(
+            d.get("$currentOp"),
+            Some(RawValue::Document(o)) if matches!(o.get("localOps"), Some(RawValue::Boolean(true)))
+        )
+    );
+    let forwarded = match pipeline.system_stage() {
+        Some("$listClusterCatalog" | "$querySettings") => true,
+        Some("$currentOp") => !local_ops,
+        _ => false,
+    };
     let cursor = if on_collection || forwarded {
         Document::new().with("id", id).with("ns", ns_text).with("firstBatch", batch)
     } else {
@@ -718,6 +748,12 @@ fn check_system_namespace(
             INVALID_NAMESPACE,
             "$listLocalSessions must be run against the database with {aggregate: 1}, not a collection",
         )),
+        Some("$currentOp") if on_collection || ns.db != super::admin::ADMIN_DB => {
+            Err(CommandError::new(
+                INVALID_NAMESPACE,
+                "$currentOp must be run against the 'admin' database with {aggregate: 1}",
+            ))
+        }
         Some("$listClusterCatalog") if on_collection => Err(CommandError::new(
             crate::error::CLUSTER_CATALOG_ON_COLLECTION,
             "The $listClusterCatalog stage must run on a database, not a collection.",

@@ -361,7 +361,11 @@ fn check_files(files: &[&str]) {
 fn session_stages_answer_as_refdb() {
     let mut m = Mem::new();
     let mut wrong = Vec::new();
-    for line in include_str!("aggregate/sessions.out").lines().filter(|l| !l.is_empty()) {
+    // And `$currentOp` (T033), on `admin` only.
+    let lines = include_str!("aggregate/sessions.out")
+        .lines()
+        .chain(include_str!("aggregate/current_op.out").lines());
+    for line in lines.filter(|l| !l.is_empty()) {
         let (cmd, want) = line.split_once('\t').expect("a command and its reply");
         let spec = extjson::parse(cmd).expect("command");
         let got = match (spec.get("db"), spec.get("cmd")) {

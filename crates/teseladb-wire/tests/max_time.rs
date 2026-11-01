@@ -874,3 +874,24 @@ fn max_time_counts_on_the_monotonic_clock_and_not_on_the_cluster_time() {
     let e = Guarded::new(&mut m, &shared, id).check().unwrap_err();
     assert_eq!(e.code.code, 50);
 }
+
+/// `$currentOp` (010 T033): the node's operations as `currentOp` describes them, the running
+/// `aggregate` among them (measured on a `refrouter` 9.0.4: `type: "op"`, `op: "command"`,
+/// `ns: "admin.$cmd.aggregate"`, `active: true`).
+#[test]
+fn current_op_stage_lists_the_running_aggregate() {
+    let mut m = node(0);
+    let mut conn = Connection::new(1);
+    let cmd = teseladb_bson::extjson::parse(
+        r#"{"aggregate":1,"pipeline":[{"$currentOp":{}},{"$match":{"command.pipeline.0.$currentOp":{"$exists":true}}},{"$project":{"_id":0,"type":1,"op":1,"ns":1,"active":1}}],"cursor":{}}"#,
+    )
+    .expect("command");
+    let r = run(&mut m, &mut conn, "admin", cmd);
+    let Value::Array(batch) = field(&r, "cursor.firstBatch").clone() else { panic!("{r:?}") };
+    assert_eq!(batch.len(), 1, "{r:?}");
+    let Value::Document(d) = &batch[0] else { panic!("{r:?}") };
+    assert_eq!(d.get("type"), Some(&Value::from("op")));
+    assert_eq!(d.get("op"), Some(&Value::from("command")));
+    assert_eq!(d.get("ns"), Some(&Value::from("admin.$cmd.aggregate")));
+    assert_eq!(d.get("active"), Some(&Value::Boolean(true)));
+}
