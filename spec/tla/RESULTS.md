@@ -27,6 +27,7 @@ Cada modelo explica en su cabecera qué comprueba; `scripts/ci.sh` vuelve a gene
 | `SingleServerChange` | `SingleServerChange.cfg` | 5.633.534 | 1.403.162 | 30 | 29 s |
 | `Smoke` | `Smoke.cfg` | 5 | 4 | 4 | 3 s |
 | `SnapshotAwait` | `SnapshotAwait.cfg` | 38.943 | 7.088 | 19 | 2 s |
+| `SplitCompletion` | `SplitCompletion.cfg` | 1.043 | 559 | 24 | 1 s |
 | `TxnCommit` | `TxnCommit.cfg` | 60.303.931 | 12.502.328 | 23 | 137 s |
 | `WriteConcernW1` | `WriteConcernW1.cfg` | 16.564.351 | 2.349.474 | 21 | 31 s |
 

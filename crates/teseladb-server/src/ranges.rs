@@ -55,6 +55,9 @@ struct Led {
     applied: u64,
     /// Its live bytes.
     live: u64,
+    /// Whether its state machine applied the split Group 0 recorded for it, by the cut into the
+    /// split's new range (A007-3-1).
+    cut: bool,
 }
 
 /// Group 0's ranges as core 0 hands them to the cores.
@@ -402,7 +405,10 @@ impl Replicas {
                 let (start, end) = sm.bounds();
                 let bounds = (start.to_vec(), end.to_vec());
                 let (applied, live) = (sm.applied_index(), sm.live_bytes());
-                Some(Led { desc: d.clone(), st, bounds, applied, live })
+                let cut = (d.pending_split.as_ref())
+                    .zip(self.splits.get(&d.group))
+                    .is_some_and(|(at, new_range)| sm.applied_split(at, *new_range));
+                Some(Led { desc: d.clone(), st, bounds, applied, live, cut })
             })
             .collect();
         for l in led {
@@ -485,7 +491,9 @@ impl Replicas {
         let (g, desc) = (l.desc.group, &l.desc);
         let (start, end) = (&l.bounds.0, &l.bounds.1);
         if let Some(at) = &desc.pending_split {
-            if end == at {
+            // The cut into the split's new range, never an end that matches: a leader that has
+            // not applied the merge that undid an earlier cut at the same key ends there too.
+            if l.cut {
                 if self.may_send(g, now) {
                     let at_index = l.applied;
                     out.push(Group0Command::CompleteSplit { group: g, at: at.clone(), at_index });
@@ -762,17 +770,34 @@ mod tests {
         o.run(110);
         o.set(vec![desc(1, &[1], &[3])], &[]);
         assert!(o.lead().is_empty());
-        // A recorded split without its number waits; a cut already applied is completed, once
-        // per pause.
+        // A recorded split without its number waits.
         let mut pending = desc(1, &[1], &[4]);
         pending.pending_split = Some(vec![1, 5]);
         o.set(vec![pending.clone()], &[]);
         assert!(o.lead().is_empty());
+        // An end that matches the cut is not the cut (A007-3-1): no split into range 7 was
+        // applied, so nothing is completed.
         pending.pending_split = Some(vec![4]);
+        o.set(vec![pending.clone()], &[(1, 7)]);
+        assert!(o.lead().is_empty());
+        // The leader carries the split out; once its cut into range 7 is applied the split is
+        // completed, and not again before the pause.
+        pending.pending_split = Some(vec![2]);
         o.set(vec![pending], &[(1, 7)]);
-        let done = o.lead();
+        let mut done = Vec::new();
+        for _ in 0..50 {
+            done = o.lead();
+            if !done.is_empty() {
+                break;
+            }
+            o.run(20);
+        }
         assert!(
-            matches!(done.as_slice(), [Group0Command::CompleteSplit { group: G, .. }]),
+            !done.is_empty()
+                && done.iter().all(|c| matches!(
+                    c,
+                    Group0Command::CompleteSplit { group: G, at, .. } if at.as_slice() == [2]
+                )),
             "{done:?}"
         );
         assert!(o.lead().is_empty());
