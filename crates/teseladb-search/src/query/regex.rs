@@ -32,6 +32,14 @@ pub enum RegexError {
     UnexpectedEnd,
     /// A `{n,m}` with `m < n` or a count above [`MAX_REPEAT`].
     BadRepeat(usize),
+    /// A repetition whose counts are not followed by `}`, at the position of the character
+    /// that should be it.
+    ExpectedBrace(usize),
+    /// A repetition without a count where one goes.
+    ExpectedInteger(usize),
+    /// A group, class, quote or interval that the pattern ends inside, with the character that
+    /// should close it and the position where it should be.
+    ExpectedClose(char, usize),
     /// A class range whose end is below its start, or an empty class.
     BadClass(usize),
     /// A `<n-m>` whose bounds are not decimal numbers that fit in 64 bits.
@@ -57,6 +65,70 @@ enum Node {
 
 fn literal(c: char) -> Node {
     Node::Class(vec![(c, c)])
+}
+
+/// The unit `\c` stands for: the classes `\d`, `\s` and `\w` and their complements `\D`, `\S`
+/// and `\W` (`\w` matched the term `g` in `refsearch`), else `c` itself.
+fn escaped(c: char) -> Node {
+    let digits = vec![('0', '9')];
+    let spaces = vec![('\t', '\r'), (' ', ' ')];
+    let word = vec![('0', '9'), ('A', 'Z'), ('_', '_'), ('a', 'z')];
+    match c {
+        'd' => Node::Class(digits),
+        's' => Node::Class(spaces),
+        'w' => Node::Class(word),
+        'D' => Node::Class(complement(&digits)),
+        'S' => Node::Class(complement(&spaces)),
+        'W' => Node::Class(complement(&word)),
+        c => literal(c),
+    }
+}
+
+impl RegexError {
+    /// The message `refsearch` gives for this error in `pattern` (measured 02-11-2026 for an
+    /// unclosed group or branch, `a{2`, `a{2,1}` and `[z-a]`).
+    pub fn message(&self, pattern: &str) -> String {
+        let chars: Vec<char> = pattern.chars().collect();
+        match *self {
+            RegexError::UnexpectedEnd => "unexpected end-of-string".to_owned(),
+            RegexError::ExpectedBrace(at) => format!("expected '}}' at position {at}"),
+            RegexError::ExpectedInteger(at) => format!("integer expected at position {at}"),
+            RegexError::Unexpected(at) => format!("end-of-string expected at position {at}"),
+            RegexError::BadRepeat(at) => {
+                let inner: String = chars[at + 1..].iter().take_while(|&&c| c != '}').collect();
+                let (min, max) = inner.split_once(',').unwrap_or((&inner, &inner));
+                format!("invalid repetition range(out of order): {min}..{max}")
+            }
+            RegexError::BadClass(at) => match class_inversion(&chars[at..]) {
+                Some((from, to)) => {
+                    format!("invalid range: from ({}) cannot be > to ({})", from as u32, to as u32)
+                }
+                None => "unexpected end-of-string".to_owned(),
+            },
+            RegexError::ExpectedClose(c, at) => format!("expected '{c}' at position {at}"),
+            RegexError::BadInterval(at) => {
+                let inner: String = chars[at + 1..].iter().take_while(|&&c| c != '>').collect();
+                if inner.contains('-') {
+                    format!("interval syntax error at position {at}")
+                } else {
+                    format!("'{inner}' not found")
+                }
+            }
+            RegexError::TooComplex => "the pattern has too many states".to_owned(),
+        }
+    }
+}
+
+/// The first range `c-e` with `e < c` of the class that `class` starts.
+fn class_inversion(class: &[char]) -> Option<(char, char)> {
+    let mut i = 1;
+    while i + 2 < class.len() && class[i] != ']' {
+        if class[i + 1] == '-' && class[i + 2] < class[i] {
+            return Some((class[i], class[i + 2]));
+        }
+        i += 1;
+    }
+    None
 }
 
 fn any_char() -> Node {
@@ -135,6 +207,10 @@ impl Parser {
         let mut branches = vec![self.concatenation()?];
         while self.peek() == Some('|') {
             self.at += 1;
+            // As in `refsearch`, a branch cannot be empty at the end of the pattern.
+            if self.at == self.chars.len() {
+                return Err(RegexError::UnexpectedEnd);
+            }
             branches.push(self.concatenation()?);
         }
         Ok(if branches.len() == 1 { branches.remove(0) } else { Node::Alt(branches) })
@@ -184,9 +260,10 @@ impl Parser {
         } else {
             Some(min)
         };
-        if self.next()? != '}' {
-            return Err(RegexError::Unexpected(self.at - 1));
+        if self.peek() != Some('}') {
+            return Err(RegexError::ExpectedBrace(self.at));
         }
+        self.at += 1;
         let bounded = |n: u32| n <= MAX_REPEAT;
         if !bounded(min) || max.is_some_and(|m| m < min || !bounded(m)) {
             return Err(RegexError::BadRepeat(start));
@@ -197,10 +274,7 @@ impl Parser {
     fn number(&mut self, start: usize) -> Result<u32, RegexError> {
         let text = self.digit_run();
         if text.is_empty() {
-            return match self.peek() {
-                None => Err(RegexError::UnexpectedEnd),
-                Some(_) => Err(RegexError::Unexpected(self.at)),
-            };
+            return Err(RegexError::ExpectedInteger(self.at));
         }
         text.parse().map_err(|_| RegexError::BadRepeat(start))
     }
@@ -220,18 +294,29 @@ impl Parser {
             '.' => Ok(any_char()),
             '#' => Ok(Node::Nothing),
             '@' => Ok(Node::AnyString),
-            '\\' => Ok(literal(self.next()?)),
+            '\\' => Ok(escaped(self.next()?)),
             '(' => {
+                if self.peek() == Some(')') {
+                    self.at += 1;
+                    return Ok(Node::Empty);
+                }
+                if self.peek().is_none() {
+                    return Err(RegexError::UnexpectedEnd);
+                }
                 let inner = self.alternation()?;
-                match self.next()? {
-                    ')' => Ok(inner),
-                    _ => Err(RegexError::Unexpected(self.at - 1)),
+                match self.peek() {
+                    Some(')') => {
+                        self.at += 1;
+                        Ok(inner)
+                    }
+                    _ => Err(RegexError::ExpectedClose(')', self.at)),
                 }
             }
             '[' => self.class(at),
             '"' => self.quoted(),
             '<' => self.interval(at),
-            '?' | '+' | '*' | '{' | '}' | ']' | '>' => Err(RegexError::Unexpected(at)),
+            // Where a unit starts, `refsearch` reads any other character as itself (`[[:alpha:]]`
+            // is a class and a `]`).
             c => Ok(literal(c)),
         }
     }
@@ -239,9 +324,16 @@ impl Parser {
     fn quoted(&mut self) -> Result<Node, RegexError> {
         let mut items = Vec::new();
         loop {
-            match self.next()? {
-                '"' => return Ok(Node::Concat(items)),
-                c => items.push(literal(c)),
+            match self.peek() {
+                None => return Err(RegexError::ExpectedClose('"', self.at)),
+                Some('"') => {
+                    self.at += 1;
+                    return Ok(Node::Concat(items));
+                }
+                Some(c) => {
+                    self.at += 1;
+                    items.push(literal(c));
+                }
             }
         }
     }
@@ -253,10 +345,21 @@ impl Parser {
         }
         let mut ranges = Vec::new();
         loop {
-            let c = match self.next()? {
-                ']' => break,
-                '\\' => self.next()?,
-                c => c,
+            // The first character of a class is itself, `]` too (measured: `[]` wants a `]` at 2).
+            let c = match self.peek() {
+                None => return Err(RegexError::ExpectedClose(']', self.at)),
+                Some(']') if !ranges.is_empty() => {
+                    self.at += 1;
+                    break;
+                }
+                Some('\\') => {
+                    self.at += 1;
+                    self.next()?
+                }
+                Some(c) => {
+                    self.at += 1;
+                    c
+                }
             };
             if self.peek() == Some('-') && self.chars.get(self.at + 1).is_some_and(|&n| n != ']') {
                 self.at += 1;
@@ -272,20 +375,24 @@ impl Parser {
                 ranges.push((c, c));
             }
         }
-        if ranges.is_empty() {
-            return Err(RegexError::BadClass(start));
-        }
         let ranges = normalize(ranges);
         Ok(Node::Class(if negated { complement(&ranges) } else { ranges }))
     }
 
     /// `n-m>` after the `<` at `start`.
     fn interval(&mut self, start: usize) -> Result<Node, RegexError> {
-        let lo = self.digit_run();
-        let dash = self.next()?;
-        let hi = self.digit_run();
-        let close = self.next()?;
-        if dash != '-' || close != '>' || lo.is_empty() || hi.is_empty() {
+        let from = self.at;
+        while self.peek().is_some_and(|c| c != '>') {
+            self.at += 1;
+        }
+        if self.peek().is_none() {
+            return Err(RegexError::ExpectedClose('>', self.at));
+        }
+        let inner: String = self.chars[from..self.at].iter().collect();
+        self.at += 1;
+        let (lo, hi) = inner.split_once('-').ok_or(RegexError::BadInterval(start))?;
+        let digits = |t: &str| !t.is_empty() && t.chars().all(|c| c.is_ascii_digit());
+        if !digits(lo) || !digits(hi) {
             return Err(RegexError::BadInterval(start));
         }
         let (lo_n, hi_n) = match (lo.parse::<u64>(), hi.parse::<u64>()) {
@@ -636,30 +743,30 @@ mod tests {
     #[test]
     fn malformed_patterns_are_rejected_with_their_position() {
         assert_eq!(Regex::new("ab)").unwrap_err(), RegexError::Unexpected(2));
-        assert_eq!(Regex::new("(ab").unwrap_err(), RegexError::UnexpectedEnd);
-        assert_eq!(Regex::new("(a]").unwrap_err(), RegexError::Unexpected(2));
-        assert_eq!(Regex::new("*a").unwrap_err(), RegexError::Unexpected(0));
-        assert_eq!(Regex::new("a|+").unwrap_err(), RegexError::Unexpected(2));
-        assert_eq!(Regex::new("a}").unwrap_err(), RegexError::Unexpected(1));
+        assert_eq!(Regex::new("(ab").unwrap_err(), RegexError::ExpectedClose(')', 3));
+        assert_eq!(Regex::new("(a]").unwrap_err(), RegexError::ExpectedClose(')', 3));
+        assert!(Regex::new("*a").unwrap().is_full_match("*a"));
+        assert!(Regex::new("a|+").unwrap().is_full_match("+"));
+        assert!(Regex::new("a}").unwrap().is_full_match("a}"));
         assert_eq!(Regex::new("a\\").unwrap_err(), RegexError::UnexpectedEnd);
-        assert_eq!(Regex::new("[ab").unwrap_err(), RegexError::UnexpectedEnd);
-        assert_eq!(Regex::new("[]").unwrap_err(), RegexError::BadClass(0));
+        assert_eq!(Regex::new("[ab").unwrap_err(), RegexError::ExpectedClose(']', 3));
+        assert_eq!(Regex::new("[]").unwrap_err(), RegexError::ExpectedClose(']', 2));
         assert_eq!(Regex::new("x[z-a]").unwrap_err(), RegexError::BadClass(1));
-        assert_eq!(Regex::new("\"abc").unwrap_err(), RegexError::UnexpectedEnd);
-        assert_eq!(Regex::new("a{").unwrap_err(), RegexError::UnexpectedEnd);
-        assert_eq!(Regex::new("a{x}").unwrap_err(), RegexError::Unexpected(2));
-        assert_eq!(Regex::new("a{2").unwrap_err(), RegexError::UnexpectedEnd);
-        assert_eq!(Regex::new("a{2x").unwrap_err(), RegexError::Unexpected(3));
+        assert_eq!(Regex::new("\"abc").unwrap_err(), RegexError::ExpectedClose('"', 4));
+        assert_eq!(Regex::new("a{").unwrap_err(), RegexError::ExpectedInteger(2));
+        assert_eq!(Regex::new("a{x}").unwrap_err(), RegexError::ExpectedInteger(2));
+        assert_eq!(Regex::new("a{2").unwrap_err(), RegexError::ExpectedBrace(3));
+        assert_eq!(Regex::new("a{2x").unwrap_err(), RegexError::ExpectedBrace(3));
         assert_eq!(Regex::new("a{3,2}").unwrap_err(), RegexError::BadRepeat(1));
         assert_eq!(Regex::new("a{1001}").unwrap_err(), RegexError::BadRepeat(1));
         assert_eq!(Regex::new("a{99999999999}").unwrap_err(), RegexError::BadRepeat(1));
-        assert_eq!(Regex::new("<1-2").unwrap_err(), RegexError::UnexpectedEnd);
+        assert_eq!(Regex::new("<1-2").unwrap_err(), RegexError::ExpectedClose('>', 4));
         assert_eq!(Regex::new("<1x2>").unwrap_err(), RegexError::BadInterval(0));
         assert_eq!(Regex::new("<-2>").unwrap_err(), RegexError::BadInterval(0));
         assert_eq!(Regex::new("<1->").unwrap_err(), RegexError::BadInterval(0));
-        assert_eq!(Regex::new("<1-2]").unwrap_err(), RegexError::BadInterval(0));
+        assert_eq!(Regex::new("<1-2]").unwrap_err(), RegexError::ExpectedClose('>', 5));
         assert_eq!(Regex::new("<1-99999999999999999999>").unwrap_err(), RegexError::BadInterval(0));
-        assert_eq!(Regex::new("a>").unwrap_err(), RegexError::Unexpected(1));
+        assert!(Regex::new("a>").unwrap().is_full_match("a>"));
         assert_eq!(Regex::new("(.{1000}){1000}").unwrap_err(), RegexError::TooComplex);
     }
 

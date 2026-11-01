@@ -936,3 +936,34 @@ fn segments_are_written_to_the_node_directory_and_read_back() {
     assert!(SearchIndexes::default().open_dir(dir.join("other.txt").join("x")).is_err());
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// `wildcard` and `regex` reach the index through `$search` (measured behaviour in
+/// `teseladb-search`'s `pattern_tests`: a constant score of 1 per query and path that matches).
+#[test]
+fn pattern_operators_are_served() {
+    let mut m = with_collection();
+    insert(&mut m, vec![doc(&[("_id", 2.into()), ("t", "adios mundo cruel".into())])]);
+    create(&mut m, "c", vec![index("default", dynamic(true))]);
+    let want = |id: i32| doc(&[("_id", id.into()), ("s", Value::Double(1.0))]);
+    for (op, q) in [("wildcard", "MUND*"), ("regex", "c.*l")] {
+        let spec = Document::new().with(
+            op,
+            Document::new().with("query", q).with("path", "t").with("allowAnalyzedField", true),
+        );
+        let got =
+            batch(&agg(&mut m, "c".into(), vec![Document::new().with("$search", spec), scored()]));
+        let ids: Vec<i32> = if op == "wildcard" { vec![1, 2] } else { vec![2] };
+        assert_eq!(got, ids.into_iter().map(want).collect::<Vec<_>>(), "{op}");
+    }
+    let refused =
+        Document::new().with("regex", Document::new().with("query", "x").with("path", "t"));
+    let r = search(&mut m, "c", "$search", refused);
+    assert_eq!(
+        error(&r),
+        (
+            8,
+            "Field t is analyzed. Use a keyword analyzed field or set allowAnalyzedField to true."
+                .into()
+        )
+    );
+}
