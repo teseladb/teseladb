@@ -412,10 +412,17 @@ pub fn aggregate<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
     teseladb_exec::pipeline::optimize::optimize_stages(&stages, a.vars.as_ref())
         .map_err(from_mql)?;
     let collation = command_collation(&mut *ctx.backend, &ns, on_collection, a.collation.as_ref())?;
-    let (docs, sbe) = if on_collection && pipeline.reads_collection() {
-        read_engine(&mut *ctx.backend, &ns, a.concern)?
-    } else {
-        (Vec::new(), true)
+    let planned = match on_collection && pipeline.reads_collection() && collation.get().is_none() {
+        true => planned_read(ctx, &ns, (&stages, a.vars.as_ref()), a.concern)
+            .map_err(|e| executor_on(&ns_text, e))?,
+        false => None,
+    };
+    let (docs, sbe) = match planned {
+        Some(docs) => (docs, true),
+        None if on_collection && pipeline.reads_collection() => {
+            read_engine(&mut *ctx.backend, &ns, a.concern)?
+        }
+        None => (Vec::new(), true),
     };
     let env = WireEnv {
         backend: RefCell::new(&mut *ctx.backend),
@@ -461,6 +468,69 @@ pub fn aggregate<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
         Document::new().with("firstBatch", batch).with("id", id).with("ns", ns_text)
     };
     Ok(Document::new().with("cursor", cursor).with("ok", 1.0))
+}
+
+/// `err` as an error of running the pipeline on `ns_text`.
+fn executor_on(ns_text: &str, mut err: CommandError) -> CommandError {
+    err.errmsg = format!(
+        "Executor error during aggregate command on namespace: {ns_text} :: caused by :: {}",
+        err.errmsg
+    );
+    err
+}
+
+/// The documents of plain collection `ns` that the index plan of the query a pipeline of
+/// `stages` starts with reads, in its order (010 FR-001): the stages run on them as on the whole
+/// collection, and stages that keep the order of their input give the index's order. `None` for
+/// a view, a collection that is not a plain one, a pipeline without filter or sort, or when the
+/// collection scan wins.
+fn planned_read<B: Backend + ?Sized>(
+    ctx: &mut Ctx<'_, B>,
+    ns: &Namespace,
+    (stages, vars): (&[RawValue<'_>], Option<&Document>),
+    concern: ReadConcern,
+) -> Result<Option<Vec<Document>>, CommandError> {
+    let stages: Vec<Document> = stages
+        .iter()
+        .map(|v| match v {
+            RawValue::Document(d) => Some(Document::from(*d)),
+            _ => None,
+        })
+        .collect::<Option<_>>()
+        .unwrap_or_default();
+    let (filter, sort, limit) = super::explain::planned_query(&stages);
+    if filter.is_empty() && sort.is_none() {
+        return Ok(None);
+    }
+    if super::authz_collections::documents(ctx.backend, ns)?.is_some()
+        || super::views::resolve(ctx.backend, ns)?.is_some()
+    {
+        return Ok(None);
+    }
+    let Some(coll) = ctx.backend.collection(ns)? else { return Ok(None) };
+    let parsed = super::plan_exec::parsed_filter(&filter, vars)?;
+    let indexes = super::plan_exec::plan_indexes(ctx.backend, &coll)?;
+    let read = super::plan_exec::ReadPlan {
+        filter: &filter,
+        parsed: &parsed,
+        sort: sort.as_ref().map(super::explain::sort_fields).unwrap_or_default(),
+        limit,
+        hint: None,
+        vars,
+        concern,
+        intersect: super::lock(ctx.shared).params.hash_intersection,
+    };
+    if indexes.is_empty() || super::explain::matches_nothing(&parsed) {
+        return Ok(None);
+    }
+    let Some(found) = super::plan_exec::planned_documents(ctx.backend, &coll, &read)? else {
+        return Ok(None);
+    };
+    found
+        .iter()
+        .map(|b| Ok(Document::from(RawDoc::from_bytes(b)?)))
+        .collect::<Result<_, _>>()
+        .map(Some)
 }
 
 /// A collation document as the pipeline compares with it: none for the simple one.

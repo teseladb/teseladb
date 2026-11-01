@@ -281,6 +281,38 @@ fn aggregate_reads_through_index_plans_as_refdb() {
     check_in(include_str!("explain/agg_index.out"), false);
 }
 
+/// The index of `_id` as one more candidate of the planner (`tests/explain/plan_id.out`, 010
+/// FR-001, T019): `find`, `count`, `distinct`, the writes and `aggregate` read `_id` ranges, `$in`
+/// and sorts on `_id` through it, in its order, and it competes with the other indexes.
+#[test]
+fn id_index_plans_answer_as_refdb() {
+    check_in(include_str!("explain/plan_id.out"), false);
+}
+
+/// A rooted `$or` (`tests/explain/or_*.out`, 010 FR-001, T019): its clauses on the leading field
+/// of one index read it once over their joined intervals, a scan of several intervals examines
+/// the key that ends each one, and the `SUBPLAN` stands over the stages of the whole read
+/// (limit, sort, projection, skip) and under `COUNT`, `UPDATE` and `DELETE`.
+#[test]
+fn or_plans_answer_as_refdb() {
+    for file in [
+        include_str!("explain/or_join.out"),
+        include_str!("explain/or_join2.out"),
+        include_str!("explain/or_subplan.out"),
+    ] {
+        check_in(file, false);
+    }
+}
+
+/// `distinct` and `findAndModify` with a query through the planner
+/// (`tests/explain/plan_distinct.out`, T019): a scan of the key's index after fields the query
+/// fixes reads one key per value (`DISTINCT_SCAN`), `findAndModify` takes the first document of
+/// the plan or of its sort, and a skip goes under a fetch without filter.
+#[test]
+fn distinct_and_find_and_modify_plans_answer_as_refdb() {
+    check_in(include_str!("explain/plan_distinct.out"), false);
+}
+
 /// More replies that name a `refrouter`'s shards (`tests/explain/shards2.out`, DV-031, D-102): the
 /// index commands' `raw`, keyed `node<N>/host:port`, and a `writeConcernError` ` at node<N>`.
 #[test]

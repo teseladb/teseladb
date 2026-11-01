@@ -27,6 +27,8 @@ mod moves;
 mod steps;
 mod views;
 
+pub(crate) use aggregate::planned_query;
+
 /// `explain`.
 pub const EXPLAIN: &str = "explain";
 
@@ -585,7 +587,7 @@ fn collscan(ns: &Namespace, shown: &Document, examined: u64, matched: u64) -> St
 }
 
 /// Whether parsed query `shown` matches no document, which RefDb plans as `EOF`.
-fn matches_nothing(shown: &Document) -> bool {
+pub(super) fn matches_nothing(shown: &Document) -> bool {
     shown.len() == 1 && shown.get(teseladb_mql::ops::ALWAYS_FALSE).is_some()
 }
 
@@ -728,20 +730,20 @@ fn find<B: Backend + ?Sized>(
         .filter(|_| collation.is_none() && a.natural.is_none() && !matches_nothing(&shown))
     {
         let indexes = super::plan_exec::plan_indexes(ctx.backend, c)?;
-        if !indexes.is_empty() {
-            let hint = super::hints::position(ctx.cmd.get("hint"), &indexes)?;
-            let read = super::plan_exec::ReadPlan {
-                filter: &a.filter,
-                parsed: &shown,
-                sort: sort.as_ref().map(sort_fields).unwrap_or_default(),
-                limit: a.limit.map(|l| a.skip.saturating_add(l)),
-                hint,
-                vars: a.vars.as_ref(),
-                concern: a.concern,
-                intersect: super::lock(ctx.shared).params.hash_intersection,
-            };
-            let super::plan_exec::Chosen { winner, others } =
-                super::plan_exec::choose(ctx.backend, c, &indexes, &read)?;
+        let hint = super::hints::position(ctx.cmd.get("hint"), &indexes)?;
+        let read = super::plan_exec::ReadPlan {
+            filter: &a.filter,
+            parsed: &shown,
+            sort: sort.as_ref().map(sort_fields).unwrap_or_default(),
+            limit: a.limit.map(|l| a.skip.saturating_add(l)),
+            hint,
+            vars: a.vars.as_ref(),
+            concern: a.concern,
+            intersect: super::lock(ctx.shared).params.hash_intersection,
+        };
+        if let Some(super::plan_exec::Chosen { winner, others }) =
+            super::plan_exec::choose(ctx.backend, c, &indexes, &read)?
+        {
             let shape = |r: &super::plan_exec::Ran, run: bool| {
                 let covered = projection.as_ref().filter(|p| covers(p, &indexes, r));
                 let tail = Tail {
@@ -826,9 +828,25 @@ struct Tail<'a> {
 }
 
 impl Tail<'_> {
-    /// `plan` with the stages after it; `sorted`: the plan reads in the sort's order already.
+    /// `plan` with the stages after it; `sorted`: the plan reads in the sort's order already. A
+    /// `SUBPLAN` stays the root, over the stages after the scans (measured).
     fn over(&self, mut plan: Stage, sorted: bool) -> Stage {
+        if plan.name == "SUBPLAN"
+            && let Some(input) = plan.input.take()
+        {
+            let inner = self.over(*input, sorted);
+            plan.returned = inner.returned;
+            return plan.over(inner);
+        }
         if let Some(sort) = self.sort.filter(|_| !sorted) {
+            // A projection that keeps the sort's fields runs below a sort without a limit
+            // (measured).
+            let below = self
+                .projection
+                .filter(|p| self.limit.is_none() && aggregate::projection_keeps_sort(p, sort));
+            if let Some(p) = below {
+                plan = projection_stage(p, plan);
+            }
             let mut s = Stage::new("SORT");
             s.tail.push("sortPattern", sort.clone());
             s.tail.push("memLimit", SORT_MEM_LIMIT);
@@ -841,7 +859,7 @@ impl Tail<'_> {
             s.returned = bound.map_or(plan.returned, |b| plan.returned.min(b));
             plan = s.over(plan);
             plan = skip_stage(self.skip, plan);
-            if let Some(p) = self.projection {
+            if let Some(p) = self.projection.filter(|_| below.is_none()) {
                 plan = projection_stage(p, plan);
             }
             return plan;
@@ -861,7 +879,7 @@ impl Tail<'_> {
 }
 
 /// The fields and directions of a sort.
-fn sort_fields(sort: &Document) -> Vec<(String, i32)> {
+pub(super) fn sort_fields(sort: &Document) -> Vec<(String, i32)> {
     sort.iter()
         .map(|(k, v)| {
             let neg = match v {
@@ -876,13 +894,14 @@ fn sort_fields(sort: &Document) -> Vec<(String, i32)> {
 }
 
 /// Whether a plan reads in the order of the sort.
-fn sorted(r: &super::plan_exec::Ran) -> bool {
+pub(super) fn sorted(r: &super::plan_exec::Ran) -> bool {
     match &r.access {
         teseladb_plan::rules::Access::Index(s) => s.sorts,
         teseladb_plan::rules::Access::AndHash { scans, .. } => {
             scans.last().is_some_and(|s| s.sorts)
         }
-        teseladb_plan::rules::Access::Or(_) | teseladb_plan::rules::Access::Collscan => false,
+        teseladb_plan::rules::Access::Or(scans) => matches!(scans.as_slice(), [s] if s.sorts),
+        teseladb_plan::rules::Access::Collscan => false,
     }
 }
 
@@ -898,10 +917,30 @@ fn planned_read<B: Backend + ?Sized>(
         return Ok(None);
     };
     let indexes = super::plan_exec::plan_indexes(ctx.backend, c)?;
-    if indexes.is_empty() {
-        return Ok(None);
-    }
     let chosen = super::plan_exec::choose(ctx.backend, c, &indexes, read)?;
+    Ok(chosen.map(|chosen| (indexes, chosen)))
+}
+
+/// The plans of a write that takes the first document of `read` (its limit of one) or all of
+/// them: plans compete without the limit, and the plan that wins shows its trial; a plan alone
+/// stops at the first document (measured on a `refrouter` 9.0.4).
+fn planned_write<B: Backend + ?Sized>(
+    ctx: &mut Ctx<'_, B>,
+    coll: Option<&CollectionEntry>,
+    read: &super::plan_exec::ReadPlan<'_>,
+    collation: Option<&Document>,
+) -> Result<Option<(Vec<super::plan_exec::PlanIndex>, super::plan_exec::Chosen)>, CommandError> {
+    let unbounded = super::plan_exec::ReadPlan { sort: read.sort.clone(), limit: None, ..*read };
+    let Some((indexes, mut chosen)) = planned_read(ctx, coll, &unbounded, collation)? else {
+        return Ok(None);
+    };
+    if read.limit.is_none() {
+        return Ok(Some((indexes, chosen)));
+    }
+    if chosen.others.is_empty() {
+        return planned_read(ctx, coll, read, collation);
+    }
+    chosen.winner = chosen.winner.at_trial();
     Ok(Some((indexes, chosen)))
 }
 
@@ -934,10 +973,11 @@ fn covers(
     // The fields the projection reads, computed ones too (none for one that drops fields).
     let reads =
         teseladb_exec::pipeline::deps::needed(&[Document::new().with("$project", p.clone())]);
+    let holds = |k: &str| index.meta.key.iter().any(|(x, _)| x == k);
     scan.residual.is_none()
         && !index.meta.multikey
-        && p.get("_id").is_some_and(off)
-        && reads.is_some_and(|f| f.iter().all(|k| index.meta.key.iter().any(|(x, _)| x == k)))
+        && (p.get("_id").is_some_and(off) || holds("_id"))
+        && reads.is_some_and(|f| f.iter().all(|k| holds(k)))
 }
 
 /// The stages that read for plan `r`: an index scan and its fetch (or the projection of the
@@ -955,7 +995,8 @@ fn planned_access(
         teseladb_plan::rules::Access::Collscan => collscan(ns, shown, r.docs, returned),
         teseladb_plan::rules::Access::Index(scan) => {
             let keys = if run { r.keys } else { 0 };
-            let ix = index_stage(Some(ns), &indexes[scan.index], scan, keys, keys);
+            let within = if run { r.keys.saturating_sub(r.past) } else { 0 };
+            let ix = index_stage(Some(ns), &indexes[scan.index], scan, keys, within);
             match covered {
                 Some(p) => {
                     // One that computes is the default projection over the keys (measured).
@@ -972,33 +1013,12 @@ fn planned_access(
             }
         }
         teseladb_plan::rules::Access::Or(scans) => {
-            let mut or = Stage::new("OR");
-            // A clause the index does not decide alone fetches and filters its documents.
-            let children: Vec<Stage> = scans
-                .iter()
-                .enumerate()
-                .map(|(i, s)| {
-                    let keys = if run { r.child_keys.get(i).copied().unwrap_or(0) } else { 0 };
-                    let mut ix = index_stage(None, &indexes[s.index], s, keys, keys);
-                    ix.returned = keys;
-                    match &s.residual {
-                        Some(f) => fetch_stage(None, Some(f), ix, 0, 0),
-                        None => ix,
-                    }
-                })
-                .collect();
-            if run {
-                let tested: u64 = r.child_keys.iter().sum();
-                let dropped = tested.saturating_sub(r.docs);
-                or.lead.push("dupsTested", long(tested));
-                or.lead.push("dupsDropped", long(dropped));
-            }
-            let inputs: Vec<Value> =
-                children.iter().map(|c| Value::Document(c.planned())).collect();
-            or.tail.push("inputStages", Value::Array(inputs));
-            or.inputs = children;
-            or.returned = returned;
-            let fetch = fetch_stage(None, None, or, r.docs, returned);
+            // The documents come from the `OR`, or from the one scan's own fetch.
+            let docs = match scans.as_slice() {
+                [_] => r.docs,
+                _ => returned,
+            };
+            let fetch = fetch_stage(None, None, or_stage(indexes, r, scans, run), docs, returned);
             let mut sub = Stage::new("SUBPLAN").over(fetch);
             sub.returned = returned;
             sub
@@ -1030,6 +1050,44 @@ fn planned_access(
     }
 }
 
+/// The scans of a rooted `$or` (`SUBPLAN`): one scan alone, or each joined in an `OR`, a clause
+/// the index does not decide alone fetching and filtering its documents.
+fn or_stage(
+    indexes: &[super::plan_exec::PlanIndex],
+    r: &super::plan_exec::Ran,
+    scans: &[teseladb_plan::rules::IndexScan],
+    run: bool,
+) -> Stage {
+    let child = |i: usize, s: &teseladb_plan::rules::IndexScan| {
+        let keys = if run { r.child_keys.get(i).copied().unwrap_or(0) } else { 0 };
+        let past = if run { r.child_past.get(i).copied().unwrap_or(0) } else { 0 };
+        let given = if run { r.child_given.get(i).copied().unwrap_or(0) } else { 0 };
+        let within = keys.saturating_sub(past);
+        let mut ix = index_stage(None, &indexes[s.index], s, keys, within);
+        ix.returned = within;
+        match &s.residual {
+            Some(f) => fetch_stage(None, Some(f), ix, within, given),
+            None => ix,
+        }
+    };
+    if let [only] = scans {
+        return child(0, only);
+    }
+    let children: Vec<Stage> = scans.iter().enumerate().map(|(i, s)| child(i, s)).collect();
+    let mut or = Stage::new("OR");
+    if run {
+        let tested: u64 = r.child_given.iter().sum();
+        let dropped = tested.saturating_sub(u64::try_from(r.found.len()).unwrap_or(u64::MAX));
+        or.lead.push("dupsTested", long(tested));
+        or.lead.push("dupsDropped", long(dropped));
+    }
+    let inputs: Vec<Value> = children.iter().map(|c| Value::Document(c.planned())).collect();
+    or.tail.push("inputStages", Value::Array(inputs));
+    or.inputs = children;
+    or.returned = u64::try_from(r.found.len()).unwrap_or(u64::MAX);
+    or
+}
+
 /// The memory an `AND_HASH` may hold (`internalQueryMaxAndHashMemory`, 32 MiB as measured).
 const AND_HASH_MEM_LIMIT: i32 = 33_554_432;
 
@@ -1039,22 +1097,13 @@ const AND_HASH_ENTRY_BYTES: u64 = 43;
 
 /// `DISTINCT_SCAN` of the values of `key`, the first field of `index`, as the projection of that
 /// field alone.
-fn distinct_scan(index: &super::plan_exec::PlanIndex, key: &str, values: u64) -> Stage {
-    let all = teseladb_plan::rules::IndexScan {
-        index: 0,
-        bounds: index
-            .meta
-            .key
-            .iter()
-            .map(|(f, _)| (f.clone(), vec![teseladb_plan::logical::Bound::all()]))
-            .collect(),
-        backward: false,
-        residual: None,
-        sorts: false,
-        assigned: 0,
-        preds: Vec::new(),
-    };
-    let ix = index_stage(None, index, &all, 0, 0);
+fn distinct_scan(
+    index: &super::plan_exec::PlanIndex,
+    scan: &teseladb_plan::rules::IndexScan,
+    key: &str,
+    (keys, values): (u64, u64),
+) -> Stage {
+    let ix = index_stage(None, index, scan, 0, 0);
     let mut s = Stage::new("DISTINCT_SCAN");
     for (k, v) in ix.tail.iter() {
         if k == "indexVersion" {
@@ -1064,13 +1113,17 @@ fn distinct_scan(index: &super::plan_exec::PlanIndex, key: &str, values: u64) ->
         s.tail.push(k, v.clone());
     }
     // It reads one key per value (measured).
-    s.counters.push("keysExamined", long(values));
+    s.counters.push("keysExamined", long(keys));
     for k in ["docsExamined", "chunkSkips", "orphanChunkSkips"] {
         s.counters.push(k, 0);
     }
     s.returned = values;
     let mut p = Stage::new("PROJECTION_COVERED");
-    p.tail.push("transformBy", Document::new().with("_id", 0).with(key, 1));
+    let keeps = match key {
+        "_id" => Document::new().with("_id", 1),
+        _ => Document::new().with("_id", 0).with(key, 1),
+    };
+    p.tail.push("transformBy", keeps);
     p.returned = values;
     p.over(s)
 }
@@ -1198,9 +1251,22 @@ fn sort_counters(s: &mut Stage) {
     }
 }
 
-fn skip_stage(skip: u64, input: Stage) -> Stage {
+fn skip_stage(skip: u64, mut input: Stage) -> Stage {
     if skip == 0 {
         return input;
+    }
+    // A fetch without a filter fetches only what the skip leaves (measured).
+    if input.name == "FETCH"
+        && input.head.get("filter").is_none()
+        && input.tail.get("filter").is_none()
+        && let Some(scan) = input.input.take()
+    {
+        let skipped = skip_stage(skip, *scan);
+        input.returned = input.returned.saturating_sub(skip);
+        if input.counters.get("docsExamined").is_some() {
+            input.counters.insert("docsExamined", long(skipped.returned));
+        }
+        return input.over(skipped);
     }
     let mut s = Stage::new("SKIP");
     s.tail.push("skipAmount", long(skip));
@@ -1315,10 +1381,19 @@ fn count_plan<B: Backend + ?Sized>(
             teseladb_plan::rules::Access::Index(scan)
                 if scan.residual.is_none() && !indexes[scan.index].meta.multikey =>
             {
-                let keys = if run { winner.keys + u64::from(winner.trial.eof) } else { 0 };
+                let keys = if run { winner.keys } else { 0 };
                 let mut ix = index_stage(Some(ns), &indexes[scan.index], scan, keys, 0);
-                ix.returned = if run { winner.keys } else { 0 };
+                ix.returned = if run { winner.keys.saturating_sub(winner.past) } else { 0 };
                 ix
+            }
+            teseladb_plan::rules::Access::Or(scans)
+                if scans
+                    .iter()
+                    .all(|s| s.residual.is_none() && !indexes[s.index].meta.multikey) =>
+            {
+                let mut sub = Stage::new("SUBPLAN").over(or_stage(&indexes, winner, scans, run));
+                sub.returned = if run { winner.docs } else { 0 };
+                sub
             }
             _ => planned_access(ns, &shown, &indexes, winner, run, None),
         };
@@ -1395,7 +1470,7 @@ fn distinct<B: Backend + ?Sized>(
             } else {
                 0
             };
-            let plan = distinct_scan(index, &key, values);
+            let plan = distinct_scan(index, &all_of(index), &key, (values, values));
             return Ok(Explained {
                 parsed: Value::Document(shown),
                 router_stage: "SINGLE_SHARD",
@@ -1405,6 +1480,30 @@ fn distinct<B: Backend + ?Sized>(
             });
         }
     }
+    let plan_read = super::plan_exec::ReadPlan {
+        filter: &query,
+        parsed: &shown,
+        sort: Vec::new(),
+        limit: None,
+        hint: None,
+        vars: None,
+        concern,
+        intersect: super::lock(ctx.shared).params.hash_intersection,
+    };
+    let planned = match query.is_empty() {
+        true => None,
+        false => planned_read(ctx, coll.as_ref(), &plan_read, collation.as_ref())?,
+    };
+    if let (Some((indexes, chosen)), Some(c)) = (planned, coll.as_ref()) {
+        let plan = distinct_plans(ctx, (ns, c, &shown), &indexes, &chosen, run)?;
+        return Ok(Explained {
+            parsed: Value::Document(shown),
+            router_stage: "SINGLE_SHARD",
+            plan: plan.0,
+            rejected: plan.1,
+            trials: Vec::new(),
+        });
+    }
     let plan = collscan(ns, &shown, examined, matched);
     Ok(Explained {
         parsed: Value::Document(shown),
@@ -1413,6 +1512,103 @@ fn distinct<B: Backend + ?Sized>(
         rejected: Vec::new(),
         trials: Vec::new(),
     })
+}
+
+/// The plan of a `distinct` with a query that indexes serve, and the plans it rejected: a plan
+/// whose index holds the key after fields the query fixes, and decides the whole query, reads one
+/// key per value (`DISTINCT_SCAN`) and goes first; the others fetch their documents (measured on
+/// a `refrouter` 9.0.4).
+fn distinct_plans<B: Backend + ?Sized>(
+    ctx: &mut Ctx<'_, B>,
+    (ns, coll, shown): (&Namespace, &CollectionEntry, &Document),
+    indexes: &[super::plan_exec::PlanIndex],
+    chosen: &super::plan_exec::Chosen,
+    run: bool,
+) -> Result<(Stage, Vec<Document>), CommandError> {
+    let key = match ctx.cmd.get("key") {
+        Some(Value::String(k)) => k.clone(),
+        _ => String::new(),
+    };
+    let by_key = |r: &super::plan_exec::Ran| match &r.access {
+        teseladb_plan::rules::Access::Index(s) if reads_by_key(&indexes[s.index], s, &key) => {
+            Some(s.clone())
+        }
+        _ => None,
+    };
+    let plans: Vec<&super::plan_exec::Ran> =
+        std::iter::once(&chosen.winner).chain(&chosen.others).collect();
+    let mut order: Vec<&super::plan_exec::Ran> =
+        plans.iter().copied().filter(|r| by_key(r).is_some()).collect();
+    order.extend(plans.iter().copied().filter(|r| by_key(r).is_none()));
+    let shape = |r: &super::plan_exec::Ran, run: bool, counts: (u64, u64)| match by_key(r) {
+        Some(scan) => distinct_scan(&indexes[scan.index], &scan, &key, counts),
+        None => planned_access(ns, shown, indexes, r, run, None),
+    };
+    let Some((first, rest)) = order.split_first() else {
+        return Ok((collscan(ns, shown, 0, 0), Vec::new()));
+    };
+    // The winner runs: one key per value, the entries outside its intervals, and the key after
+    // its last interval that ends a scan of one.
+    let first = (*first).clone();
+    let first = match &chosen.winner.access {
+        a if *a == first.access => chosen.winner.clone(),
+        _ => first.at_trial(),
+    };
+    let counts = match (run, by_key(&first)) {
+        (false, _) => (0, 0),
+        (true, Some(scan)) => {
+            let values = match super::query::distinct(ctx)?.get("values") {
+                Some(Value::Array(v)) => u64::try_from(v.len()).unwrap_or(u64::MAX),
+                _ => 0,
+            };
+            let after = scan.bounds.iter().all(|(_, b)| b.len() == 1)
+                && super::plan_exec::key_after(ctx.backend, coll, &indexes[scan.index], &scan)?;
+            (values + first.past + u64::from(after), values)
+        }
+        (true, None) => (0, 0),
+    };
+    let plan = shape(&first, run, counts);
+    let rejected = rest
+        .iter()
+        .map(|r| {
+            let mut d = Document::new().with("isCached", false);
+            extend(&mut d, &shape(r, false, (0, 0)).planned());
+            d
+        })
+        .collect();
+    Ok((plan, rejected))
+}
+
+/// Whether scan `s` of `index` can read the values of `key` one key each: the index is no
+/// multikey one, holds `key` after fields the query fixes to one value, and decides the whole
+/// query.
+fn reads_by_key(
+    index: &super::plan_exec::PlanIndex,
+    s: &teseladb_plan::rules::IndexScan,
+    key: &str,
+) -> bool {
+    let Some(at) = index.meta.key.iter().position(|(f, _)| f == key) else { return false };
+    !index.meta.multikey
+        && s.residual.is_none()
+        && s.bounds[..at].iter().all(|(_, b)| b.len() == 1 && b[0].is_point())
+}
+
+/// A scan of every key of `index`.
+fn all_of(index: &super::plan_exec::PlanIndex) -> teseladb_plan::rules::IndexScan {
+    teseladb_plan::rules::IndexScan {
+        index: 0,
+        bounds: index
+            .meta
+            .key
+            .iter()
+            .map(|(f, _)| (f.clone(), vec![teseladb_plan::logical::Bound::all()]))
+            .collect(),
+        backward: false,
+        residual: None,
+        sorts: false,
+        assigned: 0,
+        preds: Vec::new(),
+    }
 }
 
 /// The one statement of an explained write batch (`field` of `cmd`).
@@ -1568,7 +1764,7 @@ fn update_on_node<B: Backend + ?Sized>(
         concern: teseladb_range::read::ReadConcern::Local,
         intersect: super::lock(ctx.shared).params.hash_intersection,
     };
-    if let Some((indexes, chosen)) = planned_read(ctx, coll, &plan_read, collation)? {
+    if let Some((indexes, chosen)) = planned_write(ctx, coll, &plan_read, collation)? {
         let plan = s.over(planned_access(ns, &shown, &indexes, &chosen.winner, run, None));
         let rejected = rejected_reads(ns, &shown, &indexes, &chosen.others);
         return Ok(Explained {
@@ -1670,7 +1866,7 @@ fn delete_on_node<B: Backend + ?Sized>(
         concern: teseladb_range::read::ReadConcern::Local,
         intersect: super::lock(ctx.shared).params.hash_intersection,
     };
-    if let Some((indexes, chosen)) = planned_read(ctx, coll, &plan_read, collation)? {
+    if let Some((indexes, chosen)) = planned_write(ctx, coll, &plan_read, collation)? {
         let plan = s.over(planned_access(ns, &shown, &indexes, &chosen.winner, run, None));
         let rejected = rejected_reads(ns, &shown, &indexes, &chosen.others);
         return Ok(Explained {
@@ -1732,8 +1928,35 @@ fn find_and_modify<B: Backend + ?Sized>(
         (true, Some(u)) => would_update(ctx, coll.as_ref(), &read, u, sort.is_some())?,
     };
     let shown = parsed(&q, vars.as_ref())?;
-    let mut plan = collscan(ns, &shown, examined, matched);
-    if let Some(sort) = sort {
+    let plan_read = super::plan_exec::ReadPlan {
+        filter: &q,
+        parsed: &shown,
+        sort: sort.as_ref().map(sort_fields).unwrap_or_default(),
+        limit: Some(1),
+        hint: None,
+        vars: vars.as_ref(),
+        concern: teseladb_range::read::ReadConcern::Local,
+        intersect: super::lock(ctx.shared).params.hash_intersection,
+    };
+    let planned = match sort.is_some() {
+        true => planned_read(ctx, coll.as_ref(), &plan_read, collation.as_ref())?,
+        false => planned_write(ctx, coll.as_ref(), &plan_read, collation.as_ref())?,
+    };
+    let (mut plan, rejected, index_sorts) = match &planned {
+        Some((indexes, chosen)) => (
+            planned_access(ns, &shown, indexes, &chosen.winner, run, None),
+            rejected_reads(ns, &shown, indexes, &chosen.others),
+            sorted(&chosen.winner),
+        ),
+        None => (collscan(ns, &shown, examined, matched), Vec::new(), false),
+    };
+    // An index in the sort's order takes the first document (measured: `LIMIT` 1).
+    if sort.is_some() && index_sorts {
+        let mut s = Stage::new("LIMIT");
+        s.tail.push("limitAmount", 1);
+        s.returned = plan.returned.min(1);
+        plan = s.over(plan);
+    } else if let Some(sort) = sort {
         let mut s = Stage::new("SORT");
         s.tail.push("sortPattern", sort);
         s.tail.push("memLimit", SORT_MEM_LIMIT);
@@ -1767,7 +1990,7 @@ fn find_and_modify<B: Backend + ?Sized>(
         parsed: Value::Document(shown),
         router_stage: "SINGLE_SHARD",
         plan,
-        rejected: Vec::new(),
+        rejected,
         trials: Vec::new(),
     })
 }
