@@ -54,6 +54,16 @@ pub fn is_document_key(key: &[u8]) -> bool {
         && key[9..DOC_PREFIX] == teseladb_keys::DOCUMENTS.to_be_bytes()
 }
 
+/// The tenant and the collection of a document key.
+pub fn collection_of(key: &[u8]) -> Option<(u32, u32)> {
+    if !is_document_key(key) {
+        return None;
+    }
+    let word =
+        |at: usize| key.get(at..at + 4).and_then(|b| b.try_into().ok()).map(u32::from_be_bytes);
+    Some((word(1)?, word(5)?))
+}
+
 /// The type of the event of the write `meta` describes.
 fn kind_of(meta: &ChangeMeta) -> EventKind {
     if meta.delete {

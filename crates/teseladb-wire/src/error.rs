@@ -213,6 +213,24 @@ codes! {
     IDL_DUPLICATE_FIELD = 40413, "IDLDuplicateField";
     /// Unknown field in a command.
     IDL_UNKNOWN_FIELD = 40415, "IDLUnknownField";
+    /// A change stream event lost its `_id` in the pipeline, or the stream cannot go on (014).
+    CHANGE_STREAM_FATAL = 280, "ChangeStreamFatalError";
+    /// A change stream resumes from a point older than what the cluster keeps (014 FR-006).
+    CHANGE_STREAM_HISTORY_LOST = 286, "ChangeStreamHistoryLost";
+    /// A resume token without a string `_data` (014).
+    CS_BAD_TOKEN = 40_647, "Location40647";
+    /// A resume token and `startAtOperationTime` together (014).
+    CS_SEVERAL_STARTS = 40_674, "Location40674";
+    /// `$changeStream` not first in the pipeline (014).
+    CS_NOT_FIRST = 40_602, "Location40602";
+    /// Both `resumeAfter` and `startAfter` (014).
+    CS_BOTH_STARTS = 50_865, "Location50865";
+    /// `$changeStream` with an argument that is no document (014).
+    CS_NOT_AN_OBJECT = 6_188_500, "Location6188500";
+    /// `$changeStreamSplitLargeEvent` with an argument that is not an empty document (014).
+    CS_SPLIT_SPEC = 7_182_800, "Location7182800";
+    /// `$changeStreamSplitLargeEvent` not last (014).
+    CS_SPLIT_NOT_LAST = 7_182_802, "Location7182802";
     /// `getMore` in a session on a cursor opened outside any.
     CURSOR_NOT_IN_SESSION = 50799, "Location50799";
     /// `killOp` without `op`.

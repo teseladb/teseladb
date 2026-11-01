@@ -21,6 +21,7 @@ pub mod authz_collections;
 pub mod authz_writes;
 pub mod capped;
 pub mod catalog;
+pub mod change_stream;
 pub mod cluster_admin;
 pub mod config_db;
 pub mod config_settings;
@@ -116,10 +117,10 @@ pub enum LdapLogin {
     Authorized(Vec<RoleName>),
 }
 
-/// What the commands need from the node: Group 0's catalog, the ranges and the cluster time.
 /// What a change stream read of an interval: the versions up to the resolved mark, and the mark.
 pub type ChangeBatch = (Vec<teseladb_range::changes::Versioned>, teseladb_hlc::Hlc);
 
+/// What the commands need from the node: Group 0's catalog, the ranges and the cluster time.
 /// The server's implementation finds the leaders and forwards; errors come translated.
 pub trait Backend {
     /// The collection of `ns`, as the node's copy of Group 0 has it.
@@ -779,7 +780,10 @@ fn session_info<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<(), Command
 }
 
 fn command<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
-    if let Value::String(coll) = ctx.first() {
+    // A change stream refuses a buckets namespace as an internal one (014, measured).
+    if let Value::String(coll) = ctx.first()
+        && !change_stream::opens(ctx.cmd)
+    {
         timeseries::legacy_buckets(ctx.db, coll, ctx.name())?;
     }
     match crate::concerns::canonical(ctx.name()) {
