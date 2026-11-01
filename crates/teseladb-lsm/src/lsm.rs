@@ -117,6 +117,9 @@ pub(crate) struct Counters {
     pub(crate) blocks: [u64; 4],
     /// Bytes of data blocks written, before and after compression.
     pub(crate) block_bytes: [u64; 2],
+    /// Compactions that made room for an ingestion, and the bytes they read and wrote (FR-024).
+    pub(crate) ingest_compactions: u64,
+    pub(crate) ingest_compaction_bytes: u64,
 }
 
 impl Counters {
@@ -159,6 +162,8 @@ enum Request {
         files: Vec<FileRef>,
         intervals: Vec<(Vec<u8>, Vec<u8>)>,
         flushed: Option<(GroupId, u64)>,
+        /// The compaction that makes room for it already ran, or was not needed.
+        room: bool,
     },
     Clear {
         id: u64,
@@ -197,6 +202,8 @@ pub struct Lsm {
     /// Clearings whose compaction is running.
     clears_compacting: Vec<u64>,
     budget: i64,
+    /// The budget of the compactions that make room for an ingestion (FR-024).
+    ingest_budget: i64,
     budget_at: Option<Nanos>,
     requests: std::collections::VecDeque<Request>,
     next_request: u64,
@@ -256,6 +263,7 @@ impl Lsm {
             clears: Vec::new(),
             clears_compacting: Vec::new(),
             budget: i64::try_from(cfg.compaction_bytes_per_sec).unwrap_or(i64::MAX),
+            ingest_budget: i64::try_from(cfg.ingest_compaction_bytes_per_sec).unwrap_or(i64::MAX),
             budget_at: None,
             requests: std::collections::VecDeque::new(),
             next_request: 1,

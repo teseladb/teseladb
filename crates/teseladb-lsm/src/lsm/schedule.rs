@@ -36,15 +36,7 @@ impl Lsm {
         }
         let all = std::mem::take(&mut self.compact_all);
         if let Some(plan) = compaction::pick(&self.version, &self.cfg, &mut self.pointers, all) {
-            let job = CompactJob::new(&self.cfg, plan, self.gc.clone());
-            let job = match self.cfg.codec {
-                Codec::ZstdDict => {
-                    let written = self.dict_written.clone();
-                    job.with_training(Training::new(&self.cfg, &self.state, &self.version, written))
-                }
-                Codec::None | Codec::Zlib | Codec::Zstd => job,
-            };
-            return Some(Job::Compact(Box::new(job)));
+            return Some(Job::Compact(Box::new(self.compaction(plan))));
         }
         // Nothing to compact: the clearings are done.
         self.done.cleared.extend(std::mem::take(&mut self.clears_compacting));
@@ -61,6 +53,19 @@ impl Lsm {
             )));
         }
         None
+    }
+
+    /// The compaction of `plan`, which trains the collections' dictionaries with
+    /// [`Codec::ZstdDict`].
+    pub(super) fn compaction(&self, plan: compaction::Plan) -> CompactJob {
+        let job = CompactJob::new(&self.cfg, plan, self.gc.clone());
+        match self.cfg.codec {
+            Codec::ZstdDict => {
+                let written = self.dict_written.clone();
+                job.with_training(Training::new(&self.cfg, &self.state, &self.version, written))
+            }
+            Codec::None | Codec::Zlib | Codec::Zstd => job,
+        }
     }
 
     pub(super) fn install(&mut self, o: Outcome) {
@@ -109,7 +114,8 @@ impl Lsm {
                 // The compaction waits until the tombstones are in a file.
                 self.clears.push(id);
             }
-            Outcome::Changed { added, removed, edit, dict_written } => {
+            Outcome::Changed { added, removed, edit, dict_written, ingest } => {
+                self.counters.ingest_compactions += u64::from(ingest);
                 self.apply_files(added, &removed, &edit);
                 if let Some(w) = dict_written {
                     self.dict_written = w;
@@ -148,20 +154,25 @@ impl Lsm {
         self.version = Rc::new(v);
     }
 
-    /// Adds the compaction budget earned since the last call, up to one second of it.
+    /// Adds the compaction budgets earned since the last call, up to one second of each.
     pub(super) fn refill(&mut self, now: Nanos) {
-        let rate = i64::try_from(self.cfg.compaction_bytes_per_sec).unwrap_or(i64::MAX);
         match self.budget_at {
             Some(at) if now > at => {
-                let earned = u128::from(self.cfg.compaction_bytes_per_sec)
-                    * u128::from((now - at).0)
-                    / 1_000_000_000;
-                let earned = i64::try_from(earned).unwrap_or(i64::MAX);
-                self.budget = self.budget.saturating_add(earned).min(rate);
+                let elapsed = now - at;
+                self.budget = earn(self.budget, self.cfg.compaction_bytes_per_sec, elapsed);
+                let rate = self.cfg.ingest_compaction_bytes_per_sec;
+                self.ingest_budget = earn(self.ingest_budget, rate, elapsed);
                 self.budget_at = Some(now);
             }
             Some(_) => {}
             None => self.budget_at = Some(now),
         }
     }
+}
+
+/// `budget` after `elapsed` at `rate` bytes per second, up to one second of it.
+fn earn(budget: i64, rate: u64, elapsed: Nanos) -> i64 {
+    let earned = u128::from(rate) * u128::from(elapsed.0) / 1_000_000_000;
+    let earned = i64::try_from(earned).unwrap_or(i64::MAX);
+    budget.saturating_add(earned).min(i64::try_from(rate).unwrap_or(i64::MAX))
 }

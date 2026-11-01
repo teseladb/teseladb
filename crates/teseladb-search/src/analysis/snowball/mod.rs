@@ -3,7 +3,9 @@
 //! for the Snowball vocabularies (`tests/fixtures/refsearch/stem/`).
 
 mod arabic;
+mod armenian;
 mod basque;
+mod catalan;
 mod dutch;
 mod english;
 mod estonian;
@@ -54,7 +56,9 @@ macro_rules! stemmers {
 
 stemmers! {
     Arabic => "arabic", arabic::stem;
+    Armenian => "armenian", armenian::stem;
     Basque => "basque", basque::stem;
+    Catalan => "catalan", catalan::stem;
     Danish => "danish", nordic::danish;
     Dutch => "dutch", dutch::stem;
     English => "english", english::stem;

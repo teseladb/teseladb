@@ -110,13 +110,23 @@ pub enum Misc {
     TsSecond(Expr),
     TsIncrement(Expr),
     Subtype(Expr),
-    Hash { hex: bool, input: Expr, algorithm: Expr },
+    Hash {
+        hex: bool,
+        input: Expr,
+        algorithm: Expr,
+    },
     HashedKey(Expr),
-    Similarity { kind: Similarity, vectors: Vec<Expr>, score: bool },
+    Similarity {
+        kind: Similarity,
+        vectors: Vec<Expr>,
+        score: bool,
+    },
     Rand,
     CurrentDate,
     CreateObjectId,
     Meta(String),
+    /// `$function`, run by the scope's JavaScript engine.
+    Function(Box<super::js::Function>),
 }
 
 fn name_of(t: Trig) -> &'static str {
@@ -203,6 +213,7 @@ pub(super) fn parse(name: &str, arg: RawValue<'_>, ctx: &Ctx) -> Result<Option<M
             }
         },
         "$meta" => parse_meta(arg)?,
+        "$function" => Misc::Function(Box::new(super::js::Function::parse(arg, ctx)?)),
         other => match UNARY.iter().find(|(n, _, _)| *n == other) {
             Some((_, t, _)) => Misc::Unary(*t, one_arg(name, arg, ctx)?),
             None => return Ok(None),
@@ -454,6 +465,7 @@ impl Misc {
                 similarity(*kind, &at(&vectors[0])?, &at(&vectors[1])?, *score)
             }
             Misc::Rand => Ok(Some(Value::Double(scope.random_unit()))),
+            Misc::Function(f) => f.eval(doc, scope),
             Misc::CurrentDate => super::path::eval_variable("NOW", None, doc, scope),
             Misc::CreateObjectId => {
                 let now = match super::path::eval_variable("NOW", None, doc, scope)? {
