@@ -54,10 +54,25 @@ pub fn is_document_key(key: &[u8]) -> bool {
         && key[9..DOC_PREFIX] == teseladb_keys::DOCUMENTS.to_be_bytes()
 }
 
-/// The changes of `versions`, in the merge order.
+/// The type of the event of the write `meta` describes.
+fn kind_of(meta: &ChangeMeta) -> EventKind {
+    if meta.delete {
+        EventKind::Delete
+    } else if meta.update.is_some() {
+        EventKind::Update
+    } else if meta.replace {
+        EventKind::Replace
+    } else {
+        EventKind::Insert
+    }
+}
+
+/// The changes of `versions`, in the merge order: one for each meta of a document at a mark (a
+/// transaction that wrote it several times left one per write), or one for its version where it
+/// has none.
 pub fn changes(versions: impl IntoIterator<Item = Versioned>) -> Result<Vec<Change>, ChangeError> {
     let mut docs: BTreeMap<(Vec<u8>, Hlc), Option<Vec<u8>>> = BTreeMap::new();
-    let mut metas: BTreeMap<(Vec<u8>, Hlc), ChangeMeta> = BTreeMap::new();
+    let mut metas: BTreeMap<(Vec<u8>, Hlc), Vec<ChangeMeta>> = BTreeMap::new();
     for v in versions {
         if !is_document_key(&v.key) {
             continue;
@@ -66,7 +81,7 @@ pub fn changes(versions: impl IntoIterator<Item = Versioned>) -> Result<Vec<Chan
             Some((crate::HISTORY_VALUE, bytes)) => {
                 let meta = ChangeMeta::decode(&bytes).map_err(ChangeError::Meta)?;
                 if let Some(doc) = doc_of_meta(&v.key) {
-                    metas.insert((doc.to_vec(), v.ts), meta);
+                    metas.entry((doc.to_vec(), v.ts)).or_default().push(meta);
                 }
             }
             Some((crate::DOCUMENT_VALUE, bytes)) => {
@@ -78,21 +93,28 @@ pub fn changes(versions: impl IntoIterator<Item = Versioned>) -> Result<Vec<Chan
             }
         }
     }
-    let mut out: Vec<Change> = docs
-        .into_iter()
-        .map(|((key, ts), doc)| {
-            let meta = metas.remove(&(key.clone(), ts));
-            let kind = match (&doc, &meta) {
-                (None, _) => EventKind::Delete,
-                (Some(_), Some(m)) if m.update.is_some() => EventKind::Update,
-                (Some(_), Some(m)) if m.replace => EventKind::Replace,
-                (Some(_), _) => EventKind::Insert,
+    let mut out = Vec::new();
+    for ((key, ts), doc) in &docs {
+        if metas.contains_key(&(key.clone(), *ts)) {
+            continue;
+        }
+        let kind = if doc.is_some() { EventKind::Insert } else { EventKind::Delete };
+        let event = EventKey { ts: *ts, txn: 0, op: 0, key: key.clone() };
+        out.push(Change { event, kind, doc: doc.clone(), meta: None });
+    }
+    for ((key, ts), list) in metas {
+        let version = docs.get(&(key.clone(), ts)).cloned().flatten();
+        for meta in list {
+            let kind = kind_of(&meta);
+            let doc = match kind {
+                EventKind::Delete => None,
+                _ => meta.doc.clone().or_else(|| version.clone()),
             };
-            let (txn, op) =
-                meta.as_ref().map_or((0, 0), |m| (m.txn.as_ref().map_or(0, |t| t.id), m.op));
-            Change { event: EventKey { ts, txn, op, key }, kind, doc, meta }
-        })
-        .collect();
+            let txn = meta.txn.as_ref().map_or(0, |t| t.id);
+            let event = EventKey { ts, txn, op: meta.op, key: key.clone() };
+            out.push(Change { event, kind, doc, meta: Some(meta) });
+        }
+    }
     out.sort_by(|a, b| a.event.cmp(&b.event));
     Ok(out)
 }

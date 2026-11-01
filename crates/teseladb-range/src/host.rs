@@ -35,12 +35,14 @@ use crate::sm::{RangeState, dedup_key};
 use crate::tscache::TsCache;
 
 mod closed;
+mod feed;
 mod merge;
 mod purge;
 mod split;
 mod txn;
 mod write;
 
+pub use feed::{ChangesReq, FEED_WINDOW_MS, STREAM_HOLD};
 pub use merge::MergeSource;
 pub use split::SplitDone;
 pub use txn::{CONTINUES, FIND_BATCH, TxnOp, TxnReq, continues, last_activity};
@@ -213,6 +215,16 @@ pub enum Reply {
     },
     /// A transaction's record after `EndTxn` or `PushTxn` (008).
     Record(crate::intents::TxnRecord),
+    /// What a change stream reads of the range (014): the versions of `(from, to]`, `to` at or
+    /// below the closed mark, and the oldest intent pending there.
+    Changes {
+        /// The versions and deletions.
+        rows: Vec<crate::changes::Versioned>,
+        /// The end of the interval read.
+        to: Hlc,
+        /// The mark of the oldest pending intent.
+        oldest_intent: Option<Hlc>,
+    },
 }
 
 pub(crate) struct Leader {
@@ -240,6 +252,12 @@ pub(crate) struct Leader {
     /// When it closes its next mark, and when it next writes one in the log (007 FR-012).
     close_at: Nanos,
     log_close_at: Nanos,
+    /// Until when change streams read the range: it closes marks 200 ms behind its clock till
+    /// then (014 FR-004).
+    pub(crate) streams_until: Nanos,
+    /// The highest mark it closed, with the last index of its log then: a mark closed with the
+    /// longer lag never goes below it, and the range reads at it once it applied that index.
+    pub(crate) last_closed: (Hlc, u64),
 }
 
 impl Leader {
@@ -444,6 +462,7 @@ pub struct ScanReq {
 pub(crate) enum Req {
     Mut(MutReq),
     Get(GetReq),
+    Changes(feed::FeedReq),
     Purge(PurgeReq),
     Round(RoundReq),
 }
@@ -616,7 +635,9 @@ impl RangeHost {
                 Req::Mut(MutReq { g: rg, state: MutState::Proposed(_), .. }) => {
                     (*rg == g).then_some((*id, Some(RangeError::Unavailable)))
                 }
-                Req::Mut(MutReq { g: rg, .. }) | Req::Get(GetReq { g: rg, .. }) => {
+                Req::Mut(MutReq { g: rg, .. })
+                | Req::Get(GetReq { g: rg, .. })
+                | Req::Changes(feed::FeedReq { g: rg, .. }) => {
                     (*rg == g).then_some((*id, Some(RangeError::NotLeader { hint: NodeId(0) })))
                 }
                 Req::Purge(PurgeReq { g: rg, .. }) | Req::Round(RoundReq { g: rg, .. }) => {
@@ -678,7 +699,7 @@ impl RangeHost {
     pub fn proposed(&self, id: ReqId) -> Option<(Hlc, u64)> {
         match self.reqs.get(&id)? {
             Req::Mut(MutReq { term, state: MutState::Proposed(p), .. }) => Some((p.ts, *term)),
-            Req::Mut(_) | Req::Get(_) | Req::Purge(_) | Req::Round(_) => None,
+            Req::Mut(_) | Req::Get(_) | Req::Changes(_) | Req::Purge(_) | Req::Round(_) => None,
         }
     }
 
@@ -956,6 +977,8 @@ impl RangeHost {
             Req::Mut(m) => self.mutation_done(core, id, m, r.map(|_| ())),
             Req::Purge(p) => self.purge_done(p, r.map(|_| ())),
             Req::Round(p) => self.round_done(p),
+            // A stream's read has no operation in the core.
+            Req::Changes(f) => self.reply(id, Err(RangeError::NotLeader { hint: f.hint })),
             Req::Get(mut q) => match r {
                 // The mark comes from the clock the core's clock rule checked (FR-006).
                 Ok(_) => match q.at.or_else(|| core.read_mark(self.now)) {
@@ -1051,6 +1074,8 @@ impl RangeHost {
             load,
             close_at: Nanos::ZERO,
             log_close_at: Nanos::ZERO,
+            streams_until: Nanos::ZERO,
+            last_closed: (ZERO, 0),
         });
         let lost: Vec<ReqId> = self
             .reqs
@@ -1061,7 +1086,8 @@ impl RangeHost {
                     g: rg,
                     state: GetState::Admit(_) | GetState::Read(_) | GetState::Scanning(..),
                     ..
-                }) => *rg == g,
+                })
+                | Req::Changes(feed::FeedReq { g: rg, .. }) => *rg == g,
                 Req::Mut(_) | Req::Get(_) | Req::Purge(_) | Req::Round(_) => false,
             })
             .map(|(id, _)| *id)
@@ -1084,6 +1110,7 @@ impl RangeHost {
         match req {
             Req::Mut(m) => self.step_mut(core, id, m, now),
             Req::Get(q) => self.step_get(core, id, q),
+            Req::Changes(f) => self.step_changes(id, f),
             // The core answers for them.
             r @ (Req::Purge(_) | Req::Round(_)) => {
                 self.reqs.insert(id, r);

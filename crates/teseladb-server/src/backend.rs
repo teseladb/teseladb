@@ -211,7 +211,8 @@ impl ServerBackend {
                     | RemoteReply::Intents { .. }
                     | RemoteReply::Record(_)
                     | RemoteReply::Piece { .. }
-                    | RemoteReply::Restored { .. },
+                    | RemoteReply::Restored { .. }
+                    | RemoteReply::Changes { .. },
                 ) => {
                     return Err(CommandError::new(INTERNAL_ERROR, "a scan answered with no rows"));
                 }
@@ -562,7 +563,8 @@ impl Backend for ServerBackend {
             | RemoteReply::Intents { .. }
             | RemoteReply::Record(_)
             | RemoteReply::Piece { .. }
-            | RemoteReply::Restored { .. } => {
+            | RemoteReply::Restored { .. }
+            | RemoteReply::Changes { .. } => {
                 Err(CommandError::new(INTERNAL_ERROR, "a write answered with no result"))
             }
         }
@@ -644,6 +646,45 @@ impl Backend for ServerBackend {
 
     fn end_operation(&mut self) {
         self.release_pins();
+    }
+
+    fn changes(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        from: Hlc,
+    ) -> Result<teseladb_wire::commands::ChangeBatch, CommandError> {
+        // Range by range in key order, each read on its leader (014 FR-003); the batch is
+        // resolved up to the lowest resolved mark of its ranges (FR-004, FR-005).
+        let mut rows = Vec::new();
+        let mut resolved: Option<Hlc> = None;
+        let mut at = start.to_vec();
+        while at.as_slice() < end {
+            let stop = |e: &RouteEntry| match e.end.is_empty() || end <= e.end.as_slice() {
+                true => end.to_vec(),
+                false => e.end.clone(),
+            };
+            let key = at.clone();
+            let build =
+                |e: &RouteEntry, _| RemoteReq::Changes { start: key.clone(), end: stop(e), from };
+            match self.data(&at, false, build)? {
+                (e, RemoteReply::Changes { rows: more, to, oldest_intent }) => {
+                    let mark = teseladb_changestream::resolved::resolved(to, oldest_intent);
+                    resolved = Some(resolved.map_or(mark, |r| r.min(mark)));
+                    rows.extend(more);
+                    at = stop(&e);
+                }
+                _ => {
+                    return Err(CommandError::new(
+                        INTERNAL_ERROR,
+                        "a change stream's read answered with something else",
+                    ));
+                }
+            }
+        }
+        let resolved = resolved.unwrap_or(from).max(from);
+        rows.retain(|r: &teseladb_range::changes::Versioned| r.ts <= resolved);
+        Ok((rows, resolved))
     }
 
     fn txn_pause(&mut self) -> bool {

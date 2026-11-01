@@ -466,7 +466,7 @@ impl TxnBackend<'_> {
         &mut self,
         writes: Vec<(Vec<u8>, IntentOp)>,
     ) -> Result<Vec<(Vec<u8>, IntentOp)>, CommandError> {
-        use teseladb_changestream::meta::{ChangeMeta, TxnInfo, doc_of_meta, history};
+        use teseladb_changestream::meta::{ChangeMeta, DocWrite, TxnInfo, doc_of_meta, history};
         let is_history = |op: &IntentOp| matches!(op, IntentOp::Put { value_type, .. } if *value_type == teseladb_range::HISTORY_VALUE);
         let (mut updates, mut replaced) = (Vec::new(), Vec::new());
         for (key, op) in &writes {
@@ -496,15 +496,29 @@ impl TxnBackend<'_> {
                     IntentOp::Delete => true,
                 }
         };
-        let docs: Vec<Vec<u8>> =
-            out.iter().filter(|(k, op)| is_doc(k, op)).map(|(k, _)| k.clone()).collect();
+        // Each write keeps its type and the document it left: a later write of the transaction
+        // replaces the document's intent, and its event still has to show this one.
+        let docs: Vec<DocWrite> = out
+            .iter()
+            .filter(|(k, op)| is_doc(k, op))
+            .map(|(key, op)| {
+                let update = updates.iter().find(|(u, _)| u == key).map(|(_, d)| d.clone());
+                let replace = update.is_none() && replaced.contains(key);
+                let doc = match op {
+                    IntentOp::Put { value, .. } => Some(value.clone()),
+                    IntentOp::Delete => None,
+                };
+                let delete = doc.is_none();
+                DocWrite { key: key.clone(), update, replace, delete, doc }
+            })
+            .collect();
         let (lsid, txn_number) = self.run.coord.session();
         let uid = match self.inner.authenticated_user() {
             Some(u) => teseladb_hash::sha256(format!("{}@{}", u.user, u.db).as_bytes()),
             None => teseladb_hash::sha256(b""),
         };
         let info = TxnInfo { id: self.run.coord.txn().0, lsid, uid, txn_number };
-        for (key, meta) in history(&docs, (&updates, &replaced), Some((&info, self.run.ops))) {
+        for (key, meta) in history(&docs, Some((&info, self.run.ops))) {
             let value = meta.encode().map_err(|e| {
                 CommandError::new(INTERNAL_ERROR, format!("change description: {e}"))
             })?;
@@ -1279,6 +1293,15 @@ impl Backend for TxnBackend<'_> {
 
     fn end_operation(&mut self) {
         self.inner.end_operation();
+    }
+
+    fn changes(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        from: Hlc,
+    ) -> Result<super::ChangeBatch, CommandError> {
+        self.inner.changes(start, end, from)
     }
 
     fn txn_route(&self, key: &[u8]) -> Option<teseladb_types::GroupId> {

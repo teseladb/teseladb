@@ -232,18 +232,28 @@ fn the_document_of_a_primary_key_is_that_of_its_id() {
     }
 }
 
-/// A document's change meta (014) is its key followed by `00`, the very next key: a cut there
-/// would leave the meta in another range than its document, so it moves to the document.
+/// A document's change metas (014) are its key followed by `00` and a position, right after it.
+/// A document's key that merely ends in `00` is no meta.
 #[test]
-fn a_split_key_never_parts_a_document_from_its_meta() {
-    let none = |_: u32, _: u32| false;
+fn a_meta_is_told_from_a_document_that_ends_in_zero() {
     let doc = KeyBuilder::document(0, 3, RawValue::Int32(5)).as_bytes().to_vec();
-    let meta = [&doc[..], &[0][..]].concat();
-    let whole = (&[][..], &[][..]);
-    assert_eq!(space::cut_outside(&meta, whole, none), Some(doc.clone()));
-    // At the start of the range the document is already there: no cut.
-    assert_eq!(space::cut_outside(&meta, (&doc, &[][..]), none), None);
-    // An index entry ending in `00` is no meta.
-    let entry = [KeyBuilder::index_prefix(0, 3, 1).as_bytes(), &[4, 0]].concat();
-    assert_eq!(space::cut_outside(&entry, whole, none), Some(entry.clone()));
+    let meta = [&doc[..], &[0, 0, 0, 0, 3][..]].concat();
+    assert_eq!(space::meta_document(&meta, false), Some(&doc[..]));
+    // An `_id` whose encoding ends in `00`, and a key of 16 raw bytes ending in `01 00`.
+    let ends = KeyBuilder::document(0, 3, RawValue::String("ab")).as_bytes().to_vec();
+    assert_eq!(ends.last(), Some(&0));
+    assert_eq!(space::meta_document(&ends, false), None);
+    let raw = [KeyBuilder::index_prefix(0, 3, 0).as_bytes(), &256u128.to_be_bytes()[..]].concat();
+    assert_eq!(space::meta_document(&raw, false), None);
+    // A capped collection's document and its meta.
+    let capped = KeyBuilder::document_capped(0, 3, 256).as_bytes().to_vec();
+    assert_eq!(space::meta_document(&capped, true), None);
+    let capped_meta = [&capped[..], &[0, 0, 0, 0, 1][..]].concat();
+    assert_eq!(space::meta_document(&capped_meta, true), Some(&capped[..]));
+    // An index entry is never a meta.
+    let entry = [KeyBuilder::index_prefix(0, 3, 1).as_bytes(), &[0x20, 0, 0, 0, 0, 1]].concat();
+    assert_eq!(space::meta_document(&entry, false), None);
+    // A meta of a document whose own key ends in `00`.
+    let meta_of_ends = [&ends[..], &[0, 0, 0, 0, 7][..]].concat();
+    assert_eq!(space::meta_document(&meta_of_ends, false), Some(&ends[..]));
 }

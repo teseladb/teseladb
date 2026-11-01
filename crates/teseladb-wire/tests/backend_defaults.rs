@@ -72,6 +72,14 @@ impl Backend for Bare {
     fn note_plan(&mut self, _: teseladb_bson::Document) {}
 
     fn end_operation(&mut self) {}
+    fn changes(
+        &mut self,
+        _start: &[u8],
+        _end: &[u8],
+        _from: teseladb_hlc::Hlc,
+    ) -> Result<teseladb_wire::commands::ChangeBatch, CommandError> {
+        Err(none())
+    }
     fn txn_pause(&mut self) -> bool {
         false
     }

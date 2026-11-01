@@ -38,6 +38,7 @@ teseladb-rest = { path = "../teseladb-rest" }
 teseladb-wire = { path = "../teseladb-wire" }
 teseladb-auth = { path = "../teseladb-auth" }
 teseladb-bson = { path = "../teseladb-bson" }
+teseladb-changestream = { path = "../teseladb-changestream" }
 teseladb-crypto = { path = "../teseladb-crypto" }
 teseladb-x509 = { path = "../teseladb-x509" }
 teseladb-tls = { path = "../teseladb-tls" }

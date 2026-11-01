@@ -4,6 +4,15 @@
 
 use teseladb_changestream::changes::{Change, ChangeError, Versioned, changes};
 use teseladb_changestream::meta::{ChangeMeta, TxnInfo, meta_key};
+
+fn m(
+    txn: Option<TxnInfo>,
+    op: u32,
+    update: Option<UpdateDescription>,
+    replace: bool,
+) -> ChangeMeta {
+    ChangeMeta { txn, op, update, replace, delete: false, doc: None }
+}
 use teseladb_changestream::order::EventKey;
 use teseladb_changestream::token::EventKind;
 use teseladb_changestream::update_desc::UpdateDescription;
@@ -40,23 +49,21 @@ fn meta(m: &ChangeMeta) -> Vec<u8> {
 fn versions_become_changes_in_the_merge_order() {
     let txn = TxnInfo { id: 5, lsid: 9, uid: [0; 32], txn_number: 3 };
     let update = UpdateDescription::default();
-    let m_upd = ChangeMeta { txn: None, op: 1, update: Some(update.clone()), replace: false };
-    let m_rep = ChangeMeta { txn: None, op: 0, update: None, replace: true };
-    let m_txn = ChangeMeta { txn: Some(txn.clone()), op: 0, update: None, replace: false };
+    let m_upd = m(None, 1, Some(update.clone()), false);
+    let m_rep = m(None, 0, None, true);
+    let m_txn = m(Some(txn.clone()), 0, None, false);
     // In key order and, within a key, from the newest, as a time scan gives them.
     let items = vec![
         put(doc(1), 30, DOCUMENT_VALUE, b"d1@30"),
         put(doc(1), 10, DOCUMENT_VALUE, b"d1@10"),
-        put(meta_key(&doc(1)), 30, HISTORY_VALUE, &meta(&m_rep)),
+        put(meta_key(&doc(1), 0), 30, HISTORY_VALUE, &meta(&m_rep)),
         put(doc(2), 20, DOCUMENT_VALUE, b"d2@20"),
         put(doc(2), 10, DOCUMENT_VALUE, b"d2@10"),
-        put(meta_key(&doc(2)), 20, HISTORY_VALUE, &meta(&m_txn)),
-        put(meta_key(&doc(2)), 10, HISTORY_VALUE, &meta(&m_upd)),
+        put(meta_key(&doc(2), 0), 20, HISTORY_VALUE, &meta(&m_txn)),
+        put(meta_key(&doc(2), 1), 10, HISTORY_VALUE, &meta(&m_upd)),
         Versioned { key: doc(3), ts: ts(25), value: None },
         put(entry(1), 30, 2, b""),
         Versioned { key: entry(2), ts: ts(30), value: None },
-        // A meta left by a write whose document version went (a purge): no change.
-        put(meta_key(&doc(4)), 15, HISTORY_VALUE, &meta(&m_upd)),
     ];
     let got = changes(items).unwrap();
     let key = |at: u64, txn: u128, op: u32, k: Vec<u8>| EventKey { ts: ts(at), txn, op, key: k };
@@ -94,7 +101,50 @@ fn versions_become_changes_in_the_merge_order() {
 fn a_damaged_meta_stops_the_stream() {
     let items = vec![
         put(doc(1), 10, DOCUMENT_VALUE, b"d"),
-        put(meta_key(&doc(1)), 10, HISTORY_VALUE, &[9]),
+        put(meta_key(&doc(1), 0), 10, HISTORY_VALUE, &[9]),
     ];
     assert!(matches!(changes(items), Err(ChangeError::Meta(_))));
+}
+
+/// A transaction that writes a document several times gives one change per write, in their order,
+/// each with the document that write left (measured on a `refrouter` 9.0.4 on 01-11: insert, update
+/// and replace of one document, two updates of another and the deletion of the first, six events
+/// in the order of the statements).
+#[test]
+fn a_transaction_gives_one_change_per_write_of_a_document() {
+    let txn = TxnInfo { id: 5, lsid: 9, uid: [0; 32], txn_number: 3 };
+    let at = |op: u32, d: Option<&[u8]>| ChangeMeta {
+        doc: d.map(<[u8]>::to_vec),
+        ..m(Some(txn.clone()), op, None, false)
+    };
+    let desc = |f: &str| UpdateDescription {
+        updated: vec![(f.into(), teseladb_bson::Value::Int32(1))],
+        ..UpdateDescription::default()
+    };
+    let metas = [
+        (doc(1), at(0, Some(b"v1"))),
+        (doc(1), ChangeMeta { update: Some(desc("a")), ..at(1, Some(b"v1a")) }),
+        (doc(1), ChangeMeta { replace: true, ..at(2, Some(b"v5")) }),
+        (doc(0), ChangeMeta { update: Some(desc("a")), ..at(3, Some(b"z1")) }),
+        (doc(0), ChangeMeta { update: Some(desc("b")), ..at(4, Some(b"z2")) }),
+        (doc(1), ChangeMeta { delete: true, ..at(5, None) }),
+    ];
+    let mut items = vec![
+        Versioned { key: doc(0), ts: ts(50), value: Some((DOCUMENT_VALUE, b"z2".to_vec())) },
+        Versioned { key: doc(1), ts: ts(50), value: None },
+    ];
+    items.extend(metas.iter().map(|(k, x)| put(meta_key(k, x.op), 50, HISTORY_VALUE, &meta(x))));
+    let got = changes(items).unwrap();
+    let kinds: Vec<(u32, EventKind, Option<Vec<u8>>)> =
+        got.iter().map(|c| (c.event.op, c.kind, c.doc.clone())).collect();
+    let want = vec![
+        (0, EventKind::Insert, Some(b"v1".to_vec())),
+        (1, EventKind::Update, Some(b"v1a".to_vec())),
+        (2, EventKind::Replace, Some(b"v5".to_vec())),
+        (3, EventKind::Update, Some(b"z1".to_vec())),
+        (4, EventKind::Update, Some(b"z2".to_vec())),
+        (5, EventKind::Delete, None),
+    ];
+    assert_eq!(kinds, want);
+    assert!(got.iter().all(|c| c.event.txn == 5 && c.event.ts == ts(50)));
 }

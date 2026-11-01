@@ -117,6 +117,9 @@ pub enum LdapLogin {
 }
 
 /// What the commands need from the node: Group 0's catalog, the ranges and the cluster time.
+/// What a change stream read of an interval: the versions up to the resolved mark, and the mark.
+pub type ChangeBatch = (Vec<teseladb_range::changes::Versioned>, teseladb_hlc::Hlc);
+
 /// The server's implementation finds the leaders and forwards; errors come translated.
 pub trait Backend {
     /// The collection of `ns`, as the node's copy of Group 0 has it.
@@ -212,6 +215,15 @@ pub trait Backend {
     /// of its shape), for the profiler (010 FR-015). Every backend says what it does, so that a
     /// wrapper cannot drop the call.
     fn note_plan(&mut self, plan: Document);
+    /// What a change stream reads of `[start, end)` after mark `from` (014 FR-003, FR-004): the
+    /// versions of every range of the interval up to the lowest resolved mark of those ranges,
+    /// and that mark, below which no version appears later.
+    fn changes(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        from: teseladb_hlc::Hlc,
+    ) -> Result<ChangeBatch, CommandError>;
     /// Reads at most `limit` documents of `[start, end)` in key order: `(key, document)`.
     fn scan(
         &mut self,
