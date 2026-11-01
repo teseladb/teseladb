@@ -78,6 +78,8 @@ pub struct Authenticated {
     pub login_ms: u64,
     /// Its roles when they come from its LDAP groups (013 FR-026); `None`: those of its document.
     pub roles: Option<Vec<RoleName>>,
+    /// Its tenant (007 FR-025), which the connection's requests run in.
+    pub tenant: u32,
 }
 
 impl Authenticated {
@@ -163,7 +165,7 @@ impl AuthState {
         if self.user.as_ref().is_some_and(|u| u.name != name) {
             return Err(SaslError::AuthenticationFailed);
         }
-        self.user = Some(Authenticated { name, mechanism, login_ms, roles: None });
+        self.user = Some(Authenticated { name, mechanism, login_ms, roles: None, tenant: 0 });
         Ok(())
     }
 }
@@ -183,12 +185,12 @@ fn admit<B: Backend + ?Sized>(
     } else {
         ldap_roles
     };
-    let (own, roles) = match &ldap_roles {
+    let (own, roles, tenant) = match &ldap_roles {
         // Roles of LDAP groups: the user's document, if any, is not read (013 FR-026).
-        Some(r) => (None, Some(r.clone())),
+        Some(r) => (None, Some(r.clone()), 0),
         None => match login_user(backend, &name)? {
-            Some(user) => (user.restrictions, Some(user.roles)),
-            None => (None, None),
+            Some(user) => (user.restrictions, Some(user.roles), user.tenant),
+            None => (None, None, 0),
         },
     };
     if let Some(roles) = roles {
@@ -202,6 +204,7 @@ fn admit<B: Backend + ?Sized>(
     state.login(name, mechanism, backend.now_ms()).map_err(|e| sasl_error(&e))?;
     if let Some(u) = state.user.as_mut() {
         u.roles = ldap_roles;
+        u.tenant = tenant;
     }
     Ok(())
 }

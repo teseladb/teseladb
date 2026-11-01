@@ -54,6 +54,7 @@ mod f {
     pub const BYPASS: &str = "bypass";
     pub const COLLATION: &str = "collation";
     pub const COLLECTION_ID: &str = "cid";
+    pub const TENANT: &str = "tenant";
     pub const INDEXES: &str = "indexes";
     pub const VARS: &str = "let";
     pub const ATTEMPT: &str = "attempt";
@@ -133,6 +134,8 @@ pub struct Rules {
     pub collation: Option<Document>,
     /// Number of the collection, for the keys of its index entries.
     pub collection: u32,
+    /// Its tenant, which its keys carry (007 FR-025).
+    pub tenant: u32,
     /// The secondary indexes being built or ready, which every write keeps (009 FR-003).
     pub indexes: Vec<IndexRule>,
     /// The command's `let` variables, which the leader's filter and update read (FR-032).
@@ -267,6 +270,9 @@ fn rules_doc(r: &Rules, d: &mut Document, attempt: i64) {
         d.push(f::COLLATION, c.clone());
     }
     d.push(f::COLLECTION_ID, i64::from(r.collection));
+    if r.tenant != 0 {
+        d.push(f::TENANT, i64::from(r.tenant));
+    }
     if !r.indexes.is_empty() {
         d.push(f::INDEXES, index_maintenance::rules_value(&r.indexes));
     }
@@ -378,12 +384,18 @@ fn read_rules(d: RawDoc<'_>) -> Result<Rules, CommandError> {
         None => 0,
         Some(_) => return Err(bad_rules()),
     };
+    let tenant = match d.get(f::TENANT) {
+        Some(RawValue::Int64(n)) => u32::try_from(n).map_err(|_| bad_rules())?,
+        None => 0,
+        Some(_) => return Err(bad_rules()),
+    };
     Ok(Rules {
         ns: get_str(d, f::NS),
         validator,
         bypass: get_bool(d, f::BYPASS),
         collation: get_doc(d, f::COLLATION),
         collection,
+        tenant,
         indexes: index_maintenance::read_rules(d.get(f::INDEXES))?,
         vars: get_doc(d, f::VARS),
         attempt: match d.get(f::ATTEMPT) {
@@ -684,7 +696,7 @@ struct Checker {
     /// The command's `let` variables.
     vars: Option<Document>,
     /// The collection, when it is capped: its index entries end in the document's `seq`.
-    capped: Option<u32>,
+    capped: Option<(u32, u32)>,
     /// The description of each document the write updated with operators, by its key (005
     /// FR-008, 014 FR-009).
     changes: std::cell::RefCell<Vec<(Vec<u8>, UpdateDescription)>>,
@@ -722,11 +734,11 @@ impl Checker {
             bypass: r.bypass,
             constraint,
             collation,
-            indexes: Maintainer::new(&r.ns, r.collection, &r.indexes)?
+            indexes: Maintainer::new(&r.ns, (r.tenant, r.collection), &r.indexes)?
                 .with_probes(r.probes.clone(), enforce),
             unique: std::cell::RefCell::default(),
             vars: r.vars.clone(),
-            capped: r.capped.map(|_| r.collection),
+            capped: r.capped.map(|_| (r.tenant, r.collection)),
             changes: std::cell::RefCell::default(),
         })
     }
@@ -792,8 +804,8 @@ impl Checker {
         let new = new.map(RawDoc::from_bytes).transpose()?;
         let stored = |k: &[u8]| lookup(k).map(|(_, v)| v);
         let pk = match (self.capped, key) {
-            (Some(c), Some(k)) => Some(
-                teseladb_range::capped::seq_of(0, c, k)
+            (Some((t, c)), Some(k)) => Some(
+                teseladb_range::capped::seq_of(t, c, k)
                     .map(teseladb_keys::PrimaryKey::seq)
                     .ok_or_else(|| {
                         CommandError::new(INTERNAL_ERROR, "not a capped document key")

@@ -22,9 +22,12 @@ use crate::indexes::{IndexEntry, Indexes};
 use crate::meta2::{Meta1, Meta2Range};
 use crate::request::Requests;
 use crate::security::{Principal, Security, SecurityError};
+use crate::tenants::Tenants;
 
-/// Version of the snapshot format (15: `config.changelog`, 007 FR-017).
-pub const SNAPSHOT_VERSION: u8 = 15;
+/// Version of the snapshot format (16: tenants, 007 FR-025).
+pub const SNAPSHOT_VERSION: u8 = 16;
+/// The snapshot before tenants (01-11-2026), still read: no tenant but the default one.
+pub const SNAPSHOT_VERSION_WITHOUT_TENANTS: u8 = 15;
 /// The snapshot before `config.changelog` (01-11-2026), still read: no change recorded.
 pub const SNAPSHOT_VERSION_WITHOUT_CHANGELOG: u8 = 14;
 /// The previous version, still read: it has no `Meta1`.
@@ -172,8 +175,15 @@ pub enum Group0Error {
     HandedOff,
     /// No range number is left: Group 0 gives numbers below 2^32, a Meta2 range 2^32 per range.
     OutOfGroupIds,
-    /// A restore into a catalog that has collections or indexes (007 FR-021).
+    /// A restore into a catalog that has collections or indexes (007 FR-021), or a tenant
+    /// dropped with databases or users (FR-025).
     NotEmpty,
+    /// A tenant with that name exists (007 FR-025).
+    TenantExists,
+    /// No tenant with that name.
+    TenantNotFound,
+    /// No tenant can have that name: empty, too long or with a zero byte.
+    InvalidTenantName,
 }
 
 /// Result of applying a Group 0 command.
@@ -192,6 +202,8 @@ pub enum Group0Result {
     /// Refused: the descriptor is held by this Meta2 range (007 FR-014), where the sender
     /// repeats the order.
     Meta1(Meta2Range),
+    /// The tenant created (007 FR-025).
+    Tenant(u32),
     /// Nothing changed.
     Err(Group0Error),
 }
@@ -243,6 +255,8 @@ pub struct Group0Sm {
     pub meta1: Option<Meta1>,
     /// The history of the changes of its descriptors (`config.changelog`).
     pub changelog: Changelog,
+    /// The tenants (007 FR-025), boxed to keep Group 0's state small.
+    pub tenants: Box<Tenants>,
 }
 
 impl Group0Sm {
@@ -322,7 +336,7 @@ impl Group0Sm {
     }
 
     /// The numbers of the capped collections in the catalog.
-    pub fn capped_collections(&self) -> BTreeSet<u32> {
+    pub fn capped_collections(&self) -> BTreeSet<(u32, u32)> {
         self.catalog
             .collections
             .values()
@@ -332,7 +346,7 @@ impl Group0Sm {
                     Ok(crate::collection_types::CollectionKind::Capped { .. })
                 )
             })
-            .map(|e| e.id)
+            .map(|e| (e.tenant, e.id))
             .collect()
     }
 
@@ -442,6 +456,32 @@ impl Group0Sm {
         Ok(Group0Result::Ok)
     }
 
+    /// `CreateTenant`: a valid name no tenant has, with the next number.
+    fn create_tenant(&mut self, name: &str) -> Result<Group0Result, Group0Error> {
+        if !crate::tenants::valid_name(name) {
+            return Err(Group0Error::InvalidTenantName);
+        }
+        if self.tenants.id_of(name).is_some() {
+            return Err(Group0Error::TenantExists);
+        }
+        self.tenants.add(name).map(Group0Result::Tenant).ok_or(Group0Error::OutOfGroupIds)
+    }
+
+    /// `DropTenant`: a tenant without databases or users goes.
+    fn drop_tenant(&mut self, name: &str) -> Result<Group0Result, Group0Error> {
+        if !crate::tenants::valid_name(name) {
+            return Err(Group0Error::InvalidTenantName);
+        }
+        let id = self.tenants.id_of(name).ok_or(Group0Error::TenantNotFound)?;
+        let has_db = self.catalog.dbs.keys().any(|db| crate::tenants::split_db(db).0 == id);
+        let has_user = self.security.users.docs().any(|d| crate::tenants::of_user(d) == id);
+        if has_db || has_user {
+            return Err(Group0Error::NotEmpty);
+        }
+        self.tenants.remove(id);
+        Ok(Group0Result::Ok)
+    }
+
     /// Applies a decoded command at `index`.
     pub fn apply_command(&mut self, index: u64, cmd: &Group0Command) -> Group0Result {
         self.apply_command_at(index, None, cmd)
@@ -507,6 +547,8 @@ impl Group0Sm {
                 Ok(Group0Result::Ok)
             }
             Group0Command::SetSettings(changes) => self.set_settings(changes),
+            Group0Command::CreateTenant { name } => self.create_tenant(name),
+            Group0Command::DropTenant { name } => self.drop_tenant(name),
             Group0Command::CreateRange { start, end, replicas } => {
                 let (mut t, nodes) = self.table();
                 t.create_range(start, end, replicas, nodes).map(Group0Result::Range)
@@ -667,11 +709,14 @@ impl Group0Sm {
         if version > SNAPSHOT_VERSION_WITHOUT_META1 {
             e.bool(self.meta1.is_some());
             if let Some(m) = &self.meta1 {
-                m.encode(&mut e);
+                m.encode_with(&mut e, version > SNAPSHOT_VERSION_WITHOUT_TENANTS);
             }
         }
         if version > SNAPSHOT_VERSION_WITHOUT_CHANGELOG {
             self.changelog.encode(&mut e);
+        }
+        if version > SNAPSHOT_VERSION_WITHOUT_TENANTS {
+            self.tenants.encode(&mut e);
         }
         e.finish()
     }
@@ -738,10 +783,14 @@ impl Group0Sm {
             }
         }
         if version > SNAPSHOT_VERSION_WITHOUT_META1 && d.bool()? {
-            sm.meta1 = Some(Meta1::decode(&mut d)?);
+            let tenants = version > SNAPSHOT_VERSION_WITHOUT_TENANTS;
+            sm.meta1 = Some(Meta1::decode_with(&mut d, tenants)?);
         }
         if version > SNAPSHOT_VERSION_WITHOUT_CHANGELOG {
             sm.changelog = Changelog::decode(&mut d)?;
+        }
+        if version > SNAPSHOT_VERSION_WITHOUT_TENANTS {
+            sm.tenants = Box::new(Tenants::decode(&mut d)?);
         }
         d.finish()?;
         Ok(sm)

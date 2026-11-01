@@ -201,8 +201,10 @@ fn the_new_commands_round_trip_with_their_kinds() {
         assert_eq!(c.kind(), k);
         assert_eq!(Group0Command::decode(&c.encode()), Ok(c));
     }
-    let cluster =
-        Meta2Cluster { nodes: vec![(NodeId(1), 2, true), (NodeId(4), 1, false)], capped: vec![7] };
+    let cluster = Meta2Cluster {
+        nodes: vec![(NodeId(1), 2, true), (NodeId(4), 1, false)],
+        capped: vec![(0, 7)],
+    };
     for c in [
         d(Group0Command::SplitRange { group: GroupId(1), at: b"c".to_vec() }),
         Meta2Command::Cluster(cluster),
@@ -503,7 +505,7 @@ fn a_meta2_range_checks_nodes_and_capped_collections_from_its_cluster_facts() {
     let (_, mut fresh, _) = seeded();
     let mut nodes: Vec<(NodeId, u16, bool)> = NODES.iter().map(|n| (*n, 2, true)).collect();
     nodes[2].2 = false;
-    let facts = Meta2Cluster { nodes, capped: vec![5] };
+    let facts = Meta2Cluster { nodes, capped: vec![(0, 5)] };
     assert_eq!(run2(&mut fresh, Meta2Command::Cluster(facts)), Group0Result::Ok);
     let at = coll(5, b"mid");
     let split = Group0Command::SplitRange { group: GroupId(1), at: at.clone() };
@@ -694,8 +696,10 @@ fn every_error_and_the_meta1_answer_survive_in_the_table_of_requests() {
 #[test]
 fn a_meta2_snapshot_keeps_every_change_in_progress() {
     let (_, _, mut high) = seeded();
-    let facts =
-        Meta2Cluster { nodes: NODES.iter().map(|n| (*n, 2, true)).collect(), capped: vec![3, 8] };
+    let facts = Meta2Cluster {
+        nodes: NODES.iter().map(|n| (*n, 2, true)).collect(),
+        capped: vec![(0, 3), (2, 8)],
+    };
     assert_eq!(run2(&mut high, Meta2Command::Cluster(facts)), Group0Result::Ok);
     let core = high.ranges[&GroupId(2)].core;
     if high.ranges[&GroupId(3)].core != core {

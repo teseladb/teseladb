@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 
 pub mod admin;
+pub mod admin_tenants;
 pub mod at_rest;
 pub mod audit_log;
 pub mod authz_lease;

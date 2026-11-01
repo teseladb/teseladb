@@ -28,7 +28,7 @@ use teseladb_types::{DecodeError, Decoder, Encoder, GroupId, NodeId};
 
 use crate::changelog::Changelog;
 use crate::command::{Group0Command, kind};
-use crate::descriptors::{DescTable, Ids, NodeFacts, RangeIndex, merging_in};
+use crate::descriptors::{CappedSet, DescTable, Ids, NodeFacts, RangeIndex, merging_in};
 use crate::group0::{
     Group0Error, Group0Result, Group0Sm, RangeDesc, ReplicaRole, get_range, get_replicas,
     put_range, put_replicas,
@@ -50,8 +50,10 @@ pub const DEFAULT_SNAPSHOT_BYTES: u64 = 64 << 20;
 pub const DEFAULT_SPLITS_PER_SECOND: u64 = 50;
 /// Seconds every one of which must pass the rate.
 pub const WINDOW_SECONDS: u64 = 60;
-/// Version of a Meta2 range's snapshot (2: its `config.changelog`).
-pub const SNAPSHOT_VERSION: u8 = 2;
+/// Version of a Meta2 range's snapshot (3: the tenant of each capped collection, 007 FR-025).
+pub const SNAPSHOT_VERSION: u8 = 3;
+/// The version before the tenants of the capped collections, still read: all in tenant 0.
+pub const SNAPSHOT_VERSION_WITHOUT_TENANTS: u8 = 2;
 /// The version before the changelog, still read: no change recorded.
 pub const SNAPSHOT_VERSION_WITHOUT_CHANGELOG: u8 = 1;
 
@@ -154,24 +156,30 @@ impl Meta1 {
 
     /// Writes it.
     pub fn encode(&self, e: &mut Encoder) {
+        self.encode_with(e, true);
+    }
+
+    /// [`Meta1::encode`], in the format before the tenants of the capped collections without
+    /// `tenants`.
+    pub fn encode_with(&self, e: &mut Encoder, tenants: bool) {
         e.var(self.ranges.len() as u64);
         for r in &self.ranges {
             r.encode(e);
         }
-        self.facts.encode(e);
+        self.facts.encode_with(e, tenants);
         e.var(self.seeded.len() as u64);
         for g in &self.seeded {
             e.u64(g.0);
         }
     }
 
-    /// Reads what [`Meta1::encode`] wrote.
-    pub fn decode(d: &mut Decoder<'_>) -> Result<Meta1, DecodeError> {
+    /// Reads what [`Meta1::encode_with`] wrote.
+    pub fn decode_with(d: &mut Decoder<'_>, tenants: bool) -> Result<Meta1, DecodeError> {
         let mut ranges = Vec::new();
         for _ in 0..d.var()? {
             ranges.push(Meta2Range::decode(d)?);
         }
-        let facts = Meta2Cluster::decode(d)?;
+        let facts = Meta2Cluster::decode_with(d, tenants)?;
         let mut seeded = BTreeSet::new();
         for _ in 0..d.var()? {
             seeded.insert(GroupId(d.u64()?));
@@ -250,8 +258,8 @@ impl SplitRate {
 pub struct Meta2Cluster {
     /// Every node: its cores and whether it is active.
     pub nodes: Vec<(NodeId, u16, bool)>,
-    /// The capped collections, which a split never cuts.
-    pub capped: Vec<u32>,
+    /// The capped collections, by tenant and number, which a split never cuts.
+    pub capped: Vec<(u32, u32)>,
 }
 
 /// An entry of a Meta2 range's log.
@@ -267,27 +275,23 @@ pub enum Meta2Command {
 }
 
 impl Meta2Cluster {
-    /// Writes it.
-    pub fn encode(&self, e: &mut Encoder) {
+    /// Writes it, with the tenant of each capped collection or, in the format before tenants,
+    /// without it.
+    pub fn encode_with(&self, e: &mut Encoder, tenants: bool) {
         e.var(self.nodes.len() as u64);
         for (n, cores, active) in &self.nodes {
             e.u64(n.0).u16(*cores).bool(*active);
         }
-        e.var(self.capped.len() as u64);
-        for id in &self.capped {
-            e.u32(*id);
-        }
+        put_capped(e, &self.capped, tenants);
     }
 
-    /// Reads what [`Meta2Cluster::encode`] wrote.
-    pub fn decode(d: &mut Decoder<'_>) -> Result<Meta2Cluster, DecodeError> {
+    /// Reads what [`Meta2Cluster::encode_with`] wrote.
+    pub fn decode_with(d: &mut Decoder<'_>, tenants: bool) -> Result<Meta2Cluster, DecodeError> {
         let mut c = Meta2Cluster::default();
         for _ in 0..d.var()? {
             c.nodes.push((NodeId(d.u64()?), d.u16()?, d.bool()?));
         }
-        for _ in 0..d.var()? {
-            c.capped.push(d.u32()?);
-        }
+        c.capped = get_capped(d, tenants)?;
         Ok(c)
     }
 
@@ -303,8 +307,47 @@ impl Meta2Cluster {
 }
 
 const DESCRIPTOR: u8 = 0;
-const CLUSTER: u8 = 1;
+/// The cluster facts in the format before the tenants of the capped collections, still read.
+const CLUSTER_WITHOUT_TENANTS: u8 = 1;
 const SEED: u8 = 2;
+/// The cluster facts with the tenant of each capped collection (007 FR-025).
+const CLUSTER: u8 = 3;
+
+/// Writes capped collections `capped`: their numbers, then, with `tenants`, their tenants.
+fn put_capped<'a>(
+    e: &mut Encoder,
+    capped: impl IntoIterator<Item = &'a (u32, u32)> + Copy,
+    tenants: bool,
+) {
+    let n = capped.into_iter().count();
+    e.var(n as u64);
+    for (_, id) in capped {
+        e.u32(*id);
+    }
+    if tenants {
+        for (t, _) in capped {
+            e.u32(*t);
+        }
+    }
+}
+
+/// Reads what [`put_capped`] wrote; without `tenants`, every collection is tenant 0's.
+fn get_capped(d: &mut Decoder<'_>, tenants: bool) -> Result<Vec<(u32, u32)>, DecodeError> {
+    let n = d.var()?;
+    if n > d.remaining() as u64 / 4 {
+        return Err(DecodeError::InvalidValue { offset: d.position() });
+    }
+    let mut ids = Vec::new();
+    for _ in 0..n {
+        ids.push(d.u32()?);
+    }
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        let t = if tenants { d.u32()? } else { 0 };
+        out.push((t, id));
+    }
+    Ok(out)
+}
 
 /// Whether a Group 0 command of kind `k` is an order on a descriptor.
 fn is_descriptor_order(k: u16) -> bool {
@@ -334,7 +377,7 @@ impl Meta2Command {
             }
             Meta2Command::Cluster(c) => {
                 e.u8(CLUSTER);
-                c.encode(&mut e);
+                c.encode_with(&mut e, true);
             }
             Meta2Command::Seed(state) => {
                 e.u8(SEED).raw(state);
@@ -356,7 +399,10 @@ impl Meta2Command {
                 }
                 Meta2Command::Descriptor(cmd)
             }
-            CLUSTER => Meta2Command::Cluster(Meta2Cluster::decode(&mut d)?),
+            CLUSTER => Meta2Command::Cluster(Meta2Cluster::decode_with(&mut d, true)?),
+            CLUSTER_WITHOUT_TENANTS => {
+                Meta2Command::Cluster(Meta2Cluster::decode_with(&mut d, false)?)
+            }
             SEED => Meta2Command::Seed(d.raw(d.remaining())?.to_vec()),
             _ => return Err(DecodeError::InvalidValue { offset: at }),
         };
@@ -388,8 +434,8 @@ pub struct Meta2Sm {
     pub relocations: BTreeMap<GroupId, (u16, u64)>,
     /// The nodes: cores and whether active.
     pub nodes: BTreeMap<NodeId, (u16, bool)>,
-    /// The capped collections.
-    pub capped: BTreeSet<u32>,
+    /// The capped collections, by tenant and number.
+    pub capped: CappedSet,
     /// Last number given in its block.
     pub last_id: u64,
     /// Last applied index.
@@ -479,7 +525,7 @@ impl Meta2Sm {
         self.ranges.get(&g).filter(|r| r.contains(key))
     }
 
-    fn table(&mut self) -> (DescTable<'_>, &BTreeMap<NodeId, (u16, bool)>, &BTreeSet<u32>) {
+    fn table(&mut self) -> (DescTable<'_>, &BTreeMap<NodeId, (u16, bool)>, &CappedSet) {
         let t = DescTable {
             ranges: &mut self.ranges,
             index: &mut self.range_index,
@@ -656,10 +702,7 @@ impl Meta2Sm {
         for (n, (cores, active)) in &self.nodes {
             e.u64(n.0).u16(*cores).bool(*active);
         }
-        e.var(self.capped.len() as u64);
-        for c in &self.capped {
-            e.u32(*c);
-        }
+        put_capped(&mut e, &self.capped, true);
         e.u64(self.last_id).u64(self.applied).bool(self.seeded);
         e.u64(self.time_ms);
         self.changelog.encode(&mut e);
@@ -680,7 +723,8 @@ impl Meta2Sm {
             ..Meta2Sm::default()
         };
         if d.bool()? {
-            sm.meta1 = Some(Meta1::decode(&mut d)?);
+            let tenants = version > SNAPSHOT_VERSION_WITHOUT_TENANTS;
+            sm.meta1 = Some(Meta1::decode_with(&mut d, tenants)?);
         }
         for _ in 0..d.var()? {
             let r = get_range(&mut d)?;
@@ -699,9 +743,8 @@ impl Meta2Sm {
         for _ in 0..d.var()? {
             sm.nodes.insert(NodeId(d.u64()?), (d.u16()?, d.bool()?));
         }
-        for _ in 0..d.var()? {
-            sm.capped.insert(d.u32()?);
-        }
+        let tenants = version > SNAPSHOT_VERSION_WITHOUT_TENANTS;
+        sm.capped = get_capped(&mut d, tenants)?.into_iter().collect();
         sm.last_id = d.u64()?;
         sm.applied = d.u64()?;
         sm.seeded = d.bool()?;

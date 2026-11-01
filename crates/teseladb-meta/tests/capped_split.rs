@@ -144,3 +144,26 @@ fn a_range_with_a_capped_collection_never_merges_with_its_neighbours() {
     };
     assert_eq!(run(&mut sm, Group0Command::MergeRanges { left: l, right: r }), Group0Result::Ok);
 }
+
+#[test]
+fn a_capped_collection_of_a_tenant_is_cut_out_at_its_own_keys() {
+    // 007 FR-025: a tenant's collection has the tenant in its keys.
+    let (mut sm, _, _) = cluster();
+    run(&mut sm, Group0Command::CreateTenant { name: "acme".into() });
+    let ns = Namespace { db: teseladb_meta::tenants::qualified_db(1, "d"), coll: "log".into() };
+    let options = Document::new().with("capped", true).with("size", 4096).to_bytes().unwrap();
+    let create = CatalogCommand::Create { ns, uuid: [9; 16], options, if_absent: false };
+    let Group0Result::Collection(c) = run(&mut sm, Group0Command::Catalog(create)) else {
+        panic!("created")
+    };
+    let inside = KeyBuilder::document_capped(1, c.id, 9).as_bytes().to_vec();
+    assert_eq!(
+        split(&mut sm, inside),
+        Ok(KeyBuilder::collection_start(1, c.id).as_bytes().to_vec())
+    );
+    // The same number in the default tenant is no capped collection.
+    let elsewhere = KeyBuilder::document_capped(0, c.id, 9).as_bytes().to_vec();
+    let mut fresh = cluster().0;
+    run(&mut fresh, Group0Command::CreateTenant { name: "acme".into() });
+    assert_eq!(split(&mut fresh, elsewhere.clone()), Ok(elsewhere));
+}

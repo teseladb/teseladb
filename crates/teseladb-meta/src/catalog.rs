@@ -31,6 +31,10 @@ pub struct CollectionEntry {
     pub options: Vec<u8>,
     /// Group 0 index of its creation.
     pub created_index: u64,
+    /// Its tenant, which its keys carry (007 FR-025): the one of its qualified database name
+    /// (`crate::tenants::split_db`). An answer that travels without it, such as a forwarded
+    /// change's, gives the default one, and whoever knows the namespace sets it.
+    pub tenant: u32,
 }
 
 /// Why a catalog command did not change anything.
@@ -284,6 +288,7 @@ impl Catalog {
                     uuid: *uuid,
                     options: options.clone(),
                     created_index: index,
+                    tenant: crate::tenants::split_db(&ns.db).0,
                 };
                 self.collections.insert(ns.clone(), c.clone());
                 self.add_db(&ns.db, (index, mark));
@@ -388,6 +393,7 @@ impl Catalog {
                 uuid: get_uuid(d)?,
                 options: d.bytes()?.to_vec(),
                 created_index: d.u64()?,
+                tenant: crate::tenants::split_db(&ns.db).0,
             };
             c.collections.insert(ns, entry);
         }

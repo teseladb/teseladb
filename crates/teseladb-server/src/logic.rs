@@ -831,6 +831,15 @@ impl NodeLogic {
                 };
                 let _ = reply.send(a);
             }
+            CatalogReq::Tenants => {
+                let a = match self.group0() {
+                    Some(sm) if sm.bootstrapped() => CatalogAnswer::Tenants(
+                        sm.tenants.list().into_iter().map(|(id, n)| (id, n.to_owned())).collect(),
+                    ),
+                    Some(_) | None => CatalogAnswer::Unavailable,
+                };
+                let _ = reply.send(a);
+            }
             CatalogReq::Settings => {
                 let a = match self.group0() {
                     Some(sm) if sm.bootstrapped() => CatalogAnswer::Settings(sm.settings.clone()),

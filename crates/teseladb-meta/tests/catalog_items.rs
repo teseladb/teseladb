@@ -274,6 +274,7 @@ fn every_result_and_error_travels_in_the_snapshot() {
             uuid: [2; 16],
             options: vec![5, 0, 0, 0, 0],
             created_index: 9,
+            tenant: 0,
         }),
         Group0Result::Index(IndexEntry {
             id: 2,

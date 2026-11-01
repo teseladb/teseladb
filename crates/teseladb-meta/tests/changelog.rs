@@ -175,7 +175,10 @@ fn group0s_snapshot_carries_the_history_and_reads_the_one_before_it() {
     let mut sm = cluster();
     run(&mut sm, Group0Command::SplitRange { group: G, at: b"m".to_vec() });
     run(&mut sm, Group0Command::CompleteSplit { group: G, at: b"m".to_vec(), at_index: 0 });
-    assert_eq!(SNAPSHOT_VERSION, SNAPSHOT_VERSION_WITHOUT_CHANGELOG + 1);
+    // The version with the history is the one before tenants (007 FR-025).
+    let with_changelog = teseladb_meta::group0::SNAPSHOT_VERSION_WITHOUT_TENANTS;
+    assert_eq!(with_changelog, SNAPSHOT_VERSION_WITHOUT_CHANGELOG + 1);
+    assert!(SNAPSHOT_VERSION > with_changelog);
     let mut back = Group0Sm::default();
     back.restore(&sm.snapshot()).unwrap();
     assert_eq!(back.changelog, sm.changelog);
