@@ -208,6 +208,10 @@ pub trait Backend {
     /// changes of the indexes (009 FR-006). Every backend says what it does, so that a wrapper
     /// cannot drop the call.
     fn end_operation(&mut self);
+    /// The plan a read of the running operation ran (`planSummary`, `execStats` and the hashes
+    /// of its shape), for the profiler (010 FR-015). Every backend says what it does, so that a
+    /// wrapper cannot drop the call.
+    fn note_plan(&mut self, plan: Document);
     /// Reads at most `limit` documents of `[start, end)` in key order: `(key, document)`.
     fn scan(
         &mut self,
@@ -436,6 +440,11 @@ pub trait Backend {
     /// node in tests).
     fn process(&mut self) -> diagnostics::ProcessFacts {
         diagnostics::ProcessFacts::default()
+    }
+    /// The CPU time the thread running the command has used, in nanoseconds (`cpuNanos` of the
+    /// profiler, 010 FR-015); `None` where the node cannot tell (a node in tests).
+    fn thread_cpu_nanos(&mut self) -> Option<u64> {
+        None
     }
 }
 

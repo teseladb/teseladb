@@ -584,6 +584,9 @@ pub fn aggregate<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
     teseladb_exec::pipeline::optimize::optimize_stages(&stages, a.vars.as_ref())
         .map_err(from_mql)?;
     check_system_namespace(&pipeline, &ns, on_collection)?;
+    if on_collection && ctx.backend.collection(&ns)?.is_some() {
+        pipeline.check_collection_plan().map_err(from_mql)?;
+    }
     let collation = command_collation(&mut *ctx.backend, &ns, on_collection, a.collation.as_ref())?;
     let planned = match on_collection && pipeline.reads_collection() && collation.get().is_none() {
         true => planned_read(ctx, &ns, (&stages, a.vars.as_ref()), a.concern)

@@ -2100,3 +2100,62 @@ fn find_and_modify<B: Backend + ?Sized>(
         trials: Vec::new(),
     })
 }
+
+/// The `planSummary` of a plan: each scan it reads by (`COLLSCAN`, `IXSCAN { a: 1 }`), in the
+/// order of the plan, joined by commas as a `refnode` 9.0.4 writes it in `system.profile`.
+fn plan_summary(s: &Stage) -> String {
+    fn leaves(s: &Stage, out: &mut Vec<String>) {
+        if s.input.is_none() && s.inputs.is_empty() {
+            let text = match (s.name, s.tail.get("keyPattern")) {
+                (name, Some(Value::Document(k))) => {
+                    let bytes = k.to_bytes().unwrap_or_default();
+                    let shown = RawDoc::from_bytes(&bytes)
+                        .map(|r| teseladb_mql::shell(teseladb_bson::RawValue::Document(r)))
+                        .unwrap_or_default();
+                    format!("{name} {shown}")
+                }
+                (name, _) => name.to_owned(),
+            };
+            out.push(text);
+        }
+        if let Some(i) = &s.input {
+            leaves(i, out);
+        }
+        for i in &s.inputs {
+            leaves(i, out);
+        }
+    }
+    let mut out = Vec::new();
+    leaves(s, &mut out);
+    out.join(", ")
+}
+
+/// What the profiler shows of the read of `ns` with parsed filter `shown` that plan `ran` made
+/// (010 FR-015): `planSummary`, `keysExamined`, `docsExamined` and `execStats` of the plan as
+/// it ran. A collection scan's counters are the operation's own reads ([`collscan_report`]).
+pub(crate) fn plan_report(
+    ns: &Namespace,
+    shown: &Document,
+    indexes: &[super::plan_exec::PlanIndex],
+    ran: &super::plan_exec::Ran,
+) -> Document {
+    let stage = planned_access(ns, shown, indexes, ran, true, None);
+    Document::new()
+        .with("planSummary", plan_summary(&stage))
+        .with("keysExamined", long(ran.keys))
+        .with("docsExamined", long(ran.docs))
+        .with("execStats", stage.executed())
+}
+
+/// [`plan_report`] of a collection scan of `ns` with parsed filter `shown` that read `examined`
+/// documents and gave `returned`.
+pub(crate) fn collscan_report(
+    ns: &str,
+    shown: &Document,
+    examined: u64,
+    returned: u64,
+) -> Document {
+    let (db, coll) = ns.split_once('.').unwrap_or((ns, ""));
+    let stage = collscan(&names::ns(db, coll), shown, examined, returned);
+    Document::new().with("planSummary", plan_summary(&stage)).with("execStats", stage.executed())
+}

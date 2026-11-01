@@ -95,6 +95,7 @@ struct Rlimit {
 unsafe extern "C" {
     fn gethostname(name: *mut u8, len: usize) -> i32;
     fn getrusage(who: i32, usage: *mut Rusage) -> i32;
+    fn clock_gettime(clock: i32, tp: *mut ThreadTime) -> i32;
     fn getrlimit(resource: i32, rlim: *mut Rlimit) -> i32;
     fn sysconf(name: i32) -> i64;
     fn uname(buf: *mut os::Utsname) -> i32;
@@ -161,6 +162,23 @@ pub fn max_open_files() -> io::Result<u64> {
     Ok(r.cur)
 }
 
+/// `struct timespec` on the 64-bit hosts TeselaDB runs on.
+#[repr(C)]
+struct ThreadTime {
+    sec: i64,
+    nsec: i64,
+}
+
+/// The CPU time the calling thread has used, in nanoseconds (`clock_gettime(2)` with
+/// `CLOCK_THREAD_CPUTIME_ID`).
+pub fn thread_cpu_nanos() -> io::Result<u64> {
+    let mut t = ThreadTime { sec: 0, nsec: 0 };
+    // SAFETY: `t` is a `struct timespec` valid for writes during the call.
+    check_rc(unsafe { clock_gettime(os::CLOCK_THREAD_CPUTIME_ID, &mut t) })?;
+    let nanos = i128::from(t.sec) * 1_000_000_000 + i128::from(t.nsec);
+    Ok(u64::try_from(nanos).unwrap_or(0))
+}
+
 /// The process's use of the machine since it started.
 pub fn usage() -> io::Result<Usage> {
     // SAFETY: an all-zero `struct rusage` is a valid value of plain integers.
@@ -224,6 +242,22 @@ mod tests {
         assert!(max_open_files().unwrap() >= 16);
         let (name, version) = distribution();
         assert!(!name.is_empty() && !version.is_empty());
+    }
+
+    #[test]
+    fn the_thread_clock_counts_only_work() {
+        let before = thread_cpu_nanos().unwrap();
+        let mut x = 0u64;
+        for i in 0..2_000_000u64 {
+            x = x.wrapping_add(std::hint::black_box(i * i));
+        }
+        assert_ne!(x, 1);
+        let worked = thread_cpu_nanos().unwrap() - before;
+        assert!(worked > 0);
+        // Sleeping takes no CPU time of the thread.
+        let before = thread_cpu_nanos().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(thread_cpu_nanos().unwrap() - before < 20_000_000);
     }
 
     #[test]

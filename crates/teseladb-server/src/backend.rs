@@ -639,6 +639,9 @@ impl Backend for ServerBackend {
             .ok_or_else(unavailable)
     }
 
+    // The dispatcher's wrapper keeps the plan of the operation it runs.
+    fn note_plan(&mut self, _: teseladb_bson::Document) {}
+
     fn end_operation(&mut self) {
         self.release_pins();
     }
@@ -1067,6 +1070,10 @@ impl Backend for ServerBackend {
             Err(e) => e.to_string(),
         };
         crate::log::defer(crate::log::Pending { id, msg: msg.to_owned(), attr });
+    }
+
+    fn thread_cpu_nanos(&mut self) -> Option<u64> {
+        teseladb_sys::host::thread_cpu_nanos().ok()
     }
 
     fn process(&mut self) -> teseladb_wire::commands::diagnostics::ProcessFacts {

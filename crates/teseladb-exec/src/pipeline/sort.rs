@@ -278,3 +278,103 @@ fn key_of(
     };
     Ok((v, through_array))
 }
+
+/// The stages that change each document without adding or removing any, which RefDb moves a
+/// `$limit` in front of.
+const RESHAPING: [&str; 6] =
+    ["$project", "$addFields", "$set", "$unset", "$replaceRoot", "$replaceWith"];
+
+/// The stages after which a pipeline no longer needs the whole document.
+const FINITE: [&str; 11] = [
+    "$project",
+    "$unset",
+    "$replaceRoot",
+    "$replaceWith",
+    "$group",
+    "$bucket",
+    "$bucketAuto",
+    "$sortByCount",
+    "$facet",
+    "$count",
+    "$setWindowFields",
+];
+
+/// The name and specification of a raw stage.
+fn stage_of<'a>(v: &RawValue<'a>) -> Option<(&'a str, RawValue<'a>)> {
+    match v {
+        RawValue::Document(d) => d.iter().next(),
+        _ => None,
+    }
+}
+
+/// Whether `v` names a field path (a string that starts with one `$`).
+fn reads_fields(v: &RawValue<'_>) -> bool {
+    match v {
+        RawValue::String(s) => s.starts_with('$') && !s.starts_with("$$"),
+        RawValue::Document(d) => d.iter().any(|(_, x)| reads_fields(&x)),
+        RawValue::Array(a) => a.iter().any(|x| reads_fields(&x)),
+        _ => false,
+    }
+}
+
+/// Whether `v` reads `{$meta: "randVal"}`.
+fn reads_rand_val(v: &RawValue<'_>) -> bool {
+    match v {
+        RawValue::Document(d) => d.iter().any(|(k, x)| {
+            (k == "$meta" && matches!(x, RawValue::String(RAND_VAL))) || reads_rand_val(&x)
+        }),
+        RawValue::Array(a) => a.iter().any(|x| reads_rand_val(&x)),
+        _ => false,
+    }
+}
+
+/// The `$meta` name of a random value.
+const RAND_VAL: &str = "randVal";
+
+/// The error a `refrouter` 9.0.4 gives when it plans a `$sort` by `{$meta: "randVal"}` whose
+/// pipeline then stops needing the whole document without reading the random value (measured in
+/// `tests/agg/rand_val.out`): RefDb names the sort key `$computed<n>`, after its place in the
+/// sort, and that name is no field path (16410). A `$limit` after the sort (also past stages
+/// that reshape each document) or a later `$sort` takes the sort away, and so does a `$count` or
+/// a grouping that reads no field right after it, and so does any other stage before the sort.
+/// `stages` are a top-level, `$lookup` or `$unionWith` pipeline on a collection that exists;
+/// RefDb plans those of `$facet` apart.
+pub(crate) fn check_random_sort(stages: &[RawValue<'_>]) -> Result<(), MqlError> {
+    // Only a `$sort` that `$match` and `$sort` stages alone precede is planned with the read.
+    for (i, st) in stages.iter().enumerate() {
+        let Some(("$sort", RawValue::Document(spec))) = stage_of(st) else {
+            if matches!(stage_of(st), Some(("$match", _))) {
+                continue;
+            }
+            break;
+        };
+        let Some(n) = spec.iter().position(|(_, v)| {
+            matches!(v, RawValue::Document(m) if matches!(m.get("$meta"), Some(RawValue::String(RAND_VAL))))
+        }) else {
+            continue;
+        };
+        let rest: Vec<(&str, RawValue<'_>)> = stages[i + 1..].iter().filter_map(stage_of).collect();
+        let past_reshaping = rest.iter().find(|(name, _)| !RESHAPING.contains(name));
+        if matches!(past_reshaping, Some(("$limit", _)))
+            || matches!(rest.first(), Some(("$sort", _)))
+        {
+            continue;
+        }
+        let Some(stop) = rest.iter().position(|(name, _)| FINITE.contains(name)) else { continue };
+        let (stop_name, stop_spec) = &rest[stop];
+        let grouping = ["$count", "$group", "$bucket", "$bucketAuto", "$sortByCount"];
+        if stop == 0 && grouping.contains(stop_name) && !reads_fields(stop_spec) {
+            continue;
+        }
+        if rest[..=stop].iter().any(|(_, s)| reads_rand_val(s)) {
+            continue;
+        }
+        return Err(error(
+            FIELD_DOLLAR,
+            format!(
+                "Consider using $getField or $setField for a field path with '.' or '$'. :: caused by :: FieldPath field names may not start with '$', given '$computed{n}'."
+            ),
+        ));
+    }
+    Ok(())
+}

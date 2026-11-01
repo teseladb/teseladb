@@ -221,3 +221,104 @@ fn a_filter_decides_what_is_profiled() {
     let r = run(&mut m, "other", json(r#"{"profile":-1}"#));
     assert_eq!(r.get("was"), Some(&Value::Int32(0)));
 }
+
+/// The fields of a `system.profile` document that TeselaDB has no counterpart of: RefEngine's
+/// locks and queues, the classic engine's planner and the priority port (DV-038).
+const NOT_OURS: [&str; 13] = [
+    "isFromPriorityPortConnection",
+    // The test's connection sends no application name.
+    "appName",
+    "opid",
+    "nBatches",
+    "queryShapeHash",
+    "queryFramework",
+    "planRanker",
+    "locks",
+    "flowControl",
+    "queues",
+    "planningTimeMicros",
+    "totalOplogSlotDurationMicros",
+    "cpuNanos",
+];
+
+/// The plan of each read in `system.profile` (010 FR-015), against what a `refnode` 9.0.4 wrote
+/// on 01-11-2026 (`tests/profile/plans.out`): the fields in its order, the counters of what each
+/// read examined, its `planSummary` and the `execStats` of the plan as it ran. The hashes are
+/// TeselaDB's; `cpuNanos` comes from the server's thread clock, which this node in tests has not.
+#[test]
+fn profiled_reads_show_their_plan() {
+    let mut m = node();
+    run(
+        &mut m,
+        DB,
+        json(r#"{"insert":"c","documents":[{"_id":1,"a":1},{"_id":2,"a":2},{"_id":3,"a":3}]}"#),
+    );
+    run(&mut m, DB, json(r#"{"createIndexes":"c","indexes":[{"key":{"a":1},"name":"a_1"}]}"#));
+    run(&mut m, DB, json(r#"{"profile":2}"#));
+    run(&mut m, DB, json(r#"{"find":"c","filter":{"a":{"$gt":1}}}"#));
+    run(&mut m, DB, json(r#"{"find":"c","filter":{"b":1}}"#));
+    run(&mut m, DB, json(r#"{"update":"c","updates":[{"q":{"_id":2},"u":{"$set":{"b":1}}}]}"#));
+    run(&mut m, DB, json(r#"{"delete":"c","deletes":[{"q":{"a":3},"limit":1}]}"#));
+    run(&mut m, DB, json(r#"{"profile":0}"#));
+    let ours = profiled(&mut m);
+    let theirs: Vec<Document> = include_str!("profile/plans.out")
+        .lines()
+        .map(|l| extjson::parse(l).expect("a profile document"))
+        .filter(|d| d.get("op") != Some(&Value::from("command")))
+        .collect();
+    assert_eq!(ours.len(), theirs.len(), "{ours:?}");
+    for (got, want) in ours.iter().zip(&theirs) {
+        let keys = |d: &Document| -> Vec<String> {
+            d.iter()
+                .map(|(k, _)| k.to_owned())
+                .filter(|k| !NOT_OURS.contains(&k.as_str()))
+                .collect()
+        };
+        let op = got.get("op").cloned();
+        // The write statements of `update` and `delete` keep their own shape (006).
+        if op == Some(Value::from("query")) {
+            assert_eq!(keys(got), keys(want), "{got:?}");
+        }
+        for k in ["keysExamined", "docsExamined"] {
+            let n = |d: &Document| d.get(k).and_then(teseladb_wire::types::number);
+            assert_eq!(n(got), n(want), "{k} of {op:?}: {got:?}");
+        }
+        let stage = |d: &Document| match d.get("execStats") {
+            Some(Value::Document(s)) => s.get("stage").cloned(),
+            _ => None,
+        };
+        if op == Some(Value::from("query")) {
+            assert_eq!(got.get("planSummary"), want.get("planSummary"), "{got:?}");
+            assert_eq!(stage(got), stage(want), "{got:?}");
+            for k in ["queryHash", "planCacheKey", "planCacheShapeHash"] {
+                assert!(
+                    matches!(got.get(k), Some(Value::String(h)) if h.len() == 8),
+                    "{k}: {got:?}"
+                );
+            }
+        }
+    }
+}
+
+/// Passwords stay out of `system.profile` and the log: a `refnode` 9.0.4 profiles no
+/// `createUser` nor `updateUser` (measured 01-11-2026 at level 2), and a slow one's log line
+/// shows `pwd` as `"xxx"`.
+#[test]
+fn passwords_are_neither_profiled_nor_logged() {
+    let mut m = node();
+    // A filter that every operation meets profiles and logs each one.
+    run(&mut m, DB, json(r#"{"profile":2,"filter":{}}"#));
+    run(&mut m, DB, json(r#"{"createUser":"u1","pwd":"secret-1","roles":[]}"#));
+    run(&mut m, DB, json(r#"{"updateUser":"u1","pwd":"secret-2"}"#));
+    run(&mut m, DB, json(r#"{"profile":0,"filter":"unset"}"#));
+    let docs = profiled(&mut m);
+    assert!(docs.is_empty(), "{docs:?}");
+    let logged = format!("{:?}", m.logged);
+    assert!(!logged.contains("secret-"), "{logged}");
+    let slow: Vec<&Document> =
+        m.logged.iter().filter(|(id, _, _)| *id == SLOW_QUERY_ID).map(|(_, _, a)| a).collect();
+    assert_eq!(slow.len(), 2, "{logged}");
+    for a in slow {
+        assert_eq!(field(a, "command.pwd"), &Value::from("xxx"), "{a:?}");
+    }
+}

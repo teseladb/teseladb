@@ -251,6 +251,8 @@ impl Backend for Mem {
         Ok(self.replicas as usize)
     }
 
+    fn note_plan(&mut self, _: Document) {}
+
     fn end_operation(&mut self) {
         self.ended += 1;
     }
