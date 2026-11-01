@@ -1,0 +1,264 @@
+//! The documents of a search index in memory (011 FR-009, FR-016): each string field analyzed
+//! by its mapping, its postings and its lengths, and the `text` operator scored as `refsearch`
+//! 1.70.6 scores it. Measured on a 9.0.4 replica set (01-11-2026): a term scores
+//! `w − w / (1 + freq · n)` in 32-bit floats, with `w = boost · idf` and
+//! `n = 1 / (k1 · (1 − b + b · dl / avgdl))`, `dl` the field's length through its norm byte and
+//! `avgdl` the exact mean length as a 32-bit float; the terms and paths of a query add up in their
+//! order.
+
+use std::collections::BTreeMap;
+
+use teseladb_bson::{Document, Value};
+
+use crate::analysis::analyzer::Analyzer;
+use crate::definition::{DEFAULT_ANALYZER, Definition, Dynamic, FieldMapping, Mapping};
+use crate::query::bm25::{Bm25, idf};
+use crate::segment::norms;
+
+/// A string field of the index: the postings of each term (document number to positions) and the
+/// length of the field in each document.
+#[derive(Clone, Debug, Default)]
+struct TextField {
+    postings: BTreeMap<String, BTreeMap<u32, Vec<u32>>>,
+    lengths: BTreeMap<u32, u32>,
+    /// Query analyzer.
+    search_analyzer: String,
+}
+
+/// Why a document or a query cannot be analyzed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IndexError {
+    /// An analyzer the definition names and this engine cannot build.
+    Analyzer(String),
+    /// A regular expression of an analyzer ran out of steps.
+    Analysis,
+}
+
+/// The documents of one search index.
+#[derive(Clone, Debug)]
+pub struct MemIndex {
+    definition: Definition,
+    keys: Vec<Option<Vec<u8>>>,
+    by_key: BTreeMap<Vec<u8>, u32>,
+    fields: BTreeMap<String, TextField>,
+}
+
+/// A document the index found, with its score.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Hit {
+    /// Key of the document.
+    pub key: Vec<u8>,
+    /// Score, a 32-bit float as `refsearch` gives it.
+    pub score: f32,
+}
+
+/// The built-in analyzer called `name`.
+fn analyzer(name: &str) -> Result<Analyzer, IndexError> {
+    Analyzer::builtin(name).ok_or_else(|| IndexError::Analyzer(name.to_owned()))
+}
+
+impl MemIndex {
+    /// An empty index of `definition`.
+    pub fn new(definition: Definition) -> MemIndex {
+        MemIndex { definition, keys: Vec::new(), by_key: BTreeMap::new(), fields: BTreeMap::new() }
+    }
+
+    /// The index analyzer of the fields without their own.
+    fn index_analyzer(&self) -> &str {
+        self.definition.analyzer.as_deref().unwrap_or(DEFAULT_ANALYZER)
+    }
+
+    /// Adds or replaces the document of `key`.
+    pub fn put(&mut self, key: &[u8], doc: &Document) -> Result<(), IndexError> {
+        self.delete(key);
+        let id = u32::try_from(self.keys.len()).unwrap_or(u32::MAX);
+        self.keys.push(Some(key.to_vec()));
+        self.by_key.insert(key.to_vec(), id);
+        let mut texts: Vec<(String, String, String, String)> = Vec::new();
+        let mapping = self.definition.mappings.clone();
+        self.collect(&mapping, "", doc, &mut texts);
+        for (path, analyzer_name, search_name, text) in texts {
+            let tokens =
+                analyzer(&analyzer_name)?.analyze(&text).map_err(|_| IndexError::Analysis)?;
+            let field = self.fields.entry(path).or_insert_with(|| TextField {
+                search_analyzer: search_name.clone(),
+                ..TextField::default()
+            });
+            let base = field.lengths.get(&id).copied().unwrap_or(0);
+            for t in &tokens {
+                field
+                    .postings
+                    .entry(t.text.clone())
+                    .or_default()
+                    .entry(id)
+                    .or_default()
+                    .push(base + t.position);
+            }
+            let len = tokens.iter().map(|t| t.position + 1).max().unwrap_or(0);
+            *field.lengths.entry(id).or_insert(0) += len;
+        }
+        Ok(())
+    }
+
+    /// The string values of `doc` that `mapping` indexes, as (path, index analyzer, query
+    /// analyzer, text).
+    fn collect(
+        &self,
+        mapping: &Mapping,
+        prefix: &str,
+        doc: &Document,
+        out: &mut Vec<(String, String, String, String)>,
+    ) {
+        for (name, value) in doc.iter() {
+            let path = if prefix.is_empty() { name.to_owned() } else { format!("{prefix}.{name}") };
+            match mapping.fields.iter().find(|(n, _)| n == name) {
+                Some((_, types)) => {
+                    for t in types {
+                        self.collect_typed(t, &path, value, out);
+                    }
+                }
+                None if mapping.dynamic == Dynamic::On => self.collect_dynamic(&path, value, out),
+                None => {}
+            }
+        }
+    }
+
+    fn collect_dynamic(
+        &self,
+        path: &str,
+        value: &Value,
+        out: &mut Vec<(String, String, String, String)>,
+    ) {
+        let a = self.index_analyzer().to_owned();
+        let s = self.definition.search_analyzer.clone().unwrap_or_else(|| a.clone());
+        match value {
+            Value::String(text) => out.push((path.to_owned(), a, s, text.clone())),
+            Value::Array(items) => items.iter().for_each(|v| self.collect_dynamic(path, v, out)),
+            Value::Document(d) => {
+                let dynamic = Mapping {
+                    dynamic: Dynamic::On,
+                    fields: Vec::new(),
+                    stored_source: crate::definition::StoredSource::None,
+                };
+                self.collect(&dynamic, path, d, out);
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_typed(
+        &self,
+        t: &FieldMapping,
+        path: &str,
+        value: &Value,
+        out: &mut Vec<(String, String, String, String)>,
+    ) {
+        match (t, value) {
+            (FieldMapping::String(f), Value::String(text)) => {
+                let a = f.analyzer.clone().unwrap_or_else(|| self.index_analyzer().to_owned());
+                let s = f
+                    .search_analyzer
+                    .clone()
+                    .or_else(|| f.analyzer.clone())
+                    .or_else(|| self.definition.search_analyzer.clone())
+                    .unwrap_or_else(|| a.clone());
+                out.push((path.to_owned(), a, s, text.clone()));
+            }
+            (FieldMapping::String(_) | FieldMapping::Document(_), Value::Array(items)) => {
+                items.iter().for_each(|v| self.collect_typed(t, path, v, out));
+            }
+            (FieldMapping::Document(m), Value::Document(d)) => self.collect(m, path, d, out),
+            _ => {}
+        }
+    }
+
+    /// Removes the document of `key`, if the index has it.
+    pub fn delete(&mut self, key: &[u8]) {
+        let Some(id) = self.by_key.remove(key) else { return };
+        if let Some(k) = self.keys.get_mut(id as usize) {
+            *k = None;
+        }
+        for field in self.fields.values_mut() {
+            field.lengths.remove(&id);
+            field.postings.retain(|_, docs| {
+                docs.remove(&id);
+                !docs.is_empty()
+            });
+        }
+    }
+
+    /// Number of documents indexed.
+    pub fn len(&self) -> usize {
+        self.by_key.len()
+    }
+
+    /// Whether the index has no documents.
+    pub fn is_empty(&self) -> bool {
+        self.by_key.is_empty()
+    }
+
+    /// The indexed string paths that `pattern` names: a path, or `*` for all of them.
+    pub fn paths(&self, pattern: &str) -> Vec<String> {
+        if pattern == "*" {
+            return self.fields.keys().cloned().collect();
+        }
+        self.fields.keys().filter(|p| *p == pattern).cloned().collect()
+    }
+
+    /// The documents with a term of `query` in one of `paths`, each with the sum of its term
+    /// scores (`boost` multiplies each term's weight).
+    pub fn text(
+        &self,
+        query: &[String],
+        paths: &[String],
+        boost: f32,
+    ) -> Result<Vec<Hit>, IndexError> {
+        let mut scores: BTreeMap<u32, f32> = BTreeMap::new();
+        for path in paths {
+            let Some(field) = self.fields.get(path) else { continue };
+            let a = analyzer(&field.search_analyzer)?;
+            for q in query {
+                for t in a.analyze(q).map_err(|_| IndexError::Analysis)? {
+                    for (doc, score) in field.term_scores(&t.text, boost) {
+                        let s = scores.entry(doc).or_insert(0.0);
+                        *s += score;
+                    }
+                }
+            }
+        }
+        let mut hits: Vec<Hit> = scores
+            .into_iter()
+            .filter_map(|(doc, score)| {
+                let key = self.keys.get(doc as usize)?.clone()?;
+                Some(Hit { key, score })
+            })
+            .collect();
+        hits.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.key.cmp(&b.key)));
+        Ok(hits)
+    }
+}
+
+impl TextField {
+    /// The score of each document with `term`.
+    fn term_scores(&self, term: &str, boost: f32) -> Vec<(u32, f32)> {
+        let Some(docs) = self.postings.get(term) else { return Vec::new() };
+        let n = self.lengths.len() as u64;
+        let total: u64 = self.lengths.values().map(|&l| u64::from(l)).sum();
+        let avg = if n == 0 { 1.0f32 } else { (total as f64 / n as f64) as f32 };
+        let weight = boost * idf(n, docs.len() as u64) as f32;
+        let Bm25 { k1, b } = Bm25::DEFAULT;
+        docs.iter()
+            .map(|(&doc, positions)| {
+                let len = self.lengths.get(&doc).copied().unwrap_or(0);
+                let dl = norms::decode(norms::encode(len)) as f32;
+                let inverse =
+                    (1.0 / (k1 * ((1.0 - b) + b * f64::from(dl) / f64::from(avg)))) as f32;
+                let freq = positions.len() as f32;
+                (doc, weight - weight / (1.0 + freq * inverse))
+            })
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests;
