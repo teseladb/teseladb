@@ -161,6 +161,10 @@ pub struct Ended<'a> {
     pub reply: Option<&'a Result<Document, CommandError>>,
     /// How long it ran, in microseconds.
     pub micros: u64,
+    /// The CPU time its thread used, in nanoseconds, when the node can tell.
+    pub cpu_nanos: Option<u64>,
+    /// What it read and the plan of its read.
+    pub report: crate::ops::OpReport,
     /// The client's address and application.
     pub client: Option<&'a str>,
     /// `client.application.name`.
@@ -169,32 +173,172 @@ pub struct Ended<'a> {
     pub user: Option<String>,
 }
 
-/// The commands the profiler never records: itself and the handshake.
-const NOT_PROFILED: [&str; 4] = [PROFILE, "hello", "isMaster", "ismaster"];
+/// The commands the profiler never records: itself, the handshake, and those that carry a
+/// password (a `refnode` 9.0.4 profiles no `createUser` nor `updateUser`, measured 01-11-2026).
+const NOT_PROFILED: [&str; 9] = [
+    PROFILE,
+    "hello",
+    "isMaster",
+    "ismaster",
+    "createUser",
+    "updateUser",
+    "authenticate",
+    "saslStart",
+    "saslContinue",
+];
 
-/// The document of `e` as `system.profile` and the slow query log write it.
+/// The commands whose `pwd` the slow query log shows as [`HIDDEN_PASSWORD`], as a `refnode`
+/// 9.0.4 writes them.
+const WITH_PASSWORD: [&str; 2] = ["createUser", "updateUser"];
+const HIDDEN_PASSWORD: &str = "xxx";
+
+/// The commands of op `command` that read documents.
+const READING_COMMANDS: [&str; 5] =
+    ["aggregate", "count", "distinct", "findAndModify", "findandmodify"];
+
+/// Whether operation `op` of command `name` reads documents, and so has the counters and plan of
+/// its read.
+fn reads(op: &str, name: &str) -> bool {
+    match op {
+        "query" | "getmore" | "update" | "remove" => true,
+        "command" => READING_COMMANDS.contains(&name),
+        _ => false,
+    }
+}
+
+/// Command `cmd` as the slow query log writes it, without its password.
+fn logged_command(cmd: &Document) -> Document {
+    let name = cmd.iter().next().map_or("", |(k, _)| k);
+    if !WITH_PASSWORD.contains(&name) {
+        return cmd.clone();
+    }
+    let mut out = Document::new();
+    for (k, v) in cmd.iter() {
+        let v = if k == "pwd" { Value::from(HIDDEN_PASSWORD) } else { v.clone() };
+        out.push(k, v);
+    }
+    out
+}
+
+/// What the profiler shows of the read of `e`, in the order of a `refnode` 9.0.4 (measured
+/// 01-11-2026): the hashes of its shape, then after the times its `planSummary` and the
+/// `execStats` of the plan as it ran. A read the planner left to a collection scan shows a
+/// `COLLSCAN` with the documents it read.
+struct ReadParts {
+    hashes: Document,
+    summary: Option<Value>,
+    stats: Option<Value>,
+}
+
+fn read_parts(e: &Ended<'_>, returned: u64) -> ReadParts {
+    let mut parts = ReadParts { hashes: Document::new(), summary: None, stats: None };
+    let Some(plan) = &e.report.plan else {
+        if e.report.docs > 0 {
+            let r =
+                super::explain::collscan_report(e.ns, &Document::new(), e.report.docs, returned);
+            parts.summary = r.get("planSummary").cloned();
+            parts.stats = r.get("execStats").cloned();
+        }
+        return parts;
+    };
+    for k in ["planCacheShapeHash", "queryHash", "planCacheKey"] {
+        if let Some(v) = plan.get(k) {
+            parts.hashes.push(k, v.clone());
+        }
+    }
+    match (plan.get("planSummary"), plan.get("filter")) {
+        (Some(summary), _) => {
+            parts.summary = Some(summary.clone());
+            parts.stats = plan.get("execStats").cloned();
+        }
+        (None, Some(Value::Document(filter))) => {
+            let r = super::explain::collscan_report(e.ns, filter, e.report.docs, returned);
+            parts.summary = r.get("planSummary").cloned();
+            parts.stats = r.get("execStats").cloned();
+        }
+        (None, _) => {}
+    }
+    parts
+}
+
+/// The counters of what `e` read: the planner's for a plan of an index, the operation's own
+/// reads otherwise. A write by `_id` reads its documents in their range while it writes them,
+/// by their key, which is their `_id`: each document it matched is one key and one document
+/// examined, as the `EXPRESS` plan of a `refnode` 9.0.4 counts them (measured).
+fn examined(e: &Ended<'_>) -> (Value, Value) {
+    let own = |n: u64| Value::Int64(i64::try_from(n).unwrap_or(i64::MAX));
+    if let Some(p) = e.report.plan.as_ref().filter(|p| p.get("planSummary").is_some()) {
+        return (
+            p.get("keysExamined").cloned().unwrap_or(own(0)),
+            p.get("docsExamined").cloned().unwrap_or(own(0)),
+        );
+    }
+    let (keys, docs) = (e.report.keys, e.report.docs);
+    if keys + docs == 0
+        && matches!(e.op, "update" | "remove")
+        && let Some(Ok(reply)) = e.reply
+        && let Some(n) = reply.get("n").and_then(crate::types::number)
+    {
+        let n = own(n as u64);
+        return (n.clone(), n);
+    }
+    (own(keys), own(docs))
+}
+
+/// The document of `e` as `system.profile` and the slow query log write it, with the fields of a
+/// `refnode` 9.0.4 that TeselaDB has (measured 01-11-2026). `locks`, `flowControl`, `queues`,
+/// `planRanker`, `queryFramework`, `planningTimeMicros` and `isFromPriorityPortConnection` are
+/// RefEngine's and the classic engine's and have no counterpart here (DV-038).
 fn describe(e: &Ended<'_>, now_ms: i64) -> Document {
     let mut d =
         Document::new().with("op", e.op).with("ns", e.ns).with("command", e.command.clone());
-    if let Some(Ok(reply)) = e.reply {
-        if let Some(Value::Document(c)) = reply.get("cursor") {
-            let batch = c.get("firstBatch").or_else(|| c.get("nextBatch"));
-            if let Some(Value::Array(items)) = batch {
-                d.push("nreturned", items.len() as i32);
-            }
-            let exhausted = matches!(c.get("id"), Some(Value::Int64(0)));
-            d.push("cursorExhausted", exhausted);
-        }
-        match (e.op, reply.get("n")) {
+    let reply = match e.reply {
+        Some(Ok(r)) => Some(r),
+        _ => None,
+    };
+    let cursor = match reply.and_then(|r| r.get("cursor")) {
+        Some(Value::Document(c)) => Some(c),
+        _ => None,
+    };
+    let returned =
+        cursor.and_then(|c| c.get("firstBatch").or_else(|| c.get("nextBatch"))).map(|b| match b {
+            Value::Array(items) => items.len(),
+            _ => 0,
+        });
+    let name = e.command.iter().next().map_or("", |(k, _)| k);
+    let reading = reads(e.op, name);
+    let parts = read_parts(e, returned.unwrap_or(0) as u64);
+    if reading {
+        let (keys, docs) = examined(e);
+        d.push("keysExamined", keys);
+        d.push("docsExamined", docs);
+    }
+    if let Some(c) = cursor {
+        d.push("cursorExhausted", matches!(c.get("id"), Some(Value::Int64(0))));
+    }
+    if let Some(r) = reply {
+        match (e.op, r.get("n")) {
             ("insert", Some(n)) => d.push("ninserted", n.clone()),
             ("remove", Some(n)) => d.push("ndeleted", n.clone()),
             ("update", Some(n)) => d.push("nMatched", n.clone()),
             _ => {}
         }
-        if let Some(n) = reply.get("nModified") {
+        if let Some(n) = r.get("nModified") {
             d.push("nModified", n.clone());
         }
-        let size = reply.to_bytes().map_or(0, |b| b.len());
+    }
+    if reading {
+        // TeselaDB never yields an operation.
+        d.push("numYield", 0);
+    }
+    if let Some(n) = returned {
+        d.push("nreturned", i32::try_from(n).unwrap_or(i32::MAX));
+    }
+    for (k, v) in parts.hashes.iter() {
+        d.push(k, v.clone());
+    }
+    if let Some(r) = reply {
+        let size = r.to_bytes().map_or(0, |b| b.len());
         d.push("responseLength", i32::try_from(size).unwrap_or(i32::MAX));
     }
     if let Some(Err(err)) = e.reply {
@@ -204,8 +348,17 @@ fn describe(e: &Ended<'_>, now_ms: i64) -> Document {
         d.push("errCode", err.code.code);
     }
     d.push("protocol", "op_msg");
+    if let Some(cpu) = e.cpu_nanos {
+        d.push("cpuNanos", i64::try_from(cpu).unwrap_or(i64::MAX));
+    }
     d.push("millis", i64::try_from(e.micros / 1000).unwrap_or(i64::MAX));
     d.push("micros", i64::try_from(e.micros).unwrap_or(i64::MAX));
+    if let Some(summary) = parts.summary {
+        d.push("planSummary", summary);
+    }
+    if let Some(stats) = parts.stats {
+        d.push("execStats", stats);
+    }
     d.push("ts", Value::DateTime(now_ms));
     d.push("client", e.client.unwrap_or_default());
     if let Some(a) = e.app_name {
@@ -231,7 +384,8 @@ fn matches(f: &Document, doc: &Document) -> bool {
 /// `sampleRate`) say so, and logs it when it is slow.
 pub fn after_command<B: Backend + ?Sized>(backend: &mut B, shared: &super::Shared, e: &Ended<'_>) {
     let name = e.command.iter().next().map_or("", |(k, _)| k);
-    if NOT_PROFILED.contains(&name) {
+    // A password is never profiled; the slow query log hides it.
+    if NOT_PROFILED.contains(&name) && !WITH_PASSWORD.contains(&name) {
         return;
     }
     let (level, filter, slowms, rate) = {
@@ -251,9 +405,12 @@ pub fn after_command<B: Backend + ?Sized>(backend: &mut B, shared: &super::Share
         let attr = Document::new()
             .with("type", "command")
             .with("ns", e.ns)
-            .with("command", e.command.clone())
+            .with("command", logged_command(e.command))
             .with("durationMillis", millis);
         backend.log_slow_query(&attr);
+    }
+    if NOT_PROFILED.contains(&name) {
+        return;
     }
     let profiled = match level {
         2 => filter.as_ref().is_none_or(|f| matches(f, &doc)),

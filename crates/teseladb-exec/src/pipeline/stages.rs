@@ -364,13 +364,19 @@ impl Sample {
     }
 
     /// `size` documents of `docs` at random, in random order.
-    pub fn run(&self, mut docs: Vec<Document>, env: &dyn Env) -> Vec<Document> {
-        for i in (1..docs.len()).rev() {
-            let j = ((env.random() * (i + 1) as f64) as usize).min(i);
-            docs.swap(i, j);
-        }
-        docs.truncate(self.size);
-        docs
+    pub fn run(&self, docs: Vec<Document>, env: &dyn Env) -> Vec<Document> {
+        self.pick(docs.len(), env).into_iter().map(|(i, _)| docs[i].clone()).collect()
+    }
+
+    /// The places of the documents a sample of `n` takes and the random value of each, as
+    /// RefDb samples: each document gets a random value, and the `size` largest go first,
+    /// largest first (measured on a `refrouter` 9.0.4: `{$meta: "randVal"}` reads that value and
+    /// descends through the sample).
+    pub(crate) fn pick(&self, n: usize, env: &dyn Env) -> Vec<(usize, f64)> {
+        let mut keyed: Vec<(usize, f64)> = (0..n).map(|i| (i, env.random())).collect();
+        keyed.sort_by(|a, b| b.1.total_cmp(&a.1));
+        keyed.truncate(self.size);
+        keyed
     }
 }
 
@@ -596,6 +602,8 @@ pub struct Lookup {
     as_path: Vec<String>,
     lets: Vec<(String, Expr)>,
     pipeline: Option<Pipeline>,
+    /// The error its pipeline gives when it first runs (metadata no stage gives).
+    joined_error: Option<MqlError>,
 }
 
 impl Lookup {
@@ -652,17 +660,29 @@ impl Lookup {
         check_path(&as_name)?;
         let inner = ctx.with(lets.iter().map(|(n, _)| n.as_str()));
         super::out_merge::refuse_in(stages.as_deref().unwrap_or_default(), "$lookup")?;
+        let mut joined_error = None;
         let pipeline = match (stages, &from) {
-            (Some(s), Some(_)) => Some(Pipeline::parse(&s, &inner)?),
-            (Some(s), None) => Some(Pipeline::parse_from_documents(&s, &inner, "$lookup")?),
+            (Some(s), Some(_)) => {
+                joined_error = super::meta::check_joined(&s)
+                    .and_then(|()| super::sort::check_random_sort(&s))
+                    .err();
+                Some(Pipeline::parse(&s, &inner)?)
+            }
+            (Some(s), None) => {
+                super::meta::check_available(&s)?;
+                Some(Pipeline::parse_from_documents(&s, &inner, "$lookup")?)
+            }
             (None, _) => None,
         };
         let as_path = as_name.split('.').map(str::to_owned).collect();
-        Ok(Lookup { from, local, foreign, as_path, lets, pipeline })
+        Ok(Lookup { from, local, foreign, as_path, lets, pipeline, joined_error })
     }
 
     /// Each document with the documents it joins.
     pub fn run(&self, docs: Vec<Document>, env: &dyn Env) -> Result<Vec<Document>, MqlError> {
+        if let Some(e) = self.joined_error.as_ref().filter(|_| !docs.is_empty()) {
+            return Err(e.clone());
+        }
         let foreign_docs = match &self.from {
             Some(f) => env.collection(f)?,
             None => Vec::new(),
@@ -864,15 +884,19 @@ fn collect_local(v: &Value, segs: &[&str], out: &mut Vec<Value>) {
 pub struct UnionWith {
     coll: Option<String>,
     pipeline: Pipeline,
+    /// The error its pipeline gives when it runs (metadata no stage gives).
+    joined_error: Option<MqlError>,
 }
 
 impl UnionWith {
     /// Reads `"coll"` or `{coll, pipeline}`.
     pub fn parse(v: RawValue<'_>, ctx: &Ctx) -> Result<UnionWith, MqlError> {
         match v {
-            RawValue::String(s) => {
-                Ok(UnionWith { coll: Some(s.to_owned()), pipeline: Pipeline::default() })
-            }
+            RawValue::String(s) => Ok(UnionWith {
+                coll: Some(s.to_owned()),
+                pipeline: Pipeline::default(),
+                joined_error: None,
+            }),
             RawValue::Document(d) => {
                 let (mut coll, mut stages) = (None, Vec::new());
                 for (k, x) in d.iter() {
@@ -892,7 +916,16 @@ impl UnionWith {
                     Some(_) => Pipeline::parse(&stages, ctx)?,
                     None => Pipeline::parse_from_documents(&stages, ctx, "$unionWith")?,
                 };
-                Ok(UnionWith { coll, pipeline })
+                let joined_error = match coll {
+                    Some(_) => super::meta::check_joined(&stages)
+                        .and_then(|()| super::sort::check_random_sort(&stages))
+                        .err(),
+                    None => {
+                        super::meta::check_available(&stages)?;
+                        None
+                    }
+                };
+                Ok(UnionWith { coll, pipeline, joined_error })
             }
             _ => Err(error(
                 FAILED_TO_PARSE,
@@ -906,6 +939,9 @@ impl UnionWith {
 
     /// `docs` and then the results of the other collection's pipeline.
     pub fn run(&self, mut docs: Vec<Document>, env: &dyn Env) -> Result<Vec<Document>, MqlError> {
+        if let Some(e) = &self.joined_error {
+            return Err(e.clone());
+        }
         let input = match &self.coll {
             Some(c) => env.collection(c)?,
             None => Vec::new(),

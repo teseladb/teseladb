@@ -888,10 +888,35 @@ pub(crate) fn planned_documents<B: Backend + ?Sized>(
     note: Option<CacheNote<'_>>,
 ) -> Result<Option<Vec<Vec<u8>>>, CommandError> {
     let indexes = plan_indexes(backend, coll)?;
+    // The hashes of the read's shape, as `$planCacheStats` shows them, for the profiler.
+    let hashes = note.as_ref().map(|n| {
+        let ns = super::names::full(n.ns);
+        let hash = super::plan_cache::hex(&n.shape);
+        Document::new()
+            .with("planCacheShapeHash", hash.clone())
+            .with("queryHash", hash)
+            .with("planCacheKey", super::plan_cache::hex(&format!("{}{ns}", n.shape)))
+    });
+    let report = |plan: Option<Document>| {
+        let mut d = hashes.clone().unwrap_or_default();
+        d.push("filter", read.parsed.clone());
+        for (k, v) in plan.unwrap_or_default().iter() {
+            d.push(k, v.clone());
+        }
+        d
+    };
     if indexes.is_empty() {
+        backend.note_plan(report(None));
         return Ok(None);
     }
-    let Some(chosen) = choose(backend, coll, &indexes, read)? else { return Ok(None) };
+    let Some(chosen) = choose(backend, coll, &indexes, read)? else {
+        backend.note_plan(report(None));
+        return Ok(None);
+    };
+    if let Some(n) = &note {
+        let plan = super::explain::plan_report(n.ns, read.parsed, &indexes, &chosen.winner);
+        backend.note_plan(report(Some(plan)));
+    }
     if let Some(n) = note
         && let Some(mut learned) =
             super::explain::learned(n.ns, read.parsed, &indexes, &chosen, (n.from, n.shape))

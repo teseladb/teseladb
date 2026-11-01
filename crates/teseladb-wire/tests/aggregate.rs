@@ -209,6 +209,82 @@ fn coll_stats_has_refdb_shape() {
     }
 }
 
+/// The bytes of a size field, whatever its numeric type.
+fn bytes_of(v: &Value) -> u64 {
+    match v {
+        Value::Int32(n) => u64::try_from(*n).expect("a size"),
+        Value::Int64(n) => u64::try_from(*n).expect("a size"),
+        Value::Double(x) => *x as u64,
+        other => panic!("{other:?} is no size"),
+    }
+}
+
+/// Checks the index sizes of `stats` (a `collStats` reply or `storageStats`) against RefDb's
+/// `want`: the same indexes in the same order, each in whole 4 KiB blocks, and totals that add up.
+/// The sizes themselves are TeselaDB's (DV-037).
+fn check_index_sizes(got: &Document, want: &Document, what: &str) {
+    let (Value::Document(g), Value::Document(w)) =
+        (field(got, "indexSizes"), field(want, "indexSizes"))
+    else {
+        panic!("{what}: {got:?}")
+    };
+    assert_eq!(keys(g), keys(w), "{what}: indexSizes");
+    assert_eq!(field(got, "nindexes"), field(want, "nindexes"), "{what}: nindexes");
+    let sizes: Vec<u64> = g.iter().map(|(_, v)| bytes_of(v)).collect();
+    assert!(sizes.iter().all(|s| *s >= 4096 && s % 4096 == 0), "{what}: {sizes:?}");
+    assert_eq!(bytes_of(field(got, "totalIndexSize")), sizes.iter().sum::<u64>(), "{what}");
+    assert_eq!(
+        bytes_of(field(got, "totalSize")),
+        bytes_of(field(got, "storageSize")) + bytes_of(field(got, "totalIndexSize")),
+        "{what}"
+    );
+}
+
+/// `collStats`, `$collStats` and `dbStats` count and measure every index (010 T035, FR-018),
+/// against a `refrouter` 9.0.4 (`tests/aggregate/collstats_indexes.out`, without `refengine` and
+/// `indexDetails`, DV-038).
+#[test]
+fn coll_stats_measure_every_index() {
+    let mut m = Mem::new();
+    load(&mut m, "c", C);
+    load(&mut m, "o", O);
+    for line in include_str!("aggregate/collstats_indexes.out").lines().filter(|l| !l.is_empty()) {
+        let (cmd, want) = line.split_once('\t').expect("a command and its reply");
+        let want = extjson::parse(want.strip_prefix("=> ").expect("a reply")).expect("reply");
+        let got = m.run(DB, extjson::parse(cmd).expect("command"));
+        assert_eq!(got.get("ok"), Some(&Value::Double(1.0)), "{cmd}: {got:?}");
+        if cmd.starts_with("{\"collStats\"") {
+            check_index_sizes(&got, &want, cmd);
+        } else if cmd.starts_with("{\"aggregate\"") {
+            let (got_first, want_first) = (first_doc(&got), first_doc(&want));
+            let (Value::Document(g), Value::Document(w)) =
+                (field(&got_first, "storageStats"), field(&want_first, "storageStats"))
+            else {
+                panic!("{cmd}: {got:?}")
+            };
+            check_index_sizes(g, w, cmd);
+        } else if cmd.starts_with("{\"dbStats\"") {
+            assert_eq!(field(&got, "indexes"), field(&want, "indexes"), "{cmd}");
+            let c = m.run(DB, doc(&[("collStats", "c".into())]));
+            let o = m.run(DB, doc(&[("collStats", "o".into())]));
+            let total =
+                bytes_of(field(&c, "totalIndexSize")) + bytes_of(field(&o, "totalIndexSize"));
+            assert_eq!(bytes_of(field(&got, "indexSize")), total, "{cmd}");
+        }
+    }
+    // The sizes are the stored keys: more documents make a secondary index bigger.
+    let before = m.run(DB, doc(&[("collStats", "c".into())]));
+    let many: Vec<Value> = (100..2100)
+        .map(|i| Value::Document(Document::new().with("_id", i).with("g", format!("value-{i:06}"))))
+        .collect();
+    let r = m.run(DB, Document::new().with("insert", "c").with("documents", Value::Array(many)));
+    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+    let after = m.run(DB, doc(&[("collStats", "c".into())]));
+    let size = |r: &Document, name: &str| bytes_of(field(r, &format!("indexSizes.{name}")));
+    assert!(size(&after, "g_1") > size(&before, "g_1"), "{before:?}\n{after:?}");
+    assert!(size(&after, "_id_") > size(&before, "_id_"), "{before:?}\n{after:?}");
+}
+
 /// The value at a dotted `path` of `d`.
 fn lookup(d: &Document, path: &str) -> Option<Value> {
     let mut cur = Value::Document(d.clone());
@@ -502,4 +578,41 @@ fn cluster_catalog_answers_as_refdb() {
 #[test]
 fn array_sorts_answer_as_refdb() {
     check_files(&[include_str!("aggregate/array_sort.out")]);
+}
+
+/// `{$meta: "recordId"}` and `showRecordId` (DV-047): a `refrouter` 9.0.4 gives each document the
+/// 64-bit identifier of its RefEngine record (measured 01-11-2026: 1 to 8 in insertion order, in
+/// `find` and `aggregate`, and `$recordId` with `showRecordId`). A TeselaDB document has no record
+/// identifier, only its key in the range, so `find`, its projection and every stage leave the
+/// field out, the same in each.
+#[test]
+fn record_ids_are_left_out_everywhere() {
+    let mut m = Mem::new();
+    load(&mut m, "c", C);
+    for cmd in [
+        r#"{"aggregate":"c","pipeline":[{"$project":{"r":{"$meta":"recordId"}}}],"cursor":{}}"#,
+        r#"{"aggregate":"c","pipeline":[{"$addFields":{"r":{"$meta":"recordId"}}}],"cursor":{}}"#,
+        r#"{"find":"c","projection":{"r":{"$meta":"recordId"}}}"#,
+        r#"{"find":"c","projection":{"_id":1,"r":{"$meta":"recordId"}}}"#,
+        r#"{"find":"c","showRecordId":true}"#,
+    ] {
+        let r = m.run(DB, extjson::parse(cmd).expect("command"));
+        assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{cmd}: {r:?}");
+        let Value::Array(batch) = field(&r, "cursor.firstBatch") else { panic!("{cmd}: {r:?}") };
+        assert_eq!(batch.len(), 8, "{cmd}: {r:?}");
+        for d in batch {
+            let Value::Document(d) = d else { panic!("{d:?}") };
+            assert!(d.get("r").is_none() && d.get("$recordId").is_none(), "{cmd}: {d:?}");
+        }
+    }
+}
+
+/// Metadata no stage gives, read first in a pipeline (`tests/aggregate/meta_sort.out`, measured
+/// on a `refrouter` 9.0.4 on 01-11-2026): a `$sort` that only `$match` and `$sort` precede fails
+/// with 40218 behind the words of the query system's `DISTINCT_SCAN` check, any other stage
+/// without them, and the pipeline of a `$lookup` or `$unionWith` when it runs (an executor error,
+/// none for a `$lookup` without input).
+#[test]
+fn missing_metadata_first_answers_as_refdb() {
+    check_files(&[include_str!("aggregate/meta_sort.out")]);
 }

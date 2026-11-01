@@ -76,6 +76,8 @@ impl Backend for Bare {
     fn voters(&mut self, _start: &[u8], _end: &[u8]) -> Result<usize, CommandError> {
         Ok(1)
     }
+    fn note_plan(&mut self, _: teseladb_bson::Document) {}
+
     fn end_operation(&mut self) {}
     fn changes(
         &mut self,

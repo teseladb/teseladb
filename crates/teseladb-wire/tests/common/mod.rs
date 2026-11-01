@@ -141,6 +141,8 @@ pub struct Mem {
     pub uncertain_more: Vec<Hlc>,
     /// Pauses a waiting command takes before its time runs out (none: it runs out at once).
     pub pauses_left: usize,
+    /// The next change stream read fails with this error (014).
+    pub fail_changes: Option<CommandError>,
     /// The next resolutions of intents fail with this error.
     pub resolve_errors: Vec<teseladb_range::host::RangeError>,
     /// A commit's wait for the clock runs out.
@@ -265,6 +267,8 @@ impl Backend for Mem {
         Ok(self.replicas as usize)
     }
 
+    fn note_plan(&mut self, _: Document) {}
+
     fn end_operation(&mut self) {
         self.ended += 1;
     }
@@ -275,6 +279,9 @@ impl Backend for Mem {
         end: &[u8],
         from: Hlc,
     ) -> Result<teseladb_wire::commands::ChangeBatch, CommandError> {
+        if let Some(e) = self.fail_changes.take() {
+            return Err(e);
+        }
         // Every write of this node is applied at once: resolved up to its clock.
         let rows = self
             .history
@@ -452,7 +459,16 @@ impl Backend for Mem {
             });
         }
         let type_of = self.types.get(key).copied().unwrap_or(1);
-        Ok(self.data.get(key).map(|v| (type_of, v.clone())))
+        if let Some(v) = self.data.get(key) {
+            return Ok(Some((type_of, v.clone())));
+        }
+        // A document gone since: its version at `at`, as a range's MVCC keeps it.
+        Ok(self
+            .history
+            .iter()
+            .rev()
+            .find(|v| v.key.as_slice() == key && v.ts <= at)
+            .and_then(|v| v.value.clone()))
     }
 
     fn txn_scan(

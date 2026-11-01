@@ -144,6 +144,16 @@ pub fn op_type(name: &str) -> &'static str {
     }
 }
 
+/// The index a data key belongs to (`01 · tenant · collection · index`): 0 for a document.
+fn space_of(key: &[u8]) -> Option<u32> {
+    match key {
+        [teseladb_keys::space::DATA, _, _, _, _, _, _, _, _, a, b, c, d, ..] => {
+            Some(u32::from_be_bytes([*a, *b, *c, *d]))
+        }
+        _ => None,
+    }
+}
+
 /// A command in progress on the node.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Op {
@@ -184,11 +194,24 @@ pub struct Op {
     pub progress: Option<teseladb_index::build::Progress>,
 }
 
+/// What an operation read and how it planned its read, for the profiler (010 FR-015).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct OpReport {
+    /// Index entries it read (`keysExamined`).
+    pub keys: u64,
+    /// Documents it read (`docsExamined`).
+    pub docs: u64,
+    /// The plan its read ran, as the planner reported it: `planSummary`, `execStats` and the
+    /// hashes of its shape.
+    pub plan: Option<Document>,
+}
+
 /// The node's commands in progress, by operation id.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct OpTable {
     last: u32,
     ops: BTreeMap<u32, Op>,
+    reports: BTreeMap<u32, OpReport>,
 }
 
 impl OpTable {
@@ -209,6 +232,17 @@ impl OpTable {
     /// The operation ended.
     pub fn end(&mut self, id: u32) {
         self.ops.remove(&id);
+        self.reports.remove(&id);
+    }
+
+    /// What operation `id` has read and planned so far.
+    pub fn report_mut(&mut self, id: u32) -> &mut OpReport {
+        self.reports.entry(id).or_default()
+    }
+
+    /// What operation `id` read and planned, taken.
+    pub fn take_report(&mut self, id: u32) -> OpReport {
+        self.reports.remove(&id).unwrap_or_default()
     }
 
     /// Marks operation `id` for interruption; whether it was running.
@@ -272,6 +306,32 @@ impl<'a, B: Backend + ?Sized> Guarded<'a, B> {
     /// The audit events of the catalog changes made so far, taken.
     pub fn take_audit(&mut self) -> crate::commands::audit::Pending {
         std::mem::take(&mut self.audit)
+    }
+
+    /// Counts the index entries and documents among `rows` for the operation's report: a
+    /// document is a row of a collection's documents, an index entry a row of one of its indexes
+    /// (also the `_id` entries of a capped collection), and the rest (multikey marks, guards of
+    /// `prepareUnique`, the node's own tables) is neither.
+    fn tally(&self, rows: &[(Vec<u8>, Vec<u8>)]) {
+        let (mut keys, mut docs) = (0u64, 0u64);
+        for (key, _) in rows {
+            match space_of(key) {
+                Some(teseladb_keys::space::DOCUMENTS) => docs += 1,
+                Some(i)
+                    if i < crate::commands::index_maintenance::MULTIKEY_MARKS
+                        || i == teseladb_range::capped::ID_INDEX =>
+                {
+                    keys += 1;
+                }
+                _ => {}
+            }
+        }
+        if keys + docs > 0 {
+            let mut g = lock(self.shared);
+            let r = g.ops.report_mut(self.id);
+            r.keys += keys;
+            r.docs += docs;
+        }
     }
 
     /// The error that stops the operation now, if any.
@@ -379,7 +439,15 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         &mut self,
         keys: &[Vec<u8>],
     ) -> Result<crate::commands::Versions, CommandError> {
-        self.call(|b| b.read_versions(keys))
+        let (at, versions) = self.call(|b| b.read_versions(keys))?;
+        let found: Vec<(Vec<u8>, Vec<u8>)> = keys
+            .iter()
+            .zip(&versions)
+            .filter(|(_, v)| v.is_some())
+            .map(|(k, _)| (k.clone(), Vec::new()))
+            .collect();
+        self.tally(&found);
+        Ok((at, versions))
     }
 
     fn transact(
@@ -467,7 +535,13 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         view: &teseladb_range::push::TxnView,
         uncertain_to: Option<teseladb_hlc::Hlc>,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
-        self.call(|b| b.txn_scan(start, end, limit, at, view, uncertain_to))
+        let rows = self.call(|b| b.txn_scan(start, end, limit, at, view, uncertain_to))?;
+        self.tally(&rows);
+        Ok(rows)
+    }
+
+    fn note_plan(&mut self, plan: Document) {
+        lock(self.shared).ops.report_mut(self.id).plan = Some(plan);
     }
 
     fn audit_event(&mut self, atype: teseladb_auth::audit::AuditType, param: Document) {
@@ -521,6 +595,7 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         // that returned is done and keeps its result.
         let rows = self.call(|b| b.scan(start, end, limit, concern))?;
         self.check()?;
+        self.tally(&rows);
         Ok(rows)
     }
 
@@ -691,7 +766,7 @@ mod tests {
             desc: None,
             progress: None,
         };
-        let mut t = OpTable { last: u32::MAX - 1, ops: BTreeMap::new() };
+        let mut t = OpTable { last: u32::MAX - 1, ops: BTreeMap::new(), reports: BTreeMap::new() };
         t.ops.insert(1, op.clone());
         assert_eq!(t.begin(op.clone()), u32::MAX);
         assert_eq!(t.begin(op), 2);

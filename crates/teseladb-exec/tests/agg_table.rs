@@ -199,6 +199,9 @@ fn compare(spec: &str, want: &str) -> Option<String> {
     let result =
         Pipeline::parse_command(&stages, &Ctx::checked([]), !coll.is_empty()).and_then(|p| {
             let input = if coll.is_empty() { Vec::new() } else { env.collection(&coll)? };
+            if !coll.is_empty() {
+                p.check_collection_plan()?;
+            }
             p.run(input, &env)
         });
     let sorts_after = spec.rfind("\"$sort\"").unwrap_or(0)
@@ -290,6 +293,14 @@ fn ties_follow_the_engine_refdb_chooses() {
 #[test]
 fn metadata_follows_the_documents_as_refdb() {
     check(include_str!("agg/meta.out"));
+}
+
+/// `$sort` by `{$meta: "randVal"}` without a `$sample` before it, as a `refrouter` 9.0.4 runs it
+/// (`agg/rand_val.out`): the documents keep their order, and a stage that reshapes them after
+/// the sort, with no `$limit` between, fails with 16410 on the sort key's computed field.
+#[test]
+fn sort_by_random_value_matches_refdb() {
+    check(include_str!("agg/rand_val.out"));
 }
 
 /// Each `$meta` name in `$project`, `$addFields`, `$sort`, `$expr` and an accumulator of a
@@ -390,4 +401,48 @@ fn search_stages_go_first() {
         let want = format!("!! 40602\t{name} is only valid as the first stage in a pipeline");
         assert_eq!(compare(&spec, &want), None);
     }
+}
+
+/// The random values `$sample` gives the documents it takes, as a `refrouter` 9.0.4 does (measured
+/// 01-11-2026: `[{$sample: {size: 2}}, {$project: {r: {$meta: "randVal"}}}]` gave 0.749 and then
+/// 0.659): a double in [0, 1) for each, descending through the sample, which a later `$sort` and
+/// `$group` read.
+#[test]
+fn sample_gives_each_document_its_random_value() {
+    let env = TestEnv { random: std::cell::Cell::new(7), collation: Collation::default() };
+    let run = |json: &str| -> Vec<Document> {
+        let holder = extjson::parse(&format!(r#"{{"p":{json}}}"#)).expect("pipeline");
+        let bytes = holder.to_bytes().expect("small");
+        let raw = RawDoc::from_bytes(&bytes).expect("a document");
+        let Some(RawValue::Array(a)) = raw.get("p") else { panic!("{json}") };
+        let stages: Vec<RawValue<'_>> = a.iter().collect();
+        let p = Pipeline::parse_command(&stages, &Ctx::checked([]), true).expect(json);
+        p.run(env.collection("c").expect("c"), &env).expect(json)
+    };
+    let values = |docs: &[Document]| -> Vec<f64> {
+        docs.iter()
+            .map(|d| match d.get("r") {
+                Some(Value::Double(r)) => *r,
+                other => panic!("{other:?} in {d:?}"),
+            })
+            .collect()
+    };
+    let sampled = run(r#"[{"$sample":{"size":5}},{"$project":{"r":{"$meta":"randVal"}}}]"#);
+    let r = values(&sampled);
+    assert_eq!(r.len(), 5);
+    assert!(r.iter().all(|x| (0.0..1.0).contains(x)), "{r:?}");
+    assert!(r.windows(2).all(|w| w[0] >= w[1]), "{r:?}");
+    let all = run(r#"[{"$sample":{"size":20}},{"$project":{"r":{"$meta":"randVal"}}}]"#);
+    assert_eq!(all.len(), 8, "a sample larger than the collection takes all of it");
+    let resorted = run(
+        r#"[{"$sample":{"size":8}},{"$sort":{"k":{"$meta":"randVal"}}},{"$project":{"r":{"$meta":"randVal"}}}]"#,
+    );
+    let r = values(&resorted);
+    assert!(r.windows(2).all(|w| w[0] >= w[1]), "{r:?}");
+    let grouped = run(
+        r#"[{"$sample":{"size":3}},{"$group":{"_id":null,"r":{"$push":{"$meta":"randVal"}}}}]"#,
+    );
+    let Some(Value::Array(pushed)) = grouped[0].get("r") else { panic!("{grouped:?}") };
+    assert_eq!(pushed.len(), 3);
+    assert!(pushed.iter().all(|v| matches!(v, Value::Double(_))), "{pushed:?}");
 }

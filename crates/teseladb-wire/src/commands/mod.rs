@@ -21,6 +21,7 @@ pub mod authz_collections;
 pub mod authz_writes;
 pub mod capped;
 pub mod catalog;
+pub mod change_stream;
 pub mod cluster_admin;
 pub mod config_db;
 pub mod config_settings;
@@ -117,10 +118,10 @@ pub enum LdapLogin {
     Authorized(Vec<RoleName>),
 }
 
-/// What the commands need from the node: Group 0's catalog, the ranges and the cluster time.
 /// What a change stream read of an interval: the versions up to the resolved mark, and the mark.
 pub type ChangeBatch = (Vec<teseladb_range::changes::Versioned>, teseladb_hlc::Hlc);
 
+/// What the commands need from the node: Group 0's catalog, the ranges and the cluster time.
 /// The server's implementation finds the leaders and forwards; errors come translated.
 pub trait Backend {
     /// The collection of `ns`, as the node's copy of Group 0 has it.
@@ -218,6 +219,10 @@ pub trait Backend {
     /// changes of the indexes (009 FR-006). Every backend says what it does, so that a wrapper
     /// cannot drop the call.
     fn end_operation(&mut self);
+    /// The plan a read of the running operation ran (`planSummary`, `execStats` and the hashes
+    /// of its shape), for the profiler (010 FR-015). Every backend says what it does, so that a
+    /// wrapper cannot drop the call.
+    fn note_plan(&mut self, plan: Document);
     /// What a change stream reads of `[start, end)` after mark `from` (014 FR-003, FR-004): the
     /// versions of every range of the interval up to the lowest resolved mark of those ranges,
     /// and that mark, below which no version appears later.
@@ -455,6 +460,11 @@ pub trait Backend {
     /// node in tests).
     fn process(&mut self) -> diagnostics::ProcessFacts {
         diagnostics::ProcessFacts::default()
+    }
+    /// The CPU time the thread running the command has used, in nanoseconds (`cpuNanos` of the
+    /// profiler, 010 FR-015); `None` where the node cannot tell (a node in tests).
+    fn thread_cpu_nanos(&mut self) -> Option<u64> {
+        None
     }
 }
 
@@ -781,7 +791,10 @@ fn session_info<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<(), Command
 }
 
 fn command<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
-    if let Value::String(coll) = ctx.first() {
+    // A change stream refuses a buckets namespace as an internal one (014, measured).
+    if let Value::String(coll) = ctx.first()
+        && !change_stream::opens(ctx.cmd)
+    {
         timeseries::legacy_buckets(ctx.db, coll, ctx.name())?;
     }
     match crate::concerns::canonical(ctx.name()) {

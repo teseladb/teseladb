@@ -625,7 +625,8 @@ pub fn insert<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
 }
 
 /// Inserts `docs` in `ns` for the node itself (the profiler's `system.profile`, which no
-/// client command writes): the first write error is the result.
+/// client command writes) as they are, without an `_id` (a `refnode` 9.0.4 writes its profile
+/// documents without one, measured): the first write error is the result.
 pub(crate) fn insert_internal<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
     ns: &Namespace,
@@ -635,12 +636,14 @@ pub(crate) fn insert_internal<B: Backend + ?Sized>(
     let Some(coll) = ctx.backend.collection(ns)? else {
         return Err(CommandError::new(crate::error::INTERNAL_ERROR, "no collection to write"));
     };
-    let rules = rules_of(ns, &coll, true, None, index_rules(ctx.backend, &coll)?)?;
+    // Documents without `_id` keep no entry in the `_id_` index of a capped collection.
+    let mut indexes = index_rules(ctx.backend, &coll)?;
+    indexes.retain(|r| r.id != teseladb_range::capped::ID_INDEX);
+    let rules = rules_of(ns, &coll, true, None, indexes)?;
     let mut chunk = Vec::new();
     for (i, d) in docs.into_iter().enumerate() {
-        let doc = with_id(ctx.backend, ctx.shared, &d)?;
-        let key = insert_key(&coll, doc.get("_id").unwrap_or(&Value::Null))?;
-        chunk.push((i, doc, key));
+        let key = insert_key(&coll, d.get("_id").unwrap_or(&Value::Null))?;
+        chunk.push((i, d, key));
     }
     let (mut n, mut errors) = (0, Vec::new());
     flush(ctx, &mut w, (&coll, &rules), true, &mut chunk, &mut n, &mut errors);

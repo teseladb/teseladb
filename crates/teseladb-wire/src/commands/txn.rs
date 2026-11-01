@@ -1294,6 +1294,10 @@ impl Backend for TxnBackend<'_> {
         Ok(read_ts)
     }
 
+    fn note_plan(&mut self, plan: Document) {
+        self.inner.note_plan(plan);
+    }
+
     fn end_operation(&mut self) {
         self.inner.end_operation();
     }

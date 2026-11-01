@@ -576,6 +576,12 @@ pub fn aggregate<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
         Some(RawValue::Array(p)) => p.iter().collect(),
         _ => Vec::new(),
     };
+    if super::change_stream::first_stage(&stages)
+        == Some(teseladb_changestream::stage::CHANGE_STREAM)
+    {
+        return super::change_stream::open(ctx, &ns, on_collection, &stages);
+    }
+    super::change_stream::not_first(&stages)?;
     let vars = a.vars.clone().unwrap_or_default();
     let names: Vec<String> = vars.iter().map(|(k, _)| k.to_owned()).collect();
     let ctx_vars = ExprCtx::checked(names.iter().map(String::as_str));
@@ -594,6 +600,9 @@ pub fn aggregate<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
     teseladb_exec::pipeline::optimize::optimize_stages(&stages, a.vars.as_ref())
         .map_err(from_mql)?;
     check_system_namespace(&pipeline, &ns, on_collection)?;
+    if on_collection && ctx.backend.collection(&ns)?.is_some() {
+        pipeline.check_collection_plan().map_err(from_mql)?;
+    }
     let collation = command_collation(&mut *ctx.backend, &ns, on_collection, a.collation.as_ref())?;
     let planned = match on_collection && pipeline.reads_collection() && collation.get().is_none() {
         true => planned_read(ctx, &ns, (&stages, a.vars.as_ref()), a.concern)
@@ -639,6 +648,7 @@ pub fn aggregate<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
         left: None,
         tail: None,
         read_mark: ctx.backend.read_mark(),
+        stream: None,
     };
     let size = Some(a.batch_size.unwrap_or(DEFAULT_FIRST_BATCH));
     let (batch, short) = state.batch(ctx.backend, size)?;

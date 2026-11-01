@@ -215,6 +215,8 @@ pub(crate) const SC_NPROCESSORS_ONLN: i32 = 84;
 /// `getrlimit(2)` resource of open files.
 pub(crate) const RLIMIT_NOFILE: i32 = 7;
 /// `ru_maxrss` is in kilobytes on Linux.
+/// `CLOCK_THREAD_CPUTIME_ID`: the CPU time of the calling thread.
+pub(crate) const CLOCK_THREAD_CPUTIME_ID: i32 = 3;
 pub(crate) const MAXRSS_PER_KB: i64 = 1;
 
 /// Bytes of each field of `struct utsname`.

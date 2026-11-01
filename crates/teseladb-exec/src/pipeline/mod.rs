@@ -145,6 +145,9 @@ pub struct Pipeline {
     sbe_specs: Vec<bool>,
     /// Whether a stage reads `{$meta: "sortKey"}`, which each `$sort` then sets.
     reads_sort_key: bool,
+    /// The error of planning its `$sort` by a random value on an existing collection
+    /// ([`sort::check_random_sort`]).
+    random_sort: Option<MqlError>,
 }
 
 impl Pipeline {
@@ -189,7 +192,9 @@ impl Pipeline {
         if !on_collection {
             collectionless(pipeline)?;
         }
-        let pipeline = parsed;
+        let random_sort = sort::check_random_sort(pipeline).err();
+        let mut pipeline = parsed;
+        pipeline.random_sort = random_sort;
         pipeline.check_positions()?;
         if on_collection && pipeline.starts_with_documents() {
             return Err(error(
@@ -243,6 +248,13 @@ impl Pipeline {
             Some(Stage::System(name, _)) => Some(name),
             _ => None,
         }
+    }
+
+    /// The errors of planning the pipeline on a collection that exists, before it runs: a
+    /// `refrouter` 9.0.4 only plans the start of a pipeline on the shard that has the collection
+    /// (measured: the `$sort` by a random value of [`sort::check_random_sort`] fails only then).
+    pub fn check_collection_plan(&self) -> Result<(), MqlError> {
+        self.random_sort.clone().map_or(Ok(()), Err)
     }
 
     /// The errors of planning the pipeline's reads on `env`, before it runs (the index of
@@ -360,7 +372,9 @@ impl Pipeline {
                 metas = Some(s.run(&docs, &own, env)?);
                 continue;
             }
-            if self.reads_sort_key && metas.is_none() && matches!(st, Stage::Sort(_)) {
+            // `$sample` gives each document it takes a random value (`{$meta: "randVal"}`).
+            let sample = matches!(st, Stage::Sample(_));
+            if metas.is_none() && (sample || self.reads_sort_key && matches!(st, Stage::Sort(_))) {
                 metas = Some(vec![meta::Meta::new(); docs.len()]);
             }
             (docs, metas) = match metas {
@@ -436,7 +450,7 @@ fn parse_stages(pipeline: &[RawValue<'_>], ctx: &Ctx) -> Result<Pipeline, MqlErr
     let mut read = Vec::new();
     pipeline.iter().for_each(|v| meta::metas_read(*v, &mut read));
     let reads_sort_key = read.iter().any(|n| n == crate::expr::SORT_KEY);
-    Ok(Pipeline { stages, sbe_specs, reads_sort_key })
+    Ok(Pipeline { stages, sbe_specs, reads_sort_key, random_sort: None })
 }
 
 fn parse_stage(d: RawDoc<'_>, ctx: &Ctx) -> Result<Stage, MqlError> {
@@ -768,19 +782,14 @@ fn run_stage_meta(
             let (docs, metas): (Vec<_>, Vec<_>) = keyed.into_iter().map(|(_, d, m)| (d, m)).unzip();
             (docs, Some(metas))
         }
-        // The documents a sample takes depend only on how many there are.
+        // Each document a sample takes keeps its metadata and gets its random value.
         Stage::Sample(s) => {
-            let marks: Vec<Document> =
-                (0..docs.len()).map(|i| Document::new().with("i", i as i64)).collect();
-            let picked = s.run(marks, env);
             let mut out = (Vec::new(), Vec::new());
-            for p in picked {
-                if let Some(Value::Int64(i)) = p.get("i")
-                    && let Ok(i) = usize::try_from(*i)
-                {
-                    out.0.push(docs[i].clone());
-                    out.1.push(metas[i].clone());
-                }
+            for (i, r) in s.pick(docs.len(), env) {
+                let mut m = metas[i].clone();
+                m.insert(meta::RAND_VAL.to_owned(), Value::Double(r));
+                out.0.push(docs[i].clone());
+                out.1.push(m);
             }
             (out.0, Some(out.1))
         }
