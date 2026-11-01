@@ -571,7 +571,7 @@ fn edges_of_intervals_and_their_display() {
         high: Value::Int32(5),
         high_inclusive: false,
     };
-    assert_eq!(intersect(&[a.clone()], &[b.clone()])[0].shown(), "[1, 5)");
+    assert_eq!(intersect(std::slice::from_ref(&a), std::slice::from_ref(&b))[0].shown(), "[1, 5)");
     // Intervals that meet at an end left open on both sides stay apart.
     let c = Bound {
         low: Value::Int32(5),
@@ -604,4 +604,51 @@ fn a_hint_takes_no_intersection() {
     let found = candidates(&request, &c);
     assert_eq!(found.len(), 1);
     assert!(matches!(found[0], Access::Index(_)));
+}
+
+#[test]
+fn more_edges_of_intervals_joins_and_intersections() {
+    let half = Bound {
+        low: Value::Int32(1),
+        low_inclusive: true,
+        high: Value::Int32(1),
+        high_inclusive: false,
+    };
+    assert!(!half.is_point());
+    let d = Value::Document(doc(r#"{"a":1}"#));
+    assert_ne!(shown_value(&d), "{}");
+    assert_ne!(shown_value(&Value::Array(vec![Value::Int32(1)])), "[]");
+    let x = Bound {
+        low: Value::Int32(0),
+        low_inclusive: true,
+        high: Value::Int32(5),
+        high_inclusive: false,
+    };
+    let y = Bound {
+        low: Value::Int32(1),
+        low_inclusive: true,
+        high: Value::Int32(5),
+        high_inclusive: true,
+    };
+    assert_eq!(intersect(std::slice::from_ref(&x), std::slice::from_ref(&y))[0].shown(), "[1, 5)");
+    let after = Bound {
+        low: Value::Int32(5),
+        low_inclusive: false,
+        high: Value::Int32(9),
+        high_inclusive: true,
+    };
+    assert!(intersect(std::slice::from_ref(&y), std::slice::from_ref(&after)).is_empty());
+    let from = Bound {
+        low: Value::Int32(5),
+        low_inclusive: true,
+        high: Value::Int32(9),
+        high_inclusive: true,
+    };
+    assert_eq!(union(&[x], &[from])[0].shown(), "[0, 9]");
+    // The clauses of a `$or` on different indexes stay apart.
+    let c = catalog();
+    assert_eq!(plans(r#"{"$or":[{"g":{"$eq":"a"}},{"s":{"$eq":"x"}}]}"#, &[], &c).len(), 1);
+    let parsed = doc(r#"{"$and":[{"g":{"$eq":"a"}},{"s":{"$eq":"x"}}]}"#);
+    let request = Request { parsed: Some(&parsed), sort: &[], hint: None, intersect: true };
+    assert!(candidates(&request, &c).iter().any(|a| matches!(a, Access::AndHash { .. })));
 }
