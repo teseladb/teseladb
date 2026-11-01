@@ -143,6 +143,10 @@ pub struct Mem {
     pub wait_clock_fails: bool,
     /// The node knows no range for any key.
     pub no_route: bool,
+    /// The highest feature compatibility version some node runs (007 FR-027).
+    pub fcv_limit: Option<String>,
+    /// Answers of the other nodes that do not apply the write gates yet (007 FR-029).
+    pub gate_lagging: usize,
 }
 
 /// A change of the data before a read of `[start, …)`.
@@ -238,6 +242,15 @@ impl Backend for Mem {
 
     fn end_operation(&mut self) {
         self.ended += 1;
+    }
+
+    fn gate_everywhere(
+        &mut self,
+        _want: teseladb_wire::commands::write_block::WriteGate,
+    ) -> Result<bool, CommandError> {
+        let behind = self.gate_lagging > 0;
+        self.gate_lagging = self.gate_lagging.saturating_sub(1);
+        Ok(!behind)
     }
 
     // One range, with no intents: a read sees the committed documents.
@@ -583,6 +596,10 @@ impl Backend for Mem {
     fn set_cluster_parameter(&mut self, name: &str, value: Vec<u8>) -> Result<(), CommandError> {
         self.params.insert(name.to_owned(), value);
         Ok(())
+    }
+
+    fn fcv_limit(&mut self) -> Result<Option<String>, CommandError> {
+        Ok(self.fcv_limit.clone())
     }
 
     fn set_read_mark(&mut self, at: Option<teseladb_txn::causal::ReadMark>) {

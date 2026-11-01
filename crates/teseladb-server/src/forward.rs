@@ -2,14 +2,15 @@
 //! Group 0 command for Group 0's leader (001 FR-022, 005 FR-016), a piece of a data range's
 //! snapshot for a replica that waits for it (005 FR-012), a request for the data range's leader
 //! or Group 0's (006 FR-014, FR-027), the sessions to kill on every node (006 FR-016), a replica's
-//! checksum for its range's leader and the leader's order to rebuild a replica (005 FR-014). The
-//! first byte tells them apart.
+//! checksum for its range's leader and the leader's order to rebuild a replica (005 FR-014), and
+//! whether a node applies the cluster's write gates (007 FR-029). The first byte tells them apart.
 
 use teseladb_meta::command::Group0Command;
 use teseladb_range::checksum::Report;
 use teseladb_range::snapshot::Chunk;
 use teseladb_types::{DecodeError, Decoder, Encoder, GroupId};
 use teseladb_wire::commands::session::KillScope;
+use teseladb_wire::commands::write_block::WriteGate;
 
 /// Tag of a Group 0 command.
 const GROUP0: u8 = 0;
@@ -34,6 +35,12 @@ const REBUILD: u8 = 6;
 const MERGE_PROBE: u8 = 7;
 /// Tag of [`Request::Meta2`].
 const META2: u8 = 8;
+/// Tag of [`Request::Gate`].
+const GATE: u8 = 9;
+/// The answer of a node to [`Request::Gate`] that applies the gates.
+pub const GATE_HELD: u8 = 1;
+/// The answer of a node to [`Request::Gate`] that does not apply them yet.
+pub const GATE_BEHIND: u8 = 0;
 /// Tag of the answer "not ready yet".
 const NOT_READY: u8 = 0;
 /// Tag of the answer with a chunk.
@@ -86,6 +93,9 @@ pub enum Request {
         /// The entry.
         entry: Vec<u8>,
     },
+    /// Whether the node that receives it applies write gates `want` (007 FR-029): the answer is
+    /// [`GATE_HELD`] if so, [`GATE_BEHIND`] if not yet.
+    Gate(WriteGate),
 }
 
 impl Request {
@@ -133,6 +143,11 @@ impl Request {
             Request::Meta2 { group, entry } => {
                 let mut e = Encoder::new();
                 e.u8(META2).u64(group.0).bytes(entry);
+                e.finish()
+            }
+            Request::Gate(g) => {
+                let mut e = Encoder::new();
+                e.u8(GATE).u32(g.fsync_locks).u8(u8::from(g.user_writes_blocked));
                 e.finish()
             }
         }
@@ -190,6 +205,16 @@ impl Request {
                 let (group, entry) = (GroupId(d.u64()?), d.bytes()?.to_vec());
                 d.finish()?;
                 Ok(Request::Meta2 { group, entry })
+            }
+            GATE => {
+                let fsync_locks = d.u32()?;
+                let user_writes_blocked = match d.u8()? {
+                    0 => false,
+                    1 => true,
+                    _ => return Err(DecodeError::InvalidValue { offset: 5 }),
+                };
+                d.finish()?;
+                Ok(Request::Gate(WriteGate { fsync_locks, user_writes_blocked }))
             }
             _ => Err(DecodeError::InvalidValue { offset: 0 }),
         }
@@ -254,6 +279,8 @@ mod tests {
                 sum: Some([5; 32]),
             }),
             Request::Rebuild(GroupId(4)),
+            Request::Gate(WriteGate { fsync_locks: u32::MAX, user_writes_blocked: true }),
+            Request::Gate(WriteGate::default()),
         ];
         for r in reqs {
             assert_eq!(Request::decode(&r.encode()), Ok(r));
@@ -291,6 +318,10 @@ mod tests {
         assert!(Request::decode(&[KILL_SESSIONS]).is_err());
         assert!(Request::decode(&[KILL_SESSIONS, 0, 2, 1]).is_err());
         assert!(Request::decode(&[KILL_SESSIONS, 1, 0]).is_err());
+        // Gates with a flag that is no bool, cut short, or with bytes after them.
+        assert!(Request::decode(&[GATE, 0, 0, 0, 1, 2]).is_err());
+        assert!(Request::decode(&[GATE, 0, 0, 0, 1]).is_err());
+        assert!(Request::decode(&[GATE, 0, 0, 0, 1, 1, 0]).is_err());
         assert!(FetchReply::decode(&[]).is_err());
         assert!(FetchReply::decode(&[NOT_READY, 1]).is_err());
         assert!(FetchReply::decode(&[STALE, 1]).is_err());

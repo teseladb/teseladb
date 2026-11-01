@@ -41,7 +41,7 @@ use crate::catalog_ops::{CatalogAnswer, CatalogOps, CatalogReq, CatalogSender};
 use crate::clustertime_keys::KeyDriver;
 use crate::coresm::{CoreOutput, CoreSm, Group0Holder};
 use crate::data::{DataCore, DataReq, DataSender, IoOwner};
-use crate::forward::Request;
+use crate::forward::{GATE_BEHIND, GATE_HELD, Request};
 use crate::frames::{from_wire, to_wire};
 use crate::liveness::{LivenessDriver, SharedLoads, core_load};
 use crate::node::FOUNDER;
@@ -127,6 +127,9 @@ pub enum NodeMsg {
     Catalog(CatalogReq, CatalogSender),
     /// Sessions to kill on the other nodes (core 0, 006 FR-016).
     KillSessions(KillScope, KillSender),
+    /// Whether every other node not removed applies write gates `want`; one that cannot be
+    /// reached does not count (core 0, 007 FR-029).
+    GateEverywhere(teseladb_wire::commands::write_block::WriteGate, KillSender),
     /// A core change between two cores of the node (007 FR-011).
     Relocate(RelocateMsg),
     /// A frame another core of the node received for a range this core runs (007 FR-011: the
@@ -186,6 +189,8 @@ pub struct NodeLogic {
     /// FR-013).
     tags: Vec<(String, String)>,
     tags_op: Option<OpId>,
+    /// The record of this node's versions in Group 0 (007 FR-027), in flight.
+    versions_op: Option<OpId>,
     /// The nodes' tags last published for the client workers.
     sent_tags: Option<crate::routes::NodeTags>,
     create_op: Option<OpId>,
@@ -204,6 +209,8 @@ pub struct NodeLogic {
     catalog: CatalogOps,
     /// Kills of sessions sent to the other nodes (core 0).
     kills: SessionOps,
+    /// Questions to the other nodes about the write gates they apply (core 0, 007 FR-029).
+    gates: SessionOps,
     /// The node's cursors and sessions, where the other nodes' kills land (core 0).
     sessions: Option<Arc<Shared>>,
     /// This core's index and where it publishes its load for core 0's heartbeat (007 FR-010).
@@ -248,6 +255,7 @@ impl NodeLogic {
             boot_op: None,
             tags: Vec::new(),
             tags_op: None,
+            versions_op: None,
             sent_tags: None,
             create_op: None,
             balance_op: None,
@@ -260,6 +268,7 @@ impl NodeLogic {
             peers: BTreeMap::new(),
             catalog: CatalogOps::default(),
             kills: SessionOps::default(),
+            gates: SessionOps::default(),
             sessions: None,
             loads: None,
             presence: None,
@@ -334,6 +343,28 @@ impl NodeLogic {
             .map(|to| self.core.forward(to, Bytes::from_vec(body.clone()), self.now))
             .collect();
         self.kills.start(ops, reply);
+    }
+
+    /// Asks every other node not removed whether it applies write gates `want` (007 FR-029).
+    fn gate_everywhere(
+        &mut self,
+        want: teseladb_wire::commands::write_block::WriteGate,
+        reply: KillSender,
+    ) {
+        let me = self.me.as_ref().map_or(NodeId(0), |(id, _)| *id);
+        let others: Vec<NodeId> = self.group0().map_or_else(Vec::new, |sm| {
+            sm.nodes
+                .values()
+                .filter(|n| n.id != me && n.state != NodeState::Removed)
+                .map(|n| n.id)
+                .collect()
+        });
+        let body = Request::Gate(want).encode();
+        let ops = others
+            .into_iter()
+            .map(|to| self.core.forward(to, Bytes::from_vec(body.clone()), self.now))
+            .collect();
+        self.gates.start(ops, reply);
     }
 
     /// This core holds data ranges.
@@ -545,6 +576,17 @@ impl NodeLogic {
         }
     }
 
+    /// Records the versions this node runs in Group 0 while they differ there (007 FR-027); one
+    /// at a time.
+    fn announce_versions(&mut self) {
+        let Some((id, _)) = &self.me else { return };
+        let (key, value) = (crate::node_versions::key(*id), crate::node_versions::ours());
+        let differ = self.group0().is_some_and(|sm| sm.settings.get(&key) != Some(&value));
+        if differ && self.versions_op.is_none() {
+            self.versions_op = self.send_group0(Group0Command::SetSetting { key, value });
+        }
+    }
+
     /// Records this node's tags in Group 0 (`SetNodeTags`) while they differ there; one at a time.
     fn announce_tags(&mut self) {
         let Some((id, _)) = &self.me else { return };
@@ -653,9 +695,19 @@ impl NodeLogic {
         }
     }
 
-    /// Publishes the nodes' tags for the client workers when Group 0's change (core 0, FR-013).
+    /// Publishes the nodes' tags for the client workers when Group 0's change (core 0, FR-013),
+    /// and the cluster's write gates (FR-029).
     fn sync_tags(&mut self) {
         let (Some(routes), Some(sm)) = (&self.routes, self.group0()) else { return };
+        let all = crate::backend::parameters_of(&sm.settings);
+        let gate = teseladb_wire::commands::write_block::gate_of(&all);
+        if routes.gate() != gate {
+            routes.publish_gate(gate);
+        }
+        let limit = crate::node_versions::fcv_limit(sm);
+        if routes.fcv_limit() != limit {
+            routes.publish_fcv_limit(limit);
+        }
         let tags: crate::routes::NodeTags =
             sm.nodes.iter().map(|(id, n)| (*id, n.tags.clone())).collect();
         if self.sent_tags.as_ref() != Some(&tags) {
@@ -1135,6 +1187,11 @@ impl NodeLogic {
                         }
                         self.core.answer_forward(f.from, f.req, Bytes::new());
                     }
+                    (Ok(Request::Gate(want)), _) => {
+                        let held = self.routes.as_ref().is_some_and(|r| r.gate() == want);
+                        let answer = vec![if held { GATE_HELD } else { GATE_BEHIND }];
+                        self.core.answer_forward(f.from, f.req, Bytes::from_vec(answer));
+                    }
                     (
                         Ok(
                             Request::Fetch(_)
@@ -1184,6 +1241,7 @@ impl NodeLogic {
             || mine(&mut self.addr_update)
             || mine(&mut self.boot_op)
             || mine(&mut self.tags_op)
+            || mine(&mut self.versions_op)
             || mine(&mut self.create_op)
             || mine(&mut self.balance_op)
             || self.group0_ops.remove(&op)
@@ -1192,6 +1250,13 @@ impl NodeLogic {
         }
         if self.kills.owns(op) {
             self.kills.on_done(op, matches!(result, Ok(Done::Forwarded(_))));
+            return;
+        }
+        // A node that answers 0 is behind; one that does not answer is down, and one that answers
+        // nothing speaks a protocol without the question: neither counts.
+        if self.gates.owns(op) {
+            let behind = matches!(&result, Ok(Done::Forwarded(b)) if b[..] == [GATE_BEHIND]);
+            self.gates.on_done(op, !behind);
             return;
         }
         if let Some((step, reply)) = self.joins.remove(&op) {
@@ -1232,6 +1297,8 @@ fn forward_allowed(cmd: &Group0Command, from: NodeId) -> bool {
         Group0Command::SetNodeAddrs { node, .. }
         | Group0Command::NodeBoot { node, .. }
         | Group0Command::SetNodeTags { node, .. } => *node == from,
+        // A node records its own versions only (007 FR-027).
+        Group0Command::SetSetting { key, .. } => *key == crate::node_versions::key(from),
         Group0Command::SetLeaderHint { node, term, .. } => *node == from && *term > 0,
         Group0Command::ReplicasSettled { .. }
         | Group0Command::SplitRange { .. }
@@ -1261,6 +1328,7 @@ impl CoreLogic for NodeLogic {
         self.update_addrs();
         self.announce_boot();
         self.announce_tags();
+        self.announce_versions();
         self.sync_tags();
         self.create_range();
         self.balance();
@@ -1369,6 +1437,7 @@ impl CoreLogic for NodeLogic {
             NodeMsg::Peers(peers) => self.peers = peers,
             NodeMsg::Catalog(req, reply) => self.catalog_request(req, reply),
             NodeMsg::KillSessions(scope, reply) => self.kill_sessions(scope, reply),
+            NodeMsg::GateEverywhere(want, reply) => self.gate_everywhere(want, reply),
             NodeMsg::Ranges(ranges) => {
                 if let Some(data) = &mut self.data {
                     data.set_ranges(&ranges);
@@ -1708,6 +1777,32 @@ mod tests {
         // Joining again from the same address gives back the same node, already a member.
         let rx = c.join(1, request(2, &addr(2)));
         assert_eq!(c.answer(&rx).expect("accepted").node_id, NodeId(2));
+    }
+
+    #[test]
+    fn each_node_records_the_versions_it_runs_in_group0() {
+        use crate::node_versions::{key, ours};
+        let mut c = Cluster::new();
+        c.found();
+        c.run_until(|c| c.logic(1).view().bootstrapped);
+        c.join_node(1, 2);
+        c.run_until(|c| c.logic(2).view().bootstrapped);
+        let recorded = |c: &mut Cluster, n: u64| {
+            let sm = c.logic(1).group0().cloned();
+            sm.and_then(|sm| sm.settings.get(&key(NodeId(n))).cloned()) == Some(ours())
+        };
+        assert!(!recorded(&mut c, 2), "a node that does not know itself records nothing");
+        // Started as a node does, knowing who it is: it records them through Group 0's leader.
+        c.restart(2, &addr(2));
+        c.run_until(|c| recorded(c, 2));
+        assert!(forward_allowed(
+            &Group0Command::SetSetting { key: key(NodeId(2)), value: ours() },
+            NodeId(2)
+        ));
+        assert!(!forward_allowed(
+            &Group0Command::SetSetting { key: key(NodeId(1)), value: ours() },
+            NodeId(2)
+        ));
     }
 
     #[test]

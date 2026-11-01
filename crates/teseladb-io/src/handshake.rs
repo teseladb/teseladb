@@ -17,8 +17,8 @@ use teseladb_tls::ClientConfig;
 
 use crate::mailbox::MailboxSender;
 use crate::peer::{
-    EnrollAccepted, EnrollRequest, FrameError, Hello, JoinAccepted, PeerMsg, decode_frame,
-    encode_frame,
+    EnrollAccepted, EnrollRequest, FrameError, Hello, JoinAccepted, PeerMsg, Versions,
+    decode_frame, encode_frame,
 };
 use crate::secure::{Channel, PeerTls};
 
@@ -73,6 +73,13 @@ pub enum HandshakeError {
     UnexpectedFrame,
     /// Over TLS, a peer that is not enrolling sent no certificate of the cluster's CA.
     NoCertificate,
+    /// The two nodes speak no protocol version in common (007 FR-027).
+    VersionMismatch {
+        /// Ours.
+        local: Versions,
+        /// The peer's.
+        remote: Versions,
+    },
     /// The dialed node answered with another identity.
     UnexpectedNode {
         /// Expected.
@@ -96,11 +103,14 @@ impl From<io::Error> for HandshakeError {
     }
 }
 
-/// Outcome of a handshake: the peer's `Hello` and the bytes already read after it.
+/// Outcome of a handshake: the peer's `Hello`, the protocol version both speak and the bytes
+/// already read after it.
 #[derive(Debug)]
 pub struct Handshaked {
     /// The peer's handshake.
     pub hello: Hello,
+    /// The highest protocol version both nodes speak.
+    pub version: u16,
     /// Bytes received after the `Hello` (the start of the next frames).
     pub rest: Vec<u8>,
 }
@@ -116,7 +126,8 @@ fn send_hello(
 fn read_hello(stream: &mut TcpStream, ch: &mut Channel) -> Result<Handshaked, HandshakeError> {
     let (msg, rest) = read_frame(stream, ch, Vec::new())?;
     match msg {
-        PeerMsg::Hello(hello) => Ok(Handshaked { hello, rest }),
+        // The version both speak is known once the `Hello` is validated.
+        PeerMsg::Hello(hello) => Ok(Handshaked { version: hello.versions.max, hello, rest }),
         _ => Err(HandshakeError::NotHello),
     }
 }
@@ -152,7 +163,7 @@ fn set_timeouts(stream: &TcpStream, t: Option<Duration>) -> io::Result<()> {
 }
 
 /// Checks a peer's `Hello` against ours (contract rules).
-pub fn validate(local: &Hello, remote: &Hello) -> Result<(), HandshakeError> {
+pub fn validate(local: &Hello, remote: &Hello) -> Result<u16, HandshakeError> {
     if remote.cluster_id != local.cluster_id {
         return Err(HandshakeError::ClusterMismatch);
     }
@@ -165,7 +176,16 @@ pub fn validate(local: &Hello, remote: &Hello) -> Result<(), HandshakeError> {
     if remote.node_id == NodeId(0) {
         return Err(HandshakeError::NoNodeId);
     }
-    Ok(())
+    common_version(local.versions, remote.versions)
+}
+
+/// The highest protocol version both ranges have (007 FR-027).
+fn common_version(local: Versions, remote: Versions) -> Result<u16, HandshakeError> {
+    let highest = local.max.min(remote.max);
+    match highest >= local.min.max(remote.min) {
+        true => Ok(highest),
+        false => Err(HandshakeError::VersionMismatch { local, remote }),
+    }
 }
 
 /// Dialer side: sends `local` (with the core of the connection), waits for the answer and
@@ -184,9 +204,9 @@ pub fn dial_on(
     ch.handshake(stream)?;
     send_hello(stream, ch, local)?;
     let got = read_hello(stream, ch)?;
-    validate(local, &got.hello)?;
+    let version = validate(local, &got.hello)?;
     set_timeouts(stream, None)?;
-    Ok(got)
+    Ok(Handshaked { version, ..got })
 }
 
 /// Acceptor side: waits for the peer's `Hello`, validates it and answers with `local` (whose
@@ -243,11 +263,11 @@ fn answer_or_join(
     let got = read_hello(stream, ch)?;
     let newcomer = opts.join.is_some() || opts.enroll.is_some();
     if got.hello.node_id != NodeId(0) || !newcomer {
-        validate(local, &got.hello)?;
+        let version = validate(local, &got.hello)?;
         certified(ch)?;
         send_hello(stream, ch, &Hello { core: got.hello.core, ..local.clone() })?;
         set_timeouts(stream, None)?;
-        return Ok(Some(got));
+        return Ok(Some(Handshaked { version, ..got }));
     }
     send_hello(stream, ch, &Hello { core: 0, ..local.clone() })?;
     // The cluster may take a while (a proposal and a configuration change).
@@ -298,6 +318,7 @@ pub fn request_join_with(
         peer_addr: req.peer_addr.clone(),
         http_addr: req.http_addr.clone(),
         native_addr: req.native_addr.clone(),
+        versions: Versions::OWN,
     };
     match newcomer(addr, &hello, &msg, client)? {
         PeerMsg::JoinResponse(r) => Ok(r),
@@ -320,6 +341,7 @@ pub fn request_enroll(
         peer_addr: String::new(),
         http_addr: String::new(),
         native_addr: String::new(),
+        versions: Versions::OWN,
     };
     match newcomer(addr, &hello, &PeerMsg::EnrollRequest(req.clone()), Some(client))? {
         PeerMsg::EnrollResponse(r) => Ok(r),
