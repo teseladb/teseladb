@@ -276,6 +276,9 @@ pub type StreamBatch = (Vec<Document>, Document, bool);
 
 /// The next batch of a change stream cursor and its `postBatchResumeToken`: at most `batch`
 /// events (`None`: no limit) and 16 MiB, waiting for some up to `max_time` (1 s by default).
+/// Like a `refrouter`, a batch with events holds every event written before the `getMore`: it reads
+/// on, within the same wait, until the resolved mark passes the node's clock at its start, which
+/// goes some 200 ms ahead of it (014 FR-004).
 pub fn more<B: Backend + ?Sized>(
     backend: &mut B,
     stream: &mut ChangeStream,
@@ -283,6 +286,7 @@ pub fn more<B: Backend + ?Sized>(
     max_time: Option<u64>,
 ) -> Result<StreamBatch, CommandError> {
     let deadline = backend.now_ms().saturating_add(max_time.unwrap_or(DEFAULT_AWAIT_MS));
+    let started = backend.cluster_mark();
     let mut out = Vec::new();
     let mut last = None;
     loop {
@@ -301,8 +305,11 @@ pub fn more<B: Backend + ?Sized>(
             out.push(doc);
             last = Some(token);
         }
-        let ended = stream.invalidated.is_some() && stream.pending.is_empty();
-        if ended || !out.is_empty() || backend.now_ms() >= deadline || !backend.pause() {
+        // Events left waiting: the batch is full (or the stream ended with them still to give).
+        let full = !stream.pending.is_empty();
+        let ended = stream.invalidated.is_some() && !full;
+        let caught_up = !out.is_empty() && stream.position.from() >= started;
+        if full || ended || caught_up || backend.now_ms() >= deadline || !backend.pause() {
             break;
         }
     }

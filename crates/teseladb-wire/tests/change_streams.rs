@@ -392,3 +392,37 @@ fn a_cursor_that_falls_behind_the_retention_or_a_failed_read_ends_resumable() {
     let label = Value::Array(vec![Value::from("NonResumableChangeStreamError")]);
     assert_eq!(r.get("errorLabels"), Some(&label));
 }
+
+#[test]
+fn a_get_more_returns_every_event_written_before_it_started() {
+    // The resolved mark goes 200 ms behind the clock (014 FR-004); a `refrouter` returns every event
+    // written before the `getMore`, so the batch waits until the mark passes its start.
+    let mut m = Mem::new();
+    m.resolved_lag_ms = 200;
+    m.pause_ms = 50;
+    create(&mut m, "c");
+    let id = id_of(&open(&mut m, DB, "c".into(), stream(Document::new(), vec![])));
+    m.now += 10;
+    insert(&mut m, "c", vec![doc(&[("_id", 1.into())])]);
+    m.now += 150;
+    insert(&mut m, "c", vec![doc(&[("_id", 2.into())])]);
+    m.now += 100;
+    m.pauses_left = 20;
+    let started = m.now;
+    let both = batch(&get_more(&mut m, DB, id, "c", Document::new()));
+    let keys: Vec<&Value> = both.iter().map(|e| field(e, "documentKey._id")).collect();
+    assert_eq!(keys, [&Value::Int32(1), &Value::Int32(2)]);
+    assert!(m.now - started <= 250, "the wait stops once the mark passes the start");
+    // A full batch answers at once, and the wait never goes past `maxTimeMS`.
+    insert(&mut m, "c", (3..=5).map(|i| doc(&[("_id", i.into())])).collect());
+    let at = m.now;
+    let one = batch(&get_more(&mut m, DB, id, "c", Document::new().with("batchSize", 1)));
+    assert_eq!(one.len(), 1);
+    assert_eq!(m.now, at + 200, "the batch fills once the mark passes the writes");
+    m.now += 10;
+    insert(&mut m, "c", vec![doc(&[("_id", 6.into())])]);
+    let at = m.now;
+    let short = batch(&get_more(&mut m, DB, id, "c", Document::new().with("maxTimeMS", 100)));
+    assert!(m.now - at <= 150, "bounded by maxTimeMS");
+    assert!(short.len() >= 2, "{short:?}");
+}

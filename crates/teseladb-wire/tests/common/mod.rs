@@ -157,6 +157,10 @@ pub struct Mem {
     pub tenants: Vec<(u32, String)>,
     /// The catalog changes, at the node's clock (014 FR-014).
     pub ddl: teseladb_meta::ddl_log::DdlLog,
+    /// How far behind the clock the ranges' resolved mark goes, in milliseconds (014 FR-004).
+    pub resolved_lag_ms: u64,
+    /// Milliseconds the clock moves on at each pause of a waiting command.
+    pub pause_ms: u64,
 }
 
 /// A change of the data before a read of `[start, …)`.
@@ -292,14 +296,14 @@ impl Backend for Mem {
         if let Some(e) = self.fail_changes.take() {
             return Err(e);
         }
-        // Every write of this node is applied at once: resolved up to its clock.
+        // Every write of this node is applied at once: resolved up to its clock, less the lag.
         let rows = self
             .history
             .iter()
             .filter(|v| v.ts > from && start <= v.key.as_slice() && v.key.as_slice() < end)
             .cloned()
             .collect();
-        Ok((rows, Hlc { physical: self.now, logical: 0 }))
+        Ok((rows, Hlc { physical: self.now.saturating_sub(self.resolved_lag_ms), logical: 0 }))
     }
 
     fn catalog_changes(
@@ -330,6 +334,7 @@ impl Backend for Mem {
     fn txn_pause(&mut self) -> bool {
         let left = self.pauses_left > 0;
         self.pauses_left = self.pauses_left.saturating_sub(1);
+        self.now += self.pause_ms;
         left
     }
 
