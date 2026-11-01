@@ -58,6 +58,7 @@ impl Registry {
         r.register_workload("indexes", Indexes::boxed).expect("a new name");
         r.register_workload("special-collections", SpecialCollections::boxed).expect("a new name");
         r.register_workload("queries", Queries::boxed).expect("a new name");
+        r.register_workload("changestream", SplitsWorkload::streams).expect("a new name");
         r
     }
 

@@ -933,6 +933,27 @@ fn a_change_read_walks_every_range_and_resolves_at_the_lowest_mark() {
 }
 
 #[test]
+fn a_change_read_moved_by_a_split_or_a_new_leader_reads_each_key_once() {
+    // 014 FR-010: a range that split under the read (`OutOfRange`) or changed leader is read
+    // again with the table as it is then; every key comes once and the mark is the lowest.
+    let ts = |p: u64| Hlc { physical: p, logical: 0 };
+    let data = vec![
+        Err(RangeError::OutOfRange),
+        changes(vec![(1, 20)], 30, None),
+        Err(RangeError::NotLeader { hint: NodeId(2) }),
+        changes(vec![(2, 22), (3, 26)], 25, None),
+    ];
+    let mut b = backend(data, vec![]);
+    let (rows, resolved) = b.changes(&[1], &[4], ts(10)).unwrap();
+    let seen: Vec<(u8, u64)> = rows.iter().map(|r| (r.key[0], r.ts.physical)).collect();
+    assert_eq!((seen, resolved), (vec![(1, 20), (2, 22)], ts(25)));
+    // 014 FR-018: each range read leaves its lag behind the clock in the metrics for a while.
+    let lags = teseladb_server::backend::range_lags(wall_ms());
+    assert!(lags.iter().any(|(_, lag)| *lag + 30 >= wall_ms()), "{lags:?}");
+    assert!(teseladb_server::backend::range_lags(wall_ms() + 60_000).is_empty());
+}
+
+#[test]
 fn a_change_stream_reads_the_catalog_changes_and_moves_a_quiet_group_0() {
     // 014 FR-014: the copy's changes and its last mark; a mark far behind the node's clock asks
     // Group 0 for an empty entry and reads again.

@@ -788,7 +788,7 @@ fn find<B: Backend + ?Sized>(
                 .chain(&others)
                 .filter_map(|r| {
                     let t = r.tried?;
-                    Some(trial_doc(&shape(&r.at_trial(), true), t))
+                    Some(trial_doc(&shape(&r.at_trial(t), true), t))
                 })
                 .collect();
             return Ok(Explained {
@@ -960,7 +960,7 @@ fn planned_write<B: Backend + ?Sized>(
     if chosen.others.is_empty() {
         return planned_read(ctx, coll, read, collation);
     }
-    chosen.winner = chosen.winner.at_trial();
+    chosen.winner = chosen.winner.tried_view();
     Ok(Some((indexes, chosen)))
 }
 
@@ -997,7 +997,7 @@ pub(crate) fn learned(
             let t = r.tried?;
             // A plan that sorts what it read gives, in its trial, every document it fetched to
             // the sort and the trial's own count from it.
-            let mut at = r.at_trial();
+            let mut at = r.at_trial(t);
             let blocking = sort.is_some() && !sorted(r);
             if blocking {
                 let fetched = usize::try_from(t.docs).unwrap_or(usize::MAX);
@@ -1437,6 +1437,19 @@ fn count_plan<B: Backend + ?Sized>(
         if run { scan(ctx, coll.as_ref(), &read, None, |_| Ok(()))? } else { (0, 0) };
     let counted =
         limit.map_or(matched.saturating_sub(skip), |l| matched.saturating_sub(skip).min(l));
+    // A missing collection counts nothing, whatever the query (measured on a `refrouter` 9.0.4).
+    if coll.is_none() {
+        let mut s = Stage::new("COUNT");
+        s.counters.push("nCounted", 0);
+        s.counters.push("nSkipped", 0);
+        return Ok(Explained {
+            parsed: Value::Null,
+            router_stage: "SINGLE_SHARD",
+            plan: s.over(missing_namespace()),
+            rejected: Vec::new(),
+            trials: Vec::new(),
+        });
+    }
     if query.is_empty() {
         let mut s = Stage::new("RECORD_STORE_FAST_COUNT");
         s.counters.push("nCounted", long(counted));
@@ -1564,9 +1577,18 @@ fn distinct<B: Backend + ?Sized>(
     check_filter(&query, collation.as_ref(), None)?;
     let shown = parsed(&query, None)?;
     let read = Read { filter: &query, collation: collation.as_ref(), vars: None, concern };
+    let Some(c) = coll.as_ref() else {
+        return Ok(Explained {
+            parsed: Value::Document(shown),
+            router_stage: "SINGLE_SHARD",
+            plan: missing_namespace(),
+            rejected: Vec::new(),
+            trials: Vec::new(),
+        });
+    };
     let (examined, matched) =
-        if run { scan(ctx, coll.as_ref(), &read, None, |_| Ok(()))? } else { (0, 0) };
-    if let (Some(c), None, true) = (coll.as_ref(), collation.as_ref(), query.is_empty()) {
+        if run { scan(ctx, Some(c), &read, None, |_| Ok(()))? } else { (0, 0) };
+    if let (None, true) = (collation.as_ref(), query.is_empty()) {
         let key = match ctx.cmd.get("key") {
             Some(Value::String(k)) => k.clone(),
             _ => String::new(),
@@ -1667,7 +1689,7 @@ fn distinct_plans<B: Backend + ?Sized>(
     let first = (*first).clone();
     let first = match &chosen.winner.access {
         a if *a == first.access => chosen.winner.clone(),
-        _ => first.at_trial(),
+        _ => first.tried_view(),
     };
     let counts = match (run, by_key(&first)) {
         (false, _) => (0, 0),
@@ -1966,6 +1988,16 @@ fn delete_on_node<B: Backend + ?Sized>(
         || matches!(st.get("limit"), Some(Value::Double(x)) if *x == 1.0);
     check_filter(&q, collation, vars)?;
     let shown = parsed(&q, vars)?;
+    // A missing collection deletes nothing (measured on a `refrouter` 9.0.4).
+    if coll.is_none() {
+        return Ok(Explained {
+            parsed: Value::Null,
+            router_stage: "SHARD_WRITE",
+            plan: missing_namespace(),
+            rejected: Vec::new(),
+            trials: Vec::new(),
+        });
+    }
     let read =
         Read { filter: &q, collation, vars, concern: teseladb_range::read::ReadConcern::Local };
     let (examined, matched) =

@@ -146,6 +146,11 @@ fn required_images_that_are_missing_fail_as_on_a_refrouter() {
         Some(Value::String(s)) => s.clone(),
         other => panic!("{other:?}"),
     };
+    // Through a `refrouter` the shard that read the event names itself (measured on 01-11).
+    let msg = msg
+        .strip_prefix("Error on remote shard ")
+        .and_then(|m| m.split_once(" :: caused by :: ").map(|(_, rest)| rest))
+        .unwrap_or_else(|| panic!("no shard prefix: {msg}"));
     assert!(msg.starts_with("Executor error during getMore :: caused by :: Change stream was configured to require a post-image for all update events, but the post-image was not found for event: {operationType: \"update\", ns: {db: \"img\", coll: \"c\"}, clusterTime: Timestamp("), "{msg}");
     let e = get_more(&mut m, pre, "c");
     assert_eq!(e.get("code"), Some(&Value::Int32(47)), "{e:?}");

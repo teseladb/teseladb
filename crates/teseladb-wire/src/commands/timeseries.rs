@@ -96,8 +96,8 @@ impl TsStats {
             return;
         }
         self.bucket_inserts += 1;
-        let (window, meta) = (id[..4].try_into(), id[4..9].try_into());
-        let (Ok(window), Ok(meta)) = (window, meta) else { return };
+        let window: [u8; 4] = std::array::from_fn(|i| id[i]);
+        let meta: [u8; 5] = std::array::from_fn(|i| id[4 + i]);
         match (n, closing, self.last_window.get(&meta)) {
             (1.., Some(Full::Count), _) => self.closed_by_count += 1,
             (1.., Some(Full::Size), _) => self.closed_by_size += 1,
@@ -183,12 +183,9 @@ pub fn write<B: Backend + ?Sized>(
     shared: &super::Shared,
     w: &mut Writer,
     (coll, spec): (&CollectionEntry, &BucketSpec),
-    bound: &Bound,
+    (docs, ordered, rules): (&[Document], bool, &super::mutation::Rules),
     stmt: u32,
 ) -> Result<MutationResult, CommandError> {
-    let DocMutation::Insert { docs, ordered, rules } = &bound.mutation else {
-        return Err(CommandError::new(INTERNAL_ERROR, "not a time series insert"));
-    };
     let mut total = MutationResult::default();
     // The measurements of each window and meta value, in order, with their place in `docs`.
     let mut groups: Vec<([u8; 12], Vec<(usize, Document)>)> = Vec::new();
@@ -201,7 +198,7 @@ pub fn write<B: Backend + ?Sized>(
                     other => format!("{other:?}"),
                 };
                 total.errors.push(WriteError { index, error: CommandError::new(BAD_VALUE, msg) });
-                if *ordered {
+                if ordered {
                     break;
                 }
                 continue;
@@ -234,7 +231,7 @@ pub fn write<B: Backend + ?Sized>(
             let mut rules = rules.clone();
             rules.timeseries = Some(TimeSeriesRule { spec: spec.clone(), bucket });
             let docs = pending.iter().map(|(_, d)| d.clone()).collect();
-            let mutation = DocMutation::Insert { docs, ordered: *ordered, rules };
+            let mutation = DocMutation::Insert { docs, ordered, rules };
             let b = Bound { mutation, keys: vec![bucket_key(coll, bucket)?] };
             // Each write of the statement its own number: that of its first measurement.
             let first = u32::try_from(pending[0].0).unwrap_or(u32::MAX);
@@ -270,7 +267,7 @@ pub fn write<B: Backend + ?Sized>(
             if let Some(e) = r.errors.into_iter().next() {
                 total.errors.push(WriteError { index: pending[e.index].0, error: e.error });
                 pending = &pending[e.index + 1..];
-                if *ordered {
+                if ordered {
                     break;
                 }
                 continue;
@@ -378,12 +375,16 @@ struct Read {
 fn read_bucket(spec: &BucketSpec, key: Vec<u8>, bytes: &[u8]) -> Result<Read, CommandError> {
     let raw = RawDoc::from_bytes(bytes)?;
     let doc = teseladb_bson::Document::from(raw);
-    let (Some(Value::ObjectId(id)), Some(data)) = (doc.get("_id"), doc.get("data")) else {
-        return Err(CommandError::new(INTERNAL_ERROR, "a bucket without _id or data"));
+    // A bucket is written with its `_id` and its `data`.
+    let malformed = || CommandError::new(INTERNAL_ERROR, "a bucket without _id or data");
+    let id = match doc.get("_id") {
+        Some(Value::ObjectId(id)) => *id,
+        _ => return Err(malformed()),
     };
+    let data = doc.get("data").ok_or_else(malformed)?;
     let rows =
         spec.measurements(raw).map_err(|e| CommandError::new(INTERNAL_ERROR, format!("{e:?}")))?;
-    Ok(Read { key, id: *id, meta: doc.get("meta").cloned(), rows, data: data.clone() })
+    Ok(Read { key, id, meta: doc.get("meta").cloned(), rows, data: data.clone() })
 }
 
 /// Rewrites bucket `b` as `new` (none: deleted), if it still holds what was read; `false` when
@@ -447,6 +448,8 @@ pub fn modify<B: Backend + ?Sized>(
     let now = teseladb_mql::update::Now { millis, timestamp: (seconds, 1) };
     let statement = Statement { spec, rules, m, stmt, now };
     let (mut next, end) = scan_range(coll, spec, &bounds)?;
+    let collation = collation(rules)?;
+    let collator = collation.as_ref().map(|c| c as &dyn teseladb_bson::Collator);
     let mut total = MutationResult::default();
     loop {
         let rows = backend.scan(&next, &end, super::query::SCAN_CHUNK, ReadConcern::Local)?;
@@ -454,7 +457,7 @@ pub fn modify<B: Backend + ?Sized>(
         for (key, bytes) in rows {
             next = [key.as_slice(), &[0]].concat();
             if !bounds
-                .may_match(spec, RawDoc::from_bytes(&bytes)?)
+                .may_match(spec, RawDoc::from_bytes(&bytes)?, collator)
                 .map_err(|e| CommandError::new(INTERNAL_ERROR, format!("{e:?}")))?
             {
                 continue;

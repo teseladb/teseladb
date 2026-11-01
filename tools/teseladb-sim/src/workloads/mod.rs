@@ -4,6 +4,7 @@
 //! across two ranges, 008), `indexes` (documents and their index entries in two ranges, 009) and
 //! `special-collections` (a capped collection, 015).
 
+pub mod changestream;
 pub mod data_ship;
 pub mod indexes;
 pub mod kv;

@@ -55,6 +55,9 @@ variants!(
     // the transaction never began and leaves that record aborted; the transaction itself goes on
     // and commits, and `txn_recovery` finds the recovery that answered «not committed».
     ("decision_not_durable", "txn_recovery", Default, 1000),
+    // A cursor whose resolved mark ignores the pending intents (014 T020): a transaction commits
+    // at its intents' mark below what the cursor read past, and `changestream` never emits it.
+    ("emit_above_resolved", "changestream_delivery", Default, 1000),
     ("follower_local_read", "linearizable", Default, 1000),
     ("follower_read_above_closed", "mvcc", Default, 1000),
     ("fsync_retry_success", "recovery", Default, 1000),
@@ -64,6 +67,9 @@ variants!(
     // the node number in the logical counter makes rarer (D-003).
     ("hlc_regress_restart", "mvcc", Heavy, 1000),
     ("lease_without_check_quorum", "raft_safety", Default, 1000),
+    // A range a split shrank answers the part of a stream's interval it still holds (014 T020):
+    // the cursor takes the rest as read and `changestream` misses the changes there.
+    ("lose_events_on_split", "changestream_delivery", Default, 1000),
     ("memory_raft_ack", "raft_safety", Default, 1000),
     // A range frozen for a merge goes on writing (007 T017): a write the right range acknowledged
     // after its state went to the left one is missing on the replicas that had not applied it.
@@ -118,6 +124,9 @@ variants!(
     // The split retracts the intents of the half that moves (007 T017): a transaction that commits
     // loses its write there, and `splits` reads an older value at a mark above its commit.
     ("split_loses_intents", "intents", Default, 1000),
+    // A stream resumed inside a transaction takes the token's mark for the whole transaction
+    // (014 T020): `changestream` sees the rest of the transaction dropped after a short batch.
+    ("split_txn_events", "changestream_delivery", Default, 1000),
     // A deposed leader's read: `range-docs` reads again at that mark and sees another version, which
     // the `mvcc` check reports before the history is checked; `follower_local_read` covers
     // `linearizable`.

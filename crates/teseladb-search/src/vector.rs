@@ -3,7 +3,8 @@
 //! quantizations of the index definition.
 //!
 //! The scores, measured on `refsearch` 1.70.6 with and without `exact`, are `1 / (1 + d²)` for
-//! `euclidean`, where `d` is the euclidean distance, `(1 + cos) / 2` for `cosine` and
+//! `euclidean`, where `d` is the euclidean distance, `(1 + cos) / 2` for `cosine` (the cosine divided by the root of the norms' product in
+//! double precision) and
 //! `(1 + dot) / 2` for `dotProduct` (which may pass 1 for vectors longer than 1), as `f32`. A higher
 //! score is a nearer vector.
 
@@ -41,8 +42,13 @@ impl Similarity {
         match self {
             Similarity::Euclidean => 1.0 / (1.0 + squared_distance(a, b)),
             Similarity::Cosine => {
-                let (na, nb) = (dot(a, a).sqrt(), dot(b, b).sqrt());
-                let cos = if na == 0.0 || nb == 0.0 { 0.0 } else { dot(a, b) / (na * nb) };
+                // The norms multiply and take their root in double precision (measured: the
+                // single-precision roots differ in the last bit).
+                let (na, nb) = (f64::from(dot(a, a)), f64::from(dot(b, b)));
+                let cos = match na == 0.0 || nb == 0.0 {
+                    true => 0.0,
+                    false => (f64::from(dot(a, b)) / (na * nb).sqrt()) as f32,
+                };
                 (1.0 + cos) / 2.0
             }
             Similarity::DotProduct => (1.0 + dot(a, b)) / 2.0,

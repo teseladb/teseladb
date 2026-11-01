@@ -101,7 +101,8 @@ fn names_are_unique_and_the_builtin_workloads_are_there() {
             "txn-append",
             "indexes",
             "special-collections",
-            "queries"
+            "queries",
+            "changestream"
         ]
     );
     assert!(reg.register_workload("testkv", kv_copy).unwrap_err().contains("already registered"));

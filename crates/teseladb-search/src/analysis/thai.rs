@@ -1,16 +1,22 @@
-//! The tokenizer of `reflib.thai` as `refsearch` 1.70.6 runs it (011 T009, D-109): runs of Thai
-//! letters are cut into words with the Thai dictionary of the Java runtime, and the other
-//! characters follow its word rules. The word list in `data/thai-words.txt` was deduced by asking
-//! `refsearch` (D-109): a candidate (the words of the ICU 74.2 Thai dictionary and the tokens `refsearch`
-//! gave for 12 000 sentences) is a word when `refsearch` cuts it, and it after and before `ภาษา`, as
-//! this segmenter does with it in the list and not without it.
+//! The tokenizer of `reflib.thai` as `refsearch` 1.70.6 runs it (011 T009, D-109): the Thai word
+//! iterator of its Java runtime (Temurin 21.0.11), whose rules and dictionary walk this module
+//! follows. The rules cut the text into segments: a run of dictionary characters, with `ๆ` or
+//! `ฯๆ` after it, or with `ฯ` when the character after the `ฯ` is neither `ล` nor one to ignore;
+//! `ฯลฯ`; any other character alone. A segment is divided with the dictionary only when the rules
+//! looked up two dictionary characters or more to find it.
 //!
-//! A run of Thai letters is walked letter by letter through the word list, longest words first.
-//! Each place a word ends is a possible break; when the walk cannot go on, it goes back to the
-//! last possible break not yet proved wrong. When no break is left, the breaks of the walk that
-//! reached furthest are kept and the walk starts again one letter after that point, so letters no
-//! word covers join the word after them (or the last word, at the end of the run). Measured on
-//! 12 000 sentences: see `tests/sentences_refsearch.rs`.
+//! The dictionary walk goes letter by letter through the word list, longest words first. Each
+//! place a word ends is a possible break; when the walk cannot go on, it goes back to the last
+//! possible break not yet proved wrong. When no break is left, the breaks of the walk that reached
+//! furthest are kept and the walk starts again one letter after that point, so the letter it
+//! stopped at joins the word before. A character outside the dictionary's alphabet at the end of a
+//! word stops the walk, and the rest of the segment joins that word.
+//!
+//! `data/thai-words.txt` holds the words and `data/thai-prefixes.txt` the strings the dictionary
+//! walks through without a word ending, asked of the runtime of `refsearch` for every place of the
+//! 12 000 sentences of `tests/sentences_refsearch.rs` and for the earlier word list, which kept only
+//! the strings the runtime has as words (01-11-2026). Measured: the 12 000 sentences give the
+//! tokens of `refsearch`.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -30,8 +36,20 @@ struct Trie {
 }
 
 impl Trie {
-    fn build(words: &str) -> Trie {
+    /// The trie of `words`, with the paths of `prefixes` (strings the dictionary walks through
+    /// without them being words) as well.
+    fn build(words: &str, prefixes: &str) -> Trie {
         let mut nodes = vec![Node::default()];
+        for p in prefixes.lines().filter(|l| !l.is_empty()) {
+            let mut at = 0;
+            for c in p.chars() {
+                let len = nodes.len();
+                at = *nodes[at].next.entry(c).or_insert(len);
+                if at == len {
+                    nodes.push(Node::default());
+                }
+            }
+        }
         for w in words.lines().filter(|l| !l.is_empty()) {
             let mut at = 0;
             for c in w.chars() {
@@ -48,7 +66,12 @@ impl Trie {
 
     fn get() -> &'static Trie {
         static TRIE: OnceLock<Trie> = OnceLock::new();
-        TRIE.get_or_init(|| Trie::build(include_str!("../../data/thai-words.txt")))
+        TRIE.get_or_init(|| {
+            Trie::build(
+                include_str!("../../data/thai-words.txt"),
+                include_str!("../../data/thai-prefixes.txt"),
+            )
+        })
     }
 }
 
@@ -65,6 +88,13 @@ fn ignorable(c: char) -> bool {
     const ME: usize = 8;
     const CF: usize = 27;
     c != '\u{AD}' && !thai_letter(c) && matches!(props::category(c), MN | ME | CF)
+}
+
+/// Whether the dictionary has no column for `c`: a character to ignore, or one of the Thai
+/// characters outside its alphabet (`ฃ ฅ ํ ๎`, asked of the Java runtime of `refsearch`). At the end of
+/// a word the walk stops there and the rest of the segment joins that word.
+fn outside(c: char) -> bool {
+    matches!(c, '\u{0E03}' | '\u{0E05}' | '\u{0E4D}' | '\u{0E4E}') || ignorable(c)
 }
 
 /// The ends of the words of a run of Thai letters, the last one at `text.len()`. A format
@@ -84,11 +114,11 @@ fn breaks(text: &[char], trie: &Trie) -> Vec<usize> {
         if word {
             possible.push(i);
         }
-        if i < end && ignorable(text[i]) && word {
+        if i < end && outside(text[i]) && word {
             break;
         }
         let next = match text.get(i) {
-            Some(c) if !ignorable(*c) => trie.nodes[node].next.get(c).copied(),
+            Some(c) if !outside(*c) => trie.nodes[node].next.get(c).copied(),
             _ => None,
         };
         if let Some(n) = next {
@@ -142,6 +172,64 @@ fn breaks(text: &[char], trie: &Trie) -> Vec<usize> {
     current
 }
 
+/// Paiyannoi, the abbreviation sign, and maiyamok, the repetition sign: no dictionary characters
+/// for Java's word rules, which join them to the run before them.
+const PAIYANNOI: char = '\u{0E2F}';
+const MAIYAMOK: char = '\u{0E46}';
+const LO_LING: char = '\u{0E25}';
+
+/// Whether `c` is a dictionary character of Java's Thai word rules
+/// (`[\u0e01-\u0e2e\u0e30-\u0e3a\u0e40-\u0e44\u0e47-\u0e4e]`).
+fn dictionary(c: char) -> bool {
+    matches!(c, '\u{0E01}'..='\u{0E2E}' | '\u{0E30}'..='\u{0E3A}' | '\u{0E40}'..='\u{0E44}' | '\u{0E47}'..='\u{0E4E}')
+}
+
+/// Whether `ฯลฯ` starts at `i`.
+fn etc(chars: &[(usize, char)], i: usize) -> bool {
+    let at = |k: usize| chars.get(i + k).map(|&(_, c)| c);
+    at(0) == Some(PAIYANNOI) && at(1) == Some(LO_LING) && at(2) == Some(PAIYANNOI)
+}
+
+/// The end of the segment that Java's Thai word rules start at `i`: `ฯลฯ`; or a run of
+/// dictionary characters (the characters to ignore inside it), then `ๆ` or `ฯๆ`, or `ฯ` when
+/// the character after it is neither `ล` nor one to ignore, or is `ล` followed by neither `ฯ` nor
+/// one to ignore.
+fn segment_end(chars: &[(usize, char)], i: usize) -> usize {
+    if etc(chars, i) {
+        return i + 3;
+    }
+    let at = |k: usize| chars.get(k).map(|&(_, c)| c);
+    let mut j = i;
+    while at(j).is_some_and(|c| dictionary(c) || ignorable(c)) {
+        j += 1;
+    }
+    let free = |c: Option<char>| c.is_some_and(|c| !ignorable(c));
+    match (at(j), at(j + 1)) {
+        (Some(MAIYAMOK), _) => j + 1,
+        (Some(PAIYANNOI), Some(MAIYAMOK)) => j + 2,
+        (Some(PAIYANNOI), Some(LO_LING)) if free(at(j + 2)) && at(j + 2) != Some(PAIYANNOI) => {
+            j + 1
+        }
+        (Some(PAIYANNOI), next) if free(next) && next != Some(LO_LING) => j + 1,
+        _ => j,
+    }
+}
+
+/// The dictionary characters Java's rule-based iterator looks up to find the segment
+/// `start..end`: its own and those it reads past its end before its rules stop, the character a
+/// `ฯ` looks ahead to (two after `ล`) and the one after it, or the one after `ๆ`.
+fn looked_up(chars: &[(usize, char)], start: usize, end: usize) -> usize {
+    let at = |k: usize| chars.get(k).map(|&(_, c)| c);
+    let ahead = |k: usize| if at(k) == Some(LO_LING) { 2 } else { 1 };
+    let past = match (at(end - 1), at(end)) {
+        (Some(PAIYANNOI), _) => ahead(end) + 1,
+        (Some(MAIYAMOK), _) => 1,
+        (_, Some(PAIYANNOI)) => 1 + ahead(end + 1),
+        _ => 0,
+    };
+    (start..end + past).filter(|&k| at(k).is_some_and(dictionary)).count()
+}
+
 /// Whether `c` is a letter or a digit (general category L or Nd), as Java's
 /// `Character.isLetterOrDigit` reads it.
 fn letter_or_digit(c: char) -> bool {
@@ -168,14 +256,18 @@ pub fn thai_words(text: &str) -> Vec<(usize, usize)> {
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i].1;
-        if thai_letter(c) {
+        if dictionary(c) || (c == PAIYANNOI && etc(&chars, i)) {
             let start = i;
-            while i < chars.len() && (thai_letter(chars[i].1) || ignorable(chars[i].1)) {
-                i += 1;
-            }
+            i = segment_end(&chars, i);
             let run: Vec<char> = chars[start..i].iter().map(|&(_, c)| c).collect();
+            // Java divides a segment with the dictionary only when its rules looked up two
+            // dictionary characters or more: `ปฯ,` stays whole, `ปฯ พ` does not.
+            let pieces = match looked_up(&chars, start, i) {
+                0 | 1 => vec![run.len()],
+                _ => breaks(&run, trie),
+            };
             let mut from = 0;
-            for b in breaks(&run, trie) {
+            for b in pieces {
                 if b > from && letter_or_digit(run[from]) {
                     out.push((at(start + from), at(start + b)));
                 }

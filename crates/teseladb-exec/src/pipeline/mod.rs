@@ -550,7 +550,7 @@ fn parse_stage(d: RawDoc<'_>, ctx: &Ctx) -> Result<Stage, MqlError> {
         )?),
         "$search" => Stage::Search("$search", search::parse(name, arg)?),
         "$searchMeta" => Stage::Search("$searchMeta", search::parse(name, arg)?),
-        "$vectorSearch" => Stage::Search("$vectorSearch", search::parse(name, arg)?),
+        "$vectorSearch" => Stage::Search("$vectorSearch", search::parse_vector(arg)?),
         out_merge::OUT => {
             Stage::Write(Box::new(out_merge::Write::Out(out_merge::Out::parse(arg)?)))
         }

@@ -211,7 +211,10 @@ impl Parser {
             self.skip_comments();
             match self.peek() {
                 None | Some('|' | ')') => return Ok(out),
-                Some('*' | '+' | '?' | '{') => return Err(self.error(ErrorKind::DanglingMeta)),
+                Some('*' | '+' | '?') => return Err(self.error(ErrorKind::DanglingMeta)),
+                // Java repeats the empty string with a `{…}` where an atom should be (measured:
+                // `x{2}{3}` compiles, `{` alone is an illegal repetition).
+                Some('{') => out.push_str(&self.quantifier(String::new())?),
                 Some(_) => {
                     let atoms = self.atom()?;
                     let count = atoms.len();

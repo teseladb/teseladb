@@ -33,8 +33,129 @@ pub enum RegexError {
     /// A match ran out of the engine's steps.
     Limit,
     /// A replacement has a `\` or `$` at its end, a `$` without a group, or names a group the
-    /// pattern does not have.
-    Replacement,
+    /// pattern does not have, with the message of `Matcher.appendReplacement`.
+    Replacement(String),
+}
+
+/// A replacement error with Java's message.
+fn bad_replacement(message: &str) -> RegexError {
+    RegexError::Replacement(message.to_owned())
+}
+
+/// The message of the `PatternSyntaxException` Java throws for `error` in `pattern`: the
+/// description, ` near index n` when there is an index, the pattern on its own line and a caret
+/// under the index when it falls inside the pattern.
+pub fn syntax_message(pattern: &str, error: &SyntaxError) -> String {
+    let chars: Vec<char> = pattern.chars().collect();
+    let (description, index) = describe(&chars, error);
+    let mut out = description;
+    if let Some(i) = index {
+        out.push_str(&format!(" near index {i}"));
+    }
+    out.push('\n');
+    out.push_str(pattern);
+    if let Some(i) = index.filter(|&i| i < chars.len()) {
+        out.push('\n');
+        out.push_str(&" ".repeat(i));
+        out.push('^');
+    }
+    out
+}
+
+/// The text between `open` and `close` that ends before `at`, searched backwards.
+fn enclosed(chars: &[char], at: usize, open: char, close: char) -> String {
+    let end = chars[..at.min(chars.len())].iter().rposition(|&c| c == close).unwrap_or(at);
+    let start = chars[..end.min(chars.len())].iter().rposition(|&c| c == open).map_or(0, |s| s + 1);
+    chars[start..end.max(start)].iter().collect()
+}
+
+/// Java's description of `error` and the index it reports.
+fn describe(chars: &[char], error: &SyntaxError) -> (String, Option<usize>) {
+    let at = error.index;
+    let char_at = |i: usize| chars.get(i).copied();
+    let text = match error.kind {
+        ErrorKind::DanglingMeta => {
+            format!("Dangling meta character '{}'", char_at(at).unwrap_or(' '))
+        }
+        ErrorKind::IllegalRepetition if char_at(at.wrapping_sub(1)) == Some('}') => {
+            return ("Illegal repetition range".into(), Some(at - 1));
+        }
+        ErrorKind::IllegalRepetition => "Illegal repetition".into(),
+        ErrorKind::RepetitionTooLarge => {
+            return ("Illegal repetition range".into(), Some(overflow_digit(chars, at)));
+        }
+        ErrorKind::UnclosedGroup => "Unclosed group".into(),
+        ErrorKind::UnmatchedClose => {
+            return ("Unmatched closing ')'".into(), at.checked_sub(1));
+        }
+        ErrorKind::UnclosedClass => return ("Unclosed character class".into(), Some(at - 1)),
+        ErrorKind::IllegalRange => return ("Illegal character range".into(), Some(at - 1)),
+        ErrorKind::IllegalEscape if at >= chars.len() => "Unescaped trailing backslash".into(),
+        ErrorKind::IllegalEscape => "Illegal/unsupported escape sequence".into(),
+        ErrorKind::IllegalCharacter => {
+            let slash = chars[..at.min(chars.len())].iter().rposition(|&c| c == '\\');
+            let slash = slash.unwrap_or(0);
+            match char_at(slash + 1) {
+                Some('x') => {
+                    return ("Illegal hexadecimal escape sequence".into(), Some(slash + 2));
+                }
+                Some('u') => "Illegal Unicode escape sequence".into(),
+                Some('c') => return ("Illegal control escape sequence".into(), Some(slash + 1)),
+                Some('N') => {
+                    let name = enclosed(chars, at + 1, '{', '}');
+                    format!("Unknown character name [{name}]")
+                }
+                _ => "Illegal octal escape sequence".into(),
+            }
+        }
+        ErrorKind::UnknownProperty => {
+            let name = enclosed(chars, at, '{', '}');
+            return (format!("Unknown character property name {{{name}}}"), Some(at - 1));
+        }
+        ErrorKind::UnknownGroup if char_at(at.wrapping_sub(1)) == Some('?') => {
+            "Unknown inline modifier".into()
+        }
+        ErrorKind::UnknownGroup => "Unknown group type".into(),
+        ErrorKind::BadGroupName => return bad_group_name(chars, at),
+    };
+    (text, Some(at))
+}
+
+/// The index of the digit at which the count of the repetition that ends before `at` passes
+/// `i32::MAX`, where Java stops.
+fn overflow_digit(chars: &[char], at: usize) -> usize {
+    let end = at.min(chars.len());
+    let open = chars[..end].iter().rposition(|&c| c == '{').unwrap_or(0);
+    let mut value: i64 = 0;
+    for (i, c) in chars.iter().enumerate().take(end).skip(open + 1) {
+        let Some(d) = c.to_digit(10) else {
+            value = 0;
+            continue;
+        };
+        value = value * 10 + i64::from(d);
+        if value > i64::from(i32::MAX) {
+            return i;
+        }
+    }
+    at.saturating_sub(1)
+}
+
+/// The three group name errors: a name that does not start with a letter, a name used twice and
+/// a back reference to a name that does not exist.
+fn bad_group_name(chars: &[char], at: usize) -> (String, Option<usize>) {
+    let before: String = chars[..at.min(chars.len())].iter().collect();
+    let open = before.rfind('<').map_or(0, |b| before[..b].chars().count());
+    let name: String = chars.iter().skip(open + 1).take_while(|&&c| c != '>').collect();
+    if !name.starts_with(|c: char| c.is_ascii_alphabetic()) {
+        let text = "capturing group name does not start with a Latin letter".into();
+        return (text, Some(open + 1));
+    }
+    let text = if open >= 2 && chars[open - 2] == '\\' && chars[open - 1] == 'k' {
+        format!("named capturing group <{name}> does not exist")
+    } else {
+        format!("Named capturing group <{name}> is already defined")
+    };
+    (text, Some(at - 1))
 }
 
 /// A compiled Java pattern.
@@ -96,30 +217,39 @@ impl JavaRegex {
         while i < chars.len() {
             match chars[i] {
                 '\\' => {
-                    text.push(*chars.get(i + 1).ok_or(RegexError::Replacement)?);
+                    text.push(
+                        *chars
+                            .get(i + 1)
+                            .ok_or_else(|| bad_replacement("character to be escaped is missing"))?,
+                    );
                     i += 2;
                 }
                 '$' => {
                     out.push(Piece::Text(std::mem::take(&mut text)));
                     i += 1;
                     let group = if chars.get(i) == Some(&'{') {
-                        let end = chars[i..]
-                            .iter()
-                            .position(|&c| c == '}')
-                            .ok_or(RegexError::Replacement)?
-                            + i;
+                        let end = chars[i..].iter().position(|&c| c == '}').ok_or_else(|| {
+                            bad_replacement("named capturing group is missing trailing '}'")
+                        })? + i;
                         let name: String = chars[i + 1..end].iter().collect();
+                        if name.is_empty() {
+                            return Err(bad_replacement("named capturing group has 0 length name"));
+                        }
                         i = end + 1;
-                        self.names
-                            .iter()
-                            .find(|(n, _)| *n == name)
-                            .map(|&(_, g)| g)
-                            .ok_or(RegexError::Replacement)?
+                        self.names.iter().find(|(n, _)| *n == name).map(|&(_, g)| g).ok_or_else(
+                            || bad_replacement(&format!("No group with name {{{name}}}")),
+                        )?
                     } else {
-                        let first = chars
-                            .get(i)
-                            .and_then(|c| c.to_digit(10))
-                            .ok_or(RegexError::Replacement)?;
+                        let first = match chars.get(i) {
+                            None => {
+                                return Err(bad_replacement(
+                                    "Illegal group reference: group index is missing",
+                                ));
+                            }
+                            Some(c) => c
+                                .to_digit(10)
+                                .ok_or_else(|| bad_replacement("Illegal group reference"))?,
+                        };
                         let mut group = first as usize;
                         i += 1;
                         while let Some(d) = chars.get(i).and_then(|c| c.to_digit(10)) {
@@ -132,7 +262,7 @@ impl JavaRegex {
                         group
                     };
                     if group > self.groups {
-                        return Err(RegexError::Replacement);
+                        return Err(bad_replacement(&format!("No group {group}")));
                     }
                     out.push(Piece::Group(group));
                 }

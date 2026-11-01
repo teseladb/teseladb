@@ -512,4 +512,12 @@ fn the_leader_gives_a_stream_its_versions_up_to_the_closed_mark() {
         Ok(Reply::Changes { oldest_intent, .. }) => assert_eq!(oldest_intent, Some(at)),
         other => panic!("not changes: {other:?}"),
     }
+    // 014 FR-010: an interval the range no longer holds whole (a split shrank it under a stale
+    // table) is refused, never answered for the part it holds, so the cursor reads it again.
+    for (start, end) in [(&b"\x01"[..], &b"\x04"[..]), (b"\x00", b"\x02"), (b"\x01b", b"\x01b")] {
+        let req = ChangesReq { g: G, start: start.to_vec(), end: end.to_vec(), from: a };
+        let now = n.now;
+        let id = n.host.changes(&mut n.core, req, now);
+        assert_eq!(n.answer(id), Err(RangeError::OutOfRange), "{start:?}..{end:?}");
+    }
 }

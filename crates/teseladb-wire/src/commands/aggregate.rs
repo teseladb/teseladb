@@ -410,6 +410,11 @@ impl<B: Backend + ?Sized> Env for WireEnv<'_, B> {
     }
 
     fn check_search(&self, stage: &str, spec: &Document) -> Result<(), MqlError> {
+        // Only `$search` asks `refsearch` while the pipeline is planned (measured on 9.0.4: the
+        // errors of `$searchMeta` and `$vectorSearch` carry the executor's prefix).
+        if stage != "$search" {
+            return Ok(());
+        }
         let Some((shared, ns)) = &self.node else { return Ok(()) };
         let mut backend = self.backend.borrow_mut();
         let found =
@@ -551,6 +556,32 @@ pub(crate) fn read_through_staged<B: Backend + ?Sized>(
     Ok(pipeline.run(docs, &env).map(|out| (out, sbe)).map_err(from_mql))
 }
 
+/// Runs `stages` (BSON documents) of database `db` over `docs`, as the stages of a view run
+/// (no search stages, simple collation).
+pub(crate) fn run_stages<B: Backend + ?Sized>(
+    backend: &mut B,
+    db: &str,
+    stages: &[Vec<u8>],
+    docs: Vec<Document>,
+) -> Result<Vec<Document>, CommandError> {
+    let raws: Vec<RawDoc<'_>> =
+        stages.iter().map(|b| RawDoc::from_bytes(b)).collect::<Result<_, _>>()?;
+    let values: Vec<RawValue<'_>> = raws.into_iter().map(RawValue::Document).collect();
+    let pipeline = Pipeline::parse(&values, &ExprCtx::checked(std::iter::empty::<&str>()))
+        .map_err(from_mql)?;
+    let env = WireEnv {
+        backend: RefCell::new(backend),
+        db,
+        vars: Document::new(),
+        concern: ReadConcern::Local,
+        collation: collation_value(None)?,
+        allow_disk_use: true,
+        node: None,
+        searched: RefCell::new(Vec::new()),
+    };
+    pipeline.run(docs, &env).map_err(from_mql)
+}
+
 /// The arguments of `aggregate` besides its pipeline.
 struct AggregateArgs {
     batch_size: Option<usize>,
@@ -565,6 +596,10 @@ struct AggregateArgs {
 /// Reads the `cursor` document: `batchSize` only.
 fn cursor_batch_size(cmd: &Document) -> Result<Option<usize>, CommandError> {
     let c = match cmd.get("cursor") {
+        // `explain: true` needs no cursor (measured on a `refnode` 9.0.4).
+        None if matches!(cmd.get(super::explain::EXPLAIN), Some(Value::Boolean(true))) => {
+            return Ok(None);
+        }
         None => {
             return Err(CommandError::new(
                 FAILED_TO_PARSE,
@@ -876,8 +911,7 @@ fn planned_read<B: Backend + ?Sized>(
             .with("projection", Document::new()),
         shape: super::plan_cache::read_shape(&parsed, sort.as_ref(), None, None),
     };
-    let Some((found, keys)) =
-        super::plan_exec::planned_keyed(ctx.backend, &coll, &read, Some(note))?
+    let Some((found, keys)) = super::plan_exec::planned_keyed(ctx.backend, &coll, &read, note)?
     else {
         return Ok(None);
     };
