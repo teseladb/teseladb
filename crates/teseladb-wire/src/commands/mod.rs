@@ -240,6 +240,11 @@ pub trait Backend {
     fn kill_everywhere(&mut self, _scope: &session::KillScope) -> Result<(), CommandError> {
         Ok(())
     }
+    /// The operations in progress on the other nodes of the cluster, as `currentOp` describes
+    /// them ([`admin::node_operations`], 010 T033); a node alone has no others.
+    fn other_operations(&mut self) -> Result<Vec<Document>, CommandError> {
+        Ok(Vec::new())
+    }
     /// The documents of collection `coll` of `config` that the node generates from its copy of
     /// Group 0 (007 FR-017, [`config_db`]); a backend without a cluster has none.
     fn config_documents(&mut self, _coll: &str) -> Result<Vec<Document>, CommandError> {

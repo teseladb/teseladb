@@ -1334,6 +1334,10 @@ impl Backend for TxnBackend<'_> {
         self.inner.kill_everywhere(scope)
     }
 
+    fn other_operations(&mut self) -> Result<Vec<Document>, CommandError> {
+        self.inner.other_operations()
+    }
+
     fn config_documents(&mut self, coll: &str) -> Result<Vec<Document>, CommandError> {
         self.inner.config_documents(coll)
     }

@@ -43,6 +43,8 @@ pub struct Mem {
     /// The kills sent to the other nodes; with `Some`, the next one fails with that error.
     pub killed: Vec<KillScope>,
     pub fail_kill: Option<CommandError>,
+    /// The operations of the other nodes of the cluster, as each node describes its own.
+    pub other_ops: Vec<Document>,
     /// Milliseconds the clock moves with each read of the range.
     pub tick: u64,
     /// The users and passwords the LDAP server of the node takes (013 PLAIN).
@@ -593,6 +595,10 @@ impl Backend for Mem {
         }
         self.killed.push(scope.clone());
         Ok(())
+    }
+
+    fn other_operations(&mut self) -> Result<Vec<Document>, CommandError> {
+        Ok(self.other_ops.clone())
     }
 
     fn cluster_parameters(&mut self) -> Result<BTreeMap<String, Vec<u8>>, CommandError> {

@@ -512,6 +512,10 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         self.inner.kill_everywhere(scope)
     }
 
+    fn other_operations(&mut self) -> Result<Vec<Document>, CommandError> {
+        self.inner.other_operations()
+    }
+
     fn config_documents(&mut self, coll: &str) -> Result<Vec<Document>, CommandError> {
         let all = self.call(|b| b.config_documents(coll))?;
         Ok(tenants::own_config_documents(self.tenant, all))

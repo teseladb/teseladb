@@ -157,7 +157,7 @@ impl<B: Backend + ?Sized> WireEnv<'_, B> {
         Ok(out)
     }
 
-    /// `$currentOp`: the operations running on the node, as `currentOp` describes them.
+    /// `$currentOp`: the operations running on every node, as `currentOp` describes them.
     fn current_ops(&self) -> Result<Vec<Document>, CommandError> {
         let Some((shared, _)) = &self.node else { return Ok(Vec::new()) };
         let mut backend = self.backend.borrow_mut();
