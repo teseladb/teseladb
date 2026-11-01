@@ -1201,3 +1201,50 @@ fn field_of(r: &Document) -> String {
         other => panic!("{other:?}"),
     }
 }
+
+/// The ObjectIds an insert gives (the ObjectId specification): the seconds, five random bytes of
+/// the node, and a counter that grows from a random start, so that they sort in the order the
+/// documents came.
+#[test]
+fn generated_ids_keep_the_order_of_the_inserts() {
+    let mut m = Mem::new();
+    let docs: Vec<Value> =
+        (0..50).map(|i| Value::Document(doc(&[("i", Value::Int32(i))]))).collect();
+    m.run("db", Document::new().with("insert", "c").with("documents", Value::Array(docs)));
+    m.run(
+        "db",
+        Document::new()
+            .with("insert", "c")
+            .with("documents", vec![Value::Document(doc(&[("i", Value::Int32(50))]))]),
+    );
+    let r = m.run(
+        "db",
+        Document::new()
+            .with("find", "c")
+            .with("sort", doc(&[("_id", 1.into())]))
+            .with("batchSize", 100),
+    );
+    let Value::Document(cursor) = field(&r, "cursor") else { panic!("{r:?}") };
+    let Some(Value::Array(found)) = cursor.get("firstBatch") else { panic!("{r:?}") };
+    let order: Vec<Value> = found
+        .iter()
+        .map(|d| match d {
+            Value::Document(d) => d.get("i").cloned().unwrap_or(Value::Null),
+            other => other.clone(),
+        })
+        .collect();
+    let want: Vec<Value> = (0..51).map(Value::Int32).collect();
+    assert_eq!(order, want);
+    let ids: Vec<[u8; 12]> = found
+        .iter()
+        .filter_map(|d| match d {
+            Value::Document(d) => match d.get("_id") {
+                Some(Value::ObjectId(id)) => Some(*id),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    // One node, one random part.
+    assert!(ids.windows(2).all(|w| w[0][4..9] == w[1][4..9]));
+}

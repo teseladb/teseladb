@@ -113,6 +113,9 @@ fn the_fields_a_pipeline_uses_are_those_it_reads() {
         list(&["_id", "n", "o.k", "s"])
     );
     assert_eq!(fields(r#"[{"$project":{"_id":0,"s":1}}]"#), list(&["s"]));
+    // A projection of `_id` alone keeps it (measured: `PROJECTION_COVERED` over `_id_`).
+    assert_eq!(fields(r#"[{"$project":{"_id":1}}]"#), list(&["_id"]));
+    assert_eq!(fields(r#"[{"$project":{"_id":0}},{"$group":{"_id":"$s"}}]"#), list(&["s"]));
     assert_eq!(
         fields(
             r#"[{"$match":{"g":"a","$or":[{"n":1},{"$expr":{"$eq":["$$ROOT.x",1]}}],"$comment":"c"}},{"$sort":{"s":1}},{"$skip":1},{"$limit":2},{"$bucket":{"groupBy":"$d","boundaries":[0,1]}}]"#
