@@ -120,7 +120,7 @@ impl Score {
             match k {
                 "score" => {
                     score = Some(Expr::parse_in(x, ctx)?);
-                    shown = expression_shown(x)?;
+                    shown = shown_expression(x)?;
                 }
                 "normalization" => {
                     normalization = match x {
@@ -257,7 +257,7 @@ impl Score {
 /// The `expression` of `scoreDetails`: the argument under a `string` field, written as the
 /// server writes BSON in its messages with its strings in single quotes (measured:
 /// `{ string: { $add: [ '$_id', 1 ] } }`).
-fn expression_shown(x: RawValue<'_>) -> Result<String, MqlError> {
+pub(crate) fn shown_expression(x: RawValue<'_>) -> Result<String, MqlError> {
     let holder = Document::new().with("string", Value::from(x));
     let bytes = crate::raw::bytes_of(&holder)?;
     let raw = teseladb_bson::RawDoc::from_bytes(&bytes).map_err(crate::raw::bad)?;
@@ -288,7 +288,7 @@ pub(crate) fn check_available(stages: &[RawValue<'_>]) -> Result<(), MqlError> {
                 return Err(crate::expr::missing_meta(r));
             }
         }
-        if name == "$score" {
+        if matches!(name, "$score" | "$rankFusion" | "$scoreFusion") {
             available.push(SCORE);
             if let RawValue::Document(s) = arg
                 && s.get("scoreDetails").is_some_and(|v| crate::expr::truthy(&Some(Value::from(v))))

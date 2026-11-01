@@ -7,6 +7,7 @@
 pub mod deps;
 pub mod errors;
 mod fill;
+pub mod fusion;
 pub mod geo_near;
 mod granularity;
 mod group;
@@ -115,6 +116,7 @@ enum Stage {
     GraphLookup(Box<fill::GraphLookup>),
     GeoNear(Box<geo_near::GeoNear>),
     Score(Box<meta::Score>),
+    Fusion(Box<fusion::Fusion>),
     /// A stage the node answers itself, first in its pipeline.
     System(&'static str, Document),
     /// `$out` or `$merge`, last: the node writes what reaches it.
@@ -184,6 +186,9 @@ impl Pipeline {
 
     /// Refuses `$documents` and the stages the node answers itself anywhere but first.
     fn check_positions(&self) -> Result<(), MqlError> {
+        if self.stages.iter().skip(1).any(|s| matches!(s, Stage::Fusion(_))) {
+            return Err(fusion::not_first());
+        }
         // `$geoNear` goes first, after the `$match`es it takes as its query (measured).
         let leading = self.stages.iter().take_while(|s| matches!(s, Stage::Match(_))).count();
         if self
@@ -232,6 +237,14 @@ impl Pipeline {
             }
         }
         Ok(())
+    }
+
+    /// The last `$sort` of the pipeline.
+    pub(crate) fn last_sort(&self) -> Option<&SortSpec> {
+        self.stages.iter().rev().find_map(|s| match s {
+            Stage::Sort(sort) => Some(sort),
+            _ => None,
+        })
     }
 
     /// Whether the pipeline has no stage.
@@ -301,6 +314,11 @@ impl Pipeline {
         let mut sbe = sbe && !self.starts_with_documents();
         for (st, spec) in self.stages.iter().zip(&self.sbe_specs) {
             sbe = sbe && *spec && sbe_capable(st);
+            if let Stage::Fusion(f) = st {
+                let (fused, scores) = f.run(docs, env)?;
+                (docs, metas) = (fused, Some(scores));
+                continue;
+            }
             if let Stage::Score(s) = st {
                 let own = metas.take().unwrap_or_else(|| vec![meta::Meta::new(); docs.len()]);
                 metas = Some(s.run(&docs, &own, env)?);
@@ -417,6 +435,9 @@ fn parse_stage(d: RawDoc<'_>, ctx: &Ctx) -> Result<Stage, MqlError> {
         "$collStats" => Stage::System("$collStats", system::coll_stats(arg)?),
         "$geoNear" => Stage::GeoNear(Box::new(geo_near::GeoNear::parse(arg, ctx)?)),
         "$score" => Stage::Score(Box::new(meta::Score::parse(arg, ctx)?)),
+        "$rankFusion" | "$scoreFusion" => {
+            Stage::Fusion(Box::new(fusion::Fusion::parse(name, arg, ctx)?))
+        }
         "$listLocalSessions" => {
             Stage::System("$listLocalSessions", system::sessions("$listLocalSessions", arg)?)
         }
@@ -549,6 +570,7 @@ fn sbe_capable(st: &Stage) -> bool {
         | Stage::GraphLookup(_)
         | Stage::GeoNear(_)
         | Stage::Score(_)
+        | Stage::Fusion(_)
         | Stage::System(..)
         | Stage::Write(_) => false,
     }
@@ -606,6 +628,7 @@ fn run_stage(
         Stage::GeoNear(g) => g.run(docs, env)?,
         // Without metadata before it, `$score` gives each document its own.
         Stage::Score(_) => docs,
+        Stage::Fusion(f) => f.run(docs, env)?.0,
         Stage::System(name, spec) => env.system_stage(name, spec)?,
         // The node writes what reaches it (`out_merge`).
         Stage::Write(_) => docs,

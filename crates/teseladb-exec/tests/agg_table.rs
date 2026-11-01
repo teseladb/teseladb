@@ -292,6 +292,12 @@ fn metadata_follows_the_documents_as_refdb() {
     check(include_str!("agg/meta.out"));
 }
 
+/// `$rankFusion` and `$scoreFusion` (010 T042): their scores, their order and their errors.
+#[test]
+fn fusion_stages_match_refdb() {
+    check(include_str!("agg/fusion.out"));
+}
+
 /// The arguments of `$function` and `$accumulator` (010 T012), checked before any JavaScript
 /// runs; this node has no engine.
 #[test]
