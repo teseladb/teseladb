@@ -12,10 +12,9 @@ workspace = true
 
 [dependencies]
 teseladb-crypto = { path = "../teseladb-crypto" }
+teseladb-deflate = { path = "../teseladb-deflate" }
 teseladb-hash = { path = "../teseladb-hash" }
 teseladb-keys = { path = "../teseladb-keys" }
 teseladb-mql = { path = "../teseladb-mql" }
 teseladb-types = { path = "../teseladb-types" }
 
-[dev-dependencies]
-teseladb-deflate = { path = "../teseladb-deflate" }

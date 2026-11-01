@@ -6,6 +6,7 @@ pub mod charfilters;
 pub mod jregex;
 pub mod language;
 pub mod morfologik;
+pub mod morph;
 pub mod normalize;
 pub mod props;
 pub mod snowball;

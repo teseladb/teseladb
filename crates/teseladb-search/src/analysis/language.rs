@@ -33,6 +33,7 @@ const STOPWORDS: &[(&str, &str)] = &[
     ("indonesian", include_str!("stopwords/indonesian.txt")),
     ("irish", include_str!("stopwords/irish.txt")),
     ("italian", include_str!("stopwords/italian.txt")),
+    ("kuromoji", include_str!("stopwords/kuromoji.txt")),
     ("latvian", include_str!("stopwords/latvian.txt")),
     ("lithuanian", include_str!("stopwords/lithuanian.txt")),
     ("norwegian", include_str!("stopwords/norwegian.txt")),
@@ -90,6 +91,15 @@ fn elision(articles: &[&str]) -> TokenFilter {
 
 /// The character filters, tokenizer and token filters of `reflib.<language>`.
 pub fn language(language: &str) -> Option<(Vec<CharFilter>, Tokenizer, Vec<TokenFilter>)> {
+    match language {
+        "kuromoji" => {
+            let stop = TokenFilter::Stopword { tokens: stopwords(language)?, ignore_case: true };
+            let filters = vec![stop, TokenFilter::JapaneseKatakanaStemming, TokenFilter::Lowercase];
+            return Some((vec![], Tokenizer::Kuromoji, filters));
+        }
+        "nori" => return Some((vec![], Tokenizer::Nori, vec![TokenFilter::Lowercase])),
+        _ => {}
+    }
     let cjk = CJK_ANALYZERS.contains(&language);
     let list = if cjk { "cjk" } else { language };
     let stop = TokenFilter::Stopword { tokens: stopwords(list)?, ignore_case: false };

@@ -35,6 +35,7 @@ mod stemmers;
 
 use arabic_script::{persian_normal, persian_stem, sorani_normal, sorani_stem};
 use brazilian::brazilian_stem;
+pub(crate) use cjk::cjk_width_offsets;
 use cjk::{cjk_bigrams, cjk_width};
 use indic::{bengali_normal, bengali_stem, hindi_normal, hindi_stem, indic_normal};
 use inflection::{bulgarian_stem, czech_stem, indonesian_stem, latvian_stem};
@@ -225,6 +226,9 @@ pub enum TokenFilter {
     BengaliStemming,
     /// The stemmer of the Brazilian Portuguese analyzer.
     BrazilianStemming,
+    /// Drops the final prolonged sound mark of Katakana words of 4 or more characters
+    /// (Japanese analyzer).
+    JapaneseKatakanaStemming,
     /// Writes Sorani in one spelling (Sorani analyzer).
     SoraniNormalization,
     /// Removes the Sorani postpositions, possessives and noun endings (Sorani analyzer).
@@ -347,6 +351,16 @@ fn rewrite(tokens: Vec<Token>, skip_keywords: bool, f: impl Fn(&str) -> String) 
         .into_iter()
         .map(|t| if skip_keywords && t.keyword { t } else { with_text(&t, f(&t.text)) })
         .collect()
+}
+
+/// `text` without its final `ー` when it is all Katakana (U+30A0 to U+30FF) and has at least 4
+/// UTF-16 units.
+fn katakana_stem(text: &str) -> String {
+    let katakana = text.chars().all(|c| ('\u{30A0}'..='\u{30FF}').contains(&c));
+    match text.strip_suffix('ー') {
+        Some(stem) if katakana && text.encode_utf16().count() >= 4 => stem.to_string(),
+        _ => text.to_string(),
+    }
 }
 
 /// `text` with the Arabic alef variants as plain alef, `ى` as `ي`, `ة` as `ه`, and without
@@ -603,6 +617,7 @@ impl TokenFilter {
             TokenFilter::BengaliNormalization => rewrite(tokens, false, bengali_normal),
             TokenFilter::BengaliStemming => rewrite(tokens, true, bengali_stem),
             TokenFilter::BrazilianStemming => rewrite(tokens, true, brazilian_stem),
+            TokenFilter::JapaneseKatakanaStemming => rewrite(tokens, true, katakana_stem),
             TokenFilter::SoraniNormalization => rewrite(tokens, false, sorani_normal),
             TokenFilter::SoraniStemming => rewrite(tokens, true, sorani_stem),
             TokenFilter::Regex { pattern, replacement, matches } => {

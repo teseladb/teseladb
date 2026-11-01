@@ -14,27 +14,32 @@ const SEMI_VOICED: char = '\u{309A}';
 /// `text` with full-width ASCII as ASCII and half-width Katakana as full-width Katakana; a
 /// half-width sound mark joins the letter before it when they compose.
 pub(super) fn cjk_width(text: &str) -> String {
-    let mut out: Vec<char> = Vec::with_capacity(text.len());
-    for c in text.chars() {
+    cjk_width_offsets(text).into_iter().map(|(c, _)| c).collect()
+}
+
+/// The characters of [`cjk_width`] with the byte offset in `text` where each one starts.
+pub(crate) fn cjk_width_offsets(text: &str) -> Vec<(char, usize)> {
+    let mut out: Vec<(char, usize)> = Vec::with_capacity(text.len());
+    for (at, c) in text.char_indices() {
         match c {
             '\u{FF01}'..='\u{FF5E}' => {
-                out.push(char::from_u32(c as u32 - 0xFEE0).unwrap_or(c));
+                out.push((char::from_u32(c as u32 - 0xFEE0).unwrap_or(c), at));
             }
             '\u{FF65}'..='\u{FF9F}' => {
                 let wide = normalize(&c.to_string(), Form::Nfkc);
                 let mark = wide.chars().next().filter(|&m| m == VOICED || m == SEMI_VOICED);
                 match (mark, out.last().copied()) {
-                    (Some(m), Some(p)) if compose(p, m).is_some() => {
+                    (Some(m), Some((p, from))) if compose(p, m).is_some() => {
                         out.pop();
-                        out.extend(compose(p, m));
+                        out.extend(compose(p, m).map(|c| (c, from)));
                     }
-                    _ => out.extend(wide.chars()),
+                    _ => out.extend(wide.chars().map(|c| (c, at))),
                 }
             }
-            c => out.push(c),
+            c => out.push((c, at)),
         }
     }
-    out.into_iter().collect()
+    out
 }
 
 /// Whether `c` is a character the bigram filter joins: Han (but the Han letters of word-break
