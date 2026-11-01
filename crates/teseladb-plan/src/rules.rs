@@ -1,6 +1,6 @@
 //! The plans a query may take (010 FR-001, T014), by the rule RefDb's planner follows
 //! (measured on a `refrouter` 9.0.4, 01-11-2026): an index whose first field the filter constrains
-//! scans its leading fields' intervals, equalities first and one range after them; an index that
+//! scans the intervals of each of its fields; an index that
 //! gives the order of the sort is a plan even when the filter does not constrain it; a `$or`
 //! whose every clause has an index scans each and joins them; without any, the collection is
 //! scanned. The clauses an index decides alone leave the filter; the others filter what it
@@ -242,9 +242,12 @@ fn scan(pos: usize, index: &IndexMeta, clauses: &[Document], sort: &[(String, i3
     let mut assigned = 0;
     let mut preds = Vec::new();
     let mut bounds = Vec::new();
-    let mut open = true;
-    for (field, _) in &index.key {
-        if !open {
+    // Every field takes the intervals of its clauses, also after a range or a field without
+    // any, once the leading field has one: the scan checks each key against them and seeks past
+    // those outside (measured on a `refrouter` 9.0.4: `{g: {$gt: "a"}, n: 5}` over `{g: 1, n: 1}`
+    // scans `n` in `[5, 5]`; a hinted index whose leading field has no clause scans everything).
+    for (pos, (field, _)) in index.key.iter().enumerate() {
+        if pos > 0 && assigned == 0 {
             bounds.push((field.clone(), vec![Bound::all()]));
             continue;
         }
@@ -271,16 +274,12 @@ fn scan(pos: usize, index: &IndexMeta, clauses: &[Document], sort: &[(String, i3
         }
         match field_bounds {
             Some(b) => {
-                open = b.iter().all(Bound::is_point);
                 for i in taken {
                     used[i] = true;
                 }
                 bounds.push((field.clone(), b));
             }
-            None => {
-                open = false;
-                bounds.push((field.clone(), vec![Bound::all()]));
-            }
+            None => bounds.push((field.clone(), vec![Bound::all()])),
         }
     }
     let (sorts, backward) = sort_order(index, &bounds, sort);

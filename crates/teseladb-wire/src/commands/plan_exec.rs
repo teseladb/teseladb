@@ -15,6 +15,7 @@ use teseladb_keys::{
 use teseladb_meta::catalog::CollectionEntry;
 use teseladb_meta::collection_types::CollectionKind;
 use teseladb_meta::indexes::{IndexEntry, IndexState as EntryState};
+use teseladb_plan::checker::{FieldWalk, Visit, walk};
 use teseladb_plan::cost::{TRIAL_RESULTS, Trial, ranked, score, trial_works};
 use teseladb_plan::logical::Bound;
 use teseladb_plan::rules::{
@@ -257,6 +258,9 @@ pub(crate) struct Ran {
     /// What each scan of a `$or` gave the `OR`: its entries, or the documents its own filter
     /// kept.
     pub child_given: Vec<u64>,
+    /// Seeks of its scans: one each, and one more for each key outside the intervals of a scan
+    /// that checks its keys.
+    pub seeks: u64,
 }
 
 /// What a plan counted at the end of the trial, and its score.
@@ -459,6 +463,7 @@ fn run<B: Backend + ?Sized>(
         child_keys: Vec::new(),
         child_past: Vec::new(),
         child_given: Vec::new(),
+        seeks: 0,
     };
     let scans: Vec<IndexScan> = match &access {
         Access::Collscan => {
@@ -507,7 +512,9 @@ fn run<B: Backend + ?Sized>(
         ran.child_given.push(0);
         let residual = s.residual.as_ref().map(&plan_filter).transpose()?;
         let decode = read.index_keys && !index.id_index;
-        for entry in entries(backend, (coll.tenant, coll.id), index, s, read.concern, decode)? {
+        let scanned = entries(backend, (coll.tenant, coll.id), index, s, read.concern, decode)?;
+        ran.seeks += scanned.seeks;
+        for entry in scanned.entries {
             if budget.is_some_and(|b| ran.keys >= b) {
                 ended = false;
                 break 'scans;
@@ -517,7 +524,7 @@ fn run<B: Backend + ?Sized>(
                 *k += 1;
             }
             last_past = entry.is_none();
-            let Some(Entry { pk, key: index_key }) = entry else {
+            let Some(Entry { pk, key: index_key, .. }) = entry else {
                 ran.past += 1;
                 if let Some(p) = ran.child_past.last_mut() {
                     *p += 1;
@@ -619,7 +626,8 @@ fn intersected<B: Backend + ?Sized>(
     let mut sets: Vec<std::collections::BTreeSet<Vec<u8>>> = Vec::new();
     for s in held {
         let read_entries =
-            entries(backend, (coll.tenant, coll.id), &indexes[s.index], s, read.concern, false)?;
+            entries(backend, (coll.tenant, coll.id), &indexes[s.index], s, read.concern, false)?
+                .entries;
         let n = u64::try_from(read_entries.len()).unwrap_or(u64::MAX);
         let outside = read_entries.iter().filter(|e| e.is_none()).count();
         let past = u64::try_from(outside).unwrap_or(u64::MAX);
@@ -634,7 +642,8 @@ fn intersected<B: Backend + ?Sized>(
     ran.child_keys.push(0);
     ran.child_past.push(0);
     let last_index = &indexes[last.index];
-    for entry in entries(backend, (coll.tenant, coll.id), last_index, last, read.concern, false)? {
+    let scanned = entries(backend, (coll.tenant, coll.id), last_index, last, read.concern, false)?;
+    for entry in scanned.entries {
         ran.keys += 1;
         if let Some(k) = ran.child_keys.last_mut() {
             *k += 1;
@@ -687,7 +696,10 @@ fn entries<B: Backend + ?Sized>(
     scan: &IndexScan,
     concern: ReadConcern,
     decode: bool,
-) -> Result<Vec<Option<Entry>>, CommandError> {
+) -> Result<Scanned, CommandError> {
+    if checks_keys(scan) {
+        return walked(backend, (tenant, collection), index, scan, concern, decode);
+    }
     let ranges = key_ranges((tenant, collection), index, &scan.bounds)?;
     let (first, past) = index_span((tenant, collection), index);
     let mut lists = Vec::new();
@@ -722,7 +734,82 @@ fn entries<B: Backend + ?Sized>(
             out.push(None);
         }
     }
-    Ok(out)
+    Ok(Scanned { entries: out, seeks: 1 })
+}
+
+/// The entries a scan examined, in its order, and its seeks.
+struct Scanned {
+    entries: Vec<Option<Entry>>,
+    seeks: u64,
+}
+
+/// Whether a scan of `scan` checks each key against the intervals of a field after one with a
+/// range, which its key ranges cannot hold.
+fn checks_keys(scan: &IndexScan) -> bool {
+    let all = vec![Bound::all()];
+    let range = scan.bounds.iter().position(|(_, b)| !b.iter().all(Bound::is_point));
+    range.is_some_and(|i| scan.bounds[i + 1..].iter().any(|(_, b)| *b != all))
+}
+
+/// The entries of a scan that checks its keys ([`checks_keys`]): every entry from its first
+/// interval to its last, walked as RefDb's index bounds checker walks them
+/// ([`teseladb_plan::checker`]), and the next entry of the index when the walk runs out of
+/// them, which is outside the leading field's intervals.
+fn walked<B: Backend + ?Sized>(
+    backend: &mut B,
+    (tenant, collection): (u32, u32),
+    index: &PlanIndex,
+    scan: &IndexScan,
+    concern: ReadConcern,
+    decode: bool,
+) -> Result<Scanned, CommandError> {
+    let ranges = key_ranges((tenant, collection), index, &scan.bounds)?;
+    let (first, past) = index_span((tenant, collection), index);
+    let (Some(low), Some(high)) = (ranges.first(), ranges.last()) else {
+        return Ok(Scanned { entries: Vec::new(), seeks: 1 });
+    };
+    let span = KeyRange { start: low.start.clone(), end: high.end.clone() };
+    let mut read = range_entries(backend, (tenant, collection), index, &span, (concern, true))?;
+    if scan.backward {
+        read.reverse();
+    }
+    let fields: Vec<FieldWalk> = scan
+        .bounds
+        .iter()
+        .zip(&index.meta.key)
+        .map(|((_, b), (_, dir))| FieldWalk {
+            bounds: b.clone(),
+            ascending: (*dir < 0) == scan.backward,
+        })
+        .collect();
+    let values: Vec<Vec<Value>> =
+        read.iter().map(|e| e.values.clone().unwrap_or_default()).collect();
+    let w = walk(&fields, &values);
+    let mut slots: Vec<Option<Entry>> = read.into_iter().map(Some).collect();
+    let mut out = Vec::new();
+    for v in &w.visits {
+        match v {
+            Visit::Within(i) => {
+                let entry = slots.get_mut(*i).and_then(Option::take).map(|e| match decode {
+                    true => e,
+                    false => Entry { key: None, values: None, ..e },
+                });
+                out.push(entry);
+            }
+            Visit::Outside(_) => out.push(None),
+        }
+    }
+    if !w.done {
+        let end = span.end.clone().unwrap_or_else(|| past.clone());
+        let (from, to) = match scan.backward {
+            false => (end, past),
+            true => (first, span.start.clone()),
+        };
+        if from < to && any_entry(backend, tenant, index, (&from, &to), concern)? {
+            out.push(None);
+        }
+    }
+    Ok(Scanned { entries: out, seeks: w.seeks })
 }
 
 /// Whether `index` has an entry after the last interval of `scan`, in its direction.
@@ -747,6 +834,8 @@ pub(crate) fn key_after<B: Backend + ?Sized>(
 pub(crate) struct Entry {
     pk: Vec<u8>,
     key: Option<Document>,
+    /// The entry's values as stored, when decoded.
+    values: Option<Vec<Value>>,
 }
 
 /// The key of a document in the index of `_id`: `{_id: value}`.
@@ -756,22 +845,27 @@ fn id_key(doc: &[u8]) -> Result<Option<Document>, CommandError> {
 }
 
 impl PlanIndex {
-    /// The key of an entry of this index whose values are `values` and whose stored value is
-    /// `stored` (type bits, after the primary key in a unique index), each field with its value
-    /// as RefDb gives `{$meta: "indexKey"}`; `None` when it does not decode (a collation's).
-    fn key_of(&self, values: &[u8], stored: &[u8]) -> Option<Document> {
+    /// The values of an entry of this index whose encoded values are `values` and whose stored
+    /// value is `stored` (type bits, after the primary key in a unique index); `None` when they
+    /// do not decode (a collation's).
+    fn values_of(&self, values: &[u8], stored: &[u8]) -> Option<Vec<Value>> {
         let bits = match self.catalog.unique {
             true => teseladb_keys::space::split_unique_value(stored).ok()?.1,
             false => teseladb_keys::TypeBits::from_bytes(stored.to_vec()),
         };
-        let decoded = teseladb_keys::decode(values, &bits, &self.dirs).ok()?;
+        teseladb_keys::decode(values, &bits, &self.dirs).ok()
+    }
+
+    /// The key of an entry of values `values`, each field with its value as RefDb gives
+    /// `{$meta: "indexKey"}`.
+    fn key_from(&self, values: &[Value]) -> Document {
         let names = self.pattern.iter().map(|(k, _)| k);
         // The key of an empty array is `undefined`; RefDb gives it back as `null` (measured).
-        let shown = decoded.into_iter().map(|v| match v {
+        let shown = values.iter().map(|v| match v {
             Value::Undefined => Value::Null,
-            other => other,
+            other => other.clone(),
         });
-        Some(names.zip(shown).fold(Document::new(), |d, (k, v)| d.with(k, v)))
+        names.zip(shown).fold(Document::new(), |d, (k, v)| d.with(k, v))
     }
 }
 
@@ -796,7 +890,7 @@ fn range_entries<B: Backend + ?Sized>(
     let end = r.end.clone().unwrap_or(past);
     if index.id_index {
         let pks = id_entries(backend, (tenant, collection), (&r.start, &end), concern)?;
-        return Ok(pks.into_iter().map(|pk| Entry { pk, key: None }).collect());
+        return Ok(pks.into_iter().map(|pk| Entry { pk, key: None, values: None }).collect());
     }
     let head = KeyBuilder::index_prefix(tenant, collection, index.entry.id).as_bytes().len();
     let malformed = || CommandError::new(INTERNAL_ERROR, "an index entry that does not decode");
@@ -808,11 +902,12 @@ fn range_entries<B: Backend + ?Sized>(
         for (key, value) in &rows {
             let rest = key.get(head..).ok_or_else(malformed)?;
             let cut = head + values_len(rest, &index.dirs).map_err(|_| malformed())?;
-            let found = match decode {
-                true => index.key_of(&key[head..cut], value),
+            let values = match decode {
+                true => index.values_of(&key[head..cut], value),
                 false => None,
             };
-            pks.push(Entry { pk: key[cut..].to_vec(), key: found });
+            let found = values.as_ref().map(|v| index.key_from(v));
+            pks.push(Entry { pk: key[cut..].to_vec(), key: found, values });
         }
         match rows.last() {
             Some((k, _)) if !short => from = [k.as_slice(), &[0]].concat(),

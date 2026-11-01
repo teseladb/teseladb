@@ -382,6 +382,19 @@ fn clauses_and_paths_of_a_parsed_filter() {
 /// The branches the measured cases leave: clauses no index answers, arrays, hints over `$or`,
 /// intervals that touch.
 #[test]
+fn fields_after_a_range_keep_their_intervals() {
+    let c = catalog();
+    assert_eq!(
+        plans(r#"{"$and":[{"n":{"$eq":5}},{"g":{"$gt":"a"}}]}"#, &[], &c)[0],
+        r#"g_1_n_1: g["(\"a\", {})"] n["[5, 5]"]"#
+    );
+    assert_eq!(
+        plans(r#"{"$and":[{"n":{"$eq":5}},{"g":{"$exists":true}}]}"#, &[], &c)[0],
+        r#"g_1_n_1: g["[MinKey, MaxKey]"] n["[5, 5]"] | {"g":{"$exists":true}}"#
+    );
+}
+
+#[test]
 fn existence_scans_the_whole_index() {
     let c = catalog();
     assert_eq!(

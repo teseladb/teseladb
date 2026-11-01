@@ -516,3 +516,11 @@ fn canonical_value(v: &Value) -> String {
         other => format!("{other:?}"),
     }
 }
+
+/// Scans whose fields after a range keep their intervals, and `$exists` over a whole index,
+/// against a `refrouter` 9.0.4 (`plan_checked.out`, 010 FR-001): each key the bounds checker lands
+/// on is examined, the keys outside make it seek.
+#[test]
+fn scans_that_check_their_keys_answer_as_refdb() {
+    check_in(include_str!("explain/plan_checked.out"), false);
+}
