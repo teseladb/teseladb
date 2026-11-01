@@ -406,6 +406,18 @@ fn pipeline_updates_answer_as_refdb() {
     check_files(&[include_str!("aggregate/update_pipeline.out")]);
 }
 
+/// The stages a `refrouter` 9.0.4 knows besides those of `stages.md`'s table (`extra_stages.out`,
+/// 010 T037): the collectionless ones on the wrong namespace, those behind a feature flag and the
+/// internal ones a request may not name.
+#[test]
+fn extra_stages_answer_as_refdb() {
+    check_files(&[
+        include_str!("aggregate/extra_stages.out"),
+        include_str!("aggregate/list_catalog.out"),
+        include_str!("aggregate/list_catalog2.out"),
+    ]);
+}
+
 /// Runs each file's commands on a node of its own over `c` and `o`, against the replies of a
 /// `refrouter` (without what only a sharded cluster gives).
 fn check_files(files: &[&str]) {
@@ -634,4 +646,102 @@ fn index_key_metadata_answers_as_refdb() {
 #[test]
 fn index_stats_answer_as_refdb() {
     check_files(&[include_str!("aggregate/index_stats.out")]);
+}
+
+/// `validate` against a `refrouter` 9.0.4 (`tests/validate/*.out`, 010 FR-017, T034): the reply
+/// with the shard's under `raw`, each index's entries and details, a multikey and a sparse
+/// index, and the errors of its arguments. The collection's `uuid` and the shard's cluster times
+/// differ by nature and are left out of the comparison.
+#[test]
+fn validate_answers_as_refdb() {
+    for file in [include_str!("validate/basic.out"), include_str!("validate/options.out")] {
+        let mut m = Mem::new();
+        load(&mut m, "c", C);
+        load(&mut m, "o", O);
+        let mut wrong = Vec::new();
+        for line in file.lines().filter(|l| !l.is_empty()) {
+            let (cmd, want) = line.split_once('\t').expect("a command and its reply");
+            let got = comparable(&ours(&mut m, cmd));
+            let want = comparable(&unsharded(want));
+            if got != want {
+                wrong.push(format!("{cmd}\n   got  {got}\n   want {want}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{} differ:\n{}", wrong.len(), wrong.join("\n"));
+    }
+}
+
+/// A `validate` reply without what differs by nature: the `uuid`, and in the shard's part under
+/// `raw`, named by the shard alone, the cluster's times.
+fn comparable(reply: &str) -> String {
+    let Some(json) = reply.strip_prefix("=> ") else { return reply.to_owned() };
+    let mut r = extjson::parse(json).expect("reply");
+    r.remove("uuid");
+    if let Some(Value::Document(raw)) = r.get("raw").cloned() {
+        let mut shards = Document::new();
+        for (k, v) in raw.iter() {
+            let Value::Document(mut part) = v.clone() else { continue };
+            for f in ["uuid", "$clusterTime", "$configTime", "$topologyTime", "operationTime"] {
+                part.remove(f);
+            }
+            shards.push(k.replacen("sh1", "node1", 1), normal(part));
+        }
+        r.insert("raw", shards);
+    }
+    format!("=> {}", canonical(&r))
+}
+
+/// `validate` of an index that lost an entry and kept one of a document gone, as a `refnode`
+/// 9.0.4 reports them (measured 01-11-2026 with the fail points `skipIndexNewRecords` and
+/// `skipUnindexingDocumentWhenDeleted`): the entries under `missingIndexEntries` and
+/// `extraIndexEntries`, their counts in `warnings`, the index in `errors` and its details, and
+/// the advice. TeselaDB has no record ids (DV-075).
+#[test]
+fn validate_reports_missing_and_extra_entries() {
+    let mut m = Mem::new();
+    load(&mut m, "v", r#"[{"_id":1,"a":1},{"_id":2,"a":2}]"#);
+    let before: Vec<Vec<u8>> = m.data.keys().cloned().collect();
+    ours(&mut m, r#"{"createIndexes":"v","indexes":[{"key":{"a":1},"name":"a_1"}]}"#);
+    let entries: Vec<Vec<u8>> = m.data.keys().filter(|k| !before.contains(k)).cloned().collect();
+    // The entry of `a: 2`, the last of the index, goes; so does the document `_id: 1`.
+    let last = entries.iter().filter(|k| entries.iter().all(|o| o.len() <= k.len())).max();
+    m.data.remove(last.expect("an entry"));
+    let one = Document::new().with("_id", 1).with("a", 1).to_bytes().expect("small");
+    let doc_key = m.data.iter().find(|(_, v)| **v == one).map(|(k, _)| k.clone());
+    m.data.remove(&doc_key.expect("the document"));
+    let got = ours(&mut m, r#"{"validate":"v"}"#);
+    let r = extjson::parse(got.strip_prefix("=> ").expect("a reply")).expect("json");
+    let shown = |k: &str| canonical(&Document::new().with(k, r.get(k).cloned().expect(k)));
+    assert_eq!(shown("valid"), r#"{"valid":false}"#);
+    assert_eq!(
+        shown("warnings"),
+        r#"{"warnings":["Detected 1 missing index entries.","Detected 1 extra index entries."]}"#
+    );
+    assert_eq!(shown("errors"), r#"{"errors":["Found errors in a_1"]}"#);
+    assert_eq!(
+        shown("extraIndexEntries"),
+        r#"{"extraIndexEntries":[{"indexName":"a_1","indexKey":{"a":{"$numberInt":"1"}}}]}"#
+    );
+    assert_eq!(
+        shown("missingIndexEntries"),
+        concat!(
+            r#"{"missingIndexEntries":[{"indexName":"a_1","indexKey":{"a":{"$numberInt":"2"}},"#,
+            r#""idKey":{"_id":{"$numberInt":"2"}}}]}"#
+        )
+    );
+    assert_eq!(
+        shown("keysPerIndex"),
+        r#"{"keysPerIndex":{"_id_":{"$numberInt":"1"},"a_1":{"$numberInt":"1"}}}"#
+    );
+    assert_eq!(
+        shown("indexDetails"),
+        concat!(
+            r#"{"indexDetails":{"_id_":{"valid":true,"spec":{"v":{"$numberInt":"2"},"#,
+            r#""key":{"_id":{"$numberInt":"1"}},"name":"_id_"},"isMultikey":false},"#,
+            r#""a_1":{"valid":false,"spec":{"v":{"$numberInt":"2"},"key":{"a":{"$numberInt":"1"}},"#,
+            r#""name":"a_1"},"isMultikey":false,"#,
+            r#""errors":["Index with name 'a_1' has inconsistencies."]}}}"#
+        )
+    );
+    assert!(shown("advice").contains("A corrupt namespace has been detected."));
 }

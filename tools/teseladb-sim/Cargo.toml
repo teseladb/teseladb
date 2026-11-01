@@ -26,6 +26,7 @@ teseladb-multiraft = { path = "../../crates/teseladb-multiraft" }
 teseladb-meta = { path = "../../crates/teseladb-meta" }
 teseladb-testkv = { path = "../../crates/teseladb-testkv" }
 teseladb-range = { path = "../../crates/teseladb-range" }
+teseladb-changestream = { path = "../../crates/teseladb-changestream" }
 teseladb-txn = { path = "../../crates/teseladb-txn" }
 teseladb-wire = { path = "../../crates/teseladb-wire" }
 teseladb-hlc = { path = "../../crates/teseladb-hlc" }

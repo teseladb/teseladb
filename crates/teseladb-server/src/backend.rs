@@ -511,6 +511,30 @@ const DDL_TICK_AFTER_MS: u64 = 100;
 /// The wall clock of the last empty entry this node asked for, in milliseconds.
 static LAST_DDL_TICK_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// By range, how far behind the wall clock its resolved mark was at the last change stream read
+/// of it, in milliseconds, and when that read was (014 FR-018).
+static RANGE_LAG: std::sync::Mutex<BTreeMap<u64, (u64, u64)>> =
+    std::sync::Mutex::new(BTreeMap::new());
+/// A range whose streams stopped reading it this long ago leaves the metrics.
+const RANGE_LAG_HOLD_MS: u64 = 10_000;
+
+/// Notes the lag of range `g`'s resolved mark `mark` at wall clock `now_ms`.
+fn note_range_lag(g: u64, mark: Hlc, now_ms: u64) {
+    let mut lags = RANGE_LAG.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    lags.retain(|_, (_, at)| now_ms.saturating_sub(*at) < RANGE_LAG_HOLD_MS);
+    lags.insert(g, (now_ms.saturating_sub(mark.physical), now_ms));
+}
+
+/// The lag of each range change streams read in the last [`RANGE_LAG_HOLD_MS`], in
+/// milliseconds, by range (014 FR-018).
+pub fn range_lags(now_ms: u64) -> Vec<(u64, u64)> {
+    let lags = RANGE_LAG.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    lags.iter()
+        .filter(|(_, (_, at))| now_ms.saturating_sub(*at) < RANGE_LAG_HOLD_MS)
+        .map(|(g, (lag, _))| (*g, *lag))
+        .collect()
+}
+
 /// Whether this read may ask for an empty entry now: none was asked for in the last
 /// [`DDL_TICK_AFTER_MS`] / 2.
 fn take_ddl_tick(now_ms: u64) -> bool {
@@ -690,12 +714,11 @@ impl Backend for ServerBackend {
         from: Hlc,
     ) -> Result<teseladb_wire::commands::ChangeBatch, CommandError> {
         // The batch is resolved up to the lowest resolved mark of its ranges (FR-004, FR-005).
-        let ranges = self.range_changes(start, end, from)?;
-        let resolved = ranges.iter().map(|r| r.resolved).min().unwrap_or(from).max(from);
-        let mut rows: Vec<teseladb_range::changes::Versioned> =
-            ranges.into_iter().flat_map(|r| r.rows).collect();
-        rows.retain(|r| r.ts <= resolved);
-        Ok((rows, resolved))
+        let mut read = teseladb_changestream::read::IntervalRead::new(start, end, from);
+        for r in self.range_changes(start, end, from)? {
+            read.answered(r.end, r.rows, r.resolved, None);
+        }
+        Ok(read.finish(|r: &teseladb_range::changes::Versioned| r.ts))
     }
 
     fn range_changes(
@@ -704,31 +727,31 @@ impl Backend for ServerBackend {
         end: &[u8],
         from: Hlc,
     ) -> Result<Vec<teseladb_wire::commands::RangeBatch>, CommandError> {
-        // Range by range in key order, each read on its leader (014 FR-003) and kept up to its
-        // own resolved mark.
+        // Range by range in key order, each read on its leader (014 FR-003, FR-010) and kept up
+        // to its own resolved mark.
         let mut out = Vec::new();
-        let mut at = start.to_vec();
-        while at.as_slice() < end {
-            let stop = |e: &RouteEntry| match e.end.is_empty() || end <= e.end.as_slice() {
-                true => end.to_vec(),
-                false => e.end.clone(),
-            };
+        let mut walk = teseladb_changestream::read::IntervalRead::<()>::new(start, end, from);
+        while let Some(at) = walk.next().map(<[u8]>::to_vec) {
             let key = at.clone();
-            let build =
-                |e: &RouteEntry, _| RemoteReq::Changes { start: key.clone(), end: stop(e), from };
+            let build = |e: &RouteEntry, _| RemoteReq::Changes {
+                start: key.clone(),
+                end: walk.stop(&e.end),
+                from,
+            };
             match self.data(&at, false, build)? {
                 (e, RemoteReply::Changes { mut rows, to, oldest_intent }) => {
                     let mark = teseladb_changestream::resolved::resolved(to, oldest_intent);
+                    note_range_lag(e.group.0, mark, crate::clock::wall_ms());
                     let resolved = mark.max(from);
                     rows.retain(|r| r.ts <= resolved);
-                    let next = stop(&e);
+                    let next = walk.stop(&e.end);
                     out.push(teseladb_wire::commands::RangeBatch {
-                        start: at.clone(),
+                        start: at,
                         end: next.clone(),
                         rows,
                         resolved,
                     });
-                    at = next;
+                    walk.answered(next, Vec::new(), to, oldest_intent);
                 }
                 _ => {
                     return Err(CommandError::new(
@@ -748,8 +771,11 @@ impl Backend for ServerBackend {
         let batch = self.read_ddl(from)?;
         // A quiet Group 0 leaves this copy's last mark behind: an empty entry moves it, at most
         // one at a time for the whole node.
-        let behind = self.h.clock.0.peek().physical.saturating_sub(batch.resolved.physical);
-        if behind < DDL_TICK_AFTER_MS || !take_ddl_tick(crate::clock::wall_ms()) {
+        // Against the node's clock, which is at least the wall clock once it gave a mark.
+        let wall = crate::clock::wall_ms();
+        let behind =
+            self.h.clock.0.peek().physical.max(wall).saturating_sub(batch.resolved.physical);
+        if behind < DDL_TICK_AFTER_MS || !take_ddl_tick(wall) {
             return Ok(batch);
         }
         self.group0_change(CatalogReq::Tick)?.map_err(|e| {

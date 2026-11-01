@@ -1103,7 +1103,10 @@ fn planned_access(
         teseladb_plan::rules::Access::Index(scan) => {
             let keys = if run { r.keys } else { 0 };
             let within = if run { r.keys.saturating_sub(r.past) } else { 0 };
-            let ix = index_stage(Some(ns), &indexes[scan.index], scan, keys, within);
+            let mut ix = index_stage(Some(ns), &indexes[scan.index], scan, keys, within);
+            if run && r.seeks > 1 {
+                ix.counters.insert("seeks", long(r.seeks));
+            }
             match covered {
                 Some(p) => {
                     // One that computes is the default projection over the keys (measured).

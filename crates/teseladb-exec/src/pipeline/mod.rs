@@ -528,9 +528,21 @@ fn parse_stage(d: RawDoc<'_>, ctx: &Ctx) -> Result<Stage, MqlError> {
         "$listClusterCatalog" => {
             Stage::System("$listClusterCatalog", system::cluster_catalog(arg)?)
         }
+        "$listExtensions" => Stage::System("$listExtensions", system::list_extensions(arg)?),
+        "$listCatalog" => Stage::System("$listCatalog", system::list_catalog(arg)?),
+        "$listMqlEntities" | "$listCachedAndActiveUsers" => return Err(system::behind_flag(name)),
+        // A stage that only keeps the stages around it from being optimised together: the
+        // documents go through as they are (measured).
+        "$_internalInhibitOptimization" => Stage::Match(Match::parse(
+            RawValue::Document(
+                RawDoc::from_bytes(EMPTY_DOCUMENT)
+                    .map_err(|e| error(errors::BAD_VALUE, e.to_string()))?,
+            ),
+            ctx,
+        )?),
         "$search" => Stage::Search("$search", search::parse(name, arg)?),
         "$searchMeta" => Stage::Search("$searchMeta", search::parse(name, arg)?),
-        "$vectorSearch" => Stage::Search("$vectorSearch", search::parse(name, arg)?),
+        "$vectorSearch" => Stage::Search("$vectorSearch", search::parse_vector(arg)?),
         out_merge::OUT => {
             Stage::Write(Box::new(out_merge::Write::Out(out_merge::Out::parse(arg)?)))
         }
@@ -555,14 +567,19 @@ pub(crate) fn invalid(name: &str, e: MqlError) -> MqlError {
     MqlError::new(e.code, format!("Invalid {name} :: caused by :: {}", e.message))
 }
 
+/// An empty BSON document.
+const EMPTY_DOCUMENT: &[u8] = &[5, 0, 0, 0, 0];
+
 /// The stages an `aggregate: 1` may start with: they read no collection.
-const COLLECTIONLESS_STAGES: [&str; 6] = [
+const COLLECTIONLESS_STAGES: [&str; 8] = [
     "$documents",
     "$currentOp",
     "$listLocalSessions",
     "$changeStream",
     "$listClusterCatalog",
     "$querySettings",
+    "$listCatalog",
+    "$listExtensions",
 ];
 
 /// The error of `$listSessions` anywhere but on `config.system.sessions`.

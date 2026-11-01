@@ -76,6 +76,27 @@ fn wire_and_crud_run_against_a_local_cluster() {
     }
 }
 
+/// `aggregate` and `sort` (010 FR-021, SC-004) against a local cluster: the query by an index
+/// of equality that gives 10 documents with its target, a `$group` and the sorts.
+#[test]
+fn aggregate_and_sort_run_against_a_local_cluster() {
+    let short = ["--duration", "300ms", "--warmup", "50ms", "--records", "200", "--format", "json"];
+    let agg = metrics(&bench(&[&["--scenario", "aggregate"][..], &short[..]].concat()));
+    for name in ["equality_10.p50", "group.p50", "match_group.p99", "200 documents"] {
+        assert!(agg.contains(name), "{name}: {agg}");
+    }
+    let sort = metrics(&bench(&[&["--scenario", "sort"][..], &short[..]].concat()));
+    for name in ["indexed_top10.p50", "memory_top10.p50", "aggregate_sort.p99"] {
+        assert!(sort.contains(name), "{name}: {sort}");
+    }
+    // The harness of SC-003 (T027), over 300 documents instead of 50 GB.
+    let large =
+        metrics(&bench(&["--scenario", "group-large", "--records", "300", "--format", "json"]));
+    for name in ["load_seconds", "group_seconds", "resident_per_core", "300 documents of 1 KiB"] {
+        assert!(large.contains(name), "{name}: {large}");
+    }
+}
+
 /// `timeseries` (015 FR-012, SC-003, SC-004) against a local cluster: the ingest rate, an hour of
 /// one sensor with its target and the space against a collection that is not a time series.
 #[test]

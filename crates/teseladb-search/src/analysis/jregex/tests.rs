@@ -176,8 +176,17 @@ fn replacements() {
     assert_eq!(re.replace("ab", "\\$1", true).unwrap(), "$1");
     assert_eq!(re.replace("ab", "$12", true).unwrap(), "a2");
     assert_eq!(re.replace("zz", "$", true).unwrap(), "zz");
-    for bad in ["$", "\\", "$9", "${zz}", "${a", "$x"] {
-        assert_eq!(re.replace("ab", bad, true), Err(RegexError::Replacement), "{bad}");
+    // The messages of `Matcher.appendReplacement` (measured on `refsearch` 1.70.6).
+    for (bad, message) in [
+        ("$", "Illegal group reference: group index is missing"),
+        ("\\", "character to be escaped is missing"),
+        ("$9", "No group 9"),
+        ("${zz}", "No group with name {zz}"),
+        ("${a", "named capturing group is missing trailing '}'"),
+        ("$x", "Illegal group reference"),
+    ] {
+        let want = Err(RegexError::Replacement(message.to_owned()));
+        assert_eq!(re.replace("ab", bad, true), want, "{bad}");
     }
     let named = JavaRegex::new("(?<w>\\w+)").unwrap();
     assert_eq!(named.replace("hi yo", "<${w}>", true).unwrap(), "<hi> <yo>");
@@ -196,4 +205,58 @@ fn grapheme_cluster_boundaries() {
     assert!(matches("\u{301}\\b{g}b", "e\u{301}b"));
     assert!(!matches("e\\b{g}\u{301}", "e\u{301}"));
     assert!(!matches("\u{1F1EA}\\b{g}\u{1F1F8}", "\u{1F1EA}\u{1F1F8}"));
+}
+
+/// The messages of `PatternSyntaxException` that `refsearch` 1.70.6 gives (measured 01-11-2026).
+#[test]
+fn syntax_messages() {
+    let cases = [
+        ("*", "Dangling meta character '*' near index 0\n*\n^"),
+        ("a**x", "Dangling meta character '*' near index 2\na**x\n  ^"),
+        ("+", "Dangling meta character '+' near index 0\n+\n^"),
+        ("{", "Illegal repetition near index 1\n{"),
+        ("a{", "Illegal repetition near index 2\na{"),
+        ("a{2,1}", "Illegal repetition range near index 5\na{2,1}\n     ^"),
+        ("a{99999999999}", "Illegal repetition range near index 11\na{99999999999}\n           ^"),
+        ("(", "Unclosed group near index 1\n("),
+        ("(?i:a", "Unclosed group near index 5\n(?i:a"),
+        (")", "Unmatched closing ')'\n)"),
+        ("a)b", "Unmatched closing ')' near index 0\na)b\n^"),
+        ("[a", "Unclosed character class near index 1\n[a\n ^"),
+        ("[", "Unclosed character class near index 0\n[\n^"),
+        ("[[a]", "Unclosed character class near index 3\n[[a]\n   ^"),
+        ("[z-a]", "Illegal character range near index 3\n[z-a]\n   ^"),
+        ("[a-\\d]", "Illegal character range near index 4\n[a-\\d]\n    ^"),
+        ("\\q", "Illegal/unsupported escape sequence near index 1\n\\q\n ^"),
+        ("a\\", "Unescaped trailing backslash near index 2\na\\"),
+        ("\\x", "Illegal hexadecimal escape sequence near index 2\n\\x"),
+        ("\\xZZ", "Illegal hexadecimal escape sequence near index 2\n\\xZZ\n  ^"),
+        ("\\u12", "Illegal Unicode escape sequence near index 4\n\\u12"),
+        ("\\p{Foo}", "Unknown character property name {Foo} near index 6\n\\p{Foo}\n      ^"),
+        ("(?z)", "Unknown inline modifier near index 2\n(?z)\n  ^"),
+        (
+            "(?<1a>x)",
+            "capturing group name does not start with a Latin letter near index 3\n(?<1a>x)\n   ^",
+        ),
+        (
+            "(?<n>a)(?<n>b)",
+            "Named capturing group <n> is already defined near index 11\n(?<n>a)(?<n>b)\n           ^",
+        ),
+        ("\\k<zz>", "named capturing group <zz> does not exist near index 5\n\\k<zz>\n     ^"),
+        ("\\c", "Illegal control escape sequence near index 1\n\\c\n ^"),
+        ("\\N{FOO}", "Unknown character name [FOO] near index 6\n\\N{FOO}\n      ^"),
+        ("\\0", "Illegal octal escape sequence near index 2\n\\0"),
+        ("\\09", "Illegal octal escape sequence near index 2\n\\09\n  ^"),
+    ];
+    let mut wrong = Vec::new();
+    for (pattern, want) in cases {
+        let got = match JavaRegex::new(pattern) {
+            Err(RegexError::Syntax(e)) => syntax_message(pattern, &e),
+            other => format!("{other:?}"),
+        };
+        if got != want {
+            wrong.push(format!("{pattern}: {got:?} != {want:?}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }

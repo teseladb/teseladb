@@ -926,7 +926,7 @@ const fn info(
 
 /// The commands TeselaDB answers, in name order, as `listCommands` of a `refrouter` 9.0.4 shows
 /// them; the help of `getParameter` and `setParameter` lists TeselaDB's parameters.
-const COMMANDS: [CommandInfo; 58] = [
+const COMMANDS: [CommandInfo; 60] = [
     info(BUILD_INFO, NO_HELP, [true, false, true, false], false),
     info(
         "bulkWrite",
@@ -987,6 +987,12 @@ const COMMANDS: [CommandInfo; 58] = [
         false,
     ),
     info(GET_CMD_LINE_OPTS, NO_HELP, [true, true, true, true], false),
+    info(
+        super::diagnostic_data::GET_DIAGNOSTIC_DATA,
+        "get latest diagnostic data collection snapshot",
+        [true, true, true, true],
+        false,
+    ),
     info(GET_LOG, "{ getLog : '*' }  OR { getLog : 'global' }", [true, true, true, true], false),
     info(
         "getDefaultRWConcern",
@@ -1074,6 +1080,7 @@ const COMMANDS: [CommandInfo; 58] = [
     ),
     info("startSession", "start a logical session", [true, false, true, false], false),
     info("update", "update documents", [true, true, false, false], true),
+    info(super::validate::VALIDATE, NO_HELP, [true, true, true, false], false),
     info(WHATS_MY_URI, "{whatsmyuri:1}", [true, true, true, false], false),
 ];
 

@@ -557,10 +557,288 @@ fn search_errors_and_missing_indexes_answer_as_measured() {
         error(&search(&mut m, "c", "$search", nopath)),
         (8, "\"text.path\" is required".to_owned())
     );
-    // The vector indexes are not served by the indexer: `$vectorSearch` answers as without search.
-    let vector = Document::new().with("path", "v").with("limit", 1);
-    assert_eq!(error(&search(&mut m, "c", "$vectorSearch", vector)).0, 31082);
+    // `$searchMeta`'s errors come from running it.
+    let nopath = Document::new().with("text", Document::new().with("query", "a"));
+    assert_eq!(
+        error(&search(&mut m, "c", "$searchMeta", nopath)),
+        (8, format!("{EXECUTOR}\"text.path\" is required"))
+    );
+    // `$vectorSearch` on a `search` index.
+    let r = search(&mut m, "c", "$vectorSearch", vector_query("default", &[1.0, 0.2, 0.1]));
+    assert_eq!(error(&r), (8, format!("{EXECUTOR}v must be indexed as \"vector\".")));
     // A dropped index is forgotten and serves nothing.
     m.run(DB, Document::new().with("dropSearchIndex", "c").with("name", "default"));
     assert!(batch(&search(&mut m, "c", "$search", text("hola"))).is_empty());
+}
+
+/// The prefix of an error of a running pipeline on `t.c`.
+const EXECUTOR: &str = "Executor error during aggregate command on namespace: t.c :: caused by :: ";
+
+fn floats(xs: &[f64]) -> Value {
+    Value::Array(xs.iter().map(|x| Value::Double(*x)).collect())
+}
+
+fn vector_query(index: &str, v: &[f64]) -> Document {
+    Document::new()
+        .with("index", index)
+        .with("path", "v")
+        .with("queryVector", floats(v))
+        .with("numCandidates", 10)
+        .with("limit", 10)
+}
+
+/// The measured run of 01-11-2026 (`lane3g/v2.js`): a `vectorSearch` index `ve` with `v`
+/// (3 dimensions, `euclidean`) and the filter `g`.
+#[test]
+fn vector_search_serves_the_index_with_refsearch_scores() {
+    let mut m = with_collection();
+    let row =
+        |id: i32, v: &[f64], g: &str| doc(&[("_id", id.into()), ("v", floats(v)), ("g", g.into())]);
+    insert(
+        &mut m,
+        vec![
+            row(11, &[1.0, 0.0, 0.0], "a"),
+            row(12, &[0.0, 1.0, 0.0], "b"),
+            row(13, &[0.5, 0.5, 0.0], "a"),
+            row(16, &[1.0, 2.0], "a"),
+        ],
+    );
+    let vector = Document::new()
+        .with("type", "vector")
+        .with("path", "v")
+        .with("numDimensions", 3)
+        .with("similarity", "euclidean");
+    let def = Document::new().with(
+        "fields",
+        arr(vec![vector, Document::new().with("type", "filter").with("path", "g")]),
+    );
+    create(&mut m, "c", vec![index("ve", def).with("type", "vectorSearch")]);
+    let s = Document::new().with("$meta", "vectorSearchScore");
+    let project = Document::new().with("$project", Document::new().with("s", s));
+    let run = |m: &mut Mem, q: Document| {
+        batch(&agg(m, "c".into(), vec![Document::new().with("$vectorSearch", q), project.clone()]))
+    };
+    let want = |id: i32, s: f64| doc(&[("_id", id.into()), ("s", Value::Double(s))]);
+    let q = vector_query("ve", &[1.0, 0.2, 0.1]);
+    assert_eq!(
+        run(&mut m, q.clone()),
+        vec![
+            want(11, 0.9523810148239136),
+            want(13, 0.7407407164573669),
+            want(12, 0.37735846638679504)
+        ]
+    );
+    // A write is seen by the next query, and the prefilter keeps what it accepts.
+    insert(&mut m, vec![row(14, &[1.0, 1.0, 1.0], "b")]);
+    let filtered = q.clone().with("filter", Document::new().with("g", "b"));
+    assert_eq!(
+        run(&mut m, filtered),
+        vec![want(14, 0.40816324949264526), want(12, 0.37735846638679504)]
+    );
+    // `refsearch`'s errors carry the executor's prefix; `refnode`'s come first and do not.
+    let unfiltered = q.clone().with("filter", Document::new().with("z", 1));
+    let r = agg(&mut m, "c".into(), vec![Document::new().with("$vectorSearch", unfiltered)]);
+    assert_eq!(error(&r), (8, format!("{EXECUTOR}Path 'z' needs to be indexed as filter")));
+    let r = search(&mut m, "c", "$vectorSearch", vector_query("ve", &[1.0]));
+    assert_eq!(
+        error(&r),
+        (8, format!("{EXECUTOR}vector field is indexed with 3 dimensions but queried with 1"))
+    );
+    let mut negative = q.clone();
+    negative.insert("limit", -1);
+    let r = search(&mut m, "c", "$vectorSearch", negative);
+    assert_eq!(error(&r), (7_912_700, "Expected limit to be positive".to_owned()));
+    // A missing index or collection finds nothing; `$search` on a vector index is refused.
+    assert!(batch(&search(&mut m, "c", "$vectorSearch", vector_query("nope", &[1.0]))).is_empty());
+    assert!(batch(&search(&mut m, "zz", "$vectorSearch", vector_query("ve", &[1.0]))).is_empty());
+    let on_vector = text("a").with("index", "ve");
+    assert_eq!(
+        error(&search(&mut m, "c", "$search", on_vector)),
+        (8, "Cannot execute $search over vectorSearch index 've'".to_owned())
+    );
+    let meta =
+        Document::new().with("index", "ve").with("exists", Document::new().with("path", "g"));
+    assert_eq!(
+        error(&search(&mut m, "c", "$searchMeta", meta)),
+        (8, format!("{EXECUTOR}Cannot execute $search over vectorSearch index 've'"))
+    );
+    let bad = Document::new().with("index", "ve").with("text", Document::new().with("path", "g"));
+    assert_eq!(
+        error(&search(&mut m, "c", "$search", bad)),
+        (8, "\"text.query\" is required".to_owned())
+    );
+    // `$listSearchIndexes` shows it served.
+    let listed = batch(&agg(
+        &mut m,
+        "c".into(),
+        vec![Document::new().with("$listSearchIndexes", Document::new())],
+    ));
+    assert_eq!(listed[0].get("status"), Some(&Value::String("READY".to_owned())));
+}
+
+/// A search waits for the segments to reach its mark (FR-010): a range whose resolved mark lags
+/// is read again after a pause, and past the command's time the search fails.
+#[test]
+fn search_waits_for_the_segments_to_reach_its_mark() {
+    let mut m = with_collection();
+    create(&mut m, "c", vec![index("default", dynamic(true))]);
+    m.changes_lag = 2;
+    m.pauses_left = 2;
+    assert_eq!(batch(&search(&mut m, "c", "$search", text("hola"))).len(), 1);
+    assert_eq!(m.changes_lag, 0);
+    m.changes_lag = 3;
+    m.pauses_left = 1;
+    let r = search(&mut m, "c", "$search", text("hola"));
+    assert_eq!(error(&r), (50, "operation exceeded time limit".to_owned()));
+}
+
+fn view(m: &mut Mem, name: &str, on: &str, stages: Vec<Document>) {
+    let cmd = Document::new().with("create", name).with("viewOn", on).with("pipeline", arr(stages));
+    m.run(DB, cmd);
+}
+
+/// The measured run of 01-11-2026 (`lane3g/w2.js`): indexes on views follow the view's
+/// `$addFields`, `$set` and `$match` with `$expr`, and refuse other stages (FR-021, T027).
+#[test]
+fn indexes_on_views_follow_the_view_stages() {
+    let mut m = with_collection();
+    let t = |id: i32, s: &str, n: i32| doc(&[("_id", id.into()), ("t", s.into()), ("n", n.into())]);
+    m.run(
+        DB,
+        Document::new().with("delete", "c").with(
+            "deletes",
+            arr(vec![Document::new().with("q", Document::new()).with("limit", 0)]),
+        ),
+    );
+    insert(&mut m, vec![t(1, "hola mundo", 1), t(2, "adios mundo", 2), t(3, "hola casa", 3)]);
+    let gte = Document::new().with("$gte", Value::Array(vec!["$n".into(), 2.into()]));
+    let concat = Document::new().with("$concat", Value::Array(vec!["$t".into(), " extra".into()]));
+    view(
+        &mut m,
+        "v",
+        "c",
+        vec![
+            Document::new().with("$match", Document::new().with("$expr", gte)),
+            Document::new().with("$addFields", Document::new().with("u", concat)),
+        ],
+    );
+    view(&mut m, "vv", "v", vec![Document::new().with("$set", Document::new().with("k", 1))]);
+    view(&mut m, "ve", "c", vec![]);
+    view(&mut m, "vl", "c", vec![Document::new().with("$limit", 5)]);
+    view(&mut m, "vm", "c", vec![Document::new().with("$match", Document::new().with("n", 1))]);
+    let r = create(&mut m, "vl", vec![index("default", dynamic(true))]);
+    let incompatible = "Cannot perform a search operation as the view definition is incompatible with RefCloud: ";
+    assert_eq!(error(&r), (10_623_000, format!("{incompatible}$limit is not allowed")));
+    let r = create(&mut m, "vm", vec![index("default", dynamic(true))]);
+    assert_eq!(
+        error(&r),
+        (10_623_001, format!("{incompatible}$match stage can only contain $expr"))
+    );
+    let r = m.run(DB, Document::new().with("listSearchIndexes", "vm"));
+    assert_eq!(error(&r).0, 10_623_001);
+    create(&mut m, "v", vec![index("default", dynamic(true))]);
+    create(&mut m, "ve", vec![index("idx", dynamic(true))]);
+    // The same name and definition on the collection gives back the view's index.
+    let again = create(&mut m, "c", vec![index("default", dynamic(true))]);
+    assert!(field(&again, "ok") == &Value::Double(1.0));
+    let listed = batch(&list(&mut m, &[]));
+    assert_eq!(listed.len(), 2);
+    assert_eq!(field(&listed[0], "latestDefinition"), &Value::Document(dynamic(true)));
+    let score = |s: f64| Value::Double(s);
+    let on = |m: &mut Mem, coll: &str, spec: Document| {
+        batch(&agg(m, coll.into(), vec![Document::new().with("$search", spec), scored()]))
+    };
+    let s = |id: i32, v: f64| doc(&[("_id", id.into()), ("s", score(v))]);
+    assert_eq!(on(&mut m, "v", text("mundo")), vec![s(2, 0.3150668740272522)]);
+    let extra =
+        Document::new().with("text", Document::new().with("query", "extra").with("path", "u"));
+    assert_eq!(on(&mut m, "v", extra), vec![s(2, 0.08287343382835388), s(3, 0.08287343382835388)]);
+    assert_eq!(on(&mut m, "c", text("mundo")), vec![s(2, 0.3150668740272522)]);
+    // On the view the documents come through it; on an empty view as stored.
+    let whole = batch(&search(&mut m, "v", "$search", text("mundo")));
+    assert_eq!(whole[0].get("u"), Some(&Value::from("adios mundo extra")));
+    let plain = batch(&search(&mut m, "ve", "$search", text("mundo")));
+    assert_eq!(plain, vec![t(2, "adios mundo", 2)]);
+    let both = batch(&search(&mut m, "ve", "$search", text("mundo").with("index", "idx")));
+    assert_eq!(both.len(), 2);
+    // Another view's index finds nothing; `$searchMeta` counts on the view.
+    assert!(batch(&search(&mut m, "vv", "$search", text("mundo"))).is_empty());
+    let one = Document::new().with("count", Document::new().with("lowerBound", 1i64));
+    assert_eq!(batch(&search(&mut m, "v", "$searchMeta", text("mundo"))), vec![one]);
+    // A write is seen through the view.
+    insert(&mut m, vec![t(4, "mundo nuevo", 9)]);
+    let ids: Vec<Value> = batch(&search(&mut m, "v", "$search", text("mundo")))
+        .iter()
+        .map(|d| d.get("_id").cloned().unwrap_or(Value::Null))
+        .collect();
+    assert_eq!(ids.len(), 2);
+    // A query on an incompatible view is refused.
+    let r = search(&mut m, "vm", "$search", text("mundo"));
+    assert_eq!(error(&r).0, 10_623_001);
+    // An update keeps the view.
+    let upd = Document::new().with("updateSearchIndex", "v").with("name", "default").with(
+        "definition",
+        Document::new()
+            .with("mappings", Document::new().with("dynamic", true))
+            .with("analyzer", "reflib.standard"),
+    );
+    m.run(DB, upd);
+    let casa = on(&mut m, "v", text("casa"));
+    assert_eq!(
+        casa.iter().map(|d| d.get("_id").cloned()).collect::<Vec<_>>(),
+        vec![Some(3.into())]
+    );
+    assert!(batch(&search(&mut m, "vv", "$search", text("casa"))).is_empty());
+    let listed = batch(&list(&mut m, &[]));
+    let analyzer = field(&listed[0], "latestDefinition.analyzer");
+    assert_eq!(analyzer, &Value::from("reflib.standard"));
+}
+
+/// A custom analyzer with `nGram` `minGram: 0` passes the definition and fails when it first
+/// analyzes a text (measured: `FAILED`, `replication failed (action=drop): minGram must be greater
+/// than zero`, and a query names the index and its state); unused, it is never built.
+#[test]
+fn an_analyzer_that_cannot_be_built_fails_the_index() {
+    let mut m = with_collection();
+    let grams = doc(&[("type", "nGram".into()), ("minGram", 0.into()), ("maxGram", 2.into())]);
+    let analyzer = doc(&[("name", "a".into()), ("tokenizer", grams.into())]);
+    let defined = |used: bool| {
+        let d = dynamic(true).with("analyzers", arr(vec![analyzer.clone()]));
+        if used { d.with("analyzer", "a") } else { d }
+    };
+    create(&mut m, "c", vec![index("bad", defined(true)), index("unused", defined(false))]);
+    let listed = batch(&list(&mut m, &[]));
+    assert_eq!(field(&listed[0], "status"), &Value::from("FAILED"));
+    assert_eq!(field(&listed[0], "queryable"), &Value::Boolean(false));
+    let Value::Array(detail) = field(&listed[0], "statusDetail") else { panic!("{listed:?}") };
+    let Some(Value::Document(detail)) = detail.first() else { panic!("{listed:?}") };
+    assert_eq!(field(detail, "mainIndex.status"), &Value::from("FAILED"));
+    let message = "replication failed (action=drop): minGram must be greater than zero";
+    assert_eq!(field(detail, "mainIndex.message"), &Value::from(message));
+    assert_eq!(field(&listed[1], "status"), &Value::from("READY"));
+    let (code, msg) = error(&search(&mut m, "c", "$search", text("hola").with("index", "bad")));
+    assert_eq!(code, 8);
+    let Value::String(id) = field(&listed[0], "id") else { panic!("{listed:?}") };
+    let start = format!("cannot query search index {id} (index bad collection c (");
+    assert!(msg.starts_with(&start), "{msg}");
+    assert!(msg.ends_with(") in database t) while in state FAILED"), "{msg}");
+    assert!(
+        batch(&search(&mut m, "c", "$search", text("hola").with("index", "unused"))).len() == 1
+    );
+}
+
+/// Segments left a whole history retention behind start over from what the ranges hold, so a
+/// deletion the GC dropped is not missed (T049).
+#[test]
+fn segments_behind_the_history_retention_start_over() {
+    let mut m = with_collection();
+    insert(&mut m, vec![doc(&[("_id", 2.into()), ("t", "adios mundo cruel".into())])]);
+    create(&mut m, "c", vec![index("default", dynamic(true))]);
+    assert_eq!(batch(&search(&mut m, "c", "$search", text("mundo"))).len(), 2);
+    m.now += 25 * 60 * 60 * 1000;
+    let del = Document::new().with("q", doc(&[("_id", 1.into())])).with("limit", 1);
+    m.run(DB, Document::new().with("delete", "c").with("deletes", arr(vec![del])));
+    let pipeline = vec![Document::new().with("$search", text("mundo")), scored()];
+    let got = batch(&agg(&mut m, "c".into(), pipeline));
+    assert_eq!(got, vec![doc(&[("_id", 2.into()), ("s", Value::Double(0.13076457381248474))])]);
 }
