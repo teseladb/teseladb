@@ -877,9 +877,8 @@ pub fn modify<B: Backend + ?Sized>(
     if let Some(spec) = super::timeseries::spec_of(&coll)?.filter(|_| !raw) {
         return super::timeseries::modify(ctx.backend, w, (&coll, &spec), m, &rules, stmt);
     }
-    if m.sort.is_some() || id_equality(&m.filter).is_none() {
-        super::query::count_scan(ctx.shared, ns);
-    }
+    // A scan counts once the statement ends without an error (measured on a `refnode` 9.0.4).
+    let scans = m.sort.is_some() || id_equality(&m.filter).is_none();
     let mut keys = match &m.sort {
         Some(sort) => sorted_first(ctx.backend, &coll, m, rules.collation.as_ref(), sort)?,
         None => candidates(ctx.backend, &coll, m, rules.collation.as_ref())?,
@@ -944,6 +943,9 @@ pub fn modify<B: Backend + ?Sized>(
         if !m.multi && total.n > 0 {
             break;
         }
+    }
+    if scans {
+        super::query::count_scan(ctx.shared, ns);
     }
     Ok(total)
 }

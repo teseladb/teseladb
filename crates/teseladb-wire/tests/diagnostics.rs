@@ -538,9 +538,10 @@ fn server_status_counts_what_the_dispatch_ran() {
     assert_eq!(field(&r, "opLatencies.writes.ops"), &Value::Int64(2));
     assert_eq!(field(&r, "opLatencies.commands.ops"), &Value::Int64(2));
     assert_eq!(field(&r, "opWorkingTime.reads.ops"), &Value::Int64(2));
-    // Only the update read the collection, once per statement: both `find`s ran before the
-    // insert created it.
-    assert_eq!(field(&r, "metrics.queryExecutor.collectionScans.total"), &Value::Int64(2));
+    // Only the update read the collection, and a `refnode` 9.0.4 counts the scan of a statement
+    // that ends (the pipeline's), not of one that fails while it updates (the `arrayFilters`
+    // one, on documents without `b`; measured): both `find`s ran before the insert created it.
+    assert_eq!(field(&r, "metrics.queryExecutor.collectionScans.total"), &Value::Int64(1));
     assert_eq!(field(&r, "logicalSessionRecordCache.activeSessionsCount"), &Value::Int32(0));
 }
 
