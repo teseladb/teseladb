@@ -4,7 +4,10 @@
 //! `collectionUUID` (only with `showExpandedEvents`) and `wallTime`; an insert or a replacement
 //! goes on with `fullDocument`, `ns` and `documentKey`; an update with `ns`, `documentKey`,
 //! `updateDescription` and then `fullDocument` or `fullDocumentBeforeChange` when asked for; a
-//! deletion with `ns` and `documentKey`.
+//! deletion with `ns` and `documentKey`. A catalog event (measured on 01-11) puts `to` first for
+//! a `rename`, then `_id`, `operationType`, `clusterTime`, `collectionUUID`, `wallTime` and `ns`,
+//! and with `showExpandedEvents` `operationDescription`, `stateBeforeChange` and `nsType`; an
+//! `invalidate` has no `ns`.
 
 use teseladb_bson::{BsonError, Document, RawDoc, Value};
 use teseladb_hlc::{Hlc, to_timestamp};
@@ -48,6 +51,15 @@ pub struct ChangeEvent {
     pub before: Option<Value>,
     /// `lsid` and `txnNumber` of the transaction that wrote it.
     pub txn: Option<(Document, i64)>,
+    /// `to` of a `rename`.
+    pub to: Option<Namespace>,
+    /// `operationDescription` of a DDL event, written with `showExpandedEvents`.
+    pub operation_description: Option<Document>,
+    /// `stateBeforeChange` of a `modify`, written with `showExpandedEvents`.
+    pub state_before: Option<Document>,
+    /// `nsType` of a `create` (`collection`, `view` or `timeseries`), written with
+    /// `showExpandedEvents`.
+    pub ns_type: Option<&'static str>,
 }
 
 impl ChangeEvent {
@@ -70,7 +82,7 @@ impl ChangeEvent {
         let meta = change.meta.as_ref();
         let ts = change.event.ts;
         Ok(ChangeEvent {
-            token: ResumeToken { event: change.event.clone(), kind: change.kind },
+            token: ResumeToken::new(change.event.clone(), change.kind),
             cluster_time: ts,
             wall_ms: i64::try_from(ts.physical).unwrap_or(i64::MAX),
             ns,
@@ -84,7 +96,33 @@ impl ChangeEvent {
             txn: meta
                 .and_then(|m| m.txn.as_ref())
                 .map(|t| (lsid_document(t.lsid, &t.uid), t.txn_number)),
+            to: None,
+            operation_description: None,
+            state_before: None,
+            ns_type: None,
         })
+    }
+
+    /// An event of the catalog (014 FR-014) or an `invalidate`, with token `token` (its mark is
+    /// the `clusterTime`) in namespace `ns`; the caller adds the rest.
+    pub fn catalog(token: ResumeToken, ns: Namespace) -> ChangeEvent {
+        let ts = token.event.ts;
+        ChangeEvent {
+            token,
+            cluster_time: ts,
+            wall_ms: i64::try_from(ts.physical).unwrap_or(i64::MAX),
+            ns,
+            collection_uuid: None,
+            document_key: None,
+            update_description: None,
+            full_document: None,
+            before: None,
+            txn: None,
+            to: None,
+            operation_description: None,
+            state_before: None,
+            ns_type: None,
+        }
     }
 
     /// The event's type.
@@ -95,6 +133,9 @@ impl ChangeEvent {
     /// The document the cursor returns; `expanded` is `showExpandedEvents`.
     pub fn to_document(&self, expanded: bool) -> Document {
         let mut d = Document::new();
+        if let Some(to) = &self.to {
+            d.push("to", namespace(to));
+        }
         if let Some((lsid, number)) = &self.txn {
             d.push("txnNumber", *number);
             d.push("lsid", lsid.clone());
@@ -113,30 +154,45 @@ impl ChangeEvent {
         if full_first && let Some(full) = &self.full_document {
             d.push("fullDocument", full.clone());
         }
-        d.push("ns", self.namespace());
+        if self.kind() != EventKind::Invalidate {
+            d.push("ns", namespace(&self.ns));
+        }
         if let Some(key) = &self.document_key {
             d.push("documentKey", key.clone());
         }
         if let Some(desc) = &self.update_description {
             d.push("updateDescription", desc.clone());
         }
-        if !full_first && let Some(full) = &self.full_document {
-            d.push("fullDocument", full.clone());
-        }
+        // An update gives the pre-image before the post-image (measured on 01-11).
         if let Some(before) = &self.before {
             d.push("fullDocumentBeforeChange", before.clone());
         }
+        if !full_first && let Some(full) = &self.full_document {
+            d.push("fullDocument", full.clone());
+        }
+        if expanded {
+            if let Some(desc) = &self.operation_description {
+                d.push("operationDescription", desc.clone());
+            }
+            if let Some(state) = &self.state_before {
+                d.push("stateBeforeChange", state.clone());
+            }
+            if let Some(t) = self.ns_type {
+                d.push("nsType", t);
+            }
+        }
         d
     }
+}
 
-    fn namespace(&self) -> Document {
-        let mut ns = Document::new();
-        ns.push("db", self.ns.db.clone());
-        if let Some(coll) = &self.ns.coll {
-            ns.push("coll", coll.clone());
-        }
-        ns
+/// `ns` as an event writes it: `{db, coll}`, or `{db}` for a database.
+fn namespace(ns: &Namespace) -> Document {
+    let mut d = Document::new();
+    d.push("db", ns.db.clone());
+    if let Some(coll) = &ns.coll {
+        d.push("coll", coll.clone());
     }
+    d
 }
 
 /// The `operationType` of an event type.

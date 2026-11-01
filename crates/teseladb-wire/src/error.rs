@@ -219,6 +219,10 @@ codes! {
     IDL_DUPLICATE_FIELD = 40413, "IDLDuplicateField";
     /// Unknown field in a command.
     IDL_UNKNOWN_FIELD = 40415, "IDLUnknownField";
+    /// A change stream lacks a pre- or post-image it requires (014 FR-008).
+    NO_MATCHING_DOCUMENT = 47, "NoMatchingDocument";
+    /// `resumeAfter` from an `invalidate` (014).
+    INVALID_RESUME_TOKEN = 260, "InvalidResumeToken";
     /// A change stream event lost its `_id` in the pipeline, or the stream cannot go on (014).
     CHANGE_STREAM_FATAL = 280, "ChangeStreamFatalError";
     /// A change stream resumes from a point older than what the cluster keeps (014 FR-006).

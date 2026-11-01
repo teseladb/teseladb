@@ -98,7 +98,7 @@ mod tests {
 
     fn event(physical: u64, key: &str) -> ResumeToken {
         let event = EventKey { ts: ts(physical), txn: 0, op: 0, key: key.as_bytes().to_vec() };
-        ResumeToken { event, kind: EventKind::Insert }
+        ResumeToken::new(event, EventKind::Insert)
     }
 
     #[test]

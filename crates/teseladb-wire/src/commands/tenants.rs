@@ -60,6 +60,51 @@ pub fn own_collections(
         .collect()
 }
 
+/// The catalog changes of tenant `tenant` among `all`, by the names it gives its namespaces.
+pub fn own_ddl(
+    tenant: u32,
+    all: Vec<teseladb_meta::ddl_log::DdlRecord>,
+) -> Vec<teseladb_meta::ddl_log::DdlRecord> {
+    use teseladb_meta::ddl_log::DdlChange;
+    let own = |ns: &Namespace| {
+        let (t, db) = split_db(&ns.db);
+        (t == tenant).then(|| Namespace { db: db.to_owned(), coll: ns.coll.clone() })
+    };
+    all.into_iter()
+        .filter_map(|r| {
+            let change = match r.change {
+                DdlChange::Create { ns, collection } => {
+                    DdlChange::Create { ns: own(&ns)?, collection }
+                }
+                DdlChange::Drop { ns, collection } => DdlChange::Drop { ns: own(&ns)?, collection },
+                DdlChange::Rename { from, to, collection, target } => {
+                    DdlChange::Rename { from: own(&from)?, to: own(&to)?, collection, target }
+                }
+                DdlChange::Modify { ns, collection, description } => {
+                    DdlChange::Modify { ns: own(&ns)?, collection, description }
+                }
+                DdlChange::DropDatabase { db } => {
+                    let (t, name) = split_db(&db);
+                    if t != tenant {
+                        return None;
+                    }
+                    DdlChange::DropDatabase { db: name.to_owned() }
+                }
+                DdlChange::CreateIndex { ns, collection, spec } => {
+                    DdlChange::CreateIndex { ns: own(&ns)?, collection, spec }
+                }
+                DdlChange::DropIndex { ns, collection, spec } => {
+                    DdlChange::DropIndex { ns: own(&ns)?, collection, spec }
+                }
+                DdlChange::ModifyIndex { ns, collection, before, after } => {
+                    DdlChange::ModifyIndex { ns: own(&ns)?, collection, before, after }
+                }
+            };
+            Some(teseladb_meta::ddl_log::DdlRecord { change, ..r })
+        })
+        .collect()
+}
+
 /// The databases of tenant `tenant` among `all`, by their names.
 pub fn own_databases(tenant: u32, all: Vec<String>) -> Vec<String> {
     all.iter()
@@ -87,9 +132,11 @@ pub fn qualified_command(tenant: u32, cmd: &CatalogCommand) -> CatalogCommand {
             drop_target: *drop_target,
             uuid: *uuid,
         },
-        CatalogCommand::Modify { ns: n, options } => {
-            CatalogCommand::Modify { ns: ns(n), options: options.clone() }
-        }
+        CatalogCommand::Modify { ns: n, options, description } => CatalogCommand::Modify {
+            ns: ns(n),
+            options: options.clone(),
+            description: description.clone(),
+        },
         CatalogCommand::DropDatabase { db } => {
             CatalogCommand::DropDatabase { db: qualified_db(tenant, db) }
         }

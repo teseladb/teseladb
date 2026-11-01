@@ -322,7 +322,7 @@ fn a_document_the_index_refuses_fails_the_build_as_on_a_refnode() {
     assert_eq!(r.get("n"), Some(&Value::Int32(1)), "{r:?}");
     // The node holds only documents yet: the scan reads them in key order.
     let before = m
-        .stored()
+        .stored(..)
         .into_values()
         .position(|v| {
             let d = Document::from(teseladb_bson::RawDoc::from_bytes(v).expect("a document"));

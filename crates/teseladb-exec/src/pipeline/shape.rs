@@ -109,7 +109,9 @@ impl Projection {
                 "projection specification must have at least one field",
             ));
         }
-        p.inclusion = mode.unwrap_or(true);
+        // `_id` alone decides: `{_id: 0}` is an exclusion that drops only `_id`, `{_id: 1}` an
+        // inclusion that keeps only `_id`.
+        p.inclusion = mode.unwrap_or(p.keep_id);
         Ok(p)
     }
 

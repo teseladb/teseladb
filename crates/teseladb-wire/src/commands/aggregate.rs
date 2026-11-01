@@ -51,6 +51,9 @@ struct WireEnv<'a, B: Backend + ?Sized> {
     /// The node's shared state and the aggregated collection, for the stages the node answers
     /// itself (`$collStats`); `None` inside a view's pipeline.
     node: Option<(&'a super::Shared, Namespace)>,
+    /// What the search stages' queries gave while the pipeline was planned, by stage and
+    /// specification, for the run to take (011 FR-022).
+    searched: RefCell<Vec<(String, Document, Vec<teseladb_exec::pipeline::search::Scored>)>>,
 }
 
 /// An error of the node as an error of the pipeline.
@@ -248,9 +251,9 @@ impl<B: Backend + ?Sized> WireEnv<'_, B> {
 
     /// The documents of `$listSearchIndexes` on the pipeline's collection (011 FR-008).
     fn search_indexes(&self, spec: &Document) -> Result<Vec<Document>, CommandError> {
-        let Some((_, ns)) = &self.node else { return Ok(Vec::new()) };
+        let Some((shared, ns)) = &self.node else { return Ok(Vec::new()) };
         let mut backend = self.backend.borrow_mut();
-        super::search_indexes::stage(&mut **backend, ns, spec)
+        super::search_indexes::stage(&mut **backend, shared, ns, spec)
     }
 
     /// `$collStats` of the aggregated collection (015 FR-010), with the sections `spec` asks
@@ -369,6 +372,30 @@ impl<B: Backend + ?Sized> Env for WireEnv<'_, B> {
         &self,
     ) -> Result<(String, Vec<teseladb_exec::pipeline::geo_near::GeoIndex>), MqlError> {
         self.geo_index_list().map_err(to_mql)
+    }
+
+    fn search_source(
+        &self,
+        stage: &str,
+        spec: &Document,
+    ) -> Result<Vec<teseladb_exec::pipeline::search::Scored>, MqlError> {
+        let mut searched = self.searched.borrow_mut();
+        if let Some(i) = searched.iter().position(|(n, s, _)| n == stage && s == spec) {
+            return Ok(searched.remove(i).2);
+        }
+        drop(searched);
+        let Some((shared, ns)) = &self.node else { return Ok(Vec::new()) };
+        let mut backend = self.backend.borrow_mut();
+        super::search_ops::source(&mut **backend, shared, ns, stage, spec).map_err(to_mql)
+    }
+
+    fn check_search(&self, stage: &str, spec: &Document) -> Result<(), MqlError> {
+        let Some((shared, ns)) = &self.node else { return Ok(()) };
+        let mut backend = self.backend.borrow_mut();
+        let found =
+            super::search_ops::source(&mut **backend, shared, ns, stage, spec).map_err(to_mql)?;
+        self.searched.borrow_mut().push((stage.to_owned(), spec.clone(), found));
+        Ok(())
     }
 
     fn system_stage(&self, name: &str, spec: &Document) -> Result<Vec<Document>, MqlError> {
@@ -492,6 +519,7 @@ pub(crate) fn read_through_staged<B: Backend + ?Sized>(
         collation,
         allow_disk_use: true,
         node: None,
+        searched: RefCell::new(Vec::new()),
     };
     let sbe = pipeline.runs_in_sbe();
     Ok(pipeline.run(docs, &env).map(|out| (out, sbe)).map_err(from_mql))
@@ -698,6 +726,7 @@ pub fn aggregate<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
         collation,
         allow_disk_use: a.allow_disk_use,
         node: Some((ctx.shared, ns.clone())),
+        searched: RefCell::new(Vec::new()),
     };
     let executor = |mut err: CommandError| {
         err.errmsg = format!(

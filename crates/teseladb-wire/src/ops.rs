@@ -477,6 +477,24 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         self.call(|b| b.changes(start, end, from))
     }
 
+    fn catalog_changes(
+        &mut self,
+        from: teseladb_hlc::Hlc,
+    ) -> Result<crate::commands::DdlBatch, CommandError> {
+        let mut batch = self.call(|b| b.catalog_changes(from))?;
+        batch.records = tenants::own_ddl(self.tenant, batch.records);
+        Ok(batch)
+    }
+
+    fn range_changes(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        from: teseladb_hlc::Hlc,
+    ) -> Result<Vec<crate::commands::RangeBatch>, CommandError> {
+        self.call(|b| b.range_changes(start, end, from))
+    }
+
     fn set_read_preference(&mut self, pref: Option<teseladb_router::read_pref::ReadPreference>) {
         self.inner.set_read_preference(pref);
     }

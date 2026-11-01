@@ -108,7 +108,32 @@ const ID_INDEX_VERSION: &str = "$_idIndexVersion";
 
 /// Checks the validator options of `create` and `collMod` (`cmd`), with the messages of a
 /// `refrouter` 9.0.4 (measured).
+/// Checks `changeStreamPreAndPostImages` of `create` or `collMod` (014 FR-008): an object with a
+/// boolean `enabled` and nothing else (measured on a `refrouter` 9.0.4).
+fn check_images(o: &Document, cmd: &str) -> Result<(), CommandError> {
+    const IMAGES: &str = "changeStreamPreAndPostImages";
+    const ENABLED: &str = "enabled";
+    let images = match o.get(IMAGES) {
+        None => return Ok(()),
+        Some(Value::Document(d)) => d,
+        Some(v) => return Err(wrong_type(&format!("{cmd}.{IMAGES}"), v, "object")),
+    };
+    if let Some((k, _)) = images.iter().find(|(k, _)| *k != ENABLED) {
+        let msg = format!("BSON field '{cmd}.{IMAGES}.{k}' is an unknown field.");
+        return Err(CommandError::new(crate::error::IDL_UNKNOWN_FIELD, msg));
+    }
+    match images.get(ENABLED) {
+        Some(Value::Boolean(_)) => Ok(()),
+        Some(v) => Err(wrong_type(&format!("{cmd}.{IMAGES}.{ENABLED}"), v, "bool")),
+        None => Err(CommandError::new(
+            crate::error::IDL_FAILED_TO_PARSE,
+            format!("BSON field '{cmd}.{IMAGES}.{ENABLED}' is missing but a required field"),
+        )),
+    }
+}
+
 fn check_validation(o: &Document, cmd: &str) -> Result<(), CommandError> {
+    check_images(o, cmd)?;
     let enumeration = |value: &str, field: &str| {
         let msg =
             format!("Enumeration value '{value}' for field '{cmd}.{field}' is not a valid value.");
@@ -577,7 +602,8 @@ pub fn coll_mod<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, C
     }
     let bytes = options.to_bytes()?;
     super::write_block::ddl(ctx.backend, &ns.db)?;
-    ctx.backend.catalog_write(CatalogCommand::Modify { ns, options: bytes })?;
+    let description = changes.to_bytes()?;
+    ctx.backend.catalog_write(CatalogCommand::Modify { ns, options: bytes, description })?;
     Ok(index_reply.with("ok", 1.0))
 }
 

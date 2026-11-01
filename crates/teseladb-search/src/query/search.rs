@@ -118,19 +118,29 @@ pub fn run(index: &MemIndex, spec: &Document) -> Result<Vec<Hit>, SearchError> {
 /// The document of `$searchMeta` (and `$$SEARCH_META`) for `spec`: the count of the documents
 /// it selects, as `lowerBound` unless `count.type` is `total` (measured: the count is exact).
 pub fn meta(index: &MemIndex, spec: &Document) -> Result<Document, SearchError> {
-    let total = match spec.get("count") {
-        None => false,
+    let total = count_total(spec)?;
+    Ok(count_document(total, run(index, spec)?.len()))
+}
+
+/// Whether `count.type` of `spec` asks for `total` rather than `lowerBound`.
+pub fn count_total(spec: &Document) -> Result<bool, SearchError> {
+    match spec.get("count") {
+        None => Ok(false),
         Some(Value::Document(c)) => match c.get("type") {
-            None => false,
-            Some(Value::String(t)) if t == "lowerBound" => false,
-            Some(Value::String(t)) if t == "total" => true,
-            Some(_) => return Err(shape("count.type", "must be one of [lowerBound, total]")),
+            None => Ok(false),
+            Some(Value::String(t)) if t == "lowerBound" => Ok(false),
+            Some(Value::String(t)) if t == "total" => Ok(true),
+            Some(_) => Err(shape("count.type", "must be one of [lowerBound, total]")),
         },
-        Some(_) => return Err(shape("count", "must be a document")),
-    };
-    let n = i64::try_from(run(index, spec)?.len()).unwrap_or(i64::MAX);
+        Some(_) => Err(shape("count", "must be a document")),
+    }
+}
+
+/// The `$searchMeta` document of `n` selected documents.
+pub fn count_document(total: bool, n: usize) -> Document {
+    let n = i64::try_from(n).unwrap_or(i64::MAX);
     let name = if total { "total" } else { "lowerBound" };
-    Ok(Document::new().with("count", Document::new().with(name, n)))
+    Document::new().with("count", Document::new().with(name, n))
 }
 
 fn parse_root(index: &MemIndex, spec: &Document) -> Result<Operator, SearchError> {

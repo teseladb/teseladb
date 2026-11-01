@@ -4,7 +4,7 @@
 use teseladb_bson::Value;
 use teseladb_hlc::{Hlc, from_timestamp};
 
-use crate::token::{Position, TokenError};
+use crate::token::{EventKind, Position, TokenError};
 
 /// The stage's name.
 pub const CHANGE_STREAM: &str = "$changeStream";
@@ -32,6 +32,8 @@ pub mod codes {
     pub const ILLEGAL_OPERATION: i32 = 20;
     /// `InvalidOptions`.
     pub const INVALID_OPTIONS: i32 = 72;
+    /// `InvalidResumeToken`.
+    pub const INVALID_RESUME_TOKEN: i32 = 260;
     /// `IDLUnknownField`.
     pub const UNKNOWN_FIELD: i32 = 40415;
     /// `$changeStream` not first.
@@ -261,7 +263,12 @@ impl ChangeStreamSpec {
                 return Err(error(codes::BOTH_STARTS, msg));
             }
             (Some(v), None) => {
-                spec.start = several(&spec, Start::ResumeAfter(token(v, RESUME_AFTER)?))?
+                let p = token(v, RESUME_AFTER)?;
+                if matches!(&p, Position::Event(t) if t.kind == EventKind::Invalidate) {
+                    let msg = "Attempting to resume a change stream using 'resumeAfter' is not allowed from an invalidate notification";
+                    return Err(error(codes::INVALID_RESUME_TOKEN, msg));
+                }
+                spec.start = several(&spec, Start::ResumeAfter(p))?
             }
             (None, Some(v)) => {
                 spec.start = several(&spec, Start::StartAfter(token(v, START_AFTER)?))?

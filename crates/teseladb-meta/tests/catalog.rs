@@ -103,10 +103,12 @@ fn options_change_and_databases_drop_whole() {
     apply(&mut sm, 2, create(ns("db", "a"), 1, false));
     apply(&mut sm, 3, create(ns("db", "b"), 2, false));
     apply(&mut sm, 4, create(ns("keep", "c"), 3, false));
-    let modify = CatalogCommand::Modify { ns: ns("db", "a"), options: vec![1, 2, 3] };
+    let modify =
+        CatalogCommand::Modify { ns: ns("db", "a"), options: vec![1, 2, 3], description: vec![] };
     assert_eq!(apply(&mut sm, 5, modify), Group0Result::Ok);
     assert_eq!(sm.catalog.get(&ns("db", "a")).map(|c| c.options.clone()), Some(vec![1, 2, 3]));
-    let missing = CatalogCommand::Modify { ns: ns("db", "zz"), options: vec![] };
+    let missing =
+        CatalogCommand::Modify { ns: ns("db", "zz"), options: vec![], description: vec![] };
     assert_eq!(apply(&mut sm, 6, missing), err(Group0Error::NamespaceNotFound));
     assert_eq!(sm.catalog.databases(), vec!["db".to_owned(), "keep".to_owned()]);
     assert_eq!(sm.catalog.in_db("db").len(), 2);

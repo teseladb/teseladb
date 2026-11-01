@@ -252,6 +252,22 @@ impl ServerBackend {
         }
     }
 
+    /// The catalog changes of this node's copy above `from` (014 FR-014).
+    fn read_ddl(&mut self, from: Hlc) -> Result<teseladb_wire::commands::DdlBatch, CommandError> {
+        let until = self.until();
+        loop {
+            if let Some(CatalogAnswer::Ddl(records, floor, resolved)) =
+                self.ask(0, |tx| NodeMsg::Catalog(CatalogReq::Ddl(from), tx), until)
+            {
+                return Ok(teseladb_wire::commands::DdlBatch { records, floor, resolved });
+            }
+            if Instant::now() >= until {
+                return Err(unavailable());
+            }
+            thread::sleep(RETRY_PAUSE);
+        }
+    }
+
     /// Runs a change of Group 0 (the catalog, a setting, the users and roles) and waits until
     /// this node's copy applied it; what Group 0 refused, if it refused it.
     fn group0_change(
@@ -272,6 +288,7 @@ impl ServerBackend {
                     | CatalogAnswer::Documents(_)
                     | CatalogAnswer::Dump(_)
                     | CatalogAnswer::Tenants(_)
+                    | CatalogAnswer::Ddl(..)
                     | CatalogAnswer::Unavailable,
                 )
                 | None => {}
@@ -488,6 +505,23 @@ fn unavailable() -> CommandError {
     CommandError::new(NOT_WRITABLE_PRIMARY, "Group 0 has no leader to take the catalog change")
 }
 
+/// How far behind the node's clock Group 0's last mark may be before a change stream's read
+/// asks for an empty entry (014 FR-014): well inside the 500 ms of SC-002.
+const DDL_TICK_AFTER_MS: u64 = 100;
+/// The wall clock of the last empty entry this node asked for, in milliseconds.
+static LAST_DDL_TICK_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Whether this read may ask for an empty entry now: none was asked for in the last
+/// [`DDL_TICK_AFTER_MS`] / 2.
+fn take_ddl_tick(now_ms: u64) -> bool {
+    use std::sync::atomic::Ordering;
+    let last = LAST_DDL_TICK_MS.load(Ordering::Relaxed);
+    now_ms.saturating_sub(last) >= DDL_TICK_AFTER_MS / 2
+        && LAST_DDL_TICK_MS
+            .compare_exchange(last, now_ms, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+}
+
 impl Drop for ServerBackend {
     fn drop(&mut self) {
         self.release_pins();
@@ -655,10 +689,24 @@ impl Backend for ServerBackend {
         end: &[u8],
         from: Hlc,
     ) -> Result<teseladb_wire::commands::ChangeBatch, CommandError> {
-        // Range by range in key order, each read on its leader (014 FR-003); the batch is
-        // resolved up to the lowest resolved mark of its ranges (FR-004, FR-005).
-        let mut rows = Vec::new();
-        let mut resolved: Option<Hlc> = None;
+        // The batch is resolved up to the lowest resolved mark of its ranges (FR-004, FR-005).
+        let ranges = self.range_changes(start, end, from)?;
+        let resolved = ranges.iter().map(|r| r.resolved).min().unwrap_or(from).max(from);
+        let mut rows: Vec<teseladb_range::changes::Versioned> =
+            ranges.into_iter().flat_map(|r| r.rows).collect();
+        rows.retain(|r| r.ts <= resolved);
+        Ok((rows, resolved))
+    }
+
+    fn range_changes(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        from: Hlc,
+    ) -> Result<Vec<teseladb_wire::commands::RangeBatch>, CommandError> {
+        // Range by range in key order, each read on its leader (014 FR-003) and kept up to its
+        // own resolved mark.
+        let mut out = Vec::new();
         let mut at = start.to_vec();
         while at.as_slice() < end {
             let stop = |e: &RouteEntry| match e.end.is_empty() || end <= e.end.as_slice() {
@@ -669,11 +717,18 @@ impl Backend for ServerBackend {
             let build =
                 |e: &RouteEntry, _| RemoteReq::Changes { start: key.clone(), end: stop(e), from };
             match self.data(&at, false, build)? {
-                (e, RemoteReply::Changes { rows: more, to, oldest_intent }) => {
+                (e, RemoteReply::Changes { mut rows, to, oldest_intent }) => {
                     let mark = teseladb_changestream::resolved::resolved(to, oldest_intent);
-                    resolved = Some(resolved.map_or(mark, |r| r.min(mark)));
-                    rows.extend(more);
-                    at = stop(&e);
+                    let resolved = mark.max(from);
+                    rows.retain(|r| r.ts <= resolved);
+                    let next = stop(&e);
+                    out.push(teseladb_wire::commands::RangeBatch {
+                        start: at.clone(),
+                        end: next.clone(),
+                        rows,
+                        resolved,
+                    });
+                    at = next;
                 }
                 _ => {
                     return Err(CommandError::new(
@@ -683,9 +738,24 @@ impl Backend for ServerBackend {
                 }
             }
         }
-        let resolved = resolved.unwrap_or(from).max(from);
-        rows.retain(|r: &teseladb_range::changes::Versioned| r.ts <= resolved);
-        Ok((rows, resolved))
+        Ok(out)
+    }
+
+    fn catalog_changes(
+        &mut self,
+        from: Hlc,
+    ) -> Result<teseladb_wire::commands::DdlBatch, CommandError> {
+        let batch = self.read_ddl(from)?;
+        // A quiet Group 0 leaves this copy's last mark behind: an empty entry moves it, at most
+        // one at a time for the whole node.
+        let behind = self.h.clock.0.peek().physical.saturating_sub(batch.resolved.physical);
+        if behind < DDL_TICK_AFTER_MS || !take_ddl_tick(crate::clock::wall_ms()) {
+            return Ok(batch);
+        }
+        self.group0_change(CatalogReq::Tick)?.map_err(|e| {
+            CommandError::new(INTERNAL_ERROR, format!("Group 0 refused an empty entry: {e:?}"))
+        })?;
+        self.read_ddl(from)
     }
 
     fn txn_pause(&mut self) -> bool {
