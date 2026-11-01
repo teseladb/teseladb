@@ -248,3 +248,48 @@ fn phrases_score_as_refsearch() {
         Err(SearchError("\"phrase.slop\" cannot be negative".to_owned()))
     );
 }
+
+#[test]
+fn exists_scores_one_as_refsearch() {
+    let mut idx = index();
+    let doc = Document::new()
+        .with("_id", 3)
+        .with("t", "perro perro perro")
+        .with("u", "gato")
+        .with("x", "algo")
+        .with("y", Document::new().with("z", "dentro"));
+    idx.put(&[3], &doc).expect("indexed");
+    let run_on = |spec: Document| -> Result<Vec<(u8, f64)>, SearchError> {
+        Ok(run(&idx, &spec)?.into_iter().map(|h| (h.key[0], f64::from(h.score))).collect())
+    };
+    let exists = |p: Value| Document::new().with("exists", Document::new().with("path", p));
+    assert_eq!(run_on(exists("x".into())).unwrap(), [(3, 1.0)]);
+    assert_eq!(run_on(exists("t".into())).unwrap().len(), 8);
+    assert_eq!(run_on(exists("y".into())).unwrap(), [(3, 1.0)]);
+    assert_eq!(run_on(exists("y.z".into())).unwrap(), [(3, 1.0)]);
+    let boosted = Document::new().with(
+        "exists",
+        Document::new()
+            .with("path", "x")
+            .with("score", Document::new().with("boost", Document::new().with("value", 3))),
+    );
+    assert_eq!(run_on(boosted).unwrap(), [(3, 3.0)]);
+    let filtered = compound(
+        Document::new()
+            .with("must", list(vec![text("perro")]))
+            .with("filter", list(vec![exists("x".into()).into()])),
+    );
+    assert_eq!(run_on(filtered).unwrap(), [(3, 0.5545177459716797)]);
+    assert_eq!(
+        run_on(Document::new().with("exists", Document::new())),
+        Err(SearchError("\"exists.path\" is required".to_owned()))
+    );
+    assert_eq!(
+        run_on(exists(list(vec!["x".into(), "t".into()]))),
+        Err(SearchError("\"exists.path\" must be a string".to_owned()))
+    );
+    assert_eq!(
+        run_on(Document::new().with("exists", Document::new().with("path", "x").with("foo", 1))),
+        Err(SearchError("\"exists\" unrecognized field \"foo\"".to_owned()))
+    );
+}

@@ -89,6 +89,10 @@ enum Operator {
         paths: Vec<String>,
         score: Score,
     },
+    Exists {
+        path: String,
+        score: Score,
+    },
     Phrase {
         query: Vec<String>,
         paths: Vec<String>,
@@ -135,6 +139,7 @@ fn parse(index: &MemIndex, name: &str, v: &Value, path: &str) -> Result<Operator
     match name {
         "text" => parse_text(index, d, path),
         "phrase" => parse_phrase(index, d, path),
+        "exists" => parse_exists(d, path),
         "compound" => parse_compound(index, d, path),
         other => {
             Err(SearchError(format!("\"{other}\" is not supported by this node's search engine")))
@@ -170,6 +175,21 @@ fn queries(d: &Document, at: &str) -> Result<Vec<String>, SearchError> {
             })
             .collect(),
         Some(_) => Err(shape(at, "must be a string")),
+    }
+}
+
+fn parse_exists(d: &Document, path: &str) -> Result<Operator, SearchError> {
+    if let Some((k, _)) = d.iter().find(|(k, _)| *k != "path" && *k != "score") {
+        return Err(SearchError(format!("\"{path}\" unrecognized field \"{k}\"")));
+    }
+    let at = format!("{path}.path");
+    match d.get("path") {
+        None => Err(shape(&at, "is required")),
+        Some(Value::String(p)) => Ok(Operator::Exists {
+            path: p.clone(),
+            score: parse_score(d.get("score"), &format!("{path}.score"))?,
+        }),
+        Some(_) => Err(shape(&at, "must be a string")),
     }
 }
 
@@ -315,16 +335,22 @@ fn parse_compound(index: &MemIndex, d: &Document, path: &str) -> Result<Operator
     })
 }
 
-/// The number at `path` of `doc`, 0 without one.
-fn number_at(doc: Option<&Document>, path: &str) -> f32 {
-    let mut cur = doc.map(|d| Value::Document(d.clone()));
-    for part in path.split('.') {
+/// The value at dotted `path` of `doc`.
+fn value_at<'a>(doc: &'a Document, path: &str) -> Option<&'a Value> {
+    let mut parts = path.split('.');
+    let mut cur = doc.get(parts.next()?)?;
+    for part in parts {
         cur = match cur {
-            Some(Value::Document(d)) => d.get(part).cloned(),
-            _ => None,
+            Value::Document(d) => d.get(part)?,
+            _ => return None,
         };
     }
-    cur.as_ref().and_then(number).unwrap_or(0.0)
+    Some(cur)
+}
+
+/// The number at `path` of `doc`, 0 without one.
+fn number_at(doc: Option<&Document>, path: &str) -> f32 {
+    doc.and_then(|d| value_at(d, path)).and_then(number).unwrap_or(0.0)
 }
 
 fn eval(index: &MemIndex, op: &Operator) -> Result<BTreeMap<u32, f32>, SearchError> {
@@ -332,6 +358,14 @@ fn eval(index: &MemIndex, op: &Operator) -> Result<BTreeMap<u32, f32>, SearchErr
         Operator::Text { query, paths, score } => {
             let s = index.text_scores(query, paths, boost_of(score))?;
             Ok(rescored(index, s, score))
+        }
+        Operator::Exists { path, score } => {
+            let found = index
+                .live()
+                .filter(|&doc| index.document(doc).is_some_and(|d| value_at(d, path).is_some()))
+                .map(|doc| (doc, boost_of(score)))
+                .collect();
+            Ok(rescored(index, found, score))
         }
         Operator::Phrase { query, paths, slop, score } => {
             let s = index.phrase_scores(query, paths, *slop, boost_of(score))?;
