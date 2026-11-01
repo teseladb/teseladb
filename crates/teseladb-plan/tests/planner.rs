@@ -8,7 +8,7 @@ use teseladb_bson::{Document, Value, extjson};
 use teseladb_plan::cost::{Trial, ranked, score, trial_works};
 use teseladb_plan::logical::{
     Bound, compare_values, conjunction, conjuncts, intersect, intervals, on_path, shown_value,
-    sorted,
+    sorted, union,
 };
 use teseladb_plan::rules::{Access, IndexMeta, IndexScan, Request, candidates};
 
@@ -425,4 +425,74 @@ fn intervals_that_touch_meet_at_their_ends() {
     assert_eq!(kept.len(), 3);
     assert_eq!(shown_value(&Value::Document(Document::new())), "{}");
     assert_eq!(on_path(&doc(r#"{"a":{"$eq":1},"b":{"$eq":1}}"#)), None);
+}
+
+/// A `$or` whose clauses are each one predicate on the leading field of the same index scans that
+/// index once, over the union of their intervals (measured on a `refrouter` 9.0.4, 01-11-2026:
+/// `{_id: {$lt: 3}}` or `{_id: "x"}` reads `_id_` over `[-inf, 3)` and `["x", "x"]`); a clause of
+/// more predicates keeps its own scan, and the scans follow the order of their indexes.
+#[test]
+fn clauses_on_the_leading_field_of_one_index_join_their_intervals() {
+    let c = vec![
+        index("_id_", &[("_id", 1)]),
+        index("g_1", &[("g", 1)]),
+        index("n_1_g_1", &[("n", 1), ("g", 1)]),
+    ];
+    let one = r#"{"$or":[{"_id":{"$lt":3}},{"_id":{"$eq":"x"}}]}"#;
+    assert_eq!(
+        plans(one, &[], &c),
+        [r#"_id_: _id["[-inf, 3)", "[\"x\", \"x\"]"]"#].map(|s| format!("OR [{s}]"))
+    );
+    let spread = r#"{"$or":[{"_id":{"$lt":3}},{"g":{"$eq":"c"}},{"_id":{"$gt":6}}]}"#;
+    assert_eq!(
+        plans(spread, &[], &c),
+        [r#"OR [_id_: _id["[-inf, 3)", "(6, inf]"]; g_1: g["[\"c\", \"c\"]"]]"#]
+    );
+    let compound = r#"{"$or":[{"n":{"$lt":1}},{"n":{"$gt":6}}]}"#;
+    assert_eq!(
+        plans(compound, &[], &c),
+        [r#"OR [n_1_g_1: n["[-inf, 1)", "(6, inf]"] g["[MinKey, MaxKey]"]]"#]
+    );
+    let and = r#"{"$or":[{"$and":[{"n":{"$gt":5}},{"n":{"$lt":8}}]},{"n":{"$eq":3}}]}"#;
+    assert_eq!(
+        plans(and, &[], &c),
+        [
+            r#"OR [n_1_g_1: n["(5, 8)"] g["[MinKey, MaxKey]"]; n_1_g_1: n["[3, 3]"] g["[MinKey, MaxKey]"]]"#
+        ]
+    );
+    let first = r#"{"$or":[{"_id":{"$lt":3}},{"$and":[{"_id":{"$eq":"x"}},{"g":{"$eq":2}}]}]}"#;
+    assert_eq!(
+        plans(first, &[], &c),
+        [
+            r#"OR [_id_: _id["[\"x\", \"x\"]"] | {"g":{"$eq":{"$numberInt":"2"}}}; _id_: _id["[-inf, 3)"]]"#
+        ]
+    );
+    let all = r#"{"$or":[{"_id":{"$gt":2}},{"_id":{"$lt":4}}]}"#;
+    assert_eq!(plans(all, &[], &c), [r#"OR [_id_: _id["[-inf, inf]"]]"#]);
+    let backward = r#"{"$or":[{"_id":{"$gt":6}},{"_id":{"$eq":2}}]}"#;
+    assert_eq!(
+        plans(backward, &[("_id", -1)], &c),
+        [r#"OR [_id_: _id["[inf, 6)", "[2, 2]"] sorted backward]"#]
+    );
+}
+
+/// The union of intervals: those that meet or overlap join, the others stay apart in order.
+#[test]
+fn intervals_join_where_they_meet() {
+    let b = |low: i32, li: bool, high: i32, hi: bool| Bound {
+        low: Value::Int32(low),
+        low_inclusive: li,
+        high: Value::Int32(high),
+        high_inclusive: hi,
+    };
+    let shown = |list: Vec<Bound>| list.iter().map(Bound::shown).collect::<Vec<_>>();
+    assert_eq!(shown(union(&[b(1, true, 3, false)], &[b(3, true, 5, true)])), ["[1, 5]"]);
+    assert_eq!(
+        shown(union(&[b(1, true, 3, false)], &[b(3, false, 5, true)])),
+        ["[1, 3)", "(3, 5]"]
+    );
+    assert_eq!(shown(union(&[b(4, true, 9, true)], &[b(1, true, 5, false)])), ["[1, 9]"]);
+    assert_eq!(shown(union(&[b(1, true, 9, false)], &[b(2, true, 3, true)])), ["[1, 9)"]);
+    assert_eq!(shown(union(&[b(1, true, 3, false)], &[b(1, true, 3, true)])), ["[1, 3]"]);
+    assert_eq!(shown(union(&[b(5, true, 5, true)], &[b(1, true, 1, true)])), ["[1, 1]", "[5, 5]"]);
 }

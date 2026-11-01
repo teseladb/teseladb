@@ -218,6 +218,33 @@ pub fn intersect(a: &[Bound], b: &[Bound]) -> Vec<Bound> {
     sorted(out)
 }
 
+/// The intervals `a` or `b` allows, in order: those that overlap or meet at an end one of them
+/// holds become one.
+pub fn union(a: &[Bound], b: &[Bound]) -> Vec<Bound> {
+    let mut items: Vec<Bound> = a.iter().chain(b).cloned().collect();
+    items
+        .sort_by(|x, y| compare_values(&x.low, &y.low).then(y.low_inclusive.cmp(&x.low_inclusive)));
+    let mut out: Vec<Bound> = Vec::new();
+    for item in items {
+        if let Some(last) = out.last_mut() {
+            let order = compare_values(&item.low, &last.high);
+            if order.is_lt() || (order.is_eq() && (item.low_inclusive || last.high_inclusive)) {
+                match compare_values(&item.high, &last.high) {
+                    Ordering::Greater => {
+                        last.high = item.high;
+                        last.high_inclusive = item.high_inclusive;
+                    }
+                    Ordering::Equal => last.high_inclusive |= item.high_inclusive,
+                    Ordering::Less => {}
+                }
+                continue;
+            }
+        }
+        out.push(item);
+    }
+    out
+}
+
 /// Intervals in order, without repeated points.
 pub fn sorted(mut items: Vec<Bound>) -> Vec<Bound> {
     items.sort_by(|a, b| compare_values(&a.low, &b.low));

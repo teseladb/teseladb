@@ -1004,6 +1004,10 @@ impl DataCore {
                         // a snapshot past it.
                         let ingested = teseladb_range::sm::RangeSm::data_ingested;
                         core.data_entered(g, |sm| sm.range_mut().into_iter().for_each(ingested));
+                        // That snapshot is saved once the memtable's entries are down: they go
+                        // now, rather than when the core is next idle, so that a replica behind
+                        // it does not wait on the load.
+                        lsm.borrow_mut().flush();
                     }
                     continue;
                 }

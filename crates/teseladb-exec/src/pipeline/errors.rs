@@ -113,7 +113,27 @@ location!(
     N_MISSING = 5_787_906,
     SORT_BY_MISSING = 5_788_005,
     NEAR_IN_MATCH = 5_626_500,
+    OUT_TYPE = 16990,
+    OUT_SPECIAL = 17385,
+    MERGE_SPECIAL = 31319,
+    MERGE_INTO_TYPE = 51178,
+    MERGE_ON_TYPE = 51186,
+    MERGE_ON_EMPTY = 51187,
+    MERGE_ON_ELEMENT = 51134,
+    MERGE_WHEN_MATCHED_TYPE = 51191,
+    MERGE_MODES = 51181,
+    MERGE_INTO_EMPTY = 5_786_800,
+    MERGE_INTO_COLL = 5_786_801,
+    WRITE_NOT_LAST = 40601,
+    WRITE_IN_LOOKUP = 51047,
+    WRITE_IN_UNION = 31441,
 );
+
+/// `$merge` with `whenNotMatched: fail` and a document without a target.
+pub const MERGE_NO_MATCH: ErrorCode =
+    ErrorCode { code: 13113, name: "MergeStageNoMatchingDocument" };
+/// `InvalidOptions`: a stage an update's pipeline does not take.
+pub const INVALID_OPTIONS: ErrorCode = ErrorCode { code: 72, name: "InvalidOptions" };
 
 /// An error with `code` and `msg`.
 pub fn error(code: ErrorCode, msg: impl Into<String>) -> MqlError {

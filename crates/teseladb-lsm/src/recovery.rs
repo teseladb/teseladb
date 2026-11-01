@@ -90,6 +90,7 @@ fn open_table(
     disk: &mut dyn Disk,
     cfg: &LsmConfig,
     f: &manifest::FileMeta,
+    dicts: &crate::sst::reader::Dictionaries,
 ) -> Result<Table, LsmError> {
     let dir = &cfg.dir;
     let bad = |offset| LsmError::Corrupt { file: f.number, offset };
@@ -106,7 +107,9 @@ fn open_table(
     }
     let meta = read_at(disk, f.number, start, f.size - start)?;
     let ring = cfg.encryption.as_ref().map(|e| &*e.0);
-    let t = Table::from_meta(f.number, f.size, start, &meta, ring).map_err(|_| bad(start))?;
+    // A file whose dictionary the manifest does not have is as unreadable as a broken one.
+    let t =
+        Table::from_meta(f.number, f.size, start, &meta, (ring, dicts)).map_err(|_| bad(start))?;
     if t.props.lo != f.lo || t.props.hi != f.hi {
         return Err(bad(start));
     }
@@ -183,8 +186,9 @@ pub(crate) fn recover(cfg: &LsmConfig, disk: &mut dyn Disk) -> Result<Recovered,
         IoOp::Open { file: file_id(number), path: cfg.dir.join(manifest::manifest_name(number)) },
     )?;
     let mut tables = Vec::new();
+    let dicts = state.dictionary_contents();
     for f in state.files.values() {
-        tables.push((f.level, open_table(disk, cfg, f)?));
+        tables.push((f.level, open_table(disk, cfg, f, &dicts)?));
     }
     remove_leftovers(disk, cfg, &names, &state, number)?;
     Ok(Recovered { state, manifest: number, manifest_tail: tail, tables })

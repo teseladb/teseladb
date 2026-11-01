@@ -1,16 +1,19 @@
 //! Writing an SST as a stream: versions go in in order, aligned chunks come out as blocks fill,
 //! and [`TableWriter::finish`] adds the filter, properties, index and footer.
 
+use std::collections::BTreeMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use teseladb_crypto::at_rest::{FileKey, KeyRing, WRAPPED_KEY_LEN};
 use teseladb_keys::Hlc;
 use teseladb_types::Bytes;
 
-use super::block::{BlockBuilder, frame, frame_sealed};
+use super::block::{BlockBuilder, Method, TRAILER, frame, frame_sealed};
 use super::meta::{FOOTER, Footer, Handle, Props};
-use super::reader::Table;
+use super::reader::{BlockStats, Table};
 use super::{ALIGN, PAD, filter, pad, put_varint};
+use crate::config::Codec;
 use crate::entry::{self, Kind, RangeTombstone};
 
 /// Restart interval of data blocks.
@@ -18,11 +21,23 @@ const RESTART_INTERVAL: usize = 16;
 /// Varints and kind byte of an entry, at most.
 const ENTRY_HEADER: usize = 3 * 10 + 1;
 
+/// The newest dictionary of each collection, by the collection's prefix (004 FR-022).
+pub(crate) type CurrentDictionaries = BTreeMap<Vec<u8>, (u64, Arc<[u8]>)>;
+
 /// Writes one file.
 #[derive(Debug)]
 pub(crate) struct TableWriter {
     block_bytes: usize,
-    compress: bool,
+    codec: Codec,
+    /// The dictionaries its blocks may use ([`Codec::ZstdDict`]); none for a flush or an export.
+    dicts: Option<Rc<CurrentDictionaries>>,
+    /// The dictionary of the file: that of the first block whose collection has one. Blocks of
+    /// another collection use zstd alone.
+    file_dict: Option<(u64, Arc<[u8]>)>,
+    /// The first logical key of the open data block.
+    block_first: Option<Vec<u8>>,
+    /// What its data blocks took.
+    stats: BlockStats,
     data: BlockBuilder,
     index: BlockBuilder,
     out: Vec<u8>,
@@ -39,10 +54,14 @@ pub(crate) struct TableWriter {
 
 impl TableWriter {
     /// A writer with data blocks of about `block_bytes`.
-    pub(crate) fn new(block_bytes: usize, compress: bool) -> TableWriter {
+    pub(crate) fn new(block_bytes: usize, codec: Codec) -> TableWriter {
         TableWriter {
             block_bytes,
-            compress,
+            codec,
+            dicts: None,
+            file_dict: None,
+            block_first: None,
+            stats: BlockStats::default(),
             data: BlockBuilder::new(RESTART_INTERVAL),
             index: BlockBuilder::new(1),
             out: Vec::new(),
@@ -70,14 +89,33 @@ impl TableWriter {
         TableWriter { key, ..self }
     }
 
-    /// `payload` framed for offset `offset`, sealed when the file is encrypted.
-    fn framed(&self, payload: &[u8], compress: bool, offset: u64) -> Vec<u8> {
+    /// The writer compressing its blocks with the dictionaries of `dicts` too.
+    pub(crate) fn with_dicts(self, dicts: Rc<CurrentDictionaries>) -> TableWriter {
+        TableWriter { dicts: Some(dicts), ..self }
+    }
+
+    /// `payload` framed for offset `offset` with `method`, sealed when the file is encrypted.
+    fn framed(&self, payload: &[u8], method: Method<'_>, offset: u64) -> Vec<u8> {
         match &self.key {
-            None => frame(payload, compress),
+            None => frame(payload, method),
             // A file has far fewer than 2³² blocks (each takes at least 4 KiB), the most one data
             // key seals.
-            Some((k, _)) => frame_sealed(payload, compress, k, offset)
+            Some((k, _)) => frame_sealed(payload, method, k, offset)
                 .expect("a data key seals fewer than 2³² blocks of one file"),
+        }
+    }
+
+    /// The dictionary of a data block that starts at logical key `first`: its collection's, when
+    /// that is the file's (the first one taken becomes the file's).
+    fn block_dict(&mut self, first: &[u8]) -> Option<Arc<[u8]>> {
+        let prefix = teseladb_keys::space::collection_of(first)?;
+        let (version, content) = self.dicts.as_ref()?.get(prefix)?.clone();
+        match &self.file_dict {
+            None => {
+                self.file_dict = Some((version, content.clone()));
+                Some(content)
+            }
+            Some((v, c)) => (*v == version).then(|| c.clone()),
         }
     }
 
@@ -90,7 +128,21 @@ impl TableWriter {
         let last = self.data.last_key().to_vec();
         let payload = self.data.finish();
         let offset = self.taken + self.out.len() as u64;
-        let framed = self.framed(&payload, self.compress, offset);
+        let first = self.block_first.take().unwrap_or_default();
+        let dict = match self.codec {
+            Codec::ZstdDict => self.block_dict(&first),
+            Codec::None | Codec::Zlib | Codec::Zstd => None,
+        };
+        let method = match (self.codec, &dict) {
+            (Codec::None, _) => Method::None,
+            (Codec::Zlib, _) => Method::Zlib,
+            (Codec::ZstdDict, Some(d)) => Method::Dict(d),
+            (Codec::Zstd | Codec::ZstdDict, _) => Method::Zstd,
+        };
+        let framed = self.framed(&payload, method, offset);
+        self.stats.codes[usize::from(framed[framed.len() - TRAILER])] += 1;
+        self.stats.raw += payload.len() as u64;
+        self.stats.stored += framed.len() as u64;
         let mut handle = Vec::new();
         put_varint(&mut handle, offset);
         put_varint(&mut handle, framed.len() as u64);
@@ -106,8 +158,11 @@ impl TableWriter {
         {
             self.flush_block();
         }
-        self.data.add(ikey, kind, value);
         let (logical, ts) = entry::split(ikey);
+        if self.data.is_empty() {
+            self.block_first = Some(logical.to_vec());
+        }
+        self.data.add(ikey, kind, value);
         if self.last_logical.as_deref() != Some(logical) {
             self.hashes.push(filter::hashes(logical));
             self.last_logical = Some(logical.to_vec());
@@ -138,7 +193,7 @@ impl TableWriter {
 
     fn meta_block(&mut self, payload: &[u8]) -> Handle {
         let offset = self.taken + self.out.len() as u64;
-        let framed = self.framed(payload, false, offset);
+        let framed = self.framed(payload, Method::None, offset);
         let handle = Handle { offset, len: framed.len() as u64 };
         self.out.extend_from_slice(&framed);
         pad(&mut self.out);
@@ -177,6 +232,7 @@ impl TableWriter {
             max_ts: max_ts.expect("a version or a tombstone"),
             versions: self.versions,
             tombstones,
+            dictionary: self.file_dict.as_ref().map_or(0, |(v, _)| *v),
         };
         let props_handle = self.meta_block(&props.encode());
         let index_payload = self.index.finish();
@@ -188,8 +244,10 @@ impl TableWriter {
         let size = self.taken + self.out.len() as u64;
         let meta = Bytes::from_vec(self.out[(meta_start - self.taken) as usize..].to_vec());
         let key = self.key.as_ref().map(|(k, _)| k.clone());
-        let table = Table::with_key(number, size, meta_start, &meta, key)
+        let dict = self.file_dict.as_ref().map(|(_, c)| c.clone());
+        let mut table = Table::with_key(number, size, meta_start, &meta, key, &|_| dict.clone())
             .expect("a file just written reads back");
+        table.written = self.stats;
         let (at, chunk) = self.take().expect("the end of the file");
         Some((at, chunk, table))
     }
@@ -202,13 +260,13 @@ mod tests {
 
     #[test]
     fn an_empty_writer_writes_nothing() {
-        let w = TableWriter::new(4096, false);
+        let w = TableWriter::new(4096, Codec::None);
         assert!(w.finish(1, Vec::new()).is_none());
     }
 
     #[test]
     fn chunks_are_aligned_and_contiguous() {
-        let mut w = TableWriter::new(4096, false);
+        let mut w = TableWriter::new(4096, Codec::None);
         let mut file = Vec::new();
         for i in 0..2000u32 {
             let key =
@@ -229,5 +287,52 @@ mod tests {
         assert_eq!(file.len() % ALIGN, 0);
         assert_eq!(table.props.versions, 2000);
         assert!(table.blocks() > 20);
+    }
+
+    /// A key of collection `coll` in the data space.
+    fn data_key(coll: u32, i: u32) -> Vec<u8> {
+        let mut k = vec![teseladb_keys::space::DATA, 0, 0, 0, 1];
+        k.extend_from_slice(&coll.to_be_bytes());
+        k.extend_from_slice(&[0, 0, 0, 0]);
+        k.extend_from_slice(&i.to_be_bytes());
+        k
+    }
+
+    #[test]
+    fn blocks_use_the_dictionary_of_the_file_s_collection() {
+        let value = br#"{"name": "customer", "city": "Bilbao", "zip": "48001"}"#.repeat(3);
+        let dict: Arc<[u8]> = Arc::from(&value[..60]);
+        let prefix = data_key(7, 0)[..9].to_vec();
+        let dicts = Rc::new(BTreeMap::from([(prefix, (4u64, dict.clone()))]));
+        let mut w = TableWriter::new(4096, Codec::ZstdDict).with_dicts(dicts);
+        let mut file = Vec::new();
+        // Collection 7 has a dictionary, collection 8 none, and the system space is not data.
+        let keys = (0..300).map(|i| data_key(7, i)).chain((0..300).map(|i| data_key(8, i)));
+        for (n, key) in keys.chain([vec![teseladb_keys::space::SYSTEM, 1]]).enumerate() {
+            let ik = entry::internal_key(&key, Hlc { physical: 5, logical: n as u32 });
+            w.add(&ik, Kind::Put, &value);
+            if let Some((_, chunk)) = w.take() {
+                file.extend_from_slice(&chunk);
+            }
+        }
+        let (_, chunk, table) = w.finish(9, Vec::new()).unwrap();
+        file.extend_from_slice(&chunk);
+        assert_eq!(table.props.dictionary, 4);
+        let codes = table.written.codes;
+        assert!(codes[3] > 0 && codes[2] > 0, "{codes:?}");
+        // The file opens with its dictionary, and without it is unreadable.
+        let footer = Table::footer(&file).unwrap();
+        let meta = Bytes::from_vec(file[footer.filter.offset as usize..].to_vec());
+        let size = file.len() as u64;
+        let dicts = crate::sst::reader::Dictionaries::from([(4, dict)]);
+        let t = Table::from_meta(9, size, footer.filter.offset, &meta, (None, &dicts)).unwrap();
+        for i in 0..t.blocks() {
+            let h = t.handle(i);
+            let read =
+                Bytes::from_vec(file[h.offset as usize..(h.offset + h.len) as usize].to_vec());
+            assert!(t.block(i, &read).is_ok(), "block {i}");
+        }
+        let none = crate::sst::reader::Dictionaries::new();
+        assert!(Table::from_meta(9, size, footer.filter.offset, &meta, (None, &none)).is_err());
     }
 }

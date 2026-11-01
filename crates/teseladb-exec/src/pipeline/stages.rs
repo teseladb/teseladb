@@ -633,6 +633,7 @@ impl Lookup {
         })?;
         check_path(&as_name)?;
         let inner = ctx.with(lets.iter().map(|(n, _)| n.as_str()));
+        super::out_merge::refuse_in(stages.as_deref().unwrap_or_default(), "$lookup")?;
         let pipeline = match (stages, &from) {
             (Some(s), Some(_)) => Some(Pipeline::parse(&s, &inner)?),
             (Some(s), None) => Some(Pipeline::parse_from_documents(&s, &inner, "$lookup")?),
@@ -771,6 +772,7 @@ impl UnionWith {
                         }
                     }
                 }
+                super::out_merge::refuse_in(&stages, "$unionWith")?;
                 let pipeline = match coll {
                     Some(_) => Pipeline::parse(&stages, ctx)?,
                     None => Pipeline::parse_from_documents(&stages, ctx, "$unionWith")?,

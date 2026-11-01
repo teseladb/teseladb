@@ -103,6 +103,79 @@ impl Extensions for NodeExtensions {
         doc: RawDoc<'_>,
         vars: Option<&Document>,
     ) -> Result<Document> {
-        NoExtensions.update_pipeline(pipeline, doc, vars)
+        let stages: Vec<RawValue<'_>> = match pipeline {
+            RawValue::Array(a) => a.iter().collect(),
+            _ => Vec::new(),
+        };
+        refuse_outside_update(&stages)?;
+        let names: Vec<&str> = vars.map(|v| v.iter().map(|(k, _)| k).collect()).unwrap_or_default();
+        let ctx = teseladb_exec::expr::Ctx::checked(names);
+        let p = teseladb_exec::pipeline::Pipeline::parse(&stages, &ctx)?;
+        let env = VarsEnv(vars.cloned().unwrap_or_default());
+        let d = Document::from(doc);
+        // An empty pipeline leaves the document as it is.
+        Ok(p.run(vec![d.clone()], &env)?.into_iter().next().unwrap_or(d))
+    }
+}
+
+/// The stages an update's pipeline takes (measured on 9.0.4).
+const UPDATE_STAGES: [&str; 6] =
+    ["$addFields", "$set", "$project", "$unset", "$replaceRoot", "$replaceWith"];
+
+/// `InvalidOptions`: a stage an update's pipeline does not take.
+const INVALID_OPTIONS: teseladb_mql::ErrorCode =
+    teseladb_mql::ErrorCode { code: 72, name: "InvalidOptions" };
+
+/// Checks the pipeline `u` of an update with variables `vars`: its stages and their arguments,
+/// as RefDb parses it with the statement.
+pub(crate) fn check_update_pipeline(u: &Value, vars: Option<&Document>) -> Result<()> {
+    let holder = Document::new().with("u", u.clone());
+    let bytes = holder.to_bytes().map_err(|e| MqlError::new(codes::BAD_VALUE, e.to_string()))?;
+    let raw =
+        RawDoc::from_bytes(&bytes).map_err(|e| MqlError::new(codes::BAD_VALUE, e.to_string()))?;
+    let stages: Vec<RawValue<'_>> = match raw.get("u") {
+        Some(RawValue::Array(a)) => a.iter().collect(),
+        _ => Vec::new(),
+    };
+    refuse_outside_update(&stages)?;
+    let names: Vec<&str> = vars.map(|v| v.iter().map(|(k, _)| k).collect()).unwrap_or_default();
+    teseladb_exec::pipeline::Pipeline::parse(&stages, &teseladb_exec::expr::Ctx::checked(names))?;
+    Ok(())
+}
+
+/// Refuses a stage of an update's pipeline other than [`UPDATE_STAGES`].
+pub(crate) fn refuse_outside_update(stages: &[RawValue<'_>]) -> Result<()> {
+    for s in stages {
+        let name = match s {
+            RawValue::Document(d) => d.iter().next().map_or("", |(k, _)| k),
+            _ => "",
+        };
+        if !UPDATE_STAGES.contains(&name) {
+            let msg = format!("{name} is not allowed to be used within an update");
+            return Err(MqlError::new(INVALID_OPTIONS, msg));
+        }
+    }
+    Ok(())
+}
+
+/// The environment of a pipeline that reads only the command's variables (an update's, the
+/// `whenMatched` pipeline of `$merge`).
+pub(crate) struct VarsEnv(pub(crate) Document);
+
+impl teseladb_exec::pipeline::Env for VarsEnv {
+    fn ext(&self) -> &dyn Extensions {
+        &NodeExtensions
+    }
+
+    fn vars(&self) -> Option<&Document> {
+        Some(&self.0)
+    }
+
+    fn collection(&self, _name: &str) -> Result<Vec<Document>> {
+        Ok(Vec::new())
+    }
+
+    fn random(&self) -> f64 {
+        0.0
     }
 }

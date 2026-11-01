@@ -145,10 +145,13 @@ fn minimal(paths: BTreeSet<String>) -> Vec<String> {
 
 /// Whether a `$project` keeps fields (rather than dropping them).
 fn inclusion(p: &Document) -> bool {
-    p.iter().filter(|(k, _)| *k != "_id").any(|(_, v)| {
+    let kept = |v: &Value| {
         !matches!(v, Value::Int32(0) | Value::Int64(0) | Value::Boolean(false))
             && !matches!(v, Value::Double(x) if *x == 0.0)
-    })
+    };
+    // `{_id: 1}` alone keeps `_id`; `_id` beside other fields decides nothing.
+    p.iter().filter(|(k, _)| *k != "_id").any(|(_, v)| kept(v))
+        || (p.len() == 1 && p.get("_id").is_some_and(kept))
 }
 
 /// Whether a `$project` drops `_id`.

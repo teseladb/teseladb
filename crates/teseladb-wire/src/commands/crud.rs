@@ -452,11 +452,12 @@ fn dollar_free_id(d: &Document) -> Result<(), CommandError> {
 /// The document as stored: `_id` first, generated if missing.
 pub(crate) fn with_id<B: Backend + ?Sized>(
     backend: &mut B,
+    shared: &super::Shared,
     doc: &Document,
 ) -> Result<Document, CommandError> {
     let id = match doc.get("_id") {
         Some(v) => v.clone(),
-        None => Value::ObjectId(new_object_id(backend)),
+        None => Value::ObjectId(new_object_id(backend, shared)),
     };
     check_id(&id)?;
     let mut out = Document::new().with("_id", id);
@@ -577,7 +578,7 @@ pub fn insert<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
     let mut stop = false;
     for (i, d) in docs.iter().enumerate() {
         let prepared = match d {
-            Value::Document(d) => with_id(ctx.backend, d).and_then(|doc| {
+            Value::Document(d) => with_id(ctx.backend, ctx.shared, d).and_then(|doc| {
                 let id = doc.get("_id").cloned().unwrap_or(Value::Null);
                 insert_key(&coll, &id).map(|k| (doc, k))
             }),
@@ -771,6 +772,7 @@ fn raw(d: &Document) -> Result<Vec<u8>, CommandError> {
 /// The document an upsert inserts for `filter` and `update`.
 pub(crate) fn upsert_doc<B: Backend + ?Sized>(
     backend: &mut B,
+    shared: &super::Shared,
     op: &str,
     filter: &Document,
     update: &Value,
@@ -799,7 +801,7 @@ pub(crate) fn upsert_doc<B: Backend + ?Sized>(
         now: now_of(backend),
         insert: true,
     };
-    let oid = new_object_id(backend);
+    let oid = new_object_id(backend, shared);
     let during = executor_error(op);
     let doc = upsert(&f, &u, &ctx, || Value::ObjectId(oid)).map_err(from_mql).map_err(&during)?;
     if let Some(id) = doc.get("_id") {
@@ -882,9 +884,8 @@ pub fn modify<B: Backend + ?Sized>(
     if let Some(spec) = super::timeseries::spec_of(&coll)?.filter(|_| !raw) {
         return super::timeseries::modify(ctx.backend, w, (&coll, &spec), m, &rules, stmt);
     }
-    if m.sort.is_some() || id_equality(&m.filter).is_none() {
-        super::query::count_scan(ctx.shared, ns);
-    }
+    // A scan counts once the statement ends without an error (measured on a `refnode` 9.0.4).
+    let scans = m.sort.is_some() || id_equality(&m.filter).is_none();
     let mut keys = match &m.sort {
         Some(sort) => sorted_first(ctx.backend, &coll, m, rules.collation.as_ref(), sort)?,
         None => candidates(ctx.backend, &coll, m, rules.collation.as_ref())?,
@@ -892,7 +893,7 @@ pub fn modify<B: Backend + ?Sized>(
     let upsert_doc = match (&m.update, m.upsert) {
         (Some(u), true) => {
             let op = executor_of(m.image);
-            Some(upsert_doc(ctx.backend, op, &m.filter, u, m.array_filters.as_deref())?)
+            Some(upsert_doc(ctx.backend, ctx.shared, op, &m.filter, u, m.array_filters.as_deref())?)
         }
         _ => None,
     };
@@ -949,6 +950,9 @@ pub fn modify<B: Backend + ?Sized>(
         if !m.multi && total.n > 0 {
             break;
         }
+    }
+    if scans {
+        super::query::count_scan(ctx.shared, ns);
     }
     Ok(total)
 }
@@ -1013,8 +1017,8 @@ fn unknown_field(d: &Document, name: &str, known: &[&str]) -> Result<(), Command
 /// rejects fails the whole command (measured).
 /// What an update statement says beyond its `Modify`, checked when the statement runs.
 pub(crate) struct UpdateFlags {
-    /// It has constants (`c`).
-    constants: bool,
+    /// Its constants (`c`), which its pipeline reads as variables.
+    constants: Option<Document>,
     /// `upsertSupplied: true`.
     upsert_supplied: bool,
 }
@@ -1029,7 +1033,7 @@ pub(crate) fn update_statement(v: &Value, i: usize) -> Result<(Modify, UpdateFla
     let update = d.get("u").cloned().ok_or_else(|| missing(name, "u"))?;
     let multi = args::bool_field(d, name, "multi")?.unwrap_or(false);
     let flags = UpdateFlags {
-        constants: d.get("c").is_some(),
+        constants: args::doc(d, name, "c")?.cloned(),
         upsert_supplied: args::bool_field(d, name, "upsertSupplied")?.unwrap_or(false),
     };
     let m = Modify {
@@ -1057,7 +1061,7 @@ pub(crate) fn check_update_statement(
 ) -> Result<(), CommandError> {
     let pipeline = matches!(m.update, Some(Value::Array(_)));
     let replacement = matches!(&m.update, Some(Value::Document(u)) if u.iter().next().is_none_or(|(k, _)| !k.starts_with('$')));
-    if flags.constants && !pipeline {
+    if flags.constants.is_some() && !pipeline {
         return Err(CommandError::new(
             CONSTANTS_ONLY_FOR_PIPELINE,
             "Constant values may only be specified for pipeline updates",
@@ -1078,7 +1082,25 @@ pub(crate) fn check_update_statement(
             "cannot specify 'upsertSupplied: true' for a non-upsert operation",
         ));
     }
+    // A pipeline is parsed with the statement: its stages and variables (measured).
+    if let Some(u @ Value::Array(_)) = &m.update {
+        super::engines::check_update_pipeline(u, m.vars.as_ref()).map_err(from_mql)?;
+    }
     Ok(())
+}
+
+/// The variables of an update statement: the command's `let`, then its constants (`c`).
+fn statement_vars(vars: Option<&Document>, flags: &UpdateFlags) -> Option<Document> {
+    match (vars, &flags.constants) {
+        (v, None) => v.cloned(),
+        (v, Some(c)) => {
+            let mut all = v.cloned().unwrap_or_default();
+            for (k, x) in c.iter() {
+                all.insert(k, x.clone());
+            }
+            Some(all)
+        }
+    }
 }
 
 /// A `refrouter` 9.0 refuses the whole command when an update is neither a document nor a
@@ -1110,7 +1132,10 @@ pub fn update<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
     let statements: Vec<(Modify, UpdateFlags)> = items
         .iter()
         .enumerate()
-        .map(|(i, v)| update_statement(v, i).map(|(m, f)| (Modify { vars: vars.clone(), ..m }, f)))
+        .map(|(i, v)| {
+            update_statement(v, i)
+                .map(|(m, f)| (Modify { vars: statement_vars(vars.as_ref(), &f), ..m }, f))
+        })
         .collect::<Result<_, _>>()?;
     let expected_uuid = uuid::expected(ctx.cmd, UPDATE)?;
     let mut w = Writer::new(ctx, UPDATE)?;
@@ -1600,7 +1625,7 @@ fn bulk_op<B: Backend + ?Sized>(
         BulkBody::Insert(doc) => {
             names::check_writable(ns)?;
             let coll = ensure_collection(ctx, ns)?;
-            let doc = with_id(ctx.backend, doc)?;
+            let doc = with_id(ctx.backend, ctx.shared, doc)?;
             let key = insert_key(&coll, doc.get("_id").unwrap_or(&Value::Null))?;
             let rules = rules_of(ns, &coll, bypass, None, index_rules(ctx.backend, &coll)?)?;
             let keys = if key.is_empty() { Vec::new() } else { vec![key] };

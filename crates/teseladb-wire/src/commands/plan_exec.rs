@@ -8,13 +8,18 @@
 use teseladb_bson::{Document, RawDoc, RawValue, Value};
 use teseladb_index::planner_api::{CatalogIndex, IndexCatalog, IndexState};
 use teseladb_index::spec::catalog_index;
-use teseladb_keys::{Direction, FieldBounds, Hlc, Interval, KeyBuilder, KeyRange, values_len};
+use teseladb_keys::{
+    DOCUMENT_BUCKETS, DOCUMENTS, Direction, FieldBounds, Hlc, Interval, KeyBuilder, KeyRange,
+    values_len,
+};
 use teseladb_meta::catalog::CollectionEntry;
 use teseladb_meta::collection_types::CollectionKind;
 use teseladb_meta::indexes::{IndexEntry, IndexState as EntryState};
 use teseladb_plan::cost::{TRIAL_RESULTS, Trial, ranked, score, trial_works};
 use teseladb_plan::logical::Bound;
-use teseladb_plan::rules::{Access, IndexMeta, IndexScan, Request, branch_scans, candidates};
+use teseladb_plan::rules::{
+    Access, IndexMeta, IndexScan, Request, branch_scans, candidates, joined_or,
+};
 use teseladb_range::read::ReadConcern;
 
 use super::index_maintenance::MULTIKEY_MARKS;
@@ -24,6 +29,9 @@ use crate::error::{CommandError, INTERNAL_ERROR};
 
 /// The entries an index scan reads at a time.
 const KEY_CHUNK: usize = 256;
+
+/// The name of the index of `_id`.
+const ID_INDEX: &str = "_id_";
 
 /// An index of a collection as the planner and `explain` see it.
 #[derive(Clone, Debug)]
@@ -40,6 +48,8 @@ pub(crate) struct PlanIndex {
     catalog: CatalogIndex,
     /// The directions of its fields.
     dirs: Vec<Direction>,
+    /// The index of `_id`, whose entries are the collection's documents.
+    id_index: bool,
 }
 
 impl PlanIndex {
@@ -59,8 +69,9 @@ impl PlanIndex {
     }
 }
 
-/// The ready indexes of `coll` the planner may consider, in the catalog's order; none for a
-/// collection that is not a plain one (its documents' keys are not those of their `_id`).
+/// The ready indexes of `coll` the planner may consider, in the catalog's order: the index of
+/// `_id` first, as RefDb lists it; none for a collection that is not a plain one (its
+/// documents' keys are not those of their `_id`).
 pub(crate) fn plan_indexes<B: Backend + ?Sized>(
     backend: &mut B,
     coll: &CollectionEntry,
@@ -68,16 +79,27 @@ pub(crate) fn plan_indexes<B: Backend + ?Sized>(
     if !matches!(super::kinds::kind_of(coll)?, CollectionKind::Normal) {
         return Ok(Vec::new());
     }
+    let id_entry = IndexEntry {
+        id: DOCUMENTS,
+        collection: coll.id,
+        name: ID_INDEX.to_owned(),
+        spec: super::catalog::id_index(coll)?.to_bytes()?,
+        buckets: 0,
+        state: EntryState::Ready,
+    };
     let mut out = Vec::new();
-    for entry in backend.indexes(coll.id)? {
+    for entry in std::iter::once(id_entry).chain(backend.indexes(coll.id)?) {
         if entry.state != EntryState::Ready {
             continue;
         }
+        let id_index = entry.id == DOCUMENTS;
         let spec = RawDoc::from_bytes(&entry.spec)?;
         let ready = IndexState::Ready(Hlc { physical: 0, logical: 0 });
         let catalog = catalog_index(spec, entry.id, entry.buckets, ready)
             .map_err(|e| CommandError::new(INTERNAL_ERROR, e.reason))?;
-        let Some(catalog) = catalog else { continue };
+        let Some(mut catalog) = catalog else { continue };
+        // The index of `_id` is unique without saying so in its definition.
+        catalog.unique |= id_index;
         let pattern = Document::from(RawDoc::from_bytes(&catalog.key_pattern)?);
         let ordered = pattern.iter().all(|(_, v)| {
             matches!(v, Value::Int32(_) | Value::Int64(_) | Value::Double(_) | Value::Decimal128(_))
@@ -89,7 +111,11 @@ pub(crate) fn plan_indexes<B: Backend + ?Sized>(
             && !catalog.sparse
             && spec.get("collation").is_none()
             && pattern.iter().all(|(k, _)| !k.contains('$'));
-        let multikey_paths = multikey_paths(backend, (coll.tenant, coll.id), &entry, &pattern)?;
+        let multikey_paths = if id_index {
+            pattern.iter().map(|(k, _)| (k.to_owned(), Vec::new())).collect()
+        } else {
+            multikey_paths(backend, (coll.tenant, coll.id), &entry, &pattern)?
+        };
         let key = pattern
             .iter()
             .map(|(k, v)| (k.to_owned(), if query_number(v) < 0.0 { -1 } else { 1 }))
@@ -101,7 +127,7 @@ pub(crate) fn plan_indexes<B: Backend + ?Sized>(
             plannable,
         };
         let dirs = catalog.def.key_spec().fields.iter().map(|f| f.direction).collect();
-        out.push(PlanIndex { entry, pattern, multikey_paths, meta, catalog, dirs });
+        out.push(PlanIndex { entry, pattern, multikey_paths, meta, catalog, dirs, id_index });
     }
     Ok(out)
 }
@@ -169,6 +195,9 @@ pub(crate) struct Ran {
     pub trial: Trial,
     /// Index entries read.
     pub keys: u64,
+    /// The entries among them outside the plan's intervals, read on the way to the next interval
+    /// or to the end of a scan of several intervals.
+    pub past: u64,
     /// Documents read.
     pub docs: u64,
     /// Documents found, in order.
@@ -181,6 +210,11 @@ pub(crate) struct Ran {
     docs_at: Vec<u64>,
     /// The entries each scan of an intersection read, in its order.
     pub child_keys: Vec<u64>,
+    /// The entries each of those scans read outside its intervals.
+    pub child_past: Vec<u64>,
+    /// What each scan of a `$or` gave the `OR`: its entries, or the documents its own filter
+    /// kept.
+    pub child_given: Vec<u64>,
 }
 
 /// What a plan counted at the end of the trial, and its score.
@@ -217,13 +251,14 @@ impl Ran {
     }
 }
 
-/// The plans of `read` on `coll` with `indexes`, the winner first, each with its trial.
+/// The plans of `read` on `coll` with `indexes`, the winner first, each with its trial; `None`
+/// when no index serves and the collection scan is the one plan (the caller scans).
 pub(crate) fn choose<B: Backend + ?Sized>(
     backend: &mut B,
     coll: &CollectionEntry,
     indexes: &[PlanIndex],
     read: &ReadPlan<'_>,
-) -> Result<Chosen, CommandError> {
+) -> Result<Option<Chosen>, CommandError> {
     let metas: Vec<IndexMeta> = indexes.iter().map(|i| i.meta.clone()).collect();
     let request = Request {
         parsed: Some(read.parsed),
@@ -236,14 +271,15 @@ pub(crate) fn choose<B: Backend + ?Sized>(
         && let Some(branches) = branch_scans(&request, &metas)
     {
         // The clauses' scans join in the order of their indexes (measured).
-        let mut scans = subplanned(backend, coll, indexes, read, branches)?;
-        scans.sort_by_key(|s| s.index);
-        plans = vec![Access::Or(scans)];
+        let scans = subplanned(backend, coll, indexes, read, branches)?;
+        plans = vec![Access::Or(joined_or(scans, &metas, &read.sort))];
     }
     if plans.len() < 2 {
-        let access = plans.pop().unwrap_or(Access::Collscan);
+        let Some(access) = plans.pop().filter(|a| *a != Access::Collscan) else {
+            return Ok(None);
+        };
         let winner = run(backend, coll, indexes, read, access, None)?;
-        return Ok(Chosen { winner, others: Vec::new() });
+        return Ok(Some(Chosen { winner, others: Vec::new() }));
     }
     let documents = count_documents(backend, coll, read.concern)?;
     let budget = trial_works(documents);
@@ -269,7 +305,7 @@ pub(crate) fn choose<B: Backend + ?Sized>(
     let mut winner = run(backend, coll, indexes, read, best.access.clone(), None)?;
     winner.tried = best.tried;
     let others = order[1..].iter().map(|i| trials[*i].clone()).collect();
-    Ok(Chosen { winner, others })
+    Ok(Some(Chosen { winner, others }))
 }
 
 /// The plan the planner chose, and the others it tried, best first.
@@ -360,12 +396,15 @@ fn run<B: Backend + ?Sized>(
         access: access.clone(),
         trial: Trial::default(),
         keys: 0,
+        past: 0,
         docs: 0,
         found: Vec::new(),
         given_at: Vec::new(),
         tried: None,
         docs_at: Vec::new(),
         child_keys: Vec::new(),
+        child_past: Vec::new(),
+        child_given: Vec::new(),
     };
     let scans: Vec<IndexScan> = match &access {
         Access::Collscan => {
@@ -406,11 +445,14 @@ fn run<B: Backend + ?Sized>(
     let limit = if blocking { None } else { read.limit };
     let mut seen: std::collections::BTreeSet<Vec<u8>> = std::collections::BTreeSet::new();
     let mut ended = true;
+    let mut last_past = false;
     'scans: for s in &scans {
         let index = &indexes[s.index];
         ran.child_keys.push(0);
+        ran.child_past.push(0);
+        ran.child_given.push(0);
         let residual = s.residual.as_ref().map(&plan_filter).transpose()?;
-        for pk in entries(backend, (coll.tenant, coll.id), index, s, read.concern)? {
+        for entry in entries(backend, (coll.tenant, coll.id), index, s, read.concern)? {
             if budget.is_some_and(|b| ran.keys >= b) {
                 ended = false;
                 break 'scans;
@@ -419,8 +461,24 @@ fn run<B: Backend + ?Sized>(
             if let Some(k) = ran.child_keys.last_mut() {
                 *k += 1;
             }
-            if !seen.insert(pk.clone()) {
+            last_past = entry.is_none();
+            let Some(pk) = entry else {
+                ran.past += 1;
+                if let Some(p) = ran.child_past.last_mut() {
+                    *p += 1;
+                }
                 continue;
+            };
+            // A scan without filter gives its entries to the `OR`, which drops those it has
+            // seen; one with a filter fetches each document first.
+            let seen_before = seen.contains(&pk);
+            if residual.is_none() {
+                if let Some(g) = ran.child_given.last_mut() {
+                    *g += 1;
+                }
+                if seen_before {
+                    continue;
+                }
             }
             let key = KeyBuilder::document_of_pk(coll.tenant, coll.id, &pk);
             let next = [key.as_bytes(), &[0]].concat();
@@ -435,7 +493,14 @@ fn run<B: Backend + ?Sized>(
                 Some(f) => f.matches(RawDoc::from_bytes(&bytes)?, &ctx).map_err(from_mql)?,
                 None => true,
             };
-            if keep {
+            if keep
+                && residual.is_some()
+                && let Some(g) = ran.child_given.last_mut()
+            {
+                *g += 1;
+            }
+            if keep && !seen_before {
+                seen.insert(pk);
                 ran.found.push((dk, bytes));
                 ran.given_at.push(ran.keys);
                 let n = u64::try_from(ran.found.len()).unwrap_or(u64::MAX);
@@ -446,7 +511,9 @@ fn run<B: Backend + ?Sized>(
             }
         }
     }
-    let input = ran.keys + u64::from(ended);
+    // A key read past the last interval is the work that ends the scan (measured).
+    let ends_past = ended && last_past;
+    let input = ran.keys + u64::from(ended && !ends_past);
     let advanced = u64::try_from(ran.found.len()).unwrap_or(u64::MAX);
     let works = if blocking {
         let out = read.limit.map_or(advanced, |l| advanced.min(l));
@@ -489,18 +556,33 @@ fn intersected<B: Backend + ?Sized>(
     let Some((last, held)) = scans.split_last() else { return Ok(ran) };
     let mut sets: Vec<std::collections::BTreeSet<Vec<u8>>> = Vec::new();
     for s in held {
-        let pks = entries(backend, (coll.tenant, coll.id), &indexes[s.index], s, read.concern)?;
-        let n = u64::try_from(pks.len()).unwrap_or(u64::MAX);
+        let read_entries =
+            entries(backend, (coll.tenant, coll.id), &indexes[s.index], s, read.concern)?;
+        let n = u64::try_from(read_entries.len()).unwrap_or(u64::MAX);
+        let outside = read_entries.iter().filter(|e| e.is_none()).count();
+        let past = u64::try_from(outside).unwrap_or(u64::MAX);
+        let pks: std::collections::BTreeSet<Vec<u8>> = read_entries.into_iter().flatten().collect();
         ran.keys += n;
+        ran.past += past;
         ran.child_keys.push(n);
-        sets.push(pks.into_iter().collect());
+        ran.child_past.push(past);
+        sets.push(pks);
     }
     ran.child_keys.push(0);
-    for pk in entries(backend, (coll.tenant, coll.id), &indexes[last.index], last, read.concern)? {
+    ran.child_past.push(0);
+    for entry in entries(backend, (coll.tenant, coll.id), &indexes[last.index], last, read.concern)?
+    {
         ran.keys += 1;
         if let Some(k) = ran.child_keys.last_mut() {
             *k += 1;
         }
+        let Some(pk) = entry else {
+            ran.past += 1;
+            if let Some(p) = ran.child_past.last_mut() {
+                *p += 1;
+            }
+            continue;
+        };
         if !sets.iter().all(|set| set.contains(&pk)) {
             continue;
         }
@@ -530,41 +612,175 @@ fn intersected<B: Backend + ?Sized>(
     Ok(ran)
 }
 
-/// The primary keys of the entries of `index` within the intervals of `scan`, in its order.
+/// The entries of `index` a scan of `scan` examines, in its order: the primary key of each
+/// entry within its intervals, and `None` for an entry outside them. A scan of one interval stops
+/// at its end; a scan of several reads, after each interval, the next entry, which is outside
+/// them when it lies before the next interval or after the last (measured on a `refrouter` 9.0.4:
+/// `_id` in `[2, 5, 7]` over `_id` 1 to 8 examines 6 keys).
 fn entries<B: Backend + ?Sized>(
     backend: &mut B,
     (tenant, collection): (u32, u32),
     index: &PlanIndex,
     scan: &IndexScan,
     concern: ReadConcern,
-) -> Result<Vec<Vec<u8>>, CommandError> {
+) -> Result<Vec<Option<Vec<u8>>>, CommandError> {
     let ranges = key_ranges((tenant, collection), index, &scan.bounds)?;
+    let (first, past) = index_span((tenant, collection), index);
+    let mut lists = Vec::new();
+    for r in &ranges {
+        let mut pks = range_entries(backend, (tenant, collection), index, r, concern)?;
+        if scan.backward {
+            pks.reverse();
+        }
+        lists.push(pks);
+    }
+    let several = ranges.len() > 1;
+    let order: Vec<usize> = match scan.backward {
+        true => (0..ranges.len()).rev().collect(),
+        false => (0..ranges.len()).collect(),
+    };
+    let mut out = Vec::new();
+    for (step, &i) in order.iter().enumerate() {
+        out.extend(lists[i].drain(..).map(Some));
+        if !several {
+            continue;
+        }
+        // The stretch between this interval and the next one the scan reads, or the index's end.
+        let next = order.get(step + 1).copied();
+        let end_of = |r: &KeyRange| r.end.clone().unwrap_or_else(|| past.clone());
+        let (from, to) = match (scan.backward, next) {
+            (false, Some(n)) => (end_of(&ranges[i]), ranges[n].start.clone()),
+            (false, None) => (end_of(&ranges[i]), past.clone()),
+            (true, Some(n)) => (end_of(&ranges[n]), ranges[i].start.clone()),
+            (true, None) => (first.clone(), ranges[i].start.clone()),
+        };
+        if from < to && any_entry(backend, tenant, index, (&from, &to), concern)? {
+            out.push(None);
+        }
+    }
+    Ok(out)
+}
+
+/// Whether `index` has an entry after the last interval of `scan`, in its direction.
+pub(crate) fn key_after<B: Backend + ?Sized>(
+    backend: &mut B,
+    coll: &CollectionEntry,
+    index: &PlanIndex,
+    scan: &IndexScan,
+) -> Result<bool, CommandError> {
+    let ranges = key_ranges((coll.tenant, coll.id), index, &scan.bounds)?;
+    let (first, past) = index_span((coll.tenant, coll.id), index);
+    let (from, to) = match (scan.backward, ranges.first(), ranges.last()) {
+        (true, Some(r), _) => (first, r.start.clone()),
+        (false, _, Some(r)) => (r.end.clone().unwrap_or_else(|| past.clone()), past),
+        _ => return Ok(false),
+    };
+    Ok(from < to && any_entry(backend, coll.tenant, index, (&from, &to), ReadConcern::Local)?)
+}
+
+/// The first key of `index` and the first key after it.
+fn index_span((tenant, collection): (u32, u32), index: &PlanIndex) -> (Vec<u8>, Vec<u8>) {
+    let id = index.entry.id;
+    (
+        KeyBuilder::index_prefix(tenant, collection, id).as_bytes().to_vec(),
+        KeyBuilder::index_prefix(tenant, collection, id + 1).as_bytes().to_vec(),
+    )
+}
+
+/// The primary keys of the entries of `index` within key range `r`, in key order.
+fn range_entries<B: Backend + ?Sized>(
+    backend: &mut B,
+    (tenant, collection): (u32, u32),
+    index: &PlanIndex,
+    r: &KeyRange,
+    concern: ReadConcern,
+) -> Result<Vec<Vec<u8>>, CommandError> {
+    let (_, past) = index_span((tenant, collection), index);
+    let end = r.end.clone().unwrap_or(past);
+    if index.id_index {
+        return id_entries(backend, (tenant, collection), (&r.start, &end), concern);
+    }
     let head = KeyBuilder::index_prefix(tenant, collection, index.entry.id).as_bytes().len();
     let malformed = || CommandError::new(INTERNAL_ERROR, "an index entry that does not decode");
     let mut pks = Vec::new();
-    for r in ranges {
-        let end = r.end.clone().unwrap_or_else(|| {
-            KeyBuilder::index_prefix(tenant, collection, index.entry.id + 1).as_bytes().to_vec()
-        });
-        let mut from = r.start.clone();
+    let mut from = r.start.clone();
+    loop {
+        let rows = backend.scan(&from, &end, KEY_CHUNK, concern)?;
+        let short = rows.len() < KEY_CHUNK;
+        for (key, _) in &rows {
+            let rest = key.get(head..).ok_or_else(malformed)?;
+            let cut = head + values_len(rest, &index.dirs).map_err(|_| malformed())?;
+            pks.push(key[cut..].to_vec());
+        }
+        match rows.last() {
+            Some((k, _)) if !short => from = [k.as_slice(), &[0]].concat(),
+            _ => break,
+        }
+    }
+    Ok(pks)
+}
+
+/// Whether `index` has an entry in `[from, to)`.
+fn any_entry<B: Backend + ?Sized>(
+    backend: &mut B,
+    tenant: u32,
+    index: &PlanIndex,
+    (from, to): (&[u8], &[u8]),
+    concern: ReadConcern,
+) -> Result<bool, CommandError> {
+    if !index.id_index {
+        return Ok(!backend.scan(from, to, 1, concern)?.is_empty());
+    }
+    let docs = KeyBuilder::index_prefix(tenant, index.entry.collection, DOCUMENTS);
+    for bucket in 0..DOCUMENT_BUCKETS {
+        let (low, high) = in_bucket(docs.as_bytes(), bucket, (from, to));
+        if !backend.scan(&low, &high, 1, concern)?.is_empty() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Key range `[from, to)` of the index of `_id`, whose keys follow the documents' prefix
+/// `docs`, as the keys of the documents of `bucket`; a key past that prefix ends the bucket.
+fn in_bucket(docs: &[u8], bucket: u8, (from, to): (&[u8], &[u8])) -> (Vec<u8>, Vec<u8>) {
+    let at = |k: &[u8]| -> Vec<u8> {
+        match k.strip_prefix(docs) {
+            Some(rest) => [docs, &[bucket], rest].concat(),
+            None if k < docs => [docs, &[bucket]].concat(),
+            None => [docs, &[bucket + 1]].concat(),
+        }
+    };
+    (at(from), at(to))
+}
+
+/// The primary keys of the documents of `collection` within key range `[from, to)` of the
+/// index of `_id`, in key order. A document's key is its bucket and then its primary key, the
+/// `_id` as the index writes it: the range is read in every bucket and the keys put back in
+/// order.
+fn id_entries<B: Backend + ?Sized>(
+    backend: &mut B,
+    (tenant, collection): (u32, u32),
+    (from, to): (&[u8], &[u8]),
+    concern: ReadConcern,
+) -> Result<Vec<Vec<u8>>, CommandError> {
+    let docs = KeyBuilder::index_prefix(tenant, collection, DOCUMENTS);
+    let head = docs.as_bytes().len();
+    let mut found = Vec::new();
+    for bucket in 0..DOCUMENT_BUCKETS {
+        let (mut low, high) = in_bucket(docs.as_bytes(), bucket, (from, to));
         loop {
-            let rows = backend.scan(&from, &end, KEY_CHUNK, concern)?;
+            let rows = backend.scan(&low, &high, KEY_CHUNK, concern)?;
             let short = rows.len() < KEY_CHUNK;
-            for (key, _) in &rows {
-                let rest = key.get(head..).ok_or_else(malformed)?;
-                let cut = head + values_len(rest, &index.dirs).map_err(|_| malformed())?;
-                pks.push(key[cut..].to_vec());
-            }
+            found.extend(rows.iter().map(|(k, _)| k.get(head + 1..).unwrap_or_default().to_vec()));
             match rows.last() {
-                Some((k, _)) if !short => from = [k.as_slice(), &[0]].concat(),
+                Some((k, _)) if !short => low = [k.as_slice(), &[0]].concat(),
                 _ => break,
             }
         }
     }
-    if scan.backward {
-        pks.reverse();
-    }
-    Ok(pks)
+    found.sort();
+    Ok(found)
 }
 
 /// The key intervals of `index` for `bounds`.
@@ -621,19 +837,16 @@ pub(crate) fn planned_keys<B: Backend + ?Sized>(
         filter: &m.filter,
         parsed: &parsed,
         sort: Vec::new(),
-        limit: (!m.multi).then_some(1),
+        // Plans compete without the limit of one (measured).
+        limit: None,
         hint: super::hints::position(m.hint.as_ref(), &indexes)?,
         vars: m.vars.as_ref(),
         concern: ReadConcern::Local,
         intersect: false,
     };
-    match choose(backend, coll, &indexes, &read)?.winner {
-        Ran { access: Access::Collscan, .. } => Ok(None),
-        winner => {
-            let take = if m.multi { usize::MAX } else { 1 };
-            Ok(Some(winner.found.into_iter().take(take).map(|(k, _)| k).collect()))
-        }
-    }
+    let take = if m.multi { usize::MAX } else { 1 };
+    Ok(choose(backend, coll, &indexes, &read)?
+        .map(|c| c.winner.found.into_iter().take(take).map(|(k, _)| k).collect()))
 }
 
 /// Filter `filter` as RefDb writes it back after parsing it, each `$expr` optimised.
@@ -660,8 +873,6 @@ pub(crate) fn planned_documents<B: Backend + ?Sized>(
     if indexes.is_empty() {
         return Ok(None);
     }
-    match choose(backend, coll, &indexes, read)?.winner {
-        Ran { access: Access::Collscan, .. } => Ok(None),
-        winner => Ok(Some(winner.found.into_iter().map(|(_, d)| d).collect())),
-    }
+    Ok(choose(backend, coll, &indexes, read)?
+        .map(|c| c.winner.found.into_iter().map(|(_, d)| d).collect()))
 }

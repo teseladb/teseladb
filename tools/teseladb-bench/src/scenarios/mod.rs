@@ -1,5 +1,5 @@
 //! Scenarios (contract `bench-cli.md` of 002): 001 registers `raftlog`, its `raftlog-recover`
-//! variant and the copied `deflate`; 003 adds `bson` and `keys`; 004 adds `lsm`; 005 adds `write`, `read` and
+//! variant and the copied `deflate`; 003 adds `bson` and `keys`; 004 adds `lsm` and `lsm-compression`; 005 adds `write`, `read` and
 //! `failover`; 006 adds `wire` and `crud`; 007 adds `follower-read`, `group0-limits`, `split`, `add-node` and `rebalance`; 008 adds `txn`, `txn-readers` and `contention`; 013 adds
 //! `tls-handshake` and `scram`; 015 adds `timeseries`; every specification
 //! adds its own.
@@ -13,6 +13,7 @@ pub mod follower_read;
 pub mod group0_limits;
 pub mod keys;
 pub mod lsm;
+pub mod lsm_compression;
 pub mod raftlog;
 pub mod read;
 pub mod reference;
@@ -143,6 +144,7 @@ pub fn run(args: &Args) -> Result<Report, String> {
         "keys" => keys::run(args),
         "lsm" => lsm::run(args),
         "lsm-sustained" => lsm::sustained(args),
+        "lsm-compression" => lsm_compression::run(args),
         "write" => write::run(args),
         "read" => read::run(args),
         "failover" => failover::run(args),
@@ -164,7 +166,7 @@ pub fn run(args: &Args) -> Result<Report, String> {
             ycsb::run(args, s.chars().last().unwrap_or('?'))
         }
         other => Err(format!(
-            "unknown scenario: {other} (available: raftlog, raftlog-recover, deflate, bson, keys, lsm, lsm-sustained, \
+            "unknown scenario: {other} (available: raftlog, raftlog-recover, deflate, bson, keys, lsm, lsm-sustained, lsm-compression, \
              write, read, failover, follower-read, group0-limits, split, add-node, rebalance, reference, wire, crud, txn, txn-readers, contention, tls-handshake, scram, ycsb-a … ycsb-f)"
         )),
     }

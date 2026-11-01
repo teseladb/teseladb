@@ -9,6 +9,8 @@ use teseladb_types::Nanos;
 
 use super::{Job, Lsm};
 use crate::compaction::{self, CompactJob};
+use crate::config::Codec;
+use crate::dict::Training;
 use crate::jobs::{Outcome, Script};
 use crate::sst::reader::Table;
 
@@ -34,7 +36,15 @@ impl Lsm {
         }
         let all = std::mem::take(&mut self.compact_all);
         if let Some(plan) = compaction::pick(&self.version, &self.cfg, &mut self.pointers, all) {
-            return Some(Job::Compact(Box::new(CompactJob::new(&self.cfg, plan, self.gc.clone()))));
+            let job = CompactJob::new(&self.cfg, plan, self.gc.clone());
+            let job = match self.cfg.codec {
+                Codec::ZstdDict => {
+                    let written = self.dict_written.clone();
+                    job.with_training(Training::new(&self.cfg, &self.state, &self.version, written))
+                }
+                Codec::None | Codec::Zlib | Codec::Zstd => job,
+            };
+            return Some(Job::Compact(Box::new(job)));
         }
         // Nothing to compact: the clearings are done.
         self.done.cleared.extend(std::mem::take(&mut self.clears_compacting));
@@ -62,7 +72,8 @@ impl Lsm {
                 if let Some(t) = table {
                     self.reader.cache.pin_meta(t.number, t.meta.clone());
                     self.counters.written_bytes += t.size;
-                    v.levels[0].insert(0, Rc::new(t));
+                    self.counters.note_codes(&t);
+                    v.levels[0].insert(0, Rc::new(*t));
                 }
                 self.version = Rc::new(v);
                 self.done.flushed.extend(edit.flushed);
@@ -98,8 +109,11 @@ impl Lsm {
                 // The compaction waits until the tombstones are in a file.
                 self.clears.push(id);
             }
-            Outcome::Changed { added, removed, edit } => {
+            Outcome::Changed { added, removed, edit, dict_written } => {
                 self.apply_files(added, &removed, &edit);
+                if let Some(w) = dict_written {
+                    self.dict_written = w;
+                }
                 self.done.cleared.extend(std::mem::take(&mut self.clears_compacting));
                 self.counters.compactions += 1;
             }
@@ -125,6 +139,7 @@ impl Lsm {
         for (level, t) in added {
             self.reader.cache.pin_meta(t.number, t.meta.clone());
             self.counters.written_bytes += t.size;
+            self.counters.note_codes(&t);
             v.levels[usize::from(level)].push(Rc::new(t));
         }
         for level in &mut v.levels[1..] {

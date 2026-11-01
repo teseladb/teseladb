@@ -21,6 +21,7 @@ use teseladb_raftlog::{IoErrno, IoOp};
 use teseladb_types::Bytes;
 
 use crate::config::LsmConfig;
+use crate::dict::Training;
 use crate::entry::{self, Kind, RangeTombstone};
 use crate::error::LsmError;
 use crate::gc::{self, Candidate, GcTable};
@@ -246,7 +247,11 @@ pub(crate) struct CompactJob {
     dir: PathBuf,
     chunk: usize,
     block_bytes: usize,
-    compress: bool,
+    codec: crate::config::Codec,
+    /// What it learns of the collections it writes, with [`Codec::ZstdDict`](crate::Codec).
+    training: Option<Training>,
+    /// The bytes written per collection since its dictionary, after its edit.
+    dict_written: Option<crate::dict::Written>,
     /// The key ring of encrypted outputs (013 FR-015).
     encryption: Option<crate::config::Encryption>,
     target: u64,
@@ -290,10 +295,17 @@ impl CompactJob {
             dir: cfg.dir.clone(),
             chunk: cfg.io_chunk_bytes,
             block_bytes: cfg.block_bytes,
-            compress: cfg.codec == crate::config::Codec::Zlib,
+            codec: cfg.codec,
+            training: None,
+            dict_written: None,
             encryption: cfg.encryption.clone(),
             target: cfg.target_file_bytes,
         }
+    }
+
+    /// The compaction writing with the collections' dictionaries and training them.
+    pub(crate) fn with_training(self, training: Training) -> CompactJob {
+        CompactJob { training: Some(training), ..self }
     }
 
     /// An export of `spec` from the files `inputs` (in order of precedence).
@@ -346,7 +358,12 @@ impl CompactJob {
     /// A writer for a new output, with a new data key when the files are encrypted.
     fn writer(&self) -> TableWriter {
         let ring = self.encryption.as_ref().map(|e| &*e.0);
-        TableWriter::new(self.block_bytes, self.compress).sealed(ring)
+        let w = TableWriter::new(self.block_bytes, self.codec);
+        let w = match &self.training {
+            Some(t) => w.with_dicts(t.current.clone()),
+            None => w,
+        };
+        w.sealed(ring)
     }
 
     fn start_output(&mut self, first: &[u8], next_file: &mut u64) {
@@ -406,6 +423,9 @@ impl CompactJob {
             }
             let o = self.out.as_mut().expect("started above");
             o.writer.add(&entry::internal_key(&key, c.ts), c.kind, &value);
+            if let Some(t) = &mut self.training {
+                t.note(&key, &value);
+            }
         }
         if let Some(o) = &mut self.out
             && o.writer.pending() >= self.chunk
@@ -525,13 +545,21 @@ impl CompactJob {
                 }
                 Stage::Edit => {
                     let level = self.plan.output_level as u8;
-                    let edit = Edit {
+                    let mut edit = Edit {
                         adds: self.finished.iter().map(|t| file_meta(level, t)).collect(),
                         removes: self.plan.inputs.iter().map(|(l, t)| (*l, t.number)).collect(),
-                        flushed: Vec::new(),
-                        resets: Vec::new(),
                         next_file: *next_file,
+                        ..Edit::default()
                     };
+                    if let Some(t) = &mut self.training {
+                        let removed: Vec<u64> =
+                            self.plan.inputs.iter().map(|(_, t)| t.props.dictionary).collect();
+                        let added: Vec<u64> =
+                            self.finished.iter().map(|t| t.props.dictionary).collect();
+                        let (trained, dropped, written) = t.finish(&removed, &added);
+                        (edit.dictionaries, edit.dropped) = (trained, dropped);
+                        self.dict_written = Some(written);
+                    }
                     self.queued.extend(manifest.append(&edit));
                     self.stage = Stage::Done;
                     self.edit = Some(edit);
@@ -544,7 +572,9 @@ impl CompactJob {
                         .collect();
                     let removed = self.plan.inputs.iter().map(|(_, t)| t.number).collect();
                     let edit = self.edit.take().expect("written in the edit stage");
-                    return Ok(Next::Done(Box::new(Outcome::Changed { added, removed, edit })));
+                    let dict_written = self.dict_written.take();
+                    let o = Outcome::Changed { added, removed, edit, dict_written };
+                    return Ok(Next::Done(Box::new(o)));
                 }
             }
         }

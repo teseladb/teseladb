@@ -22,6 +22,7 @@
 //! - `doubleMetaphone`, in the documentation, is not a filter `refsearch` 1.70.6 accepts.
 
 mod arabic_script;
+mod brazilian;
 mod cjk;
 mod delimiter;
 mod folding;
@@ -33,6 +34,8 @@ mod soundex;
 mod stemmers;
 
 use arabic_script::{persian_normal, persian_stem, sorani_normal, sorani_stem};
+use brazilian::brazilian_stem;
+pub(crate) use cjk::cjk_width_offsets;
 use cjk::{cjk_bigrams, cjk_width};
 use indic::{bengali_normal, bengali_stem, hindi_normal, hindi_stem, indic_normal};
 use inflection::{bulgarian_stem, czech_stem, indonesian_stem, latvian_stem};
@@ -46,6 +49,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub use delimiter::DelimiterOptions;
 
 use super::jregex::RegexError;
+use super::morfologik::{Dictionary, Language};
 use super::normalize::{Form, normalize};
 use super::props::category;
 use super::snowball::{Stemmer, porter_stemming};
@@ -197,6 +201,13 @@ pub enum TokenFilter {
     PersianNormalization,
     /// Removes the Persian plural, comparative and other endings (Persian analyzer).
     PersianStemming,
+    /// Replaces each word form found in a morfologik dictionary by its lemmas, at the same
+    /// position, trying the token as it is and then in lowercase (Polish and Ukrainian
+    /// analyzers).
+    Morfologik {
+        /// The dictionary.
+        language: Language,
+    },
     /// Full-width ASCII and half-width Katakana to their usual widths (CJK analyzer).
     CjkWidth,
     /// Bigrams of the Han, Hiragana, Katakana and Hangul characters of touching tokens (CJK
@@ -213,6 +224,11 @@ pub enum TokenFilter {
     BengaliNormalization,
     /// The Bengali stemmer of the Bengali analyzer.
     BengaliStemming,
+    /// The stemmer of the Brazilian Portuguese analyzer.
+    BrazilianStemming,
+    /// Drops the final prolonged sound mark of Katakana words of 4 or more characters
+    /// (Japanese analyzer).
+    JapaneseKatakanaStemming,
     /// Writes Sorani in one spelling (Sorani analyzer).
     SoraniNormalization,
     /// Removes the Sorani postpositions, possessives and noun endings (Sorani analyzer).
@@ -337,6 +353,16 @@ fn rewrite(tokens: Vec<Token>, skip_keywords: bool, f: impl Fn(&str) -> String) 
         .collect()
 }
 
+/// `text` without its final `ー` when it is all Katakana (U+30A0 to U+30FF) and has at least 4
+/// UTF-16 units.
+fn katakana_stem(text: &str) -> String {
+    let katakana = text.chars().all(|c| ('\u{30A0}'..='\u{30FF}').contains(&c));
+    match text.strip_suffix('ー') {
+        Some(stem) if katakana && text.encode_utf16().count() >= 4 => stem.to_string(),
+        _ => text.to_string(),
+    }
+}
+
 /// `text` with the Arabic alef variants as plain alef, `ى` as `ي`, `ة` as `ه`, and without
 /// diacritics (U+064B to U+0652) or tatweel.
 fn arabic_normal(text: &str) -> String {
@@ -424,6 +450,25 @@ fn elide(text: &str, articles: &BTreeSet<String>) -> String {
         Some(at) if articles.contains(&lower(&text[..at])) => text[at..].chars().skip(1).collect(),
         _ => text.to_string(),
     }
+}
+
+/// The tokens with each word form of `language`'s dictionary replaced by its lemmas at its
+/// position; a form the dictionary lacks, also in lowercase, stays.
+fn lemmatize(tokens: Vec<Token>, language: Language) -> Vec<Token> {
+    let Some(dictionary) = Dictionary::get(language) else { return tokens };
+    let mut out = Vec::with_capacity(tokens.len());
+    for t in tokens {
+        let mut lemmas = dictionary.lemmas(&t.text);
+        if lemmas.is_empty() {
+            lemmas = dictionary.lemmas(&lower(&t.text));
+        }
+        if t.keyword || lemmas.is_empty() {
+            out.push(t);
+            continue;
+        }
+        out.extend(lemmas.into_iter().map(|text| with_text(&t, text)));
+    }
+    out
 }
 
 /// `text` lowercased with the Turkish `I` → `ı` and `İ` → `i`.
@@ -563,6 +608,7 @@ impl TokenFilter {
             TokenFilter::IndonesianStemming => rewrite(tokens, true, indonesian_stem),
             TokenFilter::PersianNormalization => rewrite(tokens, false, persian_normal),
             TokenFilter::PersianStemming => rewrite(tokens, true, persian_stem),
+            &TokenFilter::Morfologik { language } => lemmatize(tokens, language),
             TokenFilter::CjkWidth => rewrite(tokens, false, cjk_width),
             TokenFilter::CjkBigram => cjk_bigrams(tokens),
             TokenFilter::IndicNormalization => rewrite(tokens, false, indic_normal),
@@ -570,6 +616,8 @@ impl TokenFilter {
             TokenFilter::HindiStemming => rewrite(tokens, true, hindi_stem),
             TokenFilter::BengaliNormalization => rewrite(tokens, false, bengali_normal),
             TokenFilter::BengaliStemming => rewrite(tokens, true, bengali_stem),
+            TokenFilter::BrazilianStemming => rewrite(tokens, true, brazilian_stem),
+            TokenFilter::JapaneseKatakanaStemming => rewrite(tokens, true, katakana_stem),
             TokenFilter::SoraniNormalization => rewrite(tokens, false, sorani_normal),
             TokenFilter::SoraniStemming => rewrite(tokens, true, sorani_stem),
             TokenFilter::Regex { pattern, replacement, matches } => {
