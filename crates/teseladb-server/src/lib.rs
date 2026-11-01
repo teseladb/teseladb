@@ -42,6 +42,7 @@ pub mod merges;
 pub mod meta2_ops;
 pub mod metrics_http;
 pub mod node;
+pub mod node_versions;
 pub mod ocsp_staple;
 pub mod oidc_client;
 pub mod pki;

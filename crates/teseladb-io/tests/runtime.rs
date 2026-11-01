@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use teseladb_io::handshake::{self, Acceptor, HandshakeError};
 use teseladb_io::mailbox::MailboxSender;
-use teseladb_io::peer::{Hello, PeerMsg, encode_frame};
+use teseladb_io::peer::{Hello, PeerMsg, Versions, encode_frame};
 use teseladb_io::runtime::{CoreInput, CoreLogic, CoreRuntime, RuntimeConfig};
 use teseladb_raftlog::{FileId, IoDone, IoOp, MemDisk};
 use teseladb_types::{Bytes, Nanos, NodeId};
@@ -29,6 +29,7 @@ fn hello(node: u64, addr: &str) -> Hello {
         peer_addr: addr.into(),
         http_addr: String::new(),
         native_addr: String::new(),
+        versions: Versions::OWN,
     }
 }
 
@@ -501,4 +502,41 @@ fn the_logic_is_reachable_before_the_loop_runs() {
     tx.send(CoreInput::Stop).ok().unwrap();
     let toy = thread.join().unwrap();
     assert_eq!(toy.addrs[&NodeId(41)], "set before running");
+}
+
+/// A node of node `node` that speaks protocol versions `min` to `max`.
+fn speaking(node: u64, min: u16, max: u16) -> Hello {
+    Hello { versions: Versions { min, max }, ..hello(node, "x") }
+}
+
+#[test]
+fn two_nodes_speak_the_highest_version_both_have() {
+    // An upgraded node (4 and 5) with one that is not (4), both upgraded, and the other way round.
+    let agreed = |a: (u16, u16), b: (u16, u16)| {
+        handshake::validate(&speaking(1, a.0, a.1), &speaking(2, b.0, b.1)).ok()
+    };
+    assert_eq!(agreed((4, 5), (4, 4)), Some(4));
+    assert_eq!(agreed((4, 4), (4, 5)), Some(4));
+    assert_eq!(agreed((4, 5), (4, 5)), Some(5));
+    assert_eq!(agreed((4, 5), (5, 6)), Some(5));
+    assert_eq!(agreed((5, 6), (4, 5)), Some(5));
+    // No version in common: the handshake fails and names both ranges.
+    let e = handshake::validate(&speaking(1, 4, 4), &speaking(2, 5, 6)).unwrap_err();
+    assert!(
+        matches!(e, HandshakeError::VersionMismatch { local, remote }
+            if local == Versions { min: 4, max: 4 } && remote == Versions { min: 5, max: 6 }),
+        "{e}"
+    );
+    // Over a socket, mid-upgrade: the upgraded node dials one that only speaks 4, and both
+    // speak 4.
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = l.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut s, _) = l.accept().unwrap();
+        handshake::answer(&mut s, &speaking(3, 4, 4)).unwrap().version
+    });
+    let mut s = TcpStream::connect(addr).unwrap();
+    let got = handshake::dial(&mut s, &speaking(1, 4, 5)).unwrap();
+    assert_eq!((got.version, got.hello.versions), (4, Versions { min: 4, max: 4 }));
+    assert_eq!(server.join().unwrap(), 4);
 }

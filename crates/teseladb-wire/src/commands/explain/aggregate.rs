@@ -65,6 +65,44 @@ fn fields_only(p: &Document) -> bool {
     })
 }
 
+/// The query a pipeline of `stages` starts with, as the planner reads it: its leading filter
+/// (with the `$match`es that move before the stages ahead of them), its sort and the documents it
+/// reads at most.
+pub(crate) fn planned_query(stages: &[Document]) -> (Document, Option<Document>, Option<u64>) {
+    let steps = swapped(stages.iter().cloned().map(Step::new).collect());
+    let i = leading_matches(&steps);
+    let first = query_part(&steps, false);
+    let mut filter = Document::new();
+    for st in &steps[..i] {
+        if let Kind::Match(m) = &st.kind {
+            for (k, v) in m.iter() {
+                filter.push(k, v.clone());
+            }
+        }
+    }
+    let (sort, limit) = sort_and_limit(&steps[i..first]);
+    (filter, sort, limit)
+}
+
+/// The sort of the query's stages `steps` and the documents it reads at most (its skip and
+/// limit), as the planner takes them.
+fn sort_and_limit(steps: &[Step]) -> (Option<Document>, Option<u64>) {
+    let mut sort = None;
+    let (mut skip, mut limit) = (0u64, None::<u64>);
+    for st in steps {
+        match &st.kind {
+            Kind::Sort(s) => sort = Some(s.clone()),
+            Kind::Skip(n) => {
+                skip = skip.saturating_add(*n);
+                limit = limit.map(|l: u64| l.saturating_sub(*n));
+            }
+            Kind::Limit(n) => limit = Some(limit.map_or(*n, |l| l.min(*n))),
+            _ => {}
+        }
+    }
+    (sort, limit.map(|l| skip.saturating_add(l)))
+}
+
 /// How many `$match`es the pipeline starts with.
 fn leading_matches(steps: &[Step]) -> usize {
     steps.iter().take_while(|s| matches!(s.kind, Kind::Match(_))).count()
@@ -166,6 +204,38 @@ pub(super) fn aggregate<B: Backend + ?Sized>(
     let (examined, matched) =
         if run { scan(ctx, coll.as_ref(), &read, stop, |_| Ok(()))? } else { (0, 0) };
     let shown = parsed(&filter, None)?;
+    // The planner chooses how the filter reads, with the query's sort and limit (measured: an
+    // `_id` range through its index, a sort on `_id` read backward).
+    let (sort, limit) = sort_and_limit(&steps[i..first]);
+    let plan_read = super::super::plan_exec::ReadPlan {
+        filter: &filter,
+        parsed: &shown,
+        sort: sort.as_ref().map(super::sort_fields).unwrap_or_default(),
+        limit,
+        hint: None,
+        vars: None,
+        concern: teseladb_range::read::ReadConcern::Local,
+        intersect: super::super::lock(ctx.shared).params.hash_intersection,
+    };
+    let chosen = super::planned_read(ctx, coll.as_ref(), &plan_read, None)?;
+    let access = chosen.as_ref().map(|(indexes, c)| {
+        (
+            (
+                super::planned_access(ns, &shown, indexes, &c.winner, run, None),
+                super::sorted(&c.winner),
+            ),
+            c.others
+                .iter()
+                .map(|r| {
+                    (super::planned_access(ns, &shown, indexes, r, false, None), super::sorted(r))
+                })
+                .collect::<Vec<(Stage, bool)>>(),
+        )
+    });
+    let (mut input, rejected) = match access {
+        Some((a, r)) => (Some(a), r),
+        None => (None, Vec::new()),
+    };
     let counted = Run { examined, matched };
     let mut ids = Ids { next: engine.then_some(1) };
     let mut foreign = Vec::new();
@@ -178,10 +248,10 @@ pub(super) fn aggregate<B: Backend + ?Sized>(
         }
     }
     let (plan, last, extra) = if engine {
-        let base = query_plan(ns, &steps, (i, first), &shown, &counted, &mut ids);
+        let base = query_plan(ns, &steps, (i, first), &shown, &counted, &mut ids, input.take());
         engine_plan(ns, &steps, (first, &foreign), base, &mut ids)?
     } else {
-        let mut plan = query_plan(ns, &steps, (i, first), &shown, &counted, &mut ids);
+        let mut plan = query_plan(ns, &steps, (i, first), &shown, &counted, &mut ids, input.take());
         if makes_sort_keys(&steps[first..]) {
             let mut keys = Stage::new("SORT_KEY_GENERATOR");
             keys.returned = plan.returned;
@@ -195,10 +265,13 @@ pub(super) fn aggregate<B: Backend + ?Sized>(
         if let Kind::UnionWith(u) = Step::new(d.clone()).kind {
             *d = union_with(ctx, ns, &u, verbosity)?;
         }
+        if let Some(out) = d.get("$out").cloned() {
+            *d = Document::new().with("$out", out_target(&out, &ns.db));
+        }
     }
     let mut planner = Document::new()
         .with("namespace", names::full(ns))
-        .with("parsedQuery", shown)
+        .with("parsedQuery", shown.clone())
         .with("indexFilterSet", false)
         .with("optimizationTimeMillis", 0);
     if remaining.is_empty() {
@@ -221,7 +294,19 @@ pub(super) fn aggregate<B: Backend + ?Sized>(
         extend(&mut winning, &plan.planned());
     }
     planner.push("winningPlan", winning);
-    planner.push("rejectedPlans", Vec::<Value>::new());
+    // Each plan the planner rejected, under the query's own stages.
+    let rejected: Vec<Value> = rejected
+        .into_iter()
+        .map(|access| {
+            let mut none = Ids { next: None };
+            let other =
+                query_plan(ns, &steps, (i, first), &shown, &counted, &mut none, Some(access));
+            let mut d = Document::new().with("isCached", false);
+            extend(&mut d, &other.planned());
+            Value::Document(d)
+        })
+        .collect();
+    planner.push("rejectedPlans", rejected);
     let mut cursor = Document::new().with("queryPlanner", planner);
     let returned =
         if run && engine { through(ctx, ns, &docs(&steps[..last]))? } else { plan.returned };
@@ -285,6 +370,18 @@ pub(super) fn aggregate<B: Backend + ?Sized>(
         .with("shards", Document::new().with(shard.as_str(), section))
         .with("command", command)
         .with("ok", 1.0))
+}
+
+/// The target of `$out` as `explain` writes it: its collection, then its database (the
+/// command's, `db`, when it names none).
+fn out_target(spec: &Value, db: &str) -> Document {
+    let (coll, named) = match spec {
+        Value::Document(d) => (d.get("coll").cloned(), d.get("db").cloned()),
+        other => (Some(other.clone()), None),
+    };
+    Document::new()
+        .with("coll", coll.unwrap_or(Value::Null))
+        .with("db", named.unwrap_or(Value::from(db)))
 }
 
 /// Where a scan under `steps` (the query's own after its filter) stops: after the documents a
@@ -674,10 +771,17 @@ fn query_plan(
     shown: &Document,
     counted: &Run,
     ids: &mut Ids,
+    access: Option<(Stage, bool)>,
 ) -> Stage {
     let engine = ids.next.is_some();
-    let scan_id = ids.take();
-    let mut plan = collscan(ns, shown, counted.examined, counted.matched);
+    let indexed = access.is_some();
+    // An index that reads in the sort's order leaves no sort to do.
+    let index_sorts = access.as_ref().is_some_and(|(_, sorts)| *sorts);
+    let scan_id = if indexed { None } else { ids.take() };
+    let mut plan = match access {
+        Some((a, _)) => number_chain(a, ids),
+        None => collscan(ns, shown, counted.examined, counted.matched),
+    };
     if matches_nothing(shown) {
         plan.id = scan_id;
         return plan;
@@ -690,8 +794,10 @@ fn query_plan(
             None
         }
     };
-    plan.id = scan_id;
-    if engine && plan.head.get("filter").is_none() {
+    if !indexed {
+        plan.id = scan_id;
+    }
+    if engine && !indexed && plan.head.get("filter").is_none() {
         plan.head.push("filter", Document::new());
     }
     let mut sort: Option<Document> = None;
@@ -699,6 +805,7 @@ fn query_plan(
     let mut projections: Vec<&Step> = Vec::new();
     for st in &steps[from..to] {
         match &st.kind {
+            Kind::Sort(_) if index_sorts => {}
             Kind::Sort(s) => sort = Some(s.clone()),
             Kind::Skip(n) => {
                 skip = skip.saturating_add(*n);
@@ -802,6 +909,16 @@ fn query_plan(
     }
 }
 
+/// `stage` and the stages under it numbered from the bottom, as the engine numbers an index
+/// scan and its fetch.
+fn number_chain(mut stage: Stage, ids: &mut Ids) -> Stage {
+    if let Some(input) = stage.input.take() {
+        stage.input = Some(Box::new(number_chain(*input, ids)));
+    }
+    stage.id = ids.take();
+    stage
+}
+
 /// Whether projection `p`, which only keeps or drops fields, leaves the fields of sort `s` as
 /// they are.
 fn keeps_sort(p: &Step, s: &Document) -> bool {
@@ -816,6 +933,11 @@ fn keeps_sort(p: &Step, s: &Document) -> bool {
         Kind::Project(spec) if fields_only(spec) => !spec.iter().any(|(f, v)| off(v) && touched(f)),
         _ => false,
     }
+}
+
+/// Whether find projection `p` keeps the fields of sort `s`, so that it runs below the sort.
+pub(super) fn projection_keeps_sort(p: &Document, s: &Document) -> bool {
+    keeps_sort(&Step::new(Document::new().with("$project", p.clone())), s)
 }
 
 /// Whether a projection stage is a `$project` that keeps fields (or computes them), which stands

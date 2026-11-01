@@ -6,6 +6,7 @@
 use std::collections::BTreeSet;
 
 use super::charfilters::CharFilter;
+use super::morfologik::Language;
 use super::snowball::Stemmer;
 use super::tokenfilters::TokenFilter;
 use super::tokenizers::{DEFAULT_MAX_TOKEN_LENGTH, Tokenizer};
@@ -32,6 +33,7 @@ const STOPWORDS: &[(&str, &str)] = &[
     ("indonesian", include_str!("stopwords/indonesian.txt")),
     ("irish", include_str!("stopwords/irish.txt")),
     ("italian", include_str!("stopwords/italian.txt")),
+    ("kuromoji", include_str!("stopwords/kuromoji.txt")),
     ("latvian", include_str!("stopwords/latvian.txt")),
     ("lithuanian", include_str!("stopwords/lithuanian.txt")),
     ("norwegian", include_str!("stopwords/norwegian.txt")),
@@ -44,6 +46,7 @@ const STOPWORDS: &[(&str, &str)] = &[
     ("spanish", include_str!("stopwords/spanish.txt")),
     ("swedish", include_str!("stopwords/swedish.txt")),
     ("turkish", include_str!("stopwords/turkish.txt")),
+    ("ukrainian", include_str!("stopwords/ukrainian.txt")),
 ];
 
 /// The analyzers that are the CJK bigram analyzer under another name.
@@ -72,6 +75,15 @@ const FRENCH_ARTICLES: &[&str] =
 /// The articles the Catalan analyzer removes before an apostrophe.
 const CATALAN_ARTICLES: &[&str] = &["d", "l", "m", "n", "s", "t"];
 
+/// The spellings the Ukrainian analyzer folds before tokenizing: the typographic apostrophes as
+/// `'`, the stress mark dropped and `ґ` as `г`.
+fn ukrainian_mappings() -> Vec<(String, String)> {
+    [("\u{2019}", "'"), ("\u{2BC}", "'"), ("\u{301}", ""), ("ґ", "г"), ("Ґ", "Г")]
+        .iter()
+        .map(|&(from, to)| (from.to_string(), to.to_string()))
+        .collect()
+}
+
 /// An elision filter for `articles`.
 fn elision(articles: &[&str]) -> TokenFilter {
     TokenFilter::Elision { articles: articles.iter().map(|a| a.to_string()).collect() }
@@ -79,6 +91,15 @@ fn elision(articles: &[&str]) -> TokenFilter {
 
 /// The character filters, tokenizer and token filters of `reflib.<language>`.
 pub fn language(language: &str) -> Option<(Vec<CharFilter>, Tokenizer, Vec<TokenFilter>)> {
+    match language {
+        "kuromoji" => {
+            let stop = TokenFilter::Stopword { tokens: stopwords(language)?, ignore_case: true };
+            let filters = vec![stop, TokenFilter::JapaneseKatakanaStemming, TokenFilter::Lowercase];
+            return Some((vec![], Tokenizer::Kuromoji, filters));
+        }
+        "nori" => return Some((vec![], Tokenizer::Nori, vec![TokenFilter::Lowercase])),
+        _ => {}
+    }
     let cjk = CJK_ANALYZERS.contains(&language);
     let list = if cjk { "cjk" } else { language };
     let stop = TokenFilter::Stopword { tokens: stopwords(list)?, ignore_case: false };
@@ -150,9 +171,15 @@ pub fn language(language: &str) -> Option<(Vec<CharFilter>, Tokenizer, Vec<Token
             TokenFilter::BengaliStemming,
         ],
         "polish" => vec![TokenFilter::Lowercase, stop, TokenFilter::Stempel],
+        "brazilian" => vec![TokenFilter::Lowercase, stop, TokenFilter::BrazilianStemming],
         _ if cjk => {
             vec![TokenFilter::CjkWidth, TokenFilter::Lowercase, TokenFilter::CjkBigram, stop]
         }
+        "ukrainian" => vec![
+            TokenFilter::Lowercase,
+            stop,
+            TokenFilter::Morfologik { language: Language::Ukrainian },
+        ],
         "czech" => vec![TokenFilter::Lowercase, stop, TokenFilter::CzechStemming],
         "bulgarian" => vec![TokenFilter::Lowercase, stop, TokenFilter::BulgarianStemming],
         "latvian" => vec![TokenFilter::Lowercase, stop, TokenFilter::LatvianStemming],
@@ -174,7 +201,11 @@ pub fn language(language: &str) -> Option<(Vec<CharFilter>, Tokenizer, Vec<Token
         ],
         _ => vec![TokenFilter::Lowercase, stop, snowball(language)?],
     };
-    let char_filters = if language == "persian" { vec![CharFilter::Persian] } else { vec![] };
+    let char_filters = match language {
+        "persian" => vec![CharFilter::Persian],
+        "ukrainian" => vec![CharFilter::Mapping { mappings: ukrainian_mappings() }],
+        _ => vec![],
+    };
     let tokenizer = Tokenizer::Standard { max_token_length: DEFAULT_MAX_TOKEN_LENGTH };
     Some((char_filters, tokenizer, filters))
 }

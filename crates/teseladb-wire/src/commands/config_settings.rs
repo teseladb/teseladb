@@ -209,11 +209,12 @@ pub fn insert<B: Backend + ?Sized>(
     ordered: bool,
     bypass: bool,
 ) -> Result<Document, CommandError> {
+    let shared = ctx.shared;
     let (n, errors) = commit(ctx, bypass, |backend, settings| {
         let (mut n, mut errors) = (0i64, Vec::new());
         for (i, v) in docs.iter().enumerate() {
             let added = match v {
-                Value::Document(d) => with_id(backend, d).and_then(|doc| {
+                Value::Document(d) => with_id(backend, shared, d).and_then(|doc| {
                     let bytes = stored_bytes(&doc, Stored::Insert)?;
                     settings.check(&bytes, None)?;
                     Ok(doc)
@@ -250,10 +251,11 @@ pub fn modify<B: Backend + ?Sized>(
     ordered: bool,
     bypass: bool,
 ) -> Result<Vec<Result<MutationResult, CommandError>>, CommandError> {
+    let shared = ctx.shared;
     commit(ctx, bypass, |backend, settings| {
         let mut out = Vec::new();
         for st in statements {
-            let r = st.clone().and_then(|m| statement(backend, settings, &m));
+            let r = st.clone().and_then(|m| statement(backend, shared, settings, &m));
             let failed = r.is_err();
             out.push(r);
             if failed && ordered {

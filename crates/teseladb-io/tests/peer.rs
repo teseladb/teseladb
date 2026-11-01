@@ -3,8 +3,8 @@
 
 use teseladb_io::peer::{
     EnrollAccepted, EnrollRequest, FLAG_DEFLATE, FrameError, GroupHeartbeat, GroupHeartbeatResp,
-    HEADER_LEN, Hello, JoinAccepted, MAX_FRAME_LEN, PeerMsg, RAFT_CHUNK_KIND, decode_frame,
-    encode_frame,
+    HEADER_LEN, Hello, JoinAccepted, MAX_FRAME_LEN, PeerMsg, RAFT_CHUNK_KIND, Versions,
+    decode_frame, encode_frame,
 };
 use teseladb_raft::{Entry, EntryKind, Message, MessageType};
 use teseladb_types::{Bytes, GroupId, NodeId};
@@ -34,6 +34,7 @@ fn all() -> Vec<PeerMsg> {
             peer_addr: "10.0.0.3:7421".into(),
             http_addr: "10.0.0.3:8080".into(),
             native_addr: "10.0.0.3:7422".into(),
+            versions: Versions::OWN,
         }),
         PeerMsg::RaftBatch {
             wall_ms: 1_800_000_000_789,
@@ -161,7 +162,12 @@ fn every_kind_round_trips() {
         let f = frame(&m);
         assert_eq!(u32::from_le_bytes(f[..4].try_into().unwrap()) as usize, f.len() - 4);
         assert_eq!(f[4], m.kind());
-        assert_eq!(&f[5..8], &[0, 0, 0]);
+        // No flags; only a `Hello` uses the spare bytes, for its highest version.
+        let spare = match &m {
+            PeerMsg::Hello(h) => h.versions.max.to_le_bytes(),
+            _ => [0, 0],
+        };
+        assert_eq!(&f[5..8], &[0, spare[0], spare[1]]);
         assert_eq!(decode_frame(&f), Ok(Some((m.clone(), f.len()))), "{m:?}");
         kinds.insert(m.kind());
     }
@@ -363,6 +369,31 @@ fn damaged_payloads_never_panic() {
 }
 
 #[test]
+fn a_hello_carries_the_range_of_versions_its_node_speaks() {
+    let with = |min, max| PeerMsg::Hello(Hello { versions: Versions { min, max }, ..hello() });
+    for (min, max) in [(4, 4), (4, 5), (5, 9)] {
+        let m = with(min, max);
+        let Ok(Some((got, _))) = decode_frame(&frame(&m)) else { panic!("{min} {max}") };
+        assert_eq!(got, m);
+    }
+    // A node that only speaks 4 sends the version in the body and zeros in the header's spare
+    // bytes, which reads as 4 to 4; and it still reads the body of an upgraded node's `Hello`.
+    let mut old = frame(&with(4, 6));
+    old[6..8].copy_from_slice(&[0, 0]);
+    let Ok(Some((got, _))) = decode_frame(&old) else { panic!() };
+    assert_eq!(got, with(4, 4));
+    // A highest version below the lowest is no range.
+    let mut f = frame(&with(5, 5));
+    f[6..8].copy_from_slice(&4u16.to_le_bytes());
+    assert!(matches!(decode_frame(&f), Err(FrameError::Malformed { kind: 0x01, .. })));
+}
+
+fn hello() -> Hello {
+    let Some(PeerMsg::Hello(h)) = all().into_iter().next() else { panic!() };
+    h
+}
+
+#[test]
 fn specific_rejections() {
     let Ok(Some((PeerMsg::Hello(_), _))) = decode_frame(&frame(&all()[0])) else { panic!() };
     // Marker or version that are not ours.
@@ -370,8 +401,9 @@ fn specific_rejections() {
     f[HEADER_LEN] = b'X';
     assert!(matches!(decode_frame(&f), Err(FrameError::Malformed { kind: 0x01, .. })));
     let mut f = frame(&all()[0]);
-    // A version other than ours (2 since the HLC went into the frames, D-069).
-    f[HEADER_LEN + 8] = f[HEADER_LEN + 8].wrapping_add(1);
+    // A lowest version above the highest the header gives (versions themselves are judged by
+    // the handshake, 007 FR-027).
+    f[HEADER_LEN + 8] = f[HEADER_LEN + 8].wrapping_add(2);
     assert!(matches!(decode_frame(&f), Err(FrameError::Malformed { kind: 0x01, .. })));
     // A list claiming more elements than fit.
     let mut f = frame(&PeerMsg::Heartbeats { wall_ms: 7, hlc: HLC, beats: vec![] });

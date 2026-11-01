@@ -93,7 +93,7 @@ fn indexes<B: Backend + ?Sized>(
 }
 
 /// The position among `indexes` of the index `hint` names, if the planner may scan it; `None`
-/// without a hint, for `$natural` and for the index of `_id`, which the collection scan reads.
+/// without a hint and for `$natural`.
 pub(crate) fn position(
     hint: Option<&Value>,
     indexes: &[super::plan_exec::PlanIndex],

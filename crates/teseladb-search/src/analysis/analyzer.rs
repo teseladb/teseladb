@@ -4,6 +4,7 @@
 use super::charfilters::{CharFilter, Filtered};
 use super::jregex::RegexError;
 use super::language::language;
+use super::morfologik::Language;
 use super::tokenfilters::{Stream, TokenFilter};
 use super::tokenizers::{DEFAULT_MAX_TOKEN_LENGTH, Token, Tokenizer};
 
@@ -31,6 +32,11 @@ impl Analyzer {
             }
             "reflib.whitespace" => (vec![], Tokenizer::Whitespace { max_token_length }, vec![]),
             "reflib.keyword" => (vec![], Tokenizer::Keyword, vec![]),
+            "reflib.morfologik" => (
+                vec![],
+                Tokenizer::Standard { max_token_length },
+                vec![TokenFilter::Morfologik { language: Language::Polish }],
+            ),
             _ => language(name.strip_prefix("reflib.")?)?,
         };
         Some(Analyzer { char_filters, tokenizer, token_filters })
