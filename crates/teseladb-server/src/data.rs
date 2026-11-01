@@ -294,6 +294,18 @@ impl DataCore {
         client: Client,
         at: (Nanos, u64),
     ) {
+        // A replica that still waits for its first snapshot, or for the data of the one it
+        // installed, keeps the restore's files staged until it has it (007 FR-021): that
+        // snapshot holds the range as it was before the restore and would drop them.
+        let incomplete = || {
+            core.state_machine(g).is_some_and(StateMachine::needs_snapshot)
+                || self.transfers.waiting_for(g)
+        };
+        if matches!(r, RemoteReq::RestoreIngest { .. }) && incomplete() {
+            let not_yet = Ok(RemoteReply::Restored { done: false });
+            self.send_answer(core, client, not_yet, at.0);
+            return;
+        }
         self.backup_next += 1;
         let id = self.backup_next;
         self.backup_clients.insert(id, client);
@@ -1130,6 +1142,28 @@ mod tests {
         assert!(answered, "a forward in flight");
     }
 
+    /// Ticks a lone replica until it leads its range and applied an entry, as the replica of a
+    /// cluster's first range does: the time it got there.
+    fn lead_alone(core: &mut MultiRaftCore<CoreSm>, d: &mut DataCore, disk: &mut MemDisk) -> Nanos {
+        use teseladb_raftlog::Disk;
+        let mut now = Nanos::from_secs(1);
+        for _ in 0..1_000 {
+            now = now + Nanos::from_millis(10);
+            core.on_tick(now, 0);
+            while let Some(op) = core.poll_io(now) {
+                let done = disk.execute(op);
+                core.on_io_done(done, now);
+            }
+            let _ = core.drain_actions();
+            d.poll(core, (now, 0));
+            run_io(core, d, disk, now);
+            if core.state_machine(G).is_some_and(|sm| sm.applied_index() > 0) {
+                return now;
+            }
+        }
+        panic!("the replica never applied an entry")
+    }
+
     /// Runs the disk operations of the core's LSM and transfers until none is left.
     fn run_io(core: &mut MultiRaftCore<CoreSm>, d: &mut DataCore, disk: &mut MemDisk, now: Nanos) {
         use teseladb_raftlog::Disk;
@@ -1185,8 +1219,7 @@ mod tests {
     #[test]
     fn a_restore_whose_file_the_lsm_refuses_ends_in_an_error_and_takes_no_snapshot() {
         let (mut core, mut d, mut disk) = setup_disk(&[1]);
-        let now = Nanos::from_secs(1);
-        d.poll(&mut core, (now, 0));
+        let now = lead_alone(&mut core, &mut d, &mut disk);
         let ask = |core: &mut MultiRaftCore<CoreSm>, d: &mut DataCore, r: RemoteReq| {
             let (tx, rx) = channel();
             d.request(core, DataReq::At(ME, G, r), tx, (now, 0));
@@ -1200,6 +1233,28 @@ mod tests {
         let r = ask(&mut core, &mut d, RemoteReq::RestoreIngest { files: 1 });
         assert!(matches!(&r, Err(RangeError::Mutation(m)) if m.0.contains("failed")), "{r:?}");
         assert_eq!(core.snapshot_index(G), before);
+    }
+
+    #[test]
+    fn a_replica_waiting_for_its_first_snapshot_keeps_a_restore_s_files_until_it_has_it() {
+        // 007 FR-021: the snapshot it waits for holds the range as it was before the restore,
+        // and installing it after the restore's files would drop them.
+        let (mut core, mut d, mut disk) = setup_disk(&[1, 2]);
+        let now = Nanos::from_secs(1);
+        d.poll(&mut core, (now, 0));
+        assert!(core.state_machine(G).is_some_and(StateMachine::needs_snapshot));
+        let ask = |core: &mut MultiRaftCore<CoreSm>, d: &mut DataCore, r: RemoteReq| {
+            let (tx, rx) = channel();
+            d.request(core, DataReq::At(ME, G, r), tx, (now, 0));
+            rx.try_recv().expect("answered at once")
+        };
+        let piece = RemoteReq::RestorePiece { file: 0, offset: 0, data: b"not an sst".to_vec() };
+        assert!(ask(&mut core, &mut d, piece).is_ok());
+        let not_yet = Ok(DataReply::Remote(RemoteReply::Restored { done: false }));
+        assert_eq!(ask(&mut core, &mut d, RemoteReq::RestoreIngest { files: 1 }), not_yet);
+        run_io(&mut core, &mut d, &mut disk, now);
+        // Nothing went to the LSM: the files wait, staged, for the snapshot.
+        assert_eq!(ask(&mut core, &mut d, RemoteReq::RestoreIngest { files: 1 }), not_yet);
     }
 
     #[test]
