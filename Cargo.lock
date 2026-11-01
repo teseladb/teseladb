@@ -283,6 +283,7 @@ name = "teseladb-search"
 version = "0.1.0"
 dependencies = [
  "teseladb-crypto",
+ "teseladb-deflate",
  "teseladb-hash",
  "teseladb-keys",
  "teseladb-mql",

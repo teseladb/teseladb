@@ -46,6 +46,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub use delimiter::DelimiterOptions;
 
 use super::jregex::RegexError;
+use super::morfologik::{Dictionary, Language};
 use super::normalize::{Form, normalize};
 use super::props::category;
 use super::snowball::{Stemmer, porter_stemming};
@@ -197,6 +198,13 @@ pub enum TokenFilter {
     PersianNormalization,
     /// Removes the Persian plural, comparative and other endings (Persian analyzer).
     PersianStemming,
+    /// Replaces each word form found in a morfologik dictionary by its lemmas, at the same
+    /// position, trying the token as it is and then in lowercase (Polish and Ukrainian
+    /// analyzers).
+    Morfologik {
+        /// The dictionary.
+        language: Language,
+    },
     /// Full-width ASCII and half-width Katakana to their usual widths (CJK analyzer).
     CjkWidth,
     /// Bigrams of the Han, Hiragana, Katakana and Hangul characters of touching tokens (CJK
@@ -426,6 +434,25 @@ fn elide(text: &str, articles: &BTreeSet<String>) -> String {
     }
 }
 
+/// The tokens with each word form of `language`'s dictionary replaced by its lemmas at its
+/// position; a form the dictionary lacks, also in lowercase, stays.
+fn lemmatize(tokens: Vec<Token>, language: Language) -> Vec<Token> {
+    let Some(dictionary) = Dictionary::get(language) else { return tokens };
+    let mut out = Vec::with_capacity(tokens.len());
+    for t in tokens {
+        let mut lemmas = dictionary.lemmas(&t.text);
+        if lemmas.is_empty() {
+            lemmas = dictionary.lemmas(&lower(&t.text));
+        }
+        if t.keyword || lemmas.is_empty() {
+            out.push(t);
+            continue;
+        }
+        out.extend(lemmas.into_iter().map(|text| with_text(&t, text)));
+    }
+    out
+}
+
 /// `text` lowercased with the Turkish `I` → `ı` and `İ` → `i`.
 fn turkish_lower(text: &str) -> String {
     text.chars()
@@ -563,6 +590,7 @@ impl TokenFilter {
             TokenFilter::IndonesianStemming => rewrite(tokens, true, indonesian_stem),
             TokenFilter::PersianNormalization => rewrite(tokens, false, persian_normal),
             TokenFilter::PersianStemming => rewrite(tokens, true, persian_stem),
+            &TokenFilter::Morfologik { language } => lemmatize(tokens, language),
             TokenFilter::CjkWidth => rewrite(tokens, false, cjk_width),
             TokenFilter::CjkBigram => cjk_bigrams(tokens),
             TokenFilter::IndicNormalization => rewrite(tokens, false, indic_normal),
