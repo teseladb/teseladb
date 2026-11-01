@@ -63,14 +63,20 @@ pub(crate) fn file_meta(level: u8, t: &Table) -> FileMeta {
 #[derive(Debug)]
 pub(crate) enum Outcome {
     /// The oldest frozen memtable is in `table` (none if it only had applied indexes).
-    Flushed { table: Option<Table>, edit: Edit },
+    Flushed { table: Option<Box<Table>>, edit: Edit },
     /// The manifest is now `manifest`.
     Rotated { manifest: ManifestFile },
     /// Files are gone from the disk.
     Deleted,
     /// A compaction or an ingestion changed the files: `added` with their level, `removed` by
     /// number.
-    Changed { added: Vec<(u8, Table)>, removed: Vec<u64>, edit: Edit },
+    Changed {
+        added: Vec<(u8, Table)>,
+        removed: Vec<u64>,
+        edit: Edit,
+        /// Bytes written per collection since its dictionary, after the edit.
+        dict_written: Option<crate::dict::Written>,
+    },
     /// Export `id` wrote `files` (they are not part of the LSM).
     Exported { id: u64, files: Vec<crate::ingest::FileRef> },
     /// Ingestion `id` added these files with this edit, or failed and changed nothing.
@@ -140,8 +146,7 @@ impl FlushJob {
             chunk: cfg.io_chunk_bytes,
             writer: has_data.then(|| {
                 let ring = cfg.encryption.as_ref().map(|e| &*e.0);
-                TableWriter::new(cfg.block_bytes, cfg.codec == crate::config::Codec::Zlib)
-                    .sealed(ring)
+                TableWriter::new(cfg.block_bytes, cfg.codec).sealed(ring)
             }),
             next_entry: 0,
             table: None,
@@ -202,7 +207,7 @@ impl FlushJob {
                 FlushStage::Done => {
                     let edit = std::mem::take(&mut self.edit);
                     return Next::Done(Box::new(Outcome::Flushed {
-                        table: self.table.take(),
+                        table: self.table.take().map(Box::new),
                         edit,
                     }));
                 }

@@ -789,6 +789,24 @@ impl Backend for ServerBackend {
         }
     }
 
+    fn write_gate(
+        &mut self,
+    ) -> Result<teseladb_wire::commands::write_block::WriteGate, CommandError> {
+        Ok(self.h.routes.gate())
+    }
+
+    fn gate_everywhere(
+        &mut self,
+        want: teseladb_wire::commands::write_block::WriteGate,
+    ) -> Result<bool, CommandError> {
+        let until = self.until();
+        Ok(self.ask(0, |tx| NodeMsg::GateEverywhere(want, tx), until) == Some(true))
+    }
+
+    fn fcv_limit(&mut self) -> Result<Option<String>, CommandError> {
+        Ok(self.h.routes.fcv_limit())
+    }
+
     fn set_cluster_parameter(&mut self, name: &str, value: Vec<u8>) -> Result<(), CommandError> {
         let key = [PARAMETER_PREFIX, name.as_bytes()].concat();
         let req = CatalogReq::SetSetting { key, value };

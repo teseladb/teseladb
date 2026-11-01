@@ -262,11 +262,12 @@ pub fn insert<B: Backend + ?Sized>(
     docs: &[Value],
     ordered: bool,
 ) -> Result<Document, CommandError> {
+    let shared = ctx.shared;
     let (n, errors) = commit(ctx, kind, |backend, sim| {
         let (mut n, mut errors) = (0i64, Vec::new());
         for (i, v) in docs.iter().enumerate() {
             let added = match v {
-                Value::Document(d) => with_id(backend, d).and_then(|doc| {
+                Value::Document(d) => with_id(backend, shared, d).and_then(|doc| {
                     let bytes = stored_bytes(&doc, Stored::Insert)?;
                     sim.check(&bytes, None)?;
                     Ok(doc)
@@ -304,10 +305,11 @@ pub fn modify<B: Backend + ?Sized>(
     statements: &[Result<Modify, CommandError>],
     ordered: bool,
 ) -> Result<Vec<Result<MutationResult, CommandError>>, CommandError> {
+    let shared = ctx.shared;
     commit(ctx, kind, |backend, sim| {
         let mut out = Vec::new();
         for st in statements {
-            let r = st.clone().and_then(|m| statement(backend, sim, &m));
+            let r = st.clone().and_then(|m| statement(backend, shared, sim, &m));
             let failed = r.is_err();
             out.push(r);
             if failed && ordered {
@@ -343,6 +345,7 @@ fn parsed_update(m: &Modify) -> Result<Option<Update>, CommandError> {
 /// One update or delete statement on the documents.
 pub(crate) fn statement<B: Backend + ?Sized, S: Staged>(
     backend: &mut B,
+    shared: &super::Shared,
     sim: &mut S,
     m: &Modify,
 ) -> Result<MutationResult, CommandError> {
@@ -410,7 +413,7 @@ pub(crate) fn statement<B: Backend + ?Sized, S: Staged>(
     }
     if let (0, true, Some(u)) = (r.n, m.upsert, &m.update) {
         let op = executor_of(m.image);
-        let doc = upsert_doc(backend, op, &m.filter, u, m.array_filters.as_deref())?;
+        let doc = upsert_doc(backend, shared, op, &m.filter, u, m.array_filters.as_deref())?;
         let bytes = stored_bytes(&doc, Stored::Upsert).map_err(&during)?;
         sim.check(&bytes, None).map_err(&during)?;
         sim.note(INSERT, &doc);

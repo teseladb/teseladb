@@ -289,6 +289,7 @@ fn fake_node(answer: fn(&str) -> String, asked: Arc<AtomicUsize>) -> (Acceptor, 
         peer_addr: addr.clone(),
         http_addr: String::new(),
         native_addr: String::new(),
+        versions: teseladb_io::peer::Versions::OWN,
     };
     let (tx, _rx) = channel::<Inbound>(Arc::new(Quiet));
     let a = Acceptor::spawn_with_join(listener, hello, vec![tx], |i| i, Some(join)).unwrap();

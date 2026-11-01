@@ -47,6 +47,7 @@ mod cache;
 mod compaction;
 mod config;
 mod cursor;
+mod dict;
 pub mod entry;
 mod error;
 mod gc;

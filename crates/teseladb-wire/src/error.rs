@@ -149,6 +149,14 @@ codes! {
     UNSUPPORTED_OP_QUERY_COMMAND = 352, "UnsupportedOpQueryCommand";
     /// A BSON column (binary subtype 7) that does not follow the column layout (003 T029).
     NON_CONFORMANT_BSON = 378, "NonConformantBSON";
+    /// A write to a user database while `setUserWriteBlockMode` blocks them (007 FR-029).
+    USER_WRITES_BLOCKED = 371, "UserWritesBlocked";
+    /// A feature compatibility version that does not exist (007 FR-027).
+    INVALID_FCV = 4_926_900, "Location4926900";
+    /// A change of the feature compatibility version without `confirm: true`.
+    FCV_NOT_CONFIRMED = 7_369_100, "Location7369100";
+    /// A change of the feature compatibility version RefDb does not allow from the current one.
+    FCV_BAD_TRANSITION = 5_147_403, "Location5147403";
     /// Two fields of a compound index go through different arrays (009).
     CANNOT_INDEX_PARALLEL_ARRAYS = 171, "CannotIndexParallelArrays";
     /// A transaction that would pass `maxConcurrentMultiDocumentTransactions` (008 FR-020).

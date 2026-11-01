@@ -1,7 +1,8 @@
 //! The node's routing table for the client workers (007 FR-003): core 0 writes it from its copy
 //! of Group 0 whenever the ranges change, and a worker reads it to send each request to the core
 //! of the range that holds its key. That core's router finds the range's leader. Core 0 also
-//! publishes every node's tags, which reads with a `readPreference` match (FR-013).
+//! publishes every node's tags, which reads with a `readPreference` match (FR-013), and the
+//! cluster's write gates, which every write looks at (FR-029).
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
@@ -9,6 +10,7 @@ use std::sync::{Arc, RwLock};
 use teseladb_meta::group0::RangeDesc;
 use teseladb_router::table::{RouteEntry, RouteTable};
 use teseladb_types::{GroupId, NodeId};
+use teseladb_wire::commands::write_block::WriteGate;
 
 use crate::hosting::Hosting;
 
@@ -23,6 +25,11 @@ pub struct SharedRoutes {
     /// Which cores of the node hold each range: a range on its way to another core is sent to
     /// the core that holds it (007 FR-011).
     hosting: Hosting,
+    /// The `fsync` locks and the user write block as this node's copy of Group 0 has them.
+    gate: Arc<RwLock<Arc<WriteGate>>>,
+    /// The highest feature compatibility version every node runs, when one runs less than this
+    /// binary's latest (FR-027).
+    fcv_limit: Arc<RwLock<Arc<Option<String>>>>,
 }
 
 /// Replaces what `lock` holds with `v`; a writer that panicked left a whole value behind, which
@@ -71,6 +78,26 @@ impl SharedRoutes {
     /// Every node's tags.
     pub fn tags(&self) -> Arc<NodeTags> {
         read(&self.tags)
+    }
+
+    /// Replaces the write gates with `gate`.
+    pub fn publish_gate(&self, gate: WriteGate) {
+        replace(&self.gate, Arc::new(gate));
+    }
+
+    /// The write gates.
+    pub fn gate(&self) -> WriteGate {
+        *read(&self.gate)
+    }
+
+    /// Replaces the nodes' feature compatibility version limit with `limit`.
+    pub fn publish_fcv_limit(&self, limit: Option<String>) {
+        replace(&self.fcv_limit, Arc::new(limit));
+    }
+
+    /// The nodes' feature compatibility version limit.
+    pub fn fcv_limit(&self) -> Option<String> {
+        (*read(&self.fcv_limit)).clone()
     }
 
     fn table(&self) -> Arc<RouteTable> {

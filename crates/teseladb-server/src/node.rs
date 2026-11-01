@@ -737,6 +737,7 @@ impl<D: Disk + Send + 'static> Node<D> {
             peer_addr: advertised_peer,
             http_addr: cfg.admin_addr.clone(),
             native_addr: cfg.native_addr.clone(),
+            versions: teseladb_io::peer::Versions::OWN,
         };
         let seed = cfg.seed.unwrap_or_else(random_u64);
 

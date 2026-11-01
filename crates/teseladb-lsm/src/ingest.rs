@@ -190,7 +190,9 @@ impl IngestJob {
             Pending::Meta(i, start) => {
                 let n = self.numbers[i];
                 let ring = self.encryption.as_ref().map(|e| &*e.0);
-                match Table::from_meta(n, self.files[i].size, start, &data, ring) {
+                // Exports never use dictionaries: a file that names one is refused.
+                let none = crate::sst::reader::Dictionaries::new();
+                match Table::from_meta(n, self.files[i].size, start, &data, (ring, &none)) {
                     Ok(t)
                         if self
                             .intervals
@@ -296,10 +298,9 @@ impl IngestJob {
             let level = self.level(v);
             let edit = Edit {
                 adds: self.opened.iter().map(|t| file_meta(level, t)).collect(),
-                removes: Vec::new(),
                 flushed: self.flushed.into_iter().collect(),
-                resets: Vec::new(),
                 next_file,
+                ..Edit::default()
             };
             self.queued.extend(manifest.append(&edit));
             let added = std::mem::take(&mut self.opened).into_iter().map(|t| (level, t)).collect();

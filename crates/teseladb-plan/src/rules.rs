@@ -8,7 +8,7 @@
 
 use teseladb_bson::{Document, Value};
 
-use crate::logical::{Bound, conjunction, conjuncts, intersect, intervals, on_path};
+use crate::logical::{Bound, conjunction, conjuncts, intersect, intervals, on_path, union};
 
 /// What the planner knows of an index.
 #[derive(Clone, Debug, PartialEq)]
@@ -82,7 +82,7 @@ pub fn candidates(request: &Request<'_>, indexes: &[IndexMeta]) -> Vec<Access> {
     let parsed = request.parsed.unwrap_or(&empty);
     if let Some(branches) = branch_scans(request, indexes) {
         return match branches.into_iter().map(|b| b.into_iter().next()).collect() {
-            Some(scans) => vec![Access::Or(scans)],
+            Some(scans) => vec![Access::Or(joined_or(scans, indexes, request.sort))],
             None => vec![Access::Collscan],
         };
     }
@@ -119,6 +119,39 @@ pub fn branch_scans(request: &Request<'_>, indexes: &[IndexMeta]) -> Option<Vec<
         out.push(found);
     }
     Some(out)
+}
+
+/// The scans of the clauses of a rooted `$or` as RefDb joins them (measured on a `refrouter`
+/// 9.0.4): in the order of their indexes, on one index the clauses of several predicates first
+/// (RefDb orders them by path, theirs empty), and a clause that is one predicate on the leading
+/// field of the same index as the clause before it adds its intervals to that clause's scan,
+/// which then reads in the sort's order if the index gives it.
+pub fn joined_or(
+    mut scans: Vec<IndexScan>,
+    indexes: &[IndexMeta],
+    sort: &[(String, i32)],
+) -> Vec<IndexScan> {
+    let single = |s: &IndexScan| s.residual.is_none() && s.preds.len() == 1;
+    scans.sort_by_key(|s| (s.index, single(s)));
+    let mut out: Vec<(IndexScan, bool)> = Vec::new();
+    for s in scans {
+        let joins = single(&s);
+        match out.last_mut() {
+            Some((last, true)) if joins && last.index == s.index => {
+                if let (Some((_, into)), Some((_, from))) =
+                    (last.bounds.first_mut(), s.bounds.first())
+                {
+                    *into = union(into, from);
+                }
+                last.assigned += s.assigned;
+                let (sorts, backward) = sort_order(&indexes[last.index], &last.bounds, sort);
+                last.sorts = sorts;
+                last.backward = backward;
+            }
+            _ => out.push((s, joins)),
+        }
+    }
+    out.into_iter().map(|(s, _)| s).collect()
 }
 
 /// The intersections of two scans RefDb makes when hash intersection is on (measured on a

@@ -83,6 +83,7 @@ fn hello(node: u64) -> Hello {
         peer_addr: "127.0.0.1:1".into(),
         http_addr: String::new(),
         native_addr: String::new(),
+        versions: teseladb_io::peer::Versions::OWN,
     }
 }
 

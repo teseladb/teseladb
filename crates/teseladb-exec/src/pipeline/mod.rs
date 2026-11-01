@@ -10,6 +10,7 @@ mod fill;
 mod granularity;
 mod group;
 pub mod optimize;
+pub mod out_merge;
 mod sbe;
 mod scoped;
 mod shape;
@@ -95,6 +96,8 @@ enum Stage {
     GraphLookup(Box<fill::GraphLookup>),
     /// A stage the node answers itself, first in its pipeline.
     System(&'static str, Document),
+    /// `$out` or `$merge`, last: the node writes what reaches it.
+    Write(Box<out_merge::Write>),
 }
 
 /// A parsed pipeline.
@@ -159,6 +162,12 @@ impl Pipeline {
 
     /// Refuses `$documents` and the stages the node answers itself anywhere but first.
     fn check_positions(&self) -> Result<(), MqlError> {
+        let last = self.stages.len().saturating_sub(1);
+        for st in &self.stages[..last] {
+            if let Stage::Write(w) = st {
+                return Err(out_merge::not_last(w.name()));
+            }
+        }
         for st in self.stages.iter().skip(1) {
             let name = match st {
                 Stage::Documents(_) => "$documents",
@@ -333,6 +342,12 @@ fn parse_stage(d: RawDoc<'_>, ctx: &Ctx) -> Result<Stage, MqlError> {
         "$fill" => Stage::Fill(Box::new(fill::Fill::parse(arg, ctx)?)),
         "$graphLookup" => Stage::GraphLookup(Box::new(fill::GraphLookup::parse(arg, ctx)?)),
         "$collStats" => Stage::System("$collStats", system::coll_stats(arg)?),
+        out_merge::OUT => {
+            Stage::Write(Box::new(out_merge::Write::Out(out_merge::Out::parse(arg)?)))
+        }
+        out_merge::MERGE => Stage::Write(Box::new(out_merge::Write::Merge(Box::new(
+            out_merge::Merge::parse(arg, ctx)?,
+        )))),
         "$setWindowFields" => {
             Stage::SetWindowFields(Box::new(crate::window::SetWindowFields::parse(arg, ctx)?))
         }
@@ -442,7 +457,8 @@ fn sbe_capable(st: &Stage) -> bool {
         | Stage::SetWindowFields(_)
         | Stage::Densify(_)
         | Stage::GraphLookup(_)
-        | Stage::System(..) => false,
+        | Stage::System(..)
+        | Stage::Write(_) => false,
     }
 }
 
@@ -487,5 +503,7 @@ fn run_stage(
         Stage::Fill(f) => f.run(docs, env)?,
         Stage::GraphLookup(g) => g.run(docs, env)?,
         Stage::System(name, spec) => env.system_stage(name, spec)?,
+        // The node writes what reaches it (`out_merge`).
+        Stage::Write(_) => docs,
     })
 }
