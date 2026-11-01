@@ -20,18 +20,66 @@ use teseladb_exec::pipeline::search::Scored;
 use teseladb_hlc::Hlc;
 use teseladb_meta::catalog::{CollectionEntry, Namespace};
 use teseladb_meta::indexes::{SearchIndexEntry, SearchIndexKind};
-use teseladb_search::definition::Definition;
-use teseladb_search::indexer::Indexer;
+use teseladb_search::definition::{Definition, VectorDefinition};
+use teseladb_search::index::MemIndex;
+use teseladb_search::indexer::{Found, Indexer};
+use teseladb_search::query::search::SearchError;
+use teseladb_search::query::vector_search::{self, VectorQuery};
+use teseladb_search::vector_indexer::VectorIndexer;
 
 use super::query::documents_of;
-use super::{Backend, Shared, lock};
-use crate::error::{CommandError, INTERNAL_ERROR, UNKNOWN_ERROR};
+use super::search_indexes::{IndexView, check_view_stages, split_definition};
+use super::{Backend, Shared, lock, views};
+use crate::error::{CommandError, INTERNAL_ERROR, MAX_TIME_MS_EXPIRED, UNKNOWN_ERROR};
 
 /// The index a search stage uses when it names none.
 pub const DEFAULT_INDEX: &str = "default";
 
 /// The `$search` metadata of a document's score.
 const SEARCH_SCORE: &str = "searchScore";
+/// The `$vectorSearch` metadata of a document's score.
+const VECTOR_SEARCH_SCORE: &str = "vectorSearchScore";
+
+/// The segments of an index, by its type.
+#[derive(Clone, Debug)]
+pub enum Segments {
+    /// A `search` index.
+    Search(Box<Indexer>),
+    /// A `vectorSearch` index.
+    Vector(VectorIndexer),
+}
+
+impl Segments {
+    /// Empty segments of the same definition.
+    fn emptied(&self) -> Segments {
+        match self {
+            Segments::Search(ix) => {
+                Segments::Search(Box::new(Indexer::new(ix.definition().clone())))
+            }
+            Segments::Vector(ix) => Segments::Vector(VectorIndexer::new(ix.definition().clone())),
+        }
+    }
+
+    fn reshape(&mut self, bounds: &[(Vec<u8>, Vec<u8>)]) -> Result<(), CommandError> {
+        match self {
+            Segments::Search(ix) => ix.reshape(bounds).map_err(index_error),
+            Segments::Vector(ix) => {
+                ix.reshape(bounds);
+                Ok(())
+            }
+        }
+    }
+
+    fn apply(&mut self, newest: BTreeMap<Vec<u8>, Option<Document>>) -> Result<(), CommandError> {
+        match self {
+            Segments::Search(ix) => ix.apply(newest).map_err(index_error),
+            Segments::Vector(ix) => {
+                ix.apply(newest);
+                Ok(())
+            }
+        }
+    }
+}
 
 /// The segments of one index as this node built them.
 #[derive(Clone, Debug)]
@@ -45,15 +93,22 @@ pub struct Built {
     /// That definition completed with its defaults.
     definition: Document,
     /// The segments.
-    indexer: Indexer,
+    indexer: Segments,
     /// The mark every segment has applied the versions up to.
     applied: Hlc,
+    /// The view the index was created on: its documents are the collection's through the
+    /// view's stages (FR-021).
+    view: Option<IndexView>,
+    /// With a view, the collection's documents as stored, by key.
+    stored: BTreeMap<Vec<u8>, Document>,
 }
 
 /// The indexes this node built, by identifier.
 #[derive(Clone, Debug, Default)]
 pub struct SearchIndexes {
     built: BTreeMap<[u8; 12], Built>,
+    /// The indexes whose build failed on this node, with the version that failed.
+    failed: BTreeMap<[u8; 12], Served>,
 }
 
 /// What `statusDetail` says of an index this node built: the version it serves, when it was
@@ -66,21 +121,26 @@ pub struct Served {
     pub defined_ms: i64,
     /// The definition completed with its defaults.
     pub definition: Document,
+    /// Why building it failed: the index is then `FAILED` and cannot be queried.
+    pub failure: Option<String>,
 }
 
 impl SearchIndexes {
-    /// What this node serves of index `id`.
+    /// What this node serves of index `id`, or the version it failed to build.
     pub fn served(&self, id: &[u8; 12]) -> Option<Served> {
-        self.built.get(id).map(|b| Served {
+        let built = self.built.get(id).map(|b| Served {
             version: b.version,
             defined_ms: b.defined_ms,
             definition: b.definition.clone(),
-        })
+            failure: None,
+        });
+        built.or_else(|| self.failed.get(id).cloned())
     }
 
     /// Forgets index `id` (dropped).
     pub fn forget(&mut self, id: &[u8; 12]) {
         self.built.remove(id);
+        self.failed.remove(id);
     }
 }
 
@@ -89,12 +149,25 @@ fn query_error(msg: String) -> CommandError {
     CommandError::new(UNKNOWN_ERROR, msg)
 }
 
-/// The definition of a `search` index of the catalog.
-fn definition_of(entry: &SearchIndexEntry) -> Result<(Definition, Document), CommandError> {
-    let raw = Document::from(RawDoc::from_bytes(&entry.definition)?);
-    let def = Definition::parse(&raw).map_err(|e| query_error(e.message("")))?;
-    let completed = def.normalized();
-    Ok((def, completed))
+/// The empty segments of an index of the catalog and its definition completed with its
+/// defaults.
+fn definition_of(
+    entry: &SearchIndexEntry,
+) -> Result<(Segments, Document, Option<IndexView>), CommandError> {
+    let (raw, view) = split_definition(&entry.definition)?;
+    let (segments, completed) = match entry.kind {
+        SearchIndexKind::Search => {
+            let def = Definition::parse(&raw).map_err(|e| query_error(e.message("")))?;
+            let completed = def.normalized();
+            (Segments::Search(Box::new(Indexer::new(def))), completed)
+        }
+        SearchIndexKind::VectorSearch => {
+            let def = VectorDefinition::parse(&raw).map_err(|e| query_error(e.message("")))?;
+            let completed = def.normalized();
+            (Segments::Vector(VectorIndexer::new(def)), completed)
+        }
+    };
+    Ok((segments, completed, view))
 }
 
 /// Brings the segments of `entry` on `coll` up to the resolved marks of its ranges, building
@@ -104,26 +177,45 @@ pub fn with_index<B: Backend + ?Sized, R>(
     shared: &Shared,
     coll: &CollectionEntry,
     entry: &SearchIndexEntry,
-    f: impl FnOnce(&Indexer) -> R,
+    f: impl FnOnce(&Segments, &BTreeMap<Vec<u8>, Document>) -> R,
 ) -> Result<R, CommandError> {
     let taken = lock(shared).search.built.remove(&entry.id);
+    let mut fresh = false;
     let mut built = match taken {
         Some(b) if b.version == entry.version && b.collection == coll.id => b,
         _ => {
-            let (def, definition) = definition_of(entry)?;
+            fresh = true;
+            let (indexer, definition, view) = definition_of(entry)?;
             Built {
                 collection: coll.id,
                 version: entry.version,
                 defined_ms: entry.defined_ms,
                 definition,
-                indexer: Indexer::new(def),
+                indexer,
                 applied: Hlc { physical: 0, logical: 0 },
+                view,
+                stored: BTreeMap::new(),
             }
         }
     };
-    catch_up(backend, coll, &mut built)?;
-    let out = f(&built.indexer);
-    lock(shared).search.built.insert(entry.id, built);
+    if let Err(e) = catch_up(backend, coll, &mut built) {
+        // A document the definition cannot analyze fails the build: the index is `FAILED`
+        // (measured: `replication failed (action=drop): minGram must be greater than zero`).
+        if fresh && e.code == UNKNOWN_ERROR {
+            let failed = Served {
+                version: built.version,
+                defined_ms: built.defined_ms,
+                definition: built.definition,
+                failure: Some(format!("replication failed (action=drop): {}", e.errmsg)),
+            };
+            lock(shared).search.failed.insert(entry.id, failed);
+        }
+        return Err(e);
+    }
+    let out = f(&built.indexer, &built.stored);
+    let mut indexes = lock(shared);
+    indexes.search.failed.remove(&entry.id);
+    indexes.search.built.insert(entry.id, built);
     Ok(out)
 }
 
@@ -134,7 +226,25 @@ fn catch_up<B: Backend + ?Sized>(
     built: &mut Built,
 ) -> Result<(), CommandError> {
     let (start, end) = documents_of(coll);
-    let ranges = backend.range_changes(&start, &end, built.applied)?;
+    if behind_history(built.applied, history_floor(backend)?) {
+        // The ranges may have dropped the deletions after the mark: start over from a scan of
+        // what they hold now (T049).
+        built.indexer = built.indexer.emptied();
+        built.applied = Hlc { physical: 0, logical: 0 };
+        built.stored.clear();
+    }
+    // The search waits until every range's segments reach the read's mark, its
+    // `search_applied_ts` (FR-010), no longer than the command's `maxTimeMS`.
+    let target = backend.read_mark().map_or_else(|| backend.cluster_mark(), |m| m.at);
+    let ranges = loop {
+        let ranges = backend.range_changes(&start, &end, built.applied)?;
+        if ranges.iter().all(|r| r.resolved >= target) {
+            break ranges;
+        }
+        if !backend.pause() {
+            return Err(CommandError::new(MAX_TIME_MS_EXPIRED, "operation exceeded time limit"));
+        }
+    };
     let bounds: Vec<(Vec<u8>, Vec<u8>)> =
         ranges.iter().map(|r| (r.start.clone(), r.end.clone())).collect();
     let resolved = ranges.iter().map(|r| r.resolved).min().unwrap_or(built.applied);
@@ -156,10 +266,56 @@ fn catch_up<B: Backend + ?Sized>(
         };
         newest.insert(c.event.key, doc);
     }
-    built.indexer.reshape(&bounds).map_err(index_error)?;
-    built.indexer.apply(newest).map_err(index_error)?;
+    if let Some(view) = &built.view {
+        // The stages a search view may have read no other collection: no database is needed.
+        newest = through_view(backend, "", view, newest, &mut built.stored)?;
+    }
+    built.indexer.reshape(&bounds)?;
+    built.indexer.apply(newest)?;
     built.applied = resolved;
     Ok(())
+}
+
+/// The oldest mark whose versions the ranges still keep: the wall clock less the history
+/// retention (`teselaHistoryRetention`, D-020); the GC threshold of every range is at or below it.
+fn history_floor<B: Backend + ?Sized>(backend: &mut B) -> Result<u64, CommandError> {
+    let params = backend.cluster_parameters()?;
+    let stored = params.get(super::parameters::HISTORY_RETENTION).map(Vec::as_slice);
+    let retention = super::parameters::history_retention_ms(stored);
+    Ok(backend.wall_ms().saturating_sub(retention))
+}
+
+/// Whether segments that applied the versions up to `applied` can no longer catch up: the GC
+/// may have dropped a deletion above their mark, so reading the changes would keep a document
+/// that no longer exists. Segments that applied nothing scan the whole state anyway.
+pub(crate) fn behind_history(applied: Hlc, floor_ms: u64) -> bool {
+    applied.physical != 0 && applied.physical < floor_ms
+}
+
+/// The changed documents of an index on a view: each one through the view's stages (`None`
+/// when its `$match` leaves it out), the stored ones kept in `stored`.
+fn through_view<B: Backend + ?Sized>(
+    backend: &mut B,
+    db: &str,
+    view: &IndexView,
+    newest: BTreeMap<Vec<u8>, Option<Document>>,
+    stored: &mut BTreeMap<Vec<u8>, Document>,
+) -> Result<BTreeMap<Vec<u8>, Option<Document>>, CommandError> {
+    let mut out = BTreeMap::new();
+    for (key, doc) in newest {
+        let seen = match doc {
+            Some(d) => {
+                stored.insert(key.clone(), d.clone());
+                super::aggregate::run_stages(backend, db, &view.stages, vec![d])?.into_iter().next()
+            }
+            None => {
+                stored.remove(&key);
+                None
+            }
+        };
+        out.insert(key, seen);
+    }
+    Ok(out)
 }
 
 /// A document the index cannot analyze.
@@ -176,7 +332,7 @@ fn index_name(spec: &Document) -> Result<String, CommandError> {
     }
 }
 
-/// The documents of `$search` or `$searchMeta` on `ns` with `spec`.
+/// The documents of `$search`, `$searchMeta` or `$vectorSearch` on `ns` with `spec`.
 pub fn source<B: Backend + ?Sized>(
     backend: &mut B,
     shared: &Shared,
@@ -185,36 +341,149 @@ pub fn source<B: Backend + ?Sized>(
     spec: &Document,
 ) -> Result<Vec<Scored>, CommandError> {
     if stage == "$vectorSearch" {
-        // The vector indexes are not served by this node's indexer: the stage answers as a
-        // deployment without search, as before the indexer.
-        return Err(super::mutation::from_mql(teseladb_exec::pipeline::search::not_enabled()));
+        return vector_source(backend, shared, ns, spec);
     }
     let name = index_name(spec)?;
-    let Some(coll) = backend.collection(ns)? else { return Ok(Vec::new()) };
-    let entry = backend
-        .search_indexes(coll.id)?
-        .into_iter()
-        .find(|e| e.name == name && e.kind == SearchIndexKind::Search);
     let meta_only = stage == "$searchMeta";
-    let Some(entry) = entry else {
-        return Ok(match meta_only {
-            true => vec![plain(teseladb_search::query::search::count_document(true, 0))],
-            false => Vec::new(),
-        });
+    // Without the collection even `$searchMeta` gives nothing (measured).
+    let Some((coll, view)) = target(backend, ns, !meta_only)? else { return Ok(Vec::new()) };
+    let entry = backend.search_indexes(coll.id)?.into_iter().find(|e| e.name == name);
+    let entry = match entry {
+        None => return Ok(missing(meta_only)),
+        // `refsearch` reads the query before it finds the index is of the other type.
+        Some(e) if e.kind == SearchIndexKind::VectorSearch => {
+            let empty = MemIndex::new(dynamic_definition()?);
+            teseladb_search::query::search::run(&empty, spec).map_err(|e| query_error(e.0))?;
+            return Err(query_error(vector_search::not_search(&name).0));
+        }
+        Some(e) if !serves(&e, view.as_deref())? => return Ok(missing(meta_only)),
+        Some(e) => e,
     };
-    let found = with_index(backend, shared, &coll, &entry, |ix| match meta_only {
-        true => ix.meta(spec).map(|d| vec![plain(d)]),
-        false => ix.search(spec).map(|found| {
-            found
-                .into_iter()
-                .map(|f| {
-                    let score = Value::Double(f64::from(f.score));
-                    Scored { doc: f.doc, meta: BTreeMap::from([(SEARCH_SCORE.to_owned(), score)]) }
-                })
-                .collect()
-        }),
+    let failed = lock(shared).search.served(&entry.id);
+    if failed.is_some_and(|s| s.version == entry.version && s.failure.is_some()) {
+        return Err(query_error(failed_state(&entry, &coll, ns)));
+    }
+    let found = with_index(backend, shared, &coll, &entry, |ix, stored| match (ix, meta_only) {
+        (Segments::Search(ix), true) => ix.meta(spec).map(|d| vec![plain(d)]),
+        (Segments::Search(ix), false) => {
+            ix.search(spec).map(|f| scored(as_read(f, stored, view.is_some()), SEARCH_SCORE))
+        }
+        (Segments::Vector(_), _) => Err(vector_search::not_search(&name)),
     })?;
     found.map_err(|e| query_error(e.0))
+}
+
+/// The error of a query on an index that failed to build (measured).
+fn failed_state(entry: &SearchIndexEntry, coll: &CollectionEntry, ns: &Namespace) -> String {
+    let id: String = entry.id.iter().map(|b| format!("{b:02x}")).collect();
+    let u: String = coll.uuid.iter().map(|b| format!("{b:02x}")).collect();
+    let uuid = format!("{}-{}-{}-{}-{}", &u[..8], &u[8..12], &u[12..16], &u[16..20], &u[20..]);
+    format!(
+        "cannot query search index {id} (index {} collection {} ({uuid}) in database {}) while in \
+         state FAILED",
+        entry.name, ns.coll, ns.db
+    )
+}
+
+/// What a search stage finds without an index: nothing, and `$searchMeta` counts no document.
+fn missing(meta_only: bool) -> Vec<Scored> {
+    match meta_only {
+        true => vec![plain(teseladb_search::query::search::count_document(true, 0))],
+        false => Vec::new(),
+    }
+}
+
+/// The collection of `ns` (through its views) and, when `ns` is a view with stages, its name;
+/// `check` refuses the stages a search index cannot follow (FR-021). `None` when there is no
+/// collection.
+fn target<B: Backend + ?Sized>(
+    backend: &mut B,
+    ns: &Namespace,
+    check: bool,
+) -> Result<Option<(CollectionEntry, Option<String>)>, CommandError> {
+    let (coll_ns, view) = match views::resolve(backend, ns)? {
+        Some(v) if v.pipeline.is_empty() => {
+            (Namespace { db: ns.db.clone(), coll: v.collection }, None)
+        }
+        Some(v) => {
+            if check {
+                check_view_stages(&v.pipeline)?;
+            }
+            (Namespace { db: ns.db.clone(), coll: v.collection }, Some(ns.coll.clone()))
+        }
+        None => (ns.clone(), None),
+    };
+    Ok(backend.collection(&coll_ns)?.map(|c| (c, view)))
+}
+
+/// Whether index `entry` serves a query on view `view` (`None`: on the collection, which any
+/// index serves): measured on 9.0.4, an index created on another view finds nothing.
+fn serves(entry: &SearchIndexEntry, view: Option<&str>) -> Result<bool, CommandError> {
+    let Some(view) = view else { return Ok(true) };
+    let (_, made_on) = split_definition(&entry.definition)?;
+    Ok(made_on.is_some_and(|v| v.name == view))
+}
+
+/// The documents found as the query reads them: through the index's view when the query is on
+/// that view, else as the collection stores them.
+fn as_read(found: Vec<Found>, stored: &BTreeMap<Vec<u8>, Document>, on_view: bool) -> Vec<Found> {
+    if on_view || stored.is_empty() {
+        return found;
+    }
+    found
+        .into_iter()
+        .map(|mut f| {
+            if let Some(d) = stored.get(&f.key) {
+                f.doc = d.clone();
+            }
+            f
+        })
+        .collect()
+}
+
+/// The definition `{mappings: {dynamic: true}}`, to read a query with no index of its type.
+fn dynamic_definition() -> Result<Definition, CommandError> {
+    let def = Document::new().with("mappings", Document::new().with("dynamic", true));
+    Definition::parse(&def).map_err(|e| query_error(e.message("")))
+}
+
+/// The documents of `$vectorSearch` on `ns` with `spec`: `refsearch` reads the query first, then
+/// a missing index or collection finds nothing and an index of type `search` refuses it.
+fn vector_source<B: Backend + ?Sized>(
+    backend: &mut B,
+    shared: &Shared,
+    ns: &Namespace,
+    spec: &Document,
+) -> Result<Vec<Scored>, CommandError> {
+    let query = VectorQuery::parse(spec).map_err(|e| query_error(e.0))?;
+    let Some((coll, view)) = target(backend, ns, true)? else { return Ok(Vec::new()) };
+    let entry = backend.search_indexes(coll.id)?.into_iter().find(|e| e.name == query.index);
+    let Some(entry) = entry else { return Ok(Vec::new()) };
+    if entry.kind == SearchIndexKind::Search {
+        return Err(query_error(vector_search::not_vector(&query.path).0));
+    }
+    if !serves(&entry, view.as_deref())? {
+        return Ok(Vec::new());
+    }
+    let on_view = view.is_some();
+    let found = with_index(backend, shared, &coll, &entry, |ix, stored| match ix {
+        Segments::Vector(ix) => {
+            ix.search(&query).map(|f| scored(as_read(f, stored, on_view), VECTOR_SEARCH_SCORE))
+        }
+        Segments::Search(_) => Err(vector_search::not_vector(&query.path)),
+    })?;
+    found.map_err(|e: SearchError| query_error(e.0))
+}
+
+/// The documents found, with their score as metadata `name`.
+fn scored(found: Vec<Found>, name: &str) -> Vec<Scored> {
+    found
+        .into_iter()
+        .map(|f| {
+            let score = Value::Double(f64::from(f.score));
+            Scored { doc: f.doc, meta: BTreeMap::from([(name.to_owned(), score)]) }
+        })
+        .collect()
 }
 
 /// A document without metadata.
@@ -229,14 +498,35 @@ pub fn status_detail(host: u64, served: &Served) -> Document {
     let version = Document::new()
         .with("version", i32::try_from(served.version).unwrap_or(i32::MAX))
         .with("createdAt", Value::DateTime(created));
-    let main = Document::new()
-        .with("status", "READY")
-        .with("queryable", true)
+    let (status, queryable) = match served.failure {
+        Some(_) => ("FAILED", false),
+        None => ("READY", true),
+    };
+    let mut main = Document::new()
+        .with("status", status)
+        .with("queryable", queryable)
         .with("definitionVersion", version)
         .with("definition", served.definition.clone());
+    if let Some(message) = &served.failure {
+        main.push("message", message.as_str());
+    }
     Document::new()
         .with("hostname", format!("{host:024x}"))
-        .with("status", "READY")
-        .with("queryable", true)
+        .with("status", status)
+        .with("queryable", queryable)
         .with("mainIndex", main)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn segments_behind_the_history_floor_start_over() {
+        let at = |physical| Hlc { physical, logical: 0 };
+        assert!(!behind_history(at(0), 5_000));
+        assert!(behind_history(at(4_999), 5_000));
+        assert!(!behind_history(at(5_000), 5_000));
+        assert!(!behind_history(at(9_000), 5_000));
+    }
 }

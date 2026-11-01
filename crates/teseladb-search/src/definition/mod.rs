@@ -4,11 +4,13 @@
 //! set, 01-11-2026). [`Definition::normalized`] gives the definition as `refsearch` shows it in
 //! `statusDetail.mainIndex.definition`.
 
+mod analyzers;
 mod fields;
 mod vector;
 
 use teseladb_bson::{Document, Value};
 
+pub use analyzers::CustomAnalyzer;
 pub use fields::{Dynamic, FieldMapping, Mapping, StringField};
 pub use vector::{VectorDefinition, VectorField};
 
@@ -188,8 +190,8 @@ pub struct Definition {
     pub mappings: Mapping,
     /// What is kept besides the fields.
     pub stored_source: StoredSource,
-    /// Custom analyzers, as given, by name.
-    pub analyzers: Vec<(String, Document)>,
+    /// Custom analyzers.
+    pub analyzers: Vec<CustomAnalyzer>,
     /// Synonym mappings.
     pub synonyms: Vec<Synonyms>,
     /// Type sets of `dynamic: {typeSet}`, by name, each with its field types.
@@ -208,7 +210,7 @@ impl Definition {
             Some(Value::Document(m)) => Mapping::parse(m, "mappings", fields::Owner::Root)?,
             Some(_) => return Err(DefinitionError::shape("mappings", "must be a document")),
         };
-        let analyzers = custom_analyzers(def)?;
+        let analyzers = analyzers::parse(def)?;
         let synonyms = synonyms(def)?;
         let type_sets = type_sets(def)?;
         let d = Definition {
@@ -226,7 +228,12 @@ impl Definition {
 
     /// Whether `name` is an analyzer of this index: a built-in one or one it defines.
     pub fn has_analyzer(&self, name: &str) -> bool {
-        Analyzer::builtin(name).is_some() || self.analyzers.iter().any(|(n, _)| n == name)
+        Analyzer::builtin(name).is_some() || self.custom_analyzer(name).is_some()
+    }
+
+    /// The custom analyzer called `name`.
+    pub fn custom_analyzer(&self, name: &str) -> Option<&CustomAnalyzer> {
+        self.analyzers.iter().find(|a| a.name == name)
     }
 
     /// Every analyzer name the definition uses must exist (code 125 when one does not).
@@ -259,7 +266,8 @@ impl Definition {
             d.push("storedSource", s);
         }
         if !self.analyzers.is_empty() {
-            let all = self.analyzers.iter().map(|(_, a)| Value::Document(a.clone())).collect();
+            let all =
+                self.analyzers.iter().map(|a| Value::Document(a.normalized.clone())).collect();
             d.push("analyzers", Value::Array(all));
         }
         if !self.synonyms.is_empty() {
@@ -317,18 +325,6 @@ fn documents<'a>(
             .collect(),
         Some(_) => Err(DefinitionError::shape(field, "must be an array")),
     }
-}
-
-/// The custom analyzers, each with a name.
-fn custom_analyzers(def: &Document) -> Result<Vec<(String, Document)>, DefinitionError> {
-    documents(def, "analyzers")?
-        .into_iter()
-        .map(|(at, a)| {
-            let name = string_of(a, &at, "name")?
-                .ok_or_else(|| DefinitionError::shape(&join(&at, "name"), "is required"))?;
-            Ok((name.to_owned(), a.clone()))
-        })
-        .collect()
 }
 
 /// The synonym mappings.

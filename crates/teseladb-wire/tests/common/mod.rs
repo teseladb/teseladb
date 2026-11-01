@@ -141,6 +141,9 @@ pub struct Mem {
     pub uncertain_more: Vec<Hlc>,
     /// Pauses a waiting command takes before its time runs out (none: it runs out at once).
     pub pauses_left: usize,
+    /// How many reads of the changes still give a resolved mark one millisecond behind the
+    /// clock, as a range whose oldest intent is not resolved yet (011 FR-010).
+    pub changes_lag: usize,
     /// The next change stream read fails with this error (014).
     pub fail_changes: Option<CommandError>,
     /// The next resolutions of intents fail with this error.
@@ -308,14 +311,18 @@ impl Backend for Mem {
         if let Some(e) = self.fail_changes.take() {
             return Err(e);
         }
-        // Every write of this node is applied at once: resolved up to its clock, less the lag.
+        // Every write of this node is applied at once: resolved up to its clock, less the lag
+        // asked for (in milliseconds, or one millisecond for the next `changes_lag` reads).
+        let lag = u64::from(self.changes_lag > 0);
+        self.changes_lag = self.changes_lag.saturating_sub(1);
         let rows = self
             .history
             .iter()
             .filter(|v| v.ts > from && start <= v.key.as_slice() && v.key.as_slice() < end)
             .cloned()
             .collect();
-        Ok((rows, Hlc { physical: self.now.saturating_sub(self.resolved_lag_ms), logical: 0 }))
+        let behind = self.resolved_lag_ms.saturating_add(lag);
+        Ok((rows, Hlc { physical: self.now.saturating_sub(behind), logical: 0 }))
     }
 
     fn catalog_changes(

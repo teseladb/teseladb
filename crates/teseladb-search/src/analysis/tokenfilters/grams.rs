@@ -4,7 +4,10 @@
 //! first token and spans the positions up to its last token's (`n - 1` for `n` tokens in a row).
 //! Positions left empty by an earlier filter, also before the first token and after the last,
 //! become `_` tokens right after the token before them, at most `maxShingleSize - 1` of them per
-//! gap, and no shingle is made of `_` alone.
+//! gap, and no shingle is made of `_` alone. Tokens stacked at one position (edge grams) count as
+//! tokens in a row, as RefLib's `ShingleFilter` reads them (measured on `refsearch`: the query graph
+//! of `h he hel` has the paths `h he` `he hel` and `h he hel`), so every later position moves by
+//! the tokens stacked before it.
 
 use super::{Original, with_text};
 use crate::analysis::tokenizers::Token;
@@ -42,7 +45,14 @@ pub(super) fn grams(
 pub(super) fn shingles(tokens: &[Token], min: usize, max: usize, end: u32) -> Vec<Token> {
     let mut line: Vec<Token> = Vec::with_capacity(tokens.len());
     let mut next = 0;
+    let mut stacked = 0;
+    let mut before: Option<u32> = None;
     for t in tokens {
+        if before == Some(t.position) {
+            stacked += 1;
+        }
+        before = Some(t.position);
+        let t = &Token { position: t.position + stacked, ..t.clone() };
         for position in (next..t.position).take(max - 1) {
             line.push(Token {
                 text: FILLER.to_string(),
@@ -56,7 +66,7 @@ pub(super) fn shingles(tokens: &[Token], min: usize, max: usize, end: u32) -> Ve
         line.push(t.clone());
     }
     if let Some(last) = tokens.last() {
-        for position in (next..end).take(max - 1) {
+        for position in (next..end + stacked).take(max - 1) {
             line.push(Token {
                 text: FILLER.to_string(),
                 start: last.end,

@@ -24,6 +24,7 @@ Cada modelo explica en su cabecera qué comprueba; `scripts/ci.sh` vuelve a gene
 | `RangeSplit` | `RangeSplit.cfg` | 158.877 | 45.305 | 15 | 2 s |
 | `RangeSplitMvcc` | `RangeSplitMvcc.cfg` | 422.892 | 199.812 | 17 | 3 s |
 | `Reshard` | `Reshard.cfg` | 120.926 | 55.665 | 20 | 2 s |
+| `SearchSegmentGc` | `SearchSegmentGc.cfg` | 21.830 | 6.097 | 9 | 0 s |
 | `SingleServerChange` | `SingleServerChange.cfg` | 5.633.534 | 1.403.162 | 30 | 29 s |
 | `Smoke` | `Smoke.cfg` | 5 | 4 | 4 | 3 s |
 | `SnapshotAwait` | `SnapshotAwait.cfg` | 38.943 | 7.088 | 19 | 2 s |
