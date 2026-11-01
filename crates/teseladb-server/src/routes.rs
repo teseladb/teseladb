@@ -27,6 +27,9 @@ pub struct SharedRoutes {
     hosting: Hosting,
     /// The `fsync` locks and the user write block as this node's copy of Group 0 has them.
     gate: Arc<RwLock<Arc<WriteGate>>>,
+    /// The highest feature compatibility version every node runs, when one runs less than this
+    /// binary's latest (FR-027).
+    fcv_limit: Arc<RwLock<Arc<Option<String>>>>,
 }
 
 /// Replaces what `lock` holds with `v`; a writer that panicked left a whole value behind, which
@@ -85,6 +88,16 @@ impl SharedRoutes {
     /// The write gates.
     pub fn gate(&self) -> WriteGate {
         *read(&self.gate)
+    }
+
+    /// Replaces the nodes' feature compatibility version limit with `limit`.
+    pub fn publish_fcv_limit(&self, limit: Option<String>) {
+        replace(&self.fcv_limit, Arc::new(limit));
+    }
+
+    /// The nodes' feature compatibility version limit.
+    pub fn fcv_limit(&self) -> Option<String> {
+        (*read(&self.fcv_limit)).clone()
     }
 
     fn table(&self) -> Arc<RouteTable> {

@@ -29,6 +29,7 @@ pub mod crud;
 pub mod diagnostics;
 pub mod engines;
 pub mod explain;
+pub mod fcv;
 pub mod hints;
 pub mod index_build;
 pub mod index_maintenance;
@@ -263,6 +264,11 @@ pub trait Backend {
     /// keeps them closer at hand.
     fn write_gate(&mut self) -> Result<write_block::WriteGate, CommandError> {
         Ok(write_block::gate_of(&self.cluster_parameters()?))
+    }
+    /// The highest feature compatibility version every node of the cluster runs (007 FR-027),
+    /// if one runs less than this binary's latest.
+    fn fcv_limit(&mut self) -> Result<Option<String>, CommandError> {
+        Ok(None)
     }
     /// Sets a cluster parameter in Group 0 and waits until this node's copy applied it.
     fn set_cluster_parameter(&mut self, name: &str, value: Vec<u8>) -> Result<(), CommandError>;
@@ -589,7 +595,7 @@ impl<B: Backend + ?Sized> Ctx<'_, B> {
 }
 
 /// The commands of this module.
-const NAMES: [&str; 63] = [
+const NAMES: [&str; 64] = [
     aggregate::AGGREGATE,
     explain::EXPLAIN,
     audit::LOG_APPLICATION_MESSAGE,
@@ -603,6 +609,7 @@ const NAMES: [&str; 63] = [
     cluster_admin::FSYNC,
     write_block::FSYNC_UNLOCK,
     write_block::SET_USER_WRITE_BLOCK_MODE,
+    fcv::SET_FCV,
     cluster_admin::COMPACT,
     cluster_admin::AUTO_COMPACT,
     cluster_admin::SHUTDOWN,
@@ -701,6 +708,7 @@ fn command<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comman
         cluster_admin::FSYNC => cluster_admin::fsync(ctx),
         write_block::FSYNC_UNLOCK => write_block::fsync_unlock(ctx),
         write_block::SET_USER_WRITE_BLOCK_MODE => write_block::set_user_write_block_mode(ctx),
+        fcv::SET_FCV => fcv::set_fcv(ctx),
         cluster_admin::COMPACT => cluster_admin::compact(ctx),
         cluster_admin::AUTO_COMPACT => cluster_admin::auto_compact(ctx),
         cluster_admin::SHUTDOWN => cluster_admin::shutdown(ctx),

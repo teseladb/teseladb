@@ -186,6 +186,8 @@ pub struct NodeLogic {
     /// FR-013).
     tags: Vec<(String, String)>,
     tags_op: Option<OpId>,
+    /// The record of this node's versions in Group 0 (007 FR-027), in flight.
+    versions_op: Option<OpId>,
     /// The nodes' tags last published for the client workers.
     sent_tags: Option<crate::routes::NodeTags>,
     create_op: Option<OpId>,
@@ -248,6 +250,7 @@ impl NodeLogic {
             boot_op: None,
             tags: Vec::new(),
             tags_op: None,
+            versions_op: None,
             sent_tags: None,
             create_op: None,
             balance_op: None,
@@ -545,6 +548,17 @@ impl NodeLogic {
         }
     }
 
+    /// Records the versions this node runs in Group 0 while they differ there (007 FR-027); one
+    /// at a time.
+    fn announce_versions(&mut self) {
+        let Some((id, _)) = &self.me else { return };
+        let (key, value) = (crate::node_versions::key(*id), crate::node_versions::ours());
+        let differ = self.group0().is_some_and(|sm| sm.settings.get(&key) != Some(&value));
+        if differ && self.versions_op.is_none() {
+            self.versions_op = self.send_group0(Group0Command::SetSetting { key, value });
+        }
+    }
+
     /// Records this node's tags in Group 0 (`SetNodeTags`) while they differ there; one at a time.
     fn announce_tags(&mut self) {
         let Some((id, _)) = &self.me else { return };
@@ -661,6 +675,10 @@ impl NodeLogic {
         let gate = teseladb_wire::commands::write_block::gate_of(&all);
         if routes.gate() != gate {
             routes.publish_gate(gate);
+        }
+        let limit = crate::node_versions::fcv_limit(sm);
+        if routes.fcv_limit() != limit {
+            routes.publish_fcv_limit(limit);
         }
         let tags: crate::routes::NodeTags =
             sm.nodes.iter().map(|(id, n)| (*id, n.tags.clone())).collect();
@@ -1190,6 +1208,7 @@ impl NodeLogic {
             || mine(&mut self.addr_update)
             || mine(&mut self.boot_op)
             || mine(&mut self.tags_op)
+            || mine(&mut self.versions_op)
             || mine(&mut self.create_op)
             || mine(&mut self.balance_op)
             || self.group0_ops.remove(&op)
@@ -1238,6 +1257,8 @@ fn forward_allowed(cmd: &Group0Command, from: NodeId) -> bool {
         Group0Command::SetNodeAddrs { node, .. }
         | Group0Command::NodeBoot { node, .. }
         | Group0Command::SetNodeTags { node, .. } => *node == from,
+        // A node records its own versions only (007 FR-027).
+        Group0Command::SetSetting { key, .. } => *key == crate::node_versions::key(from),
         Group0Command::SetLeaderHint { node, term, .. } => *node == from && *term > 0,
         Group0Command::ReplicasSettled { .. }
         | Group0Command::SplitRange { .. }
@@ -1267,6 +1288,7 @@ impl CoreLogic for NodeLogic {
         self.update_addrs();
         self.announce_boot();
         self.announce_tags();
+        self.announce_versions();
         self.sync_tags();
         self.create_range();
         self.balance();
@@ -1714,6 +1736,32 @@ mod tests {
         // Joining again from the same address gives back the same node, already a member.
         let rx = c.join(1, request(2, &addr(2)));
         assert_eq!(c.answer(&rx).expect("accepted").node_id, NodeId(2));
+    }
+
+    #[test]
+    fn each_node_records_the_versions_it_runs_in_group0() {
+        use crate::node_versions::{key, ours};
+        let mut c = Cluster::new();
+        c.found();
+        c.run_until(|c| c.logic(1).view().bootstrapped);
+        c.join_node(1, 2);
+        c.run_until(|c| c.logic(2).view().bootstrapped);
+        let recorded = |c: &mut Cluster, n: u64| {
+            let sm = c.logic(1).group0().cloned();
+            sm.and_then(|sm| sm.settings.get(&key(NodeId(n))).cloned()) == Some(ours())
+        };
+        assert!(!recorded(&mut c, 2), "a node that does not know itself records nothing");
+        // Started as a node does, knowing who it is: it records them through Group 0's leader.
+        c.restart(2, &addr(2));
+        c.run_until(|c| recorded(c, 2));
+        assert!(forward_allowed(
+            &Group0Command::SetSetting { key: key(NodeId(2)), value: ours() },
+            NodeId(2)
+        ));
+        assert!(!forward_allowed(
+            &Group0Command::SetSetting { key: key(NodeId(1)), value: ours() },
+            NodeId(2)
+        ));
     }
 
     #[test]

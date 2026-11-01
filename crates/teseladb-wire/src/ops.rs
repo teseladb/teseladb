@@ -461,6 +461,10 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         self.call(|b| b.write_gate())
     }
 
+    fn fcv_limit(&mut self) -> Result<Option<String>, CommandError> {
+        self.call(|b| b.fcv_limit())
+    }
+
     fn scan(
         &mut self,
         start: &[u8],

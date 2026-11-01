@@ -299,9 +299,20 @@ pub fn get_parameter<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Docume
     let details = matches!(ctx.first(), Value::Document(d)
         if d.get("showDetails").and_then(crate::types::truthy) == Some(true));
     let all = matches!(ctx.first(), Value::String(s) if s == ALL);
+    // The cluster's feature compatibility version, as a `refnode` shows it (007 FR-027), in its
+    // place by name.
+    let mut fcv = match all || ctx.cmd.get(super::fcv::FCV).is_some() {
+        true => Some(super::fcv::shown(ctx.backend)?),
+        false => None,
+    };
     let g = lock(ctx.shared);
     let mut out = Document::new();
     for (name, runtime, startup) in KNOWN {
+        if name > super::fcv::FCV
+            && let Some(v) = fcv.take()
+        {
+            out.insert(super::fcv::FCV, v);
+        }
         if !all && ctx.cmd.get(name).is_none() {
             continue;
         }
@@ -316,6 +327,10 @@ pub fn get_parameter<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Docume
             false => v,
         };
         out.insert(name, v);
+    }
+    drop(g);
+    if let Some(v) = fcv {
+        out.insert(super::fcv::FCV, v);
     }
     if out.is_empty() {
         return Err(CommandError::new(INVALID_OPTIONS, "no option found to get"));
