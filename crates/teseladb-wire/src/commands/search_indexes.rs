@@ -9,6 +9,8 @@ use teseladb_bson::{Document, Value};
 use teseladb_meta::catalog::{CollectionEntry, Namespace};
 use teseladb_meta::indexes::{IndexCommand, SearchIndexEntry, SearchIndexKind, SearchIndexStatus};
 
+use teseladb_search::definition::{Definition, DefinitionError, VectorDefinition};
+
 use super::{Backend, Ctx, args, names, views};
 use crate::error::{
     COMMAND_FAILED, CommandError, INDEX_ALREADY_EXISTS, INDEX_NOT_FOUND, INVALID_NAMESPACE,
@@ -35,9 +37,6 @@ const NAME: &str = "name";
 const ID: &str = "id";
 const TYPE: &str = "type";
 const DEFINITION: &str = "definition";
-const MAPPINGS: &str = "mappings";
-const DYNAMIC: &str = "dynamic";
-const FIELDS: &str = "fields";
 /// How `refsearch` names the command in its errors.
 const USER_COMMAND: &str = "userCommand";
 /// The error when both `name` and `id` are given.
@@ -164,23 +163,20 @@ fn not_found(which: &Pick, ns: &Namespace) -> CommandError {
     )
 }
 
-/// The first problem of a definition of type `kind`: the path of the field inside the
-/// definition and what is wrong with it, as `refsearch` words them.
-fn check_definition(kind: SearchIndexKind, def: &Document) -> Option<(String, &'static str)> {
+/// The first problem of a definition of type `kind`, as `refsearch` finds it.
+fn check_definition(kind: SearchIndexKind, def: &Document) -> Result<(), DefinitionError> {
     match kind {
-        SearchIndexKind::Search => match def.get(MAPPINGS) {
-            None => Some((MAPPINGS.to_owned(), "is required")),
-            Some(Value::Document(m)) => match m.get(DYNAMIC) {
-                None | Some(Value::Boolean(_) | Value::Document(_)) => None,
-                Some(_) => Some((format!("{MAPPINGS}.{DYNAMIC}"), "must be a boolean or document")),
-            },
-            Some(_) => Some((MAPPINGS.to_owned(), "must be a document")),
-        },
-        SearchIndexKind::VectorSearch => match def.get(FIELDS) {
-            None => Some((FIELDS.to_owned(), "is required")),
-            Some(Value::Array(_)) => None,
-            Some(_) => Some((FIELDS.to_owned(), "must be an array")),
-        },
+        SearchIndexKind::Search => Definition::parse(def).map(|_| ()),
+        SearchIndexKind::VectorSearch => VectorDefinition::parse(def).map(|_| ()),
+    }
+}
+
+/// The error of a wrong definition: a shape error is `UnknownError` with the path behind
+/// `prefix` when creating, a missing analyzer and any error when updating are `CommandFailed`.
+fn definition_error(e: &DefinitionError, prefix: Option<&str>) -> CommandError {
+    match (e, prefix) {
+        (DefinitionError::Shape { .. }, Some(p)) => CommandError::new(UNKNOWN_ERROR, e.message(p)),
+        (_, p) => CommandError::new(COMMAND_FAILED, e.message(p.unwrap_or(""))),
     }
 }
 
@@ -216,10 +212,8 @@ fn wanted(i: usize, v: &Value) -> Result<Wanted, CommandError> {
             return Err(CommandError::new(UNKNOWN_ERROR, msg));
         }
     };
-    if let Some((at, what)) = check_definition(kind, definition) {
-        let msg = format!("\"userCommand.{INDEXES}[{i}].{at}\" {what}");
-        return Err(CommandError::new(UNKNOWN_ERROR, msg));
-    }
+    let prefix = format!("{USER_COMMAND}.{INDEXES}[{i}].");
+    check_definition(kind, definition).map_err(|e| definition_error(&e, Some(&prefix)))?;
     Ok(Wanted { name, kind, definition: definition.clone() })
 }
 
@@ -358,9 +352,7 @@ pub fn update<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
     let which = pick(ctx.cmd, UPDATE_SEARCH_INDEX, USER_COMMAND, BOTH)?
         .ok_or_else(|| CommandError::new(INVALID_OPTIONS, "Must set either 'name' or 'id'."))?;
     let e = find(ctx.backend, &t, &which)?;
-    if let Some((at, what)) = check_definition(e.kind, definition) {
-        return Err(CommandError::new(COMMAND_FAILED, format!("\"{at}\" {what}")));
-    }
+    check_definition(e.kind, definition).map_err(|e| definition_error(&e, None))?;
     let at_ms = i64::try_from(ctx.backend.now_ms()).unwrap_or(i64::MAX);
     ctx.backend.index_write(IndexCommand::UpdateSearch {
         at_ms,
@@ -416,24 +408,5 @@ mod tests {
         assert_eq!(hex_id(&id), "6ae78b5a64236d09bf4d2903");
         assert_eq!(parse_id("abc"), None);
         assert_eq!(parse_id("6ae78b5a64236d09bf4d29zz"), None);
-    }
-
-    #[test]
-    fn definitions_are_checked_as_refsearch_words_it() {
-        let d = |v: Value| Document::new().with(MAPPINGS, v);
-        assert_eq!(check_definition(SearchIndexKind::Search, &d(Document::new().into())), None);
-        assert_eq!(
-            check_definition(SearchIndexKind::Search, &Document::new()),
-            Some((MAPPINGS.to_owned(), "is required"))
-        );
-        let bad = Document::new().with(DYNAMIC, "x");
-        assert_eq!(
-            check_definition(SearchIndexKind::Search, &d(bad.into())),
-            Some(("mappings.dynamic".to_owned(), "must be a boolean or document"))
-        );
-        assert_eq!(
-            check_definition(SearchIndexKind::VectorSearch, &d(Document::new().into())),
-            Some((FIELDS.to_owned(), "is required"))
-        );
     }
 }

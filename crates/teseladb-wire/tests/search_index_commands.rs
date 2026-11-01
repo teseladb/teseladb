@@ -218,6 +218,16 @@ fn create_refuses_what_refsearch_refuses() {
     for (cmd, code, msg) in cases {
         assert_eq!(error(&m.run(DB, cmd.clone())), (code, msg.to_owned()), "{cmd:?}");
     }
+    let wrong = Document::new()
+        .with("type", "string")
+        .with("analyzer", "nope1")
+        .with("searchAnalyzer", "nope2");
+    let def = Document::new()
+        .with("mappings", Document::new().with("fields", Document::new().with("t", wrong)));
+    assert_eq!(
+        error(&create(&mut m, "c", vec![index("an", def)])),
+        (125, "references non-existent analyzers: nope1, nope2".to_owned())
+    );
     let r = create(&mut m, "c", vec![]);
     assert_eq!(field(&r, "indexesCreated"), &Value::Array(vec![]));
 }
