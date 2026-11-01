@@ -187,3 +187,97 @@ fn an_update_gives_a_meta_value_to_measurements_without_one() {
         .collect();
     assert_eq!(b, &want, "{r:?}");
 }
+
+/// Partial filters of a time series index as a `refnode` 9.0.4 translates them to the buckets
+/// (`listIndexes` with `rawData`) or refuses them, measured on 01-11-2026.
+#[test]
+fn partial_filters_translate_to_the_buckets_as_refdb_does() {
+    let d = |ms: i64| format!(r#"{{"$date":{{"$numberLong":"{ms}"}}}}"#);
+    let translated = [
+        (
+            r#"{"x":{"$exists":true}}"#.to_owned(),
+            r#"{"$and":[{"control.min.x":{"$exists":true}},{"control.max.x":{"$exists":true}}]}"#
+                .to_owned(),
+        ),
+        (r#"{"m":{"a":1}}"#.to_owned(), r#"{"meta":{"$eq":{"a":1}}}"#.to_owned()),
+        (
+            format!(r#"{{"x":{{"$gte":{}}}}}"#, d(1000)),
+            format!(r#"{{"control.max.x":{{"$_internalExprGte":{}}}}}"#, d(1000)),
+        ),
+        (
+            r#"{"$and":[{"x":{"$gt":1}},{"y":{"$lt":2}}]}"#.to_owned(),
+            r#"{"$and":[{"control.max.x":{"$_internalExprGt":1}},{"control.min.y":{"$_internalExprLt":2}}]}"#.to_owned(),
+        ),
+        (
+            r#"{"$or":[{"x":{"$gt":1}},{"m":2}]}"#.to_owned(),
+            r#"{"$or":[{"control.max.x":{"$_internalExprGt":1}},{"meta":{"$eq":2}}]}"#.to_owned(),
+        ),
+        (r#"{"m":{"$in":[1,2]}}"#.to_owned(), r#"{"meta":{"$in":[1,2]}}"#.to_owned()),
+        (
+            r#"{"x":{"$in":[1,2]}}"#.to_owned(),
+            r#"{"$or":[{"$and":[{"control.min.x":{"$_internalExprLte":1}},{"control.max.x":{"$_internalExprGte":1}}]},{"$and":[{"control.min.x":{"$_internalExprLte":2}},{"control.max.x":{"$_internalExprGte":2}}]}]}"#.to_owned(),
+        ),
+        (
+            format!(r#"{{"t":{{"$gt":{}}}}}"#, d(1000)),
+            format!(
+                r#"{{"$and":[{{"control.max.t":{{"$_internalExprGt":{}}}}},{{"control.min.t":{{"$_internalExprGt":{}}}}}]}}"#,
+                d(1000),
+                d(1000 - 3_600_000)
+            ),
+        ),
+    ];
+    let refused = [
+        (r#"{"x":{"$gte":null}}"#, "can't handle comparison to null: { x: { $gte: null } }"),
+        (r#"{"x":{"$gt":null}}"#, "can't handle comparison to null: { x: { $gt: null } }"),
+        (r#"{"x":{"$lt":null}}"#, "can't handle comparison to null: { x: { $lt: null } }"),
+        (r#"{"x":{"$lte":null}}"#, "can't handle comparison to null: { x: { $lte: null } }"),
+        (
+            r#"{"x":{"$lt":5,"$gte":null}}"#,
+            "can't handle comparison to null: { x: { $gte: null } }",
+        ),
+        (
+            r#"{"x":{"$exists":false}}"#,
+            "can't handle this predicate: { x: { $not: { $exists: true } } }",
+        ),
+        (
+            r#"{"x":{"$in":[null]}}"#,
+            "can't handle {$eq: null} predicate (inside $in predicate): { x: { $in: [ null ] } }",
+        ),
+    ];
+    let create = |pf: &str| {
+        let mut m = Mem::new();
+        series(&mut m, "ts");
+        let r = run(
+            &mut m,
+            &format!(
+                r#"{{"createIndexes":"ts","indexes":[{{"key":{{"m":1,"z":1}},"name":"z","partialFilterExpression":{pf}}}]}}"#
+            ),
+        );
+        (m, r)
+    };
+    for (pf, want) in &translated {
+        let (mut m, r) = create(pf);
+        assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{pf}: {r:?}");
+        let r = run(&mut m, r#"{"listIndexes":"ts","rawData":true}"#);
+        let Value::Array(b) = field(&r, "cursor.firstBatch") else { panic!("{r:?}") };
+        let z = b
+            .iter()
+            .find_map(|x| match x {
+                Value::Document(x) if x.get("name") == Some(&Value::from("z")) => Some(x.clone()),
+                _ => None,
+            })
+            .expect("index z");
+        assert_eq!(field(&z, "partialFilterExpression"), &Value::Document(json(want)), "{pf}");
+    }
+    for (pf, msg) in refused {
+        let (_, r) = create(pf);
+        assert_eq!(r.get("code"), Some(&Value::Int32(5_916_301)), "{pf}: {r:?}");
+        assert_eq!(
+            field(&r, "errmsg"),
+            &Value::String(format!(
+                "Error translating non-metadata time-series predicate to operate on buckets: {msg}"
+            )),
+            "{pf}"
+        );
+    }
+}
