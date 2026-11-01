@@ -43,6 +43,8 @@ pub struct Mem {
     /// The kills sent to the other nodes; with `Some`, the next one fails with that error.
     pub killed: Vec<KillScope>,
     pub fail_kill: Option<CommandError>,
+    /// The operations of the other nodes of the cluster, as each node describes its own.
+    pub other_ops: Vec<Document>,
     /// Milliseconds the clock moves with each read of the range.
     pub tick: u64,
     /// The users and passwords the LDAP server of the node takes (013 PLAIN).
@@ -638,6 +640,10 @@ impl Backend for Mem {
         Ok(())
     }
 
+    fn other_operations(&mut self) -> Result<Vec<Document>, CommandError> {
+        Ok(self.other_ops.clone())
+    }
+
     fn cluster_parameters(&mut self) -> Result<BTreeMap<String, Vec<u8>>, CommandError> {
         Ok(self.params.clone())
     }
@@ -794,6 +800,14 @@ impl Backend for Mem {
 
     fn log_warning(&mut self, id: i32, msg: &str, attr: &Document) {
         self.logged.push((id, msg.to_owned(), attr.clone()));
+    }
+
+    fn log_slow_query(&mut self, attr: &Document) {
+        self.logged.push((
+            teseladb_wire::commands::profile::SLOW_QUERY_ID,
+            "Slow query".to_owned(),
+            attr.clone(),
+        ));
     }
 
     fn process(&mut self) -> teseladb_wire::commands::diagnostics::ProcessFacts {

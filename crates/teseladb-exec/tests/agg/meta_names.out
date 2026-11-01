@@ -1,0 +1,109 @@
+[{"$project":{"s":{"$meta":"textScore"}}},{"$limit":1}]	!! 40218	query requires text score metadata, but it is not available
+[{"$addFields":{"s":{"$meta":"textScore"}}},{"$limit":1}]	!! 40218	query requires text score metadata, but it is not available
+[{"$sort":{"s":{"$meta":"textScore"}}},{"$limit":1}]	!! 40218	query requires text score metadata, but it is not available
+[{"$match":{"$expr":{"$eq":[{"$meta":"textScore"},1]}}}]	!! 40218	query requires text score metadata, but it is not available
+[{"$group":{"_id":null,"s":{"$max":{"$meta":"textScore"}}}}]	!! 40218	query requires text score metadata, but it is not available
+[{"$project":{"s":{"$meta":"randVal"}}},{"$limit":1}]	=> [{"_id":{"$numberInt":"1"}}]
+[{"$addFields":{"s":{"$meta":"randVal"}}},{"$limit":1}]	=> [{"_id":{"$numberInt":"1"},"g":"a","n":{"$numberInt":"5"},"x":{"$numberDouble":"1.5"},"t":["red","green"],"d":{"$date":{"$numberLong":"1214870400000"}},"o":{"k":{"$numberInt":"1"},"v":[{"$numberInt":"1"},{"$numberInt":"2"}]}}]
+[{"$sort":{"s":{"$meta":"randVal"}}},{"$limit":1}]	=> [{"_id":{"$numberInt":"1"},"g":"a","n":{"$numberInt":"5"},"x":{"$numberDouble":"1.5"},"s":"apple","t":["red","green"],"d":{"$date":{"$numberLong":"1214870400000"}},"o":{"k":{"$numberInt":"1"},"v":[{"$numberInt":"1"},{"$numberInt":"2"}]}}]
+[{"$match":{"$expr":{"$eq":[{"$meta":"randVal"},1]}}}]	=> []
+[{"$group":{"_id":null,"s":{"$max":{"$meta":"randVal"}}}}]	=> [{"_id":null,"s":null}]
+[{"$project":{"s":{"$meta":"searchScore"}}},{"$limit":1}]	!! 40218	query requires $search score metadata, but it is not available
+[{"$addFields":{"s":{"$meta":"searchScore"}}},{"$limit":1}]	!! 40218	query requires $search score metadata, but it is not available
+[{"$sort":{"s":{"$meta":"searchScore"}}},{"$limit":1}]	!! 40218	query requires $search score metadata, but it is not available
+[{"$match":{"$expr":{"$eq":[{"$meta":"searchScore"},1]}}}]	!! 40218	query requires $search score metadata, but it is not available
+[{"$group":{"_id":null,"s":{"$max":{"$meta":"searchScore"}}}}]	!! 40218	query requires $search score metadata, but it is not available
+[{"$project":{"s":{"$meta":"searchHighlights"}}},{"$limit":1}]	=> [{"_id":{"$numberInt":"1"}}]
+[{"$addFields":{"s":{"$meta":"searchHighlights"}}},{"$limit":1}]	=> [{"_id":{"$numberInt":"1"},"g":"a","n":{"$numberInt":"5"},"x":{"$numberDouble":"1.5"},"t":["red","green"],"d":{"$date":{"$numberLong":"1214870400000"}},"o":{"k":{"$numberInt":"1"},"v":[{"$numberInt":"1"},{"$numberInt":"2"}]}}]
+[{"$sort":{"s":{"$meta":"searchHighlights"}}},{"$limit":1}]	!! 31138	Illegal $meta sort: $meta: "searchHighlights"
+[{"$match":{"$expr":{"$eq":[{"$meta":"searchHighlights"},1]}}}]	=> []
+[{"$group":{"_id":null,"s":{"$max":{"$meta":"searchHighlights"}}}}]	=> [{"_id":null,"s":null}]
+[{"$project":{"s":{"$meta":"geoNearDistance"}}},{"$limit":1}]	!! 40218	query requires $geoNear distance metadata, but it is not available
+[{"$addFields":{"s":{"$meta":"geoNearDistance"}}},{"$limit":1}]	!! 40218	query requires $geoNear distance metadata, but it is not available
+[{"$sort":{"s":{"$meta":"geoNearDistance"}}},{"$limit":1}]	!! 40218	query requires $geoNear distance metadata, but it is not available
+[{"$match":{"$expr":{"$eq":[{"$meta":"geoNearDistance"},1]}}}]	!! 40218	query requires $geoNear distance metadata, but it is not available
+[{"$group":{"_id":null,"s":{"$max":{"$meta":"geoNearDistance"}}}}]	!! 40218	query requires $geoNear distance metadata, but it is not available
+[{"$project":{"s":{"$meta":"geoNearPoint"}}},{"$limit":1}]	!! 40218	query requires $geoNear point metadata, but it is not available
+[{"$addFields":{"s":{"$meta":"geoNearPoint"}}},{"$limit":1}]	!! 40218	query requires $geoNear point metadata, but it is not available
+[{"$sort":{"s":{"$meta":"geoNearPoint"}}},{"$limit":1}]	!! 31138	Illegal $meta sort: $meta: "geoNearPoint"
+[{"$match":{"$expr":{"$eq":[{"$meta":"geoNearPoint"},1]}}}]	!! 40218	query requires $geoNear point metadata, but it is not available
+[{"$group":{"_id":null,"s":{"$max":{"$meta":"geoNearPoint"}}}}]	!! 40218	query requires $geoNear point metadata, but it is not available
+[{"$match":{"$expr":{"$eq":[{"$meta":"recordId"},1]}}}]	=> []
+[{"$project":{"s":{"$meta":"indexKey"}}},{"$limit":1}]	=> [{"_id":{"$numberInt":"1"}}]
+[{"$addFields":{"s":{"$meta":"indexKey"}}},{"$limit":1}]	=> [{"_id":{"$numberInt":"1"},"g":"a","n":{"$numberInt":"5"},"x":{"$numberDouble":"1.5"},"t":["red","green"],"d":{"$date":{"$numberLong":"1214870400000"}},"o":{"k":{"$numberInt":"1"},"v":[{"$numberInt":"1"},{"$numberInt":"2"}]}}]
+[{"$sort":{"s":{"$meta":"indexKey"}}},{"$limit":1}]	!! 31138	Illegal $meta sort: $meta: "indexKey"
+[{"$match":{"$expr":{"$eq":[{"$meta":"indexKey"},1]}}}]	=> []
+[{"$group":{"_id":null,"s":{"$max":{"$meta":"indexKey"}}}}]	=> [{"_id":null,"s":null}]
+[{"$project":{"s":{"$meta":"sortKey"}}},{"$limit":1}]	=> [{"_id":{"$numberInt":"1"},"s":[]}]
+[{"$addFields":{"s":{"$meta":"sortKey"}}},{"$limit":1}]	=> [{"_id":{"$numberInt":"1"},"g":"a","n":{"$numberInt":"5"},"x":{"$numberDouble":"1.5"},"s":[],"t":["red","green"],"d":{"$date":{"$numberLong":"1214870400000"}},"o":{"k":{"$numberInt":"1"},"v":[{"$numberInt":"1"},{"$numberInt":"2"}]}}]
+[{"$sort":{"s":{"$meta":"sortKey"}}},{"$limit":1}]	!! 31138	Illegal $meta sort: $meta: "sortKey"
+[{"$match":{"$expr":{"$eq":[{"$meta":"sortKey"},1]}}}]	=> []
+[{"$group":{"_id":null,"s":{"$max":{"$meta":"sortKey"}}}}]	=> [{"_id":null,"s":[]}]
+[{"$project":{"s":{"$meta":"searchScoreDetails"}}},{"$limit":1}]	=> [{"_id":{"$numberInt":"1"}}]
+[{"$addFields":{"s":{"$meta":"searchScoreDetails"}}},{"$limit":1}]	=> [{"_id":{"$numberInt":"1"},"g":"a","n":{"$numberInt":"5"},"x":{"$numberDouble":"1.5"},"t":["red","green"],"d":{"$date":{"$numberLong":"1214870400000"}},"o":{"k":{"$numberInt":"1"},"v":[{"$numberInt":"1"},{"$numberInt":"2"}]}}]
+[{"$sort":{"s":{"$meta":"searchScoreDetails"}}},{"$limit":1}]	!! 31138	Illegal $meta sort: $meta: "searchScoreDetails"
+[{"$match":{"$expr":{"$eq":[{"$meta":"searchScoreDetails"},1]}}}]	=> []
+[{"$group":{"_id":null,"s":{"$max":{"$meta":"searchScoreDetails"}}}}]	=> [{"_id":null,"s":null}]
+[{"$project":{"s":{"$meta":"searchSequenceToken"}}},{"$limit":1}]	=> [{"_id":{"$numberInt":"1"}}]
+[{"$addFields":{"s":{"$meta":"searchSequenceToken"}}},{"$limit":1}]	=> [{"_id":{"$numberInt":"1"},"g":"a","n":{"$numberInt":"5"},"x":{"$numberDouble":"1.5"},"t":["red","green"],"d":{"$date":{"$numberLong":"1214870400000"}},"o":{"k":{"$numberInt":"1"},"v":[{"$numberInt":"1"},{"$numberInt":"2"}]}}]
+[{"$sort":{"s":{"$meta":"searchSequenceToken"}}},{"$limit":1}]	!! 31138	Illegal $meta sort: $meta: "searchSequenceToken"
+[{"$match":{"$expr":{"$eq":[{"$meta":"searchSequenceToken"},1]}}}]	=> []
+[{"$group":{"_id":null,"s":{"$max":{"$meta":"searchSequenceToken"}}}}]	=> [{"_id":null,"s":null}]
+[{"$project":{"s":{"$meta":"vectorSearchScore"}}},{"$limit":1}]	!! 40218	query requires $vectorSearch score metadata, but it is not available
+[{"$addFields":{"s":{"$meta":"vectorSearchScore"}}},{"$limit":1}]	!! 40218	query requires $vectorSearch score metadata, but it is not available
+[{"$sort":{"s":{"$meta":"vectorSearchScore"}}},{"$limit":1}]	!! 40218	query requires $vectorSearch score metadata, but it is not available
+[{"$match":{"$expr":{"$eq":[{"$meta":"vectorSearchScore"},1]}}}]	!! 40218	query requires $vectorSearch score metadata, but it is not available
+[{"$group":{"_id":null,"s":{"$max":{"$meta":"vectorSearchScore"}}}}]	!! 40218	query requires $vectorSearch score metadata, but it is not available
+[{"$project":{"s":{"$meta":"score"}}},{"$limit":1}]	!! 40218	query requires score metadata, but it is not available
+[{"$addFields":{"s":{"$meta":"score"}}},{"$limit":1}]	!! 40218	query requires score metadata, but it is not available
+[{"$sort":{"s":{"$meta":"score"}}},{"$limit":1}]	!! 40218	query requires score metadata, but it is not available
+[{"$match":{"$expr":{"$eq":[{"$meta":"score"},1]}}}]	!! 40218	query requires score metadata, but it is not available
+[{"$group":{"_id":null,"s":{"$max":{"$meta":"score"}}}}]	!! 40218	query requires score metadata, but it is not available
+[{"$project":{"s":{"$meta":"scoreDetails"}}},{"$limit":1}]	!! 40218	query requires scoreDetails metadata, but it is not available
+[{"$addFields":{"s":{"$meta":"scoreDetails"}}},{"$limit":1}]	!! 40218	query requires scoreDetails metadata, but it is not available
+[{"$sort":{"s":{"$meta":"scoreDetails"}}},{"$limit":1}]	!! 31138	Illegal $meta sort: $meta: "scoreDetails"
+[{"$match":{"$expr":{"$eq":[{"$meta":"scoreDetails"},1]}}}]	!! 40218	query requires scoreDetails metadata, but it is not available
+[{"$group":{"_id":null,"s":{"$max":{"$meta":"scoreDetails"}}}}]	!! 40218	query requires scoreDetails metadata, but it is not available
+[{"$project":{"s":{"$meta":"searchRootDocumentId"}}},{"$limit":1}]	!! 40218	query requires $search root document id metadata, but it is not available
+[{"$addFields":{"s":{"$meta":"searchRootDocumentId"}}},{"$limit":1}]	!! 40218	query requires $search root document id metadata, but it is not available
+[{"$sort":{"s":{"$meta":"searchRootDocumentId"}}},{"$limit":1}]	!! 31138	Illegal $meta sort: $meta: "searchRootDocumentId"
+[{"$match":{"$expr":{"$eq":[{"$meta":"searchRootDocumentId"},1]}}}]	!! 40218	query requires $search root document id metadata, but it is not available
+[{"$group":{"_id":null,"s":{"$max":{"$meta":"searchRootDocumentId"}}}}]	!! 40218	query requires $search root document id metadata, but it is not available
+[{"$project":{"s":{"$meta":"stream"}}},{"$limit":1}]	!! 9692105	Unsupported $meta field: stream
+[{"$addFields":{"s":{"$meta":"stream"}}},{"$limit":1}]	!! 9692105	Unsupported $meta field: stream
+[{"$sort":{"s":{"$meta":"stream"}}},{"$limit":1}]	!! 31138	Illegal $meta sort: $meta: "stream"
+[{"$match":{"$expr":{"$eq":[{"$meta":"stream"},1]}}}]	!! 9692105	Unsupported $meta field: stream
+[{"$group":{"_id":null,"s":{"$max":{"$meta":"stream"}}}}]	!! 9692105	Unsupported $meta field: stream
+[{"$project":{"s":{"$meta":"changeStreamControlEvent"}}},{"$limit":1}]	=> [{"_id":{"$numberInt":"1"},"s":false}]
+[{"$addFields":{"s":{"$meta":"changeStreamControlEvent"}}},{"$limit":1}]	=> [{"_id":{"$numberInt":"1"},"g":"a","n":{"$numberInt":"5"},"x":{"$numberDouble":"1.5"},"s":false,"t":["red","green"],"d":{"$date":{"$numberLong":"1214870400000"}},"o":{"k":{"$numberInt":"1"},"v":[{"$numberInt":"1"},{"$numberInt":"2"}]}}]
+[{"$sort":{"s":{"$meta":"changeStreamControlEvent"}}},{"$limit":1}]	!! 31138	Illegal $meta sort: $meta: "changeStreamControlEvent"
+[{"$match":{"$expr":{"$eq":[{"$meta":"changeStreamControlEvent"},1]}}}]	=> []
+[{"$group":{"_id":null,"s":{"$max":{"$meta":"changeStreamControlEvent"}}}}]	=> [{"_id":null,"s":false}]
+[{"$project":{"s":{"$meta":"bogus"}}},{"$limit":1}]	!! 17308	Unsupported $meta field: bogus
+[{"$addFields":{"s":{"$meta":"bogus"}}},{"$limit":1}]	!! 17308	Unsupported $meta field: bogus
+[{"$sort":{"s":{"$meta":"bogus"}}},{"$limit":1}]	!! 31138	Illegal $meta sort: $meta: "bogus"
+[{"$match":{"$expr":{"$eq":[{"$meta":"bogus"},1]}}}]	!! 17308	Unsupported $meta field: bogus
+[{"$group":{"_id":null,"s":{"$max":{"$meta":"bogus"}}}}]	!! 17308	Unsupported $meta field: bogus
+[{"$sort":{"n":1}},{"$project":{"s":{"$meta":"sortKey"}}},{"$limit":2}]	=> [{"_id":{"$numberInt":"5"},"s":[{"$numberInt":"-1"}]},{"_id":{"$numberInt":"7"},"s":[{"$numberInt":"0"}]}]
+[{"$sort":{"n":1,"_id":-1}},{"$project":{"s":{"$meta":"sortKey"}}},{"$limit":2}]	=> [{"_id":{"$numberInt":"5"},"s":[{"$numberInt":"-1"},{"$numberInt":"5"}]},{"_id":{"$numberInt":"7"},"s":[{"$numberInt":"0"},{"$numberInt":"7"}]}]
+[{"$sort":{"n":1}},{"$group":{"_id":null,"s":{"$max":{"$meta":"sortKey"}}}}]	=> [{"_id":null,"s":["10"]}]
+[{"$sort":{"n":1}},{"$project":{"n":1}},{"$project":{"s":{"$meta":"sortKey"}}},{"$limit":2}]	=> [{"_id":{"$numberInt":"5"},"s":[{"$numberInt":"-1"}]},{"_id":{"$numberInt":"7"},"s":[{"$numberInt":"0"}]}]
+[{"$match":{"g":"a"}},{"$project":{"s":{"$meta":"textScore"}}}]	!! 40218	query requires text score metadata, but it is not available
+[{"$group":{"_id":"$g"}},{"$project":{"s":{"$meta":"textScore"}}}]	!! 40218	query requires text score metadata, but it is not available
+[{"$facet":{"a":[{"$project":{"s":{"$meta":"textScore"}}}]}}]	!! 40218	query requires text score metadata, but it is not available
+[{"$lookup":{"from":"o","pipeline":[{"$project":{"s":{"$meta":"textScore"}}}],"as":"j"}}]	!! 40218	query requires text score metadata, but it is not available
+[{"$unionWith":{"coll":"o","pipeline":[{"$project":{"s":{"$meta":"geoNearDistance"}}}]}}]	!! 40218	query requires $geoNear distance metadata, but it is not available
+[{"$project":{"s":{"$meta":"geoNearDistance"}}},{"$limit":0}]	!! 15958	the limit must be positive
+[{"$limit":1},{"$project":{"s":{"$meta":"searchScore"}}}]	!! 40218	query requires $search score metadata, but it is not available
+[{"$score":{"score":"$_id"}},{"$project":{"s":{"$meta":"searchScore"}}},{"$limit":1}]	!! 40218	query requires $search score metadata, but it is not available
+[{"$score":{"score":"$_id"}},{"$project":{"s":{"$meta":"vectorSearchScore"}}},{"$limit":1}]	!! 40218	query requires $vectorSearch score metadata, but it is not available
+[{"$score":{"score":"$_id"}},{"$project":{"s":{"$meta":"textScore"}}},{"$limit":1}]	!! 40218	query requires text score metadata, but it is not available
+[{"$score":{"score":"$_id","scoreDetails":true}},{"$project":{"s":{"$meta":"searchScoreDetails"}}},{"$limit":1}]	=> [{"_id":{"$numberInt":"1"}}]
+[{"$sort":{"s":{"$meta":"randVal"},"_id":-1}},{"$project":{"_id":1}},{"$limit":2}]	=> [{"_id":{"$numberInt":"8"}},{"_id":{"$numberInt":"7"}}]
+[{"$sort":{"s":{"$meta":"textScore"}}},{"$limit":0}]	!! 15958	the limit must be positive
+[{"$redact":{"$cond":[{"$eq":[{"$meta":"textScore"},1]},"$$KEEP","$$PRUNE"]}}]	=> []
+[{"$bucket":{"groupBy":{"$meta":"geoNearDistance"},"boundaries":[0,1]}}]	!! 40218	query requires $geoNear distance metadata, but it is not available
+[{"$setWindowFields":{"sortBy":{"s":{"$meta":"textScore"}},"output":{"c":{"$count":{}}}}}]	!! 40218	query requires text score metadata, but it is not available
+[{"$setWindowFields":{"sortBy":{"s":{"$meta":"recordId"}},"output":{"c":{"$count":{}}}}}]	!! 31138	Illegal $meta sort: $meta: "recordId"
+[{"$group":{"_id":null,"t":{"$top":{"sortBy":{"s":{"$meta":"textScore"}},"output":"$_id"}}}}]	!! 40218	query requires text score metadata, but it is not available
+[{"$group":{"_id":null,"t":{"$top":{"sortBy":{"s":{"$meta":"recordId"}},"output":"$_id"}}}}]	!! 31138	Illegal $meta sort: $meta: "recordId"

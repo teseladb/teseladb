@@ -47,14 +47,25 @@ pub fn check(ns: &Namespace) -> Result<(), CommandError> {
     Ok(())
 }
 
+/// Faults of `db.coll` that fail `create`: those of the writes, but a client may create
+/// `system.profile` to size the profiler's collection (measured on a `refrouter` 9.0.4).
+pub fn check_creatable(ns: &Namespace) -> Result<(), CommandError> {
+    check_name(ns, ns.coll != SYSTEM_PROFILE)
+}
+
 /// Faults of `db.coll` that fail the writes to it (and the commands that create it).
 pub fn check_writable(ns: &Namespace) -> Result<(), CommandError> {
+    check_name(ns, true)
+}
+
+/// Faults of `db.coll`'s name; a `system.` collection is one when `system` says so.
+fn check_name(ns: &Namespace, system: bool) -> Result<(), CommandError> {
     let full = format!("{}.{}", ns.db, ns.coll);
     if ns.coll.contains('$') {
         let msg = format!("Invalid collection name: {}", ns.coll);
         return Err(CommandError::new(INVALID_NAMESPACE, msg));
     }
-    if ns.coll.starts_with(SYSTEM_PREFIX) {
+    if system && ns.coll.starts_with(SYSTEM_PREFIX) {
         return Err(CommandError::new(
             INVALID_NAMESPACE,
             format!("Invalid system namespace: {full}"),

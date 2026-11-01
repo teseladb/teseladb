@@ -45,6 +45,7 @@ pub mod parameters;
 pub mod partial_filter;
 pub(crate) mod plan_cache;
 pub(crate) mod plan_exec;
+pub mod profile;
 pub mod query;
 pub mod registry;
 pub mod roles;
@@ -252,6 +253,11 @@ pub trait Backend {
     fn kill_everywhere(&mut self, _scope: &session::KillScope) -> Result<(), CommandError> {
         Ok(())
     }
+    /// The operations in progress on the other nodes of the cluster, as `currentOp` describes
+    /// them ([`admin::node_operations`], 010 T033); a node alone has no others.
+    fn other_operations(&mut self) -> Result<Vec<Document>, CommandError> {
+        Ok(Vec::new())
+    }
     /// The documents of collection `coll` of `config` that the node generates from its copy of
     /// Group 0 (007 FR-017, [`config_db`]); a backend without a cluster has none.
     fn config_documents(&mut self, _coll: &str) -> Result<Vec<Document>, CommandError> {
@@ -430,6 +436,9 @@ pub trait Backend {
     /// Writes a warning line of the node's log, with RefDb's identifier `id`, its message and
     /// its attributes (the validation lines of `warn` and `errorAndLog`).
     fn log_warning(&mut self, id: i32, msg: &str, attr: &Document);
+    /// Writes a «Slow query» line of the node's log (RefDb's identifier 51803, severity I) with
+    /// attributes `attr` (010 FR-015).
+    fn log_slow_query(&mut self, attr: &Document);
     /// Loads the node's certificates again (`rotateCertificates`, 013 FR-006): the new TLS
     /// settings serve the connections that come after, and on failure the old ones stay. A node
     /// without TLS has nothing to load. Every backend says what it does, so that a wrapper cannot
@@ -535,6 +544,8 @@ pub struct NodeSessions {
     pub object_ids: ObjectIds,
     /// The plans the node's reads chose, by shape (010 FR-002).
     pub plan_cache: plan_cache::PlanCache,
+    /// The profiler's settings (010 FR-015).
+    pub profiler: profile::Profiler,
 }
 
 /// What a node puts after the seconds of each ObjectId it makes (ObjectId specification): five
@@ -574,6 +585,7 @@ impl NodeSessions {
             cursors: CursorTable::with_timeout(t.cursor_ms),
             sessions: SessionTable::with_timeout(t.session_ms),
             failpoint: None,
+            profiler: profile::Profiler::default(),
             ops: OpTable::default(),
             counters: diagnostics::OpCounters::default(),
             status: status::StatusCounters::default(),
@@ -656,7 +668,7 @@ impl<B: Backend + ?Sized> Ctx<'_, B> {
 }
 
 /// The commands of this module.
-const NAMES: [&str; 65] = [
+const NAMES: [&str; 66] = [
     aggregate::AGGREGATE,
     plan_cache::PLAN_CACHE_CLEAR,
     explain::EXPLAIN,
@@ -722,6 +734,7 @@ const NAMES: [&str; 65] = [
     diagnostics::GET_LOG,
     diagnostics::DB_STATS,
     diagnostics::COLL_STATS,
+    profile::PROFILE,
 ];
 
 /// Whether `name` is one of this module's commands.
@@ -786,6 +799,7 @@ fn command<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comman
         diagnostics::GET_LOG => diagnostics::get_log(ctx),
         diagnostics::DB_STATS => diagnostics::db_stats(ctx),
         diagnostics::COLL_STATS => diagnostics::coll_stats(ctx),
+        profile::PROFILE => profile::profile(ctx),
         admin::CURRENT_OP => admin::current_op(ctx),
         admin::REPL_SET_GET_STATUS => admin::repl_set_get_status(ctx),
         crud::INSERT => crud::insert(ctx),

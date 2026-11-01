@@ -604,6 +604,29 @@ impl Backend for ServerBackend {
         }
     }
 
+    fn other_operations(&mut self) -> Result<Vec<teseladb_bson::Document>, CommandError> {
+        let until = Instant::now() + self.deadline;
+        let Some(Some(answers)) = self.ask(0, NodeMsg::CurrentOps, until) else {
+            return Err(CommandError::new(
+                NETWORK_TIMEOUT,
+                "a node of the cluster did not answer the list of its operations",
+            ));
+        };
+        let mut ops = Vec::new();
+        for a in answers {
+            let doc = teseladb_bson::RawDoc::from_bytes(&a)
+                .map(teseladb_bson::Document::from)
+                .map_err(|_| CommandError::new(NETWORK_TIMEOUT, "a node answered a bad list"))?;
+            if let Some(teseladb_bson::Value::Array(items)) = doc.get("ops") {
+                ops.extend(items.iter().filter_map(|v| match v {
+                    teseladb_bson::Value::Document(d) => Some(d.clone()),
+                    _ => None,
+                }));
+            }
+        }
+        Ok(ops)
+    }
+
     fn voters(&mut self, start: &[u8], end: &[u8]) -> Result<usize, CommandError> {
         let overlaps = |e: &RouteEntry| {
             (e.end.is_empty() || start < e.end.as_slice()) && e.start.as_slice() < end
@@ -1057,6 +1080,22 @@ impl Backend for ServerBackend {
         teseladb_sys::fill_random(out).map_err(|e| {
             CommandError::new(INTERNAL_ERROR, format!("the system gave no random bytes: {e}"))
         })
+    }
+
+    fn log_slow_query(&mut self, attr: &teseladb_bson::Document) {
+        let attr = attr
+            .to_bytes()
+            .ok()
+            .and_then(|b| {
+                teseladb_bson::RawDoc::from_bytes(&b).ok().map(teseladb_bson::extjson::to_relaxed)
+            })
+            .unwrap_or_default();
+        let line = crate::log::Pending {
+            id: teseladb_wire::commands::profile::SLOW_QUERY_ID,
+            msg: "Slow query".to_owned(),
+            attr,
+        };
+        crate::log::defer_at(crate::log::Level::Info, line);
     }
 
     fn log_warning(&mut self, id: i32, msg: &str, attr: &teseladb_bson::Document) {

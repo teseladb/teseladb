@@ -521,6 +521,10 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         self.inner.kill_everywhere(scope)
     }
 
+    fn other_operations(&mut self) -> Result<Vec<Document>, CommandError> {
+        self.inner.other_operations()
+    }
+
     fn config_documents(&mut self, coll: &str) -> Result<Vec<Document>, CommandError> {
         let all = self.call(|b| b.config_documents(coll))?;
         Ok(tenants::own_config_documents(self.tenant, all))
@@ -615,6 +619,10 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
 
     fn process(&mut self) -> crate::commands::diagnostics::ProcessFacts {
         self.inner.process()
+    }
+
+    fn log_slow_query(&mut self, attr: &teseladb_bson::Document) {
+        self.inner.log_slow_query(attr)
     }
 
     fn log_warning(&mut self, id: i32, msg: &str, attr: &teseladb_bson::Document) {

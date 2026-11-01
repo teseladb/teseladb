@@ -237,18 +237,32 @@ fn describe(id: u32, op: &Op, now_ms: u64, (shard, host): (&str, &str)) -> Docum
     d
 }
 
-/// The operations running on the node, as `currentOp` describes them (010 T033).
+/// The operations running on node `node` at `host` (from its `shared` registry) at `now_ms`, as
+/// `currentOp` describes them; each node answers the others with these (010 T033).
+pub fn node_operations(
+    shared: &super::Shared,
+    node: u64,
+    host: &str,
+    now_ms: u64,
+) -> Vec<Document> {
+    let shard = super::shard_name(node);
+    lock(shared).ops.iter().map(|(id, op)| describe(id, op, now_ms, (&shard, host))).collect()
+}
+
+/// The operations of every node of the cluster, this one's first, as `currentOp` describes
+/// them (010 T033, FR-016): a `refrouter` lists those of all its shards.
 pub(crate) fn current_operations<B: Backend + ?Sized>(
     backend: &mut B,
     shared: &super::Shared,
 ) -> Result<Vec<Document>, CommandError> {
     let now = backend.now_ms();
-    let shard = super::shard_name(backend.node());
     let host = super::host_port(backend);
-    Ok(lock(shared).ops.iter().map(|(id, op)| describe(id, op, now, (&shard, &host))).collect())
+    let mut ops = node_operations(shared, backend.node(), &host, now);
+    ops.extend(backend.other_operations()?);
+    Ok(ops)
 }
 
-/// `currentOp`: the node's operations in progress that match the command's other fields.
+/// `currentOp`: the operations in progress on every node that match the command's other fields.
 pub fn current_op<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     admin_only(CURRENT_OP, ctx.db)?;
     let mut filter = Document::new();
@@ -257,14 +271,7 @@ pub fn current_op<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document,
             filter.insert(k, v.clone());
         }
     }
-    let now = ctx.backend.now_ms();
-    let shard = super::shard_name(ctx.backend.node());
-    let host = super::host_port(ctx.backend);
-    let ops: Vec<Document> = lock(ctx.shared)
-        .ops
-        .iter()
-        .map(|(id, op)| describe(id, op, now, (&shard, &host)))
-        .collect();
+    let ops = current_operations(ctx.backend, ctx.shared)?;
     let mut inprog = Vec::new();
     for d in ops {
         if passes(Some(&filter), &d)? {
