@@ -89,6 +89,12 @@ enum Operator {
         paths: Vec<String>,
         score: Score,
     },
+    Phrase {
+        query: Vec<String>,
+        paths: Vec<String>,
+        slop: u32,
+        score: Score,
+    },
     Compound {
         must: Vec<Operator>,
         should: Vec<Operator>,
@@ -128,6 +134,7 @@ fn parse(index: &MemIndex, name: &str, v: &Value, path: &str) -> Result<Operator
     let Value::Document(d) = v else { return Err(shape(path, "must be a document")) };
     match name {
         "text" => parse_text(index, d, path),
+        "phrase" => parse_phrase(index, d, path),
         "compound" => parse_compound(index, d, path),
         other => {
             Err(SearchError(format!("\"{other}\" is not supported by this node's search engine")))
@@ -142,23 +149,50 @@ fn parse_text(index: &MemIndex, d: &Document, path: &str) -> Result<Operator, Se
         return Err(SearchError(format!("\"{path}\" unrecognized field \"{k}\"")));
     }
     let at = |f: &str| format!("{path}.{f}");
-    let query = match d.get("query") {
-        None => return Err(shape(&at("query"), "is required")),
-        Some(Value::String(s)) => vec![s.clone()],
-        Some(Value::Array(items)) => items
-            .iter()
-            .map(|i| match i {
-                Value::String(s) => Ok(s.clone()),
-                _ => Err(shape(&at("query"), "must be a string")),
-            })
-            .collect::<Result<_, _>>()?,
-        Some(_) => return Err(shape(&at("query"), "must be a string")),
-    };
+    let query = queries(d, &at("query"))?;
     let paths = match d.get("path") {
         None => return Err(shape(&at("path"), "is required")),
         Some(p) => paths(index, p, &at("path"))?,
     };
     Ok(Operator::Text { query, paths, score: parse_score(d.get("score"), &at("score"))? })
+}
+
+/// The `query` option of `text` and `phrase`: a string or an array of strings.
+fn queries(d: &Document, at: &str) -> Result<Vec<String>, SearchError> {
+    match d.get("query") {
+        None => Err(shape(at, "is required")),
+        Some(Value::String(s)) => Ok(vec![s.clone()]),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|i| match i {
+                Value::String(s) => Ok(s.clone()),
+                _ => Err(shape(at, "must be a string")),
+            })
+            .collect(),
+        Some(_) => Err(shape(at, "must be a string")),
+    }
+}
+
+fn parse_phrase(index: &MemIndex, d: &Document, path: &str) -> Result<Operator, SearchError> {
+    const OPTIONS: [&str; 5] = ["query", "path", "slop", "score", "synonyms"];
+    if let Some((k, _)) = d.iter().find(|(k, _)| !OPTIONS.contains(k)) {
+        return Err(SearchError(format!("\"{path}\" unrecognized field \"{k}\"")));
+    }
+    let at = |f: &str| format!("{path}.{f}");
+    let query = queries(d, &at("query"))?;
+    let paths = match d.get("path") {
+        None => return Err(shape(&at("path"), "is required")),
+        Some(p) => paths(index, p, &at("path"))?,
+    };
+    let slop = match d.get("slop") {
+        None => 0,
+        Some(v) => match number(v) {
+            Some(n) if n < 0.0 => return Err(shape(&at("slop"), "cannot be negative")),
+            Some(n) => n as u32,
+            None => return Err(shape(&at("slop"), "must be a number")),
+        },
+    };
+    Ok(Operator::Phrase { query, paths, slop, score: parse_score(d.get("score"), &at("score"))? })
 }
 
 /// The indexed paths a `path` option names: a string, `{wildcard}` or an array of them.
@@ -296,23 +330,36 @@ fn number_at(doc: Option<&Document>, path: &str) -> f32 {
 fn eval(index: &MemIndex, op: &Operator) -> Result<BTreeMap<u32, f32>, SearchError> {
     match op {
         Operator::Text { query, paths, score } => {
-            let boost = if let Score::Boost(b) = score { *b } else { 1.0 };
-            let mut s = index.text_scores(query, paths, boost)?;
-            match score {
-                Score::Constant(c) => s.values_mut().for_each(|v| *v = *c),
-                Score::BoostPath(p) => {
-                    for (doc, v) in s.iter_mut() {
-                        *v *= number_at(index.document(*doc), p);
-                    }
-                }
-                Score::Plain | Score::Boost(_) => {}
-            }
-            Ok(s)
+            let s = index.text_scores(query, paths, boost_of(score))?;
+            Ok(rescored(index, s, score))
+        }
+        Operator::Phrase { query, paths, slop, score } => {
+            let s = index.phrase_scores(query, paths, *slop, boost_of(score))?;
+            Ok(rescored(index, s, score))
         }
         Operator::Compound { must, should, filter, must_not, minimum } => {
             eval_compound(index, must, should, filter, must_not, *minimum)
         }
     }
+}
+
+/// The factor `score` puts in a term's weight.
+fn boost_of(score: &Score) -> f32 {
+    if let Score::Boost(b) = score { *b } else { 1.0 }
+}
+
+/// The scores after `score`'s constant or field boost.
+fn rescored(index: &MemIndex, mut s: BTreeMap<u32, f32>, score: &Score) -> BTreeMap<u32, f32> {
+    match score {
+        Score::Constant(c) => s.values_mut().for_each(|v| *v = *c),
+        Score::BoostPath(p) => {
+            for (doc, v) in s.iter_mut() {
+                *v *= number_at(index.document(*doc), p);
+            }
+        }
+        Score::Plain | Score::Boost(_) => {}
+    }
+    s
 }
 
 fn eval_compound(

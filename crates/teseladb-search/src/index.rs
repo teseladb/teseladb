@@ -250,6 +250,31 @@ impl MemIndex {
         Ok(scores)
     }
 
+    /// The documents where a phrase of `queries` appears in one of `paths` with at most `slop`
+    /// positions between its terms, scored as `refsearch` scores a phrase (measured): the weight
+    /// is `boost` times the sum of the terms' idf and the frequency counts each match as
+    /// `1 / (1 + length)`, its length being how far the terms are from their places.
+    pub(crate) fn phrase_scores(
+        &self,
+        queries: &[String],
+        paths: &[String],
+        slop: u32,
+        boost: f32,
+    ) -> Result<BTreeMap<u32, f32>, IndexError> {
+        let mut scores: BTreeMap<u32, f32> = BTreeMap::new();
+        for path in paths {
+            let Some(field) = self.fields.get(path) else { continue };
+            let a = analyzer(&field.search_analyzer)?;
+            for q in queries {
+                let terms = a.analyze(q).map_err(|_| IndexError::Analysis)?;
+                for (doc, score) in field.phrase_scores(&terms, slop, boost) {
+                    *scores.entry(doc).or_insert(0.0) += score;
+                }
+            }
+        }
+        Ok(scores)
+    }
+
     /// The numbers of the documents indexed.
     pub(crate) fn live(&self) -> impl Iterator<Item = u32> + '_ {
         self.by_key.values().copied()
@@ -280,24 +305,95 @@ impl MemIndex {
 }
 
 impl TextField {
-    /// The score of each document with `term`.
-    fn term_scores(&self, term: &str, boost: f32) -> Vec<(u32, f32)> {
-        let Some(docs) = self.postings.get(term) else { return Vec::new() };
+    /// The mean length as a 32-bit float and the score of a match frequency for `doc`.
+    fn scorer(&self, weight: f32) -> impl Fn(u32, f32) -> f32 + '_ {
         let n = self.lengths.len() as u64;
         let total: u64 = self.lengths.values().map(|&l| u64::from(l)).sum();
         let avg = if n == 0 { 1.0f32 } else { (total as f64 / n as f64) as f32 };
-        let weight = boost * idf(n, docs.len() as u64) as f32;
         let Bm25 { k1, b } = Bm25::DEFAULT;
-        docs.iter()
-            .map(|(&doc, positions)| {
-                let len = self.lengths.get(&doc).copied().unwrap_or(0);
-                let dl = norms::decode(norms::encode(len)) as f32;
-                let inverse =
-                    (1.0 / (k1 * ((1.0 - b) + b * f64::from(dl) / f64::from(avg)))) as f32;
-                let freq = positions.len() as f32;
-                (doc, weight - weight / (1.0 + freq * inverse))
+        move |doc, freq| {
+            let len = self.lengths.get(&doc).copied().unwrap_or(0);
+            let dl = norms::decode(norms::encode(len)) as f32;
+            let (k1, b) = (k1 as f32, b as f32);
+            let inverse = 1.0 / (k1 * ((1.0 - b) + b * dl / avg));
+            weight - weight / (1.0 + freq * inverse)
+        }
+    }
+
+    /// The phrase frequency of each document with all of `terms` and its score.
+    fn phrase_scores(
+        &self,
+        terms: &[crate::analysis::tokenizers::Token],
+        slop: u32,
+        boost: f32,
+    ) -> Vec<(u32, f32)> {
+        let Some(first) = terms.first() else { return Vec::new() };
+        let n = self.lengths.len() as u64;
+        let mut lists = Vec::with_capacity(terms.len());
+        let mut idf_sum = 0.0f32;
+        for t in terms {
+            let Some(docs) = self.postings.get(&t.text) else { return Vec::new() };
+            idf_sum += idf(n, docs.len() as u64) as f32;
+            lists.push((docs, i64::from(t.position) - i64::from(first.position)));
+        }
+        let score = self.scorer(boost * idf_sum);
+        let (shortest, _) =
+            lists.iter().min_by_key(|(d, _)| d.len()).copied().unwrap_or((lists[0].0, 0));
+        shortest
+            .keys()
+            .filter_map(|doc| {
+                let places: Option<Vec<Vec<i64>>> = lists
+                    .iter()
+                    .map(|(d, offset)| {
+                        d.get(doc).map(|ps| ps.iter().map(|&p| i64::from(p) - offset).collect())
+                    })
+                    .collect();
+                let freq = phrase_freq(&places?, i64::from(slop));
+                (freq > 0.0).then(|| (*doc, score(*doc, freq)))
             })
             .collect()
+    }
+
+    /// The score of each document with `term`.
+    fn term_scores(&self, term: &str, boost: f32) -> Vec<(u32, f32)> {
+        let Some(docs) = self.postings.get(term) else { return Vec::new() };
+        let weight = boost * idf(self.lengths.len() as u64, docs.len() as u64) as f32;
+        let score = self.scorer(weight);
+        docs.iter().map(|(&doc, positions)| (doc, score(doc, positions.len() as f32))).collect()
+    }
+}
+
+/// The matches of a phrase whose terms sit at `places` (each term's positions minus its offset in
+/// the phrase), each worth `1 / (1 + span)`: the term at the lowest place moves on while it stays
+/// at or below the next lowest, which keeps the shortest span of the group, and the group counts
+/// once if that span is at most `slop`.
+fn phrase_freq(places: &[Vec<i64>], slop: i64) -> f32 {
+    let mut at = vec![0usize; places.len()];
+    let mut freq = 0.0f32;
+    loop {
+        let current: Option<Vec<i64>> =
+            places.iter().zip(&at).map(|(p, &i)| p.get(i).copied()).collect();
+        let Some(current) = current else { return freq };
+        let Some((low, &lo)) = current.iter().enumerate().min_by_key(|&(_, v)| *v) else {
+            return freq;
+        };
+        let hi = current.iter().copied().max().unwrap_or(lo);
+        let second = current
+            .iter()
+            .enumerate()
+            .filter(|&(i, _)| i != low)
+            .map(|(_, &v)| v)
+            .min()
+            .unwrap_or(lo);
+        let mut span = hi - lo;
+        while let Some(&next) = places[low].get(at[low] + 1).filter(|&&v| v <= second) {
+            at[low] += 1;
+            span = span.min(hi - next);
+        }
+        if span <= slop {
+            freq += 1.0 / (1.0 + span as f32);
+        }
+        at[low] += 1;
     }
 }
 

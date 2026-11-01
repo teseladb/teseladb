@@ -206,3 +206,45 @@ fn errors_are_refsearch_s() {
         assert_eq!(search(spec.clone()), Err(SearchError(want)), "{spec:?}");
     }
 }
+
+fn phrase(q: Value, slop: Option<i32>) -> Document {
+    let mut p = Document::new().with("query", q).with("path", "t");
+    if let Some(s) = slop {
+        p.push("slop", s);
+    }
+    Document::new().with("phrase", p)
+}
+
+#[test]
+fn phrases_score_as_refsearch() {
+    assert_eq!(
+        search(phrase("gato perro".into(), None)).unwrap(),
+        [(1, 0.7410147190093994), (2, 0.6240124702453613)]
+    );
+    assert_eq!(
+        search(phrase("gato gato".into(), None)).unwrap(),
+        [(6, 0.8207941055297852), (2, 0.5183963179588318)]
+    );
+    assert!(search(phrase("gato raton".into(), None)).unwrap().is_empty());
+    assert_eq!(search(phrase("gato raton".into(), Some(1))).unwrap(), [(2, 0.5131921768188477)]);
+    assert_eq!(
+        search(phrase("gato raton".into(), Some(5))).unwrap(),
+        [(2, 0.5131921768188477), (5, 0.069083571434021)]
+    );
+    assert_eq!(
+        search(phrase("queso".into(), None)).unwrap(),
+        [(4, 1.0456602573394775), (5, 0.2978915572166443)]
+    );
+    assert_eq!(
+        search(phrase(list(vec!["gato perro".into(), "queso queso".into()]), None)).unwrap(),
+        [(4, 2.017218589782715), (1, 0.7410147190093994), (2, 0.6240124702453613)]
+    );
+    assert_eq!(
+        search(Document::new().with("phrase", Document::new().with("path", "t"))),
+        Err(SearchError("\"phrase.query\" is required".to_owned()))
+    );
+    assert_eq!(
+        search(phrase("a b".into(), Some(-1))),
+        Err(SearchError("\"phrase.slop\" cannot be negative".to_owned()))
+    );
+}
