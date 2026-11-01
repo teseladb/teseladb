@@ -653,9 +653,15 @@ impl NodeLogic {
         }
     }
 
-    /// Publishes the nodes' tags for the client workers when Group 0's change (core 0, FR-013).
+    /// Publishes the nodes' tags for the client workers when Group 0's change (core 0, FR-013),
+    /// and the cluster's write gates (FR-029).
     fn sync_tags(&mut self) {
         let (Some(routes), Some(sm)) = (&self.routes, self.group0()) else { return };
+        let all = crate::backend::parameters_of(&sm.settings);
+        let gate = teseladb_wire::commands::write_block::gate_of(&all);
+        if routes.gate() != gate {
+            routes.publish_gate(gate);
+        }
         let tags: crate::routes::NodeTags =
             sm.nodes.iter().map(|(id, n)| (*id, n.tags.clone())).collect();
         if self.sent_tags.as_ref() != Some(&tags) {

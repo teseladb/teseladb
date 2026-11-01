@@ -144,6 +144,8 @@ impl Writer {
         bound: &Bound,
         stmt: u32,
     ) -> Result<MutationResult, CommandError> {
+        // An `fsync` lock holds it back, and blocked user writes refuse it (007 FR-029).
+        super::write_block::data(backend, bound)?;
         let dedup =
             self.retry.map(|(lsid, txn_number)| StatementKey { lsid, txn_number, stmt_id: stmt });
         // `w: 0` waits for no one: the write is applied by the range's leader before the next

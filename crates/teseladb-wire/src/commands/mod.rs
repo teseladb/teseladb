@@ -60,6 +60,7 @@ pub mod users;
 pub mod users_info;
 pub mod uuid;
 pub mod views;
+pub mod write_block;
 
 use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard};
@@ -258,6 +259,11 @@ pub trait Backend {
     }
     /// The cluster parameters as Group 0 keeps them: name and the BSON document of its value.
     fn cluster_parameters(&mut self) -> Result<BTreeMap<String, Vec<u8>>, CommandError>;
+    /// The cluster's write gates (007 FR-029), from the cluster parameters unless the backend
+    /// keeps them closer at hand.
+    fn write_gate(&mut self) -> Result<write_block::WriteGate, CommandError> {
+        Ok(write_block::gate_of(&self.cluster_parameters()?))
+    }
     /// Sets a cluster parameter in Group 0 and waits until this node's copy applied it.
     fn set_cluster_parameter(&mut self, name: &str, value: Vec<u8>) -> Result<(), CommandError>;
     /// The time, on the monotonic clock of [`Backend::now_micros`] in milliseconds, at which the
@@ -583,7 +589,7 @@ impl<B: Backend + ?Sized> Ctx<'_, B> {
 }
 
 /// The commands of this module.
-const NAMES: [&str; 61] = [
+const NAMES: [&str; 63] = [
     aggregate::AGGREGATE,
     explain::EXPLAIN,
     audit::LOG_APPLICATION_MESSAGE,
@@ -595,6 +601,8 @@ const NAMES: [&str; 61] = [
     cluster_admin::GET_DEFAULT_RW_CONCERN,
     cluster_admin::SET_DEFAULT_RW_CONCERN,
     cluster_admin::FSYNC,
+    write_block::FSYNC_UNLOCK,
+    write_block::SET_USER_WRITE_BLOCK_MODE,
     cluster_admin::COMPACT,
     cluster_admin::AUTO_COMPACT,
     cluster_admin::SHUTDOWN,
@@ -691,6 +699,8 @@ fn command<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comman
         cluster_admin::GET_DEFAULT_RW_CONCERN => cluster_admin::get_default_rw_concern(ctx),
         cluster_admin::SET_DEFAULT_RW_CONCERN => cluster_admin::set_default_rw_concern(ctx),
         cluster_admin::FSYNC => cluster_admin::fsync(ctx),
+        write_block::FSYNC_UNLOCK => write_block::fsync_unlock(ctx),
+        write_block::SET_USER_WRITE_BLOCK_MODE => write_block::set_user_write_block_mode(ctx),
         cluster_admin::COMPACT => cluster_admin::compact(ctx),
         cluster_admin::AUTO_COMPACT => cluster_admin::auto_compact(ctx),
         cluster_admin::SHUTDOWN => cluster_admin::shutdown(ctx),

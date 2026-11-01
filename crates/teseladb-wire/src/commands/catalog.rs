@@ -416,6 +416,7 @@ pub fn drop<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
         }
         return Ok(Document::new().with("ok", 1.0));
     };
+    super::write_block::ddl(ctx.backend, &ns.db)?;
     ctx.backend.catalog_write(CatalogCommand::Drop { ns: ns.clone() })?;
     purge(ctx.backend, &ns, &c)?;
     // `system.views` holds the views of its database: they go with it (measured on 9.0.4).
@@ -481,6 +482,7 @@ pub fn rename<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
             format!("Target collection {to_text} exists but dropTarget is not set"),
         ));
     }
+    super::write_block::ddl(ctx.backend, &from.db)?;
     let uuid = super::new_uuid(ctx.backend);
     let rename = CatalogCommand::Rename { from, to: to.clone(), drop_target, uuid };
     write_adding_database(ctx.backend, &to.db, rename)?;
@@ -567,6 +569,7 @@ pub fn coll_mod<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, C
         options.push(ID_INDEX_VERSION, version.clone());
     }
     let bytes = options.to_bytes()?;
+    super::write_block::ddl(ctx.backend, &ns.db)?;
     ctx.backend.catalog_write(CatalogCommand::Modify { ns, options: bytes })?;
     Ok(index_reply.with("ok", 1.0))
 }
@@ -623,6 +626,7 @@ pub(crate) fn write_adding_database<B: Backend + ?Sized>(
     db: &str,
     cmd: CatalogCommand,
 ) -> Result<Option<CollectionEntry>, CommandError> {
+    super::write_block::ddl(backend, db)?;
     let refused = match backend.catalog_write(cmd) {
         Err(e) if e.code == DATABASE_DIFFER_CASE => e,
         other => return other,
@@ -915,6 +919,9 @@ pub fn drop_database<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Docume
         ctx.backend.collections()?.into_iter().filter(|(ns, _)| ns.db == db).collect();
     // A database without collections is still in the catalog until it is dropped (D-077).
     if !doomed.is_empty() || has_database(ctx.backend, &db)? {
+        if !doomed.is_empty() {
+            super::write_block::ddl(ctx.backend, &db)?;
+        }
         ctx.backend.catalog_write(CatalogCommand::DropDatabase { db })?;
         for (ns, c) in &doomed {
             purge(ctx.backend, ns, c)?;

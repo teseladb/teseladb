@@ -457,6 +457,10 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         self.call(|b| b.write(op))
     }
 
+    fn write_gate(&mut self) -> Result<crate::commands::write_block::WriteGate, CommandError> {
+        self.call(|b| b.write_gate())
+    }
+
     fn scan(
         &mut self,
         start: &[u8],

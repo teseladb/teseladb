@@ -789,6 +789,12 @@ impl Backend for ServerBackend {
         }
     }
 
+    fn write_gate(
+        &mut self,
+    ) -> Result<teseladb_wire::commands::write_block::WriteGate, CommandError> {
+        Ok(self.h.routes.gate())
+    }
+
     fn set_cluster_parameter(&mut self, name: &str, value: Vec<u8>) -> Result<(), CommandError> {
         let key = [PARAMETER_PREFIX, name.as_bytes()].concat();
         let req = CatalogReq::SetSetting { key, value };
