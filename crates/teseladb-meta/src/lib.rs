@@ -19,6 +19,7 @@ pub mod clustertime_keys;
 pub mod collection_types;
 pub mod command;
 pub mod config_settings;
+pub mod ddl_log;
 pub mod descriptors;
 pub mod drain;
 pub mod enroll_tokens;

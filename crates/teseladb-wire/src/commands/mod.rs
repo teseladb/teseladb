@@ -22,6 +22,7 @@ pub mod authz_writes;
 pub mod capped;
 pub mod catalog;
 pub mod change_stream;
+pub mod change_stream_ddl;
 pub mod cluster_admin;
 pub mod config_db;
 pub mod config_settings;
@@ -120,6 +121,17 @@ pub enum LdapLogin {
 
 /// What a change stream read of an interval: the versions up to the resolved mark, and the mark.
 pub type ChangeBatch = (Vec<teseladb_range::changes::Versioned>, teseladb_hlc::Hlc);
+
+/// What a change stream reads of the catalog changes after a mark (014 FR-014).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DdlBatch {
+    /// The changes above the mark, oldest first.
+    pub records: Vec<teseladb_meta::ddl_log::DdlRecord>,
+    /// At or below this mark the changes are no longer complete.
+    pub floor: teseladb_hlc::Hlc,
+    /// No change at or below this mark appears later.
+    pub resolved: teseladb_hlc::Hlc,
+}
 
 /// What the commands need from the node: Group 0's catalog, the ranges and the cluster time.
 /// The server's implementation finds the leaders and forwards; errors come translated.
@@ -232,6 +244,9 @@ pub trait Backend {
         end: &[u8],
         from: teseladb_hlc::Hlc,
     ) -> Result<ChangeBatch, CommandError>;
+    /// The catalog changes Group 0 recorded above mark `from` (014 FR-014), as the node's copy has
+    /// them, with the mark up to which that copy is complete.
+    fn catalog_changes(&mut self, from: teseladb_hlc::Hlc) -> Result<DdlBatch, CommandError>;
     /// Reads at most `limit` documents of `[start, end)` in key order: `(key, document)`.
     fn scan(
         &mut self,

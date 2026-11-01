@@ -155,6 +155,8 @@ pub struct Mem {
     pub gate_lagging: usize,
     /// The tenants Group 0 knows, by number and name (007 FR-025).
     pub tenants: Vec<(u32, String)>,
+    /// The catalog changes, at the node's clock (014 FR-014).
+    pub ddl: teseladb_meta::ddl_log::DdlLog,
 }
 
 /// A change of the data before a read of `[start, …)`.
@@ -163,6 +165,11 @@ pub type ScanHook = Box<dyn FnMut(&[u8], &mut BTreeMap<Vec<u8>, Vec<u8>>)>;
 impl Mem {
     pub fn new() -> Mem {
         Mem { now: 1_700_000_000_000, replicas: 3, ..Mem::default() }
+    }
+
+    /// The node's mark now: its clock, as its writes and catalog changes get it.
+    pub fn mark(&self) -> Hlc {
+        Hlc { physical: self.now, logical: 0 }
     }
 
     /// Notes a version of `key` written at `ts` for the change streams.
@@ -244,12 +251,15 @@ impl Backend for Mem {
         cmd: CatalogCommand,
     ) -> Result<Option<CollectionEntry>, CommandError> {
         self.index += 1;
-        self.catalog.apply(self.index, &cmd).map_err(|e| match e {
+        let changes = teseladb_meta::ddl_log::catalog_changes(&self.catalog, &cmd);
+        let r = self.catalog.apply(self.index, &cmd).map_err(|e| match e {
             CatalogError::NamespaceExists => CommandError::new(NAMESPACE_EXISTS, "exists"),
             CatalogError::NamespaceNotFound => CommandError::new(NAMESPACE_NOT_FOUND, "not found"),
             CatalogError::DatabaseDifferCase => CommandError::new(DATABASE_DIFFER_CASE, "case"),
             other => CommandError::new(INTERNAL_ERROR, format!("{other:?}")),
-        })
+        })?;
+        self.ddl.record_applied(self.mark(), changes, r.as_ref());
+        Ok(r)
     }
 
     fn indexes(&mut self, collection: u32) -> Result<Vec<IndexEntry>, CommandError> {
@@ -290,6 +300,17 @@ impl Backend for Mem {
             .cloned()
             .collect();
         Ok((rows, Hlc { physical: self.now, logical: 0 }))
+    }
+
+    fn catalog_changes(
+        &mut self,
+        from: Hlc,
+    ) -> Result<teseladb_wire::commands::DdlBatch, CommandError> {
+        Ok(teseladb_wire::commands::DdlBatch {
+            records: self.ddl.after(from),
+            floor: self.ddl.floor,
+            resolved: self.mark(),
+        })
     }
 
     fn tenant_named(&mut self, name: &str) -> Result<Option<u32>, CommandError> {
@@ -459,10 +480,12 @@ impl Backend for Mem {
             });
         }
         let type_of = self.types.get(key).copied().unwrap_or(1);
-        if let Some(v) = self.data.get(key) {
+        // A version written after `at` hides the current one: the read goes to the history.
+        let newer = self.history.iter().any(|v| v.key.as_slice() == key && v.ts > at);
+        if let Some(v) = self.data.get(key).filter(|_| !newer) {
             return Ok(Some((type_of, v.clone())));
         }
-        // A document gone since: its version at `at`, as a range's MVCC keeps it.
+        // A document gone or changed since: its version at `at`, as a range's MVCC keeps it.
         Ok(self
             .history
             .iter()
@@ -544,11 +567,14 @@ impl Backend for Mem {
 
     fn index_write(&mut self, cmd: IndexCommand) -> Result<(), CommandError> {
         self.index_log.push(cmd.clone());
+        let changes = teseladb_meta::ddl_log::index_changes(&self.catalog, &self.indexes, &cmd);
         let live: Vec<u32> = self.catalog.collections.values().map(|c| c.id).collect();
         self.indexes.apply(&cmd, |c| live.contains(&c)).map(drop).map_err(|e| match e {
             CatalogError::NamespaceNotFound => CommandError::new(NAMESPACE_NOT_FOUND, "not found"),
             other => CommandError::new(INTERNAL_ERROR, format!("{other:?}")),
-        })
+        })?;
+        self.ddl.record_applied(self.mark(), changes, None);
+        Ok(())
     }
 
     fn write(&mut self, op: WriteOp) -> Result<Vec<u8>, CommandError> {

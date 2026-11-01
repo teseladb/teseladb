@@ -163,3 +163,23 @@ fn only_some_stages_follow_and_the_split_goes_last() {
     let e = check_rest(&["$changeStream"]).unwrap_err();
     assert_eq!(e.code, codes::NOT_FIRST);
 }
+
+#[test]
+fn resume_after_an_invalidate_is_refused_and_start_after_it_is_not() {
+    // Measured on 01-11: `InvalidResumeToken` when the stream is opened.
+    let token =
+        ResumeToken::decode("01000000000000000100000001000000000000000000000000000000000001006B")
+            .unwrap();
+    let inv = teseladb_changestream::ddl::invalidate_of(&token);
+    let data = Document::new().with("_data", inv.encode());
+    let e = parse(Document::new().with("resumeAfter", data.clone())).unwrap_err();
+    assert_eq!(
+        e,
+        (
+            codes::INVALID_RESUME_TOKEN,
+            "Attempting to resume a change stream using 'resumeAfter' is not allowed from an invalidate notification".into()
+        )
+    );
+    let after = parse(Document::new().with("startAfter", data)).unwrap();
+    assert_eq!(after.start, Start::StartAfter(Position::Event(inv)));
+}

@@ -1311,8 +1311,15 @@ pub fn get_more<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, C
         return Err(CommandError::new(crate::error::BAD_VALUE, msg));
     }
     if let Some(stream) = c.state.stream.as_mut() {
-        let (docs, token) = super::change_stream::more(ctx.backend, stream, batch, max_time)?;
-        lock(ctx.shared).cursors.put(id, c);
+        let (docs, token, ended) =
+            super::change_stream::more(ctx.backend, stream, batch, max_time)?;
+        // An `invalidate` closes the cursor in the same batch (measured on 01-11).
+        let id = if ended {
+            0
+        } else {
+            lock(ctx.shared).cursors.put(id, c);
+            id
+        };
         let docs: Vec<Value> = docs.into_iter().map(Value::Document).collect();
         let cursor = Document::new()
             .with("id", id)

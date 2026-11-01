@@ -87,6 +87,12 @@ impl Backend for Bare {
     ) -> Result<teseladb_wire::commands::ChangeBatch, CommandError> {
         Err(none())
     }
+    fn catalog_changes(
+        &mut self,
+        _from: teseladb_hlc::Hlc,
+    ) -> Result<teseladb_wire::commands::DdlBatch, CommandError> {
+        Err(none())
+    }
     fn txn_pause(&mut self) -> bool {
         false
     }
