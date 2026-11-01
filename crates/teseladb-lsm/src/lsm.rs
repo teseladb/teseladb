@@ -113,6 +113,21 @@ pub(crate) struct Counters {
     pub(crate) compactions: u64,
     pub(crate) stalls: u64,
     pub(crate) rejects: u64,
+    /// Data blocks written by compression code.
+    pub(crate) blocks: [u64; 4],
+    /// Bytes of data blocks written, before and after compression.
+    pub(crate) block_bytes: [u64; 2],
+}
+
+impl Counters {
+    /// Counts the data blocks of `t`, a file this LSM just wrote.
+    pub(crate) fn note_codes(&mut self, t: &Table) {
+        for (n, written) in self.blocks.iter_mut().zip(t.written.codes) {
+            *n += written;
+        }
+        self.block_bytes[0] += t.written.raw;
+        self.block_bytes[1] += t.written.stored;
+    }
 }
 
 /// Where a job runs: flushes beside one background job, one operation in flight at a time.
@@ -188,6 +203,8 @@ pub struct Lsm {
     pub(crate) obsolete: Vec<Rc<Table>>,
     done: Completions,
     pub(crate) counters: Counters,
+    /// Bytes compactions wrote per collection since its dictionary was trained (004 FR-022).
+    pub(crate) dict_written: crate::dict::Written,
 }
 
 impl Lsm {
@@ -245,6 +262,7 @@ impl Lsm {
             obsolete: Vec::new(),
             done: Completions::default(),
             counters: Counters::default(),
+            dict_written: crate::dict::Written::new(),
         };
         Ok((lsm, flushed))
     }

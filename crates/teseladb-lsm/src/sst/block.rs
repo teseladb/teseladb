@@ -3,7 +3,8 @@
 //! ```text
 //! entry  := shared(varint) · unshared(varint) · value_len(varint) · key_delta · kind(u8) · value
 //! block  := entry* · restarts(u32 LE)* · num_restarts(u32 LE)
-//! framed := block · compression(u8: 0 none, 1 zlib) · encryption(32 bytes) · crc32c(u32 LE)
+//! framed := block · compression(u8: 0 none, 1 zlib, 2 zstd, 3 zstd with the dictionary of the
+//!           file) · encryption(32 bytes) · crc32c(u32 LE)
 //! ```
 //!
 //! A restart point stores its key whole, so a seek binary-searches the restart points and walks
@@ -15,6 +16,7 @@
 use std::cmp::Ordering;
 use std::ops::Range;
 
+use teseladb_compress::zstd;
 use teseladb_crypto::at_rest::{AtRestError, FileKey};
 use teseladb_deflate::zlib;
 use teseladb_hash::crc32c;
@@ -27,20 +29,42 @@ use crate::entry::Kind;
 pub(crate) const TRAILER: usize = 1 + ENCRYPTION + 4;
 /// Bytes reserved for the encryption of 013 (nonce and tag).
 const ENCRYPTION: usize = 32;
-const COMPRESSION_NONE: u8 = 0;
-const COMPRESSION_ZLIB: u8 = 1;
+pub(crate) const COMPRESSION_NONE: u8 = 0;
+pub(crate) const COMPRESSION_ZLIB: u8 = 1;
+pub(crate) const COMPRESSION_ZSTD: u8 = 2;
+pub(crate) const COMPRESSION_ZSTD_DICT: u8 = 3;
 const ZLIB_LEVEL: u8 = 6;
+/// Largest payload a block decompresses to: a version larger than a block takes one of its own,
+/// and a document is at most 16 MiB.
+const MAX_PAYLOAD: usize = 64 << 20;
 
-/// Frames a payload, compressing it when asked and when that makes it smaller.
-pub(crate) fn frame(payload: &[u8], compress: bool) -> Vec<u8> {
-    let (body, method) = compressed(payload, compress);
-    assemble(&body, method, &[0; ENCRYPTION])
+/// How a block's payload is compressed.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Method<'a> {
+    None,
+    Zlib,
+    Zstd,
+    /// zstd with this raw content dictionary, the file's.
+    Dict(&'a [u8]),
 }
 
-fn compressed(payload: &[u8], compress: bool) -> (Vec<u8>, u8) {
-    let zipped = compress.then(|| zlib::compress(payload, ZLIB_LEVEL));
-    match zipped {
-        Some(z) if z.len() < payload.len() => (z, COMPRESSION_ZLIB),
+/// Frames a payload, compressed with `method` when that makes it smaller.
+pub(crate) fn frame(payload: &[u8], method: Method<'_>) -> Vec<u8> {
+    let (body, code) = compressed(payload, method);
+    assemble(&body, code, &[0; ENCRYPTION])
+}
+
+/// The body of a block and its compression code: `payload` itself (code 0) when `method` does
+/// not shrink it.
+pub(crate) fn compressed(payload: &[u8], method: Method<'_>) -> (Vec<u8>, u8) {
+    let packed = match method {
+        Method::None => None,
+        Method::Zlib => Some((zlib::compress(payload, ZLIB_LEVEL), COMPRESSION_ZLIB)),
+        Method::Zstd => Some((zstd::compress(payload), COMPRESSION_ZSTD)),
+        Method::Dict(d) => Some((zstd::compress_with_dict(payload, d), COMPRESSION_ZSTD_DICT)),
+    };
+    match packed {
+        Some((z, code)) if z.len() < payload.len() => (z, code),
         _ => (payload.to_vec(), COMPRESSION_NONE),
     }
 }
@@ -66,18 +90,23 @@ fn aad(offset: u64, method: u8) -> [u8; 9] {
 /// [`frame`] sealed with `key` for offset `offset` (013 FR-015).
 pub(crate) fn frame_sealed(
     payload: &[u8],
-    compress: bool,
+    method: Method<'_>,
     key: &FileKey,
     offset: u64,
 ) -> Result<Vec<u8>, AtRestError> {
-    let (body, method) = compressed(payload, compress);
+    let (body, method) = compressed(payload, method);
     let (sealed, trailer) = key.seal(&aad(offset, method), &body)?;
     Ok(assemble(&sealed, method, &trailer))
 }
 
 /// The payload of a framed block, checked and decompressed; a block of a file sealed with a data
-/// key opens with that key and its offset.
-pub(crate) fn unframe_with(stored: &Bytes, key: Option<(&FileKey, u64)>) -> Result<Bytes, Bad> {
+/// key opens with that key and its offset, and one compressed with the file's dictionary with
+/// `dict`.
+pub(crate) fn unframe_with(
+    stored: &Bytes,
+    key: Option<(&FileKey, u64)>,
+    dict: Option<&[u8]>,
+) -> Result<Bytes, Bad> {
     let cut = stored.len().checked_sub(TRAILER).ok_or(Bad)?;
     let (head, crc) = stored.split_at(stored.len() - 4);
     if crc32c(head) != u32::from_le_bytes(crc.try_into().map_err(|_| Bad)?) {
@@ -101,6 +130,15 @@ pub(crate) fn unframe_with(stored: &Bytes, key: Option<(&FileKey, u64)>) -> Resu
                 return Err(Bad);
             }
             Ok(Bytes::from_vec(v))
+        }
+        COMPRESSION_ZSTD => {
+            zstd::decompress(&body, MAX_PAYLOAD).map(Bytes::from_vec).map_err(|_| Bad)
+        }
+        COMPRESSION_ZSTD_DICT => {
+            let dict = dict.ok_or(Bad)?;
+            zstd::decompress_with_dict(&body, MAX_PAYLOAD, dict)
+                .map(Bytes::from_vec)
+                .map_err(|_| Bad)
         }
         _ => Err(Bad),
     }
@@ -399,22 +437,28 @@ mod tests {
     #[test]
     fn framing_checks_and_compresses() {
         let payload = vec![7u8; 5000];
-        let plain = frame(&payload, false);
+        let plain = frame(&payload, Method::None);
         assert_eq!(plain.len(), payload.len() + TRAILER);
-        assert_eq!(&*unframe_with(&Bytes::from_vec(plain.clone()), None).unwrap(), &payload[..]);
-        let zipped = frame(&payload, true);
+        assert_eq!(
+            &*unframe_with(&Bytes::from_vec(plain.clone()), None, None).unwrap(),
+            &payload[..]
+        );
+        let zipped = frame(&payload, Method::Zlib);
         assert!(zipped.len() < plain.len());
-        assert_eq!(&*unframe_with(&Bytes::from_vec(zipped.clone()), None).unwrap(), &payload[..]);
+        assert_eq!(
+            &*unframe_with(&Bytes::from_vec(zipped.clone()), None, None).unwrap(),
+            &payload[..]
+        );
         // Random-looking bytes that zlib cannot shrink stay plain.
         let noise: Vec<u8> =
             (0..64u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8).collect();
-        assert_eq!(frame(&noise, true).len(), noise.len() + TRAILER);
+        assert_eq!(frame(&noise, Method::Zlib).len(), noise.len() + TRAILER);
         for i in [0, plain.len() - 1, plain.len() - TRAILER] {
             let mut bad = plain.clone();
             bad[i] ^= 1;
-            assert_eq!(unframe_with(&Bytes::from_vec(bad), None), Err(Bad), "byte {i}");
+            assert_eq!(unframe_with(&Bytes::from_vec(bad), None, None), Err(Bad), "byte {i}");
         }
-        assert_eq!(unframe_with(&Bytes::from_vec(vec![0; 3]), None), Err(Bad));
+        assert_eq!(unframe_with(&Bytes::from_vec(vec![0; 3]), None, None), Err(Bad));
         // A valid checksum over a wrong method, encryption bytes or zlib stream.
         let reframe = |mut body: Vec<u8>, tweak: usize, value: u8| {
             let cut = body.len() - TRAILER;
@@ -424,15 +468,45 @@ mod tests {
             body.extend_from_slice(&crc.to_le_bytes());
             Bytes::from_vec(body)
         };
-        assert_eq!(unframe_with(&reframe(plain.clone(), 0, 9), None), Err(Bad), "method");
-        assert_eq!(unframe_with(&reframe(plain.clone(), 5, 1), None), Err(Bad), "encrypted");
-        assert_eq!(unframe_with(&reframe(plain, 0, COMPRESSION_ZLIB), None), Err(Bad), "not zlib");
+        assert_eq!(unframe_with(&reframe(plain.clone(), 0, 9), None, None), Err(Bad), "method");
+        assert_eq!(unframe_with(&reframe(plain.clone(), 5, 1), None, None), Err(Bad), "encrypted");
+        assert_eq!(
+            unframe_with(&reframe(plain, 0, COMPRESSION_ZLIB), None, None),
+            Err(Bad),
+            "not zlib"
+        );
         let mut trailing = zlib::compress(&payload, 6);
         trailing.push(0);
         assert_eq!(
-            unframe_with(&Bytes::from_vec(frame_raw(&trailing, COMPRESSION_ZLIB)), None),
+            unframe_with(&Bytes::from_vec(frame_raw(&trailing, COMPRESSION_ZLIB)), None, None),
             Err(Bad)
         );
+    }
+
+    #[test]
+    fn zstd_blocks_and_blocks_with_the_file_s_dictionary() {
+        let payload = b"{\"name\": \"customer\", \"city\": \"Bilbao\"} ".repeat(40);
+        let dict = b"{\"name\": \"customer\", \"city\": \"Bilbao\"} ".to_vec();
+        let z = Bytes::from_vec(frame(&payload, Method::Zstd));
+        assert_eq!(z[z.len() - TRAILER], COMPRESSION_ZSTD);
+        assert_eq!(&*unframe_with(&z, None, None).unwrap(), &payload[..]);
+        let d = Bytes::from_vec(frame(&payload, Method::Dict(&dict)));
+        assert_eq!(d[d.len() - TRAILER], COMPRESSION_ZSTD_DICT);
+        assert!(d.len() <= z.len());
+        assert_eq!(&*unframe_with(&d, None, Some(&dict)).unwrap(), &payload[..]);
+        // Without the file's dictionary, or with another one, it does not open.
+        assert_eq!(unframe_with(&d, None, None), Err(Bad));
+        assert_eq!(unframe_with(&d, None, Some(b"another dictionary entirely")), Err(Bad));
+        // A body that is no zstd frame.
+        assert_eq!(
+            unframe_with(&Bytes::from_vec(frame_raw(b"nope", COMPRESSION_ZSTD)), None, None),
+            Err(Bad)
+        );
+        // What zstd does not shrink stays plain.
+        let mut noise = vec![0u8; 4096];
+        teseladb_types::Rng::new(3).fill(&mut noise);
+        let n = frame(&noise, Method::Dict(&dict));
+        assert_eq!(n[n.len() - TRAILER], COMPRESSION_NONE);
     }
 
     fn frame_raw(body: &[u8], method: u8) -> Vec<u8> {
@@ -493,17 +567,23 @@ mod tests {
         });
         let (key, _) = ring.new_file_key().unwrap();
         let payload = b"a payload that compresses, compresses, compresses".repeat(8);
-        for compress in [false, true] {
-            let sealed = frame_sealed(&payload, compress, &key, 4096).unwrap();
+        let dict = b"a payload that compresses".to_vec();
+        for method in [Method::None, Method::Zlib, Method::Zstd, Method::Dict(&dict)] {
+            let sealed = frame_sealed(&payload, method, &key, 4096).unwrap();
             assert!(!sealed.windows(8).any(|w| w == b"compress"));
             let stored = Bytes::from_vec(sealed.clone());
-            assert_eq!(&*unframe_with(&stored, Some((&key, 4096))).unwrap(), &payload[..]);
-            assert_eq!(unframe_with(&stored, Some((&key, 8192))), Err(Bad), "another offset");
-            assert_eq!(unframe_with(&stored, None), Err(Bad), "no key");
+            let opened = unframe_with(&stored, Some((&key, 4096)), Some(&dict)).unwrap();
+            assert_eq!(&*opened, &payload[..]);
+            assert_eq!(unframe_with(&stored, Some((&key, 8192)), None), Err(Bad), "another offset");
+            assert_eq!(unframe_with(&stored, None, None), Err(Bad), "no key");
             let (other, _) = ring.new_file_key().unwrap();
-            assert_eq!(unframe_with(&stored, Some((&other, 4096))), Err(Bad), "another key");
+            assert_eq!(unframe_with(&stored, Some((&other, 4096)), None), Err(Bad), "another key");
         }
-        let plain = Bytes::from_vec(frame(&payload, false));
-        assert_eq!(unframe_with(&plain, Some((&key, 0))), Err(Bad), "a clear block is not sealed");
+        let plain = Bytes::from_vec(frame(&payload, Method::None));
+        assert_eq!(
+            unframe_with(&plain, Some((&key, 0)), None),
+            Err(Bad),
+            "a clear block is not sealed"
+        );
     }
 }

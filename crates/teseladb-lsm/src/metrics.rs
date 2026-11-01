@@ -31,6 +31,9 @@ pub struct LsmMetrics {
     pub files: usize,
     /// Data blocks written since the LSM opened, by compression code (`sst-format.md`).
     pub blocks_written: [u64; 4],
+    /// Bytes of the data blocks written since the LSM opened, before and after compression
+    /// (framed, without the padding to the page): the compression rate of 004 SC-006.
+    pub block_bytes_written: [u64; 2],
     /// Dictionaries in the manifest.
     pub dictionaries: usize,
 }
@@ -58,14 +61,16 @@ impl Lsm {
             cache_bytes: r.cache.used(),
             memtable_bytes: v.memtables.iter().map(|m| m.borrow().bytes()).sum(),
             files: v.tables().count(),
-            blocks_written: [0; 4],
-            dictionaries: 0,
+            blocks_written: c.blocks,
+            block_bytes_written: c.block_bytes,
+            dictionaries: self.state.dictionaries.len(),
         }
     }
 
-    /// The versions of the dictionaries in the manifest, in order.
-    pub fn dictionary_versions(&self) -> Vec<u64> {
-        Vec::new()
+    /// The dictionaries in the manifest: the prefix of their collection and their version, in
+    /// the order of the versions.
+    pub fn dictionaries(&self) -> Vec<(Vec<u8>, u64)> {
+        self.state.dictionaries.values().map(|d| (d.prefix.clone(), d.version)).collect()
     }
 }
 
