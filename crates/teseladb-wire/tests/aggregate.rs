@@ -312,6 +312,14 @@ fn failing_constants_answer_as_refdb() {
     check_files(&[include_str!("aggregate/optimize.out")]);
 }
 
+/// `$out` and `$merge` against a `refrouter` 9.0.4 (`out_merge.out`, 010 FR-012, T029): the
+/// collection `$out` replaces or creates, `$merge` with each of its modes and its pipeline, and
+/// the errors of their arguments and places.
+#[test]
+fn out_and_merge_answer_as_refdb() {
+    check_files(&[include_str!("aggregate/out_merge.out")]);
+}
+
 /// Runs each file's commands on a node of its own over `c` and `o`, against the replies of a
 /// `refrouter` (without what only a sharded cluster gives).
 fn check_files(files: &[&str]) {

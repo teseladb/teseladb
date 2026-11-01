@@ -398,6 +398,9 @@ pub fn aggregate<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
     let cmd_bytes = ctx.cmd.to_bytes()?;
     let raw_cmd = RawDoc::from_bytes(&cmd_bytes)?;
     let a = aggregate_args(&mut *ctx.backend, ctx.cmd)?;
+    if matches!(ctx.cmd.get(super::explain::EXPLAIN), Some(Value::Boolean(true))) {
+        return super::explain::aggregate_flag(ctx);
+    }
     let stages: Vec<RawValue<'_>> = match raw_cmd.get("pipeline") {
         Some(RawValue::Array(p)) => p.iter().collect(),
         _ => Vec::new(),
@@ -422,15 +425,21 @@ pub fn aggregate<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
         collation,
         node: Some((ctx.shared, ns.clone())),
     };
-    let results = pipeline.run_in(docs, &env, sbe).map_err(|e| {
-        let mut err = from_mql(e);
+    let executor = |mut err: CommandError| {
         err.errmsg = format!(
             "Executor error during aggregate command on namespace: {ns_text} :: caused by :: {}",
             err.errmsg
         );
         err
-    })?;
+    };
+    let mut results = pipeline.run_in(docs, &env, sbe).map_err(|e| executor(from_mql(e)))?;
+    let vars = env.vars.clone();
     drop(env);
+    // `$out` and `$merge` write what reaches them and give no documents (010 FR-012).
+    if let Some(w) = pipeline.write() {
+        let docs = std::mem::take(&mut results);
+        super::out_merge::write(ctx, w, docs, vars, executor)?;
+    }
     let mut state = QueryCursor {
         source: Source::Done,
         buffered: VecDeque::from(results),

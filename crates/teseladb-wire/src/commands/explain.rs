@@ -287,6 +287,24 @@ pub fn explain<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Co
 }
 
 /// The explained command as the router echoes it: `findAndModify` in the order of its fields
+/// `aggregate` with `explain: true`: the explain of its pipeline as `explain` gives it in
+/// `queryPlanner` mode, the command echoed without the flag (measured on a `refrouter` 9.0.4).
+pub(crate) fn aggregate_flag<B: Backend + ?Sized>(
+    ctx: &mut Ctx<'_, B>,
+) -> Result<Document, CommandError> {
+    let inner = ctx
+        .cmd
+        .iter()
+        .filter(|(k, _)| *k != EXPLAIN && *k != "$db")
+        .fold(Document::new(), |d, (k, v)| d.with(k, v.clone()));
+    let command = echoed(&inner, "aggregate", ctx.db);
+    let ns = super::query::target(ctx)?;
+    if let Some(view) = super::views::resolve(ctx.backend, &ns)? {
+        return views::on_view(ctx, &ns, &view, ("aggregate", &inner), Verbosity::QueryPlanner);
+    }
+    aggregate::aggregate(ctx, &ns, &inner, Verbosity::QueryPlanner, command)
+}
+
 /// and `aggregate` with its implicit read concern, both without `$db`; the others with `$db`.
 fn echoed(inner: &Document, name: &str, db: &str) -> Document {
     let mut out = Document::new();

@@ -195,6 +195,9 @@ pub(super) fn aggregate<B: Backend + ?Sized>(
         if let Kind::UnionWith(u) = Step::new(d.clone()).kind {
             *d = union_with(ctx, ns, &u, verbosity)?;
         }
+        if let Some(out) = d.get("$out").cloned() {
+            *d = Document::new().with("$out", out_target(&out, &ns.db));
+        }
     }
     let mut planner = Document::new()
         .with("namespace", names::full(ns))
@@ -285,6 +288,18 @@ pub(super) fn aggregate<B: Backend + ?Sized>(
         .with("shards", Document::new().with(shard.as_str(), section))
         .with("command", command)
         .with("ok", 1.0))
+}
+
+/// The target of `$out` as `explain` writes it: its collection, then its database (the
+/// command's, `db`, when it names none).
+fn out_target(spec: &Value, db: &str) -> Document {
+    let (coll, named) = match spec {
+        Value::Document(d) => (d.get("coll").cloned(), d.get("db").cloned()),
+        other => (Some(other.clone()), None),
+    };
+    Document::new()
+        .with("coll", coll.unwrap_or(Value::Null))
+        .with("db", named.unwrap_or(Value::from(db)))
 }
 
 /// Where a scan under `steps` (the query's own after its filter) stops: after the documents a

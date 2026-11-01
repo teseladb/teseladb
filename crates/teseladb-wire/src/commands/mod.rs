@@ -39,6 +39,7 @@ pub mod kinds;
 pub mod maintenance;
 pub mod mutation;
 pub mod names;
+pub mod out_merge;
 pub mod parameters;
 pub mod partial_filter;
 pub(crate) mod plan_exec;
