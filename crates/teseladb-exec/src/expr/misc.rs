@@ -355,6 +355,13 @@ const META_REQUIRED: [(&str, &str); 8] = [
     ("searchRootDocumentId", "$search root document id"),
 ];
 
+/// The error of metadata `name` that no stage before gives: `None` for one that is optional.
+pub(crate) fn missing_meta_error(name: &str) -> Option<MqlError> {
+    META_REQUIRED.iter().find(|(n, _)| *n == name).map(|(_, words)| {
+        error(META_MISSING, format!("query requires {words} metadata, but it is not available"))
+    })
+}
+
 fn parse_meta(arg: RawValue<'_>) -> Result<Misc, MqlError> {
     let RawValue::String(name) = arg else {
         return Err(error(META_STRING, "$meta only supports string arguments"));

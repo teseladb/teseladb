@@ -228,6 +228,8 @@ pub(crate) struct Tried {
     pub returned: u64,
     /// RefDb's score.
     pub score: f64,
+    /// Units of work of the trial.
+    pub works: u64,
 }
 
 impl Ran {
@@ -297,6 +299,7 @@ pub(crate) fn choose<B: Backend + ?Sized>(
                 .unwrap_or(u64::MAX),
             returned: t.trial.advanced,
             score: score(&t.trial),
+            works: t.trial.works,
         });
     }
     // Two plans or more: the first of the order wins, and runs again without a budget.
@@ -862,17 +865,40 @@ pub(crate) fn parsed_filter(
     Ok(f.parsed_query())
 }
 
+/// Where a read leaves what its plans' trial learned (010 FR-002): the node, the collection
+/// and `createdFromQuery` with the read's shape.
+pub(crate) struct CacheNote<'a> {
+    /// The node.
+    pub shared: &'a super::Shared,
+    /// The collection.
+    pub ns: &'a teseladb_meta::catalog::Namespace,
+    /// `createdFromQuery`.
+    pub from: Document,
+    /// The read's shape.
+    pub shape: String,
+}
+
 /// The documents a read of `coll` finds through the index plan that wins, in its order; `None`
-/// when the collection scan wins or no index serves (the caller scans).
+/// when the collection scan wins or no index serves (the caller scans). When plans competed, the
+/// node's plan cache learns of it (`note`).
 pub(crate) fn planned_documents<B: Backend + ?Sized>(
     backend: &mut B,
     coll: &CollectionEntry,
     read: &ReadPlan<'_>,
+    note: Option<CacheNote<'_>>,
 ) -> Result<Option<Vec<Vec<u8>>>, CommandError> {
     let indexes = plan_indexes(backend, coll)?;
     if indexes.is_empty() {
         return Ok(None);
     }
-    Ok(choose(backend, coll, &indexes, read)?
-        .map(|c| c.winner.found.into_iter().map(|(_, d)| d).collect()))
+    let Some(chosen) = choose(backend, coll, &indexes, read)? else { return Ok(None) };
+    if let Some(n) = note
+        && let Some(mut learned) =
+            super::explain::learned(n.ns, read.parsed, &indexes, &chosen, (n.from, n.shape))
+    {
+        learned.catalog = super::plan_cache::catalog_signature(coll, &indexes);
+        let now = i64::try_from(backend.now_ms()).unwrap_or(i64::MAX);
+        super::lock(n.shared).plan_cache.learn(&super::names::full(n.ns), learned, now);
+    }
+    Ok(Some(chosen.winner.found.into_iter().map(|(_, d)| d).collect()))
 }

@@ -65,8 +65,13 @@ tlc() {
     echo "tlc: without Java the model has to be under $ROOT" >&2
     return 2
   fi
-  docker run --rm -v "$ROOT:/w" -w /w eclipse-temurin:21-jre \
-    java -XX:+UseParallelGC -cp .tools/tla2tools.jar tlc2.TLC -workers auto -metadir "$meta" \
+  # The jar is mounted on its own: in a worktree `.tools/tla2tools.jar` is a link to a path of the
+  # main checkout that the container does not see.
+  local jar=$JAR
+  [[ -L $jar ]] && jar=$(readlink "$jar")
+  [[ $jar == /* ]] || jar="$ROOT/.tools/$jar"
+  docker run --rm -v "$ROOT:/w" -v "$jar:/opt/tla2tools.jar:ro" -w /w eclipse-temurin:21-jre \
+    java -XX:+UseParallelGC -cp /opt/tla2tools.jar tlc2.TLC -workers auto -metadir "$meta" \
     -config "${cfg#"$ROOT"/}" "${model#"$ROOT"/}" "$@"
 }
 

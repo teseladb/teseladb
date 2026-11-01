@@ -5,9 +5,10 @@ use crate::checkers::Violation;
 use crate::history::History;
 use crate::workloads::{
     Workload, indexes::Indexes, kv::KvWorkload, lsm::LsmWorkload, lsm_ingest::LsmIngest,
-    meta2::Meta2Workload, multirange::MultiRangeWorkload, range_docs::RangeDocsWorkload,
-    relocate::RelocateWorkload, special_collections::SpecialCollections, splits::SplitsWorkload,
-    storage::StorageWorkload, txn_append::Append, txn_bank::Bank,
+    meta2::Meta2Workload, multirange::MultiRangeWorkload, queries::Queries,
+    range_docs::RangeDocsWorkload, relocate::RelocateWorkload,
+    special_collections::SpecialCollections, splits::SplitsWorkload, storage::StorageWorkload,
+    txn_append::Append, txn_bank::Bank,
 };
 use crate::world::World;
 
@@ -56,6 +57,7 @@ impl Registry {
         r.register_workload("txn-append", Append::boxed).expect("a new name");
         r.register_workload("indexes", Indexes::boxed).expect("a new name");
         r.register_workload("special-collections", SpecialCollections::boxed).expect("a new name");
+        r.register_workload("queries", Queries::boxed).expect("a new name");
         r
     }
 

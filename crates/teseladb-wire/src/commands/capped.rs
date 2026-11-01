@@ -195,6 +195,7 @@ pub fn purge<B: Backend + ?Sized>(
         ns: full(ns),
         collection: c.id,
         tenant: c.tenant,
+        unlogged: true,
         ..Default::default()
     };
     loop {

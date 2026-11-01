@@ -159,6 +159,13 @@ impl Mem {
         Mem { now: 1_700_000_000_000, replicas: 3, ..Mem::default() }
     }
 
+    /// The stored versions a range's scans return: all but those that only serve the history of
+    /// a document (014).
+    pub fn stored(&self) -> BTreeMap<&Vec<u8>, &Vec<u8>> {
+        let history = |k: &Vec<u8>| self.types.get(k) == Some(&teseladb_range::HISTORY_VALUE);
+        self.data.iter().filter(|(k, _)| !history(k)).collect()
+    }
+
     /// Runs `cmd` on database `db`; the reply or the error document.
     pub fn run(&mut self, db: &str, cmd: Document) -> Document {
         let shared = std::mem::take(&mut self.shared);
@@ -425,14 +432,18 @@ impl Backend for Mem {
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
         use teseladb_range::intents::IntentOp;
         self.txn_read(at, uncertain_to)?;
+        // As a range's scan: the versions that only serve the history are no documents.
+        let history = teseladb_range::HISTORY_VALUE;
         let mut rows: BTreeMap<Vec<u8>, Vec<u8>> = self
             .data
             .range(start.to_vec()..end.to_vec())
+            .filter(|(k, _)| self.types.get(*k) != Some(&history))
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         let own = view.own.and_then(|t| self.intents.get(&t.0)).cloned().unwrap_or_default();
         for (k, w) in own.into_iter().filter(|(k, _)| start <= k.as_slice() && k.as_slice() < end) {
             match w {
+                IntentOp::Put { value_type, .. } if value_type == history => None,
                 IntentOp::Put { value, .. } => rows.insert(k, value),
                 IntentOp::Delete => rows.remove(&k),
             };
@@ -570,9 +581,11 @@ impl Backend for Mem {
         if let Some(f) = self.on_scan_data.as_mut() {
             f(start, &mut self.data);
         }
+        // As a range's scan: the versions that only serve the history are no documents.
         Ok(self
-            .data
-            .range(start.to_vec()..end.to_vec())
+            .stored()
+            .into_iter()
+            .filter(|(k, _)| start <= k.as_slice() && k.as_slice() < end)
             .take(limit)
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect())
