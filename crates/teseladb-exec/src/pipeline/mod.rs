@@ -69,9 +69,14 @@ pub trait Env {
         Ok((String::new(), Vec::new()))
     }
 
+    /// The engine of `$function` and `$accumulator` (016); none by default.
+    fn js(&self) -> Option<std::rc::Rc<dyn crate::expr::js::JsEngine>> {
+        None
+    }
+
     /// The scope of an expression over `doc`.
     fn scope(&self, doc: &Document) -> Scope {
-        Scope::new(doc.clone(), self.vars()).with_collation(self.collation())
+        Scope::new(doc.clone(), self.vars()).with_collation(self.collation()).with_js(self.js())
     }
 }
 

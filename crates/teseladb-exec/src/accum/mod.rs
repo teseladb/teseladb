@@ -76,9 +76,24 @@ pub(crate) enum NKind {
 pub(crate) enum Accumulator {
     Unary(Unary, Expr),
     Count,
-    N { kind: NKind, input: Expr, n: Expr },
-    Top { top: bool, many: bool, output: Expr, n: Option<Expr>, sort: SortSpec },
-    Percentile { input: Expr, ps: Option<Vec<f64>> },
+    N {
+        kind: NKind,
+        input: Expr,
+        n: Expr,
+    },
+    Top {
+        top: bool,
+        many: bool,
+        output: Expr,
+        n: Option<Expr>,
+        sort: SortSpec,
+    },
+    Percentile {
+        input: Expr,
+        ps: Option<Vec<f64>>,
+    },
+    /// `$accumulator`, whose functions the scope's JavaScript engine runs.
+    Js(Box<crate::expr::js::Accumulator>),
 }
 
 /// The running state of an accumulator over one group.
@@ -89,6 +104,8 @@ pub(crate) enum State {
     Deviation(Deviation),
     /// `$first` (the first value, if any document came) and `$last`.
     One(Option<Value>),
+    /// The state of `$accumulator` after its first document, and the scope that runs it.
+    Js(Option<(Value, Scope)>),
     /// The values so far (`$push`, `$addToSet`, the N family, `$median`, `$percentile`).
     Many(Vec<Value>),
     /// The sort keys and outputs of the `$top` family.
@@ -160,6 +177,9 @@ impl Accumulator {
             "$count" => Accumulator::Count,
             "$firstN" | "$lastN" | "$minN" | "$maxN" => parse_n(name, arg, ctx)?,
             "$top" | "$bottom" | "$topN" | "$bottomN" => parse_top(name, arg, ctx)?,
+            "$accumulator" => {
+                Accumulator::Js(Box::new(crate::expr::js::Accumulator::parse(arg, ctx)?))
+            }
             "$median" | "$percentile" => match parse_percentile(name, arg, ctx)? {
                 Form::Percentile { input, ps } => Accumulator::Percentile { input, ps },
                 _ => return Err(error(BAD_VALUE, format!("{name} is not a percentile"))),
@@ -190,6 +210,7 @@ impl Accumulator {
             Accumulator::N { .. } => State::NCount(None, Vec::new()),
             Accumulator::Top { .. } => State::Keyed(Vec::new()),
             Accumulator::Percentile { .. } => State::Many(Vec::new()),
+            Accumulator::Js(_) => State::Js(None),
         }
     }
 
@@ -233,6 +254,14 @@ impl Accumulator {
                 }
                 Ok(())
             }
+            (Accumulator::Js(js), State::Js(st)) => {
+                let state = match st.take() {
+                    Some((v, _)) => v,
+                    None => js.start(scope)?,
+                };
+                *st = Some((js.step(state, doc, scope)?, scope.clone()));
+                Ok(())
+            }
             _ => Err(error(BAD_VALUE, "accumulator state of another kind")),
         }
     }
@@ -266,6 +295,8 @@ impl Accumulator {
                 percentiles(items.iter().filter_map(f64_of).collect(), ps.as_deref())
             }
             (_, State::Many(items)) => Value::Array(items),
+            (Accumulator::Js(js), State::Js(Some((v, scope)))) => js.finish(v, &scope)?,
+            (Accumulator::Js(_), State::Js(None)) => Value::Null,
             _ => return Err(error(BAD_VALUE, "accumulator state of another kind")),
         })
     }
