@@ -330,6 +330,11 @@ fn parse_similarity(
     Ok(Misc::Similarity { kind, vectors, score })
 }
 
+/// The metadata of a document's sort key, empty before any `$sort`.
+pub(crate) const SORT_KEY: &str = "sortKey";
+/// The metadata that marks a change stream's control events, false elsewhere.
+const CONTROL_EVENT: &str = "changeStreamControlEvent";
+
 /// The `$meta` names that give nothing when the document has no such metadata, and those that
 /// are an error then, with the words of the error.
 const META_OPTIONAL: [&str; 10] = [
@@ -485,16 +490,15 @@ impl Misc {
                 id[4..].copy_from_slice(&scope.random_u64().to_be_bytes());
                 Ok(Some(Value::ObjectId(id)))
             }
-            Misc::Meta(name) => match scope.meta.get(name) {
-                Some(v) => Ok(Some(v.clone())),
-                None => match META_REQUIRED.iter().find(|(n, _)| n == name) {
-                    Some((_, words)) => Err(error(
-                        META_MISSING,
-                        format!("query requires {words} metadata, but it is not available"),
-                    )),
-                    None => Ok(None),
-                },
-            },
+            // A pipeline checks before it runs that a stage gives the metadata it reads; where
+            // nothing gives it (`$redact`, a `find` filter's `$expr`) it is missing, and the
+            // sort key and the change stream mark have a value of their own (measured).
+            Misc::Meta(name) => Ok(match scope.meta.get(name) {
+                Some(v) => Some(v.clone()),
+                None if name == SORT_KEY => Some(Value::Array(Vec::new())),
+                None if name == CONTROL_EVENT => Some(Value::Boolean(false)),
+                None => None,
+            }),
         }
     }
 }

@@ -47,6 +47,7 @@ use teseladb_mql::{ErrorCode, MqlError};
 
 pub(crate) use logic::sort_by_values;
 pub use logic::{order, truthy, try_sort_by};
+pub(crate) use misc::SORT_KEY;
 pub use path::field_path;
 
 /// The result of an expression: a value, or nothing (a missing field).
@@ -241,6 +242,11 @@ pub enum Op {
     DateArith(Box<dates_arith::DateArith>),
     /// `$dateFromString`.
     FromString(Box<date_parse::FromString>),
+}
+
+/// Whether metadata `name` must come from a stage before the one that reads it.
+pub(crate) fn meta_is_required(name: &str) -> bool {
+    misc::missing_meta_error(name).is_some()
 }
 
 /// The error of metadata `name` that no stage before gives.

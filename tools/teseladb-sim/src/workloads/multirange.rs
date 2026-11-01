@@ -1134,14 +1134,14 @@ pub(crate) fn record_answer(
             prefer.insert(rec.client, node);
         }
         Ok(Reply::Batch(_)) => rec.result = OpResult::Unknown,
-        Ok(Reply::Intents { .. } | Reply::Record(_))
+        Ok(Reply::Intents { .. } | Reply::Record(_) | Reply::Changes { .. })
         | Err(
             RangeError::WriteConflict
             | RangeError::IntentConflict(_)
             | RangeError::ReadIntent { .. }
             | RangeError::ReadUncertain { .. }
             | RangeError::NoSuchTransaction,
-        ) => unreachable!("the workload runs no transactions"),
+        ) => unreachable!("the workload runs no transactions nor change streams"),
         // Refused before anything was proposed: it imposes nothing.
         Err(RangeError::NotLeader { hint }) => {
             rec.result = OpResult::Rejected;

@@ -158,6 +158,8 @@ fn an_event_comes_from_its_change() {
             op: 2,
             update: Some(update.clone()),
             replace: false,
+            delete: false,
+            doc: None,
         }),
     };
     let ns = Namespace { db: "shop".into(), coll: Some("orders".into()) };

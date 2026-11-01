@@ -315,10 +315,16 @@ impl DescTable<'_> {
         if at <= r.start.as_slice() || !r.contains(at) {
             return Err(Group0Error::BadSplit);
         }
-        let at = teseladb_keys::space::cut_outside(at, (&r.start, &r.end), |t, c| {
-            capped.contains(&(t, c))
-        })
-        .ok_or(Group0Error::BadSplit)?;
+        let is_capped = |t: u32, c: u32| capped.contains(&(t, c));
+        // A change meta (014) stays with its document: the leader cuts before the document.
+        let collection = |i: usize| Some(u32::from_be_bytes(at.get(i..i + 4)?.try_into().ok()?));
+        if let (Some(t), Some(c)) = (collection(1), collection(5))
+            && teseladb_keys::space::meta_document(at, is_capped(t, c)).is_some()
+        {
+            return Err(Group0Error::BadSplit);
+        }
+        let at = teseladb_keys::space::cut_outside(at, (&r.start, &r.end), is_capped)
+            .ok_or(Group0Error::BadSplit)?;
         let new = self.ids.next().ok_or(Group0Error::OutOfGroupIds)?;
         self.range_mut(g)?.pending_split = Some(at);
         self.split_ids.insert(g, new);

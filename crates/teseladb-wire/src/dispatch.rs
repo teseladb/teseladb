@@ -10,7 +10,8 @@ use crate::commands::query::FIND;
 use teseladb_auth::users::advertised_mechanisms;
 
 use crate::commands::{
-    Backend, Ctx, Shared, audit, auth, authorize, is_data_command, lock, run, txn, txn_concern,
+    Backend, Ctx, Shared, audit, auth, authorize, is_data_command, lock, profile, run, txn,
+    txn_concern,
 };
 use crate::concerns::canonical;
 use crate::connection::{Connection, Kind, Request};
@@ -518,6 +519,7 @@ fn run_op<B: Backend + ?Sized>(
         progress: None,
     };
     let id = lock(shared).ops.begin(op);
+    let started_micros = backend.now_micros();
     let (result, mut events) = {
         let mut guarded = Guarded::new(backend, shared, id);
         let (db, cmd) = (req.db.as_str(), &req.command);
@@ -551,6 +553,19 @@ fn run_op<B: Backend + ?Sized>(
         g.counters.count(name, &req.command, matches!(result, Some(Err(_))));
     }
     audit::record(shared, conn, backend, events, 0);
+    let ns = op_ns(&req.db, &req.command);
+    let ended = profile::Ended {
+        db: &req.db,
+        command: &req.command,
+        op: op_type(name),
+        ns: &ns,
+        reply: result.as_ref(),
+        micros: backend.now_micros().saturating_sub(started_micros),
+        client: conn.peer.as_deref(),
+        app_name: conn.hello.app_name.as_deref(),
+        user: conn.auth.user.as_ref().map(|u| format!("{}@{}", u.name.user, u.name.db)),
+    };
+    profile::after_command(backend, shared, &ended);
     result.map(|r| r.map_err(|e| interrupted_find(e, name, &req.db, &req.command)))
 }
 

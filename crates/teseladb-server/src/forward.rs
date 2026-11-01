@@ -37,6 +37,8 @@ const MERGE_PROBE: u8 = 7;
 const META2: u8 = 8;
 /// Tag of [`Request::Gate`].
 const GATE: u8 = 9;
+/// Tag of [`Request::CurrentOps`].
+const CURRENT_OPS: u8 = 10;
 /// The answer of a node to [`Request::Gate`] that applies the gates.
 pub const GATE_HELD: u8 = 1;
 /// The answer of a node to [`Request::Gate`] that does not apply them yet.
@@ -96,6 +98,9 @@ pub enum Request {
     /// Whether the node that receives it applies write gates `want` (007 FR-029): the answer is
     /// [`GATE_HELD`] if so, [`GATE_BEHIND`] if not yet.
     Gate(WriteGate),
+    /// The operations in progress on the node that receives it (`currentOp`, 010 FR-016): the
+    /// answer is a BSON document whose `ops` array holds each one as `currentOp` describes it.
+    CurrentOps,
 }
 
 impl Request {
@@ -150,6 +155,7 @@ impl Request {
                 e.u8(GATE).u32(g.fsync_locks).u8(u8::from(g.user_writes_blocked));
                 e.finish()
             }
+            Request::CurrentOps => vec![CURRENT_OPS],
         }
     }
 
@@ -215,6 +221,10 @@ impl Request {
                 };
                 d.finish()?;
                 Ok(Request::Gate(WriteGate { fsync_locks, user_writes_blocked }))
+            }
+            CURRENT_OPS => {
+                d.finish()?;
+                Ok(Request::CurrentOps)
             }
             _ => Err(DecodeError::InvalidValue { offset: 0 }),
         }
@@ -320,6 +330,8 @@ mod tests {
         assert!(Request::decode(&[KILL_SESSIONS, 1, 0]).is_err());
         // Gates with a flag that is no bool, cut short, or with bytes after them.
         assert!(Request::decode(&[GATE, 0, 0, 0, 1, 2]).is_err());
+        assert_eq!(Request::decode(&Request::CurrentOps.encode()), Ok(Request::CurrentOps));
+        assert!(Request::decode(&[CURRENT_OPS, 0]).is_err());
         assert!(Request::decode(&[GATE, 0, 0, 0, 1]).is_err());
         assert!(Request::decode(&[GATE, 0, 0, 0, 1, 1, 0]).is_err());
         assert!(FetchReply::decode(&[]).is_err());

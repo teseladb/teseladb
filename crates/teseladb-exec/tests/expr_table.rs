@@ -3,8 +3,10 @@
 //! document `{x: <result>}` in canonical extended JSON (`{}` when the result is missing), or
 //! `!! `, the error code, a tab and the message. Every expression reads `tests/expr/doc.json`.
 
-use teseladb_bson::{Document, RawDoc, extjson};
+use teseladb_bson::{Document, RawDoc, RawValue, extjson};
 use teseladb_exec::expr::{Ctx, Expr, Scope};
+use teseladb_exec::pipeline::Pipeline;
+use teseladb_mql::MqlError;
 
 const DOC: &str = include_str!("expr/doc.json");
 
@@ -13,14 +15,32 @@ fn canonical(d: &Document) -> String {
     extjson::to_canonical(RawDoc::from_bytes(&bytes).expect("a document"))
 }
 
+/// The error of the `$project` the expressions were measured in when `e` reads metadata no
+/// stage gives (the pipeline checks it before it runs; 40218).
+fn missing_meta(e: &str) -> Result<(), MqlError> {
+    let holder = extjson::parse(&format!(r#"{{"p":[{{"$project":{{"x":{e}}}}}]}}"#))
+        .expect("json")
+        .to_bytes()
+        .expect("small");
+    let raw = RawDoc::from_bytes(&holder).expect("a document");
+    let Some(RawValue::Array(p)) = raw.get("p") else { panic!("not an array") };
+    let stages: Vec<RawValue<'_>> = p.iter().collect();
+    match Pipeline::parse_command(&stages, &Ctx::checked([]), true) {
+        Err(err) if err.code.code == 40_218 => Err(err),
+        _ => Ok(()),
+    }
+}
+
 /// What TeselaDB gives for expression `e`, written as the measurements are.
 fn ours(e: &str) -> String {
     let holder =
         extjson::parse(&format!(r#"{{"e":{e}}}"#)).expect("json").to_bytes().expect("small");
     let raw = RawDoc::from_bytes(&holder).expect("a document");
     let doc = extjson::parse(DOC).expect("the document");
-    let r = Expr::parse_in(raw.get("e").expect("e"), &Ctx::checked([]))
-        .and_then(|x| x.eval(&doc, &Scope::new(doc.clone(), None)));
+    let r = Expr::parse_in(raw.get("e").expect("e"), &Ctx::checked([])).and_then(|x| {
+        missing_meta(e)?;
+        x.eval(&doc, &Scope::new(doc.clone(), None))
+    });
     match r {
         Ok(v) => {
             let mut out = Document::new();

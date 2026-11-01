@@ -894,7 +894,9 @@ impl RangeDocsWorkload {
                 self.last_read.insert(client, k);
                 seen = Some(v);
             }
-            Ok(Reply::Batch(_)) => unreachable!("the workload does not scan"),
+            Ok(Reply::Batch(_) | Reply::Changes { .. }) => {
+                unreachable!("the workload does not scan nor read change streams")
+            }
             Ok(Reply::Intents { .. } | Reply::Record(_)) => {
                 unreachable!("the workload runs no transactions")
             }

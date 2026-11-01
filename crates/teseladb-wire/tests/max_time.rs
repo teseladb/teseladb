@@ -419,6 +419,56 @@ fn current_op_lists_and_filters_the_node_operations() {
     assert_eq!(d.get("killPending"), Some(&Value::Boolean(true)));
 }
 
+/// `currentOp` and `$currentOp` list the operations of every node, this one's first, and the
+/// filter applies to all of them (010 T033, FR-016).
+#[test]
+fn current_op_lists_the_operations_of_every_node() {
+    let mut m = node(0);
+    let mut conn = Connection::new(1);
+    let other = |node: &str, op: &str| {
+        Document::new()
+            .with("shard", node)
+            .with("type", "op")
+            .with("opid", format!("{node}:3"))
+            .with("op", op)
+    };
+    m.other_ops = vec![other("node2", "query"), other("node3", "insert")];
+    let r =
+        run(&mut m, &mut conn, "admin", Document::new().with("currentOp", 1).with("$all", true));
+    let Value::Array(all) = field(&r, "inprog") else { panic!("{r:?}") };
+    let shards: Vec<Option<&Value>> = all
+        .iter()
+        .map(|d| match d {
+            Value::Document(d) => d.get("shard"),
+            _ => None,
+        })
+        .collect();
+    let (n1, n2, n3) = (Value::from("node1"), Value::from("node2"), Value::from("node3"));
+    assert_eq!(shards, [Some(&n1), Some(&n2), Some(&n3)]);
+    let r =
+        run(&mut m, &mut conn, "admin", Document::new().with("currentOp", 1).with("op", "insert"));
+    let Value::Array(some) = field(&r, "inprog") else { panic!("{r:?}") };
+    assert_eq!(some, &vec![Value::Document(other("node3", "insert"))]);
+    let agg = Document::new()
+        .with("aggregate", 1)
+        .with(
+            "pipeline",
+            vec![
+                Value::Document(Document::new().with("$currentOp", Document::new())),
+                Value::Document(
+                    Document::new().with("$match", Document::new().with("shard", "node2")),
+                ),
+            ],
+        )
+        .with("cursor", Document::new());
+    let r = run(&mut m, &mut conn, "admin", agg);
+    let Value::Document(cursor) = field(&r, "cursor") else { panic!("{r:?}") };
+    assert_eq!(
+        cursor.get("firstBatch"),
+        Some(&Value::Array(vec![Value::Document(other("node2", "query"))]))
+    );
+}
+
 #[test]
 fn kill_op_reads_its_op_as_a_refrouter_does() {
     let mut m = node(0);

@@ -388,6 +388,15 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         self.inner.end_operation();
     }
 
+    fn changes(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        from: teseladb_hlc::Hlc,
+    ) -> Result<crate::commands::ChangeBatch, CommandError> {
+        self.call(|b| b.changes(start, end, from))
+    }
+
     fn set_read_preference(&mut self, pref: Option<teseladb_router::read_pref::ReadPreference>) {
         self.inner.set_read_preference(pref);
     }
@@ -512,6 +521,10 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         self.inner.kill_everywhere(scope)
     }
 
+    fn other_operations(&mut self) -> Result<Vec<Document>, CommandError> {
+        self.inner.other_operations()
+    }
+
     fn config_documents(&mut self, coll: &str) -> Result<Vec<Document>, CommandError> {
         let all = self.call(|b| b.config_documents(coll))?;
         Ok(tenants::own_config_documents(self.tenant, all))
@@ -606,6 +619,10 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
 
     fn process(&mut self) -> crate::commands::diagnostics::ProcessFacts {
         self.inner.process()
+    }
+
+    fn log_slow_query(&mut self, attr: &teseladb_bson::Document) {
+        self.inner.log_slow_query(attr)
     }
 
     fn log_warning(&mut self, id: i32, msg: &str, attr: &teseladb_bson::Document) {
