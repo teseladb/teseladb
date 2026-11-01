@@ -22,6 +22,7 @@
 //! - `doubleMetaphone`, in the documentation, is not a filter `refsearch` 1.70.6 accepts.
 
 mod arabic_script;
+mod brazilian;
 mod cjk;
 mod delimiter;
 mod folding;
@@ -33,6 +34,7 @@ mod soundex;
 mod stemmers;
 
 use arabic_script::{persian_normal, persian_stem, sorani_normal, sorani_stem};
+use brazilian::brazilian_stem;
 use cjk::{cjk_bigrams, cjk_width};
 use indic::{bengali_normal, bengali_stem, hindi_normal, hindi_stem, indic_normal};
 use inflection::{bulgarian_stem, czech_stem, indonesian_stem, latvian_stem};
@@ -221,6 +223,8 @@ pub enum TokenFilter {
     BengaliNormalization,
     /// The Bengali stemmer of the Bengali analyzer.
     BengaliStemming,
+    /// The stemmer of the Brazilian Portuguese analyzer.
+    BrazilianStemming,
     /// Writes Sorani in one spelling (Sorani analyzer).
     SoraniNormalization,
     /// Removes the Sorani postpositions, possessives and noun endings (Sorani analyzer).
@@ -598,6 +602,7 @@ impl TokenFilter {
             TokenFilter::HindiStemming => rewrite(tokens, true, hindi_stem),
             TokenFilter::BengaliNormalization => rewrite(tokens, false, bengali_normal),
             TokenFilter::BengaliStemming => rewrite(tokens, true, bengali_stem),
+            TokenFilter::BrazilianStemming => rewrite(tokens, true, brazilian_stem),
             TokenFilter::SoraniNormalization => rewrite(tokens, false, sorani_normal),
             TokenFilter::SoraniStemming => rewrite(tokens, true, sorani_stem),
             TokenFilter::Regex { pattern, replacement, matches } => {

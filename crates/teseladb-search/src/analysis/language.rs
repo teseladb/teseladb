@@ -161,6 +161,7 @@ pub fn language(language: &str) -> Option<(Vec<CharFilter>, Tokenizer, Vec<Token
             TokenFilter::BengaliStemming,
         ],
         "polish" => vec![TokenFilter::Lowercase, stop, TokenFilter::Stempel],
+        "brazilian" => vec![TokenFilter::Lowercase, stop, TokenFilter::BrazilianStemming],
         _ if cjk => {
             vec![TokenFilter::CjkWidth, TokenFilter::Lowercase, TokenFilter::CjkBigram, stop]
         }

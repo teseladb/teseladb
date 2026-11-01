@@ -309,3 +309,23 @@ fn french_light_stemmer_matches_refsearch() {
         ]
     );
 }
+
+#[test]
+fn stems_brazilian_portuguese() {
+    let f = [TokenFilter::BrazilianStemming];
+    // Too short or too long: kept as they are, accents included.
+    assert_eq!(texts(&f, "fé pé"), ["fé", "pé"]);
+    let long = "a".repeat(30);
+    assert_eq!(texts(&f, &long), [long.as_str()]);
+    // Something other than letters: folded, not stemmed.
+    assert_eq!(texts(&f, "ações2"), ["acoes2"]);
+    // Standard suffixes in R2, verb suffixes in RV, residual vowels and the final e.
+    assert_eq!(
+        texts(&f, "assistência mentiras cantava aquele dengue"),
+        ["assistente", "ment", "cantav", "aquel", "deng"]
+    );
+    // A suffix whose region fails lets a shorter one go.
+    assert_eq!(texts(&f, "abencia atira barbalarbeira"), ["abenc", "atir", "barbalarbeir"]);
+    // A word with a supplementary character is not stemmed.
+    assert_eq!(texts(&f, "casa\u{1d400}"), ["casa\u{1d400}"]);
+}
