@@ -109,6 +109,14 @@ impl<B: Backend + ?Sized> WireEnv<'_, B> {
         Ok((names::full(ns), out))
     }
 
+    /// `$listCatalog`: the catalog entry of the aggregated collection, or of every collection
+    /// with `aggregate: 1` on `admin`.
+    fn list_catalog(&self) -> Result<Vec<Document>, CommandError> {
+        let Some((_, ns)) = &self.node else { return Ok(Vec::new()) };
+        let only = (ns.coll != COLLECTIONLESS).then_some(ns.coll.as_str());
+        super::list_catalog::entries(&mut **self.backend.borrow_mut(), &ns.db, only)
+    }
+
     /// `$listClusterCatalog`: every collection and view of the command's database (of every
     /// database on `admin`), as `listCollections` writes them with their namespace and database,
     /// none sharded; `shards` names the node and `tracked` says none is (measured on a `refrouter`
@@ -382,6 +390,11 @@ impl<B: Backend + ?Sized> Env for WireEnv<'_, B> {
     }
 
     fn check_search(&self, stage: &str, spec: &Document) -> Result<(), MqlError> {
+        // Only `$search` asks `refsearch` while the pipeline is planned (measured on 9.0.4: the
+        // errors of `$searchMeta` and `$vectorSearch` carry the executor's prefix).
+        if stage != "$search" {
+            return Ok(());
+        }
         let Some((shared, ns)) = &self.node else { return Ok(()) };
         let mut backend = self.backend.borrow_mut();
         let found =
@@ -402,6 +415,9 @@ impl<B: Backend + ?Sized> Env for WireEnv<'_, B> {
             "$indexStats" => self.index_stats().map_err(to_mql),
             "$currentOp" => self.current_ops().map_err(to_mql),
             "$listClusterCatalog" => self.cluster_catalog(spec).map_err(to_mql),
+            // TeselaDB loads no extensions.
+            "$listExtensions" => Ok(Vec::new()),
+            "$listCatalog" => self.list_catalog().map_err(to_mql),
             other => Err(MqlError::new(
                 teseladb_mql::ErrorCode { code: BAD_VALUE.code, name: BAD_VALUE.name },
                 format!("{other} is not supported by this node"),
@@ -514,6 +530,32 @@ pub(crate) fn read_through_staged<B: Backend + ?Sized>(
     Ok(pipeline.run(docs, &env).map(|out| (out, sbe)).map_err(from_mql))
 }
 
+/// Runs `stages` (BSON documents) of database `db` over `docs`, as the stages of a view run
+/// (no search stages, simple collation).
+pub(crate) fn run_stages<B: Backend + ?Sized>(
+    backend: &mut B,
+    db: &str,
+    stages: &[Vec<u8>],
+    docs: Vec<Document>,
+) -> Result<Vec<Document>, CommandError> {
+    let raws: Vec<RawDoc<'_>> =
+        stages.iter().map(|b| RawDoc::from_bytes(b)).collect::<Result<_, _>>()?;
+    let values: Vec<RawValue<'_>> = raws.into_iter().map(RawValue::Document).collect();
+    let pipeline = Pipeline::parse(&values, &ExprCtx::checked(std::iter::empty::<&str>()))
+        .map_err(from_mql)?;
+    let env = WireEnv {
+        backend: RefCell::new(backend),
+        db,
+        vars: Document::new(),
+        concern: ReadConcern::Local,
+        collation: collation_value(None)?,
+        allow_disk_use: true,
+        node: None,
+        searched: RefCell::new(Vec::new()),
+    };
+    pipeline.run(docs, &env).map_err(from_mql)
+}
+
 /// The arguments of `aggregate` besides its pipeline.
 struct AggregateArgs {
     batch_size: Option<usize>,
@@ -528,6 +570,10 @@ struct AggregateArgs {
 /// Reads the `cursor` document: `batchSize` only.
 fn cursor_batch_size(cmd: &Document) -> Result<Option<usize>, CommandError> {
     let c = match cmd.get("cursor") {
+        // `explain: true` needs no cursor (measured on a `refnode` 9.0.4).
+        None if matches!(cmd.get(super::explain::EXPLAIN), Some(Value::Boolean(true))) => {
+            return Ok(None);
+        }
         None => {
             return Err(CommandError::new(
                 FAILED_TO_PARSE,
@@ -674,6 +720,16 @@ pub fn aggregate<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
     teseladb_exec::pipeline::optimize::optimize_stages(&stages, a.vars.as_ref())
         .map_err(from_mql)?;
     check_system_namespace(&pipeline, &ns, on_collection)?;
+    // On a view whose pipeline has stages, `$listCatalog` comes after them (measured).
+    if pipeline.system_stage() == Some("$listCatalog")
+        && let Some(c) = ctx.backend.collection(&ns)?
+        && matches!(super::kinds::kind_of(&c)?, CollectionKind::View { pipeline, .. } if !pipeline.is_empty())
+    {
+        return Err(CommandError::new(
+            crate::error::CS_NOT_FIRST,
+            "$listCatalog is only valid as the first stage in a pipeline",
+        ));
+    }
     if on_collection && ctx.backend.collection(&ns)?.is_some() {
         pipeline.check_collection_plan().map_err(from_mql)?;
     }
@@ -829,8 +885,7 @@ fn planned_read<B: Backend + ?Sized>(
             .with("projection", Document::new()),
         shape: super::plan_cache::read_shape(&parsed, sort.as_ref(), None, None),
     };
-    let Some((found, keys)) =
-        super::plan_exec::planned_keyed(ctx.backend, &coll, &read, Some(note))?
+    let Some((found, keys)) = super::plan_exec::planned_keyed(ctx.backend, &coll, &read, note)?
     else {
         return Ok(None);
     };
@@ -877,6 +932,19 @@ fn check_system_namespace(
             Err(CommandError::new(
                 INVALID_NAMESPACE,
                 "$currentOp must be run against the 'admin' database with {aggregate: 1}",
+            ))
+        }
+        Some("$listExtensions") if on_collection || ns.db != super::admin::ADMIN_DB => {
+            Err(CommandError::new(
+                INVALID_NAMESPACE,
+                "$listExtensions must be run against the 'admin' database with {aggregate: 1}",
+            ))
+        }
+        Some("$listCatalog") if !on_collection && ns.db != super::admin::ADMIN_DB => {
+            Err(CommandError::new(
+                INVALID_NAMESPACE,
+                "Collectionless $listCatalog must be run against the 'admin' database with \
+                 {aggregate: 1}",
             ))
         }
         Some("$listClusterCatalog") if on_collection => Err(CommandError::new(

@@ -153,3 +153,38 @@ fn keys_fall_in_their_range() {
     assert!(in_range(b"z", b"a", b""));
     assert!(!in_range(b"0", b"a", b""));
 }
+
+/// Three replicas analyze the same log each on its own, with other batches and with the split
+/// at another moment, and end with the same segments (FR-011).
+#[test]
+fn three_replicas_build_the_same_segments() {
+    let all = changes();
+    let mut log = all.clone();
+    log.push((vec![2], Some(doc(5))));
+    log.push((vec![6], None));
+    log.push((vec![9], Some(doc(1))));
+    let mut replicas = vec![Indexer::new(definition()); 3];
+    // One batch, then the split.
+    replicas[0].apply(log.clone()).expect("applied");
+    replicas[0].reshape(&bounds(&[4])).expect("split");
+    // The split first, then one change at a time.
+    replicas[1].reshape(&bounds(&[4])).expect("split");
+    for c in log.clone() {
+        replicas[1].apply([c]).expect("applied");
+    }
+    // Two batches around the split.
+    let (a, b) = log.split_at(5);
+    replicas[2].apply(a.to_vec()).expect("applied");
+    replicas[2].reshape(&bounds(&[4])).expect("split");
+    replicas[2].apply(b.to_vec()).expect("applied");
+    let first = replicas[0].contents();
+    assert_eq!(first.len(), 2);
+    for r in &replicas {
+        assert_eq!(r.analyzers_version(), crate::analysis::ANALYZERS_VERSION);
+        assert_eq!(r.contents(), first);
+        assert_eq!(
+            scores(&r.search(&text("gato perro")).expect("ran")),
+            scores(&replicas[0].search(&text("gato perro")).expect("ran"))
+        );
+    }
+}

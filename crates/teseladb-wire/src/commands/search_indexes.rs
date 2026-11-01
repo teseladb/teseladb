@@ -5,7 +5,7 @@
 //! RefDb does. The definition's own rules are the search engine's; here only what decides the
 //! command's answer is checked.
 
-use teseladb_bson::{Document, Value};
+use teseladb_bson::{Document, RawValue, Value};
 use teseladb_meta::catalog::{CollectionEntry, Namespace};
 use teseladb_meta::indexes::{IndexCommand, SearchIndexEntry, SearchIndexKind, SearchIndexStatus};
 
@@ -48,6 +48,100 @@ const BOTH: &str = "Cannot set both 'name' and 'id'.";
 struct Target {
     ns: Namespace,
     coll: CollectionEntry,
+    /// The view the command names, when its stages are not empty.
+    view: Option<IndexView>,
+}
+
+/// The key under which the catalog keeps, beside an index's definition, the view the index was
+/// created on (a `$` key no definition may carry).
+const VIEW_KEY: &str = "$view";
+
+/// The view an index was created on: its name and its stages (the innermost view's first).
+#[derive(Clone, Debug, PartialEq)]
+pub struct IndexView {
+    /// Name of the view.
+    pub name: String,
+    /// Its stages as BSON documents.
+    pub stages: Vec<Vec<u8>>,
+}
+
+/// RefDb's error for a view stage `refsearch` cannot index through.
+const VIEW_STAGE_NOT_ALLOWED: crate::error::Code =
+    crate::error::Code { code: 10_623_000, name: "Location10623000" };
+/// RefDb's error for a view's `$match` with more than `$expr`.
+const VIEW_MATCH_NOT_EXPR: crate::error::Code =
+    crate::error::Code { code: 10_623_001, name: "Location10623001" };
+const VIEW_INCOMPATIBLE: &str =
+    "Cannot perform a search operation as the view definition is incompatible with RefCloud: ";
+
+/// Checks that a view's stages are ones a search index can follow (011 FR-021, measured on
+/// 9.0.4: `$addFields`, `$set` and a `$match` with only `$expr`).
+pub fn check_view_stages(stages: &[Vec<u8>]) -> Result<(), CommandError> {
+    for bytes in stages {
+        let stage = teseladb_bson::RawDoc::from_bytes(bytes)?;
+        let Some((name, spec)) = stage.iter().next() else { continue };
+        match name {
+            "$addFields" | "$set" => {}
+            "$match" => {
+                let only_expr = matches!(spec, RawValue::Document(d)
+                    if d.iter().count() == 1 && d.get("$expr").is_some());
+                if !only_expr {
+                    let msg = format!("{VIEW_INCOMPATIBLE}$match stage can only contain $expr");
+                    return Err(CommandError::new(VIEW_MATCH_NOT_EXPR, msg));
+                }
+            }
+            other => {
+                let msg = format!("{VIEW_INCOMPATIBLE}{other} is not allowed");
+                return Err(CommandError::new(VIEW_STAGE_NOT_ALLOWED, msg));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The definition kept in the catalog: `definition` with the view it was created on.
+fn stored_definition(
+    definition: &Document,
+    view: Option<&IndexView>,
+) -> Result<Vec<u8>, CommandError> {
+    let mut d = definition.clone();
+    if let Some(v) = view {
+        let stages = v
+            .stages
+            .iter()
+            .map(|b| Ok(Value::Document(Document::from(teseladb_bson::RawDoc::from_bytes(b)?))))
+            .collect::<Result<Vec<Value>, CommandError>>()?;
+        let kept =
+            Document::new().with("name", v.name.as_str()).with("stages", Value::Array(stages));
+        d.push(VIEW_KEY, kept);
+    }
+    Ok(d.to_bytes()?)
+}
+
+/// The definition the catalog keeps for an index and the view it was created on.
+pub fn split_definition(bytes: &[u8]) -> Result<(Document, Option<IndexView>), CommandError> {
+    let mut d = Document::from(teseladb_bson::RawDoc::from_bytes(bytes)?);
+    let view = match d.remove(VIEW_KEY) {
+        Some(Value::Document(v)) => {
+            let name = match v.get("name") {
+                Some(Value::String(n)) => n.clone(),
+                _ => String::new(),
+            };
+            let stages = match v.get("stages") {
+                Some(Value::Array(a)) => a
+                    .iter()
+                    .filter_map(|x| match x {
+                        Value::Document(st) => st.to_bytes().ok(),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            Some(IndexView { name, stages })
+        }
+        _ => None,
+    };
+    Ok((d, view))
 }
 
 /// The collection the command's first field names, through its views.
@@ -60,12 +154,17 @@ fn target<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Target, CommandEr
         }
     };
     names::check(&named)?;
-    let ns = match views::resolve(ctx.backend, &named)? {
-        Some(view) => names::ns(&named.db, &view.collection),
-        None => named.clone(),
+    let (ns, view) = match views::resolve(ctx.backend, &named)? {
+        Some(view) if view.pipeline.is_empty() => (names::ns(&named.db, &view.collection), None),
+        Some(view) => {
+            check_view_stages(&view.pipeline)?;
+            let kept = IndexView { name: named.coll.clone(), stages: view.pipeline };
+            (names::ns(&named.db, &view.collection), Some(kept))
+        }
+        None => (named.clone(), None),
     };
     match ctx.backend.collection(&ns)? {
-        Some(coll) => Ok(Target { ns, coll }),
+        Some(coll) => Ok(Target { ns, coll, view }),
         None => Err(CommandError::new(
             NAMESPACE_NOT_FOUND,
             format!(
@@ -231,9 +330,12 @@ pub fn create<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
     let mut created = Vec::new();
     let mut new = Vec::new();
     for w in all {
-        let bytes = w.definition.to_bytes()?;
+        let bytes = stored_definition(&w.definition, t.view.as_ref())?;
+        let same = |e: &SearchIndexEntry| {
+            split_definition(&e.definition).is_ok_and(|(d, _)| d == w.definition)
+        };
         match existing.iter().find(|e| e.name == w.name) {
-            Some(e) if e.definition == bytes => created.push((e.id, w.name)),
+            Some(e) if same(e) => created.push((e.id, w.name)),
             Some(_) => {
                 let msg = format!(
                     "Index {} already exists with a different definition. Drop it first if needed.",
@@ -266,7 +368,7 @@ pub fn create<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
     Ok(Document::new().with("indexesCreated", list).with("ok", 1.0))
 }
 
-/// Builds this node's segments of the `search` indexes of `coll` whose definition version it
+/// Builds this node's segments of the search indexes of `coll` whose definition version it
 /// does not serve yet, over the documents already written (FR-014). An index whose documents
 /// cannot be analyzed stays `PENDING`; its queries give the error.
 fn build<B: Backend + ?Sized>(
@@ -275,8 +377,8 @@ fn build<B: Backend + ?Sized>(
 ) -> Result<(), CommandError> {
     for e in ctx.backend.search_indexes(coll.id)? {
         let served = lock(ctx.shared).search.served(&e.id).map(|s| s.version);
-        if e.kind == SearchIndexKind::Search && served != Some(e.version) {
-            match search_ops::with_index(ctx.backend, ctx.shared, coll, &e, |_| ()) {
+        if served != Some(e.version) {
+            match search_ops::with_index(ctx.backend, ctx.shared, coll, &e, |_, _| ()) {
                 Ok(()) => {}
                 Err(err) if err.code == UNKNOWN_ERROR => {}
                 Err(err) => return Err(err),
@@ -327,9 +429,14 @@ pub fn described(
     let (status, queryable, detail) = match served {
         Some(s) => {
             let mut d = search_ops::status_detail(host, s);
-            let status = if s.version == e.version { "READY" } else { "BUILDING" };
+            let status = match (&s.failure, s.version == e.version) {
+                (Some(_), _) => "FAILED",
+                (None, true) => "READY",
+                (None, false) => "BUILDING",
+            };
+            let queryable = s.failure.is_none();
             d.insert("status", status);
-            (status, true, vec![Value::Document(d)])
+            (status, queryable, vec![Value::Document(d)])
         }
         None => (status_name(e.status), queryable(e), Vec::new()),
     };
@@ -339,7 +446,7 @@ pub fn described(
         .with("status", status)
         .with("queryable", queryable)
         .with("latestDefinitionVersion", version)
-        .with("latestDefinition", Document::from(teseladb_bson::RawDoc::from_bytes(&e.definition)?))
+        .with("latestDefinition", split_definition(&e.definition)?.0)
         .with("statusDetail", detail))
 }
 
@@ -400,8 +507,8 @@ pub fn update<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
     ctx.backend.index_write(IndexCommand::UpdateSearch {
         at_ms,
         collection: t.coll.id,
+        definition: stored_definition(definition, split_definition(&e.definition)?.1.as_ref())?,
         name: e.name,
-        definition: definition.to_bytes()?,
     })?;
     build(ctx, &t.coll)?;
     Ok(Document::new().with("ok", 1.0))

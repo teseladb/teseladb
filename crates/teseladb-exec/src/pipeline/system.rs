@@ -308,3 +308,50 @@ fn session_user(name: &str, i: usize, u: RawValue<'_>) -> Result<(), MqlError> {
     }
     Ok(())
 }
+
+/// RefDb's code for a `$listExtensions` whose specification is not empty.
+const LIST_EXTENSIONS_SPEC: teseladb_mql::ErrorCode =
+    teseladb_mql::ErrorCode { code: 10_983_502, name: "Location10983502" };
+
+/// RefDb's code for a `$listCatalog` whose specification is not empty.
+const LIST_CATALOG_SPEC: teseladb_mql::ErrorCode =
+    teseladb_mql::ErrorCode { code: 6_200_600, name: "Location6200600" };
+
+/// Checks the specification of `$listExtensions`: an empty object (measured on a `refrouter`
+/// 9.0.4).
+pub fn list_extensions(v: RawValue<'_>) -> Result<Document, MqlError> {
+    match v {
+        RawValue::Document(d) if d.iter().next().is_none() => Ok(Document::new()),
+        other => Err(error(
+            LIST_EXTENSIONS_SPEC,
+            format!(
+                "expected an empty object as specification for $listExtensions stage, got \
+                 $listExtensions: {}",
+                display(&Value::from(other))
+            ),
+        )),
+    }
+}
+
+/// Checks the specification of `$listCatalog`: an empty object (measured on a `refrouter` 9.0.4).
+pub fn list_catalog(v: RawValue<'_>) -> Result<Document, MqlError> {
+    match v {
+        RawValue::Document(d) if d.iter().next().is_none() => Ok(Document::new()),
+        _ => Err(error(
+            LIST_CATALOG_SPEC,
+            "The $listCatalog stage specification must be an empty object",
+        )),
+    }
+}
+
+/// The error of a stage behind a feature flag that a `refrouter` 9.0.4 does not enable
+/// (`$listMqlEntities`, `$listCachedAndActiveUsers`; measured).
+pub fn behind_flag(name: &str) -> MqlError {
+    error(
+        teseladb_mql::codes::QUERY_FEATURE_NOT_ALLOWED,
+        format!(
+            "{name} is not allowed with the current configuration. You may need to enable the \
+             corresponding feature flag"
+        ),
+    )
+}

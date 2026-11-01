@@ -641,3 +641,26 @@ fn only_commands_that_never_wait_stay_on_the_client_worker() {
         assert!(!answers_without_waiting(&request(cmd.clone())), "{cmd:?}");
     }
 }
+
+/// `getDiagnosticData` gives the node's sample on `admin` (010 FR-024, T041): `start`, the
+/// parts of a `refnode` 9.0.4 TeselaDB has, each with its own `start` and `end`, and `end`; on
+/// another database it is 13, as on a `refrouter` 9.0.4 (measured 01-11-2026).
+#[test]
+fn get_diagnostic_data_samples_the_node() {
+    let mut m = node();
+    let r = m.run("admin", doc(&[("getDiagnosticData", 1.into())]));
+    assert_eq!(keys(&Value::Document(r.clone())), ["data", "ok"]);
+    assert_eq!(keys(field(&r, "data")), ["start", "serverStatus", "connPoolStats", "end"]);
+    let status = keys(field(&r, "data.serverStatus"));
+    assert_eq!(status.first().map(String::as_str), Some("start"));
+    assert_eq!(status.get(1).map(String::as_str), Some("host"));
+    assert_eq!(status.last().map(String::as_str), Some("end"));
+    assert!(!status.contains(&"ok".to_owned()));
+    assert!(matches!(field(&r, "data.connPoolStats.start"), Value::DateTime(_)));
+    let r = m.run("db", doc(&[("getDiagnosticData", 1.into())]));
+    assert_eq!(code(&r), 13);
+    assert_eq!(
+        field(&r, "errmsg"),
+        &s("getDiagnosticData may only be run against the admin database.")
+    );
+}

@@ -12,8 +12,10 @@ use teseladb_meta::security::{Principal, Security, SecurityError, SecurityOp};
 use teseladb_range::host::Mutation;
 use teseladb_range::read::ReadConcern;
 use teseladb_session::retry::StatementKey;
+use teseladb_wire::commands::config_db::COLLECTIONS;
 use teseladb_wire::commands::mutation::Bound;
 use teseladb_wire::commands::session::KillScope;
+use teseladb_wire::commands::sharding;
 use teseladb_wire::commands::{Backend, Ctx, LdapLogin, Shared, WriteOp, run};
 use teseladb_wire::error::{
     CommandError, DATABASE_DIFFER_CASE, INTERNAL_ERROR, NAMESPACE_EXISTS, NAMESPACE_NOT_FOUND,
@@ -141,6 +143,9 @@ pub struct Mem {
     pub uncertain_more: Vec<Hlc>,
     /// Pauses a waiting command takes before its time runs out (none: it runs out at once).
     pub pauses_left: usize,
+    /// How many reads of the changes still give a resolved mark one millisecond behind the
+    /// clock, as a range whose oldest intent is not resolved yet (011 FR-010).
+    pub changes_lag: usize,
     /// The next change stream read fails with this error (014).
     pub fail_changes: Option<CommandError>,
     /// The next resolutions of intents fail with this error.
@@ -308,14 +313,18 @@ impl Backend for Mem {
         if let Some(e) = self.fail_changes.take() {
             return Err(e);
         }
-        // Every write of this node is applied at once: resolved up to its clock, less the lag.
+        // Every write of this node is applied at once: resolved up to its clock, less the lag
+        // asked for (in milliseconds, or one millisecond for the next `changes_lag` reads).
+        let lag = u64::from(self.changes_lag > 0);
+        self.changes_lag = self.changes_lag.saturating_sub(1);
         let rows = self
             .history
             .iter()
             .filter(|v| v.ts > from && start <= v.key.as_slice() && v.key.as_slice() < end)
             .cloned()
             .collect();
-        Ok((rows, Hlc { physical: self.now.saturating_sub(self.resolved_lag_ms), logical: 0 }))
+        let behind = self.resolved_lag_ms.saturating_add(lag);
+        Ok((rows, Hlc { physical: self.now.saturating_sub(behind), logical: 0 }))
     }
 
     fn catalog_changes(
@@ -702,6 +711,15 @@ impl Backend for Mem {
             }
             teseladb_wire::commands::config_settings::SETTINGS => {
                 self.settings.clone().unwrap_or_default()
+            }
+            COLLECTIONS => {
+                let mut out = Vec::new();
+                for (ns, c) in &self.catalog.collections {
+                    if let Some(k) = sharding::shard_key_of(c)? {
+                        out.push(sharding::config_entry(ns, c, &k));
+                    }
+                }
+                out
             }
             _ => Vec::new(),
         })

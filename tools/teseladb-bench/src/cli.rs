@@ -74,7 +74,7 @@ impl Default for Args {
 
 /// Usage.
 pub const USAGE: &str = "usage: teseladb-bench --scenario raftlog|raftlog-recover|deflate|bson|keys|lsm|\
-                         lsm-sustained|write|read|failover|follower-read|group0-limits|split|add-node|rebalance|reference|wire|crud|txn|txn-readers|contention|tls-handshake|scram|timeseries|ycsb-a..ycsb-f [--data dir] [--json file] \
+                         lsm-sustained|write|read|failover|follower-read|group0-limits|split|add-node|rebalance|reference|wire|crud|aggregate|sort|group-large|txn|txn-readers|contention|tls-handshake|scram|timeseries|ycsb-a..ycsb-f [--data dir] [--json file] \
                          [--duration 3s] [--warmup 10s] [--records N] [--groups N] [--format text|json] \
                          [--target refdb://host:port] [--concurrency N] [--rate ops/s] \
                          [--baseline file] [--save-baseline file]\n       \

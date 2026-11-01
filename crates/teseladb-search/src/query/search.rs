@@ -59,7 +59,7 @@ impl From<IndexError> for SearchError {
     fn from(e: IndexError) -> SearchError {
         SearchError(match e {
             IndexError::Analyzer(name) => format!("references non-existent analyzers: {name}"),
-            IndexError::Analysis => "analysis ran out of steps".to_owned(),
+            IndexError::Analysis(message) => message,
         })
     }
 }
@@ -364,7 +364,7 @@ fn parse_compound(index: &MemIndex, d: &Document, path: &str) -> Result<Operator
 }
 
 /// The value at dotted `path` of `doc`.
-fn value_at<'a>(doc: &'a Document, path: &str) -> Option<&'a Value> {
+pub(crate) fn value_at<'a>(doc: &'a Document, path: &str) -> Option<&'a Value> {
     let mut parts = path.split('.');
     let mut cur = doc.get(parts.next()?)?;
     for part in parts {

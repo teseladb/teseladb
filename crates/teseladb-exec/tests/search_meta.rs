@@ -203,3 +203,40 @@ fn documents_that_did_not_come_from_the_search_stage_refuse_its_score() {
     let want = Document::new().with("a", Value::Array(vec![x(2, 0.5).into(), x(1, 0.25).into()]));
     assert_eq!(run(vec![search(), facet]).unwrap(), [want]);
 }
+
+#[test]
+fn refnode_checks_the_limit_and_filter_of_vector_search_first() {
+    let vs = |spec: Document| run(vec![Document::new().with("$vectorSearch", spec)]);
+    let positive = (7_912_700, "Expected limit to be positive".to_owned());
+    for limit in [Value::Int32(0), Value::Int64(-1), Value::Double(-0.5), Value::Double(f64::NAN)] {
+        assert_eq!(message(vs(Document::new().with("limit", limit))), positive);
+    }
+    assert_eq!(
+        message(vs(Document::new().with("limit", "5"))),
+        (8_575_100, "Expected limit field to be a number in $vectorSearch".to_owned())
+    );
+    assert_eq!(
+        message(vs(Document::new().with("limit", 2).with("filter", 5))),
+        (10_065, "invalid parameter: expected an object (filter)".to_owned())
+    );
+    let empty_and = Document::new().with("$and", Value::Array(Vec::new()));
+    assert_eq!(
+        message(vs(Document::new().with("filter", empty_and))),
+        (2, "$and argument must be a non-empty array".to_owned())
+    );
+    let unknown = Document::new().with("n", Document::new().with("$foo", 1));
+    assert_eq!(
+        message(vs(Document::new().with("filter", unknown))),
+        (2, "unknown operator: $foo".to_owned())
+    );
+    // What `refsearch` checks reaches the node: a fractional limit, a missing one.
+    let fine = Document::new().with("limit", 2.5).with("filter", Document::new().with("n", 1));
+    assert_eq!(vs(fine).expect("runs").len(), 2);
+    assert_eq!(vs(Document::new()).expect("runs").len(), 2);
+    let decimal = teseladb_bson::Decimal128::from_parts(false, 3, 0).expect("a decimal");
+    assert_eq!(vs(Document::new().with("limit", decimal)).expect("runs").len(), 2);
+    assert_eq!(
+        message(run(vec![Document::new().with("$vectorSearch", 5)])),
+        (9, "$vectorSearch value must be an object. Found: int".to_owned())
+    );
+}
