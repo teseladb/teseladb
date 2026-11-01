@@ -351,3 +351,101 @@ fn check_files(files: &[&str]) {
         assert!(wrong.is_empty(), "{} differ:\n{}", wrong.len(), wrong.join("\n"));
     }
 }
+
+/// `$listLocalSessions` and `$listSessions` (`tests/aggregate/sessions.out`, 010 T010): their
+/// arguments, the namespaces they run on and the users they list, as a `refrouter` 9.0.4 answers;
+/// a line `{db, cmd}` runs `cmd` on database `db`.
+#[test]
+fn session_stages_answer_as_refdb() {
+    let mut m = Mem::new();
+    let mut wrong = Vec::new();
+    for line in include_str!("aggregate/sessions.out").lines().filter(|l| !l.is_empty()) {
+        let (cmd, want) = line.split_once('\t').expect("a command and its reply");
+        let spec = extjson::parse(cmd).expect("command");
+        let got = match (spec.get("db"), spec.get("cmd")) {
+            (Some(Value::String(db)), Some(Value::Document(c))) => {
+                let r = m.run(db, c.clone());
+                match (r.get("code"), r.get("codeName"), r.get("errmsg")) {
+                    (Some(Value::Int32(code)), Some(Value::String(n)), Some(Value::String(e))) => {
+                        format!("!! {code}\t{n}\t{e}")
+                    }
+                    _ => format!("=> {}", canonical(&normal(r))),
+                }
+            }
+            _ => ours(&mut m, cmd),
+        };
+        let want = match want.strip_prefix("=> ") {
+            Some(json) => {
+                format!("=> {}", canonical(&normal(extjson::parse(json).expect("reply"))))
+            }
+            None => want.to_owned(),
+        };
+        if got != want {
+            wrong.push(format!("{cmd}\n   got  {got}\n   want {want}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{} differ:\n{}", wrong.len(), wrong.join("\n"));
+}
+
+/// `$listLocalSessions` lists the sessions the node holds, each as its record of
+/// `config.system.sessions` writes it, for every user, the command's or none of a list.
+#[test]
+fn local_sessions_list_what_the_node_holds() {
+    let mut m = Mem::new();
+    for _ in 0..2 {
+        let r = m.run("admin", doc(&[("startSession", Value::Int32(1))]));
+        assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+    }
+    let count = |m: &mut Mem, spec: &str| -> Value {
+        let cmd = extjson::parse(&format!(
+            r#"{{"aggregate":1,"pipeline":[{{"$listLocalSessions":{spec}}},{{"$count":"n"}}],"cursor":{{}}}}"#
+        ))
+        .expect("command");
+        let r = m.run(DB, cmd);
+        let Some(Value::Document(c)) = r.get("cursor") else { panic!("{r:?}") };
+        match c.get("firstBatch") {
+            Some(Value::Array(b)) if b.is_empty() => Value::Int32(0),
+            Some(Value::Array(b)) => match &b[0] {
+                Value::Document(d) => d.get("n").cloned().unwrap_or(Value::Null),
+                other => other.clone(),
+            },
+            other => panic!("{other:?}"),
+        }
+    };
+    assert_eq!(count(&mut m, "{}"), Value::Int32(2));
+    assert_eq!(count(&mut m, r#"{"allUsers":true}"#), Value::Int32(2));
+    assert_eq!(count(&mut m, r#"{"users":[]}"#), Value::Int32(2));
+    assert_eq!(count(&mut m, r#"{"users":[{"user":"a","db":"b"}]}"#), Value::Int32(0));
+    let cmd = extjson::parse(
+        r#"{"aggregate":1,"pipeline":[{"$listLocalSessions":{}},{"$limit":1}],"cursor":{}}"#,
+    )
+    .expect("command");
+    let r = m.run(DB, cmd);
+    let Some(Value::Document(c)) = r.get("cursor") else { panic!("{r:?}") };
+    let Some(Value::Array(b)) = c.get("firstBatch") else { panic!("{r:?}") };
+    let Some(Value::Document(first)) = b.first() else { panic!("{r:?}") };
+    assert_eq!(first.iter().map(|(k, _)| k).collect::<Vec<_>>(), ["_id", "lastUse"]);
+    let Some(Value::Document(id)) = first.get("_id") else { panic!("{first:?}") };
+    assert_eq!(id.iter().map(|(k, _)| k).collect::<Vec<_>>(), ["id", "uid"]);
+}
+
+/// `$geoNear` (`tests/aggregate/geo_near*.out`, 010 T010): the index it reads, its distances on
+/// the sphere and the plane, its options and its errors, as a `refrouter` 9.0.4 answers; an error's
+/// line breaks are written `\n`.
+#[test]
+fn geo_near_answers_as_refdb() {
+    for file in [include_str!("aggregate/geo_near.out"), include_str!("aggregate/geo_near2.out")] {
+        let mut m = Mem::new();
+        let mut wrong = Vec::new();
+        for line in file.lines().filter(|l| !l.is_empty()) {
+            let (cmd, want) = line.split_once('\t').expect("a command and its reply");
+            let got = ours(&mut m, cmd).replace('\n', "\\n");
+            // A `refrouter` names its shard where the node names itself.
+            let want = unsharded(want).replace("sh1/lc12-sh1:27018", "node1/:0");
+            if got != want {
+                wrong.push(format!("{cmd}\n   got  {got}\n   want {want}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{} differ:\n{}", wrong.len(), wrong.join("\n"));
+    }
+}

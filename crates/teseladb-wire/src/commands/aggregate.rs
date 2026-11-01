@@ -24,7 +24,12 @@ use super::query::{
     target,
 };
 use super::{Backend, Ctx, args, names};
-use crate::error::{BAD_VALUE, CommandError, FAILED_TO_PARSE, TYPE_MISMATCH};
+use crate::error::{BAD_VALUE, CommandError, FAILED_TO_PARSE, INVALID_NAMESPACE, TYPE_MISMATCH};
+
+/// The key of a 2d index's field.
+const FLAT_INDEX: &str = "2d";
+/// The key of a 2dsphere index's field.
+const SPHERE_INDEX: &str = "2dsphere";
 
 /// The command's name.
 pub const AGGREGATE: &str = super::status::AGGREGATE;
@@ -51,6 +56,61 @@ fn to_mql(e: CommandError) -> MqlError {
 }
 
 impl<B: Backend + ?Sized> WireEnv<'_, B> {
+    /// `$listLocalSessions`: the sessions this node holds in memory, as the records of
+    /// `config.system.sessions` write them, for the users `spec` asks for.
+    fn local_sessions(&self, spec: &Document) -> Result<Vec<Document>, CommandError> {
+        let Some((shared, _)) = &self.node else { return Ok(Vec::new()) };
+        let used = super::lock(shared).sessions.used_since(0);
+        Ok(used
+            .into_iter()
+            .map(|(lsid, last)| {
+                Document::new()
+                    .with("_id", super::registry::record_id(lsid))
+                    .with("lastUse", Value::DateTime(i64::try_from(last).unwrap_or(i64::MAX)))
+            })
+            .filter(|d| wanted_session(d.get("_id"), spec))
+            .collect())
+    }
+
+    /// The namespace of the aggregated collection and its ready 2d and 2dsphere indexes, in
+    /// the catalog's order (`$geoNear`).
+    fn geo_index_list(
+        &self,
+    ) -> Result<(String, Vec<teseladb_exec::pipeline::geo_near::GeoIndex>), CommandError> {
+        let Some((_, ns)) = &self.node else { return Ok((String::new(), Vec::new())) };
+        let mut backend = self.backend.borrow_mut();
+        let mut out = Vec::new();
+        if let Some(coll) = backend.collection(ns)? {
+            for entry in backend.indexes(coll.id)? {
+                if entry.state != teseladb_meta::indexes::IndexState::Ready {
+                    continue;
+                }
+                let spec = Document::from(RawDoc::from_bytes(&entry.spec)?);
+                let Some(Value::Document(key)) = spec.get("key") else { continue };
+                for (field, kind) in key.iter() {
+                    match kind {
+                        Value::String(k) if k == FLAT_INDEX || k == SPHERE_INDEX => {
+                            out.push(teseladb_exec::pipeline::geo_near::GeoIndex {
+                                field: field.to_owned(),
+                                sphere: k == SPHERE_INDEX,
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        Ok((names::full(ns), out))
+    }
+
+    /// `$listSessions`: the records of `config.system.sessions` for the users `spec` asks for.
+    fn recorded_sessions(&self, spec: &Document) -> Result<Vec<Document>, CommandError> {
+        let Some((_, ns)) = &self.node else { return Ok(Vec::new()) };
+        let mut backend = self.backend.borrow_mut();
+        let records = read(&mut **backend, ns, self.concern)?;
+        Ok(records.into_iter().filter(|d| wanted_session(d.get("_id"), spec)).collect())
+    }
+
     /// `$collStats` of the aggregated collection (015 FR-010), with the sections `spec` asks
     /// for in RefDb's order. TeselaDB has no shards: the document has no `shard` (DV-038).
     fn coll_stats(&self, spec: &Document) -> Result<Vec<Document>, CommandError> {
@@ -159,9 +219,17 @@ impl<B: Backend + ?Sized> Env for WireEnv<'_, B> {
         (bits >> 11) as f64 / (1u64 << 53) as f64
     }
 
+    fn geo_indexes(
+        &self,
+    ) -> Result<(String, Vec<teseladb_exec::pipeline::geo_near::GeoIndex>), MqlError> {
+        self.geo_index_list().map_err(to_mql)
+    }
+
     fn system_stage(&self, name: &str, spec: &Document) -> Result<Vec<Document>, MqlError> {
         match name {
             "$collStats" => self.coll_stats(spec).map_err(to_mql),
+            "$listLocalSessions" => self.local_sessions(spec).map_err(to_mql),
+            "$listSessions" => self.recorded_sessions(spec).map_err(to_mql),
             other => Err(MqlError::new(
                 teseladb_mql::ErrorCode { code: BAD_VALUE.code, name: BAD_VALUE.name },
                 format!("{other} is not supported by this node"),
@@ -411,6 +479,7 @@ pub fn aggregate<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
     let pipeline = Pipeline::parse_command(&stages, &ctx_vars, on_collection).map_err(from_mql)?;
     teseladb_exec::pipeline::optimize::optimize_stages(&stages, a.vars.as_ref())
         .map_err(from_mql)?;
+    check_system_namespace(&pipeline, &ns, on_collection)?;
     let collation = command_collation(&mut *ctx.backend, &ns, on_collection, a.collation.as_ref())?;
     let planned = match on_collection && pipeline.reads_collection() && collation.get().is_none() {
         true => planned_read(ctx, &ns, (&stages, a.vars.as_ref()), a.concern)
@@ -439,6 +508,7 @@ pub fn aggregate<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
         );
         err
     };
+    pipeline.check_plan(&env).map_err(from_mql)?;
     let mut results = pipeline.run_in(docs, &env, sbe).map_err(|e| executor(from_mql(e)))?;
     let vars = env.vars.clone();
     drop(env);
@@ -531,6 +601,57 @@ fn planned_read<B: Backend + ?Sized>(
         .map(|b| Ok(Document::from(RawDoc::from_bytes(b)?)))
         .collect::<Result<_, _>>()
         .map(Some)
+}
+
+/// Refuses a stage the node answers itself on a namespace it does not run on (measured on a
+/// `refrouter` 9.0.4): `$listLocalSessions` only with `aggregate: 1`, `$listSessions` only on
+/// `config.system.sessions`.
+fn check_system_namespace(
+    pipeline: &Pipeline,
+    ns: &Namespace,
+    on_collection: bool,
+) -> Result<(), CommandError> {
+    let sessions =
+        ns.db == super::registry::SESSIONS_DB && ns.coll == super::registry::SESSIONS_COLL;
+    match pipeline.system_stage() {
+        Some("$listLocalSessions") if on_collection => Err(CommandError::new(
+            INVALID_NAMESPACE,
+            "$listLocalSessions must be run against the database with {aggregate: 1}, not a collection",
+        )),
+        Some("$listSessions") if !sessions => Err(CommandError::new(
+            INVALID_NAMESPACE,
+            teseladb_exec::pipeline::LIST_SESSIONS_NAMESPACE,
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Whether a session record's `_id` belongs to the users a sessions stage's `spec` asks for:
+/// every user with `allUsers`, those of `users`, else the user of the command, who without a
+/// user's name in the record is the record's own (`uid` is the SHA-256 of `user@db`).
+fn wanted_session(id: Option<&Value>, spec: &Document) -> bool {
+    if matches!(spec.get("allUsers"), Some(Value::Boolean(true))) {
+        return true;
+    }
+    let uid = match id {
+        Some(Value::Document(d)) => d.get("uid").cloned(),
+        _ => None,
+    };
+    let of = |user: &str| Value::Binary {
+        subtype: 0,
+        bytes: teseladb_hash::sha256(user.as_bytes()).to_vec(),
+    };
+    match spec.get("users") {
+        Some(Value::Array(list)) if !list.is_empty() => list.iter().any(|u| {
+            let Value::Document(u) = u else { return false };
+            let (Some(Value::String(user)), Some(Value::String(db))) = (u.get("user"), u.get("db"))
+            else {
+                return false;
+            };
+            uid.as_ref() == Some(&of(&format!("{user}@{db}")))
+        }),
+        _ => uid.as_ref() == Some(&of("")),
+    }
 }
 
 /// A collation document as the pipeline compares with it: none for the simple one.
