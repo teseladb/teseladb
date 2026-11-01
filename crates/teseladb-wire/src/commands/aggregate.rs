@@ -454,6 +454,10 @@ struct AggregateArgs {
 /// Reads the `cursor` document: `batchSize` only.
 fn cursor_batch_size(cmd: &Document) -> Result<Option<usize>, CommandError> {
     let c = match cmd.get("cursor") {
+        // `explain: true` needs no cursor (measured on a `refnode` 9.0.4).
+        None if matches!(cmd.get(super::explain::EXPLAIN), Some(Value::Boolean(true))) => {
+            return Ok(None);
+        }
         None => {
             return Err(CommandError::new(
                 FAILED_TO_PARSE,
@@ -742,8 +746,7 @@ fn planned_read<B: Backend + ?Sized>(
             .with("projection", Document::new()),
         shape: super::plan_cache::read_shape(&parsed, sort.as_ref(), None, None),
     };
-    let Some(found) = super::plan_exec::planned_documents(ctx.backend, &coll, &read, Some(note))?
-    else {
+    let Some(found) = super::plan_exec::planned_documents(ctx.backend, &coll, &read, note)? else {
         return Ok(None);
     };
     found

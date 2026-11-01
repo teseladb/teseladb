@@ -180,6 +180,17 @@ impl Plan {
         }
     }
 
+    /// Document `doc`, which this plan's filter already matched, projected.
+    fn matched(
+        &self,
+        doc: RawDoc<'_>,
+        sort_key: Option<&[Value]>,
+    ) -> Result<Document, CommandError> {
+        self.apply(doc, sort_key)?.ok_or_else(|| {
+            CommandError::new(crate::error::INTERNAL_ERROR, "a matched document matches no more")
+        })
+    }
+
     /// The `$meta` of the projection, then of the sort, that this query cannot give.
     fn check_metadata(&self, sort: Option<&SortSpec>) -> Result<(), CommandError> {
         let (text, near) = (self.filter.uses_text(), self.filter.uses_near());
@@ -319,7 +330,7 @@ pub fn for_each_doc<B: Backend + ?Sized>(
         for (key, bytes) in rows {
             next = after(&key);
             let bucket = RawDoc::from_bytes(&bytes)?;
-            if !bounds.may_match(&spec, bucket).map_err(ts_error)? {
+            if !bounds.may_match(&spec, bucket, ctx.collation).map_err(ts_error)? {
                 continue;
             }
             for mb in spec.unpack_raw(bucket).map_err(ts_error)? {
@@ -375,9 +386,7 @@ fn measurements_cursor<B: Backend + ?Sized>(
     let take = a.limit.map_or(usize::MAX, |l| usize::try_from(l).unwrap_or(usize::MAX));
     let mut docs = Vec::new();
     for bytes in rows.iter().skip(skip).take(take) {
-        if let Some(d) = plan.apply(RawDoc::from_bytes(bytes)?, None)? {
-            docs.push(d);
-        }
+        docs.push(plan.matched(RawDoc::from_bytes(bytes)?, None)?);
     }
     let mut c = QueryCursor::buffered(docs);
     c.left = a.limit;
@@ -434,14 +443,14 @@ impl QueryCursor {
                     let short = want.is_none_or(|w| out.len() < w);
                     return Ok(self.finish(out, short));
                 }
-                // A tailable cursor that read up to the newest document ends its batch there.
-                None if self.tail.as_ref().is_some_and(|t| t.caught_up) => {
-                    if let Some(t) = &mut self.tail {
+                None => {
+                    // A tailable cursor that read up to the newest document ends its batch there.
+                    if let Some(t) = self.tail.as_mut().filter(|t| t.caught_up) {
                         t.reached_newest();
+                        return Ok(self.finish(out, false));
                     }
-                    return Ok(self.finish(out, false));
+                    self.refill(backend)?;
                 }
-                None => self.refill(backend)?,
             }
         }
     }
@@ -455,10 +464,11 @@ impl QueryCursor {
 
     /// Reads the next chunk of the source into the buffer.
     fn refill<B: Backend + ?Sized>(&mut self, backend: &mut B) -> Result<(), CommandError> {
-        let Source::Scan { next, end, filter, projection, collation, concern, vars } =
-            &mut self.source
-        else {
-            return Ok(());
+        let (next, end, filter, projection, collation, concern, vars) = match &mut self.source {
+            Source::Scan { next, end, filter, projection, collation, concern, vars } => {
+                (next, end, filter, projection, collation, concern, vars)
+            }
+            Source::Done => return Ok(()),
         };
         let plan =
             Plan::new(filter, projection.as_ref(), collation.as_ref())?.with_vars(vars.as_ref());
@@ -829,8 +839,7 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
                 .with("projection", projection.clone()),
             shape: super::plan_cache::read_shape(&parsed, Some(&sort_doc), Some(&projection), None),
         };
-        super::plan_exec::planned_documents(ctx.backend, &coll, &read, Some(note))
-            .map_err(executor)?
+        super::plan_exec::planned_documents(ctx.backend, &coll, &read, note).map_err(executor)?
     } else {
         None
     };
@@ -957,9 +966,7 @@ fn planned_cursor(
     let take = a.limit.map_or(usize::MAX, |l| usize::try_from(l).unwrap_or(usize::MAX));
     let mut docs = Vec::new();
     for bytes in rows.iter().skip(skip).take(take) {
-        if let Some(d) = plan.apply(RawDoc::from_bytes(bytes)?, None)? {
-            docs.push(d);
-        }
+        docs.push(plan.matched(RawDoc::from_bytes(bytes)?, None)?);
     }
     let mut c = QueryCursor::buffered(docs);
     c.left = a.limit;
@@ -992,9 +999,7 @@ fn backward<B: Backend + ?Sized>(
     let take = a.limit.map_or(usize::MAX, |l| usize::try_from(l).unwrap_or(usize::MAX));
     let mut docs = Vec::new();
     for bytes in rows.iter().rev().skip(skip).take(take) {
-        if let Some(d) = plan.apply(RawDoc::from_bytes(bytes)?, None)? {
-            docs.push(d);
-        }
+        docs.push(plan.matched(RawDoc::from_bytes(bytes)?, None)?);
     }
     let mut c = QueryCursor::buffered(docs);
     c.left = a.limit;
@@ -1071,9 +1076,7 @@ fn generated_find<B: Backend + ?Sized>(
     let mut out = Vec::new();
     for (key, b) in rows.into_iter().skip(skip).take(limit) {
         let key: Vec<Value> = key.into_iter().map(|k| k.0).collect();
-        if let Some(d) = plan.apply(RawDoc::from_bytes(&b)?, Some(&key))? {
-            out.push(d);
-        }
+        out.push(plan.matched(RawDoc::from_bytes(&b)?, Some(&key))?);
     }
     buffered_reply(ctx, &full(ns), a, out, false)
 }
@@ -1269,9 +1272,7 @@ fn sorted<B: Backend + ?Sized>(
         let bytes = raw_bytes(&d)?;
         let raw = RawDoc::from_bytes(&bytes)?;
         let key: Vec<Value> = key.into_iter().map(|k| k.0).collect();
-        if let Some(p) = plan.apply(raw, Some(&key))? {
-            docs.push(p);
-        }
+        docs.push(plan.matched(raw, Some(&key))?);
     }
     let mut c = QueryCursor::buffered(docs);
     c.left = a.limit;
@@ -1370,9 +1371,8 @@ fn tail_more<B: Backend + ?Sized>(
     }
     let deadline = backend.now_ms().saturating_add(wait);
     loop {
-        if let Some(t) = &mut state.tail {
-            t.caught_up = false;
-        }
+        // Each wait reads again past the newest document it saw.
+        state.tail.iter_mut().for_each(|t| t.caught_up = false);
         let (docs, _) = state.batch(backend, batch)?;
         if !docs.is_empty() || backend.now_ms() >= deadline || !backend.pause() {
             return Ok(docs);
@@ -1788,5 +1788,5 @@ fn planned<B: Backend + ?Sized>(
         },
         shape: super::plan_cache::read_shape(&parsed, None, None, distinct),
     };
-    super::plan_exec::planned_documents(ctx.backend, coll, &read, Some(note))
+    super::plan_exec::planned_documents(ctx.backend, coll, &read, note)
 }

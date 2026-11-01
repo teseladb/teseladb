@@ -411,8 +411,9 @@ fn run<B: Backend + ?Sized>(
         return super::capped::write(backend, w, coll, bound, stmt);
     }
     match (&bound.mutation, super::timeseries::spec_of(coll)?) {
-        (DocMutation::Insert { .. }, Some(spec)) => {
-            super::timeseries::write(backend, shared, w, (coll, &spec), bound, stmt)
+        (DocMutation::Insert { docs, ordered, rules }, Some(spec)) => {
+            let insert = (docs.as_slice(), *ordered, rules);
+            super::timeseries::write(backend, shared, w, (coll, &spec), insert, stmt)
         }
         _ => w.write(backend, bound, stmt),
     }
@@ -801,15 +802,28 @@ fn raw(d: &Document) -> Result<Vec<u8>, CommandError> {
     d.to_bytes_with(command_limits()).map_err(CommandError::from)
 }
 
-/// The document an upsert inserts for `filter` and `update`.
+/// The document an upsert of statement `m` with update `update` inserts: the one it supplies
+/// (`upsertSupplied`, with an `_id` first when it has none), or its filter's equalities updated,
+/// the update reading the statement's variables.
 pub(crate) fn upsert_doc<B: Backend + ?Sized>(
     backend: &mut B,
     shared: &super::Shared,
     op: &str,
-    filter: &Document,
+    m: &Modify,
     update: &Value,
-    array_filters: Option<&[Value]>,
 ) -> Result<Document, CommandError> {
+    let (filter, array_filters) = (&m.filter, m.array_filters.as_deref());
+    if let Some(doc) = &m.supplied {
+        if doc.get("_id").is_some() {
+            return Ok(doc.clone());
+        }
+        let oid = new_object_id(backend, shared);
+        let mut out = Document::new().with("_id", Value::ObjectId(oid));
+        for (k, v) in doc.iter() {
+            out.push(k, v.clone());
+        }
+        return Ok(out);
+    }
     let holder = Document::new()
         .with("q", filter.clone())
         .with("u", update.clone())
@@ -828,7 +842,11 @@ pub(crate) fn upsert_doc<B: Backend + ?Sized>(
     let u = Update::parse(h.get("u").ok_or(CommandError::new(BAD_VALUE, "bad update"))?, af)
         .map_err(from_mql)?;
     let ctx = UpdateContext {
-        matcher: MatchContext { collation: None, ext: &super::engines::NodeExtensions, vars: None },
+        matcher: MatchContext {
+            collation: None,
+            ext: &super::engines::NodeExtensions,
+            vars: m.vars.as_ref(),
+        },
         position: None,
         now: now_of(backend),
         insert: true,
@@ -865,6 +883,8 @@ pub struct Modify {
     pub vars: Option<Document>,
     /// The index `hint` names (a name or a key pattern).
     pub hint: Option<Value>,
+    /// With `upsertSupplied`, the document an upsert inserts as it is (constant `new`).
+    pub supplied: Option<Document>,
 }
 
 /// Runs one update or delete statement: the sum of its mutations' results.
@@ -925,7 +945,7 @@ pub fn modify<B: Backend + ?Sized>(
     let upsert_doc = match (&m.update, m.upsert) {
         (Some(u), true) => {
             let op = executor_of(m.image);
-            Some(upsert_doc(ctx.backend, ctx.shared, op, &m.filter, u, m.array_filters.as_deref())?)
+            Some(upsert_doc(ctx.backend, ctx.shared, op, m, u)?)
         }
         _ => None,
     };
@@ -1083,6 +1103,12 @@ pub(crate) fn update_statement(v: &Value, i: usize) -> Result<(Modify, UpdateFla
         image: Image::None,
         vars: None,
         hint: d.get("hint").cloned(),
+        supplied: flags.constants.as_ref().filter(|_| flags.upsert_supplied).and_then(|c| match c
+            .get("new")
+        {
+            Some(Value::Document(d)) => Some(d.clone()),
+            _ => None,
+        }),
     };
     Ok((m, flags))
 }
@@ -1112,6 +1138,12 @@ pub(crate) fn check_update_statement(
         return Err(CommandError::new(
             FAILED_TO_PARSE,
             "cannot specify 'upsertSupplied: true' for a non-upsert operation",
+        ));
+    }
+    if flags.upsert_supplied && m.supplied.is_none() {
+        return Err(CommandError::new(
+            FAILED_TO_PARSE,
+            "the parameter 'upsertSupplied' is set to 'true', but no document was supplied",
         ));
     }
     // A pipeline is parsed with the statement: its stages and variables (measured).
@@ -1257,6 +1289,7 @@ pub(crate) fn delete_statement(v: &Value, i: usize) -> Result<Modify, CommandErr
         image: Image::None,
         vars: None,
         hint: d.get("hint").cloned(),
+        supplied: None,
     })
 }
 
@@ -1378,6 +1411,7 @@ pub fn find_and_modify<B: Backend + ?Sized>(
         image: if new { Image::After } else { Image::Before },
         vars: super::query::command_let(ctx.backend, cmd, name)?,
         hint: cmd.get("hint").cloned(),
+        supplied: None,
     };
     let bypass = args::safe_bool(cmd, name, "bypassDocumentValidation", &WRITE_SAFE_BOOL_TYPES)?
         .unwrap_or(false);
@@ -1620,6 +1654,7 @@ fn parse_bulk_op(
                 image: Image::None,
                 vars: None,
                 hint: d.get("hint").cloned(),
+                supplied: None,
             })
         };
     let body = match kind {

@@ -9,7 +9,7 @@
 
 use std::cmp::Ordering;
 
-use teseladb_bson::{Document, RawDoc, RawValue, Value, compare};
+use teseladb_bson::{Collator, Document, RawDoc, RawValue, Value, compare};
 use teseladb_mql::timeseries_write::{BucketSpec, CONTROL, MAX, META, MIN, TsError};
 
 /// What a filter says of the buckets it may match.
@@ -89,8 +89,14 @@ impl Bounds {
         }
     }
 
-    /// Whether bucket `bucket` may hold a measurement within the bounds.
-    pub fn may_match(&self, spec: &BucketSpec, bucket: RawDoc<'_>) -> Result<bool, TsError> {
+    /// Whether bucket `bucket` may hold a measurement within the bounds, its meta value compared
+    /// with the read's `collation`.
+    pub fn may_match(
+        &self,
+        spec: &BucketSpec,
+        bucket: RawDoc<'_>,
+        collation: Option<&dyn Collator>,
+    ) -> Result<bool, TsError> {
         let control = match bucket.get(CONTROL) {
             Some(RawValue::Document(c)) => c,
             _ => return Err(TsError::Malformed("a bucket without control".into())),
@@ -110,7 +116,7 @@ impl Bounds {
         let holder = Document::new().with("v", want.clone()).to_bytes().map_err(malformed)?;
         let want = RawDoc::from_bytes(&holder).map_err(malformed)?;
         Ok(match (bucket.get(META), want.get("v")) {
-            (Some(have), Some(want)) => compare(have, want, None) == Ordering::Equal,
+            (Some(have), Some(want)) => compare(have, want, collation) == Ordering::Equal,
             _ => false,
         })
     }
