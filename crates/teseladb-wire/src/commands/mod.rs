@@ -40,6 +40,7 @@ pub mod index_spec;
 pub(crate) mod index_usage;
 pub mod indexes;
 pub mod kinds;
+pub mod list_catalog;
 pub mod maintenance;
 pub mod mutation;
 pub mod names;

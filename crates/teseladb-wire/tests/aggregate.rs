@@ -406,6 +406,18 @@ fn pipeline_updates_answer_as_refdb() {
     check_files(&[include_str!("aggregate/update_pipeline.out")]);
 }
 
+/// The stages a `refrouter` 9.0.4 knows besides those of `stages.md`'s table (`extra_stages.out`,
+/// 010 T037): the collectionless ones on the wrong namespace, those behind a feature flag and the
+/// internal ones a request may not name.
+#[test]
+fn extra_stages_answer_as_refdb() {
+    check_files(&[
+        include_str!("aggregate/extra_stages.out"),
+        include_str!("aggregate/list_catalog.out"),
+        include_str!("aggregate/list_catalog2.out"),
+    ]);
+}
+
 /// Runs each file's commands on a node of its own over `c` and `o`, against the replies of a
 /// `refrouter` (without what only a sharded cluster gives).
 fn check_files(files: &[&str]) {
