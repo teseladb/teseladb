@@ -16,7 +16,7 @@ use crate::error::{
 
 /// `setFeatureCompatibilityVersion`.
 pub const SET_FCV: &str = "setFeatureCompatibilityVersion";
-/// The parameter of `getParameter`, and the cluster parameter that holds the version.
+/// The cluster parameter that holds the version (a `refrouter` 9.0.4 has no such `getParameter`).
 pub const FCV: &str = "featureCompatibilityVersion";
 /// The versions this binary runs, latest first: the latest, the last continuous and the last
 /// long-term release (measured on 9.0.4).
@@ -40,11 +40,6 @@ pub fn version_of(all: &BTreeMap<String, Vec<u8>>) -> String {
             _ => None,
         })
         .unwrap_or_else(|| LATEST.to_owned())
-}
-
-/// The cluster's version, as `getParameter` shows it on a `refnode`: `{version: …}`.
-pub fn shown<B: Backend + ?Sized>(b: &mut B) -> Result<Value, CommandError> {
-    Ok(Value::Document(Document::new().with(VERSION, version_of(&b.cluster_parameters()?))))
 }
 
 /// Where a version sits in [`VERSIONS`], latest first.

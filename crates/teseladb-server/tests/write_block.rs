@@ -43,15 +43,9 @@ fn a_lock_holds_the_other_connections_writes_and_a_block_refuses_them() {
     node.stop();
 }
 
-fn version(c: &mut Client) -> Option<Value> {
-    let r = c.run(
-        "admin",
-        Document::new().with("getParameter", 1).with("featureCompatibilityVersion", 1),
-    );
-    match r.get("featureCompatibilityVersion") {
-        Some(Value::Document(d)) => d.get("version").cloned(),
-        _ => None,
-    }
+/// Sets the cluster's feature compatibility version to `v`.
+fn set_fcv(c: &mut Client, v: &str) -> Document {
+    c.run("admin", Document::new().with("setFeatureCompatibilityVersion", v).with("confirm", true))
 }
 
 #[test]
@@ -59,12 +53,10 @@ fn the_version_lives_in_group0() {
     let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
     assert!(node.wait_ready(READY));
     let mut c = Client::new(&node);
-    assert_eq!(version(&mut c), Some(Value::from("9.0")));
-    let r = c.run(
-        "admin",
-        Document::new().with("setFeatureCompatibilityVersion", "8.0").with("confirm", true),
-    );
-    assert!(ok(&r), "{r:?}");
-    assert_eq!(version(&mut Client::new(&node)), Some(Value::from("8.0")));
+    assert!(ok(&set_fcv(&mut c, "8.0")));
+    // From 8.0 only to 9.0: another connection sees the version Group 0 keeps.
+    let r = set_fcv(&mut Client::new(&node), "8.3");
+    assert_eq!(r.get("code"), Some(&Value::Int32(5_147_403)), "{r:?}");
+    assert!(ok(&set_fcv(&mut c, "9.0")));
     node.stop();
 }

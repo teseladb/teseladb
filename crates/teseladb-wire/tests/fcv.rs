@@ -15,12 +15,22 @@ fn set(v: Value, confirm: Option<Value>) -> Document {
     d
 }
 
+/// The version Group 0 keeps.
 fn version(m: &mut Mem) -> Value {
+    Value::from(teseladb_wire::commands::fcv::version_of(&m.params))
+}
+
+#[test]
+fn get_parameter_has_no_feature_compatibility_version_as_on_a_refrouter() {
+    let mut m = Mem::new();
     let r = m.run(
         "admin",
         doc(&[("getParameter", Value::Int32(1)), ("featureCompatibilityVersion", Value::Int32(1))]),
     );
-    field(&r, "featureCompatibilityVersion.version").clone()
+    let msg = Value::from("no option found to get");
+    assert_eq!(err(&r), (Some(&Value::Int32(72)), Some(&msg)));
+    let r = m.run("admin", doc(&[("getParameter", Value::from("*"))]));
+    assert_eq!(r.get("featureCompatibilityVersion"), None, "{r:?}");
 }
 
 fn err(r: &Document) -> (Option<&Value>, Option<&Value>) {

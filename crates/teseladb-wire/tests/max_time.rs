@@ -763,7 +763,7 @@ fn server_parameters_are_read_and_set_as_a_refrouter_does() {
     let names: Vec<&str> = r.iter().map(|(k, _)| k).collect();
     // `auditAuthorizationSuccess` is RefDb Enterprise's, the OCSP ones, `authSchemaVersion` and
     // `maxConcurrentMultiDocumentTransactions` a refnode's (measured on 9.0.4; 013 FR-016, FR-030,
-    // FR-031; 008 FR-020), and so is `featureCompatibilityVersion` (007 FR-027).
+    // FR-031; 008 FR-020).
     assert_eq!(
         names,
         [
@@ -773,7 +773,6 @@ fn server_parameters_are_read_and_set_as_a_refrouter_does() {
             "clusterAuthMode",
             "cursorTimeoutMillis",
             "enableTestCommands",
-            "featureCompatibilityVersion",
             "internalQueryPlannerEnableHashIntersection",
             "localLogicalSessionTimeoutMinutes",
             "maxConcurrentMultiDocumentTransactions",
