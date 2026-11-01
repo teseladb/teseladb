@@ -72,6 +72,13 @@ pub trait Env {
         Err(search::not_enabled())
     }
 
+    /// Sends a search stage's query to the search indexes while the pipeline is planned, as
+    /// `refnode` does with `refsearch`: its errors are those of planning, not of running (measured on
+    /// 9.0.4). Nothing to check without search.
+    fn check_search(&self, _stage: &str, _spec: &Document) -> Result<(), MqlError> {
+        Ok(())
+    }
+
     /// The collation strings compare with (010 FR-014): the binary order by default.
     fn collation(&self) -> crate::collation::Collation {
         crate::collation::Collation::default()
@@ -263,8 +270,10 @@ impl Pipeline {
     /// `$geoNear`).
     pub fn check_plan(&self, env: &dyn Env) -> Result<(), MqlError> {
         for st in &self.stages {
-            if let Stage::GeoNear(g) = st {
-                g.check_plan(env)?;
+            match st {
+                Stage::GeoNear(g) => g.check_plan(env)?,
+                Stage::Search(name, spec) => env.check_search(name, spec)?,
+                _ => {}
             }
         }
         Ok(())
@@ -352,8 +361,13 @@ impl Pipeline {
         sbe: bool,
     ) -> Result<(Vec<Document>, Option<Vec<meta::Meta>>), MqlError> {
         let mut sbe = sbe && !self.starts_with_documents();
+        // The scores search stages gave: a document without them is an error until a stage
+        // makes new documents, after which they read as nothing (measured on 9.0.4).
+        let mut required: Vec<String> = Vec::new();
         for (st, spec) in self.stages.iter().zip(&self.sbe_specs) {
             sbe = sbe && *spec && sbe_capable(st);
+            let strict = meta::RequiredEnv { inner: env, names: &required };
+            let env: &dyn Env = if required.is_empty() { env } else { &strict };
             if let Stage::Fusion(f) = st {
                 let (fused, scores) = f.run(docs, env)?;
                 (docs, metas) = (fused, Some(scores));
@@ -367,6 +381,7 @@ impl Pipeline {
                     .map(|s| (s.doc, meta::with_score(s.meta, own)))
                     .unzip();
                 (docs, metas) = (found, Some(scores));
+                required.extend(own.map(str::to_owned));
                 continue;
             }
             if let Stage::Score(s) = st {
@@ -383,6 +398,9 @@ impl Pipeline {
                 None => (run_stage(st, docs, env, sbe)?, None),
                 Some(m) => run_stage_meta(st, docs, m, env, sbe)?,
             };
+            if makes_new_documents(st) {
+                required.clear();
+            }
         }
         Ok((docs, metas))
     }
@@ -642,6 +660,19 @@ fn sbe_capable(st: &Stage) -> bool {
         | Stage::Search(..)
         | Stage::Write(_) => false,
     }
+}
+
+/// Whether `st` makes new documents from many, after which a search stage's scores read as
+/// nothing (measured on 9.0.4).
+fn makes_new_documents(st: &Stage) -> bool {
+    matches!(
+        st,
+        Stage::Group(_)
+            | Stage::Bucket(_)
+            | Stage::BucketAuto(_)
+            | Stage::SortByCount(_)
+            | Stage::Count(_)
+    )
 }
 
 fn run_stage(

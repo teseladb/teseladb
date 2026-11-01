@@ -42,6 +42,44 @@ pub struct MemIndex {
     docs: Vec<Option<Document>>,
     by_key: BTreeMap<Vec<u8>, u32>,
     fields: BTreeMap<String, TextField>,
+    /// The statistics of the whole index when this one is a segment of it: its scores then use
+    /// them instead of its own (FR-015, FR-016).
+    global: Option<Stats>,
+}
+
+/// What the scores of a string field depend on: its number of documents, the sum of their
+/// lengths and the number of documents with each term.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FieldStats {
+    /// Documents with the field.
+    pub docs: u64,
+    /// Sum of their lengths.
+    pub length: u64,
+    /// Documents with each term.
+    pub df: BTreeMap<String, u64>,
+}
+
+/// The statistics of the string fields of an index, by path.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Stats {
+    /// By path.
+    pub fields: BTreeMap<String, FieldStats>,
+}
+
+impl Stats {
+    /// The statistics of `self` and `other` together (segments with no document in common).
+    pub fn plus(&self, other: &Stats) -> Stats {
+        let mut out = self.clone();
+        for (path, f) in &other.fields {
+            let into = out.fields.entry(path.clone()).or_default();
+            into.docs += f.docs;
+            into.length += f.length;
+            for (term, n) in &f.df {
+                *into.df.entry(term.clone()).or_insert(0) += n;
+            }
+        }
+        out
+    }
 }
 
 /// A document the index found, with its score.
@@ -52,6 +90,9 @@ pub struct Hit {
     /// Score, a 32-bit float as `refsearch` gives it.
     pub score: f32,
 }
+
+/// The statistics of a field no segment has.
+static EMPTY_FIELD: FieldStats = FieldStats { docs: 0, length: 0, df: BTreeMap::new() };
 
 /// The built-in analyzer called `name`.
 fn analyzer(name: &str) -> Result<Analyzer, IndexError> {
@@ -67,7 +108,33 @@ impl MemIndex {
             docs: Vec::new(),
             by_key: BTreeMap::new(),
             fields: BTreeMap::new(),
+            global: None,
         }
+    }
+
+    /// The statistics of this index's own documents.
+    pub fn stats(&self) -> Stats {
+        let fields = self
+            .fields
+            .iter()
+            .map(|(path, f)| {
+                let df = f.postings.iter().map(|(t, d)| (t.clone(), d.len() as u64)).collect();
+                let length = f.lengths.values().map(|&l| u64::from(l)).sum();
+                (path.clone(), FieldStats { docs: f.lengths.len() as u64, length, df })
+            })
+            .collect();
+        Stats { fields }
+    }
+
+    /// Scores with `stats`, those of the whole index this one is a segment of, or with its own
+    /// statistics when `None`.
+    pub fn set_global(&mut self, stats: Option<Stats>) {
+        self.global = stats;
+    }
+
+    /// The statistics a field of path `path` scores with, when they are not its own.
+    fn global_of(&self, path: &str) -> Option<&FieldStats> {
+        self.global.as_ref().map(|g| g.fields.get(path).unwrap_or(&EMPTY_FIELD))
     }
 
     /// The index analyzer of the fields without their own.
@@ -240,7 +307,7 @@ impl MemIndex {
             let a = analyzer(&field.search_analyzer)?;
             for q in query {
                 for t in a.analyze(q).map_err(|_| IndexError::Analysis)? {
-                    for (doc, score) in field.term_scores(&t.text, boost) {
+                    for (doc, score) in field.term_scores(&t.text, boost, self.global_of(path)) {
                         let s = scores.entry(doc).or_insert(0.0);
                         *s += score;
                     }
@@ -267,7 +334,8 @@ impl MemIndex {
             let a = analyzer(&field.search_analyzer)?;
             for q in queries {
                 let terms = a.analyze(q).map_err(|_| IndexError::Analysis)?;
-                for (doc, score) in field.phrase_scores(&terms, slop, boost) {
+                let g = self.global_of(path);
+                for (doc, score) in field.phrase_scores(&terms, slop, boost, g) {
                     *scores.entry(doc).or_insert(0.0) += score;
                 }
             }
@@ -283,6 +351,11 @@ impl MemIndex {
     /// The document of number `id`.
     pub fn document(&self, id: u32) -> Option<&Document> {
         self.docs.get(id as usize)?.as_ref()
+    }
+
+    /// The keys and documents indexed, in key order.
+    pub fn entries(&self) -> impl Iterator<Item = (&[u8], &Document)> + '_ {
+        self.by_key.iter().filter_map(|(k, &id)| Some((k.as_slice(), self.document(id)?)))
     }
 
     /// The document of `key`.
@@ -305,10 +378,17 @@ impl MemIndex {
 }
 
 impl TextField {
+    /// The number of documents with `term`: `local` in this segment, or the whole index's.
+    fn df(&self, term: &str, local: usize, g: Option<&FieldStats>) -> u64 {
+        g.map_or(local as u64, |g| g.df.get(term).copied().unwrap_or(local as u64))
+    }
+
     /// The mean length as a 32-bit float and the score of a match frequency for `doc`.
-    fn scorer(&self, weight: f32) -> impl Fn(u32, f32) -> f32 + '_ {
-        let n = self.lengths.len() as u64;
-        let total: u64 = self.lengths.values().map(|&l| u64::from(l)).sum();
+    fn scorer(&self, weight: f32, g: Option<&FieldStats>) -> impl Fn(u32, f32) -> f32 + '_ {
+        let (n, total) = match g {
+            Some(g) => (g.docs, g.length),
+            None => (self.lengths.len() as u64, self.lengths.values().map(|&l| u64::from(l)).sum()),
+        };
         let avg = if n == 0 { 1.0f32 } else { (total as f64 / n as f64) as f32 };
         let Bm25 { k1, b } = Bm25::DEFAULT;
         move |doc, freq| {
@@ -326,17 +406,18 @@ impl TextField {
         terms: &[crate::analysis::tokenizers::Token],
         slop: u32,
         boost: f32,
+        g: Option<&FieldStats>,
     ) -> Vec<(u32, f32)> {
         let Some(first) = terms.first() else { return Vec::new() };
-        let n = self.lengths.len() as u64;
+        let n = g.map_or(self.lengths.len() as u64, |g| g.docs);
         let mut lists = Vec::with_capacity(terms.len());
         let mut idf_sum = 0.0f32;
         for t in terms {
             let Some(docs) = self.postings.get(&t.text) else { return Vec::new() };
-            idf_sum += idf(n, docs.len() as u64) as f32;
+            idf_sum += idf(n, self.df(&t.text, docs.len(), g)) as f32;
             lists.push((docs, i64::from(t.position) - i64::from(first.position)));
         }
-        let score = self.scorer(boost * idf_sum);
+        let score = self.scorer(boost * idf_sum, g);
         let (shortest, _) =
             lists.iter().min_by_key(|(d, _)| d.len()).copied().unwrap_or((lists[0].0, 0));
         shortest
@@ -355,10 +436,11 @@ impl TextField {
     }
 
     /// The score of each document with `term`.
-    fn term_scores(&self, term: &str, boost: f32) -> Vec<(u32, f32)> {
+    fn term_scores(&self, term: &str, boost: f32, g: Option<&FieldStats>) -> Vec<(u32, f32)> {
         let Some(docs) = self.postings.get(term) else { return Vec::new() };
-        let weight = boost * idf(self.lengths.len() as u64, docs.len() as u64) as f32;
-        let score = self.scorer(weight);
+        let n = g.map_or(self.lengths.len() as u64, |g| g.docs);
+        let weight = boost * idf(n, self.df(term, docs.len(), g)) as f32;
+        let score = self.scorer(weight, g);
         docs.iter().map(|(&doc, positions)| (doc, score(doc, positions.len() as f32))).collect()
     }
 }
