@@ -529,6 +529,7 @@ const STEPS: [StepDef; 4] = [
         alternative: false,
         within: None,
         when: When::Always,
+        protect: true,
     },
     StepDef {
         groups: STEP_1,
@@ -537,6 +538,7 @@ const STEPS: [StepDef; 4] = [
         alternative: false,
         within: Some(Cond::R1),
         when: When::Always,
+        protect: true,
     },
     StepDef {
         groups: STEP_2,
@@ -545,6 +547,7 @@ const STEPS: [StepDef; 4] = [
         alternative: false,
         within: Some(Cond::R1),
         when: When::Always,
+        protect: true,
     },
     StepDef {
         groups: STEP_3,
@@ -553,6 +556,7 @@ const STEPS: [StepDef; 4] = [
         alternative: false,
         within: Some(Cond::R1),
         when: When::Always,
+        protect: true,
     },
 ];
 

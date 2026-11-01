@@ -79,6 +79,7 @@ const STEPS: [StepDef; 6] = [
         alternative: false,
         within: None,
         when: When::Always,
+        protect: true,
     },
     StepDef {
         groups: STEP_1,
@@ -87,6 +88,7 @@ const STEPS: [StepDef; 6] = [
         alternative: false,
         within: None,
         when: When::Always,
+        protect: true,
     },
     StepDef {
         groups: STEP_2,
@@ -95,6 +97,7 @@ const STEPS: [StepDef; 6] = [
         alternative: false,
         within: None,
         when: When::Always,
+        protect: true,
     },
     StepDef {
         groups: STEP_3,
@@ -103,6 +106,7 @@ const STEPS: [StepDef; 6] = [
         alternative: false,
         within: None,
         when: When::Always,
+        protect: true,
     },
     StepDef {
         groups: STEP_4,
@@ -111,6 +115,7 @@ const STEPS: [StepDef; 6] = [
         alternative: false,
         within: None,
         when: When::Always,
+        protect: true,
     },
     StepDef {
         groups: STEP_5,
@@ -119,6 +124,7 @@ const STEPS: [StepDef; 6] = [
         alternative: false,
         within: None,
         when: When::Always,
+        protect: true,
     },
 ];
 

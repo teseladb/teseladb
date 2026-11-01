@@ -35,6 +35,7 @@ const NOUN: [StepDef; 3] = [
         alternative: false,
         within: None,
         when: When::Always,
+        protect: true,
     },
     StepDef {
         groups: NOUN_1,
@@ -43,6 +44,7 @@ const NOUN: [StepDef; 3] = [
         alternative: false,
         within: None,
         when: When::Always,
+        protect: true,
     },
     StepDef {
         groups: NOUN_2,
@@ -51,6 +53,7 @@ const NOUN: [StepDef; 3] = [
         alternative: false,
         within: None,
         when: When::Always,
+        protect: true,
     },
 ];
 
@@ -187,6 +190,7 @@ const VERB: [StepDef; 8] = [
         alternative: false,
         within: None,
         when: When::Always,
+        protect: true,
     },
     StepDef {
         groups: VERB_1,
@@ -195,6 +199,7 @@ const VERB: [StepDef; 8] = [
         alternative: false,
         within: None,
         when: When::Changed(0),
+        protect: true,
     },
     StepDef {
         groups: VERB_2,
@@ -203,6 +208,7 @@ const VERB: [StepDef; 8] = [
         alternative: false,
         within: None,
         when: When::Unchanged(0),
+        protect: true,
     },
     StepDef {
         groups: VERB_3,
@@ -211,6 +217,7 @@ const VERB: [StepDef; 8] = [
         alternative: false,
         within: None,
         when: When::Always,
+        protect: true,
     },
     StepDef {
         groups: VERB_4,
@@ -219,6 +226,7 @@ const VERB: [StepDef; 8] = [
         alternative: false,
         within: None,
         when: When::Always,
+        protect: true,
     },
     StepDef {
         groups: VERB_5,
@@ -227,6 +235,7 @@ const VERB: [StepDef; 8] = [
         alternative: false,
         within: None,
         when: When::Changed(4),
+        protect: true,
     },
     StepDef {
         groups: VERB_6,
@@ -235,6 +244,7 @@ const VERB: [StepDef; 8] = [
         alternative: false,
         within: None,
         when: When::Unchanged(4),
+        protect: true,
     },
     StepDef {
         groups: VERB_7,
@@ -243,6 +253,7 @@ const VERB: [StepDef; 8] = [
         alternative: false,
         within: None,
         when: When::Always,
+        protect: true,
     },
 ];
 
