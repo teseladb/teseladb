@@ -497,6 +497,9 @@ impl Misc {
                 Some(v) => Some(v.clone()),
                 None if name == SORT_KEY => Some(Value::Array(Vec::new())),
                 None if name == CONTROL_EVENT => Some(Value::Boolean(false)),
+                None if scope.meta_required.iter().any(|n| n == name) => {
+                    return Err(super::missing_meta(name));
+                }
                 None => None,
             }),
         }
