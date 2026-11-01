@@ -111,6 +111,10 @@ impl Env for RequiredEnv<'_> {
         self.inner.system_stage(name, spec)
     }
 
+    fn check_search(&self, stage: &str, spec: &Document) -> Result<(), MqlError> {
+        self.inner.check_search(stage, spec)
+    }
+
     fn search_source(
         &self,
         stage: &str,

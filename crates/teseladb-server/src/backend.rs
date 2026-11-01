@@ -655,10 +655,24 @@ impl Backend for ServerBackend {
         end: &[u8],
         from: Hlc,
     ) -> Result<teseladb_wire::commands::ChangeBatch, CommandError> {
-        // Range by range in key order, each read on its leader (014 FR-003); the batch is
-        // resolved up to the lowest resolved mark of its ranges (FR-004, FR-005).
-        let mut rows = Vec::new();
-        let mut resolved: Option<Hlc> = None;
+        // The batch is resolved up to the lowest resolved mark of its ranges (FR-004, FR-005).
+        let ranges = self.range_changes(start, end, from)?;
+        let resolved = ranges.iter().map(|r| r.resolved).min().unwrap_or(from).max(from);
+        let mut rows: Vec<teseladb_range::changes::Versioned> =
+            ranges.into_iter().flat_map(|r| r.rows).collect();
+        rows.retain(|r| r.ts <= resolved);
+        Ok((rows, resolved))
+    }
+
+    fn range_changes(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        from: Hlc,
+    ) -> Result<Vec<teseladb_wire::commands::RangeBatch>, CommandError> {
+        // Range by range in key order, each read on its leader (014 FR-003) and kept up to its
+        // own resolved mark.
+        let mut out = Vec::new();
         let mut at = start.to_vec();
         while at.as_slice() < end {
             let stop = |e: &RouteEntry| match e.end.is_empty() || end <= e.end.as_slice() {
@@ -669,11 +683,18 @@ impl Backend for ServerBackend {
             let build =
                 |e: &RouteEntry, _| RemoteReq::Changes { start: key.clone(), end: stop(e), from };
             match self.data(&at, false, build)? {
-                (e, RemoteReply::Changes { rows: more, to, oldest_intent }) => {
+                (e, RemoteReply::Changes { mut rows, to, oldest_intent }) => {
                     let mark = teseladb_changestream::resolved::resolved(to, oldest_intent);
-                    resolved = Some(resolved.map_or(mark, |r| r.min(mark)));
-                    rows.extend(more);
-                    at = stop(&e);
+                    let resolved = mark.max(from);
+                    rows.retain(|r| r.ts <= resolved);
+                    let next = stop(&e);
+                    out.push(teseladb_wire::commands::RangeBatch {
+                        start: at.clone(),
+                        end: next.clone(),
+                        rows,
+                        resolved,
+                    });
+                    at = next;
                 }
                 _ => {
                     return Err(CommandError::new(
@@ -683,9 +704,7 @@ impl Backend for ServerBackend {
                 }
             }
         }
-        let resolved = resolved.unwrap_or(from).max(from);
-        rows.retain(|r: &teseladb_range::changes::Versioned| r.ts <= resolved);
-        Ok((rows, resolved))
+        Ok(out)
     }
 
     fn txn_pause(&mut self) -> bool {

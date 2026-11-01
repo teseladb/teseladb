@@ -72,6 +72,13 @@ pub trait Env {
         Err(search::not_enabled())
     }
 
+    /// Sends a search stage's query to the search indexes while the pipeline is planned, as
+    /// `refnode` does with `refsearch`: its errors are those of planning, not of running (measured on
+    /// 9.0.4). Nothing to check without search.
+    fn check_search(&self, _stage: &str, _spec: &Document) -> Result<(), MqlError> {
+        Ok(())
+    }
+
     /// The collation strings compare with (010 FR-014): the binary order by default.
     fn collation(&self) -> crate::collation::Collation {
         crate::collation::Collation::default()
@@ -261,8 +268,10 @@ impl Pipeline {
     /// `$geoNear`).
     pub fn check_plan(&self, env: &dyn Env) -> Result<(), MqlError> {
         for st in &self.stages {
-            if let Stage::GeoNear(g) = st {
-                g.check_plan(env)?;
+            match st {
+                Stage::GeoNear(g) => g.check_plan(env)?,
+                Stage::Search(name, spec) => env.check_search(name, spec)?,
+                _ => {}
             }
         }
         Ok(())

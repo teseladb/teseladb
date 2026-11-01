@@ -1311,6 +1311,15 @@ impl Backend for TxnBackend<'_> {
         self.inner.changes(start, end, from)
     }
 
+    fn range_changes(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        from: Hlc,
+    ) -> Result<Vec<super::RangeBatch>, CommandError> {
+        self.inner.range_changes(start, end, from)
+    }
+
     fn txn_route(&self, key: &[u8]) -> Option<teseladb_types::GroupId> {
         self.inner.txn_route(key)
     }
