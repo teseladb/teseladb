@@ -13,6 +13,9 @@ use teseladb_types::Nanos;
 pub const CLOSED_LAG_MS: u64 = 3_000;
 /// How often a leader closes a mark for its heartbeats.
 pub const CLOSE_EVERY: Nanos = Nanos::from_millis(200);
+/// How often a leader closes a mark while change streams read its range (014 SC-002): the
+/// resolved mark trails the clock by [`STREAM_CLOSE_LAG_MS`] plus at most this.
+pub const STREAM_CLOSE_EVERY: Nanos = Nanos::from_millis(20);
 /// How often a leader writes its closed mark in the log.
 pub const LOG_EVERY: Nanos = Nanos::from_secs(5);
 

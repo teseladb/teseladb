@@ -502,6 +502,21 @@ fn the_leader_gives_a_stream_its_versions_up_to_the_closed_mark() {
         }
         other => panic!("not changes: {other:?}"),
     }
+    // With a stream open the leader closes marks every 20 ms, not every 200 ms (014 SC-002).
+    let first = match ask(&mut n, from) {
+        Ok(Reply::Changes { to, .. }) => to,
+        other => panic!("not changes: {other:?}"),
+    };
+    for _ in 0..4 {
+        n.now = n.now + Nanos::from_millis(10);
+        n.settle();
+    }
+    match ask(&mut n, first) {
+        Ok(Reply::Changes { to, .. }) => {
+            assert!(to.physical >= first.physical + 20, "{first:?} then {to:?}");
+        }
+        other => panic!("not changes: {other:?}"),
+    }
     // A pending intent shows its mark.
     let at = intents_mark(n.txn(intents(T1, a, &[(b"\x01c", put(b"c"))])));
     for _ in 0..60 {

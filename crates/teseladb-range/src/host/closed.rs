@@ -5,7 +5,8 @@ use teseladb_types::{GroupId, Nanos, NodeId};
 
 use super::{GetReq, GetState, RangeError, RangeHost, ReadSpec, Req, ReqId};
 use crate::closed_ts::{
-    CLOSE_EVERY, CLOSED_LAG_MS, LOG_EVERY, STREAM_CLOSE_LAG_MS, closing, follower_mark,
+    CLOSE_EVERY, CLOSED_LAG_MS, LOG_EVERY, STREAM_CLOSE_EVERY, STREAM_CLOSE_LAG_MS, closing,
+    follower_mark,
 };
 use crate::command::Command;
 use crate::push::ScanState;
@@ -98,11 +99,12 @@ impl RangeHost {
         if now < l.close_at || !l.caught_up(core, g) {
             return false;
         }
-        l.close_at = now + CLOSE_EVERY;
         // The clock the core's clock rule checked (005 FR-006).
-        // With change streams reading the range, 200 ms behind (014 FR-004); a mark never goes
-        // below one closed before with that lag.
-        let lag = if now < l.streams_until { STREAM_CLOSE_LAG_MS } else { CLOSED_LAG_MS };
+        // With change streams reading the range, 200 ms behind and more often (014 FR-004,
+        // SC-002); a mark never goes below one closed before with that lag.
+        let streams = now < l.streams_until;
+        l.close_at = now + if streams { STREAM_CLOSE_EVERY } else { CLOSE_EVERY };
+        let lag = if streams { STREAM_CLOSE_LAG_MS } else { CLOSED_LAG_MS };
         let Some(c) = core.read_mark(now).and_then(|m| closing(m, lag)) else { return false };
         let c = c.max(l.last_closed.0);
         if c > l.last_closed.0 {
