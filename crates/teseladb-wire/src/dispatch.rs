@@ -557,6 +557,13 @@ fn run_op<B: Backend + ?Sized>(
     };
     audit::record(shared, conn, backend, events, 0);
     let ns = op_ns(&req.db, &req.command);
+    if !report.used.is_empty() {
+        let now = i64::try_from(backend.wall_ms()).unwrap_or(i64::MAX);
+        let mut g = lock(shared);
+        for name in &report.used {
+            g.index_usage.used(&ns, name, now);
+        }
+    }
     let ended = profile::Ended {
         db: &req.db,
         command: &req.command,
@@ -571,6 +578,7 @@ fn run_op<B: Backend + ?Sized>(
         client: conn.peer.as_deref(),
         app_name: conn.hello.app_name.as_deref(),
         user: conn.auth.user.as_ref().map(|u| format!("{}@{}", u.name.user, u.name.db)),
+        opid: id,
     };
     profile::after_command(backend, shared, &ended);
     result.map(|r| r.map_err(|e| interrupted_find(e, name, &req.db, &req.command)))

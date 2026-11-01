@@ -11,6 +11,7 @@ use std::rc::Rc;
 use teseladb_bson::{Document, RawDoc, RawValue, Value};
 use teseladb_exec::collation::Collation;
 use teseladb_exec::expr::Ctx as ExprCtx;
+use teseladb_exec::pipeline::meta::{INDEX_KEY, Meta};
 use teseladb_exec::pipeline::{Env, Pipeline};
 use teseladb_meta::catalog::Namespace;
 use teseladb_meta::collection_types::CollectionKind;
@@ -185,6 +186,50 @@ impl<B: Backend + ?Sized> WireEnv<'_, B> {
         Ok(super::lock(shared).plan_cache.stats(&ns_text, (&host, &shard)))
     }
 
+    /// `$indexStats`: each index of the aggregated collection with how many reads and writes
+    /// its plans scanned it and since when, as a `refrouter` 9.0.4 lists them (measured in
+    /// `tests/aggregate/index_stats.out`); nothing for a collection that does not exist.
+    fn index_stats(&self) -> Result<Vec<Document>, CommandError> {
+        let Some((shared, ns)) = &self.node else { return Ok(Vec::new()) };
+        let mut backend = self.backend.borrow_mut();
+        let Some(coll) = backend.collection(ns)? else { return Ok(Vec::new()) };
+        let mut specs = match super::catalog::has_id_index(ns) {
+            true => vec![super::catalog::id_index(&coll)?],
+            false => Vec::new(),
+        };
+        specs.extend(super::indexes::listed(&mut **backend, &coll)?);
+        let facts = backend.process();
+        let host = format!("{}:{}", facts.host.hostname, facts.port);
+        let shard = super::shard_name(backend.node());
+        let now = i64::try_from(backend.wall_ms()).unwrap_or(i64::MAX);
+        let ns_text = names::full(ns);
+        let mut g = super::lock(shared);
+        let names: Vec<String> = specs
+            .iter()
+            .filter_map(|s| match s.get("name") {
+                Some(Value::String(n)) => Some(n.clone()),
+                _ => None,
+            })
+            .collect();
+        g.index_usage.keep_only(&ns_text, &names);
+        Ok(specs
+            .into_iter()
+            .zip(names)
+            .map(|(spec, name)| {
+                let (ops, since) = g.index_usage.of(&ns_text, &name, now);
+                let accesses =
+                    Document::new().with("ops", ops).with("since", Value::DateTime(since));
+                Document::new()
+                    .with("name", name)
+                    .with("key", spec.get("key").cloned().unwrap_or(Value::Null))
+                    .with("host", host.clone())
+                    .with("accesses", accesses)
+                    .with("shard", shard.clone())
+                    .with("spec", spec)
+            })
+            .collect())
+    }
+
     /// `$listSessions`: the records of `config.system.sessions` for the users `spec` asks for.
     fn recorded_sessions(&self, spec: &Document) -> Result<Vec<Document>, CommandError> {
         let Some((_, ns)) = &self.node else { return Ok(Vec::new()) };
@@ -193,8 +238,6 @@ impl<B: Backend + ?Sized> WireEnv<'_, B> {
         Ok(records.into_iter().filter(|d| wanted_session(d.get("_id"), spec)).collect())
     }
 
-    /// `$collStats` of the aggregated collection (015 FR-010), with the sections `spec` asks
-    /// for in RefDb's order. TeselaDB has no shards: the document has no `shard` (DV-038).
     /// The documents of `$listSearchIndexes` on the pipeline's collection (011 FR-008).
     fn search_indexes(&self, spec: &Document) -> Result<Vec<Document>, CommandError> {
         let Some((_, ns)) = &self.node else { return Ok(Vec::new()) };
@@ -202,6 +245,8 @@ impl<B: Backend + ?Sized> WireEnv<'_, B> {
         super::search_indexes::stage(&mut **backend, ns, spec)
     }
 
+    /// `$collStats` of the aggregated collection (015 FR-010), with the sections `spec` asks
+    /// for in RefDb's order. TeselaDB has no shards: the document has no `shard` (DV-038).
     fn coll_stats(&self, spec: &Document) -> Result<Vec<Document>, CommandError> {
         let Some((shared, ns)) = &self.node else { return Ok(Vec::new()) };
         let mut backend = self.backend.borrow_mut();
@@ -327,6 +372,7 @@ impl<B: Backend + ?Sized> Env for WireEnv<'_, B> {
             "$listLocalSessions" => self.local_sessions(spec).map_err(to_mql),
             "$listSessions" => self.recorded_sessions(spec).map_err(to_mql),
             "$planCacheStats" => self.plan_cache_stats().map_err(to_mql),
+            "$indexStats" => self.index_stats().map_err(to_mql),
             "$currentOp" => self.current_ops().map_err(to_mql),
             "$listClusterCatalog" => self.cluster_catalog(spec).map_err(to_mql),
             other => Err(MqlError::new(
@@ -605,16 +651,23 @@ pub fn aggregate<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
     }
     let collation = command_collation(&mut *ctx.backend, &ns, on_collection, a.collation.as_ref())?;
     let planned = match on_collection && pipeline.reads_collection() && collation.get().is_none() {
-        true => planned_read(ctx, &ns, (&stages, a.vars.as_ref()), a.concern)
-            .map_err(|e| executor_on(&ns_text, e))?,
+        true => planned_read(
+            ctx,
+            &ns,
+            (&stages, a.vars.as_ref()),
+            a.concern,
+            pipeline.reads_index_key(),
+        )
+        .map_err(|e| executor_on(&ns_text, e))?,
         false => None,
     };
-    let (docs, sbe) = match planned {
-        Some(docs) => (docs, true),
+    let (docs, metas, sbe) = match planned {
+        Some((docs, metas)) => (docs, metas, true),
         None if on_collection && pipeline.reads_collection() => {
-            read_engine(&mut *ctx.backend, &ns, a.concern)?
+            let (docs, sbe) = read_engine(&mut *ctx.backend, &ns, a.concern)?;
+            (docs, None, sbe)
         }
-        None => (Vec::new(), true),
+        None => (Vec::new(), None, true),
     };
     let env = WireEnv {
         backend: RefCell::new(&mut *ctx.backend),
@@ -633,7 +686,8 @@ pub fn aggregate<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
         err
     };
     pipeline.check_plan(&env).map_err(from_mql)?;
-    let mut results = pipeline.run_in(docs, &env, sbe).map_err(|e| executor(from_mql(e)))?;
+    let (mut results, _) =
+        pipeline.run_with_meta(docs, metas, &env, sbe).map_err(|e| executor(from_mql(e)))?;
     let vars = env.vars.clone();
     drop(env);
     // `$out` and `$merge` write what reaches them and give no documents (010 FR-012).
@@ -649,6 +703,7 @@ pub fn aggregate<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
         tail: None,
         read_mark: ctx.backend.read_mark(),
         stream: None,
+        origin: None,
     };
     let size = Some(a.batch_size.unwrap_or(DEFAULT_FIRST_BATCH));
     let (batch, short) = state.batch(ctx.backend, size)?;
@@ -693,13 +748,15 @@ fn executor_on(ns_text: &str, mut err: CommandError) -> CommandError {
 /// `stages` starts with reads, in its order (010 FR-001): the stages run on them as on the whole
 /// collection, and stages that keep the order of their input give the index's order. `None` for
 /// a view, a collection that is not a plain one, a pipeline without filter or sort, or when the
-/// collection scan wins.
+/// collection scan wins. With `index_keys`, each document's metadata has the key of the index
+/// entry it was read by (`{$meta: "indexKey"}`, measured in `tests/aggregate/index_key.out`).
 fn planned_read<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
     ns: &Namespace,
     (stages, vars): (&[RawValue<'_>], Option<&Document>),
     concern: ReadConcern,
-) -> Result<Option<Vec<Document>>, CommandError> {
+    index_keys: bool,
+) -> Result<Option<PlannedRead>, CommandError> {
     let stages: Vec<Document> = stages
         .iter()
         .map(|v| match v {
@@ -729,6 +786,7 @@ fn planned_read<B: Backend + ?Sized>(
         vars,
         concern,
         intersect: super::lock(ctx.shared).params.hash_intersection,
+        index_keys: index_keys && !super::query::id_point(&filter),
     };
     if indexes.is_empty() || super::explain::matches_nothing(&parsed) {
         return Ok(None);
@@ -742,16 +800,34 @@ fn planned_read<B: Backend + ?Sized>(
             .with("projection", Document::new()),
         shape: super::plan_cache::read_shape(&parsed, sort.as_ref(), None, None),
     };
-    let Some(found) = super::plan_exec::planned_documents(ctx.backend, &coll, &read, Some(note))?
+    let Some((found, keys)) =
+        super::plan_exec::planned_keyed(ctx.backend, &coll, &read, Some(note))?
     else {
         return Ok(None);
     };
-    found
+    let docs = found
         .iter()
         .map(|b| Ok(Document::from(RawDoc::from_bytes(b)?)))
-        .collect::<Result<_, _>>()
-        .map(Some)
+        .collect::<Result<_, CommandError>>()?;
+    let metas = index_keys.then(|| {
+        let mut keys = keys.into_iter();
+        found
+            .iter()
+            .map(|_| {
+                let mut m = Meta::new();
+                if let Some(Some(k)) = keys.next() {
+                    m.insert(INDEX_KEY.to_owned(), Value::Document(k));
+                }
+                m
+            })
+            .collect()
+    });
+    Ok(Some((docs, metas)))
 }
+
+/// The documents an index plan read and, when the pipeline reads `{$meta: "indexKey"}`, the
+/// metadata of each with its index key.
+type PlannedRead = (Vec<Document>, Option<Vec<Meta>>);
 
 /// Refuses a stage the node answers itself on a namespace it does not run on (measured on a
 /// `refrouter` 9.0.4): `$listLocalSessions` only with `aggregate: 1`, `$listSessions` only on

@@ -341,6 +341,7 @@ fn projection_corners() {
         matcher: MatchContext { collation: None, ext: &NoExtensions, vars: None },
         position: Some(1),
         sort_key: None,
+        index_key: None,
     };
     assert_eq!(
         json(&Projection::parse(raw(&s)).unwrap().apply(raw(&d), &ctx).unwrap()),
@@ -384,6 +385,7 @@ fn integration_defaults() {
         matcher: MatchContext { collation: None, ext: &NoExtensions, vars: None },
         position: None,
         sort_key: None,
+        index_key: None,
     };
     let s = bytes(r#"{"s": {"$meta": "textScore"}}"#);
     let d = bytes(r#"{"a": 1}"#);

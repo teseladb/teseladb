@@ -100,6 +100,11 @@ impl<S> CursorTable<S> {
         self.cursors.get(&id)
     }
 
+    /// Cursor `id` to change, if it is open and not taken.
+    pub fn get_mut(&mut self, id: i64) -> Option<&mut Cursor<S>> {
+        self.cursors.get_mut(&id)
+    }
+
     /// Open cursors.
     pub fn len(&self) -> usize {
         self.cursors.len()
