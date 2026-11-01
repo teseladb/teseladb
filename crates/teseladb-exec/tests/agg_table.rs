@@ -284,6 +284,13 @@ fn ties_follow_the_engine_refdb_chooses() {
     check(include_str!("agg/sbe.out"));
 }
 
+/// The arguments of `$function` and `$accumulator` (010 T012), checked before any JavaScript
+/// runs; this node has no engine.
+#[test]
+fn javascript_arguments_match_refdb() {
+    check(include_str!("agg/js.out"));
+}
+
 /// The errors of each stage's and accumulator's arguments (010 FR-001).
 #[test]
 fn argument_errors_match_refdb() {

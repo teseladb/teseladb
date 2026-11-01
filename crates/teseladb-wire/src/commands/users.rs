@@ -300,6 +300,8 @@ fn create_user<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Co
     user.roles = roles;
     user.custom_data = custom;
     user.restrictions = restrictions;
+    // A user belongs to the tenant of the session that creates it (007 FR-025).
+    user.tenant = ctx.backend.tenant();
     if let Some(p) = &pwd {
         let mechs = mechs.unwrap_or_else(|| vec![Mechanism::ScramSha1, Mechanism::ScramSha256]);
         credentials(ctx.backend, &mut user, &mechs, p, !digest)?;

@@ -61,6 +61,8 @@ pub enum CatalogReq {
     /// The catalog and the index definitions of this node's copy, encoded as
     /// `RestoreCatalog` carries them, for a backup (007 FR-021).
     Dump,
+    /// The tenants of this node's copy (007 FR-025).
+    Tenants,
 }
 
 /// The answer to a [`CatalogReq`].
@@ -79,6 +81,8 @@ pub enum CatalogAnswer {
     Dump(Vec<u8>),
     /// Documents of a generated collection of `config`, in BSON.
     Documents(Vec<Vec<u8>>),
+    /// The tenants, by number and name.
+    Tenants(Vec<(u32, String)>),
     /// The change was applied: the collection it created or found.
     Done(Option<CollectionEntry>),
     /// Group 0 refused the change.
@@ -113,6 +117,10 @@ fn error_code(e: Group0Error) -> u8 {
         Group0Error::PrincipalNotFound(Principal::Role) => 6,
         Group0Error::SecurityConflict => 7,
         Group0Error::DatabaseDifferCase => 8,
+        Group0Error::TenantExists => 9,
+        Group0Error::TenantNotFound => 10,
+        Group0Error::InvalidTenantName => 11,
+        Group0Error::NotEmpty => 12,
         _ => 2,
     }
 }
@@ -127,6 +135,10 @@ fn error_of(c: u8) -> Group0Error {
         6 => Group0Error::PrincipalNotFound(Principal::Role),
         7 => Group0Error::SecurityConflict,
         8 => Group0Error::DatabaseDifferCase,
+        9 => Group0Error::TenantExists,
+        10 => Group0Error::TenantNotFound,
+        11 => Group0Error::InvalidTenantName,
+        12 => Group0Error::NotEmpty,
         _ => Group0Error::NotBootstrapped,
     }
 }
@@ -168,6 +180,7 @@ pub fn decode_applied(b: &[u8]) -> Result<Option<Applied>, DecodeError> {
                     uuid,
                     options: d.bytes()?.to_vec(),
                     created_index: d.u64()?,
+                    tenant: 0,
                 })
             } else {
                 None
@@ -193,7 +206,8 @@ fn applied(index: u64, r: Result<Done<CoreOutput>, OpError>) -> Option<Applied> 
                 | Group0Result::Node(_)
                 | Group0Result::Range(_)
                 | Group0Result::Index(_)
-                | Group0Result::Meta1(_) => Ok(None),
+                | Group0Result::Meta1(_)
+                | Group0Result::Tenant(_) => Ok(None),
             };
             Some(Applied { index, result })
         }
@@ -345,6 +359,7 @@ mod tests {
             uuid: [4; 16],
             options: vec![5, 0, 0, 0, 0],
             created_index: 9,
+            tenant: 0,
         };
         let cases = [
             None,

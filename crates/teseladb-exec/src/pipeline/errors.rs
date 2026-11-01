@@ -134,6 +134,8 @@ pub const MERGE_NO_MATCH: ErrorCode =
     ErrorCode { code: 13113, name: "MergeStageNoMatchingDocument" };
 /// `InvalidOptions`: a stage an update's pipeline does not take.
 pub const INVALID_OPTIONS: ErrorCode = ErrorCode { code: 72, name: "InvalidOptions" };
+/// RefDb's `UnsupportedFormat` (12).
+pub const UNSUPPORTED_FORMAT: ErrorCode = ErrorCode { code: 12, name: "UnsupportedFormat" };
 
 /// An error with `code` and `msg`.
 pub fn error(code: ErrorCode, msg: impl Into<String>) -> MqlError {

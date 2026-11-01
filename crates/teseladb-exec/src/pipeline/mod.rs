@@ -7,6 +7,7 @@
 pub mod deps;
 pub mod errors;
 mod fill;
+pub mod geo_near;
 mod granularity;
 mod group;
 pub mod optimize;
@@ -74,9 +75,20 @@ pub trait Env {
         crate::collation::Collation::default()
     }
 
+    /// The namespace of the pipeline's collection and its 2d and 2dsphere indexes, in the
+    /// catalog's order (`$geoNear`); none by default.
+    fn geo_indexes(&self) -> Result<(String, Vec<geo_near::GeoIndex>), MqlError> {
+        Ok((String::new(), Vec::new()))
+    }
+
+    /// The engine of `$function` and `$accumulator` (016); none by default.
+    fn js(&self) -> Option<std::rc::Rc<dyn crate::expr::js::JsEngine>> {
+        None
+    }
+
     /// The scope of an expression over `doc`.
     fn scope(&self, doc: &Document) -> Scope {
-        Scope::new(doc.clone(), self.vars()).with_collation(self.collation())
+        Scope::new(doc.clone(), self.vars()).with_collation(self.collation()).with_js(self.js())
     }
 }
 
@@ -106,6 +118,7 @@ enum Stage {
     Densify(Box<fill::Densify>),
     Fill(Box<fill::Fill>),
     GraphLookup(Box<fill::GraphLookup>),
+    GeoNear(Box<geo_near::GeoNear>),
     /// A stage the node answers itself, first in its pipeline.
     System(&'static str, Document),
     /// A search stage, first in its pipeline (011 FR-022).
@@ -176,6 +189,16 @@ impl Pipeline {
 
     /// Refuses `$documents` and the stages the node answers itself anywhere but first.
     fn check_positions(&self) -> Result<(), MqlError> {
+        // `$geoNear` goes first, after the `$match`es it takes as its query (measured).
+        let leading = self.stages.iter().take_while(|s| matches!(s, Stage::Match(_))).count();
+        if self
+            .stages
+            .iter()
+            .enumerate()
+            .any(|(i, s)| matches!(s, Stage::GeoNear(_)) && i > leading)
+        {
+            return Err(geo_near::not_first());
+        }
         let last = self.stages.len().saturating_sub(1);
         for st in &self.stages[..last] {
             if let Stage::Write(w) = st {
@@ -193,6 +216,26 @@ impl Pipeline {
                 errors::FIRST_STAGE,
                 format!("{name} is only valid as the first stage in a pipeline"),
             ));
+        }
+        Ok(())
+    }
+
+    /// The name of the first stage when the node answers it itself (`$collStats`,
+    /// `$listSessions`…).
+    pub fn system_stage(&self) -> Option<&'static str> {
+        match self.stages.first() {
+            Some(Stage::System(name, _)) => Some(name),
+            _ => None,
+        }
+    }
+
+    /// The errors of planning the pipeline's reads on `env`, before it runs (the index of
+    /// `$geoNear`).
+    pub fn check_plan(&self, env: &dyn Env) -> Result<(), MqlError> {
+        for st in &self.stages {
+            if let Stage::GeoNear(g) = st {
+                g.check_plan(env)?;
+            }
         }
         Ok(())
     }
@@ -360,6 +403,11 @@ fn parse_stage(d: RawDoc<'_>, ctx: &Ctx) -> Result<Stage, MqlError> {
         "$fill" => Stage::Fill(Box::new(fill::Fill::parse(arg, ctx)?)),
         "$graphLookup" => Stage::GraphLookup(Box::new(fill::GraphLookup::parse(arg, ctx)?)),
         "$collStats" => Stage::System("$collStats", system::coll_stats(arg)?),
+        "$geoNear" => Stage::GeoNear(Box::new(geo_near::GeoNear::parse(arg, ctx)?)),
+        "$listLocalSessions" => {
+            Stage::System("$listLocalSessions", system::sessions("$listLocalSessions", arg)?)
+        }
+        "$listSessions" => Stage::System("$listSessions", system::sessions("$listSessions", arg)?),
         "$search" => Stage::Search("$search", search::parse(name, arg)?),
         "$searchMeta" => Stage::Search("$searchMeta", search::parse(name, arg)?),
         "$vectorSearch" => Stage::Search("$vectorSearch", search::parse(name, arg)?),
@@ -397,6 +445,10 @@ const COLLECTIONLESS_STAGES: [&str; 6] = [
     "$querySettings",
 ];
 
+/// The error of `$listSessions` anywhere but on `config.system.sessions`.
+pub const LIST_SESSIONS_NAMESPACE: &str =
+    "$listSessions may only be run against config.system.sessions";
+
 /// Checks the first stage of an `aggregate: 1`, which must read no collection.
 fn collectionless(stages: &[RawValue<'_>]) -> Result<(), MqlError> {
     let Some(RawValue::Document(first)) = stages.first() else {
@@ -406,6 +458,9 @@ fn collectionless(stages: &[RawValue<'_>]) -> Result<(), MqlError> {
         ));
     };
     let name = first.iter().next().map(|(k, _)| k).unwrap_or_default();
+    if name == "$listSessions" {
+        return Err(error(errors::INVALID_NAMESPACE, LIST_SESSIONS_NAMESPACE));
+    }
     if !COLLECTIONLESS_STAGES.contains(&name) {
         return Err(error(
             errors::INVALID_NAMESPACE,
@@ -478,6 +533,7 @@ fn sbe_capable(st: &Stage) -> bool {
         | Stage::SetWindowFields(_)
         | Stage::Densify(_)
         | Stage::GraphLookup(_)
+        | Stage::GeoNear(_)
         | Stage::System(..)
         | Stage::Search(..)
         | Stage::Write(_) => false,
@@ -524,6 +580,7 @@ fn run_stage(
         Stage::Densify(d) => d.run(docs, env.collation().get())?,
         Stage::Fill(f) => f.run(docs, env)?,
         Stage::GraphLookup(g) => g.run(docs, env)?,
+        Stage::GeoNear(g) => g.run(docs, env)?,
         Stage::System(name, spec) => env.system_stage(name, spec)?,
         Stage::Search(name, spec) => {
             env.search_source(name, spec)?.into_iter().map(|s| s.doc).collect()

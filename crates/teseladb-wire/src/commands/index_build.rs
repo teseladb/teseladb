@@ -179,6 +179,7 @@ impl<'a> BuildOp<'a> {
             deadline_ms: None,
             killed: false,
             user: None,
+            tenant: 0,
             privileges: None,
             roles: None,
             desc: None,

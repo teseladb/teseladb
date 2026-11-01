@@ -114,7 +114,7 @@ pub(crate) fn plan_indexes<B: Backend + ?Sized>(
         let multikey_paths = if id_index {
             pattern.iter().map(|(k, _)| (k.to_owned(), Vec::new())).collect()
         } else {
-            multikey_paths(backend, coll.id, &entry, &pattern)?
+            multikey_paths(backend, (coll.tenant, coll.id), &entry, &pattern)?
         };
         let key = pattern
             .iter()
@@ -144,14 +144,14 @@ fn query_number(v: &Value) -> f64 {
 /// The paths through arrays of each field of index `entry`, from the marks its writes left.
 fn multikey_paths<B: Backend + ?Sized>(
     backend: &mut B,
-    collection: u32,
+    (tenant, collection): (u32, u32),
     entry: &IndexEntry,
     pattern: &Document,
 ) -> Result<Vec<(String, Vec<String>)>, CommandError> {
     let mut out: Vec<(String, Vec<String>)> =
         pattern.iter().map(|(k, _)| (k.to_owned(), Vec::new())).collect();
-    let start = KeyBuilder::index_prefix(0, collection, MULTIKEY_MARKS + entry.id);
-    let end = KeyBuilder::index_prefix(0, collection, MULTIKEY_MARKS + entry.id + 1);
+    let start = KeyBuilder::index_prefix(tenant, collection, MULTIKEY_MARKS + entry.id);
+    let end = KeyBuilder::index_prefix(tenant, collection, MULTIKEY_MARKS + entry.id + 1);
     let head = start.as_bytes().len();
     let rows = backend.scan(start.as_bytes(), end.as_bytes(), usize::MAX, ReadConcern::Local)?;
     for (key, _) in rows {
@@ -452,7 +452,7 @@ fn run<B: Backend + ?Sized>(
         ran.child_past.push(0);
         ran.child_given.push(0);
         let residual = s.residual.as_ref().map(&plan_filter).transpose()?;
-        for entry in entries(backend, coll.id, index, s, read.concern)? {
+        for entry in entries(backend, (coll.tenant, coll.id), index, s, read.concern)? {
             if budget.is_some_and(|b| ran.keys >= b) {
                 ended = false;
                 break 'scans;
@@ -480,7 +480,7 @@ fn run<B: Backend + ?Sized>(
                     continue;
                 }
             }
-            let key = KeyBuilder::document_of_pk(0, coll.id, &pk);
+            let key = KeyBuilder::document_of_pk(coll.tenant, coll.id, &pk);
             let next = [key.as_bytes(), &[0]].concat();
             let Some((dk, bytes)) =
                 backend.scan(key.as_bytes(), &next, 1, read.concern)?.into_iter().next()
@@ -556,7 +556,8 @@ fn intersected<B: Backend + ?Sized>(
     let Some((last, held)) = scans.split_last() else { return Ok(ran) };
     let mut sets: Vec<std::collections::BTreeSet<Vec<u8>>> = Vec::new();
     for s in held {
-        let read_entries = entries(backend, coll.id, &indexes[s.index], s, read.concern)?;
+        let read_entries =
+            entries(backend, (coll.tenant, coll.id), &indexes[s.index], s, read.concern)?;
         let n = u64::try_from(read_entries.len()).unwrap_or(u64::MAX);
         let outside = read_entries.iter().filter(|e| e.is_none()).count();
         let past = u64::try_from(outside).unwrap_or(u64::MAX);
@@ -569,7 +570,8 @@ fn intersected<B: Backend + ?Sized>(
     }
     ran.child_keys.push(0);
     ran.child_past.push(0);
-    for entry in entries(backend, coll.id, &indexes[last.index], last, read.concern)? {
+    for entry in entries(backend, (coll.tenant, coll.id), &indexes[last.index], last, read.concern)?
+    {
         ran.keys += 1;
         if let Some(k) = ran.child_keys.last_mut() {
             *k += 1;
@@ -584,7 +586,7 @@ fn intersected<B: Backend + ?Sized>(
         if !sets.iter().all(|set| set.contains(&pk)) {
             continue;
         }
-        let key = KeyBuilder::document_of_pk(0, coll.id, &pk);
+        let key = KeyBuilder::document_of_pk(coll.tenant, coll.id, &pk);
         let next = [key.as_bytes(), &[0]].concat();
         let Some((dk, bytes)) =
             backend.scan(key.as_bytes(), &next, 1, read.concern)?.into_iter().next()
@@ -617,16 +619,16 @@ fn intersected<B: Backend + ?Sized>(
 /// `_id` in `[2, 5, 7]` over `_id` 1 to 8 examines 6 keys).
 fn entries<B: Backend + ?Sized>(
     backend: &mut B,
-    collection: u32,
+    (tenant, collection): (u32, u32),
     index: &PlanIndex,
     scan: &IndexScan,
     concern: ReadConcern,
 ) -> Result<Vec<Option<Vec<u8>>>, CommandError> {
-    let ranges = key_ranges(collection, index, &scan.bounds)?;
-    let (first, past) = index_span(collection, index);
+    let ranges = key_ranges((tenant, collection), index, &scan.bounds)?;
+    let (first, past) = index_span((tenant, collection), index);
     let mut lists = Vec::new();
     for r in &ranges {
-        let mut pks = range_entries(backend, collection, index, r, concern)?;
+        let mut pks = range_entries(backend, (tenant, collection), index, r, concern)?;
         if scan.backward {
             pks.reverse();
         }
@@ -652,7 +654,7 @@ fn entries<B: Backend + ?Sized>(
             (true, Some(n)) => (end_of(&ranges[n]), ranges[i].start.clone()),
             (true, None) => (first.clone(), ranges[i].start.clone()),
         };
-        if from < to && any_entry(backend, index, (&from, &to), concern)? {
+        if from < to && any_entry(backend, tenant, index, (&from, &to), concern)? {
             out.push(None);
         }
     }
@@ -666,39 +668,39 @@ pub(crate) fn key_after<B: Backend + ?Sized>(
     index: &PlanIndex,
     scan: &IndexScan,
 ) -> Result<bool, CommandError> {
-    let ranges = key_ranges(coll.id, index, &scan.bounds)?;
-    let (first, past) = index_span(coll.id, index);
+    let ranges = key_ranges((coll.tenant, coll.id), index, &scan.bounds)?;
+    let (first, past) = index_span((coll.tenant, coll.id), index);
     let (from, to) = match (scan.backward, ranges.first(), ranges.last()) {
         (true, Some(r), _) => (first, r.start.clone()),
         (false, _, Some(r)) => (r.end.clone().unwrap_or_else(|| past.clone()), past),
         _ => return Ok(false),
     };
-    Ok(from < to && any_entry(backend, index, (&from, &to), ReadConcern::Local)?)
+    Ok(from < to && any_entry(backend, coll.tenant, index, (&from, &to), ReadConcern::Local)?)
 }
 
 /// The first key of `index` and the first key after it.
-fn index_span(collection: u32, index: &PlanIndex) -> (Vec<u8>, Vec<u8>) {
+fn index_span((tenant, collection): (u32, u32), index: &PlanIndex) -> (Vec<u8>, Vec<u8>) {
     let id = index.entry.id;
     (
-        KeyBuilder::index_prefix(0, collection, id).as_bytes().to_vec(),
-        KeyBuilder::index_prefix(0, collection, id + 1).as_bytes().to_vec(),
+        KeyBuilder::index_prefix(tenant, collection, id).as_bytes().to_vec(),
+        KeyBuilder::index_prefix(tenant, collection, id + 1).as_bytes().to_vec(),
     )
 }
 
 /// The primary keys of the entries of `index` within key range `r`, in key order.
 fn range_entries<B: Backend + ?Sized>(
     backend: &mut B,
-    collection: u32,
+    (tenant, collection): (u32, u32),
     index: &PlanIndex,
     r: &KeyRange,
     concern: ReadConcern,
 ) -> Result<Vec<Vec<u8>>, CommandError> {
-    let (_, past) = index_span(collection, index);
+    let (_, past) = index_span((tenant, collection), index);
     let end = r.end.clone().unwrap_or(past);
     if index.id_index {
-        return id_entries(backend, collection, (&r.start, &end), concern);
+        return id_entries(backend, (tenant, collection), (&r.start, &end), concern);
     }
-    let head = KeyBuilder::index_prefix(0, collection, index.entry.id).as_bytes().len();
+    let head = KeyBuilder::index_prefix(tenant, collection, index.entry.id).as_bytes().len();
     let malformed = || CommandError::new(INTERNAL_ERROR, "an index entry that does not decode");
     let mut pks = Vec::new();
     let mut from = r.start.clone();
@@ -721,6 +723,7 @@ fn range_entries<B: Backend + ?Sized>(
 /// Whether `index` has an entry in `[from, to)`.
 fn any_entry<B: Backend + ?Sized>(
     backend: &mut B,
+    tenant: u32,
     index: &PlanIndex,
     (from, to): (&[u8], &[u8]),
     concern: ReadConcern,
@@ -728,7 +731,7 @@ fn any_entry<B: Backend + ?Sized>(
     if !index.id_index {
         return Ok(!backend.scan(from, to, 1, concern)?.is_empty());
     }
-    let docs = KeyBuilder::index_prefix(0, index.entry.collection, DOCUMENTS);
+    let docs = KeyBuilder::index_prefix(tenant, index.entry.collection, DOCUMENTS);
     for bucket in 0..DOCUMENT_BUCKETS {
         let (low, high) = in_bucket(docs.as_bytes(), bucket, (from, to));
         if !backend.scan(&low, &high, 1, concern)?.is_empty() {
@@ -757,11 +760,11 @@ fn in_bucket(docs: &[u8], bucket: u8, (from, to): (&[u8], &[u8])) -> (Vec<u8>, V
 /// order.
 fn id_entries<B: Backend + ?Sized>(
     backend: &mut B,
-    collection: u32,
+    (tenant, collection): (u32, u32),
     (from, to): (&[u8], &[u8]),
     concern: ReadConcern,
 ) -> Result<Vec<Vec<u8>>, CommandError> {
-    let docs = KeyBuilder::index_prefix(0, collection, DOCUMENTS);
+    let docs = KeyBuilder::index_prefix(tenant, collection, DOCUMENTS);
     let head = docs.as_bytes().len();
     let mut found = Vec::new();
     for bucket in 0..DOCUMENT_BUCKETS {
@@ -782,7 +785,7 @@ fn id_entries<B: Backend + ?Sized>(
 
 /// The key intervals of `index` for `bounds`.
 fn key_ranges(
-    collection: u32,
+    (tenant, collection): (u32, u32),
     index: &PlanIndex,
     bounds: &[(String, Vec<Bound>)],
 ) -> Result<Vec<KeyRange>, CommandError> {
@@ -810,7 +813,7 @@ fn key_ranges(
         }
         fields.push(intervals);
     }
-    let catalog = IndexCatalog { tenant: 0, collection, indexes: vec![index.catalog.clone()] };
+    let catalog = IndexCatalog { tenant, collection, indexes: vec![index.catalog.clone()] };
     Ok(catalog.bounds(&index.catalog, &FieldBounds { fields }, None))
 }
 

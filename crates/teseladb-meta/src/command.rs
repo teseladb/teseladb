@@ -77,6 +77,10 @@ pub mod kind {
     pub const RESTORE_CATALOG: u16 = 50;
     /// [`super::Group0Command::SetSettings`].
     pub const SET_SETTINGS: u16 = 51;
+    /// [`super::Group0Command::CreateTenant`].
+    pub const CREATE_TENANT: u16 = 52;
+    /// [`super::Group0Command::DropTenant`].
+    pub const DROP_TENANT: u16 = 53;
 }
 
 /// Addresses, name and cores of a node.
@@ -351,6 +355,16 @@ pub enum Group0Command {
     /// expects its value as it was read (`None`: absent), and none changes unless all are so;
     /// a value `None` removes the setting.
     SetSettings(Vec<SettingChange>),
+    /// Adds tenant `name` with a number never given before (007 FR-025).
+    CreateTenant {
+        /// Its name.
+        name: String,
+    },
+    /// Takes tenant `name` out, if it has no database and no user left (007 FR-025).
+    DropTenant {
+        /// Its name.
+        name: String,
+    },
 }
 
 /// A setting of [`Group0Command::SetSettings`].
@@ -455,6 +469,8 @@ impl Group0Command {
             Group0Command::Meta2Seeded { .. } => kind::META2_SEEDED,
             Group0Command::RestoreCatalog { .. } => kind::RESTORE_CATALOG,
             Group0Command::SetSettings(_) => kind::SET_SETTINGS,
+            Group0Command::CreateTenant { .. } => kind::CREATE_TENANT,
+            Group0Command::DropTenant { .. } => kind::DROP_TENANT,
         }
     }
 
@@ -536,6 +552,9 @@ impl Group0Command {
             Group0Command::RestoreCatalog { catalog, indexes } => {
                 catalog.encode(&mut e);
                 indexes.encode(&mut e);
+            }
+            Group0Command::CreateTenant { name } | Group0Command::DropTenant { name } => {
+                e.str(name);
             }
             Group0Command::SetSettings(changes) => {
                 e.var(changes.len() as u64);
@@ -666,6 +685,8 @@ impl Group0Command {
                 }
                 Group0Command::SetSettings(changes)
             }
+            kind::CREATE_TENANT => Group0Command::CreateTenant { name: d.str()?.to_owned() },
+            kind::DROP_TENANT => Group0Command::DropTenant { name: d.str()?.to_owned() },
             kind::CATALOG => Group0Command::Catalog(CatalogCommand::decode(&mut d)?),
             kind::INDEXES => Group0Command::Indexes(IndexCommand::decode(&mut d)?),
             kind::SECURITY => Group0Command::Security(decode_ops(&mut d)?),

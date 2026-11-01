@@ -42,9 +42,13 @@ const REMOVABLE: ErrorCode = loc!(5461500);
 const LINEAR_SORT: ErrorCode = loc!(605001);
 const EMPTY_PATH: ErrorCode = loc!(40352);
 const LINEAR_REPEATED: ErrorCode = loc!(6050106);
+const SCALER_INPUT: ErrorCode = loc!(10487001);
+
+/// The name of `$minMaxScaler` in its argument errors.
+const SCALER: &str = "$minMaxScaler";
 
 /// The window functions that are no accumulator.
-const WINDOW_ONLY: [&str; 11] = [
+const WINDOW_ONLY: [&str; 12] = [
     "$rank",
     "$denseRank",
     "$documentNumber",
@@ -56,6 +60,7 @@ const WINDOW_ONLY: [&str; 11] = [
     "$covarianceSamp",
     "$locf",
     "$linearFill",
+    "$minMaxScaler",
 ];
 
 /// The expected type of an object argument, as `TypeMismatch` messages write it.
@@ -110,6 +115,12 @@ enum Func {
     },
     Locf(Expr),
     LinearFill(Expr),
+    /// Each document's input scaled from the range of its window's inputs to `[min, max]`.
+    MinMaxScaler {
+        input: Expr,
+        min: Value,
+        max: Value,
+    },
 }
 
 /// A `$setWindowFields`.
@@ -264,6 +275,48 @@ fn ema_alpha(v: &Value) -> Result<Weight, MqlError> {
 }
 
 /// The fields of a sub-object argument (`$shift`, `$expMovingAvg`…).
+/// Reads `$minMaxScaler`'s argument: an `input` expression and, both or neither, the `min` and
+/// `max` of the scaled range as numeric constants, `min` below `max` (measured on a `refrouter`
+/// 9.0.4).
+fn min_max_scaler(arg: RawValue<'_>, ctx: &Ctx) -> Result<Func, MqlError> {
+    let root = format!("root.{SCALER}");
+    let RawValue::Document(d) = arg else {
+        return Err(wrong_type(&root, arg, OBJECT));
+    };
+    let (mut input, mut min, mut max) = (None, None, None);
+    for (k, x) in d.iter() {
+        match k {
+            "input" => input = Some(Expr::parse_in(x, ctx)?),
+            "min" => min = Some(Expr::parse_in(x, ctx)?),
+            "max" => max = Some(Expr::parse_in(x, ctx)?),
+            other => return Err(unknown_field(&root, other)),
+        }
+    }
+    let input = input.ok_or_else(|| missing_field(&root, "input"))?;
+    let constant = |e: Expr, which: &str| -> Result<Value, MqlError> {
+        let empty = Document::new();
+        match e.eval(&empty, &Scope::new(empty.clone(), None))? {
+            Some(v) if crate::expr::values::is_number(&v) => Ok(v),
+            _ => Err(failed(format!("'{which}' argument to {SCALER} must be a numeric type"))),
+        }
+    };
+    let (min, max) = match (min, max) {
+        (None, None) => (Value::Int32(0), Value::Int32(1)),
+        (Some(lo), Some(hi)) => (constant(lo, "min")?, constant(hi, "max")?),
+        _ => {
+            return Err(failed(format!(
+                "Only one of 'min' and 'max' were specified as an argument to {SCALER}. Neither or both must be specified"
+            )));
+        }
+    };
+    if order(&Some(max.clone()), &Some(min.clone()), None)? != Ordering::Greater {
+        return Err(failed(format!(
+            "the 'max' must be strictly greater than 'min', as arguments to {SCALER}"
+        )));
+    }
+    Ok(Func::MinMaxScaler { input, min, max })
+}
+
 fn sub_object<'a>(name: &str, arg: RawValue<'a>) -> Result<RawDoc<'a>, MqlError> {
     match arg {
         RawValue::Document(d) => Ok(d),
@@ -481,6 +534,7 @@ impl SetWindowFields {
                 no_window(name)?;
                 Func::Locf(Expr::parse_in(arg, ctx)?)
             }
+            "$minMaxScaler" => min_max_scaler(arg, ctx)?,
             "$linearFill" => {
                 no_window(name)?;
                 if self.sort.is_none() {
@@ -663,6 +717,30 @@ impl SetWindowFields {
                     (0..n).map(|i| eval(e, i)).collect::<Result<_, _>>()?;
                 let xs = self.linear_positions(docs)?;
                 funcs::linear_fill(&values, &xs)?
+            }
+            Func::MinMaxScaler { input, min, max } => {
+                let mut inputs = Vec::with_capacity(n);
+                for i in 0..n {
+                    let v = eval(input, i)?;
+                    match v {
+                        Some(x) if crate::expr::values::is_number(&x) => inputs.push(x),
+                        other => {
+                            let got = other.as_ref().map_or("missing", type_name_of);
+                            return Err(error(
+                                SCALER_INPUT,
+                                format!(
+                                    "'input' argument to {SCALER} must evaluate to a numeric type, got: {got}"
+                                ),
+                            ));
+                        }
+                    }
+                }
+                let ranges = self.windows(win, docs)?;
+                let mut out = Vec::with_capacity(n);
+                for (i, (lo, hi)) in ranges.into_iter().enumerate() {
+                    out.push(funcs::min_max_scaled(&inputs[i], &inputs[lo..hi], (min, max))?);
+                }
+                out
             }
             _ => {
                 let ranges = self.windows(win, docs)?;
