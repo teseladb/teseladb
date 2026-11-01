@@ -738,7 +738,7 @@ impl<B: Backend + ?Sized> Ctx<'_, B> {
 }
 
 /// The commands of this module.
-const NAMES: [&str; 72] = [
+const NAMES: [&str; 74] = [
     aggregate::AGGREGATE,
     plan_cache::PLAN_CACHE_CLEAR,
     explain::EXPLAIN,
