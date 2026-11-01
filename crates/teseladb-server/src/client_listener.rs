@@ -24,6 +24,7 @@ use teseladb_io::mailbox::{self, Mailbox, MailboxSender};
 use teseladb_io::poller::{Interest, Poller, WAKE_TOKEN, Waker};
 use teseladb_multiraft::NodeClock;
 use teseladb_txn::reaper::Reaper;
+use teseladb_wire::commands::diagnostic_data;
 use teseladb_wire::commands::registry::{REFRESH_INTERVAL_MS, refresh};
 use teseladb_wire::commands::{
     Backend, NodeSessions, REAP_INTERVAL_MS, Shared, Timeouts, lock, reap,
@@ -39,6 +40,7 @@ use crate::backend::{NodeHandle, SCAN_EVERY, ServerBackend};
 use crate::certs::Certificates;
 use crate::clustertime_keys::KeySlot;
 use crate::diag::{Diag, PortStats, ProcessConfig};
+use crate::diagnostic_capture::{self, Capture};
 use crate::tls_port::{TlsPort, Transport};
 use teseladb_wire::error::{CommandError, SHUTDOWN_IN_PROGRESS};
 use teseladb_wire::hello::HelloRequest;
@@ -519,7 +521,8 @@ impl ClientListener {
         let keeper = match state.handle() {
             Some(h) => {
                 let k = Keeper {
-                    backend: ServerBackend::new(h, seed(workers)),
+                    backend: ServerBackend::new(h, seed(workers)).with_diag(diag.clone()),
+                    capture: cfg.process.dbpath.as_deref().map(Capture::new),
                     shared,
                     refresh_every: cfg.refresh_every,
                     ttl_every: hooks.ttl_every,
@@ -571,9 +574,29 @@ struct Keeper {
     stop: Arc<AtomicBool>,
     /// The reapers of abandoned transactions, one per core (008 FR-007).
     reapers: BTreeMap<u16, Reaper>,
+    /// The periodic diagnostic capture of a node with a data directory (010 FR-024).
+    capture: Option<Capture>,
 }
 
 impl Keeper {
+    /// Writes the node's diagnostic sample (010 FR-024). A sample that cannot be taken or
+    /// written is logged and the next one comes a period later.
+    fn sample(&mut self) {
+        let Some(capture) = self.capture.as_mut() else { return };
+        let at = i64::try_from(self.backend.wall_ms()).unwrap_or(i64::MAX);
+        let taken = diagnostic_data::capture(&mut self.backend, &self.shared);
+        self.backend.end_operation();
+        let written = match taken {
+            Ok(sample) => capture.write(at, sample).map_err(|e| e.to_string()),
+            Err(e) => Err(e.errmsg),
+        };
+        if let Err(e) = written {
+            let attr = format!("{{\"error\":{e:?}}}");
+            let msg = "Diagnostic capture failed".to_owned();
+            crate::log::defer(crate::log::Pending { id: diagnostic_capture::FAILED_ID, msg, attr });
+        }
+    }
+
     /// The reaping period: `clientCursorMonitorFrequencySecs` as `setParameter` left it, at
     /// least a millisecond.
     fn reap_period(&self) -> Duration {
@@ -589,6 +612,7 @@ impl Keeper {
         let ttl_every = self.ttl_every;
         let mut next_ttl = start + ttl_every;
         let mut next_txn = start + SCAN_EVERY;
+        let mut next_sample = start + diagnostic_capture::PERIOD;
         // Sessions used from this cluster time on go in the next refresh.
         let mut since = 0;
         while !self.stop.load(Ordering::Acquire) {
@@ -621,7 +645,11 @@ impl Keeper {
                 self.backend.end_operation();
                 next_txn = now + SCAN_EVERY;
             }
-            let next = next_reap.min(next_refresh).min(next_ttl).min(next_txn);
+            if now >= next_sample {
+                self.sample();
+                next_sample = now + diagnostic_capture::PERIOD;
+            }
+            let next = next_reap.min(next_refresh).min(next_ttl).min(next_txn).min(next_sample);
             thread::park_timeout(next.saturating_duration_since(Instant::now()));
         }
     }

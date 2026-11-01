@@ -14,6 +14,7 @@ use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_raftlog::MemDisk;
 use teseladb_server::audit_log::{AuditLog, AuditOpts};
 use teseladb_server::client_listener::{ClientConfig, Hooks};
+use teseladb_server::diag::ProcessConfig;
 use teseladb_server::node::{Node, NodeConfig};
 use teseladb_wire::msg::{HEADER_LEN, Header, OpMsg};
 
@@ -321,6 +322,38 @@ fn a_client_gone_while_its_command_runs_leaves_its_logout_in_the_audit_log() {
     let logout = r#"{ "atype" : "logout""#;
     let logged = || std::fs::read_to_string(&path).is_ok_and(|t| t.contains(logout));
     assert!(eventually(logged), "{:?}", std::fs::read_to_string(&path));
+    drop(n.stop());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A node with a data directory writes its diagnostic sample each second to
+/// `<data>/diagnostic.data` (010 FR-024, T041): BSON documents `{_id, type: 1, data}` whose
+/// `data` is what `getDiagnosticData` gives.
+#[test]
+fn the_node_writes_its_diagnostic_samples_to_its_data_directory() {
+    let dir = std::env::temp_dir().join(format!("teseladb-ftdc-node-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let process = ProcessConfig { dbpath: Some(dir.clone()), ..ProcessConfig::default() };
+    let n = node_with(Hooks::default(), ClientConfig { process, ..ClientConfig::new(Vec::new()) });
+    let samples = dir.join("diagnostic.data");
+    let first = || {
+        let file = std::fs::read_dir(&samples).ok()?.filter_map(Result::ok).next()?;
+        let bytes = std::fs::read(file.path()).ok()?;
+        let len = u32::from_le_bytes(bytes.get(..4)?.try_into().ok()?) as usize;
+        Some(Document::from(RawDoc::from_bytes(bytes.get(..len)?).ok()?))
+    };
+    assert!(eventually(|| first().is_some()), "no sample in {samples:?}");
+    let doc = first().expect("a sample");
+    let keys: Vec<&str> = doc.iter().map(|(k, _)| k).collect();
+    assert_eq!(keys, ["_id", "type", "data"]);
+    match doc.get("data") {
+        Some(Value::Document(d)) => {
+            let parts: Vec<&str> = d.iter().map(|(k, _)| k).collect();
+            assert_eq!(parts, ["start", "serverStatus", "connPoolStats", "end"]);
+        }
+        other => panic!("{other:?}"),
+    }
     drop(n.stop());
     let _ = std::fs::remove_dir_all(&dir);
 }

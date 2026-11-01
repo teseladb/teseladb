@@ -26,6 +26,7 @@ pub mod data;
 pub mod data_wire;
 pub mod dev;
 pub mod diag;
+pub mod diagnostic_capture;
 pub mod enroll;
 pub mod forward;
 pub mod frames;

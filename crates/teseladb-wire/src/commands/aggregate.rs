@@ -109,6 +109,14 @@ impl<B: Backend + ?Sized> WireEnv<'_, B> {
         Ok((names::full(ns), out))
     }
 
+    /// `$listCatalog`: the catalog entry of the aggregated collection, or of every collection
+    /// with `aggregate: 1` on `admin`.
+    fn list_catalog(&self) -> Result<Vec<Document>, CommandError> {
+        let Some((_, ns)) = &self.node else { return Ok(Vec::new()) };
+        let only = (ns.coll != COLLECTIONLESS).then_some(ns.coll.as_str());
+        super::list_catalog::entries(&mut **self.backend.borrow_mut(), &ns.db, only)
+    }
+
     /// `$listClusterCatalog`: every collection and view of the command's database (of every
     /// database on `admin`), as `listCollections` writes them with their namespace and database,
     /// none sharded; `shards` names the node and `tracked` says none is (measured on a `refrouter`
@@ -402,6 +410,9 @@ impl<B: Backend + ?Sized> Env for WireEnv<'_, B> {
             "$indexStats" => self.index_stats().map_err(to_mql),
             "$currentOp" => self.current_ops().map_err(to_mql),
             "$listClusterCatalog" => self.cluster_catalog(spec).map_err(to_mql),
+            // TeselaDB loads no extensions.
+            "$listExtensions" => Ok(Vec::new()),
+            "$listCatalog" => self.list_catalog().map_err(to_mql),
             other => Err(MqlError::new(
                 teseladb_mql::ErrorCode { code: BAD_VALUE.code, name: BAD_VALUE.name },
                 format!("{other} is not supported by this node"),
@@ -674,6 +685,16 @@ pub fn aggregate<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
     teseladb_exec::pipeline::optimize::optimize_stages(&stages, a.vars.as_ref())
         .map_err(from_mql)?;
     check_system_namespace(&pipeline, &ns, on_collection)?;
+    // On a view whose pipeline has stages, `$listCatalog` comes after them (measured).
+    if pipeline.system_stage() == Some("$listCatalog")
+        && let Some(c) = ctx.backend.collection(&ns)?
+        && matches!(super::kinds::kind_of(&c)?, CollectionKind::View { pipeline, .. } if !pipeline.is_empty())
+    {
+        return Err(CommandError::new(
+            crate::error::CS_NOT_FIRST,
+            "$listCatalog is only valid as the first stage in a pipeline",
+        ));
+    }
     if on_collection && ctx.backend.collection(&ns)?.is_some() {
         pipeline.check_collection_plan().map_err(from_mql)?;
     }
@@ -877,6 +898,19 @@ fn check_system_namespace(
             Err(CommandError::new(
                 INVALID_NAMESPACE,
                 "$currentOp must be run against the 'admin' database with {aggregate: 1}",
+            ))
+        }
+        Some("$listExtensions") if on_collection || ns.db != super::admin::ADMIN_DB => {
+            Err(CommandError::new(
+                INVALID_NAMESPACE,
+                "$listExtensions must be run against the 'admin' database with {aggregate: 1}",
+            ))
+        }
+        Some("$listCatalog") if !on_collection && ns.db != super::admin::ADMIN_DB => {
+            Err(CommandError::new(
+                INVALID_NAMESPACE,
+                "Collectionless $listCatalog must be run against the 'admin' database with \
+                 {aggregate: 1}",
             ))
         }
         Some("$listClusterCatalog") if on_collection => Err(CommandError::new(

@@ -382,6 +382,19 @@ fn clauses_and_paths_of_a_parsed_filter() {
 /// The branches the measured cases leave: clauses no index answers, arrays, hints over `$or`,
 /// intervals that touch.
 #[test]
+fn fields_after_a_range_keep_their_intervals() {
+    let c = catalog();
+    assert_eq!(
+        plans(r#"{"$and":[{"n":{"$eq":5}},{"g":{"$gt":"a"}}]}"#, &[], &c)[0],
+        r#"g_1_n_1: g["(\"a\", {})"] n["[5, 5]"]"#
+    );
+    assert_eq!(
+        plans(r#"{"$and":[{"n":{"$eq":5}},{"g":{"$exists":true}}]}"#, &[], &c)[0],
+        r#"g_1_n_1: g["[MinKey, MaxKey]"] n["[5, 5]"] | {"g":{"$exists":true}}"#
+    );
+}
+
+#[test]
 fn existence_scans_the_whole_index() {
     let c = catalog();
     assert_eq!(
@@ -523,4 +536,119 @@ fn intervals_join_where_they_meet() {
     assert_eq!(shown(union(&[b(1, true, 9, false)], &[b(2, true, 3, true)])), ["[1, 9)"]);
     assert_eq!(shown(union(&[b(1, true, 3, false)], &[b(1, true, 3, true)])), ["[1, 3]"]);
     assert_eq!(shown(union(&[b(5, true, 5, true)], &[b(1, true, 1, true)])), ["[1, 1]", "[5, 5]"]);
+}
+
+#[test]
+fn edges_of_intervals_and_their_display() {
+    let open = Bound {
+        low: Value::Int32(1),
+        low_inclusive: false,
+        high: Value::Int32(1),
+        high_inclusive: true,
+    };
+    assert!(!open.is_point());
+    assert_eq!(shown_value(&Value::Document(Document::new())), "{}");
+    assert_eq!(shown_value(&Value::Array(Vec::new())), "[]");
+    // `$not` of more than `$exists`, or of `$exists: 0`, has no intervals.
+    assert_eq!(intervals("$not", &Value::Document(doc(r#"{"$exists":true,"$gt":1}"#))), None);
+    assert_eq!(intervals("$not", &Value::Document(doc(r#"{"$exists":0}"#))), None);
+    for v in [Value::Int64(1), Value::Double(1.0), Value::String("x".to_owned())] {
+        assert!(intervals("$exists", &v).is_some(), "{v:?}");
+    }
+    for v in [Value::Int64(0), Value::Double(0.0), Value::Null, Value::Undefined] {
+        assert!(intervals("$exists", &v).is_none(), "{v:?}");
+    }
+    // Two intervals with the same upper end keep it in only if both do.
+    let a = Bound {
+        low: Value::Int32(0),
+        low_inclusive: true,
+        high: Value::Int32(5),
+        high_inclusive: true,
+    };
+    let b = Bound {
+        low: Value::Int32(1),
+        low_inclusive: true,
+        high: Value::Int32(5),
+        high_inclusive: false,
+    };
+    assert_eq!(intersect(std::slice::from_ref(&a), std::slice::from_ref(&b))[0].shown(), "[1, 5)");
+    // Intervals that meet at an end left open on both sides stay apart.
+    let c = Bound {
+        low: Value::Int32(5),
+        low_inclusive: false,
+        high: Value::Int32(9),
+        high_inclusive: true,
+    };
+    assert_eq!(union(&[b], &[c]).len(), 2);
+    let empty = Bound {
+        low: Value::Int32(5),
+        low_inclusive: false,
+        high: Value::Int32(5),
+        high_inclusive: true,
+    };
+    assert!(intersect(&[a], &[empty]).is_empty());
+}
+
+#[test]
+fn a_trial_that_does_not_end_scores_without_its_bonus() {
+    let base =
+        Trial { works: 10, advanced: 5, fetches: true, sorts: false, intersects: false, eof: true };
+    assert!(score(&base) > score(&Trial { eof: false, ..base }));
+}
+
+#[test]
+fn a_hint_takes_no_intersection() {
+    let c = catalog();
+    let parsed = doc(r#"{"$and":[{"g":{"$eq":"a"}},{"s":{"$eq":"x"}}]}"#);
+    let request = Request { parsed: Some(&parsed), sort: &[], hint: Some(0), intersect: true };
+    let found = candidates(&request, &c);
+    assert_eq!(found.len(), 1);
+    assert!(matches!(found[0], Access::Index(_)));
+}
+
+#[test]
+fn more_edges_of_intervals_joins_and_intersections() {
+    let half = Bound {
+        low: Value::Int32(1),
+        low_inclusive: true,
+        high: Value::Int32(1),
+        high_inclusive: false,
+    };
+    assert!(!half.is_point());
+    let d = Value::Document(doc(r#"{"a":1}"#));
+    assert_ne!(shown_value(&d), "{}");
+    assert_ne!(shown_value(&Value::Array(vec![Value::Int32(1)])), "[]");
+    let x = Bound {
+        low: Value::Int32(0),
+        low_inclusive: true,
+        high: Value::Int32(5),
+        high_inclusive: false,
+    };
+    let y = Bound {
+        low: Value::Int32(1),
+        low_inclusive: true,
+        high: Value::Int32(5),
+        high_inclusive: true,
+    };
+    assert_eq!(intersect(std::slice::from_ref(&x), std::slice::from_ref(&y))[0].shown(), "[1, 5)");
+    let after = Bound {
+        low: Value::Int32(5),
+        low_inclusive: false,
+        high: Value::Int32(9),
+        high_inclusive: true,
+    };
+    assert!(intersect(std::slice::from_ref(&y), std::slice::from_ref(&after)).is_empty());
+    let from = Bound {
+        low: Value::Int32(5),
+        low_inclusive: true,
+        high: Value::Int32(9),
+        high_inclusive: true,
+    };
+    assert_eq!(union(&[x], &[from])[0].shown(), "[0, 9]");
+    // The clauses of a `$or` on different indexes stay apart.
+    let c = catalog();
+    assert_eq!(plans(r#"{"$or":[{"g":{"$eq":"a"}},{"s":{"$eq":"x"}}]}"#, &[], &c).len(), 1);
+    let parsed = doc(r#"{"$and":[{"g":{"$eq":"a"}},{"s":{"$eq":"x"}}]}"#);
+    let request = Request { parsed: Some(&parsed), sort: &[], hint: None, intersect: true };
+    assert!(candidates(&request, &c).iter().any(|a| matches!(a, Access::AndHash { .. })));
 }
