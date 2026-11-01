@@ -285,6 +285,7 @@ dependencies = [
 name = "teseladb-search"
 version = "0.1.0"
 dependencies = [
+ "teseladb-bson",
  "teseladb-crypto",
  "teseladb-deflate",
  "teseladb-hash",
@@ -437,6 +438,7 @@ dependencies = [
  "teseladb-plan",
  "teseladb-range",
  "teseladb-router",
+ "teseladb-search",
  "teseladb-session",
  "teseladb-txn",
  "teseladb-types",

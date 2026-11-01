@@ -267,6 +267,7 @@ impl ServerBackend {
                     CatalogAnswer::Catalog(_)
                     | CatalogAnswer::Settings(_)
                     | CatalogAnswer::Indexes(..)
+                    | CatalogAnswer::SearchIndexes(_)
                     | CatalogAnswer::Principals(_)
                     | CatalogAnswer::Documents(_)
                     | CatalogAnswer::Dump(_)
@@ -641,6 +642,9 @@ impl Backend for ServerBackend {
             .ok_or_else(unavailable)
     }
 
+    // The dispatcher's wrapper keeps the plan of the operation it runs.
+    fn note_plan(&mut self, _: teseladb_bson::Document) {}
+
     fn end_operation(&mut self) {
         self.release_pins();
     }
@@ -793,6 +797,23 @@ impl Backend for ServerBackend {
                 self.ask(0, |tx| NodeMsg::Catalog(CatalogReq::Indexes(collection), tx), until)
             {
                 self.pins.push(pin);
+                return Ok(all);
+            }
+            if Instant::now() >= until {
+                return Err(unavailable());
+            }
+            thread::sleep(RETRY_PAUSE);
+        }
+    }
+
+    fn search_indexes(
+        &mut self,
+        collection: u32,
+    ) -> Result<Vec<teseladb_meta::indexes::SearchIndexEntry>, CommandError> {
+        let until = self.until();
+        loop {
+            let ask = |tx| NodeMsg::Catalog(CatalogReq::SearchIndexes(collection), tx);
+            if let Some(CatalogAnswer::SearchIndexes(all)) = self.ask(0, ask, until) {
                 return Ok(all);
             }
             if Instant::now() >= until {
@@ -1108,6 +1129,10 @@ impl Backend for ServerBackend {
             Err(e) => e.to_string(),
         };
         crate::log::defer(crate::log::Pending { id, msg: msg.to_owned(), attr });
+    }
+
+    fn thread_cpu_nanos(&mut self) -> Option<u64> {
+        teseladb_sys::host::thread_cpu_nanos().ok()
     }
 
     fn process(&mut self) -> teseladb_wire::commands::diagnostics::ProcessFacts {

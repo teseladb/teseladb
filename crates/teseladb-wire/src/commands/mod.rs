@@ -21,6 +21,7 @@ pub mod authz_collections;
 pub mod authz_writes;
 pub mod capped;
 pub mod catalog;
+pub mod change_stream;
 pub mod cluster_admin;
 pub mod config_db;
 pub mod config_settings;
@@ -49,6 +50,7 @@ pub mod profile;
 pub mod query;
 pub mod registry;
 pub mod roles;
+pub mod search_indexes;
 pub mod server_params;
 pub mod session;
 pub mod sort;
@@ -116,10 +118,10 @@ pub enum LdapLogin {
     Authorized(Vec<RoleName>),
 }
 
-/// What the commands need from the node: Group 0's catalog, the ranges and the cluster time.
 /// What a change stream read of an interval: the versions up to the resolved mark, and the mark.
 pub type ChangeBatch = (Vec<teseladb_range::changes::Versioned>, teseladb_hlc::Hlc);
 
+/// What the commands need from the node: Group 0's catalog, the ranges and the cluster time.
 /// The server's implementation finds the leaders and forwards; errors come translated.
 pub trait Backend {
     /// The collection of `ns`, as the node's copy of Group 0 has it.
@@ -140,6 +142,12 @@ pub trait Backend {
     /// The secondary indexes of collection `collection`, as the node's copy of Group 0 has them
     /// (009).
     fn indexes(&mut self, collection: u32) -> Result<Vec<IndexEntry>, CommandError>;
+    /// The search indexes of collection `collection`, by name, as the node's copy of Group 0 has
+    /// them (011).
+    fn search_indexes(
+        &mut self,
+        collection: u32,
+    ) -> Result<Vec<teseladb_meta::indexes::SearchIndexEntry>, CommandError>;
     /// Runs a change of the secondary indexes in Group 0 and waits until this node's copy
     /// applied it (009).
     fn index_write(&mut self, cmd: IndexCommand) -> Result<(), CommandError>;
@@ -211,6 +219,10 @@ pub trait Backend {
     /// changes of the indexes (009 FR-006). Every backend says what it does, so that a wrapper
     /// cannot drop the call.
     fn end_operation(&mut self);
+    /// The plan a read of the running operation ran (`planSummary`, `execStats` and the hashes
+    /// of its shape), for the profiler (010 FR-015). Every backend says what it does, so that a
+    /// wrapper cannot drop the call.
+    fn note_plan(&mut self, plan: Document);
     /// What a change stream reads of `[start, end)` after mark `from` (014 FR-003, FR-004): the
     /// versions of every range of the interval up to the lowest resolved mark of those ranges,
     /// and that mark, below which no version appears later.
@@ -449,6 +461,11 @@ pub trait Backend {
     fn process(&mut self) -> diagnostics::ProcessFacts {
         diagnostics::ProcessFacts::default()
     }
+    /// The CPU time the thread running the command has used, in nanoseconds (`cpuNanos` of the
+    /// profiler, 010 FR-015); `None` where the node cannot tell (a node in tests).
+    fn thread_cpu_nanos(&mut self) -> Option<u64> {
+        None
+    }
 }
 
 /// How long cursors and sessions live without use.
@@ -668,7 +685,7 @@ impl<B: Backend + ?Sized> Ctx<'_, B> {
 }
 
 /// The commands of this module.
-const NAMES: [&str; 66] = [
+const NAMES: [&str; 70] = [
     aggregate::AGGREGATE,
     plan_cache::PLAN_CACHE_CLEAR,
     explain::EXPLAIN,
@@ -711,6 +728,10 @@ const NAMES: [&str; 66] = [
     catalog::LIST_INDEXES,
     indexes::CREATE_INDEXES,
     indexes::DROP_INDEXES,
+    search_indexes::CREATE_SEARCH_INDEXES,
+    search_indexes::LIST_SEARCH_INDEXES,
+    search_indexes::UPDATE_SEARCH_INDEX,
+    search_indexes::DROP_SEARCH_INDEX,
     catalog::DROP_DATABASE,
     session::END_SESSIONS,
     session::REFRESH_SESSIONS,
@@ -770,7 +791,10 @@ fn session_info<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<(), Command
 }
 
 fn command<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
-    if let Value::String(coll) = ctx.first() {
+    // A change stream refuses a buckets namespace as an internal one (014, measured).
+    if let Value::String(coll) = ctx.first()
+        && !change_stream::opens(ctx.cmd)
+    {
         timeseries::legacy_buckets(ctx.db, coll, ctx.name())?;
     }
     match crate::concerns::canonical(ctx.name()) {
@@ -825,6 +849,10 @@ fn command<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comman
         catalog::LIST_INDEXES => catalog::list_indexes(ctx),
         indexes::CREATE_INDEXES => indexes::create_indexes(ctx),
         indexes::DROP_INDEXES => indexes::drop_indexes(ctx),
+        search_indexes::CREATE_SEARCH_INDEXES => search_indexes::create(ctx),
+        search_indexes::LIST_SEARCH_INDEXES => search_indexes::list(ctx),
+        search_indexes::UPDATE_SEARCH_INDEX => search_indexes::update(ctx),
+        search_indexes::DROP_SEARCH_INDEX => search_indexes::drop(ctx),
         catalog::DROP_DATABASE => catalog::drop_database(ctx),
         session::END_SESSIONS => session::end_sessions(ctx),
         session::REFRESH_SESSIONS => session::refresh_sessions(ctx),

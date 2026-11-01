@@ -344,6 +344,8 @@ pub(crate) const SC_NPROCESSORS_ONLN: i32 = 58;
 /// `getrlimit(2)` resource of open files.
 pub(crate) const RLIMIT_NOFILE: i32 = 8;
 /// `ru_maxrss` is in bytes on macOS.
+/// `CLOCK_THREAD_CPUTIME_ID`: the CPU time of the calling thread.
+pub(crate) const CLOCK_THREAD_CPUTIME_ID: i32 = 16;
 pub(crate) const MAXRSS_PER_KB: i64 = 1024;
 
 /// Bytes of each field of `struct utsname`.

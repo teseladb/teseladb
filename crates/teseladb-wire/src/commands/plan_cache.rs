@@ -207,7 +207,7 @@ pub fn catalog_signature(
 }
 
 /// A hash of `text` as RefDb writes its plan hashes: eight hexadecimal digits.
-fn hex(text: &str) -> String {
+pub(crate) fn hex(text: &str) -> String {
     format!("{:08X}", teseladb_hash::crc32c(text.as_bytes()))
 }
 

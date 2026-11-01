@@ -5,7 +5,7 @@ use teseladb_bson::{Document, Value};
 use teseladb_changestream::stage::{
     BeforeChange, ChangeStreamSpec, FullDocument, Scope, Start, check_rest, codes,
 };
-use teseladb_changestream::token::ResumeToken;
+use teseladb_changestream::token::{Position, ResumeToken};
 
 const NS: &str = "lane1errs.c";
 
@@ -30,14 +30,18 @@ fn the_options_are_read() {
     .unwrap();
     assert_eq!(spec.full_document, FullDocument::UpdateLookup);
     assert_eq!(spec.before, BeforeChange::Required);
-    assert_eq!(spec.start, Start::ResumeAfter(token.clone()));
+    assert_eq!(spec.start, Start::ResumeAfter(Position::Event(token.clone())));
     assert!(spec.expanded && !spec.all_for_cluster);
     let after = parse(Document::new().with("startAfter", data)).unwrap();
-    assert_eq!(after.start, Start::StartAfter(token));
+    assert_eq!(after.start, Start::StartAfter(Position::Event(token)));
     let at = parse(
         Document::new().with("startAtOperationTime", Value::Timestamp { time: 1, increment: 1 }),
     );
     assert!(matches!(at.unwrap().start, Start::At(_)));
+    let mark = teseladb_hlc::Hlc { physical: 5, logical: 1 };
+    let high = Document::new().with("_data", Position::HighWater(mark).encode());
+    let resumed = parse(Document::new().with("resumeAfter", high)).unwrap();
+    assert_eq!(resumed.start, Start::ResumeAfter(Position::HighWater(mark)));
     let all = ChangeStreamSpec::parse(
         &Value::Document(Document::new().with("allChangesForCluster", true)),
         Scope::Cluster,
@@ -80,6 +84,44 @@ fn bad_options_fail_as_on_a_refrouter() {
             Document::new().with("allChangesForCluster", true),
             codes::INVALID_OPTIONS,
             "A $changeStream with 'allChangesForCluster:true' may only be opened on the 'admin' database, and with no collection name; found lane1errs.c",
+        ),
+        (
+            Document::new().with("resumeAfter", Document::new().with("_data", 1)),
+            codes::BAD_TOKEN,
+            "Bad resume token: _data of missing or of wrong type. Expected string, got {_data: 1}",
+        ),
+        (
+            Document::new().with("resumeAfter", Document::new()),
+            codes::BAD_TOKEN,
+            "Bad resume token: _data of missing or of wrong type. Expected string, got {}",
+        ),
+        (
+            Document::new().with("resumeAfter", 1),
+            codes::TYPE_MISMATCH,
+            "BSON field '$changeStream.resumeAfter' is the wrong type 'int', expected type 'object'",
+        ),
+        (
+            Document::new().with("startAtOperationTime", 1),
+            codes::TYPE_MISMATCH,
+            "BSON field '$changeStream.startAtOperationTime' is the wrong type 'int', expected type 'timestamp'",
+        ),
+        (
+            Document::new().with("fullDocument", 1),
+            codes::TYPE_MISMATCH,
+            "BSON field '$changeStream.fullDocument' is the wrong type 'int', expected type 'string'",
+        ),
+        (
+            Document::new()
+                .with("startAtOperationTime", Value::Timestamp { time: 1, increment: 1 })
+                .with(
+                    "resumeAfter",
+                    Document::new().with(
+                        "_data",
+                        Position::HighWater(teseladb_hlc::Hlc { physical: 1, logical: 0 }).encode(),
+                    ),
+                ),
+            codes::SEVERAL_STARTS,
+            "Only one type of resume option is allowed, but multiple were found",
         ),
         (
             Document::new().with("showExpandedEvents", "x"),

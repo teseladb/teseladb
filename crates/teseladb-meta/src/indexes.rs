@@ -89,6 +89,12 @@ fn get_coded<T>(d: &mut Decoder<'_>, from: fn(u8) -> Option<T>) -> Result<T, Dec
     from(d.u8()?).ok_or(DecodeError::InvalidValue { offset: at })
 }
 
+/// Reads the 12 bytes of a search index identifier.
+fn object_id(d: &mut Decoder<'_>) -> Result<[u8; 12], DecodeError> {
+    let at = d.position();
+    d.raw(12)?.try_into().map_err(|_| DecodeError::InvalidValue { offset: at })
+}
+
 /// A secondary index.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IndexEntry {
@@ -109,6 +115,8 @@ pub struct IndexEntry {
 /// A search index.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SearchIndexEntry {
+    /// Identifier, the 12 bytes of the `ObjectId` the commands show as `id`.
+    pub id: [u8; 12],
     /// Its collection.
     pub collection: u32,
     /// Name.
@@ -119,6 +127,12 @@ pub struct SearchIndexEntry {
     pub definition: Vec<u8>,
     /// Status.
     pub status: SearchIndexStatus,
+    /// Version of the definition: 0 when created, one more on each update
+    /// (`latestDefinitionVersion.version`).
+    pub version: u32,
+    /// When the current definition was given, in milliseconds since the epoch
+    /// (`latestDefinitionVersion.createdAt`).
+    pub defined_ms: i64,
 }
 
 /// A command on the indexes of the catalog.
@@ -166,6 +180,10 @@ pub enum IndexCommand {
     },
     /// Creates a search index in status `Pending`.
     CreateSearch {
+        /// Identifier.
+        id: [u8; 12],
+        /// When it was asked for, in milliseconds since the epoch.
+        at_ms: i64,
         /// Collection.
         collection: u32,
         /// Name.
@@ -175,8 +193,10 @@ pub enum IndexCommand {
         /// Definition.
         definition: Vec<u8>,
     },
-    /// Replaces a search index's definition; it goes back to `Pending`.
+    /// Replaces a search index's definition, one version later; it goes back to `Pending`.
     UpdateSearch {
+        /// When it was asked for, in milliseconds since the epoch.
+        at_ms: i64,
         /// Collection.
         collection: u32,
         /// Name.
@@ -231,11 +251,12 @@ impl IndexCommand {
             IndexCommand::Drop { id } => {
                 e.u8(DROP).u32(*id);
             }
-            IndexCommand::CreateSearch { collection, name, kind, definition } => {
-                e.u8(CREATE_SEARCH).u32(*collection).str(name).u8(kind.code()).bytes(definition);
+            IndexCommand::CreateSearch { id, at_ms, collection, name, kind, definition } => {
+                e.u8(CREATE_SEARCH).raw(id).i64(*at_ms).u32(*collection).str(name);
+                e.u8(kind.code()).bytes(definition);
             }
-            IndexCommand::UpdateSearch { collection, name, definition } => {
-                e.u8(UPDATE_SEARCH).u32(*collection).str(name).bytes(definition);
+            IndexCommand::UpdateSearch { at_ms, collection, name, definition } => {
+                e.u8(UPDATE_SEARCH).i64(*at_ms).u32(*collection).str(name).bytes(definition);
             }
             IndexCommand::SetSearchStatus { collection, name, status } => {
                 e.u8(SET_SEARCH_STATUS).u32(*collection).str(name).u8(status.code());
@@ -263,12 +284,15 @@ impl IndexCommand {
             SWAP => IndexCommand::Swap { old: d.u32()?, new: d.u32()? },
             DROP => IndexCommand::Drop { id: d.u32()? },
             CREATE_SEARCH => IndexCommand::CreateSearch {
+                id: object_id(d)?,
+                at_ms: d.i64()?,
                 collection: d.u32()?,
                 name: d.str()?.to_owned(),
                 kind: get_coded(d, SearchIndexKind::from_code)?,
                 definition: d.bytes()?.to_vec(),
             },
             UPDATE_SEARCH => IndexCommand::UpdateSearch {
+                at_ms: d.i64()?,
                 collection: d.u32()?,
                 name: d.str()?.to_owned(),
                 definition: d.bytes()?.to_vec(),
@@ -372,7 +396,7 @@ impl Indexes {
             IndexCommand::Drop { id } => {
                 self.indexes.remove(id).map(|_| None).ok_or(CatalogError::IndexNotFound)
             }
-            IndexCommand::CreateSearch { collection, name, kind, definition } => {
+            IndexCommand::CreateSearch { id, at_ms, collection, name, kind, definition } => {
                 if !live(*collection) {
                     return Err(CatalogError::NamespaceNotFound);
                 }
@@ -381,19 +405,24 @@ impl Indexes {
                     return Err(CatalogError::IndexExists);
                 }
                 let entry = SearchIndexEntry {
+                    id: *id,
                     collection: *collection,
                     name: name.clone(),
                     kind: *kind,
                     definition: definition.clone(),
                     status: SearchIndexStatus::Pending,
+                    version: 0,
+                    defined_ms: *at_ms,
                 };
                 self.search.insert(key, entry);
                 Ok(None)
             }
-            IndexCommand::UpdateSearch { collection, name, definition } => {
+            IndexCommand::UpdateSearch { at_ms, collection, name, definition } => {
                 let s = self.search_mut(*collection, name)?;
                 s.definition = definition.clone();
                 s.status = SearchIndexStatus::Pending;
+                s.version += 1;
+                s.defined_ms = *at_ms;
                 Ok(None)
             }
             IndexCommand::SetSearchStatus { collection, name, status } => {
@@ -423,8 +452,8 @@ impl Indexes {
         }
         e.var(self.search.len() as u64);
         for s in self.search.values() {
-            e.u32(s.collection).str(&s.name).u8(s.kind.code()).bytes(&s.definition);
-            e.u8(s.status.code());
+            e.raw(&s.id).u32(s.collection).str(&s.name).u8(s.kind.code()).bytes(&s.definition);
+            e.u8(s.status.code()).u32(s.version).i64(s.defined_ms);
         }
     }
 
@@ -444,11 +473,14 @@ impl Indexes {
         }
         for _ in 0..d.var()? {
             let s = SearchIndexEntry {
+                id: object_id(d)?,
                 collection: d.u32()?,
                 name: d.str()?.to_owned(),
                 kind: get_coded(d, SearchIndexKind::from_code)?,
                 definition: d.bytes()?.to_vec(),
                 status: get_coded(d, SearchIndexStatus::from_code)?,
+                version: d.u32()?,
+                defined_ms: d.i64()?,
             };
             x.search.insert((s.collection, s.name.clone()), s);
         }

@@ -892,3 +892,42 @@ fn a_read_leaves_an_intent_without_a_range_to_the_next_reader() {
     let mut b = ServerBackend::new(h, 7).with_deadline(Duration::from_secs(5));
     assert_eq!(b.scan(&[1], &[2], 10, ReadConcern::Majority), Ok(vec![]));
 }
+
+/// A change stream's read of a range: its rows up to `to`, with its oldest pending intent.
+fn changes(rows: Vec<(u8, u64)>, to: u64, intent: Option<u64>) -> Result<DataReply, RangeError> {
+    let ts = |p: u64| Hlc { physical: p, logical: 0 };
+    let rows = rows
+        .into_iter()
+        .map(|(k, p)| teseladb_range::changes::Versioned {
+            key: vec![k],
+            ts: ts(p),
+            value: Some((1, vec![k])),
+        })
+        .collect();
+    Ok(DataReply::Remote(RemoteReply::Changes { rows, to: ts(to), oldest_intent: intent.map(ts) }))
+}
+
+#[test]
+fn a_change_read_walks_every_range_and_resolves_at_the_lowest_mark() {
+    let ts = |p: u64| Hlc { physical: p, logical: 0 };
+    // Range 1 is resolved to 30; range 2 to 50 but holds an intent at 25: the batch stops at 24.
+    let data = vec![
+        changes(vec![(1, 20), (1, 28)], 30, None),
+        changes(vec![(2, 22), (3, 40)], 50, Some(25)),
+    ];
+    let mut b = backend(data, vec![]);
+    let (rows, resolved) = b.changes(&[1], &[4], ts(10)).unwrap();
+    assert_eq!(resolved, Hlc { physical: 24, logical: u32::MAX });
+    let seen: Vec<(u8, u64)> = rows.iter().map(|r| (r.key[0], r.ts.physical)).collect();
+    assert_eq!(seen, [(1, 20), (2, 22)], "nothing above the resolved mark");
+    // A range with nothing closed past the start keeps the batch at the start.
+    let mut b = backend(vec![changes(vec![], 5, None), changes(vec![], 60, None)], vec![]);
+    assert_eq!(b.changes(&[1], &[4], ts(10)).unwrap(), (vec![], ts(10)));
+    // An interval inside one range reads only that range.
+    let mut b = backend(vec![changes(vec![(2, 12)], 15, None)], vec![]);
+    let (rows, resolved) = b.changes(&[2], &[3], ts(10)).unwrap();
+    assert_eq!((rows.len(), resolved), (1, ts(15)));
+    // A range that answers something else is an internal error.
+    let mut b = backend(vec![written(b"x")], vec![]);
+    assert_eq!(b.changes(&[1], &[2], ts(10)).unwrap_err().code.code, 1);
+}

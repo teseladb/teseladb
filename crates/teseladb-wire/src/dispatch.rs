@@ -520,6 +520,7 @@ fn run_op<B: Backend + ?Sized>(
     };
     let id = lock(shared).ops.begin(op);
     let started_micros = backend.now_micros();
+    let started_cpu = backend.thread_cpu_nanos();
     let (result, mut events) = {
         let mut guarded = Guarded::new(backend, shared, id);
         let (db, cmd) = (req.db.as_str(), &req.command);
@@ -547,11 +548,13 @@ fn run_op<B: Backend + ?Sized>(
     {
         events.push(e);
     }
-    {
+    let report = {
         let mut g = lock(shared);
+        let report = g.ops.take_report(id);
         g.ops.end(id);
         g.counters.count(name, &req.command, matches!(result, Some(Err(_))));
-    }
+        report
+    };
     audit::record(shared, conn, backend, events, 0);
     let ns = op_ns(&req.db, &req.command);
     let ended = profile::Ended {
@@ -561,6 +564,10 @@ fn run_op<B: Backend + ?Sized>(
         ns: &ns,
         reply: result.as_ref(),
         micros: backend.now_micros().saturating_sub(started_micros),
+        cpu_nanos: started_cpu
+            .zip(backend.thread_cpu_nanos())
+            .map(|(start, end)| end.saturating_sub(start)),
+        report,
         client: conn.peer.as_deref(),
         app_name: conn.hello.app_name.as_deref(),
         user: conn.auth.user.as_ref().map(|u| format!("{}@{}", u.name.user, u.name.db)),

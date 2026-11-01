@@ -49,6 +49,13 @@ impl Backend for Bare {
     fn indexes(&mut self, _collection: u32) -> Result<Vec<IndexEntry>, CommandError> {
         Ok(Vec::new())
     }
+
+    fn search_indexes(
+        &mut self,
+        _collection: u32,
+    ) -> Result<Vec<teseladb_meta::indexes::SearchIndexEntry>, CommandError> {
+        Ok(Vec::new())
+    }
     fn index_write(&mut self, _cmd: IndexCommand) -> Result<(), CommandError> {
         Err(none())
     }
@@ -69,6 +76,8 @@ impl Backend for Bare {
     fn voters(&mut self, _start: &[u8], _end: &[u8]) -> Result<usize, CommandError> {
         Ok(1)
     }
+    fn note_plan(&mut self, _: teseladb_bson::Document) {}
+
     fn end_operation(&mut self) {}
     fn changes(
         &mut self,

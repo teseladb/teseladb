@@ -602,6 +602,7 @@ const STEPS: [StepDef; 4] = [
         alternative: false,
         within: None,
         when: When::Always,
+        protect: true,
     },
     StepDef {
         groups: NOUNS,
@@ -610,6 +611,7 @@ const STEPS: [StepDef; 4] = [
         alternative: false,
         within: None,
         when: When::Always,
+        protect: true,
     },
     StepDef {
         groups: ADJECTIVES,
@@ -618,6 +620,7 @@ const STEPS: [StepDef; 4] = [
         alternative: false,
         within: None,
         when: When::Always,
+        protect: true,
     },
     StepDef {
         groups: LAST,
@@ -626,6 +629,7 @@ const STEPS: [StepDef; 4] = [
         alternative: false,
         within: None,
         when: When::Always,
+        protect: true,
     },
 ];
 

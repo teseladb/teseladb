@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 
 pub mod changes;
+pub mod cursor;
 pub mod describe;
 pub mod event;
 pub mod merge;

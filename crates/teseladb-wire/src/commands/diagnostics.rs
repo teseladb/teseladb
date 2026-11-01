@@ -7,7 +7,9 @@
 
 use teseladb_auth::users::RoleName;
 use teseladb_bson::{Document, Value};
+use teseladb_keys::KeyBuilder;
 use teseladb_meta::collection_types::CollectionKind;
+use teseladb_meta::indexes::IndexState;
 use teseladb_range::read::ReadConcern;
 
 use super::admin::admin_only;
@@ -605,27 +607,71 @@ fn scale(cmd: &Document, name: &str) -> Result<i64, CommandError> {
     Ok(s)
 }
 
-/// Documents and their bytes in a collection.
+/// What a collection holds: its documents, their bytes and the bytes of their keys.
+struct Tally {
+    count: i64,
+    bytes: u64,
+    key_bytes: u64,
+}
+
+/// Documents, their bytes and the bytes of their keys in a collection.
 fn tally<B: Backend + ?Sized>(
     backend: &mut B,
     c: &teseladb_meta::catalog::CollectionEntry,
-) -> Result<(i64, u64), CommandError> {
+) -> Result<Tally, CommandError> {
     let (mut start, end) = documents_of(c);
-    let (mut count, mut bytes) = (0i64, 0u64);
+    let mut t = Tally { count: 0, bytes: 0, key_bytes: 0 };
     loop {
         let chunk = backend.scan(&start, &end, SCAN_CHUNK, ReadConcern::Local)?;
         let Some((last, _)) = chunk.last() else { break };
         let next = [last.as_slice(), &[0]].concat();
-        for (_, doc) in &chunk {
-            count += 1;
-            bytes += doc.len() as u64;
+        for (key, doc) in &chunk {
+            t.count += 1;
+            t.bytes += doc.len() as u64;
+            t.key_bytes += key.len() as u64;
         }
         if chunk.len() < SCAN_CHUNK {
             break;
         }
         start = next;
     }
-    Ok((count, bytes))
+    Ok(t)
+}
+
+/// Bytes `stored` takes in whole storage blocks, at least one (an empty index takes 4096 bytes
+/// in RefEngine, measured on 9.0.4; DV-037).
+fn in_blocks(stored: u64) -> u64 {
+    stored.div_ceil(INDEX_BYTES).max(1) * INDEX_BYTES
+}
+
+/// The indexes of collection `c` with the bytes of their keys, in the order of `listIndexes`:
+/// `_id_` (the keys of the documents, or the `_id` entries of a capped collection) unless the
+/// collection is clustered or a time series, then each secondary index (010 FR-018).
+fn index_sizes<B: Backend + ?Sized>(
+    backend: &mut B,
+    c: &teseladb_meta::catalog::CollectionEntry,
+    kind: &CollectionKind,
+    key_bytes: u64,
+) -> Result<Vec<(String, u64)>, CommandError> {
+    let prefix = |id: u32| KeyBuilder::index_prefix(c.tenant, c.id, id).as_bytes().to_vec();
+    let mut out = Vec::new();
+    match kind {
+        CollectionKind::Clustered { .. } | CollectionKind::TimeSeries(_) => {}
+        CollectionKind::Capped { .. } => {
+            let start = prefix(teseladb_range::capped::ID_INDEX);
+            let end = KeyBuilder::collection_end(c.tenant, c.id).as_bytes().to_vec();
+            out.push(("_id_".to_owned(), in_blocks(backend.stored_bytes(&start, &end)?)));
+        }
+        _ => out.push(("_id_".to_owned(), in_blocks(key_bytes))),
+    }
+    for e in backend.indexes(c.id)? {
+        if e.state == IndexState::Dropping {
+            continue;
+        }
+        let bytes = backend.stored_bytes(&prefix(e.id), &prefix(e.id + 1))?;
+        out.push((e.name, in_blocks(bytes)));
+    }
+    Ok(out)
 }
 
 /// `dbStats`. The sizes are TeselaDB's (DV-037); views arrive with 010.
@@ -633,19 +679,23 @@ pub fn db_stats<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, C
     let scale = scale(ctx.cmd, DB_STATS)?;
     let db = ctx.db.to_owned();
     let (mut collections, mut objects, mut data, mut storage) = (0i64, 0i64, 0u64, 0u64);
+    let (mut indexes, mut index) = (0i64, 0u64);
     for (ns, c) in ctx.backend.collections()? {
         if ns.db != db {
             continue;
         }
-        let (n, bytes) = tally(ctx.backend, &c)?;
+        let t = tally(ctx.backend, &c)?;
         let (start, end) = documents_of(&c);
         collections += 1;
-        objects += n;
-        data += bytes;
+        objects += t.count;
+        data += t.bytes;
         storage += collection_size(ctx.backend.stored_bytes(&start, &end)?) - INDEX_BYTES;
+        let kind = super::kinds::kind_of(&c)?;
+        let sizes = index_sizes(ctx.backend, &c, &kind, t.key_bytes)?;
+        indexes += i64::try_from(sizes.len()).unwrap_or(0);
+        index += sizes.iter().map(|(_, b)| b).sum::<u64>();
     }
     let facts = ctx.backend.process();
-    let index = INDEX_BYTES * u64::try_from(collections).unwrap_or(0);
     let scaled = |b: u64| b as f64 / scale as f64;
     let avg = if objects > 0 { data as f64 / objects as f64 } else { 0.0 };
     let (fs_used, fs_total) = match collections {
@@ -662,7 +712,7 @@ pub fn db_stats<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, C
             .with("avgObjSize", avg)
             .with("dataSize", scaled(data))
             .with("storageSize", scaled(storage))
-            .with("indexes", count(collections))
+            .with("indexes", count(indexes))
             .with("indexSize", scaled(index))
             .with("totalSize", scaled(storage + index))
             .with("scaleFactor", count(scale))
@@ -691,16 +741,16 @@ pub(crate) fn storage_stats<B: Backend + ?Sized>(
     c: &teseladb_meta::catalog::CollectionEntry,
     scale: i64,
 ) -> Result<Document, CommandError> {
-    let (count, bytes) = tally(backend, c)?;
+    let Tally { count, bytes, key_bytes } = tally(backend, c)?;
     let (start, end) = documents_of(c);
     let storage = collection_size(backend.stored_bytes(&start, &end)?) - INDEX_BYTES;
     let scaled =
         |b: u64| number(i64::try_from(b / u64::try_from(scale).unwrap_or(1)).unwrap_or(i64::MAX));
     let kind = super::kinds::kind_of(c)?;
+    let sizes = index_sizes(backend, c, &kind, key_bytes)?;
     let mut d = Document::new().with("size", scaled(bytes));
-    let mut index_sizes = Document::new();
-    let index_bytes = match &kind {
-        CollectionKind::TimeSeries(ts) => {
+    match &kind {
+        CollectionKind::TimeSeries(_) => {
             let avg_bucket = if count > 0 { bytes / u64::try_from(count).unwrap_or(1) } else { 0 };
             let stats = lock(shared).timeseries.get(&c.id).cloned().unwrap_or_default();
             let mut series = Document::new()
@@ -711,21 +761,6 @@ pub(crate) fn storage_stats<B: Backend + ?Sized>(
                 series.push(k, number(v));
             }
             d.push("timeseries", series);
-            match &ts.meta_field {
-                Some(m) => {
-                    index_sizes.push(format!("{m}_1_{}_1", ts.time_field), scaled(INDEX_BYTES));
-                    INDEX_BYTES
-                }
-                None => 0,
-            }
-        }
-        CollectionKind::Clustered { .. } => {
-            d.push("count", number(count));
-            d.push(
-                "avgObjSize",
-                number(if count > 0 { i64::try_from(bytes).unwrap_or(0) / count } else { 0 }),
-            );
-            0
         }
         _ => {
             d.push("count", number(count));
@@ -733,10 +768,13 @@ pub(crate) fn storage_stats<B: Backend + ?Sized>(
                 "avgObjSize",
                 number(if count > 0 { i64::try_from(bytes).unwrap_or(0) / count } else { 0 }),
             );
-            index_sizes.push("_id_", scaled(INDEX_BYTES));
-            INDEX_BYTES
         }
-    };
+    }
+    let index_bytes: u64 = sizes.iter().map(|(_, b)| b).sum();
+    let mut index_sizes = Document::new();
+    for (name, b) in sizes {
+        index_sizes.push(name, scaled(b));
+    }
     d.push("numOrphanDocs", 0);
     d.push("storageSize", scaled(storage));
     d.push("freeStorageSize", 0);
@@ -796,7 +834,7 @@ pub fn coll_stats<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document,
             .with("ok", 1.0));
     };
     super::kinds::not_a_view(&ns, &c)?;
-    let (count, bytes) = tally(ctx.backend, &c)?;
+    let Tally { count, bytes, key_bytes } = tally(ctx.backend, &c)?;
     let (start, end) = documents_of(&c);
     let storage = collection_size(ctx.backend.stored_bytes(&start, &end)?) - INDEX_BYTES;
     let avg = if count > 0 { (bytes / u64::try_from(count).unwrap_or(1)) as f64 } else { 0.0 };
@@ -817,16 +855,10 @@ pub fn coll_stats<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document,
     }
     d.push("size", scaled(bytes));
     d.push("storageSize", scaled(storage));
-    // A clustered collection has no `_id_` index of its own; a time series has one on its
-    // `metaField` and `timeField` when it has a `metaField`, and none otherwise (measured).
-    let index_name = match &kind {
-        CollectionKind::Clustered { .. } => None,
-        CollectionKind::TimeSeries(ts) => {
-            ts.meta_field.as_ref().map(|m| format!("{m}_1_{}_1", ts.time_field))
-        }
-        _ => Some("_id_".to_owned()),
-    };
-    let index_bytes = if index_name.is_some() { INDEX_BYTES } else { 0 };
+    // A clustered collection and a time series have no `_id_` index of their own; a time series
+    // has one on its `metaField` and `timeField` when it has a `metaField` (measured).
+    let sizes = index_sizes(ctx.backend, &c, &kind, key_bytes)?;
+    let index_bytes: u64 = sizes.iter().map(|(_, b)| b).sum();
     d.push("totalIndexSize", scaled(index_bytes));
     d.push("totalSize", scaled(storage + index_bytes));
     if series {
@@ -844,15 +876,16 @@ pub fn coll_stats<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document,
         }
         d.push("timeseries", ts);
     }
-    let index_sizes = match &index_name {
-        None => Document::new(),
-        Some(n) => Document::new().with(n.clone(), scaled(INDEX_BYTES)),
-    };
+    let nindexes = i32::try_from(sizes.len()).unwrap_or(i32::MAX);
+    let mut index_sizes = Document::new();
+    for (name, b) in sizes {
+        index_sizes.push(name, scaled(b));
+    }
     let avg_value = if series { Value::Int32(0) } else { Value::Double(avg) };
     Ok(d.with("indexSizes", index_sizes)
         .with("avgObjSize", avg_value)
         .with("maxSize", number(max_size))
-        .with("nindexes", i32::from(index_name.is_some()))
+        .with("nindexes", nindexes)
         .with("scaleFactor", number(scale))
         .with("nchunks", 1)
         .with("ok", 1.0))

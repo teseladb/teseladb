@@ -22,8 +22,33 @@ pub type Meta = BTreeMap<String, Value>;
 
 /// The name of the metadata `$score` sets.
 pub const SCORE: &str = "score";
+/// The name of the random value `$sample` gives each document it takes.
+pub const RAND_VAL: &str = "randVal";
 /// The name of the metadata of a score's details.
 pub const SCORE_DETAILS: &str = "scoreDetails";
+
+/// The score `$search` gives each document.
+pub const SEARCH_SCORE: &str = "searchScore";
+/// The score `$vectorSearch` gives each document.
+pub const VECTOR_SEARCH_SCORE: &str = "vectorSearchScore";
+
+/// The score metadata search stage `name` gives, if it scores documents.
+pub fn search_score_of(name: &str) -> Option<&'static str> {
+    match name {
+        "$search" => Some(SEARCH_SCORE),
+        "$vectorSearch" => Some(VECTOR_SEARCH_SCORE),
+        _ => None,
+    }
+}
+
+/// The metadata of a document a search stage gave: `score` is the stage's score `own` unless
+/// the stage set it (measured: `$meta: "score"` after `$search` is its `searchScore`).
+pub fn with_score(mut m: Meta, own: Option<&str>) -> Meta {
+    if let Some(v) = own.and_then(|o| m.get(o)).cloned() {
+        m.entry(SCORE.to_owned()).or_insert(v);
+    }
+    m
+}
 
 /// An environment whose scopes carry one document's metadata.
 pub(crate) struct MetaEnv<'a> {
@@ -315,8 +340,10 @@ fn given_by(name: &str, arg: RawValue<'_>) -> Vec<&'static str> {
         if s.get("scoreDetails").is_some_and(|v| crate::expr::truthy(&Some(Value::from(v)))));
     let mut given = match name {
         "$score" | "$rankFusion" | "$scoreFusion" => vec![SCORE],
-        "$search" => vec!["searchScore", "searchRootDocumentId", SCORE],
-        "$vectorSearch" => vec!["vectorSearchScore", SCORE],
+        // `searchRootDocumentId` needs `returnScope`, which no stage of this engine runs
+        // (measured on 9.0.4: 40218 after `$search`).
+        "$search" => vec![SEARCH_SCORE, SCORE],
+        "$vectorSearch" => vec![VECTOR_SEARCH_SCORE, SCORE],
         "$geoNear" => vec!["geoNearDistance", "geoNearPoint"],
         "$match" if matches!(arg, RawValue::Document(m) if super::has_text(m)) => {
             vec!["textScore", SCORE]
@@ -331,13 +358,31 @@ fn given_by(name: &str, arg: RawValue<'_>) -> Vec<&'static str> {
 
 /// Refuses a stage that reads with `$meta` metadata that no stage before it gives (40218,
 /// measured on a `refrouter` 9.0.4 for every name): `$facet`'s pipelines see the metadata of the
-/// stage's input, those of `$lookup` and `$unionWith` start without any, and `$redact` reads a
-/// missing value instead.
+/// stage's input, and `$redact` reads a missing value instead. The pipelines of `$lookup` and
+/// `$unionWith` start without any and are checked when they run ([`check_joined`]).
 pub(crate) fn check_available(stages: &[RawValue<'_>]) -> Result<(), MqlError> {
-    check_pipeline(stages, Vec::new())
+    check_pipeline(stages, Vec::new(), true)
 }
 
-fn check_pipeline(stages: &[RawValue<'_>], mut available: Vec<&str>) -> Result<(), MqlError> {
+/// [`check_available`] for the pipeline of a `$lookup` or `$unionWith` on a collection, which a
+/// `refrouter` 9.0.4 checks when it first runs it (measured: a `$lookup` with no input document
+/// gives no error).
+pub(crate) fn check_joined(stages: &[RawValue<'_>]) -> Result<(), MqlError> {
+    check_pipeline(stages, Vec::new(), true)
+}
+
+/// The words a `refrouter` 9.0.4 puts before the missing metadata of a `$sort` that only `$match`
+/// and `$sort` stages precede in a pipeline on a collection: it asks the query system whether it
+/// can run the pipeline's start, and that fails first (measured 01-11-2026 for each sortable name;
+/// not in `$facet`, nor after any other stage).
+const DISTINCT_SCAN_CHECK: &str = "Failed to determine whether query system can provide a DISTINCT_SCAN grouping :: caused by :: ";
+
+fn check_pipeline(
+    stages: &[RawValue<'_>],
+    mut available: Vec<&str>,
+    on_collection: bool,
+) -> Result<(), MqlError> {
+    let mut leading = on_collection;
     for st in stages {
         let RawValue::Document(d) = st else { continue };
         let Some((name, arg)) = d.iter().next() else { continue };
@@ -346,32 +391,33 @@ fn check_pipeline(stages: &[RawValue<'_>], mut available: Vec<&str>) -> Result<(
                 if let RawValue::Document(f) = arg {
                     for (_, p) in f.iter() {
                         if let RawValue::Array(p) = p {
-                            check_pipeline(&p.iter().collect::<Vec<_>>(), available.clone())?;
+                            let p: Vec<_> = p.iter().collect();
+                            check_pipeline(&p, available.clone(), false)?;
                         }
                     }
                 }
             }
-            "$lookup" | "$unionWith" => {
-                if let RawValue::Document(l) = arg
-                    && let Some(RawValue::Array(p)) = l.get("pipeline")
-                {
-                    check_pipeline(&p.iter().collect::<Vec<_>>(), Vec::new())?;
-                }
-            }
-            "$redact" => {}
+            "$lookup" | "$unionWith" | "$redact" => {}
             _ => {
                 let mut read = Vec::new();
                 metas_read(arg, &mut read);
                 for r in &read {
                     if crate::expr::meta_is_required(r) && !available.contains(&r.as_str()) {
-                        return Err(crate::expr::missing_meta(r));
+                        let mut e = crate::expr::missing_meta(r);
+                        if leading && name == "$sort" {
+                            e.message = format!("{DISTINCT_SCAN_CHECK}{}", e.message);
+                        }
+                        return Err(e);
                     }
                 }
             }
         }
+        leading = leading && matches!(name, "$match" | "$sort");
         available.extend(given_by(name, arg));
         if DROPPING.contains(&name) {
-            available.clear();
+            // The scores of a search stage stay readable, as nothing (measured on 9.0.4 after
+            // `$group`); the other metadata goes.
+            available.retain(|n| *n == SEARCH_SCORE || *n == VECTOR_SEARCH_SCORE);
         }
     }
     Ok(())

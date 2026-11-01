@@ -69,6 +69,9 @@ pub struct StepDef {
     pub within: Option<Cond>,
     /// Whether the step runs, by what an earlier step did.
     pub when: When,
+    /// Whether an affix rewritten to itself stays out of the later steps' reach; without it the
+    /// rule only counts as the step having acted (as Snowball's Catalan does).
+    pub protect: bool,
 }
 
 /// A step ready to run: its rules sorted by affix and the length of the longest one.
@@ -81,6 +84,7 @@ pub struct Step {
     alternative: bool,
     within: Option<Cond>,
     when: When,
+    protect: bool,
 }
 
 /// The steps of `defs`, ready to run.
@@ -102,6 +106,7 @@ pub fn build(defs: &[StepDef]) -> Vec<Step> {
                 alternative: d.alternative,
                 within: d.within,
                 when: d.when,
+                protect: d.protect,
             }
         })
         .collect()
@@ -132,6 +137,7 @@ pub fn run_marked(mut c: Vec<char>, steps: &[Step], marks: [usize; 3]) -> String
         }
         let kept_before = kept;
         let before = c.clone();
+        let mut acted = false;
         loop {
             let start = step.within.map_or(0, |r| mark(r, &marks).saturating_sub(removed_front));
             let end = if step.prefix { c.len() } else { c.len() - kept };
@@ -148,7 +154,12 @@ pub fn run_marked(mut c: Vec<char>, steps: &[Step], marks: [usize; 3]) -> String
                 break;
             }
             let to: Vec<char> = rule.to.chars().collect();
-            let keep = !step.prefix && rule.to == rule.from;
+            let identity = !step.prefix && rule.to == rule.from;
+            if identity && !step.protect {
+                acted = true;
+                break;
+            }
+            let keep = identity;
             if step.prefix {
                 removed_front += n;
                 removed_front -= to.len().min(removed_front);
@@ -162,7 +173,7 @@ pub fn run_marked(mut c: Vec<char>, steps: &[Step], marks: [usize; 3]) -> String
                 break;
             }
         }
-        changed = c != before || kept != kept_before;
+        changed = c != before || kept != kept_before || acted;
         did.push(changed);
     }
     c.into_iter().collect()
@@ -240,6 +251,7 @@ mod tests {
             alternative: false,
             within: None,
             when: When::Always,
+            protect: true,
         }
     }
 
@@ -291,6 +303,18 @@ mod tests {
         assert_eq!(run("candaxo", &two, vowel), "candxo");
         // A rewrite after a kept affix leaves the kept affix in place.
         assert_eq!(run("candixo", &build(&[step(KEEP), step(ENDINGS)]), vowel), "candyxo");
+    }
+
+    #[test]
+    fn an_affix_rewritten_to_itself_without_protection_only_counts_as_acting() {
+        let open = |d: &'static [Group]| StepDef { protect: false, ..step(d) };
+        // "xo" stops the step; the next step sees the whole word and removes the final "o".
+        assert_eq!(run("candaxo", &build(&[open(KEEP), open(ENDINGS)]), vowel), "candax");
+        // The step acted, so a step that runs only after a change runs, over the whole word.
+        let after = StepDef { when: When::Changed(0), ..open(ENDINGS) };
+        assert_eq!(run("candxo", &build(&[open(KEEP), after]), vowel), "candx");
+        let otherwise = StepDef { when: When::Unchanged(0), ..open(SHORT) };
+        assert_eq!(run("cats", &build(&[open(KEEP), otherwise]), vowel), "ca");
     }
 
     #[test]
