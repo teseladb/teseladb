@@ -238,6 +238,13 @@ impl Backend for Mem {
         Ok(self.indexes.of(collection).cloned().collect())
     }
 
+    fn search_indexes(
+        &mut self,
+        collection: u32,
+    ) -> Result<Vec<teseladb_meta::indexes::SearchIndexEntry>, CommandError> {
+        Ok(self.indexes.search_of(collection).cloned().collect())
+    }
+
     fn voters(&mut self, _: &[u8], _: &[u8]) -> Result<usize, CommandError> {
         Ok(self.replicas as usize)
     }

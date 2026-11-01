@@ -42,6 +42,12 @@ codes! {
     ILLEGAL_OPERATION = 20, "IllegalOperation";
     /// A field of the wrong BSON type.
     TYPE_MISMATCH = 14, "TypeMismatch";
+    /// An error `refsearch` gives without a code of its own (011: a search index definition).
+    UNKNOWN_ERROR = 8, "UnknownError";
+    /// A search index with the same name and another definition (011).
+    INDEX_ALREADY_EXISTS = 68, "IndexAlreadyExists";
+    /// A command that `refsearch` refused (011: `updateSearchIndex` with a wrong definition).
+    COMMAND_FAILED = 125, "CommandFailed";
     /// A document past RefDb's nesting limit (003 FR-003).
     OVERFLOW = 15, "Overflow";
     /// Authentication failed (013).

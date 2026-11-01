@@ -113,6 +113,13 @@ impl<B: Backend + ?Sized> WireEnv<'_, B> {
 
     /// `$collStats` of the aggregated collection (015 FR-010), with the sections `spec` asks
     /// for in RefDb's order. TeselaDB has no shards: the document has no `shard` (DV-038).
+    /// The documents of `$listSearchIndexes` on the pipeline's collection (011 FR-008).
+    fn search_indexes(&self, spec: &Document) -> Result<Vec<Document>, CommandError> {
+        let Some((_, ns)) = &self.node else { return Ok(Vec::new()) };
+        let mut backend = self.backend.borrow_mut();
+        super::search_indexes::stage(&mut **backend, ns, spec)
+    }
+
     fn coll_stats(&self, spec: &Document) -> Result<Vec<Document>, CommandError> {
         let Some((shared, ns)) = &self.node else { return Ok(Vec::new()) };
         let mut backend = self.backend.borrow_mut();
@@ -228,6 +235,9 @@ impl<B: Backend + ?Sized> Env for WireEnv<'_, B> {
     fn system_stage(&self, name: &str, spec: &Document) -> Result<Vec<Document>, MqlError> {
         match name {
             "$collStats" => self.coll_stats(spec).map_err(to_mql),
+            teseladb_exec::pipeline::LIST_SEARCH_INDEXES => {
+                self.search_indexes(spec).map_err(to_mql)
+            }
             "$listLocalSessions" => self.local_sessions(spec).map_err(to_mql),
             "$listSessions" => self.recorded_sessions(spec).map_err(to_mql),
             other => Err(MqlError::new(

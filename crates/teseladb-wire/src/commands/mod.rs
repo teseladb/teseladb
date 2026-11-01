@@ -47,6 +47,7 @@ pub(crate) mod plan_exec;
 pub mod query;
 pub mod registry;
 pub mod roles;
+pub mod search_indexes;
 pub mod server_params;
 pub mod session;
 pub mod sort;
@@ -135,6 +136,12 @@ pub trait Backend {
     /// The secondary indexes of collection `collection`, as the node's copy of Group 0 has them
     /// (009).
     fn indexes(&mut self, collection: u32) -> Result<Vec<IndexEntry>, CommandError>;
+    /// The search indexes of collection `collection`, by name, as the node's copy of Group 0 has
+    /// them (011).
+    fn search_indexes(
+        &mut self,
+        collection: u32,
+    ) -> Result<Vec<teseladb_meta::indexes::SearchIndexEntry>, CommandError>;
     /// Runs a change of the secondary indexes in Group 0 and waits until this node's copy
     /// applied it (009).
     fn index_write(&mut self, cmd: IndexCommand) -> Result<(), CommandError>;
@@ -640,7 +647,7 @@ impl<B: Backend + ?Sized> Ctx<'_, B> {
 }
 
 /// The commands of this module.
-const NAMES: [&str; 64] = [
+const NAMES: [&str; 68] = [
     aggregate::AGGREGATE,
     explain::EXPLAIN,
     audit::LOG_APPLICATION_MESSAGE,
@@ -682,6 +689,10 @@ const NAMES: [&str; 64] = [
     catalog::LIST_INDEXES,
     indexes::CREATE_INDEXES,
     indexes::DROP_INDEXES,
+    search_indexes::CREATE_SEARCH_INDEXES,
+    search_indexes::LIST_SEARCH_INDEXES,
+    search_indexes::UPDATE_SEARCH_INDEX,
+    search_indexes::DROP_SEARCH_INDEX,
     catalog::DROP_DATABASE,
     session::END_SESSIONS,
     session::REFRESH_SESSIONS,
@@ -793,6 +804,10 @@ fn command<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comman
         catalog::LIST_INDEXES => catalog::list_indexes(ctx),
         indexes::CREATE_INDEXES => indexes::create_indexes(ctx),
         indexes::DROP_INDEXES => indexes::drop_indexes(ctx),
+        search_indexes::CREATE_SEARCH_INDEXES => search_indexes::create(ctx),
+        search_indexes::LIST_SEARCH_INDEXES => search_indexes::list(ctx),
+        search_indexes::UPDATE_SEARCH_INDEX => search_indexes::update(ctx),
+        search_indexes::DROP_SEARCH_INDEX => search_indexes::drop(ctx),
         catalog::DROP_DATABASE => catalog::drop_database(ctx),
         session::END_SESSIONS => session::end_sessions(ctx),
         session::REFRESH_SESSIONS => session::refresh_sessions(ctx),

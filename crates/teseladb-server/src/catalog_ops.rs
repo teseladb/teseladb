@@ -29,6 +29,8 @@ pub enum CatalogReq {
     Indexes(u32),
     /// A change of the secondary indexes (009).
     Index(IndexCommand),
+    /// The search indexes of a collection in this node's copy (011).
+    SearchIndexes(u32),
     /// Settings changed together, each as it was read (`config.settings`, 007 FR-017).
     SetSettings(Vec<teseladb_meta::command::SettingChange>),
     /// A change of a cluster setting.
@@ -75,6 +77,8 @@ pub enum CatalogAnswer {
     /// The secondary indexes of a collection, and the pin of the read, which the operation
     /// releases when it ends (009 FR-006).
     Indexes(Vec<IndexEntry>, u64),
+    /// The search indexes of a collection, by name.
+    SearchIndexes(Vec<teseladb_meta::indexes::SearchIndexEntry>),
     /// Documents of users or roles.
     Principals(Vec<Vec<u8>>),
     /// The catalog and the index definitions, encoded (`CatalogReq::Dump`).

@@ -1182,6 +1182,13 @@ impl Backend for TxnBackend<'_> {
         self.inner.indexes(collection)
     }
 
+    fn search_indexes(
+        &mut self,
+        collection: u32,
+    ) -> Result<Vec<teseladb_meta::indexes::SearchIndexEntry>, CommandError> {
+        self.inner.search_indexes(collection)
+    }
+
     fn voters(&mut self, start: &[u8], end: &[u8]) -> Result<usize, CommandError> {
         self.inner.voters(start, end)
     }

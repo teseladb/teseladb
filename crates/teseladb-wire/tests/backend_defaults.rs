@@ -49,6 +49,13 @@ impl Backend for Bare {
     fn indexes(&mut self, _collection: u32) -> Result<Vec<IndexEntry>, CommandError> {
         Ok(Vec::new())
     }
+
+    fn search_indexes(
+        &mut self,
+        _collection: u32,
+    ) -> Result<Vec<teseladb_meta::indexes::SearchIndexEntry>, CommandError> {
+        Ok(Vec::new())
+    }
     fn index_write(&mut self, _cmd: IndexCommand) -> Result<(), CommandError> {
         Err(none())
     }

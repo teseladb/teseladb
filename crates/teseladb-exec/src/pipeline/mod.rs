@@ -22,7 +22,7 @@ mod system;
 
 pub use shape::projected_expr;
 pub use stages::check_exprs;
-pub use system::scale_of;
+pub use system::{LIST_SEARCH_INDEXES, scale_of};
 
 use teseladb_bson::{Document, RawDoc, RawValue};
 use teseladb_mql::{Extensions, MqlError};
@@ -403,6 +403,9 @@ fn parse_stage(d: RawDoc<'_>, ctx: &Ctx) -> Result<Stage, MqlError> {
         "$fill" => Stage::Fill(Box::new(fill::Fill::parse(arg, ctx)?)),
         "$graphLookup" => Stage::GraphLookup(Box::new(fill::GraphLookup::parse(arg, ctx)?)),
         "$collStats" => Stage::System("$collStats", system::coll_stats(arg)?),
+        LIST_SEARCH_INDEXES => {
+            Stage::System(LIST_SEARCH_INDEXES, system::list_search_indexes(arg)?)
+        }
         "$geoNear" => Stage::GeoNear(Box::new(geo_near::GeoNear::parse(arg, ctx)?)),
         "$listLocalSessions" => {
             Stage::System("$listLocalSessions", system::sessions("$listLocalSessions", arg)?)

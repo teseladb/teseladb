@@ -859,6 +859,15 @@ impl NodeLogic {
                 };
                 let _ = reply.send(a);
             }
+            CatalogReq::SearchIndexes(collection) => {
+                let a = match self.group0() {
+                    Some(sm) if sm.bootstrapped() => CatalogAnswer::SearchIndexes(
+                        sm.indexes.search_of(collection).cloned().collect(),
+                    ),
+                    Some(_) | None => CatalogAnswer::Unavailable,
+                };
+                let _ = reply.send(a);
+            }
             CatalogReq::Principal { kind, db, name } => {
                 let a = match self.group0() {
                     Some(sm) if sm.bootstrapped() => CatalogAnswer::Principals(
@@ -1831,6 +1840,7 @@ mod tests {
             CatalogReq::Read,
             CatalogReq::Settings,
             CatalogReq::Indexes(1),
+            CatalogReq::SearchIndexes(1),
             CatalogReq::Principal { kind: user, db: "admin".into(), name: "u".into() },
             CatalogReq::Principals { kind: user, db: None },
             CatalogReq::Config("shards".into()),
@@ -1935,6 +1945,14 @@ mod tests {
         let (tx, rx) = channel();
         c.logic(2).on_message(NodeMsg::Catalog(CatalogReq::Indexes(1), tx), now);
         let Ok(CatalogAnswer::Indexes(_, pin)) = rx.try_recv() else { panic!("an answer") };
+        // The search indexes are read from the same copy, without a pin (011).
+        let (search_tx, search_rx) = channel();
+        c.logic(2).on_message(NodeMsg::Catalog(CatalogReq::SearchIndexes(1), search_tx), now);
+        let search = search_rx.try_recv();
+        assert!(
+            matches!(&search, Ok(CatalogAnswer::SearchIndexes(v)) if v.is_empty()),
+            "{search:?}"
+        );
         let (tx, rx) = channel();
         let index = IndexCommand::SetState { id: 1, state: IndexState::Ready };
         let now = c.now;

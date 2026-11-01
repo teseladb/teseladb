@@ -154,7 +154,8 @@ fn digit(c: char) -> bool {
 }
 
 /// The signs that may close a word ending in a digit, measured on `refsearch` 1.70.6.
-const NUMBER_SIGNS: [char; 7] = ['%', '&', '\u{A2}', '\u{2030}', '\u{2031}', '\u{066A}', '\u{0E2F}'];
+const NUMBER_SIGNS: [char; 7] =
+    ['%', '&', '\u{A2}', '\u{2030}', '\u{2031}', '\u{066A}', '\u{0E2F}'];
 
 /// The byte ranges of the tokens of `text`: Thai runs cut into words, and the other words by the
 /// Java word rules `refsearch` follows here (letters joined by one `-`, `.` or `'`, digits joined by
@@ -263,22 +264,20 @@ mod tests {
     #[test]
     fn keeps_one_sign_after_a_number() {
         // Measured on `refsearch` 1.70.6: one of `% & ¢ ‰ ٪ ‱`, or `ฯ`, closes a word that ends in a digit.
-        assert_eq!(cut("1% 1%% 1%2 a1% a% 1.% 1,5% 1& 1‰ 4ฯ"), [
-            "1%", "1%", "1%", "2", "a1%", "a", "1", "1,5%", "1&", "1‰", "4ฯ"
-        ]);
+        assert_eq!(
+            cut("1% 1%% 1%2 a1% a% 1.% 1,5% 1& 1‰ 4ฯ"),
+            ["1%", "1%", "1%", "2", "a1%", "a", "1", "1,5%", "1&", "1‰", "4ฯ"]
+        );
     }
 
     #[test]
     fn format_and_combining_marks_join_the_word() {
         // Measured: format characters (but the soft hyphen) and combining marks stay inside a
         // word; after a whole dictionary word they join the rest of the Thai run to it.
-        assert_eq!(cut("ab\u{200B}cd 4\u{200B}5 1\u{200B}.5 ab\u{200B}% \u{200B}ab"), [
-            "ab\u{200B}cd",
-            "4\u{200B}5",
-            "1\u{200B}.5",
-            "ab\u{200B}",
-            "ab"
-        ]);
+        assert_eq!(
+            cut("ab\u{200B}cd 4\u{200B}5 1\u{200B}.5 ab\u{200B}% \u{200B}ab"),
+            ["ab\u{200B}cd", "4\u{200B}5", "1\u{200B}.5", "ab\u{200B}", "ab"]
+        );
         assert_eq!(cut("ภาษา\u{200B}ภาษา"), ["ภาษา\u{200B}ภาษา"]);
         assert_eq!(cut("ไทยภาษา\u{200B}ไทย"), ["ไทย", "ภาษา\u{200B}ไทย"]);
         assert_eq!(cut("\u{200B}ภาษาไทย"), ["ภาษา", "ไทย"]);
