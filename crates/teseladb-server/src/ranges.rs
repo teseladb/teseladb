@@ -511,6 +511,16 @@ impl Replicas {
         // keys the leader served.
         let by_size = l.live >= self.split_bytes || size.bytes >= disk_limit;
         let at = if by_size { size.cut } else { host.load_cut(g, now) };
+        // A cut at a change meta (014) goes before its document, which it belongs with.
+        let at = at.map(|k| {
+            let word =
+                |i: usize| k.get(i..i + 4).and_then(|w| w.try_into().ok()).map(u32::from_be_bytes);
+            let capped = match (word(1), word(5)) {
+                (Some(t), Some(c)) => self.capped.contains(&(t, c)),
+                _ => false,
+            };
+            teseladb_keys::space::meta_document(&k, capped).map_or(k.clone(), <[u8]>::to_vec)
+        });
         // Measured once a second: a request Group 0 has not applied yet goes again then.
         if let Some(at) = at {
             out.push(Group0Command::SplitRange { group: g, at });

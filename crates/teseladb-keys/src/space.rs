@@ -105,13 +105,6 @@ pub fn cut_outside(
 ) -> Option<Vec<u8>> {
     let inside = |k: &[u8]| start < k && (end.is_empty() || k < end);
     let word = |i: usize| Some(u32::from_be_bytes(at.get(i..i + 4)?.try_into().ok()?));
-    // A change meta of a document (014, `document · 00 · position`) goes right after it: a cut
-    // there goes before the document so that they stay in one range.
-    let capped = |t, c| whole(t, c);
-    let at = match (word(1), word(5)) {
-        (Some(t), Some(c)) => meta_document(at, capped(t, c)).unwrap_or(at),
-        _ => at,
-    };
     let (Some(&DATA), Some(t), Some(c)) = (at.first(), word(1), word(5)) else {
         return inside(at).then(|| at.to_vec());
     };
@@ -130,10 +123,13 @@ const META_TAIL: usize = 5;
 /// Bytes of a capped collection's document after its prefix: the insertion number.
 const CAPPED_SEQ: usize = 8;
 
-/// The document of `key` if `key` is one of its change metas (014): a document's key, complete,
-/// then `00` and four bytes. An encoded value never starts with `00`, so after whole values the
-/// byte `00` is no other key's.
-fn meta_document(key: &[u8], capped: bool) -> Option<&[u8]> {
+/// The document of `key` if `key` is one of its change metas (014, `document · 00 · position`):
+/// a document's key whose values are complete, then `00` and four bytes. An encoded value never
+/// starts with `00`, so after whole values the byte `00` is no other key's; a document's key that
+/// merely ends in `00` (an integer `_id`) is no meta. `capped`: the collection is capped, whose
+/// documents are an 8-byte insertion number. A split never cuts at a meta, which belongs with its
+/// document: the leader cuts at the document instead.
+pub fn meta_document(key: &[u8], capped: bool) -> Option<&[u8]> {
     if key.first() != Some(&DATA) || key.get(9..DOC_PREFIX)? != DOCUMENTS.to_be_bytes() {
         return None;
     }

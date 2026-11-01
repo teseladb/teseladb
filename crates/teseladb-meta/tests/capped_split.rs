@@ -167,3 +167,22 @@ fn a_capped_collection_of_a_tenant_is_cut_out_at_its_own_keys() {
     run(&mut fresh, Group0Command::CreateTenant { name: "acme".into() });
     assert_eq!(split(&mut fresh, elsewhere.clone()), Ok(elsewhere));
 }
+
+/// A cut at a document's change meta (014, `document · 00 · position`) is refused: the meta
+/// belongs with its document and the leader cuts before the document. A document whose key ends
+/// in `00` is no meta: the cut stays and completes as it was asked.
+#[test]
+fn a_cut_at_a_change_meta_is_refused_and_one_at_a_document_ending_in_zero_completes() {
+    let (mut sm, capped, plain) = cluster();
+    let doc = KeyBuilder::document(0, plain, teseladb_bson::RawValue::Int32(5)).as_bytes().to_vec();
+    let meta = [&doc[..], &[0, 0, 0, 0, 1][..]].concat();
+    assert_eq!(split(&mut sm, meta), Err(Group0Result::Err(Group0Error::BadSplit)));
+    let seq = KeyBuilder::document_capped(0, capped, 1).as_bytes().to_vec();
+    let capped_meta = [&seq[..], &[0, 0, 0, 0, 1][..]].concat();
+    assert_eq!(split(&mut sm, capped_meta), Err(Group0Result::Err(Group0Error::BadSplit)));
+    let ends =
+        [KeyBuilder::index_prefix(0, plain, 0).as_bytes(), &256u128.to_be_bytes()[..]].concat();
+    assert_eq!(split(&mut sm, ends.clone()), Ok(ends.clone()));
+    let done = Group0Command::CompleteSplit { group: GroupId(1), at: ends, at_index: 9 };
+    assert!(matches!(run(&mut sm, done), Group0Result::Range(_)));
+}
