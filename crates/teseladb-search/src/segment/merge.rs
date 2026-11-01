@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use teseladb_keys::Hlc;
 
-use crate::segment::data::{FieldData, SegmentData};
+use crate::segment::data::{FieldData, SegmentData, VectorData};
 
 /// Size of the smallest tier: smaller segments count as this size.
 pub const TIER_FLOOR: u64 = 1 << 20;
@@ -101,7 +101,16 @@ pub fn merge(
             let g = out.geo.entry(name.clone()).or_insert_with(|| vec![Vec::new(); base]);
             g.extend(kept.iter().map(|&d| cells[d].clone()));
         }
-        // Fields, columns and cells this segment lacks.
+        for (name, v) in &seg.vectors {
+            let o = out.vectors.entry(name.clone()).or_insert_with(|| VectorData {
+                dims: v.dims,
+                similarity: v.similarity,
+                quantization: v.quantization,
+                values: vec![None; base],
+            });
+            o.values.extend(kept.iter().map(|&d| v.values[d].clone()));
+        }
+        // Fields, columns, cells and vectors this segment lacks.
         let total = base + added;
         for f in out.fields.values_mut() {
             f.lengths.resize(total, 0);
@@ -111,6 +120,9 @@ pub fn merge(
         }
         for g in out.geo.values_mut() {
             g.resize(total, Vec::new());
+        }
+        for v in out.vectors.values_mut() {
+            v.values.resize(total, None);
         }
     }
     for f in out.fields.values_mut() {
