@@ -94,6 +94,8 @@ struct Running {
     contacted: BTreeSet<GroupId>,
     /// Requests it sent to ranges.
     requests: i64,
+    /// Documents its statements wrote: the position of the next one in its events (014).
+    ops: u32,
 }
 
 impl Running {
@@ -457,8 +459,64 @@ impl TxnBackend<'_> {
         }
     }
 
+    /// `writes` with what the events of the documents they write need (014 FR-002, FR-005): each
+    /// document's meta carries the transaction and the document's position in it, with the
+    /// description of its update, if any.
+    fn with_history(
+        &mut self,
+        writes: Vec<(Vec<u8>, IntentOp)>,
+    ) -> Result<Vec<(Vec<u8>, IntentOp)>, CommandError> {
+        use teseladb_changestream::meta::{ChangeMeta, TxnInfo, doc_of_meta, history};
+        let is_history = |op: &IntentOp| matches!(op, IntentOp::Put { value_type, .. } if *value_type == teseladb_range::HISTORY_VALUE);
+        let (mut updates, mut replaced) = (Vec::new(), Vec::new());
+        for (key, op) in &writes {
+            if let (IntentOp::Put { value, .. }, true) = (op, is_history(op)) {
+                let meta = ChangeMeta::decode(value).map_err(|e| {
+                    CommandError::new(INTERNAL_ERROR, format!("change description: {e:?}"))
+                })?;
+                let Some(doc) = doc_of_meta(key) else { continue };
+                if let Some(u) = meta.update {
+                    updates.push((doc.to_vec(), u));
+                }
+                if meta.replace {
+                    replaced.push(doc.to_vec());
+                }
+            }
+        }
+        let mut out: Vec<(Vec<u8>, IntentOp)> =
+            writes.into_iter().filter(|(_, op)| !is_history(op)).collect();
+        let is_doc = |key: &[u8], op: &IntentOp| {
+            let doc_key = matches!(
+                teseladb_keys::KeyParts::of(key),
+                Ok(teseladb_keys::KeyParts::Data { index: teseladb_keys::DOCUMENTS, .. })
+            );
+            doc_key
+                && match op {
+                    IntentOp::Put { value_type, .. } => *value_type == super::mutation::DOCUMENT,
+                    IntentOp::Delete => true,
+                }
+        };
+        let docs: Vec<Vec<u8>> =
+            out.iter().filter(|(k, op)| is_doc(k, op)).map(|(k, _)| k.clone()).collect();
+        let (lsid, txn_number) = self.run.coord.session();
+        let uid = match self.inner.authenticated_user() {
+            Some(u) => teseladb_hash::sha256(format!("{}@{}", u.user, u.db).as_bytes()),
+            None => teseladb_hash::sha256(b""),
+        };
+        let info = TxnInfo { id: self.run.coord.txn().0, lsid, uid, txn_number };
+        for (key, meta) in history(&docs, (&updates, &replaced), Some((&info, self.run.ops))) {
+            let value = meta.encode().map_err(|e| {
+                CommandError::new(INTERNAL_ERROR, format!("change description: {e}"))
+            })?;
+            out.push((key, IntentOp::Put { value_type: teseladb_range::HISTORY_VALUE, value }));
+        }
+        self.run.ops = self.run.ops.saturating_add(u32::try_from(docs.len()).unwrap_or(u32::MAX));
+        Ok(out)
+    }
+
     /// Writes `writes` as one statement of the transaction.
     fn statement(&mut self, writes: Vec<(Vec<u8>, IntentOp)>) -> Result<(), CommandError> {
+        let writes = self.with_history(writes)?;
         let number = self.run.txn_number;
         let stmt =
             self.run.coord.write(&Via(&*self.inner), writes).map_err(|e| txn_error(e, number))?;
@@ -651,6 +709,7 @@ fn run_command(
                 uncertain: None,
                 contacted: BTreeSet::new(),
                 requests: 0,
+                ops: 0,
             };
             txn_stats::started(&mut lock(shared));
             store(shared, f.lsid, run);
@@ -929,6 +988,7 @@ fn with_running(
                 let (txn, now) = (run.coord.txn(), nanos(&*backend));
                 run.coord = Coordinator::new(txn, (f.lsid, f.txn_number), at, now)
                     .with_budget(backend.txn_memory_budget());
+                run.ops = 0;
             }
             OnUncertain::Fail => break result,
         }

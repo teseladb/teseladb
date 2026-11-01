@@ -66,6 +66,11 @@ mod time_iter;
 mod version;
 
 pub use config::{Codec, Encryption, LsmConfig};
+
+/// First byte of the stored value of a version that only serves the history of its key (the
+/// change description of 014 next to each document): it is read at its own mark, never below the
+/// GC threshold, so at or below the threshold every such version goes, also the newest.
+pub const HISTORY_VALUE: u8 = 5;
 pub use entry::{Kind, RangeTombstone};
 pub use error::LsmError;
 pub use gc::GcTable;

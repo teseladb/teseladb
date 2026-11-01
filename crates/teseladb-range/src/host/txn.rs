@@ -14,7 +14,7 @@ use crate::intents::{
     Conflict, Intent, IntentOp, Latest, Push, RecordError, RecordOp, TxnId, TxnRecord, TxnStatus,
     check_put, end_txn, push_txn, record_key,
 };
-use crate::mutate::live_size;
+use crate::mutate::live_size_of;
 
 /// What a transaction asks of one range.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -191,7 +191,7 @@ fn stored_size(key: &[u8], version: Option<&Item>) -> i64 {
     version
         .filter(|v| v.kind == Kind::Put)
         .and_then(|v| v.value.split_first())
-        .map_or(0, |(_, value)| live_size(key, value))
+        .map_or(0, |(t, value)| live_size_of(key, *t, value))
 }
 
 /// The resolutions of `txn`'s intents among `versions` and the change of live bytes they make.
@@ -216,7 +216,7 @@ fn resolutions(
         let commit = (status == TxnStatus::Committed).then_some(intent.op);
         if let Some(op) = &commit {
             let new = match op {
-                IntentOp::Put { value, .. } => live_size(key, value),
+                IntentOp::Put { value_type, value } => live_size_of(key, *value_type, value),
                 IntentOp::Delete => 0,
             };
             delta += new - stored_size(key, v.get(1));

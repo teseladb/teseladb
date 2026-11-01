@@ -1027,7 +1027,8 @@ fn empty_timestamps_take_the_time_of_the_write() {
             keys: vec![vec![1]],
         };
         let out = b.eval(&[Some((1, &current))], ts).unwrap();
-        assert_eq!(out.puts.len(), usize::from(filled));
+        let docs = out.puts.iter().filter(|p| p.value_type != teseladb_range::HISTORY_VALUE);
+        assert_eq!(docs.count(), usize::from(filled));
         if filled {
             assert_eq!(stored(&out, 0).get("t"), Some(&Value::Timestamp { time, increment: inc }));
         }
@@ -1179,4 +1180,84 @@ fn an_update_by_operators_writes_its_change_description() {
         let out = update(u, true).eval(&[Some((1, &one)), Some((1, &two))], ts).unwrap();
         assert!(out.change.is_empty());
     }
+}
+
+/// Each document a write changes keeps, next to its version, what its event needs (014 FR-005,
+/// FR-009): the description of an update by operators and its position in the write; the first
+/// document of a write with nothing to describe keeps nothing.
+#[test]
+fn a_write_keeps_the_history_of_its_documents_next_to_them() {
+    use teseladb_changestream::meta::{ChangeMeta, meta_key};
+    use teseladb_changestream::update_desc::UpdateDescription;
+    let ts = Hlc { physical: 5_000, logical: 0 };
+    let key = |i: i32| {
+        teseladb_keys::KeyBuilder::document(0, 7, teseladb_bson::RawValue::Int32(i))
+            .as_bytes()
+            .to_vec()
+    };
+    let history = |out: &teseladb_range::mutate::Outcome| -> Vec<(Vec<u8>, ChangeMeta)> {
+        out.puts
+            .iter()
+            .filter(|p| p.value_type == teseladb_range::HISTORY_VALUE)
+            .map(|p| (p.key.clone(), ChangeMeta::decode(&p.value).unwrap()))
+            .collect()
+    };
+    let current = |i: i32| Document::new().with("_id", i).with("a", 1).to_bytes().unwrap();
+    let (one, two) = (current(1), current(2));
+    let update = Bound {
+        mutation: DocMutation::Update {
+            filter: Document::new(),
+            update: Value::Document(Document::new().with("$set", Document::new().with("a", 2))),
+            array_filters: None,
+            multi: true,
+            upsert: None,
+            image: Image::None,
+            rules: Rules::default(),
+        },
+        keys: vec![key(1), key(2)],
+    };
+    let out = update.eval(&[Some((1, &one)), Some((1, &two))], ts).unwrap();
+    let desc = UpdateDescription {
+        updated: vec![("a".into(), Value::Int32(2))],
+        ..UpdateDescription::default()
+    };
+    let want = vec![
+        (
+            meta_key(&key(1)),
+            ChangeMeta { txn: None, op: 0, update: Some(desc.clone()), replace: false },
+        ),
+        (meta_key(&key(2)), ChangeMeta { txn: None, op: 1, update: Some(desc), replace: false }),
+    ];
+    assert_eq!(history(&out), want);
+    let docs = vec![Document::new().with("_id", 1), Document::new().with("_id", 2)];
+    let insert = Bound {
+        mutation: DocMutation::Insert { docs, ordered: true, rules: Rules::default() },
+        keys: vec![key(1), key(2)],
+    };
+    let out = insert.eval(&[None, None], ts).unwrap();
+    assert_eq!(
+        history(&out),
+        vec![(meta_key(&key(2)), ChangeMeta { txn: None, op: 1, update: None, replace: false })]
+    );
+    // A replacement says so.
+    let replace = Bound {
+        mutation: DocMutation::Update {
+            filter: Document::new(),
+            update: Value::Document(Document::new().with("b", 1)),
+            array_filters: None,
+            multi: false,
+            upsert: None,
+            image: Image::None,
+            rules: Rules::default(),
+        },
+        keys: vec![key(1)],
+    };
+    let out = replace.eval(&[Some((1, &one))], ts).unwrap();
+    let want = ChangeMeta { txn: None, op: 0, update: None, replace: true };
+    assert_eq!(history(&out), vec![(meta_key(&key(1)), want)]);
+    let out = insert.eval(&[None, None], ts).unwrap();
+    assert_eq!(
+        history(&out),
+        vec![(meta_key(&key(2)), ChangeMeta { txn: None, op: 1, update: None, replace: false })]
+    );
 }

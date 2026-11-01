@@ -381,7 +381,7 @@ pub fn purge<B: Backend + ?Sized>(
     super::indexes::drop_all(backend, ns, c)?;
     let (start, end) = documents_of(c);
     let mut w = Writer::internal();
-    let rules = Rules { ns: full(ns), ..Rules::default() };
+    let rules = Rules { ns: full(ns), unlogged: true, ..Rules::default() };
     loop {
         let rows =
             backend.scan(&start, &end, super::crud::MODIFY_CHUNK_KEYS, ReadConcern::Local)?;

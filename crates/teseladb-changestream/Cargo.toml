@@ -13,3 +13,5 @@ workspace = true
 [dependencies]
 teseladb-hlc = { path = "../teseladb-hlc" }
 teseladb-bson = { path = "../teseladb-bson" }
+teseladb-keys = { path = "../teseladb-keys" }
+teseladb-lsm = { path = "../teseladb-lsm" }

@@ -48,7 +48,7 @@ const NEW_SIZE: &str = "newSize";
 const UPDATES: &str = "changes";
 
 /// A description holds values of a document two levels below it, of any size the document has.
-const DESCRIPTION_LIMITS: teseladb_bson::Limits = teseladb_bson::Limits {
+pub(crate) const DESCRIPTION_LIMITS: teseladb_bson::Limits = teseladb_bson::Limits {
     max_size: 2 * teseladb_bson::MAX_SIZE,
     max_depth: teseladb_bson::MAX_DEPTH + 2,
 };
@@ -135,7 +135,7 @@ impl UpdateDescription {
     }
 
     /// Reads a description from its `updateDescription` document.
-    fn from_document(d: &Document) -> Result<UpdateDescription, DescError> {
+    pub(crate) fn from_document(d: &Document) -> Result<UpdateDescription, DescError> {
         let doc = |name| match d.get(name) {
             Some(Value::Document(v)) => Ok(v),
             _ => Err(DescError::Shape(name)),

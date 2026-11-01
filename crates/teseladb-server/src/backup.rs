@@ -234,6 +234,19 @@ fn data_ranges(a: &NodeAdmin) -> Vec<teseladb_router::table::RouteEntry> {
         .collect()
 }
 
+/// The nodes a restore of range `entry` sends its files to (007 FR-021): every replica of Group
+/// 0's descriptor `desc` of it, learners too, since a replica the routing table does not list as a
+/// voter yet would otherwise keep the range as it was before the restore.
+fn restore_nodes(
+    entry: &teseladb_router::table::RouteEntry,
+    desc: Option<&teseladb_meta::group0::RangeDesc>,
+) -> Vec<NodeId> {
+    match desc.filter(|d| d.group == entry.group) {
+        Some(d) => d.replicas.iter().map(|(n, _)| *n).collect(),
+        None => entry.voters.clone(),
+    }
+}
+
 /// A request of a backup for range `range`'s leader (`node` `None`), or of a restore for its
 /// replica on `node`, through the core of this node that holds the range or forwards it.
 fn remote(
@@ -340,7 +353,9 @@ pub fn run_op(a: &NodeAdmin, op: Op) -> Answer {
                     ranges.len()
                 )));
             };
-            let nodes: Vec<Value> = only.voters.iter().map(|n| node_value(*n)).collect();
+            let view = a.ask(0, NodeMsg::View);
+            let desc = view.as_ref().and_then(|v| v.data_range.as_ref());
+            let nodes: Vec<Value> = restore_nodes(only, desc).into_iter().map(node_value).collect();
             Ok(Document::new()
                 .with("range", Value::Int64(i64::try_from(only.group.0).unwrap_or(i64::MAX)))
                 .with("nodes", Value::Array(nodes)))
@@ -613,6 +628,31 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
+
+    #[test]
+    fn a_restore_goes_to_every_replica_of_the_range_learners_too() {
+        use teseladb_meta::group0::{RangeDesc, ReplicaRole};
+        let roles = [(1, ReplicaRole::Voter), (2, ReplicaRole::Learner), (3, ReplicaRole::Voter)];
+        let desc = RangeDesc {
+            group: GroupId(1),
+            start: Vec::new(),
+            end: Vec::new(),
+            core: 0,
+            replicas: roles.iter().map(|(n, r)| (NodeId(*n), *r)).collect(),
+            replica_epoch: 1,
+            generation: 1,
+            leader_hint: None,
+            leader_term: 0,
+            pending_split: None,
+            settling: true,
+        };
+        let entry = teseladb_router::table::RouteEntry::from_desc(&desc);
+        assert_eq!(restore_nodes(&entry, Some(&desc)), vec![NodeId(1), NodeId(2), NodeId(3)]);
+        // Another range's descriptor, or none: the routing table's voters.
+        let other = RangeDesc { group: GroupId(9), ..desc.clone() };
+        assert_eq!(restore_nodes(&entry, Some(&other)), vec![NodeId(1), NodeId(3)]);
+        assert_eq!(restore_nodes(&entry, None), vec![NodeId(1), NodeId(3)]);
+    }
 
     fn req(method: Method, target: &str, body: Document) -> HttpRequest {
         let (path, query) = target.split_once('?').unwrap_or((target, ""));

@@ -58,7 +58,7 @@ fn a_write_whose_entries_are_in_another_range_is_one_transaction() {
     assert_eq!(field(&r, "nModified"), &Value::Int32(1), "{r:?}");
     assert_eq!(entries(&m, c), 1);
     assert_eq!(m.txns.len(), 2);
-    assert_eq!(m.txns[1].1.len(), 3, "the document, the old entry and the new one");
+    assert_eq!(m.txns[1].1.len(), 4, "the document, its meta (014), the old entry and the new one");
 }
 
 #[test]
