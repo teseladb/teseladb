@@ -926,7 +926,7 @@ const fn info(
 
 /// The commands TeselaDB answers, in name order, as `listCommands` of a `refrouter` 9.0.4 shows
 /// them; the help of `getParameter` and `setParameter` lists TeselaDB's parameters.
-const COMMANDS: [CommandInfo; 60] = [
+const COMMANDS: [CommandInfo; 62] = [
     info(BUILD_INFO, NO_HELP, [true, false, true, false], false),
     info(
         "bulkWrite",
@@ -1040,6 +1040,12 @@ const COMMANDS: [CommandInfo; 60] = [
         true,
     ),
     info("refreshSessions", "renew a set of logical sessions", [true, false, true, false], true),
+    info(
+        super::query_settings::REMOVE_QUERY_SETTINGS,
+        "Removes the query settings for the query shape of a given query.",
+        [true, true, false, true],
+        false,
+    ),
     info("renameCollection", NO_HELP, [true, true, false, true], true),
     info(
         super::admin::REPL_SET_GET_STATUS,
@@ -1072,6 +1078,12 @@ const COMMANDS: [CommandInfo; 60] = [
         false,
     ),
     info("setParameter", "", [true, true, true, true], false),
+    info(
+        super::query_settings::SET_QUERY_SETTINGS,
+        "Sets the query settings for the query shape of a given query.",
+        [true, true, false, true],
+        false,
+    ),
     info(
         "shutdown",
         "Shuts down the refrouter. Must be run against the admin database and either (1) run from localhost or (2) run while authenticated with the shutdown privilege. Spends 'timeoutSecs' in quiesce mode, where the refrouter continues to allow operations to run, but directs clients to route new operations to other refrouter nodes.",

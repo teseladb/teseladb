@@ -415,6 +415,9 @@ fn reply<B: Backend + ?Sized>(
     if verbosity >= Verbosity::ExecutionStats {
         out.push("executionStats", stats(&e, &shard, verbosity));
     }
+    if let Some(hash) = super::query_shape::explained_hash(ctx.db, &command) {
+        out.push("queryShapeHash", hash);
+    }
     out.push("serverInfo", server);
     out.push("serverParameters", params);
     out.push("command", command);

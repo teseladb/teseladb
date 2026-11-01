@@ -96,6 +96,12 @@ pub trait Env {
         true
     }
 
+    /// The memory the whole operation may hold in its stages
+    /// (`internalQueryMaxMemoryUsageBytesPerOperation`, 010 FR-010); 1 GiB by default.
+    fn operation_memory_limit(&self) -> usize {
+        errors::OPERATION_MEMORY_LIMIT
+    }
+
     /// The engine of `$function` and `$accumulator` (016); none by default.
     fn js(&self) -> Option<std::rc::Rc<dyn crate::expr::js::JsEngine>> {
         None
@@ -530,6 +536,8 @@ fn parse_stage(d: RawDoc<'_>, ctx: &Ctx) -> Result<Stage, MqlError> {
         }
         "$listExtensions" => Stage::System("$listExtensions", system::list_extensions(arg)?),
         "$listCatalog" => Stage::System("$listCatalog", system::list_catalog(arg)?),
+        "$querySettings" => Stage::System("$querySettings", system::object_spec(name, arg)?),
+        "$queryStats" => Stage::System("$queryStats", system::object_spec(name, arg)?),
         "$listMqlEntities" | "$listCachedAndActiveUsers" => return Err(system::behind_flag(name)),
         // A stage that only keeps the stages around it from being optimised together: the
         // documents go through as they are (measured).
@@ -571,7 +579,8 @@ pub(crate) fn invalid(name: &str, e: MqlError) -> MqlError {
 const EMPTY_DOCUMENT: &[u8] = &[5, 0, 0, 0, 0];
 
 /// The stages an `aggregate: 1` may start with: they read no collection.
-const COLLECTIONLESS_STAGES: [&str; 8] = [
+const COLLECTIONLESS_STAGES: [&str; 9] = [
+    "$queryStats",
     "$documents",
     "$currentOp",
     "$listLocalSessions",

@@ -357,13 +357,17 @@ pub(super) fn aggregate<B: Backend + ?Sized>(
         }
         section.push("stages", list);
     }
-    Ok(Document::new()
+    let mut out = Document::new()
         .with("serverInfo", server)
         .with("serverParameters", params)
         .with("splitPipeline", Value::Null)
-        .with("shards", Document::new().with(shard.as_str(), section))
-        .with("command", command)
-        .with("ok", 1.0))
+        .with("shards", Document::new().with(shard.as_str(), section));
+    if let Some(hash) = super::super::query_shape::explained_hash(ctx.db, &command) {
+        out.push("queryShapeHash", hash);
+    }
+    out.push("command", command);
+    out.push("ok", 1.0);
+    Ok(out)
 }
 
 /// The target of `$out` as `explain` writes it: its collection, then its database (the

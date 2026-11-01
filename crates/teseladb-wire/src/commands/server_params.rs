@@ -63,6 +63,11 @@ pub const CLUSTER_AUTH_MODE: &str = "clusterAuthMode";
 /// Index intersection by hashing (`AND_HASH` plans, 010 FR-001): off by default, as on a
 /// `refrouter` 9.0.4 (measured).
 pub const HASH_INTERSECTION: &str = "internalQueryPlannerEnableHashIntersection";
+/// The memory one operation may hold in its stages (010 FR-010); past it a `$group` writes to
+/// disk, or fails with 292 without `allowDiskUse` (measured on a `refnode` 9.0.4).
+pub const MAX_OPERATION_MEMORY: &str = "internalQueryMaxMemoryUsageBytesPerOperation";
+/// Its default: 1 GiB, the least RefDb gives it.
+pub const MAX_OPERATION_MEMORY_DEFAULT: i64 = 1 << 30;
 /// `getParameter: "*"`.
 const ALL: &str = "*";
 
@@ -159,6 +164,8 @@ pub struct ServerParams {
     pub tls_enabled: bool,
     /// `internalQueryPlannerEnableHashIntersection`.
     pub hash_intersection: bool,
+    /// `internalQueryMaxMemoryUsageBytesPerOperation`.
+    pub operation_memory: i64,
 }
 
 impl Default for ServerParams {
@@ -176,19 +183,21 @@ impl Default for ServerParams {
             cluster_auth_mode: ClusterAuthMode::Undefined,
             tls_enabled: true,
             hash_intersection: false,
+            operation_memory: MAX_OPERATION_MEMORY_DEFAULT,
         }
     }
 }
 
 /// The parameters TeselaDB has, in name order: name, settable at runtime, settable at startup
 /// with `--setParameter` (`redactClientLogData` starts with its own option, measured).
-const KNOWN: [(&str, bool, bool); 17] = [
+const KNOWN: [(&str, bool, bool); 18] = [
     (AUDIT_AUTHORIZATION_SUCCESS, true, true),
     (AUTH_SCHEMA_VERSION, false, false),
     (CLIENT_CURSOR_MONITOR_FREQUENCY_SECS, true, true),
     (CLUSTER_AUTH_MODE, true, false),
     (CURSOR_TIMEOUT_MILLIS, true, true),
     (ENABLE_TEST_COMMANDS, false, true),
+    (MAX_OPERATION_MEMORY, true, true),
     (HASH_INTERSECTION, true, true),
     (LOCAL_LOGICAL_SESSION_TIMEOUT_MINUTES, false, true),
     (MAX_CONCURRENT_MULTI_DOCUMENT_TRANSACTIONS, true, true),
@@ -230,6 +239,7 @@ fn value_of(name: &str, s: &NodeSessions) -> Value {
         REDACT_CLIENT_LOG_DATA => Value::Boolean(s.params.redact_client_log_data),
         USE_INTERNAL_AUTHZ_FOR_X509 => Value::Boolean(s.params.use_internal_authz_for_x509),
         HASH_INTERSECTION => Value::Boolean(s.params.hash_intersection),
+        MAX_OPERATION_MEMORY => Value::Int64(s.params.operation_memory),
         TRANSACTION_LIFETIME_LIMIT_SECONDS => {
             Value::Int32(clamp_i32(s.params.transaction_lifetime_secs))
         }
@@ -385,6 +395,10 @@ pub fn set_parameter<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Docume
             MAX_CONCURRENT_MULTI_DOCUMENT_TRANSACTIONS => 0,
             _ => i64::MIN,
         };
+        if *name == MAX_OPERATION_MEMORY && n <= 0 {
+            let msg = format!("Invalid value for parameter {name}: {n} is not greater than 0");
+            return Err(CommandError::new(BAD_VALUE, msg));
+        }
         if n < least {
             let msg = format!(
                 "Invalid value for parameter {name}: {n} is not greater than or equal to {least}"
@@ -408,6 +422,7 @@ pub fn set_parameter<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Docume
             REDACT_CLIENT_LOG_DATA => g.params.redact_client_log_data = n != 0,
             USE_INTERNAL_AUTHZ_FOR_X509 => g.params.use_internal_authz_for_x509 = n != 0,
             HASH_INTERSECTION => g.params.hash_intersection = n != 0,
+            MAX_OPERATION_MEMORY => g.params.operation_memory = n,
             CLUSTER_AUTH_MODE => g.params.cluster_auth_mode = ClusterAuthMode::from_index(n),
             AUDIT_AUTHORIZATION_SUCCESS => match g.audit.as_ref() {
                 Some(a) => {

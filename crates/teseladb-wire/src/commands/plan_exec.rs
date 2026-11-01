@@ -107,6 +107,34 @@ impl PlanIndex {
     }
 }
 
+std::thread_local! {
+    /// The indexes query settings allow on one collection while a command runs (010 FR-023):
+    /// the collection's identifier and the allowed names or key patterns.
+    static ALLOWED: std::cell::RefCell<Option<(u32, Vec<Value>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `f` with only the indexes `allowed` (names or key patterns) plannable on collection
+/// `coll`.
+pub(crate) fn with_allowed_indexes<R>(coll: u32, allowed: Vec<Value>, f: impl FnOnce() -> R) -> R {
+    ALLOWED.with(|a| *a.borrow_mut() = Some((coll, allowed)));
+    let out = f();
+    ALLOWED.with(|a| *a.borrow_mut() = None);
+    out
+}
+
+/// Whether query settings let the planner use index `name` with key `pattern` of `coll`.
+fn allowed_by_settings(coll: u32, name: &str, pattern: &Document) -> bool {
+    ALLOWED.with(|a| match &*a.borrow() {
+        Some((c, allowed)) if *c == coll => allowed.iter().any(|v| match v {
+            Value::String(n) => n == name,
+            Value::Document(k) => k == pattern,
+            _ => false,
+        }),
+        _ => true,
+    })
+}
+
 /// The ready indexes of `coll` the planner may consider, in the catalog's order: the index of
 /// `_id` first, as RefDb lists it; none for a collection that is not a plain one (its
 /// documents' keys are not those of their `_id`).
@@ -148,7 +176,8 @@ pub(crate) fn plan_indexes<B: Backend + ?Sized>(
             && !catalog.partial
             && !catalog.sparse
             && spec.get("collation").is_none()
-            && pattern.iter().all(|(k, _)| !k.contains('$'));
+            && pattern.iter().all(|(k, _)| !k.contains('$'))
+            && allowed_by_settings(coll.id, &entry.name, &pattern);
         let multikey_paths = if id_index {
             pattern.iter().map(|(k, _)| (k.to_owned(), Vec::new())).collect()
         } else {
