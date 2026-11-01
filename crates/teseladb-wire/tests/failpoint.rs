@@ -272,3 +272,39 @@ fn what_configure_fail_point_refuses() {
     );
     assert_eq!(field(&r, "ok"), &Value::Double(1.0));
 }
+
+/// `{times: 2}` fires twice and then lets commands through; a probability outside 0 to 1 is
+/// refused; a failpoint without `failCommands` touches nothing, and an empty `errorLabels`
+/// adds no labels.
+#[test]
+fn times_probability_and_empty_options() {
+    let mut m = node(true);
+    let mut c = Connection::new(1);
+    let fails = || d(&[("failCommands", Value::Array(vec![s("ping")])), ("errorCode", 2.into())]);
+    run(&mut m, &mut c, "admin", configure(d(&[("times", 2.into())]), fails()));
+    for _ in 0..2 {
+        assert_eq!(field(&run(&mut m, &mut c, "admin", ping()), "codeName"), &s("BadValue"));
+    }
+    assert_eq!(field(&run(&mut m, &mut c, "admin", ping()), "ok"), &Value::Double(1.0));
+    let r = run(
+        &mut m,
+        &mut c,
+        "admin",
+        configure(d(&[("activationProbability", 2.0.into())]), fails()),
+    );
+    assert_eq!(field(&r, "code"), &Value::Int32(2), "{r:?}");
+    assert_eq!(field(&r, "errmsg"), &s("activationProbability must be between 0.0 and 1.0"));
+    run(&mut m, &mut c, "admin", configure(s("alwaysOn"), d(&[("errorCode", 2.into())])));
+    assert_eq!(field(&run(&mut m, &mut c, "admin", ping()), "ok"), &Value::Double(1.0));
+    let data = d(&[
+        ("failCommands", Value::Array(vec![s("ping")])),
+        ("errorCode", 2.into()),
+        ("errorLabels", Value::Array(Vec::new())),
+        ("blockConnection", true.into()),
+        ("blockTimeMS", 0.into()),
+    ]);
+    run(&mut m, &mut c, "admin", configure(s("alwaysOn"), data));
+    let r = run(&mut m, &mut c, "admin", ping());
+    assert_eq!(field(&r, "codeName"), &s("BadValue"));
+    assert!(r.get("errorLabels").is_none(), "{r:?}");
+}

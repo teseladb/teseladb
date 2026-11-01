@@ -204,7 +204,8 @@ fn scans_of(
             continue;
         }
         let scan = scan(pos, index, clauses, if sorting { request.sort } else { &[] });
-        let constrained = scan.bounds.first().is_some_and(|(_, b)| b != &vec![Bound::all()]);
+        // A clause on the leading field makes the plan, `$exists` scanning all of it too.
+        let constrained = scan.assigned > 0;
         if constrained || request.hint == Some(pos) {
             out.push(scan);
         } else if scan.sorts {

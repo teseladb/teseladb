@@ -5,8 +5,8 @@ use teseladb_bson::{Document, RawDoc, RawValue, Value};
 use teseladb_mql::MqlError;
 
 use super::errors::{
-    BAD_VALUE, COLL_STATS_OBJECT, FAILED_TO_PARSE, INVALID_OPTIONS, TYPE_MISMATCH,
-    UNSUPPORTED_FORMAT, error, missing_field, unknown_field, wrong_type,
+    BAD_VALUE, COLL_STATS_OBJECT, FAILED_TO_PARSE, INDEX_STATS_EMPTY, INVALID_OPTIONS,
+    TYPE_MISMATCH, UNSUPPORTED_FORMAT, error, missing_field, unknown_field, wrong_type,
 };
 use crate::expr::arith::raw_type_name;
 use crate::expr::values::{display, display_bson};
@@ -209,6 +209,17 @@ pub fn cluster_catalog(v: RawValue<'_>) -> Result<Document, MqlError> {
         return Err(unknown_field("$listClusterCatalog", k));
     }
     Ok(Document::from(d))
+}
+
+/// Checks the specification of `$indexStats`: an empty object (measured on a `refrouter` 9.0.4).
+pub fn index_stats(v: RawValue<'_>) -> Result<Document, MqlError> {
+    match v {
+        RawValue::Document(d) if d.iter().next().is_none() => Ok(Document::new()),
+        _ => Err(error(
+            INDEX_STATS_EMPTY,
+            "The $indexStats stage specification must be an empty object",
+        )),
+    }
 }
 
 /// Checks the specification of `$planCacheStats`: an object whose only field may be

@@ -24,6 +24,8 @@ pub type Meta = BTreeMap<String, Value>;
 pub const SCORE: &str = "score";
 /// The name of the random value `$sample` gives each document it takes.
 pub const RAND_VAL: &str = "randVal";
+/// The name of the key of the index entry a document was read by.
+pub const INDEX_KEY: &str = "indexKey";
 /// The name of the metadata of a score's details.
 pub const SCORE_DETAILS: &str = "scoreDetails";
 
@@ -80,6 +82,69 @@ pub(crate) fn unmark_doc(d: &mut Document) {
         if let Some(v) = d.get_mut(&k) {
             unmark(v);
         }
+    }
+}
+
+/// An environment whose scopes refuse a missing read of the metadata `names` (011: the scores
+/// of a search stage before, for the documents that did not come from it).
+pub(crate) struct RequiredEnv<'a> {
+    pub(crate) inner: &'a dyn Env,
+    pub(crate) names: &'a [String],
+}
+
+impl Env for RequiredEnv<'_> {
+    fn ext(&self) -> &dyn Extensions {
+        self.inner.ext()
+    }
+
+    fn vars(&self) -> Option<&Document> {
+        self.inner.vars()
+    }
+
+    fn collection(&self, name: &str) -> Result<Vec<Document>, MqlError> {
+        self.inner.collection(name)
+    }
+
+    fn random(&self) -> f64 {
+        self.inner.random()
+    }
+
+    fn system_stage(&self, name: &str, spec: &Document) -> Result<Vec<Document>, MqlError> {
+        self.inner.system_stage(name, spec)
+    }
+
+    fn check_search(&self, stage: &str, spec: &Document) -> Result<(), MqlError> {
+        self.inner.check_search(stage, spec)
+    }
+
+    fn search_source(
+        &self,
+        stage: &str,
+        spec: &Document,
+    ) -> Result<Vec<super::search::Scored>, MqlError> {
+        self.inner.search_source(stage, spec)
+    }
+
+    fn collation(&self) -> crate::collation::Collation {
+        self.inner.collation()
+    }
+
+    fn geo_indexes(&self) -> Result<(String, Vec<super::geo_near::GeoIndex>), MqlError> {
+        self.inner.geo_indexes()
+    }
+
+    fn js(&self) -> Option<std::rc::Rc<dyn crate::expr::js::JsEngine>> {
+        self.inner.js()
+    }
+
+    fn allow_disk_use(&self) -> bool {
+        self.inner.allow_disk_use()
+    }
+
+    fn scope(&self, doc: &Document) -> Scope {
+        let mut s = self.inner.scope(doc);
+        s.meta_required.extend(self.names.iter().cloned());
+        s
     }
 }
 

@@ -24,6 +24,7 @@
 pub mod analysis;
 pub mod definition;
 pub mod index;
+pub mod indexer;
 pub mod query;
 pub mod segment;
 pub mod vector;

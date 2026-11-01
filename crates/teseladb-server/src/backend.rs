@@ -713,22 +713,45 @@ impl Backend for ServerBackend {
         end: &[u8],
         from: Hlc,
     ) -> Result<teseladb_wire::commands::ChangeBatch, CommandError> {
-        // Range by range in key order, each read on its leader (014 FR-003, FR-010); the batch is
-        // resolved up to the lowest resolved mark of its ranges (FR-004, FR-005).
+        // The batch is resolved up to the lowest resolved mark of its ranges (FR-004, FR-005).
         let mut read = teseladb_changestream::read::IntervalRead::new(start, end, from);
-        while let Some(at) = read.next().map(<[u8]>::to_vec) {
+        for r in self.range_changes(start, end, from)? {
+            read.answered(r.end, r.rows, r.resolved, None);
+        }
+        Ok(read.finish(|r: &teseladb_range::changes::Versioned| r.ts))
+    }
+
+    fn range_changes(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        from: Hlc,
+    ) -> Result<Vec<teseladb_wire::commands::RangeBatch>, CommandError> {
+        // Range by range in key order, each read on its leader (014 FR-003, FR-010) and kept up
+        // to its own resolved mark.
+        let mut out = Vec::new();
+        let mut walk = teseladb_changestream::read::IntervalRead::<()>::new(start, end, from);
+        while let Some(at) = walk.next().map(<[u8]>::to_vec) {
             let key = at.clone();
             let build = |e: &RouteEntry, _| RemoteReq::Changes {
                 start: key.clone(),
-                end: read.stop(&e.end),
+                end: walk.stop(&e.end),
                 from,
             };
             match self.data(&at, false, build)? {
-                (e, RemoteReply::Changes { rows, to, oldest_intent }) => {
+                (e, RemoteReply::Changes { mut rows, to, oldest_intent }) => {
                     let mark = teseladb_changestream::resolved::resolved(to, oldest_intent);
                     note_range_lag(e.group.0, mark, crate::clock::wall_ms());
-                    let stop = read.stop(&e.end);
-                    read.answered(stop, rows, to, oldest_intent);
+                    let resolved = mark.max(from);
+                    rows.retain(|r| r.ts <= resolved);
+                    let next = walk.stop(&e.end);
+                    out.push(teseladb_wire::commands::RangeBatch {
+                        start: at,
+                        end: next.clone(),
+                        rows,
+                        resolved,
+                    });
+                    walk.answered(next, Vec::new(), to, oldest_intent);
                 }
                 _ => {
                     return Err(CommandError::new(
@@ -738,7 +761,7 @@ impl Backend for ServerBackend {
                 }
             }
         }
-        Ok(read.finish(|r: &teseladb_range::changes::Versioned| r.ts))
+        Ok(out)
     }
 
     fn catalog_changes(

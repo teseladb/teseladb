@@ -150,7 +150,28 @@ pub fn intervals(op: &str, arg: &Value) -> Option<(Vec<Bound>, bool)> {
             Some((vec![b], true))
         }
         "$regex" => prefix_regex(arg),
+        // A non-sparse index holds every document: `$exists` scans all of it and `$not:
+        // {$exists: true}` its nulls, the documents deciding both (measured).
+        "$exists" if truthy(arg) => Some((vec![Bound::all()], false)),
+        "$not" => match arg {
+            Value::Document(d) if d.len() == 1 && d.get("$exists").is_some_and(truthy) => {
+                Some((vec![Bound::point(Value::Null)], false))
+            }
+            _ => None,
+        },
         _ => None,
+    }
+}
+
+/// Whether an `$exists` argument asks for the field, as RefDb reads it.
+fn truthy(v: &Value) -> bool {
+    match v {
+        Value::Boolean(b) => *b,
+        Value::Int32(n) => *n != 0,
+        Value::Int64(n) => *n != 0,
+        Value::Double(n) => *n != 0.0,
+        Value::Null | Value::Undefined => false,
+        _ => true,
     }
 }
 
