@@ -219,7 +219,13 @@ impl Span {
                     let Some(ls) = littles.get(&doc) else { continue };
                     let inside = |b: &Match, l: &Match| b.0 <= l.0 && l.1 <= b.1;
                     let found: Vec<Match> = if *outer {
-                        bigs.iter().filter(|b| ls.iter().any(|l| inside(b, l))).copied().collect()
+                        // Measured: a containing term keeps its width (0); a containing phrase
+                        // counts its whole length.
+                        let whole = !matches!(**big, Span::Term { .. });
+                        bigs.iter()
+                            .filter(|b| ls.iter().any(|l| inside(b, l)))
+                            .map(|b| if whole { (b.0, b.1, b.1 - b.0) } else { *b })
+                            .collect()
                     } else {
                         ls.iter().filter(|l| bigs.iter().any(|b| inside(b, l))).copied().collect()
                     };
@@ -231,6 +237,57 @@ impl Span {
             }
             Span::Near { clauses, slop, in_order } => near(index, clauses, *slop, *in_order)?,
         })
+    }
+
+    /// How RefLib writes the span query (measured with `scoreDetails`).
+    pub(super) fn description(&self, ctx: &super::explain::Ctx<'_>) -> String {
+        let list = |all: &[Span]| -> String {
+            all.iter().map(|c| c.description(ctx)).collect::<Vec<_>>().join(", ")
+        };
+        match self {
+            Span::Term { path, query } => {
+                let terms = ctx.index.query_terms(path, query).unwrap_or_default();
+                let t = terms.first().cloned().unwrap_or_else(|| query.clone());
+                format!("{}:{t}", ctx.name(path))
+            }
+            Span::First { op, end } => format!("spanFirst({}, {end})", op.description(ctx)),
+            Span::Near { clauses, slop, in_order } => {
+                format!("spanNear([{}], {slop}, {in_order})", list(clauses))
+            }
+            Span::Or(clauses) => format!("spanOr([{}])", list(clauses)),
+            Span::Subtract { include, exclude } => {
+                format!("spanNot({}, {}, 0, 0)", include.description(ctx), exclude.description(ctx))
+            }
+            Span::Contains { little, big, outer } => format!(
+                "{}({}, {})",
+                if *outer { "SpanContaining" } else { "SpanWithin" },
+                big.description(ctx),
+                little.description(ctx)
+            ),
+        }
+    }
+
+    /// The explanation of the query's score for `doc`, with weight `boost` (measured: always
+    /// `weight(… in n)`, its frequency a `phraseFreq`).
+    pub(super) fn explain(
+        &self,
+        ctx: &super::explain::Ctx<'_>,
+        boost: f32,
+        doc: u32,
+    ) -> Result<Option<crate::index::Explanation>, SearchError> {
+        let path = self.path().to_owned();
+        let mut terms = Vec::new();
+        self.weight_terms(ctx.index, &mut terms)?;
+        let Some(ms) = self.matches(ctx.index)?.remove(&doc) else { return Ok(None) };
+        let freq: f32 = ms.iter().map(|m| 1.0 / (1.0 + m.2 as f32)).sum();
+        let dfs: Vec<u64> = terms.iter().map(|t| ctx.index.doc_freq(&path, t)).collect();
+        let weight = crate::index::Weight {
+            description: format!("weight({} in {doc})", self.description(ctx)),
+            dfs: &dfs,
+            boost,
+            kind: crate::index::FreqKind::Phrase,
+        };
+        Ok(ctx.index.explain_weight(&path, &weight, doc, freq))
     }
 
     /// The scores of the query in `index`, with weight `boost`.

@@ -118,6 +118,11 @@ enum Operator {
     },
     /// Nothing (a `queryString` of only excluded clauses).
     Empty,
+    /// Every document, scored 1 (a `facet` collector without an operator).
+    All,
+    /// `text` with `matchCriteria: "all"`: each query string on each path counts only in the
+    /// documents with all its terms (measured).
+    AllTerms(Box<Operator>),
     /// An operator whose scores `score` changes as a whole.
     Scored(Box<Operator>, Score),
     /// `embeddedDocument`.
@@ -134,10 +139,14 @@ enum Operator {
     },
     /// Scores already computed, by document number (`hasRoot` inside `embeddedDocument`).
     Precomputed(BTreeMap<u32, f32>),
+    /// The scores elements take from the documents that hold them (`hasRoot`, `hasAncestor`).
+    Passed(embedded::Passed),
     /// `geoWithin`, `geoShape` or `near` on a `geo` field.
     Geo(geo::Geo),
     /// `autocomplete`.
     Autocomplete(autocomplete::Autocomplete),
+    /// `text` or `phrase` with `synonyms`.
+    Synonyms(synonyms::Synonyms),
     /// `span`, with its score option.
     Span(span::Span, Score),
     Compound {
@@ -146,6 +155,9 @@ enum Operator {
         filter: Vec<Operator>,
         must_not: Vec<Operator>,
         minimum: usize,
+        /// Whether a boost of the whole `compound` weighs its clauses (their term queries then
+        /// explain as `weight(… in n)`).
+        weighted: bool,
     },
 }
 
@@ -168,16 +180,66 @@ pub fn explain(
     Ok(keys.iter().filter_map(|k| Some((k.clone(), by_id.remove(&index.id_of(k)?)?))).collect())
 }
 
+/// The highlights `spec` asks for of the document of `key`, `None` without `highlight`.
+pub fn highlights(
+    index: &MemIndex,
+    spec: &Document,
+    key: &[u8],
+) -> Result<Option<Value>, SearchError> {
+    let Some(v) = spec.get("highlight") else { return Ok(None) };
+    let h = highlight::parse(index, v)?;
+    let op = parse_root(index, spec)?;
+    Ok(index.document_of(key).map(|d| h.of(index, &op, d)))
+}
+
 /// Whether `spec` asks for `scoreDetails`.
 pub fn wants_details(spec: &Document) -> bool {
     matches!(spec.get("scoreDetails"), Some(Value::Boolean(true)))
 }
 
 /// The document of `$searchMeta` (and `$$SEARCH_META`) for `spec`: the count of the documents
-/// it selects, as `lowerBound` unless `count.type` is `total` (measured: the count is exact).
+/// it selects, as `lowerBound` unless `count.type` is `total` (measured: the count is exact),
+/// and the buckets of its `facet` collector.
 pub fn meta(index: &MemIndex, spec: &Document) -> Result<Document, SearchError> {
-    let total = count_total(spec)?;
-    Ok(count_document(total, run(index, spec)?.len()))
+    let partial = meta_partial(index, spec)?;
+    meta_finish(index, spec, &partial)
+}
+
+/// What one segment counts for [`meta`]: the documents it selects and its facets' counts.
+pub fn meta_partial(index: &MemIndex, spec: &Document) -> Result<facet::Partial, SearchError> {
+    count_total(spec)?;
+    match collector(index, spec)? {
+        Some(c) => c.partial(index),
+        None => Ok(facet::Partial { matched: run(index, spec)?.len(), ..Default::default() }),
+    }
+}
+
+/// The document of [`meta`] from the counts of every segment added up (`index`, any segment,
+/// reads the query again).
+pub fn meta_finish(
+    index: &MemIndex,
+    spec: &Document,
+    partial: &facet::Partial,
+) -> Result<Document, SearchError> {
+    let mut out = count_document(count_total(spec)?, partial.matched);
+    if let Some(c) = collector(index, spec)? {
+        out.push("facet", c.finish(partial));
+    }
+    Ok(out)
+}
+
+/// The `facet` collector of `spec`, if it has one (measured: never beside an operator).
+fn collector(index: &MemIndex, spec: &Document) -> Result<Option<facet::Collector>, SearchError> {
+    let Some(v) = spec.get("facet") else { return Ok(None) };
+    if spec.iter().any(|(k, _)| OPERATORS.contains(&k)) {
+        return Err(SearchError(
+            "Top-level operator is not allowed to be used with collector".to_owned(),
+        ));
+    }
+    if let Some((k, _)) = spec.iter().find(|(k, _)| *k != "facet" && !STAGE_OPTIONS.contains(k)) {
+        return Err(SearchError(format!("unrecognized field \"{k}\"")));
+    }
+    facet::parse(index, v).map(Some)
 }
 
 /// Whether `count.type` of `spec` asks for `total` rather than `lowerBound`.
@@ -205,6 +267,15 @@ fn parse_root(index: &MemIndex, spec: &Document) -> Result<Operator, SearchError
     // `refsearch`'s check, which `$searchMeta` reaches (`refnode` checks it first for `$search`).
     if spec.get("scoreDetails").is_some_and(|v| !matches!(v, Value::Boolean(_))) {
         return Err(shape("scoreDetails", "must be a boolean"));
+    }
+    if let Some(v) = spec.get("highlight") {
+        highlight::parse(index, v)?;
+    }
+    if let Some(c) = collector(index, spec)? {
+        return Ok(match c.operator {
+            Some(op) => *op,
+            None => Operator::All,
+        });
     }
     parse_at(index, spec, "")
 }
@@ -299,7 +370,51 @@ fn parse_text(index: &MemIndex, d: &Document, path: &str) -> Result<Operator, Se
         Some(p) => paths(index, p, &at("path"))?,
     };
     let fuzzy = parse_fuzzy(d.get("fuzzy"), &at("fuzzy"))?;
-    Ok(Operator::Text { query, paths, fuzzy, score: parse_score(d.get("score"), &at("score"))? })
+    let all = match d.get("matchCriteria") {
+        None => false,
+        Some(Value::String(m)) if m == "any" => false,
+        Some(Value::String(m)) if m == "all" => true,
+        Some(Value::String(_)) => {
+            return Err(shape(&at("matchCriteria"), "must be one of [all, any]"));
+        }
+        Some(_) => return Err(shape(&at("matchCriteria"), "must be a string")),
+    };
+    let score = parse_score(d.get("score"), &at("score"))?;
+    if let Some(mapping) = synonym_mapping(index, d, path)? {
+        if fuzzy.is_some() {
+            return Err(shape(path, "at most one of [fuzzy, synonyms] may be present"));
+        }
+        let criteria = d.get("matchCriteria").map(|_| all);
+        return Ok(Operator::Synonyms(synonyms::Synonyms {
+            query,
+            paths,
+            mapping,
+            phrase: None,
+            criteria,
+            score,
+        }));
+    }
+    let text = Operator::Text { query, paths, fuzzy, score };
+    Ok(if all { Operator::AllTerms(Box::new(text)) } else { text })
+}
+
+/// The synonym mapping `d` names in `synonyms`, checked against the definition.
+fn synonym_mapping(
+    index: &MemIndex,
+    d: &Document,
+    path: &str,
+) -> Result<Option<String>, SearchError> {
+    match d.get("synonyms") {
+        None => Ok(None),
+        Some(Value::String(name)) => {
+            if index.definition().synonyms.iter().any(|s| &s.name == name) {
+                Ok(Some(name.clone()))
+            } else {
+                Err(SearchError(format!("unknown synonym mapping name \"{name}\"")))
+            }
+        }
+        Some(_) => Err(shape(&format!("{path}.synonyms"), "must be a string")),
+    }
 }
 
 /// The `fuzzy` option of `text` and `term`: RefLib's defaults of `FuzzyQuery` as `refsearch` uses
@@ -423,7 +538,19 @@ fn parse_phrase(index: &MemIndex, d: &Document, path: &str) -> Result<Operator, 
             None => return Err(shape(&at("slop"), "must be a number")),
         },
     };
-    Ok(Operator::Phrase { query, paths, slop, score: parse_score(d.get("score"), &at("score"))? })
+    let score = parse_score(d.get("score"), &at("score"))?;
+    if let Some(mapping) = synonym_mapping(index, d, path)? {
+        let phrase = Some(slop);
+        return Ok(Operator::Synonyms(synonyms::Synonyms {
+            query,
+            paths,
+            mapping,
+            phrase,
+            criteria: None,
+            score,
+        }));
+    }
+    Ok(Operator::Phrase { query, paths, slop, score })
 }
 
 /// The indexed paths a `path` option names: a string, `{wildcard}` or an array of them.
@@ -541,12 +668,19 @@ fn parse_compound(index: &MemIndex, d: &Document, path: &str) -> Result<Operator
             "minimumShouldMatch cannot be greater than number of should clauses",
         ));
     }
-    Ok(Operator::Compound {
+    let op = Operator::Compound {
         must: clauses(index, d, "must", path)?,
         should,
         filter: clauses(index, d, "filter", path)?,
         must_not: clauses(index, d, "mustNot", path)?,
         minimum,
+        weighted: false,
+    };
+    // Measured: a boost weighs the clauses' terms; a constant or a function scores the whole.
+    Ok(match parse_score(d.get("score"), &format!("{path}.score"))? {
+        Score::Plain => op,
+        Score::Boost(b) => boosted(op, b),
+        other => Operator::Scored(Box::new(op), other),
     })
 }
 
@@ -594,7 +728,10 @@ fn eval(index: &MemIndex, op: &Operator) -> Result<BTreeMap<u32, f32>, SearchErr
             rescored(index, s, p.score())
         }
         Operator::Empty => Ok(BTreeMap::new()),
+        Operator::All => Ok(index.live().map(|d| (d, 1.0)).collect()),
+        Operator::AllTerms(inner) => eval_all_terms(index, inner),
         Operator::Precomputed(s) => Ok(s.clone()),
+        Operator::Passed(p) => Ok(p.scores.clone()),
         Operator::HasRoot(_) => Err(outside_embedded("hasRoot")),
         Operator::HasAncestor { .. } => Err(outside_embedded("hasAncestor")),
         Operator::Geo(g) => {
@@ -625,6 +762,10 @@ fn eval(index: &MemIndex, op: &Operator) -> Result<BTreeMap<u32, f32>, SearchErr
             let s = index.matching_terms(path, inside).into_iter().map(|d| (d, boost)).collect();
             rescored(index, s, score)
         }
+        Operator::Synonyms(sy) => {
+            let s = sy.scores(index, boost_of(&sy.score))?;
+            rescored(index, s, &sy.score)
+        }
         Operator::Span(sp, score) => {
             let s = sp.scores(index, boost_of(score))?;
             rescored(index, s, score)
@@ -637,10 +778,47 @@ fn eval(index: &MemIndex, op: &Operator) -> Result<BTreeMap<u32, f32>, SearchErr
             let s = values::scores(index, v, boost_of(v.score()));
             rescored(index, s, v.score())
         }
-        Operator::Compound { must, should, filter, must_not, minimum } => {
+        Operator::Compound { must, should, filter, must_not, minimum, .. } => {
             eval_compound(index, must, should, filter, must_not, *minimum)
         }
     }
+}
+
+/// [`Operator::AllTerms`]: the scores of each query string on each path, in the order `text`
+/// adds them, kept in the documents that have every term of the string (or, with `fuzzy`, a
+/// term near each).
+fn eval_all_terms(index: &MemIndex, op: &Operator) -> Result<BTreeMap<u32, f32>, SearchError> {
+    let Operator::Text { query, paths, fuzzy, score } = op else { return eval(index, op) };
+    let mut out: BTreeMap<u32, f32> = BTreeMap::new();
+    for p in paths {
+        for q in query {
+            let unit = Operator::Text {
+                query: vec![q.clone()],
+                paths: vec![p.clone()],
+                fuzzy: fuzzy.clone(),
+                score: score.clone(),
+            };
+            let tokens = index.query_terms(p, q)?;
+            let docs_of = |t: &str| -> Vec<u32> {
+                let terms: Vec<String> = match fuzzy {
+                    Some(f) => index.fuzzy_terms(p, t, f).into_iter().map(|(t, _)| t).collect(),
+                    None => vec![t.to_owned()],
+                };
+                terms
+                    .iter()
+                    .filter_map(|t| index.positions(p, t))
+                    .flat_map(|d| d.keys().copied())
+                    .collect()
+            };
+            let lists: Vec<Vec<u32>> = tokens.iter().map(|t| docs_of(t)).collect();
+            for (doc, s) in eval(index, &unit)? {
+                if lists.iter().all(|l| l.contains(&doc)) {
+                    *out.entry(doc).or_insert(0.0) += s;
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// The error of `hasRoot` or `hasAncestor` (`name`) outside `embeddedDocument`.
@@ -667,13 +845,19 @@ fn boosted(op: Operator, b: f32) -> Operator {
             Operator::Phrase { query, paths, slop, score: scaled(score) }
         }
         Operator::Exists { path, score } => Operator::Exists { path, score: scaled(score) },
-        Operator::Compound { must, should, filter, must_not, minimum } => Operator::Compound {
-            must: must.into_iter().map(|o| boosted(o, b)).collect(),
-            should: should.into_iter().map(|o| boosted(o, b)).collect(),
-            filter,
-            must_not,
-            minimum,
-        },
+        Operator::Synonyms(sy) => {
+            Operator::Synonyms(synonyms::Synonyms { score: scaled(sy.score), ..sy })
+        }
+        Operator::Compound { must, should, filter, must_not, minimum, weighted } => {
+            Operator::Compound {
+                must: must.into_iter().map(|o| boosted(o, b)).collect(),
+                should: should.into_iter().map(|o| boosted(o, b)).collect(),
+                filter,
+                must_not,
+                minimum,
+                weighted: weighted || b != 1.0,
+            }
+        }
         other if b == 1.0 => other,
         other => Operator::Scored(Box::new(other), Score::Boost(b)),
     }
@@ -747,24 +931,32 @@ fn eval_compound(
 }
 
 mod autocomplete;
+mod describe;
 mod embedded;
 mod explain;
+pub mod facet;
 mod function;
 mod geo;
+mod highlight;
 mod knn;
 mod more_like;
 mod pattern;
 mod query_string;
 mod sloppy;
 mod span;
+mod synonyms;
 pub(crate) mod values;
 
+#[cfg(test)]
+mod explain_more_tests;
 #[cfg(test)]
 mod geo_tests;
 #[cfg(test)]
 mod m10_tests;
 #[cfg(test)]
 mod pattern_tests;
+#[cfg(test)]
+mod synonyms_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

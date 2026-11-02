@@ -81,9 +81,12 @@ pub(super) fn parse(index: &MemIndex, d: &Document, path: &str) -> Result<Operat
         Score::Boost(b) => (b, Score::Plain),
         other => (1.0, other),
     };
+    // RefLib's `MoreLikeThis` adds the kept terms from its queue, the lowest score first
+    // (measured with `scoreDetails`).
+    let kept: Vec<(f64, String, String)> =
+        kept.into_iter().take(MAX_QUERY_TERMS).collect::<Vec<_>>().into_iter().rev().collect();
     let should: Vec<Operator> = kept
         .into_iter()
-        .take(MAX_QUERY_TERMS)
         .map(|(_, field, term)| Operator::Text {
             query: vec![term],
             paths: vec![field],
@@ -100,6 +103,7 @@ pub(super) fn parse(index: &MemIndex, d: &Document, path: &str) -> Result<Operat
         filter: Vec::new(),
         must_not: Vec::new(),
         minimum: 0,
+        weighted: false,
     };
     Ok(match rest {
         Score::Plain => op,
