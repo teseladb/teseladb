@@ -6,5 +6,9 @@
 
 pub mod client;
 pub mod cors;
+pub mod hpack;
 pub mod http1;
+pub mod http2;
+pub mod http2_frames;
+pub mod huffman;
 pub mod server1;
