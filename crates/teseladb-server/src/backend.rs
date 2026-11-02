@@ -6,6 +6,7 @@
 
 mod across;
 mod intent_wait;
+mod span;
 mod txn_reaper;
 
 pub(crate) use txn_reaper::SCAN_EVERY;
@@ -735,17 +736,20 @@ impl Backend for ServerBackend {
     }
 
     fn voters(&mut self, start: &[u8], end: &[u8]) -> Result<usize, CommandError> {
-        let overlaps = |e: &RouteEntry| {
-            (e.end.is_empty() || start < e.end.as_slice()) && e.start.as_slice() < end
-        };
-        self.h
-            .routes
-            .entries()
-            .iter()
-            .filter(|e| overlaps(e))
-            .map(|e| e.voters.len())
-            .min()
-            .ok_or_else(unavailable)
+        // A node that is starting fills its routing table after it is ready: it waits for the
+        // span's ranges as a write waits for its key's (`data`).
+        let until = self.until();
+        loop {
+            if let Some(n) = span::fewest_voters(&self.h.routes.entries(), start, end) {
+                return Ok(n);
+            }
+            if Instant::now() >= until {
+                let max_time_expired = self.max_until.is_some_and(|m| Instant::now() >= m);
+                let ctx = RangeContext { retryable_write: false, max_time_expired };
+                return Err(from_range(&RangeError::Timeout, ctx));
+            }
+            thread::sleep(RETRY_PAUSE);
+        }
     }
 
     // The dispatcher's wrapper keeps the plan of the operation it runs.
