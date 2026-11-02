@@ -105,9 +105,13 @@ pub fn event_of(w: &Watch<'_>, r: &DdlRecord) -> Result<Option<ChangeEvent>, Com
     let key = ddl_key(r.mark, r.op);
     let token = |kind| ResumeToken::new(key.clone(), kind);
     // A resharding's own catalog changes (018 FR-002): its critical section gives no event and
-    // its rename is the `reshardCollection` or `refineCollectionShardKey` of the collection.
+    // its rename is the `reshardCollection` or `refineCollectionShardKey` of the collection. The
+    // mark of a time series with measurements outside the bucket `_id` years gives none either.
     match &r.change {
-        DdlChange::Modify { description, .. } if super::reshard::is_cutover_change(description) => {
+        DdlChange::Modify { description, .. }
+            if super::reshard::is_cutover_change(description)
+                || super::timeseries_range::is_extended_change(description) =>
+        {
             return Ok(None);
         }
         DdlChange::Rename { from, to, target, .. } => {

@@ -559,3 +559,43 @@ fn a_distinct_scan_reads_the_key_after_its_interval_only_when_there_is_one() {
         assert_eq!(got, want, "{query}: {r:?}");
     }
 }
+
+/// A document both scans of an index intersection hold leaves the intersection only when it also
+/// matches the rest of the filter (007 T037).
+#[test]
+fn an_intersection_filters_the_documents_both_scans_hold() {
+    let mut m = Mem::new();
+    let set = doc(&[
+        ("setParameter", Value::Int32(1)),
+        ("internalQueryPlannerEnableHashIntersection", Value::Boolean(true)),
+    ]);
+    let r = m.run("admin", set);
+    assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+    let docs: Vec<Value> = (0..4)
+        .map(|i| {
+            Value::Document(doc(&[
+                ("_id", Value::Int32(i)),
+                ("a", Value::Int32(1)),
+                ("b", Value::Int32(1)),
+                ("c", Value::Int32(i)),
+            ]))
+        })
+        .collect();
+    m.run("x", doc(&[("insert", Value::from("i")), ("documents", Value::Array(docs))]));
+    for key in ["a", "b"] {
+        let index = doc(&[
+            ("key", Value::Document(doc(&[(key, Value::Int32(1))]))),
+            ("name", Value::from(key)),
+        ]);
+        let cmd = doc(&[
+            ("createIndexes", Value::from("i")),
+            ("indexes", Value::Array(vec![Value::Document(index)])),
+        ]);
+        m.run("x", cmd);
+    }
+    let filter = doc(&[("a", Value::Int32(1)), ("b", Value::Int32(1)), ("c", Value::Int32(2))]);
+    let r = m.run("x", doc(&[("find", Value::from("i")), ("filter", Value::Document(filter))]));
+    let Value::Array(found) = field(&r, "cursor.firstBatch").clone() else { panic!("{r:?}") };
+    assert_eq!(found.len(), 1, "{r:?}");
+    assert_eq!(field(&r, "cursor.firstBatch.0._id"), &Value::Int32(2), "{r:?}");
+}
