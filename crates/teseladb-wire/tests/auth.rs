@@ -1328,6 +1328,11 @@ fn a_members_certificate_logs_in_as_system_with_x509_cluster_authentication() {
         (ClusterAuthMode::SendX509, true),
         (ClusterAuthMode::X509, true),
     ] {
+        // The modes that send the shared key relax the secure default.
+        assert_eq!(
+            mode.uses_shared_key(),
+            matches!(mode, ClusterAuthMode::KeyFile | ClusterAuthMode::SendKeyFile)
+        );
         m.shared.lock().unwrap().params.cluster_auth_mode = mode;
         let mut c = conn(true);
         c.auth.peer_member = true;

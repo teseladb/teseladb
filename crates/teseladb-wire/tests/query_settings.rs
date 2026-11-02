@@ -303,3 +303,151 @@ fn index_hints_leave_the_indexes_of_other_collections_alone() {
 fn json_of(text: &str) -> Value {
     cmd(&format!(r#"{{"v":{text}}}"#)).get("v").cloned().expect("a value")
 }
+
+/// The fields of `settings` as a `refrouter` 9.0.4 reads them (measured on 02-11-2026): index
+/// hints one by one or in an array, `maxTimeMS` as a "safe" 64-bit integer up to the largest
+/// `int`, and a null `queryFramework` or `maxTimeMS` as an absent one.
+#[test]
+fn set_query_settings_reads_each_field_as_refdb_does() {
+    let mut m = seeded();
+    let ns = r#""ns":{"db":"qsh","coll":"c"}"#;
+    let refused: [(&str, String, i32, &str); 16] = [
+        (r#""ABC""#, r#"{"reject":true}"#.into(), 2, "Hash input is not a hex string"),
+        (
+            MATCH_QUERY,
+            r#"{"indexHints":5}"#.into(),
+            9,
+            "'indexHints' must be an object or an array",
+        ),
+        (
+            MATCH_QUERY,
+            r#"{"indexHints":"x"}"#.into(),
+            9,
+            "'indexHints' must be an object or an array",
+        ),
+        (
+            MATCH_QUERY,
+            r#"{"indexHints":null}"#.into(),
+            9,
+            "'indexHints' must be an object or an array",
+        ),
+        (
+            MATCH_QUERY,
+            r#"{"indexHints":{"allowedIndexes":["a_1"]}}"#.into(),
+            40414,
+            "BSON field 'IndexHintSpec.ns' is missing but a required field",
+        ),
+        (
+            MATCH_QUERY,
+            r#"{"indexHints":{"ns":{"coll":"c"},"allowedIndexes":["a_1"]}}"#.into(),
+            8_727_500,
+            "invalid index hint: 'ns.db' field is missing",
+        ),
+        (
+            MATCH_QUERY,
+            format!(r#"{{"indexHints":{{{ns}}}}}"#),
+            40414,
+            "BSON field 'IndexHintSpec.allowedIndexes' is missing but a required field",
+        ),
+        (
+            MATCH_QUERY,
+            format!(r#"{{"indexHints":{{{ns},"allowedIndexes":[]}}}}"#),
+            7_746_604,
+            "the resulting settings cannot be empty or contain only default values",
+        ),
+        (
+            MATCH_QUERY,
+            r#"{"indexHints":[5]}"#.into(),
+            10065,
+            "invalid parameter: expected an object (0)",
+        ),
+        (
+            MATCH_QUERY,
+            r#"{"queryKnobs":1}"#.into(),
+            10065,
+            "invalid parameter: expected an object (queryKnobs)",
+        ),
+        (
+            MATCH_QUERY,
+            r#"{"maxTimeMS":"x"}"#.into(),
+            14,
+            "BSON field 'setQuerySettings.settings.maxTimeMS' is the wrong type 'string', expected types '[decimal, double, int, long]'",
+        ),
+        (
+            MATCH_QUERY,
+            r#"{"maxTimeMS":true}"#.into(),
+            14,
+            "BSON field 'setQuerySettings.settings.maxTimeMS' is the wrong type 'bool', expected types '[decimal, double, int, long]'",
+        ),
+        (
+            MATCH_QUERY,
+            r#"{"maxTimeMS":2147483648}"#.into(),
+            2,
+            "BSON field 'maxTimeMS' value must be <= 2147483647, actual value '2147483648'",
+        ),
+        (
+            MATCH_QUERY,
+            r#"{"maxTimeMS":{"$numberDouble":"Infinity"}}"#.into(),
+            2,
+            "BSON field 'maxTimeMS' value must be <= 2147483647, actual value '9223372036854775807'",
+        ),
+        (
+            MATCH_QUERY,
+            r#"{"queryFramework":1}"#.into(),
+            14,
+            "BSON field 'setQuerySettings.settings.queryFramework' is the wrong type 'int', expected type 'string'",
+        ),
+        (
+            MATCH_QUERY,
+            r#"{"queryFramework":null}"#.into(),
+            8_727_502,
+            "settings field in setQuerySettings command cannot be empty",
+        ),
+    ];
+    for (target, settings, code, msg) in refused {
+        let r = set(&mut m, target, &settings);
+        assert_eq!(error(&r), (code, msg.to_owned()), "{target} {settings}");
+    }
+    let r = set(&mut m, MATCH_QUERY, r#"{"reject":null}"#);
+    assert_eq!(error(&r), (14, "Field 'reject' should be a boolean value, but found: null".into()));
+    // A hint that allows nothing is left out of the list.
+    let hints = format!(
+        r#"{{"indexHints":[{{{ns},"allowedIndexes":[]}},{{{ns},"allowedIndexes":["a_1"]}}]}}"#
+    );
+    let r = set(&mut m, MATCH_QUERY, &hints);
+    let hint = format!(r#"{{{ns},"allowedIndexes":["a_1"]}}"#);
+    let want = |rest: &str| cmd(&format!(r#"{{"indexHints":[{hint}]{rest}}}"#));
+    assert_eq!(field(&r, "settings"), &Value::Document(want("")), "{r:?}");
+    let r = set(&mut m, MATCH_QUERY, r#"{"queryFramework":"classic"}"#);
+    assert_eq!(field(&r, "settings"), &Value::Document(want(r#","queryFramework":"classic""#)));
+    // Empty knobs are no setting.
+    let r = set(&mut m, MATCH_QUERY, r#"{"queryKnobs":{},"reject":true}"#);
+    let base = r#","queryFramework":"classic","reject":true"#;
+    assert_eq!(field(&r, "settings"), &Value::Document(want(base)), "{r:?}");
+    // A double is truncated, a decimal rounded half to even, NaN is the default.
+    for (given, kept) in [
+        (r#"{"$numberDouble":"3.7"}"#, Some(3)),
+        (r#"{"$numberDecimal":"3.5"}"#, Some(4)),
+        (r#"{"$numberDecimal":"2.5"}"#, Some(2)),
+        (r#"{"$numberDouble":"NaN"}"#, None),
+    ] {
+        let r = set(&mut m, MATCH_QUERY, &format!(r#"{{"maxTimeMS":{given}}}"#));
+        let time =
+            kept.map_or(String::new(), |n| format!(r#","maxTimeMS":{{"$numberLong":"{n}"}}"#));
+        assert_eq!(
+            field(&r, "settings"),
+            &Value::Document(want(&format!("{base}{time}"))),
+            "{given}"
+        );
+    }
+    // A null time leaves the one set before.
+    set(&mut m, MATCH_QUERY, r#"{"maxTimeMS":5}"#);
+    let r = set(&mut m, MATCH_QUERY, r#"{"comment":"c","maxTimeMS":null}"#);
+    let time = r#","comment":"c","maxTimeMS":{"$numberLong":"5"}"#;
+    assert_eq!(field(&r, "settings"), &Value::Document(want(&format!("{base}{time}"))), "{r:?}");
+    // Removing settings that are not there is no error.
+    for _ in 0..2 {
+        let r = m.run("admin", doc(&[("removeQuerySettings", Value::from(MATCH_HASH))]));
+        assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+    }
+}

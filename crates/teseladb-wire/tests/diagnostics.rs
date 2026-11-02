@@ -657,6 +657,11 @@ fn get_diagnostic_data_samples_the_node() {
     assert_eq!(status.last().map(String::as_str), Some("end"));
     assert!(!status.contains(&"ok".to_owned()));
     assert!(matches!(field(&r, "data.connPoolStats.start"), Value::DateTime(_)));
+    // What the node writes each second outside any command is the same sample.
+    let shared = std::mem::take(&mut m.shared);
+    let sample = teseladb_wire::commands::diagnostic_data::capture(&mut m, &shared).unwrap();
+    m.shared = shared;
+    assert_eq!(keys(&Value::Document(sample)), ["start", "serverStatus", "connPoolStats", "end"]);
     let r = m.run("db", doc(&[("getDiagnosticData", 1.into())]));
     assert_eq!(code(&r), 13);
     assert_eq!(
