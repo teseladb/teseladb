@@ -326,6 +326,58 @@ fn the_catch_up_leaves_one_version_of_each_document_in_the_copy() {
     assert_eq!(got[3].get("b"), None, "{got:?}");
 }
 
+/// Many writes during the apply phase: the round reads the history again before the critical
+/// section, and every write reaches the copy.
+#[test]
+fn a_busy_apply_phase_chases_the_writes() {
+    let mut m = sharded(&docs(100));
+    let (mut r, shared) =
+        started(&mut m, r#"{"reshardCollection":"rs.c","key":{"b":1},"numInitialChunks":1}"#);
+    r.copy(&mut m, &shared).expect("copied");
+    m.shared = shared;
+    m.now += 5;
+    ok(&run(&mut m, r#"{"update":"c","updates":[{"q":{},"u":{"$set":{"x":1}},"multi":true}]}"#));
+    let shared = std::mem::take(&mut m.shared);
+    m.now += 5;
+    r.drive(&mut m, &shared).expect("committed");
+    r.finish(&shared);
+    m.shared = shared;
+    let got = find_all(&mut m);
+    assert_eq!(got.len(), 100);
+    assert!(got.iter().all(|d| d.get("x") == Some(&Value::Int32(1))), "{got:?}");
+}
+
+/// The writes of a collection that loses its key reach the copy too.
+#[test]
+fn an_unsplittable_copy_catches_up() {
+    let mut m = sharded(&docs(3));
+    let shared = std::mem::take(&mut m.shared);
+    let cmd = json(r#"{"reshardCollection":"rs.c","key":{"b":1},"numInitialChunks":1}"#);
+    let mut plan = {
+        let mut ctx = Ctx { backend: &mut m, shared: &shared, db: "admin", cmd: &cmd };
+        reshard_plan(&mut ctx).expect("a plan").expect("a new key")
+    };
+    plan.provenance = teseladb_wire::commands::reshard::Provenance::Unshard;
+    plan.key.key = json(r#"{"_id":1}"#);
+    let mut r = Resharding::start(&mut m, &shared, plan, &cmd).expect("started");
+    r.copy(&mut m, &shared).expect("copied");
+    m.shared = shared;
+    m.now += 5;
+    ok(&run(&mut m, r#"{"insert":"c","documents":[{"_id":9,"a":9,"b":9}]}"#));
+    ok(&run(&mut m, r#"{"update":"c","updates":[{"q":{"_id":9},"u":{"$set":{"x":9}}}]}"#));
+    ok(&run(&mut m, r#"{"update":"c","updates":[{"q":{"_id":1},"u":{"$set":{"x":1}}}]}"#));
+    let shared = std::mem::take(&mut m.shared);
+    m.now += 5;
+    r.drive(&mut m, &shared).expect("committed");
+    r.finish(&shared);
+    m.shared = shared;
+    let got = find_all(&mut m);
+    let ids: Vec<Value> = got.iter().map(|d| d.get("_id").cloned().unwrap()).collect();
+    assert_eq!(ids, [0, 1, 2, 9].map(Value::Int32).to_vec(), "{got:?}");
+    assert_eq!(got[3].get("x"), Some(&Value::Int32(9)));
+    assert_eq!(got[1].get("x"), Some(&Value::Int32(1)));
+}
+
 #[test]
 fn writes_wait_for_the_critical_section() {
     let mut m = sharded(&docs(3));

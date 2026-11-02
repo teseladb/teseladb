@@ -345,6 +345,30 @@ fn unshard_collection_picks_the_shard_with_the_least_data() {
     assert_eq!(node(&mut m, "s"), Some(1));
 }
 
+/// A draining shard takes no collection, a range without a leader hint is led by its first
+/// voter, and one without voters counts for no shard.
+#[test]
+fn unshard_collection_leaves_draining_shards_and_reads_the_first_voter() {
+    let mut m = cluster();
+    m.routes[0].leader_hint = None;
+    m.routes[0].end = vec![0xFF, 0];
+    m.routes.push(RouteEntry {
+        group: GroupId(9),
+        start: vec![0xFF, 0],
+        end: Vec::new(),
+        core: 0,
+        voters: Vec::new(),
+        generation: 1,
+        leader_hint: None,
+    });
+    m.draining = vec!["node2".into()];
+    ok(&admin(&mut m, r#"{"unshardCollection":"m.s"}"#));
+    assert_eq!(node(&mut m, "s"), Some(1));
+    m.draining = vec!["node1".into(), "node2".into()];
+    ok(&admin(&mut m, r#"{"shardCollection":"m.u","key":{"_id":1}}"#));
+    fails(&admin(&mut m, r#"{"unshardCollection":"m.u"}"#), 70, "No shards found");
+}
+
 #[test]
 fn rewrite_collection_fails_and_rewrites_as_on_a_refrouter() {
     let mut m = cluster();
