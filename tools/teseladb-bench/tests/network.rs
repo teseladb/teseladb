@@ -232,9 +232,9 @@ fn reshard_runs_against_a_local_cluster_without_losing_writes() {
         "--scenario",
         "reshard",
         "--records",
-        "500",
+        "2000",
         "--concurrency",
-        "1",
+        "2",
         "--duration",
         "300ms",
         "--warmup",
@@ -245,6 +245,18 @@ fn reshard_runs_against_a_local_cluster_without_losing_writes() {
     for name in ["\"reshard\"", "cutover", "\"lost\",\"unit\":\"doc\",\"value\":0", "writes"] {
         assert!(out.contains(name), "{name}: {out}");
     }
+    // SC-002: the cutover under its budget of 2 s while two writers keep writing.
+    let cutover = value_of(&out, "cutover");
+    assert!(cutover <= 2_000.0, "a cutover of {cutover} ms: {out}");
+}
+
+/// The value of metric `name` in a JSON report.
+fn value_of(out: &str, name: &str) -> f64 {
+    let at = out.find(&format!("\"{name}\"")).unwrap_or_else(|| panic!("{name}: {out}"));
+    let rest = &out[at..];
+    let v = &rest[rest.find("\"value\":").unwrap_or_else(|| panic!("{name}: {out}")) + 8..];
+    let end = v.find([',', '}']).unwrap_or(v.len());
+    v[..end].parse().unwrap_or_else(|_| panic!("{name}: {out}"))
 }
 
 /// `changestream-lag` (014 FR-016, SC-002) against a local cluster: the time from each insert's

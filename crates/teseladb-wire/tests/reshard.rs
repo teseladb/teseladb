@@ -271,6 +271,61 @@ fn writes_after_the_clone_mark_reach_the_copy() {
     assert_eq!(got[2].get("a"), Some(&Value::Int32(30)));
 }
 
+/// The catch-up finds the copy's version of a document from the history when an update left
+/// the new key alone, and reads it from the copy's `_id_` index otherwise: every document is
+/// in the copy once, as it is now.
+#[test]
+fn the_catch_up_leaves_one_version_of_each_document_in_the_copy() {
+    let mut m = sharded(&docs(6));
+    let (mut r, shared) =
+        started(&mut m, r#"{"reshardCollection":"rs.c","key":{"b":1},"numInitialChunks":1}"#);
+    r.copy(&mut m, &shared).expect("copied");
+    m.shared = shared;
+    let writes = [
+        r#"{"update":"c","updates":[{"q":{"_id":0},"u":{"$set":{"x":1}}}]}"#,
+        r#"{"update":"c","updates":[{"q":{"_id":1},"u":{"$set":{"b":50}}}]}"#,
+        r#"{"update":"c","updates":[{"q":{"_id":2},"u":{"_id":2,"a":2,"b":70}}]}"#,
+        r#"{"update":"c","updates":[{"q":{"_id":3},"u":{"$unset":{"b":""}}}]}"#,
+        r#"{"insert":"c","documents":[{"_id":20,"a":20,"b":20}]}"#,
+        r#"{"update":"c","updates":[{"q":{"_id":20},"u":{"$set":{"x":20}}}]}"#,
+        r#"{"delete":"c","deletes":[{"q":{"_id":4},"limit":1}]}"#,
+    ];
+    for w in writes {
+        m.now += 5;
+        ok(&run(&mut m, w));
+    }
+    let shared = std::mem::take(&mut m.shared);
+    m.now += 5;
+    r.catch_up(&mut m, &shared).expect("applied");
+    m.shared = shared;
+    // A second round: the copy holds the versions of the first.
+    for w in [
+        r#"{"update":"c","updates":[{"q":{"_id":0},"u":{"$set":{"x":2}}}]}"#,
+        r#"{"update":"c","updates":[{"q":{"_id":1},"u":{"$set":{"y":1}}}]}"#,
+        r#"{"update":"c","updates":[{"q":{"_id":20},"u":{"$inc":{"b":1}}}]}"#,
+    ] {
+        m.now += 5;
+        ok(&run(&mut m, w));
+    }
+    let shared = std::mem::take(&mut m.shared);
+    m.now += 5;
+    r.drive(&mut m, &shared).expect("committed");
+    r.finish(&shared);
+    m.shared = shared;
+    let got = find_all(&mut m);
+    let want = json(
+        r#"{"all":[{"_id":0,"a":0,"b":0,"x":2},{"_id":1,"a":1,"b":50,"y":1},{"_id":2,"a":2,"b":70},{"_id":3,"a":3},{"_id":5,"a":5,"b":5},{"_id":20,"a":20,"b":21,"x":20}]}"#,
+    );
+    let want = batch(&want, "all");
+    assert_eq!(got.len(), want.len(), "{got:?}");
+    for (g, w) in got.iter().zip(&want) {
+        for (k, v) in w.iter() {
+            assert_eq!(g.get(k), Some(v), "{g:?}");
+        }
+    }
+    assert_eq!(got[3].get("b"), None, "{got:?}");
+}
+
 #[test]
 fn writes_wait_for_the_critical_section() {
     let mut m = sharded(&docs(3));
