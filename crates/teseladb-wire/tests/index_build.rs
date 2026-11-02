@@ -310,26 +310,21 @@ fn a_duplicate_fails_a_unique_build_without_leftovers() {
 fn a_document_the_index_refuses_fails_the_build_as_on_a_refnode() {
     let mut m = seeded(DOCS);
     let c = collection(&m);
-    let parallel = Document::new()
-        .with("_id", "parallel")
-        .with("a", Value::Array(vec![1.into(), 2.into()]))
-        .with("b", Value::Array(vec![3.into(), 4.into()]));
-    let r = m.run(
-        DB,
-        Document::new()
-            .with("insert", "c")
-            .with("documents", Value::Array(vec![Value::Document(parallel)])),
-    );
-    assert_eq!(r.get("n"), Some(&Value::Int32(1)), "{r:?}");
-    // The node holds only documents yet: the scan reads them in key order.
-    let before = m
-        .stored(..)
-        .into_values()
-        .position(|v| {
-            let d = Document::from(teseladb_bson::RawDoc::from_bytes(v).expect("a document"));
-            d.get("_id") == Some(&Value::from("parallel"))
+    // Documents the index refuses, inserted in `_id` order after the seeded ones: RefDb scans
+    // in insertion order and names the first; TeselaDB names the first in `_id` order, which is
+    // the same here, whatever the order of the keys in the ranges.
+    let refused: Vec<Value> = (0..40)
+        .map(|i| {
+            Value::Document(
+                Document::new()
+                    .with("_id", DOCS + 10 * i)
+                    .with("a", Value::Array(vec![1.into(), 2.into()]))
+                    .with("b", Value::Array(vec![3.into(), 4.into()])),
+            )
         })
-        .expect("the document");
+        .collect();
+    let r = m.run(DB, Document::new().with("insert", "c").with("documents", Value::Array(refused)));
+    assert_eq!(r.get("n"), Some(&Value::Int32(40)), "{r:?}");
     let key = Document::new().with("a", 1).with("b", 1);
     let spec = Document::new().with("key", key).with("name", "ab");
     let cmd = Document::new()
@@ -340,14 +335,13 @@ fn a_document_the_index_refuses_fails_the_build_as_on_a_refnode() {
     let Some(Value::String(msg)) = r.get("errmsg") else { panic!("{r:?}") };
     // Measured on a `refnode` and a `refrouter` 9.0.4: the documents before it, and its position.
     assert!(msg.starts_with("Index build failed: "), "{msg}");
-    let scan = format!(
-        ":: caused by :: collection scan stopped. totalRecords: {before}; durationMillis: "
-    );
+    let scan =
+        format!(":: caused by :: collection scan stopped. totalRecords: {DOCS}; durationMillis: ");
     assert!(msg.contains(&scan), "{msg}");
     let tail = format!(
         "ms; phase: collection scan; collectionScanPosition: RecordId({}); readSource: \
          kMajorityCommitted :: caused by :: cannot index parallel arrays [b] [a]",
-        before + 1
+        DOCS + 1
     );
     assert!(msg.ends_with(&tail), "{msg}");
     let id = m.indexes.last_index;

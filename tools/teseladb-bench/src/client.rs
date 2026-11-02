@@ -172,6 +172,40 @@ pub fn check(reply: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+/// RefDb's `NotWritablePrimary`: the node has no leader to take the command yet.
+const NOT_WRITABLE_PRIMARY: i32 = 10107;
+
+/// The code of a failed reply, or of its first write error.
+fn error_code(reply: &[u8]) -> Result<Option<i32>, String> {
+    let doc = RawDoc::from_bytes(reply).map_err(debug)?;
+    if let Some(RawValue::Int32(c)) = doc.get("code") {
+        return Ok(Some(c));
+    }
+    if let Some(RawValue::Array(errors)) = doc.get("writeErrors")
+        && let Some(RawValue::Document(first)) = errors.iter().next()
+        && let Some(RawValue::Int32(c)) = first.get("code")
+    {
+        return Ok(Some(c));
+    }
+    Ok(None)
+}
+
+impl Client {
+    /// Runs `command` until it succeeds, while it fails with `NotWritablePrimary`, at most
+    /// [`TIMEOUT`], as a driver retries: a local cluster that just started may still be electing
+    /// its leaders. For the setup of a scenario, outside its timing.
+    pub fn until_ready(&mut self, db: &str, command: Document) -> Result<(), String> {
+        let until = Instant::now() + TIMEOUT;
+        loop {
+            let reply = self.send(db, command.clone())?;
+            if error_code(&reply)? != Some(NOT_WRITABLE_PRIMARY) || Instant::now() >= until {
+                return check(&reply);
+            }
+            std::thread::sleep(RANGE_POLL);
+        }
+    }
+}
+
 /// An error as its message.
 fn text(e: std::io::Error) -> String {
     e.to_string()

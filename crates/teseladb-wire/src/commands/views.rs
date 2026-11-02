@@ -64,7 +64,7 @@ pub fn check_collation(view: &Resolved, given: Option<&Document>) -> Result<(), 
 }
 
 /// Whether `filter` holds `$text`, at its top level or inside `$and`, `$or` or `$nor`.
-fn has_text(filter: &Document) -> bool {
+pub(crate) fn has_text(filter: &Document) -> bool {
     filter.iter().any(|(k, v)| match (k, v) {
         ("$text", _) => true,
         ("$and" | "$or" | "$nor", Value::Array(items)) => {
@@ -103,17 +103,25 @@ pub fn find_stages(cmd: &Document, ns_text: &str) -> Result<Vec<Document>, Comma
             format!("Option {option} not supported in aggregation."),
         ));
     }
+    if let Some(Value::Document(f)) = cmd.get("filter")
+        && has_text(f)
+    {
+        return Err(CommandError::new(
+            INDEX_NOT_FOUND,
+            format!("text index required for $text query (no such collection '{ns_text}')"),
+        ));
+    }
+    Ok(stages_of(cmd))
+}
+
+/// The stages of a `find`: `$match`, `$sort`, `$skip`, `$limit` and `$project`, each when the
+/// command has it.
+pub(crate) fn stages_of(cmd: &Document) -> Vec<Document> {
     let mut stages = Vec::new();
-    if let Some(Value::Document(f)) = cmd.get("filter") {
-        if has_text(f) {
-            return Err(CommandError::new(
-                INDEX_NOT_FOUND,
-                format!("text index required for $text query (no such collection '{ns_text}')"),
-            ));
-        }
-        if !f.is_empty() {
-            stages.push(Document::new().with("$match", f.clone()));
-        }
+    if let Some(Value::Document(f)) = cmd.get("filter")
+        && !f.is_empty()
+    {
+        stages.push(Document::new().with("$match", f.clone()));
     }
     if let Some(Value::Document(s)) = cmd.get("sort")
         && !s.is_empty()
@@ -128,7 +136,7 @@ pub fn find_stages(cmd: &Document, ns_text: &str) -> Result<Vec<Document>, Comma
     {
         stages.push(Document::new().with("$project", p.clone()));
     }
-    Ok(stages)
+    stages
 }
 
 /// Adds `{stage: n}` for a positive number `field` of `cmd` (the command checked its type).

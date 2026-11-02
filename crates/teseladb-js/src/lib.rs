@@ -14,15 +14,25 @@ mod bigints;
 mod bson;
 mod builtins;
 mod date;
+mod early;
+mod generators;
 mod interp;
+mod iterators;
 mod json;
 mod lexer;
 mod math;
 mod number;
 mod parser;
+mod promise;
+mod props;
+mod proxy;
 mod regex;
+mod shared;
 mod strings;
+mod symbols;
+mod typed;
 mod value;
+mod weak;
 
 use std::cell::RefCell;
 use std::fmt;
@@ -31,8 +41,9 @@ use std::rc::Rc;
 use teseladb_bson::{Document, Value};
 
 use crate::ast::{Expr, Stmt};
-use crate::interp::{Ctrl, EnvRec, Fatal, Interp};
-use crate::value::{Budget, Kind, Val};
+use crate::interp::{Ctrl, Fatal, Interp};
+use crate::shared::Globals;
+use crate::value::{Kind, Val};
 
 pub use crate::interp::Limits;
 
@@ -55,15 +66,19 @@ pub enum JsError {
         /// The column, from 1.
         col: u32,
     },
-    /// The code threw: the exception's message (an error's `message`, or the value as text) and
-    /// where the code that threw starts.
+    /// The code threw: the exception's message (an error's `message`, or `uncaught exception:`
+    /// and the value as text), where SpiderMonkey reports it (where an error was made, or where
+    /// the `throw` left the evaluation) in RefDb's columns, and an error's stack.
     Thrown {
         /// The message.
         message: String,
         /// The line, from 1.
         line: u32,
-        /// The column, from 1.
+        /// The column, from 1, with what RefDb puts before the code on the first line.
         col: u32,
+        /// An error's stack, one `name@file:line:column` line per call; `None` for a value that
+        /// is not an error.
+        stack: Option<String>,
     },
     /// The heap limit was reached.
     OutOfMemory,
@@ -73,6 +88,9 @@ pub enum JsError {
     Deadline,
     /// The result has a value BSON cannot hold (a symbol).
     NotConvertible(String),
+    /// The engine of RefDb 9.0 stops with a trap (`wasm trap: uninitialized element`): a
+    /// promise job or a `FinalizationRegistry`.
+    Trap,
     /// A function program was expected and the source is something else.
     NotAFunction,
 }
@@ -88,6 +106,7 @@ impl JsError {
             JsError::Steps => "uncaught exception: too many steps".into(),
             JsError::Deadline => "operation exceeded time limit".into(),
             JsError::NotAFunction => "the code is not a function".into(),
+            JsError::Trap => "wasm trap: uninitialized element".into(),
         }
     }
 }
@@ -97,6 +116,12 @@ impl fmt::Display for JsError {
         f.write_str(&self.message())
     }
 }
+
+/// What RefDb puts before a function's code on its first line: `(`.
+const FUNCTION_PREFIX: u32 = 1;
+/// What RefDb puts before a `$where` expression on its first line (measured: an error at the
+/// start of `this.a.b.c` is at column 15).
+const WHERE_PREFIX: u32 = 14;
 
 /// What a call reads from the runtime.
 #[derive(Default)]
@@ -130,6 +155,8 @@ impl fmt::Debug for JsCtx<'_> {
 pub struct Program {
     body: Rc<Vec<Stmt>>,
     is_function: bool,
+    /// The global objects its calls share, built by the first call ([`shared`]).
+    globals: Rc<RefCell<Option<Globals>>>,
 }
 
 impl fmt::Debug for Program {
@@ -141,13 +168,15 @@ impl fmt::Debug for Program {
 impl Program {
     /// Parses `source`.
     pub fn compile(source: &str) -> Result<Program, JsError> {
-        let body = parser::parse_script(source).map_err(|e| JsError::Compile {
-            message: e.message,
-            line: e.line,
-            col: e.col,
+        let body = parser::parse_script(source).map_err(|e| {
+            // RefDb compiles a function inside `(` and `)`: its first line moves one column.
+            let t = source.trim_start();
+            let wrapped = t.starts_with("function") || t.starts_with("async") || t.starts_with('(');
+            let shift = if wrapped && e.line == 1 { FUNCTION_PREFIX } else { 0 };
+            JsError::Compile { message: e.message, line: e.line, col: e.col + shift }
         })?;
         let is_function = matches!(body.as_slice(), [Stmt::Expr(Expr::Func(_))] | [Stmt::Func(..)]);
-        Ok(Program { body: Rc::new(body), is_function })
+        Ok(Program { body: Rc::new(body), is_function, globals: Rc::default() })
     }
 
     /// Whether the source is one function.
@@ -163,31 +192,20 @@ impl Program {
         args: &[Value],
         ctx: &mut JsCtx<'_>,
     ) -> Result<Value, JsError> {
-        let budget = Rc::new(Budget { used: std::cell::Cell::new(0), limit: ctx.limits.heap });
-        let realm = builtins::realm(&budget);
-        let global_env = Rc::new(RefCell::new(EnvRec::default()));
+        let globals = match self.globals.borrow_mut().take() {
+            Some(g) if g.fits(&ctx.limits) => g,
+            _ => Globals::build(ctx.limits)?,
+        };
         let emit = ctx.emit.take();
         let mut emitted: Vec<(Value, Value)> = Vec::new();
         let result = {
-            let mut it = Interp {
-                realm,
-                budget: budget.clone(),
-                limits: ctx.limits,
-                steps: 0,
-                depth: 0,
-                envs: Vec::new(),
-                global_env: global_env.clone(),
-                now_ms: ctx.now_ms as f64,
-                rng: ctx.seed,
-                deadline: ctx.deadline,
-                symbol_ids: 0,
-                output: Vec::new(),
-                last: None,
-                pos: ast::Pos::default(),
-                strict: false,
-            };
-            it.envs.push(Rc::downgrade(&global_env));
-            let r = self.run(&mut it, this, args, ctx.scope, emit.is_some(), &mut emitted);
+            let mut it = globals.enter(ctx.limits);
+            it.now_ms = ctx.now_ms as f64;
+            it.rng = ctx.seed;
+            it.deadline = ctx.deadline;
+            it.col_offset = if self.is_function { FUNCTION_PREFIX } else { WHERE_PREFIX };
+            let r =
+                self.run(&mut it, &globals, this, args, ctx.scope, emit.is_some(), &mut emitted);
             drop(it);
             r
         };
@@ -197,13 +215,16 @@ impl Program {
             }
             ctx.emit = Some(e);
         }
-        global_env.borrow_mut().vars.clear();
+        if globals.fits(&ctx.limits) {
+            *self.globals.borrow_mut() = Some(globals);
+        }
         result
     }
 
     fn run(
         &self,
         it: &mut Interp,
+        globals: &Globals,
         this: Option<&Document>,
         args: &[Value],
         scope: Option<&Document>,
@@ -211,7 +232,7 @@ impl Program {
         emitted: &mut Vec<(Value, Value)>,
     ) -> Result<Value, JsError> {
         let out = (|| -> Result<Value, Ctrl> {
-            builtins::install(it)?;
+            globals.fill_global(it)?;
             if let Some(scope) = scope {
                 for (k, v) in scope.iter() {
                     let x = bson::from_bson(it, v, 0)?;
@@ -290,33 +311,74 @@ fn emit_native(it: &mut Interp, _: &Val, a: &[Val]) -> Result<Val, Ctrl> {
 }
 
 /// The error of a control transfer that left the program.
-fn error_of(it: &mut Interp, c: Ctrl) -> JsError {
+pub(crate) fn error_of(it: &mut Interp, c: Ctrl) -> JsError {
     match c {
         Ctrl::Fatal(Fatal::OutOfMemory) => JsError::OutOfMemory,
         Ctrl::Fatal(Fatal::Steps) => JsError::Steps,
         Ctrl::Fatal(Fatal::Deadline) => JsError::Deadline,
         Ctrl::Fatal(Fatal::Convert(m)) => JsError::NotConvertible(m),
+        Ctrl::Fatal(Fatal::Trap) => JsError::Trap,
         Ctrl::Throw(v) => {
             // The heap may be full: the message is read without new allocations counting.
             it.budget.used.set(0);
-            let message = match &v {
-                Val::Obj(o) if matches!(o.borrow().kind, Kind::Error) => {
-                    match it.get(&v, "message") {
-                        Ok(m) => it.str_of(&m).map(|s| s.to_string()).unwrap_or_default(),
-                        Err(_) => String::new(),
-                    }
-                }
-                _ => it
-                    .str_of(&v)
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|_| "uncaught exception".into()),
+            let is_error = matches!(&v, Val::Obj(o) if matches!(o.borrow().kind, Kind::Error));
+            if !is_error {
+                let text = it.str_of(&v).map(|s| s.to_string()).unwrap_or_default();
+                let (line, col) = it.shown(it.thrown_at);
+                return JsError::Thrown {
+                    message: format!("uncaught exception: {text}"),
+                    line,
+                    col,
+                    stack: None,
+                };
+            }
+            let mut read = |key: &str| match it.get(&v, key) {
+                Ok(Val::Undef) | Err(_) => None,
+                Ok(x) => it.str_of(&x).ok().map(|s| s.to_string()),
             };
-            JsError::Thrown { message, line: it.pos.line, col: it.pos.col }
+            let message =
+                read("message").filter(|m| !m.is_empty()).unwrap_or_else(|| "none".into());
+            let line = read("lineNumber").and_then(|l| l.parse().ok()).unwrap_or(0);
+            let col = read("columnNumber").and_then(|c| c.parse().ok()).unwrap_or(0);
+            JsError::Thrown { message, line, col, stack: read("stack") }
         }
-        Ctrl::Return(_) | Ctrl::Break(_) | Ctrl::Continue(_) => JsError::Thrown {
-            message: "unexpected control flow".into(),
-            line: it.pos.line,
-            col: it.pos.col,
-        },
+        Ctrl::Return(_) | Ctrl::Break(_) | Ctrl::Continue(_) | Ctrl::Suspend => {
+            let (line, col) = it.shown(it.pos);
+            JsError::Thrown { message: "unexpected control flow".into(), line, col, stack: None }
+        }
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    use super::*;
+
+    fn kept(src: &str, this: Option<&Document>, args: &[Value]) -> bool {
+        let p = Program::compile(src).unwrap();
+        for _ in 0..3 {
+            p.call(this, args, &mut JsCtx::default()).unwrap();
+        }
+        p.globals.borrow().is_some()
+    }
+
+    #[test]
+    fn calls_that_change_no_shared_object_keep_the_globals() {
+        let doc = Document::new().with("a", 41).with("b", "x");
+        assert!(kept("function(a, b) { return a + b }", None, &[Value::Int32(1), Value::Int32(2)]));
+        assert!(kept("this.a > 40 && this.b == 'x'", Some(&doc), &[]));
+        assert!(kept(
+            "function(){ var o = {a: [1, 2], m: new Map([[1, 2]])}; \
+             return JSON.stringify(o) + [3, 1].sort().join() + 'ab'.toUpperCase() + \
+             Object.keys(o).length + new Date(0).getTime() + /a(b)/.exec('ab')[1] + \
+             Math.max(1, 2) + [1, 2].map(x => x * 2).reduce((s, x) => s + x) }",
+            None,
+            &[]
+        ));
+    }
+
+    #[test]
+    fn a_call_that_changes_a_shared_object_drops_the_globals() {
+        assert!(!kept("function(){ Object.freeze(Math) }", None, &[]));
     }
 }

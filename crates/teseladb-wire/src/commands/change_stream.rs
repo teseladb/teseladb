@@ -348,7 +348,14 @@ pub fn more<B: Backend + ?Sized>(
     let mut last = None;
     loop {
         if stream.pending.is_empty() {
-            poll(backend, stream).map_err(resumable)?;
+            match poll(backend, stream) {
+                Ok(()) => {}
+                // The wait ran out while the node read the ranges: an empty `getMore` answers
+                // with what it has, it does not fail (a `refrouter` never answers
+                // `MaxTimeMSExpired` to the `getMore` of a stream).
+                Err(e) if e.code.code == error::MAX_TIME_MS_EXPIRED.code => break,
+                Err(e) => return Err(resumable(e)),
+            }
         }
         let mut bytes = 0usize;
         while batch.is_none_or(|b| out.len() < b) {

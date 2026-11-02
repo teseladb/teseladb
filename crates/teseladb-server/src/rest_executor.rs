@@ -27,30 +27,30 @@ use crate::client_listener::NodeState;
 use crate::http_listener::Caller;
 
 /// The executor of one request on the node.
-pub struct NodeExecutor<'a> {
+pub struct NodeExecutor {
     conn: Connection,
     /// The REFDB-X509 user of the caller's certificate, which a forwarded request carries.
     x509_user: Option<String>,
     backend: ServerBackend,
     shared: std::sync::Arc<Shared>,
-    state: &'a dyn NodeState,
+    state: std::sync::Arc<dyn NodeState>,
     node: u64,
 }
 
-impl std::fmt::Debug for NodeExecutor<'_> {
+impl std::fmt::Debug for NodeExecutor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NodeExecutor").field("node", &self.node).finish_non_exhaustive()
     }
 }
 
-impl<'a> NodeExecutor<'a> {
+impl NodeExecutor {
     /// An executor on the node of `handle` with `backend`, with the node's state from `state`.
     #[must_use]
     pub fn new(
         handle: &NodeHandle,
         backend: ServerBackend,
-        state: &'a dyn NodeState,
-    ) -> NodeExecutor<'a> {
+        state: std::sync::Arc<dyn NodeState>,
+    ) -> NodeExecutor {
         NodeExecutor {
             conn: Connection::new(0),
             x509_user: None,
@@ -102,7 +102,7 @@ impl Credential {
 /// A request with no credential, or one that does not authenticate, gets `401` with
 /// `WWW-Authenticate`. The API key that logged in, if one did.
 pub fn authenticate(
-    exec: &mut NodeExecutor<'_>,
+    exec: &mut NodeExecutor,
     request: &Request,
     who: &Credential,
     auth: bool,
@@ -152,9 +152,34 @@ fn ok_reply(reply: &teseladb_bson::Document) -> Result<(), Response> {
     }
 }
 
+impl NodeExecutor {
+    /// The cluster parameters as this node's copy of Group 0 has them.
+    pub fn cluster_parameters(
+        &mut self,
+    ) -> Result<std::collections::BTreeMap<String, Vec<u8>>, teseladb_wire::error::CommandError>
+    {
+        teseladb_wire::commands::Backend::cluster_parameters(&mut self.backend)
+    }
+
+    /// Writes the `httpRequest` event of the request to the audit log (019 FR-018), with the
+    /// connection's user and addresses; `0` as the result of an answer below `400`, else its
+    /// status.
+    pub fn audit(&mut self, param: teseladb_bson::Document, status: u16) {
+        let result = if status < 400 { 0 } else { i32::from(status) };
+        let events = vec![(teseladb_auth::audit::AuditType::HttpRequest, param)];
+        teseladb_wire::commands::audit::record(
+            &self.shared,
+            &mut self.conn,
+            &mut self.backend,
+            events,
+            result,
+        );
+    }
+}
+
 /// Moves the `lastUsedAt` of `key` (at most once a minute) on a thread of its own, so that the
 /// request does not wait for the change in Group 0.
-pub fn touch_later(exec: &mut NodeExecutor<'_>, key: ApiKey) {
+pub fn touch_later(exec: &mut NodeExecutor, key: ApiKey) {
     let now =
         i64::try_from(teseladb_wire::commands::Backend::wall_ms(&exec.backend)).unwrap_or(i64::MAX);
     if !key.due_touch(now) {
@@ -239,7 +264,7 @@ pub fn decode_response(b: &[u8]) -> Result<Response, DecodeError> {
     Ok(Response { status, headers, body })
 }
 
-impl Executor for NodeExecutor<'_> {
+impl Executor for NodeExecutor {
     fn run(&mut self, db: &str, mut command: teseladb_bson::Document) -> teseladb_bson::Document {
         command.push("$db", db);
         let req = WireRequest {
@@ -283,6 +308,41 @@ impl Executor for NodeExecutor<'_> {
 
     fn object_id(&mut self) -> [u8; 12] {
         new_object_id(&mut self.backend, &self.shared)
+    }
+
+    fn random(&mut self, out: &mut [u8]) {
+        if teseladb_wire::commands::Backend::secure_random(&mut self.backend, out).is_err() {
+            for chunk in out.chunks_mut(8) {
+                let r = teseladb_wire::commands::Backend::random(&mut self.backend).to_le_bytes();
+                chunk.copy_from_slice(&r[..chunk.len()]);
+            }
+        }
+    }
+
+    fn now_ms(&self) -> u64 {
+        teseladb_wire::commands::Backend::wall_ms(&self.backend)
+    }
+
+    fn principal(&self) -> String {
+        self.conn
+            .auth
+            .user
+            .as_ref()
+            .map(|u| format!("{}@{}", u.name.user, u.name.db))
+            .unwrap_or_default()
+    }
+
+    fn run_internal(
+        &mut self,
+        db: &str,
+        command: teseladb_bson::Document,
+    ) -> teseladb_bson::Document {
+        let (required, user) = (self.conn.auth.required, self.conn.auth.user.take());
+        self.conn.auth.required = false;
+        let reply = self.run(db, command);
+        self.conn.auth.required = required;
+        self.conn.auth.user = user;
+        reply
     }
 
     fn forward(&mut self, node: u64, request: &Request) -> Option<Response> {

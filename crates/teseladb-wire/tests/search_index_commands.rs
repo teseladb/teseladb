@@ -997,11 +997,12 @@ fn indexes_past_the_memory_part_are_written_out_and_read_back() {
     assert!(search_metrics(&m.shared).memory_bytes <= both / 2 + 1);
     assert_eq!(lock(&m.shared).search.evicted(), 1);
     assert!(store.files.lock().unwrap().contains_key(&a));
-    assert!(lock(&m.shared).search.served(&a).is_none(), "out of memory");
+    assert!(!lock(&m.shared).search.in_memory(&a), "out of memory");
+    assert!(lock(&m.shared).search.served(&a).is_some(), "still served, from its file");
     // `a` comes back from its file, and `b` leaves in turn.
     assert_eq!(batch(&agg(&mut m, "c".into(), on("a"))), first_a);
-    assert!(lock(&m.shared).search.served(&a).is_some());
-    assert!(lock(&m.shared).search.served(&b).is_none());
+    assert!(lock(&m.shared).search.in_memory(&a));
+    assert!(!lock(&m.shared).search.in_memory(&b));
     assert_eq!(lock(&m.shared).search.evicted(), 2);
     // Without a part nothing leaves.
     lock(&m.shared).search.set_memory_limit(None);

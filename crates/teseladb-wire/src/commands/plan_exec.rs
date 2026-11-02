@@ -66,7 +66,7 @@ pub(crate) fn used_id_index(planned: bool) -> Document {
 }
 
 /// The names of the indexes `access` scans.
-fn scanned(indexes: &[PlanIndex], access: &Access) -> Vec<String> {
+pub(crate) fn scanned(indexes: &[PlanIndex], access: &Access) -> Vec<String> {
     let scans: Vec<&IndexScan> = match access {
         Access::Collscan => Vec::new(),
         Access::Index(s) => vec![s],
@@ -160,6 +160,15 @@ pub(crate) fn plan_indexes<B: Backend + ?Sized>(
     if !matches!(super::kinds::kind_of(coll)?, CollectionKind::Normal) {
         return Ok(Vec::new());
     }
+    stored_indexes(backend, coll)
+}
+
+/// The indexes of `coll` as they are stored, whatever its kind: those of a time series index
+/// its buckets (015 FR-008).
+pub(crate) fn stored_indexes<B: Backend + ?Sized>(
+    backend: &mut B,
+    coll: &CollectionEntry,
+) -> Result<Vec<PlanIndex>, CommandError> {
     // A collection with a shard key keeps `_id` in an index of its own (018 FR-001).
     let sharded = super::sharding::is_sharded(coll);
     let id_entry = IndexEntry {
@@ -640,7 +649,11 @@ fn indexed_document<B: Backend + ?Sized>(
     pk: &[u8],
     concern: ReadConcern,
 ) -> Result<(Vec<u8>, Vec<u8>), CommandError> {
-    let key = match super::sharding::is_sharded(coll) {
+    // The buckets of a time series are kept in `_id` order without hash bucket, as the
+    // documents of a collection with a shard key (015 FR-008).
+    let unbucketed = super::sharding::is_sharded(coll)
+        || matches!(super::kinds::kind_of(coll)?, CollectionKind::TimeSeries(_));
+    let key = match unbucketed {
         true => KeyBuilder::document_of_sharded_pk(coll.tenant, coll.id, pk),
         false => KeyBuilder::document_of_pk(coll.tenant, coll.id, pk),
     };
@@ -861,21 +874,18 @@ fn walked<B: Backend + ?Sized>(
     Ok(Scanned { entries: out, seeks: w.seeks })
 }
 
-/// Whether `index` has an entry after the last interval of `scan`, in its direction.
+/// Whether `index` has an entry after the last interval of `scan`, a forward scan.
 pub(crate) fn key_after<B: Backend + ?Sized>(
     backend: &mut B,
     coll: &CollectionEntry,
     index: &PlanIndex,
     scan: &IndexScan,
 ) -> Result<bool, CommandError> {
+    // A `distinct` has no sort: its scan goes forward, to the end of the index.
     let ranges = key_ranges((coll.tenant, coll.id), index, &scan.bounds)?;
-    let (first, past) = index_span((coll.tenant, coll.id), index);
-    let (from, to) = match (scan.backward, ranges.first(), ranges.last()) {
-        (true, Some(r), _) => (first, r.start.clone()),
-        (false, _, Some(r)) => (r.end.clone().unwrap_or_else(|| past.clone()), past),
-        _ => return Ok(false),
-    };
-    Ok(from < to && any_entry(backend, coll.tenant, index, (&from, &to), ReadConcern::Local)?)
+    let (_, past) = index_span((coll.tenant, coll.id), index);
+    let from = ranges.last().and_then(|r| r.end.clone()).unwrap_or_else(|| past.clone());
+    Ok(from < past && any_entry(backend, coll.tenant, index, (&from, &past), ReadConcern::Local)?)
 }
 
 /// An entry an index scan reads: the document's primary key and, when the read wants it, the

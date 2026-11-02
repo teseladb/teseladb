@@ -74,6 +74,8 @@ pub enum Error {
     RevocationUnknown,
     /// The host name or address is not among the certificate's subject alternative names.
     HostnameMismatch,
+    /// A certificate or CRL signed with a digest too weak for security level 1 (SHA-1).
+    WeakDigest,
 }
 
 impl std::fmt::Display for Error {
@@ -98,6 +100,7 @@ impl std::fmt::Display for Error {
             Error::Policy => "no explicit policy",
             Error::Revoked => "certificate revoked",
             Error::RevocationUnknown => "unable to get certificate CRL",
+            Error::WeakDigest => "CA signature digest algorithm too weak",
             Error::HostnameMismatch => "hostname mismatch",
         };
         f.write_str(text)
