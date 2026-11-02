@@ -756,6 +756,14 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         self.call(|b| b.principals(kind, db))
     }
 
+    fn principal_by_id(
+        &mut self,
+        kind: Principal,
+        id: &[u8],
+    ) -> Result<Option<Vec<u8>>, CommandError> {
+        self.call(|b| b.principal_by_id(kind, id))
+    }
+
     fn security_write(
         &mut self,
         ops: Vec<SecurityOp>,

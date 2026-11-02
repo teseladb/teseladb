@@ -31,6 +31,7 @@ fn without_a_value_cors_is_off_and_mcp_is_read_only() {
             allowed_origins: Vec::new(),
             concurrent_requests: DEFAULT_CONCURRENT_REQUESTS,
             requests_per_second: DEFAULT_REQUESTS_PER_SECOND,
+            api_key_max_days: 365,
         }
     );
     assert_eq!((DEFAULT_CONCURRENT_REQUESTS, DEFAULT_REQUESTS_PER_SECOND), (1_000, 10_000));

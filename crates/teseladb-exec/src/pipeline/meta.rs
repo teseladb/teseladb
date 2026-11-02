@@ -90,6 +90,9 @@ pub(crate) fn unmark_doc(d: &mut Document) {
 pub(crate) struct RequiredEnv<'a> {
     pub(crate) inner: &'a dyn Env,
     pub(crate) names: &'a [String],
+    /// The variables with `SEARCH_META` set, after a `$search` whose metadata the pipeline
+    /// reads (011 FR-004).
+    pub(crate) vars: Option<&'a Document>,
 }
 
 impl Env for RequiredEnv<'_> {
@@ -98,7 +101,19 @@ impl Env for RequiredEnv<'_> {
     }
 
     fn vars(&self) -> Option<&Document> {
-        self.inner.vars()
+        self.vars.or_else(|| self.inner.vars())
+    }
+
+    fn collection_matching(
+        &self,
+        name: &str,
+        filter: &Document,
+    ) -> Result<Vec<Document>, MqlError> {
+        self.inner.collection_matching(name, filter)
+    }
+
+    fn operation_memory_limit(&self) -> usize {
+        self.inner.operation_memory_limit()
     }
 
     fn collection(&self, name: &str) -> Result<Vec<Document>, MqlError> {
@@ -152,9 +167,15 @@ impl Env for RequiredEnv<'_> {
     fn scope(&self, doc: &Document) -> Scope {
         let mut s = self.inner.scope(doc);
         s.meta_required.extend(self.names.iter().cloned());
+        if let Some(meta) = self.vars.and_then(|v| v.get(SEARCH_META)) {
+            s.vars.insert(SEARCH_META.to_owned(), Some(meta.clone()));
+        }
         s
     }
 }
+
+/// The variable a `$search` sets for the stages after it.
+pub(crate) const SEARCH_META: &str = "SEARCH_META";
 
 impl Env for MetaEnv<'_> {
     fn ext(&self) -> &dyn Extensions {

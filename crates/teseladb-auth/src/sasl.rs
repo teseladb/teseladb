@@ -32,6 +32,9 @@ pub enum SaslMechanism {
     Aws,
     /// REFDB-OIDC (FR-025).
     Oidc,
+    /// An API key of the HTTP API (019 FR-015); no command of the wire protocol takes it, so it
+    /// is not in [`SaslMechanism::ALL`].
+    ApiKey,
 }
 
 impl SaslMechanism {
@@ -56,6 +59,7 @@ impl SaslMechanism {
             SaslMechanism::Gssapi => "GSSAPI",
             SaslMechanism::Aws => "REFDB-AWS",
             SaslMechanism::Oidc => "REFDB-OIDC",
+            SaslMechanism::ApiKey => crate::apikey::MECHANISM,
         }
     }
 

@@ -2,8 +2,8 @@
 //! and the routes of `teseladb admin`, over HTTP/1.1 with one request per connection. The
 //! requests are parsed and the answers encoded here without I/O; [`AdminListener`] owns the
 //! socket. On a node with a PKI the port speaks TLS and names each [`Caller`] by its client
-//! certificate (013 FR-017); a request without TLS only gets `/healthz`. 019 T008 serves this
-//! port with `teseladb-http` instead.
+//! certificate (013 FR-017); a request without TLS only gets `/healthz`. The HTTP/1.1 messages
+//! are read and written by `teseladb-http` (019 T008), the same code as the HTTP port's.
 
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -12,6 +12,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use teseladb_http::http1::{Limits, Request, ResponseReader};
+use teseladb_http::server1::{Refused, RequestReader, encode_response};
 use teseladb_tls::ClientConfig;
 use teseladb_x509::{Certificate, Name, oid};
 
@@ -110,58 +112,34 @@ impl HttpResponse {
 
     /// The answer as bytes: status line, `Content-Type`, `Content-Length`, `Connection: close`.
     pub fn encode(&self) -> Vec<u8> {
-        let head = format!(
-            "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            self.status,
-            reason(self.status),
-            self.content_type,
-            self.body.len()
-        );
-        [head.as_bytes(), &self.body].concat()
+        let headers = [
+            ("Content-Type".to_owned(), self.content_type.to_owned()),
+            ("Connection".to_owned(), "close".to_owned()),
+        ];
+        encode_response(self.status, &headers, &self.body)
     }
 }
 
-/// Parses a request from the start of `buf`: `Ok(None)` while it is incomplete.
+/// Parses a request from the start of `buf` with the HTTP/1.1 reader of `teseladb-http`:
+/// `Ok(None)` while it is incomplete.
 pub fn parse_request(buf: &[u8]) -> Result<Option<HttpRequest>, HttpError> {
-    let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
-        return if buf.len() > MAX_HEAD {
-            Err(HttpError::TooLarge { status: 431 })
-        } else {
-            Ok(None)
-        };
-    };
-    if end > MAX_HEAD {
-        return Err(HttpError::TooLarge { status: 431 });
-    }
-    let head = std::str::from_utf8(&buf[..end]).map_err(|_| HttpError::BadRequest)?;
-    let mut lines = head.split("\r\n");
-    let line = lines.next().unwrap_or_default();
-    let mut parts = line.split(' ');
-    let (Some(method), Some(target), Some("HTTP/1.1"), None) =
-        (parts.next(), parts.next(), parts.next(), parts.next())
-    else {
-        return Err(HttpError::BadRequest);
-    };
-    let mut length = 0usize;
-    for h in lines {
-        let (name, value) = h.split_once(':').ok_or(HttpError::BadRequest)?;
-        let value = value.trim();
-        if name.eq_ignore_ascii_case("content-length") {
-            length = value.parse().map_err(|_| HttpError::BadRequest)?;
-        } else if name.eq_ignore_ascii_case("transfer-encoding") {
-            // A body comes with its length only.
-            return Err(HttpError::BadRequest);
+    let limits = Limits { max_head: MAX_HEAD, max_body: MAX_BODY };
+    let incoming = match RequestReader::new(limits).feed(buf) {
+        Ok(Some(i)) => i,
+        Ok(None) => return Ok(None),
+        Err(Refused { status: status @ (413 | 431), .. }) => {
+            return Err(HttpError::TooLarge { status });
         }
-    }
-    let method = match method {
+        Err(_) => return Err(HttpError::BadRequest),
+    };
+    let r = incoming.request;
+    let method = match r.method.as_str() {
         "GET" => Method::Get,
         "POST" => Method::Post,
         _ => return Err(HttpError::MethodNotAllowed),
     };
-    if length > MAX_BODY {
-        return Err(HttpError::TooLarge { status: 413 });
-    }
-    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    let (path, query) = r.target.split_once('?').unwrap_or((&r.target, ""));
+    // The port takes the origin form only (RFC 9112, section 3.2.1).
     if !path.starts_with('/') {
         return Err(HttpError::BadRequest);
     }
@@ -174,12 +152,7 @@ pub fn parse_request(buf: &[u8]) -> Result<Option<HttpRequest>, HttpError> {
             Ok((decode(k)?, decode(v)?))
         })
         .collect::<Result<Vec<_>, HttpError>>()?;
-    let body_at = end + 4;
-    if buf.len() < body_at + length {
-        return Ok(None);
-    }
-    let body = buf[body_at..body_at + length].to_vec();
-    Ok(Some(HttpRequest { method, path, query, body }))
+    Ok(Some(HttpRequest { method, path, query, body: r.body }))
 }
 
 /// Percent-decodes `text`, with `+` as a space (`application/x-www-form-urlencoded`).
@@ -206,22 +179,6 @@ fn decode(text: &str) -> Result<String, HttpError> {
         }
     }
     String::from_utf8(out).map_err(|_| HttpError::BadRequest)
-}
-
-/// Reason phrase of `status` (RFC 9110 §15), empty for one the port does not send.
-fn reason(status: u16) -> &'static str {
-    match status {
-        200 => "OK",
-        400 => "Bad Request",
-        404 => "Not Found",
-        405 => "Method Not Allowed",
-        409 => "Conflict",
-        413 => "Content Too Large",
-        431 => "Request Header Fields Too Large",
-        500 => "Internal Server Error",
-        503 => "Service Unavailable",
-        _ => "",
-    }
 }
 
 /// Who sent a request.
@@ -421,11 +378,16 @@ pub fn request_with(
         Method::Get => "GET",
         Method::Post => "POST",
     };
-    let head = format!(
-        "{verb} {target} HTTP/1.1\r\nHost: {addr}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
-    );
-    let req = [head.as_bytes(), body].concat();
+    let bad = |e: teseladb_http::http1::HttpError| {
+        io::Error::new(io::ErrorKind::InvalidData, format!("{e:?}"))
+    };
+    let req = Request::new(verb, target)
+        .header("Host", addr)
+        .header("Connection", "close")
+        .header("Content-Length", &body.len().to_string())
+        .body(body.to_vec())
+        .encode()
+        .map_err(bad)?;
     let answer = match tls {
         None => {
             let mut s = s;
@@ -440,15 +402,12 @@ pub fn request_with(
             t.recv_to_end().map_err(other)?
         }
     };
-    let bad = || io::Error::new(io::ErrorKind::InvalidData, "not an HTTP/1.1 answer");
-    let end = answer.windows(4).position(|w| w == b"\r\n\r\n").ok_or_else(bad)?;
-    let head = std::str::from_utf8(&answer[..end]).map_err(|_| bad())?;
-    let status = head
-        .strip_prefix("HTTP/1.1 ")
-        .and_then(|r| r.get(..3))
-        .and_then(|c| c.parse().ok())
-        .ok_or_else(bad)?;
-    Ok((status, answer[end + 4..].to_vec()))
+    let mut reader = ResponseReader::new(Limits::default());
+    let r = match reader.feed(&answer).map_err(bad)? {
+        Some(r) => r,
+        None => reader.finish().map_err(bad)?,
+    };
+    Ok((r.status, r.body))
 }
 
 #[cfg(test)]
@@ -469,7 +428,7 @@ mod tests {
         assert_eq!(r.param("collection"), Some("db.c/x"));
         assert_eq!(r.param("x"), Some("1"));
         assert_eq!(r.param("y"), None);
-        let post = "POST /admin/config/a+b HTTP/1.1\r\ncontent-length: 4\r\n\r\n";
+        let post = "POST /admin/config/a+b HTTP/1.1\r\nHost: x\r\ncontent-length: 4\r\n\r\n";
         assert_eq!(parse(post), Ok(None), "the body is not here yet");
         let r = parse(&format!("{post}{{}}ab")).unwrap().unwrap();
         assert_eq!(
@@ -481,25 +440,31 @@ mod tests {
     #[test]
     fn malformed_and_oversized_requests_are_refused() {
         assert_eq!(parse("GET\r\n\r\n"), Err(HttpError::BadRequest));
-        assert_eq!(parse("GET /x HTTP/2\r\n\r\n"), Err(HttpError::BadRequest));
-        assert_eq!(parse("GET x HTTP/1.1\r\n\r\n"), Err(HttpError::BadRequest));
-        assert_eq!(parse("GET /%zz HTTP/1.1\r\n\r\n"), Err(HttpError::BadRequest));
-        assert_eq!(parse("GET /x HTTP/1.1\r\nno colon\r\n\r\n"), Err(HttpError::BadRequest));
+        assert_eq!(parse("GET /x HTTP/2\r\nHost: x\r\n\r\n"), Err(HttpError::BadRequest));
+        assert_eq!(parse("GET x HTTP/1.1\r\nHost: x\r\n\r\n"), Err(HttpError::BadRequest));
+        assert_eq!(parse("GET /%zz HTTP/1.1\r\nHost: x\r\n\r\n"), Err(HttpError::BadRequest));
         assert_eq!(
-            parse("POST /x HTTP/1.1\r\nContent-Length: z\r\n\r\n"),
+            parse("GET /x HTTP/1.1\r\nHost: x\r\nno colon\r\n\r\n"),
             Err(HttpError::BadRequest)
         );
         assert_eq!(
-            parse("POST /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"),
+            parse("POST /x HTTP/1.1\r\nHost: x\r\nContent-Length: z\r\n\r\n"),
             Err(HttpError::BadRequest)
         );
-        assert_eq!(parse("PUT /x HTTP/1.1\r\n\r\n"), Err(HttpError::MethodNotAllowed));
+        // A body in chunks is read whole (RFC 9112, section 7.1), and a request without `Host`
+        // is refused (section 3.2).
+        let chunked =
+            "POST /x HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n";
+        assert_eq!(parse(chunked).unwrap().unwrap().body, b"{}");
+        assert_eq!(parse("GET /x HTTP/1.1\r\n\r\n"), Err(HttpError::BadRequest));
+        assert_eq!(parse("PUT /x HTTP/1.1\r\nHost: x\r\n\r\n"), Err(HttpError::MethodNotAllowed));
         let long = format!("GET /{} HTTP/1.1\r\n", "a".repeat(MAX_HEAD));
         assert_eq!(parse(&long), Err(HttpError::TooLarge { status: 431 }));
         // A head over the limit that already ended.
         let ended = format!("GET /{} HTTP/1.1\r\n\r\n", "a".repeat(MAX_HEAD));
         assert_eq!(parse(&ended), Err(HttpError::TooLarge { status: 431 }));
-        let big = format!("POST /x HTTP/1.1\r\nContent-Length: {}\r\n\r\n", MAX_BODY + 1);
+        let big =
+            format!("POST /x HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n", MAX_BODY + 1);
         assert_eq!(parse(&big), Err(HttpError::TooLarge { status: 413 }));
         assert_eq!(HttpError::MethodNotAllowed.response().status, 405);
         assert_eq!(HttpError::TooLarge { status: 413 }.response().status, 413);
@@ -545,7 +510,7 @@ mod tests {
         );
         // A request the port cannot parse gets its error.
         let mut s = TcpStream::connect(&at).unwrap();
-        s.write_all(b"BREW /x HTTP/1.1\r\n\r\n").unwrap();
+        s.write_all(b"BREW /x HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
         let mut answer = String::new();
         s.read_to_string(&mut answer).unwrap();
         assert!(answer.starts_with("HTTP/1.1 405 "), "{answer}");

@@ -1,7 +1,9 @@
 //! Loop of one core: waits on the poller until the next tick or
 //! deadline, feeds the core's logic with peer frames, mailbox messages and disk completions, runs
-//! the ticks, and executes what the logic asks for: disk operations go to the core's disk thread
-//! and frames for other nodes go to one outbound connection per node (dialed in the background,
+//! the ticks, and executes what the logic asks for: disk operations go to the core's disk thread,
+//! or with an io_uring disk ([`crate::NodeDisk::Uring`], 012 FR-002) to the core's ring, whose
+//! completions wake the same poller through an `eventfd` and whose submissions of a turn go to the
+//! kernel in one call; frames for other nodes go to one outbound connection per node (dialed in the background,
 //! redialed with a 10 ms–1 s backoff with jitter after a failure).
 
 use std::collections::BTreeMap;
@@ -118,6 +120,24 @@ struct Link {
     backoff_ms: u64,
 }
 
+/// Poller token of the ring's `eventfd`.
+pub const RING_TOKEN: u64 = u64::MAX - 1;
+
+/// Who executes the core's disk operations.
+enum Exec<D: Disk + Send + 'static> {
+    /// The core's disk thread.
+    Thread(DiskThread<D>),
+    /// The core itself, through its ring (`D` is an io_uring [`crate::NodeDisk`]).
+    #[cfg(target_os = "linux")]
+    InLoop(D),
+}
+
+/// The ring of `disk`, when it is an io_uring [`crate::NodeDisk`].
+#[cfg(target_os = "linux")]
+fn ring_of<D: 'static>(disk: &mut D) -> Option<&mut crate::IoUringDisk> {
+    (disk as &mut dyn std::any::Any).downcast_mut::<crate::NodeDisk>()?.uring()
+}
+
 /// Loop of one core.
 pub struct CoreRuntime<L: CoreLogic, D: Disk + Send + 'static> {
     logic: L,
@@ -126,7 +146,10 @@ pub struct CoreRuntime<L: CoreLogic, D: Disk + Send + 'static> {
     poller: Poller,
     mailbox: Mailbox<CoreInput<L::Msg>>,
     sender: CoreSender<L::Msg>,
-    disk: DiskThread<D>,
+    disk: Exec<D>,
+    /// Completions taken from the ring this turn.
+    #[cfg(target_os = "linux")]
+    reaped: Vec<IoDone>,
     conns: BTreeMap<u64, Conn>,
     links: BTreeMap<NodeId, Link>,
     /// Inter-node addresses announced in the `Hello` of incoming connections: used when the logic
@@ -153,14 +176,27 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
     /// the runtime and a sender for its mailbox (for the acceptor and the node).
     pub fn new(
         logic: L,
-        disk: D,
+        #[cfg_attr(not(target_os = "linux"), allow(unused_mut))] mut disk: D,
         hello: Hello,
         cfg: RuntimeConfig,
     ) -> io::Result<(CoreRuntime<L, D>, CoreSender<L::Msg>)> {
         let poller = Poller::new()?;
         let (sender, mailbox) = mailbox::channel(Arc::new(poller.waker()));
-        let name = format!("disk-{}", hello.core);
-        let disk = DiskThread::spawn(name, disk, sender.clone(), CoreInput::Disk)?;
+        #[cfg(target_os = "linux")]
+        let ring = ring_of(&mut disk).map(|r| r.event_fd());
+        #[cfg(not(target_os = "linux"))]
+        let ring: Option<i32> = None;
+        let disk = match ring {
+            #[cfg(target_os = "linux")]
+            Some(fd) => {
+                poller.register(&fd, RING_TOKEN, Interest::READ)?;
+                Exec::InLoop(disk)
+            }
+            _ => {
+                let name = format!("disk-{}", hello.core);
+                Exec::Thread(DiskThread::spawn(name, disk, sender.clone(), CoreInput::Disk)?)
+            }
+        };
         let rt = CoreRuntime {
             logic,
             hello,
@@ -171,6 +207,8 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
             mailbox,
             sender: sender.clone(),
             disk,
+            #[cfg(target_os = "linux")]
+            reaped: Vec::new(),
             conns: BTreeMap::new(),
             links: BTreeMap::new(),
             learned: BTreeMap::new(),
@@ -202,7 +240,17 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
             self.turn()?;
         }
         let CoreRuntime { logic, disk, .. } = self;
-        Ok((logic, disk.shutdown()))
+        let disk = match disk {
+            Exec::Thread(t) => t.shutdown(),
+            #[cfg(target_os = "linux")]
+            Exec::InLoop(mut d) => {
+                if let Some(ring) = ring_of(&mut d) {
+                    ring.drain();
+                }
+                Some(d)
+            }
+        };
+        Ok((logic, disk))
     }
 
     /// One iteration of the loop.
@@ -215,15 +263,19 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
         if let Some(ms) = self.timers.next_deadline() {
             deadline = deadline.min(Nanos::from_millis(ms));
         }
-        let timeout = Duration::from_nanos(deadline.0.saturating_sub(now.0));
+        let mut timeout = Duration::from_nanos(deadline.0.saturating_sub(now.0));
+        if self.ring_ready() {
+            timeout = Duration::ZERO;
+        }
         self.events.clear();
         self.events.extend_from_slice(self.poller.poll(Some(timeout))?);
         let events = std::mem::take(&mut self.events);
         for e in &events {
-            if e.token != WAKE_TOKEN {
+            if e.token != WAKE_TOKEN && e.token != RING_TOKEN {
                 self.on_socket(e);
             }
         }
+        self.reap_ring()?;
         self.events = events;
         self.mailbox.drain_into(&mut self.inputs);
         for input in std::mem::take(&mut self.inputs) {
@@ -243,14 +295,59 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
         Ok(())
     }
 
+    /// Whether the ring has results that no completion will signal.
+    fn ring_ready(&mut self) -> bool {
+        #[cfg(target_os = "linux")]
+        if let Exec::InLoop(d) = &mut self.disk {
+            return ring_of(d).is_some_and(|r| r.ready());
+        }
+        false
+    }
+
+    /// Feeds the logic with the ring's completions. A ring that fails is a disk that cannot make
+    /// anything durable any more: the loop ends with the error.
+    fn reap_ring(&mut self) -> io::Result<()> {
+        #[cfg(target_os = "linux")]
+        if let Exec::InLoop(d) = &mut self.disk
+            && let Some(ring) = ring_of(d)
+        {
+            ring.reap(&mut self.reaped)?;
+            let now = self.now();
+            for done in std::mem::take(&mut self.reaped) {
+                self.logic.on_io_done(done, now);
+            }
+        }
+        Ok(())
+    }
+
     /// Hands the logic's disk operations and frames to their executors.
     fn pump(&mut self, now: Nanos) {
         while let Some(op) = self.logic.poll_io(now) {
-            if self.disk.submit(op).is_err() {
+            let gone = match &mut self.disk {
+                Exec::Thread(t) => t.submit(op).is_err(),
+                #[cfg(target_os = "linux")]
+                Exec::InLoop(d) => match ring_of(d) {
+                    Some(ring) => {
+                        ring.submit(op);
+                        false
+                    }
+                    None => true,
+                },
+            };
+            if gone {
                 // The disk thread is gone: nothing can be made durable any more.
                 self.stopped = true;
                 return;
             }
+        }
+        // One `io_uring_enter` for the whole turn.
+        #[cfg(target_os = "linux")]
+        if let Exec::InLoop(d) = &mut self.disk
+            && let Some(ring) = ring_of(d)
+            && ring.flush().is_err()
+        {
+            self.stopped = true;
+            return;
         }
         self.logic.take_outbound(&mut self.outbox);
         for (node, msg) in std::mem::take(&mut self.outbox) {

@@ -9,12 +9,12 @@ use crate::interp::{Ctrl, Interp, R, Realm};
 use crate::number;
 use crate::value::*;
 
-fn arg(args: &[Val], i: usize) -> Val {
+pub(crate) fn arg(args: &[Val], i: usize) -> Val {
     args.get(i).cloned().unwrap_or(Val::Undef)
 }
 
 /// `this` of a native constructor called with `new`: the new target.
-fn new_target(this: &Val) -> Option<Val> {
+pub(crate) fn new_target(this: &Val) -> Option<Val> {
     let Val::Obj(o) = this else { return None };
     o.borrow().get_own("@@new").map(|p| p.value.clone())
 }
@@ -24,7 +24,7 @@ pub(crate) fn method(it: &Interp, o: &ObjRef, name: &str, f: NativeFn, arity: us
     it.define(o, name, Prop::hidden(Val::Obj(fo)))
 }
 
-fn ctor(
+pub(crate) fn ctor(
     it: &Interp,
     global: &ObjRef,
     name: &str,
@@ -59,6 +59,7 @@ pub fn realm(budget: &Rc<Budget>) -> Realm {
         number: p(Kind::Num(0.0)),
         boolean: p(Kind::Bool(false)),
         symbol: p(Kind::Ordinary),
+        bigint: p(Kind::Ordinary),
         error: p(Kind::Ordinary),
         date: p(Kind::Ordinary),
         regexp: p(Kind::Ordinary),
@@ -100,9 +101,54 @@ pub fn install(it: &mut Interp) -> R<()> {
     crate::date::install(it, &g)?;
     collections(it, &g)?;
     symbol_builtins(it, &g)?;
+    crate::bigints::install(it, &g)?;
     regexp_builtins(it, &g)?;
     crate::bson::install(it, &g)?;
+    freeze_builtins(it);
     Ok(())
+}
+
+/// Freezes the objects of the globals, as RefDb's engine does (measured on a `refrouter` 9.0.4
+/// on 02-11: `Object.isFrozen(Array.prototype)` is `true`, a new property of a prototype is not
+/// kept, and strict code that assigns `name` on an error throws `"name" is read-only`).
+fn freeze_builtins(it: &Interp) {
+    fn freeze(o: &ObjRef) {
+        let mut b = o.borrow_mut();
+        b.extensible = false;
+        for (_, p) in &mut b.props {
+            p.writable = false;
+        }
+    }
+    let mut all: Vec<ObjRef> = vec![
+        it.realm.object.clone(),
+        it.realm.function.clone(),
+        it.realm.array.clone(),
+        it.realm.string.clone(),
+        it.realm.number.clone(),
+        it.realm.boolean.clone(),
+        it.realm.symbol.clone(),
+        it.realm.bigint.clone(),
+        it.realm.error.clone(),
+        it.realm.date.clone(),
+        it.realm.regexp.clone(),
+        it.realm.map.clone(),
+        it.realm.set.clone(),
+        it.realm.iter.clone(),
+    ];
+    let globals: Vec<Val> =
+        it.realm.global.borrow().props.iter().map(|(_, p)| p.value.clone()).collect();
+    for v in globals {
+        let Val::Obj(o) = v else { continue };
+        if o.ptr_eq(&it.realm.global) {
+            continue;
+        }
+        let proto = o.borrow().get_own("prototype").and_then(|p| p.value.as_obj().cloned());
+        all.extend(proto);
+        all.push(o);
+    }
+    for o in &all {
+        freeze(o);
+    }
 }
 
 // Globals.
@@ -432,9 +478,11 @@ fn obj_to_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
             Kind::Date(_) => "Date",
             Kind::RegExp(..) => "RegExp",
             Kind::Arguments => "Arguments",
+            Kind::BigInt(_) => "BigInt",
             _ => "Object",
         },
         Val::Num(_) => "Number",
+        Val::BigInt(_) => "BigInt",
         Val::Str(_) => "String",
         Val::Bool(_) => "Boolean",
         Val::Sym(_) => "Symbol",
@@ -613,7 +661,7 @@ fn array_sum(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     let items = it.iterate(&arg(a, 0))?;
     let mut acc = match items.first() {
         Some(x) => x.clone(),
-        None => return Ok(Val::Num(0.0)),
+        None => return Ok(Val::Null),
     };
     for x in &items[1..] {
         acc = it.binary("+", &acc, x)?;
@@ -651,14 +699,13 @@ fn array_unique(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     it.array(out)
 }
 
+/// RefDb's `Array.shuffle` calls a `Random` its engine does not define (measured: it fails
+/// with `Random is not defined` on a `refrouter` 9.0.4); an empty array has nothing to draw.
 fn array_shuffle(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     if let Val::Obj(o) = arg(a, 0) {
         let n = it.array_len(&o);
-        for i in (1..n).rev() {
-            let j = (crate::math::next_random(it) * (i + 1) as f64) as usize;
-            if let Kind::Array(v) = &mut o.borrow_mut().kind {
-                v.swap(i, j.min(i));
-            }
+        if n > 0 {
+            return Err(it.error("ReferenceError", "Random is not defined"));
         }
     }
     Ok(arg(a, 0))
@@ -708,7 +755,13 @@ fn number_builtins(it: &mut Interp, g: &ObjRef) -> R<()> {
 }
 
 fn number_ctor(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    let n = if a.is_empty() { 0.0 } else { it.number_of(&a[0])? };
+    let n = match a.first() {
+        None => 0.0,
+        Some(v) => match it.numeric(v)? {
+            Val::BigInt(b) => b.to_f64(),
+            n => it.number_of(&n)?,
+        },
+    };
     if new_target(this).is_some() {
         return Ok(Val::Obj(it.alloc(Some(it.realm.number.clone()), Kind::Num(n))?));
     }
@@ -766,8 +819,12 @@ fn num_to_precision(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     if !(1.0..=100.0).contains(&p) {
         return Err(it.error("RangeError", "precision is out of range"));
     }
-    if n == 0.0 || !n.is_finite() {
+    if !n.is_finite() {
         return it.string(number::to_string(n));
+    }
+    if n == 0.0 {
+        let zeros = "0".repeat(p as usize - 1);
+        return it.string(if zeros.is_empty() { "0".into() } else { format!("0.{zeros}") });
     }
     let e = n.abs().log10().floor() as i32;
     let p = p as i32;

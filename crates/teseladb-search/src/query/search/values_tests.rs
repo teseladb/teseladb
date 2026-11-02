@@ -565,8 +565,10 @@ fn values_follow_type_sets_and_nested_mappings() {
     assert_eq!(found(&idx, &equals("d.k", Value::DateTime(JAN_1))), Ok(ones(&[1])));
     assert_eq!(found(&idx, &equals("d.n", 5)), Ok(ones(&[])));
     let def = idx.definition();
-    assert!(values::numeric(def, "n") && values::numeric(def, "sub.n"));
-    assert!(!values::numeric(def, "d.k") && !values::numeric(def, "d.n.x"));
+    assert!(values::numeric(def, "n"));
+    assert!(values::numeric(def, "sub.n"));
+    assert!(!values::numeric(def, "d.k"));
+    assert!(!values::numeric(def, "d.n.x"));
     assert!(!values::numeric(def, "d.k.x"));
 }
 
@@ -1618,7 +1620,8 @@ fn fuzzy_and_prefix_edges() {
     };
     // Several terms within two edits: the closest weigh most.
     let near = fuzzy("t", "gato").unwrap();
-    assert!(near.len() >= 2 && near[0].0 == 3, "{near:?}");
+    assert!(near.len() >= 2, "{near:?}");
+    assert!(near[0].0 == 3, "{near:?}");
     assert_eq!(fuzzy("zz", "gato"), Ok(vec![]));
     let mixed = op(
         "term",

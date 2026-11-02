@@ -1529,6 +1529,14 @@ impl Backend for TxnBackend<'_> {
         self.inner.principals(kind, db)
     }
 
+    fn principal_by_id(
+        &mut self,
+        kind: Principal,
+        id: &[u8],
+    ) -> Result<Option<Vec<u8>>, CommandError> {
+        self.inner.principal_by_id(kind, id)
+    }
+
     fn security_write(
         &mut self,
         ops: Vec<SecurityOp>,

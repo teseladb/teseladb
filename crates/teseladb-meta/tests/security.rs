@@ -117,3 +117,49 @@ fn the_previous_snapshot_version_restores_its_users_and_roles_in_name_order() {
     assert_eq!(order(&old), by_name);
     assert_eq!(old.security.version, sm.security.version);
 }
+
+/// 019 T020: API keys live next to the users, found by the SHA-256 of the key (their `_id`),
+/// unique by `keyId` and `db`, kept in the snapshot; a snapshot from before them has none.
+#[test]
+fn api_keys_are_found_by_their_hash_and_survive_the_snapshot() {
+    use teseladb_meta::group0::SNAPSHOT_VERSION_WITHOUT_API_KEYS;
+    use teseladb_meta::security::string_id;
+    let mut sm = cluster();
+    let k = Principal::ApiKey;
+    assert_eq!(k.unique_index(), "keyId_1_db_1");
+    let key = |hash: &str, id: &str| {
+        Document::new()
+            .with("_id", hash)
+            .with("keyId", id)
+            .with("db", "admin")
+            .with("user", "ann")
+            .to_bytes()
+            .unwrap()
+    };
+    let put = |doc: Vec<u8>| SecurityOp::put(k, Expect::Absent, doc).unwrap();
+    let ops = vec![put(key("h1", "k1")), put(key("h2", "k2"))];
+    assert_eq!(apply(&mut sm, 2, Group0Command::Security(ops)), Group0Result::Ok);
+    assert_eq!(sm.security.get_by_id(k, &string_id("h2")), Some(key("h2", "k2").as_slice()));
+    assert_eq!(sm.security.get_by_id(k, &string_id("h3")), None);
+    assert_eq!(sm.security.get(k, "admin", "k1"), Some(key("h1", "k1").as_slice()));
+    // Another key with the same `keyId` in the same database is refused.
+    let twin = vec![put(key("h3", "k1"))];
+    assert_eq!(
+        apply(&mut sm, 3, Group0Command::Security(twin)),
+        Group0Result::Err(Group0Error::PrincipalExists(k))
+    );
+    let gone = vec![SecurityOp::remove(k, key("h1", "k1")).unwrap()];
+    assert_eq!(apply(&mut sm, 4, Group0Command::Security(gone.clone())), Group0Result::Ok);
+    assert_eq!(
+        apply(&mut sm, 5, Group0Command::Security(gone)),
+        Group0Result::Err(Group0Error::PrincipalNotFound(k))
+    );
+    let mut copy = Group0Sm::default();
+    copy.restore(&sm.snapshot()).unwrap();
+    assert_eq!(copy.security.list(k, None), sm.security.list(k, None));
+    assert_eq!(copy.security.get_by_id(k, &string_id("h2")), Some(key("h2", "k2").as_slice()));
+    let mut old = Group0Sm::default();
+    old.restore(&sm.encode_snapshot_as(SNAPSHOT_VERSION_WITHOUT_API_KEYS)).unwrap();
+    assert!(old.security.keys.is_empty());
+    assert_eq!(old.security.users, sm.security.users);
+}

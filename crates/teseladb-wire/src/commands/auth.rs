@@ -649,6 +649,39 @@ fn oidc_login<B: Backend + ?Sized>(
     admit(state, backend, identity.user, SaslMechanism::Oidc, identity.roles)
 }
 
+/// Logs in with API key `key` (019 FR-015, FR-017): the key found by its SHA-256, not expired,
+/// its user still there and let in from the connection's addresses, and the roles of the key the
+/// user still holds as the connection's roles. Every failure is `Authentication failed.`. The key
+/// found, for its last use.
+pub fn api_key_login<B: Backend + ?Sized>(
+    state: &mut AuthState,
+    key: &str,
+    backend: &mut B,
+) -> Result<teseladb_auth::apikey::ApiKey, CommandError> {
+    use teseladb_auth::apikey::{self, ApiKey};
+    let failed = || sasl_error(&SaslError::AuthenticationFailed);
+    if !apikey::is_key(key) {
+        return Err(failed());
+    }
+    let id = teseladb_meta::security::string_id(&apikey::hash_hex(key));
+    let doc = backend.principal_by_id(teseladb_meta::security::Principal::ApiKey, &id)?;
+    let doc = doc.ok_or_else(failed)?;
+    let raw = teseladb_bson::RawDoc::from_bytes(&doc).map_err(|_| failed())?;
+    let found = ApiKey::from_document(&Document::from(raw)).map_err(|_| failed())?;
+    let name = UserName::new(found.user.as_str(), found.db.as_str());
+    state.attempt = Some((name.clone(), SaslMechanism::ApiKey.name().to_owned()));
+    let now = i64::try_from(backend.wall_ms()).unwrap_or(i64::MAX);
+    if found.expired(now) {
+        return Err(failed());
+    }
+    let Some(user) = login_user(backend, &name)? else { return Err(failed()) };
+    admit(state, backend, name, SaslMechanism::ApiKey, None)?;
+    if let Some(u) = state.user.as_mut() {
+        u.roles = Some(found.effective_roles(&user.roles));
+    }
+    Ok(found)
+}
+
 /// The end of REFDB-AWS (013 FR-025): the client's signed request goes to the STS, whose
 /// answer names the user, which must exist in `$external`. Every failure is `Authentication
 /// failed.`, as RefDb Enterprise 9.0.4 answers it.

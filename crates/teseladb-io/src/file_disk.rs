@@ -3,6 +3,10 @@
 //! Operation paths are relative to the disk's root directory (the data directory). Durability is
 //! requested from the system with a full `fsync` (`sync_all`, which on macOS uses `F_FULLFSYNC`)
 //! on files and directories.
+//!
+//! With `O_DIRECT` (Linux, 012 FR-003) each file has a second descriptor opened with it: writes
+//! and reads of whole 4 KiB blocks go through it from an aligned buffer, and the rest through the
+//! buffered one. Both are the same inode, so a `fsync` on either covers both.
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -11,17 +15,64 @@ use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
 use teseladb_raftlog::{Disk, FileId, IoDone, IoErrno, IoOp};
+use teseladb_sys::aligned::AlignedBuf;
 use teseladb_types::Bytes;
+
+use crate::buffers::is_aligned;
+
+/// `O_DIRECT` on Linux (x86_64 and aarch64 differ).
+#[cfg(target_arch = "aarch64")]
+pub(crate) const O_DIRECT: i32 = 0o200000;
+#[cfg(not(target_arch = "aarch64"))]
+pub(crate) const O_DIRECT: i32 = 0o40000;
+
+/// An open file: its buffered descriptor and, with `O_DIRECT`, the direct one.
+#[derive(Debug)]
+struct DiskFile {
+    file: File,
+    direct: Option<File>,
+}
 
 /// Real disk rooted at a directory.
 #[derive(Debug)]
 pub struct FileDisk {
     root: PathBuf,
-    files: HashMap<FileId, File>,
+    files: HashMap<FileId, DiskFile>,
     direct_io: bool,
+    /// Aligned bounce buffer of the direct accesses.
+    scratch: AlignedBuf,
 }
 
-fn errno(e: &io::Error) -> IoErrno {
+/// Whether the file system of `dir` takes `O_DIRECT` writes of whole 4 KiB blocks (012 FR-003):
+/// it writes, reads back and removes a probe file. Always `false` outside Linux.
+pub fn direct_io_supported(dir: &Path) -> io::Result<bool> {
+    if !cfg!(target_os = "linux") {
+        return Ok(false);
+    }
+    let probe = dir.join(".direct-io-probe");
+    let mut o = OpenOptions::new();
+    o.read(true).write(true).create(true).truncate(true);
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.custom_flags(O_DIRECT);
+    }
+    let r = o.open(&probe).and_then(|f| {
+        let mut b = AlignedBuf::new(4096);
+        b[..5].copy_from_slice(b"probe");
+        f.write_all_at(&b, 0)?;
+        f.read_exact_at(&mut b, 0)?;
+        Ok(&b[..5] == b"probe")
+    });
+    let _ = fs::remove_file(&probe);
+    match r {
+        Ok(same) => Ok(same),
+        // EINVAL: the file system does not take O_DIRECT, or not with 4 KiB blocks.
+        Err(e) if e.raw_os_error() == Some(22) => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+pub(crate) fn errno(e: &io::Error) -> IoErrno {
     if teseladb_sys::is_no_space(e) {
         return IoErrno::NoSpace;
     }
@@ -56,13 +107,23 @@ impl FileDisk {
     pub fn open(root: impl Into<PathBuf>) -> io::Result<FileDisk> {
         let root = root.into();
         fs::create_dir_all(&root)?;
-        Ok(FileDisk { root, files: HashMap::new(), direct_io: false })
+        Ok(FileDisk {
+            root,
+            files: HashMap::new(),
+            direct_io: false,
+            scratch: AlignedBuf::new(4096),
+        })
     }
 
-    /// Enables `O_DIRECT` on the files opened from now on (Linux only; no effect on other
-    /// systems). It requires writes aligned to 4 KiB, which the engine already does.
+    /// Enables `O_DIRECT` for whole-block accesses on the files opened from now on (Linux only;
+    /// no effect on other systems).
     pub fn set_direct_io(&mut self, on: bool) {
-        self.direct_io = on;
+        self.direct_io = on && cfg!(target_os = "linux");
+    }
+
+    /// Whether whole-block accesses use `O_DIRECT`.
+    pub fn direct_io(&self) -> bool {
+        self.direct_io
     }
 
     /// Root directory.
@@ -74,23 +135,55 @@ impl FileDisk {
         self.root.join(p)
     }
 
-    fn options(&self) -> OpenOptions {
+    fn options() -> OpenOptions {
         let mut o = OpenOptions::new();
         o.read(true).write(true);
-        #[cfg(target_os = "linux")]
-        if self.direct_io {
-            use std::os::unix::fs::OpenOptionsExt;
-            // O_DIRECT on Linux (x86_64 and aarch64).
-            #[cfg(target_arch = "aarch64")]
-            o.custom_flags(0o200000);
-            #[cfg(not(target_arch = "aarch64"))]
-            o.custom_flags(0o40000);
-        }
         o
     }
 
-    fn file(&self, id: FileId) -> Result<&File, IoErrno> {
+    /// The direct descriptor of a file just opened at `full`, when `O_DIRECT` is on.
+    fn direct(&self, full: &Path) -> io::Result<Option<File>> {
+        if !self.direct_io {
+            return Ok(None);
+        }
+        use std::os::unix::fs::OpenOptionsExt;
+        Self::options().custom_flags(O_DIRECT).open(full).map(Some)
+    }
+
+    fn file(&self, id: FileId) -> Result<&DiskFile, IoErrno> {
         self.files.get(&id).ok_or(IoErrno::BadFile)
+    }
+
+    fn write(&mut self, id: FileId, offset: u64, data: &[u8]) -> Result<(), IoErrno> {
+        let f = self.files.get(&id).ok_or(IoErrno::BadFile)?;
+        match &f.direct {
+            Some(d) if is_aligned(offset, data.len() as u64) => {
+                if self.scratch.len() < data.len() {
+                    self.scratch = AlignedBuf::new(data.len());
+                }
+                self.scratch[..data.len()].copy_from_slice(data);
+                d.write_all_at(&self.scratch[..data.len()], offset).map_err(|e| errno(&e))
+            }
+            _ => f.file.write_all_at(data, offset).map_err(|e| errno(&e)),
+        }
+    }
+
+    fn read(&mut self, id: FileId, offset: u64, len: usize) -> Result<Vec<u8>, IoErrno> {
+        let f = self.files.get(&id).ok_or(IoErrno::BadFile)?;
+        let mut buf = vec![0u8; len];
+        let got = match &f.direct {
+            Some(d) if is_aligned(offset, len as u64) => {
+                if self.scratch.len() < len {
+                    self.scratch = AlignedBuf::new(len);
+                }
+                let got = read_up_to(d, &mut self.scratch[..len], offset).map_err(|e| errno(&e))?;
+                buf[..got].copy_from_slice(&self.scratch[..got]);
+                got
+            }
+            _ => read_up_to(&f.file, &mut buf, offset).map_err(|e| errno(&e))?,
+        };
+        buf.truncate(got);
+        Ok(buf)
     }
 
     fn run(&mut self, op: &IoOp) -> Result<Option<Bytes>, IoErrno> {
@@ -99,34 +192,38 @@ impl FileDisk {
             IoOp::Create { file, path, prealloc } => {
                 let full = self.full(path);
                 fs::create_dir_all(full.parent().unwrap_or(&self.root)).map_err(e)?;
-                let f = self.options().create_new(true).open(&full).map_err(e)?;
-                if *prealloc > 0
-                    && let Err(err) = teseladb_sys::preallocate(&f, *prealloc)
-                {
-                    // Do not leave a half-made file behind if there is no space.
-                    let _ = fs::remove_file(&full);
-                    return Err(errno(&err));
-                }
-                self.files.insert(*file, f);
+                let f = Self::options().create_new(true).open(&full).map_err(e)?;
+                let made = match *prealloc {
+                    0 => Ok(()),
+                    n => teseladb_sys::preallocate(&f, n),
+                };
+                let direct = made.and_then(|()| self.direct(&full));
+                match direct {
+                    Ok(direct) => self.files.insert(*file, DiskFile { file: f, direct }),
+                    Err(err) => {
+                        // Do not leave a half-made file behind if there is no space.
+                        let _ = fs::remove_file(&full);
+                        return Err(errno(&err));
+                    }
+                };
                 Ok(None)
             }
             IoOp::Open { file, path } => {
-                let f = self.options().open(self.full(path)).map_err(e)?;
-                self.files.insert(*file, f);
+                let full = self.full(path);
+                let f = Self::options().open(&full).map_err(e)?;
+                let direct = self.direct(&full).map_err(e)?;
+                self.files.insert(*file, DiskFile { file: f, direct });
                 Ok(None)
             }
             IoOp::WriteAt { file, offset, data, .. } => {
-                self.file(*file)?.write_all_at(data, *offset).map_err(e)?;
+                self.write(*file, *offset, data)?;
                 Ok(None)
             }
             IoOp::ReadAt { file, offset, len, .. } => {
-                let mut buf = vec![0u8; *len as usize];
-                let got = read_up_to(self.file(*file)?, &mut buf, *offset).map_err(e)?;
-                buf.truncate(got);
-                Ok(Some(Bytes::from_vec(buf)))
+                Ok(Some(Bytes::from_vec(self.read(*file, *offset, *len as usize)?)))
             }
             IoOp::Sync { file, .. } => {
-                self.file(*file)?.sync_all().map_err(e)?;
+                self.file(*file)?.file.sync_all().map_err(e)?;
                 Ok(None)
             }
             IoOp::SyncDir { path } => {
@@ -134,7 +231,7 @@ impl FileDisk {
                 Ok(None)
             }
             IoOp::Truncate { file, len } => {
-                self.file(*file)?.set_len(*len).map_err(e)?;
+                self.file(*file)?.file.set_len(*len).map_err(e)?;
                 Ok(None)
             }
             IoOp::Rename { from, to } => {

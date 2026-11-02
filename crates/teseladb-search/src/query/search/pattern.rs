@@ -25,12 +25,18 @@ pub(super) struct Pattern {
 }
 
 impl Pattern {
-    /// How `refsearch` names the query in `scoreDetails` (measured: `$type:string/t:gat*`).
-    pub(super) fn description(&self) -> String {
+    /// How `refsearch` names the query in `scoreDetails` (measured: `$type:string/t:gat*` and
+    /// `$type:string/t:/ga.o/`), its field names after `prefix`.
+    pub(super) fn description(&self, prefix: &str) -> String {
         let terms: Vec<String> = self
             .paths
             .iter()
-            .flat_map(|p| self.query.iter().map(move |q| format!("$type:string/{p}:{q}")))
+            .flat_map(|p| {
+                self.query.iter().map(move |q| {
+                    let q = if self.regex { format!("/{q}/") } else { q.clone() };
+                    format!("{prefix}$type:string/{p}:{q}")
+                })
+            })
             .collect();
         match terms.as_slice() {
             [one] => one.clone(),
@@ -120,6 +126,19 @@ impl Pattern {
             }
         }
         Ok(out)
+    }
+
+    /// The compiled patterns of the query for the field at `path`.
+    pub(super) fn matchers(&self, index: &MemIndex, path: &str) -> Vec<Regex> {
+        let keyword = index.query_analyzer(path) == KEYWORD;
+        self.query
+            .iter()
+            .filter_map(|q| {
+                let q: String =
+                    if keyword { q.clone() } else { q.chars().map(lowercase).collect() };
+                if self.regex { Regex::new(&q).ok() } else { Some(wildcard(&q)) }
+            })
+            .collect()
     }
 
     /// The score option.

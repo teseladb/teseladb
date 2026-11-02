@@ -117,6 +117,13 @@ pub struct ServerBackend {
 }
 
 impl ServerBackend {
+    /// A backend over the same node, for work on another thread, with its own random numbers.
+    #[must_use]
+    pub fn fresh(&mut self) -> ServerBackend {
+        let seed = teseladb_wire::commands::Backend::random(self);
+        ServerBackend::new(self.h.clone(), seed)
+    }
+
     /// A backend over `h`, with `seed` for its random numbers.
     pub fn new(h: NodeHandle, seed: u64) -> ServerBackend {
         let cores = h.senders.iter().map(CoreSenders::sender).collect();
@@ -220,6 +227,21 @@ impl ServerBackend {
             }
         }
         Ok(rows)
+    }
+
+    /// The answer of node `node` to an HTTP request forwarded to it (019 FR-008), or `None`
+    /// when it cannot be reached or has no HTTP port.
+    pub fn forward_http(&self, node: u64, body: Vec<u8>) -> Option<Vec<u8>> {
+        let until = self.until();
+        let answers = self.ask(0, |tx| NodeMsg::ForwardHttp(NodeId(node), body, tx), until)??;
+        answers.into_iter().next().filter(|a| !a.is_empty())
+    }
+
+    /// Sends node `to` the answer to the HTTP request it forwarded as its request `req`.
+    pub fn answer_http(&self, to: NodeId, req: u64, body: Vec<u8>) {
+        if let Some(core) = self.cores.first() {
+            let _ = core.send(CoreInput::App(NodeMsg::HttpAnswer(to, req, body)));
+        }
     }
 
     fn until(&self) -> Instant {
@@ -491,7 +513,7 @@ pub fn parameters_of(settings: &BTreeMap<Vec<u8>, Vec<u8>>) -> BTreeMap<String, 
 
 /// The instant the process first read the monotonic clock, the origin of
 /// [`Backend::now_micros`].
-fn process_start() -> Instant {
+pub(crate) fn process_start() -> Instant {
     static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
     *START.get_or_init(Instant::now)
 }
@@ -1150,6 +1172,15 @@ impl Backend for ServerBackend {
         name: &str,
     ) -> Result<Option<Vec<u8>>, CommandError> {
         let req = CatalogReq::Principal { kind, db: db.to_owned(), name: name.to_owned() };
+        Ok(self.principal_read(req)?.into_iter().next())
+    }
+
+    fn principal_by_id(
+        &mut self,
+        kind: Principal,
+        id: &[u8],
+    ) -> Result<Option<Vec<u8>>, CommandError> {
+        let req = CatalogReq::PrincipalById { kind, id: id.to_vec() };
         Ok(self.principal_read(req)?.into_iter().next())
     }
 
