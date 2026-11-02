@@ -101,6 +101,25 @@ impl<'a, R: EscReader> Rewriter<'a, R> {
 
     fn check_indexed(&self, path: &str, kind: QueryType) -> Result<(), crate::FleError> {
         let indexed = self.config.field(path).is_some_and(|f| f.has(kind));
+        self.indexed_or_refuse(path, kind, indexed)
+    }
+
+    /// `$encStrNormalizedEq` asks for the whole string, which every text field indexes.
+    fn check_text_indexed(&self, path: &str, kind: QueryType) -> Result<(), crate::FleError> {
+        if kind != QueryType::Equality {
+            return self.check_indexed(path, kind);
+        }
+        let text = [QueryType::Prefix, QueryType::Suffix, QueryType::Substring];
+        let indexed = self.config.field(path).is_some_and(|f| text.iter().any(|k| f.has(*k)));
+        self.indexed_or_refuse(path, kind, indexed)
+    }
+
+    fn indexed_or_refuse(
+        &self,
+        path: &str,
+        kind: QueryType,
+        indexed: bool,
+    ) -> Result<(), crate::FleError> {
         if indexed {
             return Ok(());
         }
@@ -145,7 +164,7 @@ impl<'a, R: EscReader> Rewriter<'a, R> {
             BlobSubtype::Fle2FindText => {
                 let Some(kind) = text else { return Ok(None) };
                 let p = FindTextPayload::parse(bytes)?;
-                self.check_indexed(path, kind)?;
+                self.check_text_indexed(path, kind)?;
                 let sets: Vec<FindTokens> = p.tokens().cloned().into_iter().collect();
                 let tags = tags_of(self.esc, &sets, p.max_contention).map_err(WriteError::Read)?;
                 Ok(Some(Some(tags)))
@@ -284,6 +303,15 @@ impl<'a, R: EscReader> Rewriter<'a, R> {
         }
     }
 
+    /// An expression argument without its `$const`: a driver with automatic encryption sends the
+    /// payloads of an expression as `{$const: payload}` (measured with `refcryptd` 9.0.4).
+    fn constant(v: &Value) -> &Value {
+        match v {
+            Value::Document(d) if d.len() == 1 => d.get("$const").unwrap_or(v),
+            _ => v,
+        }
+    }
+
     /// The tags an expression asks for, if it is one over a payload, and whether it is negated.
     fn expr_tags(&mut self, e: &Document) -> Result<Option<(Asked, bool)>, WriteError<R::Error>> {
         let Some((op, arg)) = e.iter().next().filter(|_| e.len() == 1) else { return Ok(None) };
@@ -294,7 +322,7 @@ impl<'a, R: EscReader> Rewriter<'a, R> {
                 return Ok(None);
             };
             let path = path.to_string();
-            return Ok(self.payload(&path, p, Some(*kind))?.map(|t| (t, false)));
+            return Ok(self.payload(&path, Self::constant(p), Some(*kind))?.map(|t| (t, false)));
         }
         let Value::Array(args) = arg else { return Ok(None) };
         let negated = op == NE;
@@ -305,12 +333,13 @@ impl<'a, R: EscReader> Rewriter<'a, R> {
                     (None, Some(path)) => (path.to_string(), a),
                     _ => return Ok(None),
                 };
-                Ok(self.payload(&path, p, None)?.map(|t| (t, negated)))
+                Ok(self.payload(&path, Self::constant(p), None)?.map(|t| (t, negated)))
             }
             (IN, [a, Value::Array(list)]) => {
                 let Some(path) = Self::field_ref(a) else { return Ok(None) };
                 let path = path.to_string();
-                Ok(self.payload_list(&path, list)?.map(|t| (Some(t), false)))
+                let list: Vec<Value> = list.iter().map(|v| Self::constant(v).clone()).collect();
+                Ok(self.payload_list(&path, &list)?.map(|t| (Some(t), false)))
             }
             _ => Ok(None),
         }
