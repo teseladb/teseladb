@@ -5,4 +5,13 @@
 #![cfg_attr(coverage, feature(coverage_attribute))]
 
 pub mod client;
+pub mod cors;
+pub mod hpack;
 pub mod http1;
+pub mod http2;
+pub mod http2_frames;
+pub mod huffman;
+pub mod limits;
+pub mod server;
+pub mod server1;
+pub mod sse;

@@ -228,6 +228,9 @@ fn describe(id: u32, op: &Op, now_ms: u64, (shard, host): (&str, &str)) -> Docum
             .with("total", i64::try_from(p.total).unwrap_or(i64::MAX));
         d.insert("progress", progress);
     }
+    for (k, v) in op.metrics.iter().flat_map(Document::iter) {
+        d.insert(k, v.clone());
+    }
     d.insert("numYields", 0);
     d.insert("locks", Document::new());
     d.insert("waitingForLock", false);

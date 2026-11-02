@@ -33,6 +33,7 @@ fn op(deadline_ms: Option<u64>) -> Op {
         roles: None,
         desc: None,
         progress: None,
+        metrics: None,
     }
 }
 

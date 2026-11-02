@@ -14,6 +14,7 @@
 
 use teseladb_bson::{Document, RawDoc, RawValue, Value};
 use teseladb_exec::pipeline::Pipeline;
+use teseladb_exec::pipeline::spill::{Counting, SpillStats, SpillStore};
 use teseladb_meta::catalog::Namespace;
 
 use super::super::mutation::from_mql;
@@ -333,6 +334,11 @@ pub(super) fn aggregate<B: Backend + ?Sized>(
         }
         list.push(Value::Document(head));
         let mut upto: Vec<Document> = docs(&steps[..last]);
+        let allow_disk_use = !matches!(inner.get("allowDiskUse"), Some(Value::Boolean(false)));
+        let mut before_spilled = match run {
+            true => through_counted(ctx, ns, &upto, allow_disk_use)?.1,
+            false => SpillStats::default(),
+        };
         let mut next = last;
         for (d, span) in remaining {
             let mut d = d;
@@ -349,8 +355,9 @@ pub(super) fn aggregate<B: Backend + ?Sized>(
                     _ => {}
                 }
                 next += span;
-                let n = through(ctx, ns, &upto)?;
-                d = with_counters(d, n);
+                let (n, spilled) = through_counted(ctx, ns, &upto, allow_disk_use)?;
+                d = with_counters(d, n, spilled.minus(before_spilled));
+                before_spilled = spilled;
                 extend(&mut d, &more);
             }
             list.push(Value::Document(d));
@@ -412,7 +419,7 @@ fn facet_counts<B: Backend + ?Sized>(
     let mut out = Document::new();
     for (name, stages) in branches {
         let tee = Document::new().with("$internalFacetTeeConsumer", Document::new());
-        let mut list = vec![Value::Document(with_counters(tee, entering))];
+        let mut list = vec![Value::Document(with_counters(tee, entering, SpillStats::default()))];
         for k in 0..stages.len() {
             let prefix =
                 Value::Array(docs(&stages[..=k]).into_iter().map(Value::Document).collect());
@@ -431,7 +438,7 @@ fn facet_counts<B: Backend + ?Sized>(
                 _ => 0,
             };
             for e in super::forms::forms(&stages[k]) {
-                list.push(Value::Document(with_counters(e, n)));
+                list.push(Value::Document(with_counters(e, n, SpillStats::default())));
             }
         }
         out.push(name, Value::Array(list));
@@ -493,33 +500,55 @@ fn lookup_vars(l: &Lookup, doc: Option<&Document>) -> Result<Option<Document>, C
     Ok(Some(vars))
 }
 
-/// What a `$sort` and a `$group` listed after the plan count when they run, beside the
-/// documents they give (`nReturned`): their memory, and that they never spilled.
-fn with_counters(d: Document, returned: u64) -> Document {
+/// What a `$sort`, a `$group`, a `$bucketAuto` and a `$setWindowFields` listed after the plan
+/// count when they run, beside the documents they give (`nReturned`): their memory and what they
+/// wrote to disk (`spilled`, counted over the run, 010 T024), in the order of a `refnode` 9.0.4.
+fn with_counters(d: Document, returned: u64, spilled: SpillStats) -> Document {
     let n = int64(returned);
-    let spilled = ["spilledBytes", "spilledRecords", "spilledDataStorageSize"];
+    let used = spilled.spills > 0;
+    let spills = Value::Int64(i64::try_from(spilled.spills).unwrap_or(i64::MAX));
+    let bytes = Value::Int64(i64::try_from(spilled.bytes).unwrap_or(i64::MAX));
+    let records = Value::Int64(i64::try_from(spilled.records).unwrap_or(i64::MAX));
     if d.get("$sort").is_some() {
-        let mut out =
-            d.with("totalDataSizeSortedBytesEstimate", Value::Int64(0)).with("usedDisk", false);
-        out.push("spills", Value::Int64(0));
-        for k in spilled {
-            out.push(k, Value::Int64(0));
-        }
-        return out.with("nReturned", n).with("executionTimeMillisEstimate", Value::Int64(0));
+        return d
+            .with("totalDataSizeSortedBytesEstimate", Value::Int64(0))
+            .with("usedDisk", used)
+            .with("spills", spills)
+            .with("spilledBytes", bytes.clone())
+            .with("spilledRecords", records)
+            .with("spilledDataStorageSize", bytes)
+            .with("nReturned", n)
+            .with("executionTimeMillisEstimate", Value::Int64(0));
     }
     let mut out = d.with("nReturned", n).with("executionTimeMillisEstimate", Value::Int64(0));
-    if let Some(Value::Document(g)) = out.get("$group").cloned() {
+    let memory = |spec: Option<&Value>, skip: &str| {
         let mut memory = Document::new();
-        for (k, _) in g.iter().filter(|(k, _)| *k != "_id" && *k != "$willBeMerged") {
-            memory.push(k, Value::Int64(0));
+        if let Some(Value::Document(g)) = spec {
+            for (k, _) in g.iter().filter(|(k, _)| *k != skip && *k != "$willBeMerged") {
+                memory.push(k, Value::Int64(0));
+            }
         }
-        out.push("maxAccumulatorMemoryUsageBytes", memory);
+        memory
+    };
+    let counted = |mut out: Document| {
+        out.push("usedDisk", used);
+        out.push("spills", spills.clone());
+        out.push("spilledDataStorageSize", bytes.clone());
+        out.push("spilledBytes", bytes.clone());
+        out.push("spilledRecords", records.clone());
+        out
+    };
+    if let Some(g) = out.get("$group").cloned() {
+        out.push("maxAccumulatorMemoryUsageBytes", memory(Some(&g), "_id"));
         out.push("totalOutputDataSizeBytes", Value::Int64(0));
-        out.push("usedDisk", false);
-        out.push("spills", Value::Int64(0));
-        out.push("spilledDataStorageSize", Value::Int64(0));
-        out.push("spilledBytes", Value::Int64(0));
-        out.push("spilledRecords", Value::Int64(0));
+        return counted(out);
+    }
+    if out.get("$bucketAuto").is_some() {
+        return counted(out);
+    }
+    if let Some(Value::Document(w)) = out.get("$_internalSetWindowFields").cloned() {
+        out.push("maxFunctionMemoryUsageBytes", memory(w.get("output"), ""));
+        return counted(out);
     }
     out
 }
@@ -728,6 +757,32 @@ fn sort_moves_before_unwind(st: &Step, path: &str) -> bool {
 }
 
 /// How many documents the pipeline's first stages give.
+/// The documents `stages` give and what they wrote to the node's store, with `allowDiskUse`
+/// as the command sets it.
+fn through_counted<B: Backend + ?Sized>(
+    ctx: &mut Ctx<'_, B>,
+    ns: &Namespace,
+    stages: &[Document],
+    allow_disk_use: bool,
+) -> Result<(u64, SpillStats), CommandError> {
+    let node = super::super::lock(ctx.shared).spill.clone();
+    let counter = node.store.clone().map(|s| std::sync::Arc::new(Counting::new(s)));
+    let spill = super::super::Spill {
+        store: counter.clone().map(|c| c as std::sync::Arc<dyn SpillStore + Send + Sync>),
+        stage_bytes: node.stage_bytes,
+    };
+    let docs = super::super::aggregate::read_through_spilling(
+        ctx.backend,
+        ns,
+        (stages, None),
+        teseladb_range::read::ReadConcern::Local,
+        (spill, allow_disk_use),
+    )??
+    .0;
+    let n = u64::try_from(docs.len()).unwrap_or(u64::MAX);
+    Ok((n, counter.map(|c| c.stats()).unwrap_or_default()))
+}
+
 fn through<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
     ns: &Namespace,

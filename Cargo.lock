@@ -129,7 +129,10 @@ dependencies = [
 name = "teseladb-http"
 version = "0.1.0"
 dependencies = [
+ "teseladb-crypto",
+ "teseladb-tls",
  "teseladb-types",
+ "teseladb-x509",
 ]
 
 [[package]]
@@ -155,6 +158,13 @@ dependencies = [
  "teseladb-tls",
  "teseladb-types",
  "teseladb-x509",
+]
+
+[[package]]
+name = "teseladb-js"
+version = "0.1.0"
+dependencies = [
+ "teseladb-bson",
 ]
 
 [[package]]

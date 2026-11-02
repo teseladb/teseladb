@@ -12,13 +12,13 @@ pub const MAX_HEAD: usize = 64 << 10;
 /// Most bytes of a body, by default (a JWKS or an STS answer is a few kilobytes).
 pub const MAX_BODY: usize = 16 << 20;
 
-const CRLF: &[u8] = b"\r\n";
+pub(crate) const CRLF: &[u8] = b"\r\n";
 const VERSION: &str = "HTTP/1.1";
 /// The version of an HTTP/1.0 answer.
 const VERSION_1_0: &str = "HTTP/1.0";
-const CONTENT_LENGTH: &str = "content-length";
-const TRANSFER_ENCODING: &str = "transfer-encoding";
-const CHUNKED: &str = "chunked";
+pub(crate) const CONTENT_LENGTH: &str = "content-length";
+pub(crate) const TRANSFER_ENCODING: &str = "transfer-encoding";
+pub(crate) const CHUNKED: &str = "chunked";
 
 /// Why a message was refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,12 +53,12 @@ fn is_tchar(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)
 }
 
-fn is_token(s: &str) -> bool {
+pub(crate) fn is_token(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(is_tchar)
 }
 
 /// A field value without control characters other than tab.
-fn is_field_value(s: &str) -> bool {
+pub(crate) fn is_field_value(s: &str) -> bool {
     s.bytes().all(|b| b == b'\t' || (b >= 0x20 && b != 0x7f))
 }
 
@@ -166,7 +166,7 @@ impl Default for Limits {
 
 /// Where a chunked body is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Chunk {
+pub(crate) enum Chunk {
     Size,
     Data(usize),
     DataEnd,
@@ -199,17 +199,17 @@ pub struct ResponseReader {
     state: State,
 }
 
-fn malformed(what: &'static str) -> HttpError {
+pub(crate) fn malformed(what: &'static str) -> HttpError {
     HttpError::Malformed(what)
 }
 
 /// The position after the first `\r\n\r\n` of `buf`.
-fn head_end(buf: &[u8]) -> Option<usize> {
+pub(crate) fn head_end(buf: &[u8]) -> Option<usize> {
     buf.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4)
 }
 
 /// The position of the first `\r\n` of `buf`.
-fn line_end(buf: &[u8]) -> Option<usize> {
+pub(crate) fn line_end(buf: &[u8]) -> Option<usize> {
     buf.windows(2).position(|w| w == CRLF)
 }
 
@@ -366,43 +366,58 @@ impl ResponseReader {
         mut head: Response,
         mut chunk: Chunk,
     ) -> Result<Option<Response>, HttpError> {
-        loop {
-            match chunk {
-                Chunk::Size | Chunk::DataEnd | Chunk::Trailers => {
-                    let Some(end) = line_end(&self.buf) else {
-                        if self.buf.len() > self.limits.max_head {
-                            return Err(HttpError::TooLarge("chunk line"));
-                        }
-                        self.state = State::Body { head, framing: Framing::Chunked(chunk) };
-                        return Ok(None);
-                    };
-                    let line: Vec<u8> = self.buf.drain(..end + 2).take(end).collect();
-                    chunk = match chunk {
-                        Chunk::Size => {
-                            let size = line.split(|&b| b == b';').next().unwrap_or_default();
-                            let text =
-                                std::str::from_utf8(size).map_err(|_| malformed("chunk size"))?;
-                            let n = usize::from_str_radix(text.trim_end_matches([' ', '\t']), 16)
-                                .map_err(|_| malformed("chunk size"))?;
-                            if head.body.len().saturating_add(n) > self.limits.max_body {
-                                return Err(HttpError::TooLarge("body"));
-                            }
-                            if n == 0 { Chunk::Trailers } else { Chunk::Data(n) }
-                        }
-                        Chunk::DataEnd if line.is_empty() => Chunk::Size,
-                        Chunk::DataEnd => return Err(malformed("chunk end")),
-                        _ if line.is_empty() => return Ok(Some(head)),
-                        _ => Chunk::Trailers,
-                    };
-                }
-                Chunk::Data(n) => {
-                    let take = n.min(self.buf.len());
-                    head.body.extend(self.buf.drain(..take));
-                    chunk = if take == n { Chunk::DataEnd } else { Chunk::Data(n - take) };
-                    if take < n {
-                        self.state = State::Body { head, framing: Framing::Chunked(chunk) };
-                        return Ok(None);
+        match decode_chunked(&mut self.buf, &mut head.body, &mut chunk, self.limits)? {
+            true => Ok(Some(head)),
+            false => {
+                self.state = State::Body { head, framing: Framing::Chunked(chunk) };
+                Ok(None)
+            }
+        }
+    }
+}
+
+/// Takes the chunks of a chunked body (RFC 9112, section 7.1) from `buf` into `body`, from where
+/// `chunk` says it is; whether the body ended. Trailer fields are read and dropped.
+pub(crate) fn decode_chunked(
+    buf: &mut Vec<u8>,
+    body: &mut Vec<u8>,
+    chunk: &mut Chunk,
+    limits: Limits,
+) -> Result<bool, HttpError> {
+    loop {
+        match *chunk {
+            Chunk::Size | Chunk::DataEnd | Chunk::Trailers => {
+                let Some(end) = line_end(buf) else {
+                    if buf.len() > limits.max_head {
+                        return Err(HttpError::TooLarge("chunk line"));
                     }
+                    return Ok(false);
+                };
+                let line: Vec<u8> = buf.drain(..end + 2).take(end).collect();
+                *chunk = match *chunk {
+                    Chunk::Size => {
+                        let size = line.split(|&b| b == b';').next().unwrap_or_default();
+                        let text =
+                            std::str::from_utf8(size).map_err(|_| malformed("chunk size"))?;
+                        let n = usize::from_str_radix(text.trim_end_matches([' ', '\t']), 16)
+                            .map_err(|_| malformed("chunk size"))?;
+                        if body.len().saturating_add(n) > limits.max_body {
+                            return Err(HttpError::TooLarge("body"));
+                        }
+                        if n == 0 { Chunk::Trailers } else { Chunk::Data(n) }
+                    }
+                    Chunk::DataEnd if line.is_empty() => Chunk::Size,
+                    Chunk::DataEnd => return Err(malformed("chunk end")),
+                    _ if line.is_empty() => return Ok(true),
+                    _ => Chunk::Trailers,
+                };
+            }
+            Chunk::Data(n) => {
+                let take = n.min(buf.len());
+                body.extend(buf.drain(..take));
+                *chunk = if take == n { Chunk::DataEnd } else { Chunk::Data(n - take) };
+                if take < n {
+                    return Ok(false);
                 }
             }
         }

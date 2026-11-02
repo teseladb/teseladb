@@ -607,13 +607,39 @@ impl SetWindowFields {
     }
 
     /// `docs` with the output fields, partitions in the order of their keys.
+    /// Past the stage's limit, without `allowDiskUse` it fails with 292 and with it sorts
+    /// through the node's store (010 FR-010, T024).
     pub fn run(&self, docs: Vec<Document>, env: &dyn Env) -> Result<Vec<Document>, MqlError> {
-        let partitions = self.partitions(docs, env)?;
+        let limit = env.stage_memory_limit();
+        crate::pipeline::errors::check_sort_memory(&docs, env.allow_disk_use(), limit)?;
+        let store = env.spill().filter(|_| env.allow_disk_use());
+        let partitions = match store {
+            Some(store) if crate::pipeline::errors::bytes_of(&docs) > limit => {
+                self.partitions_spilled(docs, env, (limit, store))?
+            }
+            _ => self.partitions(docs, env)?,
+        };
         let mut out = Vec::new();
         for docs in partitions {
             out.extend(self.run_partition(docs, env)?);
         }
         Ok(out)
+    }
+
+    /// The partition of document `d`.
+    fn partition_key(&self, d: &Document, env: &dyn Env) -> Result<Value, MqlError> {
+        Ok(match &self.partition {
+            None => Value::Null,
+            Some(e) => match e.eval(d, &env.scope(d))? {
+                Some(Value::Array(_)) => {
+                    return Err(error(
+                        TYPE_MISMATCH,
+                        "An expression used to partition cannot evaluate to value of type array",
+                    ));
+                }
+                v => v.unwrap_or(Value::Null),
+            },
+        })
     }
 
     /// The partitions of `docs`, each sorted, in the order of their keys.
@@ -627,18 +653,7 @@ impl SetWindowFields {
         let mut index: HashMap<Vec<u8>, usize> = HashMap::new();
         let mut parts: Vec<(Value, Vec<Document>)> = Vec::new();
         for d in docs {
-            let key = match &self.partition {
-                None => Value::Null,
-                Some(e) => match e.eval(&d, &env.scope(&d))? {
-                    Some(Value::Array(_)) => {
-                        return Err(error(
-                            TYPE_MISMATCH,
-                            "An expression used to partition cannot evaluate to value of type array",
-                        ));
-                    }
-                    v => v.unwrap_or(Value::Null),
-                },
-            };
+            let key = self.partition_key(&d, env)?;
             let canon = crate::pipeline::group_key(&key, col);
             match index.get(&canon) {
                 Some(i) => parts[*i].1.push(d),
@@ -657,6 +672,59 @@ impl SetWindowFields {
             });
         }
         Ok(out)
+    }
+
+    /// The partitions of `docs` sorted by partition and `sortBy` through `store` in runs of at
+    /// most `limit` bytes (010 FR-010, T024).
+    fn partitions_spilled(
+        &self,
+        docs: Vec<Document>,
+        env: &dyn Env,
+        (limit, store): (usize, &dyn crate::pipeline::spill::SpillStore),
+    ) -> Result<Vec<Vec<Document>>, MqlError> {
+        let collation = env.collation();
+        let col = collation.get();
+        let mut wrapped = Vec::with_capacity(docs.len());
+        for d in docs {
+            let key = self.partition_key(&d, env)?;
+            wrapped.push(crate::pipeline::spill::with_key(d, key));
+        }
+        type Key = (Vec<u8>, Value, Vec<Value>);
+        let keys = |w: &Document| -> Result<Key, MqlError> {
+            let p = crate::pipeline::spill::key_of(w);
+            let sort = match &self.sort {
+                Some(s) => s.key(w, col)?,
+                None => Vec::new(),
+            };
+            Ok((crate::pipeline::group_key(&p, col), p, sort))
+        };
+        // Keys of one partition compare equal even where the collation still tells them apart.
+        let cmp = |a: &Key, b: &Key| {
+            let by_partition = match a.0 == b.0 {
+                true => std::cmp::Ordering::Equal,
+                false => order(&Some(a.1.clone()), &Some(b.1.clone()), col)?,
+            };
+            match (by_partition, &self.sort) {
+                (std::cmp::Ordering::Equal, Some(s)) => s.compare(&a.2, &b.2, col),
+                (o, _) => Ok(o),
+            }
+        };
+        let mut out: Vec<(Vec<u8>, Vec<Document>)> = Vec::new();
+        crate::pipeline::spill::external_sort(
+            wrapped,
+            keys,
+            cmp,
+            (limit, store),
+            |(canon, _, _), w| {
+                let d = crate::pipeline::spill::without_key(w);
+                match out.last_mut() {
+                    Some((c, part)) if *c == canon => part.push(d),
+                    _ => out.push((canon, vec![d])),
+                }
+                Ok(())
+            },
+        )?;
+        Ok(out.into_iter().map(|(_, part)| part).collect())
     }
 
     fn run_partition(&self, docs: Vec<Document>, env: &dyn Env) -> Result<Vec<Document>, MqlError> {

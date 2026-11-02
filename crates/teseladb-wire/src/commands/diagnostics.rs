@@ -754,11 +754,9 @@ pub(crate) fn storage_stats<B: Backend + ?Sized>(
         CollectionKind::TimeSeries(_) => {
             let avg_bucket = if count > 0 { bytes / u64::try_from(count).unwrap_or(1) } else { 0 };
             let stats = lock(shared).timeseries.get(&c.id).cloned().unwrap_or_default();
-            let mut series = Document::new()
-                .with("bucketsNs", full(ns))
-                .with("bucketCount", number(count))
-                .with("avgBucketSize", number(i64::try_from(avg_bucket).unwrap_or(i64::MAX)));
-            for (k, v) in stats.fields() {
+            let mut series = Document::new().with("bucketsNs", full(ns));
+            let avg = i64::try_from(avg_bucket).unwrap_or(i64::MAX);
+            for (k, v) in stats.fields(count, avg) {
                 series.push(k, number(v));
             }
             d.push("timeseries", series);
@@ -866,13 +864,9 @@ pub fn coll_stats<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document,
         let avg_bucket = if count > 0 { bytes / u64::try_from(count).unwrap_or(1) } else { 0 };
         // The bucket counters of this node since it started, as RefDb's catalog counts them.
         let stats = lock(ctx.shared).timeseries.get(&c.id).cloned().unwrap_or_default();
-        let mut ts = Document::new()
-            .with("bucketsNs", full(&ns))
-            .with("avgBucketSize", number(i64::try_from(avg_bucket).unwrap_or(i64::MAX)));
-        let mut counters = stats.fields();
-        counters.push(("bucketCount", count));
-        counters.sort_by_key(|(k, _)| *k);
-        for (k, v) in counters {
+        let mut ts = Document::new().with("bucketsNs", full(&ns));
+        let avg = i64::try_from(avg_bucket).unwrap_or(i64::MAX);
+        for (k, v) in stats.fields(count, avg) {
             ts.push(k, number(v));
         }
         d.push("timeseries", ts);

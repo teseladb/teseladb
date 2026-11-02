@@ -70,6 +70,29 @@ fn in_watch(w: &Watch<'_>, ns: &Namespace) -> bool {
 }
 
 /// The type of a collection's event, and whether a time series gives none.
+/// The description `shardCollection` writes with its catalog change: what the
+/// `shardCollection` event shows (measured on a `refrouter` 9.0.4 on 02-11).
+pub fn shard_description(
+    key: &Document,
+    unique: bool,
+    capped: bool,
+) -> Result<Vec<u8>, CommandError> {
+    let d = Document::new()
+        .with(SHARD_KEY_FIELD, key.clone())
+        .with("unique", unique)
+        .with("presplitHashedZones", false)
+        .with("capped", capped);
+    Ok(d.to_bytes()?)
+}
+
+/// The field of a `shardCollection`'s description, which no `collMod` writes.
+const SHARD_KEY_FIELD: &str = "shardKey";
+
+/// Whether a catalog change's description is that of a `shardCollection`.
+fn is_shard(description: &[u8]) -> bool {
+    RawDoc::from_bytes(description).is_ok_and(|d| d.get(SHARD_KEY_FIELD).is_some())
+}
+
 fn kind_of(c: &CollectionEntry) -> Result<Option<CollectionKind>, CommandError> {
     match kinds::kind_of(c)? {
         CollectionKind::TimeSeries(_) => Ok(None),
@@ -81,10 +104,39 @@ fn kind_of(c: &CollectionEntry) -> Result<Option<CollectionKind>, CommandError> 
 pub fn event_of(w: &Watch<'_>, r: &DdlRecord) -> Result<Option<ChangeEvent>, CommandError> {
     let key = ddl_key(r.mark, r.op);
     let token = |kind| ResumeToken::new(key.clone(), kind);
+    // A resharding's own catalog changes (018 FR-002): its critical section gives no event and
+    // its rename is the `reshardCollection` or `refineCollectionShardKey` of the collection.
+    match &r.change {
+        DdlChange::Modify { description, .. } if super::reshard::is_cutover_change(description) => {
+            return Ok(None);
+        }
+        DdlChange::Rename { from, to, target, .. } => {
+            if let Some((refine, uuid_of, desc)) =
+                super::reshard::cutover_event(from, target.as_ref())?
+            {
+                let kind = if refine {
+                    EventKind::RefineCollectionShardKey
+                } else {
+                    EventKind::ReshardCollection
+                };
+                if !in_watch(w, to) || !shown(kind, w.expanded) {
+                    return Ok(None);
+                }
+                let mut e = ChangeEvent::catalog(token(kind), event_ns(to));
+                e.collection_uuid = Some(uuid_of);
+                e.operation_description = Some(desc);
+                return Ok(Some(e));
+            }
+        }
+        _ => {}
+    }
     let (kind, ns) = match &r.change {
         DdlChange::Create { ns, .. } => (EventKind::Create, ns),
         DdlChange::Drop { ns, .. } => (EventKind::Drop, ns),
         DdlChange::Rename { from, .. } => (EventKind::Rename, from),
+        DdlChange::Modify { ns, description, .. } if is_shard(description) => {
+            (EventKind::ShardCollection, ns)
+        }
         DdlChange::Modify { ns, .. } | DdlChange::ModifyIndex { ns, .. } => (EventKind::Modify, ns),
         DdlChange::CreateIndex { ns, .. } => (EventKind::CreateIndexes, ns),
         DdlChange::DropIndex { ns, .. } => (EventKind::DropIndexes, ns),
@@ -146,10 +198,13 @@ pub fn event_of(w: &Watch<'_>, r: &DdlRecord) -> Result<Option<ChangeEvent>, Com
             e.collection_uuid = Some(collection.uuid);
             e.operation_description = Some(desc);
         }
+        DdlChange::Modify { collection, description, .. } if kind == EventKind::ShardCollection => {
+            e.collection_uuid = Some(collection.uuid);
+            e.operation_description = Some(doc(description)?);
+        }
         DdlChange::Modify { collection, description, .. } => {
             e.collection_uuid = Some(collection.uuid);
-            e.operation_description =
-                Some(if description.is_empty() { Document::new() } else { doc(description)? });
+            e.operation_description = Some(doc(description)?);
             let before = Document::new().with("collectionOptions", options_before(collection)?);
             e.state_before = Some(before);
         }
@@ -181,6 +236,9 @@ pub fn ends(w: &Watch<'_>, r: &DdlRecord) -> bool {
     match &r.change {
         DdlChange::Drop { ns, .. } => {
             invalidates(w.scope, watched, EventKind::Drop, (&ns.db, Some(&ns.coll)))
+        }
+        DdlChange::Rename { from, .. } if from.coll.starts_with(super::reshard::TEMP_PREFIX) => {
+            false
         }
         DdlChange::Rename { from, to, target, .. } => {
             let on = |n: &Namespace| {
