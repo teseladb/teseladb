@@ -277,14 +277,15 @@ impl Indexer {
         crate::query::paginate::arrange(found, spec, &self.definition)
     }
 
-    /// The document of `$searchMeta` for `spec`: the count over every segment.
+    /// The document of `$searchMeta` for `spec`: the count and the facets over every segment,
+    /// each segment counting its documents and the counts added up (FR-015).
     pub fn meta(&self, spec: &Document) -> Result<Document, SearchError> {
-        let total = search::count_total(spec)?;
-        let mut n = 0;
+        let mut partial = search::facet::Partial::default();
         for s in &self.segments {
-            n += search::run(&s.index, spec)?.len();
+            partial = partial.plus(&search::meta_partial(&s.index, spec)?);
         }
-        Ok(search::count_document(total, n))
+        let first = &self.segments[0].index;
+        search::meta_finish(first, spec, &partial)
     }
 }
 

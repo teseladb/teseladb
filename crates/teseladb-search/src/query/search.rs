@@ -118,6 +118,8 @@ enum Operator {
     },
     /// Nothing (a `queryString` of only excluded clauses).
     Empty,
+    /// Every document, scored 1 (a `facet` collector without an operator).
+    All,
     /// An operator whose scores `score` changes as a whole.
     Scored(Box<Operator>, Score),
     /// `embeddedDocument`.
@@ -181,10 +183,48 @@ pub fn wants_details(spec: &Document) -> bool {
 }
 
 /// The document of `$searchMeta` (and `$$SEARCH_META`) for `spec`: the count of the documents
-/// it selects, as `lowerBound` unless `count.type` is `total` (measured: the count is exact).
+/// it selects, as `lowerBound` unless `count.type` is `total` (measured: the count is exact),
+/// and the buckets of its `facet` collector.
 pub fn meta(index: &MemIndex, spec: &Document) -> Result<Document, SearchError> {
-    let total = count_total(spec)?;
-    Ok(count_document(total, run(index, spec)?.len()))
+    let partial = meta_partial(index, spec)?;
+    meta_finish(index, spec, &partial)
+}
+
+/// What one segment counts for [`meta`]: the documents it selects and its facets' counts.
+pub fn meta_partial(index: &MemIndex, spec: &Document) -> Result<facet::Partial, SearchError> {
+    count_total(spec)?;
+    match collector(index, spec)? {
+        Some(c) => c.partial(index),
+        None => Ok(facet::Partial { matched: run(index, spec)?.len(), ..Default::default() }),
+    }
+}
+
+/// The document of [`meta`] from the counts of every segment added up (`index`, any segment,
+/// reads the query again).
+pub fn meta_finish(
+    index: &MemIndex,
+    spec: &Document,
+    partial: &facet::Partial,
+) -> Result<Document, SearchError> {
+    let mut out = count_document(count_total(spec)?, partial.matched);
+    if let Some(c) = collector(index, spec)? {
+        out.push("facet", c.finish(partial));
+    }
+    Ok(out)
+}
+
+/// The `facet` collector of `spec`, if it has one (measured: never beside an operator).
+fn collector(index: &MemIndex, spec: &Document) -> Result<Option<facet::Collector>, SearchError> {
+    let Some(v) = spec.get("facet") else { return Ok(None) };
+    if spec.iter().any(|(k, _)| OPERATORS.contains(&k)) {
+        return Err(SearchError(
+            "Top-level operator is not allowed to be used with collector".to_owned(),
+        ));
+    }
+    if let Some((k, _)) = spec.iter().find(|(k, _)| *k != "facet" && !STAGE_OPTIONS.contains(k)) {
+        return Err(SearchError(format!("unrecognized field \"{k}\"")));
+    }
+    facet::parse(index, v).map(Some)
 }
 
 /// Whether `count.type` of `spec` asks for `total` rather than `lowerBound`.
@@ -212,6 +252,12 @@ fn parse_root(index: &MemIndex, spec: &Document) -> Result<Operator, SearchError
     // `refsearch`'s check, which `$searchMeta` reaches (`refnode` checks it first for `$search`).
     if spec.get("scoreDetails").is_some_and(|v| !matches!(v, Value::Boolean(_))) {
         return Err(shape("scoreDetails", "must be a boolean"));
+    }
+    if let Some(c) = collector(index, spec)? {
+        return Ok(match c.operator {
+            Some(op) => *op,
+            None => Operator::All,
+        });
     }
     parse_at(index, spec, "")
 }
@@ -640,6 +686,7 @@ fn eval(index: &MemIndex, op: &Operator) -> Result<BTreeMap<u32, f32>, SearchErr
             rescored(index, s, p.score())
         }
         Operator::Empty => Ok(BTreeMap::new()),
+        Operator::All => Ok(index.live().map(|d| (d, 1.0)).collect()),
         Operator::Precomputed(s) => Ok(s.clone()),
         Operator::Passed(p) => Ok(p.scores.clone()),
         Operator::HasRoot(_) => Err(outside_embedded("hasRoot")),
@@ -807,6 +854,7 @@ mod autocomplete;
 mod describe;
 mod embedded;
 mod explain;
+pub mod facet;
 mod function;
 mod geo;
 mod knn;

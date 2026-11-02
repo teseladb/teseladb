@@ -180,6 +180,7 @@ fn score_of(op: &Operator) -> Option<&Score> {
         Operator::Knn(k) => &k.score,
         Operator::Synonyms(s) => &s.score,
         Operator::Empty
+        | Operator::All
         | Operator::Precomputed(_)
         | Operator::Passed(_)
         | Operator::HasRoot(_)
@@ -338,6 +339,7 @@ fn operator_name(op: &Operator) -> &'static str {
     match op {
         Operator::Knn(_) => "knnBeta",
         Operator::Empty => "empty",
+        Operator::All => "*:*",
         Operator::Embedded(_) => "embeddedDocument",
         Operator::HasRoot(_) => "hasRoot",
         Operator::HasAncestor { .. } => "hasAncestor",
