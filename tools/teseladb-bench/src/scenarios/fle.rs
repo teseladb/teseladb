@@ -22,10 +22,6 @@ const COLLECTION: &str = "fle";
 /// The metadata collections of the collection, by their default names.
 const ESC: &str = "enxcol_.fle.esc";
 const ECOC: &str = "enxcol_.fle.ecoc";
-/// The answer of a catalog change the cluster could not take in time, and how long the setup
-/// asks again after it.
-const NO_LEADER: &str = "Group 0 has no leader to take the catalog change";
-const SETUP_WAIT: std::time::Duration = std::time::Duration::from_secs(180);
 /// The array of tags of an encrypted document.
 const SAFE_CONTENT: &str = "__safeContent__";
 /// The encrypted field.
@@ -171,20 +167,8 @@ fn load(c: &mut Client, records: u64) -> Result<i64, String> {
     for name in [COLLECTION, ESC, ECOC] {
         let _ = c.command(DB, doc(vec![("drop", Value::String(name.into()))]));
     }
-    let started = std::time::Instant::now();
     for command in setup() {
-        // Open defect (017 T011): an index change in the first seconds of a cluster waits out
-        // its 30 s behind the reads of the indexes that early writes without an answer hold, and
-        // answers NotWritablePrimary; nothing changed, so it goes again within a bound.
-        loop {
-            match run_on(c, command.clone()) {
-                Err(e) if e.contains(NO_LEADER) && started.elapsed() < SETUP_WAIT => {}
-                other => {
-                    other?;
-                    break;
-                }
-            }
-        }
+        run_on(c, command)?;
     }
     let records = i64::try_from(records).unwrap_or(i64::MAX).max(PER_VALUE);
     let mut next = 0;
