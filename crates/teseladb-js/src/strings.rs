@@ -284,7 +284,7 @@ fn last_index_of(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 
 fn no_regex(it: &mut Interp, v: &Val) -> R<()> {
     if matches!(v, Val::Obj(o) if matches!(o.borrow().kind, Kind::RegExp(..))) {
-        return it.type_error(&format!("Invalid type: first can't be a Regular Expression"));
+        return it.type_error("Invalid type: first can't be a Regular Expression");
     }
     Ok(())
 }
