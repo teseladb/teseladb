@@ -216,6 +216,11 @@ pub struct NodeConfig {
     /// Bytes of memory the node may use (`--memory-limit`, 012 FR-013); `None`: three quarters of
     /// the memory the process has.
     pub memory_limit: Option<u64>,
+    /// Where the cores run (`--cpu-list`, 012 FR-006).
+    pub affinity: crate::affinity::Affinity,
+    /// Whether the files the node writes outside its cores' disks (the search segments) use
+    /// `O_DIRECT` (012 FR-003): what `--direct-io` decided for the cores' disks.
+    pub direct_io: bool,
     /// How the clients' port starts its executors and runs the TTL monitor; a test changes them.
     #[doc(hidden)]
     pub client_hooks: crate::client_listener::Hooks,
@@ -248,6 +253,8 @@ impl Default for NodeConfig {
             data_dir: None,
             tags: Vec::new(),
             memory_limit: None,
+            affinity: crate::affinity::Affinity::Off,
+            direct_io: false,
             client_hooks: crate::client_listener::Hooks::default(),
         }
     }
@@ -440,6 +447,8 @@ struct CoreSpec {
     http_forwards: Option<crate::logic::HttpForwards>,
     /// Which cores of the node hold each range (007 FR-011).
     hosting: Hosting,
+    /// The CPU the core's thread is pinned to (012 FR-006).
+    cpu: Option<usize>,
 }
 
 /// The data ranges of a core: its LSM recovered. Its ranges open as Group 0 gives them, each from
@@ -525,6 +534,13 @@ fn run_core<D: Disk + Send + 'static>(
     mut disk: D,
     ready: mpsc::Sender<Result<CoreSender<NodeMsg>, NodeError>>,
 ) -> io::Result<Option<D>> {
+    // Pinned before it allocates anything, so that its memory is on its CPU's node.
+    if let Some(cpu) = spec.cpu
+        && let Err(e) = crate::affinity::place_current(cpu)
+    {
+        let _ = ready.send(Err(NodeError::Config(format!("core {}: CPU {cpu}: {e}", spec.core))));
+        return Ok(None);
+    }
     let logic = match build_core(&spec, &mut disk) {
         Ok(l) => l,
         Err(e) => {
@@ -567,6 +583,8 @@ pub struct Node<D> {
     enroller: Option<Enroller>,
     /// Its memory and the split between its cores (012 FR-013).
     memory: Option<crate::memory::MemoryBudget>,
+    /// The CPU of each core (012 FR-006).
+    cpus: Vec<Option<usize>>,
     /// Each core's LSM configuration.
     lsm: LsmConfig,
     /// Set by a client's `shutdown` (007 FR-018).
@@ -734,6 +752,10 @@ impl<D: Disk + Send + 'static> Node<D> {
             .or_else(teseladb_sys::memory_limit::host_default)
             .map(|total| crate::memory::MemoryBudget::new(total, cores));
         let lsm = memory.map_or_else(|| cfg.lsm.clone(), |m| m.lsm(&cfg.lsm));
+        // Where each core runs (012 FR-006).
+        let allowed = teseladb_sys::numa::allowed_cpus()?;
+        let cpus = crate::affinity::core_cpus(&cfg.affinity, cores, &allowed)
+            .map_err(NodeError::Config)?;
         let mut meta = open_node(&mut meta_disk, u32::from(cores), cluster_id, now_ms())?;
         // A node that joins gets its identifier and cluster from the cluster; the node that creates
         // the cluster is node 1 (Group 0 `Bootstrap`).
@@ -785,13 +807,23 @@ impl<D: Disk + Send + 'static> Node<D> {
             cfg.client.as_ref().map_or_else(NodeSessions::default, ClientConfig::sessions);
         if let Some(dir) = &cfg.data_dir {
             // The segments of the search indexes, one file per index (011 FR-012).
-            crate::search_segments::open(dir, &mut tables.search)?;
+            crate::search_segments::open(dir, &mut tables.search, cfg.direct_io)?;
             // What aggregation stages write past their memory (010 FR-010).
             let disk = teseladb_io::FileDisk::open(dir.join(crate::spill::SPILL_DIR))?;
             let spill =
                 crate::spill::DiskSpill::open(disk).map_err(|e| io::Error::other(e.message))?;
             tables.spill.store = Some(Arc::new(spill));
         }
+        // The search segments in memory stay within the cores' parts for them (D-105): past
+        // them, indexes go to their files until a query needs them again.
+        tables.search.set_memory_limit(
+            memory.map(|m| m.part(crate::memory::Component::SearchSegments) * u64::from(cores)),
+        );
+        // The open cursors' computed results stay within the cores' parts for cursors (D-105).
+        tables.spill.cursor_bytes = memory.map(|m| {
+            let part = m.part(crate::memory::Component::Cursors) * u64::from(cores);
+            usize::try_from(part).unwrap_or(usize::MAX)
+        });
         // A stage holds at most the core's part for aggregations (D-105).
         tables.spill.stage_bytes = memory.map(|m| {
             usize::try_from(m.part(crate::memory::Component::Aggregations)).unwrap_or(usize::MAX)
@@ -846,6 +878,7 @@ impl<D: Disk + Send + 'static> Node<D> {
                 presence: (k == 0).then(|| presence.clone()),
                 http_forwards: (k == 0).then(|| http_forwards_tx.clone()),
                 hosting: hosting.clone(),
+                cpu: cpus[usize::from(k)],
             };
             let (tx, rx) = mpsc::channel();
             let spawned = thread::Builder::new()
@@ -1025,6 +1058,7 @@ impl<D: Disk + Send + 'static> Node<D> {
             routes,
             enroller: cfg.enroller.clone(),
             memory,
+            cpus,
             lsm,
             shutdown,
             _lock: lock,
@@ -1035,6 +1069,11 @@ impl<D: Disk + Send + 'static> Node<D> {
     /// and the system did not say how much there is.
     pub fn memory(&self) -> Option<crate::memory::MemoryBudget> {
         self.memory
+    }
+
+    /// The CPU each core is pinned to, by core (012 FR-006); `None` for a core left unpinned.
+    pub fn cpus(&self) -> &[Option<usize>] {
+        &self.cpus
     }
 
     /// The LSM configuration of each core: the node's with the memtables and the block cache in

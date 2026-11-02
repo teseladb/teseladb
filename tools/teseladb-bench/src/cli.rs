@@ -34,6 +34,8 @@ pub struct Args {
     pub concurrency: usize,
     /// Operations per second of an open loop; a closed loop without it.
     pub rate: Option<f64>,
+    /// Most cores of `cores-curve` (012 FR-009).
+    pub max_cores: u16,
 }
 
 /// Output format of `--format`.
@@ -68,15 +70,16 @@ impl Default for Args {
             target: None,
             concurrency: 1,
             rate: None,
+            max_cores: 16,
         }
     }
 }
 
 /// Usage.
 pub const USAGE: &str = "usage: teseladb-bench --scenario raftlog|raftlog-recover|deflate|bson|js|keys|lsm|\
-                         lsm-sustained|write|read|failover|follower-read|group0-limits|split|add-node|rebalance|reference|wire|crud|aggregate|sort|group-large|txn|txn-readers|contention|tls-handshake|scram|timeseries|ycsb-a..ycsb-f [--data dir] [--json file] \
+                         lsm-sustained|write|read|failover|follower-read|group0-limits|split|add-node|rebalance|reference|wire|crud|aggregate|sort|group-large|txn|txn-readers|contention|tls-handshake|scram|timeseries|ycsb-a..ycsb-f|cores-curve|disk-usage [--data dir] [--json file] \
                          [--duration 3s] [--warmup 10s] [--records N] [--groups N] [--format text|json] \
-                         [--target refdb://host:port] [--concurrency N] [--rate ops/s] \
+                         [--target refdb://host:port] [--concurrency N] [--rate ops/s] [--max-cores N] \
                          [--baseline file] [--save-baseline file]\n       \
                          teseladb-bench --compare report.json --baseline file";
 
@@ -117,6 +120,13 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
             "--save-baseline" => out.save_baseline = Some(PathBuf::from(value()?)),
             "--compare" => out.compare = Some(PathBuf::from(value()?)),
             "--target" => out.target = Some(value()?),
+            "--max-cores" => {
+                out.max_cores = value()?
+                    .parse()
+                    .ok()
+                    .filter(|&n| n > 0)
+                    .ok_or("--max-cores needs a number above 0")?
+            }
             "--concurrency" => {
                 out.concurrency = value()?
                     .parse()
@@ -181,6 +191,9 @@ mod tests {
         assert!(p("--scenario s --groups x").is_err());
         assert!(p("--scenario s --duration 3h").is_err());
         assert!(p("--scenario s --duration x").is_err());
+        assert_eq!(a.max_cores, 16, "012 FR-009");
+        assert_eq!(p("--scenario cores-curve --max-cores 4").unwrap().max_cores, 4);
+        assert!(p("--scenario s --max-cores 0").unwrap_err().contains("--max-cores"));
     }
 
     #[test]

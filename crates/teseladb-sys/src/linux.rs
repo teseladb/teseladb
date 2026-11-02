@@ -204,6 +204,76 @@ pub(crate) fn pin_to_cpu(cpu: usize) -> std::io::Result<bool> {
 mod tests {
     use super::*;
 
+    unsafe extern "C" {
+        fn pthread_kill(thread: std::os::unix::thread::RawPthread, sig: i32) -> i32;
+        fn signal(sig: i32, handler: extern "C" fn(i32)) -> usize;
+    }
+
+    const SIGUSR1: i32 = 10;
+
+    extern "C" fn ignore(_sig: i32) {}
+
+    #[test]
+    fn preallocate_rejects_a_size_beyond_i64() {
+        let path =
+            std::env::temp_dir().join(format!("teseladb-sys-prealloc-{}", std::process::id()));
+        let file = File::create(&path).unwrap();
+        let err = preallocate(&file, u64::MAX).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn system_call_errors_are_returned() {
+        // Waits on something that is not an epoll descriptor.
+        let not_an_epoll = OwnedFd::from(std::fs::File::open("/dev/null").unwrap());
+        let p =
+            Poller { ep: not_an_epoll, wake: Arc::new(std::fs::File::open("/dev/null").unwrap()) };
+        let err = p.wait(&mut Vec::new(), Some(Duration::ZERO)).unwrap_err();
+        assert_ne!(err.raw_os_error(), Some(EINTR));
+        // A wake-up that cannot be written is an error, not a pending wake-up.
+        assert!(p.waker().wake().is_err());
+    }
+
+    #[test]
+    fn a_wake_on_a_full_counter_is_already_pending() {
+        let p = Poller::new().unwrap();
+        // The largest value an eventfd counter holds: one more would block.
+        (&*p.wake).write_all(&(u64::MAX - 1).to_ne_bytes()).unwrap();
+        p.waker().wake().unwrap();
+        let mut out = Vec::new();
+        p.wait(&mut out, Some(Duration::ZERO)).unwrap();
+        assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn a_signal_during_the_wait_returns_without_events() {
+        // SAFETY: `ignore` is a valid handler for the whole program and does nothing.
+        assert_ne!(unsafe { signal(SIGUSR1, ignore) }, usize::MAX);
+        // The signal may arrive before the thread enters `epoll_wait`: then the wait lasts its
+        // whole timeout and the round is repeated.
+        let interrupted = (0..50).any(|_| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let waiter = std::thread::spawn(move || {
+                let p = Poller::new().unwrap();
+                let mut out = Vec::new();
+                tx.send(()).unwrap();
+                let start = std::time::Instant::now();
+                p.wait(&mut out, Some(Duration::from_secs(2))).unwrap();
+                (start.elapsed(), out.len())
+            });
+            rx.recv().unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+            use std::os::unix::thread::JoinHandleExt;
+            // SAFETY: the thread is alive until `join`; `SIGUSR1` has a handler that does nothing.
+            assert_eq!(unsafe { pthread_kill(waiter.as_pthread_t(), SIGUSR1) }, 0);
+            let (elapsed, events) = waiter.join().unwrap();
+            assert_eq!(events, 0);
+            elapsed < Duration::from_secs(1)
+        });
+        assert!(interrupted, "no wait was interrupted by the signal");
+    }
+
     #[test]
     fn struct_layouts_match_the_system_headers() {
         let expected = if cfg!(target_arch = "x86_64") { 12 } else { 16 };
