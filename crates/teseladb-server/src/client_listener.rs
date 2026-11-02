@@ -412,6 +412,8 @@ pub struct ClientListener {
     workers: Vec<(Arc<Waker>, JoinHandle<()>)>,
     /// The thread that reaps and refreshes the node's sessions, with a node behind the port.
     keeper: Option<JoinHandle<()>>,
+    /// The thread that builds the node's search indexes, with a node behind the port.
+    builder: Option<JoinHandle<()>>,
     open: Arc<AtomicUsize>,
 }
 
@@ -522,6 +524,14 @@ impl ClientListener {
         };
         let t =
             thread::Builder::new().name("client-accept".into()).spawn(move || acceptor.run())?;
+        let builder = match state.handle() {
+            Some(h) => {
+                let backend =
+                    ServerBackend::new(h, seed(workers.saturating_add(1))).with_diag(diag.clone());
+                Some(crate::search_builder::spawn(backend, shared.clone(), stop.clone())?)
+            }
+            None => None,
+        };
         let keeper = match state.handle() {
             Some(h) => {
                 let k = Keeper {
@@ -537,7 +547,15 @@ impl ClientListener {
             }
             None => None,
         };
-        Ok(ClientListener { addrs, stop, acceptor: (waker, t), workers: handles, keeper, open })
+        Ok(ClientListener {
+            addrs,
+            stop,
+            acceptor: (waker, t),
+            workers: handles,
+            keeper,
+            builder,
+            open,
+        })
     }
 
     /// The addresses it listens on (with the ports the system chose for port 0).
@@ -559,7 +577,7 @@ impl ClientListener {
             let _ = waker.wake();
             let _ = t.join();
         }
-        if let Some(k) = self.keeper {
+        for k in self.keeper.into_iter().chain(self.builder) {
             k.thread().unpark();
             let _ = k.join();
         }

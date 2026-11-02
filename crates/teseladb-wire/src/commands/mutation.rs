@@ -1334,6 +1334,26 @@ fn backfill(
     Ok((puts, deletes, r))
 }
 
+/// The documents of `rows` (keys and stored bytes, as a scan reads them) the indexes of `rules`
+/// refuse, by their position in `rows`, with why. A duplicate in a unique index is no refusal: a
+/// build finds those once its scan is over.
+pub(crate) fn refusals(
+    rules: &Rules,
+    rows: &[(Vec<u8>, Vec<u8>)],
+) -> Result<Vec<(usize, CommandError)>, CommandError> {
+    let checker = Checker::new(rules, false)?;
+    let none = |_: &[u8]| None;
+    let mut out = Vec::new();
+    for (at, (key, bytes)) in rows.iter().enumerate() {
+        if let Err(e) = checker.entries_at(Some(key), None, Some(bytes), &none)
+            && e.code != DUPLICATE_KEY
+        {
+            out.push((at, e));
+        }
+    }
+    Ok(out)
+}
+
 fn now_of(ts: Hlc) -> Now {
     Now { millis: i64::try_from(ts.physical).unwrap_or(i64::MAX), timestamp: to_timestamp(ts) }
 }

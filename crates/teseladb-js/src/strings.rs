@@ -296,7 +296,8 @@ fn repeat(it: &mut Interp, this: &Val, a: &[Val]) -> R {
         return Err(it.error("RangeError", "repeat count must be non-negative"));
     }
     let total = (s.len() as f64) * n;
-    if total > (1u64 << 30) as f64 {
+    // Past the longest string (`Interp::max_string`).
+    if total > it.max_string() as f64 {
         return Err(it.error(
             "RangeError",
             "repeat count must be less than infinity and not overflow maximum string size",
@@ -311,7 +312,7 @@ fn concat(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     for x in a {
         s.push_str(&it.str_of(x)?);
     }
-    it.string(s)
+    it.joined_string(s)
 }
 
 fn at(it: &mut Interp, this: &Val, a: &[Val]) -> R {

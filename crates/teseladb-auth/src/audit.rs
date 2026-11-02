@@ -63,6 +63,7 @@ audit_types! {
     GrantPrivilegesToRole => "grantPrivilegesToRole",
     GrantRolesToRole => "grantRolesToRole",
     GrantRolesToUser => "grantRolesToUser",
+    HttpRequest => "httpRequest",
     Logout => "logout",
     RefineCollectionShardKey => "refineCollectionShardKey",
     RemoveShard => "removeShard",

@@ -159,3 +159,22 @@ fn transaction_scenarios_run_against_a_local_cluster() {
         assert!(hot.contains(name), "{name}: {hot}");
     }
 }
+
+/// `index-write` and `index-read` (009 FR-018, SC-002) against a local cluster: a write with three
+/// indexes in the document's range and with its index entries in another range, and the read by
+/// an index; `reference` queries by its index too (002 FR-020).
+#[test]
+fn index_write_and_read_run_against_a_local_cluster() {
+    let short = ["--duration", "300ms", "--warmup", "50ms", "--records", "200", "--format", "json"];
+    let write = metrics(&bench(&[&["--scenario", "index-write"][..], &short[..]].concat()));
+    for name in ["same_range.p50", "other_range.p50", "other_range.p99", "\"target\""] {
+        assert!(write.contains(name), "{name}: {write}");
+    }
+    let read = metrics(&bench(&[&["--scenario", "index-read"][..], &short[..]].concat()));
+    for name in ["index_read.p50", "index_read.p99", "200 documents"] {
+        assert!(read.contains(name), "{name}: {read}");
+    }
+    let reference =
+        metrics(&bench(&[&["--scenario", "reference", "--rate", "100"][..], &short[..]].concat()));
+    assert!(reference.contains("query.p50"), "{reference}");
+}

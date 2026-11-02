@@ -12,3 +12,6 @@ workspace = true
 
 [dependencies]
 teseladb-bson = { path = "../teseladb-bson" }
+
+[dev-dependencies]
+teseladb-types = { path = "../teseladb-types" }

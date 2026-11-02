@@ -744,6 +744,10 @@ impl Resharding {
         })?;
         self.target = backend.read_versions(&[])?.0;
         self.phase = Phase::Committed;
+        // The zones' intervals follow the new key order (018 FR-003).
+        if let Some(now) = backend.collection(&self.plan.ns)? {
+            super::zones::rekey(backend, &self.plan.ns, &now)?;
+        }
         Ok(())
     }
 

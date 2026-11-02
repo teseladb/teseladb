@@ -78,6 +78,14 @@ pub enum Op {
     GetMore,
     /// `killCursors`.
     KillCursor,
+    /// A change stream of a collection (FR-012).
+    WatchCollection,
+    /// A change stream of a database.
+    WatchDatabase,
+    /// A change stream of the cluster.
+    WatchCluster,
+    /// A transaction of 008 (FR-009).
+    Transaction,
     /// `listApiKeys` (FR-016).
     ListApiKeys,
     /// `createApiKey`.
@@ -150,9 +158,16 @@ pub const ROUTES: &[Route] = &[
     r("POST", coll!("/searchIndexes"), Op::CreateSearchIndexes, "createSearchIndexes"),
     r("PATCH", coll!("/searchIndexes/{name}"), Op::UpdateSearchIndex, "updateSearchIndex"),
     r("DELETE", coll!("/searchIndexes/{name}"), Op::DropSearchIndex, "dropSearchIndex"),
+    r("GET", coll!("/changeStream"), Op::WatchCollection, "aggregate"),
+    r("POST", coll!("/changeStream"), Op::WatchCollection, "aggregate"),
+    r("GET", "/databases/{db}/changeStream", Op::WatchDatabase, "aggregate"),
+    r("POST", "/databases/{db}/changeStream", Op::WatchDatabase, "aggregate"),
+    r("GET", "/changeStream", Op::WatchCluster, "aggregate"),
+    r("POST", "/changeStream", Op::WatchCluster, "aggregate"),
     r("POST", "/databases/{db}/command", Op::Command, "command"),
     r("GET", "/cursors/{id}", Op::GetMore, "getMore"),
     r("DELETE", "/cursors/{id}", Op::KillCursor, "killCursors"),
+    r("POST", "/transactions", Op::Transaction, "transaction"),
     r("GET", "/apiKeys", Op::ListApiKeys, "listApiKeys"),
     r("POST", "/apiKeys", Op::CreateApiKey, "createApiKey"),
     r("DELETE", "/apiKeys/{id}", Op::RevokeApiKey, "revokeApiKey"),

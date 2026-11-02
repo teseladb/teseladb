@@ -186,3 +186,212 @@ fn a_user_belongs_to_the_tenant_that_created_it_and_works_in_it() {
     let r = run(&mut m, &mut ann, "app", as_acme(doc(&[("find", "c".into())])));
     assert_eq!(r.get("code"), Some(&Value::Int32(13)), "{r:?}");
 }
+
+// 013 T035 (FR-024): the barrier between tenants. A user or role belongs to the tenant of the
+// session that wrote it, and only that tenant sees it; a user of a tenant other than the default
+// one has no privilege over the node's administration, which every tenant shares.
+
+const GLOBEX: &str = "globex";
+
+fn two_tenants() -> Mem {
+    let mut m = node();
+    m.tenants = vec![(1, ACME.to_owned()), (2, GLOBEX.to_owned())];
+    m
+}
+
+fn in_tenant(tenant: &str, cmd: Document) -> Document {
+    cmd.with("$tenant", tenant)
+}
+
+fn create_user(name: &str, roles: Vec<Value>) -> Document {
+    doc(&[
+        ("createUser", name.into()),
+        ("pwd", PASSWORD.into()),
+        ("roles", Value::Array(roles)),
+        ("mechanisms", Value::Array(vec![Value::from("SCRAM-SHA-256")])),
+    ])
+}
+
+fn code(r: &Document) -> Option<&Value> {
+    r.get("code")
+}
+
+fn listed_users(r: &Document) -> Vec<String> {
+    let Value::Array(users) = field(r, "users") else { panic!("{r:?}") };
+    users
+        .iter()
+        .map(|u| match u {
+            Value::Document(d) => match d.get("user") {
+                Some(Value::String(n)) => n.clone(),
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        })
+        .collect()
+}
+
+fn listed_roles(r: &Document) -> Vec<String> {
+    let Value::Array(roles) = field(r, "roles") else { panic!("{r:?}") };
+    roles
+        .iter()
+        .map(|u| match u {
+            Value::Document(d) => match d.get("role") {
+                Some(Value::String(n)) => n.clone(),
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        })
+        .collect()
+}
+
+#[test]
+fn a_tenant_does_not_see_nor_change_the_users_of_another() {
+    let (mut m, mut c) = (two_tenants(), Connection::new(9));
+    let root = || vec![Value::from("root")];
+    assert!(ok(&run(&mut m, &mut c, "admin", in_tenant(ACME, create_user("ann", root())))));
+    assert!(ok(&run(&mut m, &mut c, "admin", in_tenant(GLOBEX, create_user("bob", root())))));
+    assert!(ok(&run(&mut m, &mut c, "admin", create_user("ops", root()))));
+    // Each tenant lists only its users, whichever way it asks.
+    let all = || doc(&[("usersInfo", Value::Document(doc(&[("forAllDBs", true.into())])))]);
+    assert_eq!(listed_users(&run(&mut m, &mut c, "admin", in_tenant(ACME, all()))), ["ann"]);
+    assert_eq!(listed_users(&run(&mut m, &mut c, "admin", in_tenant(GLOBEX, all()))), ["bob"]);
+    assert_eq!(listed_users(&run(&mut m, &mut c, "admin", all())), ["ops"]);
+    let one = |u: &str| doc(&[("usersInfo", u.into())]);
+    assert!(listed_users(&run(&mut m, &mut c, "admin", in_tenant(GLOBEX, one("ann")))).is_empty());
+    let system = || doc(&[("find", "system.users".into())]);
+    assert_eq!(found(&run(&mut m, &mut c, "admin", in_tenant(ACME, system()))), 1);
+    // Another tenant's user is not found to change or drop.
+    let drop = doc(&[("dropUser", "ann".into())]);
+    assert_eq!(
+        code(&run(&mut m, &mut c, "admin", in_tenant(GLOBEX, drop.clone()))),
+        Some(&11.into())
+    );
+    let update = doc(&[("updateUser", "ann".into()), ("pwd", "other1".into())]);
+    assert_eq!(code(&run(&mut m, &mut c, "admin", in_tenant(GLOBEX, update))), Some(&11.into()));
+    let grant = doc(&[("grantRolesToUser", "ann".into()), ("roles", Value::Array(root()))]);
+    assert_eq!(code(&run(&mut m, &mut c, "admin", in_tenant(GLOBEX, grant))), Some(&11.into()));
+    let drop_all = doc(&[("dropAllUsersFromDatabase", 1.into())]);
+    let r = run(&mut m, &mut c, "admin", in_tenant(GLOBEX, drop_all));
+    assert_eq!(r.get("n"), Some(&Value::Int32(1)), "{r:?}");
+    assert!(m.security.get(Principal::User, "admin", "ann").is_some());
+    assert!(m.security.get(Principal::User, "admin", "ops").is_some());
+    assert!(m.security.get(Principal::User, "admin", "bob").is_none());
+    // Its own tenant still drops it.
+    assert!(ok(&run(&mut m, &mut c, "admin", in_tenant(ACME, drop))));
+}
+
+#[test]
+fn a_user_written_to_system_users_belongs_to_the_tenant_that_wrote_it() {
+    let (mut m, mut c) = (two_tenants(), Connection::new(9));
+    assert!(ok(&run(&mut m, &mut c, "admin", in_tenant(ACME, create_user("ann", vec![])))));
+    let stored = m.security.get(Principal::User, "admin", "ann").unwrap().to_vec();
+    let mut forged = Document::from(RawDoc::from_bytes(&stored).unwrap());
+    forged.insert("_id", "admin.eve");
+    forged.insert("user", "eve");
+    // `globex` writes a user that claims to be `acme`'s: it is `globex`'s.
+    forged.insert("tenantId", 1i64);
+    let insert = doc(&[
+        ("insert", "system.users".into()),
+        ("documents", Value::Array(vec![Value::Document(forged)])),
+    ]);
+    let r = run(&mut m, &mut c, "admin", in_tenant(GLOBEX, insert));
+    assert!(ok(&r), "{r:?}");
+    let eve = m.security.get(Principal::User, "admin", "eve").unwrap();
+    let eve = Document::from(RawDoc::from_bytes(eve).unwrap());
+    assert_eq!(eve.get("tenantId"), Some(&Value::Int64(2)));
+}
+
+#[test]
+fn a_tenant_does_not_see_nor_use_the_roles_of_another() {
+    let (mut m, mut c) = (two_tenants(), Connection::new(9));
+    let privilege = Value::Document(doc(&[
+        ("resource", Value::Document(doc(&[("db", "app".into()), ("collection", "".into())]))),
+        ("actions", Value::Array(vec![Value::from("find")])),
+    ]));
+    let create_role = doc(&[
+        ("createRole", "reader".into()),
+        ("privileges", Value::Array(vec![privilege])),
+        ("roles", Value::Array(vec![])),
+    ]);
+    assert!(ok(&run(&mut m, &mut c, "admin", in_tenant(ACME, create_role))));
+    let stored = m.security.get(Principal::Role, "admin", "reader").unwrap();
+    let stored = Document::from(RawDoc::from_bytes(stored).unwrap());
+    assert_eq!(stored.get("tenantId"), Some(&Value::Int64(1)));
+    let all = || doc(&[("rolesInfo", 1.into())]);
+    assert_eq!(listed_roles(&run(&mut m, &mut c, "admin", in_tenant(ACME, all()))), ["reader"]);
+    assert!(listed_roles(&run(&mut m, &mut c, "admin", in_tenant(GLOBEX, all()))).is_empty());
+    assert!(listed_roles(&run(&mut m, &mut c, "admin", all())).is_empty());
+    let system = || doc(&[("find", "system.roles".into())]);
+    assert_eq!(found(&run(&mut m, &mut c, "admin", in_tenant(GLOBEX, system()))), 0);
+    // `globex` can neither grant it nor drop it.
+    let reader = Value::Document(doc(&[("role", "reader".into()), ("db", "admin".into())]));
+    let user = create_user("bob", vec![reader.clone()]);
+    assert_eq!(code(&run(&mut m, &mut c, "admin", in_tenant(GLOBEX, user))), Some(&31.into()));
+    let drop = doc(&[("dropRole", "reader".into())]);
+    assert_eq!(
+        code(&run(&mut m, &mut c, "admin", in_tenant(GLOBEX, drop.clone()))),
+        Some(&31.into())
+    );
+    let drop_all = doc(&[("dropAllRolesFromDatabase", 1.into())]);
+    let r = run(&mut m, &mut c, "admin", in_tenant(GLOBEX, drop_all));
+    assert_eq!(r.get("n"), Some(&Value::Int32(0)), "{r:?}");
+    // `acme` grants it to its user and drops it.
+    let user = create_user("ann", vec![reader]);
+    assert!(ok(&run(&mut m, &mut c, "admin", in_tenant(ACME, user))));
+    assert!(ok(&run(&mut m, &mut c, "admin", in_tenant(ACME, drop))));
+}
+
+#[test]
+fn a_tenant_user_has_no_privilege_over_the_node() {
+    let (mut m, mut c) = (two_tenants(), Connection::new(9));
+    let root = vec![Value::from("root")];
+    assert!(ok(&run(&mut m, &mut c, "admin", in_tenant(ACME, create_user("ann", root.clone())))));
+    assert!(ok(&run(&mut m, &mut c, "admin", create_user("ops", root))));
+    let mut ann = Connection::new(10);
+    ann.auth.required = true;
+    log_in(&mut m, &mut ann, "ann");
+    // Its databases are its own to work with, `root` of its tenant.
+    assert!(ok(&run(&mut m, &mut ann, "app", insert(1))));
+    let list = doc(&[("listDatabases", 1.into()), ("nameOnly", true.into())]);
+    assert!(ok(&run(&mut m, &mut ann, "admin", list)));
+    // What every tenant shares is refused.
+    for cmd in [
+        doc(&[("getLog", "global".into())]),
+        doc(&[("currentOp", 1.into())]),
+        doc(&[("killOp", 1.into()), ("op", 1.into())]),
+        doc(&[("setParameter", 1.into()), ("logLevel", 1.into())]),
+        doc(&[("shutdown", 1.into())]),
+        doc(&[("fsync", 1.into())]),
+        doc(&[("serverStatus", 1.into())]),
+    ] {
+        let r = run(&mut m, &mut ann, "admin", cmd.clone());
+        assert_eq!(code(&r), Some(&13.into()), "{cmd:?}: {r:?}");
+    }
+    // A user of the default tenant keeps them.
+    let mut ops = Connection::new(11);
+    ops.auth.required = true;
+    log_in(&mut m, &mut ops, "ops");
+    assert!(ok(&run(&mut m, &mut ops, "admin", doc(&[("getLog", "global".into())]))));
+}
+
+#[test]
+fn a_cursor_of_a_tenant_is_not_found_from_another() {
+    let (mut m, mut c) = (two_tenants(), Connection::new(9));
+    for id in 1..=3 {
+        assert!(ok(&run(&mut m, &mut c, "app", in_tenant(ACME, insert(id)))));
+        assert!(ok(&run(&mut m, &mut c, "app", in_tenant(GLOBEX, insert(id)))));
+    }
+    let find = doc(&[("find", "c".into()), ("batchSize", 1.into())]);
+    let r = run(&mut m, &mut c, "app", in_tenant(ACME, find));
+    let Value::Int64(id) = *field(&r, "cursor.id") else { panic!("{r:?}") };
+    let more = doc(&[("getMore", id.into()), ("collection", "c".into()), ("batchSize", 1.into())]);
+    let r = run(&mut m, &mut c, "app", in_tenant(GLOBEX, more.clone()));
+    assert_eq!(code(&r), Some(&43.into()), "{r:?}");
+    let kill = doc(&[("killCursors", "c".into()), ("cursors", Value::Array(vec![id.into()]))]);
+    let r = run(&mut m, &mut c, "app", in_tenant(GLOBEX, kill.clone()));
+    assert_eq!(field(&r, "cursorsNotFound"), &Value::Array(vec![id.into()]), "{r:?}");
+    let r = run(&mut m, &mut c, "app", in_tenant(ACME, more));
+    assert!(ok(&r), "{r:?}");
+    let r = run(&mut m, &mut c, "app", in_tenant(ACME, kill));
+    assert_eq!(field(&r, "cursorsKilled"), &Value::Array(vec![id.into()]), "{r:?}");
+}

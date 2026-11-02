@@ -34,6 +34,7 @@ dependencies = [
  "teseladb-deflate",
  "teseladb-fle",
  "teseladb-io",
+ "teseladb-js",
  "teseladb-json",
  "teseladb-keys",
  "teseladb-lsm",
@@ -176,6 +177,7 @@ name = "teseladb-js"
 version = "0.1.0"
 dependencies = [
  "teseladb-bson",
+ "teseladb-types",
 ]
 
 [[package]]
@@ -293,6 +295,7 @@ name = "teseladb-rest"
 version = "0.1.0"
 dependencies = [
  "teseladb-bson",
+ "teseladb-hash",
  "teseladb-http",
  "teseladb-json",
  "teseladb-session",

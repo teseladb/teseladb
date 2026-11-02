@@ -3,6 +3,7 @@
 //! [`region`]), the cell hierarchy ([`cells`]) and bounded coverings ([`cover`]).
 
 pub mod cells;
+mod clip;
 pub mod cover;
 mod exact;
 pub mod geojson;

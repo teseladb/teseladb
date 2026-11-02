@@ -108,7 +108,7 @@ fn each_tenant_has_its_databases_and_the_collection_numbers_are_shared() {
 }
 
 #[test]
-fn a_tenant_with_databases_or_users_cannot_be_dropped() {
+fn a_tenant_with_databases_users_or_roles_cannot_be_dropped() {
     let mut sm = cluster();
     apply(&mut sm, 2, create_tenant("acme"));
     apply(&mut sm, 3, create(1, "app", "c"));
@@ -129,7 +129,19 @@ fn a_tenant_with_databases_or_users_cannot_be_dropped() {
     let gone = sm.security.get(Principal::User, "admin", "ann").map(<[u8]>::to_vec).unwrap();
     let op = SecurityOp::remove(Principal::User, gone).unwrap();
     apply(&mut sm, 8, Group0Command::Security(vec![op]));
-    assert_eq!(apply(&mut sm, 9, drop_tenant("acme")), Group0Result::Ok);
+    // And a role of the tenant (013 FR-024).
+    let role = Document::new()
+        .with("_id", "admin.reader")
+        .with("role", "reader")
+        .with("db", "admin")
+        .with(TENANT_FIELD, 1_i64);
+    let op = SecurityOp::put(Principal::Role, Expect::Absent, role.to_bytes().unwrap()).unwrap();
+    assert_eq!(apply(&mut sm, 9, Group0Command::Security(vec![op])), Group0Result::Ok);
+    assert_eq!(apply(&mut sm, 10, drop_tenant("acme")), busy);
+    let gone = sm.security.get(Principal::Role, "admin", "reader").map(<[u8]>::to_vec).unwrap();
+    let op = SecurityOp::remove(Principal::Role, gone).unwrap();
+    apply(&mut sm, 11, Group0Command::Security(vec![op]));
+    assert_eq!(apply(&mut sm, 12, drop_tenant("acme")), Group0Result::Ok);
 }
 
 #[test]

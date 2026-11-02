@@ -200,3 +200,18 @@ fn a_p521_root_with_ecdsa_sha512_validates_and_its_key_reads() {
     let again = PrivateKey::from_pem(&pem::encode(pem::label::PRIVATE_KEY, &k.to_pkcs8()), None);
     assert_eq!(again.unwrap().public_key(), root.public_key);
 }
+
+/// 013 T032: a certificate signed with SHA-1 is refused as OpenSSL 3 refuses it at security level 1
+/// (`CA signature digest algorithm too weak`, measured on the `ref:9.0.4` image), unless the caller
+/// allows weak digests (the NIST PKITS vectors are signed with SHA-1).
+#[test]
+fn a_certificate_signed_with_sha1_is_refused() {
+    let leaf = cert("sha1-leaf.pem");
+    let root = cert("root.pem");
+    let opts = VerifyOptions::new(NOW);
+    let err = verify_chain(&leaf, &[], std::slice::from_ref(&root), &opts).err();
+    assert_eq!(err, Some(Error::WeakDigest));
+    assert_eq!(Error::WeakDigest.to_string(), "CA signature digest algorithm too weak");
+    let allowed = VerifyOptions { weak_digests: true, ..VerifyOptions::new(NOW) };
+    assert!(verify_chain(&leaf, &[], std::slice::from_ref(&root), &allowed).is_ok());
+}

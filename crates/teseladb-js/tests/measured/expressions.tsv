@@ -321,3 +321,308 @@ String(123456789012345678901234567890n * 987654321098765432109876543210n) + ',' 
 (0x1fn + 0o7n + 0b11n + 1_000n).toString()	S:1041
 (()=>{let a=1n;a++;a+=2n;a*=3n;a**=2n;a--;return String(a)+typeof a})()	S:143bigint
 typeof function(){} + typeof class {} + typeof null + typeof [] + typeof 1n	S:functionfunctionobjectobjectbigint
+(()=>{const w=new WeakMap();const k={};w.set(k,1);return w.get(k)+','+w.has(k)+','+w.has({})+','+w.delete(k)+','+w.has(k)})()	S:1,true,false,true,false
+(()=>{try{new WeakMap().set(1,2)}catch(e){return e.name+':'+e.message}})()	S:TypeError:WeakMap key 1 must be an object
+(()=>{const w=new WeakSet();const k={};w.add(k);return w.has(k)+','+w.has({})+','+w.delete(k)+','+String(w)})()	S:true,false,true,[object WeakSet]
+(()=>{try{new WeakSet().add('s')}catch(e){return e.name+':'+e.message}})()	S:TypeError:WeakSet value "s" must be an object
+(()=>{const o={};const r=new WeakRef(o);return (r.deref()===o)+','+String(r)})()	S:true,[object WeakRef]
+String(new WeakMap()) + ',' + String(new WeakMap([[{},1]]).get({}))	S:[object WeakMap],undefined
+(()=>{function* g(){yield 1;yield 2;return 3}const it=g();return JSON.stringify([it.next(),it.next(),it.next(),it.next()])})()	S:[{"value":1,"done":false},{"value":2,"done":false},{"value":3,"done":true},{"done":true}]
+(()=>{function* g(){const x=yield 1;yield x*2}const it=g();it.next();return it.next(21).value})()	J:42
+(()=>{function* g(){let i=0;while(true)yield i++}const r=[];for(const v of g()){if(v>3)break;r.push(v)}return r.join()})()	S:0,1,2,3
+(()=>{function* g(){try{yield 1;yield 2}finally{r.push('f')}}const r=[];for(const v of g()){r.push(v);break}return r.join()})()	S:1,f
+(()=>{function* g(){yield* [1,2];yield* h()}function* h(){yield 3}return [...g()].join()})()	S:1,2,3
+(()=>{function* g(){try{yield 1}catch(e){yield 'c:'+e}}const it=g();it.next();return it.throw('x').value+','+JSON.stringify(it.next())})()	S:c:x,{"done":true}
+(()=>{function* g(){yield 1}const it=g();return JSON.stringify(it.return(5))+JSON.stringify(it.next())+String(it)+typeof it[Symbol.iterator]})()	S:{"value":5,"done":true}{"done":true}[object Generator]function
+(()=>{const o={*m(){yield 'a'}};class C{*[Symbol.iterator](){yield 'b'}}return [...o.m(),...new C()].join()})()	S:a,b
+(()=>{function* g(){yield 1}return Object.prototype.toString.call(g())+','+g.constructor.name+','+typeof g.prototype})()	S:[object Generator],GeneratorFunction,object
+(()=>{const it=(function*(){const a=yield;return a})();it.next();try{it.next(1);it.next();return 'ok'}catch(e){return e.message}})()	S:ok
+(()=>{function* g(){yield 1}const it=g();it.next();try{const it2=(function*(){it2.next();yield})();it2.next()}catch(e){return e.name+':'+e.message}})()	S:TypeError:already executing generator
+(()=>{let r=0;const p=new Promise(res=>{r=1;res(2)});return r+','+String(p)+','+Object.prototype.toString.call(p)})()	S:1,[object Promise],[object Promise]
+(()=>{async function f(){return 1}const p=f();return typeof p.then+','+String(p)})()	S:function,[object Promise]
+(()=>{const {promise,resolve}=Promise.withResolvers();resolve(1);return typeof promise})()	S:object
+typeof Array.fromAsync + typeof Promise.all + typeof Promise.allSettled + typeof Promise.any + typeof Promise.race + typeof queueMicrotask + typeof setTimeout	S:functionfunctionfunctionfunctionfunctionundefinedundefined
+(()=>{function* g(){const a=[]; a.push((yield 1)+(yield 2)); return a[0]}const it=g();it.next();it.next(10);return JSON.stringify(it.next(20))})()	S:{"value":30,"done":true}
+(()=>{function* g(x){ return x ? yield 'a' : yield 'b' }const it=g(0);return it.next().value+','+it.next(7).value})()	S:b,7
+(()=>{function* g(){ let s=''; for (let i=0;i<3;i++){ s += (yield i) } return s }const it=g();let r=it.next();const out=[];while(!r.done){out.push(r.value);r=it.next('x'+r.value)}return out.join()+'|'+r.value})()	S:0,1,2|x0x1x2
+(()=>{function* g(){ for (const k in {a:1,b:2}) yield k; for (const v of [3,4]) yield v }return [...g()].join()})()	S:a,b,3,4
+(()=>{function* g(){ let i=0; do { yield i } while ((yield 'c') && ++i < 2) }const it=g();const r=[];let x=it.next();while(!x.done){r.push(x.value);x=it.next(true)}return r.join()})()	S:0,c,1,c
+(()=>{function* g(v){ switch(v){ case 1: yield 'one'; case 2: yield 'two'; break; default: yield 'd' } yield 'end' }return [...g(1)].join()+'|'+[...g(5)].join()})()	S:one,two,end|d,end
+(()=>{function* g(){ try { yield 1; throw new Error('e') } catch(e) { yield 'c:'+e.message } finally { yield 'f' } yield 'after' }return [...g()].join()})()	S:1,c:e,f,after
+(()=>{function* g(){ try { yield 1; yield 2 } finally { return 'r' } }const it=g();it.next();return JSON.stringify(it.return(9))})()	S:{"value":"r","done":true}
+(()=>{function* g(){ try { yield 1 } finally { yield 'cleanup' } }const it=g();it.next();return JSON.stringify([it.return(5),it.next(),it.next()])})()	S:[{"value":"cleanup","done":false},{"value":5,"done":true},{"done":true}]
+(()=>{function* g(){ outer: for (const a of [1,2]) { for (const b of [1,2]) { if (b===2) continue outer; yield a*10+b } } }return [...g()].join()})()	S:11,21
+(()=>{function* g(){ const o = { a: yield 1, [yield 2]: yield 3 }; return JSON.stringify(o) }const it=g();it.next();it.next('A');it.next('k');return it.next('V').value})()	S:{"a":"A","k":"V"}
+(()=>{function* g(){ const x = (yield 1) || (yield 2); return x }const it=g();it.next();const a=it.next(0);return JSON.stringify([a,it.next('z')])})()	S:[{"value":2,"done":false},{"value":"z","done":true}]
+(()=>{function* g(){ let a = 1; a += yield a; return a }const it=g();it.next();return it.next(5).value})()	J:6
+(()=>{function* g(){ yield* g2(); return 'done' } function* g2(){ const r = yield 'in'; return r }const it=g();return JSON.stringify([it.next(),it.next('s'),it.next()])})()	S:[{"value":"in","done":false},{"value":"done","done":true},{"done":true}]
+(()=>{function* g(){ const r = yield* [1,2]; return r }return JSON.stringify([...g()])+String(g().next().value)})()	S:[1,2]1
+(()=>{const g=function*(){ yield this.v };return g.call({v:3}).next().value})()	J:3
+(()=>{function* g(){ yield arguments.length }return g(1,2,3).next().value})()	J:3
+(()=>{function* fib(){ let [a,b]=[0,1]; for(;;){ yield a; [a,b]=[b,a+b] } }const r=[];for(const v of fib()){if(v>50)break;r.push(v)}return r.join()})()	S:0,1,1,2,3,5,8,13,21,34
+(()=>{function* g(){ yield 1; yield 2; yield 3 }const [a,,c]=g();const it=g();const [x]=it;return a+','+c+','+x+','+JSON.stringify(it.next())})()	S:1,3,1,{"done":true}
+(()=>{function* g(){ yield 1 }return Array.from(g()).concat(new Set(g()).size, new Map([[1,2]]).size)})()	J:[1,1,1]
+(()=>{function* g(){ yield 1 } const it = g(); try { it.throw(new Error('pre')) } catch(e) { return e.message + JSON.stringify(it.next()) } })()	S:pre{"done":true}
+(()=>{function* g(){ const x = yield; yield typeof x }const it=g();it.next();return it.next().value})()	S:undefined
+(()=>{function* g(){ return 5 }const it=g();return JSON.stringify([it.next(),it.next()])})()	S:[{"value":5,"done":true},{"done":true}]
+(()=>{function* g(){ yield 1 }return [typeof g, g instanceof Function, Object.getPrototypeOf(g)===Function.prototype, String(Object.getPrototypeOf(g())===g.prototype), typeof g().return].join()})()	S:function,true,false,true,function
+(()=>{const it=(function*(){})();return it[Symbol.iterator]()===it})()	J:true
+(()=>{class C{ *items(){ yield* this.list } constructor(){ this.list=[7,8] } }return [...new C().items()].join()})()	S:7,8
+(()=>{function* g(){ while(true){ try { yield 1 } catch(e) { yield 'caught '+e } } }const it=g();it.next();return it.throw('a').value+'|'+it.next().value+'|'+it.throw('b').value})()	S:caught a|1|caught b
+(()=>{function* g(){ yield 1 }const it=g();try{ it.next.call({}) }catch(e){ return e.name+':'+e.message }})()	S:TypeError:next method called on incompatible Object
+(()=>{function* g(){ yield 1 }try { new g() } catch(e) { return e.name+':'+e.message }})()	S:TypeError:g is not a constructor
+(()=>{const f = async function(){ return 1 }; try { new f() } catch(e) { return e.name+':'+e.message }})()	S:TypeError:f is not a constructor
+(()=>{function* g(){ yield [yield 1, yield 2] }const it=g();it.next();it.next('a');return JSON.stringify(it.next('b').value)})()	S:["a","b"]
+(()=>{function* g(){ const v = `${yield 1}-${yield 2}`; return v }const it=g();it.next();it.next('p');return it.next('q').value})()	S:p-q
+(()=>{function* g(){ return (yield 1)(yield 2) }const it=g();it.next();it.next(x=>x*2);return it.next(21).value})()	J:42
+(()=>{function* g(){ const o = {m(a){ return this.k + a }, k: 1}; return o.m(yield 'x') }const it=g();it.next();return it.next(4).value})()	J:5
+typeof BigInt + typeof Proxy + typeof WeakMap + typeof WeakSet + typeof WeakRef + typeof FinalizationRegistry + typeof Uint8Array + typeof ArrayBuffer + typeof DataView + typeof Promise + typeof Symbol.iterator + typeof Symbol.asyncIterator	S:functionfunctionfunctionfunctionfunctionfunctionfunctionfunctionfunctionfunctionsymbolsymbol
+new Proxy({}, {get:(t,k)=>'p:'+String(k)}).abc	S:p:abc
+(()=>{const log=[];const p=new Proxy({a:1},{set(t,k,v){log.push(k+'='+v);t[k]=v*2;return true}});p.b=3;return log.join()+','+p.b})()	S:b=3,6
+(()=>{const p=new Proxy({}, {has:(t,k)=>k==='z'});return ('z' in p)+','+('y' in p)})()	S:true,false
+(()=>{const p=new Proxy(function(){return 1},{apply:(t,th,a)=>a.length*10});return p(1,2,3)})()	J:30
+(()=>{const p=new Proxy(class{},{construct:(t,a)=>({n:a[0]})});return new p(5).n})()	J:5
+Object.keys(new Proxy({a:1,b:2},{ownKeys:()=>['b']  ,getOwnPropertyDescriptor:(t,k)=>({value:t[k],enumerable:true,configurable:true})}))	J:["b"]
+(()=>{const p=new Proxy({a:1},{deleteProperty(t,k){return false}});return delete p.a})()	J:false
+(()=>{const {proxy,revoke}=Proxy.revocable({},{});revoke();try{proxy.x}catch(e){return e.name+':'+e.message}})()	S:TypeError:illegal operation attempted on a revoked proxy
+(()=>{const p=new Proxy({},{});p.q=1;return JSON.stringify(p)+typeof p})()	S:{"q":1}object
+(()=>{const p=new Proxy([1,2],{});return Array.isArray(p)+','+p.length+','+JSON.stringify(p)})()	S:true,2,[1,2]
+(()=>{try{new Proxy({}, {get:1}).x}catch(e){return e.name+':'+e.message}})()	S:TypeError:proxy handler's get trap wasn't undefined, null, or callable
+(()=>{try{return Proxy({},{})}catch(e){return e.name+':'+e.message}})()	S:TypeError:calling a builtin Proxy constructor without new is forbidden
+(()=>{const a=new Uint8Array([1,2,300,-1]);return Array.from(a).join()+','+a.length+','+a.byteLength+','+String(a)})()	S:1,2,44,255,4,4,1,2,44,255
+(()=>{const a=new Int16Array(3);a[0]=40000;a[5]=1;return a.join()+','+a[5]+','+Object.prototype.toString.call(a)})()	S:-25536,0,0,undefined,[object Int16Array]
+(()=>{const a=new Float64Array([1.5,2]);const b=new Float32Array([0.1]);return a[0]+','+b[0]+','+JSON.stringify(a)})()	S:1.5,0.10000000149011612,{"0":1.5,"1":2}
+(()=>{const buf=new ArrayBuffer(8);const v=new DataView(buf);v.setInt32(0,-2);v.setFloat32(4,1.5,true);return v.getUint32(0)+','+v.getInt8(3)+','+v.getFloat32(4,true)+','+buf.byteLength+','+new Uint8Array(buf).join()})()	S:4294967294,-2,1.5,8,255,255,255,254,0,0,192,63
+(()=>{const a=new Uint8ClampedArray([300,-5,1.5,2.5]);return a.join()})()	S:255,0,2,2
+(()=>{const a=new Int32Array([5,1,4]);a.sort();return a.join()+','+a.map(x=>x*2).join()+','+a.filter(x=>x>1).join()+','+a.indexOf(4)+','+a.includes(5)+','+a.subarray(1).join()+','+a.slice(0,2).join()})()	S:1,4,5,2,8,10,4,5,1,true,4,5,1,4
+(()=>{const a=new BigInt64Array([1n,-1n]);return String(a[1])+','+new BigUint64Array([-1n])[0]})()	S:-1,18446744073709551615
+(()=>{try{new Uint8Array(-1)}catch(e){return e.name+':'+e.message}})()	S:RangeError:invalid array length
+(()=>{const a=new Uint8Array(4);a.set([7,8],1);a.fill(9,3);return a.join()+','+Uint8Array.BYTES_PER_ELEMENT+','+Float64Array.from([1,2]).join()+','+Int8Array.of(1,2).length})()	S:0,7,8,9,1,1,2,2
+(()=>{const a=new Uint16Array([1,2,3]);return [...a].join()+','+[...a.entries()].join(';')+','+a.reverse().join()+','+a.at(-1)})()	S:1,2,3,0,1;1,2;2,3,3,2,1,1
+typeof Uint8Array.prototype.toHex + typeof Uint8Array.fromBase64 + typeof ArrayBuffer.prototype.transfer + typeof ArrayBuffer.prototype.resize	S:functionfunctionfunctionfunction
+(()=>{const r=new ArrayBuffer(4).slice(1,3);return r.byteLength+','+ArrayBuffer.isView(new Uint8Array(1))+','+ArrayBuffer.isView([])})()	S:2,true,false
+(()=>{const r=[];for(const f of [()=>isNaN(1n),()=>1n*'2',()=>(1n).toString(1),()=>Math.abs(-1n),()=>1n+1,()=>1+1n, ()=>1n<<1, ()=>BigInt.asUintN(-1,1n), ()=>BigInt.prototype.toString.call(1), ()=>Symbol()+1n, ()=>[1n].join(1n), ()=>new Uint8Array([1n])]) {try{r.push(String(f()))}catch(e){r.push(e.name+':'+e.message)}}return r.join('|')})()	S:TypeError:can't convert BigInt to number|TypeError:can't convert BigInt to number|RangeError:radix must be an integer at least 2 and no greater than 36|TypeError:can't convert BigInt to number|TypeError:can't convert BigInt to number|TypeError:can't convert BigInt to number|TypeError:can't convert BigInt to number|RangeError:invalid or out-of-range index|TypeError:toString method called on incompatible number|TypeError:can't convert symbol to number|1|TypeError:can't convert BigInt to number
+typeof Float16Array + typeof SharedArrayBuffer + typeof Atomics + typeof Uint8Array.fromHex + typeof Uint8Array.prototype.setFromBase64 + typeof Iterator + typeof Promise.try + typeof AggregateError	S:functionundefinedundefinedfunctionfunctionfunctionfunctionfunction
+(()=>{try{Uint8Array(2)}catch(e){return e.name+':'+e.message}})()	S:TypeError:calling a builtin typed array constructor without new is forbidden
+(()=>{const a=new Uint8Array([1,2,3]);return [a.length,a.byteLength,a.byteOffset,a.buffer.byteLength,Object.keys(a).join('|'),Object.getPrototypeOf(Uint8Array).name, Uint8Array.name, Uint8Array.length].join()})()	S:3,3,0,3,0|1|2,TypedArray,Uint8Array,3
+(()=>{const b=new ArrayBuffer(8);const a=new Int16Array(b,2,2);a[0]=-1;return [a.length,a.byteOffset,new Uint8Array(b).join('')].join()})()	S:2,2,002552550000
+(()=>{try{new Int32Array(new ArrayBuffer(5))}catch(e){return e.name+':'+e.message}})()	S:RangeError:buffer length for Int32Array should be a multiple of 4
+(()=>{try{new Int32Array(new ArrayBuffer(8),1)}catch(e){return e.name+':'+e.message}})()	S:RangeError:start offset of Int32Array should be a multiple of 4
+(()=>{try{new Uint8Array(new ArrayBuffer(4),2,5)}catch(e){return e.name+':'+e.message}})()	S:RangeError:attempting to construct out-of-bounds Uint8Array on ArrayBuffer
+(()=>{const a=new Float64Array([3,1,2]);return [a.toSorted().join(), a.toReversed().join(), a.with(0,9).join(), a.findLast(x=>x<3), a.lastIndexOf(2), a.every(x=>x>0), a.some(x=>x>2), a.reduce((s,x)=>s+x), a.reduceRight((s,x)=>s+','+x,''), a.find(x=>x>1), a.findIndex(x=>x>5), a.findLastIndex(x=>x>1)].join(';')})()	S:1,2,3;2,1,3;9,1,2;2;2;true;true;6;,2,1,3;3;-1;2
+(()=>{const a=new Uint8Array([1,2,3,4,5]);a.copyWithin(0,3);const r=[];a.forEach((x,i)=>r.push(i+':'+x));return r.join()+'|'+[...a.keys()].join()+'|'+[...a.values()].join()+'|'+a.toString()+'|'+a.toLocaleString()})()	S:0:4,1:5,2:3,3:4,4:5|0,1,2,3,4|4,5,3,4,5|4,5,3,4,5|4,5,3,4,5
+(()=>{const a=new Int8Array([1,2,3]);const m=a.map(x=>x*100);return Object.prototype.toString.call(m)+m.join()+'|'+Object.prototype.toString.call(a.filter(x=>x>1))+'|'+a.slice(-2).join()+'|'+a.subarray(-2).byteOffset})()	S:[object Int8Array]100,-56,44|[object Int8Array]|2,3|1
+(()=>{const a=new Uint8Array([10,1,2]);a.sort((x,y)=>y-x);return a.join()+'|'+[1,2,3].map(x=>x)+'|'+new Uint8Array(new Uint16Array([257,2])).join()})()	S:10,2,1|1,2,3|1,2
+(()=>{const u=new Uint8Array([0xde,0xad,0xbe,0xef]);return u.toHex()+','+u.toBase64()+','+Uint8Array.fromHex('0aff').join()+','+Uint8Array.fromBase64('3q2+7w==').join()})()	S:deadbeef,3q2+7w==,10,255,222,173,190,239
+(()=>{const v=new DataView(new ArrayBuffer(16),2);v.setBigInt64(0,-2n);v.setUint16(8,0x1234);return [String(v.getBigInt64(0)),String(v.getBigUint64(0,true)),v.getUint16(8),v.getUint16(8,true),v.getInt16(8),v.byteOffset,v.byteLength,v.getFloat64(0)].join()})()	S:-2,18374686479671623679,4660,13330,4660,2,14,NaN
+(()=>{const v=new DataView(new ArrayBuffer(4));try{v.getInt32(1)}catch(e){return e.name+':'+e.message}})()	S:RangeError:offset is outside the bounds of the DataView
+(()=>{try{new DataView(1)}catch(e){return e.name+':'+e.message}})()	S:TypeError:1 is not an object
+(()=>{const b=new ArrayBuffer(4,{maxByteLength:8});b.resize(6);const t=b.transfer();return [b.byteLength,b.detached,t.byteLength,t.resizable,t.maxByteLength,new ArrayBuffer(2).resizable].join()})()	S:0,true,6,true,8,false
+(()=>{const a=new Uint8Array(2);a['-0']=5;a[1.5]=3;a.foo=1;return JSON.stringify(a)+','+a['-0']+','+Object.keys(a).join('|')+','+('1' in a)+','+('2' in a)})()	S:{"0":0,"1":0,"foo":1},undefined,0|1|foo,true,false
+(()=>{const a=new Float32Array([1.1, NaN, -0]);return [a[0], a[1], Object.is(a[2],-0), a.includes(NaN), a.indexOf(NaN)].join()})()	S:1.100000023841858,NaN,true,true,-1
+(()=>{const a=new Uint32Array([-1]);const b=new Int32Array([2**31]);const c=new Uint8Array(['7',null,true,{}]);return a[0]+','+b[0]+','+c.join()})()	S:4294967295,-2147483648,7,0,1,0
+(()=>{try{new BigInt64Array([1])}catch(e){return e.name+':'+e.message}})()	S:TypeError:can't convert 1 to BigInt
+(()=>{const a=new Uint8Array(3);a.set(new Uint8Array([9,8]),1);try{a.set([1,2,3],1)}catch(e){return a.join()+'|'+e.name+':'+e.message}})()	S:0,9,8|RangeError:source array is too long
+(()=>{const a=new Uint8Array([1,2]);return [a.at(-1), a.fill(7).join(), a.join('-'), Array.isArray(a), ArrayBuffer.isView(new DataView(new ArrayBuffer(1)))].join()})()	S:2,7,7,7-7,false,true
+String(Object.getOwnPropertyNames(Object.getPrototypeOf(Int8Array.prototype)).sort())	S:at,buffer,byteLength,byteOffset,constructor,copyWithin,entries,every,fill,filter,find,findIndex,findLast,findLastIndex,forEach,includes,indexOf,join,keys,lastIndexOf,length,map,reduce,reduceRight,reverse,set,slice,some,sort,subarray,toLocaleString,toReversed,toSorted,toString,values,with
+[1,2,3,4].values().map(x=>x*2).filter(x=>x>2).take(2).toArray()	J:[4,6]
+(()=>{function* g(){let i=0;while(true)yield i++}return g().drop(2).take(3).toArray().join()+'|'+g().flatMap(x=>[x,x]).take(5).toArray().join()+'|'+g().take(4).reduce((a,b)=>a+b)+'|'+g().some(x=>x>3)+'|'+g().take(3).every(x=>x<3)+'|'+g().find(x=>x*x>10)})()	S:2,3,4|0,0,1,1,2|6|true|true|4
+(()=>{const r=[];[5,6].values().forEach((v,i)=>r.push(v+':'+i));return r.join()+'|'+Iterator.from({next(){return {done:true}}}).toArray().length+'|'+typeof Iterator.prototype.map+'|'+Object.prototype.toString.call([].values().map(x=>x))})()	S:5:0,6:1|0|function|[object Iterator Helper]
+(()=>{try{[].values().take(-1)}catch(e){return e.name+':'+e.message}})()	S:RangeError:Iterator limits cannot be negative
+(()=>{try{new Iterator()}catch(e){return e.name+':'+e.message}})()	S:TypeError:Iterator constructor can't be used directly
+(()=>{try{[].values().reduce((a,b)=>a)}catch(e){return e.name+':'+e.message}})()	S:TypeError:reduce of empty iterator with no initial value
+(()=>{const e=new AggregateError([1,2],'m');return [e.name,e.message,e.errors.join(),e instanceof Error,String(e)].join('|')})()	S:AggregateError|m|1,2|true|AggregateError: m
+(()=>{const p=Promise.try(()=>1);const q=Promise.try(()=>{throw 2});return String(p)+typeof q})()	S:[object Promise]object
+(()=>{const p=new Proxy({}, {getOwnPropertyDescriptor(){return {value:1,configurable:true,enumerable:true}}, ownKeys(){return ['x','y']}});return JSON.stringify(Object.keys(p))+JSON.stringify(p)})()	S:["x","y"]{}
+(()=>{const h={};const p=new Proxy([],h);p.push(1,2);return p.length+','+p.join('-')+','+Object.prototype.toString.call(p)+','+String(p)})()	S:2,1-2,[object Array],1,2
+(()=>{const t={a:1};const p=new Proxy(t,{});delete p.a;return 'a' in t})()	J:false
+(()=>{const p=new Proxy({a:1},{has(){return false}});return ('a' in p)+','+p.hasOwnProperty('a')+','+Object.hasOwn(p,'a')})()	S:false,true,true
+(()=>{const f=new Proxy(function f(a){return a+1},{});return f(1)+','+typeof f+','+f.name+','+f.length})()	S:2,function,f,1
+(()=>{const C=new Proxy(class{constructor(x){this.x=x}},{});const o=new C(3);return o.x+','+(o instanceof C)})()	S:3,true
+(()=>{const p=new Proxy({},{get(t,k,r){return r===p}});return p.q})()	J:true
+(()=>{try{new Proxy(1,{})}catch(e){return e.name+':'+e.message}})()	S:TypeError:`target` argument of Proxy must be an object, got the number 1
+(()=>{const p=new Proxy({},{set(){return false}});p.a=1;return 'ok'})()	S:ok
+(()=>{'use strict';const p=new Proxy({},{set(){return false}});try{p.a=1}catch(e){return e.name+':'+e.message}})()	S:TypeError:proxy set handler returned false for property '"a"'
+(()=>{const p=new Proxy({},{ownKeys(){return 1}});try{Object.keys(p)}catch(e){return e.name+':'+e.message}})()	S:TypeError:ownKeys trap must be an object, got 1
+(()=>{const r=Proxy.revocable(function(){},{});r.revoke();return typeof r.proxy})()	S:function
+typeof Proxy.prototype + ',' + Proxy.length + ',' + Proxy.name	S:undefined,2,Proxy
+(()=>{const w=new WeakMap();try{w.set(Symbol('s'),1);return w.has(Symbol.iterator)}catch(e){return e.name+':'+e.message}})()	S:TypeError:WeakMap key Symbol("s") must be an object
+(()=>{try{new WeakRef(1)}catch(e){return e.name+':'+e.message}})()	S:TypeError:1 is not a non-null object
+(()=>{try{WeakMap.prototype.get.call({},{})}catch(e){return e.name+':'+e.message}})()	S:TypeError:get method called on incompatible Object
+(()=>{try{new Promise(()=>{}).then.call(1)}catch(e){return e.name+':'+e.message}})()	S:TypeError:Receiver of Promise.prototype.then call is not a non-null object
+[typeof (async()=>{})().then, (async function(){}).constructor.name, (function*(){}).constructor.name, String(Object.getPrototypeOf(async function(){})===Function.prototype)].join()	S:function,AsyncFunction,GeneratorFunction,false
+(()=>{const r=[];for(const [t,h] of [['s',{}],[true,{}],[null,{}],[undefined,{}],[Symbol('q'),{}],[1n,{}],[{},1],[{},null]]){try{new Proxy(t,h)}catch(e){r.push(e.message)}}return r.join('|')})()	S:`target` argument of Proxy must be an object, got the string "s"|`target` argument of Proxy must be an object, got true|`target` argument of Proxy must be an object, got null|`target` argument of Proxy must be an object, got undefined|`target` argument of Proxy must be an object, got Symbol("q")|`target` argument of Proxy must be an object, got the BigInt 1n|`handler` argument of Proxy must be an object, got the number 1|`handler` argument of Proxy must be an object, got null
+(()=>{const r=[];for(const v of [NaN,-1.5,'x',undefined]){try{[].values().take(v);r.push('ok')}catch(e){r.push(e.name+':'+e.message)}}return r.join('|')})()	S:RangeError:Iterator limits cannot be negative|RangeError:Iterator limits cannot be negative|RangeError:Iterator limits cannot be negative|RangeError:Iterator limits cannot be negative
+(()=>{const p=new Proxy({},{ownKeys(){return [1]}});try{Object.keys(p)}catch(e){return e.name+':'+e.message}})()	S:TypeError:proxy [[OwnPropertyKeys]] must return an array with only string and symbol elements
+(()=>{const r=[];for(const f of [()=>(1).toFixed(200),()=>(1).toFixed(-1),()=>(1).toPrecision(0),()=>(1).toPrecision(101),()=>(1).toFixed(1.5),()=>(1).toExponential(101)]){try{r.push(f())}catch(e){r.push(e.name+':'+e.message)}}return r.join('|')})()	S:RangeError:precision 200 out of range|RangeError:precision -1 out of range|RangeError:precision 0 out of range|RangeError:precision 101 out of range|1.0|RangeError:precision 101 out of range
+[(2.5).toExponential(0),(1.25).toExponential(1),(123.456).toExponential(),(0.00015).toExponential(1),(-3).toExponential(2),(0).toExponential(),(1e21).toExponential(3),Infinity.toExponential(),(5e-324).toExponential()].join()	S:3e+0,1.3e+0,1.23456e+2,1.5e-4,-3.00e+0,0e+0,1.000e+21,Infinity,5e-324
+Object.getOwnPropertyDescriptor(Math,'PI')	J:{"value":3.141592653589793,"writable":false,"enumerable":false,"configurable":false}
+Object.getOwnPropertyDescriptor(Math,'abs').writable	J:false
+Object.getOwnPropertyDescriptor(function f(a,b){},'length')	J:{"value":2,"writable":false,"enumerable":false,"configurable":true}
+Object.getOwnPropertyDescriptor(function f(a){},'name')	J:{"value":"f","writable":false,"enumerable":false,"configurable":true}
+Object.getOwnPropertyDescriptor(function f(a){},'prototype').writable	J:true
+Object.getOwnPropertyDescriptor([1],'length')	J:{"value":1,"writable":true,"enumerable":false,"configurable":false}
+Object.getOwnPropertyDescriptor([7],'0')	J:{"value":7,"writable":true,"enumerable":true,"configurable":true}
+Object.getOwnPropertyDescriptor('ab','1')	J:{"value":"b","writable":false,"enumerable":true,"configurable":false}
+Object.getOwnPropertyDescriptor('ab','length')	J:{"value":2,"writable":false,"enumerable":false,"configurable":false}
+Object.getOwnPropertyDescriptor({},'x')	J:undefined
+Object.getOwnPropertyDescriptor('ab','x')	J:undefined
+Object.getOwnPropertyDescriptors({a:1, get b(){return 1}})	J:{"a":{"value":1,"writable":true,"enumerable":true,"configurable":true},"b":{"enumerable":true,"configurable":true}}
+(()=>{var o={a:1}; Object.defineProperty(o,'b',{value:2}); return [JSON.stringify(Object.getOwnPropertyDescriptor(o,'b')), delete o.b, o.b, Object.keys(o).join()].join('|')})()	S:{"value":2,"writable":false,"enumerable":false,"configurable":false}|false|2|a
+(()=>{"use strict"; var o={}; Object.defineProperty(o,'b',{value:2}); delete o.b})()	E:TypeError:property "b" is non-configurable and can't be deleted
+(()=>{var o={}; Object.defineProperty(o,'b',{value:2}); Object.defineProperty(o,'b',{value:3})})()	E:TypeError:can't redefine non-configurable property "b"
+(()=>{var o={}; Object.defineProperty(o,'b',{value:2, writable:true}); Object.defineProperty(o,'b',{value:3}); return o.b})()	J:3
+(()=>{var o={}; Object.defineProperty(o,'b',{get(){return 1}}); Object.defineProperty(o,'b',{value:3})})()	E:TypeError:can't redefine non-configurable property "b"
+(()=>{var o={}; Object.defineProperty(o,'b',{value:1, configurable:true}); Object.defineProperty(o,'b',{get(){return 5}}); return JSON.stringify(Object.getOwnPropertyDescriptor(o,'b')) + o.b})()	S:{"enumerable":false,"configurable":true}5
+(()=>{var o={a:1}; Object.defineProperty(o,'a',{enumerable:false}); return JSON.stringify(Object.getOwnPropertyDescriptor(o,'a'))})()	S:{"value":1,"writable":true,"enumerable":false,"configurable":true}
+(()=>{var o=Object.preventExtensions({}); Object.defineProperty(o,'z',{value:1})})()	E:TypeError:can't define property "z": Object is not extensible
+(()=>{"use strict"; var o=Object.preventExtensions({}); o.z = 1})()	E:TypeError:can't define property "z": Object is not extensible
+(()=>{var o=Object.preventExtensions({}); o.z = 1; return o.z})()	J:undefined
+Object.defineProperty(1,'a',{})	E:TypeError:1 is not a non-null object
+Object.defineProperty({},'a',1)	E:TypeError:Property descriptor must be an object, got 1
+Object.defineProperty({},'a',{get:1})	E:TypeError:property descriptor's get field is neither undefined nor a function
+Object.defineProperty({},'a',{get(){},value:1})	E:TypeError:property descriptors must not specify a value or be writable when a getter or setter has been specified
+[Object.isExtensible({}), Object.isExtensible(Object.freeze({})), Object.isExtensible(1), Object.isSealed(Object.seal({a:1})), Object.isFrozen(Object.seal({a:1})), Object.isFrozen(Object.seal({})), Object.isSealed(1), Object.isFrozen(Object.preventExtensions({a:1}))]	J:[true,false,false,true,false,true,true,false]
+(()=>{var o=Object.seal({a:1}); o.a=2; delete o.a; o.b=1; return JSON.stringify(o)})()	S:{"a":2}
+(()=>{var s = Symbol('x'); var o = {[s]:1, a:2}; var r = Object.getOwnPropertySymbols(o); return [r.length, String(r[0]), r[0] === s, Object.keys(o).join()].join()})()	S:1,Symbol(x),true,a
+Object.getOwnPropertySymbols(Array.prototype).map(String).join()	S:Symbol(Symbol.iterator),Symbol(Symbol.unscopables)
+Object.getOwnPropertySymbols(1)	J:[]
+Object.getOwnPropertySymbols(null)	E:TypeError:can't convert null to object
+[({}).propertyIsEnumerable.call([1],'length'), Object.prototype.propertyIsEnumerable.call({a:1},'a'), Object.prototype.propertyIsEnumerable.call([1],'0'), Boolean.propertyIsEnumerable('prototype')]	J:[false,true,true,false]
+(()=>{var o={}; Object.defineProperties(o,{a:{value:1,enumerable:true},b:{get(){return 2}}}); return JSON.stringify(o)+o.b})()	S:{"a":1}2
+Object.getOwnPropertyDescriptor(globalThis,'NaN')	J:{"value":null,"writable":false,"enumerable":false,"configurable":false}
+Object.getOwnPropertyDescriptor(globalThis,'Math').writable	J:true
+Object.getOwnPropertyDescriptor(Symbol,'iterator')	J:{"writable":false,"enumerable":false,"configurable":false}
+(()=>{var a=[1,2]; Object.defineProperty(a,'length',{writable:false}); a.push(3)})()	E:TypeError:can't define array index property past the end of an array with non-writable length
+(()=>{function f(){} delete f.length; return f.hasOwnProperty('length') + ' ' + f.length})()	S:false 0
+(()=>{function f(){} f.name = 'z'; return f.name})()	S:f
+(()=>{var o = Object.freeze([1]); o[0] = 5; o.push(2)})()	E:TypeError:can't define array index property past the end of an array with non-writable length
+(()=>{var o={a:1}; Object.freeze(o); return JSON.stringify(Object.getOwnPropertyDescriptor(o,'a'))})()	S:{"value":1,"writable":false,"enumerable":true,"configurable":false}
+(()=>{var o={get a(){return 1}}; Object.freeze(o); return JSON.stringify(Object.getOwnPropertyDescriptor(o,'a'))+Object.isFrozen(o)})()	S:{"enumerable":true,"configurable":false}true
+Object.getOwnPropertyDescriptor(Object.prototype, '__proto__').get.name	S:get __proto__
+Object.getOwnPropertyNames(function(){}).join()	S:prototype,length,name
+Object.getOwnPropertyNames(class {}).join()	S:prototype,length,name
+Object.getOwnPropertyNames(()=>1).join()	S:length,name
+Object.getOwnPropertyNames(function*(){}).join()	S:prototype,length,name
+(()=>{var a=Object.freeze([1,2]); var r=[]; for (const f of [()=>a.pop(),()=>a.shift(),()=>a.unshift(0),()=>a.splice(0,1),()=>a.sort(),()=>a.reverse(),()=>a.fill(0),()=>a.copyWithin(0,1)]){try{r.push(f())}catch(e){r.push(e.message)}} return r.join('|')})()	S:property 1 is non-configurable and can't be deleted|0 is read-only|can't define array index property past the end of an array with non-writable length|0 is read-only|0 is read-only|0 is read-only|0 is read-only|0 is read-only
+(()=>{var a=Object.seal([1,2]); var r=[]; for (const f of [()=>a.pop(),()=>a.push(3),()=>a.reverse().join(),()=>{a[0]=9;return a[0]},()=>delete a[0]]){try{r.push(f())}catch(e){r.push(e.message)}} return r.join('|')})()	S:property 1 is non-configurable and can't be deleted|can't define property 2: Array is not extensible|2,1|9|false
+(()=>{var a=Object.preventExtensions([1,2]); var r=[]; for (const f of [()=>a.push(3),()=>a.pop(),()=>{a[5]=1;return a.length}]){try{r.push(f())}catch(e){r.push(e.message)}} return r.join('|')})()	S:can't define property 2: Array is not extensible|2|1
+(()=>{"use strict"; var a=Object.freeze([1]); try{a[0]=2}catch(e){return e.message}})()	S:0 is read-only
+(()=>{"use strict"; var a=Object.freeze([1]); try{a[3]=2}catch(e){return e.message}})()	S:can't define array index property past the end of an array with non-writable length
+(()=>{"use strict"; var a=Object.freeze([1]); try{a.length=0}catch(e){return e.message}})()	S:"length" is read-only
+(()=>{"use strict"; var a=Object.freeze([1]); try{delete a[0]}catch(e){return e.message}})()	S:property 0 is non-configurable and can't be deleted
+[Object.isFrozen(Object.freeze([1])), Object.isFrozen(Object.preventExtensions([])), Object.isSealed(Object.seal([1])), Object.isFrozen('ab'), Object.isFrozen(new String('ab')), Object.getOwnPropertyNames([5]).join(), Object.getOwnPropertyNames('ab').join()]	J:[true,false,true,true,false,"0,length","0,1,length"]
+(()=>{"use strict"; var o=Object.freeze({a:1}); try{delete o.a}catch(e){return e.message}})()	S:property "a" is non-configurable and can't be deleted
+Symbol.keyFor('x')	E:TypeError:"x" is not a symbol
+Symbol.keyFor(Symbol.iterator)	J:undefined
+[Symbol.for('a') === Symbol.for('a'), Symbol.for('a') === Symbol('a'), Symbol.for().description, String(Symbol.for()), Symbol('').description, Symbol().description, Symbol(undefined).description, Symbol(null).description]	J:[true,false,"undefined","Symbol(undefined)","",null,null,"null"]
+[typeof Object(Symbol('q')), Object(Symbol('q')).description, Object(Symbol('q')).toString(), Object(Symbol('q')).valueOf().toString(), Symbol.prototype.valueOf.call(Symbol.iterator) === Symbol.iterator]	J:["object","q","Symbol(q)","Symbol(q)",true]
+Symbol.prototype.valueOf.call({})	E:TypeError:valueOf method called on incompatible Object
+Object.getOwnPropertyDescriptor(Symbol.prototype, 'description').get.call({})	E:TypeError:get description method called on incompatible Object
+Symbol.prototype.toString.call(1)	E:TypeError:toString method called on incompatible number
+Symbol.prototype[Symbol.toPrimitive].call(1)	E:TypeError:[Symbol.toPrimitive] method called on incompatible number
+[typeof Symbol.prototype[Symbol.toPrimitive], Symbol.prototype[Symbol.toPrimitive].name, Symbol.prototype[Symbol.toPrimitive].length, Object.getOwnPropertyNames(Symbol.prototype).sort().join()]	J:["function","[Symbol.toPrimitive]",1,"constructor,description,toString,valueOf"]
+Object.getOwnPropertySymbols(Symbol.prototype).map(String).join()	S:Symbol(Symbol.toPrimitive),Symbol(Symbol.toStringTag)
+[Symbol.hasInstance, Symbol.isConcatSpreadable, Symbol.match, Symbol.matchAll, Symbol.replace, Symbol.search, Symbol.species, Symbol.split, Symbol.toPrimitive, Symbol.unscopables, Symbol.asyncIterator].map(String).join()	S:Symbol(Symbol.hasInstance),Symbol(Symbol.isConcatSpreadable),Symbol(Symbol.match),Symbol(Symbol.matchAll),Symbol(Symbol.replace),Symbol(Symbol.search),Symbol(Symbol.species),Symbol(Symbol.split),Symbol(Symbol.toPrimitive),Symbol(Symbol.unscopables),Symbol(Symbol.asyncIterator)
+Symbol.length + ' ' + Symbol.name	S:0 Symbol
+new Symbol()	E:TypeError:Symbol is not a constructor
+Symbol() + ''	E:TypeError:can't convert symbol to string
+`${Symbol()}`	E:TypeError:can't convert symbol to string
+Symbol() * 1	E:TypeError:can't convert symbol to number
+Object.getOwnPropertyNames(Function.prototype).join()	S:toString,apply,call,bind,arguments,caller,constructor,length,name
+Object.getOwnPropertyNames(Math.abs).join()	S:length,name
+Object.getOwnPropertyNames(class { constructor(a){} }).join()	S:prototype,length,name
+(class A { static x(){} }).length	J:0
+Object.getOwnPropertySymbols(Function.prototype).map(String).join()	S:Symbol(Symbol.hasInstance)
+(function(){}).caller	J:null
+(function*(){}).caller	E:TypeError:'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them
+(function(){"use strict"}).caller	E:TypeError:'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them
+(function*(){}).arguments	E:TypeError:'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them
+(()=>1).caller	E:TypeError:'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them
+[typeof Object.getOwnPropertyDescriptor(Function.prototype,'caller').get, Function.prototype.length, JSON.stringify(Function.prototype.name), Function.prototype[Symbol.hasInstance].name, Function.prototype[Symbol.hasInstance].call(Array, [])]	J:["function",0,"\\"\\"","[Symbol.hasInstance]",true]
+Object.getOwnPropertyDescriptor(Function.prototype, Symbol.hasInstance).writable	J:false
+(()=>{var f=function(){}; f.prototype=Array.prototype; return [] instanceof f})()	J:true
+(()=>{var o={[Symbol.hasInstance](v){return v===1}}; return 1 instanceof o})()	J:true
+(()=>{var o={[Symbol.toPrimitive](h){return h}}; return [`${o}`, o+'', +{[Symbol.toPrimitive](){return 4}}].join()})()	S:string,default,4
+Object.setPrototypeOf(Object.preventExtensions({}), Array.prototype)	E:TypeError:can't set prototype of this object
+(()=>{var p={}; var o=Object.preventExtensions(Object.create(p)); return Object.setPrototypeOf(o, p) === o})()	J:true
+[({}).__proto__ === Object.prototype, ({__proto__: Array.prototype}) instanceof Array, Object.getPrototypeOf({__proto__: null}), JSON.stringify(Object.keys({__proto__: 1, a: 2}))]	J:[true,true,null,"[\\"a\\"]"]
+(()=>{var o={}; o.__proto__ = Array.prototype; return o instanceof Array})()	J:true
+(()=>{var o=Object.preventExtensions({}); o.__proto__ = Array.prototype})()	E:TypeError:can't set prototype of this object
+Object.getOwnPropertyDescriptor(Object.prototype, '__proto__').set.name	S:set __proto__
+Object.setPrototypeOf(1, null)	J:1
+Object.setPrototypeOf({}, 1)	E:TypeError:Object.setPrototypeOf: expected an object or null, got number
+Object.setPrototypeOf(null, {})	E:TypeError:can't convert null to object
+Math.sumPrecise([{}])	E:TypeError:values passed to Math.sumPrecise must be numbers
+Math.sumPrecise(1)	E:TypeError:1 is not iterable
+[Math.sumPrecise([]), 1/Math.sumPrecise([]), 1/Math.sumPrecise([-0,-0]), 1/Math.sumPrecise([-0,0]), Math.sumPrecise([1e308,1e308,-1e308]), Math.sumPrecise([Infinity,-Infinity]), Math.sumPrecise([0.1,0.2,0.3]), Math.sumPrecise([5e-324,5e-324])]	J:[0,null,null,null,1e+308,null,0.6,1e-323]
+[Math.f16round(1.337), Math.f16round(65520), Math.f16round(65519.99), Math.f16round(5.960464477539063e-8), Math.f16round(2.98e-8), Math.f16round(-0.1), Math.f16round(NaN)]	J:[1.3369140625,null,65504,5.960464477539063e-8,0,-0.0999755859375,null]
+[Math.acosh(1), Math.acosh(0.5), Math.asinh(-0), Math.atanh(1), Math.atanh(0.5), Math.imul(0xffffffff, 5), Math.imul(3.7, -2), Math.round(-0.5), 1/Math.round(-0.2), Math.round(0.49999999999999994), Math.round(2.5), Math.round(-2.5), Math.hypot(NaN, Infinity), Math.hypot(), Math.hypot(3,4)]	J:[0,null,0,null,0.5493061443340548,-5,-6,0,null,0,3,-2,null,0,5]
+new Math.abs()	E:TypeError:Math.abs is not a constructor
+new Math.max(1)	E:TypeError:Math.max is not a constructor
+new JSON.parse('1')	E:TypeError:JSON.parse is not a constructor
+new Symbol.for('a')	E:TypeError:Symbol.for is not a constructor
+new parseInt('1')	E:TypeError:parseInt is not a constructor
+new (function(){}).bind()	E:TypeError:(intermediate value).bind is not a constructor
+new ({m(){}}).m()	E:TypeError:(intermediate value).m is not a constructor
+new (class { static m(){} }).m()	E:TypeError:(intermediate value).m is not a constructor
+new (Object.getOwnPropertyDescriptor({get a(){return 1}}, 'a').get)()	E:TypeError:Object.getOwnPropertyDescriptor(...).get is not a constructor
+new Proxy({}, {})	J:{}
+[1e-10, 1e-5, 0.1, 0.3, 0.5, 0.9, 1, 2, 3.5, 10, 1e5, 1e20, -0.5, -0.9, -1e-300].map(x => Math.log1p(x)).join()	S:9.999999999500001e-11,0.000009999950000333332,0.09531017980432487,0.26236426446749106,0.4054651081081644,0.6418538861723948,0.6931471805599453,1.0986122886681096,1.5040773967762742,2.3978952727983707,11.51293546492023,46.051701859880914,-0.6931471805599453,-2.302585092994046,-1e-300
+[0.1, 0.3, 0.49, 0.5, 0.7, 0.99, -0.2].map(x => Math.atanh(x)).join()	S:0.10033534773107558,0.30951960420311175,0.5360603366105666,0.5493061443340548,0.8673005276940531,2.6466524123622457,-0.2027325540540822
+[1e-9, 0.1, 1, 1.5, 2.5, 10, 1e10, 1e300, -3].map(x => Math.asinh(x)).join()	S:1e-9,0.09983407889920758,0.881373587019543,1.1947632172871094,1.6472311463710958,2.99822295029797,23.7189981105004,691.4686750787736,-1.8184464592320668
+[1, 1.0001, 1.5, 2, 2.5, 10, 1e10, 1e300].map(x => Math.acosh(x)).join()	S:0,0.014142017775251547,0.9624236501192069,1.3169578969248166,1.566799236972411,2.993222846126381,23.7189981105004,691.4686750787736
+eval("for (var i = 0; i < 2; ++i) { if (i) { try { throw null; } catch (e) { break; } } 'bad completion'; }")	J:undefined
+eval("for (var i = 0; i < 2; ++i) { if (i) { try { throw null; } catch (e) { continue; } } 'bad completion'; }")	J:undefined
+eval("for (var i = 0; i < 2; ++i) { if (i) { try { throw null; } catch (e) {} finally { break; } } 'bad completion'; }")	J:undefined
+eval("for (var i = 0; i < 2; ++i) { if (i) { try { throw null; } catch (e) {} finally { continue; } } 'bad completion'; }")	J:undefined
+eval('1; try { throw null; } catch (err) { }')	J:undefined
+eval('2; try { throw null; } catch (err) { 3; }')	J:3
+eval("for (var i = 0; i < 2; ++i) { if (i) { try {} finally { break; } } 'bad completion'; }")	J:undefined
+eval("for (var i = 0; i < 2; ++i) { if (i) { try {} finally { continue; } } 'bad completion'; }")	J:undefined
+eval('1; try { throw null; } catch (err) { } finally { }')	J:undefined
+eval('2; try { throw null; } catch (err) { 3; } finally { }')	J:3
+eval('4; try { throw null; } catch (err) { } finally { 5; }')	J:undefined
+eval('6; try { throw null; } catch (err) { 7; } finally { 8; }')	J:7
+eval('99; do { -99; try { 39 } catch (e) { -1 } finally { 42; break; -2 }; } while (false);')	J:42
+eval('99; do { -99; try { [].x.x } catch (e) { -1; } finally { 42; break; -3 }; } while (false);')	J:42
+eval('99; do { -99; try { 39 } catch (e) { -1 } finally { break; -2 }; } while (false);')	J:undefined
+eval('99; do { -99; try { [].x.x } catch (e) { -1; } finally { break; -3 }; } while (false);')	J:undefined
+eval('99; do { -99; try { 39 } catch (e) { -1 } finally { 42; break; -3 }; -77 } while (false);')	J:42
+eval('99; do { -99; try { [].x.x } catch (e) { -1; } finally { 42; break; -3 }; -77 } while (false);')	J:42
+eval('99; do { -99; try { 39 } catch (e) { -1 } finally { break; -3 }; -77 } while (false);')	J:undefined
+eval('99; do { -99; try { [].x.x } catch (e) { -1; } finally { break; -3 }; -77 } while (false);')	J:undefined
+eval('99; do { -99; try { 39 } catch (e) { -1 } finally { 42; continue; -3 }; } while (false);')	J:42
+eval('99; do { -99; try { [].x.x } catch (e) { -1; } finally { 42; continue; -3 }; } while (false);')	J:42
+eval('99; do { -99; try { 39 } catch (e) { -1 } finally { 42; continue; -3 }; -77 } while (false);')	J:42
+eval('99; do { -99; try { [].x.x } catch (e) { -1 } finally { 42; continue; -3 }; -77 } while (false);')	J:42
+(function(){ return this === globalThis })()	J:true
+(function(){ "use strict"; return this })()	J:undefined
+typeof (function(){ return this }).call(1)	S:object
+[typeof EvalError, typeof URIError, typeof RangeError, String(new EvalError(1)), String(new URIError('u'))]	J:["function","function","function","EvalError: 1","URIError: u"]
+(()=>{ var x = 1; return delete x })()	J:false
+(()=>{ try { throw 1 } catch (e) { return delete e } })()	J:false
+(()=>{ globalThis.zz = 1; return delete zz })()	J:true
+delete undefinedThing	J:true
+[eval('1; try { } catch (err) { }'), eval('1; if (true) { }'), eval('1; {}'), eval('1; var x = 2;'), eval('1; do { } while (false)'), eval('1; do { 2; break; } while (false)'), eval('1; switch (0) { }'), eval('1; try { 3 } finally { 4 }')]	J:[1,1,1,1,1,2,1,3]
+Object.getOwnPropertyDescriptor(Object.getPrototypeOf(function*(){}).prototype, 'constructor').writable	J:false
+[Array, Map, Set, RegExp, Promise, ArrayBuffer].map(c => typeof Object.getOwnPropertyDescriptor(c, Symbol.species).get + Object.getOwnPropertyDescriptor(c, Symbol.species).get.name).join()	S:functionget [Symbol.species],functionget [Symbol.species],functionget [Symbol.species],functionget [Symbol.species],functionget [Symbol.species],functionget [Symbol.species]
+Array[Symbol.species] === Array	J:true
+(()=>{ class A { static { this.x = 1 } } return A.x })()	J:1
+(()=>{ with ({a: 1}) { return a } })()	J:1
+JSON.rawJSON('')	E:SyntaxError:JSON.rawJSON: argument cannot be empty when converted to string
+JSON.rawJSON(' 1')	E:SyntaxError:JSON.rawJSON: first or last character cannot be any of tab, line feed, carriage return, or space
+JSON.rawJSON('{}')	E:SyntaxError:JSON.rawJSON: outermost value must not be an array or object
+JSON.rawJSON('[1]')	E:SyntaxError:JSON.rawJSON: outermost value must not be an array or object
+JSON.rawJSON('tru')	E:SyntaxError:JSON.parse: unexpected keyword at line 1 column 1 of the JSON data
+[JSON.stringify({a: JSON.rawJSON('1e1000')}), JSON.isRawJSON(JSON.rawJSON('"x"')), JSON.isRawJSON({}), Object.getPrototypeOf(JSON.rawJSON('1')), Object.isFrozen(JSON.rawJSON('1')), JSON.rawJSON('null').rawJSON, Object.getOwnPropertyNames(JSON.rawJSON('1')).join()]	J:["{\\"a\\":1e1000}",true,false,null,true,"null","rawJSON"]
+JSON.stringify({a: 1, b: 2, c: 3}, ['b', 1, 'b', new String('a'), {}, undefined, Symbol(), 'zz'])	S:{"b":2,"a":1}
+JSON.stringify([1, [2]], null, 3.7)	S:[\n   1,\n   [\n      2\n   ]\n]
+JSON.stringify({a: 1}, null, new Number(2))	S:{\n  "a": 1\n}
+JSON.parse('[1, 2]', function(k, v, ctx) { return typeof ctx + ':' + JSON.stringify(ctx) })	S:object:{}
+JSON.parse('{"a": 1.0, "b": [true, "x"]}', function(k, v, ctx) { return v === null || typeof v !== 'object' ? (ctx && ctx.source) : v })	J:{"a":"1.0","b":["true","\\"x\\""]}
+[(function(a){ arguments[0] = 2; return a })(1), (function(a){ a = 3; return arguments[0] })(1), (function(a){ "use strict"; a = 3; return arguments[0] })(1), (function(a){ delete arguments[0]; arguments[0] = 5; return a })(1), (function(a, b){ b = 9; return arguments[1] })(1), (function(a = 0){ a = 3; return arguments[0] })(1)]	J:[2,3,1,1,null,1]
+(()=>{ function f(a){ var r = []; eval('var a = 7'); r.push(a, arguments[0]); return r } return f(1) })()	J:[7,7]
+(()=>{ function f(x = 1){ var x; return x } return f() })()	J:1
+(()=>{ function f(x = x){ } try { f() } catch (e) { return e.name + ': ' + e.message } })()	S:ReferenceError: can't access lexical declaration 'x' before initialization
+(()=>{ let y = 1; try { eval('var y') } catch (e) { return e.name + ': ' + e.message } })()	S:SyntaxError: redeclaration of let y

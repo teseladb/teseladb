@@ -217,7 +217,9 @@ impl<B: Backend + ?Sized> WireEnv<'_, B> {
         let Some((shared, ns)) = &self.node else { return Ok(Vec::new()) };
         let mut backend = self.backend.borrow_mut();
         let Some(coll) = backend.collection(ns)? else { return Ok(Vec::new()) };
-        let mut specs = match super::catalog::has_id_index(ns) {
+        // A time series lists its buckets' indexes alone (measured on a `refnode` 9.0.4).
+        let series = super::timeseries::spec_of(&coll)?.is_some();
+        let mut specs = match super::catalog::has_id_index(ns) && !series {
             true => vec![super::catalog::id_index(&coll)?],
             false => Vec::new(),
         };
@@ -441,6 +443,18 @@ impl<B: Backend + ?Sized> Env for WireEnv<'_, B> {
         let Some((shared, ns)) = &self.node else { return Ok(Vec::new()) };
         let mut backend = self.backend.borrow_mut();
         super::search_ops::source(&mut **backend, shared, ns, stage, spec).map_err(to_mql)
+    }
+
+    fn text_source(
+        &self,
+        filter: &Document,
+    ) -> Result<Vec<teseladb_exec::pipeline::search::Scored>, MqlError> {
+        let ns = match &self.node {
+            Some((_, ns)) => ns.clone(),
+            None => return Err(to_mql(super::text_search::no_index_here())),
+        };
+        let mut backend = self.backend.borrow_mut();
+        super::text_search::source(&mut **backend, &ns, filter, self.concern).map_err(to_mql)
     }
 
     fn check_search(&self, stage: &str, spec: &Document) -> Result<(), MqlError> {

@@ -440,7 +440,7 @@ pub fn to_bson(it: &mut Interp, v: &Val, name: &str, depth: usize) -> R<Value> {
                 }
                 _ => {
                     let mut d = Document::new();
-                    for k in it.own_keys(o, true) {
+                    for k in it.keys(o, true)? {
                         let x = it.get(v, &k)?;
                         if x.is_callable() && matches!(o.borrow().kind, Kind::Error) {
                             continue;

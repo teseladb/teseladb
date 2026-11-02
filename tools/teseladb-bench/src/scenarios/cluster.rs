@@ -127,7 +127,7 @@ fn between(samples: &[(Instant, u64)], from: Instant, to: Instant) -> Histogram 
 }
 
 /// Runs `teseladb admin` with `words` against the node's administration port.
-fn admin(addr: SocketAddr, words: &[&str]) -> Result<(), String> {
+pub(crate) fn admin(addr: SocketAddr, words: &[&str]) -> Result<(), String> {
     let mut argv = vec!["--node".to_owned(), addr.to_string()];
     argv.extend(words.iter().map(|w| (*w).to_owned()));
     let opts = teseladb_server::admin::parse(&argv)?;
