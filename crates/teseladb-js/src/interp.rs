@@ -1061,7 +1061,8 @@ impl<'c> Interp<'c> {
     /// An assignment to a read-only property: ignored, or a `TypeError` in strict code.
     fn read_only(&self, key: &str) -> R<()> {
         if self.strict {
-            return self.type_error(&format!("{} is read-only", crate::props::shown_key(key)));
+            return self
+                .type_error(&format!("{} is read-only", crate::props::shown_key(self, key)));
         }
         Ok(())
     }
@@ -1162,7 +1163,7 @@ impl<'c> Interp<'c> {
         }
         if crate::props::own_prop(o, key).is_some_and(|p| !p.configurable) {
             if self.strict {
-                let k = crate::props::shown_key(key);
+                let k = crate::props::shown_key(self, key);
                 return self
                     .type_error(&format!("property {k} is non-configurable and can't be deleted"));
             }
@@ -2585,7 +2586,7 @@ impl<'c> Interp<'c> {
                 && let Some(cur) = self.get_own_prop(&target, &key)
                 && !cur.configurable
             {
-                let shown = crate::props::shown_key(&key);
+                let shown = crate::props::shown_key(self, &key);
                 return self
                     .type_error(&format!("can't redefine non-configurable property {shown}"));
             }

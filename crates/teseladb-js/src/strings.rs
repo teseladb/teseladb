@@ -456,6 +456,9 @@ fn at(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 
 pub(crate) fn split(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let s = this_text(it, this)?;
+    if let Some(v) = crate::regex::delegated(it, a, "split", this, &[arg(a, 1)])? {
+        return Ok(v);
+    }
     let limit = if matches!(arg(a, 1), Val::Undef) {
         u32::MAX as usize
     } else {
@@ -587,6 +590,9 @@ pub fn substitute(
 
 fn replace_in(it: &mut Interp, this: &Val, a: &[Val], all: bool) -> R {
     let s = this_text(it, this)?;
+    if let Some(v) = crate::regex::delegated(it, a, "replace", this, &[arg(a, 1)])? {
+        return Ok(v);
+    }
     let pat = arg(a, 0);
     if matches!(&pat, Val::Obj(o) if matches!(o.borrow().kind, Kind::RegExp(..))) {
         return crate::regex::replace(it, &s, &pat, &arg(a, 1), all);

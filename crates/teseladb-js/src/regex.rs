@@ -1058,18 +1058,30 @@ fn all(it: &mut Interp, re: &Regex, s: &[u32]) -> R<Vec<Caps>> {
     Ok(out)
 }
 
-/// `String.prototype.<sym>(x)` where `x` is an object other than a `RegExp` with a method
-/// `Symbol.<sym>`: what that method gives for `this` (ECMA-262 §22.1.3.13).
-fn delegated(it: &mut Interp, a: &[Val], sym: &str, this: &Val) -> R<Option<Val>> {
+/// `String.prototype.<sym>(x, …rest)` where `x` is an object other than a `RegExp` with a method
+/// `Symbol.<sym>`: what that method gives for `this` and `rest` (ECMA-262 §22.1.3.13); a method
+/// that is neither callable nor `undefined` or `null` is a `TypeError` (GetMethod).
+pub(crate) fn delegated(
+    it: &mut Interp,
+    a: &[Val],
+    sym: &str,
+    this: &Val,
+    rest: &[Val],
+) -> R<Option<Val>> {
     let x = a.first().cloned().unwrap_or(Val::Undef);
     if !matches!(&x, Val::Obj(o) if !matches!(o.borrow().kind, Kind::RegExp(..))) {
         return Ok(None);
     }
     let f = it.get(&x, &crate::builtins::well_known(sym))?;
-    if !f.is_callable() {
+    if f.is_nullish() {
         return Ok(None);
     }
-    it.call(&f, &x, std::slice::from_ref(this)).map(Some)
+    if !f.is_callable() {
+        return it.type_error(&format!("{} is not a function", f.type_of()));
+    }
+    let mut args = vec![this.clone()];
+    args.extend_from_slice(rest);
+    it.call(&f, &x, &args).map(Some)
 }
 
 fn as_regexp(it: &mut Interp, v: &Val) -> R<Val> {
@@ -1083,7 +1095,7 @@ fn as_regexp(it: &mut Interp, v: &Val) -> R<Val> {
 /// `String.prototype.match`.
 pub fn string_match(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let s = crate::strings::this_text(it, this)?;
-    if let Some(v) = delegated(it, a, "match", this)? {
+    if let Some(v) = delegated(it, a, "match", this, &[])? {
         return Ok(v);
     }
     let rv = as_regexp(it, &a.first().cloned().unwrap_or(Val::Undef))?;
@@ -1113,7 +1125,7 @@ pub fn string_match(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 /// `String.prototype.search`.
 pub fn search(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let s = crate::strings::this_text(it, this)?;
-    if let Some(v) = delegated(it, a, "search", this)? {
+    if let Some(v) = delegated(it, a, "search", this, &[])? {
         return Ok(v);
     }
     let rv = as_regexp(it, &a.first().cloned().unwrap_or(Val::Undef))?;
@@ -1221,11 +1233,8 @@ pub fn match_all(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     }
     let arg = a.first().cloned().unwrap_or(Val::Undef);
     let is_regexp = matches!(&arg, Val::Obj(o) if matches!(o.borrow().kind, Kind::RegExp(..)));
-    if !is_regexp && let Val::Obj(_) = &arg {
-        let custom = it.get(&arg, &crate::builtins::well_known("matchAll"))?;
-        if custom.is_callable() {
-            return it.call(&custom, &arg, std::slice::from_ref(this));
-        }
+    if !is_regexp && let Some(v) = delegated(it, a, "matchAll", this, &[])? {
+        return Ok(v);
     }
     let s = it.str_of(this);
     let s = it.operand_named(s, "this")?;

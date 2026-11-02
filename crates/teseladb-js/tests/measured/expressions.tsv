@@ -4684,3 +4684,32 @@ Math.sumPrecise([1, 2 ** -1074])	J:1
 Math.sumPrecise(5)	E:TypeError:5 is not iterable
 Math.sumPrecise([1, 'a'])	E:TypeError:values passed to Math.sumPrecise must be numbers
 Math.hypot(...[3, 4])	J:5
+'x'.split({[Symbol.split]: (s, l) => 'S' + s + l}, 3)	S:Sx3
+'x'.replace({[Symbol.replace]: (s, r) => 'R' + s + r}, 'y')	S:Rxy
+'x'.replaceAll({[Symbol.replace]: (s, r) => 'R' + s + r}, 'y')	S:Rxy
+'x'.match({[Symbol.match]: (s) => 'M' + s})	S:Mx
+'x'.matchAll({[Symbol.matchAll]: (s) => 'A' + s})	S:Ax
+'x'.search({[Symbol.search]: (s) => 'Q' + s})	S:Qx
+'a,b'.split({[Symbol.split]: undefined, toString(){ return ',' }})	J:["a","b"]
+'a,b'.split({[Symbol.split]: null, toString(){ return ',' }})	J:["a","b"]
+'a,b'.split({[Symbol.split]: 1, toString(){ return ',' }})	E:TypeError:number is not a function
+'x'.split(Object.assign(/x/, {[Symbol.split]: (s) => 'own'}))	E:TypeError:Symbol.split is read-only
+'x'.match({[Symbol.match]: 1})	E:TypeError:number is not a function
+'x'.search({[Symbol.search]: 'a'})	E:TypeError:string is not a function
+'x'.replace({[Symbol.replace]: {}}, 'y')	E:TypeError:object is not a function
+'x'.matchAll({[Symbol.matchAll]: true})	E:TypeError:boolean is not a function
+'x'.replaceAll({[Symbol.replace]: 1}, 'y')	E:TypeError:number is not a function
+'x'.split({[Symbol.split]: 1})	E:TypeError:number is not a function
+(function(){ 'use strict'; const o = Object.freeze({[Symbol('k')]: 1}); o[Object.getOwnPropertySymbols(o)[0]] = 2 })()	E:TypeError:Symbol("k") is read-only
+(function(){ 'use strict'; const o = Object.freeze({[Symbol.iterator]: 1}); o[Symbol.iterator] = 2 })()	E:TypeError:Symbol.iterator is read-only
+(function(){ 'use strict'; const o = Object.freeze({[Symbol()]: 1}); o[Object.getOwnPropertySymbols(o)[0]] = 2 })()	E:TypeError:Symbol() is read-only
+(function(){ 'use strict'; const o = Object.freeze({[Symbol.for('r')]: 1}); o[Symbol.for('r')] = 2 })()	E:TypeError:Symbol.for("r") is read-only
+'x'.replace(null, 'y')	S:x
+'nullx'.replace({[Symbol.replace]: null, toString(){ return 'x' }}, 'y')	S:nully
+(function(){ 'use strict'; const o = {}; Object.defineProperty(o, Symbol.toStringTag, {value: 1}); delete o[Symbol.toStringTag] })()	E:TypeError:property Symbol.toStringTag is non-configurable and can't be deleted
+(function(){ const o = {}; Object.defineProperty(o, Symbol('q'), {value: 1}); Object.defineProperty(o, Object.getOwnPropertySymbols(o)[0], {value: 2}) })()	E:TypeError:can't redefine non-configurable property Symbol("q")
+'a'.split({[Symbol.split]: null})	J:["a"]
+'a,b'.replace({[Symbol.replace]: undefined, toString(){ return 'a' }}, 'z')	S:z,b
+'x'.matchAll({[Symbol.matchAll]: null, toString(){ return 'x' }}).next().value[0]	S:x
+String.prototype.split.call(null, {[Symbol.split]: () => 1})	E:TypeError:String.prototype.split called on incompatible null
+'x'.search({[Symbol.search]: function(s){ return [this === undefined, typeof s].join() }})	S:false,string

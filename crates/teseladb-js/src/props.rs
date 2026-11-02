@@ -234,7 +234,7 @@ fn forbidden(cur: &Prop, d: &Desc) -> bool {
 pub fn define_own(it: &mut Interp, o: &ObjRef, key: &str, d: &Desc) -> R<()> {
     let is_array = matches!(o.borrow().kind, Kind::Array(_));
     let cur = own_prop(o, key);
-    let shown = shown_key(key);
+    let shown = shown_key(it, key);
     match &cur {
         None if is_array && array_index(key).is_some() && o.borrow().locks & LENGTH_FIXED != 0 => {
             return Err(crate::arrays::cannot_grow(it, true, array_index(key).unwrap_or(0)));
@@ -402,8 +402,24 @@ fn merged(base: &Prop, d: &Desc) -> Prop {
     p
 }
 
-/// A key as the engine shows it in a message: `"b"`, or `0` for an index.
-pub fn shown_key(key: &str) -> String {
+/// A key as the engine shows it in a message: `"b"`, `0` for an index, and a symbol as it is
+/// written: `Symbol.iterator`, `Symbol.for("r")`, `Symbol("k")` or `Symbol()` (measured on a
+/// `refrouter` 9.0.4 on 02-11).
+pub fn shown_key(it: &Interp, key: &str) -> String {
+    if let Val::Sym(sym) = symbol_of_key(key)
+        && key.starts_with("@@")
+    {
+        let (desc, id) = (&sym.0, sym.1);
+        return if id == 0 {
+            desc.to_string()
+        } else if it.registry.iter().any(|(_, s)| matches!(s, Val::Sym(r) if r.1 == id)) {
+            format!("Symbol.for(\"{desc}\")")
+        } else if it.undescribed.contains(&id) {
+            "Symbol()".into()
+        } else {
+            format!("Symbol(\"{desc}\")")
+        };
+    }
     if array_index(key).is_some() { key.to_string() } else { format!("\"{key}\"") }
 }
 
