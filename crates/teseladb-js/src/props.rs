@@ -226,6 +226,9 @@ pub fn define_own(it: &mut Interp, o: &ObjRef, key: &str, d: &Desc) -> R<()> {
     let cur = own_prop(o, key);
     let shown = shown_key(key);
     match &cur {
+        None if is_array && array_index(key).is_some() && o.borrow().locks & LENGTH_FIXED != 0 => {
+            return Err(crate::arrays::cannot_grow(it, true, array_index(key).unwrap_or(0)));
+        }
         None if !o.borrow().extensible => {
             return it
                 .type_error(&format!("can't define property {shown}: Object is not extensible"));

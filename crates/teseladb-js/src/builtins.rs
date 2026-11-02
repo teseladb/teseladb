@@ -1147,7 +1147,7 @@ fn stack_getter(_: &mut Interp, this: &Val, _: &[Val]) -> R {
 /// Setting `stack` gives the error its own `stack`.
 fn stack_setter(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     if let Val::Obj(o) = this {
-        it.define(o, "stack", Prop::hidden(arg(a, 0)))?;
+        it.define(o, "stack", Prop::data(arg(a, 0)))?;
     }
     Ok(Val::Undef)
 }
@@ -1207,9 +1207,11 @@ fn collections(it: &mut Interp, g: &ObjRef) -> R<()> {
         "size",
         Prop { getter: Some(it.native("size", coll_size, 0)?), ..Prop::hidden(Val::Undef) },
     )?;
-    for o in [&mp, &sp] {
-        let f = it.native("[Symbol.iterator]", coll_default_iter, 0)?;
-        it.define(o, "@@Symbol.iterator:0", Prop::hidden(Val::Obj(f)))?;
+    // `Map.prototype[Symbol.iterator]` is `entries` and `Set.prototype[Symbol.iterator]` is
+    // `values`, the same functions (ECMA-262 §24.1.3.12, §24.2.3.11).
+    for (o, name) in [(&mp, "entries"), (&sp, "values")] {
+        let f = o.borrow().get_own(name).map(|p| p.value.clone()).unwrap_or(Val::Undef);
+        it.define(o, "@@Symbol.iterator:0", Prop::hidden(f))?;
     }
     let ip = it.realm.iter.clone();
     method(it, &ip, "next", iter_next, 0)?;
@@ -1225,18 +1227,17 @@ pub(crate) fn add_from(
     target: &Val,
     iterable: &Val,
     adder: NativeFn,
-    entries: bool,
+    entries: Option<&str>,
 ) -> R<()> {
     if iterable.is_nullish() {
         return Ok(());
     }
     let mut rec = it.open_iter(iterable)?;
     while let Some(item) = it.iter_step(&mut rec)? {
-        let r = if !entries {
+        let r = if let Some(kind) = entries.filter(|_| !matches!(item, Val::Obj(_))) {
+            it.type_error(&format!("iterable for {kind} should have array-like objects"))
+        } else if entries.is_none() {
             adder(it, target, &[item])
-        } else if !matches!(item, Val::Obj(_)) {
-            let m = format!("iterator value {} is not an entry object", it.show(&item));
-            it.type_error(&m)
         } else {
             it.get(&item, "0")
                 .and_then(|k| Ok((k, it.get(&item, "1")?)))
@@ -1260,7 +1261,7 @@ fn map_ctor(it: &mut Interp, this: &Val, a: &[Val]) -> R {
         return it.type_error("calling a builtin Map constructor without new is forbidden");
     }
     let m = Val::Obj(it.alloc(Some(it.realm.map.clone()), Kind::Map(Vec::new()))?);
-    add_from(it, &m, &arg(a, 0), map_set, true)?;
+    add_from(it, &m, &arg(a, 0), map_set, Some("Map"))?;
     Ok(m)
 }
 
@@ -1269,7 +1270,7 @@ fn set_ctor(it: &mut Interp, this: &Val, a: &[Val]) -> R {
         return it.type_error("calling a builtin Set constructor without new is forbidden");
     }
     let s = it.alloc(Some(it.realm.set.clone()), Kind::Set(Vec::new()))?;
-    add_from(it, &Val::Obj(s.clone()), &arg(a, 0), set_add, false)?;
+    add_from(it, &Val::Obj(s.clone()), &arg(a, 0), set_add, None)?;
     Ok(Val::Obj(s))
 }
 
@@ -1433,12 +1434,6 @@ fn coll_entries(it: &mut Interp, this: &Val, _: &[Val]) -> R {
         items.push(it.array(vec![k, v])?);
     }
     make_iter(it, items)
-}
-
-fn coll_default_iter(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    let o = coll(it, this)?;
-    let is_map = matches!(o.borrow().kind, Kind::Map(_));
-    if is_map { coll_entries(it, this, a) } else { map_values(it, this, a) }
 }
 
 fn iter_next(it: &mut Interp, this: &Val, _: &[Val]) -> R {

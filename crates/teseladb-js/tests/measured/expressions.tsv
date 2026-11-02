@@ -643,3 +643,72 @@ decodeURI('%C0%80')	E:URIError:malformed URI sequence
 (()=>{ var e = Error('m', 'a', 3.7); return [e.lineNumber].join('|') })()	S:3
 JSON.stringify(Object.getOwnPropertyNames(Error('m', 'a', 2)))	S:["fileName","lineNumber","columnNumber","message"]
 [1,2].map(Error).map(e => e.fileName + ':' + e.lineNumber).join()	S:0:0,1:0
+(0, eval)('1 + 2')	J:3
+(0, eval)('var zzq = 5; zzq')	J:5
+(0, eval)(7)	J:7
+eval('let q = 3; q * 2')	J:6
+eval('"use strict"; var w = 1; typeof w')	S:number
+eval('function fq(){ return 9 } fq()')	J:9
+(0, eval)('1 +')	E:SyntaxError:expected expression, got end of script
+[new Date(2020, 1, 3, 4, 5, 6, 7).getFullYear(), new Date(2020, 1, 3, 4, 5, 6, 7).getMonth(), new Date(2020, 1, 3, 4, 5, 6, 7).getDate(), new Date(2020, 1, 3, 4, 5, 6, 7).getHours(), new Date(2020, 1, 3, 4, 5, 6, 7).getMinutes(), new Date(2020, 1, 3, 4, 5, 6, 7).getSeconds(), new Date(2020, 1, 3, 4, 5, 6, 7).getMilliseconds(), new Date(2020, 1, 3).getDay()]	J:[2020,1,3,4,5,6,7,1]
+[new Date(0).getUTCFullYear(), new Date(0).getUTCMonth(), new Date(0).getUTCDate(), new Date(0).getUTCHours(), new Date(0).getUTCDay(), new Date(NaN).getFullYear()]	J:[1970,0,1,0,4,null]
+(()=>{ var d = new Date(0); d.setFullYear(2001); d.setMonth(5); d.setDate(9); d.setHours(3); d.setMinutes(4); d.setSeconds(5); d.setMilliseconds(6); return d.toISOString() })()	S:2001-06-09T03:04:05.006Z
+(()=>{ var e = new Error('x'); e.stack = 'mine'; return e.stack + Object.keys(e).length })()	S:mine1
+[SyntaxError('s') instanceof SyntaxError, InternalError('i').name, new InternalError('j').message]	J:[true,"InternalError","j"]
+[...new Map([[1, 2]])].join() + [...new Set([3])].join() + [...new Map([[1, 2]]).keys()].join()	S:1,231
+new Map([[1, 2]])[Symbol.iterator] === Map.prototype.entries	J:true
+(()=>{ var a = []; a[5] = 1; return a.length + ':' + a.copyWithin(0, 5).join() })()	S:6:1,,,,,1
+[1, 2, 3, 4, 5].copyWithin(-2, 0, 2).join()	S:1,2,3,1,2
+(()=>{ var o = {}; Object.defineProperty(o, 'a', {get: function g(){ return 1 }, configurable: false}); try { Object.defineProperty(o, 'a', {get: function h(){ return 2 }}) } catch (e) { return e.message } })()	S:can't redefine non-configurable property "a"
+(()=>{ var g = function(){ return 1 }; var o = {}; Object.defineProperty(o, 'a', {get: g}); Object.defineProperty(o, 'a', {get: g}); try { Object.defineProperty(o, 'a', {set: g}) } catch (e) { return e.message } })()	S:can't redefine non-configurable property "a"
+(()=>{ var o = {}; Object.defineProperty(o, 'a', {value: 1}); try { Object.defineProperty(o, 'a', {enumerable: true}) } catch (e) { return e.message } })()	S:can't redefine non-configurable property "a"
+(()=>{ var o = {}; Object.defineProperty(o, 'a', {value: NaN}); Object.defineProperty(o, 'a', {value: NaN}); try { Object.defineProperty(o, 'a', {value: -0}) ; Object.defineProperty(o, 'b', {value: 0}); Object.defineProperty(o, 'b', {value: -0}) } catch (e) { return e.message } })()	S:can't redefine non-configurable property "a"
+(()=>{ var o = {}; Object.defineProperty(o, 'a', {value: 1, writable: true}); try { Object.defineProperty(o, 'a', {get(){}}) } catch (e) { return e.message } })()	S:can't redefine non-configurable property "a"
+(()=>{ var a = [1, 2]; Object.defineProperty(a, 0, {value: 9, writable: false}); a[0] = 5; var r = [a[0], Object.getOwnPropertyDescriptor(a, 0).writable, Object.keys(a).join()]; delete a[0]; return r.concat([a[0]]).join() })()	S:9,false,0,1,
+(()=>{ var a = [1, 2]; Object.defineProperty(a, 1, {enumerable: false}); return Object.keys(a).join() + '|' + JSON.stringify(a) + '|' + Object.getOwnPropertyNames(a).join() })()	S:0|[1,2]|0,1,length
+(()=>{ var a = [1]; Object.defineProperty(a, 5, {get(){ return 'g' }}); return a.length + ':' + a[5] })()	S:6:g
+(()=>{ "use strict"; var a = [1]; Object.defineProperty(a, 0, {value: 1, writable: false}); try { a[0] = 2 } catch (e) { return e.message } })()	S:0 is read-only
+(()=>{ var a = Object.freeze([]); try { Object.defineProperty(a, 0, {value: 1}) } catch (e) { return e.message } })()	S:can't define array index property past the end of an array with non-writable length
+(()=>{ var a = [1, 2, 3]; Object.defineProperty(a, 'length', {value: 1}); return a.join() + a.length })()	S:11
+Object.getOwnPropertyDescriptor(new Uint8Array([7]), '0')	J:{"value":7,"writable":true,"enumerable":true,"configurable":true}
+Object.getOwnPropertyDescriptor(new Uint8Array([7]), '5')	J:undefined
+[Object.isFrozen(new Uint8Array(0)), Object.isFrozen(Object.preventExtensions(new Uint8Array(0))), Object.isFrozen(Object.preventExtensions(new Uint8Array(2))), Object.isSealed(Object.preventExtensions([]))]	J:[false,true,false,true]
+Object.getOwnPropertyDescriptors([5])	J:{"0":{"value":5,"writable":true,"enumerable":true,"configurable":true},"length":{"value":1,"writable":true,"enumerable":false,"configurable":false}}
+Object.getOwnPropertyDescriptors('ab')	J:{"0":{"value":"a","writable":false,"enumerable":true,"configurable":false},"1":{"value":"b","writable":false,"enumerable":true,"configurable":false},"length":{"value":2,"writable":false,"enumerable":false,"configurable":false}}
+(()=>{ var o = Object.create({}, {a: {value: 1, enumerable: true}, b: {get(){ return 2 }}}); return JSON.stringify(o) + o.b })()	S:{"a":1}2
+Object.create({}, null)	E:TypeError:can't convert null to object
+Object.defineProperties({}, {a: 1})	E:TypeError:Property descriptor must be an object, got 1
+Object.defineProperty({}, 'a', {set: 5})	E:TypeError:property descriptor's set field is neither undefined nor a function
+(()=>{ var s = Symbol('k'); var o = {}; Object.defineProperties(o, {[s]: {value: 3, enumerable: true}}); return o[s] })()	J:3
+Object.prototype.propertyIsEnumerable.call('ab', '0')	J:true
+[Object.isExtensible(Object.seal({})), Object.isSealed({}), Object.isFrozen({get a(){}}), Object.isFrozen(Object.freeze({get a(){ return 1 }}))]	J:[false,false,false,true]
+(()=>{ var o = Object.seal({a: 1}); "use strict"; try { delete o.a } catch (e) { return e.message } return 'kept' })()	S:kept
+(()=>{ var m = new Map(); try { new Map([1]) } catch (e) { return e.message } })()	S:iterable for Map should have array-like objects
+(()=>{ try { new WeakMap([[1, 2]]) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:WeakMap key 1 must be an object
+(()=>{ var it = {[Symbol.iterator]() { return {next() { return {done: false, value: 'x'} }, return() { return 1 } } }}; try { new Map(it) } catch (e) { return e.message } })()	S:iterable for Map should have array-like objects
+Math.sumPrecise([1e308, 1e308, -1e308, -1e308, 1])	J:1
+Math.sumPrecise([2 ** -1074, 2 ** -1074, 2 ** -1073])	J:2e-323
+Math.sumPrecise([0.1, 0.2, -0.3, 1e-20])	J:2.776557561562891e-17
+Math.sumPrecise([1, NaN])	J:null
+Math.sumPrecise([-Infinity, 1])	J:null
+[Math.f16round(1e-8), Math.f16round(-1e-8), Math.f16round(0.00006103515625), Math.f16round(65504), Math.f16round(-70000), Math.f16round(1.0009765625), Math.f16round(1.00048828125), Math.f16round(-0)]	J:[0,0,0.00006103515625,65504,null,1.0009765625,1,0]
+[Math.hypot(-3, 4, 12), Math.hypot(0, -0), Math.hypot(1e300, 1e300), Math.hypot(NaN), Math.hypot(1, '2')]	J:[13,0,1.4142135623730952e+300,null,2.23606797749979]
+[Math.acosh(Infinity), Math.acosh(3e8), Math.asinh(Infinity), Math.asinh(-1e300), Math.atanh(-1), Math.atanh(2), Math.atanh(NaN), Math.log1p(-1), Math.log1p(-2), Math.log1p(Infinity), Math.log1p(1e-300), Math.log1p(4e15), Math.log1p(1.5)]	J:[null,20.212440213180418,null,-691.4686750787736,null,null,null,null,null,null,1e-300,35.92507075603058,0.9162907318741551]
+Symbol.prototype.toString.call(Object(Symbol('w')))	S:Symbol(w)
+Symbol.keyFor(Symbol.for('zz'))	S:zz
+(()=>{ var s = Symbol(); return [String(s), s.description, Object(s).description] })()	J:["Symbol()",null,null]
+(()=>{ class A { static [Symbol.hasInstance](v) { return v === 5 } } return [5 instanceof A, 6 instanceof A] })()	J:[true,false]
+(()=>{ var b = function(){}.bind(null); return [] instanceof b })()	J:false
+(()=>{ var o = {[Symbol.toPrimitive]: undefined, valueOf() { return 4 }}; return o * 2 })()	J:8
+(()=>{ var o = {[Symbol.toPrimitive](h) { return h }}; return [String(o), o + '', +{[Symbol.toPrimitive](h){ return h == 'number' ? 3 : 0 }}] })()	J:["string","default",3]
+JSON.stringify({a: [1, {b: 2}]}, null, '--')	S:{\n--"a": [\n----1,\n----{\n------"b": 2\n----}\n--]\n}
+JSON.stringify({a: 1, b: [1]}, ['a', 'b'])	S:{"a":1,"b":[1]}
+JSON.stringify(1, null, new String('xx'))	S:1
+JSON.stringify({a: JSON.rawJSON('"q"')}, null, 1)	S:{\n "a": "q"\n}
+JSON.parse('[1, {"a": [2]}]', function(k, v, c) { return k === '' ? v : (typeof v === 'object' ? 'o' : c.source) })	J:["1","o"]
+JSON.parse('{"a": 1, "a": 2}', function(k, v, c) { return k === 'a' ? c.source : v })	J:{"a":"2"}
+JSON.parse('[1]', function(k, v) { if (k === '0') { this.length = 5 } return v }).length	J:5
+JSON.parse('{"a": 1}', function(k, v) { if (k === 'a') { Object.defineProperty(this, 'b', {value: 1, configurable: false}) } return k === 'b' ? undefined : v })	J:{"a":1}
+JSON.parse('tru')	E:SyntaxError:JSON.parse: unexpected keyword at line 1 column 1 of the JSON data
+JSON.parse('{"a" 1}')	E:SyntaxError:JSON.parse: expected ':' after property name in object at line 1 column 6 of the JSON data
+JSON.rawJSON(Symbol())	E:TypeError:can't convert symbol to string
