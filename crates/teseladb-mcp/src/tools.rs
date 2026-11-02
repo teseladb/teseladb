@@ -352,7 +352,7 @@ pub fn own_input_schema(t: &Tool) -> Object {
 /// `outputSchema` of `t`, when its result has `structuredContent`: the reference's.
 pub fn output_schema(t: &Tool) -> Option<Object> {
     match reference(t.name).and_then(|r| r.get("outputSchema")) {
-        Some(Value::Object(o)) => return Some(o.clone()),
+        Some(Value::Object(o)) => return Some(satisfiable(t.name, o.clone())),
         Some(Value::Null) => return None,
         _ => {}
     }
@@ -367,6 +367,33 @@ pub fn output_schema(t: &Tool) -> Option<Object> {
     o.insert("type", "object");
     o.insert("properties", Value::Object(props));
     Some(o)
+}
+
+/// The reference's `outputSchema` of `name`, with what no answer could meet corrected: the
+/// connections of `list-connections` require `description`, which the reference leaves out of
+/// their properties while it refuses any other (`additionalProperties: false`), so that every
+/// SDK that validates results rejects every answer. The property is added as a string.
+fn satisfiable(name: &str, schema: Object) -> Object {
+    if name != "list-connections" {
+        return schema;
+    }
+    let with = |o: &Object, key: &str, f: &dyn Fn(Object) -> Object| -> Object {
+        let mut o = o.clone();
+        if let Some(inner) = o.get(key).and_then(Value::as_object).cloned() {
+            o.insert(key, Value::Object(f(inner)));
+        }
+        o
+    };
+    let add_description = |mut props: Object| {
+        let mut text = Object::new();
+        text.insert("type", "string");
+        props.insert("description", Value::Object(text));
+        props
+    };
+    let items = |i: Object| with(&i, "properties", &add_description);
+    let connections = |c: Object| with(&c, "items", &items);
+    let properties = |p: Object| with(&p, "connections", &connections);
+    with(&schema, "properties", &properties)
 }
 
 /// The entry of `t` in `tools/list`.

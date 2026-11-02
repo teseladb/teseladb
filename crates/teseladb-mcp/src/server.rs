@@ -19,9 +19,19 @@ use crate::resources;
 use crate::tools::{TOOLS, allowed, check_args, listing, tool};
 use crate::untrusted::wrap;
 use crate::versions::{
-    PROTOCOL_VERSION_HEADER, Revision, discover_result, negotiate_initialize, request_revision,
+    PROTOCOL_VERSION_HEADER, RESULT_COMPLETE, RESULT_TYPE, Revision, discover_result,
+    negotiate_initialize, request_revision,
 };
 
+/// The methods whose 2026-07-28 results are cacheable (`ttlMs` and `cacheScope`).
+const CACHEABLE: &[&str] =
+    &["tools/list", "resources/list", "resources/templates/list", "resources/read"];
+/// The field of a cacheable result with how long it may be kept.
+const TTL_MS: &str = "ttlMs";
+/// The field of a cacheable result with who may keep it.
+const CACHE_SCOPE_FIELD: &str = "cacheScope";
+/// `cacheScope` of a result that depends on the caller.
+const CACHE_PRIVATE: &str = "private";
 /// The session field of the revisions with `initialize`.
 pub const SESSION_HEADER: &str = "Mcp-Session-Id";
 /// The server's name in `serverInfo`.
@@ -346,7 +356,21 @@ impl Server {
             _ => Err(ErrorObject::new(METHOD_NOT_FOUND, format!("Method not found: {method}"))),
         };
         match result {
-            Ok(r) => Some((200, response(&id, Value::Object(r)), Vec::new())),
+            Ok(mut r) => {
+                // Each result of 2026-07-28 says whether it is complete (its `basic` section).
+                if revision == Revision::R2026_07_28 {
+                    if r.get(RESULT_TYPE).is_none() {
+                        r.insert(RESULT_TYPE, RESULT_COMPLETE);
+                    }
+                    // The lists and the reads are cacheable results (SEP-2549): they depend on
+                    // the caller's roles and on data that changes, so nobody keeps them.
+                    if CACHEABLE.contains(&method.as_str()) {
+                        r.insert(TTL_MS, Value::Number(teseladb_json::Number::Int(0)));
+                        r.insert(CACHE_SCOPE_FIELD, CACHE_PRIVATE);
+                    }
+                }
+                Some((200, response(&id, Value::Object(r)), Vec::new()))
+            }
             Err(e) if e.code == METHOD_NOT_FOUND && stateless => err(404, e),
             Err(e) => err(200, e),
         }
