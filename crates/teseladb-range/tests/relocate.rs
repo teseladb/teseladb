@@ -159,10 +159,15 @@ fn a_snapshot_written_before_core_changes_existed_restores_with_none() {
     let mut sm = core.open(OLD);
     apply(&mut sm, 1, ts(10), &write(b"\x01b")).unwrap();
     let mut snap = sm.snapshot();
-    // The field the last cut added (u64, A007-3-1), then the two a core change added: the target
-    // (u16) and the intent (u64). A snapshot from before the last cut was kept restores with none.
-    snap.truncate(snap.len() - 8);
+    // The write fences (018: an empty list, one byte), the field the last cut added (u64,
+    // A007-3-1), then the two a core change added: the target (u16) and the intent (u64). A
+    // snapshot from before each of them restores with none.
+    snap.truncate(snap.len() - 1);
     core.flush();
+    let mut other = core.open(OLD);
+    other.restore(&snap).unwrap();
+    assert!(other.fences().is_empty());
+    snap.truncate(snap.len() - 8);
     let mut other = core.open(OLD);
     other.restore(&snap).unwrap();
     assert_eq!((other.relocated(), other.last_cut()), (None, None));

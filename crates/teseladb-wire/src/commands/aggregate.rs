@@ -358,6 +358,10 @@ impl<B: Backend + ?Sized> Env for WireEnv<'_, B> {
         &NodeExtensions
     }
 
+    fn js(&self) -> Option<std::rc::Rc<dyn teseladb_exec::expr::js::JsEngine>> {
+        Some(super::js::engine())
+    }
+
     fn allow_disk_use(&self) -> bool {
         self.allow_disk_use
     }

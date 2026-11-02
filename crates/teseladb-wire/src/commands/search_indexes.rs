@@ -378,7 +378,7 @@ fn build<B: Backend + ?Sized>(
     for e in ctx.backend.search_indexes(coll.id)? {
         let served = lock(ctx.shared).search.served(&e.id).map(|s| s.version);
         if served != Some(e.version) {
-            match search_ops::with_index(ctx.backend, ctx.shared, coll, &e, |_, _| ()) {
+            match search_ops::with_index(ctx.backend, ctx.shared, coll, &e, &[], |_, _| ()) {
                 Ok(()) => {}
                 Err(err) if err.code == UNKNOWN_ERROR => {}
                 Err(err) => return Err(err),

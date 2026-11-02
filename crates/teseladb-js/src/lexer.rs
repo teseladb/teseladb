@@ -8,6 +8,8 @@ use std::rc::Rc;
 pub enum Tok {
     Ident(Rc<str>),
     Num(f64),
+    /// A `BigInt` literal (`10n`).
+    BigInt(Rc<crate::bigint::BigInt>),
     Str(Rc<str>),
     /// A whole template literal: its cooked strings and the source of each substitution.
     Template(Vec<Rc<str>>, Vec<String>),
@@ -219,7 +221,7 @@ impl Lexer {
             self.bump();
             self.bump();
             let mut v = 0f64;
-            let mut any = false;
+            let mut text = String::new();
             while let Some(c) = self.peek(0) {
                 if c == '_' {
                     self.bump();
@@ -227,13 +229,13 @@ impl Lexer {
                 }
                 let Some(d) = c.to_digit(radix) else { break };
                 v = v * f64::from(radix) + f64::from(d);
-                any = true;
+                text.push(c);
                 self.bump();
             }
-            if !any {
+            if text.is_empty() {
                 return self.err("missing digits after integer base prefix");
             }
-            return self.after_number(v);
+            return self.after_number(v, Some((&text, radix)));
         }
         let mut text = String::new();
         let digits = |lx: &mut Lexer, text: &mut String| {
@@ -270,12 +272,22 @@ impl Lexer {
             }
         }
         let v = text.parse::<f64>().or_else(|_| self.err("invalid number"))?;
-        self.after_number(v)
+        let integer = text.bytes().all(|b| b.is_ascii_digit());
+        self.after_number(v, integer.then_some((text.as_str(), 10)))
     }
 
-    fn after_number(&mut self, v: f64) -> Result<Tok, SyntaxError> {
+    /// The token of a number read as `v`; `digits` are its integer digits and radix, which a
+    /// `n` after them makes a `BigInt`.
+    fn after_number(&mut self, v: f64, digits: Option<(&str, u32)>) -> Result<Tok, SyntaxError> {
         if self.peek(0) == Some('n') {
-            return self.err("BigInt literals are not supported");
+            let Some(b) = digits.and_then(|(d, r)| crate::bigint::BigInt::parse_radix(d, r)) else {
+                return self.err("invalid BigInt literal");
+            };
+            self.bump();
+            if self.peek(0).is_some_and(is_id_start) {
+                return self.err("identifier starts immediately after numeric literal");
+            }
+            return Ok(Tok::BigInt(Rc::new(b)));
         }
         if self.peek(0).is_some_and(is_id_start) {
             return self.err("identifier starts immediately after numeric literal");

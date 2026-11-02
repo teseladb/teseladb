@@ -12,6 +12,7 @@ pub mod client;
 pub mod closed_ts;
 pub mod command;
 pub mod dedup;
+pub mod fence;
 pub mod gc;
 pub mod host;
 pub mod intents;

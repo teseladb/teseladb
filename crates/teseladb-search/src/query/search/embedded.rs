@@ -136,9 +136,67 @@ fn nested(path: &str, value: Value) -> Document {
 /// `embeddedDocuments` path, whose keys start with the number of the document of the level
 /// above that holds them.
 #[derive(Clone, Copy)]
-struct Level<'a> {
-    path: &'a str,
-    index: &'a MemIndex,
+pub(super) struct Level<'a> {
+    pub(super) path: &'a str,
+    pub(super) index: &'a MemIndex,
+}
+
+/// The scores an element takes from the document of level `level` that holds it (`hasRoot`,
+/// `hasAncestor`): that document's score under `parent` plus `one`.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct Passed {
+    pub(super) scores: BTreeMap<u32, f32>,
+    parent: Box<Operator>,
+    level: usize,
+    one: f32,
+}
+
+impl Passed {
+    /// The explanation of element `doc`'s score (measured: the holder's explanation under
+    /// `Score based on parent document`, then a constant for being an element of the path).
+    pub(super) fn explain(
+        &self,
+        ctx: &super::explain::Ctx<'_>,
+        doc: u32,
+        score: f32,
+    ) -> Result<Option<crate::index::Explanation>, SearchError> {
+        use crate::index::Explanation;
+        let levels = &ctx.levels;
+        if levels.len() <= self.level {
+            return Ok(None);
+        }
+        let last = levels.len() - 1;
+        let Some(holder_id) = holder(levels, last, doc, self.level) else { return Ok(None) };
+        let up = levels[self.level];
+        let parent_score = eval(up.index, &self.parent)?.get(&holder_id).copied().unwrap_or(0.0);
+        let prefix = if self.level == 0 {
+            String::new()
+        } else {
+            format!("$embedded:{}/{}/", self.level, up.path)
+        };
+        let parent_ctx = super::explain::Ctx {
+            index: up.index,
+            prefix,
+            weighted: ctx.weighted,
+            levels: levels[..=self.level].to_vec(),
+        };
+        let inner = super::explain::explain(&parent_ctx, &self.parent, holder_id, parent_score)?;
+        let parent = Explanation::node(
+            parent_score,
+            format!("Score based on parent document {holder_id}"),
+            inner.into_iter().collect(),
+        );
+        let path = Explanation::leaf(
+            self.one,
+            format!(
+                "ConstantScore($meta/embeddedPath:{}) [BM25Similarity], result of:",
+                levels[last].path
+            ),
+        );
+        let mut e = super::explain::sum(vec![parent, path]);
+        e.value = score;
+        Ok(Some(e))
+    }
 }
 
 /// The number, in level `to`, of the document holding element `id` of level `from`.
@@ -154,14 +212,20 @@ fn holder(chain: &[Level<'_>], from: usize, id: u32, to: usize) -> Option<u32> {
 /// The scores of the elements of the last level of `chain`: `scores` of their holders in level
 /// `to`, plus `one` (measured with `scoreDetails`: the holder's score and a constant 1 for being
 /// an element of the path, both times the boost).
-fn passed_down(chain: &[Level<'_>], to: usize, scores: &BTreeMap<u32, f32>, one: f32) -> Operator {
+fn passed_down(
+    chain: &[Level<'_>],
+    to: usize,
+    parent: Operator,
+    scores: &BTreeMap<u32, f32>,
+    one: f32,
+) -> Operator {
     let last = chain.len() - 1;
     let by_element = chain[last]
         .index
         .live()
         .filter_map(|id| Some((id, scores.get(&holder(chain, last, id, to)?)? + one)))
         .collect();
-    Operator::Precomputed(by_element)
+    Operator::Passed(Passed { scores: by_element, parent: Box::new(parent), level: to, one })
 }
 
 /// `op`, run on the last level of `chain` (named `here` in messages), with `hasRoot`,
@@ -173,7 +237,9 @@ fn resolve(op: Operator, chain: &[Level<'_>], here: &str) -> Result<Operator, Se
     Ok(match op {
         Operator::HasRoot(inner) => {
             let root = chain[0].index;
-            passed_down(chain, 0, &eval(root, &parse_root(root, &inner)?)?, 1.0)
+            let parent = parse_root(root, &inner)?;
+            let scores = eval(root, &parent)?;
+            passed_down(chain, 0, parent, &scores, 1.0)
         }
         Operator::HasAncestor { path, operator, score, at } => {
             let last = chain.len() - 1;
@@ -198,7 +264,7 @@ fn resolve(op: Operator, chain: &[Level<'_>], here: &str) -> Result<Operator, Se
             let inner = boosted(resolve(inner, &chain[..=to], &here)?, b);
             let scores = eval(level, &inner)?;
             let rest = if b == 1.0 { score } else { Score::Plain };
-            Operator::Scored(Box::new(passed_down(chain, to, &scores, b)), rest)
+            Operator::Scored(Box::new(passed_down(chain, to, inner, &scores, b)), rest)
         }
         Operator::Embedded(e) => {
             let s = e.scores_in(chain, super::boost_of(&e.score))?;
@@ -208,13 +274,16 @@ fn resolve(op: Operator, chain: &[Level<'_>], here: &str) -> Result<Operator, Se
             };
             Operator::Scored(Box::new(Operator::Precomputed(s)), rest)
         }
-        Operator::Compound { must, should, filter, must_not, minimum } => Operator::Compound {
-            must: all(must)?,
-            should: all(should)?,
-            filter: all(filter)?,
-            must_not: all(must_not)?,
-            minimum,
-        },
+        Operator::Compound { must, should, filter, must_not, minimum, weighted } => {
+            Operator::Compound {
+                must: all(must)?,
+                should: all(should)?,
+                filter: all(filter)?,
+                must_not: all(must_not)?,
+                minimum,
+                weighted,
+            }
+        }
         Operator::Scored(inner, score) => {
             Operator::Scored(Box::new(resolve(*inner, chain, here)?), score)
         }
@@ -261,13 +330,14 @@ impl Embedded {
         self.scores_in(&[Level { path: "", index }], boost)
     }
 
-    /// The scores of the documents of the last level of `chain` whose elements the operator
-    /// matches.
-    fn scores_in(
+    /// `f` run on the levels from `chain` down to the operator's elements, the number of the
+    /// last one and the operator resolved there with weight `boost`.
+    fn with_elements<R>(
         &self,
         chain: &[Level<'_>],
         boost: f32,
-    ) -> Result<BTreeMap<u32, f32>, SearchError> {
+        f: impl FnOnce(&[Level<'_>], usize, &Operator) -> Result<R, SearchError>,
+    ) -> Result<R, SearchError> {
         let top = chain[chain.len() - 1];
         // Every `embeddedDocuments` path from the top level down to the operator's.
         let mut built: Vec<(String, MemIndex)> = Vec::new();
@@ -298,16 +368,41 @@ impl Embedded {
         let here = format!("embeddedDocument.path '{}'", self.path);
         // A boost weighs the terms of the elements' operator, as RefLib's `BoostQuery` does.
         let op = boosted(resolve(op, &levels, &here)?, boost);
-        let mut per_doc: BTreeMap<u32, Vec<f32>> = BTreeMap::new();
+        f(&levels, last, &op)
+    }
+
+    /// The scores of the elements of `levels`' last level by the document of the level of
+    /// `top` holding them, in the elements' order.
+    fn per_doc(
+        levels: &[Level<'_>],
+        last: usize,
+        top: usize,
+        op: &Operator,
+    ) -> Result<BTreeMap<u32, Vec<(u32, f32)>>, SearchError> {
+        let mut per_doc: BTreeMap<u32, Vec<(u32, f32)>> = BTreeMap::new();
         // The elements in their order, as the scores of a document's elements are added.
-        for (id, score) in eval(elements, &op)? {
-            if let Some(doc) = holder(&levels, last, id, chain.len() - 1) {
-                per_doc.entry(doc).or_default().push(score);
+        for (id, score) in eval(levels[last].index, op)? {
+            if let Some(doc) = holder(levels, last, id, top) {
+                per_doc.entry(doc).or_default().push((id, score));
             }
         }
+        Ok(per_doc)
+    }
+
+    /// The scores of the documents of the last level of `chain` whose elements the operator
+    /// matches.
+    fn scores_in(
+        &self,
+        chain: &[Level<'_>],
+        boost: f32,
+    ) -> Result<BTreeMap<u32, f32>, SearchError> {
+        let top = chain.len() - 1;
+        let per_doc = self
+            .with_elements(chain, boost, |levels, last, op| Self::per_doc(levels, last, top, op))?;
         Ok(per_doc
             .into_iter()
             .map(|(doc, s)| {
+                let s: Vec<f32> = s.into_iter().map(|(_, v)| v).collect();
                 let v = match self.aggregate.as_str() {
                     "maximum" => s.iter().copied().fold(f32::MIN, f32::max),
                     "minimum" => s.iter().copied().fold(f32::MAX, f32::min),
@@ -317,5 +412,39 @@ impl Embedded {
                 (doc, v)
             })
             .collect())
+    }
+
+    /// The explanation of the score of `doc` (measured: the element that decides it, the
+    /// lowest for `minimum` and the highest otherwise, explained on the elements).
+    pub(super) fn explain(
+        &self,
+        ctx: &super::explain::Ctx<'_>,
+        boost: f32,
+        doc: u32,
+        score: f32,
+    ) -> Result<Option<crate::index::Explanation>, SearchError> {
+        let chain = [Level { path: "", index: ctx.index }];
+        self.with_elements(&chain, boost, |levels, last, op| {
+            let per_doc = Self::per_doc(levels, last, 0, op)?;
+            let Some(elements) = per_doc.get(&doc) else { return Ok(None) };
+            let pick = if self.aggregate == "minimum" {
+                elements.iter().min_by(|a, b| a.1.total_cmp(&b.1))
+            } else {
+                elements.iter().max_by(|a, b| a.1.total_cmp(&b.1).then(b.0.cmp(&a.0)))
+            };
+            let Some(&(id, s)) = pick else { return Ok(None) };
+            let inner = super::explain::Ctx {
+                index: levels[last].index,
+                prefix: format!("{}$embedded:{last}/{}/", ctx.prefix, self.path),
+                weighted: ctx.weighted || boost != 1.0,
+                levels: levels.to_vec(),
+            };
+            let child = super::explain::explain(&inner, op, id, s)?;
+            Ok(Some(crate::index::Explanation::node(
+                score,
+                "Score based on child docs, best match:",
+                child.into_iter().collect(),
+            )))
+        })
     }
 }

@@ -69,6 +69,12 @@ pub struct StartOpts {
     pub peer_listen: SocketAddr,
     /// Administration address (`teseladb.adminListen`; 007).
     pub admin_listen: SocketAddr,
+    /// Port of the REST API and MCP (`--http-port`, `teseladb.http.port`; 019 FR-002); 0 closes
+    /// it.
+    pub http_port: u16,
+    /// Addresses of the HTTP port (`--http-bind`, comma separated, `teseladb.http.bind`); those of
+    /// `--bind_ip` without it.
+    pub http_bind: String,
     /// Inter-node addresses of nodes of an existing cluster (comma separated).
     pub join: Vec<String>,
     /// The node's tags (`--tags dc=east,rack=r1`), sorted by name, which reads with a
@@ -117,6 +123,8 @@ pub struct StartOpts {
     pub max_concurrent_transactions: i64,
     /// `--redactClientLogData`: the clients' documents go redacted in the log (013 FR-027).
     pub redact_client_log_data: bool,
+    /// `--noscripting`: no server-side JavaScript (016 FR-009).
+    pub no_scripting: bool,
     /// The options as given, by name, for `getCmdLineOpts` (006).
     pub given: Vec<(String, String)>,
     /// The command line, for `getCmdLineOpts`; [`crate::run`] fills it.
@@ -139,6 +147,10 @@ pub struct StartOpts {
 
 /// `--tlsMode`.
 pub const TLS_MODE: &str = "tlsMode";
+/// `--http-port`.
+pub const HTTP_PORT: &str = "http-port";
+/// `--http-bind`.
+pub const HTTP_BIND: &str = "http-bind";
 /// `--tlsCertificateKeyFile`.
 pub const TLS_CERTIFICATE_KEY_FILE: &str = "tlsCertificateKeyFile";
 /// `--enroll-token`.
@@ -157,6 +169,10 @@ pub const TLS_FIPS_MODE: &str = "tlsFIPSMode";
 pub const SCRAM_SHA1_FIPS: &str = "SCRAM-SHA-1 is not allowed in FIPS mode.";
 /// `--redactClientLogData` (013 FR-027).
 pub const REDACT_CLIENT_LOG_DATA: &str = "redactClientLogData";
+/// `--noscripting` (016 FR-009).
+pub const NO_SCRIPTING: &str = "noscripting";
+/// `security.javascriptEnabled` of the configuration file (016 FR-009).
+pub const JAVASCRIPT_ENABLED: &str = "javascriptEnabled";
 /// `--enableEncryption`.
 pub const ENABLE_ENCRYPTION: &str = "enableEncryption";
 /// `--encryptionKeyFile`.
@@ -324,6 +340,8 @@ const START: &[Spec] = &[
     ("port", VALUE),
     ("peer-listen", VALUE),
     ("admin-listen", VALUE),
+    (HTTP_PORT, VALUE),
+    (HTTP_BIND, VALUE),
     ("join", VALUE),
     ("tags", VALUE),
     (ENROLL_TOKEN, VALUE),
@@ -348,6 +366,8 @@ const START: &[Spec] = &[
     (KEY_FILE, VALUE),
     (CLUSTER_AUTH_MODE, VALUE),
     (REDACT_CLIENT_LOG_DATA, FLAG),
+    (NO_SCRIPTING, FLAG),
+    (JAVASCRIPT_ENABLED, VALUE),
     (ENABLE_ENCRYPTION, FLAG),
     (ENCRYPTION_KEY_FILE, VALUE),
     (ENCRYPTION_CIPHER_MODE, VALUE),
@@ -779,6 +799,14 @@ impl Opts {
         self.values.get(name).map(String::as_str)
     }
 
+    /// A boolean option that is `default` when absent.
+    fn flag_or(&self, name: &str, default: bool) -> Result<bool, CliError> {
+        match self.get(name) {
+            None => Ok(default),
+            Some(_) => self.flag(name),
+        }
+    }
+
     fn flag(&self, name: &str) -> Result<bool, CliError> {
         match self.get(name) {
             None => Ok(false),
@@ -934,13 +962,19 @@ fn start(o: &Opts) -> Result<StartOpts, CliError> {
     let bind_ip = o.get("bind_ip").unwrap_or("127.0.0.1").to_string();
     let peer_listen = addr(o, "peer-listen", "127.0.0.1:27100")?;
     let admin_listen = addr(o, "admin-listen", "127.0.0.1:27200")?;
+    // Without `--http-bind`, the addresses of `--bind_ip` (contract `cli-base.md` of 001).
+    let http_bind = o.get(HTTP_BIND).unwrap_or(&bind_ip).to_string();
     if insecure && !insecure_allow_remote {
         // `--bind_ip` is a comma separated list: every address in it must be loopback.
         let binds = bind_ip.split(',').map(str::trim).filter(|h| !h.is_empty());
-        let hosts = binds.map(|h| ("bind_ip", h.to_owned())).chain([
-            ("peer-listen", peer_listen.ip().to_string()),
-            ("admin-listen", admin_listen.ip().to_string()),
-        ]);
+        let http = http_bind.split(',').map(str::trim).filter(|h| !h.is_empty());
+        let hosts = binds
+            .map(|h| ("bind_ip", h.to_owned()))
+            .chain(http.map(|h| (HTTP_BIND, h.to_owned())))
+            .chain([
+                ("peer-listen", peer_listen.ip().to_string()),
+                ("admin-listen", admin_listen.ip().to_string()),
+            ]);
         for (name, host) in hosts {
             if !is_loopback(&host) {
                 return err(format!(
@@ -961,6 +995,8 @@ fn start(o: &Opts) -> Result<StartOpts, CliError> {
         port: o.range("port", 27017, 0, u16::MAX)?,
         peer_listen,
         admin_listen,
+        http_port: o.range(HTTP_PORT, crate::http_listener::DEFAULT_HTTP_PORT, 0, u16::MAX)?,
+        http_bind,
         join: o.list("join"),
         tags: tags(&o.list("tags"))?,
         memory_limit: o
@@ -1008,6 +1044,7 @@ fn start(o: &Opts) -> Result<StartOpts, CliError> {
             0,
         )?,
         redact_client_log_data: o.flag(REDACT_CLIENT_LOG_DATA)?,
+        no_scripting: o.flag(NO_SCRIPTING)? || !o.flag_or(JAVASCRIPT_ENABLED, true)?,
         // Passwords never stay in the options as given (they show in `Debug`).
         given: o
             .values

@@ -897,7 +897,7 @@ impl RangeDocsWorkload {
             Ok(Reply::Batch(_) | Reply::Changes { .. }) => {
                 unreachable!("the workload does not scan nor read change streams")
             }
-            Ok(Reply::Intents { .. } | Reply::Record(_)) => {
+            Ok(Reply::Intents { .. } | Reply::Record(_) | Reply::Fenced { .. }) => {
                 unreachable!("the workload runs no transactions")
             }
             Err(RangeError::Mutation(MutationError(held))) => {

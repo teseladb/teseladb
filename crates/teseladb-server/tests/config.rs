@@ -191,3 +191,21 @@ fn redaction_from_the_file_or_the_command_line() {
     assert!(with_file("start --redactClientLogData", "").unwrap().redact_client_log_data);
     assert!(!with_file("start", "").unwrap().redact_client_log_data);
 }
+
+/// `--noscripting` and `security.javascriptEnabled: false` turn JavaScript off, and
+/// `getCmdLineOpts` shows `security.javascriptEnabled: false` for both (measured on a `refnode`
+/// 9.0.4 started with `--noscripting` on 02-11; 016 FR-009).
+#[test]
+fn javascript_is_turned_off_from_the_file_or_the_command_line() {
+    let file = "security:\n  javascriptEnabled: false\n";
+    let from_file = with_file("start --config c.yaml", file).unwrap();
+    let from_flag = with_file("start --noscripting", "").unwrap();
+    for o in [&from_file, &from_flag] {
+        assert!(o.no_scripting);
+        let shown = format!("{:?}", teseladb_server::parsed_options(o));
+        assert!(shown.contains(r#"("javascriptEnabled", Boolean(false))"#), "{shown}");
+    }
+    assert!(!with_file("start", "").unwrap().no_scripting);
+    let on = with_file("start --config c.yaml", "security:\n  javascriptEnabled: true\n").unwrap();
+    assert!(!on.no_scripting);
+}

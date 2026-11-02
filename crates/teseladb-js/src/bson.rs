@@ -95,7 +95,6 @@ pub fn install(it: &mut Interp, g: &ObjRef) -> R<()> {
         it.realm.bson.push(((*name).into(), c));
     }
     if let Some(p) = proto_of(it, "ObjectId") {
-        method(it, &p, "toHexString", object_id_hex, 0)?;
         method(it, &p, "getTimestamp", object_id_time, 0)?;
         let getter = it.native("str", object_id_hex, 0)?;
         it.define(&p, "str", Prop { getter: Some(getter), ..Prop::hidden(Val::Undef) })?;
@@ -241,8 +240,8 @@ fn to_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
         Bson::ObjectId(id) => format!("ObjectId(\"{}\")", hex(&id)),
         Bson::BinData(t, b) => format!("BinData({t},\"{}\")", base64_encode(&b)),
         Bson::Timestamp(t, i) => format!("Timestamp({t}, {i})"),
-        Bson::MinKey => "{ \"$minKey\" : 1 }".into(),
-        Bson::MaxKey => "{ \"$maxKey\" : 1 }".into(),
+        Bson::MinKey => "[object MinKey]".into(),
+        Bson::MaxKey => "[object MaxKey]".into(),
         Bson::DbPointer(ns, id) => format!("DBPointer(\"{ns}\", ObjectId(\"{}\"))", hex(&id)),
         Bson::Symbol(s) | Bson::Code(s) => s,
     };
@@ -350,7 +349,10 @@ pub fn from_bson(it: &mut Interp, v: &Value, depth: usize) -> R {
         Value::DbPointer { namespace, id } => make(it, Bson::DbPointer(namespace.clone(), *id))?,
         Value::Symbol(s) => make(it, Bson::Symbol(s.clone()))?,
         Value::JavaScript(code) | Value::JavaScriptWithScope { code, .. } => {
-            make(it, Bson::Code(code.clone()))?
+            match function_of(it, code)? {
+                Some(f) => f,
+                None => make(it, Bson::Code(code.clone()))?,
+            }
         }
         Value::Array(items) => {
             let mut out = Vec::with_capacity(items.len());
@@ -361,6 +363,17 @@ pub fn from_bson(it: &mut Interp, v: &Value, depth: usize) -> R {
         }
         Value::Document(d) => from_document(it, d, depth)?,
     })
+}
+
+/// The function `code` defines, as RefDb gives a `Code` value to JavaScript (a function
+/// stored in `system.js` is called by its name); `None` when the code is not one function.
+fn function_of(it: &mut Interp, code: &str) -> R<Option<Val>> {
+    let Ok(body) = crate::parser::parse_script(code) else { return Ok(None) };
+    let [crate::ast::Stmt::Expr(crate::ast::Expr::Func(def))] = body.as_slice() else {
+        return Ok(None);
+    };
+    let env = it.global_env.clone();
+    it.closure(def, &env).map(Some)
 }
 
 pub fn from_document(it: &mut Interp, d: &Document, depth: usize) -> R {
@@ -391,7 +404,7 @@ pub fn to_bson(it: &mut Interp, v: &Val, name: &str, depth: usize) -> R<Value> {
         Val::Bool(b) => Value::Boolean(*b),
         Val::Num(n) => Value::Double(*n),
         Val::Str(s) => Value::String(s.to_string()),
-        Val::Sym(_) => return Err(not_convertible(name)),
+        Val::Sym(_) | Val::BigInt(_) => return Err(not_convertible(name)),
         Val::Obj(o) => {
             let kind = o.borrow().kind.clone();
             match kind {

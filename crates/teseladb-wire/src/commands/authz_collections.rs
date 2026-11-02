@@ -267,12 +267,18 @@ fn read_temp<B: Backend + ?Sized>(
         let entry = match kind {
             Principal::User => user_entry(&d)?,
             Principal::Role => role_entry(&d)?,
+            Principal::ApiKey => return Err(no_collection()),
         };
         if db.is_empty() || entry.db == db {
             out.push(entry);
         }
     }
     Ok(out)
+}
+
+/// The error of a collection command on the API keys, which no collection shows (019 FR-016).
+pub(crate) fn no_collection() -> CommandError {
+    CommandError::new(crate::error::INTERNAL_ERROR, "the API keys have no collection")
 }
 
 /// `NoSuchKey` or `TypeMismatch` unless field `f` of `d` is a string, as RefDb checks a stored
@@ -389,10 +395,7 @@ fn plan<B: Backend + ?Sized>(
     ops: &mut Vec<SecurityOp>,
 ) -> Result<(), CommandError> {
     let scope = if a.db.is_empty() { None } else { Some(a.db.as_str()) };
-    let name_field = match kind {
-        Principal::User => "user",
-        Principal::Role => "role",
-    };
+    let name_field = kind.name_field();
     // The stored documents in scope, with their name and database when they are strings.
     let mut existing: Vec<(Option<(String, String)>, Vec<u8>)> = Vec::new();
     for bytes in backend.principals(kind, scope)? {
