@@ -110,6 +110,11 @@ impl<S> CursorTable<S> {
         self.cursors.len()
     }
 
+    /// The cursors in the table (not those a command has taken).
+    pub fn iter(&self) -> impl Iterator<Item = &Cursor<S>> {
+        self.cursors.values()
+    }
+
     /// Whether no cursor is open.
     pub fn is_empty(&self) -> bool {
         self.cursors.is_empty()

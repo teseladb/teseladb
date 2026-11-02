@@ -120,3 +120,35 @@ fn values_len_measures_strings_in_a_collations_order() {
         assert_eq!(values_len(&key, &[dir]), Ok(len));
     }
 }
+
+#[test]
+fn a_key_without_its_type_bits_comes_back_with_the_plainest_type() {
+    // 018 FR-006: a range's bound read as shard key values.
+    use teseladb_bson::Decimal128;
+    use teseladb_keys::decode_untyped;
+    let untyped = |v: Value| {
+        let doc = bytes_of(&v);
+        let raw = teseladb_bson::RawDoc::from_bytes(&doc).unwrap();
+        let (key, _) = encode(&[(raw.get("v").unwrap(), Direction::Ascending)]);
+        decode_untyped(&key, &[Direction::Ascending])
+    };
+    let cases = [
+        (Value::Int64(10), Value::Int32(10)),
+        (Value::Double(0.0), Value::Int32(0)),
+        (Value::Int64(1 << 40), Value::Int64(1 << 40)),
+        (Value::Double(-2.5), Value::Double(-2.5)),
+        (Value::Double(1e300), Value::Double(1e300)),
+        (Value::Double(f64::INFINITY), Value::Double(f64::INFINITY)),
+        (Value::from("x"), Value::from("x")),
+        (Value::Symbol("s".into()), Value::from("s")),
+        (Value::MinKey, Value::MinKey),
+    ];
+    for (given, back) in cases {
+        assert_eq!(untyped(given.clone()), Ok(vec![back]), "{given:?}");
+    }
+    // A NaN keeps its payload in the bits.
+    assert!(untyped(Value::Double(f64::NAN)).is_err());
+    // A decimal reads as the number it is.
+    let five = Value::Decimal128(Decimal128::from_parts(false, 5, 0).unwrap());
+    assert_eq!(untyped(five), Ok(vec![Value::Int32(5)]));
+}

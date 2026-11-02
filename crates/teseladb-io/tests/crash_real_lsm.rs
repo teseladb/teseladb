@@ -1,5 +1,5 @@
 //! Real crashes of the log and the LSM together (004 T030, second pass; FR-010, FR-011). A child
-//! process writes entries to a group's log with `FileDisk`, applies each durable one to the LSM,
+//! process writes entries to a group's log with each disk executor (012 FR-004), applies each durable one to the LSM,
 //! declares the LSM's release floor, takes snapshots (refused past the floor) and prints every
 //! applied entry; the parent kills it with `SIGKILL` at an arbitrary point, recovers both,
 //! replays the log after the LSM's flushed index and checks every printed entry.
@@ -10,7 +10,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 
-use teseladb_io::FileDisk;
+use teseladb_io::NodeDisk;
 use teseladb_keys::Hlc;
 use teseladb_lsm::{Lookup, Lsm, LsmConfig};
 use teseladb_raftlog::format::wal::EntryKind;
@@ -60,7 +60,7 @@ fn at(index: u64) -> Hlc {
 
 /// Child process: writes, applies and prints "ok <index>" until the parent kills it.
 fn child(dir: &str) {
-    let mut disk = FileDisk::open(dir).unwrap();
+    let mut disk = disks::open(dir, disks::from_env());
     let mut s = CoreStore::recover(&store_cfg(), 0, &mut disk).unwrap().0;
     let (mut lsm, flushed) = Lsm::recover(&lsm_cfg(), &mut disk).unwrap();
     if s.group(G).is_none() {
@@ -106,17 +106,22 @@ fn child(dir: &str) {
     }
 }
 
+#[path = "common/disks.rs"]
+mod disks;
+
 fn main() {
     match std::env::var("TESELADB_CHILD_DIR") {
         Ok(dir) => child(&dir),
         Err(_) => {
-            sigkill_never_loses_applied_entries();
+            for (name, exec) in disks::executors() {
+                sigkill_never_loses_applied_entries(name, exec);
+            }
             println!("crash_real_lsm: ok");
         }
     }
 }
 
-fn read(lsm: &mut Lsm, disk: &mut FileDisk, index: u64) -> Option<Vec<u8>> {
+fn read(lsm: &mut Lsm, disk: &mut NodeDisk, index: u64) -> Option<Vec<u8>> {
     let v = lsm.view();
     loop {
         match v.get(lsm, &key(index), at(index)) {
@@ -129,8 +134,9 @@ fn read(lsm: &mut Lsm, disk: &mut FileDisk, index: u64) -> Option<Vec<u8>> {
     }
 }
 
-fn sigkill_never_loses_applied_entries() {
-    let dir = std::env::temp_dir().join(format!("teseladb-crash-real-lsm-{}", std::process::id()));
+fn sigkill_never_loses_applied_entries(name: &str, exec: teseladb_io::node_disk::IoExecutor) {
+    let dir =
+        std::env::temp_dir().join(format!("teseladb-crash-real-lsm-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let mut applied: Vec<u64> = Vec::new();
     let mut rng = Rng::new(43);
@@ -139,6 +145,7 @@ fn sigkill_never_loses_applied_entries() {
     for round in 0..rounds {
         let mut c = Command::new(std::env::current_exe().unwrap())
             .env("TESELADB_CHILD_DIR", &dir)
+            .env(disks::EXECUTOR_VAR, name)
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
@@ -159,7 +166,7 @@ fn sigkill_never_loses_applied_entries() {
         }
         c.kill().unwrap(); // SIGKILL
         c.wait().unwrap();
-        let mut disk = FileDisk::open(&dir).unwrap();
+        let mut disk = disks::open(&dir, exec);
         let s = CoreStore::recover(&store_cfg(), 0, &mut disk).unwrap().0;
         let (mut lsm, flushed) =
             Lsm::recover(&lsm_cfg(), &mut disk).unwrap_or_else(|e| panic!("round {round}: {e}"));

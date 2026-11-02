@@ -110,6 +110,7 @@ pub fn event_of(w: &Watch<'_>, r: &DdlRecord) -> Result<Option<ChangeEvent>, Com
     match &r.change {
         DdlChange::Modify { description, .. }
             if super::reshard::is_cutover_change(description)
+                || super::balancing::is_balancing_change(description)
                 || super::timeseries_range::is_extended_change(description) =>
         {
             return Ok(None);

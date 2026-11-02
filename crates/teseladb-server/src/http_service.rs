@@ -48,6 +48,10 @@ pub struct NodeHttp {
     options: Mutex<Option<(Instant, (HttpOptions, McpOptions))>>,
     /// MCP's sessions and exports on this node.
     mcp: teseladb_mcp::server::Server,
+    /// The identity providers of REFDB-OIDC, for `Authorization: Bearer` with a token.
+    oidc: Option<std::sync::Arc<crate::oidc_client::Oidc>>,
+    /// `authenticationMechanisms` of the node.
+    mechanisms: Vec<teseladb_auth::sasl::SaslMechanism>,
 }
 
 impl std::fmt::Debug for NodeHttp {
@@ -85,10 +89,8 @@ impl NodeHttp {
     /// With `audit`, the request goes to the audit log (a forwarded one went on the node the
     /// client reached).
     fn mcp(&self, request: &Request, who: &Credential, audit: bool) -> Response {
-        let backend = self.backends.lock().unwrap_or_else(PoisonError::into_inner).pop();
-        let backend =
-            backend.unwrap_or_else(|| ServerBackend::new(self.handle.clone(), random_seed()));
-        let mut exec = NodeExecutor::new(&self.handle, backend, self.state.clone());
+        let mut exec = self.executor(self.backend());
+        exec.auth_state().oidc_resource = Some(self.resource(request));
         let mut key_id = None;
         let answer = match authenticate(&mut exec, request, who, self.auth) {
             Ok(key) => {
@@ -154,7 +156,45 @@ impl NodeHttp {
             backends: Mutex::new(Vec::new()),
             options: Mutex::new(None),
             mcp,
+            oidc: None,
+            mechanisms: Vec::new(),
         }
+    }
+
+    /// The service with the node's identity providers and `authenticationMechanisms`: a Bearer
+    /// token of a provider logs in with REFDB-OIDC as on the clients' port (FR-015).
+    #[must_use]
+    pub fn with_auth(
+        self,
+        oidc: Option<std::sync::Arc<crate::oidc_client::Oidc>>,
+        mechanisms: Vec<teseladb_auth::sasl::SaslMechanism>,
+    ) -> NodeHttp {
+        NodeHttp { oidc, mechanisms, ..self }
+    }
+
+    /// A backend for a request: one a finished request left, or a new one, with the node's
+    /// identity providers.
+    fn backend(&self) -> ServerBackend {
+        let kept = self.backends.lock().unwrap_or_else(PoisonError::into_inner).pop();
+        kept.unwrap_or_else(|| ServerBackend::new(self.handle.clone(), random_seed()))
+            .with_oidc(self.oidc.clone())
+    }
+
+    /// An executor for a request, with the node's mechanisms.
+    fn executor(&self, backend: ServerBackend) -> NodeExecutor {
+        let mut exec = NodeExecutor::new(&self.handle, backend, self.state.clone());
+        exec.auth_state().mechanisms.clone_from(&self.mechanisms);
+        exec
+    }
+
+    /// The URI of `/mcp` as tokens for MCP name it (RFC 8707): `mcpOptions.resourceUri`, or the
+    /// one at the request's `Host`.
+    fn resource(&self, request: &Request) -> String {
+        if let Some(fixed) = self.parameters().1.resource_uri {
+            return fixed;
+        }
+        let host = header_of(request, "Host").unwrap_or("localhost");
+        teseladb_mcp::oauth_metadata::resource_uri(self.scheme(), host)
     }
 }
 
@@ -340,15 +380,14 @@ impl NodeHttp {
 
     /// The metadata of the protected resource `/mcp` (RFC 9728, FR-027), public.
     fn oauth_metadata(&self, request: &Request) -> Response {
-        use teseladb_mcp::oauth_metadata::{document, resource_uri};
-        let host = header_of(request, "Host").unwrap_or("localhost");
-        let backend = self.backends.lock().unwrap_or_else(PoisonError::into_inner).pop();
-        let backend =
-            backend.unwrap_or_else(|| ServerBackend::new(self.handle.clone(), random_seed()));
-        let issuers: Vec<String> =
-            backend.oidc_providers().0.into_iter().map(|p| p.issuer).collect();
-        self.backends.lock().unwrap_or_else(PoisonError::into_inner).push(backend);
-        let body = document(&resource_uri(self.scheme(), host), &issuers).into_bytes();
+        let providers = self.oidc.as_ref().map(|o| o.providers.0.as_slice()).unwrap_or_default();
+        let issuers: Vec<String> = providers.iter().map(|p| p.issuer.clone()).collect();
+        let mut scopes: Vec<String> = providers.iter().flat_map(|p| p.scopes.clone()).collect();
+        scopes.sort();
+        scopes.dedup();
+        let resource = self.resource(request);
+        let body =
+            teseladb_mcp::oauth_metadata::document(&resource, &issuers, &scopes).into_bytes();
         let headers = vec![("Content-Type".to_owned(), "application/json".to_owned())];
         Response { status: 200, headers, body }
     }
@@ -374,10 +413,12 @@ impl NodeHttp {
     /// notifications of `listChanged` (FR-023). Any node serves it: what it says depends only on
     /// the cluster's `mcpOptions`.
     fn mcp_stream(&self, request: &Request, who: &Credential) -> Reply {
-        let backend = ServerBackend::new(self.handle.clone(), random_seed());
-        let mut exec = NodeExecutor::new(&self.handle, backend, self.state.clone());
+        let backend =
+            ServerBackend::new(self.handle.clone(), random_seed()).with_oidc(self.oidc.clone());
+        let mut exec = self.executor(backend);
+        exec.auth_state().oidc_resource = Some(self.resource(request));
         if let Err(r) = authenticate(&mut exec, request, who, self.auth) {
-            return Reply::Whole(r);
+            return Reply::Whole(self.with_metadata(request, r));
         }
         let headers = vec![
             ("Content-Type".to_owned(), EVENT_STREAM.to_owned()),
@@ -392,10 +433,7 @@ impl NodeHttp {
     fn rest(&self, request: &Request, who: &Credential, audit: bool) -> Reply {
         // A backend opens its own rings to the cores (012 FR-005), which the cores take some time
         // to pick up: the requests reuse them.
-        let backend = self.backends.lock().unwrap_or_else(PoisonError::into_inner).pop();
-        let backend =
-            backend.unwrap_or_else(|| ServerBackend::new(self.handle.clone(), random_seed()));
-        let mut exec = NodeExecutor::new(&self.handle, backend, self.state.clone());
+        let mut exec = self.executor(self.backend());
         let mut key_id = None;
         let (answer, stream) = match authenticate(&mut exec, request, who, self.auth) {
             Ok(key) => {

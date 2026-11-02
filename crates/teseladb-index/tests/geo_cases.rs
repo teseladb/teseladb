@@ -212,3 +212,17 @@ fn lines_meet_a_polygon_as_refdb_clips_them() {
         }
     }
 }
+
+/// A polygon a billionth of a degree wide is that small square, not the rest of the sphere
+/// (measured on a `refrouter` 9.0.4: it meets a point inside it and none far away).
+#[test]
+fn a_tiny_polygon_is_its_small_side() {
+    let tiny = geo(
+        r#"{"type": "Polygon", "coordinates": [[[0, 0], [1e-9, 0], [1e-9, 1e-9], [0, 1e-9], [0, 0]]]}"#,
+    )
+    .unwrap();
+    assert!(intersects(&geo("[1e-12, 1e-12]").unwrap(), &tiny));
+    for far in ["[180, 0]", "[0, 90]", "[0, -90]"] {
+        assert!(!intersects(&geo(far).unwrap(), &tiny), "{far}");
+    }
+}

@@ -5,7 +5,9 @@
 use std::collections::BTreeMap;
 
 use teseladb_bson::Document;
-use teseladb_meta::config_settings::{AUTOMERGE_KEY, BALANCER_KEY, automerge, balancing};
+use teseladb_meta::config_settings::{
+    AUTOMERGE_KEY, BALANCER_KEY, CHUNK_SIZE_KEY, automerge, balancing, chunk_size_bytes,
+};
 
 fn with(key: &[u8], doc: Document) -> BTreeMap<Vec<u8>, Vec<u8>> {
     BTreeMap::from([(key.to_vec(), doc.to_bytes().unwrap())])
@@ -114,4 +116,24 @@ fn automatic_merges_run_unless_turned_off() {
     assert!(automerge(&BTreeMap::new()));
     assert!(!automerge(&with(AUTOMERGE_KEY, Document::new().with("enabled", false))));
     assert!(automerge(&with(AUTOMERGE_KEY, Document::new().with("enabled", true))));
+}
+
+#[test]
+fn the_chunk_size_of_config_settings_is_the_split_size_in_mib() {
+    // 018 FR-004: `chunksize`'s `value`, in MiB, is where the ranges split.
+    use teseladb_bson::Value;
+    assert_eq!(chunk_size_bytes(&BTreeMap::new()), None);
+    let size = |v: Value| {
+        let d = Document::new().with("_id", "chunksize").with("value", v);
+        chunk_size_bytes(&with(CHUNK_SIZE_KEY, d))
+    };
+    assert_eq!(size(Value::Int32(32)), Some(32 << 20));
+    assert_eq!(size(Value::Int64(2)), Some(2 << 20));
+    assert_eq!(size(Value::Double(1.5)), Some(1 << 20));
+    assert_eq!(size(Value::Double(0.5)), None);
+    assert_eq!(size(Value::Int32(0)), None);
+    assert_eq!(size(Value::Int32(-1)), None);
+    assert_eq!(size(Value::Int64(-1)), None);
+    assert_eq!(size(Value::from("x")), None);
+    assert_eq!(chunk_size_bytes(&with(CHUNK_SIZE_KEY, Document::new())), None);
 }

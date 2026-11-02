@@ -1481,6 +1481,17 @@ impl Backend for TxnBackend<'_> {
         self.inner.config_documents(coll)
     }
 
+    fn route_entries(&mut self) -> Result<Vec<teseladb_router::table::RouteEntry>, CommandError> {
+        self.inner.route_entries()
+    }
+
+    fn range_order(
+        &mut self,
+        cmd: teseladb_meta::command::Group0Command,
+    ) -> Result<(), CommandError> {
+        self.inner.range_order(cmd)
+    }
+
     fn config_settings_write(
         &mut self,
         writes: Vec<super::config_settings::SettingsWrite>,

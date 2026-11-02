@@ -148,3 +148,56 @@ fn a_document_the_definition_cannot_analyze_fails_the_build() {
     assert!(msg.ends_with("while in state FAILED"), "{msg}");
     assert_eq!(build(&mut m), 0);
 }
+
+/// Segment files kept in memory, as the server keeps them in `<dbpath>/search`.
+#[derive(Debug, Default)]
+struct MemStore(std::sync::Mutex<std::collections::BTreeMap<[u8; 12], Vec<u8>>>);
+
+impl teseladb_wire::commands::search_ops::SegmentStore for MemStore {
+    fn put(&self, id: &[u8; 12], bytes: &[u8]) -> Result<(), String> {
+        self.0.lock().unwrap().insert(*id, bytes.to_vec());
+        Ok(())
+    }
+    fn get(&self, id: &[u8; 12]) -> Result<Option<Vec<u8>>, String> {
+        Ok(self.0.lock().unwrap().get(id).cloned())
+    }
+    fn remove(&self, id: &[u8; 12]) -> Result<(), String> {
+        self.0.lock().unwrap().remove(id);
+        Ok(())
+    }
+}
+
+/// With a builder too, an index past the memory part goes to its file and stays `READY`; the
+/// next query reads it back (012 FR-013).
+#[test]
+fn an_index_written_out_of_memory_stays_ready_and_comes_back() {
+    let mut m = with_builder();
+    m.shared.lock().unwrap().search.set_store(std::sync::Arc::new(MemStore::default()));
+    let spec = |name: &str| Document::new().with("name", name).with("definition", dynamic(true));
+    let cmd = Document::new()
+        .with("createSearchIndexes", "c")
+        .with("indexes", arr(vec![spec("a"), spec("b")]));
+    m.run(DB, cmd);
+    assert_eq!(build(&mut m), 2);
+    let on = |m: &mut Mem, name: &str| {
+        let q = Document::new().with("query", "mundo").with("path", "t");
+        let stage =
+            Document::new().with("$search", Document::new().with("text", q).with("index", name));
+        let cmd = Document::new()
+            .with("aggregate", "c")
+            .with("pipeline", arr(vec![stage]))
+            .with("cursor", Document::new());
+        found(&m.run(DB, cmd))
+    };
+    m.shared.lock().unwrap().search.set_memory_limit(Some(1));
+    assert_eq!(on(&mut m, "b"), 2);
+    assert_eq!(m.shared.lock().unwrap().search.evicted(), 1, "a left memory");
+    let r = m.run(DB, Document::new().with("listSearchIndexes", "c"));
+    let Value::Array(all) = field(&r, "cursor.firstBatch") else { panic!("{r:?}") };
+    for ix in all {
+        let Value::Document(d) = ix else { panic!("{ix:?}") };
+        assert_eq!(d.get("status"), Some(&Value::from("READY")), "{d:?}");
+    }
+    assert_eq!(on(&mut m, "a"), 2, "read back from its file");
+    assert_eq!(m.shared.lock().unwrap().search.evicted(), 2, "b left in turn");
+}

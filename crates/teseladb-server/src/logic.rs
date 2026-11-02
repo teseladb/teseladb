@@ -58,6 +58,8 @@ use teseladb_meta::security::{Expect, Principal, SecurityOp};
 
 /// Time between two proposals of the `root` user while the cluster has none (013).
 const ROOT_RETRY: Nanos = Nanos::from_millis(2_000);
+/// How soon the balancer looks again after a round that saw a replica change in progress.
+const SETTLE_CHECK: Nanos = Nanos::from_millis(100);
 
 /// Whose a disk operation in flight is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -219,6 +221,13 @@ pub struct NodeLogic {
     create_op: Option<OpId>,
     balance_op: Option<OpId>,
     balance_at: Nanos,
+    /// The nodes the balancer last saw, with their state and whether they started: a change runs
+    /// it before its next round.
+    balanced_nodes: Vec<(NodeId, NodeState, bool)>,
+    /// When the balancer looks again after a round that saw a replica change in progress.
+    settle_check_at: Option<Nanos>,
+    /// When the balancer last looked.
+    balance_round: Nanos,
     /// Group 0 commands of the range's core, proposed or forwarded.
     group0_ops: BTreeSet<OpId>,
     /// Group 0's ranges last given to the cores (core 0).
@@ -287,6 +296,9 @@ impl NodeLogic {
             create_op: None,
             balance_op: None,
             balance_at: Nanos::ZERO,
+            balanced_nodes: Vec::new(),
+            settle_check_at: None,
+            balance_round: Nanos::ZERO,
             meta2: crate::meta2_ops::Meta2Ops::default(),
             zone: None,
             group0_ops: BTreeSet::new(),
@@ -681,13 +693,12 @@ impl NodeLogic {
 
     /// Every [`BALANCE_EVERY`], Group 0's leader runs the balancer and proposes its first replica,
     /// node-state or leader decision; the ranges' leaders carry out the leader moves (007 FR-010).
-    /// Group 0's own membership stays with [`NodeLogic::promote`] (001), which also takes a
-    /// draining node out of the voters.
+    /// Between two rounds it looks again for replicas only ([`NodeLogic::balance_due`]). Group 0's
+    /// own membership stays with [`NodeLogic::promote`] (001), which also takes a draining node
+    /// out of the voters.
     fn balance(&mut self) {
-        if !self.is_leader() || self.now < self.balance_at || self.balance_op.is_some() {
-            return;
-        }
-        self.balance_at = self.now + BALANCE_EVERY;
+        let Some((regular, nodes)) = self.balance_due() else { return };
+        self.balance_round = self.now;
         let me = self.me.as_ref().map_or(NodeId(0), |(id, _)| *id);
         let now = self.now;
         let conf = self.core.conf(GROUP0).cloned().unwrap_or_default();
@@ -698,8 +709,6 @@ impl NodeLogic {
             .and_then(Group0Holder::group0)
             .expect("Group 0's leader holds it");
         let Some(table) = self.liveness.table_mut() else { return };
-        let nodes: Vec<NodeId> =
-            sm.nodes.values().filter(|n| n.state != NodeState::Removed).map(|n| n.id).collect();
         let limit = dead_after(sm.settings.get(DEAD_AFTER_SETTING).map(Vec::as_slice), DEAD_AFTER);
         table.check(&nodes, now, limit);
         let states = table.states().into_iter().collect();
@@ -726,17 +735,46 @@ impl NodeLogic {
             skewed: &[],
             local_offset_s: crate::local_zone::offset_s(self.zone, sm.cluster_time_ms),
         };
+        let settling = ranges.values().any(|d| d.settling);
         let cmd = plan(&view).into_iter().find_map(|d| match d {
+            Decision::Command(c @ Group0Command::SetReplicas { .. }) => Some(c),
             Decision::Command(
-                c @ (Group0Command::SetReplicas { .. }
-                | Group0Command::SetNodeState { .. }
-                | Group0Command::SetLeaderHint { .. }),
-            ) => Some(c),
+                c @ (Group0Command::SetNodeState { .. } | Group0Command::SetLeaderHint { .. }),
+            ) if regular => Some(c),
             Decision::Command(_) | Decision::Group0Conf(_) => None,
         });
+        self.settle_check_at = settling.then_some(now + SETTLE_CHECK);
         if let Some(cmd) = cmd {
             self.balance_op = self.send_group0(cmd);
         }
+    }
+
+    /// Whether the balancer looks now: `Some(true)` at its round, `Some(false)` between two rounds
+    /// when a node joined, started or left, or [`SETTLE_CHECK`] after a round that saw a replica
+    /// change in progress, with the nodes not removed. A node changes the replication factor and
+    /// the replicas wanted, and a change that settles lets the next one go: until they are done a
+    /// range may keep its only voter on one node, and losing that node would leave the range
+    /// without a leader for good (005 SC-004). Those looks only take replica changes, so the
+    /// moves for balance and the leader moves keep the pace of the rounds.
+    fn balance_due(&mut self) -> Option<(bool, Vec<NodeId>)> {
+        if !self.is_leader() || self.balance_op.is_some() {
+            return None;
+        }
+        let sm = self.group0()?;
+        let seen: Vec<(NodeId, NodeState, bool)> =
+            sm.nodes.values().map(|n| (n.id, n.state, n.boot_epoch > 0)).collect();
+        let regular = self.now >= self.balance_at;
+        let settle = self.settle_check_at.is_some_and(|at| self.now >= at);
+        if !regular && !settle && seen == self.balanced_nodes {
+            return None;
+        }
+        if regular {
+            self.balance_at = self.now + BALANCE_EVERY;
+        }
+        let nodes =
+            seen.iter().filter(|(_, st, _)| *st != NodeState::Removed).map(|(n, ..)| *n).collect();
+        self.balanced_nodes = seen;
+        Some((regular, nodes))
     }
 
     /// Gives the other cores the nodes' addresses when they change (core 0).
@@ -2209,6 +2247,56 @@ mod tests {
         l.balance_at = Nanos::ZERO;
         l.balance();
         assert_eq!((l.balance_op, l.balance_at), (Some(OpId(4242)), Nanos::ZERO));
+    }
+
+    /// A node that joins or starts makes the balancer look at once, not at its next round: until
+    /// then the founder may hold the only voter of every range, and losing it would leave them
+    /// without a leader for good (007 FR-010, 005 SC-004).
+    #[test]
+    fn a_node_that_joins_or_starts_makes_the_balancer_look_before_its_round() {
+        let mut c = Cluster::new();
+        c.found();
+        c.run_until(|c| c.logic(1).view().bootstrapped && c.logic(1).balance_at > Nanos::ZERO);
+        let looked = c.logic(1).balance_round;
+        let rx = c.join(1, request(2, &addr(2)));
+        let a = c.answer(&rx).expect("accepted");
+        let soon = c.now + Nanos::from_millis(100);
+        c.run_until(|c| c.logic(1).balance_round > looked);
+        assert!(c.now < soon, "the balancer waited for its round after the join");
+        // The node can take replicas once it records its start: the balancer looks again.
+        let voters = a.voters.iter().map(|(n, _)| *n).collect();
+        c.add(2, Some(GroupDesc { group: GROUP0, voters, learners: vec![NodeId(2)] }), false);
+        c.logic(2).boot_epoch = Some(1);
+        c.logic(2).me = Some((NodeId(2), addrs(2)));
+        let booted = |c: &mut Cluster| {
+            let sm = c.logic(1).group0().expect("Group 0");
+            sm.nodes.get(&NodeId(2)).is_some_and(|n| n.boot_epoch > 0)
+        };
+        c.run_until(booted);
+        let (started, soon) = (c.now, c.now + Nanos::from_millis(100));
+        c.run_until(|c| c.logic(1).balance_round >= started);
+        assert!(c.now < soon, "the balancer waited for its round after the start");
+    }
+
+    /// Between two rounds the balancer looks again [`SETTLE_CHECK`] after a round that saw a
+    /// replica change in progress, and not before.
+    #[test]
+    fn a_replica_change_in_progress_makes_the_balancer_look_again_soon() {
+        let mut c = Cluster::new();
+        c.found();
+        c.run_until(|c| c.logic(1).view().bootstrapped && c.logic(1).balance_at > Nanos::ZERO);
+        let l = c.logic(1);
+        l.balance_at = l.now + BALANCE_EVERY;
+        l.balanced_nodes.clear();
+        assert_eq!(l.balance_due().map(|(regular, _)| regular), Some(false), "a node changed");
+        l.settle_check_at = Some(l.now + SETTLE_CHECK);
+        assert!(l.balance_due().is_none());
+        l.settle_check_at = Some(l.now);
+        assert_eq!(l.balance_due().map(|(regular, _)| regular), Some(false));
+        l.settle_check_at = None;
+        assert!(l.balance_due().is_none());
+        l.balance_at = l.now;
+        assert_eq!(l.balance_due(), Some((true, vec![NodeId(1)])));
     }
 
     #[test]
