@@ -4,27 +4,38 @@
 
 use teseladb_bson::{Document, Value};
 use teseladb_topology::replset::{
-    ConfigError, LastWrite, Member, OpTime, PresentationMode, ReplicaSet,
+    ConfigError, HelloContext, LastWrite, Limits, Member, OpTime, PresentationMode, ReplicaSet,
+    Timestamp,
 };
-use teseladb_wire::connection::HelloState;
-use teseladb_wire::hello::{ClusterTime, HelloRequest, IS_MASTER, NodeInfo, Topology};
 
 const H1: &str = "h1:27017";
 const H2: &str = "h2:27017";
 const H3: &str = "h3:27017";
 const PROCESS: [u8; 12] = [7; 12];
 
-fn node() -> NodeInfo {
-    NodeInfo {
-        topology: Topology { process_id: PROCESS, counter: 6 },
-        cluster_time: ClusterTime { time: 1_793_358_977, increment: 10 },
+/// The context of a plain `hello` on connection 29.
+fn ctx() -> HelloContext {
+    HelloContext {
+        legacy: false,
+        hello_ok: false,
+        compressors: Vec::new(),
+        process_id: PROCESS,
+        counter: 6,
         now_ms: 1_793_358_981_915,
-        keys: None,
+        connection_id: 29,
+        limits: Limits {
+            max_bson_object_size: 16_777_216,
+            max_message_size: 48_000_000,
+            max_write_batch_size: 100_000,
+            logical_session_timeout_minutes: 30,
+            min_wire_version: 0,
+            max_wire_version: 29,
+        },
     }
 }
 
 fn last_write() -> LastWrite {
-    let at = OpTime { ts: ClusterTime { time: 1_793_358_977, increment: 10 }, term: 1 };
+    let at = OpTime { ts: Timestamp { time: 1_793_358_977, increment: 10 }, term: 1 };
     LastWrite { op_time: at, majority_op_time: at }
 }
 
@@ -38,12 +49,12 @@ fn three() -> ReplicaSet {
     ReplicaSet::new("rs0", members, Some(H1), 1, 1).expect("valid configuration")
 }
 
-fn hello(rs: &ReplicaSet, me: &str, cmd: Document, name: &str) -> Document {
-    let mut state = HelloState::default();
-    let req = HelloRequest::parse(name, &cmd, &state).expect("valid hello");
-    req.accept(&mut state, &node().topology).expect("accepted");
-    let me = rs.member(me).expect("member");
-    rs.hello(&req, &state, 29, &node(), me, &last_write())
+fn hello_with(rs: &ReplicaSet, me: &str, ctx: &HelloContext) -> Document {
+    rs.hello(ctx, rs.member(me).expect("member"), &last_write())
+}
+
+fn hello(rs: &ReplicaSet, me: &str) -> Document {
+    hello_with(rs, me, &ctx())
 }
 
 fn keys(d: &Document) -> Vec<&str> {
@@ -62,7 +73,7 @@ fn last_write_doc() -> Document {
 
 #[test]
 fn primary_answers_like_a_refnode_primary() {
-    let d = hello(&three(), H1, Document::new().with("hello", 1), "hello");
+    let d = hello(&three(), H1);
     let tv = Document::new().with("processId", Value::ObjectId(PROCESS)).with("counter", 6i64);
     let mut eid = [0u8; 12];
     eid[..4].copy_from_slice(&[0x7f, 0xff, 0xff, 0xff]);
@@ -94,7 +105,7 @@ fn primary_answers_like_a_refnode_primary() {
 
 #[test]
 fn passive_secondary_shows_its_attributes_and_no_election_id() {
-    let d = hello(&three(), H3, Document::new().with("hello", 1), "hello");
+    let d = hello(&three(), H3);
     assert_eq!(
         keys(&d),
         [
@@ -136,12 +147,12 @@ fn hidden_member_is_left_out_of_hosts() {
         Member::new(H3).with_priority(0.0).hidden(),
     ];
     let rs = ReplicaSet::new("rs0", members, Some(H2), 2, 2).expect("valid");
-    let d = hello(&rs, H3, Document::new().with("hello", 1), "hello");
+    let d = hello(&rs, H3);
     assert_eq!(d.get("hosts"), Some(&Value::Array(vec![Value::from(H1), Value::from(H2)])));
     assert!(d.get("passives").is_none());
     assert_eq!(d.get("passive"), Some(&Value::Boolean(true)));
     assert_eq!(d.get("hidden"), Some(&Value::Boolean(true)));
-    let p = hello(&rs, H2, Document::new().with("hello", 1), "hello");
+    let p = hello(&rs, H2);
     assert_eq!(p.get("tags"), Some(&Value::Document(Document::new().with("dc", "us"))));
     let Some(Value::ObjectId(eid)) = p.get("electionId") else { panic!("electionId") };
     assert_eq!(eid[11], 2);
@@ -149,11 +160,9 @@ fn hidden_member_is_left_out_of_hosts() {
 
 #[test]
 fn legacy_hello_with_hello_ok_and_compression() {
-    let cmd = Document::new()
-        .with(IS_MASTER, 1)
-        .with("helloOk", true)
-        .with("compression", vec![Value::from("zstd"), Value::from("snappy")]);
-    let d = hello(&three(), H1, cmd, IS_MASTER);
+    let legacy =
+        HelloContext { legacy: true, hello_ok: true, compressors: vec!["zstd", "snappy"], ..ctx() };
+    let d = hello_with(&three(), H1, &legacy);
     let k = keys(&d);
     assert_eq!(k[..4], ["compression", "helloOk", "topologyVersion", "hosts"]);
     assert_eq!(d.get("ismaster"), Some(&Value::Boolean(true)));
@@ -164,7 +173,7 @@ fn legacy_hello_with_hello_ok_and_compression() {
 fn without_primary_every_member_is_secondary() {
     let rs =
         ReplicaSet::new("rs0", vec![Member::new(H1), Member::new(H2)], None, 1, 1).expect("valid");
-    let d = hello(&rs, H1, Document::new().with("hello", 1), "hello");
+    let d = hello(&rs, H1);
     assert!(d.get("primary").is_none());
     assert!(d.get("electionId").is_none());
     assert_eq!(d.get("secondary"), Some(&Value::Boolean(true)));

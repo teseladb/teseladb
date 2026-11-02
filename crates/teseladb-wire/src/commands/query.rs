@@ -77,6 +77,17 @@ pub enum Source {
         /// The command's `let` variables, for its `getMore`s too.
         vars: Option<Document>,
     },
+    /// The entries of `local.oplog.rs` above mark `from`, filtered and projected (018 FR-009).
+    Oplog {
+        /// The mark read up to.
+        from: teseladb_hlc::Hlc,
+        /// Filter.
+        filter: Document,
+        /// Projection.
+        projection: Option<Document>,
+        /// The command's `let` variables.
+        vars: Option<Document>,
+    },
     /// The computed results wait in the node's temporary store from `offset` (012 FR-013).
     Spilled {
         /// The run.
@@ -525,6 +536,9 @@ impl QueryCursor {
 
     /// Reads the next chunk of the source into the buffer.
     fn refill<B: Backend + ?Sized>(&mut self, backend: &mut B) -> Result<(), CommandError> {
+        if let Source::Oplog { .. } = &self.source {
+            return self.refill_oplog(backend);
+        }
         if let Source::Spilled { run, offset } = &mut self.source {
             let (next, read) = super::cursor_spill::refill(run, *offset, &mut self.buffered)?;
             self.held += read;
@@ -538,7 +552,7 @@ impl QueryCursor {
             Source::Scan { next, end, filter, projection, collation, concern, vars } => {
                 (next, end, filter, projection, collation, concern, vars)
             }
-            Source::Done | Source::Spilled { .. } => return Ok(()),
+            Source::Done | Source::Spilled { .. } | Source::Oplog { .. } => return Ok(()),
         };
         let plan =
             Plan::new(filter, projection.as_ref(), collation.as_ref())?.with_vars(vars.as_ref());
@@ -569,6 +583,77 @@ impl QueryCursor {
         }
         Ok(())
     }
+}
+
+impl QueryCursor {
+    /// Reads the oplog's entries past the cursor's mark into the buffer: a tailable cursor
+    /// stays on the newest one, any other ends there.
+    fn refill_oplog<B: Backend + ?Sized>(&mut self, backend: &mut B) -> Result<(), CommandError> {
+        let Source::Oplog { from, filter, projection, vars } = &mut self.source else {
+            return Ok(());
+        };
+        let plan = Plan::new(filter, projection.as_ref(), None)?.with_vars(vars.as_ref());
+        let read = super::oplog::read(backend, *from)?;
+        *from = read.resolved;
+        for item in read.items {
+            let bytes = item.doc.to_bytes()?;
+            let mut buffered = false;
+            if let Some(d) = plan.apply(RawDoc::from_bytes(&bytes)?, None)? {
+                if self.skip > 0 {
+                    self.skip -= 1;
+                } else {
+                    self.buffered.push_back(d);
+                    buffered = true;
+                }
+            }
+            if let Some(t) = &mut self.tail {
+                t.read(item.key(), buffered);
+            }
+        }
+        match &mut self.tail {
+            Some(t) => t.caught_up = true,
+            None => self.source = Source::Done,
+        }
+        Ok(())
+    }
+}
+
+/// A `find` on `local.oplog.rs` (018 FR-009): a tailable one reads on from the newest entry on
+/// each `getMore`; `oplogReplay` is accepted and ignored, as on RefDb 9.0.
+fn oplog_find<B: Backend + ?Sized>(
+    ctx: &mut Ctx<'_, B>,
+    ns: &Namespace,
+    a: &FindArgs,
+) -> Result<Document, CommandError> {
+    if a.tailable.is_none() {
+        let docs = super::oplog::documents(ctx.backend, &a.filter)?;
+        return generated_find(ctx, ns, a, docs);
+    }
+    let ns_text = full(ns);
+    Plan::new(&a.filter, a.projection.as_ref(), a.collation.as_ref())?;
+    let from = super::oplog::lower_bound(&a.filter)
+        .unwrap_or(teseladb_hlc::Hlc { physical: 0, logical: 0 });
+    let mut state = QueryCursor {
+        source: Source::Oplog {
+            from,
+            filter: a.filter.clone(),
+            projection: a.projection.clone(),
+            vars: a.vars.clone(),
+        },
+        buffered: VecDeque::new(),
+        skip: a.skip,
+        left: a.limit,
+        tail: a.tailable.map(Tail::new),
+        read_mark: None,
+        stream: None,
+        origin: None,
+        held: 0,
+    };
+    let size = Some(a.batch_size.unwrap_or(DEFAULT_FIRST_BATCH));
+    let (docs, _) = state.batch(ctx.backend, size)?;
+    let exhausted = state.tail.as_ref().is_none_or(|t| !t.stays_open());
+    let id = keep(ctx, &ns_text, state, exhausted, a.no_timeout)?;
+    Ok(cursor_reply(id, &ns_text, "firstBatch", docs))
 }
 
 /// What `find` reads.
@@ -844,6 +929,9 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
     let ns_text = full(&ns);
     if ns.coll == super::kinds::SYSTEM_VIEWS {
         return system_views(ctx, &ns, &a);
+    }
+    if super::oplog::is_oplog(&ns) {
+        return oplog_find(ctx, &ns, &a);
     }
     if let Some(docs) = super::authz_collections::documents(ctx.backend, &ns)? {
         return generated_find(ctx, &ns, &a, docs);

@@ -21,6 +21,7 @@ use teseladb_x509::Certificate;
 
 use super::{DataDir, at, keep_going, msg, warm_up};
 use crate::cli::Args;
+use crate::client::debug;
 use crate::report::{Report, Target};
 
 /// SC-006: a complete TLS handshake under 2 ms at p50.
@@ -54,9 +55,8 @@ struct SecureNode {
 impl Drop for SecureNode {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
-        }
+        // The thread is there until the node is dropped.
+        let _ = self.thread.take().map(JoinHandle::join);
     }
 }
 
@@ -120,8 +120,7 @@ impl SecureNode {
             }
             std::thread::sleep(Duration::from_millis(20));
         };
-        let ca =
-            Certificate::from_pem_all(&read(&db.join(CA_FILE))?).map_err(|e| format!("{e:?}"))?;
+        let ca = Certificate::from_pem_all(&read(&db.join(CA_FILE))?).map_err(debug)?;
         node.ca = Arc::new(ClientConfig::new(Trust::anchors(ca)));
         let creds = read(&db.join(CREDENTIALS))?;
         let get = |k: &str| {
@@ -151,7 +150,7 @@ impl TlsClient {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
         let tls = Connection::client(node.ca.clone(), Some(SERVER_NAME), now, &entropy, None)
-            .map_err(|e| format!("{e:?}"))?;
+            .map_err(debug)?;
         let sock = TcpStream::connect(("127.0.0.1", node.port)).map_err(msg)?;
         sock.set_nodelay(true).map_err(msg)?;
         sock.set_read_timeout(Some(TIMEOUT)).map_err(msg)?;
@@ -178,13 +177,13 @@ impl TlsClient {
         if n == 0 {
             return Err("the node closed the connection".into());
         }
-        self.tls.feed(&buf[..n]).map_err(|e| format!("{e:?}"))
+        self.tls.feed(&buf[..n]).map_err(debug)
     }
 
     /// Runs `cmd` on `db`; its reply.
     fn command(&mut self, db: &str, cmd: Document) -> Result<Document, String> {
-        let body = cmd.with("$db", db).to_bytes().map_err(|e| format!("{e:?}"))?;
-        self.tls.write(&OpMsg::encode(1, 0, 0, &body)).map_err(|e| format!("{e:?}"))?;
+        let body = cmd.with("$db", db).to_bytes().map_err(debug)?;
+        self.tls.write(&OpMsg::encode(1, 0, 0, &body)).map_err(debug)?;
         self.round_trips += 1;
         let mut reply = Vec::new();
         loop {
@@ -194,13 +193,9 @@ impl TlsClient {
                 && i32::from_le_bytes([reply[0], reply[1], reply[2], reply[3]]) as usize
                     == reply.len();
             if whole {
-                let body = OpMsg::parse(&reply)
-                    .map_err(|e| format!("{e:?}"))?
-                    .body
-                    .ok_or("a reply without a body")?;
-                return Ok(Document::from(
-                    RawDoc::from_bytes(&body).map_err(|e| format!("{e:?}"))?,
-                ));
+                let body =
+                    OpMsg::parse(&reply).map_err(debug)?.body.ok_or("a reply without a body")?;
+                return Ok(Document::from(RawDoc::from_bytes(&body).map_err(debug)?));
             }
             self.receive()?;
         }
@@ -217,8 +212,7 @@ fn payload(d: &Document) -> Result<Vec<u8>, String> {
 /// A login of `root` with `speculativeAuthenticate` and `skipEmptyExchange`, as the drivers do.
 fn login(node: &SecureNode, c: &mut TlsClient) -> Result<(), String> {
     let mech = Mechanism::ScramSha256;
-    let prepared =
-        mech.prepare_password(&node.user, &node.password, false).map_err(|e| format!("{e:?}"))?;
+    let prepared = mech.prepare_password(&node.user, &node.password, false).map_err(debug)?;
     let (mut client, first) =
         ClientSession::start(mech, &node.user, &prepared, "teseladb-bench-nonce");
     let start = Document::new()
@@ -232,7 +226,7 @@ fn login(node: &SecureNode, c: &mut TlsClient) -> Result<(), String> {
     let Some(Value::Document(spec)) = hello.get("speculativeAuthenticate") else {
         return Err(format!("no speculativeAuthenticate in {hello:?}"));
     };
-    let fin = client.respond(&payload(spec)?).map_err(|e| format!("{e:?}"))?;
+    let fin = client.respond(&payload(spec)?).map_err(debug)?;
     let cont = Document::new()
         .with("saslContinue", 1)
         .with("conversationId", 1)
@@ -241,7 +235,7 @@ fn login(node: &SecureNode, c: &mut TlsClient) -> Result<(), String> {
     if r.get("done") != Some(&Value::Boolean(true)) {
         return Err(format!("the login needs more round trips: {r:?}"));
     }
-    client.verify(&payload(&r)?).map_err(|e| format!("{e:?}"))
+    client.verify(&payload(&r)?).map_err(debug)
 }
 
 /// Times `op` on a fresh connection each run (the connection is not timed).

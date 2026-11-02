@@ -700,19 +700,33 @@ fn catch_up_to<B: Backend + ?Sized>(
         built.stored.clear();
     }
     // The search waits until every range's segments reach the read's mark, its
-    // `search_applied_ts` (FR-010), no longer than the command's `maxTimeMS`.
+    // `search_applied_ts` (FR-010), no longer than the command's `maxTimeMS`. Each read of a
+    // range's changes goes at most a window past `from` (014 FR-004): the segments apply what
+    // they read and read again from there, so a range far behind, or one without writes whose
+    // leader only closes marks as time goes by, gets there too.
     let target = backend.read_mark().map_or_else(|| backend.cluster_mark(), |m| m.at);
     let lag = target.physical.saturating_sub(built.applied.physical);
     INDEXER_LAG_MS.store(lag, Ordering::Relaxed);
-    let ranges = loop {
+    loop {
+        let before = built.applied;
         let ranges = backend.range_changes(&start, &end, built.applied)?;
-        if !wait || ranges.iter().all(|r| r.resolved >= target) {
-            break ranges;
+        let reached = segments_reached(ranges.iter().map(|r| r.resolved), target);
+        apply_changes(backend, built, ranges)?;
+        if !wait || reached {
+            return Ok(());
         }
-        if !backend.pause() {
+        if built.applied == before && !backend.pause() {
             return Err(CommandError::new(MAX_TIME_MS_EXPIRED, "operation exceeded time limit"));
         }
-    };
+    }
+}
+
+/// Applies to `built` the changes `ranges` read, up to the lowest mark they resolved.
+fn apply_changes<B: Backend + ?Sized>(
+    backend: &mut B,
+    built: &mut Built,
+    ranges: Vec<super::RangeBatch>,
+) -> Result<(), CommandError> {
     let bounds: Vec<(Vec<u8>, Vec<u8>)> =
         ranges.iter().map(|r| (r.start.clone(), r.end.clone())).collect();
     let resolved = ranges.iter().map(|r| r.resolved).min().unwrap_or(built.applied);
@@ -743,6 +757,20 @@ fn catch_up_to<B: Backend + ?Sized>(
     built.indexer.apply(newest)?;
     built.applied = resolved;
     Ok(())
+}
+
+/// Whether segments that read every range up to the marks `resolved` reach a search's mark
+/// `target` (FR-010): every range has to.
+pub fn segments_reached(resolved: impl IntoIterator<Item = Hlc>, target: Hlc) -> bool {
+    // Faulty variant (011 T018): the search answers with what its segments hold, and the
+    // `search` workload finds an answer below its mark.
+    #[cfg(teseladb_bug = "search_without_wait")]
+    return {
+        let _ = (resolved.into_iter().count(), target);
+        true
+    };
+    #[cfg(not(teseladb_bug = "search_without_wait"))]
+    resolved.into_iter().all(|r| r >= target)
 }
 
 /// The oldest mark whose versions the ranges still keep: the wall clock less the history
@@ -851,9 +879,10 @@ fn answer<B: Backend + ?Sized>(
     let found = with_index(backend, shared, ns, &coll, &entry, &synonyms, |ix, stored| {
         match (ix, meta_only) {
             (Segments::Search(ix), true) => ix.meta(spec).map(|d| vec![plain(d)]),
-            (Segments::Search(ix), false) => {
-                ix.search(spec).map(|f| scored(as_read(f, stored, view.is_some()), SEARCH_SCORE))
-            }
+            (Segments::Search(ix), false) => ix.search(spec).map(|f| {
+                let found = as_read(f, stored, view.is_some());
+                scored(stored_source(ix.definition(), spec, found), SEARCH_SCORE)
+            }),
             (Segments::Vector(_), _) => Err(vector_search::not_search(&name)),
         }
     })?;
@@ -950,6 +979,20 @@ fn as_read(found: Vec<Found>, stored: &BTreeMap<Vec<u8>, Document>, on_view: boo
             if let Some(d) = stored.get(&f.key) {
                 f.doc = d.clone();
             }
+            f
+        })
+        .collect()
+}
+
+/// With `returnStoredSource: true`, each document as the index's `storedSource` keeps it.
+fn stored_source(definition: &Definition, spec: &Document, found: Vec<Found>) -> Vec<Found> {
+    if !matches!(spec.get("returnStoredSource"), Some(Value::Boolean(true))) {
+        return found;
+    }
+    found
+        .into_iter()
+        .map(|mut f| {
+            f.doc = definition.stored_source.project(&f.doc);
             f
         })
         .collect()

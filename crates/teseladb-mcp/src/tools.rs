@@ -349,24 +349,40 @@ pub fn own_input_schema(t: &Tool) -> Object {
     o
 }
 
-/// `outputSchema` of `t`, when its result has `structuredContent`: the reference's.
+/// `outputSchema` of `t`, when its result has `structuredContent`: the reference's (every tool
+/// of the reference has one, `null` for `export`).
 pub fn output_schema(t: &Tool) -> Option<Object> {
     match reference(t.name).and_then(|r| r.get("outputSchema")) {
-        Some(Value::Object(o)) => return Some(o.clone()),
-        Some(Value::Null) => return None,
-        _ => {}
+        Some(Value::Object(o)) => Some(satisfiable(t.name, o.clone())),
+        _ => None,
     }
-    if t.output.is_empty() {
-        return None;
+}
+
+/// The reference's `outputSchema` of `name`, with what no answer could meet corrected: the
+/// connections of `list-connections` require `description`, which the reference leaves out of
+/// their properties while it refuses any other (`additionalProperties: false`), so that every
+/// SDK that validates results rejects every answer. The property is added as a string.
+fn satisfiable(name: &str, schema: Object) -> Object {
+    if name != "list-connections" {
+        return schema;
     }
-    let mut props = Object::new();
-    for f in t.output {
-        props.insert(*f, Value::Object(Object::new()));
-    }
-    let mut o = Object::new();
-    o.insert("type", "object");
-    o.insert("properties", Value::Object(props));
-    Some(o)
+    let with = |o: &Object, key: &str, f: &dyn Fn(Object) -> Object| -> Object {
+        let mut o = o.clone();
+        if let Some(inner) = o.get(key).and_then(Value::as_object).cloned() {
+            o.insert(key, Value::Object(f(inner)));
+        }
+        o
+    };
+    let add_description = |mut props: Object| {
+        let mut text = Object::new();
+        text.insert("type", "string");
+        props.insert("description", Value::Object(text));
+        props
+    };
+    let items = |i: Object| with(&i, "properties", &add_description);
+    let connections = |c: Object| with(&c, "items", &items);
+    let properties = |p: Object| with(&p, "connections", &connections);
+    with(&schema, "properties", &properties)
 }
 
 /// The entry of `t` in `tools/list`.
@@ -420,4 +436,27 @@ pub fn check_args(t: &Tool, args: &Object) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    use super::*;
+
+    /// The builders of [`TOOLS`] run at compile time; the same values at run time.
+    #[test]
+    fn the_builders_give_the_tools_of_the_table() {
+        let t = read("find", "d", &[DB, COLL], &["documents"]);
+        assert_eq!((t.read_only, t.destructive), (true, false));
+        let w = write("drop-database", "d", &[DB], &[], true);
+        assert_eq!((w.read_only, w.destructive), (false, true));
+        assert!(req("a", Kind::Str).required && !opt("b", Kind::Bool).required);
+        assert_eq!(tool("find").map(|t| (t.read_only, t.destructive)), Some((true, false)));
+        // `read_only` with `allow_destructive` lists every tool; `connect` takes no connection.
+        assert!(TOOLS.iter().all(|t| allowed(t, true, true)));
+        let mut args = Object::new();
+        args.insert("connectionId", "7.s");
+        let connect = tool("connect").unwrap();
+        assert_eq!(check_args(connect, &args), Err("unknown argument connectionId".to_owned()));
+    }
 }

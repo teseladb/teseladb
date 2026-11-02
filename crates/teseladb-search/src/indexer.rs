@@ -231,6 +231,12 @@ impl Indexer {
         let mut outcome = Ok(());
         for (key, doc) in changes {
             let Some(s) = self.segment_of(&key) else { continue };
+            // Faulty variant (011 T018): a key the segment holds keeps its old version, and the
+            // `search` workload finds a document the query no longer selects or one it misses.
+            #[cfg(teseladb_bug = "indexer_skips_version")]
+            if doc.is_some() && s.index.document_of(&key).is_some() {
+                continue;
+            }
             match doc {
                 Some(d) => {
                     if let Err(e) = s.index.put(&key, &d) {
@@ -247,6 +253,11 @@ impl Indexer {
 
     /// Gives every segment the statistics of all of them when there are several.
     fn refresh_stats(&mut self) {
+        // Faulty variant (011 T018): each segment scores with its own statistics only, and the
+        // `search` workload's scores differ from those of one segment over every document.
+        #[cfg(teseladb_bug = "local_only_stats")]
+        let global: Option<Stats> = None;
+        #[cfg(not(teseladb_bug = "local_only_stats"))]
         let global = (self.segments.len() > 1).then(|| {
             self.segments.iter().fold(Stats::default(), |acc, s| acc.plus(&s.index.stats()))
         });

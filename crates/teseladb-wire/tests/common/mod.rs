@@ -41,6 +41,8 @@ pub struct Mem {
     pub replicas: u32,
     /// The next write fails with this error.
     pub fail_next: Option<CommandError>,
+    /// The write after this many more fails with this error (`(0, e)` is the next one).
+    pub fail_write_at: Option<(usize, CommandError)>,
     pub shared: Shared,
     /// The kills sent to the other nodes; with `Some`, the next one fails with that error.
     pub killed: Vec<KillScope>,
@@ -118,6 +120,8 @@ pub struct Mem {
     pub intents: BTreeMap<u128, Vec<(Vec<u8>, teseladb_range::intents::IntentOp)>>,
     /// The next `PutIntents` fail with this error.
     pub intent_errors: Vec<teseladb_range::host::RangeError>,
+    /// How many `PutIntents` succeed before those of `intent_errors` fail.
+    pub intents_before_error: usize,
     /// The next commits of a record fail with this error.
     pub commit_errors: Vec<teseladb_range::host::RangeError>,
     /// The coordinator's memory budget for a client transaction, when not the node's.
@@ -176,6 +180,9 @@ pub struct Mem {
     pub ddl: teseladb_meta::ddl_log::DdlLog,
     /// How far behind the clock the ranges' resolved mark goes, in milliseconds (014 FR-004).
     pub resolved_lag_ms: u64,
+    /// The most a read of the changes goes past its start, in milliseconds, as a range's leader
+    /// answers (014 FR-004, `FEED_WINDOW_MS`); zero: no limit. A read from zero has none.
+    pub changes_window_ms: u64,
     /// Milliseconds the clock moves on at each pause of a waiting command.
     pub pause_ms: u64,
     /// The change stream reads of ranges so far (014 FR-012).
@@ -380,14 +387,24 @@ impl Backend for Mem {
         // asked for (in milliseconds, or one millisecond for the next `changes_lag` reads).
         let lag = u64::from(self.changes_lag > 0);
         self.changes_lag = self.changes_lag.saturating_sub(1);
-        let rows = self
+        let rows: Vec<teseladb_range::changes::Versioned> = self
             .history
             .iter()
             .filter(|v| v.ts > from && start <= v.key.as_slice() && v.key.as_slice() < end)
             .cloned()
             .collect();
         let behind = self.resolved_lag_ms.saturating_add(lag);
-        Ok((rows, Hlc { physical: self.now.saturating_sub(behind), logical: 0 }))
+        let resolved = Hlc { physical: self.now.saturating_sub(behind), logical: 0 };
+        let windowed = self.changes_window_ms > 0 && from.physical > 0;
+        let resolved = match windowed {
+            true => resolved.min(Hlc {
+                physical: from.physical.saturating_add(self.changes_window_ms),
+                logical: 0,
+            }),
+            false => resolved,
+        };
+        let rows = rows.into_iter().filter(|v| v.ts <= resolved).collect();
+        Ok((rows, resolved))
     }
 
     fn catalog_changes(
@@ -463,7 +480,10 @@ impl Backend for Mem {
         match op {
             TxnOp::PutIntents { txn, writes, .. } => {
                 if !self.intent_errors.is_empty() {
-                    return Err(self.intent_errors.remove(0));
+                    if self.intents_before_error == 0 {
+                        return Err(self.intent_errors.remove(0));
+                    }
+                    self.intents_before_error -= 1;
                 }
                 let keys: Vec<Vec<u8>> = writes.iter().map(|(k, _)| k.clone()).collect();
                 if self.check_fences(&keys).is_err() {
@@ -674,6 +694,11 @@ impl Backend for Mem {
     fn write(&mut self, op: WriteOp) -> Result<Vec<u8>, CommandError> {
         if let Some(e) = self.fail_next.take() {
             return Err(e);
+        }
+        match self.fail_write_at.take() {
+            Some((0, e)) => return Err(e),
+            Some((n, e)) => self.fail_write_at = Some((n - 1, e)),
+            None => {}
         }
         if let teseladb_range::ack::W::Nodes(n) = op.wc.w
             && n > self.replicas

@@ -147,6 +147,11 @@ pub fn documents<B: Backend + ?Sized>(
 ) -> Result<Option<Vec<Document>>, CommandError> {
     match Generated::of(ns) {
         Some(g) => g.documents(backend).map(Some),
+        // `local.oplog.rs`, from the versions of the documents (018 FR-009).
+        None if super::oplog::is_oplog(ns) => {
+            super::oplog::documents(backend, &Document::new()).map(Some)
+        }
+        None if super::local_db::generated(ns) => super::local_db::documents(backend, ns),
         // The collections of `config` that show the cluster (007 FR-017).
         None => super::config_db::documents(backend, ns),
     }

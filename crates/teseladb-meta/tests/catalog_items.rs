@@ -4,7 +4,9 @@
 
 use teseladb_meta::catalog::{CatalogCommand, Namespace};
 use teseladb_meta::command::{Group0Command, NodeAddrs};
-use teseladb_meta::group0::{Group0Error, Group0Result, Group0Sm};
+use teseladb_meta::group0::{
+    Group0Error, Group0Result, Group0Sm, SNAPSHOT_VERSION_WITHOUT_INDEX_PLACES,
+};
 use teseladb_meta::indexes::{
     IndexCommand, IndexEntry, IndexState, SearchIndexKind, SearchIndexStatus,
 };
@@ -466,6 +468,7 @@ fn a_rebuilt_index_takes_the_place_of_the_old_one() {
     let Group0Result::Index(old) = apply(&mut sm, 3, index(a, "x_1")) else { panic!("index") };
     let ready = IndexCommand::SetState { id: old.id, state: IndexState::Ready };
     apply(&mut sm, 4, Group0Command::Indexes(ready));
+    let Group0Result::Index(later) = apply(&mut sm, 41, index(a, "z_1")) else { panic!("index") };
     let Group0Result::Index(new) = apply(&mut sm, 5, index(a, "x_1 (unique)")) else {
         panic!("index")
     };
@@ -475,6 +478,18 @@ fn a_rebuilt_index_takes_the_place_of_the_old_one() {
     assert_eq!((o.name.as_str(), o.state), ("x_1 (unique)", IndexState::Dropping));
     assert_eq!((n.name.as_str(), n.state), ("x_1", IndexState::Ready));
     assert_eq!(restored(&sm), sm);
+    // It is listed where the old one was, before an index created after the old one, also once
+    // the old one is dropped and in a copy taken from the snapshot; a snapshot of the format
+    // before the places lists by identifier.
+    let order = |sm: &Group0Sm| sm.indexes.of(a).map(|i| i.id).collect::<Vec<_>>();
+    assert_eq!(order(&sm), [old.id, new.id, later.id]);
+    apply(&mut sm, 52, Group0Command::Indexes(IndexCommand::Drop { id: old.id }));
+    assert_eq!(order(&sm), [new.id, later.id]);
+    assert_eq!(order(&restored(&sm)), [new.id, later.id]);
+    let mut old_format = Group0Sm::default();
+    old_format.restore(&sm.encode_snapshot_as(SNAPSHOT_VERSION_WITHOUT_INDEX_PLACES)).unwrap();
+    assert_eq!(order(&old_format), [later.id, new.id]);
+    assert!(old_format.indexes.places.is_empty());
     let missing = IndexCommand::Swap { old: old.id, new: 77 };
     assert_eq!(
         apply(&mut sm, 7, Group0Command::Indexes(missing)),

@@ -146,6 +146,7 @@ impl MemIndex {
             let mut f = TextField {
                 search_analyzer: String::from_utf8(analyzer)
                     .map_err(|_| DumpError::Corrupt("segment: query analyzer"))?,
+                similarity: index.similarity_of(path),
                 ..TextField::default()
             };
             for (id, t) in tokens.iter().enumerate() {

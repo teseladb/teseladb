@@ -214,11 +214,6 @@ impl Maintainer {
         (!requests.is_empty()).then(|| probe_error(&requests))
     }
 
-    /// Whether the collection has no index to keep.
-    pub fn is_empty(&self) -> bool {
-        self.sets.is_empty()
-    }
-
     /// The entries to write and the keys to delete when version `old` becomes `new` (`None`:
     /// no document); an index that refuses `new` fails the write, and so does a unique key that
     /// another document holds (`stored`, the versions the leader read) or that an earlier

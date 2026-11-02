@@ -135,3 +135,41 @@ pub(crate) fn request_of(fields: &[Field]) -> Result<(Request, Option<usize>), (
     }
     Ok((Request { method, target: path, headers, body: Vec::new() }, length))
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    use super::*;
+
+    fn field(name: &str, value: &str) -> Field {
+        Field { name: name.as_bytes().to_vec(), value: value.as_bytes().to_vec() }
+    }
+
+    fn block(extra: &[(&str, &str)]) -> Vec<Field> {
+        let mut f = vec![field(":method", "GET"), field(":scheme", "https"), field(":path", "/")];
+        f.extend(extra.iter().map(|(n, v)| field(n, v)));
+        f
+    }
+
+    /// RFC 9113, 8.2.1 and 8.1.1: names in lower case without controls, values without NUL, CR
+    /// or LF, and one `content-length` value however many times it comes.
+    #[test]
+    fn malformed_fields_and_lengths_are_refused() {
+        for (n, v) in
+            [("X-Up", "1"), ("a b", "1"), ("a\u{7f}", "1"), ("a", "x\0"), ("a", "\r"), ("a", "\n")]
+        {
+            assert!(request_of(&block(&[(n, v)])).is_err(), "{n:?} {v:?}");
+        }
+        let same = block(&[("content-length", "3"), ("content-length", "3")]);
+        assert_eq!(request_of(&same).map(|(_, l)| l), Ok(Some(3)));
+        assert!(request_of(&block(&[("content-length", "3"), ("content-length", "4")])).is_err());
+        // `:authority` becomes `host` unless the block has one.
+        let mut with_host = block(&[("host", "h")]);
+        with_host.push(field(":authority", "a"));
+        assert!(request_of(&with_host).is_err());
+        let mut b = vec![field(":authority", "a")];
+        b.extend(block(&[("host", "h")]));
+        let (r, _) = request_of(&b).unwrap();
+        assert_eq!(r.headers, [("host".to_owned(), "h".to_owned())]);
+    }
+}

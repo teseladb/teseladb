@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use super::{FieldStats, MemIndex, TextField};
+use super::{FieldStats, MemIndex, Similarity, TextField, mismatch, rarity_of};
 use crate::query::bm25::{Bm25, idf};
 use crate::segment::norms;
 
@@ -67,6 +67,8 @@ pub(crate) struct Weight<'a> {
     pub boost: f32,
     /// How the frequency is named.
     pub kind: FreqKind,
+    /// The terms, whose lengths `stableTfl` scores.
+    pub terms: Vec<String>,
 }
 
 impl TextField {
@@ -78,6 +80,11 @@ impl TextField {
         freq: f32,
         g: Option<&FieldStats>,
     ) -> Explanation {
+        match self.similarity {
+            Similarity::Boolean => return explain_boolean(weight),
+            Similarity::StableTfl => return self.explain_stable(weight, doc, freq),
+            Similarity::Bm25 => {}
+        }
         let n_docs = g.map_or(self.lengths.len() as u64, |g| g.docs);
         let idf_of = |df: u64| {
             Explanation::node(
@@ -104,7 +111,7 @@ impl TextField {
         let dl = norms::decode(norms::encode(len)) as f32;
         let Bm25 { k1, b } = Bm25::DEFAULT;
         let (k1, b) = (k1 as f32, b as f32);
-        let score = self.scorer(weight.boost * idf_part.value, g)(doc, freq);
+        let score = self.scorer(weight.boost, idf_part.value, &[], g)(doc, freq);
         // As RefLib's scorer: one minus one over one plus the frequency times the inverse norm.
         let inverse = 1.0 / (k1 * ((1.0 - b) + b * dl / avg));
         let tf = 1.0 - 1.0 / (1.0 + freq * inverse);
@@ -204,7 +211,8 @@ impl MemIndex {
         let docs = field.postings.get(term)?;
         let freq = docs.get(&doc)?.len() as f32;
         let df = field.df(term, docs.len(), g);
-        let weight = Weight { description, dfs: &[df], boost, kind: FreqKind::Term };
+        let terms = vec![term.to_owned()];
+        let weight = Weight { description, dfs: &[df], boost, kind: FreqKind::Term, terms };
         Some(field.explain_weight(&weight, doc, freq, g))
     }
 
@@ -240,5 +248,93 @@ impl MemIndex {
             at.entry(t.position).or_default().push(t.text);
         }
         at.into_values().filter(|v| v.len() == 1).flatten().collect()
+    }
+}
+
+/// `boolean`: the boost of the query (measured on `refsearch` 1.70.6 with `scoreDetails`).
+fn explain_boolean(weight: &Weight<'_>) -> Explanation {
+    let boost = Explanation::leaf(weight.boost, "boost, query boost");
+    let computed =
+        Explanation::node(weight.boost, "score(BooleanWeight), computed from:", vec![boost]);
+    let name = similarity_name(weight, "BooleanSimilarity");
+    Explanation::node(
+        weight.boost,
+        format!("{} [{name}], result of:", weight.description),
+        vec![computed],
+    )
+}
+
+/// The similarity a weight's explanation names: RefLib's wrapper for a phrase or span.
+fn similarity_name(weight: &Weight<'_>, own: &'static str) -> &'static str {
+    match weight.kind {
+        FreqKind::Phrase => "SimilarityWrapper",
+        FreqKind::Term | FreqKind::Synonym => own,
+    }
+}
+
+impl TextField {
+    /// `stableTfl`: boost, saturation and the rarity of each term from its length and the
+    /// document's (measured on `refsearch` 1.70.6 with `scoreDetails`).
+    fn explain_stable(&self, weight: &Weight<'_>, doc: u32, freq: f32) -> Explanation {
+        let names: Vec<&str> = weight.terms.iter().map(String::as_str).collect();
+        let score = self.scorer(weight.boost, 0.0, &names, None)(doc, freq);
+        let len = self.lengths.get(&doc).copied().unwrap_or(0);
+        let k1 = Bm25::DEFAULT.k1 as f32;
+        let rarity_of = |term: &str| {
+            let chars = term.chars().count() as u32;
+            let p = mismatch(chars, len);
+            let p_part = Explanation::node(
+                p,
+                "p, probability that the term appears in the doc, computed as 1 - (1 - m * 2 ^ \
+                 (-c * tl)) ^ dl from:",
+                vec![
+                    Explanation::leaf(
+                        super::STABLE_M,
+                        "m, multiplicative constant to term mismatch probability",
+                    ),
+                    Explanation::leaf(super::STABLE_C, "c, decaying constant for term length"),
+                    Explanation::leaf(chars as f32, "tl, term length"),
+                    Explanation::leaf(len as f32, "dl, document length"),
+                ],
+            );
+            Explanation::node(
+                rarity_of(p),
+                "tr, term rarity, computed as log(1 + (1 - p + 0.05) / (p + 0.05)) from:",
+                vec![p_part],
+            )
+        };
+        let tr = match names.as_slice() {
+            [one] => rarity_of(one),
+            many => {
+                let parts: Vec<Explanation> = many.iter().map(|t| rarity_of(t)).collect();
+                let sum = parts.iter().map(|p| f64::from(p.value)).sum::<f64>() as f32;
+                Explanation::node(sum, "tr, term rarity, computed as the sum of:", parts)
+            }
+        };
+        let freq_text = java_float(freq);
+        let freq_leaf = match weight.kind {
+            FreqKind::Term => "freq, occurrences of term within document".to_owned(),
+            FreqKind::Phrase => format!("phraseFreq={freq_text}"),
+            FreqKind::Synonym => format!("termFreq={freq_text}"),
+        };
+        let tf = Explanation::node(
+            freq / (freq + k1),
+            "tf, computed as freq / (freq + k1)) from:",
+            vec![
+                Explanation::leaf(freq, freq_leaf),
+                Explanation::leaf(k1, "k1, term saturation parameter"),
+            ],
+        );
+        let computed = Explanation::node(
+            score,
+            format!("score(freq={freq_text}), computed as boost * tr * tf from:"),
+            vec![Explanation::leaf(weight.boost, "boost"), tf, tr],
+        );
+        let name = similarity_name(weight, "StableTflSimilarity");
+        Explanation::node(
+            score,
+            format!("{} [{name}], result of:", weight.description),
+            vec![computed],
+        )
     }
 }

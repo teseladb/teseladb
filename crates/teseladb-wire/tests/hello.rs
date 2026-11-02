@@ -20,6 +20,7 @@ fn node() -> NodeInfo {
         cluster_time: ClusterTime { time: 1_793_354_317, increment: 2 },
         now_ms: 1_793_354_317_123,
         keys: None,
+        replica_set: None,
     }
 }
 
