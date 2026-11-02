@@ -134,6 +134,35 @@ fn function_errors_are_those_of_a_refrouter() {
     assert!(msg.contains("Failed to create JS function :: source = function(){ return  1 + }: e-compile message : "), "{msg}");
 }
 
+/// A `Timestamp` whose `t` or `i` is not right cannot be written (measured on a `refrouter` 9.0.4
+/// on 02-11): `BadValue`, or a code of its own when the field is missing.
+#[test]
+fn a_malformed_timestamp_fails_with_the_codes_of_a_refrouter() {
+    let mut m = Mem::new();
+    load(&mut m);
+    for (body, want, text) in [
+        (
+            "const t = Timestamp(1, 2); t.t = 'x'; return t",
+            2,
+            "Timestamp time (seconds) must be a number",
+        ),
+        (
+            "const t = Timestamp(1, 2); delete t.i; return t",
+            6_900_901,
+            "missing increment field, 'i'",
+        ),
+        ("return {t: Timestamp.prototype}", 6_900_900, "missing timestamp field, 't'"),
+        ("return ObjectId.prototype", 2, "Can't call getOID on OID prototype"),
+    ] {
+        let cmd = format!(
+            r#"{{"aggregate":"c","pipeline":[{{"$project":{{"v":{{"$function":{{"body":"function(){{ {body} }}","args":[],"lang":"js"}}}}}}}}],"cursor":{{}}}}"#
+        );
+        let (code, msg) = error(&run(&mut m, &cmd));
+        assert_eq!(code, want, "{msg}");
+        assert!(msg.contains(text), "{msg}");
+    }
+}
+
 #[test]
 fn accumulator_groups_with_init_accumulate_merge_and_finalize() {
     let mut m = Mem::new();

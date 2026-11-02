@@ -185,6 +185,7 @@ fn dispatched(m: &mut Mem, cmd: &str) -> Document {
         cluster_time: ClusterTime { time: 1, increment: 1 },
         now_ms: 0,
         keys: None,
+        replica_set: None,
     };
     let bytes = teseladb_wire::msg::OpMsg::encode(
         1,

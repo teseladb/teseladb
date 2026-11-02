@@ -37,6 +37,10 @@ impl GeoOperator {
     }
 }
 
+/// How a missing radius shows in its error (the end-of-object marker of a `refrouter` 9.0.4,
+/// measured).
+const MISSING: &str = "EOO";
+
 /// The shape a query asks about.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Shape {
@@ -133,7 +137,7 @@ pub fn parse_query(op: GeoOperator, spec: RawValue<'_>) -> Result<Shape, QueryEr
             let center = pair(parts.first().copied())?;
             let radius = parts.get(1).copied().and_then(number).filter(|r| *r >= 0.0);
             let Some(radius) = radius else {
-                let shown = parts.get(1).map_or_else(|| "missing".to_string(), |r| shell_value(*r));
+                let shown = parts.get(1).map_or_else(|| MISSING.to_string(), |r| shell_value(*r));
                 return Err(bad(format!("Radius must be a non-negative number: {shown}")));
             };
             if kind == "$center" {

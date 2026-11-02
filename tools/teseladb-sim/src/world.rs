@@ -295,6 +295,9 @@ impl Ord for Pending {
 
 /// Tick period of a cluster core (production: 10 ms).
 pub const CLUSTER_TICK: Nanos = Nanos::from_millis(10);
+/// The longest a node waiting for its clock to pass the HLC bound sleeps before it looks again
+/// (the server's `start_clock` sleeps at most 50 ms at a time).
+pub const START_POLL: Nanos = Nanos::from_millis(50);
 
 /// Core of a node, with its disk (each core has its own I/O executor, like the production disk
 /// thread; their files are in different directories).
@@ -827,6 +830,14 @@ impl World {
         let until = teseladb_hlc::wait_on_start(n.hlc_bound, self.wall_ms(node))?;
         let at = n.clock.wall_reaches(self.now, until);
         Some(at)
+    }
+
+    /// When `node`, waiting for its wall clock to pass the HLC bound on its disk, looks at its
+    /// clock again: at [`World::start_wait`] or after [`START_POLL`], whichever comes first, as
+    /// the server sleeps at most that long between looks (a clock NTP sets right meanwhile lets
+    /// it start then).
+    pub fn start_recheck(&self, node: u32) -> Option<Nanos> {
+        self.start_wait(node).map(|at| at.min(self.now + START_POLL))
     }
 
     /// Writes a new HLC bound to the node's `node.meta` if one is due, as the server's clock

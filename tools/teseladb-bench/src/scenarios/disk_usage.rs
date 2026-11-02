@@ -17,7 +17,7 @@ use teseladb_io::FileDisk;
 use teseladb_server::client_listener::ClientConfig;
 use teseladb_server::node::{Node, NodeConfig};
 
-use super::ycsb::{insert, record_doc};
+use super::ycsb::{insert_when_ready, record_doc};
 use super::ycsb_gen::Rng;
 use super::{DataDir, at, msg};
 use crate::cli::Args;
@@ -98,7 +98,7 @@ fn measure(args: &Args, node: &Node<FileDisk>, dir: &Path) -> Result<(u64, u64, 
             bson += d.to_bytes().map_err(msg)?.len() as u64;
             docs.push(Value::Document(d));
         }
-        insert_retrying(&mut c, docs)?;
+        insert_when_ready(&mut c, docs)?;
         i += n;
     }
     // The last memtable may still be in memory: the LSM's files grow until it is flushed or the
@@ -116,18 +116,6 @@ fn measure(args: &Args, node: &Node<FileDisk>, dir: &Path) -> Result<(u64, u64, 
     let count = doc(vec![("count", Value::String("usertable".into()))]);
     c.command("ycsb", count)?;
     Ok((bson, sst, bytes_under(dir, "").map_err(at(dir))?))
-}
-
-/// The first insert may come before the data range has its leader.
-fn insert_retrying(c: &mut Client, docs: Vec<Value>) -> Result<(), String> {
-    let deadline = Instant::now() + READY;
-    loop {
-        match insert(c, docs.clone()) {
-            Ok(()) => return Ok(()),
-            Err(e) if Instant::now() > deadline => return Err(e),
-            Err(_) => std::thread::sleep(Duration::from_millis(50)),
-        }
-    }
 }
 
 #[cfg(test)]

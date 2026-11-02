@@ -100,7 +100,7 @@ pub fn drive_seeing(
             Event::Deliver { from, to, core, epoch, frame } => {
                 w.on_deliver(from, to, core, epoch, &frame)
             }
-            Event::Restart { node } => match w.start_wait(node) {
+            Event::Restart { node } => match w.start_recheck(node) {
                 Some(at) => w.schedule(at, Event::Restart { node }),
                 None => w.start_node(node).unwrap(),
             },

@@ -40,6 +40,7 @@ fn info(keys: Option<KeyRing>) -> NodeInfo {
         cluster_time: NOW,
         now_ms: 0,
         keys: keys.map(Arc::new),
+        replica_set: None,
     }
 }
 

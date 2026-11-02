@@ -517,6 +517,16 @@ fn the_leader_gives_a_stream_its_versions_up_to_the_closed_mark() {
         }
         other => panic!("not changes: {other:?}"),
     }
+    // A read from the start of time (the first build of a search index, 011 FR-014) has no
+    // window: it reaches the closed mark at once instead of one second after the epoch.
+    let zero = Hlc { physical: 0, logical: 0 };
+    match ask(&mut n, zero) {
+        Ok(Reply::Changes { rows, to, .. }) => {
+            assert!(to >= a, "closed at {to:?}, the write at {a:?}");
+            assert_eq!(rows.len(), 1);
+        }
+        other => panic!("not changes: {other:?}"),
+    }
     // A pending intent shows its mark.
     let at = intents_mark(n.txn(intents(T1, a, &[(b"\x01c", put(b"c"))])));
     for _ in 0..60 {

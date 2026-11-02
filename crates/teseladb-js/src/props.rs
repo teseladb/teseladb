@@ -63,6 +63,7 @@ pub fn symbol_of_key(key: &str) -> Val {
 /// The own property `key` of `o` with its attributes, the elements an array or a string holds
 /// included.
 pub fn own_prop(o: &ObjRef, key: &str) -> Option<Prop> {
+    touch(o, key);
     let b = o.borrow();
     let fixed = |value: Val, writable: bool, enumerable: bool, configurable: bool| Prop {
         value,
@@ -93,12 +94,17 @@ pub fn own_prop(o: &ObjRef, key: &str) -> Option<Prop> {
         }
         Kind::Str(s) => {
             if key == "length" {
-                return Some(fixed(Val::Num(s.encode_utf16().count() as f64), false, false, false));
+                return Some(fixed(
+                    Val::Num(crate::strings::utf16_len(s) as f64),
+                    false,
+                    false,
+                    false,
+                ));
             }
             if let Some(i) = array_index(key)
                 && let Some(c) = crate::interp::utf16_at(s, i)
             {
-                let v = Val::Str(String::from_utf16_lossy(&[c]).into());
+                let v = Val::Str(crate::strings::from_units(&[c]).into());
                 return Some(fixed(v, false, true, false));
             }
         }
@@ -221,9 +227,13 @@ pub fn define_own(it: &mut Interp, o: &ObjRef, key: &str, d: &Desc) -> R<()> {
     let cur = own_prop(o, key);
     let shown = shown_key(key);
     match &cur {
+        None if is_array && array_index(key).is_some() && o.borrow().locks & LENGTH_FIXED != 0 => {
+            return Err(crate::arrays::cannot_grow(it, true, array_index(key).unwrap_or(0)));
+        }
         None if !o.borrow().extensible => {
+            let class = crate::builtins::object_class(it, o);
             return it
-                .type_error(&format!("can't define property {shown}: Object is not extensible"));
+                .type_error(&format!("can't define property {shown}: {class} is not extensible"));
         }
         Some(c) if forbidden(c, d) => {
             return it.type_error(&format!("can't redefine non-configurable property {shown}"));
@@ -378,10 +388,22 @@ fn get_own_property_descriptor(it: &mut Interp, _: &Val, a: &[Val]) -> R {
 fn all_keys(it: &mut Interp, o: &ObjRef) -> R<Vec<Name>> {
     let mut keys = it.keys(o, false)?;
     if matches!(o.borrow().kind, Kind::Array(_) | Kind::Str(_)) {
-        keys.push("length".into());
+        // After the indices and before the other keys, which come after it (ECMA-262 §10.1.11.1).
+        let at = keys.iter().take_while(|k| array_index(k).is_some()).count();
+        keys.insert(at, "length".into());
     }
     keys.extend(symbol_keys(o));
     Ok(keys)
+}
+
+/// The enumerable symbol keys of `o` (object spread, `Object.assign`).
+pub fn enumerable_symbol_keys(o: &ObjRef) -> Vec<Name> {
+    let b = o.borrow();
+    b.props
+        .iter()
+        .filter(|(k, p)| p.enumerable && is_symbol_key(k))
+        .map(|(k, _)| k.clone())
+        .collect()
 }
 
 fn symbol_keys(o: &ObjRef) -> Vec<Name> {
@@ -487,6 +509,7 @@ fn is_frozen(_: &mut Interp, _: &Val, a: &[Val]) -> R {
 pub fn lock(o: &ObjRef, frozen: bool) {
     let mut b = o.borrow_mut();
     b.extensible = false;
+    b.locks &= !LAZY;
     b.locks |=
         if frozen { LENGTH_FIXED | ELEMENTS_SEALED | ELEMENTS_FROZEN } else { ELEMENTS_SEALED };
     for (_, p) in &mut b.props {
@@ -545,6 +568,23 @@ pub fn create_data_property(it: &mut Interp, o: &ObjRef, key: &str, v: Val) -> R
     }
     define_own(it, o, key, &d)?;
     Ok(true)
+}
+
+/// CreateDataPropertyOrThrow (ECMA-262 §7.3.7): the errors of `defineProperty` when `o` refuses
+/// the property.
+pub fn create_data_property_or_throw(it: &mut Interp, o: &ObjRef, key: &str, v: Val) -> R<()> {
+    if crate::proxy::is_proxy(o) {
+        create_data_property(it, o, key, v)?;
+        return Ok(());
+    }
+    let d = Desc {
+        value: Some(v),
+        writable: Some(true),
+        enumerable: Some(true),
+        configurable: Some(true),
+        ..Desc::default()
+    };
+    define_own(it, o, key, &d)
 }
 
 /// The object form of `d`.

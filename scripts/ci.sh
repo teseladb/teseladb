@@ -64,6 +64,7 @@ gate "2. CLDR 29 data (D-043)" scripts/fetch-pinned.sh scripts/unicode-cldr.sha2
 gate "2. ICU 57.1 collation data (D-043)" scripts/fetch-pinned.sh scripts/icu-coll.sha256
 gate "2. Unicode 16.0 data of the regex engine (D-049)" scripts/fetch-pinned.sh crates/teseladb-mql/unicode/ucd.sha256
 gate "2. PCRE2 10.43 test data (006 T058)" scripts/fetch-pinned.sh crates/teseladb-mql/tests/pcre2.sha256
+gate "2. test262 subset of the JavaScript engine (016 T002)" scripts/fetch-pinned.sh crates/teseladb-js/tests/test262.sha256
 gate "2. Unicode 15.1 data of the search analyzers (011)" scripts/fetch-pinned.sh scripts/unicode-search.sha256
 gate "2. Unicode 12.1 data of the standard tokenizer (011)" scripts/fetch-pinned.sh scripts/unicode-tokenizer.sha256
 gate "2. emoji 12.1 data of the standard tokenizer (011)" scripts/fetch-pinned.sh scripts/unicode-emoji-tokenizer.sha256

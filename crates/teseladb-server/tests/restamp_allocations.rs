@@ -24,6 +24,7 @@ fn moving_a_reply_to_a_later_cluster_time_allocates_nothing() {
             cluster_time: BEFORE,
             now_ms: 0,
             keys: keys.clone().map(std::sync::Arc::new),
+            replica_set: None,
         };
         let mut reply = with_cluster_time(Document::new().with("ok", 1.0), &node);
         let start = allocations();

@@ -29,8 +29,41 @@ fn ycsb_and_reference_run_against_a_local_cluster() {
     let reference =
         metrics(&bench(&[&["--scenario", "reference", "--rate", "100"][..], &short[..]].concat()));
     assert!(reference.contains("100 op/s"), "{reference}");
-    for name in ["write.p50", "write.p99", "read.p50", "read.p99"] {
+    for name in ["write.p50", "write.p99", "read.p50", "read.p99", "search.p50", "search.p99"] {
         assert!(reference.contains(name), "{name}: {reference}");
+    }
+}
+
+/// `vector-search` (011 T032) on a few hundred vectors: the scenario of SC-005 with a million
+/// runs the same code.
+#[test]
+fn vector_search_runs_against_a_local_cluster() {
+    let short = ["--duration", "300ms", "--warmup", "0ms", "--format", "json"];
+    let out = metrics(&bench(
+        &[&["--scenario", "vector-search", "--records", "300"][..], &short[..]].concat(),
+    ));
+    for name in ["query.p50", "recall@10"] {
+        assert!(out.contains(name), "{name}: {out}");
+    }
+}
+
+/// The `$search` scenarios (011 T041) on a few hundred documents: the scenarios of SC-003 and
+/// SC-004 with a million run the same code.
+#[test]
+fn search_scenarios_run_against_a_local_cluster() {
+    let short = ["--duration", "300ms", "--warmup", "0ms", "--format", "json"];
+    for scenario in ["search-term", "search-multi", "search-phrase", "search-fuzzy", "vector"] {
+        let records = if scenario == "vector" { "100" } else { "300" };
+        let out = metrics(&bench(
+            &[&["--scenario", scenario, "--records", records][..], &short[..]].concat(),
+        ));
+        assert!(out.contains("query.p50"), "{scenario}: {out}");
+    }
+    let out = metrics(&bench(
+        &[&["--scenario", "search-visibility", "--records", "100"][..], &short[..]].concat(),
+    ));
+    for name in ["visible.p99", "visible.next"] {
+        assert!(out.contains(name), "{name}: {out}");
     }
 }
 
@@ -94,6 +127,17 @@ fn aggregate_and_sort_run_against_a_local_cluster() {
         metrics(&bench(&["--scenario", "group-large", "--records", "300", "--format", "json"]));
     for name in ["load_seconds", "group_seconds", "resident_per_core", "300 documents of 1 KiB"] {
         assert!(large.contains(name), "{name}: {large}");
+    }
+}
+
+/// `fle-query` (017 SC-002, T011) against a local cluster: the equality query on an encrypted
+/// field with its target of 5 ms at p50, over 200 documents.
+#[test]
+fn fle_query_runs_against_a_local_cluster() {
+    let short = ["--duration", "300ms", "--warmup", "50ms", "--records", "200", "--format", "json"];
+    let fle = metrics(&bench(&[&["--scenario", "fle-query"][..], &short[..]].concat()));
+    for name in ["encrypted_equality_10.p50", "encrypted_equality_10.p99", "200 documents"] {
+        assert!(fle.contains(name), "{name}: {fle}");
     }
 }
 
@@ -178,6 +222,17 @@ fn index_build_load_runs_against_a_local_cluster() {
     for name in
         ["write_before.p99", "write_during_build.p99", "build_ms", "2000 documents", "\"target\""]
     {
+        assert!(out.contains(name), "{name}: {out}");
+    }
+}
+
+/// `changestream-lag` (014 FR-016, SC-002) against a local cluster: the time from each insert's
+/// answer to its event on a change stream, with the target of SC-002 at p99.
+#[test]
+fn changestream_lag_runs_against_a_local_cluster() {
+    let short = ["--duration", "100ms", "--warmup", "50ms", "--format", "json"];
+    let out = metrics(&bench(&[&["--scenario", "changestream-lag"][..], &short[..]].concat()));
+    for name in ["lag.p50", "lag.p99", "\"target\"", "local cluster of three nodes"] {
         assert!(out.contains(name), "{name}: {out}");
     }
 }

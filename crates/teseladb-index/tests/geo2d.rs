@@ -79,6 +79,7 @@ fn rejections_as_measured() {
         ("{\"type\": \"Point\", \"coordinates\": [1, 2]}", DEFAULT_GRID, not_pair.clone()),
         ("[{\"$numberDouble\": \"NaN\"}, 1]", DEFAULT_GRID, out("-180, 180")),
         ("[-180.000001, 0]", DEFAULT_GRID, out("-180, 180")),
+        ("[0, 180.5]", DEFAULT_GRID, out("-180, 180")),
         ("[[1, 2], \"x\"]", DEFAULT_GRID, not_pair),
         (
             "[[1, 2], [1]]",

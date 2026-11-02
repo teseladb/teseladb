@@ -238,6 +238,7 @@ fn dispatched(m: &mut Mem, text: &str) -> Document {
         cluster_time: ClusterTime { time: 1, increment: 1 },
         now_ms: 0,
         keys: None,
+        replica_set: None,
     };
     let body = cmd(text).with("$db", "qsh").to_bytes().unwrap();
     let mut c = Connection::new(9);

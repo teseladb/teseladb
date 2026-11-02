@@ -2,8 +2,10 @@
 //! a test identity provider of its own: an HTTPS server with the discovery document and the
 //! JWKS, under a CA the node trusts. A token issued for the audience of REFDB-OIDC opens the
 //! REST API; a token for `/mcp` carries the resource's URI as audience (RFC 8707), and each is
-//! refused where the other is taken. The metadata of `/mcp` name the provider and the resource,
-//! and `mcpOptions.resourceUri` fixes the resource whatever `Host` the client sends.
+//! refused where the other is taken. The metadata of `/mcp` name the provider and the resource.
+//! The resource's URI never comes from the `Host` the client sends: it is `mcpOptions.resourceUri`
+//! or, without it, the address the HTTP port listens on; a node listening only on wildcard
+//! addresses takes no token on `/mcp` until `mcpOptions.resourceUri` is set.
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -31,7 +33,7 @@ use teseladb_x509::ext::GeneralName;
 const READY: Duration = Duration::from_secs(30);
 /// The audience of REFDB-OIDC, for the REST API.
 const AUDIENCE: &str = "teseladb-rest";
-/// The `Host` the tests send, so the URI of `/mcp` the node derives from it.
+/// The `Host` the tests send, which the node must not take as the URI of `/mcp`.
 const HOST: &str = "db.test:27080";
 const KEY_ID: &str = "k1";
 
@@ -115,7 +117,9 @@ fn serve(sock: TcpStream, config: &Arc<ServerConfig>, port: u16) {
 
 /// A CA with a certificate for `localhost` signed by it, in a temporary folder that is removed.
 fn pki() -> teseladb_server::pki::Pki {
-    let dir = std::env::temp_dir().join(format!("teseladb-oidc-http-{}", std::process::id()));
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("teseladb-oidc-http-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -133,7 +137,9 @@ fn pki() -> teseladb_server::pki::Pki {
 
 /// The `root` user of a credentials file, as a first start creates it (013 FR-004).
 fn root_user() -> Vec<u8> {
-    let dir = std::env::temp_dir().join(format!("teseladb-oidc-root-{}", std::process::id()));
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("teseladb-oidc-root-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join(teseladb_server::pki::ROOT_CREDENTIALS);
     std::fs::write(&file, "user=root\npassword=root-pw-31\n").unwrap();
@@ -147,8 +153,13 @@ fn root_user() -> Vec<u8> {
 }
 
 /// A node that requires credentials, with REFDB-OIDC and the provider of `issuer`, which it
-/// reaches trusting `ca`.
-fn start(issuer: &str, ca: teseladb_x509::Certificate) -> Node<MemDisk> {
+/// reaches trusting `ca`, and its HTTP port on `http`.
+fn start(
+    issuer: &str,
+    ca: teseladb_x509::Certificate,
+    http: SocketAddr,
+    tls: Option<teseladb_server::tls_port::TlsPort>,
+) -> Node<MemDisk> {
     let json = format!(
         r#"[{{"issuer": "{issuer}", "audience": "{AUDIENCE}", "authNamePrefix": "idp", "clientId": "cid", "requestScopes": ["db.read"], "useAuthorizationClaim": true, "authorizationClaim": "groups", "supportsHumanFlows": false}}]"#
     );
@@ -161,11 +172,7 @@ fn start(issuer: &str, ca: teseladb_x509::Certificate) -> Node<MemDisk> {
         mechanisms: vec![SaslMechanism::ScramSha256, SaslMechanism::Oidc],
         ..ClientConfig::new(Vec::new())
     };
-    let http = HttpPortConfig {
-        addrs: vec![SocketAddr::from(([127, 0, 0, 1], 0))],
-        tls: None,
-        settings: Settings::default(),
-    };
+    let http = HttpPortConfig { addrs: vec![http], tls, settings: Settings::default() };
     let cfg = NodeConfig {
         cores: Some(2),
         client: Some(client),
@@ -209,8 +216,8 @@ fn call(
     (r.status, extjson::parse(std::str::from_utf8(&r.body).unwrap()).unwrap_or_default())
 }
 
-/// A stateless `tools/call` of `find` on `app.c` with Bearer `credential`: status and answer.
-fn mcp_find(at: SocketAddr, node: u64, credential: &str) -> (u16, Value) {
+/// A stateless `tools/call` of `find` on `app.c` with Bearer `credential`.
+fn mcp_request(at: SocketAddr, node: u64, credential: &str) -> Response {
     let meta = r#""_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}"#;
     let body = format!(
         r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{{meta},"name":"find","arguments":{{"connectionId":"{node}.stateless","database":"app","collection":"c","filter":{{}}}}}}}}"#
@@ -220,7 +227,12 @@ fn mcp_find(at: SocketAddr, node: u64, credential: &str) -> (u16, Value) {
         .header("Content-Type", "application/json")
         .header("Accept", "application/json, text/event-stream")
         .body(body.into_bytes());
-    let r = send(at, req);
+    send(at, req)
+}
+
+/// [`mcp_request`]: status and answer.
+fn mcp_find(at: SocketAddr, node: u64, credential: &str) -> (u16, Value) {
+    let r = mcp_request(at, node, credential);
     (r.status, parse(&r.body).unwrap_or(Value::Null))
 }
 
@@ -242,16 +254,54 @@ fn root_key(node: &Node<MemDisk>) -> String {
     String::from_utf8(out).unwrap().trim().to_owned()
 }
 
-#[test]
-fn tokens_of_the_provider_open_rest_and_mcp_each_with_its_own_audience() {
+/// The provider's test PKI, the provider and a node with its HTTP port on `http`: the node, the
+/// address its HTTP port answers on over loopback, and the issuer.
+fn setup(http: SocketAddr) -> (Node<MemDisk>, SocketAddr, String) {
+    let (node, at, issuer, _) = setup_with(http, false);
+    (node, at, issuer)
+}
+
+/// [`setup`], with TLS on the HTTP port when `tls`: also the PKI.
+fn setup_with(
+    http: SocketAddr,
+    tls: bool,
+) -> (Node<MemDisk>, SocketAddr, String, teseladb_server::pki::Pki) {
     let pki = pki();
     let config = Arc::new(ServerConfig::new(CertifiedKey {
         chain: pki.node_chain.clone(),
         key: pki.node_key.clone(),
     }));
     let issuer = provider(config);
-    let node = start(&issuer, pki.ca.clone());
-    let at = node.http_addrs()[0];
+    let port_tls = tls.then(|| {
+        let opts = teseladb_server::cli::TlsOpts::default();
+        teseladb_server::tls_port::build(&opts, &pki).unwrap()
+    });
+    let node = start(&issuer, pki.ca.clone(), http, port_tls);
+    let port = node.http_addrs()[0].port();
+    (node, SocketAddr::from(([127, 0, 0, 1], port)), issuer, pki)
+}
+
+/// The metadata of `/mcp`: status and document.
+fn metadata(at: SocketAddr) -> (u16, Document) {
+    let r = send(at, Request::new("GET", "/.well-known/oauth-protected-resource/mcp"));
+    (r.status, extjson::parse(std::str::from_utf8(&r.body).unwrap()).unwrap_or_default())
+}
+
+/// [`mcp_request`]: status and `WWW-Authenticate`.
+fn mcp_challenge(at: SocketAddr, node: u64, credential: &str) -> (u16, String) {
+    let r = mcp_request(at, node, credential);
+    let challenge = r
+        .headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("WWW-Authenticate"))
+        .map(|(_, v)| v.clone())
+        .unwrap_or_default();
+    (r.status, challenge)
+}
+
+#[test]
+fn tokens_of_the_provider_open_rest_and_mcp_each_with_its_own_audience() {
+    let (node, at, issuer) = setup(SocketAddr::from(([127, 0, 0, 1], 0)));
     let root = root_key(&node);
     // The provider's group `readers` reads `app`, through the role its claim names.
     let role =
@@ -262,11 +312,11 @@ fn tokens_of_the_provider_open_rest_and_mcp_each_with_its_own_audience() {
     let (st, d) = call(at, &root, "POST", "/v1/databases/app/collections/c/insertMany", docs);
     assert_eq!(st, 200, "{d:?}");
 
-    // The metadata of `/mcp`, public, name the provider and the resource.
-    let r = send(at, Request::new("GET", "/.well-known/oauth-protected-resource/mcp"));
-    assert_eq!(r.status, 200);
-    let meta = extjson::parse(std::str::from_utf8(&r.body).unwrap()).unwrap();
-    let resource = format!("https://{HOST}/mcp");
+    // The metadata of `/mcp`, public, name the provider and the resource: the address the
+    // HTTP port listens on, not the `Host` the client sent.
+    let (st, meta) = metadata(at);
+    assert_eq!(st, 200, "{meta:?}");
+    let resource = format!("https://{at}/mcp");
     assert_eq!(meta.get("resource"), Some(&Bson::from(resource.as_str())));
     let servers = Bson::Array(vec![Bson::from(issuer.as_str())]);
     assert_eq!(meta.get("authorization_servers"), Some(&servers));
@@ -286,6 +336,12 @@ fn tokens_of_the_provider_open_rest_and_mcp_each_with_its_own_audience() {
     assert_eq!((st, found(&v)), (200, Some(2)), "{v:?}");
     let (st, _) = call(at, &mcp_token, "POST", "/v1/databases/app/collections/c/find", find);
     assert_eq!(st, 401);
+    // A token issued for the resource the client names in `Host` is someone else's: refused.
+    let host_token = token(&issuer, &format!("https://{HOST}/mcp"), "alice", r#"["readers"]"#);
+    let (st, challenge) = mcp_challenge(at, node.node_id().0, &host_token);
+    assert_eq!(st, 401);
+    let url = format!("https://{at}/.well-known/oauth-protected-resource/mcp");
+    assert!(challenge.contains(&format!("resource_metadata=\"{url}\"")), "{challenge}");
     // The roles come from the token's groups: without `readers`, nothing is read.
     let (st, d) = call(
         at,
@@ -300,21 +356,111 @@ fn tokens_of_the_provider_open_rest_and_mcp_each_with_its_own_audience() {
     assert_eq!(call(at, &forged, "GET", "/v1/databases", "").0, 401);
     let stranger = token("https://other.test", AUDIENCE, "alice", "[]");
     assert_eq!(call(at, &stranger, "GET", "/v1/databases", "").0, 401);
+    // Another scheme than Bearer is refused.
+    let basic = Request::new("GET", "/v1/databases").header("Authorization", "Basic cm9vdDp4");
+    assert_eq!(send(at, basic).status, 401);
+    // A call with progress opens its stream with an API key, and is refused without a credential
+    // the node takes.
+    let progress = |credential: &str| {
+        let body = format!(
+            r#"{{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{{"_meta":{{"io.modelcontextprotocol/protocolVersion":"2026-07-28","progressToken":"p"}},"name":"find","arguments":{{"connectionId":"{}.stateless","database":"app","collection":"c"}}}}}}"#,
+            node.node_id().0
+        );
+        let req = Request::new("POST", "/mcp")
+            .header("Authorization", &format!("Bearer {credential}"))
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream")
+            .body(body.into_bytes());
+        send(at, req)
+    };
+    let r = progress(&root);
+    assert_eq!(r.status, 200);
+    assert!(String::from_utf8_lossy(&r.body).contains("notifications/progress"));
+    assert_eq!(progress(&rest_token).status, 401);
+    drop(node.stop());
+}
 
-    // With `mcpOptions.resourceUri`, the resource no longer follows `Host`.
+/// A node whose HTTP port listens only on a wildcard address does not know the URI clients reach
+/// `/mcp` by: it takes no OIDC token there, says why, and publishes no metadata, until
+/// `mcpOptions.resourceUri` is set. API keys keep working.
+#[test]
+fn without_a_known_uri_mcp_takes_no_token_until_the_resource_is_set() {
+    let (node, at, issuer) = setup(SocketAddr::from(([0, 0, 0, 0], 0)));
+    let root = root_key(&node);
+    let id = node.node_id().0;
+    let host_token = token(&issuer, &format!("https://{HOST}/mcp"), "alice", r#"["readers"]"#);
+    let (st, challenge) = mcp_challenge(at, id, &host_token);
+    assert_eq!(st, 401);
+    assert!(challenge.contains("error=\"invalid_token\""), "{challenge}");
+    assert!(challenge.contains("mcpOptions.resourceUri"), "{challenge}");
+    let (st, d) = metadata(at);
+    assert_eq!(st, 404, "{d:?}");
+    assert!(format!("{d:?}").contains("mcpOptions.resourceUri"), "{d:?}");
+    assert_eq!(mcp_find(at, id, &root).0, 200);
+
+    // With `mcpOptions.resourceUri`, tokens for it are taken, whatever `Host` the client sends.
     let fixed = "https://db.example.com/mcp";
     let set = format!(r#"{{"setClusterParameter":{{"mcpOptions":{{"resourceUri":"{fixed}"}}}}}}"#);
     let (st, d) = call(at, &root, "POST", "/v1/databases/admin/command", &set);
     assert_eq!(st, 200, "{d:?}");
+    let role =
+        r#"{"createRole":"idp/readers","privileges":[],"roles":[{"role":"read","db":"app"}]}"#;
+    let (st, d) = call(at, &root, "POST", "/v1/databases/admin/command", role);
+    assert_eq!(st, 200, "{d:?}");
     let fixed_token = token(&issuer, fixed, "alice", r#"["readers"]"#);
     let end = std::time::Instant::now() + READY;
-    while mcp_find(at, node.node_id().0, &fixed_token).0 != 200 {
+    while mcp_find(at, id, &fixed_token).0 != 200 {
         assert!(std::time::Instant::now() < end, "the fixed resource was never taken");
         std::thread::sleep(Duration::from_millis(50));
     }
-    assert_eq!(mcp_find(at, node.node_id().0, &mcp_token).0, 401);
-    let r = send(at, Request::new("GET", "/.well-known/oauth-protected-resource/mcp"));
-    let meta = extjson::parse(std::str::from_utf8(&r.body).unwrap()).unwrap();
+    let (st, challenge) = mcp_challenge(at, id, &host_token);
+    assert_eq!(st, 401);
+    let url = "https://db.example.com/.well-known/oauth-protected-resource/mcp";
+    assert!(challenge.contains(&format!("resource_metadata=\"{url}\"")), "{challenge}");
+    let (st, meta) = metadata(at);
+    assert_eq!(st, 200);
     assert_eq!(meta.get("resource"), Some(&Bson::from(fixed)));
     drop(node.stop());
+}
+
+/// 019 FR-020: `teseladb mcp --uri https://…` reaches a node whose HTTP port has TLS, trusting
+/// the CA of `--tlsCAFile`; progress comes back as the events of a stream, one line each. Without
+/// `--tlsCAFile`, with a file that is not a CA, or with another scheme, it stops with a message.
+#[test]
+fn mcp_over_stdio_reaches_a_node_over_tls() {
+    use teseladb_server::mcp_stdio::{McpOpts, run};
+    let (node, at, _, pki) = setup_with(SocketAddr::from(([127, 0, 0, 1], 0)), true);
+    let key = root_key(&node);
+    let dir = std::env::temp_dir().join(format!("teseladb-mcp-tls-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let ca = dir.join("ca.pem");
+    std::fs::write(&ca, pki.ca.to_pem()).unwrap();
+    let uri = format!("https://localhost:{}", at.port());
+    let o = McpOpts { uri, ca_file: Some(ca), certificate_key_file: None };
+    let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#;
+    let call = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"_meta":{"progressToken":"p"},"name":"list-databases","arguments":{}}}"#;
+    let input = format!("{init}\n{call}\n");
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let code = run(&o, &mut input.as_bytes(), &mut out, &mut err, Some(key.clone()));
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.lines().count() >= 2 && text.contains(r#""id":2"#), "{text}");
+    let fails = |o: &McpOpts| {
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let code = run(o, &mut input.as_bytes(), &mut out, &mut err, Some(key.clone()));
+        (code, String::from_utf8_lossy(&err).into_owned())
+    };
+    let none = McpOpts { ca_file: None, ..o.clone() };
+    assert_eq!(fails(&none), (1, "teseladb mcp: an https:// URI needs --tlsCAFile\n".to_owned()));
+    let missing = McpOpts { ca_file: Some(dir.join("nope.pem")), ..o.clone() };
+    let (code, msg) = fails(&missing);
+    assert!(code == 1 && msg.contains("--tlsCAFile"), "{msg}");
+    let not_ca = dir.join("not.pem");
+    std::fs::write(&not_ca, "not a certificate").unwrap();
+    let (code, msg) = fails(&McpOpts { ca_file: Some(not_ca), ..o.clone() });
+    assert!(code == 1 && msg.contains("--tlsCAFile"), "{msg}");
+    let (code, msg) = fails(&McpOpts { uri: "ftp://h".to_owned(), ..o.clone() });
+    assert!(code == 1 && msg.contains("https:// or http://"), "{msg}");
+    drop(node.stop());
+    std::fs::remove_dir_all(&dir).unwrap();
 }

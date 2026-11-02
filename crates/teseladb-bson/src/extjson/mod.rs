@@ -25,7 +25,7 @@ mod legacy;
 mod parse;
 mod write;
 
-pub use date::to_log_time;
+pub use date::{civil_from_days, to_log_time};
 
 /// Text that is not Extended JSON of a document.
 #[derive(Clone, Debug, PartialEq, Eq)]

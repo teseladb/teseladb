@@ -104,6 +104,8 @@ fn names_are_unique_and_the_builtin_workloads_are_there() {
             "queries",
             "changestream",
             "reshard",
+            "search",
+            "vector",
             "zones"
         ]
     );

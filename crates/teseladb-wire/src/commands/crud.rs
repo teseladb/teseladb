@@ -582,6 +582,8 @@ pub fn insert<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
         }
     };
     let rules = rules_of(&ns, &coll, bypass, None, index_rules(ctx.backend, &coll)?)?;
+    // A collection with encrypted fields refuses what a driver did not encrypt (017 FR-006).
+    let encrypted = super::fle::plain_insert_config(&coll)?;
     let mut target = (coll, rules);
     // A chunk a resharding's fence refused goes to the collection as the catalog has it then.
     let mut again = |ctx: &mut Ctx<'_, B>| {
@@ -595,7 +597,10 @@ pub fn insert<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
     let mut stop = false;
     for (i, d) in docs.iter().enumerate() {
         let prepared = match d {
-            Value::Document(d) => with_id(ctx.backend, ctx.shared, d)
+            Value::Document(d) => encrypted
+                .as_ref()
+                .map_or(Ok(()), |c| super::fle_write::check_plain(c, d))
+                .and_then(|()| with_id(ctx.backend, ctx.shared, d))
                 .and_then(|doc| insert_key(&target.0, &doc).map(|k| (doc, k))),
             other => Err(wrong_type(&format!("insert.documents.{i}"), other, "object")),
         };

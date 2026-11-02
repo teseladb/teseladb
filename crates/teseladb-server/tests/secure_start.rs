@@ -44,6 +44,8 @@ struct Started {
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<i32>>,
     port: u16,
+    /// The administration port's address.
+    admin: String,
 }
 
 impl Drop for Started {
@@ -64,11 +66,6 @@ fn start_with(data: &Path, log: &Path, extra: &[&str]) -> Started {
     let _ = std::fs::remove_file(log);
     let args: Vec<String> = [
         "start",
-        "--admin-listen",
-        "127.0.0.1:0",
-        // Several nodes on one machine: none opens the HTTP port of 019.
-        "--http-port",
-        "0",
         "--cores",
         "1",
         "--port",
@@ -95,19 +92,24 @@ fn start_with(data: &Path, log: &Path, extra: &[&str]) -> Started {
         let (mut out, mut err) = (Vec::new(), Vec::new());
         run(&args, &mut out, &mut err, &|| s.load(Ordering::Relaxed))
     });
+    // The node logs its clients' port and then its administration port: the test waits for
+    // both lines, since a read between the two writes sees only the first.
     let until = Instant::now() + READY_WAIT;
-    let port = loop {
+    let (port, admin) = loop {
         let text = std::fs::read_to_string(log).unwrap_or_default();
-        let found = text.lines().find_map(|l| {
+        let port = text.lines().find_map(|l| {
             l.split("clients' port addr=").nth(1).and_then(|a| a.rsplit(':').next()?.parse().ok())
         });
-        if let Some(p) = found {
-            break p;
+        let admin = text
+            .lines()
+            .find_map(|l| l.split("administration port addr=").nth(1).map(|a| a.trim().to_owned()));
+        if let (Some(p), Some(a)) = (port, admin) {
+            break (p, a);
         }
         assert!(Instant::now() < until, "the node did not start: {text}");
         std::thread::sleep(Duration::from_millis(50));
     };
-    Started { stop, thread: Some(thread), port }
+    Started { stop, thread: Some(thread), port, admin }
 }
 
 fn now_ms() -> i64 {
@@ -971,13 +973,7 @@ fn the_admin_command_rotates_the_node_certificate() {
     let ca = Certificate::from_pem_all(&std::fs::read_to_string(data.join(CA_CERT)).unwrap())
         .unwrap()
         .remove(0);
-    let text = std::fs::read_to_string(&log).unwrap();
-    let admin = text
-        .lines()
-        .find_map(|l| l.split("administration port addr=").nth(1))
-        .expect("the administration port in the log")
-        .trim()
-        .to_owned();
+    let admin = node.admin.clone();
     let first = served_leaf(node.port, &ca);
     let admin_run = |extra: &[&str]| {
         let args: Vec<String> = ["admin", "--node", &admin]
@@ -1025,13 +1021,7 @@ fn the_administration_port_asks_for_tls_and_roles() {
     let ca_file = data.join(CA_CERT);
     let ca =
         Certificate::from_pem_all(&std::fs::read_to_string(&ca_file).unwrap()).unwrap().remove(0);
-    let text = std::fs::read_to_string(&log).unwrap();
-    let admin = text
-        .lines()
-        .find_map(|l| l.split("administration port addr=").nth(1))
-        .expect("the administration port in the log")
-        .trim()
-        .to_owned();
+    let admin = node.admin.clone();
     let mut root = root_client(node.port, &ca, &data);
     let roles = Value::Array(vec![Value::Document(
         Document::new().with("role", "clusterMonitor").with("db", "admin"),
@@ -1187,11 +1177,7 @@ fn secrets_stay_out_of_the_log_the_diagnostics_and_the_metrics() {
     assert!(ok(&r), "{r:?}");
     seen.push_str(&format!("{r:?}\n"));
     // The metrics, read by an operator with `clusterMonitor`.
-    let admin = std::fs::read_to_string(&log)
-        .unwrap()
-        .lines()
-        .find_map(|l| l.split("administration port addr=").nth(1).map(|a| a.trim().to_owned()))
-        .expect("the administration port in the log");
+    let admin = node.admin.clone();
     let roles = Value::Array(vec![Value::Document(
         Document::new().with("role", "clusterMonitor").with("db", "admin"),
     )]);

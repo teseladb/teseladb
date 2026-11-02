@@ -966,6 +966,8 @@ mod m10_tests;
 #[cfg(test)]
 mod pattern_tests;
 #[cfg(test)]
+mod similarity_tests;
+#[cfg(test)]
 mod synonyms_tests;
 #[cfg(test)]
 mod tests;
