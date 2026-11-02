@@ -61,6 +61,12 @@ impl NodeExecutor {
         }
     }
 
+    /// What the connection keeps of its authentication: the node's mechanisms and the resource
+    /// an OIDC token must be issued for go there before [`authenticate`].
+    pub fn auth_state(&mut self) -> &mut teseladb_wire::commands::auth::AuthState {
+        &mut self.conn.auth
+    }
+
     /// Its backend, for the next request.
     #[must_use]
     pub fn into_backend(self) -> ServerBackend {

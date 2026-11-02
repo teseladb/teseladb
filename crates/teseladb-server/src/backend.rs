@@ -102,6 +102,9 @@ pub struct ServerBackend {
     max_until: Option<Instant>,
     /// What the diagnostic commands report; `None` for a backend without a client port.
     diag: Option<Arc<crate::diag::Diag>>,
+    /// The identity providers of REFDB-OIDC of a backend without a client port (the HTTP
+    /// port's); a backend with one reads them from [`Diag`](crate::diag::Diag).
+    oidc: Option<Arc<crate::oidc_client::Oidc>>,
     /// The pins of the running operation's reads of the indexes (009 FR-006).
     pins: Vec<u64>,
     /// The latest wait end of a write of the running operation that got no answer: a leader may
@@ -134,6 +137,7 @@ impl ServerBackend {
             deadline: REQUEST_DEADLINE,
             max_until: None,
             diag: None,
+            oidc: None,
             pins: Vec::new(),
             unsettled: None,
             read_pref: None,
@@ -147,6 +151,19 @@ impl ServerBackend {
         let mut b = self;
         b.diag = Some(diag);
         b
+    }
+
+    /// The backend with the identity providers `oidc` (the HTTP port's, 019 FR-015).
+    #[must_use]
+    pub fn with_oidc(self, oidc: Option<Arc<crate::oidc_client::Oidc>>) -> ServerBackend {
+        let mut b = self;
+        b.oidc = oidc;
+        b
+    }
+
+    /// The node's identity providers: this backend's, or its client port's.
+    fn oidc(&self) -> Option<&crate::oidc_client::Oidc> {
+        self.oidc.as_deref().or_else(|| self.diag.as_ref().and_then(|d| d.oidc()))
     }
 
     /// The backend with another deadline for each request.
@@ -1236,7 +1253,7 @@ impl Backend for ServerBackend {
     }
 
     fn oidc_providers(&self) -> teseladb_auth::oidc::Providers {
-        self.diag.as_ref().and_then(|d| d.oidc()).map(|o| o.providers.clone()).unwrap_or_default()
+        self.oidc().map(|o| o.providers.clone()).unwrap_or_default()
     }
 
     fn oidc_keys(
@@ -1245,8 +1262,8 @@ impl Backend for ServerBackend {
         refresh: bool,
     ) -> Result<teseladb_auth::oidc::KeySet, CommandError> {
         let failed = |m: &str| CommandError::new(teseladb_wire::error::OPERATION_FAILED, m);
-        let diag = self.diag.clone();
-        let Some(oidc) = diag.as_ref().and_then(|d| d.oidc()) else {
+        let (own, diag) = (self.oidc.clone(), self.diag.clone());
+        let Some(oidc) = own.as_deref().or_else(|| diag.as_ref().and_then(|d| d.oidc())) else {
             return Err(failed("no identity provider"));
         };
         oidc.keys(issuer, refresh).map_err(|e| {

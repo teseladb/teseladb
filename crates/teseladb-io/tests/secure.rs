@@ -115,6 +115,23 @@ fn dial(addr: &str, client: Option<Arc<ClientConfig>>) -> Outbound {
     wait(&mut rx)
 }
 
+/// A channel in clear passes the bytes as they are, and says so in its debug form.
+#[test]
+fn a_plain_channel_reads_until_the_peer_closes() {
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut a = std::net::TcpStream::connect(l.local_addr().unwrap()).unwrap();
+    let (mut b, _) = l.accept().unwrap();
+    let mut ch = Channel::Plain;
+    assert_eq!(format!("{ch:?}"), "Plain");
+    ch.send(&mut a, b"abc").unwrap();
+    let mut plain = Vec::new();
+    ch.recv(&mut b, &mut plain).unwrap();
+    assert_eq!(plain, b"abc");
+    drop(a);
+    let e = ch.recv(&mut b, &mut plain).unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::UnexpectedEof);
+}
+
 #[test]
 fn nodes_of_one_ca_talk_over_mtls_and_others_are_refused() {
     let the_ca = ca(1);
@@ -137,6 +154,14 @@ fn nodes_of_one_ca_talk_over_mtls_and_others_are_refused() {
     let mut plain = Vec::new();
     accepted.channel.recv(&mut accepted.stream, &mut plain).unwrap();
     assert_eq!(plain, frame);
+    // The debug forms leave the keys out.
+    assert_eq!((format!("{tls:?}"), format!("{ch:?}")), ("PeerTls".into(), "Tls".into()));
+    // Bytes that are not TLS end the read, and the channel answers them with an alert.
+    std::io::Write::write_all(&mut stream, &[0x17, 0x03, 0x03, 0x00, 0x05, 1, 2, 3, 4, 5]).unwrap();
+    let mut rest = Vec::new();
+    let e = accepted.channel.recv(&mut accepted.stream, &mut rest).unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::InvalidData);
+    drop(stream);
     // Without a client certificate, with another CA's, or in clear: refused.
     let mut bare = (*tls.client()).clone();
     bare.identity = None;

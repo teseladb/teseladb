@@ -14,8 +14,9 @@ use super::mutation::{Bound, DocMutation, Rules};
 use super::names::{self, full};
 use super::{Backend, Ctx, display, index_spec};
 use crate::error::{
-    BAD_VALUE, CANNOT_CREATE_INDEX, CommandError, FAILED_TO_PARSE, HASHED_UNIQUE, INTERNAL_ERROR,
-    INVALID_INDEX_SPECIFICATION_OPTION, INVALID_NAMESPACE, INVALID_OPTIONS, TYPE_MISMATCH,
+    BAD_VALUE, CANNOT_CREATE_INDEX, CommandError, FAILED_TO_PARSE, HASHED_FIELDS, HASHED_UNIQUE,
+    INTERNAL_ERROR, INVALID_INDEX_SPECIFICATION_OPTION, INVALID_NAMESPACE, INVALID_OPTIONS,
+    TYPE_MISMATCH,
 };
 use teseladb_collation::{ParsedCollation, parse_collation};
 use teseladb_index::build::CommitQuorum;
@@ -41,8 +42,15 @@ const SPARSE: &str = "sparse";
 const BACKGROUND: &str = "background";
 const EXPIRE_AFTER_SECONDS: &str = "expireAfterSeconds";
 const COLLATION: &str = "collation";
+/// The options that make another index on the same key (measured on a `refrouter` 9.0.4).
+const IDENTIFYING: [&str; 5] =
+    [UNIQUE, SPARSE, "partialFilterExpression", COLLATION, "wildcardProjection"];
+/// The options a requested index shows before its key in a message (measured).
+const SHOWN_FIRST: [&str; 5] = [BACKGROUND, UNIQUE, SPARSE, HIDDEN, PREPARE_UNIQUE];
 const SPHERE: &str = "2dsphere";
 const SPHERE_VERSION: &str = "2dsphereIndexVersion";
+/// The namespace field of old specifications.
+const NS: &str = "ns";
 /// The `2dsphereIndexVersion` of a new index.
 const SPHERE_VERSION_DEFAULT: i32 = 4;
 const PLANE: &str = "2d";
@@ -60,8 +68,9 @@ const DEFAULT_LANGUAGE_VALUE: &str = "english";
 const LANGUAGE_OVERRIDE_VALUE: &str = "language";
 const TEXT_INDEX_VERSION_VALUE: i32 = 3;
 /// Specification errors `createIndexes` shows inside «Error in specification».
-const SPEC_ERRORS: [i32; 4] = [
+const SPEC_ERRORS: [i32; 5] = [
     CANNOT_CREATE_INDEX.code,
+    crate::error::PROJECTION_EXCLUSION_IN_INCLUSION.code,
     FAILED_TO_PARSE.code,
     INVALID_INDEX_SPECIFICATION_OPTION.code,
     TYPE_MISMATCH.code,
@@ -163,6 +172,8 @@ fn stored_booleans(spec: &mut Document) {
 fn stored(spec: &Document, version: i32) -> Result<Document, CommandError> {
     let mut out = spec.clone();
     out.insert(VERSION, version);
+    // `ns` (old dumps carry it) is dropped, whatever namespace it names (measured).
+    out.remove(NS);
     stored_booleans(&mut out);
     if let Some(Value::Document(c)) = out.get(COLLATION).cloned() {
         match parse_collation(RawDoc::from_bytes(&c.to_bytes()?)?)? {
@@ -277,7 +288,7 @@ fn build_failed<B: Backend + ?Sized>(
 /// options, then `key` and `name` (measured).
 fn requested(spec: &Document, version: i32) -> String {
     let mut out = Document::new().with(VERSION, version);
-    for (k, v) in spec.iter().filter(|(k, _)| ![VERSION, KEY, NAME].contains(k)) {
+    for (k, v) in spec.iter().filter(|(k, _)| SHOWN_FIRST.contains(k)) {
         out.push(k, v.clone());
     }
     for k in [KEY, NAME] {
@@ -285,7 +296,16 @@ fn requested(spec: &Document, version: i32) -> String {
             out.push(k, v.clone());
         }
     }
+    let rest = |k: &str| ![VERSION, KEY, NAME].contains(&k) && !SHOWN_FIRST.contains(&k);
+    for (k, v) in spec.iter().filter(|(k, _)| rest(k)) {
+        out.push(k, v.clone());
+    }
     display(&Value::Document(out))
+}
+
+/// The options of a stored specification that tell two indexes on the same key apart.
+fn identity(spec: &Document) -> Vec<(String, Value)> {
+    options(spec).into_iter().filter(|(k, _)| IDENTIFYING.contains(&k.as_str())).collect()
 }
 
 /// The options of a stored specification, without `v`, `key` and `name`.
@@ -336,7 +356,18 @@ fn compare(spec: &Document, version: i32, all: &[Existing]) -> Result<bool, Comm
         );
         return Err(CommandError::new(INDEX_KEY_SPECS_CONFLICT, msg));
     }
-    if let Some(other) = all.iter().find(|e| e.spec.get(KEY) == key) {
+    let equivalent =
+        all.iter().find(|e| e.spec.get(KEY) == key && identity(&e.spec) == identity(&normal));
+    if let Some(other) = equivalent {
+        if options(&other.spec) != options(&normal) {
+            let msg = format!(
+                "An equivalent index already exists with a different name and options. \
+                 Requested index: {}, existing index: {}",
+                requested(spec, version),
+                display(&Value::Document(other.spec.clone()))
+            );
+            return Err(CommandError::new(INDEX_OPTIONS_CONFLICT, msg));
+        }
         let other_name = match other.spec.get(NAME) {
             Some(Value::String(n)) => n.clone(),
             _ => String::new(),
@@ -421,7 +452,22 @@ fn create<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Command
             Some(Value::Document(k)) => k.clone(),
             _ => Document::new(),
         };
-        if is_unique(spec) && key.iter().any(|(_, v)| v == &Value::from(HASHED)) {
+        let hashed = key.iter().filter(|(_, v)| *v == &Value::from(HASHED)).count();
+        if hashed > 1 {
+            let (msg, build) = build_failed(ctx.backend, &ns, &coll, "");
+            let detail = format!(
+                "Caught exception during index builder ({build}) initialization on namespace {} \
+                 ({}). {} index specs provided. First index spec: {} :: caused by :: A maximum \
+                 of one index field is allowed to be hashed but found {hashed} for 'key' {}",
+                full(&ns),
+                super::uuid_text(&coll.uuid),
+                specs.len(),
+                requested(spec, *version),
+                display(&Value::Document(key.clone()))
+            );
+            return Err(CommandError::new(HASHED_FIELDS, format!("{msg}{detail}")));
+        }
+        if is_unique(spec) && hashed > 0 {
             let (msg, build) = build_failed(ctx.backend, &ns, &coll, "");
             let detail = format!(
                 "Caught exception during index builder ({build}) initialization on namespace {} \

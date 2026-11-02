@@ -27,10 +27,12 @@ pub mod change_stream;
 pub mod change_stream_ddl;
 pub mod chunks;
 pub mod cluster_admin;
+pub mod coll_mod_kinds;
 pub mod config_db;
 pub mod config_settings;
 pub mod cross_range;
 pub mod crud;
+pub mod cursor_spill;
 pub mod diagnostic_data;
 pub mod diagnostics;
 pub mod engines;
@@ -54,6 +56,7 @@ pub mod maintenance;
 pub mod mapreduce;
 pub mod mutation;
 pub mod names;
+pub mod near_find;
 pub mod oplog;
 pub mod out_merge;
 pub mod parameters;
@@ -85,6 +88,7 @@ pub mod text_search;
 pub mod timeseries;
 pub mod timeseries_catalog;
 pub mod timeseries_filter;
+pub mod timeseries_range;
 pub mod ttl;
 pub mod txn;
 pub mod txn_concern;
@@ -809,6 +813,9 @@ pub struct Spill {
     /// The memory of a stage when the node's part for aggregations (D-105) is less than
     /// RefDb's 100 MiB.
     pub stage_bytes: Option<usize>,
+    /// The bytes the open cursors' computed results may hold in memory: the node's part for
+    /// cursors (012 FR-013, D-105); `None`: no limit.
+    pub cursor_bytes: Option<usize>,
 }
 
 impl Spill {

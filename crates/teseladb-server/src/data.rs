@@ -423,7 +423,9 @@ impl DataCore {
                 return;
             }
             DataReq::At(node, g, r) if node != self.me => {
-                self.forward(core, g, r, reply, node, now);
+                // The request names its replica, which may still be a learner the router does
+                // not count among the voters: it goes there and nowhere else.
+                self.send_to(core, (g, r), reply, node, now);
                 return;
             }
             DataReq::At(_, g, r) | DataReq::Remote(g, r) => {
@@ -462,6 +464,18 @@ impl DataCore {
             let _ = to.send(Err(RangeError::NotLeader { hint: NodeId(0) }));
             return;
         };
+        self.send_to(core, (g, r), to, node, now);
+    }
+
+    /// Sends request `r` for range `g` to `node`; its answer goes to `to`.
+    fn send_to(
+        &mut self,
+        core: &mut MultiRaftCore<CoreSm>,
+        (g, r): (GroupId, RemoteReq),
+        to: DataSender,
+        node: NodeId,
+        now: Nanos,
+    ) {
         let body = Request::Data(encode_for(g, &r)).encode();
         let op = core.forward(node, Bytes::from_vec(body), now);
         self.forwarded.insert(op, (to, g, node));
@@ -1206,6 +1220,19 @@ mod tests {
         let (tx, _rx) = channel();
         d.follower_scan(&mut core, G, scan(), tx, (Nanos::ZERO, 0));
         assert_eq!(d.forwarded.len(), 1, "to the range's leader");
+    }
+
+    /// A request for the replica on a node goes to that node even while the router does not
+    /// count it among the voters yet (a learner that a restore sends its files to): sent to the
+    /// leader instead, the files would never reach it and its ingestion would find nothing.
+    #[test]
+    fn a_request_for_a_replica_goes_to_its_node_even_as_a_learner() {
+        let (mut core, mut d) = setup(&[2, 3]);
+        let (tx, _rx) = channel();
+        let piece = RemoteReq::RestorePiece { file: 0, offset: 0, data: Vec::new() };
+        d.request(&mut core, DataReq::At(NodeId(9), G, piece), tx, (Nanos::ZERO, 0));
+        let asked: Vec<NodeId> = d.forwarded.values().map(|(_, _, n)| *n).collect();
+        assert_eq!(asked, vec![NodeId(9)]);
     }
 
     #[test]
