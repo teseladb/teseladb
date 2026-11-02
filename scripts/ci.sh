@@ -6,6 +6,8 @@
 #   TESELADB_BENCH=1 scripts/ci.sh   also the reference benchmark (gate 8)
 #   TESELADB_E2E=0 scripts/ci.sh     every gate but the end-to-end ones (gate 6). The owner decided on
 #     30-10-2026 that the end-to-end suites run once, when every task of every specification is done.
+#   TESELADB_CI_LONG=0 scripts/ci.sh  every gate but the long runs of coverage, faulty variants and TLC,
+#     which scripts/final-phase.sh runs as phases of their own (coverage crate by crate)
 # Bash 3.2 (macOS) or later. The full run needs Docker (x86_64 tests and shellcheck).
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -81,6 +83,7 @@ gate "2. tests of check-origin" scripts/tests/check_origin_test.sh
 gate "2. tests of fetch-pinned" scripts/tests/fetch_pinned_test.sh
 gate "2. tests of the battery's requires" scripts/tests/compat_requires_test.sh
 gate "2. tests of the battery's secrets scan" scripts/tests/compat_secrets_test.sh
+gate "2. tests of final-phase" scripts/tests/final_phase_test.sh
 gate "3. simulated crashes (2,000 seeds × 3 lives)" env TESELADB_CRASH_SEEDS=2000 \
   cargo test -q --offline --release -p teseladb-raftlog --test crash_sim
 gate "3. LSM crashes (10,000 seeds × 3 lives, 004 SC-001)" env TESELADB_LSM_CRASH_SEEDS=10000 \
@@ -93,10 +96,17 @@ gate "3. tests on x86_64 Linux" scripts/test-x86_64.sh
 gate "3. tests on the Linux kernel, io_uring included (012)" scripts/test-linux.sh
 gate "3. TLS interoperability with openssl and curl (013 FR-019)" scripts/tls-interop.sh
 gate "4. tests of coverage" scripts/tests/coverage_test.sh
-gate "4. coverage (95 % per crate)" env TESELADB_COV_MIN=95 scripts/coverage.sh
+long_gate() {
+  if [[ ${TESELADB_CI_LONG:-1} == 0 ]]; then
+    echo "== gate: $1: run by scripts/final-phase.sh (TESELADB_CI_LONG=0)"
+  else
+    gate "$@"
+  fi
+}
+long_gate "4. coverage (95 % per crate)" env TESELADB_COV_MIN=95 scripts/coverage.sh
 
 gate "5. tests of sim-mutants" scripts/tests/sim_mutants_test.sh
-gate "5. faulty variants, each caught by its checker (002 SC-002)" scripts/sim-mutants.sh
+long_gate "5. faulty variants, each caught by its checker (002 SC-002)" scripts/sim-mutants.sh
 gate "5. simulator (200 seeds of every workload)" cargo run -q --offline --release -p teseladb-sim -- \
   --seeds 200 --workload all --jobs "$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
 if [[ ${TESELADB_E2E:-1} == 0 ]]; then
@@ -108,7 +118,7 @@ else
   absent "6. compatibility" "tests/compat arrives with specification 002"
 fi
 gate "7. tests of tlc" scripts/tests/tlc_test.sh
-gate "7. TLC (every model, writes spec/tla/RESULTS.md)" scripts/tlc.sh --all
+long_gate "7. TLC (every model, writes spec/tla/RESULTS.md)" scripts/tlc.sh --all
 if [[ ${TESELADB_BENCH:-0} == 1 ]]; then
   # 002 replaces it with `reference` and its baseline.
   gate "8. performance" cargo run -q --offline --release -p teseladb-bench -- --scenario raftlog
