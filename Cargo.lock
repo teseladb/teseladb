@@ -294,6 +294,7 @@ name = "teseladb-rest"
 version = "0.1.0"
 dependencies = [
  "teseladb-bson",
+ "teseladb-hash",
  "teseladb-http",
  "teseladb-json",
  "teseladb-session",

@@ -38,6 +38,22 @@ impl Executor for Fake {
         self.forwarded.push(node);
         (node == 4).then(|| Response { status: 299, headers: Vec::new(), body: Vec::new() })
     }
+
+    fn random(&mut self, out: &mut [u8]) {
+        out.fill(1);
+    }
+
+    fn now_ms(&self) -> u64 {
+        0
+    }
+
+    fn principal(&self) -> String {
+        String::new()
+    }
+
+    fn run_internal(&mut self, db: &str, command: Document) -> Document {
+        self.run(db, command)
+    }
 }
 
 fn ok() -> Document {

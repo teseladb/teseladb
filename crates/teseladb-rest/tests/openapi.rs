@@ -67,6 +67,22 @@ fn served_at_its_route() {
         fn forward(&mut self, _: u64, _: &Request) -> Option<teseladb_http::server::Response> {
             None
         }
+        fn random(&mut self, out: &mut [u8]) {
+            out.fill(1);
+        }
+        fn now_ms(&self) -> u64 {
+            0
+        }
+        fn principal(&self) -> String {
+            String::new()
+        }
+        fn run_internal(
+            &mut self,
+            db: &str,
+            command: teseladb_bson::Document,
+        ) -> teseladb_bson::Document {
+            self.run(db, command)
+        }
     }
     let r = teseladb_rest::api::handle(&Request::new("GET", "/v1/openapi.json"), &mut Nothing);
     assert_eq!(r.status, 200);
