@@ -319,3 +319,78 @@ fn an_index_takes_hash_buckets_of_its_own() {
         assert!(errmsg(&r).starts_with("teselaBuckets must be an integer from 0 to 255"), "{r:?}");
     }
 }
+
+#[test]
+fn the_namespace_of_a_specification_is_not_kept() {
+    // `refrestore` sends `ns` in the specifications of an old dump; a `refrouter` 9.0.4 drops it,
+    // whatever namespace it names (measured on `lc12`).
+    let mut m = Mem::new();
+    let with_ns = |key: &str, ns: &str| spec(Document::new().with(key, 1), key).with("ns", ns);
+    let r = create(&mut m, "c", vec![with_ns("a", "t.c"), with_ns("b", "other.c")]);
+    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+    assert_eq!(listed_fields(&mut m, "a"), ["v", "key", "name"]);
+    assert_eq!(listed_fields(&mut m, "b"), ["v", "key", "name"]);
+}
+
+#[test]
+fn indexes_on_the_same_key_differ_by_their_identifying_options() {
+    // Measured on a `refrouter` 9.0.4 (`lc12`): `unique`, `sparse`, `partialFilterExpression`,
+    // `collation` and `wildcardProjection` make another index on the same key; `hidden`,
+    // `expireAfterSeconds` and `prepareUnique` do not.
+    let mut m = Mem::new();
+    let s = || Document::new().with("s", 1);
+    let ok = |r: &Document| r.get("ok") == Some(&Value::Double(1.0));
+    assert!(ok(&create(&mut m, "c", vec![spec(s(), "s_1")])));
+    let es = Document::new().with("locale", "es").with("strength", 1);
+    let gt = |n: i32| Document::new().with("s", Document::new().with("$gt", n));
+    for other in [
+        spec(s(), "s_u").with("unique", true),
+        spec(s(), "s_sp").with("sparse", true),
+        spec(s(), "s_pf").with("partialFilterExpression", gt(1)),
+        spec(s(), "s_co").with("collation", es.clone()),
+        spec(s(), "s_pf2").with("partialFilterExpression", gt(2)),
+    ] {
+        let r = create(&mut m, "c", vec![other]);
+        assert!(ok(&r), "{r:?}");
+    }
+    let all = Document::new().with("$**", 1);
+    assert!(ok(&create(&mut m, "c", vec![spec(all.clone(), "all")])));
+    let projected = spec(all, "proj").with("wildcardProjection", Document::new().with("a", 1));
+    assert!(ok(&create(&mut m, "c", vec![projected])));
+    let r = create(&mut m, "c", vec![spec(s(), "s_hid").with("hidden", true)]);
+    assert_eq!(field(&r, "code"), &Value::Int32(85));
+    assert_eq!(
+        errmsg(&r),
+        "An equivalent index already exists with a different name and options. Requested index: \
+         { v: 2, hidden: true, key: { s: 1 }, name: \"s_hid\" }, existing index: { v: 2, key: \
+         { s: 1 }, name: \"s_1\" }"
+    );
+    let r = create(&mut m, "c", vec![spec(s(), "s_ttl").with("expireAfterSeconds", 5)]);
+    assert_eq!(
+        errmsg(&r),
+        "An equivalent index already exists with a different name and options. Requested index: \
+         { v: 2, key: { s: 1 }, name: \"s_ttl\", expireAfterSeconds: 5 }, existing index: { v: \
+         2, key: { s: 1 }, name: \"s_1\" }"
+    );
+    let r = create(&mut m, "c", vec![spec(s(), "s_co2").with("collation", es)]);
+    assert_eq!(field(&r, "code"), &Value::Int32(85));
+    assert_eq!(errmsg(&r), "Index already exists with a different name: s_co");
+}
+
+#[test]
+fn only_one_field_of_an_index_may_be_hashed() {
+    let mut m = Mem::new();
+    let key = Document::new().with("v", "hashed").with("w", "hashed");
+    let r = create(&mut m, "c", vec![spec(key, "two")]);
+    assert_eq!(field(&r, "code"), &Value::Int32(31303), "{r:?}");
+    let msg = errmsg(&r);
+    assert!(msg.starts_with("Index build failed: "), "{msg}");
+    assert!(
+        msg.ends_with(
+            "1 index specs provided. First index spec: { v: 2, key: { v: \"hashed\", w: \
+             \"hashed\" }, name: \"two\" } :: caused by :: A maximum of one index field is \
+             allowed to be hashed but found 2 for 'key' { v: \"hashed\", w: \"hashed\" }"
+        ),
+        "{msg}"
+    );
+}

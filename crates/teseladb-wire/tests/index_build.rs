@@ -298,6 +298,9 @@ fn a_duplicate_fails_a_unique_build_without_leftovers() {
     let c = collection(&m);
     let r = m.run(DB, create("a", Some(("unique", Value::Boolean(true)))));
     assert_eq!(field(&r, "code"), &Value::Int32(11000), "{r:?}");
+    // RefDb names the smallest duplicated key, whatever the scan met first (measured).
+    let Some(Value::String(msg)) = r.get("errmsg") else { panic!("{r:?}") };
+    assert!(msg.ends_with("dup key: { a: 0 }"), "{msg}");
     let id = m.indexes.last_index;
     assert!(m.indexes.of(c).next().is_none());
     assert_eq!(leftovers(&m, c, id), 0);
