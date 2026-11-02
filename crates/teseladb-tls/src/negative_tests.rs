@@ -246,6 +246,13 @@ fn records_after_the_handshake() {
     let mut out = Vec::new();
     s.records.write(ContentType::ChangeCipherSpec, &[1], &mut out).unwrap();
     assert_eq!(c.feed(&out), local(Alert::UnexpectedMessage));
+    // A protected change_cipher_spec while the handshake runs (RFC 8446, 5: only an unprotected
+    // one is dropped).
+    let (mut c, mut s) = connected();
+    c.state = State::ClientWaitFinished;
+    let mut out = Vec::new();
+    s.records.write(ContentType::ChangeCipherSpec, &[1], &mut out).unwrap();
+    assert_eq!(c.feed(&out), local(Alert::UnexpectedMessage));
     // Data after close_notify, and a fatal user_canceled.
     let (mut c, mut s) = connected();
     s.close().unwrap();
