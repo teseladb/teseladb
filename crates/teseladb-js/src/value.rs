@@ -30,6 +30,9 @@ pub enum Val {
 pub struct Budget {
     pub used: Cell<usize>,
     pub limit: usize,
+    /// Whether a call changed an object of the shared globals ([`ObjCell::shared`]): the globals
+    /// are then built again before the next call.
+    pub touched: Cell<bool>,
 }
 
 impl Budget {
@@ -54,6 +57,8 @@ pub struct ObjCell {
     pub obj: RefCell<Obj>,
     pub charged: Cell<usize>,
     pub budget: Rc<Budget>,
+    /// Whether the object belongs to the global objects a program's calls share.
+    pub shared: Cell<bool>,
 }
 
 impl Drop for ObjCell {
@@ -71,7 +76,11 @@ impl ObjRef {
         self.0.obj.borrow()
     }
 
+    /// The object to change; changing a shared global object marks the globals as touched.
     pub fn borrow_mut(&self) -> std::cell::RefMut<'_, Obj> {
+        if self.0.shared.get() {
+            self.0.budget.touched.set(true);
+        }
         self.0.obj.borrow_mut()
     }
 }

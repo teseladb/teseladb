@@ -58,7 +58,7 @@ pub struct EnvRec {
 pub type EnvRef = Rc<RefCell<EnvRec>>;
 
 /// The prototypes and constructors the interpreter makes values with.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Realm {
     pub global: ObjRef,
     pub object: ObjRef,
@@ -165,34 +165,8 @@ impl Drop for Interp<'_> {
                 e.func = None;
             }
         }
-        let g = self.realm.global.clone();
-        {
-            let o = &self.realm.global;
-            o.borrow_mut().props.clear();
-        }
-        drop(g);
-        for (_, o) in self.realm.errors.iter().chain(self.realm.bson.iter()) {
-            o.borrow_mut().props.clear();
-        }
-        for o in [
-            &self.realm.object,
-            &self.realm.function,
-            &self.realm.array,
-            &self.realm.string,
-            &self.realm.number,
-            &self.realm.boolean,
-            &self.realm.symbol,
-            &self.realm.error,
-            &self.realm.date,
-            &self.realm.regexp,
-            &self.realm.map,
-            &self.realm.set,
-            &self.realm.iter,
-        ] {
-            let mut b = o.borrow_mut();
-            b.props.clear();
-            b.proto = None;
-        }
+        // The global object is the call's own; the objects it holds are shared ([`crate::shared`]).
+        self.realm.global.borrow_mut().props.clear();
     }
 }
 
@@ -311,6 +285,7 @@ impl<'c> Interp<'c> {
             obj: RefCell::new(Obj { proto, props: Vec::new(), kind, extensible: true }),
             charged: std::cell::Cell::new(size),
             budget: self.budget.clone(),
+            shared: std::cell::Cell::new(false),
         })))
     }
 

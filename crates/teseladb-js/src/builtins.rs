@@ -71,6 +71,7 @@ fn bare(budget: &Rc<Budget>, proto: Option<ObjRef>, kind: Kind) -> ObjRef {
         obj: std::cell::RefCell::new(Obj { proto, props: Vec::new(), kind, extensible: true }),
         charged: std::cell::Cell::new(0),
         budget: budget.clone(),
+        shared: std::cell::Cell::new(false),
     }))
 }
 
