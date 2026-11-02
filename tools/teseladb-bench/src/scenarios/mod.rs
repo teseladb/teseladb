@@ -2,7 +2,7 @@
 //! variant and the copied `deflate`; 003 adds `bson` and `keys`; 004 adds `lsm` and `lsm-compression`; 005 adds `write`, `read` and
 //! `failover`; 006 adds `wire` and `crud`; 007 adds `follower-read`, `group0-limits`, `split`, `add-node` and `rebalance`; 008 adds `txn`, `txn-readers` and `contention`; 013 adds
 //! `tls-handshake` and `scram`; 010 adds `aggregate`, `sort` and `group-large`; 015 adds
-//! `timeseries`; 014 adds `changestream-lag`; every specification
+//! `timeseries`; 014 adds `changestream-lag`; 016 adds `js`; every specification
 //! adds its own.
 
 pub mod bson;
@@ -14,6 +14,7 @@ pub mod failover;
 pub mod follower_read;
 pub mod group0_limits;
 pub mod index;
+pub mod js;
 pub mod keys;
 pub mod lsm;
 pub mod lsm_compression;
@@ -145,6 +146,7 @@ pub fn run(args: &Args) -> Result<Report, String> {
         "raftlog-recover" => raftlog::recover_existing(args),
         "deflate" => deflate::run(args),
         "bson" => bson::run(args),
+        "js" => js::run(args),
         "keys" => keys::run(args),
         "lsm" => lsm::run(args),
         "lsm-sustained" => lsm::sustained(args),

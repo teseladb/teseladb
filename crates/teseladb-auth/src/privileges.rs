@@ -132,9 +132,9 @@ impl Resource {
     /// Whether a role of database `db` may hold it: a role of `admin` anything, another only
     /// its own database.
     fn allowed_for(&self, db: &str) -> bool {
-        db == ADMIN_DB
-            || matches!(self, Resource::Ns { db: d, .. } if d == db)
-            || matches!(self, Resource::SystemBuckets { db: Some(d), .. } if d == db)
+        // A `system_buckets` resource only in `admin`, also on the role's own database
+        // (measured on a `refnode` 9.0.4 on 02-11-2026: 49).
+        db == ADMIN_DB || matches!(self, Resource::Ns { db: d, .. } if d == db)
     }
 }
 

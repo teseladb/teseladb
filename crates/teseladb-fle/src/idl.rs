@@ -66,11 +66,6 @@ impl<'a> Fields<'a> {
         }
     }
 
-    /// Field `k`, required.
-    pub fn need(&self, k: &str) -> Result<RawValue<'a>, FleError> {
-        self.get(k).ok_or_else(|| missing(&self.path(k)))
-    }
-
     /// The bytes of binary field `k` of `subtype`.
     pub fn binary(&self, k: &str, subtype: u8) -> Result<Option<&'a [u8]>, FleError> {
         match self.get(k) {

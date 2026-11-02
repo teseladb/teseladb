@@ -1,0 +1,33 @@
+function(){ let a; var a; }	redeclaration of let a	1	25
+function(){ var a; let a; }	redeclaration of var a	1	25
+function(){ const a = 1; let a; }	redeclaration of const a	1	31
+function(){ class a {} var a; }	redeclaration of class a	1	29
+function(){ function a(){} let a; }	redeclaration of function a	1	33
+function(){ let a; function a(){} }	redeclaration of let a	1	30
+function(){ { function a(){} function a(){} } return 1 }	OK	1
+function(){ "use strict"; { function a(){} function a(){} } }	redeclaration of function a	1	54
+function(){ { let a; function a(){} } }	redeclaration of let a	1	32
+function(){ switch (0) { case 1: let a; default: var a } }	redeclaration of let a	1	55
+function(x){ let x; }	redeclaration of formal parameter x	1	19
+function(){ try {} catch (e) { let e; } }	redeclaration of catch parameter e	1	37
+function(){ try {} catch (e) { var e; } return 1 }	OK	1
+function(){ try {} catch ([e]) { var e; } }	redeclaration of catch parameter e	1	39
+function(){ try {} catch (e) { function e(){} } }	redeclaration of catch parameter e	1	42
+function(){ try {} catch ([x, x]) {} }	redeclaration of catch parameter x	1	32
+function(){ for (let i;;) { var i } }	redeclaration of let i	1	34
+function(){ "use strict"; try {} catch (eval) {} }	'eval' can't be defined or assigned to in strict mode code	1	42
+function(){ "use strict"; var yield; }	yield is a reserved identifier	1	32
+function(){ function* g(){ var yield; } }	yield is a reserved identifier	1	33
+function(){ function* g(x = yield){} }	yield expression can't be used in parameter	1	30
+function(){ function f(a = 1){ "use strict" } }	"use strict" not allowed in function with default parameter	1	33
+function(){ function* f(x = 0, x){} }	duplicate argument names not allowed in this context	1	33
+function(){ function f(x, x){} return 1 }	OK	1
+function(){ function* g(){ yield: 1 } }	yield is a reserved identifier	1	29
+function(){ return `\08` }	octal escape sequences can't be used in untagged template literals or in strict mode code	1	22
+function(){ return `\u{` }	malformed Unicode character escape sequence	1	22
+function(){ let let = 1 }	a lexical declaration can't define a 'let' binding	1	18
+function(){ var a; var a; let b; { let a; var c; } return 1 }	OK	1
+function(){ { var x; } let x; }	redeclaration of var x	1	29
+function(){ label: function f(){} return 1 }	OK	1
+function(){ return 1 + }	expected expression, got '}'	1	25
+  function(){ return ) }	expected expression, got ')'	1	23

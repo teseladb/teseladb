@@ -351,21 +351,41 @@ pub fn for_each_doc<B: Backend + ?Sized>(
     let bounds = teseladb_exec::timeseries_read::Bounds::of(&spec, filter);
     let plan = Plan::new(filter, None, collation)?.with_vars(vars);
     let ctx = plan.ctx();
+    // The measurements of one bucket that match; `false` when `each` wants no more.
+    let mut bucket = |key: &[u8], bytes: &[u8]| -> Result<bool, CommandError> {
+        let bucket = RawDoc::from_bytes(bytes)?;
+        if !bounds.may_match(&spec, bucket, ctx.collation).map_err(ts_error)? {
+            return Ok(true);
+        }
+        for mb in spec.unpack_raw(bucket).map_err(ts_error)? {
+            let doc = RawDoc::from_bytes(&mb)?;
+            if plan.filter.matches(doc, &ctx).map_err(from_mql)? && !each(key.to_vec(), &mb)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    };
+    // An index of the buckets compares strings without a collation: a read with one scans them.
+    let indexed = match collation {
+        Some(_) => None,
+        None => super::timeseries::indexed_buckets(backend, coll, &spec, filter, concern)?,
+    };
+    if let Some(found) = indexed {
+        for (key, bytes) in found {
+            if !bucket(&key, &bytes)? {
+                return Ok(());
+            }
+        }
+        return Ok(());
+    }
     let (mut next, end) = super::timeseries::scan_range(coll, &spec, &bounds)?;
     loop {
         let rows = backend.scan(&next, &end, SCAN_CHUNK, concern)?;
         let short = rows.len() < SCAN_CHUNK;
         for (key, bytes) in rows {
             next = after(&key);
-            let bucket = RawDoc::from_bytes(&bytes)?;
-            if !bounds.may_match(&spec, bucket, ctx.collation).map_err(ts_error)? {
-                continue;
-            }
-            for mb in spec.unpack_raw(bucket).map_err(ts_error)? {
-                let doc = RawDoc::from_bytes(&mb)?;
-                if plan.filter.matches(doc, &ctx).map_err(from_mql)? && !each(key.clone(), &mb)? {
-                    return Ok(());
-                }
+            if !bucket(&key, &bytes)? {
+                return Ok(());
             }
         }
         if short {
@@ -789,8 +809,14 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
     let Some(coll) = ctx.backend.collection(&ns)? else {
         // Validate the filter even when there is nothing to read, as RefDb does.
         Plan::new(&a.filter, a.projection.as_ref(), a.collation.as_ref())?;
+        if super::views::has_text(&a.filter) {
+            return text_find(ctx, &ns);
+        }
         return Ok(cursor_reply(0, &ns_text, "firstBatch", Vec::new()));
     };
+    if super::views::has_text(&a.filter) {
+        return text_find(ctx, &ns);
+    }
     let collation = a.collation.clone().or_else(|| options_collation(&coll));
     Plan::new(&a.filter, a.projection.as_ref(), collation.as_ref())?
         .check_metadata(a.sort.as_ref())?;
@@ -944,6 +970,31 @@ fn near_find<B: Backend + ?Sized>(
         })?;
     let ends = a.limit.is_some_and(|l| u64::try_from(docs.len()).is_ok_and(|n| n == l));
     buffered_reply(ctx, &ns_text, a, docs, ends)
+}
+
+/// A `find` whose filter has a `$text` (011 FR-001): the aggregation of its stages, whose first
+/// `$match` the collection's text index answers with each document's `textScore`.
+fn text_find<B: Backend + ?Sized>(
+    ctx: &mut Ctx<'_, B>,
+    ns: &Namespace,
+) -> Result<Document, CommandError> {
+    let stages: Vec<Value> =
+        super::views::stages_of(ctx.cmd).into_iter().map(Value::Document).collect();
+    let mut cursor = Document::new();
+    if let Some(size) = ctx.cmd.get("batchSize") {
+        cursor.push("batchSize", size.clone());
+    }
+    let mut agg = Document::new()
+        .with("aggregate", ns.coll.clone())
+        .with("pipeline", Value::Array(stages))
+        .with("cursor", cursor);
+    for option in ["collation", "let", "readConcern", "maxTimeMS", "comment"] {
+        if let Some(v) = ctx.cmd.get(option) {
+            agg.push(option, v.clone());
+        }
+    }
+    let mut inner = Ctx { backend: &mut *ctx.backend, shared: ctx.shared, db: ctx.db, cmd: &agg };
+    super::aggregate::aggregate(&mut inner)
 }
 
 /// Refuses a tailable `find` on a collection that is not capped, as a `refrouter` 9.0.4 does

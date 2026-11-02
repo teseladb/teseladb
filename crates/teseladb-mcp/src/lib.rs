@@ -12,6 +12,7 @@
 
 pub mod calls;
 pub mod jsonrpc;
+pub mod oauth_metadata;
 pub mod resources;
 pub mod server;
 pub mod tools;

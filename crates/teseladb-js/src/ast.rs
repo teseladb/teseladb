@@ -47,11 +47,19 @@ pub struct FuncDef {
     pub is_ctor_of_derived: bool,
     /// Strict mode code (a class, or `"use strict"` in it or around it).
     pub strict: bool,
+    /// `function*`: a call makes a generator.
+    pub generator: bool,
+    /// `async function`: a call gives a promise.
+    pub is_async: bool,
+    /// A method, getter or setter of an object literal or a class: `new` refuses it.
+    pub method: bool,
     pub source: Rc<str>,
 }
 
 #[derive(Debug)]
 pub struct ClassDef {
+    /// Where `class` is: the place of what its implicit constructor does.
+    pub pos: Pos,
     pub name: Option<Name>,
     pub parent: Option<Box<Expr>>,
     pub ctor: Option<Rc<FuncDef>>,
@@ -88,6 +96,8 @@ pub enum Expr {
     BigInt(Rc<crate::bigint::BigInt>),
     Str(Name),
     Template(Vec<Name>, Vec<Expr>),
+    /// The strings a tagged template gives its tag: the cooked pieces with their `raw`.
+    TemplateObject(Rc<crate::lexer::TemplateParts>),
     Regex(Name, Name),
     Bool(bool),
     Null,
@@ -137,6 +147,13 @@ pub enum Expr {
     /// The end of an optional chain: a short circuit inside gives `undefined` here.
     OptChain(Box<Expr>),
     Typeof(Box<Expr>),
+    /// `yield x` (`false`) or `yield* x` (`true`) in a generator.
+    Yield(Option<Box<Expr>>, bool),
+    /// `await x` in an async function.
+    Await(Box<Expr>),
+    /// An expression and where it starts: evaluating it moves the place errors are reported at,
+    /// as SpiderMonkey does (016 T021).
+    At(Pos, Box<Expr>),
     Delete(Box<Expr>),
 }
 
@@ -178,5 +195,9 @@ pub enum Stmt {
     Try(Vec<Stmt>, Option<(Option<Pattern>, Vec<Stmt>)>, Option<Vec<Stmt>>),
     Switch(Expr, Vec<(Option<Expr>, Vec<Stmt>)>),
     Labeled(Name, Box<Stmt>),
+    /// `with (obj) body`: the object's properties are names in the body.
+    With(Expr, Box<Stmt>),
     Empty,
+    /// A statement of a generator that holds a `yield` (see `generators.rs`).
+    Suspends(Box<Stmt>),
 }

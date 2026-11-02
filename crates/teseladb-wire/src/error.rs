@@ -305,6 +305,14 @@ codes! {
     KEY_NOT_FOUND = 211, "KeyNotFound";
     /// A document whose shard key holds an array (018 FR-001).
     SHARD_KEY_NOT_FOUND = 61, "ShardKeyNotFound";
+    /// A zone no shard is in (018 FR-003).
+    ZONE_NOT_FOUND = 177, "ZoneNotFound";
+    /// A zone's interval that overlaps another one of the collection (018 FR-003).
+    RANGE_OVERLAP_CONFLICT = 178, "RangeOverlapConflict";
+    /// The last shard of a zone that still has intervals (018 FR-003).
+    ZONE_STILL_IN_USE = 163, "ZoneStillInUse";
+    /// Intervals of one namespace with other fields (018 FR-003).
+    BOUND_FIELDS_MISMATCH = 16_634, "Location16634";
     /// A collection whose UUID is not the one the command names.
     COLLECTION_UUID_MISMATCH = 361, "CollectionUUIDMismatch";
     /// An update statement with constants (`c`) that is not a pipeline.

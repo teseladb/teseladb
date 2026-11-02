@@ -920,7 +920,7 @@ const fn info(
 
 /// The commands TeselaDB answers, in name order, as `listCommands` of a `refrouter` 9.0.4 shows
 /// them; the help of `getParameter` and `setParameter` lists TeselaDB's parameters.
-const COMMANDS: [CommandInfo; 62] = [
+const COMMANDS: [CommandInfo; 64] = [
     info(BUILD_INFO, NO_HELP, [true, false, true, false], false),
     info(
         "bulkWrite",
@@ -928,9 +928,11 @@ const COMMANDS: [CommandInfo; 62] = [
         [true, true, false, true],
         true,
     ),
+    info(super::fle::CLEANUP, NO_HELP, [true, true, false, false], false),
     info("collMod", NO_HELP, [true, true, false, false], true),
     info(COLL_STATS, NO_HELP, [true, true, true, false], false),
     info("compact", NO_HELP, [true, true, true, false], false),
+    info(super::fle::COMPACT, NO_HELP, [true, true, false, false], false),
     info(
         "configureFailPoint",
         "modifies the settings of a fail point",

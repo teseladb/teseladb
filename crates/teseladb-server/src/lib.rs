@@ -43,6 +43,7 @@ pub mod liveness;
 pub mod local_zone;
 pub mod log;
 pub mod logic;
+pub mod mcp_stdio;
 pub mod memory;
 pub mod merges;
 pub mod meta2_ops;
@@ -57,6 +58,7 @@ pub mod replicas;
 pub mod rest_executor;
 pub mod rollback;
 pub mod routes;
+pub mod search_builder;
 pub mod search_segments;
 pub mod sessions_ops;
 pub mod spill;
@@ -157,6 +159,10 @@ pub fn run(
         }
         Command::Dev(o) => dev::run(&o, out, err, stop),
         Command::Admin(o) => admin::run(&o, out, err),
+        Command::Mcp(o) => {
+            let key = std::env::var(mcp_stdio::API_KEY_VAR).ok().filter(|k| !k.is_empty());
+            mcp_stdio::run(&o, &mut io::stdin().lock(), out, err, key)
+        }
         Command::Start(o) => {
             let argv = std::iter::once(PROGRAM.to_owned()).chain(redact_password(args)).collect();
             start(&StartOpts { argv, ..*o }, out, err, stop)

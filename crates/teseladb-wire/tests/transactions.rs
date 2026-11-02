@@ -1476,3 +1476,24 @@ fn a_change_stream_sees_each_write_of_a_key_in_a_transaction() {
     let Value::Document(second) = &events[1] else { panic!() };
     assert_eq!(field(second, "fullDocumentBeforeChange._id"), &Value::Int32(1), "{second:?}");
 }
+
+/// The first statement of a transaction carries the transaction's `readConcern` whatever command
+/// it is, as the drivers send it: an `insert` with `snapshot` starts the transaction (RefDb
+/// checks the level against the transaction, not the command; 019 FR-009).
+#[test]
+fn a_first_write_statement_takes_the_transaction_read_concern() {
+    let mut m = node();
+    let rc = Document::new().with("level", "snapshot");
+    let docs = Value::Array(vec![Value::Document(Document::new().with("_id", 1))]);
+    let insert = Document::new().with("insert", "c").with("documents", docs);
+    let r = run(&mut m, DB, stmt(insert, 7, 1, true).with("readConcern", rc));
+    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+    let r = run(&mut m, "admin", end("commitTransaction", 7, 1));
+    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+    // Outside a transaction an `insert` still refuses it.
+    let docs = Value::Array(vec![Value::Document(Document::new().with("_id", 2))]);
+    let insert = Document::new().with("insert", "c").with("documents", docs);
+    let rc = Document::new().with("level", "snapshot");
+    let r = run(&mut m, DB, insert.with("readConcern", rc));
+    assert_eq!(r.get("code"), Some(&Value::Int32(72)), "{r:?}");
+}

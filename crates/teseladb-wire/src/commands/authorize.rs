@@ -92,6 +92,20 @@ pub fn authorize<B: Backend + ?Sized>(
         _ if !check.passes(&privileges, true) => return Err(unauthorized(req)),
         _ => {}
     }
+    // `rawData` also asks for `performRawDataOperations` on the collection (measured on a
+    // `refnode` 9.0.4 with authentication on 02-11-2026: `find` alone, or the action alone, is
+    // refused with 13).
+    let raw = matches!(cmd.get("rawData"), Some(Value::Boolean(true)));
+    if raw
+        && let Some((_, Value::String(coll))) = cmd.iter().next()
+        && !authz::allows(
+            &privileges,
+            &Target::collection(&req.db, coll),
+            ActionType::PerformRawDataOperations,
+        )
+    {
+        return Err(unauthorized(req));
+    }
     Ok(Some(privileges))
 }
 

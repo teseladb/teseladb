@@ -76,6 +76,8 @@ pub fn shown_value(v: &Value) -> String {
         Value::Document(d) if d.is_empty() => "{}".to_owned(),
         Value::Array(a) if a.is_empty() => "[]".to_owned(),
         Value::Regex { pattern, options } => format!("/{pattern}/{options}"),
+        // As RefDb's bounds write a date (measured on a `refnode` 9.0.4, 02-11-2026).
+        Value::DateTime(ms) => format!("new Date({ms})"),
         other => format!("{other:?}"),
     }
 }
@@ -149,6 +151,12 @@ pub fn intervals(op: &str, arg: &Value) -> Option<(Vec<Bound>, bool)> {
             };
             Some((vec![b], true))
         }
+        // A time series' bucket filter compares `control.min` and `control.max` with these:
+        // the plain comparison's interval, which the buckets decide (015 FR-008).
+        "$_internalExprGt" | "$_internalExprGte" | "$_internalExprLt" | "$_internalExprLte" => {
+            let plain = op.replace("_internalExpr", "").to_lowercase();
+            intervals(&plain, arg).map(|(b, _)| (b, false))
+        }
         "$regex" => prefix_regex(arg),
         // A non-sparse index holds every document: `$exists` scans all of it and `$not:
         // {$exists: true}` its nulls, the documents deciding both (measured).
@@ -183,6 +191,9 @@ fn bracket(v: &Value) -> Option<(Value, Value)> {
             Some((Value::Double(f64::NEG_INFINITY), Value::Double(f64::INFINITY)))
         }
         Value::String(_) => Some((Value::String(String::new()), Value::Document(Document::new()))),
+        // Dates from the least to the greatest one (`new Date(-9223372036854775808)` to
+        // `new Date(9223372036854775807)` in RefDb's bounds).
+        Value::DateTime(_) => Some((Value::DateTime(i64::MIN), Value::DateTime(i64::MAX))),
         _ => None,
     }
 }

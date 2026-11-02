@@ -18,13 +18,15 @@
 //!   core change `relocate` with its `core`; a range's bounds are its keys as binary data, the
 //!   ranges of TeselaDB not being chunks of a shard key (D-008);
 //! - `collections`, `chunks` and `tags`: the collections with a shard key, their chunks and
-//!   zones, which 018 adds; none before.
+//!   zones (018); `tags` lists the zones' intervals (`_id`, `ns`, `min`, `max`, `tag`, measured on
+//!   9.0.4) and `shards` the zones of each node in `tags`, in the order they were added.
 
 use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_meta::changelog::{Change, ChangeKind};
 use teseladb_meta::command::{NodeState, SettingChange};
 use teseladb_meta::group0::Group0Sm;
 use teseladb_meta::meta2::Meta2Sm;
+use teseladb_meta::zones::Zones;
 use teseladb_types::NodeId;
 use teseladb_wire::commands::cluster_admin::RW_DEFAULTS;
 use teseladb_wire::commands::config_db::COLLECTIONS;
@@ -60,6 +62,7 @@ pub fn documents(sm: &Group0Sm, coll: &str) -> Vec<Document> {
         "refrouter" => routers(sm),
         "version" => vec![version(sm)],
         SETTINGS => settings(sm),
+        "tags" => tags(sm),
         "changelog" => sm.changelog.changes.iter().map(|c| change(sm, c)).collect(),
         _ => Vec::new(),
     }
@@ -194,6 +197,7 @@ fn text(b: &[u8]) -> String {
 }
 
 fn shards(sm: &Group0Sm) -> Vec<Document> {
+    let zones = Zones::from_settings(&sm.settings);
     live(sm)
         .map(|n| {
             let mut d = Document::new()
@@ -204,7 +208,30 @@ fn shards(sm: &Group0Sm) -> Vec<Document> {
             if n.state == NodeState::Draining {
                 d.push("draining", true);
             }
+            if let Some(tags) = zones.shards.get(&n.id).filter(|t| !t.is_empty()) {
+                d.push(
+                    "tags",
+                    Value::Array(tags.iter().map(|t| Value::from(t.as_str())).collect()),
+                );
+            }
             d
+        })
+        .collect()
+}
+
+/// `config.tags`: every zone's interval.
+fn tags(sm: &Group0Sm) -> Vec<Document> {
+    let doc = |b: &[u8]| RawDoc::from_bytes(b).map(Document::from).unwrap_or_default();
+    Zones::from_settings(&sm.settings)
+        .ranges
+        .iter()
+        .map(|r| {
+            Document::new()
+                .with("_id", Value::ObjectId(r.id))
+                .with("ns", r.ns.as_str())
+                .with("min", doc(&r.min))
+                .with("max", doc(&r.max))
+                .with("tag", r.zone.as_str())
         })
         .collect()
 }
@@ -312,6 +339,31 @@ mod tests {
         assert_eq!(listed[0].get("_id"), Some(&Value::from("app.s")));
         assert_eq!(listed[0].get("key"), Some(&Value::Document(Document::new().with("tienda", 1))));
         assert_eq!(listed[0].get("unique"), Some(&Value::Boolean(false)));
+    }
+
+    #[test]
+    fn zones_show_in_tags_and_in_the_shards() {
+        use teseladb_meta::zones::{ZoneRange, shard_key};
+        let mut sm = cluster();
+        let n1 = teseladb_types::NodeId(1);
+        sm.settings.insert(shard_key(n1, "EU"), vec![2]);
+        sm.settings.insert(shard_key(n1, ""), vec![3]);
+        let min = Document::new().with("a", 0).to_bytes().unwrap();
+        let max = Document::new().with("a", 10).to_bytes().unwrap();
+        let r =
+            ZoneRange { ns: "app.c".into(), id: [7; 12], min, max, zone: "EU".into(), keys: None };
+        sm.settings.insert(r.key(), r.encode());
+        let shards = documents(&sm, "shards");
+        let tags = Value::Array(vec![Value::from("EU"), Value::from("")]);
+        assert_eq!(shards[0].get("tags"), Some(&tags));
+        assert_eq!(shards[1].get("tags"), None);
+        let want = Document::new()
+            .with("_id", Value::ObjectId([7; 12]))
+            .with("ns", "app.c")
+            .with("min", Document::new().with("a", 0))
+            .with("max", Document::new().with("a", 10))
+            .with("tag", "EU");
+        assert_eq!(documents(&sm, "tags"), [want]);
     }
 
     #[test]
