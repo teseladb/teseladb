@@ -1546,3 +1546,22 @@ fn vector_search_and_the_nested_operators_answer_as_refsearch() {
         );
     }
 }
+
+#[test]
+fn has_root_inside_embedded_document_scores_the_root_plus_one() {
+    let idx = m3_embedded();
+    let root = |q: &str| {
+        op(
+            "hasRoot",
+            Document::new()
+                .with("operator", op("text", Document::new().with("path", "t").with("query", q))),
+        )
+    };
+    assert_eq!(found(&idx, &embedded(root("gato"), None)), Ok(vec![(1, 2.330655813217163)]));
+    let must = arr(vec![
+        op("text", Document::new().with("path", "e.n").with("query", "perro")).into(),
+        root("negro").into(),
+    ]);
+    let both = op("compound", Document::new().with("must", must));
+    assert_eq!(found(&idx, &embedded(both, None)), Ok(vec![(1, 1.6619503498077393)]));
+}

@@ -527,6 +527,11 @@ impl MemIndex {
         Ok(tokens.into_iter().map(|t| t.text).collect())
     }
 
+    /// The key of document number `id`.
+    pub(crate) fn key_of(&self, id: u32) -> Option<&[u8]> {
+        self.keys.get(id as usize)?.as_deref()
+    }
+
     /// Whether some document has analyzed text at `path`.
     pub(crate) fn has_text(&self, path: &str) -> bool {
         self.fields.contains_key(path)

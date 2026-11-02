@@ -40,6 +40,8 @@ fn named_paths(v: &Value, out: &mut Vec<String>) {
                             out.push(p.clone());
                         }
                     }
+                    // `hasRoot` names the paths of the documents that hold the elements.
+                    ("hasRoot", _) => {}
                     _ => named_paths(v, out),
                 }
             }
@@ -107,6 +109,41 @@ fn element_mapping(path: &str, inner: Mapping) -> Mapping {
     parts.into_iter().rev().fold(wrap(last, inner), |m, name| wrap(name, m))
 }
 
+/// `op` with each `hasRoot` replaced by the scores of its operator on the documents of `root`,
+/// given to their elements in `elements` plus 1 (measured with `scoreDetails`: the root's
+/// score and a constant 1 for being an element of the path).
+fn resolve_roots(
+    op: Operator,
+    root: &MemIndex,
+    elements: &MemIndex,
+) -> Result<Operator, SearchError> {
+    let all = |ops: Vec<Operator>| {
+        ops.into_iter().map(|o| resolve_roots(o, root, elements)).collect::<Result<Vec<_>, _>>()
+    };
+    Ok(match op {
+        Operator::HasRoot(inner) => {
+            let scores = eval(root, &parse_root(root, &inner)?)?;
+            let by_element = elements
+                .live()
+                .filter_map(|id| {
+                    let key = elements.key_of(id)?;
+                    let parent = u32::from_be_bytes([key[0], key[1], key[2], key[3]]);
+                    Some((id, scores.get(&parent)? + 1.0))
+                })
+                .collect();
+            Operator::Precomputed(by_element)
+        }
+        Operator::Compound { must, should, filter, must_not, minimum } => Operator::Compound {
+            must: all(must)?,
+            should: all(should)?,
+            filter: all(filter)?,
+            must_not: all(must_not)?,
+            minimum,
+        },
+        other => other,
+    })
+}
+
 /// `doc` with `value` at dotted `path`.
 fn nested(path: &str, value: Value) -> Document {
     let mut parts: Vec<&str> = path.split('.').collect();
@@ -149,7 +186,8 @@ impl Embedded {
             }
         }
         // A boost weighs the terms of the elements' operator, as RefLib's `BoostQuery` does.
-        let op = super::boosted(parse_root(&elements, &self.operator)?, boost);
+        let op = resolve_roots(parse_root(&elements, &self.operator)?, index, &elements)?;
+        let op = super::boosted(op, boost);
         let mut per_doc: BTreeMap<u32, Vec<f32>> = BTreeMap::new();
         let mut hits = elements.hits(eval(&elements, &op)?);
         // The elements in their order, as the scores of a document's elements are added.

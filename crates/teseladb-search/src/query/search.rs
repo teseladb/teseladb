@@ -122,6 +122,10 @@ enum Operator {
     Scored(Box<Operator>, Score),
     /// `embeddedDocument`.
     Embedded(embedded::Embedded),
+    /// `hasRoot`: its operator, run on the documents that hold the elements.
+    HasRoot(Document),
+    /// Scores already computed, by document number (`hasRoot` inside `embeddedDocument`).
+    Precomputed(BTreeMap<u32, f32>),
     /// `geoWithin`, `geoShape` or `near` on a `geo` field.
     Geo(geo::Geo),
     /// `autocomplete`.
@@ -203,7 +207,12 @@ fn parse(index: &MemIndex, name: &str, v: &Value, path: &str) -> Result<Operator
         "term" | "search" => parse_term(index, d, path),
         "knnBeta" => knn::parse(index, d, path),
         "vectorSearch" => knn::parse_vector_search(index, d, path),
-        "hasAncestor" | "hasRoot" => Err(SearchError(format!(
+        "hasRoot" => match d.get("operator") {
+            Some(Value::Document(o)) => Ok(Operator::HasRoot(o.clone())),
+            Some(_) => Err(shape(&format!("{path}.operator"), "must be a document")),
+            None => Err(shape(&format!("{path}.operator"), "is required")),
+        },
+        "hasAncestor" => Err(SearchError(format!(
             "{name} operator requires embeddedDocument.path, hasAncestor.ancestorPath, or \
              returnScope.path to be set."
         ))),
@@ -531,6 +540,12 @@ fn eval(index: &MemIndex, op: &Operator) -> Result<BTreeMap<u32, f32>, SearchErr
             rescored(index, s, p.score())
         }
         Operator::Empty => Ok(BTreeMap::new()),
+        Operator::Precomputed(s) => Ok(s.clone()),
+        Operator::HasRoot(_) => Err(SearchError(
+            "hasRoot operator requires embeddedDocument.path, hasAncestor.ancestorPath, or \
+             returnScope.path to be set."
+                .to_owned(),
+        )),
         Operator::Geo(g) => {
             let s = g.scores(index, boost_of(g.score()))?;
             rescored(index, s, g.score())
