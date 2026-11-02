@@ -22,10 +22,12 @@ fn searches_answer_as_one_segment_over_the_committed_documents() {
 /// Heavy seeds that found defects with the cluster's third node out for good: 2361 left a range
 /// born from a split without the snapshot its other replica needed (the leader's snapshot waited
 /// for a memtable flush that a core applying something every second never did); 3772 left a node
-/// asleep until its old clock would have passed the HLC bound, after NTP had set it right.
+/// asleep until its old clock would have passed the HLC bound, after NTP had set it right; 3796
+/// let a deposed leader whose clock ran ahead resolve a search index's read up to a mark it closed
+/// out of its lease, below a write of the new leader.
 #[test]
 fn the_seeds_that_found_defects_pass() {
-    for seed in [2361, 3772] {
+    for seed in [2361, 3772, 3796] {
         let r = run_seed(&cfg("search", FaultPlan::Heavy), seed);
         assert_eq!(r.verdict, Verdict::Pass, "search seed {seed}");
     }
