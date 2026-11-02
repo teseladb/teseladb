@@ -106,6 +106,10 @@ pub struct Mem {
     pub txns: Vec<(Option<teseladb_range::intents::TxnId>, Vec<Vec<u8>>)>,
     /// The next this many transactions find a conflict.
     pub conflicts: usize,
+    /// Group 0's settings that `group0_settings` reads and writes (018 zones).
+    pub group0: BTreeMap<Vec<u8>, Vec<u8>>,
+    /// The next this many writes of Group 0's settings find a concurrent change.
+    pub group0_conflicts: usize,
     /// The write fences of the ranges (018): a write or an intent with a key in one is refused.
     pub fences: Vec<(Vec<u8>, Vec<u8>)>,
     /// The next pause lifts every fence (the critical section ended meanwhile).
@@ -790,6 +794,34 @@ impl Backend for Mem {
             }
             _ => Vec::new(),
         })
+    }
+
+    fn group0_settings(
+        &mut self,
+        prefix: &[u8],
+    ) -> Result<BTreeMap<Vec<u8>, Vec<u8>>, CommandError> {
+        let all = self.group0.iter().filter(|(k, _)| k.starts_with(prefix));
+        Ok(all.map(|(k, v)| (k.clone(), v.clone())).collect())
+    }
+
+    fn group0_settings_write(
+        &mut self,
+        changes: Vec<teseladb_meta::command::SettingChange>,
+    ) -> Result<bool, CommandError> {
+        if self.group0_conflicts > 0 {
+            self.group0_conflicts -= 1;
+            return Ok(false);
+        }
+        if changes.iter().any(|c| self.group0.get(&c.key) != c.expect.as_ref()) {
+            return Ok(false);
+        }
+        for c in changes {
+            match c.value {
+                Some(v) => self.group0.insert(c.key, v),
+                None => self.group0.remove(&c.key),
+            };
+        }
+        Ok(true)
     }
 
     fn config_settings_write(

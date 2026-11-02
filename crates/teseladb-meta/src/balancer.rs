@@ -1,7 +1,9 @@
 //! The balancer: on Group 0's leader, every 2 s, it compares the cluster with its targets (Group
 //! 0's voters, every range's replication factor, nodes being drained) and decides at most one
 //! change per group; with nothing missing it moves one replica for space or for numbers, and
-//! leaders for numbers or for load (007 FR-010, plan «Equilibrio de réplicas y líderes»). It only
+//! leaders for numbers or for load (007 FR-010, plan «Equilibrio de réplicas y líderes»). While
+//! balancing is on, zones (018 FR-003, [`crate::zones`]) keep the replicas of the ranges inside a
+//! zone's interval on the zone's nodes, cutting first a range that crosses an interval's edge. It only
 //! decides: the decisions are Group 0 entries and configuration changes of Group 0, and the
 //! ranges' leaders carry out what concerns their ranges.
 
@@ -14,6 +16,7 @@ use crate::command::{Group0Command, NodeState};
 use crate::group0::{Group0Sm, RangeDesc};
 use crate::liveness::{LiveState, NodeLoad};
 use crate::load;
+use crate::zones::{Placement, Zones};
 
 /// How often the balancer looks at the cluster.
 pub const BALANCE_EVERY: Nanos = Nanos::from_secs(2);
@@ -182,26 +185,41 @@ pub fn plan(v: &View<'_>) -> Vec<Decision> {
     let eligible = v.eligible_nodes();
     let f = factor(v.group0.settings.get(FACTOR_SETTING).map(Vec::as_slice));
     let wanted = target(f, usable);
+    // `config.settings` can stop the moves for balance and for zones; the repairs go on.
+    let offset_ms = i64::from(v.local_offset_s) * 1_000;
+    let local_ms = v.group0.cluster_time_ms.saturating_add_signed(offset_ms);
+    let balancing = crate::config_settings::balancing(&v.group0.settings, local_ms);
+    // Faulty variant (018 T007): the balancer places the replicas without looking at the zones.
+    let zoned = balancing && !cfg!(teseladb_bug = "zones_ignored");
+    let zones = if zoned { Zones::from_settings(&v.group0.settings) } else { Zones::default() };
     for r in v.ranges.values() {
         // A change in progress, or a split being cut: the range waits.
         if r.settling || r.pending_split.is_some() {
             continue;
         }
-        if let Some((add, remove)) = replica_change(v, &r.nodes(), &eligible, wanted) {
+        let place = zones.placement(&r.start, &r.end);
+        if let Placement::CutAt(at) = place {
+            out.push(Decision::Command(Group0Command::SplitRange { group: r.group, at }));
+            continue;
+        }
+        let allowed = |n: &NodeId| match &place {
+            Placement::On(nodes) => nodes.contains(n),
+            Placement::Anywhere | Placement::CutAt(_) => true,
+        };
+        let usable_here = v.group0.nodes.keys().filter(|n| v.usable(**n) && allowed(n)).count();
+        let here: Vec<NodeId> = eligible.iter().copied().filter(|n| allowed(n)).collect();
+        let change = replica_change(v, (&r.nodes(), &allowed), &here, wanted.min(usable_here));
+        if let Some((add, remove)) = change {
             let cmd =
                 Group0Command::SetReplicas { group: r.group, epoch: r.replica_epoch, add, remove };
             out.push(Decision::Command(cmd));
         }
     }
-    // `config.settings` can stop the moves for balance; the repairs above go on.
-    let offset_ms = i64::from(v.local_offset_s) * 1_000;
-    let local_ms = v.group0.cluster_time_ms.saturating_add_signed(offset_ms);
-    let balancing = crate::config_settings::balancing(&v.group0.settings, local_ms);
     let quiet = balancing
         && !out.iter().any(|d| matches!(d, Decision::Command(_)))
         && v.ranges.values().all(|r| !r.settling && r.pending_split.is_none());
     if let Some((group, add, remove)) =
-        quiet.then(|| space_move(v).or_else(|| count_move(v))).flatten()
+        quiet.then(|| space_move(v, &zones).or_else(|| count_move(v, &zones))).flatten()
     {
         let epoch = v.ranges.get(&group).map_or(0, |r| r.replica_epoch);
         let cmd = Group0Command::SetReplicas { group, epoch, add: vec![add], remove: vec![remove] };
@@ -252,14 +270,15 @@ fn group0_change(v: &View<'_>) -> Option<ConfChange> {
     }
 }
 
-/// The replica change of a range with `replicas`, if any: `(add, remove)`.
+/// The replica change of a range with `replicas`, if any: `(add, remove)`. A replica on a node
+/// its zone does not `allow` goes as one on a dead node does; `eligible` are the nodes allowed.
 fn replica_change(
     v: &View<'_>,
-    replicas: &[NodeId],
+    (replicas, allowed): (&[NodeId], &dyn Fn(&NodeId) -> bool),
     eligible: &[NodeId],
     wanted: usize,
 ) -> Option<(Vec<NodeId>, Vec<NodeId>)> {
-    let bad: Vec<NodeId> = replicas.iter().copied().filter(|n| v.bad(*n)).collect();
+    let bad: Vec<NodeId> = replicas.iter().copied().filter(|n| v.bad(*n) || !allowed(n)).collect();
     let candidate = best_candidate(v, replicas, eligible);
     match (bad.first(), candidate) {
         (Some(&b), Some(c)) => return Some((vec![c], vec![b])),
@@ -293,14 +312,22 @@ fn best_candidate(v: &View<'_>, replicas: &[NodeId], eligible: &[NodeId]) -> Opt
     eligible.iter().copied().filter(|n| !replicas.contains(n)).min_by_key(|n| v.receiver_rank(*n))
 }
 
-/// The first movable range that `from` replicates and `to` does not.
-fn range_to_move(v: &View<'_>, from: NodeId, to: NodeId) -> Option<GroupId> {
-    v.movable().find(|r| r.nodes().contains(&from) && !r.nodes().contains(&to)).map(|r| r.group)
+/// The first movable range that `from` replicates and `to` does not, and whose zone lets it go
+/// to `to`.
+fn range_to_move(v: &View<'_>, zones: &Zones, from: NodeId, to: NodeId) -> Option<GroupId> {
+    let may_go = |r: &RangeDesc| match zones.placement(&r.start, &r.end) {
+        Placement::Anywhere => true,
+        Placement::On(nodes) => nodes.contains(&to),
+        Placement::CutAt(_) => false,
+    };
+    v.movable()
+        .find(|r| r.nodes().contains(&from) && !r.nodes().contains(&to) && may_go(r))
+        .map(|r| r.group)
 }
 
 /// Step 2: the fullest node above [`load::FULL_PCT`] gives a replica to the eligible node with
 /// the most free space in proportion, if that one stays below [`load::ROOM_PCT`].
-fn space_move(v: &View<'_>) -> Option<(GroupId, NodeId, NodeId)> {
+fn space_move(v: &View<'_>, zones: &Zones) -> Option<(GroupId, NodeId, NodeId)> {
     let nodes = v.eligible_nodes();
     let fullest = nodes
         .iter()
@@ -312,12 +339,12 @@ fn space_move(v: &View<'_>) -> Option<(GroupId, NodeId, NodeId)> {
         .copied()
         .filter(|n| *n != fullest && load::roomy(&v.load(*n)))
         .min_by_key(|n| (load::used_permille(&v.load(*n)), *n))?;
-    range_to_move(v, fullest, emptiest).map(|g| (g, emptiest, fullest))
+    range_to_move(v, zones, fullest, emptiest).map(|g| (g, emptiest, fullest))
 }
 
 /// Step 3: the node with the most replicas gives one to the one with the fewest when they differ
 /// by two or more.
-fn count_move(v: &View<'_>) -> Option<(GroupId, NodeId, NodeId)> {
+fn count_move(v: &View<'_>, zones: &Zones) -> Option<(GroupId, NodeId, NodeId)> {
     let nodes = v.eligible_nodes();
     let most = *nodes.iter().max_by_key(|n| (v.replicas(**n), core::cmp::Reverse(**n)))?;
     let fewest =
@@ -325,7 +352,7 @@ fn count_move(v: &View<'_>) -> Option<(GroupId, NodeId, NodeId)> {
     if v.replicas(most) < v.replicas(fewest) + 2 {
         return None;
     }
-    range_to_move(v, most, fewest).map(|g| (g, fewest, most))
+    range_to_move(v, zones, most, fewest).map(|g| (g, fewest, most))
 }
 
 /// Nodes that may lead now (eligible, clock in margin) and the ranges each leads.

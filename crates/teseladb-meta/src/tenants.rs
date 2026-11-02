@@ -39,7 +39,7 @@ pub fn split_db(db: &str) -> (u32, &str) {
     }
 }
 
-/// The tenant of the user whose stored document is `doc`: its [`TENANT_FIELD`], or the default
+/// The tenant of the user or role whose stored document is `doc`: its [`TENANT_FIELD`], or the default
 /// one without it.
 pub fn of_user(doc: &[u8]) -> u32 {
     match RawDoc::from_bytes(doc).ok().and_then(|d| d.get(TENANT_FIELD)) {

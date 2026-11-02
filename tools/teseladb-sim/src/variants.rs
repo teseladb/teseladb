@@ -174,6 +174,9 @@ variants!(
     // reads below that commit and misses it; the real-time order of `txn-append` finds the cycle
     // of its `rw` and the other's `rt` (G-SI-realtime). The ±50 ms of the default clocks suffice.
     ("zero_uncertainty", "snapshot-isolation", Default, 1000),
+    // The balancer places replicas without the zones (018 T007): a range inside an interval keeps
+    // replicas outside its zone's nodes, or one crosses an interval's edge.
+    ("zones_ignored", "zones", Default, 1000),
 );
 
 /// The line of `--list-variants`: `<cfg> <checker> <plan> <seeds>`.

@@ -2,9 +2,10 @@
 //! the baselines applies to, over the wire protocol against `--target` or a local cluster. It
 //! measures a write confirmed by the majority with the journal (`insert`, `w: "majority"`,
 //! `j: true`) and a read by `_id` served by the leader's lease (`find`, `readConcern: "local"`),
-//! one after the other on each worker, on documents of 100 bytes, and then a `$search` term query
-//! for the value it wrote (011 T050) over a `default` search index built before the load. The
-//! query by index (009) joins it when the server answers `createIndexes`.
+//! and a query by a secondary index (009 T029: `find` by equality on the indexed field `v`, which
+//! gives the document just written), and then a `$search` term query for the value it wrote (011
+//! T050) over a `default` search index built before the load, one after the other on each worker,
+//! on documents of 100 bytes.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -23,14 +24,15 @@ const SEED: u64 = 0x5245_4645;
 /// Kinds of operation in the report.
 const WRITE: &str = "write";
 const READ: &str = "read";
+const QUERY: &str = "query";
 const SEARCH: &str = "search";
 /// Longest wait for the search index to be `READY` before the load.
 const INDEX_READY: std::time::Duration = std::time::Duration::from_secs(120);
+/// The indexed field of the documents.
+const INDEXED: &str = "v";
 
-/// Writes document `id` and gives the value of its field `v`.
-fn insert(c: &mut Client, id: String, rng: &mut Rng) -> Result<String, String> {
-    let value = field(rng);
-    let document = doc(vec![("_id", Value::String(id)), ("v", Value::String(value.clone()))]);
+fn insert(c: &mut Client, id: String, value: String) -> Result<(), String> {
+    let document = doc(vec![("_id", Value::String(id)), (INDEXED, Value::String(value))]);
     let wc = doc(vec![("w", Value::String("majority".into())), ("j", Value::Boolean(true))]);
     c.command(
         DB,
@@ -40,7 +42,7 @@ fn insert(c: &mut Client, id: String, rng: &mut Rng) -> Result<String, String> {
             ("writeConcern", Value::Document(wc)),
         ]),
     )
-    .map(|_| value)
+    .map(drop)
 }
 
 fn read(c: &mut Client, id: String) -> Result<(), String> {
@@ -58,9 +60,22 @@ fn read(c: &mut Client, id: String) -> Result<(), String> {
     .map(drop)
 }
 
+fn query(c: &mut Client, value: String) -> Result<(), String> {
+    let filter = doc(vec![(INDEXED, Value::String(value))]);
+    c.command(
+        DB,
+        doc(vec![
+            ("find", Value::String(COLLECTION.into())),
+            ("filter", Value::Document(filter)),
+            ("limit", Value::Int32(1)),
+        ]),
+    )
+    .map(drop)
+}
+
 /// The `$search` term query for `value` on `v`, first result only.
 fn search(c: &mut Client, value: String) -> Result<(), String> {
-    let text = doc(vec![("path", Value::String("v".into())), ("query", Value::String(value))]);
+    let text = doc(vec![("path", Value::String(INDEXED.into())), ("query", Value::String(value))]);
     let stage = doc(vec![("$search", Value::Document(doc(vec![("text", Value::Document(text))])))]);
     let limit = doc(vec![("$limit", Value::Int32(1))]);
     c.command(
@@ -76,7 +91,6 @@ fn search(c: &mut Client, value: String) -> Result<(), String> {
 
 /// Creates the `default` search index of the collection and waits until it is `READY`.
 fn search_index(c: &mut Client) -> Result<(), String> {
-    let _ = c.command(DB, doc(vec![("create", Value::String(COLLECTION.into()))]));
     let definition =
         doc(vec![("mappings", Value::Document(doc(vec![("dynamic", Value::Boolean(true))])))]);
     let index = doc(vec![
@@ -102,11 +116,27 @@ fn search_index(c: &mut Client) -> Result<(), String> {
     Err("the search index of the reference scenario was not READY in time".to_owned())
 }
 
-/// What a worker does next.
-enum Step {
+/// The index of `v`.
+fn create_index(c: &mut Client) -> Result<(), String> {
+    let index = doc(vec![
+        ("key", Value::Document(doc(vec![(INDEXED, Value::Int32(1))]))),
+        ("name", Value::String(format!("{INDEXED}_1"))),
+    ]);
+    c.until_ready(
+        DB,
+        doc(vec![
+            ("createIndexes", Value::String(COLLECTION.into())),
+            ("indexes", Value::Array(vec![Value::Document(index)])),
+        ]),
+    )
+}
+
+/// What a worker does next: write a document, read it by `_id`, query it by its index, then
+/// search its value.
+enum Next {
     Write,
-    /// Read the document written, then search its value.
     Read(String, String),
+    Query(String),
     Search(String),
 }
 
@@ -117,6 +147,17 @@ pub fn run(args: &Args) -> Result<Report, String> {
     let mut setup = Client::connect(addr)?;
     // The collection may not exist yet.
     let _ = setup.command(DB, doc(vec![("drop", Value::String(COLLECTION.into()))]));
+    create_index(&mut setup)?;
+    // A first document, not timed, waits for the cluster's leaders.
+    let probe =
+        doc(vec![("_id", Value::String("ready".into())), (INDEXED, Value::String(String::new()))]);
+    setup.until_ready(
+        DB,
+        doc(vec![
+            ("insert", Value::String(COLLECTION.into())),
+            ("documents", Value::Array(vec![Value::Document(probe)])),
+        ]),
+    )?;
     search_index(&mut setup)?;
     let next = AtomicU64::new(0);
     let load = Load {
@@ -125,23 +166,30 @@ pub fn run(args: &Args) -> Result<Report, String> {
         concurrency: args.concurrency,
         rate: args.rate,
     };
-    // Each worker writes a document, reads it by `_id` and then searches its value.
+    // Each worker cycles: it writes a document, reads it by `_id`, queries it by its index, then
+    // searches its value.
     let out = drive(
         &load,
-        |w| Ok((Client::connect(addr)?, Rng::new(SEED + w as u64), Step::Write)),
-        |(c, rng, step)| match std::mem::replace(step, Step::Write) {
-            Step::Write => {
+        |w| Ok((Client::connect(addr)?, Rng::new(SEED + w as u64), Next::Write)),
+        |(c, rng, next_op)| match std::mem::replace(next_op, Next::Write) {
+            Next::Write => {
                 let id = key(next.fetch_add(1, Ordering::Relaxed));
-                let value = insert(c, id.clone(), rng)?;
-                *step = Step::Read(id, value);
+                let value = field(rng);
+                insert(c, id.clone(), value.clone())?;
+                *next_op = Next::Read(id, value);
                 Ok(WRITE)
             }
-            Step::Read(id, value) => {
+            Next::Read(id, value) => {
                 read(c, id)?;
-                *step = Step::Search(value);
+                *next_op = Next::Query(value);
                 Ok(READ)
             }
-            Step::Search(value) => {
+            Next::Query(value) => {
+                query(c, value.clone())?;
+                *next_op = Next::Search(value);
+                Ok(QUERY)
+            }
+            Next::Search(value) => {
                 search(c, value)?;
                 Ok(SEARCH)
             }

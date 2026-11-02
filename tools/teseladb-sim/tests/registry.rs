@@ -105,7 +105,8 @@ fn names_are_unique_and_the_builtin_workloads_are_there() {
             "changestream",
             "reshard",
             "search",
-            "vector"
+            "vector",
+            "zones"
         ]
     );
     assert!(reg.register_workload("testkv", kv_copy).unwrap_err().contains("already registered"));

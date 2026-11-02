@@ -10,9 +10,10 @@ use crate::Error;
 use crate::cert::Certificate;
 use crate::crl::{Crl, REASON_REMOVE_FROM_CRL};
 use crate::ext::{DistributionPoint, GeneralName, key_usage, reasons};
-use crate::key::PublicKey;
+use crate::key::{PublicKey, SignatureAlgorithm};
 use crate::oid;
 use crate::policy::{self, PolicySettings};
+use teseladb_crypto::HashAlgorithm;
 
 /// Default longest path, certificates included.
 pub const DEFAULT_MAX_DEPTH: usize = 32;
@@ -56,6 +57,9 @@ pub struct VerifyOptions<'a> {
     pub policy: PolicySettings,
     /// Longest path, certificates included.
     pub max_depth: usize,
+    /// Whether signatures with SHA-1 are accepted. OpenSSL 3, which RefDb 9.0.4 uses, refuses
+    /// them from security level 1 on (measured); old test suites such as PKITS need them.
+    pub weak_digests: bool,
 }
 
 impl<'a> VerifyOptions<'a> {
@@ -68,6 +72,7 @@ impl<'a> VerifyOptions<'a> {
             crl_check: CrlCheck::None,
             policy: PolicySettings::default(),
             max_depth: DEFAULT_MAX_DEPTH,
+            weak_digests: false,
         }
     }
 }
@@ -93,6 +98,19 @@ fn may_issue(parent: &Certificate, child: &Certificate) -> bool {
             (Some(a), Some(s)) => a == s,
             _ => true,
         }
+}
+
+/// Refuses signature algorithm `alg` when its digest is too weak and `opts` does not allow it.
+fn check_digest(alg: SignatureAlgorithm, opts: &VerifyOptions<'_>) -> Result<(), Error> {
+    let hash = match alg {
+        SignatureAlgorithm::RsaPkcs1(h) | SignatureAlgorithm::Ecdsa(h) => Some(h),
+        SignatureAlgorithm::RsaPss { hash, .. } => Some(hash),
+        SignatureAlgorithm::Ed25519 => None,
+    };
+    if hash == Some(HashAlgorithm::Sha1) && !opts.weak_digests {
+        return Err(Error::WeakDigest);
+    }
+    Ok(())
 }
 
 /// Validates `leaf` up to one of `anchors`, using `intermediates` to build the path. Returns the
@@ -313,6 +331,7 @@ fn validate(ctx: &Ctx<'_>, path: &[&Certificate], nesting: usize) -> Result<(), 
     let mut issuer: &Certificate = anchor;
     for (idx, c) in certs.iter().enumerate() {
         let last = idx + 1 == n;
+        check_digest(c.signature_algorithm, opts)?;
         c.verify_signed_by(working_key)?;
         check_dates(c, opts.now)?;
         let needs_crl = match opts.crl_check {
@@ -414,7 +433,11 @@ fn check_revocation(
     } else {
         &cert.crl_distribution_points
     };
-    let usable = |c: &&Crl| !c.unknown_critical && c.is_current(now);
+    let usable = |c: &&Crl| {
+        !c.unknown_critical
+            && c.is_current(now)
+            && check_digest(c.signature_algorithm, ctx.opts).is_ok()
+    };
     let mut mask = 0u16;
     let mut revoked = false;
     for dp in dps {

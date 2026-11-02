@@ -4,9 +4,10 @@
 //! by their names; the node keeps them qualified by the tenant
 //! ([`teseladb_meta::tenants::qualified_db`]), and these functions translate between both.
 
-use teseladb_bson::{Document, Value};
+use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_meta::catalog::{CatalogCommand, CollectionEntry, Namespace};
-use teseladb_meta::tenants::{DEFAULT_TENANT, qualified_db, split_db};
+use teseladb_meta::security::{Expect, SecurityOp};
+use teseladb_meta::tenants::{DEFAULT_TENANT, TENANT_FIELD, qualified_db, split_db};
 
 use super::Backend;
 use crate::error::{BAD_VALUE, CommandError, UNAUTHORIZED};
@@ -145,6 +146,48 @@ pub fn qualified_command(tenant: u32, cmd: &CatalogCommand) -> CatalogCommand {
         }
         CatalogCommand::Purged { id } => CatalogCommand::Purged { id: *id },
     }
+}
+
+/// The tenant of the stored user or role document `doc` (013 FR-024): only that tenant sees it.
+pub fn of_principal(doc: &[u8]) -> u32 {
+    teseladb_meta::tenants::of_user(doc)
+}
+
+/// Changes `ops` of the users and roles as tenant `tenant` writes them: each document written
+/// belongs to it, whatever tenant it names (013 FR-024). `None` if one expects a document of
+/// another tenant, which the tenant could not have read.
+pub fn own_security_ops(
+    tenant: u32,
+    ops: Vec<SecurityOp>,
+) -> Result<Option<Vec<SecurityOp>>, CommandError> {
+    let mut out = Vec::with_capacity(ops.len());
+    for op in ops {
+        if let Expect::Exactly(old) = &op.expect
+            && of_principal(old) != tenant
+        {
+            return Ok(None);
+        }
+        let doc = match op.doc {
+            Some(bytes) => Some(stamped(tenant, &bytes)?),
+            None => None,
+        };
+        out.push(SecurityOp { doc, ..op });
+    }
+    Ok(Some(out))
+}
+
+/// Document `bytes` with tenant `tenant` in [`TENANT_FIELD`], which the default tenant leaves out.
+fn stamped(tenant: u32, bytes: &[u8]) -> Result<Vec<u8>, CommandError> {
+    let mut d = Document::from(RawDoc::from_bytes(bytes)?);
+    match tenant {
+        DEFAULT_TENANT => {
+            d.remove(TENANT_FIELD);
+        }
+        t => {
+            d.insert(TENANT_FIELD, i64::from(t));
+        }
+    }
+    Ok(d.to_bytes()?)
 }
 
 /// The fields of the `config` documents that name a database or a namespace.

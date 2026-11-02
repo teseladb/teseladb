@@ -19,6 +19,7 @@ pub fn install(it: &mut Interp, proto: &ObjRef) -> R<()> {
         ("concat", concat, 1),
         ("join", join, 1),
         ("toString", to_string, 0),
+        ("toLocaleString", to_locale_string, 0),
         ("reverse", reverse, 0),
         ("indexOf", index_of, 1),
         ("lastIndexOf", last_index_of, 1),
@@ -40,6 +41,7 @@ pub fn install(it: &mut Interp, proto: &ObjRef) -> R<()> {
         ("flat", flat, 0),
         ("flatMap", flat_map, 1),
         ("fill", fill, 1),
+        ("copyWithin", copy_within, 2),
         ("at", at, 1),
         ("keys", keys, 0),
         ("values", values, 0),
@@ -75,6 +77,60 @@ fn array_obj(it: &Interp, this: &Val) -> R<ObjRef> {
     }
 }
 
+/// How an array method changes the array it works on.
+#[derive(Clone, Copy, PartialEq)]
+enum Change {
+    /// Elements are written in place (`sort`, `reverse`, `fill`).
+    Write,
+    /// Elements are added at the end (`push`, `unshift`).
+    Grow,
+    /// The last element is removed (`pop`, `splice`).
+    Shrink,
+    /// The first element is removed and the rest move (`shift`).
+    Shift,
+}
+
+/// The error of adding element `i` to an array whose length is read-only (`fixed`) or that is not
+/// extensible.
+pub fn cannot_grow(it: &Interp, fixed: bool, i: usize) -> crate::interp::Ctrl {
+    let m = if fixed {
+        "can't define array index property past the end of an array with non-writable length"
+            .to_string()
+    } else {
+        format!("can't define property {i}: Array is not extensible")
+    };
+    it.error("TypeError", &m)
+}
+
+/// Refuses `change` to `o` when `Object.seal`, `Object.freeze` or `Object.preventExtensions` forbid
+/// it, with the error of the first step the engine would take.
+fn check(it: &Interp, o: &ObjRef, change: Change) -> R<()> {
+    let (locks, extensible, len) = {
+        let b = o.borrow();
+        let len = match &b.kind {
+            Kind::Array(v) => v.len(),
+            _ => 0,
+        };
+        (b.locks, b.extensible, len)
+    };
+    let frozen = locks & ELEMENTS_FROZEN != 0;
+    let sealed = locks & ELEMENTS_SEALED != 0;
+    let read_only = || Err(it.error("TypeError", "0 is read-only"));
+    let undeletable = |i: usize| {
+        Err(it
+            .error("TypeError", &format!("property {i} is non-configurable and can't be deleted")))
+    };
+    match change {
+        Change::Grow if locks & LENGTH_FIXED != 0 || !extensible => {
+            Err(cannot_grow(it, locks & LENGTH_FIXED != 0, len))
+        }
+        Change::Write if frozen && len > 0 => read_only(),
+        Change::Shift if frozen && len > 1 => read_only(),
+        Change::Shrink | Change::Shift if sealed && len > 0 => undeletable(len - 1),
+        _ => Ok(()),
+    }
+}
+
 fn with_vec<T>(o: &ObjRef, f: impl FnOnce(&mut Vec<Val>) -> T) -> Option<T> {
     match &mut o.borrow_mut().kind {
         Kind::Array(v) => Some(f(v)),
@@ -92,8 +148,28 @@ fn relative(it: &mut Interp, v: &Val, len: usize, default: usize) -> R<usize> {
     Ok(if n < 0.0 { (len as f64 + n).max(0.0) as usize } else { (n as usize).min(len) })
 }
 
+/// `push` on an object that is not an array (a proxy of one): through `length` and `set`.
+fn push_generic(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    let o = Val::Obj(it.object_of(this)?);
+    let n = it.get(&o, "length")?;
+    let mut n = it.number_of(&n)?;
+    n = if n.is_finite() && n > 0.0 { n.trunc() } else { 0.0 };
+    for x in a {
+        it.set(&o, &crate::number::to_string(n), x.clone())?;
+        n += 1.0;
+    }
+    it.set(&o, "length", Val::Num(n))?;
+    Ok(Val::Num(n))
+}
+
 fn push(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    if !matches!(this, Val::Obj(o) if matches!(o.borrow().kind, Kind::Array(_))) {
+        return push_generic(it, this, a);
+    }
     let o = array_obj(it, this)?;
+    if !a.is_empty() {
+        check(it, &o, Change::Grow)?;
+    }
     it.grow(&o, a.len())?;
     let n = with_vec(&o, |v| {
         v.extend_from_slice(a);
@@ -104,11 +180,13 @@ fn push(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 
 fn pop(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     let o = array_obj(it, this)?;
+    check(it, &o, Change::Shrink)?;
     Ok(with_vec(&o, Vec::pop).flatten().unwrap_or(Val::Undef))
 }
 
 fn shift(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     let o = array_obj(it, this)?;
+    check(it, &o, Change::Shift)?;
     Ok(with_vec(&o, |v| if v.is_empty() { None } else { Some(v.remove(0)) })
         .flatten()
         .unwrap_or(Val::Undef))
@@ -116,6 +194,9 @@ fn shift(it: &mut Interp, this: &Val, _: &[Val]) -> R {
 
 fn unshift(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let o = array_obj(it, this)?;
+    if !a.is_empty() {
+        check(it, &o, Change::Grow)?;
+    }
     it.grow(&o, a.len())?;
     let n = with_vec(&o, |v| {
         v.splice(0..0, a.iter().cloned());
@@ -145,6 +226,13 @@ fn splice(it: &mut Interp, this: &Val, a: &[Val]) -> R {
         }
     };
     let insert = a.get(2..).unwrap_or(&[]).to_vec();
+    if count > 0 || !insert.is_empty() {
+        let change = if insert.len() > count { Change::Grow } else { Change::Shrink };
+        if o.borrow().locks & ELEMENTS_FROZEN != 0 {
+            check(it, &o, Change::Write)?;
+        }
+        check(it, &o, change)?;
+    }
     it.grow(&o, insert.len())?;
     let removed = with_vec(&o, |v| v.splice(start..start + count, insert).collect::<Vec<_>>())
         .unwrap_or_default();
@@ -183,8 +271,27 @@ fn to_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     join(it, this, &[])
 }
 
+/// Each element's `toLocaleString()`, joined with commas.
+fn to_locale_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+    let v = items(it, this)?;
+    let mut out = String::new();
+    for (i, x) in v.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        if !x.is_nullish() {
+            let f = it.get(x, "toLocaleString")?;
+            let s = it.call(&f, x, &[])?;
+            out.push_str(&it.str_of(&s)?);
+        }
+        it.charge(0)?;
+    }
+    it.string(out)
+}
+
 fn reverse(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     let o = array_obj(it, this)?;
+    check(it, &o, Change::Write)?;
     with_vec(&o, |v| v.reverse());
     Ok(this.clone())
 }
@@ -417,6 +524,7 @@ fn sorted(it: &mut Interp, mut v: Vec<Val>, cmp: &Val) -> R<Vec<Val>> {
 
 fn sort(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let o = array_obj(it, this)?;
+    check(it, &o, Change::Write)?;
     let cmp = arg(a, 0);
     if !matches!(cmp, Val::Undef) && !cmp.is_callable() {
         return it.type_error("invalid Array.prototype.sort argument");
@@ -473,6 +581,7 @@ fn flat_map(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 
 fn fill(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let o = array_obj(it, this)?;
+    check(it, &o, Change::Write)?;
     let len = it.array_len(&o);
     let start = relative(it, &arg(a, 1), len, 0)?;
     let end = relative(it, &arg(a, 2), len, len)?;
@@ -481,6 +590,21 @@ fn fill(it: &mut Interp, this: &Val, a: &[Val]) -> R {
         for slot in v.iter_mut().take(end).skip(start) {
             *slot = x.clone();
         }
+    });
+    Ok(this.clone())
+}
+
+fn copy_within(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    let o = array_obj(it, this)?;
+    check(it, &o, Change::Write)?;
+    let len = it.array_len(&o);
+    let target = relative(it, &arg(a, 0), len, 0)?;
+    let start = relative(it, &arg(a, 1), len, 0)?;
+    let end = relative(it, &arg(a, 2), len, len)?;
+    let count = end.saturating_sub(start).min(len - target);
+    with_vec(&o, |v| {
+        let part: Vec<Val> = v[start..start + count].to_vec();
+        v[target..target + count].clone_from_slice(&part);
     });
     Ok(this.clone())
 }

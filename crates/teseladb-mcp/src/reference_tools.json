@@ -1,0 +1,2311 @@
+[
+ {
+  "annotations": {
+   "destructiveHint": false,
+   "openWorldHint": true,
+   "readOnlyHint": true
+  },
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "collection": {
+     "type": "string"
+    },
+    "connectionId": {
+     "type": "string"
+    },
+    "database": {
+     "type": "string"
+    },
+    "pipeline": {
+     "items": {
+      "anyOf": [
+       {
+        "properties": {
+         "$vectorSearch": {
+          "anyOf": [
+           {
+            "properties": {
+             "exact": {
+              "default": false,
+              "type": "boolean"
+             },
+             "filter": {
+              "additionalProperties": {},
+              "properties": {},
+              "type": "object"
+             },
+             "index": {
+              "type": "string"
+             },
+             "limit": {
+              "default": 10,
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991,
+              "type": "integer"
+             },
+             "numCandidates": {
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991,
+              "type": "integer"
+             },
+             "path": {
+              "type": "string"
+             },
+             "queryVector": {
+              "items": {
+               "type": "number"
+              },
+              "type": "array"
+             }
+            },
+            "required": [
+             "index",
+             "path",
+             "queryVector"
+            ],
+            "type": "object"
+           },
+           {
+            "properties": {
+             "exact": {
+              "default": false,
+              "type": "boolean"
+             },
+             "filter": {
+              "additionalProperties": {},
+              "properties": {},
+              "type": "object"
+             },
+             "index": {
+              "type": "string"
+             },
+             "limit": {
+              "default": 10,
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991,
+              "type": "integer"
+             },
+             "model": {
+              "enum": [
+               "voyage-4",
+               "voyage-4-large",
+               "voyage-4-lite",
+               "voyage-code-3"
+              ],
+              "type": "string"
+             },
+             "numCandidates": {
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991,
+              "type": "integer"
+             },
+             "path": {
+              "type": "string"
+             },
+             "query": {
+              "properties": {
+               "text": {
+                "type": "string"
+               }
+              },
+              "required": [
+               "text"
+              ],
+              "type": "object"
+             }
+            },
+            "required": [
+             "index",
+             "path",
+             "query"
+            ],
+            "type": "object"
+           }
+          ]
+         }
+        },
+        "required": [
+         "$vectorSearch"
+        ],
+        "type": "object"
+       },
+       {
+        "additionalProperties": {},
+        "properties": {},
+        "type": "object"
+       }
+      ]
+     },
+     "type": "array"
+    },
+    "responseBytesLimit": {
+     "default": 1048576,
+     "type": "number"
+    }
+   },
+   "required": [
+    "connectionId",
+    "database",
+    "collection",
+    "pipeline"
+   ],
+   "type": "object"
+  },
+  "name": "aggregate",
+  "outputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "appliedLimits": {
+     "items": {
+      "enum": [
+       "config.maxDocumentsPerQuery",
+       "config.maxBytesPerQuery",
+       "tool.responseBytesLimit"
+      ],
+      "type": "string"
+     },
+     "type": "array"
+    },
+    "count": {
+     "anyOf": [
+      {
+       "type": "number"
+      },
+      {
+       "const": "indeterminate",
+       "type": "string"
+      }
+     ]
+    },
+    "documents": {
+     "items": {},
+     "type": "array"
+    }
+   },
+   "required": [
+    "documents",
+    "count",
+    "appliedLimits"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "annotations": {
+   "destructiveHint": false,
+   "openWorldHint": true,
+   "readOnlyHint": true
+  },
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "connectionId": {
+     "type": "string"
+    },
+    "database": {
+     "type": "string"
+    },
+    "pipeline": {
+     "items": {
+      "additionalProperties": {},
+      "properties": {},
+      "type": "object"
+     },
+     "minItems": 1,
+     "type": "array"
+    },
+    "responseBytesLimit": {
+     "default": 1048576,
+     "type": "number"
+    }
+   },
+   "required": [
+    "connectionId",
+    "database",
+    "pipeline"
+   ],
+   "type": "object"
+  },
+  "name": "aggregate-db",
+  "outputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "aggResultsCount": {
+     "type": "number"
+    },
+    "appliedLimits": {
+     "items": {
+      "enum": [
+       "config.maxDocumentsPerQuery",
+       "config.maxBytesPerQuery",
+       "tool.responseBytesLimit"
+      ],
+      "type": "string"
+     },
+     "type": "array"
+    },
+    "documents": {
+     "items": {},
+     "type": "array"
+    }
+   },
+   "required": [
+    "documents",
+    "appliedLimits"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "annotations": {
+   "destructiveHint": false,
+   "openWorldHint": true,
+   "readOnlyHint": true
+  },
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "collection": {
+     "type": "string"
+    },
+    "connectionId": {
+     "type": "string"
+    },
+    "database": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "connectionId",
+    "database",
+    "collection"
+   ],
+   "type": "object"
+  },
+  "name": "collection-indexes",
+  "outputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "classicIndexes": {
+     "items": {
+      "additionalProperties": false,
+      "properties": {
+       "key": {
+        "additionalProperties": {},
+        "propertyNames": {
+         "type": "string"
+        },
+        "type": "object"
+       },
+       "name": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "name",
+       "key"
+      ],
+      "type": "object"
+     },
+     "type": "array"
+    },
+    "classicIndexesCount": {
+     "type": "number"
+    },
+    "searchIndexes": {
+     "items": {
+      "additionalProperties": false,
+      "properties": {
+       "latestDefinition": {
+        "additionalProperties": {},
+        "propertyNames": {
+         "type": "string"
+        },
+        "type": "object"
+       },
+       "name": {
+        "type": "string"
+       },
+       "queryable": {
+        "type": "boolean"
+       },
+       "status": {
+        "type": "string"
+       },
+       "type": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "name",
+       "type",
+       "status",
+       "queryable",
+       "latestDefinition"
+      ],
+      "type": "object"
+     },
+     "type": "array"
+    },
+    "searchIndexesCount": {
+     "type": "number"
+    }
+   },
+   "required": [
+    "classicIndexes",
+    "searchIndexes",
+    "classicIndexesCount",
+    "searchIndexesCount"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "annotations": {
+   "destructiveHint": false,
+   "openWorldHint": true,
+   "readOnlyHint": true
+  },
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "collection": {
+     "type": "string"
+    },
+    "connectionId": {
+     "type": "string"
+    },
+    "database": {
+     "type": "string"
+    },
+    "responseBytesLimit": {
+     "default": 1048576,
+     "type": "number"
+    },
+    "sampleSize": {
+     "default": 50,
+     "type": "number"
+    }
+   },
+   "required": [
+    "connectionId",
+    "database",
+    "collection"
+   ],
+   "type": "object"
+  },
+  "name": "collection-schema",
+  "outputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "fieldsCount": {
+     "type": "number"
+    },
+    "schema": {
+     "additionalProperties": {},
+     "propertyNames": {
+      "type": "string"
+     },
+     "type": "object"
+    }
+   },
+   "required": [
+    "schema",
+    "fieldsCount"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "annotations": {
+   "destructiveHint": false,
+   "openWorldHint": true,
+   "readOnlyHint": true
+  },
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "collection": {
+     "type": "string"
+    },
+    "connectionId": {
+     "type": "string"
+    },
+    "database": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "connectionId",
+    "database",
+    "collection"
+   ],
+   "type": "object"
+  },
+  "name": "collection-storage-size",
+  "outputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "size": {
+     "type": "number"
+    },
+    "units": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "size",
+    "units"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "annotations": {
+   "destructiveHint": false,
+   "openWorldHint": true,
+   "readOnlyHint": true
+  },
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "connectionName": {
+     "type": "string"
+    },
+    "connectionString": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "connectionString"
+   ],
+   "type": "object"
+  },
+  "name": "connect",
+  "outputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "connectionId": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "connectionId"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "annotations": {
+   "destructiveHint": false,
+   "openWorldHint": true,
+   "readOnlyHint": true
+  },
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "collection": {
+     "type": "string"
+    },
+    "connectionId": {
+     "type": "string"
+    },
+    "database": {
+     "type": "string"
+    },
+    "query": {
+     "additionalProperties": {},
+     "properties": {},
+     "type": "object"
+    }
+   },
+   "required": [
+    "connectionId",
+    "database",
+    "collection"
+   ],
+   "type": "object"
+  },
+  "name": "count",
+  "outputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "count": {
+     "type": "number"
+    }
+   },
+   "required": [
+    "count"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "annotations": {
+   "destructiveHint": false,
+   "openWorldHint": true,
+   "readOnlyHint": false
+  },
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "collection": {
+     "type": "string"
+    },
+    "connectionId": {
+     "type": "string"
+    },
+    "database": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "connectionId",
+    "database",
+    "collection"
+   ],
+   "type": "object"
+  },
+  "name": "create-collection",
+  "outputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "collection": {
+     "type": "string"
+    },
+    "created": {
+     "type": "boolean"
+    },
+    "database": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "database",
+    "collection",
+    "created"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "annotations": {
+   "destructiveHint": false,
+   "openWorldHint": true,
+   "readOnlyHint": false
+  },
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "collection": {
+     "type": "string"
+    },
+    "connectionId": {
+     "type": "string"
+    },
+    "database": {
+     "type": "string"
+    },
+    "definition": {
+     "items": {
+      "oneOf": [
+       {
+        "properties": {
+         "keys": {
+          "additionalProperties": {
+           "anyOf": [
+            {
+             "const": 1,
+             "type": "number"
+            },
+            {
+             "const": -1,
+             "type": "number"
+            },
+            {
+             "const": "2d",
+             "type": "string"
+            },
+            {
+             "const": "2dsphere",
+             "type": "string"
+            },
+            {
+             "const": "text",
+             "type": "string"
+            },
+            {
+             "const": "geoHaystack",
+             "type": "string"
+            },
+            {
+             "const": "hashed",
+             "type": "string"
+            }
+           ]
+          },
+          "propertyNames": {
+           "type": "string"
+          },
+          "type": "object"
+         },
+         "type": {
+          "const": "classic",
+          "type": "string"
+         }
+        },
+        "required": [
+         "type",
+         "keys"
+        ],
+        "type": "object"
+       },
+       {
+        "properties": {
+         "fields": {
+          "items": {
+           "oneOf": [
+            {
+             "additionalProperties": false,
+             "properties": {
+              "path": {
+               "type": "string"
+              },
+              "type": {
+               "const": "filter",
+               "type": "string"
+              }
+             },
+             "required": [
+              "type",
+              "path"
+             ],
+             "type": "object"
+            },
+            {
+             "additionalProperties": false,
+             "properties": {
+              "numDimensions": {
+               "default": 1024,
+               "maximum": 8192,
+               "minimum": 1,
+               "type": "number"
+              },
+              "path": {
+               "type": "string"
+              },
+              "quantization": {
+               "default": "none",
+               "enum": [
+                "none",
+                "scalar",
+                "binary"
+               ],
+               "type": "string"
+              },
+              "similarity": {
+               "default": "euclidean",
+               "enum": [
+                "cosine",
+                "euclidean",
+                "dotProduct"
+               ],
+               "type": "string"
+              },
+              "type": {
+               "const": "vector",
+               "type": "string"
+              }
+             },
+             "required": [
+              "type",
+              "path"
+             ],
+             "type": "object"
+            },
+            {
+             "additionalProperties": false,
+             "properties": {
+              "modality": {
+               "enum": [
+                "text"
+               ],
+               "type": "string"
+              },
+              "model": {
+               "enum": [
+                "voyage-4",
+                "voyage-4-large",
+                "voyage-4-lite",
+                "voyage-code-3"
+               ],
+               "type": "string"
+              },
+              "path": {
+               "type": "string"
+              },
+              "type": {
+               "const": "autoEmbed",
+               "type": "string"
+              }
+             },
+             "required": [
+              "type",
+              "path",
+              "model",
+              "modality"
+             ],
+             "type": "object"
+            }
+           ]
+          },
+          "minItems": 1,
+          "type": "array"
+         },
+         "type": {
+          "const": "vectorSearch",
+          "type": "string"
+         }
+        },
+        "required": [
+         "type",
+         "fields"
+        ],
+        "type": "object"
+       },
+       {
+        "additionalProperties": {},
+        "properties": {
+         "analyzer": {
+          "default": "reflib.standard",
+          "type": "string"
+         },
+         "mappings": {
+          "additionalProperties": {},
+          "properties": {
+           "dynamic": {
+            "anyOf": [
+             {
+              "type": "boolean"
+             },
+             {
+              "additionalProperties": false,
+              "properties": {
+               "typeSet": {
+                "type": "string"
+               }
+              },
+              "required": [
+               "typeSet"
+              ],
+              "type": "object"
+             }
+            ],
+            "default": false
+           },
+           "fields": {
+            "additionalProperties": {},
+            "propertyNames": {
+             "type": "string"
+            },
+            "type": "object"
+           }
+          },
+          "type": "object"
+         },
+         "numPartitions": {
+          "anyOf": [
+           {
+            "const": "1",
+            "type": "string"
+           },
+           {
+            "const": "2",
+            "type": "string"
+           },
+           {
+            "const": "4",
+            "type": "string"
+           }
+          ],
+          "default": "1"
+         },
+         "type": {
+          "const": "search",
+          "type": "string"
+         }
+        },
+        "required": [
+         "type",
+         "mappings"
+        ],
+        "type": "object"
+       }
+      ]
+     },
+     "type": "array"
+    },
+    "name": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "connectionId",
+    "database",
+    "collection",
+    "definition"
+   ],
+   "type": "object"
+  },
+  "name": "create-index",
+  "outputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "collection": {
+     "type": "string"
+    },
+    "database": {
+     "type": "string"
+    },
+    "indexName": {
+     "type": "string"
+    },
+    "indexType": {
+     "enum": [
+      "classic",
+      "vectorSearch",
+      "search"
+     ],
+     "type": "string"
+    }
+   },
+   "required": [
+    "database",
+    "collection",
+    "indexName",
+    "indexType"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "annotations": {
+   "destructiveHint": false,
+   "openWorldHint": true,
+   "readOnlyHint": true
+  },
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "connectionId": {
+     "type": "string"
+    },
+    "database": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "connectionId",
+    "database"
+   ],
+   "type": "object"
+  },
+  "name": "db-stats",
+  "outputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "stats": {
+     "additionalProperties": {},
+     "propertyNames": {
+      "type": "string"
+     },
+     "type": "object"
+    }
+   },
+   "required": [
+    "stats"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "annotations": {
+   "destructiveHint": true,
+   "openWorldHint": true,
+   "readOnlyHint": false
+  },
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "collection": {
+     "type": "string"
+    },
+    "connectionId": {
+     "type": "string"
+    },
+    "database": {
+     "type": "string"
+    },
+    "filter": {
+     "additionalProperties": {},
+     "properties": {},
+     "type": "object"
+    }
+   },
+   "required": [
+    "connectionId",
+    "database",
+    "collection"
+   ],
+   "type": "object"
+  },
+  "name": "delete-many",
+  "outputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "collection": {
+     "type": "string"
+    },
+    "database": {
+     "type": "string"
+    },
+    "deletedCount": {
+     "type": "number"
+    }
+   },
+   "required": [
+    "database",
+    "collection",
+    "deletedCount"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "annotations": {
+   "destructiveHint": false,
+   "openWorldHint": true,
+   "readOnlyHint": true
+  },
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "connectionId": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "connectionId"
+   ],
+   "type": "object"
+  },
+  "name": "disconnect",
+  "outputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "outcome": {
+     "enum": [
+      "removed",
+      "disconnected"
+     ],
+     "type": "string"
+    }
+   },
+   "required": [
+    "outcome"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "annotations": {
+   "destructiveHint": true,
+   "openWorldHint": true,
+   "readOnlyHint": false
+  },
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "collection": {
+     "type": "string"
+    },
+    "connectionId": {
+     "type": "string"
+    },
+    "database": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "connectionId",
+    "database",
+    "collection"
+   ],
+   "type": "object"
+  },
+  "name": "drop-collection",
+  "outputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "collection": {
+     "type": "string"
+    },
+    "database": {
+     "type": "string"
+    },
+    "dropped": {
+     "type": "boolean"
+    }
+   },
+   "required": [
+    "database",
+    "collection",
+    "dropped"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "annotations": {
+   "destructiveHint": true,
+   "openWorldHint": true,
+   "readOnlyHint": false
+  },
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "connectionId": {
+     "type": "string"
+    },
+    "database": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "connectionId",
+    "database"
+   ],
+   "type": "object"
+  },
+  "name": "drop-database",
+  "outputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "database": {
+     "type": "string"
+    },
+    "dropped": {
+     "type": "boolean"
+    }
+   },
+   "required": [
+    "database",
+    "dropped"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "annotations": {
+   "destructiveHint": true,
+   "openWorldHint": true,
+   "readOnlyHint": false
+  },
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "collection": {
+     "type": "string"
+    },
+    "connectionId": {
+     "type": "string"
+    },
+    "database": {
+     "type": "string"
+    },
+    "indexName": {
+     "minLength": 1,
+     "type": "string"
+    },
+    "type": {
+     "enum": [
+      "classic",
+      "search"
+     ],
+     "type": "string"
+    }
+   },
+   "required": [
+    "connectionId",
+    "database",
+    "collection",
+    "indexName",
+    "type"
+   ],
+   "type": "object"
+  },
+  "name": "drop-index",
+  "outputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "collection": {
+     "type": "string"
+    },
+    "database": {
+     "type": "string"
+    },
+    "dropped": {
+     "type": "boolean"
+    },
+    "indexName": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "database",
+    "collection",
+    "indexName",
+    "dropped"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "annotations": {
+   "destructiveHint": false,
+   "openWorldHint": true,
+   "readOnlyHint": true
+  },
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "collection": {
+     "type": "string"
+    },
+    "connectionId": {
+     "type": "string"
+    },
+    "database": {
+     "type": "string"
+    },
+    "method": {
+     "items": {
+      "oneOf": [
+       {
+        "properties": {
+         "arguments": {
+          "properties": {
+           "pipeline": {
+            "items": {
+             "anyOf": [
+              {
+               "properties": {
+                "$vectorSearch": {
+                 "anyOf": [
+                  {
+                   "properties": {
+                    "exact": {
+                     "default": false,
+                     "type": "boolean"
+                    },
+                    "filter": {
+                     "additionalProperties": {},
+                     "properties": {},
+                     "type": "object"
+                    },
+                    "index": {
+                     "type": "string"
+                    },
+                    "limit": {
+                     "default": 10,
+                     "exclusiveMinimum": 0,
+                     "maximum": 9007199254740991,
+                     "type": "integer"
+                    },
+                    "numCandidates": {
+                     "exclusiveMinimum": 0,
+                     "maximum": 9007199254740991,
+                     "type": "integer"
+                    },
+                    "path": {
+                     "type": "string"
+                    },
+                    "queryVector": {
+                     "items": {
+                      "type": "number"
+                     },
+                     "type": "array"
+                    }
+                   },
+                   "required": [
+                    "index",
+                    "path",
+                    "queryVector"
+                   ],
+                   "type": "object"
+                  },
+                  {
+                   "properties": {
+                    "exact": {
+                     "default": false,
+                     "type": "boolean"
+                    },
+                    "filter": {
+                     "additionalProperties": {},
+                     "properties": {},
+                     "type": "object"
+                    },
+                    "index": {
+                     "type": "string"
+                    },
+                    "limit": {
+                     "default": 10,
+                     "exclusiveMinimum": 0,
+                     "maximum": 9007199254740991,
+                     "type": "integer"
+                    },
+                    "model": {
+                     "enum": [
+                      "voyage-4",
+                      "voyage-4-large",
+                      "voyage-4-lite",
+                      "voyage-code-3"
+                     ],
+                     "type": "string"
+                    },
+                    "numCandidates": {
+                     "exclusiveMinimum": 0,
+                     "maximum": 9007199254740991,
+                     "type": "integer"
+                    },
+                    "path": {
+                     "type": "string"
+                    },
+                    "query": {
+                     "properties": {
+                      "text": {
+                       "type": "string"
+                      }
+                     },
+                     "required": [
+                      "text"
+                     ],
+                     "type": "object"
+                    }
+                   },
+                   "required": [
+                    "index",
+                    "path",
+                    "query"
+                   ],
+                   "type": "object"
+                  }
+                 ]
+                }
+               },
+               "required": [
+                "$vectorSearch"
+               ],
+               "type": "object"
+              },
+              {
+               "additionalProperties": {},
+               "properties": {},
+               "type": "object"
+              }
+             ]
+            },
+            "type": "array"
+           }
+          },
+          "required": [
+           "pipeline"
+          ],
+          "type": "object"
+         },
+         "name": {
+          "const": "aggregate",
+          "type": "string"
+         }
+        },
+        "required": [
+         "name",
+         "arguments"
+        ],
+        "type": "object"
+       },
+       {
+        "properties": {
+         "arguments": {
+          "properties": {
+           "filter": {
+            "additionalProperties": {},
+            "properties": {},
+            "type": "object"
+           },
+           "limit": {
+            "default": 10,
+            "type": "number"
+           },
+           "projection": {
+            "additionalProperties": {},
+            "properties": {},
+            "type": "object"
+           },
+           "sort": {
+            "additionalProperties": {
+             "anyOf": [
+              {
+               "const": 1,
+               "type": "number"
+              },
+              {
+               "const": -1,
+               "type": "number"
+              },
+              {
+               "const": "asc",
+               "type": "string"
+              },
+              {
+               "const": "desc",
+               "type": "string"
+              },
+              {
+               "const": "ascending",
+               "type": "string"
+              },
+              {
+               "const": "descending",
+               "type": "string"
+              },
+              {
+               "properties": {
+                "$meta": {
+                 "type": "string"
+                }
+               },
+               "required": [
+                "$meta"
+               ],
+               "type": "object"
+              }
+             ]
+            },
+            "propertyNames": {
+             "type": "string"
+            },
+            "type": "object"
+           }
+          },
+          "type": "object"
+         },
+         "name": {
+          "const": "find",
+          "type": "string"
+         }
+        },
+        "required": [
+         "name",
+         "arguments"
+        ],
+        "type": "object"
+       },
+       {
+        "properties": {
+         "arguments": {
+          "properties": {
+           "query": {
+            "additionalProperties": {},
+            "properties": {},
+            "type": "object"
+           }
+          },
+          "type": "object"
+         },
+         "name": {
+          "const": "count",
+          "type": "string"
+         }
+        },
+        "required": [
+         "name",
+         "arguments"
+        ],
+        "type": "object"
+       }
+      ]
+     },
+     "type": "array"
+    },
+    "verbosity": {
+     "default": "queryPlanner",
+     "enum": [
+      "queryPlanner",
+      "queryPlannerExtended",
+      "executionStats",
+      "allPlansExecution"
+     ],
+     "type": "string"
+    }
+   },
+   "required": [
+    "connectionId",
+    "database",
+    "collection",
+    "method"
+   ],
+   "type": "object"
+  },
+  "name": "explain",
+  "outputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "explainResult": {
+     "additionalProperties": {},
+     "propertyNames": {
+      "type": "string"
+     },
+     "type": "object"
+    },
+    "method": {
+     "enum": [
+      "aggregate",
+      "find",
+      "count"
+     ],
+     "type": "string"
+    },
+    "verbosity": {
+     "enum": [
+      "queryPlanner",
+      "queryPlannerExtended",
+      "executionStats",
+      "allPlansExecution"
+     ],
+     "type": "string"
+    }
+   },
+   "required": [
+    "explainResult",
+    "method",
+    "verbosity"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "annotations": {
+   "destructiveHint": false,
+   "openWorldHint": true,
+   "readOnlyHint": true
+  },
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "collection": {
+     "type": "string"
+    },
+    "connectionId": {
+     "type": "string"
+    },
+    "database": {
+     "type": "string"
+    },
+    "exportTarget": {
+     "items": {
+      "oneOf": [
+       {
+        "properties": {
+         "arguments": {
+          "properties": {
+           "filter": {
+            "additionalProperties": {},
+            "properties": {},
+            "type": "object"
+           },
+           "limit": {
+            "type": "number"
+           },
+           "projection": {
+            "additionalProperties": {},
+            "properties": {},
+            "type": "object"
+           },
+           "sort": {
+            "additionalProperties": {
+             "anyOf": [
+              {
+               "const": 1,
+               "type": "number"
+              },
+              {
+               "const": -1,
+               "type": "number"
+              },
+              {
+               "const": "asc",
+               "type": "string"
+              },
+              {
+               "const": "desc",
+               "type": "string"
+              },
+              {
+               "const": "ascending",
+               "type": "string"
+              },
+              {
+               "const": "descending",
+               "type": "string"
+              },
+              {
+               "properties": {
+                "$meta": {
+                 "type": "string"
+                }
+               },
+               "required": [
+                "$meta"
+               ],
+               "type": "object"
+              }
+             ]
+            },
+            "propertyNames": {
+             "type": "string"
+            },
+            "type": "object"
+           }
+          },
+          "type": "object"
+         },
+         "name": {
+          "const": "find",
+          "type": "string"
+         }
+        },
+        "required": [
+         "name",
+         "arguments"
+        ],
+        "type": "object"
+       },
+       {
+        "properties": {
+         "arguments": {
+          "properties": {
+           "pipeline": {
+            "items": {
+             "anyOf": [
+              {
+               "properties": {
+                "$vectorSearch": {
+                 "anyOf": [
+                  {
+                   "properties": {
+                    "exact": {
+                     "default": false,
+                     "type": "boolean"
+                    },
+                    "filter": {
+                     "additionalProperties": {},
+                     "properties": {},
+                     "type": "object"
+                    },
+                    "index": {
+                     "type": "string"
+                    },
+                    "limit": {
+                     "default": 10,
+                     "exclusiveMinimum": 0,
+                     "maximum": 9007199254740991,
+                     "type": "integer"
+                    },
+                    "numCandidates": {
+                     "exclusiveMinimum": 0,
+                     "maximum": 9007199254740991,
+                     "type": "integer"
+                    },
+                    "path": {
+                     "type": "string"
+                    },
+                    "queryVector": {
+                     "items": {
+                      "type": "number"
+                     },
+                     "type": "array"
+                    }
+                   },
+                   "required": [
+                    "index",
+                    "path",
+                    "queryVector"
+                   ],
+                   "type": "object"
+                  },
+                  {
+                   "properties": {
+                    "exact": {
+                     "default": false,
+                     "type": "boolean"
+                    },
+                    "filter": {
+                     "additionalProperties": {},
+                     "properties": {},
+                     "type": "object"
+                    },
+                    "index": {
+                     "type": "string"
+                    },
+                    "limit": {
+                     "default": 10,
+                     "exclusiveMinimum": 0,
+                     "maximum": 9007199254740991,
+                     "type": "integer"
+                    },
+                    "model": {
+                     "enum": [
+                      "voyage-4",
+                      "voyage-4-large",
+                      "voyage-4-lite",
+                      "voyage-code-3"
+                     ],
+                     "type": "string"
+                    },
+                    "numCandidates": {
+                     "exclusiveMinimum": 0,
+                     "maximum": 9007199254740991,
+                     "type": "integer"
+                    },
+                    "path": {
+                     "type": "string"
+                    },
+                    "query": {
+                     "properties": {
+                      "text": {
+                       "type": "string"
+                      }
+                     },
+                     "required": [
+                      "text"
+                     ],
+                     "type": "object"
+                    }
+                   },
+                   "required": [
+                    "index",
+                    "path",
+                    "query"
+                   ],
+                   "type": "object"
+                  }
+                 ]
+                }
+               },
+               "required": [
+                "$vectorSearch"
+               ],
+               "type": "object"
+              },
+              {
+               "additionalProperties": {},
+               "properties": {},
+               "type": "object"
+              }
+             ]
+            },
+            "type": "array"
+           }
+          },
+          "required": [
+           "pipeline"
+          ],
+          "type": "object"
+         },
+         "name": {
+          "const": "aggregate",
+          "type": "string"
+         }
+        },
+        "required": [
+         "name",
+         "arguments"
+        ],
+        "type": "object"
+       }
+      ]
+     },
+     "type": "array"
+    },
+    "exportTitle": {
+     "type": "string"
+    },
+    "jsonExportFormat": {
+     "default": "relaxed",
+     "enum": [
+      "relaxed",
+      "canonical"
+     ],
+     "type": "string"
+    }
+   },
+   "required": [
+    "connectionId",
+    "database",
+    "collection",
+    "exportTitle",
+    "exportTarget"
+   ],
+   "type": "object"
+  },
+  "name": "export",
+  "outputSchema": null
+ },
+ {
+  "annotations": {
+   "destructiveHint": false,
+   "openWorldHint": true,
+   "readOnlyHint": true
+  },
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "collection": {
+     "type": "string"
+    },
+    "connectionId": {
+     "type": "string"
+    },
+    "database": {
+     "type": "string"
+    },
+    "filter": {
+     "additionalProperties": {},
+     "properties": {},
+     "type": "object"
+    },
+    "limit": {
+     "default": 10,
+     "type": "number"
+    },
+    "projection": {
+     "additionalProperties": {},
+     "properties": {},
+     "type": "object"
+    },
+    "responseBytesLimit": {
+     "default": 1048576,
+     "type": "number"
+    },
+    "sort": {
+     "additionalProperties": {
+      "anyOf": [
+       {
+        "const": 1,
+        "type": "number"
+       },
+       {
+        "const": -1,
+        "type": "number"
+       },
+       {
+        "const": "asc",
+        "type": "string"
+       },
+       {
+        "const": "desc",
+        "type": "string"
+       },
+       {
+        "const": "ascending",
+        "type": "string"
+       },
+       {
+        "const": "descending",
+        "type": "string"
+       },
+       {
+        "properties": {
+         "$meta": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "$meta"
+        ],
+        "type": "object"
+       }
+      ]
+     },
+     "propertyNames": {
+      "type": "string"
+     },
+     "type": "object"
+    }
+   },
+   "required": [
+    "connectionId",
+    "database",
+    "collection"
+   ],
+   "type": "object"
+  },
+  "name": "find",
+  "outputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "appliedLimits": {
+     "items": {
+      "enum": [
+       "config.maxDocumentsPerQuery",
+       "config.maxBytesPerQuery",
+       "tool.responseBytesLimit"
+      ],
+      "type": "string"
+     },
+     "type": "array"
+    },
+    "documents": {
+     "items": {},
+     "type": "array"
+    },
+    "queryResultsCount": {
+     "type": "number"
+    }
+   },
+   "required": [
+    "documents",
+    "appliedLimits"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "annotations": {
+   "destructiveHint": false,
+   "openWorldHint": true,
+   "readOnlyHint": false
+  },
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "collection": {
+     "type": "string"
+    },
+    "connectionId": {
+     "type": "string"
+    },
+    "database": {
+     "type": "string"
+    },
+    "documents": {
+     "items": {
+      "additionalProperties": {},
+      "properties": {},
+      "type": "object"
+     },
+     "type": "array"
+    }
+   },
+   "required": [
+    "connectionId",
+    "database",
+    "collection",
+    "documents"
+   ],
+   "type": "object"
+  },
+  "name": "insert-many",
+  "outputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "collection": {
+     "type": "string"
+    },
+    "database": {
+     "type": "string"
+    },
+    "insertedCount": {
+     "type": "number"
+    },
+    "insertedIds": {
+     "items": {},
+     "type": "array"
+    }
+   },
+   "required": [
+    "database",
+    "collection",
+    "insertedCount",
+    "insertedIds"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "annotations": {
+   "destructiveHint": false,
+   "openWorldHint": true,
+   "readOnlyHint": true
+  },
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "connectionId": {
+     "type": "string"
+    },
+    "database": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "connectionId",
+    "database"
+   ],
+   "type": "object"
+  },
+  "name": "list-collections",
+  "outputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "collections": {
+     "items": {
+      "additionalProperties": false,
+      "properties": {
+       "name": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "name"
+      ],
+      "type": "object"
+     },
+     "type": "array"
+    },
+    "totalCount": {
+     "type": "number"
+    }
+   },
+   "required": [
+    "collections",
+    "totalCount"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "annotations": {
+   "destructiveHint": false,
+   "openWorldHint": true,
+   "readOnlyHint": true
+  },
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {},
+   "type": "object"
+  },
+  "name": "list-connections",
+  "outputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "connections": {
+     "items": {
+      "additionalProperties": false,
+      "properties": {
+       "connectionId": {
+        "type": "string"
+       },
+       "createdAt": {
+        "type": "string"
+       },
+       "lastError": {
+        "type": "string"
+       },
+       "lastUsedAt": {
+        "type": "string"
+       },
+       "name": {
+        "type": "string"
+       },
+       "source": {
+        "enum": [
+         "explicit",
+         "preconfigured"
+        ],
+        "type": "string"
+       },
+       "state": {
+        "enum": [
+         "connected",
+         "connecting",
+         "disconnected",
+         "errored"
+        ],
+        "type": "string"
+       }
+      },
+      "required": [
+       "connectionId",
+       "name",
+       "source",
+       "description",
+       "createdAt",
+       "lastUsedAt"
+      ],
+      "type": "object"
+     },
+     "type": "array"
+    }
+   },
+   "required": [
+    "connections"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "annotations": {
+   "destructiveHint": false,
+   "openWorldHint": true,
+   "readOnlyHint": true
+  },
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "connectionId": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "connectionId"
+   ],
+   "type": "object"
+  },
+  "name": "list-databases",
+  "outputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "databases": {
+     "items": {
+      "additionalProperties": false,
+      "properties": {
+       "name": {
+        "type": "string"
+       },
+       "size": {
+        "type": "number"
+       }
+      },
+      "required": [
+       "name",
+       "size"
+      ],
+      "type": "object"
+     },
+     "type": "array"
+    },
+    "totalCount": {
+     "type": "number"
+    }
+   },
+   "required": [
+    "databases",
+    "totalCount"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "annotations": {
+   "destructiveHint": false,
+   "openWorldHint": true,
+   "readOnlyHint": true
+  },
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "connectionId": {
+     "type": "string"
+    },
+    "limit": {
+     "default": 50,
+     "maximum": 1024,
+     "minimum": 1,
+     "type": "integer"
+    },
+    "type": {
+     "default": "global",
+     "enum": [
+      "global",
+      "startupWarnings"
+     ],
+     "type": "string"
+    }
+   },
+   "required": [
+    "connectionId"
+   ],
+   "type": "object"
+  },
+  "name": "refdb-logs",
+  "outputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "logs": {
+     "items": {
+      "type": "string"
+     },
+     "type": "array"
+    },
+    "shownCount": {
+     "type": "number"
+    },
+    "totalLinesWritten": {
+     "type": "number"
+    }
+   },
+   "required": [
+    "logs",
+    "totalLinesWritten",
+    "shownCount"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "annotations": {
+   "destructiveHint": true,
+   "openWorldHint": true,
+   "readOnlyHint": false
+  },
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "collection": {
+     "type": "string"
+    },
+    "connectionId": {
+     "type": "string"
+    },
+    "database": {
+     "type": "string"
+    },
+    "dropTarget": {
+     "default": false,
+     "type": "boolean"
+    },
+    "newName": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "connectionId",
+    "database",
+    "collection",
+    "newName"
+   ],
+   "type": "object"
+  },
+  "name": "rename-collection",
+  "outputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "database": {
+     "type": "string"
+    },
+    "newCollection": {
+     "type": "string"
+    },
+    "oldCollection": {
+     "type": "string"
+    },
+    "renamed": {
+     "type": "boolean"
+    }
+   },
+   "required": [
+    "database",
+    "oldCollection",
+    "newCollection",
+    "renamed"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "annotations": {
+   "destructiveHint": true,
+   "openWorldHint": true,
+   "readOnlyHint": false
+  },
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "collection": {
+     "type": "string"
+    },
+    "connectionId": {
+     "type": "string"
+    },
+    "database": {
+     "type": "string"
+    },
+    "filter": {
+     "additionalProperties": {},
+     "properties": {},
+     "type": "object"
+    },
+    "update": {
+     "additionalProperties": {},
+     "properties": {},
+     "type": "object"
+    },
+    "upsert": {
+     "type": "boolean"
+    }
+   },
+   "required": [
+    "connectionId",
+    "database",
+    "collection",
+    "update"
+   ],
+   "type": "object"
+  },
+  "name": "update-many",
+  "outputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "collection": {
+     "type": "string"
+    },
+    "database": {
+     "type": "string"
+    },
+    "matchedCount": {
+     "type": "number"
+    },
+    "modifiedCount": {
+     "type": "number"
+    },
+    "upsertedCount": {
+     "type": "number"
+    },
+    "upsertedId": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "database",
+    "collection",
+    "matchedCount",
+    "modifiedCount",
+    "upsertedCount"
+   ],
+   "type": "object"
+  }
+ }
+]

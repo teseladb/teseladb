@@ -50,7 +50,11 @@ pub fn authorize<B: Backend + ?Sized>(
     };
     let who = auth.name.clone();
     let roles = auth.direct_roles(&mut *backend)?;
-    let privileges = Graph::new(&mut *backend).inherit(&roles, None)?.privileges;
+    let mut privileges = Graph::new(&mut *backend).inherit(&roles, None)?.privileges;
+    // What the tenants share is the default tenant's to administer (013 FR-024).
+    if auth.tenant != teseladb_meta::tenants::DEFAULT_TENANT {
+        privileges = teseladb_auth::privileges::of_tenant(privileges);
+    }
     conn.bypass_default_max_time =
         authz::allows(&privileges, &Target::Cluster, ActionType::BypassDefaultMaxTimeMS);
     let cmd = by_name(backend, &req.db, &req.command)?;
@@ -87,6 +91,20 @@ pub fn authorize<B: Backend + ?Sized>(
         }
         _ if !check.passes(&privileges, true) => return Err(unauthorized(req)),
         _ => {}
+    }
+    // `rawData` also asks for `performRawDataOperations` on the collection (measured on a
+    // `refnode` 9.0.4 with authentication on 02-11-2026: `find` alone, or the action alone, is
+    // refused with 13).
+    let raw = matches!(cmd.get("rawData"), Some(Value::Boolean(true)));
+    if raw
+        && let Some((_, Value::String(coll))) = cmd.iter().next()
+        && !authz::allows(
+            &privileges,
+            &Target::collection(&req.db, coll),
+            ActionType::PerformRawDataOperations,
+        )
+    {
+        return Err(unauthorized(req));
     }
     Ok(Some(privileges))
 }

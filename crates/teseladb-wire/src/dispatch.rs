@@ -534,7 +534,19 @@ fn run_op<B: Backend + ?Sized>(
                 Some(_) | None => Some(Err(refused)),
             },
             (None, Err(e)) => Some(Err(e)),
-            (None, Ok(None)) => run(&mut Ctx { backend: &mut guarded, shared, db, cmd }),
+            (None, Ok(None)) => {
+                // A write on encrypted fields runs in a transaction of the node (017 FR-003).
+                let internal = crate::commands::fle::in_internal_txn(
+                    &mut guarded,
+                    shared,
+                    (name, db, cmd),
+                    |backend, cmd| run(&mut Ctx { backend, shared, db, cmd }),
+                );
+                match internal {
+                    Some(r) => Some(r),
+                    None => run(&mut Ctx { backend: &mut guarded, shared, db, cmd }),
+                }
+            }
             (None, Ok(Some(f))) => {
                 txn::run_in_txn(&mut guarded, shared, (name, db, cmd), f, |backend| {
                     run(&mut Ctx { backend, shared, db, cmd })

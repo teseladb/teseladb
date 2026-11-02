@@ -12,7 +12,7 @@ use teseladb_rest::api::{Executor, header};
 
 use crate::calls::{Ctx, Limits, call};
 use crate::jsonrpc::{
-    ErrorObject, INVALID_PARAMS, Incoming, METHOD_NOT_FOUND, Message, error_response, read,
+    ErrorObject, INVALID_PARAMS, Id, Incoming, METHOD_NOT_FOUND, Message, error_response, read,
     response,
 };
 use crate::resources;
@@ -65,6 +65,9 @@ pub struct Call<'a, E: Executor + ?Sized> {
     pub now_ms: u64,
     /// 16 random bytes per draw.
     pub random: &'a mut dyn FnMut() -> [u8; 16],
+    /// The `notifications/progress` of the call, which go before its result in an event stream
+    /// when the client asked for them and accepts one (FR-026).
+    pub progress: Vec<Value>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -81,10 +84,69 @@ fn hex(b: [u8; 16]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
+/// Whether `req` accepts an event stream.
+fn accepts_events(req: &Request) -> bool {
+    header(req, "Accept").is_some_and(|a| a.contains(teseladb_http::sse::EVENT_STREAM))
+}
+
 /// The node in session or export id `id` (`<node>.<random>`).
 pub fn node_of(id: &str) -> Option<u64> {
     id.split_once('.').and_then(|(n, _)| n.parse().ok())
 }
+
+/// The notification that cancels a request (FR-026).
+pub const CANCELLED: &str = "notifications/cancelled";
+/// The field of `_meta` that asks for `notifications/progress`.
+pub const PROGRESS_TOKEN: &str = "progressToken";
+
+/// The `comment` of the commands of request `id` of `connection_id`: what `currentOp` finds to
+/// cancel it.
+#[must_use]
+pub fn operation_tag(connection_id: &str, id: &Id) -> String {
+    let id = match id {
+        Id::Number(n) => n.to_string(),
+        Id::String(s) => format!("\"{s}\""),
+    };
+    format!("mcp:{connection_id}:{id}")
+}
+
+fn id_of(v: &Value) -> Option<Id> {
+    match v {
+        Value::String(s) => Some(Id::String(s.clone())),
+        Value::Number(_) => v.as_i64().map(Id::Number),
+        _ => None,
+    }
+}
+
+/// Kills the operations whose `comment` is `tag`, with `currentOp` and `killOp` and the
+/// credential of the request that cancels.
+fn cancel<E: Executor + ?Sized>(exec: &mut E, tag: &str) {
+    let find = teseladb_bson::Document::new().with("currentOp", 1).with("command.comment", tag);
+    let r = exec.run("admin", find);
+    let Some(teseladb_bson::Value::Array(ops)) = r.get("inprog") else { return };
+    for op in ops {
+        if let Some(opid) = op.as_document().and_then(|d| d.get("opid")) {
+            let kill = teseladb_bson::Document::new().with("killOp", 1).with("op", opid.clone());
+            let _ = exec.run("admin", kill);
+        }
+    }
+}
+
+/// `notifications/progress` of `token` after `n` documents.
+fn progress_note(token: &Value, n: u64) -> Value {
+    let mut p = Object::new();
+    p.insert(PROGRESS_TOKEN, token.clone());
+    p.insert("progress", Value::Number(teseladb_json::Number::UInt(n)));
+    let mut m = Object::new();
+    m.insert("jsonrpc", "2.0");
+    m.insert("method", "notifications/progress");
+    m.insert("params", Value::Object(p));
+    Value::Object(m)
+}
+
+/// The notification that the tools a session sees changed (`listChanged`, FR-023).
+pub const TOOLS_LIST_CHANGED: &str =
+    r#"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#;
 
 fn capabilities() -> Object {
     let mut list = Object::new();
@@ -155,6 +217,19 @@ impl Server {
         match incoming {
             Incoming::Single(m) => match self.message(m, session.as_ref(), revision_header, c) {
                 None => Response { status: 202, headers: Vec::new(), body: Vec::new() },
+                Some((200, body, extra)) if !c.progress.is_empty() && accepts_events(req) => {
+                    let mut out = Vec::new();
+                    for note in c.progress.drain(..).chain([Value::Object(body)]) {
+                        let data = to_string(&note).unwrap_or_default();
+                        out.extend(teseladb_http::sse::Event::data(data).encode());
+                    }
+                    let mut headers = vec![(
+                        "Content-Type".to_owned(),
+                        teseladb_http::sse::EVENT_STREAM.to_owned(),
+                    )];
+                    headers.extend(extra);
+                    Response { status: 200, headers, body: out }
+                }
                 Some((status, body, extra)) => json_response(status, &Value::Object(body), extra),
             },
             Incoming::Batch(items) => {
@@ -185,7 +260,19 @@ impl Server {
         revision_header: Option<&str>,
         c: &mut Call<'_, E>,
     ) -> Option<(u16, Object, Vec<(String, String)>)> {
-        let Message::Request { id, method, params } = m else { return None };
+        let (id, method, params) = match m {
+            Message::Request { id, method, params } => (id, method, params),
+            Message::Notification { method, params } if method == CANCELLED => {
+                let connection_id =
+                    session.map_or_else(|| format!("{}.stateless", self.node), |(s, _)| s.clone());
+                let request = params.as_ref().and_then(|p| p.get("requestId")).cloned();
+                if let Some(rid) = request.and_then(|v| id_of(&v)) {
+                    cancel(c.exec, &operation_tag(&connection_id, &rid));
+                }
+                return None;
+            }
+            _ => return None,
+        };
         let err =
             |status: u16, e: ErrorObject| Some((status, error_response(Some(&id), &e), Vec::new()));
         if method == "initialize" {
@@ -238,7 +325,7 @@ impl Server {
                 r.insert("tools", Value::Array(tools));
                 Ok(r)
             }
-            "tools/call" => self.tools_call(p, &connection_id, c),
+            "tools/call" => self.tools_call(p, &connection_id, &id, c),
             "resources/list" => Ok(resources::list(lock(&self.exports).keys())),
             "resources/templates/list" => Ok(resources::templates()),
             "resources/read" => {
@@ -247,6 +334,8 @@ impl Server {
                     exec: &mut *c.exec,
                     limits: c.options.limits,
                     connection_id: &connection_id,
+                    comment: None,
+                    progress: Vec::new(),
                 };
                 let export = |name: &str| lock(&self.exports).get(name).map(|(d, _)| d.clone());
                 resources::read(uri, &mut ctx, &c.options, revision, &export)
@@ -264,6 +353,7 @@ impl Server {
         &self,
         p: &Object,
         connection_id: &str,
+        id: &Id,
         c: &mut Call<'_, E>,
     ) -> Result<Object, ErrorObject> {
         let name = p.get("name").and_then(Value::as_str).unwrap_or_default();
@@ -285,9 +375,20 @@ impl Server {
         };
         check_args(t, args)
             .map_err(|m| ErrorObject::new(INVALID_PARAMS, format!("Invalid params: {m}")))?;
-        let mut ctx = Ctx { exec: &mut *c.exec, limits: c.options.limits, connection_id };
+        let mut ctx = Ctx {
+            exec: &mut *c.exec,
+            limits: c.options.limits,
+            connection_id,
+            comment: Some(operation_tag(connection_id, id)),
+            progress: Vec::new(),
+        };
         let mut r = Object::new();
-        match call(&mut ctx, name, args) {
+        let outcome = call(&mut ctx, name, args);
+        let token = p.get("_meta").and_then(|m| m.get(PROGRESS_TOKEN)).cloned();
+        if let Some(token) = token {
+            c.progress.extend(ctx.progress.iter().map(|n| progress_note(&token, *n)));
+        }
+        match outcome {
             Ok(out) => {
                 let mut content = vec![text(&out.summary)];
                 if let Some(data) = &out.data {

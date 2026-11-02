@@ -24,6 +24,7 @@ pub mod storage;
 pub mod txn;
 pub mod txn_append;
 pub mod txn_bank;
+pub mod zones;
 
 use teseladb_raftlog::Completions;
 

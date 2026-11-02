@@ -299,6 +299,9 @@ fn attempt_group<B: Backend + ?Sized>(
         Route::Open => buckets.iter().find(|b| b.n == open),
         Route::Query { .. } => lookup(&buckets, earliest(spec, group), spec.meta_field.is_some()),
     };
+    if let Route::Query { .. } = route {
+        note_lookup(backend, coll, spec)?;
+    }
     let docs: Vec<Document> = group.iter().map(|(_, d)| d.clone()).collect();
     let full = into.and_then(|b| full_for(spec, b, &docs));
     with_stats(shared, coll.id, |s| {
@@ -315,6 +318,105 @@ fn attempt_group<B: Backend + ?Sized>(
     });
     Ok(())
 }
+
+/// Stored rows: their keys and bytes.
+type Rows = Vec<(Vec<u8>, Vec<u8>)>;
+
+/// The buckets of `coll` a read with `filter` finds through an index of its buckets (015
+/// FR-008, T014): its conditions on the meta value and the time, as conditions on the buckets,
+/// go to the planner, which serves them with an index when one wins over reading the buckets in
+/// `_id` order (measured on a `refnode` 9.0.4 on 02-11-2026 with `$indexStats`); `None` when
+/// none does.
+pub fn indexed_buckets<B: Backend + ?Sized>(
+    backend: &mut B,
+    coll: &CollectionEntry,
+    spec: &BucketSpec,
+    filter: &Document,
+    concern: ReadConcern,
+) -> Result<Option<Rows>, CommandError> {
+    use super::plan_exec::{ReadPlan, USED_INDEXES, choose, parsed_filter, scanned};
+    let Some(on_buckets) = index_conditions(spec, filter) else { return Ok(None) };
+    let indexes = super::plan_exec::stored_indexes(backend, coll)?;
+    let parsed = parsed_filter(&on_buckets, None)?;
+    let read = ReadPlan {
+        filter: &on_buckets,
+        parsed: &parsed,
+        sort: Vec::new(),
+        limit: None,
+        hint: None,
+        vars: None,
+        concern,
+        intersect: false,
+        index_keys: false,
+    };
+    let Some(chosen) = choose(backend, coll, &indexes, &read)? else { return Ok(None) };
+    let names: Vec<Value> =
+        scanned(&indexes, &chosen.winner.access).into_iter().map(Value::from).collect();
+    backend.note_plan(Document::new().with(USED_INDEXES, Document::new().with("names", names)));
+    Ok(Some(chosen.winner.found))
+}
+
+/// The conditions of `filter` on the meta value and the time (at its top level and in its
+/// `$and`) as conditions on the buckets; `None` without any, or when they do not translate.
+fn index_conditions(spec: &BucketSpec, filter: &Document) -> Option<Document> {
+    let meta = spec.meta_field.as_deref();
+    let on = |k: &str| {
+        k == spec.time_field
+            || meta.is_some_and(|m| k == m || k.strip_prefix(m).is_some_and(|r| r.starts_with('.')))
+    };
+    let mut kept = Document::new();
+    let mut take = |d: &Document| {
+        for (k, v) in d.iter() {
+            if on(k) && kept.get(k).is_none() {
+                kept.push(k, v.clone());
+            }
+        }
+    };
+    take(filter);
+    if let Some(Value::Array(all)) = filter.get("$and") {
+        for c in all {
+            if let Value::Document(d) = c {
+                take(d);
+            }
+        }
+    }
+    kept.iter().next()?;
+    super::timeseries_filter::bucket_filter(spec, &kept).ok()
+}
+
+/// Notes the lookup of a bucket by an insert into `coll`: RefDb's query scans the index of the
+/// buckets on the meta value (measured on a `refnode` 9.0.4 on 02-11-2026: one access of
+/// `m_1_t_1` for each lookup).
+fn note_lookup<B: Backend + ?Sized>(
+    backend: &mut B,
+    coll: &CollectionEntry,
+    spec: &BucketSpec,
+) -> Result<(), CommandError> {
+    use teseladb_meta::indexes::IndexState as EntryState;
+    if spec.meta_field.is_none() {
+        return Ok(());
+    }
+    for entry in backend.indexes(coll.id)? {
+        if entry.state != EntryState::Ready {
+            continue;
+        }
+        let stored = RawDoc::from_bytes(&entry.spec)?;
+        let first = match stored.get("key").map(Value::from) {
+            Some(Value::Document(key)) => key.iter().next().map(|(k, _)| k.to_owned()),
+            _ => None,
+        };
+        if first.as_deref() == Some(META_FIELD) {
+            let names = vec![Value::from(entry.name)];
+            let used = Document::new().with("names", names);
+            backend.note_plan(Document::new().with(super::plan_exec::USED_INDEXES, used));
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
+/// The field of a bucket that holds its meta value.
+const META_FIELD: &str = "meta";
 
 /// What every group of an insert of measurements shares: the collection, its buckets, the
 /// insert's order, the write's rules and its statement number.
@@ -387,6 +489,7 @@ fn write_group<B: Backend + ?Sized>(
             let landed =
                 lookup(&stored, earliest(spec, group), spec.meta_field.is_some()).map(|b| b.n);
             with_stats(shared, coll.id, |s| s.looked_up(first, landed.is_some()));
+            note_lookup(backend, coll, spec)?;
             landing = landed.is_some();
             let n = landed.unwrap_or_else(|| next_free(&stored));
             buckets = Some(stored);

@@ -8,7 +8,7 @@ use crate::workloads::{
     meta2::Meta2Workload, multirange::MultiRangeWorkload, queries::Queries,
     range_docs::RangeDocsWorkload, relocate::RelocateWorkload, reshard::Reshard,
     special_collections::SpecialCollections, splits::SplitsWorkload, storage::StorageWorkload,
-    txn_append::Append, txn_bank::Bank,
+    txn_append::Append, txn_bank::Bank, zones::ZonesWorkload,
 };
 use crate::world::World;
 
@@ -62,6 +62,7 @@ impl Registry {
         r.register_workload("reshard", Reshard::boxed).expect("a new name");
         r.register_workload("search", SplitsWorkload::searching).expect("a new name");
         r.register_workload("vector", SplitsWorkload::vectors).expect("a new name");
+        r.register_workload("zones", ZonesWorkload::boxed).expect("a new name");
         r
     }
 

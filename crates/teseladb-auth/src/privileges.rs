@@ -132,9 +132,9 @@ impl Resource {
     /// Whether a role of database `db` may hold it: a role of `admin` anything, another only
     /// its own database.
     fn allowed_for(&self, db: &str) -> bool {
-        db == ADMIN_DB
-            || matches!(self, Resource::Ns { db: d, .. } if d == db)
-            || matches!(self, Resource::SystemBuckets { db: Some(d), .. } if d == db)
+        // A `system_buckets` resource only in `admin`, also on the role's own database
+        // (measured on a `refnode` 9.0.4 on 02-11-2026: 49).
+        db == ADMIN_DB || matches!(self, Resource::Ns { db: d, .. } if d == db)
     }
 }
 
@@ -198,6 +198,30 @@ impl Privilege {
         }
         Ok(Privilege { resource, actions })
     }
+}
+
+/// The actions on the cluster a user of a tenant other than the default one keeps (013 FR-024,
+/// D-116): those that only reach its own databases or its own command. Every other action on the
+/// cluster (`shutdown`, `getLog`, `inprog`, `serverStatus`...) concerns what all tenants share.
+pub const TENANT_CLUSTER_ACTIONS: [ActionType; 3] =
+    [ActionType::BypassDefaultMaxTimeMS, ActionType::ListDatabases, ActionType::UseUUID];
+
+/// Privileges `privs` as a user of a tenant other than the default one has them (013 FR-024):
+/// on the cluster only [`TENANT_CLUSTER_ACTIONS`], and nothing on `anyResource`; its databases
+/// are its tenant's, so those privileges stay.
+pub fn of_tenant(privs: Vec<Privilege>) -> Vec<Privilege> {
+    privs
+        .into_iter()
+        .filter_map(|p| match p.resource {
+            Resource::Any => None,
+            Resource::Cluster => {
+                let actions: Vec<ActionType> =
+                    p.actions.into_iter().filter(|a| TENANT_CLUSTER_ACTIONS.contains(a)).collect();
+                (!actions.is_empty()).then_some(Privilege { resource: Resource::Cluster, actions })
+            }
+            _ => Some(p),
+        })
+        .collect()
 }
 
 /// Adds `more` to `set`, merging the actions of privileges on the same resource, as RefDb
