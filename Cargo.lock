@@ -379,6 +379,7 @@ dependencies = [
  "teseladb-raft",
  "teseladb-raftlog",
  "teseladb-range",
+ "teseladb-search",
  "teseladb-testkv",
  "teseladb-txn",
  "teseladb-types",

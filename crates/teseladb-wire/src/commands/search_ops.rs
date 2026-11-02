@@ -670,6 +670,14 @@ fn apply_changes<B: Backend + ?Sized>(
 /// Whether segments that read every range up to the marks `resolved` reach a search's mark
 /// `target` (FR-010): every range has to.
 pub fn segments_reached(resolved: impl IntoIterator<Item = Hlc>, target: Hlc) -> bool {
+    // Faulty variant (011 T018): the search answers with what its segments hold, and the
+    // `search` workload finds an answer below its mark.
+    #[cfg(teseladb_bug = "search_without_wait")]
+    return {
+        let _ = (resolved.into_iter().count(), target);
+        true
+    };
+    #[cfg(not(teseladb_bug = "search_without_wait"))]
     resolved.into_iter().all(|r| r >= target)
 }
 
