@@ -65,7 +65,7 @@ const PRIMARY_ONLY: [&str; 14] = [
     "dropIndexes",
     "renameCollection",
     "collMod",
-    "applyOps",
+    super::apply_ops::APPLY_OPS,
     "convertToCapped",
 ];
 
