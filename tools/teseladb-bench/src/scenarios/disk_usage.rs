@@ -17,9 +17,9 @@ use teseladb_io::FileDisk;
 use teseladb_server::client_listener::ClientConfig;
 use teseladb_server::node::{Node, NodeConfig};
 
-use super::ycsb::{insert, record};
+use super::ycsb::{insert, record_doc};
 use super::ycsb_gen::Rng;
-use super::{DataDir, at};
+use super::{DataDir, at, msg};
 use crate::cli::Args;
 use crate::client::{Client, doc};
 use crate::report::Report;
@@ -60,7 +60,7 @@ pub fn run(args: &Args) -> Result<Report, String> {
         ..NodeConfig::default()
     };
     cfg.lsm.memtable_bytes = MEMTABLE_BYTES;
-    let node = Node::start(cfg, || FileDisk::open(&path), None).map_err(|e| format!("{e:?}"))?;
+    let node = Node::start(cfg, || FileDisk::open(&path), None).map_err(msg)?;
     let measured = measure(args, &node, &path);
     node.stop();
     let (bson, sst, total) = measured?;
@@ -92,11 +92,11 @@ fn measure(args: &Args, node: &Node<FileDisk>, dir: &Path) -> Result<(u64, u64, 
     let mut i = 0;
     while i < args.records {
         let n = BATCH.min(args.records - i);
-        let docs: Vec<Value> = (i..i + n).map(|j| record(j, &mut rng)).collect();
-        for d in &docs {
-            if let Value::Document(d) = d {
-                bson += d.to_bytes().map_err(|e| format!("{e:?}"))?.len() as u64;
-            }
+        let mut docs = Vec::new();
+        for j in i..i + n {
+            let d = record_doc(j, &mut rng);
+            bson += d.to_bytes().map_err(msg)?.len() as u64;
+            docs.push(Value::Document(d));
         }
         insert_retrying(&mut c, docs)?;
         i += n;
@@ -144,6 +144,13 @@ mod tests {
         assert_eq!(bytes_under(&d.path, ".sst").unwrap(), 10);
         assert_eq!(bytes_under(&d.path, "").unwrap(), 15);
         assert!(bytes_under(&d.path.join("missing"), "").is_err());
+    }
+
+    #[test]
+    fn no_records_is_no_bytes() {
+        let r = run(&Args { records: 0, ..Args::default() }).unwrap();
+        let ratio = r.metrics.iter().find(|m| m.name == "disk_usage.sst_over_bson").unwrap();
+        assert_eq!(ratio.value, 0.0);
     }
 
     #[test]

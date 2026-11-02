@@ -22,12 +22,17 @@ const LOAD_BATCH: u64 = 1000;
 const SEED: u64 = 0x5943_5342;
 
 pub(crate) fn record(i: u64, rng: &mut Rng) -> Value {
+    Value::Document(record_doc(i, rng))
+}
+
+/// Record `i`: its key and ten fields of 100 bytes.
+pub(crate) fn record_doc(i: u64, rng: &mut Rng) -> teseladb_bson::Document {
     let mut pairs = vec![("_id", Value::String(key(i)))];
     let names: Vec<String> = (0..FIELDS).map(|f| format!("field{f}")).collect();
     for n in &names {
         pairs.push((n.as_str(), Value::String(field(rng))));
     }
-    Value::Document(doc(pairs))
+    doc(pairs)
 }
 
 pub(crate) fn insert(c: &mut Client, docs: Vec<Value>) -> Result<(), String> {
