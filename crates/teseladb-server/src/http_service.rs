@@ -32,6 +32,8 @@ pub struct NodeHttp {
     state: std::sync::Arc<dyn NodeState>,
     /// Requests need a credential (a node started without `--insecure`).
     auth: bool,
+    /// Backends of finished requests, for the next ones.
+    backends: Mutex<Vec<ServerBackend>>,
     options: Mutex<Option<(Instant, HttpOptions)>>,
 }
 
@@ -46,7 +48,13 @@ impl NodeHttp {
     /// with `auth`, each request authenticates (013).
     #[must_use]
     pub fn new(handle: NodeHandle, state: std::sync::Arc<dyn NodeState>, auth: bool) -> NodeHttp {
-        NodeHttp { handle, state, auth, options: Mutex::new(None) }
+        NodeHttp {
+            handle,
+            state,
+            auth,
+            backends: Mutex::new(Vec::new()),
+            options: Mutex::new(None),
+        }
     }
 }
 
@@ -58,11 +66,23 @@ fn not_found() -> Reply {
 impl NodeHttp {
     /// The REST answer to `request` of `who`.
     fn rest(&self, request: &Request, who: &Credential) -> Response {
-        let mut exec = NodeExecutor::new(&self.handle, self.state.as_ref());
-        if let Err(r) = authenticate(&mut exec, request, who, self.auth) {
-            return r;
-        }
-        teseladb_rest::api::handle(request, &mut exec)
+        // A backend opens its own rings to the cores (012 FR-005), which the cores take some time
+        // to pick up: the requests reuse them.
+        let backend = self.backends.lock().unwrap_or_else(PoisonError::into_inner).pop();
+        let backend = backend.unwrap_or_else(|| {
+            let seed = std::hash::BuildHasher::hash_one(
+                &std::collections::hash_map::RandomState::new(),
+                0u8,
+            );
+            ServerBackend::new(self.handle.clone(), seed)
+        });
+        let mut exec = NodeExecutor::new(&self.handle, backend, self.state.as_ref());
+        let answer = match authenticate(&mut exec, request, who, self.auth) {
+            Ok(()) => teseladb_rest::api::handle(request, &mut exec),
+            Err(r) => r,
+        };
+        self.backends.lock().unwrap_or_else(PoisonError::into_inner).push(exec.into_backend());
+        answer
     }
 
     /// The answer, encoded, to a request another node forwarded ([`Forwarded`]); an empty

@@ -252,6 +252,41 @@ impl Running {
     }
 }
 
+/// What wakes a connection: bytes from its client, or a part of an answer.
+enum Event {
+    /// Bytes read; `None` when the client closed or the socket failed.
+    Read(Option<Vec<u8>>),
+    /// A part of the answer to request `.0`.
+    Part(u32, Part),
+}
+
+/// Reads `sock` on its own thread into `tx` until the client closes or `closed` is set, so the
+/// connection wakes at once for bytes and for answers alike.
+fn spawn_reader(
+    mut sock: TcpStream,
+    tx: mpsc::Sender<Event>,
+    closed: Arc<AtomicBool>,
+) -> io::Result<()> {
+    let run = move || {
+        let mut buf = vec![0u8; READ_CHUNK];
+        while !closed.load(Ordering::SeqCst) {
+            let read = match sock.read(&mut buf) {
+                Ok(0) => None,
+                Ok(n) => Some(buf[..n].to_vec()),
+                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                    continue;
+                }
+                Err(_) => None,
+            };
+            let gone = read.is_none();
+            if tx.send(Event::Read(read)).is_err() || gone {
+                return;
+            }
+        }
+    };
+    thread::Builder::new().name("teseladb-http-read".into()).spawn(run).map(drop)
+}
+
 /// One connection: reads, hands requests to their threads, writes their answers.
 fn serve(mut sock: TcpStream, shared: &Arc<Shared>) -> io::Result<()> {
     sock.set_read_timeout(Some(POLL))?;
@@ -262,20 +297,27 @@ fn serve(mut sock: TcpStream, shared: &Arc<Shared>) -> io::Result<()> {
         None => Transport::Plain,
     };
     let mut conn: Option<Conn> = None;
-    let (tx, rx) = mpsc::channel::<(u32, Part)>();
+    let (tx, rx) = mpsc::channel::<Event>();
+    let closed = Arc::new(AtomicBool::new(false));
+    spawn_reader(sock.try_clone()?, tx.clone(), closed.clone())?;
     let mut running: BTreeMap<u32, Running> = BTreeMap::new();
-    let mut buf = vec![0u8; READ_CHUNK];
     let opened = now_ms();
+    let mut first = rx.recv_timeout(POLL).ok();
     loop {
         let now = now_ms();
         let mut plain = Vec::new();
         let mut out = Vec::new();
-        let peer_gone = match sock.read(&mut buf) {
-            Ok(0) => true,
-            Ok(n) => !transport.incoming(&buf[..n], &mut plain, &mut out),
-            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => false,
-            Err(e) => return Err(e),
-        };
+        let mut parts = Vec::new();
+        let mut peer_gone = false;
+        for event in first.take().into_iter().chain(std::iter::from_fn(|| rx.try_recv().ok())) {
+            match event {
+                Event::Read(Some(bytes)) => {
+                    peer_gone |= !transport.incoming(&bytes, &mut plain, &mut out);
+                }
+                Event::Read(None) => peer_gone = true,
+                Event::Part(id, part) => parts.push((id, part)),
+            }
+        }
         if conn.is_none() && (transport.tls_established() || transport.is_plain()) {
             let protocol = match transport.tls_established() {
                 true => Some(http2::negotiated(transport.alpn())),
@@ -294,7 +336,7 @@ fn serve(mut sock: TcpStream, shared: &Arc<Shared>) -> io::Result<()> {
                     start(incoming, c, &caller, shared, &tx, &mut running);
                 }
             }
-            while let Ok((id, part)) = rx.try_recv() {
+            for (id, part) in parts {
                 c.touch(now);
                 deliver(c, id, part, shared, &mut running);
             }
@@ -314,7 +356,10 @@ fn serve(mut sock: TcpStream, shared: &Arc<Shared>) -> io::Result<()> {
         if peer_gone || expired || done || shared.stop.load(Ordering::SeqCst) {
             break;
         }
+        first = rx.recv_timeout(POLL).ok();
     }
+    closed.store(true, Ordering::SeqCst);
+    let _ = sock.shutdown(std::net::Shutdown::Both);
     for (_, r) in std::mem::take(&mut running) {
         r.cancelled.store(true, Ordering::SeqCst);
         r.end(shared, CLIENT_GONE);
@@ -337,7 +382,7 @@ fn start(
     c: &mut Conn,
     caller: &Caller,
     shared: &Arc<Shared>,
-    tx: &mpsc::Sender<(u32, Part)>,
+    tx: &mpsc::Sender<Event>,
     running: &mut BTreeMap<u32, Running>,
 ) {
     let (id, request) = match incoming {
@@ -383,7 +428,7 @@ fn start(
     let cors_fields = cors.response_headers(origin, false);
     let (service, caller, tx) = (shared.service.clone(), caller.clone(), tx.clone());
     let spawned = thread::Builder::new().name("teseladb-http-req".into()).spawn(move || {
-        let send = |part| tx.send((id, part)).is_ok();
+        let send = |part| tx.send(Event::Part(id, part)).is_ok();
         match service.serve(&request, &caller, &cancelled) {
             Reply::Whole(mut r) => {
                 r.headers.extend(cors_fields);

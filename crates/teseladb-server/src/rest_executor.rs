@@ -43,19 +43,27 @@ impl std::fmt::Debug for NodeExecutor<'_> {
 }
 
 impl<'a> NodeExecutor<'a> {
-    /// An executor on the node of `handle`, with the node's state from `state`.
+    /// An executor on the node of `handle` with `backend`, with the node's state from `state`.
     #[must_use]
-    pub fn new(handle: &NodeHandle, state: &'a dyn NodeState) -> NodeExecutor<'a> {
-        let seed =
-            std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), 0u8);
+    pub fn new(
+        handle: &NodeHandle,
+        backend: ServerBackend,
+        state: &'a dyn NodeState,
+    ) -> NodeExecutor<'a> {
         NodeExecutor {
             conn: Connection::new(0),
             x509_user: None,
-            backend: ServerBackend::new(handle.clone(), seed),
+            backend,
             shared: handle.sessions.clone(),
             state,
             node: handle.node.0,
         }
+    }
+
+    /// Its backend, for the next request.
+    #[must_use]
+    pub fn into_backend(self) -> ServerBackend {
+        self.backend
     }
 }
 
