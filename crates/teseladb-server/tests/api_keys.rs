@@ -290,3 +290,52 @@ fn the_audit_log_records_each_request_without_bodies_keys_or_tokens() {
     drop(node.stop());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// 019 T025, FR-020: `teseladb mcp` relays stdio to `/mcp` with the key of `TESELADB_API_KEY`,
+/// keeps the session `initialize` opened and refuses to go on with a key the node refuses.
+#[test]
+fn mcp_over_stdio_relays_each_message_with_the_key() {
+    use teseladb_server::mcp_stdio::{McpOpts, run};
+    let node = start(Vec::new());
+    let (code, out, err) = admin(&node, &["apikey", "create", "--user", "root", "--db", "admin"]);
+    assert_eq!(code, 0, "{err}");
+    let key = out.trim().to_owned();
+    let o = McpOpts {
+        uri: format!("http://{}", node.http_addrs()[0]),
+        ca_file: None,
+        certificate_key_file: None,
+    };
+    let input = concat!(
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#,
+        "\n",
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        "\n\n",
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+        "\n",
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list-connections","arguments":{}}}"#,
+        "\n",
+    );
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let code = until("the key", || {
+        let (o2, e2) = (&mut Vec::new(), &mut Vec::new());
+        let c = run(&o, &mut input.as_bytes(), o2, e2, Some(key.clone()));
+        (c == 0).then(|| {
+            out = o2.clone();
+            err = e2.clone();
+            c
+        })
+    });
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+    let text = String::from_utf8(out).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 3, "{text}");
+    assert!(lines[0].contains(r#""protocolVersion":"2025-06-18""#), "{text}");
+    assert!(lines[1].contains(r#""name":"find""#), "{text}");
+    assert!(lines[2].contains(r#""id":3"#) && lines[2].contains("connections"), "{text}");
+    // Another key: the relay stops with an error.
+    let other = teseladb_auth::apikey::encode_key(&[3; 32]);
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    assert_eq!(run(&o, &mut input.as_bytes(), &mut out, &mut err, Some(other)), 1);
+    assert!(String::from_utf8_lossy(&err).contains("401"));
+    drop(node.stop());
+}
