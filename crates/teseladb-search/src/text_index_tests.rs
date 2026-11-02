@@ -23,9 +23,9 @@ fn plain() -> Sensitivity {
     Sensitivity::default()
 }
 
-fn close(have: &[(i32, f64)], want: &[(i32, f64)]) -> bool {
+fn same(have: &[(i32, f64)], want: &[(i32, f64)]) -> bool {
     have.len() == want.len()
-        && have.iter().zip(want).all(|(h, w)| h.0 == w.0 && (h.1 - w.1).abs() < 1e-12)
+        && have.iter().zip(want).all(|(h, w)| h.0 == w.0 && h.1.to_bits() == w.1.to_bits())
 }
 
 #[test]
