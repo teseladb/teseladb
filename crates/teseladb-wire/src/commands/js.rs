@@ -87,6 +87,17 @@ fn next_function_id() -> u64 {
 
 /// Runs `p` with the node's context.
 fn run(p: &Program, this: Option<&Document>, args: &[Value]) -> Result<Value, JsError> {
+    run_full(p, this, args, None, None)
+}
+
+/// [`run`] with `mapReduce`'s `emit` and `scope`.
+fn run_full(
+    p: &Program,
+    this: Option<&Document>,
+    args: &[Value],
+    emit: Option<&mut dyn FnMut(Value, Value)>,
+    scope: Option<&Document>,
+) -> Result<Value, JsError> {
     let deadline = DEADLINE_MS.with(Cell::get);
     let clock = CLOCK.get().copied();
     let passed = move || match (deadline, clock) {
@@ -97,6 +108,11 @@ fn run(p: &Program, this: Option<&Document>, args: &[Value]) -> Result<Value, Js
         now_ms: NOW_MS.with(Cell::get),
         seed: super::engines::next_seed(),
         deadline: Some(&passed),
+        emit: match emit {
+            Some(e) => Some(&mut *e),
+            None => None,
+        },
+        scope,
         ..JsCtx::default()
     };
     p.call(this, args, &mut ctx)
@@ -236,6 +252,26 @@ fn compile_error(text: &str, e: &JsError) -> MqlError {
             e.message()
         ),
     )
+}
+
+/// Whether server-side JavaScript runs on this node now.
+pub(crate) fn is_enabled() -> bool {
+    enabled()
+}
+
+/// Calls `code` (a function, or a script whose last value is the result) for `mapReduce`, with
+/// `this`, `args`, `emit` and the globals of `scope`; an error is worded as for `$function`.
+pub(crate) fn call_map_reduce(
+    code: &Value,
+    this: Option<&Document>,
+    args: &[Value],
+    emit: Option<&mut dyn FnMut(Value, Value)>,
+    scope: Option<&Document>,
+) -> Result<Value, MqlError> {
+    let text = code_text(code).unwrap_or_default();
+    let p = program(text).map_err(|e| compile_error(text, &e))?;
+    run_full(&p, this, args, emit, scope)
+        .map_err(|e| runtime_error("Failed to invoke JS function", &e))
 }
 
 /// The engine every scope of the node calls.

@@ -45,6 +45,7 @@ pub mod js;
 pub mod kinds;
 pub mod list_catalog;
 pub mod maintenance;
+pub mod mapreduce;
 pub mod mutation;
 pub mod names;
 pub mod out_merge;
@@ -782,7 +783,7 @@ impl<B: Backend + ?Sized> Ctx<'_, B> {
 }
 
 /// The commands of this module.
-const NAMES: [&str; 79] = [
+const NAMES: [&str; 80] = [
     aggregate::AGGREGATE,
     query_settings::SET_QUERY_SETTINGS,
     query_settings::REMOVE_QUERY_SETTINGS,
@@ -811,6 +812,7 @@ const NAMES: [&str; 79] = [
     reshard::RESHARD_COLLECTION,
     reshard::REFINE_COLLECTION_SHARD_KEY,
     reshard::ABORT_RESHARD_COLLECTION,
+    mapreduce::MAP_REDUCE,
     crud::INSERT,
     crud::UPDATE,
     crud::DELETE,
@@ -1175,6 +1177,7 @@ fn dispatch<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
         reshard::RESHARD_COLLECTION => reshard::reshard_collection(ctx),
         reshard::REFINE_COLLECTION_SHARD_KEY => reshard::refine_collection_shard_key(ctx),
         reshard::ABORT_RESHARD_COLLECTION => reshard::abort_reshard_collection(ctx),
+        mapreduce::MAP_REDUCE => mapreduce::map_reduce(ctx),
         crud::INSERT => crud::insert(ctx),
         crud::UPDATE => crud::update(ctx),
         crud::DELETE => crud::delete(ctx),
