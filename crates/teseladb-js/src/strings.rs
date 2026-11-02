@@ -170,10 +170,13 @@ fn index_of(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 fn last_index_of(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let u = units(&this_str(it, this)?);
     let n = units(&it.str_of(&arg(a, 0))?);
+    let pos = it.number_of(&arg(a, 1))?;
     if n.len() > u.len() {
         return Ok(Val::Num(-1.0));
     }
-    let r = (0..=u.len() - n.len()).rev().find(|&i| u[i..i + n.len()] == n[..]);
+    let last = u.len() - n.len();
+    let from = if pos.is_nan() { last } else { (pos.max(0.0) as usize).min(last) };
+    let r = (0..=from).rev().find(|&i| u[i..i + n.len()] == n[..]);
     Ok(Val::Num(r.map_or(-1.0, |i| i as f64)))
 }
 
@@ -496,9 +499,13 @@ fn value_of(it: &mut Interp, this: &Val, _: &[Val]) -> R {
 fn locale_compare(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let s = this_str(it, this)?;
     let t = it.str_of(&arg(a, 0))?;
-    Ok(Val::Num(match s.cmp(&t) {
-        std::cmp::Ordering::Less => -1.0,
-        std::cmp::Ordering::Equal => 0.0,
-        std::cmp::Ordering::Greater => 1.0,
-    }))
+    // The engine of RefDb 9.0.4 has no ICU: the difference of the first UTF-16 units that
+    // differ, else of the lengths (measured: `"Abc".localeCompare("abc")` is -32).
+    let (x, y) = (units(&s), units(&t));
+    let d = x
+        .iter()
+        .zip(&y)
+        .find(|(p, q)| p != q)
+        .map_or_else(|| x.len() as f64 - y.len() as f64, |(p, q)| f64::from(*p) - f64::from(*q));
+    Ok(Val::Num(d))
 }

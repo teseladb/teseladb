@@ -163,7 +163,7 @@ impl Parser<'_> {
                             return Ok(atom);
                         }
                         if max < min {
-                            return Err("numbers out of order in {} quantifier".into());
+                            return Err("numbers out of order in {} quantifier.".into());
                         }
                         (min, max)
                     }
@@ -224,6 +224,9 @@ impl Parser<'_> {
                 let index = if capture && look.is_none() {
                     self.groups += 1;
                     if let Some(n) = name {
+                        if self.names.iter().any(|(m, _)| *m == n) {
+                            return Err("duplicate capture group name in regular expression".into());
+                        }
                         self.names.push((n, self.groups));
                     }
                     Some(self.groups)
@@ -232,7 +235,7 @@ impl Parser<'_> {
                 };
                 let inner = self.alt()?;
                 if self.peek() != Some(')') {
-                    return Err("missing ) in regular expression".into());
+                    return Err("unterminated parenthetical".into());
                 }
                 self.i += 1;
                 match look {
@@ -277,7 +280,7 @@ impl Parser<'_> {
                 let name = self.text_from(start);
                 self.i += 1;
                 let idx = self.names.iter().find(|(n, _)| *n == name).map(|(_, i)| *i);
-                Node::BackRef(idx.ok_or("invalid named reference")?)
+                Node::BackRef(idx.ok_or("invalid named capture reference in regular expression")?)
             }
             '1'..='9' if !in_class => {
                 self.i -= 1;
@@ -344,7 +347,7 @@ impl Parser<'_> {
         }
         let mut items = Vec::new();
         loop {
-            let Some(c) = self.peek() else { return Err("missing ] after character class".into()) };
+            let Some(c) = self.peek() else { return Err("unterminated character class".into()) };
             self.i += 1;
             if c == ']' {
                 break;
@@ -635,8 +638,7 @@ fn parts(it: &Interp, v: &Val) -> R<(Name, Name)> {
 }
 
 fn compiled(it: &Interp, src: &str, flags: &str) -> R<Regex> {
-    compile(src, flags)
-        .map_err(|e| it.error("SyntaxError", &format!("invalid regular expression: {e}")))
+    compile(src, flags).map_err(|e| it.error("SyntaxError", &e))
 }
 
 /// Checks a pattern when a literal or `new RegExp` makes it.

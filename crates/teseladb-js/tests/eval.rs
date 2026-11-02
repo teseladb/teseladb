@@ -371,7 +371,7 @@ fn regular_expressions_follow_ecmascript() {
     let e = Program::compile("function(){ return /(/ }")
         .and_then(|p| p.call(None, &[], &mut JsCtx::default()))
         .unwrap_err();
-    assert!(e.message().contains("invalid regular expression"), "{e:?}");
+    assert!(e.message().contains("unterminated parenthetical"), "{e:?}");
 }
 
 /// A backslash that does not start a `\u` escape is refused instead of read as an empty name

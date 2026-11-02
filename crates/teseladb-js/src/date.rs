@@ -258,6 +258,9 @@ pub fn install(it: &mut Interp, g: &ObjRef) -> R<()> {
         &c,
         "UTC",
         |it, _, a| {
+            if a.is_empty() {
+                return Ok(Val::Num(f64::NAN));
+            }
             let mut parts = Vec::new();
             for x in a.iter().take(7) {
                 parts.push(it.number_of(x)?);

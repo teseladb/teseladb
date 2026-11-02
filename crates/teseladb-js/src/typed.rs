@@ -722,10 +722,18 @@ fn to_base64(it: &mut Interp, this: &Val, _: &[Val]) -> R {
 
 fn from_hex(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     let Val::Str(s) = arg(a, 0) else { return it.type_error("fromHex requires a string") };
-    let digits: Option<Vec<u8>> = s.chars().map(|c| c.to_digit(16).map(|d| d as u8)).collect();
-    let Some(d) = digits.filter(|d| d.len() % 2 == 0) else {
+    if s.chars().count() % 2 != 0 {
         return Err(it.error("SyntaxError", "hex-string must have an even number of characters"));
-    };
+    }
+    let mut d = Vec::with_capacity(s.len());
+    for c in s.chars() {
+        match c.to_digit(16) {
+            Some(x) => d.push(x as u8),
+            None => {
+                return Err(it.error("SyntaxError", &format!("'{c}' is not a valid hex-digit")));
+            }
+        }
+    }
     let bytes: Vec<Val> = d.chunks(2).map(|p| Val::Num(f64::from(p[0] * 16 + p[1]))).collect();
     Ok(Val::Obj(typed_from(it, Ty::U8, &bytes)?))
 }

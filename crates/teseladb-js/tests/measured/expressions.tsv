@@ -1681,3 +1681,76 @@ BigInt(1) + 1	E:TypeError:can't convert BigInt to number
 (() => { var w = 1 ? () => new Error().stack : 0; return w() })()	S:v</w@wasm:function:1:58\nv<@wasm:function:1:88\n@wasm:function:1:94\n
 (() => { const h = (x = () => new Error().stack) => x(); return h() })()	S:x@wasm:function:1:61\nh@wasm:function:1:83\nv<@wasm:function:1:95\n@wasm:function:1:101\n
 (() => { let z; z = [0].map(() => () => new Error().stack)[0]; return z() })()	S:v</z</<@wasm:function:1:71\nv<@wasm:function:1:101\n@wasm:function:1:107\n
+(() => { const d = new Date(0); return [d.getFullYear(), d.getMonth(), d.getDate(), d.getHours(), d.getMinutes(), d.getSeconds(), d.getMilliseconds(), d.getDay()].join() })()	S:1970,0,1,0,0,0,0,4
+(() => { const d = new Date(0); d.setFullYear(2001, 2, 3); d.setHours(4, 5, 6, 7); return d.toISOString() })()	S:2001-03-03T04:05:06.007Z
+(() => { const d = new Date(0); d.setMonth(5); d.setDate(9); d.setMinutes(8); d.setSeconds(7); d.setMilliseconds(6); return d.getTime() })()	J:13738087006
+(() => { const d = new Date(0); d.setUTCFullYear(1999); d.setUTCMonth(1, 2); d.setUTCHours(3); return d.toISOString() })()	S:1999-02-02T03:00:00.000Z
+(() => { const d = new Date(NaN); d.setHours(1); return String(d.getTime()) })()	S:NaN
+new Date(2020, 0, 1, 2, 3, 4, 5).toISOString()	S:2020-01-01T02:03:04.005Z
+Date.UTC(2020) + "," + Date.UTC(2020, 13) + "," + Date.UTC()	S:1577836800000,1612137600000,NaN
+new Date(8.64e15 + 1).getTime()	J:null
+new Date("2020-01-01T00:00:00.000+01:00").toISOString()	S:2019-12-31T23:00:00.000Z
+new Date("garbage").toString()	S:Invalid Date
+Date.parse("2020-02-30")	J:1583020800000
+new Date(0).toUTCString() + "|" + new Date(0).toDateString()	S:Thu, 01 Jan 1970 00:00:00 GMT|Thu Jan 01 1970
+new Date(-62198755200000).toISOString()	S:-000001-01-01T00:00:00.000Z
+new Date(253402300800000).toISOString()	S:+010000-01-01T00:00:00.000Z
+new Date(0).getTimezoneOffset()	J:0
+JSON.stringify(new Date(NaN))	S:null
+new Date(0).toJSON()	S:1970-01-01T00:00:00.000Z
+(() => { const a = new Uint8Array([1, 2, 3]); return [a.subarray(1).join(), a.slice(-2).join(), a.indexOf(2), a.lastIndexOf(3), a.includes(9), a.at(-1), a.reverse().join(), a.fill(7, 1).join()].join("|") })()	S:2,3|2,3|1|2|false|3|3,2,1|3,7,7
+(() => { const a = new Float64Array(3); a.set([1.5, 2.5], 1); return a.join() + "|" + a.map(x => x * 2).join() + "|" + a.filter(x => x).length })()	S:0,1.5,2.5|0,3,5|2
+(() => { const a = new Int16Array([3, 1, 2]); a.sort(); return a.join() + "|" + a.toSorted((x, y) => y - x).join() + "|" + a.toReversed().join() + "|" + a.with(0, 9).join() })()	S:1,2,3|3,2,1|3,2,1|9,2,3
+(() => { const b = new ArrayBuffer(8); const v = new DataView(b); v.setInt16(0, -2); v.setFloat32(2, 1.5, true); return [v.getInt16(0), v.getUint16(0), v.getFloat32(2, true), v.getUint8(1), b.byteLength, b.slice(2).byteLength].join() })()	S:-2,65534,1.5,254,8,6
+(() => { const v = new DataView(new ArrayBuffer(4)); return v.getInt32(2) })()	E:RangeError:offset is outside the bounds of the DataView
+new Uint8Array(new ArrayBuffer(4), 1, 2).length	J:2
+new Uint8Array(new ArrayBuffer(4), 3, 2)	E:RangeError:attempting to construct out-of-bounds Uint8Array on ArrayBuffer
+new Int32Array(new ArrayBuffer(5))	E:RangeError:buffer length for Int32Array should be a multiple of 4
+Uint8Array.from([1, 2], x => x * 3).join() + "|" + Uint8Array.of(4, 5).join()	S:3,6|4,5
+new Uint8Array([255, 256, -1]).join() + "|" + new Uint8ClampedArray([300, -5, 1.5]).join() + "|" + new Int8Array([200]).join()	S:255,0,255|255,0,2|-56
+(() => { const a = new BigInt64Array(2); a[0] = 5n; return String(a[0]) + typeof a[1] })()	S:5bigint
+new Uint8Array([1, 2]).toHex()	S:0102
+Uint8Array.fromHex("0aff").join()	S:10,255
+Uint8Array.fromBase64("AQID").join() + "|" + new Uint8Array([1, 2, 3]).toBase64()	S:1,2,3|AQID
+Uint8Array.fromHex("zz")	E:SyntaxError:'z' is not a valid hex-digit
+Object.prototype.toString.call(new Float32Array(1)) + new Float32Array(1)[Symbol.toStringTag]	S:[object Float32Array]Float32Array
+[...new Uint8Array([7, 8]).entries()].join("|")	S:0,7|1,8
+new Uint8Array([1, 2, 3]).every(x => x > 0) + "," + new Uint8Array([1]).some(x => x > 5) + "," + new Uint8Array([4, 5]).find(x => x > 4) + "," + new Uint8Array([4, 5]).findIndex(x => x > 9) + "," + new Uint8Array([1, 2]).reduce((a, b) => a + b) + "," + new Uint8Array([1, 2]).reduceRight((a, b) => a - b)	S:true,false,5,-1,3,1
+new Uint8Array([1, 2, 3]).copyWithin(0, 1).join()	S:2,3,3
+new Uint8Array(2).buffer.byteLength + "," + new Uint16Array(3).byteLength + "," + new Uint16Array(3).BYTES_PER_ELEMENT	S:2,6,2
+Promise.reject(1)	J:{}
+Promise.allSettled([])	J:{}
+Promise.race([])	J:{}
+Promise.any([])	J:{}
+typeof Promise.resolve(1)	S:object
+(() => { const r = /(?<y>\d{4})-(?<m>\d\d)/.exec("on 2020-05!"); return [r.index, r.groups.y, r.groups.m, r[0]].join() })()	S:3,2020,05,2020-05
+"aBc".replace(/b/i, "[$&]") + "|" + "abc".replace(/(b)/, "$1$1$`$'$$") + "|" + "x".replace(/(?<n>x)/, "$<n>!")	S:a[B]c|abbac$c|x!
+/a{2,3}/.test("aa") + "," + /a{2,}?/.exec("aaaa")[0] + "," + /^(?:a|b)+$/.test("abab") + "," + /\bfoo\B/.test("foox") + "," + /(?=a)a/.test("a") + "," + /(?!a)b/.test("b") + "," + /(?<=a)b/.test("ab") + "," + /(?<!a)b/.test("cb")	S:true,aa,true,true,true,true,true,true
+/[^\d\s]+/.exec("12 ab")[0] + "|" + /[\w-]+/.exec("a-b c")[0] + "|" + /\x41B\cJ/.test("AB\n") + "|" + /[a-c]/i.test("B") + "|" + /\S\W\D/.test("a!x")	S:ab|a-b|true|true|true
+/(a)|(b)/.exec("b").join() + "|" + /(a)\1/.test("aa") + "|" + /(?<q>a)\k<q>/.test("aa") + "|" + /./s.test("\n") + "|" + /^b/m.test("a\nb") + "|" + /a$/m.test("a\nb")	S:b,,b|true|true|true|true|true
+"a1b2c3".split(/\d/, 2).join() + "|" + "abc".split("").length + "|" + "a,b,".split(",").length + "|" + "".split(/x/).length + "|" + "".split("").length	S:a,b|3|3|1|0
+"aaa".lastIndexOf("a", 1) + "," + "abc".at(-1) + "," + "abc".codePointAt(5) + "," + "abc".charAt(9) + "," + "ab".padStart(5, "xy") + "," + "ab".padEnd(1) + "," + "a".repeat(3) + "," + "Abc".localeCompare("abc")	S:1,c,undefined,,xyxab,ab,aaa,-32
+"abc".substring(2, 0) + "," + "abc".substr(-2, 1) + "," + "abc".slice(-2) + "," + " a ".trim() + "|" + "aXbX".replaceAll("X", "-") + "|" + "aXbX".replaceAll(/X/g, "_")	S:ab,b,bc,a|a-b-|a_b_
+"aXbX".replaceAll(/X/, "_")	E:TypeError:replaceAll must be called with a global RegExp
+"abc".startsWith("b", 1) + "," + "abc".endsWith("b", 2) + "," + "abc".includes("c", 3) + "," + "ß".toUpperCase() + "," + "İ".toLowerCase().length	S:true,true,false,SS,2
+new RegExp("a", "gg")	E:SyntaxError:invalid regular expression flag g
+new RegExp("(")	E:SyntaxError:unterminated parenthetical
+new RegExp("[b-a]")	E:SyntaxError:invalid range in character class
+new RegExp("a{3,1}")	E:SyntaxError:numbers out of order in {} quantifier.
+/a/.source + "," + /a/gi.flags + "," + new RegExp("/").source + "," + RegExp("x").global + "," + new RegExp(/a/g, "i").flags	S:a,gi,\\/,false,i
+(() => { const r = /a/g; r.lastIndex = 5; return r.test("aaa") + "," + r.lastIndex })()	S:false,0
+(() => { const r = /a/y; return [r.test("ba"), r.lastIndex, r.test("ab"), r.lastIndex].join() })()	S:false,0,true,1
+"x".match(/y/g) + "," + "abab".match(/a/g).length + "," + "abab".search(/b/) + "," + [..."a1b2".matchAll ? [] : []].length	S:null,2,1,0
+"b".localeCompare("a") + "," + "a".localeCompare("ab") + "," + "ab".localeCompare("a") + "," + "é".localeCompare("e") + "," + "a".localeCompare("a")	S:1,-1,1,132,0
+"aaa".lastIndexOf("a", 0) + "," + "aaa".lastIndexOf("a", -5) + "," + "aaa".lastIndexOf("a", NaN) + "," + "abc".lastIndexOf("", 1) + "," + "abc".lastIndexOf("c", 1)	S:0,0,2,1,-1
+Uint8Array.fromHex("abc")	E:SyntaxError:hex-string must have an even number of characters
+Uint8Array.fromHex("a z")	E:SyntaxError:hex-string must have an even number of characters
+new RegExp("a)")	E:SyntaxError:unmatched ) in regular expression
+new RegExp("*")	E:SyntaxError:nothing to repeat
+new RegExp("[a")	E:SyntaxError:unterminated character class
+new RegExp("\\")	E:SyntaxError:\\ at end of pattern
+new RegExp("(?<a>x)(?<a>y)")	E:SyntaxError:duplicate capture group name in regular expression
+new RegExp("\\k<z>", "u")	E:SyntaxError:invalid named capture reference in regular expression
+new RegExp("x", "z")	E:SyntaxError:invalid regular expression flag z
+/a/.toString() + new RegExp("/", "g").toString() + new RegExp("").source + new RegExp("\n").source	S:/a//\\//g(?:)\\n
+Date.UTC(NaN) + "," + Date.UTC(2020, 0, 1, 25)	S:NaN,1577926800000

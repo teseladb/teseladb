@@ -1549,9 +1549,42 @@ fn regexp_builtins(it: &mut Interp, g: &ObjRef) -> R<()> {
 
 pub fn make_regexp(it: &mut Interp, source: Name, flags: Name) -> R {
     crate::regex::check(it, &source, &flags)?;
+    let source = escape_pattern(source);
     let o = it.alloc(Some(it.realm.regexp.clone()), Kind::RegExp(source, flags))?;
     it.define(&o, "lastIndex", Prop::hidden(Val::Num(0.0)))?;
     Ok(Val::Obj(o))
+}
+
+/// The pattern as `source` gives it (ECMA-262 §22.2.6.13.1): `(?:)` for an empty one, `/` and
+/// line terminators escaped.
+fn escape_pattern(source: Name) -> Name {
+    if source.is_empty() {
+        return "(?:)".into();
+    }
+    if !source.contains(['/', '\n', '\r', '\u{2028}', '\u{2029}']) {
+        return source;
+    }
+    let mut out = String::with_capacity(source.len() + 2);
+    let (mut escaped, mut class) = (false, false);
+    for c in source.chars() {
+        match c {
+            '/' if !escaped && !class => out.push_str("\\/"),
+            '\n' => out.push_str(if escaped { "n" } else { "\\n" }),
+            '\r' => out.push_str(if escaped { "r" } else { "\\r" }),
+            '\u{2028}' => out.push_str(if escaped { "u2028" } else { "\\u2028" }),
+            '\u{2029}' => out.push_str(if escaped { "u2029" } else { "\\u2029" }),
+            c => out.push(c),
+        }
+        if !escaped {
+            match c {
+                '[' => class = true,
+                ']' => class = false,
+                _ => {}
+            }
+        }
+        escaped = !escaped && c == '\\';
+    }
+    out.into()
 }
 
 fn regexp_ctor(it: &mut Interp, _: &Val, a: &[Val]) -> R {
