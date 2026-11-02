@@ -18,9 +18,9 @@ use super::admin::admin_only;
 use super::query_shape::{self, Shape};
 use super::{Backend, Ctx};
 use crate::error::{
-    BAD_VALUE, CommandError, IDL_FAILED_TO_PARSE, IDL_UNKNOWN_FIELD, INVALID_INDEX_HINT,
-    INVALID_INDEX_HINT_DB, INVALID_LENGTH, QUERY_KNOB_NOT_SETTABLE, QUERY_REJECTED_BY_SETTINGS,
-    QUERY_SETTINGS_DEFAULTS, QUERY_SETTINGS_EMPTY, QUERY_SHAPE_UNSUPPORTED,
+    BAD_VALUE, CommandError, IDL_FAILED_TO_PARSE, INVALID_INDEX_HINT, INVALID_INDEX_HINT_DB,
+    INVALID_LENGTH, QUERY_KNOB_NOT_SETTABLE, QUERY_REJECTED_BY_SETTINGS, QUERY_SETTINGS_DEFAULTS,
+    QUERY_SETTINGS_EMPTY, QUERY_SHAPE_UNSUPPORTED,
 };
 use crate::types::{wrong_type, wrong_types};
 
@@ -183,9 +183,11 @@ fn target(name: &str, v: &Value) -> Result<Target, CommandError> {
 }
 
 /// One index hint: `{ns: {db, coll}, allowedIndexes: [...]}`; `None` when it allows nothing.
-fn index_hint(v: &Value) -> Result<Option<Document>, CommandError> {
+/// `at` names it in the error of a hint that is not an object: its position in the list.
+fn index_hint(v: &Value, at: usize) -> Result<Option<Document>, CommandError> {
     let Value::Document(h) = v else {
-        return Err(wrong_type("IndexHintSpec", v, "object"));
+        let msg = format!("invalid parameter: expected an object ({at})");
+        return Err(CommandError::new(crate::error::EXPECTED_OBJECT, msg));
     };
     let Some(Value::Document(ns)) = h.get("ns") else {
         let msg = "BSON field 'IndexHintSpec.ns' is missing but a required field";
@@ -214,28 +216,37 @@ fn parse_settings(given: &Document) -> Result<Document, CommandError> {
     for key in ORDER {
         let Some(v) = given.get(key) else { continue };
         let x = match (*key, v) {
+            // A null `queryFramework` or `maxTimeMS` is no setting (measured).
+            ("queryFramework" | "maxTimeMS", Value::Null) => continue,
             ("indexHints", Value::Array(items)) => {
                 let mut list = Vec::new();
-                for i in items {
-                    if let Some(h) = index_hint(i)? {
+                for (at, i) in items.iter().enumerate() {
+                    if let Some(h) = index_hint(i, at)? {
                         list.push(Value::Document(h));
                     }
                 }
                 Value::Array(list)
             }
-            ("indexHints", one) => {
-                Value::Array(index_hint(one)?.map(Value::Document).into_iter().collect())
+            ("indexHints", one @ Value::Document(_)) => {
+                Value::Array(index_hint(one, 0)?.map(Value::Document).into_iter().collect())
+            }
+            ("indexHints", _) => {
+                let msg = "'indexHints' must be an object or an array";
+                return Err(CommandError::new(crate::error::FAILED_TO_PARSE, msg));
             }
             ("queryFramework", Value::String(f)) if FRAMEWORKS.contains(&f.as_str()) => v.clone(),
-            ("queryFramework", other) => {
-                let got = match other {
-                    Value::String(s) => s.clone(),
-                    _ => String::new(),
-                };
+            ("queryFramework", Value::String(got)) => {
                 let msg = format!(
                     "Invalid value for 'queryFramework': expected classic or sbe, but got {got}"
                 );
                 return Err(CommandError::new(BAD_VALUE, msg));
+            }
+            ("queryFramework", other) => {
+                return Err(wrong_type(
+                    "setQuerySettings.settings.queryFramework",
+                    other,
+                    "string",
+                ));
             }
             ("reject", Value::Boolean(_)) => v.clone(),
             ("reject", other) => {
@@ -269,17 +280,27 @@ fn parse_settings(given: &Document) -> Result<Document, CommandError> {
     Ok(out)
 }
 
-/// `maxTimeMS` of a setting: a number of at least 0, truncated.
+/// `maxTimeMS` of a setting: a number from 0 to 2³¹ − 1. A fractional double is truncated and
+/// a decimal rounded half to even (measured: 2.5 is 2 in both, decimal 3.5 is 4 and 2.7 is 3);
+/// either one out of the 64-bit range counts as its nearest end, and NaN as 0.
 fn max_time(v: &Value) -> Result<i64, CommandError> {
     let n = match v {
         Value::Int32(n) => i64::from(*n),
         Value::Int64(n) => *n,
-        // A fractional time is truncated (measured: 2.5 is 2).
-        Value::Double(x) if x.is_finite() && x.abs() < i64::MAX as f64 => x.trunc() as i64,
-        other => return Err(wrong_type("maxTimeMS", other, "int")),
+        // `as` truncates, saturates at the ends of `i64` and makes NaN 0.
+        Value::Double(x) => *x as i64,
+        Value::Decimal128(_) => crate::types::number(v).map_or(0.0, f64::round_ties_even) as i64,
+        other => {
+            let path = "setQuerySettings.settings.maxTimeMS";
+            return Err(wrong_types(path, other, &["decimal", "double", "int", "long"]));
+        }
     };
     if n < 0 {
         let msg = format!("BSON field 'maxTimeMS' value must be >= 0, actual value '{n}'");
+        return Err(CommandError::new(BAD_VALUE, msg));
+    }
+    if n > i64::from(i32::MAX) {
+        let msg = format!("BSON field 'maxTimeMS' value must be <= 2147483647, actual value '{n}'");
         return Err(CommandError::new(BAD_VALUE, msg));
     }
     Ok(n)
@@ -358,27 +379,13 @@ pub fn remove_query_settings<B: Backend + ?Sized>(
     Ok(Document::new().with("ok", 1.0))
 }
 
-/// The documents of a `$querySettings` stage with specification `spec`.
+/// The documents of a `$querySettings` stage with specification `s` (the pipeline's parser
+/// checks it).
 pub fn listed<B: Backend + ?Sized>(
     backend: &mut B,
-    spec: &Value,
+    s: &Document,
 ) -> Result<Vec<Document>, CommandError> {
-    let Value::Document(s) = spec else {
-        return Err(wrong_type(STAGE, spec, "object"));
-    };
-    let mut debug = false;
-    for (k, v) in s.iter() {
-        match (k, v) {
-            ("showDebugQueryShape", Value::Boolean(b)) => debug = *b,
-            ("showDebugQueryShape", other) => {
-                return Err(wrong_type("$querySettings.showDebugQueryShape", other, "bool"));
-            }
-            _ => {
-                let msg = format!("BSON field '$querySettings.{k}' is an unknown field.");
-                return Err(CommandError::new(IDL_UNKNOWN_FIELD, msg).parsed());
-            }
-        }
-    }
+    let debug = matches!(s.get("showDebugQueryShape"), Some(Value::Boolean(true)));
     Ok(stored(backend)?.values().map(|e| e.to_document(debug)).collect())
 }
 

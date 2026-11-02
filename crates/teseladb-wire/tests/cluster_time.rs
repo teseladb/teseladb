@@ -411,3 +411,18 @@ fn a_reply_moves_to_a_later_cluster_time_as_if_stamped_then() {
         }
     }
 }
+
+/// A reply that ends with the two fields in other shapes keeps what it does not have: only the
+/// times and the signature's parts that are there change.
+#[test]
+fn a_restamp_changes_only_the_parts_that_are_there() {
+    let later = ClusterTime { time: NOW.time + 3, increment: 9 };
+    let ts = Value::Timestamp { time: later.time, increment: later.increment };
+    let mut plain = Document::new().with("$clusterTime", 1).with("operationTime", 2);
+    assert!(restamp_cluster_time(&mut plain, later, None));
+    assert_eq!(plain, Document::new().with("$clusterTime", 1).with("operationTime", ts.clone()));
+    let bare = Document::new().with("signature", Document::new().with("hash", 1));
+    let mut partial = Document::new().with("$clusterTime", bare.clone()).with("operationTime", 2);
+    assert!(restamp_cluster_time(&mut partial, later, Some(&ring())));
+    assert_eq!(partial, Document::new().with("$clusterTime", bare).with("operationTime", ts));
+}

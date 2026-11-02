@@ -317,22 +317,39 @@ const LIST_EXTENSIONS_SPEC: teseladb_mql::ErrorCode =
 const LIST_CATALOG_SPEC: teseladb_mql::ErrorCode =
     teseladb_mql::ErrorCode { code: 6_200_600, name: "Location6200600" };
 
-/// Checks the specification of `$listExtensions`: an empty object (measured on a `refrouter`
-/// 9.0.4).
-/// The specification of stage `name`, which must be a document; the node checks its fields.
+/// RefDb's code for a `$querySettings` whose specification is not a document.
+const QUERY_SETTINGS_OBJECT: teseladb_mql::ErrorCode =
+    teseladb_mql::ErrorCode { code: 7_746_800, name: "Location7746800" };
+
+/// The specification of stage `name` (`$querySettings` or `$queryStats`), which must be a
+/// document: `$querySettings` takes only a boolean `showDebugQueryShape`, and the node checks
+/// the fields of `$queryStats`. The errors are a `refnode` 9.0.4's (measured on
+/// 02-11-2026).
 pub fn object_spec(name: &str, v: RawValue<'_>) -> Result<Document, MqlError> {
     match v {
+        RawValue::Document(d) if name == "$querySettings" => {
+            for (k, x) in d.iter() {
+                if k != "showDebugQueryShape" {
+                    return Err(unknown_field(name, k));
+                }
+                boolean(k, x, &[k])?;
+            }
+            Ok(Document::from(d))
+        }
         RawValue::Document(d) => Ok(Document::from(d)),
+        _ if name == "$querySettings" => Err(error(
+            QUERY_SETTINGS_OBJECT,
+            "$querySettings stage expects a document as argument".to_owned(),
+        )),
         other => Err(error(
-            TYPE_MISMATCH,
-            format!(
-                "{name} stage expects a document as argument, got {}",
-                display(&Value::from(other))
-            ),
+            FAILED_TO_PARSE,
+            format!("{name} value must be an object. Found: {}", raw_type_name(other)),
         )),
     }
 }
 
+/// Checks the specification of `$listExtensions`: an empty object (measured on a `refrouter`
+/// 9.0.4).
 pub fn list_extensions(v: RawValue<'_>) -> Result<Document, MqlError> {
     match v {
         RawValue::Document(d) if d.iter().next().is_none() => Ok(Document::new()),

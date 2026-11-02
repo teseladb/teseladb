@@ -212,6 +212,70 @@ fn a_partial_filter_takes_only_what_an_index_can_hold() {
             67,
             "Expression not supported in partial index: $nor\n    a $eq 1\n".into(),
         ),
+        // Measured on a `refnode` 9.0.4 on 02-11-2026: a child of `$nor` with more than one
+        // predicate is an `$and` one level deeper, and an equality to an array or a document
+        // shows the value as the shell writes it.
+        (
+            d(&[(
+                "$nor",
+                Value::Array(vec![
+                    d(&[("a", 1.into())]),
+                    d(&[("b", d(&[("$gt", 2.into()), ("$lt", 9.into())]))]),
+                ]),
+            )]),
+            67,
+            "Expression not supported in partial index: $nor\n    a $eq 1\n    $and\n        b $gt 2\n        b $lt 9\n".into(),
+        ),
+        (
+            d(&[(
+                "$nor",
+                Value::Array(vec![
+                    d(&[("a", 1.into()), ("c", 2.into())]),
+                    d(&[("b", d(&[("$gt", 2.into())]))]),
+                ]),
+            )]),
+            67,
+            "Expression not supported in partial index: $nor\n    $and\n        a $eq 1\n        c $eq 2\n    b $gt 2\n".into(),
+        ),
+        (
+            d(&[(
+                "$nor",
+                Value::Array(vec![d(&[
+                    ("b", d(&[("$gt", 2.into()), ("$lt", 9.into())])),
+                    ("c", d(&[("$in", Value::Array(vec![1.into(), 2.into()]))])),
+                ])]),
+            )]),
+            67,
+            "Expression not supported in partial index: $nor\n    $and\n        b $gt 2\n        b $lt 9\n        c $in [ 1 2]\n".into(),
+        ),
+        (
+            d(&[(
+                "$nor",
+                Value::Array(vec![
+                    d(&[("a", d(&[("b", 1.into())]))]),
+                    d(&[("a", Value::Array(vec![1.into(), 2.into()]))]),
+                ]),
+            )]),
+            67,
+            "Expression not supported in partial index: $nor\n    a $eq { b: 1 }\n    a $eq [ 1, 2 ]\n".into(),
+        ),
+        (
+            d(&[("a", d(&[("$elemMatch", d(&[("b", Value::Array(vec![1.into(), 2.into()]))]))]))]),
+            67,
+            "Expression not supported in partial index: a $elemMatch (obj)\n    b $eq [ 1, 2 ]\n"
+                .into(),
+        ),
+        (
+            d(&[(
+                "a",
+                d(&[(
+                    "$elemMatch",
+                    d(&[("b", 1.into()), ("c", d(&[("$gt", 2.into()), ("$lt", 5.into())]))]),
+                )]),
+            )]),
+            67,
+            "Expression not supported in partial index: a $elemMatch (obj)\n    $and\n        b $eq 1\n        c $gt 2\n        c $lt 5\n".into(),
+        ),
         (
             d(&[("a", d(&[("$bitsAllSet", 1.into())]))]),
             67,
@@ -236,6 +300,7 @@ fn a_partial_filter_takes_only_what_an_index_can_hold() {
     }
     // What an index can hold.
     let fine = vec![
+        d(&[("a", d(&[("b", 1.into())]))]),
         d(&[("a", d(&[("$exists", true.into())]))]),
         d(&[("a", d(&[("$in", Value::Array(vec![1.into(), 2.into()]))]))]),
         d(&[("a", d(&[("$lt", 1.into()), ("$gt", 0.into())]))]),

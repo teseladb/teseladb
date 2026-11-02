@@ -62,12 +62,24 @@ fn a_live_operation_reaches_the_node_with_each_call() {
     assert!(g.search_indexes(1).unwrap().is_empty());
     let zero = teseladb_hlc::Hlc { physical: 0, logical: 0 };
     assert!(g.changes(b"a", b"b", zero).is_ok());
+    assert!(g.range_changes(b"a", b"b", zero).is_ok());
+    assert!(g.fence(b"a", b"b", true).is_ok() && g.fence(b"a", b"b", false).is_ok());
+    assert!(g.route_entries().unwrap().is_empty());
+    let order = teseladb_meta::command::Group0Command::SetLeaderHint {
+        group: teseladb_types::GroupId(1),
+        node: teseladb_types::NodeId(1),
+        term: 0,
+    };
+    assert!(g.range_order(order).is_ok());
+    let key = teseladb_meta::security::string_id("k");
+    assert_eq!(g.principal_by_id(teseladb_meta::security::Principal::ApiKey, &key).unwrap(), None);
     g.set_read_preference(None);
     let refused = g.request_shutdown().unwrap_err();
     assert_eq!(refused.errmsg, "this node cannot be shut down");
     g.log_slow_query(&Document::new().with("ns", "db.c"));
     drop(g);
     assert_eq!((m.database_marks, m.logged.len(), m.rotations.len()), (1, 2, 1));
+    assert_eq!(m.range_orders.len(), 1);
     // The operation ended: the node takes the next command.
     let r = m.run("db", doc(&[("find", Value::from("c"))]));
     assert_eq!(field(&r, "ok"), &Value::Double(1.0));

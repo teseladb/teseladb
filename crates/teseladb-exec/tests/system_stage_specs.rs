@@ -107,7 +107,15 @@ fn the_other_stages_take_their_objects() {
     );
     check("$listExtensions", &[("{}", Ok(())), (r#"{"a":1}"#, Err(10_983_502))]);
     check("$listCatalog", &[("{}", Ok(())), ("1", Err(6_200_600))]);
-    check("$querySettings", &[("{}", Ok(())), ("1", Err(14))]);
-    check("$queryStats", &[("{}", Ok(()))]);
+    check(
+        "$querySettings",
+        &[
+            (r#"{"showDebugQueryShape":true}"#, Ok(())),
+            ("1", Err(7_746_800)),
+            (r#"{"showDebugQueryShape":1}"#, Err(14)),
+            (r#"{"x":1}"#, Err(40415)),
+        ],
+    );
+    check("$queryStats", &[("{}", Ok(())), ("1", Err(9))]);
     check("$listMqlEntities", &[("{}", Err(224))]);
 }

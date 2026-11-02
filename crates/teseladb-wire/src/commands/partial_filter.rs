@@ -62,18 +62,27 @@ fn conjunction(filter: &Document) -> Option<String> {
 }
 
 /// The description of the plain predicates of `filter` at depth `depth`, as RefDb prints the
-/// children of `$nor` and `$elemMatch`: equalities and comparisons.
+/// children of `$nor` and `$elemMatch`: equalities and comparisons, under an `$and` one level
+/// deeper when there are several (measured on a `refnode` 9.0.4).
 fn lines(filter: &Document, depth: usize) -> String {
-    let pad = INDENT.repeat(depth);
-    filter
+    let predicates: Vec<String> = filter
         .iter()
         .flat_map(|(path, v)| match v {
             Value::Document(ops) if ops.iter().next().is_some_and(|(o, _)| o.starts_with('$')) => {
-                ops.iter().map(|(op, a)| format!("{pad}{path} {op} {}\n", shown(a))).collect()
+                ops.iter().map(|(op, a)| format!("{path} {op} {}", shown(a))).collect()
             }
-            v => vec![format!("{pad}{path} $eq {}\n", shown(v))],
+            v => vec![format!("{path} $eq {}", display(v))],
         })
-        .collect()
+        .collect();
+    let pad = INDENT.repeat(depth);
+    match predicates.as_slice() {
+        [one] => format!("{pad}{one}\n"),
+        many => {
+            let deeper = INDENT.repeat(depth + 1);
+            let children: String = many.iter().map(|p| format!("{deeper}{p}\n")).collect();
+            format!("{pad}$and\n{children}")
+        }
+    }
 }
 
 /// A value as RefDb prints it in a description; an array as `[ a b]`.

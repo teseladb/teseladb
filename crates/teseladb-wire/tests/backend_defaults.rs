@@ -13,7 +13,9 @@ use teseladb_range::read::ReadConcern;
 use teseladb_wire::commands::diagnostics::ProcessFacts;
 use teseladb_wire::commands::session::KillScope;
 use teseladb_wire::commands::{Backend, LdapLogin, Versions, WriteOp};
-use teseladb_wire::error::{AUTHENTICATION_FAILED, CommandError, INTERNAL_ERROR, OPERATION_FAILED};
+use teseladb_wire::error::{
+    AUTHENTICATION_FAILED, CommandError, ILLEGAL_OPERATION, INTERNAL_ERROR, OPERATION_FAILED,
+};
 
 const NOW_MS: u64 = 1_700_000_000_000;
 
@@ -21,6 +23,8 @@ const NOW_MS: u64 = 1_700_000_000_000;
 #[derive(Default)]
 struct Bare {
     stored_user: Option<Vec<u8>>,
+    /// The documents `principals` gives.
+    stored_principals: Vec<Vec<u8>>,
 }
 
 fn none() -> CommandError {
@@ -200,7 +204,7 @@ impl Backend for Bare {
         _kind: Principal,
         _db: Option<&str>,
     ) -> Result<Vec<Vec<u8>>, CommandError> {
-        Ok(Vec::new())
+        Ok(self.stored_principals.clone())
     }
     fn security_write(
         &mut self,
@@ -266,4 +270,41 @@ fn a_stored_user_is_read_as_refdb_reads_it() {
     assert_eq!((e.code.code, e.code.name), (12, "UnsupportedFormat"));
     b.stored_user = Some(good.to_document().to_bytes().unwrap());
     assert_eq!(b.user(&name).unwrap(), Some(good));
+}
+
+/// A node alone: it pauses as a transaction does, knows no ranges, other operations, tenants,
+/// LDAP groups or `config` documents, cannot order ranges or keep cluster settings, and every
+/// other node already has its write gates.
+#[test]
+fn a_bare_backend_is_a_node_alone() {
+    let mut b = Bare::default();
+    assert!(!b.pause());
+    assert!(b.route_entries().unwrap().is_empty());
+    let order = teseladb_meta::command::Group0Command::SetLeaderHint {
+        group: teseladb_types::GroupId(1),
+        node: teseladb_types::NodeId(1),
+        term: 0,
+    };
+    assert_eq!(b.range_order(order).unwrap_err().code, ILLEGAL_OPERATION);
+    assert!(b.other_operations().unwrap().is_empty());
+    assert!(b.config_documents("settings").unwrap().is_empty());
+    assert_eq!(b.config_settings_write(Vec::new()).unwrap_err().code, ILLEGAL_OPERATION);
+    assert_eq!(b.group0_settings_write(Vec::new()).unwrap_err().code, ILLEGAL_OPERATION);
+    assert_eq!(b.tenant_named("t").unwrap(), None);
+    assert!(b.gate_everywhere(Default::default()).unwrap());
+    assert_eq!(b.fcv_limit().unwrap(), None);
+    assert_eq!(b.ldap_groups("alice").unwrap(), None);
+}
+
+/// A principal is found by the key of its `_id` among those of its kind; a document without
+/// `_id` matches none.
+#[test]
+fn a_principal_is_found_by_its_id_key() {
+    let key = Document::new().with("_id", "k1").with("keyId", "a").to_bytes().unwrap();
+    let no_id = Document::new().with("keyId", "b").to_bytes().unwrap();
+    let mut b = Bare { stored_principals: vec![no_id, key.clone()], ..Bare::default() };
+    let id = teseladb_meta::security::string_id("k1");
+    assert_eq!(b.principal_by_id(Principal::ApiKey, &id).unwrap(), Some(key));
+    let other = teseladb_meta::security::string_id("k2");
+    assert_eq!(b.principal_by_id(Principal::ApiKey, &other).unwrap(), None);
 }

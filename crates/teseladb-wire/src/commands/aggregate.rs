@@ -488,8 +488,7 @@ impl<B: Backend + ?Sized> Env for WireEnv<'_, B> {
             "$listCatalog" => self.list_catalog().map_err(to_mql),
             super::query_settings::STAGE => {
                 let mut backend = self.backend.borrow_mut();
-                super::query_settings::listed(&mut **backend, &Value::Document(spec.clone()))
-                    .map_err(to_mql)
+                super::query_settings::listed(&mut **backend, spec).map_err(to_mql)
             }
             super::query_stats::STAGE => self.query_stats(spec).map_err(to_mql),
             other => Err(MqlError::new(

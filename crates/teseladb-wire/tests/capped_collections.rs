@@ -325,6 +325,16 @@ fn convert_to_capped_refuses_as_a_refrouter_does() {
             72,
             "Capped collection size must be greater than zero",
         ),
+        (
+            r#"{"convertToCapped":"p","size":{"$numberDouble":"NaN"}}"#,
+            72,
+            "Capped collection size must be greater than zero",
+        ),
+        (
+            r#"{"convertToCapped":"p","size":0.5}"#,
+            72,
+            "Capped collection size must be greater than zero",
+        ),
         (r#"{"convertToCapped":"p","size":2e15}"#, 2, "size cannot exceed 1 PB"),
         (r#"{"convertToCapped":"nope","size":100}"#, 26, "source collection m.nope does not exist"),
         (r#"{"convertToCapped":"v","size":100}"#, 166, "Namespace m.v is a view, not a collection"),
@@ -422,4 +432,15 @@ fn coll_stats_shows_each_kind_as_a_refrouter_does() {
     assert!(r.get("count").is_none(), "{r:?}");
     assert_eq!(field(&r, "timeseries.bucketCount"), &Value::Int32(2));
     assert_eq!(field(&r, "timeseries.bucketsNs"), &Value::String("m.ts".into()));
+}
+
+/// A collection of more documents than one read of the node gives is copied whole.
+#[test]
+fn convert_to_capped_copies_more_than_one_read() {
+    let mut m = Mem::new();
+    let docs: Vec<String> = (0..1500).map(|i| format!(r#"{{"_id":{i}}}"#)).collect();
+    run(&mut m, &format!(r#"{{"insert":"p","documents":[{}]}}"#, docs.join(",")));
+    run(&mut m, r#"{"convertToCapped":"p","size":1000000}"#);
+    let r = run(&mut m, r#"{"count":"p"}"#);
+    assert_eq!(field(&r, "n"), &Value::Int32(1500), "{r:?}");
 }
