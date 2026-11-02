@@ -458,10 +458,12 @@ pub(super) fn parse_near(d: &Document, path: &str) -> Result<Operator, SearchErr
     let paths = value_paths(d, path)?;
     let origin = match d.get("origin") {
         None => return Err(shape(&at("origin"), "is required")),
-        Some(Value::Int32(n)) => Key::Number(f64::from(*n)),
-        Some(Value::Int64(n)) => Key::Number(*n as f64),
-        Some(Value::Double(f)) => Key::Number(*f),
-        Some(Value::DateTime(ms)) => Key::Date(*ms),
+        Some(Value::Int32(n)) => Some(Key::Number(f64::from(*n))),
+        Some(Value::Int64(n)) => Some(Key::Number(*n as f64)),
+        Some(Value::Double(f)) => Some(Key::Number(*f)),
+        Some(Value::DateTime(ms)) => Some(Key::Date(*ms)),
+        // A GeoJSON point, for `geo` fields.
+        Some(Value::Document(_)) => None,
         Some(other) => {
             return Err(shape(&at("origin"), &format!("Unsupported type: {}", type_name(other))));
         }
@@ -477,7 +479,16 @@ pub(super) fn parse_near(d: &Document, path: &str) -> Result<Operator, SearchErr
         return Err(shape(&at("pivot"), "must be positive"));
     }
     let score = parse_score(d.get("score"), &at("score"))?;
-    Ok(Operator::Values(ValueOp::Near { paths, origin, pivot, score }))
+    match origin {
+        Some(origin) => Ok(Operator::Values(ValueOp::Near { paths, origin, pivot, score })),
+        None => super::geo::parse_near(
+            paths,
+            d.get("origin").unwrap_or(&Value::Null),
+            pivot,
+            score,
+            &at("origin"),
+        ),
+    }
 }
 
 /// The scored documents of `op` in `index`.

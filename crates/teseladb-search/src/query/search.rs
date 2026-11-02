@@ -122,6 +122,8 @@ enum Operator {
     Scored(Box<Operator>, Score),
     /// `embeddedDocument`.
     Embedded(embedded::Embedded),
+    /// `geoWithin`, `geoShape` or `near` on a `geo` field.
+    Geo(geo::Geo),
     /// `autocomplete`.
     Autocomplete(autocomplete::Autocomplete),
     /// `span`, with its score option.
@@ -205,6 +207,8 @@ fn parse(index: &MemIndex, name: &str, v: &Value, path: &str) -> Result<Operator
         "moreLikeThis" => more_like::parse(index, d, path),
         "embeddedDocument" => embedded::parse(d, path),
         "autocomplete" => autocomplete::parse(d, path),
+        "geoWithin" => geo::parse_within(d, path),
+        "geoShape" => geo::parse_shape(d, path),
         "in" => values::parse_in(d, path),
         "range" => values::parse_range(d, path),
         "near" => values::parse_near(d, path),
@@ -522,6 +526,10 @@ fn eval(index: &MemIndex, op: &Operator) -> Result<BTreeMap<u32, f32>, SearchErr
             rescored(index, s, p.score())
         }
         Operator::Empty => Ok(BTreeMap::new()),
+        Operator::Geo(g) => {
+            let s = g.scores(index, boost_of(g.score()))?;
+            rescored(index, s, g.score())
+        }
         Operator::Autocomplete(a) => {
             let s = a.scores(index, boost_of(&a.score))?;
             rescored(index, s, &a.score)
@@ -662,13 +670,17 @@ fn eval_compound(
 mod autocomplete;
 mod embedded;
 mod function;
+mod geo;
 mod knn;
 mod more_like;
 mod pattern;
 mod query_string;
+mod sloppy;
 mod span;
 mod values;
 
+#[cfg(test)]
+mod geo_tests;
 #[cfg(test)]
 mod pattern_tests;
 #[cfg(test)]
