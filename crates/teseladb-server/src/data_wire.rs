@@ -121,6 +121,15 @@ pub enum RemoteReq {
         /// The stream read the range up to this mark.
         from: Hlc,
     },
+    /// Raises (`on`) or lifts the write fence of `[start, end)` (018 FR-002), on the leader.
+    Fence {
+        /// First key.
+        start: Vec<u8>,
+        /// End (excluded).
+        end: Vec<u8>,
+        /// Whether the fence goes up.
+        on: bool,
+    },
 }
 
 fn put_mark(e: &mut Encoder, ts: Hlc) {
@@ -198,6 +207,11 @@ pub enum RemoteReply {
         /// The mark of the oldest pending intent.
         oldest_intent: Option<Hlc>,
     },
+    /// A fence applied at mark `ts` (018 FR-002).
+    Fenced {
+        /// Mark of its entry.
+        ts: Hlc,
+    },
 }
 
 const WRITE: u8 = 0;
@@ -210,6 +224,7 @@ const BACKUP_FETCH: u8 = 6;
 const RESTORE_PIECE: u8 = 7;
 const RESTORE_INGEST: u8 = 8;
 const CHANGES: u8 = 9;
+const FENCE: u8 = 10;
 
 fn put_hlc(e: &mut Encoder, ts: Hlc) {
     e.u64(ts.physical).u32(ts.logical);
@@ -374,6 +389,9 @@ impl RemoteReq {
                 e.u8(CHANGES).bytes(start).bytes(end);
                 put_mark(&mut e, *from);
             }
+            RemoteReq::Fence { start, end, on } => {
+                e.u8(FENCE).bytes(start).bytes(end).bool(*on);
+            }
         }
         e.finish()
     }
@@ -460,6 +478,11 @@ impl RemoteReq {
                 end: d.bytes()?.to_vec(),
                 from: get_mark(&mut d)?,
             },
+            FENCE => RemoteReq::Fence {
+                start: d.bytes()?.to_vec(),
+                end: d.bytes()?.to_vec(),
+                on: d.bool()?,
+            },
             _ => return Err(DecodeError::InvalidValue { offset: at }),
         };
         d.finish()?;
@@ -476,6 +499,7 @@ const OK_RECORD: u8 = 5;
 const OK_PIECE: u8 = 6;
 const OK_RESTORED: u8 = 7;
 const OK_CHANGES: u8 = 8;
+const OK_FENCED: u8 = 9;
 
 fn put_error(e: &mut Encoder, err: &RangeError) {
     let (tag, hint, text): (u8, u64, &str) = match err {
@@ -493,6 +517,7 @@ fn put_error(e: &mut Encoder, err: &RangeError) {
         RangeError::NoSuchTransaction => (11, 0, ""),
         RangeError::ReadIntent { .. } => (12, 0, ""),
         RangeError::ReadUncertain { .. } => (13, 0, ""),
+        RangeError::Fenced => (14, 0, ""),
     };
     e.u8(tag).u64(hint).str(text);
     let put_owner = |e: &mut Encoder, o: &IntentOwner| {
@@ -541,6 +566,7 @@ fn get_error(d: &mut Decoder<'_>) -> Result<RangeError, DecodeError> {
             at: Hlc { physical: d.u64()?, logical: d.u32()? },
         },
         13 => RangeError::ReadUncertain { ts: Hlc { physical: d.u64()?, logical: d.u32()? } },
+        14 => RangeError::Fenced,
         _ => return Err(DecodeError::InvalidValue { offset: at }),
     })
 }
@@ -593,6 +619,10 @@ pub fn encode_reply(r: &Result<RemoteReply, RangeError>) -> Vec<u8> {
             put_mark(&mut e, *to);
             e.bool(oldest_intent.is_some());
             put_mark(&mut e, oldest_intent.unwrap_or(Hlc { physical: 0, logical: 0 }));
+        }
+        Ok(RemoteReply::Fenced { ts }) => {
+            e.u8(OK_FENCED);
+            put_mark(&mut e, *ts);
         }
         Err(err) => {
             e.u8(ERR);
@@ -665,6 +695,7 @@ pub fn decode_reply(b: &[u8]) -> Result<Result<RemoteReply, RangeError>, DecodeE
             let (some, intent) = (d.bool()?, get_mark(&mut d)?);
             Ok(RemoteReply::Changes { rows, to, oldest_intent: some.then_some(intent) })
         }
+        OK_FENCED => Ok(RemoteReply::Fenced { ts: get_mark(&mut d)? }),
         ERR => Err(get_error(&mut d)?),
         _ => return Err(DecodeError::InvalidValue { offset: at }),
     };
@@ -774,6 +805,8 @@ mod tests {
                 end: vec![2],
                 from: Hlc { physical: 7, logical: 3 },
             },
+            RemoteReq::Fence { start: vec![1], end: vec![2], on: true },
+            RemoteReq::Fence { start: vec![], end: vec![9], on: false },
         ];
         for r in reqs {
             assert_eq!(RemoteReq::decode(&r.encode()), Ok(r));
@@ -797,6 +830,8 @@ mod tests {
                 value: Some((2, vec![3])),
             }),
             Ok(RemoteReply::Intents { ts: Hlc { physical: 6, logical: 0 } }),
+            Ok(RemoteReply::Fenced { ts: Hlc { physical: 6, logical: 4 } }),
+            Err(RangeError::Fenced),
             Ok(RemoteReply::Changes {
                 rows: vec![
                     Versioned { key: vec![1], ts: Hlc { physical: 4, logical: 1 }, value: None },

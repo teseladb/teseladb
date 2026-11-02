@@ -52,7 +52,7 @@ pub(crate) fn reseed(seed: u64) {
 }
 
 /// The next 64 random bits of this thread's draws (SplitMix64).
-fn next_seed() -> u64 {
+pub(crate) fn next_seed() -> u64 {
     DRAWS.with(|d| {
         let state = d.get().wrapping_add(0x9E37_79B9_7F4A_7C15);
         d.set(state);
@@ -65,7 +65,7 @@ fn next_seed() -> u64 {
 
 /// A scope over `d` whose `$rand` draws from this thread's state.
 fn drawing_scope(d: &Document, vars: Option<&Document>) -> Scope {
-    Scope::new(d.clone(), vars).seeded(next_seed())
+    Scope::new(d.clone(), vars).seeded(next_seed()).with_js(Some(super::js::engine()))
 }
 
 /// The node's extensions.
@@ -80,7 +80,7 @@ impl Extensions for NodeExtensions {
     }
 
     fn where_js(&self, code: RawValue<'_>, doc: RawDoc<'_>) -> Result<bool> {
-        NoExtensions.where_js(code, doc)
+        super::js::where_js(code, doc)
     }
 
     fn text(&self, query: &TextQuery, doc: RawDoc<'_>) -> Result<bool> {
@@ -205,5 +205,9 @@ impl teseladb_exec::pipeline::Env for VarsEnv {
 
     fn random(&self) -> f64 {
         NodeExtensions.random()
+    }
+
+    fn js(&self) -> Option<std::rc::Rc<dyn teseladb_exec::expr::js::JsEngine>> {
+        Some(super::js::engine())
     }
 }

@@ -55,6 +55,11 @@ const ROWS: &[Row] = &[
     ("ping", On::Open, &[]),
     ("buildInfo", On::Open, &[]),
     ("whatsmyuri", On::Open, &[]),
+    // The API keys check the user's own keys or the privilege on its database themselves
+    // (019 FR-016): which user a `revokeApiKey` touches is only known once its key is read.
+    ("createApiKey", On::Open, &[]),
+    ("listApiKeys", On::Open, &[]),
+    ("revokeApiKey", On::Open, &[]),
     ("isdbgrid", On::Open, &[]),
     ("listCommands", On::Open, &[]),
     ("connectionStatus", On::Open, &[]),

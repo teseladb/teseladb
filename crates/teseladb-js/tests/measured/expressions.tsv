@@ -1,0 +1,323 @@
+Object.values({a:1,b:[2]})	J:[1,[2]]
+Object.assign({a:1},{b:2},null,{a:3})	J:{"a":3,"b":2}
+Object.hasOwn({x:1},'x') + ',' + ({}).hasOwnProperty('y')	S:true,false
+Object.create({p:1}).p	J:1
+Object.getPrototypeOf([]) === Array.prototype	J:true
+(()=>{const o={a:1}; Object.freeze(o); o.a=2; return [o.a, Object.isFrozen(o)]})()	J:[1,true]
+(()=>{const o={}; Object.defineProperty(o,'x',{get(){return 5},enumerable:false}); return [o.x, Object.keys(o).length]})()	J:[5,0]
+Object.getOwnPropertyNames([1,2])	J:["0","1","length"]
+Object.fromEntries([['a',1],['b',2]])	J:{"a":1,"b":2}
+[Object.is(NaN,NaN), Object.is(0,-0)]	J:[true,false]
+Object.groupBy([1,2,3,4], x => x%2 ? 'odd':'even')	J:{"odd":[1,3],"even":[2,4]}
+String(Object.prototype.toString.call([])) + String(Object.prototype.toString.call(null))	S:[object Array][object Null]
+(function(){ return this }).call(5) + 1	J:6
+Math.max.apply(null,[1,5,3])	J:5
+(function(a,b){return a+b}).bind(null,2)(3)	J:5
+(function f(){}).toString()	S:function f(){}
+Array.isArray([]) + ',' + Array.isArray({})	S:true,false
+Array.of(1,2,3)	J:[1,2,3]
+Array.from('abc')	J:["a","b","c"]
+Array.from(new Set([1,2,2]))	J:[1,2]
+Array.from(new Map([[1,'a']]))	J:[[1,"a"]]
+[1,2,3].pop() + [1,2,3].shift() + [1].unshift(0)	J:6
+[1,2,3,4,5].slice(1,-1)	J:[2,3,4]
+[1,2].concat([3],4)	J:[1,2,3,4]
+[1,2,3].reverse()	J:[3,2,1]
+[1,2,1].lastIndexOf(1)	J:2
+[1,2,3].find(x=>x>1) + [1,2,3].findIndex(x=>x>5) + [1,2,3].findLastIndex(x=>x<3)	J:2
+[1,2,3].some(x=>x>2) + ',' + [1,2,3].every(x=>x>0)	S:true,true
+[[1,2],[3]].reduceRight((a,b)=>a.concat(b),[])	J:[3,1,2]
+[3,1,2].toSorted()	J:[1,2,3]
+[1,2,3].toReversed()	J:[3,2,1]
+[1,[2,[3,[4]]]].flat(Infinity)	J:[1,2,3,4]
+[1,2].flatMap(x=>[x,x*2])	J:[1,2,2,4]
+new Array(3).fill(0)	J:[0,0,0]
+[1,2,3].at(-1)	J:3
+[...[1,2].keys()] 	J:[0,1]
+[...['a','b'].entries()]	J:[[0,"a"],[1,"b"]]
+[...[7,8].values()]	J:[7,8]
+[1,2,3].join('-')	S:1-2-3
+String([1,[2,3]])	S:1,2,3
+'abc'.charAt(1) + 'abc'.charCodeAt(1) + 'abc'.codePointAt(0)	S:b9897
+String.fromCharCode(72,105) + String.fromCodePoint(128512).length	S:Hi2
+'abcabc'.lastIndexOf('b') + ',' + 'abc'.includes('b') + 'abc'.startsWith('b',1) + 'abc'.endsWith('b',2)	S:4,truetruetrue
+'abcdef'.substr(-3,2)	S:de
+'  x '.trimStart() + '|' + '  x '.trimEnd() + '|'	S:x |  x|
+'ab'.padEnd(5,'xy')	S:abxyx
+'a'.concat('b',1)	S:ab1
+'a-b-c'.split('-',2)	J:["a","b"]
+'abc'.split('')	J:["a","b","c"]
+'aXbXc'.replace('X','$$')	S:a$bXc
+'aXbXc'.replaceAll('X', (m,i)=>i)	S:a1b3c
+'abc'.search(/c/)	J:2
+'Ab'.localeCompare('Ab')	J:0
+'AbC'.toLowerCase() + 'abc'.toUpperCase()	S:abcABC
+(12.345).toFixed(1) + ',' + (0.000001234).toPrecision(2) + ',' + (1234.5).toPrecision(2)	S:12.3,0.0000012,1.2e+3
+(255).toString(2) + ',' + (-255.5).toString(16)	S:11111111,-ff.8
+Number.isSafeInteger(2**53) + ',' + Number.isFinite('1') + ',' + Number.isNaN(NaN)	S:false,false,true
+Number.parseFloat('3.5abc') + Number.parseInt('12px')	J:15.5
+Number.MAX_SAFE_INTEGER + ',' + Number.EPSILON	S:9007199254740991,2.220446049250313e-16
+parseInt('0x1F') + parseInt('  -7') + parseInt('z',36)	J:59
+isNaN('x') + ',' + isFinite('12')	S:true,true
+new Number(5) + 1	J:6
+new Boolean(false) ? 'y' : 'n'	S:y
+(true).toString() + new Boolean(true).valueOf()	S:truetrue
+Math.sign(-3) + Math.trunc(-4.7) + Math.cbrt(27) + Math.hypot(3,4)	J:3
+Math.round(-2.5) + ',' + Math.round(2.5) + ',' + Math.round(-0.4)	S:-2,3,0
+Math.pow(2,10) + Math.atan2(0,1) + Math.log2(8) + Math.log10(1000)	J:1030
+Math.clz32(1) + Math.fround(5.5) + Math.expm1(0) + Math.log1p(0)	J:36.5
+Math.min(1,NaN)	J:null
+[Math.sin(0),Math.cos(0),Math.tan(0),Math.asin(0),Math.acos(1),Math.atan(0),Math.sinh(0),Math.cosh(0),Math.tanh(0),Math.exp(0),Math.log(1)]	J:[0,1,0,0,0,0,0,1,0,1,0]
+JSON.stringify({d:new Date(0)})	S:{"d":"1970-01-01T00:00:00.000Z"}
+JSON.stringify([undefined, function(){}, NaN])	S:[null,null,null]
+JSON.stringify({a:[1,{b:2}]}, null, '\t')	S:{\n\t"a": [\n\t\t1,\n\t\t{\n\t\t\t"b": 2\n\t\t}\n\t]\n}
+JSON.stringify({a:1,b:2,c:3}, ['a','c'])	S:{"a":1,"c":3}
+JSON.stringify({a:1,b:2}, (k,v)=> typeof v === 'number' ? v*2 : v)	S:{"a":2,"b":4}
+JSON.parse('[1,2,{"a":"\\u0041"}]', (k,v)=> typeof v==='number'? v+1 : v)	J:[2,3,{"a":"A"}]
+(()=>{try{JSON.parse('{bad')}catch(e){return e.name}})()	S:SyntaxError
+(()=>{const o={}; o.o=o; try{JSON.stringify(o)}catch(e){return e.name}})()	S:TypeError
+new Date(Date.UTC(2020,1,29,12,30,15,250)).toUTCString()	S:Sat, 29 Feb 2020 12:30:15 GMT
+new Date(2020,1,29).toDateString()	S:Sat Feb 29 2020
+new Date('Thu, 01 Jan 1970 00:00:01 GMT').getTime()	J:1000
+new Date('Jan 2, 1970').getTime()	J:86400000
+Date.parse('2020-01-01')	J:1577836800000
+Date.parse('2020-01-01T00:00:00+01:00')	J:1577833200000
+new Date(NaN).getTime() + ',' + String(new Date(NaN))	S:NaN,Invalid Date
+(()=>{const d=new Date(0); d.setFullYear(2000); d.setMonth(5); d.setDate(15); d.setHours(10); d.setMinutes(20); d.setSeconds(30); d.setMilliseconds(400); return d.toISOString()})()	S:2000-06-15T10:20:30.400Z
+(()=>{const d=new Date(0); d.setTime(86400000); return [d.getUTCDate(), d.getDay(), d.getMilliseconds(), d.getSeconds(), d.getMinutes()]})()	J:[2,5,0,0,0]
+new Date(2020,0,1,0,0,0,0).valueOf()	J:1577836800000
+JSON.stringify(new Date(86400000))	S:"1970-01-02T00:00:00.000Z"
+(()=>{const m=new Map(); m.set(NaN,1).set(0,2); return [m.get(NaN), m.get(-0), m.has(1), m.delete(0), m.size]})()	J:[1,2,false,true,1]
+(()=>{const m=new Map([['a',1],['b',2]]); const r=[]; m.forEach((v,k)=>r.push(k+v)); return [r, [...m.keys()], [...m.values()], [...m]]})()	J:[["a1","b2"],["a","b"],[1,2],[["a",1],["b",2]]]
+(()=>{const s=new Set([1,2]); s.add(2).add(3); s.delete(1); const r=[]; s.forEach(v=>r.push(v)); return [r, s.size, [...s.entries()]]})()	J:[[2,3],2,[[2,2],[3,3]]]
+(()=>{const s=new Set([1]); s.clear(); return s.size})()	J:0
+(()=>{const i=[1,2][Symbol.iterator](); return [i.next().value, i.next().value, i.next().done]})()	J:[1,2,true]
+(()=>{const o={[Symbol.iterator](){let n=0; return {next(){n++; return {value:n, done:n>3}}}}}; return [...o]})()	J:[1,2,3]
+Symbol('x').toString() + typeof Symbol()	S:Symbol(x)symbol
+(()=>{try{null.x}catch(e){return e.message}})()	S:can't access property "x" of null
+(()=>{try{undefined.x}catch(e){return e.message}})()	S:can't access property "x" of undefined
+(()=>{try{({}).f()}catch(e){return e.message}})()	S:(intermediate value).f is not a function
+(()=>{try{new (function(){}.bind())}catch(e){return 'err'} return 'ok'})()	S:ok
+String(new RangeError('r')) + String(new Error())	S:RangeError: rError
+new TypeError('t', {cause: 1}).cause	J:1
+Error('x').message	S:x
+[typeof RangeError, typeof EvalError, typeof URIError, typeof SyntaxError, typeof ReferenceError]	J:["function","function","function","function","function"]
+(()=>{try{eval('1 +')}catch(e){return e.name}})()	S:SyntaxError
+eval('var z = 4; z * 2')	J:8
+new Function('a','b','return a*b')(3,4)	J:12
+`a${1}b${'c'}`.length	J:4
+(()=>{ const tag=(s,...v)=>s.join('|')+v.join(','); return tag`x${1}y${2}z` })()	S:x|y|z1,2
+(()=>{ let x=0; label: { x=1; break label; x=2 } return x })()	J:1
+(()=>{ let i=0; do { i++; if(i==2) continue; } while(i<3); return i })()	J:3
+(()=>{ const r=[]; for (const [k,v] of Object.entries({a:1})) r.push(k+v); return r })()	J:["a1"]
+(()=>{ let s=''; for (var i in [5,6]) s+=i; return s })()	S:01
+(()=>{ var x = 1; var x; return x })()	J:1
+(()=>{ try { return 1 } finally { } })()	J:1
+(()=>{ let r; try { throw {a:1} } catch ({a}) { r=a } return r })()	J:1
+(()=>{ try { try { throw 1 } finally { } } catch(e) { return e } })()	J:1
+(()=>{ switch(1){ case 2: return 'a' } return 'none' })()	S:none
+void 0 === undefined	J:true
+typeof notDeclared	S:undefined
+delete [1,2][1]	J:true
+'a' in {a:1}	J:true
+(()=>{ class A { static s = 2; f = 3; m(){ return this.f } } return [A.s, new A().m()] })()	J:[2,3]
+(()=>{ class A { get v(){ return 1 } set v(x){ this._v = x } } const a=new A(); a.v=5; return [a.v, a._v] })()	J:[1,5]
+(()=>{ class E extends Error { constructor(m){ super(m); this.name='E' } } try { throw new E('q') } catch(e) { return [e.name, e.message, e instanceof Error] } })()	J:["TypeError","\\"name\\" is read-only",true]
+(()=>{ class M extends Map {} return new M([[1,2]]).get(1) })()	J:2
+(()=>{ const o = { __proto__: null }; return typeof o })()	S:object
+(()=>{ const o = {a:1}; const {a: b = 2, c = 3} = o; return [b, c] })()	J:[1,3]
+(()=>{ let a = 1, b = 2; [a, b] = [b, a]; return [a, b] })()	J:[2,1]
+(()=>{ const f = ({x} = {x: 9}) => x; return f() })()	J:9
+(()=>{ function f(){ return arguments.length } return f(1,2,3) })()	J:3
+(()=>{ const a = [1,2,3]; return a.length = 1, a })()	J:[1]
+1e21.toString() + ',' + (123e-20).toString() + ',' + (2**64)	S:1e+21,1.23e-18,18446744073709552000
+0.1*3	J:0.30000000000000004
+-(2**31) >> 0	J:-2147483648
+~5 + (5 ^ 3) + (1 << 31)	J:-2147483648
+'5' - '2' + ('5' == 5) + (null == undefined) + (null === undefined) + ('' == 0)	J:6
+[] + {}	S:[object Object]
+[1] == 1	J:true
+null >= 0	J:true
+'b' > 'a'	J:true
+(x => x ?? 'd')(null) + (x => x?.y)(undefined)	S:dundefined
+1 / 0 + ',' + -1 / 0 + ',' + 0 / 0	S:Infinity,-Infinity,NaN
+Array.sum([1,2,3]) + ',' + Array.sum([])	S:6,null
+Array.avg([1,2,3,4])	J:2.5
+Array.contains([1,2],2) + ',' + Array.contains([1,2],'2')	S:true,false
+Array.unique([1,2,1,'1'])	J:[1,2,"1"]
+Array.stdDev([2,4,4,4,5,5,7,9])	J:2
+Array.shuffle([1,2,3]).length	E:ReferenceError:Random is not defined
+typeof print + typeof sleep + String(print('x')) + String(sleep(1))	S:functionfunctionundefinedundefined
+Object(1) instanceof Number	J:true
+Object() instanceof Object	J:true
+Object.setPrototypeOf({}, {q:7}).q	J:7
+Array.prototype.isPrototypeOf([]) + ',' + Object.prototype.isPrototypeOf(Object.create(null))	S:true,false
+(()=>{try{Function('return (')}catch(e){return e.name}})()	S:SyntaxError
+new Number(3).valueOf() + Number(true)	J:4
+[...new Map([[1,2]])]	J:[[1,2]]
+[...'ab']	J:["a","b"]
+[...new Set('aab')]	J:["a","b"]
+new RegExp('a+','g').toString() + ',' + new RegExp(/x/i).flags + ',' + /q/g.global + ',' + /w+/.source	S:/a+/g,i,true,w+
+new RegExp('a', 'y').exec('ba')	J:null
+'a.b.c'.split('.', -1)	J:["a","b","c"]
+(()=>{const r=[]; [1,2].forEach(function(x){ r.push(this.k+x) }, {k:10}); return r})()	J:[11,12]
+ObjectId('507f1f77bcf86cd799439011').equals(ObjectId('507f1f77bcf86cd799439011'))	J:true
+ObjectId('507f1f77bcf86cd799439011').toHexString()	E:TypeError:ObjectId(...).toHexString is not a function
+ObjectId().toHexString().length	E:TypeError:ObjectId().toHexString is not a function
+(()=>{try{ObjectId('zz')}catch(e){return e.name}})()	S:Error
+BinData(0,'AQID').toString()	S:BinData(0,"AQID")
+MinKey().toString() + ' ' + MaxKey().toString()	S:[object MinKey] [object MaxKey]
+(()=>{const r=DBRef('c', 1); return [r.$ref, r.$id]})()	J:["c",1]
+NumberLong('12').toNumber() + NumberLong(3).valueOf()	J:15
+(()=>{try{NumberLong('abc')}catch(e){return e.name}})()	S:Error
+(()=>{try{NumberDecimal('abc')}catch(e){return e.name}})()	S:Error
+NumberInt('7').toString() + NumberInt(2.9).valueOf()	S:NumberInt(7)2
+new Timestamp(5, 6).toString() + ',' + new Timestamp(5, 6).i	S:Timestamp(5, 6),6
+ISODate('2021-02-03T04:05:06Z').toISOString()	S:2021-02-03T04:05:06.000Z
+(()=>{try{ISODate('nope')}catch(e){return e.name}})()	S:Error
+new Date(0).getUTCFullYear() + new Date(0).getUTCMonth() + new Date(0).getUTCHours() + new Date(0).getUTCMinutes() + new Date(0).getUTCSeconds() + new Date(0).getUTCMilliseconds() + new Date(0).getUTCDay()	J:1974
+(()=>{const d=new Date(0); d.setUTCFullYear(1999,11,31); d.setUTCHours(23,59,59,999); return d.toISOString()})()	S:1999-12-31T23:59:59.999Z
+new Date(-1).toISOString() + ',' + new Date(Date.UTC(-1,0,1)).toISOString() + ',' + new Date(Date.UTC(10000,0,1)).toISOString()	S:1969-12-31T23:59:59.999Z,-000001-01-01T00:00:00.000Z,+010000-01-01T00:00:00.000Z
+(()=>{try{new Date(NaN).toISOString()}catch(e){return e.name}})()	S:RangeError
+new Date(NaN).toJSON() + ',' + new Date(NaN).toUTCString() + ',' + new Date(NaN).toDateString()	S:null,Invalid Date,Invalid Date
+typeof Date() + ',' + (Date.now() >= 0)	S:string,true
+new Date(99, 0).getFullYear()	J:1999
+new Date('2020-02-30').getTime()	J:1583020800000
+new Date('2020-06-15T10:20:30.5Z').getMilliseconds()	J:500
+new Date('Mon Jun 15 2020 10:20:30 GMT+0200').toISOString()	S:2020-06-15T08:20:30.000Z
+(1e21).toFixed(2) + ',' + (-1.5).toFixed(0) + ',' + (0).toPrecision(3) + ',' + (1e-7).toPrecision(2)	S:1e+21,-2,0.00,1.0e-7
+(()=>{try{(1).toFixed(101)}catch(e){return e.name}})()	S:RangeError
+(()=>{try{(1).toString(1)}catch(e){return e.name}})()	S:RangeError
+(()=>{try{(1).toPrecision(0)}catch(e){return e.name}})()	S:RangeError
+'abc'.at(5) + ',' + 'abc'.charAt(9) + ',' + 'abc'.charCodeAt(9) + ',' + 'abc'.codePointAt(9)	S:undefined,,NaN,undefined
+(()=>{try{'a'.repeat(-1)}catch(e){return e.name}})()	S:RangeError
+(()=>{try{String.fromCodePoint(-1)}catch(e){return e.name}})()	S:RangeError
+(()=>{try{'a'.includes(/a/)}catch(e){return e.name}})()	S:TypeError
+'aaa'.lastIndexOf('aaaa') + ',' + 'abc'.indexOf('') + ',' + 'x'.padStart(3)	S:-1,0,  x
+String(Symbol('q')) + String(null) + String(undefined) + String(true)	S:Symbol(q)nullundefinedtrue
+'a-b'.replace(/(?<x>a)/, '[$<x>|$&|$`|$\'|$$]')	S:[a|a||-b|$]-b
+'abc'.replace(/(z)?b/, (m,g)=>String(g))	S:aundefinedc
+'x1y2'.match(/\d/g) + ',' + 'xy'.match(/\d/g) + ',' + 'x1'.match(/(\d)/)[1]	S:1,2,null,1
+/a{2,3}/.test('aa') + ',' + /a{2,}/.test('a') + ',' + /^[^a-c]$/.test('d') + ',' + /[\w-]+/.exec('a-b c')[0]	S:true,false,true,a-b
+/(?<=\$)\d+/.exec('cost $42')[0] + ',' + /(?<!x)y/.test('xy') + ',' + /a(?!b)/.test('ab')	S:42,false,false
+/A/i.test('a') + ',' + /^b/m.test('a\nb') + ',' + /a.b/s.test('a\nb') + ',' + /A\x42/.test('AB')	S:true,true,true,true
+'aBc'.replace(/[a-z]/gi, c => c.toUpperCase())	S:ABC
+/(a)|(b)/.exec('b')	J:["b",null,"b"]
+/a*?b/.exec('aaab')[0] + ',' + /(a+)+$/.test('aaaa')	S:aaab,true
+'one two'.split(/(\s)/)	J:["one"," ","two"]
+''.split(/x/).length + ',' + ''.split('').length	S:1,0
+(()=>{try{new RegExp('[')}catch(e){return e.name}})()	S:SyntaxError
+(()=>{try{new RegExp('a', 'z')}catch(e){return e.name}})()	S:SyntaxError
+JSON.stringify({a:new Number(1), b:new String('s'), c:new Boolean(false)})	S:{"a":1,"b":"s","c":false}
+JSON.stringify('\u0007\b\f')	S:"\\u0007\\b\\f"
+JSON.parse(' "\\u00e9\\n" ').length	J:2
+(()=>{try{JSON.parse('[1,]')}catch(e){return e.message}})()	S:JSON.parse: unexpected character at line 1 column 4 of the JSON data
+(()=>{try{JSON.parse('')}catch(e){return e.message}})()	S:JSON.parse: unexpected end of data at line 1 column 1 of the JSON data
+JSON.stringify(JSON.parse('{"a":-1.5e2,"b":true,"c":false,"d":null}'))	S:{"a":-150,"b":true,"c":false,"d":null}
+JSON.stringify({toJSON(){ return 'custom' }})	S:"custom"
+JSON.stringify(Object.create(null))	S:{}
+(()=>{const m=new Map(); return [m.get(1), m.delete(1), [...m.entries()].length]})()	J:[null,false,0]
+(()=>{try{Map()}catch(e){return e.name}})()	S:TypeError
+(()=>{try{Set()}catch(e){return e.name}})()	S:TypeError
+(()=>{try{new Symbol()}catch(e){return e.name}})()	S:TypeError
+Math.random() < 1	J:true
+[1,2,3].indexOf(2, 2) + ',' + [1,2,3].includes(1, 1) + ',' + [NaN].includes(NaN) + ',' + [NaN].indexOf(NaN)	S:-1,false,true,-1
+[5,1,10].sort((a,b)=>b-a)	J:[10,5,1]
+[,1].length + ',' + [1,2,3].splice(-1) + ',' + [1,2,3].splice(0)	S:2,3,1,2,3
+(()=>{const a=[1,2,3]; a.length=5; return [a.length, a[4]]})()	J:[5,null]
+(()=>{try{[].length=-1}catch(e){return e.name}})()	S:RangeError
+(()=>{try{[].reduce((a,b)=>a)}catch(e){return e.name}})()	S:TypeError
+(()=>{try{[].map(1)}catch(e){return e.name}})()	S:TypeError
+Array.from({length:2, 0:'a', 1:'b'})	J:["a","b"]
+Array.prototype.join.call({length:2, 0:'x', 1:'y'}, '+')	S:x+y
+Array(3).length + ',' + Array(1,2).length	S:3,2
+(()=>{try{new Array(-1)}catch(e){return e.name}})()	S:RangeError
+Object.keys('ab') + ',' + Object.entries([7])	S:0,1,0,7
+(()=>{const o={b:1,2:1,a:1,1:1}; return Object.keys(o)})()	J:["1","2","b","a"]
+(()=>{ 'use strict'; try { Object.freeze({a:1}).a = 2 } catch(e) { return e.message } })()	S:"a" is read-only
+(()=>{ 'use strict'; try { Object.preventExtensions({}).z = 1 } catch(e) { return e.message } })()	S:can't define property "z": Object is not extensible
+(()=>{ const o = Object.seal({a:1}); o.b = 2; return Object.keys(o) })()	J:["a"]
+(()=>{ let n = 0; const o = { set x(v){ n = v } }; o.x = 5; return n })()	J:5
+(()=>{ const o = { get x(){ return 1 } }; try { (function(){'use strict'; o.x = 2})() } catch(e) { return e.message } })()	S:setting getter-only property "x"
+(()=>{ function F(){ return {own:1} } return new F().own })()	J:1
+(()=>{ try { new (()=>1) } catch(e) { return e.message } })()	S:()=>1 is not a constructor
+(()=>{ try { (class A{})() } catch(e) { return e.message } })()	S:class constructors must be invoked with 'new'
+(()=>{ try { 1 in 2 } catch(e) { return e.message } })()	S:right-hand side of 'in' should be an object, got number
+(()=>{ try { ({}) instanceof 1 } catch(e) { return e.message } })()	S:invalid 'instanceof' operand 1
+(()=>{ try { [...1] } catch(e) { return e.message } })()	S:1 is not iterable
+(()=>{ try { Symbol() + '' } catch(e) { return e.message } })()	S:can't convert symbol to string
+(()=>{ try { let x = x } catch(e) { return e.name } })()	S:ReferenceError
+(()=>{ try { const {a} = null } catch(e) { return e.name } })()	S:TypeError
+(()=>{ try { class A extends 5 {} } catch(e) { return e.message } })()	S:class heritage 5 is not an object or null
+(()=>{ class A { constructor(){ return {z:1} } } class B extends A { constructor(){ super(); } } return new B().z })()	J:1
+(()=>{ class A { m(){ return 'a' } static s(){ return 's' } } class B extends A { m(){ return super.m() + 'b' } static s(){ return super.s() + 't' } } return new B().m() + B.s() })()	S:abst
+(()=>{ const o = { m(){ return super.toString === Object.prototype.toString } }; return o.m() })()	J:true
+(()=>{ function f(a, b = a * 2, {c} = {c: 3}, ...d){ return [a, b, c, d] } return f(1) })()	J:[1,2,3,[]]
+(()=>{ const f = function g(){ return typeof g }; return f() })()	S:function
+(()=>{ var r = []; for (let i = 0, j = 5; i < j; i += 2, j--) r.push(i + ':' + j); return r })()	J:["0:5","2:4"]
+(()=>{ let s = 0; outer: while (true) { s++; while (true) { if (s > 2) break outer; continue outer } } return s })()	J:3
+(()=>{ let x = 'a'; switch (x) { case 'a': x += '1'; case 'b': x += '2'; break; default: x += '3' } return x })()	S:a12
+(()=>{ const o = {a: 1}; delete o.a; return 'a' in o })()	J:false
+(()=>{ const o = {a: {b: 1}}; return o?.a?.['b'] + (o.z?.y ?? 'n') })()	S:1n
+(()=>{ let a; a ||= 2; a &&= a + 1; a ??= 9; a **= 2; a <<= 1; a >>= 1; a >>>= 0; a |= 1; a &= 7; a ^= 2; return a })()	J:3
+(()=>{ let i = 5; return [i++, ++i, i--, --i] })()	J:[5,7,7,5]
+typeof function(){} + typeof class {} + typeof null + typeof []	S:functionfunctionobjectobject
+'b' + 'a' + +'a' + 'a'	S:baNaNa
+[1,2,3] + [4]	S:1,2,34
+0.1 + 0.7	J:0.7999999999999999
+123456789012345680000 + ',' + 0.000001 + ',' + 1.5e-10 + ',' + -1e-7	S:123456789012345680000,0.000001,1.5e-10,-1e-7
+(25).toString(36) + (0.5).toString(2) + (-0).toString()	S:p0.10
+parseFloat('.5') + parseFloat('-.5e1') + parseFloat('Infinityx') + ',' + parseFloat('x')	S:Infinity,NaN
+Number('0b101') + Number('0o17') + Number('') + Number(' 12 ') + ',' + Number('1e') + ',' + Number('-Infinity')	S:32,NaN,-Infinity
+parseInt('101', 2) + parseInt('0x', 16) + ',' + parseInt('', 10) + ',' + parseInt('12', 1)	S:NaN,NaN,NaN
+(10n ** 20n).toString()	S:100000000000000000000
+typeof 1n	S:bigint
+1n + 2n	E:TypeError:BigInt value can't be serialized in JSON
+String(2n ** 64n - 1n)	S:18446744073709551615
+BigInt(10) * 3n	E:TypeError:BigInt value can't be serialized in JSON
+BigInt('0x1f')	E:TypeError:BigInt value can't be serialized in JSON
+5n / 2n	E:TypeError:BigInt value can't be serialized in JSON
+-7n % 3n	E:TypeError:BigInt value can't be serialized in JSON
+1n == 1	J:true
+1n === 1	J:false
+2n > 1	J:true
+(()=>{try{return 1n + 1}catch(e){return e.name+':'+e.message}})()	S:TypeError:can't convert BigInt to number
+BigInt.asUintN(8, 257n)	E:TypeError:BigInt value can't be serialized in JSON
+BigInt.asIntN(8, 255n)	E:TypeError:BigInt value can't be serialized in JSON
+(255n).toString(16)	S:ff
+JSON.stringify({a:1n})	E:TypeError:BigInt value can't be serialized in JSON
+Number(12n)	J:12
+BigInt(1.5)	E:RangeError:1.5 can't be converted to BigInt because it isn't an integer
+typeof Object(1n)	S:object
+[3n,1n,2n].sort().join()	S:1,2,3
+-(5n)	E:TypeError:BigInt value can't be serialized in JSON
+1n << 70n	E:TypeError:BigInt value can't be serialized in JSON
+(-1n) >> 3n	E:TypeError:BigInt value can't be serialized in JSON
+5n & 3n	E:TypeError:BigInt value can't be serialized in JSON
+~0n	E:TypeError:BigInt value can't be serialized in JSON
+0n ? 'y' : 'n'	S:n
+BigInt('abc')	E:SyntaxError:invalid BigInt syntax
+String(1n + 2n) + ',' + String(BigInt(10) * 3n) + ',' + BigInt('0x1f') + ',' + 5n / 2n + ',' + -7n % 3n + ',' + -(5n)	S:3,30,31,2,-1,-5
+String(BigInt.asUintN(8, 257n)) + ',' + BigInt.asIntN(8, 255n) + ',' + (1n << 70n) + ',' + ((-1n) >> 3n) + ',' + (5n & 3n) + ',' + ~0n	S:1,-1,1180591620717411303424,-1,1,-1
+String(BigInt(' 12 ')) + BigInt(true) + BigInt('') + ',' + (2n ** 0n) + ',' + (10n).toLocaleString()	S:1210,1,10
+(()=>{try{return 1n/0n}catch(e){return e.name+':'+e.message}})()	S:RangeError:BigInt division by zero
+(()=>{try{return 2n ** -1n}catch(e){return e.name+':'+e.message}})()	S:RangeError:BigInt negative exponent
+(()=>{try{return +1n}catch(e){return e.name+':'+e.message}})()	S:TypeError:can't convert BigInt to number
+(()=>{try{return 1n >>> 0n}catch(e){return e.name+':'+e.message}})()	S:TypeError:can't convert BigInt to number
+(()=>{try{return new BigInt(1)}catch(e){return e.name+':'+e.message}})()	S:TypeError:BigInt is not a constructor
+(()=>{try{return Math.max(1n)}catch(e){return e.name+':'+e.message}})()	S:TypeError:can't convert BigInt to number
+[1n < 1.5, 2n == '2', 0n == false, 1n === 1n, Object.is(0n, -0n), typeof (0n * -1n), 3n > 2.9, NaN < 1n]	J:[true,true,true,true,true,"bigint",true,false]
+String([1n, 2n]) + `${3n}` + (4n + '')	S:1,234
+Object.prototype.toString.call(1n) + ',' + BigInt.prototype.toString.call(9n)	S:[object BigInt],9
+[new Set([1n,1n,1]).size, [1n].includes(1n), [1n].indexOf(1n), new Map([[2n,'a']]).get(2n)]	J:[2,true,0,"a"]
+String(BigInt(Number.MAX_SAFE_INTEGER)+2n) + ',' + BigInt(1e21) + ',' + BigInt('0b101') + ',' + BigInt('0o17') + ',' + BigInt('-12') + ',' + BigInt('+7') + ',' + (123n).toString(36) + ',' + BigInt(-0)	S:9007199254740993,1000000000000000000000,5,15,-12,7,3f,0
+(()=>{const r=[];for(const s of ['-0x1','1e3','1.0','12n','0x','- 1',' ']) {try{r.push(String(BigInt(s)))}catch(e){r.push(e.name+':'+e.message)}}return r.join('|')})()	S:SyntaxError:invalid BigInt syntax|SyntaxError:invalid BigInt syntax|SyntaxError:invalid BigInt syntax|SyntaxError:invalid BigInt syntax|SyntaxError:invalid BigInt syntax|SyntaxError:invalid BigInt syntax|0
+(()=>{const r=[];for(const v of [NaN,Infinity,undefined,null,Symbol('q'),{valueOf(){return 3n}},[],[5],'']) {try{r.push(String(BigInt(v)))}catch(e){r.push(e.name+':'+e.message)}}return r.join('|')})()	S:RangeError:NaN can't be converted to BigInt because it isn't an integer|RangeError:Infinity can't be converted to BigInt because it isn't an integer|TypeError:can't convert undefined to BigInt|TypeError:can't convert null to BigInt|TypeError:can't convert Symbol("q") to BigInt|3|0|5|0
+String(5n ** 3n) + ',' + (-5n / 2n) + ',' + (-5n % 2n) + ',' + ((-5n) >> 1n) + ',' + (-1n << -1n) + ',' + (5n | -3n) + ',' + (5n ^ -3n) + ',' + (-5n & 3n) + ',' + (1n - 2n) + ',' + (8n >> -2n) + ',' + (-8n << 2n)	S:125,-2,-1,-3,-1,-3,-8,3,-1,32,-32
+[0n === -0n, Number.isInteger(1n), typeof (1n + {}) , 1n + {}, String(-0n), Number(2n**1024n), Number(2n**53n+1n), typeof BigInt.prototype, BigInt.length, BigInt.name]	J:[true,false,"string","1[object Object]","0",null,9007199254740992,"object",1,"BigInt"]
+[1n < 2n, '10' > 9n, 1n < '1.5', 1n == '1.0', 2n > '1x', 10n > 9.5, 1n < Infinity, -1n > -Infinity, 1n == 1.5, 3n >= 3]	J:[true,true,false,false,false,true,true,true,false,true]
+String(BigInt.asUintN(64, -1n)) + ',' + BigInt.asIntN(64, 2n**63n) + ',' + BigInt.asIntN(0, 5n) + ',' + BigInt.asUintN(3, -1n) + ',' + BigInt.asIntN(3, 4n) + ',' + BigInt.asIntN(1,1n)	S:18446744073709551615,-9223372036854775808,0,7,-4,-1
+String(123456789012345678901234567890n * 987654321098765432109876543210n) + ',' + (10n**40n / 7n) + ',' + (10n**40n % 7n) + ',' + (-(10n**30n) / 3n)	S:121932631137021795226185032733622923332237463801111263526900,1428571428571428571428571428571428571428,4,-333333333333333333333333333333
+(0x1fn + 0o7n + 0b11n + 1_000n).toString()	S:1041
+(()=>{let a=1n;a++;a+=2n;a*=3n;a**=2n;a--;return String(a)+typeof a})()	S:143bigint
+typeof function(){} + typeof class {} + typeof null + typeof [] + typeof 1n	S:functionfunctionobjectobjectbigint

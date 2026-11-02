@@ -341,6 +341,7 @@ fn write(
             Kind::Num(n) => Some(Val::Num(*n)),
             Kind::Str(s) => Some(Val::Str(s.clone())),
             Kind::Bool(b) => Some(Val::Bool(*b)),
+            Kind::BigInt(b) => Some(Val::BigInt(b.clone())),
             _ => None,
         };
         if let Some(p) = prim {
@@ -355,6 +356,7 @@ fn write(
         }
         Val::Str(s) => out.push_str(&quote(s)),
         Val::Undef | Val::Sym(_) => return Ok(false),
+        Val::BigInt(_) => return it.type_error("BigInt value can't be serialized in JSON"),
         Val::Obj(o) => {
             if o.borrow().is_callable() {
                 return Ok(false);

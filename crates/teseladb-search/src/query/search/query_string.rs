@@ -526,7 +526,7 @@ fn compound(clauses: &[(Occur, Node)], boost: f32) -> Operator {
     if must.is_empty() && should.is_empty() {
         return Operator::Empty;
     }
-    Operator::Compound { must, should, filter: Vec::new(), must_not, minimum: 0 }
+    Operator::Compound { must, should, filter: Vec::new(), must_not, minimum: 0, weighted: false }
 }
 
 /// `queryString` with its options `d` at `path` of the query.

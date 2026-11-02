@@ -20,6 +20,7 @@ use teseladb_raftlog::Disk;
 use teseladb_types::{DecodeError, Decoder, Encoder, GroupId, Nanos};
 
 use crate::command::{Command, DedupRecord, Put};
+use crate::fence::Span;
 
 mod txn;
 
@@ -51,6 +52,8 @@ const ABANDONED: u8 = 0x0A;
 const RELOCATED: u8 = 0x0B;
 /// Local key of the range the last `Split` gave the upper part to (007 FR-007, A007-3-1).
 const CUT: u8 = 0x0C;
+/// Local key of the range's write fences (018, [`crate::fence`]).
+const FENCES: u8 = 0x0D;
 /// The mark of a range nothing was written to.
 const ZERO: Hlc = Hlc { physical: 0, logical: 0 };
 /// The newest mark: reads of local keys see their last version.
@@ -171,6 +174,8 @@ pub enum RangeOutput {
         /// The merge.
         merge: u64,
     },
+    /// A `Write` or `PutIntents` with a key a fence holds (018): nothing of it was written.
+    Fenced,
 }
 
 /// What the host of a core reads from the state machine of each of its ranges.
@@ -187,6 +192,10 @@ pub trait RangeState {
     /// The highest closed mark of the log and the index of its `SetClosedTs` (007 FR-012).
     fn closed_mark(&self) -> Option<(Hlc, u64)> {
         None
+    }
+    /// Whether a write fence holds `key` (018, [`crate::fence`]).
+    fn fenced(&self, _key: &[u8]) -> bool {
+        false
     }
 }
 
@@ -244,6 +253,8 @@ pub struct RangeSm {
     /// The range the last `Split` applied gave the upper part to: what tells a split Group 0
     /// recorded from an earlier cut at the same key that a merge undid (A007-3-1).
     cut: Option<GroupId>,
+    /// Its write fences (018).
+    fences: Vec<Span>,
 }
 
 /// A read of a local key at its last version that does not wait: `Ok(None)` when it needs a
@@ -270,6 +281,7 @@ struct SnapState {
     merges: MergeState,
     relocated: Option<(u16, u64)>,
     cut: Option<GroupId>,
+    fences: Vec<Span>,
 }
 
 /// What a range keeps of merges: the merge it is frozen for, the last range it absorbed and the
@@ -297,6 +309,7 @@ struct LocalState {
     merges: MergeState,
     relocated: Option<(u16, u64)>,
     cut: Option<GroupId>,
+    fences: Vec<Span>,
 }
 
 /// The value of local key `0B`: the target core (u16) and the intent (u64).
@@ -332,6 +345,7 @@ fn read_state(
         ABANDONED,
         RELOCATED,
         CUT,
+        FENCES,
     ];
     for sub in subs {
         match read(&local_key(range, sub))? {
@@ -372,6 +386,10 @@ fn read_state(
         cut: match &values[10] {
             Some(v) => Some(GroupId(decode_u64(v).ok_or_else(corrupt)?)),
             None => None,
+        },
+        fences: match &values[11] {
+            Some(v) => crate::fence::decode(v).map_err(|_| corrupt())?,
+            None => Vec::new(),
         },
     }))
 }
@@ -461,6 +479,7 @@ impl RangeSm {
             relocated: s.relocated,
             core: None,
             cut: s.cut,
+            fences: s.fences,
         }
     }
 
@@ -688,6 +707,14 @@ impl RangeSm {
         let (own_live_key, own_live) = (live_key(self.range), left_live.to_be_bytes());
         let (new_live_key, new_live) = (live_key(new_range), right_live.to_be_bytes());
         let (cut_key, cut) = (local_key(self.range, CUT), new_range.0.to_be_bytes());
+        // Each half keeps the fences of its keys (018).
+        let left_fences = crate::fence::clip(&self.fences, &self.start, at);
+        let (own_fences_key, own_fences) =
+            (local_key(self.range, FENCES), crate::fence::encode(&left_fences));
+        let (new_fences_key, new_fences) = (
+            local_key(new_range, FENCES),
+            crate::fence::encode(&crate::fence::clip(&self.fences, at, &self.end)),
+        );
         let writes: Vec<EntryWrite<'_>> = born
             .iter()
             .map(|(k, v)| EntryWrite { key: k, kind: Kind::Put, value: v })
@@ -697,6 +724,8 @@ impl RangeSm {
                 EntryWrite { key: &own_live_key, kind: Kind::Put, value: &own_live },
                 EntryWrite { key: &new_live_key, kind: Kind::Put, value: &new_live },
                 EntryWrite { key: &cut_key, kind: Kind::Put, value: &cut },
+                EntryWrite { key: &own_fences_key, kind: Kind::Put, value: &own_fences },
+                EntryWrite { key: &new_fences_key, kind: Kind::Put, value: &new_fences },
             ])
             .collect();
         self.write(ctx.index, ctx.ts, &writes)?;
@@ -704,7 +733,22 @@ impl RangeSm {
         self.live = left_live;
         self.last_split = ctx.index;
         self.cut = Some(new_range);
+        self.fences = left_fences;
         Ok(())
+    }
+
+    /// `Fence` (018): adds or lifts the write fence of `span`.
+    fn apply_fence(&mut self, span: &Span, on: bool, ctx: &ApplyCtx) -> Result<(), ApplyError> {
+        let fences = crate::fence::with(&self.fences, span, on);
+        let (key, value) = (local_key(self.range, FENCES), crate::fence::encode(&fences));
+        self.write(ctx.index, ctx.ts, &[EntryWrite { key: &key, kind: Kind::Put, value: &value }])?;
+        self.fences = fences;
+        Ok(())
+    }
+
+    /// The write fences of the range (018).
+    pub fn fences(&self) -> &[Span] {
+        &self.fences
     }
 
     /// `MergeFreeze` (007 FR-009): from this entry the range writes nothing until merge 0 thaws
@@ -760,12 +804,16 @@ impl RangeSm {
         writes.push((live_key(self.range), live.to_be_bytes().to_vec()));
         let merged = [right.0.to_be_bytes(), merge.to_be_bytes()].concat();
         writes.push((local_key(self.range, MERGED), merged));
+        let fences =
+            a.fences.iter().fold(self.fences.clone(), |f, s| crate::fence::with(&f, s, true));
+        writes.push((local_key(self.range, FENCES), crate::fence::encode(&fences)));
         let entries: Vec<EntryWrite<'_>> =
             writes.iter().map(|(k, v)| EntryWrite { key: k, kind: Kind::Put, value: v }).collect();
         self.write(ctx.index, ctx.ts, &entries)?;
         self.end.clone_from(&a.end);
         (self.gc_threshold, self.last_mark, self.live) = (gc, mark, live);
         self.merged = Some((right, merge));
+        self.fences = fences;
         self.last_split = ctx.index;
         Ok(RangeOutput::Merged { right, merge })
     }
@@ -803,8 +851,13 @@ impl RangeSm {
             0 => None,
             _ => Some(d.u64()?).filter(|g| *g != 0).map(GroupId),
         };
+        // And those taken before write fences existed (018).
+        let fences = match d.remaining() {
+            0 => Vec::new(),
+            _ => crate::fence::get(&mut d)?,
+        };
         d.finish()?;
-        Ok(SnapState { applied, last_write, gc, mark, end, live, merges, relocated, cut })
+        Ok(SnapState { applied, last_write, gc, mark, end, live, merges, relocated, cut, fences })
     }
 }
 
@@ -827,6 +880,12 @@ impl RangeState for RangeSm {
 
     fn closed_mark(&self) -> Option<(Hlc, u64)> {
         self.closed
+    }
+
+    fn fenced(&self, key: &[u8]) -> bool {
+        // Faulty variant (018 T005): the range takes the writes of a resharding's critical
+        // section, so one that found the collection before it may land after the last catch-up.
+        !cfg!(teseladb_bug = "reshard_without_fence") && crate::fence::covers(&self.fences, key)
     }
 }
 
@@ -856,8 +915,20 @@ impl StateMachine for RangeSm {
             .map_err(|e| ApplyError(format!("range {}: entry {}: {e}", self.range.0, ctx.index)))?;
         let out = match cmd {
             Command::Noop => RangeOutput::Applied { ts: ctx.ts },
+            Command::Write { puts, deletes, .. }
+                if puts.iter().map(|p| &p.key).chain(&deletes).any(|k| self.fenced(k)) =>
+            {
+                RangeOutput::Fenced
+            }
             Command::Write { puts, deletes, dedup, live_delta } => {
                 self.apply_write(&puts, &deletes, (dedup.as_ref(), live_delta), ctx)?;
+                RangeOutput::Applied { ts: ctx.ts }
+            }
+            Command::PutIntents { intents, .. } if intents.iter().any(|i| self.fenced(&i.key)) => {
+                RangeOutput::Fenced
+            }
+            Command::Fence { start, end, on } => {
+                self.apply_fence(&(start, end), on, ctx)?;
                 RangeOutput::Applied { ts: ctx.ts }
             }
             Command::SetClosedTs { closed } => {
@@ -975,13 +1046,14 @@ impl StateMachine for RangeSm {
         let (core, intent) = self.relocated.unwrap_or((0, 0));
         e.u16(core).u64(intent);
         e.u64(self.cut.map_or(0, |g| g.0));
+        crate::fence::put(&mut e, &self.fences);
         e.finish()
     }
 
     fn restore(&mut self, snap: &[u8]) -> Result<(), RestoreError> {
-        let SnapState { applied, last_write, gc, mark, end, live, merges, relocated, cut } = self
-            .decode_snapshot(snap)
-            .map_err(|e| RestoreError(format!("range {}: {e}", self.range.0)))?;
+        let SnapState { applied, last_write, gc, mark, end, live, merges, relocated, cut, fences } =
+            self.decode_snapshot(snap)
+                .map_err(|e| RestoreError(format!("range {}: {e}", self.range.0)))?;
         let flushed = self.lsm.borrow().flushed_index(self.range);
         if flushed < last_write {
             return Err(RestoreError(format!(
@@ -999,6 +1071,7 @@ impl StateMachine for RangeSm {
             (merges.frozen, merges.merged, merges.abandoned);
         self.relocated = relocated;
         self.cut = cut;
+        self.fences = fences;
         // A split below the snapshot's index may be the last one: none below it leaves.
         self.last_split = applied;
         self.log_floor = applied;

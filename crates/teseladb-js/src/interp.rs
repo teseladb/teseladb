@@ -63,6 +63,7 @@ pub struct Realm {
     pub number: ObjRef,
     pub boolean: ObjRef,
     pub symbol: ObjRef,
+    pub bigint: ObjRef,
     pub error: ObjRef,
     pub date: ObjRef,
     pub regexp: ObjRef,
@@ -102,6 +103,8 @@ pub struct Interp<'c> {
     pub last: Option<Val>,
     /// Where the expression or `throw` evaluated last starts: the place of an error.
     pub pos: Pos,
+    /// Whether the running code is strict: assignments to read-only properties throw.
+    pub strict: bool,
 }
 
 /// How often the deadline is read, in steps.
@@ -169,11 +172,12 @@ fn callee_text(e: &Expr) -> String {
             MemberProp::Computed(_) => format!("{}[...]", callee_text(obj)),
         },
         Expr::This => "this".into(),
+        Expr::Call { callee, args, .. } if args.is_empty() => format!("{}()", callee_text(callee)),
         Expr::Call { callee, .. } => format!("{}(...)", callee_text(callee)),
         Expr::Str(s) => format!("\"{s}\""),
         Expr::Num(n) => number::to_string(*n),
         Expr::OptChain(e) => callee_text(e),
-        _ => "expression".into(),
+        _ => "(intermediate value)".into(),
     }
 }
 
@@ -286,6 +290,7 @@ impl<'c> Interp<'c> {
             Kind::Num(n) => return Ok(Val::Num(n)),
             Kind::Str(s) => return Ok(Val::Str(s)),
             Kind::Bool(b) => return Ok(Val::Bool(b)),
+            Kind::BigInt(b) => return Ok(Val::BigInt(b)),
             _ => {}
         }
         let order: [&str; 2] =
@@ -314,6 +319,7 @@ impl<'c> Interp<'c> {
             Val::Num(n) => *n,
             Val::Str(s) => number::parse(s),
             Val::Sym(_) => return self.type_error("can't convert symbol to number"),
+            Val::BigInt(_) => return self.type_error("can't convert BigInt to number"),
             Val::Obj(_) => {
                 let p = self.primitive(v, "number")?;
                 self.number_of(&p)?
@@ -328,6 +334,7 @@ impl<'c> Interp<'c> {
             Val::Bool(b) => if *b { "true" } else { "false" }.into(),
             Val::Num(n) => number::to_string(*n).into(),
             Val::Str(s) => s.clone(),
+            Val::BigInt(b) => b.to_string().into(),
             Val::Sym(_) => return self.type_error("can't convert symbol to string"),
             Val::Obj(_) => {
                 let p = self.primitive(v, "string")?;
@@ -357,6 +364,7 @@ impl<'c> Interp<'c> {
             Val::Num(n) => self.alloc(Some(self.realm.number.clone()), Kind::Num(*n)),
             Val::Str(s) => self.alloc(Some(self.realm.string.clone()), Kind::Str(s.clone())),
             Val::Sym(_) => self.alloc(Some(self.realm.symbol.clone()), Kind::Ordinary),
+            Val::BigInt(b) => self.alloc(Some(self.realm.bigint.clone()), Kind::BigInt(b.clone())),
         }
     }
 
@@ -367,6 +375,7 @@ impl<'c> Interp<'c> {
             Val::Null => "null".into(),
             Val::Str(s) => format!("\"{s}\""),
             Val::Num(n) => number::to_string(*n),
+            Val::BigInt(b) => format!("{b}n"),
             Val::Bool(b) => b.to_string(),
             Val::Sym(s) => format!("Symbol({})", s.0),
             Val::Obj(o) => {
@@ -387,6 +396,7 @@ impl<'c> Interp<'c> {
             Val::Num(_) => Some(self.realm.number.clone()),
             Val::Bool(_) => Some(self.realm.boolean.clone()),
             Val::Sym(_) => Some(self.realm.symbol.clone()),
+            Val::BigInt(_) => Some(self.realm.bigint.clone()),
             _ => None,
         }
     }
@@ -500,6 +510,9 @@ impl<'c> Interp<'c> {
                     return self.type_error(&format!("setting getter-only property \"{key}\""));
                 }
                 if !p.writable {
+                    if self.strict {
+                        return self.type_error(&format!("\"{key}\" is read-only"));
+                    }
                     return Ok(());
                 }
                 if c.ptr_eq(o) {
@@ -513,6 +526,11 @@ impl<'c> Interp<'c> {
             cur = c.borrow().proto.clone();
         }
         if !o.borrow().extensible {
+            if self.strict {
+                return self.type_error(&format!(
+                    "can't define property \"{key}\": Object is not extensible"
+                ));
+            }
             return Ok(());
         }
         self.grow(o, 1)?;
@@ -616,8 +634,8 @@ impl<'c> Interp<'c> {
                 all.extend_from_slice(args);
                 self.call(&Val::Obj(target), &bound_this, &all)
             }
-            Func::Closure { def, env, this: arrow_this, home, derived, .. } => {
-                if derived || (def.is_ctor_of_derived) {
+            Func::Closure { def, env, this: arrow_this, home, derived, class, .. } => {
+                if class.is_some() || derived || def.is_ctor_of_derived {
                     self.depth -= 1;
                     return self.type_error("class constructors must be invoked with 'new'");
                 }
@@ -668,6 +686,9 @@ impl<'c> Interp<'c> {
                 s.new_target = Some(new_target.unwrap_or(Val::Undef));
             }
         }
+        if let (false, Some(name)) = (def.arrow, &def.name) {
+            declare(&scope, name, Val::Obj(fo.clone()), true);
+        }
         if !def.arrow {
             let a = self.alloc(Some(self.realm.object.clone()), Kind::Arguments)?;
             self.grow(&a, args.len() + 1)?;
@@ -695,7 +716,10 @@ impl<'c> Interp<'c> {
             self.bind(r, arr, &scope, Some(true))?;
         }
         self.hoist(&def.body, &scope, true)?;
-        let v = match self.exec_block_in(&def.body, &scope) {
+        let outer = std::mem::replace(&mut self.strict, def.strict);
+        let r = self.exec_block_in(&def.body, &scope);
+        self.strict = outer;
+        let v = match r {
             Ok(()) | Err(Ctrl::Break(_) | Ctrl::Continue(_)) => Val::Undef,
             Err(Ctrl::Return(v)) => v,
             Err(e) => return Err(e),
@@ -1429,7 +1453,7 @@ impl<'c> Interp<'c> {
                     },
                     _ => {
                         return self.type_error(&format!(
-                            "class heritage {} is not a constructor",
+                            "class heritage {} is not an object or null",
                             self.show(&pv)
                         ));
                     }
@@ -1455,6 +1479,7 @@ impl<'c> Interp<'c> {
                 },
                 arrow: false,
                 is_ctor_of_derived: derived,
+                strict: true,
                 source: format!("class {} {{ }}", c.name.as_deref().unwrap_or("")).into(),
             }),
         };
@@ -1527,6 +1552,7 @@ impl<'c> Interp<'c> {
     pub fn eval(&mut self, e: &Expr, env: &EnvRef) -> R {
         match e {
             Expr::Num(n) => Ok(Val::Num(*n)),
+            Expr::BigInt(b) => Ok(Val::BigInt(b.clone())),
             Expr::Str(s) => Ok(Val::Str(s.clone())),
             Expr::Bool(b) => Ok(Val::Bool(*b)),
             Expr::Null => Ok(Val::Null),
@@ -1582,9 +1608,15 @@ impl<'c> Interp<'c> {
                 let v = self.eval(x, env)?;
                 Ok(match *op {
                     "!" => Val::Bool(!v.truthy()),
-                    "-" => Val::Num(-self.number_of(&v)?),
+                    "-" => match self.numeric(&v)? {
+                        Val::BigInt(b) => Val::BigInt(Rc::new(b.neg())),
+                        n => Val::Num(-self.number_of(&n)?),
+                    },
                     "+" => Val::Num(self.number_of(&v)?),
-                    "~" => Val::Num(f64::from(!number::to_int32(self.number_of(&v)?))),
+                    "~" => match self.numeric(&v)? {
+                        Val::BigInt(b) => Val::BigInt(Rc::new(b.not())),
+                        n => Val::Num(f64::from(!number::to_int32(self.number_of(&n)?))),
+                    },
                     _ => Val::Undef,
                 })
             }
@@ -1623,10 +1655,19 @@ impl<'c> Interp<'c> {
             },
             Expr::Update { op, prefix, target } => {
                 let old = self.eval(target, env)?;
-                let n = self.number_of(&old)?;
-                let new = if *op == "++" { n + 1.0 } else { n - 1.0 };
-                self.assign_to(target, Val::Num(new), env)?;
-                Ok(Val::Num(if *prefix { new } else { n }))
+                let (old, new) = match self.numeric(&old)? {
+                    Val::BigInt(b) => {
+                        let one = crate::bigint::BigInt::from_i64(1);
+                        let new = if *op == "++" { b.add(&one) } else { b.sub(&one) };
+                        (Val::BigInt(b), Val::BigInt(Rc::new(new)))
+                    }
+                    v => {
+                        let n = self.number_of(&v)?;
+                        (Val::Num(n), Val::Num(if *op == "++" { n + 1.0 } else { n - 1.0 }))
+                    }
+                };
+                self.assign_to(target, new.clone(), env)?;
+                Ok(if *prefix { new } else { old })
             }
             Expr::Binary(op, a, b) => {
                 let x = self.eval(a, env)?;
@@ -1669,12 +1710,7 @@ impl<'c> Interp<'c> {
                 }
                 let key = self.member_key(prop, env)?;
                 if o.is_nullish() {
-                    let what = callee_text(obj);
-                    let msg = if matches!(o, Val::Undef) {
-                        format!("{what} is undefined")
-                    } else {
-                        format!("{what} is null")
-                    };
+                    let msg = null_access(obj, &key, &o);
                     return self.type_error(&msg);
                 }
                 self.get(&o, &key)
@@ -1702,9 +1738,13 @@ impl<'c> Interp<'c> {
                 self.pos = *pos;
                 let f = self.eval(callee, env)?;
                 let args = self.eval_args(args, env)?;
-                if !f.is_callable() {
-                    return self
-                        .type_error(&format!("{} is not a constructor", callee_text(callee)));
+                let arrow = matches!(&f, Val::Obj(o) if matches!(&o.borrow().kind, Kind::Func(Func::Closure { def, .. }) if def.arrow));
+                if !f.is_callable() || arrow {
+                    let text = match &**callee {
+                        Expr::Func(def) => def.source.to_string(),
+                        other => callee_text(other),
+                    };
+                    return self.type_error(&format!("{text} is not a constructor"));
                 }
                 self.construct(&f, &args, &f)
             }
@@ -1793,8 +1833,8 @@ impl<'c> Interp<'c> {
                 }
                 let key = self.member_key(prop, env)?;
                 if o.is_nullish() {
-                    let what = callee_text(obj);
-                    return self.type_error(&format!("{what} is {}", self.show(&o)));
+                    let msg = null_access(obj, &key, &o);
+                    return self.type_error(&msg);
                 }
                 (self.get(&o, &key)?, o)
             }
@@ -1902,8 +1942,8 @@ impl<'c> Interp<'c> {
                 let o = self.eval(obj, env)?;
                 let key = self.member_key(prop, env)?;
                 if o.is_nullish() {
-                    let what = callee_text(obj);
-                    return self.type_error(&format!("{what} is {}", self.show(&o)));
+                    let msg = null_access(obj, &key, &o);
+                    return self.type_error(&msg);
                 }
                 self.set(&o, &key, v)
             }
@@ -1913,7 +1953,7 @@ impl<'c> Interp<'c> {
 
     pub fn instance_of(&mut self, x: &Val, f: &Val) -> R<bool> {
         if !f.is_callable() {
-            return self.type_error(&format!("{} is not a function", self.show(f)));
+            return self.type_error(&format!("invalid 'instanceof' operand {}", self.show(f)));
         }
         if let Val::Obj(fo) = f
             && let Kind::Func(Func::Bound(t, ..)) = &fo.borrow().kind
@@ -1934,6 +1974,15 @@ impl<'c> Interp<'c> {
     }
 
     pub fn loose_eq(&mut self, a: &Val, b: &Val) -> R<bool> {
+        match (a, b) {
+            (Val::Bool(x), y) if !matches!(y, Val::Bool(_)) => {
+                return self.loose_eq(&Val::Num(f64::from(u8::from(*x))), b);
+            }
+            (x, Val::Bool(y)) if !matches!(x, Val::Bool(_)) => {
+                return self.loose_eq(a, &Val::Num(f64::from(u8::from(*y))));
+            }
+            _ => {}
+        }
         Ok(match (a, b) {
             (Val::Undef | Val::Null, Val::Undef | Val::Null) => true,
             (Val::Undef | Val::Null, _) | (_, Val::Undef | Val::Null) => false,
@@ -1952,6 +2001,10 @@ impl<'c> Interp<'c> {
                 }
                 x == y
             }
+            (Val::BigInt(_), Val::Num(_) | Val::Str(_) | Val::BigInt(_))
+            | (Val::Num(_) | Val::Str(_), Val::BigInt(_)) => {
+                crate::bigints::compare(self, a, b)? == Some(std::cmp::Ordering::Equal)
+            }
             (Val::Obj(_), Val::Obj(_)) => strict_eq(a, b),
             (Val::Obj(_), _) => {
                 let p = self.primitive(a, "default")?;
@@ -1965,21 +2018,19 @@ impl<'c> Interp<'c> {
         })
     }
 
-    pub fn binary(&mut self, op: &str, x: &Val, y: &Val) -> R {
+    /// `ToNumeric`: a number or a `BigInt`.
+    pub fn numeric(&mut self, v: &Val) -> R {
+        let p = self.primitive(v, "number")?;
+        Ok(match p {
+            Val::BigInt(_) => p,
+            other => Val::Num(self.number_of(&other)?),
+        })
+    }
+
+    fn number_binary(&mut self, op: &str, x: &Val, y: &Val) -> R {
         let num = |s: &mut Self, v: &Val| s.number_of(v);
         Ok(match op {
-            "+" => {
-                let a = self.primitive(x, "default")?;
-                let b = self.primitive(y, "default")?;
-                if matches!(a, Val::Str(_)) || matches!(b, Val::Str(_)) {
-                    let (sa, sb) = (self.str_of(&a)?, self.str_of(&b)?);
-                    let mut out = String::with_capacity(sa.len() + sb.len());
-                    out.push_str(&sa);
-                    out.push_str(&sb);
-                    return self.string(out);
-                }
-                Val::Num(self.number_of(&a)? + self.number_of(&b)?)
-            }
+            "@+" => Val::Num(num(self, x)? + num(self, y)?),
             "-" => Val::Num(num(self, x)? - num(self, y)?),
             "*" => Val::Num(num(self, x)? * num(self, y)?),
             "/" => Val::Num(num(self, x)? / num(self, y)?),
@@ -2014,6 +2065,37 @@ impl<'c> Interp<'c> {
                 number::to_uint32(num(self, x)?)
                     .wrapping_shr(number::to_uint32(num(self, y)?) & 31),
             )),
+            _ => return self.type_error(&format!("unknown operator {op}")),
+        })
+    }
+
+    pub fn binary(&mut self, op: &str, x: &Val, y: &Val) -> R {
+        Ok(match op {
+            "+" => {
+                let a = self.primitive(x, "default")?;
+                let b = self.primitive(y, "default")?;
+                if matches!(a, Val::Str(_)) || matches!(b, Val::Str(_)) {
+                    let (sa, sb) = (self.str_of(&a)?, self.str_of(&b)?);
+                    let mut out = String::with_capacity(sa.len() + sb.len());
+                    out.push_str(&sa);
+                    out.push_str(&sb);
+                    return self.string(out);
+                }
+                return self.binary("@+", &a, &b);
+            }
+            "-" | "*" | "/" | "%" | "**" | "&" | "|" | "^" | "<<" | ">>" | ">>>" | "@+" => {
+                let a = self.numeric(x)?;
+                let b = self.numeric(y)?;
+                match (&a, &b) {
+                    (Val::BigInt(p), Val::BigInt(q)) => {
+                        return crate::bigints::binary(self, op, p, q);
+                    }
+                    (Val::BigInt(_), _) | (_, Val::BigInt(_)) => {
+                        return self.type_error("can't convert BigInt to number");
+                    }
+                    _ => self.number_binary(op, &a, &b)?,
+                }
+            }
             "==" => Val::Bool(self.loose_eq(x, y)?),
             "!=" => Val::Bool(!self.loose_eq(x, y)?),
             "===" => Val::Bool(strict_eq(x, y)),
@@ -2023,6 +2105,8 @@ impl<'c> Interp<'c> {
                 let b = self.primitive(y, "number")?;
                 let ord = if let (Val::Str(p), Val::Str(q)) = (&a, &b) {
                     Some(p.encode_utf16().cmp(q.encode_utf16()))
+                } else if matches!(a, Val::BigInt(_)) || matches!(b, Val::BigInt(_)) {
+                    crate::bigints::compare(self, &a, &b)?
                 } else {
                     let (p, q) = (self.number_of(&a)?, self.number_of(&b)?);
                     p.partial_cmp(&q)
@@ -2039,11 +2123,8 @@ impl<'c> Interp<'c> {
             "instanceof" => Val::Bool(self.instance_of(x, y)?),
             "in" => {
                 let Val::Obj(o) = y else {
-                    let key = self.str_of(x)?;
-                    let msg = format!(
-                        "can't use 'in' operator to search for '{key}' in {}",
-                        self.show(y)
-                    );
+                    let msg =
+                        format!("right-hand side of 'in' should be an object, got {}", y.type_of());
                     return self.type_error(&msg);
                 };
                 let k = self.key_of(x)?;
@@ -2051,6 +2132,23 @@ impl<'c> Interp<'c> {
             }
             _ => return self.type_error(&format!("unknown operator {op}")),
         })
+    }
+}
+
+/// SpiderMonkey's message for reading `key` of `o` (null or undefined) that `obj` gave:
+/// `can't access property "x", o is null` when the expression has a name, and
+/// `can't access property "x" of null` for a literal (measured on a `refrouter` 9.0.4 on 02-11).
+fn null_access(obj: &Expr, key: &str, o: &Val) -> String {
+    let what = if matches!(o, Val::Undef) { "undefined" } else { "null" };
+    let named = match obj {
+        Expr::Ident(n, _) => &**n != "undefined",
+        Expr::Member { .. } | Expr::Call { .. } | Expr::This => true,
+        _ => false,
+    };
+    if named {
+        format!("can't access property \"{key}\", {} is {what}", callee_text(obj))
+    } else {
+        format!("can't access property \"{key}\" of {what}")
     }
 }
 
