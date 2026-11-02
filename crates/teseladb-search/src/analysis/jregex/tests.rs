@@ -152,9 +152,9 @@ fn syntax_errors() {
         ("(?<1a>x)", ErrorKind::BadGroupName),
         ("(?<a>x)(?<a>y)", ErrorKind::BadGroupName),
         ("\\k<zz>", ErrorKind::BadGroupName),
-        ("\\kx", ErrorKind::BadGroupName),
-        ("\\b{x}", ErrorKind::IllegalEscape),
-        ("\\b{g", ErrorKind::IllegalEscape),
+        ("\\kx", ErrorKind::BareNamedReference),
+        ("\\b{x}", ErrorKind::IllegalRepetition),
+        ("\\b{g", ErrorKind::BadBoundary),
         ("\\x{110000}", ErrorKind::IllegalCharacter),
         ("\\x{41", ErrorKind::IllegalCharacter),
         ("\\xZZ", ErrorKind::IllegalCharacter),
@@ -184,6 +184,8 @@ fn replacements() {
         ("${zz}", "No group with name {zz}"),
         ("${a", "named capturing group is missing trailing '}'"),
         ("$x", "Illegal group reference"),
+        // `m83.js` of lane 3.
+        ("${}", "named capturing group has 0 length name"),
     ] {
         let want = Err(RegexError::Replacement(message.to_owned()));
         assert_eq!(re.replace("ab", bad, true), want, "{bad}");
@@ -191,6 +193,21 @@ fn replacements() {
     let named = JavaRegex::new("(?<w>\\w+)").unwrap();
     assert_eq!(named.replace("hi yo", "<${w}>", true).unwrap(), "<hi> <yo>");
     assert_eq!(JavaRegex::new("x*").unwrap().replace("ab", "-", true).unwrap(), "-a-b-");
+    // With twelve groups `$12` is the twelfth (`m83.js` of lane 3: `Hello` gives `[]`).
+    let twelve = JavaRegex::new("(H)(e)(l)(l)(o)()()()()()()()").unwrap();
+    assert_eq!(twelve.replace("Hello", "[$12]", true).unwrap(), "[]");
+}
+
+/// Patterns `refsearch` 1.70.6 accepts (`m81.js` of lane 3), and what they match.
+#[test]
+fn surrogates_quotes_and_case_ranges() {
+    assert!(JavaRegex::new("\\uD800\\x41").is_ok());
+    assert!(matches("\\Qa\\b\\E", "a\\b"));
+    assert!(matches("\\Qa\\", "a\\"));
+    assert!(matches("(?iu)\u{101}", "\u{100}"));
+    // A back reference takes the most digits that name a group.
+    assert!(matches("(H)(e)(l)(l)(o)()()()()()()(x)\\12", "Helloxx"));
+    assert!(!matches("(H)(e)(l)(l)(o)()()()()()()(x)\\12", "Hellox"));
 }
 
 #[test]
@@ -247,6 +264,49 @@ fn syntax_messages() {
         ("\\N{FOO}", "Unknown character name [FOO] near index 6\n\\N{FOO}\n      ^"),
         ("\\0", "Illegal octal escape sequence near index 2\n\\0"),
         ("\\09", "Illegal octal escape sequence near index 2\n\\09\n  ^"),
+        // Measured on `refsearch` 1.70.6 on 02-11-2026 (`scratchpad/lane3r/m81.js`).
+        ("a{2,3", "Unclosed counted closure near index 5\na{2,3"),
+        ("a{2", "Unclosed counted closure near index 3\na{2"),
+        ("(?<ab)", "named capturing group is missing trailing '>' near index 5\n(?<ab)\n     ^"),
+        ("(?<ab", "named capturing group is missing trailing '>' near index 5\n(?<ab"),
+        (
+            "(?<ab-c>x)",
+            "named capturing group is missing trailing '>' near index 5\n(?<ab-c>x)\n     ^",
+        ),
+        ("\\ka", "\\k is not followed by '<' for named capturing group near index 2\n\\ka\n  ^"),
+        ("a\\kb", "\\k is not followed by '<' for named capturing group near index 3\na\\kb\n   ^"),
+        ("\\k", "\\k is not followed by '<' for named capturing group near index 2\n\\k"),
+        ("[\\k]", "Illegal/unsupported escape sequence near index 2\n[\\k]\n  ^"),
+        ("[\\k<a>]", "Illegal/unsupported escape sequence near index 2\n[\\k<a>]\n  ^"),
+        ("[\\1]", "Illegal/unsupported escape sequence near index 2\n[\\1]\n  ^"),
+        ("(a)[\\1]", "Illegal/unsupported escape sequence near index 5\n(a)[\\1]\n     ^"),
+        ("\\b{x}", "Illegal repetition near index 3\n\\b{x}\n   ^"),
+        ("\\b{gx", "Illegal/unsupported escape sequence near index 4\n\\b{gx\n    ^"),
+        ("\\b{g", "Illegal/unsupported escape sequence near index 4\n\\b{g"),
+        ("(?iz)", "Unknown inline modifier near index 3\n(?iz)\n   ^"),
+        ("(?i", "Unknown inline modifier near index 3\n(?i"),
+        ("(?i-", "Unknown inline modifier near index 4\n(?i-"),
+        ("(?-", "Unknown inline modifier near index 3\n(?-"),
+        ("(?", "Unknown inline modifier near index 2\n(?"),
+        (
+            "a{1,99999999999}",
+            "Illegal repetition range near index 13\na{1,99999999999}\n             ^",
+        ),
+        ("a{1,x}", "Unclosed counted closure near index 4\na{1,x}\n    ^"),
+        ("a{x}", "Illegal repetition near index 2\na{x}\n  ^"),
+        ("(a)\\k<a>", "named capturing group <a> does not exist near index 7\n(a)\\k<a>\n       ^"),
+        (
+            "(?<a>x)\\k<a",
+            "named capturing group is missing trailing '>' near index 11\n(?<a>x)\\k<a",
+        ),
+        (
+            "(?<a>x)\\k<b>",
+            "named capturing group <b> does not exist near index 11\n(?<a>x)\\k<b>\n           ^",
+        ),
+        (
+            "x\\k<1>",
+            "capturing group name does not start with a Latin letter near index 4\nx\\k<1>\n    ^",
+        ),
     ];
     let mut wrong = Vec::new();
     for (pattern, want) in cases {

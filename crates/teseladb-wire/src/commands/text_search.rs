@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use teseladb_bson::{Document, RawDoc, RawValue, Value};
 use teseladb_exec::pipeline::search::Scored;
-use teseladb_meta::catalog::Namespace;
+use teseladb_meta::catalog::{CollectionEntry, Namespace};
 use teseladb_mql::{
     Extensions, Filter, FilterUse, GeoQuery, MatchContext, MqlError, Result as MqlResult,
 };
@@ -188,6 +188,33 @@ fn count_text(filter: &Document, under_nor: bool) -> Result<usize, CommandError>
     Ok(n)
 }
 
+/// Plans the `$text` of `filter` on `ns`: one text expression, the collection's text index and
+/// the query's `$language`, in `refnode`'s order (measured: the missing index comes first).
+pub fn check<B: Backend + ?Sized>(
+    backend: &mut B,
+    ns: &Namespace,
+    filter: &Document,
+) -> Result<(), CommandError> {
+    planned(backend, ns, filter).map(|_| ())
+}
+
+/// The collection of `ns` and its text index, once the `$text` of `filter` is planned.
+fn planned<B: Backend + ?Sized>(
+    backend: &mut B,
+    ns: &Namespace,
+    filter: &Document,
+) -> Result<(CollectionEntry, TextIndex), CommandError> {
+    if count_text(filter, false)? > 1 {
+        return Err(CommandError::new(BAD_VALUE, "Too many text expressions"));
+    }
+    let Some(coll) = backend.collection(ns)? else { return Err(no_index(ns, true)) };
+    let Some(index) = text_index(backend, coll.id)? else { return Err(no_index(ns, false)) };
+    if let Some(q) = text_of(filter) {
+        TextExtensions { index: &index }.query(&q).map_err(from_mql)?;
+    }
+    Ok((coll, index))
+}
+
 /// The documents of `ns` that `filter` (with a `$text`) selects, each with its `textScore`
 /// (measured: the score of the text clause, also when an `$or` let the document in).
 pub fn source<B: Backend + ?Sized>(
@@ -198,11 +225,7 @@ pub fn source<B: Backend + ?Sized>(
 ) -> Result<Vec<Scored>, CommandError> {
     let bytes = filter.to_bytes()?;
     let parsed = Filter::parse(RawDoc::from_bytes(&bytes)?, FilterUse::Query).map_err(from_mql)?;
-    if count_text(filter, false)? > 1 {
-        return Err(CommandError::new(BAD_VALUE, "Too many text expressions"));
-    }
-    let Some(coll) = backend.collection(ns)? else { return Err(no_index(ns, true)) };
-    let Some(index) = text_index(backend, coll.id)? else { return Err(no_index(ns, false)) };
+    let (coll, index) = planned(backend, ns, filter)?;
     let ext = TextExtensions { index: &index };
     let query = text_of(filter);
     let ctx = MatchContext { collation: None, ext: &ext, vars: None };
