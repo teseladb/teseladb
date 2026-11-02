@@ -663,3 +663,63 @@ fn formats_of_bodies_and_answers() {
         Request::new("POST", &format!("{C}/find")).header("Content-Type", BSON).body(vec![1, 2]);
     assert_eq!(handle(&req, &mut f).status, 400);
 }
+
+/// 019 FR-009: `POST /v1/transactions` answers its results, the problem of the operation that
+/// failed with its index and `operationTime`, or the problem of a body it does not take.
+#[test]
+fn transactions_answer_results_or_the_operation_that_failed() {
+    let body = r#"{"operations":[{"op":"insert","db":"a","coll":"c","documents":[{"_id":1}]}]}"#;
+    let mut f = Fake::default();
+    let r = call(&mut f, "POST", "/v1/transactions", body);
+    assert_eq!(r.status, 200);
+    assert!(json(&r).get("results").is_some());
+    let mut f = Fake {
+        replies: vec![doc(
+            r#"{"ok":1.0,"writeErrors":[{"index":0,"code":11000,"errmsg":"dup"}],"operationTime":{"$timestamp":{"t":4,"i":1}}}"#,
+        )],
+        ..Fake::default()
+    };
+    let r = call(&mut f, "POST", "/v1/transactions", body);
+    assert_eq!(r.status, 409);
+    assert_eq!(json(&r).get("operationIndex"), Some(&Value::Int32(0)));
+    assert!(header(&r, OPERATION_TIME).is_some());
+    let mut f = Fake {
+        replies: vec![doc(r#"{"ok":0.0,"code":2,"codeName":"BadValue","errmsg":"no"}"#)],
+        ..Fake::default()
+    };
+    let r = call(&mut f, "POST", "/v1/transactions", body);
+    assert_eq!((r.status, header(&r, OPERATION_TIME)), (400, None));
+    let r = call(&mut Fake::default(), "POST", "/v1/transactions", r#"{"operations":[]}"#);
+    assert_eq!(r.status, 400);
+}
+
+/// 019 FR-012: the change stream routes open their `aggregate`; other routes are not streams.
+#[test]
+fn watch_opens_the_change_stream_of_its_route() {
+    use teseladb_rest::api::{problem_body, watch};
+    let get = Request::new("GET", &format!("{C}/changeStream?fullDocument=updateLookup"))
+        .header(teseladb_http::sse::LAST_EVENT_ID, r#"{"_data":"01"}"#);
+    let (db, cmd) = watch(&get).unwrap().unwrap();
+    assert_eq!((db.as_str(), cmd.get("aggregate")), ("shop", Some(&Value::from("items"))));
+    let post = Request::new("POST", &format!("{C}/changeStream")).body(b"{\"x\":".to_vec());
+    assert_eq!(watch(&post).unwrap().unwrap_err().status, 400);
+    let bad = Request::new("GET", &format!("{C}/changeStream?nope=1"));
+    assert_eq!(watch(&bad).unwrap().unwrap_err().status, 400);
+    assert!(watch(&Request::new("GET", "/v1/databases")).is_none());
+    assert!(watch(&Request::new("GET", "/nowhere")).is_none());
+    let (st, d) =
+        problem_body(&doc(r#"{"ok":0.0,"code":26,"codeName":"NamespaceNotFound","errmsg":"x"}"#));
+    assert_eq!((st, d.get("code")), (404, Some(&Value::Int32(26))));
+}
+
+/// 019 FR-010: a write with `Idempotency-Key` runs once in its session through the route.
+#[test]
+fn a_write_with_an_idempotency_key_runs_in_its_session() {
+    let mut f = Fake::default();
+    let req = Request::new("POST", &format!("{C}/insertOne"))
+        .header(teseladb_rest::idempotency::HEADER, "k1")
+        .body(br#"{"document":{"_id":1}}"#.to_vec());
+    let r = handle(&req, &mut f);
+    assert!(r.status < 300, "{}", r.status);
+    assert!(f.ran.iter().any(|(_, c)| c.get("lsid").is_some() && c.get("txnNumber").is_some()));
+}
