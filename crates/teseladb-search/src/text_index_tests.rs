@@ -75,7 +75,7 @@ fn scores_follow_counts_lengths_weights_and_arrays() {
     ];
     for (search, s, want) in cases {
         let have = run(&index, &docs, search, s);
-        assert!(close(&have, &want), "{search}: {have:?} != {want:?}");
+        assert!(same(&have, &want), "{search}: {have:?} != {want:?}");
     }
 }
 
@@ -160,7 +160,7 @@ fn queries_read_terms_phrases_negations_and_sensitivity_as_measured() {
     ];
     for (search, s, want) in cases {
         let have = run(&index, &docs, search, s);
-        assert!(close(&have, &want), "{search} {s:?}: {have:?} != {want:?}");
+        assert!(same(&have, &want), "{search} {s:?}: {have:?} != {want:?}");
     }
     // `$language` changes how the query reads, not the documents.
     let spanish = Language::named("spanish").expect("spanish");
