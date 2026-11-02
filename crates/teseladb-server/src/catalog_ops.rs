@@ -49,6 +49,13 @@ pub enum CatalogReq {
         /// Name.
         name: String,
     },
+    /// The document of `kind` whose `_id` has key `id` (an API key by its hash, 019 FR-016).
+    PrincipalById {
+        /// User, role or API key.
+        kind: Principal,
+        /// The key of its `_id`.
+        id: Vec<u8>,
+    },
     /// The documents of the users or roles of a database, or of all (013).
     Principals {
         /// User or role.

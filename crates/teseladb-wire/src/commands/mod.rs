@@ -13,6 +13,7 @@
 
 pub mod admin;
 pub mod aggregate;
+pub mod api_keys;
 pub mod args;
 pub mod audit;
 pub mod auth;
@@ -447,6 +448,18 @@ pub trait Backend {
             Err(e) => Err(authz_collections::stored_error(e)),
         }
     }
+    /// The document of `kind` whose `_id` has key `id` ([`teseladb_meta::security::id_key`]):
+    /// an API key by the SHA-256 of the key (019 FR-016).
+    fn principal_by_id(
+        &mut self,
+        kind: Principal,
+        id: &[u8],
+    ) -> Result<Option<Vec<u8>>, CommandError> {
+        Ok(self
+            .principals(kind, None)?
+            .into_iter()
+            .find(|d| teseladb_meta::security::id_key(d).is_ok_and(|k| k == id)))
+    }
     /// Fills `out` with random bytes of the operating system (the SCRAM nonces).
     fn secure_random(&mut self, out: &mut [u8]) -> Result<(), CommandError>;
     /// Whether `user` logs in to the node's LDAP server with `password` (PLAIN on `$external`,
@@ -873,6 +886,7 @@ pub fn is_data_command(name: &str) -> bool {
         || name == txn::ABORT_TRANSACTION
         || users::NAMES.contains(&name)
         || roles::NAMES.contains(&name)
+        || api_keys::NAMES.contains(&name)
 }
 
 /// Runs the command of `ctx`; `None` if it is not one of this module's.
@@ -1223,6 +1237,10 @@ fn dispatch<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
         other if roles::NAMES.contains(&other) => {
             let name = other.to_owned();
             roles::run(ctx).unwrap_or_else(|| Err(not_found_error(&name)))
+        }
+        other if api_keys::NAMES.contains(&other) => {
+            let name = other.to_owned();
+            api_keys::run(ctx).unwrap_or_else(|| Err(not_found_error(&name)))
         }
         other if users::NAMES.contains(&other) => {
             let name = other.to_owned();

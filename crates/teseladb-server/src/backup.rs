@@ -29,11 +29,11 @@ use teseladb_meta::indexes::Indexes;
 use teseladb_types::{Decoder, GroupId, NodeId};
 
 use crate::admin::{AdminError, AdminOpts, Answer, NodeAdmin};
+use crate::admin_http::{HttpRequest, HttpResponse, Method};
 use crate::catalog_ops::{CatalogAnswer, CatalogReq};
 use crate::data::{DataReply, DataReq};
 use crate::data_wire::{RemoteReply, RemoteReq};
 use crate::logic::NodeMsg;
-use crate::metrics_http::{HttpRequest, HttpResponse, Method};
 
 /// The first key a backup copies: documents and index entries (`01`) and transaction records
 /// (`02`), whose intents the documents may still carry.
@@ -585,7 +585,7 @@ pub fn run(
     };
     let call = |method: Method, target: &str, body: &[u8]| -> Result<Document, String> {
         let (status, answer) =
-            crate::metrics_http::request_with(&o.node, tls.clone(), method, target, body)
+            crate::admin_http::request_with(&o.node, tls.clone(), method, target, body)
                 .map_err(|e| format!("cannot reach {}: {e}", o.node))?;
         let doc = teseladb_rest::media::decode(&answer, teseladb_rest::media::Format::Relaxed)
             .map_err(|e| format!("the node's answer does not read: {e:?}"))?;

@@ -142,6 +142,9 @@ fn the_start_checks_the_key_file_and_warns() {
             "127.0.0.1:0",
             "--admin-listen",
             "127.0.0.1:0",
+            // Several nodes on one machine: none opens the HTTP port of 019.
+            "--http-port",
+            "0",
             "--logpath",
             log.to_str().unwrap(),
         ]

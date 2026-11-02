@@ -6,10 +6,10 @@
 use teseladb_bson::{Document, Value};
 use teseladb_wire::error::{
     AUTHENTICATION_FAILED, CURSOR_NOT_FOUND, Code, CommandError, DUPLICATE_KEY, INTERNAL_ERROR,
-    INTERRUPTED_AT_SHUTDOWN, INTERRUPTED_DUE_TO_REPL_STATE_CHANGE, MAX_TIME_MS_EXPIRED,
-    NAMESPACE_NOT_FOUND, NETWORK_TIMEOUT, NOT_WRITABLE_PRIMARY, PRIMARY_STEPPED_DOWN,
-    RETRYABLE_WRITE_ERROR, SHUTDOWN_IN_PROGRESS, TRANSIENT_TRANSACTION_ERROR, UNAUTHORIZED,
-    WRITE_CONFLICT,
+    INTERRUPTED_AT_SHUTDOWN, INTERRUPTED_DUE_TO_REPL_STATE_CHANGE, KEY_NOT_FOUND,
+    MAX_TIME_MS_EXPIRED, NAMESPACE_NOT_FOUND, NETWORK_TIMEOUT, NOT_WRITABLE_PRIMARY,
+    PRIMARY_STEPPED_DOWN, RETRYABLE_WRITE_ERROR, SHUTDOWN_IN_PROGRESS, TRANSIENT_TRANSACTION_ERROR,
+    UNAUTHORIZED, USER_NOT_FOUND, WRITE_CONFLICT,
 };
 
 /// Media type of the error bodies.
@@ -36,7 +36,11 @@ fn status_of(code: i32, labels: &[&str]) -> u16 {
         401
     } else if is(UNAUTHORIZED) {
         403
-    } else if is(NAMESPACE_NOT_FOUND) || is(CURSOR_NOT_FOUND) {
+    } else if is(NAMESPACE_NOT_FOUND)
+        || is(CURSOR_NOT_FOUND)
+        || is(USER_NOT_FOUND)
+        || is(KEY_NOT_FOUND)
+    {
         404
     } else if is(DUPLICATE_KEY)
         || is(WRITE_CONFLICT)
@@ -138,4 +142,58 @@ pub fn write_status(reply: &Document, operations: usize) -> u16 {
         Some(wce) => code_and_labels(wce).map_or(400, |(c, l)| status_of(c, &l)),
         None => 200,
     }
+}
+
+/// Fields of a reply that belong to the wire protocol, not to an HTTP body.
+pub const WIRE_FIELDS: [&str; 3] = ["ok", "operationTime", "$clusterTime"];
+
+/// The status and problem body of an error document (an error reply, a write error or a write
+/// concern error): its code, name, message and labels, and its other fields except those of
+/// the wire protocol.
+pub fn problem_of(doc: &Document) -> (u16, Document) {
+    let whole = Value::Document(doc.clone());
+    let (code, labels) = code_and_labels(&whole).unwrap_or((1, Vec::new()));
+    let st = status_of(code, &labels);
+    let name = match doc.get("codeName") {
+        Some(Value::String(n)) => n.clone(),
+        _ => teseladb_wire::error::code(code)
+            .map_or_else(|| format!("Location{code}"), |c| c.name.to_owned()),
+    };
+    let errmsg = match doc.get("errmsg") {
+        Some(Value::String(m)) => m.clone(),
+        _ => String::new(),
+    };
+    let mut d = Document::new()
+        .with("type", format!("{TYPE_PREFIX}{name}"))
+        .with("title", name.as_str())
+        .with("status", i32::from(st))
+        .with("code", code)
+        .with("codeName", name.as_str())
+        .with("errmsg", errmsg);
+    let own = ["code", "codeName", "errmsg", "ok", "operationTime", "$clusterTime"];
+    for (k, v) in doc.iter().filter(|(k, _)| !own.contains(k)) {
+        d.push(k, v.clone());
+    }
+    (st, d)
+}
+
+/// The problem of a write reply whose status `st` is not `200`: that of its first write error,
+/// or of its write concern error, with the reply's `writeErrors` and `writeConcernError`.
+pub fn write_problem(reply: &Document) -> (u16, Document) {
+    let source = match (reply.get("writeErrors"), reply.get("writeConcernError")) {
+        (Some(Value::Array(es)), _) if !es.is_empty() => es[0].as_document().cloned(),
+        (_, Some(Value::Document(w))) => Some(w.clone()),
+        _ => None,
+    }
+    .unwrap_or_default();
+    let (st, mut d) = problem_of(&source);
+    for k in ["index", "keyPattern", "keyValue", "errInfo", "writeErrors", "writeConcernError"] {
+        d.remove(k);
+    }
+    for k in ["writeErrors", "writeConcernError"] {
+        if let Some(v) = reply.get(k) {
+            d.push(k, v.clone());
+        }
+    }
+    (st, d)
 }

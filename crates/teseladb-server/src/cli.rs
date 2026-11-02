@@ -69,6 +69,12 @@ pub struct StartOpts {
     pub peer_listen: SocketAddr,
     /// Administration address (`teseladb.adminListen`; 007).
     pub admin_listen: SocketAddr,
+    /// Port of the REST API and MCP (`--http-port`, `teseladb.http.port`; 019 FR-002); 0 closes
+    /// it.
+    pub http_port: u16,
+    /// Addresses of the HTTP port (`--http-bind`, comma separated, `teseladb.http.bind`); those of
+    /// `--bind_ip` without it.
+    pub http_bind: String,
     /// Inter-node addresses of nodes of an existing cluster (comma separated).
     pub join: Vec<String>,
     /// The node's tags (`--tags dc=east,rack=r1`), sorted by name, which reads with a
@@ -135,6 +141,10 @@ pub struct StartOpts {
 
 /// `--tlsMode`.
 pub const TLS_MODE: &str = "tlsMode";
+/// `--http-port`.
+pub const HTTP_PORT: &str = "http-port";
+/// `--http-bind`.
+pub const HTTP_BIND: &str = "http-bind";
 /// `--tlsCertificateKeyFile`.
 pub const TLS_CERTIFICATE_KEY_FILE: &str = "tlsCertificateKeyFile";
 /// `--enroll-token`.
@@ -321,6 +331,8 @@ const START: &[Spec] = &[
     ("port", VALUE),
     ("peer-listen", VALUE),
     ("admin-listen", VALUE),
+    (HTTP_PORT, VALUE),
+    (HTTP_BIND, VALUE),
     ("join", VALUE),
     ("tags", VALUE),
     (ENROLL_TOKEN, VALUE),
@@ -925,13 +937,19 @@ fn start(o: &Opts) -> Result<StartOpts, CliError> {
     let bind_ip = o.get("bind_ip").unwrap_or("127.0.0.1").to_string();
     let peer_listen = addr(o, "peer-listen", "127.0.0.1:27100")?;
     let admin_listen = addr(o, "admin-listen", "127.0.0.1:27200")?;
+    // Without `--http-bind`, the addresses of `--bind_ip` (contract `cli-base.md` of 001).
+    let http_bind = o.get(HTTP_BIND).unwrap_or(&bind_ip).to_string();
     if insecure && !insecure_allow_remote {
         // `--bind_ip` is a comma separated list: every address in it must be loopback.
         let binds = bind_ip.split(',').map(str::trim).filter(|h| !h.is_empty());
-        let hosts = binds.map(|h| ("bind_ip", h.to_owned())).chain([
-            ("peer-listen", peer_listen.ip().to_string()),
-            ("admin-listen", admin_listen.ip().to_string()),
-        ]);
+        let http = http_bind.split(',').map(str::trim).filter(|h| !h.is_empty());
+        let hosts = binds
+            .map(|h| ("bind_ip", h.to_owned()))
+            .chain(http.map(|h| (HTTP_BIND, h.to_owned())))
+            .chain([
+                ("peer-listen", peer_listen.ip().to_string()),
+                ("admin-listen", admin_listen.ip().to_string()),
+            ]);
         for (name, host) in hosts {
             if !is_loopback(&host) {
                 return err(format!(
@@ -952,6 +970,8 @@ fn start(o: &Opts) -> Result<StartOpts, CliError> {
         port: o.range("port", 27017, 0, u16::MAX)?,
         peer_listen,
         admin_listen,
+        http_port: o.range(HTTP_PORT, crate::http_listener::DEFAULT_HTTP_PORT, 0, u16::MAX)?,
+        http_bind,
         join: o.list("join"),
         tags: tags(&o.list("tags"))?,
         memory_limit: o

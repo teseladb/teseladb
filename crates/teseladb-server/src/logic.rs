@@ -144,12 +144,21 @@ pub enum NodeMsg {
     /// The operations in progress on every other node, each node's answer (core 0, 010
     /// FR-016).
     CurrentOps(AnswersSender),
+    /// A request of the HTTP port for node `.0`, which opened its cursor or session (core 0,
+    /// 019 FR-008): its answer, or none when the node cannot be reached.
+    ForwardHttp(NodeId, Vec<u8>, AnswersSender),
+    /// The answer to the HTTP request node `.0` forwarded as its request `.1` (core 0).
+    HttpAnswer(NodeId, u64, Vec<u8>),
     /// A core change between two cores of the node (007 FR-011).
     Relocate(RelocateMsg),
     /// A frame another core of the node received for a range this core runs (007 FR-011: the
     /// range moved between cores), with the node that sent it.
     Stray(NodeId, PeerFrame),
 }
+
+/// Requests other nodes forward to the node's HTTP port: the node that sent each, its request
+/// number and the request (019 FR-008).
+pub type HttpForwards = std::sync::mpsc::Sender<(NodeId, u64, Vec<u8>)>;
 
 /// Step of a join waiting for an operation.
 #[derive(Debug)]
@@ -233,6 +242,8 @@ pub struct NodeLogic {
     loads: Option<(usize, Arc<SharedLoads>)>,
     /// Where core 0 tells the clients' port the node's state in Group 0 (007 FR-015).
     presence: Option<Arc<NodePresence>>,
+    /// Where core 0 hands the HTTP requests other nodes forward to the node's HTTP port.
+    http_forwards: Option<HttpForwards>,
     /// The duties of core 0 for the `Meta2` ranges (007 FR-014).
     meta2: crate::meta2_ops::Meta2Ops,
     /// The node's time zone, where the balancer reads its window (core 0, 007 FR-017).
@@ -289,12 +300,18 @@ impl NodeLogic {
             sessions: None,
             loads: None,
             presence: None,
+            http_forwards: None,
         }
     }
 
     /// Core 0 publishes the node's state in Group 0 for the clients' port.
     pub fn with_presence(self, presence: Arc<NodePresence>) -> NodeLogic {
         NodeLogic { presence: Some(presence), ..self }
+    }
+
+    /// Where core 0 hands the HTTP requests other nodes forward (019 FR-008).
+    pub fn with_http_forwards(self, forwards: HttpForwards) -> NodeLogic {
+        NodeLogic { http_forwards: Some(forwards), ..self }
     }
 
     /// The node's `topologyVersion` counter, and whether it drained (it holds nothing and was
@@ -931,6 +948,15 @@ impl NodeLogic {
                 };
                 let _ = reply.send(a);
             }
+            CatalogReq::PrincipalById { kind, id } => {
+                let a = match self.group0() {
+                    Some(sm) if sm.bootstrapped() => CatalogAnswer::Principals(
+                        sm.security.get_by_id(kind, &id).map(<[u8]>::to_vec).into_iter().collect(),
+                    ),
+                    Some(_) | None => CatalogAnswer::Unavailable,
+                };
+                let _ = reply.send(a);
+            }
             CatalogReq::Principals { kind, db } => {
                 let a = match self.group0() {
                     Some(sm) if sm.bootstrapped() => CatalogAnswer::Principals(
@@ -1278,6 +1304,17 @@ impl NodeLogic {
                         }
                         self.core.answer_forward(f.from, f.req, Bytes::new());
                     }
+                    // The node's HTTP port answers it, then core 0 sends the answer
+                    // ([`NodeMsg::HttpAnswer`]); without a port, an empty answer.
+                    (Ok(Request::Http(body)), _) => {
+                        let handed = self
+                            .http_forwards
+                            .as_ref()
+                            .is_some_and(|h| h.send((f.from, f.req, body)).is_ok());
+                        if !handed {
+                            self.core.answer_forward(f.from, f.req, Bytes::new());
+                        }
+                    }
                     (Ok(Request::CurrentOps), _) => {
                         let answer = self.own_operations();
                         self.core.answer_forward(f.from, f.req, Bytes::from_vec(answer));
@@ -1542,6 +1579,14 @@ impl CoreLogic for NodeLogic {
             NodeMsg::KillSessions(scope, reply) => self.kill_sessions(scope, reply),
             NodeMsg::GateEverywhere(want, reply) => self.gate_everywhere(want, reply),
             NodeMsg::CurrentOps(reply) => self.current_ops(reply),
+            NodeMsg::ForwardHttp(to, body, reply) => {
+                let b = Bytes::from_vec(crate::forward::Request::Http(body).encode());
+                let op = self.core.forward(to, b, self.now);
+                self.op_lists.start(vec![op], reply);
+            }
+            NodeMsg::HttpAnswer(to, req, body) => {
+                self.core.answer_forward(to, req, Bytes::from_vec(body));
+            }
             NodeMsg::Ranges(ranges) => {
                 if let Some(data) = &mut self.data {
                     data.set_ranges(&ranges);

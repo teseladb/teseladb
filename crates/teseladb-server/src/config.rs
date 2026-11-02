@@ -35,6 +35,8 @@ const KEYS: &[(&str, Kind)] = &[
     ("teseladb.memoryLimit", Kind::Option("memory-limit")),
     ("teseladb.peerListen", Kind::Option("peer-listen")),
     ("teseladb.adminListen", Kind::Option("admin-listen")),
+    ("teseladb.http.port", Kind::Option(crate::cli::HTTP_PORT)),
+    ("teseladb.http.bind", Kind::Option(crate::cli::HTTP_BIND)),
     ("teseladb.join", Kind::List("join")),
     ("teseladb.enrollToken", Kind::Option(crate::cli::ENROLL_TOKEN)),
     ("teseladb.insecure", Kind::Option("insecure")),
