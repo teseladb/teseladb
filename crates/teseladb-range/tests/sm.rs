@@ -307,6 +307,22 @@ fn a_range_needs_its_start_below_its_end() {
 }
 
 #[test]
+#[should_panic(expected = "bounds of a data range")]
+fn a_range_opened_while_the_core_runs_cannot_cover_local_keys() {
+    let mut disk = MemDisk::new();
+    let lsm = Rc::new(RefCell::new(Lsm::recover(&cfg(), &mut disk).unwrap().0));
+    let _ = RangeSm::try_open(G, b"\x00".to_vec(), END.to_vec(), lsm);
+}
+
+#[test]
+#[should_panic(expected = "bounds of a data range")]
+fn a_range_opened_while_the_core_runs_needs_its_start_below_its_end() {
+    let mut disk = MemDisk::new();
+    let lsm = Rc::new(RefCell::new(Lsm::recover(&cfg(), &mut disk).unwrap().0));
+    let _ = RangeSm::try_open(G, END.to_vec(), START.to_vec(), lsm);
+}
+
+#[test]
 fn a_purge_of_keys_that_are_not_the_ranges_idempotence_records_stops_the_group() {
     let mut r = Replica::new();
     let other = dedup_key(GroupId(G.0 + 1), 1, 1, 0);

@@ -309,12 +309,17 @@ fn doc(v: &[u8]) -> Option<(u8, Vec<u8>)> {
 fn a_transaction_commits_across_two_ranges_and_resolves_its_intents() {
     let mut n = Node::new();
     n.begin(1, TxnId(1));
+    assert_eq!(n.coords[&1].session(), (1, 1));
+    assert!(!n.coords[&1].written(), "nothing written: another read mark may replace it");
     assert_eq!(n.write(1, &[(A, put(b"a1")), (Z, put(b"z1"))]), Ok(()));
     assert_eq!(n.write(1, &[(A, put(b"a2"))]), Ok(()), "its own key again");
+    assert!(n.coords[&1].written());
+    assert_eq!(n.coords[&1].written_ranges().into_iter().collect::<Vec<_>>(), [G1, G2]);
     let intents = n.coords[&1].intent_max();
     let Outcome::Committed(ts) = n.commit(1) else { panic!("not committed") };
     assert!(ts >= intents, "the commit is at or above its intents");
     assert!(n.resolved(1));
+    assert_eq!(n.coords[&1].unresolved(), 0);
     assert_eq!(n.get(A), doc(b"a2"));
     assert_eq!(n.get(Z), doc(b"z1"));
     let rec = n.record(TxnId(1));
