@@ -41,6 +41,8 @@ pub struct Mem {
     pub replicas: u32,
     /// The next write fails with this error.
     pub fail_next: Option<CommandError>,
+    /// The write after this many more fails with this error (`(0, e)` is the next one).
+    pub fail_write_at: Option<(usize, CommandError)>,
     pub shared: Shared,
     /// The kills sent to the other nodes; with `Some`, the next one fails with that error.
     pub killed: Vec<KillScope>,
@@ -118,6 +120,8 @@ pub struct Mem {
     pub intents: BTreeMap<u128, Vec<(Vec<u8>, teseladb_range::intents::IntentOp)>>,
     /// The next `PutIntents` fail with this error.
     pub intent_errors: Vec<teseladb_range::host::RangeError>,
+    /// How many `PutIntents` succeed before those of `intent_errors` fail.
+    pub intents_before_error: usize,
     /// The next commits of a record fail with this error.
     pub commit_errors: Vec<teseladb_range::host::RangeError>,
     /// The coordinator's memory budget for a client transaction, when not the node's.
@@ -452,7 +456,10 @@ impl Backend for Mem {
         match op {
             TxnOp::PutIntents { txn, writes, .. } => {
                 if !self.intent_errors.is_empty() {
-                    return Err(self.intent_errors.remove(0));
+                    if self.intents_before_error == 0 {
+                        return Err(self.intent_errors.remove(0));
+                    }
+                    self.intents_before_error -= 1;
                 }
                 let keys: Vec<Vec<u8>> = writes.iter().map(|(k, _)| k.clone()).collect();
                 if self.check_fences(&keys).is_err() {
@@ -663,6 +670,11 @@ impl Backend for Mem {
     fn write(&mut self, op: WriteOp) -> Result<Vec<u8>, CommandError> {
         if let Some(e) = self.fail_next.take() {
             return Err(e);
+        }
+        match self.fail_write_at.take() {
+            Some((0, e)) => return Err(e),
+            Some((n, e)) => self.fail_write_at = Some((n - 1, e)),
+            None => {}
         }
         if let teseladb_range::ack::W::Nodes(n) = op.wc.w
             && n > self.replicas

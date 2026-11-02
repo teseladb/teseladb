@@ -129,10 +129,15 @@ fn write_metadata<B: Backend + ?Sized>(
 }
 
 /// The first write error of a reply as an error.
-fn checked(reply: Document) -> Result<Document, CommandError> {
-    let Some(Value::Array(errors)) = reply.get("writeErrors") else { return Ok(reply) };
-    let Some(Value::Document(e)) = errors.first() else { return Ok(reply) };
-    Err(error_of(e))
+pub(super) fn checked(reply: Document) -> Result<Document, CommandError> {
+    let first = match reply.get("writeErrors") {
+        Some(Value::Array(errors)) => errors.first().and_then(Value::as_document),
+        _ => None,
+    };
+    match first {
+        Some(e) => Err(error_of(e)),
+        None => Ok(reply),
+    }
 }
 
 /// A write error document as an error.
@@ -421,13 +426,15 @@ fn update<B: Backend + ?Sized>(
         Some(Value::Array(s)) if !s.is_empty() => s.clone(),
         _ => return sub_command(ctx, &cmd),
     };
-    // A statement that is no document, or has no document or pipeline in `u`, gets the
-    // command's own argument errors.
+    // A statement that is no document, or has no document in `q` or no document or pipeline in
+    // `u`, gets the command's own argument errors.
     let mut parsed: Vec<(&Document, &Value)> = Vec::new();
     for st in &statements {
         match st {
-            Value::Document(d) => match d.get("u") {
-                Some(u @ (Value::Document(_) | Value::Array(_))) => parsed.push((d, u)),
+            Value::Document(d) => match (d.get("q"), d.get("u")) {
+                (Some(Value::Document(_)), Some(u @ (Value::Document(_) | Value::Array(_)))) => {
+                    parsed.push((d, u));
+                }
                 _ => return sub_command(ctx, &cmd),
             },
             _ => return sub_command(ctx, &cmd),
