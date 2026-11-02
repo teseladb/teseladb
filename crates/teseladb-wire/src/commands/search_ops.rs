@@ -190,6 +190,13 @@ pub struct SearchIndexes {
     received: BTreeMap<[u8; 12], Shipped>,
     /// Where the segments of each index are written as an immutable file (FR-012).
     store: Option<std::sync::Arc<dyn SegmentStore>>,
+    /// Whether a builder of the node fills new indexes outside the commands (FR-014, T040):
+    /// a query then serves what is built and an index not built yet refuses it.
+    background: bool,
+    /// The definition each index the builder is filling for the first time will serve.
+    building: BTreeMap<[u8; 12], Served>,
+    /// The indexes whose segments a query or the builder holds now.
+    borrowed: std::collections::BTreeSet<[u8; 12]>,
 }
 
 /// The segment files of a `search` index as one node sends them to a new replica with the SST
@@ -231,8 +238,24 @@ impl SearchIndexes {
         built.or_else(|| self.failed.get(id).cloned())
     }
 
+    /// The definition this node is building index `id` with when it serves none yet.
+    pub fn building(&self, id: &[u8; 12]) -> Option<Served> {
+        self.building.get(id).cloned()
+    }
+
+    /// Hands the building of new indexes to a builder outside the commands (FR-014, T040).
+    pub fn set_background(&mut self) {
+        self.background = true;
+    }
+
+    /// Whether a builder fills new indexes outside the commands.
+    pub fn has_builder(&self) -> bool {
+        self.background
+    }
+
     /// Forgets index `id` (dropped), and its file.
     pub fn forget(&mut self, id: &[u8; 12]) -> Result<(), String> {
+        self.building.remove(id);
         self.built.remove(id);
         self.failed.remove(id);
         self.received.remove(id);
@@ -376,9 +399,162 @@ fn definition_of(
     Ok((segments, completed, view))
 }
 
-/// Brings the segments of `entry` on `coll` up to the resolved marks of its ranges, building
-/// them first when this node has none for its definition version, and runs `f` over them.
+/// Brings the segments of `entry` on `coll` (of namespace `ns`) up to the resolved marks of its
+/// ranges and runs `f` over them. Without a builder (FR-014), it first builds them when this node
+/// has none for the definition version; with one, it serves what the builder built, an older
+/// definition while a new one is built, and refuses an index not built yet as `refsearch` does
+/// while in `INITIAL_SYNC` (measured 02-11-2026, `scratchpad/lane3m/m32.js`).
 pub fn with_index<B: Backend + ?Sized, R>(
+    backend: &mut B,
+    shared: &Shared,
+    ns: &Namespace,
+    coll: &CollectionEntry,
+    entry: &SearchIndexEntry,
+    synonyms: &[(String, Vec<Document>)],
+    f: impl FnOnce(&Segments, &BTreeMap<Vec<u8>, Document>) -> R,
+) -> Result<R, CommandError> {
+    if !lock(shared).search.background {
+        return with_built(backend, shared, coll, entry, synonyms, f);
+    }
+    let Some(mut built) = borrow(backend, shared, &entry.id, coll.id)? else {
+        return Err(query_error(state_message(entry, coll, ns, "INITIAL_SYNC")));
+    };
+    let caught = catch_up(backend, coll, &mut built)
+        .and_then(|()| built.indexer.set_synonyms(synonyms));
+    let out = caught.map(|()| f(&built.indexer, &built.stored));
+    give_back(shared, entry.id, built, false)?;
+    out
+}
+
+/// Builds this node's segments of `entry` on `coll` for its definition version, over the
+/// documents written up to the resolved marks of its ranges (FR-014, T040): the builder's work.
+/// While it runs, the index shows `BUILDING` and queries keep the version served before; a
+/// document the definition cannot analyze leaves it `FAILED`.
+pub fn build_index<B: Backend + ?Sized>(
+    backend: &mut B,
+    shared: &Shared,
+    coll: &CollectionEntry,
+    entry: &SearchIndexEntry,
+) -> Result<(), CommandError> {
+    let received = lock(shared).search.received.remove(&entry.id);
+    let mut built = fresh(coll, entry, received)?;
+    let serving = Served {
+        version: built.version,
+        defined_ms: built.defined_ms,
+        definition: built.definition.clone(),
+        failure: None,
+    };
+    lock(shared).search.building.insert(entry.id, serving);
+    let caught = catch_up(backend, coll, &mut built);
+    lock(shared).search.building.remove(&entry.id);
+    if let Err(e) = caught {
+        fail(shared, entry, built, &e);
+        return Err(e);
+    }
+    give_back(shared, entry.id, built, true)
+}
+
+/// The segments of index `id` on collection `coll` that this node built, taken out while one
+/// operation uses them: an operation that finds them taken waits for them, no longer than its
+/// `maxTimeMS`. `None` when there are none.
+fn borrow<B: Backend + ?Sized>(
+    backend: &mut B,
+    shared: &Shared,
+    id: &[u8; 12],
+    coll: u32,
+) -> Result<Option<Built>, CommandError> {
+    loop {
+        {
+            let mut indexes = lock(shared);
+            let search = &mut indexes.search;
+            if let Some(b) = search.built.remove(id) {
+                if b.collection != coll {
+                    return Ok(None);
+                }
+                search.borrowed.insert(*id);
+                return Ok(Some(b));
+            }
+            if !search.borrowed.contains(id) {
+                return Ok(None);
+            }
+        }
+        if !backend.pause() {
+            return Err(CommandError::new(MAX_TIME_MS_EXPIRED, "operation exceeded time limit"));
+        }
+    }
+}
+
+/// Puts `built` back as the segments of index `id`, unless a newer version was built meanwhile;
+/// writes its file when `dump` or when enough documents changed.
+fn give_back(
+    shared: &Shared,
+    id: [u8; 12],
+    mut built: Built,
+    dump: bool,
+) -> Result<(), CommandError> {
+    let dump = dump || built.pending >= DUMP_EVERY;
+    if dump {
+        built.pending = 0;
+    }
+    let mut indexes = lock(shared);
+    let search = &mut indexes.search;
+    search.borrowed.remove(&id);
+    if search.built.get(&id).is_some_and(|b| b.version > built.version) {
+        return Ok(());
+    }
+    if search.failed.get(&id).is_some_and(|f| f.version <= built.version) {
+        search.failed.remove(&id);
+    }
+    search.built.insert(id, built);
+    if dump {
+        search.write_file(&id).map_err(|e| {
+            CommandError::new(INTERNAL_ERROR, format!("cannot write a search segment: {e}"))
+        })?;
+    }
+    Ok(())
+}
+
+/// New segments of `entry` on `coll`: those `received` (a file kept before a restart or shipped
+/// with a range) when they serve its version, empty ones otherwise.
+fn fresh(
+    coll: &CollectionEntry,
+    entry: &SearchIndexEntry,
+    received: Option<Shipped>,
+) -> Result<Built, CommandError> {
+    let (indexer, definition, view) = definition_of(entry)?;
+    let shipped = received.and_then(|r| from_received(r, coll, entry));
+    let (indexer, applied) = shipped.unwrap_or((indexer, Hlc { physical: 0, logical: 0 }));
+    Ok(Built {
+        collection: coll.id,
+        version: entry.version,
+        defined_ms: entry.defined_ms,
+        definition,
+        indexer,
+        applied,
+        view,
+        stored: BTreeMap::new(),
+        pending: 0,
+    })
+}
+
+/// Records that building `built` failed with `e` when a document cannot be analyzed: the index
+/// is `FAILED` (measured: `replication failed (action=drop): minGram must be greater than zero`).
+fn fail(shared: &Shared, entry: &SearchIndexEntry, built: Built, e: &CommandError) {
+    if e.code != UNKNOWN_ERROR {
+        return;
+    }
+    let failed = Served {
+        version: built.version,
+        defined_ms: built.defined_ms,
+        definition: built.definition,
+        failure: Some(format!("replication failed (action=drop): {}", e.errmsg)),
+    };
+    lock(shared).search.failed.insert(entry.id, failed);
+}
+
+/// [`with_index`] without a builder: builds the segments in the command when this node has
+/// none for the definition version.
+fn with_built<B: Backend + ?Sized, R>(
     backend: &mut B,
     shared: &Shared,
     coll: &CollectionEntry,
@@ -390,56 +566,19 @@ pub fn with_index<B: Backend + ?Sized, R>(
         let mut indexes = lock(shared);
         (indexes.search.built.remove(&entry.id), indexes.search.received.remove(&entry.id))
     };
-    let mut fresh = false;
-    let mut built = match taken {
-        Some(b) if b.version == entry.version && b.collection == coll.id => b,
-        _ => {
-            fresh = true;
-            let (indexer, definition, view) = definition_of(entry)?;
-            let shipped = received.and_then(|r| from_received(r, coll, entry));
-            let (indexer, applied) = shipped.unwrap_or((indexer, Hlc { physical: 0, logical: 0 }));
-            Built {
-                collection: coll.id,
-                version: entry.version,
-                defined_ms: entry.defined_ms,
-                definition,
-                indexer,
-                applied,
-                view,
-                stored: BTreeMap::new(),
-                pending: 0,
-            }
-        }
+    let (mut built, fresh_build) = match taken {
+        Some(b) if b.version == entry.version && b.collection == coll.id => (b, false),
+        _ => (fresh(coll, entry, received)?, true),
     };
     if let Err(e) = catch_up(backend, coll, &mut built) {
-        // A document the definition cannot analyze fails the build: the index is `FAILED`
-        // (measured: `replication failed (action=drop): minGram must be greater than zero`).
-        if fresh && e.code == UNKNOWN_ERROR {
-            let failed = Served {
-                version: built.version,
-                defined_ms: built.defined_ms,
-                definition: built.definition,
-                failure: Some(format!("replication failed (action=drop): {}", e.errmsg)),
-            };
-            lock(shared).search.failed.insert(entry.id, failed);
+        if fresh_build {
+            fail(shared, entry, built, &e);
         }
         return Err(e);
     }
-    built.indexer.set_synonyms(synonyms)?;
-    let out = f(&built.indexer, &built.stored);
-    let dump = fresh || built.pending >= DUMP_EVERY;
-    if dump {
-        built.pending = 0;
-    }
-    let mut indexes = lock(shared);
-    indexes.search.failed.remove(&entry.id);
-    indexes.search.built.insert(entry.id, built);
-    if dump {
-        indexes.search.write_file(&entry.id).map_err(|e| {
-            CommandError::new(INTERNAL_ERROR, format!("cannot write a search segment: {e}"))
-        })?;
-    }
-    Ok(out)
+    let out = built.indexer.set_synonyms(synonyms).map(|()| f(&built.indexer, &built.stored));
+    give_back(shared, entry.id, built, fresh_build)?;
+    out
 }
 
 /// Applies to `built` what the ranges of its collection wrote after its mark.
@@ -602,10 +741,10 @@ fn answer<B: Backend + ?Sized>(
     };
     let failed = lock(shared).search.served(&entry.id);
     if failed.is_some_and(|s| s.version == entry.version && s.failure.is_some()) {
-        return Err(query_error(failed_state(&entry, &coll, ns)));
+        return Err(query_error(state_message(&entry, &coll, ns, "FAILED")));
     }
     let synonyms = synonym_documents(backend, ns, &entry)?;
-    let found = with_index(backend, shared, &coll, &entry, &synonyms, |ix, stored| {
+    let found = with_index(backend, shared, ns, &coll, &entry, &synonyms, |ix, stored| {
         match (ix, meta_only) {
             (Segments::Search(ix), true) => ix.meta(spec).map(|d| vec![plain(d)]),
             (Segments::Search(ix), false) => {
@@ -638,14 +777,20 @@ fn synonym_documents<B: Backend + ?Sized>(
     Ok(out)
 }
 
-/// The error of a query on an index that failed to build (measured).
-fn failed_state(entry: &SearchIndexEntry, coll: &CollectionEntry, ns: &Namespace) -> String {
+/// The error of a query on an index in `state` (measured: `FAILED` after a failed build,
+/// `INITIAL_SYNC` while the first build runs).
+fn state_message(
+    entry: &SearchIndexEntry,
+    coll: &CollectionEntry,
+    ns: &Namespace,
+    state: &str,
+) -> String {
     let id: String = entry.id.iter().map(|b| format!("{b:02x}")).collect();
     let u: String = coll.uuid.iter().map(|b| format!("{b:02x}")).collect();
     let uuid = format!("{}-{}-{}-{}-{}", &u[..8], &u[8..12], &u[12..16], &u[16..20], &u[20..]);
     format!(
         "cannot query search index {id} (index {} collection {} ({uuid}) in database {}) while in \
-         state FAILED",
+         state {state}",
         entry.name, ns.coll, ns.db
     )
 }
@@ -731,7 +876,7 @@ fn vector_source<B: Backend + ?Sized>(
         return Ok(Vec::new());
     }
     let on_view = view.is_some();
-    let found = with_index(backend, shared, &coll, &entry, &[], |ix, stored| match ix {
+    let found = with_index(backend, shared, ns, &coll, &entry, &[], |ix, stored| match ix {
         Segments::Vector(ix) => {
             ix.search(&query).map(|f| scored(as_read(f, stored, on_view), VECTOR_SEARCH_SCORE))
         }
@@ -768,15 +913,25 @@ fn plain(doc: Document) -> Scored {
 
 /// The `statusDetail` of an index that this node serves: its host and the version it serves.
 pub fn status_detail(host: u64, served: &Served) -> Document {
+    let (status, queryable) = match served.failure {
+        Some(_) => ("FAILED", false),
+        None => ("READY", true),
+    };
+    detail(host, served, status, queryable)
+}
+
+/// The `statusDetail` of an index whose first build runs on this node (measured,
+/// `scratchpad/lane3m/m32.js`): `BUILDING` and not queryable, with the definition it builds.
+pub fn building_detail(host: u64, building: &Served) -> Document {
+    detail(host, building, "BUILDING", false)
+}
+
+fn detail(host: u64, served: &Served, status: &str, queryable: bool) -> Document {
     // `createdAt` keeps whole seconds (measured).
     let created = served.defined_ms - served.defined_ms.rem_euclid(1000);
     let version = Document::new()
         .with("version", i32::try_from(served.version).unwrap_or(i32::MAX))
         .with("createdAt", Value::DateTime(created));
-    let (status, queryable) = match served.failure {
-        Some(_) => ("FAILED", false),
-        None => ("READY", true),
-    };
     let mut main = Document::new()
         .with("status", status)
         .with("queryable", queryable)
