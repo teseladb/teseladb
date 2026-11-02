@@ -178,8 +178,9 @@ fn insert<B: Backend + ?Sized>(
     ns: &Namespace,
     config: &EncryptedFieldConfig,
 ) -> Result<Document, CommandError> {
+    // No list, or an empty one, gets the command's own errors.
     let docs = match ctx.cmd.get("documents") {
-        Some(Value::Array(d)) => d.clone(),
+        Some(Value::Array(d)) if !d.is_empty() => d.clone(),
         _ => {
             let cmd = ctx.cmd.clone();
             return sub_command(ctx, &cmd);
@@ -417,7 +418,7 @@ fn update<B: Backend + ?Sized>(
 ) -> Result<Document, CommandError> {
     let cmd = rewritten(ctx, config)?;
     let statements = match cmd.get("updates") {
-        Some(Value::Array(s)) => s.clone(),
+        Some(Value::Array(s)) if !s.is_empty() => s.clone(),
         _ => return sub_command(ctx, &cmd),
     };
     // A statement that is no document, or has no document or pipeline in `u`, gets the

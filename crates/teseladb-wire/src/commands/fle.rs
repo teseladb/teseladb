@@ -388,8 +388,10 @@ pub fn in_internal_txn(
         _ => return None,
     };
     config(backend, &ns).ok().flatten()?;
-    let Some((field, Value::Array(items))) =
-        statements_field(name).and_then(|f| cmd.get(f).map(|v| (f, v)))
+    // An empty list gets the command's own error for its batch size.
+    let Some((field, Value::Array(items))) = statements_field(name)
+        .and_then(|f| cmd.get(f).map(|v| (f, v)))
+        .filter(|(_, v)| !matches!(v, Value::Array(a) if a.is_empty()))
     else {
         return Some(one_txn(backend, shared, (name, db, cmd), &mut statement));
     };
