@@ -452,6 +452,7 @@ dependencies = [
  "teseladb-crypto",
  "teseladb-deflate",
  "teseladb-exec",
+ "teseladb-fle",
  "teseladb-hash",
  "teseladb-hlc",
  "teseladb-index",
