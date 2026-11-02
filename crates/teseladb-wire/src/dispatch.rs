@@ -700,6 +700,21 @@ fn audit_authentication<B: Backend + ?Sized>(
     audit::record(shared, conn, backend, vec![(AuditType::Authenticate, event)], result);
 }
 
+/// Logs `conn` in with `login` outside a command (the credentials of the HTTP API, 019 FR-015),
+/// with the `authenticate` event of the audit log that an authentication command writes.
+pub fn login<B: Backend + ?Sized, T>(
+    conn: &mut Connection,
+    backend: &mut B,
+    shared: &Shared,
+    login: impl FnOnce(&mut auth::AuthState, &mut B) -> Result<T, CommandError>,
+) -> Result<T, CommandError> {
+    let before = conn.auth.user.clone();
+    let r = login(&mut conn.auth, backend);
+    let code = r.as_ref().err().map(|e| e.code.code);
+    audit_authentication(conn, backend, shared, before.as_ref(), code);
+    r
+}
+
 /// `{ip, port}` of an address the connection knows, for `clientMetadata`.
 fn endpoint_doc(addr: Option<&str>) -> Document {
     addr.and_then(teseladb_auth::audit::Endpoint::parse)

@@ -60,6 +60,12 @@ pub enum Step {
     /// A plain write of a document mutation of `teseladb-wire` (an encoded `Bound`), outside the
     /// transaction, routed by its first key: its answer goes to [`Script::mutated`] (015 T002).
     Mutate(Vec<u8>),
+    /// A plain write of the value [`Script::value`] gives at the key, outside the transaction
+    /// (018): its mark, or the range's error, goes to [`Script::put`].
+    Put(Vec<u8>),
+    /// Raises the write fence of `[.0, .1)` on the range of `.0` (018 FR-002): its mark, or the
+    /// range's error, goes to [`Script::fenced`].
+    Fence(Vec<u8>, Vec<u8>),
 }
 
 /// Name of the check that no plain write fails because of an intent (008 FR-002, T032).
@@ -80,6 +86,16 @@ const RECORD_TTL_MS: u64 = 10_000;
 /// How far the reaper's clock may be from the run's real time when it judges a record's age: the
 /// heavy plan jumps clocks by up to 2 s.
 const CLOCK_SLACK: Nanos = Nanos::from_millis(3_000);
+
+/// A plain write of value `.2` (type `.1`) at key `.0`.
+struct PutValue(Vec<u8>, u8, Vec<u8>);
+
+impl Mutation for PutValue {
+    fn eval(&self, _: &[Option<(u8, &[u8])>], _: Hlc) -> Result<Change, MutationError> {
+        let put = Put { key: self.0.clone(), value_type: self.1, value: self.2.clone() };
+        Ok(Change { puts: vec![put], deletes: Vec::new(), change: Vec::new(), result: Vec::new() })
+    }
+}
 
 /// A plain write that rewrites key `.0` with the value it has.
 struct Touch(Vec<u8>);
@@ -118,6 +134,10 @@ pub trait Script {
     }
     /// The answer to a [`Step::Mutate`] of a client: the mutation's result, or the range's error.
     fn mutated(&mut self, _client: u32, _r: Result<Vec<u8>, RangeError>) {}
+    /// The answer to a [`Step::Put`] of a client: the write's mark, or the range's error.
+    fn put(&mut self, _client: u32, _r: Result<Hlc, RangeError>) {}
+    /// The answer to a [`Step::Fence`] of a client: the fence's mark, or the range's error.
+    fn fenced(&mut self, _client: u32, _r: Result<Hlc, RangeError>) {}
     /// The fault window ended.
     fn healed(&mut self) {}
     /// The value type a write at `key` stores.
@@ -205,6 +225,10 @@ enum Asker {
     TouchPush(u32),
     /// A client's plain write of a document mutation.
     Mutate(u32),
+    /// A client's plain write of a value.
+    Put(u32),
+    /// A client's write fence.
+    Fence(u32),
     /// A lazy resolution nobody waits for.
     Nobody,
     /// A recovery of a transaction's decision, and its request.
@@ -503,6 +527,89 @@ impl TxnDriver {
         None
     }
 
+    /// Sends a client's plain write `m` of `key` to the leader of its range.
+    fn plain(
+        &mut self,
+        w: &mut World,
+        (_, asker): (u32, Asker),
+        key: Vec<u8>,
+        m: Box<dyn Mutation>,
+    ) -> Option<(Asker, Result<Reply, RangeError>)> {
+        let g = self.route().range_of(&key).expect("every key has a range");
+        let Some(node) = self.leader(w, g) else {
+            return Some((asker, Err(RangeError::NotLeader { hint: NodeId(0) })));
+        };
+        let (now, wall) = Self::times(w, node);
+        let host = self.hosts.get_mut(&node).expect("a live node has its host");
+        let core = w.cluster_core(node, self.core).expect("alive");
+        let req = WriteReq { g, keys: vec![key], m, dedup: None, wc: MAJORITY };
+        let id = host.mutate(core, req, now, wall);
+        self.pending.insert((node, id), asker);
+        None
+    }
+
+    /// Sends a client's write fence of `[start, end)` to the leader of the range of `start`.
+    fn fence(
+        &mut self,
+        w: &mut World,
+        client: u32,
+        start: Vec<u8>,
+        end: Vec<u8>,
+    ) -> Option<(Asker, Result<Reply, RangeError>)> {
+        let g = self.route().range_of(&start).expect("every key has a range");
+        let Some(node) = self.leader(w, g) else {
+            return Some((Asker::Fence(client), Err(RangeError::NotLeader { hint: NodeId(0) })));
+        };
+        let (now, _) = Self::times(w, node);
+        let host = self.hosts.get_mut(&node).expect("a live node has its host");
+        let core = w.cluster_core(node, self.core).expect("alive");
+        let id = host.fence(core, (g, start, end), true, now);
+        self.pending.insert((node, id), Asker::Fence(client));
+        None
+    }
+
+    /// The answer to a client's plain write of a value.
+    fn put_done(
+        &mut self,
+        w: &mut World,
+        client: u32,
+        r: Result<Reply, RangeError>,
+        script: &mut dyn Script,
+    ) {
+        let Some(c) = self.clients.get_mut(&client) else { return };
+        if c.waiting != Waiting::Mutated {
+            return;
+        }
+        let r = r.and_then(|reply| match reply {
+            Reply::Mutated { ts, .. } => Ok(ts),
+            other => Err(RangeError::Mutation(MutationError(format!("{other:?}")))),
+        });
+        script.put(client, r);
+        c.waiting = Waiting::Nothing;
+        self.advance(w, client, script);
+    }
+
+    /// The answer to a client's write fence.
+    fn fence_done(
+        &mut self,
+        w: &mut World,
+        client: u32,
+        r: Result<Reply, RangeError>,
+        script: &mut dyn Script,
+    ) {
+        let Some(c) = self.clients.get_mut(&client) else { return };
+        if c.waiting != Waiting::Mutated {
+            return;
+        }
+        let r = r.and_then(|reply| match reply {
+            Reply::Fenced { ts } => Ok(ts),
+            other => Err(RangeError::Mutation(MutationError(format!("{other:?}")))),
+        });
+        script.fenced(client, r);
+        c.waiting = Waiting::Nothing;
+        self.advance(w, client, script);
+    }
+
     /// The answer to a client's document mutation: the script takes it and the client goes on.
     fn mutate_done(
         &mut self,
@@ -621,6 +728,22 @@ impl TxnDriver {
             Step::Mutate(bound) => {
                 c.waiting = Waiting::Mutated;
                 if let Some((asker, r)) = self.mutate(w, client, &bound) {
+                    self.answer(w, asker, r, script);
+                }
+                return;
+            }
+            Step::Put(key) => {
+                c.waiting = Waiting::Mutated;
+                let value = script.value(client, &key, &c.read).unwrap_or_default();
+                let m = Box::new(PutValue(key.clone(), script.value_type(&key), value));
+                if let Some((asker, r)) = self.plain(w, (client, Asker::Put(client)), key, m) {
+                    self.answer(w, asker, r, script);
+                }
+                return;
+            }
+            Step::Fence(start, end) => {
+                c.waiting = Waiting::Mutated;
+                if let Some((asker, r)) = self.fence(w, client, start, end) {
                     self.answer(w, asker, r, script);
                 }
                 return;
@@ -755,6 +878,8 @@ impl TxnDriver {
             Asker::Touch(client) => self.touch_done(w, client, r, script),
             Asker::TouchPush(client) => self.touch_pushed(w, client, r, script),
             Asker::Mutate(client) => self.mutate_done(w, client, r, script),
+            Asker::Put(client) => self.put_done(w, client, r, script),
+            Asker::Fence(client) => self.fence_done(w, client, r, script),
         }
     }
 

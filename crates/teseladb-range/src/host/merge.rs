@@ -32,6 +32,8 @@ pub struct MergeSource {
     pub mark: Hlc,
     /// Its live bytes.
     pub live: u64,
+    /// Its write fences (018).
+    pub fences: Vec<crate::fence::Span>,
 }
 
 /// Where a leader's part of a merge is.
@@ -161,8 +163,8 @@ impl RangeHost {
                     l.merge = MergeJob::Idle;
                     // A table that could not be read: the embedder asks again.
                     if let Ok(records) = result {
-                        let MergeSource { right, merge, end, gc, mark, live } = source;
-                        let absorb = Some(Absorbed { end, gc, mark, live, records });
+                        let MergeSource { right, merge, end, gc, mark, live, fences } = source;
+                        let absorb = Some(Absorbed { end, gc, mark, live, records, fences });
                         propose(core, g, &Command::Merge { right, merge, absorb }, now);
                     }
                     true

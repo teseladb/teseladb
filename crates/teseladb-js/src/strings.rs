@@ -359,6 +359,7 @@ pub fn substitute(
     position: usize,
     subject: &str,
     groups: &[Val],
+    named: &[(String, Val)],
 ) -> R<String> {
     if replacement.is_callable() {
         let mut args = vec![Val::Str(matched.into())];
@@ -386,6 +387,15 @@ pub fn substitute(
             Some('&') => {
                 chars.next();
                 out.push_str(matched);
+            }
+            Some('<') if !named.is_empty() => {
+                chars.next();
+                let name: String = chars.by_ref().take_while(|c| *c != '>').collect();
+                if let Some((_, v)) = named.iter().find(|(n, _)| *n == name)
+                    && !matches!(v, Val::Undef)
+                {
+                    out.push_str(&it.str_of(v)?);
+                }
             }
             Some('`') => {
                 chars.next();
@@ -437,7 +447,7 @@ fn replace_in(it: &mut Interp, this: &Val, a: &[Val], all: bool) -> R {
     let mut from = 0;
     while let Some(i) = find_units(&su, &pu, from) {
         out.push_str(&from_units(&su[last..i]));
-        let r = substitute(it, &arg(a, 1), &p, i, &s, &[])?;
+        let r = substitute(it, &arg(a, 1), &p, i, &s, &[], &[])?;
         out.push_str(&r);
         last = i + pu.len();
         from = if pu.is_empty() { i + 1 } else { last };

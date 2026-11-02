@@ -117,6 +117,9 @@ variants!(
     // A resharding that renames without the writes after its last read of the history (018
     // T002): the `reshard` workload reads a value of the old order the copy never took.
     ("reshard_cutover_loses_writes", "reshard", Default, 1000),
+    // The ranges take the writes of a resharding's critical section (018 T005): a plain write that
+    // read `old` lands in the old order after the copy's last read of it.
+    ("reshard_without_fence", "reshard", Default, 1000),
     ("resolve_before_durable_commit", "snapshot-isolation", Default, 1000),
     ("resolved_intent_reappears", "lsm", Default, 1000),
     ("rollback_unrecorded", "rollback", Default, 1000),

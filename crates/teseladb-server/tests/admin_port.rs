@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use common::{Client, READY, batch, config, docs, ok, until};
 use teseladb_bson::Document;
 use teseladb_raftlog::MemDisk;
-use teseladb_server::metrics_http::{Method, request};
+use teseladb_server::admin_http::{Method, request};
 use teseladb_server::node::{Node, NodeConfig};
 
 fn with_admin(join: Vec<String>) -> NodeConfig {

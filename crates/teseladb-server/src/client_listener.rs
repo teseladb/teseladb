@@ -69,6 +69,8 @@ pub struct ClientConfig {
     pub test_commands: bool,
     /// `--redactClientLogData` (013 FR-027): the value the node starts with.
     pub redact_client_log_data: bool,
+    /// Whether server-side JavaScript runs (`--noscripting` turns it off, 016 FR-009).
+    pub javascript_enabled: bool,
     /// `--setParameter auditAuthorizationSuccess` of a node without an audit log (with one, the
     /// auditor's configuration has it).
     pub audit_authorization_success: bool,
@@ -113,6 +115,7 @@ impl ClientConfig {
         s.audit = self.audit.as_ref().map(crate::audit_log::AuditLog::for_node);
         s.params.monitor_ms = i64::try_from(self.reap_every.as_millis()).unwrap_or(i64::MAX);
         s.params.redact_client_log_data = self.redact_client_log_data;
+        s.params.javascript_enabled = self.javascript_enabled;
         s.params.audit_authorization_success = self.audit_authorization_success;
         s.params.ocsp_enabled = self.ocsp_enabled;
         s.params.use_internal_authz_for_x509 = self.use_internal_authz_for_x509;
@@ -134,6 +137,7 @@ impl ClientConfig {
             refresh_every: Duration::from_millis(REFRESH_INTERVAL_MS),
             test_commands: false,
             redact_client_log_data: false,
+            javascript_enabled: true,
             audit_authorization_success: false,
             ocsp_enabled: true,
             use_internal_authz_for_x509: false,

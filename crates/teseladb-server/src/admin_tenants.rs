@@ -7,9 +7,9 @@ use teseladb_meta::command::Group0Command;
 use teseladb_meta::group0::Group0Error;
 
 use crate::admin::{AdminBackend, AdminError, Answer, NodeAdmin, json};
+use crate::admin_http::{HttpRequest, HttpResponse, Method};
 use crate::catalog_ops::{CatalogAnswer, CatalogReq};
 use crate::logic::NodeMsg;
-use crate::metrics_http::{HttpRequest, HttpResponse, Method};
 
 /// `GET`: the tenants; `POST /admin/tenants/<name>` creates one, and `/admin/tenants/<name>/drop`
 /// drops it.

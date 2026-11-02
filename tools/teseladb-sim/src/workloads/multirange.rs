@@ -809,6 +809,7 @@ impl MultiRangeWorkload {
                 gc: r.gc_threshold(),
                 mark: r.last_mark(),
                 live: r.live_bytes(),
+                fences: r.fences().to_vec(),
             });
             if let Some(source) = source {
                 self.hosts.get_mut(&l).expect("hosted").absorb(m.left, source);
@@ -1139,14 +1140,17 @@ pub(crate) fn record_answer(
             prefer.insert(rec.client, node);
         }
         Ok(Reply::Batch(_)) => rec.result = OpResult::Unknown,
-        Ok(Reply::Intents { .. } | Reply::Record(_) | Reply::Changes { .. })
+        Ok(
+            Reply::Intents { .. } | Reply::Record(_) | Reply::Changes { .. } | Reply::Fenced { .. },
+        )
         | Err(
             RangeError::WriteConflict
             | RangeError::IntentConflict(_)
             | RangeError::ReadIntent { .. }
             | RangeError::ReadUncertain { .. }
-            | RangeError::NoSuchTransaction,
-        ) => unreachable!("the workload runs no transactions nor change streams"),
+            | RangeError::NoSuchTransaction
+            | RangeError::Fenced,
+        ) => unreachable!("the workload runs no transactions, change streams nor fences"),
         // Refused before anything was proposed: it imposes nothing.
         Err(RangeError::NotLeader { hint }) => {
             rec.result = OpResult::Rejected;
