@@ -1208,8 +1208,11 @@ pub(crate) fn add_from(
                 .and_then(|(k, v)| adder(it, target, &[k, v]))
         };
         if let Err(e) = r {
-            if matches!(e, Ctrl::Throw(_)) {
-                it.iter_close(&rec)?;
+            // Closing keeps the first error; only a fatal stop while closing replaces it.
+            if matches!(e, Ctrl::Throw(_))
+                && let Err(fatal @ Ctrl::Fatal(_)) = it.iter_close(&rec)
+            {
+                return Err(fatal);
             }
             return Err(e);
         }

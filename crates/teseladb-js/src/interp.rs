@@ -584,6 +584,7 @@ impl<'c> Interp<'c> {
                         }
                         if let Some(i) = array_index(key)
                             && let Some(x) = items.get(i)
+                            && (b.locks & ELEMENTS_OWN == 0 || b.get_own(key).is_none())
                         {
                             return Ok(x.clone());
                         }
@@ -644,6 +645,9 @@ impl<'c> Interp<'c> {
         {
             let mut b = o.borrow_mut();
             let (locks, extensible) = (b.locks, b.extensible);
+            let own = locks & ELEMENTS_OWN != 0
+                && array_index(key).is_some()
+                && b.props.iter().any(|(n, _)| &**n == key);
             if let Kind::Array(items) = &mut b.kind {
                 if key == "length" && locks & LENGTH_FIXED != 0 {
                     drop(b);
@@ -663,7 +667,7 @@ impl<'c> Interp<'c> {
                     }
                     return Ok(());
                 }
-                if let Some(i) = array_index(key) {
+                if let Some(i) = array_index(key).filter(|_| !own) {
                     if i < items.len() {
                         if locks & ELEMENTS_FROZEN != 0 {
                             drop(b);
@@ -707,7 +711,13 @@ impl<'c> Interp<'c> {
                     return self.read_only(key);
                 }
                 if c.ptr_eq(o) {
-                    if let Some(p) = o.borrow_mut().get_own_mut(key) {
+                    let mut b = o.borrow_mut();
+                    if let (Some(i), Kind::Array(items)) = (array_index(key), &mut b.kind)
+                        && let Some(slot) = items.get_mut(i)
+                    {
+                        *slot = value.clone();
+                    }
+                    if let Some(p) = b.get_own_mut(key) {
                         p.value = value;
                     }
                     return Ok(());
@@ -842,6 +852,7 @@ impl<'c> Interp<'c> {
             if i < items.len() {
                 items[i] = Val::Undef;
             }
+            b.remove(key);
             return Ok(true);
         }
         b.remove(key);
@@ -859,7 +870,15 @@ impl<'c> Interp<'c> {
         };
         let mut ints: Vec<(usize, Name)> = Vec::new();
         let mut rest = Vec::new();
+        let elements = matches!(b.kind, Kind::Array(_));
         for (k, p) in &b.props {
+            // An array element with attributes of its own is listed with the others.
+            if elements && array_index(k).is_some() {
+                if only_enumerable && !p.enumerable {
+                    out.retain(|x| x != k);
+                }
+                continue;
+            }
             if (only_enumerable && !p.enumerable) || k.starts_with("@@") {
                 continue;
             }

@@ -80,6 +80,22 @@ pub fn has(it: &mut Interp, o: &ObjRef, key: &str) -> R<bool> {
     }
 }
 
+/// `[[DefineOwnProperty]]` through the `defineProperty` trap, or on the target.
+pub fn define(it: &mut Interp, o: &ObjRef, key: &str, desc: Val) -> R<bool> {
+    let (target, handler) = live(it, o)?;
+    match trap(it, &handler, "defineProperty")? {
+        Some(t) => {
+            let args = [Val::Obj(target), key_val(key), desc];
+            Ok(it.call(&t, &Val::Obj(handler), &args)?.truthy())
+        }
+        None => {
+            let d = crate::props::to_desc(it, &desc)?;
+            crate::props::define_own(it, &target, key, &d)?;
+            Ok(true)
+        }
+    }
+}
+
 pub fn delete(it: &mut Interp, o: &ObjRef, key: &str) -> R<bool> {
     let (target, handler) = live(it, o)?;
     match trap(it, &handler, "deleteProperty")? {

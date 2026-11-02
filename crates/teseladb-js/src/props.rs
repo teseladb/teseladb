@@ -81,6 +81,11 @@ pub fn own_prop(o: &ObjRef, key: &str) -> Option<Prop> {
             if let Some(i) = array_index(key)
                 && let Some(x) = items.get(i)
             {
+                if b.locks & ELEMENTS_OWN != 0
+                    && let Some(p) = b.get_own(key)
+                {
+                    return Some(p.clone());
+                }
                 let frozen = b.locks & ELEMENTS_FROZEN != 0;
                 let sealed = b.locks & ELEMENTS_SEALED != 0;
                 return Some(fixed(x.clone(), !frozen, true, !sealed));
@@ -277,13 +282,82 @@ fn define_array(it: &mut Interp, o: &ObjRef, key: &str, d: &Desc) -> R<()> {
         }
         return Ok(());
     }
-    if let Some(v) = &d.value {
-        let outer = std::mem::replace(&mut it.strict, true);
-        let r = it.set(&Val::Obj(o.clone()), key, v.clone());
-        it.strict = outer;
-        r?;
+    let cur = own_prop(o, key);
+    let has_own = o.borrow().locks & ELEMENTS_OWN != 0 && o.borrow().get_own(key).is_some();
+    let plain = !d.is_accessor()
+        && d.writable != Some(false)
+        && d.enumerable != Some(false)
+        && d.configurable != Some(false)
+        && (cur.is_none()
+            || d.writable.is_some() && d.enumerable.is_some() && d.configurable.is_some());
+    if plain && !has_own {
+        if let Some(v) = &d.value {
+            let outer = std::mem::replace(&mut it.strict, true);
+            let r = it.set(&Val::Obj(o.clone()), key, v.clone());
+            it.strict = outer;
+            r?;
+        } else if cur.is_none() {
+            it.set(&Val::Obj(o.clone()), key, Val::Undef)?;
+        }
+        return Ok(());
     }
-    Ok(())
+    // An element with attributes of its own: kept in the properties, over the kind's value.
+    let base = cur.unwrap_or(Prop {
+        value: Val::Undef,
+        getter: None,
+        setter: None,
+        enumerable: false,
+        writable: false,
+        configurable: false,
+    });
+    let p = merged(&base, d);
+    let i = array_index(key).unwrap_or(0);
+    if i >= it.array_len(o) {
+        if o.borrow().locks & LENGTH_FIXED != 0 {
+            return Err(crate::arrays::cannot_grow(it, true, i));
+        }
+        it.grow(o, i + 1 - it.array_len(o))?;
+    }
+    if let Kind::Array(items) = &mut o.borrow_mut().kind {
+        if i >= items.len() {
+            items.resize(i + 1, Val::Undef);
+        }
+        items[i] = if p.is_accessor() { Val::Undef } else { p.value.clone() };
+    }
+    o.borrow_mut().locks |= ELEMENTS_OWN;
+    it.define(o, key, p)
+}
+
+/// `base` with the fields `d` has.
+fn merged(base: &Prop, d: &Desc) -> Prop {
+    let mut p = base.clone();
+    if d.is_accessor() && !base.is_accessor() {
+        p.value = Val::Undef;
+        p.writable = false;
+    }
+    if d.is_data() && base.is_accessor() {
+        p.getter = None;
+        p.setter = None;
+    }
+    if let Some(v) = &d.value {
+        p.value = v.clone();
+    }
+    if let Some(w) = d.writable {
+        p.writable = w;
+    }
+    if let Some(g) = &d.get {
+        p.getter = g.clone();
+    }
+    if let Some(s) = &d.set {
+        p.setter = s.clone();
+    }
+    if let Some(e) = d.enumerable {
+        p.enumerable = e;
+    }
+    if let Some(c) = d.configurable {
+        p.configurable = c;
+    }
+    p
 }
 
 /// A key as the engine shows it in a message: `"b"`, or `0` for an index.
@@ -448,4 +522,44 @@ fn property_is_enumerable(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let k = it.key_of(&arg(a, 0))?;
     let o = it.object_of(this)?;
     Ok(Val::Bool(own_prop(&o, &k).is_some_and(|p| p.enumerable)))
+}
+
+/// CreateDataProperty (ECMA-262 §7.3.5): `o[key] = v` as a new enumerable, writable and
+/// configurable property; `false` when `o` refuses it.
+pub fn create_data_property(it: &mut Interp, o: &ObjRef, key: &str, v: Val) -> R<bool> {
+    let d = Desc {
+        value: Some(v),
+        writable: Some(true),
+        enumerable: Some(true),
+        configurable: Some(true),
+        ..Desc::default()
+    };
+    if crate::proxy::is_proxy(o) {
+        let obj = desc_object(it, &d)?;
+        return crate::proxy::define(it, o, key, obj);
+    }
+    match own_prop(o, key) {
+        Some(c) if !c.configurable => return Ok(false),
+        None if !o.borrow().extensible => return Ok(false),
+        _ => {}
+    }
+    define_own(it, o, key, &d)?;
+    Ok(true)
+}
+
+/// The object form of `d`.
+fn desc_object(it: &mut Interp, d: &Desc) -> R {
+    let o = it.object()?;
+    let fields: [(&str, Option<Val>); 4] = [
+        ("value", d.value.clone()),
+        ("writable", d.writable.map(Val::Bool)),
+        ("enumerable", d.enumerable.map(Val::Bool)),
+        ("configurable", d.configurable.map(Val::Bool)),
+    ];
+    for (k, v) in fields {
+        if let Some(v) = v {
+            it.define(&o, k, Prop::data(v))?;
+        }
+    }
+    Ok(Val::Obj(o))
 }

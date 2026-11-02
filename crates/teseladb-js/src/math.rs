@@ -263,7 +263,9 @@ fn sum_precise(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     let (mut nan, mut plus_inf, mut minus_inf, mut all_minus_zero) = (false, false, false, true);
     while let Some(v) = it.iter_step(&mut rec)? {
         let Val::Num(x) = v else {
-            it.iter_close(&rec)?;
+            if let Err(fatal @ crate::interp::Ctrl::Fatal(_)) = it.iter_close(&rec) {
+                return Err(fatal);
+            }
             return it.type_error("values passed to Math.sumPrecise must be numbers");
         };
         all_minus_zero &= x == 0.0 && x.is_sign_negative();

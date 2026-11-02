@@ -223,6 +223,10 @@ pub const LENGTH_FIXED: u8 = 1;
 pub const ELEMENTS_SEALED: u8 = 2;
 /// An array's elements are read-only.
 pub const ELEMENTS_FROZEN: u8 = 4;
+/// Some elements of an array have attributes of their own (an accessor, a read-only or
+/// non-configurable element): those are kept in its properties under their index, over the value
+/// the kind holds.
+pub const ELEMENTS_OWN: u8 = 8;
 
 /// Whether `key` is the key of a symbol (`@@description:id`), not an internal slot (`@@new`).
 pub fn is_symbol_key(key: &str) -> bool {
