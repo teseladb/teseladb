@@ -5,7 +5,7 @@
 # with rust-lld) and run inside the image of scripts/docker/x86_64-qemu.Dockerfile, without the
 # seccomp profile (Docker's default one refuses the io_uring calls) and with a 1 MiB tmpfs at
 # `TESELADB_FULL_DIR`, the full disk of the executors' equivalence battery.
-#   scripts/test-linux.sh [crate...] [-- test filter]
+#   scripts/test-linux.sh [crate...]
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -14,17 +14,7 @@ case $(uname -m) in
   *) TARGET=x86_64-unknown-linux-musl ;;
 esac
 IMAGE=teseladb-x86_64-qemu
-crates=()
-filter=()
-while [[ $# -gt 0 ]]; do
-  if [[ $1 == -- ]]; then
-    shift
-    filter=("$@")
-    break
-  fi
-  crates+=("$1")
-  shift
-done
+crates=("$@")
 [[ ${#crates[@]} -gt 0 ]] || crates=(teseladb-sys teseladb-io)
 pkgs=()
 for c in "${crates[@]}"; do pkgs+=(-p "$c"); done
@@ -42,18 +32,13 @@ while IFS= read -r run; do runs+=("$run"); done < <(
 
 docker run --rm -i --security-opt seccomp=unconfined --tmpfs /full:rw,size=1m \
   -e TESELADB_FULL_DIR=/full -v "$PWD:$PWD" -w "$PWD" "$IMAGE" \
-  sh -s -- "${#runs[@]}" "${runs[@]}" "${filter[@]+"${filter[@]}"}" <<'SH'
-n=$1
-shift
-i=0
-runs=""
-while [ "$i" -lt "$n" ]; do runs="$runs $1"; shift; i=$((i + 1)); done
+  sh -s -- "${runs[@]}" <<'SH'
 fail=0
-for run in $runs; do
+for run in "$@"; do
   dir=${run%%:*}
   bin=${run#*:}
   name=$(basename "$bin")
-  if out=$(cd "$dir" && "$bin" "$@" 2>&1); then
+  if out=$(cd "$dir" && "$bin" 2>&1); then
     echo "$out" | grep -E "^test result|^[a-z_]+: ok" | sed "s|^|$name: |"
   else
     echo "$out" | tail -40

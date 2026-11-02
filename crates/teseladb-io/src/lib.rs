@@ -4,9 +4,12 @@
 #![cfg_attr(coverage, feature(coverage_attribute))]
 #![forbid(unsafe_code)]
 
+pub mod buffers;
 pub mod disk_thread;
 mod file_disk;
 pub mod handshake;
+#[cfg(target_os = "linux")]
+pub mod io_uring_disk;
 pub mod mailbox;
 pub mod peer;
 pub mod poller;
@@ -15,4 +18,6 @@ pub mod secure;
 pub mod spsc;
 pub mod timer;
 
-pub use file_disk::FileDisk;
+pub use file_disk::{FileDisk, direct_io_supported};
+#[cfg(target_os = "linux")]
+pub use io_uring_disk::IoUringDisk;

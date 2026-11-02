@@ -265,11 +265,17 @@ pub struct Completion {
     pub id: u64,
     /// Its result.
     pub result: io::Result<u32>,
+    /// The descriptor an [`Op::OpenAt`] opened, owned by whoever takes it.
+    pub fd: Option<OwnedFd>,
 }
 
 /// What the kernel may still read or write for an operation in flight.
 enum Keep {
     Nothing,
+    /// An open: its result is a new descriptor.
+    Open {
+        _alive: CString,
+    },
     Buffer(u16),
     /// Paths the kernel reads.
     Paths {
@@ -284,6 +290,15 @@ pub struct Probe {
 }
 
 impl Probe {
+    /// A probe that lists `ops` as supported (for tests of what depends on it).
+    pub fn with(ops: &[u8]) -> Probe {
+        let mut supported = vec![false; 256];
+        for op in ops {
+            supported[usize::from(*op)] = true;
+        }
+        Probe { supported }
+    }
+
     /// Whether operation `op` is supported.
     pub fn supports(&self, op: u8) -> bool {
         self.supported.get(usize::from(op)).copied().unwrap_or(false)
@@ -606,7 +621,7 @@ impl Ring {
                 sqe.addr = path.as_ptr() as u64;
                 sqe.len = mode;
                 sqe.op_flags = (flags | O_CLOEXEC) as u32;
-                Keep::Paths { _alive: vec![path] }
+                Keep::Open { _alive: path }
             }
             Op::Close { fd } => {
                 sqe.opcode = opcode::CLOSE;
@@ -694,15 +709,22 @@ impl Ring {
         let cqe = unsafe { self.cqes.add((head & self.cq_mask) as usize).read() };
         // SAFETY: the release store hands the slot back to the kernel after reading it.
         unsafe { (*self.cq_head).store(head.wrapping_add(1), Ordering::Release) };
-        if let Some(Keep::Buffer(b)) = self.in_flight.remove(&cqe.user_data) {
-            self.busy[usize::from(b)] = false;
+        let mut fd = None;
+        match self.in_flight.remove(&cqe.user_data) {
+            Some(Keep::Buffer(b)) => self.busy[usize::from(b)] = false,
+            Some(Keep::Open { .. }) if cqe.res >= 0 => {
+                // SAFETY: the kernel has just opened this descriptor for the operation and
+                // nobody else owns it.
+                fd = Some(unsafe { OwnedFd::from_raw_fd(cqe.res) });
+            }
+            _ => {}
         }
         let result = if cqe.res < 0 {
             Err(io::Error::from_raw_os_error(-cqe.res))
         } else {
             Ok(cqe.res as u32)
         };
-        Some(Completion { id: cqe.user_data, result })
+        Some(Completion { id: cqe.user_data, result, fd })
     }
 }
 
@@ -752,15 +774,19 @@ mod tests {
         p
     }
 
-    fn wait_one(r: &mut Ring, id: u64) -> io::Result<u32> {
+    fn wait(r: &mut Ring, id: u64) -> Completion {
         r.submit(1).unwrap();
         loop {
             if let Some(c) = r.complete() {
                 assert_eq!(c.id, id);
-                return c.result;
+                return c;
             }
             r.submit(1).unwrap();
         }
+    }
+
+    fn wait_one(r: &mut Ring, id: u64) -> io::Result<u32> {
+        wait(r, id).result
     }
 
     #[test]
@@ -800,9 +826,8 @@ mod tests {
         let id = r
             .push(Op::OpenAt { path: cpath(&f), flags: 0o2 | 0o100 | 0o200, mode: 0o644 })
             .unwrap();
-        let fd = wait_one(&mut r, id).unwrap() as RawFd;
-        // SAFETY: the open has just returned this descriptor.
-        let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+        let owned = wait(&mut r, id).fd.unwrap();
+        let fd = owned.as_raw_fd();
         r.set_file(1, fd).unwrap();
         assert!(r.set_file(9, fd).is_err());
         r.buffer(0).unwrap()[..5].copy_from_slice(b"hello");
