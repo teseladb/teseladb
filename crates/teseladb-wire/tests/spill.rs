@@ -176,3 +176,68 @@ fn query_stats_counts_a_query_that_wrote_to_disk() {
     assert!(used.contains(&(true, true)), "{used:?}");
     assert!(used.contains(&(false, false)), "{used:?}");
 }
+
+fn batch_ks(r: &Document, which: &str) -> Vec<i64> {
+    let Value::Array(b) = field(r, &format!("cursor.{which}")) else { panic!("{r:?}") };
+    b.iter()
+        .map(|d| match d {
+            Value::Document(d) => match d.get("k") {
+                Some(Value::Int32(n)) => i64::from(*n),
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        })
+        .collect()
+}
+
+fn cursor_id(r: &Document) -> i64 {
+    match field(r, "cursor.id") {
+        Value::Int64(n) => *n,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Open cursors keep within the node's part of memory for them (012 FR-013, D-105): a cursor
+/// whose results would pass it writes them to the temporary store and its `getMore`s read them
+/// back in order; the run goes when the cursor ends.
+#[test]
+fn a_cursor_past_the_cursors_part_waits_in_the_store() {
+    let store = Arc::new(MemorySpill::default());
+    let mut m = node(&store);
+    m.shared.lock().unwrap().spill.cursor_bytes = Some(3_000);
+    let r = m.run(
+        "sp",
+        cmd(r#"{"aggregate":"c","pipeline":[{"$sort":{"k":1}}],"cursor":{"batchSize":2},"allowDiskUse":true}"#),
+    );
+    assert_eq!(batch_ks(&r, "firstBatch"), [0, 1]);
+    assert_eq!(store.len(), 1, "the other 58 results wait in the store");
+    let id = cursor_id(&r);
+    let mut got = vec![0, 1];
+    loop {
+        let more =
+            m.run("sp", cmd(&format!(r#"{{"getMore":{id},"collection":"c","batchSize":7}}"#)));
+        got.extend(batch_ks(&more, "nextBatch"));
+        if cursor_id(&more) == 0 {
+            break;
+        }
+    }
+    assert_eq!(got, (0..60).collect::<Vec<i64>>());
+    assert!(store.is_empty(), "the run goes with the cursor");
+    // Results that fit stay in memory.
+    let r = m.run(
+        "sp",
+        cmd(r#"{"aggregate":"c","pipeline":[{"$sort":{"k":1}}],"cursor":{"batchSize":55},"allowDiskUse":true}"#),
+    );
+    assert_ne!(cursor_id(&r), 0);
+    assert!(store.is_empty());
+    // A killed cursor drops its run too.
+    let r = m.run(
+        "sp",
+        cmd(r#"{"aggregate":"c","pipeline":[{"$sort":{"k":1}}],"cursor":{"batchSize":1},"allowDiskUse":true}"#),
+    );
+    assert_eq!(store.len(), 1);
+    let kill =
+        format!(r#"{{"killCursors":"c","cursors":[{{"$numberLong":"{}"}}]}}"#, cursor_id(&r));
+    assert_eq!(field(&m.run("sp", cmd(&kill)), "ok"), &Value::Double(1.0));
+    assert!(store.is_empty(), "a killed cursor drops its run");
+}

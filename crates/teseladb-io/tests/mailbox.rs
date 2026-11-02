@@ -168,3 +168,27 @@ fn a_waiting_sender_gets_through_a_small_ring_and_a_gone_sender_left_its_message
     assert_eq!(out, [1], "what a sender queued before it went still arrives");
     assert!(rx.is_empty());
 }
+
+/// Senders made from a sender, from the mailbox and from a shared factory each get their own
+/// ring and all reach the same mailbox; the debug forms say what each is.
+#[test]
+fn every_way_of_making_a_sender_reaches_the_same_mailbox() {
+    let (_, tx, mut rx) = counted::<u32>();
+    let from_sender = tx.senders();
+    let from_mailbox = rx.senders();
+    let shared = from_sender.clone();
+    let senders =
+        [tx.clone(), from_sender.sender(), from_mailbox.sender(), shared.sender(), rx.sender()];
+    for (i, s) in senders.iter().enumerate() {
+        s.send(i as u32).ok().unwrap();
+    }
+    let mut got = Vec::new();
+    rx.drain_into(&mut got);
+    got.sort_unstable();
+    assert_eq!(got, [0, 1, 2, 3, 4]);
+    assert!(format!("{tx:?}").contains("closed: false"));
+    assert!(format!("{shared:?}").starts_with("MailboxSenders"));
+    assert!(format!("{rx:?}").contains("len"));
+    drop(rx);
+    assert!(format!("{tx:?}").contains("closed: true"));
+}

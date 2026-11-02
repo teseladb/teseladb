@@ -22,6 +22,7 @@ mod macos;
 #[cfg(target_os = "linux")]
 pub use linux::io_uring as uring;
 pub mod memory_limit;
+pub mod numa;
 pub mod poll;
 pub mod ring;
 pub mod signal;

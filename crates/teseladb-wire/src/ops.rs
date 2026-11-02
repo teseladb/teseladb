@@ -730,6 +730,17 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         self.inner.other_operations()
     }
 
+    fn route_entries(&mut self) -> Result<Vec<teseladb_router::table::RouteEntry>, CommandError> {
+        self.call(|b| b.route_entries())
+    }
+
+    fn range_order(
+        &mut self,
+        cmd: teseladb_meta::command::Group0Command,
+    ) -> Result<(), CommandError> {
+        self.call(|b| b.range_order(cmd))
+    }
+
     fn config_documents(&mut self, coll: &str) -> Result<Vec<Document>, CommandError> {
         let all = self.call(|b| b.config_documents(coll))?;
         Ok(tenants::own_config_documents(self.tenant, all))

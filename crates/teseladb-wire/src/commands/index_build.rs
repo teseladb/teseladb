@@ -328,6 +328,47 @@ fn first_refused<B: Backend + ?Sized>(
     Ok(Some((why, before)))
 }
 
+/// The duplicate of a unique index of `rules` among the documents of `coll` with the smallest
+/// key: RefDb sorts the keys of a build and names the first two that are equal (measured on a
+/// `refrouter` 9.0.4, `dup key: { b: 0 }` where TeselaDB's scan met `{ b: 1 }` first).
+fn smallest_duplicate<B: Backend + ?Sized>(
+    backend: &mut B,
+    coll: &CollectionEntry,
+    rules: &Rules,
+) -> Result<Option<CommandError>, CommandError> {
+    let check = super::mutation::DocCheck::new(rules)?;
+    let key_value = |e: &CommandError| -> Result<Vec<u8>, CommandError> {
+        let v = e.extra.get("keyValue").cloned().unwrap_or(Value::Document(Document::new()));
+        Ok(Document::new().with("k", v).to_bytes()?)
+    };
+    let mut best: Option<(Vec<u8>, CommandError)> = None;
+    let (mut from, end) = documents_of(coll);
+    loop {
+        let rows = backend.scan(&from, &end, MODIFY_CHUNK_KEYS, ReadConcern::Local)?;
+        let Some((last, _)) = rows.last() else { break };
+        from = [last.as_slice(), &[0]].concat();
+        for (key, bytes) in &rows {
+            let Some(e) = check.check(key, bytes).filter(|e| e.code == DUPLICATE_KEY) else {
+                continue;
+            };
+            let value = key_value(&e)?;
+            let smaller = match &best {
+                Some((b, _)) => teseladb_bson::compare_docs(
+                    RawDoc::from_bytes(&value)?,
+                    RawDoc::from_bytes(b)?,
+                    None,
+                )
+                .is_lt(),
+                None => true,
+            };
+            if smaller {
+                best = Some((value, e));
+            }
+        }
+    }
+    Ok(best.map(|(_, e)| e))
+}
+
 impl Backfill<'_> {
     /// Writes the entries of the indexes of `rules` for every document of `coll`.
     pub fn run<B: Backend + ?Sized>(
@@ -362,7 +403,11 @@ impl Backfill<'_> {
             if let Some(e) = r.errors.into_iter().next() {
                 // A unique index finds its duplicates once the scan is over (measured).
                 if e.error.code == DUPLICATE_KEY {
-                    return Err(Stopped::Build(e.error));
+                    let first = match rules.capped {
+                        Some(_) => None,
+                        None => smallest_duplicate(backend, coll, rules)?,
+                    };
+                    return Err(Stopped::Build(first.unwrap_or(e.error)));
                 }
                 let (cause, done) = match rules.capped {
                     // A capped collection's keys are its insertion order, as RefDb scans.

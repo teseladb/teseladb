@@ -943,24 +943,122 @@ fn a_range_snapshot_carries_the_segments_over_its_intervals() {
 #[derive(Debug, Default)]
 struct MemStore {
     files: std::sync::Mutex<std::collections::BTreeMap<[u8; 12], Vec<u8>>>,
-    broken: bool,
+    broken: std::sync::atomic::AtomicBool,
 }
 
 impl teseladb_wire::commands::search_ops::SegmentStore for MemStore {
     fn put(&self, id: &[u8; 12], bytes: &[u8]) -> Result<(), String> {
-        if self.broken {
+        if self.broken.load(std::sync::atomic::Ordering::Relaxed) {
             return Err("disk full".into());
         }
         self.files.lock().unwrap().insert(*id, bytes.to_vec());
         Ok(())
     }
     fn remove(&self, id: &[u8; 12]) -> Result<(), String> {
-        if self.broken {
+        if self.broken.load(std::sync::atomic::Ordering::Relaxed) {
             return Err("read-only".into());
         }
         self.files.lock().unwrap().remove(id);
         Ok(())
     }
+    fn get(&self, id: &[u8; 12]) -> Result<Option<Vec<u8>>, String> {
+        if self.broken.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err("unreadable".into());
+        }
+        Ok(self.files.lock().unwrap().get(id).cloned())
+    }
+}
+
+/// With the node's part of memory for search segments (012 FR-013, D-105), indexes past it are
+/// written to their file and leave memory, the largest first; the next query that needs one
+/// reads it back from its file and gives the same results.
+#[test]
+fn indexes_past_the_memory_part_are_written_out_and_read_back() {
+    use std::sync::Arc;
+    use teseladb_wire::commands::lock;
+    use teseladb_wire::commands::search_ops::search_metrics;
+
+    let store = Arc::new(MemStore::default());
+    let mut m = with_collection();
+    lock(&m.shared).search.set_store(store.clone());
+    let reply = create(&mut m, "c", vec![index("a", dynamic(true)), index("b", dynamic(true))]);
+    let (a, b) = (id_bytes(&id_of(&reply, 0)), id_bytes(&id_of(&reply, 1)));
+    let on = |name: &str| {
+        let q = text("mundo").with("index", name);
+        vec![Document::new().with("$search", q), scored()]
+    };
+    let first_a = batch(&agg(&mut m, "c".into(), on("a")));
+    let first_b = batch(&agg(&mut m, "c".into(), on("b")));
+    let both = search_metrics(&m.shared).memory_bytes;
+    assert!(both > 0);
+    // A part that holds one index: using `b` leaves `a` out of memory, in its file.
+    lock(&m.shared).search.set_memory_limit(Some(both / 2 + 1));
+    assert_eq!(batch(&agg(&mut m, "c".into(), on("b"))), first_b);
+    assert!(search_metrics(&m.shared).memory_bytes <= both / 2 + 1);
+    assert_eq!(lock(&m.shared).search.evicted(), 1);
+    assert!(store.files.lock().unwrap().contains_key(&a));
+    assert!(!lock(&m.shared).search.in_memory(&a), "out of memory");
+    assert!(lock(&m.shared).search.served(&a).is_some(), "still served, from its file");
+    // `a` comes back from its file, and `b` leaves in turn.
+    assert_eq!(batch(&agg(&mut m, "c".into(), on("a"))), first_a);
+    assert!(lock(&m.shared).search.in_memory(&a));
+    assert!(!lock(&m.shared).search.in_memory(&b));
+    assert_eq!(lock(&m.shared).search.evicted(), 2);
+    // Without a part nothing leaves.
+    lock(&m.shared).search.set_memory_limit(None);
+    assert_eq!(batch(&agg(&mut m, "c".into(), on("b"))), first_b);
+    assert!(
+        lock(&m.shared).search.served(&a).is_some() && lock(&m.shared).search.served(&b).is_some()
+    );
+}
+
+/// Only an index that can be read back from its file leaves memory (012 FR-013): one on a view
+/// has no file (a replica builds it from the documents) and stays; without a store, or when its
+/// file cannot be written, the index stays too.
+#[test]
+fn indexes_that_cannot_come_back_from_a_file_stay_in_memory() {
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+    use teseladb_wire::commands::lock;
+
+    let on = |name: &str| {
+        let q = text("mundo").with("index", name);
+        vec![Document::new().with("$search", q), scored()]
+    };
+    // Without a store nothing leaves.
+    let mut m = with_collection();
+    create(&mut m, "c", vec![index("a", dynamic(true)), index("b", dynamic(true))]);
+    let (first_a, first_b) =
+        (batch(&agg(&mut m, "c".into(), on("a"))), batch(&agg(&mut m, "c".into(), on("b"))));
+    lock(&m.shared).search.set_memory_limit(Some(1));
+    assert_eq!(batch(&agg(&mut m, "c".into(), on("b"))), first_b);
+    assert_eq!(batch(&agg(&mut m, "c".into(), on("a"))), first_a);
+    assert_eq!(lock(&m.shared).search.evicted(), 0);
+
+    // An index on a view stays; the collection's one leaves for its file.
+    let store = Arc::new(MemStore::default());
+    let mut m = with_collection();
+    lock(&m.shared).search.set_store(store.clone());
+    view(&mut m, "v", "c", vec![Document::new().with("$set", Document::new().with("k", 1))]);
+    let onview = id_bytes(&id_of(&create(&mut m, "v", vec![index("onview", dynamic(true))]), 0));
+    let r = create(&mut m, "c", vec![index("a", dynamic(true))]);
+    let a = id_bytes(&id_of(&r, 0));
+    let first_view = batch(&agg(&mut m, "v".into(), on("onview")));
+    assert!(!first_view.is_empty());
+    let first_a = batch(&agg(&mut m, "c".into(), on("a")));
+    lock(&m.shared).search.set_memory_limit(Some(1));
+    assert_eq!(batch(&agg(&mut m, "v".into(), on("onview"))), first_view);
+    assert!(!lock(&m.shared).search.in_memory(&a), "the collection's index left");
+    assert_eq!(batch(&agg(&mut m, "c".into(), on("a"))), first_a);
+    assert!(lock(&m.shared).search.in_memory(&a), "back from its file");
+    assert!(lock(&m.shared).search.in_memory(&onview), "the view's stayed");
+    assert_eq!(lock(&m.shared).search.evicted(), 1);
+
+    // A file that cannot be written keeps its index in memory.
+    store.broken.store(true, Ordering::Relaxed);
+    assert_eq!(batch(&agg(&mut m, "v".into(), on("onview"))), first_view);
+    assert!(lock(&m.shared).search.in_memory(&a), "a stays: its file cannot be written");
+    assert_eq!(lock(&m.shared).search.evicted(), 1);
 }
 
 /// The segments of an index are handed to the node's store when it is built, and after a
@@ -1001,7 +1099,9 @@ fn a_failing_segment_store_fails_the_command() {
     use teseladb_wire::commands::lock;
 
     let mut m = with_collection();
-    lock(&m.shared).search.set_store(Arc::new(MemStore { broken: true, ..MemStore::default() }));
+    lock(&m.shared)
+        .search
+        .set_store(Arc::new(MemStore { broken: true.into(), ..MemStore::default() }));
     let (_, err) = error(&create(&mut m, "c", vec![index("default", dynamic(true))]));
     assert!(err.contains("cannot write a search segment: disk full"), "{err}");
     let drop = Document::new().with("dropSearchIndex", "c").with("name", "default");

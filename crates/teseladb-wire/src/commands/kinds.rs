@@ -26,20 +26,20 @@ use crate::types::{wrong_type, wrong_types};
 pub const SYSTEM_VIEWS: &str = "system.views";
 
 /// Options of the kinds, each named once.
-const VIEW_ON: &str = "viewOn";
-const PIPELINE: &str = "pipeline";
+pub(crate) const VIEW_ON: &str = "viewOn";
+pub(crate) const PIPELINE: &str = "pipeline";
 const COLLATION: &str = "collation";
 const CAPPED: &str = "capped";
 const SIZE: &str = "size";
 const MAX: &str = "max";
-const TIMESERIES: &str = "timeseries";
-const TIME_FIELD: &str = "timeField";
-const META_FIELD: &str = "metaField";
-const GRANULARITY: &str = "granularity";
-const MAX_SPAN: &str = "bucketMaxSpanSeconds";
-const ROUNDING: &str = "bucketRoundingSeconds";
-const FIXED_BUCKETING: &str = "fixedBucketing";
-const EXPIRE: &str = "expireAfterSeconds";
+pub(crate) const TIMESERIES: &str = "timeseries";
+pub(crate) const TIME_FIELD: &str = "timeField";
+pub(crate) const META_FIELD: &str = "metaField";
+pub(crate) const GRANULARITY: &str = "granularity";
+pub(crate) const MAX_SPAN: &str = "bucketMaxSpanSeconds";
+pub(crate) const ROUNDING: &str = "bucketRoundingSeconds";
+pub(crate) const FIXED_BUCKETING: &str = "fixedBucketing";
+pub(crate) const EXPIRE: &str = "expireAfterSeconds";
 const CLUSTERED: &str = "clusteredIndex";
 const ID_INDEX: &str = "idIndex";
 const KEY: &str = "key";
@@ -64,7 +64,7 @@ const TIMESERIES_FIELDS: [&str; 5] = [TIME_FIELD, META_FIELD, GRANULARITY, MAX_S
 /// The fields of `clusteredIndex`.
 const CLUSTERED_FIELDS: [&str; 4] = [KEY, UNIQUE, NAME, VERSION];
 /// The numeric types of `size`, `max`, `expireAfterSeconds` and the bucketing spans.
-const NUMBER: [&str; 4] = ["double", "int", "long", "decimal"];
+pub(crate) const NUMBER: [&str; 4] = ["double", "int", "long", "decimal"];
 /// The types of `capped`.
 const CAPPED_TYPES: [&str; 5] = ["double", "decimal", "bool", "int", "long"];
 /// Largest `size` (1024⁵ bytes).
@@ -72,7 +72,7 @@ const MAX_SIZE: i128 = 1 << 50;
 /// `max` is below this.
 const MAX_DOCS: i128 = 1 << 31;
 /// Longest bucket span of a time series (a year in seconds).
-const MAX_BUCKET_SPAN: i128 = 31_536_000;
+pub(crate) const MAX_BUCKET_SPAN: i128 = 31_536_000;
 /// The version of a clustered index.
 const CLUSTERED_INDEX_VERSION: i32 = 2;
 /// The name of a clustered index by default.
@@ -119,7 +119,7 @@ pub enum Asked {
 
 /// An integral value of a numeric option as RefDb reads it: a `double` truncated, a `decimal`
 /// rounded half to even.
-fn integral(v: &Value) -> Option<i128> {
+pub(crate) fn integral(v: &Value) -> Option<i128> {
     // `as` saturates at the bounds of `i64` and makes NaN 0, as RefDb reads these options
     // (measured: `expireAfterSeconds: 1e30` is 9223372036854775807, NaN is 0).
     match v {
@@ -139,16 +139,16 @@ fn number(v: &Value, path: &str) -> Result<i128, CommandError> {
     integral(v).ok_or_else(|| wrong_types(path, v, &NUMBER))
 }
 
-fn invalid(msg: impl Into<String>) -> CommandError {
+pub(crate) fn invalid(msg: impl Into<String>) -> CommandError {
     CommandError::new(INVALID_OPTIONS, msg.into())
 }
 
-fn bad(msg: impl Into<String>) -> CommandError {
+pub(crate) fn bad(msg: impl Into<String>) -> CommandError {
     CommandError::new(BAD_VALUE, msg.into())
 }
 
 /// `BadValue` of a number below `min` or above `max`.
-fn bounded(
+pub(crate) fn bounded(
     field: &str,
     n: i128,
     min: i128,
@@ -180,7 +180,7 @@ fn doc_of<'a>(o: &'a Document, field: &str) -> Result<Option<&'a Document>, Comm
 
 /// Checks the options of `create` of `ns` that make a special kind, in the order a `refrouter`
 /// 9.0.4 checks them.
-pub fn check(ns: &Namespace, o: &Document) -> Result<Asked, CommandError> {
+pub fn check(ns: &Namespace, o: &Document, now_secs: i64) -> Result<Asked, CommandError> {
     let view_on = match o.get(VIEW_ON) {
         None => None,
         Some(Value::String(s)) => Some(s.clone()),
@@ -269,10 +269,10 @@ pub fn check(ns: &Namespace, o: &Document) -> Result<Asked, CommandError> {
     }
     let expire = o.get(EXPIRE).map(|v| number(v, "create.expireAfterSeconds")).transpose()?;
     if let Some(ts) = timeseries {
-        return check_timeseries(ns, ts, expire);
+        return check_timeseries(ns, ts, expire, now_secs);
     }
     if let Some(c) = clustered {
-        return check_clustered(o, c, expire);
+        return check_clustered(o, c, expire, now_secs);
     }
     if capped {
         return check_capped(o);
@@ -311,9 +311,14 @@ fn check_capped(o: &Document) -> Result<Asked, CommandError> {
     Ok(Asked::Capped { size, max })
 }
 
-/// `expireAfterSeconds` of a time series or a clustered collection, checked: not negative, and
-/// its milliseconds within an `int64` (measured).
-fn checked_expire(expire: Option<i128>, prefix: &str) -> Result<Option<i64>, CommandError> {
+/// `expireAfterSeconds` of a time series or a clustered collection, checked: not negative, its
+/// milliseconds within an `int64` and at most the seconds since 1970 at `now_secs` (measured on a
+/// `refnode` 9.0.4 on 02-11-2026, also by `collMod`).
+pub(crate) fn checked_expire(
+    expire: Option<i128>,
+    prefix: &str,
+    now_secs: i64,
+) -> Result<Option<i64>, CommandError> {
     let Some(n) = expire else { return Ok(None) };
     if n < 0 {
         return Err(invalid(format!(
@@ -325,6 +330,11 @@ fn checked_expire(expire: Option<i128>, prefix: &str) -> Result<Option<i64>, Com
     if seconds.checked_mul(1000).is_none() {
         return Err(invalid(format!(
             "{prefix}TTL index 'expireAfterSeconds' option cannot overflow int64_t when cast as milliseconds, found {seconds}"
+        )));
+    }
+    if seconds > now_secs {
+        return Err(invalid(format!(
+            "{prefix}TTL index 'expireAfterSeconds' option cannot exceed time since last epoch ({now_secs}s) found {seconds}"
         )));
     }
     Ok(Some(seconds))
@@ -342,6 +352,7 @@ fn check_timeseries(
     ns: &Namespace,
     ts: &Document,
     expire: Option<i128>,
+    now_secs: i64,
 ) -> Result<Asked, CommandError> {
     if let Some((k, _)) = ts.iter().find(|(k, _)| !TIMESERIES_FIELDS.contains(k)) {
         return Err(CommandError::new(
@@ -430,7 +441,7 @@ fn check_timeseries(
         }
     }
     out.push(FIXED_BUCKETING, true);
-    let expire = checked_expire(expire, TIMESERIES_FAILED)?;
+    let expire = checked_expire(expire, TIMESERIES_FAILED, now_secs)?;
     Ok(Asked::TimeSeries { options: out, expire })
 }
 
@@ -443,6 +454,7 @@ fn check_clustered(
     o: &Document,
     c: &Document,
     expire: Option<i128>,
+    now_secs: i64,
 ) -> Result<Asked, CommandError> {
     if o.get(ID_INDEX).is_some() {
         return Err(invalid(
@@ -512,7 +524,7 @@ fn check_clustered(
             "The clusteredIndex name cannot be empty",
         ));
     }
-    let expire = checked_expire(expire, "")?;
+    let expire = checked_expire(expire, "", now_secs)?;
     Ok(Asked::Clustered { index: index(Value::Int32(CLUSTERED_INDEX_VERSION)), expire })
 }
 

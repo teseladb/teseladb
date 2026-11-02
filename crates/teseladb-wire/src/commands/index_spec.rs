@@ -184,7 +184,63 @@ pub fn check(spec: &Document) -> Result<i32, CommandError> {
         }
     }
     check_options(spec, version)?;
+    check_wildcard(spec, version)?;
     Ok(version)
+}
+
+/// The key, the `wildcardProjection` and the options of wildcard specification `spec`, as
+/// `teseladb-index` reads them.
+fn wildcard_rules(
+    spec: &Document,
+) -> Result<Result<(), teseladb_index::keygen::wildcard::SpecError>, CommandError> {
+    use teseladb_index::keygen::wildcard::{WildcardProjection, check_key, check_options};
+    let bytes = spec.to_bytes()?;
+    let raw = teseladb_bson::RawDoc::from_bytes(&bytes)?;
+    if let Err(e) = teseladb_index::spec::index_def(raw, 0) {
+        return Ok(Err(e));
+    }
+    let Some(Value::Document(key)) = spec.get(KEY) else { return Ok(Ok(())) };
+    let is_wildcard = |f: &str| f == "$**" || f.ends_with(".$**");
+    let fields: Vec<(&str, bool)> = key.iter().map(|(f, _)| (f, is_wildcard(f))).collect();
+    let plugin = key.iter().any(|(_, v)| matches!(v, Value::String(_)));
+    let projection = match raw.get("wildcardProjection") {
+        Some(teseladb_bson::RawValue::Document(p)) => {
+            match WildcardProjection::parse(p, &|_| false) {
+                Ok(p) => Some(p),
+                Err(e) => return Ok(Err(e)),
+            }
+        }
+        _ => None,
+    };
+    if let Err(e) = check_key(&fields, plugin, projection.as_ref()) {
+        return Ok(Err(e));
+    }
+    let flag = |k: &str| spec.get(k).and_then(crate::types::truthy).unwrap_or(false);
+    Ok(check_options(flag("unique"), flag("sparse"), spec.get("expireAfterSeconds").is_some()))
+}
+
+/// The rules of a wildcard index (key, `wildcardProjection` and the options it does not take),
+/// checked with the specification as RefDb does, before any build.
+fn check_wildcard(spec: &Document, version: i32) -> Result<(), CommandError> {
+    let wildcard = match spec.get(KEY) {
+        Some(Value::Document(k)) => k.iter().any(|(f, _)| f == "$**" || f.ends_with(".$**")),
+        _ => false,
+    };
+    if !wildcard {
+        return Ok(());
+    }
+    let Err(e) = wildcard_rules(spec)? else { return Ok(()) };
+    let code = crate::error::code(e.code).unwrap_or(crate::error::BAD_VALUE);
+    // An option the index does not take is found once the specification has its version.
+    let options = ["does not support the", "cannot make a TTL index"];
+    if !options.iter().any(|o| e.reason.contains(o)) || spec.get(VERSION).is_some() {
+        return Err(CommandError::new(code, e.reason));
+    }
+    let shown = display(&Value::Document(spec.clone().with(VERSION, version)));
+    Err(CommandError::new(
+        code,
+        format!("Error in specification {shown} :: caused by :: {}", e.reason),
+    ))
 }
 
 /// The rules between the fields of a specification whose fields have their types.
