@@ -203,7 +203,7 @@ pub fn shard_collection<B: Backend + ?Sized>(
     let unique = matches!(ctx.cmd.get("unique"), Some(Value::Boolean(true)));
     let asked = ShardKey { key, unique };
     check_key(&asked)?;
-    check_collation(ctx.cmd.get("collation"))?;
+    check_collation(SHARD_COLLECTION, ctx.cmd.get("collation"))?;
     let special = [super::admin::ADMIN_DB, super::config_db::CONFIG_DB, super::names::LOCAL_DB];
     if special.contains(&ns.db.as_str()) || ns.coll.starts_with(SYSTEM_PREFIX) {
         return Err(CommandError::new(
@@ -337,7 +337,7 @@ fn sharded_reply(ns: &Namespace) -> Document {
 
 /// The shard key's own rules: fields, each `1` or the one `"hashed"`, no `$` part, and no
 /// unique hashed key.
-fn check_key(k: &ShardKey) -> Result<(), CommandError> {
+pub(super) fn check_key(k: &ShardKey) -> Result<(), CommandError> {
     if k.key.is_empty() {
         return Err(CommandError::new(BAD_VALUE, "Shard key is empty"));
     }
@@ -381,14 +381,14 @@ fn check_key(k: &ShardKey) -> Result<(), CommandError> {
 }
 
 /// Only the simple collation shards a collection.
-fn check_collation(c: Option<&Value>) -> Result<(), CommandError> {
+pub(super) fn check_collation(name: &str, c: Option<&Value>) -> Result<(), CommandError> {
     match c {
         None => Ok(()),
         Some(Value::Document(d)) if d.get("locale") == Some(&Value::from("simple")) => Ok(()),
         Some(v) => Err(CommandError::new(
             BAD_VALUE,
             format!(
-                "The collation for shardCollection must be {{locale: 'simple'}}, but found: {}",
+                "The collation for {name} must be {{locale: 'simple'}}, but found: {}",
                 display(v)
             ),
         )),
@@ -412,7 +412,7 @@ fn check_collection(ns: &Namespace, c: &CollectionEntry, _: &ShardKey) -> Result
     }
 }
 
-fn is_empty<B: Backend + ?Sized>(
+pub(super) fn is_empty<B: Backend + ?Sized>(
     backend: &mut B,
     c: &CollectionEntry,
 ) -> Result<bool, CommandError> {
@@ -497,7 +497,7 @@ fn supporting_index<B: Backend + ?Sized>(
 
 /// Whether an index key value and a shard key value say the same: `1` in any numeric type, or
 /// `"hashed"`.
-fn same_value(index: &Value, shard: &Value) -> bool {
+pub(super) fn same_value(index: &Value, shard: &Value) -> bool {
     let number = |v: &Value| match v {
         Value::Int32(n) => Some(f64::from(*n)),
         Value::Int64(n) => Some(*n as f64),

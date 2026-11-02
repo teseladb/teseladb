@@ -261,7 +261,8 @@ pub fn ensure_collection<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
     ns: &Namespace,
 ) -> Result<CollectionEntry, CommandError> {
-    if let Some(c) = ctx.backend.collection(ns)? {
+    // A resharding in its critical section holds the write until its rename (018 FR-002).
+    if let Some(c) = super::reshard::writable(ctx.backend, ns)? {
         super::kinds::not_a_view(ns, &c)?;
         return Ok(c);
     }
@@ -926,7 +927,7 @@ pub fn modify<B: Backend + ?Sized>(
     if let Some(e) = names::cannot_write(ns, &host) {
         return Err(e);
     }
-    let existing = ctx.backend.collection(ns)?;
+    let existing = super::reshard::writable(ctx.backend, ns)?;
     let coll = match (existing, m.upsert && m.update.is_some()) {
         (Some(c), _) => {
             super::kinds::not_a_view(ns, &c)?;
