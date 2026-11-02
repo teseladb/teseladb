@@ -19,9 +19,19 @@ use crate::resources;
 use crate::tools::{TOOLS, allowed, check_args, listing, tool};
 use crate::untrusted::wrap;
 use crate::versions::{
-    PROTOCOL_VERSION_HEADER, Revision, discover_result, negotiate_initialize, request_revision,
+    PROTOCOL_VERSION_HEADER, RESULT_COMPLETE, RESULT_TYPE, Revision, discover_result,
+    negotiate_initialize, request_revision,
 };
 
+/// The methods whose 2026-07-28 results are cacheable (`ttlMs` and `cacheScope`).
+const CACHEABLE: &[&str] =
+    &["tools/list", "resources/list", "resources/templates/list", "resources/read"];
+/// The field of a cacheable result with how long it may be kept.
+const TTL_MS: &str = "ttlMs";
+/// The field of a cacheable result with who may keep it.
+const CACHE_SCOPE_FIELD: &str = "cacheScope";
+/// `cacheScope` of a result that depends on the caller.
+const CACHE_PRIVATE: &str = "private";
 /// The session field of the revisions with `initialize`.
 pub const SESSION_HEADER: &str = "Mcp-Session-Id";
 /// The server's name in `serverInfo`.
@@ -68,6 +78,9 @@ pub struct Call<'a, E: Executor + ?Sized> {
     /// The `notifications/progress` of the call, which go before its result in an event stream
     /// when the client asked for them and accepts one (FR-026).
     pub progress: Vec<Value>,
+    /// Where each `notifications/progress` goes as soon as its batch is read, when the answer is
+    /// already a stream; `None`: they wait in [`Call::progress`].
+    pub stream: Option<&'a mut dyn FnMut(Value)>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -335,7 +348,7 @@ impl Server {
                     limits: c.options.limits,
                     connection_id: &connection_id,
                     comment: None,
-                    progress: Vec::new(),
+                    on_batch: None,
                 };
                 let export = |name: &str| lock(&self.exports).get(name).map(|(d, _)| d.clone());
                 resources::read(uri, &mut ctx, &c.options, revision, &export)
@@ -343,7 +356,21 @@ impl Server {
             _ => Err(ErrorObject::new(METHOD_NOT_FOUND, format!("Method not found: {method}"))),
         };
         match result {
-            Ok(r) => Some((200, response(&id, Value::Object(r)), Vec::new())),
+            Ok(mut r) => {
+                // Each result of 2026-07-28 says whether it is complete (its `basic` section).
+                if revision == Revision::R2026_07_28 {
+                    if r.get(RESULT_TYPE).is_none() {
+                        r.insert(RESULT_TYPE, RESULT_COMPLETE);
+                    }
+                    // The lists and the reads are cacheable results (SEP-2549): they depend on
+                    // the caller's roles and on data that changes, so nobody keeps them.
+                    if CACHEABLE.contains(&method.as_str()) {
+                        r.insert(TTL_MS, Value::Number(teseladb_json::Number::Int(0)));
+                        r.insert(CACHE_SCOPE_FIELD, CACHE_PRIVATE);
+                    }
+                }
+                Some((200, response(&id, Value::Object(r)), Vec::new()))
+            }
             Err(e) if e.code == METHOD_NOT_FOUND && stateless => err(404, e),
             Err(e) => err(200, e),
         }
@@ -375,19 +402,26 @@ impl Server {
         };
         check_args(t, args)
             .map_err(|m| ErrorObject::new(INVALID_PARAMS, format!("Invalid params: {m}")))?;
+        let token = p.get("_meta").and_then(|m| m.get(PROGRESS_TOKEN)).cloned();
+        let (kept, stream) = (&mut c.progress, &mut c.stream);
+        let mut tell = |n: u64| {
+            let Some(token) = &token else { return };
+            let note = progress_note(token, n);
+            match stream {
+                Some(send) => send(note),
+                None => kept.push(note),
+            }
+        };
         let mut ctx = Ctx {
             exec: &mut *c.exec,
             limits: c.options.limits,
             connection_id,
             comment: Some(operation_tag(connection_id, id)),
-            progress: Vec::new(),
+            on_batch: Some(&mut tell),
         };
-        let mut r = Object::new();
         let outcome = call(&mut ctx, name, args);
-        let token = p.get("_meta").and_then(|m| m.get(PROGRESS_TOKEN)).cloned();
-        if let Some(token) = token {
-            c.progress.extend(ctx.progress.iter().map(|n| progress_note(&token, *n)));
-        }
+        drop(ctx);
+        let mut r = Object::new();
         match outcome {
             Ok(out) => {
                 let mut content = vec![text(&out.summary)];

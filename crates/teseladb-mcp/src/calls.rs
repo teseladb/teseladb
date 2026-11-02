@@ -42,8 +42,8 @@ pub struct Ctx<'a, E: Executor + ?Sized> {
     /// The `comment` each command of the call carries, which `notifications/cancelled` finds
     /// with `currentOp` (FR-026).
     pub comment: Option<String>,
-    /// The documents read after each batch, for `notifications/progress`.
-    pub progress: Vec<u64>,
+    /// Told the documents read after each batch, for `notifications/progress` (FR-026).
+    pub on_batch: Option<&'a mut dyn FnMut(u64)>,
 }
 
 /// A failed call's message.
@@ -111,14 +111,13 @@ pub fn is_ok(reply: &Document) -> bool {
 }
 
 impl<E: Executor + ?Sized> Ctx<'_, E> {
-    /// Runs `command` on `db` with the call's `maxTimeMS` when `timed`.
+    /// Runs `command` on `db` with the call's `maxTimeMS` when `timed`, and its `comment`. No
+    /// tool builds a command with either field.
     fn run(&mut self, db: &str, mut command: Document, timed: bool) -> Result<Document, Failure> {
-        if timed && command.get("maxTimeMS").is_none() {
+        if timed {
             command.push("maxTimeMS", self.limits.max_time_ms as i64);
         }
-        if let Some(c) = &self.comment
-            && command.get("comment").is_none()
-        {
+        if let Some(c) = &self.comment {
             command.push("comment", c.as_str());
         }
         let reply = self.exec.run(db, command);
@@ -142,7 +141,9 @@ impl<E: Executor + ?Sized> Ctx<'_, E> {
             if let Some(Bson::Array(b)) = cursor.get(field) {
                 out.extend(b.iter().filter_map(Bson::as_document).cloned());
             }
-            self.progress.push(out.len() as u64);
+            if let Some(tell) = self.on_batch.as_mut() {
+                tell(out.len() as u64);
+            }
             let id = match cursor.get("id") {
                 Some(Bson::Int64(id)) => *id,
                 _ => 0,
@@ -174,20 +175,22 @@ impl<E: Executor + ?Sized> Ctx<'_, E> {
     /// the limits applied.
     fn limit(&self, docs: &[Document], bytes_arg: Option<i64>) -> (Vec<Value>, String, Vec<Value>) {
         let max_docs = usize::try_from(self.limits.max_documents).unwrap_or(usize::MAX);
-        let max_bytes = bytes_arg
-            .map_or(self.limits.max_bytes, |b| (b.max(0) as u64).min(self.limits.max_bytes));
+        let asked = bytes_arg.map(|b| b.max(0) as u64).filter(|b| *b < self.limits.max_bytes);
+        let max_bytes = asked.unwrap_or(self.limits.max_bytes);
+        // The names RefDb MCP Server gives the limits in `appliedLimits` (its `outputSchema`).
+        let bytes_limit = if asked.is_some() { LIMIT_TOOL_BYTES } else { LIMIT_CONFIG_BYTES };
         let mut applied = Vec::new();
         let mut kept = Vec::new();
         let mut size = 2;
         for (k, d) in docs.iter().enumerate() {
             if k >= max_docs {
-                applied.push(Value::String("maxDocuments".into()));
+                applied.push(Value::String(LIMIT_CONFIG_DOCUMENTS.into()));
                 break;
             }
             let v = to_json(d);
             let len = to_string(&v).map_or(0, |t| t.len() + 1) as u64;
             if size + len > max_bytes {
-                applied.push(Value::String("maxBytes".into()));
+                applied.push(Value::String(bytes_limit.into()));
                 break;
             }
             size += len;
@@ -208,6 +211,48 @@ fn read_only_pipeline(pipeline: &[Bson]) -> Result<(), Failure> {
         Err("$out and $merge are not allowed: the tool only reads".to_owned())
     } else {
         Ok(())
+    }
+}
+
+/// `appliedLimits` when `mcpOptions.maxDocuments` cut the documents.
+const LIMIT_CONFIG_DOCUMENTS: &str = "config.maxDocumentsPerQuery";
+/// `appliedLimits` when `mcpOptions.maxBytes` cut them.
+const LIMIT_CONFIG_BYTES: &str = "config.maxBytesPerQuery";
+/// `appliedLimits` when the call's smaller `responseBytesLimit` cut them.
+const LIMIT_TOOL_BYTES: &str = "tool.responseBytesLimit";
+/// The fields of a search index in `collection-indexes` (the reference's `outputSchema`).
+const SEARCH_INDEX_FIELDS: &[&str] = &["name", "type", "status", "queryable", "latestDefinition"];
+/// The name `list-connections` gives the server's connection.
+const CONNECTION_NAME: &str = "teseladb";
+/// `source` of a connection the server fixes (RefDb MCP Server's enumeration).
+const PRECONFIGURED: &str = "preconfigured";
+/// `state` of an open connection.
+const CONNECTED: &str = "connected";
+/// `outcome` of `disconnect`.
+const DISCONNECTED: &str = "disconnected";
+
+/// The fields `fields` of `d` that it has, in that order, as relaxed Extended JSON.
+fn keep_fields(d: &Document, fields: &[&str]) -> Value {
+    let mut kept = Document::new();
+    for f in fields {
+        if let Some(x) = d.get(f) {
+            kept.push(*f, x.clone());
+        }
+    }
+    to_json(&kept)
+}
+
+/// An `_id` as the text `upsertedId` carries: an ObjectId in hexadecimal, a string as it is, and
+/// any other value in relaxed Extended JSON.
+fn id_text(id: &Bson) -> Value {
+    match id {
+        Bson::ObjectId(oid) => Value::String(oid.iter().map(|b| format!("{b:02x}")).collect()),
+        Bson::String(text) => Value::String(text.clone()),
+        other => {
+            let v = to_json(&Document::new().with("id", other.clone()));
+            let inner = v.get("id").cloned().unwrap_or(Value::Null);
+            Value::String(to_string(&inner).unwrap_or_default())
+        }
     }
 }
 
@@ -391,9 +436,13 @@ pub fn call<E: Executor + ?Sized>(
                 Ok(r) => c.drain(&db, r, usize::MAX)?,
                 Err(_) => Vec::new(),
             };
-            let (cl, sr): (Vec<Value>, Vec<Value>) =
-                (classic.iter().map(to_json).collect(), search.iter().map(to_json).collect());
-            let text = to_string(&Value::Array(cl.clone())).unwrap_or_default();
+            let all: Vec<Value> = classic.iter().map(to_json).collect();
+            let text = to_string(&Value::Array(all)).unwrap_or_default();
+            // The structured list keeps the name and the key of each index, as the reference's
+            // `outputSchema` describes it; the whole definitions go in the text.
+            let cl: Vec<Value> = classic.iter().map(|i| keep_fields(i, &["name", "key"])).collect();
+            let sr: Vec<Value> =
+                search.iter().map(|i| keep_fields(i, SEARCH_INDEX_FIELDS)).collect();
             let summary = format!(
                 "Found {} classic indexes and {} search indexes in \"{db}.{coll}\"",
                 cl.len(),
@@ -744,13 +793,7 @@ pub fn call<E: Executor + ?Sized>(
                 .first()
                 .and_then(Bson::as_document)
                 .and_then(|d| d.get("_id"))
-                .map(|id| {
-                    to_json(&Document::new().with("id", id.clone()))
-                        .get("id")
-                        .cloned()
-                        .unwrap_or(Value::Null)
-                })
-                .unwrap_or(Value::Null);
+                .map(id_text);
             let matched = n_of(&r, "n") - upserted.len() as i64;
             let st = structured(vec![
                 ("database", s(&db)),
@@ -758,8 +801,11 @@ pub fn call<E: Executor + ?Sized>(
                 ("matchedCount", int(matched)),
                 ("modifiedCount", int(n_of(&r, "nModified"))),
                 ("upsertedCount", int(upserted.len() as i64)),
-                ("upsertedId", upserted_id),
             ]);
+            let mut st = st;
+            if let Some(id) = upserted_id {
+                st.insert("upsertedId", id);
+            }
             Ok(out(
                 format!(
                     "Matched {matched} documents in \"{db}.{coll}\", modified {}",
@@ -849,13 +895,20 @@ pub fn call<E: Executor + ?Sized>(
             structured(vec![("connectionId", s(c.connection_id))]),
         )),
         "disconnect" => Ok(out(
-            "The server keeps the connection open".to_owned(),
-            structured(vec![("outcome", s("kept"))]),
+            "Disconnected; the server opens the connection again on the next call".to_owned(),
+            structured(vec![("outcome", s(DISCONNECTED))]),
         )),
         "list-connections" => {
+            let now = i64::try_from(c.exec.now_ms()).unwrap_or(i64::MAX);
+            let at = extjson::to_log_time(now).unwrap_or_default();
             let one = Value::Object(obj(vec![
                 ("connectionId", s(c.connection_id)),
-                ("connectionName", s("teseladb")),
+                ("name", s(CONNECTION_NAME)),
+                ("source", s(PRECONFIGURED)),
+                ("description", s("The connection of the authenticated user, fixed by the server")),
+                ("state", s(CONNECTED)),
+                ("createdAt", s(&at)),
+                ("lastUsedAt", s(&at)),
             ]));
             Ok(out(
                 "One connection, fixed by the server".to_owned(),

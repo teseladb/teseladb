@@ -193,6 +193,7 @@ pub fn node_config(o: &StartOpts) -> NodeConfig {
         admin_listen: Some(o.admin_listen),
         native_addr: format!("{}:{}", o.bind_ip, o.port),
         http: http_config(o),
+        http_advertise: http_advertise(&o.http_bind, o.http_port),
         join: o.join.clone(),
         client: Some(client_config(o)),
         data_dir: Some(o.dbpath.clone()),
@@ -232,6 +233,19 @@ pub fn http_config(o: &StartOpts) -> Option<crate::http_listener::HttpPortConfig
         tls: None,
         settings: teseladb_http::server::Settings::default(),
     })
+}
+
+/// The `host:port` clients reach the HTTP port by (019 FR-027): the first name or address of
+/// `bind` (`--http-bind`) that is not a wildcard, with `port`. `None` when every one is a
+/// wildcard (`0.0.0.0`, `::`): the node cannot know the name it is reached by.
+#[must_use]
+pub fn http_advertise(bind: &str, port: u16) -> Option<String> {
+    let host = bind.split(',').map(str::trim).find(|h| {
+        let ip = h.trim_start_matches('[').trim_end_matches(']');
+        !h.is_empty() && !ip.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_unspecified())
+    })?;
+    let bracketed = host.contains(':') && !host.starts_with('[');
+    Some(if bracketed { format!("[{host}]:{port}") } else { format!("{host}:{port}") })
 }
 
 /// The clients' port of `teseladb start`: each address of `--bind_ip` (comma separated, names

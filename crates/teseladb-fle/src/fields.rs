@@ -441,22 +441,26 @@ pub fn for_create(coll: &str, doc: RawDoc<'_>) -> Result<EncryptedFieldConfig, F
     Ok(c)
 }
 
-/// The checks of a configuration beyond its IDL, in the order of a `refnode` 9.0.4.
+/// The checks of a configuration beyond its IDL, in the order of a `refnode` 9.0.4: first each
+/// field's type and queries, all fields, then for each field its key id, its path and how it
+/// meets the paths before it (measured with fields that break two rules, `create-two-rules.json`).
 pub fn check(c: &EncryptedFieldConfig) -> Result<(), FleError> {
+    for field in &c.fields {
+        check_field(field)?;
+    }
     let mut keys: Vec<[u8; 16]> = Vec::new();
     let mut paths: Vec<&str> = Vec::new();
     for field in &c.fields {
+        if keys.contains(&field.key_id) {
+            return Err(err(DUPLICATE_KEY_IDS, "Duplicate key ids are not allowed"));
+        }
+        keys.push(field.key_id);
         if field.path.is_empty() {
             return Err(err(EMPTY_PATH, "Encrypted field must have a non-empty path"));
         }
         if field.path == "_id" || field.path.starts_with("_id.") {
             return Err(err(ENCRYPTED_ID, "Cannot encrypt _id or its subfields"));
         }
-        check_field(field)?;
-        if keys.contains(&field.key_id) {
-            return Err(err(DUPLICATE_KEY_IDS, "Duplicate key ids are not allowed"));
-        }
-        keys.push(field.key_id);
         for other in &paths {
             if *other == field.path {
                 return Err(err(DUPLICATE_PATHS, "Duplicate paths are not allowed"));
@@ -552,8 +556,13 @@ fn not_allowed(code: (i32, &'static str), name: &str, index: &str) -> FleError {
 }
 
 fn check_equality(q: &Query, ty: u8, alias: &str) -> Result<(), FleError> {
-    // The type is checked after the options (the order of a `refnode` 9.0.4 is not measured for
-    // a field that fails both).
+    // The type first, then the options (measured: `create-two-rules.json`).
+    if !EQUALITY_TYPES.contains(&ty) {
+        return Err(err(
+            EQUALITY_TYPE,
+            format!("Type '{alias}' is not a supported equality indexed type"),
+        ));
+    }
     for (name, present) in [("min", q.min.is_some()), ("max", q.max.is_some())] {
         if present {
             return Err(not_allowed(EQUALITY_BOUND, name, "equality"));
@@ -570,12 +579,6 @@ fn check_equality(q: &Query, ty: u8, alias: &str) -> Result<(), FleError> {
     }
     if let Some(name) = text_option(q) {
         return Err(not_allowed(EQUALITY_TEXT_OPTION, name, "equality"));
-    }
-    if !EQUALITY_TYPES.contains(&ty) {
-        return Err(err(
-            EQUALITY_TYPE,
-            format!("Type '{alias}' is not a supported equality indexed type"),
-        ));
     }
     Ok(())
 }

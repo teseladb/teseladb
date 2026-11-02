@@ -47,7 +47,7 @@ struct Known {
 }
 
 /// The cluster parameters TeselaDB has, in name order.
-const KNOWN: [Known; 6] = [
+const KNOWN: [Known; 7] = [
     Known {
         name: audit_log::AUDIT_CONFIG,
         default: audit_log::audit_config_default,
@@ -84,6 +84,14 @@ const KNOWN: [Known; 6] = [
         name: HISTORY_RETENTION,
         default: history_default,
         parse: history_parse,
+        idl: "ClusterServerParameter",
+        prefixed: true,
+        nested: false,
+    },
+    Known {
+        name: super::presentation::TOPOLOGY_PRESENTATION,
+        default: super::presentation::default_value,
+        parse: super::presentation::parse,
         idl: "ClusterServerParameter",
         prefixed: true,
         nested: false,
@@ -296,7 +304,12 @@ pub fn set_cluster_parameter<B: Backend + ?Sized>(
         let why = format!("BSON field '{}.{PARAMETER_TIME}' is a duplicate field", k.idl);
         return Err(failed(IDL_DUPLICATE_FIELD, why));
     }
-    let parsed = (k.parse)(v).map_err(|(code, why)| failed(code, why))?;
+    let mut parsed = (k.parse)(v).map_err(|(code, why)| failed(code, why))?;
+    if k.name == super::presentation::TOPOLOGY_PRESENTATION {
+        let before = super::presentation::stored(ctx.backend)?;
+        let hosts = super::presentation::hosts(ctx.backend)?;
+        parsed = super::presentation::next(&before, &parsed, &hosts)?.to_document();
+    }
     let secs = u32::try_from(ctx.backend.now_ms() / 1000).unwrap_or(u32::MAX);
     let time_value = Value::Timestamp { time: secs, increment: 1 };
     let stored = joined(Document::new().with(PARAMETER_TIME, time_value.clone()), parsed);

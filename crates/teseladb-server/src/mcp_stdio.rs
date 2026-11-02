@@ -245,6 +245,11 @@ fn ca_only(ca: &std::path::Path) -> Result<Arc<ClientConfig>, String> {
         std::fs::read_to_string(ca).map_err(|e| format!("--tlsCAFile {}: {e}", ca.display()))?;
     let anchors = teseladb_x509::Certificate::from_pem_all(&text)
         .map_err(|e| format!("--tlsCAFile {}: {e}", ca.display()))?;
+    // A file without a certificate would trust nothing, and every handshake would fail later
+    // with an unknown issuer instead of naming the option.
+    if anchors.is_empty() {
+        return Err(format!("--tlsCAFile {}: no certificate in the file", ca.display()));
+    }
     Ok(Arc::new(ClientConfig::new(teseladb_tls::Trust::anchors(anchors))))
 }
 

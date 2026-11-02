@@ -49,11 +49,112 @@ pub fn install(it: &mut Interp, g: &ObjRef) -> R<()> {
         ("toString", value_of, 0),
         ("valueOf", value_of, 0),
         ("localeCompare", locale_compare, 1),
-        ("normalize", value_of, 0),
+        ("isWellFormed", is_well_formed, 0),
+        ("toWellFormed", to_well_formed, 0),
+        ("matchAll", crate::regex::match_all, 1),
     ] {
         method(it, &proto, name, f, n)?;
     }
+    // `trimLeft` and `trimRight` are the same functions as `trimStart` and `trimEnd`.
+    for (alias, name) in [("trimLeft", "trimStart"), ("trimRight", "trimEnd")] {
+        let f = proto.borrow().get_own(name).map(|p| p.value.clone()).unwrap_or(Val::Undef);
+        it.define(&proto, alias, Prop::hidden(f))?;
+    }
+    for (name, f, n) in HTML_METHODS {
+        method(it, &proto, name, f, n)?;
+    }
+    method(it, &c, "raw", raw, 1)?;
     Ok(())
+}
+
+/// The HTML methods of Annex B (measured on a `refrouter` 9.0.4 on 02-11).
+const HTML_METHODS: [(&str, NativeFn, usize); 13] = [
+    ("anchor", |it, t, a| html(it, t, "a", Some(("name", a))), 1),
+    ("big", |it, t, _| html(it, t, "big", None), 0),
+    ("blink", |it, t, _| html(it, t, "blink", None), 0),
+    ("bold", |it, t, _| html(it, t, "b", None), 0),
+    ("fixed", |it, t, _| html(it, t, "tt", None), 0),
+    ("fontcolor", |it, t, a| html(it, t, "font", Some(("color", a))), 1),
+    ("fontsize", |it, t, a| html(it, t, "font", Some(("size", a))), 1),
+    ("italics", |it, t, _| html(it, t, "i", None), 0),
+    ("link", |it, t, a| html(it, t, "a", Some(("href", a))), 1),
+    ("small", |it, t, _| html(it, t, "small", None), 0),
+    ("strike", |it, t, _| html(it, t, "strike", None), 0),
+    ("sub", |it, t, _| html(it, t, "sub", None), 0),
+    ("sup", |it, t, _| html(it, t, "sup", None), 0),
+];
+
+/// `this` as a string for a method that names itself when `this` is null or undefined.
+fn this_string(it: &mut Interp, this: &Val) -> R<Name> {
+    if this.is_nullish() {
+        let name = it.native.clone();
+        return it.type_error(&format!(
+            "String.prototype.{name} called on incompatible {}",
+            it.show(this)
+        ));
+    }
+    it.str_of(this)
+}
+
+/// CreateHTML: `<tag attr="value">text</tag>`, with `"` in the value as `&quot;`.
+fn html(it: &mut Interp, this: &Val, tag: &str, attr: Option<(&str, &[Val])>) -> R {
+    let text = this_string(it, this)?;
+    let open = match attr {
+        Some((name, a)) => {
+            let v = it.str_of(&arg(a, 0))?;
+            format!("<{tag} {name}=\"{}\">", v.replace('"', "&quot;"))
+        }
+        None => format!("<{tag}>"),
+    };
+    it.string(format!("{open}{text}</{tag}>"))
+}
+
+fn is_well_formed(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+    let s = this_string(it, this)?;
+    let u = units(&s);
+    Ok(Val::Bool(well_formed(&u)))
+}
+
+/// Whether `u` has no lone surrogate.
+fn well_formed(u: &[u16]) -> bool {
+    char::decode_utf16(u.iter().copied()).all(|c| c.is_ok())
+}
+
+fn to_well_formed(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+    let s = this_string(it, this)?;
+    let u = units(&s);
+    if well_formed(&u) {
+        return Ok(Val::Str(s));
+    }
+    let fixed: Vec<u16> = char::decode_utf16(u.iter().copied())
+        .flat_map(|c| {
+            let mut buf = [0u16; 2];
+            c.unwrap_or('\u{fffd}').encode_utf16(&mut buf).to_vec()
+        })
+        .collect();
+    it.string(from_units(&fixed))
+}
+
+/// `String.raw(template, ...substitutions)`.
+fn raw(it: &mut Interp, _: &Val, a: &[Val]) -> R {
+    let template = arg(a, 0);
+    let cooked = it.object_of(&template)?;
+    let strings = it.get(&Val::Obj(cooked), "raw")?;
+    let strings = Val::Obj(it.object_of(&strings)?);
+    let len = it.get(&strings, "length")?;
+    let len = it.number_of(&len)?;
+    let len = if len.is_finite() && len > 0.0 { len as usize } else { 0 };
+    let mut out = String::new();
+    for i in 0..len {
+        let part = it.get(&strings, &i.to_string())?;
+        out.push_str(&it.str_of(&part)?);
+        if i + 1 < len
+            && let Some(sub) = a.get(i + 1)
+        {
+            out.push_str(&it.str_of(sub)?);
+        }
+    }
+    it.string(out)
 }
 
 fn string_ctor(it: &mut Interp, this: &Val, a: &[Val]) -> R {
@@ -72,18 +173,13 @@ fn string_ctor(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 /// `this` as a string.
 pub fn this_str(it: &mut Interp, this: &Val) -> R<Name> {
     if this.is_nullish() {
-        return it.type_error(&format!("String.prototype method called on {}", it.show(this)));
+        let m = format!("String.prototype.{} called on incompatible {}", it.native, it.show(this));
+        return it.type_error(&m);
     }
     it.str_of(this)
 }
 
-pub fn units(s: &str) -> Vec<u16> {
-    s.encode_utf16().collect()
-}
-
-pub fn from_units(u: &[u16]) -> String {
-    String::from_utf16_lossy(u)
-}
+pub use crate::text::{from_units, pair_surrogates, to_utf8, units, utf16_len};
 
 fn int_arg(it: &mut Interp, v: &Val, default: f64) -> R<f64> {
     if matches!(v, Val::Undef) {
@@ -113,8 +209,8 @@ fn from_code_point(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     let mut s = String::new();
     for x in a {
         let n = it.number_of(x)?;
-        match char::from_u32(n as u32).filter(|_| n.fract() == 0.0 && n >= 0.0) {
-            Some(c) => s.push(c),
+        match (n.fract() == 0.0 && (0.0..=1_114_111.0).contains(&n)).then_some(n as u32) {
+            Some(cp) => crate::text::push_cp(&mut s, cp),
             None => {
                 return Err(it.error(
                     "RangeError",
@@ -176,29 +272,30 @@ fn index_of(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 fn last_index_of(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let u = units(&this_str(it, this)?);
     let n = units(&it.str_of(&arg(a, 0))?);
+    let pos = it.number_of(&arg(a, 1))?;
     if n.len() > u.len() {
         return Ok(Val::Num(-1.0));
     }
-    let r = (0..=u.len() - n.len()).rev().find(|&i| u[i..i + n.len()] == n[..]);
+    let last = u.len() - n.len();
+    let from = if pos.is_nan() { last } else { (pos.max(0.0) as usize).min(last) };
+    let r = (0..=from).rev().find(|&i| u[i..i + n.len()] == n[..]);
     Ok(Val::Num(r.map_or(-1.0, |i| i as f64)))
 }
 
-fn no_regex(it: &mut Interp, v: &Val, what: &str) -> R<()> {
+fn no_regex(it: &mut Interp, v: &Val) -> R<()> {
     if matches!(v, Val::Obj(o) if matches!(o.borrow().kind, Kind::RegExp(..))) {
-        return it.type_error(&format!(
-            "first argument to String.prototype.{what} must not be a regular expression"
-        ));
+        return it.type_error("Invalid type: first can't be a Regular Expression");
     }
     Ok(())
 }
 
 fn includes(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    no_regex(it, &arg(a, 0), "includes")?;
+    no_regex(it, &arg(a, 0))?;
     index_of(it, this, a).map(|v| Val::Bool(!matches!(v, Val::Num(n) if n < 0.0)))
 }
 
 fn starts_with(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    no_regex(it, &arg(a, 0), "startsWith")?;
+    no_regex(it, &arg(a, 0))?;
     let u = units(&this_str(it, this)?);
     let n = units(&it.str_of(&arg(a, 0))?);
     let from = clamp(int_arg(it, &arg(a, 1), 0.0)?, u.len());
@@ -206,7 +303,7 @@ fn starts_with(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 }
 
 fn ends_with(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    no_regex(it, &arg(a, 0), "endsWith")?;
+    no_regex(it, &arg(a, 0))?;
     let u = units(&this_str(it, this)?);
     let n = units(&it.str_of(&arg(a, 0))?);
     let end = clamp(int_arg(it, &arg(a, 1), u.len() as f64)?, u.len());
@@ -243,7 +340,8 @@ fn upper(it: &mut Interp, this: &Val, _: &[Val]) -> R {
 
 fn lower(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     let s = this_str(it, this)?;
-    it.string(s.to_lowercase())
+    // Each character on its own: no final sigma (measured on a `refrouter` 9.0.4 on 02-11).
+    it.string(s.chars().flat_map(char::to_lowercase).collect())
 }
 
 fn is_ws(c: char) -> bool {
@@ -255,19 +353,19 @@ fn trim(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     it.string(s.trim_matches(is_ws).to_owned())
 }
 
-fn trim_start(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+pub(crate) fn trim_start(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     let s = this_str(it, this)?;
     it.string(s.trim_start_matches(is_ws).to_owned())
 }
 
-fn trim_end(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+pub(crate) fn trim_end(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     let s = this_str(it, this)?;
     it.string(s.trim_end_matches(is_ws).to_owned())
 }
 
 fn pad(it: &mut Interp, this: &Val, a: &[Val], start: bool) -> R {
     let s = this_str(it, this)?;
-    let len = s.encode_utf16().count();
+    let len = utf16_len(&s);
     let target = int_arg(it, &arg(a, 0), 0.0)?;
     let fill = if matches!(arg(a, 1), Val::Undef) { " ".into() } else { it.str_of(&arg(a, 1))? };
     if target <= len as f64 || fill.is_empty() {
@@ -292,8 +390,12 @@ fn pad_end(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 fn repeat(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let s = this_str(it, this)?;
     let n = int_arg(it, &arg(a, 0), 0.0)?;
-    if n < 0.0 || n.is_infinite() {
+    if n < 0.0 {
         return Err(it.error("RangeError", "repeat count must be non-negative"));
+    }
+    if n.is_infinite() {
+        let m = "repeat count must be less than infinity and not overflow maximum string size";
+        return Err(it.error("RangeError", m));
     }
     let total = (s.len() as f64) * n;
     // Past the longest string (`Interp::max_string`).
@@ -341,9 +443,23 @@ fn split(it: &mut Interp, this: &Val, a: &[Val]) -> R {
         sep => {
             let sep = it.str_of(&sep)?;
             if sep.is_empty() {
-                s.encode_utf16().map(|c| Val::Str(from_units(&[c]).into())).collect()
+                units(&s).into_iter().map(|c| Val::Str(from_units(&[c]).into())).collect()
             } else {
-                s.split(&*sep).map(|p| Val::Str(p.into())).collect()
+                let (su, pu) = (units(&s), units(&sep));
+                let mut out = Vec::new();
+                let mut last = 0;
+                let mut i = 0;
+                while i + pu.len() <= su.len() {
+                    if su[i..i + pu.len()] == pu[..] {
+                        out.push(Val::Str(from_units(&su[last..i]).into()));
+                        i += pu.len();
+                        last = i;
+                    } else {
+                        i += 1;
+                    }
+                }
+                out.push(Val::Str(from_units(&su[last..]).into()));
+                out
             }
         }
     };
@@ -488,9 +604,13 @@ fn value_of(it: &mut Interp, this: &Val, _: &[Val]) -> R {
 fn locale_compare(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let s = this_str(it, this)?;
     let t = it.str_of(&arg(a, 0))?;
-    Ok(Val::Num(match s.cmp(&t) {
-        std::cmp::Ordering::Less => -1.0,
-        std::cmp::Ordering::Equal => 0.0,
-        std::cmp::Ordering::Greater => 1.0,
-    }))
+    // The engine of RefDb 9.0.4 has no ICU: the difference of the first UTF-16 units that
+    // differ, else of the lengths (measured: `"Abc".localeCompare("abc")` is -32).
+    let (x, y) = (units(&s), units(&t));
+    let d = x
+        .iter()
+        .zip(&y)
+        .find(|(p, q)| p != q)
+        .map_or_else(|| x.len() as f64 - y.len() as f64, |(p, q)| f64::from(*p) - f64::from(*q));
+    Ok(Val::Num(d))
 }

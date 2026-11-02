@@ -359,6 +359,22 @@ mod tests {
         assert_eq!(r.next_request(), Ok(None));
     }
 
+    /// RFC 9112, 3.2 and 6.3: a target of visible characters, one `Host` (none needed in HTTP/1.0,
+    /// never two) and a `Content-Length` of digits.
+    #[test]
+    fn targets_hosts_and_lengths_that_are_refused() {
+        let status = |head: &[u8]| match read_all(head).remove(0) {
+            Ok(_) => 200,
+            Err(e) => e.status,
+        };
+        assert_eq!(status(b"GET  HTTP/1.1\r\nHost: h\r\n\r\n"), 400);
+        assert_eq!(status(b"GET /\x01 HTTP/1.1\r\nHost: h\r\n\r\n"), 400);
+        assert_eq!(status(b"GET / HTTP/1.0\r\nHost: a\r\nHost: b\r\n\r\n"), 400);
+        assert_eq!(status(b"GET / HTTP/1.1\r\n\r\n"), 400);
+        assert_eq!(status(b"POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 1a\r\n\r\n"), 400);
+        assert_eq!(status(b"POST / HTTP/1.1\r\nHost: h\r\nContent-Length:\r\n\r\n"), 400);
+    }
+
     #[test]
     fn http10_closes_unless_it_asks_to_keep_alive() {
         let got = read_all(b"GET / HTTP/1.0\r\n\r\n");

@@ -626,6 +626,7 @@ fn strict_fields_and_write_concern_through_dispatch() {
         cluster_time: ClusterTime { time: 1, increment: 1 },
         now_ms: 0,
         keys: None,
+        replica_set: None,
     };
     let mut run = |cmd: Document| {
         let bytes = OpMsg::encode(1, 0, 0, &cmd.with("$db", TEST).to_bytes().unwrap());

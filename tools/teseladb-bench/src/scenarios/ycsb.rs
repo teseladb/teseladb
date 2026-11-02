@@ -5,7 +5,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use teseladb_bson::Value;
+use teseladb_bson::{Document, Value};
 
 use super::ycsb_gen::{FIELDS, KeyChooser, MAX_SCAN, Op, Rng, Workload, field, key};
 use crate::cli::Args;
@@ -26,7 +26,7 @@ pub(crate) fn record(i: u64, rng: &mut Rng) -> Value {
 }
 
 /// Record `i`: its key and ten fields of 100 bytes.
-pub(crate) fn record_doc(i: u64, rng: &mut Rng) -> teseladb_bson::Document {
+pub(crate) fn record_doc(i: u64, rng: &mut Rng) -> Document {
     let mut pairs = vec![("_id", Value::String(key(i)))];
     let names: Vec<String> = (0..FIELDS).map(|f| format!("field{f}")).collect();
     for n in &names {
@@ -35,12 +35,18 @@ pub(crate) fn record_doc(i: u64, rng: &mut Rng) -> teseladb_bson::Document {
     doc(pairs)
 }
 
-pub(crate) fn insert(c: &mut Client, docs: Vec<Value>) -> Result<(), String> {
-    c.command(
-        DB,
-        doc(vec![("insert", Value::String(COLLECTION.into())), ("documents", Value::Array(docs))]),
-    )
-    .map(drop)
+fn insert(c: &mut Client, docs: Vec<Value>) -> Result<(), String> {
+    c.command(DB, insert_command(docs)).map(drop)
+}
+
+/// The insert of `docs` into the YCSB collection.
+fn insert_command(docs: Vec<Value>) -> Document {
+    doc(vec![("insert", Value::String(COLLECTION.into())), ("documents", Value::Array(docs))])
+}
+
+/// Inserts `docs` into the YCSB collection of a node that may still be electing its leaders.
+pub(crate) fn insert_when_ready(c: &mut Client, docs: Vec<Value>) -> Result<(), String> {
+    c.until_ready(DB, insert_command(docs))
 }
 
 fn find(c: &mut Client, filter: Value, limit: u64) -> Result<(), String> {

@@ -130,6 +130,17 @@ fn aggregate_and_sort_run_against_a_local_cluster() {
     }
 }
 
+/// `fle-query` (017 SC-002, T011) against a local cluster: the equality query on an encrypted
+/// field with its target of 5 ms at p50, over 200 documents.
+#[test]
+fn fle_query_runs_against_a_local_cluster() {
+    let short = ["--duration", "300ms", "--warmup", "50ms", "--records", "200", "--format", "json"];
+    let fle = metrics(&bench(&[&["--scenario", "fle-query"][..], &short[..]].concat()));
+    for name in ["encrypted_equality_10.p50", "encrypted_equality_10.p99", "200 documents"] {
+        assert!(fle.contains(name), "{name}: {fle}");
+    }
+}
+
 /// `timeseries` (015 FR-012, SC-003, SC-004) against a local cluster: the ingest rate, an hour of
 /// one sensor with its target and the space against a collection that is not a time series.
 #[test]
@@ -211,6 +222,17 @@ fn index_build_load_runs_against_a_local_cluster() {
     for name in
         ["write_before.p99", "write_during_build.p99", "build_ms", "2000 documents", "\"target\""]
     {
+        assert!(out.contains(name), "{name}: {out}");
+    }
+}
+
+/// `changestream-lag` (014 FR-016, SC-002) against a local cluster: the time from each insert's
+/// answer to its event on a change stream, with the target of SC-002 at p99.
+#[test]
+fn changestream_lag_runs_against_a_local_cluster() {
+    let short = ["--duration", "100ms", "--warmup", "50ms", "--format", "json"];
+    let out = metrics(&bench(&[&["--scenario", "changestream-lag"][..], &short[..]].concat()));
+    for name in ["lag.p50", "lag.p99", "\"target\"", "local cluster of three nodes"] {
         assert!(out.contains(name), "{name}: {out}");
     }
 }

@@ -80,6 +80,9 @@ fn the_guard_refuses_a_key_another_document_holds_or_took_in_the_same_write() {
     let mut g = UniqueGuard::default();
     assert_eq!(g.admit(std::slice::from_ref(&key), &[], &stored), Ok(()));
     assert_eq!(g.admit(&[], &put(2), &stored), Ok(()));
+    // So does the statement's own removal of the key it puts.
+    let removed = std::slice::from_ref(&key);
+    assert_eq!(UniqueGuard::default().admit(removed, &put(2), &stored), Ok(()));
 
     // A refused statement leaves nothing behind.
     let mut g = UniqueGuard::default();
@@ -106,6 +109,7 @@ fn the_error_names_the_index_its_pattern_and_the_conflicting_values() {
     let values = conflicting_values(&set, ID, raw, &keys[1].0, None).unwrap();
     assert_eq!(values, vec![Value::Int32(2), Value::from("x")], "the second element's entry");
     assert!(conflicting_values(&set, ID, raw, b"nope", None).unwrap().is_empty());
+    assert!(conflicting_values(&set, ID + 1, raw, &keys[1].0, None).unwrap().is_empty());
 
     let pattern = Document::new().with("a", 1).with("b", -1);
     let e = duplicate_key("msgs.c", "a_b", &pattern, &values).unwrap();

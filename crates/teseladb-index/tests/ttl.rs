@@ -27,6 +27,9 @@ fn a_ttl_index_is_one_field_with_expire_after_seconds() {
         Some(5.0)
     );
     assert_eq!(ttl(Document::new().with("t", 1), None), None);
+    // A specification whose `key` is no document is no TTL index.
+    let odd = Document::new().with("key", 1).with("expireAfterSeconds", 5).to_bytes().unwrap();
+    assert_eq!(Ttl::of(RawDoc::from_bytes(&odd).unwrap()), None);
     assert_eq!(ttl(Document::new().with("t", 1).with("u", 1), Some(Value::Int32(1))), None);
     assert_eq!(ttl(Document::new().with("t", 1), Some(Value::from("x"))), None);
     assert_eq!(ttl(Document::new().with("t", "2dsphere"), Some(Value::Int32(1))), None);

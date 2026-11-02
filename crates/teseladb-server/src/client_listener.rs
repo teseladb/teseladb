@@ -185,13 +185,33 @@ pub trait NodeState: Send + Sync + 'static {
 pub struct NodePresence {
     counter: AtomicI64,
     closed: AtomicBool,
+    /// The replica set and the member this node is, in the replica set presentation (018
+    /// FR-007).
+    replica: std::sync::Mutex<Option<Arc<ReplicaMember>>>,
 }
+
+/// A replica set and the member this node is in it.
+pub type ReplicaMember =
+    (teseladb_topology::replset::ReplicaSet, teseladb_topology::replset::MemberId);
 
 impl NodePresence {
     /// The counter of the node's state, and whether it drained.
     pub fn set(&self, counter: i64, closed: bool) {
         self.counter.store(counter, Ordering::Release);
         self.closed.store(closed, Ordering::Release);
+    }
+
+    /// The replica set presentation this node answers in (`None`: as a `refrouter`).
+    pub fn set_replica(&self, replica: Option<ReplicaMember>) {
+        let mut slot = self.replica.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if slot.as_deref() != replica.as_ref() {
+            *slot = replica.map(Arc::new);
+        }
+    }
+
+    /// The replica set presentation this node answers in.
+    pub fn replica(&self) -> Option<Arc<ReplicaMember>> {
+        self.replica.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
 
     /// The `topologyVersion` counter.
@@ -256,11 +276,22 @@ impl NodeClockState {
 impl NodeState for NodeClockState {
     fn info(&self) -> NodeInfo {
         let (time, increment) = to_timestamp(self.clock.0.peek());
+        let replica_set = self.presence.replica().map(|r| {
+            let (set, me) = (*r).clone();
+            // `lastWrite`: the node's mark, in the presentation's term.
+            let at = teseladb_topology::replset::OpTime {
+                ts: teseladb_topology::replset::Timestamp { time, increment },
+                term: set.term(),
+            };
+            let last = teseladb_topology::replset::LastWrite { op_time: at, majority_op_time: at };
+            Arc::new(teseladb_wire::hello::ReplicaView { set, me, last })
+        });
         NodeInfo {
             topology: Topology { process_id: self.process_id, counter: self.presence.counter() },
             cluster_time: ClusterTime { time, increment },
             now_ms: wall_ms(),
             keys: self.keys.as_ref().map(|k| k.ring()),
+            replica_set,
         }
     }
 

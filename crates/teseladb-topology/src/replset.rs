@@ -9,20 +9,78 @@
 //! is not behind a load balancer.
 
 use teseladb_bson::{Document, Value};
-use teseladb_wire::compressed::Compressor;
-use teseladb_wire::connection::HelloState;
-use teseladb_wire::hello::{ClusterTime, HelloRequest, IS_MASTER_LOWER, NodeInfo};
-use teseladb_wire::{
-    LOGICAL_SESSION_TIMEOUT_MINUTES, MAX_BSON_OBJECT_SIZE, MAX_MESSAGE_SIZE, MAX_WIRE_VERSION,
-    MAX_WRITE_BATCH_SIZE, MIN_WIRE_VERSION,
-};
 
 /// Highest priority a member may have.
 const MAX_PRIORITY: f64 = 1000.0;
 /// First bytes of an `electionId`: the term follows as a big-endian 64-bit integer.
 const ELECTION_ID_PREFIX: [u8; 4] = [0x7f, 0xff, 0xff, 0xff];
+/// `settings.heartbeatIntervalMillis` (RefDb's default).
+const HEARTBEAT_INTERVAL_MS: i32 = 2000;
+/// `settings.heartbeatTimeoutSecs`.
+const HEARTBEAT_TIMEOUT_SECS: i32 = 10;
+/// `settings.electionTimeoutMillis`.
+const ELECTION_TIMEOUT_MS: i32 = 10_000;
+/// `settings.catchUpTakeoverDelayMillis`.
+const CATCH_UP_TAKEOVER_DELAY_MS: i32 = 30_000;
+
+/// A priority as RefDb writes it: a whole number as a 32-bit integer.
+fn priority_value(p: f64) -> Value {
+    if p.fract() == 0.0 && p.abs() <= MAX_PRIORITY {
+        Value::Int32(p as i32)
+    } else {
+        Value::Double(p)
+    }
+}
+
 /// Milliseconds per second, for `lastWriteDate` (the seconds of the optime).
 const MS_PER_SECOND: i64 = 1000;
+
+/// A timestamp of the cluster (005 FR-024): seconds and the increment within the second.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Timestamp {
+    /// Seconds.
+    pub time: u32,
+    /// Increment within the second.
+    pub increment: u32,
+}
+
+/// The limits and versions a node announces in its `hello`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Limits {
+    /// `maxBsonObjectSize`.
+    pub max_bson_object_size: i32,
+    /// `maxMessageSizeBytes`.
+    pub max_message_size: i32,
+    /// `maxWriteBatchSize`.
+    pub max_write_batch_size: i32,
+    /// `logicalSessionTimeoutMinutes`.
+    pub logical_session_timeout_minutes: i32,
+    /// `minWireVersion`.
+    pub min_wire_version: i32,
+    /// `maxWireVersion`.
+    pub max_wire_version: i32,
+}
+
+/// What a member's `hello` needs from the connection and the node, already validated.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HelloContext {
+    /// `isMaster` (`ismaster` in the reply) rather than `hello`.
+    pub legacy: bool,
+    /// `helloOk` was asked.
+    pub hello_ok: bool,
+    /// The negotiated compressors' names, in order.
+    pub compressors: Vec<&'static str>,
+    /// `topologyVersion`: the process and its counter.
+    pub process_id: [u8; 12],
+    /// `topologyVersion.counter`.
+    pub counter: i64,
+    /// `localTime`, milliseconds since 1970.
+    pub now_ms: i64,
+    /// `connectionId`.
+    pub connection_id: i32,
+    /// The node's limits.
+    pub limits: Limits,
+}
 
 /// How the cluster shows itself to the drivers (`topologyPresentation.mode`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -92,8 +150,28 @@ impl Member {
         &self.host
     }
 
+    /// `priority`.
+    pub fn priority(&self) -> f64 {
+        self.priority
+    }
+
+    /// `votes`.
+    pub fn votes(&self) -> i32 {
+        self.votes
+    }
+
+    /// `hidden`.
+    pub fn is_hidden(&self) -> bool {
+        self.hidden
+    }
+
+    /// `tags`, in order.
+    pub fn tags(&self) -> &[(String, String)] {
+        &self.tags
+    }
+
     /// Whether Group 0 may designate it as primary.
-    fn electable(&self) -> bool {
+    pub fn electable(&self) -> bool {
         self.priority > 0.0
     }
 
@@ -146,7 +224,7 @@ pub struct MemberId(usize);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OpTime {
     /// Timestamp (005 FR-024).
-    pub ts: ClusterTime,
+    pub ts: Timestamp,
     /// Term: the presentation's version (contract `oplog-format.md`).
     pub term: i64,
 }
@@ -323,31 +401,65 @@ impl ReplicaSet {
             .collect()
     }
 
+    /// The configuration as `replSetGetConfig` and `local.system.replset` give it (measured on
+    /// RefDb 9.0.4): the settings of RefDb's defaults, `replicaSetId` the cluster's.
+    pub fn config_document(&self, replica_set_id: [u8; 12]) -> Document {
+        let members: Vec<Value> = self
+            .members
+            .iter()
+            .enumerate()
+            .map(|(i, m)| {
+                let tags = m.tags.iter().fold(Document::new(), |t, (k, v)| t.with(k, v.as_str()));
+                Value::Document(
+                    Document::new()
+                        .with("_id", i32::try_from(i).unwrap_or(i32::MAX))
+                        .with("host", m.host.as_str())
+                        .with("arbiterOnly", false)
+                        .with("buildIndexes", true)
+                        .with("hidden", m.hidden)
+                        .with("priority", priority_value(m.priority))
+                        .with("tags", tags)
+                        .with("secondaryDelaySecs", 0i64)
+                        .with("votes", m.votes),
+                )
+            })
+            .collect();
+        let settings = Document::new()
+            .with("chainingAllowed", true)
+            .with("heartbeatIntervalMillis", HEARTBEAT_INTERVAL_MS)
+            .with("heartbeatTimeoutSecs", HEARTBEAT_TIMEOUT_SECS)
+            .with("electionTimeoutMillis", ELECTION_TIMEOUT_MS)
+            .with("catchUpTimeoutMillis", -1)
+            .with("catchUpTakeoverDelayMillis", CATCH_UP_TAKEOVER_DELAY_MS)
+            .with("getLastErrorModes", Document::new())
+            .with("getLastErrorDefaults", Document::new().with("w", 1).with("wtimeout", 0))
+            .with("replicaSetId", Value::ObjectId(replica_set_id));
+        Document::new()
+            .with("_id", self.set_name.as_str())
+            .with("version", self.set_version)
+            .with("term", i32::try_from(self.term).unwrap_or(i32::MAX))
+            .with("members", members)
+            .with("protocolVersion", 1i64)
+            .with("writeConcernMajorityJournalDefault", true)
+            .with("settings", settings)
+    }
+
     /// The reply of member `me` to a validated `hello` (without `$clusterTime` and
-    /// `operationTime`, which `teseladb_wire::hello::with_cluster_time` appends).
-    pub fn hello(
-        &self,
-        req: &HelloRequest,
-        state: &HelloState,
-        connection_id: i32,
-        node: &NodeInfo,
-        me: MemberId,
-        last: &LastWrite,
-    ) -> Document {
+    /// `operationTime`, which the wire appends).
+    pub fn hello(&self, ctx: &HelloContext, me: MemberId, last: &LastWrite) -> Document {
         let member = &self.members[me.0];
         let is_primary = self.primary == Some(me.0);
         let mut d = Document::new();
-        if !state.compressors.is_empty() {
-            let names: Vec<Value> =
-                state.compressors.iter().copied().map(Compressor::name).map(Value::from).collect();
+        if !ctx.compressors.is_empty() {
+            let names: Vec<Value> = ctx.compressors.iter().copied().map(Value::from).collect();
             d.push("compression", names);
         }
-        if req.hello_ok() {
+        if ctx.hello_ok {
             d.push("helloOk", true);
         }
         let tv = Document::new()
-            .with("processId", Value::ObjectId(node.topology.process_id))
-            .with("counter", node.topology.counter);
+            .with("processId", Value::ObjectId(ctx.process_id))
+            .with("counter", ctx.counter);
         d.push("topologyVersion", tv);
         d.push("hosts", self.hosts(false));
         let passives = self.hosts(true);
@@ -356,7 +468,7 @@ impl ReplicaSet {
         }
         d.push("setName", self.set_name.as_str());
         d.push("setVersion", self.set_version);
-        d.push(if req.legacy() { IS_MASTER_LOWER } else { "isWritablePrimary" }, is_primary);
+        d.push(if ctx.legacy { "ismaster" } else { "isWritablePrimary" }, is_primary);
         d.push("secondary", !is_primary);
         if let Some(p) = self.primary() {
             d.push("primary", p);
@@ -376,14 +488,15 @@ impl ReplicaSet {
             d.push("electionId", Value::ObjectId(self.election_id()));
         }
         d.push("lastWrite", last.to_document());
-        d.push("maxBsonObjectSize", MAX_BSON_OBJECT_SIZE);
-        d.push("maxMessageSizeBytes", MAX_MESSAGE_SIZE as i32);
-        d.push("maxWriteBatchSize", MAX_WRITE_BATCH_SIZE);
-        d.push("localTime", Value::DateTime(node.now_ms));
-        d.push("logicalSessionTimeoutMinutes", LOGICAL_SESSION_TIMEOUT_MINUTES);
-        d.push("connectionId", connection_id);
-        d.push("minWireVersion", MIN_WIRE_VERSION);
-        d.push("maxWireVersion", MAX_WIRE_VERSION);
+        let l = &ctx.limits;
+        d.push("maxBsonObjectSize", l.max_bson_object_size);
+        d.push("maxMessageSizeBytes", l.max_message_size);
+        d.push("maxWriteBatchSize", l.max_write_batch_size);
+        d.push("localTime", Value::DateTime(ctx.now_ms));
+        d.push("logicalSessionTimeoutMinutes", l.logical_session_timeout_minutes);
+        d.push("connectionId", ctx.connection_id);
+        d.push("minWireVersion", l.min_wire_version);
+        d.push("maxWireVersion", l.max_wire_version);
         d.push("readOnly", false);
         d.push("ok", 1.0);
         d

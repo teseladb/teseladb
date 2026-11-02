@@ -204,6 +204,9 @@ pub struct Forwarded {
     pub who: Credential,
     /// The request.
     pub request: Request,
+    /// The URI of `/mcp` the node the client reached took for the request (019 FR-027), so that
+    /// an OIDC token is checked against the same resource on this node.
+    pub resource: Option<String>,
 }
 
 impl Forwarded {
@@ -222,6 +225,10 @@ impl Forwarded {
             e.str(k).str(v);
         }
         e.bytes(&self.request.body);
+        match &self.resource {
+            Some(r) => e.bool(true).str(r),
+            None => e.bool(false),
+        };
         e.finish()
     }
 
@@ -238,9 +245,10 @@ impl Forwarded {
             headers.push((d.str()?.to_owned(), d.str()?.to_owned()));
         }
         let body = d.bytes()?.to_vec();
+        let resource = if d.bool()? { Some(d.str()?.to_owned()) } else { None };
         d.finish()?;
         let request = Request { method, target, headers, body };
-        Ok(Forwarded { who: Credential { peer, x509_user }, request })
+        Ok(Forwarded { who: Credential { peer, x509_user }, request, resource })
     }
 }
 
@@ -356,8 +364,28 @@ impl Executor for NodeExecutor {
             peer: self.conn.peer.clone().unwrap_or_default(),
             x509_user: self.x509_user.clone(),
         };
-        let body = Forwarded { who, request: request.clone() }.encode();
+        let resource = self.conn.auth.oidc_resource.clone();
+        let body = Forwarded { who, request: request.clone(), resource }.encode();
         let answer = self.backend.forward_http(node, body)?;
         decode_response(&answer).ok()
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_forwarded_request_keeps_its_caller_and_the_resource_it_was_taken_for() {
+        let request = Request::new("POST", "/mcp").header("Host", "a").body(b"{}".to_vec());
+        for (x509_user, resource) in
+            [(None, None), (Some("CN=c".to_owned()), Some("https://db.example.com/mcp".to_owned()))]
+        {
+            let who = Credential { peer: "127.0.0.1:9".to_owned(), x509_user };
+            let f = Forwarded { who, request: request.clone(), resource };
+            assert_eq!(Forwarded::decode(&f.encode()), Ok(f));
+        }
+        assert!(Forwarded::decode(b"").is_err());
     }
 }

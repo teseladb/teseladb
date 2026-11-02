@@ -75,9 +75,8 @@ pub(super) fn insert(
     checker: &Checker,
     lookup: &Lookup<'_>,
 ) -> Result<Evaluated, CommandError> {
-    let [key] = keys else {
-        return Err(CommandError::new(INTERNAL_ERROR, "a time series write without its bucket"));
-    };
+    // A time series write is bound to its one bucket.
+    let key = keys.first().map(Vec::as_slice).unwrap_or_default();
     let old = lookup(key).map(|(_, v)| RawDoc::from_bytes(v)).transpose()?;
     // A measurement the bucket's indexes refuse (a geometry, 511) is found alone: its own
     // bucket's entries are checked before it goes in.
