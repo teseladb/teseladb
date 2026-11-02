@@ -139,3 +139,57 @@ pub fn write_status(reply: &Document, operations: usize) -> u16 {
         None => 200,
     }
 }
+
+/// Fields of a reply that belong to the wire protocol, not to an HTTP body.
+pub const WIRE_FIELDS: [&str; 3] = ["ok", "operationTime", "$clusterTime"];
+
+/// The status and problem body of an error document (an error reply, a write error or a write
+/// concern error): its code, name, message and labels, and its other fields except those of
+/// the wire protocol.
+pub fn problem_of(doc: &Document) -> (u16, Document) {
+    let whole = Value::Document(doc.clone());
+    let (code, labels) = code_and_labels(&whole).unwrap_or((1, Vec::new()));
+    let st = status_of(code, &labels);
+    let name = match doc.get("codeName") {
+        Some(Value::String(n)) => n.clone(),
+        _ => teseladb_wire::error::code(code)
+            .map_or_else(|| format!("Location{code}"), |c| c.name.to_owned()),
+    };
+    let errmsg = match doc.get("errmsg") {
+        Some(Value::String(m)) => m.clone(),
+        _ => String::new(),
+    };
+    let mut d = Document::new()
+        .with("type", format!("{TYPE_PREFIX}{name}"))
+        .with("title", name.as_str())
+        .with("status", i32::from(st))
+        .with("code", code)
+        .with("codeName", name.as_str())
+        .with("errmsg", errmsg);
+    let own = ["code", "codeName", "errmsg", "ok", "operationTime", "$clusterTime"];
+    for (k, v) in doc.iter().filter(|(k, _)| !own.contains(k)) {
+        d.push(k, v.clone());
+    }
+    (st, d)
+}
+
+/// The problem of a write reply whose status `st` is not `200`: that of its first write error,
+/// or of its write concern error, with the reply's `writeErrors` and `writeConcernError`.
+pub fn write_problem(reply: &Document) -> (u16, Document) {
+    let source = match (reply.get("writeErrors"), reply.get("writeConcernError")) {
+        (Some(Value::Array(es)), _) if !es.is_empty() => es[0].as_document().cloned(),
+        (_, Some(Value::Document(w))) => Some(w.clone()),
+        _ => None,
+    }
+    .unwrap_or_default();
+    let (st, mut d) = problem_of(&source);
+    for k in ["index", "keyPattern", "keyValue", "errInfo", "writeErrors", "writeConcernError"] {
+        d.remove(k);
+    }
+    for k in ["writeErrors", "writeConcernError"] {
+        if let Some(v) = reply.get(k) {
+            d.push(k, v.clone());
+        }
+    }
+    (st, d)
+}

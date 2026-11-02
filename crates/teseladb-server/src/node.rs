@@ -943,7 +943,15 @@ impl<D: Disk + Send + 'static> Node<D> {
                     auth: auth.clone(),
                     shutdown: shutdown.clone(),
                 };
-                let service = Arc::new(crate::http_service::NodeHttp::new(handle));
+                let mut state = NodeClockState::new(clock.clone(), random_u64())
+                    .with_handle(handle.clone())
+                    .with_presence(presence.clone());
+                if let Some((_, slot)) = &keys {
+                    state = state.with_keys(slot.clone());
+                }
+                let auth = cfg.client.as_ref().is_some_and(|c| c.auth);
+                let service =
+                    Arc::new(crate::http_service::NodeHttp::new(handle, Arc::new(state), auth));
                 match crate::http_listener::HttpListener::spawn(h, service, http_metrics.clone()) {
                     Ok(l) => Some(l),
                     Err(e) => {
