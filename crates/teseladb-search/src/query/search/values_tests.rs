@@ -1250,3 +1250,165 @@ fn more_like_this_keeps_terms_in_two_documents() {
         ]
     );
 }
+
+/// The `e` field of `m3.js`: an `embeddedDocuments` field with a dynamic mapping.
+fn m3_embedded() -> MemIndex {
+    let e = Document::new().with("type", "embeddedDocuments").with("dynamic", true);
+    let def = Document::new().with(
+        "mappings",
+        Document::new().with("dynamic", true).with("fields", Document::new().with("e", e)),
+    );
+    let el = |n: &str, k: i32| Value::from(Document::new().with("n", n).with("k", k));
+    let docs = vec![
+        Document::new()
+            .with("t", "el gato negro come")
+            .with("e", arr(vec![el("gato", 1), el("perro", 2)])),
+        Document::new().with("t", "perro negro").with("e", arr(vec![el("gato gato", 3)])),
+        Document::new().with("t", "gato").with("e", arr(vec![])),
+        Document::new().with("e", "not an array"),
+        Document::new().with("e", arr(vec![5.into()])),
+    ];
+    build(def, docs)
+}
+
+fn embedded(operator: Document, score: Option<Document>) -> Document {
+    let mut d = Document::new().with("path", "e").with("operator", operator);
+    if let Some(s) = score {
+        d.push("score", s);
+    }
+    op("embeddedDocument", d)
+}
+
+fn aggregate(how: &str) -> Option<Document> {
+    Some(Document::new().with("embedded", Document::new().with("aggregate", how)))
+}
+
+#[test]
+fn embedded_documents_score_their_elements() {
+    let idx = m3_embedded();
+    let gato = || op("text", Document::new().with("path", "e.n").with("query", "gato"));
+    let either = || {
+        let should = arr(vec![
+            gato().into(),
+            op("text", Document::new().with("path", "e.n").with("query", "perro")).into(),
+        ]);
+        op("compound", Document::new().with("should", should))
+    };
+    let e = |o: Document, s: Option<Document>| found(&idx, &embedded(o, s));
+    let one = vec![(2, 0.25753623247146606), (1, 0.23797652125358582)];
+    assert_eq!(e(gato(), None), Ok(one.clone()));
+    for how in ["maximum", "mean", "minimum", "sum"] {
+        assert_eq!(e(gato(), aggregate(how)), Ok(one.clone()), "{how}");
+    }
+    assert_eq!(e(either(), None), Ok(vec![(1, 0.7345988750457764), (2, 0.25753623247146606)]));
+    assert_eq!(
+        e(either(), aggregate("maximum")),
+        Ok(vec![(1, 0.49662238359451294), (2, 0.25753623247146606)])
+    );
+    assert_eq!(
+        e(either(), aggregate("mean")),
+        Ok(vec![(1, 0.3672994375228882), (2, 0.25753623247146606)])
+    );
+    assert_eq!(
+        e(either(), aggregate("minimum")),
+        Ok(vec![(2, 0.25753623247146606), (1, 0.23797652125358582)])
+    );
+    let range = op("range", Document::new().with("path", "e.k").with("gte", 1));
+    assert_eq!(e(range, None), Ok(vec![(1, 2.0), (2, 1.0)]));
+    let exists = op("exists", Document::new().with("path", "e.k"));
+    assert_eq!(e(exists, None), Ok(vec![(1, 2.0), (2, 1.0)]));
+    let equals = op("equals", Document::new().with("path", "e.k").with("value", 2));
+    assert_eq!(e(equals, None), Ok(vec![(1, 1.0)]));
+    let boost = Document::new().with("boost", Document::new().with("value", 3));
+    assert_eq!(e(gato(), Some(boost)), Ok(vec![(2, 0.7726086974143982), (1, 0.7139295935630798)]));
+    let outer = Document::new().with(
+        "embedded",
+        Document::new()
+            .with("aggregate", "sum")
+            .with("outerScore", Document::new().with("boost", Document::new().with("value", 2))),
+    );
+    assert_eq!(e(gato(), Some(outer)), Ok(vec![(2, 0.5150724649429321), (1, 0.47595304250717163)]));
+    let default_sum = Document::new().with("embedded", Document::new());
+    assert_eq!(e(gato(), Some(default_sum)), Ok(one));
+    // The text of an element is not text of the document.
+    assert_eq!(found(&idx, &gato()), Ok(vec![]));
+    // A boost reaches every kind of operator of the elements.
+    let two = || Some(Document::new().with("boost", Document::new().with("value", 2)));
+    let exists = op("exists", Document::new().with("path", "e.k"));
+    assert_eq!(e(exists, two()), Ok(vec![(1, 4.0), (2, 2.0)]));
+    let c = Document::new().with("constant", Document::new().with("value", 5));
+    let constant = op("exists", Document::new().with("path", "e.k").with("score", c));
+    assert_eq!(e(constant, two()), Ok(vec![(1, 20.0), (2, 10.0)]));
+    let pattern = op(
+        "wildcard",
+        Document::new().with("path", "e.n").with("query", "gat*").with("allowAnalyzedField", true),
+    );
+    assert_eq!(e(pattern, two()), Ok(vec![(1, 2.0), (2, 2.0)]));
+    let phrase = || op("phrase", Document::new().with("path", "e.n").with("query", "gato gato"));
+    let plain = e(phrase(), None).unwrap();
+    assert_eq!(e(phrase(), two()), Ok(vec![(2, plain[0].1 * 2.0)]));
+    let should = arr(vec![phrase().into()]);
+    let filter = arr(vec![gato().into()]);
+    let mixed = op("compound", Document::new().with("should", should).with("filter", filter));
+    assert_eq!(e(mixed, two()), Ok(vec![(2, plain[0].1 * 2.0), (1, 0.0)]));
+}
+
+#[test]
+fn embedded_document_errors_name_the_option() {
+    let idx = m3_embedded();
+    let err = |d: Document| found(&idx, &op("embeddedDocument", d)).unwrap_err();
+    let gato = |p: &str| op("text", Document::new().with("path", p).with("query", "gato"));
+    assert_eq!(
+        err(Document::new().with("operator", gato("e.n"))),
+        "\"embeddedDocument.path\" is required"
+    );
+    assert_eq!(err(Document::new().with("path", "e")), "\"embeddedDocument.operator\" is required");
+    assert_eq!(
+        err(Document::new().with("path", "e").with("operator", gato("e.n")).with("x", 1)),
+        "\"embeddedDocument\" unrecognized field \"x\""
+    );
+    assert_eq!(
+        err(Document::new().with("path", "e").with("operator", gato("t"))),
+        "\"embeddedDocument\" t is not a subfield of e"
+    );
+    assert_eq!(
+        err(Document::new().with("path", "t").with("operator", gato("t"))),
+        "\"embeddedDocument\" t is not a subfield of t"
+    );
+    let wild = op(
+        "text",
+        Document::new().with("path", arr(vec!["e.n".into(), "t".into()])).with("query", "gato"),
+    );
+    assert_eq!(
+        err(Document::new().with("path", "e").with("operator", wild)),
+        "\"embeddedDocument\" t is not a subfield of e"
+    );
+    let range = op(
+        "range",
+        Document::new().with("path", Document::new().with("value", "k")).with("gte", 1),
+    );
+    assert_eq!(
+        err(Document::new().with("path", "e").with("operator", range)),
+        "\"embeddedDocument\" k is not a subfield of e"
+    );
+    assert_eq!(
+        found(&idx, &embedded(gato("e.n"), aggregate("x"))).unwrap_err(),
+        "\"embeddedDocument.score.embedded.aggregate\" must be one of [maximum, mean, minimum, sum]"
+    );
+    assert_eq!(
+        found(&idx, &embedded(gato("e.n"), Some(Document::new().with("embedded", 1)))).unwrap_err(),
+        "\"embeddedDocument.score.embedded\" must be a document"
+    );
+    assert_eq!(
+        err(Document::new().with("path", 1).with("operator", gato("e.n"))),
+        "\"embeddedDocument.path\" must be a string"
+    );
+    assert_eq!(
+        err(Document::new().with("path", "e").with("operator", 1)),
+        "\"embeddedDocument.operator\" must be a document"
+    );
+    assert_eq!(
+        err(Document::new().with("path", "t.x").with("operator", gato("t.x.n"))),
+        "embeddedDocument path t.x is not indexed as embeddedDocuments"
+    );
+}

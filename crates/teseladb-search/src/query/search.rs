@@ -120,6 +120,8 @@ enum Operator {
     Empty,
     /// An operator whose scores `score` changes as a whole.
     Scored(Box<Operator>, Score),
+    /// `embeddedDocument`.
+    Embedded(embedded::Embedded),
     /// `span`, with its score option.
     Span(span::Span, Score),
     Compound {
@@ -199,6 +201,7 @@ fn parse(index: &MemIndex, name: &str, v: &Value, path: &str) -> Result<Operator
         "span" => span::parse(d, path),
         "queryString" => query_string::parse(index, d, path),
         "moreLikeThis" => more_like::parse(index, d, path),
+        "embeddedDocument" => embedded::parse(d, path),
         "in" => values::parse_in(d, path),
         "range" => values::parse_range(d, path),
         "near" => values::parse_near(d, path),
@@ -516,8 +519,15 @@ fn eval(index: &MemIndex, op: &Operator) -> Result<BTreeMap<u32, f32>, SearchErr
             rescored(index, s, p.score())
         }
         Operator::Empty => Ok(BTreeMap::new()),
+        Operator::Embedded(e) => {
+            let s = e.scores(index, boost_of(&e.score))?;
+            rescored(index, s, &e.score)
+        }
         Operator::Scored(op, score) => {
-            let s = eval(index, op)?;
+            let mut s = eval(index, op)?;
+            if let Score::Boost(b) = score {
+                s.values_mut().for_each(|v| *v *= b);
+            }
             rescored(index, s, score)
         }
         Operator::TermRange { path, lower, upper, score } => {
@@ -544,6 +554,34 @@ fn eval(index: &MemIndex, op: &Operator) -> Result<BTreeMap<u32, f32>, SearchErr
         Operator::Compound { must, should, filter, must_not, minimum } => {
             eval_compound(index, must, should, filter, must_not, *minimum)
         }
+    }
+}
+
+/// `op` with `b` times the weight of its scores.
+fn boosted(op: Operator, b: f32) -> Operator {
+    let scaled = |score: Score| match score {
+        Score::Plain => Score::Boost(b),
+        Score::Boost(x) => Score::Boost(x * b),
+        Score::Constant(c) => Score::Constant(c * b),
+        other => other,
+    };
+    match op {
+        Operator::Text { query, paths, fuzzy, score } => {
+            Operator::Text { query, paths, fuzzy, score: scaled(score) }
+        }
+        Operator::Phrase { query, paths, slop, score } => {
+            Operator::Phrase { query, paths, slop, score: scaled(score) }
+        }
+        Operator::Exists { path, score } => Operator::Exists { path, score: scaled(score) },
+        Operator::Compound { must, should, filter, must_not, minimum } => Operator::Compound {
+            must: must.into_iter().map(|o| boosted(o, b)).collect(),
+            should: should.into_iter().map(|o| boosted(o, b)).collect(),
+            filter,
+            must_not,
+            minimum,
+        },
+        other if b == 1.0 => other,
+        other => Operator::Scored(Box::new(other), Score::Boost(b)),
     }
 }
 
@@ -614,6 +652,7 @@ fn eval_compound(
     Ok(out)
 }
 
+mod embedded;
 mod function;
 mod knn;
 mod more_like;
