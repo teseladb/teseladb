@@ -216,3 +216,62 @@ fn functions_stored_in_system_js_are_globals() {
     );
     assert_eq!(first(&r).get("v"), Some(&Value::Boolean(true)));
 }
+
+#[test]
+fn a_promise_job_ends_the_call_with_the_trap_of_a_refrouter() {
+    let mut m = Mem::new();
+    load(&mut m);
+    for body in [
+        "function(){ try { Promise.resolve(1).then(() => 1) } catch (e) { return 'caught' } }",
+        "function(){ new FinalizationRegistry(() => {}); return 1 }",
+    ] {
+        let cmd = format!(
+            r#"{{"aggregate":"c","pipeline":[{{"$project":{{"v":{{"$function":{{"body":"{body}","args":[],"lang":"js"}}}}}}}}],"cursor":{{}}}}"#
+        );
+        let (code, msg) = error(&run(&mut m, &cmd));
+        assert_eq!(code, 11_542_340, "{msg}");
+        assert_eq!(
+            msg,
+            "Executor error during aggregate command on namespace: js.c :: caused by :: wasm trap: uninitialized element"
+        );
+    }
+    let r = run(
+        &mut m,
+        r#"{"find":"c","filter":{"$where":"Promise.resolve(1).then(()=>1); return true"}}"#,
+    );
+    let (code, msg) = error(&r);
+    assert_eq!(code, 11_542_340, "{msg}");
+    assert!(msg.ends_with(":: caused by :: wasm trap: uninitialized element"), "{msg}");
+}
+
+#[test]
+fn errors_carry_the_line_column_and_stack_of_a_refrouter() {
+    let mut m = Mem::new();
+    load(&mut m);
+    let r = run(
+        &mut m,
+        r#"{"aggregate":"c","pipeline":[{"$project":{"v":{"$function":{"body":"function(){ function g(){ throw new Error('q') } function h(){ g() } h() }","args":[],"lang":"js"}}}}],"cursor":{}}"#,
+    );
+    let (code, msg) = error(&r);
+    assert_eq!(code, 139, "{msg}");
+    assert!(
+        msg.ends_with(": e-runtime message : 'q', file : 'wasm:function', line : 1, column : 34\ng@wasm:function:1:34\nh@wasm:function:1:65\n@wasm:function:1:71\n"),
+        "{msg}"
+    );
+    let r = run(
+        &mut m,
+        r#"{"aggregate":"c","pipeline":[{"$project":{"v":{"$function":{"body":"function(){ throw {a:1, b:2} }","args":[],"lang":"js"}}}}],"cursor":{}}"#,
+    );
+    let (_, msg) = error(&r);
+    assert!(
+        msg.ends_with(": e-runtime message : 'uncaught exception: [object Object]', file : 'wasm:function', line : 1, column : 26"),
+        "{msg}"
+    );
+    let r = run(&mut m, r#"{"find":"c","filter":{"$where":"this.a.b.c"}}"#);
+    let (code, msg) = error(&r);
+    assert_eq!(code, 139, "{msg}");
+    assert!(
+        msg.contains(": e-runtime message : 'can't access property \"b\", this.a is undefined', file : 'wasm:function', line : 1, column : 15\n@wasm:function:1:15\n"),
+        "{msg}"
+    );
+}

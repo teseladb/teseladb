@@ -30,6 +30,9 @@ pub enum Val {
 pub struct Budget {
     pub used: Cell<usize>,
     pub limit: usize,
+    /// Whether a call changed an object of the shared globals ([`ObjCell::shared`]): the globals
+    /// are then built again before the next call.
+    pub touched: Cell<bool>,
 }
 
 impl Budget {
@@ -54,6 +57,8 @@ pub struct ObjCell {
     pub obj: RefCell<Obj>,
     pub charged: Cell<usize>,
     pub budget: Rc<Budget>,
+    /// Whether the object belongs to the global objects a program's calls share.
+    pub shared: Cell<bool>,
 }
 
 impl Drop for ObjCell {
@@ -71,7 +76,11 @@ impl ObjRef {
         self.0.obj.borrow()
     }
 
+    /// The object to change; changing a shared global object marks the globals as touched.
     pub fn borrow_mut(&self) -> std::cell::RefMut<'_, Obj> {
+        if self.0.shared.get() {
+            self.0.budget.touched.set(true);
+        }
         self.0.obj.borrow_mut()
     }
 }
@@ -84,15 +93,30 @@ pub struct Prop {
     pub setter: Option<ObjRef>,
     pub enumerable: bool,
     pub writable: bool,
+    pub configurable: bool,
 }
 
 impl Prop {
     pub fn data(value: Val) -> Prop {
-        Prop { value, getter: None, setter: None, enumerable: true, writable: true }
+        Prop {
+            value,
+            getter: None,
+            setter: None,
+            enumerable: true,
+            writable: true,
+            configurable: true,
+        }
     }
 
     pub fn hidden(value: Val) -> Prop {
-        Prop { value, getter: None, setter: None, enumerable: false, writable: true }
+        Prop {
+            value,
+            getter: None,
+            setter: None,
+            enumerable: false,
+            writable: true,
+            configurable: true,
+        }
     }
 
     pub fn is_accessor(&self) -> bool {
@@ -154,9 +178,33 @@ pub enum Kind {
     Set(Vec<Val>),
     RegExp(Name, Name),
     Bson(Bson),
-    Arguments,
+    /// An `arguments` object; in a sloppy function with a plain parameter list its first
+    /// elements are its parameters (ECMA-262 §10.4.4.7).
+    Arguments(Option<Rc<crate::interp::Mapped>>),
+    /// A `WeakMap`: its entries by key identity.
+    WeakMap(Vec<(ObjRef, Val)>),
+    /// A `WeakSet`.
+    WeakSet(Vec<ObjRef>),
+    /// A `WeakRef` and its target.
+    WeakRef(ObjRef),
+    /// A lazy iterator helper (`map`, `filter`…).
+    Helper(Rc<RefCell<crate::iterators::Helper>>),
+    /// An `ArrayBuffer`.
+    ArrayBuffer(crate::typed::BufRef),
+    /// A typed array.
+    Typed(crate::typed::View),
+    /// A `DataView`.
+    DataView(crate::typed::View),
+    /// A proxy: its target and handler (`None` once revoked) and whether it is callable.
+    Proxy(Option<(ObjRef, ObjRef)>, bool),
+    /// A generator object.
+    Generator(Rc<RefCell<crate::generators::GenState>>),
+    /// A promise.
+    Promise(Rc<RefCell<crate::promise::PromiseState>>),
     /// An iterator over a snapshot of values (`entries()`, `values()`, `keys()`).
     Iter(Rc<RefCell<(Vec<Val>, usize)>>),
+    /// A `Symbol` object (`Object(Symbol())`): its symbol.
+    Symbol(Val),
 }
 
 /// An object: its prototype, its own properties in insertion order and its kind.
@@ -166,6 +214,27 @@ pub struct Obj {
     pub props: Vec<(Name, Prop)>,
     pub kind: Kind,
     pub extensible: bool,
+    /// What `Object.seal` and `Object.freeze` did to the elements an array holds in its kind
+    /// ([`LENGTH_FIXED`], [`ELEMENTS_SEALED`], [`ELEMENTS_FROZEN`]).
+    pub locks: u8,
+}
+
+/// An array's `length` is read-only.
+pub const LENGTH_FIXED: u8 = 1;
+/// An array's elements cannot be deleted.
+pub const ELEMENTS_SEALED: u8 = 2;
+/// An array's elements are read-only.
+pub const ELEMENTS_FROZEN: u8 = 4;
+/// Some elements of an array have attributes of their own (an accessor, a read-only or
+/// non-configurable element): those are kept in its properties under their index, over the value
+/// the kind holds.
+pub const ELEMENTS_OWN: u8 = 8;
+
+/// Whether `key` is the key of a symbol (`@@description:id`), not an internal slot (`@@new`).
+pub fn is_symbol_key(key: &str) -> bool {
+    key.strip_prefix("@@")
+        .and_then(|k| k.rsplit_once(':'))
+        .is_some_and(|(_, id)| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
 }
 
 impl Obj {
@@ -182,7 +251,7 @@ impl Obj {
     }
 
     pub fn is_callable(&self) -> bool {
-        matches!(self.kind, Kind::Func(_))
+        matches!(self.kind, Kind::Func(_) | Kind::Proxy(_, true))
     }
 }
 
@@ -257,7 +326,7 @@ pub fn strict_eq(a: &Val, b: &Val) -> bool {
         (Val::Num(x), Val::Num(y)) => x == y,
         (Val::BigInt(x), Val::BigInt(y)) => x == y,
         (Val::Str(x), Val::Str(y)) => x == y,
-        (Val::Sym(x), Val::Sym(y)) => Rc::ptr_eq(x, y),
+        (Val::Sym(x), Val::Sym(y)) => x.1 == y.1 && x.0 == y.0,
         (Val::Obj(x), Val::Obj(y)) => x.ptr_eq(y),
         _ => false,
     }

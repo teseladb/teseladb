@@ -7,7 +7,7 @@ use teseladb_bson::types as t;
 use teseladb_bson::{RawDoc, RawValue, Value};
 
 use crate::error::{BAD_VALUE, FleError, INVALID_BSON, OVERFLOW, err};
-use crate::idl::{Fields, missing};
+use crate::idl::Fields;
 use crate::subtype::BlobSubtype;
 use crate::tokens::Token;
 
@@ -27,8 +27,8 @@ pub struct TokenSet {
 /// The token sets of a text value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TextTokenSets {
-    /// The whole string.
-    pub exact: TokenSet,
+    /// The whole string (always there once read).
+    pub exact: Option<TokenSet>,
     /// Each substring.
     pub substrings: Vec<TokenSet>,
     /// Each suffix.
@@ -95,12 +95,15 @@ const SERVER_ENCRYPTION: &str = "ServerDataEncryptionLevel1Token";
 
 fn token_set(doc: RawDoc<'_>, context: &str) -> Result<TokenSet, FleError> {
     let f = Fields::read(doc, context, &TOKEN_SET_FIELDS)?;
+    let (edc, esc) = (f.token("d", EDC_CF)?, f.token("s", ESC_CF)?);
+    let (server, p) = (f.token("l", SERVER_DERIVED)?, f.binary("p", t::BINARY_GENERIC)?);
     f.require(&TOKEN_SET_FIELDS)?;
-    let edc = f.token("d", EDC_CF)?.ok_or_else(|| missing(&f.path("d")))?;
-    let esc = f.token("s", ESC_CF)?.ok_or_else(|| missing(&f.path("s")))?;
-    let server = f.token("l", SERVER_DERIVED)?.ok_or_else(|| missing(&f.path("l")))?;
-    let p = f.binary("p", t::BINARY_GENERIC)?.ok_or_else(|| missing(&f.path("p")))?;
-    Ok(TokenSet { edc, esc, server, encrypted_tokens: p.to_vec() })
+    Ok(TokenSet {
+        edc: edc.unwrap_or_default(),
+        esc: esc.unwrap_or_default(),
+        server: server.unwrap_or_default(),
+        encrypted_tokens: p.unwrap_or_default().to_vec(),
+    })
 }
 
 fn token_sets(values: Vec<RawValue<'_>>, context: &str) -> Result<Vec<TokenSet>, FleError> {
@@ -116,12 +119,13 @@ fn token_sets(values: Vec<RawValue<'_>>, context: &str) -> Result<Vec<TokenSet>,
 fn text_sets(doc: RawDoc<'_>) -> Result<TextTokenSets, FleError> {
     const FIELDS: [&str; 4] = ["e", "s", "u", "p"];
     let f = Fields::read(doc, "TextSearchTokenSets", &FIELDS)?;
-    f.require(&FIELDS)?;
-    let exact = token_set(f.document("e")?.ok_or_else(|| missing(&f.path("e")))?, "e")?;
+    let exact = f.document("e")?.map(|d| token_set(d, "e")).transpose()?;
     let list = |k: &str| -> Result<Vec<TokenSet>, FleError> {
         token_sets(f.array(k)?.unwrap_or_default(), k)
     };
-    Ok(TextTokenSets { exact, substrings: list("s")?, suffixes: list("u")?, prefixes: list("p")? })
+    let (substrings, suffixes, prefixes) = (list("s")?, list("u")?, list("p")?);
+    f.require(&FIELDS)?;
+    Ok(TextTokenSets { exact, substrings, suffixes, prefixes })
 }
 
 impl InsertUpdatePayload {
@@ -132,22 +136,21 @@ impl InsertUpdatePayload {
     /// Reads the payload of a binary whose first byte is 11.
     pub fn parse(bytes: &[u8]) -> Result<InsertUpdatePayload, FleError> {
         let f = Fields::read(body(bytes)?, ROOT, &Self::FIELDS)?;
-        f.require(&Self::REQUIRED)?;
-        let need = |k: &str| missing(&f.path(k));
-        let edc = f.token("d", EDC_CF)?.ok_or_else(|| need("d"))?;
-        let esc = f.token("s", ESC_CF)?.ok_or_else(|| need("s"))?;
-        let p = f.binary("p", t::BINARY_GENERIC)?.ok_or_else(|| need("p"))?.to_vec();
-        let index_key_id = f.uuid("u")?.ok_or_else(|| need("u"))?;
-        let bson_type = f.int32("t")?.ok_or_else(|| need("t"))?;
-        let value = f.binary("v", t::BINARY_GENERIC)?.ok_or_else(|| need("v"))?.to_vec();
-        let server_encryption = f.token("e", SERVER_ENCRYPTION)?.ok_or_else(|| need("e"))?;
-        let server = f.token("l", SERVER_DERIVED)?.ok_or_else(|| need("l"))?;
-        let k = f.int64("k")?.ok_or_else(|| need("k"))?;
+        let (edc, esc) = (f.token("d", EDC_CF)?, f.token("s", ESC_CF)?);
+        let p = f.binary("p", t::BINARY_GENERIC)?.unwrap_or_default().to_vec();
+        let index_key_id = f.uuid("u")?.unwrap_or_default();
+        let bson_type = f.int32("t")?.unwrap_or_default();
+        let value = f.binary("v", t::BINARY_GENERIC)?.unwrap_or_default().to_vec();
+        let server_encryption = f.token("e", SERVER_ENCRYPTION)?.unwrap_or_default();
+        let server = f.token("l", SERVER_DERIVED)?.unwrap_or_default();
+        let k = f.int64("k")?.unwrap_or_default();
         let contention = u64::try_from(k).map_err(|_| {
             err(BAD_VALUE, format!("BSON field 'k' value must be >= 0, actual value '{k}'"))
         })?;
         let edges = f.array("g")?.map(|g| token_sets(g, "EdgeTokenSetV2")).transpose()?;
         let text = f.document("b")?.map(text_sets).transpose()?;
+        f.require(&Self::REQUIRED)?;
+        let (edc, esc) = (edc.unwrap_or_default(), esc.unwrap_or_default());
         Ok(InsertUpdatePayload {
             tokens: TokenSet { edc, esc, server, encrypted_tokens: p },
             index_key_id,
@@ -172,7 +175,7 @@ impl InsertUpdatePayload {
             return edges.iter().collect();
         }
         if let Some(text) = &self.text {
-            let mut sets = vec![&text.exact];
+            let mut sets: Vec<&TokenSet> = text.exact.iter().collect();
             sets.extend(&text.substrings);
             sets.extend(&text.suffixes);
             sets.extend(&text.prefixes);
@@ -197,16 +200,16 @@ const FIND_FIELDS: [&str; 3] = ["d", "s", "l"];
 
 fn find_tokens(doc: RawDoc<'_>, context: &str) -> Result<FindTokens, FleError> {
     let f = Fields::read(doc, context, &FIND_FIELDS)?;
-    f.require(&FIND_FIELDS)?;
     tokens_of(&f)
 }
 
+/// The three find tokens, after their types, then whether they are all there.
 fn tokens_of(f: &Fields<'_>) -> Result<FindTokens, FleError> {
-    Ok(FindTokens {
-        edc: f.token("d", "EDCDerivedFromDataToken")?.ok_or_else(|| missing(&f.path("d")))?,
-        esc: f.token("s", "ESCDerivedFromDataToken")?.ok_or_else(|| missing(&f.path("s")))?,
-        server: f.token("l", SERVER_DERIVED)?.ok_or_else(|| missing(&f.path("l")))?,
-    })
+    let edc = f.token("d", "EDCDerivedFromDataToken")?.unwrap_or_default();
+    let esc = f.token("s", "ESCDerivedFromDataToken")?.unwrap_or_default();
+    let server = f.token("l", SERVER_DERIVED)?.unwrap_or_default();
+    f.require(&FIND_FIELDS)?;
+    Ok(FindTokens { edc, esc, server })
 }
 
 /// `FLE2FindEqualityPayloadV2`.
@@ -229,8 +232,8 @@ impl FindEqualityPayload {
     /// Reads the payload of a binary whose first byte is 12.
     pub fn parse(bytes: &[u8]) -> Result<FindEqualityPayload, FleError> {
         let f = Fields::read(body(bytes)?, ROOT, &["d", "s", "l", "cm"])?;
-        f.require(&FIND_FIELDS)?;
-        Ok(FindEqualityPayload { tokens: tokens_of(&f)?, max_contention: max_contention(&f)? })
+        let max_contention = max_contention(&f)?;
+        Ok(FindEqualityPayload { tokens: tokens_of(&f)?, max_contention })
     }
 }
 
@@ -306,19 +309,27 @@ impl FindTextPayload {
     /// Reads the payload of a binary whose first byte is 18.
     pub fn parse(bytes: &[u8]) -> Result<FindTextPayload, FleError> {
         let f = Fields::read(body(bytes)?, ROOT, &Self::FIELDS)?;
-        f.require(&["ts", "cm", "cf", "df"])?;
-        let ts = f.document("ts")?.ok_or_else(|| missing(&f.path("ts")))?;
-        let tf = Fields::read(ts, "ts", &["e", "s", "u", "p"])?;
-        let one = |k: &str| tf.document(k)?.map(|d| find_tokens(d, k)).transpose();
-        Ok(FindTextPayload {
+        let ts = f.document("ts")?;
+        let (max_contention, case_fold) = (max_contention(&f)?, f.boolean("cf")?.unwrap_or(false));
+        let diacritic_fold = f.boolean("df")?.unwrap_or(false);
+        let tf = ts.map(|d| Fields::read(d, "ts", &["e", "s", "u", "p"])).transpose()?;
+        let one = |k: &str| -> Result<Option<FindTokens>, FleError> {
+            match &tf {
+                Some(tf) => tf.document(k)?.map(|d| find_tokens(d, k)).transpose(),
+                None => Ok(None),
+            }
+        };
+        let payload = FindTextPayload {
             exact: one("e")?,
             substring: one("s")?,
             suffix: one("u")?,
             prefix: one("p")?,
-            max_contention: max_contention(&f)?,
-            case_fold: f.boolean("cf")?.unwrap_or(false),
-            diacritic_fold: f.boolean("df")?.unwrap_or(false),
-        })
+            max_contention,
+            case_fold,
+            diacritic_fold,
+        };
+        f.require(&["ts", "cm", "cf", "df"])?;
+        Ok(payload)
     }
 
     /// The tokens of the query, whichever of the four kinds it is.

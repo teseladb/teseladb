@@ -460,6 +460,9 @@ fn tag_set(v: &Value) -> TagSet {
         .collect()
 }
 
+/// The field of the first statement of a transaction.
+const START_TRANSACTION: &str = "startTransaction";
+
 /// The commands a `refrouter` 9.0.4 parses after reading their generic arguments and checking that
 /// they take the concerns they were given: an unknown field of theirs comes after those errors
 /// (measured). The others refuse an unknown field first.
@@ -483,7 +486,10 @@ pub fn parse(cmd: &Document, name: &str) -> Result<Generic, CommandError> {
             _ => {}
         }
     }
-    check_support(name, g.read.as_ref(), g.write.as_ref())?;
+    // The first statement of a transaction carries the transaction's read concern, which
+    // RefDb checks against the transaction and not against the command (008 FR-009).
+    let read = if cmd.get(START_TRANSACTION).is_some() { None } else { g.read.as_ref() };
+    check_support(name, read, g.write.as_ref())?;
     if late {
         check_unknown_fields(cmd, name)?;
     }

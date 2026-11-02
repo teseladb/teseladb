@@ -1,8 +1,40 @@
 //! The tools of contract `mcp-server.md` (FR-021, FR-023): the database tools of RefDb MCP
 //! Server with their arguments, schemas and annotations, each run as the command it names on the
-//! executor of the wire protocol.
+//! executor of the wire protocol. `inputSchema`, `outputSchema` and the hints are those of the
+//! version fixed in the contract (T026): `reference_tools.json`, written by
+//! `scripts/mcp-reference-tools.sh` from that package's `tools/list`, without its descriptions.
+
+use std::sync::OnceLock;
 
 use teseladb_json::{Number, Object, Value};
+
+/// The shape of each tool of RefDb MCP Server 3.2.2: name, annotations, `inputSchema` and
+/// `outputSchema` without descriptions.
+pub const REFERENCE: &str = include_str!("reference_tools.json");
+
+/// The entry of `name` in [`REFERENCE`].
+#[must_use]
+pub fn reference(name: &str) -> Option<&'static Object> {
+    static PARSED: OnceLock<Vec<Object>> = OnceLock::new();
+    let all = PARSED.get_or_init(|| match teseladb_json::parse(REFERENCE.as_bytes()) {
+        Ok(Value::Array(items)) => items
+            .into_iter()
+            .filter_map(|v| match v {
+                Value::Object(o) => Some(o),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    });
+    all.iter().find(|o| o.get("name").and_then(Value::as_str) == Some(name))
+}
+
+fn reference_object(name: &str, field: &str) -> Option<Object> {
+    match reference(name)?.get(field)? {
+        Value::Object(o) => Some(o.clone()),
+        _ => None,
+    }
+}
 
 /// The kind of an argument.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,8 +87,6 @@ pub struct Tool {
     pub read_only: bool,
     /// `destructiveHint`.
     pub destructive: bool,
-    /// `idempotentHint`.
-    pub idempotent: bool,
 }
 
 const DB: Arg = req("database", Kind::Str);
@@ -69,7 +99,7 @@ const fn read(
     args: &'static [Arg],
     output: &'static [&'static str],
 ) -> Tool {
-    Tool { name, description, args, output, read_only: true, destructive: false, idempotent: true }
+    Tool { name, description, args, output, read_only: true, destructive: false }
 }
 
 const fn write(
@@ -78,9 +108,8 @@ const fn write(
     args: &'static [Arg],
     output: &'static [&'static str],
     destructive: bool,
-    idempotent: bool,
 ) -> Tool {
-    Tool { name, description, args, output, read_only: false, destructive, idempotent }
+    Tool { name, description, args, output, read_only: false, destructive }
 }
 
 /// Every tool, in the order of `tools/list`.
@@ -186,7 +215,6 @@ pub const TOOLS: &[Tool] = &[
         &[DB, COLL, req("documents", Kind::Arr)],
         &["database", "collection", "insertedCount", "insertedIds"],
         false,
-        false,
     ),
     write(
         "create-index",
@@ -194,14 +222,12 @@ pub const TOOLS: &[Tool] = &[
         &[DB, COLL, opt("name", Kind::Str), req("definition", Kind::Arr)],
         &["database", "collection", "indexName", "indexType"],
         false,
-        true,
     ),
     write(
         "create-collection",
         "Create a collection.",
         &[DB, COLL],
         &["database", "collection", "created"],
-        false,
         false,
     ),
     write(
@@ -210,7 +236,6 @@ pub const TOOLS: &[Tool] = &[
         &[DB, COLL, opt("filter", Kind::Obj), req("update", Kind::Obj), opt("upsert", Kind::Bool)],
         &["database", "collection", "matchedCount", "modifiedCount", "upsertedCount", "upsertedId"],
         true,
-        false,
     ),
     write(
         "rename-collection",
@@ -218,7 +243,6 @@ pub const TOOLS: &[Tool] = &[
         &[DB, COLL, req("newName", Kind::Str), opt("dropTarget", Kind::Bool)],
         &["database", "oldCollection", "newCollection", "renamed"],
         true,
-        false,
     ),
     write(
         "delete-many",
@@ -226,14 +250,12 @@ pub const TOOLS: &[Tool] = &[
         &[DB, COLL, opt("filter", Kind::Obj)],
         &["database", "collection", "deletedCount"],
         true,
-        false,
     ),
     write(
         "drop-index",
         "Drop an index or a search index.",
         &[DB, COLL, req("indexName", Kind::Str), req("type", Kind::Enum(&["classic", "search"]))],
         &["database", "collection", "indexName", "dropped"],
-        true,
         true,
     ),
     write(
@@ -242,9 +264,8 @@ pub const TOOLS: &[Tool] = &[
         &[DB, COLL],
         &["database", "collection", "dropped"],
         true,
-        true,
     ),
-    write("drop-database", "Drop a database.", &[DB], &["database", "dropped"], true, true),
+    write("drop-database", "Drop a database.", &[DB], &["database", "dropped"], true),
     read(
         "connect",
         "Return the connection the server fixed for you.",
@@ -300,8 +321,14 @@ fn schema_of(kind: Kind) -> Value {
     Value::Object(o)
 }
 
-/// `inputSchema` of `t` (JSON Schema 2020-12, without other properties).
+/// `inputSchema` of `t` (JSON Schema 2020-12, without other properties): the reference's.
 pub fn input_schema(t: &Tool) -> Object {
+    reference_object(t.name, "inputSchema").unwrap_or_else(|| own_input_schema(t))
+}
+
+/// The `inputSchema` [`Tool::args`] describe, which the reference's has to match.
+#[must_use]
+pub fn own_input_schema(t: &Tool) -> Object {
     let mut props = Object::new();
     let mut required = Vec::new();
     if takes_connection(t) {
@@ -322,8 +349,13 @@ pub fn input_schema(t: &Tool) -> Object {
     o
 }
 
-/// `outputSchema` of `t`, when its result has `structuredContent`.
+/// `outputSchema` of `t`, when its result has `structuredContent`: the reference's.
 pub fn output_schema(t: &Tool) -> Option<Object> {
+    match reference(t.name).and_then(|r| r.get("outputSchema")) {
+        Some(Value::Object(o)) => return Some(o.clone()),
+        Some(Value::Null) => return None,
+        _ => {}
+    }
     if t.output.is_empty() {
         return None;
     }
@@ -343,7 +375,6 @@ pub fn listing(t: &Tool) -> Object {
     annotations.insert("title", t.name);
     annotations.insert("readOnlyHint", Value::Bool(t.read_only));
     annotations.insert("destructiveHint", Value::Bool(t.destructive));
-    annotations.insert("idempotentHint", Value::Bool(t.idempotent));
     annotations.insert("openWorldHint", Value::Bool(true));
     let mut o = Object::new();
     o.insert("name", t.name);

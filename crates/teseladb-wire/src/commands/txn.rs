@@ -154,6 +154,14 @@ pub struct TxnFields {
     start: bool,
 }
 
+impl TxnFields {
+    /// The fields of a transaction of the node itself (017: the writes with encrypted fields),
+    /// on session `lsid`.
+    pub(crate) fn internal(lsid: u128, txn_number: i64, start: bool) -> TxnFields {
+        TxnFields { lsid, txn_number, autocommit: Some(false), start }
+    }
+}
+
 fn flag(cmd: &Document, name: &str) -> Result<Option<bool>, CommandError> {
     match cmd.get(name) {
         None => Ok(None),

@@ -37,6 +37,7 @@ impl Executor for Fake {
                 r#"{"cursor":{"id":0,"ns":"db.c","firstBatch":[{"a":1,"b":"x"},{"a":"y"}]},"ok":1}"#,
             ),
             "drop" => d(r#"{"ok":0,"errmsg":"ns not found","code":26}"#),
+            "currentOp" => d(r#"{"inprog":[{"opid":42}],"ok":1}"#),
             _ => d(r#"{"ok":1}"#),
         }
     }
@@ -52,6 +53,22 @@ impl Executor for Fake {
     fn forward(&mut self, node: u64, _: &Request) -> Option<Response> {
         self.forwarded.push(node);
         None
+    }
+
+    fn random(&mut self, out: &mut [u8]) {
+        out.fill(1);
+    }
+
+    fn now_ms(&self) -> u64 {
+        0
+    }
+
+    fn principal(&self) -> String {
+        String::new()
+    }
+
+    fn run_internal(&mut self, db: &str, command: Document) -> Document {
+        self.run(db, command)
     }
 }
 
@@ -77,7 +94,8 @@ fn post(
         n += 1;
         [n; 16]
     };
-    let mut call = Call { exec: f, options, now_ms: 1_000, random: &mut random };
+    let mut call =
+        Call { exec: f, options, now_ms: 1_000, random: &mut random, progress: Vec::new() };
     let r = server.http(&req, &mut call);
     let v = parse(&r.body).unwrap_or(Value::Null);
     (r, v)
@@ -174,7 +192,13 @@ fn initialize_then_tools_in_a_session() {
     assert_eq!(f.forwarded, vec![8]);
     let del = Request::new("DELETE", "/mcp").header(SESSION_HEADER, &sid);
     let mut random = || [0u8; 16];
-    let mut call = Call { exec: &mut f, options: READ_ONLY, now_ms: 2_000, random: &mut random };
+    let mut call = Call {
+        exec: &mut f,
+        options: READ_ONLY,
+        now_ms: 2_000,
+        random: &mut random,
+        progress: Vec::new(),
+    };
     assert_eq!(server.http(&del, &mut call).status, 200);
 }
 
@@ -221,7 +245,13 @@ fn stateless_revision_with_meta() {
     assert_eq!(r.status, 400);
     let get = Request::new("GET", "/mcp");
     let mut random = || [0u8; 16];
-    let mut call = Call { exec: &mut f, options: READ_ONLY, now_ms: 0, random: &mut random };
+    let mut call = Call {
+        exec: &mut f,
+        options: READ_ONLY,
+        now_ms: 0,
+        random: &mut random,
+        progress: Vec::new(),
+    };
     assert_eq!(server.http(&get, &mut call).status, 405);
 }
 
@@ -286,4 +316,61 @@ fn schemas_and_filters_of_the_tools() {
     b.insert("connectionId", "x");
     assert!(check_args(find, &b).is_err());
     assert!(tool("nothing").is_none());
+}
+
+/// 019 T030, FR-026: each command of a call carries the call's tag as `comment`;
+/// `notifications/cancelled` finds its operations with `currentOp` and kills them with `killOp`;
+/// a call with `progressToken` that accepts an event stream gets `notifications/progress` before
+/// its result.
+#[test]
+fn a_call_is_cancelled_by_its_tag_and_reports_its_progress() {
+    let server = Server::new(7);
+    let mut f = Fake::default();
+    let meta =
+        r#""_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","progressToken":"p1"}"#;
+    let body = format!(
+        r#"{{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{{{meta},"name":"find","arguments":{{"connectionId":"7.stateless","database":"db","collection":"c"}}}}}}"#
+    );
+    let req = Request::new("POST", "/mcp")
+        .header("Accept", "application/json, text/event-stream")
+        .body(body.into_bytes());
+    let mut random = || [1u8; 16];
+    let mut call = Call {
+        exec: &mut f,
+        options: READ_ONLY,
+        now_ms: 0,
+        random: &mut random,
+        progress: Vec::new(),
+    };
+    let r = server.http(&req, &mut call);
+    assert_eq!(r.status, 200);
+    assert!(r.headers.iter().any(|(k, v)| k == "Content-Type" && v == "text/event-stream"));
+    let events = teseladb_http::sse::Reader::default().feed(&r.body);
+    assert_eq!(events.len(), 2, "{events:?}");
+    assert!(events[0].data.contains(r#""method":"notifications/progress""#), "{events:?}");
+    assert!(
+        events[0].data.contains(r#""progressToken":"p1""#)
+            && events[0].data.contains(r#""progress":3"#)
+    );
+    assert!(events[1].data.contains(r#""id":5"#));
+    let find = f.ran.iter().find(|c| c.get("find").is_some()).unwrap();
+    assert_eq!(find.get("comment"), Some(&teseladb_bson::Value::from("mcp:7.stateless:5")));
+    // The cancellation of request 5.
+    f.ran.clear();
+    let cancel = r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":5,"reason":"user"}}"#;
+    let req = Request::new("POST", "/mcp").body(cancel.as_bytes().to_vec());
+    let mut call = Call {
+        exec: &mut f,
+        options: READ_ONLY,
+        now_ms: 0,
+        random: &mut random,
+        progress: Vec::new(),
+    };
+    assert_eq!(server.http(&req, &mut call).status, 202);
+    assert_eq!(
+        f.ran[0].get("command.comment"),
+        Some(&teseladb_bson::Value::from("mcp:7.stateless:5"))
+    );
+    assert_eq!(f.ran[1].get("killOp"), Some(&teseladb_bson::Value::Int32(1)));
+    assert_eq!(f.ran[1].get("op"), Some(&teseladb_bson::Value::Int32(42)));
 }

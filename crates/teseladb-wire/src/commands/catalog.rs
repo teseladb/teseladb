@@ -198,6 +198,7 @@ pub fn create<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
     let ns = target(ctx)?;
     names::check_creatable(&ns)?;
     let mut options = options_from(ctx.cmd);
+    super::fle::check_create(&ns.coll, &mut options)?;
     let asked = kinds::check(&ns, &options)?;
     let given_collation = match options.get(COLLATION) {
         Some(Value::Document(c)) => Some(c.clone()),
@@ -461,6 +462,9 @@ pub fn drop<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
     Ok(Document::new().with("ok", 1.0))
 }
 
+/// Prefix of the bucket namespaces of RefDb's time series before 9.0.
+const BUCKETS_PREFIX: &str = "system.buckets.";
+
 /// `renameCollection` (on `admin`).
 pub fn rename<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     let from_text = match ctx.first() {
@@ -488,7 +492,21 @@ pub fn rename<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
         let msg = "Can't rename a collection in the config database";
         return Err(CommandError::new(ILLEGAL_OPERATION, msg));
     }
-    names::check_writable(&to)?;
+    // Into a `system.` namespace a rename fails as an illegal operation (measured on a `refnode`
+    // 9.0.4, 02-11-2026), whether the source exists or not.
+    if to.coll.starts_with(BUCKETS_PREFIX) {
+        let msg = format!(
+            "Cannot rename non timeseries buckets collection '{from_text}' to a timeseries buckets namespace '{to_text}'."
+        );
+        return Err(CommandError::new(ILLEGAL_OPERATION, msg));
+    }
+    names::check_writable(&to).map_err(|e| match to.coll.starts_with("system.") {
+        true => CommandError::new(
+            ILLEGAL_OPERATION,
+            format!("error with target namespace: {}", e.errmsg),
+        ),
+        false => e,
+    })?;
     if from == to {
         return Err(CommandError::new(ILLEGAL_OPERATION, "Can't rename a collection to itself"));
     }

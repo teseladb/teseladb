@@ -147,7 +147,10 @@ fn this_bigint(it: &mut Interp, this: &Val, method: &str) -> R<Rc<BigInt>> {
             Kind::BigInt(b) => Ok(b.clone()),
             _ => unreachable!("checked by the guard"),
         },
-        _ => it.type_error(&format!("{method} method called on incompatible {}", this.type_of())),
+        _ => it.type_error(&format!(
+            "{method} method called on incompatible {}",
+            crate::builtins::class_name(this)
+        )),
     }
 }
 
@@ -182,5 +185,5 @@ pub fn install(it: &mut Interp, g: &ObjRef) -> R<()> {
     method(it, &proto, "toString", to_string, 0)?;
     method(it, &proto, "toLocaleString", to_locale_string, 0)?;
     method(it, &proto, "valueOf", value_of, 0)?;
-    Ok(())
+    crate::builtins::to_string_tag(it, &proto, "BigInt")
 }

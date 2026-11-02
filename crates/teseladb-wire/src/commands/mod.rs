@@ -36,6 +36,8 @@ pub mod diagnostics;
 pub mod engines;
 pub mod explain;
 pub mod fcv;
+pub mod fle;
+pub mod fle_write;
 pub mod hints;
 pub mod http_parameters;
 pub mod index_build;
@@ -75,6 +77,7 @@ pub mod shards;
 pub mod sort;
 pub mod status;
 pub mod tenants;
+pub mod text_search;
 pub mod timeseries;
 pub mod timeseries_catalog;
 pub mod timeseries_filter;
@@ -846,7 +849,9 @@ impl<B: Backend + ?Sized> Ctx<'_, B> {
 }
 
 /// The commands of this module.
-const NAMES: [&str; 108] = [
+const NAMES: [&str; 110] = [
+    fle::COMPACT,
+    fle::CLEANUP,
     aggregate::AGGREGATE,
     query_settings::SET_QUERY_SETTINGS,
     query_settings::REMOVE_QUERY_SETTINGS,
@@ -978,7 +983,10 @@ pub fn run<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Option<Result<Document,
         let limit = lock(ctx.shared).params.expression_memory;
         let limit = u64::try_from(limit).unwrap_or(u64::MAX);
         teseladb_exec::expr::optimize::with_expression_memory_limit(limit, || {
-            crate::concerns::with_defaults(d.read, d.write, || command(ctx))
+            crate::concerns::with_defaults(d.read, d.write, || match fle::intercept(ctx) {
+                Some(r) => r,
+                None => command(ctx),
+            })
         })
     }))
 }
@@ -994,7 +1002,7 @@ fn session_info<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<(), Command
     Ok(())
 }
 
-fn command<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
+pub(crate) fn command<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     // A change stream refuses a buckets namespace as an internal one (014, measured).
     if let Value::String(coll) = ctx.first()
         && !change_stream::opens(ctx.cmd)
@@ -1053,8 +1061,14 @@ fn shaped<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Command
     };
     let cmd = limited.as_ref().unwrap_or(ctx.cmd);
     let start = query_stats_start(ctx.backend);
-    let reply =
-        dispatch(&mut Ctx { backend: &mut *ctx.backend, shared: ctx.shared, db: ctx.db, cmd })?;
+    // The shape's index hints limit the indexes of its collection in the run too (measured on a
+    // `refnode` 9.0.4 on 02-11-2026 with `$indexStats`).
+    let reply = with_settings_indexes(
+        &mut Ctx { backend: &mut *ctx.backend, shared: ctx.shared, db: ctx.db, cmd },
+        cmd,
+        settings.as_ref(),
+        dispatch,
+    )?;
     // The shape only of a sampled query: the others cost no more than the draw.
     if sampled(ctx)
         && let Some(shape) = query_shape::shape(ctx.db, ctx.cmd)
@@ -1262,6 +1276,7 @@ fn dispatch<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
         diagnostics::COLL_STATS => diagnostics::coll_stats(ctx),
         profile::PROFILE => profile::profile(ctx),
         validate::VALIDATE => validate::validate(ctx),
+        fle::COMPACT | fle::CLEANUP => fle::compact(ctx),
         diagnostic_data::GET_DIAGNOSTIC_DATA => diagnostic_data::get_diagnostic_data(ctx),
         admin::CURRENT_OP => admin::current_op(ctx),
         admin::REPL_SET_GET_STATUS => admin::repl_set_get_status(ctx),

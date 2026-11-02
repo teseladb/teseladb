@@ -507,6 +507,11 @@ fn matches(f: &Document, doc: &Document) -> bool {
 pub fn after_command<B: Backend + ?Sized>(backend: &mut B, shared: &super::Shared, e: &Ended<'_>) {
     let name = e.command.iter().next().map_or("", |(k, _)| k);
     keep_origin(shared, e);
+    // Nothing of Queryable Encryption is profiled or logged: its payloads and tokens (017
+    // FR-008, measured on a `refnode` 9.0.4).
+    if super::fle::is_secret(e.command) {
+        return;
+    }
     // A password is never profiled; the slow query log hides it.
     if NOT_PROFILED.contains(&name) && !WITH_PASSWORD.contains(&name) {
         return;

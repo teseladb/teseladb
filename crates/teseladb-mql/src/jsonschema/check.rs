@@ -11,6 +11,9 @@ use crate::regex::Regex;
 use crate::types;
 use crate::value::{cmp, exact_i64, is_nan, is_number, to_f64};
 
+/// Where a CSFLE value keeps its original BSON type: after its subtype and key id.
+const CSFLE_TYPE_AT: usize = 17;
+
 /// Fields of the explanation of a failed rule, each declared once.
 pub(super) mod detail {
     pub const OPERATOR_NAME: &str = "operatorName";
@@ -234,10 +237,20 @@ impl Rule {
                     .with(detail::OPERATOR_NAME, self.name)
                     .with(detail::REASON, "child expression matched")
             }),
-            Kind::Encrypt => {
-                let ok = matches!(v, RawValue::Binary { subtype: t::BINARY_ENCRYPTED, .. });
-                (!ok).then(|| fail(self, "value was not encrypted", None))
-            }
+            Kind::Encrypt(types) => match v {
+                RawValue::Binary { subtype: t::BINARY_ENCRYPTED, bytes } => {
+                    // A CSFLE value: subtype 1 or 2, the key id, then the original type.
+                    let typed = |allowed: &Vec<u8>| {
+                        matches!(bytes.first(), Some(1 | 2))
+                            && bytes.get(CSFLE_TYPE_AT).is_some_and(|ty| allowed.contains(ty))
+                    };
+                    types
+                        .as_ref()
+                        .is_some_and(|allowed| !typed(allowed))
+                        .then(|| fail(self, "encrypted value has wrong type", None))
+                }
+                _ => Some(fail(self, "value was not encrypted", None)),
+            },
         })
     }
 

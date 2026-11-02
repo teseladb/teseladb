@@ -395,6 +395,8 @@ fn geospatial_operators_go_to_the_integration_point() {
         ),
         (r#"{"p": {"$nearSphere": {"$geometry": {}}}}"#, r#"{"q": 1}"#, false),
         (r#"{"p": {"$geoWithin": {"$polygon": []}}}"#, r#"{"p": [{"x": 1}]}"#, true),
+        // `$within`, the old name of `$geoWithin` (009 T035, measured on a `refrouter` 9.0.4).
+        (r#"{"p": {"$within": {"$box": [[0, 0], [1, 1]]}}}"#, r#"{"p": {"x": 1}}"#, true),
     ]);
     let ext = TestExt::default();
     let ctx = MatchContext { collation: None, ext: &ext, vars: None };
@@ -622,6 +624,7 @@ fn malformed_filters_fail_like_refdb() {
         (r#"{"$jsonSchema": 1}"#, codes::TYPE_MISMATCH, "$jsonSchema must be an object"),
         (r#"{"p": {"$geoWithin": 1}}"#, bad, "geometry must be an object"),
         (r#"{"p": {"$geoIntersects": {"$foo": []}}}"#, bad, "unknown geo specifier: $foo: []"),
+        (r#"{"p": {"$within": 1}}"#, bad, "geometry must be an object"),
         (r#"{"p": {"$maxDistance": 1}}"#, bad, "unknown operator: $maxDistance"),
         (
             r#"{"p": {"$geoWithin": {"$box": []}, "$maxDistance": 1}}"#,
@@ -733,7 +736,6 @@ fn regex_options_and_geo_operator_documents() {
         (r#"{"a": {"$geoWithin": {}}}"#.into(), bad, "geo query doesn't have any geometry".into()),
         (r#"{"a": {"$geoWithin": {"$geometry": 1}}}"#.into(), bad, "unknown geo specifier: $geometry: 1".into()),
         (r#"{"a": {"$geoWithin": {"$box": 1}}}"#.into(), bad, "unknown geo specifier: $box: 1".into()),
-        (r#"{"a": {"$geoIntersects": {"$box": []}}}"#.into(), bad, "unknown geo specifier: $box: []".into()),
         (r#"{"a": {"$gt": 1, "$geoWithin": {"$box": []}}}"#.into(), bad, "can't parse extra field: $geoWithin: { $box: [] }".into()),
         (r#"{"a": {"$geoWithin": {"$box": [], "$x": 1}}}"#.into(), bad, "$geoWithin doesn't accept multiple shapes $geoWithin: { $box: [], $x: 1 }".into()),
         (format!(r#"{{"a": {{"$geoIntersects": {}, "x": 1}}}}}}"#, &gj[..gj.len()]), bad, "unknown geo specifier: x: 1".into()),

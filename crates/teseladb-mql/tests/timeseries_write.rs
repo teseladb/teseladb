@@ -225,3 +225,26 @@ fn a_bucket_without_columns_unpacks_its_meta_alone() {
     let plain = BucketSpec { meta_field: None, ..spec() };
     assert_eq!(plain.meta_of(&m), None);
 }
+
+/// A meta value is kept with the fields of its documents sorted, also inside arrays, so that
+/// the same value in another field order goes to the same bucket (measured on a `refnode` 9.0.4
+/// on 02-11-2026: `{b: 1, a: {d: 1, c: 2}}` and `{a: {c: 2, d: 1}, b: 1}` share one bucket,
+/// whose `meta` is `{a: {c: 2, d: 1}, b: 1}`; `[{b: 1, a: 2}, 3]` comes back `[{a: 2, b: 1}, 3]`).
+#[test]
+fn a_meta_value_is_kept_with_its_fields_sorted() {
+    let s = spec();
+    let inner = |first: (&str, i32), second: (&str, i32)| {
+        Value::Document(Document::new().with(first.0, first.1).with(second.0, second.1))
+    };
+    let one = Value::Document(Document::new().with("b", 1).with("a", inner(("d", 1), ("c", 2))));
+    let other = Value::Document(Document::new().with("a", inner(("c", 2), ("d", 1))).with("b", 1));
+    assert_eq!(s.bucket_id(T0, Some(&one), 0), s.bucket_id(T0, Some(&other), 0));
+    let m = Document::new().with("t", Value::DateTime(T0)).with("m", one);
+    let id = s.bucket_id(T0, s.meta_of(&m), 0).unwrap();
+    let bucket = s.append(id, None, &m).unwrap();
+    assert_eq!(bucket.get("meta"), Some(&other));
+    let listed = Value::Array(vec![inner(("b", 1), ("a", 2)), Value::Int32(3)]);
+    let sorted = Value::Array(vec![inner(("a", 2), ("b", 1)), Value::Int32(3)]);
+    let built = s.build(id, Some(&listed), &[]).unwrap();
+    assert_eq!(built.get("meta"), Some(&sorted));
+}

@@ -48,6 +48,8 @@ pub enum Command {
     Dev(DevOpts),
     /// Administers a node through its administration port (007 FR-020).
     Admin(crate::admin::AdminOpts),
+    /// MCP over stdio, relayed to a node's HTTP port (019 FR-020).
+    Mcp(crate::mcp_stdio::McpOpts),
     /// Prints the version.
     Version,
     /// Prints the usage.
@@ -1064,6 +1066,7 @@ pub fn parse_with(
         }
         "dev" => Ok(Command::Dev(dev(&parse_opts(rest, DEV)?)?)),
         "admin" => crate::admin::parse(rest).map(Command::Admin).map_err(CliError),
+        "mcp" => crate::mcp_stdio::parse(rest).map(Command::Mcp).map_err(CliError),
         "--version" => Ok(Command::Version),
         "--help" | "-h" => Ok(Command::Help),
         other => err(format!("unknown subcommand `{other}` (see `teseladb --help`)")),
@@ -1084,6 +1087,7 @@ usage:
                  [--setParameter enableTestCommands=1]
   teseladb dev [--nodes <1-7>] [--cores <n>] [--port <n>] [--setParameter enableTestCommands=1]
   teseladb admin [--node <ip:port>] [--format text|json] <subcommand>   (teseladb admin help)
+  teseladb mcp --uri https://<node>:<port> [--tlsCAFile <pem>] [--tlsCertificateKeyFile <pem>]
   teseladb --version
   teseladb --help
 ";

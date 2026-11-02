@@ -165,6 +165,31 @@ fn combinations_and_encryption() {
             true,
         ),
         (
+            r#"{"properties": {"s": {"encrypt": {"bsonType": ["string", "int"]}}}}"#,
+            r#"{"s": {"$binary": {"base64": "AWtra2tra2tra2tra2tra2sCeHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHg=", "subType": "06"}}}"#,
+            true,
+        ),
+        (
+            r#"{"properties": {"s": {"encrypt": {"bsonType": ["string", "int"]}}}}"#,
+            r#"{"s": {"$binary": {"base64": "Amtra2tra2tra2tra2tra2sCeHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHg=", "subType": "06"}}}"#,
+            true,
+        ),
+        (
+            r#"{"properties": {"s": {"encrypt": {"bsonType": ["string", "int"]}}}}"#,
+            r#"{"s": {"$binary": {"base64": "EGtra2tra2tra2tra2tra2sCeHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHg=", "subType": "06"}}}"#,
+            false,
+        ),
+        (
+            r#"{"properties": {"s": {"encrypt": {"bsonType": ["string", "int"]}}}}"#,
+            r#"{"s": {"$binary": {"base64": "AWtra2tra2tra2tra2tra2tjeHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHg=", "subType": "06"}}}"#,
+            false,
+        ),
+        (
+            r#"{"properties": {"s": {"encrypt": {}}}}"#,
+            r#"{"s": {"$binary": {"base64": "EGtra2tra2tra2tra2tra2tjeHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHg=", "subType": "06"}}}"#,
+            true,
+        ),
+        (
             r#"{"properties": {"s": {"encrypt": {"bsonType": "string"}}}, "encryptMetadata": {}}"#,
             r#"{"s": "plain"}"#,
             false,
@@ -277,6 +302,31 @@ fn explanations_of_every_rule() {
     );
     has(r#"{"not": {}}"#, "{}", "child expression matched");
     has(r#"{"properties": {"s": {"encrypt": {}}}}"#, r#"{"s": 1}"#, "value was not encrypted");
+    // With `bsonType`, a CSFLE value (subtype 1 or 2) whose original type is one of them (measured
+    // on a `refnode` 9.0.4).
+    let wrong = "encrypted value has wrong type";
+    let typed = r#"{"properties": {"s": {"encrypt": {"bsonType": "string"}}}}"#;
+    has(
+        typed,
+        r#"{"s": {"$binary": {"base64": "AGtra2tra2tra2tra2tra2sCeHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHg=", "subType": "06"}}}"#,
+        wrong,
+    );
+    has(
+        typed,
+        r#"{"s": {"$binary": {"base64": "EGtra2tra2tra2tra2tra2sCeHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHg=", "subType": "06"}}}"#,
+        wrong,
+    );
+    has(
+        typed,
+        r#"{"s": {"$binary": {"base64": "AWtra2tra2tra2tra2tra2sQeHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHg=", "subType": "06"}}}"#,
+        wrong,
+    );
+    has(
+        typed,
+        r#"{"s": {"$binary": {"base64": "AWtra2tra2tra2tra2tra2s=", "subType": "06"}}}"#,
+        wrong,
+    );
+
     has(r#"{"type": "array"}"#, "{}", r#""consideredType":"object""#);
 }
 

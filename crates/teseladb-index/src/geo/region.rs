@@ -54,7 +54,7 @@ fn part_intersects(a: &Part<'_>, b: &Part<'_>) -> bool {
         (Part::Point(p), Part::Polygon(g)) | (Part::Polygon(g), Part::Point(p)) => g.contains(*p),
         (Part::Line(l), Part::Line(m)) => edges_meet(line_edges(l), &|| line_edges(m).collect()),
         (Part::Line(l), Part::Polygon(g)) | (Part::Polygon(g), Part::Line(l)) => {
-            l.iter().any(|&p| g.contains(p)) || edges_meet(line_edges(l), &|| g.edges().collect())
+            super::clip::line_meets_polygon(l, g)
         }
         (Part::Polygon(g), Part::Polygon(h)) => {
             g.vertices().any(|p| h.contains(p))

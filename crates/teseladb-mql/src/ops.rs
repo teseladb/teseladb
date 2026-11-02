@@ -70,6 +70,8 @@ pub const BITS_ANY_CLEAR: &str = "$bitsAnyClear";
 pub const BITS_ANY_SET: &str = "$bitsAnySet";
 /// `$geoWithin`.
 pub const GEO_WITHIN: &str = "$geoWithin";
+/// `$within`, the old name of `$geoWithin`.
+pub const WITHIN: &str = "$within";
 /// `$geoIntersects`.
 pub const GEO_INTERSECTS: &str = "$geoIntersects";
 /// `$near`.

@@ -98,3 +98,44 @@ fn a_function_comes_back_as_code() {
         Value::JavaScript("function(){}".into())
     );
 }
+
+/// What the newer objects come back as, measured on a `refrouter` 9.0.4 on 02-11: a typed array is
+/// a document of its elements, a proxy the document of its target, a buffer, a map, a
+/// generator or a promise an empty document, and a `BigInt` cannot be converted.
+#[test]
+fn newer_objects_come_back_as_on_a_refrouter() {
+    let doc = |pairs: &[(&str, f64)]| {
+        let mut d = Document::new();
+        for (k, v) in pairs {
+            d.push(*k, Value::Double(*v));
+        }
+        Value::Document(d)
+    };
+    let empty = Value::Document(Document::new());
+    for (src, want) in [
+        ("function(){ return new Uint8Array([1,2]) }", doc(&[("0", 1.0), ("1", 2.0)])),
+        ("function(){ return new Float64Array([1.5]) }", doc(&[("0", 1.5)])),
+        ("function(){ return new Proxy({a:1},{}) }", doc(&[("a", 1.0)])),
+        ("function(){ return new ArrayBuffer(2) }", empty.clone()),
+        ("function(){ return new WeakMap() }", empty.clone()),
+        ("function(){ return (function*(){})() }", empty.clone()),
+        ("function(){ return Promise.resolve(1) }", empty.clone()),
+        ("function(){ return Object(1n) }", empty.clone()),
+    ] {
+        assert_eq!(call(src, &[]), want, "{src}");
+    }
+    for (src, field) in [
+        ("function(){ return 1n }", "__returnValue"),
+        ("function(){ return [2n] }", "0"),
+        ("function(){ return {a: 3n} }", "a"),
+    ] {
+        let e = Program::compile(src)
+            .and_then(|p| p.call(None, &[], &mut JsCtx::default()))
+            .expect_err(src);
+        assert_eq!(
+            e.message(),
+            format!("unable to convert JavaScript property to ref element {field}"),
+            "{src}"
+        );
+    }
+}
