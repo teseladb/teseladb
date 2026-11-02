@@ -32,6 +32,8 @@ const REPRESENTATIONS: [&str; 2] = ["double", "int64"];
 const TOKENIZATIONS: [&str; 3] = ["edgeGram", "nGram", "rightEdgeGram"];
 /// The similarities of vector fields.
 pub const SIMILARITIES: [&str; 3] = ["cosine", "dotProduct", "euclidean"];
+/// How a `string` or `autocomplete` field scores a matching term (`bm25` by default).
+pub const STRING_SIMILARITIES: [&str; 3] = ["bm25", "boolean", "stableTfl"];
 /// The bounds of a vector's number of dimensions.
 pub const MAX_DIMENSIONS: i64 = 8192;
 
@@ -163,6 +165,8 @@ pub struct StringField {
     pub norms: String,
     /// Alternate analyzers of the same field, by name.
     pub multi: Vec<(String, StringField)>,
+    /// How a matching term scores, as given (`bm25` when absent).
+    pub similarity: Option<String>,
 }
 
 impl StringField {
@@ -175,6 +179,7 @@ impl StringField {
             "indexOptions",
             "store",
             "norms",
+            "similarity",
         ];
         if !in_multi {
             allowed.push("multi");
@@ -208,6 +213,7 @@ impl StringField {
             store: bool_of(d, path, "store")?.unwrap_or(true),
             norms: one_of(d, path, "norms", &NORMS)?.unwrap_or("include").to_owned(),
             multi,
+            similarity: similarity_of(d, path)?,
         })
     }
 
@@ -225,6 +231,7 @@ impl StringField {
         d.push("indexOptions", self.index_options.as_str());
         d.push("store", self.store);
         d.push("norms", self.norms.as_str());
+        push_similarity(&mut d, self.similarity.as_deref());
         if !self.multi.is_empty() {
             let mut m = Document::new();
             for (name, f) in &self.multi {
@@ -275,6 +282,8 @@ pub enum FieldMapping {
         tokenization: String,
         /// Analyzer of the text before the grams.
         analyzer: Option<String>,
+        /// How a matching gram scores, as given (`bm25` when absent).
+        similarity: Option<String>,
     },
     /// Points and shapes.
     Geo {
@@ -425,6 +434,7 @@ impl FieldMapping {
                 fold_diacritics,
                 tokenization,
                 analyzer,
+                similarity,
             } => {
                 let mut d = Document::new()
                     .with("type", "autocomplete")
@@ -435,6 +445,7 @@ impl FieldMapping {
                 if let Some(a) = analyzer {
                     d.push("analyzer", a.as_str());
                 }
+                push_similarity(&mut d, similarity.as_deref());
                 d
             }
             FieldMapping::Geo { index_shapes } => {
@@ -477,8 +488,38 @@ fn typed(kind: &str, rest: Document) -> Document {
     d
 }
 
+/// The `similarity` of a `string` or `autocomplete` field: a document with its `type`.
+fn similarity_of(d: &Document, path: &str) -> Result<Option<String>, DefinitionError> {
+    let at = join(path, "similarity");
+    match d.get("similarity") {
+        None => Ok(None),
+        Some(Value::Document(s)) => {
+            only(s, &at, &["type"])?;
+            let kind = one_of(s, &at, "type", &STRING_SIMILARITIES)?
+                .ok_or_else(|| DefinitionError::shape(&join(&at, "type"), "is required"))?;
+            Ok(Some(kind.to_owned()))
+        }
+        Some(_) => Err(DefinitionError::shape(&at, "must be a document")),
+    }
+}
+
+fn push_similarity(d: &mut Document, similarity: Option<&str>) {
+    if let Some(kind) = similarity {
+        d.push("similarity", Document::new().with("type", kind));
+    }
+}
+
 fn autocomplete(d: &Document, path: &str) -> Result<FieldMapping, DefinitionError> {
-    only(d, path, &["type", "minGrams", "maxGrams", "foldDiacritics", "tokenization", "analyzer"])?;
+    let allowed = [
+        "type",
+        "minGrams",
+        "maxGrams",
+        "foldDiacritics",
+        "tokenization",
+        "analyzer",
+        "similarity",
+    ];
+    only(d, path, &allowed)?;
     let positive = |field: &str, default: i64| -> Result<i64, DefinitionError> {
         match int_of(d, path, field)? {
             None => Ok(default),
@@ -494,6 +535,7 @@ fn autocomplete(d: &Document, path: &str) -> Result<FieldMapping, DefinitionErro
             .unwrap_or("edgeGram")
             .to_owned(),
         analyzer: string_of(d, path, "analyzer")?.map(str::to_owned),
+        similarity: similarity_of(d, path)?,
     })
 }
 

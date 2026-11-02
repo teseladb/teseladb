@@ -29,8 +29,41 @@ fn ycsb_and_reference_run_against_a_local_cluster() {
     let reference =
         metrics(&bench(&[&["--scenario", "reference", "--rate", "100"][..], &short[..]].concat()));
     assert!(reference.contains("100 op/s"), "{reference}");
-    for name in ["write.p50", "write.p99", "read.p50", "read.p99"] {
+    for name in ["write.p50", "write.p99", "read.p50", "read.p99", "search.p50", "search.p99"] {
         assert!(reference.contains(name), "{name}: {reference}");
+    }
+}
+
+/// `vector-search` (011 T032) on a few hundred vectors: the scenario of SC-005 with a million
+/// runs the same code.
+#[test]
+fn vector_search_runs_against_a_local_cluster() {
+    let short = ["--duration", "300ms", "--warmup", "0ms", "--format", "json"];
+    let out = metrics(&bench(
+        &[&["--scenario", "vector-search", "--records", "300"][..], &short[..]].concat(),
+    ));
+    for name in ["query.p50", "recall@10"] {
+        assert!(out.contains(name), "{name}: {out}");
+    }
+}
+
+/// The `$search` scenarios (011 T041) on a few hundred documents: the scenarios of SC-003 and
+/// SC-004 with a million run the same code.
+#[test]
+fn search_scenarios_run_against_a_local_cluster() {
+    let short = ["--duration", "300ms", "--warmup", "0ms", "--format", "json"];
+    for scenario in ["search-term", "search-multi", "search-phrase", "search-fuzzy", "vector"] {
+        let records = if scenario == "vector" { "100" } else { "300" };
+        let out = metrics(&bench(
+            &[&["--scenario", scenario, "--records", records][..], &short[..]].concat(),
+        ));
+        assert!(out.contains("query.p50"), "{scenario}: {out}");
+    }
+    let out = metrics(&bench(
+        &[&["--scenario", "search-visibility", "--records", "100"][..], &short[..]].concat(),
+    ));
+    for name in ["visible.p99", "visible.next"] {
+        assert!(out.contains(name), "{name}: {out}");
     }
 }
 

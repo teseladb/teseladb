@@ -205,3 +205,23 @@ fn merges_and_memory_are_counted() {
     assert_eq!(ix.merges(), 3);
     assert_eq!(ix.memory_bytes(), one);
 }
+
+/// A segment whose range stays is kept as it is, a key outside every segment is left out, and
+/// files that do not chain their ranges do not load.
+#[test]
+fn kept_segments_stray_keys_and_unchained_files() {
+    let mut ix = Indexer::new(definition());
+    assert_eq!(ix.definition().search_analyzer, None);
+    ix.apply(changes()).expect("applied");
+    ix.reshape(&bounds(&[3])).expect("split");
+    ix.reshape(&bounds(&[3, 5])).expect("the first range stays");
+    assert_eq!((ix.segments(), ix.len()), (3, TEXTS.len()));
+    ix.reshape(&[(vec![2], Vec::new())]).expect("narrowed");
+    ix.apply([(vec![0], Some(doc(0)))]).expect("a stray key is left out");
+    assert_eq!(ix.len(), TEXTS.len() - 2);
+    ix.reshape(&bounds(&[5])).expect("split again");
+    let mark = Hlc { physical: 7, logical: 0 };
+    let mut files = ix.dump(mark);
+    files.reverse();
+    assert!(Indexer::load(definition(), &files).is_err());
+}

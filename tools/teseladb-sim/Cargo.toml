@@ -29,4 +29,5 @@ teseladb-range = { path = "../../crates/teseladb-range" }
 teseladb-changestream = { path = "../../crates/teseladb-changestream" }
 teseladb-txn = { path = "../../crates/teseladb-txn" }
 teseladb-wire = { path = "../../crates/teseladb-wire" }
+teseladb-search = { path = "../../crates/teseladb-search" }
 teseladb-hlc = { path = "../../crates/teseladb-hlc" }

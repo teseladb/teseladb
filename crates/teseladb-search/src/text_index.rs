@@ -249,20 +249,20 @@ fn stem_as_refnode(stemmer: Stemmer, word: &str) -> String {
         Stemmer::Romanian => |c| matches!(c, 'ș' | 'ț'),
         _ => return stemmer.stem(word),
     };
-    let word: String = word
-        .chars()
-        .map(|c| match (stemmer, c) {
-            (Stemmer::Romanian, 'ş') => 'ș',
-            (Stemmer::Romanian, 'ţ') => 'ț',
-            _ => c,
-        })
-        .collect();
+    // The letters it does not know are hidden before the ones it knows take the current
+    // stemmer's spelling: a Romanian `ș` with comma below is unknown to it, its `ş` with cedilla
+    // is the current `ș`.
+    let known = |c: char| match (stemmer, c) {
+        (Stemmer::Romanian, 'ş') => 'ș',
+        (Stemmer::Romanian, 'ţ') => 'ț',
+        _ => c,
+    };
     let mut foreign: Vec<char> = Vec::new();
     let hidden: String = word
         .chars()
         .map(|c| {
             if !hide(c) {
-                return c;
+                return known(c);
             }
             let i = foreign.iter().position(|f| *f == c).unwrap_or_else(|| {
                 foreign.push(c);

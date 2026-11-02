@@ -66,7 +66,13 @@ variants!(
     // before (`mvcc`); a lost version (`durability`) needs two writes to fall on one mark, which
     // the node number in the logical counter makes rarer (D-003).
     ("hlc_regress_restart", "mvcc", Heavy, 1000),
+    // A search index that keeps a document's old version when a newer one comes (011 T018): the
+    // `search` workload finds a search whose documents are not those of the collection.
+    ("indexer_skips_version", "search_results", Default, 1000),
     ("lease_without_check_quorum", "raft_safety", Default, 1000),
+    // Search segments that score with the statistics of their own range only (011 T018): once the
+    // ranges split, the `search` workload's scores differ from one segment's over every document.
+    ("local_only_stats", "search_results", Default, 1000),
     // A range a split shrank answers the part of a stream's interval it still holds (014 T020):
     // the cursor takes the rest as read and `changestream` misses the changes there.
     ("lose_events_on_split", "changestream_delivery", Default, 1000),
@@ -123,6 +129,9 @@ variants!(
     ("resolve_before_durable_commit", "snapshot-isolation", Default, 1000),
     ("resolved_intent_reappears", "lsm", Default, 1000),
     ("rollback_unrecorded", "rollback", Default, 1000),
+    // A search that answers before its segments reach its mark (011 T018): the `search` workload
+    // finds an answer below the mark the search asked for.
+    ("search_without_wait", "search_results", Default, 1000),
     // A split completed on an end that matches its cut (007 A007-3-1): with a merge that undid an
     // earlier cut at the same key, a replica behind that merge ends there too, Group 0 records a
     // range that no split made, and the replicas past the merge still hold its keys.
