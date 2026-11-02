@@ -406,15 +406,19 @@ fn resumable(e: CommandError) -> CommandError {
 /// Refuses a stream that would read from `from` when the ranges no longer keep the versions of
 /// that mark: below the wall clock less the history retention (`teselaHistoryRetention`, 24 h by
 /// default, D-020) (014 FR-006, FR-007).
+pub(crate) fn history_floor<B: Backend + ?Sized>(backend: &mut B) -> Result<u64, CommandError> {
+    let params = backend.cluster_parameters()?;
+    let stored = params.get(super::parameters::HISTORY_RETENTION).map(Vec::as_slice);
+    let retention = super::parameters::history_retention_ms(stored);
+    Ok(backend.wall_ms().saturating_sub(retention))
+}
+
 fn check_history<B: Backend + ?Sized>(
     backend: &mut B,
     from: Hlc,
     resume: Hlc,
 ) -> Result<(), CommandError> {
-    let params = backend.cluster_parameters()?;
-    let stored = params.get(super::parameters::HISTORY_RETENTION).map(Vec::as_slice);
-    let retention = super::parameters::history_retention_ms(stored);
-    let floor = backend.wall_ms().saturating_sub(retention);
+    let floor = history_floor(backend)?;
     if from.physical < floor {
         return Err(history_lost(resume));
     }
@@ -456,20 +460,20 @@ fn has_documents(c: &CollectionEntry) -> bool {
 /// What a read of the stream knows of a collection over the marks it reads: its name now (or
 /// when it was dropped), its renames and its drop (014 FR-014). A change of a collection dropped
 /// since the stream's mark is still read, up to the drop.
-struct Watched {
-    ns: Namespace,
-    entry: CollectionEntry,
+pub(crate) struct Watched {
+    pub(crate) ns: Namespace,
+    pub(crate) entry: CollectionEntry,
     /// Each rename: where it is in the merge, and the names before and after.
     renames: Vec<(EventKey, Namespace, Namespace)>,
     /// Where its drop is in the merge.
-    dropped: Option<EventKey>,
+    pub(crate) dropped: Option<EventKey>,
     /// Each `collMod`: where it is in the merge, and the options before it.
     modifies: Vec<(EventKey, Vec<u8>)>,
 }
 
 impl Watched {
     /// The collection's name at event `key`.
-    fn ns_at(&self, key: &EventKey) -> &Namespace {
+    pub(crate) fn ns_at(&self, key: &EventKey) -> &Namespace {
         self.renames.iter().find(|(at, ..)| at > key).map_or(&self.ns, |(_, from, _)| from)
     }
 
@@ -530,6 +534,15 @@ fn watched_of(
     now: Vec<(Namespace, CollectionEntry)>,
     records: &[DdlRecord],
 ) -> Vec<Watched> {
+    watched_all(now, records).into_iter().filter(|w| w.ever_in(stream)).collect()
+}
+
+/// The collections with documents of the catalog now and those the catalog changes in
+/// `records` dropped, with their renames.
+pub(crate) fn watched_all(
+    now: Vec<(Namespace, CollectionEntry)>,
+    records: &[DdlRecord],
+) -> Vec<Watched> {
     let mut by_id: BTreeMap<(u32, u32), Watched> = now
         .into_iter()
         .map(|(ns, entry)| {
@@ -562,7 +575,7 @@ fn watched_of(
             _ => {}
         }
     }
-    by_id.into_values().filter(|w| has_documents(&w.entry) && w.ever_in(stream)).collect()
+    by_id.into_values().filter(|w| has_documents(&w.entry)).collect()
 }
 
 /// Reads the changes after the stream's mark into its pending events: the documents' changes

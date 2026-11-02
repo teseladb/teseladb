@@ -29,6 +29,7 @@ fn run(m: &mut Mem, cmd: &str) -> Document {
         cluster_time: ClusterTime { time: 1, increment: 1 },
         now_ms: 0,
         keys: None,
+        replica_set: None,
     };
     let bytes = OpMsg::encode(1, 0, 0, &json(cmd).with("$db", DB).to_bytes().unwrap());
     let mut c = Connection::new(9);

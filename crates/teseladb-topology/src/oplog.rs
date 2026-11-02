@@ -9,11 +9,8 @@
 //! the last with `partialTxn: true`, gives the last the total `count`, and chains them with
 //! `prevOpTime`. One operation larger than that goes alone.
 
+use crate::replset::{OpTime, Timestamp};
 use teseladb_bson::{Document, Value};
-use teseladb_wire::error::{Code, CommandError, INVALID_NAMESPACE};
-use teseladb_wire::hello::ClusterTime;
-
-use crate::replset::OpTime;
 
 /// The oplog's namespace.
 pub const OPLOG_NS: &str = "local.oplog.rs";
@@ -22,15 +19,20 @@ pub const APPLY_OPS_NS: &str = "admin.$cmd";
 /// Largest `o` of a transaction's `applyOps` entry before it splits.
 pub const MAX_APPLY_OPS_BYTES: usize = 16 * 1024 * 1024;
 /// `prevOpTime` of the first entry of a transaction: `{ts: Timestamp(0, 0), t: -1}`.
-pub const NULL_OP_TIME: OpTime = OpTime { ts: ClusterTime { time: 0, increment: 0 }, term: -1 };
+pub const NULL_OP_TIME: OpTime = OpTime { ts: Timestamp { time: 0, increment: 0 }, term: -1 };
 /// `v` of every entry RefDb 9.0 writes.
 pub const ENTRY_VERSION: i64 = 2;
 /// BSON binary subtype of a UUID (`ui`, `lsid.id`).
 const UUID_SUBTYPE: u8 = 4;
 /// Bytes of a UUID.
 const UUID_LEN: usize = 16;
-/// `drop` of the oplog while it replicates.
-const CANNOT_DROP_LIVE_OPLOG: Code = Code { code: 5_255_000, name: "Location5255000" };
+/// Message of an insert, update, delete or index build on the oplog (code 73,
+/// `InvalidNamespace`, on RefDb 9.0.4).
+pub const WRITE_REFUSED: &str = "cannot write to local.oplog.rs";
+/// Code of `drop` on the oplog (`Location5255000` on RefDb 9.0.4).
+pub const DROP_REFUSED_CODE: i32 = 5_255_000;
+/// Message of `drop` on the oplog.
+pub const DROP_REFUSED: &str = "can't drop live oplog while replicating";
 
 /// `op` of an entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -218,11 +220,11 @@ fn integer(d: &Document, field: &'static str) -> Result<Option<i64>, OplogError>
     }
 }
 
-fn timestamp(d: &Document) -> Result<Option<ClusterTime>, OplogError> {
+fn timestamp(d: &Document) -> Result<Option<Timestamp>, OplogError> {
     match d.get("ts") {
         None => Ok(None),
         Some(Value::Timestamp { time, increment }) => {
-            Ok(Some(ClusterTime { time: *time, increment: *increment }))
+            Ok(Some(Timestamp { time: *time, increment: *increment }))
         }
         Some(_) => Err(OplogError::WrongType("ts")),
     }
@@ -381,16 +383,6 @@ pub fn transaction_entries(
         prev = at;
     }
     out
-}
-
-/// The error of an insert, update, delete or index build on the oplog (RefDb 9.0.4).
-pub fn write_refused() -> CommandError {
-    CommandError::new(INVALID_NAMESPACE, format!("cannot write to {OPLOG_NS}"))
-}
-
-/// The error of `drop` on the oplog (RefDb 9.0.4).
-pub fn drop_refused() -> CommandError {
-    CommandError::new(CANNOT_DROP_LIVE_OPLOG, "can't drop live oplog while replicating")
 }
 
 #[cfg(test)]

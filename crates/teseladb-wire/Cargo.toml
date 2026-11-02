@@ -31,6 +31,7 @@ teseladb-plan = { path = "../teseladb-plan" }
 teseladb-range = { path = "../teseladb-range" }
 teseladb-router = { path = "../teseladb-router" }
 teseladb-session = { path = "../teseladb-session" }
+teseladb-topology = { path = "../teseladb-topology" }
 teseladb-txn = { path = "../teseladb-txn" }
 teseladb-types = { path = "../teseladb-types" }
 teseladb-x509 = { path = "../teseladb-x509" }

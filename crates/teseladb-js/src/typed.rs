@@ -238,7 +238,8 @@ fn this_view(it: &mut Interp, this: &Val) -> R<View> {
     match view_of(this) {
         Some(v) => Ok(v),
         None => it.type_error(&format!(
-            "TypedArray method called on incompatible {}",
+            "{} method called on incompatible {}",
+            it.native,
             crate::builtins::class_name(this)
         )),
     }
@@ -291,6 +292,9 @@ pub fn elements(v: &View) -> Vec<Val> {
     (0..v.length()).map(|i| read(v, i)).collect()
 }
 
+/// The longest typed array the engine makes (2³⁰ elements).
+const MAX_LENGTH: f64 = (1u64 << 30) as f64;
+
 fn to_index(it: &mut Interp, v: &Val, what: &str) -> R<usize> {
     if matches!(v, Val::Undef) {
         return Ok(0);
@@ -330,9 +334,8 @@ fn typed_ctor(it: &mut Interp, this: &Val, a: &[Val], ty: Ty) -> R {
                             return Err(it.error("RangeError", &m));
                         }
                         if offset > total {
-                            let m = format!(
-                                "attempting to construct out-of-bounds {name} on ArrayBuffer"
-                            );
+                            let m =
+                                format!("size of buffer is too small for {name} with byteOffset");
                             return Err(it.error("RangeError", &m));
                         }
                         Some((total - offset) / ty.size())
@@ -357,8 +360,8 @@ fn typed_ctor(it: &mut Interp, this: &Val, a: &[Val], ty: Ty) -> R {
             } else if let Some(v) = view_of(&first) {
                 let items = elements(&v);
                 if ty.is_big() != v.ty.is_big() {
-                    let x = items.first().cloned().unwrap_or(Val::Undef);
-                    convert(it, ty, &x)?;
+                    let m = format!("{} elements are incompatible with {}", v.ty.name(), ty.name());
+                    return it.type_error(&m);
                 }
                 typed_from(it, ty, &items)?
             } else {
@@ -387,7 +390,10 @@ fn array_like(it: &mut Interp, v: &Val) -> R<Vec<Val>> {
     }
     let n = it.get(v, "length")?;
     let n = it.number_of(&n)?;
-    let n = if n.is_finite() && n > 0.0 { n as usize } else { 0 };
+    if n > MAX_LENGTH {
+        return Err(it.error("RangeError", "invalid array length"));
+    }
+    let n = if n > 0.0 { n as usize } else { 0 };
     let mut out = Vec::with_capacity(n.min(1 << 20));
     for i in 0..n {
         out.push(it.get(v, &i.to_string())?);
@@ -415,8 +421,12 @@ fn ty_of_ctor(it: &mut Interp, c: &Val) -> R<Ty> {
 
 fn ta_from(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let ty = ty_of_ctor(it, this)?;
-    let mut items = array_like(it, &arg(a, 0))?;
     let f = arg(a, 1);
+    if !matches!(f, Val::Undef) && !f.is_callable() {
+        let text = crate::decompile::value_source(it, &f);
+        return it.type_error(&format!("{text} is not a function"));
+    }
+    let mut items = array_like(it, &arg(a, 0))?;
     if f.is_callable() {
         for (i, x) in items.iter_mut().enumerate() {
             *x = it.call(&f, &arg(a, 2), &[x.clone(), Val::Num(i as f64)])?;
@@ -430,8 +440,9 @@ fn ta_of(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     Ok(Val::Obj(typed_from(it, ty, a)?))
 }
 
-fn abstract_ctor(it: &mut Interp, _: &Val, _: &[Val]) -> R {
-    it.type_error("calling a builtin TypedArray constructor without new is forbidden")
+fn abstract_ctor(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+    let how = if new_target(this).is_some() { "construct" } else { "call" };
+    it.type_error(&format!("cannot directly {how} builtin %TypedArray%"))
 }
 
 // Getters.
@@ -498,7 +509,41 @@ fn ta_filter(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     same_type(it, &v, &out)
 }
 
+/// The methods of `%TypedArray%.prototype` that take a callback and do what the array ones do.
+const CALLBACK_METHODS: [&str; 9] = [
+    "every",
+    "find",
+    "findIndex",
+    "findLast",
+    "findLastIndex",
+    "forEach",
+    "reduce",
+    "reduceRight",
+    "some",
+];
+
+/// `CALLBACK_METHODS[I]` of a typed array: its callback checked as the `refrouter` 9.0.4 does, then
+/// the array method.
+fn with_callback<const I: usize>(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    this_view(it, this)?;
+    let name = CALLBACK_METHODS[I];
+    if matches!(arg(a, 0), Val::Undef) {
+        let owner = if name == "forEach" { "TypedArray" } else { "%TypedArray%" };
+        let msg = format!("missing argument 0 when calling function {owner}.prototype.{name}");
+        return it.type_error(&msg);
+    }
+    let f = it.get(&Val::Obj(it.realm.array.clone()), name)?;
+    it.call(&f, this, a)
+}
+
 fn callable(it: &mut Interp, f: &Val) -> R {
+    if matches!(f, Val::Undef) {
+        // Measured on a `refrouter` 9.0.4 on 02-11 (`forEach` without the `%`).
+        let m = it.native.clone();
+        let owner = if &*m == "forEach" { "TypedArray" } else { "%TypedArray%" };
+        let msg = format!("missing argument 0 when calling function {owner}.prototype.{m}");
+        return it.type_error(&msg);
+    }
     if !f.is_callable() {
         return it.type_error(&format!("{} is not a function", it.show(f)));
     }
@@ -533,7 +578,11 @@ fn ta_subarray(it: &mut Interp, this: &Val, a: &[Val]) -> R {
         offset: v.offset + s * v.ty.size(),
         len: Some(e.saturating_sub(s)),
     };
-    Ok(Val::Obj(it.alloc(Some(it.realm.proto(v.ty.name())), Kind::Typed(view))?))
+    // The new view's `buffer` is the same object.
+    let buffer = g_buffer(it, this, &[])?;
+    let o = it.alloc(Some(it.realm.proto(v.ty.name())), Kind::Typed(view))?;
+    o.borrow_mut().props.push(("@@buffer".into(), Prop::hidden(buffer)));
+    Ok(Val::Obj(o))
 }
 
 /// Numbers in ascending order, NaN last (the default order of a typed array).
@@ -584,6 +633,9 @@ fn store(v: &View, items: &[Val]) {
 
 fn ta_sort(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let v = this_view(it, this)?;
+    if !matches!(arg(a, 0), Val::Undef) && !arg(a, 0).is_callable() {
+        return it.type_error("invalid %TypedArray%.prototype.sort argument");
+    }
     let items = sorted(it, &v, &arg(a, 0))?;
     store(&v, &items);
     Ok(this.clone())
@@ -688,7 +740,8 @@ const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz012
 fn bytes_of(it: &mut Interp, this: &Val) -> R<Vec<u8>> {
     let v = this_view(it, this)?;
     if v.ty != Ty::U8 {
-        return it.type_error("Uint8Array method called on incompatible object");
+        let m = format!("{} method called on incompatible {}", it.native, v.ty.name());
+        return it.type_error(&m);
     }
     let n = v.length();
     Ok(v.buf.borrow().data[v.offset..v.offset + n].to_vec())
@@ -721,32 +774,95 @@ fn to_base64(it: &mut Interp, this: &Val, _: &[Val]) -> R {
 }
 
 fn from_hex(it: &mut Interp, _: &Val, a: &[Val]) -> R {
-    let Val::Str(s) = arg(a, 0) else { return it.type_error("fromHex requires a string") };
-    let digits: Option<Vec<u8>> = s.chars().map(|c| c.to_digit(16).map(|d| d as u8)).collect();
-    let Some(d) = digits.filter(|d| d.len() % 2 == 0) else {
+    let s = string_arg(it, a)?;
+    if s.chars().count() % 2 != 0 {
         return Err(it.error("SyntaxError", "hex-string must have an even number of characters"));
-    };
+    }
+    let mut d = Vec::with_capacity(s.len());
+    for c in s.chars() {
+        match c.to_digit(16) {
+            Some(x) => d.push(x as u8),
+            None => {
+                return Err(it.error("SyntaxError", &format!("'{c}' is not a valid hex-digit")));
+            }
+        }
+    }
     let bytes: Vec<Val> = d.chunks(2).map(|p| Val::Num(f64::from(p[0] * 16 + p[1]))).collect();
     Ok(Val::Obj(typed_from(it, Ty::U8, &bytes)?))
 }
 
 fn from_base64(it: &mut Interp, _: &Val, a: &[Val]) -> R {
-    let Val::Str(s) = arg(a, 0) else { return it.type_error("fromBase64 requires a string") };
-    let mut acc = 0u32;
-    let mut bits = 0;
-    let mut out = Vec::new();
-    for c in s.chars().filter(|c| !c.is_ascii_whitespace() && *c != '=') {
-        let Some(d) = B64.iter().position(|b| *b as char == c) else {
-            return Err(it.error("SyntaxError", "invalid character in base64 string"));
-        };
-        acc = (acc << 6) | d as u32;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push(Val::Num(f64::from((acc >> bits) & 0xff)));
+    let s = string_arg(it, a)?;
+    let chunks = base64_chunks(&s).map_err(|m| it.error("SyntaxError", &m))?;
+    let out: Vec<Val> =
+        chunks.iter().flat_map(|(b, _)| b.iter().map(|x| Val::Num(f64::from(*x)))).collect();
+    Ok(Val::Obj(typed_from(it, Ty::U8, &out)?))
+}
+
+/// The string argument of `fromHex` and `fromBase64` (measured on a `refrouter` 9.0.4 on 02-11).
+fn string_arg(it: &mut Interp, a: &[Val]) -> R<Name> {
+    match arg(a, 0) {
+        Val::Str(s) => Ok(s),
+        v => {
+            let text = crate::decompile::value_source(it, &v);
+            it.type_error(&format!("{text} is not a string"))
         }
     }
-    Ok(Val::Obj(typed_from(it, Ty::U8, &out)?))
+}
+
+/// The chunks of a base64 text (ECMA-262 FromBase64, with ASCII spaces anywhere and the last
+/// chunk loose): each one's bytes and the characters read up to its end, or the message of a
+/// `refrouter` 9.0.4 for what is wrong.
+fn base64_chunks(s: &str) -> Result<Vec<(Vec<u8>, usize)>, String> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = Vec::new();
+    let mut chunk: Vec<u32> = Vec::new();
+    let mut i = 0;
+    let decode = |chunk: &[u32]| -> Vec<u8> {
+        let n = chunk.iter().fold(0u32, |acc, d| (acc << 6) | d) << (6 * (4 - chunk.len()));
+        let bytes = [(n >> 16) as u8, (n >> 8) as u8, n as u8];
+        bytes[..chunk.len() - 1].to_vec()
+    };
+    while i < chars.len() {
+        let c = chars[i];
+        i += 1;
+        if c.is_ascii_whitespace() {
+            continue;
+        }
+        if c == '=' {
+            if chunk.len() < 2 {
+                return Err("unexpected incomplete base64 chunk".into());
+            }
+            if chunk.len() == 2 {
+                while i < chars.len() && chars[i].is_ascii_whitespace() {
+                    i += 1;
+                }
+                if chars.get(i) != Some(&'=') {
+                    return Err("missing padding '=' character".into());
+                }
+                i += 1;
+            }
+            if let Some(c) = chars[i..].iter().find(|c| !c.is_ascii_whitespace()) {
+                return Err(format!("unexpected '{c}' after base64 padding"));
+            }
+            out.push((decode(&chunk), i));
+            return Ok(out);
+        }
+        let Some(d) = B64.iter().position(|b| *b as char == c) else {
+            return Err(format!("'{c}' is not a valid base64 character"));
+        };
+        chunk.push(d as u32);
+        if chunk.len() == 4 {
+            out.push((decode(&chunk), i));
+            chunk.clear();
+        }
+    }
+    match chunk.len() {
+        0 => {}
+        1 => return Err("unexpected incomplete base64 chunk".into()),
+        _ => out.push((decode(&chunk), i)),
+    }
+    Ok(out)
 }
 
 // ArrayBuffer.
@@ -755,7 +871,8 @@ fn this_buf(it: &mut Interp, this: &Val) -> R<BufRef> {
     match buf_of(this) {
         Some(b) => Ok(b),
         None => it.type_error(&format!(
-            "ArrayBuffer method called on incompatible {}",
+            "{} method called on incompatible {}",
+            it.native,
             crate::builtins::class_name(this)
         )),
     }
@@ -773,8 +890,12 @@ fn ab_ctor(it: &mut Interp, this: &Val, a: &[Val]) -> R {
         },
         _ => None,
     };
-    if n > (1 << 30) || max.is_some_and(|m| m < n || m > (1 << 30)) {
-        return Err(it.error("RangeError", "invalid array buffer length"));
+    // Measured on a `refrouter` 9.0.4 on 02-11.
+    if n > (1 << 30) || max.is_some_and(|m| m > (1 << 30)) {
+        return Err(it.error("RangeError", "invalid array length"));
+    }
+    if max.is_some_and(|m| m < n) {
+        return Err(it.error("RangeError", OVER_MAX));
     }
     let data = zeroed(it, n)?;
     Ok(Val::Obj(new_buf(it, data, max)?.0))
@@ -806,6 +927,9 @@ fn ab_detached(it: &mut Interp, this: &Val, _: &[Val]) -> R {
 
 fn ab_slice(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let b = this_buf(it, this)?;
+    if b.borrow().detached {
+        return it.type_error(DETACHED);
+    }
     let data = b.borrow().data.clone();
     let s = relative(it, &arg(a, 0), data.len(), 0)?;
     let e = relative(it, &arg(a, 1), data.len(), data.len())?;
@@ -818,9 +942,12 @@ fn ab_resize(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let b = this_buf(it, this)?;
     let n = to_index(it, &arg(a, 0), "invalid array buffer length")?;
     let max = b.borrow().max;
+    if b.borrow().detached {
+        return it.type_error("resize method called on incompatible ArrayBuffer");
+    }
     match max {
         None => it.type_error("ArrayBuffer.prototype.resize called on a non-resizable buffer"),
-        Some(m) if n > m => Err(it.error("RangeError", "invalid array buffer length")),
+        Some(m) if n > m => Err(it.error("RangeError", OVER_MAX)),
         Some(_) => {
             b.borrow_mut().data.resize(n, 0);
             Ok(Val::Undef)
@@ -828,14 +955,23 @@ fn ab_resize(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     }
 }
 
+/// The error of a detached buffer (measured on a `refrouter` 9.0.4 on 02-11).
+const DETACHED: &str = "attempting to access detached ArrayBuffer";
+/// A length over the buffer's maximum.
+const OVER_MAX: &str = "byte length is larger than maximum byte length";
+
 fn transfer_in(it: &mut Interp, this: &Val, a: &[Val], keep_max: bool) -> R {
     let b = this_buf(it, this)?;
     if b.borrow().detached {
-        return it.type_error("can't transfer a detached ArrayBuffer");
+        return it.type_error(DETACHED);
     }
     let mut data = std::mem::take(&mut b.borrow_mut().data);
     if !matches!(arg(a, 0), Val::Undef) {
         let n = to_index(it, &arg(a, 0), "invalid array buffer length")?;
+        if keep_max && b.borrow().max.is_some_and(|m| n > m) {
+            b.borrow_mut().data = data;
+            return Err(it.error("RangeError", OVER_MAX));
+        }
         it.charge(n.saturating_sub(data.len()))?;
         data.resize(n, 0);
     }
@@ -865,17 +1001,20 @@ fn dv_ctor(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let total = buf.borrow().data.len();
     let offset = to_index(it, &arg(a, 1), "invalid or out-of-range index")?;
     if offset > total {
-        return Err(it.error("RangeError", "invalid or out-of-range index"));
+        return Err(it.error("RangeError", "start offset is outside the bounds of the buffer"));
     }
     let len = match arg(a, 2) {
         Val::Undef => total - offset,
         l => to_index(it, &l, "invalid or out-of-range index")?,
     };
     if offset + len > total {
-        return Err(it.error("RangeError", "invalid or out-of-range index"));
+        return Err(it.error("RangeError", "invalid data view length"));
     }
     let view = View { ty: Ty::U8, buf, offset, len: Some(len) };
-    Ok(Val::Obj(it.alloc(Some(it.realm.proto("DataView")), Kind::DataView(view))?))
+    let o = it.alloc(Some(it.realm.proto("DataView")), Kind::DataView(view))?;
+    // Its `buffer` is the buffer it was made on.
+    o.borrow_mut().props.push(("@@buffer".into(), Prop::hidden(arg(a, 0))));
+    Ok(Val::Obj(o))
 }
 
 fn this_dv(it: &mut Interp, this: &Val) -> R<View> {
@@ -885,7 +1024,8 @@ fn this_dv(it: &mut Interp, this: &Val) -> R<View> {
         return Ok(v.clone());
     }
     it.type_error(&format!(
-        "DataView method called on incompatible {}",
+        "{} method called on incompatible {}",
+        it.native,
         crate::builtins::class_name(this)
     ))
 }
@@ -899,14 +1039,18 @@ fn dv_byte_offset(it: &mut Interp, this: &Val, _: &[Val]) -> R {
 }
 
 fn dv_buffer(it: &mut Interp, this: &Val, _: &[Val]) -> R {
-    let v = this_dv(it, this)?;
-    Ok(Val::Obj(it.alloc(Some(it.realm.proto("ArrayBuffer")), Kind::ArrayBuffer(v.buf))?))
+    this_dv(it, this)?;
+    let Val::Obj(o) = this else { return Ok(Val::Undef) };
+    Ok(o.borrow().get_own("@@buffer").map_or(Val::Undef, |p| p.value.clone()))
 }
 
 /// The element view of `ty` at byte `index` of a `DataView`, checked against its bounds.
 fn dv_at(it: &mut Interp, this: &Val, index: &Val, ty: Ty) -> R<View> {
     let v = this_dv(it, this)?;
     let i = to_index(it, index, "invalid or out-of-range index")?;
+    if v.buf.borrow().detached {
+        return it.type_error(DETACHED);
+    }
     if i + ty.size() > v.length() {
         return Err(it.error("RangeError", "offset is outside the bounds of the DataView"));
     }
@@ -954,7 +1098,7 @@ dv_methods!(g_i8, s_i8 => Ty::I8, g_u8, s_u8 => Ty::U8, g_i16, s_i16 => Ty::I16,
     g_i64, s_i64 => Ty::I64, g_u64, s_u64 => Ty::U64);
 
 fn getter(it: &mut Interp, o: &ObjRef, name: &str, f: NativeFn) -> R<()> {
-    let g = it.native(name, f, 0)?;
+    let g = it.native(&format!("get {name}"), f, 0)?;
     it.define(o, name, Prop { getter: Some(g), ..Prop::hidden(Val::Undef) })
 }
 
@@ -993,20 +1137,11 @@ pub fn install(it: &mut Interp, g: &ObjRef) -> R<()> {
     for name in [
         "at",
         "entries",
-        "every",
-        "find",
-        "findIndex",
-        "findLast",
-        "findLastIndex",
-        "forEach",
         "includes",
         "indexOf",
         "join",
         "keys",
         "lastIndexOf",
-        "reduce",
-        "reduceRight",
-        "some",
         "toLocaleString",
         "toString",
         "values",
@@ -1016,6 +1151,20 @@ pub fn install(it: &mut Interp, g: &ObjRef) -> R<()> {
     }
     let values = it.get(&ap, "values")?;
     it.define(&tap, "@@Symbol.iterator:0", Prop::hidden(values))?;
+    let with_callback: [NativeFn; 9] = [
+        with_callback::<0>,
+        with_callback::<1>,
+        with_callback::<2>,
+        with_callback::<3>,
+        with_callback::<4>,
+        with_callback::<5>,
+        with_callback::<6>,
+        with_callback::<7>,
+        with_callback::<8>,
+    ];
+    for (name, f) in CALLBACK_METHODS.iter().zip(with_callback) {
+        method(it, &tap, name, f, 1)?;
+    }
     for (name, f, n) in [
         ("map", ta_map as NativeFn, 1),
         ("filter", ta_filter, 1),
@@ -1123,18 +1272,25 @@ fn set_from(it: &mut Interp, this: &Val, decoded: Val, read: usize) -> R {
 
 fn set_from_hex(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let d = from_hex(it, &Val::Undef, a)?;
-    let read = match arg(a, 0) {
-        Val::Str(s) => s.chars().count(),
-        _ => 0,
-    };
-    set_from(it, this, d, read)
+    let room = this_view(it, this)?.length();
+    let n = view_of(&d).map_or(0, |v| v.length()).min(room);
+    // Two characters each byte written.
+    set_from(it, this, d, 2 * n)
 }
 
 fn set_from_base64(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    let d = from_base64(it, &Val::Undef, a)?;
-    let read = match arg(a, 0) {
-        Val::Str(s) => s.chars().count(),
-        _ => 0,
-    };
+    let room = this_view(it, this)?.length();
+    let s = string_arg(it, a)?;
+    let chunks = base64_chunks(&s).map_err(|m| it.error("SyntaxError", &m))?;
+    // Whole chunks while they fit.
+    let (mut bytes, mut read) = (Vec::new(), 0);
+    for (b, end) in chunks {
+        if bytes.len() + b.len() > room {
+            break;
+        }
+        bytes.extend(b.into_iter().map(|x| Val::Num(f64::from(x))));
+        read = end;
+    }
+    let d = Val::Obj(typed_from(it, Ty::U8, &bytes)?);
     set_from(it, this, d, read)
 }

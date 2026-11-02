@@ -12,4 +12,4 @@ workspace = true
 
 [dependencies]
 teseladb-bson = { path = "../teseladb-bson" }
-teseladb-wire = { path = "../teseladb-wire" }
+teseladb-changestream = { path = "../teseladb-changestream" }

@@ -33,6 +33,7 @@ dependencies = [
  "teseladb-collation",
  "teseladb-crypto",
  "teseladb-deflate",
+ "teseladb-fle",
  "teseladb-http",
  "teseladb-io",
  "teseladb-js",
@@ -355,6 +356,7 @@ dependencies = [
  "teseladb-session",
  "teseladb-sys",
  "teseladb-tls",
+ "teseladb-topology",
  "teseladb-txn",
  "teseladb-types",
  "teseladb-tz",
@@ -385,6 +387,7 @@ dependencies = [
  "teseladb-raft",
  "teseladb-raftlog",
  "teseladb-range",
+ "teseladb-search",
  "teseladb-testkv",
  "teseladb-txn",
  "teseladb-types",
@@ -419,7 +422,7 @@ name = "teseladb-topology"
 version = "0.1.0"
 dependencies = [
  "teseladb-bson",
- "teseladb-wire",
+ "teseladb-changestream",
 ]
 
 [[package]]
@@ -479,6 +482,7 @@ dependencies = [
  "teseladb-router",
  "teseladb-search",
  "teseladb-session",
+ "teseladb-topology",
  "teseladb-txn",
  "teseladb-types",
  "teseladb-x509",

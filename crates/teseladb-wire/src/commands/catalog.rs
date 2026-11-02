@@ -444,6 +444,9 @@ pub fn purge<B: Backend + ?Sized>(
 /// `drop`.
 pub fn drop<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     let ns = target(ctx)?;
+    if super::oplog::is_oplog(&ns) {
+        return Err(super::oplog::drop_refused());
+    }
     names::check_droppable(&ns)?;
     if let Some(u) = uuid::expected(ctx.cmd, DROP)? {
         uuid::check(ctx.backend, &ns, u)?;
@@ -918,6 +921,19 @@ pub fn list_collections<B: Backend + ?Sized>(
             }
         }
     }
+    // `local.oplog.rs`, `startup_log` and `system.replset` (018 FR-009, FR-010).
+    if db == super::local_db::LOCAL_DB {
+        for d in super::local_db::listed(ctx.backend, name_only)? {
+            let name = match d.get("name") {
+                Some(Value::String(n)) => n.clone(),
+                _ => String::new(),
+            };
+            let shown = super::authorize::collection_shown(only.as_deref(), &db, &name);
+            if shown && passes(filter.as_ref(), &d)? {
+                docs.push(d);
+            }
+        }
+    }
     let ns_text = format!("{db}.$cmd.listCollections");
     let mut state = QueryCursor::buffered(docs);
     let (first, short) = state.batch(ctx.backend, batch.or(Some(usize::MAX)))?;
@@ -973,7 +989,7 @@ pub fn list_indexes<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Documen
         // measurements' fields (015 FR-008).
         Some(ts) => super::indexes::listed(ctx.backend, &c)?
             .into_iter()
-            .map(|s| if raw { s } else { super::timeseries::user_index(&ts, &s) })
+            .filter_map(|s| if raw { Some(s) } else { super::timeseries::user_index(&ts, &s) })
             .collect(),
         None => {
             let mut specs = match has_id_index(&ns) {

@@ -59,6 +59,9 @@ pub struct ObjCell {
     pub budget: Rc<Budget>,
     /// Whether the object belongs to the global objects a program's calls share.
     pub shared: Cell<bool>,
+    /// Whether nothing has changed the object since it was marked: a call's global object that
+    /// stays so serves the next call as it is.
+    pub pristine: Cell<bool>,
 }
 
 impl Drop for ObjCell {
@@ -78,6 +81,7 @@ impl ObjRef {
 
     /// The object to change; changing a shared global object marks the globals as touched.
     pub fn borrow_mut(&self) -> std::cell::RefMut<'_, Obj> {
+        self.0.pristine.set(false);
         if self.0.shared.get() {
             self.0.budget.touched.set(true);
         }
@@ -158,8 +162,28 @@ pub enum Bson {
     MinKey,
     MaxKey,
     DbPointer(String, [u8; 12]),
+    /// An object made by `DBRef`: its properties are the reference.
+    DbRef,
     Symbol(String),
     Code(String),
+}
+
+/// What an array iterator gives at each step.
+#[derive(Clone, Copy, Debug)]
+pub enum ArrayIterKind {
+    Keys,
+    Values,
+    Entries,
+}
+
+/// An array iterator: the object it reads (`None` once it is done), the next index and what it
+/// gives. It reads `length` at each step, as SpiderMonkey does (measured on a `refrouter` 9.0.4 on
+/// 02-11: elements pushed while iterating are visited, and once done it stays done).
+#[derive(Debug)]
+pub struct ArrayIter {
+    pub source: Option<Val>,
+    pub pos: usize,
+    pub kind: ArrayIterKind,
 }
 
 /// What kind of object.
@@ -203,6 +227,8 @@ pub enum Kind {
     Promise(Rc<RefCell<crate::promise::PromiseState>>),
     /// An iterator over a snapshot of values (`entries()`, `values()`, `keys()`).
     Iter(Rc<RefCell<(Vec<Val>, usize)>>),
+    /// An array iterator, which reads its array at each step.
+    ArrayIter(Rc<RefCell<ArrayIter>>),
     /// A `Symbol` object (`Object(Symbol())`): its symbol.
     Symbol(Val),
 }
@@ -230,6 +256,38 @@ pub const ELEMENTS_FROZEN: u8 = 4;
 /// the kind holds.
 pub const ELEMENTS_OWN: u8 = 8;
 
+/// The built-in properties of a function SpiderMonkey makes when they are first looked up
+/// (measured on a `refrouter` 9.0.4 on 02-11: a property added before lists before them, and one
+/// looked up moves ahead of those still unmade): `prototype` (of a plain function), `length` and
+/// `name`.
+pub const LAZY_PROTOTYPE: u8 = 16;
+pub const LAZY_LENGTH: u8 = 32;
+pub const LAZY_NAME: u8 = 64;
+pub const LAZY: u8 = LAZY_PROTOTYPE | LAZY_LENGTH | LAZY_NAME;
+
+fn lazy_bit(key: &str) -> u8 {
+    match key {
+        "prototype" => LAZY_PROTOTYPE,
+        "length" => LAZY_LENGTH,
+        "name" => LAZY_NAME,
+        _ => 0,
+    }
+}
+
+/// Makes the lazy built-in `key` of `o` when it has one not made yet (a lookup of it).
+pub fn touch(o: &ObjRef, key: &str) {
+    if o.borrow().locks & LAZY != 0 {
+        o.borrow_mut().resolve(key);
+    }
+}
+
+/// Makes every lazy built-in of `o`, in their order (an enumeration of its keys).
+pub fn touch_all(o: &ObjRef) {
+    for key in ["prototype", "length", "name"] {
+        touch(o, key);
+    }
+}
+
 /// Whether `key` is the key of a symbol (`@@description:id`), not an internal slot (`@@new`).
 pub fn is_symbol_key(key: &str) -> bool {
     key.strip_prefix("@@")
@@ -248,6 +306,36 @@ impl Obj {
 
     pub fn remove(&mut self, key: &str) {
         self.props.retain(|(k, _)| &**k != key);
+    }
+
+    /// Adds the own property `key`: before the lazy built-ins of a function not made yet.
+    pub fn insert(&mut self, key: Name, prop: Prop) {
+        let at = self.first_lazy();
+        self.props.insert(at, (key, prop));
+    }
+
+    fn first_lazy(&self) -> usize {
+        if self.locks & LAZY == 0 {
+            return self.props.len();
+        }
+        self.props
+            .iter()
+            .position(|(k, _)| self.locks & lazy_bit(k) != 0)
+            .unwrap_or(self.props.len())
+    }
+
+    /// Makes the lazy built-in `key` of a function: it moves ahead of those not made yet.
+    pub fn resolve(&mut self, key: &str) {
+        let bit = lazy_bit(key);
+        if self.locks & bit == 0 {
+            return;
+        }
+        self.locks &= !bit;
+        if let Some(i) = self.props.iter().position(|(k, _)| &**k == key) {
+            let entry = self.props.remove(i);
+            let at = self.first_lazy();
+            self.props.insert(at, entry);
+        }
     }
 
     pub fn is_callable(&self) -> bool {

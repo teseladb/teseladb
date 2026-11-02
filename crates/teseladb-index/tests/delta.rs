@@ -45,6 +45,7 @@ fn insert_update_and_delete() {
 
     let delete = s.delta(Some(new), None, None).unwrap();
     assert_eq!((delete.remove.len(), delete.add.len()), (4, 0));
+    assert!(!delete.is_empty() && !insert.is_empty());
     assert!(s.delta(Some(old), Some(old), None).unwrap().is_empty());
 }
 

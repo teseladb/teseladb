@@ -319,12 +319,25 @@ pub struct Indexes {
     pub last_index: u32,
     /// Search indexes by collection and name.
     pub search: BTreeMap<(u32, String), SearchIndexEntry>,
+    /// The place in the list of an index that took another's place (`collMod` to `unique`,
+    /// 009 FR-007): the identifier of the first index of that place. The others are listed at
+    /// their own identifier.
+    pub places: BTreeMap<u32, u32>,
 }
 
 impl Indexes {
-    /// The secondary indexes of collection `collection`, by identifier.
+    /// The secondary indexes of collection `collection`, in the order they are listed: by place,
+    /// then by identifier.
     pub fn of(&self, collection: u32) -> impl Iterator<Item = &IndexEntry> {
-        self.indexes.values().filter(move |i| i.collection == collection)
+        let mut all: Vec<&IndexEntry> =
+            self.indexes.values().filter(|i| i.collection == collection).collect();
+        all.sort_by_key(|i| (self.place(i.id), i.id));
+        all.into_iter()
+    }
+
+    /// The place in the list of index `id`.
+    fn place(&self, id: u32) -> u32 {
+        self.places.get(&id).copied().unwrap_or(id)
     }
 
     /// The search indexes of collection `collection`, by name.
@@ -391,9 +404,11 @@ impl Indexes {
                 o.state = IndexState::Dropping;
                 let n = self.indexes.get_mut(new).ok_or(CatalogError::IndexNotFound)?;
                 n.state = IndexState::Ready;
+                self.places.insert(*new, self.place(*old));
                 Ok(None)
             }
             IndexCommand::Drop { id } => {
+                self.places.remove(id);
                 self.indexes.remove(id).map(|_| None).ok_or(CatalogError::IndexNotFound)
             }
             IndexCommand::CreateSearch { id, at_ms, collection, name, kind, definition } => {
@@ -440,7 +455,26 @@ impl Indexes {
     /// The documents of collection `id` were purged: its indexes go with them.
     pub fn forget_collection(&mut self, id: u32) {
         self.indexes.retain(|_, i| i.collection != id);
+        let indexes = &self.indexes;
+        self.places.retain(|i, _| indexes.contains_key(i));
         self.search.retain(|(c, _), _| *c != id);
+    }
+
+    /// Writes the places of the indexes into Group 0's snapshot (from its format 19).
+    pub fn encode_places(&self, e: &mut Encoder) {
+        e.var(self.places.len() as u64);
+        for (id, place) in &self.places {
+            e.u32(*id).u32(*place);
+        }
+    }
+
+    /// Reads what [`Indexes::encode_places`] wrote.
+    pub fn decode_places(&mut self, d: &mut Decoder<'_>) -> Result<(), DecodeError> {
+        for _ in 0..d.var()? {
+            let id = d.u32()?;
+            self.places.insert(id, d.u32()?);
+        }
+        Ok(())
     }
 
     /// Writes the indexes into Group 0's snapshot.
