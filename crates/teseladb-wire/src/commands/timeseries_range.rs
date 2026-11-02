@@ -49,9 +49,6 @@ pub fn mark<B: Backend + ?Sized>(
         .into_iter()
         .find(|(_, c)| c.id == coll.id)
         .ok_or_else(|| CommandError::new(NAMESPACE_NOT_FOUND, "no collection"))?;
-    if is_extended(&now) {
-        return Ok(());
-    }
     let options = Document::from(RawDoc::from_bytes(&now.options)?).with(EXTENDED_RANGE, true);
     backend.catalog_write(CatalogCommand::Modify {
         ns,

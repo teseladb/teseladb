@@ -25,8 +25,11 @@ use crate::request::Requests;
 use crate::security::{Principal, Security, SecurityError};
 use crate::tenants::Tenants;
 
-/// Version of the snapshot format (18: the API keys, 019 FR-016).
-pub const SNAPSHOT_VERSION: u8 = 18;
+/// Version of the snapshot format (19: the places of the indexes in their list, 009 FR-007).
+pub const SNAPSHOT_VERSION: u8 = 19;
+/// The snapshot before the places of the indexes (02-11-2026), still read: each index at its
+/// identifier.
+pub const SNAPSHOT_VERSION_WITHOUT_INDEX_PLACES: u8 = 18;
 /// The snapshot before the API keys (02-11-2026), still read: none.
 pub const SNAPSHOT_VERSION_WITHOUT_API_KEYS: u8 = 17;
 /// The snapshot before the catalog changes (01-11-2026), still read: none recorded.
@@ -754,6 +757,9 @@ impl Group0Sm {
         if version > SNAPSHOT_VERSION_WITHOUT_API_KEYS {
             self.security.encode_keys(&mut e);
         }
+        if version > SNAPSHOT_VERSION_WITHOUT_INDEX_PLACES {
+            self.indexes.encode_places(&mut e);
+        }
         e.finish()
     }
 
@@ -833,6 +839,9 @@ impl Group0Sm {
         }
         if version > SNAPSHOT_VERSION_WITHOUT_API_KEYS {
             sm.security.decode_keys(&mut d)?;
+        }
+        if version > SNAPSHOT_VERSION_WITHOUT_INDEX_PLACES {
+            sm.indexes.decode_places(&mut d)?;
         }
         d.finish()?;
         Ok(sm)

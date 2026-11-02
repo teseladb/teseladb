@@ -1539,7 +1539,8 @@ fn autocomplete_grams_follow_the_field_options() {
     let folded = Grams::new(2, 3, true, "edgeGram");
     assert_eq!(folded.normalized("Canción"), "cancion");
     assert_eq!(folded.of("ab"), vec!["ab".to_owned()]);
-    assert_eq!(folded.of("a"), Vec::<String>::new());
+    // Shorter than `minGrams`: kept whole, as `refsearch` keeps it (T019).
+    assert_eq!(folded.of("a"), vec!["a".to_owned()]);
     assert_eq!(folded.term("a"), None);
 }
 

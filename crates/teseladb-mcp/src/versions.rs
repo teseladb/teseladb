@@ -17,7 +17,9 @@ const DISCOVER_TTL_MS: i64 = 3_600_000;
 /// The reply depends on who asks (the tools follow the roles).
 const CACHE_SCOPE: &str = "private";
 /// `resultType` of a complete result.
-const RESULT_COMPLETE: &str = "complete";
+pub const RESULT_COMPLETE: &str = "complete";
+/// The field of a 2026-07-28 result that says whether it is complete.
+pub const RESULT_TYPE: &str = "resultType";
 
 /// A protocol revision.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -131,7 +133,7 @@ pub fn discover_result(capabilities: Object, name: &str, version: &str) -> Objec
     let mut meta = Object::new();
     meta.insert(META_SERVER_INFO, Value::Object(info));
     let mut o = Object::new();
-    o.insert("resultType", RESULT_COMPLETE);
+    o.insert(RESULT_TYPE, RESULT_COMPLETE);
     o.insert("supportedVersions", supported());
     o.insert("capabilities", Value::Object(capabilities));
     o.insert("_meta", Value::Object(meta));

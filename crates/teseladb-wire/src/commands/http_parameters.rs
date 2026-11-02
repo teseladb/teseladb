@@ -6,7 +6,8 @@
 //!   credential, and `apiKeys.maxExpiresAfterDays` (365), the longest life of an API key;
 //! - `mcpOptions`: `readOnly` (true), `allowDestructive` (false), `maxDocuments` (100),
 //!   `maxBytes` (1 MiB), `maxTimeMS` (30 seconds) and `resourceUri` (none: the URI of `/mcp` at
-//!   the `Host` of each request), the resource MCP's tokens are issued for (FR-027).
+//!   the address the node's HTTP port is configured with, never a request's `Host`), the
+//!   resource MCP's tokens are issued for (FR-027).
 //!
 //! A value given replaces the stored one; the fields it leaves out take their defaults.
 
@@ -74,7 +75,7 @@ pub struct McpOptions {
     /// `maxTimeMS` of each tool's operation.
     pub max_time_ms: u64,
     /// The URI of the resource `/mcp` that tokens for MCP carry as audience (RFC 8707); `None`:
-    /// the one at the `Host` of each request.
+    /// the one at the address the node's HTTP port is configured with.
     pub resource_uri: Option<String>,
 }
 

@@ -104,3 +104,5 @@ function(){ g(1, 2); function g(){ throw new Error('in') } }	in	wasm:function	1	
 function(){ if (true) h(3); function h(){ return null.q } }	can't access property "q" of null	wasm:function	1	44	h@wasm:function:1:44\n@wasm:function:1:25\n
 function(){ const a = [1]; a.forEach(function(v){ throw new RangeError('r' + v) }) }	r1	wasm:function	1	58	@wasm:function:1:58\n@wasm:function:1:31\n
 function(){ let s = 'x'; for (let i = 0; ; i++) s += s }	allocation size overflow	wasm:function	1	50	@wasm:function:1:50\n
+function(){ throw Error('boom', 'my.js', 5) }	boom	my.js	5	1	@wasm:function:1:20\n
+function(){ [1,2].map(Error); throw [1,2].map(Error)[0] }	1	0	0	1	@wasm:function:1:44\n

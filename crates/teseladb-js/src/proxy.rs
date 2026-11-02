@@ -41,8 +41,9 @@ fn trap(it: &mut Interp, handler: &ObjRef, name: &str) -> R<Option<Val>> {
     Ok(Some(t))
 }
 
+/// The key a trap receives: a symbol for a symbol key, a string otherwise.
 fn key_val(key: &str) -> Val {
-    Val::str(key)
+    if crate::value::is_symbol_key(key) { crate::props::symbol_of_key(key) } else { Val::str(key) }
 }
 
 pub fn get(it: &mut Interp, o: &ObjRef, key: &str, receiver: &Val) -> R {

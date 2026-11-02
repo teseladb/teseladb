@@ -21,15 +21,61 @@ pub(crate) fn new_target(this: &Val) -> Option<Val> {
 
 /// How SpiderMonkey names the type of `this` in «… method called on incompatible X»: an
 /// object's class, a primitive's type.
-pub(crate) fn class_name(v: &Val) -> &'static str {
+pub(crate) fn class_name(v: &Val) -> String {
+    if let Val::Obj(o) = v {
+        if crate::proxy::is_proxy(o) {
+            return "Proxy".into();
+        }
+        // A built-in prototype is named after its constructor (measured on a `refrouter` 9.0.4 on
+        // 02-11: `Date.prototype.getTime called on incompatible Date.prototype`).
+        if let Some(name) = prototype_of_ctor(o) {
+            return format!("{name}.prototype");
+        }
+    }
+    class_kind(v).into()
+}
+
+/// The name of the constructor whose `prototype` is `o`, when `o` is that constructor's.
+fn prototype_of_ctor(o: &ObjRef) -> Option<String> {
+    let ctor = o.borrow().get_own("constructor")?.value.as_obj().cloned()?;
+    if !matches!(ctor.borrow().kind, Kind::Func(Func::Native(..))) {
+        return None;
+    }
+    let proto = ctor.borrow().get_own("prototype")?.value.as_obj().cloned()?;
+    if !proto.ptr_eq(o) {
+        return None;
+    }
+    let name = ctor.borrow().get_own("name")?.value.clone();
+    match name {
+        Val::Str(n) if !n.is_empty() => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+pub(crate) fn class_kind(v: &Val) -> &'static str {
     match v {
         Val::Obj(o) => match &o.borrow().kind {
             Kind::Array(_) => "Array",
             Kind::Func(_) => "Function",
+            Kind::Map(_) => "Map",
+            Kind::Set(_) => "Set",
+            Kind::WeakMap(_) => "WeakMap",
+            Kind::WeakSet(_) => "WeakSet",
+            Kind::Date(_) => "Date",
+            Kind::RegExp(..) => "RegExp",
+            Kind::Error => "Error",
+            Kind::Bool(_) => "Boolean",
+            Kind::Num(_) => "Number",
+            Kind::Str(_) => "String",
             _ => "Object",
         },
         other => other.type_of(),
     }
+}
+
+/// The class SpiderMonkey names in «X is not extensible»: a BSON type, or the kind of object.
+pub(crate) fn object_class(it: &Interp, o: &ObjRef) -> &'static str {
+    crate::bson::bson_class(it, o).unwrap_or_else(|| class_kind(&Val::Obj(o.clone())))
 }
 
 /// The key of the well-known symbol `Symbol.<name>`.
@@ -80,6 +126,7 @@ fn bare(budget: &Rc<Budget>, proto: Option<ObjRef>, kind: Kind) -> ObjRef {
         charged: std::cell::Cell::new(0),
         budget: budget.clone(),
         shared: std::cell::Cell::new(false),
+        pristine: std::cell::Cell::new(false),
     }))
 }
 
@@ -145,6 +192,7 @@ pub fn install(it: &mut Interp) -> R<()> {
     crate::json::install(it, &g)?;
     crate::date::install(it, &g)?;
     collections(it, &g)?;
+    crate::setmethods::install(it, &g)?;
     symbol_builtins(it, &g)?;
     crate::bigints::install(it, &g)?;
     crate::weak::install(it, &g)?;
@@ -154,7 +202,10 @@ pub fn install(it: &mut Interp) -> R<()> {
     crate::iterators::install(it, &g)?;
     regexp_builtins(it, &g)?;
     crate::bson::install(it, &g)?;
+    crate::uri::install(it, &g)?;
     crate::symbols::install_species(it, &g)?;
+    crate::shell::install(it, &g)?;
+    crate::order::apply(it);
     freeze_builtins(it);
     Ok(())
 }
@@ -193,7 +244,16 @@ fn freeze_builtins(it: &Interp) {
         all.extend(proto);
         all.push(o);
     }
+    // The functions of those objects (methods, accessors) are frozen too.
+    let mut functions = Vec::new();
     for o in &all {
+        for (_, p) in &o.borrow().props {
+            let parts = [p.value.as_obj(), p.getter.as_ref(), p.setter.as_ref()];
+            functions
+                .extend(parts.into_iter().flatten().filter(|f| f.borrow().is_callable()).cloned());
+        }
+    }
+    for o in all.iter().chain(&functions) {
         freeze(o);
     }
 }
@@ -248,8 +308,7 @@ fn sleep(it: &mut Interp, _: &Val, a: &[Val]) -> R {
 /// `eval(code)`: a script in the global scope.
 fn eval(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     let Val::Str(src) = arg(a, 0) else { return Ok(arg(a, 0)) };
-    let body =
-        crate::parser::parse_script(&src).map_err(|e| it.error("SyntaxError", &e.message))?;
+    let body = crate::parser::parse_script(&src).map_err(|e| it.syntax_error(&e))?;
     let env = it.global_env.clone();
     it.hoist(&body, &env, true)?;
     let saved = it.last.take();
@@ -288,6 +347,10 @@ fn object_builtins(it: &mut Interp, g: &ObjRef) -> R<()> {
         ("toLocaleString", obj_to_string, 0),
         ("valueOf", obj_value_of, 0),
         ("isPrototypeOf", obj_is_prototype_of, 1),
+        ("__defineGetter__", |it, t, a| define_legacy_accessor(it, t, a, true), 2),
+        ("__defineSetter__", |it, t, a| define_legacy_accessor(it, t, a, false), 2),
+        ("__lookupGetter__", |it, t, a| lookup_legacy_accessor(it, t, a, true), 1),
+        ("__lookupSetter__", |it, t, a| lookup_legacy_accessor(it, t, a, false), 1),
     ] {
         method(it, &proto, name, f, n)?;
     }
@@ -341,7 +404,10 @@ fn obj_assign(it: &mut Interp, _: &Val, a: &[Val]) -> R {
         if src.is_nullish() {
             continue;
         }
-        let (o, keys) = keys_of(it, src)?;
+        let (o, mut keys) = keys_of(it, src)?;
+        if let Val::Obj(so) = &o {
+            keys.extend(crate::props::enumerable_symbol_keys(so));
+        }
         for k in keys {
             let v = it.get(&o, &k)?;
             // `Object.assign` sets as strict code does: a read-only property throws.
@@ -455,7 +521,9 @@ fn obj_own_names(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     let o = it.object_of(&arg(a, 0))?;
     let mut keys = it.keys(&o, false)?;
     if matches!(o.borrow().kind, Kind::Array(_) | Kind::Str(_)) {
-        keys.push("length".into());
+        // After the indices and before the other keys (ECMA-262 §10.1.11.1).
+        let at = keys.iter().take_while(|k| array_index(k).is_some()).count();
+        keys.insert(at, "length".into());
     }
     it.array(keys.into_iter().map(Val::Str).collect())
 }
@@ -505,24 +573,34 @@ fn obj_group_by(it: &mut Interp, _: &Val, a: &[Val]) -> R {
 }
 
 fn obj_to_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
-    if let Val::Obj(o) = this
-        && crate::proxy::is_proxy(o)
-    {
-        let tag = if crate::proxy::is_array(it, this)? {
-            "Array"
-        } else if o.borrow().is_callable() {
-            "Function"
-        } else {
-            "Object"
-        };
-        return it.string(format!("[object {tag}]"));
-    }
+    let builtin = builtin_tag(it, this)?;
     if !this.is_nullish()
         && let Val::Str(tag) = it.get(this, &well_known("toStringTag"))?
     {
         return it.string(format!("[object {tag}]"));
     }
-    let tag = match this {
+    it.string(format!("[object {builtin}]"))
+}
+
+/// The tag `Object.prototype.toString` gives `this` when it has no `Symbol.toStringTag`.
+fn builtin_tag(it: &mut Interp, this: &Val) -> R<&'static str> {
+    if let Val::Obj(o) = this
+        && let Some(class) = crate::bson::bson_class(it, o)
+    {
+        return Ok(class);
+    }
+    if let Val::Obj(o) = this
+        && crate::proxy::is_proxy(o)
+    {
+        return Ok(if crate::proxy::is_array(it, this)? {
+            "Array"
+        } else if o.borrow().is_callable() {
+            "Function"
+        } else {
+            "Object"
+        });
+    }
+    Ok(match this {
         Val::Undef => "Undefined",
         Val::Null => "Null",
         Val::Obj(o) => match &o.borrow().kind {
@@ -540,8 +618,7 @@ fn obj_to_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
         Val::Str(_) => "String",
         Val::Bool(_) => "Boolean",
         Val::Sym(_) => "Symbol",
-    };
-    it.string(format!("[object {tag}]"))
+    })
 }
 
 fn obj_value_of(it: &mut Interp, this: &Val, _: &[Val]) -> R {
@@ -622,8 +699,7 @@ pub(crate) fn function_ctor(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     }
     let body = parts.pop().unwrap_or_default();
     let src = format!("(function anonymous({}\n) {{\n{body}\n}})", parts.join(","));
-    let stmts =
-        crate::parser::parse_script(&src).map_err(|e| it.error("SyntaxError", &e.message))?;
+    let stmts = crate::parser::parse_script(&src).map_err(|e| it.syntax_error(&e))?;
     let env = it.global_env.clone();
     match stmts.first() {
         Some(crate::ast::Stmt::Expr(e)) => it.eval(e, &env),
@@ -647,8 +723,29 @@ fn fn_bind(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let Val::Obj(target) = this else {
         return it.type_error("bind called on a value that is not a function");
     };
-    let f = Func::Bound(target.clone(), arg(a, 0), a.get(1..).unwrap_or(&[]).to_vec());
-    Ok(Val::Obj(it.alloc(Some(it.realm.function.clone()), Kind::Func(f))?))
+    let bound_args = a.get(1..).unwrap_or(&[]).to_vec();
+    // `length` is the target's less the bound arguments, `name` is `bound ` and the target's;
+    // reading them does not make the target's lazy ones (measured on a `refrouter` 9.0.4 on 02-11).
+    let mut read = |key: &str| -> R {
+        let own =
+            target.borrow().get_own(key).filter(|p| !p.is_accessor()).map(|p| p.value.clone());
+        own.map_or_else(|| it.get(this, key), Ok)
+    };
+    let length = match read("length")? {
+        Val::Num(n) if n.is_nan() => 0.0,
+        Val::Num(n) => (n.trunc() - bound_args.len() as f64).max(0.0),
+        _ => 0.0,
+    };
+    let name = match read("name")? {
+        Val::Str(s) => format!("bound {s}"),
+        _ => "bound ".to_owned(),
+    };
+    let f = Func::Bound(target.clone(), arg(a, 0), bound_args);
+    let o = it.alloc(Some(it.realm.function.clone()), Kind::Func(f))?;
+    let fixed = |v: Val| Prop { writable: false, ..Prop::hidden(v) };
+    it.define(&o, "length", fixed(Val::Num(length)))?;
+    it.define(&o, "name", fixed(Val::str(&name)))?;
+    Ok(Val::Obj(o))
 }
 
 fn fn_to_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
@@ -656,9 +753,13 @@ fn fn_to_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
         return it.type_error("Function.prototype.toString called on incompatible object");
     };
     let s = match &o.borrow().kind {
+        Kind::Func(Func::Closure { class: Some(c), .. }) => c.source.to_string(),
         Kind::Func(Func::Closure { def, .. }) => def.source.to_string(),
         Kind::Func(Func::Native(_, n)) => format!("function {n}() {{\n    [native code]\n}}"),
-        Kind::Func(Func::Bound(..)) => "function () {\n    [native code]\n}".to_owned(),
+        // A bound function and a callable proxy (measured on a `refrouter` 9.0.4 on 02-11).
+        Kind::Func(Func::Bound(..)) | Kind::Proxy(_, true) => {
+            "function () {\n    [native code]\n}".to_owned()
+        }
         _ => return it.type_error("Function.prototype.toString called on incompatible object"),
     };
     it.string(s)
@@ -701,8 +802,9 @@ fn array_is_array(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     Ok(Val::Bool(crate::proxy::is_array(it, &arg(a, 0))?))
 }
 
-fn array_from(it: &mut Interp, _: &Val, a: &[Val]) -> R {
+fn array_from(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let src = arg(a, 0);
+    let mut target = None;
     let items = match &src {
         Val::Obj(o)
             if !matches!(
@@ -714,6 +816,7 @@ fn array_from(it: &mut Interp, _: &Val, a: &[Val]) -> R {
             let n = it.number_of(&n)?;
             let n = if n.is_finite() && n > 0.0 { n as usize } else { 0 };
             it.charge(n * crate::interp::PROP_BYTES)?;
+            target = crate::arrays::made_by(it, this, &[Val::Num(n as f64)])?;
             let mut out = Vec::with_capacity(n);
             for i in 0..n {
                 out.push(it.get(&src, &i.to_string())?);
@@ -723,7 +826,13 @@ fn array_from(it: &mut Interp, _: &Val, a: &[Val]) -> R {
         Val::Undef | Val::Null => {
             return it.type_error(&format!("{} is not iterable", it.show(&src)));
         }
-        _ => it.iterate(&src)?,
+        // A number, boolean, symbol or bigint has no iterator and no length: no elements
+        // (measured on a `refrouter` 9.0.4 on 02-11: `Set.tojson(5)` is `new Set([ ])`).
+        Val::Num(_) | Val::Bool(_) | Val::Sym(_) | Val::BigInt(_) => Vec::new(),
+        _ => {
+            target = crate::arrays::made_by(it, this, &[])?;
+            it.iterate(&src)?
+        }
     };
     let f = arg(a, 1);
     if f.is_callable() {
@@ -731,13 +840,14 @@ fn array_from(it: &mut Interp, _: &Val, a: &[Val]) -> R {
         for (i, x) in items.into_iter().enumerate() {
             out.push(it.call(&f, &Val::Undef, &[x, Val::Num(i as f64)])?);
         }
-        return it.array(out);
+        return crate::arrays::species_result(it, target, out, true);
     }
-    it.array(items)
+    crate::arrays::species_result(it, target, items, true)
 }
 
-fn array_of(it: &mut Interp, _: &Val, a: &[Val]) -> R {
-    it.array(a.to_vec())
+fn array_of(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    let target = crate::arrays::made_by(it, this, &[Val::Num(a.len() as f64)])?;
+    crate::arrays::species_result(it, target, a.to_vec(), true)
 }
 
 fn numbers(it: &mut Interp, v: &Val) -> R<Vec<f64>> {
@@ -1061,6 +1171,12 @@ fn errors(it: &mut Interp, g: &ObjRef) -> R<()> {
     it.define(&proto, "name", Prop::hidden(Val::str("Error")))?;
     it.define(&proto, "message", Prop::hidden(Val::str("")))?;
     method(it, &proto, "toString", error_to_string, 0)?;
+    let get = it.native("", stack_getter, 0)?;
+    let set = it.native("", stack_setter, 1)?;
+    let p = Prop { getter: Some(get), setter: Some(set), ..Prop::hidden(Val::Undef) };
+    it.define(&proto, "stack", p)?;
+    method(it, &base, "isError", |_, _, a| Ok(Val::Bool(is_error(&arg(a, 0)))), 1)?;
+    method(it, &base, "captureStackTrace", capture_stack_trace, 2)?;
     it.realm.errors.push(("Error".into(), base.clone()));
     for (name, f) in ERRORS {
         let p = it.alloc(Some(proto.clone()), Kind::Ordinary)?;
@@ -1103,6 +1219,18 @@ fn error_ctor(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 /// An error with `proto` from the arguments of its constructor.
 fn make_error_object(it: &mut Interp, proto: Option<ObjRef>, a: &[Val]) -> R {
     let o = it.alloc(proto, Kind::Error)?;
+    it.place_error(&o)?;
+    // SpiderMonkey's `Error(message, fileName, lineNumber)`: a second argument that is not an
+    // options object is the file, a third the line, and then the column is 1 (measured).
+    if a.len() > 1 && !matches!(a[1], Val::Obj(_)) {
+        let f = it.str_of(&a[1])?;
+        it.define(&o, "fileName", Prop::hidden(Val::Str(f)))?;
+    }
+    if a.len() > 2 && !matches!(a[1], Val::Obj(_)) {
+        let n = it.number_of(&a[2])?;
+        it.define(&o, "lineNumber", Prop::hidden(Val::Num(f64::from(number::to_int32(n)))))?;
+        it.define(&o, "columnNumber", Prop::hidden(Val::Num(1.0)))?;
+    }
     if !matches!(arg(a, 0), Val::Undef) {
         let m = it.str_of(&arg(a, 0))?;
         it.define(&o, "message", Prop::hidden(Val::Str(m)))?;
@@ -1113,8 +1241,62 @@ fn make_error_object(it: &mut Interp, proto: Option<ObjRef>, a: &[Val]) -> R {
         let c = it.get(&Val::Obj(opts), "cause")?;
         it.define(&o, "cause", Prop::hidden(c))?;
     }
-    it.place_error(&o)?;
     Ok(Val::Obj(o))
+}
+
+/// `Error.isError(v)`: whether `v` is an error object (made by an error constructor).
+fn is_error(v: &Val) -> bool {
+    matches!(v, Val::Obj(o) if matches!(o.borrow().kind, Kind::Error))
+}
+
+/// `Error.captureStackTrace(target, fn)`: gives `target` an own `stack` with the calls in
+/// progress; with `fn`, the frames from the newest down to `fn`'s are left out, and none remain
+/// when `fn` is not running (measured on a `refrouter` 9.0.4 on 02-11).
+fn capture_stack_trace(it: &mut Interp, _: &Val, a: &[Val]) -> R {
+    let Some(target) = a.first() else {
+        return it.type_error(
+            "Error.captureStackTrace: At least 1 argument required, but only 0 passed",
+        );
+    };
+    let Val::Obj(o) = target else {
+        let shown = match target {
+            Val::Num(_) => format!("the number {}", it.show(target)),
+            Val::Str(_) => format!("the string {}", it.show(target)),
+            _ => it.show(target),
+        };
+        return it.type_error(&format!(
+            "`target` argument of Error.captureStackTrace must be an object, got {shown}"
+        ));
+    };
+    let mut stack = it.stack_text();
+    let until = arg(a, 1);
+    if until.is_callable() {
+        let name = it.get(&until, "name")?;
+        let name = it.str_of(&name)?;
+        let marker = format!("{name}@");
+        stack = match stack.lines().position(|l| l.starts_with(&marker)) {
+            Some(i) => stack.lines().skip(i + 1).map(|l| format!("{l}\n")).collect(),
+            None => String::new(),
+        };
+    }
+    it.define(o, "stack", Prop::data(Val::Str(stack.into())))?;
+    Ok(Val::Undef)
+}
+
+/// `Error.prototype.stack`: the stack of the error, kept when it was made.
+fn stack_getter(_: &mut Interp, this: &Val, _: &[Val]) -> R {
+    Ok(match this {
+        Val::Obj(o) => o.borrow().get_own("@@stack").map_or(Val::Undef, |p| p.value.clone()),
+        _ => Val::Undef,
+    })
+}
+
+/// Setting `stack` gives the error its own `stack`.
+fn stack_setter(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    if let Val::Obj(o) = this {
+        it.define(o, "stack", Prop::data(arg(a, 0)))?;
+    }
+    Ok(Val::Undef)
 }
 
 fn error_to_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
@@ -1132,54 +1314,98 @@ fn error_to_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
 
 // Map and Set.
 
+/// A method of `Map.prototype` or `Set.prototype` that first checks that `this` is one of them:
+/// `entries method called on incompatible Object` (measured on a `refrouter` 9.0.4 on 02-11).
+macro_rules! branded {
+    ($map:expr, $f:path) => {
+        |it: &mut Interp, t: &Val, a: &[Val]| {
+            brand(it, t, $map)?;
+            $f(it, t, a)
+        }
+    };
+}
+
+fn brand(it: &mut Interp, this: &Val, map: bool) -> R<()> {
+    let ok = matches!(this, Val::Obj(o) if match o.borrow().kind {
+        Kind::Map(_) => map,
+        Kind::Set(_) => !map,
+        _ => false,
+    });
+    if ok {
+        return Ok(());
+    }
+    let name = it.native.clone();
+    let name = if &*name == "[Symbol.iterator]" {
+        if map { "entries".into() } else { "values".into() }
+    } else {
+        name
+    };
+    it.type_error(&format!("{name} method called on incompatible {}", class_name(this)))
+}
+
 fn collections(it: &mut Interp, g: &ObjRef) -> R<()> {
     let mp = it.realm.map.clone();
     ctor(it, g, "Map", map_ctor, 0, &mp)?;
     for (name, f, n) in [
-        ("get", map_get as NativeFn, 1),
-        ("set", map_set, 2),
-        ("has", map_has, 1),
-        ("delete", map_delete, 1),
-        ("clear", coll_clear, 0),
-        ("forEach", coll_for_each, 1),
-        ("keys", map_keys, 0),
-        ("values", map_values, 0),
-        ("entries", coll_entries, 0),
+        ("get", branded!(true, map_get) as NativeFn, 1),
+        ("set", branded!(true, map_set), 2),
+        ("has", branded!(true, map_has), 1),
+        ("delete", branded!(true, map_delete), 1),
+        ("clear", branded!(true, coll_clear), 0),
+        ("forEach", branded!(true, coll_for_each), 1),
+        ("keys", branded!(true, map_keys), 0),
+        ("values", branded!(true, map_values), 0),
+        ("entries", branded!(true, coll_entries), 0),
     ] {
         method(it, &mp, name, f, n)?;
     }
     it.define(
         &mp,
         "size",
-        Prop { getter: Some(it.native("size", coll_size, 0)?), ..Prop::hidden(Val::Undef) },
+        Prop {
+            getter: Some(it.native("size", branded!(true, coll_size), 0)?),
+            ..Prop::hidden(Val::Undef)
+        },
     )?;
     let sp = it.realm.set.clone();
     ctor(it, g, "Set", set_ctor, 0, &sp)?;
     for (name, f, n) in [
-        ("add", set_add as NativeFn, 1),
-        ("has", map_has, 1),
-        ("delete", map_delete, 1),
-        ("clear", coll_clear, 0),
-        ("forEach", coll_for_each, 1),
-        ("values", map_values, 0),
-        ("keys", map_values, 0),
-        ("entries", coll_entries, 0),
+        ("add", branded!(false, set_add) as NativeFn, 1),
+        ("has", branded!(false, map_has), 1),
+        ("delete", branded!(false, map_delete), 1),
+        ("clear", branded!(false, coll_clear), 0),
+        ("forEach", branded!(false, coll_for_each), 1),
+        ("values", branded!(false, map_values), 0),
+        ("keys", branded!(false, map_values), 0),
+        ("entries", branded!(false, coll_entries), 0),
     ] {
         method(it, &sp, name, f, n)?;
     }
     it.define(
         &sp,
         "size",
-        Prop { getter: Some(it.native("size", coll_size, 0)?), ..Prop::hidden(Val::Undef) },
+        Prop {
+            getter: Some(it.native("size", branded!(false, coll_size), 0)?),
+            ..Prop::hidden(Val::Undef)
+        },
     )?;
-    for o in [&mp, &sp] {
-        let f = it.native("[Symbol.iterator]", coll_default_iter, 0)?;
-        it.define(o, "@@Symbol.iterator:0", Prop::hidden(Val::Obj(f)))?;
+    // `Map.prototype[Symbol.iterator]` is `entries` and `Set.prototype[Symbol.iterator]` is
+    // `values`, the same functions (ECMA-262 §24.1.3.12, §24.2.3.11).
+    for (o, name) in [(&mp, "entries"), (&sp, "values")] {
+        let f = o.borrow().get_own(name).map(|p| p.value.clone()).unwrap_or(Val::Undef);
+        it.define(o, "@@Symbol.iterator:0", Prop::hidden(f))?;
     }
     let ip = it.realm.iter.clone();
-    method(it, &ip, "next", iter_next, 0)?;
     let f = it.native("[Symbol.iterator]", iter_self, 0)?;
     it.define(&ip, "@@Symbol.iterator:0", Prop::hidden(Val::Obj(f)))?;
+    // Each kind of iterator has its prototype, with `next` and its tag, over
+    // `Iterator.prototype` (which has no `next`).
+    for name in ITERATOR_KINDS {
+        let p = it.alloc(Some(ip.clone()), Kind::Ordinary)?;
+        method(it, &p, "next", iter_next, 0)?;
+        to_string_tag(it, &p, name)?;
+        it.realm.protos.push((name, p));
+    }
     Ok(())
 }
 
@@ -1190,18 +1416,17 @@ pub(crate) fn add_from(
     target: &Val,
     iterable: &Val,
     adder: NativeFn,
-    entries: bool,
+    entries: Option<&str>,
 ) -> R<()> {
     if iterable.is_nullish() {
         return Ok(());
     }
     let mut rec = it.open_iter(iterable)?;
     while let Some(item) = it.iter_step(&mut rec)? {
-        let r = if !entries {
+        let r = if let Some(kind) = entries.filter(|_| !matches!(item, Val::Obj(_))) {
+            it.type_error(&format!("iterable for {kind} should have array-like objects"))
+        } else if entries.is_none() {
             adder(it, target, &[item])
-        } else if !matches!(item, Val::Obj(_)) {
-            let m = format!("iterator value {} is not an entry object", it.show(&item));
-            it.type_error(&m)
         } else {
             it.get(&item, "0")
                 .and_then(|k| Ok((k, it.get(&item, "1")?)))
@@ -1225,7 +1450,7 @@ fn map_ctor(it: &mut Interp, this: &Val, a: &[Val]) -> R {
         return it.type_error("calling a builtin Map constructor without new is forbidden");
     }
     let m = Val::Obj(it.alloc(Some(it.realm.map.clone()), Kind::Map(Vec::new()))?);
-    add_from(it, &m, &arg(a, 0), map_set, true)?;
+    add_from(it, &m, &arg(a, 0), map_set, Some("Map"))?;
     Ok(m)
 }
 
@@ -1234,7 +1459,7 @@ fn set_ctor(it: &mut Interp, this: &Val, a: &[Val]) -> R {
         return it.type_error("calling a builtin Set constructor without new is forbidden");
     }
     let s = it.alloc(Some(it.realm.set.clone()), Kind::Set(Vec::new()))?;
-    add_from(it, &Val::Obj(s.clone()), &arg(a, 0), set_add, false)?;
+    add_from(it, &Val::Obj(s.clone()), &arg(a, 0), set_add, None)?;
     Ok(Val::Obj(s))
 }
 
@@ -1362,9 +1587,24 @@ fn coll_for_each(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     Ok(Val::Undef)
 }
 
-pub(crate) fn make_iter(it: &Interp, items: Vec<Val>) -> R {
+/// The kinds of iterator the built-ins make, by their `Symbol.toStringTag`.
+pub(crate) const ARRAY_ITERATOR: &str = "Array Iterator";
+pub(crate) const MAP_ITERATOR: &str = "Map Iterator";
+pub(crate) const SET_ITERATOR: &str = "Set Iterator";
+pub(crate) const STRING_ITERATOR: &str = "String Iterator";
+pub(crate) const REGEXP_STRING_ITERATOR: &str = "RegExp String Iterator";
+const ITERATOR_KINDS: [&str; 5] =
+    [ARRAY_ITERATOR, MAP_ITERATOR, SET_ITERATOR, STRING_ITERATOR, REGEXP_STRING_ITERATOR];
+
+/// An iterator of kind `kind` over `items`.
+pub(crate) fn make_iter(it: &Interp, kind: &str, items: Vec<Val>) -> R {
     let state = Rc::new(std::cell::RefCell::new((items, 0usize)));
-    Ok(Val::Obj(it.alloc(Some(it.realm.iter.clone()), Kind::Iter(state))?))
+    Ok(Val::Obj(it.alloc(Some(it.realm.proto(kind)), Kind::Iter(state))?))
+}
+
+/// The kind of iterator a `Map` or a `Set` gives.
+fn coll_iter_kind(o: &ObjRef) -> &'static str {
+    if matches!(o.borrow().kind, Kind::Set(_)) { SET_ITERATOR } else { MAP_ITERATOR }
 }
 
 fn map_keys(it: &mut Interp, this: &Val, _: &[Val]) -> R {
@@ -1373,7 +1613,7 @@ fn map_keys(it: &mut Interp, this: &Val, _: &[Val]) -> R {
         Kind::Map(e) => e.iter().map(|(k, _)| k.clone()).collect(),
         _ => Vec::new(),
     };
-    make_iter(it, items)
+    make_iter(it, coll_iter_kind(&o), items)
 }
 
 fn map_values(it: &mut Interp, this: &Val, _: &[Val]) -> R {
@@ -1383,7 +1623,7 @@ fn map_values(it: &mut Interp, this: &Val, _: &[Val]) -> R {
         Kind::Set(e) => e.clone(),
         _ => Vec::new(),
     };
-    make_iter(it, items)
+    make_iter(it, coll_iter_kind(&o), items)
 }
 
 fn coll_entries(it: &mut Interp, this: &Val, _: &[Val]) -> R {
@@ -1397,18 +1637,18 @@ fn coll_entries(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     for (k, v) in pairs {
         items.push(it.array(vec![k, v])?);
     }
-    make_iter(it, items)
-}
-
-fn coll_default_iter(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    let o = coll(it, this)?;
-    let is_map = matches!(o.borrow().kind, Kind::Map(_));
-    if is_map { coll_entries(it, this, a) } else { map_values(it, this, a) }
+    make_iter(it, coll_iter_kind(&o), items)
 }
 
 fn iter_next(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     let Val::Obj(o) = this else { return it.type_error("next called on incompatible object") };
-    let Kind::Iter(state) = o.borrow().kind.clone() else {
+    let kind = o.borrow().kind.clone();
+    if let Kind::ArrayIter(state) = kind {
+        let v = crate::arrays::array_iter_next(it, &state)?;
+        let done = v.is_none();
+        return iter_result(it, v.unwrap_or(Val::Undef), done);
+    }
+    let Kind::Iter(state) = kind else {
         return it.type_error("next called on incompatible object");
     };
     let (v, done) = {
@@ -1421,6 +1661,11 @@ fn iter_next(it: &mut Interp, this: &Val, _: &[Val]) -> R {
             None => (Val::Undef, true),
         }
     };
+    iter_result(it, v, done)
+}
+
+/// `{value, done}`.
+fn iter_result(it: &mut Interp, v: Val, done: bool) -> R {
     let r = it.object()?;
     it.define(&r, "value", Prop::data(v))?;
     it.define(&r, "done", Prop::data(Val::Bool(done)))?;
@@ -1477,7 +1722,11 @@ fn symbol_builtins(it: &mut Interp, g: &ObjRef) -> R<()> {
 
 fn string_iter(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     let s = it.str_of(this)?;
-    make_iter(it, s.chars().map(|c| Val::Str(c.to_string().into())).collect())
+    make_iter(
+        it,
+        STRING_ITERATOR,
+        crate::text::code_points(&s).map(|c| Val::Str(c.into())).collect(),
+    )
 }
 
 // RegExp: the literal and constructor keep the source and flags; matching is in `strings`.
@@ -1488,20 +1737,232 @@ fn regexp_builtins(it: &mut Interp, g: &ObjRef) -> R<()> {
     method(it, &proto, "test", crate::regex::test, 1)?;
     method(it, &proto, "exec", crate::regex::exec, 1)?;
     method(it, &proto, "toString", regexp_to_string, 0)?;
-    for (name, f) in
-        [("source", regexp_source as NativeFn), ("flags", regexp_flags), ("global", regexp_global)]
-    {
-        let getter = it.native(name, f, 0)?;
+    method(it, &proto, "compile", regexp_compile, 2)?;
+    let getter = it.native("source", regexp_source, 0)?;
+    it.define(&proto, "source", Prop { getter: Some(getter), ..Prop::hidden(Val::Undef) })?;
+    let getter = it.native("flags", regexp_flags, 0)?;
+    it.define(&proto, "flags", Prop { getter: Some(getter), ..Prop::hidden(Val::Undef) })?;
+    for (name, _) in REGEXP_FLAGS {
+        let getter = it.native(name, regexp_flag, 0)?;
         it.define(&proto, name, Prop { getter: Some(getter), ..Prop::hidden(Val::Undef) })?;
+    }
+    if let Some(Val::Obj(c)) = g.borrow().get_own("RegExp").map(|p| p.value.clone()) {
+        method(it, &c, "escape", regexp_escape, 1)?;
+        let names = [
+            "input",
+            "$_",
+            "lastMatch",
+            "$&",
+            "lastParen",
+            "$+",
+            "leftContext",
+            "$`",
+            "rightContext",
+            "$'",
+            "$1",
+            "$2",
+            "$3",
+            "$4",
+            "$5",
+            "$6",
+            "$7",
+            "$8",
+            "$9",
+        ];
+        for name in names {
+            let get = it.native(name, crate::regex::legacy_static, 0)?;
+            let set = if matches!(name, "input" | "$_") {
+                Some(it.native(name, crate::regex::legacy_input_setter, 1)?)
+            } else {
+                None
+            };
+            // The long names and `$1`…`$9` are enumerable, the other short ones are not.
+            let enumerable = !name.starts_with('$') || name[1..].parse::<u8>().is_ok();
+            let p = Prop { getter: Some(get), setter: set, enumerable, ..Prop::hidden(Val::Undef) };
+            it.define(&c, name, p)?;
+        }
     }
     Ok(())
 }
 
+/// The flag accessors of `RegExp.prototype`, in the order `flags` reads them.
+const REGEXP_FLAGS: [(&str, char); 8] = [
+    ("hasIndices", 'd'),
+    ("global", 'g'),
+    ("ignoreCase", 'i'),
+    ("multiline", 'm'),
+    ("dotAll", 's'),
+    ("unicode", 'u'),
+    ("unicodeSets", 'v'),
+    ("sticky", 'y'),
+];
+
+/// `this` of a `RegExp.prototype` accessor: the pattern and flags of a regular expression,
+/// `None` for `RegExp.prototype` itself, an error otherwise (measured on a `refrouter` 9.0.4 on
+/// 02-11: `RegExp.prototype.global getter called on non-RegExp object: Object`).
+fn regexp_this(it: &mut Interp, this: &Val) -> R<Option<(Name, Name)>> {
+    if let Val::Obj(o) = this {
+        if let Kind::RegExp(s, f) = &o.borrow().kind {
+            return Ok(Some((s.clone(), f.clone())));
+        }
+        if o.ptr_eq(&it.realm.regexp) {
+            return Ok(None);
+        }
+    }
+    let name = it.native.clone();
+    let class = match this {
+        Val::Obj(_) => class_name(this),
+        v => v.type_of().to_string(),
+    };
+    it.type_error(&format!("RegExp.prototype.{name} getter called on non-RegExp object: {class}"))
+}
+
+fn regexp_flag(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+    let name = it.native.clone();
+    let flag = REGEXP_FLAGS.iter().find(|(n, _)| **n == *name).map_or('g', |(_, c)| *c);
+    Ok(match regexp_this(it, this)? {
+        Some((_, f)) => Val::Bool(f.contains(flag)),
+        None => Val::Undef,
+    })
+}
+
+fn regexp_source(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+    Ok(match regexp_this(it, this)? {
+        Some((s, _)) => Val::Str(s),
+        None => Val::str("(?:)"),
+    })
+}
+
+/// `flags`: the flags read through their accessors (ECMA-262 §22.2.6.4).
+fn regexp_flags(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+    if !matches!(this, Val::Obj(_)) {
+        return it.type_error(&format!("{} is not a non-null object", this.type_of()));
+    }
+    let mut out = String::new();
+    for (name, c) in REGEXP_FLAGS {
+        if it.get(this, name)?.truthy() {
+            out.push(c);
+        }
+    }
+    it.string(out)
+}
+
+/// `toString`: `/source/flags`, read from any object (ECMA-262 §22.2.6.17).
+pub(crate) fn regexp_to_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+    if !matches!(this, Val::Obj(_)) {
+        return it.type_error(&format!("{} is not a non-null object", this.type_of()));
+    }
+    let source = it.get(this, "source")?;
+    let source = it.str_of(&source)?;
+    let flags = it.get(this, "flags")?;
+    let flags = it.str_of(&flags)?;
+    it.string(format!("/{source}/{flags}"))
+}
+
+/// `compile(pattern, flags)` of Annex B: `this` takes the new pattern and `lastIndex` goes to 0.
+fn regexp_compile(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    let Val::Obj(o) = this else {
+        return Err(incompatible(it, "RegExp.prototype.compile"));
+    };
+    if !matches!(o.borrow().kind, Kind::RegExp(..)) {
+        return Err(incompatible(it, "RegExp.prototype.compile"));
+    }
+    let pattern = arg(a, 0);
+    let flags = arg(a, 1);
+    let from = match &pattern {
+        Val::Obj(p) => match &p.borrow().kind {
+            Kind::RegExp(s, f) => Some((s.clone(), f.clone())),
+            _ => None,
+        },
+        _ => None,
+    };
+    let (source, flags) = match from {
+        Some(parts) if matches!(flags, Val::Undef) => parts,
+        Some(_) => {
+            return it.type_error("can't supply flags when constructing one RegExp from another");
+        }
+        None => {
+            let s = if matches!(pattern, Val::Undef) { "".into() } else { it.str_of(&pattern)? };
+            let f = if matches!(flags, Val::Undef) { "".into() } else { it.str_of(&flags)? };
+            (s, f)
+        }
+    };
+    crate::regex::check(it, &source, &flags)?;
+    o.borrow_mut().kind = Kind::RegExp(escape_pattern(source), flags);
+    it.set(this, "lastIndex", Val::Num(0.0))?;
+    Ok(this.clone())
+}
+
+/// `RegExp.escape(text)` (ECMA-262 §22.2.5.1): a pattern that matches `text` literally.
+fn regexp_escape(it: &mut Interp, _: &Val, a: &[Val]) -> R {
+    let Val::Str(s) = arg(a, 0) else {
+        let v = arg(a, 0);
+        return it.type_error(&format!("{} is not a string", it.show(&v)));
+    };
+    let mut out = String::new();
+    for (i, u) in crate::strings::units(&s).into_iter().enumerate() {
+        let c = char::from_u32(u32::from(u));
+        match c {
+            Some(c) if i == 0 && c.is_ascii_alphanumeric() => out.push_str(&format!("\\x{u:02x}")),
+            Some(c) if "^$\\.*+?()[]{}|/".contains(c) => {
+                out.push('\\');
+                out.push(c);
+            }
+            Some(c) if ",-=<>#&!%:;@~'`\"".contains(c) => out.push_str(&format!("\\x{u:02x}")),
+            Some('\t') => out.push_str("\\t"),
+            Some('\n') => out.push_str("\\n"),
+            Some('\u{b}') => out.push_str("\\v"),
+            Some('\u{c}') => out.push_str("\\f"),
+            Some('\r') => out.push_str("\\r"),
+            Some(' ') => out.push_str("\\x20"),
+            Some(c) if c.is_whitespace() || c == '\u{feff}' => {
+                out.push_str(&format!("\\u{u:04x}"));
+            }
+            Some(c) => out.push(c),
+            None => out.push_str(&format!("\\u{u:04x}")),
+        }
+    }
+    it.string(crate::text::encode(&out).into_owned())
+}
+
 pub fn make_regexp(it: &mut Interp, source: Name, flags: Name) -> R {
     crate::regex::check(it, &source, &flags)?;
+    let source = escape_pattern(source);
     let o = it.alloc(Some(it.realm.regexp.clone()), Kind::RegExp(source, flags))?;
     it.define(&o, "lastIndex", Prop::hidden(Val::Num(0.0)))?;
     Ok(Val::Obj(o))
+}
+
+/// The pattern as `source` gives it (ECMA-262 §22.2.6.13.1): `(?:)` for an empty one, `/` and
+/// line terminators escaped.
+fn escape_pattern(source: Name) -> Name {
+    if source.is_empty() {
+        return "(?:)".into();
+    }
+    if !source.contains(['/', '\n', '\r', '\u{2028}', '\u{2029}']) {
+        return source;
+    }
+    let mut out = String::with_capacity(source.len() + 2);
+    let (mut escaped, mut class) = (false, false);
+    for c in source.chars() {
+        match c {
+            '/' if !escaped && !class => out.push_str("\\/"),
+            '\n' => out.push_str(if escaped { "n" } else { "\\n" }),
+            '\r' => out.push_str(if escaped { "r" } else { "\\r" }),
+            '\u{2028}' => out.push_str(if escaped { "u2028" } else { "\\u2028" }),
+            '\u{2029}' => out.push_str(if escaped { "u2029" } else { "\\u2029" }),
+            c => out.push(c),
+        }
+        if !escaped {
+            match c {
+                '[' => class = true,
+                ']' => class = false,
+                _ => {}
+            }
+        }
+        escaped = !escaped && c == '\\';
+    }
+    out.into()
 }
 
 fn regexp_ctor(it: &mut Interp, _: &Val, a: &[Val]) -> R {
@@ -1521,31 +1982,42 @@ fn unreachable_pair() -> (Name, Name) {
     ("(?:)".into(), "".into())
 }
 
-fn regexp_parts(it: &Interp, this: &Val) -> R<(Name, Name)> {
-    match this {
-        Val::Obj(o) => match &o.borrow().kind {
-            Kind::RegExp(s, f) => Ok((s.clone(), f.clone())),
-            _ => it.type_error("RegExp method called on incompatible object"),
-        },
-        _ => it.type_error("RegExp method called on incompatible value"),
+/// `__defineGetter__(key, f)` and `__defineSetter__` of Annex B: an enumerable, configurable
+/// accessor (`invalid getter usage` when `f` is not a function, measured on a `refrouter` 9.0.4).
+fn define_legacy_accessor(it: &mut Interp, this: &Val, a: &[Val], getter: bool) -> R {
+    let o = it.object_of(this)?;
+    let f = arg(a, 1);
+    let Val::Obj(fo) = &f else {
+        return it.type_error(if getter { "invalid getter usage" } else { "invalid setter usage" });
+    };
+    if !f.is_callable() {
+        return it.type_error(if getter { "invalid getter usage" } else { "invalid setter usage" });
     }
+    let key = it.key_of(&arg(a, 0))?;
+    let d = crate::props::Desc {
+        get: getter.then(|| Some(fo.clone())),
+        set: (!getter).then(|| Some(fo.clone())),
+        enumerable: Some(true),
+        configurable: Some(true),
+        ..crate::props::Desc::default()
+    };
+    crate::props::define_own(it, &o, &key, &d)?;
+    Ok(Val::Undef)
 }
 
-fn regexp_to_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
-    let (s, f) = regexp_parts(it, this)?;
-    it.string(format!("/{s}/{f}"))
-}
-
-fn regexp_source(it: &mut Interp, this: &Val, _: &[Val]) -> R {
-    Ok(Val::Str(regexp_parts(it, this)?.0))
-}
-
-fn regexp_flags(it: &mut Interp, this: &Val, _: &[Val]) -> R {
-    Ok(Val::Str(regexp_parts(it, this)?.1))
-}
-
-fn regexp_global(it: &mut Interp, this: &Val, _: &[Val]) -> R {
-    Ok(Val::Bool(regexp_parts(it, this)?.1.contains('g')))
+/// `__lookupGetter__(key)` and `__lookupSetter__`: the accessor of `key` on the object or the
+/// nearest prototype that has the property.
+fn lookup_legacy_accessor(it: &mut Interp, this: &Val, a: &[Val], getter: bool) -> R {
+    let mut o = Some(it.object_of(this)?);
+    let key = it.key_of(&arg(a, 0))?;
+    while let Some(cur) = o {
+        if let Some(p) = crate::props::own_prop(&cur, &key) {
+            let f = if getter { p.getter } else { p.setter };
+            return Ok(f.map_or(Val::Undef, Val::Obj));
+        }
+        o = cur.borrow().proto.clone();
+    }
+    Ok(Val::Undef)
 }
 
 /// The error a native function gives for `this` of the wrong kind.

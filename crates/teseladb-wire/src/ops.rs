@@ -178,6 +178,9 @@ pub struct Op {
     pub deadline_ms: Option<u64>,
     /// `killOp` marked it.
     pub killed: bool,
+    /// The flag `killOp` also raises, for the work outside the backend's calls (JavaScript reads
+    /// it every few thousand steps); the running thread's, set by [`Guarded`].
+    pub interrupt: Option<Interrupt>,
     /// The user its connection authenticated as (013).
     pub user: Option<UserName>,
     /// The tenant it runs in (007 FR-025): its user's, or the one `$tenant` named.
@@ -231,6 +234,25 @@ pub struct OpTable {
     reports: BTreeMap<u32, OpReport>,
 }
 
+/// The flag `killOp` raises for one operation.
+#[derive(Clone, Debug, Default)]
+pub struct Interrupt(pub std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl Interrupt {
+    /// Whether `killOp` raised it.
+    #[must_use]
+    pub fn raised(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl PartialEq for Interrupt {
+    /// Raised or not alike.
+    fn eq(&self, other: &Interrupt) -> bool {
+        self.raised() == other.raised()
+    }
+}
+
 impl OpTable {
     /// Records `op` and gives its id: the next free one after the last given, from 1, never 0.
     pub fn begin(&mut self, op: Op) -> u32 {
@@ -267,6 +289,9 @@ impl OpTable {
         match self.ops.get_mut(&id) {
             Some(op) => {
                 op.killed = true;
+                if let Some(f) = &op.interrupt {
+                    f.0.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
                 true
             }
             None => false,
@@ -309,6 +334,9 @@ pub struct Guarded<'a, B: Backend + ?Sized> {
     tenant: u32,
     /// The audit events of the catalog changes the operation made (013 FR-016).
     audit: crate::commands::audit::Pending,
+    /// Whether the thread's interrupt flag was raised before this operation (an outer one's),
+    /// put back at its end.
+    outer_interrupt: bool,
 }
 
 impl<'a, B: Backend + ?Sized> Guarded<'a, B> {
@@ -317,7 +345,16 @@ impl<'a, B: Backend + ?Sized> Guarded<'a, B> {
         let (deadline_ms, tenant) =
             lock(shared).ops.get(id).map_or((None, 0), |o| (o.deadline_ms, o.tenant));
         inner.set_deadline(deadline_ms);
-        Guarded { inner, shared, id, deadline_ms, tenant, audit: Vec::new() }
+        let flag = crate::commands::js::thread_interrupt();
+        let outer_interrupt = flag.raised();
+        let mut g = lock(shared);
+        let killed = g.ops.get(id).is_some_and(|o| o.killed);
+        flag.0.store(killed, std::sync::atomic::Ordering::SeqCst);
+        if let Some(op) = g.ops.get_mut(id) {
+            op.interrupt = Some(flag);
+        }
+        drop(g);
+        Guarded { inner, shared, id, deadline_ms, tenant, audit: Vec::new(), outer_interrupt }
     }
 
     /// The audit events of the catalog changes made so far, taken.
@@ -383,6 +420,8 @@ impl<B: Backend + ?Sized> Drop for Guarded<'_, B> {
     fn drop(&mut self) {
         self.inner.set_deadline(None);
         self.inner.end_operation();
+        let flag = crate::commands::js::thread_interrupt();
+        flag.0.store(self.outer_interrupt, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -887,6 +926,7 @@ mod tests {
             started_ms: 0,
             deadline_ms: None,
             killed: false,
+            interrupt: None,
             user: None,
             tenant: 0,
             privileges: None,
@@ -895,7 +935,7 @@ mod tests {
             progress: None,
             metrics: None,
         };
-        let mut t = OpTable { last: u32::MAX - 1, ops: BTreeMap::new(), reports: BTreeMap::new() };
+        let mut t = OpTable { last: u32::MAX - 1, ..OpTable::default() };
         t.ops.insert(1, op.clone());
         assert_eq!(t.begin(op.clone()), u32::MAX);
         assert_eq!(t.begin(op), 2);
