@@ -77,6 +77,12 @@ pub struct StartOpts {
     /// Memory the node may use (`--memory-limit`, `teseladb.memoryLimit`; 012 FR-013); `None`:
     /// three quarters of the memory the process has.
     pub memory_limit: Option<u64>,
+    /// Who executes the disk operations (`--io-executor`, 012 FR-007).
+    pub io_executor: teseladb_io::node_disk::IoExecutor,
+    /// `O_DIRECT` (`--direct-io`, 012 FR-003).
+    pub direct_io: teseladb_io::node_disk::DirectIo,
+    /// The cores' CPUs (`--cpu-list`, 012 FR-006); `None`: the CPUs the process may use.
+    pub cpu_list: Option<Vec<usize>>,
     /// The enrollment token of a node that joins without a PKI yet (013 FR-005).
     pub enroll_token: Option<Password>,
     /// No TLS and no authentication.
@@ -311,6 +317,9 @@ const START: &[Spec] = &[
     ("dbpath", VALUE),
     ("cores", VALUE),
     ("memory-limit", VALUE),
+    ("io-executor", VALUE),
+    ("direct-io", VALUE),
+    ("cpu-list", VALUE),
     ("bind_ip", VALUE),
     ("port", VALUE),
     ("peer-listen", VALUE),
@@ -863,6 +872,22 @@ fn no_positional(o: &Opts, sub: &str) -> Result<(), CliError> {
 }
 
 /// The tags of `--tags`: `name=value` items, each name once, sorted by name.
+/// `--cpu-list` (012 FR-006): fewer CPUs than `--cores` is a usage error.
+fn cpu_list(v: Option<&str>, cores: Option<u16>) -> Result<Option<Vec<usize>>, CliError> {
+    let Some(v) = v else { return Ok(None) };
+    let list =
+        teseladb_sys::numa::parse_cpu_list(v).map_err(|e| CliError(format!("--cpu-list: {e}")))?;
+    if let Some(c) = cores
+        && list.len() < usize::from(c)
+    {
+        return Err(CliError(format!(
+            "--cpu-list names {} CPUs for {c} cores: it needs one per core",
+            list.len()
+        )));
+    }
+    Ok(Some(list))
+}
+
 fn tags(items: &[String]) -> Result<Vec<(String, String)>, CliError> {
     let mut tags = Vec::with_capacity(items.len());
     for item in items {
@@ -944,6 +969,18 @@ fn start(o: &Opts) -> Result<StartOpts, CliError> {
                 crate::memory::parse_size(v).map_err(|e| CliError(format!("--memory-limit: {e}")))
             })
             .transpose()?,
+        io_executor: match o.get("io-executor") {
+            None => teseladb_io::node_disk::IoExecutor::Auto,
+            Some(v) => teseladb_io::node_disk::IoExecutor::parse(v).ok_or_else(|| {
+                CliError(format!("--io-executor: {v:?} is not auto, uring or threads"))
+            })?,
+        },
+        direct_io: match o.get("direct-io") {
+            None => teseladb_io::node_disk::DirectIo::Auto,
+            Some(v) => teseladb_io::node_disk::DirectIo::parse(v)
+                .ok_or_else(|| CliError(format!("--direct-io: {v:?} is not auto, on or off")))?,
+        },
+        cpu_list: cpu_list(o.get("cpu-list"), cores)?,
         enroll_token: o.get(ENROLL_TOKEN).map(Password::from),
         insecure,
         insecure_allow_remote,
@@ -1037,6 +1074,7 @@ pub fn parse_with(
 pub const USAGE: &str = "\
 usage:
   teseladb start [--dbpath <dir>] [--cores <n>] [--memory-limit <bytes[K|M|G|T]>]
+                 [--io-executor auto|uring|threads] [--direct-io auto|on|off] [--cpu-list <cpus>]
                  [--bind_ip <addr>] [--port <n>]
                  [--peer-listen <ip:port>] [--admin-listen <ip:port>] [--join <ip:port>,...]
                  [--enroll-token <token>]

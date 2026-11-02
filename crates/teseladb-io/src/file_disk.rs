@@ -20,6 +20,8 @@ use teseladb_types::Bytes;
 
 use crate::buffers::is_aligned;
 
+const ALIGN: usize = teseladb_sys::aligned::ALIGN;
+
 /// `O_DIRECT` on Linux (x86_64 and aarch64 differ).
 #[cfg(target_arch = "aarch64")]
 pub(crate) const O_DIRECT: i32 = 0o200000;
@@ -70,6 +72,28 @@ pub fn direct_io_supported(dir: &Path) -> io::Result<bool> {
         Err(e) if e.raw_os_error() == Some(22) => Ok(false),
         Err(e) => Err(e),
     }
+}
+
+/// Writes `bytes` as the whole content of a new file at `path` and syncs it (012 FR-003). With
+/// `direct` (Linux) the whole 4 KiB blocks go through `O_DIRECT` from an aligned buffer and the
+/// tail through the buffered descriptor; elsewhere, or without `direct`, all of it is buffered.
+pub fn write_whole(path: &Path, bytes: &[u8], direct: bool) -> io::Result<()> {
+    let f = File::create(path)?;
+    let head = if direct && cfg!(target_os = "linux") { bytes.len() / ALIGN * ALIGN } else { 0 };
+    if head > 0 {
+        use std::os::unix::fs::OpenOptionsExt;
+        let d = FileDisk::options().custom_flags(O_DIRECT).open(path)?;
+        let mut buf = AlignedBuf::new(head);
+        buf[..head].copy_from_slice(&bytes[..head]);
+        d.write_all_at(&buf[..head], 0)?;
+    }
+    f.write_all_at(&bytes[head..], head as u64)?;
+    f.sync_all()
+}
+
+/// Syncs directory `dir`, so that the creations, renames and removals in it are durable.
+pub fn sync_dir(dir: &Path) -> io::Result<()> {
+    File::open(dir)?.sync_all()
 }
 
 pub(crate) fn errno(e: &io::Error) -> IoErrno {
@@ -416,6 +440,24 @@ mod tests {
         let s = Script(std::cell::RefCell::new(vec![Err(io::Error::from_raw_os_error(5))]));
         assert!(read_up_to(&s, &mut buf, 0).is_err());
         assert!(s.write_at(b"x", 0).is_err());
+    }
+
+    #[test]
+    fn whole_files_are_written_with_and_without_o_direct() {
+        let root = temp_root("whole");
+        fs::create_dir_all(&root).unwrap();
+        for direct in [false, true] {
+            for len in [0usize, 100, 4096, 10_000, 3 * 4096] {
+                let p = root.join(format!("f-{direct}-{len}"));
+                let bytes: Vec<u8> = (0..len).map(|i| (i % 253) as u8).collect();
+                write_whole(&p, &bytes, direct).unwrap();
+                assert_eq!(fs::read(&p).unwrap(), bytes, "direct={direct} len={len}");
+            }
+        }
+        sync_dir(&root).unwrap();
+        assert!(write_whole(&root.join("missing/x"), b"x", false).is_err());
+        assert!(sync_dir(&root.join("missing")).is_err());
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

@@ -147,6 +147,9 @@ pub struct IoUringDisk {
     done: VecDeque<(u64, IoDone)>,
     next_seq: u64,
     wake: File,
+    /// Whether the buffers are registered: on the first read or write, from the core's thread,
+    /// so that their memory is on the NUMA node of the core's CPU (012 FR-006).
+    buffers_ready: bool,
 }
 
 fn cpath(p: &Path) -> CString {
@@ -180,7 +183,6 @@ impl IoUringDisk {
         let mut ring = Ring::new(RING_ENTRIES)?;
         let probe = ring.probe()?;
         missing_ops(&probe).map_err(io::Error::other)?;
-        ring.register_buffers(BufferPool::allocate(BUFFERS_PER_CORE))?;
         ring.register_files(FILE_SLOTS)?;
         let wake = File::from(teseladb_sys::uring::eventfd()?);
         ring.register_eventfd(wake.as_raw_fd())?;
@@ -198,6 +200,7 @@ impl IoUringDisk {
             done: VecDeque::new(),
             next_seq: 0,
             wake,
+            buffers_ready: false,
         })
     }
 
@@ -301,6 +304,18 @@ impl IoUringDisk {
                 return;
             }
             let (seq, op) = self.queue.pop_front().expect("front op");
+            if data_range(&op).is_some() && !self.buffers_ready {
+                match self.ring.register_buffers(BufferPool::allocate(BUFFERS_PER_CORE)) {
+                    Ok(()) => self.buffers_ready = true,
+                    Err(e) => {
+                        // Finished at once, behind the ones still running.
+                        let result = Some(fail(&op, errno(&e)));
+                        let work = Work::Steps { steps: VecDeque::new(), opened: Vec::new() };
+                        self.running.push_back(Job { seq, op, work, waiting: None, result });
+                        continue;
+                    }
+                }
+            }
             let work = match &op {
                 IoOp::WriteAt { .. } => {
                     Work::Write { pos: 0, buf: self.pool.take().expect("a free buffer") }

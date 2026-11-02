@@ -31,13 +31,7 @@ pub enum Target {
 impl Target {
     /// From `--target` (`refdb://host:port[/...]`), or a local cluster without it.
     pub fn open(uri: Option<&str>) -> Result<Target, String> {
-        let Some(uri) = uri else {
-            let opts = DevOpts { nodes: LOCAL_NODES, cores: 1, port: 0, test_commands: false };
-            return match teseladb_server::dev::start(&opts, None) {
-                Ok(nodes) => Ok(Target::Local(nodes)),
-                Err(e) => Err(format!("local cluster: {e:?}")),
-            };
-        };
+        let Some(uri) = uri else { return Target::local(LOCAL_NODES, 1) };
         let rest = uri
             .strip_prefix("refdb://")
             .ok_or(format!("--target is refdb://host:port, not {uri}"))?;
@@ -48,6 +42,15 @@ impl Target {
             .next()
             .ok_or(format!("{host}: no address"))?;
         Ok(Target::Remote(addr))
+    }
+
+    /// A cluster of `nodes` nodes of `cores` cores in this process.
+    pub fn local(nodes: u16, cores: u16) -> Result<Target, String> {
+        let opts = DevOpts { nodes, cores, port: 0, test_commands: false };
+        match teseladb_server::dev::start(&opts, None) {
+            Ok(nodes) => Ok(Target::Local(nodes)),
+            Err(e) => Err(format!("local cluster: {e:?}")),
+        }
     }
 
     /// Address of the server (the first node of a local cluster).

@@ -262,10 +262,14 @@ fn three_processes_join_and_survive_the_loss_of_the_leader() {
     let (id1, seed) = p1.ready();
     assert_eq!(id1, 1);
     let p2 = Proc::start("2", Some(&seed));
+    // The disk executor and O_DIRECT are logged before the node starts (012 FR-003, FR-007).
+    p2.wait_for("disk: ");
     let (id2, peer2) = p2.ready();
     let p3 = Proc::start("3", Some(&seed));
     let (id3, _) = p3.ready();
     assert_eq!((id2, id3), (2, 3));
+    // Its cores are pinned to the CPUs the process may use (012 FR-006).
+    p3.wait_for("cores' CPUs cpus=");
     // Node 3 votes in Group 0: losing one of three voters keeps the quorum.
     p3.wait_for("Group 0 membership voter=true");
     // The founder created the data range and leads it: its log says so (005 T029 finds the
