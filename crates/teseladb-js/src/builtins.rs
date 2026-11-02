@@ -56,6 +56,7 @@ pub(crate) fn class_kind(v: &Val) -> &'static str {
     match v {
         Val::Obj(o) => match &o.borrow().kind {
             Kind::Array(_) => "Array",
+            Kind::Func(Func::Bound(..)) => "BoundFunctionObject",
             Kind::Func(_) => "Function",
             Kind::Map(_) => "Map",
             Kind::Set(_) => "Set",
@@ -83,6 +84,7 @@ pub(crate) fn class_kind(v: &Val) -> &'static str {
             Kind::AsyncGenerator => "AsyncGenerator",
             Kind::Ordinary | Kind::Bson(_) => "Object",
         },
+        Val::Null => "null",
         other => other.type_of(),
     }
 }
@@ -325,7 +327,7 @@ fn sleep(it: &mut Interp, _: &Val, a: &[Val]) -> R {
 /// `eval(code)`: a script in the global scope.
 fn eval(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     let Val::Str(src) = arg(a, 0) else { return Ok(arg(a, 0)) };
-    let body = crate::parser::parse_script(&src).map_err(|e| it.syntax_error(&e))?;
+    let body = crate::parser::parse_eval(&src).map_err(|e| it.syntax_error(&e))?;
     let env = it.global_env.clone();
     it.hoist(&body, &env, true)?;
     if !crate::parser::has_use_strict(&body) {
@@ -530,15 +532,13 @@ fn proto_getter(it: &mut Interp, this: &Val, _: &[Val]) -> R {
 
 fn proto_setter(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     if this.is_nullish() {
-        return it.type_error(&format!("can't convert {} to object", it.show(this)));
+        let m = format!("std_Object_setProto method called on incompatible {}", it.show(this));
+        return it.type_error(&m);
     }
-    let p = match arg(a, 0) {
-        Val::Obj(p) => Some(p),
-        Val::Null => None,
-        _ => return Ok(Val::Undef),
-    };
-    if let Val::Obj(o) = this {
-        set_proto_of(it, o, p)?;
+    match (this, arg(a, 0)) {
+        (Val::Obj(o), Val::Obj(p)) => set_proto_of(it, o, Some(p))?,
+        (Val::Obj(o), Val::Null) => set_proto_of(it, o, None)?,
+        _ => {}
     }
     Ok(Val::Undef)
 }
@@ -696,8 +696,9 @@ fn function_builtins(it: &mut Interp, g: &ObjRef) -> R<()> {
         method(it, &proto, name, f, n)?;
     }
     for name in ["arguments", "caller"] {
-        let f = it.native("", restricted, 0)?;
-        let p = Prop { getter: Some(f.clone()), setter: Some(f), ..Prop::hidden(Val::Undef) };
+        let get = it.native(&format!("get {name}"), restricted, 0)?;
+        let set = it.native(&format!("set {name}"), restricted, 0)?;
+        let p = Prop { getter: Some(get), setter: Some(set), ..Prop::hidden(Val::Undef) };
         it.define(&proto, name, p)?;
     }
     if let Some(c) = constructor {
@@ -714,6 +715,13 @@ fn function_builtins(it: &mut Interp, g: &ObjRef) -> R<()> {
 /// `Function.prototype.caller` and `arguments`: `null` for a sloppy function, an error for the
 /// others.
 fn restricted(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+    let function = matches!(this, Val::Obj(o)
+        if matches!(o.borrow().kind, Kind::Func(Func::Closure { .. } | Func::Native(..))));
+    if !function {
+        let class = class_name(this);
+        let name = it.native.clone();
+        return it.type_error(&format!("{name} method called on incompatible {class}"));
+    }
     let sloppy = matches!(this, Val::Obj(o) if matches!(&o.borrow().kind,
         Kind::Func(Func::Closure { def, .. })
             if !def.strict && !def.arrow && !def.generator && !def.is_async));
@@ -741,7 +749,7 @@ pub(crate) fn function_ctor(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     }
     let body = parts.pop().unwrap_or_default();
     let src = format!("(function anonymous({}\n) {{\n{body}\n}})", parts.join(","));
-    let stmts = crate::parser::parse_script(&src).map_err(|e| it.syntax_error(&e))?;
+    let stmts = crate::parser::parse_eval(&src).map_err(|e| it.syntax_error(&e))?;
     let env = it.global_env.clone();
     match stmts.first() {
         Some(crate::ast::Stmt::Expr(e)) => it.eval(e, &env),
@@ -1225,8 +1233,8 @@ fn errors(it: &mut Interp, g: &ObjRef) -> R<()> {
     it.define(&proto, "name", Prop::hidden(Val::str("Error")))?;
     it.define(&proto, "message", Prop::hidden(Val::str("")))?;
     method(it, &proto, "toString", error_to_string, 0)?;
-    let get = it.native("", stack_getter, 0)?;
-    let set = it.native("", stack_setter, 1)?;
+    let get = it.native("get stack", stack_getter, 0)?;
+    let set = it.native("set stack", stack_setter, 1)?;
     let p = Prop { getter: Some(get), setter: Some(set), ..Prop::hidden(Val::Undef) };
     it.define(&proto, "stack", p)?;
     method(it, &base, "isError", |_, _, a| Ok(Val::Bool(is_error(&arg(a, 0)))), 1)?;
@@ -1338,18 +1346,36 @@ fn capture_stack_trace(it: &mut Interp, _: &Val, a: &[Val]) -> R {
 }
 
 /// `Error.prototype.stack`: the stack of the error, kept when it was made.
-fn stack_getter(_: &mut Interp, this: &Val, _: &[Val]) -> R {
-    Ok(match this {
-        Val::Obj(o) => o.borrow().get_own("@@stack").map_or(Val::Undef, |p| p.value.clone()),
-        _ => Val::Undef,
-    })
+/// An object that is not an error reads the stack of the first error of its prototypes, and an
+/// empty one when it reaches `Error.prototype` (measured on a `refrouter` 9.0.4).
+fn stack_getter(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+    let Val::Obj(o) = this else {
+        return it
+            .type_error(&format!("get stack method called on incompatible {}", class_name(this)));
+    };
+    let mut cur = Some(o.clone());
+    while let Some(c) = cur {
+        if matches!(c.borrow().kind, Kind::Error) {
+            return Ok(c.borrow().get_own("@@stack").map_or(Val::Undef, |p| p.value.clone()));
+        }
+        if c.ptr_eq(&it.realm.error) {
+            return Ok(Val::str(""));
+        }
+        cur = c.borrow().proto.clone();
+    }
+    it.type_error(&format!(
+        "Error.prototype.(get stack) called on incompatible {}",
+        class_name(this)
+    ))
 }
 
-/// Setting `stack` gives the error its own `stack`.
+/// Setting `stack` gives the object its own `stack`.
 fn stack_setter(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    if let Val::Obj(o) = this {
-        it.define(o, "stack", Prop::data(arg(a, 0)))?;
-    }
+    let Val::Obj(o) = this else {
+        return it
+            .type_error(&format!("set stack method called on incompatible {}", class_name(this)));
+    };
+    it.define(o, "stack", Prop::data(arg(a, 0)))?;
     Ok(Val::Undef)
 }
 
@@ -1417,7 +1443,7 @@ fn collections(it: &mut Interp, g: &ObjRef) -> R<()> {
         &mp,
         "size",
         Prop {
-            getter: Some(it.native("size", branded!(true, coll_size), 0)?),
+            getter: Some(it.native("get size", branded!(true, coll_size), 0)?),
             ..Prop::hidden(Val::Undef)
         },
     )?;
@@ -1441,7 +1467,7 @@ fn collections(it: &mut Interp, g: &ObjRef) -> R<()> {
         &sp,
         "size",
         Prop {
-            getter: Some(it.native("size", branded!(false, coll_size), 0)?),
+            getter: Some(it.native("get size", branded!(false, coll_size), 0)?),
             ..Prop::hidden(Val::Undef)
         },
     )?;
@@ -1819,12 +1845,12 @@ fn regexp_builtins(it: &mut Interp, g: &ObjRef) -> R<()> {
         let fo = it.native(&format!("[Symbol.{name}]"), f, n)?;
         it.define(&proto, &well_known(name), Prop::hidden(Val::Obj(fo)))?;
     }
-    let getter = it.native("source", regexp_source, 0)?;
+    let getter = it.native("get source", regexp_source, 0)?;
     it.define(&proto, "source", Prop { getter: Some(getter), ..Prop::hidden(Val::Undef) })?;
-    let getter = it.native("flags", regexp_flags, 0)?;
+    let getter = it.native("get flags", regexp_flags, 0)?;
     it.define(&proto, "flags", Prop { getter: Some(getter), ..Prop::hidden(Val::Undef) })?;
     for (name, _) in REGEXP_FLAGS {
-        let getter = it.native(name, regexp_flag, 0)?;
+        let getter = it.native(&format!("get {name}"), regexp_flag, 0)?;
         it.define(&proto, name, Prop { getter: Some(getter), ..Prop::hidden(Val::Undef) })?;
     }
     if let Some(Val::Obj(c)) = g.borrow().get_own("RegExp").map(|p| p.value.clone()) {
@@ -1890,7 +1916,8 @@ fn regexp_this(it: &mut Interp, this: &Val) -> R<Option<(Name, Name)>> {
             return Ok(None);
         }
     }
-    let name = it.native.clone();
+    let native = it.native.clone();
+    let name = native.strip_prefix("get ").unwrap_or(&native);
     let class = match this {
         Val::Obj(_) => class_name(this),
         v => v.type_of().to_string(),
@@ -1899,7 +1926,8 @@ fn regexp_this(it: &mut Interp, this: &Val) -> R<Option<(Name, Name)>> {
 }
 
 fn regexp_flag(it: &mut Interp, this: &Val, _: &[Val]) -> R {
-    let name = it.native.clone();
+    let native = it.native.clone();
+    let name = native.strip_prefix("get ").unwrap_or(&native);
     let flag = REGEXP_FLAGS.iter().find(|(n, _)| **n == *name).map_or('g', |(_, c)| *c);
     Ok(match regexp_this(it, this)? {
         Some((_, f)) => Val::Bool(f.contains(flag)),
@@ -1942,12 +1970,13 @@ pub(crate) fn regexp_to_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
 
 /// `compile(pattern, flags)` of Annex B: `this` takes the new pattern and `lastIndex` goes to 0.
 fn regexp_compile(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    let Val::Obj(o) = this else {
-        return Err(incompatible(it, "RegExp.prototype.compile"));
+    let o = match this {
+        Val::Obj(o) if matches!(o.borrow().kind, Kind::RegExp(..)) => o,
+        _ => {
+            let m = format!("compile method called on incompatible {}", class_name(this));
+            return it.type_error(&m);
+        }
     };
-    if !matches!(o.borrow().kind, Kind::RegExp(..)) {
-        return Err(incompatible(it, "RegExp.prototype.compile"));
-    }
     let pattern = arg(a, 0);
     let flags = arg(a, 1);
     let from = match &pattern {

@@ -306,12 +306,13 @@ pub(crate) fn callee_text(e: &Expr) -> String {
         Expr::Ident(n, _) => n.to_string(),
         Expr::Member { obj, prop, .. } => match &**prop {
             MemberProp::Name(n) | MemberProp::Private(n) => format!("{}.{n}", callee_text(obj)),
-            // SpiderMonkey folds a constant key: `o['k' + 1]` is `o.k1`, `o['a b']` stays.
+            // SpiderMonkey folds a constant key: `o['k' + 1]` is `o.k1`, `o[1 + 2]` and `o['3']`
+            // are `o[3]`, `o[1.5]` is `o['1.5']`, `o['a b']` stays.
             MemberProp::Computed(k) => match fold_key(k) {
+                Some(key) if array_index(&key).is_some() => format!("{}[{key}]", callee_text(obj)),
                 Some(key) if is_identifier(&key) => format!("{}.{key}", callee_text(obj)),
                 Some(key) => format!("{}['{key}']", callee_text(obj)),
                 None => match k {
-                    Expr::Num(n) => format!("{}[{}]", callee_text(obj), number::to_string(*n)),
                     Expr::Ident(..) => format!("{}[{}]", callee_text(obj), callee_text(k)),
                     Expr::At(_, inner) if matches!(**inner, Expr::Ident(..)) => {
                         format!("{}[{}]", callee_text(obj), callee_text(inner))
@@ -357,24 +358,37 @@ fn bare_temp(e: &Expr) -> bool {
     matches!(e, Expr::Ident(n, _) if n.starts_with(crate::generators::TEMP_PREFIX) && !n.contains('|'))
 }
 
-/// The string a constant key folds to: a string, or `+` of strings and numbers.
-fn fold_key(e: &Expr) -> Option<String> {
-    match e {
-        Expr::Str(s) => Some(s.to_string()),
-        Expr::At(_, x) => fold_key(x),
-        Expr::Binary("+", a, b) => {
-            let side = |x: &Expr| match x {
-                Expr::Num(n) => Some(number::to_string(*n)),
-                Expr::At(_, y) if matches!(**y, Expr::Num(_)) => match **y {
-                    Expr::Num(n) => Some(number::to_string(n)),
-                    _ => None,
-                },
-                other => fold_key(other),
-            };
-            Some(side(a)? + &side(b)?)
+/// A constant that SpiderMonkey folds: a string or a number.
+enum Folded {
+    Str(String),
+    Num(f64),
+}
+
+impl Folded {
+    fn text(self) -> String {
+        match self {
+            Folded::Str(s) => s,
+            Folded::Num(n) => number::to_string(n),
         }
+    }
+}
+
+fn fold(e: &Expr) -> Option<Folded> {
+    match e {
+        Expr::Str(s) => Some(Folded::Str(s.to_string())),
+        Expr::Num(n) => Some(Folded::Num(*n)),
+        Expr::At(_, x) => fold(x),
+        Expr::Binary("+", a, b) => Some(match (fold(a)?, fold(b)?) {
+            (Folded::Num(x), Folded::Num(y)) => Folded::Num(x + y),
+            (x, y) => Folded::Str(x.text() + &y.text()),
+        }),
         _ => None,
     }
+}
+
+/// The property key a constant key expression folds to: a string, a number, or `+` of them.
+fn fold_key(e: &Expr) -> Option<String> {
+    fold(e).map(Folded::text)
 }
 
 /// Writes `name` for the first `text` of the message of `err`, an error `make_error` made: its
