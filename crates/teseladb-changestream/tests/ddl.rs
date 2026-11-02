@@ -45,6 +45,7 @@ fn a_drop_or_rename_ends_a_collection_stream_and_a_drop_database_a_database_stre
     assert!(!invalidates(Scope::Collection, w, EventKind::Drop, ("other", Some("c"))));
     assert!(!invalidates(Scope::Collection, w, EventKind::DropDatabase, ("db", None)));
     assert!(!invalidates(Scope::Collection, w, EventKind::Modify, ("db", Some("c"))));
+    assert!(!invalidates(Scope::Collection, w, EventKind::Drop, ("db", None)));
     let d = ("db", None);
     assert!(invalidates(Scope::Database, d, EventKind::DropDatabase, ("db", None)));
     assert!(!invalidates(Scope::Database, d, EventKind::DropDatabase, ("x", None)));
@@ -73,4 +74,7 @@ fn an_index_change_names_the_index_with_its_new_values_and_the_old_ones() {
         Document::new().with("v", 2).with("key", key).with("name", "a_1").with("sparse", true);
     let (_, options) = index_change(&Document::new(), &fresh);
     assert_eq!(options, Document::new(), "an option absent before and not a flag has no old value");
+    let unnamed = Document::new().with("v", 2).with("hidden", true);
+    let (index, _) = index_change(&Document::new(), &unnamed);
+    assert_eq!(index, Document::new().with("hidden", true), "a specification without a name");
 }
