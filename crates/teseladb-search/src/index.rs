@@ -582,11 +582,10 @@ impl MemIndex {
         let Some(field) = self.fields.get(path) else { return BTreeMap::new() };
         let g = self.global_of(path);
         let n = g.map_or(field.lengths.len() as u64, |g| g.docs);
-        let idf_sum: f32 = terms
-            .iter()
-            .filter_map(|t| field.postings.get(t).map(|d| (t, d.len())))
-            .map(|(t, local)| idf(n, field.df(t, local, g)) as f32)
-            .sum();
+        let idf_sum = idf_sum(
+            n,
+            terms.iter().filter_map(|t| field.postings.get(t).map(|d| field.df(t, d.len(), g))),
+        );
         let score = field.scorer(boost * idf_sum, g);
         freqs.into_iter().map(|(doc, f)| (doc, score(doc, f))).collect()
     }
@@ -689,7 +688,7 @@ impl TextField {
     ) -> Vec<(u32, f32)> {
         let Some((dfs, freqs)) = self.phrase_freqs(terms, slop, g) else { return Vec::new() };
         let n = g.map_or(self.lengths.len() as u64, |g| g.docs);
-        let idf_sum: f32 = dfs.iter().map(|&df| idf(n, df) as f32).sum();
+        let idf_sum = idf_sum(n, dfs.iter().copied());
         let score = self.scorer(boost * idf_sum, g);
         freqs.into_iter().map(|(doc, f)| (doc, score(doc, f))).collect()
     }
@@ -1041,6 +1040,12 @@ fn walk<'a>(
         prefix.pop();
     }
     Ok(())
+}
+
+/// The weight of several terms: their idfs, each a 32-bit float, added in double precision as
+/// RefLib's `BM25Similarity.idfExplain` adds them.
+pub(crate) fn idf_sum(n: u64, dfs: impl IntoIterator<Item = u64>) -> f32 {
+    dfs.into_iter().map(|df| f64::from(idf(n, df) as f32)).sum::<f64>() as f32
 }
 
 /// The matches of a phrase whose terms sit at `places` (each term's positions minus its offset in

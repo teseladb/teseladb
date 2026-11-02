@@ -21,6 +21,7 @@ use teseladb_exec::pipeline::search::Scored;
 use teseladb_hlc::Hlc;
 use teseladb_meta::catalog::{CollectionEntry, Namespace};
 use teseladb_meta::indexes::{SearchIndexEntry, SearchIndexKind};
+use teseladb_range::read::ReadConcern;
 use teseladb_search::definition::{Definition, VectorDefinition};
 use teseladb_search::index::MemIndex;
 use teseladb_search::indexer::{Found, Indexer, SegmentFile};
@@ -116,6 +117,16 @@ impl Segments {
                 Ok(())
             }
         }
+    }
+
+    /// Gives a `search` index the documents of its synonym collections.
+    fn set_synonyms(&mut self, synonyms: &[(String, Vec<Document>)]) -> Result<(), CommandError> {
+        if let Segments::Search(ix) = self {
+            for (name, docs) in synonyms {
+                ix.set_synonyms(name, docs).map_err(index_error)?;
+            }
+        }
+        Ok(())
     }
 
     fn apply(&mut self, newest: BTreeMap<Vec<u8>, Option<Document>>) -> Result<(), CommandError> {
@@ -370,6 +381,7 @@ pub fn with_index<B: Backend + ?Sized, R>(
     shared: &Shared,
     coll: &CollectionEntry,
     entry: &SearchIndexEntry,
+    synonyms: &[(String, Vec<Document>)],
     f: impl FnOnce(&Segments, &BTreeMap<Vec<u8>, Document>) -> R,
 ) -> Result<R, CommandError> {
     let (taken, received) = {
@@ -411,6 +423,7 @@ pub fn with_index<B: Backend + ?Sized, R>(
         }
         return Err(e);
     }
+    built.indexer.set_synonyms(synonyms)?;
     let out = f(&built.indexer, &built.stored);
     let dump = fresh || built.pending >= DUMP_EVERY;
     if dump {
@@ -589,14 +602,38 @@ fn answer<B: Backend + ?Sized>(
     if failed.is_some_and(|s| s.version == entry.version && s.failure.is_some()) {
         return Err(query_error(failed_state(&entry, &coll, ns)));
     }
-    let found = with_index(backend, shared, &coll, &entry, |ix, stored| match (ix, meta_only) {
-        (Segments::Search(ix), true) => ix.meta(spec).map(|d| vec![plain(d)]),
-        (Segments::Search(ix), false) => {
-            ix.search(spec).map(|f| scored(as_read(f, stored, view.is_some()), SEARCH_SCORE))
+    let synonyms = synonym_documents(backend, ns, &entry)?;
+    let found = with_index(backend, shared, &coll, &entry, &synonyms, |ix, stored| {
+        match (ix, meta_only) {
+            (Segments::Search(ix), true) => ix.meta(spec).map(|d| vec![plain(d)]),
+            (Segments::Search(ix), false) => {
+                ix.search(spec).map(|f| scored(as_read(f, stored, view.is_some()), SEARCH_SCORE))
+            }
+            (Segments::Vector(_), _) => Err(vector_search::not_search(&name)),
         }
-        (Segments::Vector(_), _) => Err(vector_search::not_search(&name)),
     })?;
     found.map_err(|e| query_error(e.0))
+}
+
+/// The documents of the collection of each synonym mapping of `entry`, in the database of `ns`,
+/// read at the query's mark (an absent collection has none).
+fn synonym_documents<B: Backend + ?Sized>(
+    backend: &mut B,
+    ns: &Namespace,
+    entry: &SearchIndexEntry,
+) -> Result<Vec<(String, Vec<Document>)>, CommandError> {
+    if entry.kind != SearchIndexKind::Search {
+        return Ok(Vec::new());
+    }
+    let (raw, _) = split_definition(&entry.definition)?;
+    let def = Definition::parse(&raw).map_err(|e| query_error(e.message("")))?;
+    let mut out = Vec::new();
+    for s in &def.synonyms {
+        let source = Namespace { db: ns.db.clone(), coll: s.collection.clone() };
+        let docs = super::aggregate::read_through(backend, &source, &[], None, ReadConcern::Local)?;
+        out.push((s.name.clone(), docs));
+    }
+    Ok(out)
 }
 
 /// The error of a query on an index that failed to build (measured).
@@ -692,7 +729,7 @@ fn vector_source<B: Backend + ?Sized>(
         return Ok(Vec::new());
     }
     let on_view = view.is_some();
-    let found = with_index(backend, shared, &coll, &entry, |ix, stored| match ix {
+    let found = with_index(backend, shared, &coll, &entry, &[], |ix, stored| match ix {
         Segments::Vector(ix) => {
             ix.search(&query).map(|f| scored(as_read(f, stored, on_view), VECTOR_SEARCH_SCORE))
         }

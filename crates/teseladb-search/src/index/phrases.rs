@@ -212,8 +212,7 @@ impl MemIndex {
         let Some(field) = self.fields.get(key) else { return BTreeMap::new() };
         let g = self.global_of(key);
         let n = g.map_or(field.lengths.len() as u64, |g| g.docs);
-        let idf_sum: f32 =
-            field.dfs(&phrase.terms(), g).into_iter().map(|df| idf(n, df) as f32).sum();
+        let idf_sum: f32 = super::idf_sum(n, field.dfs(&phrase.terms(), g));
         let score = field.scorer(boost * idf_sum, g);
         field
             .multi_phrase_freqs(&phrase.positions, phrase.slop)
@@ -264,7 +263,7 @@ impl MemIndex {
                 terms.push(t.clone());
             }
         }
-        let idf_sum: f32 = field.dfs(&terms, g).into_iter().map(|df| idf(n, df) as f32).sum();
+        let idf_sum = super::idf_sum(n, field.dfs(&terms, g));
         let score = field.scorer(boost * idf_sum, g);
         field.automaton_freqs(paths).into_iter().map(|(d, f)| (d, score(d, f))).collect()
     }

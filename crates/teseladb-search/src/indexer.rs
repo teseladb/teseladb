@@ -56,6 +56,8 @@ pub struct Indexer {
     segments: Vec<Segment>,
     /// Segments rebuilt by [`Indexer::reshape`].
     merges: u64,
+    /// The documents of each synonym mapping's collection, as last read (T036).
+    synonyms: std::collections::BTreeMap<String, Vec<Document>>,
 }
 
 /// Whether `key` is in `[start, end)`.
@@ -71,6 +73,7 @@ impl Indexer {
             definition,
             segments: vec![Segment { start: Vec::new(), end: Vec::new(), index }],
             merges: 0,
+            synonyms: std::collections::BTreeMap::new(),
         }
     }
 
@@ -139,7 +142,7 @@ impl Indexer {
                 None => self.segments.push(Segment {
                     start: start.clone(),
                     end: end.clone(),
-                    index: MemIndex::new(self.definition.clone()),
+                    index: self.empty_segment()?,
                 }),
             }
         }
@@ -149,6 +152,28 @@ impl Indexer {
             }
         }
         self.refresh_stats();
+        Ok(())
+    }
+
+    /// An empty segment with the synonyms read so far.
+    fn empty_segment(&self) -> Result<MemIndex, IndexError> {
+        let mut index = MemIndex::new(self.definition.clone());
+        for (name, docs) in &self.synonyms {
+            index.set_synonyms(name, docs)?;
+        }
+        Ok(index)
+    }
+
+    /// Gives every segment the documents `docs` of the collection of synonym mapping `name`,
+    /// when they changed since the last read (the reload of 011 FR-006).
+    pub fn set_synonyms(&mut self, name: &str, docs: &[Document]) -> Result<(), IndexError> {
+        if self.synonyms.get(name).is_some_and(|d| d.as_slice() == docs) {
+            return Ok(());
+        }
+        for s in &mut self.segments {
+            s.index.set_synonyms(name, docs)?;
+        }
+        self.synonyms.insert(name.to_owned(), docs.to_vec());
         Ok(())
     }
 
@@ -179,7 +204,8 @@ impl Indexer {
             let index = MemIndex::load(definition.clone(), &f.bytes)?;
             segments.push(Segment { start: f.start.clone(), end: f.end.clone(), index });
         }
-        let mut ix = Indexer { definition, segments, merges: 0 };
+        let synonyms = std::collections::BTreeMap::new();
+        let mut ix = Indexer { definition, segments, merges: 0, synonyms };
         ix.refresh_stats();
         Ok(ix)
     }

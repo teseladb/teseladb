@@ -93,7 +93,7 @@ impl TextField {
             [one] => idf_of(*one),
             many => {
                 let parts: Vec<Explanation> = many.iter().map(|&df| idf_of(df)).collect();
-                let sum = parts.iter().map(|p| p.value).sum();
+                let sum = parts.iter().map(|p| f64::from(p.value)).sum::<f64>() as f32;
                 Explanation::node(sum, "idf, sum of:", parts)
             }
         };
