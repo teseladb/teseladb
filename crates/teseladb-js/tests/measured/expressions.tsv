@@ -5019,3 +5019,66 @@ eval('<!-- x\n 2')	J:2
 (function(){ try { eval('3in []') } catch (e) { return e.message } })()	S:identifier starts immediately after numeric literal
 (function(){ try { eval('\\u0061wait: 1') ; return 'ok' } catch (e) { return e.message } })()	S:ok
 (function(){ try { eval('@') } catch (e) { return e.message } })()	S:illegal character U+0040
+Function.prototype.call.call(1)	E:TypeError:Function.prototype.call called on incompatible number
+Function.prototype.apply.call({})	E:TypeError:Function.prototype.apply called on incompatible Object
+Function.prototype.bind.call(1)	E:TypeError:Function.prototype.bind called on incompatible number
+(function(){ try { Function.prototype.call.call(1) } catch (e) { return e.message } })()	S:Function.prototype.call called on incompatible number
+(function(){ try { Function.prototype.apply.call({}) } catch (e) { return e.message } })()	S:Function.prototype.apply called on incompatible Object
+(function(){ try { Function.prototype.bind.call(1) } catch (e) { return e.message } })()	S:Function.prototype.bind called on incompatible number
+(function(){ try { Function.prototype.toString.call(1) } catch (e) { return e.message } })()	S:Function.prototype.toString called on incompatible object
+(function(){ try { new (function(){}.bind())(); return 'ok' } catch (e) { return e.message } })()	S:ok
+(function(){ try { new (Math.max.bind())() } catch (e) { return e.message } })()	S:Math.max.bind() is not a constructor
+(function(){ try { new (() => 1)() } catch (e) { return e.message } })()	S:() => 1 is not a constructor
+(function(){ try { new ({m(){}}).m() } catch (e) { return e.message } })()	S:(intermediate value).m is not a constructor
+(function(){ class A { constructor(){ this.x = 1 } }; class B extends A {}; const b = Reflect; })()	E:ReferenceError:Reflect is not defined
+(function(){ class A {}; class B extends A { constructor(){ return 1 } }; try { new B() } catch (e) { return e.message } })()	S:derived class constructor returned invalid value 1
+(function(){ class A {}; class B extends A { constructor(){ } }; try { new B() } catch (e) { return e.message } })()	S:must call super constructor before using 'this' in derived class constructor
+(function(){ class A {}; class B extends A { constructor(){ super(); super() } }; try { new B() } catch (e) { return e.message } })()	S:super() called twice in derived class constructor
+(function(){ class B extends null {}; try { new B() } catch (e) { return e.message } })()	S:super is not a constructor
+(function(){ function F(){ return null } return typeof new F() })()	S:object
+(function(){ function F(){ return function(){} } return typeof new F() })()	S:function
+(function(){ const o = {get x(){ return this }}; return Object.getOwnPropertyDescriptor(o, 'x').get.call(5) === 5 })()	J:false
+(function(){ 'use strict'; function f(){ return this } return [f.call(null), f.call(undefined), typeof f.call(1)].join() })()	S:,,number
+(function(){ function f(){ return this } return [typeof f.call(null), typeof f.call(1)].join() })()	S:object,object
+(function(){ var x = 1; { function x(){} } return typeof x })()	S:function
+(function(){ eval('var e1 = 5'); return e1 })()	J:5
+(function(){ 'use strict'; eval('var e2 = 5'); return typeof e2 })()	S:undefined
+(function(){ let a = 1; try { eval('let a = 2; var b = a'); return a + b } catch (e) { return e.message } })()	J:3
+(function(){ let c = 1; try { eval('var c = 2') } catch (e) { return e.message } })()	S:redeclaration of let c
+(function(){ const f = function g(){ g = 1; return typeof g }; return f() })()	S:function
+(function(){ 'use strict'; const f = function g(){ try { g = 1 } catch (e) { return e.message } }; return f() })()	S:invalid assignment to const 'g'
+(function(){ try { undefinedVar } catch (e) { return e.message } })()	S:undefinedVar is not defined
+(function(){ 'use strict'; try { undeclared = 1 } catch (e) { return e.message } })()	S:assignment to undeclared variable undeclared
+(function(){ try { const k = 1; k = 2 } catch (e) { return e.message } })()	S:invalid assignment to const 'k'
+(function(){ try { tdz; let tdz = 1 } catch (e) { return e.message } })()	S:can't access lexical declaration 'tdz' before initialization
+(function(){ try { (function(){ typeof tdz2; let tdz2 })() } catch (e) { return e.message } })()	S:can't access lexical declaration 'tdz2' before initialization
+(function(){ with ({a: 1}) { var w = a } return w })()	J:1
+(function(){ const o = {a: 1}; with (o) { a = 2 } return o.a })()	J:2
+(function(){ with ({[Symbol.unscopables]: {a: true}, a: 1}) { try { return a } catch (e) { return e.message } } })()	S:a is not defined
+(function(){ return new.target === undefined })()	J:true
+(function(){ function F(){ return new.target === F } return new F() })()	J:{}
+(function(){ const t = (s, ...v) => s.raw.join('|') + v.join(); return t`a${1}b${2}c` })()	S:a|b|c1,2
+(function(){ const t = (s) => s; return t`x` === t`x` })()	J:false
+(function(){ function f(){ return (s) => s } return f()`x` === f()`x` })()	J:false
+(function(){ const o = {f(){ return super.toString === Object.prototype.toString }}; return o.f() })()	J:true
+(function(){ const o = {a: 1, __proto__: {b: 2}}; return o.b })()	J:2
+(function(){ const o = {__proto__: 1}; return Object.getPrototypeOf(o) === Object.prototype })()	J:true
+(function(){ const k = '__proto__'; const o = {[k]: 1}; return Object.keys(o).join() })()	S:__proto__
+(function(){ try { null.x } catch (e) { return e.message } })()	S:can't access property "x" of null
+(function(){ try { undefined[Symbol()] } catch (e) { return e.message } })()	S:can't access property Symbol() of undefined
+(function(){ try { let u; u.x.y } catch (e) { return e.message } })()	S:can't access property "x", u is undefined
+(function(){ try { let u = {}; u.x.y } catch (e) { return e.message } })()	S:can't access property "y", u.x is undefined
+(function(){ try { let u = {}; u.f() } catch (e) { return e.message } })()	S:u.f is not a function
+(function(){ try { let u = {}; u['f' + 1]() } catch (e) { return e.message } })()	S:u.f1 is not a function
+(function(){ try { let u = {f: 1}; new u.f() } catch (e) { return e.message } })()	S:u.f is not a constructor
+(function(){ let u = null; return u?.x?.y })()	J:undefined
+(function(){ let u = {f: null}; return u.f?.() })()	J:undefined
+(function(){ let u = null; return u?.[0] })()	J:undefined
+(function(){ function g(){ g = 1; return typeof g } const r = g(); return r + ' ' + typeof g })()	S:number number
+(function(){ const o = {m(){ return typeof m }}; return o.m() })()	S:undefined
+(function(){ const f = function* gen(){ yield typeof gen }; return f().next().value })()	S:function
+(function(){ 'use strict'; const f = function* gen(){ try { gen = 1 } catch (e) { yield e.message } }; return f().next().value })()	S:invalid assignment to const 'gen'
+(function(){ const f = function g(){ var g = 2; return g }; return f() })()	J:2
+(function(){ const f = function g(x = g){ return typeof x }; return f() })()	S:function
+(function(){ const f = function g(){ return eval('typeof g') }; return f() })()	S:function
+(function(){ class B extends null { constructor(){ return Object.create(B.prototype) } }; return typeof new B() })()	S:object

@@ -66,6 +66,9 @@ pub struct EnvRec {
     pub home: Option<ObjRef>,
     pub func: Option<ObjRef>,
     pub new_target: Option<Val>,
+    /// The scope of a named function expression, which holds its name: assigning to it does
+    /// nothing in non-strict code and is an error in strict code.
+    pub function_name: bool,
 }
 
 pub type EnvRef = Rc<RefCell<EnvRec>>;
@@ -1345,9 +1348,6 @@ impl<'c> Interp<'c> {
                 s.new_target = Some(new_target.unwrap_or(Val::Undef));
             }
         }
-        if let (false, Some(name)) = (def.arrow, &def.name) {
-            declare(&scope, name, Val::Obj(fo.clone()), true);
-        }
         if !def.arrow {
             let plain = def.rest.is_none()
                 && def.params.iter().all(|(p, d)| d.is_none() && matches!(p, Pattern::Name(_)));
@@ -1696,7 +1696,11 @@ impl<'c> Interp<'c> {
                 ));
             }
             if !binding.mutable {
+                let silent = b.function_name && !self.strict;
                 drop(b);
+                if silent {
+                    return Ok(());
+                }
                 return self.type_error(&format!("invalid assignment to const '{name}'"));
             }
             binding.value = Some(v);
@@ -1843,6 +1847,19 @@ impl<'c> Interp<'c> {
             })
         });
         (self.home_of(env).is_some(), derived)
+    }
+
+    /// A function expression: a named one sees its name in a scope of its own (ECMA-262
+    /// §15.2.5), which it cannot change.
+    fn function_expression(&mut self, def: &Rc<FuncDef>, env: &EnvRef) -> R {
+        let Some(name) = def.name.as_ref().filter(|_| !def.arrow && !def.method) else {
+            return self.closure(def, env);
+        };
+        let scope = self.new_env(Some(env.clone()));
+        scope.borrow_mut().function_name = true;
+        let f = self.closure(def, &scope)?;
+        declare(&scope, name, f.clone(), false);
+        Ok(f)
     }
 
     pub fn closure(&mut self, def: &Rc<FuncDef>, env: &EnvRef) -> R {
@@ -2801,7 +2818,7 @@ impl<'c> Interp<'c> {
                 self.array(out)
             }
             Expr::Object(props) => self.object_literal(props, env),
-            Expr::Func(def) => self.closure(def, env),
+            Expr::Func(def) => self.function_expression(def, env),
             Expr::Class(c) => self.class(c, env),
             Expr::Spread(_) => self.type_error("unexpected spread"),
             Expr::Unary(op, x) => {
@@ -2900,7 +2917,7 @@ impl<'c> Interp<'c> {
                 }
                 let key = self.member_key(prop, env)?;
                 if o.is_nullish() {
-                    let msg = null_access(obj, &key, &o);
+                    let msg = null_access(obj, &self.access_key(&key), &o);
                     return self.type_error(&msg);
                 }
                 self.get(&o, &key)
@@ -2968,9 +2985,10 @@ impl<'c> Interp<'c> {
             let b = fenv.borrow();
             (b.func.clone(), b.new_target.clone().unwrap_or(Val::Undef))
         };
+        // `class extends null` has `Function.prototype` there, which is no constructor.
         let parent = match func.and_then(|f| f.borrow().proto.clone()) {
-            Some(p) => Val::Obj(p),
-            None => return self.type_error("super is not a constructor"),
+            Some(p) if is_constructor(&Val::Obj(p.clone())) => Val::Obj(p),
+            _ => return self.type_error("super is not a constructor"),
         };
         let args = self.eval_args(args, env)?;
         let this = self.construct(&parent, &args, &new_target)?;
@@ -3038,7 +3056,7 @@ impl<'c> Interp<'c> {
                 }
                 let key = self.member_key(prop, env)?;
                 if o.is_nullish() {
-                    let msg = null_access(obj, &key, &o);
+                    let msg = null_access(obj, &self.access_key(&key), &o);
                     return self.type_error(&msg);
                 }
                 (self.get(&o, &key)?, o)
@@ -3182,7 +3200,7 @@ impl<'c> Interp<'c> {
                 let o = self.eval(obj, env)?;
                 let key = self.member_key(prop, env)?;
                 if o.is_nullish() {
-                    let msg = null_access(obj, &key, &o);
+                    let msg = null_access(obj, &self.access_key(&key), &o);
                     return self.type_error(&msg);
                 }
                 self.set(&o, &key, v)
@@ -3208,6 +3226,11 @@ impl<'c> Interp<'c> {
     /// OrdinaryHasInstance: whether `f.prototype` is on the chain of `x`.
     /// A direct `eval(src)`: the code runs in the caller's scope, its `var`s go to the caller's
     /// function (unless it is strict) and may not redeclare a `let` on the way (ECMA-262 §19.2.1).
+    /// A key as a message about reading it shows it: `"x"`, a symbol as it is written.
+    fn access_key(&self, key: &str) -> String {
+        if is_symbol_key(key) { crate::props::shown_key(self, key) } else { format!("\"{key}\"") }
+    }
+
     /// The statements of a direct `eval` of `src`: from the cache of the code this call has
     /// evaluated, as the engine keeps it (an `eval` of the same text in a deep recursion does
     /// not parse it again), or parsed in the room the call has left.
@@ -3571,6 +3594,7 @@ impl<'c> Interp<'c> {
 /// `can't access property "x", o is null` when the expression has a name, and
 /// `can't access property "x" of null` for a literal (measured on a `refrouter` 9.0.4 on 02-11).
 fn null_access(obj: &Expr, key: &str, o: &Val) -> String {
+    // `key` is shown already: `"x"`, or `Symbol()` for a symbol.
     let what = if matches!(o, Val::Undef) { "undefined" } else { "null" };
     let named = match obj {
         Expr::Ident(n, _) => &**n != "undefined",
@@ -3578,9 +3602,9 @@ fn null_access(obj: &Expr, key: &str, o: &Val) -> String {
         _ => false,
     };
     if named {
-        format!("can't access property \"{key}\", {} is {what}", callee_text(obj))
+        format!("can't access property {key}, {} is {what}", callee_text(obj))
     } else {
-        format!("can't access property \"{key}\" of {what}")
+        format!("can't access property {key} of {what}")
     }
 }
 
