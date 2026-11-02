@@ -96,6 +96,11 @@ fn started(m: &mut Mem, cmd: &str) -> (Resharding, Shared) {
 #[test]
 fn its_arguments_fail_as_on_a_refrouter() {
     let mut m = sharded(&docs(3));
+    fails(
+        &admin(&mut m, r#"{"reshardCollection":"rs.c","key":{"b":1},"performVerification":true}"#),
+        72,
+        "Cannot set 'performVerification' to true when reshardingDocumentVerification is false",
+    );
     ok(&run(&mut m, r#"{"insert":"u","documents":[{"_id":1}]}"#));
     let cases: [(&str, i32, &str); 11] = [
         (

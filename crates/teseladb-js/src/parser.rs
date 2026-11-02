@@ -9,12 +9,17 @@ use crate::lexer::{SyntaxError, Tok, Token, tokenize};
 
 /// Parses a whole script.
 pub fn parse_script(src: &str) -> Result<Vec<Stmt>, SyntaxError> {
-    parse_script_in(src, &[])
+    parse_script_in(src, &[], (false, false))
 }
 
 /// Parses a whole script that may use the private names `privates` (the code of a direct
-/// `eval` inside a class).
-pub fn parse_script_in(src: &str, privates: &[Name]) -> Result<Vec<Stmt>, SyntaxError> {
+/// `eval` inside a class); `supers` says whether it may use `super.x` and `super()` (the code
+/// of a direct `eval` inside a method or a derived constructor).
+pub fn parse_script_in(
+    src: &str,
+    privates: &[Name],
+    supers: (bool, bool),
+) -> Result<Vec<Stmt>, SyntaxError> {
     let mut p = Parser {
         toks: tokenize(src)?,
         i: 0,
@@ -31,6 +36,8 @@ pub fn parse_script_in(src: &str, privates: &[Name]) -> Result<Vec<Stmt>, Syntax
         namer: crate::names::Namer::default(),
         privates: Vec::new(),
         loose_privates: false,
+        super_prop: supers.0,
+        super_call: supers.1,
     };
     if !privates.is_empty() {
         let declared = privates.iter().map(|n| (n.clone(), PrivateKind::Field, false)).collect();
@@ -40,6 +47,12 @@ pub fn parse_script_in(src: &str, privates: &[Name]) -> Result<Vec<Stmt>, Syntax
     let mut out = Vec::new();
     while !p.at_eof() {
         out.push(p.statement()?);
+        if out.len() == 1 && has_use_strict(&out) {
+            p.strict = true;
+        }
+    }
+    if p.strict {
+        p.check_legacy(0)?;
     }
     p.namer.finish();
     Ok(out)
@@ -52,6 +65,7 @@ fn parse_expression(
     col: u32,
     in_gen: bool,
     in_async: bool,
+    supers: (bool, bool),
 ) -> Result<Expr, SyntaxError> {
     let mut p = Parser {
         toks: crate::lexer::tokenize_at(src, line, col)?,
@@ -69,6 +83,8 @@ fn parse_expression(
         namer: crate::names::Namer::default(),
         privates: Vec::new(),
         loose_privates: true,
+        super_prop: supers.0,
+        super_call: supers.1,
     };
     p.scopes.push(ScopeKind::Function);
     let start = p.pos();
@@ -156,6 +172,8 @@ struct FnKind {
     generator: bool,
     is_async: bool,
     method: bool,
+    /// A class's constructor.
+    ctor: bool,
 }
 
 struct Parser {
@@ -179,6 +197,11 @@ struct Parser {
     in_params: bool,
     /// Whether the code being read is a class's `static { … }` block (no `await` binding).
     in_static: bool,
+    /// Whether `super.x` is allowed here: in a method, a constructor, a field's initializer or
+    /// a static block, and in the arrows inside them.
+    super_prop: bool,
+    /// Whether `super()` is allowed here: in a derived class's constructor and its arrows.
+    super_call: bool,
     /// The functions read and where they are written, for their guessed names.
     namer: crate::names::Namer,
     /// The private names of the classes open here, innermost last.
@@ -215,6 +238,11 @@ fn accessor_name(kind: PropKind, key: &str) -> String {
 }
 
 /// Whether `body` starts with the directive `"use strict"`.
+/// A function declared as the branch of an `if` is in a block of its own (Annex B.3.4).
+fn in_block(s: Stmt) -> Stmt {
+    if matches!(s, Stmt::Func(..)) { Stmt::Block(vec![s]) } else { s }
+}
+
 pub fn has_use_strict(body: &[Stmt]) -> bool {
     matches!(body.first(), Some(Stmt::Expr(Expr::Str(s))) if &**s == "use strict")
 }
@@ -327,6 +355,15 @@ impl Parser {
     fn fail<T>(&self, message: String) -> Result<T, SyntaxError> {
         let p = self.pos();
         Err(SyntaxError { message, line: p.line, col: p.col })
+    }
+
+    /// Strict mode code from the token `from` up to here: a legacy octal number or escape
+    /// fails ([`crate::lexer::Token::legacy`]).
+    fn check_legacy(&self, from: usize) -> Result<(), SyntaxError> {
+        match self.toks[from..self.i].iter().find_map(|t| t.legacy.map(|m| (t, m))) {
+            Some((t, m)) => Err(SyntaxError { message: m.into(), line: t.line, col: t.col }),
+            None => Ok(()),
+        }
     }
 
     fn fail_at<T>(&self, p: Pos, message: String) -> Result<T, SyntaxError> {
@@ -528,9 +565,12 @@ impl Parser {
                 self.expect("(")?;
                 let c = self.expr_at()?;
                 self.expect(")")?;
-                let then = Box::new(self.statement()?);
-                let other =
-                    if self.eat_word("else") { Some(Box::new(self.statement()?)) } else { None };
+                let then = Box::new(in_block(self.statement()?));
+                let other = if self.eat_word("else") {
+                    Some(Box::new(in_block(self.statement()?)))
+                } else {
+                    None
+                };
                 Ok(Stmt::If(c, then, other))
             }
             "while" => {
@@ -1056,7 +1096,7 @@ impl Parser {
         self.in_gen = outer;
         let name = name?;
         let name = if name.is_empty() { None } else { Some(name) };
-        self.function_body(start, name, false, FnKind { generator, is_async, method: false })
+        self.function_body(start, name, false, FnKind { generator, is_async, ..FnKind::default() })
     }
 
     fn function_body(
@@ -1067,14 +1107,17 @@ impl Parser {
         kind: FnKind,
     ) -> Result<Rc<FuncDef>, SyntaxError> {
         let outer = (self.strict, self.in_gen, self.in_async, self.in_static);
+        let supers = (self.super_prop, self.super_call);
         self.in_gen = kind.generator;
         self.in_async = kind.is_async;
         self.in_static = false;
+        (self.super_prop, self.super_call) = (kind.method || kind.ctor, derived_ctor);
         let entry = self.namer.enter();
         let r = self
             .scoped(ScopeKind::Function, |p| p.function_body_in(start, name, derived_ctor, kind));
         self.namer.leave(entry, r.as_ref().ok());
         (self.strict, self.in_gen, self.in_async, self.in_static) = outer;
+        (self.super_prop, self.super_call) = supers;
         r
     }
 
@@ -1085,6 +1128,8 @@ impl Parser {
         derived_ctor: bool,
         kind: FnKind,
     ) -> Result<Rc<FuncDef>, SyntaxError> {
+        let outer_strict = self.strict;
+        let from = self.i;
         let (params, rest) = self.params()?;
         self.expect("{")?;
         // A directive is the first statement: it is read before the rest of the body.
@@ -1106,8 +1151,12 @@ impl Parser {
         }
         let body = self.block_rest();
         let strict = self.strict || body.as_deref().is_ok_and(has_use_strict);
+        let body = body?;
+        if strict && !outer_strict {
+            self.check_legacy(from)?;
+        }
         let body =
-            if kind.generator && !kind.is_async { crate::generators::lower(body?) } else { body? };
+            if kind.generator && !kind.is_async { crate::generators::lower(body) } else { body };
         Ok(Rc::new(FuncDef {
             name,
             params,
@@ -1121,16 +1170,22 @@ impl Parser {
             method: kind.method,
             source: self.source_from(start),
             guessed: std::cell::OnceCell::new(),
+            annex: std::cell::Cell::new(false),
         }))
     }
 
     /// A class: its code is strict.
     fn class_rest(&mut self) -> Result<Rc<ClassDef>, SyntaxError> {
         let outer = self.strict;
+        let from = self.i;
         self.strict = true;
         let c = self.class_body();
         self.strict = outer;
-        c
+        let c = c?;
+        if !outer {
+            self.check_legacy(from)?;
+        }
+        Ok(c)
     }
 
     fn class_body(&mut self) -> Result<Rc<ClassDef>, SyntaxError> {
@@ -1198,7 +1253,7 @@ impl Parser {
             if self.is("(") {
                 let is_ctor =
                     !is_static && matches!(&key, PropName::Fixed(n) if &**n == "constructor");
-                let fk = FnKind { method: !is_ctor, ..fk };
+                let fk = FnKind { method: !is_ctor, ctor: is_ctor, ..fk };
                 let f = self.function_body(start, None, is_ctor && parent.is_some(), fk)?;
                 if let PropName::Fixed(n) | PropName::Private(n) = &key
                     && !is_ctor
@@ -1211,7 +1266,11 @@ impl Parser {
                     members.push(ClassMember { is_static, key, kind, field: None, func: Some(f) });
                 }
             } else {
-                let init = if self.eat("=") { Some(self.assign()?) } else { Some(Expr::Undefined) };
+                let supers = (self.super_prop, self.super_call);
+                (self.super_prop, self.super_call) = (true, false);
+                let init = if self.eat("=") { self.assign() } else { Ok(Expr::Undefined) };
+                (self.super_prop, self.super_call) = supers;
+                let init = Some(init?);
                 self.semicolon()?;
                 members.push(ClassMember { is_static, key, kind, field: init, func: None });
             }
@@ -1336,10 +1395,11 @@ impl Parser {
 
     /// A class's `static { … }` after `{`: a method of the class with no parameters.
     fn static_block(&mut self, start: Pos) -> Result<Rc<FuncDef>, SyntaxError> {
-        let outer = (self.in_gen, self.in_async, self.in_static);
-        (self.in_gen, self.in_async, self.in_static) = (false, false, true);
+        let outer = (self.in_gen, self.in_async, self.in_static, self.super_prop, self.super_call);
+        (self.in_gen, self.in_async, self.in_static, self.super_prop, self.super_call) =
+            (false, false, true, true, false);
         let body = self.scoped(ScopeKind::Function, Self::block_rest);
-        (self.in_gen, self.in_async, self.in_static) = outer;
+        (self.in_gen, self.in_async, self.in_static, self.super_prop, self.super_call) = outer;
         Ok(Rc::new(FuncDef {
             name: None,
             params: Vec::new(),
@@ -1353,6 +1413,7 @@ impl Parser {
             method: true,
             source: self.source_from(start),
             guessed: std::cell::OnceCell::new(),
+            annex: std::cell::Cell::new(false),
         }))
     }
 
@@ -1454,6 +1515,7 @@ impl Parser {
     }
 
     fn arrow_in(&mut self, start: Pos, is_async: bool) -> Result<Expr, SyntaxError> {
+        let (outer_strict, from) = (self.strict, self.i);
         let (params, rest) = if let Tok::Ident(_) = self.tok() {
             (vec![(Pattern::Name(self.ident()?), None)], None)
         } else {
@@ -1470,6 +1532,9 @@ impl Parser {
         };
         let strict = self.strict;
         let body = body?;
+        if strict && !outer_strict {
+            self.check_legacy(from)?;
+        }
         Ok(Expr::Func(Rc::new(FuncDef {
             name: None,
             params,
@@ -1483,6 +1548,7 @@ impl Parser {
             method: false,
             source: self.source_from(start),
             guessed: std::cell::OnceCell::new(),
+            annex: std::cell::Cell::new(false),
         })))
     }
 
@@ -1830,7 +1896,8 @@ impl Parser {
     /// A template's substitution, positioned where it starts in the source.
     fn substitution(&self, sub: &(String, u32, u32)) -> Result<Expr, SyntaxError> {
         let (src, line, col) = sub;
-        parse_expression(src, *line, *col, self.in_gen, self.in_async)
+        let supers = (self.super_prop, self.super_call);
+        parse_expression(src, *line, *col, self.in_gen, self.in_async, supers)
     }
 
     fn primary(&mut self) -> Result<Expr, SyntaxError> {
@@ -1854,7 +1921,13 @@ impl Parser {
                 let strs = parts.cooked.iter().map(|c| c.clone().unwrap_or_default()).collect();
                 Expr::Template(strs, subs)
             }
-            Tok::Regex(b, f) => Expr::Regex(b, f),
+            Tok::Regex(b, f) => {
+                if let Err(m) = crate::regex::syntax(&b, &f) {
+                    self.i -= 1;
+                    return self.fail(m);
+                }
+                Expr::Regex(b, f)
+            }
             Tok::Punct("(") => {
                 let e = self.expression()?;
                 self.expect(")")?;
@@ -1895,6 +1968,15 @@ impl Parser {
                 "true" => Expr::Bool(true),
                 "false" => Expr::Bool(false),
                 "super" => {
+                    const PROP: &str = "use of super property accesses only valid within methods or eval code within methods";
+                    let call = self.is("(");
+                    if call && !self.super_call {
+                        return self
+                            .fail("super() is only valid in derived class constructors".into());
+                    }
+                    if !call && (self.is(".") || self.is("[")) && !self.super_prop {
+                        return self.fail(PROP.into());
+                    }
                     if self.eat("(") {
                         Expr::SuperCall(self.arguments()?, pos)
                     } else if self.eat(".") {
@@ -1907,8 +1989,7 @@ impl Parser {
                         self.expect("]")?;
                         Expr::SuperMember(Box::new(e))
                     } else {
-                        self.i -= 1;
-                        return self.unexpected();
+                        return self.fail("invalid use of keyword 'super'".into());
                     }
                 }
                 _ if is_reserved(&w) => {

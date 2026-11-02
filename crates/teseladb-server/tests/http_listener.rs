@@ -40,6 +40,21 @@ impl HttpService for Echo {
                 }),
             };
         }
+        if r.target == "/panic" {
+            panic!("the service failed");
+        }
+        if r.target == "/events-then-panic" {
+            let mut n = 0;
+            return Reply::Stream {
+                status: 200,
+                headers: vec![("Content-Type".into(), "text/event-stream".into())],
+                pieces: Box::new(move |_| {
+                    n += 1;
+                    assert!(n == 1, "the stream failed");
+                    Some(b"data: 1\n\n".to_vec())
+                }),
+            };
+        }
         let body = format!("{} {} tls={}", r.method, r.target, caller.tls);
         Reply::Whole(Response { status: 200, headers: Vec::new(), body: body.into_bytes() })
     }
@@ -97,6 +112,21 @@ fn answers_in_pieces_arrive_as_chunks() {
     let r = h1(&l, "GET /events HTTP/1.1\r\nHost: h\r\n\r\n");
     assert_eq!(r.body, b"data: 1\n\ndata: 2\n\ndata: 3\n\n");
     assert_eq!(r.header("content-type"), Some("text/event-stream"));
+    l.stop();
+}
+
+/// A request whose thread ends without answering, because the service panicked, gets `503`; a
+/// stream it began ends; and the port goes on answering, with the limits' places given back.
+#[test]
+fn a_request_given_up_by_its_thread_gets_503_and_a_begun_stream_ends() {
+    let (l, echo) = spawn(None);
+    echo.options.lock().unwrap().concurrent_requests = 1;
+    let r = h1(&l, "GET /panic HTTP/1.1\r\nHost: h\r\n\r\n");
+    assert_eq!(r.status, 503);
+    let r = h1(&l, "GET /events-then-panic HTTP/1.1\r\nHost: h\r\n\r\n");
+    assert_eq!((r.status, r.body.as_slice()), (200, &b"data: 1\n\n"[..]));
+    let r = h1(&l, "GET /v1/after HTTP/1.1\r\nHost: h\r\n\r\n");
+    assert_eq!(r.status, 200);
     l.stop();
 }
 
@@ -267,25 +297,28 @@ fn http2_chosen_by_alpn_over_tls() {
     l.stop();
 }
 
-#[test]
-fn a_client_that_gives_up_cancels_its_request() {
-    let flag_seen = Arc::new(AtomicBool::new(false));
-    struct Slow(Arc<AtomicBool>);
-    impl HttpService for Slow {
-        fn serve(&self, _: &Request, _: &Caller, cancelled: &AtomicBool) -> Reply {
-            for _ in 0..500 {
-                if cancelled.load(Ordering::SeqCst) {
-                    self.0.store(true, Ordering::SeqCst);
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(10));
+/// A service whose requests run until their client gives them up, which it records.
+struct Slow(Arc<AtomicBool>);
+
+impl HttpService for Slow {
+    fn serve(&self, _: &Request, _: &Caller, cancelled: &AtomicBool) -> Reply {
+        for _ in 0..500 {
+            if cancelled.load(Ordering::SeqCst) {
+                self.0.store(true, Ordering::SeqCst);
+                break;
             }
-            Reply::Whole(Response::problem(504))
+            std::thread::sleep(Duration::from_millis(10));
         }
-        fn options(&self) -> HttpOptions {
-            http_options(None)
-        }
+        Reply::Whole(Response::problem(504))
     }
+    fn options(&self) -> HttpOptions {
+        http_options(None)
+    }
+}
+
+/// A port of [`Slow`]: the port, the flag its requests set when cancelled, and its metrics.
+fn slow_port() -> (HttpListener, Arc<AtomicBool>, Arc<Mutex<HttpMetrics>>) {
+    let flag_seen = Arc::new(AtomicBool::new(false));
     let cfg = HttpPortConfig {
         addrs: vec![SocketAddr::from(([127, 0, 0, 1], 0))],
         tls: None,
@@ -293,10 +326,11 @@ fn a_client_that_gives_up_cancels_its_request() {
     };
     let metrics = Arc::new(Mutex::new(HttpMetrics::default()));
     let l = HttpListener::spawn(cfg, Arc::new(Slow(flag_seen.clone())), metrics.clone()).unwrap();
-    let mut s = connect(&l);
-    s.write_all(b"GET / HTTP/1.1\r\nHost: h\r\n\r\n").unwrap();
-    std::thread::sleep(Duration::from_millis(100));
-    drop(s);
+    (l, flag_seen, metrics)
+}
+
+/// Waits until the request saw its cancellation, then checks the metrics counted it as 499.
+fn assert_cancelled(flag_seen: &AtomicBool, metrics: &Mutex<HttpMetrics>) {
     for _ in 0..300 {
         if flag_seen.load(Ordering::SeqCst) {
             break;
@@ -310,5 +344,139 @@ fn a_client_that_gives_up_cancels_its_request() {
         text.contains("teseladb_http_errors_total{route=\"unrouted\",status=\"499\"} 1"),
         "{text}"
     );
+}
+
+#[test]
+fn a_client_that_gives_up_cancels_its_request() {
+    let (l, flag_seen, metrics) = slow_port();
+    let mut s = connect(&l);
+    s.write_all(b"GET / HTTP/1.1\r\nHost: h\r\n\r\n").unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    drop(s);
+    assert_cancelled(&flag_seen, &metrics);
+    l.stop();
+}
+
+/// Over HTTP/2 the client cancels one request with `RST_STREAM` and keeps its connection: the
+/// request's thread sees the flag, and the connection still answers.
+#[test]
+fn an_http2_reset_cancels_its_request_and_keeps_the_connection() {
+    let (l, flag_seen, metrics) = slow_port();
+    let mut s = connect(&l);
+    s.write_all(&h2_request("/v1/slow")).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    // CANCEL (0x8), RFC 9113 section 7.
+    s.write_all(&frame(kind::RST_STREAM, 0, 1, &8u32.to_be_bytes())).unwrap();
+    assert_cancelled(&flag_seen, &metrics);
+    // A request whose body has not come yet, cancelled: nothing ran for it.
+    let block = Encoder::new().encode(&[
+        Field::new(":method", "POST"),
+        Field::new(":scheme", "http"),
+        Field::new(":path", "/v1/later"),
+        Field::new(":authority", "h"),
+    ]);
+    s.write_all(&frame(kind::HEADERS, flag::END_HEADERS, 3, &block)).unwrap();
+    s.write_all(&frame(kind::RST_STREAM, 0, 3, &8u32.to_be_bytes())).unwrap();
+    // The connection is still open: a PING gets its ACK.
+    s.write_all(&frame(kind::PING, 0, 0, &[7; 8])).unwrap();
+    let mut all = Vec::new();
+    let mut buf = [0u8; 4096];
+    let ack = frame(kind::PING, flag::ACK, 0, &[7; 8]);
+    while !all.windows(ack.len()).any(|w| w == ack.as_slice()) {
+        let n = s.read(&mut buf).unwrap();
+        assert!(n > 0, "the connection closed");
+        all.extend_from_slice(&buf[..n]);
+    }
+    l.stop();
+}
+
+/// A TLS connection whose client sends a record that does not decrypt right after a request ends
+/// there: what the request would have answered is not sent.
+#[test]
+fn a_tls_connection_that_fails_answers_nothing_more() {
+    let (port, cc) = tls_pair();
+    let (l, echo) = spawn(Some(port));
+    echo.options.lock().unwrap().allowed_origins = vec!["https://app.example".into()];
+    let mut s = connect(&l);
+    let mut c = Connection::client(
+        Arc::new(cc),
+        Some("node1.cluster.test"),
+        now_ms(),
+        &[5; ENTROPY_LEN],
+        None,
+    )
+    .unwrap();
+    let mut buf = [0u8; 16_384];
+    while c.is_handshaking() {
+        let out = c.take_output();
+        if !out.is_empty() {
+            s.write_all(&out).unwrap();
+        }
+        if c.is_handshaking() {
+            let n = s.read(&mut buf).unwrap();
+            assert!(n > 0, "the port closed");
+            c.feed(&buf[..n]).unwrap();
+        }
+    }
+    // A CORS preflight, which the connection answers at once, and a record that fails, together.
+    let pre = "OPTIONS /v1/x HTTP/1.1\r\nHost: h\r\nOrigin: https://app.example\r\nAccess-Control-Request-Method: POST\r\n\r\n";
+    c.write(pre.as_bytes()).unwrap();
+    let mut bytes = c.take_output();
+    bytes.extend_from_slice(&[0x17, 0x03, 0x03, 0x00, 0x20]);
+    bytes.extend_from_slice(&[0xAA; 0x20]);
+    s.write_all(&bytes).unwrap();
+    let mut plain = Vec::new();
+    loop {
+        match s.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                if c.feed(&buf[..n]).is_err() {
+                    break;
+                }
+                plain.extend(c.read());
+            }
+        }
+    }
+    assert!(
+        !String::from_utf8_lossy(&plain).contains("204"),
+        "{}",
+        String::from_utf8_lossy(&plain)
+    );
+    l.stop();
+}
+
+/// A port that stops closes the connections it keeps open between requests.
+#[test]
+fn stopping_the_port_closes_its_idle_connections() {
+    let (l, _) = spawn(None);
+    let mut s = connect(&l);
+    s.write_all(b"GET /v1/a HTTP/1.1\r\nHost: h\r\n\r\n").unwrap();
+    let mut reader = ResponseReader::new(Limits::default());
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = s.read(&mut buf).unwrap();
+        assert!(n > 0, "closed before the answer");
+        if reader.feed(&buf[..n]).unwrap().is_some() {
+            break;
+        }
+    }
+    l.stop();
+    assert!(matches!(s.read(&mut buf), Ok(0) | Err(_)), "the connection stayed open");
+}
+
+/// A client that never finishes its request's fields is closed once the header timeout passes
+/// (FR-003).
+#[test]
+fn a_request_whose_fields_never_end_is_closed_after_the_header_timeout() {
+    let (l, _) = spawn(None);
+    let mut s = connect(&l);
+    s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+    let start = std::time::Instant::now();
+    s.write_all(b"GET /v1/a HTTP/1.1\r\nHost: h\r\n").unwrap();
+    let mut buf = [0u8; 4096];
+    assert!(matches!(s.read(&mut buf), Ok(0) | Err(_)), "an answer came");
+    let waited = start.elapsed();
+    let timeout = Duration::from_millis(teseladb_http::limits::HEADER_TIMEOUT_MS);
+    assert!(waited >= timeout && waited < timeout * 2, "{waited:?}");
     l.stop();
 }

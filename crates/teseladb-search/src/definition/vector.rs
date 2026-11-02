@@ -4,7 +4,10 @@
 use teseladb_bson::{Document, Value};
 
 use super::fields::{MAX_DIMENSIONS, SIMILARITIES, int32};
-use super::{DefinitionError, int_of, join, one_of, string_of, unrecognized};
+use super::{
+    DefinitionError, embedding_model, int_of, join, no_embedding_service, one_of, string_of,
+    unrecognized,
+};
 
 /// The field types of a `vectorSearch` index, in `refsearch`'s order.
 pub const VECTOR_FIELD_TYPES: [&str; 5] =
@@ -35,6 +38,9 @@ pub enum VectorField {
     Other(Document),
 }
 
+/// The model a `text` field embeds with when it names none (measured on `refsearch` 1.70.6).
+const DEFAULT_EMBEDDING_MODEL: &str = "voyage-3-large";
+
 /// The definition of a `vectorSearch` index.
 #[derive(Clone, Debug, PartialEq)]
 pub struct VectorDefinition {
@@ -60,7 +66,23 @@ impl VectorDefinition {
                     _ => Err(DefinitionError::shape(&at, "must be a document")),
                 }
             })
-            .collect::<Result<_, _>>()?;
+            .collect::<Result<Vec<VectorField>, _>>()?;
+        // A `text` field embeds with its `model`, `voyage-3-large` when it names none.
+        let models: Vec<String> = fields
+            .iter()
+            .filter_map(|f| match f {
+                VectorField::Other(d) if d.get("type") == Some(&Value::from("text")) => {
+                    Some(match d.get("model") {
+                        Some(Value::String(m)) => m.clone(),
+                        _ => DEFAULT_EMBEDDING_MODEL.to_owned(),
+                    })
+                }
+                _ => None,
+            })
+            .collect();
+        if !models.is_empty() {
+            return Err(no_embedding_service(&models));
+        }
         Ok(VectorDefinition { fields })
     }
 
@@ -109,6 +131,12 @@ impl VectorField {
             "filter" => {
                 only(&["type", "path"])?;
                 Ok(VectorField::Filter { path: path()? })
+            }
+            "autoEmbed" => {
+                let model = embedding_model(d, at, &["model", "modality"])?;
+                Err(DefinitionError::Unsupported(format!(
+                    "CanonicalModel: {model} not registered yet, supported models are: []"
+                )))
             }
             _ => Ok(VectorField::Other(d.clone())),
         }

@@ -15,8 +15,17 @@ use crate::error::{CommandError, ILLEGAL_OPERATION};
 pub const CONFIG_DB: &str = "config";
 
 /// The collections of `config` generated from Group 0, in name order.
-pub const GENERATED: [&str; 8] =
-    ["changelog", "chunks", COLLECTIONS, "databases", "refrouter", SHARDS, "tags", "version"];
+pub const GENERATED: [&str; 9] = [
+    "changelog",
+    "chunks",
+    COLLECTIONS,
+    "databases",
+    "refrouter",
+    super::query_analysis::QUERY_ANALYZERS,
+    SHARDS,
+    "tags",
+    "version",
+];
 /// `config.collections`: one document per sharded collection with its shard key (018).
 pub const COLLECTIONS: &str = "collections";
 /// `config.shards`: one document per node, whose `_id` is the node's name (`super::shard_name`).
