@@ -1357,8 +1357,22 @@ impl<'c> Interp<'c> {
         };
         // A derived constructor gives the `this` its `super(...)` made, unless it returns an
         // object.
+        // Measured on a `refrouter` 9.0.4 on 02-11: another value is refused, and `undefined`
+        // needs the `this` of `super(...)`.
         if def.is_ctor_of_derived && !matches!(v, Val::Obj(_)) {
-            return Ok(scope.borrow().this.clone().unwrap_or(Val::Undef));
+            if !matches!(v, Val::Undef) {
+                let shown = crate::decompile::value_source(self, &v);
+                return self.type_error(&format!(
+                    "derived class constructor returned invalid value {shown}"
+                ));
+            }
+            let this = scope.borrow().this.clone();
+            return this.ok_or_else(|| {
+                self.error(
+                    "ReferenceError",
+                    "must call super constructor before using 'this' in derived class constructor",
+                )
+            });
         }
         Ok(v)
     }
@@ -1431,10 +1445,8 @@ impl<'c> Interp<'c> {
                         args,
                         Some(new_target.clone()),
                     )?;
-                    return match v {
-                        Val::Obj(_) => Ok(v),
-                        _ => self.type_error("derived class constructor did not call super()"),
-                    };
+                    // `run_closure` refuses what is not an object.
+                    return Ok(v);
                 }
                 let obj = Val::Obj(self.alloc(proto, Kind::Ordinary)?);
                 if let (Some(c), Some(ce)) = (&class, &class_env) {
@@ -1587,8 +1599,12 @@ impl<'c> Interp<'c> {
             binding.value = Some(v);
             return Ok(());
         }
-        let g = Val::Obj(self.realm.global.clone());
-        self.set(&g, name, v)
+        let global = self.realm.global.clone();
+        if self.strict && !self.has_property(&global, name) {
+            let m = format!("assignment to undeclared variable {name}");
+            return Err(self.error("ReferenceError", &m));
+        }
+        self.set(&Val::Obj(global), name, v)
     }
 
     fn this_of(&self, env: &EnvRef) -> Option<(Val, EnvRef)> {
@@ -1858,7 +1874,7 @@ impl<'c> Interp<'c> {
         }
         let it = self.call(&it_fn, v, &[])?;
         if !matches!(it, Val::Obj(_)) {
-            return self.type_error("result of the Symbol.iterator method is not an object");
+            return self.type_error("[Symbol.iterator]() returned a non-object value");
         }
         let next = self.get(&it, "next")?;
         Ok(IterRec::Proto { it, next })
@@ -1955,6 +1971,9 @@ impl<'c> Interp<'c> {
                     return Err(self.not_iterable(v));
                 }
                 let it = self.call(&it_fn, v, &[])?;
+                if !matches!(it, Val::Obj(_)) {
+                    return self.type_error("[Symbol.iterator]() returned a non-object value");
+                }
                 let next = self.get(&it, "next")?;
                 let mut out = Vec::new();
                 loop {
@@ -3145,7 +3164,11 @@ impl<'c> Interp<'c> {
             return self.ordinary_instance_of(x, &t);
         }
         let Val::Obj(o) = x else { return Ok(false) };
-        let Val::Obj(proto) = self.get(f, "prototype")? else { return Ok(false) };
+        let Val::Obj(proto) = self.get(f, "prototype")? else {
+            return Err(
+                self.operand_error(f, |t| format!("'prototype' property of {t} is not an object"))
+            );
+        };
         let mut cur = self.proto_of(o)?;
         while let Some(c) = cur {
             if c.ptr_eq(&proto) {

@@ -2996,3 +2996,91 @@ new RegExp('/', 'g').source + new RegExp('\n').source + new RegExp('').source + 
 (() => JSON.stringify(Object.getOwnPropertyDescriptor(RegExp.prototype, Symbol.replace), (k, v) => typeof v === 'function' ? 'f' : v))()	S:{"value":"f","writable":false,"enumerable":false,"configurable":false}
 (() => /(a)/[Symbol.replace]('xa', '[$1]') + '|' + /a/[Symbol.match](5) + '|' + String(/z/[Symbol.match]('a')))()	S:x[a]|null|null
 (() => { const o = Object.setPrototypeOf(/x/g[Symbol.matchAll]('x'), null); return 'x'.concat(o) })()	E:TypeError:can't convert RegExp String Iterator to string
+(() => { function* g() { let x; ({ [yield 'k']: x } = { z: 5 }); return x } const it = g(); it.next(); return it.next('z').value })()	J:5
+(() => { function* g() { return (yield 1) ? (yield 2) : (yield 3) } const it = g(); it.next(); return it.next(0).value + '|' + it.next('z').value })()	S:3|z
+(() => { function* g() { const o = { m: { n: 4 } }; return o[yield 'k'].n } const it = g(); it.next(); return it.next('m').value })()	J:4
+(() => { function* g() { const o = { [yield 1]: yield 2, get [yield 3]() { return 7 }, ...(yield 4) } ; return JSON.stringify(o) } const it = g(); it.next(); it.next('a'); it.next('b'); it.next('c'); return it.next({d: 1}).value })()	S:{"a":"b","c":7,"d":1}
+(() => { function* g() { const f = (...a) => a.join(); return f(1, ...(yield 'x'), yield 'y') } const it = g(); it.next(); it.next([2, 3]); return it.next(4).value })()	S:1,2,3,4
+(() => { function* g() { const o = { f(a, b) { return this.v + a + b }, v: 1 }; return o.f(yield 1, yield 2) } const it = g(); it.next(); it.next(2); return it.next(3).value })()	J:6
+(() => { function* g() { const o = { v: 1 }; o.v &&= yield 'a'; o.w ||= yield 'b'; o.z ??= yield 'c'; return JSON.stringify(o) } const it = g(); it.next(); it.next(5); it.next(6); return it.next(7).value })()	S:{"v":5,"w":6,"z":7}
+(() => { function* g() { let x = 2; x += yield 1; x *= yield 2; return x } const it = g(); it.next(); it.next(3); return it.next(4).value })()	J:20
+(() => { function* g() { function f(a = 1) { return a } const h = function (b = 2) { return b }; return f() + h() + (yield 0) } const it = g(); it.next(); return it.next(10).value })()	J:13
+(() => { function* g() { try { throw yield 1 } catch (e) { return 'c:' + e } } const it = g(); it.next(); return it.next('E').value })()	S:c:E
+(() => { function* g() { if (yield 1) { return 'a' } else if (yield 2) { return 'b' } return 'c' } const it = g(); it.next(); it.next(0); return it.next(1).value })()	S:b
+(() => { function* g() { const r = []; for (let i = 0; i < (yield 'n'); i += yield 'step') r.push(i); return r.join() } const it = g(); it.next(); it.next(3); it.next(1); it.next(3); it.next(1); it.next(3); it.next(1); return it.next(0).value })()	S:0,1,2
+(() => { function* g() { let i = 0; do { i++ } while ((yield i) < 3); return i } const it = g(); let r; for (let k = 0; k < 5 && !(r = it.next(k)).done; k++); return r.value })()	J:3
+(() => { function* g() { let i = 0; do { i++; if (i > 2) break; yield i } while (true); return 'end' + i } return [...g()].join() })()	S:1,2
+(() => { function* g() { outer: for (const a of [1, 2]) { for (const b of [1, 2]) { if (b === 2) continue outer; yield a + '' + b } } } return [...g()].join() })()	S:11,21
+(() => { function* g() { lbl: { yield 1; break lbl; } yield 2 } return [...g()].join() })()	S:1,2
+(() => { function* g() { lbl: for (let i = 0; i < 3; i++) { try { yield i; if (i === 1) break lbl } finally { yield 'f' + i } } } return [...g()].join() })()	S:0,f0,1,f1
+(() => { function* g() { try { yield 1; throw new Error('x') } catch ({ message }) { yield message } finally { yield 'f' } } return [...g()].join() })()	S:1,x,f
+(() => { function* g() { try { yield 1 } catch { yield 'c' } } const it = g(); it.next(); return JSON.stringify(it.throw(5)) })()	S:{"value":"c","done":false}
+(() => { function* g() { try { yield 1 } finally { return 'fin' } } const it = g(); it.next(); return JSON.stringify(it.return(9)) })()	S:{"value":"fin","done":true}
+(() => { function* g() { for (let i = 0, j = yield 'j'; i < j; i++) yield i } const it = g(); it.next(); return [it.next(2).value, it.next().value, it.next().done].join() })()	S:0,1,true
+(() => { function* g() { for (;;) { if ((yield 1) === 'stop') return 'out' } } const it = g(); it.next(); it.next(); return it.next('stop').value })()	S:out
+(() => { function* g() { switch (yield 1) { case (yield 2): return 'a'; default: return 'd' } } const it = g(); it.next(); it.next(5); return it.next(5).value })()	S:a
+(() => { function* g() { const x = [1, , yield 'h', ...(yield 's')]; return JSON.stringify(x) + (1 in x) } const it = g(); it.next(); it.next(2); return it.next([3]).value })()	S:[1,null,2,3]false
+(() => { function* g() { return typeof (yield 1) + (void (yield 2)) + !(yield 3) + -(yield 4) } const it = g(); it.next(); it.next(1); it.next(2); it.next(3); return it.next(4).value })()	S:numberundefinedfalse-4
+(() => { function* g() { const o = {a: 1}; delete o[yield 'k']; return Object.keys(o).join() + (yield 'x' in o) } const it = g(); it.next(); it.next('a'); return it.next(1).value })()	S:1
+(() => { function* g() { return `a${yield 1}b${yield 2}` } const it = g(); it.next(); it.next('X'); return it.next('Y').value })()	S:aXbY
+(() => { function* g() { return new (yield 'C')(yield 'arg') } const it = g(); it.next(); it.next(Array); return it.next(3).value.length })()	J:3
+(() => { function* g() { const o = {}; o[yield 'k'] = yield 'v'; return JSON.stringify(o) } const it = g(); it.next(); it.next('a'); return it.next(1).value })()	S:{"a":1}
+(() => { function* g() { const a = [5]; a[yield 'i']++; return a[0] } const it = g(); it.next(); return it.next(0).value })()	J:6
+(() => { function* g() { return (yield 1, yield 2, 3) } const it = g(); it.next(); it.next(); return it.next().value })()	J:3
+(() => { function* g() { return (yield 1) ?? (yield 2) } const it = g(); it.next(); it.next(null); return it.next('n').value })()	S:n
+(() => { function* g() { yield* [1, 2]; const r = yield* (function* () { yield 3; return 4 })(); yield r } return [...g()].join() })()	S:1,2,3,4
+(() => { function* g() { const it2 = { [Symbol.iterator]() { return { next: () => ({ done: true, value: 'r' }) } } }; return yield* it2 } return JSON.stringify(g().next()) })()	S:{"value":"r","done":true}
+(() => { function* g() { let x = 1; { let x = yield 2; return x } } const it = g(); it.next(); return it.next(9).value })()	J:9
+(() => { function* g() { while ((yield 'w') !== 0) {} return 'done' } const it = g(); it.next(); it.next(1); return it.next(0).value })()	S:done
+(() => { function* g() { for (const k in (yield 'o')) yield k } const it = g(); it.next(); return [it.next({a: 1, b: 2}).value, it.next().value].join() })()	S:a,b
+(() => { function* g() { with ({ v: 3 }) { yield v } } return [...g()].join() })()	S:3
+(() => { function* g(a = 1, { b } = { b: 2 }) { yield a + b } return [...g()].join() + [...g(5, { b: 5 })].join() })()	S:310
+(() => { const g = function* () { yield this && this.v }; return [...g.call({ v: 'T' })].join() })()	S:T
+(() => { const $a_ = 1, ñ = 2, _9 = 3; return $a_ + ñ + _9 })()	J:6
+(() => { const o = {}; o[-1] = 'a'; o[1.5] = 'b'; o[1e15] = 'c'; o[1e21] = 'd'; o[-0] = 'z'; return Object.keys(o).join() })()	S:0,-1,1.5,1000000000000000,1e+21
+(() => { const a = [1]; Object.defineProperty(a, 0, { set(v) { this.s = v }, configurable: true }); a[0] = 7; return a.s + '|' + a[0] })()	S:7|undefined
+(() => { function f(x) { arguments[0] = 9; return x } return f(1) + '|' + (function (x) { 'use strict'; arguments[0] = 9; return x })(1) })()	S:9|1
+(() => { function f(x) { delete arguments[0]; arguments[0] = 5; return x + '|' + arguments[0] } return f(1) })()	S:1|5
+(() => { const t = new Uint8Array(2); return [0 in t, '-0' in t, '1.5' in t, 2 in t, Object.hasOwn(t, '0')].join() })()	S:true,false,false,false,true
+(() => { const p = new Proxy(function () { return 'r' }, {}); return p() + '|' + typeof new Proxy(class { }, {})() })()	E:TypeError:class constructors must be invoked with 'new'
+(() => { const p = new Proxy(function (a) { this.a = a }, {}); return new p(3).a })()	J:3
+(() => { function f() { return typeof this } return [f.call(5), f.call(null), f.call('s'), f.call(undefined) === 'object'].join() })()	S:object,object,object,true
+(() => { const o = { v: 1 }; with (o) { v = 2; var w = v } return o.v + '|' + w })()	S:2|2
+(() => { const o = { [Symbol.unscopables]: { v: true }, v: 1 }; let v = 'outer'; with (o) { return v } })()	S:outer
+(() => { const [a, ...b] = 'xyz'; const [c, ...d] = new Set([1, 2]); return a + b.join('') + c + d })()	S:xyz12
+(() => { const it = { [Symbol.iterator]() { return { next() { return 5 } } } }; try { for (const x of it) {} } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:iterator.next() returned a non-object value
+(() => { l: { if (true) break l; return 'no' } return 'yes' })()	S:yes
+(() => { const f = () => this; return typeof f() })()	S:object
+(() => { function f() { return new.target === f } return f() + '|' + new f() instanceof f })()	J:false
+(() => { let s = ''; for (const k in 'ab') s += k; for (const k in [7, 8]) s += k; return s })()	S:01ltrimrtrimpad01
+(() => { const o = Object.create({ inh: 1 }); o.own = 2; let s = []; for (const k in o) s.push(k); return s.join() })()	S:own,inh
+(() => { try { undefinedName } catch (e) { return e.name + ':' + e.message } })()	S:ReferenceError:undefinedName is not defined
+(() => { const a = [1, 2, 3]; const { length, 0: first, ...rest } = a; return length + first + JSON.stringify(rest) })()	S:4{"1":2,"2":3}
+(() => { let x = 0; const o = { get g() { return ++x } }; o.g; o.g; return x })()	J:2
+(() => { const o = { a: 1 }; Object.freeze(o); 'use strict'; o.a = 2; return o.a })()	J:1
+(() => { 'use strict'; const o = Object.freeze({ a: 1 }); try { o.a = 2 } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:"a" is read-only
+(() => { 'use strict'; const o = { get a() { return 1 } }; try { o.a = 2 } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:setting getter-only property "a"
+(() => { 'use strict'; const a = Object.freeze([1]); try { a[0] = 2 } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:0 is read-only
+(() => { 'use strict'; const a = [1]; Object.defineProperty(a, 'length', { writable: false }); try { a.length = 3 } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:"length" is read-only
+(() => { const a = []; try { a.length = -1 } catch (e) { return e.name + ':' + e.message } })()	S:RangeError:invalid array length
+(() => { const a = []; try { a.length = 1.5 } catch (e) { return e.name + ':' + e.message } })()	S:RangeError:invalid array length
+(() => { class A {} class B extends A { constructor() { super(); return 5 } } try { return typeof new B() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:derived class constructor returned invalid value 5
+(() => { class A {} class B extends A { constructor() { return 5 } } try { return typeof new B() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:derived class constructor returned invalid value 5
+(() => { class A {} class B extends A { constructor() { return undefined } } try { return typeof new B() } catch (e) { return e.name + ':' + e.message } })()	S:ReferenceError:must call super constructor before using 'this' in derived class constructor
+(() => { const it = { [Symbol.iterator]() { return 5 } }; try { const [a] = it } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:[Symbol.iterator]() returned a non-object value
+(() => { function F() {} F.prototype = 3; try { return ({}) instanceof F } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:'prototype' property of F is not an object
+(() => { 'use strict'; try { undeclared = 1 } catch (e) { return e.name + ':' + e.message } })()	S:ReferenceError:assignment to undeclared variable undeclared
+(() => { const it = { [Symbol.iterator]() { return 5 } }; try { for (const x of it) {} } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:[Symbol.iterator]() returned a non-object value
+(() => { const it = { [Symbol.iterator]() { return 5 } }; try { return [...it] } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:[Symbol.iterator]() returned a non-object value
+(() => { const it = { [Symbol.iterator]() { return 5 } }; try { return Array.from(it) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:[Symbol.iterator]() returned a non-object value
+(() => { const it = { [Symbol.iterator]() { return 5 } }; try { return new Set(it) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:[Symbol.iterator]() returned a non-object value
+(() => { const it = { [Symbol.iterator]() { return null } }; try { let a; [a] = it } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:[Symbol.iterator]() returned a non-object value
+(() => { class A {} class B extends A { constructor() { super(); return null } } try { return typeof new B() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:derived class constructor returned invalid value null
+(() => { class A {} class B extends A { constructor() { super(); return 'str' } } try { return typeof new B() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:derived class constructor returned invalid value "str"
+(() => { class A {} class B extends A { constructor() { } } try { return typeof new B() } catch (e) { return e.name + ':' + e.message } })()	S:ReferenceError:must call super constructor before using 'this' in derived class constructor
+(() => { class A {} class B extends A { constructor() { return {} } } try { return typeof new B() } catch (e) { return e.name + ':' + e.message } })()	S:object
+(() => { function F() {} F.prototype = null; try { return ({}) instanceof F } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:'prototype' property of F is not an object
+(() => { const F = function () {}.bind(); try { return ({}) instanceof F } catch (e) { return e.name + ':' + e.message } })()	J:false
+(() => { 'use strict'; try { undeclared2 += 1 } catch (e) { return e.name + ':' + e.message } })()	S:ReferenceError:undeclared2 is not defined
+(() => { 'use strict'; try { [undeclared3] = [1] } catch (e) { return e.name + ':' + e.message } })()	S:ReferenceError:assignment to undeclared variable undeclared3
+(() => { 'use strict'; try { undeclared4++ } catch (e) { return e.name + ':' + e.message } })()	S:ReferenceError:undeclared4 is not defined
