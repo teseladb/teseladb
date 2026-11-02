@@ -108,8 +108,15 @@ pub struct Built {
 /// Changed documents after which the segments of an index are written again to their file.
 const DUMP_EVERY: usize = 1024;
 
-/// Extension of the file of an index's segments in the node's directory.
-const SEGMENT_EXT: &str = "seg";
+/// Where a node keeps the segments of its search indexes, one immutable file per index (FR-012):
+/// the server writes them under `<dbpath>/search`; the logic only hands over the bytes, as
+/// [`Shipped::encode`] makes them.
+pub trait SegmentStore: Send + Sync + std::fmt::Debug {
+    /// Replaces the file of index `id` with `bytes`, whole or not at all.
+    fn put(&self, id: &[u8; 12], bytes: &[u8]) -> Result<(), String>;
+    /// Removes the file of index `id`; one that is not there is already removed.
+    fn remove(&self, id: &[u8; 12]) -> Result<(), String>;
+}
 
 /// The indexes this node built, by identifier.
 #[derive(Clone, Debug, Default)]
@@ -121,7 +128,7 @@ pub struct SearchIndexes {
     /// directory, not yet served (FR-012, FR-013).
     received: BTreeMap<[u8; 12], Shipped>,
     /// Where the segments of each index are written as an immutable file (FR-012).
-    dir: Option<std::path::PathBuf>,
+    store: Option<std::sync::Arc<dyn SegmentStore>>,
 }
 
 /// The segment files of a `search` index as one node sends them to a new replica with the SST
@@ -164,52 +171,48 @@ impl SearchIndexes {
     }
 
     /// Forgets index `id` (dropped), and its file.
-    pub fn forget(&mut self, id: &[u8; 12]) {
+    pub fn forget(&mut self, id: &[u8; 12]) -> Result<(), String> {
         self.built.remove(id);
         self.failed.remove(id);
         self.received.remove(id);
-        if let Some(path) = self.file_of(id) {
-            // A file that is not there is already forgotten.
-            let _ = std::fs::remove_file(path);
+        self.store.as_ref().map_or(Ok(()), |store| store.remove(id))
+    }
+
+    /// Keeps the segments of each index in `store` from now on (FR-012).
+    pub fn set_store(&mut self, store: std::sync::Arc<dyn SegmentStore>) {
+        self.store = Some(store);
+    }
+
+    /// Takes a segment file the store kept before a restart, or one that came with a range's
+    /// SST files, to serve its segments from the mark they cover instead of analyzing every
+    /// document again (FR-012, FR-013): `false` for a damaged file, which the caller removes so
+    /// that the index is built again. A file of a version this node already serves or passed is
+    /// left: what the node built is at least as new.
+    pub fn restore(&mut self, bytes: &[u8]) -> bool {
+        let Ok((id, shipped)) = Shipped::decode(bytes) else { return false };
+        if self.built.get(&id).is_none_or(|b| b.version < shipped.version) {
+            self.received.insert(id, shipped);
         }
+        true
     }
 
-    /// Keeps the segments of each index in a file of `dir`, and takes those already there, to
-    /// serve them from the mark they cover after a restart instead of analyzing every document
-    /// again (FR-012). A file that cannot be read is removed: the index is built again.
-    pub fn open_dir(&mut self, dir: std::path::PathBuf) -> std::io::Result<()> {
-        std::fs::create_dir_all(&dir)?;
-        for entry in std::fs::read_dir(&dir)? {
-            let path = entry?.path();
-            if path.extension().and_then(|e| e.to_str()) != Some(SEGMENT_EXT) {
-                continue;
-            }
-            match Shipped::decode(&std::fs::read(&path)?) {
-                Ok((id, shipped)) => {
-                    self.received.insert(id, shipped);
-                }
-                Err(_) => std::fs::remove_file(&path)?,
-            }
-        }
-        self.dir = Some(dir);
-        Ok(())
+    /// The segment files a snapshot of a range over `intervals` carries with its SST files
+    /// (FR-013), each as [`Shipped::encode`] makes it: those of every index this node built
+    /// with a segment over one of the intervals. An empty end has no bound.
+    pub fn ship_over(&self, intervals: &[(Vec<u8>, Vec<u8>)]) -> Vec<Vec<u8>> {
+        let overlaps = |f: &SegmentFile| {
+            intervals.iter().any(|(start, end)| {
+                (f.end.is_empty() || *start < f.end) && (end.is_empty() || f.start < *end)
+            })
+        };
+        let shipped = self.built.keys().filter_map(|id| Some((id, self.ship(id)?)));
+        shipped.filter(|(_, s)| s.files.iter().any(overlaps)).map(|(id, s)| s.encode(id)).collect()
     }
 
-    /// The file of index `id`'s segments, with a directory.
-    fn file_of(&self, id: &[u8; 12]) -> Option<std::path::PathBuf> {
-        let hex: String = id.iter().map(|b| format!("{b:02x}")).collect();
-        Some(self.dir.as_ref()?.join(format!("{hex}.{SEGMENT_EXT}")))
-    }
-
-    /// Writes the segments of index `id` as a new file that replaces the previous one: written
-    /// and synced under another name first, so a crash leaves one whole file or the other.
-    fn write_file(&self, id: &[u8; 12]) -> std::io::Result<()> {
-        let (Some(path), Some(shipped)) = (self.file_of(id), self.ship(id)) else { return Ok(()) };
-        let tmp = path.with_extension("tmp");
-        let mut f = std::fs::File::create(&tmp)?;
-        std::io::Write::write_all(&mut f, &shipped.encode(id))?;
-        f.sync_all()?;
-        std::fs::rename(&tmp, &path)
+    /// Writes the segments of index `id` to the store, replacing its previous file.
+    fn write_file(&self, id: &[u8; 12]) -> Result<(), String> {
+        let (Some(store), Some(shipped)) = (&self.store, self.ship(id)) else { return Ok(()) };
+        store.put(id, &shipped.encode(id))
     }
 
     /// The segment files of index `id` as this node built them, covering the versions up to

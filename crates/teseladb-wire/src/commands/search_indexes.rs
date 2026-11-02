@@ -14,8 +14,8 @@ use teseladb_search::definition::{Definition, DefinitionError, VectorDefinition}
 use super::search_ops::{self, Served};
 use super::{Backend, Ctx, Shared, args, lock, names, views};
 use crate::error::{
-    COMMAND_FAILED, CommandError, INDEX_ALREADY_EXISTS, INDEX_NOT_FOUND, INVALID_NAMESPACE,
-    INVALID_OPTIONS, NAMESPACE_NOT_FOUND, UNKNOWN_ERROR,
+    COMMAND_FAILED, CommandError, INDEX_ALREADY_EXISTS, INDEX_NOT_FOUND, INTERNAL_ERROR,
+    INVALID_NAMESPACE, INVALID_OPTIONS, NAMESPACE_NOT_FOUND, UNKNOWN_ERROR,
 };
 
 /// `createSearchIndexes`.
@@ -523,7 +523,9 @@ pub fn drop<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
     })?;
     let e = find(ctx.backend, &t, &which)?;
     ctx.backend.index_write(IndexCommand::DropSearch { collection: t.coll.id, name: e.name })?;
-    lock(ctx.shared).search.forget(&e.id);
+    lock(ctx.shared).search.forget(&e.id).map_err(|e| {
+        CommandError::new(INTERNAL_ERROR, format!("cannot remove a search segment: {e}"))
+    })?;
     Ok(Document::new().with("ok", 1.0))
 }
 

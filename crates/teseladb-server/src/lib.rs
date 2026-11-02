@@ -53,6 +53,7 @@ pub mod relocations;
 pub mod replicas;
 pub mod rollback;
 pub mod routes;
+pub mod search_segments;
 pub mod sessions_ops;
 pub mod sts_client;
 pub mod tls_port;

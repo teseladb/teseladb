@@ -236,7 +236,7 @@ fn a_chunk_announcing_an_impossible_size_is_refused_without_reserving_it() {
 /// them (011 FR-013).
 #[test]
 fn segment_files_travel_with_the_sst_files() {
-    use teseladb_range::snapshot::{Bundle, bundle, unbundle};
+    use teseladb_range::snapshot::{Bundle, bundle, trailer, unbundle};
     let big = vec![9u8; CHUNK_BYTES + 17];
     let b = Bundle {
         ssts: vec![vec![1, 2, 3], Vec::new(), big.clone()],
@@ -247,7 +247,9 @@ fn segment_files_travel_with_the_sst_files() {
     for c in split(G, 4, &bundle(&b)) {
         whole = asm.add(Chunk::decode(&c.encode()).unwrap()).unwrap();
     }
-    assert_eq!(unbundle(whole.expect("every chunk arrived")), Some(b));
+    let whole = whole.expect("every chunk arrived");
+    assert_eq!(whole.last(), Some(&trailer(3, 3)));
+    assert_eq!(unbundle(whole), Some(b));
     let empty = Bundle::default();
     assert_eq!(unbundle(bundle(&empty)), Some(empty));
     // Files that are not a bundle are refused.
