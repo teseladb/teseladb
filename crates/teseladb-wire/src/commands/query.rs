@@ -1343,6 +1343,35 @@ fn reads_index_key(p: Option<&Document>) -> bool {
 
 /// `getMore`.
 pub fn get_more<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
+    let start = super::query_stats_start(ctx.backend);
+    let reply = next_batch(ctx);
+    let Ok(id) = args::long(ctx.first(), "getMore.getMore") else { return reply };
+    let (docs, open) = match &reply {
+        Ok(r) => match r.get("cursor") {
+            Some(Value::Document(c)) => (
+                match c.get("nextBatch") {
+                    Some(Value::Array(b)) => i64::try_from(b.len()).unwrap_or(i64::MAX),
+                    _ => 0,
+                },
+                c.get("id") == Some(&Value::Int64(id)),
+            ),
+            _ => (0, false),
+        },
+        Err(_) => (0, lock(ctx.shared).cursors.get(id).is_some()),
+    };
+    let batch = super::query_stats_batch(ctx.backend, &start, docs);
+    let now = i64::try_from(ctx.backend.now_ms()).unwrap_or(i64::MAX);
+    let mut g = lock(ctx.shared);
+    g.query_stats.more(id, batch);
+    if !open {
+        g.query_stats.close(id, now);
+    }
+    drop(g);
+    reply
+}
+
+/// The next batch of a cursor (`getMore`).
+fn next_batch<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     let id = args::long(ctx.first(), "getMore.getMore")?;
     let coll = args::string(ctx.cmd, GET_MORE, "collection")?
         .ok_or_else(|| missing(GET_MORE, "collection"))?;
@@ -1516,9 +1545,11 @@ pub fn kill_cursors<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Documen
         parsed.push(args::long(v, &format!("killCursors.cursors.{i}"))?);
     }
     let (mut killed, mut not_found) = (Vec::new(), Vec::new());
+    let now = i64::try_from(ctx.backend.now_ms()).unwrap_or(i64::MAX);
     let mut guard = lock(ctx.shared);
     for id in parsed {
         if guard.cursors.remove(id) {
+            guard.query_stats.close(id, now);
             killed.push(Value::Int64(id));
         } else {
             not_found.push(Value::Int64(id));

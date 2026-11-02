@@ -703,6 +703,11 @@ impl Backend for ServerBackend {
     // The dispatcher's wrapper keeps the plan of the operation it runs.
     fn note_plan(&mut self, _: teseladb_bson::Document) {}
 
+    // The dispatcher's wrapper counts what the operation examines.
+    fn op_reads(&mut self) -> teseladb_wire::ops::OpReads {
+        teseladb_wire::ops::OpReads::default()
+    }
+
     fn end_operation(&mut self) {
         self.release_pins();
     }

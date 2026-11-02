@@ -211,6 +211,17 @@ pub struct OpReport {
     pub used: Vec<String>,
 }
 
+/// What an operation has examined so far and the metadata of its client (`$queryStats`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct OpReads {
+    /// Index entries it read.
+    pub keys: u64,
+    /// Documents it read.
+    pub docs: u64,
+    /// The client metadata of its connection.
+    pub client: Option<Document>,
+}
+
 /// The node's commands in progress, by operation id.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct OpTable {
@@ -563,6 +574,13 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         Ok(rows)
     }
 
+    fn op_reads(&mut self) -> OpReads {
+        let mut g = lock(self.shared);
+        let client = g.ops.get(self.id).and_then(|o| o.metadata.clone());
+        let r = g.ops.report_mut(self.id);
+        OpReads { keys: r.keys, docs: r.docs, client }
+    }
+
     fn note_plan(&mut self, plan: Document) {
         let mut plan = plan;
         let mut g = lock(self.shared);
@@ -694,6 +712,10 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
 
     fn random(&mut self) -> u64 {
         self.inner.random()
+    }
+
+    fn thread_cpu_nanos(&mut self) -> Option<u64> {
+        self.inner.thread_cpu_nanos()
     }
 
     fn node(&self) -> u64 {

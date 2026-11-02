@@ -451,6 +451,44 @@ impl WriteConcernArgs {
         }
     }
 
+    /// The write concern as `$queryStats` keys show it (`{w: 1, wtimeout: 0, provenance:
+    /// "clientSupplied"}`, measured on a `refrouter` 9.0.4): the fields of [`Self::describe`].
+    pub fn to_document(&self) -> Document {
+        let majority = matches!(self.w, None | Some(WArg::Majority));
+        let w = match &self.w {
+            None | Some(WArg::Majority) => Value::from(MAJORITY),
+            Some(WArg::Nodes(n)) => Value::Int32(i32::try_from(*n).unwrap_or(i32::MAX)),
+            Some(WArg::Mode(m)) => Value::from(m.as_str()),
+            Some(WArg::Tags(tags)) => {
+                let mut d = Document::new();
+                for (k, n) in tags {
+                    d.push(k.clone(), Value::Int32(i32::try_from(*n).unwrap_or(i32::MAX)));
+                }
+                Value::Document(d)
+            }
+        };
+        let mut d = Document::new().with("w", w);
+        match self.sync {
+            Sync::Journal => d.push("j", true),
+            Sync::None => d.push("j", majority),
+            Sync::Unset | Sync::Fsync => {}
+        }
+        d.push("wtimeout", self.wtimeout);
+        if self.sync == Sync::Fsync {
+            d.push("fsync", true);
+        }
+        d.with("provenance", self.provenance())
+    }
+
+    /// Where the write concern came from.
+    fn provenance(&self) -> &'static str {
+        match (self.custom, self.w.is_none()) {
+            (true, _) => CUSTOM_DEFAULT,
+            (false, true) => IMPLICIT_DEFAULT,
+            (false, false) => CLIENT_SUPPLIED,
+        }
+    }
+
     /// The write concern as `writeConcernError` messages print it
     /// (`{ w: 5, j: true, wtimeout: 0, provenance: "clientSupplied" }`).
     pub fn describe(&self) -> String {
@@ -475,12 +513,7 @@ impl WriteConcernArgs {
         if self.sync == Sync::Fsync {
             fields.push(String::from("fsync: true"));
         }
-        let source = match (self.custom, self.w.is_none()) {
-            (true, _) => CUSTOM_DEFAULT,
-            (false, true) => IMPLICIT_DEFAULT,
-            (false, false) => CLIENT_SUPPLIED,
-        };
-        fields.push(format!("provenance: \"{source}\""));
+        fields.push(format!("provenance: \"{}\"", self.provenance()));
         format!("{{ {} }}", fields.join(", "))
     }
 }
@@ -493,6 +526,17 @@ pub fn default_write_concern() -> WriteConcernArgs {
         .map_or(WriteConcernArgs { w: None, sync: Sync::Unset, wtimeout: 0, custom: false }, |wc| {
             WriteConcernArgs { custom: true, ..wc }
         })
+}
+
+/// The read concern of a command without `readConcern` as `$queryStats` keys show it: the
+/// cluster's default level with `provenance: "customDefault"`, else `local` with
+/// `"implicitDefault"` (measured on a `refrouter` 9.0.4).
+pub fn default_read_concern() -> Document {
+    let custom = DEFAULTS.with(|d| d.borrow().0);
+    let provenance = if custom.is_some() { CUSTOM_DEFAULT } else { IMPLICIT_DEFAULT };
+    Document::new()
+        .with("level", custom.unwrap_or(Level::Local).name())
+        .with("provenance", provenance)
 }
 
 /// The read concern level of a command without `readConcern`: the cluster's default while one

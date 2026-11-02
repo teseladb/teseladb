@@ -299,6 +299,10 @@ impl Backend for Mem {
 
     fn note_plan(&mut self, _: Document) {}
 
+    fn op_reads(&mut self) -> teseladb_wire::ops::OpReads {
+        teseladb_wire::ops::OpReads::default()
+    }
+
     fn end_operation(&mut self) {
         self.ended += 1;
     }
