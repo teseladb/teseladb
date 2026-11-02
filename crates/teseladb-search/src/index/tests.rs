@@ -146,3 +146,19 @@ fn mappings_decide_which_strings_are_indexed() {
     assert_eq!(text(&idx, "gato", &["s.x"], 1.0).len(), 1);
     assert!(text(&idx, "gato", &["other"], 1.0).is_empty());
 }
+
+/// The grams of an `autocomplete` word (measured on `refsearch` 1.70.6, 02-11-2026: the five
+/// documents of `search-op-autocomplete` sum 296 grams, `avgdl` 59.2): a word shorter than
+/// `minGrams` is kept whole, one longer than `maxGrams` gives its first `maxGrams` characters
+/// once more.
+#[test]
+fn autocomplete_keeps_words_shorter_than_the_shortest_gram() {
+    let edge = Grams::new(2, 7, true, "edgeGram");
+    assert_eq!(edge.of("a"), ["a"]);
+    assert_eq!(edge.of("fox"), ["fo", "fox"]);
+    assert_eq!(edge.of("jumping"), ["ju", "jum", "jump", "jumpi", "jumpin", "jumping"]);
+    assert_eq!(edge.of("jumping fox").last().map(String::as_str), Some("jumping"));
+    let right = Grams::new(2, 3, true, "rightEdgeGram");
+    assert_eq!(right.of("x"), ["x"]);
+    assert_eq!(right.of("abcd"), ["dc", "dcb", "dcb"]);
+}

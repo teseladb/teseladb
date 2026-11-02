@@ -27,11 +27,14 @@ pub enum Fatal {
     OutOfMemory,
     Deadline,
     Steps,
-    /// A value without a BSON form, with RefDb's message.
-    Convert(String),
+    /// A value without a BSON form, with RefDb's code and message.
+    Convert(i32, String),
     /// What the engine of RefDb 9.0 cannot run and ends the call with a trap of its
     /// WebAssembly build: a promise job (`then`, `await`) or a `FinalizationRegistry`.
     Trap,
+    /// A function the engine of RefDb 9.0 declares and cannot run (`version()`): its
+    /// WebAssembly build reaches an `unreachable` instruction.
+    Unreachable,
 }
 
 pub type R<T = Val> = Result<T, Ctrl>;
@@ -118,6 +121,8 @@ pub enum IterRec {
     Items(Vec<Val>, usize),
     /// An iterator object and its `next`.
     Proto { it: Val, next: Val },
+    /// An array, read at each step.
+    Array(Rc<RefCell<ArrayIter>>),
 }
 
 /// The invocation's limits.
@@ -138,7 +143,21 @@ pub struct Interp<'c> {
     pub limits: Limits,
     pub steps: u64,
     pub depth: usize,
+    /// The address of the stack when the first call began, to stop before the native stack
+    /// runs out (a call through `for…in` and accessors takes far more of it than a plain one).
+    pub stack_base: usize,
+    /// The last successful match of a regular expression in this call: the input and the
+    /// captures in UTF-16 units, read by `RegExp.$1`, `lastMatch` and the other legacy statics.
+    pub last_match: Option<(Name, Vec<Option<(usize, usize)>>)>,
     pub envs: Vec<Weak<RefCell<EnvRec>>>,
+    /// The name of the native function last called, for the messages that name it.
+    pub native: Name,
+    /// The last error about an operand (`can't convert ({}) to number`): the error, the operand
+    /// and the text written for it, which the operator that sees its expression may replace.
+    pub operand_failure: Option<(ObjRef, Val, String)>,
+    /// Whether the conversion to a primitive that failed last called a method of the object
+    /// (`valueOf`, `toString`): SpiderMonkey then names fewer operands.
+    pub conversion_called: bool,
     pub global_env: EnvRef,
     pub now_ms: f64,
     pub rng: u64,
@@ -198,8 +217,22 @@ impl Drop for Interp<'_> {
             }
         }
         // The global object is the call's own; the objects it holds are shared ([`crate::shared`]).
-        self.realm.global.borrow_mut().props.clear();
+        // One that the call left as it was serves the next call ([`crate::shared::Globals`]).
+        if !self.realm.global.0.pristine.get() {
+            self.realm.global.borrow_mut().props.clear();
+        }
     }
+}
+
+/// How much native stack the calls of one program may take: well inside the 2 MiB of a spawned
+/// thread, so deep recursion ends as `too much recursion` instead of overflowing.
+const STACK_BUDGET: usize = 1 << 20;
+
+/// The address of a local of the caller's frame: where the stack is now.
+#[inline(never)]
+fn stack_position() -> usize {
+    let marker = 0u8;
+    std::hint::black_box(&marker as *const u8 as usize)
 }
 
 /// Whether `new f()` may run: a class or plain function, a native constructor (one with a
@@ -211,19 +244,43 @@ pub fn is_constructor(f: &Val) -> bool {
         Kind::Func(Func::Closure { def, .. }) => {
             !(def.arrow || def.generator || def.is_async || def.method)
         }
-        Kind::Func(Func::Native(_, name)) => b.get_own("prototype").is_some() || &**name == "Proxy",
+        // `UUID`, `MD5` and `HexData` of the RefDb shell have no `prototype` and still construct.
+        Kind::Func(Func::Native(_, name)) => {
+            b.get_own("prototype").is_some()
+                || matches!(&**name, "Proxy" | "UUID" | "MD5" | "HexData" | "MinKey" | "MaxKey")
+        }
         Kind::Func(Func::Bound(t, ..)) => is_constructor(&Val::Obj(t.clone())),
         Kind::Proxy(_, callable) => *callable,
         _ => false,
     }
 }
 
+/// The name of `f` when it is a native function.
+fn native_name(f: &Val) -> Option<Name> {
+    let Val::Obj(o) = f else { return None };
+    match &o.borrow().kind {
+        Kind::Func(Func::Native(_, n)) => Some(n.clone()),
+        _ => None,
+    }
+}
+
+/// How the key of a private name starts (`@@#x@3`): a slot no program can name or list.
+pub const PRIVATE_PREFIX: &str = "@@#";
+/// The binding of a class scope that holds the private methods of its instances.
+const PRIVATE_METHODS: &str = "#";
+
+/// The name in the key of a private name, without its `#`.
+fn private_name(key: &str) -> &str {
+    let rest = key.strip_prefix(PRIVATE_PREFIX).unwrap_or(key);
+    rest.rsplit_once('@').map_or(rest, |(n, _)| n)
+}
+
 /// The name of a key for messages: `o.f`.
-fn callee_text(e: &Expr) -> String {
+pub(crate) fn callee_text(e: &Expr) -> String {
     match e {
         Expr::Ident(n, _) => n.to_string(),
         Expr::Member { obj, prop, .. } => match &**prop {
-            MemberProp::Name(n) => format!("{}.{n}", callee_text(obj)),
+            MemberProp::Name(n) | MemberProp::Private(n) => format!("{}.{n}", callee_text(obj)),
             // SpiderMonkey folds a constant key: `o['k' + 1]` is `o.k1`, `o['a b']` stays.
             MemberProp::Computed(k) => match fold_key(k) {
                 Some(key) if is_identifier(&key) => format!("{}.{key}", callee_text(obj)),
@@ -239,6 +296,10 @@ fn callee_text(e: &Expr) -> String {
             },
         },
         Expr::This => "this".into(),
+        Expr::New { callee, args, .. } if args.is_empty() => {
+            format!("(new {}())", callee_text(callee))
+        }
+        Expr::New { callee, .. } => format!("(new {}(...))", callee_text(callee)),
         Expr::Call { callee, args, .. } if args.is_empty() => format!("{}()", callee_text(callee)),
         Expr::Call { callee, .. } => format!("{}(...)", callee_text(callee)),
         Expr::Str(s) => format!("\"{s}\""),
@@ -275,6 +336,15 @@ fn is_identifier(s: &str) -> bool {
 }
 
 impl<'c> Interp<'c> {
+    /// Whether the calls in progress have used up the stack budget (the stack grows downwards).
+    fn stack_exhausted(&mut self) -> bool {
+        let here = stack_position();
+        if self.stack_base == 0 || self.depth == 0 {
+            self.stack_base = here;
+        }
+        self.stack_base.saturating_sub(here) > STACK_BUDGET
+    }
+
     // Limits.
 
     pub fn step(&mut self) -> R<()> {
@@ -316,7 +386,7 @@ impl<'c> Interp<'c> {
     /// A new string, charged to the heap.
     pub fn string(&self, s: String) -> R {
         self.charge(s.len())?;
-        Ok(Val::Str(s.into()))
+        Ok(Val::Str(crate::strings::pair_surrogates(s).into()))
     }
 
     // Objects.
@@ -334,6 +404,7 @@ impl<'c> Interp<'c> {
             charged: std::cell::Cell::new(size),
             budget: self.budget.clone(),
             shared: std::cell::Cell::new(false),
+            pristine: std::cell::Cell::new(false),
         })))
     }
 
@@ -363,6 +434,7 @@ impl<'c> Interp<'c> {
                 Prop { writable: false, ..Prop::hidden(Val::Num(arity as f64)) },
             ));
             b.props.push(("name".into(), Prop { writable: false, ..Prop::hidden(Val::str(name)) }));
+            b.locks |= LAZY_LENGTH | LAZY_NAME;
         }
         Ok(o)
     }
@@ -423,7 +495,8 @@ impl<'c> Interp<'c> {
             ("fileName", Val::str(ERROR_FILE)),
             ("lineNumber", Val::Num(f64::from(l))),
             ("columnNumber", Val::Num(f64::from(c))),
-            ("stack", Val::Str(stack.into())),
+            // Read through the accessor `Error.prototype.stack`, as in SpiderMonkey.
+            ("@@stack", Val::Str(stack.into())),
         ] {
             b.props.retain(|(x, _)| &**x != k);
             b.props.push((k.into(), Prop::hidden(v)));
@@ -431,8 +504,53 @@ impl<'c> Interp<'c> {
         Ok(())
     }
 
+    /// The `SyntaxError` of code that `eval` or `Function` parse: at its place in that code.
+    pub fn syntax_error(&self, e: &crate::lexer::SyntaxError) -> Ctrl {
+        let err = self.error("SyntaxError", &e.message);
+        if let Ctrl::Throw(Val::Obj(o)) = &err {
+            let mut b = o.borrow_mut();
+            for (k, v) in [("lineNumber", e.line), ("columnNumber", e.col)] {
+                if let Some(p) = b.get_own_mut(k) {
+                    p.value = Val::Num(f64::from(v));
+                }
+            }
+        }
+        err
+    }
+
     pub fn type_error<T>(&self, message: &str) -> R<T> {
         Err(self.error("TypeError", message))
+    }
+
+    /// A `TypeError` about the object `v` with its source as its text; an operator that sees the
+    /// operand's expression writes the expression instead ([`Interp::name_operands`]).
+    pub fn operand_error(&mut self, v: &Val, message: impl FnOnce(&str) -> String) -> Ctrl {
+        let text = crate::decompile::value_source(self, v);
+        let e = self.error("TypeError", &message(&text));
+        if let Ctrl::Throw(Val::Obj(o)) = &e {
+            self.operand_failure = Some((o.clone(), v.clone(), text));
+        }
+        e
+    }
+
+    /// `r`, with the text of the operand in an operand error replaced by its expression, as
+    /// SpiderMonkey's decompiler writes it (`can't convert o to number`).
+    pub fn name_operands<T>(&mut self, r: R<T>, operands: &[(&Expr, &Val)]) -> R<T> {
+        let Err(Ctrl::Throw(Val::Obj(err))) = &r else { return r };
+        let Some((o, v, text)) = self.operand_failure.take() else { return r };
+        if !o.ptr_eq(err) {
+            return r;
+        }
+        let Some((e, _)) = operands.iter().find(|(_, x)| strict_eq(x, &v)) else { return r };
+        let name = crate::decompile::operand_text(self, e, &v);
+        let mut b = err.borrow_mut();
+        if let Some((_, p)) = b.props.iter_mut().find(|(k, _)| &**k == "message")
+            && let Val::Str(m) = &p.value
+        {
+            p.value = Val::Str(m.replacen(&text, &name, 1).into());
+        }
+        drop(b);
+        r
     }
 
     // Conversions.
@@ -440,17 +558,20 @@ impl<'c> Interp<'c> {
     pub fn primitive(&mut self, v: &Val, hint: &str) -> R {
         let Val::Obj(o) = v else { return Ok(v.clone()) };
         let exotic = self.get(v, "@@Symbol.toPrimitive:0")?;
+        let to = if hint == "string" { "string" } else { "number" };
         if !exotic.is_nullish() && !exotic.is_callable() {
-            let to = if hint == "string" { "string" } else { "number" };
-            return self.type_error(&format!(
-                "can't convert {} to {to}: its [Symbol.toPrimitive] property is not a function",
-                self.show(v)
-            ));
+            return Err(self.operand_error(v, |t| {
+                format!(
+                    "can't convert {t} to {to}: its [Symbol.toPrimitive] property is not a function"
+                )
+            }));
         }
         if exotic.is_callable() {
             let r = self.call(&exotic, v, &[Val::str(hint)])?;
             if matches!(r, Val::Obj(_)) {
-                return self.type_error("can't convert object to primitive type");
+                return Err(self.operand_error(v, |t| {
+                    format!("can't convert {t} to {to}: its [Symbol.toPrimitive] method returned an object")
+                }));
             }
             return Ok(r);
         }
@@ -468,16 +589,24 @@ impl<'c> Interp<'c> {
             } else {
                 ["valueOf", "toString"]
             };
+        let mut called = false;
         for m in order {
             let f = self.get(v, m)?;
             if f.is_callable() {
+                called = true;
                 let r = self.call(&f, v, &[])?;
                 if !matches!(r, Val::Obj(_)) {
                     return Ok(r);
                 }
             }
         }
-        self.type_error("can't convert object to primitive type")
+        self.conversion_called = called;
+        let to = match hint {
+            "number" => "number",
+            "string" => "string",
+            _ => "primitive type",
+        };
+        Err(self.operand_error(v, |t| format!("can't convert {t} to {to}")))
     }
 
     pub fn number_of(&mut self, v: &Val) -> R<f64> {
@@ -572,6 +701,9 @@ impl<'c> Interp<'c> {
 
     /// The property `key` of `v`, through its prototypes and getters.
     pub fn get(&mut self, v: &Val, key: &str) -> R {
+        if key.starts_with(PRIVATE_PREFIX) {
+            return self.private_get(v, key);
+        }
         let start = match v {
             Val::Obj(o) => o.clone(),
             Val::Undef | Val::Null => {
@@ -579,11 +711,12 @@ impl<'c> Interp<'c> {
             }
             Val::Str(s) => {
                 if key == "length" {
-                    return Ok(Val::Num(s.encode_utf16().count() as f64));
+                    return Ok(Val::Num(crate::strings::utf16_len(s) as f64));
                 }
                 if let Some(i) = array_index(key) {
-                    return Ok(utf16_at(s, i)
-                        .map_or(Val::Undef, |c| Val::Str(String::from_utf16_lossy(&[c]).into())));
+                    return Ok(utf16_at(s, i).map_or(Val::Undef, |c| {
+                        Val::Str(crate::strings::from_units(&[c]).into())
+                    }));
                 }
                 self.proto_of_primitive(v).unwrap_or_else(|| self.realm.object.clone())
             }
@@ -594,6 +727,7 @@ impl<'c> Interp<'c> {
             if crate::proxy::is_proxy(&o) {
                 return crate::proxy::get(self, &o, key, v);
             }
+            touch(&o, key);
             let found = {
                 let b = o.borrow();
                 match &b.kind {
@@ -609,7 +743,10 @@ impl<'c> Interp<'c> {
                         }
                     }
                     Kind::Str(s) if key == "length" => {
-                        return Ok(Val::Num(s.encode_utf16().count() as f64));
+                        return Ok(Val::Num(crate::strings::utf16_len(s) as f64));
+                    }
+                    Kind::Str(s) if let Some(c) = array_index(key).and_then(|i| utf16_at(s, i)) => {
+                        return Ok(Val::Str(crate::strings::from_units(&[c]).into()));
                     }
                     Kind::Arguments(Some(m)) => {
                         if let Some(n) = m.name(key) {
@@ -654,6 +791,9 @@ impl<'c> Interp<'c> {
 
     /// Sets property `key` of `target` to `value`, through setters of its prototypes.
     pub fn set(&mut self, target: &Val, key: &str, value: Val) -> R<()> {
+        if key.starts_with(PRIVATE_PREFIX) {
+            return self.private_set(target, key, value);
+        }
         let Val::Obj(o) = target else {
             if target.is_nullish() {
                 return self.type_error(&format!("{} has no properties", self.show(target)));
@@ -732,6 +872,7 @@ impl<'c> Interp<'c> {
         // A setter or a read-only property along the chain.
         let mut cur = Some(o.clone());
         while let Some(c) = cur {
+            touch(&c, key);
             let found = c.borrow().get_own(key).cloned();
             if let Some(p) = found {
                 if let Some(s) = p.setter {
@@ -739,7 +880,12 @@ impl<'c> Interp<'c> {
                     return Ok(());
                 }
                 if p.getter.is_some() {
-                    return self.type_error(&format!("setting getter-only property \"{key}\""));
+                    let shown = if array_index(key).is_some() {
+                        key.to_string()
+                    } else {
+                        format!("\"{key}\"")
+                    };
+                    return self.type_error(&format!("setting getter-only property {shown}"));
                 }
                 if !p.writable {
                     return self.read_only(key);
@@ -769,14 +915,15 @@ impl<'c> Interp<'c> {
         }
         if !o.borrow().extensible {
             if self.strict {
+                let class = crate::builtins::object_class(self, o);
                 return self.type_error(&format!(
-                    "can't define property \"{key}\": Object is not extensible"
+                    "can't define property \"{key}\": {class} is not extensible"
                 ));
             }
             return Ok(());
         }
         self.grow(o, 1)?;
-        o.borrow_mut().props.push((key.into(), Prop::data(value)));
+        o.borrow_mut().insert(key.into(), Prop::data(value));
         Ok(())
     }
 
@@ -790,13 +937,14 @@ impl<'c> Interp<'c> {
 
     pub fn define(&self, o: &ObjRef, key: &str, prop: Prop) -> R<()> {
         let mut b = o.borrow_mut();
+        b.resolve(key);
         if let Some(p) = b.get_own_mut(key) {
             *p = prop;
             return Ok(());
         }
         drop(b);
         self.grow(o, 1)?;
-        o.borrow_mut().props.push((key.into(), prop));
+        o.borrow_mut().insert(key.into(), prop);
         Ok(())
     }
 
@@ -809,6 +957,7 @@ impl<'c> Interp<'c> {
 
     /// Whether `key` is an own property of `o`.
     pub fn has_own(&self, o: &ObjRef, key: &str) -> bool {
+        touch(o, key);
         let b = o.borrow();
         match &b.kind {
             Kind::Array(items)
@@ -818,7 +967,7 @@ impl<'c> Interp<'c> {
             }
             Kind::Str(s)
                 if key == "length"
-                    || array_index(key).is_some_and(|i| i < s.encode_utf16().count()) =>
+                    || array_index(key).is_some_and(|i| i < crate::strings::utf16_len(s)) =>
             {
                 true
             }
@@ -846,6 +995,7 @@ impl<'c> Interp<'c> {
         if crate::proxy::is_proxy(o) {
             return crate::proxy::keys(self, o, only_enumerable);
         }
+        touch_all(o);
         Ok(self.own_keys(o, only_enumerable))
     }
 
@@ -911,7 +1061,9 @@ impl<'c> Interp<'c> {
         let b = o.borrow();
         let mut out: Vec<Name> = match &b.kind {
             Kind::Array(items) => (0..items.len()).map(|i| i.to_string().into()).collect(),
-            Kind::Str(s) => (0..s.encode_utf16().count()).map(|i| i.to_string().into()).collect(),
+            Kind::Str(s) => {
+                (0..crate::strings::utf16_len(s)).map(|i| i.to_string().into()).collect()
+            }
             Kind::Typed(t) => (0..t.length()).map(|i| i.to_string().into()).collect(),
             _ => Vec::new(),
         };
@@ -955,12 +1107,15 @@ impl<'c> Interp<'c> {
             _ => return self.type_error(&format!("{} is not a function", self.show(f))),
         };
         self.step()?;
-        if self.depth >= self.limits.depth {
+        if self.depth >= self.limits.depth || self.stack_exhausted() {
             return Err(self.error("InternalError", "too much recursion"));
         }
         self.depth += 1;
         let r = match func {
-            Func::Native(n, _) => n(self, this, args),
+            Func::Native(n, name) => {
+                self.native = name;
+                n(self, this, args)
+            }
             Func::Bound(target, bound_this, bound_args) => {
                 let mut all = bound_args.clone();
                 all.extend_from_slice(args);
@@ -1009,8 +1164,8 @@ impl<'c> Interp<'c> {
     ) -> R {
         self.charge(0)?;
         let name = match fo.borrow().get_own("name").map(|p| p.value.clone()) {
-            Some(Val::Str(n)) => n,
-            _ => "".into(),
+            Some(Val::Str(n)) if !n.is_empty() => n,
+            _ => def.guessed.get().cloned().unwrap_or_else(|| "".into()),
         };
         let caller = std::mem::replace(&mut self.fname, name);
         self.frames.push((caller, self.pos));
@@ -1176,7 +1331,7 @@ impl<'c> Interp<'c> {
             _ => return self.type_error(&format!("{} is not a constructor", self.show(f))),
         };
         self.step()?;
-        if self.depth >= self.limits.depth {
+        if self.depth >= self.limits.depth || self.stack_exhausted() {
             return Err(self.error("InternalError", "too much recursion"));
         }
         self.depth += 1;
@@ -1254,17 +1409,42 @@ impl<'c> Interp<'c> {
     }
 
     /// The instance fields of class `c` on `obj`.
+    /// The value of a field's initializer `e`: an anonymous function is named after `key`.
+    fn field_value(&mut self, e: &Expr, scope: &EnvRef, key: &str) -> R {
+        let v = self.eval(e, scope)?;
+        if anonymous_definition(e) {
+            name_if_anonymous(&v, &key_function_name(key, None));
+        }
+        Ok(v)
+    }
+
     fn init_fields(&mut self, c: &ClassDef, env: &EnvRef, obj: &Val) -> R<()> {
+        let methods = env
+            .borrow()
+            .vars
+            .iter()
+            .find(|(k, _)| &**k == PRIVATE_METHODS)
+            .and_then(|(_, b)| b.value.clone());
+        if let (Some(Val::Obj(h)), Val::Obj(o)) = (&methods, obj) {
+            let all = h.borrow().props.clone();
+            for (k, p) in all {
+                self.private_add(o, &k, p)?;
+            }
+        }
         for m in c.members.iter().filter(|m| !m.is_static && m.func.is_none()) {
             let scope = self.new_env(Some(env.clone()));
             scope.borrow_mut().this = Some(obj.clone());
             let key = self.prop_key(&m.key, &scope)?;
             let v = match &m.field {
-                Some(e) => self.eval(e, &scope)?,
+                Some(e) => self.field_value(e, &scope, &key)?,
                 None => Val::Undef,
             };
             if let Val::Obj(o) = obj {
-                self.define(o, &key, Prop::data(v))?;
+                if matches!(m.key, PropName::Private(_)) {
+                    self.private_add(o, &key, Prop::data(v))?;
+                } else {
+                    self.define(o, &key, Prop::data(v))?;
+                }
             }
         }
         Ok(())
@@ -1472,7 +1652,7 @@ impl<'c> Interp<'c> {
         } else if def.is_async {
             f.borrow_mut().proto = Some(self.realm.proto("AsyncFunction"));
             None
-        } else if !def.arrow {
+        } else if !def.arrow && !def.method {
             let proto = self.object()?;
             self.define(&proto, "constructor", Prop::hidden(Val::Obj(f.clone())))?;
             Some(proto)
@@ -1490,6 +1670,9 @@ impl<'c> Interp<'c> {
         b.props.push(("length".into(), fixed(Val::Num(length))));
         let name = def.name.clone().unwrap_or_else(|| "".into());
         b.props.push(("name".into(), fixed(Val::Str(name))));
+        b.locks |= LAZY_LENGTH
+            | LAZY_NAME
+            | if b.get_own("prototype").is_some() { LAZY_PROTOTYPE } else { 0 };
         drop(b);
         Ok(Val::Obj(f))
     }
@@ -1590,6 +1773,7 @@ impl<'c> Interp<'c> {
     fn prop_key(&mut self, k: &PropName, scope: &EnvRef) -> R<Name> {
         match k {
             PropName::Fixed(n) => Ok(n.clone()),
+            PropName::Private(n) => self.private_key(n, scope),
             PropName::Computed(e) => {
                 let v = self.eval(e, scope)?;
                 self.key_of(&v)
@@ -1601,16 +1785,17 @@ impl<'c> Interp<'c> {
     /// Starts iterating `v`: the values of the objects the interpreter knows, or the iterator
     /// its `Symbol.iterator` gives, read one value at a time.
     pub fn open_iter(&mut self, v: &Val) -> R<IterRec> {
+        if let Val::Obj(o) = v
+            && let Kind::Array(_) = o.borrow().kind
+        {
+            let state = ArrayIter { source: Some(v.clone()), pos: 0, kind: ArrayIterKind::Values };
+            return Ok(IterRec::Array(Rc::new(RefCell::new(state))));
+        }
         let fast = match v {
             Val::Str(_) => true,
             Val::Obj(o) => matches!(
                 o.borrow().kind,
-                Kind::Array(_)
-                    | Kind::Typed(_)
-                    | Kind::Set(_)
-                    | Kind::Map(_)
-                    | Kind::Iter(_)
-                    | Kind::Arguments(_)
+                Kind::Typed(_) | Kind::Set(_) | Kind::Map(_) | Kind::Iter(_) | Kind::Arguments(_)
             ),
             _ => false,
         };
@@ -1623,7 +1808,7 @@ impl<'c> Interp<'c> {
         }
         let it_fn = self.get(v, "@@Symbol.iterator:0")?;
         if !it_fn.is_callable() {
-            return self.type_error(&format!("{} is not iterable", self.show(v)));
+            return Err(self.not_iterable(v));
         }
         let it = self.call(&it_fn, v, &[])?;
         if !matches!(it, Val::Obj(_)) {
@@ -1642,6 +1827,7 @@ impl<'c> Interp<'c> {
                 *i += 1;
                 Ok(v)
             }
+            IterRec::Array(state) => crate::arrays::array_iter_next(self, state),
             IterRec::Proto { it, next } => {
                 let (it, next) = (it.clone(), next.clone());
                 let r = self.call(&next, &it, &[])?;
@@ -1672,11 +1858,22 @@ impl<'c> Interp<'c> {
 
     pub fn iterate(&mut self, v: &Val) -> R<Vec<Val>> {
         match v {
-            Val::Str(s) => Ok(s.chars().map(|c| Val::Str(c.to_string().into())).collect()),
+            Val::Str(s) => Ok(crate::text::code_points(s).map(|c| Val::Str(c.into())).collect()),
             Val::Obj(o) => {
                 let kind = o.borrow().kind.clone();
                 match kind {
-                    Kind::Array(items) => return Ok(items),
+                    Kind::Array(items) if o.borrow().locks & ELEMENTS_OWN == 0 => {
+                        return Ok(items);
+                    }
+                    Kind::Array(items) => {
+                        // An element with its own attributes is read through its getter.
+                        let target = Val::Obj(o.clone());
+                        let mut out = Vec::with_capacity(items.len());
+                        for i in 0..items.len() {
+                            out.push(self.get(&target, &i.to_string())?);
+                        }
+                        return Ok(out);
+                    }
                     Kind::Typed(t) => return Ok(crate::typed::elements(&t)),
                     Kind::Set(items) => return Ok(items),
                     Kind::Map(entries) => {
@@ -1704,13 +1901,10 @@ impl<'c> Interp<'c> {
                     _ => {}
                 }
                 let it_fn = self.get(v, "@@Symbol.iterator:0")?;
-                let it = if it_fn.is_callable() {
-                    self.call(&it_fn, v, &[])?
-                } else if self.get(v, "next")?.is_callable() {
-                    v.clone()
-                } else {
-                    return self.type_error(&format!("{} is not iterable", self.show(v)));
-                };
+                if !it_fn.is_callable() {
+                    return Err(self.not_iterable(v));
+                }
+                let it = self.call(&it_fn, v, &[])?;
                 let next = self.get(&it, "next")?;
                 let mut out = Vec::new();
                 loop {
@@ -1723,7 +1917,7 @@ impl<'c> Interp<'c> {
                     out.push(self.get(&r, "value")?);
                 }
             }
-            _ => self.type_error(&format!("{} is not iterable", self.show(v))),
+            _ => Err(self.not_iterable(v)),
         }
     }
 
@@ -2006,8 +2200,12 @@ impl<'c> Interp<'c> {
         label: Option<&Name>,
     ) -> R<()> {
         let v = self.eval(obj, env)?;
-        let mut rec =
-            if of { self.open_iter(&v)? } else { IterRec::Items(self.for_in_keys(&v)?, 0) };
+        let mut rec = if of {
+            let r = self.open_iter(&v);
+            self.name_operands(r, &[(obj, &v)])?
+        } else {
+            IterRec::Items(self.for_in_keys(&v)?, 0)
+        };
         while let Some(x) = self.iter_step(&mut rec)? {
             let scope = self.new_env(Some(env.clone()));
             let r = match decl {
@@ -2059,6 +2257,7 @@ impl<'c> Interp<'c> {
 
     pub fn class(&mut self, c: &Rc<ClassDef>, env: &EnvRef) -> R {
         let scope = self.new_env(Some(env.clone()));
+        self.declare_privates(c, &scope)?;
         let (parent_proto, parent_ctor) = match &c.parent {
             Some(p) => {
                 let pv = self.eval(p, env)?;
@@ -2105,6 +2304,7 @@ impl<'c> Interp<'c> {
                 is_ctor_of_derived: derived,
                 strict: true,
                 source: format!("class {} {{ }}", c.name.as_deref().unwrap_or("")).into(),
+                guessed: std::cell::OnceCell::new(),
             }),
         };
         let ctor_proto = match &parent_ctor {
@@ -2133,6 +2333,7 @@ impl<'c> Interp<'c> {
         };
         self.define(&ctor, "length", fixed(Val::Num(length as f64)))?;
         self.define(&ctor, "name", fixed(Val::Str(name.clone())))?;
+        ctor.borrow_mut().locks |= LAZY_LENGTH | LAZY_NAME;
         self.define(&proto, "constructor", Prop::hidden(Val::Obj(ctor.clone())))?;
         if let Some(n) = &c.name {
             declare(&scope, n, Val::Obj(ctor.clone()), false);
@@ -2148,12 +2349,30 @@ impl<'c> Interp<'c> {
                 continue;
             }
             let key = self.prop_key(&m.key, &scope)?;
+            let private = matches!(m.key, PropName::Private(_));
+            let home = target.clone();
+            let target = match self.lookup(&scope, PRIVATE_METHODS) {
+                Some((e, i)) if private && !m.is_static => match &e.borrow().vars[i].1.value {
+                    Some(Val::Obj(h)) => h.clone(),
+                    _ => target,
+                },
+                _ => target,
+            };
+            if !private
+                && let Some(cur) = self.get_own_prop(&target, &key)
+                && !cur.configurable
+            {
+                let shown = crate::props::shown_key(&key);
+                return self
+                    .type_error(&format!("can't redefine non-configurable property {shown}"));
+            }
             if let Some(f) = &m.func {
                 let fv = self.closure(f, &scope)?;
+                name_if_anonymous(&fv, &key_function_name(&key, accessor_prefix(m.kind)));
                 if let Val::Obj(fo) = &fv
-                    && let Kind::Func(Func::Closure { home, .. }) = &mut fo.borrow_mut().kind
+                    && let Kind::Func(Func::Closure { home: h, .. }) = &mut fo.borrow_mut().kind
                 {
-                    *home = Some(target.clone());
+                    *h = Some(home.clone());
                 }
                 let fo = fv.as_obj().cloned();
                 let mut p =
@@ -2164,18 +2383,121 @@ impl<'c> Interp<'c> {
                     PropKind::Get => p.getter = fo,
                     PropKind::Set => p.setter = fo,
                 }
+                if private {
+                    // A private method is read-only; a private field is enumerable.
+                    p.writable = false;
+                    p.configurable = false;
+                }
                 self.define(&target, &key, p)?;
             } else if m.is_static {
                 let s = self.new_env(Some(scope.clone()));
                 s.borrow_mut().this = Some(Val::Obj(ctor.clone()));
                 let v = match &m.field {
-                    Some(e) => self.eval(e, &s)?,
+                    Some(e) => self.field_value(e, &s, &key)?,
                     None => Val::Undef,
                 };
                 self.define(&ctor, &key, Prop::data(v))?;
             }
         }
         Ok(Val::Obj(ctor))
+    }
+
+    /// The key that stands for the private name `n` (`#x`) where `env` is: the one its class
+    /// made when it was evaluated, so each evaluation of a class has names of its own.
+    fn private_key(&mut self, n: &str, env: &EnvRef) -> R<Name> {
+        let found = self.lookup(env, n).and_then(|(e, i)| e.borrow().vars[i].1.value.clone());
+        match found {
+            Some(Val::Str(k)) => Ok(k),
+            _ => Err(self.error(
+                "SyntaxError",
+                &format!("reference to undeclared private field or method {n}"),
+            )),
+        }
+    }
+
+    /// The private names a class declares, each with a key of this evaluation, bound in its
+    /// scope; the methods and accessors of its instances go to a holder bound as `#`, which each
+    /// new instance copies.
+    fn declare_privates(&mut self, c: &ClassDef, scope: &EnvRef) -> R<()> {
+        for m in &c.members {
+            let PropName::Private(n) = &m.key else { continue };
+            if self.lookup_own(scope, n) {
+                continue;
+            }
+            self.symbol_ids += 1;
+            let key = format!("{PRIVATE_PREFIX}{}@{}", &n[1..], self.symbol_ids);
+            declare(scope, n, Val::Str(key.into()), false);
+        }
+        if c.members
+            .iter()
+            .any(|m| !m.is_static && m.func.is_some() && matches!(m.key, PropName::Private(_)))
+        {
+            let holder = self.alloc(None, Kind::Ordinary)?;
+            declare(scope, PRIVATE_METHODS, Val::Obj(holder), false);
+        }
+        Ok(())
+    }
+
+    fn lookup_own(&self, scope: &EnvRef, n: &str) -> bool {
+        scope.borrow().vars.iter().any(|(k, _)| &**k == n)
+    }
+
+    /// Reads the private member `key` of `v` (measured on a `refrouter` 9.0.4 on 02-11): only an
+    /// own member, never through a proxy or the prototypes.
+    fn private_get(&mut self, v: &Val, key: &str) -> R {
+        let p = match v {
+            Val::Obj(o) => o.borrow().get_own(key).cloned(),
+            _ => None,
+        };
+        let Some(p) = p else {
+            return self
+                .type_error("can't access private field or method: object is not the right class");
+        };
+        if !p.is_accessor() {
+            return Ok(p.value);
+        }
+        match p.getter {
+            Some(g) => self.call(&Val::Obj(g), v, &[]),
+            None => self.type_error("getting private setter-only property"),
+        }
+    }
+
+    /// Writes the private member `key` of `v`: a field (enumerable, even in a frozen object), a
+    /// setter, and the errors of a method, a getter alone or an object without it.
+    fn private_set(&mut self, v: &Val, key: &str, value: Val) -> R<()> {
+        let Val::Obj(o) = v else {
+            return self.type_error("can't set private field: object is not the right class");
+        };
+        let p = o.borrow().get_own(key).cloned();
+        let Some(p) = p else {
+            return self.type_error("can't set private field: object is not the right class");
+        };
+        if p.is_accessor() {
+            return match p.setter {
+                Some(s) => self.call(&Val::Obj(s), v, &[value]).map(|_| ()),
+                None => {
+                    let name = private_name(key);
+                    self.type_error(&format!("setting getter-only property #{name}"))
+                }
+            };
+        }
+        if !p.enumerable {
+            return self.type_error("cannot assign to private method");
+        }
+        if let Some(slot) = o.borrow_mut().get_own_mut(key) {
+            slot.value = value;
+        }
+        Ok(())
+    }
+
+    /// Adds the private member `key` to `o` as a new instance gets it: an object gets each once.
+    fn private_add(&self, o: &ObjRef, key: &str, prop: Prop) -> R<()> {
+        if o.borrow().get_own(key).is_some() {
+            return self.type_error("Initializing an object twice is an error with private fields");
+        }
+        self.grow(o, 1)?;
+        o.borrow_mut().props.push((key.into(), prop));
+        Ok(())
     }
 
     fn get_own_prop(&self, o: &ObjRef, key: &str) -> Option<Prop> {
@@ -2186,6 +2508,16 @@ impl<'c> Interp<'c> {
 
     pub fn eval(&mut self, e: &Expr, env: &EnvRef) -> R {
         match e {
+            Expr::PrivateIn(n, x) => {
+                let key = self.private_key(n, env)?;
+                let v = self.eval(x, env)?;
+                let Val::Obj(o) = &v else {
+                    let msg =
+                        format!("right-hand side of 'in' should be an object, got {}", v.type_of());
+                    return self.type_error(&msg);
+                };
+                Ok(Val::Bool(o.borrow().get_own(&key).is_some()))
+            }
             Expr::Num(n) => Ok(Val::Num(*n)),
             Expr::BigInt(b) => Ok(Val::BigInt(b.clone())),
             // The parser leaves a generator's `yield` only where `generators.rs` runs it.
@@ -2204,7 +2536,8 @@ impl<'c> Interp<'c> {
                     out.push_str(s);
                     if let Some(x) = subs.get(i) {
                         let v = self.eval(x, env)?;
-                        out.push_str(&self.str_of(&v)?);
+                        let s = self.str_of(&v);
+                        out.push_str(&self.name_operands(s, &[(x, &v)])?);
                     }
                 }
                 self.joined_string(out)
@@ -2232,7 +2565,8 @@ impl<'c> Interp<'c> {
                         None => out.push(Val::Undef),
                         Some(Expr::Spread(x)) => {
                             let v = self.eval(x, env)?;
-                            let all = self.iterate(&v)?;
+                            let all = self.iterate(&v);
+                            let all = self.name_operands(all, &[(x, &v)])?;
                             self.charge(all.len() * PROP_BYTES)?;
                             out.extend(all);
                         }
@@ -2247,19 +2581,8 @@ impl<'c> Interp<'c> {
             Expr::Spread(_) => self.type_error("unexpected spread"),
             Expr::Unary(op, x) => {
                 let v = self.eval(x, env)?;
-                Ok(match *op {
-                    "!" => Val::Bool(!v.truthy()),
-                    "-" => match self.numeric(&v)? {
-                        Val::BigInt(b) => Val::BigInt(Rc::new(b.neg())),
-                        n => Val::Num(-self.number_of(&n)?),
-                    },
-                    "+" => Val::Num(self.number_of(&v)?),
-                    "~" => match self.numeric(&v)? {
-                        Val::BigInt(b) => Val::BigInt(Rc::new(b.not())),
-                        n => Val::Num(f64::from(!number::to_int32(self.number_of(&n)?))),
-                    },
-                    _ => Val::Undef,
-                })
+                let r = self.unary(op, &v);
+                self.name_operands(r, &[(x, &v)])
             }
             Expr::Typeof(x) => {
                 if let Expr::Ident(n, _) = &**x
@@ -2306,7 +2629,16 @@ impl<'c> Interp<'c> {
             Expr::Binary(op, a, b) => {
                 let x = self.eval(a, env)?;
                 let y = self.eval(b, env)?;
-                self.binary(op, &x, &y)
+                self.conversion_called = false;
+                let r = self.binary(op, &x, &y);
+                // SpiderMonkey names the left operand of `+` only when the conversion called no
+                // method (measured: `o + 1` with a `valueOf` gives the source of `o`,
+                // `Object.create(null) + ""` names it, `"" + Object.create(null)` gives
+                // `Object.create(...)`).
+                if *op == "+" && self.conversion_called {
+                    return self.name_operands(r, &[(b, &y)]);
+                }
+                self.name_operands(r, &[(a, &x), (b, &y)])
             }
             Expr::Logical(op, a, b) => {
                 let x = self.eval(a, env)?;
@@ -2370,9 +2702,9 @@ impl<'c> Interp<'c> {
                 self.pos = *pos;
                 self.eval(e, env)
             }
-            Expr::New { callee, args, pos } => {
+            Expr::New { callee, args: exprs, pos } => {
                 let f = self.eval(callee, env)?;
-                let args = self.eval_args(args, env)?;
+                let args = self.eval_args(exprs, env)?;
                 self.pos = *pos;
                 if !is_constructor(&f) {
                     let text = match &**callee {
@@ -2381,7 +2713,9 @@ impl<'c> Interp<'c> {
                     };
                     return self.type_error(&format!("{text} is not a constructor"));
                 }
-                self.construct(&f, &args, &f)
+                self.conversion_called = false;
+                let r = self.construct(&f, &args, &f);
+                self.name_arguments(r, &f, exprs, &args)
             }
         }
     }
@@ -2441,7 +2775,8 @@ impl<'c> Interp<'c> {
             match a {
                 Expr::Spread(x) => {
                     let v = self.eval(x, env)?;
-                    out.extend(self.iterate(&v)?);
+                    let all = self.iterate(&v);
+                    out.extend(self.name_operands(all, &[(x, &v)])?);
                 }
                 x => out.push(self.eval(x, env)?),
             }
@@ -2452,6 +2787,7 @@ impl<'c> Interp<'c> {
     fn member_key(&mut self, prop: &MemberProp, env: &EnvRef) -> R<Name> {
         match prop {
             MemberProp::Name(n) => Ok(n.clone()),
+            MemberProp::Private(n) => self.private_key(n, env),
             MemberProp::Computed(e) => {
                 let v = self.eval(e, env)?;
                 self.key_of(&v)
@@ -2489,7 +2825,8 @@ impl<'c> Interp<'c> {
         if optional && f.is_nullish() {
             return Err(Ctrl::Break(Some("?.".into())));
         }
-        let args = self.eval_args(args, env)?;
+        let exprs = args;
+        let args = self.eval_args(exprs, env)?;
         if is_eval_name(callee) && is_builtin_eval(&f) {
             return self.direct_eval(args.first().cloned().unwrap_or(Val::Undef), env);
         }
@@ -2497,7 +2834,25 @@ impl<'c> Interp<'c> {
         if !f.is_callable() {
             return self.type_error(&format!("{} is not a function", callee_text(callee)));
         }
-        self.call(&f, &this, &args)
+        self.conversion_called = false;
+        let r = self.call(&f, &this, &args);
+        self.name_arguments(r, &f, exprs, &args)
+    }
+
+    /// `r` of a call of `f`, with the argument a native could not convert named by its
+    /// expression, unless the conversion called a method (measured on a `refrouter` 9.0.4 on 02-11:
+    /// `Math.max(o)`, `new Date(o)`; `String(o)` names it in both cases).
+    fn name_arguments(&mut self, r: R, f: &Val, exprs: &[Expr], args: &[Val]) -> R {
+        let Some(name) = native_name(f) else { return r };
+        if r.is_err()
+            && !matches!(&*name, "isNaN" | "concat")
+            && !exprs.iter().any(|e| matches!(e, Expr::Spread(_)))
+            && (!self.conversion_called || &*name == "String")
+        {
+            let pairs: Vec<(&Expr, &Val)> = exprs.iter().zip(args.iter()).collect();
+            return self.name_operands(r, &pairs);
+        }
+        r
     }
 
     fn object_literal(&mut self, props: &[ObjProp], env: &EnvRef) -> R {
@@ -2519,16 +2874,14 @@ impl<'c> Interp<'c> {
                         if let Kind::Func(Func::Closure { home, .. }) = &mut f.borrow_mut().kind {
                             *home = Some(o.clone());
                         }
-                        let unnamed = matches!(f.borrow().get_own("name").map(|p| &p.value), Some(Val::Str(s)) if s.is_empty());
-                        if unnamed && let Some(p) = f.borrow_mut().get_own_mut("name") {
-                            p.value = Val::Str(key.clone());
-                        }
+                        name_if_anonymous(&v, &key_function_name(&key, None));
                     }
                     self.define(&o, &key, Prop::data(v))?;
                 }
                 ObjProp::Accessor(k, kind, def) => {
                     let key = self.prop_key(k, env)?;
                     let f = self.closure(def, env)?;
+                    name_if_anonymous(&f, &key_function_name(&key, accessor_prefix(*kind)));
                     let mut p = self
                         .get_own_prop(&o, &key)
                         .filter(Prop::is_accessor)
@@ -2544,18 +2897,18 @@ impl<'c> Interp<'c> {
                     let v = self.eval(e, env)?;
                     match &v {
                         Val::Obj(src) => {
-                            for k in self.keys(src, true)? {
+                            // Symbol keys are copied too, after the string keys.
+                            let mut keys = self.keys(src, true)?;
+                            keys.extend(crate::props::enumerable_symbol_keys(src));
+                            for k in keys {
                                 let x = self.get(&v, &k)?;
                                 self.define(&o, &k, Prop::data(x))?;
                             }
                         }
                         Val::Str(s) => {
-                            for (i, c) in s.chars().enumerate() {
-                                self.define(
-                                    &o,
-                                    &i.to_string(),
-                                    Prop::data(Val::Str(c.to_string().into())),
-                                )?;
+                            for (i, c) in crate::strings::units(s).into_iter().enumerate() {
+                                let unit = crate::strings::from_units(&[c]);
+                                self.define(&o, &i.to_string(), Prop::data(Val::Str(unit.into())))?;
                             }
                         }
                         _ => {}
@@ -2624,8 +2977,17 @@ impl<'c> Interp<'c> {
     /// function (unless it is strict) and may not redeclare a `let` on the way (ECMA-262 §19.2.1).
     pub fn direct_eval(&mut self, src: Val, env: &EnvRef) -> R {
         let Val::Str(src) = src else { return Ok(src) };
+        // The code may use the private names of the classes around the call.
+        let mut privates = Vec::new();
+        let mut cur = Some(env.clone());
+        while let Some(e) = cur {
+            let b = e.borrow();
+            let names = b.vars.iter().map(|(k, _)| k).filter(|k| k.len() > 1 && k.starts_with('#'));
+            privates.extend(names.cloned());
+            cur = b.parent.clone();
+        }
         let body =
-            crate::parser::parse_script(&src).map_err(|e| self.error("SyntaxError", &e.message))?;
+            crate::parser::parse_script_in(&src, &privates).map_err(|e| self.syntax_error(&e))?;
         let strict = self.strict || crate::parser::has_use_strict(&body);
         let lex = self.new_env(Some(env.clone()));
         let var_env = if strict { lex.clone() } else { var_scope_of(env) };
@@ -2710,7 +3072,18 @@ impl<'c> Interp<'c> {
         Ok(strings)
     }
 
+    /// `v is not iterable`, with the source of an object.
+    fn not_iterable(&mut self, v: &Val) -> Ctrl {
+        if matches!(v, Val::Obj(_)) {
+            return self.operand_error(v, |t| format!("{t} is not iterable"));
+        }
+        self.error("TypeError", &format!("{} is not iterable", self.show(v)))
+    }
+
     pub fn ordinary_instance_of(&mut self, x: &Val, f: &Val) -> R<bool> {
+        if matches!(f, Val::Obj(_)) && !f.is_callable() {
+            return Err(self.operand_error(f, |t| format!("{t} is not a function")));
+        }
         if !f.is_callable() {
             return self.type_error(&format!("invalid 'instanceof' operand {}", self.show(f)));
         }
@@ -2828,6 +3201,22 @@ impl<'c> Interp<'c> {
         })
     }
 
+    fn unary(&mut self, op: &str, v: &Val) -> R {
+        Ok(match op {
+            "!" => Val::Bool(!v.truthy()),
+            "-" => match self.numeric(v)? {
+                Val::BigInt(b) => Val::BigInt(Rc::new(b.neg())),
+                n => Val::Num(-self.number_of(&n)?),
+            },
+            "+" => Val::Num(self.number_of(v)?),
+            "~" => match self.numeric(v)? {
+                Val::BigInt(b) => Val::BigInt(Rc::new(b.not())),
+                n => Val::Num(f64::from(!number::to_int32(self.number_of(&n)?))),
+            },
+            _ => Val::Undef,
+        })
+    }
+
     pub fn binary(&mut self, op: &str, x: &Val, y: &Val) -> R {
         Ok(match op {
             "+" => {
@@ -2863,7 +3252,7 @@ impl<'c> Interp<'c> {
                 let a = self.primitive(x, "number")?;
                 let b = self.primitive(y, "number")?;
                 let ord = if let (Val::Str(p), Val::Str(q)) = (&a, &b) {
-                    Some(p.encode_utf16().cmp(q.encode_utf16()))
+                    Some(crate::strings::units(p).cmp(&crate::strings::units(q)))
                 } else if matches!(a, Val::BigInt(_)) || matches!(b, Val::BigInt(_)) {
                     crate::bigints::compare(self, &a, &b)?
                 } else {
@@ -2882,6 +3271,11 @@ impl<'c> Interp<'c> {
             "instanceof" => Val::Bool(self.instance_of(x, y)?),
             "in" => {
                 let Val::Obj(o) = y else {
+                    if let Val::Str(_) = y {
+                        let (k, s) = (self.key_of(x)?, self.show(y));
+                        let msg = format!("cannot use 'in' operator to search for \"{k}\" in {s}");
+                        return self.type_error(&msg);
+                    }
                     let msg =
                         format!("right-hand side of 'in' should be an object, got {}", y.type_of());
                     return self.type_error(&msg);
@@ -2976,6 +3370,46 @@ fn anonymous_definition(e: &Expr) -> bool {
     }
 }
 
+/// The name SetFunctionName (ECMA-262 §10.2.9) gives a function for the property `key`: a
+/// symbol's description in brackets, a private name with its `#`, with `prefix` (`get`, `set`).
+fn key_function_name(key: &str, prefix: Option<&str>) -> String {
+    let base = if key.starts_with(PRIVATE_PREFIX) {
+        format!("#{}", private_name(key))
+    } else if crate::value::is_symbol_key(key) {
+        let desc = key.strip_prefix("@@").and_then(|k| k.rsplit_once(':')).map_or("", |(d, _)| d);
+        if desc.is_empty() { String::new() } else { format!("[{desc}]") }
+    } else {
+        key.to_string()
+    };
+    match prefix {
+        Some(p) => format!("{p} {base}"),
+        None => base,
+    }
+}
+
+/// Gives the function `v` the name `name` when it has none.
+fn name_if_anonymous(v: &Val, name: &str) {
+    let Val::Obj(f) = v else { return };
+    let mut b = f.borrow_mut();
+    if !b.is_callable() {
+        return;
+    }
+    if let Some(prop) = b.get_own_mut("name")
+        && matches!(&prop.value, Val::Str(s) if s.is_empty())
+    {
+        prop.value = Val::str(name);
+    }
+}
+
+/// The prefix of the name of an accessor of `kind`.
+fn accessor_prefix(kind: PropKind) -> Option<&'static str> {
+    match kind {
+        PropKind::Get => Some("get"),
+        PropKind::Set => Some("set"),
+        PropKind::Value => None,
+    }
+}
+
 /// Names the function `v` that `e` made after the name `p` binds, when `e` is anonymous.
 fn name_function(v: &Val, p: &Pattern, e: &Expr) {
     if !anonymous_definition(e) {
@@ -3065,5 +3499,5 @@ fn var_names(s: &Stmt, out: &mut Vec<Name>) {
 
 /// The UTF-16 unit `i` of `s`.
 pub fn utf16_at(s: &str, i: usize) -> Option<u16> {
-    s.encode_utf16().nth(i)
+    crate::strings::units(s).get(i).copied()
 }

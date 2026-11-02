@@ -38,6 +38,7 @@ fn info() -> NodeInfo {
         cluster_time: ClusterTime { time: CLUSTER_TS.0, increment: CLUSTER_TS.1 },
         now_ms: NOW_MS as i64,
         keys: None,
+        replica_set: None,
     }
 }
 

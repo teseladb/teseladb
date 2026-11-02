@@ -31,6 +31,7 @@ fn op(deadline_ms: Option<u64>) -> Op {
         started_ms: 0,
         deadline_ms,
         killed: false,
+        interrupt: None,
         user: None,
         tenant: 0,
         privileges: None,

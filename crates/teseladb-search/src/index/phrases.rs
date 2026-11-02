@@ -174,7 +174,8 @@ impl MemIndex {
         let g = self.global_of(key);
         let freq = field.postings.get(term)?.get(&doc)?.len() as f32;
         let df = field.blended_df(kept, g);
-        let weight = Weight { description, dfs: &[df], boost, kind: FreqKind::Term };
+        let terms = vec![term.to_owned()];
+        let weight = Weight { description, dfs: &[df], boost, kind: FreqKind::Term, terms };
         Some(field.explain_weight(&weight, doc, freq, g))
     }
 
@@ -206,7 +207,8 @@ impl MemIndex {
         let slop_text = if slop > 0 { format!("~{slop}") } else { String::new() };
         let query = format!("{name}:\"{}\"{slop_text}", words.join(" "));
         let description = if weighted { format!("weight({query} in {doc})") } else { query };
-        let weight = Weight { description, dfs: &dfs, boost, kind: FreqKind::Phrase };
+        let terms = words.iter().map(|w| (*w).to_owned()).collect();
+        let weight = Weight { description, dfs: &dfs, boost, kind: FreqKind::Phrase, terms };
         Ok(Some(field.explain_weight(&weight, doc, freq, g)))
     }
 
@@ -220,8 +222,10 @@ impl MemIndex {
         let Some(field) = self.fields.get(key) else { return BTreeMap::new() };
         let g = self.global_of(key);
         let n = g.map_or(field.lengths.len() as u64, |g| g.docs);
-        let idf_sum: f32 = super::idf_sum(n, present(field.dfs(&phrase.terms(), g)));
-        let score = field.scorer(boost * idf_sum, g);
+        let terms = phrase.terms();
+        let idf_sum: f32 = super::idf_sum(n, present(field.dfs(&terms, g)));
+        let names: Vec<&str> = terms.iter().map(String::as_str).collect();
+        let score = field.scorer(boost, idf_sum, &names, g);
         field
             .multi_phrase_freqs(&phrase.positions, phrase.slop)
             .into_iter()
@@ -256,8 +260,9 @@ impl MemIndex {
             .multi_phrase_freqs(&phrase.positions, phrase.slop)
             .into_iter()
             .find(|f| f.0 == doc)?;
-        let dfs = present(field.dfs(&phrase.terms(), g));
-        let weight = Weight { description, dfs: &dfs, boost, kind: FreqKind::Phrase };
+        let terms = phrase.terms();
+        let dfs = present(field.dfs(&terms, g));
+        let weight = Weight { description, dfs: &dfs, boost, kind: FreqKind::Phrase, terms };
         Some(field.explain_weight(&weight, doc, freq, g))
     }
 
@@ -279,7 +284,8 @@ impl MemIndex {
             }
         }
         let idf_sum = super::idf_sum(n, field.dfs(&terms, g));
-        let score = field.scorer(boost * idf_sum, g);
+        let names: Vec<&str> = terms.iter().map(String::as_str).collect();
+        let score = field.scorer(boost, idf_sum, &names, g);
         field.automaton_freqs(paths).into_iter().map(|(d, f)| (d, score(d, f))).collect()
     }
 
@@ -295,7 +301,8 @@ impl MemIndex {
         let g = self.global_of(key);
         let n = g.map_or(field.lengths.len() as u64, |g| g.docs);
         let df = field.dfs(terms, g).into_iter().max().unwrap_or(0);
-        let score = field.scorer(boost * idf(n, df) as f32, g);
+        let names: Vec<&str> = terms.iter().take(1).map(String::as_str).collect();
+        let score = field.scorer(boost, idf(n, df) as f32, &names, g);
         field.synonym_freqs(terms).into_iter().map(|(doc, f)| (doc, score(doc, f))).collect()
     }
 
@@ -312,7 +319,8 @@ impl MemIndex {
         let g = self.global_of(key);
         let freq = *field.synonym_freqs(terms).get(&doc)?;
         let df = field.dfs(terms, g).into_iter().max().unwrap_or(0);
-        let weight = Weight { description, dfs: &[df], boost, kind: FreqKind::Synonym };
+        let terms = terms.iter().take(1).cloned().collect();
+        let weight = Weight { description, dfs: &[df], boost, kind: FreqKind::Synonym, terms };
         Some(field.explain_weight(&weight, doc, freq, g))
     }
 }

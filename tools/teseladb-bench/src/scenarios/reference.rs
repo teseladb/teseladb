@@ -3,8 +3,9 @@
 //! measures a write confirmed by the majority with the journal (`insert`, `w: "majority"`,
 //! `j: true`) and a read by `_id` served by the leader's lease (`find`, `readConcern: "local"`),
 //! and a query by a secondary index (009 T029: `find` by equality on the indexed field `v`, which
-//! gives the document just written), one after the other on each worker, on documents of 100
-//! bytes. The search (011) joins it when the server answers `$search`.
+//! gives the document just written), and then a `$search` term query for the value it wrote (011
+//! T050) over a `default` search index built before the load, one after the other on each worker,
+//! on documents of 100 bytes.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -24,6 +25,9 @@ const SEED: u64 = 0x5245_4645;
 const WRITE: &str = "write";
 const READ: &str = "read";
 const QUERY: &str = "query";
+const SEARCH: &str = "search";
+/// Longest wait for the search index to be `READY` before the load.
+const INDEX_READY: std::time::Duration = std::time::Duration::from_secs(120);
 /// The indexed field of the documents.
 const INDEXED: &str = "v";
 
@@ -69,6 +73,22 @@ fn query(c: &mut Client, value: String) -> Result<(), String> {
     .map(drop)
 }
 
+/// The `$search` term query for `value` on `v`, first result only.
+fn search(c: &mut Client, value: String) -> Result<(), String> {
+    let text = doc(vec![("path", Value::String(INDEXED.into())), ("query", Value::String(value))]);
+    let stage = doc(vec![("$search", Value::Document(doc(vec![("text", Value::Document(text))])))]);
+    let limit = doc(vec![("$limit", Value::Int32(1))]);
+    c.command(
+        DB,
+        doc(vec![
+            ("aggregate", Value::String(COLLECTION.into())),
+            ("pipeline", Value::Array(vec![Value::Document(stage), Value::Document(limit)])),
+            ("cursor", Value::Document(doc(vec![]))),
+        ]),
+    )
+    .map(drop)
+}
+
 /// The index of `v`.
 fn create_index(c: &mut Client) -> Result<(), String> {
     let index = doc(vec![
@@ -84,11 +104,13 @@ fn create_index(c: &mut Client) -> Result<(), String> {
     )
 }
 
-/// What a worker does next: write a document, read it by `_id`, then query it by its index.
+/// What a worker does next: write a document, read it by `_id`, query it by its index, then
+/// search its value.
 enum Next {
     Write,
     Read(String, String),
     Query(String),
+    Search(String),
 }
 
 /// Runs the scenario.
@@ -109,6 +131,7 @@ pub fn run(args: &Args) -> Result<Report, String> {
             ("documents", Value::Array(vec![Value::Document(probe)])),
         ]),
     )?;
+    super::search::default_index(&mut setup, DB, COLLECTION, INDEX_READY)?;
     let next = AtomicU64::new(0);
     let load = Load {
         warmup: args.warmup,
@@ -116,7 +139,8 @@ pub fn run(args: &Args) -> Result<Report, String> {
         concurrency: args.concurrency,
         rate: args.rate,
     };
-    // Each worker cycles: it writes a document, reads it by `_id`, then queries it by its index.
+    // Each worker cycles: it writes a document, reads it by `_id`, queries it by its index, then
+    // searches its value.
     let out = drive(
         &load,
         |w| Ok((Client::connect(addr)?, Rng::new(SEED + w as u64), Next::Write)),
@@ -134,8 +158,13 @@ pub fn run(args: &Args) -> Result<Report, String> {
                 Ok(READ)
             }
             Next::Query(value) => {
-                query(c, value)?;
+                query(c, value.clone())?;
+                *next_op = Next::Search(value);
                 Ok(QUERY)
+            }
+            Next::Search(value) => {
+                search(c, value)?;
+                Ok(SEARCH)
             }
         },
     )?;

@@ -533,6 +533,7 @@ impl Resharding {
             started_ms: backend.now_ms(),
             deadline_ms: None,
             killed: false,
+            interrupt: None,
             user: None,
             tenant: old.tenant,
             privileges: None,

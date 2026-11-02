@@ -125,20 +125,42 @@ impl<'c, 'a, B: Backend + ?Sized> CtxEsc<'c, 'a, B> {
     }
 }
 
+thread_local! {
+    /// Whether the command running on this thread is one the encryption step sends.
+    static IN_SUB_COMMAND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Runs `cmd` on the database of `ctx` as a command of the node, without the encryption step.
 pub fn sub_command<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
     cmd: &Document,
 ) -> Result<Document, CommandError> {
     let mut sub = Ctx { backend: &mut *ctx.backend, shared: ctx.shared, db: ctx.db, cmd };
-    super::command(&mut sub)
+    let outer = IN_SUB_COMMAND.replace(true);
+    let reply = super::command(&mut sub);
+    IN_SUB_COMMAND.set(outer);
+    reply
+}
+
+/// The encrypted fields an insert without `encryptionInformation` into `c` must respect (no
+/// `__safeContent__`, the implicit schema): `None` if `c` has none, or if the insert is one the
+/// encryption step sends with the values it already processed. The insert reads `c` anyway, so
+/// a collection without encrypted fields costs nothing more.
+pub fn plain_insert_config(
+    c: &CollectionEntry,
+) -> Result<Option<EncryptedFieldConfig>, CommandError> {
+    if IN_SUB_COMMAND.get() {
+        return Ok(None);
+    }
+    config_of(c)
 }
 
 /// The documents of the first batch of a cursor reply.
 pub fn first_batch(reply: &Document) -> Vec<Document> {
-    let Some(Value::Document(c)) = reply.get("cursor") else { return Vec::new() };
-    let Some(Value::Array(b)) = c.get("firstBatch") else { return Vec::new() };
-    b.iter().filter_map(|v| v.as_document().cloned()).collect()
+    match reply.get("cursor").and_then(Value::as_document).and_then(|c| c.get("firstBatch")) {
+        Some(Value::Array(b)) => b.iter().filter_map(|v| v.as_document().cloned()).collect(),
+        _ => Vec::new(),
+    }
 }
 
 impl<B: Backend + ?Sized> EscReader for CtxEsc<'_, '_, B> {
@@ -221,8 +243,7 @@ pub fn rewrite_command<B: Backend + ?Sized>(
 const INFORMATION_FIELDS: [&str; 3] = ["type", "schema", "crudProcessed"];
 
 /// Reads `encryptionInformation` with the IDL rules of a `refnode` 9.0.4 (FR-006).
-fn check_information(name: &str, cmd: &Document) -> Result<(), CommandError> {
-    let Some(v) = cmd.get(ENCRYPTION_INFORMATION) else { return Ok(()) };
+fn check_information(name: &str, v: &Value) -> Result<(), CommandError> {
     let path = format!("{name}.{ENCRYPTION_INFORMATION}");
     let Value::Document(d) = v else { return Err(crate::types::wrong_type(&path, v, "object")) };
     if let Some((k, _)) = d.iter().find(|(k, _)| !INFORMATION_FIELDS.contains(k)) {
@@ -256,17 +277,16 @@ fn target_ns<B: Backend + ?Sized>(ctx: &Ctx<'_, B>) -> Option<Namespace> {
 pub fn intercept<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
 ) -> Option<Result<Document, CommandError>> {
+    // Only a command a driver encrypted has a step here: the rest pay nothing.
+    let information = ctx.cmd.get(ENCRYPTION_INFORMATION)?;
     let name = ctx.name().to_string();
-    if let Err(e) = check_information(&name, ctx.cmd) {
+    if let Err(e) = check_information(&name, information) {
         return Some(Err(e));
     }
     let is_query = QUERIES.contains(&name.as_str());
     let is_write = WRITES.contains(&name.as_str());
     if !is_query && !is_write {
         return None;
-    }
-    if is_query {
-        ctx.cmd.get(ENCRYPTION_INFORMATION)?;
     }
     let ns = target_ns(ctx)?;
     // A catalog the node cannot read now (a command refused before its arguments) leaves the
@@ -325,16 +345,14 @@ fn merge(total: &mut Document, part: &Document, at: usize) {
     }
     for k in ["upserted", "writeErrors"] {
         let Some(Value::Array(items)) = part.get(k) else { continue };
-        let shifted = items.iter().map(|v| match v {
-            Value::Document(d) => {
-                let mut d = d.clone();
-                if let Some(Value::Int32(i)) = d.get("index") {
-                    let i = i + offset;
-                    d.insert("index", i);
-                }
-                Value::Document(d)
+        // Each item is a document with the statement's `index` (a command's reply).
+        let shifted = items.iter().filter_map(Value::as_document).map(|d| {
+            let mut d = d.clone();
+            if let Some(Value::Int32(i)) = d.get("index") {
+                let i = i + offset;
+                d.insert("index", i);
             }
-            other => other.clone(),
+            Value::Document(d)
         });
         match total.get_mut(k) {
             Some(Value::Array(a)) => a.extend(shifted),
@@ -362,13 +380,16 @@ pub fn in_internal_txn(
     if !WRITES.contains(&name) {
         return None;
     }
+    cmd.get(ENCRYPTION_INFORMATION)?;
     let ns = match cmd.iter().next() {
         Some((_, Value::String(c))) => Namespace { db: db.to_string(), coll: c.clone() },
         _ => return None,
     };
     config(backend, &ns).ok().flatten()?;
-    let Some((field, Value::Array(items))) =
-        statements_field(name).and_then(|f| cmd.get(f).map(|v| (f, v)))
+    // An empty list gets the command's own error for its batch size.
+    let Some((field, Value::Array(items))) = statements_field(name)
+        .and_then(|f| cmd.get(f).map(|v| (f, v)))
+        .filter(|(_, v)| !matches!(v, Value::Array(a) if a.is_empty()))
     else {
         return Some(one_txn(backend, shared, (name, db, cmd), &mut statement));
     };
@@ -385,9 +406,6 @@ pub fn in_internal_txn(
         if ordered && reply.get("writeErrors").is_some() {
             break;
         }
-    }
-    if name == "update" && total.get("nModified").is_none() {
-        total.insert("nModified", 0);
     }
     total.push("ok", 1.0);
     Some(Ok(total))
@@ -453,7 +471,7 @@ pub const COMPACT: &str = "compactStructuredEncryptionData";
 /// `cleanupStructuredEncryptionData`.
 pub const CLEANUP: &str = "cleanupStructuredEncryptionData";
 /// The documents of the ECOC one read takes.
-const ECOC_BATCH: i32 = 100_000;
+const ECOC_BATCH: i32 = 10_000;
 
 /// Reads every ECOC document of `config`.
 fn read_ecoc<B: Backend + ?Sized>(
@@ -587,7 +605,7 @@ pub fn compact<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Co
                     .with("limit", 0),
             )],
         );
-        sub_command(ctx, &del)?;
+        super::fle_write::checked(sub_command(ctx, &del)?)?;
     }
     let count = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
     let ecoc_stats = Document::new().with("read", count(ecoc.len() as u64)).with("deleted", 0i64);
@@ -612,10 +630,9 @@ fn apply<B: Backend + ?Sized>(
     for op in ops {
         match op {
             EscOp::Insert(id, value) => {
-                let mut d = Document::new().with("_id", binary(id.0.to_vec()));
-                if let Some(v) = value {
-                    d.push("value", binary(v));
-                }
+                // A compaction inserts anchors, which always have a value.
+                let d = Document::new().with("_id", binary(id.0.to_vec()));
+                let d = value.into_iter().fold(d, |d, v| d.with("value", binary(v)));
                 inserts.push(Value::Document(d));
             }
             EscOp::Update(id, value) => updates.push(Value::Document(
@@ -632,15 +649,15 @@ fn apply<B: Backend + ?Sized>(
         let cmd = Document::new()
             .with("delete", config.esc.as_str())
             .with("deletes", vec![Value::Document(Document::new().with("q", q).with("limit", 0))]);
-        sub_command(ctx, &cmd)?;
+        super::fle_write::checked(sub_command(ctx, &cmd)?)?;
     }
     if !updates.is_empty() {
         let cmd = Document::new().with("update", config.esc.as_str()).with("updates", updates);
-        sub_command(ctx, &cmd)?;
+        super::fle_write::checked(sub_command(ctx, &cmd)?)?;
     }
     if !inserts.is_empty() {
         let cmd = Document::new().with("insert", config.esc.as_str()).with("documents", inserts);
-        sub_command(ctx, &cmd)?;
+        super::fle_write::checked(sub_command(ctx, &cmd)?)?;
     }
     Ok(())
 }

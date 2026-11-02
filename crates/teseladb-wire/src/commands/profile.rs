@@ -524,10 +524,11 @@ pub fn after_command<B: Backend + ?Sized>(backend: &mut B, shared: &super::Share
     let millis = i64::try_from(e.micros / 1000).unwrap_or(i64::MAX);
     let sampled = rate >= 1.0 || (backend.random() as f64 / u64::MAX as f64) < rate;
     let now = i64::try_from(backend.wall_ms()).unwrap_or(i64::MAX);
-    let doc = describe(e, now);
-    let wanted = match &filter {
-        Some(f) => matches(f, &doc),
-        None => millis > slowms && sampled,
+    // The description is built only when a filter or the profiler reads it.
+    let doc = (filter.is_some() || level > 0).then(|| describe(e, now));
+    let wanted = match (&filter, &doc) {
+        (Some(f), Some(doc)) => matches(f, doc),
+        _ => millis > slowms && sampled,
     };
     if wanted {
         let attr = Document::new()
@@ -541,12 +542,18 @@ pub fn after_command<B: Backend + ?Sized>(backend: &mut B, shared: &super::Share
         return;
     }
     let profiled = match level {
-        2 => filter.as_ref().is_none_or(|f| matches(f, &doc)),
+        2 => match (&filter, &doc) {
+            (Some(f), Some(doc)) => matches(f, doc),
+            _ => true,
+        },
         1 => wanted,
         _ => false,
     };
     // Profiling its own collection would never end.
-    if profiled && !e.ns.ends_with(SYSTEM_PROFILE) {
+    if profiled
+        && !e.ns.ends_with(SYSTEM_PROFILE)
+        && let Some(doc) = doc
+    {
         // The profiler records what it can: a failed write of the profile is not the command's.
         let _ = write(backend, shared, e.db, doc);
     }

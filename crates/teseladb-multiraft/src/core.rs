@@ -414,6 +414,9 @@ pub struct MultiRaftCore<S: StateMachine> {
     /// Transfers this core is sending, per group and destination, with their start and size (0
     /// until the snapshot is loaded).
     sending: BTreeMap<GroupId, BTreeMap<NodeId, (Nanos, u64)>>,
+    /// Groups whose leader took a snapshot for a replica that asked for one: while it waits for
+    /// the release floor, a flush is owed ([`MultiRaftCore::snapshot_awaits_flush`]).
+    floor_waits: BTreeSet<GroupId>,
     /// Nodes whose connection dropped and that sent nothing since: a request forwarded to one
     /// ends at once with `Unreachable` instead of waiting for its deadline.
     unreachable: BTreeSet<NodeId>,
@@ -471,6 +474,7 @@ impl<S: StateMachine> MultiRaftCore<S> {
             snapshot_reqs: BTreeMap::new(),
             installing_from: BTreeMap::new(),
             sending: BTreeMap::new(),
+            floor_waits: BTreeSet::new(),
             unreachable: BTreeSet::new(),
             heard: BTreeMap::new(),
             next_ping: Nanos::ZERO,
@@ -1200,6 +1204,7 @@ impl<S: StateMachine> MultiRaftCore<S> {
                 });
                 if !ok && index == 0 && leads && self.snapshot_index(group) == Some(0) {
                     self.snapshot_now(group);
+                    self.floor_waits.insert(group);
                 }
                 if let Some(grp) = self.groups.get_mut(&group) {
                     // A failed transfer goes again at once: the follower may be waiting for the
@@ -1884,6 +1889,7 @@ impl<S: StateMachine> MultiRaftCore<S> {
             return;
         }
         let (meta, data) = grp.pending_snap.take().expect("checked");
+        self.floor_waits.remove(&g);
         if meta.index <= grp.snap_index {
             return;
         }
@@ -2101,6 +2107,15 @@ impl<S: StateMachine> MultiRaftCore<S> {
     /// Whether group `g` is quiescent: idle, its leader sends no heartbeats.
     pub fn is_quiesced(&self, g: GroupId) -> bool {
         self.groups.get(&g).is_some_and(|grp| grp.raw.is_quiesced())
+    }
+
+    /// Whether a snapshot a replica waits for is held back by the release floor (a state machine
+    /// that holds the log, its memtable not flushed yet): the layer above flushes now rather than
+    /// when the core is next idle, since the replica may be what the group needs to commit.
+    pub fn snapshot_awaits_flush(&self) -> bool {
+        self.floor_waits
+            .iter()
+            .any(|g| self.groups.get(g).is_some_and(|grp| grp.pending_snap.is_some()))
     }
 
     /// Raft status of a group.

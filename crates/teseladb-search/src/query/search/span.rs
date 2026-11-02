@@ -286,6 +286,7 @@ impl Span {
             dfs: &dfs,
             boost,
             kind: crate::index::FreqKind::Phrase,
+            terms: terms.clone(),
         };
         Ok(ctx.index.explain_weight(&path, &weight, doc, freq))
     }

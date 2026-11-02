@@ -37,6 +37,7 @@ teseladb-json = { path = "../teseladb-json" }
 teseladb-mcp = { path = "../teseladb-mcp" }
 teseladb-rest = { path = "../teseladb-rest" }
 teseladb-wire = { path = "../teseladb-wire" }
+teseladb-topology = { path = "../teseladb-topology" }
 teseladb-exec = { path = "../teseladb-exec" }
 teseladb-mql = { path = "../teseladb-mql" }
 teseladb-auth = { path = "../teseladb-auth" }

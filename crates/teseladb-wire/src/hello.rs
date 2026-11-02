@@ -10,6 +10,7 @@ use std::sync::Arc;
 use teseladb_auth::clustertime::{KEY_LEN, KeyRing, Time};
 use teseladb_auth::users::UserName;
 use teseladb_bson::{Document, Value};
+use teseladb_topology::replset::{HelloContext, LastWrite, Limits, MemberId, ReplicaSet};
 
 use crate::commands::auth::{AUTHENTICATE, SASL_START, SPECULATIVE_AUTHENTICATE};
 use crate::compressed::Compressor;
@@ -77,7 +78,35 @@ pub struct NodeInfo {
     /// The keys that sign `$clusterTime` and check the one a client sends, on a node with
     /// authentication; `None` signs with zeros and takes any signature (013 FR-014).
     pub keys: Option<Arc<KeyRing>>,
+    /// The replica set this node is a member of, in the replica set presentation (018 FR-007);
+    /// `None`: the node answers as a `refrouter`.
+    pub replica_set: Option<Arc<ReplicaView>>,
 }
+
+/// A node's view of the replica set presentation: the set, the member it is and its
+/// `lastWrite`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReplicaView {
+    /// The set.
+    pub set: ReplicaSet,
+    /// This node's member.
+    pub me: MemberId,
+    /// `lastWrite`, from the closed mark.
+    pub last: LastWrite,
+}
+
+// Priorities are validated within 0..=1000, never NaN.
+impl Eq for ReplicaView {}
+
+/// The node's limits, as its `hello` announces them.
+pub const LIMITS: Limits = Limits {
+    max_bson_object_size: MAX_BSON_OBJECT_SIZE,
+    max_message_size: MAX_MESSAGE_SIZE as i32,
+    max_write_batch_size: MAX_WRITE_BATCH_SIZE,
+    logical_session_timeout_minutes: LOGICAL_SESSION_TIMEOUT_MINUTES,
+    min_wire_version: MIN_WIRE_VERSION,
+    max_wire_version: MAX_WIRE_VERSION,
+};
 
 /// A validated handshake request.
 #[derive(Clone, Debug, PartialEq)]
@@ -414,6 +443,9 @@ impl HelloRequest {
 
     /// The reply, without `$clusterTime` and `operationTime`.
     pub fn response(&self, state: &HelloState, connection_id: i32, node: &NodeInfo) -> Document {
+        if let Some(view) = &node.replica_set {
+            return self.member_response(state, connection_id, node, view);
+        }
         let mut d = Document::new();
         if !state.compressors.is_empty() {
             let names: Vec<Value> =
@@ -448,6 +480,36 @@ impl HelloRequest {
             d.push("serviceId", Value::ObjectId(node.topology.process_id));
         }
         d.push("ok", 1.0);
+        d
+    }
+
+    /// The reply of a member of the replica set presentation (contract `topology-modes.md`):
+    /// `loadBalanced` adds no `serviceId`, as on a `refnode` that is not behind a balancer.
+    fn member_response(
+        &self,
+        state: &HelloState,
+        connection_id: i32,
+        node: &NodeInfo,
+        view: &ReplicaView,
+    ) -> Document {
+        let ctx = HelloContext {
+            legacy: self.legacy,
+            hello_ok: self.hello_ok,
+            compressors: state.compressors.iter().map(|c| c.name()).collect(),
+            process_id: node.topology.process_id,
+            counter: node.topology.counter,
+            now_ms: node.now_ms,
+            connection_id,
+            limits: LIMITS,
+        };
+        let mut d = view.set.hello(&ctx, view.me, &view.last);
+        if self.sasl.is_some() {
+            let mechs = self.mechanisms.as_deref().unwrap_or(&SASL_MECHANISMS);
+            let mechs: Vec<Value> = mechs.iter().map(|&m| Value::from(m)).collect();
+            d.remove("ok");
+            d.push("saslSupportedMechs", mechs);
+            d.push("ok", 1.0);
+        }
         d
     }
 }
