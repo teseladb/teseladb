@@ -18,3 +18,4 @@ teseladb-session = { path = "../teseladb-session" }
 
 [dev-dependencies]
 teseladb-json = { path = "../teseladb-json" }
+teseladb-types = { path = "../teseladb-types" }

@@ -282,6 +282,7 @@ dependencies = [
  "teseladb-http",
  "teseladb-json",
  "teseladb-session",
+ "teseladb-types",
  "teseladb-wire",
 ]
 
