@@ -322,6 +322,39 @@ fn resources_and_exports() {
     assert!(text(&replies[2]).contains("\"readOnly\":true"));
     assert!(text(&replies[3]).contains("\"types\":[\"int\",\"string\"]"), "{}", text(&replies[3]));
     assert!(replies[4].get("error").is_some());
+    // The other resources, the other template, and the URIs that name none.
+    let read = |id: usize, uri: &str| {
+        format!(
+            r#"{{"jsonrpc":"2.0","id":{id},"method":"resources/read","params":{{"uri":"{uri}"}}}}"#
+        )
+    };
+    let uris = [
+        "debug://refdb",
+        "teseladb://cluster/status",
+        "teseladb://db/c/indexes",
+        "teseladb://db/c/other",
+        "teseladb://db/c",
+        "exported-data://7.none",
+    ];
+    let items: Vec<String> = uris.iter().enumerate().map(|(i, u)| read(10 + i, u)).collect();
+    let batch = format!("[{}]", items.join(","));
+    let (_, v) = post(&server, &mut f, READ_ONLY, &batch, Some(&sid));
+    let replies = v.as_array().unwrap();
+    assert!(text(&replies[0]).contains("\"connected\":true"), "{}", text(&replies[0]));
+    assert!(result(&replies[1]).get("contents").is_some());
+    assert!(text(&replies[2]).contains("_id_"), "{}", text(&replies[2]));
+    assert!(replies[3..].iter().all(|r| r.get("error").is_some()), "{replies:?}");
+    // A batch of notifications only is answered with `202`; a string id is kept as it came.
+    let note = r#"[{"jsonrpc":"2.0","method":"notifications/initialized"}]"#;
+    assert_eq!(post(&server, &mut f, READ_ONLY, note, Some(&sid)).0.status, 202);
+    let batch = r#"[{"jsonrpc":"2.0","id":"s1","method":"tools/list"},{"jsonrpc":"2.0","id":[1],"method":"x"}]"#;
+    let (_, v) = post(&server, &mut f, READ_ONLY, batch, Some(&sid));
+    let replies = v.as_array().unwrap();
+    assert_eq!(replies[0].get("id").and_then(Value::as_str), Some("s1"));
+    assert!(replies[1].get("error").is_some());
+    let call = r#"{"jsonrpc":"2.0","id":"s2","method":"tools/call","params":{"name":"find","arguments":[]}}"#;
+    let (_, v) = post(&server, &mut f, READ_ONLY, call, Some(&sid));
+    assert!(format!("{v:?}").contains("arguments must be an object"), "{v:?}");
 }
 
 #[test]

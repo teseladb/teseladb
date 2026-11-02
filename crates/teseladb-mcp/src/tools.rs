@@ -349,24 +349,13 @@ pub fn own_input_schema(t: &Tool) -> Object {
     o
 }
 
-/// `outputSchema` of `t`, when its result has `structuredContent`: the reference's.
+/// `outputSchema` of `t`, when its result has `structuredContent`: the reference's (every tool
+/// of the reference has one, `null` for `export`).
 pub fn output_schema(t: &Tool) -> Option<Object> {
     match reference(t.name).and_then(|r| r.get("outputSchema")) {
-        Some(Value::Object(o)) => return Some(satisfiable(t.name, o.clone())),
-        Some(Value::Null) => return None,
-        _ => {}
+        Some(Value::Object(o)) => Some(satisfiable(t.name, o.clone())),
+        _ => None,
     }
-    if t.output.is_empty() {
-        return None;
-    }
-    let mut props = Object::new();
-    for f in t.output {
-        props.insert(*f, Value::Object(Object::new()));
-    }
-    let mut o = Object::new();
-    o.insert("type", "object");
-    o.insert("properties", Value::Object(props));
-    Some(o)
 }
 
 /// The reference's `outputSchema` of `name`, with what no answer could meet corrected: the
@@ -447,4 +436,21 @@ pub fn check_args(t: &Tool, args: &Object) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    use super::*;
+
+    /// The builders of [`TOOLS`] run at compile time; the same values at run time.
+    #[test]
+    fn the_builders_give_the_tools_of_the_table() {
+        let t = read("find", "d", &[DB, COLL], &["documents"]);
+        assert_eq!((t.read_only, t.destructive), (true, false));
+        let w = write("drop-database", "d", &[DB], &[], true);
+        assert_eq!((w.read_only, w.destructive), (false, true));
+        assert!(req("a", Kind::Str).required && !opt("b", Kind::Bool).required);
+        assert_eq!(tool("find").map(|t| (t.read_only, t.destructive)), Some((true, false)));
+    }
 }
