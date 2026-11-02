@@ -2563,3 +2563,33 @@ new Uint8Array([300, -1, 1.5]).toHex() + new Uint8Array([255, 0, 7]).toBase64()	
 (() => { try { 'abc'.includes(/a/) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:Invalid type: first can't be a Regular Expression
 ['İ'.toLowerCase(), 'ß'.toUpperCase(), 'ǅ'.toLowerCase(), 'İstanbul'.toLocaleLowerCase(), 'ﬀ'.toUpperCase(), 'Σ'.toLowerCase(), 'ΑΣ'.toLowerCase()].join('|')	S:i̇|SS|ǆ|i̇stanbul|FF|σ|ασ
 ['a'.localeCompare('b'), 'b'.localeCompare('a'), 'a'.localeCompare('a'), 'a'.localeCompare(), 'B'.localeCompare('a')].join()	S:-1,1,0,-20,-31
+[/\u{1F600}/u.test('😀'), /😀/u.test('😀'), /[😀]/u.test('😀'), /\uD83D/u.test('😀'), /[🐀-🟿]/u.test('😀')].join()	S:true,true,true,false,true
+[/a{2,}/.test('aaa'), /a{,2}/.test('a{,2}'), /a{2/.test('a{2'), /x{1}?/.exec('xx')[0], /\k<n>(?<n>a)/.test('a'), /\k/.test('k')].join()	S:true,true,true,x,true,true
+[/[\b]/.test('\b'), /[\B]/.test('B'), /\bfoo\b/.test('a foo b'), /\Bo/.test('foo'), /o\B/.test('fo'), /(a)\1/.test('aa'), /(a)\2/.test('a\x02'), /[\1]/.test('\x01')].join()	S:true,true,true,true,false,true,true,true
+[/(?:a|b)*?c/.exec('ababc')[0], /(a*)*b/.exec('aab')[0], /(a|)*b/.exec('ab')[0], /(?:)*x/.exec('x')[0], /(?=a)*/.exec('a') + ''].join('|')	S:ababc|aab|ab|x|
+[/ß/i.test('SS'), /[a-z]/i.test('K'), /K/i.test('k'), /K/iu.test('k'), /[K]/iu.test('K'), /ſ/i.test('s'), /ſ/iu.test('S')].join()	S:false,true,false,false,false,false,false
+['aBc'.replace(/b/i, x => x.toUpperCase() + '!'), 'abc'.replace(/(?<l>b)/g, (...a) => JSON.stringify(a[a.length - 1])), 'xyz'.replace(/y/g, '$&$&'), 'aaa'.replace(/a*?/g, '-'), 'abc'.replace(/(?:)/gu, '|')].join(' ')	S:aB!c a{"l":"b"}c xyyz -a-a-a- |a|b|c|
+['😀😀'.split(/(?:)/u).length, '😀😀'.split('').length, 'abc'.split(/(?=b)/), 'a,b'.split(/,/, -1), 'test'.split(/(t)/, 2)].map(x => JSON.stringify(x)).join()	S:2,4,["a","bc"],["a","b"],["","t"]
+[[...'a1b22'.matchAll(/\d+/g)].map(m => m.index + m[0]).join(';'), 'xAy'.search(/a/i), 'xy'.search('z'), 'abc'.match(/(?<q>b)/).groups.q, JSON.stringify('abc'.match(/z/g)), 'a.b'.match('.').index].join()	S:11;322,1,-1,b,null,0
+(() => { const r = /a/g; r.lastIndex = 5; return [r.test('aaa'), r.lastIndex, r.exec('a'), r.lastIndex].join() })()	S:false,0,a,1
+(() => { const r = /a/y; return [r.test('ba'), r.lastIndex, (r.lastIndex = 1, r.test('ba')), r.lastIndex].join() })()	S:false,0,true,2
+(() => { const r = /a/d; const m = r.exec('xa'); return JSON.stringify(m.indices) })()	S:[[1,2]]
+(() => { const r = /(?<z>a)(b)?/d; const m = r.exec('xa'); return JSON.stringify(m.indices) + JSON.stringify(m.indices.groups) })()	S:[[1,2],[1,2],null]{"z":[1,2]}
+(() => { try { new RegExp('(') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:unterminated parenthetical
+(() => { try { new RegExp('a', 'gg') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid regular expression flag g
+(() => { try { new RegExp('[b-a]') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid range in character class
+(() => { try { new RegExp('a**') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:nothing to repeat
+(() => { try { new RegExp('\\') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:\\ at end of pattern
+(() => { try { new RegExp('(?<a>x)(?<a>y)') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:duplicate capture group name in regular expression
+(() => { try { new RegExp('\\u{110000}', 'u') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid unicode escape in regular expression
+(() => { try { new RegExp('\\p{Foo}', 'u') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid property name in regular expression
+(() => { const r = /a/g; r[Symbol.replace] === RegExp.prototype[Symbol.replace]; return 'aXa'.replaceAll('a', 'b') + 'aXa'.replaceAll(/a/g, () => 'c') })()	S:bXbcXc
+(() => { const re = /x/; re.exec = () => null; return [re.test('x'), 'x'.replace(re, 'y'), 'x'.search(re)].join() })()	S:true,y,0
+(() => { const re = /x/; re.exec = () => ({ index: 0, 0: 'x', length: 1 }); return [re.test('q'), String('ab'.match(re))].join() })()	S:false,null
+(() => { const re = /x/; re.exec = () => 5; try { re.test('x') } catch (e) { return e.name + ':' + e.message } })()	J:undefined
+(() => { const r = /(a)|(b)/g; return 'b'.replace(r, '[$1|$2]') })()	S:[|b]
+RegExp.prototype.source + '|' + RegExp.prototype.flags + '|' + String(RegExp.prototype.global)	S:(?:)||undefined
+(() => { try { return RegExp.prototype.exec.call({}, 'a') } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:exec method called on incompatible Object
+new RegExp('/', 'g').source + new RegExp('\n').source + new RegExp('').source + RegExp(/a/g, 'i').flags + new RegExp(/a/g).flags	S:\\/\\n(?:)ig
+[/\x4/.test('x4'), /\x41/.test('A'), /\u41/.test('u41'), /\cJ/.test('\n'), /\c1/.test('\\c1'), /[\c_]/.test('\x1f'), /\c/.test('\\c')].join()	S:true,true,true,true,true,true,true
+[/^b/m.test('a\nb'), /a$/m.test('a\nb'), /a$/.test('a\nb'), /./s.test('\n'), /./.test(' '), /a.c/s.exec('a\rc')[0].length].join()	S:true,true,false,true,false,3

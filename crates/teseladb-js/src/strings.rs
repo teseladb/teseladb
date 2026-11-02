@@ -483,6 +483,14 @@ pub fn substitute(
         args.extend(groups.iter().cloned());
         args.push(Val::Num(position as f64));
         args.push(Val::Str(subject.into()));
+        // With named groups, their object comes last (ECMA-262 §22.1.3.19.1).
+        if !named.is_empty() {
+            let g = it.alloc(None, Kind::Ordinary)?;
+            for (n, v) in named {
+                it.define(&g, n, Prop::data(v.clone()))?;
+            }
+            args.push(Val::Obj(g));
+        }
         let r = it.call(replacement, &Val::Undef, &args)?;
         return Ok(it.str_of(&r)?.to_string());
     }

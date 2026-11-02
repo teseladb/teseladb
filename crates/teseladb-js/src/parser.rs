@@ -1854,7 +1854,13 @@ impl Parser {
                 let strs = parts.cooked.iter().map(|c| c.clone().unwrap_or_default()).collect();
                 Expr::Template(strs, subs)
             }
-            Tok::Regex(b, f) => Expr::Regex(b, f),
+            Tok::Regex(b, f) => {
+                if let Err(m) = crate::regex::syntax(&b, &f) {
+                    self.i -= 1;
+                    return self.fail(m);
+                }
+                Expr::Regex(b, f)
+            }
             Tok::Punct("(") => {
                 let e = self.expression()?;
                 self.expect(")")?;
