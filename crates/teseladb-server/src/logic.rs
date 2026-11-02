@@ -100,6 +100,17 @@ pub struct Group0View {
     pub addrs_current: bool,
     /// Group 0's descriptor of the data range, once created (005 FR-016).
     pub data_range: Option<RangeDesc>,
+    /// The `root` user this node creates on a secure cluster's first start is not in Group 0
+    /// yet: a client that logs in with its credentials would fail (013).
+    pub root_pending: bool,
+}
+
+impl Group0View {
+    /// The node serves clients: the cluster exists, Group 0 has this node's addresses and the
+    /// `root` user this node creates, if any.
+    pub fn ready(&self) -> bool {
+        self.bootstrapped && self.addrs_current && !self.root_pending
+    }
 }
 
 /// Messages a core takes from the rest of the process.
@@ -528,6 +539,7 @@ impl NodeLogic {
             nodes: sm.nodes.keys().copied().collect(),
             addrs_current: self.addrs_current(),
             data_range: data_range(sm).cloned(),
+            root_pending: self.root_user.is_some(),
         }
     }
 
@@ -2805,6 +2817,9 @@ mod tests {
             .to_bytes()
             .unwrap();
         c.logic(1).root_user = Some((doc.clone(), Nanos::ZERO));
+        // Bootstrapped, the node is not ready while its `root` user is not in Group 0.
+        let v = c.logic(1).view();
+        assert!(v.root_pending && !v.ready(), "{v:?}");
         c.run_until(|c| {
             c.logic(1).group0().is_some_and(|sm| {
                 sm.security.get(Principal::User, "admin", crate::pki::ROOT_USER).is_some()
@@ -2815,6 +2830,7 @@ mod tests {
         };
         c.run_until(|c| c.logic(1).root_user.is_none());
         assert_eq!(users(&mut c), 1);
+        assert!(c.logic(1).view().ready());
         // With a user already there, another node's `root` is not created.
         c.logic(1).root_user = Some((doc, Nanos::ZERO));
         c.run_until(|c| c.logic(1).root_user.is_none());

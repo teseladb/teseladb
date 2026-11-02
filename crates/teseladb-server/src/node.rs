@@ -988,12 +988,12 @@ impl<D: Disk + Send + 'static> Node<D> {
         rx.recv_timeout(timeout).ok()
     }
 
-    /// Waits until Group 0 has the cluster created and this node's current addresses (`false` if
-    /// `timeout` passes first).
+    /// Waits until Group 0 has the cluster created, this node's current addresses and the `root`
+    /// user this node creates, if any ([`Group0View::ready`]; `false` if `timeout` passes first).
     pub fn wait_ready(&self, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
-            if self.view(timeout).is_some_and(|v| v.bootstrapped && v.addrs_current) {
+            if self.view(timeout).is_some_and(|v| v.ready()) {
                 return true;
             }
             thread::sleep(Duration::from_millis(5));
