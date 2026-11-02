@@ -125,13 +125,34 @@ impl<'c, 'a, B: Backend + ?Sized> CtxEsc<'c, 'a, B> {
     }
 }
 
+thread_local! {
+    /// Whether the command running on this thread is one the encryption step sends.
+    static IN_SUB_COMMAND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Runs `cmd` on the database of `ctx` as a command of the node, without the encryption step.
 pub fn sub_command<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
     cmd: &Document,
 ) -> Result<Document, CommandError> {
     let mut sub = Ctx { backend: &mut *ctx.backend, shared: ctx.shared, db: ctx.db, cmd };
-    super::command(&mut sub)
+    let outer = IN_SUB_COMMAND.replace(true);
+    let reply = super::command(&mut sub);
+    IN_SUB_COMMAND.set(outer);
+    reply
+}
+
+/// The encrypted fields an insert without `encryptionInformation` into `c` must respect (no
+/// `__safeContent__`, the implicit schema): `None` if `c` has none, or if the insert is one the
+/// encryption step sends with the values it already processed. The insert reads `c` anyway, so
+/// a collection without encrypted fields costs nothing more.
+pub fn plain_insert_config(
+    c: &CollectionEntry,
+) -> Result<Option<EncryptedFieldConfig>, CommandError> {
+    if IN_SUB_COMMAND.get() {
+        return Ok(None);
+    }
+    config_of(c)
 }
 
 /// The documents of the first batch of a cursor reply.
@@ -256,6 +277,8 @@ fn target_ns<B: Backend + ?Sized>(ctx: &Ctx<'_, B>) -> Option<Namespace> {
 pub fn intercept<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
 ) -> Option<Result<Document, CommandError>> {
+    // Only a command a driver encrypted has a step here: the rest pay nothing.
+    ctx.cmd.get(ENCRYPTION_INFORMATION)?;
     let name = ctx.name().to_string();
     if let Err(e) = check_information(&name, ctx.cmd) {
         return Some(Err(e));
@@ -264,9 +287,6 @@ pub fn intercept<B: Backend + ?Sized>(
     let is_write = WRITES.contains(&name.as_str());
     if !is_query && !is_write {
         return None;
-    }
-    if is_query {
-        ctx.cmd.get(ENCRYPTION_INFORMATION)?;
     }
     let ns = target_ns(ctx)?;
     // A catalog the node cannot read now (a command refused before its arguments) leaves the
@@ -362,6 +382,7 @@ pub fn in_internal_txn(
     if !WRITES.contains(&name) {
         return None;
     }
+    cmd.get(ENCRYPTION_INFORMATION)?;
     let ns = match cmd.iter().next() {
         Some((_, Value::String(c))) => Namespace { db: db.to_string(), coll: c.clone() },
         _ => return None,
