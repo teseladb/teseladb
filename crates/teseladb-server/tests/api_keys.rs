@@ -235,6 +235,10 @@ fn keys_carry_their_roles_and_a_revoked_key_is_refused_everywhere_within_a_secon
     assert_eq!(call(at[0], &root, "DELETE", &format!("/v1/apiKeys/{key_id}"), "").0, 404);
     let (code, _, err) = admin(&first, &["apikey", "revoke", &key_id]);
     assert_eq!(code, 1, "{err}");
+    // A key for a user that does not exist: the port answers 404, the command line fails.
+    let (code, _, err) = admin(&first, &["apikey", "create", "--user", "ghost", "--db", "admin"]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("ghost"), "{err}");
     drop(others.into_iter().map(Node::stop).collect::<Vec<_>>());
     drop(first.stop());
 }
