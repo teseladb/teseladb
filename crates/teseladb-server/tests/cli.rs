@@ -271,6 +271,15 @@ fn the_http_port_and_its_addresses() {
     let http = teseladb_server::http_config(&o).expect("the port");
     assert_eq!(http.addrs, ["127.0.0.1:28080".parse().unwrap()]);
     assert!(http.tls.is_none());
+    // The URI of `/mcp` comes from the configuration, never from a client's `Host` (FR-027).
+    let advertised = teseladb_server::node_config(&o).http_advertise;
+    assert_eq!(advertised.as_deref(), Some("127.0.0.1:28080"));
+    let advertise = teseladb_server::http_advertise;
+    assert_eq!(advertise("0.0.0.0, db.example.com", 1).as_deref(), Some("db.example.com:1"));
+    assert_eq!(advertise("::1", 2).as_deref(), Some("[::1]:2"));
+    assert_eq!(advertise("[::1]", 2).as_deref(), Some("[::1]:2"));
+    assert_eq!(advertise("0.0.0.0,::,[::]", 3), None);
+    assert_eq!(advertise("", 3), None);
     let e = bad("start --insecure --http-bind 10.0.0.1");
     assert!(e.contains("--http-bind 10.0.0.1: with --insecure only loopback"), "{e}");
     let e = bad("start --insecure --http-port 70000");

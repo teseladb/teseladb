@@ -18,6 +18,7 @@ use crate::backend::{NodeHandle, ServerBackend};
 use crate::client_listener::NodeState;
 use crate::http_listener::{Caller, HttpService, Reply};
 use teseladb_auth::audit_param::{Transport, http_request};
+use teseladb_auth::bearer::Bearer;
 use teseladb_http::sse::{EVENT_STREAM, HEARTBEAT};
 use teseladb_mcp::server::SESSION_HEADER;
 use teseladb_rest::changestream::HEARTBEAT_MS;
@@ -52,6 +53,8 @@ pub struct NodeHttp {
     oidc: Option<std::sync::Arc<crate::oidc_client::Oidc>>,
     /// `authenticationMechanisms` of the node.
     mechanisms: Vec<teseladb_auth::sasl::SaslMechanism>,
+    /// The `host:port` clients reach the port by, once the port listens (FR-027).
+    advertised: std::sync::OnceLock<String>,
 }
 
 impl std::fmt::Debug for NodeHttp {
@@ -89,10 +92,20 @@ impl NodeHttp {
     /// With `audit`, the request goes to the audit log (a forwarded one went on the node the
     /// client reached).
     fn mcp(&self, request: &Request, who: &Credential, audit: bool) -> Response {
+        self.mcp_for(request, who, audit, self.resource())
+    }
+
+    /// [`NodeHttp::mcp`] with the URI of `/mcp` an OIDC token must name, `resource`.
+    fn mcp_for(
+        &self,
+        request: &Request,
+        who: &Credential,
+        audit: bool,
+        resource: Option<String>,
+    ) -> Response {
         let mut exec = self.executor(self.backend());
-        exec.auth_state().oidc_resource = Some(self.resource(request));
         let mut key_id = None;
-        let answer = match authenticate(&mut exec, request, who, self.auth) {
+        let answer = match self.mcp_login(&mut exec, request, who, resource) {
             Ok(key) => {
                 if let Some(k) = key {
                     key_id = Some(k.key_id.clone());
@@ -100,7 +113,7 @@ impl NodeHttp {
                 }
                 run_mcp(&self.mcp, &mut exec, request, self.mcp_options(), None)
             }
-            Err(r) => self.with_metadata(request, r),
+            Err(r) => r,
         };
         if audit {
             audit_mcp(&mut exec, request, answer.status, key_id.as_deref());
@@ -114,15 +127,13 @@ impl NodeHttp {
     /// the result. The call runs on a thread of its own, which also writes the audit event.
     fn mcp_progress(&self, request: &Request, who: &Credential) -> Reply {
         let mut exec = self.executor(self.backend());
-        exec.auth_state().oidc_resource = Some(self.resource(request));
-        let key_id = match authenticate(&mut exec, request, who, self.auth) {
+        let key_id = match self.mcp_login(&mut exec, request, who, self.resource()) {
             Ok(key) => key.map(|k| {
                 let id = k.key_id.clone();
                 touch_later(&mut exec, k);
                 id
             }),
             Err(r) => {
-                let r = self.with_metadata(request, r);
                 audit_mcp(&mut exec, request, r.status, None);
                 return Reply::Whole(r);
             }
@@ -192,7 +203,14 @@ impl NodeHttp {
             mcp,
             oidc: None,
             mechanisms: Vec::new(),
+            advertised: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Sets the `host:port` clients reach the port by, of which `/mcp`'s resource URI is made
+    /// while `mcpOptions.resourceUri` is not set (FR-027); only the first call counts.
+    pub fn advertise(&self, authority: String) {
+        let _ = self.advertised.set(authority);
     }
 
     /// The service with the node's identity providers and `authenticationMechanisms`: a Bearer
@@ -222,13 +240,37 @@ impl NodeHttp {
     }
 
     /// The URI of `/mcp` as tokens for MCP name it (RFC 8707): `mcpOptions.resourceUri`, or the
-    /// one at the request's `Host`.
-    fn resource(&self, request: &Request) -> String {
+    /// one at the address the port is reached by, from the node's configuration. Never the
+    /// request's `Host`, which the client chooses: a token the provider issued for another
+    /// resource would pass by naming that resource's host. `None` when the node does not know it.
+    fn resource(&self) -> Option<String> {
         if let Some(fixed) = self.parameters().1.resource_uri {
-            return fixed;
+            return Some(fixed);
         }
-        let host = header_of(request, "Host").unwrap_or("localhost");
-        teseladb_mcp::oauth_metadata::resource_uri(self.scheme(), host)
+        let authority = self.advertised.get()?;
+        Some(teseladb_mcp::oauth_metadata::resource_uri(self.scheme(), authority))
+    }
+
+    /// Authenticates a request of `/mcp` (FR-015, FR-027): an OIDC token must be issued for
+    /// `resource`, and without one the node takes no token, with a `401` that says how to fix
+    /// it. A `401` names the resource's metadata in `WWW-Authenticate`.
+    fn mcp_login(
+        &self,
+        exec: &mut NodeExecutor,
+        request: &Request,
+        who: &Credential,
+        resource: Option<String>,
+    ) -> Result<Option<teseladb_auth::apikey::ApiKey>, Response> {
+        let token = header_of(request, "Authorization")
+            .is_some_and(|v| matches!(teseladb_auth::bearer::parse(v), Ok(Bearer::Jwt(_))));
+        let Some(resource) = resource else {
+            if self.auth && token {
+                return Err(unknown_resource(401));
+            }
+            return authenticate(exec, request, who, self.auth);
+        };
+        exec.auth_state().oidc_resource = Some(resource.clone());
+        authenticate(exec, request, who, self.auth).map_err(|r| with_metadata(&resource, r))
     }
 }
 
@@ -330,6 +372,48 @@ impl OpenStream {
 /// The value of field `name` of `request`, case-insensitively.
 fn header_of<'a>(request: &'a Request, name: &str) -> Option<&'a str> {
     teseladb_rest::api::header(request, name)
+}
+
+/// Why `/mcp` takes no OIDC token on a node that does not know its URI.
+const UNKNOWN_RESOURCE: &str = "this node does not know the URI clients reach /mcp by, so it \
+     takes no OIDC access token there: set mcpOptions.resourceUri with setClusterParameter";
+
+/// The answer of `/mcp` (`401`) or of its metadata (`404`) while the node does not know the
+/// resource's URI (FR-027): a problem that says how to set it.
+fn unknown_resource(status: u16) -> Response {
+    let mut r = Response::problem(status);
+    let mut problem = teseladb_json::Object::new();
+    problem.insert("type", "about:blank");
+    problem.insert("title", if status == 401 { "Unauthorized" } else { "Not Found" });
+    problem.insert("status", i64::from(status));
+    problem.insert("detail", UNKNOWN_RESOURCE);
+    r.body = teseladb_json::to_string(&teseladb_json::Value::Object(problem))
+        .unwrap_or_default()
+        .into_bytes();
+    if status == 401 {
+        let challenge = format!(
+            "{}, error_description=\"{UNKNOWN_RESOURCE}\"",
+            teseladb_auth::bearer::challenge(true, None)
+        );
+        r.headers.push(("WWW-Authenticate".to_owned(), challenge));
+    }
+    r
+}
+
+/// A `401` of `/mcp` with the URL of the metadata of `resource` in `WWW-Authenticate`
+/// (RFC 9728, 5.1).
+fn with_metadata(resource: &str, mut r: Response) -> Response {
+    if r.status != 401 {
+        return r;
+    }
+    let Some(url) = teseladb_mcp::oauth_metadata::metadata_url(resource) else { return r };
+    for (k, v) in &mut r.headers {
+        if k.eq_ignore_ascii_case("WWW-Authenticate") {
+            let invalid = v.contains("invalid_token");
+            *v = teseladb_auth::bearer::challenge(invalid, Some(&url));
+        }
+    }
+    r
 }
 
 /// How often the stream of an MCP session reads `mcpOptions` again.
@@ -471,34 +555,17 @@ impl NodeHttp {
     }
 
     /// The metadata of the protected resource `/mcp` (RFC 9728, FR-027), public.
-    fn oauth_metadata(&self, request: &Request) -> Response {
+    fn oauth_metadata(&self) -> Response {
+        let Some(resource) = self.resource() else { return unknown_resource(404) };
         let providers = self.oidc.as_ref().map(|o| o.providers.0.as_slice()).unwrap_or_default();
         let issuers: Vec<String> = providers.iter().map(|p| p.issuer.clone()).collect();
         let mut scopes: Vec<String> = providers.iter().flat_map(|p| p.scopes.clone()).collect();
         scopes.sort();
         scopes.dedup();
-        let resource = self.resource(request);
         let body =
             teseladb_mcp::oauth_metadata::document(&resource, &issuers, &scopes).into_bytes();
         let headers = vec![("Content-Type".to_owned(), "application/json".to_owned())];
         Response { status: 200, headers, body }
-    }
-
-    /// A `401` of `/mcp` with the URL of the resource's metadata in `WWW-Authenticate`
-    /// (RFC 9728, 5.1).
-    fn with_metadata(&self, request: &Request, mut r: Response) -> Response {
-        if r.status != 401 {
-            return r;
-        }
-        let host = header_of(request, "Host").unwrap_or("localhost");
-        let url = teseladb_mcp::oauth_metadata::metadata_url(self.scheme(), host);
-        for (k, v) in &mut r.headers {
-            if k.eq_ignore_ascii_case("WWW-Authenticate") {
-                let invalid = v.contains("invalid_token");
-                *v = teseladb_auth::bearer::challenge(invalid, Some(&url));
-            }
-        }
-        r
     }
 
     /// `GET /mcp` of a session (revisions with `initialize`): the server's stream with the
@@ -508,9 +575,8 @@ impl NodeHttp {
         let backend =
             ServerBackend::new(self.handle.clone(), random_seed()).with_oidc(self.oidc.clone());
         let mut exec = self.executor(backend);
-        exec.auth_state().oidc_resource = Some(self.resource(request));
-        if let Err(r) = authenticate(&mut exec, request, who, self.auth) {
-            return Reply::Whole(self.with_metadata(request, r));
+        if let Err(r) = self.mcp_login(&mut exec, request, who, self.resource()) {
+            return Reply::Whole(r);
         }
         let headers = vec![
             ("Content-Type".to_owned(), EVENT_STREAM.to_owned()),
@@ -582,7 +648,8 @@ impl NodeHttp {
     pub fn answer_forwarded(&self, body: &[u8]) -> Vec<u8> {
         match Forwarded::decode(body) {
             Ok(f) if f.request.target.split('?').next() == Some(MCP) => {
-                encode_response(&self.mcp(&f.request, &f.who, false))
+                let resource = f.resource.or_else(|| self.resource());
+                encode_response(&self.mcp_for(&f.request, &f.who, false, resource))
             }
             Ok(f) => encode_response(&self.rest_whole(&f.request, &f.who)),
             Err(_) => Vec::new(),
@@ -598,7 +665,7 @@ impl HttpService for NodeHttp {
             return Reply::Whole(Response { status: 200, headers, body: b"ok\n".to_vec() });
         }
         if teseladb_mcp::oauth_metadata::is_metadata_path(path) && request.method == "GET" {
-            return Reply::Whole(self.oauth_metadata(request));
+            return Reply::Whole(self.oauth_metadata());
         }
         if path == MCP {
             if request.method == "GET" && header_of(request, SESSION_HEADER).is_some() {

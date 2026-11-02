@@ -207,6 +207,10 @@ pub struct NodeConfig {
     pub admin_listen: Option<SocketAddr>,
     /// The HTTP port of the REST API and MCP (019 FR-002); `None`: the node does not open it.
     pub http: Option<crate::http_listener::HttpPortConfig>,
+    /// The `host:port` clients reach the HTTP port by, of which `/mcp`'s resource URI is made
+    /// when `mcpOptions.resourceUri` is not set (019 FR-027); `None`: the first address the port
+    /// listens on that is not a wildcard, and without one the node does not know it.
+    pub http_advertise: Option<String>,
     /// TLS on the administration port, on a node with a PKI (013 FR-017).
     pub admin_tls: Option<crate::admin_http::AdminTls>,
     /// The data directory, whose disk space the heartbeats carry (007 FR-010); `None`: unknown.
@@ -244,6 +248,7 @@ impl Default for NodeConfig {
             enroller: None,
             admin_listen: None,
             http: None,
+            http_advertise: None,
             admin_tls: None,
             data_dir: None,
             tags: Vec::new(),
@@ -994,8 +999,19 @@ impl<D: Disk + Send + 'static> Node<D> {
                         .with_auth(oidc, mechanisms),
                 );
                 spawn_http_forwards(http_forwards_rx, service.clone(), backend);
+                let advertise = service.clone();
                 match crate::http_listener::HttpListener::spawn(h, service, http_metrics.clone()) {
-                    Ok(l) => Some(l),
+                    Ok(l) => {
+                        let listening = l.addrs().iter().find(|a| !a.ip().is_unspecified());
+                        let authority = cfg
+                            .http_advertise
+                            .clone()
+                            .or_else(|| listening.map(ToString::to_string));
+                        if let Some(a) = authority {
+                            advertise.advertise(a);
+                        }
+                        Some(l)
+                    }
                     Err(e) => {
                         if let Some(a) = admin {
                             a.stop();
