@@ -42,6 +42,8 @@ pub fn install(it: &mut Interp, g: &ObjRef) -> R<()> {
         method(it, g, name, f, 0)?;
     }
     code_and_pointer(it, g)?;
+    let object_proto = it.realm.object.clone();
+    method(it, &object_proto, "bsonsize", bson_size, 0)?;
     prototype_additions(it, g)?;
     let undefined = Prop { writable: false, configurable: false, ..Prop::hidden(Val::Undef) };
     it.define(g, "undefined", undefined)?;
@@ -229,6 +231,34 @@ fn wrapped(it: &mut Interp, v: &Val) -> R<Document> {
     let mut d = Document::new();
     d.push("a", x);
     Ok(d)
+}
+
+/// `bsonsize(o)`, on `Object.prototype`: the size of `o` as a BSON document, 0 for `null`
+/// (measured on a `refrouter` 9.0.4 on 02-11). An object that is not a document (a date, a regular
+/// expression, a function) counts as an empty one.
+fn bson_size(it: &mut Interp, _: &Val, a: &[Val]) -> R {
+    if a.len() != 1 {
+        return Err(it.error("Error", "bsonsize needs 1 argument"));
+    }
+    let v = &a[0];
+    if matches!(v, Val::Null) {
+        return Ok(Val::Num(0.0));
+    }
+    if !matches!(v, Val::Obj(_)) {
+        return Err(it.error("Error", "argument to bsonsize has to be an object"));
+    }
+    let doc = match to_bson(it, v, "", 0)? {
+        Value::Document(d) => d,
+        Value::Array(items) => {
+            let mut d = Document::new();
+            for (i, x) in items.into_iter().enumerate() {
+                d.push(i.to_string(), x);
+            }
+            d
+        }
+        _ => Document::new(),
+    };
+    Ok(Val::Num(bytes_of(it, &doc)?.len() as f64))
 }
 
 fn bytes_of(it: &Interp, d: &Document) -> R<Vec<u8>> {

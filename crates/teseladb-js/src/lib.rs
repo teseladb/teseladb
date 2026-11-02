@@ -30,6 +30,7 @@ mod promise;
 mod props;
 mod proxy;
 mod regex;
+mod setmethods;
 mod shared;
 mod shell;
 mod strings;

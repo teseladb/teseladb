@@ -1807,3 +1807,51 @@ new Date(0).toLocaleDateString("de-DE", {year: "numeric"}) + "|" + new Date(0).t
 (() => { const d = new Date(0); return [d.setYear("99"), d.setYear(-1), d.getFullYear(), d.setYear(100), d.getFullYear(), d.setYear(99.9), d.getFullYear(), d.setYear(), String(d.getTime())].join() })()	S:915148800000,-62198755200000,-1,-59011459200000,100,915148800000,1999,NaN,NaN
 Date.prototype.setYear.call({}, 1)	E:TypeError:Date.prototype.setYear called on incompatible Object
 Date.prototype.toLocaleDateString.call({})	E:TypeError:Date.prototype.toLocaleDateString called on incompatible Object
+(() => { const a = new Set([1, 2, 3]), b = new Set([3, 4, 1]); return [[...a.union(b)], [...a.intersection(b)], [...a.difference(b)], [...a.symmetricDifference(b)], a.isSubsetOf(b), a.isSupersetOf(new Set([1])), a.isDisjointFrom(new Set([9]))].map(x => JSON.stringify(x)).join("|") })()	S:[1,2,3,4]|[1,3]|[2]|[2,4]|false|true|true
+["union", "intersection", "difference", "symmetricDifference", "isSubsetOf", "isSupersetOf", "isDisjointFrom"].map(m => Set.prototype[m].length + Set.prototype[m].name).join()	S:1union,1intersection,1difference,1symmetricDifference,1isSubsetOf,1isSupersetOf,1isDisjointFrom
+new Set([1]).union([1, 2])	E:TypeError:size is undefined
+new Set([1]).union({size: 1, has(){ return true }, keys(){ return [5].values() }}).size	J:2
+new Set([1]).union({size: NaN, has(){}, keys(){}})	E:TypeError:size is NaN
+new Set([1]).union({size: 1, has: 5, keys(){}})	E:TypeError:has property is not callable
+new Set([1]).union({size: -1, has(){}, keys(){}})	E:RangeError:Set size must be non-negative
+(() => { const r = []; const other = {get size(){ r.push("size"); return 2 }, get has(){ r.push("has"); return () => true }, get keys(){ r.push("keys"); return () => [7, 8].values() }}; new Set([1, 2, 3]).intersection(other); return r.join() })()	S:size,has,keys
+(() => { const r = []; const other = {size: 10, has(v){ r.push("has" + v); return v == 2 }, keys(){ r.push("keys"); return [2].values() }}; return JSON.stringify([...new Set([1, 2, 3]).intersection(other)]) + r.join() })()	S:[2]has1,has2,has3
+(() => { const r = []; const other = {size: 1, has(v){ r.push("has" + v); return v == 2 }, keys(){ r.push("keys"); return [2, 9].values() }}; return JSON.stringify([...new Set([1, 2, 3]).intersection(other)]) + r.join() })()	S:[2]keys
+Set.prototype.union.call(new Map(), new Set())	E:TypeError:union method called on incompatible Map
+JSON.stringify([...Map.groupBy([1, 2, 3, 4], x => x % 2 ? "odd" : "even")]) + Map.groupBy.length	S:[["odd",[1,3]],["even",[2,4]]]2
+Map.groupBy(5, x => x)	E:TypeError:5 is not iterable
+Map.groupBy([1], 5)	E:TypeError:5 is not a function
+(() => { const m = Map.groupBy([1, 2, 3], (x, i) => i); return [m instanceof Map, m.size, JSON.stringify([...m.keys()])].join() })()	S:true,3,[0,1,2]
+(() => { const m = Map.groupBy([-0, 0], x => x); return [m.size, Object.is([...m.keys()][0], 0)].join() })()	S:1,true
+["dotAll", "global", "hasIndices", "ignoreCase", "multiline", "sticky", "unicode", "unicodeSets", "source", "flags"].map(k => { const d = Object.getOwnPropertyDescriptor(RegExp.prototype, k); return k + ":" + (d ? typeof d.get + d.enumerable + d.configurable : "none") + ":" + Object.getOwnPropertyNames(/a/gimsuyd).includes(k) }).join(" ")	S:dotAll:functionfalsefalse:false global:functionfalsefalse:false hasIndices:functionfalsefalse:false ignoreCase:functionfalsefalse:false multiline:functionfalsefalse:false sticky:functionfalsefalse:false unicode:functionfalsefalse:false unicodeSets:functionfalsefalse:false source:functionfalsefalse:false flags:functionfalsefalse:false
+[RegExp.prototype.global, RegExp.prototype.source, RegExp.prototype.flags, RegExp.prototype.dotAll, /a/s.dotAll, /a/d.hasIndices, /a/v.unicodeSets].join()	S:,(?:),,,true,true,true
+Object.getOwnPropertyDescriptor(RegExp.prototype, "global").get.call({})	E:TypeError:RegExp.prototype.global getter called on non-RegExp object: Object
+Object.getOwnPropertyDescriptor(RegExp.prototype, "source").get.call(5)	E:TypeError:RegExp.prototype.source getter called on non-RegExp object: number
+Object.getOwnPropertyNames(/a/g).join()	S:lastIndex
+RegExp.prototype.toString.call({source: "s", flags: "f"}) + "|" + RegExp.prototype.toString.call(RegExp.prototype) + "|" + String(new RegExp("x\ny")) + "|" + new RegExp("/").source + "|" + new RegExp("a b").source	S:/s/f|/(?:)/|/x\\ny/|\\/|a\\u2028b
+RegExp.prototype.toString.call(5)	E:TypeError:number is not a non-null object
+JSON.stringify([RegExp.escape("a.b*c"), RegExp.escape("1x"), RegExp.escape("_-,= "), RegExp.escape("\n"), RegExp.escape.length])	S:["\\\\x61\\\\.b\\\\*c","\\\\x31x","_\\\\x2d\\\\x2c\\\\x3d\\\\x20","\\\\n",1]
+RegExp.escape(5)	E:TypeError:5 is not a string
+(() => { const r = /a/g; const x = r.compile("b", "i"); return [x === r, r.source, r.flags, r.lastIndex, RegExp.prototype.compile.length].join() })()	S:true,b,i,0,2
+(() => { const r = /a/g; r.compile(/c/m); return r.source + r.flags })()	S:cm
+/a/.compile(/c/, "g")	E:TypeError:can't supply flags when constructing one RegExp from another
+(() => { const o = {}; o.__defineGetter__("x", () => 5); o.__defineSetter__("y", function (v) { this.z = v }); o.y = 3; return [o.x, o.z, typeof o.__lookupGetter__("x"), typeof o.__lookupSetter__("y"), o.__lookupGetter__("nope"), Object.prototype.__defineGetter__.length, JSON.stringify(Object.keys(o))].join() })()	S:5,3,function,function,,2,["x","y","z"]
+({}).__defineGetter__("x", 5)	E:TypeError:invalid getter usage
+Object.prototype.__lookupGetter__.call(null, "x")	E:TypeError:can't convert null to object
+(() => { const p = {get q(){ return 1 }}; const o = Object.create(p); return typeof o.__lookupGetter__("q") })()	S:function
+[bsonsize({}), bsonsize({a: 1}), bsonsize({a: "xyz"}), bsonsize(), bsonsize.length, typeof bsonsize].join()	E:Error:bsonsize needs 1 argument
+bsonsize(5)	E:Error:argument to bsonsize has to be an object
+bsonsize(null)	J:0
+bsonsize([1, 2])	J:27
+JSON.stringify(Object.getOwnPropertyDescriptor(Object.prototype, "__proto__") && Object.keys(Object.getOwnPropertyDescriptor(Object.prototype, "__proto__")))	S:["get","set","enumerable","configurable"]
+[bsonsize({}), bsonsize({a: 1}), bsonsize({a: "xyz"}), bsonsize(undefined), bsonsize.length, typeof bsonsize, bsonsize.name, bsonsize({a: undefined}), bsonsize(new Date(0)), bsonsize(/a/)].join()	E:Error:argument to bsonsize has to be an object
+bsonsize("s")	E:Error:argument to bsonsize has to be an object
+bsonsize(() => 1)	J:5
+bsonsize({f(){}})	J:18
+bsonsize(1, 2)	E:Error:bsonsize needs 1 argument
+JSON.stringify(Object.getOwnPropertyDescriptor(globalThis, "bsonsize") && Object.entries(Object.getOwnPropertyDescriptor(globalThis, "bsonsize")).map(([k, v]) => k + typeof v))	J:undefined
+JSON.stringify(Object.entries(Object.getOwnPropertyDescriptor(Object.prototype, "bsonsize")).map(([k, v]) => k + ":" + (typeof v == "function" ? "fn" : v))) + bsonsize.length + bsonsize.name	S:["value:fn","writable:false","enumerable:false","configurable:false"]0bsonsize
+[bsonsize({}), bsonsize({a: 1}), bsonsize({a: "xyz"}), bsonsize(new Date(0)), bsonsize(/a/), bsonsize({a: undefined}), ({}).bsonsize({b: 1})].join()	S:5,16,16,5,5,8,16
+bsonsize(undefined)	E:Error:argument to bsonsize has to be an object
+bsonsize()	E:Error:bsonsize needs 1 argument
+(() => { let n = 0; for (const k in {}) n++; return n })()	J:0

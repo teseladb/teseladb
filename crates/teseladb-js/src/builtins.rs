@@ -187,6 +187,7 @@ pub fn install(it: &mut Interp) -> R<()> {
     crate::json::install(it, &g)?;
     crate::date::install(it, &g)?;
     collections(it, &g)?;
+    crate::setmethods::install(it, &g)?;
     symbol_builtins(it, &g)?;
     crate::bigints::install(it, &g)?;
     crate::weak::install(it, &g)?;
@@ -341,6 +342,10 @@ fn object_builtins(it: &mut Interp, g: &ObjRef) -> R<()> {
         ("toLocaleString", obj_to_string, 0),
         ("valueOf", obj_value_of, 0),
         ("isPrototypeOf", obj_is_prototype_of, 1),
+        ("__defineGetter__", |it, t, a| define_legacy_accessor(it, t, a, true), 2),
+        ("__defineSetter__", |it, t, a| define_legacy_accessor(it, t, a, false), 2),
+        ("__lookupGetter__", |it, t, a| lookup_legacy_accessor(it, t, a, true), 1),
+        ("__lookupSetter__", |it, t, a| lookup_legacy_accessor(it, t, a, false), 1),
     ] {
         method(it, &proto, name, f, n)?;
     }
@@ -1672,13 +1677,159 @@ fn regexp_builtins(it: &mut Interp, g: &ObjRef) -> R<()> {
     method(it, &proto, "test", crate::regex::test, 1)?;
     method(it, &proto, "exec", crate::regex::exec, 1)?;
     method(it, &proto, "toString", regexp_to_string, 0)?;
-    for (name, f) in
-        [("source", regexp_source as NativeFn), ("flags", regexp_flags), ("global", regexp_global)]
-    {
-        let getter = it.native(name, f, 0)?;
+    method(it, &proto, "compile", regexp_compile, 2)?;
+    let getter = it.native("source", regexp_source, 0)?;
+    it.define(&proto, "source", Prop { getter: Some(getter), ..Prop::hidden(Val::Undef) })?;
+    let getter = it.native("flags", regexp_flags, 0)?;
+    it.define(&proto, "flags", Prop { getter: Some(getter), ..Prop::hidden(Val::Undef) })?;
+    for (name, _) in REGEXP_FLAGS {
+        let getter = it.native(name, regexp_flag, 0)?;
         it.define(&proto, name, Prop { getter: Some(getter), ..Prop::hidden(Val::Undef) })?;
     }
+    if let Some(Val::Obj(c)) = g.borrow().get_own("RegExp").map(|p| p.value.clone()) {
+        method(it, &c, "escape", regexp_escape, 1)?;
+    }
     Ok(())
+}
+
+/// The flag accessors of `RegExp.prototype`, in the order `flags` reads them.
+const REGEXP_FLAGS: [(&str, char); 8] = [
+    ("hasIndices", 'd'),
+    ("global", 'g'),
+    ("ignoreCase", 'i'),
+    ("multiline", 'm'),
+    ("dotAll", 's'),
+    ("unicode", 'u'),
+    ("unicodeSets", 'v'),
+    ("sticky", 'y'),
+];
+
+/// `this` of a `RegExp.prototype` accessor: the pattern and flags of a regular expression,
+/// `None` for `RegExp.prototype` itself, an error otherwise (measured on a `refrouter` 9.0.4 on
+/// 02-11: `RegExp.prototype.global getter called on non-RegExp object: Object`).
+fn regexp_this(it: &mut Interp, this: &Val) -> R<Option<(Name, Name)>> {
+    if let Val::Obj(o) = this {
+        if let Kind::RegExp(s, f) = &o.borrow().kind {
+            return Ok(Some((s.clone(), f.clone())));
+        }
+        if o.ptr_eq(&it.realm.regexp) {
+            return Ok(None);
+        }
+    }
+    let name = it.native.clone();
+    let class = match this {
+        Val::Obj(_) => class_name(this),
+        v => v.type_of().to_string(),
+    };
+    it.type_error(&format!("RegExp.prototype.{name} getter called on non-RegExp object: {class}"))
+}
+
+fn regexp_flag(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+    let name = it.native.clone();
+    let flag = REGEXP_FLAGS.iter().find(|(n, _)| **n == *name).map_or('g', |(_, c)| *c);
+    Ok(match regexp_this(it, this)? {
+        Some((_, f)) => Val::Bool(f.contains(flag)),
+        None => Val::Undef,
+    })
+}
+
+fn regexp_source(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+    Ok(match regexp_this(it, this)? {
+        Some((s, _)) => Val::Str(s),
+        None => Val::str("(?:)"),
+    })
+}
+
+/// `flags`: the flags read through their accessors (ECMA-262 §22.2.6.4).
+fn regexp_flags(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+    if !matches!(this, Val::Obj(_)) {
+        return it.type_error(&format!("{} is not a non-null object", this.type_of()));
+    }
+    let mut out = String::new();
+    for (name, c) in REGEXP_FLAGS {
+        if it.get(this, name)?.truthy() {
+            out.push(c);
+        }
+    }
+    it.string(out)
+}
+
+/// `toString`: `/source/flags`, read from any object (ECMA-262 §22.2.6.17).
+pub(crate) fn regexp_to_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+    if !matches!(this, Val::Obj(_)) {
+        return it.type_error(&format!("{} is not a non-null object", this.type_of()));
+    }
+    let source = it.get(this, "source")?;
+    let source = it.str_of(&source)?;
+    let flags = it.get(this, "flags")?;
+    let flags = it.str_of(&flags)?;
+    it.string(format!("/{source}/{flags}"))
+}
+
+/// `compile(pattern, flags)` of Annex B: `this` takes the new pattern and `lastIndex` goes to 0.
+fn regexp_compile(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    let Val::Obj(o) = this else {
+        return Err(incompatible(it, "RegExp.prototype.compile"));
+    };
+    if !matches!(o.borrow().kind, Kind::RegExp(..)) {
+        return Err(incompatible(it, "RegExp.prototype.compile"));
+    }
+    let pattern = arg(a, 0);
+    let flags = arg(a, 1);
+    let from = match &pattern {
+        Val::Obj(p) => match &p.borrow().kind {
+            Kind::RegExp(s, f) => Some((s.clone(), f.clone())),
+            _ => None,
+        },
+        _ => None,
+    };
+    let (source, flags) = match from {
+        Some(parts) if matches!(flags, Val::Undef) => parts,
+        Some(_) => {
+            return it.type_error("can't supply flags when constructing one RegExp from another");
+        }
+        None => {
+            let s = if matches!(pattern, Val::Undef) { "".into() } else { it.str_of(&pattern)? };
+            let f = if matches!(flags, Val::Undef) { "".into() } else { it.str_of(&flags)? };
+            (s, f)
+        }
+    };
+    crate::regex::check(it, &source, &flags)?;
+    o.borrow_mut().kind = Kind::RegExp(escape_pattern(source), flags);
+    it.set(this, "lastIndex", Val::Num(0.0))?;
+    Ok(this.clone())
+}
+
+/// `RegExp.escape(text)` (ECMA-262 §22.2.5.1): a pattern that matches `text` literally.
+fn regexp_escape(it: &mut Interp, _: &Val, a: &[Val]) -> R {
+    let Val::Str(s) = arg(a, 0) else {
+        let v = arg(a, 0);
+        return it.type_error(&format!("{} is not a string", it.show(&v)));
+    };
+    let mut out = String::new();
+    for (i, u) in crate::strings::units(&s).into_iter().enumerate() {
+        let c = char::from_u32(u32::from(u));
+        match c {
+            Some(c) if i == 0 && c.is_ascii_alphanumeric() => out.push_str(&format!("\\x{u:02x}")),
+            Some(c) if "^$\\.*+?()[]{}|/".contains(c) => {
+                out.push('\\');
+                out.push(c);
+            }
+            Some(c) if ",-=<>#&!%:;@~'`\"".contains(c) => out.push_str(&format!("\\x{u:02x}")),
+            Some('\t') => out.push_str("\\t"),
+            Some('\n') => out.push_str("\\n"),
+            Some('\u{b}') => out.push_str("\\v"),
+            Some('\u{c}') => out.push_str("\\f"),
+            Some('\r') => out.push_str("\\r"),
+            Some(' ') => out.push_str("\\x20"),
+            Some(c) if c.is_whitespace() || c == '\u{feff}' => {
+                out.push_str(&format!("\\u{u:04x}"));
+            }
+            Some(c) => out.push(c),
+            None => out.push_str(&format!("\\u{u:04x}")),
+        }
+    }
+    it.string(crate::text::encode(&out).into_owned())
 }
 
 pub fn make_regexp(it: &mut Interp, source: Name, flags: Name) -> R {
@@ -1738,31 +1889,42 @@ fn unreachable_pair() -> (Name, Name) {
     ("(?:)".into(), "".into())
 }
 
-fn regexp_parts(it: &Interp, this: &Val) -> R<(Name, Name)> {
-    match this {
-        Val::Obj(o) => match &o.borrow().kind {
-            Kind::RegExp(s, f) => Ok((s.clone(), f.clone())),
-            _ => it.type_error("RegExp method called on incompatible object"),
-        },
-        _ => it.type_error("RegExp method called on incompatible value"),
+/// `__defineGetter__(key, f)` and `__defineSetter__` of Annex B: an enumerable, configurable
+/// accessor (`invalid getter usage` when `f` is not a function, measured on a `refrouter` 9.0.4).
+fn define_legacy_accessor(it: &mut Interp, this: &Val, a: &[Val], getter: bool) -> R {
+    let o = it.object_of(this)?;
+    let f = arg(a, 1);
+    let Val::Obj(fo) = &f else {
+        return it.type_error(if getter { "invalid getter usage" } else { "invalid setter usage" });
+    };
+    if !f.is_callable() {
+        return it.type_error(if getter { "invalid getter usage" } else { "invalid setter usage" });
     }
+    let key = it.key_of(&arg(a, 0))?;
+    let d = crate::props::Desc {
+        get: getter.then(|| Some(fo.clone())),
+        set: (!getter).then(|| Some(fo.clone())),
+        enumerable: Some(true),
+        configurable: Some(true),
+        ..crate::props::Desc::default()
+    };
+    crate::props::define_own(it, &o, &key, &d)?;
+    Ok(Val::Undef)
 }
 
-pub(crate) fn regexp_to_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
-    let (s, f) = regexp_parts(it, this)?;
-    it.string(format!("/{s}/{f}"))
-}
-
-fn regexp_source(it: &mut Interp, this: &Val, _: &[Val]) -> R {
-    Ok(Val::Str(regexp_parts(it, this)?.0))
-}
-
-fn regexp_flags(it: &mut Interp, this: &Val, _: &[Val]) -> R {
-    Ok(Val::Str(regexp_parts(it, this)?.1))
-}
-
-fn regexp_global(it: &mut Interp, this: &Val, _: &[Val]) -> R {
-    Ok(Val::Bool(regexp_parts(it, this)?.1.contains('g')))
+/// `__lookupGetter__(key)` and `__lookupSetter__`: the accessor of `key` on the object or the
+/// nearest prototype that has the property.
+fn lookup_legacy_accessor(it: &mut Interp, this: &Val, a: &[Val], getter: bool) -> R {
+    let mut o = Some(it.object_of(this)?);
+    let key = it.key_of(&arg(a, 0))?;
+    while let Some(cur) = o {
+        if let Some(p) = crate::props::own_prop(&cur, &key) {
+            let f = if getter { p.getter } else { p.setter };
+            return Ok(f.map_or(Val::Undef, Val::Obj));
+        }
+        o = cur.borrow().proto.clone();
+    }
+    Ok(Val::Undef)
 }
 
 /// The error a native function gives for `this` of the wrong kind.
