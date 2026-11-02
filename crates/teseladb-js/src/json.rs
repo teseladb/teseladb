@@ -726,3 +726,45 @@ fn write(
     }
     Ok(true)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::is_json;
+
+    #[test]
+    fn json_text_is_told_from_other_code() {
+        for ok in [
+            "[]",
+            " [ ] ",
+            "[1, -2.5e3, true, false, null]",
+            "[{}]",
+            "[{ \"a\" : 1, \"b\": [true, null], \"c\": {\"d\": \"x\\\"y\"} }]",
+            "[[[1]], [2]]",
+        ] {
+            assert!(is_json(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "[",
+            "[1,]",
+            "[1}",
+            "[}",
+            "[{\"a\" 1}]",
+            "[{a: 1}]",
+            "[{\"a\": 1,}]",
+            "[{\"a\": 1, \"b\"}]",
+            "[{\"a\": 1]",
+            "[\"\u{1}\"]",
+            "[\"unterminated",
+            "[\"x\\",
+            "[+1]",
+            "[.5]",
+            "[undefined]",
+            "[1] x",
+            "[{",
+            "[{\"a\"",
+        ] {
+            assert!(!is_json(bad), "{bad}");
+        }
+    }
+}

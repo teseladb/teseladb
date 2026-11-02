@@ -4713,3 +4713,144 @@ Math.hypot(...[3, 4])	J:5
 'x'.matchAll({[Symbol.matchAll]: null, toString(){ return 'x' }}).next().value[0]	S:x
 String.prototype.split.call(null, {[Symbol.split]: () => 1})	E:TypeError:String.prototype.split called on incompatible null
 'x'.search({[Symbol.search]: function(s){ return [this === undefined, typeof s].join() }})	S:false,string
+(class A {}).call()	E:TypeError:class constructors must be invoked with 'new'
+(function(){ class A {}; try { A.apply(null, []) } catch (e) { return e.message } })()	S:class constructors must be invoked with 'new'
+(function(){ let s = 0; for (let i = 0; i < 20; i++) s += eval(String(i)); return s })()	J:190
+String.prototype.valueOf.call({})	E:TypeError:valueOf method called on incompatible Object
+String.prototype.valueOf.call(1)	E:TypeError:valueOf method called on incompatible number
+Array.prototype.concat.call(1, 2).length	J:2
+(2n ** 64n).toString()	S:18446744073709551616
+(1n ** (2n ** 70n)).toString()	S:1
+((-1n) ** (2n ** 70n + 1n)).toString()	S:-1
+((-1n) ** (2n ** 70n)).toString()	S:1
+(0n ** (2n ** 70n)).toString()	S:0
+(function(){ try { return (2n ** (2n ** 70n)).toString() } catch (e) { return e.name + ':' + e.message } })()	S:RangeError:BigInt is too large to allocate
+(function(){ try { return ((2n ** 600000n) * (2n ** 600000n)).toString().length } catch (e) { return e.name + ':' + e.message } })()	S:RangeError:BigInt is too large to allocate
+(0.5).toString(3)	S:0.1111111111111111111111111111111112
+(2.5).toString(5)	S:2.2222222222222222222222
+(1/3).toString(2)	S:0.010101010101010101010101010101010101010101010101010101
+(0.1).toString(7)	S:0.04620462046204620463
+(255.999999999).toString(16)	S:ff.fffffffbb48
+(1e21).toString(36)	S:5v1j4f4ds79m9s
+Math.log1p(3)	J:1.3862943611198906
+Math.log1p(0.3)	J:0.26236426446749106
+Math.log1p(-1e-10)	J:-1.00000000005e-10
+Math.log1p(0.00001)	J:0.000009999950000333332
+Math.sumPrecise([1e-320, 1e-320])	J:2e-320
+Math.sumPrecise([2**53, 1, 1])	J:9007199254740994
+Math.sumPrecise([1e308, 1e308])	J:null
+Number.isSafeInteger(2**53)	J:false
+(12.345).toFixed(2)	S:12.35
+(1.005).toFixed(2)	S:1.00
+(1.45).toFixed(1)	S:1.4
+(0.000001).toFixed(7)	S:0.0000010
+JSON.stringify('\u0001"\\')	S:"\\u0001\\"\\\\"
+JSON.parse('{"a":[1,{"b":2}]}', function(k, v){ return v }).a[1].b	J:2
+JSON.parse('[1,[2]]', function(k, v){ return Array.isArray(v) ? v.length : v })	J:2
+JSON.stringify(Object.create(null, {x: {get(){ return 1 }, enumerable: true}}))	S:{"x":1}
+(function(){ const o = {}; Object.defineProperty(o, 'a', {get(){ return 1 }}); return JSON.stringify(Object.getOwnPropertyDescriptor(o, 'a').set) })()	J:undefined
+tojson({get a(){ return 1 }})	S:{ "a" : 1 }
+tojson({set a(v){}})	S:{ }
+tojson({'b c': 1, 'd': -0, 3: 1})	S:{ "3" : 1, "b c" : 1, "d" : 0 }
+tojson([-0, 0])	S:[ 0, 0 ]
+(function(){ let o = {}; let c = o; for (let i = 0; i < 200; i++) { c.a = {}; c = c.a } return tojson(o).length })()	J:11219
+Object.defineProperty([], 'length', {value: 1, writable: false}).length	J:1
+(function(){ const a = Object.defineProperty([1,2], 'length', {writable: false}); try { Object.defineProperty(a, 'length', {value: 1}) } catch (e) { return e.message } })()	S:can't redefine array length
+(function(){ const a = Object.freeze([1]); try { Object.defineProperty(a, 'length', {value: 5}) } catch (e) { return e.message } })()	S:can't redefine array length
+Object.getOwnPropertyDescriptor(Object.defineProperty({}, 'x', {writable: false}), 'x').value	J:undefined
+Object.isSealed(Object.preventExtensions([]))	J:true
+Object.assign({}, Object.defineProperty({a: 1}, 'b', {value: 2, enumerable: false})).b	J:undefined
+Object.entries(Object.defineProperty({a: 1}, 'b', {get(){ return 2 }, enumerable: true}))	J:[["a",1],["b",2]]
+Object.fromEntries([['a', 1]]).a	J:1
+(function(){ try { Object.setPrototypeOf(1, null); return 'ok' } catch (e) { return e.message } })()	S:ok
+(function(){ try { Object.setPrototypeOf({}, 1) } catch (e) { return e.message } })()	S:Object.setPrototypeOf: expected an object or null, got number
+(function(){ const p = new Proxy({}, {ownKeys(){ return ['a'] }, getOwnPropertyDescriptor(){ return {value: 1, enumerable: false, configurable: true} }}); return Object.keys(p).length })()	J:0
+(function(){ const p = new Proxy({}, {ownKeys(){ return ['a'] }}); return JSON.stringify(Object.getOwnPropertyNames(p)) })()	S:["a"]
+(function(){ 'use strict'; const p = new Proxy({}, {set(){ return false }}); try { p.x = 1 } catch (e) { return e.message } })()	S:proxy set handler returned false for property '"x"'
+(function(){ const p = new Proxy({}, {deleteProperty(){ return false }}); return delete p.x })()	J:false
+(function(){ 'use strict'; const p = new Proxy({}, {deleteProperty(){ return false }}); try { delete p.x } catch (e) { return e.message } })()	S:can't delete property '"x"': proxy deleteProperty handler returned false
+(function(){ const p = new Proxy(function(){}, {construct(){ return 1 }}); try { new p() } catch (e) { return e.message } })()	S:proxy [[Construct]] must return an object
+(function(){ const t = Object.preventExtensions({}); const p = new Proxy(t, {getPrototypeOf(){ return Array.prototype }}); try { Object.getPrototypeOf(p) } catch (e) { return e.message } })()	S:proxy getPrototypeOf handler didn't return the target object's prototype
+(function(){ const t = Object.preventExtensions({}); const p = new Proxy(t, {setPrototypeOf(){ return true }}); try { Object.setPrototypeOf(p, Array.prototype) } catch (e) { return e.message } })()	S:proxy setPrototypeOf handler returned true, even though the target's prototype is immutable because the target is non-extensible
+(function(){ const p = new Proxy({}, {has(){ return false }}); const t = Object.preventExtensions({a: 1}); const q = new Proxy(t, {has(){ return false }}); try { return 'a' in q } catch (e) { return e.message } })()	S:proxy can't report an existing own property '"a"' as non-existent on a non-extensible object
+(function(){ class B { constructor(){ return 1 } }; const P = new Proxy(B, {}); return typeof new P() })()	S:object
+(function(){ const { proxy, revoke } = Proxy.revocable({}, {}); revoke(); revoke(); try { proxy.x } catch (e) { return e.message } })()	S:illegal operation attempted on a revoked proxy
+(1e21).toString(2)	S:1101100011010111001001101011011100010111011110101000000000000000000000
+(2**60 + 2**10).toString(3)	S:21200101122222021102111220121121021022
+(-1.7976931348623157e308).toString(36).length	J:200
+(123.456).toString(36)	S:3f.gez4w97ry
+(0).toString(2)	S:0
+(-255).toString(16)	S:-ff
+String.prototype.toString.call({})	E:TypeError:toString method called on incompatible Object
+String.prototype.toString.call(Object.create(String.prototype))	E:TypeError:toString method called on incompatible Object
+(function(){ const t = {}; Object.defineProperty(t, 'a', {value: 1}); const q = new Proxy(t, {has(){ return false }}); try { return 'a' in q } catch (e) { return e.message } })()	S:proxy can't report a non-configurable own property '"a"' as non-existent
+(function(){ const t = {}; Object.defineProperty(t, 'a', {value: 1}); const q = new Proxy(t, {get(){ return 2 }}); try { return q.a } catch (e) { return e.message } })()	S:proxy must report the same value for the non-writable, non-configurable property '"a"'
+(function(){ const t = {}; Object.defineProperty(t, 'a', {set(v){}}); const q = new Proxy(t, {get(){ return 2 }}); try { return q.a } catch (e) { return e.message } })()	S:proxy must report the same value for the non-writable, non-configurable property '"a"'
+(function(){ const t = {}; Object.defineProperty(t, 'a', {value: 1}); const q = new Proxy(t, {set(){ return true }}); try { q.a = 2; return 'ok' } catch (e) { return e.message } })()	S:proxy can't successfully set a non-writable, non-configurable property '"a"'
+(function(){ const t = {}; Object.defineProperty(t, 'a', {get(){ return 1 }}); const q = new Proxy(t, {set(){ return true }}); try { q.a = 2; return 'ok' } catch (e) { return e.message } })()	S:proxy can't succesfully set an accessor property '"a"' without a setter
+(function(){ const t = {}; Object.defineProperty(t, 'a', {value: 1}); const q = new Proxy(t, {deleteProperty(){ return true }}); try { return delete q.a } catch (e) { return e.message } })()	S:property "a" is non-configurable and can't be deleted
+(function(){ const t = Object.preventExtensions({a: 1}); const q = new Proxy(t, {deleteProperty(){ return true }}); try { return delete q.a } catch (e) { return e.message } })()	S:proxy can't delete property '"a"' on a non-extensible object
+(function(){ const t = {}; Object.defineProperty(t, 'a', {value: 1}); const q = new Proxy(t, {getOwnPropertyDescriptor(){ return undefined }}); try { return Object.getOwnPropertyDescriptor(q, 'a') } catch (e) { return e.message } })()	S:proxy can't report a non-configurable own property '"a"' as non-existent
+(function(){ const t = Object.preventExtensions({a: 1}); const q = new Proxy(t, {getOwnPropertyDescriptor(){ return undefined }}); try { return Object.getOwnPropertyDescriptor(q, 'a') } catch (e) { return e.message } })()	S:proxy can't report an existing own property '"a"' as non-existent on a non-extensible object
+(function(){ const t = Object.preventExtensions({}); const q = new Proxy(t, {getOwnPropertyDescriptor(){ return {value: 1, configurable: true} }}); try { return Object.getOwnPropertyDescriptor(q, 'a').value } catch (e) { return e.message } })()	S:proxy can't report an incompatible property descriptor ('"a"', proxy can't report an extensible object as non-extensible)
+(function(){ const q = new Proxy({}, {getOwnPropertyDescriptor(){ return {value: 1, configurable: false} }}); try { return Object.getOwnPropertyDescriptor(q, 'a').value } catch (e) { return e.message } })()	S:proxy can't report a non-existent property '"a"' as non-configurable
+(function(){ const q = new Proxy({}, {getOwnPropertyDescriptor(){ return 1 }}); try { return Object.getOwnPropertyDescriptor(q, 'a') } catch (e) { return e.message } })()	S:proxy [[GetOwnProperty]] must return an object or undefined for property '"a"'
+(function(){ const t = Object.preventExtensions({}); const q = new Proxy(t, {defineProperty(){ return true }}); try { Object.defineProperty(q, 'a', {value: 1}); return 'ok' } catch (e) { return e.message } })()	S:proxy can't define a new property '"a"' on a non-extensible object
+(function(){ const q = new Proxy({}, {defineProperty(){ return true }}); try { Object.defineProperty(q, 'a', {value: 1, configurable: false}); return 'ok' } catch (e) { return e.message } })()	S:proxy can't define a non-existent '"a"' property as non-configurable
+(function(){ const t = {}; Object.defineProperty(t, 'a', {value: 1}); const q = new Proxy(t, {ownKeys(){ return [] }}); try { return Object.keys(q) } catch (e) { return e.message } })()	S:proxy can't skip a non-configurable property '"a"'
+(function(){ const t = Object.preventExtensions({a: 1}); const q = new Proxy(t, {ownKeys(){ return ['a', 'b'] }}); try { return Object.keys(q) } catch (e) { return e.message } })()	S:proxy can't report a new property '"b"' on a non-extensible object
+(function(){ const q = new Proxy({}, {ownKeys(){ return ['a', 'a'] }}); try { return Object.keys(q) } catch (e) { return e.message } })()	S:proxy [[OwnPropertyKeys]] can't report property '"a"' more than once
+(function(){ const q = new Proxy({}, {ownKeys(){ return [1] }}); try { return Object.keys(q) } catch (e) { return e.message } })()	S:proxy [[OwnPropertyKeys]] must return an array with only string and symbol elements
+(function(){ const t = Object.preventExtensions({}); const q = new Proxy(t, {isExtensible(){ return true }}); try { return Object.isExtensible(q) } catch (e) { return e.message } })()	S:proxy must report same extensiblitity as target
+(function(){ const q = new Proxy({}, {preventExtensions(){ return true }}); try { Object.preventExtensions(q); return 'ok' } catch (e) { return e.message } })()	S:proxy can't report an extensible object as non-extensible
+(function(){ const q = new Proxy({}, {getPrototypeOf(){ return 1 }}); try { return Object.getPrototypeOf(q) } catch (e) { return e.message } })()	S:proxy getPrototypeOf handler returned a non-object, non-null value
+(function(){ const t = {a: 1}; const q = new Proxy(t, {getOwnPropertyDescriptor(){ return {value: 1, configurable: false} }}); try { return Object.getOwnPropertyDescriptor(q, 'a').value } catch (e) { return e.message } })()	S:proxy can't report existing configurable property '"a"' as non-configurable
+(function(){ const t = {}; Object.defineProperty(t, 'a', {value: 1}); const q = new Proxy(t, {getOwnPropertyDescriptor(){ return {value: 2, configurable: false} }}); try { return Object.getOwnPropertyDescriptor(q, 'a').value } catch (e) { return e.message } })()	S:proxy can't report an incompatible property descriptor ('"a"', proxy must report the same value for the non-writable, non-configurable property)
+(function(){ const t = {}; Object.defineProperty(t, 'a', {value: 1}); const q = new Proxy(t, {getOwnPropertyDescriptor(){ return {value: 1, configurable: true} }}); try { return Object.getOwnPropertyDescriptor(q, 'a').value } catch (e) { return e.message } })()	S:proxy can't report an incompatible property descriptor ('"a"', proxy can't report an existing non-configurable property as configurable)
+(function(){ const t = {}; Object.defineProperty(t, 'a', {value: 1, writable: true}); const q = new Proxy(t, {getOwnPropertyDescriptor(){ return {value: 1, writable: false, configurable: false} }}); try { return Object.getOwnPropertyDescriptor(q, 'a').value } catch (e) { return e.message } })()	S:proxy can't report existing writable property '"a"' as non-writable
+(function(){ const q = new Proxy({a: 1}, {getOwnPropertyDescriptor(){ return {get(){ return 5 }, configurable: true} }}); const d = Object.getOwnPropertyDescriptor(q, 'a'); return [typeof d.get, d.set, d.enumerable, d.configurable].join() })()	S:function,,false,true
+(function(){ const q = new Proxy({a: 1}, {getOwnPropertyDescriptor(){ return {value: 3, configurable: true} }}); const d = Object.getOwnPropertyDescriptor(q, 'a'); return [d.value, d.writable, d.enumerable, d.configurable].join() })()	S:3,false,false,true
+(function(){ const t = {}; Object.defineProperty(t, 'a', {value: 1}); const q = new Proxy(t, {defineProperty(){ return true }}); try { Object.defineProperty(q, 'a', {value: 2}); return 'ok' } catch (e) { return e.message } })()	S:proxy can't define an incompatible property descriptor ('"a"', proxy must report the same value for the non-writable, non-configurable property)
+(function(){ const t = {a: 1}; const q = new Proxy(t, {defineProperty(){ return true }}); try { Object.defineProperty(q, 'a', {value: 2, configurable: false}); return 'ok' } catch (e) { return e.message } })()	S:proxy can't define an incompatible property descriptor ('"a"', proxy can't define an existing configurable property as non-configurable)
+(function(){ const q = new Proxy({}, {defineProperty(){ return false }}); try { Object.defineProperty(q, 'a', {value: 2}); return 'ok' } catch (e) { return e.message } })()	S:proxy defineProperty handler returned false for property '"a"'
+(function(){ const q = new Proxy({}, {defineProperty(){ return false }}); return Reflect })()	E:ReferenceError:Reflect is not defined
+(function(){ const t = Object.preventExtensions({a: 1, b: 2}); const q = new Proxy(t, {ownKeys(){ return ['a'] }}); try { return Object.keys(q) } catch (e) { return e.message } })()	S:proxy can't report an existing own property '"b"' as non-existent on a non-extensible object
+(function(){ const q = new Proxy({}, {preventExtensions(){ return false }}); try { Object.preventExtensions(q); return 'ok' } catch (e) { return e.message } })()	S:proxy preventExtensions handler returned false
+(function(){ const q = new Proxy({}, {preventExtensions(){ Object.preventExtensions(arguments[0]); return true }}); try { Object.preventExtensions(q); return Object.isExtensible(q) } catch (e) { return e.message } })()	J:false
+(function(){ const q = new Proxy({}, {isExtensible(){ return 1 }}); return Object.isExtensible(q) })()	J:true
+(function(){ const q = new Proxy({}, {}); Object.preventExtensions(q); return Object.isExtensible(q) + ' ' + Object.isFrozen(q) })()	S:false true
+(function(){ const q = new Proxy({a: 1}, {}); Object.freeze(q); return Object.isFrozen(q) })()	J:true
+(function(){ 'use strict'; const t = {}; Object.defineProperty(t, 'a', {value: 1}); const q = new Proxy(t, {set(){ return false }}); try { q.a = 2; return 'ok' } catch (e) { return e.message } })()	S:proxy set handler returned false for property '"a"'
+(function(){ const t = {}; Object.defineProperty(t, Symbol.iterator, {value: 1}); const q = new Proxy(t, {get(){ return 2 }}); try { return q[Symbol.iterator] } catch (e) { return e.message } })()	S:proxy must report the same value for the non-writable, non-configurable property 'Symbol.iterator'
+(function(){ const t = {}; Object.defineProperty(t, 'a', {value: NaN}); const q = new Proxy(t, {get(){ return NaN }}); try { return String(q.a) } catch (e) { return e.message } })()	S:NaN
+(function(){ const t = {}; Object.defineProperty(t, 'a', {value: 0}); const q = new Proxy(t, {get(){ return -0 }}); try { return String(q.a) } catch (e) { return e.message } })()	S:proxy must report the same value for the non-writable, non-configurable property '"a"'
+(function(){ const q = new Proxy({}, {ownKeys(){ return [Symbol.iterator, 'a'] }}); return Object.getOwnPropertySymbols(q).length + ' ' + Object.getOwnPropertyNames(q).length })()	S:1 1
+(function(){ const q = new Proxy({a: 1}, {getOwnPropertyDescriptor(t, k){ return Reflect }}); try { return Object.keys(q) } catch (e) { return e.message } })()	S:Reflect is not defined
+(function(){ const q = new Proxy({a: 1}, {getOwnPropertyDescriptor(){ return 1 }}); try { return Object.keys(q) } catch (e) { return e.message } })()	S:proxy [[GetOwnProperty]] must return an object or undefined for property '"a"'
+(function(){ const q = new Proxy({a: 1}, {getOwnPropertyDescriptor(){ return 1 }}); try { return q.hasOwnProperty('a') } catch (e) { return e.message } })()	S:proxy [[GetOwnProperty]] must return an object or undefined for property '"a"'
+(function(){ const t = {}; Object.defineProperty(t, 'a', {value: 1}); const q = new Proxy(t, {getOwnPropertyDescriptor(){ return {value: 1, enumerable: true} }}); try { Object.getOwnPropertyDescriptor(q, 'a'); return 'ok' } catch (e) { return e.message } })()	S:proxy can't report an incompatible property descriptor ('"a"', proxy can't report a different 'enumerable' from target when target is not configurable)
+(function(){ const t = {}; Object.defineProperty(t, 'a', {value: 1}); const q = new Proxy(t, {defineProperty(){ return true }}); try { Object.defineProperty(q, 'a', {value: 1, enumerable: true}); return 'ok' } catch (e) { return e.message } })()	S:proxy can't define an incompatible property descriptor ('"a"', proxy can't report a different 'enumerable' from target when target is not configurable)
+(function(){ const t = {}; Object.defineProperty(t, 'a', {value: 1}); const q = new Proxy(t, {getOwnPropertyDescriptor(){ return {get(){}} }}); try { Object.getOwnPropertyDescriptor(q, 'a'); return 'ok' } catch (e) { return e.message } })()	S:proxy can't report an incompatible property descriptor ('"a"', proxy can't report a different descriptor type when target is not configurable)
+(function(){ const t = {}; Object.defineProperty(t, 'a', {value: 1}); const q = new Proxy(t, {defineProperty(){ return true }}); try { Object.defineProperty(q, 'a', {get(){}}); return 'ok' } catch (e) { return e.message } })()	S:proxy can't define an incompatible property descriptor ('"a"', proxy can't report a different descriptor type when target is not configurable)
+(function(){ const t = {}; Object.defineProperty(t, 'a', {get(){}}); const q = new Proxy(t, {getOwnPropertyDescriptor(){ return {value: 1} }}); try { Object.getOwnPropertyDescriptor(q, 'a'); return 'ok' } catch (e) { return e.message } })()	S:proxy can't report an incompatible property descriptor ('"a"', proxy can't report a different descriptor type when target is not configurable)
+(function(){ const t = {}; Object.defineProperty(t, 'a', {get(){}}); const q = new Proxy(t, {defineProperty(){ return true }}); try { Object.defineProperty(q, 'a', {value: 1}); return 'ok' } catch (e) { return e.message } })()	S:proxy can't define an incompatible property descriptor ('"a"', proxy can't report a different descriptor type when target is not configurable)
+(function(){ const t = {}; Object.defineProperty(t, 'a', {value: 1}); const q = new Proxy(t, {getOwnPropertyDescriptor(){ return {value: 1, writable: true} }}); try { Object.getOwnPropertyDescriptor(q, 'a'); return 'ok' } catch (e) { return e.message } })()	S:proxy can't report an incompatible property descriptor ('"a"', proxy can't report a non-configurable, non-writable property as writable)
+(function(){ const t = {}; Object.defineProperty(t, 'a', {value: 1}); const q = new Proxy(t, {defineProperty(){ return true }}); try { Object.defineProperty(q, 'a', {value: 1, writable: true}); return 'ok' } catch (e) { return e.message } })()	S:proxy can't define an incompatible property descriptor ('"a"', proxy can't report a non-configurable, non-writable property as writable)
+(function(){ const t = {}; Object.defineProperty(t, 'a', {get: function(){}}); const q = new Proxy(t, {getOwnPropertyDescriptor(){ return {get: function(){}} }}); try { Object.getOwnPropertyDescriptor(q, 'a'); return 'ok' } catch (e) { return e.message } })()	S:proxy can't report an incompatible property descriptor ('"a"', proxy can't report different getters for a currently non-configurable property)
+(function(){ const t = {}; Object.defineProperty(t, 'a', {get: function(){}}); const q = new Proxy(t, {defineProperty(){ return true }}); try { Object.defineProperty(q, 'a', {get: function(){}}); return 'ok' } catch (e) { return e.message } })()	S:proxy can't define an incompatible property descriptor ('"a"', proxy can't report different getters for a currently non-configurable property)
+(function(){ const t = {}; Object.defineProperty(t, 'a', {set: function(){}}); const q = new Proxy(t, {getOwnPropertyDescriptor(){ return {set: function(){}} }}); try { Object.getOwnPropertyDescriptor(q, 'a'); return 'ok' } catch (e) { return e.message } })()	S:proxy can't report an incompatible property descriptor ('"a"', proxy can't report different setters for a currently non-configurable property)
+(function(){ const t = {}; Object.defineProperty(t, 'a', {set: function(){}}); const q = new Proxy(t, {defineProperty(){ return true }}); try { Object.defineProperty(q, 'a', {set: function(){}}); return 'ok' } catch (e) { return e.message } })()	S:proxy can't define an incompatible property descriptor ('"a"', proxy can't report different setters for a currently non-configurable property)
+(function(){ const t = {}; Object.defineProperty(t, 'a', {value: 1, writable: true}); const q = new Proxy(t, {getOwnPropertyDescriptor(){ return {value: 2, writable: true} }}); try { Object.getOwnPropertyDescriptor(q, 'a'); return 'ok' } catch (e) { return e.message } })()	S:ok
+(function(){ const t = {}; Object.defineProperty(t, 'a', {value: 1, writable: true}); const q = new Proxy(t, {defineProperty(){ return true }}); try { Object.defineProperty(q, 'a', {value: 2, writable: true}); return 'ok' } catch (e) { return e.message } })()	S:ok
+(function(){ const t = {}; Object.defineProperty(t, 'a', {value: 1, writable: true, configurable: true}); const q = new Proxy(t, {getOwnPropertyDescriptor(){ return {value: 2, writable: false, configurable: false} }}); try { Object.getOwnPropertyDescriptor(q, 'a'); return 'ok' } catch (e) { return e.message } })()	S:proxy can't report existing configurable property '"a"' as non-configurable
+(function(){ const t = {}; Object.defineProperty(t, 'a', {value: 1, writable: true, configurable: true}); const q = new Proxy(t, {defineProperty(){ return true }}); try { Object.defineProperty(q, 'a', {value: 2, writable: false, configurable: false}); return 'ok' } catch (e) { return e.message } })()	S:proxy can't define an incompatible property descriptor ('"a"', proxy can't define an existing configurable property as non-configurable)
+(function(){ const t = {}; Object.defineProperty(t, 'a', {value: 1}); const q = new Proxy(t, {getOwnPropertyDescriptor(){ return {value: 1} }}); try { Object.getOwnPropertyDescriptor(q, 'a'); return 'ok' } catch (e) { return e.message } })()	S:ok
+(function(){ const t = {}; Object.defineProperty(t, 'a', {value: 1}); const q = new Proxy(t, {defineProperty(){ return true }}); try { Object.defineProperty(q, 'a', {value: 1}); return 'ok' } catch (e) { return e.message } })()	S:ok
+(function(){ const t = Object.preventExtensions({}); const q = new Proxy(t, {getOwnPropertyDescriptor(){ return {value: 1, configurable: false} }}); try { Object.getOwnPropertyDescriptor(q, 'a'); return 'ok' } catch (e) { return e.message } })()	S:proxy can't report an incompatible property descriptor ('"a"', proxy can't report an extensible object as non-extensible)
+(function(){ const t = {}; Object.defineProperty(t, 'a', {value: 1, writable: true}); const q = new Proxy(t, {defineProperty(){ return true }}); try { Object.defineProperty(q, 'a', {value: 1, writable: false, configurable: false}); return 'ok' } catch (e) { return e.message } })()	S:proxy can't define an incompatible property descriptor ('"a"', proxy can't define an existing non-configurable writable property as non-writable)
+(function(){ const t = Object.preventExtensions({}); const q = new Proxy(t, {getOwnPropertyDescriptor(){ return {value: 1, configurable: true} }}); try { Object.getOwnPropertyDescriptor(q, 'b'); return 'ok' } catch (e) { return e.message } })()	S:proxy can't report an incompatible property descriptor ('"b"', proxy can't report an extensible object as non-extensible)
+(function(){ const q = new Proxy([], {ownKeys(){ return [] }}); try { return Object.keys(q) } catch (e) { return e.message } })()	S:proxy can't skip a non-configurable property '"length"'
+(function(){ const q = new Proxy({a: 1, get b(){ return 1 }}, {}); Object.seal(q); return Object.isSealed(q) + ' ' + Object.isFrozen(q) })()	S:true false
+(function(){ const q = new Proxy({a: 1}, {preventExtensions(){ return false }}); try { Object.freeze(q) } catch (e) { return e.message } })()	S:proxy preventExtensions handler returned false
+(function(){ const q = new Proxy({a: 1}, {defineProperty(){ return false }}); try { Object.freeze(q) } catch (e) { return e.message } })()	S:proxy defineProperty handler returned false for property '"a"'
+(function(){ const q = new Proxy({}, {}); return Object.isFrozen(q) + ' ' + Object.isSealed(q) })()	S:false false

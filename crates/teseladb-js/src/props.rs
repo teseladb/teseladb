@@ -21,11 +21,11 @@ pub struct Desc {
 }
 
 impl Desc {
-    fn is_accessor(&self) -> bool {
+    pub(crate) fn is_accessor(&self) -> bool {
         self.get.is_some() || self.set.is_some()
     }
 
-    fn is_data(&self) -> bool {
+    pub(crate) fn is_data(&self) -> bool {
         self.value.is_some() || self.writable.is_some()
     }
 }
@@ -201,7 +201,7 @@ pub(crate) fn same_value(a: &Val, b: &Val) -> bool {
     }
 }
 
-fn same_fn(a: &Option<ObjRef>, b: &Option<ObjRef>) -> bool {
+pub(crate) fn same_fn(a: &Option<ObjRef>, b: &Option<ObjRef>) -> bool {
     match (a, b) {
         (None, None) => true,
         (Some(x), Some(y)) => x.ptr_eq(y),
@@ -426,7 +426,12 @@ pub fn shown_key(it: &Interp, key: &str) -> String {
 fn get_own_property_descriptor(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     let o = it.object_of(&arg(a, 0))?;
     let k = it.key_of(&arg(a, 1))?;
-    match own_prop(&o, &k) {
+    let p = if crate::proxy::is_proxy(&o) {
+        crate::proxy::own_property(it, &o, &k)?
+    } else {
+        own_prop(&o, &k)
+    };
+    match p {
         Some(p) => descriptor_object(it, &p),
         None => Ok(Val::Undef),
     }
@@ -454,7 +459,7 @@ pub fn enumerable_symbol_keys(o: &ObjRef) -> Vec<Name> {
         .collect()
 }
 
-fn symbol_keys(o: &ObjRef) -> Vec<Name> {
+pub(crate) fn symbol_keys(o: &ObjRef) -> Vec<Name> {
     o.borrow().props.iter().filter(|(k, _)| is_symbol_key(k)).map(|(k, _)| k.clone()).collect()
 }
 
@@ -472,7 +477,12 @@ fn get_own_property_descriptors(it: &mut Interp, _: &Val, a: &[Val]) -> R {
 
 fn get_own_property_symbols(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     let o = it.object_of(&arg(a, 0))?;
-    let syms = symbol_keys(&o).iter().map(|k| symbol_of_key(k)).collect();
+    let keys = if crate::proxy::is_proxy(&o) {
+        crate::proxy::own_keys(it, &o)?.into_iter().filter(|k| is_symbol_key(k)).collect()
+    } else {
+        symbol_keys(&o)
+    };
+    let syms = keys.iter().map(|k| symbol_of_key(k)).collect();
     it.array(syms)
 }
 
@@ -481,6 +491,15 @@ fn define_property(it: &mut Interp, _: &Val, a: &[Val]) -> R {
         return it.type_error(&format!("{} is not a non-null object", it.show(&arg(a, 0))));
     };
     let k = it.key_of(&arg(a, 1))?;
+    if crate::proxy::is_proxy(&o) {
+        if !crate::proxy::define(it, &o, &k, arg(a, 2))? {
+            let k = shown_key(it, &k);
+            return it.type_error(&format!(
+                "proxy defineProperty handler returned false for property '{k}'"
+            ));
+        }
+        return Ok(Val::Obj(o));
+    }
     let d = to_desc(it, &arg(a, 2))?;
     define_own(it, &o, &k, &d)?;
     Ok(Val::Obj(o))
@@ -510,8 +529,12 @@ fn define_properties(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     Ok(Val::Obj(o))
 }
 
-fn is_extensible(_: &mut Interp, _: &Val, a: &[Val]) -> R {
-    Ok(Val::Bool(matches!(arg(a, 0), Val::Obj(o) if o.borrow().extensible)))
+fn is_extensible(it: &mut Interp, _: &Val, a: &[Val]) -> R {
+    Ok(Val::Bool(match arg(a, 0) {
+        Val::Obj(o) if crate::proxy::is_proxy(&o) => crate::proxy::is_extensible(it, &o)?,
+        Val::Obj(o) => o.borrow().extensible,
+        _ => false,
+    }))
 }
 
 /// Whether `o` cannot grow and none of its properties can be deleted (and, for `frozen`, none
@@ -539,15 +562,17 @@ pub fn is_locked(o: &ObjRef, frozen: bool) -> bool {
             .all(|(_, p)| !p.configurable && (!frozen || p.is_accessor() || !p.writable))
 }
 
-fn is_sealed(_: &mut Interp, _: &Val, a: &[Val]) -> R {
+fn is_sealed(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     Ok(Val::Bool(match arg(a, 0) {
+        Val::Obj(o) if crate::proxy::is_proxy(&o) => crate::proxy::is_locked(it, &o, false)?,
         Val::Obj(o) => is_locked(&o, false),
         _ => true,
     }))
 }
 
-fn is_frozen(_: &mut Interp, _: &Val, a: &[Val]) -> R {
+fn is_frozen(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     Ok(Val::Bool(match arg(a, 0) {
+        Val::Obj(o) if crate::proxy::is_proxy(&o) => crate::proxy::is_locked(it, &o, true)?,
         Val::Obj(o) => is_locked(&o, true),
         _ => true,
     }))
@@ -568,23 +593,33 @@ pub fn lock(o: &ObjRef, frozen: bool) {
     }
 }
 
-fn freeze(_: &mut Interp, _: &Val, a: &[Val]) -> R {
-    if let Val::Obj(o) = arg(a, 0) {
-        lock(&o, true);
+fn freeze(it: &mut Interp, _: &Val, a: &[Val]) -> R {
+    match arg(a, 0) {
+        Val::Obj(o) if crate::proxy::is_proxy(&o) => crate::proxy::lock(it, &o, true)?,
+        Val::Obj(o) => lock(&o, true),
+        _ => {}
     }
     Ok(arg(a, 0))
 }
 
-fn seal(_: &mut Interp, _: &Val, a: &[Val]) -> R {
-    if let Val::Obj(o) = arg(a, 0) {
-        lock(&o, false);
+fn seal(it: &mut Interp, _: &Val, a: &[Val]) -> R {
+    match arg(a, 0) {
+        Val::Obj(o) if crate::proxy::is_proxy(&o) => crate::proxy::lock(it, &o, false)?,
+        Val::Obj(o) => lock(&o, false),
+        _ => {}
     }
     Ok(arg(a, 0))
 }
 
-fn prevent_extensions(_: &mut Interp, _: &Val, a: &[Val]) -> R {
-    if let Val::Obj(o) = arg(a, 0) {
-        o.borrow_mut().extensible = false;
+fn prevent_extensions(it: &mut Interp, _: &Val, a: &[Val]) -> R {
+    match arg(a, 0) {
+        Val::Obj(o) if crate::proxy::is_proxy(&o) => {
+            if !crate::proxy::prevent_extensions(it, &o)? {
+                return it.type_error("proxy preventExtensions handler returned false");
+            }
+        }
+        Val::Obj(o) => o.borrow_mut().extensible = false,
+        _ => {}
     }
     Ok(arg(a, 0))
 }

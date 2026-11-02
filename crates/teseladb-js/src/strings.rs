@@ -634,11 +634,12 @@ fn replace_all(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 fn value_of(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     match this {
         Val::Str(s) => Ok(Val::Str(s.clone())),
-        Val::Obj(o) => match &o.borrow().kind {
-            Kind::Str(s) => Ok(Val::Str(s.clone())),
-            _ => Err(crate::builtins::incompatible(it, "String.prototype.valueOf")),
-        },
-        _ => Err(crate::builtins::incompatible(it, "String.prototype.valueOf")),
+        Val::Obj(o) if let Kind::Str(s) = &o.borrow().kind => Ok(Val::Str(s.clone())),
+        // Measured on a `refrouter` 9.0.4 on 02-11: `valueOf method called on incompatible number`.
+        v => {
+            let (class, name) = (crate::builtins::class_name(v), it.native.clone());
+            Err(it.error("TypeError", &format!("{name} method called on incompatible {class}")))
+        }
     }
 }
 

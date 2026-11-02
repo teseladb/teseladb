@@ -4,6 +4,7 @@
 
 use crate::builtins::{arg, ctor, method, new_target};
 use crate::interp::{Interp, R};
+use crate::props::{Desc, own_prop, same_fn, same_value};
 use crate::value::*;
 
 const REVOKED: &str = "illegal operation attempted on a revoked proxy";
@@ -107,28 +108,245 @@ fn key_val(key: &str) -> Val {
 
 pub fn get(it: &mut Interp, o: &ObjRef, key: &str, receiver: &Val) -> R {
     let (target, handler) = live(it, o)?;
-    match trap(it, &handler, "get")? {
-        Some(t) => it.call_back(
+    let Some(t) = trap(it, &handler, "get")? else { return it.get(&Val::Obj(target), key) };
+    let v = it.call_back(
+        crate::recursion::PROXY_TRAP,
+        &t,
+        &Val::Obj(handler),
+        &[Val::Obj(target.clone()), key_val(key), receiver.clone()],
+    )?;
+    // A non-configurable property of the target fixes what the trap may give (§10.5.8).
+    if let Some(p) = target_prop(it, &target, key)?
+        && !p.configurable
+        && if p.is_accessor() {
+            p.getter.is_none() && !matches!(v, Val::Undef)
+        } else {
+            !p.writable && !same_value(&v, &p.value)
+        }
+    {
+        let k = shown(it, key);
+        return it.type_error(&format!(
+            "proxy must report the same value for the non-writable, non-configurable property {k}"
+        ));
+    }
+    Ok(v)
+}
+
+/// `[[GetOwnProperty]]` of the target of a proxy, which may be a proxy itself.
+fn target_prop(it: &mut Interp, target: &ObjRef, key: &str) -> R<Option<Prop>> {
+    if is_proxy(target) { own_property(it, target, key) } else { Ok(own_prop(target, key)) }
+}
+
+/// A key as the messages of a proxy show it: `'"a"'`.
+fn shown(it: &Interp, key: &str) -> String {
+    format!("'{}'", crate::props::shown_key(it, key))
+}
+
+/// Whether the target of a proxy may grow: its own `[[IsExtensible]]`.
+fn extensible(it: &mut Interp, target: &ObjRef) -> R<bool> {
+    if is_proxy(target) { is_extensible(it, target) } else { Ok(target.borrow().extensible) }
+}
+
+/// `[[IsExtensible]]` of a proxy: its `isExtensible` trap, which must agree with its target
+/// (§10.5.3).
+pub fn is_extensible(it: &mut Interp, o: &ObjRef) -> R<bool> {
+    let (target, handler) = live(it, o)?;
+    let Some(t) = trap(it, &handler, "isExtensible")? else { return extensible(it, &target) };
+    let r = it
+        .call_back(
             crate::recursion::PROXY_TRAP,
             &t,
             &Val::Obj(handler),
-            &[Val::Obj(target), key_val(key), receiver.clone()],
-        ),
-        None => it.get(&Val::Obj(target), key),
+            &[Val::Obj(target.clone())],
+        )?
+        .truthy();
+    if r != extensible(it, &target)? {
+        return it.type_error("proxy must report same extensiblitity as target");
     }
+    Ok(r)
+}
+
+/// `[[PreventExtensions]]` of a proxy: its `preventExtensions` trap, which may only succeed when
+/// its target no longer grows (§10.5.4).
+pub fn prevent_extensions(it: &mut Interp, o: &ObjRef) -> R<bool> {
+    let (target, handler) = live(it, o)?;
+    let Some(t) = trap(it, &handler, "preventExtensions")? else {
+        if is_proxy(&target) {
+            return prevent_extensions(it, &target);
+        }
+        target.borrow_mut().extensible = false;
+        return Ok(true);
+    };
+    let r = it
+        .call_back(
+            crate::recursion::PROXY_TRAP,
+            &t,
+            &Val::Obj(handler),
+            &[Val::Obj(target.clone())],
+        )?
+        .truthy();
+    if r && extensible(it, &target)? {
+        return it.type_error("proxy can't report an extensible object as non-extensible");
+    }
+    Ok(r)
+}
+
+/// Why `desc` may not stand for a property whose target has `current` (IsCompatiblePropertyDescriptor,
+/// ECMA-262 §10.1.6.2), in SpiderMonkey's words.
+fn incompatible(extensible: bool, desc: &Desc, current: Option<&Prop>) -> Option<&'static str> {
+    let Some(c) = current else {
+        return (!extensible)
+            .then_some("proxy can't report an extensible object as non-extensible");
+    };
+    if c.configurable {
+        return None;
+    }
+    if desc.configurable == Some(true) {
+        return Some("proxy can't report an existing non-configurable property as configurable");
+    }
+    if desc.enumerable.is_some_and(|e| e != c.enumerable) {
+        return Some(
+            "proxy can't report a different 'enumerable' from target when target is not configurable",
+        );
+    }
+    if !desc.is_data() && !desc.is_accessor() {
+        return None;
+    }
+    if desc.is_accessor() != c.is_accessor() {
+        return Some(
+            "proxy can't report a different descriptor type when target is not configurable",
+        );
+    }
+    if c.is_accessor() {
+        if desc.get.as_ref().is_some_and(|g| !same_fn(g, &c.getter)) {
+            return Some(
+                "proxy can't report different getters for a currently non-configurable property",
+            );
+        }
+        if desc.set.as_ref().is_some_and(|f| !same_fn(f, &c.setter)) {
+            return Some(
+                "proxy can't report different setters for a currently non-configurable property",
+            );
+        }
+        return None;
+    }
+    if !c.writable {
+        if desc.writable == Some(true) {
+            return Some(
+                "proxy can't report a non-configurable, non-writable property as writable",
+            );
+        }
+        if desc.value.as_ref().is_some_and(|v| !same_value(v, &c.value)) {
+            return Some(
+                "proxy must report the same value for the non-writable, non-configurable property",
+            );
+        }
+    }
+    None
+}
+
+/// `[[GetOwnProperty]]` of a proxy: what its `getOwnPropertyDescriptor` trap gives, checked
+/// against its target (§10.5.5), or its target's property.
+pub fn own_property(it: &mut Interp, o: &ObjRef, key: &str) -> R<Option<Prop>> {
+    let (target, handler) = live(it, o)?;
+    let Some(t) = trap(it, &handler, "getOwnPropertyDescriptor")? else {
+        return target_prop(it, &target, key);
+    };
+    let r = it.call_back(
+        crate::recursion::PROXY_TRAP,
+        &t,
+        &Val::Obj(handler),
+        &[Val::Obj(target.clone()), key_val(key)],
+    )?;
+    let current = target_prop(it, &target, key)?;
+    let k = shown(it, key);
+    if matches!(r, Val::Undef) {
+        let Some(c) = current else { return Ok(None) };
+        if !c.configurable {
+            return it.type_error(&format!(
+                "proxy can't report a non-configurable own property {k} as non-existent"
+            ));
+        }
+        if !extensible(it, &target)? {
+            return it.type_error(&format!(
+                "proxy can't report an existing own property {k} as non-existent on a non-extensible object"
+            ));
+        }
+        return Ok(None);
+    }
+    if !matches!(r, Val::Obj(_)) {
+        return it.type_error(&format!(
+            "proxy [[GetOwnProperty]] must return an object or undefined for property {k}"
+        ));
+    }
+    let d = crate::props::to_desc(it, &r)?;
+    let grows = extensible(it, &target)?;
+    if let Some(why) = incompatible(grows, &d, current.as_ref()) {
+        return it.type_error(&format!(
+            "proxy can't report an incompatible property descriptor ({k}, {why})"
+        ));
+    }
+    if d.configurable != Some(true) {
+        match &current {
+            None => {
+                return it.type_error(&format!(
+                    "proxy can't report a non-existent property {k} as non-configurable"
+                ));
+            }
+            Some(c) if c.configurable => {
+                return it.type_error(&format!(
+                    "proxy can't report existing configurable property {k} as non-configurable"
+                ));
+            }
+            Some(c) if d.writable == Some(false) && !c.is_accessor() && c.writable => {
+                return it.type_error(&format!(
+                    "proxy can't report existing writable property {k} as non-writable"
+                ));
+            }
+            Some(_) => {}
+        }
+    }
+    let accessor = d.is_accessor();
+    Ok(Some(Prop {
+        value: d.value.unwrap_or(Val::Undef),
+        getter: d.get.flatten(),
+        setter: d.set.flatten(),
+        enumerable: d.enumerable.unwrap_or(false),
+        writable: !accessor && d.writable.unwrap_or(false),
+        configurable: d.configurable.unwrap_or(false),
+    }))
 }
 
 pub fn set(it: &mut Interp, o: &ObjRef, key: &str, value: Val, receiver: &Val) -> R<()> {
     let (target, handler) = live(it, o)?;
     match trap(it, &handler, "set")? {
         Some(t) => {
-            let args = [Val::Obj(target), key_val(key), value, receiver.clone()];
+            let args = [Val::Obj(target.clone()), key_val(key), value.clone(), receiver.clone()];
             let ok =
                 it.call_back(crate::recursion::PROXY_TRAP, &t, &Val::Obj(handler), &args)?.truthy();
-            if !ok && it.strict {
-                return it.type_error(&format!(
-                    "proxy set handler returned false for property '\"{key}\"'"
-                ));
+            if !ok {
+                if it.strict {
+                    let k = shown(it, key);
+                    return it
+                        .type_error(&format!("proxy set handler returned false for property {k}"));
+                }
+                return Ok(());
+            }
+            // A non-configurable property of the target fixes what may be set (§10.5.9).
+            if let Some(p) = target_prop(it, &target, key)?
+                && !p.configurable
+            {
+                let k = shown(it, key);
+                if p.is_accessor() && p.setter.is_none() {
+                    return it.type_error(&format!(
+                        "proxy can't succesfully set an accessor property {k} without a setter"
+                    ));
+                }
+                if !p.is_accessor() && !p.writable && !same_value(&value, &p.value) {
+                    return it.type_error(&format!(
+                        "proxy can't successfully set a non-writable, non-configurable property {k}"
+                    ));
+                }
             }
             Ok(())
         }
@@ -138,17 +356,29 @@ pub fn set(it: &mut Interp, o: &ObjRef, key: &str, value: Val, receiver: &Val) -
 
 pub fn has(it: &mut Interp, o: &ObjRef, key: &str) -> R<bool> {
     let (target, handler) = live(it, o)?;
-    match trap(it, &handler, "has")? {
-        Some(t) => Ok(it
-            .call_back(
-                crate::recursion::PROXY_TRAP,
-                &t,
-                &Val::Obj(handler),
-                &[Val::Obj(target), key_val(key)],
-            )?
-            .truthy()),
-        None => it.has(&target, key),
+    let Some(t) = trap(it, &handler, "has")? else { return it.has(&target, key) };
+    let found = it
+        .call_back(
+            crate::recursion::PROXY_TRAP,
+            &t,
+            &Val::Obj(handler),
+            &[Val::Obj(target.clone()), key_val(key)],
+        )?
+        .truthy();
+    if !found && let Some(p) = target_prop(it, &target, key)? {
+        let k = shown(it, key);
+        if !p.configurable {
+            return it.type_error(&format!(
+                "proxy can't report a non-configurable own property {k} as non-existent"
+            ));
+        }
+        if !extensible(it, &target)? {
+            return it.type_error(&format!(
+                "proxy can't report an existing own property {k} as non-existent on a non-extensible object"
+            ));
+        }
     }
+    Ok(found)
 }
 
 /// `[[DefineOwnProperty]]` through the `defineProperty` trap, or on the target.
@@ -156,14 +386,55 @@ pub fn define(it: &mut Interp, o: &ObjRef, key: &str, desc: Val) -> R<bool> {
     let (target, handler) = live(it, o)?;
     match trap(it, &handler, "defineProperty")? {
         Some(t) => {
-            let args = [Val::Obj(target), key_val(key), desc];
-            Ok(it.call_back(crate::recursion::PROXY_TRAP, &t, &Val::Obj(handler), &args)?.truthy())
+            let d = crate::props::to_desc(it, &desc)?;
+            let args = [Val::Obj(target.clone()), key_val(key), desc];
+            if !it.call_back(crate::recursion::PROXY_TRAP, &t, &Val::Obj(handler), &args)?.truthy()
+            {
+                return Ok(false);
+            }
+            check_defined(it, &target, key, &d)?;
+            Ok(true)
         }
         None => {
             let d = crate::props::to_desc(it, &desc)?;
             crate::props::define_own(it, &target, key, &d)?;
             Ok(true)
         }
+    }
+}
+
+/// What a `defineProperty` trap that succeeded may have done to the target (§10.5.6).
+fn check_defined(it: &mut Interp, target: &ObjRef, key: &str, d: &Desc) -> R<()> {
+    let current = target_prop(it, target, key)?;
+    let k = shown(it, key);
+    let fixing = d.configurable == Some(false);
+    let Some(c) = current else {
+        if !extensible(it, target)? {
+            return it.type_error(&format!(
+                "proxy can't define a new property {k} on a non-extensible object"
+            ));
+        }
+        if fixing {
+            return it.type_error(&format!(
+                "proxy can't define a non-existent {k} property as non-configurable"
+            ));
+        }
+        return Ok(());
+    };
+    let why = if let Some(why) = incompatible(true, d, Some(&c)) {
+        Some(why)
+    } else if fixing && c.configurable {
+        Some("proxy can't define an existing configurable property as non-configurable")
+    } else if !c.is_accessor() && !c.configurable && c.writable && d.writable == Some(false) {
+        Some("proxy can't define an existing non-configurable writable property as non-writable")
+    } else {
+        None
+    };
+    match why {
+        Some(why) => it.type_error(&format!(
+            "proxy can't define an incompatible property descriptor ({k}, {why})"
+        )),
+        None => Ok(()),
     }
 }
 
@@ -176,7 +447,7 @@ pub fn delete(it: &mut Interp, o: &ObjRef, key: &str) -> R<bool> {
                     crate::recursion::PROXY_TRAP,
                     &t,
                     &Val::Obj(handler),
-                    &[Val::Obj(target), key_val(key)],
+                    &[Val::Obj(target.clone()), key_val(key)],
                 )?
                 .truthy();
             if !ok && it.strict {
@@ -184,88 +455,156 @@ pub fn delete(it: &mut Interp, o: &ObjRef, key: &str) -> R<bool> {
                     "can't delete property '\"{key}\"': proxy deleteProperty handler returned false"
                 ));
             }
+            if ok && let Some(p) = target_prop(it, &target, key)? {
+                if !p.configurable {
+                    let k = crate::props::shown_key(it, key);
+                    return it.type_error(&format!(
+                        "property {k} is non-configurable and can't be deleted"
+                    ));
+                }
+                if !extensible(it, &target)? {
+                    let k = shown(it, key);
+                    return it.type_error(&format!(
+                        "proxy can't delete property {k} on a non-extensible object"
+                    ));
+                }
+            }
             Ok(ok)
         }
         None => it.delete_key(&target, key),
     }
 }
 
-/// The own keys, through `ownKeys`, and their enumerability through `getOwnPropertyDescriptor`.
-pub fn keys(it: &mut Interp, o: &ObjRef, only_enumerable: bool) -> R<Vec<Name>> {
+/// `[[OwnPropertyKeys]]` of a proxy: what its `ownKeys` trap gives, checked against its target
+/// (§10.5.11), or its target's keys; symbols as their keys.
+pub fn own_keys(it: &mut Interp, o: &ObjRef) -> R<Vec<Name>> {
     let (target, handler) = live(it, o)?;
-    let all = match trap(it, &handler, "ownKeys")? {
-        Some(t) => {
-            let list = it.call_back(
-                crate::recursion::PROXY_TRAP,
-                &t,
-                &Val::Obj(handler.clone()),
-                &[Val::Obj(target.clone())],
-            )?;
-            if !matches!(list, Val::Obj(_)) {
-                let m = format!("ownKeys trap must be an object, got {}", it.show(&list));
-                return it.type_error(&m);
-            }
-            let mut out = Vec::new();
-            for k in it.iterate(&list)? {
-                match k {
-                    Val::Str(s) => out.push(s),
-                    Val::Sym(_) => {}
-                    _ => {
-                        return it.type_error(
-                            "proxy [[OwnPropertyKeys]] must return an array with only string and symbol elements",
-                        );
-                    }
-                }
-            }
-            out
+    let Some(t) = trap(it, &handler, "ownKeys")? else {
+        if is_proxy(&target) {
+            return own_keys(it, &target);
         }
-        None => return it.keys(&target, only_enumerable),
+        let mut all = it.keys(&target, false)?;
+        all.extend(crate::props::symbol_keys(&target));
+        return Ok(all);
     };
+    let list = it.call_back(
+        crate::recursion::PROXY_TRAP,
+        &t,
+        &Val::Obj(handler),
+        &[Val::Obj(target.clone())],
+    )?;
+    if !matches!(list, Val::Obj(_)) {
+        let m = format!("ownKeys trap must be an object, got {}", it.show(&list));
+        return it.type_error(&m);
+    }
+    let mut seen: Vec<Name> = Vec::new();
+    for k in it.iterate(&list)? {
+        if !matches!(k, Val::Str(_) | Val::Sym(_)) {
+            return it.type_error(
+                "proxy [[OwnPropertyKeys]] must return an array with only string and symbol elements",
+            );
+        }
+        let key = it.key_of(&k)?;
+        if seen.contains(&key) {
+            let k = shown(it, &key);
+            return it.type_error(&format!(
+                "proxy [[OwnPropertyKeys]] can't report property {k} more than once"
+            ));
+        }
+        seen.push(key);
+    }
+    check_keys(it, &target, &seen)?;
+    Ok(seen)
+}
+
+/// The string keys of a proxy, the enumerable ones through `[[GetOwnProperty]]`.
+pub fn keys(it: &mut Interp, o: &ObjRef, only_enumerable: bool) -> R<Vec<Name>> {
+    let all: Vec<Name> = own_keys(it, o)?.into_iter().filter(|k| !is_symbol_key(k)).collect();
     if !only_enumerable {
         return Ok(all);
     }
     let mut out = Vec::new();
     for k in all {
-        if let Some(d) = descriptor(it, &target, &handler, &k)?
-            && it.get(&d, "enumerable")?.truthy()
-        {
+        if own_property(it, o, &k)?.is_some_and(|p| p.enumerable) {
             out.push(k);
         }
     }
     Ok(out)
 }
 
-/// The descriptor `getOwnPropertyDescriptor` gives for `key`, or the target's.
-fn descriptor(it: &mut Interp, target: &ObjRef, handler: &ObjRef, key: &str) -> R<Option<Val>> {
-    let d = match trap(it, handler, "getOwnPropertyDescriptor")? {
-        Some(t) => it.call_back(
-            crate::recursion::PROXY_TRAP,
-            &t,
-            &Val::Obj(handler.clone()),
-            &[Val::Obj(target.clone()), key_val(key)],
-        )?,
-        None => {
-            if !it.has_own_property(target, key)? {
-                return Ok(None);
-            }
-            let enumerable = it.keys(target, true)?.iter().any(|k| &**k == key);
-            let o = it.object()?;
-            it.define(&o, "enumerable", Prop::data(Val::Bool(enumerable)))?;
-            Val::Obj(o)
-        }
-    };
-    match d {
-        Val::Undef => Ok(None),
-        Val::Obj(_) => Ok(Some(d)),
-        _ => it.type_error(
-            "proxy getOwnPropertyDescriptor handler returned neither object nor undefined",
-        ),
+/// SetIntegrityLevel of a proxy (`Object.seal`, `Object.freeze`): no more growth, and every
+/// property fixed through its traps.
+pub fn lock(it: &mut Interp, o: &ObjRef, frozen: bool) -> R<()> {
+    if !prevent_extensions(it, o)? {
+        return it.type_error("proxy preventExtensions handler returned false");
     }
+    for k in own_keys(it, o)? {
+        let d = it.object()?;
+        it.define(&d, "configurable", Prop::data(Val::Bool(false)))?;
+        if frozen && own_property(it, o, &k)?.is_some_and(|p| !p.is_accessor()) {
+            it.define(&d, "writable", Prop::data(Val::Bool(false)))?;
+        }
+        if !define(it, o, &k, Val::Obj(d))? {
+            let k = shown(it, &k);
+            return it.type_error(&format!(
+                "proxy defineProperty handler returned false for property {k}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// TestIntegrityLevel of a proxy (`Object.isSealed`, `Object.isFrozen`).
+pub fn is_locked(it: &mut Interp, o: &ObjRef, frozen: bool) -> R<bool> {
+    if is_extensible(it, o)? {
+        return Ok(false);
+    }
+    for k in own_keys(it, o)? {
+        if let Some(p) = own_property(it, o, &k)?
+            && (p.configurable || frozen && !p.is_accessor() && p.writable)
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// The keys an `ownKeys` trap gave, against the target's (§10.5.11): every non-configurable key,
+/// and for a target that does not grow exactly its keys.
+fn check_keys(it: &mut Interp, target: &ObjRef, keys: &[Name]) -> R<()> {
+    let grows = extensible(it, target)?;
+    let mut own = it.keys(target, false)?;
+    if matches!(target.borrow().kind, Kind::Array(_)) {
+        own.push("length".into());
+    }
+    own.extend(crate::props::symbol_keys(target));
+    for k in &own {
+        if keys.contains(k) {
+            continue;
+        }
+        let fixed = target_prop(it, target, k)?.is_some_and(|p| !p.configurable);
+        let shown_k = shown(it, k);
+        if fixed {
+            return it
+                .type_error(&format!("proxy can't skip a non-configurable property {shown_k}"));
+        }
+        if !grows {
+            return it.type_error(&format!(
+                "proxy can't report an existing own property {shown_k} as non-existent on a non-extensible object"
+            ));
+        }
+    }
+    if !grows && let Some(k) = keys.iter().find(|k| !own.contains(k)) {
+        let k = shown(it, k);
+        return it.type_error(&format!(
+            "proxy can't report a new property {k} on a non-extensible object"
+        ));
+    }
+    Ok(())
 }
 
 pub fn has_own(it: &mut Interp, o: &ObjRef, key: &str) -> R<bool> {
-    let (target, handler) = live(it, o)?;
-    Ok(descriptor(it, &target, &handler, key)?.is_some())
+    Ok(own_property(it, o, key)?.is_some())
 }
 
 pub fn apply(it: &mut Interp, o: &ObjRef, this: &Val, args: &[Val]) -> R {

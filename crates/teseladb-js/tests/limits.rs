@@ -358,3 +358,21 @@ fn a_program_nested_too_deep_does_not_compile() {
     let e = run("function(){ return eval('x=>'.repeat(316) + '1') }").unwrap_err();
     assert_eq!(e.message(), "wasm trap: call stack exhausted");
 }
+
+/// With little native stack, an `eval` and `JSON.parse` stop as `too much recursion` before the
+/// thread's stack runs out.
+#[test]
+fn a_small_stack_ends_deep_parses_as_too_much_recursion() {
+    let limits = Limits { stack: 32 << 10, ..Limits::default() };
+    for src in [
+        "function(){ try { eval('('.repeat(60) + '1' + ')'.repeat(60)) } catch (e) { return e.message } }",
+        "function(){ try { JSON.parse('['.repeat(5000) + ']'.repeat(5000)) } catch (e) { return e.message } }",
+    ] {
+        let mut ctx = JsCtx { limits, ..JsCtx::default() };
+        assert_eq!(
+            run_with(src, &mut ctx),
+            Ok(Value::String("too much recursion".into())),
+            "{src}"
+        );
+    }
+}
