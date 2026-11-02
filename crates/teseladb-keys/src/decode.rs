@@ -23,7 +23,24 @@ impl std::error::Error for DecodeError {}
 
 /// The values of a key, one per field in `dirs`.
 pub fn decode(key: &[u8], bits: &TypeBits, dirs: &[Direction]) -> Result<Vec<Value>, DecodeError> {
-    let mut r = Reader { key, pos: 0, invert: 0, bits: bits.as_bytes(), bit: 0 };
+    read(key, bits.as_bytes(), dirs, false)
+}
+
+/// The values of a key without its type bits, one per field in `dirs`: a number comes back as
+/// an `int` when it is a whole number that fits, a `long` when it fits that, and a `double`
+/// otherwise, and a string as a string (018 FR-006: a range's bounds in shard key values). A
+/// value that cannot be read without its bits (a NaN, a decimal) fails.
+pub fn decode_untyped(key: &[u8], dirs: &[Direction]) -> Result<Vec<Value>, DecodeError> {
+    read(key, &[], dirs, true)
+}
+
+fn read(
+    key: &[u8],
+    bits: &[u8],
+    dirs: &[Direction],
+    untyped: bool,
+) -> Result<Vec<Value>, DecodeError> {
+    let mut r = Reader { key, pos: 0, invert: 0, bits, bit: 0, untyped };
     let values = dirs
         .iter()
         .map(|dir| {
@@ -45,7 +62,12 @@ struct Reader<'a> {
     invert: u8,
     bits: &'a [u8],
     bit: usize,
+    /// Reading without type bits ([`decode_untyped`]).
+    untyped: bool,
 }
+
+/// The tag [`Reader::tag`] gives without type bits.
+const UNTYPED: u8 = 0xFF;
 
 impl Reader<'_> {
     fn byte(&mut self) -> Result<u8, DecodeError> {
@@ -63,6 +85,9 @@ impl Reader<'_> {
     }
 
     fn tag(&mut self) -> Result<u8, DecodeError> {
+        if self.untyped {
+            return Ok(UNTYPED);
+        }
         let t = *self.bits.get(self.bit).ok_or(DecodeError("type bits cut short"))?;
         self.bit += 1;
         Ok(t)
@@ -84,7 +109,7 @@ impl Reader<'_> {
             4 => {
                 let s = self.text()?;
                 match self.tag()? {
-                    STRING => Value::String(s),
+                    STRING | UNTYPED => Value::String(s),
                     SYMBOL => Value::Symbol(s),
                     _ => return Err(DecodeError("a string's type bits")),
                 }
@@ -186,7 +211,20 @@ impl Reader<'_> {
             0x01 | 0x02 | 0x04 | 0x06 => None,
             _ => return Err(DecodeError("not a number")),
         };
-        let tag = self.tag()?;
+        let tag = match self.tag()? {
+            UNTYPED => match (sub, &finite) {
+                (0x04, _) => INT32,
+                (_, Some((negative, digits, exponent))) => {
+                    match integer(*negative, digits, *exponent) {
+                        Ok(n) if i32::try_from(n).is_ok() => INT32,
+                        Ok(_) => INT64,
+                        Err(_) => DOUBLE,
+                    }
+                }
+                _ => DOUBLE,
+            },
+            t => t,
+        };
         let text = |negative: bool, digits: &[u8], exponent: i32| {
             let d: String = digits.iter().map(|&x| char::from(b'0' + x)).collect();
             format!("{}0.{d}E{exponent}", if negative { "-" } else { "" })

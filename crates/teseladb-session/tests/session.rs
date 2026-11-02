@@ -156,3 +156,19 @@ fn ended_sessions_wait_for_the_refresh() {
     assert_eq!(t.take_ending(), vec![1, 3]);
     assert!(t.take_ending().is_empty());
 }
+
+/// The table lists what it holds, lets a cursor be changed in place and keeps its timeout.
+#[test]
+fn the_table_lists_and_changes_its_cursors() {
+    let mut t = CursorTable::with_timeout(250);
+    assert_eq!(t.timeout_ms(), 250);
+    assert!(t.is_empty());
+    t.put(7, cursor("db.c", None, false));
+    t.put(8, cursor("db.d", None, false));
+    assert!(!t.is_empty());
+    t.get_mut(7).unwrap().state = 41;
+    assert!(t.get_mut(9).is_none());
+    assert_eq!(t.get(7).unwrap().state, 41);
+    assert!(t.iter().any(|c| c.state == 41));
+    assert_eq!(t.iter().count(), 2);
+}

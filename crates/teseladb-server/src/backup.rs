@@ -533,8 +533,26 @@ impl Cli<'_> {
         self.post(&format!("{RESTORE}/finish"), &finish).map(|_| ())
     }
 
-    /// Sends the files to the replica of `range` on `node` and has them ingested.
+    /// Sends the files to the replica of `range` on `node` and has them ingested, from the first
+    /// piece again while [`Cli::wait`] lasts if a step fails: a replica just added may not have
+    /// opened the range yet, and one whose core started again lost the pieces it had.
     fn load(&self, (range, node): (i64, i64), files: &[Vec<u8>], at: &Value) -> Result<(), String> {
+        let until = Instant::now() + self.wait;
+        loop {
+            match self.load_once((range, node), files, at, until) {
+                Err(_) if Instant::now() < until => std::thread::sleep(PAUSE),
+                done => return done,
+            }
+        }
+    }
+
+    fn load_once(
+        &self,
+        (range, node): (i64, i64),
+        files: &[Vec<u8>],
+        at: &Value,
+        until: Instant,
+    ) -> Result<(), String> {
         for (n, data) in files.iter().enumerate() {
             let mut offset = 0;
             // An empty file still sends its one piece, so that the replica knows it.
@@ -551,7 +569,6 @@ impl Cli<'_> {
         }
         let count = i64::try_from(files.len()).unwrap_or(i64::MAX);
         let ingest = Document::new().with("files", Value::Int64(count)).with("at", at.clone());
-        let until = Instant::now() + self.wait;
         loop {
             let d = self.post(&format!("{RESTORE}/{range}/{node}/ingest"), &ingest)?;
             if d.get("done") == Some(&Value::Boolean(true)) {
@@ -948,6 +965,30 @@ mod tests {
         assert_eq!(rec.get(&(1, 0)).map(Vec::as_slice), Some(&b"abcdefgh"[..]));
         assert_eq!(rec.get(&(2, 1)).map(Vec::as_slice), Some(&b"xy"[..]));
         assert!(node.log.borrow().last().unwrap().ends_with("/finish"));
+    }
+
+    /// A replica that lost the pieces (its range opened or moved after they came) answers that no
+    /// restore is under way: it gets every piece again and ingests them.
+    #[test]
+    fn a_replica_that_lost_its_pieces_gets_them_again() {
+        let dir = Dir::new("again");
+        let node = FakeNode::new(vec![b"abcd".to_vec()]);
+        let failed = std::cell::Cell::new(false);
+        let call = |m: Method, t: &str, b: &[u8]| {
+            if t.ends_with("/2/ingest") && !failed.replace(true) {
+                node.received.borrow_mut().remove(&(2, 0));
+                return Err("no restore of this range is under way".to_owned());
+            }
+            node.call(m, t, b)
+        };
+        let c = cli(&call);
+        c.backup(None, &dir.0).unwrap();
+        *node.asked.borrow_mut() = 0;
+        c.restore(&dir.0).unwrap();
+        assert!(failed.get());
+        assert_eq!(node.received.borrow().get(&(2, 0)).map(Vec::as_slice), Some(&b"abcd"[..]));
+        let pieces = node.log.borrow().iter().filter(|t| t.contains("/5/2/0?offset=")).count();
+        assert_eq!(pieces, 2, "{:?}", node.log.borrow());
     }
 
     #[test]

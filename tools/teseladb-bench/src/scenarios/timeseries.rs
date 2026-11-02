@@ -1,11 +1,15 @@
 //! `timeseries` scenario (015 FR-012, SC-003, SC-004): a time series against `--target` or a
 //! local cluster of three nodes. Measurements of [`SENSORS`] sensors, one a second each, go in
-//! batches of [`BATCH`] (the rate of measurements a second is the ingest metric); then one hour of
+//! batches of [`BATCH`] from `--concurrency` clients that take the next batch in turn (the rate of
+//! measurements a second is the ingest metric, at least [`INGEST_RATE`] for SC-003); then one hour of
 //! one sensor is read by its meta value and time (under 10 ms at p50); last, the same
 //! measurements in a collection that is not a time series give the space it takes against the
 //! series' (`collStats.size` of both).
 
-use std::time::Instant;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use teseladb_bson::{RawDoc, RawValue, Value};
 
@@ -24,6 +28,8 @@ const BATCH: i64 = 1000;
 /// Start of the measurements (2026-01-01T00:00:00Z) and an hour, in ms.
 const T0: i64 = 1_767_225_600_000;
 const HOUR: i64 = 3_600_000;
+/// SC-003: measurements a second the ingest reaches on three nodes.
+const INGEST_RATE: f64 = 1_000_000.0;
 /// SC-003: one hour of one sensor read under 10 ms at p50.
 const HOUR_P50_NS: f64 = 10_000_000.0;
 /// Hours of measurements the space comparison writes into both collections.
@@ -53,6 +59,38 @@ fn ingest(c: &mut Client, coll: &str, from: i64, to: i64) -> Result<(), String> 
         i = end;
     }
     Ok(())
+}
+
+/// Ingests into the series from `clients` connections, each taking the next batch, until `duration`
+/// has passed and every sensor has at least an hour; returns the measurements written, which are
+/// always the first ones (every batch taken is written before its client stops).
+fn ingest_for(
+    addr: std::net::SocketAddr,
+    clients: usize,
+    duration: Duration,
+) -> Result<i64, String> {
+    let next = Arc::new(AtomicI64::new(0));
+    let start = Instant::now();
+    let workers: Vec<_> = (0..clients.max(1))
+        .map(|_| {
+            let next = next.clone();
+            thread::spawn(move || -> Result<(), String> {
+                let mut c = Client::connect(addr)?;
+                loop {
+                    let from = next.fetch_add(BATCH, Ordering::Relaxed);
+                    if from >= SENSORS * 3600 && start.elapsed() >= duration {
+                        return Ok(());
+                    }
+                    ingest(&mut c, SERIES, from, from + BATCH)?;
+                }
+            })
+        })
+        .collect();
+    for w in workers {
+        w.join().map_err(|_| "an ingest client panicked")??;
+    }
+    // Each client took one batch past the end and wrote nothing for it.
+    Ok(next.load(Ordering::Relaxed) - BATCH * clients.max(1) as i64)
 }
 
 /// `collStats.size` of `coll`.
@@ -88,11 +126,7 @@ pub fn run(args: &Args) -> Result<Report, String> {
     )?;
     // Ingest for the run's duration (at least one batch of each sensor's hour).
     let start = Instant::now();
-    let mut written = 0i64;
-    while written < SENSORS * 3600 || start.elapsed() < args.duration {
-        ingest(&mut c, SERIES, written, written + BATCH)?;
-        written += BATCH;
-    }
+    let written = ingest_for(target.addr()?, args.concurrency, args.duration)?;
     let rate = written as f64 / start.elapsed().as_secs_f64();
     let hours = (written / SENSORS / 3600).max(1);
     let mut n = 0i64;
@@ -132,11 +166,12 @@ pub fn run(args: &Args) -> Result<Report, String> {
     ingest(&mut c, PLAIN, 0, space_end)?;
     let ratio = size(&mut c, SERIES)? / size(&mut c, PLAIN)?;
     let mut report = Report::new("timeseries");
-    report.push("ingest", "measurements/s", rate, None);
+    report.push("ingest", "measurements/s", rate, Some(Goal::AtLeast(INGEST_RATE)));
     report.latency("hour_of_one_sensor", &hour, Some(HOUR_P50_NS), None);
     report.push("space_ratio", "series/plain", ratio, Some(Goal::AtMost(1.0)));
     report.notes.push(format!(
-        "{SENSORS} sensors, one measurement a second each, batches of {BATCH}, one connection, target {}",
+        "{SENSORS} sensors, one measurement a second each, batches of {BATCH}, {} ingest connections, target {}",
+        args.concurrency,
         args.target.as_deref().unwrap_or("local cluster of three nodes")
     ));
     Ok(report)

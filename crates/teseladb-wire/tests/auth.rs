@@ -1068,6 +1068,11 @@ fn refdb_oidc_logs_in_with_a_token() {
     let role = Value::Document(doc(&[("role", s("idp/readers")), ("db", s(ADMIN))]));
     assert_eq!(field(info, "authenticatedUserRoles"), &Value::Array(vec![role]));
     assert_eq!(m.jwks_reads, vec![false]);
+    // A connection of a protected resource (019 FR-027) takes only tokens for its URI.
+    let mut c = conn(false);
+    enable(&mut c);
+    c.auth.oidc_resource = Some("https://db.test/mcp".to_owned());
+    assert_eq!(run(&mut m, &mut c, EXTERNAL_DB, start(jwt.clone())), failed);
     // Two steps.
     let mut c = conn(false);
     enable(&mut c);

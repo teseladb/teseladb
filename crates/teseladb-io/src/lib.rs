@@ -19,7 +19,7 @@ pub mod secure;
 pub mod spsc;
 pub mod timer;
 
-pub use file_disk::{FileDisk, direct_io_supported};
+pub use file_disk::{FileDisk, direct_io_supported, sync_dir, write_whole};
 #[cfg(target_os = "linux")]
 pub use io_uring_disk::IoUringDisk;
 pub use node_disk::NodeDisk;

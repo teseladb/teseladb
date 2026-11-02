@@ -559,6 +559,30 @@ pub(crate) fn read_through_staged<B: Backend + ?Sized>(
 pub(crate) fn read_through_spilling<B: Backend + ?Sized>(
     backend: &mut B,
     ns: &Namespace,
+    stages: (&[Document], Option<&Document>),
+    concern: ReadConcern,
+    spilling: (super::Spill, bool),
+) -> Result<Result<(Vec<Document>, bool), CommandError>, CommandError> {
+    read_through_on(backend, None, ns, stages, concern, spilling)
+}
+
+/// [`read_through`] with the node's state, so that the stages see the collection's indexes
+/// (`$geoNear` of a `find` with `$near`, 009 T035).
+pub(crate) fn read_through_node<B: Backend + ?Sized>(
+    backend: &mut B,
+    shared: &super::Shared,
+    ns: &Namespace,
+    stages: (&[Document], Option<&Document>),
+    concern: ReadConcern,
+) -> Result<Vec<Document>, CommandError> {
+    read_through_on(backend, Some(shared), ns, stages, concern, (super::Spill::default(), true))?
+        .map(|(docs, _)| docs)
+}
+
+fn read_through_on<B: Backend + ?Sized>(
+    backend: &mut B,
+    shared: Option<&super::Shared>,
+    ns: &Namespace,
     (extra, vars): (&[Document], Option<&Document>),
     concern: ReadConcern,
     (spill, allow_disk_use): (super::Spill, bool),
@@ -609,7 +633,7 @@ pub(crate) fn read_through_spilling<B: Backend + ?Sized>(
         concern,
         collation,
         allow_disk_use,
-        node: None,
+        node: shared.map(|sh| (sh, base.clone())),
         searched: RefCell::new(Vec::new()),
         spill,
     };
@@ -907,6 +931,7 @@ pub fn aggregate<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
         read_mark: ctx.backend.read_mark(),
         stream: None,
         origin: None,
+        held: 0,
     };
     let size = Some(a.batch_size.unwrap_or(DEFAULT_FIRST_BATCH));
     let (batch, short) = state.batch(ctx.backend, size)?;

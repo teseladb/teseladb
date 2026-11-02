@@ -1334,6 +1334,23 @@ fn backfill(
     Ok((puts, deletes, r))
 }
 
+/// The indexes of a build checking the documents of a collection one by one, as its backfill
+/// does, without writing: what an index refuses, and the duplicates of a unique index among the
+/// documents checked so far.
+pub(crate) struct DocCheck(Checker);
+
+impl DocCheck {
+    pub(crate) fn new(rules: &Rules) -> Result<DocCheck, CommandError> {
+        Checker::new(rules, false).map(DocCheck)
+    }
+
+    /// Why the indexes refuse document `bytes` stored at `key`, if they do.
+    pub(crate) fn check(&self, key: &[u8], bytes: &[u8]) -> Option<CommandError> {
+        let none = |_: &[u8]| None;
+        self.0.entries_at(Some(key), None, Some(bytes), &none).err()
+    }
+}
+
 /// The documents of `rows` (keys and stored bytes, as a scan reads them) the indexes of `rules`
 /// refuse, by their position in `rows`, with why. A duplicate in a unique index is no refusal: a
 /// build finds those once its scan is over.
@@ -1341,17 +1358,13 @@ pub(crate) fn refusals(
     rules: &Rules,
     rows: &[(Vec<u8>, Vec<u8>)],
 ) -> Result<Vec<(usize, CommandError)>, CommandError> {
-    let checker = Checker::new(rules, false)?;
-    let none = |_: &[u8]| None;
-    let mut out = Vec::new();
-    for (at, (key, bytes)) in rows.iter().enumerate() {
-        if let Err(e) = checker.entries_at(Some(key), None, Some(bytes), &none)
-            && e.code != DUPLICATE_KEY
-        {
-            out.push((at, e));
-        }
-    }
-    Ok(out)
+    let check = DocCheck::new(rules)?;
+    Ok(rows
+        .iter()
+        .enumerate()
+        .filter_map(|(at, (key, bytes))| check.check(key, bytes).map(|e| (at, e)))
+        .filter(|(_, e)| e.code != DUPLICATE_KEY)
+        .collect())
 }
 
 fn now_of(ts: Hlc) -> Now {
