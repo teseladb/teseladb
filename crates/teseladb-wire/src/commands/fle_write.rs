@@ -420,27 +420,41 @@ fn update<B: Backend + ?Sized>(
         Some(Value::Array(s)) => s.clone(),
         _ => return sub_command(ctx, &cmd),
     };
-    for s in &statements {
-        let Value::Document(s) = s else { continue };
-        if matches!(s.get("multi"), Some(Value::Boolean(true))) {
+    // A statement that is no document, or has no document or pipeline in `u`, gets the
+    // command's own argument errors.
+    let mut parsed: Vec<(&Document, &Value)> = Vec::new();
+    for st in &statements {
+        match st {
+            Value::Document(d) => match d.get("u") {
+                Some(u @ (Value::Document(_) | Value::Array(_))) => parsed.push((d, u)),
+                _ => return sub_command(ctx, &cmd),
+            },
+            _ => return sub_command(ctx, &cmd),
+        }
+    }
+    let mut checked: Vec<(&Document, &Document)> = Vec::new();
+    for (st, u) in parsed {
+        if matches!(st.get("multi"), Some(Value::Boolean(true))) {
             return Err(CommandError::new(
                 MULTI_UPDATE,
                 "FLE only supports single document updates",
             ));
         }
-        if matches!(s.get("u"), Some(Value::Array(_))) {
-            return Err(CommandError::new(
-                PIPELINE_UPDATE,
-                "FLE only supports modifier and replacement style updates",
-            ));
+        match u {
+            Value::Document(u) => checked.push((st, u)),
+            _ => {
+                return Err(CommandError::new(
+                    PIPELINE_UPDATE,
+                    "FLE only supports modifier and replacement style updates",
+                ));
+            }
         }
     }
     let ordered = !matches!(cmd.get("ordered"), Some(Value::Boolean(false)));
     let (mut n, mut modified) = (0i32, 0i32);
     let (mut upserted, mut errors) = (Vec::new(), Vec::new());
-    for (i, s) in statements.iter().enumerate() {
-        let Value::Document(s) = s else { continue };
-        match update_one(ctx, ns, config, s) {
+    for (i, (s, u)) in checked.into_iter().enumerate() {
+        match update_one(ctx, ns, config, s, u) {
             Ok(r) => {
                 n += r.n;
                 modified += r.modified;
@@ -484,10 +498,8 @@ fn update_one<B: Backend + ?Sized>(
     ns: &Namespace,
     config: &EncryptedFieldConfig,
     s: &Document,
+    u: &Document,
 ) -> Result<Updated, Failure> {
-    let Some(Value::Document(u)) = s.get("u") else {
-        return Err(Failure::Command(CommandError::new(BAD_VALUE, "update statement without u")));
-    };
     if touches_safe_content(u) {
         return Err(Failure::Write(CommandError::new(
             SAFE_CONTENT_UPDATE,

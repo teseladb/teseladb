@@ -1,6 +1,6 @@
 //! The implicit schema of a collection with encrypted fields (FR-006): every encrypted field a
-//! document has must hold a stored value of Queryable Encryption of its kind (equality 14, range
-//! 15, text 17, unindexed 16) and of its configured BSON type. A `refnode` 9.0.4 reports a failure
+//! document has must hold a stored value of Queryable Encryption (subtypes 6, 7, 9 and 14 to 17,
+//! whatever its kind) of its configured BSON type. A `refnode` 9.0.4 reports a failure
 //! as the validator `implicitFLESchema` with one `fle2Encrypt` rule per field, nested along the
 //! paths, and refuses an array where a path needs a document (measured).
 
@@ -14,6 +14,16 @@ use crate::subtype::BlobSubtype;
 pub const NOT_ENCRYPTED: &str = "value was not encrypted";
 /// The reason of an encrypted value of another kind or type.
 pub const WRONG_TYPE: &str = "Queryable Encryption encrypted value has wrong type";
+/// The stored values the implicit schema takes.
+const STORED: [BlobSubtype; 7] = [
+    BlobSubtype::Fle2UnindexedV1,
+    BlobSubtype::Fle2EqualityIndexedV1,
+    BlobSubtype::Fle2RangeIndexedV1,
+    BlobSubtype::Fle2EqualityIndexed,
+    BlobSubtype::Fle2RangeIndexed,
+    BlobSubtype::Fle2Unindexed,
+    BlobSubtype::Fle2TextIndexed,
+];
 /// Where the original BSON type sits in a stored value: after the subtype and the key id.
 const TYPE_AT: usize = 17;
 
@@ -32,7 +42,9 @@ fn reason(f: &EncryptedField, v: &Value) -> Option<&'static str> {
     let Value::Binary { subtype: t::BINARY_ENCRYPTED, bytes } = v else {
         return Some(NOT_ENCRYPTED);
     };
-    if BlobSubtype::of(bytes) != Some(expected_subtype(f)) {
+    // Any stored value of Queryable Encryption, of whatever kind or version, passes on to the
+    // type check (measured: a `refnode` 9.0.4 takes subtypes 6, 7, 9 and 14 to 17 on every field).
+    if !matches!(BlobSubtype::of(bytes), Some(st) if STORED.contains(&st)) {
         return Some(WRONG_TYPE);
     }
     match (&f.bson_type, bytes.get(TYPE_AT)) {
