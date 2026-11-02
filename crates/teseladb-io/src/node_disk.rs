@@ -86,10 +86,12 @@ impl fmt::Display for DiskChoice {
     }
 }
 
-/// Decides the executor and `O_DIRECT` for a data directory: `uring_support` is what the kernel
-/// lacks for io_uring (`Err`), `direct_support` whether the directory's file system takes
-/// `O_DIRECT`. Asking for what is not there is an error.
+/// Decides the executor and `O_DIRECT` for a data directory: `uring_default` whether `auto`
+/// prefers io_uring ([`URING_BY_DEFAULT`]), `uring_support` what the kernel lacks for io_uring
+/// (`Err`), `direct_support` whether the directory's file system takes `O_DIRECT`. Asking for
+/// what is not there is an error.
 pub fn decide(
+    uring_default: bool,
     exec: IoExecutor,
     direct: DirectIo,
     uring_support: Result<(), String>,
@@ -100,7 +102,7 @@ pub fn decide(
         (IoExecutor::Threads, _) => false,
         (IoExecutor::Uring, Ok(())) => true,
         (IoExecutor::Uring, Err(why)) => return Err(format!("--io-executor uring: {why}")),
-        (IoExecutor::Auto, Ok(())) if URING_BY_DEFAULT => true,
+        (IoExecutor::Auto, Ok(())) if uring_default => true,
         (IoExecutor::Auto, Ok(())) => {
             notes.push("io_uring available; the disk threads stay the default (FR-011)".into());
             false
@@ -138,7 +140,7 @@ pub fn choose(exec: IoExecutor, direct: DirectIo, dir: &Path) -> Result<DiskChoi
     let support = crate::io_uring_disk::check_support();
     #[cfg(not(target_os = "linux"))]
     let support = Err("io_uring is Linux only".to_string());
-    decide(exec, direct, support, direct_io_supported(dir))
+    decide(URING_BY_DEFAULT, exec, direct, support, direct_io_supported(dir))
 }
 
 /// A core's disk.
@@ -219,13 +221,15 @@ mod tests {
     #[test]
     fn the_choice_follows_the_options_and_what_the_host_has() {
         let no = || Err::<(), String>("missing IORING_OP_RENAMEAT".into());
-        let d = |e, d, u, s| decide(e, d, u, s);
+        let d = |e, d, u, s| decide(false, e, d, u, s);
         let c = d(IoExecutor::Auto, DirectIo::Auto, no(), Ok(true)).unwrap();
         assert!(!c.uring && c.direct);
         assert!(c.to_string().contains("io_uring not available (missing IORING_OP_RENAMEAT)"));
         let c = d(IoExecutor::Auto, DirectIo::Auto, Ok(()), Ok(false)).unwrap();
-        assert_eq!(c.uring, URING_BY_DEFAULT);
+        assert!(!c.uring);
         assert!(!c.direct);
+        let preferred = decide(true, IoExecutor::Auto, DirectIo::Off, Ok(()), Ok(true)).unwrap();
+        assert!(preferred.uring && preferred.notes.is_empty());
         assert!(c.to_string().contains("does not take O_DIRECT"));
         let c = d(IoExecutor::Uring, DirectIo::On, Ok(()), Ok(true)).unwrap();
         assert!(c.uring && c.direct);

@@ -23,10 +23,17 @@ use crate::buffers::is_aligned;
 const ALIGN: usize = teseladb_sys::aligned::ALIGN;
 
 /// `O_DIRECT` on Linux (x86_64 and aarch64 differ).
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 pub(crate) const O_DIRECT: i32 = 0o200000;
-#[cfg(not(target_arch = "aarch64"))]
+#[cfg(all(target_os = "linux", not(target_arch = "aarch64")))]
 pub(crate) const O_DIRECT: i32 = 0o40000;
+
+/// The flag of the direct descriptor: `O_DIRECT` on Linux. macOS has none, so there the direct
+/// descriptor is a second plain one and only the path through the aligned buffer is the same.
+#[cfg(target_os = "linux")]
+const DIRECT_FLAG: i32 = O_DIRECT;
+#[cfg(not(target_os = "linux"))]
+const DIRECT_FLAG: i32 = 0;
 
 /// An open file: its buffered descriptor and, with `O_DIRECT`, the direct one.
 #[derive(Debug)]
@@ -46,18 +53,13 @@ pub struct FileDisk {
 }
 
 /// Whether the file system of `dir` takes `O_DIRECT` writes of whole 4 KiB blocks (012 FR-003):
-/// it writes, reads back and removes a probe file. Always `false` outside Linux.
+/// it writes, reads back and removes a probe file.
+#[cfg(target_os = "linux")]
 pub fn direct_io_supported(dir: &Path) -> io::Result<bool> {
-    if !cfg!(target_os = "linux") {
-        return Ok(false);
-    }
+    use std::os::unix::fs::OpenOptionsExt;
     let probe = dir.join(".direct-io-probe");
     let mut o = OpenOptions::new();
-    o.read(true).write(true).create(true).truncate(true);
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        o.custom_flags(O_DIRECT);
-    }
+    o.read(true).write(true).create(true).truncate(true).custom_flags(O_DIRECT);
     let r = o.open(&probe).and_then(|f| {
         let mut b = AlignedBuf::new(4096);
         b[..5].copy_from_slice(b"probe");
@@ -66,23 +68,34 @@ pub fn direct_io_supported(dir: &Path) -> io::Result<bool> {
         Ok(&b[..5] == b"probe")
     });
     let _ = fs::remove_file(&probe);
+    probe_answer(r)
+}
+
+/// The answer of the `O_DIRECT` probe: `EINVAL` means the file system does not take `O_DIRECT`,
+/// or not with 4 KiB blocks; any other error is a failure to check.
+#[cfg(target_os = "linux")]
+fn probe_answer(r: io::Result<bool>) -> io::Result<bool> {
     match r {
-        Ok(same) => Ok(same),
-        // EINVAL: the file system does not take O_DIRECT, or not with 4 KiB blocks.
         Err(e) if e.raw_os_error() == Some(22) => Ok(false),
-        Err(e) => Err(e),
+        other => other,
     }
 }
 
+/// Outside Linux there is no `O_DIRECT`.
+#[cfg(not(target_os = "linux"))]
+pub fn direct_io_supported(_dir: &Path) -> io::Result<bool> {
+    Ok(false)
+}
+
 /// Writes `bytes` as the whole content of a new file at `path` and syncs it (012 FR-003). With
-/// `direct` (Linux) the whole 4 KiB blocks go through `O_DIRECT` from an aligned buffer and the
-/// tail through the buffered descriptor; elsewhere, or without `direct`, all of it is buffered.
+/// `direct` the whole 4 KiB blocks go through the direct descriptor (`O_DIRECT` on Linux) from an
+/// aligned buffer and the tail through the buffered one; without it, all of it is buffered.
 pub fn write_whole(path: &Path, bytes: &[u8], direct: bool) -> io::Result<()> {
     let f = File::create(path)?;
-    let head = if direct && cfg!(target_os = "linux") { bytes.len() / ALIGN * ALIGN } else { 0 };
+    let head = if direct { bytes.len() / ALIGN * ALIGN } else { 0 };
     if head > 0 {
         use std::os::unix::fs::OpenOptionsExt;
-        let d = FileDisk::options().custom_flags(O_DIRECT).open(path)?;
+        let d = FileDisk::options().custom_flags(DIRECT_FLAG).open(path)?;
         let mut buf = AlignedBuf::new(head);
         buf[..head].copy_from_slice(&bytes[..head]);
         d.write_all_at(&buf[..head], 0)?;
@@ -94,6 +107,11 @@ pub fn write_whole(path: &Path, bytes: &[u8], direct: bool) -> io::Result<()> {
 /// Syncs directory `dir`, so that the creations, renames and removals in it are durable.
 pub fn sync_dir(dir: &Path) -> io::Result<()> {
     File::open(dir)?.sync_all()
+}
+
+/// [`errno`] for `map_err`.
+pub(crate) fn io_errno(e: io::Error) -> IoErrno {
+    errno(&e)
 }
 
 pub(crate) fn errno(e: &io::Error) -> IoErrno {
@@ -139,10 +157,10 @@ impl FileDisk {
         })
     }
 
-    /// Enables `O_DIRECT` for whole-block accesses on the files opened from now on (Linux only;
-    /// no effect on other systems).
+    /// Sends the whole-block accesses of the files opened from now on through a direct
+    /// descriptor and an aligned buffer: `O_DIRECT` on Linux, a second plain descriptor on macOS.
     pub fn set_direct_io(&mut self, on: bool) {
-        self.direct_io = on && cfg!(target_os = "linux");
+        self.direct_io = on;
     }
 
     /// Whether whole-block accesses use `O_DIRECT`.
@@ -171,7 +189,7 @@ impl FileDisk {
             return Ok(None);
         }
         use std::os::unix::fs::OpenOptionsExt;
-        Self::options().custom_flags(O_DIRECT).open(full).map(Some)
+        Self::options().custom_flags(DIRECT_FLAG).open(full).map(Some)
     }
 
     fn file(&self, id: FileId) -> Result<&DiskFile, IoErrno> {
@@ -186,9 +204,9 @@ impl FileDisk {
                     self.scratch = AlignedBuf::new(data.len());
                 }
                 self.scratch[..data.len()].copy_from_slice(data);
-                d.write_all_at(&self.scratch[..data.len()], offset).map_err(|e| errno(&e))
+                d.write_all_at(&self.scratch[..data.len()], offset).map_err(io_errno)
             }
-            _ => f.file.write_all_at(data, offset).map_err(|e| errno(&e)),
+            _ => f.file.write_all_at(data, offset).map_err(io_errno),
         }
     }
 
@@ -200,23 +218,22 @@ impl FileDisk {
                 if self.scratch.len() < len {
                     self.scratch = AlignedBuf::new(len);
                 }
-                let got = read_up_to(d, &mut self.scratch[..len], offset).map_err(|e| errno(&e))?;
+                let got = read_up_to(d, &mut self.scratch[..len], offset).map_err(io_errno)?;
                 buf[..got].copy_from_slice(&self.scratch[..got]);
                 got
             }
-            _ => read_up_to(&f.file, &mut buf, offset).map_err(|e| errno(&e))?,
+            _ => read_up_to(&f.file, &mut buf, offset).map_err(io_errno)?,
         };
         buf.truncate(got);
         Ok(buf)
     }
 
     fn run(&mut self, op: &IoOp) -> Result<Option<Bytes>, IoErrno> {
-        let e = |err: io::Error| errno(&err);
         match op {
             IoOp::Create { file, path, prealloc } => {
                 let full = self.full(path);
-                fs::create_dir_all(full.parent().unwrap_or(&self.root)).map_err(e)?;
-                let f = Self::options().create_new(true).open(&full).map_err(e)?;
+                fs::create_dir_all(full.parent().unwrap_or(&self.root)).map_err(io_errno)?;
+                let f = Self::options().create_new(true).open(&full).map_err(io_errno)?;
                 let made = match *prealloc {
                     0 => Ok(()),
                     n => teseladb_sys::preallocate(&f, n),
@@ -234,8 +251,8 @@ impl FileDisk {
             }
             IoOp::Open { file, path } => {
                 let full = self.full(path);
-                let f = Self::options().open(&full).map_err(e)?;
-                let direct = self.direct(&full).map_err(e)?;
+                let f = Self::options().open(&full).map_err(io_errno)?;
+                let direct = self.direct(&full).map_err(io_errno)?;
                 self.files.insert(*file, DiskFile { file: f, direct });
                 Ok(None)
             }
@@ -247,27 +264,27 @@ impl FileDisk {
                 Ok(Some(Bytes::from_vec(self.read(*file, *offset, *len as usize)?)))
             }
             IoOp::Sync { file, .. } => {
-                self.file(*file)?.file.sync_all().map_err(e)?;
+                self.file(*file)?.file.sync_all().map_err(io_errno)?;
                 Ok(None)
             }
             IoOp::SyncDir { path } => {
-                File::open(self.full(path)).and_then(|d| d.sync_all()).map_err(e)?;
+                File::open(self.full(path)).and_then(|d| d.sync_all()).map_err(io_errno)?;
                 Ok(None)
             }
             IoOp::Truncate { file, len } => {
-                self.file(*file)?.file.set_len(*len).map_err(e)?;
+                self.file(*file)?.file.set_len(*len).map_err(io_errno)?;
                 Ok(None)
             }
             IoOp::Rename { from, to } => {
-                fs::rename(self.full(from), self.full(to)).map_err(e)?;
+                fs::rename(self.full(from), self.full(to)).map_err(io_errno)?;
                 Ok(None)
             }
             IoOp::Remove { path } => {
-                fs::remove_file(self.full(path)).map_err(e)?;
+                fs::remove_file(self.full(path)).map_err(io_errno)?;
                 Ok(None)
             }
             IoOp::RemoveDir { path } => {
-                fs::remove_dir(self.full(path)).map_err(e)?;
+                fs::remove_dir(self.full(path)).map_err(io_errno)?;
                 Ok(None)
             }
             IoOp::Close { file } => {
@@ -281,8 +298,8 @@ impl FileDisk {
 impl Disk for FileDisk {
     fn list(&mut self, dir: &Path) -> Result<Vec<PathBuf>, IoErrno> {
         let mut v = Vec::new();
-        for entry in fs::read_dir(self.full(dir)).map_err(|e| errno(&e))? {
-            let entry = entry.map_err(|e| errno(&e))?;
+        for entry in fs::read_dir(self.full(dir)).map_err(io_errno)? {
+            let entry = entry.map_err(io_errno)?;
             v.push(dir.join(entry.file_name()));
         }
         v.sort();
@@ -290,7 +307,7 @@ impl Disk for FileDisk {
     }
 
     fn read_all(&mut self, path: &Path) -> Result<Vec<u8>, IoErrno> {
-        fs::read(self.full(path)).map_err(|e| errno(&e))
+        fs::read(self.full(path)).map_err(io_errno)
     }
 
     fn execute(&mut self, op: IoOp) -> IoDone {
@@ -327,6 +344,7 @@ mod tests {
         let root = temp_root("life");
         let mut d = FileDisk::open(&root).unwrap();
         d.set_direct_io(false);
+        assert!(!d.direct_io());
         assert_eq!(d.root(), root.as_path());
         ok(
             &mut d,
@@ -458,6 +476,14 @@ mod tests {
         assert!(write_whole(&root.join("missing/x"), b"x", false).is_err());
         assert!(sync_dir(&root.join("missing")).is_err());
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_direct_probe_reads_einval_as_no() {
+        assert!(probe_answer(Ok(true)).unwrap());
+        assert!(!probe_answer(Err(io::Error::from_raw_os_error(22))).unwrap());
+        assert!(probe_answer(Err(io::Error::from_raw_os_error(13))).is_err());
     }
 
     #[test]

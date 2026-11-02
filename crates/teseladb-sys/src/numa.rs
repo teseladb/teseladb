@@ -87,11 +87,18 @@ mod os {
     pub(crate) fn bind_memory_local() -> io::Result<bool> {
         // SAFETY: MPOL_LOCAL takes no node mask (null, 0 bits); no pointers.
         let rc = unsafe { syscall(SYS_SET_MEMPOLICY, MPOL_LOCAL, std::ptr::null::<u64>(), 0u64) };
+        policy_result(rc, io::Error::last_os_error())
+    }
+
+    /// `set_mempolicy`'s return code and `errno` as an answer: `ENOSYS` is a kernel without NUMA.
+    pub(crate) fn policy_result(rc: i64, e: io::Error) -> io::Result<bool> {
         if rc == 0 {
-            return Ok(true);
+            Ok(true)
+        } else if e.raw_os_error() == Some(ENOSYS) {
+            Ok(false)
+        } else {
+            Err(e)
         }
-        let e = io::Error::last_os_error();
-        if e.raw_os_error() == Some(ENOSYS) { Ok(false) } else { Err(e) }
     }
 }
 
@@ -131,6 +138,16 @@ mod tests {
         assert!(cpus.windows(2).all(|w| w[0] < w[1]));
         // Binding twice gives the same answer: there is NUMA or there is not.
         assert_eq!(bind_memory_local().unwrap(), bind_memory_local().unwrap());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_policy_call_reads_as_bound_absent_or_failed() {
+        use super::os::policy_result;
+        let e = |c| io::Error::from_raw_os_error(c);
+        assert!(policy_result(0, e(0)).unwrap());
+        assert!(!policy_result(-1, e(38)).unwrap(), "ENOSYS: no NUMA");
+        assert!(policy_result(-1, e(22)).is_err());
     }
 
     #[test]
