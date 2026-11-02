@@ -23,10 +23,12 @@ mod math;
 mod number;
 mod parser;
 mod promise;
+mod props;
 mod proxy;
 mod regex;
 mod shared;
 mod strings;
+mod symbols;
 mod typed;
 mod value;
 mod weak;
@@ -374,10 +376,6 @@ mod tests {
 
     #[test]
     fn a_call_that_changes_a_shared_object_drops_the_globals() {
-        assert!(!kept(
-            "function(){ try { Array.prototype.push.call(Array.prototype, 5) } catch (e) {} }",
-            None,
-            &[]
-        ));
+        assert!(!kept("function(){ Object.freeze(Math) }", None, &[]));
     }
 }

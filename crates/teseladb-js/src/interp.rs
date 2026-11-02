@@ -123,6 +123,10 @@ pub struct Interp<'c> {
     pub rng: u64,
     pub deadline: Option<&'c dyn Fn() -> bool>,
     pub symbol_ids: u64,
+    /// The symbols made without a description (`Symbol()`): their `description` is undefined.
+    pub undescribed: Vec<u64>,
+    /// The registry of `Symbol.for`.
+    pub registry: Vec<(Name, Val)>,
     pub output: Vec<String>,
     /// The value of the last expression statement (a `$where` string's result).
     pub last: Option<Val>,
@@ -282,7 +286,7 @@ impl<'c> Interp<'c> {
             };
         self.charge(size)?;
         Ok(ObjRef(Rc::new(ObjCell {
-            obj: RefCell::new(Obj { proto, props: Vec::new(), kind, extensible: true }),
+            obj: RefCell::new(Obj { proto, props: Vec::new(), kind, extensible: true, locks: 0 }),
             charged: std::cell::Cell::new(size),
             budget: self.budget.clone(),
             shared: std::cell::Cell::new(false),
@@ -310,11 +314,11 @@ impl<'c> Interp<'c> {
             .alloc(Some(self.realm.function.clone()), Kind::Func(Func::Native(f, name.into())))?;
         {
             let mut b = o.borrow_mut();
-            b.props.push(("name".into(), Prop { writable: false, ..Prop::hidden(Val::str(name)) }));
             b.props.push((
                 "length".into(),
                 Prop { writable: false, ..Prop::hidden(Val::Num(arity as f64)) },
             ));
+            b.props.push(("name".into(), Prop { writable: false, ..Prop::hidden(Val::str(name)) }));
         }
         Ok(o)
     }
@@ -391,6 +395,14 @@ impl<'c> Interp<'c> {
 
     pub fn primitive(&mut self, v: &Val, hint: &str) -> R {
         let Val::Obj(o) = v else { return Ok(v.clone()) };
+        let exotic = self.get(v, "@@Symbol.toPrimitive:0")?;
+        if exotic.is_callable() {
+            let r = self.call(&exotic, v, &[Val::str(hint)])?;
+            if matches!(r, Val::Obj(_)) {
+                return self.type_error("can't convert object to primitive type");
+            }
+            return Ok(r);
+        }
         let kind = o.borrow().kind.clone();
         match kind {
             Kind::Num(n) => return Ok(Val::Num(n)),
@@ -469,7 +481,7 @@ impl<'c> Interp<'c> {
             Val::Bool(b) => self.alloc(Some(self.realm.boolean.clone()), Kind::Bool(*b)),
             Val::Num(n) => self.alloc(Some(self.realm.number.clone()), Kind::Num(*n)),
             Val::Str(s) => self.alloc(Some(self.realm.string.clone()), Kind::Str(s.clone())),
-            Val::Sym(_) => self.alloc(Some(self.realm.symbol.clone()), Kind::Ordinary),
+            Val::Sym(_) => self.alloc(Some(self.realm.symbol.clone()), Kind::Symbol(v.clone())),
             Val::BigInt(b) => self.alloc(Some(self.realm.bigint.clone()), Kind::BigInt(b.clone())),
         }
     }
@@ -599,7 +611,12 @@ impl<'c> Interp<'c> {
         }
         {
             let mut b = o.borrow_mut();
+            let (locks, extensible) = (b.locks, b.extensible);
             if let Kind::Array(items) = &mut b.kind {
+                if key == "length" && locks & LENGTH_FIXED != 0 {
+                    drop(b);
+                    return self.read_only(key);
+                }
                 if key == "length" {
                     drop(b);
                     let n = self.number_of(&value)?;
@@ -616,8 +633,20 @@ impl<'c> Interp<'c> {
                 }
                 if let Some(i) = array_index(key) {
                     if i < items.len() {
+                        if locks & ELEMENTS_FROZEN != 0 {
+                            drop(b);
+                            return self.read_only(key);
+                        }
                         items[i] = value;
                         return Ok(());
+                    }
+                    if locks & LENGTH_FIXED != 0 || !extensible {
+                        let fixed = locks & LENGTH_FIXED != 0;
+                        drop(b);
+                        if !self.strict {
+                            return Ok(());
+                        }
+                        return Err(crate::arrays::cannot_grow(self, fixed, i));
                     }
                     let grow = i + 1 - items.len();
                     drop(b);
@@ -643,10 +672,7 @@ impl<'c> Interp<'c> {
                     return self.type_error(&format!("setting getter-only property \"{key}\""));
                 }
                 if !p.writable {
-                    if self.strict {
-                        return self.type_error(&format!("\"{key}\" is read-only"));
-                    }
-                    return Ok(());
+                    return self.read_only(key);
                 }
                 if c.ptr_eq(o) {
                     if let Some(p) = o.borrow_mut().get_own_mut(key) {
@@ -668,6 +694,14 @@ impl<'c> Interp<'c> {
         }
         self.grow(o, 1)?;
         o.borrow_mut().props.push((key.into(), Prop::data(value)));
+        Ok(())
+    }
+
+    /// An assignment to a read-only property: ignored, or a `TypeError` in strict code.
+    fn read_only(&self, key: &str) -> R<()> {
+        if self.strict {
+            return self.type_error(&format!("{} is read-only", crate::props::shown_key(key)));
+        }
         Ok(())
     }
 
@@ -759,6 +793,14 @@ impl<'c> Interp<'c> {
     pub fn delete_key(&mut self, o: &ObjRef, key: &str) -> R<bool> {
         if crate::proxy::is_proxy(o) {
             return crate::proxy::delete(self, o, key);
+        }
+        if crate::props::own_prop(o, key).is_some_and(|p| !p.configurable) {
+            if self.strict {
+                let k = crate::props::shown_key(key);
+                return self
+                    .type_error(&format!("property {k} is non-configurable and can't be deleted"));
+            }
+            return Ok(false);
         }
         let mut b = o.borrow_mut();
         if let Kind::Array(items) = &mut b.kind
@@ -1207,36 +1249,37 @@ impl<'c> Interp<'c> {
             }),
         )?;
         self.grow(&f, 3)?;
-        {
-            let mut b = f.borrow_mut();
-            let name = def.name.clone().unwrap_or_else(|| "".into());
-            b.props.push(("name".into(), Prop { writable: false, ..Prop::hidden(Val::Str(name)) }));
-            b.props.push((
-                "length".into(),
-                Prop {
-                    writable: false,
-                    ..Prop::hidden(Val::Num(
-                        def.params.iter().take_while(|(_, d)| d.is_none()).count() as f64,
-                    ))
-                },
-            ));
-        }
-        if def.generator {
+        let fixed = |v: Val| Prop { writable: false, ..Prop::hidden(v) };
+        let prototype = if def.generator {
             let (fp, pp) = if def.is_async {
                 ("AsyncGeneratorFunction", "AsyncGenerator")
             } else {
                 ("GeneratorFunction", "Generator")
             };
             f.borrow_mut().proto = Some(self.realm.proto(fp));
-            let proto = self.alloc(Some(self.realm.proto(pp)), Kind::Ordinary)?;
-            f.borrow_mut().props.push(("prototype".into(), Prop::hidden(Val::Obj(proto))));
+            Some(self.alloc(Some(self.realm.proto(pp)), Kind::Ordinary)?)
         } else if def.is_async {
             f.borrow_mut().proto = Some(self.realm.proto("AsyncFunction"));
+            None
         } else if !def.arrow {
             let proto = self.object()?;
             self.define(&proto, "constructor", Prop::hidden(Val::Obj(f.clone())))?;
-            f.borrow_mut().props.push(("prototype".into(), Prop::hidden(Val::Obj(proto))));
+            Some(proto)
+        } else {
+            None
+        };
+        let mut b = f.borrow_mut();
+        if let Some(p) = prototype {
+            b.props.push((
+                "prototype".into(),
+                Prop { configurable: false, ..Prop::hidden(Val::Obj(p)) },
+            ));
         }
+        let length = def.params.iter().take_while(|(_, d)| d.is_none()).count() as f64;
+        b.props.push(("length".into(), fixed(Val::Num(length))));
+        let name = def.name.clone().unwrap_or_else(|| "".into());
+        b.props.push(("name".into(), fixed(Val::Str(name))));
+        drop(b);
         Ok(Val::Obj(f))
     }
 
@@ -1849,12 +1892,15 @@ impl<'c> Interp<'c> {
             }),
         )?;
         let name = c.name.clone().unwrap_or_else(|| "".into());
-        self.define(
-            &ctor,
-            "prototype",
-            Prop { writable: false, ..Prop::hidden(Val::Obj(proto.clone())) },
-        )?;
-        self.define(&ctor, "name", Prop::hidden(Val::Str(name.clone())))?;
+        let fixed = |v: Val| Prop { writable: false, ..Prop::hidden(v) };
+        let prototype = Prop { configurable: false, ..fixed(Val::Obj(proto.clone())) };
+        self.define(&ctor, "prototype", prototype)?;
+        let length = match &c.ctor {
+            Some(d) => d.params.iter().take_while(|(_, d)| d.is_none()).count(),
+            None => 0,
+        };
+        self.define(&ctor, "length", fixed(Val::Num(length as f64)))?;
+        self.define(&ctor, "name", fixed(Val::Str(name.clone())))?;
         self.define(&proto, "constructor", Prop::hidden(Val::Obj(ctor.clone())))?;
         if let Some(n) = &c.name {
             declare(&scope, n, Val::Obj(ctor.clone()), false);
@@ -2213,6 +2259,14 @@ impl<'c> Interp<'c> {
                 ObjProp::Value(k, e) => {
                     let key = self.prop_key(k, env)?;
                     let v = self.eval(e, env)?;
+                    if matches!(k, PropName::Fixed(n) if &**n == "__proto__") {
+                        match v {
+                            Val::Obj(p) => o.borrow_mut().proto = Some(p),
+                            Val::Null => o.borrow_mut().proto = None,
+                            _ => {}
+                        }
+                        continue;
+                    }
                     if let (Val::Obj(f), Expr::Func(_)) = (&v, e) {
                         if let Kind::Func(Func::Closure { home, .. }) = &mut f.borrow_mut().kind {
                             *home = Some(o.clone());
@@ -2304,6 +2358,21 @@ impl<'c> Interp<'c> {
     }
 
     pub fn instance_of(&mut self, x: &Val, f: &Val) -> R<bool> {
+        if let Val::Obj(fo) = f {
+            let custom = self.get(f, "@@Symbol.hasInstance:0")?;
+            let builtin = fo.borrow().is_callable()
+                && custom.as_obj().is_some_and(|h| {
+                    matches!(&h.borrow().kind, Kind::Func(Func::Native(_, n)) if &**n == "[Symbol.hasInstance]")
+                });
+            if !custom.is_nullish() && !builtin {
+                return Ok(self.call(&custom, f, std::slice::from_ref(x))?.truthy());
+            }
+        }
+        self.ordinary_instance_of(x, f)
+    }
+
+    /// OrdinaryHasInstance: whether `f.prototype` is on the chain of `x`.
+    pub fn ordinary_instance_of(&mut self, x: &Val, f: &Val) -> R<bool> {
         if !f.is_callable() {
             return self.type_error(&format!("invalid 'instanceof' operand {}", self.show(f)));
         }
@@ -2311,7 +2380,7 @@ impl<'c> Interp<'c> {
             && let Kind::Func(Func::Bound(t, ..)) = &fo.borrow().kind
         {
             let t = Val::Obj(t.clone());
-            return self.instance_of(x, &t);
+            return self.ordinary_instance_of(x, &t);
         }
         let Val::Obj(o) = x else { return Ok(false) };
         let Val::Obj(proto) = self.get(f, "prototype")? else { return Ok(false) };

@@ -93,15 +93,30 @@ pub struct Prop {
     pub setter: Option<ObjRef>,
     pub enumerable: bool,
     pub writable: bool,
+    pub configurable: bool,
 }
 
 impl Prop {
     pub fn data(value: Val) -> Prop {
-        Prop { value, getter: None, setter: None, enumerable: true, writable: true }
+        Prop {
+            value,
+            getter: None,
+            setter: None,
+            enumerable: true,
+            writable: true,
+            configurable: true,
+        }
     }
 
     pub fn hidden(value: Val) -> Prop {
-        Prop { value, getter: None, setter: None, enumerable: false, writable: true }
+        Prop {
+            value,
+            getter: None,
+            setter: None,
+            enumerable: false,
+            writable: true,
+            configurable: true,
+        }
     }
 
     pub fn is_accessor(&self) -> bool {
@@ -186,6 +201,8 @@ pub enum Kind {
     Promise(Rc<RefCell<crate::promise::PromiseState>>),
     /// An iterator over a snapshot of values (`entries()`, `values()`, `keys()`).
     Iter(Rc<RefCell<(Vec<Val>, usize)>>),
+    /// A `Symbol` object (`Object(Symbol())`): its symbol.
+    Symbol(Val),
 }
 
 /// An object: its prototype, its own properties in insertion order and its kind.
@@ -195,6 +212,23 @@ pub struct Obj {
     pub props: Vec<(Name, Prop)>,
     pub kind: Kind,
     pub extensible: bool,
+    /// What `Object.seal` and `Object.freeze` did to the elements an array holds in its kind
+    /// ([`LENGTH_FIXED`], [`ELEMENTS_SEALED`], [`ELEMENTS_FROZEN`]).
+    pub locks: u8,
+}
+
+/// An array's `length` is read-only.
+pub const LENGTH_FIXED: u8 = 1;
+/// An array's elements cannot be deleted.
+pub const ELEMENTS_SEALED: u8 = 2;
+/// An array's elements are read-only.
+pub const ELEMENTS_FROZEN: u8 = 4;
+
+/// Whether `key` is the key of a symbol (`@@description:id`), not an internal slot (`@@new`).
+pub fn is_symbol_key(key: &str) -> bool {
+    key.strip_prefix("@@")
+        .and_then(|k| k.rsplit_once(':'))
+        .is_some_and(|(_, id)| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
 }
 
 impl Obj {
@@ -286,7 +320,7 @@ pub fn strict_eq(a: &Val, b: &Val) -> bool {
         (Val::Num(x), Val::Num(y)) => x == y,
         (Val::BigInt(x), Val::BigInt(y)) => x == y,
         (Val::Str(x), Val::Str(y)) => x == y,
-        (Val::Sym(x), Val::Sym(y)) => Rc::ptr_eq(x, y),
+        (Val::Sym(x), Val::Sym(y)) => x.1 == y.1 && x.0 == y.0,
         (Val::Obj(x), Val::Obj(y)) => x.ptr_eq(y),
         _ => false,
     }

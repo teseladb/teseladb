@@ -60,7 +60,9 @@ pub(crate) fn ctor(
     proto: &ObjRef,
 ) -> R<ObjRef> {
     let c = it.native(name, f, arity)?;
-    it.define(&c, "prototype", Prop { writable: false, ..Prop::hidden(Val::Obj(proto.clone())) })?;
+    let fixed =
+        Prop { writable: false, configurable: false, ..Prop::hidden(Val::Obj(proto.clone())) };
+    it.define(&c, "prototype", fixed)?;
     it.define(proto, "constructor", Prop::hidden(Val::Obj(c.clone())))?;
     it.define(global, name, Prop::hidden(Val::Obj(c.clone())))?;
     Ok(c)
@@ -68,7 +70,13 @@ pub(crate) fn ctor(
 
 fn bare(budget: &Rc<Budget>, proto: Option<ObjRef>, kind: Kind) -> ObjRef {
     ObjRef(Rc::new(ObjCell {
-        obj: std::cell::RefCell::new(Obj { proto, props: Vec::new(), kind, extensible: true }),
+        obj: std::cell::RefCell::new(Obj {
+            proto,
+            props: Vec::new(),
+            kind,
+            extensible: true,
+            locks: 0,
+        }),
         charged: std::cell::Cell::new(0),
         budget: budget.clone(),
         shared: std::cell::Cell::new(false),
@@ -106,8 +114,16 @@ pub fn realm(budget: &Rc<Budget>) -> Realm {
 pub fn install(it: &mut Interp) -> R<()> {
     let g = it.realm.global.clone();
     it.define(&g, "globalThis", Prop::hidden(Val::Obj(g.clone())))?;
-    it.define(&g, "NaN", Prop { writable: false, ..Prop::hidden(Val::Num(f64::NAN)) })?;
-    it.define(&g, "Infinity", Prop { writable: false, ..Prop::hidden(Val::Num(f64::INFINITY)) })?;
+    it.define(
+        &g,
+        "NaN",
+        Prop { writable: false, configurable: false, ..Prop::hidden(Val::Num(f64::NAN)) },
+    )?;
+    it.define(
+        &g,
+        "Infinity",
+        Prop { writable: false, configurable: false, ..Prop::hidden(Val::Num(f64::INFINITY)) },
+    )?;
     for (name, f, n) in [
         ("parseInt", parse_int as NativeFn, 2),
         ("parseFloat", parse_float, 1),
@@ -147,11 +163,7 @@ pub fn install(it: &mut Interp) -> R<()> {
 /// kept, and strict code that assigns `name` on an error throws `"name" is read-only`).
 fn freeze_builtins(it: &Interp) {
     fn freeze(o: &ObjRef) {
-        let mut b = o.borrow_mut();
-        b.extensible = false;
-        for (_, p) in &mut b.props {
-            p.writable = false;
-        }
+        crate::props::lock(o, true);
     }
     let mut all: Vec<ObjRef> = vec![
         it.realm.object.clone(),
@@ -262,11 +274,6 @@ fn object_builtins(it: &mut Interp, g: &ObjRef) -> R<()> {
         ("create", obj_create, 2),
         ("getPrototypeOf", obj_get_proto, 1),
         ("setPrototypeOf", obj_set_proto, 2),
-        ("freeze", obj_freeze, 1),
-        ("isFrozen", obj_is_frozen, 1),
-        ("seal", obj_freeze, 1),
-        ("preventExtensions", obj_freeze, 1),
-        ("defineProperty", obj_define_property, 3),
         ("getOwnPropertyNames", obj_own_names, 1),
         ("fromEntries", obj_from_entries, 1),
         ("is", obj_is, 2),
@@ -280,11 +287,14 @@ fn object_builtins(it: &mut Interp, g: &ObjRef) -> R<()> {
         ("toLocaleString", obj_to_string, 0),
         ("valueOf", obj_value_of, 0),
         ("isPrototypeOf", obj_is_prototype_of, 1),
-        ("propertyIsEnumerable", obj_proto_has_own, 1),
     ] {
         method(it, &proto, name, f, n)?;
     }
-    Ok(())
+    let get = it.native("get __proto__", proto_getter, 0)?;
+    let set = it.native("set __proto__", proto_setter, 1)?;
+    let p = Prop { getter: Some(get), setter: Some(set), ..Prop::hidden(Val::Undef) };
+    it.define(&proto, "__proto__", p)?;
+    crate::props::install(it, &c)
 }
 
 fn object_ctor(it: &mut Interp, _: &Val, a: &[Val]) -> R {
@@ -362,11 +372,8 @@ fn obj_create(it: &mut Interp, _: &Val, a: &[Val]) -> R {
         v => return it.type_error(&format!("{} is not an object or null", it.show(&v))),
     };
     let o = it.alloc(proto, Kind::Ordinary)?;
-    if let Val::Obj(props) = arg(a, 1) {
-        for k in it.keys(&props, true)? {
-            let d = it.get(&Val::Obj(props.clone()), &k)?;
-            define_from(it, &o, &k, &d)?;
-        }
+    if !matches!(arg(a, 1), Val::Undef) {
+        crate::props::define_all(it, &o, &arg(a, 1))?;
     }
     Ok(Val::Obj(o))
 }
@@ -378,78 +385,69 @@ fn obj_get_proto(it: &mut Interp, _: &Val, a: &[Val]) -> R {
 }
 
 fn obj_set_proto(it: &mut Interp, _: &Val, a: &[Val]) -> R {
-    if let Val::Obj(o) = arg(a, 0) {
-        let p = match arg(a, 1) {
-            Val::Obj(p) => Some(p),
-            _ => None,
-        };
-        // A cycle in the chain is refused.
-        let mut cur = p.clone();
-        while let Some(c) = cur {
-            if c.ptr_eq(&o) {
-                return it
-                    .type_error("can't set prototype: it would cause a prototype chain cycle");
-            }
-            cur = c.borrow().proto.clone();
-        }
-        o.borrow_mut().proto = p;
+    let target = arg(a, 0);
+    if target.is_nullish() {
+        return it.type_error(&format!("can't convert {} to object", it.show(&target)));
     }
-    Ok(arg(a, 0))
-}
-
-fn obj_freeze(_: &mut Interp, _: &Val, a: &[Val]) -> R {
-    if let Val::Obj(o) = arg(a, 0) {
-        let mut b = o.borrow_mut();
-        b.extensible = false;
-        for (_, p) in &mut b.props {
-            p.writable = false;
+    let p = match arg(a, 1) {
+        Val::Obj(p) => Some(p),
+        Val::Null => None,
+        v => {
+            return it.type_error(&format!(
+                "Object.setPrototypeOf: expected an object or null, got {}",
+                v.type_of()
+            ));
         }
-    }
-    Ok(arg(a, 0))
-}
-
-fn obj_is_frozen(_: &mut Interp, _: &Val, a: &[Val]) -> R {
-    Ok(Val::Bool(match arg(a, 0) {
-        Val::Obj(o) => {
-            let b = o.borrow();
-            !b.extensible && b.props.iter().all(|(_, p)| !p.writable)
-        }
-        _ => true,
-    }))
-}
-
-fn define_from(it: &mut Interp, o: &ObjRef, key: &str, d: &Val) -> R<()> {
-    let get = it.get(d, "get")?;
-    let set = it.get(d, "set")?;
-    let value = it.get(d, "value")?;
-    let enumerable = it.get(d, "enumerable")?.truthy();
-    let writable = it.get(d, "writable")?.truthy();
-    let prop = Prop {
-        value,
-        getter: get.as_obj().cloned(),
-        setter: set.as_obj().cloned(),
-        enumerable,
-        writable,
     };
-    it.define(o, key, prop)
+    if let Val::Obj(o) = &target {
+        set_proto(it, o, p)?;
+    }
+    Ok(target)
 }
 
-fn obj_define_property(it: &mut Interp, _: &Val, a: &[Val]) -> R {
-    let Val::Obj(o) = arg(a, 0) else {
-        return it.type_error("Object.defineProperty called on non-object");
+/// Sets the prototype of `o`, refusing a cycle or a change to an object that is not extensible.
+pub(crate) fn set_proto(it: &Interp, o: &ObjRef, p: Option<ObjRef>) -> R<()> {
+    let same = match (&o.borrow().proto, &p) {
+        (Some(x), Some(y)) => x.ptr_eq(y),
+        (None, None) => true,
+        _ => false,
     };
-    let k = it.key_of(&arg(a, 1))?;
-    if let (Some(i), Kind::Array(_)) = (array_index(&k), &o.borrow().kind) {
-        let _ = i;
+    if same {
+        return Ok(());
     }
-    let d = arg(a, 2);
-    if matches!(o.borrow().kind, Kind::Array(_)) && array_index(&k).is_some() {
-        let v = it.get(&d, "value")?;
-        it.set(&Val::Obj(o.clone()), &k, v)?;
-    } else {
-        define_from(it, &o, &k, &d)?;
+    if !o.borrow().extensible {
+        return it.type_error("can't set prototype of this object");
     }
-    Ok(Val::Obj(o))
+    let mut cur = p.clone();
+    while let Some(c) = cur {
+        if c.ptr_eq(o) {
+            return it.type_error("can't set prototype: it would cause a prototype chain cycle");
+        }
+        cur = c.borrow().proto.clone();
+    }
+    o.borrow_mut().proto = p;
+    Ok(())
+}
+
+fn proto_getter(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+    let o = it.object_of(this)?;
+    let p = o.borrow().proto.clone();
+    Ok(p.map_or(Val::Null, Val::Obj))
+}
+
+fn proto_setter(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    if this.is_nullish() {
+        return it.type_error(&format!("can't convert {} to object", it.show(this)));
+    }
+    let p = match arg(a, 0) {
+        Val::Obj(p) => Some(p),
+        Val::Null => None,
+        _ => return Ok(Val::Undef),
+    };
+    if let Val::Obj(o) = this {
+        set_proto(it, o, p)?;
+    }
+    Ok(Val::Undef)
 }
 
 fn obj_own_names(it: &mut Interp, _: &Val, a: &[Val]) -> R {
@@ -566,15 +564,53 @@ fn obj_is_prototype_of(_: &mut Interp, this: &Val, a: &[Val]) -> R {
 fn function_builtins(it: &mut Interp, g: &ObjRef) -> R<()> {
     let proto = it.realm.function.clone();
     ctor(it, g, "Function", function_ctor, 1, &proto)?;
+    // SpiderMonkey's order: the methods, `arguments`, `caller`, `constructor`, `length`, `name`.
+    let constructor = proto.borrow().get_own("constructor").cloned();
+    proto.borrow_mut().remove("constructor");
     for (name, f, n) in [
-        ("call", fn_call as NativeFn, 1),
+        ("toString", fn_to_string as NativeFn, 0),
         ("apply", fn_apply, 2),
+        ("call", fn_call, 1),
         ("bind", fn_bind, 1),
-        ("toString", fn_to_string, 0),
     ] {
         method(it, &proto, name, f, n)?;
     }
-    Ok(())
+    for name in ["arguments", "caller"] {
+        let f = it.native("", restricted, 0)?;
+        let p = Prop { getter: Some(f.clone()), setter: Some(f), ..Prop::hidden(Val::Undef) };
+        it.define(&proto, name, p)?;
+    }
+    if let Some(c) = constructor {
+        it.define(&proto, "constructor", c)?;
+    }
+    let fixed = |v: Val| Prop { writable: false, ..Prop::hidden(v) };
+    it.define(&proto, "length", fixed(Val::Num(0.0)))?;
+    it.define(&proto, "name", fixed(Val::str("")))?;
+    let f = it.native("[Symbol.hasInstance]", fn_has_instance, 1)?;
+    let fixed = Prop { writable: false, configurable: false, ..Prop::hidden(Val::Obj(f)) };
+    it.define(&proto, &well_known("hasInstance"), fixed)
+}
+
+/// `Function.prototype.caller` and `arguments`: `null` for a sloppy function, an error for the
+/// others.
+fn restricted(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+    let sloppy = matches!(this, Val::Obj(o) if matches!(&o.borrow().kind,
+        Kind::Func(Func::Closure { def, .. })
+            if !def.strict && !def.arrow && !def.generator && !def.is_async));
+    if sloppy {
+        return Ok(Val::Null);
+    }
+    it.type_error(
+        "'caller', 'callee', and 'arguments' properties may not be accessed on strict mode \
+         functions or the arguments objects for calls to them",
+    )
+}
+
+fn fn_has_instance(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    if !this.is_callable() {
+        return Ok(Val::Bool(false));
+    }
+    Ok(Val::Bool(it.ordinary_instance_of(&arg(a, 0), this)?))
 }
 
 /// `Function(args…, body)`.
@@ -1351,13 +1387,7 @@ fn iter_self(_: &mut Interp, this: &Val, _: &[Val]) -> R {
 // Symbol.
 
 fn symbol_builtins(it: &mut Interp, g: &ObjRef) -> R<()> {
-    let proto = it.realm.symbol.clone();
-    let c = ctor(it, g, "Symbol", symbol_ctor, 0, &proto)?;
-    for name in ["iterator", "asyncIterator", "toStringTag"] {
-        let sym = Val::Sym(Rc::new((format!("Symbol.{name}").into(), 0)));
-        it.define(&c, name, Prop { writable: false, ..Prop::hidden(sym) })?;
-    }
-    to_string_tag(it, &proto, "Symbol")?;
+    crate::symbols::install(it, g)?;
     let (mp, sp) = (it.realm.map.clone(), it.realm.set.clone());
     to_string_tag(it, &mp, "Map")?;
     to_string_tag(it, &sp, "Set")?;
@@ -1366,10 +1396,32 @@ fn symbol_builtins(it: &mut Interp, g: &ObjRef) -> R<()> {
             to_string_tag(it, &o, name)?;
         }
     }
-    method(it, &proto, "toString", symbol_to_string, 0)?;
     let arr = it.realm.array.clone();
     let values = it.get(&Val::Obj(arr.clone()), "values")?;
     it.define(&arr, "@@Symbol.iterator:0", Prop::hidden(values))?;
+    let unscopables = it.alloc(None, Kind::Ordinary)?;
+    for name in [
+        "at",
+        "copyWithin",
+        "entries",
+        "fill",
+        "find",
+        "findIndex",
+        "findLast",
+        "findLastIndex",
+        "flat",
+        "flatMap",
+        "includes",
+        "keys",
+        "toReversed",
+        "toSorted",
+        "toSpliced",
+        "values",
+    ] {
+        it.define(&unscopables, name, Prop::data(Val::Bool(true)))?;
+    }
+    let fixed = Prop { writable: false, ..Prop::hidden(Val::Obj(unscopables)) };
+    it.define(&arr, &well_known("unscopables"), fixed)?;
     let sp = it.realm.string.clone();
     let f = it.native("[Symbol.iterator]", string_iter, 0)?;
     it.define(&sp, "@@Symbol.iterator:0", Prop::hidden(Val::Obj(f)))?;
@@ -1379,22 +1431,6 @@ fn symbol_builtins(it: &mut Interp, g: &ObjRef) -> R<()> {
 fn string_iter(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     let s = it.str_of(this)?;
     make_iter(it, s.chars().map(|c| Val::Str(c.to_string().into())).collect())
-}
-
-fn symbol_ctor(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    if new_target(this).is_some() {
-        return it.type_error("Symbol is not a constructor");
-    }
-    let d = if matches!(arg(a, 0), Val::Undef) { "".into() } else { it.str_of(&arg(a, 0))? };
-    it.symbol_ids += 1;
-    Ok(Val::Sym(Rc::new((d, it.symbol_ids))))
-}
-
-fn symbol_to_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
-    match this {
-        Val::Sym(s) => it.string(format!("Symbol({})", s.0)),
-        _ => it.type_error("Symbol.prototype.toString called on incompatible value"),
-    }
 }
 
 // RegExp: the literal and constructor keep the source and flags; matching is in `strings`.

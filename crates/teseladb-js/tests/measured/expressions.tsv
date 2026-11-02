@@ -456,3 +456,100 @@ typeof Proxy.prototype + ',' + Proxy.length + ',' + Proxy.name	S:undefined,2,Pro
 (()=>{const p=new Proxy({},{ownKeys(){return [1]}});try{Object.keys(p)}catch(e){return e.name+':'+e.message}})()	S:TypeError:proxy [[OwnPropertyKeys]] must return an array with only string and symbol elements
 (()=>{const r=[];for(const f of [()=>(1).toFixed(200),()=>(1).toFixed(-1),()=>(1).toPrecision(0),()=>(1).toPrecision(101),()=>(1).toFixed(1.5),()=>(1).toExponential(101)]){try{r.push(f())}catch(e){r.push(e.name+':'+e.message)}}return r.join('|')})()	S:RangeError:precision 200 out of range|RangeError:precision -1 out of range|RangeError:precision 0 out of range|RangeError:precision 101 out of range|1.0|RangeError:precision 101 out of range
 [(2.5).toExponential(0),(1.25).toExponential(1),(123.456).toExponential(),(0.00015).toExponential(1),(-3).toExponential(2),(0).toExponential(),(1e21).toExponential(3),Infinity.toExponential(),(5e-324).toExponential()].join()	S:3e+0,1.3e+0,1.23456e+2,1.5e-4,-3.00e+0,0e+0,1.000e+21,Infinity,5e-324
+Object.getOwnPropertyDescriptor(Math,'PI')	J:{"value":3.141592653589793,"writable":false,"enumerable":false,"configurable":false}
+Object.getOwnPropertyDescriptor(Math,'abs').writable	J:false
+Object.getOwnPropertyDescriptor(function f(a,b){},'length')	J:{"value":2,"writable":false,"enumerable":false,"configurable":true}
+Object.getOwnPropertyDescriptor(function f(a){},'name')	J:{"value":"f","writable":false,"enumerable":false,"configurable":true}
+Object.getOwnPropertyDescriptor(function f(a){},'prototype').writable	J:true
+Object.getOwnPropertyDescriptor([1],'length')	J:{"value":1,"writable":true,"enumerable":false,"configurable":false}
+Object.getOwnPropertyDescriptor([7],'0')	J:{"value":7,"writable":true,"enumerable":true,"configurable":true}
+Object.getOwnPropertyDescriptor('ab','1')	J:{"value":"b","writable":false,"enumerable":true,"configurable":false}
+Object.getOwnPropertyDescriptor('ab','length')	J:{"value":2,"writable":false,"enumerable":false,"configurable":false}
+Object.getOwnPropertyDescriptor({},'x')	J:undefined
+Object.getOwnPropertyDescriptor('ab','x')	J:undefined
+Object.getOwnPropertyDescriptors({a:1, get b(){return 1}})	J:{"a":{"value":1,"writable":true,"enumerable":true,"configurable":true},"b":{"enumerable":true,"configurable":true}}
+(()=>{var o={a:1}; Object.defineProperty(o,'b',{value:2}); return [JSON.stringify(Object.getOwnPropertyDescriptor(o,'b')), delete o.b, o.b, Object.keys(o).join()].join('|')})()	S:{"value":2,"writable":false,"enumerable":false,"configurable":false}|false|2|a
+(()=>{"use strict"; var o={}; Object.defineProperty(o,'b',{value:2}); delete o.b})()	E:TypeError:property "b" is non-configurable and can't be deleted
+(()=>{var o={}; Object.defineProperty(o,'b',{value:2}); Object.defineProperty(o,'b',{value:3})})()	E:TypeError:can't redefine non-configurable property "b"
+(()=>{var o={}; Object.defineProperty(o,'b',{value:2, writable:true}); Object.defineProperty(o,'b',{value:3}); return o.b})()	J:3
+(()=>{var o={}; Object.defineProperty(o,'b',{get(){return 1}}); Object.defineProperty(o,'b',{value:3})})()	E:TypeError:can't redefine non-configurable property "b"
+(()=>{var o={}; Object.defineProperty(o,'b',{value:1, configurable:true}); Object.defineProperty(o,'b',{get(){return 5}}); return JSON.stringify(Object.getOwnPropertyDescriptor(o,'b')) + o.b})()	S:{"enumerable":false,"configurable":true}5
+(()=>{var o={a:1}; Object.defineProperty(o,'a',{enumerable:false}); return JSON.stringify(Object.getOwnPropertyDescriptor(o,'a'))})()	S:{"value":1,"writable":true,"enumerable":false,"configurable":true}
+(()=>{var o=Object.preventExtensions({}); Object.defineProperty(o,'z',{value:1})})()	E:TypeError:can't define property "z": Object is not extensible
+(()=>{"use strict"; var o=Object.preventExtensions({}); o.z = 1})()	E:TypeError:can't define property "z": Object is not extensible
+(()=>{var o=Object.preventExtensions({}); o.z = 1; return o.z})()	J:undefined
+Object.defineProperty(1,'a',{})	E:TypeError:1 is not a non-null object
+Object.defineProperty({},'a',1)	E:TypeError:Property descriptor must be an object, got 1
+Object.defineProperty({},'a',{get:1})	E:TypeError:property descriptor's get field is neither undefined nor a function
+Object.defineProperty({},'a',{get(){},value:1})	E:TypeError:property descriptors must not specify a value or be writable when a getter or setter has been specified
+[Object.isExtensible({}), Object.isExtensible(Object.freeze({})), Object.isExtensible(1), Object.isSealed(Object.seal({a:1})), Object.isFrozen(Object.seal({a:1})), Object.isFrozen(Object.seal({})), Object.isSealed(1), Object.isFrozen(Object.preventExtensions({a:1}))]	J:[true,false,false,true,false,true,true,false]
+(()=>{var o=Object.seal({a:1}); o.a=2; delete o.a; o.b=1; return JSON.stringify(o)})()	S:{"a":2}
+(()=>{var s = Symbol('x'); var o = {[s]:1, a:2}; var r = Object.getOwnPropertySymbols(o); return [r.length, String(r[0]), r[0] === s, Object.keys(o).join()].join()})()	S:1,Symbol(x),true,a
+Object.getOwnPropertySymbols(Array.prototype).map(String).join()	S:Symbol(Symbol.iterator),Symbol(Symbol.unscopables)
+Object.getOwnPropertySymbols(1)	J:[]
+Object.getOwnPropertySymbols(null)	E:TypeError:can't convert null to object
+[({}).propertyIsEnumerable.call([1],'length'), Object.prototype.propertyIsEnumerable.call({a:1},'a'), Object.prototype.propertyIsEnumerable.call([1],'0'), Boolean.propertyIsEnumerable('prototype')]	J:[false,true,true,false]
+(()=>{var o={}; Object.defineProperties(o,{a:{value:1,enumerable:true},b:{get(){return 2}}}); return JSON.stringify(o)+o.b})()	S:{"a":1}2
+Object.getOwnPropertyDescriptor(globalThis,'NaN')	J:{"value":null,"writable":false,"enumerable":false,"configurable":false}
+Object.getOwnPropertyDescriptor(globalThis,'Math').writable	J:true
+Object.getOwnPropertyDescriptor(Symbol,'iterator')	J:{"writable":false,"enumerable":false,"configurable":false}
+(()=>{var a=[1,2]; Object.defineProperty(a,'length',{writable:false}); a.push(3)})()	E:TypeError:can't define array index property past the end of an array with non-writable length
+(()=>{function f(){} delete f.length; return f.hasOwnProperty('length') + ' ' + f.length})()	S:false 0
+(()=>{function f(){} f.name = 'z'; return f.name})()	S:f
+(()=>{var o = Object.freeze([1]); o[0] = 5; o.push(2)})()	E:TypeError:can't define array index property past the end of an array with non-writable length
+(()=>{var o={a:1}; Object.freeze(o); return JSON.stringify(Object.getOwnPropertyDescriptor(o,'a'))})()	S:{"value":1,"writable":false,"enumerable":true,"configurable":false}
+(()=>{var o={get a(){return 1}}; Object.freeze(o); return JSON.stringify(Object.getOwnPropertyDescriptor(o,'a'))+Object.isFrozen(o)})()	S:{"enumerable":true,"configurable":false}true
+Object.getOwnPropertyDescriptor(Object.prototype, '__proto__').get.name	S:get __proto__
+Object.getOwnPropertyNames(function(){}).join()	S:prototype,length,name
+Object.getOwnPropertyNames(class {}).join()	S:prototype,length,name
+Object.getOwnPropertyNames(()=>1).join()	S:length,name
+Object.getOwnPropertyNames(function*(){}).join()	S:prototype,length,name
+(()=>{var a=Object.freeze([1,2]); var r=[]; for (const f of [()=>a.pop(),()=>a.shift(),()=>a.unshift(0),()=>a.splice(0,1),()=>a.sort(),()=>a.reverse(),()=>a.fill(0),()=>a.copyWithin(0,1)]){try{r.push(f())}catch(e){r.push(e.message)}} return r.join('|')})()	S:property 1 is non-configurable and can't be deleted|0 is read-only|can't define array index property past the end of an array with non-writable length|0 is read-only|0 is read-only|0 is read-only|0 is read-only|0 is read-only
+(()=>{var a=Object.seal([1,2]); var r=[]; for (const f of [()=>a.pop(),()=>a.push(3),()=>a.reverse().join(),()=>{a[0]=9;return a[0]},()=>delete a[0]]){try{r.push(f())}catch(e){r.push(e.message)}} return r.join('|')})()	S:property 1 is non-configurable and can't be deleted|can't define property 2: Array is not extensible|2,1|9|false
+(()=>{var a=Object.preventExtensions([1,2]); var r=[]; for (const f of [()=>a.push(3),()=>a.pop(),()=>{a[5]=1;return a.length}]){try{r.push(f())}catch(e){r.push(e.message)}} return r.join('|')})()	S:can't define property 2: Array is not extensible|2|1
+(()=>{"use strict"; var a=Object.freeze([1]); try{a[0]=2}catch(e){return e.message}})()	S:0 is read-only
+(()=>{"use strict"; var a=Object.freeze([1]); try{a[3]=2}catch(e){return e.message}})()	S:can't define array index property past the end of an array with non-writable length
+(()=>{"use strict"; var a=Object.freeze([1]); try{a.length=0}catch(e){return e.message}})()	S:"length" is read-only
+(()=>{"use strict"; var a=Object.freeze([1]); try{delete a[0]}catch(e){return e.message}})()	S:property 0 is non-configurable and can't be deleted
+[Object.isFrozen(Object.freeze([1])), Object.isFrozen(Object.preventExtensions([])), Object.isSealed(Object.seal([1])), Object.isFrozen('ab'), Object.isFrozen(new String('ab')), Object.getOwnPropertyNames([5]).join(), Object.getOwnPropertyNames('ab').join()]	J:[true,false,true,true,false,"0,length","0,1,length"]
+(()=>{"use strict"; var o=Object.freeze({a:1}); try{delete o.a}catch(e){return e.message}})()	S:property "a" is non-configurable and can't be deleted
+Symbol.keyFor('x')	E:TypeError:"x" is not a symbol
+Symbol.keyFor(Symbol.iterator)	J:undefined
+[Symbol.for('a') === Symbol.for('a'), Symbol.for('a') === Symbol('a'), Symbol.for().description, String(Symbol.for()), Symbol('').description, Symbol().description, Symbol(undefined).description, Symbol(null).description]	J:[true,false,"undefined","Symbol(undefined)","",null,null,"null"]
+[typeof Object(Symbol('q')), Object(Symbol('q')).description, Object(Symbol('q')).toString(), Object(Symbol('q')).valueOf().toString(), Symbol.prototype.valueOf.call(Symbol.iterator) === Symbol.iterator]	J:["object","q","Symbol(q)","Symbol(q)",true]
+Symbol.prototype.valueOf.call({})	E:TypeError:valueOf method called on incompatible Object
+Object.getOwnPropertyDescriptor(Symbol.prototype, 'description').get.call({})	E:TypeError:get description method called on incompatible Object
+Symbol.prototype.toString.call(1)	E:TypeError:toString method called on incompatible number
+Symbol.prototype[Symbol.toPrimitive].call(1)	E:TypeError:[Symbol.toPrimitive] method called on incompatible number
+[typeof Symbol.prototype[Symbol.toPrimitive], Symbol.prototype[Symbol.toPrimitive].name, Symbol.prototype[Symbol.toPrimitive].length, Object.getOwnPropertyNames(Symbol.prototype).sort().join()]	J:["function","[Symbol.toPrimitive]",1,"constructor,description,toString,valueOf"]
+Object.getOwnPropertySymbols(Symbol.prototype).map(String).join()	S:Symbol(Symbol.toPrimitive),Symbol(Symbol.toStringTag)
+[Symbol.hasInstance, Symbol.isConcatSpreadable, Symbol.match, Symbol.matchAll, Symbol.replace, Symbol.search, Symbol.species, Symbol.split, Symbol.toPrimitive, Symbol.unscopables, Symbol.asyncIterator].map(String).join()	S:Symbol(Symbol.hasInstance),Symbol(Symbol.isConcatSpreadable),Symbol(Symbol.match),Symbol(Symbol.matchAll),Symbol(Symbol.replace),Symbol(Symbol.search),Symbol(Symbol.species),Symbol(Symbol.split),Symbol(Symbol.toPrimitive),Symbol(Symbol.unscopables),Symbol(Symbol.asyncIterator)
+Symbol.length + ' ' + Symbol.name	S:0 Symbol
+new Symbol()	E:TypeError:Symbol is not a constructor
+Symbol() + ''	E:TypeError:can't convert symbol to string
+`${Symbol()}`	E:TypeError:can't convert symbol to string
+Symbol() * 1	E:TypeError:can't convert symbol to number
+Object.getOwnPropertyNames(Function.prototype).join()	S:toString,apply,call,bind,arguments,caller,constructor,length,name
+Object.getOwnPropertyNames(Math.abs).join()	S:length,name
+Object.getOwnPropertyNames(class { constructor(a){} }).join()	S:prototype,length,name
+(class A { static x(){} }).length	J:0
+Object.getOwnPropertySymbols(Function.prototype).map(String).join()	S:Symbol(Symbol.hasInstance)
+(function(){}).caller	J:null
+(function*(){}).caller	E:TypeError:'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them
+(function(){"use strict"}).caller	E:TypeError:'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them
+(function*(){}).arguments	E:TypeError:'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them
+(()=>1).caller	E:TypeError:'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them
+[typeof Object.getOwnPropertyDescriptor(Function.prototype,'caller').get, Function.prototype.length, JSON.stringify(Function.prototype.name), Function.prototype[Symbol.hasInstance].name, Function.prototype[Symbol.hasInstance].call(Array, [])]	J:["function",0,"\\"\\"","[Symbol.hasInstance]",true]
+Object.getOwnPropertyDescriptor(Function.prototype, Symbol.hasInstance).writable	J:false
+(()=>{var f=function(){}; f.prototype=Array.prototype; return [] instanceof f})()	J:true
+(()=>{var o={[Symbol.hasInstance](v){return v===1}}; return 1 instanceof o})()	J:true
+(()=>{var o={[Symbol.toPrimitive](h){return h}}; return [`${o}`, o+'', +{[Symbol.toPrimitive](){return 4}}].join()})()	S:string,default,4
+Object.setPrototypeOf(Object.preventExtensions({}), Array.prototype)	E:TypeError:can't set prototype of this object
+(()=>{var p={}; var o=Object.preventExtensions(Object.create(p)); return Object.setPrototypeOf(o, p) === o})()	J:true
+[({}).__proto__ === Object.prototype, ({__proto__: Array.prototype}) instanceof Array, Object.getPrototypeOf({__proto__: null}), JSON.stringify(Object.keys({__proto__: 1, a: 2}))]	J:[true,true,null,"[\\"a\\"]"]
+(()=>{var o={}; o.__proto__ = Array.prototype; return o instanceof Array})()	J:true
+(()=>{var o=Object.preventExtensions({}); o.__proto__ = Array.prototype})()	E:TypeError:can't set prototype of this object
+Object.getOwnPropertyDescriptor(Object.prototype, '__proto__').set.name	S:set __proto__
+Object.setPrototypeOf(1, null)	J:1
+Object.setPrototypeOf({}, 1)	E:TypeError:Object.setPrototypeOf: expected an object or null, got number
+Object.setPrototypeOf(null, {})	E:TypeError:can't convert null to object
