@@ -1065,6 +1065,10 @@ fn errors(it: &mut Interp, g: &ObjRef) -> R<()> {
     it.define(&proto, "name", Prop::hidden(Val::str("Error")))?;
     it.define(&proto, "message", Prop::hidden(Val::str("")))?;
     method(it, &proto, "toString", error_to_string, 0)?;
+    let get = it.native("", stack_getter, 0)?;
+    let set = it.native("", stack_setter, 1)?;
+    let p = Prop { getter: Some(get), setter: Some(set), ..Prop::hidden(Val::Undef) };
+    it.define(&proto, "stack", p)?;
     it.realm.errors.push(("Error".into(), base.clone()));
     for (name, f) in ERRORS {
         let p = it.alloc(Some(proto.clone()), Kind::Ordinary)?;
@@ -1107,6 +1111,18 @@ fn error_ctor(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 /// An error with `proto` from the arguments of its constructor.
 fn make_error_object(it: &mut Interp, proto: Option<ObjRef>, a: &[Val]) -> R {
     let o = it.alloc(proto, Kind::Error)?;
+    it.place_error(&o)?;
+    // SpiderMonkey's `Error(message, fileName, lineNumber)`: a second argument that is not an
+    // options object is the file, a third the line, and then the column is 1 (measured).
+    if a.len() > 1 && !matches!(a[1], Val::Obj(_)) {
+        let f = it.str_of(&a[1])?;
+        it.define(&o, "fileName", Prop::hidden(Val::Str(f)))?;
+    }
+    if a.len() > 2 && !matches!(a[1], Val::Obj(_)) {
+        let n = it.number_of(&a[2])?;
+        it.define(&o, "lineNumber", Prop::hidden(Val::Num(f64::from(number::to_int32(n)))))?;
+        it.define(&o, "columnNumber", Prop::hidden(Val::Num(1.0)))?;
+    }
     if !matches!(arg(a, 0), Val::Undef) {
         let m = it.str_of(&arg(a, 0))?;
         it.define(&o, "message", Prop::hidden(Val::Str(m)))?;
@@ -1117,8 +1133,23 @@ fn make_error_object(it: &mut Interp, proto: Option<ObjRef>, a: &[Val]) -> R {
         let c = it.get(&Val::Obj(opts), "cause")?;
         it.define(&o, "cause", Prop::hidden(c))?;
     }
-    it.place_error(&o)?;
     Ok(Val::Obj(o))
+}
+
+/// `Error.prototype.stack`: the stack of the error, kept when it was made.
+fn stack_getter(_: &mut Interp, this: &Val, _: &[Val]) -> R {
+    Ok(match this {
+        Val::Obj(o) => o.borrow().get_own("@@stack").map_or(Val::Undef, |p| p.value.clone()),
+        _ => Val::Undef,
+    })
+}
+
+/// Setting `stack` gives the error its own `stack`.
+fn stack_setter(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    if let Val::Obj(o) = this {
+        it.define(o, "stack", Prop::hidden(arg(a, 0)))?;
+    }
+    Ok(Val::Undef)
 }
 
 fn error_to_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {

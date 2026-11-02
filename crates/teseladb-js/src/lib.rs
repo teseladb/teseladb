@@ -73,6 +73,8 @@ pub enum JsError {
     Thrown {
         /// The message.
         message: String,
+        /// The file an error names (`wasm:function`, or what `Error(message, file)` gave).
+        file: String,
         /// The line, from 1.
         line: u32,
         /// The column, from 1, with what RefDb puts before the code on the first line.
@@ -328,6 +330,7 @@ pub(crate) fn error_of(it: &mut Interp, c: Ctrl) -> JsError {
                 let (line, col) = it.shown(it.thrown_at);
                 return JsError::Thrown {
                     message: format!("uncaught exception: {text}"),
+                    file: interp::ERROR_FILE.into(),
                     line,
                     col,
                     stack: None,
@@ -339,13 +342,20 @@ pub(crate) fn error_of(it: &mut Interp, c: Ctrl) -> JsError {
             };
             let message =
                 read("message").filter(|m| !m.is_empty()).unwrap_or_else(|| "none".into());
+            let file = read("fileName").unwrap_or_else(|| interp::ERROR_FILE.into());
             let line = read("lineNumber").and_then(|l| l.parse().ok()).unwrap_or(0);
             let col = read("columnNumber").and_then(|c| c.parse().ok()).unwrap_or(0);
-            JsError::Thrown { message, line, col, stack: read("stack") }
+            JsError::Thrown { message, file, line, col, stack: read("stack") }
         }
         Ctrl::Return(_) | Ctrl::Break(_) | Ctrl::Continue(_) | Ctrl::Suspend => {
             let (line, col) = it.shown(it.pos);
-            JsError::Thrown { message: "unexpected control flow".into(), line, col, stack: None }
+            JsError::Thrown {
+                message: "unexpected control flow".into(),
+                file: interp::ERROR_FILE.into(),
+                line,
+                col,
+                stack: None,
+            }
         }
     }
 }

@@ -632,3 +632,14 @@ JSON.parse('{"a": 1.0, "b": [true, "x"]}', function(k, v, ctx) { return v === nu
 encodeURIComponent('\uD800')	E:URIError:malformed URI sequence
 decodeURIComponent('%E0%A4%A')	E:URIError:malformed URI sequence
 decodeURI('%C0%80')	E:URIError:malformed URI sequence
+(()=>{ var e = Error('m', 'f.js', 7); return [e.message, e.fileName, e.lineNumber, e.columnNumber].join('|') })()	S:m|f.js|7|1
+(()=>{ var e = new TypeError('m', 'f.js', 7, 9); return [e.message, e.fileName, e.lineNumber, e.columnNumber].join('|') })()	S:m|f.js|7|1
+(()=>{ var e = Error('m', 0, [1,2]); return [e.fileName, e.lineNumber, e.columnNumber].join('|') })()	S:0|0|1
+(()=>{ var e = Error('m', {cause: 1}); return [e.fileName, e.lineNumber, e.columnNumber, e.cause].join('|') })()	S:wasm:function|1|51|1
+(()=>{ var e = Error('m', 'x.js'); return [e.fileName, e.lineNumber, e.columnNumber].join('|') })()	S:x.js|1|51
+(()=>{ var e = Error('m', undefined, 3); return [e.fileName, e.lineNumber, e.columnNumber].join('|') })()	S:undefined|3|1
+(()=>{ var e = Error('m', 'a', '12'); return [typeof e.lineNumber, e.lineNumber].join('|') })()	S:number|12
+(()=>{ var e = Error('m', 'a', -1); return [e.lineNumber].join('|') })()	S:-1
+(()=>{ var e = Error('m', 'a', 3.7); return [e.lineNumber].join('|') })()	S:3
+JSON.stringify(Object.getOwnPropertyNames(Error('m', 'a', 2)))	S:["fileName","lineNumber","columnNumber","message"]
+[1,2].map(Error).map(e => e.fileName + ':' + e.lineNumber).join()	S:0:0,1:0

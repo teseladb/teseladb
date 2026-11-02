@@ -29,8 +29,8 @@ fn unescape(s: &str) -> String {
 fn ours(body: &str) -> String {
     let r = Program::compile(body).and_then(|p| p.call(None, &[], &mut JsCtx::default()));
     match r {
-        Err(JsError::Thrown { message, line, col, stack }) => {
-            format!("{message}|wasm:function|{line}|{col}|{}", stack.unwrap_or_else(|| "-".into()))
+        Err(JsError::Thrown { message, file, line, col, stack }) => {
+            format!("{message}|{file}|{line}|{col}|{}", stack.unwrap_or_else(|| "-".into()))
         }
         Err(JsError::OutOfMemory) => "uncaught exception: out of memory|none|0|1|-".into(),
         other => format!("{other:?}"),

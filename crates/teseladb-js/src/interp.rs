@@ -423,7 +423,8 @@ impl<'c> Interp<'c> {
             ("fileName", Val::str(ERROR_FILE)),
             ("lineNumber", Val::Num(f64::from(l))),
             ("columnNumber", Val::Num(f64::from(c))),
-            ("stack", Val::Str(stack.into())),
+            // Read through the accessor `Error.prototype.stack`, as in SpiderMonkey.
+            ("@@stack", Val::Str(stack.into())),
         ] {
             b.props.retain(|(x, _)| &**x != k);
             b.props.push((k.into(), Prop::hidden(v)));
