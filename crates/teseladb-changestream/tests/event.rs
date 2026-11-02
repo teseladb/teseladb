@@ -173,6 +173,7 @@ fn an_event_comes_from_its_change() {
             replace: false,
             delete: false,
             doc: None,
+            moved: None,
         }),
     };
     let ns = Namespace { db: "shop".into(), coll: Some("orders".into()) };

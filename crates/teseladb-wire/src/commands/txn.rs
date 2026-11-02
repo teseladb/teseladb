@@ -468,7 +468,7 @@ impl TxnBackend<'_> {
     ) -> Result<Vec<(Vec<u8>, IntentOp)>, CommandError> {
         use teseladb_changestream::meta::{ChangeMeta, DocWrite, TxnInfo, doc_of_meta, history};
         let is_history = |op: &IntentOp| matches!(op, IntentOp::Put { value_type, .. } if *value_type == teseladb_range::HISTORY_VALUE);
-        let (mut updates, mut replaced) = (Vec::new(), Vec::new());
+        let (mut updates, mut replaced, mut moved) = (Vec::new(), Vec::new(), Vec::new());
         for (key, op) in &writes {
             if let (IntentOp::Put { value, .. }, true) = (op, is_history(op)) {
                 let meta = ChangeMeta::decode(value).map_err(|e| {
@@ -480,6 +480,9 @@ impl TxnBackend<'_> {
                 }
                 if meta.replace {
                     replaced.push(doc.to_vec());
+                }
+                if let Some(m) = meta.moved {
+                    moved.push((doc.to_vec(), m));
                 }
             }
         }
@@ -509,7 +512,8 @@ impl TxnBackend<'_> {
                     IntentOp::Delete => None,
                 };
                 let delete = doc.is_none();
-                DocWrite { key: key.clone(), update, replace, delete, doc }
+                let moved = moved.iter().find(|(k, _)| k == key).map(|(_, m)| m.clone());
+                DocWrite { key: key.clone(), update, replace, delete, doc, moved }
             })
             .collect();
         let (lsid, txn_number) = self.run.coord.session();

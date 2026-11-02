@@ -9,9 +9,17 @@
 //! 9.0.4 gives one event per write (measured on 01-11).
 //!
 //! Its bytes: format (2), flags (bit 0 transaction, bit 1 description, bit 2 replacement, bit 3
-//! deletion, bit 4 document), position (4 bytes, big-endian); with a transaction its identifier
-//! (16), `lsid.id` (16), `lsid.uid` (32) and `txnNumber` (8, big-endian); with a description its
-//! length (4, big-endian) and its BSON; with a document, the document's bytes to the end.
+//! deletion, bit 4 document, bit 5 moved here, bit 6 moved away), position (4 bytes,
+//! big-endian); with a transaction its identifier (16), `lsid.id` (16), `lsid.uid` (32) and
+//! `txnNumber` (8, big-endian); with a description its length (4, big-endian) and its BSON; for a
+//! document that moved here, the length (4, big-endian) and the bytes of the key it left; with a
+//! document, the document's bytes to the end.
+//!
+//! A document moves when an update changes its shard key (018 FR-001): its key is the shard key
+//! and its `_id`, so the write deletes it at the old key and puts it at the new one. A `refrouter`
+//! 9.0.4 gives one `update` (or `replace`) event for it, keyed by the document before the change
+//! (measured on 02-11-2026): the meta at the new key says where it came from, and the meta of the
+//! deletion at the old key that it gives no event.
 
 use teseladb_bson::{BsonError, Document, RawDoc, Value};
 
@@ -29,6 +37,10 @@ const REPLACE: u8 = 4;
 const DELETE: u8 = 8;
 /// Flag of a meta with the document the write left.
 const HAS_DOC: u8 = 16;
+/// Flag of the meta of a document that moved here from another key.
+const MOVED_FROM: u8 = 32;
+/// Flag of the meta of the deletion of a document that moved to another key.
+const MOVED_AWAY: u8 = 64;
 /// Byte that follows a document's key in the key of its metas.
 pub const META_SUFFIX: u8 = 0;
 /// Bytes after a document's key in the key of a meta: the suffix and the position.
@@ -68,6 +80,17 @@ pub struct ChangeMeta {
     /// The document the write left, kept inside a transaction: a later write of the transaction
     /// replaces its version.
     pub doc: Option<Vec<u8>>,
+    /// The document moved: here from another key, or away from this one.
+    pub moved: Option<Moved>,
+}
+
+/// How a document's key changed with its shard key (018 FR-001).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Moved {
+    /// It came from this key: its event is that of the write, keyed by the version there.
+    From(Vec<u8>),
+    /// It left this key: the deletion gives no event.
+    Away,
 }
 
 /// Why a stored meta does not read back.
@@ -98,7 +121,12 @@ impl ChangeMeta {
             + u8::from(self.update.is_some()) * HAS_UPDATE
             + u8::from(self.replace) * REPLACE
             + u8::from(self.delete) * DELETE
-            + u8::from(self.doc.is_some()) * HAS_DOC;
+            + u8::from(self.doc.is_some()) * HAS_DOC
+            + match self.moved {
+                Some(Moved::From(_)) => MOVED_FROM,
+                Some(Moved::Away) => MOVED_AWAY,
+                None => 0,
+            };
         let mut out = vec![META_FORMAT, flags];
         out.extend_from_slice(&self.op.to_be_bytes());
         if let Some(t) = &self.txn {
@@ -113,6 +141,11 @@ impl ChangeMeta {
             out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
             out.extend(bytes);
         }
+        if let Some(Moved::From(key)) = &self.moved {
+            // A key is far below 4 GiB.
+            out.extend_from_slice(&(key.len() as u32).to_be_bytes());
+            out.extend_from_slice(key);
+        }
         if let Some(doc) = &self.doc {
             out.extend_from_slice(doc);
         }
@@ -125,7 +158,8 @@ impl ChangeMeta {
         if format != META_FORMAT {
             return Err(MetaError::Format(format));
         }
-        if flags & !(HAS_TXN | HAS_UPDATE | REPLACE | DELETE | HAS_DOC) != 0 {
+        let known = HAS_TXN | HAS_UPDATE | REPLACE | DELETE | HAS_DOC | MOVED_FROM | MOVED_AWAY;
+        if flags & !known != 0 || flags & (MOVED_FROM | MOVED_AWAY) == MOVED_FROM | MOVED_AWAY {
             return Err(MetaError::Flags(flags));
         }
         let op = u32::from_be_bytes(take::<4>(&mut b)?);
@@ -151,6 +185,14 @@ impl ChangeMeta {
         } else {
             None
         };
+        let moved = if flags & MOVED_FROM != 0 {
+            let len = u32::from_be_bytes(take::<4>(&mut b)?) as usize;
+            let (key, rest) = b.split_at_checked(len).ok_or(MetaError::Truncated)?;
+            b = rest;
+            Some(Moved::From(key.to_vec()))
+        } else {
+            (flags & MOVED_AWAY != 0).then_some(Moved::Away)
+        };
         let doc = if flags & HAS_DOC != 0 {
             Some(b.to_vec())
         } else if b.is_empty() {
@@ -159,7 +201,7 @@ impl ChangeMeta {
             return Err(MetaError::Trailing);
         };
         let (replace, delete) = (flags & REPLACE != 0, flags & DELETE != 0);
-        Ok(ChangeMeta { txn, op, update, replace, delete, doc })
+        Ok(ChangeMeta { txn, op, update, replace, delete, doc, moved })
     }
 }
 
@@ -193,6 +235,8 @@ pub struct DocWrite {
     pub delete: bool,
     /// The document it left, kept inside a transaction.
     pub doc: Option<Vec<u8>>,
+    /// The document moved with its shard key ([`Moved`]).
+    pub moved: Option<Moved>,
 }
 
 /// The metas of the writes `writes` (in the write's order), in a transaction with its next
@@ -202,7 +246,7 @@ pub fn history(writes: &[DocWrite], txn: Option<(&TxnInfo, u32)>) -> Vec<(Vec<u8
     let first = txn.map_or(0, |(_, n)| n);
     let mut out = Vec::new();
     for (op, w) in (first..).zip(writes) {
-        if txn.is_none() && op == 0 && w.update.is_none() && !w.replace {
+        if txn.is_none() && op == 0 && w.update.is_none() && !w.replace && w.moved.is_none() {
             continue;
         }
         let meta = ChangeMeta {
@@ -212,6 +256,7 @@ pub fn history(writes: &[DocWrite], txn: Option<(&TxnInfo, u32)>) -> Vec<(Vec<u8
             replace: w.replace,
             delete: w.delete,
             doc: w.doc.clone(),
+            moved: w.moved.clone(),
         };
         out.push((meta_key(&w.key, op), meta));
     }

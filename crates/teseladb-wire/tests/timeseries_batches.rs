@@ -266,6 +266,21 @@ fn one_insert_past_a_bucket_count_fills_two_buckets() {
     assert_eq!(counters(&mut m, "s", &COUNTED), vec![2, 2, 2, 0, 1, 1005]);
 }
 
+/// The command sends a thousand measurements at most in each write, so a bucket stops by its
+/// count inside one write only when it held some already: it takes 999 of the thousand and the
+/// last one opens the next bucket.
+#[test]
+fn a_bucket_with_one_measurement_stops_by_count_inside_the_next_write() {
+    let mut m = Mem::new();
+    series(&mut m, "c", false);
+    let one = [format!(r#"{{"t":{},"m":1,"v":0}}"#, date(T0))];
+    assert_eq!(insert(&mut m, "c", &one, true).0, 1);
+    let docs: Vec<String> =
+        (1..=1000).map(|i| format!(r#"{{"t":{},"m":1,"v":{i}}}"#, date(T0 + i))).collect();
+    assert_eq!(insert(&mut m, "c", &docs, true).0, 1000);
+    assert_eq!(counters(&mut m, "c", &COUNTED), vec![2, 3, 2, 1, 1, 1001]);
+}
+
 #[test]
 fn a_retried_insert_commits_nothing_again() {
     let mut m = Mem::new();
