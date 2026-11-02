@@ -1,6 +1,8 @@
 //! The executor behind the REST API (019 FR-005, research R1): each command a route builds runs
 //! through [`dispatch_with`], the same path as a command of the wire protocol, on a connection
 //! that carries the request's credential, so authorization, semantics and errors are the same.
+//! A request for a cursor another node opened goes to that node with the caller's credential
+//! ([`Forwarded`], 019 FR-008).
 
 use std::thread;
 use std::time::Duration;
@@ -14,6 +16,8 @@ use teseladb_wire::dispatch::{Action, dispatch_with};
 use teseladb_wire::error::{CommandError, INTERNAL_ERROR};
 use teseladb_wire::msg::{Header, opcode};
 
+use teseladb_types::{DecodeError, Decoder, Encoder};
+
 use crate::backend::{NodeHandle, ServerBackend};
 use crate::client_listener::NodeState;
 use crate::http_listener::Caller;
@@ -24,6 +28,8 @@ pub const BEARER_CHALLENGE: &str = "Bearer realm=\"teseladb\"";
 /// The executor of one request on the node.
 pub struct NodeExecutor<'a> {
     conn: Connection,
+    /// The REFDB-X509 user of the caller's certificate, which a forwarded request carries.
+    x509_user: Option<String>,
     backend: ServerBackend,
     shared: std::sync::Arc<Shared>,
     state: &'a dyn NodeState,
@@ -44,6 +50,7 @@ impl<'a> NodeExecutor<'a> {
             std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), 0u8);
         NodeExecutor {
             conn: Connection::new(0),
+            x509_user: None,
             backend: ServerBackend::new(handle.clone(), seed),
             shared: handle.sessions.clone(),
             state,
@@ -59,28 +66,49 @@ fn unauthenticated() -> Response {
     r
 }
 
-/// Authenticates the request of `caller` on `exec`'s connection: without `auth` every request
+/// Who sent a request, as the executor needs it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Credential {
+    /// The client's address.
+    pub peer: String,
+    /// The REFDB-X509 user of its certificate, if it sent one.
+    pub x509_user: Option<String>,
+}
+
+impl Credential {
+    /// The credential of `caller`.
+    #[must_use]
+    pub fn of(caller: &Caller) -> Credential {
+        Credential {
+            peer: caller.peer.to_string(),
+            x509_user: caller.certificates.first().map(|c| c.subject.x509_user_name()),
+        }
+    }
+}
+
+/// Authenticates the request of `who` on `exec`'s connection: without `auth` every request
 /// runs, as on a node started with `--insecure`; with it, the client certificate authenticates
 /// as REFDB-X509 (013 FR-007). A request with no credential, or one that does not
 /// authenticate, gets `401` with `WWW-Authenticate`.
 pub fn authenticate(
     exec: &mut NodeExecutor<'_>,
     request: &Request,
-    caller: &Caller,
+    who: &Credential,
     auth: bool,
 ) -> Result<(), Response> {
     let conn = &mut exec.conn;
-    conn.peer = Some(caller.peer.to_string());
+    conn.peer = Some(who.peer.clone());
     conn.auth.client_addr = conn.peer.clone();
     conn.auth.required = auth;
+    exec.x509_user.clone_from(&who.x509_user);
     if !auth {
         return Ok(());
     }
     if header(request, "Authorization").is_some() {
         return Err(unauthenticated());
     }
-    let Some(leaf) = caller.certificates.first() else { return Err(unauthenticated()) };
-    conn.auth.peer_user = Some(leaf.subject.x509_user_name());
+    let Some(user) = &who.x509_user else { return Err(unauthenticated()) };
+    exec.conn.auth.peer_user = Some(user.clone());
     let command =
         teseladb_bson::Document::new().with("authenticate", 1).with("mechanism", "REFDB-X509");
     let reply = exec.run("$external", command);
@@ -88,6 +116,79 @@ pub fn authenticate(
         Some(teseladb_bson::Value::Double(x)) if *x == 1.0 => Ok(()),
         _ => Err(unauthenticated()),
     }
+}
+
+/// A request forwarded to the node that opened its cursor: the caller and the request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Forwarded {
+    /// The caller.
+    pub who: Credential,
+    /// The request.
+    pub request: Request,
+}
+
+impl Forwarded {
+    /// Its encoding.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut e = Encoder::new();
+        e.str(&self.who.peer);
+        match &self.who.x509_user {
+            Some(u) => e.bool(true).str(u),
+            None => e.bool(false),
+        };
+        e.str(&self.request.method).str(&self.request.target);
+        e.u32(self.request.headers.len() as u32);
+        for (k, v) in &self.request.headers {
+            e.str(k).str(v);
+        }
+        e.bytes(&self.request.body);
+        e.finish()
+    }
+
+    /// Reads [`Forwarded::encode`].
+    pub fn decode(b: &[u8]) -> Result<Forwarded, DecodeError> {
+        let mut d = Decoder::new(b);
+        let peer = d.str()?.to_owned();
+        let x509_user = if d.bool()? { Some(d.str()?.to_owned()) } else { None };
+        let method = d.str()?.to_owned();
+        let target = d.str()?.to_owned();
+        let n = d.u32()?;
+        let mut headers = Vec::new();
+        for _ in 0..n {
+            headers.push((d.str()?.to_owned(), d.str()?.to_owned()));
+        }
+        let body = d.bytes()?.to_vec();
+        d.finish()?;
+        let request = Request { method, target, headers, body };
+        Ok(Forwarded { who: Credential { peer, x509_user }, request })
+    }
+}
+
+/// The encoding of an answer to a forwarded request.
+#[must_use]
+pub fn encode_response(r: &Response) -> Vec<u8> {
+    let mut e = Encoder::new();
+    e.u16(r.status).u32(r.headers.len() as u32);
+    for (k, v) in &r.headers {
+        e.str(k).str(v);
+    }
+    e.bytes(&r.body);
+    e.finish()
+}
+
+/// Reads [`encode_response`].
+pub fn decode_response(b: &[u8]) -> Result<Response, DecodeError> {
+    let mut d = Decoder::new(b);
+    let status = d.u16()?;
+    let n = d.u32()?;
+    let mut headers = Vec::new();
+    for _ in 0..n {
+        headers.push((d.str()?.to_owned(), d.str()?.to_owned()));
+    }
+    let body = d.bytes()?.to_vec();
+    d.finish()?;
+    Ok(Response { status, headers, body })
 }
 
 impl Executor for NodeExecutor<'_> {
@@ -136,7 +237,13 @@ impl Executor for NodeExecutor<'_> {
         new_object_id(&mut self.backend, &self.shared)
     }
 
-    fn forward(&mut self, _node: u64, _request: &Request) -> Option<Response> {
-        None
+    fn forward(&mut self, node: u64, request: &Request) -> Option<Response> {
+        let who = Credential {
+            peer: self.conn.peer.clone().unwrap_or_default(),
+            x509_user: self.x509_user.clone(),
+        };
+        let body = Forwarded { who, request: request.clone() }.encode();
+        let answer = self.backend.forward_http(node, body)?;
+        decode_response(&answer).ok()
     }
 }

@@ -39,17 +39,21 @@ fn call(addr: SocketAddr, method: &str, target: &str, body: &str) -> (u16, Docum
     (r.status, doc, r)
 }
 
-fn start(client: ClientConfig) -> Node<MemDisk> {
+fn start_joining(client: ClientConfig, join: Vec<String>) -> Node<MemDisk> {
     let http = HttpPortConfig {
         addrs: vec![SocketAddr::from(([127, 0, 0, 1], 0))],
         tls: None,
         settings: Settings::default(),
     };
-    let base = config(Vec::new());
+    let base = config(join);
     let cfg = NodeConfig { http: Some(http), client: Some(client), ..base };
     let node = Node::start(cfg, || Ok(MemDisk::new()), None).unwrap();
     assert!(node.wait_ready(READY));
     node
+}
+
+fn start(client: ClientConfig) -> Node<MemDisk> {
+    start_joining(client, Vec::new())
 }
 
 fn plain_client() -> ClientConfig {
@@ -182,4 +186,48 @@ fn a_node_with_authentication_refuses_requests_without_a_credential() {
     // `/healthz` needs none.
     assert_eq!(call(at, "GET", "/healthz", "").0, 200);
     drop(node.stop());
+}
+
+#[test]
+fn any_node_of_three_follows_a_cursor_another_opened() {
+    let first = start(plain_client());
+    let seed = vec![first.peer_addr().to_string()];
+    let others: Vec<Node<MemDisk>> =
+        (0..2).map(|_| start_joining(plain_client(), seed.clone())).collect();
+    let nodes: Vec<&Node<MemDisk>> = std::iter::once(&first).chain(others.iter()).collect();
+    let at: Vec<SocketAddr> = nodes.iter().map(|n| n.http_addrs()[0]).collect();
+    let items: Vec<String> = (0..30).map(|k| format!("{{\"_id\":{k}}}")).collect();
+    let body = format!("{{\"documents\":[{}]}}", items.join(","));
+    let (st, d, _) = call(at[0], "POST", "/v1/databases/db/collections/c/insertMany", &body);
+    assert_eq!(st, 200, "{d:?}");
+    // The cursor opens on node 0; nodes 1 and 2 take its batches in turn, then node 1 kills a
+    // second one.
+    let find = r#"{"batchSize":10,"sort":{"_id":1}}"#;
+    let (st, d, _) = call(at[0], "POST", "/v1/databases/db/collections/c/find", find);
+    assert_eq!(st, 200, "{d:?}");
+    let mut c = cursor(&d);
+    let mut ids: Vec<Value> = match c.get("firstBatch") {
+        Some(Value::Array(b)) => b.clone(),
+        _ => panic!("{c:?}"),
+    };
+    let mut k = 1;
+    while let Some(Value::String(next)) = c.get("next").cloned() {
+        let (st, d, _) = call(at[k], "GET", &next, "");
+        assert_eq!(st, 200, "node {k}: {d:?}");
+        c = cursor(&d);
+        if let Some(Value::Array(b)) = c.get("nextBatch") {
+            ids.extend(b.iter().cloned());
+        }
+        k = 1 + k % 2;
+    }
+    let want: Vec<Value> =
+        (0..30).map(|k| Value::Document(Document::new().with("_id", k))).collect();
+    assert_eq!(ids, want);
+    let (_, d, _) = call(at[0], "POST", "/v1/databases/db/collections/c/find", find);
+    let Some(Value::String(next)) = cursor(&d).get("next").cloned() else { panic!("{d:?}") };
+    assert_eq!(call(at[1], "DELETE", &next, "").0, 200);
+    let (st, d, _) = call(at[2], "GET", &next, "");
+    assert_eq!((st, d.get("code")), (404, Some(&Value::Int32(43))), "{d:?}");
+    drop(others.into_iter().map(Node::stop).collect::<Vec<_>>());
+    drop(first.stop());
 }

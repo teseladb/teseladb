@@ -15,7 +15,7 @@ use teseladb_wire::commands::http_parameters::{HTTP_OPTIONS, HttpOptions, http_o
 use crate::backend::{NodeHandle, ServerBackend};
 use crate::client_listener::NodeState;
 use crate::http_listener::{Caller, HttpService, Reply};
-use crate::rest_executor::{NodeExecutor, authenticate};
+use crate::rest_executor::{Credential, Forwarded, NodeExecutor, authenticate, encode_response};
 
 use teseladb_rest::routes::BASE;
 
@@ -55,6 +55,27 @@ fn not_found() -> Reply {
     Reply::Whole(Response::problem(404))
 }
 
+impl NodeHttp {
+    /// The REST answer to `request` of `who`.
+    fn rest(&self, request: &Request, who: &Credential) -> Response {
+        let mut exec = NodeExecutor::new(&self.handle, self.state.as_ref());
+        if let Err(r) = authenticate(&mut exec, request, who, self.auth) {
+            return r;
+        }
+        teseladb_rest::api::handle(request, &mut exec)
+    }
+
+    /// The answer, encoded, to a request another node forwarded ([`Forwarded`]); an empty
+    /// answer when it does not read.
+    #[must_use]
+    pub fn answer_forwarded(&self, body: &[u8]) -> Vec<u8> {
+        match Forwarded::decode(body) {
+            Ok(f) => encode_response(&self.rest(&f.request, &f.who)),
+            Err(_) => Vec::new(),
+        }
+    }
+}
+
 impl HttpService for NodeHttp {
     fn serve(&self, request: &Request, caller: &Caller, _: &AtomicBool) -> Reply {
         let path = request.target.split('?').next().unwrap_or_default();
@@ -65,11 +86,7 @@ impl HttpService for NodeHttp {
         if path != BASE && !path.starts_with(&format!("{BASE}/")) {
             return not_found();
         }
-        let mut exec = NodeExecutor::new(&self.handle, self.state.as_ref());
-        if let Err(r) = authenticate(&mut exec, request, caller, self.auth) {
-            return Reply::Whole(r);
-        }
-        Reply::Whole(teseladb_rest::api::handle(request, &mut exec))
+        Reply::Whole(self.rest(request, &Credential::of(caller)))
     }
 
     fn route(&self, request: &Request) -> String {

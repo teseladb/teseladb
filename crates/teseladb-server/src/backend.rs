@@ -221,6 +221,21 @@ impl ServerBackend {
         Ok(rows)
     }
 
+    /// The answer of node `node` to an HTTP request forwarded to it (019 FR-008), or `None`
+    /// when it cannot be reached or has no HTTP port.
+    pub fn forward_http(&self, node: u64, body: Vec<u8>) -> Option<Vec<u8>> {
+        let until = self.until();
+        let answers = self.ask(0, |tx| NodeMsg::ForwardHttp(NodeId(node), body, tx), until)??;
+        answers.into_iter().next().filter(|a| !a.is_empty())
+    }
+
+    /// Sends node `to` the answer to the HTTP request it forwarded as its request `req`.
+    pub fn answer_http(&self, to: NodeId, req: u64, body: Vec<u8>) {
+        if let Some(core) = self.cores.first() {
+            let _ = core.send(CoreInput::App(NodeMsg::HttpAnswer(to, req, body)));
+        }
+    }
+
     fn until(&self) -> Instant {
         let own = Instant::now() + self.deadline;
         self.max_until.map_or(own, |m| m.min(own))
