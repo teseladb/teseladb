@@ -33,6 +33,7 @@ const NOT_CONVERTIBLE: [ErrorCode; 4] = [
 /// `FinalizationRegistry`), measured on a `refrouter` 9.0.4 on 02-11.
 const WASM_TRAP: ErrorCode = ErrorCode { code: 11_542_340, name: "Location11542340" };
 const MAX_TIME_MS_EXPIRED: ErrorCode = ErrorCode { code: 50, name: "MaxTimeMSExpired" };
+const INTERRUPTED: ErrorCode = ErrorCode { code: 11_601, name: "Interrupted" };
 
 /// The programs a thread keeps, at most this many texts.
 const CACHE_SIZE: usize = 256;
@@ -45,6 +46,20 @@ thread_local! {
     static FUNCTION_IDS: Cell<u64> = const { Cell::new(0) };
     /// The globals the database's `system.js` stores, for the running command.
     static STORED: RefCell<Option<Document>> = const { RefCell::new(None) };
+    /// What `killOp` raises for the operation running on this thread, one for the thread's
+    /// whole life: an operation takes it without allocating.
+    static INTERRUPT: crate::ops::Interrupt = crate::ops::Interrupt::default();
+}
+
+/// This thread's interrupt flag, which the calls of the running operation read with their
+/// deadline, so that `killOp` stops a long script (019 FR-026).
+pub(crate) fn thread_interrupt() -> crate::ops::Interrupt {
+    INTERRUPT.with(Clone::clone)
+}
+
+/// Whether `killOp` raised the running operation's flag.
+fn interrupted() -> bool {
+    INTERRUPT.with(crate::ops::Interrupt::raised)
 }
 
 /// The operators that run JavaScript.
@@ -185,9 +200,12 @@ fn run_full(
     let scope = scope.as_ref();
     let deadline = DEADLINE_MS.with(Cell::get);
     let clock = CLOCK.get().copied();
-    let passed = move || match (deadline, clock) {
-        (Some(d), Some(c)) => c() >= d,
-        _ => false,
+    let passed = move || {
+        interrupted()
+            || match (deadline, clock) {
+                (Some(d), Some(c)) => c() >= d,
+                _ => false,
+            }
     };
     let mut ctx = JsCtx {
         now_ms: NOW_MS.with(Cell::get),
@@ -207,6 +225,9 @@ fn run_full(
 /// predicate`, `Failed to invoke JS function`).
 fn runtime_error(what: &str, e: &JsError) -> MqlError {
     match e {
+        JsError::Deadline if interrupted() => {
+            MqlError::new(INTERRUPTED, "operation was interrupted")
+        }
         JsError::Deadline => MqlError::new(MAX_TIME_MS_EXPIRED, "operation exceeded time limit"),
         JsError::Trap | JsError::Unreachable => MqlError::new(WASM_TRAP, e.message()),
         JsError::NotConvertible { code, message: m } => MqlError::new(
@@ -374,4 +395,28 @@ pub(crate) fn engine() -> Rc<dyn JsEngine> {
         static ENGINE: Rc<dyn JsEngine> = Rc::new(NodeJs);
     }
     ENGINE.with(Rc::clone)
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    use super::*;
+
+    /// `killOp` raises the operation's flag: a long script stops with `Interrupted`, not with
+    /// the time limit, and the flag set before comes back.
+    #[test]
+    fn a_raised_interrupt_stops_a_script_as_interrupted() {
+        let flag = thread_interrupt();
+        let code = Value::String("function() { for (;;) {} }".into());
+        let doc = Document::new().with("a", 1).to_bytes().unwrap();
+        let raw_doc = RawDoc::from_bytes(&doc).unwrap();
+        let wrapper = Document::new().with("c", code).to_bytes().unwrap();
+        let raw = RawDoc::from_bytes(&wrapper).unwrap();
+        let c = raw.get("c").unwrap();
+        flag.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        let e = where_js(c, raw_doc).unwrap_err();
+        flag.0.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(e.code.code, 11_601, "{e:?}");
+        assert!(!interrupted());
+    }
 }

@@ -320,12 +320,8 @@ pub fn build(
             read(&p.db, d, Shape::OneDocument)
         }
         Op::PutDocument => {
-            let mut d = update(c, &Document::new(), by_id(), Value::Document(body.clone()), false);
-            if let Some(Value::Array(us)) = d.get_mut("updates")
-                && let Some(Value::Document(u)) = us.first_mut()
-            {
-                u.push("upsert", true);
-            }
+            let upsert = Document::new().with("upsert", true);
+            let d = update(c, &upsert, by_id(), Value::Document(body.clone()), false);
             write(&p.db, d, 1, false)
         }
         Op::PatchDocument => {
