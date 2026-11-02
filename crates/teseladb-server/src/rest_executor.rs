@@ -7,12 +7,16 @@
 use std::thread;
 use std::time::Duration;
 
+use teseladb_auth::apikey::ApiKey;
+use teseladb_auth::bearer::{self, Bearer};
+use teseladb_auth::users::EXTERNAL_DB;
 use teseladb_http::http1::Request;
 use teseladb_http::server::Response;
 use teseladb_rest::api::{Executor, header};
+use teseladb_wire::commands::auth;
 use teseladb_wire::commands::{Shared, lock, new_object_id};
 use teseladb_wire::connection::{Connection, Kind, Request as WireRequest};
-use teseladb_wire::dispatch::{Action, dispatch_with};
+use teseladb_wire::dispatch::{self, Action, dispatch_with};
 use teseladb_wire::error::{CommandError, INTERNAL_ERROR};
 use teseladb_wire::msg::{Header, opcode};
 
@@ -21,9 +25,6 @@ use teseladb_types::{DecodeError, Decoder, Encoder};
 use crate::backend::{NodeHandle, ServerBackend};
 use crate::client_listener::NodeState;
 use crate::http_listener::Caller;
-
-/// `WWW-Authenticate` of a request without a valid credential (RFC 6750, section 3).
-pub const BEARER_CHALLENGE: &str = "Bearer realm=\"teseladb\"";
 
 /// The executor of one request on the node.
 pub struct NodeExecutor<'a> {
@@ -67,10 +68,11 @@ impl<'a> NodeExecutor<'a> {
     }
 }
 
-/// A `401` problem with the challenge of `WWW-Authenticate`.
-fn unauthenticated() -> Response {
+/// A `401` problem with the challenge of `WWW-Authenticate`; `invalid` when a credential came
+/// and failed (RFC 6750, 3.1).
+fn unauthenticated(invalid: bool) -> Response {
     let mut r = Response::problem(401);
-    r.headers.push(("WWW-Authenticate".to_owned(), BEARER_CHALLENGE.to_owned()));
+    r.headers.push(("WWW-Authenticate".to_owned(), bearer::challenge(invalid, None)));
     r
 }
 
@@ -94,36 +96,74 @@ impl Credential {
     }
 }
 
-/// Authenticates the request of `who` on `exec`'s connection: without `auth` every request
-/// runs, as on a node started with `--insecure`; with it, the client certificate authenticates
-/// as REFDB-X509 (013 FR-007). A request with no credential, or one that does not
-/// authenticate, gets `401` with `WWW-Authenticate`.
+/// Authenticates the request of `who` on `exec`'s connection (019 FR-015): without `auth` every
+/// request runs, as on a node started with `--insecure`; with it, `Authorization: Bearer` with an
+/// API key or an OIDC access token, or else the client certificate as REFDB-X509 (013 FR-007).
+/// A request with no credential, or one that does not authenticate, gets `401` with
+/// `WWW-Authenticate`. The API key that logged in, if one did.
 pub fn authenticate(
     exec: &mut NodeExecutor<'_>,
     request: &Request,
     who: &Credential,
     auth: bool,
-) -> Result<(), Response> {
+) -> Result<Option<ApiKey>, Response> {
     let conn = &mut exec.conn;
     conn.peer = Some(who.peer.clone());
     conn.auth.client_addr = conn.peer.clone();
     conn.auth.required = auth;
     exec.x509_user.clone_from(&who.x509_user);
     if !auth {
-        return Ok(());
+        return Ok(None);
     }
-    if header(request, "Authorization").is_some() {
-        return Err(unauthenticated());
+    if let Some(value) = header(request, "Authorization") {
+        return match bearer::parse(value) {
+            Ok(Bearer::ApiKey(key)) => {
+                let shared = exec.shared.clone();
+                dispatch::login(&mut exec.conn, &mut exec.backend, &shared, |state, backend| {
+                    auth::api_key_login(state, key, backend)
+                })
+                .map(Some)
+                .map_err(|_| unauthenticated(true))
+            }
+            Ok(Bearer::Jwt(jwt)) => {
+                let payload = teseladb_bson::Document::new().with("jwt", jwt);
+                let bytes = payload.to_bytes().map_err(|_| unauthenticated(true))?;
+                let command = teseladb_bson::Document::new()
+                    .with("saslStart", 1)
+                    .with("mechanism", "REFDB-OIDC")
+                    .with("payload", teseladb_bson::Value::Binary { subtype: 0, bytes });
+                ok_reply(&exec.run(EXTERNAL_DB, command)).map(|()| None)
+            }
+            Err(_) => Err(unauthenticated(true)),
+        };
     }
-    let Some(user) = &who.x509_user else { return Err(unauthenticated()) };
+    let Some(user) = &who.x509_user else { return Err(unauthenticated(false)) };
     exec.conn.auth.peer_user = Some(user.clone());
     let command =
         teseladb_bson::Document::new().with("authenticate", 1).with("mechanism", "REFDB-X509");
-    let reply = exec.run("$external", command);
+    ok_reply(&exec.run(EXTERNAL_DB, command)).map(|()| None)
+}
+
+/// `Ok` if `reply` has `ok: 1`, else the `401` of a credential that failed.
+fn ok_reply(reply: &teseladb_bson::Document) -> Result<(), Response> {
     match reply.get("ok") {
         Some(teseladb_bson::Value::Double(x)) if *x == 1.0 => Ok(()),
-        _ => Err(unauthenticated()),
+        _ => Err(unauthenticated(true)),
     }
+}
+
+/// Moves the `lastUsedAt` of `key` (at most once a minute) on a thread of its own, so that the
+/// request does not wait for the change in Group 0.
+pub fn touch_later(exec: &mut NodeExecutor<'_>, key: ApiKey) {
+    let now =
+        i64::try_from(teseladb_wire::commands::Backend::wall_ms(&exec.backend)).unwrap_or(i64::MAX);
+    if !key.due_touch(now) {
+        return;
+    }
+    let mut backend = exec.backend.fresh();
+    let _ = thread::Builder::new().name("apikey-touch".into()).spawn(move || {
+        let _ = teseladb_wire::commands::api_keys::touch(&mut backend, &key);
+    });
 }
 
 /// A request forwarded to the node that opened its cursor: the caller and the request.

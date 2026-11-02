@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 
 pub mod admin;
+pub mod admin_apikeys;
 pub mod admin_http;
 pub mod admin_tenants;
 pub mod at_rest;

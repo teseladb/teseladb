@@ -948,6 +948,15 @@ impl NodeLogic {
                 };
                 let _ = reply.send(a);
             }
+            CatalogReq::PrincipalById { kind, id } => {
+                let a = match self.group0() {
+                    Some(sm) if sm.bootstrapped() => CatalogAnswer::Principals(
+                        sm.security.get_by_id(kind, &id).map(<[u8]>::to_vec).into_iter().collect(),
+                    ),
+                    Some(_) | None => CatalogAnswer::Unavailable,
+                };
+                let _ = reply.send(a);
+            }
             CatalogReq::Principals { kind, db } => {
                 let a = match self.group0() {
                     Some(sm) if sm.bootstrapped() => CatalogAnswer::Principals(

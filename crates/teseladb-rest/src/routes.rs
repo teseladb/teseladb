@@ -78,6 +78,12 @@ pub enum Op {
     GetMore,
     /// `killCursors`.
     KillCursor,
+    /// `listApiKeys` (FR-016).
+    ListApiKeys,
+    /// `createApiKey`.
+    CreateApiKey,
+    /// `revokeApiKey`.
+    RevokeApiKey,
     /// The OpenAPI document.
     OpenApi,
 }
@@ -147,6 +153,9 @@ pub const ROUTES: &[Route] = &[
     r("POST", "/databases/{db}/command", Op::Command, "command"),
     r("GET", "/cursors/{id}", Op::GetMore, "getMore"),
     r("DELETE", "/cursors/{id}", Op::KillCursor, "killCursors"),
+    r("GET", "/apiKeys", Op::ListApiKeys, "listApiKeys"),
+    r("POST", "/apiKeys", Op::CreateApiKey, "createApiKey"),
+    r("DELETE", "/apiKeys/{id}", Op::RevokeApiKey, "revokeApiKey"),
     r("GET", "/openapi.json", Op::OpenApi, ""),
 ];
 

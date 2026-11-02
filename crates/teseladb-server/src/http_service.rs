@@ -17,7 +17,9 @@ use teseladb_wire::commands::http_parameters::{
 use crate::backend::{NodeHandle, ServerBackend};
 use crate::client_listener::NodeState;
 use crate::http_listener::{Caller, HttpService, Reply};
-use crate::rest_executor::{Credential, Forwarded, NodeExecutor, authenticate, encode_response};
+use crate::rest_executor::{
+    Credential, Forwarded, NodeExecutor, authenticate, encode_response, touch_later,
+};
 
 use teseladb_rest::routes::BASE;
 
@@ -81,7 +83,10 @@ impl NodeHttp {
             backend.unwrap_or_else(|| ServerBackend::new(self.handle.clone(), random_seed()));
         let mut exec = NodeExecutor::new(&self.handle, backend, self.state.as_ref());
         let answer = match authenticate(&mut exec, request, who, self.auth) {
-            Ok(()) => {
+            Ok(key) => {
+                if let Some(k) = key {
+                    touch_later(&mut exec, k);
+                }
                 let m = self.parameters().1;
                 let options = teseladb_mcp::server::Options {
                     read_only: m.read_only,
@@ -159,7 +164,12 @@ impl NodeHttp {
         });
         let mut exec = NodeExecutor::new(&self.handle, backend, self.state.as_ref());
         let answer = match authenticate(&mut exec, request, who, self.auth) {
-            Ok(()) => teseladb_rest::api::handle(request, &mut exec),
+            Ok(key) => {
+                if let Some(k) = key {
+                    touch_later(&mut exec, k);
+                }
+                teseladb_rest::api::handle(request, &mut exec)
+            }
             Err(r) => r,
         };
         self.backends.lock().unwrap_or_else(PoisonError::into_inner).push(exec.into_backend());

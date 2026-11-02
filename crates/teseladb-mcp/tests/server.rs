@@ -170,13 +170,7 @@ fn initialize_then_tools_in_a_session() {
         Some("7.zz"),
     );
     assert_eq!(r.status, 404);
-    post(
-        &server,
-        &mut f,
-        READ_ONLY,
-        r#"{"jsonrpc":"2.0","id":6,"method":"ping"}"#,
-        Some("8.zz"),
-    );
+    post(&server, &mut f, READ_ONLY, r#"{"jsonrpc":"2.0","id":6,"method":"ping"}"#, Some("8.zz"));
     assert_eq!(f.forwarded, vec![8]);
     let del = Request::new("DELETE", "/mcp").header(SESSION_HEADER, &sid);
     let mut random = || [0u8; 16];
@@ -220,13 +214,8 @@ fn stateless_revision_with_meta() {
         None,
     );
     assert_eq!(r.status, 404);
-    let (r, v) = post(
-        &server,
-        &mut f,
-        READ_ONLY,
-        r#"{"jsonrpc":"2.0","id":4,"method":"tools/list"}"#,
-        None,
-    );
+    let (r, v) =
+        post(&server, &mut f, READ_ONLY, r#"{"jsonrpc":"2.0","id":4,"method":"tools/list"}"#, None);
     assert_eq!((r.status, v.get("error").is_some()), (400, true));
     let (r, _) = post(&server, &mut f, READ_ONLY, "{", None);
     assert_eq!(r.status, 400);

@@ -117,6 +117,13 @@ pub struct ServerBackend {
 }
 
 impl ServerBackend {
+    /// A backend over the same node, for work on another thread, with its own random numbers.
+    #[must_use]
+    pub fn fresh(&mut self) -> ServerBackend {
+        let seed = teseladb_wire::commands::Backend::random(self);
+        ServerBackend::new(self.h.clone(), seed)
+    }
+
     /// A backend over `h`, with `seed` for its random numbers.
     pub fn new(h: NodeHandle, seed: u64) -> ServerBackend {
         let cores = h.senders.iter().map(CoreSenders::sender).collect();
@@ -1103,6 +1110,15 @@ impl Backend for ServerBackend {
         name: &str,
     ) -> Result<Option<Vec<u8>>, CommandError> {
         let req = CatalogReq::Principal { kind, db: db.to_owned(), name: name.to_owned() };
+        Ok(self.principal_read(req)?.into_iter().next())
+    }
+
+    fn principal_by_id(
+        &mut self,
+        kind: Principal,
+        id: &[u8],
+    ) -> Result<Option<Vec<u8>>, CommandError> {
+        let req = CatalogReq::PrincipalById { kind, id: id.to_vec() };
         Ok(self.principal_read(req)?.into_iter().next())
     }
 

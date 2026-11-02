@@ -417,6 +417,22 @@ pub fn build(
             let reads = READ_COMMANDS.contains(&name);
             Built { shape: Shape::Cursor, reads, ..plain(&p.db, body.clone()) }
         }
+        Op::ListApiKeys => {
+            let mut d = Document::new().with("listApiKeys", 1);
+            for f in ["user", "db"] {
+                if let Some(v) = crate::routes::query_param(query, f) {
+                    d.push(f, v);
+                }
+            }
+            plain("admin", d)
+        }
+        Op::CreateApiKey => match body.get("user") {
+            Some(Value::String(user)) => {
+                plain("admin", command("createApiKey", user.as_str(), body, &["user"]))
+            }
+            _ => return Err(CommandError::new(FAILED_TO_PARSE, "user must be a string")),
+        },
+        Op::RevokeApiKey => plain("admin", Document::new().with("revokeApiKey", p.id.as_str())),
         Op::GetMore | Op::KillCursor | Op::OpenApi => {
             return Err(CommandError::new(COMMAND_NOT_SUPPORTED, "the route builds no command"));
         }
