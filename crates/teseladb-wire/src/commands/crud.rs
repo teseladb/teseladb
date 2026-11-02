@@ -7,6 +7,7 @@
 //! A collection that does not exist is created by the first write, as in RefDb.
 
 use teseladb_bson::{Document, RawDoc, Value};
+use teseladb_changestream::meta::RetryInfo;
 use teseladb_keys::KeyBuilder;
 use teseladb_meta::catalog::{CatalogCommand, CollectionEntry, Namespace};
 use teseladb_meta::collection_types::CollectionKind;
@@ -20,7 +21,7 @@ use teseladb_session::retry::{StatementKey, TxnCheck, check_txn_number};
 use super::args::{self, missing};
 use super::index_maintenance::{IndexRule, probe, probe_requests};
 use super::mutation::{
-    Bound, DocMutation, Image, MutationResult, Rules, Stored, executor_error, executor_of,
+    Bound, DocMutation, Image, MutationResult, Rules, Send, Stored, executor_error, executor_of,
     from_mql, stored_bytes,
 };
 use super::names::{self, full};
@@ -79,6 +80,10 @@ pub struct Writer {
     /// What follows the message of a `writeConcernError`: the node it came from, as a `refrouter`
     /// names the shard (D-102).
     relayed: String,
+    /// `lsid.uid` of a retryable write: SHA-256 of the authenticated user (018 FR-009).
+    uid: [u8; 32],
+    /// The mark of the command's last statement that wrote (the next one's `prevOpTime`).
+    prev: Option<teseladb_hlc::Hlc>,
 }
 
 impl Writer {
@@ -92,6 +97,8 @@ impl Writer {
             retried: Vec::new(),
             redact: false,
             relayed: String::new(),
+            uid: [0; 32],
+            prev: None,
         }
     }
 
@@ -134,7 +141,12 @@ impl Writer {
             (None, _) => None,
         };
         let redact = lock(ctx.shared).params.redact_client_log_data;
-        Ok(Writer { wc, retry, wc_error, args: wc_args, retried: Vec::new(), redact, relayed })
+        let uid = match ctx.backend.authenticated_user() {
+            Some(u) => teseladb_hash::sha256(format!("{}@{}", u.user, u.db).as_bytes()),
+            None => teseladb_hash::sha256(b""),
+        };
+        let (retried, prev) = (Vec::new(), None);
+        Ok(Writer { wc, retry, wc_error, args: wc_args, retried, redact, relayed, uid, prev })
     }
 
     /// Runs one mutation: its statement is `stmt` within the command.
@@ -160,13 +172,22 @@ impl Writer {
             Some(_) => i64::try_from(backend.random() >> 1).unwrap_or(i64::MAX).max(1),
             None => 0,
         };
+        // Its documents' metas keep the session for their oplog entries (018 FR-009).
+        let session = self.retry.map(|(lsid, txn_number)| RetryInfo {
+            lsid,
+            uid: self.uid,
+            txn_number,
+            stmt_id: stmt,
+            prev: self.prev,
+            image: 0,
+        });
         // A write that adds a value to an index with `prepareUnique` asks for probes of it and
         // runs again with them (009 FR-004).
         let mut probed: Option<Bound> = None;
         let mut rounds = 0;
         let (op, written) = loop {
             let b = probed.as_ref().unwrap_or(bound);
-            let mutation = b.encode_with_attempt(attempt)?;
+            let mutation = b.encode_for(Send { attempt, retry: session.as_ref() })?;
             let op = WriteOp { keys: b.latch_keys(), mutation, dedup, wc };
             // A write whose index entries are in another range goes as a transaction across
             // ranges (009 FR-003); a retryable one that went that way left its result there.
@@ -182,7 +203,10 @@ impl Writer {
                     Err(e)
                         if super::cross_range::crosses(&e) || super::cross_range::too_large(&e) =>
                     {
-                        super::cross_range::write(backend, b, dedup)
+                        match session {
+                            Some(r) => super::cross_range::write(backend, &b.with_retry(r), dedup),
+                            None => super::cross_range::write(backend, b, dedup),
+                        }
                     }
                     w => w,
                 },
@@ -216,6 +240,9 @@ impl Writer {
             Ok(bytes) => MutationResult::decode(&bytes)?,
         };
         let r = MutationResult { retried: attempt != 0 && r.attempt != attempt, ..r };
+        if r.mark.is_some() {
+            self.prev = r.mark;
+        }
         log_validation(backend, bound, &r, self.redact);
         Ok(r)
     }
@@ -353,6 +380,7 @@ pub fn rules_of(
         unlogged: false,
         shard_key: super::sharding::shard_key_of(coll)?.map(|k| k.key),
         moves: false,
+        retry: None,
     })
 }
 

@@ -717,6 +717,32 @@ fn topology_set(
     })
 }
 
+/// The warning of a `topology set` that renames the replica set: the drivers configured with the
+/// old name (`replicaSet=`) stop using the cluster. `before` is the stored parameter (alone or
+/// under its name), `after` the requested value.
+pub fn rename_warning(before: &Document, after: &Document) -> Option<String> {
+    use teseladb_wire::commands::presentation::{MODE, SET_NAME, TOPOLOGY_PRESENTATION};
+    let stored = match before.get(TOPOLOGY_PRESENTATION) {
+        Some(Value::Document(d)) => d,
+        _ => before,
+    };
+    let text = |d: &Document, f: &str| match d.get(f) {
+        Some(Value::String(s)) => Some(s.clone()),
+        _ => None,
+    };
+    if text(stored, MODE).as_deref() != Some("replicaset") {
+        return None;
+    }
+    let old = text(stored, SET_NAME)?;
+    let new = match (text(after, MODE).as_deref(), text(after, SET_NAME)) {
+        (Some("replicaset"), Some(n)) if n != old => n,
+        _ => return None,
+    };
+    Some(format!(
+        "warning: the replica set {old} becomes {new}; drivers connected with replicaSet={old} stop using the cluster until their URI says replicaSet={new}"
+    ))
+}
+
 /// What `teseladb admin` asks for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AdminAction {
@@ -1077,6 +1103,21 @@ pub fn run(o: &AdminOpts, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
             return 1;
         }
     };
+    if let AdminAction::ConfigSet { name, value } = &o.action
+        && name == teseladb_wire::commands::presentation::TOPOLOGY_PRESENTATION
+    {
+        // A new name leaves the drivers configured with the old one out: say it before applying
+        // it (018 spec, edge cases).
+        let current = format!("{CONFIG}{}", component(name));
+        let before = admin_http::request_with(&o.node, tls.clone(), Method::Get, &current, b"");
+        let before = before.ok().and_then(|(_, a)| media::decode(&a, Format::Relaxed).ok());
+        let after = media::decode(value.as_bytes(), Format::Relaxed).ok();
+        if let (Some(b), Some(a)) = (before, after)
+            && let Some(w) = rename_warning(&b, &a)
+        {
+            let _ = writeln!(err, "teseladb admin: {w}");
+        }
+    }
     let sent = admin_http::request_with(&o.node, tls, method, &target, body.as_bytes());
     let (status, answer) = match sent {
         Ok(a) => a,
@@ -1587,6 +1628,18 @@ mod tests {
         let odd = Document::new().with("token", 5i64);
         assert_eq!(text(&AdminAction::TokenCreate { ttl }, Some(&odd), b""), "5\n");
         assert_eq!(text(&AdminAction::CertRotate, None, b""), "certificates rotated\n");
+        // Renaming the replica set warns before it is applied (018, edge cases).
+        let rs = |name: &str| Document::new().with("mode", "replicaset").with("setName", name);
+        let stored = Document::new()
+            .with("_id", "topologyPresentation")
+            .with("topologyPresentation", rs("rs0"));
+        let w = rename_warning(&stored, &rs("rs1")).expect("a warning");
+        assert!(w.contains("replicaSet=rs0") && w.contains("replicaSet=rs1"), "{w}");
+        assert_eq!(rename_warning(&rs("rs0"), &rs("rs0")), None, "the same name");
+        assert_eq!(rename_warning(&rs("rs0"), &Document::new().with("mode", "refrouter")), None);
+        let refrouter = Document::new().with("mode", "refrouter");
+        assert_eq!(rename_warning(&refrouter, &rs("rs1")), None, "no replica set yet");
+        assert_eq!(rename_warning(&Document::new().with("mode", "replicaset"), &rs("a")), None);
         // `topology set` is `setClusterParameter` of `topologyPresentation` (018 FR-007).
         let words = |w: &[&str]| parse(&w.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>());
         let set = words(&["topology", "set", "replicaset", "--name", "rs0", "--primary", "h:1"]);

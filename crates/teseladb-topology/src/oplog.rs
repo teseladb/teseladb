@@ -3,8 +3,9 @@
 //! `applyOps` entries of a transaction.
 //!
 //! Field order, measured on RefDb 9.0.4: `lsid`, `txnNumber`, `op`, `ns`, `ui`, `o`, `o2`,
-//! `stmtId`, the fields this module does not interpret (such as `versionContext`), `ts`, `t`,
-//! `v`, `wall` and `prevOpTime`. A transaction's operations go inside `applyOps` entries on
+//! `needsRetryImage`, `stmtId`, the fields this module does not interpret (such as
+//! `versionContext`), `ts`, `t`, `v`, `wall`, `prevOpTime` and `multiOpType` (the `applyOps`
+//! entry of a retryable insert of several documents). A transaction's operations go inside `applyOps` entries on
 //! `admin.$cmd`; RefDb fills each one while its `o` stays within 16 MiB, marks every entry but
 //! the last with `partialTxn: true`, gives the last the total `count`, and chains them with
 //! `prevOpTime`. One operation larger than that goes alone.
@@ -170,6 +171,8 @@ pub struct OplogEntry {
     pub txn: Option<TxnInfo>,
     /// `op`, `ns`, `ui`, `o` and `o2`.
     pub operation: Operation,
+    /// `needsRetryImage` of a retryable `findAndModify` (`preImage` or `postImage`).
+    pub retry_image: Option<String>,
     /// `stmtId` of a retryable write.
     pub stmt_id: Option<i32>,
     /// Fields this module does not interpret, kept in their order (`versionContext`,
@@ -183,10 +186,12 @@ pub struct OplogEntry {
     pub wall_ms: Option<i64>,
     /// `prevOpTime`: the previous entry of the same session.
     pub prev_op_time: Option<OpTime>,
+    /// `multiOpType`: 1 on the `applyOps` entry of a retryable write of several documents.
+    pub multi_op_type: Option<i32>,
 }
 
 /// Names this module reads; anything else goes to [`OplogEntry::extra`].
-const KNOWN: [&str; 13] = [
+const KNOWN: [&str; 15] = [
     "lsid",
     "txnNumber",
     "op",
@@ -194,12 +199,14 @@ const KNOWN: [&str; 13] = [
     "ui",
     "o",
     "o2",
+    "needsRetryImage",
     "stmtId",
     "ts",
     "t",
     "v",
     "wall",
     "prevOpTime",
+    "multiOpType",
 ];
 
 fn document(d: &Document, field: &'static str) -> Result<Option<Document>, OplogError> {
@@ -246,6 +253,9 @@ impl OplogEntry {
             d.push("txnNumber", t.txn_number);
         }
         self.operation.push_into(&mut d);
+        if let Some(i) = &self.retry_image {
+            d.push("needsRetryImage", i.as_str());
+        }
         if let Some(s) = self.stmt_id {
             d.push("stmtId", s);
         }
@@ -262,6 +272,9 @@ impl OplogEntry {
         }
         if let Some(p) = self.prev_op_time {
             d.push("prevOpTime", p.to_document());
+        }
+        if let Some(m) = self.multi_op_type {
+            d.push("multiOpType", m);
         }
         d
     }
@@ -283,6 +296,16 @@ impl OplogEntry {
             Some(Value::Int32(n)) => Some(*n),
             Some(_) => return Err(OplogError::WrongType("stmtId")),
         };
+        let retry_image = match d.get("needsRetryImage") {
+            None => None,
+            Some(Value::String(s)) => Some(s.clone()),
+            Some(_) => return Err(OplogError::WrongType("needsRetryImage")),
+        };
+        let multi_op_type = match d.get("multiOpType") {
+            None => None,
+            Some(Value::Int32(n)) => Some(*n),
+            Some(_) => return Err(OplogError::WrongType("multiOpType")),
+        };
         let wall_ms = match d.get("wall") {
             None => None,
             Some(Value::DateTime(ms)) => Some(*ms),
@@ -300,12 +323,14 @@ impl OplogEntry {
         Ok(OplogEntry {
             txn,
             operation,
+            retry_image,
             stmt_id,
             extra,
             op_time: op_time(d)?,
             version: integer(d, "v")?.unwrap_or(ENTRY_VERSION),
             wall_ms,
             prev_op_time,
+            multi_op_type,
         })
     }
 }
@@ -373,12 +398,14 @@ pub fn transaction_entries(
         out.push(OplogEntry {
             txn: Some(txn.clone()),
             operation: Operation::new(OpType::Command, APPLY_OPS_NS, None, o, None),
+            retry_image: None,
             stmt_id: None,
             extra: Document::new(),
             op_time: Some(at),
             version: ENTRY_VERSION,
             wall_ms: Some(wall_ms),
             prev_op_time: Some(prev),
+            multi_op_type: None,
         });
         prev = at;
     }
