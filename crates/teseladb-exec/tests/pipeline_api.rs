@@ -77,3 +77,61 @@ fn an_environment_has_no_search_and_no_geo_index_by_default() {
     assert!(Plain.check_search("$search", &Document::new()).is_ok());
     assert_eq!(Plain.geo_indexes().expect("none"), (String::new(), Vec::new()));
 }
+
+/// An environment whose every other collection holds `docs`.
+struct Foreign(Vec<Document>);
+
+impl Env for Foreign {
+    fn ext(&self) -> &dyn Extensions {
+        &NoExtensions
+    }
+
+    fn vars(&self) -> Option<&Document> {
+        None
+    }
+
+    fn collection(&self, _: &str) -> Result<Vec<Document>, MqlError> {
+        Ok(self.0.clone())
+    }
+
+    fn random(&self) -> f64 {
+        0.25
+    }
+}
+
+#[test]
+fn a_lookup_reads_a_numbered_place_of_a_foreign_array() {
+    let foreign = Foreign(vec![
+        extjson::parse(r#"{"_id":1,"arr":[5,7]}"#).expect("doc"),
+        extjson::parse(r#"{"_id":2,"arr":[7,9]}"#).expect("doc"),
+        extjson::parse(r#"{"_id":3,"arr":5}"#).expect("doc"),
+    ]);
+    let local: Document = extjson::parse(r#"{"k":7}"#).expect("doc");
+    let joined = |field: &str| -> Vec<i32> {
+        let text = format!(
+            r#"[{{"$lookup":{{"from":"o","localField":"k","foreignField":"{field}","as":"j"}}}}]"#
+        );
+        let out =
+            parse(&text, true).expect("valid").run(vec![local.clone()], &foreign).expect("runs");
+        let Some(teseladb_bson::Value::Array(j)) = out[0].get("j") else { panic!("{out:?}") };
+        j.iter()
+            .map(|d| match d {
+                teseladb_bson::Value::Document(d) => match d.get("_id") {
+                    Some(teseladb_bson::Value::Int32(n)) => *n,
+                    other => panic!("{other:?}"),
+                },
+                other => panic!("{other:?}"),
+            })
+            .collect()
+    };
+    assert_eq!(joined("arr.1"), [1]);
+    assert_eq!(joined("arr.0"), [2]);
+    assert_eq!(joined("arr.5"), Vec::<i32>::new());
+    assert_eq!(joined("arr.x"), Vec::<i32>::new());
+}
+
+#[test]
+fn a_facet_refuses_stages_that_are_not_documents() {
+    assert!(parse(r#"[{"$facet":{"a":[5]}}]"#, true).is_err());
+    assert!(parse(r#"[{"$facet":{"a":[{}]}}]"#, true).is_err());
+}
