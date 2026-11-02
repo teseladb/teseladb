@@ -68,8 +68,9 @@ const DEFAULT_LANGUAGE_VALUE: &str = "english";
 const LANGUAGE_OVERRIDE_VALUE: &str = "language";
 const TEXT_INDEX_VERSION_VALUE: i32 = 3;
 /// Specification errors `createIndexes` shows inside «Error in specification».
-const SPEC_ERRORS: [i32; 4] = [
+const SPEC_ERRORS: [i32; 5] = [
     CANNOT_CREATE_INDEX.code,
+    crate::error::PROJECTION_EXCLUSION_IN_INCLUSION.code,
     FAILED_TO_PARSE.code,
     INVALID_INDEX_SPECIFICATION_OPTION.code,
     TYPE_MISMATCH.code,

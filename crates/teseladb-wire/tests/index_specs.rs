@@ -394,3 +394,41 @@ fn only_one_field_of_an_index_may_be_hashed() {
         "{msg}"
     );
 }
+
+#[test]
+fn wildcard_specifications_are_checked_before_the_build() {
+    // Measured on a `refrouter` 9.0.4 (`lc12`), with another `$**` index on the collection.
+    let mut m = Mem::new();
+    let all = || Document::new().with("$**", 1);
+    assert_eq!(create(&mut m, "c", vec![spec(all(), "all")]).get("ok"), Some(&Value::Double(1.0)));
+    let mixed = Document::new().with("a", 1).with("b", 0);
+    let r = create(&mut m, "c", vec![spec(all(), "mixed").with("wildcardProjection", mixed)]);
+    assert_eq!(field(&r, "code"), &Value::Int32(31254), "{r:?}");
+    assert_eq!(
+        errmsg(&r),
+        "Error in specification { key: { $**: 1 }, name: \"mixed\", wildcardProjection: { a: 1, \
+         b: 0 } } :: caused by :: Failed to parse projection: wildcardProjection :: caused by :: \
+         Cannot do exclusion on field b in inclusion projection"
+    );
+    let sub = spec(Document::new().with("b.$**", 1), "sub_proj")
+        .with("wildcardProjection", Document::new().with("b.c", 1));
+    let r = create(&mut m, "c", vec![sub]);
+    assert_eq!(field(&r, "code"), &Value::Int32(9), "{r:?}");
+    let compound = spec(Document::new().with("e", 1).with("$**", 1), "compound_bad");
+    let r = create(&mut m, "c", vec![compound]);
+    assert_eq!(field(&r, "code"), &Value::Int32(67), "{r:?}");
+    let r = create(&mut m, "c", vec![spec(all(), "wu").with("unique", true)]);
+    assert_eq!(field(&r, "code"), &Value::Int32(67), "{r:?}");
+    assert_eq!(
+        errmsg(&r),
+        "Error in specification { key: { $**: 1 }, name: \"wu\", unique: true, v: 2 } :: caused \
+         by :: Index type 'wildcard' does not support the 'unique' option"
+    );
+    let r = create(&mut m, "c", vec![spec(all(), "wttl").with("expireAfterSeconds", 5)]);
+    assert_eq!(
+        errmsg(&r),
+        "Error in specification { key: { $**: 1 }, name: \"wttl\", expireAfterSeconds: 5, v: 2 } \
+         :: caused by :: cannot make a TTL index :: caused by :: Index type 'wildcard' does not \
+         support the 'expireAfterSeconds' option"
+    );
+}
