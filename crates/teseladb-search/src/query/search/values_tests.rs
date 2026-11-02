@@ -6,6 +6,7 @@ use teseladb_bson::{Decimal128, Document, Value};
 
 use super::*;
 use crate::definition::Definition;
+use crate::index::Grams;
 
 const UUID: [u8; 16] = [
     0x3b, 0x24, 0x11, 0x01, 0xe2, 0xbb, 0x42, 0x55, 0x8c, 0xaf, 0x41, 0x36, 0xc5, 0x66, 0xa9, 0x62,
@@ -713,9 +714,15 @@ fn m3() -> MemIndex {
         .with("type", "knnVector")
         .with("dimensions", 2)
         .with("similarity", "euclidean");
+    let a = arr(vec![
+        Document::new().with("type", "autocomplete").with("minGrams", 2).with("maxGrams", 5).into(),
+        Document::new().with("type", "string").into(),
+    ]);
     let def = Document::new().with(
         "mappings",
-        Document::new().with("dynamic", true).with("fields", Document::new().with("v", v)),
+        Document::new()
+            .with("dynamic", true)
+            .with("fields", Document::new().with("v", v).with("a", a)),
     );
     let docs = vec![
         Document::new()
@@ -1411,4 +1418,93 @@ fn embedded_document_errors_name_the_option() {
         err(Document::new().with("path", "t.x").with("operator", gato("t.x.n"))),
         "embeddedDocument path t.x is not indexed as embeddedDocuments"
     );
+}
+
+fn autocomplete(query: &str, extra: Document) -> Document {
+    let mut d = Document::new().with("path", "a").with("query", query);
+    for (k, v) in extra.iter() {
+        d.push(k, v.clone());
+    }
+    op("autocomplete", d)
+}
+
+#[test]
+fn autocomplete_asks_for_the_grams_of_the_query() {
+    let idx = m3();
+    let a = |q: &str, extra: Document| found(&idx, &autocomplete(q, extra));
+    let none = Document::new;
+    assert_eq!(a("gat", none()), Ok(vec![(2, 0.3692885637283325), (1, 0.3303539752960205)]));
+    assert_eq!(a("per", none()), Ok(vec![(3, 0.6894007325172424)]));
+    assert_eq!(a("gato mon", none()), Ok(vec![(2, 2.144718647003174), (1, 0.3303539752960205)]));
+    assert_eq!(
+        a("gato mon", Document::new().with("tokenOrder", "sequential")),
+        Ok(vec![(2, 0.7706515192985535)])
+    );
+    assert_eq!(a("gato mon", Document::new().with("tokenOrder", "any")).map(|h| h.len()), Ok(2));
+    assert_eq!(
+        a("gatp", Document::new().with("fuzzy", Document::new().with("maxEdits", 1))),
+        Ok(ones(&[1, 2]))
+    );
+    assert_eq!(a("g", Document::new().with("fuzzy", Document::new())), Ok(vec![]));
+    assert_eq!(a("g", none()), Ok(vec![]));
+    assert_eq!(a("gatopardo", none()), Ok(vec![(1, 1.3063125610351562)]));
+    let multi = op(
+        "autocomplete",
+        Document::new().with("path", "a").with("query", arr(vec!["per".into(), "gat".into()])),
+    );
+    assert_eq!(found(&idx, &multi).map(|h| h.len()), Ok(3));
+    let err = |d: Document| found(&idx, &op("autocomplete", d)).unwrap_err();
+    assert_eq!(
+        err(Document::new().with("path", "t").with("query", "gat")),
+        "autocomplete index field definition not present at path t"
+    );
+    assert_eq!(err(Document::new().with("query", "gat")), "\"autocomplete.path\" is required");
+    assert_eq!(
+        err(Document::new().with("path", 1).with("query", "gat")),
+        "\"autocomplete.path\" must be a string"
+    );
+    assert_eq!(err(Document::new().with("path", "a")), "\"autocomplete.query\" is required");
+    assert_eq!(
+        err(Document::new().with("path", "a").with("query", "g").with("x", 1)),
+        "\"autocomplete\" unrecognized field \"x\""
+    );
+    assert_eq!(
+        err(Document::new().with("path", "a").with("query", "g").with("tokenOrder", "x")),
+        "\"autocomplete.tokenOrder\" must be one of [any, sequential]"
+    );
+}
+
+#[test]
+fn autocomplete_grams_follow_the_field_options() {
+    let a = Document::new()
+        .with("type", "autocomplete")
+        .with("minGrams", 2)
+        .with("maxGrams", 3)
+        .with("tokenization", "nGram")
+        .with("foldDiacritics", false)
+        .with("analyzer", "reflib.whitespace");
+    let def = Document::new().with(
+        "mappings",
+        Document::new().with("dynamic", false).with("fields", Document::new().with("a", a)),
+    );
+    let docs = vec![
+        Document::new().with("a", "Canción"),
+        Document::new().with("a", arr(vec!["cancion".into(), 5.into()])),
+        Document::new().with("a", ""),
+    ];
+    let idx = build(def, docs);
+    let hits = |q: &str| {
+        found(&idx, &autocomplete(q, Document::new()))
+            .map(|h| h.iter().map(|x| x.0).collect::<Vec<_>>())
+    };
+    assert_eq!(hits("ció"), Ok(vec![1]));
+    assert_eq!(hits("cio"), Ok(vec![2]));
+    assert_eq!(hits("anc"), Ok(vec![1, 2]));
+    // Without a string mapping the query asks for its grams alone.
+    assert_eq!(hits("cancionero"), Ok(vec![1, 2]));
+    let folded = Grams { min: 2, max: 3, fold: true, edge: true };
+    assert_eq!(folded.normalized("Canción"), "cancion");
+    assert_eq!(folded.of("ab"), vec!["ab".to_owned()]);
+    assert_eq!(folded.of("a"), Vec::<String>::new());
+    assert_eq!(folded.term("a"), None);
 }

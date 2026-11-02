@@ -122,6 +122,8 @@ enum Operator {
     Scored(Box<Operator>, Score),
     /// `embeddedDocument`.
     Embedded(embedded::Embedded),
+    /// `autocomplete`.
+    Autocomplete(autocomplete::Autocomplete),
     /// `span`, with its score option.
     Span(span::Span, Score),
     Compound {
@@ -202,6 +204,7 @@ fn parse(index: &MemIndex, name: &str, v: &Value, path: &str) -> Result<Operator
         "queryString" => query_string::parse(index, d, path),
         "moreLikeThis" => more_like::parse(index, d, path),
         "embeddedDocument" => embedded::parse(d, path),
+        "autocomplete" => autocomplete::parse(d, path),
         "in" => values::parse_in(d, path),
         "range" => values::parse_range(d, path),
         "near" => values::parse_near(d, path),
@@ -519,6 +522,10 @@ fn eval(index: &MemIndex, op: &Operator) -> Result<BTreeMap<u32, f32>, SearchErr
             rescored(index, s, p.score())
         }
         Operator::Empty => Ok(BTreeMap::new()),
+        Operator::Autocomplete(a) => {
+            let s = a.scores(index, boost_of(&a.score))?;
+            rescored(index, s, &a.score)
+        }
         Operator::Embedded(e) => {
             let s = e.scores(index, boost_of(&e.score))?;
             rescored(index, s, &e.score)
@@ -652,6 +659,7 @@ fn eval_compound(
     Ok(out)
 }
 
+mod autocomplete;
 mod embedded;
 mod function;
 mod knn;
