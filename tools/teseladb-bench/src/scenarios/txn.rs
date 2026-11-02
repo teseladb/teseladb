@@ -20,7 +20,7 @@ use teseladb_types::{Histogram, Rng};
 
 use super::wire::each;
 use crate::cli::Args;
-use crate::client::{Client, Target, check, doc};
+use crate::client::{Client, Target, check, debug, doc};
 use crate::load::{Load, drive};
 use crate::report::{Report, Target as Goal};
 
@@ -142,7 +142,7 @@ fn lifetime(c: &mut Client, args: &Args) -> Result<(), String> {
 
 /// The `v` of the first document of a `find` reply.
 fn first_v(reply: &[u8]) -> Result<Option<i64>, String> {
-    let d = RawDoc::from_bytes(reply).map_err(|e| format!("{e:?}"))?;
+    let d = RawDoc::from_bytes(reply).map_err(debug)?;
     let Some(RawValue::Document(cursor)) = d.get("cursor") else {
         return Err("a find reply without a cursor".into());
     };
@@ -433,6 +433,13 @@ mod tests {
         assert!(transient(&labelled));
         assert!(!transient(&bytes(doc(vec![("ok", Value::Int32(0))]))));
         assert!(!transient(&[1, 2]));
+    }
+
+    #[test]
+    fn a_remote_server_has_no_restarts_to_read() {
+        let remote = Target::open(Some("refdb://127.0.0.1:1")).expect("target");
+        assert_eq!(uncertainty_restarts(&remote), Ok(None));
+        assert_eq!(split(&remote, 1), Ok(()), "a remote server is not split");
     }
 
     #[test]

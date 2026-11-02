@@ -27,7 +27,7 @@ use teseladb_server::node::{Node, NodeConfig};
 use teseladb_types::Histogram;
 
 use crate::cli::Args;
-use crate::client::{Client, Target, check, doc};
+use crate::client::{Client, Target, check, debug, doc};
 use crate::report::{Report, Target as Goal};
 
 /// Database and collection of the documents.
@@ -200,7 +200,7 @@ fn join(target: &Target) -> Result<Node<MemDisk>, String> {
         admin_listen: Some(loopback),
         ..NodeConfig::default()
     };
-    let n = Node::start(cfg, || Ok(MemDisk::new()), None).map_err(|e| format!("{e:?}"))?;
+    let n = Node::start(cfg, || Ok(MemDisk::new()), None).map_err(debug)?;
     if !n.wait_ready(READY) {
         n.stop();
         return Err("the new node did not join".into());

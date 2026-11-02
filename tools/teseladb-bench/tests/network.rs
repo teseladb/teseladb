@@ -181,3 +181,14 @@ fn index_build_load_runs_against_a_local_cluster() {
         assert!(out.contains(name), "{name}: {out}");
     }
 }
+
+/// `changestream-lag` (014 FR-016, SC-002) against a local cluster: the time from each insert's
+/// answer to its event on a change stream, with the target of SC-002 at p99.
+#[test]
+fn changestream_lag_runs_against_a_local_cluster() {
+    let short = ["--duration", "100ms", "--warmup", "50ms", "--format", "json"];
+    let out = metrics(&bench(&[&["--scenario", "changestream-lag"][..], &short[..]].concat()));
+    for name in ["lag.p50", "lag.p99", "\"target\"", "local cluster of three nodes"] {
+        assert!(out.contains(name), "{name}: {out}");
+    }
+}

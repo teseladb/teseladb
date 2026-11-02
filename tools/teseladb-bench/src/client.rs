@@ -212,7 +212,7 @@ fn text(e: std::io::Error) -> String {
 }
 
 /// An error of the BSON or wire crates as its debug form.
-fn debug(e: impl std::fmt::Debug) -> String {
+pub fn debug(e: impl std::fmt::Debug) -> String {
     format!("{e:?}")
 }
 
@@ -254,6 +254,19 @@ mod tests {
         let empty = doc(vec![("ok", Value::Int32(1)), ("writeErrors", Value::Array(vec![]))]);
         assert_eq!(check(&bytes(empty)), Ok(()));
         assert!(check(&[1, 2, 3]).is_err());
+    }
+
+    #[test]
+    fn the_code_of_a_reply_is_its_own_or_that_of_its_first_write_error() {
+        let coded = |c: i32| doc(vec![("code", Value::Int32(c))]);
+        assert_eq!(error_code(&bytes(coded(NOT_WRITABLE_PRIMARY))), Ok(Some(NOT_WRITABLE_PRIMARY)));
+        let written = |errors: Vec<Value>| bytes(doc(vec![("writeErrors", Value::Array(errors))]));
+        assert_eq!(error_code(&written(vec![Value::Document(coded(11000))])), Ok(Some(11000)));
+        assert_eq!(error_code(&written(vec![Value::Document(Document::new())])), Ok(None));
+        assert_eq!(error_code(&written(vec![Value::Int32(1)])), Ok(None));
+        assert_eq!(error_code(&written(vec![])), Ok(None));
+        assert_eq!(error_code(&bytes(doc(vec![("ok", Value::Int32(1))]))), Ok(None));
+        assert!(error_code(&[1, 2, 3]).is_err());
     }
 
     #[test]
