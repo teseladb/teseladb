@@ -212,7 +212,8 @@ impl ServerBackend {
                     | RemoteReply::Record(_)
                     | RemoteReply::Piece { .. }
                     | RemoteReply::Restored { .. }
-                    | RemoteReply::Changes { .. },
+                    | RemoteReply::Changes { .. }
+                    | RemoteReply::Fenced { .. },
                 ) => {
                     return Err(CommandError::new(INTERNAL_ERROR, "a scan answered with no rows"));
                 }
@@ -623,7 +624,8 @@ impl Backend for ServerBackend {
             | RemoteReply::Record(_)
             | RemoteReply::Piece { .. }
             | RemoteReply::Restored { .. }
-            | RemoteReply::Changes { .. } => {
+            | RemoteReply::Changes { .. }
+            | RemoteReply::Fenced { .. } => {
                 Err(CommandError::new(INTERNAL_ERROR, "a write answered with no result"))
             }
         }
@@ -728,6 +730,35 @@ impl Backend for ServerBackend {
             read.answered(r.end, r.rows, r.resolved, None);
         }
         Ok(read.finish(|r: &teseladb_range::changes::Versioned| r.ts))
+    }
+
+    fn fence(&mut self, start: &[u8], end: &[u8], on: bool) -> Result<Hlc, CommandError> {
+        // Range by range in key order, each on its leader; a range that answers no mark has
+        // nothing of the span.
+        let mut mark = Hlc { physical: 0, logical: 0 };
+        let mut walk = teseladb_changestream::read::IntervalRead::<()>::new(start, end, mark);
+        while let Some(at) = walk.next().map(<[u8]>::to_vec) {
+            let key = at.clone();
+            let build = |e: &RouteEntry, _| RemoteReq::Fence {
+                start: key.clone(),
+                end: walk.stop(&e.end),
+                on,
+            };
+            match self.data(&at, true, build)? {
+                (e, RemoteReply::Fenced { ts }) => {
+                    mark = mark.max(ts);
+                    let next = walk.stop(&e.end);
+                    walk.answered(next, Vec::new(), ts, None);
+                }
+                _ => {
+                    return Err(CommandError::new(
+                        INTERNAL_ERROR,
+                        "a fence answered with something else",
+                    ));
+                }
+            }
+        }
+        Ok(mark)
     }
 
     fn range_changes(

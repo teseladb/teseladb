@@ -87,6 +87,14 @@ impl Backend for Bare {
     }
 
     fn end_operation(&mut self) {}
+    fn fence(
+        &mut self,
+        _start: &[u8],
+        _end: &[u8],
+        _on: bool,
+    ) -> Result<teseladb_hlc::Hlc, CommandError> {
+        Err(none())
+    }
     fn changes(
         &mut self,
         _start: &[u8],
