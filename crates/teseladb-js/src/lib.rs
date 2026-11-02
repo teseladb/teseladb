@@ -14,6 +14,7 @@ mod bigints;
 mod bson;
 mod builtins;
 mod date;
+mod decompile;
 mod early;
 mod generators;
 mod interp;

@@ -147,6 +147,9 @@ pub struct Interp<'c> {
     pub envs: Vec<Weak<RefCell<EnvRec>>>,
     /// The name of the native function last called, for the messages that name it.
     pub native: Name,
+    /// The last error about an operand (`can't convert ({}) to number`): the error, the operand
+    /// and the text written for it, which the operator that sees its expression may replace.
+    pub operand_failure: Option<(ObjRef, Val, String)>,
     pub global_env: EnvRef,
     pub now_ms: f64,
     pub rng: u64,
@@ -242,7 +245,7 @@ pub fn is_constructor(f: &Val) -> bool {
 }
 
 /// The name of a key for messages: `o.f`.
-fn callee_text(e: &Expr) -> String {
+pub(crate) fn callee_text(e: &Expr) -> String {
     match e {
         Expr::Ident(n, _) => n.to_string(),
         Expr::Member { obj, prop, .. } => match &**prop {
@@ -468,22 +471,56 @@ impl<'c> Interp<'c> {
         Err(self.error("TypeError", message))
     }
 
+    /// A `TypeError` about the object `v` with its source as its text; an operator that sees the
+    /// operand's expression writes the expression instead ([`Interp::name_operands`]).
+    pub fn operand_error(&mut self, v: &Val, message: impl FnOnce(&str) -> String) -> Ctrl {
+        let text = crate::decompile::value_source(self, v);
+        let e = self.error("TypeError", &message(&text));
+        if let Ctrl::Throw(Val::Obj(o)) = &e {
+            self.operand_failure = Some((o.clone(), v.clone(), text));
+        }
+        e
+    }
+
+    /// `r`, with the text of the operand in an operand error replaced by its expression, as
+    /// SpiderMonkey's decompiler writes it (`can't convert o to number`).
+    pub fn name_operands<T>(&mut self, r: R<T>, operands: &[(&Expr, &Val)]) -> R<T> {
+        let Err(Ctrl::Throw(Val::Obj(err))) = &r else { return r };
+        let Some((o, v, text)) = self.operand_failure.take() else { return r };
+        if !o.ptr_eq(err) {
+            return r;
+        }
+        let Some((e, _)) = operands.iter().find(|(_, x)| strict_eq(x, &v)) else { return r };
+        let name = crate::decompile::operand_text(self, e, &v);
+        let mut b = err.borrow_mut();
+        if let Some((_, p)) = b.props.iter_mut().find(|(k, _)| &**k == "message")
+            && let Val::Str(m) = &p.value
+        {
+            p.value = Val::Str(m.replacen(&text, &name, 1).into());
+        }
+        drop(b);
+        r
+    }
+
     // Conversions.
 
     pub fn primitive(&mut self, v: &Val, hint: &str) -> R {
         let Val::Obj(o) = v else { return Ok(v.clone()) };
         let exotic = self.get(v, "@@Symbol.toPrimitive:0")?;
+        let to = if hint == "string" { "string" } else { "number" };
         if !exotic.is_nullish() && !exotic.is_callable() {
-            let to = if hint == "string" { "string" } else { "number" };
-            return self.type_error(&format!(
-                "can't convert {} to {to}: its [Symbol.toPrimitive] property is not a function",
-                self.show(v)
-            ));
+            return Err(self.operand_error(v, |t| {
+                format!(
+                    "can't convert {t} to {to}: its [Symbol.toPrimitive] property is not a function"
+                )
+            }));
         }
         if exotic.is_callable() {
             let r = self.call(&exotic, v, &[Val::str(hint)])?;
             if matches!(r, Val::Obj(_)) {
-                return self.type_error("can't convert object to primitive type");
+                return Err(self.operand_error(v, |t| {
+                    format!("can't convert {t} to {to}: its [Symbol.toPrimitive] method returned an object")
+                }));
             }
             return Ok(r);
         }
@@ -510,7 +547,12 @@ impl<'c> Interp<'c> {
                 }
             }
         }
-        self.type_error("can't convert object to primitive type")
+        let to = match hint {
+            "number" => "number",
+            "string" => "string",
+            _ => "primitive type",
+        };
+        Err(self.operand_error(v, |t| format!("can't convert {t} to {to}")))
     }
 
     pub fn number_of(&mut self, v: &Val) -> R<f64> {
@@ -1670,7 +1712,7 @@ impl<'c> Interp<'c> {
         }
         let it_fn = self.get(v, "@@Symbol.iterator:0")?;
         if !it_fn.is_callable() {
-            return self.type_error(&format!("{} is not iterable", self.show(v)));
+            return Err(self.not_iterable(v));
         }
         let it = self.call(&it_fn, v, &[])?;
         if !matches!(it, Val::Obj(_)) {
@@ -1767,7 +1809,7 @@ impl<'c> Interp<'c> {
                 } else if self.get(v, "next")?.is_callable() {
                     v.clone()
                 } else {
-                    return self.type_error(&format!("{} is not iterable", self.show(v)));
+                    return Err(self.not_iterable(v));
                 };
                 let next = self.get(&it, "next")?;
                 let mut out = Vec::new();
@@ -1781,7 +1823,7 @@ impl<'c> Interp<'c> {
                     out.push(self.get(&r, "value")?);
                 }
             }
-            _ => self.type_error(&format!("{} is not iterable", self.show(v))),
+            _ => Err(self.not_iterable(v)),
         }
     }
 
@@ -2262,7 +2304,8 @@ impl<'c> Interp<'c> {
                     out.push_str(s);
                     if let Some(x) = subs.get(i) {
                         let v = self.eval(x, env)?;
-                        out.push_str(&self.str_of(&v)?);
+                        let s = self.str_of(&v);
+                        out.push_str(&self.name_operands(s, &[(x, &v)])?);
                     }
                 }
                 self.joined_string(out)
@@ -2290,7 +2333,8 @@ impl<'c> Interp<'c> {
                         None => out.push(Val::Undef),
                         Some(Expr::Spread(x)) => {
                             let v = self.eval(x, env)?;
-                            let all = self.iterate(&v)?;
+                            let all = self.iterate(&v);
+                            let all = self.name_operands(all, &[(x, &v)])?;
                             self.charge(all.len() * PROP_BYTES)?;
                             out.extend(all);
                         }
@@ -2305,19 +2349,8 @@ impl<'c> Interp<'c> {
             Expr::Spread(_) => self.type_error("unexpected spread"),
             Expr::Unary(op, x) => {
                 let v = self.eval(x, env)?;
-                Ok(match *op {
-                    "!" => Val::Bool(!v.truthy()),
-                    "-" => match self.numeric(&v)? {
-                        Val::BigInt(b) => Val::BigInt(Rc::new(b.neg())),
-                        n => Val::Num(-self.number_of(&n)?),
-                    },
-                    "+" => Val::Num(self.number_of(&v)?),
-                    "~" => match self.numeric(&v)? {
-                        Val::BigInt(b) => Val::BigInt(Rc::new(b.not())),
-                        n => Val::Num(f64::from(!number::to_int32(self.number_of(&n)?))),
-                    },
-                    _ => Val::Undef,
-                })
+                let r = self.unary(op, &v);
+                self.name_operands(r, &[(x, &v)])
             }
             Expr::Typeof(x) => {
                 if let Expr::Ident(n, _) = &**x
@@ -2364,7 +2397,13 @@ impl<'c> Interp<'c> {
             Expr::Binary(op, a, b) => {
                 let x = self.eval(a, env)?;
                 let y = self.eval(b, env)?;
-                self.binary(op, &x, &y)
+                let r = self.binary(op, &x, &y);
+                // SpiderMonkey names only the right operand of `+` (measured: `o + 1` gives the
+                // source of `o`, `"" + Object.create(null)` gives `Object.create(...)`).
+                if *op == "+" {
+                    return self.name_operands(r, &[(b, &y)]);
+                }
+                self.name_operands(r, &[(a, &x), (b, &y)])
             }
             Expr::Logical(op, a, b) => {
                 let x = self.eval(a, env)?;
@@ -2499,7 +2538,8 @@ impl<'c> Interp<'c> {
             match a {
                 Expr::Spread(x) => {
                     let v = self.eval(x, env)?;
-                    out.extend(self.iterate(&v)?);
+                    let all = self.iterate(&v);
+                    out.extend(self.name_operands(all, &[(x, &v)])?);
                 }
                 x => out.push(self.eval(x, env)?),
             }
@@ -2768,7 +2808,18 @@ impl<'c> Interp<'c> {
         Ok(strings)
     }
 
+    /// `v is not iterable`, with the source of an object.
+    fn not_iterable(&mut self, v: &Val) -> Ctrl {
+        if matches!(v, Val::Obj(_)) {
+            return self.operand_error(v, |t| format!("{t} is not iterable"));
+        }
+        self.error("TypeError", &format!("{} is not iterable", self.show(v)))
+    }
+
     pub fn ordinary_instance_of(&mut self, x: &Val, f: &Val) -> R<bool> {
+        if matches!(f, Val::Obj(_)) && !f.is_callable() {
+            return Err(self.operand_error(f, |t| format!("{t} is not a function")));
+        }
         if !f.is_callable() {
             return self.type_error(&format!("invalid 'instanceof' operand {}", self.show(f)));
         }
@@ -2886,6 +2937,22 @@ impl<'c> Interp<'c> {
         })
     }
 
+    fn unary(&mut self, op: &str, v: &Val) -> R {
+        Ok(match op {
+            "!" => Val::Bool(!v.truthy()),
+            "-" => match self.numeric(v)? {
+                Val::BigInt(b) => Val::BigInt(Rc::new(b.neg())),
+                n => Val::Num(-self.number_of(&n)?),
+            },
+            "+" => Val::Num(self.number_of(v)?),
+            "~" => match self.numeric(v)? {
+                Val::BigInt(b) => Val::BigInt(Rc::new(b.not())),
+                n => Val::Num(f64::from(!number::to_int32(self.number_of(&n)?))),
+            },
+            _ => Val::Undef,
+        })
+    }
+
     pub fn binary(&mut self, op: &str, x: &Val, y: &Val) -> R {
         Ok(match op {
             "+" => {
@@ -2940,6 +3007,11 @@ impl<'c> Interp<'c> {
             "instanceof" => Val::Bool(self.instance_of(x, y)?),
             "in" => {
                 let Val::Obj(o) = y else {
+                    if let Val::Str(_) = y {
+                        let (k, s) = (self.key_of(x)?, self.show(y));
+                        let msg = format!("cannot use 'in' operator to search for \"{k}\" in {s}");
+                        return self.type_error(&msg);
+                    }
                     let msg =
                         format!("right-hand side of 'in' should be an object, got {}", y.type_of());
                     return self.type_error(&msg);

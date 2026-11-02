@@ -1629,3 +1629,36 @@ ObjectId("0123456789abcdef01234567890")	E:Error:invalid object id: length
 [1, 2, 3].toSpliced(-1).join()	S:1,2
 [1, 2, 3].toSpliced(0, 0).join()	S:1,2,3
 Array.prototype.with.length + "," + Array.prototype.toSpliced.length	S:2,2
+({}) instanceof ({})	E:TypeError:({}) is not a function
+1 instanceof 2	E:TypeError:invalid 'instanceof' operand 2
+(() => { const o = {}; return 1 instanceof o })()	E:TypeError:o is not a function
+(() => { const o = {a: {}}; return 1 instanceof o.a })()	E:TypeError:o.a is not a function
++({[Symbol.toPrimitive]: 1})	E:TypeError:can't convert ({[Symbol.toPrimitive]:1}) to number: its [Symbol.toPrimitive] property is not a function
+(() => { const o = {[Symbol.toPrimitive]: 1}; return +o })()	E:TypeError:can't convert o to number: its [Symbol.toPrimitive] property is not a function
++({[Symbol.toPrimitive]() { return {} }})	E:TypeError:can't convert ({[Symbol.toPrimitive]() { return {} }}) to number: its [Symbol.toPrimitive] method returned an object
+(() => { const o = {[Symbol.toPrimitive]() { return {} }}; return `${o}` })()	E:TypeError:can't convert o to string: its [Symbol.toPrimitive] method returned an object
++({valueOf() { return {} }, toString() { return {} }})	E:TypeError:can't convert ({valueOf() { return {} }, toString() { return {} }}) to number
+(() => { const o = {valueOf() { return {} }, toString() { return {} }}; return o + 1 })()	E:TypeError:can't convert ({valueOf() { return {} }, toString() { return {} }}) to primitive type
+"" + Object.create(null)	E:TypeError:can't convert Object.create(...) to primitive type
+(() => { const o = Object.create(null); return o * 2 })()	E:TypeError:can't convert o to number
+1 in 2	E:TypeError:right-hand side of 'in' should be an object, got number
+(() => { const s = "x"; return "a" in s })()	E:TypeError:cannot use 'in' operator to search for "a" in "x"
+[...{}]	E:TypeError:({}) is not iterable
+(() => { const o = {}; return [...o] })()	E:TypeError:o is not iterable
+new (() => 1)	E:TypeError:() => 1 is not a constructor
+(() => { const f = () => 1; return new f })()	E:TypeError:f is not a constructor
+(() => { const o = {f: 1}; return o.f() })()	E:TypeError:o.f is not a function
+(() => { const o = {}; return o.f() })()	E:TypeError:o.f is not a function
+Symbol() + ""	E:TypeError:can't convert symbol to string
+(() => { const s = Symbol("q"); return s + "" })()	E:TypeError:can't convert symbol to string
+BigInt(1) + 1	E:TypeError:can't convert BigInt to number
+({}).x.y	E:TypeError:can't access property "y", (intermediate value).x is undefined
+(() => { let u; return u.p })()	E:TypeError:can't access property "p", u is undefined
+(() => { const a = [1]; return a[0].b.c })()	E:TypeError:can't access property "c", a[0].b is undefined
+(() => { const o = {}; const p = Object.create(null); return o + p })()	E:TypeError:can't convert p to primitive type
+(() => { const p = Object.create(null); return 1 + p })()	E:TypeError:can't convert p to primitive type
+(() => { const p = {a: [1, "x"], b: {c: null}, get g() { return 1 }}; p.valueOf = p.toString = undefined; return -p })()	J:null
+(() => { const p = {"a b": 1, 2: true}; p.toString = 5; p.valueOf = undefined; return p - 1 })()	J:null
+[...{a: undefined}]	E:TypeError:({a:(void 0)}) is not iterable
+(() => { const s = Symbol("k"); const o = {[s]: 1}; return [...o] })()	E:TypeError:o is not iterable
+`${Object.create(null)}`	E:TypeError:can't convert Object.create(...) to string
