@@ -136,7 +136,7 @@ impl Schema {
                     ),
                 )),
                 (Kind::Not(s), _) => clauses.push(Clause::not(s.at(path).simplified())),
-                (Kind::Encrypt, _) => {}
+                (Kind::Encrypt(_), _) => {}
                 (k, None) if is_object_keyword(k) => {
                     clauses.push(self.object_keyword(k, &required));
                 }

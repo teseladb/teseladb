@@ -217,6 +217,29 @@ pub fn rewrite_command<B: Backend + ?Sized>(
     Ok(out)
 }
 
+/// The fields of `encryptionInformation` (measured on a `refnode` 9.0.4).
+const INFORMATION_FIELDS: [&str; 3] = ["type", "schema", "crudProcessed"];
+
+/// Reads `encryptionInformation` with the IDL rules of a `refnode` 9.0.4 (FR-006).
+fn check_information(name: &str, cmd: &Document) -> Result<(), CommandError> {
+    let Some(v) = cmd.get(ENCRYPTION_INFORMATION) else { return Ok(()) };
+    let path = format!("{name}.{ENCRYPTION_INFORMATION}");
+    let Value::Document(d) = v else { return Err(crate::types::wrong_type(&path, v, "object")) };
+    if let Some((k, _)) = d.iter().find(|(k, _)| !INFORMATION_FIELDS.contains(k)) {
+        return Err(CommandError::new(
+            crate::error::IDL_UNKNOWN_FIELD,
+            format!("BSON field '{path}.{k}' is an unknown field."),
+        ));
+    }
+    if d.get("schema").is_none() {
+        return Err(CommandError::new(
+            crate::error::IDL_FAILED_TO_PARSE,
+            format!("BSON field '{path}.schema' is missing but a required field"),
+        ));
+    }
+    Ok(())
+}
+
 /// The commands whose filters carry find payloads.
 const QUERIES: [&str; 4] = ["find", "count", "distinct", "aggregate"];
 
@@ -234,6 +257,9 @@ pub fn intercept<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
 ) -> Option<Result<Document, CommandError>> {
     let name = ctx.name().to_string();
+    if let Err(e) = check_information(&name, ctx.cmd) {
+        return Some(Err(e));
+    }
     let is_query = QUERIES.contains(&name.as_str());
     let is_write = WRITES.contains(&name.as_str());
     if !is_query && !is_write {

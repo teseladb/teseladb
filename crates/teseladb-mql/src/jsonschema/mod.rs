@@ -116,7 +116,8 @@ enum Kind {
     AnyOf(Vec<Schema>),
     OneOf(Vec<Schema>),
     Not(Box<Schema>),
-    Encrypt,
+    /// `encrypt`, with the original types its `bsonType` allows.
+    Encrypt(Option<Vec<u8>>),
 }
 
 #[derive(Debug)]
@@ -336,7 +337,7 @@ impl Schema {
                 kw::NOT => Kind::Not(Box::new(sub(key, value)?)),
                 kw::ENCRYPT => {
                     object(key, value)?;
-                    Kind::Encrypt
+                    Kind::Encrypt(encrypt_types(value)?)
                 }
                 _ => return Err(failed(format!("Unknown $jsonSchema keyword: {key}"))),
             };
@@ -606,4 +607,23 @@ fn json_types(v: RawValue<'_>) -> Result<Vec<u8>> {
         return Err(failed("$jsonSchema keyword 'type' must match at least one type"));
     }
     Ok(lists.concat())
+}
+
+/// The original types `encrypt.bsonType` allows: an alias or an array of aliases.
+fn encrypt_types(value: RawValue<'_>) -> Result<Option<Vec<u8>>> {
+    let RawValue::Document(d) = value else { return Ok(None) };
+    let alias = |v: RawValue<'_>| match v {
+        RawValue::String(a) => match crate::types::by_alias(a) {
+            Some(crate::types::TypeSpec::Element(e)) => Ok(e),
+            _ => Err(bad_value(format!("Unknown type name alias: {a}"))),
+        },
+        _ => Err(type_mismatch(
+            "$jsonSchema keyword 'bsonType' must be a string or an array of strings",
+        )),
+    };
+    match d.get(kw::BSON_TYPE) {
+        None => Ok(None),
+        Some(RawValue::Array(a)) => a.iter().map(alias).collect::<Result<Vec<u8>>>().map(Some),
+        Some(v) => alias(v).map(|e| Some(vec![e])),
+    }
 }
