@@ -433,3 +433,58 @@ fn autocomplete_options_score_as_refsearch() {
         assert_eq!(ranked(query), want, "{query}");
     }
 }
+
+/// The index of `m80.js`: document `i` has `t: "w1x" + suffix i`, the suffixes being the pairs of
+/// `[a-z0-9]` in that order, documents 0 to 599 in one segment and 600 to 1 199 in another
+/// (inserted in two waves on `refsearch`), or all in one segment.
+fn fuzzy_waves(split: bool) -> Indexer {
+    let alphabet: Vec<char> = "abcdefghijklmnopqrstuvwxyz0123456789".chars().collect();
+    let def = r#"{"mappings": {"dynamic": false, "fields": {"t": {"type": "string"}}}}"#;
+    let def = Definition::parse(&extjson::parse(def).expect("JSON")).expect("definition");
+    let mut ix = Indexer::new(def);
+    let key = |i: u16| i.to_be_bytes().to_vec();
+    let changes = (0..1200_u16).map(|i| {
+        let suffix: String =
+            [alphabet[usize::from(i) / 36], alphabet[usize::from(i) % 36]].iter().collect();
+        let doc = Document::new().with("_id", i64::from(i)).with("t", format!("w1x{suffix}"));
+        (key(i), Some(doc))
+    });
+    ix.apply(changes).expect("applied");
+    if split {
+        ix.reshape(&[(Vec::new(), key(600)), (key(600), Vec::new())]).expect("split");
+        assert_eq!(ix.segments(), 2);
+    }
+    ix
+}
+
+#[test]
+fn fuzzy_expansions_are_the_terms_of_the_whole_index() {
+    // Measured on `refsearch` 1.70.6 (`scratchpad/lane3r/m80.js`): 600 expansions and 300 terms are
+    // fine with the first wave, and 1 000 expansions of the two waves and those 300 terms are too
+    // many, though each segment has 600 only.
+    let z: Vec<String> = (0..300_u32).map(|i| format!("zzzzzzzzz{}", radix36(i))).collect();
+    let big = format!(
+        r#"{{"compound": {{"should": [
+            {{"text": {{"path": "t", "query": "w1x", "fuzzy": {{"maxEdits": 2, "maxExpansions": 1000}}}}}},
+            {{"text": {{"path": "t", "query": "{}"}}}}]}}}}"#,
+        z.join(" ")
+    );
+    let f50 = q(r#"{"text": {"path": "t", "query": "w1x", "fuzzy": {"maxEdits": 2}}}"#);
+    let near = q(r#"{"text": {"path": "t", "query": "w1xzz", "fuzzy": {"maxEdits": 1}}}"#);
+    for split in [true, false] {
+        let ix = fuzzy_waves(split);
+        assert_eq!(outcome(&ix, &big), "maxClauseCount is set to 1024", "split {split}");
+        // The 50 expansions are the first terms of the whole index in byte order, all of the
+        // second wave: `w1x00` to `w1x0z` and `w1x10` to `w1x1d` (m80 `AB_f50`).
+        let found = ids(&ix, &f50).expect("fuzzy");
+        let expected: Vec<i64> = (936..972).chain(972..976).chain(998..1008).collect();
+        assert_eq!(found, expected, "split {split}");
+        let s = scores(&ix, &f50).expect("fuzzy");
+        assert!(s.iter().all(|&x| x == 1.012_946_1_f32), "split {split}: {s:?}");
+        // m80 `AB_f50_b`: 50 documents, from 25 to 1 177, scored 3.0388384 to 2.4310706.
+        let found = ids(&ix, &near).expect("near");
+        assert_eq!((found.len(), found[0], found[49]), (50, 25, 1177), "split {split}");
+        let s = scores(&ix, &near).expect("near");
+        assert_eq!((s[0], s[49]), (3.038_838_4_f32, 2.431_070_6_f32), "split {split}");
+    }
+}

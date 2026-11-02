@@ -11,7 +11,8 @@
 //!   nested clauses; maxClauseCount is set to 1024».
 //!
 //! A `range` on numbers is two clauses (of longs and of doubles), and any other operator one leaf.
-//! Fuzzy expansions are those of the index's own terms, as [`MemIndex::fuzzy_scores`] picks them.
+//! Fuzzy expansions are those of the terms of the whole index, not of the segment that answers,
+//! as [`MemIndex::fuzzy_scores`] picks them (measured in `m80.js` of lane 3).
 
 use std::collections::BTreeMap;
 
