@@ -225,3 +225,23 @@ pub(crate) fn check(
     let logs: Vec<SearchLog> = searchers.iter().flat_map(|s| s.log.iter().cloned()).collect();
     search_results::check(&writes, &logs)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn writes_of_unknown_transactions_count_once_a_search_saw_them() {
+        let ts = Hlc { physical: 7, logical: 0 };
+        let (mut a, mut b) = (Searcher::new(false), Searcher::new(false));
+        a.seen = vec![
+            (b"k".to_vec(), ts, Some(3)),
+            (b"j".to_vec(), ts, Some(4)),
+            (b"i".to_vec(), ts, None),
+        ];
+        b.seen = vec![(b"k".to_vec(), ts, Some(3))];
+        // With the writes merged, the searchers answered no search: nothing to judge them by.
+        let v = check(&[(1, ts, vec![b"x".to_vec()])], &[3], &[&a, &b]).expect_err("no search");
+        assert_eq!((v.detail.as_str(), v.liveness), ("no search answered", true));
+    }
+}

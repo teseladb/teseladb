@@ -40,6 +40,17 @@ impl Queries {
         Box::new(Queries::default())
     }
 
+    /// One pipeline checked: the distributed run has to give what the reference gives.
+    fn judge<T: PartialEq + std::fmt::Debug>(&mut self, stages: &[Document], want: T, got: T) {
+        self.checked += 1;
+        if want != got {
+            self.failed = Some(Violation::safety(
+                CHECKER,
+                format!("pipeline {stages:?}: distributed {got:?}, reference {want:?}"),
+            ));
+        }
+    }
+
     fn next_turn(w: &mut World, client: u32) {
         let at = w.now() + Nanos::from_millis(w.rng.range(20, 80));
         w.schedule(at, Event::Client { client });
@@ -166,13 +177,7 @@ impl Workload for Queries {
             let reference = Reference::new(w.rng.range(0, u64::MAX)).with_collection("c", docs);
             let want = reference.evaluate("c", &stages).map(|d| shown(&d));
             let got = run_distributed(&stages, parts, &reference).map(|d| shown(&d));
-            self.checked += 1;
-            if want != got {
-                self.failed = Some(Violation::safety(
-                    CHECKER,
-                    format!("pipeline {stages:?}: distributed {got:?}, reference {want:?}"),
-                ));
-            }
+            self.judge(&stages, want, got);
         }
         Self::next_turn(w, client);
     }
@@ -195,5 +200,26 @@ impl Workload for Queries {
             return Err(Violation::liveness(CHECKER, "no pipeline was checked"));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_distributed_answer_unlike_the_reference_fails_the_run() {
+        let mut w = World::new(1, 1, 1, false);
+        let mut q = Queries::default();
+        assert!(q.finish(&mut w).expect_err("nothing checked").liveness);
+        q.judge(&[], vec!["a"], vec!["a"]);
+        q.finish(&mut w).expect("the same answer");
+        q.judge(&[Document::new().with("$limit", 1)], vec!["a"], vec!["b"]);
+        let v = q.on_restart(&mut w, 0).expect_err("kept");
+        assert_eq!(v.checker, CHECKER);
+        // After a difference no more pipelines are drawn.
+        q.on_client(&mut w, 0);
+        assert_eq!(q.checked, 2);
+        assert_eq!(q.finish(&mut w).expect_err("failed").detail, v.detail);
     }
 }

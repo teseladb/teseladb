@@ -232,3 +232,18 @@ impl Workload for StorageWorkload {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_core_with_nothing_acknowledged_after_the_heal_fails_liveness() {
+        let mut w = World::new(1, 1, 1, false);
+        let mut wl = StorageWorkload::new(1, 1);
+        wl.finish(&mut w).expect("no fault window");
+        wl.heal_at = Some(Nanos::from_millis(5));
+        let v = wl.finish(&mut w).expect_err("nothing acknowledged");
+        assert_eq!(v.detail, "n0 c0: nothing acknowledged after healing the faults");
+    }
+}

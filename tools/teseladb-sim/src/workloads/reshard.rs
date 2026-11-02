@@ -336,3 +336,35 @@ impl Script for Reshard {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(p: u64) -> Hlc {
+        Hlc { physical: p, logical: 0 }
+    }
+
+    #[test]
+    fn a_read_of_the_new_order_must_show_the_last_write_below_its_mark() {
+        let mut r = Reshard::default();
+        r.writes[0] =
+            vec![(at(10), b"a".to_vec()), (at(20), b"b".to_vec()), (at(900), b"c".to_vec())];
+        r.unknown[1] = vec![b"u".to_vec()];
+        let none = vec![None; DOCS];
+        let mut read = none.clone();
+        read[0] = Some(b"b".to_vec());
+        r.check_read(at(25), &read).expect("the last write");
+        // A value of a write whose end is unknown may show.
+        read[1] = Some(b"u".to_vec());
+        r.check_read(at(25), &read).expect("maybe committed");
+        read[0] = Some(b"a".to_vec());
+        let v = r.check_read(at(25), &read).expect_err("an older version");
+        assert!(
+            v.detail.contains("writes near it") && !v.detail.contains("physical: 900"),
+            "{}",
+            v.detail
+        );
+        r.check_read(at(5), &none).expect("nothing yet");
+    }
+}

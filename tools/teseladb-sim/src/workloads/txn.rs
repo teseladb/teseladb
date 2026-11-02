@@ -1104,7 +1104,7 @@ impl TxnDriver {
         let route = self.route();
         let ids: Vec<u64> = self.recoveries.keys().copied().collect();
         for id in ids {
-            let Some((rec, owner)) = self.recoveries.get_mut(&id) else { continue };
+            let (rec, owner) = self.recoveries.get_mut(&id).expect("one of the ids above");
             if let Some(d) = rec.decision() {
                 let owner = *owner;
                 self.recoveries.remove(&id);
@@ -1118,9 +1118,9 @@ impl TxnDriver {
             }
             rec.tick(&route);
             for r in rec.take_requests() {
-                if let Some((_, answer)) = self.send(w, r.g, r.op, Asker::Recover(id, r.id))
-                    && let Some((rec, _)) = self.recoveries.get_mut(&id)
-                {
+                if let Some((_, answer)) = self.send(w, r.g, r.op, Asker::Recover(id, r.id)) {
+                    // Sending removes no recovery.
+                    let (rec, _) = self.recoveries.get_mut(&id).expect("still in flight");
                     rec.on_reply(r.id, answer);
                 }
             }
@@ -1242,5 +1242,235 @@ impl<S: Script> Workload for TxnWorkload<S> {
         }
         self.driver.check_recoveries()?;
         self.script.finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A script that keeps what ended and uses the trait's defaults for the rest.
+    #[derive(Default)]
+    struct Quiet {
+        ended: Vec<u32>,
+    }
+
+    impl Script for Quiet {
+        fn plan(&mut self, _: &mut World, _: u32) -> Vec<Step> {
+            Vec::new()
+        }
+        fn value(
+            &mut self,
+            _: u32,
+            _: &[u8],
+            _: &BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+        ) -> Option<Vec<u8>> {
+            None
+        }
+        fn ended(&mut self, client: u32, _: Finished) {
+            self.ended.push(client);
+        }
+        fn finish(&mut self) -> Result<(), Violation> {
+            Ok(())
+        }
+    }
+
+    fn setup() -> (World, TxnDriver) {
+        let mut w = World::cluster(1, 3, 1, false);
+        let mut d = TxnDriver::new(3, 1);
+        d.start(&mut w);
+        (w, d)
+    }
+
+    /// Client `client` on node 0 with `steps`, waiting for `waiting`.
+    fn client(d: &mut TxnDriver, w: &World, client: u32, steps: Vec<Step>, waiting: Waiting) {
+        let read_ts = Hlc { physical: 1, logical: 0 };
+        let owner = (u128::from(client) + 1, 1);
+        let coord = Coordinator::new(client_txn_id(owner.0, owner.1), owner, read_ts, w.local(0));
+        let done = Finished {
+            ops: Vec::new(),
+            read_ts,
+            outcome: Outcome::Aborted,
+            began: w.now(),
+            acked: None,
+            in_window: true,
+        };
+        let view = TxnView::default();
+        let c = Client {
+            coord,
+            node: 0,
+            steps,
+            at: 0,
+            view,
+            read: BTreeMap::new(),
+            done,
+            waiting,
+            ended: false,
+        };
+        d.clients.insert(client, c);
+    }
+
+    fn waiting(d: &TxnDriver, client: u32) -> Waiting {
+        d.clients[&client].waiting.clone()
+    }
+
+    #[test]
+    fn late_answers_for_clients_that_moved_on_are_dropped() {
+        let (mut w, mut d) = setup();
+        let mut s = Quiet::default();
+        let err = || Err(RangeError::Timeout);
+        // No such client: every answer is dropped.
+        d.put_done(&mut w, 9, err(), &mut s);
+        d.fence_done(&mut w, 9, err(), &mut s);
+        d.mutate_done(&mut w, 9, err(), &mut s);
+        d.touch_done(&mut w, 9, err(), &mut s);
+        d.touch_pushed(&mut w, 9, err(), &mut s);
+        d.read_done(&mut w, 9, err(), &mut s);
+        d.push_done(&mut w, 9, err(), &mut s);
+        d.advance(&mut w, 9, &mut s);
+        d.fail(&mut w, 9);
+        d.event(&mut w, 9, Event::Resolved, &mut s);
+        d.answer(&mut w, Asker::Coord(9, 0), err(), &mut s);
+        d.answer(&mut w, Asker::Recover(7, 0), err(), &mut s);
+        assert!(d.clients.is_empty() && s.ended.is_empty());
+        // A client that waits for something else keeps waiting for it.
+        client(&mut d, &w, 1, vec![Step::Commit], Waiting::Written);
+        d.put_done(&mut w, 1, err(), &mut s);
+        d.fence_done(&mut w, 1, err(), &mut s);
+        d.mutate_done(&mut w, 1, err(), &mut s);
+        d.touch_done(&mut w, 1, err(), &mut s);
+        d.touch_pushed(&mut w, 1, err(), &mut s);
+        d.read_done(&mut w, 1, err(), &mut s);
+        d.push_done(&mut w, 1, err(), &mut s);
+        assert_eq!(waiting(&d, 1), Waiting::Written);
+        // A client past its last step does nothing more.
+        client(&mut d, &w, 2, vec![], Waiting::Nothing);
+        d.advance(&mut w, 2, &mut s);
+        assert_eq!((waiting(&d, 2), d.clients[&2].at), (Waiting::Nothing, 0));
+    }
+
+    #[test]
+    fn plain_answers_reach_the_script_s_defaults() {
+        let (mut w, mut d) = setup();
+        let mut s = Quiet::default();
+        let ts = Hlc { physical: 5, logical: 0 };
+        for (i, answer) in
+            [Ok(Reply::Mutated { ts, change: vec![], result: vec![] }), Ok(Reply::Fenced { ts })]
+                .into_iter()
+                .enumerate()
+        {
+            client(&mut d, &w, 1, vec![], Waiting::Mutated);
+            match i {
+                0 => d.put_done(&mut w, 1, answer.clone(), &mut s),
+                _ => d.fence_done(&mut w, 1, answer.clone(), &mut s),
+            }
+            assert_eq!(waiting(&d, 1), Waiting::Nothing);
+            client(&mut d, &w, 1, vec![], Waiting::Mutated);
+            d.mutate_done(&mut w, 1, answer, &mut s);
+            assert_eq!(waiting(&d, 1), Waiting::Nothing);
+        }
+        // An expansion with the default script adds nothing.
+        client(&mut d, &w, 3, vec![Step::Expand], Waiting::Nothing);
+        d.advance(&mut w, 3, &mut s);
+        assert_eq!(d.clients[&3].steps.len(), 1);
+    }
+
+    #[test]
+    fn mutations_without_a_bound_or_a_leader_are_refused_at_once() {
+        let (mut w, mut d) = setup();
+        let (asker, r) = d.mutate(&mut w, 1, &[1, 2, 3]).expect("refused");
+        assert_eq!(asker, Asker::Mutate(1));
+        assert!(matches!(r, Err(RangeError::Mutation(_))), "{r:?}");
+        // Nobody leads yet: a mutation of a key is refused as for no leader.
+        let mut s = Quiet::default();
+        client(&mut d, &w, 1, vec![], Waiting::Mutated);
+        d.begin(&mut w, 2, vec![]);
+        assert!(!d.clients.contains_key(&2), "no steps, no transaction");
+        d.retire(1, &mut s);
+        assert!(d.clients.contains_key(&1), "not ended");
+    }
+
+    #[test]
+    fn a_retired_client_s_reads_and_pushes_are_forgotten() {
+        let (w, mut d) = setup();
+        let mut s = Quiet::default();
+        client(&mut d, &w, 1, vec![], Waiting::Ended);
+        d.clients.get_mut(&1).expect("there").ended = true;
+        d.pending.insert((0, 1), Asker::Read(1));
+        d.pending.insert((0, 2), Asker::Push(1));
+        d.pending.insert((0, 3), Asker::Read(2));
+        d.retire(1, &mut s);
+        assert_eq!(s.ended, vec![1]);
+        assert_eq!(d.pending.values().copied().collect::<Vec<_>>(), vec![Asker::Read(2)]);
+    }
+
+    #[test]
+    fn completions_of_other_cores_lost_hosts_and_crashed_nodes_are_dropped() {
+        let (mut w, mut d) = setup();
+        d.on_done(&mut w, (0, 1), OpId(1), Err(OpError::GroupNotFound));
+        d.hosts.remove(&1);
+        d.on_done(&mut w, (1, 0), OpId(1), Err(OpError::GroupNotFound));
+        w.crash_node(2);
+        d.on_done(&mut w, (2, 0), OpId(1), Err(OpError::GroupNotFound));
+        // A live node without its host is skipped by the pump.
+        let mut s = Quiet::default();
+        d.pump(&mut w, &mut s);
+    }
+
+    #[test]
+    fn the_record_gc_check_names_the_first_early_removal() {
+        let (mut w, mut d) = setup();
+        let owner = (5u128, 1i64);
+        let txn = client_txn_id(owner.0, owner.1);
+        // A record the driver never began, and one whose session has a later transaction.
+        d.check_removal(&w, client_txn_id(9, 9));
+        d.began.insert(owner, Nanos::ZERO);
+        d.last_number.insert(owner.0, 2);
+        d.check_removal(&w, txn);
+        assert!(d.early.is_none());
+        // Its time over: allowed; not over and no later one: early.
+        d.last_number.insert(owner.0, 1);
+        let later = Nanos::from_millis(RECORD_TTL_MS + 10_000);
+        w.schedule(later, WorldEvent::Heal);
+        while w.now() < later {
+            w.pop().expect("the heal is due");
+        }
+        d.check_removal(&w, txn);
+        assert!(d.early.is_none());
+        d.ended_at.insert(owner, w.now());
+        d.check_removal(&w, txn);
+        let first = d.early.clone().expect("early");
+        d.check_removal(&w, txn);
+        assert_eq!(d.early.as_ref(), Some(&first), "the first is kept");
+        let v = d.check_recoveries().expect_err("early");
+        assert_eq!((v.checker, v.detail), (TXN_RECOVERY, first));
+    }
+
+    #[test]
+    fn a_recovery_that_disagrees_with_the_end_fails_either_way() {
+        let (_, mut d) = setup();
+        let ts = Hlc { physical: 3, logical: 0 };
+        d.recovered.insert((1, 1), Decision::Committed(ts));
+        d.recovered.insert((2, 1), Decision::Aborted);
+        d.check_recoveries().expect("no end known");
+        d.ended.insert((1, 1), true);
+        d.ended.insert((2, 1), false);
+        d.check_recoveries().expect("both agree");
+        d.ended.insert((2, 1), true);
+        assert!(d.check_recoveries().expect_err("aborted").detail.ends_with("and it committed"));
+        d.ended.insert((2, 1), false);
+        d.ended.insert((1, 1), false);
+        assert!(d.check_recoveries().expect_err("committed").detail.ends_with("did not commit"));
+    }
+
+    #[test]
+    fn a_plain_write_failed_by_an_intent_fails_the_workload() {
+        let mut wl = TxnWorkload::new("probe", (3, 1), 1, Quiet::default());
+        assert_eq!((wl.name(), wl.counts()), ("probe", (0, 0, 0)));
+        let mut w = World::cluster(1, 3, 1, false);
+        wl.finish(&mut w).expect("nothing failed");
+        wl.driver.plain_failures.push("t=1 client 0".into());
+        let v = wl.finish(&mut w).expect_err("failed");
+        assert_eq!(v.checker, PLAIN_WRITES);
     }
 }

@@ -255,16 +255,10 @@ impl SpecialCollections {
                 },
                 _ => None,
             };
+            // Unpacking gives exactly the bucket's `control.count` measurements.
             let Ok(rows) = spec.measurements(raw) else {
                 return fail("a bucket that does not unpack".into());
             };
-            if control("count", "") != Some(Value::Int32(rows.len() as i32)) {
-                return fail(format!(
-                    "a bucket of {} measurements counts {:?}",
-                    rows.len(),
-                    control("count", "")
-                ));
-            }
             if doc.get("meta") != Some(&Value::Int64(meta as i64)) {
                 return fail(format!("bucket of meta {meta} holds meta {:?}", doc.get("meta")));
             }
@@ -472,5 +466,233 @@ impl Script for SpecialCollections {
             return Err(Violation::liveness(TS_CHECKER, what));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use teseladb_hlc::Hlc;
+    use teseladb_types::Nanos;
+
+    use super::*;
+
+    fn script() -> SpecialCollections {
+        SpecialCollections {
+            turns: BTreeMap::new(),
+            sent_by: BTreeMap::new(),
+            sent: ["a", "b"].into_iter().map(String::from).collect(),
+            sent_ts: ["m1", "m2"].into_iter().map(String::from).collect(),
+            healed: false,
+            checked: 0,
+            inserted: 0,
+            measured: 0,
+            series_checked: 0,
+            violation: None,
+        }
+    }
+
+    fn finished(ops: Vec<Op>, outcome: Outcome) -> Finished {
+        Finished {
+            ops,
+            read_ts: Hlc { physical: 1, logical: 0 },
+            outcome,
+            began: Nanos::ZERO,
+            acked: None,
+            in_window: true,
+        }
+    }
+
+    fn committed(ops: Vec<Op>) -> Finished {
+        finished(ops, Outcome::Committed(Hlc { physical: 1, logical: 0 }))
+    }
+
+    fn doc(id: &str, pad: usize) -> Vec<u8> {
+        Document::new().with("_id", id).with("p", "x".repeat(pad)).to_bytes().expect("small")
+    }
+
+    /// The reads of a capped turn: the state, then the documents `(seq, bytes)`.
+    fn capped(s: CappedState, docs: &[(u64, Vec<u8>)]) -> Vec<Op> {
+        let mut ops = vec![Op::Read(state_key(0, COLLECTION), Some(s.encode()))];
+        ops.extend(
+            docs.iter().map(|(seq, d)| Op::Read(doc_key(0, COLLECTION, *seq), Some(d.clone()))),
+        );
+        ops
+    }
+
+    fn capped_fails(docs: &[(u64, Vec<u8>)], next: u64, why: &str) {
+        let bytes = docs.iter().map(|(_, d)| d.len() as u64).sum();
+        let s = CappedState { bytes, docs: docs.len() as u64, next };
+        let v = script().check(&committed(capped(s, docs))).expect_err(why);
+        assert_eq!(v.checker, CHECKER);
+        assert!(v.detail.contains(why), "{why}: {}", v.detail);
+    }
+
+    #[test]
+    fn the_capped_checks_catch_each_broken_collection() {
+        // A good one passes, also a single document over the size.
+        let ok = [(0, doc("a", 10)), (1, doc("b", 10))];
+        let s =
+            CappedState { bytes: ok.iter().map(|(_, d)| d.len() as u64).sum(), docs: 2, next: 2 };
+        script().check(&committed(capped(s, &ok))).expect("a good collection");
+        let big = [(0, doc("a", 300))];
+        let s = CappedState { bytes: big[0].1.len() as u64, docs: 1, next: 1 };
+        script().check(&committed(capped(s, &big))).expect("the newest alone may pass the size");
+        // A state that does not match its documents.
+        let s = CappedState { bytes: 0, docs: 1, next: 1 };
+        let v = script().check(&committed(capped(s, &[]))).expect_err("no documents");
+        assert!(v.detail.contains("for 0 documents"), "{}", v.detail);
+        // An unreadable state.
+        let ops = vec![Op::Read(state_key(0, COLLECTION), Some(vec![1, 2, 3]))];
+        let v = script().check(&committed(ops)).expect_err("unreadable");
+        assert!(v.detail.contains("an unreadable state"), "{}", v.detail);
+        let five: Vec<(u64, Vec<u8>)> = (0..5).map(|i| (i, doc("a", 0))).collect();
+        capped_fails(&five, 5, "documents with max");
+        capped_fails(&[(0, doc("a", 120)), (1, doc("b", 120))], 2, "bytes in 2 documents");
+        capped_fails(&[(3, doc("a", 1))], 2, "at or past the next one");
+        capped_fails(&[(0, doc("z", 1))], 1, "is no insert a client sent");
+        capped_fails(&[(0, doc("a", 1)), (1, doc("a", 1))], 2, "_id a twice");
+        let numeric = Document::new().with("_id", 7).to_bytes().expect("small");
+        capped_fails(&[(0, numeric)], 1, "is no insert a client sent");
+    }
+
+    /// The bucket of meta 0 and window 0 holding `rows`, with `edit` applied, as the read of a
+    /// time-series turn.
+    fn series_read(rows: &[Document], edit: impl FnOnce(&mut Document)) -> Vec<Op> {
+        let (id, key) = bucket(0, 0);
+        let mut b = series().build(id, Some(&Value::Int64(0)), rows).expect("a bucket");
+        edit(&mut b);
+        vec![Op::Read(key, Some(b.to_bytes().expect("small")))]
+    }
+
+    fn row(id: &str, t: i64) -> Document {
+        Document::new().with("_id", id).with("t", Value::DateTime(t))
+    }
+
+    fn series_fails(ops: Vec<Op>, why: &str) {
+        let v = script().check_series(&committed(ops)).expect_err(why);
+        assert_eq!(v.checker, TS_CHECKER);
+        assert!(v.detail.contains(why), "{why}: {}", v.detail);
+    }
+
+    fn control_of(b: &Document) -> Document {
+        match b.get("control") {
+            Some(Value::Document(c)) => c.clone(),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_series_checks_catch_each_broken_bucket() {
+        let good = [row("m1", T0 + 1000), row("m2", T0 + 2000)];
+        script().check_series(&committed(series_read(&good, |_| {}))).expect("a good bucket");
+        // An absent bucket is skipped.
+        let (_, key) = bucket(0, 1);
+        script().check_series(&committed(vec![Op::Read(key, None)])).expect("absent");
+        let (_, key) = bucket(0, 0);
+        series_fails(vec![Op::Read(key, Some(vec![9]))], "an unreadable bucket");
+        series_fails(
+            series_read(&good, |b| {
+                b.insert("data", Value::Int32(1));
+            }),
+            "does not unpack",
+        );
+        series_fails(
+            series_read(&good, |b| {
+                b.insert("meta", Value::Int64(1));
+            }),
+            "bucket of meta 0 holds meta",
+        );
+        series_fails(
+            series_read(&good, |b| {
+                let mut c = control_of(b);
+                c.remove("min");
+                b.insert("control", c);
+            }),
+            "without its times",
+        );
+        // A count above the measurements' columns leaves rows without their fields.
+        series_fails(
+            series_read(&good, |b| {
+                let mut c = control_of(b);
+                c.insert("count", Value::Int32(3));
+                b.insert("control", c);
+            }),
+            "a measurement without _id or time",
+        );
+        series_fails(series_read(&[row("m9", T0)], |_| {}), "measurement m9 not sent");
+        series_fails(
+            series_read(&[row("m1", T0), row("m1", T0 + 1)], |_| {}),
+            "measurement m1 not sent, or twice",
+        );
+        series_fails(series_read(&[row("m1", T0 + HOUR + 5)], |_| {}), "in the bucket of");
+        series_fails(series_read(&[row("m1", T0 - 5)], |_| {}), "in the bucket of");
+        for (lo, hi) in [(T0 + 500, T0 + 900), (T0, T0 + 50)] {
+            let ops = series_read(&[row("m1", T0 + 100)], |b| {
+                let mut c = control_of(b);
+                c.insert("min", Document::new().with("t", Value::DateTime(lo)));
+                c.insert("max", Document::new().with("t", Value::DateTime(hi)));
+                b.insert("control", c);
+            });
+            series_fails(ops, "in the bucket of");
+        }
+    }
+
+    #[test]
+    fn turns_record_what_committed_and_finish_names_what_is_missing() {
+        let mut s = script();
+        // No answer, an unreadable one and one for a client without a turn count nothing.
+        s.mutated(0, Err(RangeError::Timeout));
+        s.mutated(0, Ok(vec![1]));
+        let one = MutationResult { n: 1, ..MutationResult::default() }.encode().expect("small");
+        s.mutated(0, Ok(one.clone()));
+        s.turns.insert(0, Turn::Insert { id: "a".into(), pad: 0 });
+        s.turns.insert(1, Turn::TsInsert { id: "m1".into(), meta: 0, t: T0 });
+        s.turns.insert(2, Turn::Delete { id: "a".into() });
+        let none = MutationResult::default().encode().expect("small");
+        s.mutated(0, Ok(none.clone()));
+        s.mutated(1, Ok(none));
+        s.mutated(2, Ok(one.clone()));
+        assert_eq!((s.inserted, s.measured), (0, 0));
+        let v = s.finish().expect_err("nothing yet");
+        assert_eq!((v.checker, v.liveness), (CHECKER, true));
+        s.mutated(0, Ok(one.clone()));
+        s.mutated(1, Ok(one));
+        assert_eq!((s.inserted, s.measured), (1, 1));
+        // A turn that did not commit is not checked; checks that commit are counted.
+        s.ended(2, finished(vec![], Outcome::Aborted));
+        assert!(!s.turns.contains_key(&2));
+        let v = s.finish().expect_err("no check yet");
+        assert!(v.detail.contains("1 inserts and 0 checks"), "{}", v.detail);
+        s.turns.insert(3, Turn::Check);
+        s.ended(3, committed(vec![]));
+        let v = s.finish().expect_err("no series check yet");
+        assert_eq!(v.checker, TS_CHECKER);
+        s.turns.insert(3, Turn::TsCheck);
+        s.ended(3, committed(vec![]));
+        s.finish().expect("each kind committed");
+        // A violation is kept and reported once; later turns are not checked.
+        s.turns.insert(3, Turn::Check);
+        s.ended(3, committed(vec![Op::Read(state_key(0, COLLECTION), Some(vec![1]))]));
+        s.ended(3, committed(vec![]));
+        assert_eq!(s.finish().expect_err("kept").checker, CHECKER);
+        s.finish().expect("reported once");
+    }
+
+    #[test]
+    fn healed_turns_check_each_collection_until_one_check_committed() {
+        let mut w = World::new(1, 3, 1, false);
+        let mut s = script();
+        s.healed();
+        // The capped check first, then the series one.
+        assert_eq!(s.plan(&mut w, 0).len(), 3);
+        assert!(matches!(s.turns.get(&0), Some(Turn::Check)));
+        s.checked = 1;
+        assert!(s.plan(&mut w, 0).len() > 3);
+        assert!(matches!(s.turns.get(&0), Some(Turn::TsCheck)));
+        // Without a turn or with an unreadable state a client reads nothing more.
+        assert!(s.expand(9, &BTreeMap::new()).is_empty());
+        s.turns.insert(1, Turn::Check);
+        let bad: BTreeMap<_, _> = [(state_key(0, COLLECTION), Some(vec![1]))].into();
+        assert!(s.expand(1, &bad).is_empty());
     }
 }

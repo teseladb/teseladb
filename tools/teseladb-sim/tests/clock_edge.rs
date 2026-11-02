@@ -144,3 +144,9 @@ fn a_leaders_clock_behind_slews_to_the_edge_and_stays_in_margin() {
 fn after_the_heal_the_clock_does_not_go_to_the_edge() {
     run(120, true);
 }
+
+#[test]
+fn a_world_of_one_node_has_no_median_to_be_off() {
+    let w = World::new(1, 1, 1, false);
+    assert_eq!(edge_offset(&w, 0, 5_000_000), None);
+}

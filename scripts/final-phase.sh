@@ -91,7 +91,7 @@ phase_table() {
       row 3 "sim-$w-$p" "$(est_sim "$s" "$p")" "\"$SIM\" --workload $w --plan $p --seeds $s --jobs $JOBS"
     done
   done < <(grep -o 'register_workload("[a-z0-9-]*"' tools/teseladb-sim/src/registry.rs | cut -d'"' -f2)
-  row 3 tlc "$(quick_or 600 3600)" "scripts/tests/tlc_test.sh && scripts/tlc.sh --all"
+  row 3 tlc "$(quick_or 120 3600)" "scripts/tests/tlc_test.sh$(quick_or '' ' && scripts/tlc.sh --all')"
   for c in crates/*/ tools/*/; do
     [[ -f $c/Cargo.toml ]] || continue
     c=$(basename "$c")

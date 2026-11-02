@@ -57,6 +57,10 @@ pub struct ZonesWorkload {
 impl ZonesWorkload {
     /// The workload over `nodes` nodes.
     pub fn boxed(nodes: u32, _cores: u16) -> Box<dyn Workload> {
+        Box::new(Self::new(nodes))
+    }
+
+    fn new(nodes: u32) -> ZonesWorkload {
         let mut sm = Group0Sm { cluster_id: [1; 16], ..Group0Sm::default() };
         for i in 1..=u64::from(nodes) {
             let info = NodeInfo {
@@ -85,15 +89,7 @@ impl ZonesWorkload {
             settling: false,
         });
         let states = sm.nodes.keys().map(|n| (*n, LiveState::Alive)).collect();
-        Box::new(ZonesWorkload {
-            nodes,
-            sm,
-            index: 100,
-            states,
-            seq: 0,
-            violation: None,
-            healed: false,
-        })
+        ZonesWorkload { nodes, sm, index: 100, states, seq: 0, violation: None, healed: false }
     }
 
     fn apply(&mut self, cmd: &Group0Command) -> Group0Result {
@@ -111,7 +107,6 @@ impl ZonesWorkload {
 
     /// One change of the zones, as the commands make it.
     fn admin(&mut self, w: &mut World) {
-        let z = self.zones();
         let zone = ZONES[w.rng.range(0, ZONES.len() as u64) as usize];
         let node = NodeId(w.rng.range(1, u64::from(self.nodes) + 1));
         // Weighted so that intervals stay and zones keep fewer nodes than the replicas.
@@ -121,6 +116,22 @@ impl ZonesWorkload {
             10..=17 => 2,
             _ => 3,
         };
+        // The draws of each change, in the order the seeds have always made them.
+        let (mut keys, mut nth) = ((0, 1), 0);
+        if pick == 2 {
+            let lo = w.rng.range(0, KEYS - 1);
+            keys = (lo, w.rng.range(lo + 1, KEYS));
+        } else if pick == 3 && !self.zones().ranges.is_empty() {
+            nth = w.rng.range(0, self.zones().ranges.len() as u64);
+        }
+        self.admin_act(pick, zone, node, keys, nth);
+    }
+
+    /// An administrator's change: 0 adds `node` to `zone`, 1 takes it out (never the last node of
+    /// a zone with ranges), 2 adds the keys `[lo, hi)` to the zone, 3 removes the `nth` range
+    /// (modulo their number).
+    fn admin_act(&mut self, pick: u8, zone: &str, node: NodeId, (lo, hi): (u64, u64), nth: u64) {
+        let z = self.zones();
         match pick {
             0 => {
                 if !z.shards.get(&node).is_some_and(|zs| zs.iter().any(|x| x == zone)) {
@@ -139,8 +150,6 @@ impl ZonesWorkload {
                 }
             }
             2 => {
-                let lo = w.rng.range(0, KEYS - 1);
-                let hi = w.rng.range(lo + 1, KEYS);
                 let (s, e) = (key(lo), key(hi));
                 let free = z
                     .ranges
@@ -171,7 +180,7 @@ impl ZonesWorkload {
                 if z.ranges.is_empty() {
                     return;
                 }
-                let r = &z.ranges[w.rng.range(0, z.ranges.len() as u64) as usize];
+                let r = &z.ranges[(nth % z.ranges.len() as u64) as usize];
                 let change = SettingChange { key: r.key(), expect: Some(r.encode()), value: None };
                 self.set(vec![change]);
             }
@@ -319,5 +328,52 @@ impl Workload for ZonesWorkload {
             return Err(v);
         }
         self.check_placement()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn in_zone(wl: &ZonesWorkload, zone: &str, node: u64) -> bool {
+        wl.zones().shards.get(&NodeId(node)).is_some_and(|zs| zs.iter().any(|z| z == zone))
+    }
+
+    #[test]
+    fn the_last_node_of_a_zone_with_ranges_stays_in_it() {
+        let mut wl = ZonesWorkload::new(3);
+        // Taking out a node that is not in the zone changes nothing.
+        wl.admin_act(1, "A", NodeId(1), (0, 1), 0);
+        wl.admin_act(0, "A", NodeId(1), (0, 1), 0);
+        wl.admin_act(2, "A", NodeId(1), (0, 4), 0);
+        assert_eq!(wl.zones().ranges.len(), 1);
+        wl.admin_act(1, "A", NodeId(1), (0, 1), 0);
+        assert!(in_zone(&wl, "A", 1), "the last node of a zone with a range");
+        wl.admin_act(0, "A", NodeId(2), (0, 1), 0);
+        wl.admin_act(1, "A", NodeId(1), (0, 1), 0);
+        assert!(!in_zone(&wl, "A", 1) && in_zone(&wl, "A", 2));
+        // A range whose identifier is taken is not added; then the ranges go one by one.
+        wl.seq = 1;
+        wl.admin_act(2, "A", NodeId(1), (8, 9), 0);
+        assert_eq!(wl.zones().ranges.len(), 1);
+        wl.admin_act(3, "A", NodeId(1), (0, 1), 5);
+        assert!(wl.zones().ranges.is_empty());
+        wl.admin_act(3, "A", NodeId(1), (0, 1), 5);
+    }
+
+    #[test]
+    fn a_range_without_replicas_or_outside_its_zone_fails() {
+        let mut wl = ZonesWorkload::new(3);
+        wl.admin_act(0, "A", NodeId(1), (0, 1), 0);
+        wl.admin_act(2, "A", NodeId(1), (0, 16), 0);
+        let r = wl.sm.ranges.get_mut(&FIRST).expect("the first range");
+        (r.start, r.end) = (key(0), key(16));
+        let v = wl.check_placement().expect_err("replicas on nodes 2 and 3");
+        assert!(!v.liveness && v.detail.contains("outside its zone's nodes"), "{}", v.detail);
+        wl.sm.ranges.get_mut(&FIRST).expect("there").replicas.clear();
+        wl.check_replicas();
+        let mut w = World::new(1, 3, 1, false);
+        let v = wl.finish(&mut w).expect_err("no replica");
+        assert!(v.detail.contains("has no replica"), "{}", v.detail);
     }
 }
