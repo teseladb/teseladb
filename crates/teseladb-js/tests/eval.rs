@@ -311,7 +311,7 @@ fn errors_report_the_thrown_message() {
     let e = call_with("function(){ throw new Error('boom') }", None, &[]).unwrap_err();
     assert_eq!(e.message(), "boom");
     let e = call_with("function(){ throw 'raw' }", None, &[]).unwrap_err();
-    assert_eq!(e.message(), "raw");
+    assert_eq!(e.message(), "uncaught exception: raw");
     let e = call_with("function(){ return undefinedFn() }", None, &[]).unwrap_err();
     assert_eq!(e.message(), "undefinedFn is not defined");
     let e = call_with("function(){ const o = {}; return o.f() }", None, &[]).unwrap_err();
@@ -372,4 +372,12 @@ fn regular_expressions_follow_ecmascript() {
         .and_then(|p| p.call(None, &[], &mut JsCtx::default()))
         .unwrap_err();
     assert!(e.message().contains("invalid regular expression"), "{e:?}");
+}
+
+/// A backslash that does not start a `\u` escape is refused instead of read as an empty name
+/// forever (found by `tests/fuzz.rs` on 02-11).
+#[test]
+fn a_stray_backslash_does_not_parse() {
+    let e = Program::compile("function(){ return (() \\> 1) }").unwrap_err();
+    assert!(matches!(e, JsError::Compile { .. }), "{e:?}");
 }

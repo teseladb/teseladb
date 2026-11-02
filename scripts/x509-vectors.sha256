@@ -7,7 +7,7 @@
 # pkits/manifest.txt: the certification path, settings and expected result of every test of section 4 of
 #   https://csrc.nist.gov/CSRC/media/Projects/PKI-Testing/documents/PKITS.pdf
 #   (SHA-256 506913f4b727704ee1b52b17aa472dc6fbcf01e41e7ad88ba505f29c1a74d9ea), transcribed from its text.
-# openssl/: written by openssl/generate.sh with OpenSSL 3.6.3 on 2026-10-30 (test keys only). The ec521-* files on 2026-10-31.
+# openssl/: written by openssl/generate.sh with OpenSSL 3.6.3 on 2026-10-30 (test keys only). The ec521-* files on 2026-10-31, sha1-leaf.pem on 2026-11-02.
 # refdb/: client certificates written by refdb/generate.sh with OpenSSL 3.6.3 on 2026-10-30.
 # ocsp/: certificates and answers of an OpenSSL 3.0.2 responder (openssl ocsp -index), written on 2026-10-31 (013 T042).
 1aa00514f0364cd5b7596c0a8d64e3686d88af8ba0e468cf90015113824f0c98  refdb/generate.sh
@@ -36,7 +36,7 @@ f95b9366be9ec4ee9b2e08ed1b8ecb1586732913378e7437a48efd1a13d75275  openssl/ec384-
 7dfc1f6e13834c4febb54e1b8d7810bc0f57aa01c0c2771f142560849e090c0e  openssl/ec521-pkcs8.pem
 27951c8790da29521fe0a61016d04f31891475e5c32d42ac5575e4ea4d41601b  openssl/ec521-root.pem
 8c68888be5fd4b5add67edec7248ce5a5ca49dc523c7145b11565151f77c437b  openssl/ed25519.pem
-548f66feec5b28ae5e5cb78ca926366fe41d67a0ee57ebb551b071a42a86955f  openssl/generate.sh
+255cc82eb2e49b4437af81d48f40cde4401f571d4a100dfd08c92c43b41ba986  openssl/generate.sh
 663909dbfd6940ed6527e52d649ea11153222f99bd34be7e506da3e72bc71454  openssl/inter.crl
 a3201c387791e1fe4bb4ba1bd0dd6e165d05a95091def58226ea69b185aed31a  openssl/inter.pem
 c044eb3e79111dfbacde5c55ced868eef4fa350d1fed0072a04b2c857fec7c65  openssl/leaf.csr
@@ -47,6 +47,7 @@ c4fe8802443f79cac3bc31a5831487af9b26343c259a55e8f84bd8eb2975c859  openssl/rsa-le
 72c4a20c0bdcda0777a50cf9f620a5e2e38fea5697c4cf13beead9dbeb54fd51  openssl/rsa-legacy-des3.pem
 f728263e7f5b5043966238066bd87eb0a574eff9b22ab3876db8e417393113a8  openssl/rsa-pkcs1.pem
 0e096cbdefb1330fd6a4ccf41121ad0a4b7b919941a1c923e25bc65f025121d3  openssl/rsa-pkcs8.pem
+10b16df75b7a0808ed0875d61df3b323f8ffc5a7d75d8b4cbd95c9d84d79940e  openssl/sha1-leaf.pem
 69112e7a8bc31911c791e7095e4fe7f75819344867999bd518a8ec83f7d184e7  pkits/certs/AllCertificatesNoPoliciesTest2EE.crt
 70f82f3e6607fb5ec09f4f4e5191b74ac4d412db8b74bd2fac8935c661b27aa2  pkits/certs/AllCertificatesSamePoliciesTest10EE.crt
 e64e7bbf800ff5e8090acf18e32b134c614d58ccbddf9cf78b62d103d96f8ef3  pkits/certs/AllCertificatesSamePoliciesTest13EE.crt

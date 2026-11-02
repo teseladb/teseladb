@@ -360,7 +360,7 @@ pub fn create<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
         ctx.backend.index_write(cmd)?;
         created.push((id, w.name));
     }
-    build(ctx, &t.coll)?;
+    build(ctx, &t.ns, &t.coll)?;
     let list: Vec<Value> = created
         .into_iter()
         .map(|(id, name)| Document::new().with(ID, hex_id(&id)).with(NAME, name).into())
@@ -369,16 +369,21 @@ pub fn create<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
 }
 
 /// Builds this node's segments of the search indexes of `coll` whose definition version it
-/// does not serve yet, over the documents already written (FR-014). An index whose documents
-/// cannot be analyzed stays `PENDING`; its queries give the error.
+/// does not serve yet, over the documents already written (FR-014), when the node has no
+/// builder to do it outside the command. An index whose documents cannot be analyzed is
+/// `FAILED`; its queries give the error.
 fn build<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
+    ns: &Namespace,
     coll: &CollectionEntry,
 ) -> Result<(), CommandError> {
+    if lock(ctx.shared).search.has_builder() {
+        return Ok(());
+    }
     for e in ctx.backend.search_indexes(coll.id)? {
         let served = lock(ctx.shared).search.served(&e.id).map(|s| s.version);
         if served != Some(e.version) {
-            match search_ops::with_index(ctx.backend, ctx.shared, coll, &e, &[], |_, _| ()) {
+            match search_ops::with_index(ctx.backend, ctx.shared, ns, coll, &e, &[], |_, _| ()) {
                 Ok(()) => {}
                 Err(err) if err.code == UNKNOWN_ERROR => {}
                 Err(err) => return Err(err),
@@ -386,6 +391,30 @@ fn build<B: Backend + ?Sized>(
         }
     }
     Ok(())
+}
+
+/// One pass of the node's builder (FR-014, T040): builds the segments of every search index
+/// whose definition version this node neither serves nor failed to build, each over the
+/// documents written up to the resolved marks of its ranges. It gives how many it built; an
+/// index that fails is left `FAILED` and the pass goes on.
+pub fn build_pending<B: Backend + ?Sized>(
+    backend: &mut B,
+    shared: &Shared,
+) -> Result<usize, CommandError> {
+    let mut built = 0;
+    for (_, coll) in backend.collections()? {
+        for e in backend.search_indexes(coll.id)? {
+            if lock(shared).search.served(&e.id).is_some_and(|s| s.version == e.version) {
+                continue;
+            }
+            match search_ops::build_index(backend, shared, &coll, &e) {
+                Ok(()) => built += 1,
+                Err(err) if err.code == UNKNOWN_ERROR => {}
+                Err(err) => return Err(err),
+            }
+        }
+    }
+    Ok(built)
 }
 
 /// The status name `$listSearchIndexes` shows.
@@ -420,6 +449,7 @@ pub fn described(
     e: &SearchIndexEntry,
     host: u64,
     served: Option<&Served>,
+    building: Option<&Served>,
 ) -> Result<Document, CommandError> {
     // `createdAt` keeps whole seconds (measured).
     let created = e.defined_ms - e.defined_ms.rem_euclid(1000);
@@ -438,7 +468,15 @@ pub fn described(
             d.insert("status", status);
             (status, queryable, vec![Value::Document(d)])
         }
-        None => (status_name(e.status), queryable(e), Vec::new()),
+        // Measured: while the first build runs, the index and its host are `BUILDING` and
+        // cannot be queried (`scratchpad/lane3m/m32.js`).
+        None => match building {
+            Some(b) => {
+                let d = search_ops::building_detail(host, b);
+                ("BUILDING", false, vec![Value::Document(d)])
+            }
+            None => (status_name(e.status), queryable(e), Vec::new()),
+        },
     };
     Ok(Document::new()
         .with(ID, hex_id(&e.id))
@@ -464,8 +502,11 @@ pub fn listed<B: Backend + ?Sized>(
     all.iter()
         .filter(|e| which.is_none_or(|w| matches(e, w)))
         .map(|e| {
-            let served = lock(shared).search.served(&e.id);
-            described(e, host, served.as_ref()).map(Value::from)
+            let (served, building) = {
+                let indexes = lock(shared);
+                (indexes.search.served(&e.id), indexes.search.building(&e.id))
+            };
+            described(e, host, served.as_ref(), building.as_ref()).map(Value::from)
         })
         .collect()
 }
@@ -510,7 +551,7 @@ pub fn update<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
         definition: stored_definition(definition, split_definition(&e.definition)?.1.as_ref())?,
         name: e.name,
     })?;
-    build(ctx, &t.coll)?;
+    build(ctx, &t.ns, &t.coll)?;
     Ok(Document::new().with("ok", 1.0))
 }
 
@@ -563,5 +604,59 @@ mod tests {
         assert_eq!(hex_id(&id), "6ae78b5a64236d09bf4d2903");
         assert_eq!(parse_id("abc"), None);
         assert_eq!(parse_id("6ae78b5a64236d09bf4d29zz"), None);
+    }
+
+    /// While its first build runs, an index and its host are `BUILDING` and not queryable, with
+    /// the definition being built (measured with `refsearch` 1.70.6, `scratchpad/lane3m/m32.js`).
+    #[test]
+    fn an_index_being_built_lists_as_building() {
+        let definition = Document::new().with("mappings", Document::new().with("dynamic", true));
+        let e = SearchIndexEntry {
+            id: [7; 12],
+            collection: 1,
+            name: "default".to_owned(),
+            kind: SearchIndexKind::Search,
+            definition: definition.to_bytes().expect("bytes"),
+            status: SearchIndexStatus::Pending,
+            version: 0,
+            defined_ms: 1_793_559_095_123,
+        };
+        let completed = Document::new().with(
+            "mappings",
+            Document::new().with("dynamic", true).with("fields", Document::new()),
+        );
+        let building = Served {
+            version: 0,
+            defined_ms: e.defined_ms,
+            definition: completed.clone(),
+            failure: None,
+        };
+        let d = described(&e, 1, None, Some(&building)).expect("described");
+        let version = Document::new()
+            .with("version", 0)
+            .with("createdAt", Value::DateTime(1_793_559_095_000));
+        let main = Document::new()
+            .with("status", "BUILDING")
+            .with("queryable", false)
+            .with("definitionVersion", version.clone())
+            .with("definition", completed);
+        let detail = Document::new()
+            .with("hostname", "000000000000000000000001")
+            .with("status", "BUILDING")
+            .with("queryable", false)
+            .with("mainIndex", main);
+        let want = Document::new()
+            .with("id", "070707070707070707070707")
+            .with("name", "default")
+            .with("status", "BUILDING")
+            .with("queryable", false)
+            .with("latestDefinitionVersion", version)
+            .with("latestDefinition", definition)
+            .with("statusDetail", Value::Array(vec![Value::Document(detail)]));
+        assert_eq!(d, want);
+        // Before the builder takes it, the catalog's `PENDING` with no `statusDetail`.
+        let pending = described(&e, 1, None, None).expect("described");
+        assert_eq!(pending.get("status"), Some(&Value::from("PENDING")));
+        assert_eq!(pending.get("statusDetail"), Some(&Value::Array(Vec::new())));
     }
 }

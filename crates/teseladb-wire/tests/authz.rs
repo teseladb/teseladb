@@ -599,3 +599,50 @@ fn malformed_stored_users_fail_the_login_as_refdb_does() {
     let r = run(&mut m, &mut c, ADMIN, start);
     assert_eq!(code(&r), Some(18), "{r:?}");
 }
+
+/// A time series lives in one namespace (015 FR-006, T022): a privilege on the collection reads
+/// its measurements, one on its `system_buckets` does not, and neither reads its buckets with
+/// `rawData` without `performRawDataOperations` (measured on a `refnode` 9.0.4 with
+/// authentication on 02-11-2026: code 13).
+#[test]
+fn a_time_series_is_read_with_privileges_on_its_own_namespace() {
+    let mut m = node();
+    let ts = Document::new().with("timeField", "t").with("metaField", "m");
+    let r = m.run(TEST, Document::new().with("create", "s").with("timeseries", ts));
+    assert!(ok(&r), "{r:?}");
+    let on = |resource: Resource| Privilege { resource, actions: vec![ActionType::Find] };
+    add_role(&mut m, "onColl", vec![on(Resource::Ns { db: TEST.into(), collection: "s".into() })]);
+    add_role(
+        &mut m,
+        "onBuckets",
+        vec![on(Resource::SystemBuckets { db: Some(TEST.into()), bucket: "s".into() })],
+    );
+    add_user(&mut m, "a", &[("onColl", ADMIN)]);
+    add_user(&mut m, "b", &[("onBuckets", ADMIN)]);
+    let find = || Document::new().with("find", "s");
+    let raw = || find().with("rawData", true);
+    let mut a = conn("a");
+    assert!(ok(&run(&mut m, &mut a, TEST, find())));
+    assert!(ok(&run(&mut m, &mut a, TEST, Document::new().with("count", "s"))));
+    assert_eq!(code(&run(&mut m, &mut a, TEST, raw())), Some(UNAUTHORIZED));
+    let mut b = conn("b");
+    assert_eq!(code(&run(&mut m, &mut b, TEST, find())), Some(UNAUTHORIZED));
+    assert_eq!(code(&run(&mut m, &mut b, TEST, raw())), Some(UNAUTHORIZED));
+    // `rawData` asks for `performRawDataOperations` too, and that action alone reads nothing.
+    let ns = || Resource::Ns { db: TEST.into(), collection: "s".into() };
+    let raw_ops = ActionType::PerformRawDataOperations;
+    add_role(
+        &mut m,
+        "raw",
+        vec![Privilege { resource: ns(), actions: vec![ActionType::Find, raw_ops] }],
+    );
+    add_role(&mut m, "rawOnly", vec![Privilege { resource: ns(), actions: vec![raw_ops] }]);
+    add_user(&mut m, "r", &[("raw", ADMIN)]);
+    add_user(&mut m, "o", &[("rawOnly", ADMIN)]);
+    let mut r = conn("r");
+    assert!(ok(&run(&mut m, &mut r, TEST, raw())));
+    assert!(ok(&run(&mut m, &mut r, TEST, find())));
+    let mut o = conn("o");
+    assert_eq!(code(&run(&mut m, &mut o, TEST, raw())), Some(UNAUTHORIZED));
+    assert_eq!(code(&run(&mut m, &mut o, TEST, find())), Some(UNAUTHORIZED));
+}

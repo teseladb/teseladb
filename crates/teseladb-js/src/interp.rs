@@ -17,6 +17,8 @@ pub enum Ctrl {
     Continue(Option<Name>),
     /// A limit that ends the invocation and cannot be caught.
     Fatal(Fatal),
+    /// A generator's `yield`: unwinds its body to `next`'s caller (see `generators.rs`).
+    Suspend,
 }
 
 /// The limits that end an invocation.
@@ -27,6 +29,9 @@ pub enum Fatal {
     Steps,
     /// A value without a BSON form, with RefDb's message.
     Convert(String),
+    /// What the engine of RefDb 9.0 cannot run and ends the call with a trap of its
+    /// WebAssembly build: a promise job (`then`, `await`) or a `FinalizationRegistry`.
+    Trap,
 }
 
 pub type R<T = Val> = Result<T, Ctrl>;
@@ -36,6 +41,9 @@ pub type R<T = Val> = Result<T, Ctrl>;
 pub struct Binding {
     pub value: Option<Val>,
     pub mutable: bool,
+    /// A `let`, `const`, `class` or a parameter of a list with expressions: a `var` of a direct
+    /// `eval` may not redeclare it.
+    pub lexical: bool,
 }
 
 /// A scope: its bindings, its parent, and for a function scope its `this`, home object and
@@ -43,6 +51,10 @@ pub struct Binding {
 #[derive(Debug, Default)]
 pub struct EnvRec {
     pub vars: Vec<(Name, Binding)>,
+    /// The object of a `with` statement, whose properties are the names of this scope.
+    pub with: Option<ObjRef>,
+    /// Whether this scope holds the `var`s of a function or of the program.
+    pub var_scope: bool,
     pub parent: Option<EnvRef>,
     pub this: Option<Val>,
     pub home: Option<ObjRef>,
@@ -52,8 +64,22 @@ pub struct EnvRec {
 
 pub type EnvRef = Rc<RefCell<EnvRec>>;
 
-/// The prototypes and constructors the interpreter makes values with.
+/// The parameters the elements of a mapped `arguments` object stand for, `None` once deleted.
 #[derive(Debug)]
+pub struct Mapped {
+    pub env: EnvRef,
+    pub names: RefCell<Vec<Option<Name>>>,
+}
+
+impl Mapped {
+    /// The parameter element `key` stands for.
+    fn name(&self, key: &str) -> Option<Name> {
+        array_index(key).and_then(|i| self.names.borrow().get(i).cloned().flatten())
+    }
+}
+
+/// The prototypes and constructors the interpreter makes values with.
+#[derive(Clone, Debug)]
 pub struct Realm {
     pub global: ObjRef,
     pub object: ObjRef,
@@ -72,6 +98,26 @@ pub struct Realm {
     pub iter: ObjRef,
     pub errors: Vec<(Name, ObjRef)>,
     pub bson: Vec<(Name, ObjRef)>,
+    /// The prototypes of the other objects (`WeakMap`, `Proxy`, typed arrays…) by name.
+    pub protos: Vec<(&'static str, ObjRef)>,
+}
+
+impl Realm {
+    /// The prototype installed under `name`, or `Object.prototype`.
+    pub fn proto(&self, name: &str) -> ObjRef {
+        self.protos
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map_or_else(|| self.object.clone(), |(_, o)| o.clone())
+    }
+}
+
+/// An iteration in progress.
+pub enum IterRec {
+    /// The values, read ahead, and the next one's index.
+    Items(Vec<Val>, usize),
+    /// An iterator object and its `next`.
+    Proto { it: Val, next: Val },
 }
 
 /// The invocation's limits.
@@ -98,6 +144,14 @@ pub struct Interp<'c> {
     pub rng: u64,
     pub deadline: Option<&'c dyn Fn() -> bool>,
     pub symbol_ids: u64,
+    /// The symbols made without a description (`Symbol()`): their `description` is undefined.
+    pub undescribed: Vec<u64>,
+    /// The registry of `Symbol.for`.
+    pub registry: Vec<(Name, Val)>,
+    /// The strings arrays of the tagged templates evaluated so far, by site.
+    pub templates: Vec<(usize, Val)>,
+    /// Whether a `with` statement has run: names are then looked up in its objects too.
+    pub with_used: bool,
     pub output: Vec<String>,
     /// The value of the last expression statement (a `$where` string's result).
     pub last: Option<Val>,
@@ -105,7 +159,22 @@ pub struct Interp<'c> {
     pub pos: Pos,
     /// Whether the running code is strict: assignments to read-only properties throw.
     pub strict: bool,
+    /// The name of the running function, for the stack of an error.
+    pub fname: Name,
+    /// The callers of the running function: their names and where each made its call.
+    pub frames: Vec<(Name, Pos)>,
+    /// Where the last `throw` left the evaluation: the place of a value that is not an error.
+    pub thrown_at: Pos,
+    /// What the engine of RefDb adds to the columns of the first line: the `(` it puts before a
+    /// function, or the code it puts before a `$where` expression.
+    pub col_offset: u32,
 }
+
+/// The key the parser gives a class's `static { … }` block.
+pub const STATIC_BLOCK: &str = "@@static-block";
+
+/// The file SpiderMonkey names in RefDb's errors.
+pub const ERROR_FILE: &str = "wasm:function";
 
 /// How often the deadline is read, in steps.
 const DEADLINE_EVERY: u64 = 1024;
@@ -128,34 +197,24 @@ impl Drop for Interp<'_> {
                 e.func = None;
             }
         }
-        let g = self.realm.global.clone();
-        {
-            let o = &self.realm.global;
-            o.borrow_mut().props.clear();
+        // The global object is the call's own; the objects it holds are shared ([`crate::shared`]).
+        self.realm.global.borrow_mut().props.clear();
+    }
+}
+
+/// Whether `new f()` may run: a class or plain function, a native constructor (one with a
+/// `prototype`, or `Proxy`), a bound constructor or a callable proxy.
+pub fn is_constructor(f: &Val) -> bool {
+    let Val::Obj(o) = f else { return false };
+    let b = o.borrow();
+    match &b.kind {
+        Kind::Func(Func::Closure { def, .. }) => {
+            !(def.arrow || def.generator || def.is_async || def.method)
         }
-        drop(g);
-        for (_, o) in self.realm.errors.iter().chain(self.realm.bson.iter()) {
-            o.borrow_mut().props.clear();
-        }
-        for o in [
-            &self.realm.object,
-            &self.realm.function,
-            &self.realm.array,
-            &self.realm.string,
-            &self.realm.number,
-            &self.realm.boolean,
-            &self.realm.symbol,
-            &self.realm.error,
-            &self.realm.date,
-            &self.realm.regexp,
-            &self.realm.map,
-            &self.realm.set,
-            &self.realm.iter,
-        ] {
-            let mut b = o.borrow_mut();
-            b.props.clear();
-            b.proto = None;
-        }
+        Kind::Func(Func::Native(_, name)) => b.get_own("prototype").is_some() || &**name == "Proxy",
+        Kind::Func(Func::Bound(t, ..)) => is_constructor(&Val::Obj(t.clone())),
+        Kind::Proxy(_, callable) => *callable,
+        _ => false,
     }
 }
 
@@ -165,20 +224,54 @@ fn callee_text(e: &Expr) -> String {
         Expr::Ident(n, _) => n.to_string(),
         Expr::Member { obj, prop, .. } => match &**prop {
             MemberProp::Name(n) => format!("{}.{n}", callee_text(obj)),
-            MemberProp::Computed(Expr::Str(s)) => format!("{}[\"{s}\"]", callee_text(obj)),
-            MemberProp::Computed(Expr::Num(n)) => {
-                format!("{}[{}]", callee_text(obj), number::to_string(*n))
-            }
-            MemberProp::Computed(_) => format!("{}[...]", callee_text(obj)),
+            // SpiderMonkey folds a constant key: `o['k' + 1]` is `o.k1`, `o['a b']` stays.
+            MemberProp::Computed(k) => match fold_key(k) {
+                Some(key) if is_identifier(&key) => format!("{}.{key}", callee_text(obj)),
+                Some(key) => format!("{}['{key}']", callee_text(obj)),
+                None => match k {
+                    Expr::Num(n) => format!("{}[{}]", callee_text(obj), number::to_string(*n)),
+                    Expr::Ident(n, _) => format!("{}[{n}]", callee_text(obj)),
+                    Expr::At(_, inner) if matches!(**inner, Expr::Ident(..)) => {
+                        format!("{}[{}]", callee_text(obj), callee_text(inner))
+                    }
+                    _ => format!("{}[...]", callee_text(obj)),
+                },
+            },
         },
         Expr::This => "this".into(),
         Expr::Call { callee, args, .. } if args.is_empty() => format!("{}()", callee_text(callee)),
         Expr::Call { callee, .. } => format!("{}(...)", callee_text(callee)),
         Expr::Str(s) => format!("\"{s}\""),
         Expr::Num(n) => number::to_string(*n),
-        Expr::OptChain(e) => callee_text(e),
+        Expr::OptChain(e) | Expr::At(_, e) => callee_text(e),
         _ => "(intermediate value)".into(),
     }
+}
+
+/// The string a constant key folds to: a string, or `+` of strings and numbers.
+fn fold_key(e: &Expr) -> Option<String> {
+    match e {
+        Expr::Str(s) => Some(s.to_string()),
+        Expr::At(_, x) => fold_key(x),
+        Expr::Binary("+", a, b) => {
+            let side = |x: &Expr| match x {
+                Expr::Num(n) => Some(number::to_string(*n)),
+                Expr::At(_, y) if matches!(**y, Expr::Num(_)) => match **y {
+                    Expr::Num(n) => Some(number::to_string(n)),
+                    _ => None,
+                },
+                other => fold_key(other),
+            };
+            Some(side(a)? + &side(b)?)
+        }
+        _ => None,
+    }
+}
+
+fn is_identifier(s: &str) -> bool {
+    let mut c = s.chars();
+    c.next().is_some_and(|f| f == '_' || f == '$' || f.is_alphabetic())
+        && c.all(|x| x == '_' || x == '$' || x.is_alphanumeric())
 }
 
 impl<'c> Interp<'c> {
@@ -202,6 +295,24 @@ impl<'c> Interp<'c> {
         if self.budget.charge(bytes) { Ok(()) } else { Err(Ctrl::Fatal(Fatal::OutOfMemory)) }
     }
 
+    /// A string made by joining others (`+`, a template, `concat`). SpiderMonkey joins them
+    /// without copying and fails when the length passes its limit; here the copy fails earlier,
+    /// at the heap limit, with the same catchable error (measured: `s = s + s` in a loop gives
+    /// «allocation size overflow» on a `refrouter` 9.0.4).
+    pub fn joined_string(&self, s: String) -> R {
+        if s.len() > self.max_string() {
+            return Err(self.error("InternalError", "allocation size overflow"));
+        }
+        self.string(s)
+    }
+
+    /// The longest string a call makes: an eighth of its heap, so that the error of a string
+    /// that keeps growing comes before the heap runs out, as SpiderMonkey's limit of 2^30 - 2
+    /// characters comes before its heap of 1100 MB does.
+    pub fn max_string(&self) -> usize {
+        self.budget.limit / 8
+    }
+
     /// A new string, charged to the heap.
     pub fn string(&self, s: String) -> R {
         self.charge(s.len())?;
@@ -219,9 +330,10 @@ impl<'c> Interp<'c> {
             };
         self.charge(size)?;
         Ok(ObjRef(Rc::new(ObjCell {
-            obj: RefCell::new(Obj { proto, props: Vec::new(), kind, extensible: true }),
+            obj: RefCell::new(Obj { proto, props: Vec::new(), kind, extensible: true, locks: 0 }),
             charged: std::cell::Cell::new(size),
             budget: self.budget.clone(),
+            shared: std::cell::Cell::new(false),
         })))
     }
 
@@ -246,11 +358,11 @@ impl<'c> Interp<'c> {
             .alloc(Some(self.realm.function.clone()), Kind::Func(Func::Native(f, name.into())))?;
         {
             let mut b = o.borrow_mut();
-            b.props.push(("name".into(), Prop { writable: false, ..Prop::hidden(Val::str(name)) }));
             b.props.push((
                 "length".into(),
                 Prop { writable: false, ..Prop::hidden(Val::Num(arity as f64)) },
             ));
+            b.props.push(("name".into(), Prop { writable: false, ..Prop::hidden(Val::str(name)) }));
         }
         Ok(o)
     }
@@ -274,7 +386,49 @@ impl<'c> Interp<'c> {
         let o = self.alloc(proto, Kind::Error)?;
         self.grow(&o, 1)?;
         o.borrow_mut().props.push(("message".into(), Prop::hidden(Val::str(message))));
+        self.place_error(&o)?;
         Ok(Val::Obj(o))
+    }
+
+    /// The column RefDb reports for `p`.
+    pub fn shown(&self, p: Pos) -> (u32, u32) {
+        (p.line, if p.line == 1 { p.col + self.col_offset } else { p.col })
+    }
+
+    /// The stack SpiderMonkey writes for an error made here: `name@file:line:column` for this
+    /// function and each caller, at most 128.
+    pub fn stack_text(&self) -> String {
+        let mut out = String::new();
+        let here = std::iter::once((&self.fname, self.pos));
+        let callers = self.frames.iter().rev().map(|(n, p)| (n, *p));
+        for (name, p) in here.chain(callers).take(128) {
+            if p.line == 0 {
+                // The call the runtime makes has no place in the code.
+                continue;
+            }
+            let (l, c) = self.shown(p);
+            out.push_str(&format!("{name}@{ERROR_FILE}:{l}:{c}\n"));
+        }
+        out
+    }
+
+    /// Gives an error object where it is made: `fileName`, `lineNumber`, `columnNumber` and
+    /// `stack`, as SpiderMonkey does.
+    pub fn place_error(&self, o: &ObjRef) -> R<()> {
+        let (l, c) = self.shown(self.pos);
+        let stack = self.stack_text();
+        self.grow(o, 4)?;
+        let mut b = o.borrow_mut();
+        for (k, v) in [
+            ("fileName", Val::str(ERROR_FILE)),
+            ("lineNumber", Val::Num(f64::from(l))),
+            ("columnNumber", Val::Num(f64::from(c))),
+            ("stack", Val::Str(stack.into())),
+        ] {
+            b.props.retain(|(x, _)| &**x != k);
+            b.props.push((k.into(), Prop::hidden(v)));
+        }
+        Ok(())
     }
 
     pub fn type_error<T>(&self, message: &str) -> R<T> {
@@ -285,6 +439,21 @@ impl<'c> Interp<'c> {
 
     pub fn primitive(&mut self, v: &Val, hint: &str) -> R {
         let Val::Obj(o) = v else { return Ok(v.clone()) };
+        let exotic = self.get(v, "@@Symbol.toPrimitive:0")?;
+        if !exotic.is_nullish() && !exotic.is_callable() {
+            let to = if hint == "string" { "string" } else { "number" };
+            return self.type_error(&format!(
+                "can't convert {} to {to}: its [Symbol.toPrimitive] property is not a function",
+                self.show(v)
+            ));
+        }
+        if exotic.is_callable() {
+            let r = self.call(&exotic, v, &[Val::str(hint)])?;
+            if matches!(r, Val::Obj(_)) {
+                return self.type_error("can't convert object to primitive type");
+            }
+            return Ok(r);
+        }
         let kind = o.borrow().kind.clone();
         match kind {
             Kind::Num(n) => return Ok(Val::Num(n)),
@@ -363,7 +532,7 @@ impl<'c> Interp<'c> {
             Val::Bool(b) => self.alloc(Some(self.realm.boolean.clone()), Kind::Bool(*b)),
             Val::Num(n) => self.alloc(Some(self.realm.number.clone()), Kind::Num(*n)),
             Val::Str(s) => self.alloc(Some(self.realm.string.clone()), Kind::Str(s.clone())),
-            Val::Sym(_) => self.alloc(Some(self.realm.symbol.clone()), Kind::Ordinary),
+            Val::Sym(_) => self.alloc(Some(self.realm.symbol.clone()), Kind::Symbol(v.clone())),
             Val::BigInt(b) => self.alloc(Some(self.realm.bigint.clone()), Kind::BigInt(b.clone())),
         }
     }
@@ -377,7 +546,7 @@ impl<'c> Interp<'c> {
             Val::Num(n) => number::to_string(*n),
             Val::BigInt(b) => format!("{b}n"),
             Val::Bool(b) => b.to_string(),
-            Val::Sym(s) => format!("Symbol({})", s.0),
+            Val::Sym(s) => format!("Symbol(\"{}\")", s.0),
             Val::Obj(o) => {
                 if o.borrow().is_callable() {
                     "function".into()
@@ -422,6 +591,9 @@ impl<'c> Interp<'c> {
         };
         let mut cur = Some(start);
         while let Some(o) = cur {
+            if crate::proxy::is_proxy(&o) {
+                return crate::proxy::get(self, &o, key, v);
+            }
             let found = {
                 let b = o.borrow();
                 match &b.kind {
@@ -431,12 +603,36 @@ impl<'c> Interp<'c> {
                         }
                         if let Some(i) = array_index(key)
                             && let Some(x) = items.get(i)
+                            && (b.locks & ELEMENTS_OWN == 0 || b.get_own(key).is_none())
                         {
                             return Ok(x.clone());
                         }
                     }
                     Kind::Str(s) if key == "length" => {
                         return Ok(Val::Num(s.encode_utf16().count() as f64));
+                    }
+                    Kind::Arguments(Some(m)) => {
+                        if let Some(n) = m.name(key) {
+                            let v = m
+                                .env
+                                .borrow()
+                                .vars
+                                .iter()
+                                .rev()
+                                .find(|(k, _)| *k == n)
+                                .and_then(|(_, b)| b.value.clone());
+                            if let Some(v) = v {
+                                return Ok(v);
+                            }
+                        }
+                    }
+                    Kind::Typed(t) => {
+                        if let Some(i) = crate::typed::numeric_key(key) {
+                            return Ok(match i {
+                                Some(i) if i < t.length() => crate::typed::read(t, i),
+                                _ => Val::Undef,
+                            });
+                        }
                     }
                     _ => {}
                 }
@@ -464,9 +660,33 @@ impl<'c> Interp<'c> {
             }
             return Ok(());
         };
+        if crate::proxy::is_proxy(o) {
+            return crate::proxy::set(self, o, key, value, target);
+        }
+        let typed = match &o.borrow().kind {
+            Kind::Typed(t) => crate::typed::numeric_key(key).map(|i| (t.clone(), i)),
+            _ => None,
+        };
+        if let Some((t, i)) = typed {
+            let x = crate::typed::convert(self, t.ty, &value)?;
+            if let Some(i) = i
+                && i < t.length()
+            {
+                crate::typed::write(&t, i, &x);
+            }
+            return Ok(());
+        }
         {
             let mut b = o.borrow_mut();
+            let (locks, extensible) = (b.locks, b.extensible);
+            let own = locks & ELEMENTS_OWN != 0
+                && array_index(key).is_some()
+                && b.props.iter().any(|(n, _)| &**n == key);
             if let Kind::Array(items) = &mut b.kind {
+                if key == "length" && locks & LENGTH_FIXED != 0 {
+                    drop(b);
+                    return self.read_only(key);
+                }
                 if key == "length" {
                     drop(b);
                     let n = self.number_of(&value)?;
@@ -481,10 +701,22 @@ impl<'c> Interp<'c> {
                     }
                     return Ok(());
                 }
-                if let Some(i) = array_index(key) {
+                if let Some(i) = array_index(key).filter(|_| !own) {
                     if i < items.len() {
+                        if locks & ELEMENTS_FROZEN != 0 {
+                            drop(b);
+                            return self.read_only(key);
+                        }
                         items[i] = value;
                         return Ok(());
+                    }
+                    if locks & LENGTH_FIXED != 0 || !extensible {
+                        let fixed = locks & LENGTH_FIXED != 0;
+                        drop(b);
+                        if !self.strict {
+                            return Ok(());
+                        }
+                        return Err(crate::arrays::cannot_grow(self, fixed, i));
                     }
                     let grow = i + 1 - items.len();
                     drop(b);
@@ -510,13 +742,23 @@ impl<'c> Interp<'c> {
                     return self.type_error(&format!("setting getter-only property \"{key}\""));
                 }
                 if !p.writable {
-                    if self.strict {
-                        return self.type_error(&format!("\"{key}\" is read-only"));
-                    }
-                    return Ok(());
+                    return self.read_only(key);
                 }
                 if c.ptr_eq(o) {
-                    if let Some(p) = o.borrow_mut().get_own_mut(key) {
+                    let mut b = o.borrow_mut();
+                    if let Kind::Arguments(Some(m)) = &b.kind
+                        && let Some(n) = m.name(key)
+                        && let Some((_, binding)) =
+                            m.env.borrow_mut().vars.iter_mut().rev().find(|(k, _)| *k == n)
+                    {
+                        binding.value = Some(value.clone());
+                    }
+                    if let (Some(i), Kind::Array(items)) = (array_index(key), &mut b.kind)
+                        && let Some(slot) = items.get_mut(i)
+                    {
+                        *slot = value.clone();
+                    }
+                    if let Some(p) = b.get_own_mut(key) {
                         p.value = value;
                     }
                     return Ok(());
@@ -535,6 +777,14 @@ impl<'c> Interp<'c> {
         }
         self.grow(o, 1)?;
         o.borrow_mut().props.push((key.into(), Prop::data(value)));
+        Ok(())
+    }
+
+    /// An assignment to a read-only property: ignored, or a `TypeError` in strict code.
+    fn read_only(&self, key: &str) -> R<()> {
+        if self.strict {
+            return self.type_error(&format!("{} is read-only", crate::props::shown_key(key)));
+        }
         Ok(())
     }
 
@@ -572,6 +822,9 @@ impl<'c> Interp<'c> {
             {
                 true
             }
+            Kind::Typed(t) if crate::typed::numeric_key(key).is_some() => {
+                matches!(crate::typed::numeric_key(key), Some(Some(i)) if i < t.length())
+            }
             _ => b.get_own(key).is_some(),
         }
     }
@@ -587,17 +840,92 @@ impl<'c> Interp<'c> {
         false
     }
 
+    /// The own string keys of `o` (only the enumerable ones when asked), through a proxy's
+    /// traps.
+    pub fn keys(&mut self, o: &ObjRef, only_enumerable: bool) -> R<Vec<Name>> {
+        if crate::proxy::is_proxy(o) {
+            return crate::proxy::keys(self, o, only_enumerable);
+        }
+        Ok(self.own_keys(o, only_enumerable))
+    }
+
+    /// Whether `o` or its prototypes have `key`, through a proxy's `has`.
+    pub fn has(&mut self, o: &ObjRef, key: &str) -> R<bool> {
+        let mut cur = Some(o.clone());
+        while let Some(c) = cur {
+            if crate::proxy::is_proxy(&c) {
+                return crate::proxy::has(self, &c, key);
+            }
+            if self.has_own(&c, key) {
+                return Ok(true);
+            }
+            cur = c.borrow().proto.clone();
+        }
+        Ok(false)
+    }
+
+    /// Whether `key` is an own property of `o`, through a proxy's traps.
+    pub fn has_own_property(&mut self, o: &ObjRef, key: &str) -> R<bool> {
+        if crate::proxy::is_proxy(o) {
+            return crate::proxy::has_own(self, o, key);
+        }
+        Ok(self.has_own(o, key))
+    }
+
+    /// `delete o[key]`.
+    pub fn delete_key(&mut self, o: &ObjRef, key: &str) -> R<bool> {
+        if crate::proxy::is_proxy(o) {
+            return crate::proxy::delete(self, o, key);
+        }
+        if crate::props::own_prop(o, key).is_some_and(|p| !p.configurable) {
+            if self.strict {
+                let k = crate::props::shown_key(key);
+                return self
+                    .type_error(&format!("property {k} is non-configurable and can't be deleted"));
+            }
+            return Ok(false);
+        }
+        let mut b = o.borrow_mut();
+        if let Kind::Arguments(Some(m)) = &b.kind
+            && let Some(i) = array_index(key)
+            && let Some(slot) = m.names.borrow_mut().get_mut(i)
+        {
+            *slot = None;
+        }
+        if let Kind::Array(items) = &mut b.kind
+            && let Some(i) = array_index(key)
+        {
+            // Holes are not kept: the element becomes undefined.
+            if i < items.len() {
+                items[i] = Val::Undef;
+            }
+            b.remove(key);
+            return Ok(true);
+        }
+        b.remove(key);
+        Ok(true)
+    }
+
     /// The enumerable own string keys of `o`, indices first.
     pub fn own_keys(&self, o: &ObjRef, only_enumerable: bool) -> Vec<Name> {
         let b = o.borrow();
         let mut out: Vec<Name> = match &b.kind {
             Kind::Array(items) => (0..items.len()).map(|i| i.to_string().into()).collect(),
             Kind::Str(s) => (0..s.encode_utf16().count()).map(|i| i.to_string().into()).collect(),
+            Kind::Typed(t) => (0..t.length()).map(|i| i.to_string().into()).collect(),
             _ => Vec::new(),
         };
         let mut ints: Vec<(usize, Name)> = Vec::new();
         let mut rest = Vec::new();
+        let elements = matches!(b.kind, Kind::Array(_));
         for (k, p) in &b.props {
+            // An array element with attributes of its own is listed with the others.
+            if elements && array_index(k).is_some() {
+                if only_enumerable && !p.enumerable {
+                    out.retain(|x| x != k);
+                }
+                continue;
+            }
             if (only_enumerable && !p.enumerable) || k.starts_with("@@") {
                 continue;
             }
@@ -618,6 +946,10 @@ impl<'c> Interp<'c> {
         let Val::Obj(fo) = f else {
             return self.type_error(&format!("{} is not a function", self.show(f)));
         };
+        if crate::proxy::is_proxy(fo) && fo.borrow().is_callable() {
+            self.step()?;
+            return crate::proxy::apply(self, fo, this, args);
+        }
         let func = match &fo.borrow().kind {
             Kind::Func(func) => func.clone(),
             _ => return self.type_error(&format!("{} is not a function", self.show(f))),
@@ -655,7 +987,7 @@ impl<'c> Interp<'c> {
         r
     }
 
-    fn new_env(&mut self, parent: Option<EnvRef>) -> EnvRef {
+    pub fn new_env(&mut self, parent: Option<EnvRef>) -> EnvRef {
         let e = Rc::new(RefCell::new(EnvRec { parent, ..EnvRec::default() }));
         self.envs.push(Rc::downgrade(&e));
         if self.envs.len() > 4096 {
@@ -676,6 +1008,41 @@ impl<'c> Interp<'c> {
         new_target: Option<Val>,
     ) -> R {
         self.charge(0)?;
+        let name = match fo.borrow().get_own("name").map(|p| p.value.clone()) {
+            Some(Val::Str(n)) => n,
+            _ => "".into(),
+        };
+        let caller = std::mem::replace(&mut self.fname, name);
+        self.frames.push((caller, self.pos));
+        let r = self.run_closure_in(fo, def, env, this, home, args, new_target);
+        if let Some((caller, pos)) = self.frames.pop() {
+            self.fname = caller;
+            self.pos = pos;
+        }
+        r
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_closure_in(
+        &mut self,
+        fo: &ObjRef,
+        def: &Rc<FuncDef>,
+        env: &EnvRef,
+        this: Option<Val>,
+        home: Option<ObjRef>,
+        args: &[Val],
+        new_target: Option<Val>,
+    ) -> R {
+        // Sloppy code sees `this` as an object: the global one for undefined and null.
+        let this = match this {
+            Some(Val::Undef | Val::Null) if !def.strict && !def.arrow => {
+                Some(Val::Obj(self.realm.global.clone()))
+            }
+            Some(v) if !def.strict && !def.arrow && !matches!(v, Val::Obj(_)) => {
+                Some(Val::Obj(self.object_of(&v)?))
+            }
+            other => other,
+        };
         let scope = self.new_env(Some(env.clone()));
         {
             let mut s = scope.borrow_mut();
@@ -690,7 +1057,21 @@ impl<'c> Interp<'c> {
             declare(&scope, name, Val::Obj(fo.clone()), true);
         }
         if !def.arrow {
-            let a = self.alloc(Some(self.realm.object.clone()), Kind::Arguments)?;
+            let plain = def.rest.is_none()
+                && def.params.iter().all(|(p, d)| d.is_none() && matches!(p, Pattern::Name(_)));
+            let mapped = (plain && !def.strict).then(|| {
+                let names = def
+                    .params
+                    .iter()
+                    .take(args.len())
+                    .map(|(p, _)| match p {
+                        Pattern::Name(n) => Some(n.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                Rc::new(Mapped { env: scope.clone(), names: RefCell::new(names) })
+            });
+            let a = self.alloc(Some(self.realm.object.clone()), Kind::Arguments(mapped))?;
             self.grow(&a, args.len() + 1)?;
             {
                 let mut b = a.borrow_mut();
@@ -701,12 +1082,31 @@ impl<'c> Interp<'c> {
             }
             declare(&scope, "arguments", Val::Obj(a), true);
         }
+        // A list with defaults or patterns: each parameter is uninitialized until its turn, and
+        // the body's `var`s get a scope of their own (ECMA-262 §10.2.11).
+        let expressions = def.rest.as_ref().is_some_and(|r| !matches!(r, Pattern::Name(_)))
+            || def.params.iter().any(|(p, d)| d.is_some() || !matches!(p, Pattern::Name(_)));
+        if expressions {
+            let mut names = Vec::new();
+            for (p, _) in &def.params {
+                pattern_names(p, &mut names);
+            }
+            if let Some(r) = &def.rest {
+                pattern_names(r, &mut names);
+            }
+            let mut sc = scope.borrow_mut();
+            for n in names {
+                sc.vars.push((n, Binding { value: None, mutable: true, lexical: true }));
+            }
+        }
+        scope.borrow_mut().var_scope = true;
         for (i, (p, d)) in def.params.iter().enumerate() {
             let mut v = args.get(i).cloned().unwrap_or(Val::Undef);
             if matches!(v, Val::Undef)
                 && let Some(d) = d
             {
                 v = self.eval(d, &scope)?;
+                name_function(&v, p, d);
             }
             self.bind(p, v, &scope, Some(true))?;
         }
@@ -715,10 +1115,40 @@ impl<'c> Interp<'c> {
             let arr = self.array(rest)?;
             self.bind(r, arr, &scope, Some(true))?;
         }
+        let scope = if expressions {
+            let body = self.new_env(Some(scope.clone()));
+            body.borrow_mut().var_scope = true;
+            // A `var` named like a parameter starts with the parameter's value.
+            let mut names = Vec::new();
+            for st in &def.body {
+                var_names(st, &mut names);
+            }
+            for n in names {
+                let v = scope
+                    .borrow()
+                    .vars
+                    .iter()
+                    .rev()
+                    .find(|(k, _)| *k == n)
+                    .and_then(|(_, b)| b.value.clone());
+                if let Some(v) = v {
+                    declare(&body, &n, v, true);
+                }
+            }
+            body
+        } else {
+            scope
+        };
         self.hoist(&def.body, &scope, true)?;
+        if def.generator {
+            return crate::generators::make(self, fo, def, scope);
+        }
         let outer = std::mem::replace(&mut self.strict, def.strict);
         let r = self.exec_block_in(&def.body, &scope);
         self.strict = outer;
+        if def.is_async {
+            return crate::promise::settle_async(self, r);
+        }
         let v = match r {
             Ok(()) | Err(Ctrl::Break(_) | Ctrl::Continue(_)) => Val::Undef,
             Err(Ctrl::Return(v)) => v,
@@ -737,6 +1167,10 @@ impl<'c> Interp<'c> {
         let Val::Obj(fo) = f else {
             return self.type_error(&format!("{} is not a constructor", self.show(f)));
         };
+        if crate::proxy::is_proxy(fo) && fo.borrow().is_callable() {
+            self.step()?;
+            return crate::proxy::construct(self, fo, args, new_target);
+        }
         let func = match &fo.borrow().kind {
             Kind::Func(func) => func.clone(),
             _ => return self.type_error(&format!("{} is not a constructor", self.show(f))),
@@ -850,7 +1284,44 @@ impl<'c> Interp<'c> {
         None
     }
 
+    /// A scope whose names are the properties of `o` (`with`).
+    pub fn with_scope(&mut self, o: &Val, env: &EnvRef) -> R<EnvRef> {
+        let o = self.object_of(o)?;
+        let scope = self.new_env(Some(env.clone()));
+        scope.borrow_mut().with = Some(o);
+        self.with_used = true;
+        Ok(scope)
+    }
+
+    /// The object of the innermost `with` that has `name`, before any scope that declares it.
+    fn with_object(&mut self, env: &EnvRef, name: &str) -> R<Option<ObjRef>> {
+        let mut cur = Some(env.clone());
+        while let Some(e) = cur {
+            let with = e.borrow().with.clone();
+            if let Some(o) = with {
+                if self.has(&o, name)? {
+                    let blocked = match self.get(&Val::Obj(o.clone()), "@@Symbol.unscopables:0")? {
+                        u @ Val::Obj(_) => self.get(&u, name)?.truthy(),
+                        _ => false,
+                    };
+                    if !blocked {
+                        return Ok(Some(o));
+                    }
+                }
+            } else if e.borrow().vars.iter().any(|(k, _)| &**k == name) {
+                return Ok(None);
+            }
+            cur = e.borrow().parent.clone();
+        }
+        Ok(None)
+    }
+
     pub fn read_var(&mut self, env: &EnvRef, name: &str) -> R {
+        if self.with_used
+            && let Some(o) = self.with_object(env, name)?
+        {
+            return self.get(&Val::Obj(o), name);
+        }
         if let Some((e, i)) = self.lookup(env, name) {
             return match &e.borrow().vars[i].1.value {
                 Some(v) => Ok(v.clone()),
@@ -868,6 +1339,11 @@ impl<'c> Interp<'c> {
     }
 
     fn write_var(&mut self, env: &EnvRef, name: &str, v: Val) -> R<()> {
+        if self.with_used
+            && let Some(o) = self.with_object(env, name)?
+        {
+            return self.set(&Val::Obj(o), name, v);
+        }
         if let Some((e, i)) = self.lookup(env, name) {
             let mut b = e.borrow_mut();
             let binding = &mut b.vars[i].1;
@@ -936,10 +1412,14 @@ impl<'c> Interp<'c> {
                         let mut names = Vec::new();
                         pattern_names(p, &mut names);
                         for n in names {
-                            scope
-                                .borrow_mut()
-                                .vars
-                                .push((n, Binding { value: None, mutable: *k == DeclKind::Let }));
+                            scope.borrow_mut().vars.push((
+                                n,
+                                Binding {
+                                    value: None,
+                                    mutable: *k == DeclKind::Let,
+                                    lexical: true,
+                                },
+                            ));
                         }
                     }
                 }
@@ -947,7 +1427,7 @@ impl<'c> Interp<'c> {
                     scope
                         .borrow_mut()
                         .vars
-                        .push((n.clone(), Binding { value: None, mutable: true }));
+                        .push((n.clone(), Binding { value: None, mutable: true, lexical: true }));
                 }
                 Stmt::Func(n, def) => {
                     let f = self.closure(def, scope)?;
@@ -980,25 +1460,37 @@ impl<'c> Interp<'c> {
             }),
         )?;
         self.grow(&f, 3)?;
-        {
-            let mut b = f.borrow_mut();
-            let name = def.name.clone().unwrap_or_else(|| "".into());
-            b.props.push(("name".into(), Prop { writable: false, ..Prop::hidden(Val::Str(name)) }));
-            b.props.push((
-                "length".into(),
-                Prop {
-                    writable: false,
-                    ..Prop::hidden(Val::Num(
-                        def.params.iter().take_while(|(_, d)| d.is_none()).count() as f64,
-                    ))
-                },
-            ));
-        }
-        if !def.arrow {
+        let fixed = |v: Val| Prop { writable: false, ..Prop::hidden(v) };
+        let prototype = if def.generator {
+            let (fp, pp) = if def.is_async {
+                ("AsyncGeneratorFunction", "AsyncGenerator")
+            } else {
+                ("GeneratorFunction", "Generator")
+            };
+            f.borrow_mut().proto = Some(self.realm.proto(fp));
+            Some(self.alloc(Some(self.realm.proto(pp)), Kind::Ordinary)?)
+        } else if def.is_async {
+            f.borrow_mut().proto = Some(self.realm.proto("AsyncFunction"));
+            None
+        } else if !def.arrow {
             let proto = self.object()?;
             self.define(&proto, "constructor", Prop::hidden(Val::Obj(f.clone())))?;
-            f.borrow_mut().props.push(("prototype".into(), Prop::hidden(Val::Obj(proto))));
+            Some(proto)
+        } else {
+            None
+        };
+        let mut b = f.borrow_mut();
+        if let Some(p) = prototype {
+            b.props.push((
+                "prototype".into(),
+                Prop { configurable: false, ..Prop::hidden(Val::Obj(p)) },
+            ));
         }
+        let length = def.params.iter().take_while(|(_, d)| d.is_none()).count() as f64;
+        b.props.push(("length".into(), fixed(Val::Num(length))));
+        let name = def.name.clone().unwrap_or_else(|| "".into());
+        b.props.push(("name".into(), fixed(Val::Str(name))));
+        drop(b);
         Ok(Val::Obj(f))
     }
 
@@ -1019,7 +1511,10 @@ impl<'c> Interp<'c> {
                             b.value = Some(v);
                             b.mutable = m;
                         }
-                        None => s.vars.push((n.clone(), Binding { value: Some(v), mutable: m })),
+                        None => s.vars.push((
+                            n.clone(),
+                            Binding { value: Some(v), mutable: m, lexical: false },
+                        )),
                     }
                     Ok(())
                 }
@@ -1038,6 +1533,7 @@ impl<'c> Interp<'c> {
                         && let Some(d) = d
                     {
                         x = self.eval(d, scope)?;
+                        name_function(&x, target, d);
                     }
                     used.push(key);
                     self.bind(target, x, scope, declare_mutable)?;
@@ -1045,7 +1541,7 @@ impl<'c> Interp<'c> {
                 if let Some(r) = rest {
                     let o = self.object()?;
                     if let Val::Obj(src) = &v {
-                        for k in self.own_keys(src, true) {
+                        for k in self.keys(src, true)? {
                             if !used.contains(&k) {
                                 let x = self.get(&v, &k)?;
                                 self.define(&o, &k, Prop::data(x))?;
@@ -1057,7 +1553,19 @@ impl<'c> Interp<'c> {
                 Ok(())
             }
             Pattern::Array(items, rest) => {
-                let all = self.iterate(&v)?;
+                // An iterator is read as far as the pattern needs and then closed.
+                let mut rec = self.open_iter(&v)?;
+                let mut all = Vec::new();
+                let want = if rest.is_some() { usize::MAX } else { items.len() };
+                while all.len() < want {
+                    match self.iter_step(&mut rec)? {
+                        Some(x) => all.push(x),
+                        None => break,
+                    }
+                }
+                if all.len() == want && rest.is_none() {
+                    self.iter_close(&rec)?;
+                }
                 for (i, item) in items.iter().enumerate() {
                     let Some((target, d)) = item else { continue };
                     let mut x = all.get(i).cloned().unwrap_or(Val::Undef);
@@ -1065,6 +1573,7 @@ impl<'c> Interp<'c> {
                         && let Some(d) = d
                     {
                         x = self.eval(d, scope)?;
+                        name_function(&x, target, d);
                     }
                     self.bind(target, x, scope, declare_mutable)?;
                 }
@@ -1089,6 +1598,78 @@ impl<'c> Interp<'c> {
     }
 
     /// The values `v` iterates over (arrays, strings, maps, sets, iterators and iterables).
+    /// Starts iterating `v`: the values of the objects the interpreter knows, or the iterator
+    /// its `Symbol.iterator` gives, read one value at a time.
+    pub fn open_iter(&mut self, v: &Val) -> R<IterRec> {
+        let fast = match v {
+            Val::Str(_) => true,
+            Val::Obj(o) => matches!(
+                o.borrow().kind,
+                Kind::Array(_)
+                    | Kind::Typed(_)
+                    | Kind::Set(_)
+                    | Kind::Map(_)
+                    | Kind::Iter(_)
+                    | Kind::Arguments(_)
+            ),
+            _ => false,
+        };
+        if fast {
+            return Ok(IterRec::Items(self.iterate(v)?, 0));
+        }
+        if v.is_nullish() {
+            let m = format!("can't access property Symbol.iterator of {}", self.show(v));
+            return self.type_error(&m);
+        }
+        let it_fn = self.get(v, "@@Symbol.iterator:0")?;
+        if !it_fn.is_callable() {
+            return self.type_error(&format!("{} is not iterable", self.show(v)));
+        }
+        let it = self.call(&it_fn, v, &[])?;
+        if !matches!(it, Val::Obj(_)) {
+            return self.type_error("result of the Symbol.iterator method is not an object");
+        }
+        let next = self.get(&it, "next")?;
+        Ok(IterRec::Proto { it, next })
+    }
+
+    /// The next value of an iteration, `None` at its end.
+    pub fn iter_step(&mut self, rec: &mut IterRec) -> R<Option<Val>> {
+        self.step()?;
+        match rec {
+            IterRec::Items(items, i) => {
+                let v = items.get(*i).cloned();
+                *i += 1;
+                Ok(v)
+            }
+            IterRec::Proto { it, next } => {
+                let (it, next) = (it.clone(), next.clone());
+                let r = self.call(&next, &it, &[])?;
+                if !matches!(r, Val::Obj(_)) {
+                    return self.type_error("iterator.next() returned a non-object value");
+                }
+                if self.get(&r, "done")?.truthy() {
+                    *rec = IterRec::Items(Vec::new(), 0);
+                    return Ok(None);
+                }
+                Ok(Some(self.get(&r, "value")?))
+            }
+        }
+    }
+
+    /// Ends an iteration early: calls the iterator's `return`.
+    pub fn iter_close(&mut self, rec: &IterRec) -> R<()> {
+        let IterRec::Proto { it, .. } = rec else { return Ok(()) };
+        let f = self.get(it, "return")?;
+        if f.is_callable() {
+            let r = self.call(&f, it, &[])?;
+            if !matches!(r, Val::Obj(_)) {
+                return self.type_error("iterator.return() returned a non-object value");
+            }
+        }
+        Ok(())
+    }
+
     pub fn iterate(&mut self, v: &Val) -> R<Vec<Val>> {
         match v {
             Val::Str(s) => Ok(s.chars().map(|c| Val::Str(c.to_string().into())).collect()),
@@ -1096,6 +1677,7 @@ impl<'c> Interp<'c> {
                 let kind = o.borrow().kind.clone();
                 match kind {
                     Kind::Array(items) => return Ok(items),
+                    Kind::Typed(t) => return Ok(crate::typed::elements(&t)),
                     Kind::Set(items) => return Ok(items),
                     Kind::Map(entries) => {
                         let mut out = Vec::with_capacity(entries.len());
@@ -1110,7 +1692,7 @@ impl<'c> Interp<'c> {
                         *pos = items.len();
                         return Ok(rest);
                     }
-                    Kind::Arguments => {
+                    Kind::Arguments(_) => {
                         let len = self.get(v, "length")?;
                         let n = self.number_of(&len)? as usize;
                         let mut out = Vec::new();
@@ -1181,7 +1763,7 @@ impl<'c> Interp<'c> {
                     let v = match init {
                         Some(e) => {
                             let v = self.eval(e, env)?;
-                            name_function(&v, p);
+                            name_function(&v, p, e);
                             v
                         }
                         None if *kind == DeclKind::Var => continue,
@@ -1195,6 +1777,7 @@ impl<'c> Interp<'c> {
                 }
             }
             Stmt::Func(..) | Stmt::Empty => {}
+            Stmt::Suspends(s) => self.exec(s, env)?,
             Stmt::Class(n, c) => {
                 let v = self.class(c, env)?;
                 self.bind(&Pattern::Name(n.clone()), v, env, Some(true))?;
@@ -1235,8 +1818,11 @@ impl<'c> Interp<'c> {
             Stmt::Break(l) => return Err(Ctrl::Break(l.clone())),
             Stmt::Continue(l) => return Err(Ctrl::Continue(l.clone())),
             Stmt::Throw(e, pos) => {
-                let v = self.eval(e, env)?;
+                // A value that is not an error is reported where the evaluation left the
+                // position: the `throw`, or the last call or property inside it.
                 self.pos = *pos;
+                let v = self.eval(e, env)?;
+                self.thrown_at = self.pos;
                 return Err(Ctrl::Throw(v));
             }
             Stmt::Try(body, catch, finally) => {
@@ -1247,10 +1833,16 @@ impl<'c> Interp<'c> {
                     if let Some(p) = param {
                         self.bind(p, x, &scope, Some(true))?;
                     }
+                    // The completion value of a statement list (`eval`): a catch starts from
+                    // undefined, and a finally that ends normally keeps the value before it
+                    // (measured on the engine of a `refrouter` 9.0.4).
+                    self.last = Some(Val::Undef);
                     r = self.block(handler, &scope);
                 }
                 if let Some(f) = finally {
+                    let before = self.last.replace(Val::Undef);
                     self.block(f, env)?;
+                    self.last = before;
                 }
                 r?;
             }
@@ -1266,7 +1858,11 @@ impl<'c> Interp<'c> {
                             for n in names {
                                 scope.borrow_mut().vars.push((
                                     n,
-                                    Binding { value: None, mutable: *k == DeclKind::Let },
+                                    Binding {
+                                        value: None,
+                                        mutable: *k == DeclKind::Let,
+                                        lexical: true,
+                                    },
                                 ));
                             }
                         }
@@ -1291,6 +1887,11 @@ impl<'c> Interp<'c> {
                         }
                     }
                 }
+            }
+            Stmt::With(o, body) => {
+                let o = self.eval(o, env)?;
+                let scope = self.with_scope(&o, env)?;
+                self.exec(body, &scope)?;
             }
             Stmt::Labeled(label, body) => {
                 let r = match &**body {
@@ -1343,28 +1944,7 @@ impl<'c> Interp<'c> {
         env: &EnvRef,
         label: Option<&Name>,
     ) -> R<()> {
-        let mut scope = self.new_env(Some(env.clone()));
-        let mut per_iteration = false;
-        match init {
-            Some(ForInit::Decl(kind, decls)) => {
-                per_iteration = *kind != DeclKind::Var;
-                self.exec(&Stmt::Decl(*kind, Vec::new()), &scope)?;
-                for (p, e) in decls {
-                    let v = match e {
-                        Some(e) => self.eval(e, &scope)?,
-                        None => Val::Undef,
-                    };
-                    match kind {
-                        DeclKind::Var => self.bind(p, v, env, None)?,
-                        k => self.bind(p, v, &scope, Some(*k == DeclKind::Let))?,
-                    }
-                }
-            }
-            Some(ForInit::Expr(e)) => {
-                self.eval(e, &scope)?;
-            }
-            None => {}
-        }
+        let (mut scope, per_iteration) = self.for_init(init, env)?;
         loop {
             if let Some(t) = test
                 && !self.eval(t, &scope)?.truthy()
@@ -1387,6 +1967,33 @@ impl<'c> Interp<'c> {
         Ok(())
     }
 
+    /// A `for` loop's scope with its declarations run, and whether each iteration copies it.
+    pub fn for_init(&mut self, init: Option<&ForInit>, env: &EnvRef) -> R<(EnvRef, bool)> {
+        let scope = self.new_env(Some(env.clone()));
+        let mut per_iteration = false;
+        match init {
+            Some(ForInit::Decl(kind, decls)) => {
+                per_iteration = *kind != DeclKind::Var;
+                self.exec(&Stmt::Decl(*kind, Vec::new()), &scope)?;
+                for (p, e) in decls {
+                    let v = match e {
+                        Some(e) => self.eval(e, &scope)?,
+                        None => Val::Undef,
+                    };
+                    match kind {
+                        DeclKind::Var => self.bind(p, v, env, None)?,
+                        k => self.bind(p, v, &scope, Some(*k == DeclKind::Let))?,
+                    }
+                }
+            }
+            Some(ForInit::Expr(e)) => {
+                self.eval(e, &scope)?;
+            }
+            None => {}
+        }
+        Ok((scope, per_iteration))
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn exec_for_in(
         &mut self,
@@ -1399,17 +2006,43 @@ impl<'c> Interp<'c> {
         label: Option<&Name>,
     ) -> R<()> {
         let v = self.eval(obj, env)?;
-        let items: Vec<Val> = if of {
-            self.iterate(&v)?
-        } else {
+        let mut rec =
+            if of { self.open_iter(&v)? } else { IterRec::Items(self.for_in_keys(&v)?, 0) };
+        while let Some(x) = self.iter_step(&mut rec)? {
+            let scope = self.new_env(Some(env.clone()));
+            let r = match decl {
+                Some(DeclKind::Var) => self.bind(target, x, env, None),
+                Some(k) => self.bind(target, x, &scope, Some(k == DeclKind::Let)),
+                None => self.bind(target, x, &scope, None),
+            }
+            .and_then(|()| loop_ctrl(self.exec(body, &scope), label));
+            match r {
+                Ok(false) => {}
+                Ok(true) => return self.iter_close(&rec),
+                Err(e) => {
+                    // A throw keeps its exception whatever `return` does.
+                    let closed = self.iter_close(&rec);
+                    if !matches!(e, Ctrl::Throw(_) | Ctrl::Fatal(_)) {
+                        closed?;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The keys `for…in` visits: the enumerable string keys of `v` and its prototypes.
+    pub fn for_in_keys(&mut self, v: &Val) -> R<Vec<Val>> {
+        Ok({
             match &v {
                 Val::Undef | Val::Null => Vec::new(),
                 _ => {
-                    let o = self.object_of(&v)?;
+                    let o = self.object_of(v)?;
                     let mut keys: Vec<Name> = Vec::new();
                     let mut cur = Some(o);
                     while let Some(c) = cur {
-                        for k in self.own_keys(&c, true) {
+                        for k in self.keys(&c, true)? {
                             if !keys.contains(&k) {
                                 keys.push(k);
                             }
@@ -1419,19 +2052,7 @@ impl<'c> Interp<'c> {
                     keys.into_iter().map(Val::Str).collect()
                 }
             }
-        };
-        for x in items {
-            let scope = self.new_env(Some(env.clone()));
-            match decl {
-                Some(DeclKind::Var) => self.bind(target, x, env, None)?,
-                Some(k) => self.bind(target, x, &scope, Some(k == DeclKind::Let))?,
-                None => self.bind(target, x, &scope, None)?,
-            }
-            if loop_ctrl(self.exec(body, &scope), label)? {
-                break;
-            }
-        }
-        Ok(())
+        })
     }
 
     // Classes.
@@ -1472,12 +2093,15 @@ impl<'c> Interp<'c> {
                 body: if derived {
                     vec![Stmt::Expr(Expr::SuperCall(
                         vec![Expr::Spread(Box::new(Expr::Ident("args".into(), Pos::default())))],
-                        Pos::default(),
+                        c.pos,
                     ))]
                 } else {
                     Vec::new()
                 },
                 arrow: false,
+                generator: false,
+                is_async: false,
+                method: false,
                 is_ctor_of_derived: derived,
                 strict: true,
                 source: format!("class {} {{ }}", c.name.as_deref().unwrap_or("")).into(),
@@ -1500,18 +2124,29 @@ impl<'c> Interp<'c> {
             }),
         )?;
         let name = c.name.clone().unwrap_or_else(|| "".into());
-        self.define(
-            &ctor,
-            "prototype",
-            Prop { writable: false, ..Prop::hidden(Val::Obj(proto.clone())) },
-        )?;
-        self.define(&ctor, "name", Prop::hidden(Val::Str(name.clone())))?;
+        let fixed = |v: Val| Prop { writable: false, ..Prop::hidden(v) };
+        let prototype = Prop { configurable: false, ..fixed(Val::Obj(proto.clone())) };
+        self.define(&ctor, "prototype", prototype)?;
+        let length = match &c.ctor {
+            Some(d) => d.params.iter().take_while(|(_, d)| d.is_none()).count(),
+            None => 0,
+        };
+        self.define(&ctor, "length", fixed(Val::Num(length as f64)))?;
+        self.define(&ctor, "name", fixed(Val::Str(name.clone())))?;
         self.define(&proto, "constructor", Prop::hidden(Val::Obj(ctor.clone())))?;
         if let Some(n) = &c.name {
             declare(&scope, n, Val::Obj(ctor.clone()), false);
         }
         for m in &c.members {
             let target = if m.is_static { ctor.clone() } else { proto.clone() };
+            if m.is_static && matches!(&m.key, PropName::Fixed(k) if &**k == STATIC_BLOCK) {
+                // `static { … }`: run once, with `this` the class.
+                if let Some(f) = &m.func {
+                    let fv = self.closure(f, &scope)?;
+                    self.call(&fv, &Val::Obj(ctor.clone()), &[])?;
+                }
+                continue;
+            }
             let key = self.prop_key(&m.key, &scope)?;
             if let Some(f) = &m.func {
                 let fv = self.closure(f, &scope)?;
@@ -1553,6 +2188,12 @@ impl<'c> Interp<'c> {
         match e {
             Expr::Num(n) => Ok(Val::Num(*n)),
             Expr::BigInt(b) => Ok(Val::BigInt(b.clone())),
+            // The parser leaves a generator's `yield` only where `generators.rs` runs it.
+            Expr::Yield(..) => self.type_error("yield is only valid in generators"),
+            Expr::Await(x) => {
+                self.eval(x, env)?;
+                Err(Ctrl::Fatal(Fatal::Trap))
+            }
             Expr::Str(s) => Ok(Val::Str(s.clone())),
             Expr::Bool(b) => Ok(Val::Bool(*b)),
             Expr::Null => Ok(Val::Null),
@@ -1566,11 +2207,11 @@ impl<'c> Interp<'c> {
                         out.push_str(&self.str_of(&v)?);
                     }
                 }
-                self.string(out)
+                self.joined_string(out)
             }
             Expr::Regex(b, f) => crate::builtins::make_regexp(self, b.clone(), f.clone()),
-            Expr::Ident(n, pos) => {
-                self.pos = *pos;
+            Expr::TemplateObject(parts) => self.template_object(parts),
+            Expr::Ident(n, _) => {
                 if &**n == "undefined" && self.lookup(env, "undefined").is_none() {
                     return Ok(Val::Undef);
                 }
@@ -1634,22 +2275,15 @@ impl<'c> Interp<'c> {
                 Expr::Member { obj, prop, .. } => {
                     let o = self.eval(obj, env)?;
                     let key = self.member_key(prop, env)?;
-                    if let Val::Obj(o) = &o {
-                        let mut b = o.borrow_mut();
-                        if let Kind::Array(items) = &mut b.kind
-                            && let Some(i) = array_index(&key)
-                        {
-                            if i + 1 == items.len() {
-                                // Holes are not kept: the last element becomes undefined.
-                                items[i] = Val::Undef;
-                            } else if i < items.len() {
-                                items[i] = Val::Undef;
-                            }
-                            return Ok(Val::Bool(true));
-                        }
-                        b.remove(&key);
+                    match &o {
+                        Val::Obj(o) => Ok(Val::Bool(self.delete_key(o, &key)?)),
+                        _ => Ok(Val::Bool(true)),
                     }
-                    Ok(Val::Bool(true))
+                }
+                Expr::Ident(n, _) => self.delete_name(env, n),
+                Expr::At(_, inner) if matches!(&**inner, Expr::Ident(..)) => {
+                    let Expr::Ident(n, _) = &**inner else { return Ok(Val::Bool(true)) };
+                    self.delete_name(env, n)
                 }
                 _ => Ok(Val::Bool(true)),
             },
@@ -1702,9 +2336,8 @@ impl<'c> Interp<'c> {
                 Err(Ctrl::Break(Some(l))) if &*l == "?." => Ok(Val::Undef),
                 r => r,
             },
-            Expr::Member { obj, prop, optional, pos } => {
+            Expr::Member { obj, prop, optional, .. } => {
                 let o = self.eval(obj, env)?;
-                self.pos = *pos;
                 if *optional && o.is_nullish() {
                     return Err(Ctrl::Break(Some("?.".into())));
                 }
@@ -1731,15 +2364,17 @@ impl<'c> Interp<'c> {
                 self.super_call(args, env)
             }
             Expr::Call { callee, args, optional, pos } => {
+                self.call_expr(callee, args, *optional, *pos, env)
+            }
+            Expr::At(pos, e) => {
                 self.pos = *pos;
-                self.call_expr(callee, args, *optional, env)
+                self.eval(e, env)
             }
             Expr::New { callee, args, pos } => {
-                self.pos = *pos;
                 let f = self.eval(callee, env)?;
                 let args = self.eval_args(args, env)?;
-                let arrow = matches!(&f, Val::Obj(o) if matches!(&o.borrow().kind, Kind::Func(Func::Closure { def, .. }) if def.arrow));
-                if !f.is_callable() || arrow {
+                self.pos = *pos;
+                if !is_constructor(&f) {
                     let text = match &**callee {
                         Expr::Func(def) => def.source.to_string(),
                         other => callee_text(other),
@@ -1824,7 +2459,14 @@ impl<'c> Interp<'c> {
         }
     }
 
-    fn call_expr(&mut self, callee: &Expr, args: &[Expr], optional: bool, env: &EnvRef) -> R {
+    fn call_expr(
+        &mut self,
+        callee: &Expr,
+        args: &[Expr],
+        optional: bool,
+        pos: Pos,
+        env: &EnvRef,
+    ) -> R {
         let (f, this) = match callee {
             Expr::Member { obj, prop, optional: opt_member, .. } => {
                 let o = self.eval(obj, env)?;
@@ -1848,6 +2490,10 @@ impl<'c> Interp<'c> {
             return Err(Ctrl::Break(Some("?.".into())));
         }
         let args = self.eval_args(args, env)?;
+        if is_eval_name(callee) && is_builtin_eval(&f) {
+            return self.direct_eval(args.first().cloned().unwrap_or(Val::Undef), env);
+        }
+        self.pos = pos;
         if !f.is_callable() {
             return self.type_error(&format!("{} is not a function", callee_text(callee)));
         }
@@ -1861,6 +2507,14 @@ impl<'c> Interp<'c> {
                 ObjProp::Value(k, e) => {
                     let key = self.prop_key(k, env)?;
                     let v = self.eval(e, env)?;
+                    if matches!(k, PropName::Fixed(n) if &**n == "__proto__") {
+                        match v {
+                            Val::Obj(p) => o.borrow_mut().proto = Some(p),
+                            Val::Null => o.borrow_mut().proto = None,
+                            _ => {}
+                        }
+                        continue;
+                    }
                     if let (Val::Obj(f), Expr::Func(_)) = (&v, e) {
                         if let Kind::Func(Func::Closure { home, .. }) = &mut f.borrow_mut().kind {
                             *home = Some(o.clone());
@@ -1890,7 +2544,7 @@ impl<'c> Interp<'c> {
                     let v = self.eval(e, env)?;
                     match &v {
                         Val::Obj(src) => {
-                            for k in self.own_keys(src, true) {
+                            for k in self.keys(src, true)? {
                                 let x = self.get(&v, &k)?;
                                 self.define(&o, &k, Prop::data(x))?;
                             }
@@ -1915,7 +2569,7 @@ impl<'c> Interp<'c> {
     fn assign(&mut self, op: &str, target: &Pattern, value: &Expr, env: &EnvRef) -> R {
         if op == "=" {
             let v = self.eval(value, env)?;
-            name_function(&v, target);
+            name_function(&v, target, value);
             self.bind(target, v.clone(), env, None)?;
             return Ok(v);
         }
@@ -1952,6 +2606,111 @@ impl<'c> Interp<'c> {
     }
 
     pub fn instance_of(&mut self, x: &Val, f: &Val) -> R<bool> {
+        if let Val::Obj(fo) = f {
+            let custom = self.get(f, "@@Symbol.hasInstance:0")?;
+            let builtin = fo.borrow().is_callable()
+                && custom.as_obj().is_some_and(|h| {
+                    matches!(&h.borrow().kind, Kind::Func(Func::Native(_, n)) if &**n == "[Symbol.hasInstance]")
+                });
+            if !custom.is_nullish() && !builtin {
+                return Ok(self.call(&custom, f, std::slice::from_ref(x))?.truthy());
+            }
+        }
+        self.ordinary_instance_of(x, f)
+    }
+
+    /// OrdinaryHasInstance: whether `f.prototype` is on the chain of `x`.
+    /// A direct `eval(src)`: the code runs in the caller's scope, its `var`s go to the caller's
+    /// function (unless it is strict) and may not redeclare a `let` on the way (ECMA-262 §19.2.1).
+    pub fn direct_eval(&mut self, src: Val, env: &EnvRef) -> R {
+        let Val::Str(src) = src else { return Ok(src) };
+        let body =
+            crate::parser::parse_script(&src).map_err(|e| self.error("SyntaxError", &e.message))?;
+        let strict = self.strict || crate::parser::has_use_strict(&body);
+        let lex = self.new_env(Some(env.clone()));
+        let var_env = if strict { lex.clone() } else { var_scope_of(env) };
+        let mut names = Vec::new();
+        for st in &body {
+            var_names(st, &mut names);
+            if let Stmt::Func(n, _) = st {
+                names.push(n.clone());
+            }
+        }
+        if !strict {
+            for n in &names {
+                let mut cur = Some(env.clone());
+                while let Some(e) = cur {
+                    let clash = e.borrow().vars.iter().any(|(k, b)| k == n && b.lexical);
+                    if clash {
+                        return Err(self.error("SyntaxError", &format!("redeclaration of let {n}")));
+                    }
+                    if Rc::ptr_eq(&e, &var_env) {
+                        break;
+                    }
+                    cur = e.borrow().parent.clone();
+                }
+            }
+        }
+        for n in &names {
+            if !var_env.borrow().vars.iter().any(|(k, _)| k == n) {
+                declare(&var_env, n, Val::Undef, true);
+            }
+        }
+        self.hoist(&body, &lex, false)?;
+        for st in &body {
+            if let Stmt::Func(n, _) = st {
+                let f = self.read_var(&lex, n)?;
+                declare(&var_env, n, f, true);
+            }
+        }
+        let outer = std::mem::replace(&mut self.strict, strict);
+        let saved = self.last.take();
+        let mut r = Ok(());
+        for st in &body {
+            r = self.exec(st, &lex);
+            if r.is_err() {
+                break;
+            }
+        }
+        self.strict = outer;
+        let v = self.last.take().unwrap_or(Val::Undef);
+        self.last = saved;
+        r?;
+        Ok(v)
+    }
+
+    /// `delete name`: a declared binding stays (`false`); a property of the global object goes.
+    fn delete_name(&mut self, env: &EnvRef, name: &str) -> R {
+        if self.lookup(env, name).is_some() {
+            return Ok(Val::Bool(false));
+        }
+        let g = self.realm.global.clone();
+        if self.has_own(&g, name) {
+            return Ok(Val::Bool(self.delete_key(&g, name)?));
+        }
+        Ok(Val::Bool(true))
+    }
+
+    /// The strings array of a tagged template: one per site and call, frozen, with its frozen
+    /// `raw` (ECMA-262 §13.2.8.4).
+    fn template_object(&mut self, parts: &Rc<crate::lexer::TemplateParts>) -> R {
+        let site = Rc::as_ptr(parts) as usize;
+        if let Some((_, v)) = self.templates.iter().find(|(s, _)| *s == site) {
+            return Ok(v.clone());
+        }
+        let cooked = parts.cooked.iter().map(|c| c.clone().map_or(Val::Undef, Val::Str)).collect();
+        let strings = self.array(cooked)?;
+        let raw = self.array(parts.raw.iter().cloned().map(Val::Str).collect())?;
+        let (Val::Obj(s), Val::Obj(r)) = (&strings, &raw) else { return Ok(strings) };
+        crate::props::lock(r, true);
+        let fixed = Prop { writable: false, configurable: false, ..Prop::hidden(raw.clone()) };
+        self.define(s, "raw", fixed)?;
+        crate::props::lock(s, true);
+        self.templates.push((site, strings.clone()));
+        Ok(strings)
+    }
+
+    pub fn ordinary_instance_of(&mut self, x: &Val, f: &Val) -> R<bool> {
         if !f.is_callable() {
             return self.type_error(&format!("invalid 'instanceof' operand {}", self.show(f)));
         }
@@ -1959,7 +2718,7 @@ impl<'c> Interp<'c> {
             && let Kind::Func(Func::Bound(t, ..)) = &fo.borrow().kind
         {
             let t = Val::Obj(t.clone());
-            return self.instance_of(x, &t);
+            return self.ordinary_instance_of(x, &t);
         }
         let Val::Obj(o) = x else { return Ok(false) };
         let Val::Obj(proto) = self.get(f, "prototype")? else { return Ok(false) };
@@ -2079,7 +2838,7 @@ impl<'c> Interp<'c> {
                     let mut out = String::with_capacity(sa.len() + sb.len());
                     out.push_str(&sa);
                     out.push_str(&sb);
-                    return self.string(out);
+                    return self.joined_string(out);
                 }
                 return self.binary("@+", &a, &b);
             }
@@ -2128,7 +2887,7 @@ impl<'c> Interp<'c> {
                     return self.type_error(&msg);
                 };
                 let k = self.key_of(x)?;
-                Val::Bool(self.has_property(o, &k))
+                Val::Bool(self.has(o, &k)?)
             }
             _ => return self.type_error(&format!("unknown operator {op}")),
         })
@@ -2173,12 +2932,55 @@ pub fn declare(env: &EnvRef, name: &str, v: Val, mutable: bool) {
             b.value = Some(v);
             b.mutable = mutable;
         }
-        None => e.vars.push((name.into(), Binding { value: Some(v), mutable })),
+        None => e.vars.push((name.into(), Binding { value: Some(v), mutable, lexical: false })),
     }
 }
 
 /// Gives an anonymous function the name it is assigned to.
-fn name_function(v: &Val, p: &Pattern) {
+/// Whether a call's callee is the name `eval` (a direct eval when it is the built-in one).
+fn is_eval_name(e: &Expr) -> bool {
+    match e {
+        Expr::Ident(n, _) => &**n == "eval",
+        Expr::At(_, x) => is_eval_name(x),
+        _ => false,
+    }
+}
+
+fn is_builtin_eval(f: &Val) -> bool {
+    matches!(f, Val::Obj(o) if matches!(&o.borrow().kind, Kind::Func(Func::Native(_, n)) if &**n == "eval"))
+}
+
+/// The scope that holds the `var`s for code running in `env`.
+fn var_scope_of(env: &EnvRef) -> EnvRef {
+    let mut cur = env.clone();
+    loop {
+        if cur.borrow().var_scope {
+            return cur;
+        }
+        let parent = cur.borrow().parent.clone();
+        match parent {
+            Some(p) => cur = p,
+            None => return cur,
+        }
+    }
+}
+
+/// Whether `e` is a function or class without a name, which takes the name of what it is bound
+/// to (ECMA-262 §8.4.3 IsAnonymousFunctionDefinition, parentheses included).
+fn anonymous_definition(e: &Expr) -> bool {
+    match e {
+        Expr::Func(d) => d.name.is_none() && !d.method,
+        Expr::Class(c) => c.name.is_none(),
+        Expr::At(_, x) => anonymous_definition(x),
+        _ => false,
+    }
+}
+
+/// Names the function `v` that `e` made after the name `p` binds, when `e` is anonymous.
+fn name_function(v: &Val, p: &Pattern, e: &Expr) {
+    if !anonymous_definition(e) {
+        return;
+    }
     let (Val::Obj(f), Pattern::Name(n)) = (v, p) else { return };
     let mut b = f.borrow_mut();
     if !b.is_callable() {
@@ -2229,7 +3031,9 @@ fn var_names(s: &Stmt, out: &mut Vec<Name>) {
             }
         }
         Stmt::Block(body) => body.iter().for_each(|s| var_names(s, out)),
-        Stmt::While(_, b) | Stmt::DoWhile(b, _) | Stmt::Labeled(_, b) => var_names(b, out),
+        Stmt::While(_, b) | Stmt::DoWhile(b, _) | Stmt::Labeled(_, b) | Stmt::With(_, b) => {
+            var_names(b, out)
+        }
         Stmt::For(init, _, _, b) => {
             if let Some(ForInit::Decl(DeclKind::Var, d)) = init {
                 for (p, _) in d {
@@ -2254,6 +3058,7 @@ fn var_names(s: &Stmt, out: &mut Vec<Name>) {
             }
         }
         Stmt::Switch(_, cases) => cases.iter().flat_map(|(_, b)| b).for_each(|s| var_names(s, out)),
+        Stmt::Suspends(s) => var_names(s, out),
         _ => {}
     }
 }

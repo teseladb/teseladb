@@ -59,3 +59,8 @@ openssl req -x509 -new -key ec521-pkcs8.pem -subj "/C=ES/O=TeselaDB Test/CN=Root
 openssl x509 -req -in leaf.csr -CA ec521-root.pem -CAkey ec521-pkcs8.pem -days "$DAYS" -set_serial 5 -sha512 \
   -copy_extensions copy -extfile <(printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n') \
   -out ec521-leaf.pem
+# The same leaf signed by the RSA root with SHA-1, which OpenSSL refuses at security level 1 (013
+# T032): `CA signature digest algorithm too weak`.
+openssl x509 -req -in leaf.csr -CA root.pem -CAkey rsa-pkcs8.pem -days "$DAYS" -set_serial 6 -sha1 \
+  -copy_extensions copy -extfile <(printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n') \
+  -out sha1-leaf.pem

@@ -76,6 +76,8 @@ codes! {
     MISMATCHED_KEY_ID = 6_726_301, "Location6726301";
     /// A payload's contention factor above its field's.
     CONTENTION_EXCEEDED = 9_188_700, "Location9188700";
+    /// A find payload for a query type its field is not indexed for.
+    NOT_INDEXED_FOR = 9_188_707, "Location9188707";
     /// A token of the wrong length.
     TOKEN_LENGTH = 9_616_300, "Location9616300";
     /// An integer option given as a fractional double.

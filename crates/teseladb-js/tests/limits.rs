@@ -51,8 +51,19 @@ fn huge_allocations_run_out_of_memory() {
         run("function(){ var a = []; while(true){ a.push(new Array(1e6).fill(1)) } }").unwrap_err();
     assert_eq!(e, JsError::OutOfMemory);
     assert_eq!(e.message(), "uncaught exception: out of memory");
+    // A string that keeps doubling passes the longest string SpiderMonkey makes: a catchable
+    // error, as on a `refrouter` 9.0.4 (measured on 02-11).
     let e = run("function(){ var s = 'x'; while(true){ s = s + s } }").unwrap_err();
-    assert_eq!(e, JsError::OutOfMemory);
+    assert_eq!(e.message(), "allocation size overflow");
+    let caught = run(
+        "function(){ var s = 'x'; try { while(true){ s = s.concat(s) } } catch (e) { return e.name } }",
+    );
+    assert_eq!(caught, Ok(Value::String("InternalError".into())));
+    let e = run("function(){ var s = 'x'; while(true){ s = s.repeat(2) } }").unwrap_err();
+    assert_eq!(
+        e.message(),
+        "repeat count must be less than infinity and not overflow maximum string size"
+    );
 }
 
 #[test]

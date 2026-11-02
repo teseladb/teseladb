@@ -74,6 +74,29 @@ fn number(v: &Value) -> Option<f64> {
     }
 }
 
+/// The place of each of `names` in the iteration of a Java `HashMap` holding them, the order
+/// `refsearch` gives the facets in (measured: `zz`, `tags`, `ns`, `aa`, `mm` come out as `zz`, `aa`,
+/// `mm`, `ns`, `tags`): by bucket of the spread `String.hashCode`, then by insertion.
+fn java_hash_map_order(names: &[&str]) -> Vec<usize> {
+    let mut capacity: usize = 16;
+    while names.len() * 4 > capacity * 3 {
+        capacity *= 2;
+    }
+    let bucket = |name: &str| {
+        let h =
+            name.encode_utf16().fold(0u32, |h, c| h.wrapping_mul(31).wrapping_add(u32::from(c)));
+        ((h ^ (h >> 16)) as usize) & (capacity - 1)
+    };
+    let mut keyed: Vec<(usize, usize)> =
+        names.iter().enumerate().map(|(i, n)| (bucket(n), i)).collect();
+    keyed.sort();
+    let mut place = vec![0; names.len()];
+    for (at, (_, i)) in keyed.into_iter().enumerate() {
+        place[i] = at;
+    }
+    place
+}
+
 /// The collector `d` (the value of `facet`).
 pub(super) fn parse(index: &MemIndex, v: &Value) -> Result<Collector, SearchError> {
     let Value::Document(d) = v else { return Err(shape("facet", "must be a document")) };
@@ -259,7 +282,14 @@ impl Collector {
     /// The `facet` document of the counts `p` of every segment.
     pub(super) fn finish(&self, p: &Partial) -> Document {
         let mut out = Document::new();
-        for ((name, kind), counts) in self.facets.iter().zip(&p.counts) {
+        let mut facets: Vec<(&(String, Kind), &Counts)> =
+            self.facets.iter().zip(&p.counts).collect();
+        let names: Vec<&str> = facets.iter().map(|((n, _), _)| n.as_str()).collect();
+        let place = java_hash_map_order(&names);
+        let mut placed: Vec<(usize, (&(String, Kind), &Counts))> =
+            place.into_iter().zip(facets.drain(..)).collect();
+        placed.sort_by_key(|(at, _)| *at);
+        for (_, ((name, kind), counts)) in placed {
             let bucket = |id: Value, n: u64| {
                 Value::Document(
                     Document::new()
@@ -319,5 +349,23 @@ impl Partial {
             }
         }
         self
+    }
+}
+
+#[cfg(test)]
+mod order_tests {
+    use super::java_hash_map_order;
+
+    /// Measured on `refsearch` 1.70.6: facets asked as `zz`, `tags`, `ns`, `aa`, `mm` come out as
+    /// `zz`, `aa`, `mm`, `ns`, `tags`; `tags` and `ns` as `ns`, `tags`.
+    #[test]
+    fn facets_come_out_in_java_hash_map_order() {
+        assert_eq!(java_hash_map_order(&["zz", "tags", "ns", "aa", "mm"]), vec![0, 4, 3, 1, 2]);
+        assert_eq!(java_hash_map_order(&["tags", "ns"]), vec![1, 0]);
+        let many: Vec<String> = (0..13).map(|i| format!("f{i}")).collect();
+        let names: Vec<&str> = many.iter().map(String::as_str).collect();
+        let mut place = java_hash_map_order(&names);
+        place.sort_unstable();
+        assert_eq!(place, (0..13).collect::<Vec<_>>());
     }
 }

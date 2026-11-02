@@ -112,6 +112,8 @@ fn own_fields(name: &str) -> Option<&'static [&'static str]> {
             "performVerification",
         ],
         "abortReshardCollection" => &["abortReshardCollection"],
+        "addShardToZone" => &["addShardToZone", "zone"],
+        "updateZoneKeyRange" => &["updateZoneKeyRange", "min", "max", "zone"],
         "setDefaultRWConcern" => {
             &["setDefaultRWConcern", "defaultReadConcern", "defaultWriteConcern"]
         }

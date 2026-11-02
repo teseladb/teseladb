@@ -24,6 +24,7 @@ teseladb-js = { path = "../teseladb-js" }
 teseladb-keys = { path = "../teseladb-keys" }
 teseladb-meta = { path = "../teseladb-meta" }
 teseladb-exec = { path = "../teseladb-exec" }
+teseladb-fle = { path = "../teseladb-fle" }
 teseladb-search = { path = "../teseladb-search" }
 teseladb-mql = { path = "../teseladb-mql" }
 teseladb-plan = { path = "../teseladb-plan" }

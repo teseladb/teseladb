@@ -263,13 +263,15 @@ pub fn shard_collection<B: Backend + ?Sized>(
             matches!(options.get("capped"), Some(Value::Boolean(true))),
         )?,
     })?;
+    let after = ctx
+        .backend
+        .collection(&ns)?
+        .ok_or_else(|| CommandError::new(crate::error::NAMESPACE_NOT_FOUND, "no collection"))?;
     if !empty {
-        let after = ctx
-            .backend
-            .collection(&ns)?
-            .ok_or_else(|| CommandError::new(crate::error::NAMESPACE_NOT_FOUND, "no collection"))?;
         rekey(ctx.backend, &ns, &c, &after)?;
     }
+    // The zones' intervals given before take the shard key's keys (018 FR-003).
+    super::zones::rekey(ctx.backend, &ns, &after)?;
     Ok(sharded_reply(&ns))
 }
 

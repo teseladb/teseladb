@@ -58,6 +58,7 @@ pub mod replicas;
 pub mod rest_executor;
 pub mod rollback;
 pub mod routes;
+pub mod search_builder;
 pub mod search_segments;
 pub mod sessions_ops;
 pub mod spill;
