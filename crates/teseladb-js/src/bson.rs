@@ -350,7 +350,10 @@ pub fn from_bson(it: &mut Interp, v: &Value, depth: usize) -> R {
         Value::DbPointer { namespace, id } => make(it, Bson::DbPointer(namespace.clone(), *id))?,
         Value::Symbol(s) => make(it, Bson::Symbol(s.clone()))?,
         Value::JavaScript(code) | Value::JavaScriptWithScope { code, .. } => {
-            make(it, Bson::Code(code.clone()))?
+            match function_of(it, code)? {
+                Some(f) => f,
+                None => make(it, Bson::Code(code.clone()))?,
+            }
         }
         Value::Array(items) => {
             let mut out = Vec::with_capacity(items.len());
@@ -361,6 +364,17 @@ pub fn from_bson(it: &mut Interp, v: &Value, depth: usize) -> R {
         }
         Value::Document(d) => from_document(it, d, depth)?,
     })
+}
+
+/// The function `code` defines, as RefDb gives a `Code` value to JavaScript (a function
+/// stored in `system.js` is called by its name); `None` when the code is not one function.
+fn function_of(it: &mut Interp, code: &str) -> R<Option<Val>> {
+    let Ok(body) = crate::parser::parse_script(code) else { return Ok(None) };
+    let [crate::ast::Stmt::Expr(crate::ast::Expr::Func(def))] = body.as_slice() else {
+        return Ok(None);
+    };
+    let env = it.global_env.clone();
+    it.closure(def, &env).map(Some)
 }
 
 pub fn from_document(it: &mut Interp, d: &Document, depth: usize) -> R {

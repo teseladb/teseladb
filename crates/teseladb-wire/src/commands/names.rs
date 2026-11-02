@@ -58,14 +58,19 @@ pub fn check_writable(ns: &Namespace) -> Result<(), CommandError> {
     check_name(ns, true)
 }
 
-/// Faults of `db.coll`'s name; a `system.` collection is one when `system` says so.
+/// The collection of a database's stored JavaScript functions, which clients write (016,
+/// measured on a `refrouter` 9.0.4 on 02-11).
+pub const SYSTEM_JS: &str = "system.js";
+
+/// Faults of `db.coll`'s name; a `system.` collection other than `system.js` is one when
+/// `system` says so.
 fn check_name(ns: &Namespace, system: bool) -> Result<(), CommandError> {
     let full = format!("{}.{}", ns.db, ns.coll);
     if ns.coll.contains('$') {
         let msg = format!("Invalid collection name: {}", ns.coll);
         return Err(CommandError::new(INVALID_NAMESPACE, msg));
     }
-    if system && ns.coll.starts_with(SYSTEM_PREFIX) {
+    if system && ns.coll.starts_with(SYSTEM_PREFIX) && ns.coll != SYSTEM_JS {
         return Err(CommandError::new(
             INVALID_NAMESPACE,
             format!("Invalid system namespace: {full}"),

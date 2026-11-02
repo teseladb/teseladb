@@ -196,3 +196,23 @@ fn an_endless_where_stops_at_max_time_ms() {
     let r = run(&mut m, r#"{"find":"c","filter":{"$where":"this._id == 2"}}"#);
     assert_eq!(ids(&r), [2]);
 }
+
+/// Measured on a `refrouter` 9.0.4 on 02-11: a function stored in `system.js` is a global of the
+/// database's JavaScript.
+#[test]
+fn functions_stored_in_system_js_are_globals() {
+    let mut m = Mem::new();
+    load(&mut m);
+    let r = run(
+        &mut m,
+        r#"{"insert":"system.js","documents":[{"_id":"cheap","value":{"$code":"function(d){ return d.precio < 5 }"}},{"_id":"limit","value":5}]}"#,
+    );
+    assert_eq!(r.get("n"), Some(&Value::Int32(2)), "{r:?}");
+    let r = run(&mut m, r#"{"find":"c","filter":{"$where":"cheap(this) && this.v == limit"}}"#);
+    assert_eq!(ids(&r), [2]);
+    let r = run(
+        &mut m,
+        r#"{"aggregate":"c","pipeline":[{"$match":{"_id":2}},{"$project":{"_id":0,"v":{"$function":{"body":"function(){ return cheap({precio: 1}) }","args":[],"lang":"js"}}}}],"cursor":{}}"#,
+    );
+    assert_eq!(first(&r).get("v"), Some(&Value::Boolean(true)));
+}

@@ -1139,6 +1139,7 @@ fn dispatch<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
         _ => None,
     };
     js::begin(enabled, ctx.backend.now_ms(), js::deadline_from(max_time));
+    js::load_stored(ctx.backend, ctx.db, ctx.cmd)?;
     match crate::concerns::canonical(ctx.name()) {
         query_settings::SET_QUERY_SETTINGS => query_settings::set_query_settings(ctx),
         query_settings::REMOVE_QUERY_SETTINGS => query_settings::remove_query_settings(ctx),

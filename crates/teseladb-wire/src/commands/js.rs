@@ -34,6 +34,80 @@ thread_local! {
     static DEADLINE_MS: Cell<Option<u64>> = const { Cell::new(None) };
     static CACHE: RefCell<HashMap<String, Rc<Program>>> = RefCell::new(HashMap::new());
     static FUNCTION_IDS: Cell<u64> = const { Cell::new(0) };
+    /// The globals the database's `system.js` stores, for the running command.
+    static STORED: RefCell<Option<Document>> = const { RefCell::new(None) };
+}
+
+/// The operators that run JavaScript.
+const USES: [&str; 3] = ["$where", "$function", "$accumulator"];
+
+/// Whether `d` (a command, at any depth) names one of [`USES`]; the command is not serialized,
+/// since it may be over the size of a document.
+fn uses_js(d: &Document) -> bool {
+    fn value(v: &Value) -> bool {
+        match v {
+            Value::Document(d) => uses_js(d),
+            Value::Array(a) => a.iter().any(value),
+            _ => false,
+        }
+    }
+    d.iter().any(|(k, v)| USES.contains(&k) || value(v))
+}
+
+/// Reads the functions and values `system.js` of the command's database stores, which are
+/// globals of its JavaScript (measured on a `refrouter` 9.0.4 on 02-11), when the command may run
+/// JavaScript.
+pub(crate) fn load_stored<B: super::Backend + ?Sized>(
+    backend: &mut B,
+    db: &str,
+    cmd: &Document,
+) -> Result<(), crate::error::CommandError> {
+    STORED.with(|s| s.borrow_mut().take());
+    if !enabled() {
+        return Ok(());
+    }
+    let is_map_reduce = cmd.iter().next().is_some_and(|(k, _)| k == super::mapreduce::MAP_REDUCE);
+    if !is_map_reduce && !uses_js(cmd) {
+        return Ok(());
+    }
+    let ns = teseladb_meta::catalog::Namespace {
+        db: db.to_owned(),
+        coll: super::names::SYSTEM_JS.to_owned(),
+    };
+    if backend.collection(&ns)?.is_none() {
+        return Ok(());
+    }
+    let docs = super::aggregate::read_through(
+        backend,
+        &ns,
+        &[],
+        None,
+        teseladb_range::read::ReadConcern::Local,
+    )?;
+    let mut globals = Document::new();
+    for d in docs {
+        if let (Some(Value::String(name)), Some(v)) = (d.get("_id"), d.get("value")) {
+            globals.push(name, v.clone());
+        }
+    }
+    STORED.with(|s| *s.borrow_mut() = Some(globals));
+    Ok(())
+}
+
+/// `scope` over the stored globals.
+fn globals(scope: Option<&Document>) -> Option<Document> {
+    let stored = STORED.with(|s| s.borrow().clone());
+    match (stored, scope) {
+        (None, None) => None,
+        (Some(s), None) => Some(s),
+        (None, Some(g)) => Some(g.clone()),
+        (Some(mut s), Some(g)) => {
+            for (k, v) in g.iter() {
+                s.insert(k, v.clone());
+            }
+            Some(s)
+        }
+    }
 }
 
 /// The monotonic clock in milliseconds the deadline of a call is read on.
@@ -98,6 +172,8 @@ fn run_full(
     emit: Option<&mut dyn FnMut(Value, Value)>,
     scope: Option<&Document>,
 ) -> Result<Value, JsError> {
+    let scope = globals(scope);
+    let scope = scope.as_ref();
     let deadline = DEADLINE_MS.with(Cell::get);
     let clock = CLOCK.get().copied();
     let passed = move || match (deadline, clock) {
