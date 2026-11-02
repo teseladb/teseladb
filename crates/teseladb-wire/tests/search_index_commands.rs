@@ -898,43 +898,115 @@ fn segment_files_shipped_with_the_ranges_are_served_without_a_rebuild() {
     assert!(Shipped::decode(&carried[1..]).is_err());
     // A dropped index forgets what it received.
     lock(&m.shared).search.receive(id, shipped);
-    lock(&m.shared).search.forget(&id);
+    assert_eq!(lock(&m.shared).search.forget(&id), Ok(()));
     assert!(lock(&m.shared).search.ship(&id).is_none());
 }
 
-/// The segments of an index are written to a file of the node's directory when it is built,
-/// and after a restart they are served from it (FR-012); a damaged file is removed and a drop
-/// removes the index's file.
+/// A range snapshot carries the segment files of the indexes with a segment over its intervals
+/// (FR-013); a replica takes them unless it already serves that version.
 #[test]
-fn segments_are_written_to_the_node_directory_and_read_back() {
+fn a_range_snapshot_carries_the_segments_over_its_intervals() {
     use teseladb_wire::commands::lock;
-    use teseladb_wire::commands::search_ops::SearchIndexes;
+    use teseladb_wire::commands::search_ops::{SearchIndexes, Shipped};
 
-    let dir = std::env::temp_dir().join(format!("tesela-seg-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
     let mut m = with_collection();
-    lock(&m.shared).search.open_dir(dir.clone()).expect("directory");
     let id = id_bytes(&id_of(&create(&mut m, "c", vec![index("default", dynamic(true))]), 0));
     let pipeline = vec![Document::new().with("$search", text("mundo")), scored()];
     let before = batch(&agg(&mut m, "c".into(), pipeline.clone()));
-    let files: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()).collect();
-    assert_eq!(files.len(), 1, "{files:?}");
-    let written = std::fs::read(&files[0]).unwrap();
+    let shipped = lock(&m.shared).search.ship(&id).expect("built");
+    let (start, end) = (shipped.files[0].start.clone(), shipped.files[0].end.clone());
+    let everything = vec![(Vec::new(), Vec::new())];
+    let carried = lock(&m.shared).search.ship_over(&everything);
+    assert_eq!(carried, vec![shipped.encode(&id)]);
+    assert_eq!(lock(&m.shared).search.ship_over(&[(start.clone(), end.clone())]), carried);
+    // Intervals before or after the segment carry nothing.
+    let below = (Vec::new(), start.clone());
+    let mut past = end.clone();
+    past.push(0);
+    let above = (if end.is_empty() { vec![0xff; 16] } else { end.clone() }, past);
+    assert!(lock(&m.shared).search.ship_over(&[below, above]).is_empty());
+
+    // The node that serves the index keeps what it built; a newer version is taken.
+    assert!(lock(&m.shared).search.restore(&carried[0]));
+    assert_eq!(batch(&agg(&mut m, "c".into(), pipeline.clone())), before);
+    let mut fresh = SearchIndexes::default();
+    assert!(fresh.restore(&carried[0]));
+    lock(&m.shared).search = fresh;
+    assert_eq!(batch(&agg(&mut m, "c".into(), pipeline)), before);
+    assert_eq!(lock(&m.shared).search.ship_over(&everything), carried);
+    let newer = Shipped { version: shipped.version + 1, ..shipped.clone() }.encode(&id);
+    assert!(lock(&m.shared).search.restore(&newer));
+    assert!(!lock(&m.shared).search.restore(b"damaged"));
+}
+
+/// Segment files kept in memory, as the server keeps them in `<dbpath>/search`.
+#[derive(Debug, Default)]
+struct MemStore {
+    files: std::sync::Mutex<std::collections::BTreeMap<[u8; 12], Vec<u8>>>,
+    broken: bool,
+}
+
+impl teseladb_wire::commands::search_ops::SegmentStore for MemStore {
+    fn put(&self, id: &[u8; 12], bytes: &[u8]) -> Result<(), String> {
+        if self.broken {
+            return Err("disk full".into());
+        }
+        self.files.lock().unwrap().insert(*id, bytes.to_vec());
+        Ok(())
+    }
+    fn remove(&self, id: &[u8; 12]) -> Result<(), String> {
+        if self.broken {
+            return Err("read-only".into());
+        }
+        self.files.lock().unwrap().remove(id);
+        Ok(())
+    }
+}
+
+/// The segments of an index are handed to the node's store when it is built, and after a
+/// restart they are served from what the store kept (FR-012); a damaged file is refused and a
+/// drop removes the index's file.
+#[test]
+fn segments_are_written_to_the_node_store_and_read_back() {
+    use std::sync::Arc;
+    use teseladb_wire::commands::lock;
+    use teseladb_wire::commands::search_ops::SearchIndexes;
+
+    let store = Arc::new(MemStore::default());
+    let mut m = with_collection();
+    lock(&m.shared).search.set_store(store.clone());
+    let id = id_bytes(&id_of(&create(&mut m, "c", vec![index("default", dynamic(true))]), 0));
+    let pipeline = vec![Document::new().with("$search", text("mundo")), scored()];
+    let before = batch(&agg(&mut m, "c".into(), pipeline.clone()));
+    let written = store.files.lock().unwrap().get(&id).cloned().expect("file written");
     assert_eq!(written, lock(&m.shared).search.ship(&id).unwrap().encode(&id));
 
-    // A restart reads the file back and serves it.
+    // A restart takes the file back and serves it.
     let mut restarted = SearchIndexes::default();
-    std::fs::write(dir.join("other.txt"), b"not a segment").unwrap();
-    std::fs::write(dir.join("broken.seg"), b"broken").unwrap();
-    restarted.open_dir(dir.clone()).expect("read back");
-    assert!(!dir.join("broken.seg").exists(), "a damaged file is removed");
+    assert!(!restarted.restore(b"broken"), "a damaged file is refused");
+    assert!(restarted.restore(&written));
+    restarted.set_store(store.clone());
     lock(&m.shared).search = restarted;
     assert_eq!(batch(&agg(&mut m, "c".into(), pipeline)), before);
-    lock(&m.shared).search.forget(&id);
-    assert!(!files[0].exists(), "a dropped index loses its file");
-    // A directory that cannot be made is an error.
-    assert!(SearchIndexes::default().open_dir(dir.join("other.txt").join("x")).is_err());
-    std::fs::remove_dir_all(&dir).unwrap();
+    let drop = Document::new().with("dropSearchIndex", "c").with("name", "default");
+    assert_eq!(m.run(DB, drop), Document::new().with("ok", 1.0));
+    assert!(store.files.lock().unwrap().is_empty(), "a dropped index loses its file");
+}
+
+/// A store that cannot write or remove fails the command that needed it, with the reason: the
+/// build of a new index writes its file.
+#[test]
+fn a_failing_segment_store_fails_the_command() {
+    use std::sync::Arc;
+    use teseladb_wire::commands::lock;
+
+    let mut m = with_collection();
+    lock(&m.shared).search.set_store(Arc::new(MemStore { broken: true, ..MemStore::default() }));
+    let (_, err) = error(&create(&mut m, "c", vec![index("default", dynamic(true))]));
+    assert!(err.contains("cannot write a search segment: disk full"), "{err}");
+    let drop = Document::new().with("dropSearchIndex", "c").with("name", "default");
+    let (_, err) = error(&m.run(DB, drop));
+    assert!(err.contains("cannot remove a search segment: read-only"), "{err}");
 }
 
 /// `wildcard` and `regex` reach the index through `$search` (measured behaviour in

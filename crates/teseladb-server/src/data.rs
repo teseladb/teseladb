@@ -1328,15 +1328,16 @@ mod tests {
             let t1 = t0 + UNSERVED_FETCH;
             d.poll(&mut core, (t1, 0));
             d.poll(&mut core, (t1, 0));
-            // An empty range: no file, ingested at once.
+            // An empty range: only the bundle's last file, ingested at once.
+            let last = teseladb_range::snapshot::trailer(0, 0);
             let empty = teseladb_range::snapshot::Chunk {
                 range: G,
                 index: 0,
                 file: 0,
-                files: 0,
+                files: 1,
                 offset: 0,
-                size: 0,
-                data: Vec::new(),
+                size: last.len() as u64,
+                data: last,
             };
             answer_forward(&mut core, &mut d, &FetchReply::Chunk(empty).encode(), t1);
             if close_first {
