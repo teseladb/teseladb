@@ -511,6 +511,7 @@ fn run_op<B: Backend + ?Sized>(
         // ahead with a mark from a node ahead, and stops while this one is out of margin).
         deadline_ms: limit.map(|ms| (backend.now_micros() / 1000).saturating_add(ms)),
         killed: refusal.is_some(),
+        interrupt: None,
         user: conn.auth.user.as_ref().map(|u| u.name.clone()),
         tenant: conn.tenant,
         privileges,

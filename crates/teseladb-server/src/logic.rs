@@ -2085,6 +2085,7 @@ mod tests {
             started_ms: 0,
             deadline_ms: None,
             killed: false,
+            interrupt: None,
             user: None,
             tenant: 0,
             privileges: None,

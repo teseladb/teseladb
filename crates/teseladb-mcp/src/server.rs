@@ -68,6 +68,9 @@ pub struct Call<'a, E: Executor + ?Sized> {
     /// The `notifications/progress` of the call, which go before its result in an event stream
     /// when the client asked for them and accepts one (FR-026).
     pub progress: Vec<Value>,
+    /// Where each `notifications/progress` goes as soon as its batch is read, when the answer is
+    /// already a stream; `None`: they wait in [`Call::progress`].
+    pub stream: Option<&'a mut dyn FnMut(Value)>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -335,7 +338,7 @@ impl Server {
                     limits: c.options.limits,
                     connection_id: &connection_id,
                     comment: None,
-                    progress: Vec::new(),
+                    on_batch: None,
                 };
                 let export = |name: &str| lock(&self.exports).get(name).map(|(d, _)| d.clone());
                 resources::read(uri, &mut ctx, &c.options, revision, &export)
@@ -375,19 +378,26 @@ impl Server {
         };
         check_args(t, args)
             .map_err(|m| ErrorObject::new(INVALID_PARAMS, format!("Invalid params: {m}")))?;
+        let token = p.get("_meta").and_then(|m| m.get(PROGRESS_TOKEN)).cloned();
+        let (kept, stream) = (&mut c.progress, &mut c.stream);
+        let mut tell = |n: u64| {
+            let Some(token) = &token else { return };
+            let note = progress_note(token, n);
+            match stream {
+                Some(send) => send(note),
+                None => kept.push(note),
+            }
+        };
         let mut ctx = Ctx {
             exec: &mut *c.exec,
             limits: c.options.limits,
             connection_id,
             comment: Some(operation_tag(connection_id, id)),
-            progress: Vec::new(),
+            on_batch: Some(&mut tell),
         };
-        let mut r = Object::new();
         let outcome = call(&mut ctx, name, args);
-        let token = p.get("_meta").and_then(|m| m.get(PROGRESS_TOKEN)).cloned();
-        if let Some(token) = token {
-            c.progress.extend(ctx.progress.iter().map(|n| progress_note(&token, *n)));
-        }
+        drop(ctx);
+        let mut r = Object::new();
         match outcome {
             Ok(out) => {
                 let mut content = vec![text(&out.summary)];

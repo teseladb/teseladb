@@ -181,6 +181,7 @@ impl<'a> BuildOp<'a> {
             started_ms: now_ms,
             deadline_ms: None,
             killed: false,
+            interrupt: None,
             user: None,
             tenant: 0,
             privileges: None,

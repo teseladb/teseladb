@@ -346,6 +346,7 @@ fn op(conn: i32) -> Op {
         started_ms: 1_700_000_000_000 - 2_500,
         deadline_ms: None,
         killed: false,
+        interrupt: None,
         user: None,
         tenant: 0,
         privileges: None,

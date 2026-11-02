@@ -42,8 +42,8 @@ pub struct Ctx<'a, E: Executor + ?Sized> {
     /// The `comment` each command of the call carries, which `notifications/cancelled` finds
     /// with `currentOp` (FR-026).
     pub comment: Option<String>,
-    /// The documents read after each batch, for `notifications/progress`.
-    pub progress: Vec<u64>,
+    /// Told the documents read after each batch, for `notifications/progress` (FR-026).
+    pub on_batch: Option<&'a mut dyn FnMut(u64)>,
 }
 
 /// A failed call's message.
@@ -142,7 +142,9 @@ impl<E: Executor + ?Sized> Ctx<'_, E> {
             if let Some(Bson::Array(b)) = cursor.get(field) {
                 out.extend(b.iter().filter_map(Bson::as_document).cloned());
             }
-            self.progress.push(out.len() as u64);
+            if let Some(tell) = self.on_batch.as_mut() {
+                tell(out.len() as u64);
+            }
             let id = match cursor.get("id") {
                 Some(Bson::Int64(id)) => *id,
                 _ => 0,

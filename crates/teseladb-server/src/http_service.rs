@@ -47,7 +47,7 @@ pub struct NodeHttp {
     backends: Mutex<Vec<ServerBackend>>,
     options: Mutex<Option<(Instant, (HttpOptions, McpOptions))>>,
     /// MCP's sessions and exports on this node.
-    mcp: teseladb_mcp::server::Server,
+    mcp: std::sync::Arc<teseladb_mcp::server::Server>,
     /// The identity providers of REFDB-OIDC, for `Authorization: Bearer` with a token.
     oidc: Option<std::sync::Arc<crate::oidc_client::Oidc>>,
     /// `authenticationMechanisms` of the node.
@@ -98,57 +98,91 @@ impl NodeHttp {
                     key_id = Some(k.key_id.clone());
                     touch_later(&mut exec, k);
                 }
-                let m = self.parameters().1;
-                let options = teseladb_mcp::server::Options {
-                    read_only: m.read_only,
-                    allow_destructive: m.allow_destructive,
-                    limits: teseladb_mcp::calls::Limits {
-                        max_documents: m.max_documents,
-                        max_bytes: m.max_bytes,
-                        max_time_ms: m.max_time_ms,
-                    },
-                };
-                let mut random = || {
-                    let mut b = [0u8; 16];
-                    // Without the system's generator, a hash of the clock: ids stay unique.
-                    if teseladb_sys::fill_random(&mut b).is_err() {
-                        b[..8].copy_from_slice(&random_seed().to_le_bytes());
-                        b[8..].copy_from_slice(&random_seed().to_le_bytes());
-                    }
-                    b
-                };
-                let mut call = teseladb_mcp::server::Call {
-                    exec: &mut exec,
-                    options,
-                    now_ms: crate::clock::wall_ms(),
-                    random: &mut random,
-                    progress: Vec::new(),
-                };
-                self.mcp.http(request, &mut call)
+                run_mcp(&self.mcp, &mut exec, request, self.mcp_options(), None)
             }
             Err(r) => self.with_metadata(request, r),
         };
         if audit {
-            let (route, tool) = mcp_call(request);
-            let p = http_request(
-                Transport::Mcp,
-                &request.method,
-                &route,
-                tool.as_deref(),
-                answer.status,
-                key_id.as_deref(),
-            );
-            exec.audit(p, answer.status);
+            audit_mcp(&mut exec, request, answer.status, key_id.as_deref());
         }
         self.backends.lock().unwrap_or_else(PoisonError::into_inner).push(exec.into_backend());
         answer
+    }
+
+    /// A `tools/call` with a `progressToken` that accepts an event stream (FR-026): the stream
+    /// opens at once, and each `notifications/progress` goes in it as its batch is read, before
+    /// the result. The call runs on a thread of its own, which also writes the audit event.
+    fn mcp_progress(&self, request: &Request, who: &Credential) -> Reply {
+        let mut exec = self.executor(self.backend());
+        exec.auth_state().oidc_resource = Some(self.resource(request));
+        let key_id = match authenticate(&mut exec, request, who, self.auth) {
+            Ok(key) => key.map(|k| {
+                let id = k.key_id.clone();
+                touch_later(&mut exec, k);
+                id
+            }),
+            Err(r) => {
+                let r = self.with_metadata(request, r);
+                audit_mcp(&mut exec, request, r.status, None);
+                return Reply::Whole(r);
+            }
+        };
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let (mcp, options, request) = (self.mcp.clone(), self.mcp_options(), request.clone());
+        std::thread::spawn(move || {
+            let notes = tx.clone();
+            let mut send = |note: teseladb_json::Value| {
+                let data = teseladb_json::to_string(&note).unwrap_or_default();
+                let _ = notes.send(teseladb_http::sse::Event::data(data).encode());
+            };
+            let r = run_mcp(&mcp, &mut exec, &request, options, Some(&mut send));
+            let streamed = r.headers.iter().any(|(k, v)| {
+                k.eq_ignore_ascii_case("Content-Type") && v.starts_with(EVENT_STREAM)
+            });
+            let last = if streamed {
+                r.body.clone()
+            } else {
+                teseladb_http::sse::Event::data(String::from_utf8_lossy(&r.body)).encode()
+            };
+            let _ = tx.send(last);
+            audit_mcp(&mut exec, &request, r.status, key_id.as_deref());
+        });
+        let headers = vec![
+            ("Content-Type".to_owned(), EVENT_STREAM.to_owned()),
+            ("Cache-Control".to_owned(), "no-store".to_owned()),
+        ];
+        let pieces: crate::http_listener::Pieces = Box::new(move |cancelled: &AtomicBool| {
+            loop {
+                match rx.recv_timeout(PROGRESS_POLL) {
+                    Ok(piece) => return Some(piece),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                        if !cancelled.load(Ordering::Relaxed) => {}
+                    Err(_) => return None,
+                }
+            }
+        });
+        Reply::Stream { status: 200, headers, pieces }
+    }
+
+    /// The options of MCP's calls now, from `mcpOptions`.
+    fn mcp_options(&self) -> teseladb_mcp::server::Options {
+        let m = self.parameters().1;
+        teseladb_mcp::server::Options {
+            read_only: m.read_only,
+            allow_destructive: m.allow_destructive,
+            limits: teseladb_mcp::calls::Limits {
+                max_documents: m.max_documents,
+                max_bytes: m.max_bytes,
+                max_time_ms: m.max_time_ms,
+            },
+        }
     }
 
     /// The service of the node of `handle`, whose replies take the node's state from `state`;
     /// with `auth`, each request authenticates (013).
     #[must_use]
     pub fn new(handle: NodeHandle, state: std::sync::Arc<dyn NodeState>, auth: bool) -> NodeHttp {
-        let mcp = teseladb_mcp::server::Server::new(handle.node.0);
+        let mcp = std::sync::Arc::new(teseladb_mcp::server::Server::new(handle.node.0));
         NodeHttp {
             handle,
             state,
@@ -360,6 +394,64 @@ fn mcp_call(request: &Request) -> (String, Option<String>) {
 }
 
 /// A seed for a backend's random numbers.
+/// How often the stream of a call with progress looks whether its client left.
+const PROGRESS_POLL: Duration = Duration::from_millis(200);
+
+/// `request` on `/mcp` with `exec`'s user and `options`; the notes of progress go to `stream`
+/// when one is open.
+fn run_mcp(
+    mcp: &teseladb_mcp::server::Server,
+    exec: &mut NodeExecutor,
+    request: &Request,
+    options: teseladb_mcp::server::Options,
+    stream: Option<&mut dyn FnMut(teseladb_json::Value)>,
+) -> Response {
+    let mut random = || {
+        let mut b = [0u8; 16];
+        // Without the system's generator, a hash of the clock: ids stay unique.
+        if teseladb_sys::fill_random(&mut b).is_err() {
+            b[..8].copy_from_slice(&random_seed().to_le_bytes());
+            b[8..].copy_from_slice(&random_seed().to_le_bytes());
+        }
+        b
+    };
+    let mut call = teseladb_mcp::server::Call {
+        exec: &mut *exec,
+        options,
+        now_ms: crate::clock::wall_ms(),
+        random: &mut random,
+        progress: Vec::new(),
+        stream: match stream {
+            Some(s) => Some(s as &mut dyn FnMut(teseladb_json::Value)),
+            None => None,
+        },
+    };
+    mcp.http(request, &mut call)
+}
+
+/// Writes the `httpRequest` event of `request` on `/mcp` (FR-018).
+fn audit_mcp(exec: &mut NodeExecutor, request: &Request, status: u16, key_id: Option<&str>) {
+    let (route, tool) = mcp_call(request);
+    let p = http_request(Transport::Mcp, &request.method, &route, tool.as_deref(), status, key_id);
+    exec.audit(p, status);
+}
+
+/// Whether `request` is a `tools/call` with a `progressToken` from a client that accepts an
+/// event stream: its notes of progress go as they come (FR-026).
+fn wants_progress(request: &Request) -> bool {
+    let accepts = header_of(request, "Accept").is_some_and(|a| a.contains(EVENT_STREAM));
+    if request.method != "POST" || !accepts {
+        return false;
+    }
+    let Ok(v) = teseladb_json::parse(&request.body) else { return false };
+    let call = v.get("method").and_then(teseladb_json::Value::as_str) == Some("tools/call");
+    let token = v
+        .get("params")
+        .and_then(|p| p.get("_meta"))
+        .and_then(|m| m.get(teseladb_mcp::server::PROGRESS_TOKEN));
+    call && token.is_some()
+}
+
 fn random_seed() -> u64 {
     std::hash::BuildHasher::hash_one(
         &std::collections::hash_map::RandomState::new(),
@@ -511,6 +603,9 @@ impl HttpService for NodeHttp {
         if path == MCP {
             if request.method == "GET" && header_of(request, SESSION_HEADER).is_some() {
                 return self.mcp_stream(request, &Credential::of(caller));
+            }
+            if wants_progress(request) {
+                return self.mcp_progress(request, &Credential::of(caller));
             }
             return Reply::Whole(self.mcp(request, &Credential::of(caller), true));
         }

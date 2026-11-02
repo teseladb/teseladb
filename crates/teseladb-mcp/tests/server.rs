@@ -94,8 +94,14 @@ fn post(
         n += 1;
         [n; 16]
     };
-    let mut call =
-        Call { exec: f, options, now_ms: 1_000, random: &mut random, progress: Vec::new() };
+    let mut call = Call {
+        exec: f,
+        options,
+        now_ms: 1_000,
+        random: &mut random,
+        progress: Vec::new(),
+        stream: None,
+    };
     let r = server.http(&req, &mut call);
     let v = parse(&r.body).unwrap_or(Value::Null);
     (r, v)
@@ -198,6 +204,7 @@ fn initialize_then_tools_in_a_session() {
         now_ms: 2_000,
         random: &mut random,
         progress: Vec::new(),
+        stream: None,
     };
     assert_eq!(server.http(&del, &mut call).status, 200);
 }
@@ -251,6 +258,7 @@ fn stateless_revision_with_meta() {
         now_ms: 0,
         random: &mut random,
         progress: Vec::new(),
+        stream: None,
     };
     assert_eq!(server.http(&get, &mut call).status, 405);
 }
@@ -341,6 +349,7 @@ fn a_call_is_cancelled_by_its_tag_and_reports_its_progress() {
         now_ms: 0,
         random: &mut random,
         progress: Vec::new(),
+        stream: None,
     };
     let r = server.http(&req, &mut call);
     assert_eq!(r.status, 200);
@@ -355,6 +364,25 @@ fn a_call_is_cancelled_by_its_tag_and_reports_its_progress() {
     assert!(events[1].data.contains(r#""id":5"#));
     let find = f.ran.iter().find(|c| c.get("find").is_some()).unwrap();
     assert_eq!(find.get("comment"), Some(&teseladb_bson::Value::from("mcp:7.stateless:5")));
+    // With a stream already open, each note goes there as its batch is read, not with the result.
+    let mut sent = Vec::new();
+    let mut send = |note: teseladb_json::Value| sent.push(note);
+    let mut call = Call {
+        exec: &mut f,
+        options: READ_ONLY,
+        now_ms: 0,
+        random: &mut random,
+        progress: Vec::new(),
+        stream: Some(&mut send),
+    };
+    let r = server.http(&req, &mut call);
+    assert!(call.progress.is_empty());
+    assert!(r.headers.iter().any(|(k, v)| k == "Content-Type" && v == "application/json"), "{r:?}");
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(
+        sent[0].get("method").and_then(teseladb_json::Value::as_str),
+        Some("notifications/progress")
+    );
     // The cancellation of request 5.
     f.ran.clear();
     let cancel = r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":5,"reason":"user"}}"#;
@@ -365,6 +393,7 @@ fn a_call_is_cancelled_by_its_tag_and_reports_its_progress() {
         now_ms: 0,
         random: &mut random,
         progress: Vec::new(),
+        stream: None,
     };
     assert_eq!(server.http(&req, &mut call).status, 202);
     assert_eq!(
