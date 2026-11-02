@@ -48,6 +48,8 @@ pub struct Binding {
 #[derive(Debug, Default)]
 pub struct EnvRec {
     pub vars: Vec<(Name, Binding)>,
+    /// The object of a `with` statement, whose properties are the names of this scope.
+    pub with: Option<ObjRef>,
     pub parent: Option<EnvRef>,
     pub this: Option<Val>,
     pub home: Option<ObjRef>,
@@ -129,6 +131,8 @@ pub struct Interp<'c> {
     pub registry: Vec<(Name, Val)>,
     /// The strings arrays of the tagged templates evaluated so far, by site.
     pub templates: Vec<(usize, Val)>,
+    /// Whether a `with` statement has run: names are then looked up in its objects too.
+    pub with_used: bool,
     pub output: Vec<String>,
     /// The value of the last expression statement (a `$where` string's result).
     pub last: Option<Val>,
@@ -146,6 +150,9 @@ pub struct Interp<'c> {
     /// function, or the code it puts before a `$where` expression.
     pub col_offset: u32,
 }
+
+/// The key the parser gives a class's `static { … }` block.
+pub const STATIC_BLOCK: &str = "@@static-block";
 
 /// The file SpiderMonkey names in RefDb's errors.
 pub const ERROR_FILE: &str = "wasm:function";
@@ -414,6 +421,13 @@ impl<'c> Interp<'c> {
     pub fn primitive(&mut self, v: &Val, hint: &str) -> R {
         let Val::Obj(o) = v else { return Ok(v.clone()) };
         let exotic = self.get(v, "@@Symbol.toPrimitive:0")?;
+        if !exotic.is_nullish() && !exotic.is_callable() {
+            let to = if hint == "string" { "string" } else { "number" };
+            return self.type_error(&format!(
+                "can't convert {} to {to}: its [Symbol.toPrimitive] property is not a function",
+                self.show(v)
+            ));
+        }
         if exotic.is_callable() {
             let r = self.call(&exotic, v, &[Val::str(hint)])?;
             if matches!(r, Val::Obj(_)) {
@@ -953,6 +967,16 @@ impl<'c> Interp<'c> {
         args: &[Val],
         new_target: Option<Val>,
     ) -> R {
+        // Sloppy code sees `this` as an object: the global one for undefined and null.
+        let this = match this {
+            Some(Val::Undef | Val::Null) if !def.strict && !def.arrow => {
+                Some(Val::Obj(self.realm.global.clone()))
+            }
+            Some(v) if !def.strict && !def.arrow && !matches!(v, Val::Obj(_)) => {
+                Some(Val::Obj(self.object_of(&v)?))
+            }
+            other => other,
+        };
         let scope = self.new_env(Some(env.clone()));
         {
             let mut s = scope.borrow_mut();
@@ -984,6 +1008,7 @@ impl<'c> Interp<'c> {
                 && let Some(d) = d
             {
                 v = self.eval(d, &scope)?;
+                name_function(&v, p, d);
             }
             self.bind(p, v, &scope, Some(true))?;
         }
@@ -1137,7 +1162,44 @@ impl<'c> Interp<'c> {
         None
     }
 
+    /// A scope whose names are the properties of `o` (`with`).
+    pub fn with_scope(&mut self, o: &Val, env: &EnvRef) -> R<EnvRef> {
+        let o = self.object_of(o)?;
+        let scope = self.new_env(Some(env.clone()));
+        scope.borrow_mut().with = Some(o);
+        self.with_used = true;
+        Ok(scope)
+    }
+
+    /// The object of the innermost `with` that has `name`, before any scope that declares it.
+    fn with_object(&mut self, env: &EnvRef, name: &str) -> R<Option<ObjRef>> {
+        let mut cur = Some(env.clone());
+        while let Some(e) = cur {
+            let with = e.borrow().with.clone();
+            if let Some(o) = with {
+                if self.has(&o, name)? {
+                    let blocked = match self.get(&Val::Obj(o.clone()), "@@Symbol.unscopables:0")? {
+                        u @ Val::Obj(_) => self.get(&u, name)?.truthy(),
+                        _ => false,
+                    };
+                    if !blocked {
+                        return Ok(Some(o));
+                    }
+                }
+            } else if e.borrow().vars.iter().any(|(k, _)| &**k == name) {
+                return Ok(None);
+            }
+            cur = e.borrow().parent.clone();
+        }
+        Ok(None)
+    }
+
     pub fn read_var(&mut self, env: &EnvRef, name: &str) -> R {
+        if self.with_used
+            && let Some(o) = self.with_object(env, name)?
+        {
+            return self.get(&Val::Obj(o), name);
+        }
         if let Some((e, i)) = self.lookup(env, name) {
             return match &e.borrow().vars[i].1.value {
                 Some(v) => Ok(v.clone()),
@@ -1155,6 +1217,11 @@ impl<'c> Interp<'c> {
     }
 
     fn write_var(&mut self, env: &EnvRef, name: &str, v: Val) -> R<()> {
+        if self.with_used
+            && let Some(o) = self.with_object(env, name)?
+        {
+            return self.set(&Val::Obj(o), name, v);
+        }
         if let Some((e, i)) = self.lookup(env, name) {
             let mut b = e.borrow_mut();
             let binding = &mut b.vars[i].1;
@@ -1337,6 +1404,7 @@ impl<'c> Interp<'c> {
                         && let Some(d) = d
                     {
                         x = self.eval(d, scope)?;
+                        name_function(&x, target, d);
                     }
                     used.push(key);
                     self.bind(target, x, scope, declare_mutable)?;
@@ -1376,6 +1444,7 @@ impl<'c> Interp<'c> {
                         && let Some(d) = d
                     {
                         x = self.eval(d, scope)?;
+                        name_function(&x, target, d);
                     }
                     self.bind(target, x, scope, declare_mutable)?;
                 }
@@ -1565,7 +1634,7 @@ impl<'c> Interp<'c> {
                     let v = match init {
                         Some(e) => {
                             let v = self.eval(e, env)?;
-                            name_function(&v, p);
+                            name_function(&v, p, e);
                             v
                         }
                         None if *kind == DeclKind::Var => continue,
@@ -1635,10 +1704,16 @@ impl<'c> Interp<'c> {
                     if let Some(p) = param {
                         self.bind(p, x, &scope, Some(true))?;
                     }
+                    // The completion value of a statement list (`eval`): a catch starts from
+                    // undefined, and a finally that ends normally keeps the value before it
+                    // (measured on the engine of a `refrouter` 9.0.4).
+                    self.last = Some(Val::Undef);
                     r = self.block(handler, &scope);
                 }
                 if let Some(f) = finally {
+                    let before = self.last.replace(Val::Undef);
                     self.block(f, env)?;
+                    self.last = before;
                 }
                 r?;
             }
@@ -1679,6 +1754,11 @@ impl<'c> Interp<'c> {
                         }
                     }
                 }
+            }
+            Stmt::With(o, body) => {
+                let o = self.eval(o, env)?;
+                let scope = self.with_scope(&o, env)?;
+                self.exec(body, &scope)?;
             }
             Stmt::Labeled(label, body) => {
                 let r = match &**body {
@@ -1926,6 +2006,14 @@ impl<'c> Interp<'c> {
         }
         for m in &c.members {
             let target = if m.is_static { ctor.clone() } else { proto.clone() };
+            if m.is_static && matches!(&m.key, PropName::Fixed(k) if &**k == STATIC_BLOCK) {
+                // `static { … }`: run once, with `this` the class.
+                if let Some(f) = &m.func {
+                    let fv = self.closure(f, &scope)?;
+                    self.call(&fv, &Val::Obj(ctor.clone()), &[])?;
+                }
+                continue;
+            }
             let key = self.prop_key(&m.key, &scope)?;
             if let Some(f) = &m.func {
                 let fv = self.closure(f, &scope)?;
@@ -2058,6 +2146,11 @@ impl<'c> Interp<'c> {
                         Val::Obj(o) => Ok(Val::Bool(self.delete_key(o, &key)?)),
                         _ => Ok(Val::Bool(true)),
                     }
+                }
+                Expr::Ident(n, _) => self.delete_name(env, n),
+                Expr::At(_, inner) if matches!(&**inner, Expr::Ident(..)) => {
+                    let Expr::Ident(n, _) = &**inner else { return Ok(Val::Bool(true)) };
+                    self.delete_name(env, n)
                 }
                 _ => Ok(Val::Bool(true)),
             },
@@ -2340,7 +2433,7 @@ impl<'c> Interp<'c> {
     fn assign(&mut self, op: &str, target: &Pattern, value: &Expr, env: &EnvRef) -> R {
         if op == "=" {
             let v = self.eval(value, env)?;
-            name_function(&v, target);
+            name_function(&v, target, value);
             self.bind(target, v.clone(), env, None)?;
             return Ok(v);
         }
@@ -2391,6 +2484,18 @@ impl<'c> Interp<'c> {
     }
 
     /// OrdinaryHasInstance: whether `f.prototype` is on the chain of `x`.
+    /// `delete name`: a declared binding stays (`false`); a property of the global object goes.
+    fn delete_name(&mut self, env: &EnvRef, name: &str) -> R {
+        if self.lookup(env, name).is_some() {
+            return Ok(Val::Bool(false));
+        }
+        let g = self.realm.global.clone();
+        if self.has_own(&g, name) {
+            return Ok(Val::Bool(self.delete_key(&g, name)?));
+        }
+        Ok(Val::Bool(true))
+    }
+
     /// The strings array of a tagged template: one per site and call, frozen, with its frozen
     /// `raw` (ECMA-262 §13.2.8.4).
     fn template_object(&mut self, parts: &Rc<crate::lexer::TemplateParts>) -> R {
@@ -2637,7 +2742,22 @@ pub fn declare(env: &EnvRef, name: &str, v: Val, mutable: bool) {
 }
 
 /// Gives an anonymous function the name it is assigned to.
-fn name_function(v: &Val, p: &Pattern) {
+/// Whether `e` is a function or class without a name, which takes the name of what it is bound
+/// to (ECMA-262 §8.4.3 IsAnonymousFunctionDefinition, parentheses included).
+fn anonymous_definition(e: &Expr) -> bool {
+    match e {
+        Expr::Func(d) => d.name.is_none() && !d.method,
+        Expr::Class(c) => c.name.is_none(),
+        Expr::At(_, x) => anonymous_definition(x),
+        _ => false,
+    }
+}
+
+/// Names the function `v` that `e` made after the name `p` binds, when `e` is anonymous.
+fn name_function(v: &Val, p: &Pattern, e: &Expr) {
+    if !anonymous_definition(e) {
+        return;
+    }
     let (Val::Obj(f), Pattern::Name(n)) = (v, p) else { return };
     let mut b = f.borrow_mut();
     if !b.is_callable() {
@@ -2688,7 +2808,9 @@ fn var_names(s: &Stmt, out: &mut Vec<Name>) {
             }
         }
         Stmt::Block(body) => body.iter().for_each(|s| var_names(s, out)),
-        Stmt::While(_, b) | Stmt::DoWhile(b, _) | Stmt::Labeled(_, b) => var_names(b, out),
+        Stmt::While(_, b) | Stmt::DoWhile(b, _) | Stmt::Labeled(_, b) | Stmt::With(_, b) => {
+            var_names(b, out)
+        }
         Stmt::For(init, _, _, b) => {
             if let Some(ForInit::Decl(DeclKind::Var, d)) = init {
                 for (p, _) in d {

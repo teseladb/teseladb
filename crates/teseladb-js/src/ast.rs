@@ -195,6 +195,8 @@ pub enum Stmt {
     Try(Vec<Stmt>, Option<(Option<Pattern>, Vec<Stmt>)>, Option<Vec<Stmt>>),
     Switch(Expr, Vec<(Option<Expr>, Vec<Stmt>)>),
     Labeled(Name, Box<Stmt>),
+    /// `with (obj) body`: the object's properties are names in the body.
+    With(Expr, Box<Stmt>),
     Empty,
     /// A statement of a generator that holds a `yield` (see `generators.rs`).
     Suspends(Box<Stmt>),

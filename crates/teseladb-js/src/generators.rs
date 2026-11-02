@@ -133,7 +133,9 @@ fn mark(s: Stmt) -> Stmt {
     let suspends = match &s {
         Stmt::Block(b) => b.iter().any(stmt_suspends),
         Stmt::If(_, a, b) => stmt_suspends(a) || b.as_deref().is_some_and(stmt_suspends),
-        Stmt::While(_, b) | Stmt::DoWhile(b, _) | Stmt::Labeled(_, b) => stmt_suspends(b),
+        Stmt::While(_, b) | Stmt::DoWhile(b, _) | Stmt::Labeled(_, b) | Stmt::With(_, b) => {
+            stmt_suspends(b)
+        }
         Stmt::For(_, _, _, b) => stmt_suspends(b),
         Stmt::ForIn { body, .. } => stmt_suspends(body),
         Stmt::Try(a, c, f) => {
@@ -593,6 +595,11 @@ impl Lower {
                 let body = self.sub(*body);
                 out.push(mark(Stmt::Labeled(l, Box::new(body))));
             }
+            Stmt::With(o, body) => {
+                let o = self.expr(o, out);
+                let body = self.sub(*body);
+                out.push(mark(Stmt::With(o, Box::new(body))));
+            }
             s => out.push(s),
         }
     }
@@ -928,9 +935,11 @@ pub fn install(it: &mut Interp) -> R<()> {
         let gp = it.alloc(Some(it.realm.iter.clone()), Kind::Ordinary)?;
         let c = it.native(ctor_name, crate::builtins::function_ctor, 1)?;
         it.define(&c, "prototype", Prop { writable: false, ..Prop::hidden(Val::Obj(gf.clone())) })?;
-        it.define(&gf, "constructor", Prop::hidden(Val::Obj(c)))?;
-        it.define(&gf, "prototype", Prop::hidden(Val::Obj(gp.clone())))?;
-        it.define(&gp, "constructor", Prop::hidden(Val::Obj(gf.clone())))?;
+        // Read-only and configurable (ECMA-262 §27.3.3, §27.5.1).
+        let fixed = |v: ObjRef| Prop { writable: false, ..Prop::hidden(Val::Obj(v)) };
+        it.define(&gf, "constructor", fixed(c))?;
+        it.define(&gf, "prototype", fixed(gp.clone()))?;
+        it.define(&gp, "constructor", fixed(gf.clone()))?;
         if step {
             for m in ["next", "return", "throw"] {
                 method(it, &gp, m, async_gen_step, 1)?;
@@ -1048,6 +1057,22 @@ impl Interp<'_> {
                 Err(Ctrl::Break(Some(x))) if x == *l => Ok(()),
                 r => r,
             },
+            Stmt::With(o, body) => {
+                let scope = if run.resuming {
+                    match run.saved.pop() {
+                        Some(Saved::Loop { env, .. }) => env,
+                        _ => return self.type_error("generator state lost"),
+                    }
+                } else {
+                    let o = self.eval(o, env)?;
+                    self.with_scope(&o, env)?
+                };
+                let r = self.exec_gen(body, &scope, run, None);
+                if matches!(r, Err(Ctrl::Suspend)) {
+                    run.saved.push(Saved::Loop { env: scope, per_iteration: false });
+                }
+                r
+            }
             other => self.exec(other, env),
         }
     }

@@ -154,6 +154,7 @@ pub fn install(it: &mut Interp) -> R<()> {
     crate::iterators::install(it, &g)?;
     regexp_builtins(it, &g)?;
     crate::bson::install(it, &g)?;
+    crate::symbols::install_species(it, &g)?;
     freeze_builtins(it);
     Ok(())
 }
@@ -1030,15 +1031,29 @@ fn bool_value_of(it: &mut Interp, this: &Val, _: &[Val]) -> R {
 
 // Errors.
 
-const ERRORS: [&str; 7] = [
-    "TypeError",
-    "RangeError",
-    "SyntaxError",
-    "ReferenceError",
-    "EvalError",
-    "URIError",
-    "InternalError",
+/// The native errors and their constructors: each makes its own kind called without `new`.
+const ERRORS: [(&str, NativeFn); 7] = [
+    ("TypeError", |it, t, a| error_of_kind(it, t, a, "TypeError")),
+    ("RangeError", |it, t, a| error_of_kind(it, t, a, "RangeError")),
+    ("SyntaxError", |it, t, a| error_of_kind(it, t, a, "SyntaxError")),
+    ("ReferenceError", |it, t, a| error_of_kind(it, t, a, "ReferenceError")),
+    ("EvalError", |it, t, a| error_of_kind(it, t, a, "EvalError")),
+    ("URIError", |it, t, a| error_of_kind(it, t, a, "URIError")),
+    ("InternalError", |it, t, a| error_of_kind(it, t, a, "InternalError")),
 ];
+
+/// `XError(…)` without `new`: an error with the prototype of the global `XError`.
+fn error_of_kind(it: &mut Interp, this: &Val, a: &[Val], kind: &str) -> R {
+    if new_target(this).is_some() {
+        return error_ctor(it, this, a);
+    }
+    let c = it.realm.errors.iter().find(|(n, _)| &**n == kind).map(|(_, c)| c.clone());
+    let proto = match c {
+        Some(c) => it.get(&Val::Obj(c), "prototype")?.as_obj().cloned(),
+        None => Some(it.realm.error.clone()),
+    };
+    make_error_object(it, proto, a)
+}
 
 fn errors(it: &mut Interp, g: &ObjRef) -> R<()> {
     let proto = it.realm.error.clone();
@@ -1047,11 +1062,11 @@ fn errors(it: &mut Interp, g: &ObjRef) -> R<()> {
     it.define(&proto, "message", Prop::hidden(Val::str("")))?;
     method(it, &proto, "toString", error_to_string, 0)?;
     it.realm.errors.push(("Error".into(), base.clone()));
-    for name in ERRORS {
+    for (name, f) in ERRORS {
         let p = it.alloc(Some(proto.clone()), Kind::Ordinary)?;
         it.define(&p, "name", Prop::hidden(Val::str(name)))?;
         it.define(&p, "message", Prop::hidden(Val::str("")))?;
-        let c = ctor(it, g, name, error_ctor, 1, &p)?;
+        let c = ctor(it, g, name, f, 1, &p)?;
         c.borrow_mut().proto = Some(base.clone());
         it.realm.errors.push((name.into(), c));
     }
@@ -1082,6 +1097,11 @@ fn error_ctor(it: &mut Interp, this: &Val, a: &[Val]) -> R {
         Some(t) => it.get(&t, "prototype")?.as_obj().cloned(),
         None => Some(it.realm.error.clone()),
     };
+    make_error_object(it, proto, a)
+}
+
+/// An error with `proto` from the arguments of its constructor.
+fn make_error_object(it: &mut Interp, proto: Option<ObjRef>, a: &[Val]) -> R {
     let o = it.alloc(proto, Kind::Error)?;
     if !matches!(arg(a, 0), Val::Undef) {
         let m = it.str_of(&arg(a, 0))?;
@@ -1163,19 +1183,47 @@ fn collections(it: &mut Interp, g: &ObjRef) -> R<()> {
     Ok(())
 }
 
+/// Adds what `iterable` gives to the new collection `target` with `adder`, one value at a time:
+/// each an entry `[key, value]` when `entries`. An error closes the iterator (ECMA-262 §24.1.1.2).
+pub(crate) fn add_from(
+    it: &mut Interp,
+    target: &Val,
+    iterable: &Val,
+    adder: NativeFn,
+    entries: bool,
+) -> R<()> {
+    if iterable.is_nullish() {
+        return Ok(());
+    }
+    let mut rec = it.open_iter(iterable)?;
+    while let Some(item) = it.iter_step(&mut rec)? {
+        let r = if !entries {
+            adder(it, target, &[item])
+        } else if !matches!(item, Val::Obj(_)) {
+            let m = format!("iterator value {} is not an entry object", it.show(&item));
+            it.type_error(&m)
+        } else {
+            it.get(&item, "0")
+                .and_then(|k| Ok((k, it.get(&item, "1")?)))
+                .and_then(|(k, v)| adder(it, target, &[k, v]))
+        };
+        if let Err(e) = r {
+            if matches!(e, Ctrl::Throw(_)) {
+                it.iter_close(&rec)?;
+            }
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
 fn map_ctor(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     if new_target(this).is_none() {
         return it.type_error("calling a builtin Map constructor without new is forbidden");
     }
-    let m = it.alloc(Some(it.realm.map.clone()), Kind::Map(Vec::new()))?;
-    if !arg(a, 0).is_nullish() {
-        for e in it.iterate(&arg(a, 0))? {
-            let k = it.get(&e, "0")?;
-            let v = it.get(&e, "1")?;
-            map_set(it, &Val::Obj(m.clone()), &[k, v])?;
-        }
-    }
-    Ok(Val::Obj(m))
+    let m = Val::Obj(it.alloc(Some(it.realm.map.clone()), Kind::Map(Vec::new()))?);
+    add_from(it, &m, &arg(a, 0), map_set, true)?;
+    Ok(m)
 }
 
 fn set_ctor(it: &mut Interp, this: &Val, a: &[Val]) -> R {
@@ -1183,11 +1231,7 @@ fn set_ctor(it: &mut Interp, this: &Val, a: &[Val]) -> R {
         return it.type_error("calling a builtin Set constructor without new is forbidden");
     }
     let s = it.alloc(Some(it.realm.set.clone()), Kind::Set(Vec::new()))?;
-    if !arg(a, 0).is_nullish() {
-        for x in it.iterate(&arg(a, 0))? {
-            set_add(it, &Val::Obj(s.clone()), &[x])?;
-        }
-    }
+    add_from(it, &Val::Obj(s.clone()), &arg(a, 0), set_add, false)?;
     Ok(Val::Obj(s))
 }
 

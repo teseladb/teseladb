@@ -46,13 +46,7 @@ fn weak_set(it: &mut Interp, this: &Val, m: &str) -> R<ObjRef> {
 fn wm_ctor(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     require_new(it, this, "WeakMap")?;
     let m = Val::Obj(it.alloc(Some(it.realm.proto("WeakMap")), Kind::WeakMap(Vec::new()))?);
-    if !arg(a, 0).is_nullish() {
-        for e in it.iterate(&arg(a, 0))? {
-            let k = it.get(&e, "0")?;
-            let v = it.get(&e, "1")?;
-            wm_set(it, &m, &[k, v])?;
-        }
-    }
+    crate::builtins::add_from(it, &m, &arg(a, 0), wm_set, true)?;
     Ok(m)
 }
 
@@ -105,11 +99,7 @@ fn wm_delete(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 fn ws_ctor(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     require_new(it, this, "WeakSet")?;
     let s = Val::Obj(it.alloc(Some(it.realm.proto("WeakSet")), Kind::WeakSet(Vec::new()))?);
-    if !arg(a, 0).is_nullish() {
-        for v in it.iterate(&arg(a, 0))? {
-            ws_add(it, &s, &[v])?;
-        }
-    }
+    crate::builtins::add_from(it, &s, &arg(a, 0), ws_add, false)?;
     Ok(s)
 }
 

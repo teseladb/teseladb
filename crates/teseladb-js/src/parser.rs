@@ -21,6 +21,7 @@ pub fn parse_script(src: &str) -> Result<Vec<Stmt>, SyntaxError> {
         scopes: Scopes::default(),
         binding: None,
         in_params: false,
+        in_static: false,
     };
     p.scopes.push(ScopeKind::Function);
     let mut out = Vec::new();
@@ -50,6 +51,7 @@ fn parse_expression(
         scopes: Scopes::default(),
         binding: None,
         in_params: false,
+        in_static: false,
     };
     p.scopes.push(ScopeKind::Function);
     let start = p.pos();
@@ -145,6 +147,8 @@ struct Parser {
     binding: Option<Decl>,
     /// Whether the code being read is a function's parameter list (no `yield` there).
     in_params: bool,
+    /// Whether the code being read is a class's `static { … }` block (no `await` binding).
+    in_static: bool,
 }
 
 /// Whether `body` starts with the directive `"use strict"`.
@@ -330,6 +334,9 @@ impl Parser {
             Tok::Ident(w) if &*w == "yield" && (self.in_gen || self.strict) => {
                 self.fail("yield is a reserved identifier".into())
             }
+            Tok::Ident(w) if &*w == "await" && self.in_static => {
+                self.fail("await is a reserved identifier".into())
+            }
             Tok::Ident(w) if !is_reserved(&w) => {
                 self.i += 1;
                 Ok(w)
@@ -418,7 +425,7 @@ impl Parser {
             {
                 self.i += 2;
                 let name_pos = self.pos_at(usize::from(self.is("*")));
-                let f = self.function_rest(pos, false, true)?;
+                let f = self.function_rest(pos, false, true, false)?;
                 let name = f.name.clone().map_or_else(|| self.fail("missing name".into()), Ok)?;
                 self.declare(&name, Decl::Function { plain: false }, name_pos)?;
                 Ok(Stmt::Func(name, f))
@@ -426,7 +433,7 @@ impl Parser {
             "function" => {
                 self.i += 1;
                 let name_pos = self.pos_at(usize::from(self.is("*")));
-                let f = self.function_rest(pos, false, false)?;
+                let f = self.function_rest(pos, false, false, false)?;
                 let name = f.name.clone().map_or_else(|| self.fail("missing name".into()), Ok)?;
                 self.declare(&name, Decl::Function { plain: !f.generator }, name_pos)?;
                 Ok(Stmt::Func(name, f))
@@ -534,7 +541,17 @@ impl Parser {
                 self.semicolon()?;
                 Ok(Stmt::Empty)
             }
-            "with" | "import" | "export" => self.fail(format!("{word} is not supported")),
+            "with" => {
+                if self.strict {
+                    return self.fail("strict mode code may not contain 'with' statements".into());
+                }
+                self.i += 1;
+                self.expect("(")?;
+                let o = self.expr_at()?;
+                self.expect(")")?;
+                Ok(Stmt::With(o, Box::new(self.statement()?)))
+            }
+            "import" | "export" => self.fail(format!("{word} is not supported")),
             _ => self.expression_statement(),
         }
     }
@@ -955,13 +972,23 @@ impl Parser {
         start: Pos,
         method: bool,
         is_async: bool,
+        expression: bool,
     ) -> Result<Rc<FuncDef>, SyntaxError> {
         let generator = self.eat("*");
+        // A function expression's name belongs to the function: `yield` is a name unless it is
+        // a generator's (ECMA-262 §15.2, §15.5).
+        let outer = self.in_gen;
+        if expression {
+            self.in_gen = generator;
+        }
         let name = if !method && matches!(self.tok(), Tok::Ident(_)) && !self.is("(") {
-            Some(self.ident()?)
+            self.ident()
         } else {
-            None
+            Ok("".into())
         };
+        self.in_gen = outer;
+        let name = name?;
+        let name = if name.is_empty() { None } else { Some(name) };
         self.function_body(start, name, false, FnKind { generator, is_async, method: false })
     }
 
@@ -972,12 +999,13 @@ impl Parser {
         derived_ctor: bool,
         kind: FnKind,
     ) -> Result<Rc<FuncDef>, SyntaxError> {
-        let outer = (self.strict, self.in_gen, self.in_async);
+        let outer = (self.strict, self.in_gen, self.in_async, self.in_static);
         self.in_gen = kind.generator;
         self.in_async = kind.is_async;
+        self.in_static = false;
         let r = self
             .scoped(ScopeKind::Function, |p| p.function_body_in(start, name, derived_ctor, kind));
-        (self.strict, self.in_gen, self.in_async) = outer;
+        (self.strict, self.in_gen, self.in_async, self.in_static) = outer;
         r
     }
 
@@ -1059,6 +1087,19 @@ impl Parser {
                     self.i += 1;
                     true
                 };
+            if is_static && self.is("{") {
+                self.i += 1;
+                let f = self.static_block(start)?;
+                let key = PropName::Fixed(crate::interp::STATIC_BLOCK.into());
+                members.push(ClassMember {
+                    is_static,
+                    key,
+                    kind: PropKind::Value,
+                    field: None,
+                    func: Some(f),
+                });
+                continue;
+            }
             let mut kind = PropKind::Value;
             if (self.is_word("get") || self.is_word("set"))
                 && !matches!(self.peek_at(1), Tok::Punct("(" | "=" | ";" | "}"))
@@ -1085,6 +1126,27 @@ impl Parser {
             }
         }
         Ok(Rc::new(ClassDef { pos, name, parent, ctor, members }))
+    }
+
+    /// A class's `static { … }` after `{`: a method of the class with no parameters.
+    fn static_block(&mut self, start: Pos) -> Result<Rc<FuncDef>, SyntaxError> {
+        let outer = (self.in_gen, self.in_async, self.in_static);
+        (self.in_gen, self.in_async, self.in_static) = (false, false, true);
+        let body = self.scoped(ScopeKind::Function, Self::block_rest);
+        (self.in_gen, self.in_async, self.in_static) = outer;
+        Ok(Rc::new(FuncDef {
+            name: None,
+            params: Vec::new(),
+            rest: None,
+            body: body?,
+            arrow: false,
+            is_ctor_of_derived: false,
+            strict: true,
+            generator: false,
+            is_async: false,
+            method: true,
+            source: self.source_from(start),
+        }))
     }
 
     fn prop_name(&mut self) -> Result<PropName, SyntaxError> {
@@ -1168,11 +1230,12 @@ impl Parser {
     }
 
     fn arrow(&mut self, start: Pos, is_async: bool) -> Result<Expr, SyntaxError> {
-        let outer = (self.strict, self.in_gen, self.in_async);
+        let outer = (self.strict, self.in_gen, self.in_async, self.in_static);
         self.in_gen = false;
         self.in_async = is_async;
+        self.in_static = false;
         let r = self.scoped(ScopeKind::Function, |p| p.arrow_in(start, is_async));
-        (self.strict, self.in_gen, self.in_async) = outer;
+        (self.strict, self.in_gen, self.in_async, self.in_static) = outer;
         r
     }
 
@@ -1572,13 +1635,13 @@ impl Parser {
             }
             Tok::Punct("{") => self.object_literal()?,
             Tok::Ident(w) => match &*w {
-                "function" => Expr::Func(self.function_rest(pos, false, false)?),
+                "function" => Expr::Func(self.function_rest(pos, false, false, true)?),
                 "async"
                     if matches!(self.tok(), Tok::Ident(w) if &**w == "function")
                         && !self.toks[self.i].newline_before =>
                 {
                     self.i += 1;
-                    Expr::Func(self.function_rest(pos, false, true)?)
+                    Expr::Func(self.function_rest(pos, false, true, true)?)
                 }
                 "class" => Expr::Class(self.class_rest()?),
                 "this" => Expr::This,
@@ -1603,6 +1666,9 @@ impl Parser {
                     self.i -= 1;
                     let what = describe(self.tok());
                     return self.fail(format!("expected expression, got {what}"));
+                }
+                "yield" if self.in_gen || self.strict => {
+                    return self.fail_at(pos, "yield is a reserved identifier".into());
                 }
                 _ => Expr::Ident(w, pos),
             },
