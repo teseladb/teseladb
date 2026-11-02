@@ -173,7 +173,7 @@ pub fn run(args: &Args) -> Result<Report, String> {
     let server = Server::open(args.target.as_deref())?;
     let addr = server.addr()?;
     let mut admin = Client::connect(addr)?;
-    load(&mut admin, n)?;
+    load(&mut admin, n).map_err(|e| format!("loading: {e}"))?;
     let acked: Acked = Arc::default();
     let started = Arc::new(AtomicBool::new(false));
     let stop = Arc::new(AtomicBool::new(false));
@@ -193,18 +193,22 @@ pub fn run(args: &Args) -> Result<Report, String> {
         ("numInitialChunks", int(chunks)),
     ]);
     let at = Instant::now();
-    let resharded = admin.command("admin", reshard).and_then(|r| check(&r));
+    let resharded = admin
+        .command("admin", reshard)
+        .and_then(|r| check(&r))
+        .map_err(|e| format!("reshardCollection: {e}"));
     let took = at.elapsed();
     thread::sleep(args.duration.min(Duration::from_secs(1)));
     stop.store(true, Ordering::Relaxed);
     let (mut writes, mut cutover) = (0u64, 0f64);
     for h in handles {
-        let (count, longest) = h.join().map_err(|_| "a writer panicked")??;
+        let (count, longest) =
+            h.join().map_err(|_| "a writer panicked")?.map_err(|e| format!("a writer: {e}"))?;
         writes += count;
         cutover = cutover.max(longest);
     }
     resharded?;
-    let now = values(&mut admin)?;
+    let now = values(&mut admin).map_err(|e| format!("reading back: {e}"))?;
     let acked = acked.lock().map_err(|_| "a writer panicked")?;
     let lost = acked.iter().filter(|(id, v)| now.get(id) != Some(v)).count();
     let missing = n.saturating_sub(now.len() as u64);
