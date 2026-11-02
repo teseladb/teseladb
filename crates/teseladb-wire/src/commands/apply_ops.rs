@@ -159,7 +159,7 @@ pub fn apply_ops<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
         results.push(Value::Boolean(apply_one(ctx, e)?));
     }
     let applied = i32::try_from(results.len()).unwrap_or(i32::MAX);
-    let failed = results.iter().any(|r| *r == Value::Boolean(false));
+    let failed = results.contains(&Value::Boolean(false));
     let d = Document::new().with("applied", applied).with("results", results);
     Ok(match failed {
         false => d.with("ok", 1.0),
