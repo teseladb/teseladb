@@ -34,6 +34,8 @@ pub mod diagnostics;
 pub mod engines;
 pub mod explain;
 pub mod fcv;
+pub mod fle;
+pub mod fle_write;
 pub mod hints;
 pub mod http_parameters;
 pub mod index_build;
@@ -70,6 +72,7 @@ pub mod sharding;
 pub mod sort;
 pub mod status;
 pub mod tenants;
+pub mod text_search;
 pub mod timeseries;
 pub mod timeseries_catalog;
 pub mod timeseries_filter;
@@ -84,6 +87,7 @@ pub mod uuid;
 pub mod validate;
 pub mod views;
 pub mod write_block;
+pub mod zones;
 
 use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard};
@@ -271,7 +275,6 @@ pub trait Backend {
     fn op_client(&mut self) -> Option<Document>;
     /// The plan the running operation noted ([`Backend::note_plan`]), for `$queryStats`.
     fn op_plan(&mut self) -> Option<Document>;
-
     /// Raises (`on`) or lifts the write fence of `[start, end)` on every range of it (018 FR-002,
     /// `teseladb_range::fence`): from then on those ranges refuse the writes and intents of the
     /// span with `StaleConfig`. The highest mark of the `Fence` entries: every write the ranges
@@ -355,6 +358,24 @@ pub trait Backend {
     fn config_settings_write(
         &mut self,
         _writes: Vec<config_settings::SettingsWrite>,
+    ) -> Result<bool, CommandError> {
+        Err(CommandError::new(
+            crate::error::ILLEGAL_OPERATION,
+            "this node keeps no cluster settings",
+        ))
+    }
+    /// The Group 0 settings whose key starts with `prefix` (018: the zones,
+    /// `teseladb_meta::zones`); a backend without a cluster keeps none.
+    fn group0_settings(
+        &mut self,
+        _prefix: &[u8],
+    ) -> Result<BTreeMap<Vec<u8>, Vec<u8>>, CommandError> {
+        Ok(BTreeMap::new())
+    }
+    /// Changes Group 0 settings together; `Ok(false)` if one of them is no longer as it was read.
+    fn group0_settings_write(
+        &mut self,
+        _changes: Vec<teseladb_meta::command::SettingChange>,
     ) -> Result<bool, CommandError> {
         Err(CommandError::new(
             crate::error::ILLEGAL_OPERATION,
@@ -808,7 +829,9 @@ impl<B: Backend + ?Sized> Ctx<'_, B> {
 }
 
 /// The commands of this module.
-const NAMES: [&str; 80] = [
+const NAMES: [&str; 85] = [
+    fle::COMPACT,
+    fle::CLEANUP,
     aggregate::AGGREGATE,
     query_settings::SET_QUERY_SETTINGS,
     query_settings::REMOVE_QUERY_SETTINGS,
@@ -837,6 +860,9 @@ const NAMES: [&str; 80] = [
     reshard::RESHARD_COLLECTION,
     reshard::REFINE_COLLECTION_SHARD_KEY,
     reshard::ABORT_RESHARD_COLLECTION,
+    zones::ADD_SHARD_TO_ZONE,
+    zones::REMOVE_SHARD_FROM_ZONE,
+    zones::UPDATE_ZONE_KEY_RANGE,
     mapreduce::MAP_REDUCE,
     crud::INSERT,
     crud::UPDATE,
@@ -912,7 +938,10 @@ pub fn run<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Option<Result<Document,
         let limit = lock(ctx.shared).params.expression_memory;
         let limit = u64::try_from(limit).unwrap_or(u64::MAX);
         teseladb_exec::expr::optimize::with_expression_memory_limit(limit, || {
-            crate::concerns::with_defaults(d.read, d.write, || command(ctx))
+            crate::concerns::with_defaults(d.read, d.write, || match fle::intercept(ctx) {
+                Some(r) => r,
+                None => command(ctx),
+            })
         })
     }))
 }
@@ -928,7 +957,7 @@ fn session_info<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<(), Command
     Ok(())
 }
 
-fn command<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
+pub(crate) fn command<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     // A change stream refuses a buckets namespace as an internal one (014, measured).
     if let Value::String(coll) = ctx.first()
         && !change_stream::opens(ctx.cmd)
@@ -1202,6 +1231,7 @@ fn dispatch<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
         diagnostics::COLL_STATS => diagnostics::coll_stats(ctx),
         profile::PROFILE => profile::profile(ctx),
         validate::VALIDATE => validate::validate(ctx),
+        fle::COMPACT | fle::CLEANUP => fle::compact(ctx),
         diagnostic_data::GET_DIAGNOSTIC_DATA => diagnostic_data::get_diagnostic_data(ctx),
         admin::CURRENT_OP => admin::current_op(ctx),
         admin::REPL_SET_GET_STATUS => admin::repl_set_get_status(ctx),
@@ -1210,6 +1240,9 @@ fn dispatch<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
         reshard::RESHARD_COLLECTION => reshard::reshard_collection(ctx),
         reshard::REFINE_COLLECTION_SHARD_KEY => reshard::refine_collection_shard_key(ctx),
         reshard::ABORT_RESHARD_COLLECTION => reshard::abort_reshard_collection(ctx),
+        zones::ADD_SHARD_TO_ZONE => zones::add_shard_to_zone(ctx),
+        zones::REMOVE_SHARD_FROM_ZONE => zones::remove_shard_from_zone(ctx),
+        zones::UPDATE_ZONE_KEY_RANGE => zones::update_zone_key_range(ctx),
         mapreduce::MAP_REDUCE => mapreduce::map_reduce(ctx),
         crud::INSERT => crud::insert(ctx),
         crud::UPDATE => crud::update(ctx),

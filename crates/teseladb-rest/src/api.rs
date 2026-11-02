@@ -32,6 +32,17 @@ pub trait Executor {
     /// The answer of node `node` to `request`, for a cursor it opened; `None` when the node
     /// cannot be reached.
     fn forward(&mut self, node: u64, request: &Request) -> Option<Response>;
+    /// Fills `out` with random bytes (the sessions of transactions, FR-009).
+    fn random(&mut self, out: &mut [u8]);
+    /// The node's wall clock in milliseconds since the epoch: the time a transaction may retry
+    /// and the life of an `Idempotency-Key` (FR-009, FR-010).
+    fn now_ms(&self) -> u64;
+    /// Who sent the request (`user@db`; empty without authentication), which an
+    /// `Idempotency-Key` belongs to.
+    fn principal(&self) -> String;
+    /// The reply of `command` run by the node itself, without the request's credential: the
+    /// records of `Idempotency-Key` in `config` (FR-010), which no user writes.
+    fn run_internal(&mut self, db: &str, command: Document) -> Document;
 }
 
 /// Field `name` of `req`, case-insensitively.
@@ -39,7 +50,7 @@ pub fn header<'a>(req: &'a Request, name: &str) -> Option<&'a str> {
     req.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
 }
 
-fn http_error(status: u16) -> Response {
+pub(crate) fn http_error(status: u16) -> Response {
     let mut r = body_response(status, &http_problem(status), Format::Relaxed);
     set_problem_type(&mut r);
     r
@@ -53,6 +64,11 @@ fn set_problem_type(r: &mut Response) {
     }
 }
 
+/// `doc` as relaxed Extended JSON with `status`.
+pub(crate) fn json(status: u16, doc: &Document) -> Response {
+    body_response(status, doc, Format::Relaxed)
+}
+
 fn body_response(status: u16, doc: &Document, format: Format) -> Response {
     match encode(doc, format) {
         Ok(body) => Response {
@@ -64,7 +80,7 @@ fn body_response(status: u16, doc: &Document, format: Format) -> Response {
     }
 }
 
-fn error_response(err: &CommandError, format: Format) -> Response {
+pub(crate) fn error_response(err: &CommandError, format: Format) -> Response {
     let (st, d) = problem(err);
     problem_response(st, &d, format)
 }
@@ -89,7 +105,7 @@ fn media_error(e: &MediaError) -> Response {
 }
 
 /// The answer to `req`.
-pub fn handle<E: Executor + ?Sized>(req: &Request, exec: &mut E) -> Response {
+pub fn handle<E: Executor>(req: &Request, exec: &mut E) -> Response {
     let (path, query) = req.target.split_once('?').unwrap_or((req.target.as_str(), ""));
     let (route, params) = match find(&req.method, path) {
         Ok(found) => found,
@@ -120,8 +136,29 @@ pub fn handle<E: Executor + ?Sized>(req: &Request, exec: &mut E) -> Response {
         Ok(b) => b,
         Err(e) => return media_error(&e),
     };
+    if route.op == Op::Transaction {
+        return transaction(&body, exec, format);
+    }
+    let op = route.op;
+    let run = |e: &mut dyn Executor| execute(req, op, &params, query, &body, e, format);
+    if let Some(r) = crate::idempotency::handle(req, op, &body, exec, run) {
+        return r;
+    }
+    execute(req, op, &params, query, &body, exec, format)
+}
+
+/// Builds the command of route `op` and answers with its reply.
+fn execute(
+    req: &Request,
+    op: Op,
+    params: &crate::routes::Params,
+    query: &str,
+    body: &Document,
+    exec: &mut dyn Executor,
+    format: Format,
+) -> Response {
     let mut new_id = || exec.object_id();
-    let built = match build(route.op, &params, query, &body, &mut new_id) {
+    let built = match build(op, params, query, body, &mut new_id) {
         Ok(b) => b,
         Err(e) => return error_response(&e, format),
     };
@@ -135,6 +172,60 @@ pub fn handle<E: Executor + ?Sized>(req: &Request, exec: &mut E) -> Response {
     let batch = batch_size(&command);
     let reply = exec.run(&built.db, command);
     answer(reply, &built.shape, format, batch)
+}
+
+/// The `aggregate` with `$changeStream` that a change stream route opens (FR-012), with its
+/// database; `None` when `req` is not one, and the answer of a request that cannot open one.
+pub fn watch(req: &Request) -> Option<Result<(String, Document), Response>> {
+    use crate::changestream::{Scope, open};
+    let (path, query) = req.target.split_once('?').unwrap_or((req.target.as_str(), ""));
+    let (route, params) = find(&req.method, path).ok()?;
+    let scope = match route.op {
+        Op::WatchCollection => Scope::Collection,
+        Op::WatchDatabase => Scope::Database,
+        Op::WatchCluster => Scope::Cluster,
+        _ => return None,
+    };
+    let body = match read_body(req, route.body) {
+        Ok(b) => b,
+        Err(e) => return Some(Err(media_error(&e))),
+    };
+    let last = header(req, teseladb_http::sse::LAST_EVENT_ID);
+    Some(
+        open(scope, &params, query, &body, !route.body, last)
+            .map_err(|e| error_response(&e, Format::Relaxed)),
+    )
+}
+
+/// The problem of a reply that failed, as `answer` gives it.
+#[must_use]
+pub fn problem_body(reply: &Document) -> (u16, Document) {
+    problem_of(reply)
+}
+
+/// `POST /transactions` (FR-009): `{results}`, or the problem of the operation that failed with
+/// its `operationIndex`.
+fn transaction<E: Executor + ?Sized>(body: &Document, exec: &mut E, format: Format) -> Response {
+    let (ops, max_commit) = match crate::txn::parse(body) {
+        Ok(p) => p,
+        Err(e) => return error_response(&e, format),
+    };
+    let reply = crate::txn::run(exec, &ops, max_commit);
+    if reply.get("results").is_some() {
+        return answer(reply, &Shape::Plain, format, None);
+    }
+    let time = operation_time(&reply);
+    let write_failed = matches!(reply.get("writeErrors"), Some(Value::Array(e)) if !e.is_empty())
+        || reply.get("writeConcernError").is_some();
+    let (st, mut d) = if write_failed { write_problem(&reply) } else { problem_of(&reply) };
+    if let Some(i) = reply.get("operationIndex") {
+        d.insert("operationIndex", i.clone());
+    }
+    let mut r = problem_response(st, &d, format);
+    if let Some(t) = time {
+        r.headers.push((OPERATION_TIME.to_owned(), t));
+    }
+    r
 }
 
 /// The body of `req`: empty for a route without one, an empty document for an empty body, and

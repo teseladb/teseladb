@@ -696,6 +696,9 @@ impl AdminBackend for NodeAdmin {
 pub enum AdminAction {
     /// `nodes`.
     Nodes,
+    /// `metrics`: the node's metrics in Prometheus' text format (the battery scans them for
+    /// secrets, 013 FR-023).
+    Metrics,
     /// `ranges [--collection db.c]`.
     Ranges {
         /// Only the ranges of this collection.
@@ -876,6 +879,7 @@ pub fn parse(args: &[String]) -> Result<AdminOpts, String> {
     let range_id = |s: &str| s.parse::<u64>().map_err(|_| format!("not a range: {s}"));
     let action = match words.as_slice() {
         ["nodes"] => allow(&[]).map(|()| AdminAction::Nodes)?,
+        ["metrics"] => allow(&[]).map(|()| AdminAction::Metrics)?,
         ["ranges"] => allow(&["collection"])
             .map(|()| AdminAction::Ranges { collection: opt("collection") })?,
         ["range", "split", id] => {
@@ -964,6 +968,7 @@ pub const ADMIN_USAGE: &str = "\
 usage: teseladb admin [--node <ip:port>] [--format text|json] [--dbpath <dir>]
                       [--tlsCertificateKeyFile <pem> --tlsCAFile <pem>] <subcommand>
   nodes
+  metrics
   ranges [--collection <db.c>]
   range split <range> [--at '{\"ns\": \"db.c\", \"_id\": <value>}']
   range merge <range>
@@ -987,6 +992,7 @@ usage: teseladb admin [--node <ip:port>] [--format text|json] [--dbpath <dir>]
 pub fn run(o: &AdminOpts, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
     let (method, target, body) = match &o.action {
         AdminAction::Nodes => (Method::Get, NODES.to_owned(), String::new()),
+        AdminAction::Metrics => (Method::Get, METRICS.to_owned(), String::new()),
         AdminAction::Ranges { collection: None } => (Method::Get, RANGES.to_owned(), String::new()),
         AdminAction::Ranges { collection: Some(c) } => {
             (Method::Get, format!("{RANGES}?collection={}", component(c)), String::new())
@@ -1126,6 +1132,7 @@ fn text(action: &AdminAction, doc: Option<&Document>, raw: &[u8]) -> String {
             let _ = writeln!(out, "node {node} removed");
         }
         AdminAction::Tenant(t) => out.push_str(&crate::admin_tenants::text(t, doc)),
+        AdminAction::Metrics => out.push_str(&String::from_utf8_lossy(raw)),
         AdminAction::ApiKey(k) => out.push_str(&crate::admin_apikeys::text(k, doc)),
         AdminAction::Split { .. }
         | AdminAction::Merge { .. }
@@ -1515,6 +1522,10 @@ mod tests {
         let odd = Document::new().with("token", 5i64);
         assert_eq!(text(&AdminAction::TokenCreate { ttl }, Some(&odd), b""), "5\n");
         assert_eq!(text(&AdminAction::CertRotate, None, b""), "certificates rotated\n");
+        // `metrics` prints Prometheus' text as the port gives it.
+        let metrics = parse(&["metrics".to_owned()]).map(|o| o.action);
+        assert_eq!(metrics, Ok(AdminAction::Metrics));
+        assert_eq!(text(&AdminAction::Metrics, None, b"a 1\nb 2\n"), "a 1\nb 2\n");
         let drain = AdminAction::Node { node: 3, drain: true };
         assert_eq!(text(&drain, None, b""), "node 3 draining\n");
         let remove = AdminAction::Node { node: 3, drain: false };

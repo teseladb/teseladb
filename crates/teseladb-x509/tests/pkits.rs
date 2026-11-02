@@ -74,6 +74,7 @@ fn run(id: &str, setting: &str, files: &str) -> Result<(), Error> {
         crls: &crls,
         crl_check: CrlCheck::All,
         policy: settings(setting),
+        weak_digests: true,
         ..VerifyOptions::new(NOW)
     };
     verify_chain(&leaf, &certs, &anchors, &opts).map(|_| ())

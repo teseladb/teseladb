@@ -6,7 +6,10 @@
 //! `commitQuorum`; `currentOp` shows its progress and `killOp` stops it. Replies and errors as a
 //! `refnode` and a `refrouter` 9.0.4 give them (measured).
 
-use teseladb_bson::{Document, Value};
+use teseladb_bson::{Document, RawDoc, Value};
+
+/// The field of a document's identifier.
+const ID: &str = "_id";
 use teseladb_index::build::{BUILD_DESC, CommitQuorum, MAX_COMMIT_QUORUM, Progress};
 use teseladb_meta::catalog::CollectionEntry;
 use teseladb_meta::indexes::{IndexCommand, IndexEntry, IndexState};
@@ -267,6 +270,63 @@ fn count<B: Backend + ?Sized>(
     }
 }
 
+/// The document of `coll` the indexes of `rules` refuse that comes first in `_id` order, with
+/// why, and how many documents come before it. RefDb's scan stops at the first refused
+/// document in insertion order (measured on a `refrouter` 9.0.4); TeselaDB keeps no insertion order
+/// (DV-056) and its keys follow a hash of `_id`, so it names the first in `_id` order, the same
+/// document whenever the `_id`s grow as they are inserted (`ObjectId`s, counters).
+fn first_refused<B: Backend + ?Sized>(
+    backend: &mut B,
+    coll: &CollectionEntry,
+    rules: &Rules,
+) -> Result<Option<(CommandError, u64)>, CommandError> {
+    let id_of = |bytes: &[u8]| -> Result<Vec<u8>, CommandError> {
+        let raw = RawDoc::from_bytes(bytes)?;
+        let id = raw.get(ID).map(Value::from).unwrap_or(Value::Null);
+        Ok(Document::new().with(ID, id).to_bytes()?)
+    };
+    let compare = |a: &[u8], b: &[u8]| -> Result<std::cmp::Ordering, CommandError> {
+        let (a, b) = (RawDoc::from_bytes(a)?, RawDoc::from_bytes(b)?);
+        Ok(match (a.get(ID), b.get(ID)) {
+            (Some(x), Some(y)) => teseladb_bson::compare(x, y, None),
+            _ => std::cmp::Ordering::Equal,
+        })
+    };
+    // The first refused document in `_id` order.
+    let mut first: Option<(Vec<u8>, CommandError)> = None;
+    let (mut from, end) = documents_of(coll);
+    loop {
+        let rows = backend.scan(&from, &end, MODIFY_CHUNK_KEYS, ReadConcern::Local)?;
+        let Some((last, _)) = rows.last() else { break };
+        from = [last.as_slice(), &[0]].concat();
+        for (at, why) in super::mutation::refusals(rules, &rows)? {
+            let id = id_of(&rows[at].1)?;
+            let earlier = match &first {
+                Some((best, _)) => compare(&id, best)?.is_lt(),
+                None => true,
+            };
+            if earlier {
+                first = Some((id, why));
+            }
+        }
+    }
+    let Some((id, why)) = first else { return Ok(None) };
+    // The documents before it in `_id` order.
+    let mut before = 0u64;
+    let (mut from, end) = documents_of(coll);
+    loop {
+        let rows = backend.scan(&from, &end, MODIFY_CHUNK_KEYS, ReadConcern::Local)?;
+        let Some((last, _)) = rows.last() else { break };
+        from = [last.as_slice(), &[0]].concat();
+        for (_, bytes) in &rows {
+            if compare(&id_of(bytes)?, &id)?.is_lt() {
+                before += 1;
+            }
+        }
+    }
+    Ok(Some((why, before)))
+}
+
 impl Backfill<'_> {
     /// Writes the entries of the indexes of `rules` for every document of `coll`.
     pub fn run<B: Backend + ?Sized>(
@@ -303,8 +363,13 @@ impl Backfill<'_> {
                 if e.error.code == DUPLICATE_KEY {
                     return Err(Stopped::Build(e.error));
                 }
-                let done = progress.done + e.index as u64;
-                return Err(Stopped::Build(scan_stopped(e.error, done, done + 1, took(backend))));
+                let (cause, done) = match rules.capped {
+                    // A capped collection's keys are its insertion order, as RefDb scans.
+                    Some(_) => (e.error, progress.done + e.index as u64),
+                    None => first_refused(backend, coll, rules)?
+                        .unwrap_or((e.error, progress.done + e.index as u64)),
+                };
+                return Err(Stopped::Build(scan_stopped(cause, done, done + 1, took(backend))));
             }
             progress.done += n;
             from = next;

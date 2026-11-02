@@ -198,6 +198,7 @@ pub fn create<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
     let ns = target(ctx)?;
     names::check_creatable(&ns)?;
     let mut options = options_from(ctx.cmd);
+    super::fle::check_create(&ns.coll, &mut options)?;
     let asked = kinds::check(&ns, &options)?;
     let given_collation = match options.get(COLLATION) {
         Some(Value::Document(c)) => Some(c.clone()),

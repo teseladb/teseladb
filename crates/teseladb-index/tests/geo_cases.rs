@@ -150,7 +150,15 @@ fn relations_between_shapes() {
     );
     let collection = geo("{\"type\": \"GeometryCollection\", \"geometries\": [{\"type\": \"Point\", \"coordinates\": [2.5, 2.6]}, {\"type\": \"MultiLineString\", \"coordinates\": [[[3, 3], [3.5, 3.5]]]}]}").unwrap();
     assert!(within(&collection, &container));
-    assert!(intersects(&geo("{\"type\": \"MultiPolygon\", \"coordinates\": [[[[3, 3], [3.5, 3], [3.5, 3.5], [3, 3]]]]}").unwrap(), &collection));
+    // The line runs along the triangle's last side against its direction: on a `refrouter` 9.0.4
+    // it does not meet the triangle, and the same side walked the triangle's way does.
+    let triangle = geo(
+        "{\"type\": \"MultiPolygon\", \"coordinates\": [[[[3, 3], [3.5, 3], [3.5, 3.5], [3, 3]]]]}",
+    )
+    .unwrap();
+    assert!(!intersects(&triangle, &collection));
+    let along = geo("{\"type\": \"LineString\", \"coordinates\": [[3.5, 3.5], [3, 3]]}").unwrap();
+    assert!(intersects(&triangle, &along));
 }
 
 #[test]
@@ -162,4 +170,45 @@ fn shell_values() {
         shell_value(v),
         "{ b: BinData(0, ABCD), u: UUID(\"00112233-4455-6677-8899-aabbccddeeff\"), s: \"x\", c: f(), w: CodeWScope( g, { a: 1 }), p: DBRef('db.c', 5f0000000000000000000001), n: undefined, r: /a/i, t: Timestamp(1, 2), l: 5, m: MinKey, x: MaxKey, d: new Date(-1), e: 1.50, f: false }"
     );
+}
+
+/// A line and a polygon intersect as RefDb clips the line to the polygon (S2's
+/// `IntersectWithPolyline`): a piece of positive length must lie inside, with the boundary
+/// decided by the symbolic perturbation, and an edge shared in the polygon's direction counts.
+/// Measured on a `refrouter` 9.0.4 (`lc12`), with and without a `2dsphere` index, for the square
+/// given counterclockwise and clockwise.
+#[test]
+fn lines_meet_a_polygon_as_refdb_clips_them() {
+    let lines: [(&str, &str, bool); 17] = [
+        ("A", "[[1, 0], [3, 0]]", false),
+        ("B", "[[0, 0], [5, 0]]", true),
+        ("C", "[[1, -1], [1, 0]]", false),
+        ("D", "[[-1, -1], [0, 0]]", false),
+        ("E", "[[1, -1], [1, 1]]", true),
+        ("F", "[[1, 0], [3, 0], [3, 1]]", true),
+        ("G", "[[-1, 1], [1, -1]]", false),
+        ("H", "[[1, 0], [1, 5]]", true),
+        ("I", "[[5, 0], [5, 5]]", true),
+        ("J", "[[0, 5], [0, 0]]", true),
+        ("K", "[[1, 6], [1, 5]]", true),
+        ("L", "[[2, 2], [2, 3]]", true),
+        ("M", "[[1, 5], [3, 5]]", true),
+        ("N", "[[0, 0], [0, 5]]", false),
+        ("O", "[[-1, 0], [6, 0]]", true),
+        ("P", "[[1, 0], [1, -2], [3, -2], [3, 0]]", false),
+        ("Q", "[[2, 0], [2, 0.000001]]", true),
+    ];
+    let squares = [
+        geo(r#"{"type": "Polygon", "coordinates": [[[0, 0], [5, 0], [5, 5], [0, 5], [0, 0]]]}"#),
+        geo(r#"{"type": "Polygon", "coordinates": [[[0, 0], [0, 5], [5, 5], [5, 0], [0, 0]]]}"#),
+    ];
+    for square in squares {
+        let square = square.unwrap();
+        for (name, coords, expected) in lines {
+            let line =
+                geo(&format!(r#"{{"type": "LineString", "coordinates": {coords}}}"#)).unwrap();
+            assert_eq!(intersects(&line, &square), expected, "line {name}");
+            assert_eq!(intersects(&square, &line), expected, "line {name}, reversed");
+        }
+    }
 }

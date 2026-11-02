@@ -263,9 +263,27 @@ impl VectorIndexer {
                 }
             }
         }
-        found.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.key.cmp(&b.key)));
+        found.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| id_order(&a.doc, &b.doc)));
         found.truncate(query.limit);
         Ok(found)
+    }
+}
+
+/// The order of two documents of equal score: by `_id`, the order `refsearch` reads a collection
+/// in when it builds the index (measured with `tests/compat/scenarios/vector-quantization.json`:
+/// `_id` 1 before 8).
+fn raw_id(bytes: &[u8]) -> Option<teseladb_bson::RawValue<'_>> {
+    RawDoc::from_bytes(bytes).ok().and_then(|d| d.get("_id"))
+}
+
+fn id_order(a: &Document, b: &Document) -> std::cmp::Ordering {
+    let bytes = |d: &Document| {
+        Document::new().with("_id", d.get("_id").cloned().unwrap_or(Value::Null)).to_bytes().ok()
+    };
+    let (Some(x), Some(y)) = (bytes(a), bytes(b)) else { return std::cmp::Ordering::Equal };
+    match (raw_id(&x), raw_id(&y)) {
+        (Some(x), Some(y)) => teseladb_bson::compare(x, y, None),
+        _ => std::cmp::Ordering::Equal,
     }
 }
 

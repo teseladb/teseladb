@@ -103,7 +103,8 @@ fn names_are_unique_and_the_builtin_workloads_are_there() {
             "special-collections",
             "queries",
             "changestream",
-            "reshard"
+            "reshard",
+            "zones"
         ]
     );
     assert!(reg.register_workload("testkv", kv_copy).unwrap_err().contains("already registered"));

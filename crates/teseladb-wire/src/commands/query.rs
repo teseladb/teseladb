@@ -15,6 +15,7 @@ use teseladb_bson::{Document, RawDoc, RawValue, Value};
 use teseladb_collation::{Collation, ParsedCollation, parse_collation};
 use teseladb_keys::{DOCUMENTS, KeyBuilder};
 use teseladb_meta::catalog::{CollectionEntry, Namespace};
+use teseladb_meta::tenants::{qualified_db, split_db};
 use teseladb_mql::projection::{Projection, ProjectionContext};
 use teseladb_mql::{Filter, FilterUse, MatchContext};
 use teseladb_range::read::ReadConcern;
@@ -765,7 +766,8 @@ pub fn keep<B: Backend + ?Sized>(
     let lsid = args::lsid(ctx.cmd)?;
     let id = cursor_id(ctx.backend.node(), ctx.backend.random());
     let c = Cursor {
-        ns: ns.to_owned(),
+        // A cursor is its tenant's (013 FR-024).
+        ns: qualified_db(ctx.backend.tenant(), ns),
         lsid,
         owner: ctx.backend.authenticated_user().map(|u| u.to_string()),
         no_timeout,
@@ -807,8 +809,14 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
     let Some(coll) = ctx.backend.collection(&ns)? else {
         // Validate the filter even when there is nothing to read, as RefDb does.
         Plan::new(&a.filter, a.projection.as_ref(), a.collation.as_ref())?;
+        if super::views::has_text(&a.filter) {
+            return text_find(ctx, &ns);
+        }
         return Ok(cursor_reply(0, &ns_text, "firstBatch", Vec::new()));
     };
+    if super::views::has_text(&a.filter) {
+        return text_find(ctx, &ns);
+    }
     let collation = a.collation.clone().or_else(|| options_collation(&coll));
     Plan::new(&a.filter, a.projection.as_ref(), collation.as_ref())?
         .check_metadata(a.sort.as_ref())?;
@@ -936,6 +944,31 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
     };
     let id = keep(ctx, &ns_text, state, exhausted, a.no_timeout)?;
     Ok(cursor_reply(id, &ns_text, "firstBatch", docs))
+}
+
+/// A `find` whose filter has a `$text` (011 FR-001): the aggregation of its stages, whose first
+/// `$match` the collection's text index answers with each document's `textScore`.
+fn text_find<B: Backend + ?Sized>(
+    ctx: &mut Ctx<'_, B>,
+    ns: &Namespace,
+) -> Result<Document, CommandError> {
+    let stages: Vec<Value> =
+        super::views::stages_of(ctx.cmd).into_iter().map(Value::Document).collect();
+    let mut cursor = Document::new();
+    if let Some(size) = ctx.cmd.get("batchSize") {
+        cursor.push("batchSize", size.clone());
+    }
+    let mut agg = Document::new()
+        .with("aggregate", ns.coll.clone())
+        .with("pipeline", Value::Array(stages))
+        .with("cursor", cursor);
+    for option in ["collation", "let", "readConcern", "maxTimeMS", "comment"] {
+        if let Some(v) = ctx.cmd.get(option) {
+            agg.push(option, v.clone());
+        }
+    }
+    let mut inner = Ctx { backend: &mut *ctx.backend, shared: ctx.shared, db: ctx.db, cmd: &agg };
+    super::aggregate::aggregate(&mut inner)
 }
 
 /// Refuses a tailable `find` on a collection that is not capped, as a `refrouter` 9.0.4 does
@@ -1409,8 +1442,16 @@ fn next_batch<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
     let now = ctx.backend.now_ms();
     let taken = {
         let mut g = lock(ctx.shared);
-        let owner = g.cursors.get(id).map(|c| (c.ns.clone(), c.lsid));
-        g.cursors.take(id, &ns_text, lsid, now).map_err(|e| (e, owner))
+        let tenant = ctx.backend.tenant();
+        match g.cursors.get(id).map(|c| (split_db(&c.ns), c.lsid)) {
+            // Another tenant's cursor is not there for this one (013 FR-024).
+            Some(((t, _), _)) if t != tenant => Err((CursorError::NotFound, None)),
+            owner => {
+                let owner = owner.map(|((_, n), l)| (n.to_owned(), l));
+                let own_ns = qualified_db(tenant, &ns_text);
+                g.cursors.take(id, &own_ns, lsid, now).map_err(|e| (e, owner))
+            }
+        }
     };
     let mut c = match taken {
         Ok(c) => c,
@@ -1569,9 +1610,12 @@ pub fn kill_cursors<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Documen
     }
     let (mut killed, mut not_found) = (Vec::new(), Vec::new());
     let now = i64::try_from(ctx.backend.now_ms()).unwrap_or(i64::MAX);
+    let tenant = ctx.backend.tenant();
     let mut guard = lock(ctx.shared);
     for id in parsed {
-        if guard.cursors.remove(id) {
+        // Another tenant's cursor is not there for this one (013 FR-024).
+        let own = guard.cursors.get(id).is_some_and(|c| split_db(&c.ns).0 == tenant);
+        if own && guard.cursors.remove(id) {
             guard.query_stats.close(id, now);
             killed.push(Value::Int64(id));
         } else {

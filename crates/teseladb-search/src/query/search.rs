@@ -271,6 +271,16 @@ fn parse_root(index: &MemIndex, spec: &Document) -> Result<Operator, SearchError
     if let Some(v) = spec.get("highlight") {
         highlight::parse(index, v)?;
     }
+    // Measured: an index without `storedSource` refuses `returnStoredSource: true`.
+    if matches!(spec.get("returnStoredSource"), Some(Value::Boolean(true)))
+        && index.definition().stored_source == crate::definition::StoredSource::None
+    {
+        return Err(SearchError(
+            "storedSource is not configured for this index. For queries on 'embeddedDocument' \
+             fields with 'storedSource', the 'returnScope' option must be populated"
+                .to_owned(),
+        ));
+    }
     if let Some(c) = collector(index, spec)? {
         return Ok(match c.operator {
             Some(op) => *op,
