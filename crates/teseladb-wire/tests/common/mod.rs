@@ -303,6 +303,10 @@ impl Backend for Mem {
         teseladb_wire::ops::OpReads::default()
     }
 
+    fn op_client(&mut self) -> Option<Document> {
+        None
+    }
+
     fn end_operation(&mut self) {
         self.ended += 1;
     }

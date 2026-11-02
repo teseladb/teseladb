@@ -708,6 +708,10 @@ impl Backend for ServerBackend {
         teseladb_wire::ops::OpReads::default()
     }
 
+    fn op_client(&mut self) -> Option<teseladb_bson::Document> {
+        None
+    }
+
     fn end_operation(&mut self) {
         self.release_pins();
     }

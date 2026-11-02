@@ -273,3 +273,41 @@ fn an_index_read_counts_the_keys_and_documents_it_examined() {
     assert_eq!(field(&count, "metrics.queryExec.docsReturned.sum"), &Value::Int64(1));
     assert_eq!(field(&count, "metrics.queryExec.docsExamined.sum"), &Value::Int64(3));
 }
+
+#[test]
+fn an_equality_lookup_reads_the_foreign_side_through_its_index() {
+    let mut c = Client::new();
+    c.set(-1, 0.0);
+    let docs: Vec<String> = (0..60).map(|i| format!(r#"{{"_id":{i},"k":{i}}}"#)).collect();
+    c.ok(DB, &format!(r#"{{"insert":"f","documents":[{}]}}"#, docs.join(",")));
+    c.ok(DB, r#"{"createIndexes":"f","indexes":[{"key":{"k":1},"name":"k_1"}]}"#);
+    let lookup = r#"{"$lookup":{"from":"f","localField":"a","foreignField":"k","as":"j"}}"#;
+    let r = c.ok(
+        DB,
+        &format!(r#"{{"aggregate":"c","pipeline":[{{"$match":{{"a":{{"$lte":2}}}}}},{lookup}],"cursor":{{}}}}"#),
+    );
+    let Value::Array(b) = field(&r, "cursor.firstBatch") else { panic!("{r:?}") };
+    assert_eq!(b.len(), 2);
+    for d in b {
+        let Value::Document(d) = d else { panic!() };
+        let Value::Array(j) = field(d, "j") else { panic!("{d:?}") };
+        assert_eq!(j.len(), 1, "{d:?}");
+        assert_eq!(
+            field(d, "a"),
+            match &j[0] {
+                Value::Document(f) => field(f, "k"),
+                other => panic!("{other:?}"),
+            }
+        );
+    }
+    let e = c.entries();
+    let agg = e
+        .iter()
+        .find(|d| field(d, "key.queryShape.command") == &Value::from("aggregate"))
+        .expect("the aggregate");
+    let Value::Int64(examined) = *field(agg, "metrics.queryExec.docsExamined.sum") else {
+        panic!("{agg:?}")
+    };
+    // The three local documents and the two foreign ones, not the 60 of `f`.
+    assert!(examined < 10, "{examined}");
+}

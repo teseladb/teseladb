@@ -1196,6 +1196,8 @@ fn check_computed(fields: RawDoc<'_>, ctx: &teseladb_exec::expr::Ctx) -> Result<
             RawValue::String(s) if s.starts_with('$') => {
                 teseladb_exec::pipeline::projected_expr(v, ctx).map_err(from_mql)?;
             }
+            // An array is a literal, folded as an expression's.
+            RawValue::Array(_) => optimized(v, ctx)?,
             _ => {}
         }
     }

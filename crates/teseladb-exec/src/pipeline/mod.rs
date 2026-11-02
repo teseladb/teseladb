@@ -19,6 +19,7 @@ mod scoped;
 pub mod search;
 mod shape;
 pub mod sort;
+pub mod spill;
 mod stages;
 mod system;
 
@@ -48,6 +49,17 @@ pub trait Env {
     /// The documents of collection `name` of the pipeline's database (none when it does not
     /// exist).
     fn collection(&self, name: &str) -> Result<Vec<Document>, MqlError>;
+
+    /// The documents of collection `name` that `filter` may match, a superset of them read
+    /// through the collection's indexes where the node can (an equality `$lookup`, 010 FR-009);
+    /// the whole collection by default.
+    fn collection_matching(
+        &self,
+        name: &str,
+        _filter: &Document,
+    ) -> Result<Vec<Document>, MqlError> {
+        self.collection(name)
+    }
 
     /// A uniform number in `[0, 1)` (`$sample`).
     fn random(&self) -> f64;
@@ -94,6 +106,18 @@ pub trait Env {
     /// (`allowDiskUse`, true by default since 6.0).
     fn allow_disk_use(&self) -> bool {
         true
+    }
+
+    /// The memory one stage may hold before it writes to disk or fails
+    /// (`internalQueryMaxBlockingSortMemoryUsageBytes`, 100 MiB, or less where the node's part
+    /// for aggregations is smaller, D-105).
+    fn stage_memory_limit(&self) -> usize {
+        errors::STAGE_MEMORY_LIMIT
+    }
+
+    /// The node's temporary store for what stages write to disk; none keeps it in memory.
+    fn spill(&self) -> Option<&dyn spill::SpillStore> {
+        None
     }
 
     /// The memory the whole operation may hold in its stages
@@ -719,8 +743,16 @@ fn run_stage(
             docs.iter().map(|d| r.apply(d, &env.scope(d))).collect::<Result<_, _>>()?
         }
         Stage::Sort(s) => {
-            errors::check_sort_memory(&docs, env.allow_disk_use())?;
-            s.sort(docs, env.collation().get())?
+            let limit = env.stage_memory_limit();
+            match (env.allow_disk_use(), env.spill()) {
+                (true, Some(store)) if errors::bytes_of(&docs) > limit => {
+                    spill::sort_runs(s, docs, env.collation().get(), limit, store)?
+                }
+                _ => {
+                    errors::check_sort_memory(&docs, env.allow_disk_use(), limit)?;
+                    s.sort(docs, env.collation().get())?
+                }
+            }
         }
         Stage::Limit(n) => {
             docs.into_iter().take(usize::try_from(*n).unwrap_or(usize::MAX)).collect()
@@ -734,7 +766,7 @@ fn run_stage(
         Stage::SortByCount(e) => group::run_sort_by_count(e, docs, env, sbe)?,
         Stage::Bucket(b) => b.run(docs, env, sbe)?,
         Stage::BucketAuto(b) => {
-            errors::check_sort_memory(&docs, env.allow_disk_use())?;
+            errors::check_sort_memory(&docs, env.allow_disk_use(), env.stage_memory_limit())?;
             b.run(docs, env)?
         }
         Stage::Sample(s) => s.run(docs, env),
@@ -744,7 +776,7 @@ fn run_stage(
         Stage::UnionWith(u) => u.run(docs, env)?,
         Stage::Documents(e) => stages::run_documents(e, env)?,
         Stage::SetWindowFields(w) => {
-            errors::check_sort_memory(&docs, env.allow_disk_use())?;
+            errors::check_sort_memory(&docs, env.allow_disk_use(), env.stage_memory_limit())?;
             w.run(docs, env)?
         }
         Stage::Densify(d) => d.run(docs, env.collation().get())?,

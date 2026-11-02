@@ -1302,6 +1302,10 @@ impl Backend for TxnBackend<'_> {
         self.inner.op_reads()
     }
 
+    fn op_client(&mut self) -> Option<Document> {
+        self.inner.op_client()
+    }
+
     fn thread_cpu_nanos(&mut self) -> Option<u64> {
         self.inner.thread_cpu_nanos()
     }

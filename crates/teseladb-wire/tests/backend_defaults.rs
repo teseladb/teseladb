@@ -82,6 +82,10 @@ impl Backend for Bare {
         teseladb_wire::ops::OpReads::default()
     }
 
+    fn op_client(&mut self) -> Option<teseladb_bson::Document> {
+        None
+    }
+
     fn end_operation(&mut self) {}
     fn changes(
         &mut self,

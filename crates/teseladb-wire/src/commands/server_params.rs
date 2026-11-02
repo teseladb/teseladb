@@ -68,6 +68,8 @@ pub const HASH_INTERSECTION: &str = "internalQueryPlannerEnableHashIntersection"
 pub const MAX_OPERATION_MEMORY: &str = "internalQueryMaxMemoryUsageBytesPerOperation";
 /// Its default: 1 GiB, the least RefDb gives it.
 pub const MAX_OPERATION_MEMORY_DEFAULT: i64 = 1 << 30;
+/// The memory one constant expression may hold when it is folded (010 FR-010).
+pub const MAX_EXPRESSION_MEMORY: &str = "internalQueryMaxSingleExpressionMemoryUsageBytes";
 /// How many queries a second `$queryStats` counts when it does not sample: -1 all, 0 none
 /// (010 FR-023; 0 by default on a `refrouter` 9.0.4, measured).
 pub const QUERY_STATS_RATE_LIMIT: &str = "internalQueryStatsRateLimit";
@@ -173,6 +175,8 @@ pub struct ServerParams {
     pub hash_intersection: bool,
     /// `internalQueryMaxMemoryUsageBytesPerOperation`.
     pub operation_memory: i64,
+    /// `internalQueryMaxSingleExpressionMemoryUsageBytes`.
+    pub expression_memory: i64,
     /// `internalQueryStatsRateLimit`.
     pub query_stats_rate_limit: i64,
     /// The bits of `internalQueryStatsSampleRate` (an `f64`, kept as bits so the parameters
@@ -203,6 +207,10 @@ impl Default for ServerParams {
             tls_enabled: true,
             hash_intersection: false,
             operation_memory: MAX_OPERATION_MEMORY_DEFAULT,
+            expression_memory: i64::try_from(
+                teseladb_exec::expr::optimize::EXPRESSION_MEMORY_DEFAULT,
+            )
+            .unwrap_or(i64::MAX),
             query_stats_rate_limit: 0,
             query_stats_sample_bits: QUERY_STATS_SAMPLE_RATE_DEFAULT.to_bits(),
         }
@@ -211,7 +219,7 @@ impl Default for ServerParams {
 
 /// The parameters TeselaDB has, in name order: name, settable at runtime, settable at startup
 /// with `--setParameter` (`redactClientLogData` starts with its own option, measured).
-const KNOWN: [(&str, bool, bool); 20] = [
+const KNOWN: [(&str, bool, bool); 21] = [
     (AUDIT_AUTHORIZATION_SUCCESS, true, true),
     (AUTH_SCHEMA_VERSION, false, false),
     (CLIENT_CURSOR_MONITOR_FREQUENCY_SECS, true, true),
@@ -219,6 +227,7 @@ const KNOWN: [(&str, bool, bool); 20] = [
     (CURSOR_TIMEOUT_MILLIS, true, true),
     (ENABLE_TEST_COMMANDS, false, true),
     (MAX_OPERATION_MEMORY, true, true),
+    (MAX_EXPRESSION_MEMORY, true, true),
     (HASH_INTERSECTION, true, true),
     (QUERY_STATS_RATE_LIMIT, true, true),
     (QUERY_STATS_SAMPLE_RATE, true, true),
@@ -263,6 +272,7 @@ fn value_of(name: &str, s: &NodeSessions) -> Value {
         USE_INTERNAL_AUTHZ_FOR_X509 => Value::Boolean(s.params.use_internal_authz_for_x509),
         HASH_INTERSECTION => Value::Boolean(s.params.hash_intersection),
         MAX_OPERATION_MEMORY => Value::Int64(s.params.operation_memory),
+        MAX_EXPRESSION_MEMORY => Value::Int64(s.params.expression_memory),
         QUERY_STATS_RATE_LIMIT => Value::Int32(clamp_i32(s.params.query_stats_rate_limit)),
         QUERY_STATS_SAMPLE_RATE => rate_value(s.params.query_stats_sample_rate()),
         TRANSACTION_LIFETIME_LIMIT_SECONDS => {
@@ -465,7 +475,7 @@ pub fn set_parameter<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Docume
             MAX_CONCURRENT_MULTI_DOCUMENT_TRANSACTIONS => 0,
             _ => i64::MIN,
         };
-        if *name == MAX_OPERATION_MEMORY && n <= 0 {
+        if (*name == MAX_OPERATION_MEMORY || *name == MAX_EXPRESSION_MEMORY) && n <= 0 {
             let msg = format!("Invalid value for parameter {name}: {n} is not greater than 0");
             return Err(CommandError::new(BAD_VALUE, msg));
         }
@@ -493,6 +503,7 @@ pub fn set_parameter<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Docume
             USE_INTERNAL_AUTHZ_FOR_X509 => g.params.use_internal_authz_for_x509 = n != 0,
             HASH_INTERSECTION => g.params.hash_intersection = n != 0,
             MAX_OPERATION_MEMORY => g.params.operation_memory = n,
+            MAX_EXPRESSION_MEMORY => g.params.expression_memory = n,
             QUERY_STATS_RATE_LIMIT => g.params.query_stats_rate_limit = n,
             QUERY_STATS_SAMPLE_RATE => {
                 g.params.query_stats_sample_bits = u64::from_ne_bytes(n.to_ne_bytes());
