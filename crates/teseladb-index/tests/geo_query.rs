@@ -101,6 +101,19 @@ fn a_bad_shape_is_refused_as_refdb_refuses_it() {
             "$geoIntersect not supported with provided geometry: { $geoIntersects: { $box: [ [ 0, 0 ], [ 5, 5 ] ] } }",
         ),
         (Within, r#"{"$center": [[0, 0], -1]}"#, "Radius must be a non-negative number: -1"),
+        // Measured on a `refrouter` 9.0.4 (02-11-2026): a missing radius, and a `$geometry` that
+        // is no geometry under each operator.
+        (Within, r#"{"$center": [[0, 0]]}"#, "Radius must be a non-negative number: EOO"),
+        (
+            Intersects,
+            r#"{"$geometry": {"type": "Point", "coordinates": "x"}}"#,
+            "Point must be an array or object, instead got type string",
+        ),
+        (
+            Within,
+            r#"{"$geometry": {"type": "Polygon", "coordinates": [[1]]}}"#,
+            "GeoJSON coordinates must be an array, instead got type int",
+        ),
         // 009 T035, measured on a `refrouter` 9.0.4: a legacy shape under `$geoIntersects` is read
         // first, so its own errors come before the refusal.
         (
@@ -124,6 +137,10 @@ fn a_bad_shape_is_refused_as_refdb_refuses_it() {
             "Polygon must have at least 3 points, instead got 2 vertices",
         ),
     ];
+    assert_eq!(GeoOperator::of("$within"), Some(Within));
+    assert_eq!(GeoOperator::of("$geoWithin"), Some(Within));
+    assert_eq!(GeoOperator::of("$geoIntersects"), Some(Intersects));
+    assert_eq!(GeoOperator::of("$near"), None);
     for (op, spec, msg) in cases {
         assert_eq!(error(op, spec), (2, msg.to_string()), "{spec}");
     }
