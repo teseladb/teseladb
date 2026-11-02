@@ -1413,6 +1413,17 @@ mod tests {
         assert_eq!(parse(&words(&["node", "drain", "x"])).unwrap_err(), "not a node: x");
         assert!(parse(&words(&["node", "stop", "3"])).is_err());
         assert_eq!(route(&req(Method::Get, CERT_ROTATE, ""), &b).status, 405);
+        // A tenant is created or dropped with a POST only.
+        assert_eq!(did(&route(&req(Method::Get, "/admin/tenants", ""), &b)), "tenants");
+        assert_eq!(route(&req(Method::Post, "/admin/tenants", ""), &b).status, 405);
+        assert_eq!(route(&req(Method::Get, "/admin/tenants/t1", ""), &b).status, 405);
+        assert_eq!(
+            did(&route(&req(Method::Post, "/admin/tenants/t1", ""), &b)),
+            "create tenant t1"
+        );
+        let r = route(&req(Method::Post, "/admin/tenants/t1/drop", ""), &b);
+        assert_eq!(did(&r), "drop tenant t1");
+        assert_eq!(route(&req(Method::Post, "/admin/tenants/t1/x", ""), &b).status, 404);
         let args: Vec<String> = ["cert", "rotate"].iter().map(|s| s.to_string()).collect();
         assert_eq!(parse(&args).map(|o| o.action), Ok(AdminAction::CertRotate));
     }

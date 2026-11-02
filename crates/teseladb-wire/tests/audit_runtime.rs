@@ -359,3 +359,24 @@ fn the_ocsp_parameters_read_as_refnode_shows_them() {
     );
     assert_eq!(error(&r).0, 20);
 }
+
+/// A login outside a command (the HTTP API's credentials, 019 FR-015) gives back what the login
+/// gave; one that logs no one in and had no attempt in progress writes no `authenticate` event.
+#[test]
+fn a_login_outside_a_command_that_logs_no_one_in_writes_no_event() {
+    let (shared, capture) = sessions(runtime());
+    let mut m = backend();
+    let mut c = Connection::new(3);
+    c.auth.required = true;
+    let r = teseladb_wire::dispatch::login(&mut c, &mut m, &shared, |_, _| Ok(7));
+    assert_eq!(r.unwrap(), 7);
+    let refused = teseladb_wire::error::CommandError::new(
+        teseladb_wire::error::AUTHENTICATION_FAILED,
+        "Authentication failed.",
+    );
+    let r: Result<(), _> =
+        teseladb_wire::dispatch::login(&mut c, &mut m, &shared, |_, _| Err(refused.clone()));
+    assert_eq!(r.unwrap_err(), refused);
+    assert!(capture.events().is_empty());
+    assert!(c.auth.user.is_none());
+}
