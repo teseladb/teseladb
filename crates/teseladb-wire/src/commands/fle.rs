@@ -33,6 +33,13 @@ fn from_write(e: WriteError<CommandError>) -> CommandError {
     }
 }
 
+/// Whether a command carries Queryable Encryption payloads or tokens, which neither the profiler
+/// nor the log records (FR-008).
+pub fn is_secret(cmd: &Document) -> bool {
+    let name = cmd.iter().next().map_or("", |(k, _)| k);
+    name == COMPACT || name == CLEANUP || cmd.get(ENCRYPTION_INFORMATION).is_some()
+}
+
 /// The encrypted fields of collection `c`, if it has them.
 pub fn config_of(c: &CollectionEntry) -> Result<Option<EncryptedFieldConfig>, CommandError> {
     let options = RawDoc::from_bytes(&c.options)?;
