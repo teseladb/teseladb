@@ -7,13 +7,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use teseladb_fle::esc::{EscKeys, EscReader, EscState, Overlay, state};
 use teseladb_fle::tokens::Token;
 
-/// An ESC in memory that keeps what was read ahead and counts the rounds that reach it: one per
-/// read ahead and one per probe that was not read ahead.
+/// An ESC in memory that keeps what was read ahead and counts the rounds that reach it (one per
+/// read ahead and one per probe that was not read ahead) and the documents they read.
 #[derive(Default)]
 struct Rounds {
     docs: BTreeMap<Vec<u8>, Vec<u8>>,
     ahead: BTreeSet<Vec<u8>>,
     rounds: usize,
+    read: usize,
     probes: Vec<Vec<u8>>,
 }
 
@@ -24,12 +25,14 @@ impl EscReader for Rounds {
         self.probes.push(id.0.to_vec());
         if !self.ahead.contains(id.0.as_slice()) {
             self.rounds += 1;
+            self.read += 1;
         }
         Ok(self.docs.get(id.0.as_slice()).cloned())
     }
 
     fn read_ahead(&mut self, ids: &[Token]) -> Result<(), ()> {
         self.rounds += 1;
+        self.read += ids.len();
         self.ahead.extend(ids.iter().map(|t| t.0.to_vec()));
         Ok(())
     }
@@ -68,45 +71,51 @@ fn esc(count: u64, null: Option<(u64, u64)>, anchors: &[(u64, u64)]) -> Rounds {
 }
 
 /// The state with and without reading ahead, which probe the same documents in the same order;
-/// the rounds of the one that reads ahead.
-fn both(mut r: Rounds) -> (EscState, usize) {
+/// the rounds of the one that reads ahead, the documents it read and the probes.
+fn both(mut r: Rounds) -> (EscState, usize, usize, usize) {
     let mut plain = OneByOne(r.docs.clone(), Vec::new());
     let expected = state(&mut plain, &keys()).unwrap();
     let got = state(&mut r, &keys()).unwrap();
     assert_eq!(got, expected);
     assert_eq!(r.probes, plain.1, "the same probes in the same order");
-    (got, r.rounds)
+    (got, r.rounds, r.read, plain.1.len())
 }
 
 #[test]
-fn a_short_esc_is_read_in_one_round() {
-    for count in [0, 1, 5, 9, 10, 15, 30] {
-        let (s, rounds) = both(esc(count, None, &[]));
+fn a_short_esc_is_read_in_two_rounds_at_most() {
+    for count in 0..=30 {
+        let (s, rounds, read, probes) = both(esc(count, None, &[]));
         assert_eq!(s.count, count);
-        assert_eq!(rounds, 1, "{count} positions");
+        assert!(rounds <= 2, "{count} positions: {rounds} rounds");
+        // About twice the documents the probes read, never the whole run of positions.
+        assert!(read <= 2 * probes + 8, "{count} positions: {read} read for {probes} probes");
     }
+    // A value never written, or once, in one round: the first one holds its probes.
+    assert_eq!(both(esc(0, None, &[])).1, 1);
 }
 
 #[test]
-fn a_long_esc_reads_ahead_in_rounds_that_double() {
-    let (s, rounds) = both(esc(1_000, None, &[]));
+fn a_long_esc_reads_ahead_a_few_levels_a_round() {
+    let (s, rounds, read, probes) = both(esc(1_000, None, &[]));
     assert_eq!(s.count, 1_000);
-    // 31, then 63, 127, ... up to 1 023 and past it: fewer rounds than the ~20 probes.
-    assert!(rounds <= 8, "{rounds} rounds");
+    // Doublings to 31, then to 1 023, then the binary search four levels a round: fewer rounds
+    // than the ~20 probes and a few times their documents.
+    assert!(rounds <= 6, "{rounds} rounds");
+    assert!(read <= 4 * probes, "{read} read for {probes} probes");
 }
 
 #[test]
 fn anchors_and_a_null_anchor_find_the_same_state() {
-    let (s, _) = both(esc(0, None, &[(1, 4), (2, 9)]));
+    let (s, ..) = both(esc(0, None, &[(1, 4), (2, 9)]));
     assert_eq!((s.apos, s.anchored), (2, 9));
     let mut r = esc(0, Some((2, 9)), &[(3, 12)]);
     let k = keys();
     for p in 13..=20 {
         r.docs.insert(k.position_id(p).0.to_vec(), Vec::new());
     }
-    let (s, rounds) = both(r);
+    let (s, rounds, ..) = both(r);
     assert_eq!((s.null, s.apos, s.anchored, s.count), (Some((2, 9)), 3, 12, 20));
-    assert!(rounds <= 4, "{rounds} rounds");
+    assert!(rounds <= 5, "{rounds} rounds");
 }
 
 #[test]
@@ -115,5 +124,7 @@ fn an_overlay_reads_ahead_through_to_its_reader() {
     let mut overlay = Overlay::new(&mut r);
     overlay.write(keys().position_id(4));
     assert_eq!(state(&mut overlay, &keys()).unwrap().count, 4);
-    assert_eq!(r.rounds, 1);
+    // Positions 1, 3 and 7, then 5 to 6 between 3 and 7: the written 4 is not asked for.
+    assert_eq!(r.rounds, 2);
+    assert!(!r.ahead.contains(keys().position_id(4).0.as_slice()));
 }

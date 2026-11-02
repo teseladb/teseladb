@@ -13,6 +13,8 @@
 //! Positions and anchors are contiguous, so the last one is found with an exponential search
 //! followed by a binary one (the "EmuBinary" of the protocol).
 
+use std::collections::BTreeSet;
+
 use crate::cipher;
 use crate::tokens::{self, Token};
 
@@ -79,36 +81,76 @@ pub trait EscReader {
     }
 }
 
-/// Positions read ahead in the first round of a search, and the least of each later round: the
-/// search from 1 probes 1, 3, 7, 15, 31, so a value written up to 30 times takes one round.
-pub const READ_AHEAD: u64 = 31;
 /// Anchors read ahead in the first round: compaction leaves few.
-const ANCHORS_AHEAD: u64 = 2;
+const ANCHOR_DOUBLINGS: u32 = 2;
+/// Doubling probes read ahead in a round past what the search has read: the first round reads
+/// positions 1, 3, 7, 15 and 31, so a value written up to 30 times needs no second doubling round.
+const DOUBLINGS: u32 = 5;
+/// Levels of the binary search read ahead in a round: up to 15 numbers, the whole gap the
+/// doubling leaves for a value written up to 16 times.
+const LEVELS: u32 = 4;
 
-/// The numbers from `from` a search has read ahead, up to `to`; each round past them reads at
-/// least as many again as the search has covered, so a search of `n` takes `log2(n)` rounds.
+/// The numbers from `from` whose documents a search has read ahead. A probe it has not read starts
+/// a round: past every number read, the next doublings of the search; inside a gap, the probes of
+/// the next levels of the binary search over that gap. A search of a value written `n` times then
+/// takes about `log2(n) / 4` rounds and reads about twice the documents it probes.
 struct Ahead {
     from: u64,
-    to: u64,
+    read: BTreeSet<u64>,
 }
 
 impl Ahead {
-    /// Reads ahead the documents of `id` for the numbers up to `n` and beyond, if not yet read.
+    /// A search from `from` that has read ahead its first `first` doublings.
+    fn new(from: u64, first: u32) -> Ahead {
+        Ahead { from, read: doublings(from, from, first).into_iter().collect() }
+    }
+
+    /// Reads ahead what the search needs for its probe of `n`, if not read yet.
     fn cover<R: EscReader>(
         &mut self,
         reader: &mut R,
         n: u64,
         id: impl Fn(u64) -> Token,
     ) -> Result<(), R::Error> {
-        if n <= self.to {
+        if self.read.contains(&n) {
             return Ok(());
         }
-        let covered = self.to.saturating_add(1).saturating_sub(self.from);
-        let to = n.max(self.to.saturating_add(READ_AHEAD.max(covered)));
-        let ids: Vec<Token> = (self.to + 1..=to).map(id).collect();
-        self.to = to;
+        let numbers = match self.read.range(n..).next() {
+            Some(&above) => {
+                let below = self.read.range(..n).next_back().copied().unwrap_or(self.from - 1);
+                let mut out = Vec::new();
+                levels(below, above, LEVELS, &mut out);
+                out
+            }
+            None => doublings(self.from, n, DOUBLINGS),
+        };
+        let ids: Vec<Token> = numbers.iter().map(|n| id(*n)).collect();
+        self.read.extend(numbers);
         reader.read_ahead(&ids)
     }
+}
+
+/// The probes of the doubling search from `from` starting at its probe `n`: `count` of them.
+fn doublings(from: u64, n: u64, count: u32) -> Vec<u64> {
+    let mut out = Vec::new();
+    let mut offset = n + 1 - from;
+    for _ in 0..count {
+        out.push(from - 1 + offset);
+        offset = offset.saturating_mul(2).saturating_add(1);
+    }
+    out
+}
+
+/// The probes of `levels` levels of the binary search strictly between `lo` and `hi`, as
+/// [`emu_binary`] picks them.
+fn levels(lo: u64, hi: u64, levels: u32, out: &mut Vec<u64>) {
+    if levels == 0 || hi - lo <= 1 {
+        return;
+    }
+    let mid = lo + (hi - lo) / 2;
+    out.push(mid);
+    self::levels(lo, mid, levels - 1, out);
+    self::levels(mid, hi, levels - 1, out);
 }
 
 /// What the ESC holds for one value.
@@ -151,19 +193,19 @@ pub fn emu_binary<E>(from: u64, mut exists: impl FnMut(u64) -> Result<bool, E>) 
     Ok(lo)
 }
 
-/// What the ESC holds for the value of `keys`.
-/// The searches read ahead (`EscReader::read_ahead`): the null anchor, the first anchors and the
-/// first positions in one round, which is all a value written a few times needs.
+/// What the ESC holds for the value of `keys`. The searches read ahead
+/// (`EscReader::read_ahead`): the null anchor, the first anchors and the first doublings of the
+/// positions in one round, then what each search reaches, so a value written up to 16 times takes
+/// two rounds.
 pub fn state<R: EscReader>(reader: &mut R, keys: &EscKeys) -> Result<EscState, R::Error> {
-    let mut first: Vec<Token> = (0..=ANCHORS_AHEAD).map(|a| keys.anchor_id(a)).collect();
-    first.extend((1..=READ_AHEAD).map(|p| keys.position_id(p)));
+    let mut first = vec![keys.anchor_id(0)];
+    first.extend(doublings(1, 1, ANCHOR_DOUBLINGS).into_iter().map(|a| keys.anchor_id(a)));
+    first.extend(doublings(1, 1, DOUBLINGS).into_iter().map(|p| keys.position_id(p)));
     reader.read_ahead(&first)?;
     let null = reader.get(&keys.anchor_id(0))?.and_then(|v| keys.read_anchor(&v));
     let first_anchor = null.map_or(1, |(a, _)| a + 1);
-    let mut anchors = Ahead {
-        from: first_anchor,
-        to: if first_anchor == 1 { ANCHORS_AHEAD } else { first_anchor - 1 },
-    };
+    let mut anchors =
+        Ahead::new(first_anchor, if first_anchor == 1 { ANCHOR_DOUBLINGS } else { 0 });
     let apos = emu_binary(first_anchor, |a| {
         anchors.cover(reader, a, |n| keys.anchor_id(n))?;
         Ok(reader.get(&keys.anchor_id(a))?.is_some())
@@ -174,8 +216,7 @@ pub fn state<R: EscReader>(reader: &mut R, keys: &EscKeys) -> Result<EscState, R
     } else {
         null.map_or(0, |(_, c)| c)
     };
-    let mut positions =
-        Ahead { from: anchored + 1, to: if anchored == 0 { READ_AHEAD } else { anchored } };
+    let mut positions = Ahead::new(anchored + 1, if anchored == 0 { DOUBLINGS } else { 0 });
     let count = emu_binary(anchored + 1, |p| {
         positions.cover(reader, p, |n| keys.position_id(n))?;
         Ok(reader.get(&keys.position_id(p))?.is_some())
