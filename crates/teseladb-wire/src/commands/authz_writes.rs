@@ -91,7 +91,7 @@ impl Sim {
             let now = Some(Document::from(RawDoc::from_bytes(&bytes)?));
             entries.push(Entry { read: Some(bytes), now });
         }
-        let coll = Generated::of_kind(kind);
+        let coll = Generated::of_kind(kind)?;
         let ns = full(&Namespace { db: teseladb_auth::roles::ADMIN_DB.into(), coll: coll.into() });
         Ok(Sim { kind, ns, entries, event: None })
     }
@@ -162,10 +162,11 @@ impl Sim {
 }
 
 impl Generated {
-    fn of_kind(kind: Principal) -> &'static str {
+    fn of_kind(kind: Principal) -> Result<&'static str, CommandError> {
         match kind {
-            Principal::User => Generated::Users.name(),
-            Principal::Role => Generated::Roles.name(),
+            Principal::User => Ok(Generated::Users.name()),
+            Principal::Role => Ok(Generated::Roles.name()),
+            Principal::ApiKey => Err(super::authz_collections::no_collection()),
         }
     }
 }

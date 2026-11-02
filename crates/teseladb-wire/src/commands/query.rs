@@ -1254,6 +1254,7 @@ pub(crate) fn check_filter_syntax(
 ) -> Result<(), CommandError> {
     let plan = Plan::new(filter, None, collation)?;
     super::engines::check_geo(&plan.filter).map_err(from_mql)?;
+    super::js::check_where(&plan.filter).map_err(from_mql)?;
     let names: Vec<&str> = vars.map(|v| v.iter().map(|(k, _)| k).collect()).unwrap_or_default();
     let bytes = filter.to_bytes()?;
     teseladb_exec::pipeline::check_exprs(

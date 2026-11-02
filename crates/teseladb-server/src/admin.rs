@@ -24,13 +24,13 @@ use teseladb_wire::commands::roles::Graph;
 use teseladb_wire::commands::{Backend, Ctx, Shared, run as run_command};
 use teseladb_x509::{Certificate, PrivateKey};
 
+use crate::admin_http::{self, Caller, HttpRequest, HttpResponse, JSON, Method, PROMETHEUS};
 use crate::backend::{NodeHandle, ServerBackend};
 use crate::catalog_ops::{CatalogAnswer, CatalogReq};
 use crate::cli::{TLS_CA_FILE, TLS_CERTIFICATE_KEY_FILE};
 use crate::data::{DataReply, DataReq};
 use crate::enroll::Enroller;
 use crate::logic::NodeMsg;
-use crate::metrics_http::{self, Caller, HttpRequest, HttpResponse, JSON, Method, PROMETHEUS};
 
 /// `GET`: 200 if the node serves, 503 if not; no body.
 pub const HEALTHZ: &str = "/healthz";
@@ -66,7 +66,7 @@ pub const DEFAULT_TTL: Duration = Duration::from_secs(3600);
 pub const CORE_WAIT: Duration = Duration::from_secs(5);
 // The client waits for the longest handler: a core's answer and then a Group 0 change.
 const _: () = assert!(
-    metrics_http::ANSWER_WAIT.as_secs() > CORE_WAIT.as_secs() + crate::node::ENROLL_WAIT.as_secs()
+    admin_http::ANSWER_WAIT.as_secs() > CORE_WAIT.as_secs() + crate::node::ENROLL_WAIT.as_secs()
 );
 
 /// Why the port could not do what it was asked.
@@ -135,6 +135,9 @@ pub trait AdminBackend: Send + Sync {
     fn create_tenant(&self, name: &str) -> Answer;
     /// Drops tenant `name`, which has no database and no user left.
     fn drop_tenant(&self, name: &str) -> Answer;
+    /// Runs a command of the API keys (`createApiKey`, `listApiKeys`, `revokeApiKey`, 019
+    /// FR-016) with the port's authority.
+    fn api_keys(&self, cmd: &Document) -> Answer;
 }
 
 /// The built-in role whose privileges `/metrics` asks for (013 FR-017).
@@ -201,6 +204,9 @@ pub fn route(req: &HttpRequest, b: &dyn AdminBackend) -> HttpResponse {
             if let Some(answer) = crate::admin_tenants::route(path, req, b) {
                 return answer;
             }
+            if let Some(answer) = crate::admin_apikeys::route(path, req, b) {
+                return answer;
+            }
             if let Some(rest) = path.strip_prefix(RANGE) {
                 return range_route(rest, req, b);
             }
@@ -261,7 +267,7 @@ fn node_route(rest: &str, req: &HttpRequest, b: &dyn AdminBackend) -> HttpRespon
 }
 
 /// The request's body as a document (`None` if it is empty).
-fn body_doc(req: &HttpRequest) -> Result<Option<Document>, AdminError> {
+pub(crate) fn body_doc(req: &HttpRequest) -> Result<Option<Document>, AdminError> {
     if req.body.iter().all(u8::is_ascii_whitespace) {
         return Ok(None);
     }
@@ -294,6 +300,8 @@ pub struct NodeAdmin {
     /// The node's memory and its split (012 FR-013); `None` when the system did not say how much
     /// there is and none was given.
     pub memory: Option<crate::memory::MemoryBudget>,
+    /// The metrics of the HTTP port (019 FR-030), when the node opened it.
+    pub http_metrics: Option<std::sync::Arc<std::sync::Mutex<teseladb_http::metrics::HttpMetrics>>>,
 }
 
 impl NodeAdmin {
@@ -345,12 +353,18 @@ impl NodeAdmin {
     }
 
     /// Runs a command of the wire protocol on database `admin`, as a client of this node would.
-    fn command(&self, cmd: &Document) -> Answer {
+    pub(crate) fn command(&self, cmd: &Document) -> Answer {
         let mut backend = ServerBackend::new(self.handle.clone(), self.handle.node.0);
         let shared: &Shared = &self.handle.sessions;
         let mut ctx = Ctx { backend: &mut backend, shared, db: "admin", cmd };
         match run_command(&mut ctx) {
             Some(Ok(d)) => Ok(d),
+            Some(Err(e))
+                if e.code.code == teseladb_wire::error::KEY_NOT_FOUND.code
+                    || e.code.code == teseladb_wire::error::USER_NOT_FOUND.code =>
+            {
+                Err(AdminError::not_found(e.errmsg))
+            }
             Some(Err(e)) => Err(AdminError::bad(e.errmsg)),
             None => Err(AdminError::bad("not a command of the node")),
         }
@@ -492,6 +506,9 @@ impl AdminBackend for NodeAdmin {
         if let Some(m) = &self.memory {
             m.metrics(&mut out);
         }
+        if let Some(h) = &self.http_metrics {
+            out.push_str(&h.lock().unwrap_or_else(std::sync::PoisonError::into_inner).render());
+        }
         out
     }
 
@@ -607,6 +624,10 @@ impl AdminBackend for NodeAdmin {
 
     fn create_tenant(&self, name: &str) -> Answer {
         crate::admin_tenants::create(self, name)
+    }
+
+    fn api_keys(&self, cmd: &Document) -> Answer {
+        self.command(cmd)
     }
 
     fn drop_tenant(&self, name: &str) -> Answer {
@@ -739,6 +760,8 @@ pub enum AdminAction {
     },
     /// `tenant create|list|drop` (007 FR-025).
     Tenant(crate::admin_tenants::TenantAction),
+    /// `apikey create|list|revoke` (019 FR-016).
+    ApiKey(crate::admin_apikeys::ApiKeyAction),
 }
 
 /// Options of `teseladb admin`.
@@ -838,7 +861,8 @@ pub fn parse(args: &[String]) -> Result<AdminOpts, String> {
                     other => return Err(format!("--format: text or json, not {other}")),
                 }
             }
-            "collection" | "at" | "ttl" | "core" | "out" | "from" => {
+            "collection" | "at" | "ttl" | "core" | "out" | "from" | "user" | "db" | "role"
+            | "expires-after-days" => {
                 opts.push((name.to_owned(), value));
             }
             other => return Err(format!("unknown option --{other}")),
@@ -895,10 +919,13 @@ pub fn parse(args: &[String]) -> Result<AdminOpts, String> {
             let ttl = opt("ttl").map_or(Ok(DEFAULT_TTL), |t| duration(&t))?;
             AdminAction::TokenCreate { ttl }
         }
-        words => match crate::admin_tenants::parse(words) {
-            Some(t) => allow(&[]).map(|()| AdminAction::Tenant(t))?,
-            None => return Err(ADMIN_USAGE.to_owned()),
-        },
+        words => {
+            match (crate::admin_tenants::parse(words), crate::admin_apikeys::parse(words, &opts)) {
+                (Some(t), _) => allow(&[]).map(|()| AdminAction::Tenant(t))?,
+                (None, Some(k)) => AdminAction::ApiKey(k?),
+                (None, None) => return Err(ADMIN_USAGE.to_owned()),
+            }
+        }
     };
     Ok(AdminOpts { node, json, action, tls })
 }
@@ -951,7 +978,10 @@ usage: teseladb admin [--node <ip:port>] [--format text|json] [--dbpath <dir>]
   restore --from <dir>
   tenant create <name>
   tenant list
-  tenant drop <name>";
+  tenant drop <name>
+  apikey create --user <u> --db <db> [--role <role>@<db>]... [--expires-after-days <n>]
+  apikey list [--user <u>]
+  apikey revoke <keyId>";
 
 /// Runs `teseladb admin` against the node's port; the exit code: 0 correct, 1 error.
 pub fn run(o: &AdminOpts, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
@@ -995,6 +1025,13 @@ pub fn run(o: &AdminOpts, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
             let (method, target) = crate::admin_tenants::request(t);
             (method, target, String::new())
         }
+        AdminAction::ApiKey(k) => match crate::admin_apikeys::request(k) {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = writeln!(err, "teseladb admin: {e}");
+                return 1;
+            }
+        },
     };
     let tls = match o.tls.client() {
         Ok(t) => t,
@@ -1003,7 +1040,7 @@ pub fn run(o: &AdminOpts, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
             return 1;
         }
     };
-    let sent = metrics_http::request_with(&o.node, tls, method, &target, body.as_bytes());
+    let sent = admin_http::request_with(&o.node, tls, method, &target, body.as_bytes());
     let (status, answer) = match sent {
         Ok(a) => a,
         Err(e) => {
@@ -1089,6 +1126,7 @@ fn text(action: &AdminAction, doc: Option<&Document>, raw: &[u8]) -> String {
             let _ = writeln!(out, "node {node} removed");
         }
         AdminAction::Tenant(t) => out.push_str(&crate::admin_tenants::text(t, doc)),
+        AdminAction::ApiKey(k) => out.push_str(&crate::admin_apikeys::text(k, doc)),
         AdminAction::Split { .. }
         | AdminAction::Merge { .. }
         | AdminAction::Relocate { .. }
@@ -1256,6 +1294,9 @@ mod tests {
         fn backup(&self, op: crate::backup::Op) -> Answer {
             self.called(format!("backup {op:?}"))
         }
+        fn api_keys(&self, cmd: &Document) -> Answer {
+            self.called(format!("apikeys {}", cmd.iter().next().map_or("", |(k, _)| k)))
+        }
         fn tenants(&self) -> Answer {
             self.called("tenants".into())
         }
@@ -1280,11 +1321,11 @@ mod tests {
 
     fn req(method: Method, target: &str, body: &str) -> HttpRequest {
         let text = format!(
-            "{} {target} HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}",
+            "{} {target} HTTP/1.1\r\nHost: node\r\nContent-Length: {}\r\n\r\n{body}",
             if method == Method::Get { "GET" } else { "POST" },
             body.len()
         );
-        metrics_http::parse_request(text.as_bytes()).unwrap().unwrap()
+        admin_http::parse_request(text.as_bytes()).unwrap().unwrap()
     }
 
     fn did(r: &HttpResponse) -> String {

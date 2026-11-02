@@ -244,6 +244,7 @@ impl Merges {
             gc: r.gc_threshold(),
             mark: r.last_mark(),
             live: r.live_bytes(),
+            fences: r.fences().to_vec(),
         });
         if let Some(source) = source {
             if self.may(g, Act::Absorb, now) {
@@ -610,7 +611,14 @@ mod tests {
             let mut left =
                 RangeSm::open(GroupId(1), vec![1], vec![2], lsm.clone(), &mut disk).unwrap();
             let zero = Hlc { physical: 0, logical: 0 };
-            let absorb = Absorbed { end: vec![4], gc: zero, mark: zero, live: 0, records: vec![] };
+            let absorb = Absorbed {
+                end: vec![4],
+                gc: zero,
+                mark: zero,
+                live: 0,
+                records: vec![],
+                fences: vec![],
+            };
             let merge = Command::Merge { right: GroupId(2), merge: 3, absorb: Some(absorb) };
             let ctx = ApplyCtx { group: GroupId(1), index: 1, term: 1, ts: zero };
             left.apply(&merge.encode(), &ctx).unwrap();

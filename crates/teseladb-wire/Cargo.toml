@@ -20,6 +20,7 @@ teseladb-hash = { path = "../teseladb-hash" }
 teseladb-collation = { path = "../teseladb-collation" }
 teseladb-hlc = { path = "../teseladb-hlc" }
 teseladb-index = { path = "../teseladb-index" }
+teseladb-js = { path = "../teseladb-js" }
 teseladb-keys = { path = "../teseladb-keys" }
 teseladb-meta = { path = "../teseladb-meta" }
 teseladb-exec = { path = "../teseladb-exec" }

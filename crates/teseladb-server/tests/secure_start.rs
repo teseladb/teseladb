@@ -66,6 +66,9 @@ fn start_with(data: &Path, log: &Path, extra: &[&str]) -> Started {
         "start",
         "--admin-listen",
         "127.0.0.1:0",
+        // Several nodes on one machine: none opens the HTTP port of 019.
+        "--http-port",
+        "0",
         "--cores",
         "1",
         "--port",
@@ -74,6 +77,9 @@ fn start_with(data: &Path, log: &Path, extra: &[&str]) -> Started {
         "127.0.0.1:0",
         "--admin-listen",
         "127.0.0.1:0",
+        // Several nodes on one machine: none opens the HTTP port of 019.
+        "--http-port",
+        "0",
         "--dbpath",
         data.to_str().unwrap(),
         "--logpath",
@@ -360,6 +366,9 @@ fn a_secure_start_stops_on_a_broken_pki_or_tls() {
             "127.0.0.1:0",
             "--admin-listen",
             "127.0.0.1:0",
+            // Several nodes on one machine: none opens the HTTP port of 019.
+            "--http-port",
+            "0",
         ];
         a.extend(["--dbpath", data.to_str().unwrap()]);
         a.extend_from_slice(extra);
@@ -1007,7 +1016,7 @@ fn the_admin_command_rotates_the_node_certificate() {
 /// or `clusterAdmin` (the commands).
 #[test]
 fn the_administration_port_asks_for_tls_and_roles() {
-    use teseladb_server::metrics_http::{Method, request, request_with};
+    use teseladb_server::admin_http::{Method, request, request_with};
     use teseladb_x509::oid;
     let d = dir("admin-roles");
     let data = d.0.join("data");
@@ -1139,7 +1148,7 @@ fn data_secrets(data: &Path) -> Vec<(String, String)> {
 /// password and an operator reading `/metrics`.
 #[test]
 fn secrets_stay_out_of_the_log_the_diagnostics_and_the_metrics() {
-    use teseladb_server::metrics_http::{Method, request_with};
+    use teseladb_server::admin_http::{Method, request_with};
     use teseladb_x509::oid;
     const PASSWORD: &str = "scanned-pw-0123456789";
     let d = dir("secrets");

@@ -116,6 +116,10 @@ codes! {
     NO_SUCH_RESHARD_COLLECTION = 339, "NoSuchReshardCollection";
     /// The resharding was aborted (018 FR-002).
     RESHARD_COLLECTION_ABORTED = 341, "ReshardCollectionAborted";
+    /// A write that found the collection before a resharding's critical section and reached a
+    /// range that the critical section fences (018 FR-002): what a shard answers `refrouter`, which
+    /// refreshes its routing and sends the write again.
+    STALE_CONFIG = 13_388, "StaleConfig";
     /// A new shard key without the cardinality for the chunks asked (018 FR-002).
     RESHARD_CARDINALITY = 4_952_606, "Location4952606";
     /// A sample size that is not a positive integer (`numInitialChunks` of a resharding).
@@ -420,6 +424,9 @@ pub const UNKNOWN_TRANSACTION_COMMIT_RESULT: &str = "UnknownTransactionCommitRes
 /// The `errmsg` of a write conflict in a transaction, as RefDb 9.0 writes it.
 pub const WRITE_CONFLICT_MESSAGE: &str = "Caused by :: Write conflict during plan execution and \
      yielding is disabled. :: Please retry your operation or multi-document transaction.";
+/// The `errmsg` of a write a resharding's critical section refused (018 FR-002).
+pub const CRITICAL_SECTION_MESSAGE: &str =
+    "the collection is in the critical section of a resharding: the write goes again once it ends";
 
 /// The error of a command: what goes back in `ok: 0`.
 #[derive(Clone, Debug, PartialEq)]
@@ -630,6 +637,13 @@ pub fn from_range(e: &RangeError, ctx: RangeContext) -> CommandError {
         ),
         RangeError::NoSuchTransaction => (
             CommandError::new(NO_SUCH_TRANSACTION, "the transaction has been aborted")
+                .with_label(TRANSIENT_TRANSACTION_ERROR),
+            false,
+        ),
+        // A statement outside a transaction waits for the critical section and goes again
+        // (`crud`); a transaction is repeated by the driver.
+        RangeError::Fenced => (
+            CommandError::new(STALE_CONFIG, CRITICAL_SECTION_MESSAGE)
                 .with_label(TRANSIENT_TRANSACTION_ERROR),
             false,
         ),

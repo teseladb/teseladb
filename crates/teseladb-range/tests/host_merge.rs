@@ -114,6 +114,7 @@ fn the_left_leader_absorbs_its_frozen_neighbour() {
         gc: sm.gc_threshold(),
         mark: sm.last_mark(),
         live: sm.live_bytes(),
+        fences: vec![],
     };
     let right_live = sm.live_bytes();
     let left_live = c.nodes[&l].core.state_machine(G).unwrap().live_bytes();
@@ -163,6 +164,7 @@ fn a_merge_given_up_leaves_both_ranges_and_the_right_one_thaws() {
         gc: sm.gc_threshold(),
         mark: sm.last_mark(),
         live: sm.live_bytes(),
+        fences: vec![],
     };
     assert!(c.nodes.get_mut(&l).unwrap().host.absorb(G, source));
     c.follow();
@@ -202,6 +204,7 @@ fn a_table_that_cannot_be_read_drops_the_absorption_until_it_is_asked_again() {
         gc: Hlc { physical: 0, logical: 0 },
         mark: Hlc { physical: 0, logical: 0 },
         live: 0,
+        fences: vec![],
     };
     assert!(c.nodes.get_mut(&l).unwrap().host.absorb(G, source.clone()));
     c.follow();

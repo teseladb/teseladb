@@ -27,7 +27,7 @@ impl RangeHost {
         core: &MultiRaftCore<S>,
         id: ReqId,
         mut m: MutReq,
-        r: Result<(), OpError>,
+        r: Result<bool, OpError>,
     ) {
         let p = m.state.proposal();
         let (latch, index, was_replied) = (p.latch, p.index, p.replied);
@@ -39,16 +39,24 @@ impl RangeHost {
         }
         match &r {
             // Another leader's entry took its index: it will never be applied.
-            Ok(()) | Err(OpError::ProposalDropped) => self.release(m.g, m.term, latch),
+            Ok(_) | Err(OpError::ProposalDropped) => self.release(m.g, m.term, latch),
             // The entry may still be applied at its mark: a read above it must not go by first.
             Err(_) => self.uncertain.push((m.g, m.term, latch, index)),
         }
         if was_replied || m.ack == AckWhen::Never {
             return;
         }
-        if let Err(e) = r {
-            self.reply(id, Err(op_error(e)));
-            return;
+        match r {
+            Err(e) => {
+                self.reply(id, Err(op_error(e)));
+                return;
+            }
+            // A fence the range applied first refused it (018): nothing was written.
+            Ok(true) => {
+                self.reply(id, Err(RangeError::Fenced));
+                return;
+            }
+            Ok(false) => {}
         }
         // Applied: `w: "majority"` answers now; `w: 1` and `w: <n>` once their copies are on disk.
         let reached = m.ack == AckWhen::Applied
@@ -89,6 +97,19 @@ impl RangeHost {
                 self.reqs.insert(id, Req::Mut(m));
                 return false;
             }
+            // A resharding's critical section refuses the writes of its collection (018 FR-002);
+            // the resolution of a decided transaction's intents still goes through.
+            let fenced_work = match &m.work {
+                Work::Mutation(_) => true,
+                Work::Txn(op) => matches!(**op, TxnOp::PutIntents { .. } | TxnOp::OnePhase { .. }),
+            };
+            if fenced_work && self.fence_holds(core, m.g, &m.keys) {
+                self.reply(id, Err(RangeError::Fenced));
+                return true;
+            }
+            let Some(l) = self.ranges.get_mut(&m.g).and_then(|r| r.leader.as_mut()) else {
+                unreachable!("led above")
+            };
             // Writes on the part being split off wait for the cut (007 FR-007), and all of them
             // for a merge's freeze (FR-009).
             let split_gate =

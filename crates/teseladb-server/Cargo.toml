@@ -34,6 +34,7 @@ teseladb-lsm = { path = "../teseladb-lsm" }
 teseladb-range = { path = "../teseladb-range" }
 teseladb-keys = { path = "../teseladb-keys" }
 teseladb-json = { path = "../teseladb-json" }
+teseladb-mcp = { path = "../teseladb-mcp" }
 teseladb-rest = { path = "../teseladb-rest" }
 teseladb-wire = { path = "../teseladb-wire" }
 teseladb-exec = { path = "../teseladb-exec" }

@@ -111,7 +111,8 @@ impl RangeClient {
                 | RangeError::WriteConflict
                 | RangeError::IntentConflict(_)
                 | RangeError::ReadIntent { .. }
-                | RangeError::NoSuchTransaction,
+                | RangeError::NoSuchTransaction
+                | RangeError::Fenced,
             ) => return Route::Done(r),
         };
         if attempt >= self.max_attempts || !retryable {

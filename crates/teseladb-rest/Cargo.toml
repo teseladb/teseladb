@@ -13,3 +13,9 @@ workspace = true
 [dependencies]
 teseladb-bson = { path = "../teseladb-bson" }
 teseladb-wire = { path = "../teseladb-wire" }
+teseladb-http = { path = "../teseladb-http" }
+teseladb-session = { path = "../teseladb-session" }
+
+[dev-dependencies]
+teseladb-json = { path = "../teseladb-json" }
+teseladb-types = { path = "../teseladb-types" }
