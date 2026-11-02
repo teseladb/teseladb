@@ -443,6 +443,18 @@ impl<B: Backend + ?Sized> Env for WireEnv<'_, B> {
         super::search_ops::source(&mut **backend, shared, ns, stage, spec).map_err(to_mql)
     }
 
+    fn text_source(
+        &self,
+        filter: &Document,
+    ) -> Result<Vec<teseladb_exec::pipeline::search::Scored>, MqlError> {
+        let ns = match &self.node {
+            Some((_, ns)) => ns.clone(),
+            None => return Err(to_mql(super::text_search::no_index_here())),
+        };
+        let mut backend = self.backend.borrow_mut();
+        super::text_search::source(&mut **backend, &ns, filter, self.concern).map_err(to_mql)
+    }
+
     fn check_search(&self, stage: &str, spec: &Document) -> Result<(), MqlError> {
         // Only `$search` asks `refsearch` while the pipeline is planned (measured on 9.0.4: the
         // errors of `$searchMeta` and `$vectorSearch` carry the executor's prefix).

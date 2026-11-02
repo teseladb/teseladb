@@ -31,6 +31,8 @@ pub const SCORE_DETAILS: &str = "scoreDetails";
 
 /// The score `$search` gives each document.
 pub const SEARCH_SCORE: &str = "searchScore";
+/// The score of a `$text` query.
+pub const TEXT_SCORE: &str = "textScore";
 /// The score `$vectorSearch` gives each document.
 pub const VECTOR_SEARCH_SCORE: &str = "vectorSearchScore";
 
