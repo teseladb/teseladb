@@ -319,3 +319,31 @@ fn priority_takeover() {
     let none = ReplicaSet::new("rs0", vec![Member::new(H1)], None, 1, 1).unwrap();
     assert_eq!(none.takeover(&|_| true), None);
 }
+
+/// `replSetGetConfig`'s members carry each attribute, a whole priority as an integer and another
+/// as a double; the accessors give what the member was built with.
+#[test]
+fn configuration_document_and_member_attributes() {
+    let m = Member::new(H1)
+        .with_priority(0.5)
+        .with_votes(0)
+        .hidden()
+        .with_tags(vec![("dc".to_owned(), "eu".to_owned())]);
+    assert_eq!((m.host(), m.priority(), m.votes(), m.is_hidden()), (H1, 0.5, 0, true));
+    assert_eq!(m.tags(), &[("dc".to_owned(), "eu".to_owned())][..]);
+    let rs = three();
+    let d = rs.config_document([4; 12]);
+    let Some(Value::Array(members)) = d.get("members") else { panic!("{d:?}") };
+    let Value::Document(first) = &members[0] else { panic!() };
+    assert_eq!(first.get("priority"), Some(&Value::Int32(1)));
+    assert_eq!(first.get("host"), Some(&Value::from(H1)));
+    let Value::Document(third) = &members[2] else { panic!() };
+    assert_eq!(third.get("priority"), Some(&Value::Int32(0)));
+    assert_eq!(third.get("tags"), Some(&Value::Document(Document::new().with("dc", "eu"))));
+    let half =
+        ReplicaSet::new("rs0", vec![Member::new(H1).with_priority(1.5)], None, 1, 1).unwrap();
+    let d = half.config_document([0; 12]);
+    let Some(Value::Array(members)) = d.get("members") else { panic!() };
+    let Value::Document(only) = &members[0] else { panic!() };
+    assert_eq!(only.get("priority"), Some(&Value::Double(1.5)));
+}

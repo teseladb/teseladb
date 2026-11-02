@@ -23,13 +23,10 @@ const ELECTION_TIMEOUT_MS: i32 = 10_000;
 /// `settings.catchUpTakeoverDelayMillis`.
 const CATCH_UP_TAKEOVER_DELAY_MS: i32 = 30_000;
 
-/// A priority as RefDb writes it: a whole number as a 32-bit integer.
+/// A priority as RefDb writes it: a whole number as a 32-bit integer (a member's priority is
+/// within 0 and [`MAX_PRIORITY`], checked when the set is made).
 fn priority_value(p: f64) -> Value {
-    if p.fract() == 0.0 && p.abs() <= MAX_PRIORITY {
-        Value::Int32(p as i32)
-    } else {
-        Value::Double(p)
-    }
+    if p.fract() == 0.0 { Value::Int32(p as i32) } else { Value::Double(p) }
 }
 
 /// Milliseconds per second, for `lastWriteDate` (the seconds of the optime).
