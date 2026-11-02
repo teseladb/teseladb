@@ -59,6 +59,53 @@ pub fn authenticate(user: &UserName, mechanism: &str) -> Document {
         .with("mechanism", mechanism)
 }
 
+/// How a request of the HTTP port came (019 FR-018).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Transport {
+    /// The REST API.
+    Rest,
+    /// MCP.
+    Mcp,
+}
+
+impl Transport {
+    /// Its name in `transport`.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Transport::Rest => "rest",
+            Transport::Mcp => "mcp",
+        }
+    }
+}
+
+/// `httpRequest` (019 FR-018), a TeselaDB action type: how it came, its method, the route's
+/// template (`/databases/{db}/collections/{coll}/find`, never the path with its values) or the
+/// JSON-RPC method and tool, the answer's status and the `keyId` of the API key that logged in.
+/// Never a body, a token or a key.
+#[must_use]
+pub fn http_request(
+    transport: Transport,
+    method: &str,
+    route: &str,
+    tool: Option<&str>,
+    status: u16,
+    key_id: Option<&str>,
+) -> Document {
+    let mut d = Document::new()
+        .with("transport", transport.name())
+        .with("method", method)
+        .with("route", route);
+    if let Some(t) = tool {
+        d.push("tool", t);
+    }
+    d.push("status", i32::from(status));
+    if let Some(k) = key_id {
+        d.push("keyId", k);
+    }
+    d
+}
+
 /// `authCheck`: the command, its namespace and, when given, its arguments without passwords or
 /// document values. A command refused because the connection has not authenticated goes
 /// without arguments and with the database as namespace (measured).

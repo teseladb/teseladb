@@ -3,7 +3,7 @@
 //! a path it does not serve. Its options come from `httpOptions`, read from Group 0 at most once
 //! a second.
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -17,6 +17,10 @@ use teseladb_wire::commands::http_parameters::{
 use crate::backend::{NodeHandle, ServerBackend};
 use crate::client_listener::NodeState;
 use crate::http_listener::{Caller, HttpService, Reply};
+use teseladb_auth::audit_param::{Transport, http_request};
+use teseladb_http::sse::{EVENT_STREAM, HEARTBEAT};
+use teseladb_rest::changestream::HEARTBEAT_MS;
+
 use crate::rest_executor::{
     Credential, Forwarded, NodeExecutor, authenticate, encode_response, touch_later,
 };
@@ -77,14 +81,18 @@ impl NodeHttp {
     }
 
     /// The answer of `/mcp` to `request` of `who` (019 FR-020).
-    fn mcp(&self, request: &Request, who: &Credential) -> Response {
+    /// With `audit`, the request goes to the audit log (a forwarded one went on the node the
+    /// client reached).
+    fn mcp(&self, request: &Request, who: &Credential, audit: bool) -> Response {
         let backend = self.backends.lock().unwrap_or_else(PoisonError::into_inner).pop();
         let backend =
             backend.unwrap_or_else(|| ServerBackend::new(self.handle.clone(), random_seed()));
-        let mut exec = NodeExecutor::new(&self.handle, backend, self.state.as_ref());
+        let mut exec = NodeExecutor::new(&self.handle, backend, self.state.clone());
+        let mut key_id = None;
         let answer = match authenticate(&mut exec, request, who, self.auth) {
             Ok(key) => {
                 if let Some(k) = key {
+                    key_id = Some(k.key_id.clone());
                     touch_later(&mut exec, k);
                 }
                 let m = self.parameters().1;
@@ -116,6 +124,18 @@ impl NodeHttp {
             }
             Err(r) => r,
         };
+        if audit {
+            let (route, tool) = mcp_call(request);
+            let p = http_request(
+                Transport::Mcp,
+                &request.method,
+                &route,
+                tool.as_deref(),
+                answer.status,
+                key_id.as_deref(),
+            );
+            exec.audit(p, answer.status);
+        }
         self.backends.lock().unwrap_or_else(PoisonError::into_inner).push(exec.into_backend());
         answer
     }
@@ -136,6 +156,126 @@ impl NodeHttp {
     }
 }
 
+/// A change stream opened on the node: where its cursor is and the events of its first batch.
+struct OpenStream {
+    db: String,
+    coll: String,
+    id: i64,
+    first: Vec<u8>,
+}
+
+/// Opens the change stream of `cmd` on `db`: the answer's status and fields, and the stream, or
+/// the problem of a stream that does not open.
+fn open_stream(
+    exec: &mut NodeExecutor,
+    db: String,
+    cmd: teseladb_bson::Document,
+) -> (Response, Option<OpenStream>) {
+    use teseladb_rest::changestream::{cursor_collection, events};
+    let reply = teseladb_rest::api::Executor::run(exec, &db, cmd);
+    match events(&reply) {
+        Ok((id, first)) => {
+            let headers = vec![
+                ("Content-Type".to_owned(), EVENT_STREAM.to_owned()),
+                ("Cache-Control".to_owned(), "no-store".to_owned()),
+            ];
+            let first = first.iter().flat_map(|e| e.encode()).collect();
+            let coll = cursor_collection(&reply);
+            let open = OpenStream { db, coll, id, first };
+            (Response { status: 200, headers, body: Vec::new() }, Some(open))
+        }
+        Err(r) => {
+            let answer = teseladb_rest::api::answer(
+                r,
+                &teseladb_rest::commands::Shape::Plain,
+                teseladb_rest::media::Format::Relaxed,
+                None,
+            );
+            (answer, None)
+        }
+    }
+}
+
+impl OpenStream {
+    /// The body of the stream: the first batch, then each `getMore`'s events, a heartbeat after
+    /// [`HEARTBEAT_MS`] without one, and an `error` event that ends it.
+    fn into_pieces(self, mut exec: NodeExecutor) -> crate::http_listener::Pieces {
+        use teseladb_rest::api::Executor;
+        use teseladb_rest::changestream::{error_event, events, get_more};
+        let OpenStream { db, coll, mut id, first } = self;
+        let mut pending = first;
+        let mut last = Instant::now();
+        let mut done = false;
+        Box::new(move |cancelled: &AtomicBool| {
+            if done {
+                return None;
+            }
+            if !pending.is_empty() {
+                last = Instant::now();
+                return Some(std::mem::take(&mut pending));
+            }
+            loop {
+                if cancelled.load(Ordering::Relaxed) || id == 0 {
+                    if id != 0 {
+                        let ids =
+                            teseladb_bson::Value::Array(vec![teseladb_bson::Value::Int64(id)]);
+                        let kill = teseladb_bson::Document::new()
+                            .with("killCursors", coll.as_str())
+                            .with("cursors", ids);
+                        let _ = exec.run(&db, kill);
+                    }
+                    done = true;
+                    return None;
+                }
+                let reply = exec.run(&db, get_more(id, &coll));
+                match events(&reply) {
+                    Ok((next, batch)) => {
+                        id = next;
+                        if !batch.is_empty() {
+                            last = Instant::now();
+                            return Some(batch.iter().flat_map(|e| e.encode()).collect());
+                        }
+                    }
+                    Err(r) => {
+                        done = true;
+                        let (_, p) = teseladb_rest::api::problem_body(&r);
+                        return Some(error_event(&p).encode());
+                    }
+                }
+                if last.elapsed() >= Duration::from_millis(HEARTBEAT_MS) {
+                    last = Instant::now();
+                    return Some(HEARTBEAT.to_vec());
+                }
+            }
+        })
+    }
+}
+
+/// The `route` of the audit event of a request no route takes.
+const UNROUTED: &str = "-";
+
+/// The JSON-RPC method of an MCP request (`batch` for a batch, `-` for a body that is not one)
+/// and, for `tools/call`, the tool's name: what the audit log records of it (019 FR-018).
+fn mcp_call(request: &Request) -> (String, Option<String>) {
+    if request.body.trim_ascii_start().first() == Some(&b'[') {
+        return ("batch".to_owned(), None);
+    }
+    let Ok(text) = std::str::from_utf8(&request.body) else { return (UNROUTED.to_owned(), None) };
+    let Ok(doc) = teseladb_bson::extjson::parse(text) else {
+        return (UNROUTED.to_owned(), None);
+    };
+    let text_of = |v: Option<&teseladb_bson::Value>| match v {
+        Some(teseladb_bson::Value::String(s)) => Some(s.clone()),
+        _ => None,
+    };
+    let method = text_of(doc.get("method")).unwrap_or_else(|| UNROUTED.to_owned());
+    let tool = match doc.get("params") {
+        Some(teseladb_bson::Value::Document(p)) if method == "tools/call" => text_of(p.get("name")),
+        _ => None,
+    };
+    (method, tool)
+}
+
 /// A seed for a backend's random numbers.
 fn random_seed() -> u64 {
     std::hash::BuildHasher::hash_one(
@@ -150,30 +290,63 @@ fn not_found() -> Reply {
 }
 
 impl NodeHttp {
-    /// The REST answer to `request` of `who`.
-    fn rest(&self, request: &Request, who: &Credential) -> Response {
+    /// The REST answer to `request` of `who`: whole, or a change stream as Server-Sent Events
+    /// (FR-012). With `audit`, the request goes to the audit log (019 FR-018).
+    fn rest(&self, request: &Request, who: &Credential, audit: bool) -> Reply {
         // A backend opens its own rings to the cores (012 FR-005), which the cores take some time
         // to pick up: the requests reuse them.
         let backend = self.backends.lock().unwrap_or_else(PoisonError::into_inner).pop();
-        let backend = backend.unwrap_or_else(|| {
-            let seed = std::hash::BuildHasher::hash_one(
-                &std::collections::hash_map::RandomState::new(),
-                0u8,
-            );
-            ServerBackend::new(self.handle.clone(), seed)
-        });
-        let mut exec = NodeExecutor::new(&self.handle, backend, self.state.as_ref());
-        let answer = match authenticate(&mut exec, request, who, self.auth) {
+        let backend =
+            backend.unwrap_or_else(|| ServerBackend::new(self.handle.clone(), random_seed()));
+        let mut exec = NodeExecutor::new(&self.handle, backend, self.state.clone());
+        let mut key_id = None;
+        let (answer, stream) = match authenticate(&mut exec, request, who, self.auth) {
             Ok(key) => {
                 if let Some(k) = key {
+                    key_id = Some(k.key_id.clone());
                     touch_later(&mut exec, k);
                 }
-                teseladb_rest::api::handle(request, &mut exec)
+                match teseladb_rest::api::watch(request) {
+                    None => (teseladb_rest::api::handle(request, &mut exec), None),
+                    Some(Err(r)) => (r, None),
+                    Some(Ok((db, cmd))) => open_stream(&mut exec, db, cmd),
+                }
             }
-            Err(r) => r,
+            Err(r) => (r, None),
         };
-        self.backends.lock().unwrap_or_else(PoisonError::into_inner).push(exec.into_backend());
-        answer
+        if audit {
+            let path = request.target.split('?').next().unwrap_or_default();
+            let route = match teseladb_rest::routes::find(&request.method, path) {
+                Ok((r, _)) => format!("{BASE}{}", r.path),
+                Err(_) => UNROUTED.to_owned(),
+            };
+            let p = http_request(
+                Transport::Rest,
+                &request.method,
+                &route,
+                None,
+                answer.status,
+                key_id.as_deref(),
+            );
+            exec.audit(p, answer.status);
+        }
+        let Some(stream) = stream else {
+            self.backends.lock().unwrap_or_else(PoisonError::into_inner).push(exec.into_backend());
+            return Reply::Whole(answer);
+        };
+        Reply::Stream {
+            status: answer.status,
+            headers: answer.headers,
+            pieces: stream.into_pieces(exec),
+        }
+    }
+
+    /// [`NodeHttp::rest`] for a request another node forwarded: a cursor's, never a stream.
+    fn rest_whole(&self, request: &Request, who: &Credential) -> Response {
+        match self.rest(request, who, false) {
+            Reply::Whole(r) => r,
+            Reply::Stream { .. } => Response::problem(500),
+        }
     }
 
     /// The answer, encoded, to a request another node forwarded ([`Forwarded`]); an empty
@@ -182,9 +355,9 @@ impl NodeHttp {
     pub fn answer_forwarded(&self, body: &[u8]) -> Vec<u8> {
         match Forwarded::decode(body) {
             Ok(f) if f.request.target.split('?').next() == Some(MCP) => {
-                encode_response(&self.mcp(&f.request, &f.who))
+                encode_response(&self.mcp(&f.request, &f.who, false))
             }
-            Ok(f) => encode_response(&self.rest(&f.request, &f.who)),
+            Ok(f) => encode_response(&self.rest_whole(&f.request, &f.who)),
             Err(_) => Vec::new(),
         }
     }
@@ -198,12 +371,12 @@ impl HttpService for NodeHttp {
             return Reply::Whole(Response { status: 200, headers, body: b"ok\n".to_vec() });
         }
         if path == MCP {
-            return Reply::Whole(self.mcp(request, &Credential::of(caller)));
+            return Reply::Whole(self.mcp(request, &Credential::of(caller), true));
         }
         if path != BASE && !path.starts_with(&format!("{BASE}/")) {
             return not_found();
         }
-        Reply::Whole(self.rest(request, &Credential::of(caller)))
+        self.rest(request, &Credential::of(caller), true)
     }
 
     fn route(&self, request: &Request) -> String {

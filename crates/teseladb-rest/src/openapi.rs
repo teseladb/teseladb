@@ -5,7 +5,8 @@ use std::fmt::Write;
 
 use crate::media::{BSON, CANONICAL_JSON, JSON};
 use crate::problem::PROBLEM_JSON;
-use crate::routes::{BASE, ROUTES, Route};
+use crate::routes::{BASE, Op, ROUTES, Route};
+use teseladb_http::sse::EVENT_STREAM;
 
 /// The OpenAPI version of the document.
 pub const OPENAPI_VERSION: &str = "3.1.0";
@@ -56,11 +57,15 @@ fn operation(route: &Route) -> String {
             content("{\"type\":\"object\"}")
         );
     }
+    let ok = if matches!(route.op, Op::WatchCollection | Op::WatchDatabase | Op::WatchCluster) {
+        format!("\"{EVENT_STREAM}\":{{\"schema\":{{\"type\":\"string\"}}}}")
+    } else {
+        content("{\"type\":\"object\"}")
+    };
     let _ = write!(
         o,
-        ",\"responses\":{{\"200\":{{\"description\":\"The command's result\",\"content\":{{{}}}}},\
-         \"default\":{{\"description\":\"An error\",\"content\":{{\"{PROBLEM_JSON}\":{{\"schema\":{{\"$ref\":\"#/components/schemas/Problem\"}}}}}}}}}}",
-        content("{\"type\":\"object\"}")
+        ",\"responses\":{{\"200\":{{\"description\":\"The command's result\",\"content\":{{{ok}}}}},\
+         \"default\":{{\"description\":\"An error\",\"content\":{{\"{PROBLEM_JSON}\":{{\"schema\":{{\"$ref\":\"#/components/schemas/Problem\"}}}}}}}}}}"
     );
     format!("{{{o}}}")
 }

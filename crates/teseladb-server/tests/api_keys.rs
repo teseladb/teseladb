@@ -11,6 +11,7 @@ use teseladb_bson::{Document, Value, extjson};
 use teseladb_http::http1::{Limits, Request, Response, ResponseReader};
 use teseladb_http::server::Settings;
 use teseladb_raftlog::MemDisk;
+use teseladb_server::audit_log::{AuditLog, AuditOpts};
 use teseladb_server::client_listener::ClientConfig;
 use teseladb_server::http_listener::HttpPortConfig;
 use teseladb_server::node::{Node, NodeConfig};
@@ -71,7 +72,10 @@ fn call(addr: SocketAddr, key: &str, method: &str, target: &str, body: &str) -> 
 
 /// The `root` user of a credentials file, as a first start creates it (013 FR-004).
 fn root_user() -> Vec<u8> {
-    let dir = std::env::temp_dir().join(format!("teseladb-apikeys-{}", std::process::id()));
+    let thread = format!("{:?}", std::thread::current().id())
+        .replace(|c: char| !c.is_ascii_alphanumeric(), "");
+    let dir =
+        std::env::temp_dir().join(format!("teseladb-apikeys-{}-{thread}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join(teseladb_server::pki::ROOT_CREDENTIALS);
     std::fs::write(&file, "user=root\npassword=root-pw-31\n").unwrap();
@@ -85,13 +89,27 @@ fn root_user() -> Vec<u8> {
 }
 
 fn start(join: Vec<String>) -> Node<MemDisk> {
+    start_with(join, None)
+}
+
+/// A node, with its audit log in JSON at `audit`.
+fn start_with(join: Vec<String>, audit: Option<&std::path::Path>) -> Node<MemDisk> {
     let http = HttpPortConfig {
         addrs: vec![SocketAddr::from(([127, 0, 0, 1], 0))],
         tls: None,
         settings: Settings::default(),
     };
     let base = config(join.clone());
-    let client = ClientConfig { auth: true, ..base.client.clone().unwrap() };
+    let mut client = ClientConfig { auth: true, ..base.client.clone().unwrap() };
+    if let Some(path) = audit {
+        let opts = AuditOpts {
+            destination: Some("file".into()),
+            format: Some("JSON".into()),
+            path: Some(path.to_str().unwrap().into()),
+            ..AuditOpts::default()
+        };
+        client.audit = AuditLog::open(&opts).unwrap();
+    }
     let cfg = NodeConfig {
         http: Some(http),
         client: Some(client),
@@ -219,4 +237,56 @@ fn keys_carry_their_roles_and_a_revoked_key_is_refused_everywhere_within_a_secon
     assert_eq!(code, 1, "{err}");
     drop(others.into_iter().map(Node::stop).collect::<Vec<_>>());
     drop(first.stop());
+}
+
+/// 019 T022, FR-018: each REST and MCP request goes to the audit log as `httpRequest` with its
+/// transport, user, route or tool, status and the key's `keyId`; neither the key, a token nor a
+/// body is written there.
+#[test]
+fn the_audit_log_records_each_request_without_bodies_keys_or_tokens() {
+    let dir = std::env::temp_dir().join(format!("teseladb-apikeys-audit-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("audit.json");
+    let node = start_with(Vec::new(), Some(&path));
+    let at = node.http_addrs()[0];
+    let (code, out, err) = admin(&node, &["apikey", "create", "--user", "root", "--db", "admin"]);
+    assert_eq!(code, 0, "{err}");
+    let key = out.trim().to_owned();
+    let secret = "s3cret-value-77";
+    let body = format!(r#"{{"document":{{"_id":1,"note":"{secret}"}}}}"#);
+    let insert = "/v1/databases/app/collections/c/insertOne";
+    let (st, d) = until("the key", || {
+        let r = call(at, &key, "POST", insert, &body);
+        (r.0 == 200).then_some(r)
+    });
+    assert_eq!(st, 200, "{d:?}");
+    let tool = format!(
+        r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"find","arguments":{{"database":"app","collection":"c","filter":{{"note":"{secret}"}}}},"_meta":{{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}}}}"#
+    );
+    let req = Request::new("POST", "/mcp")
+        .header("Authorization", &format!("Bearer {key}"))
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json, text/event-stream")
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .body(tool.into_bytes());
+    let r = send(at, req);
+    assert_eq!(r.status, 200, "{r:?}");
+    let jwt = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ4In0.c2ln";
+    assert_eq!(call(at, jwt, "GET", "/v1/databases", "").0, 401);
+    let text = until("the events", || {
+        let t = std::fs::read_to_string(&path).ok()?;
+        (t.matches(r#""atype" : "httpRequest""#).count() >= 3).then_some(t)
+    });
+    let rest = r#""transport" : "rest", "method" : "POST", "route" : "/v1/databases/{db}/collections/{coll}/insertOne", "status" : 200, "keyId" : ""#;
+    assert!(text.contains(rest), "{text}");
+    let mcp = r#""transport" : "mcp", "method" : "POST", "route" : "tools/call", "tool" : "find", "status" : 200"#;
+    assert!(text.contains(mcp), "{text}");
+    assert!(text.contains(r#""route" : "/v1/databases", "status" : 401"#), "{text}");
+    assert!(text.contains(r#""user" : "root""#), "{text}");
+    for leaked in [key.as_str(), &key[4..], jwt, secret, &teseladb_auth::apikey::hash_hex(&key)] {
+        assert!(!text.contains(leaked), "{leaked} in {text}");
+    }
+    drop(node.stop());
+    let _ = std::fs::remove_dir_all(&dir);
 }
