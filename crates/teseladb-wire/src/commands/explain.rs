@@ -1108,6 +1108,8 @@ fn planned_access(
             let keys = if run { r.keys } else { 0 };
             let within = if run { r.keys.saturating_sub(r.past) } else { 0 };
             let mut ix = index_stage(Some(ns), &indexes[scan.index], scan, keys, within);
+            let dups = if run { r.child_dups.first().copied().unwrap_or(0) } else { 0 };
+            multikey_dups(&mut ix, &indexes[scan.index], within, dups);
             if run && r.seeks > 1 {
                 ix.counters.insert("seeks", long(r.seeks));
             }
@@ -1178,7 +1180,8 @@ fn or_stage(
         let given = if run { r.child_given.get(i).copied().unwrap_or(0) } else { 0 };
         let within = keys.saturating_sub(past);
         let mut ix = index_stage(None, &indexes[s.index], s, keys, within);
-        ix.returned = within;
+        let dups = if run { r.child_dups.get(i).copied().unwrap_or(0) } else { 0 };
+        multikey_dups(&mut ix, &indexes[s.index], within, dups);
         match &s.residual {
             Some(f) => fetch_stage(None, Some(f), ix, within, given),
             None => ix,
@@ -1305,6 +1308,18 @@ fn fetch_stage(
 }
 
 /// `IXSCAN` of `index` within the intervals of `scan`.
+/// The counters of the `IXSCAN` of a multikey index that read `within` entries in its intervals
+/// and dropped `dups` of them as repeats of a document it gave (measured on a `refnode` 9.0.4:
+/// it tests each entry and gives the rest).
+fn multikey_dups(ix: &mut Stage, index: &super::plan_exec::PlanIndex, within: u64, dups: u64) {
+    if !index.meta.multikey {
+        return;
+    }
+    ix.counters.insert("dupsTested", long(within));
+    ix.counters.insert("dupsDropped", long(dups));
+    ix.returned = within.saturating_sub(dups);
+}
+
 fn index_stage(
     ns: Option<&Namespace>,
     index: &super::plan_exec::PlanIndex,
@@ -1514,10 +1529,9 @@ fn count_plan<B: Backend + ?Sized>(
                 ix.returned = if run { winner.keys.saturating_sub(winner.past) } else { 0 };
                 ix
             }
+            // The `OR` stage keeps one entry per document, multikey or not (measured).
             teseladb_plan::rules::Access::Or(scans)
-                if scans
-                    .iter()
-                    .all(|s| s.residual.is_none() && !indexes[s.index].meta.multikey) =>
+                if scans.iter().all(|s| s.residual.is_none()) =>
             {
                 let mut sub = Stage::new("SUBPLAN").over(or_stage(&indexes, winner, scans, run));
                 sub.returned = if run { winner.docs } else { 0 };

@@ -539,18 +539,19 @@ fn read_through_engine<B: Backend + ?Sized>(
     vars: Option<&Document>,
     concern: ReadConcern,
 ) -> Result<(Vec<Document>, bool), CommandError> {
-    read_through_staged(backend, ns, (extra, vars), concern)?
+    read_through_spilling(backend, ns, (extra, vars), concern, (super::Spill::default(), true))?
 }
 
-/// [`read_through_engine`] with the errors of running the stages apart from those of reading
-/// and parsing them (the outer error).
+/// [`read_through`] with the node's state `shared` (the stages of the node read it) and the
+/// errors of running the stages apart from those of reading and parsing them (the outer error).
 pub(crate) fn read_through_staged<B: Backend + ?Sized>(
     backend: &mut B,
+    shared: &super::Shared,
     ns: &Namespace,
     stages: (&[Document], Option<&Document>),
     concern: ReadConcern,
 ) -> Result<Result<(Vec<Document>, bool), CommandError>, CommandError> {
-    read_through_spilling(backend, ns, stages, concern, (super::Spill::default(), true))
+    read_through_on(backend, Some(shared), ns, stages, concern, (super::Spill::default(), true))
 }
 
 /// [`read_through_staged`] with the node's store `spill` for stages past their memory, used
