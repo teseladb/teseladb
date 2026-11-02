@@ -79,6 +79,8 @@ enum Score {
     BoostPath(String),
     /// Replaced by a number.
     Constant(f32),
+    /// Replaced by an expression over it.
+    Function(function::Expr),
 }
 
 /// An operator.
@@ -101,6 +103,8 @@ enum Operator {
     },
     /// `wildcard` or `regex`.
     Pattern(pattern::Pattern),
+    /// `equals`, `in`, `range` or `near`.
+    Values(values::ValueOp),
     Compound {
         must: Vec<Operator>,
         should: Vec<Operator>,
@@ -172,6 +176,10 @@ fn parse(index: &MemIndex, name: &str, v: &Value, path: &str) -> Result<Operator
         "exists" => parse_exists(d, path),
         "wildcard" | "regex" => pattern::parse(index, name, d, path),
         "compound" => parse_compound(index, d, path),
+        "equals" => values::parse_equals(d, path),
+        "in" => values::parse_in(d, path),
+        "range" => values::parse_range(d, path),
+        "near" => values::parse_near(d, path),
         other => {
             Err(SearchError(format!("\"{other}\" is not supported by this node's search engine")))
         }
@@ -302,6 +310,10 @@ fn parse_score(v: Option<&Value>, at: &str) -> Result<Score, SearchError> {
         }
     };
     match kinds.first() {
+        Some(&"function") => {
+            let f = d.get("function").expect("one of the keys");
+            Ok(Score::Function(function::parse(f, &format!("{at}.function"))?))
+        }
         Some(&"constant") => Ok(Score::Constant(value("constant")?.unwrap_or(1.0))),
         Some(&"boost") => match value("boost")? {
             Some(b) => Ok(Score::Boost(b)),
@@ -388,7 +400,7 @@ fn eval(index: &MemIndex, op: &Operator) -> Result<BTreeMap<u32, f32>, SearchErr
     match op {
         Operator::Text { query, paths, score } => {
             let s = index.text_scores(query, paths, boost_of(score))?;
-            Ok(rescored(index, s, score))
+            rescored(index, s, score)
         }
         Operator::Exists { path, score } => {
             let found = index
@@ -396,15 +408,19 @@ fn eval(index: &MemIndex, op: &Operator) -> Result<BTreeMap<u32, f32>, SearchErr
                 .filter(|&doc| index.document(doc).is_some_and(|d| value_at(d, path).is_some()))
                 .map(|doc| (doc, boost_of(score)))
                 .collect();
-            Ok(rescored(index, found, score))
+            rescored(index, found, score)
         }
         Operator::Phrase { query, paths, slop, score } => {
             let s = index.phrase_scores(query, paths, *slop, boost_of(score))?;
-            Ok(rescored(index, s, score))
+            rescored(index, s, score)
         }
         Operator::Pattern(p) => {
             let s = p.scores(index, boost_of(p.score()))?;
-            Ok(rescored(index, s, p.score()))
+            rescored(index, s, p.score())
+        }
+        Operator::Values(v) => {
+            let s = values::scores(index, v, boost_of(v.score()));
+            rescored(index, s, v.score())
         }
         Operator::Compound { must, should, filter, must_not, minimum } => {
             eval_compound(index, must, should, filter, must_not, *minimum)
@@ -417,8 +433,12 @@ fn boost_of(score: &Score) -> f32 {
     if let Score::Boost(b) = score { *b } else { 1.0 }
 }
 
-/// The scores after `score`'s constant or field boost.
-fn rescored(index: &MemIndex, mut s: BTreeMap<u32, f32>, score: &Score) -> BTreeMap<u32, f32> {
+/// The scores after `score`'s constant, field boost or function.
+fn rescored(
+    index: &MemIndex,
+    mut s: BTreeMap<u32, f32>,
+    score: &Score,
+) -> Result<BTreeMap<u32, f32>, SearchError> {
     match score {
         Score::Constant(c) => s.values_mut().for_each(|v| *v = *c),
         Score::BoostPath(p) => {
@@ -426,9 +446,15 @@ fn rescored(index: &MemIndex, mut s: BTreeMap<u32, f32>, score: &Score) -> BTree
                 *v *= number_at(index.document(*doc), p);
             }
         }
+        Score::Function(f) => {
+            f.check(index.definition())?;
+            for (doc, v) in s.iter_mut() {
+                *v = f.score(*v, index.document(*doc));
+            }
+        }
         Score::Plain | Score::Boost(_) => {}
     }
-    s
+    Ok(s)
 }
 
 fn eval_compound(
@@ -469,9 +495,13 @@ fn eval_compound(
     Ok(out)
 }
 
+mod function;
 mod pattern;
+mod values;
 
 #[cfg(test)]
 mod pattern_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod values_tests;

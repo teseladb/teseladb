@@ -190,6 +190,11 @@ impl MemIndex {
         self.collect(&mapping, "", doc, &mut texts);
         for (path, analyzer_name, search_name, text) in texts {
             let tokens = self.analyzer(&analyzer_name)?.analyze(&text).map_err(analysis)?;
+            // A value without tokens (an empty string) leaves no length: the document does not
+            // count among those of the field (measured: `t: ""` changes no score).
+            if tokens.is_empty() {
+                continue;
+            }
             let field = self.fields.entry(path).or_insert_with(|| TextField {
                 search_analyzer: search_name.clone(),
                 ..TextField::default()
@@ -415,6 +420,11 @@ impl MemIndex {
     /// The numbers of the documents indexed.
     pub(crate) fn live(&self) -> impl Iterator<Item = u32> + '_ {
         self.by_key.values().copied()
+    }
+
+    /// The definition the index follows.
+    pub(crate) fn definition(&self) -> &Definition {
+        &self.definition
     }
 
     /// The document of number `id`.
