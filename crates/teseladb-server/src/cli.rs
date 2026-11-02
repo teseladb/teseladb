@@ -111,6 +111,8 @@ pub struct StartOpts {
     pub max_concurrent_transactions: i64,
     /// `--redactClientLogData`: the clients' documents go redacted in the log (013 FR-027).
     pub redact_client_log_data: bool,
+    /// `--noscripting`: no server-side JavaScript (016 FR-009).
+    pub no_scripting: bool,
     /// The options as given, by name, for `getCmdLineOpts` (006).
     pub given: Vec<(String, String)>,
     /// The command line, for `getCmdLineOpts`; [`crate::run`] fills it.
@@ -151,6 +153,8 @@ pub const TLS_FIPS_MODE: &str = "tlsFIPSMode";
 pub const SCRAM_SHA1_FIPS: &str = "SCRAM-SHA-1 is not allowed in FIPS mode.";
 /// `--redactClientLogData` (013 FR-027).
 pub const REDACT_CLIENT_LOG_DATA: &str = "redactClientLogData";
+/// `--noscripting` (016 FR-009).
+pub const NO_SCRIPTING: &str = "noscripting";
 /// `--enableEncryption`.
 pub const ENABLE_ENCRYPTION: &str = "enableEncryption";
 /// `--encryptionKeyFile`.
@@ -339,6 +343,7 @@ const START: &[Spec] = &[
     (KEY_FILE, VALUE),
     (CLUSTER_AUTH_MODE, VALUE),
     (REDACT_CLIENT_LOG_DATA, FLAG),
+    (NO_SCRIPTING, FLAG),
     (ENABLE_ENCRYPTION, FLAG),
     (ENCRYPTION_KEY_FILE, VALUE),
     (ENCRYPTION_CIPHER_MODE, VALUE),
@@ -971,6 +976,7 @@ fn start(o: &Opts) -> Result<StartOpts, CliError> {
             0,
         )?,
         redact_client_log_data: o.flag(REDACT_CLIENT_LOG_DATA)?,
+        no_scripting: o.flag(NO_SCRIPTING)?,
         // Passwords never stay in the options as given (they show in `Debug`).
         given: o
             .values

@@ -442,6 +442,7 @@ dependencies = [
  "teseladb-hash",
  "teseladb-hlc",
  "teseladb-index",
+ "teseladb-js",
  "teseladb-keys",
  "teseladb-meta",
  "teseladb-mql",

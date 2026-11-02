@@ -40,6 +40,7 @@ pub mod index_mod;
 pub mod index_spec;
 pub(crate) mod index_usage;
 pub mod indexes;
+pub mod js;
 pub mod kinds;
 pub mod list_catalog;
 pub mod maintenance;
@@ -1062,6 +1063,14 @@ fn returned(reply: &Document) -> i64 {
 /// Runs the command of `ctx` by its name.
 fn dispatch<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     engines::reseed(ctx.backend.random());
+    let enabled = lock(ctx.shared).params.javascript_enabled;
+    let max_time = match ctx.cmd.get("maxTimeMS") {
+        Some(Value::Int32(n)) => u64::try_from(*n).ok(),
+        Some(Value::Int64(n)) => u64::try_from(*n).ok(),
+        Some(Value::Double(x)) if *x >= 0.0 => Some(*x as u64),
+        _ => None,
+    };
+    js::begin(enabled, ctx.backend.now_ms(), js::deadline_from(max_time));
     match crate::concerns::canonical(ctx.name()) {
         query_settings::SET_QUERY_SETTINGS => query_settings::set_query_settings(ctx),
         query_settings::REMOVE_QUERY_SETTINGS => query_settings::remove_query_settings(ctx),

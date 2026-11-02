@@ -490,7 +490,7 @@ pub fn parameters_of(settings: &BTreeMap<Vec<u8>, Vec<u8>>) -> BTreeMap<String, 
 
 /// The instant the process first read the monotonic clock, the origin of
 /// [`Backend::now_micros`].
-fn process_start() -> Instant {
+pub(crate) fn process_start() -> Instant {
     static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
     *START.get_or_init(Instant::now)
 }
