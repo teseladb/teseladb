@@ -1017,9 +1017,15 @@ impl<D: Disk + Send + 'static> Node<D> {
                     state = state.with_keys(slot.clone());
                 }
                 let auth = cfg.client.as_ref().is_some_and(|c| c.auth);
-                let backend = crate::backend::ServerBackend::new(handle.clone(), random_u64());
-                let service =
-                    Arc::new(crate::http_service::NodeHttp::new(handle, Arc::new(state), auth));
+                let oidc = cfg.client.as_ref().and_then(|c| c.oidc.clone());
+                let mechanisms =
+                    cfg.client.as_ref().map(|c| c.mechanisms.clone()).unwrap_or_default();
+                let backend = crate::backend::ServerBackend::new(handle.clone(), random_u64())
+                    .with_oidc(oidc.clone());
+                let service = Arc::new(
+                    crate::http_service::NodeHttp::new(handle, Arc::new(state), auth)
+                        .with_auth(oidc, mechanisms),
+                );
                 spawn_http_forwards(http_forwards_rx, service.clone(), backend);
                 match crate::http_listener::HttpListener::spawn(h, service, http_metrics.clone()) {
                     Ok(l) => Some(l),

@@ -43,6 +43,7 @@ fn without_a_value_cors_is_off_and_mcp_is_read_only() {
             max_documents: DEFAULT_MCP_MAX_DOCUMENTS,
             max_bytes: DEFAULT_MCP_MAX_BYTES,
             max_time_ms: DEFAULT_MCP_MAX_TIME_MS,
+            resource_uri: None,
         }
     );
     assert_eq!(
@@ -159,7 +160,10 @@ fn mcp_options_are_set_and_checked() {
     let mut m = Mem::new();
     let r = m.run(
         "admin",
-        set(MCP_OPTIONS, r#"{"readOnly":false,"allowDestructive":true,"maxDocuments":10,"maxBytes":2048,"maxTimeMS":500}"#),
+        set(
+            MCP_OPTIONS,
+            r#"{"readOnly":false,"allowDestructive":true,"maxDocuments":10,"maxBytes":2048,"maxTimeMS":500,"resourceUri":"https://db.example.com/mcp"}"#,
+        ),
     );
     assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
     assert_eq!(
@@ -169,7 +173,8 @@ fn mcp_options_are_set_and_checked() {
             allow_destructive: true,
             max_documents: 10,
             max_bytes: 2048,
-            max_time_ms: 500
+            max_time_ms: 500,
+            resource_uri: Some("https://db.example.com/mcp".to_owned()),
         }
     );
     let prefix = "Failed parsing ClusterServerParameter 'mcpOptions' :: caused by :: ";
@@ -185,6 +190,21 @@ fn mcp_options_are_set_and_checked() {
             "BSON field 'maxDocuments' value must be >= 1, actual value '0'",
         ),
         (r#"{"z":true}"#, 40415, "BSON field 'ClusterServerParameter.z' is an unknown field."),
+        (
+            r#"{"resourceUri":1}"#,
+            14,
+            "BSON field 'ClusterServerParameter.resourceUri' is the wrong type 'int', expected type 'string'",
+        ),
+        (
+            r#"{"resourceUri":"db.example.com/mcp"}"#,
+            2,
+            "BSON field 'resourceUri' is not an absolute http or https URI without a fragment: 'db.example.com/mcp'",
+        ),
+        (
+            r#"{"resourceUri":"https://db.example.com/mcp#x"}"#,
+            2,
+            "BSON field 'resourceUri' is not an absolute http or https URI without a fragment: 'https://db.example.com/mcp#x'",
+        ),
     ];
     for (value, code, msg) in cases {
         let r = m.run("admin", set(MCP_OPTIONS, value));
@@ -195,4 +215,5 @@ fn mcp_options_are_set_and_checked() {
     m.run("admin", set(MCP_OPTIONS, r#"{"maxDocuments":3}"#));
     let o = mcp_options(stored(&m, MCP_OPTIONS).as_deref());
     assert_eq!((o.read_only, o.max_documents, o.max_bytes), (true, 3, DEFAULT_MCP_MAX_BYTES));
+    assert_eq!(o.resource_uri, None);
 }

@@ -71,6 +71,29 @@ fn claims(extra: &str) -> String {
     format!(r#"{{"iss":"{ISSUER}","aud":"teseladb","sub":"alice","exp":{},{extra}}}"#, NOW + 600)
 }
 
+/// A token for a protected resource (RFC 8707, 019 FR-027) carries the resource's URI as
+/// audience: it is taken for that resource only, and a token for the provider's audience is not.
+#[test]
+fn a_token_for_a_resource_is_taken_for_that_resource_only() {
+    const MCP: &str = "https://db.test:27080/mcp";
+    let keys = KeySet::parse(&jwks("k1")).unwrap();
+    let for_mcp =
+        format!(r#"{{"iss":"{ISSUER}","aud":"{MCP}","sub":"bob","exp":{},"groups":[]}}"#, NOW + 60);
+    let t = Token::parse(&rs256(&for_mcp)).unwrap();
+    let id = t.verify_for(&providers(), &keys, NOW, Some(MCP)).unwrap();
+    assert_eq!(id.user, UserName::new("idp/bob", "$external"));
+    let refused = |r: Result<oidc::Identity, OidcError>| r.unwrap_err().0;
+    assert!(refused(t.verify(&providers(), &keys, NOW)).starts_with("Unknown audience name"));
+    let other = t.verify_for(&providers(), &keys, NOW, Some("https://other.test/mcp"));
+    assert!(refused(other).starts_with("Unknown audience name"));
+    let for_provider = Token::parse(&rs256(&claims(r#""groups":[]"#))).unwrap();
+    let r = for_provider.verify_for(&providers(), &keys, NOW, Some(MCP));
+    assert_eq!(
+        refused(r),
+        format!("Unknown audience name 'teseladb' for Identity Provider '{ISSUER}'")
+    );
+}
+
 #[test]
 fn a_valid_token_names_the_user_and_its_groups() {
     let id = verify(&rs256(&claims(r#""groups":["readers","others","readers"]"#))).unwrap();
