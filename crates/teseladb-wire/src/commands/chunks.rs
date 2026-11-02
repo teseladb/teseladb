@@ -23,8 +23,9 @@ use super::names::parse_full;
 use super::sharding::{ShardKey, document_key, shard_key_of};
 use super::{Backend, Ctx, admin, display, shard_name};
 use crate::error::{
-    BAD_VALUE, CommandError, ILLEGAL_OPERATION, INVALID_NAMESPACE, INVALID_OPTIONS,
-    NAMESPACE_NOT_FOUND, NAMESPACE_NOT_SHARDED, SHARD_NOT_FOUND, STALE_CONFIG, UNCODED,
+    BAD_VALUE, CONFLICTING_OPERATION_IN_PROGRESS, CommandError, ILLEGAL_OPERATION,
+    INVALID_NAMESPACE, INVALID_OPTIONS, NAMESPACE_NOT_FOUND, NAMESPACE_NOT_SHARDED,
+    SHARD_NOT_FOUND, STALE_CONFIG, UNCODED,
 };
 use crate::types::wrong_type;
 use teseladb_range::read::ReadConcern;
@@ -39,6 +40,8 @@ pub const MOVE_CHUNK: &str = "moveChunk";
 pub const MOVE_RANGE: &str = "moveRange";
 /// `mergeChunks`.
 pub const MERGE_CHUNKS: &str = "mergeChunks";
+/// `mergeAllChunksOnShard`.
+pub const MERGE_ALL_CHUNKS_ON_SHARD: &str = "mergeAllChunksOnShard";
 /// `clearJumboFlag`.
 pub const CLEAR_JUMBO_FLAG: &str = "clearJumboFlag";
 /// `moveChunk`'s code when no chunk has the bounds it names.
@@ -428,6 +431,7 @@ pub fn move_chunk<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document,
         }
         _ => return Err(CommandError::new(INVALID_OPTIONS, "need to specify query or bounds")),
     };
+    check_migrations(&s)?;
     let start = ctx.backend.now_ms();
     if let Some(chunk) = chunk.filter(|c| c.node != node) {
         move_chunk_to(ctx.backend, &chunk, node)?;
@@ -493,6 +497,7 @@ pub fn move_range<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document,
         let msg = format!("Could not find destination shard :: caused by :: Shard {to} not found");
         CommandError::new(SHARD_NOT_FOUND, msg)
     })?;
+    check_migrations(&s)?;
     let low = min.as_ref().map(|m| cut_at(&s, m)).transpose()?;
     let high = max.as_ref().map(|m| cut_at(&s, m)).transpose()?;
     for at in [&low, &high].into_iter().flatten() {
@@ -540,17 +545,84 @@ pub fn merge_chunks<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Documen
         );
         return Err(CommandError::new(STALE_CONFIG, msg));
     }
-    let left = run[0].group;
+    merge_run(ctx.backend, run)?;
+    Ok(ok())
+}
+
+/// Joins the neighbouring chunks of `run` into the first one's range.
+fn merge_run<B: Backend + ?Sized>(backend: &mut B, run: &[Chunk]) -> Result<(), CommandError> {
+    let Some(first) = run.first() else { return Ok(()) };
+    let left = first.group;
     for right in run[1..].iter().map(|c| c.group) {
-        ctx.backend.range_order(Group0Command::MergeRanges { left, right })?;
+        backend.range_order(Group0Command::MergeRanges { left, right })?;
         for _ in 0..MERGE_WAITS {
-            let gone = !ctx.backend.route_entries()?.iter().any(|e| e.group == right);
-            if gone || !ctx.backend.pause() {
+            let gone = !backend.route_entries()?.iter().any(|e| e.group == right);
+            if gone || !backend.pause() {
                 break;
             }
         }
     }
+    Ok(())
+}
+
+/// `mergeAllChunksOnShard`: every run of neighbouring chunks of the collection on the shard,
+/// of at most `maxNumberOfChunksToMerge` chunks, becomes one. A `refrouter` 9.0.4 leaves out the
+/// chunks split or moved in the last `minSnapshotHistoryWindowInSeconds`; the ranges here keep
+/// their history across a merge, so every run is merged at once.
+pub fn merge_all_chunks_on_shard<B: Backend + ?Sized>(
+    ctx: &mut Ctx<'_, B>,
+) -> Result<Document, CommandError> {
+    let name = MERGE_ALL_CHUNKS_ON_SHARD;
+    let text = match ctx.first() {
+        Value::String(s) => s.clone(),
+        v => return Err(wrong_type(&format!("{name}.{name}"), v, "string")),
+    };
+    let shard = required_string(ctx.cmd, name, "shard")?;
+    let most = match ctx.cmd.get("maxNumberOfChunksToMerge") {
+        Some(Value::Int32(n)) => usize::try_from(*n).unwrap_or(0).max(2),
+        Some(v) => return Err(wrong_type(&format!("{name}.maxNumberOfChunksToMerge"), v, "int")),
+        None => usize::MAX,
+    };
+    admin::admin_only(name, ctx.db)?;
+    let ns =
+        parse_full(&text).filter(|n| !n.db.is_empty() && !n.coll.is_empty()).ok_or_else(|| {
+            CommandError::new(INVALID_NAMESPACE, "invalid namespace specified for request")
+        })?;
+    let node = node_named(ctx.backend, &shard)?
+        .ok_or_else(|| CommandError::new(SHARD_NOT_FOUND, format!("Shard {shard} not found")))?;
+    let unsharded =
+        || CommandError::new(NAMESPACE_NOT_SHARDED, format!("Collection {text} is not sharded"));
+    let coll = ctx.backend.collection(&ns)?.ok_or_else(unsharded)?;
+    let key = shard_key_of(&coll)?.ok_or_else(unsharded)?;
+    let s = Sharded { coll, key };
+    let chunks = chunks_of(ctx.backend, &s)?;
+    let mut runs: Vec<Vec<Chunk>> = Vec::new();
+    for c in chunks.into_iter() {
+        let joins = runs
+            .last()
+            .and_then(|r| r.last())
+            .is_some_and(|p| p.node == node && c.node == node && p.end == c.start)
+            && runs.last().is_some_and(|r| r.len() < most);
+        match joins {
+            true => runs.last_mut().into_iter().for_each(|r| r.push(c.clone())),
+            false => runs.push(vec![c]),
+        }
+    }
+    for run in runs.iter().filter(|r| r.len() > 1) {
+        merge_run(ctx.backend, run)?;
+    }
     Ok(ok())
+}
+
+/// Refuses a migration of a collection whose migrations `setAllowMigrations` blocked.
+fn check_migrations(s: &Sharded) -> Result<(), CommandError> {
+    match super::balancing::migrations_allowed(&s.coll) {
+        true => Ok(()),
+        false => Err(CommandError::new(
+            CONFLICTING_OPERATION_IN_PROGRESS,
+            "Command request failed on source shard. :: caused by :: Can't execute moveChunk because migrations for this collection are disallowed",
+        )),
+    }
 }
 
 /// `clearJumboFlag`: TeselaDB marks no chunk jumbo (a range splits at any key), so it only finds

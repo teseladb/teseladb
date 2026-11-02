@@ -63,6 +63,9 @@ pub fn documents(sm: &Group0Sm, coll: &str) -> Vec<Document> {
         "databases" => databases(sm),
         COLLECTIONS => sharded_collections(sm),
         "refrouter" => routers(sm),
+        teseladb_wire::commands::query_analysis::QUERY_ANALYZERS => {
+            teseladb_wire::commands::query_analysis::of_settings(&sm.settings)
+        }
         "version" => vec![version(sm)],
         SETTINGS => settings(sm),
         "tags" => tags(sm),
@@ -307,10 +310,7 @@ fn sharded_collections(sm: &Group0Sm) -> Vec<Document> {
     sm.catalog
         .collections
         .iter()
-        .filter_map(|(ns, c)| {
-            let key = sharding::shard_key_of(c).ok().flatten()?;
-            Some(sharding::config_entry(ns, c, &key))
-        })
+        .filter_map(|(ns, c)| sharding::tracked_entry(ns, c).ok().flatten())
         .collect()
 }
 
