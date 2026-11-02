@@ -107,9 +107,14 @@ pub fn parse_query(op: GeoOperator, spec: RawValue<'_>) -> Result<Shape, QueryEr
         (GeoOperator::Intersects, "$geometry") => {
             super::geojson::parse(arg).map(Shape::Intersects).map_err(|e| bad(e.0))
         }
-        (GeoOperator::Intersects, _) => {
-            Err(bad(format!("$geoIntersect not supported with provided geometry: {}", whole())))
-        }
+        // A legacy shape is read first, so its errors come before the refusal; a spherical cap
+        // is accepted and selects nothing (measured on a `refrouter` 9.0.4).
+        (GeoOperator::Intersects, _) => match parse_query(GeoOperator::Within, spec)? {
+            Shape::Within(Container::Cap(_)) => Ok(Shape::Within(Container::Polygons(Vec::new()))),
+            _ => {
+                Err(bad(format!("$geoIntersect not supported with provided geometry: {}", whole())))
+            }
+        },
         (GeoOperator::Within, "$geometry") => {
             match super::geojson::parse(arg).map_err(|e| bad(e.0))? {
                 Geometry::Polygon(p) | Geometry::BigPolygon(p) => {
@@ -141,7 +146,10 @@ pub fn parse_query(op: GeoOperator, spec: RawValue<'_>) -> Result<Shape, QueryEr
             let vertices =
                 items(arg).into_iter().map(|v| pair(Some(v))).collect::<Result<Vec<_>, _>>()?;
             if vertices.len() < 3 {
-                return Err(bad("Polygon must have at least 3 points"));
+                return Err(bad(format!(
+                    "Polygon must have at least 3 points, instead got {} vertices",
+                    vertices.len()
+                )));
             }
             Ok(Shape::Polygon(vertices))
         }

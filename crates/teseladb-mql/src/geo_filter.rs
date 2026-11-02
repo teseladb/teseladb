@@ -16,7 +16,10 @@ const WITHIN_SHAPES: [&str; 5] =
 
 /// Whether `key` is a geospatial query operator.
 pub(crate) fn is_geo(key: &str) -> bool {
-    matches!(key, ops::GEO_WITHIN | ops::GEO_INTERSECTS | ops::NEAR | ops::NEAR_SPHERE)
+    matches!(
+        key,
+        ops::GEO_WITHIN | ops::WITHIN | ops::GEO_INTERSECTS | ops::NEAR | ops::NEAR_SPHERE
+    )
 }
 
 /// Whether `key` is `$near` or `$nearSphere`.
@@ -52,7 +55,11 @@ pub(crate) fn within(doc: RawDoc<'_>, key: &str, value: RawValue<'_>) -> Result<
     let Some((first, arg)) = fields.next() else {
         return Err(bad_value("geo query doesn't have any geometry"));
     };
-    let shapes: &[&str] = if key == ops::GEO_WITHIN { &WITHIN_SHAPES } else { &[ops::GEOMETRY] };
+    // `$within` is `$geoWithin` under its old name.
+    let key = if key == ops::WITHIN { ops::GEO_WITHIN } else { key };
+    // `$geoIntersects` takes the legacy shapes too: 009 reads them and refuses all but
+    // `$centerSphere` (measured on a `refrouter` 9.0.4).
+    let shapes: &[&str] = &WITHIN_SHAPES;
     let typed = match first {
         ops::GEOMETRY => matches!(arg, RawValue::Document(_)),
         _ => matches!(arg, RawValue::Array(_) | RawValue::Document(_)),

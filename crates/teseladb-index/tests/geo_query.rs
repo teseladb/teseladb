@@ -101,6 +101,28 @@ fn a_bad_shape_is_refused_as_refdb_refuses_it() {
             "$geoIntersect not supported with provided geometry: { $geoIntersects: { $box: [ [ 0, 0 ], [ 5, 5 ] ] } }",
         ),
         (Within, r#"{"$center": [[0, 0], -1]}"#, "Radius must be a non-negative number: -1"),
+        // 009 T035, measured on a `refrouter` 9.0.4: a legacy shape under `$geoIntersects` is read
+        // first, so its own errors come before the refusal.
+        (
+            Intersects,
+            r#"{"$box": []}"#,
+            "Point must be an array or object, instead got type missing",
+        ),
+        (
+            Intersects,
+            r#"{"$center": [[0, 0], 1]}"#,
+            "$geoIntersect not supported with provided geometry: { $geoIntersects: { $center: [ [ 0, 0 ], 1 ] } }",
+        ),
+        (
+            Intersects,
+            r#"{"$polygon": [[0, 0]]}"#,
+            "Polygon must have at least 3 points, instead got 1 vertices",
+        ),
+        (
+            Within,
+            r#"{"$polygon": [[0, 0], [1, 1]]}"#,
+            "Polygon must have at least 3 points, instead got 2 vertices",
+        ),
     ];
     for (op, spec, msg) in cases {
         assert_eq!(error(op, spec), (2, msg.to_string()), "{spec}");
@@ -135,4 +157,15 @@ fn a_geometry_partly_along_the_boundary_is_not_within() {
             "{id}"
         );
     }
+}
+
+/// 009 T035: `$geoIntersects` with `$centerSphere` is accepted and selects nothing, even a point
+/// at the centre (measured on a `refrouter` 9.0.4 on 02-11-2026: `[]` against `[1]` for
+/// `$geoWithin` with the same cap).
+#[test]
+fn a_spherical_cap_under_geo_intersects_selects_nothing() {
+    use GeoOperator::{Intersects, Within};
+    let cap = r#"{"$centerSphere": [[1, 1], 0.01]}"#;
+    assert_eq!(selected(Intersects, cap), Vec::<i32>::new());
+    assert!(!selected(Within, cap).is_empty());
 }
