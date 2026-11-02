@@ -53,8 +53,15 @@ pub(crate) fn txn_id(tag: u64) -> u128 {
 /// The meta write of position `op` of tag `tag`'s transaction on `key`: its key and its bytes.
 pub(crate) fn meta_write(key: &[u8], tag: u64, op: u32) -> (Vec<u8>, Vec<u8>) {
     let txn = TxnInfo { id: txn_id(tag), lsid: 1, uid: [0; 32], txn_number: tag as i64 };
-    let meta =
-        ChangeMeta { txn: Some(txn), op, update: None, replace: false, delete: false, doc: None };
+    let meta = ChangeMeta {
+        txn: Some(txn),
+        op,
+        update: None,
+        replace: false,
+        delete: false,
+        doc: None,
+        moved: None,
+    };
     (meta_key(key, op), meta.encode().expect("a meta without documents encodes"))
 }
 
