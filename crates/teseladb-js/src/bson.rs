@@ -802,7 +802,7 @@ pub fn to_bson(it: &mut Interp, v: &Val, name: &str, depth: usize) -> R<Value> {
         return Err(it.error("InternalError", "too much recursion"));
     }
     Ok(match v {
-        Val::Undef | Val::Null => Value::Null,
+        Val::Undef | Val::Hole | Val::Null => Value::Null,
         Val::Bool(b) => Value::Boolean(*b),
         Val::Num(n) => Value::Double(*n),
         Val::Str(s) => Value::String(crate::strings::to_utf8(s).into_owned()),

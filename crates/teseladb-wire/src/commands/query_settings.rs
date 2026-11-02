@@ -18,9 +18,10 @@ use super::admin::admin_only;
 use super::query_shape::{self, Shape};
 use super::{Backend, Ctx};
 use crate::error::{
-    BAD_VALUE, CommandError, IDL_FAILED_TO_PARSE, IDL_UNKNOWN_FIELD, INVALID_INDEX_HINT,
-    INVALID_INDEX_HINT_DB, INVALID_LENGTH, QUERY_KNOB_NOT_SETTABLE, QUERY_REJECTED_BY_SETTINGS,
-    QUERY_SETTINGS_DEFAULTS, QUERY_SETTINGS_EMPTY, QUERY_SHAPE_UNSUPPORTED,
+    BAD_VALUE, CommandError, EXPECTED_OBJECT, FAILED_TO_PARSE, IDL_FAILED_TO_PARSE,
+    IDL_UNKNOWN_FIELD, INVALID_INDEX_HINT, INVALID_INDEX_HINT_DB, INVALID_LENGTH,
+    QUERY_KNOB_NOT_SETTABLE, QUERY_REJECTED_BY_SETTINGS, QUERY_SETTINGS_DEFAULTS,
+    QUERY_SETTINGS_EMPTY, QUERY_SHAPE_UNSUPPORTED,
 };
 use crate::types::{wrong_type, wrong_types};
 
@@ -214,28 +215,41 @@ fn parse_settings(given: &Document) -> Result<Document, CommandError> {
     for key in ORDER {
         let Some(v) = given.get(key) else { continue };
         let x = match (*key, v) {
+            // A null `queryFramework` or `maxTimeMS` is an absent one (measured).
+            ("queryFramework" | "maxTimeMS", Value::Null) => continue,
             ("indexHints", Value::Array(items)) => {
                 let mut list = Vec::new();
-                for i in items {
+                for (n, i) in items.iter().enumerate() {
+                    if !matches!(i, Value::Document(_)) {
+                        let msg = format!("invalid parameter: expected an object ({n})");
+                        return Err(CommandError::new(EXPECTED_OBJECT, msg));
+                    }
                     if let Some(h) = index_hint(i)? {
                         list.push(Value::Document(h));
                     }
                 }
                 Value::Array(list)
             }
-            ("indexHints", one) => {
+            ("indexHints", one @ Value::Document(_)) => {
                 Value::Array(index_hint(one)?.map(Value::Document).into_iter().collect())
             }
+            ("indexHints", _) => {
+                let msg = "'indexHints' must be an object or an array";
+                return Err(CommandError::new(FAILED_TO_PARSE, msg));
+            }
             ("queryFramework", Value::String(f)) if FRAMEWORKS.contains(&f.as_str()) => v.clone(),
-            ("queryFramework", other) => {
-                let got = match other {
-                    Value::String(s) => s.clone(),
-                    _ => String::new(),
-                };
+            ("queryFramework", Value::String(f)) => {
                 let msg = format!(
-                    "Invalid value for 'queryFramework': expected classic or sbe, but got {got}"
+                    "Invalid value for 'queryFramework': expected classic or sbe, but got {f}"
                 );
                 return Err(CommandError::new(BAD_VALUE, msg));
+            }
+            ("queryFramework", other) => {
+                return Err(wrong_type(
+                    "setQuerySettings.settings.queryFramework",
+                    other,
+                    "string",
+                ));
             }
             ("reject", Value::Boolean(_)) => v.clone(),
             ("reject", other) => {
@@ -263,23 +277,37 @@ fn parse_settings(given: &Document) -> Result<Document, CommandError> {
         }
         Some(_) => {
             let msg = "invalid parameter: expected an object (queryKnobs)";
-            return Err(CommandError::new(crate::error::EXPECTED_OBJECT, msg));
+            return Err(CommandError::new(EXPECTED_OBJECT, msg));
         }
     }
     Ok(out)
 }
 
-/// `maxTimeMS` of a setting: a number of at least 0, truncated.
+/// The types `maxTimeMS` of a setting takes, in RefDb's order.
+const MAX_TIME_TYPES: [&str; 4] = ["decimal", "double", "int", "long"];
+
+/// `maxTimeMS` of a setting: a "safe" 64-bit integer (a double truncated and saturated, NaN
+/// as 0, a decimal rounded half to even; measured: 3.7 is 3, decimal 3.5 is 4) from 0 to the
+/// largest `int`.
 fn max_time(v: &Value) -> Result<i64, CommandError> {
     let n = match v {
         Value::Int32(n) => i64::from(*n),
         Value::Int64(n) => *n,
-        // A fractional time is truncated (measured: 2.5 is 2).
-        Value::Double(x) if x.is_finite() && x.abs() < i64::MAX as f64 => x.trunc() as i64,
-        other => return Err(wrong_type("maxTimeMS", other, "int")),
+        // `as` truncates toward zero, saturates and gives 0 for NaN.
+        Value::Double(x) => *x as i64,
+        Value::Decimal128(d) => teseladb_mql::decimal_saturating(*d),
+        other => {
+            let path = "setQuerySettings.settings.maxTimeMS";
+            return Err(wrong_types(path, other, &MAX_TIME_TYPES));
+        }
     };
     if n < 0 {
         let msg = format!("BSON field 'maxTimeMS' value must be >= 0, actual value '{n}'");
+        return Err(CommandError::new(BAD_VALUE, msg));
+    }
+    if n > i64::from(i32::MAX) {
+        let msg =
+            format!("BSON field 'maxTimeMS' value must be <= {}, actual value '{n}'", i32::MAX);
         return Err(CommandError::new(BAD_VALUE, msg));
     }
     Ok(n)

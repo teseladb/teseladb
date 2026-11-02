@@ -131,12 +131,14 @@ fn aggregate_and_sort_run_against_a_local_cluster() {
 }
 
 /// `fle-query` (017 SC-002, T011) against a local cluster: the equality query on an encrypted
-/// field with its target of 5 ms at p50, over 200 documents.
+/// field with its target of 5 ms at p50, over 200 documents, and the rate of their encrypted
+/// inserts.
 #[test]
 fn fle_query_runs_against_a_local_cluster() {
     let short = ["--duration", "300ms", "--warmup", "50ms", "--records", "200", "--format", "json"];
     let fle = metrics(&bench(&[&["--scenario", "fle-query"][..], &short[..]].concat()));
-    for name in ["encrypted_equality_10.p50", "encrypted_equality_10.p99", "200 documents"] {
+    let names = ["encrypted_equality_10.p50", "encrypted_equality_10.p99", "encrypted_insert"];
+    for name in names.into_iter().chain(["200 documents"]) {
         assert!(fle.contains(name), "{name}: {fle}");
     }
 }

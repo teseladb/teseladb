@@ -95,6 +95,8 @@ fn bad_files_are_usage_errors_that_name_the_file() {
         ("net:\n  bindIpAll: true\n", "--config c.yaml: unknown key `net.bindIpAll`"),
         ("replication:\n  replSetName: rs0\n", "unknown key `replication.replSetName`"),
         ("net: 5\n", "unknown key `net`"),
+        // An empty mapping is a value of its key, not a section.
+        ("net: {}\n", "unknown key `net`"),
         ("teseladb:\n  cores: [1, 2]\n", "`teseladb.cores` takes one value"),
         (
             "teseladb:\n  join: [[a]]\n",

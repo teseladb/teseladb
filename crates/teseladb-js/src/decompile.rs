@@ -84,7 +84,7 @@ fn property(it: &Interp, k: &str, p: &Prop, depth: usize) -> String {
 
 fn primitive(v: &Val) -> String {
     match v {
-        Val::Undef => "(void 0)".into(),
+        Val::Undef | Val::Hole => "(void 0)".into(),
         Val::Null => "null".into(),
         Val::Bool(b) => b.to_string(),
         Val::Num(n) if *n == 0.0 && n.is_sign_negative() => "-0".into(),

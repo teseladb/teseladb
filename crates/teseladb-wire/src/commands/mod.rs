@@ -14,6 +14,7 @@
 pub mod admin;
 pub mod aggregate;
 pub mod api_keys;
+pub mod apply_ops;
 pub mod args;
 pub mod audit;
 pub mod auth;
@@ -867,7 +868,8 @@ impl<B: Backend + ?Sized> Ctx<'_, B> {
 }
 
 /// The commands of this module.
-const NAMES: [&str; 121] = [
+const NAMES: [&str; 122] = [
+    apply_ops::APPLY_OPS,
     fle::COMPACT,
     fle::CLEANUP,
     aggregate::AGGREGATE,
@@ -1312,6 +1314,7 @@ fn dispatch<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
         diagnostic_data::GET_DIAGNOSTIC_DATA => diagnostic_data::get_diagnostic_data(ctx),
         admin::CURRENT_OP => admin::current_op(ctx),
         admin::REPL_SET_GET_STATUS => admin::repl_set_get_status(ctx),
+        apply_ops::APPLY_OPS => apply_ops::apply_ops(ctx),
         sharding::ENABLE_SHARDING => sharding::enable_sharding(ctx),
         sharding::SHARD_COLLECTION => sharding::shard_collection(ctx),
         reshard::RESHARD_COLLECTION => reshard::reshard_collection(ctx),
