@@ -255,7 +255,7 @@ fn buf_of(v: &Val) -> Option<BufRef> {
 }
 
 fn new_buf(it: &mut Interp, data: Vec<u8>, max: Option<usize>) -> R<(ObjRef, BufRef)> {
-    it.charge(data.len().max(max.unwrap_or(0)))?;
+    it.charge(max.unwrap_or(0).saturating_sub(data.len()))?;
     let b = Rc::new(RefCell::new(Buf { data, max, detached: false }));
     let o = it.alloc(Some(it.realm.proto("ArrayBuffer")), Kind::ArrayBuffer(b.clone()))?;
     Ok((o, b))
@@ -263,7 +263,8 @@ fn new_buf(it: &mut Interp, data: Vec<u8>, max: Option<usize>) -> R<(ObjRef, Buf
 
 /// A new typed array of `ty` with `len` zero elements.
 fn new_typed(it: &mut Interp, ty: Ty, len: usize) -> R<ObjRef> {
-    let (_, buf) = new_buf(it, vec![0; len * ty.size()], None)?;
+    let data = zeroed(it, len.saturating_mul(ty.size()))?;
+    let (_, buf) = new_buf(it, data, None)?;
     it.alloc(
         Some(it.realm.proto(ty.name())),
         Kind::Typed(View { ty, buf, offset: 0, len: Some(len) }),
@@ -278,6 +279,12 @@ fn typed_from(it: &mut Interp, ty: Ty, items: &[Val]) -> R<ObjRef> {
         write(&v, i, &x);
     }
     Ok(o)
+}
+
+/// `n` zero bytes, charged to the heap before they are allocated.
+fn zeroed(it: &mut Interp, n: usize) -> R<Vec<u8>> {
+    it.charge(n)?;
+    Ok(vec![0; n])
 }
 
 pub fn elements(v: &View) -> Vec<Val> {
@@ -769,7 +776,8 @@ fn ab_ctor(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     if n > (1 << 30) || max.is_some_and(|m| m < n || m > (1 << 30)) {
         return Err(it.error("RangeError", "invalid array buffer length"));
     }
-    Ok(Val::Obj(new_buf(it, vec![0; n], max)?.0))
+    let data = zeroed(it, n)?;
+    Ok(Val::Obj(new_buf(it, data, max)?.0))
 }
 
 fn ab_is_view(_: &mut Interp, _: &Val, a: &[Val]) -> R {
@@ -801,7 +809,9 @@ fn ab_slice(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let data = b.borrow().data.clone();
     let s = relative(it, &arg(a, 0), data.len(), 0)?;
     let e = relative(it, &arg(a, 1), data.len(), data.len())?;
-    Ok(Val::Obj(new_buf(it, data.get(s..e.max(s)).unwrap_or(&[]).to_vec(), None)?.0))
+    let part = data.get(s..e.max(s)).unwrap_or(&[]);
+    it.charge(part.len())?;
+    Ok(Val::Obj(new_buf(it, part.to_vec(), None)?.0))
 }
 
 fn ab_resize(it: &mut Interp, this: &Val, a: &[Val]) -> R {
@@ -826,6 +836,7 @@ fn transfer_in(it: &mut Interp, this: &Val, a: &[Val], keep_max: bool) -> R {
     let mut data = std::mem::take(&mut b.borrow_mut().data);
     if !matches!(arg(a, 0), Val::Undef) {
         let n = to_index(it, &arg(a, 0), "invalid array buffer length")?;
+        it.charge(n.saturating_sub(data.len()))?;
         data.resize(n, 0);
     }
     let max = if keep_max { b.borrow().max } else { None };

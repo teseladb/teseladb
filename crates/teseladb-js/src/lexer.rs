@@ -183,6 +183,10 @@ impl Lexer {
                     break;
                 }
             }
+            if w.is_empty() {
+                // A `\` that does not start `\u`: nothing was read (found by fuzzing).
+                return self.err("illegal character U+005C");
+            }
             return Ok(Tok::Ident(w.into()));
         }
         if c.is_ascii_digit() || (c == '.' && self.peek(1).is_some_and(|d| d.is_ascii_digit())) {

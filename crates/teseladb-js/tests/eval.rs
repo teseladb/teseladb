@@ -373,3 +373,11 @@ fn regular_expressions_follow_ecmascript() {
         .unwrap_err();
     assert!(e.message().contains("invalid regular expression"), "{e:?}");
 }
+
+/// A backslash that does not start a `\u` escape is refused instead of read as an empty name
+/// forever (found by `tests/fuzz.rs` on 02-11).
+#[test]
+fn a_stray_backslash_does_not_parse() {
+    let e = Program::compile("function(){ return (() \\> 1) }").unwrap_err();
+    assert!(matches!(e, JsError::Compile { .. }), "{e:?}");
+}
