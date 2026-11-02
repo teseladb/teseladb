@@ -29,7 +29,7 @@ pub const TOKEN_LEN: usize = 32;
 const ANCHOR_PADDING_DATA: [u8; 17] = [0; 17];
 
 /// A 32-byte token.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Token(pub [u8; TOKEN_LEN]);
 
 impl std::fmt::Debug for Token {

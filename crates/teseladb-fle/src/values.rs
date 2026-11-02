@@ -6,13 +6,15 @@ use teseladb_bson::{Decimal, Decimal128, Document, RawDoc, Value};
 
 /// Compares two values in RefDb's order (binary comparison of strings).
 pub fn compare(a: &Value, b: &Value) -> Ordering {
+    // Two values in one document; one that cannot be written compares equal.
     let doc = Document::new().with("a", a.clone()).with("b", b.clone());
-    let Ok(bytes) = doc.to_bytes() else { return Ordering::Equal };
-    let Ok(raw) = RawDoc::from_bytes(&bytes) else { return Ordering::Equal };
-    match (raw.get("a"), raw.get("b")) {
-        (Some(x), Some(y)) => teseladb_bson::compare(x, y, None),
-        _ => Ordering::Equal,
-    }
+    doc.to_bytes()
+        .ok()
+        .and_then(|bytes| {
+            let raw = RawDoc::from_bytes(&bytes).ok()?;
+            Some(teseladb_bson::compare(raw.get("a")?, raw.get("b")?, None))
+        })
+        .unwrap_or(Ordering::Equal)
 }
 
 /// The integer a decimal is worth, if it is integral and fits.

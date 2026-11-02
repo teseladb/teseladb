@@ -12,14 +12,19 @@
 #![cfg_attr(coverage, feature(coverage_attribute))]
 
 pub mod cipher;
+pub mod compact;
 pub mod error;
+pub mod esc;
 pub mod fields;
 pub mod idl;
 pub mod iev;
 pub mod payloads;
+pub mod query;
 pub mod range;
+pub mod schema;
 pub mod subtype;
 pub mod tokens;
 pub mod values;
+pub mod write;
 
 pub use error::FleError;

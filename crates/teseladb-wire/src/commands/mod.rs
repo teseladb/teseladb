@@ -34,6 +34,8 @@ pub mod diagnostics;
 pub mod engines;
 pub mod explain;
 pub mod fcv;
+pub mod fle;
+pub mod fle_write;
 pub mod hints;
 pub mod http_parameters;
 pub mod index_build;
@@ -827,7 +829,9 @@ impl<B: Backend + ?Sized> Ctx<'_, B> {
 }
 
 /// The commands of this module.
-const NAMES: [&str; 83] = [
+const NAMES: [&str; 85] = [
+    fle::COMPACT,
+    fle::CLEANUP,
     aggregate::AGGREGATE,
     query_settings::SET_QUERY_SETTINGS,
     query_settings::REMOVE_QUERY_SETTINGS,
@@ -934,7 +938,10 @@ pub fn run<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Option<Result<Document,
         let limit = lock(ctx.shared).params.expression_memory;
         let limit = u64::try_from(limit).unwrap_or(u64::MAX);
         teseladb_exec::expr::optimize::with_expression_memory_limit(limit, || {
-            crate::concerns::with_defaults(d.read, d.write, || command(ctx))
+            crate::concerns::with_defaults(d.read, d.write, || match fle::intercept(ctx) {
+                Some(r) => r,
+                None => command(ctx),
+            })
         })
     }))
 }
@@ -950,7 +957,7 @@ fn session_info<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<(), Command
     Ok(())
 }
 
-fn command<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
+pub(crate) fn command<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     // A change stream refuses a buckets namespace as an internal one (014, measured).
     if let Value::String(coll) = ctx.first()
         && !change_stream::opens(ctx.cmd)
@@ -1218,6 +1225,7 @@ fn dispatch<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
         diagnostics::COLL_STATS => diagnostics::coll_stats(ctx),
         profile::PROFILE => profile::profile(ctx),
         validate::VALIDATE => validate::validate(ctx),
+        fle::COMPACT | fle::CLEANUP => fle::compact(ctx),
         diagnostic_data::GET_DIAGNOSTIC_DATA => diagnostic_data::get_diagnostic_data(ctx),
         admin::CURRENT_OP => admin::current_op(ctx),
         admin::REPL_SET_GET_STATUS => admin::repl_set_get_status(ctx),
