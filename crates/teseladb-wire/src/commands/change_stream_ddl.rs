@@ -81,6 +81,32 @@ fn kind_of(c: &CollectionEntry) -> Result<Option<CollectionKind>, CommandError> 
 pub fn event_of(w: &Watch<'_>, r: &DdlRecord) -> Result<Option<ChangeEvent>, CommandError> {
     let key = ddl_key(r.mark, r.op);
     let token = |kind| ResumeToken::new(key.clone(), kind);
+    // A resharding's own catalog changes (018 FR-002): its critical section gives no event and
+    // its rename is the `reshardCollection` or `refineCollectionShardKey` of the collection.
+    match &r.change {
+        DdlChange::Modify { description, .. } if super::reshard::is_cutover_change(description) => {
+            return Ok(None);
+        }
+        DdlChange::Rename { from, to, target, .. } => {
+            if let Some((refine, uuid_of, desc)) =
+                super::reshard::cutover_event(from, target.as_ref())?
+            {
+                let kind = if refine {
+                    EventKind::RefineCollectionShardKey
+                } else {
+                    EventKind::ReshardCollection
+                };
+                if !in_watch(w, to) || !shown(kind, w.expanded) {
+                    return Ok(None);
+                }
+                let mut e = ChangeEvent::catalog(token(kind), event_ns(to));
+                e.collection_uuid = Some(uuid_of);
+                e.operation_description = Some(desc);
+                return Ok(Some(e));
+            }
+        }
+        _ => {}
+    }
     let (kind, ns) = match &r.change {
         DdlChange::Create { ns, .. } => (EventKind::Create, ns),
         DdlChange::Drop { ns, .. } => (EventKind::Drop, ns),
@@ -181,6 +207,9 @@ pub fn ends(w: &Watch<'_>, r: &DdlRecord) -> bool {
     match &r.change {
         DdlChange::Drop { ns, .. } => {
             invalidates(w.scope, watched, EventKind::Drop, (&ns.db, Some(&ns.coll)))
+        }
+        DdlChange::Rename { from, .. } if from.coll.starts_with(super::reshard::TEMP_PREFIX) => {
+            false
         }
         DdlChange::Rename { from, to, target, .. } => {
             let on = |n: &Namespace| {

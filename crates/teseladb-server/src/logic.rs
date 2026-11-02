@@ -2008,6 +2008,7 @@ mod tests {
             roles: None,
             desc: None,
             progress: None,
+            metrics: None,
         });
         c.logic(2).sessions = Some(shared);
         c.logic(2).me = Some((NodeId(2), addrs(2)));

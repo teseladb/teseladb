@@ -860,7 +860,7 @@ fn no_image<B: Backend + ?Sized>(
 }
 
 /// The version of `key` just below mark `ts`: the document a change at `ts` replaced, if any.
-fn previous<B: Backend + ?Sized>(
+pub(crate) fn previous<B: Backend + ?Sized>(
     backend: &mut B,
     key: &[u8],
     ts: Hlc,
