@@ -653,3 +653,41 @@ fn a_stream_opened_before_a_rename_to_another_database_sees_the_old_name_s_event
         .collect();
     assert_eq!(inserted, [&Value::Int32(1)], "{got:?}");
 }
+
+/// An event larger than a reply's 16 MiB goes alone in its batch, as a `refrouter` 9.0.4 returns
+/// an event of up to 16 MiB and 16 KiB (measured on 01-11).
+#[test]
+fn an_event_over_the_reply_s_bytes_goes_alone() {
+    let mut m = Mem::new();
+    create(&mut m, "c");
+    let id = id_of(&open(&mut m, DB, "c".into(), stream(Document::new(), vec![])));
+    let big = "x".repeat(16 * 1024 * 1024 - 64);
+    insert(&mut m, "c", vec![doc(&[("_id", 1.into()), ("a", big.as_str().into())])]);
+    let got = batch(&get_more(&mut m, DB, id, "c", Document::new()));
+    assert_eq!(got.len(), 1);
+    assert_eq!(field(&got[0], "documentKey._id"), &Value::Int32(1));
+}
+
+/// A drop seen one event per batch: the `drop` first, the `invalidate` next, and the cursor
+/// closes at the `getMore` after it.
+#[test]
+fn a_drop_read_one_event_at_a_time_ends_with_the_invalidate() {
+    let mut m = Mem::new();
+    create(&mut m, "c");
+    let id = id_of(&open(&mut m, DB, "c".into(), stream(Document::new(), vec![])));
+    m.now += 1;
+    let r = m.run(DB, Document::new().with("drop", "c"));
+    m.now += 1;
+    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+    let one = Document::new().with("batchSize", 1);
+    let first = get_more(&mut m, DB, id, "c", one.clone());
+    assert_eq!(field(&batch(&first)[0], "operationType"), &Value::from("drop"));
+    let second = get_more(&mut m, DB, id, "c", one);
+    assert_eq!(field(&batch(&second)[0], "operationType"), &Value::from("invalidate"));
+    // Measured on a `refrouter` 9.0.4 on 02-11: the batch with the `invalidate` keeps the cursor
+    // open, and the next `getMore` closes it with an empty batch.
+    assert_ne!(field(&second, "cursor.id"), &Value::Int64(0));
+    let last = get_more(&mut m, DB, id, "c", Document::new());
+    assert!(batch(&last).is_empty());
+    assert_eq!(field(&last, "cursor.id"), &Value::Int64(0));
+}

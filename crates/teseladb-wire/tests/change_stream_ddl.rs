@@ -59,6 +59,15 @@ fn types(events: &[Document]) -> Vec<String> {
         .collect()
 }
 
+/// The batch with the `invalidate` keeps the cursor open; the next `getMore` closes it with an
+/// empty batch (measured on a `refrouter` 9.0.4 on 02-11).
+fn closes_next(m: &mut Mem, db: &str, r: &Document, id: i64, coll: &str) {
+    assert_ne!(id_of(r), 0, "{r:?}");
+    let last = get_more(m, db, id, coll);
+    assert!(batch(&last).is_empty(), "{last:?}");
+    assert_eq!(id_of(&last), 0);
+}
+
 fn keys(d: &Document) -> Vec<&str> {
     d.iter().map(|(k, _)| k).collect()
 }
@@ -141,8 +150,8 @@ fn a_database_stream_with_expanded_events_sees_the_catalog_in_order() {
             "invalidate"
         ]
     );
-    assert_eq!(id_of(&r), 0, "the invalidate closes the cursor");
     assert_eq!(pbrt(&r), token_of(&events[12]));
+    closes_next(&mut m, DB, &r, id, "$cmd.aggregate");
     let create = &events[0];
     assert_eq!(
         keys(create),
@@ -222,7 +231,7 @@ fn a_drop_keeps_the_events_written_before_it_and_invalidates_the_collection_stre
     let events = batch(&r);
     assert_eq!(types(&events), ["insert", "drop", "invalidate"]);
     assert_eq!(field(&events[0], "documentKey._id"), &Value::Int32(2));
-    assert_eq!(id_of(&r), 0);
+    closes_next(&mut m, DB, &r, id, "c");
     let drop = field(&events[1], "_id").clone();
     let inv = field(&events[2], "_id").clone();
     match (token_of(&events[1]), token_of(&events[2])) {
@@ -248,7 +257,7 @@ fn a_drop_keeps_the_events_written_before_it_and_invalidates_the_collection_stre
         let r = open(&mut m, DB, "c".into(), Document::new().with(how, drop.clone()), vec![]);
         let more = get_more(&mut m, DB, id_of(&r), "c");
         assert_eq!(types(&batch(&more)), ["invalidate"], "{how}");
-        assert_eq!(id_of(&more), 0);
+        closes_next(&mut m, DB, &more, id_of(&r), "c");
     }
 }
 
@@ -281,8 +290,9 @@ fn a_rename_onto_a_watched_collection_names_the_target_and_a_filtered_invalidate
     assert!(matches!(field(&events[1], "operationDescription.dropTarget"), Value::Binary { .. }));
     let r = get_more(&mut m, DB, filtered, "c");
     assert_eq!(types(&batch(&r)), ["insert"]);
-    assert_eq!(id_of(&r), 0, "the invalidate the stages dropped still closes the cursor");
     assert!(matches!(pbrt(&r), Position::Event(t) if t.kind == EventKind::Invalidate));
+    // The invalidate the stages dropped still ends the stream.
+    closes_next(&mut m, DB, &r, filtered, "c");
 }
 
 #[test]
