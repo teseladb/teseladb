@@ -883,6 +883,8 @@ mod synonyms;
 pub(crate) mod values;
 
 #[cfg(test)]
+mod explain_more_tests;
+#[cfg(test)]
 mod geo_tests;
 #[cfg(test)]
 mod m10_tests;

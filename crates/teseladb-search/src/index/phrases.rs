@@ -18,14 +18,15 @@ impl TextField {
         let unions: Option<Vec<BTreeMap<u32, Vec<u32>>>> = positions
             .iter()
             .map(|terms| {
+                // A synonym the field lacks leaves the others of its position.
                 let mut by_doc: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
                 for t in terms {
-                    for (&doc, ps) in self.postings.get(t)? {
+                    for (&doc, ps) in self.postings.get(t).into_iter().flatten() {
                         by_doc.entry(doc).or_default().extend(ps);
                     }
                 }
                 by_doc.values_mut().for_each(|ps| ps.sort_unstable());
-                Some(by_doc)
+                (!by_doc.is_empty()).then_some(by_doc)
             })
             .collect();
         let Some(unions) = unions.filter(|u| !u.is_empty()) else { return Vec::new() };
