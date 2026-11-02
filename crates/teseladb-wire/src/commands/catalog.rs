@@ -70,13 +70,16 @@ pub const LIST_COLLECTIONS: &str = "listCollections";
 pub const DROP_DATABASE: &str = "dropDatabase";
 
 /// The options `collMod` changes.
-const MODIFIABLE: [&str; 6] = [
+const MODIFIABLE: [&str; 9] = [
     "validator",
     "prepareConstraintValidationLevel",
     "validationLevel",
     "validationAction",
     "changeStreamPreAndPostImages",
     "expireAfterSeconds",
+    "timeseries",
+    "viewOn",
+    "pipeline",
 ];
 
 fn options_from(cmd: &Document) -> Document {
@@ -93,6 +96,7 @@ pub(crate) fn options_of(c: &CollectionEntry) -> Result<Document, CommandError> 
     let mut options = stored_options(c)?;
     options.remove(ID_INDEX_VERSION);
     options.remove(super::sharding::SHARD_KEY);
+    options.remove(super::timeseries_range::EXTENDED_RANGE);
     Ok(options)
 }
 
@@ -199,7 +203,8 @@ pub fn create<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
     names::check_creatable(&ns)?;
     let mut options = options_from(ctx.cmd);
     super::fle::check_create(&ns.coll, &mut options)?;
-    let asked = kinds::check(&ns, &options)?;
+    let now_secs = i64::try_from(ctx.backend.wall_ms() / 1000).unwrap_or(i64::MAX);
+    let asked = kinds::check(&ns, &options, now_secs)?;
     let given_collation = match options.get(COLLATION) {
         Some(Value::Document(c)) => Some(c.clone()),
         _ => None,
@@ -548,6 +553,7 @@ pub fn coll_mod<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, C
     let ns = target(ctx)?;
     let expected_uuid = uuid::expected(ctx.cmd, COLL_MOD)?;
     let mut changes = options_from(ctx.cmd);
+    super::coll_mod_kinds::check_combined(&changes)?;
     // `index` changes one index (009 FR-007); the other options change the collection.
     let index_change = changes.remove(COLL_MOD_INDEX);
     let dry_run =
@@ -568,6 +574,21 @@ pub fn coll_mod<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, C
         let msg = format!("namespace does not exist: {}", full(&ns));
         return Err(missing_namespace(ctx.backend, &ns, msg)?);
     };
+    let special =
+        super::coll_mod_kinds::definition(ctx.backend, &ns, &c, &changes, index_change.is_some())?;
+    if let Some(options) = special {
+        let bytes = options.to_bytes()?;
+        if bytes != c.options {
+            super::write_block::ddl(ctx.backend, &ns.db)?;
+            let description = changes.to_bytes()?;
+            ctx.backend.catalog_write(CatalogCommand::Modify {
+                ns,
+                options: bytes,
+                description,
+            })?;
+        }
+        return Ok(Document::new().with("ok", 1.0));
+    }
     let index_reply = match &index_change {
         Some(change) => {
             let how = super::index_mod::Modify { dry_run, collection_changes: !changes.is_empty() };
@@ -590,8 +611,12 @@ pub fn coll_mod<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, C
     if upgrade && !constraint_now {
         check_constraint(ctx.backend, &ns, &c, &options, &changes)?;
     }
-    for (k, v) in changes.iter() {
+    for (k, v) in changes.iter().filter(|(k, _)| *k != kinds::EXPIRE) {
         options.insert(k, v.clone());
+    }
+    if let Some(v) = changes.get(kinds::EXPIRE) {
+        let now_secs = i64::try_from(ctx.backend.wall_ms() / 1000).unwrap_or(i64::MAX);
+        options = super::coll_mod_kinds::expiry(&c, options, v, now_secs)?;
     }
     check_constraint_action(&options).map_err(|e| {
         CommandError::new(BAD_VALUE, format!("{SET_VALIDATION} :: caused by :: {}", e.errmsg))
@@ -617,7 +642,9 @@ pub fn coll_mod<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, C
         options.push(PREPARE_CONSTRAINT, true);
     }
     let stored = stored_options(&c)?;
-    for hidden in [ID_INDEX_VERSION, super::sharding::SHARD_KEY] {
+    for hidden in
+        [ID_INDEX_VERSION, super::sharding::SHARD_KEY, super::timeseries_range::EXTENDED_RANGE]
+    {
         if let Some(v) = stored.get(hidden) {
             options.push(hidden, v.clone());
         }
