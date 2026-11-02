@@ -307,6 +307,22 @@ fn a_range_needs_its_start_below_its_end() {
 }
 
 #[test]
+#[should_panic(expected = "bounds of a data range")]
+fn a_range_opened_while_the_core_runs_cannot_cover_local_keys() {
+    let mut disk = MemDisk::new();
+    let lsm = Rc::new(RefCell::new(Lsm::recover(&cfg(), &mut disk).unwrap().0));
+    let _ = RangeSm::try_open(G, b"\x00".to_vec(), END.to_vec(), lsm);
+}
+
+#[test]
+#[should_panic(expected = "bounds of a data range")]
+fn a_range_opened_while_the_core_runs_needs_its_start_below_its_end() {
+    let mut disk = MemDisk::new();
+    let lsm = Rc::new(RefCell::new(Lsm::recover(&cfg(), &mut disk).unwrap().0));
+    let _ = RangeSm::try_open(G, END.to_vec(), START.to_vec(), lsm);
+}
+
+#[test]
 fn a_purge_of_keys_that_are_not_the_ranges_idempotence_records_stops_the_group() {
     let mut r = Replica::new();
     let other = dedup_key(GroupId(G.0 + 1), 1, 1, 0);
@@ -358,6 +374,38 @@ fn a_purge_search_takes_a_batch_of_expired_records_and_skips_the_rest() {
     assert_eq!(batch.len(), PURGE_BATCH, "one full batch; the rest go in the next round");
     assert!(!batch.contains(&dedup_key(G, 7, 1, 0)), "the deleted record is not purged again");
     assert!(!batch.contains(&dedup_key(G, 7, 1, u32::MAX)), "the newer record stays");
+}
+
+/// A record written after the cutoff is left for a later search, even within one batch.
+#[test]
+fn a_purge_search_leaves_the_records_newer_than_its_cutoff() {
+    use teseladb_range::dedup::PurgeScan;
+    let mut r = Replica::new();
+    let write = |stmt_id: u32| Command::Write {
+        puts: vec![],
+        deletes: vec![],
+        dedup: Some(DedupRecord { lsid: 7, txn_number: 1, stmt_id, result: vec![] }),
+        live_delta: 0,
+    };
+    r.apply(1, ts(10), &write(0)).unwrap();
+    r.apply(2, ts(1_000), &write(1)).unwrap();
+    // One already purged is not taken again.
+    r.apply(3, ts(11), &write(2)).unwrap();
+    r.apply(4, ts(12), &Command::PurgeDedup { keys: vec![dedup_key(G, 7, 1, 2)] }).unwrap();
+    let mut search = PurgeScan::new(&r.lsm, G, ts(500));
+    let mut batch = None;
+    for _ in 0..MAX_ROUNDS {
+        match search.step(&r.lsm) {
+            Some(found) => {
+                batch = Some(found.expect("the LSM answers"));
+                break;
+            }
+            None => {
+                r.lsm.borrow_mut().run_io(&mut r.disk, Nanos::ZERO);
+            }
+        }
+    }
+    assert_eq!(batch.expect("the search ends"), vec![dedup_key(G, 7, 1, 0)]);
 }
 
 /// 007 FR-012: a closed mark never goes back; a `SetClosedTs` at or below the one kept leaves it.

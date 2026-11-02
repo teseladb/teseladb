@@ -143,6 +143,28 @@ fn wait_for(what: &str, done: impl FnMut() -> bool) -> Result<(), String> {
     crate::client::poll_until(what, CHANGE_WAIT, POLL, done)
 }
 
+/// What Group 0 answers to a change of a range while another one is under way: the range of a
+/// cluster that just started still gets its replicas.
+const BUSY: &str = "RangeBusy";
+
+/// Asks for a change of a range with `ask` again while Group 0 answers that the range is busy,
+/// for at most `wait`: nothing changed then. The instant of the request it took; any other
+/// answer is the error.
+fn when_free(
+    mut ask: impl FnMut() -> Result<(), String>,
+    wait: Duration,
+) -> Result<Instant, String> {
+    let until = Instant::now() + wait;
+    loop {
+        let at = Instant::now();
+        match ask() {
+            Ok(()) => return Ok(at),
+            Err(e) if e.contains(BUSY) && Instant::now() < until => thread::sleep(POLL),
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 /// The local cluster's nodes (a remote server has none to change).
 fn nodes(target: &Target) -> Result<&Vec<Node<MemDisk>>, String> {
     match target {
@@ -163,9 +185,10 @@ pub fn split(args: &Args) -> Result<Report, String> {
     thread::sleep(args.warmup);
     let range = target.ranges().and_then(|r| r.first().copied()).ok_or("no data range")?;
     let at = format!("{{\"ns\": \"{DB}.{COLLECTION}\", \"_id\": {}}}", args.records / 2);
-    let t0 = Instant::now();
-    let asked = admin(admin_at, &["range", "split", &range.to_string(), "--at", &at]);
-    let routed = asked.and_then(|()| target.wait_ranges(2));
+    let split = || admin(admin_at, &["range", "split", &range.to_string(), "--at", &at]);
+    let asked = when_free(split, CHANGE_WAIT);
+    let t0 = asked.as_ref().map_or_else(|_| Instant::now(), |t| *t);
+    let routed = asked.and_then(|_| target.wait_ranges(2));
     let t1 = Instant::now();
     thread::sleep(AFTER);
     let samples = writer.finish()?;
@@ -341,6 +364,24 @@ mod tests {
         assert!(r.metrics.iter().any(|m| m.name == "add-node.copy" && m.value > 0.0));
         let r = rebalance(&args(200)).unwrap();
         assert!(r.metrics.iter().any(|m| m.name == "rebalance.copy" && m.value > 0.0));
+    }
+
+    #[test]
+    fn a_change_waits_while_its_range_is_busy() {
+        let mut busy = 3;
+        let ask = || match busy {
+            0 => Ok(()),
+            _ => {
+                busy -= 1;
+                Err(format!("teseladb admin: Group 0 refused it: {BUSY}"))
+            }
+        };
+        assert!(when_free(ask, Duration::from_secs(5)).is_ok());
+        assert_eq!(busy, 0);
+        let refused = when_free(|| Err("BadSplit".to_owned()), Duration::from_secs(5));
+        assert_eq!(refused.unwrap_err(), "BadSplit");
+        let busy = when_free(|| Err(BUSY.to_owned()), Duration::ZERO);
+        assert_eq!(busy.unwrap_err(), BUSY);
     }
 
     #[test]

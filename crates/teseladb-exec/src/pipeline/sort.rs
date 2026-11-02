@@ -201,14 +201,23 @@ fn walk<'a>(v: RawValue<'a>, segs: &[&str], out: &mut Vec<RawValue<'a>>) {
             }
         }
         RawValue::Array(a) => {
+            // A numeric segment that names an element takes that element alone.
             if let Ok(i) = first.parse::<usize>()
                 && let Some(x) = a.iter().nth(i)
             {
                 walk(x, rest, out);
+                return;
             }
+            // Otherwise each element gives its values, and one where the path ends (a document
+            // without the field, a scalar, a nested array) gives null, as an index key does
+            // (measured on a `refrouter` 9.0.4: `{a: [[{b: 7}], {b: 6}]}` sorts by `a.b` as null).
             for e in a.iter() {
+                let before = out.len();
                 if matches!(e, RawValue::Document(_)) {
                     walk(e, segs, out);
+                }
+                if out.len() == before {
+                    out.push(RawValue::Null);
                 }
             }
         }

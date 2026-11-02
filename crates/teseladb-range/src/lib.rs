@@ -1,6 +1,7 @@
 //! TeselaDB's replicated document range (specification 005): its commands, state machine and
 //! snapshots, on its leader the latches, the read cache, mutation evaluation, reads and write
 //! acknowledgements (the host of a core), and the client that finds each range's leader.
+#![cfg_attr(coverage, feature(coverage_attribute))]
 #![forbid(unsafe_code)]
 
 pub mod ack;

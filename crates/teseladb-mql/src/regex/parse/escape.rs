@@ -5,6 +5,15 @@ use super::{Flags, PResult, ParseError, Parser, group_limit, is_name_char};
 use crate::regex::ast::{Assertion, Case, Class, Item, Node, Posix, Prop, Set};
 use crate::regex::unicode::{bidi_index, binary_index, category_mask, loose, script_index};
 
+/// A braced hexadecimal code point without its `}`.
+const NON_HEX: &str = "non-hex character in \\x{} (closing brace missing?)";
+/// A braced octal code point without its `}`.
+const NON_OCTAL: &str = "non-octal character in \\o{} (closing brace missing?)";
+/// A relative reference or call of `+0` or `-0`.
+pub(super) const RELATIVE_ZERO: &str = "a relative value of zero is not allowed";
+/// A reference to a group the pattern does not have.
+const NO_SUCH_GROUP: &str = "reference to non-existent subpattern";
+
 impl Parser {
     /// An escape outside a class.
     pub(super) fn escape(&mut self, flags: &mut Flags) -> PResult<Option<Node>> {
@@ -137,6 +146,20 @@ impl Parser {
         }
     }
 
+    /// The `}` that closes the digits of a braced code point (`\x{}`, `\o{}`, `\N{U+}`):
+    /// at the brace or at the end of the pattern without digits they are missing; any other
+    /// character where the brace goes is not a digit (`unclosed`, as PCRE2 words it).
+    fn closing_brace(&mut self, digits: &str, unclosed: &str) -> PResult<()> {
+        let closed = self.eat('}');
+        if digits.is_empty() && (closed || self.peek().is_none()) {
+            return Err("digits missing in \\x{} or \\o{} or \\N{U+}".into());
+        }
+        if !closed {
+            return Err(unclosed.into());
+        }
+        Ok(())
+    }
+
     /// `\N{U+hh..}` after the `N`: a character by its code point.
     fn unicode_name(&mut self) -> PResult<char> {
         self.eat('{');
@@ -146,9 +169,7 @@ impl Parser {
         }
         let digits = self.take_while(|c| c.is_ascii_hexdigit());
         self.skip_brace_space();
-        if !self.eat('}') || digits.is_empty() {
-            return Err("digits missing in \\x{} or \\o{} or \\N{U+}".into());
-        }
+        self.closing_brace(&digits, NON_HEX)?;
         code_point(u32::from_str_radix(&digits, 16).ok())
     }
 
@@ -190,21 +211,19 @@ impl Parser {
             return Err("\\g is not followed by a braced, angle-bracketed, or quoted name/number or by a plain number".into());
         }
         let n = group_limit(&digits)?;
+        if (negative || positive) && n == 0 {
+            return Err(RELATIVE_ZERO.into());
+        }
         let group = if negative {
-            (self.groups + 1)
-                .checked_sub(n)
-                .filter(|g| *g > 0 && n > 0)
-                .ok_or("reference to non-existent subpattern")?
+            (self.groups + 1).checked_sub(n).filter(|g| *g > 0).ok_or(NO_SUCH_GROUP)?
         } else if positive {
-            if n == 0 {
-                return Err("a numbered reference must not be zero".into());
-            }
             self.groups + n
         } else {
             n
         };
+        // `\g0` names the whole pattern, which no back reference can be (measured).
         if group == 0 {
-            return Err("a numbered reference must not be zero".into());
+            return Err(NO_SUCH_GROUP.into());
         }
         self.max_backref = self.max_backref.max(group);
         Ok(Node::Backref { groups: vec![group], caseless: flags.case() })
@@ -253,9 +272,7 @@ impl Parser {
                 self.skip_brace_space();
                 let digits = self.take_while(|c| ('0'..='7').contains(&c));
                 self.skip_brace_space();
-                if !self.eat('}') || digits.is_empty() {
-                    return Err("digits missing in \\x{} or \\o{} or \\N{U+}".into());
-                }
+                self.closing_brace(&digits, NON_OCTAL)?;
                 code_point(u32::from_str_radix(&digits, 8).ok())?
             }
             'x' => {
@@ -263,9 +280,7 @@ impl Parser {
                     self.skip_brace_space();
                     let digits = self.take_while(|c| c.is_ascii_hexdigit());
                     self.skip_brace_space();
-                    if !self.eat('}') || digits.is_empty() {
-                        return Err("digits missing in \\x{} or \\o{} or \\N{U+}".into());
-                    }
+                    self.closing_brace(&digits, NON_HEX)?;
                     code_point(u32::from_str_radix(&digits, 16).ok())?
                 } else {
                     let digits: String = self.chars[self.pos..]

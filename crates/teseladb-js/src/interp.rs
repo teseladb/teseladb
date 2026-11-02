@@ -278,6 +278,9 @@ fn private_name(key: &str) -> &str {
 /// The name of a key for messages: `o.f`.
 pub(crate) fn callee_text(e: &Expr) -> String {
     match e {
+        Expr::Ident(n, _) if n.starts_with(crate::generators::TEMP_PREFIX) => {
+            n.split_once('|').map_or_else(|| INTERMEDIATE.to_string(), |(_, t)| t.to_string())
+        }
         Expr::Ident(n, _) => n.to_string(),
         Expr::Member { obj, prop, .. } => match &**prop {
             MemberProp::Name(n) | MemberProp::Private(n) => format!("{}.{n}", callee_text(obj)),
@@ -287,7 +290,7 @@ pub(crate) fn callee_text(e: &Expr) -> String {
                 Some(key) => format!("{}['{key}']", callee_text(obj)),
                 None => match k {
                     Expr::Num(n) => format!("{}[{}]", callee_text(obj), number::to_string(*n)),
-                    Expr::Ident(n, _) => format!("{}[{n}]", callee_text(obj)),
+                    Expr::Ident(..) => format!("{}[{}]", callee_text(obj), callee_text(k)),
                     Expr::At(_, inner) if matches!(**inner, Expr::Ident(..)) => {
                         format!("{}[{}]", callee_text(obj), callee_text(inner))
                     }
@@ -305,8 +308,17 @@ pub(crate) fn callee_text(e: &Expr) -> String {
         Expr::Str(s) => format!("\"{s}\""),
         Expr::Num(n) => number::to_string(*n),
         Expr::OptChain(e) | Expr::At(_, e) => callee_text(e),
-        _ => "(intermediate value)".into(),
+        _ => INTERMEDIATE.into(),
     }
+}
+
+/// What messages call a value with no source to name it by.
+pub(crate) const INTERMEDIATE: &str = "(intermediate value)";
+
+/// A temporary of a generator's rewriting with no source text: a callee that is one is named
+/// by its value (`3 is not a function`).
+fn bare_temp(e: &Expr) -> bool {
+    matches!(e, Expr::Ident(n, _) if n.starts_with(crate::generators::TEMP_PREFIX) && !n.contains('|'))
 }
 
 /// The string a constant key folds to: a string, or `+` of strings and numbers.
@@ -553,6 +565,51 @@ impl<'c> Interp<'c> {
         r
     }
 
+    /// `r`, with the operand of a failed conversion written as `name` gives it from the value
+    /// and the text written so far; the call that sees the operand's expression leaves it.
+    pub fn rename_operand<T>(
+        &mut self,
+        r: R<T>,
+        name: impl FnOnce(&Self, &Val, &str) -> String,
+    ) -> R<T> {
+        let Err(Ctrl::Throw(Val::Obj(err))) = &r else { return r };
+        let Some((o, v, text)) = self.operand_failure.take() else { return r };
+        if !o.ptr_eq(err) {
+            return r;
+        }
+        let name = name(self, &v, &text);
+        let mut b = err.borrow_mut();
+        if let Some((_, p)) = b.props.iter_mut().find(|(k, _)| &**k == "message")
+            && let Val::Str(m) = &p.value
+        {
+            p.value = Val::Str(m.replacen(&text, &name, 1).into());
+        }
+        drop(b);
+        r
+    }
+
+    /// `r`, with the operand of a failed conversion named `name`, as SpiderMonkey's self-hosted
+    /// methods name their variables (`can't convert this to string`, `raw[0]`, `target`).
+    pub fn operand_named<T>(&mut self, r: R<T>, name: &str) -> R<T> {
+        self.rename_operand(r, |_, _, _| name.to_string())
+    }
+
+    /// `r`, with the operand of a failed conversion to a string named by its class, as
+    /// SpiderMonkey's self-hosted methods write a value they hold (`can't convert Object to
+    /// string`; measured on a `refrouter` 9.0.4 on 02-11).
+    pub fn operand_as_class<T>(&mut self, r: R<T>) -> R<T> {
+        self.rename_operand(r, |it, v, text| match v {
+            Val::Obj(o) => crate::builtins::object_class(it, o).to_string(),
+            _ => text.to_string(),
+        })
+    }
+
+    /// `r`, with the operand of a failed conversion written by its source (`({})`), as
+    /// SpiderMonkey's self-hosted methods write a number they convert.
+    pub fn operand_as_source<T>(&mut self, r: R<T>) -> R<T> {
+        self.rename_operand(r, |_, _, text| text.to_string())
+    }
+
     // Conversions.
 
     pub fn primitive(&mut self, v: &Val, hint: &str) -> R {
@@ -576,13 +633,6 @@ impl<'c> Interp<'c> {
             return Ok(r);
         }
         let kind = o.borrow().kind.clone();
-        match kind {
-            Kind::Num(n) => return Ok(Val::Num(n)),
-            Kind::Str(s) => return Ok(Val::Str(s)),
-            Kind::Bool(b) => return Ok(Val::Bool(b)),
-            Kind::BigInt(b) => return Ok(Val::BigInt(b)),
-            _ => {}
-        }
         let order: [&str; 2] =
             if hint == "string" || (hint == "default" && matches!(kind, Kind::Date(_))) {
                 ["toString", "valueOf"]
@@ -611,7 +661,7 @@ impl<'c> Interp<'c> {
 
     pub fn number_of(&mut self, v: &Val) -> R<f64> {
         Ok(match v {
-            Val::Undef => f64::NAN,
+            Val::Undef | Val::Hole => f64::NAN,
             Val::Null => 0.0,
             Val::Bool(b) => f64::from(u8::from(*b)),
             Val::Num(n) => *n,
@@ -627,7 +677,7 @@ impl<'c> Interp<'c> {
 
     pub fn str_of(&mut self, v: &Val) -> R<Name> {
         Ok(match v {
-            Val::Undef => "undefined".into(),
+            Val::Undef | Val::Hole => "undefined".into(),
             Val::Null => "null".into(),
             Val::Bool(b) => if *b { "true" } else { "false" }.into(),
             Val::Num(n) => number::to_string(*n).into(),
@@ -655,7 +705,7 @@ impl<'c> Interp<'c> {
     pub fn object_of(&mut self, v: &Val) -> R<ObjRef> {
         match v {
             Val::Obj(o) => Ok(o.clone()),
-            Val::Undef | Val::Null => {
+            Val::Undef | Val::Hole | Val::Null => {
                 self.type_error(&format!("can't convert {} to object", self.show(v)))
             }
             Val::Bool(b) => self.alloc(Some(self.realm.boolean.clone()), Kind::Bool(*b)),
@@ -669,7 +719,7 @@ impl<'c> Interp<'c> {
     /// A short form of a value for messages.
     pub fn show(&self, v: &Val) -> String {
         match v {
-            Val::Undef => "undefined".into(),
+            Val::Undef | Val::Hole => "undefined".into(),
             Val::Null => "null".into(),
             Val::Str(s) => format!("\"{s}\""),
             Val::Num(n) => number::to_string(*n),
@@ -737,6 +787,7 @@ impl<'c> Interp<'c> {
                         }
                         if let Some(i) = array_index(key)
                             && let Some(x) = items.get(i)
+                            && !matches!(x, Val::Hole)
                             && (b.locks & ELEMENTS_OWN == 0 || b.get_own(key).is_none())
                         {
                             return Ok(x.clone());
@@ -837,12 +888,12 @@ impl<'c> Interp<'c> {
                     let grow = n.saturating_sub(self.array_len(o));
                     self.grow(o, grow)?;
                     if let Kind::Array(items) = &mut o.borrow_mut().kind {
-                        items.resize(n, Val::Undef);
+                        items.resize(n, Val::Hole);
                     }
                     return Ok(());
                 }
                 if let Some(i) = array_index(key).filter(|_| !own) {
-                    if i < items.len() {
+                    if i < items.len() && (extensible || !matches!(items[i], Val::Hole)) {
                         if locks & ELEMENTS_FROZEN != 0 {
                             drop(b);
                             return self.read_only(key);
@@ -850,8 +901,9 @@ impl<'c> Interp<'c> {
                         items[i] = value;
                         return Ok(());
                     }
-                    if locks & LENGTH_FIXED != 0 || !extensible {
-                        let fixed = locks & LENGTH_FIXED != 0;
+                    // Past the end, or a hole of an array that cannot take new properties.
+                    let fixed = locks & LENGTH_FIXED != 0 && i >= items.len();
+                    if fixed || !extensible {
                         drop(b);
                         if !self.strict {
                             return Ok(());
@@ -862,7 +914,7 @@ impl<'c> Interp<'c> {
                     drop(b);
                     self.grow(o, grow)?;
                     if let Kind::Array(items) = &mut o.borrow_mut().kind {
-                        items.resize(i + 1, Val::Undef);
+                        items.resize(i + 1, Val::Hole);
                         items[i] = value;
                     }
                     return Ok(());
@@ -961,7 +1013,9 @@ impl<'c> Interp<'c> {
         let b = o.borrow();
         match &b.kind {
             Kind::Array(items)
-                if key == "length" || array_index(key).is_some_and(|i| i < items.len()) =>
+                if key == "length"
+                    || array_index(key)
+                        .is_some_and(|i| items.get(i).is_some_and(|x| !matches!(x, Val::Hole))) =>
             {
                 true
             }
@@ -1045,9 +1099,8 @@ impl<'c> Interp<'c> {
         if let Kind::Array(items) = &mut b.kind
             && let Some(i) = array_index(key)
         {
-            // Holes are not kept: the element becomes undefined.
             if i < items.len() {
-                items[i] = Val::Undef;
+                items[i] = Val::Hole;
             }
             b.remove(key);
             return Ok(true);
@@ -1060,7 +1113,12 @@ impl<'c> Interp<'c> {
     pub fn own_keys(&self, o: &ObjRef, only_enumerable: bool) -> Vec<Name> {
         let b = o.borrow();
         let mut out: Vec<Name> = match &b.kind {
-            Kind::Array(items) => (0..items.len()).map(|i| i.to_string().into()).collect(),
+            Kind::Array(items) => items
+                .iter()
+                .enumerate()
+                .filter(|(_, x)| !matches!(x, Val::Hole))
+                .map(|(i, _)| i.to_string().into())
+                .collect(),
             Kind::Str(s) => {
                 (0..crate::strings::utf16_len(s)).map(|i| i.to_string().into()).collect()
             }
@@ -1295,6 +1353,16 @@ impl<'c> Interp<'c> {
             scope
         };
         self.hoist(&def.body, &scope, true)?;
+        if !def.strict {
+            let mut params = Vec::new();
+            for (p, _) in &def.params {
+                pattern_names(p, &mut params);
+            }
+            if let Some(r) = &def.rest {
+                pattern_names(r, &mut params);
+            }
+            self.hoist_block_functions(&def.body, &scope, &params);
+        }
         if def.generator {
             return crate::generators::make(self, fo, def, scope);
         }
@@ -1311,8 +1379,22 @@ impl<'c> Interp<'c> {
         };
         // A derived constructor gives the `this` its `super(...)` made, unless it returns an
         // object.
+        // Measured on a `refrouter` 9.0.4 on 02-11: another value is refused, and `undefined`
+        // needs the `this` of `super(...)`.
         if def.is_ctor_of_derived && !matches!(v, Val::Obj(_)) {
-            return Ok(scope.borrow().this.clone().unwrap_or(Val::Undef));
+            if !matches!(v, Val::Undef) {
+                let shown = crate::decompile::value_source(self, &v);
+                return self.type_error(&format!(
+                    "derived class constructor returned invalid value {shown}"
+                ));
+            }
+            let this = scope.borrow().this.clone();
+            return this.ok_or_else(|| {
+                self.error(
+                    "ReferenceError",
+                    "must call super constructor before using 'this' in derived class constructor",
+                )
+            });
         }
         Ok(v)
     }
@@ -1385,14 +1467,12 @@ impl<'c> Interp<'c> {
                         args,
                         Some(new_target.clone()),
                     )?;
-                    return match v {
-                        Val::Obj(_) => Ok(v),
-                        _ => self.type_error("derived class constructor did not call super()"),
-                    };
+                    // `run_closure` refuses what is not an object.
+                    return Ok(v);
                 }
                 let obj = Val::Obj(self.alloc(proto, Kind::Ordinary)?);
                 if let (Some(c), Some(ce)) = (&class, &class_env) {
-                    self.init_fields(c, ce, &obj)?;
+                    self.init_fields(c, ce, &obj, home.clone())?;
                 }
                 let v = self.run_closure(
                     fo,
@@ -1408,7 +1488,6 @@ impl<'c> Interp<'c> {
         }
     }
 
-    /// The instance fields of class `c` on `obj`.
     /// The value of a field's initializer `e`: an anonymous function is named after `key`.
     fn field_value(&mut self, e: &Expr, scope: &EnvRef, key: &str) -> R {
         let v = self.eval(e, scope)?;
@@ -1418,7 +1497,15 @@ impl<'c> Interp<'c> {
         Ok(v)
     }
 
-    fn init_fields(&mut self, c: &ClassDef, env: &EnvRef, obj: &Val) -> R<()> {
+    /// The instance fields of class `c` on `obj`; `home` is the class's prototype, which
+    /// `super` in an initializer reads.
+    fn init_fields(
+        &mut self,
+        c: &ClassDef,
+        env: &EnvRef,
+        obj: &Val,
+        home: Option<ObjRef>,
+    ) -> R<()> {
         let methods = env
             .borrow()
             .vars
@@ -1434,6 +1521,7 @@ impl<'c> Interp<'c> {
         for m in c.members.iter().filter(|m| !m.is_static && m.func.is_none()) {
             let scope = self.new_env(Some(env.clone()));
             scope.borrow_mut().this = Some(obj.clone());
+            scope.borrow_mut().home = home.clone();
             let key = self.prop_key(&m.key, &scope)?;
             let v = match &m.field {
                 Some(e) => self.field_value(e, &scope, &key)?,
@@ -1541,8 +1629,12 @@ impl<'c> Interp<'c> {
             binding.value = Some(v);
             return Ok(());
         }
-        let g = Val::Obj(self.realm.global.clone());
-        self.set(&g, name, v)
+        let global = self.realm.global.clone();
+        if self.strict && !self.has_property(&global, name) {
+            let m = format!("assignment to undeclared variable {name}");
+            return Err(self.error("ReferenceError", &m));
+        }
+        self.set(&Val::Obj(global), name, v)
     }
 
     fn this_of(&self, env: &EnvRef) -> Option<(Val, EnvRef)> {
@@ -1556,6 +1648,20 @@ impl<'c> Interp<'c> {
                 return None;
             }
             cur = e.borrow().parent.clone();
+        }
+        None
+    }
+
+    /// The home object `super` reads in `env`: a method's, or a field initializer's or a static
+    /// block's, which have a scope of their own with no function.
+    fn home_of(&self, env: &EnvRef) -> Option<ObjRef> {
+        let mut cur = Some(env.clone());
+        while let Some(e) = cur {
+            let b = e.borrow();
+            if b.home.is_some() || b.func.is_some() {
+                return b.home.clone();
+            }
+            cur = b.parent.clone();
         }
         None
     }
@@ -1586,37 +1692,84 @@ impl<'c> Interp<'c> {
             }
         }
         for s in body {
-            match s {
-                Stmt::Decl(k @ (DeclKind::Let | DeclKind::Const), d) => {
-                    for (p, _) in d {
-                        let mut names = Vec::new();
-                        pattern_names(p, &mut names);
-                        for n in names {
-                            scope.borrow_mut().vars.push((
-                                n,
-                                Binding {
-                                    value: None,
-                                    mutable: *k == DeclKind::Let,
-                                    lexical: true,
-                                },
-                            ));
-                        }
-                    }
-                }
-                Stmt::Class(n, _) => {
-                    scope
-                        .borrow_mut()
-                        .vars
-                        .push((n.clone(), Binding { value: None, mutable: true, lexical: true }));
-                }
-                Stmt::Func(n, def) => {
-                    let f = self.closure(def, scope)?;
-                    declare(scope, n, f, true);
-                }
-                _ => {}
-            }
+            self.hoist_lexical(s, scope)?;
         }
         Ok(())
+    }
+
+    /// Declares the `let`, `const`, `class` or function that `s` declares in the block `scope`.
+    fn hoist_lexical(&mut self, s: &Stmt, scope: &EnvRef) -> R<()> {
+        match s {
+            Stmt::Decl(k @ (DeclKind::Let | DeclKind::Const), d) => {
+                for (p, _) in d {
+                    let mut names = Vec::new();
+                    pattern_names(p, &mut names);
+                    for n in names {
+                        scope.borrow_mut().vars.push((
+                            n,
+                            Binding { value: None, mutable: *k == DeclKind::Let, lexical: true },
+                        ));
+                    }
+                }
+            }
+            Stmt::Class(n, _) => {
+                scope
+                    .borrow_mut()
+                    .vars
+                    .push((n.clone(), Binding { value: None, mutable: true, lexical: true }));
+            }
+            Stmt::Func(n, def) => {
+                let f = self.closure(def, scope)?;
+                declare(scope, n, f, true);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// The `var`s that the functions declared in blocks of non-strict `body` take (Annex
+    /// B.3.3, [`crate::annex`]), in the function or program scope `scope`.
+    pub(crate) fn hoist_block_functions(&mut self, body: &[Stmt], scope: &EnvRef, params: &[Name]) {
+        for (n, def) in crate::annex::block_functions(body, params) {
+            def.annex.set(true);
+            if !scope.borrow().vars.iter().any(|(k, _)| *k == n) {
+                declare(scope, &n, Val::Undef, true);
+            }
+        }
+    }
+
+    /// Annex B.3.3 in a direct `eval` of non-strict code: a function of a block gets a `var` of
+    /// `var_env` unless a lexical binding between `env` and `var_env` has its name.
+    fn eval_block_functions(&mut self, body: &[Stmt], env: &EnvRef, var_env: &EnvRef) {
+        for (n, def) in crate::annex::block_functions(body, &[]) {
+            let mut cur = Some(env.clone());
+            let mut clash = false;
+            while let Some(e) = cur {
+                clash |= e.borrow().vars.iter().any(|(k, b)| *k == n && b.lexical);
+                if clash || Rc::ptr_eq(&e, var_env) {
+                    break;
+                }
+                cur = e.borrow().parent.clone();
+            }
+            if clash {
+                continue;
+            }
+            def.annex.set(true);
+            if !var_env.borrow().vars.iter().any(|(k, _)| *k == n) {
+                declare(var_env, &n, Val::Undef, true);
+            }
+        }
+    }
+
+    /// Whether the code of a direct `eval` in `env` may use `super.x` (in a method) and
+    /// `super()` (in a derived constructor).
+    fn supers_of(&self, env: &EnvRef) -> (bool, bool) {
+        let derived = self.function_env(env).is_some_and(|f| {
+            f.borrow().func.as_ref().is_some_and(|o| {
+                matches!(&o.borrow().kind, Kind::Func(Func::Closure { def, .. }) if def.is_ctor_of_derived)
+            })
+        });
+        (self.home_of(env).is_some(), derived)
     }
 
     pub fn closure(&mut self, def: &Rc<FuncDef>, env: &EnvRef) -> R {
@@ -1795,7 +1948,7 @@ impl<'c> Interp<'c> {
             Val::Str(_) => true,
             Val::Obj(o) => matches!(
                 o.borrow().kind,
-                Kind::Typed(_) | Kind::Set(_) | Kind::Map(_) | Kind::Iter(_) | Kind::Arguments(_)
+                Kind::Typed(_) | Kind::Set(_) | Kind::Map(_) | Kind::Iter(..) | Kind::Arguments(_)
             ),
             _ => false,
         };
@@ -1812,7 +1965,7 @@ impl<'c> Interp<'c> {
         }
         let it = self.call(&it_fn, v, &[])?;
         if !matches!(it, Val::Obj(_)) {
-            return self.type_error("result of the Symbol.iterator method is not an object");
+            return self.type_error("[Symbol.iterator]() returned a non-object value");
         }
         let next = self.get(&it, "next")?;
         Ok(IterRec::Proto { it, next })
@@ -1862,11 +2015,15 @@ impl<'c> Interp<'c> {
             Val::Obj(o) => {
                 let kind = o.borrow().kind.clone();
                 match kind {
-                    Kind::Array(items) if o.borrow().locks & ELEMENTS_OWN == 0 => {
+                    Kind::Array(items)
+                        if o.borrow().locks & ELEMENTS_OWN == 0
+                            && !items.iter().any(|x| matches!(x, Val::Hole)) =>
+                    {
                         return Ok(items);
                     }
                     Kind::Array(items) => {
-                        // An element with its own attributes is read through its getter.
+                        // An element with its own attributes is read through its getter, and a
+                        // hole from the prototypes.
                         let target = Val::Obj(o.clone());
                         let mut out = Vec::with_capacity(items.len());
                         for i in 0..items.len() {
@@ -1883,7 +2040,7 @@ impl<'c> Interp<'c> {
                         }
                         return Ok(out);
                     }
-                    Kind::Iter(state) => {
+                    Kind::Iter(state, _) => {
                         let (items, pos) = &mut *state.borrow_mut();
                         let rest = items.get(*pos..).unwrap_or(&[]).to_vec();
                         *pos = items.len();
@@ -1905,6 +2062,9 @@ impl<'c> Interp<'c> {
                     return Err(self.not_iterable(v));
                 }
                 let it = self.call(&it_fn, v, &[])?;
+                if !matches!(it, Val::Obj(_)) {
+                    return self.type_error("[Symbol.iterator]() returned a non-object value");
+                }
                 let next = self.get(&it, "next")?;
                 let mut out = Vec::new();
                 loop {
@@ -1969,6 +2129,11 @@ impl<'c> Interp<'c> {
                         DeclKind::Const => self.bind(p, v, env, Some(false))?,
                     }
                 }
+            }
+            Stmt::Func(n, def) if def.annex.get() => {
+                // Annex B.3.3: the function's `var` takes the block's binding.
+                let v = self.read_var(env, n)?;
+                declare(&var_scope_of(env), n, v, true);
             }
             Stmt::Func(..) | Stmt::Empty => {}
             Stmt::Suspends(s) => self.exec(s, env)?,
@@ -2043,23 +2208,9 @@ impl<'c> Interp<'c> {
             Stmt::Switch(d, cases) => {
                 let v = self.eval(d, env)?;
                 let scope = self.new_env(Some(env.clone()));
-                let all: Vec<&Stmt> = cases.iter().flat_map(|(_, b)| b.iter()).collect();
-                for s in &all {
-                    if let Stmt::Decl(k @ (DeclKind::Let | DeclKind::Const), d) = s {
-                        for (p, _) in d {
-                            let mut names = Vec::new();
-                            pattern_names(p, &mut names);
-                            for n in names {
-                                scope.borrow_mut().vars.push((
-                                    n,
-                                    Binding {
-                                        value: None,
-                                        mutable: *k == DeclKind::Let,
-                                        lexical: true,
-                                    },
-                                ));
-                            }
-                        }
+                for (_, body) in cases {
+                    for s in body {
+                        self.hoist_lexical(s, &scope)?;
                     }
                 }
                 let mut start = None;
@@ -2305,6 +2456,7 @@ impl<'c> Interp<'c> {
                 strict: true,
                 source: format!("class {} {{ }}", c.name.as_deref().unwrap_or("")).into(),
                 guessed: std::cell::OnceCell::new(),
+                annex: std::cell::Cell::new(false),
             }),
         };
         let ctor_proto = match &parent_ctor {
@@ -2344,6 +2496,7 @@ impl<'c> Interp<'c> {
                 // `static { … }`: run once, with `this` the class.
                 if let Some(f) = &m.func {
                     let fv = self.closure(f, &scope)?;
+                    set_home(&fv, &ctor);
                     self.call(&fv, &Val::Obj(ctor.clone()), &[])?;
                 }
                 continue;
@@ -2392,6 +2545,7 @@ impl<'c> Interp<'c> {
             } else if m.is_static {
                 let s = self.new_env(Some(scope.clone()));
                 s.borrow_mut().this = Some(Val::Obj(ctor.clone()));
+                s.borrow_mut().home = Some(ctor.clone());
                 let v = match &m.field {
                     Some(e) => self.field_value(e, &s, &key)?,
                     None => Val::Undef,
@@ -2562,7 +2716,7 @@ impl<'c> Interp<'c> {
                 let mut out = Vec::with_capacity(items.len());
                 for it in items {
                     match it {
-                        None => out.push(Val::Undef),
+                        None => out.push(Val::Hole),
                         Some(Expr::Spread(x)) => {
                             let v = self.eval(x, env)?;
                             let all = self.iterate(&v);
@@ -2683,7 +2837,7 @@ impl<'c> Interp<'c> {
             Expr::SuperMember(k) => {
                 let key = self.eval(k, env)?;
                 let key = self.key_of(&key)?;
-                let home = self.function_env(env).and_then(|e| e.borrow().home.clone());
+                let home = self.home_of(env);
                 let this = self.this_of(env).map_or(Val::Undef, |(t, _)| t);
                 let proto = home.and_then(|h| h.borrow().proto.clone());
                 match proto {
@@ -2763,7 +2917,8 @@ impl<'c> Interp<'c> {
             _ => None,
         };
         if let Some((c, ce)) = class {
-            self.init_fields(&c, &ce, &this)?;
+            let home = fenv.borrow().home.clone();
+            self.init_fields(&c, &ce, &this, home)?;
         }
         // A derived constructor returns its `this`.
         Ok(this)
@@ -2790,7 +2945,8 @@ impl<'c> Interp<'c> {
             MemberProp::Private(n) => self.private_key(n, env),
             MemberProp::Computed(e) => {
                 let v = self.eval(e, env)?;
-                self.key_of(&v)
+                let k = self.key_of(&v);
+                self.name_operands(k, &[(e, &v)])
             }
         }
     }
@@ -2832,7 +2988,8 @@ impl<'c> Interp<'c> {
         }
         self.pos = pos;
         if !f.is_callable() {
-            return self.type_error(&format!("{} is not a function", callee_text(callee)));
+            let text = if bare_temp(callee) { self.show(&f) } else { callee_text(callee) };
+            return self.type_error(&format!("{text} is not a function"));
         }
         self.conversion_called = false;
         let r = self.call(&f, &this, &args);
@@ -2870,10 +3027,8 @@ impl<'c> Interp<'c> {
                         }
                         continue;
                     }
-                    if let (Val::Obj(f), Expr::Func(_)) = (&v, e) {
-                        if let Kind::Func(Func::Closure { home, .. }) = &mut f.borrow_mut().kind {
-                            *home = Some(o.clone());
-                        }
+                    if let Expr::Func(_) = e {
+                        set_home(&v, &o);
                         name_if_anonymous(&v, &key_function_name(&key, None));
                     }
                     self.define(&o, &key, Prop::data(v))?;
@@ -2881,6 +3036,7 @@ impl<'c> Interp<'c> {
                 ObjProp::Accessor(k, kind, def) => {
                     let key = self.prop_key(k, env)?;
                     let f = self.closure(def, env)?;
+                    set_home(&f, &o);
                     name_if_anonymous(&f, &key_function_name(&key, accessor_prefix(*kind)));
                     let mut p = self
                         .get_own_prop(&o, &key)
@@ -2986,8 +3142,8 @@ impl<'c> Interp<'c> {
             privates.extend(names.cloned());
             cur = b.parent.clone();
         }
-        let body =
-            crate::parser::parse_script_in(&src, &privates).map_err(|e| self.syntax_error(&e))?;
+        let body = crate::parser::parse_script_in(&src, &privates, self.supers_of(env))
+            .map_err(|e| self.syntax_error(&e))?;
         let strict = self.strict || crate::parser::has_use_strict(&body);
         let lex = self.new_env(Some(env.clone()));
         let var_env = if strict { lex.clone() } else { var_scope_of(env) };
@@ -3019,6 +3175,9 @@ impl<'c> Interp<'c> {
             }
         }
         self.hoist(&body, &lex, false)?;
+        if !strict {
+            self.eval_block_functions(&body, env, &var_env);
+        }
         for st in &body {
             if let Stmt::Func(n, _) = st {
                 let f = self.read_var(&lex, n)?;
@@ -3094,15 +3253,27 @@ impl<'c> Interp<'c> {
             return self.ordinary_instance_of(x, &t);
         }
         let Val::Obj(o) = x else { return Ok(false) };
-        let Val::Obj(proto) = self.get(f, "prototype")? else { return Ok(false) };
-        let mut cur = o.borrow().proto.clone();
+        let Val::Obj(proto) = self.get(f, "prototype")? else {
+            return Err(
+                self.operand_error(f, |t| format!("'prototype' property of {t} is not an object"))
+            );
+        };
+        let mut cur = self.proto_of(o)?;
         while let Some(c) = cur {
             if c.ptr_eq(&proto) {
                 return Ok(true);
             }
-            cur = c.borrow().proto.clone();
+            cur = self.proto_of(&c)?;
         }
         Ok(false)
+    }
+
+    /// `[[GetPrototypeOf]]` of `o`, through a proxy's `getPrototypeOf`.
+    pub fn proto_of(&mut self, o: &ObjRef) -> R<Option<ObjRef>> {
+        if crate::proxy::is_proxy(o) {
+            return crate::proxy::get_proto(self, o);
+        }
+        Ok(o.borrow().proto.clone())
     }
 
     pub fn loose_eq(&mut self, a: &Val, b: &Val) -> R<bool> {
@@ -3359,9 +3530,18 @@ fn var_scope_of(env: &EnvRef) -> EnvRef {
     }
 }
 
+/// Makes `home` the object `super` reads in the method `f`.
+fn set_home(f: &Val, home: &ObjRef) {
+    if let Val::Obj(fo) = f
+        && let Kind::Func(Func::Closure { home: h, .. }) = &mut fo.borrow_mut().kind
+    {
+        *h = Some(home.clone());
+    }
+}
+
 /// Whether `e` is a function or class without a name, which takes the name of what it is bound
 /// to (ECMA-262 §8.4.3 IsAnonymousFunctionDefinition, parentheses included).
-fn anonymous_definition(e: &Expr) -> bool {
+pub(crate) fn anonymous_definition(e: &Expr) -> bool {
     match e {
         Expr::Func(d) => d.name.is_none() && !d.method,
         Expr::Class(c) => c.name.is_none(),
@@ -3416,6 +3596,10 @@ fn name_function(v: &Val, p: &Pattern, e: &Expr) {
         return;
     }
     let (Val::Obj(f), Pattern::Name(n)) = (v, p) else { return };
+    // A temporary of a generator's rewriting gives no name.
+    if n.starts_with(crate::generators::TEMP_PREFIX) {
+        return;
+    }
     let mut b = f.borrow_mut();
     if !b.is_callable() {
         return;
@@ -3427,7 +3611,7 @@ fn name_function(v: &Val, p: &Pattern, e: &Expr) {
     }
 }
 
-fn pattern_names(p: &Pattern, out: &mut Vec<Name>) {
+pub(crate) fn pattern_names(p: &Pattern, out: &mut Vec<Name>) {
     match p {
         Pattern::Name(n) => out.push(n.clone()),
         Pattern::Object(props, rest) => {

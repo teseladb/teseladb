@@ -5,6 +5,8 @@
 //! them, so the scores are those of one index with all the documents, as `refsearch` gives them on a
 //! replica set; with one segment the first step is left out.
 
+use std::collections::BTreeMap;
+
 use teseladb_bson::Document;
 
 use crate::analysis::ANALYZERS_VERSION;
@@ -261,8 +263,20 @@ impl Indexer {
         let global = (self.segments.len() > 1).then(|| {
             self.segments.iter().fold(Stats::default(), |acc, s| acc.plus(&s.index.stats()))
         });
+        // The elements of `embeddedDocuments` paths, which a query builds from each segment's
+        // documents, score likewise with those of every segment.
+        let mut elements: BTreeMap<String, Stats> = BTreeMap::new();
+        if global.is_some() {
+            for s in &self.segments {
+                for (path, st) in search::element_stats(&s.index) {
+                    let sum = elements.remove(&path).unwrap_or_default().plus(&st);
+                    elements.insert(path, sum);
+                }
+            }
+        }
         for s in &mut self.segments {
             s.index.set_global(global.clone());
+            s.index.set_element_global(elements.clone());
         }
     }
 

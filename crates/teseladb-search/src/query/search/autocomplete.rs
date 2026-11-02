@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 
 use teseladb_bson::{Document, Value};
 
-use super::{Operator, Score, SearchError, parse_fuzzy, parse_score, shape};
+use super::{FuzzyOf, Operator, Score, SearchError, parse_fuzzy, parse_score, shape};
 use crate::definition::FieldMapping;
 use crate::index::{Fuzzy, Grams, MemIndex, autocomplete_key};
 use crate::query::fuzzy::Levenshtein;
@@ -46,7 +46,7 @@ pub(super) fn parse(d: &Document, path: &str) -> Result<Operator, SearchError> {
         Some(Value::String(o)) if o == "sequential" => true,
         Some(_) => return Err(shape(&at("tokenOrder"), "must be one of [any, sequential]")),
     };
-    let fuzzy = parse_fuzzy(d.get("fuzzy"), &at("fuzzy"))?;
+    let fuzzy = parse_fuzzy(d.get("fuzzy"), &at("fuzzy"), FuzzyOf::Text)?;
     let score = parse_score(d.get("score"), &at("score"))?;
     Ok(Operator::Autocomplete(Autocomplete { query, path: field, sequential, fuzzy, score }))
 }

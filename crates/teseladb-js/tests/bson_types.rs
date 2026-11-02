@@ -52,6 +52,22 @@ fn numbers_come_back_as_doubles_and_number_int_as_int32() {
     assert_eq!(call("function(){ return undefined }", &[]), Value::Null);
 }
 
+/// A hole of an array is written as `null`, like `undefined` (measured on a `refrouter` 9.0.4 on
+/// 02-11: `[1, , 3]`, `a[2] = 1` on `[]` and `new Array(2)`).
+#[test]
+fn holes_come_back_as_null() {
+    let (one, three) = (Value::Double(1.0), Value::Double(3.0));
+    assert_eq!(
+        call("function(){ return [1, , 3] }", &[]),
+        Value::Array(vec![one.clone(), Value::Null, three])
+    );
+    assert_eq!(
+        call("function(){ const a = []; a[2] = 1; return a }", &[]),
+        Value::Array(vec![Value::Null, Value::Null, one])
+    );
+    assert_eq!(call("function(){ return new Array(2) }", &[]), Value::Array(vec![Value::Null; 2]));
+}
+
 #[test]
 fn constructors_and_methods_are_those_of_refdb() {
     let id = Value::ObjectId([0x65, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
