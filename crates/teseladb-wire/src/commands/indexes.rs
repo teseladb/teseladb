@@ -389,9 +389,11 @@ fn create<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Command
         return Err(CommandError::new(BAD_VALUE, "Must specify at least one index to create"));
     }
     // A time series keeps its indexes on its buckets (015 FR-008): the bucket specifications are
-    // the ones checked, as RefDb checks them after translating them.
+    // the ones checked, as RefDb checks them after translating them; with `rawData` they are
+    // given on the buckets already (measured on a `refnode` 9.0.4 on 02-11-2026).
+    let raw = matches!(ctx.cmd.get("rawData"), Some(Value::Boolean(true)));
     let specs = match ctx.backend.collection(&ns)? {
-        Some(c) => match super::timeseries::spec_of(&c)? {
+        Some(c) => match super::timeseries::spec_of(&c)?.filter(|_| !raw) {
             Some(ts) => specs
                 .iter()
                 .map(|s| super::timeseries::bucket_index(&ts, s))

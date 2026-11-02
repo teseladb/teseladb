@@ -394,6 +394,10 @@ fn measurements_outside_the_bucket_id_years_are_read_by_time() {
     let keys: Vec<&str> = options.iter().map(|(k, _)| k).collect();
     assert_eq!(keys, vec!["expireAfterSeconds", "timeseries"], "{r:?}");
     cases(&mut m);
+    // A collection already marked takes more such measurements as they come.
+    let cmd = format!(r#"{{"insert":"ts","documents":[{{"t":{},"m":9,"v":9}}]}}"#, date(-1));
+    run(&mut m, &cmd);
+    assert_eq!(read(&mut m, format!(r#"{{"m":9,"t":{{"$lt":{}}}}}"#, date(0))), ints(&[9]));
 }
 
 /// `listCollections` shows a time series' `expireAfterSeconds` before `timeseries`, whether it
@@ -495,4 +499,90 @@ fn a_lookup_without_the_meta_index() {
     }
     let r = run(&mut m, r#"{"find":"ts","sort":{"t":1}}"#);
     assert_eq!(values(&r), vec![Value::Int32(2), Value::Int32(3), Value::Int32(1)]);
+}
+
+/// An index specification without its key, or with a key that is not an object, is refused as on
+/// a collection that is not a time series, and reads bounded both ways in time on a series without
+/// a meta field find their measurements (015 T021, measured on a `refnode` 9.0.4 on 02-11-2026).
+#[test]
+fn index_specifications_without_a_key_and_bounded_reads_without_meta() {
+    let mut m = Mem::new();
+    series(&mut m);
+    for (spec, code, msg) in [
+        (
+            r#"{"name":"x"}"#,
+            67,
+            r#"Error in specification { name: "x", key: {} } :: caused by :: Index keys cannot be empty."#,
+        ),
+        (r#"{"key":5,"name":"x"}"#, 10065, "invalid parameter: expected an object (key)"),
+    ] {
+        let r = run(&mut m, &format!(r#"{{"createIndexes":"ts","indexes":[{spec}]}}"#));
+        assert_eq!(field(&r, "code"), &Value::Int32(code), "{r:?}");
+        assert_eq!(field(&r, "errmsg"), &Value::from(msg), "{r:?}");
+    }
+    run(&mut m, r#"{"create":"nm","timeseries":{"timeField":"t"}}"#);
+    run(
+        &mut m,
+        &format!(
+            r#"{{"insert":"nm","documents":[{{"t":{},"v":1}},{{"t":{},"v":2}},{{"t":{},"v":3}}]}}"#,
+            date(T0),
+            date(T0 + 7_200_000),
+            date(T0 + 14_400_000)
+        ),
+    );
+    let r = run(
+        &mut m,
+        &format!(
+            r#"{{"find":"nm","filter":{{"t":{{"$gte":{},"$lt":{}}}}},"sort":{{"v":1}}}}"#,
+            date(T0 + 3_600_000),
+            date(T0 + 10_000_000)
+        ),
+    );
+    assert_eq!(values(&r), vec![Value::Int32(2)]);
+}
+
+/// An index made on the buckets with `rawData` lists its key on the measurements' fields, the
+/// least and greatest of a field once (measured on a `refnode` 9.0.4 on 02-11-2026).
+#[test]
+fn a_raw_bucket_index_lists_its_measurement_key() {
+    let mut m = Mem::new();
+    series(&mut m);
+    let r = run(
+        &mut m,
+        r#"{"createIndexes":"ts","rawData":true,"indexes":[{"key":{"control.min.v":1,"control.max.v":1},"name":"raw_v"}]}"#,
+    );
+    assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+    let listed = listed(&mut m, "raw_v", false).expect("raw_v");
+    assert_eq!(listed, json(r#"{"v":2,"key":{"v":1},"name":"raw_v"}"#));
+}
+
+/// An ordered insert with a refused geometry, back into a window an earlier insert closed by
+/// moving forward in time, finds that window's bucket in its attempt and writes the measurements
+/// before the refused one (015 T021).
+#[test]
+fn an_attempt_back_in_time_finds_the_closed_bucket() {
+    let mut m = Mem::new();
+    series(&mut m);
+    run(&mut m, r#"{"createIndexes":"ts","indexes":[{"key":{"loc":"2dsphere"},"name":"geo"}]}"#);
+    let point = r#"{"type":"Point","coordinates":[1,2]}"#;
+    for t in [T0, T0 + 7_200_000] {
+        let cmd =
+            format!(r#"{{"insert":"ts","documents":[{{"t":{},"m":1,"loc":{point}}}]}}"#, date(t));
+        let r = run(&mut m, &cmd);
+        assert_eq!(field(&r, "n"), &Value::Int32(1), "{r:?}");
+    }
+    let bad = r#"{"type":"Point","coordinates":[500,1]}"#;
+    let r = run(
+        &mut m,
+        &format!(
+            r#"{{"insert":"ts","documents":[{{"t":{},"m":1,"loc":{point}}},{{"t":{},"m":1,"loc":{bad}}}]}}"#,
+            date(T0 + 1000),
+            date(T0 + 1001)
+        ),
+    );
+    assert_eq!(field(&r, "n"), &Value::Int32(1), "{r:?}");
+    assert_eq!(field(&r, "writeErrors.0.index"), &Value::Int32(1), "{r:?}");
+    assert_eq!(field(&r, "writeErrors.0.code"), &Value::Int32(511), "{r:?}");
+    let r = run(&mut m, r#"{"count":"ts"}"#);
+    assert_eq!(field(&r, "n"), &Value::Int32(3), "{r:?}");
 }

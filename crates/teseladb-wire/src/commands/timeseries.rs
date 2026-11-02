@@ -1053,8 +1053,15 @@ pub fn bucket_index(spec: &BucketSpec, index: &Document) -> Result<Document, Com
         let msg = "TTL indexes on time-series collections require a partialFilterExpression on the metaField";
         return Err(CommandError::new(INVALID_OPTIONS, msg));
     }
-    let Some(Value::Document(key)) = index.get("key") else {
-        return Err(CommandError::new(INTERNAL_ERROR, "an index without key"));
+    // Without a key the specification goes on with an empty one, which its checks refuse; a key
+    // that is not an object is refused here (measured on a `refnode` 9.0.4 on 02-11-2026).
+    let key = match index.get("key") {
+        None => return Ok(index.clone().with("key", Document::new())),
+        Some(Value::Document(key)) => key,
+        Some(_) => {
+            let msg = "invalid parameter: expected an object (key)";
+            return Err(CommandError::new(crate::error::EXPECTED_OBJECT, msg));
+        }
     };
     if index.get("expireAfterSeconds").is_some() {
         if key.len() > 1 {
