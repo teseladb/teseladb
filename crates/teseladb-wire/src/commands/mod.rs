@@ -71,6 +71,7 @@ pub mod sort;
 pub mod status;
 pub mod tenants;
 pub mod timeseries;
+pub mod timeseries_catalog;
 pub mod timeseries_filter;
 pub mod ttl;
 pub mod txn;
