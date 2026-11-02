@@ -4854,3 +4854,168 @@ String.prototype.toString.call(Object.create(String.prototype))	E:TypeError:toSt
 (function(){ const q = new Proxy({a: 1}, {preventExtensions(){ return false }}); try { Object.freeze(q) } catch (e) { return e.message } })()	S:proxy preventExtensions handler returned false
 (function(){ const q = new Proxy({a: 1}, {defineProperty(){ return false }}); try { Object.freeze(q) } catch (e) { return e.message } })()	S:proxy defineProperty handler returned false for property '"a"'
 (function(){ const q = new Proxy({}, {}); return Object.isFrozen(q) + ' ' + Object.isSealed(q) })()	S:false false
+(function(){ function* g(){ const a = [1, ...[yield 1, 2], 3]; return a.join() } const it = g(); const out = []; let r = it.next(); let i = 0; while (!r.done && i < 20) { out.push(r.value); r = it.next(i++) } out.push('ret:' + r.value); return JSON.stringify(out) })()	S:[1,"ret:1,0,2,3"]
+(function(){ function* g(){ const o = {a: 1, get b(){ return 2 }, [yield 'k']: 3}; return Object.keys(o).join() } const it = g(); const out = []; let r = it.next(); let i = 0; while (!r.done && i < 20) { out.push(r.value); r = it.next(i++) } out.push('ret:' + r.value); return JSON.stringify(out) })()	S:["k","ret:0,a,b"]
+(function(){ function* g(){ const o = {a: yield 1, ...{b: 2}}; return JSON.stringify(o) } const it = g(); const out = []; let r = it.next(); let i = 0; while (!r.done && i < 20) { out.push(r.value); r = it.next(i++) } out.push('ret:' + r.value); return JSON.stringify(out) })()	S:[1,"ret:{\\"a\\":0,\\"b\\":2}"]
+(function(){ function* g(){ const o = {x: {y: 1}}; return o[yield 'k'] === undefined } const it = g(); const out = []; let r = it.next(); let i = 0; while (!r.done && i < 20) { out.push(r.value); r = it.next(i++) } out.push('ret:' + r.value); return JSON.stringify(out) })()	S:["k","ret:true"]
+(function(){ function* g(){ const o = {f(a){ return a }}; return o.f(yield 1) } const it = g(); const out = []; let r = it.next(); let i = 0; while (!r.done && i < 20) { out.push(r.value); r = it.next(i++) } out.push('ret:' + r.value); return JSON.stringify(out) })()	S:[1,"ret:0"]
+(function(){ function* g(){ const o = {f(a){ return a }}; return o[yield 'f'] ? 1 : 2 } const it = g(); const out = []; let r = it.next(); let i = 0; while (!r.done && i < 20) { out.push(r.value); r = it.next(i++) } out.push('ret:' + r.value); return JSON.stringify(out) })()	S:["f","ret:2"]
+(function(){ function* g(){ let a = 0; a ||= yield 1; return a } const it = g(); const out = []; let r = it.next(); let i = 0; while (!r.done && i < 20) { out.push(r.value); r = it.next(i++) } out.push('ret:' + r.value); return JSON.stringify(out) })()	S:[1,"ret:0"]
+(function(){ function* g(){ let a = 1; a &&= yield 1; return a } const it = g(); const out = []; let r = it.next(); let i = 0; while (!r.done && i < 20) { out.push(r.value); r = it.next(i++) } out.push('ret:' + r.value); return JSON.stringify(out) })()	S:[1,"ret:0"]
+(function(){ function* g(){ let a = null; a ??= yield 1; return a } const it = g(); const out = []; let r = it.next(); let i = 0; while (!r.done && i < 20) { out.push(r.value); r = it.next(i++) } out.push('ret:' + r.value); return JSON.stringify(out) })()	S:[1,"ret:0"]
+(function(){ function* g(){ let a = 5; a += yield 1; return a } const it = g(); const out = []; let r = it.next(); let i = 0; while (!r.done && i < 20) { out.push(r.value); r = it.next(i++) } out.push('ret:' + r.value); return JSON.stringify(out) })()	S:[1,"ret:5"]
+(function(){ function* g(){ const o = {v: 2}; o.v *= yield 1; return o.v } const it = g(); const out = []; let r = it.next(); let i = 0; while (!r.done && i < 20) { out.push(r.value); r = it.next(i++) } out.push('ret:' + r.value); return JSON.stringify(out) })()	S:[1,"ret:0"]
+(function(){ function* g(){ let s = 0; for (let i = 0; i < (yield 'test'); i += yield 'upd') s++; return s } const it = g(); const out = []; let r = it.next(); let i = 0; while (!r.done && i < 20) { out.push(r.value); r = it.next(i++) } out.push('ret:' + r.value); return JSON.stringify(out) })()	S:["test","ret:0"]
+(function(){ function* g(){ let s = 0; for (;;) { s++; if (s > 2) break } yield s; return s } const it = g(); const out = []; let r = it.next(); let i = 0; while (!r.done && i < 20) { out.push(r.value); r = it.next(i++) } out.push('ret:' + r.value); return JSON.stringify(out) })()	S:[3,"ret:3"]
+(function(){ function* g(){ a: { yield 1; break a; } return 2 } const it = g(); const out = []; let r = it.next(); let i = 0; while (!r.done && i < 20) { out.push(r.value); r = it.next(i++) } out.push('ret:' + r.value); return JSON.stringify(out) })()	S:[1,"ret:2"]
+(function(){ function* g(){ outer: for (const x of [1, 2]) { for (const y of [3, 4]) { yield y; continue outer } } return 0 } const it = g(); const out = []; let r = it.next(); let i = 0; while (!r.done && i < 20) { out.push(r.value); r = it.next(i++) } out.push('ret:' + r.value); return JSON.stringify(out) })()	S:[3,3,"ret:0"]
+(function(){ function* g(){ try { yield 1; throw 2 } catch (e) { yield e } finally { yield 3 } return 4 } const it = g(); const out = []; let r = it.next(); let i = 0; while (!r.done && i < 20) { out.push(r.value); r = it.next(i++) } out.push('ret:' + r.value); return JSON.stringify(out) })()	S:[1,2,3,"ret:4"]
+(function(){ function* g(){ try { yield 1 } finally { return 9 } } const it = g(); const out = []; let r = it.next(); let i = 0; while (!r.done && i < 20) { out.push(r.value); r = it.next(i++) } out.push('ret:' + r.value); return JSON.stringify(out) })()	S:[1,"ret:9"]
+(function(){ function* g(){ const [a = yield 1, b] = [undefined, 2]; return a + b } const it = g(); const out = []; let r = it.next(); let i = 0; while (!r.done && i < 20) { out.push(r.value); r = it.next(i++) } out.push('ret:' + r.value); return JSON.stringify(out) })()	S:[1,"ret:2"]
+(function(){ function* g(){ const {a = yield 1} = {}; return a } const it = g(); const out = []; let r = it.next(); let i = 0; while (!r.done && i < 20) { out.push(r.value); r = it.next(i++) } out.push('ret:' + r.value); return JSON.stringify(out) })()	S:[1,"ret:0"]
+(function(){ function* g(){ let x; x = yield* [1, 2]; return x } const it = g(); const out = []; let r = it.next(); let i = 0; while (!r.done && i < 20) { out.push(r.value); r = it.next(i++) } out.push('ret:' + r.value); return JSON.stringify(out) })()	S:[1,2,"ret:undefined"]
+(function(){ function* g(){ while ((yield 'c') < 2) {} return 'w' } const it = g(); const out = []; let r = it.next(); let i = 0; while (!r.done && i < 20) { out.push(r.value); r = it.next(i++) } out.push('ret:' + r.value); return JSON.stringify(out) })()	S:["c","c","c","ret:w"]
+(function(){ function* g(){ do { yield 'd' } while ((yield 'c') < 1); return 'dw' } const it = g(); const out = []; let r = it.next(); let i = 0; while (!r.done && i < 20) { out.push(r.value); r = it.next(i++) } out.push('ret:' + r.value); return JSON.stringify(out) })()	S:["d","c","ret:dw"]
+(function(){ function* g(){ switch (yield 's') { case 1: yield 'one'; break; default: yield 'def' } return 'sw' } const it = g(); const out = []; let r = it.next(); let i = 0; while (!r.done && i < 20) { out.push(r.value); r = it.next(i++) } out.push('ret:' + r.value); return JSON.stringify(out) })()	S:["s","def","ret:sw"]
+(function(){ function* g(){ const f = (yield 1) ? 1 : 2; return f } const it = g(); const out = []; let r = it.next(); let i = 0; while (!r.done && i < 20) { out.push(r.value); r = it.next(i++) } out.push('ret:' + r.value); return JSON.stringify(out) })()	S:[1,"ret:2"]
+(function(){ function* g(){ return typeof (yield 1) } const it = g(); const out = []; let r = it.next(); let i = 0; while (!r.done && i < 20) { out.push(r.value); r = it.next(i++) } out.push('ret:' + r.value); return JSON.stringify(out) })()	S:[1,"ret:number"]
+(function(){ function* g(){ return [yield 1, yield 2] } const it = g(); const out = []; let r = it.next(); let i = 0; while (!r.done && i < 20) { out.push(r.value); r = it.next(i++) } out.push('ret:' + r.value); return JSON.stringify(out) })()	S:[1,2,"ret:0,1"]
+(function(){ function* g(){ return `a${yield 1}b` } const it = g(); const out = []; let r = it.next(); let i = 0; while (!r.done && i < 20) { out.push(r.value); r = it.next(i++) } out.push('ret:' + r.value); return JSON.stringify(out) })()	S:[1,"ret:a0b"]
+(function(){ function* g(){ return (yield 1, yield 2) } const it = g(); const out = []; let r = it.next(); let i = 0; while (!r.done && i < 20) { out.push(r.value); r = it.next(i++) } out.push('ret:' + r.value); return JSON.stringify(out) })()	S:[1,2,"ret:1"]
+(function(){ function* g(){ return new Array(yield 1).length } const it = g(); const out = []; let r = it.next(); let i = 0; while (!r.done && i < 20) { out.push(r.value); r = it.next(i++) } out.push('ret:' + r.value); return JSON.stringify(out) })()	S:[1,"ret:0"]
+(function(){ function* g(){ return delete (yield 1) } const it = g(); const out = []; let r = it.next(); let i = 0; while (!r.done && i < 20) { out.push(r.value); r = it.next(i++) } out.push('ret:' + r.value); return JSON.stringify(out) })()	S:[1,"ret:true"]
+(function(){ function* g(){ let i = 0; while (true) { if (i++ > 1) break; yield i } return i } const it = g(); const out = []; let r = it.next(); let i = 0; while (!r.done && i < 20) { out.push(r.value); r = it.next(i++) } out.push('ret:' + r.value); return JSON.stringify(out) })()	S:[1,2,"ret:3"]
+(function(){ function* g(){ for (const k in {a: 1, b: 2}) yield k; return 'in' } const it = g(); const out = []; let r = it.next(); let i = 0; while (!r.done && i < 20) { out.push(r.value); r = it.next(i++) } out.push('ret:' + r.value); return JSON.stringify(out) })()	S:["a","b","ret:in"]
+(function(){ function* g(){ label: for (let i = 0; i < 3; i++) { if (i == 1) continue label; yield i } return 'lab' } const it = g(); const out = []; let r = it.next(); let i = 0; while (!r.done && i < 20) { out.push(r.value); r = it.next(i++) } out.push('ret:' + r.value); return JSON.stringify(out) })()	S:[0,2,"ret:lab"]
+(function(){ function* g(){ try { throw yield 1 } catch (e) { return 'c' + e } } const it = g(); const out = []; let r = it.next(); let i = 0; while (!r.done && i < 20) { out.push(r.value); r = it.next(i++) } out.push('ret:' + r.value); return JSON.stringify(out) })()	S:[1,"ret:c0"]
+(function(){ function* g(){ class A { static m(){ return 1 } } return A.m(yield 1) } const it = g(); const out = []; let r = it.next(); let i = 0; while (!r.done && i < 20) { out.push(r.value); r = it.next(i++) } out.push('ret:' + r.value); return JSON.stringify(out) })()	S:[1,"ret:1"]
+(function(){ function* g(){ let x = 1; x = (yield x) + (yield x); return x } const it = g(); const out = []; let r = it.next(); let i = 0; while (!r.done && i < 20) { out.push(r.value); r = it.next(i++) } out.push('ret:' + r.value); return JSON.stringify(out) })()	S:[1,1,"ret:1"]
+(function(){ function* g(){ return (yield 1) in {0: 1, 1: 1} } const it = g(); const out = []; let r = it.next(); let i = 0; while (!r.done && i < 20) { out.push(r.value); r = it.next(i++) } out.push('ret:' + r.value); return JSON.stringify(out) })()	S:[1,"ret:true"]
+(function(){ function* g(){ return void (yield 1) } const it = g(); const out = []; let r = it.next(); let i = 0; while (!r.done && i < 20) { out.push(r.value); r = it.next(i++) } out.push('ret:' + r.value); return JSON.stringify(out) })()	S:[1,"ret:undefined"]
+(function(){ function* g(){ return -(yield 1) } const it = g(); const out = []; let r = it.next(); let i = 0; while (!r.done && i < 20) { out.push(r.value); r = it.next(i++) } out.push('ret:' + r.value); return JSON.stringify(out) })()	S:[1,"ret:0"]
+(function(){ function* g(){ return [...(yield 1) || []] } const it = g(); const out = []; let r = it.next(); let i = 0; while (!r.done && i < 20) { out.push(r.value); r = it.next(i++) } out.push('ret:' + r.value); return JSON.stringify(out) })()	S:[1,"ret:"]
+Date.parse('-000001-01-01T00:00:00Z')	J:-62198755200000
+Date.parse('+002020-01-01')	J:1577836800000
+Date.parse('-002020-01-01T00:00:00.000Z')	J:-125912275200000
+Date.parse('2020-01-01T10:00:00+0530')	J:1577853000000
+Date.parse('2020-01-01T10:00:00-05:30')	J:1577892600000
+Date.parse('2020-01-01 10:00 GMT+0100')	J:1577869200000
+Date.parse('Jan 1 2020 10:00 (CET)')	J:1577872800000
+Date.parse('Jan 1 2020 10:00 Z')	J:1577872800000
+Date.parse('Jan 1 2020 (comment) 10:00')	J:1577872800000
+Date.parse('2020/01/02')	J:1577923200000
+Date.parse('2020/1/2 3:4:5')	J:1577934245000
+Date.parse('2020.01.02')	J:1577923200000
+Date.parse('1/2/2020')	J:1577923200000
+Date.parse('13/2/2020')	J:null
+Date.parse('2020 1 2')	J:1577923200000
+Date.parse('32 1 2')	J:1956614400000
+Date.parse('Jan 2020')	J:null
+Date.parse('2020 Jan 2')	J:1577923200000
+Date.parse('2 Jan 2020 GMT-5')	J:1577941200000
+Date.parse('Tue Jan 02 2020')	J:1577923200000
+Date.parse('2020-01-02T03:04')	J:1577934240000
+Date.parse('2020-01-02T03:04:05.1')	J:1577934245100
+Date.parse('2020-01-02T03:04:05.123456')	J:1577934245123
+Date.parse('2020-1-2')	J:1577923200000
+Date.parse('Jan 1, 2020 12:00 PM')	J:1577880000000
+Date.parse('Jan 1, 2020 12:00 AM')	J:1577836800000
+Date.parse('Jan 1, 2020 13:00 PM')	J:null
+Date.parse('12:00 Jan 1 2020')	J:1577880000000
+Date.parse('Jan 1 2020 UTC+2')	J:1577829600000
+Date.parse('Jan 1 2020 EST')	J:1577854800000
+Date.parse('Jan 1 2020 PDT')	J:1577862000000
+Date.parse('Jan 1 2020 +02')	J:null
+Date.parse('2020-01-01T00:00:00.000+24:00')	J:null
+Date.parse('99 Jan 1')	J:915148800000
+Date.parse('Jan 1 99')	J:915148800000
+Date.parse('Jan 1 49')	J:2493072000000
+Date.parse('Jan 1 50')	J:-631152000000
+Date.parse('2020-02-30')	J:1583020800000
+Date.parse('2020-01-01T24:00:00')	J:1577923200000
+Date.parse('2020-01-01T24:00:01')	J:null
+new Date(2020, 0).getTimezoneOffset()	J:0
+new Date(NaN).getFullYear()	J:null
+Date.UTC(2020)	J:1577836800000
+Date.UTC()	J:null
+new Date(2020, 0, 1, 0, 0, 0, 0.5).getTime()	J:1577836800000
+Date.prototype.getYear.call(new Date(0))	J:70
+(function(){ try { Date.prototype.getTime.call({}) } catch (e) { return e.message } })()	S:Date.prototype.getTime called on incompatible Object
+(function(){ try { Date.prototype.setTime.call(1) } catch (e) { return e.message } })()	S:Date.prototype.setTime called on incompatible number
+new Date(2020, 0, 1).setFullYear(2021, 5)	J:1622505600000
+new Date(0).setUTCHours(25, 61, 61, 1001)	J:93722001
+Date().length > 10	J:true
+typeof Date(0)	S:string
+Date.parse('Jan 1 2020 GMT+0130')	J:1577831400000
+Date.parse('Jan 1 2020 GMT+130')	J:1577831400000
+Date.parse('Jan 1 2020 13:00 AM')	J:null
+Date.parse('Jan 1 2020 12:30 AM')	J:1577838600000
+Date.parse('1/2/49')	J:2493158400000
+Date.parse('1/2/50')	J:-631065600000
+Date.parse('Jan 1 0099')	J:915148800000
+Date.parse('Jan 1 100')	J:-59011459200000
+Date.parse('2020.13.02')	J:null
+Date.parse('2020-01-01T24:00:00.001')	J:null
+Date.parse('2020-01-01T10:00:00+23:59')	J:1577786460000
+Date.parse('2020-01-01T10:00:00+12:60')	J:null
+(function(){ try { return new RegExp('[\\1]', 'u').test('1') } catch (e) { return e.message } })()	S:invalid decimal escape in regular expression
+(function(){ try { return new RegExp('[\\8]', 'u').test('8') } catch (e) { return e.message } })()	S:invalid identity escape in regular expression
+/\u{1F600}/u.test('\u{1F600}')	J:true
+/😀/u.test('\u{1F600}')	J:true
+/\ud83d/u.test('\ud83d')	J:true
+/é/i.test('É')	J:true
+/K/i.test('k')	J:false
+/K/iu.test('k')	J:false
+/a{2,}?/.exec('aaaa')[0]	S:aa
+/(a?)*?b/.exec('aab')[0]	S:aab
+/(?:a*)*b/.exec('b')[0]	S:b
+/(a|ab)(c|bcd)(d*)/.exec('abcd').join()	S:abcd,a,bcd,
+'aaa'.lastIndexOf('a', -5)	J:0
+'abc'.at(5)	J:undefined
+'abc'.codePointAt(5)	J:undefined
+'abc'.substr(-5, 2)	S:ab
+'a-b-c'.split('-', 0).length	J:0
+'a-b-c'.split('-', -1).length	J:3
+'abc'.replace(/(b)/, '[$2]')	S:a[$2]c
+'abc'.replace(/(b)/, '[$01]')	S:a[b]c
+'abc'.replace(/(b)/, "[$']")	S:a[c]c
+'abc'.replace(/(b)/, '[$`]')	S:a[a]c
+'abc'.replace('b', '[$&$$]')	S:a[b$]c
+'x'.padEnd(5, '')	S:x
+'x'.normalize === undefined	J:true
+String.raw({raw: ['a', 'b']}, 1, 2)	S:a1b
+String.raw({raw: 'abc'}, '-', '+')	S:a-b+c
+String.fromCodePoint(0x1F600).length	J:2
+(function(){ try { String.fromCodePoint(-1) } catch (e) { return e.message } })()	S:-1 is not a valid code point
+(function(){ try { String.fromCodePoint(1.5) } catch (e) { return e.message } })()	S:1.5 is not a valid code point
+escape('éĀ @*_+-./')	S:%E9%u0100%20@*_+-./
+unescape('%u0100%e9%zz%')	S:Āé%zz%
+encodeURIComponent('\ud800')	E:URIError:malformed URI sequence
+(function(){ try { encodeURIComponent('\ud800') } catch (e) { return e.message } })()	S:malformed URI sequence
+(function(){ try { decodeURIComponent('%E0%A4%A') } catch (e) { return e.message } })()	S:malformed URI sequence
+decodeURI('%23%41')	S:%23A
+decodeURIComponent('%F0%9F%98%80')	S:😀
+(function(){ try { decodeURIComponent('%C0%80') } catch (e) { return e.message } })()	S:malformed URI sequence
+(function(){ try { decodeURIComponent('%ED%A0%80') } catch (e) { return e.message } })()	S:malformed URI sequence
+eval('0o17 + 0b11 + 0x1F + 1_000')	J:1049
+eval('"\\u{41}\\x41\\101"')	S:AAA
+(function(){ try { eval("'use strict'; '\\101'") } catch (e) { return e.message } })()	S:octal escape sequences can't be used in untagged template literals or in strict mode code
+(function(){ try { eval('0_1') } catch (e) { return e.message } })()	S:numeric separators '_' are not allowed in numbers that start with '0'
+(function(){ try { eval('1__0') } catch (e) { return e.message } })()	S:number cannot contain multiple adjacent underscores
+(function(){ try { eval('1_') } catch (e) { return e.message } })()	S:underscore can appear only between digits, not after the last digit in a number
+eval('08 + 09')	J:17
+eval('`a\\\n b`')	S:a b
+eval('a‌ = 1; a‌')	J:1
+eval('/*   */ 1')	J:1
+eval('<!-- x\n 2')	J:2
+(function(){ try { eval('`\\u{}`') } catch (e) { return e.message } })()	S:malformed Unicode character escape sequence
+(function(){ try { eval('"\\u{110000}"') } catch (e) { return e.message } })()	S:Unicode codepoint must not be greater than 0x10FFFF in escape sequence
+(function(){ try { eval('/a/gg') } catch (e) { return e.message } })()	S:invalid regular expression flag g
+(function(){ try { eval('/a') } catch (e) { return e.message } })()	S:unterminated regular expression literal
+(function(){ try { eval('"abc') } catch (e) { return e.message } })()	S:"" literal not terminated before end of script
+(function(){ try { eval('`abc') } catch (e) { return e.message } })()	S:`` literal not terminated before end of script
+(function(){ try { eval('1e') } catch (e) { return e.message } })()	S:missing exponent
+(function(){ try { eval('0x') } catch (e) { return e.message } })()	S:missing hexadecimal digits after '0x'
+(function(){ try { eval('3in []') } catch (e) { return e.message } })()	S:identifier starts immediately after numeric literal
+(function(){ try { eval('\\u0061wait: 1') ; return 'ok' } catch (e) { return e.message } })()	S:ok
+(function(){ try { eval('@') } catch (e) { return e.message } })()	S:illegal character U+0040
