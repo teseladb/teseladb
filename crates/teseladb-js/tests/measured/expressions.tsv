@@ -4573,3 +4573,114 @@ Promise.any(null) instanceof Promise	J:true
 Promise.prototype.then.call(Promise.prototype)	E:TypeError:Promise.prototype.then called on incompatible Promise.prototype
 Iterator.prototype.filter.call(null, x => x)	E:TypeError:null is not a non-null object
 Iterator.from({next() { return {done: true} }}).next()	J:{"done":true}
+new BinData(0, 'AA==').length()	J:1
+new BinData(0, 'AAA').length()	E:Error:invalid base64
+new BinData(0, 'AA').length()	E:Error:invalid base64
+new BinData(0, 'A').length()	E:Error:invalid base64
+new BinData(0, 'AAA=').length()	J:2
+new BinData(0, 'AA=A').length()	E:Error:Invalid base64 character
+new BinData(0, 'AAAA====').length()	E:Error:Invalid base64 character
+new BinData(0, '').length()	J:0
+new BinData(0, 'AA==AAAA').length()	E:Error:Invalid base64 character
+new BinData(0, ' AAAA').length()	E:Error:invalid base64
+new String(Symbol.iterator)	E:TypeError:can't convert symbol to string
+tojson(new BinData(4, 'AAAAAAAAAAAAAAAAAAAAAA=='))	S:UUID("00000000-0000-0000-0000-000000000000")
+tojson(new BinData(4, 'AAAA'))	S:BinData(4,"AAAA")
+tojson(new BinData(3, 'AAAAAAAAAAAAAAAAAAAAAA=='))	S:BinData(3,"AAAAAAAAAAAAAAAAAAAAAA==")
+new BinData(0, '***')	E:Error:invalid base64
+new BinData(0, 'AA=').length()	E:Error:invalid base64
+new BinData(0, 'AAAA').subtype()	J:0
+new BinData(0, 'AAAA').base64()	S:AAAA
+BinData.prototype.subtype.call({})	J:undefined
+BinData.prototype.length.call({})	J:undefined
+UUID().hex().length	J:32
+NumberLong(5).toNumber()	J:5
+NumberLong.prototype.toNumber.call({})	E:Error:Cannot call "toNumber" on object of type "Object"
+NumberInt.prototype.toNumber.call({})	E:Error:Cannot call "toNumber" on object of type "Object"
+Timestamp(1, 2).getTime()	J:1
+Timestamp(Infinity, 1)	J:{"$timestamp":{"t":0,"i":1}}
+Timestamp(1, -1)	E:Error:Timestamp increment must be non-negative and not greater than 4294967295, got -1
+Timestamp(2 ** 32, 1)	E:Error:Timestamp time (seconds) must be non-negative and not greater than 4294967295, got 4294967296
+Timestamp(1, 2 ** 32)	E:Error:Timestamp increment must be non-negative and not greater than 4294967295, got 4294967296
+Timestamp.prototype.getTime.call({})	J:undefined
+tojson(DBPointer('a.b', ObjectId('000000000000000000000000')))	S:DBPointer("a.b", ObjectId("000000000000000000000000"))
+tojson(DBPointer('ab', ObjectId('000000000000000000000000')))	S:DBPointer("ab", ObjectId("000000000000000000000000"))
+tojson(DBPointer('a.b.c', ObjectId('000000000000000000000000')))	S:DBPointer("a.b.c", ObjectId("000000000000000000000000"))
+tojson(DBRef('c', 1, 'db'))	S:DBRef("c", 1, "db")
+tojson(DBRef('c', 1, ''))	S:DBRef("c", 1)
+ObjectId.prototype.getTimestamp.call(ObjectId.prototype)	E:Error:Cannot call "getter" on prototype of "ObjectId"
+ObjectId.prototype.str	E:Error:Cannot call "getter" on prototype of "ObjectId"
+BinData.prototype.base64.call(BinData.prototype)	E:Error:Cannot call "base64" on prototype of "BinData"
+tojson(DBPointer.prototype)	S:DBPointer(undefined, undefined)
+(() => { let o = {}; for (let i = 0; i < 300; i++) { o = {a: o} } return tojson(o).length })()	J:11219
+tojson(Code('function () {}'))	S:{ "code" : "function () {}" }
+tojson(Code('x', {a: 1}))	S:{ "code" : "x", "scope" : { "a" : 1 } }
+(2n ** 64n + 1n) + 3n	E:TypeError:BigInt value can't be serialized in JSON
+3n + (2n ** 64n + 1n)	E:TypeError:BigInt value can't be serialized in JSON
+(2n ** 64n - 1n) + 1n	E:TypeError:BigInt value can't be serialized in JSON
+(2n ** 64n) * 0n	E:TypeError:BigInt value can't be serialized in JSON
+0n * 5n	E:TypeError:BigInt value can't be serialized in JSON
+5n - 2n ** 70n	E:TypeError:BigInt value can't be serialized in JSON
+-(2n ** 70n) - 1n	E:TypeError:BigInt value can't be serialized in JSON
+(2n ** 64n) / 3n	E:TypeError:BigInt value can't be serialized in JSON
+-7n >> 1n	E:TypeError:BigInt value can't be serialized in JSON
+-8n >> 1n	E:TypeError:BigInt value can't be serialized in JSON
+-(2n ** 70n) >> 3n	E:TypeError:BigInt value can't be serialized in JSON
+(2n ** 70n) >> 3n	E:TypeError:BigInt value can't be serialized in JSON
+1n << 0n	E:TypeError:BigInt value can't be serialized in JSON
+0n << 100n	E:TypeError:BigInt value can't be serialized in JSON
+1n << (2n ** 64n)	E:RangeError:BigInt is too large to allocate
+Number(2n ** 1100n)	J:null
+Number(2n ** 1030n)	J:null
+BigInt.asIntN(64, -1n)	E:TypeError:BigInt value can't be serialized in JSON
+BigInt.asUintN(65, -1n)	E:TypeError:BigInt value can't be serialized in JSON
+BigInt.asIntN(3, 4n)	E:TypeError:BigInt value can't be serialized in JSON
+BigInt.asIntN(0, 5n)	E:TypeError:BigInt value can't be serialized in JSON
+(2n ** 100n).toString(16)	S:10000000000000000000000000
+(-(2n ** 100n)).toString(7)	S:-322653455556104044451560330542514132
+uneval([1, [2, [3, [4, [5, [6]]]]]])	E:ReferenceError:uneval is not defined
+uneval({a: {b: {c: {d: {e: {}}}}}})	E:ReferenceError:uneval is not defined
+uneval({'a b': 1, 1: 2, _c: 3, $d: 4, 'é': 5})	E:ReferenceError:uneval is not defined
+uneval({get x() { return 1 }, set y(v) {}})	E:ReferenceError:uneval is not defined
+uneval(-0)	E:ReferenceError:uneval is not defined
+uneval([-0, 0])	E:ReferenceError:uneval is not defined
+tojson(-0)	S:0
+'‌‍'.length	J:2
+eval('var a‌ = 1; a‌')	J:1
+eval('var ٠ = 1')	E:SyntaxError:illegal character U+0660
+eval('var x٠ = 2; x٠')	J:2
+eval('var x² = 1')	E:SyntaxError:illegal character U+00B2
+eval('var xⅠ = 3; xⅠ')	J:3
+eval('`a\\u{zz}`')	E:SyntaxError:malformed Unicode character escape sequence
+eval('String.raw`a\\u{zz}`')	S:a\\u{zz}
+eval('/a/gg')	E:SyntaxError:invalid regular expression flag g
+eval('/a/x')	E:SyntaxError:invalid regular expression flag x
+eval('0123')	J:83
+eval('09.5')	J:9.5
+eval('08')	J:8
+eval('"use strict"; 08')	E:SyntaxError:"0"-prefixed octal literals are deprecated; use the "0o" prefix instead
+'abcabc'.replaceAll('b', '$`')	S:aacaabcac
+'abc'.replaceAll('', '-')	S:-a-b-c-
+'aaa'.replaceAll('aa', 'x')	S:xa
+'abc'.replace('b', '$0$1$10')	S:a$0$1$10c
+'abc'.at(-4)	J:undefined
+'abc'.at(3)	J:undefined
+String.raw({raw: {length: 2.5, 0: 'a', 1: 'b'}}, 1, 2)	S:a1b
+String.raw({raw: {length: -1}})	S:
+String.raw({raw: 'abc'}, 1)	S:a1bc
+String(Symbol('q'))	S:Symbol(q)
+new String(Symbol('q'))	E:TypeError:can't convert symbol to string
+Math.log1p(-0)	J:0
+Math.log1p(1e-20)	J:1e-20
+Math.log1p(0.5)	J:0.4054651081081644
+Math.log1p(-0.5)	J:-0.6931471805599453
+Math.log1p(1e300)	J:690.7755278982137
+Math.expm1(0.4)	J:0.49182469764127035
+Math.expm1(-0.4)	J:-0.32967995396436073
+Math.sumPrecise([1e308, 1e308, -1e308])	J:1e+308
+Math.sumPrecise([0.1, 0.2, 0.3])	J:0.6
+Math.sumPrecise([2 ** 53, 1, 1])	J:9007199254740994
+Math.sumPrecise([1, 2 ** -1074])	J:1
+Math.sumPrecise(5)	E:TypeError:5 is not iterable
+Math.sumPrecise([1, 'a'])	E:TypeError:values passed to Math.sumPrecise must be numbers
+Math.hypot(...[3, 4])	J:5
