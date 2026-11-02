@@ -49,15 +49,18 @@ pub mod indexes;
 pub mod js;
 pub mod kinds;
 pub mod list_catalog;
+pub mod local_db;
 pub mod maintenance;
 pub mod mapreduce;
 pub mod mutation;
 pub mod names;
+pub mod oplog;
 pub mod out_merge;
 pub mod parameters;
 pub mod partial_filter;
 pub(crate) mod plan_cache;
 pub(crate) mod plan_exec;
+pub mod presentation;
 pub mod primaries;
 pub mod profile;
 pub mod query;
@@ -65,6 +68,7 @@ pub mod query_settings;
 pub mod query_shape;
 pub mod query_stats;
 pub mod registry;
+pub mod replset;
 pub mod reshard;
 pub mod roles;
 pub mod router_info;
@@ -970,6 +974,7 @@ pub fn is_data_command(name: &str) -> bool {
         || users::NAMES.contains(&name)
         || roles::NAMES.contains(&name)
         || api_keys::NAMES.contains(&name)
+        || replset::NAMES.contains(&name)
 }
 
 /// Runs the command of `ctx`; `None` if it is not one of this module's.
@@ -1364,6 +1369,10 @@ fn dispatch<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
         other if api_keys::NAMES.contains(&other) => {
             let name = other.to_owned();
             api_keys::run(ctx).unwrap_or_else(|| Err(not_found_error(&name)))
+        }
+        other if replset::NAMES.contains(&other) => {
+            let name = other.to_owned();
+            replset::run(ctx, &name)
         }
         other if users::NAMES.contains(&other) => {
             let name = other.to_owned();

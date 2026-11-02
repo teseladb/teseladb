@@ -89,7 +89,7 @@ pub fn shard_description(
 const SHARD_KEY_FIELD: &str = "shardKey";
 
 /// Whether a catalog change's description is that of a `shardCollection`.
-fn is_shard(description: &[u8]) -> bool {
+pub(crate) fn is_shard(description: &[u8]) -> bool {
     RawDoc::from_bytes(description).is_ok_and(|d| d.get(SHARD_KEY_FIELD).is_some())
 }
 

@@ -1499,6 +1499,20 @@ impl Backend for TxnBackend<'_> {
         self.inner.config_settings_write(writes)
     }
 
+    fn group0_settings(
+        &mut self,
+        prefix: &[u8],
+    ) -> Result<std::collections::BTreeMap<Vec<u8>, Vec<u8>>, CommandError> {
+        self.inner.group0_settings(prefix)
+    }
+
+    fn group0_settings_write(
+        &mut self,
+        changes: Vec<teseladb_meta::command::SettingChange>,
+    ) -> Result<bool, CommandError> {
+        self.inner.group0_settings_write(changes)
+    }
+
     fn request_shutdown(&mut self) -> Result<(), CommandError> {
         self.inner.request_shutdown()
     }

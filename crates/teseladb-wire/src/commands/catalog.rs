@@ -439,6 +439,9 @@ pub fn purge<B: Backend + ?Sized>(
 /// `drop`.
 pub fn drop<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     let ns = target(ctx)?;
+    if super::oplog::is_oplog(&ns) {
+        return Err(super::oplog::drop_refused());
+    }
     names::check_droppable(&ns)?;
     if let Some(u) = uuid::expected(ctx.cmd, DROP)? {
         uuid::check(ctx.backend, &ns, u)?;
@@ -886,6 +889,19 @@ pub fn list_collections<B: Backend + ?Sized>(
         for name in super::config_db::LISTED {
             let shown = super::authorize::collection_shown(only.as_deref(), &db, name);
             let d = super::config_db::listed(name, name_only);
+            if shown && passes(filter.as_ref(), &d)? {
+                docs.push(d);
+            }
+        }
+    }
+    // `local.oplog.rs`, `startup_log` and `system.replset` (018 FR-009, FR-010).
+    if db == super::local_db::LOCAL_DB {
+        for d in super::local_db::listed(ctx.backend, name_only)? {
+            let name = match d.get("name") {
+                Some(Value::String(n)) => n.clone(),
+                _ => String::new(),
+            };
+            let shown = super::authorize::collection_shown(only.as_deref(), &db, &name);
             if shown && passes(filter.as_ref(), &d)? {
                 docs.push(d);
             }

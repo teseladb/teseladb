@@ -88,6 +88,12 @@ fn check_name(ns: &Namespace, system: bool) -> Result<(), CommandError> {
     if super::config_db::generated(ns) {
         return Err(super::config_db::not_writable(ns));
     }
+    if super::oplog::is_oplog(ns) {
+        return Err(super::oplog::write_refused());
+    }
+    if super::local_db::generated(ns) {
+        return Err(super::local_db::not_writable(ns));
+    }
     Ok(())
 }
 
@@ -128,16 +134,6 @@ pub fn full(ns: &Namespace) -> String {
 pub const LOCAL_DB: &str = "local";
 /// The databases whose collections a `refrouter` does not let clients drop.
 const UNDROPPABLE_DBS: [&str; 2] = ["admin", "config"];
-
-/// `IllegalOperation` for any command on the `local` database, as through a `refrouter`.
-pub fn check_db_reachable(db: &str) -> Result<(), CommandError> {
-    match db == LOCAL_DB {
-        true => {
-            Err(CommandError::new(ILLEGAL_OPERATION, "Can't use 'local' database through refrouter"))
-        }
-        false => Ok(()),
-    }
-}
 
 /// `IllegalOperation` for dropping a collection of `admin` or `config`.
 pub fn check_droppable(ns: &Namespace) -> Result<(), CommandError> {

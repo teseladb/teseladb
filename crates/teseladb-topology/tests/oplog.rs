@@ -4,18 +4,16 @@
 
 use teseladb_bson::{Document, Value};
 use teseladb_topology::oplog::{
-    APPLY_OPS_NS, NULL_OP_TIME, OPLOG_NS, OpType, Operation, OplogEntry, OplogError, TxnInfo,
-    drop_refused, transaction_entries, write_refused,
+    APPLY_OPS_NS, DROP_REFUSED, DROP_REFUSED_CODE, NULL_OP_TIME, OPLOG_NS, OpType, Operation,
+    OplogEntry, OplogError, TxnInfo, WRITE_REFUSED, transaction_entries,
 };
-use teseladb_topology::replset::OpTime;
-use teseladb_wire::error::INVALID_NAMESPACE;
-use teseladb_wire::hello::ClusterTime;
+use teseladb_topology::replset::{OpTime, Timestamp};
 
 const NS: &str = "ventas.pedidos";
 const UI: [u8; 16] = [0xe9; 16];
 
 fn at(increment: u32) -> OpTime {
-    OpTime { ts: ClusterTime { time: 1_793_359_031, increment }, term: 2 }
+    OpTime { ts: Timestamp { time: 1_793_359_031, increment }, term: 2 }
 }
 
 fn uuid() -> Value {
@@ -276,10 +274,8 @@ fn op_types_by_code() {
 /// `Location5255000`.
 #[test]
 fn writes_to_the_oplog_are_refused() {
-    let e = write_refused();
-    assert_eq!((e.code, e.errmsg.as_str()), (INVALID_NAMESPACE, "cannot write to local.oplog.rs"));
+    assert_eq!(WRITE_REFUSED, "cannot write to local.oplog.rs");
     assert_eq!(OPLOG_NS, "local.oplog.rs");
-    let e = drop_refused();
-    assert_eq!((e.code.code, e.code.name), (5_255_000, "Location5255000"));
-    assert_eq!(e.errmsg, "can't drop live oplog while replicating");
+    assert_eq!(DROP_REFUSED_CODE, 5_255_000);
+    assert_eq!(DROP_REFUSED, "can't drop live oplog while replicating");
 }

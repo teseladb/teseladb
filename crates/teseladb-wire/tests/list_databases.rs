@@ -121,10 +121,17 @@ fn sizes_read_large_collections_in_chunks() {
 
 #[test]
 fn local_admin_and_config_follow_the_rules_of_a_refrouter() {
-    use teseladb_wire::commands::names::{LOCAL_DB, check_db_reachable};
-    let e = check_db_reachable(LOCAL_DB).expect_err("local");
+    use teseladb_wire::commands::local_db::{LOCAL_DB, check_reachable};
+    let e = check_reachable(LOCAL_DB, "find", Some("c")).expect_err("local");
     assert_eq!((e.code.code, e.errmsg.as_str()), (20, "Can't use 'local' database through refrouter"));
-    assert!(check_db_reachable("db").is_ok());
+    let e = check_reachable(LOCAL_DB, "ping", None).expect_err("local");
+    assert_eq!(e.code.code, 20);
+    assert!(check_reachable("db", "find", Some("c")).is_ok());
+    // What TeselaDB serves of `local` in both presentations (018 FR-009, FR-010, DV-015).
+    for c in ["oplog.rs", "startup_log", "system.replset"] {
+        assert!(check_reachable(LOCAL_DB, "find", Some(c)).is_ok());
+    }
+    assert!(check_reachable(LOCAL_DB, "getMore", None).is_ok());
     let mut m = Mem::new();
     for db in ["admin", "config"] {
         let r = m.run(db, doc(&[("drop", Value::from("c"))]));

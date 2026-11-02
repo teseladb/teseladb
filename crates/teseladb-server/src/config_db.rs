@@ -75,6 +75,35 @@ pub fn documents(sm: &Group0Sm, coll: &str) -> Vec<Document> {
 /// `config.chunks`.
 const CHUNKS: &str = "chunks";
 
+/// The replica set presentation as node `me` takes part in it (018 FR-007), from this node's
+/// copy of Group 0: the set over the live nodes and the member `me` is; `None` in the `refrouter`
+/// presentation, or when `me` is not a member.
+pub fn replica_member(
+    sm: &Group0Sm,
+    me: NodeId,
+) -> Option<(teseladb_topology::replset::ReplicaSet, teseladb_topology::replset::MemberId)> {
+    let p = presentation(sm)?;
+    if p.mode != teseladb_topology::replset::PresentationMode::ReplicaSet {
+        return None;
+    }
+    let hosts: Vec<String> = live(sm).map(|n| text(&n.addrs.native_addr)).collect();
+    let rs = p.replica_set(&hosts).ok()?;
+    let host = text(&sm.nodes.get(&me)?.addrs.native_addr);
+    let member = rs.member(&host)?;
+    Some((rs, member))
+}
+
+/// The Group 0 setting of the cluster parameter `topologyPresentation`, read at every tick
+/// without building its key.
+const PRESENTATION_KEY: &[u8] = b"clusterParameter.topologyPresentation";
+
+/// The stored `topologyPresentation`, if it reads.
+pub fn presentation(sm: &Group0Sm) -> Option<teseladb_wire::commands::presentation::Presentation> {
+    use teseladb_wire::commands::presentation::Presentation;
+    let bytes = sm.settings.get(PRESENTATION_KEY)?;
+    Presentation::from_document(&Document::from(RawDoc::from_bytes(bytes).ok()?)).ok()
+}
+
 /// `config.chunks`: the chunks of every collection with a shard key over ranges `descs`, with
 /// their bounds in shard key values (018 FR-006).
 fn chunks(descs: &[teseladb_meta::group0::RangeDesc], sm: &Group0Sm) -> Vec<Document> {
@@ -356,6 +385,12 @@ mod tests {
         assert_eq!(listed[0].get("_id"), Some(&Value::from("app.s")));
         assert_eq!(listed[0].get("key"), Some(&Value::Document(Document::new().with("tienda", 1))));
         assert_eq!(listed[0].get("unique"), Some(&Value::Boolean(false)));
+    }
+
+    #[test]
+    fn the_presentation_key_is_the_parameter_setting() {
+        let name = teseladb_wire::commands::presentation::TOPOLOGY_PRESENTATION;
+        assert_eq!(PRESENTATION_KEY, [PARAMETER_PREFIX, name.as_bytes()].concat().as_slice());
     }
 
     #[test]
