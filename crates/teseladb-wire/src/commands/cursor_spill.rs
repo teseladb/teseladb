@@ -128,4 +128,24 @@ mod tests {
         drop(copy);
         assert!(mem.is_empty());
     }
+
+    #[test]
+    fn a_result_too_large_to_encode_or_a_damaged_run_is_an_internal_error() {
+        let mem = Arc::new(MemorySpill::default());
+        let store: Store = mem.clone();
+        let huge = Document::new().with("s", "x".repeat(teseladb_bson::MAX_SIZE + 1));
+        let mut docs: VecDeque<Document> = [huge].into_iter().collect();
+        assert_eq!(bytes_of(&docs), 0, "what cannot be encoded counts nothing");
+        let e = spill(&store, &mut docs).unwrap_err();
+        assert!(e.errmsg.contains("a cursor's result"), "{e:?}");
+        // A run whose length prefix announces a document that is not one.
+        let run = SpilledRun {
+            store: store.clone(),
+            run: store.write(&[6, 0, 0, 0, 0xff, 0xff]).unwrap(),
+        };
+        let e = refill(&run, 0, &mut VecDeque::new()).unwrap_err();
+        assert!(e.errmsg.contains("a cursor's run"), "{e:?}");
+        drop(run);
+        assert!(mem.is_empty());
+    }
 }

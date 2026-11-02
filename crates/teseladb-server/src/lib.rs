@@ -816,13 +816,9 @@ pub fn serve<D: teseladb_raftlog::Disk + Send + 'static>(
     let _ = out.write_all(ready_line(format, id, &node.cluster_id(), &peer).as_bytes());
     let _ = out.flush();
     log.info("node ready", &[("node_id", &id), ("cores", &node.cores())]);
-    // Where the cores run (012 FR-006).
-    if node.cpus().iter().any(Option::is_some) {
-        let cpus: Vec<String> = node
-            .cpus()
-            .iter()
-            .map(|c| c.map_or_else(|| "-".to_string(), |c| c.to_string()))
-            .collect();
+    // Where the cores run (012 FR-006): every core is pinned or none is (`affinity::core_cpus`).
+    let cpus: Vec<String> = node.cpus().iter().flatten().map(ToString::to_string).collect();
+    if !cpus.is_empty() {
         log.info("cores' CPUs", &[("cpus", &cpus.join(","))]);
     }
     log::mark_started();

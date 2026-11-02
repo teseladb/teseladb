@@ -305,7 +305,8 @@ impl SearchIndexes {
             let largest = self
                 .built
                 .iter()
-                .filter(|(id, b)| *id != keep && memory_of(b) > 0)
+                // An index on a view has no file to come back from: it stays.
+                .filter(|(id, b)| *id != keep && b.view.is_none() && memory_of(b) > 0)
                 .max_by_key(|(_, b)| memory_of(b))
                 .map(|(id, b)| (*id, memory_of(b)));
             let Some((id, bytes)) = largest else { return };
