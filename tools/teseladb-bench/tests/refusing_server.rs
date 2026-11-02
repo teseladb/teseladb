@@ -36,6 +36,14 @@ fn serve(mut s: TcpStream, transient: bool) {
             } else {
                 refusal
             }
+        } else if name == "listSearchIndexes" {
+            // The search index the scenarios create is ready at once.
+            let ready = Document::new().with("name", "default").with("status", "READY");
+            let cursor = Document::new()
+                .with("id", 0i64)
+                .with("ns", "bench.docs")
+                .with("firstBatch", vec![teseladb_bson::Value::Document(ready)]);
+            Document::new().with("cursor", cursor).with("ok", 1.0)
         } else {
             Document::new().with("ok", 1.0)
         };
