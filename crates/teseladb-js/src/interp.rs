@@ -174,6 +174,22 @@ impl Drop for Interp<'_> {
     }
 }
 
+/// Whether `new f()` may run: a class or plain function, a native constructor (one with a
+/// `prototype`, or `Proxy`), a bound constructor or a callable proxy.
+pub fn is_constructor(f: &Val) -> bool {
+    let Val::Obj(o) = f else { return false };
+    let b = o.borrow();
+    match &b.kind {
+        Kind::Func(Func::Closure { def, .. }) => {
+            !(def.arrow || def.generator || def.is_async || def.method)
+        }
+        Kind::Func(Func::Native(_, name)) => b.get_own("prototype").is_some() || &**name == "Proxy",
+        Kind::Func(Func::Bound(t, ..)) => is_constructor(&Val::Obj(t.clone())),
+        Kind::Proxy(_, callable) => *callable,
+        _ => false,
+    }
+}
+
 /// The name of a key for messages: `o.f`.
 fn callee_text(e: &Expr) -> String {
     match e {
@@ -1870,6 +1886,7 @@ impl<'c> Interp<'c> {
                 arrow: false,
                 generator: false,
                 is_async: false,
+                method: false,
                 is_ctor_of_derived: derived,
                 strict: true,
                 source: format!("class {} {{ }}", c.name.as_deref().unwrap_or("")).into(),
@@ -2128,8 +2145,7 @@ impl<'c> Interp<'c> {
                 let f = self.eval(callee, env)?;
                 let args = self.eval_args(args, env)?;
                 self.pos = *pos;
-                let arrow = matches!(&f, Val::Obj(o) if matches!(&o.borrow().kind, Kind::Func(Func::Closure { def, .. }) if def.arrow || def.generator || def.is_async));
-                if !f.is_callable() || arrow {
+                if !is_constructor(&f) {
                     let text = match &**callee {
                         Expr::Func(def) => def.source.to_string(),
                         other => callee_text(other),

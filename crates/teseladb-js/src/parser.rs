@@ -114,6 +114,7 @@ type Params = (Vec<(Pattern, Option<Expr>)>, Option<Pattern>);
 struct FnKind {
     generator: bool,
     is_async: bool,
+    method: bool,
 }
 
 struct Parser {
@@ -798,7 +799,7 @@ impl Parser {
         } else {
             None
         };
-        self.function_body(start, name, false, FnKind { generator, is_async })
+        self.function_body(start, name, false, FnKind { generator, is_async, method: false })
     }
 
     fn function_body(
@@ -843,6 +844,7 @@ impl Parser {
             strict,
             generator: kind.generator,
             is_async: kind.is_async,
+            method: kind.method,
             source: self.source_from(start),
         }))
     }
@@ -892,6 +894,7 @@ impl Parser {
             if self.is("(") {
                 let is_ctor =
                     !is_static && matches!(&key, PropName::Fixed(n) if &**n == "constructor");
+                let fk = FnKind { method: !is_ctor, ..fk };
                 let f = self.function_body(start, None, is_ctor && parent.is_some(), fk)?;
                 if is_ctor {
                     ctor = Some(f);
@@ -1023,6 +1026,7 @@ impl Parser {
             strict,
             generator: false,
             is_async,
+            method: false,
             source: self.source_from(start),
         })))
     }
@@ -1477,7 +1481,8 @@ impl Parser {
                 };
                 let key = self.prop_name()?;
                 if kind != PropKind::Value {
-                    let f = self.function_body(start, None, false, FnKind::default())?;
+                    let fk = FnKind { method: true, ..FnKind::default() };
+                    let f = self.function_body(start, None, false, fk)?;
                     props.push(ObjProp::Accessor(key, kind, f));
                 } else if self.eat(":") {
                     // Each property moves the position to its key, constants too (measured).
@@ -1491,7 +1496,8 @@ impl Parser {
                         PropName::Fixed(n) => Some(n.clone()),
                         PropName::Computed(_) => None,
                     };
-                    let f = self.function_body(start, name, false, fk)?;
+                    let f =
+                        self.function_body(start, name, false, FnKind { method: true, ..fk })?;
                     props.push(ObjProp::Value(key, Expr::Func(f)));
                 } else if let Some(name) = shorthand {
                     // `{a}` and, inside a pattern, `{a = 1}`.

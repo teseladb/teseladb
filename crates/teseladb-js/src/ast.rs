@@ -51,6 +51,8 @@ pub struct FuncDef {
     pub generator: bool,
     /// `async function`: a call gives a promise.
     pub is_async: bool,
+    /// A method, getter or setter of an object literal or a class: `new` refuses it.
+    pub method: bool,
     pub source: Rc<str>,
 }
 

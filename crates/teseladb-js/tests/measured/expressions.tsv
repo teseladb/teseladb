@@ -553,3 +553,22 @@ Object.getOwnPropertyDescriptor(Object.prototype, '__proto__').set.name	S:set __
 Object.setPrototypeOf(1, null)	J:1
 Object.setPrototypeOf({}, 1)	E:TypeError:Object.setPrototypeOf: expected an object or null, got number
 Object.setPrototypeOf(null, {})	E:TypeError:can't convert null to object
+Math.sumPrecise([{}])	E:TypeError:values passed to Math.sumPrecise must be numbers
+Math.sumPrecise(1)	E:TypeError:1 is not iterable
+[Math.sumPrecise([]), 1/Math.sumPrecise([]), 1/Math.sumPrecise([-0,-0]), 1/Math.sumPrecise([-0,0]), Math.sumPrecise([1e308,1e308,-1e308]), Math.sumPrecise([Infinity,-Infinity]), Math.sumPrecise([0.1,0.2,0.3]), Math.sumPrecise([5e-324,5e-324])]	J:[0,null,null,null,1e+308,null,0.6,1e-323]
+[Math.f16round(1.337), Math.f16round(65520), Math.f16round(65519.99), Math.f16round(5.960464477539063e-8), Math.f16round(2.98e-8), Math.f16round(-0.1), Math.f16round(NaN)]	J:[1.3369140625,null,65504,5.960464477539063e-8,0,-0.0999755859375,null]
+[Math.acosh(1), Math.acosh(0.5), Math.asinh(-0), Math.atanh(1), Math.atanh(0.5), Math.imul(0xffffffff, 5), Math.imul(3.7, -2), Math.round(-0.5), 1/Math.round(-0.2), Math.round(0.49999999999999994), Math.round(2.5), Math.round(-2.5), Math.hypot(NaN, Infinity), Math.hypot(), Math.hypot(3,4)]	J:[0,null,0,null,0.5493061443340548,-5,-6,0,null,0,3,-2,null,0,5]
+new Math.abs()	E:TypeError:Math.abs is not a constructor
+new Math.max(1)	E:TypeError:Math.max is not a constructor
+new JSON.parse('1')	E:TypeError:JSON.parse is not a constructor
+new Symbol.for('a')	E:TypeError:Symbol.for is not a constructor
+new parseInt('1')	E:TypeError:parseInt is not a constructor
+new (function(){}).bind()	E:TypeError:(intermediate value).bind is not a constructor
+new ({m(){}}).m()	E:TypeError:(intermediate value).m is not a constructor
+new (class { static m(){} }).m()	E:TypeError:(intermediate value).m is not a constructor
+new (Object.getOwnPropertyDescriptor({get a(){return 1}}, 'a').get)()	E:TypeError:Object.getOwnPropertyDescriptor(...).get is not a constructor
+new Proxy({}, {})	J:{}
+[1e-10, 1e-5, 0.1, 0.3, 0.5, 0.9, 1, 2, 3.5, 10, 1e5, 1e20, -0.5, -0.9, -1e-300].map(x => Math.log1p(x)).join()	S:9.999999999500001e-11,0.000009999950000333332,0.09531017980432487,0.26236426446749106,0.4054651081081644,0.6418538861723948,0.6931471805599453,1.0986122886681096,1.5040773967762742,2.3978952727983707,11.51293546492023,46.051701859880914,-0.6931471805599453,-2.302585092994046,-1e-300
+[0.1, 0.3, 0.49, 0.5, 0.7, 0.99, -0.2].map(x => Math.atanh(x)).join()	S:0.10033534773107558,0.30951960420311175,0.5360603366105666,0.5493061443340548,0.8673005276940531,2.6466524123622457,-0.2027325540540822
+[1e-9, 0.1, 1, 1.5, 2.5, 10, 1e10, 1e300, -3].map(x => Math.asinh(x)).join()	S:1e-9,0.09983407889920758,0.881373587019543,1.1947632172871094,1.6472311463710958,2.99822295029797,23.7189981105004,691.4686750787736,-1.8184464592320668
+[1, 1.0001, 1.5, 2, 2.5, 10, 1e10, 1e300].map(x => Math.acosh(x)).join()	S:0,0.014142017775251547,0.9624236501192069,1.3169578969248166,1.566799236972411,2.993222846126381,23.7189981105004,691.4686750787736

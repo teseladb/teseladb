@@ -699,6 +699,7 @@ fn delegate_default(d: Expr) -> Expr {
         strict: false,
         generator: true,
         is_async: false,
+        method: false,
         source: "function* () { [code] }".into(),
     };
     let call = Expr::Call {
