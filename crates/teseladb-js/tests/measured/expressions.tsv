@@ -5082,3 +5082,109 @@ Function.prototype.bind.call(1)	E:TypeError:Function.prototype.bind called on in
 (function(){ const f = function g(x = g){ return typeof x }; return f() })()	S:function
 (function(){ const f = function g(){ return eval('typeof g') }; return f() })()	S:function
 (function(){ class B extends null { constructor(){ return Object.create(B.prototype) } }; return typeof new B() })()	S:object
+(function(){ const t = Object.preventExtensions({}); const q = new Proxy(t, {getPrototypeOf(){ return Object.prototype }}); try { return String(Object.getPrototypeOf(q) === Object.prototype) } catch (e) { return 'E:' + e.message } })()	S:true
+(function(){ const t = Object.preventExtensions({}); const q = new Proxy(t, {setPrototypeOf(){ return true }}); try { return String(Object.setPrototypeOf(q, Object.prototype) === q) } catch (e) { return 'E:' + e.message } })()	S:true
+(function(){ const t = {}; Object.defineProperty(t, 'a', {get(){ return 1 }}); const q = new Proxy(t, {get(){ return 5 }}); try { return String(q.a) } catch (e) { return 'E:' + e.message } })()	S:5
+(function(){ const t = {}; Object.defineProperty(t, 'a', {set(v){}}); const q = new Proxy(t, {get(){ return undefined }}); try { return String(q.a) } catch (e) { return 'E:' + e.message } })()	S:undefined
+(function(){ const q = new Proxy(new Proxy({}, {}), {}); try { return String(Object.isExtensible(q) + ' ' + Object.isExtensible(Object.preventExtensions(q)) + ' ' + Object.isFrozen(q)) } catch (e) { return 'E:' + e.message } })()	S:true false true
+(function(){ const t = {}; Object.defineProperty(t, 'a', {value: 1}); const q = new Proxy(t, {getOwnPropertyDescriptor(){ return {configurable: false, enumerable: false} }}); try { return String(JSON.stringify(Object.getOwnPropertyDescriptor(q, 'a'))) } catch (e) { return 'E:' + e.message } })()	S:E:proxy can't report an incompatible property descriptor ('"a"', proxy must report the same value for the non-writable, non-configurable property)
+(function(){ const s = function(v){}; const t = {}; Object.defineProperty(t, 'a', {set: s}); const q = new Proxy(t, {getOwnPropertyDescriptor(){ return {set: s, configurable: false} }}); try { return String(typeof Object.getOwnPropertyDescriptor(q, 'a').set) } catch (e) { return 'E:' + e.message } })()	S:function
+(function(){ const q = new Proxy({}, {getOwnPropertyDescriptor(){ return undefined }}); try { return String(Object.getOwnPropertyDescriptor(q, 'zz')) } catch (e) { return 'E:' + e.message } })()	S:undefined
+(function(){ const q = new Proxy({a: 1}, {getOwnPropertyDescriptor(){ return undefined }}); try { return String(Object.getOwnPropertyDescriptor(q, 'a')) } catch (e) { return 'E:' + e.message } })()	S:undefined
+(function(){ const t = {}; Object.defineProperty(t, 'a', {get(){}}); const q = new Proxy(t, {getOwnPropertyDescriptor(){ return {get: Object.getOwnPropertyDescriptor(t, 'a').get, configurable: false} }}); try { return String(typeof Object.getOwnPropertyDescriptor(q, 'a').get) } catch (e) { return 'E:' + e.message } })()	S:function
+(function(){ const t = {}; Object.defineProperty(t, 'a', {value: 1}); const q = new Proxy(t, {getOwnPropertyDescriptor(){ return {value: 1, writable: false, configurable: false} }}); try { return String(Object.getOwnPropertyDescriptor(q, 'a').value) } catch (e) { return 'E:' + e.message } })()	S:1
+(function(){ let got; const t = {}; Object.defineProperty(t, 'a', {set(v){ got = v }}); const q = new Proxy(t, {set(){ return true }}); try { return String((q.a = 3, 'ok')) } catch (e) { return 'E:' + e.message } })()	S:ok
+(function(){ const t = {}; Object.defineProperty(t, 'a', {value: 1, writable: true}); const q = new Proxy(t, {set(){ return true }}); try { return String((q.a = 3, 'ok')) } catch (e) { return 'E:' + e.message } })()	S:ok
+(function(){ const t = {}; Object.defineProperty(t, 'a', {value: 1}); const q = new Proxy(t, {set(){ return true }}); try { return String((q.a = 1, 'ok')) } catch (e) { return 'E:' + e.message } })()	S:ok
+(function(){ const q = new Proxy({}, {defineProperty(){ return true }}); try { return String((Object.defineProperty(q, 'n', {value: 1, configurable: true}), 'ok')) } catch (e) { return 'E:' + e.message } })()	S:ok
+(function(){ const t = {}; Object.defineProperty(t, 'a', {value: 1, writable: true}); const q = new Proxy(t, {defineProperty(){ return true }}); try { return String((Object.defineProperty(q, 'a', {value: 2}), 'ok')) } catch (e) { return 'E:' + e.message } })()	S:ok
+(function(){ const t = {}; Object.defineProperty(t, 'a', {get(){}}); const q = new Proxy(t, {defineProperty(){ return true }}); try { return String((Object.defineProperty(q, 'a', {enumerable: false}), 'ok')) } catch (e) { return 'E:' + e.message } })()	S:ok
+(function(){ const q = new Proxy({a: 1}, {deleteProperty(){ return true }}); try { return String(delete q.a) } catch (e) { return 'E:' + e.message } })()	S:true
+(function(){ const q = new Proxy({a: 1, get b(){ return 1 }}, {}); try { return String((Object.freeze(q), Object.isFrozen(q))) } catch (e) { return 'E:' + e.message } })()	S:true
+(function(){ const t = {}; Object.defineProperty(t, 'a', {value: 1, writable: true}); Object.preventExtensions(t); const q = new Proxy(t, {}); try { return String(Object.isSealed(q) + ' ' + Object.isFrozen(q)) } catch (e) { return 'E:' + e.message } })()	S:true false
+(function(){ const t = Object.preventExtensions({a: 1}); const q = new Proxy(t, {ownKeys(){ return ['a'] }}); try { return String(Object.keys(q).join()) } catch (e) { return 'E:' + e.message } })()	S:a
+(function(){ const P = new Proxy(class { constructor(){ this.v = 1 } }, {construct(t, a, nt){ return new t() }}); class C extends P {}; try { return String(new C().v) } catch (e) { return 'E:' + e.message } })()	S:1
+(function(){ const P = new Proxy(function(){}, {construct(t, a, nt){ return {nt: nt === P} }}); try { return String(new P().nt) } catch (e) { return 'E:' + e.message } })()	S:true
+(function(){ const r = Proxy.revocable({}, {}); r.revoke(); try { return String(typeof r.proxy) } catch (e) { return 'E:' + e.message } })()	S:object
+(function(){ const r = Proxy.revocable(function(){}, {}); r.revoke(); try { return String(r.proxy()) } catch (e) { return 'E:' + e.message } })()	S:E:illegal operation attempted on a revoked proxy
+(function(){ const r = Proxy.revocable({}, {}); r.revoke(); try { return String(Object.keys(r.proxy)) } catch (e) { return 'E:' + e.message } })()	S:E:illegal operation attempted on a revoked proxy
+(function(){ const r = Proxy.revocable({}, {}); r.revoke(); try { return String('a' in r.proxy) } catch (e) { return 'E:' + e.message } })()	S:E:illegal operation attempted on a revoked proxy
+(function(){ const q = new Proxy({}, {get: 1}); try { return String(q.a) } catch (e) { return 'E:' + e.message } })()	S:E:proxy handler's get trap wasn't undefined, null, or callable
+(function(){ const q = new Proxy({}, {ownKeys(){ return 1 }}); try { return String(Object.keys(q)) } catch (e) { return 'E:' + e.message } })()	S:E:ownKeys trap must be an object, got 1
+(function(){ const q = new Proxy({}, {set(){ return false }}); try { return String((q.a = 1, 'sloppy')) } catch (e) { return 'E:' + e.message } })()	S:sloppy
+(function(){ const q = new Proxy({a: 1}, {deleteProperty(){ return false }}); try { return String(delete q.a) } catch (e) { return 'E:' + e.message } })()	S:false
+(function(){ try { return String(parseFloat('﻿ 1.5')) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:1.5
+(function(){ try { return String(parseInt('﻿12')) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:12
+(function(){ try { return String(parseFloat('  1.5e3x')) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:1500
+(function(){ try { return String(Number.isSafeInteger(2**53 - 1)) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:true
+(function(){ try { return String(Number.isFinite(Infinity)) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:false
+(function(){ try { return String(Number.isNaN(NaN)) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:true
+(function(){ try { return String((0.5).toFixed(0) + (1.5).toFixed(0) + (2.675).toFixed(2) + (8.345).toFixed(2)) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:122.678.35
+(function(){ try { return String((1e21).toFixed(2)) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:1e+21
+(function(){ try { return String((-1.5).toFixed(0)) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:-2
+(function(){ try { return String((0.000005).toFixed(5)) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:0.00001
+(function(){ try { return String(new Map([[1, 2]])[Symbol.iterator].name) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:entries
+(function(){ try { return String(new Set([1])[Symbol.iterator].name) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:values
+(function(){ try { return String(Map.prototype.get.call(new Set(), 1)) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:E:TypeError:get method called on incompatible Set
+(function(){ try { return String(Set.prototype.add.call(new Map(), 1)) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:E:TypeError:add method called on incompatible Map
+(function(){ try { return String(Map.prototype.set.call(new Set(), 1, 2)) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:E:TypeError:set method called on incompatible Set
+(function(){ try { return String(Map.prototype.delete.call(new Set(), 1)) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:E:TypeError:delete method called on incompatible Set
+(function(){ try { return String(Set.prototype.delete.call(new Map(), 1)) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:E:TypeError:delete method called on incompatible Map
+(function(){ try { return String(Map.prototype.clear.call(new Set())) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:E:TypeError:clear method called on incompatible Set
+(function(){ try { return String(Set.prototype.clear.call(new Map())) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:E:TypeError:clear method called on incompatible Map
+(function(){ try { return String(new Map([[1, 2]]).forEach.call(new Set(), () => 1)) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:E:TypeError:forEach method called on incompatible Set
+(function(){ try { return String(Timestamp(1, 2).getTime()) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:1
+(function(){ try { return String(Timestamp(1, 2).getInc()) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:2
+(function(){ try { return String(tojson(Timestamp())) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:Timestamp(0, 0)
+(function(){ try { return String(Timestamp(Infinity, 1)) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:Timestamp(0, 1)
+(function(){ try { return String(Timestamp(1, NaN).toString()) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:Timestamp(1, 0)
+(function(){ try { return String(tojson(new DBPointer('db.c', ObjectId('000000000000000000000000')))) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:DBPointer("db.c", ObjectId("000000000000000000000000"))
+(function(){ try { return String(new DBPointer('dbc', ObjectId('000000000000000000000000')).ns) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:dbc
+(function(){ try { return String(tojson(DBPointer.prototype)) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:DBPointer(undefined, undefined)
+(function(){ try { return String(tojson(ObjectId.prototype)) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:E:Error:Cannot call "toString" on prototype of "ObjectId"
+(function(){ try { return String(tojson(BinData.prototype)) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:E:Error:Cannot call "toString" on prototype of "BinData"
+(function(){ try { return String(ObjectId.prototype.getTimestamp()) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:E:Error:Cannot call "getter" on prototype of "ObjectId"
+(function(){ try { return String(BinData.prototype.length()) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:undefined
+(function(){ try { return String(tojson(new Date(NaN))) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:ISODate("0NaN-NaN-NaNTNaN:NaN:NaNZ")
+(function(){ try { return String(tojson({d: new Date(NaN)})) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:{ "d" : ISODate("0NaN-NaN-NaNTNaN:NaN:NaNZ") }
+(function(){ try { return String(Code('function(){ return 1 }').code) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:function(){ return 1 }
+(function(){ try { return String(tojson(new Code('x', {a: 1}))) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:{ "code" : "x", "scope" : { "a" : 1 } }
+(function(){ try { return String(bsonWoCompare({a: new Date(NaN)}, {a: new Date(0)})) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:0
+(function(){ try { return String(bsonWoCompare({a: 1}, {a: Infinity})) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:-1
+(function(){ try { return String(bsonWoCompare({a: NumberLong(1)}, {a: NumberInt(1)})) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:0
+(function(){ try { return String(bsonBinaryEqual({a: 1}, {a: NumberInt(1)})) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:false
+(function(){ try { return String(bsonUnorderedFieldsCompare({a: 1, b: 2}, {b: 2, a: 1})) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:0
+(function(){ try { return String(Object.keys(bsonObjToArray({a: 1, b: [2]})).length) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:2
+(function(){ try { return String(new Int8Array(new ArrayBuffer(8), 9)) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:E:RangeError:size of buffer is too small for Int8Array with byteOffset
+(function(){ try { return String(new Int16Array(new ArrayBuffer(8), 1)) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:E:RangeError:start offset of Int16Array should be a multiple of 2
+(function(){ try { return String(new Int16Array(new ArrayBuffer(7))) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:E:RangeError:buffer length for Int16Array should be a multiple of 2
+(function(){ try { return String(new Int16Array(new ArrayBuffer(8), 2, 4)) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:E:RangeError:attempting to construct out-of-bounds Int16Array on ArrayBuffer
+(function(){ try { return String(new Float32Array([1e40, -1e-50, 3.4028235677973366e38])) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:Infinity,0,Infinity
+(function(){ try { return String(new Float16Array([65520, 1e-8, 0.00006103515625, 65504, 5.96e-8, 3e-8])) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:Infinity,0,0.00006103515625,65504,5.960464477539063e-8,5.960464477539063e-8
+(function(){ try { return String(Array.from(new Uint8Array(new ArrayBuffer(4, {maxByteLength: 8})).subarray(1))) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:0,0,0
+(function(){ try { return String((function(){ const b = new ArrayBuffer(4, {maxByteLength: 8}); b.resize(9) })()) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:E:RangeError:byte length is larger than maximum byte length
+(function(){ try { return String((function(){ const b = new ArrayBuffer(4, {maxByteLength: 8}); const t = new Uint8Array(b, 2); b.resize(1); return t.length + ' ' + t[0] + ' ' + t.byteOffset })()) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:0 undefined 0
+(function(){ try { return String((function(){ const b = new ArrayBuffer(4, {maxByteLength: 8}); const t = new Uint8Array(b, 2); b.resize(1); t[0] = 5; return t.at(0) })()) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:E:TypeError:attempting to access outside the bounds of resized ArrayBuffer
+(function(){ try { return String(new Uint8Array([1, 2, 3]).set([4], 3)) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:E:RangeError:source array is too long
+(function(){ try { return String(new Uint8Array([1, 2, 3]).with(5, 1)) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:E:RangeError:invalid or out-of-range index
+(function(){ try { return String(new Uint8Array([1, 2, 3]).fill(9, NaN, 2).join()) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:9,9,3
+(function(){ try { return String(new Uint8Array(3).forEach.call([], x => x)) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:E:TypeError:forEach method called on incompatible Array
+(function(){ try { return String(new DataView(new ArrayBuffer(2)).setInt16(1, 1)) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:E:RangeError:offset is outside the bounds of the DataView
+(function(){ try { return String(new DataView(new ArrayBuffer(4)).getFloat16(0)) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:0
+(function(){ try { return String((function(){ const d = new DataView(new ArrayBuffer(4)); d.setFloat16(0, 1.5); return d.getUint16(0) })()) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:15872
+(function(){ try { return String(Object.getOwnPropertyDescriptor(new Uint8Array([7]), '0').value) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:7
+(function(){ try { return String(Object.getOwnPropertyDescriptor(new Uint8Array([7]), '-0')) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:undefined
+(function(){ try { return String(Object.defineProperty(new Uint8Array(1), '0', {value: 3})[0]) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:3
+(function(){ try { return String(Object.defineProperty(new Uint8Array(1), '0', {value: 3, configurable: false})[0]) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:E:TypeError:can't redefine non-configurable property 0
+(function(){ try { return String(Object.defineProperty(new Uint8Array(1), '5', {value: 3})) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:E:TypeError:can't define element for invalid or out-of-range index
+(function(){ try { return String((function(){ const b = new ArrayBuffer(4); const t = new Uint8Array(b); b.transfer(); return t.at(0) })()) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:E:TypeError:attempting to access detached ArrayBuffer
+(function(){ try { return String((function(){ const b = new ArrayBuffer(4); const t = new Uint8Array(b); b.transfer(); return t.byteOffset + ' ' + t.length + ' ' + t[0] })()) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:0 0 undefined
+(function(){ try { return String((function(){ const b = new ArrayBuffer(4); const t = new Uint8Array(b); b.transfer(); return t.join() })()) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:E:TypeError:attempting to access detached ArrayBuffer
+(function(){ try { return String((function(){ const b = new ArrayBuffer(4, {maxByteLength: 8}); const t = new Uint8Array(b, 2); b.resize(1); return t.join() })()) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:E:TypeError:attempting to access outside the bounds of resized ArrayBuffer
+(function(){ try { return String((function(){ const b = new ArrayBuffer(4, {maxByteLength: 8}); const t = new Uint8Array(b, 0, 4); b.resize(2); return t.fill(1) })()) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:E:TypeError:attempting to access outside the bounds of resized ArrayBuffer
+(function(){ try { return String((function(){ const b = new ArrayBuffer(4, {maxByteLength: 8}); const t = new Uint8Array(b, 2); b.resize(1); return [...t].length })()) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:E:TypeError:attempting to access outside the bounds of resized ArrayBuffer
+(function(){ try { return String((function(){ const b = new ArrayBuffer(4, {maxByteLength: 8}); const t = new Uint8Array(b, 2); b.resize(1); return t.byteLength })()) } catch (e) { return 'E:' + e.name + ':' + e.message } })()	S:0
+bsonWoCompare({a: new Date(NaN)}, {a: new Date(-8.64e15)})	J:1
+bsonWoCompare({a: new Date(NaN)}, {a: new Date(0)})	J:0
+bsonWoCompare({a: new Date(NaN)}, {a: new Date(1)})	J:-1
+bsonBinaryEqual({a: new Date(NaN)}, {a: new Date(0)})	J:true

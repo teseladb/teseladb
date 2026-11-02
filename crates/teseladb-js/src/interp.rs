@@ -2121,7 +2121,10 @@ impl<'c> Interp<'c> {
                         }
                         return Ok(out);
                     }
-                    Kind::Typed(t) => return Ok(crate::typed::elements(&t)),
+                    Kind::Typed(t) => {
+                        crate::typed::validate(self, v)?;
+                        return Ok(crate::typed::elements(&t));
+                    }
                     Kind::Set(items) => return Ok(items),
                     Kind::Map(entries) => {
                         let mut out = Vec::with_capacity(entries.len());

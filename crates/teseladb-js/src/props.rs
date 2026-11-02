@@ -230,9 +230,44 @@ fn forbidden(cur: &Prop, d: &Desc) -> bool {
             || d.value.as_ref().is_some_and(|v| !same_value(v, &cur.value)))
 }
 
+/// `[[DefineOwnProperty]]` of an element of a typed array (ECMA-262 §10.4.5.3), with the
+/// messages of a `refrouter` 9.0.4 (measured on 02-11): an element is writable, enumerable and
+/// configurable, and nothing else can be made of it.
+fn define_element(
+    it: &mut Interp,
+    t: &crate::typed::View,
+    i: Option<usize>,
+    key: &str,
+    d: &Desc,
+) -> R<()> {
+    let Some(i) = i.filter(|i| *i < t.length()) else {
+        return it.type_error("can't define element for invalid or out-of-range index");
+    };
+    if d.configurable == Some(false)
+        || d.enumerable == Some(false)
+        || d.is_accessor()
+        || d.writable == Some(false)
+    {
+        let k = shown_key(it, key);
+        return it.type_error(&format!("can't redefine non-configurable property {k}"));
+    }
+    if let Some(v) = &d.value {
+        let x = crate::typed::convert(it, t.ty, v)?;
+        crate::typed::write(t, i, &x);
+    }
+    Ok(())
+}
+
 /// ValidateAndApplyPropertyDescriptor for `o[key]`, throwing as `Object.defineProperty` does.
 pub fn define_own(it: &mut Interp, o: &ObjRef, key: &str, d: &Desc) -> R<()> {
     let is_array = matches!(o.borrow().kind, Kind::Array(_));
+    let typed = match &o.borrow().kind {
+        Kind::Typed(t) => crate::typed::numeric_key(key).map(|i| (t.clone(), i)),
+        _ => None,
+    };
+    if let Some((t, i)) = typed {
+        return define_element(it, &t, i, key, d);
+    }
     let cur = own_prop(o, key);
     let shown = shown_key(it, key);
     match &cur {

@@ -279,7 +279,17 @@ pub fn own_property(it: &mut Interp, o: &ObjRef, key: &str) -> R<Option<Prop>> {
             "proxy [[GetOwnProperty]] must return an object or undefined for property {k}"
         ));
     }
-    let d = crate::props::to_desc(it, &r)?;
+    let mut d = crate::props::to_desc(it, &r)?;
+    // CompletePropertyDescriptor before the checks: a descriptor without value has `undefined`.
+    if d.is_accessor() {
+        d.get = Some(d.get.clone().flatten());
+        d.set = Some(d.set.clone().flatten());
+    } else {
+        d.value = Some(d.value.clone().unwrap_or(Val::Undef));
+        d.writable = Some(d.writable.unwrap_or(false));
+    }
+    d.enumerable = Some(d.enumerable.unwrap_or(false));
+    d.configurable = Some(d.configurable.unwrap_or(false));
     let grows = extensible(it, &target)?;
     if let Some(why) = incompatible(grows, &d, current.as_ref()) {
         return it.type_error(&format!(
