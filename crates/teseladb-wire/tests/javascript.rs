@@ -216,3 +216,30 @@ fn functions_stored_in_system_js_are_globals() {
     );
     assert_eq!(first(&r).get("v"), Some(&Value::Boolean(true)));
 }
+
+#[test]
+fn a_promise_job_ends_the_call_with_the_trap_of_a_refrouter() {
+    let mut m = Mem::new();
+    load(&mut m);
+    for body in [
+        "function(){ try { Promise.resolve(1).then(() => 1) } catch (e) { return 'caught' } }",
+        "function(){ new FinalizationRegistry(() => {}); return 1 }",
+    ] {
+        let cmd = format!(
+            r#"{{"aggregate":"c","pipeline":[{{"$project":{{"v":{{"$function":{{"body":"{body}","args":[],"lang":"js"}}}}}}}}],"cursor":{{}}}}"#
+        );
+        let (code, msg) = error(&run(&mut m, &cmd));
+        assert_eq!(code, 11_542_340, "{msg}");
+        assert_eq!(
+            msg,
+            "Executor error during aggregate command on namespace: js.c :: caused by :: wasm trap: uninitialized element"
+        );
+    }
+    let r = run(
+        &mut m,
+        r#"{"find":"c","filter":{"$where":"Promise.resolve(1).then(()=>1); return true"}}"#,
+    );
+    let (code, msg) = error(&r);
+    assert_eq!(code, 11_542_340, "{msg}");
+    assert!(msg.ends_with(":: caused by :: wasm trap: uninitialized element"), "{msg}");
+}

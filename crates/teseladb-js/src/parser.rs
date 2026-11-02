@@ -8,8 +8,15 @@ use crate::lexer::{SyntaxError, Tok, Token, tokenize};
 
 /// Parses a whole script.
 pub fn parse_script(src: &str) -> Result<Vec<Stmt>, SyntaxError> {
-    let mut p =
-        Parser { toks: tokenize(src)?, i: 0, src: src.chars().collect(), depth: 0, strict: false };
+    let mut p = Parser {
+        toks: tokenize(src)?,
+        i: 0,
+        src: src.chars().collect(),
+        depth: 0,
+        strict: false,
+        in_gen: false,
+        in_async: false,
+    };
     let mut out = Vec::new();
     while !p.at_eof() {
         out.push(p.statement()?);
@@ -18,9 +25,16 @@ pub fn parse_script(src: &str) -> Result<Vec<Stmt>, SyntaxError> {
 }
 
 /// Parses one expression (a template's substitution).
-fn parse_expression(src: &str) -> Result<Expr, SyntaxError> {
-    let mut p =
-        Parser { toks: tokenize(src)?, i: 0, src: src.chars().collect(), depth: 0, strict: false };
+fn parse_expression(src: &str, in_gen: bool, in_async: bool) -> Result<Expr, SyntaxError> {
+    let mut p = Parser {
+        toks: tokenize(src)?,
+        i: 0,
+        src: src.chars().collect(),
+        depth: 0,
+        strict: false,
+        in_gen,
+        in_async,
+    };
     let e = p.expression()?;
     if !p.at_eof() {
         return p.unexpected();
@@ -34,6 +48,13 @@ const MAX_DEPTH: usize = 400;
 /// A function's parameters with their defaults, and its rest parameter.
 type Params = (Vec<(Pattern, Option<Expr>)>, Option<Pattern>);
 
+/// What kind of function a body belongs to.
+#[derive(Clone, Copy, Default)]
+struct FnKind {
+    generator: bool,
+    is_async: bool,
+}
+
 struct Parser {
     toks: Vec<Token>,
     i: usize,
@@ -41,6 +62,10 @@ struct Parser {
     depth: usize,
     /// Whether the code being read is strict.
     strict: bool,
+    /// Whether the code being read is the body of a generator (`yield` is an operator).
+    in_gen: bool,
+    /// Whether the code being read is the body of an async function (`await` is an operator).
+    in_async: bool,
 }
 
 /// Whether `body` starts with the directive `"use strict"`.
@@ -256,9 +281,18 @@ impl Parser {
             // An anonymous function at the start of a statement is an expression, as RefDb
             // reads a function's source.
             "function" if matches!(self.peek_at(1), Tok::Punct("(")) => self.expression_statement(),
+            "async"
+                if matches!(self.peek_at(1), Tok::Ident(w) if &**w == "function")
+                    && !self.toks[self.i + 1].newline_before =>
+            {
+                self.i += 2;
+                let f = self.function_rest(pos, false, true)?;
+                let name = f.name.clone().map_or_else(|| self.fail("missing name".into()), Ok)?;
+                Ok(Stmt::Func(name, f))
+            }
             "function" => {
                 self.i += 1;
-                let f = self.function_rest(pos, false)?;
+                let f = self.function_rest(pos, false, false)?;
                 let name = f.name.clone().map_or_else(|| self.fail("missing name".into()), Ok)?;
                 Ok(Stmt::Func(name, f))
             }
@@ -313,6 +347,17 @@ impl Parser {
             }
             "for" => {
                 self.i += 1;
+                if self.in_async && self.eat_word("await") {
+                    // `for await` reads its first value through a promise job: the engine of
+                    // RefDb 9.0 stops there (`await`), after evaluating what it iterates.
+                    return match self.for_rest()? {
+                        Stmt::ForIn { obj, .. } => Ok(Stmt::Block(vec![
+                            Stmt::Expr(obj),
+                            Stmt::Expr(Expr::Await(Box::new(Expr::Undefined))),
+                        ])),
+                        _ => self.fail("for await needs of".into()),
+                    };
+                }
                 self.for_rest()
             }
             "break" | "continue" => {
@@ -613,17 +658,21 @@ impl Parser {
         Ok((params, rest))
     }
 
-    /// `function` already read: an optional `*` (refused), the name, parameters and body.
-    fn function_rest(&mut self, start: Pos, method: bool) -> Result<Rc<FuncDef>, SyntaxError> {
-        if self.is("*") {
-            return self.fail("generators are not supported".into());
-        }
+    /// `function` (and `async` before it) already read: an optional `*`, the name, parameters
+    /// and body.
+    fn function_rest(
+        &mut self,
+        start: Pos,
+        method: bool,
+        is_async: bool,
+    ) -> Result<Rc<FuncDef>, SyntaxError> {
+        let generator = self.eat("*");
         let name = if !method && matches!(self.tok(), Tok::Ident(_)) && !self.is("(") {
             Some(self.ident()?)
         } else {
             None
         };
-        self.function_body(start, name, false)
+        self.function_body(start, name, false, FnKind { generator, is_async })
     }
 
     fn function_body(
@@ -631,25 +680,43 @@ impl Parser {
         start: Pos,
         name: Option<Name>,
         derived_ctor: bool,
+        kind: FnKind,
+    ) -> Result<Rc<FuncDef>, SyntaxError> {
+        let outer = (self.strict, self.in_gen, self.in_async);
+        self.in_gen = kind.generator;
+        self.in_async = kind.is_async;
+        let r = self.function_body_in(start, name, derived_ctor, kind);
+        (self.strict, self.in_gen, self.in_async) = outer;
+        r
+    }
+
+    fn function_body_in(
+        &mut self,
+        start: Pos,
+        name: Option<Name>,
+        derived_ctor: bool,
+        kind: FnKind,
     ) -> Result<Rc<FuncDef>, SyntaxError> {
         let (params, rest) = self.params()?;
         self.expect("{")?;
-        let outer = self.strict;
         // A directive is the first statement: it is read before the rest of the body.
         if matches!(self.tok(), Tok::Str(s) if &**s == "use strict") {
             self.strict = true;
         }
         let body = self.block_rest();
         let strict = self.strict || body.as_deref().is_ok_and(has_use_strict);
-        self.strict = outer;
+        let body =
+            if kind.generator && !kind.is_async { crate::generators::lower(body?) } else { body? };
         Ok(Rc::new(FuncDef {
             name,
             params,
             rest,
-            body: body?,
+            body,
             arrow: false,
             is_ctor_of_derived: derived_ctor,
             strict,
+            generator: kind.generator,
+            is_async: kind.is_async,
             source: self.source_from(start),
         }))
     }
@@ -690,11 +757,12 @@ impl Parser {
                 kind = if self.is_word("get") { PropKind::Get } else { PropKind::Set };
                 self.i += 1;
             }
+            let fk = self.method_prefix(kind);
             let key = self.prop_name()?;
             if self.is("(") {
                 let is_ctor =
                     !is_static && matches!(&key, PropName::Fixed(n) if &**n == "constructor");
-                let f = self.function_body(start, None, is_ctor && parent.is_some())?;
+                let f = self.function_body(start, None, is_ctor && parent.is_some(), fk)?;
                 if is_ctor {
                     ctor = Some(f);
                 } else {
@@ -788,15 +856,22 @@ impl Parser {
         }
     }
 
-    fn arrow(&mut self) -> Result<Expr, SyntaxError> {
-        let start = self.pos();
+    fn arrow(&mut self, start: Pos, is_async: bool) -> Result<Expr, SyntaxError> {
+        let outer = (self.strict, self.in_gen, self.in_async);
+        self.in_gen = false;
+        self.in_async = is_async;
+        let r = self.arrow_in(start, is_async);
+        (self.strict, self.in_gen, self.in_async) = outer;
+        r
+    }
+
+    fn arrow_in(&mut self, start: Pos, is_async: bool) -> Result<Expr, SyntaxError> {
         let (params, rest) = if let Tok::Ident(_) = self.tok() {
             (vec![(Pattern::Name(self.ident()?), None)], None)
         } else {
             self.params()?
         };
         self.expect("=>")?;
-        let outer = self.strict;
         let body = if self.eat("{") {
             if matches!(self.tok(), Tok::Str(s) if &**s == "use strict") {
                 self.strict = true;
@@ -806,7 +881,6 @@ impl Parser {
             self.assign().map(|e| vec![Stmt::Return(Some(e))])
         };
         let strict = self.strict;
-        self.strict = outer;
         let body = body?;
         Ok(Expr::Func(Rc::new(FuncDef {
             name: None,
@@ -816,6 +890,8 @@ impl Parser {
             arrow: true,
             is_ctor_of_derived: false,
             strict,
+            generator: false,
+            is_async,
             source: self.source_from(start),
         })))
     }
@@ -828,14 +904,22 @@ impl Parser {
     }
 
     fn assign_inner(&mut self, allow_in: bool) -> Result<Expr, SyntaxError> {
-        if self.is_word("async") && !matches!(self.peek_at(1), Tok::Punct("=>" | "." | "=")) {
-            return self.fail("async functions are not supported".into());
+        let start = self.pos();
+        if self.is_word("async")
+            && self.toks.get(self.i + 1).is_some_and(|t| !t.newline_before)
+            && matches!(self.peek_at(1), Tok::Ident(_) | Tok::Punct("("))
+        {
+            self.i += 1;
+            if self.is_arrow_ahead() {
+                return self.arrow(start, true);
+            }
+            self.i -= 1;
         }
-        if self.is_word("yield") {
-            return self.fail("generators are not supported".into());
+        if self.in_gen && self.is_word("yield") {
+            return self.yield_expr(allow_in);
         }
         if self.is_arrow_ahead() {
-            return self.arrow();
+            return self.arrow(start, false);
         }
         let left = self.conditional(allow_in)?;
         let op = match self.tok() {
@@ -968,9 +1052,13 @@ impl Parser {
                 self.i += 1;
                 Ok(Expr::Delete(Box::new(self.unary()?)))
             }
-            Tok::Ident(w) if &*w == "await" => {
-                self.fail("await is only valid in async functions".into())
+            Tok::Ident(w) if &*w == "await" && self.in_async => {
+                self.i += 1;
+                Ok(Expr::Await(Box::new(self.unary()?)))
             }
+            Tok::Ident(w) if &*w == "await" => self.fail(
+                "await is only valid in async functions, async generators and modules".into(),
+            ),
             _ => {
                 let e = self.lhs()?;
                 if let Tok::Punct(op @ ("++" | "--")) = self.tok().clone()
@@ -1115,7 +1203,7 @@ impl Parser {
     }
 
     fn substitution(&self, src: &str) -> Result<Expr, SyntaxError> {
-        parse_expression(src).map_err(|mut e| {
+        parse_expression(src, self.in_gen, self.in_async).map_err(|mut e| {
             let p = self.pos();
             e.line = p.line;
             e
@@ -1161,7 +1249,14 @@ impl Parser {
             }
             Tok::Punct("{") => self.object_literal()?,
             Tok::Ident(w) => match &*w {
-                "function" => Expr::Func(self.function_rest(pos, false)?),
+                "function" => Expr::Func(self.function_rest(pos, false, false)?),
+                "async"
+                    if matches!(self.tok(), Tok::Ident(w) if &**w == "function")
+                        && !self.toks[self.i].newline_before =>
+                {
+                    self.i += 1;
+                    Expr::Func(self.function_rest(pos, false, true)?)
+                }
                 "class" => Expr::Class(self.class_rest()?),
                 "this" => Expr::This,
                 "null" => Expr::Null,
@@ -1196,6 +1291,33 @@ impl Parser {
         })
     }
 
+    /// The `async` and `*` before a method's name, when they are not the name itself.
+    fn method_prefix(&mut self, kind: PropKind) -> FnKind {
+        let mut fk = FnKind::default();
+        if kind != PropKind::Value {
+            return fk;
+        }
+        if self.is_word("async")
+            && !matches!(self.peek_at(1), Tok::Punct("(" | ":" | "," | "}" | "=" | ";"))
+            && !self.toks[self.i + 1].newline_before
+        {
+            self.i += 1;
+            fk.is_async = true;
+        }
+        fk.generator = self.eat("*");
+        fk
+    }
+
+    /// `yield`, `yield expr` or `yield* expr` inside a generator.
+    fn yield_expr(&mut self, allow_in: bool) -> Result<Expr, SyntaxError> {
+        self.i += 1;
+        let delegate = !self.toks[self.i].newline_before && self.eat("*");
+        let ends = self.toks[self.i].newline_before && !delegate
+            || matches!(self.tok(), Tok::Punct(")" | "]" | "}" | "," | ";" | ":") | Tok::Eof);
+        let arg = if ends && !delegate { None } else { Some(Box::new(self.assign_in(allow_in)?)) };
+        Ok(Expr::Yield(arg, delegate))
+    }
+
     fn object_literal(&mut self) -> Result<Expr, SyntaxError> {
         let mut props = Vec::new();
         while !self.eat("}") {
@@ -1210,19 +1332,14 @@ impl Parser {
                     kind = if self.is_word("get") { PropKind::Get } else { PropKind::Set };
                     self.i += 1;
                 }
-                if self.is("*")
-                    || (self.is_word("async")
-                        && !matches!(self.peek_at(1), Tok::Punct("(" | ":" | "," | "}")))
-                {
-                    return self.fail("generators and async methods are not supported".into());
-                }
+                let fk = self.method_prefix(kind);
                 let shorthand = match self.tok() {
                     Tok::Ident(w) if !is_reserved(w) => Some(w.clone()),
                     _ => None,
                 };
                 let key = self.prop_name()?;
                 if kind != PropKind::Value {
-                    let f = self.function_body(start, None, false)?;
+                    let f = self.function_body(start, None, false, FnKind::default())?;
                     props.push(ObjProp::Accessor(key, kind, f));
                 } else if self.eat(":") {
                     props.push(ObjProp::Value(key, self.assign()?));
@@ -1231,7 +1348,7 @@ impl Parser {
                         PropName::Fixed(n) => Some(n.clone()),
                         PropName::Computed(_) => None,
                     };
-                    let f = self.function_body(start, name, false)?;
+                    let f = self.function_body(start, name, false, fk)?;
                     props.push(ObjProp::Value(key, Expr::Func(f)));
                 } else if let Some(name) = shorthand {
                     // `{a}` and, inside a pattern, `{a = 1}`.

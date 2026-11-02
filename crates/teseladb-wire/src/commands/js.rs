@@ -23,6 +23,9 @@ const WHERE_DISABLED: ErrorCode = ErrorCode { code: 6_108_304, name: "Location61
 pub const JS_DISABLED: ErrorCode = ErrorCode { code: 31_264, name: "Location31264" };
 /// A result that BSON cannot hold.
 const NOT_CONVERTIBLE: ErrorCode = ErrorCode { code: 16_662, name: "Location16662" };
+/// The trap of the WebAssembly build of RefDb 9.0's engine (a promise job, a
+/// `FinalizationRegistry`), measured on a `refrouter` 9.0.4 on 02-11.
+const WASM_TRAP: ErrorCode = ErrorCode { code: 11_542_340, name: "Location11542340" };
 const MAX_TIME_MS_EXPIRED: ErrorCode = ErrorCode { code: 50, name: "MaxTimeMSExpired" };
 
 /// The programs a thread keeps, at most this many texts.
@@ -199,6 +202,7 @@ fn run_full(
 fn runtime_error(what: &str, e: &JsError) -> MqlError {
     match e {
         JsError::Deadline => MqlError::new(MAX_TIME_MS_EXPIRED, "operation exceeded time limit"),
+        JsError::Trap => MqlError::new(WASM_TRAP, e.message()),
         JsError::NotConvertible(m) => MqlError::new(
             NOT_CONVERTIBLE,
             format!(

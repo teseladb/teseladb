@@ -14,15 +14,21 @@ mod bigints;
 mod bson;
 mod builtins;
 mod date;
+mod generators;
 mod interp;
+mod iterators;
 mod json;
 mod lexer;
 mod math;
 mod number;
 mod parser;
+mod promise;
+mod proxy;
 mod regex;
 mod strings;
+mod typed;
 mod value;
+mod weak;
 
 use std::cell::RefCell;
 use std::fmt;
@@ -73,6 +79,9 @@ pub enum JsError {
     Deadline,
     /// The result has a value BSON cannot hold (a symbol).
     NotConvertible(String),
+    /// The engine of RefDb 9.0 stops with a trap (`wasm trap: uninitialized element`): a
+    /// promise job or a `FinalizationRegistry`.
+    Trap,
     /// A function program was expected and the source is something else.
     NotAFunction,
 }
@@ -88,6 +97,7 @@ impl JsError {
             JsError::Steps => "uncaught exception: too many steps".into(),
             JsError::Deadline => "operation exceeded time limit".into(),
             JsError::NotAFunction => "the code is not a function".into(),
+            JsError::Trap => "wasm trap: uninitialized element".into(),
         }
     }
 }
@@ -296,6 +306,7 @@ fn error_of(it: &mut Interp, c: Ctrl) -> JsError {
         Ctrl::Fatal(Fatal::Steps) => JsError::Steps,
         Ctrl::Fatal(Fatal::Deadline) => JsError::Deadline,
         Ctrl::Fatal(Fatal::Convert(m)) => JsError::NotConvertible(m),
+        Ctrl::Fatal(Fatal::Trap) => JsError::Trap,
         Ctrl::Throw(v) => {
             // The heap may be full: the message is read without new allocations counting.
             it.budget.used.set(0);
@@ -313,7 +324,7 @@ fn error_of(it: &mut Interp, c: Ctrl) -> JsError {
             };
             JsError::Thrown { message, line: it.pos.line, col: it.pos.col }
         }
-        Ctrl::Return(_) | Ctrl::Break(_) | Ctrl::Continue(_) => JsError::Thrown {
+        Ctrl::Return(_) | Ctrl::Break(_) | Ctrl::Continue(_) | Ctrl::Suspend => JsError::Thrown {
             message: "unexpected control flow".into(),
             line: it.pos.line,
             col: it.pos.col,

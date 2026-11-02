@@ -41,7 +41,7 @@ fn parse(it: &mut Interp, _: &Val, a: &[Val]) -> R {
 fn revive(it: &mut Interp, holder: &Val, key: &str, f: &Val) -> R {
     let v = it.get(holder, key)?;
     if let Val::Obj(o) = &v {
-        for k in it.own_keys(o, true) {
+        for k in it.keys(o, true)? {
             let nv = revive(it, &v, &k, f)?;
             if matches!(nv, Val::Undef) {
                 o.borrow_mut().remove(&k);
@@ -366,10 +366,12 @@ fn write(
             }
             st.stack.push(o.clone());
             let inner = format!("{gap}{}", st.indent);
-            let is_array = matches!(o.borrow().kind, Kind::Array(_));
+            let is_array = crate::proxy::is_array(it, &v)?;
             let mut parts = Vec::new();
             if is_array {
-                for i in 0..it.array_len(o) {
+                let len = it.get(&v, "length")?;
+                let len = it.number_of(&len)? as usize;
+                for i in 0..len {
                     let mut s = String::new();
                     if !write(it, st, &v, &i.to_string(), &mut s, &inner)? {
                         s = "null".into();
@@ -379,7 +381,7 @@ fn write(
             } else {
                 let keys = match &st.allow {
                     Some(k) => k.clone(),
-                    None => it.own_keys(o, true),
+                    None => it.keys(o, true)?,
                 };
                 for k in keys {
                     let mut s = String::new();

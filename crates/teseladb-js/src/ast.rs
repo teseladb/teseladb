@@ -47,6 +47,10 @@ pub struct FuncDef {
     pub is_ctor_of_derived: bool,
     /// Strict mode code (a class, or `"use strict"` in it or around it).
     pub strict: bool,
+    /// `function*`: a call makes a generator.
+    pub generator: bool,
+    /// `async function`: a call gives a promise.
+    pub is_async: bool,
     pub source: Rc<str>,
 }
 
@@ -137,6 +141,10 @@ pub enum Expr {
     /// The end of an optional chain: a short circuit inside gives `undefined` here.
     OptChain(Box<Expr>),
     Typeof(Box<Expr>),
+    /// `yield x` (`false`) or `yield* x` (`true`) in a generator.
+    Yield(Option<Box<Expr>>, bool),
+    /// `await x` in an async function.
+    Await(Box<Expr>),
     Delete(Box<Expr>),
 }
 
@@ -179,4 +187,6 @@ pub enum Stmt {
     Switch(Expr, Vec<(Option<Expr>, Vec<Stmt>)>),
     Labeled(Name, Box<Stmt>),
     Empty,
+    /// A statement of a generator that holds a `yield` (see `generators.rs`).
+    Suspends(Box<Stmt>),
 }

@@ -19,6 +19,7 @@ pub fn install(it: &mut Interp, proto: &ObjRef) -> R<()> {
         ("concat", concat, 1),
         ("join", join, 1),
         ("toString", to_string, 0),
+        ("toLocaleString", to_locale_string, 0),
         ("reverse", reverse, 0),
         ("indexOf", index_of, 1),
         ("lastIndexOf", last_index_of, 1),
@@ -92,7 +93,24 @@ fn relative(it: &mut Interp, v: &Val, len: usize, default: usize) -> R<usize> {
     Ok(if n < 0.0 { (len as f64 + n).max(0.0) as usize } else { (n as usize).min(len) })
 }
 
+/// `push` on an object that is not an array (a proxy of one): through `length` and `set`.
+fn push_generic(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    let o = Val::Obj(it.object_of(this)?);
+    let n = it.get(&o, "length")?;
+    let mut n = it.number_of(&n)?;
+    n = if n.is_finite() && n > 0.0 { n.trunc() } else { 0.0 };
+    for x in a {
+        it.set(&o, &crate::number::to_string(n), x.clone())?;
+        n += 1.0;
+    }
+    it.set(&o, "length", Val::Num(n))?;
+    Ok(Val::Num(n))
+}
+
 fn push(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    if !matches!(this, Val::Obj(o) if matches!(o.borrow().kind, Kind::Array(_))) {
+        return push_generic(it, this, a);
+    }
     let o = array_obj(it, this)?;
     it.grow(&o, a.len())?;
     let n = with_vec(&o, |v| {
@@ -181,6 +199,24 @@ fn join(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 
 fn to_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     join(it, this, &[])
+}
+
+/// Each element's `toLocaleString()`, joined with commas.
+fn to_locale_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+    let v = items(it, this)?;
+    let mut out = String::new();
+    for (i, x) in v.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        if !x.is_nullish() {
+            let f = it.get(x, "toLocaleString")?;
+            let s = it.call(&f, x, &[])?;
+            out.push_str(&it.str_of(&s)?);
+        }
+        it.charge(0)?;
+    }
+    it.string(out)
 }
 
 fn reverse(it: &mut Interp, this: &Val, _: &[Val]) -> R {

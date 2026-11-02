@@ -17,6 +17,8 @@ pub enum Ctrl {
     Continue(Option<Name>),
     /// A limit that ends the invocation and cannot be caught.
     Fatal(Fatal),
+    /// A generator's `yield`: unwinds its body to `next`'s caller (see `generators.rs`).
+    Suspend,
 }
 
 /// The limits that end an invocation.
@@ -27,6 +29,9 @@ pub enum Fatal {
     Steps,
     /// A value without a BSON form, with RefDb's message.
     Convert(String),
+    /// What the engine of RefDb 9.0 cannot run and ends the call with a trap of its
+    /// WebAssembly build: a promise job (`then`, `await`) or a `FinalizationRegistry`.
+    Trap,
 }
 
 pub type R<T = Val> = Result<T, Ctrl>;
@@ -72,6 +77,26 @@ pub struct Realm {
     pub iter: ObjRef,
     pub errors: Vec<(Name, ObjRef)>,
     pub bson: Vec<(Name, ObjRef)>,
+    /// The prototypes of the other objects (`WeakMap`, `Proxy`, typed arrays…) by name.
+    pub protos: Vec<(&'static str, ObjRef)>,
+}
+
+impl Realm {
+    /// The prototype installed under `name`, or `Object.prototype`.
+    pub fn proto(&self, name: &str) -> ObjRef {
+        self.protos
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map_or_else(|| self.object.clone(), |(_, o)| o.clone())
+    }
+}
+
+/// An iteration in progress.
+pub enum IterRec {
+    /// The values, read ahead, and the next one's index.
+    Items(Vec<Val>, usize),
+    /// An iterator object and its `next`.
+    Proto { it: Val, next: Val },
 }
 
 /// The invocation's limits.
@@ -377,7 +402,7 @@ impl<'c> Interp<'c> {
             Val::Num(n) => number::to_string(*n),
             Val::BigInt(b) => format!("{b}n"),
             Val::Bool(b) => b.to_string(),
-            Val::Sym(s) => format!("Symbol({})", s.0),
+            Val::Sym(s) => format!("Symbol(\"{}\")", s.0),
             Val::Obj(o) => {
                 if o.borrow().is_callable() {
                     "function".into()
@@ -422,6 +447,9 @@ impl<'c> Interp<'c> {
         };
         let mut cur = Some(start);
         while let Some(o) = cur {
+            if crate::proxy::is_proxy(&o) {
+                return crate::proxy::get(self, &o, key, v);
+            }
             let found = {
                 let b = o.borrow();
                 match &b.kind {
@@ -437,6 +465,14 @@ impl<'c> Interp<'c> {
                     }
                     Kind::Str(s) if key == "length" => {
                         return Ok(Val::Num(s.encode_utf16().count() as f64));
+                    }
+                    Kind::Typed(t) => {
+                        if let Some(i) = crate::typed::numeric_key(key) {
+                            return Ok(match i {
+                                Some(i) if i < t.length() => crate::typed::read(t, i),
+                                _ => Val::Undef,
+                            });
+                        }
                     }
                     _ => {}
                 }
@@ -464,6 +500,22 @@ impl<'c> Interp<'c> {
             }
             return Ok(());
         };
+        if crate::proxy::is_proxy(o) {
+            return crate::proxy::set(self, o, key, value, target);
+        }
+        let typed = match &o.borrow().kind {
+            Kind::Typed(t) => crate::typed::numeric_key(key).map(|i| (t.clone(), i)),
+            _ => None,
+        };
+        if let Some((t, i)) = typed {
+            let x = crate::typed::convert(self, t.ty, &value)?;
+            if let Some(i) = i
+                && i < t.length()
+            {
+                crate::typed::write(&t, i, &x);
+            }
+            return Ok(());
+        }
         {
             let mut b = o.borrow_mut();
             if let Kind::Array(items) = &mut b.kind {
@@ -572,6 +624,9 @@ impl<'c> Interp<'c> {
             {
                 true
             }
+            Kind::Typed(t) if crate::typed::numeric_key(key).is_some() => {
+                matches!(crate::typed::numeric_key(key), Some(Some(i)) if i < t.length())
+            }
             _ => b.get_own(key).is_some(),
         }
     }
@@ -587,12 +642,64 @@ impl<'c> Interp<'c> {
         false
     }
 
+    /// The own string keys of `o` (only the enumerable ones when asked), through a proxy's
+    /// traps.
+    pub fn keys(&mut self, o: &ObjRef, only_enumerable: bool) -> R<Vec<Name>> {
+        if crate::proxy::is_proxy(o) {
+            return crate::proxy::keys(self, o, only_enumerable);
+        }
+        Ok(self.own_keys(o, only_enumerable))
+    }
+
+    /// Whether `o` or its prototypes have `key`, through a proxy's `has`.
+    pub fn has(&mut self, o: &ObjRef, key: &str) -> R<bool> {
+        let mut cur = Some(o.clone());
+        while let Some(c) = cur {
+            if crate::proxy::is_proxy(&c) {
+                return crate::proxy::has(self, &c, key);
+            }
+            if self.has_own(&c, key) {
+                return Ok(true);
+            }
+            cur = c.borrow().proto.clone();
+        }
+        Ok(false)
+    }
+
+    /// Whether `key` is an own property of `o`, through a proxy's traps.
+    pub fn has_own_property(&mut self, o: &ObjRef, key: &str) -> R<bool> {
+        if crate::proxy::is_proxy(o) {
+            return crate::proxy::has_own(self, o, key);
+        }
+        Ok(self.has_own(o, key))
+    }
+
+    /// `delete o[key]`.
+    pub fn delete_key(&mut self, o: &ObjRef, key: &str) -> R<bool> {
+        if crate::proxy::is_proxy(o) {
+            return crate::proxy::delete(self, o, key);
+        }
+        let mut b = o.borrow_mut();
+        if let Kind::Array(items) = &mut b.kind
+            && let Some(i) = array_index(key)
+        {
+            // Holes are not kept: the element becomes undefined.
+            if i < items.len() {
+                items[i] = Val::Undef;
+            }
+            return Ok(true);
+        }
+        b.remove(key);
+        Ok(true)
+    }
+
     /// The enumerable own string keys of `o`, indices first.
     pub fn own_keys(&self, o: &ObjRef, only_enumerable: bool) -> Vec<Name> {
         let b = o.borrow();
         let mut out: Vec<Name> = match &b.kind {
             Kind::Array(items) => (0..items.len()).map(|i| i.to_string().into()).collect(),
             Kind::Str(s) => (0..s.encode_utf16().count()).map(|i| i.to_string().into()).collect(),
+            Kind::Typed(t) => (0..t.length()).map(|i| i.to_string().into()).collect(),
             _ => Vec::new(),
         };
         let mut ints: Vec<(usize, Name)> = Vec::new();
@@ -618,6 +725,10 @@ impl<'c> Interp<'c> {
         let Val::Obj(fo) = f else {
             return self.type_error(&format!("{} is not a function", self.show(f)));
         };
+        if crate::proxy::is_proxy(fo) && fo.borrow().is_callable() {
+            self.step()?;
+            return crate::proxy::apply(self, fo, this, args);
+        }
         let func = match &fo.borrow().kind {
             Kind::Func(func) => func.clone(),
             _ => return self.type_error(&format!("{} is not a function", self.show(f))),
@@ -655,7 +766,7 @@ impl<'c> Interp<'c> {
         r
     }
 
-    fn new_env(&mut self, parent: Option<EnvRef>) -> EnvRef {
+    pub fn new_env(&mut self, parent: Option<EnvRef>) -> EnvRef {
         let e = Rc::new(RefCell::new(EnvRec { parent, ..EnvRec::default() }));
         self.envs.push(Rc::downgrade(&e));
         if self.envs.len() > 4096 {
@@ -716,9 +827,15 @@ impl<'c> Interp<'c> {
             self.bind(r, arr, &scope, Some(true))?;
         }
         self.hoist(&def.body, &scope, true)?;
+        if def.generator {
+            return crate::generators::make(self, fo, def, scope);
+        }
         let outer = std::mem::replace(&mut self.strict, def.strict);
         let r = self.exec_block_in(&def.body, &scope);
         self.strict = outer;
+        if def.is_async {
+            return crate::promise::settle_async(self, r);
+        }
         let v = match r {
             Ok(()) | Err(Ctrl::Break(_) | Ctrl::Continue(_)) => Val::Undef,
             Err(Ctrl::Return(v)) => v,
@@ -737,6 +854,10 @@ impl<'c> Interp<'c> {
         let Val::Obj(fo) = f else {
             return self.type_error(&format!("{} is not a constructor", self.show(f)));
         };
+        if crate::proxy::is_proxy(fo) && fo.borrow().is_callable() {
+            self.step()?;
+            return crate::proxy::construct(self, fo, args, new_target);
+        }
         let func = match &fo.borrow().kind {
             Kind::Func(func) => func.clone(),
             _ => return self.type_error(&format!("{} is not a constructor", self.show(f))),
@@ -994,7 +1115,18 @@ impl<'c> Interp<'c> {
                 },
             ));
         }
-        if !def.arrow {
+        if def.generator {
+            let (fp, pp) = if def.is_async {
+                ("AsyncGeneratorFunction", "AsyncGenerator")
+            } else {
+                ("GeneratorFunction", "Generator")
+            };
+            f.borrow_mut().proto = Some(self.realm.proto(fp));
+            let proto = self.alloc(Some(self.realm.proto(pp)), Kind::Ordinary)?;
+            f.borrow_mut().props.push(("prototype".into(), Prop::hidden(Val::Obj(proto))));
+        } else if def.is_async {
+            f.borrow_mut().proto = Some(self.realm.proto("AsyncFunction"));
+        } else if !def.arrow {
             let proto = self.object()?;
             self.define(&proto, "constructor", Prop::hidden(Val::Obj(f.clone())))?;
             f.borrow_mut().props.push(("prototype".into(), Prop::hidden(Val::Obj(proto))));
@@ -1045,7 +1177,7 @@ impl<'c> Interp<'c> {
                 if let Some(r) = rest {
                     let o = self.object()?;
                     if let Val::Obj(src) = &v {
-                        for k in self.own_keys(src, true) {
+                        for k in self.keys(src, true)? {
                             if !used.contains(&k) {
                                 let x = self.get(&v, &k)?;
                                 self.define(&o, &k, Prop::data(x))?;
@@ -1057,7 +1189,19 @@ impl<'c> Interp<'c> {
                 Ok(())
             }
             Pattern::Array(items, rest) => {
-                let all = self.iterate(&v)?;
+                // An iterator is read as far as the pattern needs and then closed.
+                let mut rec = self.open_iter(&v)?;
+                let mut all = Vec::new();
+                let want = if rest.is_some() { usize::MAX } else { items.len() };
+                while all.len() < want {
+                    match self.iter_step(&mut rec)? {
+                        Some(x) => all.push(x),
+                        None => break,
+                    }
+                }
+                if all.len() == want && rest.is_none() {
+                    self.iter_close(&rec)?;
+                }
                 for (i, item) in items.iter().enumerate() {
                     let Some((target, d)) = item else { continue };
                     let mut x = all.get(i).cloned().unwrap_or(Val::Undef);
@@ -1089,6 +1233,78 @@ impl<'c> Interp<'c> {
     }
 
     /// The values `v` iterates over (arrays, strings, maps, sets, iterators and iterables).
+    /// Starts iterating `v`: the values of the objects the interpreter knows, or the iterator
+    /// its `Symbol.iterator` gives, read one value at a time.
+    pub fn open_iter(&mut self, v: &Val) -> R<IterRec> {
+        let fast = match v {
+            Val::Str(_) => true,
+            Val::Obj(o) => matches!(
+                o.borrow().kind,
+                Kind::Array(_)
+                    | Kind::Typed(_)
+                    | Kind::Set(_)
+                    | Kind::Map(_)
+                    | Kind::Iter(_)
+                    | Kind::Arguments
+            ),
+            _ => false,
+        };
+        if fast {
+            return Ok(IterRec::Items(self.iterate(v)?, 0));
+        }
+        if v.is_nullish() {
+            let m = format!("can't access property Symbol.iterator of {}", self.show(v));
+            return self.type_error(&m);
+        }
+        let it_fn = self.get(v, "@@Symbol.iterator:0")?;
+        if !it_fn.is_callable() {
+            return self.type_error(&format!("{} is not iterable", self.show(v)));
+        }
+        let it = self.call(&it_fn, v, &[])?;
+        if !matches!(it, Val::Obj(_)) {
+            return self.type_error("result of the Symbol.iterator method is not an object");
+        }
+        let next = self.get(&it, "next")?;
+        Ok(IterRec::Proto { it, next })
+    }
+
+    /// The next value of an iteration, `None` at its end.
+    pub fn iter_step(&mut self, rec: &mut IterRec) -> R<Option<Val>> {
+        self.step()?;
+        match rec {
+            IterRec::Items(items, i) => {
+                let v = items.get(*i).cloned();
+                *i += 1;
+                Ok(v)
+            }
+            IterRec::Proto { it, next } => {
+                let (it, next) = (it.clone(), next.clone());
+                let r = self.call(&next, &it, &[])?;
+                if !matches!(r, Val::Obj(_)) {
+                    return self.type_error("iterator.next() returned a non-object value");
+                }
+                if self.get(&r, "done")?.truthy() {
+                    *rec = IterRec::Items(Vec::new(), 0);
+                    return Ok(None);
+                }
+                Ok(Some(self.get(&r, "value")?))
+            }
+        }
+    }
+
+    /// Ends an iteration early: calls the iterator's `return`.
+    pub fn iter_close(&mut self, rec: &IterRec) -> R<()> {
+        let IterRec::Proto { it, .. } = rec else { return Ok(()) };
+        let f = self.get(it, "return")?;
+        if f.is_callable() {
+            let r = self.call(&f, it, &[])?;
+            if !matches!(r, Val::Obj(_)) {
+                return self.type_error("iterator.return() returned a non-object value");
+            }
+        }
+        Ok(())
+    }
+
     pub fn iterate(&mut self, v: &Val) -> R<Vec<Val>> {
         match v {
             Val::Str(s) => Ok(s.chars().map(|c| Val::Str(c.to_string().into())).collect()),
@@ -1096,6 +1312,7 @@ impl<'c> Interp<'c> {
                 let kind = o.borrow().kind.clone();
                 match kind {
                     Kind::Array(items) => return Ok(items),
+                    Kind::Typed(t) => return Ok(crate::typed::elements(&t)),
                     Kind::Set(items) => return Ok(items),
                     Kind::Map(entries) => {
                         let mut out = Vec::with_capacity(entries.len());
@@ -1195,6 +1412,7 @@ impl<'c> Interp<'c> {
                 }
             }
             Stmt::Func(..) | Stmt::Empty => {}
+            Stmt::Suspends(s) => self.exec(s, env)?,
             Stmt::Class(n, c) => {
                 let v = self.class(c, env)?;
                 self.bind(&Pattern::Name(n.clone()), v, env, Some(true))?;
@@ -1343,28 +1561,7 @@ impl<'c> Interp<'c> {
         env: &EnvRef,
         label: Option<&Name>,
     ) -> R<()> {
-        let mut scope = self.new_env(Some(env.clone()));
-        let mut per_iteration = false;
-        match init {
-            Some(ForInit::Decl(kind, decls)) => {
-                per_iteration = *kind != DeclKind::Var;
-                self.exec(&Stmt::Decl(*kind, Vec::new()), &scope)?;
-                for (p, e) in decls {
-                    let v = match e {
-                        Some(e) => self.eval(e, &scope)?,
-                        None => Val::Undef,
-                    };
-                    match kind {
-                        DeclKind::Var => self.bind(p, v, env, None)?,
-                        k => self.bind(p, v, &scope, Some(*k == DeclKind::Let))?,
-                    }
-                }
-            }
-            Some(ForInit::Expr(e)) => {
-                self.eval(e, &scope)?;
-            }
-            None => {}
-        }
+        let (mut scope, per_iteration) = self.for_init(init, env)?;
         loop {
             if let Some(t) = test
                 && !self.eval(t, &scope)?.truthy()
@@ -1387,6 +1584,33 @@ impl<'c> Interp<'c> {
         Ok(())
     }
 
+    /// A `for` loop's scope with its declarations run, and whether each iteration copies it.
+    pub fn for_init(&mut self, init: Option<&ForInit>, env: &EnvRef) -> R<(EnvRef, bool)> {
+        let scope = self.new_env(Some(env.clone()));
+        let mut per_iteration = false;
+        match init {
+            Some(ForInit::Decl(kind, decls)) => {
+                per_iteration = *kind != DeclKind::Var;
+                self.exec(&Stmt::Decl(*kind, Vec::new()), &scope)?;
+                for (p, e) in decls {
+                    let v = match e {
+                        Some(e) => self.eval(e, &scope)?,
+                        None => Val::Undef,
+                    };
+                    match kind {
+                        DeclKind::Var => self.bind(p, v, env, None)?,
+                        k => self.bind(p, v, &scope, Some(*k == DeclKind::Let))?,
+                    }
+                }
+            }
+            Some(ForInit::Expr(e)) => {
+                self.eval(e, &scope)?;
+            }
+            None => {}
+        }
+        Ok((scope, per_iteration))
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn exec_for_in(
         &mut self,
@@ -1399,17 +1623,43 @@ impl<'c> Interp<'c> {
         label: Option<&Name>,
     ) -> R<()> {
         let v = self.eval(obj, env)?;
-        let items: Vec<Val> = if of {
-            self.iterate(&v)?
-        } else {
+        let mut rec =
+            if of { self.open_iter(&v)? } else { IterRec::Items(self.for_in_keys(&v)?, 0) };
+        while let Some(x) = self.iter_step(&mut rec)? {
+            let scope = self.new_env(Some(env.clone()));
+            let r = match decl {
+                Some(DeclKind::Var) => self.bind(target, x, env, None),
+                Some(k) => self.bind(target, x, &scope, Some(k == DeclKind::Let)),
+                None => self.bind(target, x, &scope, None),
+            }
+            .and_then(|()| loop_ctrl(self.exec(body, &scope), label));
+            match r {
+                Ok(false) => {}
+                Ok(true) => return self.iter_close(&rec),
+                Err(e) => {
+                    // A throw keeps its exception whatever `return` does.
+                    let closed = self.iter_close(&rec);
+                    if !matches!(e, Ctrl::Throw(_) | Ctrl::Fatal(_)) {
+                        closed?;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The keys `for…in` visits: the enumerable string keys of `v` and its prototypes.
+    pub fn for_in_keys(&mut self, v: &Val) -> R<Vec<Val>> {
+        Ok({
             match &v {
                 Val::Undef | Val::Null => Vec::new(),
                 _ => {
-                    let o = self.object_of(&v)?;
+                    let o = self.object_of(v)?;
                     let mut keys: Vec<Name> = Vec::new();
                     let mut cur = Some(o);
                     while let Some(c) = cur {
-                        for k in self.own_keys(&c, true) {
+                        for k in self.keys(&c, true)? {
                             if !keys.contains(&k) {
                                 keys.push(k);
                             }
@@ -1419,19 +1669,7 @@ impl<'c> Interp<'c> {
                     keys.into_iter().map(Val::Str).collect()
                 }
             }
-        };
-        for x in items {
-            let scope = self.new_env(Some(env.clone()));
-            match decl {
-                Some(DeclKind::Var) => self.bind(target, x, env, None)?,
-                Some(k) => self.bind(target, x, &scope, Some(k == DeclKind::Let))?,
-                None => self.bind(target, x, &scope, None)?,
-            }
-            if loop_ctrl(self.exec(body, &scope), label)? {
-                break;
-            }
-        }
-        Ok(())
+        })
     }
 
     // Classes.
@@ -1478,6 +1716,8 @@ impl<'c> Interp<'c> {
                     Vec::new()
                 },
                 arrow: false,
+                generator: false,
+                is_async: false,
                 is_ctor_of_derived: derived,
                 strict: true,
                 source: format!("class {} {{ }}", c.name.as_deref().unwrap_or("")).into(),
@@ -1553,6 +1793,12 @@ impl<'c> Interp<'c> {
         match e {
             Expr::Num(n) => Ok(Val::Num(*n)),
             Expr::BigInt(b) => Ok(Val::BigInt(b.clone())),
+            // The parser leaves a generator's `yield` only where `generators.rs` runs it.
+            Expr::Yield(..) => self.type_error("yield is only valid in generators"),
+            Expr::Await(x) => {
+                self.eval(x, env)?;
+                Err(Ctrl::Fatal(Fatal::Trap))
+            }
             Expr::Str(s) => Ok(Val::Str(s.clone())),
             Expr::Bool(b) => Ok(Val::Bool(*b)),
             Expr::Null => Ok(Val::Null),
@@ -1634,22 +1880,10 @@ impl<'c> Interp<'c> {
                 Expr::Member { obj, prop, .. } => {
                     let o = self.eval(obj, env)?;
                     let key = self.member_key(prop, env)?;
-                    if let Val::Obj(o) = &o {
-                        let mut b = o.borrow_mut();
-                        if let Kind::Array(items) = &mut b.kind
-                            && let Some(i) = array_index(&key)
-                        {
-                            if i + 1 == items.len() {
-                                // Holes are not kept: the last element becomes undefined.
-                                items[i] = Val::Undef;
-                            } else if i < items.len() {
-                                items[i] = Val::Undef;
-                            }
-                            return Ok(Val::Bool(true));
-                        }
-                        b.remove(&key);
+                    match &o {
+                        Val::Obj(o) => Ok(Val::Bool(self.delete_key(o, &key)?)),
+                        _ => Ok(Val::Bool(true)),
                     }
-                    Ok(Val::Bool(true))
                 }
                 _ => Ok(Val::Bool(true)),
             },
@@ -1738,7 +1972,7 @@ impl<'c> Interp<'c> {
                 self.pos = *pos;
                 let f = self.eval(callee, env)?;
                 let args = self.eval_args(args, env)?;
-                let arrow = matches!(&f, Val::Obj(o) if matches!(&o.borrow().kind, Kind::Func(Func::Closure { def, .. }) if def.arrow));
+                let arrow = matches!(&f, Val::Obj(o) if matches!(&o.borrow().kind, Kind::Func(Func::Closure { def, .. }) if def.arrow || def.generator || def.is_async));
                 if !f.is_callable() || arrow {
                     let text = match &**callee {
                         Expr::Func(def) => def.source.to_string(),
@@ -1890,7 +2124,7 @@ impl<'c> Interp<'c> {
                     let v = self.eval(e, env)?;
                     match &v {
                         Val::Obj(src) => {
-                            for k in self.own_keys(src, true) {
+                            for k in self.keys(src, true)? {
                                 let x = self.get(&v, &k)?;
                                 self.define(&o, &k, Prop::data(x))?;
                             }
@@ -2128,7 +2362,7 @@ impl<'c> Interp<'c> {
                     return self.type_error(&msg);
                 };
                 let k = self.key_of(x)?;
-                Val::Bool(self.has_property(o, &k))
+                Val::Bool(self.has(o, &k)?)
             }
             _ => return self.type_error(&format!("unknown operator {op}")),
         })
@@ -2254,6 +2488,7 @@ fn var_names(s: &Stmt, out: &mut Vec<Name>) {
             }
         }
         Stmt::Switch(_, cases) => cases.iter().flat_map(|(_, b)| b).for_each(|s| var_names(s, out)),
+        Stmt::Suspends(s) => var_names(s, out),
         _ => {}
     }
 }

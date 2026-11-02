@@ -19,6 +19,33 @@ pub(crate) fn new_target(this: &Val) -> Option<Val> {
     o.borrow().get_own("@@new").map(|p| p.value.clone())
 }
 
+/// How SpiderMonkey names the type of `this` in «… method called on incompatible X»: an
+/// object's class, a primitive's type.
+pub(crate) fn class_name(v: &Val) -> &'static str {
+    match v {
+        Val::Obj(o) => match &o.borrow().kind {
+            Kind::Array(_) => "Array",
+            Kind::Func(_) => "Function",
+            _ => "Object",
+        },
+        other => other.type_of(),
+    }
+}
+
+/// The key of the well-known symbol `Symbol.<name>`.
+pub(crate) fn well_known(name: &str) -> String {
+    format!("@@Symbol.{name}:0")
+}
+
+/// `proto[Symbol.toStringTag] = tag`, read by `Object.prototype.toString`.
+pub(crate) fn to_string_tag(it: &Interp, proto: &ObjRef, tag: &str) -> R<()> {
+    it.define(
+        proto,
+        &well_known("toStringTag"),
+        Prop { writable: false, ..Prop::hidden(Val::str(tag)) },
+    )
+}
+
 pub(crate) fn method(it: &Interp, o: &ObjRef, name: &str, f: NativeFn, arity: usize) -> R<()> {
     let fo = it.native(name, f, arity)?;
     it.define(o, name, Prop::hidden(Val::Obj(fo)))
@@ -68,6 +95,7 @@ pub fn realm(budget: &Rc<Budget>) -> Realm {
         iter: p(Kind::Ordinary),
         errors: Vec::new(),
         bson: Vec::new(),
+        protos: Vec::new(),
         function,
         object,
     }
@@ -102,6 +130,11 @@ pub fn install(it: &mut Interp) -> R<()> {
     collections(it, &g)?;
     symbol_builtins(it, &g)?;
     crate::bigints::install(it, &g)?;
+    crate::weak::install(it, &g)?;
+    crate::promise::install(it, &g)?;
+    crate::proxy::install(it, &g)?;
+    crate::typed::install(it, &g)?;
+    crate::iterators::install(it, &g)?;
     regexp_builtins(it, &g)?;
     crate::bson::install(it, &g)?;
     freeze_builtins(it);
@@ -262,7 +295,7 @@ fn object_ctor(it: &mut Interp, _: &Val, a: &[Val]) -> R {
 
 fn keys_of(it: &mut Interp, v: &Val) -> R<(Val, Vec<Name>)> {
     let o = it.object_of(v)?;
-    let keys = it.own_keys(&o, true);
+    let keys = it.keys(&o, true)?;
     Ok((Val::Obj(o), keys))
 }
 
@@ -308,13 +341,13 @@ fn obj_assign(it: &mut Interp, _: &Val, a: &[Val]) -> R {
 fn obj_has_own(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     let o = it.object_of(&arg(a, 0))?;
     let k = it.key_of(&arg(a, 1))?;
-    Ok(Val::Bool(it.has_own(&o, &k)))
+    Ok(Val::Bool(it.has_own_property(&o, &k)?))
 }
 
 fn obj_proto_has_own(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let o = it.object_of(this)?;
     let k = it.key_of(&arg(a, 0))?;
-    Ok(Val::Bool(it.has_own(&o, &k)))
+    Ok(Val::Bool(it.has_own_property(&o, &k)?))
 }
 
 fn obj_create(it: &mut Interp, _: &Val, a: &[Val]) -> R {
@@ -325,7 +358,7 @@ fn obj_create(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     };
     let o = it.alloc(proto, Kind::Ordinary)?;
     if let Val::Obj(props) = arg(a, 1) {
-        for k in it.own_keys(&props, true) {
+        for k in it.keys(&props, true)? {
             let d = it.get(&Val::Obj(props.clone()), &k)?;
             define_from(it, &o, &k, &d)?;
         }
@@ -416,7 +449,7 @@ fn obj_define_property(it: &mut Interp, _: &Val, a: &[Val]) -> R {
 
 fn obj_own_names(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     let o = it.object_of(&arg(a, 0))?;
-    let mut keys = it.own_keys(&o, false);
+    let mut keys = it.keys(&o, false)?;
     if matches!(o.borrow().kind, Kind::Array(_) | Kind::Str(_)) {
         keys.push("length".into());
     }
@@ -468,6 +501,23 @@ fn obj_group_by(it: &mut Interp, _: &Val, a: &[Val]) -> R {
 }
 
 fn obj_to_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+    if let Val::Obj(o) = this
+        && crate::proxy::is_proxy(o)
+    {
+        let tag = if crate::proxy::is_array(it, this)? {
+            "Array"
+        } else if o.borrow().is_callable() {
+            "Function"
+        } else {
+            "Object"
+        };
+        return it.string(format!("[object {tag}]"));
+    }
+    if !this.is_nullish()
+        && let Val::Str(tag) = it.get(this, &well_known("toStringTag"))?
+    {
+        return it.string(format!("[object {tag}]"));
+    }
     let tag = match this {
         Val::Undef => "Undefined",
         Val::Null => "Null",
@@ -523,7 +573,7 @@ fn function_builtins(it: &mut Interp, g: &ObjRef) -> R<()> {
 }
 
 /// `Function(args…, body)`.
-fn function_ctor(it: &mut Interp, _: &Val, a: &[Val]) -> R {
+pub(crate) fn function_ctor(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     let mut parts = Vec::new();
     for x in a {
         parts.push(it.str_of(x)?.to_string());
@@ -605,8 +655,8 @@ fn array_ctor(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     it.array(a.to_vec())
 }
 
-fn array_is_array(_: &mut Interp, _: &Val, a: &[Val]) -> R {
-    Ok(Val::Bool(matches!(arg(a, 0), Val::Obj(o) if matches!(o.borrow().kind, Kind::Array(_)))))
+fn array_is_array(it: &mut Interp, _: &Val, a: &[Val]) -> R {
+    Ok(Val::Bool(crate::proxy::is_array(it, &arg(a, 0))?))
 }
 
 fn array_from(it: &mut Interp, _: &Val, a: &[Val]) -> R {
@@ -744,6 +794,7 @@ fn number_builtins(it: &mut Interp, g: &ObjRef) -> R<()> {
         ("valueOf", num_value_of, 0),
         ("toLocaleString", num_to_string, 0),
         ("toPrecision", num_to_precision, 1),
+        ("toExponential", num_to_exponential, 1),
     ] {
         method(it, &proto, name, f, n)?;
     }
@@ -805,9 +856,63 @@ fn num_to_fixed(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let d = it.number_of(&arg(a, 0))?;
     let d = if d.is_nan() { 0.0 } else { d.trunc() };
     if !(0.0..=100.0).contains(&d) {
-        return Err(it.error("RangeError", "precision is out of range"));
+        let m = format!("precision {} out of range", number::to_string(d));
+        return Err(it.error("RangeError", &m));
     }
     it.string(number::to_fixed(n, d as usize))
+}
+
+/// `toExponential`: one digit, the point, `d` digits (as few as tell the number apart when `d`
+/// is undefined) and the exponent; a tie rounds away from zero.
+fn num_to_exponential(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    let n = this_number(it, this)?;
+    let d = match arg(a, 0) {
+        Val::Undef => None,
+        v => {
+            let d = it.number_of(&v)?;
+            Some(if d.is_nan() { 0.0 } else { d.trunc() })
+        }
+    };
+    if !n.is_finite() {
+        return it.string(number::to_string(n));
+    }
+    if let Some(d) = d
+        && !(0.0..=100.0).contains(&d)
+    {
+        let m = format!("precision {} out of range", number::to_string(d));
+        return Err(it.error("RangeError", &m));
+    }
+    let x = n.abs();
+    let text = match d {
+        None => format!("{x:e}"),
+        Some(d) => {
+            let d = d as usize;
+            // The exact digits decide a tie, which ECMAScript rounds up.
+            let exact = format!("{:.*e}", d + 1100, x);
+            let (mant, _) = exact.split_once('e').unwrap_or((&exact, "0"));
+            let rest = mant.replace('.', "");
+            let tail = rest.get(d + 1..).unwrap_or("");
+            let tie = tail.starts_with('5') && tail[1..].bytes().all(|b| b == b'0');
+            let r = format!("{:.*e}", d, x);
+            if tie && !rounded_up(&r, &rest, d) {
+                format!("{:.*e}", d, x + x * f64::EPSILON)
+            } else {
+                r
+            }
+        }
+    };
+    let (mant, exp) = text.split_once('e').unwrap_or((&text, "0"));
+    let exp: i32 = exp.parse().unwrap_or(0);
+    let sign = if n < 0.0 { "-" } else { "" };
+    let esign = if exp < 0 { "-" } else { "+" };
+    it.string(format!("{sign}{mant}e{esign}{}", exp.abs()))
+}
+
+/// Whether `rounded` (with `d` digits after the point) went up from the exact digits.
+fn rounded_up(rounded: &str, exact_digits: &str, d: usize) -> bool {
+    let (mant, _) = rounded.split_once('e').unwrap_or((rounded, "0"));
+    let r = mant.replace('.', "");
+    r.as_str() != exact_digits.get(..d + 1).unwrap_or("")
 }
 
 fn num_to_precision(it: &mut Interp, this: &Val, a: &[Val]) -> R {
@@ -816,8 +921,10 @@ fn num_to_precision(it: &mut Interp, this: &Val, a: &[Val]) -> R {
         return it.string(number::to_string(n));
     }
     let p = it.number_of(&arg(a, 0))?;
+    let p = if p.is_nan() { 0.0 } else { p.trunc() };
     if !(1.0..=100.0).contains(&p) {
-        return Err(it.error("RangeError", "precision is out of range"));
+        let m = format!("precision {} out of range", number::to_string(p));
+        return Err(it.error("RangeError", &m));
     }
     if !n.is_finite() {
         return it.string(number::to_string(n));
@@ -907,7 +1014,25 @@ fn errors(it: &mut Interp, g: &ObjRef) -> R<()> {
         c.borrow_mut().proto = Some(base.clone());
         it.realm.errors.push((name.into(), c));
     }
+    let p = it.alloc(Some(proto.clone()), Kind::Ordinary)?;
+    it.define(&p, "name", Prop::hidden(Val::str("AggregateError")))?;
+    it.define(&p, "message", Prop::hidden(Val::str("")))?;
+    let c = ctor(it, g, "AggregateError", aggregate_error_ctor, 2, &p)?;
+    c.borrow_mut().proto = Some(base);
+    it.realm.errors.push(("AggregateError".into(), c));
     Ok(())
+}
+
+/// `new AggregateError(errors, message, options)`.
+fn aggregate_error_ctor(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    let errors = it.iterate(&arg(a, 0))?;
+    let rest: Vec<Val> = a.iter().skip(1).cloned().collect();
+    let e = error_ctor(it, this, &rest)?;
+    if let Val::Obj(o) = &e {
+        let list = it.array(errors)?;
+        it.define(o, "errors", Prop::hidden(list))?;
+    }
+    Ok(e)
 }
 
 fn error_ctor(it: &mut Interp, this: &Val, a: &[Val]) -> R {
@@ -1223,8 +1348,19 @@ fn iter_self(_: &mut Interp, this: &Val, _: &[Val]) -> R {
 fn symbol_builtins(it: &mut Interp, g: &ObjRef) -> R<()> {
     let proto = it.realm.symbol.clone();
     let c = ctor(it, g, "Symbol", symbol_ctor, 0, &proto)?;
-    let iter = Val::Sym(Rc::new(("Symbol.iterator".into(), 0)));
-    it.define(&c, "iterator", Prop { writable: false, ..Prop::hidden(iter) })?;
+    for name in ["iterator", "asyncIterator", "toStringTag"] {
+        let sym = Val::Sym(Rc::new((format!("Symbol.{name}").into(), 0)));
+        it.define(&c, name, Prop { writable: false, ..Prop::hidden(sym) })?;
+    }
+    to_string_tag(it, &proto, "Symbol")?;
+    let (mp, sp) = (it.realm.map.clone(), it.realm.set.clone());
+    to_string_tag(it, &mp, "Map")?;
+    to_string_tag(it, &sp, "Set")?;
+    for name in ["Math", "JSON"] {
+        if let Val::Obj(o) = it.get(&Val::Obj(g.clone()), name)? {
+            to_string_tag(it, &o, name)?;
+        }
+    }
     method(it, &proto, "toString", symbol_to_string, 0)?;
     let arr = it.realm.array.clone();
     let values = it.get(&Val::Obj(arr.clone()), "values")?;

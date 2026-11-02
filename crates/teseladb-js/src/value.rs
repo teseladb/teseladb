@@ -155,6 +155,26 @@ pub enum Kind {
     RegExp(Name, Name),
     Bson(Bson),
     Arguments,
+    /// A `WeakMap`: its entries by key identity.
+    WeakMap(Vec<(ObjRef, Val)>),
+    /// A `WeakSet`.
+    WeakSet(Vec<ObjRef>),
+    /// A `WeakRef` and its target.
+    WeakRef(ObjRef),
+    /// A lazy iterator helper (`map`, `filter`…).
+    Helper(Rc<RefCell<crate::iterators::Helper>>),
+    /// An `ArrayBuffer`.
+    ArrayBuffer(crate::typed::BufRef),
+    /// A typed array.
+    Typed(crate::typed::View),
+    /// A `DataView`.
+    DataView(crate::typed::View),
+    /// A proxy: its target and handler (`None` once revoked) and whether it is callable.
+    Proxy(Option<(ObjRef, ObjRef)>, bool),
+    /// A generator object.
+    Generator(Rc<RefCell<crate::generators::GenState>>),
+    /// A promise.
+    Promise(Rc<RefCell<crate::promise::PromiseState>>),
     /// An iterator over a snapshot of values (`entries()`, `values()`, `keys()`).
     Iter(Rc<RefCell<(Vec<Val>, usize)>>),
 }
@@ -182,7 +202,7 @@ impl Obj {
     }
 
     pub fn is_callable(&self) -> bool {
-        matches!(self.kind, Kind::Func(_))
+        matches!(self.kind, Kind::Func(_) | Kind::Proxy(_, true))
     }
 }
 
