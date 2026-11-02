@@ -2563,3 +2563,840 @@ new Uint8Array([300, -1, 1.5]).toHex() + new Uint8Array([255, 0, 7]).toBase64()	
 (() => { try { 'abc'.includes(/a/) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:Invalid type: first can't be a Regular Expression
 ['İ'.toLowerCase(), 'ß'.toUpperCase(), 'ǅ'.toLowerCase(), 'İstanbul'.toLocaleLowerCase(), 'ﬀ'.toUpperCase(), 'Σ'.toLowerCase(), 'ΑΣ'.toLowerCase()].join('|')	S:i̇|SS|ǆ|i̇stanbul|FF|σ|ασ
 ['a'.localeCompare('b'), 'b'.localeCompare('a'), 'a'.localeCompare('a'), 'a'.localeCompare(), 'B'.localeCompare('a')].join()	S:-1,1,0,-20,-31
+[/\u{1F600}/u.test('😀'), /😀/u.test('😀'), /[😀]/u.test('😀'), /\uD83D/u.test('😀'), /[🐀-🟿]/u.test('😀')].join()	S:true,true,true,false,true
+[/a{2,}/.test('aaa'), /a{,2}/.test('a{,2}'), /a{2/.test('a{2'), /x{1}?/.exec('xx')[0], /\k<n>(?<n>a)/.test('a'), /\k/.test('k')].join()	S:true,true,true,x,true,true
+[/[\b]/.test('\b'), /[\B]/.test('B'), /\bfoo\b/.test('a foo b'), /\Bo/.test('foo'), /o\B/.test('fo'), /(a)\1/.test('aa'), /(a)\2/.test('a\x02'), /[\1]/.test('\x01')].join()	S:true,true,true,true,false,true,true,true
+[/(?:a|b)*?c/.exec('ababc')[0], /(a*)*b/.exec('aab')[0], /(a|)*b/.exec('ab')[0], /(?:)*x/.exec('x')[0], /(?=a)*/.exec('a') + ''].join('|')	S:ababc|aab|ab|x|
+[/ß/i.test('SS'), /[a-z]/i.test('K'), /K/i.test('k'), /K/iu.test('k'), /[K]/iu.test('K'), /ſ/i.test('s'), /ſ/iu.test('S')].join()	S:false,true,false,false,false,false,false
+['aBc'.replace(/b/i, x => x.toUpperCase() + '!'), 'abc'.replace(/(?<l>b)/g, (...a) => JSON.stringify(a[a.length - 1])), 'xyz'.replace(/y/g, '$&$&'), 'aaa'.replace(/a*?/g, '-'), 'abc'.replace(/(?:)/gu, '|')].join(' ')	S:aB!c a{"l":"b"}c xyyz -a-a-a- |a|b|c|
+['😀😀'.split(/(?:)/u).length, '😀😀'.split('').length, 'abc'.split(/(?=b)/), 'a,b'.split(/,/, -1), 'test'.split(/(t)/, 2)].map(x => JSON.stringify(x)).join()	S:2,4,["a","bc"],["a","b"],["","t"]
+[[...'a1b22'.matchAll(/\d+/g)].map(m => m.index + m[0]).join(';'), 'xAy'.search(/a/i), 'xy'.search('z'), 'abc'.match(/(?<q>b)/).groups.q, JSON.stringify('abc'.match(/z/g)), 'a.b'.match('.').index].join()	S:11;322,1,-1,b,null,0
+(() => { const r = /a/g; r.lastIndex = 5; return [r.test('aaa'), r.lastIndex, r.exec('a'), r.lastIndex].join() })()	S:false,0,a,1
+(() => { const r = /a/y; return [r.test('ba'), r.lastIndex, (r.lastIndex = 1, r.test('ba')), r.lastIndex].join() })()	S:false,0,true,2
+(() => { const r = /a/d; const m = r.exec('xa'); return JSON.stringify(m.indices) })()	S:[[1,2]]
+(() => { const r = /(?<z>a)(b)?/d; const m = r.exec('xa'); return JSON.stringify(m.indices) + JSON.stringify(m.indices.groups) })()	S:[[1,2],[1,2],null]{"z":[1,2]}
+(() => { try { new RegExp('(') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:unterminated parenthetical
+(() => { try { new RegExp('a', 'gg') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid regular expression flag g
+(() => { try { new RegExp('[b-a]') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid range in character class
+(() => { try { new RegExp('a**') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:nothing to repeat
+(() => { try { new RegExp('\\') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:\\ at end of pattern
+(() => { try { new RegExp('(?<a>x)(?<a>y)') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:duplicate capture group name in regular expression
+(() => { try { new RegExp('\\u{110000}', 'u') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid unicode escape in regular expression
+(() => { try { new RegExp('\\p{Foo}', 'u') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid property name in regular expression
+(() => { const r = /a/g; r[Symbol.replace] === RegExp.prototype[Symbol.replace]; return 'aXa'.replaceAll('a', 'b') + 'aXa'.replaceAll(/a/g, () => 'c') })()	S:bXbcXc
+(() => { const re = /x/; re.exec = () => null; return [re.test('x'), 'x'.replace(re, 'y'), 'x'.search(re)].join() })()	S:true,y,0
+(() => { const re = /x/; re.exec = () => ({ index: 0, 0: 'x', length: 1 }); return [re.test('q'), String('ab'.match(re))].join() })()	S:false,null
+(() => { const re = /x/; re.exec = () => 5; try { re.test('x') } catch (e) { return e.name + ':' + e.message } })()	J:undefined
+(() => { const r = /(a)|(b)/g; return 'b'.replace(r, '[$1|$2]') })()	S:[|b]
+RegExp.prototype.source + '|' + RegExp.prototype.flags + '|' + String(RegExp.prototype.global)	S:(?:)||undefined
+(() => { try { return RegExp.prototype.exec.call({}, 'a') } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:exec method called on incompatible Object
+new RegExp('/', 'g').source + new RegExp('\n').source + new RegExp('').source + RegExp(/a/g, 'i').flags + new RegExp(/a/g).flags	S:\\/\\n(?:)ig
+[/\x4/.test('x4'), /\x41/.test('A'), /\u41/.test('u41'), /\cJ/.test('\n'), /\c1/.test('\\c1'), /[\c_]/.test('\x1f'), /\c/.test('\\c')].join()	S:true,true,true,true,true,true,true
+[/^b/m.test('a\nb'), /a$/m.test('a\nb'), /a$/.test('a\nb'), /./s.test('\n'), /./.test(' '), /a.c/s.exec('a\rc')[0].length].join()	S:true,true,false,true,false,3
+(() => { const a = [1, , 3]; return [1 in a, a.length, Object.keys(a).join(), JSON.stringify(a), a.toString(), String(a.indexOf(undefined)), String(a.includes(undefined))].join('|') })()	S:false|3|0,2|[1,null,3]|1,,3|-1|true
+(() => { const a = []; a[3] = 1; return [Object.getOwnPropertyNames(a).join(), 0 in a, a.length, JSON.stringify(a), a.join('-')].join('|') })()	S:3,length|false|4|[null,null,null,1]|---1
+(() => { const a = [1, 2, 3]; delete a[1]; return [1 in a, a.length, Object.keys(a).join(), JSON.stringify(a)].join('|') })()	S:false|3|0,2|[1,null,3]
+(() => { const a = [1, 2]; a.length = 5; return [Object.keys(a).join(), 3 in a, a.length, JSON.stringify(a)].join('|') })()	S:0,1|false|5|[1,2,null,null,null]
+(() => { const a = [1, , 3]; const r = []; a.forEach((x, i) => r.push(i + ':' + x)); return r.join() })()	S:0:1,2:3
+(() => { const a = [1, , 3]; return a.map(x => x * 2).length + '|' + (1 in a.map(x => x * 2)) + '|' + Object.keys(a.map(x => x)).join() })()	S:3|false|0,2
+(() => { const a = [1, , 3]; return a.filter(() => true).length + '|' + a.reduce((s, x) => s + x, 0) + '|' + a.some(x => x === undefined) + '|' + a.every(x => x !== undefined) })()	S:2|4|false|true
+(() => { const a = [, 'a', , 'b']; const r = []; for (const k in a) r.push(k); return r.join() })()	S:1,3
+(() => { const a = [, 'a', , 'b']; const r = []; for (const v of a) r.push(String(v)); return r.join() })()	S:undefined,a,undefined,b
+(() => { const a = [3, , 1, , 2]; a.sort(); return JSON.stringify(a) + '|' + Object.keys(a).join() + '|' + a.length })()	S:[1,2,3,null,null]|0,1,2|5
+(() => { const a = [1, , 3]; a.reverse(); return Object.keys(a).join() + '|' + JSON.stringify(a) })()	S:0,2|[3,null,1]
+(() => { const a = [1, , 3]; return Object.keys(a.slice(0)).join() + '|' + Object.keys(a.concat([4, , 6])).join() + '|' + Object.keys([...a]).join() })()	S:0,2|0,2,3,5|0,1,2
+(() => { const a = [1, , 3]; return [a.findIndex(x => x === undefined), a.find(x => x === undefined), a.lastIndexOf(undefined), a.at(1)].map(String).join() })()	S:1,undefined,-1,undefined
+(() => { const a = new Array(3); return [a.length, 0 in a, Object.keys(a).length, JSON.stringify(a), String(a), Array.from(a).length, 0 in Array.from(a)].join('|') })()	S:3|false|0|[null,null,null]|,,|3|true
+(() => { const a = [1, , 3]; a.splice(0, 1); return Object.keys(a).join() + '|' + a.length })()	S:1|2
+(() => { const a = [1, , 3]; a.shift(); return Object.keys(a).join() + '|' + a.length })()	S:1|2
+(() => { const a = [1, , 3]; a.unshift(0); return Object.keys(a).join() + '|' + a.length })()	S:0,1,3|4
+(() => { const a = [1, , 3]; return Object.keys(a.flat()).join() + '|' + Object.keys([[1, , 2], , [3]].flat()).join() + '|' + Object.keys(a.toSorted()).join() + '|' + Object.keys(a.toReversed()).join() + '|' + Object.keys(a.with(0, 9)).join() + '|' + Object.keys(a.toSpliced(0, 0)).join() })()	S:0,1|0,1,2|0,1,2|0,1,2|0,1,2|0,1,2
+(() => { const a = [1, , 3]; return Object.keys(a.fill(0)).join() + '|' + JSON.stringify(Object.entries([1, , 3])) + '|' + JSON.stringify(Object.getOwnPropertyDescriptor([1, , 3], 1)) + '|' + [1, , 3].hasOwnProperty(1) })()	S:0,1,2|[["0",1],["2",3]]|undefined|false
+(() => { const a = [1, , 3]; Array.prototype[1] = 'P'; try { return a[1] + '|' + a.join() + '|' + (1 in a) } finally { delete Array.prototype[1] } })()	S:undefined|1,,3|false
+(() => { const a = [1, , 3]; return tojson(a) })()	S:[ 1, undefined, 3 ]
+(() => { const a = [1, , 3]; return [...a.keys()].join() + '|' + [...a.entries()].join(';') + '|' + [...a.values()].map(String).join() })()	S:0,1,2|0,1;1,;2,3|1,undefined,3
+(() => { const a = [1, , 3]; return Object.keys(a.copyWithin(0, 1)).join() + '|' + JSON.stringify([1, , 3].copyWithin(0, 1)) })()	S:1,2|[null,3,3]
+(() => { const a = [, , 1]; return a.indexOf(1) + '|' + [, 1].flatMap(x => [x]).length + '|' + Object.keys(Array.prototype.map.call({length: 3, 1: 'x'}, x => x)).join() })()	S:2|1|1
+(() => { const a = [1, , 3]; return Object.freeze(a) === a && Object.isFrozen(a) && !(1 in a) })()	J:true
+(() => { const a = [1, , 3]; a.pop(); return a.length + '|' + Object.keys(a).join() + '|' + JSON.stringify([1, , ].length) })()	S:2|0|2
+(() => { const a = []; a[5] = 1; a.length = 2; return a.length + '|' + Object.keys(a).join() })()	S:2|
+(() => { const a = [1, , 3]; return Array.isArray(a) + '|' + Object.keys(Object.assign({}, a)).join() + '|' + JSON.stringify({...a}) })()	S:true|0,2|{"0":1,"2":3}
+(() => { const [x, y = 'd', z] = [1, , 3]; return [x, y, z].join() })()	S:1,d,3
+(() => { const a = [1, , 3]; return Math.max(...a) + '|' + String(Math.max.apply(null, a)) })()	S:NaN|NaN
+(() => { 'use strict'; const a = [1, , 3]; Object.preventExtensions(a); try { a[1] = 2; return 'ok' } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:can't define property 1: Array is not extensible
+(() => { const a = [1, , 3]; Object.preventExtensions(a); a[1] = 2; return (1 in a) + '|' + a.length })()	S:false|3
+(() => { 'use strict'; const a = [1, , 3]; Object.freeze(a); try { a[1] = 2; return 'ok' } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:can't define property 1: Array is not extensible
+(() => { 'use strict'; const a = [1, , 3]; Object.seal(a); try { a[1] = 2; return 'ok' } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:can't define property 1: Array is not extensible
+(() => { try { return [, , ].reduce((s, x) => s + x) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:reduce of empty array with no initial value
+(() => { return [, 5, , 7].reduce((s, x) => s + x) + '|' + [, 5, , 7].reduceRight((s, x, i) => s + ':' + i + x) })()	S:12|7:15
+(() => { const a = [1, , ]; const p = a.pop(); return String(p) + '|' + a.length + '|' + Object.keys(a).join() })()	S:undefined|1|0
+(() => { const a = [, 2]; const p = a.shift(); return String(p) + '|' + a.length + '|' + Object.keys(a).join() })()	S:undefined|1|0
+(() => { const a = [3, undefined, , 1]; a.sort(); return a.length + '|' + Object.keys(a).join() + '|' + a.map(String).join() })()	S:4|0,1,2|1,3,undefined,
+(() => { const a = [3, , 1]; a.sort((x, y) => y - x); return Object.keys(a).join() + '|' + JSON.stringify(a) })()	S:0,1|[3,1,null]
+(() => Object.values([1, , 3]).join() + '|' + Object.keys(Array.prototype.slice.call({length: 3, 2: 'z'})).join() + '|' + Object.keys(Array.prototype.concat.call([], [, 1])).join())()	S:1,3|2|1
+(() => { const a = [1, , 3]; const r = a.splice(0, 2); return Object.keys(r).join() + '|' + r.length + '|' + Object.keys(a).join() })()	S:0|2|0
+(() => { const a = [1, , 3]; return [a.indexOf(undefined), [, undefined].indexOf(undefined), [undefined, , ].lastIndexOf(undefined), a.findLast(x => x === undefined), a.findLastIndex(x => x === undefined)].map(String).join() })()	S:-1,1,0,undefined,1
+(() => { const a = [, 1]; const r = []; a.some((x, i) => { r.push(i); return false }); a.every((x, i) => { r.push(i); return true }); return r.join() })()	S:1,1
+(() => { const a = [1, , 3]; return a.flatMap(x => [x, x]).join() + '|' + Object.keys(a.filter(x => true)).join() })()	S:1,1,3,3|0,1
+(() => { const a = [1, , 3]; return a.toLocaleString() + '|' + a.join() + '|' + [null, , undefined].join('-') })()	S:1,,3|1,,3|--
+(() => { const a = [1, , 3]; return Object.getOwnPropertyNames(a).join() + '|' + Object.hasOwn(a, 1) })()	S:0,2,length|false
+(() => { const a = [1, , 3]; Object.defineProperty(a, 1, { value: 7, enumerable: false }); return Object.keys(a).join() + '|' + (1 in a) + '|' + a[1] })()	S:0,2|true|7
+(() => { const a = [1, 2, 3]; Object.defineProperty(a, 1, { get() { return 9 }, configurable: true }); delete a[1]; return Object.keys(a).join() + '|' + (1 in a) + '|' + a.length })()	S:0,2|false|3
+(() => { const a = [1, , 3]; const s = new Set(a); return s.size + '|' + [...s].map(String).join() + '|' + Array.from(a.entries()).join(';') })()	S:3|1,undefined,3|0,1;1,;2,3
+(() => { const a = []; a.length = 3; a.push(1); return Object.keys(a).join() + '|' + a.length + '|' + a.includes(undefined) })()	S:3|4|true
+(() => { const a = Array(2); a.unshift(0); return Object.keys(a).join() + '|' + a.length })()	S:0|3
+(() => { const a = Array.of(1, 2); a.length = 4; a.reverse(); return Object.keys(a).join() })()	S:2,3
+(() => { const a = [1, , 3]; let n = 0; for (const k in a) n++; return n + '|' + Object.entries(a).length })()	S:2|2
+(() => { const a = new Array(5); a.fill(1, 1, 3); return Object.keys(a).join() })()	S:1,2
+(() => { const a = [1, , 3]; return String([a, [, ]]) + '|' + JSON.stringify([a, [, ]]) })()	S:1,,3,|[[1,null,3],[null]]
+(() => { const a = [, 'x']; const o = Object.fromEntries([[0, 'a']]); return a.concat(o).length + '|' + Object.keys([].concat(a)).join() })()	S:3|1
+(() => { const a = [1, , 3]; return Object.keys(Array.prototype.map.call(a, x => x)).join() + '|' + Object.keys(a.slice(1)).join() + '|' + Object.keys(a.slice(-2)).join() })()	S:0,2|1|1
+(() => { const a = [1, , 3, 4]; Object.defineProperty(a, 0, { get() { return 'g' }, configurable: true }); a.shift(); return Object.keys(a).join() + '|' + a.length + '|' + JSON.stringify(a) })()	S:1,2|3|[null,3,4]
+(() => { const a = [1, , 3, 4]; Object.defineProperty(a, 0, { get() { return 'g' }, configurable: true }); a.reverse(); return Object.keys(a).join() + '|' + JSON.stringify(a) })()	E:TypeError:setting getter-only property 0
+(() => { const a = [5, , 3, 4]; Object.defineProperty(a, 3, { value: 1, writable: true, configurable: true, enumerable: true }); a.sort(); return Object.keys(a).join() + '|' + JSON.stringify(a) })()	S:0,1,2|[1,3,5,null]
+(() => { const a = [1, , 3]; Object.defineProperty(a, 2, { get() { return 'g' }, configurable: true }); a.pop(); return Object.keys(a).join() + '|' + a.length })()	S:0|2
+(() => { function f() { return arguments.length + ':' + (1 in arguments) } return f(...[1, , 3]) })()	S:3:true
+(() => Array.from(new Uint8Array([1, , 3])).join() + '|' + new Float64Array([1, , 3]).join())()	S:1,0,3|1,NaN,3
+(() => { const a = [1, , 3]; const b = a.slice(); b[1] = 2; return Object.keys(a).join() + '|' + Object.keys(b).join() })()	S:0,2|0,1,2
+(() => { const p = new Proxy([1, , 3], {}); return Object.keys(p).join() + '|' + (1 in p) + '|' + p.map(x => x).length + '|' + Object.keys(Array.prototype.filter.call(p, () => true)).join() })()	S:0,2|false|3|0,1
+(() => { const r = []; new Proxy([1, , 3], { has(t, k) { r.push('has:' + String(k)); return k in t } }).forEach(() => {}); return r.join() })()	S:has:0,has:1,has:2
+(() => { const a = [1, , 3]; return JSON.stringify(Object.getOwnPropertyDescriptors(a)) })()	S:{"0":{"value":1,"writable":true,"enumerable":true,"configurable":true},"2":{"value":3,"writable":true,"enumerable":true,"configurable":true},"length":{"value":3,"writable":true,"enumerable":false,"configurable":false}}
+(() => { const a = [1, , 3]; a.length = 1; a.length = 3; return Object.keys(a).join() + '|' + JSON.stringify(a) })()	S:0|[1,null,null]
+(() => { const a = [, , ]; return a.length + '|' + Object.keys(a).length + '|' + a.every(() => false) + '|' + a.some(() => true) + '|' + a.findIndex(() => true) })()	S:2|0|true|false|0
+(() => { const a = [1, , 3]; return a.keys().next().value + '|' + Array.prototype.join.call({length: 3, 0: 'a'}, '-') + '|' + Array.prototype.indexOf.call({length: 2, 1: undefined}, undefined) })()	S:0|a--|1
+(() => { const a = [0, , 2]; Object.prototype[1] = 'O'; try { return a[1] + '|' + a.join() + '|' + a.map(x => x).join() + '|' + [...a].join() + '|' + a.indexOf('O') + '|' + Object.keys(a).join() + '|' + a.pop() } finally { delete Object.prototype[1] } })()	S:undefined|0,,2|0,,2|0,,2|-1|0,2|2
+(() => { const a = [, 'b']; Object.prototype[0] = 'O'; try { return a.shift() + '|' + a.length + '|' + JSON.stringify([, 1]) } finally { delete Object.prototype[0] } })()	S:undefined|1|[null,1]
+(() => { const a = [1, , 3]; Object.seal(a); return Object.isSealed(a) + '|' + Object.isFrozen(a) + '|' + (1 in a) })()	S:true|false|false
+(() => { const a = [1, , 3]; return a.toSpliced(1, 1).join() + '|' + Object.keys(a.toSpliced(0, 1)).join() + '|' + a.with(1, 'w').join() })()	S:1,3|0,1|1,w,3
+(() => { const a = [3, , 1]; a.length = 2; return a.sort().join() + '|' + Object.keys(a).join() })()	S:3,|0
+(() => { const a = [1, 2, 3]; a.copyWithin(1, 0, 2); delete a[0]; a.unshift(); return Object.keys(a).join() })()	S:1,2
+(() => { const s = [1, , 3].entries(); s.next(); return JSON.stringify(s.next().value) })()	S:[1,null]
+(() => { const a = [,]; a.splice(1, 0, 'x'); return Object.keys(a).join() + '|' + a.length })()	S:1|2
+(() => { const a = new Array(3); a[1] = 1; return Object.keys(a.map(x => x * 2)).join() + '|' + a.reduceRight((s, x) => s + x, 10) })()	S:1|11
+(() => { const o = Object.create(null); return 'x'.concat(o) })()	E:TypeError:can't convert Object to string
+(() => { const o = { toString: undefined, valueOf: undefined }; return 'x'.concat(o) })()	E:TypeError:can't convert Object to string
+(() => { const o = { toString() { return {} }, valueOf() { return {} } }; return 'x'.concat(o) })()	E:TypeError:can't convert Object to string
+(() => { const o = Object.create(null); return 'x'.concat('a', o) })()	E:TypeError:can't convert Object to string
+(() => { const o = Object.create(null); return String.prototype.concat.call(o) })()	E:TypeError:can't convert this to string
+(() => { const o = Object.create(null); return 'x'.padStart(5, o) })()	E:TypeError:can't convert Object to string
+(() => { const o = Object.create(null); return 'x'.indexOf(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return 'x'.includes(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return 'x'.split(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return 'x'.replace(o, 'y') })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return 'x'.startsWith(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return 'x'.localeCompare(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return 'x'.concat([o]) })()	E:TypeError:can't convert Object to string
+(() => { const o = Object.create(null); return 'x' + o })()	E:TypeError:can't convert o to primitive type
+(() => { const o = Object.create(null); return `${o}` })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return [o].join() })()	E:TypeError:can't convert Object to string
+(() => { const o = Object.create(null); return 'x'.repeat(o) })()	E:TypeError:can't convert o to number
+(() => { const o = Object.create(null); return 'x'.at(o) })()	E:TypeError:can't convert o to number
+(() => { const o = Object.create(null); return 'x'.lastIndexOf(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return 'x'.endsWith(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return 'x'.replaceAll(o, 'y') })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return 'x'.replace('x', o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return 'x'.padEnd(3, o) })()	E:TypeError:can't convert Object to string
+(() => { const o = Object.create(null); return 'x'.match(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return 'x'.search(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return String.prototype.trim.call(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return 'x'.normalize ? 1 : 0 })()	J:0
+(() => { const o = Object.create(null); return parseInt(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return encodeURIComponent(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return new RegExp(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return Symbol(o).toString() })()	E:TypeError:can't convert o to string
+(() => { const f = Object.setPrototypeOf(function () {}, null); return 'x'.concat(f) })()	E:TypeError:can't convert Function to string
+(() => { const a = Object.setPrototypeOf([], null); return 'x'.concat(a) })()	E:TypeError:can't convert Array to string
+(() => { const a = Object.setPrototypeOf(new Date(0), null); return 'x'.concat(a) })()	E:TypeError:can't convert Date to string
+(() => { const a = Object.setPrototypeOf(/x/, null); return [a].join() })()	E:TypeError:can't convert RegExp to string
+(() => { const a = Object.setPrototypeOf(new Map(), null); return 'x'.padStart(4, a) })()	E:TypeError:can't convert Map to string
+(() => { return 'x'.concat(Symbol('s')) })()	E:TypeError:can't convert symbol to string
+(() => { return [Symbol('s')].join() })()	E:TypeError:can't convert symbol to string
+(() => { return 'x'.padStart(4, Symbol('s')) })()	E:TypeError:can't convert symbol to string
+(() => { const o = Object.create(null); return String.prototype.padStart.call(o, 3) })()	E:TypeError:can't convert this to string
+(() => { const o = Object.create(null); return Array.prototype.join.call([1], o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return [1, 2].join(o) })()	E:TypeError:can't convert o to string
+(() => { const o = { [Symbol.toPrimitive]() { return {} } }; return 'x'.concat(o) })()	E:TypeError:can't convert Object to string: its [Symbol.toPrimitive] method returned an object
+(() => { const o = Object.create(null); return [[o]].join() })()	E:TypeError:can't convert Object to string
+(() => { const o = Object.create(null); return [o].toString() })()	E:TypeError:can't convert Object to string
+(() => { const o = Object.create(null); return [o].toLocaleString() })()	E:TypeError:firstElement.toLocaleString is not a function
+(() => { const o = Object.create(null); return 'x'.concat(1, o) })()	E:TypeError:can't convert Object to string
+(() => { class A {} const o = new A(); o.toString = null; o.valueOf = null; return 'x'.concat(o) })()	S:x[object Object]
+(() => { const o = Object.setPrototypeOf(new Error('m'), null); return 'x'.concat(o) })()	E:TypeError:can't convert Error to string
+(() => { const o = Object.setPrototypeOf(new Number(1), null); return 'x'.concat(o) })()	E:TypeError:can't convert Number to string
+(() => { const o = Object.setPrototypeOf(new String('s'), null); return 'x'.concat(o) })()	E:TypeError:can't convert String to string
+(() => { const o = Object.create(null); return 'x'.at(0).concat(o) })()	E:TypeError:can't convert Object to string
+(() => { const o = Object.create(null); return ''.concat.call('y', o) })()	E:TypeError:can't convert Object to string
+(() => { const o = Object.create(null); return String.prototype.concat.call(1, o) })()	E:TypeError:can't convert Object to string
+(() => { const o = Object.setPrototypeOf(new Number(1), null); return '' + o })()	E:TypeError:can't convert o to primitive type
+(() => { const o = Object.setPrototypeOf(new Number(1), null); return String(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.setPrototypeOf(new Number(1), null); return o * 2 })()	E:TypeError:can't convert o to number
+(() => { const o = Object.setPrototypeOf(new String('s'), null); return `${o}` })()	E:TypeError:can't convert o to string
+(() => { const o = Object.setPrototypeOf(new Boolean(true), null); return 'x'.indexOf(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return [1, o].toLocaleString() })()	E:TypeError:nextElement.toLocaleString is not a function
+(() => { const o = Object.create(null); return [1, 2, o].toLocaleString() })()	E:TypeError:nextElement.toLocaleString is not a function
+(() => { return [1, { toLocaleString: 5 }].toLocaleString() })()	E:TypeError:nextElement.toLocaleString is not a function
+(() => { return [{ toLocaleString: 5 }].toLocaleString() })()	E:TypeError:firstElement.toLocaleString is not a function
+(() => { const o = Object.create(null); return 'x'.padStart(4, 'a').concat(o) })()	E:TypeError:can't convert Object to string
+(() => { const o = Object.create(null); return [1].concat(o).join() })()	E:TypeError:can't convert Object to string
+(() => { const o = Object.create(null); return ['a', o].join('-') })()	E:TypeError:can't convert Object to string
+(() => { const o = Object.create(null); return [o].join(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.setPrototypeOf(function f() {}, null); return [o].join() })()	E:TypeError:can't convert Function to string
+(() => { const o = Object.setPrototypeOf(new (class Foo {})(), null); return 'x'.concat(o) })()	E:TypeError:can't convert Object to string
+(() => { const o = new Proxy({}, { get: () => undefined }); return 'x'.concat(o) })()	E:TypeError:can't convert Proxy to string
+(() => { const o = Object.setPrototypeOf(new Uint8Array(1), null); return 'x'.concat(o) })()	E:TypeError:can't convert Uint8Array to string
+(() => { const o = Object.setPrototypeOf(new Set(), null); return 'x'.concat(o) })()	E:TypeError:can't convert Set to string
+(() => { const o = Object.setPrototypeOf(NumberLong(1), null); return 'x'.concat(o) })()	E:TypeError:can't convert NumberLong to string
+(() => { const o = Object.setPrototypeOf(new Boolean(false), null); return 'x'.concat(o) })()	E:TypeError:can't convert Boolean to string
+(() => { const o = Object.setPrototypeOf(Object(1n), null); return 'x'.concat(o) })()	E:TypeError:can't convert BigInt to string
+(() => { const o = Object.setPrototypeOf(Object(Symbol()), null); return 'x'.concat(o) })()	E:TypeError:can't convert Symbol to string
+(() => { function f() { return 'x'.concat(arguments) } return f.call(null) })()	S:x[object Arguments]
+(() => { const o = Object.setPrototypeOf(new ArrayBuffer(1), null); return 'x'.concat(o) })()	E:TypeError:can't convert ArrayBuffer to string
+(() => { const o = Object.setPrototypeOf(Promise.resolve(), null); return 'x'.concat(o) })()	E:TypeError:can't convert Promise to string
+(() => { const o = Object.setPrototypeOf(new WeakMap(), null); return 'x'.concat(o) })()	E:TypeError:can't convert WeakMap to string
+(() => { const o = Object.setPrototypeOf(function* () {}, null); return 'x'.concat(o) })()	E:TypeError:can't convert Function to string
+(() => { const o = Object.setPrototypeOf(ObjectId('000000000000000000000000'), null); return 'x'.concat(o) })()	E:TypeError:can't convert ObjectId to string
+(() => { const o = Object.setPrototypeOf([].values(), null); return 'x'.concat(o) })()	E:TypeError:can't convert Array Iterator to string
+(() => { const o = Object.setPrototypeOf(new DataView(new ArrayBuffer(1)), null); return 'x'.concat(o) })()	E:TypeError:can't convert DataView to string
+(() => { const o = Object.create(null); return String.prototype.at.call(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return 'abc'.at(o) })()	E:TypeError:can't convert o to number
+(() => { const o = Object.create(null); return 'abc'.at('a', o) })()	S:a
+(() => { const o = Object.create(null); return String.prototype.charAt.call(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return 'abc'.charAt(o) })()	E:TypeError:can't convert o to number
+(() => { const o = Object.create(null); return 'abc'.charAt('a', o) })()	S:a
+(() => { const o = Object.create(null); return String.prototype.charCodeAt.call(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return 'abc'.charCodeAt(o) })()	E:TypeError:can't convert o to number
+(() => { const o = Object.create(null); return 'abc'.charCodeAt('a', o) })()	J:97
+(() => { const o = Object.create(null); return String.prototype.codePointAt.call(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return 'abc'.codePointAt(o) })()	E:TypeError:can't convert o to number
+(() => { const o = Object.create(null); return 'abc'.codePointAt('a', o) })()	J:97
+(() => { const o = Object.create(null); return 'abc'.concat(o) })()	E:TypeError:can't convert Object to string
+(() => { const o = Object.create(null); return 'abc'.concat('a', o) })()	E:TypeError:can't convert Object to string
+(() => { const o = Object.create(null); return String.prototype.endsWith.call(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return 'abc'.endsWith(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return 'abc'.endsWith('a', o) })()	E:TypeError:can't convert o to number
+(() => { const o = Object.create(null); return String.prototype.includes.call(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return 'abc'.includes(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return 'abc'.includes('a', o) })()	E:TypeError:can't convert o to number
+(() => { const o = Object.create(null); return String.prototype.indexOf.call(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return 'abc'.indexOf(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return 'abc'.indexOf('a', o) })()	E:TypeError:can't convert o to number
+(() => { const o = Object.create(null); return String.prototype.lastIndexOf.call(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return 'abc'.lastIndexOf(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return 'abc'.lastIndexOf('a', o) })()	E:TypeError:can't convert o to number
+(() => { const o = Object.create(null); return String.prototype.localeCompare.call(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return 'abc'.localeCompare(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return 'abc'.localeCompare('a', o) })()	J:2
+(() => { const o = Object.create(null); return String.prototype.match.call(o) })()	E:TypeError:can't convert this to string
+(() => { const o = Object.create(null); return 'abc'.match(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return 'abc'.match('a', o) })()	J:["a"]
+(() => { const o = Object.create(null); return String.prototype.matchAll.call(o) })()	E:TypeError:can't convert this to string
+(() => { const o = Object.create(null); return 'abc'.matchAll(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return 'abc'.matchAll('a', o) })()	J:{}
+(() => { const o = Object.create(null); return String.prototype.padEnd.call(o) })()	E:TypeError:can't convert this to string
+(() => { const o = Object.create(null); return 'abc'.padEnd(o) })()	E:TypeError:can't convert ({}) to number
+(() => { const o = Object.create(null); return 'abc'.padEnd('a', o) })()	S:abc
+(() => { const o = Object.create(null); return String.prototype.padStart.call(o) })()	E:TypeError:can't convert this to string
+(() => { const o = Object.create(null); return 'abc'.padStart(o) })()	E:TypeError:can't convert ({}) to number
+(() => { const o = Object.create(null); return 'abc'.padStart('a', o) })()	S:abc
+(() => { const o = Object.create(null); return String.prototype.repeat.call(o) })()	E:TypeError:can't convert this to string
+(() => { const o = Object.create(null); return 'abc'.repeat(o) })()	E:TypeError:can't convert o to number
+(() => { const o = Object.create(null); return 'abc'.repeat('a', o) })()	S:
+(() => { const o = Object.create(null); return String.prototype.replace.call(o) })()	E:TypeError:can't convert this to string
+(() => { const o = Object.create(null); return 'abc'.replace(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return 'abc'.replace('a', o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return String.prototype.replaceAll.call(o) })()	E:TypeError:can't convert this to string
+(() => { const o = Object.create(null); return 'abc'.replaceAll(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return 'abc'.replaceAll('a', o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return String.prototype.search.call(o) })()	E:TypeError:can't convert this to string
+(() => { const o = Object.create(null); return 'abc'.search(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return 'abc'.search('a', o) })()	J:0
+(() => { const o = Object.create(null); return String.prototype.slice.call(o) })()	E:TypeError:can't convert this to string
+(() => { const o = Object.create(null); return 'abc'.slice(o) })()	E:TypeError:can't convert o to number
+(() => { const o = Object.create(null); return 'abc'.slice('a', o) })()	E:TypeError:can't convert o to number
+(() => { const o = Object.create(null); return String.prototype.split.call(o) })()	E:TypeError:can't convert this to string
+(() => { const o = Object.create(null); return 'abc'.split(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return 'abc'.split('a', o) })()	E:TypeError:can't convert o to number
+(() => { const o = Object.create(null); return String.prototype.startsWith.call(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return 'abc'.startsWith(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return 'abc'.startsWith('a', o) })()	E:TypeError:can't convert o to number
+(() => { const o = Object.create(null); return String.prototype.substring.call(o) })()	E:TypeError:can't convert this to string
+(() => { const o = Object.create(null); return 'abc'.substring(o) })()	E:TypeError:can't convert o to number
+(() => { const o = Object.create(null); return 'abc'.substring('a', o) })()	E:TypeError:can't convert o to number
+(() => { const o = Object.create(null); return String.prototype.substr.call(o) })()	E:TypeError:can't convert this to string
+(() => { const o = Object.create(null); return 'abc'.substr(o) })()	E:TypeError:can't convert o to number
+(() => { const o = Object.create(null); return 'abc'.substr('a', o) })()	E:TypeError:can't convert o to number
+(() => { const o = Object.create(null); return String.prototype.toLowerCase.call(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return 'abc'.toLowerCase(o) })()	S:abc
+(() => { const o = Object.create(null); return 'abc'.toLowerCase('a', o) })()	S:abc
+(() => { const o = Object.create(null); return String.prototype.toUpperCase.call(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return 'abc'.toUpperCase(o) })()	S:ABC
+(() => { const o = Object.create(null); return 'abc'.toUpperCase('a', o) })()	S:ABC
+(() => { const o = Object.create(null); return 'abc'.trim(o) })()	S:abc
+(() => { const o = Object.create(null); return 'abc'.trim('a', o) })()	S:abc
+(() => { const o = Object.create(null); return String.prototype.trimStart.call(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return 'abc'.trimStart(o) })()	S:abc
+(() => { const o = Object.create(null); return 'abc'.trimStart('a', o) })()	S:abc
+(() => { const o = Object.create(null); return String.prototype.trimEnd.call(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return 'abc'.trimEnd(o) })()	S:abc
+(() => { const o = Object.create(null); return 'abc'.trimEnd('a', o) })()	S:abc
+(() => { const o = Object.create(null); return String.prototype.isWellFormed.call(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return 'abc'.isWellFormed(o) })()	J:true
+(() => { const o = Object.create(null); return 'abc'.isWellFormed('a', o) })()	J:true
+(() => { const o = Object.create(null); return String.prototype.toWellFormed.call(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return 'abc'.toWellFormed(o) })()	S:abc
+(() => { const o = Object.create(null); return 'abc'.toWellFormed('a', o) })()	S:abc
+(() => { const o = Object.create(null); return String.prototype.toLocaleLowerCase.call(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return 'abc'.toLocaleLowerCase(o) })()	S:abc
+(() => { const o = Object.create(null); return 'abc'.toLocaleLowerCase('a', o) })()	S:abc
+(() => { const o = Object.create(null); return String.prototype.toLocaleUpperCase.call(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return 'abc'.toLocaleUpperCase(o) })()	S:ABC
+(() => { const o = Object.create(null); return 'abc'.toLocaleUpperCase('a', o) })()	S:ABC
+(() => { const o = Object.create(null); return String.prototype.anchor.call(o) })()	E:TypeError:can't convert this to string
+(() => { const o = Object.create(null); return 'abc'.anchor(o) })()	E:TypeError:can't convert Object to string
+(() => { const o = Object.create(null); return 'abc'.anchor('a', o) })()	S:<a name="a">abc</a>
+(() => { const o = Object.create(null); return String.prototype.link.call(o) })()	E:TypeError:can't convert this to string
+(() => { const o = Object.create(null); return 'abc'.link(o) })()	E:TypeError:can't convert Object to string
+(() => { const o = Object.create(null); return 'abc'.link('a', o) })()	S:<a href="a">abc</a>
+(() => { const o = Object.create(null); return String.prototype.fontcolor.call(o) })()	E:TypeError:can't convert this to string
+(() => { const o = Object.create(null); return 'abc'.fontcolor(o) })()	E:TypeError:can't convert Object to string
+(() => { const o = Object.create(null); return 'abc'.fontcolor('a', o) })()	S:<font color="a">abc</font>
+(() => { const o = Object.create(null); return String.prototype.big.call(o) })()	E:TypeError:can't convert this to string
+(() => { const o = Object.create(null); return 'abc'.big(o) })()	S:<big>abc</big>
+(() => { const o = Object.create(null); return 'abc'.big('a', o) })()	S:<big>abc</big>
+(() => { const o = Object.create(null); return [1, 2].includes(o) })()	J:false
+(() => { const o = Object.create(null); return [1, 2].indexOf(o) })()	J:-1
+(() => { const o = Object.create(null); return [1, 2].lastIndexOf(o) })()	J:-1
+(() => { const o = Object.create(null); return [1, 2].fill(o) })()	J:[{},{}]
+(() => { const o = Object.create(null); return [1, 2].with(o) })()	E:TypeError:can't convert o to number
+(() => { const o = Object.create(null); return [1, 2].at(o) })()	E:TypeError:can't convert o to number
+(() => { const o = Object.create(null); return [1, 2].slice(o) })()	E:TypeError:can't convert o to number
+(() => { const o = Object.create(null); return [1, 2].splice(o) })()	E:TypeError:can't convert o to number
+(() => { const o = Object.create(null); return [1, 2].flat(o) })()	E:TypeError:can't convert ({}) to number
+(() => { const o = Object.create(null); return [1, 2].copyWithin(o) })()	E:TypeError:can't convert target to number
+(() => { const o = Object.create(null); return [1, 2].toSpliced(o) })()	E:TypeError:can't convert o to number
+(() => { const o = Object.create(null); return [1, 2].sort(o) })()	E:TypeError:invalid Array.prototype.sort argument
+(() => { const o = Object.create(null); return [1, 2].push(o) })()	J:3
+(() => { const o = Object.create(null); return [1, 2].concat(o) })()	J:[1,2,{}]
+(() => { const o = Object.create(null); return [1, 2].keys(o) })()	J:{}
+(() => { const o = Object.create(null); return Array.prototype.join.call({length: 1, 0: o}) })()	E:TypeError:can't convert Object to string
+(() => { const o = Object.create(null); return [o].sort().length })()	J:1
+(() => { const o = Object.create(null); return [o, 1].sort().length })()	E:TypeError:can't convert Object to string
+(() => { const o = Object.create(null); return [1, 2].toSorted(o) })()	E:TypeError:non-function passed to Array.prototype.toSorted
+(() => { const o = Object.create(null); return String(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return String.raw({raw: [o]}) })()	E:TypeError:can't convert raw[0] to string
+(() => { const o = Object.create(null); return String.raw({raw: ['a', 'b']}, o) })()	E:TypeError:can't convert Object to string
+(() => { const o = Object.create(null); return String.fromCharCode(o) })()	E:TypeError:can't convert o to number
+(() => { const o = Object.create(null); return String.fromCodePoint(o) })()	E:TypeError:can't convert o to number
+(() => { const o = Object.create(null); return new Date(2020, o) })()	E:TypeError:can't convert o to number
+(() => { const o = Object.create(null); return Number(o) })()	E:TypeError:can't convert o to number
+(() => { const o = Object.create(null); return JSON.stringify({a: 1}, null, o) })()	S:{"a":1}
+(() => { const o = Object.create(null); return Object.fromEntries([[o, 1]]) })()	E:TypeError:can't convert pair[0] to string
+(() => { const o = Object.create(null); return ({})[o] })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return o in {} })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return Object.keys({}).includes(o) })()	J:false
+(() => { const o = Object.create(null); return new Map([[1, 2]]).get(o) })()	J:undefined
+(() => { const o = Object.create(null); return [3, 1].sort((a, b) => o) })()	E:TypeError:can't convert ({}) to number
+(() => { const o = Object.setPrototypeOf((function* () {})(), null); return 'x'.concat(o) })()	E:TypeError:can't convert Generator to string
+(() => { const o = Object.setPrototypeOf(new Map().entries(), null); return 'x'.concat(o) })()	E:TypeError:can't convert Map Iterator to string
+(() => { const o = Object.setPrototypeOf(new Set().values(), null); return 'x'.concat(o) })()	E:TypeError:can't convert Set Iterator to string
+(() => { const o = Object.setPrototypeOf('ab'[Symbol.iterator](), null); return 'x'.concat(o) })()	E:TypeError:can't convert String Iterator to string
+(() => { const o = Object.setPrototypeOf((function () { return arguments })(), null); return 'x'.concat(o) })()	E:TypeError:can't convert Arguments to string
+(() => { const o = Object.setPrototypeOf(new WeakSet(), null); return 'x'.concat(o) })()	E:TypeError:can't convert WeakSet to string
+(() => { const o = Object.setPrototypeOf(new WeakRef({}), null); return 'x'.concat(o) })()	E:TypeError:can't convert WeakRef to string
+(() => { const o = Object.setPrototypeOf([1].values().map(x => x), null); return 'x'.concat(o) })()	E:TypeError:can't convert Iterator Helper to string
+(() => { const o = Object.setPrototypeOf(new Float64Array(1), null); return 'x'.concat(o) })()	E:TypeError:can't convert Float64Array to string
+(() => { const o = Object.setPrototypeOf(new Uint8ClampedArray(1), null); return 'x'.concat(o) })()	E:TypeError:can't convert Uint8ClampedArray to string
+(() => { const o = Object.setPrototypeOf(BigInt64Array.of(1n), null); return 'x'.concat(o) })()	E:TypeError:can't convert BigInt64Array to string
+(() => { const o = Object.setPrototypeOf(NumberDecimal('1'), null); return 'x'.concat(o) })()	E:TypeError:can't convert NumberDecimal to string
+(() => { const o = Object.setPrototypeOf(Timestamp(1, 2), null); return 'x'.concat(o) })()	E:TypeError:can't convert Timestamp to string
+(() => { const o = Object.setPrototypeOf(BinData(0, ''), null); return 'x'.concat(o) })()	E:TypeError:can't convert BinData to string
+(() => { const o = Object.setPrototypeOf(DBRef('a', 1), null); return 'x'.concat(o) })()	E:TypeError:can't convert DBRef to string
+(() => { const o = Object.setPrototypeOf(new Proxy(function () {}, {}), null); return 'x'.concat(o) })()	E:TypeError:can't convert Proxy to string
+(() => { const o = Object.setPrototypeOf(Object(Symbol.iterator), null); return 'x'.concat(o) })()	E:TypeError:can't convert Symbol to string
+(() => { const o = Object.setPrototypeOf(Math, null); return 'x'.concat(o) })()	E:TypeError:can't set prototype of this object
+(() => { const o = Object.setPrototypeOf(JSON, null); return 'x'.concat(o) })()	E:TypeError:can't set prototype of this object
+(() => { const o = Object.setPrototypeOf(globalThis, null); return 'x'.concat(o) })()	E:TypeError:can't convert global to string
+(() => { const o = Object.setPrototypeOf(new (class extends Array {})(), null); return 'x'.concat(o) })()	E:TypeError:can't convert Array to string
+(() => { const o = Object.setPrototypeOf(new (class extends Error {})(), null); return 'x'.concat(o) })()	E:TypeError:can't convert Error to string
+(() => { const o = Object.setPrototypeOf((async () => {}), null); return 'x'.concat(o) })()	E:TypeError:can't convert Function to string
+(() => { 'use strict'; const o = Object.preventExtensions((function* () {})()); o.zz = 1 })()	E:TypeError:can't define property "zz": Generator is not extensible
+(() => { 'use strict'; const o = Object.preventExtensions(new Map().entries()); o.zz = 1 })()	E:TypeError:can't define property "zz": Map Iterator is not extensible
+(() => { 'use strict'; const o = Object.preventExtensions(new Set().values()); o.zz = 1 })()	E:TypeError:can't define property "zz": Set Iterator is not extensible
+(() => { 'use strict'; const o = Object.preventExtensions('ab'[Symbol.iterator]()); o.zz = 1 })()	E:TypeError:can't define property "zz": String Iterator is not extensible
+(() => { 'use strict'; const o = Object.preventExtensions((function () { return arguments })()); o.zz = 1 })()	E:TypeError:can't define property "zz": Arguments is not extensible
+(() => { 'use strict'; const o = Object.preventExtensions(new WeakSet()); o.zz = 1 })()	E:TypeError:can't define property "zz": WeakSet is not extensible
+(() => { 'use strict'; const o = Object.preventExtensions(new WeakRef({})); o.zz = 1 })()	E:TypeError:can't define property "zz": WeakRef is not extensible
+(() => { 'use strict'; const o = Object.preventExtensions([1].values().map(x => x)); o.zz = 1 })()	E:TypeError:can't define property "zz": Iterator Helper is not extensible
+(() => { 'use strict'; const o = Object.preventExtensions(new Float64Array(1)); o.zz = 1 })()	E:TypeError:can't define property "zz": Float64Array is not extensible
+(() => { 'use strict'; const o = Object.preventExtensions(new Uint8ClampedArray(1)); o.zz = 1 })()	E:TypeError:can't define property "zz": Uint8ClampedArray is not extensible
+(() => { 'use strict'; const o = Object.preventExtensions(BigInt64Array.of(1n)); o.zz = 1 })()	E:TypeError:can't define property "zz": BigInt64Array is not extensible
+(() => { const o = Object.create(null); return [1, 2].copyWithin(0, o) })()	E:TypeError:can't convert start to number
+(() => { const o = Object.create(null); return [1, 2].copyWithin(0, 0, o) })()	E:TypeError:can't convert end to number
+(() => { const o = Object.create(null); return [1, 2].fill(1, o) })()	E:TypeError:can't convert start to number
+(() => { const o = Object.create(null); return [1, 2].fill(1, 0, o) })()	E:TypeError:can't convert end to number
+(() => { const o = Object.create(null); return [1, 2].includes(1, o) })()	E:TypeError:can't convert o to number
+(() => { const o = Object.create(null); return [1, 2].indexOf(1, o) })()	E:TypeError:can't convert o to number
+(() => { const o = Object.create(null); return [1, 2].lastIndexOf(1, o) })()	E:TypeError:can't convert o to number
+(() => { const o = Object.create(null); return [1, 2].slice(0, o) })()	E:TypeError:can't convert o to number
+(() => { const o = Object.create(null); return [1, 2].splice(0, o) })()	E:TypeError:can't convert o to number
+(() => { const o = Object.create(null); return [1, 2].with(o, 1) })()	E:TypeError:can't convert o to number
+(() => { const o = Object.create(null); return [1, 2].toSpliced(0, o) })()	E:TypeError:can't convert o to number
+(() => { const o = Object.create(null); return [[1]].flat(o) })()	E:TypeError:can't convert ({}) to number
+(() => { const o = Object.create(null); return [1].flatMap(x => x, o) })()	J:[1]
+(() => { const o = Object.create(null); return Array.from({length: o}) })()	E:TypeError:can't convert arrayLike.length to number
+(() => { const o = Object.create(null); return Array.prototype.join.call({length: o}) })()	E:TypeError:can't convert {} to number
+(() => { const o = Object.create(null); return 'abc'.substring(0, o) })()	E:TypeError:can't convert o to number
+(() => { const o = Object.create(null); return 'abc'.slice(0, o) })()	E:TypeError:can't convert o to number
+(() => { const o = Object.create(null); return 'abc'.substr(0, o) })()	E:TypeError:can't convert o to number
+(() => { const o = Object.create(null); return 'abc'.split('', o) })()	E:TypeError:can't convert o to number
+(() => { const o = Object.create(null); return 'abc'.normalize(o) })()	E:TypeError:"abc".normalize is not a function
+(() => { const o = Object.create(null); return [o, 1].toSorted() })()	E:TypeError:can't convert Object to string
+(() => { const o = Object.create(null); return [o, 1].sort() })()	E:TypeError:can't convert Object to string
+(() => { const o = Object.create(null); return [1, o].toString() })()	E:TypeError:can't convert Object to string
+(() => { const o = Object.create(null); return ['a'].join(o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return Array.prototype.toString.call({join: 1, length: 1, 0: o}) })()	S:[object Object]
+(() => { const o = Object.create(null); return [1, 2].reduce(o) })()	E:TypeError:o is not a function
+(() => { const o = Object.create(null); return [1, 2].map(o) })()	E:TypeError:o is not a function
+(() => { const o = Object.create(null); return [1, 2].toSorted(5) })()	E:TypeError:non-function passed to Array.prototype.toSorted
+(() => { const o = Object.create(null); return [1, 2].toSorted(null) })()	E:TypeError:non-function passed to Array.prototype.toSorted
+(() => { const o = Object.create(null); return new Array(o) })()	J:[{}]
+(() => { const o = Object.create(null); return Array(1, o).join() })()	E:TypeError:can't convert Object to string
+(() => { const o = Object.create(null); return [1].keys().toArray(o) })()	J:[0]
+(() => { const o = Object.create(null); return Object.entries(o).length })()	J:0
+(() => { const o = Object.create(null); return Array.prototype.lastIndexOf.call({length: o}, 1) })()	E:TypeError:can't convert ({}) to number
+(() => { const o = Object.create(null); return Array.prototype.includes.call({length: o}, 1) })()	E:TypeError:can't convert ({}) to number
+(() => { const o = Object.create(null); return Array.prototype.copyWithin.call({length: o}, 0) })()	E:TypeError:can't convert O.length to number
+(() => { const o = Object.create(null); return Array.prototype.fill.call({length: o}, 0) })()	E:TypeError:can't convert O.length to number
+(() => { const o = Object.create(null); return String.raw({raw: ['a', o]}, 1) })()	E:TypeError:can't convert raw[nextIndex] to string
+(() => { const o = Object.create(null); return String.raw({raw: ['a', 'b', o]}, 1, 2) })()	E:TypeError:can't convert raw[nextIndex] to string
+(() => { const o = Object.create(null); return String.raw({raw: {length: o}}) })()	E:TypeError:can't convert raw.length to number
+(() => { const o = Object.create(null); return Object.fromEntries([['a', 1], [o, 1]]) })()	E:TypeError:can't convert pair[0] to string
+(() => { const o = Object.create(null); return Object.fromEntries([[Symbol.iterator, 1], [o, 1]]) })()	E:TypeError:can't convert pair[0] to string
+(() => { const o = Object.create(null); return Array.from({length: 2, 0: o}).length })()	J:2
+(() => { const o = Object.create(null); return Array.prototype.join.call({length: 1, 0: o}, o) })()	E:TypeError:can't convert o to string
+(() => { const o = Object.create(null); return Array.prototype.join.call({get length() { return o }}) })()	E:TypeError:can't convert {} to number
+(() => { const o = Object.create(null); return Array.prototype.indexOf.call({length: o}, 1) })()	E:TypeError:can't convert ({}) to number
+(() => { const t = function () {}; const p = new Proxy(t, {}); Object.setPrototypeOf(p, null); return [Object.getPrototypeOf(t), Object.getPrototypeOf(p), typeof p.toString].map(String).join() })()	S:null,null,undefined
+(() => { const t = {}; const p = new Proxy(t, {}); Object.setPrototypeOf(p, null); return [Object.getPrototypeOf(t), typeof p.toString].map(String).join() })()	S:null,undefined
+(() => Object.getOwnPropertySymbols(RegExp.prototype).map(String).join())()	S:Symbol(Symbol.match),Symbol(Symbol.matchAll),Symbol(Symbol.replace),Symbol(Symbol.search),Symbol(Symbol.split)
+(() => { const r = []; const p = new Proxy({}, { setPrototypeOf(t, v) { r.push('set:' + (v === null)); return Reflect === 1 } }); try { Object.setPrototypeOf(p, null) } catch (e) { r.push(e.name + ':' + e.message) } return r.join() })()	S:set:true,ReferenceError:Reflect is not defined
+(() => { const r = []; const p = new Proxy({}, { setPrototypeOf(t, v) { r.push('set'); return false } }); try { Object.setPrototypeOf(p, null) } catch (e) { r.push(e.name + ':' + e.message) } return r.join() })()	S:set,TypeError:proxy setPrototypeOf handler returned false
+(() => { const r = []; const p = new Proxy({}, { setPrototypeOf(t, v) { r.push('set'); Object.setPrototypeOf(t, v); return 1 } }); Object.setPrototypeOf(p, Array.prototype); return r.join() + '|' + (Object.getPrototypeOf(p) === Array.prototype) })()	S:set|true
+(() => { const p = new Proxy({}, { getPrototypeOf() { return Array.prototype } }); return (Object.getPrototypeOf(p) === Array.prototype) + '|' + (p instanceof Array) + '|' + Array.prototype.isPrototypeOf(p) })()	S:true|true|true
+(() => { const p = new Proxy({}, { getPrototypeOf() { return 5 } }); try { return Object.getPrototypeOf(p) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:proxy getPrototypeOf handler returned a non-object, non-null value
+(() => { const p = new Proxy(Object.preventExtensions({}), { getPrototypeOf() { return Array.prototype } }); try { return Object.getPrototypeOf(p) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:proxy getPrototypeOf handler didn't return the target object's prototype
+(() => { const p = new Proxy({}, {}); p.__proto__ = Array.prototype; return Array.isArray(p) + '|' + (p.__proto__ === Array.prototype) })()	S:false|true
+(() => { const p = new Proxy({}, { setPrototypeOf: 5 }); try { Object.setPrototypeOf(p, null) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:proxy handler's setPrototypeOf trap wasn't undefined, null, or callable
+(() => { const p = Proxy.revocable({}, {}); p.revoke(); try { Object.getPrototypeOf(p.proxy) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:illegal operation attempted on a revoked proxy
+(() => { const p = new Proxy(Object.preventExtensions({}), { setPrototypeOf() { return true } }); try { Object.setPrototypeOf(p, null); return 'ok' } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:proxy setPrototypeOf handler returned true, even though the target's prototype is immutable because the target is non-extensible
+(() => [/b/g[Symbol.match]('abcb'), /b/[Symbol.search]('abc'), /b/g[Symbol.replace]('abcb', 'X'), /b/[Symbol.split]('abcbd', 2), [.../b/g[Symbol.matchAll]('abb')].length].join('|'))()	S:b,b|1|aXcX|a,c|2
+(() => [RegExp.prototype[Symbol.match].name, RegExp.prototype[Symbol.match].length, RegExp.prototype[Symbol.matchAll].length, RegExp.prototype[Symbol.replace].length, RegExp.prototype[Symbol.search].length, RegExp.prototype[Symbol.split].length, RegExp.prototype[Symbol.split].name].join())()	S:[Symbol.match],1,1,2,1,2,[Symbol.split]
+(() => { try { return RegExp.prototype[Symbol.match].call(5, 'a') } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:number is not a non-null object
+(() => { try { return RegExp.prototype[Symbol.search].call({}, 'a') } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:[Symbol.search] method called on incompatible Object
+(() => JSON.stringify(Object.getOwnPropertyDescriptor(RegExp.prototype, Symbol.replace), (k, v) => typeof v === 'function' ? 'f' : v))()	S:{"value":"f","writable":false,"enumerable":false,"configurable":false}
+(() => /(a)/[Symbol.replace]('xa', '[$1]') + '|' + /a/[Symbol.match](5) + '|' + String(/z/[Symbol.match]('a')))()	S:x[a]|null|null
+(() => { const o = Object.setPrototypeOf(/x/g[Symbol.matchAll]('x'), null); return 'x'.concat(o) })()	E:TypeError:can't convert RegExp String Iterator to string
+(() => { function* g() { let x; ({ [yield 'k']: x } = { z: 5 }); return x } const it = g(); it.next(); return it.next('z').value })()	J:5
+(() => { function* g() { return (yield 1) ? (yield 2) : (yield 3) } const it = g(); it.next(); return it.next(0).value + '|' + it.next('z').value })()	S:3|z
+(() => { function* g() { const o = { m: { n: 4 } }; return o[yield 'k'].n } const it = g(); it.next(); return it.next('m').value })()	J:4
+(() => { function* g() { const o = { [yield 1]: yield 2, get [yield 3]() { return 7 }, ...(yield 4) } ; return JSON.stringify(o) } const it = g(); it.next(); it.next('a'); it.next('b'); it.next('c'); return it.next({d: 1}).value })()	S:{"a":"b","c":7,"d":1}
+(() => { function* g() { const f = (...a) => a.join(); return f(1, ...(yield 'x'), yield 'y') } const it = g(); it.next(); it.next([2, 3]); return it.next(4).value })()	S:1,2,3,4
+(() => { function* g() { const o = { f(a, b) { return this.v + a + b }, v: 1 }; return o.f(yield 1, yield 2) } const it = g(); it.next(); it.next(2); return it.next(3).value })()	J:6
+(() => { function* g() { const o = { v: 1 }; o.v &&= yield 'a'; o.w ||= yield 'b'; o.z ??= yield 'c'; return JSON.stringify(o) } const it = g(); it.next(); it.next(5); it.next(6); return it.next(7).value })()	S:{"v":5,"w":6,"z":7}
+(() => { function* g() { let x = 2; x += yield 1; x *= yield 2; return x } const it = g(); it.next(); it.next(3); return it.next(4).value })()	J:20
+(() => { function* g() { function f(a = 1) { return a } const h = function (b = 2) { return b }; return f() + h() + (yield 0) } const it = g(); it.next(); return it.next(10).value })()	J:13
+(() => { function* g() { try { throw yield 1 } catch (e) { return 'c:' + e } } const it = g(); it.next(); return it.next('E').value })()	S:c:E
+(() => { function* g() { if (yield 1) { return 'a' } else if (yield 2) { return 'b' } return 'c' } const it = g(); it.next(); it.next(0); return it.next(1).value })()	S:b
+(() => { function* g() { const r = []; for (let i = 0; i < (yield 'n'); i += yield 'step') r.push(i); return r.join() } const it = g(); it.next(); it.next(3); it.next(1); it.next(3); it.next(1); it.next(3); it.next(1); return it.next(0).value })()	S:0,1,2
+(() => { function* g() { let i = 0; do { i++ } while ((yield i) < 3); return i } const it = g(); let r; for (let k = 0; k < 5 && !(r = it.next(k)).done; k++); return r.value })()	J:3
+(() => { function* g() { let i = 0; do { i++; if (i > 2) break; yield i } while (true); return 'end' + i } return [...g()].join() })()	S:1,2
+(() => { function* g() { outer: for (const a of [1, 2]) { for (const b of [1, 2]) { if (b === 2) continue outer; yield a + '' + b } } } return [...g()].join() })()	S:11,21
+(() => { function* g() { lbl: { yield 1; break lbl; } yield 2 } return [...g()].join() })()	S:1,2
+(() => { function* g() { lbl: for (let i = 0; i < 3; i++) { try { yield i; if (i === 1) break lbl } finally { yield 'f' + i } } } return [...g()].join() })()	S:0,f0,1,f1
+(() => { function* g() { try { yield 1; throw new Error('x') } catch ({ message }) { yield message } finally { yield 'f' } } return [...g()].join() })()	S:1,x,f
+(() => { function* g() { try { yield 1 } catch { yield 'c' } } const it = g(); it.next(); return JSON.stringify(it.throw(5)) })()	S:{"value":"c","done":false}
+(() => { function* g() { try { yield 1 } finally { return 'fin' } } const it = g(); it.next(); return JSON.stringify(it.return(9)) })()	S:{"value":"fin","done":true}
+(() => { function* g() { for (let i = 0, j = yield 'j'; i < j; i++) yield i } const it = g(); it.next(); return [it.next(2).value, it.next().value, it.next().done].join() })()	S:0,1,true
+(() => { function* g() { for (;;) { if ((yield 1) === 'stop') return 'out' } } const it = g(); it.next(); it.next(); return it.next('stop').value })()	S:out
+(() => { function* g() { switch (yield 1) { case (yield 2): return 'a'; default: return 'd' } } const it = g(); it.next(); it.next(5); return it.next(5).value })()	S:a
+(() => { function* g() { const x = [1, , yield 'h', ...(yield 's')]; return JSON.stringify(x) + (1 in x) } const it = g(); it.next(); it.next(2); return it.next([3]).value })()	S:[1,null,2,3]false
+(() => { function* g() { return typeof (yield 1) + (void (yield 2)) + !(yield 3) + -(yield 4) } const it = g(); it.next(); it.next(1); it.next(2); it.next(3); return it.next(4).value })()	S:numberundefinedfalse-4
+(() => { function* g() { const o = {a: 1}; delete o[yield 'k']; return Object.keys(o).join() + (yield 'x' in o) } const it = g(); it.next(); it.next('a'); return it.next(1).value })()	S:1
+(() => { function* g() { return `a${yield 1}b${yield 2}` } const it = g(); it.next(); it.next('X'); return it.next('Y').value })()	S:aXbY
+(() => { function* g() { return new (yield 'C')(yield 'arg') } const it = g(); it.next(); it.next(Array); return it.next(3).value.length })()	J:3
+(() => { function* g() { const o = {}; o[yield 'k'] = yield 'v'; return JSON.stringify(o) } const it = g(); it.next(); it.next('a'); return it.next(1).value })()	S:{"a":1}
+(() => { function* g() { const a = [5]; a[yield 'i']++; return a[0] } const it = g(); it.next(); return it.next(0).value })()	J:6
+(() => { function* g() { return (yield 1, yield 2, 3) } const it = g(); it.next(); it.next(); return it.next().value })()	J:3
+(() => { function* g() { return (yield 1) ?? (yield 2) } const it = g(); it.next(); it.next(null); return it.next('n').value })()	S:n
+(() => { function* g() { yield* [1, 2]; const r = yield* (function* () { yield 3; return 4 })(); yield r } return [...g()].join() })()	S:1,2,3,4
+(() => { function* g() { const it2 = { [Symbol.iterator]() { return { next: () => ({ done: true, value: 'r' }) } } }; return yield* it2 } return JSON.stringify(g().next()) })()	S:{"value":"r","done":true}
+(() => { function* g() { let x = 1; { let x = yield 2; return x } } const it = g(); it.next(); return it.next(9).value })()	J:9
+(() => { function* g() { while ((yield 'w') !== 0) {} return 'done' } const it = g(); it.next(); it.next(1); return it.next(0).value })()	S:done
+(() => { function* g() { for (const k in (yield 'o')) yield k } const it = g(); it.next(); return [it.next({a: 1, b: 2}).value, it.next().value].join() })()	S:a,b
+(() => { function* g() { with ({ v: 3 }) { yield v } } return [...g()].join() })()	S:3
+(() => { function* g(a = 1, { b } = { b: 2 }) { yield a + b } return [...g()].join() + [...g(5, { b: 5 })].join() })()	S:310
+(() => { const g = function* () { yield this && this.v }; return [...g.call({ v: 'T' })].join() })()	S:T
+(() => { const $a_ = 1, ñ = 2, _9 = 3; return $a_ + ñ + _9 })()	J:6
+(() => { const o = {}; o[-1] = 'a'; o[1.5] = 'b'; o[1e15] = 'c'; o[1e21] = 'd'; o[-0] = 'z'; return Object.keys(o).join() })()	S:0,-1,1.5,1000000000000000,1e+21
+(() => { const a = [1]; Object.defineProperty(a, 0, { set(v) { this.s = v }, configurable: true }); a[0] = 7; return a.s + '|' + a[0] })()	S:7|undefined
+(() => { function f(x) { arguments[0] = 9; return x } return f(1) + '|' + (function (x) { 'use strict'; arguments[0] = 9; return x })(1) })()	S:9|1
+(() => { function f(x) { delete arguments[0]; arguments[0] = 5; return x + '|' + arguments[0] } return f(1) })()	S:1|5
+(() => { const t = new Uint8Array(2); return [0 in t, '-0' in t, '1.5' in t, 2 in t, Object.hasOwn(t, '0')].join() })()	S:true,false,false,false,true
+(() => { const p = new Proxy(function () { return 'r' }, {}); return p() + '|' + typeof new Proxy(class { }, {})() })()	E:TypeError:class constructors must be invoked with 'new'
+(() => { const p = new Proxy(function (a) { this.a = a }, {}); return new p(3).a })()	J:3
+(() => { function f() { return typeof this } return [f.call(5), f.call(null), f.call('s'), f.call(undefined) === 'object'].join() })()	S:object,object,object,true
+(() => { const o = { v: 1 }; with (o) { v = 2; var w = v } return o.v + '|' + w })()	S:2|2
+(() => { const o = { [Symbol.unscopables]: { v: true }, v: 1 }; let v = 'outer'; with (o) { return v } })()	S:outer
+(() => { const [a, ...b] = 'xyz'; const [c, ...d] = new Set([1, 2]); return a + b.join('') + c + d })()	S:xyz12
+(() => { const it = { [Symbol.iterator]() { return { next() { return 5 } } } }; try { for (const x of it) {} } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:iterator.next() returned a non-object value
+(() => { l: { if (true) break l; return 'no' } return 'yes' })()	S:yes
+(() => { const f = () => this; return typeof f() })()	S:object
+(() => { function f() { return new.target === f } return f() + '|' + new f() instanceof f })()	J:false
+(() => { let s = ''; for (const k in 'ab') s += k; for (const k in [7, 8]) s += k; return s })()	S:01ltrimrtrimpad01
+(() => { const o = Object.create({ inh: 1 }); o.own = 2; let s = []; for (const k in o) s.push(k); return s.join() })()	S:own,inh
+(() => { try { undefinedName } catch (e) { return e.name + ':' + e.message } })()	S:ReferenceError:undefinedName is not defined
+(() => { const a = [1, 2, 3]; const { length, 0: first, ...rest } = a; return length + first + JSON.stringify(rest) })()	S:4{"1":2,"2":3}
+(() => { let x = 0; const o = { get g() { return ++x } }; o.g; o.g; return x })()	J:2
+(() => { const o = { a: 1 }; Object.freeze(o); 'use strict'; o.a = 2; return o.a })()	J:1
+(() => { 'use strict'; const o = Object.freeze({ a: 1 }); try { o.a = 2 } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:"a" is read-only
+(() => { 'use strict'; const o = { get a() { return 1 } }; try { o.a = 2 } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:setting getter-only property "a"
+(() => { 'use strict'; const a = Object.freeze([1]); try { a[0] = 2 } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:0 is read-only
+(() => { 'use strict'; const a = [1]; Object.defineProperty(a, 'length', { writable: false }); try { a.length = 3 } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:"length" is read-only
+(() => { const a = []; try { a.length = -1 } catch (e) { return e.name + ':' + e.message } })()	S:RangeError:invalid array length
+(() => { const a = []; try { a.length = 1.5 } catch (e) { return e.name + ':' + e.message } })()	S:RangeError:invalid array length
+(() => { class A {} class B extends A { constructor() { super(); return 5 } } try { return typeof new B() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:derived class constructor returned invalid value 5
+(() => { class A {} class B extends A { constructor() { return 5 } } try { return typeof new B() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:derived class constructor returned invalid value 5
+(() => { class A {} class B extends A { constructor() { return undefined } } try { return typeof new B() } catch (e) { return e.name + ':' + e.message } })()	S:ReferenceError:must call super constructor before using 'this' in derived class constructor
+(() => { const it = { [Symbol.iterator]() { return 5 } }; try { const [a] = it } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:[Symbol.iterator]() returned a non-object value
+(() => { function F() {} F.prototype = 3; try { return ({}) instanceof F } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:'prototype' property of F is not an object
+(() => { 'use strict'; try { undeclared = 1 } catch (e) { return e.name + ':' + e.message } })()	S:ReferenceError:assignment to undeclared variable undeclared
+(() => { const it = { [Symbol.iterator]() { return 5 } }; try { for (const x of it) {} } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:[Symbol.iterator]() returned a non-object value
+(() => { const it = { [Symbol.iterator]() { return 5 } }; try { return [...it] } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:[Symbol.iterator]() returned a non-object value
+(() => { const it = { [Symbol.iterator]() { return 5 } }; try { return Array.from(it) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:[Symbol.iterator]() returned a non-object value
+(() => { const it = { [Symbol.iterator]() { return 5 } }; try { return new Set(it) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:[Symbol.iterator]() returned a non-object value
+(() => { const it = { [Symbol.iterator]() { return null } }; try { let a; [a] = it } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:[Symbol.iterator]() returned a non-object value
+(() => { class A {} class B extends A { constructor() { super(); return null } } try { return typeof new B() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:derived class constructor returned invalid value null
+(() => { class A {} class B extends A { constructor() { super(); return 'str' } } try { return typeof new B() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:derived class constructor returned invalid value "str"
+(() => { class A {} class B extends A { constructor() { } } try { return typeof new B() } catch (e) { return e.name + ':' + e.message } })()	S:ReferenceError:must call super constructor before using 'this' in derived class constructor
+(() => { class A {} class B extends A { constructor() { return {} } } try { return typeof new B() } catch (e) { return e.name + ':' + e.message } })()	S:object
+(() => { function F() {} F.prototype = null; try { return ({}) instanceof F } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:'prototype' property of F is not an object
+(() => { const F = function () {}.bind(); try { return ({}) instanceof F } catch (e) { return e.name + ':' + e.message } })()	J:false
+(() => { 'use strict'; try { undeclared2 += 1 } catch (e) { return e.name + ':' + e.message } })()	S:ReferenceError:undeclared2 is not defined
+(() => { 'use strict'; try { [undeclared3] = [1] } catch (e) { return e.name + ':' + e.message } })()	S:ReferenceError:assignment to undeclared variable undeclared3
+(() => { 'use strict'; try { undeclared4++ } catch (e) { return e.name + ':' + e.message } })()	S:ReferenceError:undeclared4 is not defined
+(() => { function* g() { const o = { [yield 'k']: 1 }; return o } const it = g(); return [it.next(), it.next('z')] })()	J:[{"value":"k","done":false},{"value":{"z":1},"done":true}]
+(() => { function* g() { const o = {a: 3}; return o?.[yield 1] } const it = g(); return [it.next(), it.next('a')] })()	J:[{"value":1,"done":false},{"value":3,"done":true}]
+(() => { function* g() { const o = undefined; return o?.a[yield 1] } const it = g(); return [it.next()] })()	J:[{"done":true}]
+(() => { { function f() { return 1 } } return typeof f })()	S:function
+(() => { if (true) { function f() { return 2 } } return f() })()	J:2
+(() => { const r = typeof f; { function f() {} } return r })()	S:undefined
+(() => { if (false) { function f() {} } return typeof f })()	S:undefined
+(() => { 'use strict'; { function f() {} } return typeof f })()	S:undefined
+(() => { let f = 1; { function f() {} } return f })()	J:1
+(() => { { function f() { return 1 } } { function f() { return 2 } } return f() })()	J:2
+(() => { switch (1) { case 1: function h() { return 3 } } return h() })()	J:3
+(() => { { function f() { return 1 } f = 5; } return typeof f })()	S:function
+(() => { try { { function f() {} } } finally {} return typeof f })()	S:function
+(() => { function q(f) { { function f() {} } return typeof f } return q(4) })()	S:number
+(() => { async function* g() {} return Object.prototype.toString.call(g()) })()	S:[object AsyncGenerator]
+(() => { async function* g() {} const o = g(); Object.setPrototypeOf(o, null); return Object.prototype.toString.call(o) })()	S:[object Object]
+(() => { async function* g() {} return String(g()) })()	S:[object AsyncGenerator]
+(() => { function* g() {} return String(g()) })()	S:[object Generator]
+(() => { async function* g() {} const o = g(); return [typeof o.next, Object.getPrototypeOf(Object.getPrototypeOf(o)) === Object.getPrototypeOf(async function*(){}).prototype] })()	J:["function",true]
+(() => { async function* g() {} return g()[Symbol.toStringTag] })()	S:AsyncGenerator
+(() => { async function* g() {} return Object.getPrototypeOf(g).prototype[Symbol.toStringTag] })()	S:AsyncGenerator
+(() => { 'use strict'; async function* g() {} const o = g(); Object.preventExtensions(o); o.x = 1 })()	E:TypeError:can't define property "x": AsyncGenerator is not extensible
+(() => { 'use strict'; async function* g() {} const o = g(); Object.setPrototypeOf(o, null); Object.preventExtensions(o); o.x = 1 })()	E:TypeError:can't define property "x": AsyncGenerator is not extensible
+(() => { async function* g() {} const o = g(); Object.preventExtensions(o); Object.defineProperty(o, 'x', {value: 1}) })()	E:TypeError:can't define property "x": AsyncGenerator is not extensible
+(() => { async function* g() {} const o = g(); Object.setPrototypeOf(o, null); return String(o) })()	E:TypeError:can't convert o to string
+(() => { async function* g() {} const o = g(); Object.setPrototypeOf(o, null); return o + '' })()	E:TypeError:can't convert o to primitive type
+(() => { async function* g() {} const o = g(); Object.setPrototypeOf(o, null); return `${o}` })()	E:TypeError:can't convert o to string
+(() => { async function* g() {} const o = g(); Object.setPrototypeOf(o, null); return 'a'.concat(o) })()	E:TypeError:can't convert AsyncGenerator to string
+(() => { async function* g() {} const o = g(); return Date.prototype.getTime.call(o) })()	E:TypeError:Date.prototype.getTime called on incompatible AsyncGenerator
+(() => { function* g() {} const o = g(); return Date.prototype.getTime.call(o) })()	E:TypeError:Date.prototype.getTime called on incompatible Generator
+(() => { async function* g() {} const o = g(); Object.setPrototypeOf(o, null); return [].join.call([o]) })()	E:TypeError:can't convert AsyncGenerator to string
+(() => { async function* g() {} const o = g(); Object.setPrototypeOf(o, null); return encodeURI(o) })()	E:TypeError:can't convert o to string
+(() => { function* g() {} const o = g(); Object.setPrototypeOf(o, null); return encodeURI(o) })()	E:TypeError:can't convert o to string
+(() => { async function* g() {} const o = g(); return Object.prototype.toString.call(Object.getPrototypeOf(o)) })()	S:[object AsyncGenerator]
+(() => { switch (1) { case 1: return h(); function h() { return 3 } } })()	J:3
+(() => { switch (2) { case 1: function h() { return 3 } case 2: return typeof h } })()	S:function
+(() => { switch (1) { case 1: class K {} return typeof K } })()	S:function
+(() => { function* g() { switch (1) { case 1: yield h(); function h() { return 4 } } } return [...g()] })()	J:[4]
+(() => { for (let f of [1]) { function f() {} } return typeof f })()	S:undefined
+(() => { { function f() { return 1 } { function f() { return 2 } } } return f() })()	J:2
+(() => { { let f = 0; { function f() {} } } return typeof f })()	S:undefined
+(() => { if (true) function f() { return 7 } return f() })()	J:7
+(() => { label: { function f() { return 8 } } return f() })()	J:8
+(() => { try { function f() { return 9 } } catch (e) {} return f() })()	J:9
+(() => { try { throw 1 } catch (f) { { function f() { return 1 } } } return typeof f })()	S:function
+(() => { var r = []; for (var i = 0; i < 2; i++) { r.push(typeof f); { function f() {} } } return r })()	J:["undefined","function"]
+(() => { { function f() {} } return Object.getOwnPropertyDescriptor(globalThis, 'f') === undefined })()	J:true
+(() => { function* g() { { function f() { return 5 } } yield f() } return [...g()] })()	J:[5]
+(() => { const o = { m() { { function f() { return 6 } } return f() } }; return o.m() })()	J:6
+(() => { class C { m() { { function f() {} } return typeof f } } return new C().m() })()	S:undefined
+(() => { return eval('{ function ev() { return 1 } } typeof ev') })()	S:function
+(() => { return (0, eval)('{ function gev() { return 1 } } typeof gev') })()	S:function
+(() => { return Function('{ function fv() { return 2 } } return typeof fv')() })()	S:function
+(() => { let f = 1; return eval('{ function f() {} } typeof f') })()	S:number
+(() => { let f = 1; eval('{ function f() {} }'); return typeof f })()	S:number
+(() => { function* g() { const [a = yield 1] = []; return a } const it = g(); const r1 = it.next(); const r2 = it.next(7); return [r1, r2] })()	J:[{"value":1,"done":false},{"value":7,"done":true}]
+(() => { function* g() { const {a = yield 1} = {}; return a } const it = g(); const r1 = it.next(); const r2 = it.next(7); return [r1, r2] })()	J:[{"value":1,"done":false},{"value":7,"done":true}]
+(() => { function* g() { let a, b; [a = yield 1, b = yield 2] = [undefined, 5]; return [a, b] } const it = g(); return [it.next(), it.next(3), it.next(4)] })()	J:[{"value":1,"done":false},{"value":[3,5],"done":true},{"done":true}]
+(() => { function* g() { let a; ({x: a = yield 'k'} = {}); return a } const it = g(); return [it.next(), it.next(9)] })()	J:[{"value":"k","done":false},{"value":9,"done":true}]
+(() => { function* g(p) { const [[x = yield 1] = []] = [p]; return x } const it = g(undefined); return [it.next(), it.next(2)] })()	J:[{"value":1,"done":false},{"value":2,"done":true}]
+(() => { function* g() { for (const [a = yield 1] of [[], [5]]) { yield a } } return [...g()] })()	J:[1,null,5]
+(() => { function* g() { const C = class { [yield 'k']() { return 1 } }; return Object.getOwnPropertyNames(C.prototype) } const it = g(); return [it.next(), it.next('m')] })()	J:[{"value":"k","done":false},{"value":["constructor","m"],"done":true}]
+(() => { function* g() { const C = class { static [yield 'k'] = 3 }; return C.m } const it = g(); return [it.next(), it.next('m')] })()	J:[{"value":"k","done":false},{"value":3,"done":true}]
+(() => { function* g() { const o = null; return o?.[yield 1] } const it = g(); return [it.next(), it.next(2)] })()	J:[{"done":true},{"done":true}]
+(() => { function* g() { const o = null; return o?.f(yield 1) } const it = g(); return [it.next()] })()	J:[{"done":true}]
+(() => { function* g() { const f = null; return f?.(yield 1) } const it = g(); return [it.next()] })()	J:[{"done":true}]
+(() => { function* g() { const [a, [b = yield 'b'] = [], ...r] = [1, undefined, 3, 4]; return [a, b, r] } const it = g(); return [it.next(), it.next(9)] })()	J:[{"value":"b","done":false},{"value":[1,9,[3,4]],"done":true}]
+(() => { function* g() { const {a = yield 'a', ...r} = {b: 2, c: 3}; return [a, r] } const it = g(); return [it.next(), it.next(5)] })()	J:[{"value":"a","done":false},{"value":[5,{"b":2,"c":3}],"done":true}]
+(() => { function* g() { const {[yield 'k']: v = 1} = {x: 7}; return v } const it = g(); return [it.next(), it.next('x')] })()	J:[{"value":"k","done":false},{"value":7,"done":true}]
+(() => { function* g() { const {[yield 'k']: v = yield 'd'} = {}; return v } const it = g(); return [it.next(), it.next('x'), it.next(4)] })()	J:[{"value":"k","done":false},{"value":"d","done":false},{"value":4,"done":true}]
+(() => { function* g() { const [f = function () {}] = [], [h = yield] = [1]; return f.name } return g().next() })()	J:{"value":"f","done":true}
+(() => { function* g() { const [f = function () {}, h = yield] = []; return f.name } const it = g(); it.next(); return it.next() })()	J:{"value":"f","done":true}
+(() => { function* g() { let a = 0; [a = yield 'a'] = [undefined]; return a } const it = g(); return [it.next(), it.next(6)] })()	J:[{"value":"a","done":false},{"value":6,"done":true}]
+(() => { function* g() { const o = {}; [o.x = yield 'x', o['y'] = 2] = []; return o } const it = g(); return [it.next(), it.next(1)] })()	J:[{"value":"x","done":false},{"value":{"x":1,"y":2},"done":true}]
+(() => { function* g() { const r = ([a = yield 'a'] = [undefined, 2]); return r } const it = g(); it.next(); return it.next(1) })()	J:{"value":[null,2],"done":true}
+(() => { function* g() { try { throw {m: undefined} } catch ({m = yield 'm'}) { return m } } const it = g(); return [it.next(), it.next(8)] })()	J:[{"value":"m","done":false},{"value":8,"done":true}]
+(() => { function* g() { let a; for ([a = yield 'a'] of [[], [2]]) { yield a } } return [...g()] })()	J:["a",null,2]
+(() => { function* g() { for (var [a = yield 'a'] of [[]]) {} return a } const it = g(); it.next(); return it.next(3) })()	J:{"value":3,"done":true}
+(() => { function* g() { const [a = yield 'a'] = null } try { g().next() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:can't access property Symbol.iterator of null
+(() => { function* g() { const {a = yield 'a'} = null } try { g().next() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:null has no properties
+(() => { function* g() { const [a = yield 'a'] = 5 } try { g().next() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:5 is not iterable
+(() => { let closed = 0; const it = { [Symbol.iterator]() { return { next() { return {value: undefined, done: false} }, return() { closed++; return {} } } } }; function* g() { const [a = yield 'a'] = it; return a } const i = g(); i.next(); const r = i.next(4); return [r, closed] })()	J:[{"value":4,"done":true},1]
+(() => { let closed = 0; const it = { [Symbol.iterator]() { return { next() { return {value: undefined, done: false} }, return() { closed++; return {} } } } }; function* g() { const [a = yield 'a'] = it; return a } const i = g(); i.next(); const r = i.return(4); return [r, closed] })()	J:[{"value":4,"done":true},1]
+(() => { const log = []; function* g() { const [a = (log.push('a'), yield 'a'), b = log.push('b')] = []; return [a, b, log] } const it = g(); it.next(); return it.next(1) })()	J:{"value":[1,2,["a","b"]],"done":true}
+(() => { function* g() { class C extends (yield 'p') {} return Object.getPrototypeOf(C) === Array } const it = g(); return [it.next(), it.next(Array)] })()	J:[{"value":"p","done":false},{"value":true,"done":true}]
+(() => { function* g() { class C { [yield 'a']() { return 1 } [yield 'b']() { return 2 } static x = 5 } return [Object.getOwnPropertyNames(C.prototype), C.x] } const it = g(); it.next(); it.next('p'); return it.next('q') })()	J:{"value":[["constructor","p","q"],5],"done":true}
+(() => { function* g() { class C { [yield 'a']() {} } return C.prototype.m.name } const it = g(); it.next(); return it.next('m') })()	J:{"value":"m","done":true}
+(() => { function* g() { const C = class { static [yield 'a'] = function () {} }; return C.k.name } const it = g(); it.next(); return it.next('k') })()	J:{"value":"k","done":true}
+(() => { function* g() { const a = { f(x) { return [this === a, x] } }; return a.f?.(yield 1) } const it = g(); it.next(); return it.next(2) })()	J:{"value":[true,2],"done":true}
+(() => { function* g() { const a = {}; return a.f?.(yield 1) } const it = g(); return [it.next()] })()	J:[{"done":true}]
+(() => { function* g() { const a = {f: 5}; return a.f?.(yield 1) } const it = g(); it.next(); try { it.next(2) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:a.f is not a function
+(() => { function* g() { const f = 5; return f?.(yield 1) } const it = g(); it.next(); try { it.next(2) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:f is not a function
+(() => { function* g() { const o = {a: {b: null}}; return o?.a.b?.[yield 1].c } const it = g(); return [it.next()] })()	J:[{"done":true}]
+(() => { function* g() { const o = {a: {b: {x: {c: 4}}}}; return o?.a.b?.[yield 1].c } const it = g(); it.next(); return it.next('x') })()	J:{"value":4,"done":true}
+(() => { function* g() { const o = {a: null}; return o.a?.[yield 1] ?? 'n' } const it = g(); return it.next() })()	J:{"value":"n","done":true}
+(() => { function* g() { const o = {k: {m: 1}}; return o?.[yield 'a']?.[yield 'b'] } const it = g(); return [it.next(), it.next('k'), it.next('m')] })()	J:[{"value":"a","done":false},{"value":"b","done":false},{"value":1,"done":true}]
+(() => { function* g() { const o = {k: null}; return o?.[yield 'a']?.[yield 'b'] } const it = g(); return [it.next(), it.next('k')] })()	J:[{"value":"a","done":false},{"done":true}]
+(() => { function* g() { return (yield 'o')?.[yield 'k'] } const it = g(); return [it.next(), it.next(null)] })()	J:[{"value":"o","done":false},{"done":true}]
+(() => { function* g() { const a = [1, 2]; return a?.map(x => x * 2)[yield 0] } const it = g(); it.next(); return it.next(1) })()	J:{"value":4,"done":true}
+(() => { function* g() { let f = function () {}; [f = yield] = [f]; return f.name } return g().next() })()	J:{"value":"f","done":true}
+(() => { function* g() { const a = {f: 5}; return a.f(yield 1) } const it = g(); it.next(); try { it.next(2) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:a.f is not a function
+(() => { function* g() { const a = {b: {f: 5}}; return a.b.f(yield 1) } const it = g(); it.next(); try { it.next(2) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:a.b.f is not a function
+(() => { function* g() { const a = {f: 5}; return a['f'](yield 1) } const it = g(); it.next(); try { it.next(2) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:a.f is not a function
+(() => { function* g() { const a = {f: 5}; const k = 'f'; return a[k](yield 1) } const it = g(); it.next(); try { it.next(2) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:a[k] is not a function
+(() => { function* g() { return (yield 1).f() } const it = g(); it.next(); try { it.next({}) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:(intermediate value).f is not a function
+(() => { function* g() { return (yield 1)() } const it = g(); it.next(); try { it.next(3) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:3 is not a function
+(() => { function* g() { const f = 3; return f(yield 1) } const it = g(); it.next(); try { it.next(3) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:f is not a function
+(() => { function* g() { const a = {}; return a.b.c[yield 1] } const it = g(); try { it.next() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:can't access property "c", a.b is undefined
+(() => { function* g() { const a = {b: null}; return a.b[yield 1] } const it = g(); it.next(); try { it.next('x') } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:can't access property "x", a.b is null
+(() => { function* g() { const a = {b: null}; return a.b.c + (yield 1) } const it = g(); try { it.next() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:can't access property "c", a.b is null
+(() => { function* g() { const a = {f: 5}; return new a.f(yield 1) } const it = g(); it.next(); try { it.next(2) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:a.f is not a constructor
+(() => { function* g() { const a = {b: null}; a.b.c = yield 1 } const it = g(); it.next(); try { it.next(2) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:can't access property "c", a.b is null
+eval('1 + 2')	J:3
+eval('1 + 2')	J:3
+eval('1\r+ 2')	J:3
+eval('﻿ 3')	J:3
+eval('true?.5:1')	J:0.5
+eval('1_000_0')	J:10000
+(() => { try { return eval('0x_1') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:missing hexadecimal digits after '0x'
+(() => { try { return eval('1__0') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:number cannot contain multiple adjacent underscores
+(() => { try { return eval('09n') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid BigInt syntax
+(() => { try { return eval('0b2n') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:missing binary digits after '0b'
+(() => { try { return eval("'\\u{110000}'") } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:Unicode codepoint must not be greater than 0x10FFFF in escape sequence
+(() => { try { return eval("'\\u{12'") } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:malformed Unicode character escape sequence
+(() => { try { return eval("'\\u{1g}'") } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:malformed Unicode character escape sequence
+(() => { try { return eval("'\\x4'") } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:malformed hexadecimal character escape sequence
+(() => { try { return eval("'abc\\") } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:reached end of script in the middle of an escape sequence in a '' literal
+(() => { try { return eval("'\\0'").charCodeAt(0) } catch (e) { return e.name + ':' + e.message } })()	J:0
+(() => { try { return eval("'\\08'").length } catch (e) { return e.name + ':' + e.message } })()	J:2
+(() => { try { return eval("'\\u'") } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:malformed Unicode character escape sequence
+(() => { try { return eval('`a${') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:expected expression, got end of script
+(() => { try { return eval('`a\\') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:reached end of script in the middle of an escape sequence in a `` literal
+(() => { try { return eval('`a') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:`` literal not terminated before end of script
+eval('`a\\`b`')	S:a`b
+eval('String.raw`\\u{zz}`')	S:\\u{zz}
+(() => { try { return eval('/a') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:unterminated regular expression literal
+(() => { try { return eval('/a\n/') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:unterminated regular expression literal
+eval('/[/]/.test("/")')	J:true
+eval('/\\//.source')	S:\\/
+eval('"\\uD83D\\uDE00".length')	J:2
+eval('var \\uD83D\\uDE00; 1')	E:SyntaxError:invalid escape sequence
+eval('"\\uD83D\\u0041".length')	J:2
+eval('"\\uD83D".length')	J:1
+eval('"\\uD83Dx".length')	J:2
+eval('"\\uD83D\\".length')	E:SyntaxError:"" literal not terminated before end of script
+(() => { try { return eval('a\\u0062c = 1; abc') } catch (e) { return e.name + ':' + e.message } })()	J:1
+(() => { try { return eval('\\u{61}b = 2; ab') } catch (e) { return e.name + ':' + e.message } })()	J:2
+(() => { try { return eval('\\u{zz} = 2') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid escape sequence
+(() => { try { return eval('\\x61 = 2') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid escape sequence
+(() => { try { return eval('1e') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:missing exponent
+(() => { try { return eval('3in []') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:identifier starts immediately after numeric literal
+(() => { try { return eval('08.5') } catch (e) { return e.name + ':' + e.message } })()	J:8.5
+(() => { try { return eval('"use strict"; 08') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:"0"-prefixed octal literals are deprecated; use the "0o" prefix instead
+(() => { try { return eval('"use strict"; "\\08"') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:octal escape sequences can't be used in untagged template literals or in strict mode code
+(() => { try { return eval('"use strict"; "\\1"') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:octal escape sequences can't be used in untagged template literals or in strict mode code
+(() => { try { return eval('"\\1"').charCodeAt(0) } catch (e) { return e.name + ':' + e.message } })()	J:1
+(() => { try { return eval('"\\18"').length } catch (e) { return e.name + ':' + e.message } })()	J:2
+(() => { try { return eval('"\\400"').length } catch (e) { return e.name + ':' + e.message } })()	J:2
+(() => { try { return eval('"\\8"') } catch (e) { return e.name + ':' + e.message } })()	S:8
+(() => { try { return eval('"a\nb"') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:"" string literal contains an unescaped line break
+eval('"a\\\nb"')	S:ab
+eval('"a\\\r\nb"')	S:ab
+eval('"a\\ b"')	S:ab
+(() => { try { return eval('"a b"').length } catch (e) { return e.name + ':' + e.message } })()	J:3
+eval('// c  5')	J:5
+eval('/* a\n */ 5')	J:5
+(() => { try { return eval('/* a') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:unterminated comment
+eval('<!-- x\n 6')	J:6
+eval('1\n--> x\n 7')	J:7
+(() => { try { return eval('@') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:illegal character U+0040
+(() => { try { return eval('#') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:'#' not followed by identifier
+(() => { try { return eval('a.#b') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:reference to undeclared private field or method #b
+(() => { try { return eval('"use strict"; 0o9') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:missing octal digits after '0o'
+(() => { try { return eval('0o') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:missing octal digits after '0o'
+(() => { try { return eval('0x') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:missing hexadecimal digits after '0x'
+(() => { try { return eval('0b') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:missing binary digits after '0b'
+(() => { try { return eval('1.5n') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:identifier starts immediately after numeric literal
+(() => { try { return eval('1e3n') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:identifier starts immediately after numeric literal
+eval('0x1Fn + 0o17n + 0b11n')	E:TypeError:BigInt value can't be serialized in JSON
+eval('.5e1 + 5.e-1 + 0.0e0')	J:5.5
+(() => { try { return eval('1.e') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:missing exponent
+(() => { try { return eval('1a') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:identifier starts immediately after numeric literal
+(() => { try { return eval('0_1') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:numeric separators '_' are not allowed in numbers that start with '0'
+(() => { try { return eval('1_') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:underscore can appear only between digits, not after the last digit in a number
+(() => { try { return eval('1._5') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:identifier starts immediately after numeric literal
+(() => { try { return eval('1e_5') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:missing exponent
+(() => { try { return eval('`a${1') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:missing } in template string
+(() => { try { return eval('`a${1}') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:`` literal not terminated before end of script
+(() => { try { return eval('`a${"x}') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:"" literal not terminated before end of script
+(() => { try { return eval("'abc") } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:'' literal not terminated before end of script
+(() => { try { return eval('"abc') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:"" literal not terminated before end of script
+(() => { try { return eval("'a\rb'") } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:'' string literal contains an unescaped line break
+(() => { try { return eval("'a\nb'") } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:'' string literal contains an unescaped line break
+(() => { try { return eval('"use strict"; "\\8"') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:the escapes \\8 and \\9 can't be used in untagged template literals or in strict mode code
+(() => { try { return eval('"use strict"; 07') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:"0"-prefixed octal literals are deprecated; use the "0o" prefix instead
+(() => { try { return eval('"use strict"; 0') } catch (e) { return e.name + ':' + e.message } })()	J:0
+(() => { try { return eval('"use strict"; 0.5 + 0e1') } catch (e) { return e.name + ':' + e.message } })()	J:0.5
+(() => { try { return eval('010 + 0777') } catch (e) { return e.name + ':' + e.message } })()	J:519
+(() => { try { return eval('07.5') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:unexpected token: numeric literal
+(() => { try { return eval('08e1') } catch (e) { return e.name + ':' + e.message } })()	J:80
+(() => { try { return eval('07n') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid BigInt syntax
+(() => { try { return eval('0n + 1') } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:can't convert BigInt to number
+(() => { try { return eval('07_1') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:numeric separators '_' are not allowed in numbers that start with '0'
+(() => { try { return eval('0x1__2') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:number cannot contain multiple adjacent underscores
+(() => { try { return eval('0x1_') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:underscore can appear only between digits, not after the last digit in a number
+(() => { try { return eval('0X') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:missing hexadecimal digits after '0x'
+(() => { try { return eval('0x1_f') } catch (e) { return e.name + ':' + e.message } })()	J:31
+(() => { try { return eval('1_0.5_5e1_0') } catch (e) { return e.name + ':' + e.message } })()	J:105500000000
+(() => { try { return eval('1e+_5') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:missing exponent
+(() => { try { return eval('1e5_') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:underscore can appear only between digits, not after the last digit in a number
+(() => { try { return eval('"\\377".charCodeAt(0) + "\\0".length + "\\7a".length') } catch (e) { return e.name + ':' + e.message } })()	J:258
+(() => { try { return eval("'\\u{}'") } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:malformed Unicode character escape sequence
+(() => { try { return eval("'\\u{0000000041}'") } catch (e) { return e.name + ':' + e.message } })()	S:A
+(() => { try { return eval("'\\u{41") } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:malformed Unicode character escape sequence
+(() => { try { return eval('\\u0020a') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid escape sequence
+(() => { try { return eval('a\\u0020') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid escape sequence
+(() => { try { return eval('\\ a') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid escape sequence
+(() => { try { return eval('\\') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid escape sequence
+(() => { try { return eval('\\u0031a') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid escape sequence
+(() => { try { return eval('var a\\u0031 = 4; a1') } catch (e) { return e.name + ':' + e.message } })()	J:4
+(() => { try { return eval('\\uD83D') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid escape sequence
+(() => { try { return eval('var \\u{1F600}') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid escape sequence
+(() => { try { return eval('var \\u{10FFFF}') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid escape sequence
+(() => { try { return eval('#\\u0061') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:private names aren't valid in this context
+(() => { try { return eval('x = 1 <!-- 2\n x') } catch (e) { return e.name + ':' + e.message } })()	J:1
+(() => { try { return eval('/*\n*/ --> c\n 3') } catch (e) { return e.name + ':' + e.message } })()	J:3
+(() => { try { return eval('1 /* a */ --> c\n 3') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid increment/decrement operand
+(() => { try { return eval('var x = 5; x\n-->1') } catch (e) { return e.name + ':' + e.message } })()	J:5
+(() => { try { return eval('-->1\n2') } catch (e) { return e.name + ':' + e.message } })()	J:2
+(() => { try { return eval('1 // c\r 2') } catch (e) { return e.name + ':' + e.message } })()	J:2
+(() => { try { return eval('1 // c  2') } catch (e) { return e.name + ':' + e.message } })()	J:2
+(() => { try { return eval('a = 1; a\n++\nb') } catch (e) { return e.name + ':' + e.message } })()	S:ReferenceError:b is not defined
+(() => { try { return eval('`\\08`') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:octal escape sequences can't be used in untagged template literals or in strict mode code
+(() => { try { return eval('`\\u{110000}`') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:Unicode codepoint must not be greater than 0x10FFFF in escape sequence
+(() => { try { return eval('String.raw`\\u{110000}`') } catch (e) { return e.name + ':' + e.message } })()	S:\\u{110000}
+(() => { try { return eval('²') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:illegal character U+00B2
+(() => { try { return eval('var a² = 1; a²') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:illegal character U+00B2
+(() => { try { return eval('Ⅰ = 3; Ⅰ') } catch (e) { return e.name + ':' + e.message } })()	J:3
+(() => { try { return eval('var ٠') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:illegal character U+0660
+(() => { function* g() { return 0 ? 1 : 2 ? 3 : yield 4 } return [...g()] })()	J:[]
+(() => { function* g() { return false ? 1 : (yield 'x') } const i = g(); return [i.next(), i.next(5)] })()	J:[{"value":"x","done":false},{"value":5,"done":true}]
+(() => { function* g() { const o = {a: 1, ...(yield 's'), get b() { return 2 }, [yield 'k']: 3, c: 4}; return o } const i = g(); i.next(); i.next({z: 9}); return i.next('kk') })()	J:{"value":{"a":1,"z":9,"b":2,"kk":3,"c":4},"done":true}
+(() => { function* g() { const o = {a: 1, get [yield 'k']() { return 7 }}; return o.q } const i = g(); i.next(); return i.next('q') })()	J:{"value":7,"done":true}
+(() => { function* g() { const o = {[yield 'k']: 1, ...(yield 's')}; return o } const i = g(); i.next(); i.next('a'); return i.next({b: 2}) })()	J:{"value":{"a":1,"b":2},"done":true}
+(() => { function* g() { return [1, ...(yield 'a'), 2, yield 'b'] } const i = g(); i.next(); i.next([7, 8]); return i.next(3) })()	J:{"value":[1,7,8,2,3],"done":true}
+(() => { function* g() { return Math.max(...[1, 2], yield 'a', ...(yield 'b')) } const i = g(); i.next(); i.next(9); return i.next([4]) })()	J:{"value":9,"done":true}
+(() => { function* g() { let a = 1; a &&= yield 'x'; let b = 0; b ||= yield 'y'; let c = null; c ??= yield 'z'; return [a, b, c] } const i = g(); i.next(); i.next(2); i.next(3); return i.next(4) })()	J:{"value":[2,3,4],"done":true}
+(() => { function* g() { let a = 0; a &&= yield 'x'; return a } return g().next() })()	J:{"value":0,"done":true}
+(() => { function* g() { const o = {p: 1}; o.p += yield 'x'; o['p'] *= yield 'y'; return o.p } const i = g(); i.next(); i.next(2); return i.next(5) })()	J:{"value":15,"done":true}
+(() => { function* g() { let s = ''; for (let i = 0; i < (yield 'n'); i++) s += i; return s } const i = g(); i.next(); i.next(2); i.next(2); return i.next(0) })()	J:{"value":"01","done":true}
+(() => { function* g() { let s = ''; for (let i = 0; i < 2; i += (yield i)) s += i; return s } const i = g(); i.next(); i.next(1); return i.next(1) })()	J:{"value":"01","done":true}
+(() => { function* g() { let s = 0; for (;;) { if (++s > 2) break; yield s } return s } return [...g()] })()	J:[1,2]
+(() => { function* g() { let s = 0; for (let i = yield 'init'; i < 2; i++) s++; return s } const i = g(); i.next(); return i.next(0) })()	J:{"value":2,"done":true}
+(() => { function* g() { outer: for (const x of [1, 2]) { for (const y of [1, 2]) { if (y === 2) continue outer; yield x * 10 + y } } } return [...g()] })()	J:[11,21]
+(() => { function* g() { a: { yield 1; break a; } return 2 } return [...g()] })()	J:[1]
+(() => { function* g() { do { yield 1 } while (yield 2) } const i = g(); return [i.next(), i.next(), i.next(false)] })()	J:[{"value":1,"done":false},{"value":2,"done":false},{"done":true}]
+(() => { function* g() { while (yield 'c') { yield 'b' } } const i = g(); return [i.next(), i.next(true), i.next(), i.next(false)] })()	J:[{"value":"c","done":false},{"value":"b","done":false},{"value":"c","done":false},{"done":true}]
+(() => { function* g() { try { yield 1 } finally { yield 2 } } const i = g(); i.next(); return [i.return(5), i.next()] })()	J:[{"value":2,"done":false},{"value":5,"done":true}]
+(() => { function* g() { try { yield 1; throw new Error('e') } catch (e) { yield e.message } finally { yield 'f' } } return [...g()] })()	J:[1,"e","f"]
+(() => { function* g() { try { throw 1 } catch { yield 'c' } } return [...g()] })()	J:["c"]
+(() => { function* g() { try { yield 1 } catch (e) { return 'caught ' + e } } const i = g(); i.next(); return i.throw(3) })()	J:{"value":"caught 3","done":true}
+(() => { function* g() { switch (yield 'd') { case 1: yield 'one'; case 2: yield 'two'; break; default: yield 'def' } } const i = g(); i.next(); return [i.next(1), i.next(), i.next()] })()	J:[{"value":"one","done":false},{"value":"two","done":false},{"done":true}]
+(() => { function* g() { switch (2) { case (yield 'a'): return 'a'; case (yield 'b'): return 'b' } } const i = g(); i.next(); i.next(1); return i.next(2) })()	J:{"value":"b","done":true}
+(() => { function* g() { switch (3) { case (yield 'a'): return 'a'; default: return 'd' } } const i = g(); i.next(); return i.next(1) })()	J:{"value":"d","done":true}
+(() => { function* g() { with ({a: 1}) { yield a } } return [...g()] })()	J:[1]
+(() => { function* g() { with (yield 'o') { return a } } const i = g(); i.next(); return i.next({a: 4}) })()	J:{"value":4,"done":true}
+(() => { function* g() { yield* [1, 2]; return yield* g2() } function* g2() { yield 3; return 4 } return [...g()] })()	J:[1,2,3]
+(() => { function* g() { const r = yield* {[Symbol.iterator]() { return {next() { return {done: true, value: 9} }} }}; return r } return g().next() })()	J:{"value":9,"done":true}
+(() => { function* g() { yield* 5 } try { g().next() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:5 is not iterable
+(() => { function* g() { yield 1 } const i = g(); i.next(); return [i.next(), i.return(3), i.throw === undefined] })()	J:[{"done":true},{"value":3,"done":true},false]
+(() => { function* g() { yield 1 } const i = g(); try { i.throw(new Error('t')) } catch (e) { return e.message } })()	S:t
+(() => { function* g() { yield 1 } try { g.prototype.next.call({}) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:next method called on incompatible Object
+(() => { function* g() { const x = yield; g2.next() } let g2; g2 = g(); g2.next(); try { g2.next() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:already executing generator
+(() => { function* g() { return new (yield 'c')(yield 'a') } const i = g(); i.next(); i.next(Array); return i.next(3) })()	J:{"value":[null,null,null],"done":true}
+(() => { function* g() { return (yield 'a') + (yield 'b') } const i = g(); i.next(); i.next(1); return i.next(2) })()	J:{"value":3,"done":true}
+(() => { function* g() { return `${yield 'a'}-${yield 'b'}` } const i = g(); i.next(); i.next(1); return i.next(2) })()	J:{"value":"1-2","done":true}
+(() => { function* g() { return typeof (yield 'a') + delete (yield 'b') } const i = g(); i.next(); i.next(1); return i.next(2) })()	J:{"value":"numbertrue","done":true}
+(() => { function* g() { let x = 1; return [x++, (yield 'a'), -(yield 'b'), !(yield 'c'), void (yield 'd')] } const i = g(); i.next(); i.next(1); i.next(2); i.next(3); return i.next(4) })()	J:{"value":[1,1,-2,false,null],"done":true}
+(() => { function* g() { return ((yield 'a'), (yield 'b'), 3) } const i = g(); i.next(); i.next(); return i.next() })()	J:{"value":3,"done":true}
+(() => { function* g() { const o = {m() { return this.v }, v: 7}; return o.m(yield 'a') } const i = g(); i.next(); return i.next(1) })()	J:{"value":7,"done":true}
+(() => { function* g() { const o = {m() { return this.v }, v: 7}; return (yield 'o').m() } const i = g(); i.next(); return i.next({m() { return 8 }}) })()	J:{"value":8,"done":true}
+(() => { function* g() { const o = {a: {b: 1}}; return o[yield 'k'].b } const i = g(); i.next(); return i.next('a') })()	J:{"value":1,"done":true}
+(() => { function* g() { const a = [1, 2]; a[yield 'i'] = yield 'v'; return a } const i = g(); i.next(); i.next(0); return i.next(9) })()	J:{"value":[9,2],"done":true}
+(() => { function* g() { let n = 0; n++; n += (yield 'a') ? 1 : 2; return n } const i = g(); i.next(); return i.next(true) })()	J:{"value":2,"done":true}
+(() => { function* g() { throw yield 'a' } const i = g(); i.next(); try { i.next('boom') } catch (e) { return e } })()	S:boom
+(() => { function* g() { if (yield 'c') return 'y'; else return 'n' } const i = g(); i.next(); return i.next(0) })()	J:{"value":"n","done":true}
+(() => { function* g() { class C extends Object { m() { return super.toString === Object.prototype.toString } } return new C().m() } return g().next() })()	J:{"value":true,"done":true}
+(() => { function* g() { return arguments.length + (yield 'a') } const i = g(1, 2); i.next(); return i.next(10) })()	J:{"value":12,"done":true}
+(() => { function* g() { const f = () => this; return f() === (yield 'a') } const o = {g}; const i = o.g(); i.next(); return i.next(o) })()	J:{"value":true,"done":true}
+(() => { try { return eval('function f() { return super.x }') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:use of super property accesses only valid within methods or eval code within methods
+(() => { try { return eval('function* f() { return super.x }') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:use of super property accesses only valid within methods or eval code within methods
+(() => { try { return eval('(() => super.x)') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:use of super property accesses only valid within methods or eval code within methods
+(() => { try { return eval('({ m() { return () => super.x } }).m()()') } catch (e) { return e.name + ':' + e.message } })()	J:undefined
+(() => { try { return eval('({ m: function () { return super.x } })') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:use of super property accesses only valid within methods or eval code within methods
+(() => { try { return eval('({ m() { return function () { return super.x } } })') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:use of super property accesses only valid within methods or eval code within methods
+(() => { try { return eval('super()') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:super() is only valid in derived class constructors
+(() => { try { return eval('({ m() { super() } })') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:super() is only valid in derived class constructors
+(() => { try { return eval('class A { m() { super() } }') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:super() is only valid in derived class constructors
+(() => { try { return eval('class A { constructor() { super() } }') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:super() is only valid in derived class constructors
+(() => { try { return eval('class A extends Object { constructor() { (() => super())() } }; new A() instanceof A') } catch (e) { return e.name + ':' + e.message } })()	J:true
+(() => { try { return eval('class A { static { super.x } }; 1') } catch (e) { return e.name + ':' + e.message } })()	J:1
+(() => { try { return eval('class A { x = super.y }; 2') } catch (e) { return e.name + ':' + e.message } })()	J:2
+(() => { try { return eval('super.x') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:use of super property accesses only valid within methods or eval code within methods
+(() => { try { return eval('super') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid use of keyword 'super'
+(() => { try { return eval('({ m() { super } })') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid use of keyword 'super'
+(() => { try { return eval('({ get m() { return super.toString === Object.prototype.toString } }).m') } catch (e) { return e.name + ':' + e.message } })()	J:true
+(() => { class A { m() { return eval('super.toString === Object.prototype.toString') } } return new A().m() })()	J:true
+(() => { class A { m() { return (() => eval('super.toString'))() === Object.prototype.toString } } return new A().m() })()	J:true
+(() => { class B extends Object { constructor() { eval('super()'); this.k = 1 } } return new B().k })()	J:1
+(() => { class A { m() { return `${super.toString === Object.prototype.toString}` } } return new A().m() })()	S:true
+(() => { class A { static s = super.toString === Function.prototype.toString } return A.s })()	J:true
+(() => { const o = { set m(v) { this.r = super.hasOwnProperty('r') } }; o.m = 1; return o.r })()	J:false
+(() => { class A { x = super.toString === Object.prototype.toString } return new A().x })()	J:true
+(() => { class B { hi() { return 'b' } } class A extends B { x = super.hi() } return new A().x })()	S:b
+(() => { class B { static hi() { return 'sb' } } class A extends B { static { this.y = super.hi() } } return A.y })()	S:sb
+(() => { class B { static hi() { return 'sb' } } class A extends B { static x = () => super.hi() } return A.x() })()	S:sb

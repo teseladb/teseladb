@@ -228,6 +228,27 @@ fn index_build_load_runs_against_a_local_cluster() {
     }
 }
 
+#[test]
+fn reshard_runs_against_a_local_cluster_without_losing_writes() {
+    let out = metrics(&bench(&[
+        "--scenario",
+        "reshard",
+        "--records",
+        "500",
+        "--concurrency",
+        "1",
+        "--duration",
+        "300ms",
+        "--warmup",
+        "100ms",
+        "--format",
+        "json",
+    ]));
+    for name in ["\"reshard\"", "cutover", "\"lost\",\"unit\":\"doc\",\"value\":0", "writes"] {
+        assert!(out.contains(name), "{name}: {out}");
+    }
+}
+
 /// `changestream-lag` (014 FR-016, SC-002) against a local cluster: the time from each insert's
 /// answer to its event on a change stream, with the target of SC-002 at p99.
 #[test]

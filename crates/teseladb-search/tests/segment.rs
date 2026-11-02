@@ -203,6 +203,12 @@ fn a_sealed_segment_hides_its_text_and_opens_with_its_master_key() {
             assert!(open_sealed(&bad, Some(&ring)).is_err(), "{mode:?} byte {at}");
         }
         assert!(open_sealed(&sealed[..10], Some(&ring)).is_err());
+        // Any byte of the header, the table or the footer changed: refused.
+        for at in (0..64).chain(sealed.len() - 120..sealed.len()) {
+            let mut bad = sealed.clone();
+            bad[at] ^= 2;
+            assert!(open_sealed(&bad, Some(&ring)).is_err(), "{mode:?} byte {at}");
+        }
     }
     // A clear segment comes back as it is.
     let clear = build(&data);

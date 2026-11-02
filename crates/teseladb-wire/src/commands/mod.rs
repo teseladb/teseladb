@@ -14,6 +14,7 @@
 pub mod admin;
 pub mod aggregate;
 pub mod api_keys;
+pub mod apply_ops;
 pub mod args;
 pub mod audit;
 pub mod auth;
@@ -33,6 +34,7 @@ pub mod config_settings;
 pub mod cross_range;
 pub mod crud;
 pub mod cursor_spill;
+pub mod data_distribution;
 pub mod diagnostic_data;
 pub mod diagnostics;
 pub mod engines;
@@ -54,6 +56,7 @@ pub mod list_catalog;
 pub mod local_db;
 pub mod maintenance;
 pub mod mapreduce;
+pub mod move_collection;
 pub mod mutation;
 pub mod names;
 pub mod near_find;
@@ -67,6 +70,7 @@ pub mod presentation;
 pub mod primaries;
 pub mod profile;
 pub mod query;
+pub mod query_analysis;
 pub mod query_settings;
 pub mod query_shape;
 pub mod query_stats;
@@ -79,6 +83,7 @@ pub mod search_indexes;
 pub mod search_ops;
 pub mod server_params;
 pub mod session;
+pub mod shard_key_analysis;
 pub mod sharding;
 pub mod shards;
 pub mod sort;
@@ -750,6 +755,8 @@ pub struct NodeSessions {
     pub index_usage: index_usage::IndexUsage,
     /// What the node counted of each query shape (`$queryStats`, 010 FR-023).
     pub query_stats: query_stats::QueryStats,
+    /// The queries this node sampled for the query analyzer (018 FR-017).
+    pub sampled_queries: query_analysis::Samples,
     /// The query settings as this node last read them (010 FR-023).
     pub query_settings: query_settings::Cache,
     /// The profiler's settings (010 FR-015).
@@ -799,6 +806,7 @@ impl NodeSessions {
             failpoint: None,
             profiler: profile::Profiler::default(),
             query_stats: query_stats::QueryStats::default(),
+            sampled_queries: query_analysis::Samples::default(),
             query_settings: query_settings::Cache::default(),
             search: search_ops::SearchIndexes::default(),
             spill: Spill::default(),
@@ -910,7 +918,8 @@ impl<B: Backend + ?Sized> Ctx<'_, B> {
 }
 
 /// The commands of this module.
-const NAMES: [&str; 110] = [
+const NAMES: [&str; 122] = [
+    apply_ops::APPLY_OPS,
     fle::COMPACT,
     fle::CLEANUP,
     aggregate::AGGREGATE,
@@ -941,6 +950,15 @@ const NAMES: [&str; 110] = [
     reshard::RESHARD_COLLECTION,
     reshard::REFINE_COLLECTION_SHARD_KEY,
     reshard::ABORT_RESHARD_COLLECTION,
+    move_collection::MOVE_COLLECTION,
+    move_collection::UNSHARD_COLLECTION,
+    move_collection::REWRITE_COLLECTION,
+    move_collection::ABORT_MOVE_COLLECTION,
+    move_collection::ABORT_UNSHARD_COLLECTION,
+    move_collection::ABORT_REWRITE_COLLECTION,
+    move_collection::COMMIT_RESHARD_COLLECTION,
+    query_analysis::CONFIGURE_QUERY_ANALYZER,
+    shard_key_analysis::ANALYZE_SHARD_KEY,
     zones::ADD_SHARD_TO_ZONE,
     zones::REMOVE_SHARD_FROM_ZONE,
     zones::UPDATE_ZONE_KEY_RANGE,
@@ -956,6 +974,8 @@ const NAMES: [&str; 110] = [
     chunks::MOVE_RANGE,
     chunks::MERGE_CHUNKS,
     chunks::CLEAR_JUMBO_FLAG,
+    chunks::MERGE_ALL_CHUNKS_ON_SHARD,
+    balancing::SET_ALLOW_MIGRATIONS,
     primaries::MOVE_PRIMARY,
     shards::ADD_SHARD,
     shards::REMOVE_SHARD,
@@ -1045,6 +1065,8 @@ pub fn run<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Option<Result<Document,
         let limit = lock(ctx.shared).params.expression_memory;
         let limit = u64::try_from(limit).unwrap_or(u64::MAX);
         teseladb_exec::expr::optimize::with_expression_memory_limit(limit, || {
+            // A failed sample never fails the command.
+            let _ = query_analysis::sample(ctx);
             crate::concerns::with_defaults(d.read, d.write, || match fle::intercept(ctx) {
                 Some(r) => r,
                 None => command(ctx),
@@ -1342,11 +1364,23 @@ fn dispatch<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
         diagnostic_data::GET_DIAGNOSTIC_DATA => diagnostic_data::get_diagnostic_data(ctx),
         admin::CURRENT_OP => admin::current_op(ctx),
         admin::REPL_SET_GET_STATUS => admin::repl_set_get_status(ctx),
+        apply_ops::APPLY_OPS => apply_ops::apply_ops(ctx),
         sharding::ENABLE_SHARDING => sharding::enable_sharding(ctx),
         sharding::SHARD_COLLECTION => sharding::shard_collection(ctx),
         reshard::RESHARD_COLLECTION => reshard::reshard_collection(ctx),
         reshard::REFINE_COLLECTION_SHARD_KEY => reshard::refine_collection_shard_key(ctx),
         reshard::ABORT_RESHARD_COLLECTION => reshard::abort_reshard_collection(ctx),
+        move_collection::MOVE_COLLECTION => move_collection::move_collection(ctx),
+        move_collection::UNSHARD_COLLECTION => move_collection::unshard_collection(ctx),
+        move_collection::REWRITE_COLLECTION => move_collection::rewrite_collection(ctx),
+        move_collection::ABORT_MOVE_COLLECTION => move_collection::abort_move_collection(ctx),
+        move_collection::ABORT_UNSHARD_COLLECTION => move_collection::abort_unshard_collection(ctx),
+        move_collection::ABORT_REWRITE_COLLECTION => move_collection::abort_rewrite_collection(ctx),
+        move_collection::COMMIT_RESHARD_COLLECTION => {
+            move_collection::commit_reshard_collection(ctx)
+        }
+        query_analysis::CONFIGURE_QUERY_ANALYZER => query_analysis::configure_query_analyzer(ctx),
+        shard_key_analysis::ANALYZE_SHARD_KEY => shard_key_analysis::analyze_shard_key(ctx),
         zones::ADD_SHARD_TO_ZONE => zones::add_shard_to_zone(ctx),
         zones::REMOVE_SHARD_FROM_ZONE => zones::remove_shard_from_zone(ctx),
         zones::UPDATE_ZONE_KEY_RANGE => zones::update_zone_key_range(ctx),
@@ -1362,6 +1396,8 @@ fn dispatch<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
         chunks::MOVE_RANGE => chunks::move_range(ctx),
         chunks::MERGE_CHUNKS => chunks::merge_chunks(ctx),
         chunks::CLEAR_JUMBO_FLAG => chunks::clear_jumbo_flag(ctx),
+        chunks::MERGE_ALL_CHUNKS_ON_SHARD => chunks::merge_all_chunks_on_shard(ctx),
+        balancing::SET_ALLOW_MIGRATIONS => balancing::set_allow_migrations(ctx),
         primaries::MOVE_PRIMARY => primaries::move_primary(ctx),
         shards::ADD_SHARD => shards::add_shard(ctx),
         shards::REMOVE_SHARD => shards::remove_shard(ctx),

@@ -29,8 +29,8 @@ pub fn expr_yields(e: &Expr) -> bool {
         | Expr::Undefined
         | Expr::Ident(..)
         | Expr::This
-        | Expr::Func(_)
-        | Expr::Class(_) => false,
+        | Expr::Func(_) => false,
+        Expr::Class(c) => crate::lowering::class_yields(c),
         Expr::Template(_, xs) | Expr::Seq(xs) => xs.iter().any(expr_yields),
         Expr::SuperMember(x)
         | Expr::Spread(x)
@@ -61,7 +61,16 @@ pub fn expr_yields(e: &Expr) -> bool {
     }
 }
 
-fn key_yields(k: &PropName) -> bool {
+/// A name or a member, through the positions the parser wraps them in.
+fn is_reference(e: &Expr) -> bool {
+    match e {
+        Expr::At(_, x) => is_reference(x),
+        Expr::Member { .. } | Expr::Ident(..) => true,
+        _ => false,
+    }
+}
+
+pub(crate) fn key_yields(k: &PropName) -> bool {
     matches!(k, PropName::Computed(e) if expr_yields(e))
 }
 
@@ -90,24 +99,25 @@ fn stmt_suspends(s: &Stmt) -> bool {
 
 /// Rewrites a generator's body (see the module's documentation).
 pub fn lower(body: Vec<Stmt>) -> Vec<Stmt> {
-    let mut l = Lower { n: 0 };
+    let mut l = Lower { names: Vec::new() };
     let mut out = l.stmts(body);
-    if l.n > 0 {
-        let temps = (1..=l.n).map(|i| (Pattern::Name(temp(i)), None)).collect();
+    if !l.names.is_empty() {
+        let temps = l.names.into_iter().map(|n| (Pattern::Name(n), None)).collect();
         out.insert(0, Stmt::Decl(DeclKind::Var, temps));
     }
     out
 }
 
-fn temp(i: usize) -> Name {
-    format!("%t{i}").into()
-}
+/// A temporary of the rewriting is `%t<n>`, or `%t<n>|<text>` when it holds the value of an
+/// expression that messages name by its source (`a.b is null`); see
+/// [`crate::interp::callee_text`].
+pub(crate) const TEMP_PREFIX: char = '%';
 
-fn ident(n: &Name) -> Expr {
+pub(crate) fn ident(n: &Name) -> Expr {
     Expr::Ident(n.clone(), Pos::default())
 }
 
-fn set(t: &Name, e: Expr) -> Stmt {
+pub(crate) fn set(t: &Name, e: Expr) -> Stmt {
     let s = Stmt::Expr(Expr::Assign {
         op: "=",
         target: Box::new(Pattern::Name(t.clone())),
@@ -126,11 +136,11 @@ fn not(e: Expr) -> Expr {
 }
 
 /// A block of statements, marked when one of them suspends.
-fn block(stmts: Vec<Stmt>) -> Stmt {
+pub(crate) fn block(stmts: Vec<Stmt>) -> Stmt {
     mark(Stmt::Block(stmts))
 }
 
-fn mark(s: Stmt) -> Stmt {
+pub(crate) fn mark(s: Stmt) -> Stmt {
     let suspends = match &s {
         Stmt::Block(b) => b.iter().any(stmt_suspends),
         Stmt::If(_, a, b) => stmt_suspends(a) || b.as_deref().is_some_and(stmt_suspends),
@@ -150,18 +160,31 @@ fn mark(s: Stmt) -> Stmt {
     if suspends { Stmt::Suspends(Box::new(s)) } else { s }
 }
 
-struct Lower {
-    n: usize,
+pub(crate) struct Lower {
+    /// The temporaries made so far.
+    names: Vec<Name>,
 }
 
 impl Lower {
-    fn tmp(&mut self) -> Name {
-        self.n += 1;
-        temp(self.n)
+    pub(crate) fn tmp(&mut self) -> Name {
+        let n: Name = format!("{TEMP_PREFIX}t{}", self.names.len() + 1).into();
+        self.names.push(n.clone());
+        n
+    }
+
+    /// A temporary for the value of `e`, which keeps the text messages give `e`.
+    pub(crate) fn tmp_for(&mut self, e: &Expr) -> Name {
+        let text = crate::interp::callee_text(e);
+        if text == crate::interp::INTERMEDIATE {
+            return self.tmp();
+        }
+        let n: Name = format!("{TEMP_PREFIX}t{}|{text}", self.names.len() + 1).into();
+        self.names.push(n.clone());
+        n
     }
 
     /// `e` kept in a temporary, so that a later `yield` cannot change it.
-    fn spill(&mut self, e: Expr, pre: &mut Vec<Stmt>) -> Expr {
+    pub(crate) fn spill(&mut self, e: Expr, pre: &mut Vec<Stmt>) -> Expr {
         if matches!(
             e,
             Expr::Num(_)
@@ -175,7 +198,7 @@ impl Lower {
         ) {
             return e;
         }
-        let t = self.tmp();
+        let t = self.tmp_for(&e);
         pre.push(set(&t, e));
         ident(&t)
     }
@@ -217,7 +240,7 @@ impl Lower {
             .collect()
     }
 
-    fn key(&mut self, k: PropName, pre: &mut Vec<Stmt>) -> PropName {
+    pub(crate) fn key(&mut self, k: PropName, pre: &mut Vec<Stmt>) -> PropName {
         match k {
             PropName::Computed(e) => {
                 let e = self.expr(*e, pre);
@@ -228,7 +251,7 @@ impl Lower {
     }
 
     /// `e` without `yield`, the statements it needs first pushed to `pre`.
-    fn expr(&mut self, e: Expr, pre: &mut Vec<Stmt>) -> Expr {
+    pub(crate) fn expr(&mut self, e: Expr, pre: &mut Vec<Stmt>) -> Expr {
         if !expr_yields(&e) {
             return e;
         }
@@ -256,8 +279,13 @@ impl Lower {
             Expr::SuperMember(x) => Expr::SuperMember(Box::new(self.expr(*x, pre))),
             Expr::Spread(x) => Expr::Spread(Box::new(self.expr(*x, pre))),
             Expr::Unary(op, x) => Expr::Unary(op, Box::new(self.expr(*x, pre))),
-            Expr::OptChain(x) => Expr::OptChain(Box::new(self.expr(*x, pre))),
+            Expr::OptChain(x) => self.opt_chain(*x, pre),
+            Expr::Class(c) => Expr::Class(self.class(c, pre)),
             Expr::Typeof(x) => Expr::Typeof(Box::new(self.expr(*x, pre))),
+            // `delete` of a value that is not a reference is `true` once it is evaluated.
+            Expr::Delete(x) if !is_reference(&x) => {
+                Expr::Seq(vec![self.expr(*x, pre), Expr::Bool(true)])
+            }
             Expr::Delete(x) => Expr::Delete(Box::new(self.expr(*x, pre))),
             Expr::PrivateIn(n, x) => Expr::PrivateIn(n, Box::new(self.expr(*x, pre))),
             Expr::Await(x) => Expr::Await(Box::new(self.expr(*x, pre))),
@@ -415,8 +443,14 @@ impl Lower {
     ) -> Expr {
         let target = match target {
             Pattern::Expr(e) => Pattern::Expr(Box::new(self.target_expr(*e, pre))),
-            Pattern::Name(n) => Pattern::Name(n),
-            p => self.pattern(p, pre),
+            p @ (Pattern::Array(..) | Pattern::Object(..)) if pattern_yields(&p) => {
+                let v = self.expr(value, pre);
+                let t = self.tmp();
+                pre.push(set(&t, v));
+                self.destructure(p, &t, None, pre);
+                return ident(&t);
+            }
+            p => p,
         };
         let read = match &target {
             Pattern::Name(n) => Some(ident(n)),
@@ -458,38 +492,6 @@ impl Lower {
         }
     }
 
-    /// A destructuring pattern whose computed keys or defaults yield: its defaults become
-    /// conditional assignments.
-    fn pattern(&mut self, p: Pattern, pre: &mut Vec<Stmt>) -> Pattern {
-        if !pattern_yields(&p) {
-            return p;
-        }
-        match p {
-            Pattern::Object(props, rest) => Pattern::Object(
-                props
-                    .into_iter()
-                    .map(|(k, p, d)| (self.key(k, pre), self.pattern(p, pre), self.default(d)))
-                    .collect(),
-                rest,
-            ),
-            Pattern::Array(items, rest) => Pattern::Array(
-                items
-                    .into_iter()
-                    .map(|i| i.map(|(p, d)| (self.pattern(p, pre), self.default(d))))
-                    .collect(),
-                rest,
-            ),
-            Pattern::Expr(e) => Pattern::Expr(Box::new(self.target_expr(*e, pre))),
-            p => p,
-        }
-    }
-
-    /// A default that yields runs, when it is needed, as a nested generator would not: it is
-    /// evaluated in place by an immediately called generator delegated to with `yield*`.
-    fn default(&mut self, d: Option<Expr>) -> Option<Expr> {
-        d.map(|d| if expr_yields(&d) { delegate_default(d) } else { d })
-    }
-
     fn stmts(&mut self, body: Vec<Stmt>) -> Vec<Stmt> {
         let mut out = Vec::new();
         for s in body {
@@ -504,7 +506,7 @@ impl Lower {
         if out.len() == 1 { out.pop().unwrap_or(Stmt::Empty) } else { block(out) }
     }
 
-    fn stmt(&mut self, s: Stmt, out: &mut Vec<Stmt>) {
+    pub(crate) fn stmt(&mut self, s: Stmt, out: &mut Vec<Stmt>) {
         // A `yield` statement keeps no position mark: its own evaluation sets none.
         let s = match s {
             Stmt::Expr(Expr::At(_, e)) if matches!(*e, Expr::Yield(..)) => Stmt::Expr(*e),
@@ -528,8 +530,13 @@ impl Lower {
             {
                 for (p, d) in decls {
                     let d = d.map(|d| self.expr(d, out));
-                    let p = self.pattern(p, out);
-                    out.push(Stmt::Decl(kind, vec![(p, d)]));
+                    if pattern_yields(&p) {
+                        let t = self.tmp();
+                        out.push(set(&t, d.unwrap_or(Expr::Undefined)));
+                        self.destructure(p, &t, Some(kind), out);
+                    } else {
+                        out.push(Stmt::Decl(kind, vec![(p, d)]));
+                    }
                 }
             }
             Stmt::Return(Some(e)) if expr_yields(&e) => {
@@ -583,16 +590,39 @@ impl Lower {
             Stmt::For(init, test, update, body) => self.for_stmt(init, test, update, *body, out),
             Stmt::ForIn { decl, target, of, obj, body } => {
                 let obj = self.expr(obj, out);
-                let body = Box::new(self.sub(*body));
+                let (target, body) = if pattern_yields(&target) {
+                    // for (x of …) { <target> = x; body }
+                    let t = self.tmp();
+                    let mut inner = Vec::new();
+                    self.destructure(target, &t, decl, &mut inner);
+                    self.stmt(*body, &mut inner);
+                    (Pattern::Name(t), Box::new(block(inner)))
+                } else {
+                    (target, Box::new(self.sub(*body)))
+                };
                 out.push(mark(Stmt::ForIn { decl, target, of, obj, body }));
             }
             Stmt::Try(a, c, f) => {
                 let a = self.stmts(a);
-                let c = c.map(|(p, b)| (p, self.stmts(b)));
+                let c = c.map(|(p, b)| match p {
+                    Some(p) if pattern_yields(&p) => {
+                        // catch (e) { let <p> = e; … }
+                        let t = self.tmp();
+                        let mut inner = Vec::new();
+                        self.destructure(p, &t, Some(DeclKind::Let), &mut inner);
+                        inner.extend(self.stmts(b));
+                        (Some(Pattern::Name(t)), inner)
+                    }
+                    p => (p, self.stmts(b)),
+                });
                 let f = f.map(|f| self.stmts(f));
                 out.push(mark(Stmt::Try(a, c, f)));
             }
             Stmt::Switch(d, cases) => self.switch(d, cases, out),
+            Stmt::Class(n, c) => {
+                let c = self.class(c, out);
+                out.push(Stmt::Class(n, c));
+            }
             Stmt::Labeled(l, body) => {
                 let body = self.sub(*body);
                 out.push(mark(Stmt::Labeled(l, Box::new(body))));
@@ -697,36 +727,6 @@ fn clone_target(e: &Expr) -> Expr {
     e.clone_shallow()
 }
 
-/// `yield* (function*(){ return d })()`: a default that yields, run in place.
-fn delegate_default(d: Expr) -> Expr {
-    let def = FuncDef {
-        name: None,
-        params: Vec::new(),
-        rest: None,
-        body: lower(vec![Stmt::Return(Some(d))]),
-        arrow: false,
-        is_ctor_of_derived: false,
-        strict: false,
-        generator: true,
-        is_async: false,
-        method: false,
-        source: "function* () { [code] }".into(),
-        guessed: std::cell::OnceCell::new(),
-    };
-    let call = Expr::Call {
-        callee: Box::new(Expr::Member {
-            obj: Box::new(Expr::Func(Rc::new(def))),
-            prop: Box::new(MemberProp::Name("call".into())),
-            optional: false,
-            pos: Pos::default(),
-        }),
-        args: vec![Expr::This],
-        optional: false,
-        pos: Pos::default(),
-    };
-    Expr::Yield(Some(Box::new(call)), true)
-}
-
 impl Expr {
     /// A copy of a simple expression: a literal, a name, `this` or a member of those. The
     /// rewriting only copies these.
@@ -822,7 +822,7 @@ pub fn make(it: &mut Interp, fo: &ObjRef, def: &Rc<FuncDef>, env: EnvRef) -> R {
         _ => it.realm.proto(fallback),
     };
     if def.is_async {
-        return Ok(Val::Obj(it.alloc(Some(proto), Kind::Ordinary)?));
+        return Ok(Val::Obj(it.alloc(Some(proto), Kind::AsyncGenerator)?));
     }
     let st = GenState { def: def.clone(), env, status: Status::Start, saved: Vec::new() };
     Ok(Val::Obj(it.alloc(Some(proto), Kind::Generator(Rc::new(RefCell::new(st))))?))

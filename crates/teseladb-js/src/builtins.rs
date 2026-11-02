@@ -67,7 +67,21 @@ pub(crate) fn class_kind(v: &Val) -> &'static str {
             Kind::Bool(_) => "Boolean",
             Kind::Num(_) => "Number",
             Kind::Str(_) => "String",
-            _ => "Object",
+            Kind::BigInt(_) => "BigInt",
+            Kind::Symbol(_) => "Symbol",
+            Kind::Proxy(..) => "Proxy",
+            Kind::ArrayBuffer(_) => "ArrayBuffer",
+            Kind::DataView(_) => "DataView",
+            Kind::Typed(t) => t.ty.name(),
+            Kind::Promise(_) => "Promise",
+            Kind::WeakRef(_) => "WeakRef",
+            Kind::Arguments(_) => "Arguments",
+            Kind::ArrayIter(_) => ARRAY_ITERATOR,
+            Kind::Iter(_, class) => class,
+            Kind::Helper(_) => "Iterator Helper",
+            Kind::Generator(_) => "Generator",
+            Kind::AsyncGenerator => "AsyncGenerator",
+            Kind::Ordinary | Kind::Bson(_) => "Object",
         },
         other => other.type_of(),
     }
@@ -75,6 +89,9 @@ pub(crate) fn class_kind(v: &Val) -> &'static str {
 
 /// The class SpiderMonkey names in «X is not extensible»: a BSON type, or the kind of object.
 pub(crate) fn object_class(it: &Interp, o: &ObjRef) -> &'static str {
+    if o.ptr_eq(&it.realm.global) {
+        return "global";
+    }
     crate::bson::bson_class(it, o).unwrap_or_else(|| class_kind(&Val::Obj(o.clone())))
 }
 
@@ -311,6 +328,9 @@ fn eval(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     let body = crate::parser::parse_script(&src).map_err(|e| it.syntax_error(&e))?;
     let env = it.global_env.clone();
     it.hoist(&body, &env, true)?;
+    if !crate::parser::has_use_strict(&body) {
+        it.hoist_block_functions(&body, &env, &[]);
+    }
     let saved = it.last.take();
     for s in &body {
         it.exec(s, &env)?;
@@ -447,8 +467,7 @@ fn obj_create(it: &mut Interp, _: &Val, a: &[Val]) -> R {
 
 fn obj_get_proto(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     let o = it.object_of(&arg(a, 0))?;
-    let p = o.borrow().proto.clone();
-    Ok(p.map_or(Val::Null, Val::Obj))
+    Ok(it.proto_of(&o)?.map_or(Val::Null, Val::Obj))
 }
 
 fn obj_set_proto(it: &mut Interp, _: &Val, a: &[Val]) -> R {
@@ -467,9 +486,17 @@ fn obj_set_proto(it: &mut Interp, _: &Val, a: &[Val]) -> R {
         }
     };
     if let Val::Obj(o) = &target {
-        set_proto(it, o, p)?;
+        set_proto_of(it, o, p)?;
     }
     Ok(target)
+}
+
+/// Sets the prototype of `o`, through a proxy's `setPrototypeOf`.
+pub(crate) fn set_proto_of(it: &mut Interp, o: &ObjRef, p: Option<ObjRef>) -> R<()> {
+    if crate::proxy::is_proxy(o) {
+        return crate::proxy::set_proto(it, o, p);
+    }
+    set_proto(it, o, p)
 }
 
 /// Sets the prototype of `o`, refusing a cycle or a change to an object that is not extensible.
@@ -498,8 +525,7 @@ pub(crate) fn set_proto(it: &Interp, o: &ObjRef, p: Option<ObjRef>) -> R<()> {
 
 fn proto_getter(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     let o = it.object_of(this)?;
-    let p = o.borrow().proto.clone();
-    Ok(p.map_or(Val::Null, Val::Obj))
+    Ok(it.proto_of(&o)?.map_or(Val::Null, Val::Obj))
 }
 
 fn proto_setter(it: &mut Interp, this: &Val, a: &[Val]) -> R {
@@ -512,7 +538,7 @@ fn proto_setter(it: &mut Interp, this: &Val, a: &[Val]) -> R {
         _ => return Ok(Val::Undef),
     };
     if let Val::Obj(o) = this {
-        set_proto(it, o, p)?;
+        set_proto_of(it, o, p)?;
     }
     Ok(Val::Undef)
 }
@@ -532,7 +558,8 @@ fn obj_from_entries(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     let o = it.object()?;
     for e in it.iterate(&arg(a, 0))? {
         let k = it.get(&e, "0")?;
-        let k = it.key_of(&k)?;
+        let k = it.key_of(&k);
+        let k = it.operand_named(k, "pair[0]")?;
         let v = it.get(&e, "1")?;
         it.define(&o, &k, Prop::data(v))?;
     }
@@ -572,7 +599,7 @@ fn obj_group_by(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     Ok(Val::Obj(o))
 }
 
-fn obj_to_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+pub(crate) fn obj_to_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     let builtin = builtin_tag(it, this)?;
     if !this.is_nullish()
         && let Val::Str(tag) = it.get(this, &well_known("toStringTag"))?
@@ -601,7 +628,7 @@ fn builtin_tag(it: &mut Interp, this: &Val) -> R<&'static str> {
         });
     }
     Ok(match this {
-        Val::Undef => "Undefined",
+        Val::Undef | Val::Hole => "Undefined",
         Val::Null => "Null",
         Val::Obj(o) => match &o.borrow().kind {
             Kind::Array(_) => "Array",
@@ -625,14 +652,14 @@ fn obj_value_of(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     Ok(Val::Obj(it.object_of(this)?))
 }
 
-fn obj_is_prototype_of(_: &mut Interp, this: &Val, a: &[Val]) -> R {
+fn obj_is_prototype_of(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let (Val::Obj(p), Val::Obj(o)) = (this, arg(a, 0)) else { return Ok(Val::Bool(false)) };
-    let mut cur = o.borrow().proto.clone();
+    let mut cur = it.proto_of(&o)?;
     while let Some(c) = cur {
         if c.ptr_eq(p) {
             return Ok(Val::Bool(true));
         }
-        cur = c.borrow().proto.clone();
+        cur = it.proto_of(&c)?;
     }
     Ok(Val::Bool(false))
 }
@@ -793,7 +820,7 @@ fn array_ctor(it: &mut Interp, _: &Val, a: &[Val]) -> R {
         }
         let n = *n as usize;
         it.charge(n * crate::interp::PROP_BYTES)?;
-        return it.array(vec![Val::Undef; n]);
+        return it.array(vec![Val::Hole; n]);
     }
     it.array(a.to_vec())
 }
@@ -809,11 +836,12 @@ fn array_from(it: &mut Interp, this: &Val, a: &[Val]) -> R {
         Val::Obj(o)
             if !matches!(
                 o.borrow().kind,
-                Kind::Array(_) | Kind::Set(_) | Kind::Map(_) | Kind::Iter(_) | Kind::Arguments(_)
+                Kind::Array(_) | Kind::Set(_) | Kind::Map(_) | Kind::Iter(..) | Kind::Arguments(_)
             ) && !it.get(&src, "@@Symbol.iterator:0")?.is_callable() =>
         {
             let n = it.get(&src, "length")?;
-            let n = it.number_of(&n)?;
+            let n = it.number_of(&n);
+            let n = it.operand_named(n, "arrayLike.length")?;
             let n = if n.is_finite() && n > 0.0 { n as usize } else { 0 };
             it.charge(n * crate::interp::PROP_BYTES)?;
             target = crate::arrays::made_by(it, this, &[Val::Num(n as f64)])?;
@@ -1597,9 +1625,9 @@ const ITERATOR_KINDS: [&str; 5] =
     [ARRAY_ITERATOR, MAP_ITERATOR, SET_ITERATOR, STRING_ITERATOR, REGEXP_STRING_ITERATOR];
 
 /// An iterator of kind `kind` over `items`.
-pub(crate) fn make_iter(it: &Interp, kind: &str, items: Vec<Val>) -> R {
+pub(crate) fn make_iter(it: &Interp, kind: &'static str, items: Vec<Val>) -> R {
     let state = Rc::new(std::cell::RefCell::new((items, 0usize)));
-    Ok(Val::Obj(it.alloc(Some(it.realm.proto(kind)), Kind::Iter(state))?))
+    Ok(Val::Obj(it.alloc(Some(it.realm.proto(kind)), Kind::Iter(state, kind))?))
 }
 
 /// The kind of iterator a `Map` or a `Set` gives.
@@ -1648,7 +1676,7 @@ fn iter_next(it: &mut Interp, this: &Val, _: &[Val]) -> R {
         let done = v.is_none();
         return iter_result(it, v.unwrap_or(Val::Undef), done);
     }
-    let Kind::Iter(state) = kind else {
+    let Kind::Iter(state, _) = kind else {
         return it.type_error("next called on incompatible object");
     };
     let (v, done) = {
@@ -1738,6 +1766,17 @@ fn regexp_builtins(it: &mut Interp, g: &ObjRef) -> R<()> {
     method(it, &proto, "exec", crate::regex::exec, 1)?;
     method(it, &proto, "toString", regexp_to_string, 0)?;
     method(it, &proto, "compile", regexp_compile, 2)?;
+    let symbols: [(&str, NativeFn, usize); 5] = [
+        ("match", crate::regex::symbol_match, 1),
+        ("matchAll", crate::regex::symbol_match_all, 1),
+        ("replace", crate::regex::symbol_replace, 2),
+        ("search", crate::regex::symbol_search, 1),
+        ("split", crate::regex::symbol_split, 2),
+    ];
+    for (name, f, n) in symbols {
+        let fo = it.native(&format!("[Symbol.{name}]"), f, n)?;
+        it.define(&proto, &well_known(name), Prop::hidden(Val::Obj(fo)))?;
+    }
     let getter = it.native("source", regexp_source, 0)?;
     it.define(&proto, "source", Prop { getter: Some(getter), ..Prop::hidden(Val::Undef) })?;
     let getter = it.native("flags", regexp_flags, 0)?;

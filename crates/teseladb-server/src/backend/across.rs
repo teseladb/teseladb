@@ -118,11 +118,15 @@ impl ServerBackend {
     }
 
     /// The newest committed versions of `keys`, read at one mark: the first key's leader takes it
-    /// under its clock rule (D-003, D-069) and the other keys are read at it.
+    /// under its clock rule (D-003, D-069) and the other keys are read at it. Without keys, the
+    /// mark is the node's clock: what a resharding reads its clone at (018 FR-002).
     pub(super) fn versions(
         &mut self,
         keys: &[Vec<u8>],
     ) -> Result<teseladb_wire::commands::Versions, CommandError> {
+        if keys.is_empty() {
+            return Ok((self.h.clock.0.peek(), Vec::new()));
+        }
         let mut mark: Option<Hlc> = None;
         let mut out = Vec::with_capacity(keys.len());
         for key in keys {
@@ -139,7 +143,7 @@ impl ServerBackend {
                 _ => return Err(CommandError::new(INTERNAL_ERROR, "a read answered with a write")),
             }
         }
-        let ts = mark.ok_or_else(|| CommandError::new(INTERNAL_ERROR, "a read of no keys"))?;
+        let ts = mark.ok_or_else(|| CommandError::new(INTERNAL_ERROR, "a read without a mark"))?;
         Ok((ts, out))
     }
 

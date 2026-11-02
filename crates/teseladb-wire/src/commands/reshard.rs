@@ -15,6 +15,9 @@
 //!   collection's place in one Group 0 entry. The fence stays on the dropped collection's keys.
 //! - `abortReshardCollection` (or `killOp`) before the rename drops the copy and lifts the
 //!   critical section; the command fails with 341.
+//! - `moveCollection`, `unshardCollection` and `rewriteCollection`
+//!   ([`super::move_collection`]) run the same steps with their own [`Provenance`]: the first
+//!   two leave the copy without shard key ([`UNSPLITTABLE`]) and send its ranges to a shard.
 //!
 //! The replies, messages and events are those of a `refrouter` 9.0.4 of two shards (measured on
 //! 02-11-2026). `currentOp` lists the operation as `ReshardingMetricsRecipientService <uuid>`.
@@ -28,6 +31,7 @@ use teseladb_meta::catalog::{CatalogCommand, CollectionEntry, Namespace};
 use teseladb_meta::indexes::{IndexCommand, IndexState};
 use teseladb_range::push::TxnView;
 use teseladb_range::read::ReadConcern;
+use teseladb_types::NodeId;
 
 use super::crud::{Writer, index_rules, rules_of};
 use super::mutation::{Bound, DocMutation, Image, Rules};
@@ -35,7 +39,7 @@ use super::names::{full, parse_full};
 use super::sharding::{SHARD_KEY, ShardKey, document_key, same_value, shard_key_of};
 use super::{Backend, Ctx, Shared, display, lock, uuid_text};
 use crate::error::{
-    BAD_VALUE, CommandError, INTERNAL_ERROR, INVALID_NAMESPACE, INVALID_OPTIONS,
+    BAD_VALUE, CommandError, ILLEGAL_OPERATION, INTERNAL_ERROR, INVALID_NAMESPACE, INVALID_OPTIONS,
     MAX_TIME_MS_EXPIRED, NAMESPACE_NOT_FOUND, NAMESPACE_NOT_SHARDED, NO_SUCH_RESHARD_COLLECTION,
     RESHARD_CARDINALITY, RESHARD_COLLECTION_ABORTED, SAMPLE_SIZE, STALE_CONFIG,
 };
@@ -54,14 +58,17 @@ pub const TEMP_PREFIX: &str = "system.resharding.";
 /// the cutover gives. Its `collMod`-less changes carry it as their description, which keeps them
 /// out of change streams.
 pub const CUTOVER: &str = "$resharding";
+/// The option of a collection without shard key that `config.collections` lists
+/// (`unsplittable: true`, key `{_id: 1}`): the command that made it so.
+pub const UNSPLITTABLE: &str = "$unsplittable";
 /// `desc` of the operation in `currentOp`.
 const METRICS_DESC: &str = "ReshardingMetricsRecipientService ";
 /// The chunks a resharding needs without `numInitialChunks` (measured: 90).
-const DEFAULT_CHUNKS: i64 = 90;
+pub(super) const DEFAULT_CHUNKS: i64 = 90;
 /// The documents sampled per chunk, every tenth one a split point (measured).
 const SAMPLES_PER_CHUNK: usize = 10;
 const SCAN: usize = super::query::SCAN_CHUNK;
-const PROVENANCE: &str = "provenance";
+pub(super) const PROVENANCE: &str = "provenance";
 
 /// The phase of a resharding, as `Reshard.tla` names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,18 +131,54 @@ pub fn next_action(phase: Phase, caught_up: bool) -> Action {
     }
 }
 
+/// The command a resharding runs for: `provenance` in its event and in `currentOp`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Provenance {
+    /// `reshardCollection`: a new shard key.
+    Reshard,
+    /// `refineCollectionShardKey`: the copy keeps the collection's UUID and the event is a
+    /// `refineCollectionShardKey`.
+    Refine,
+    /// `moveCollection`: a collection without shard key goes to another shard.
+    Move,
+    /// `unshardCollection`: the collection loses its shard key.
+    Unshard,
+    /// `rewriteCollection`: the collection is written again with its own key.
+    Rewrite,
+}
+
+impl Provenance {
+    /// The command's name.
+    pub fn name(self) -> &'static str {
+        match self {
+            Provenance::Reshard => RESHARD_COLLECTION,
+            Provenance::Refine => REFINE_COLLECTION_SHARD_KEY,
+            Provenance::Move => super::move_collection::MOVE_COLLECTION,
+            Provenance::Unshard => super::move_collection::UNSHARD_COLLECTION,
+            Provenance::Rewrite => super::move_collection::REWRITE_COLLECTION,
+        }
+    }
+
+    /// Whether the copy has no shard key: it is tracked as unsplittable
+    /// ([`UNSPLITTABLE`]).
+    pub fn unsplittable(self) -> bool {
+        matches!(self, Provenance::Move | Provenance::Unshard)
+    }
+}
+
 /// What the command asked: the new key and the event's description.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Plan {
     /// The collection.
     pub ns: Namespace,
-    /// The new shard key.
+    /// The new shard key (`{_id: 1}` for a collection that loses its key).
     pub key: ShardKey,
     /// The event's `operationDescription` without `reshardUUID`.
     pub description: Document,
-    /// `refineCollectionShardKey`: the copy keeps the collection's UUID and the event is a
-    /// `refineCollectionShardKey`.
-    pub refine: bool,
+    /// The command it runs for.
+    pub provenance: Provenance,
+    /// The shard the collection goes to once renamed (`moveCollection`, `unshardCollection`).
+    pub to: Option<NodeId>,
 }
 
 /// A resharding in progress.
@@ -180,6 +223,7 @@ pub fn reshard_plan<B: Backend + ?Sized>(
     let types = ["int", "long", "decimal", "double"];
     let chunks = super::args::int_of(ctx.cmd, RESHARD_COLLECTION, "numInitialChunks", &types)?;
     super::sharding::check_collation(RESHARD_COLLECTION, ctx.cmd.get("collation"))?;
+    super::move_collection::check_verification(ctx.cmd)?;
     let asked = ShardKey { key, unique: false };
     super::sharding::check_key(&asked)?;
     let ns = parse_ns(&name)?;
@@ -213,7 +257,7 @@ pub fn reshard_plan<B: Backend + ?Sized>(
         description.push("collation", c.clone());
     }
     description.push(PROVENANCE, RESHARD_COLLECTION);
-    Ok(Some(Plan { ns, key: asked, description, refine: false }))
+    Ok(Some(Plan { ns, key: asked, description, provenance: Provenance::Reshard, to: None }))
 }
 
 /// `refineCollectionShardKey`.
@@ -263,7 +307,7 @@ pub fn refine_collection_shard_key<B: Backend + ?Sized>(
     let description =
         Document::new().with("shardKey", asked.key.clone()).with("oldShardKey", have.key);
     let key = ShardKey { key: asked.key, unique: have.unique };
-    run(ctx, Plan { ns, key, description, refine: true })
+    run(ctx, Plan { ns, key, description, provenance: Provenance::Refine, to: None })
 }
 
 /// `abortReshardCollection`: marks the resharding of the namespace, which stops before its
@@ -271,16 +315,51 @@ pub fn refine_collection_shard_key<B: Backend + ?Sized>(
 pub fn abort_reshard_collection<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
 ) -> Result<Document, CommandError> {
-    super::admin::admin_only(ABORT_RESHARD_COLLECTION, ctx.db)?;
-    let name = command_ns(ctx.cmd, ABORT_RESHARD_COLLECTION)?;
+    abort(ctx, ABORT_RESHARD_COLLECTION, &[Provenance::Reshard, Provenance::Refine])
+}
+
+/// Kills the reshardings of the namespace `ctx`'s command `name` names that run for one of
+/// `provenances`: 339 when none runs, 20 when the ones that run are of another command.
+pub(super) fn abort<B: Backend + ?Sized>(
+    ctx: &mut Ctx<'_, B>,
+    name: &str,
+    provenances: &[Provenance],
+) -> Result<Document, CommandError> {
+    super::admin::admin_only(name, ctx.db)?;
+    let ns = command_ns(ctx.cmd, name)?;
+    let running = running(ctx.shared, &ns)?;
+    let names: Vec<&str> = provenances.iter().map(|p| p.name()).collect();
+    let found: Vec<u32> =
+        running.iter().filter(|(_, p)| names.contains(&p.as_str())).map(|(id, _)| *id).collect();
+    if found.is_empty() {
+        return Err(CommandError::new(
+            ILLEGAL_OPERATION,
+            "Could not find in-progress resharding operation with matching provenance",
+        ));
+    }
     let mut s = lock(ctx.shared);
-    let found: Vec<u32> = s
+    for id in found {
+        s.ops.kill(id);
+    }
+    Ok(ok())
+}
+
+/// The reshardings of namespace `ns` in `currentOp`, with their provenance; 339 when none.
+pub(super) fn running(shared: &Shared, ns: &str) -> Result<Vec<(u32, String)>, CommandError> {
+    let s = lock(shared);
+    let found: Vec<(u32, String)> = s
         .ops
         .iter()
         .filter(|(_, o)| {
-            o.ns == name && o.desc.as_deref().is_some_and(|d| d.starts_with(METRICS_DESC))
+            o.ns == ns && o.desc.as_deref().is_some_and(|d| d.starts_with(METRICS_DESC))
         })
-        .map(|(id, _)| id)
+        .map(|(id, o)| {
+            let provenance = match o.metrics.as_ref().and_then(|m| m.get(PROVENANCE)) {
+                Some(Value::String(p)) => p.clone(),
+                _ => String::new(),
+            };
+            (id, provenance)
+        })
         .collect();
     if found.is_empty() {
         return Err(CommandError::new(
@@ -288,10 +367,12 @@ pub fn abort_reshard_collection<B: Backend + ?Sized>(
             "Could not find resharding-related metadata that matches the given namespace",
         ));
     }
-    for id in found {
-        s.ops.kill(id);
-    }
-    Ok(ok())
+    Ok(found)
+}
+
+/// The name of a resharding command, checked as a string.
+pub(super) fn command_ns_of(cmd: &Document, name: &str) -> Result<String, CommandError> {
+    command_ns(cmd, name)
 }
 
 /// The collection of `ns` once no resharding holds its writes (018 FR-002): a write that finds
@@ -395,7 +476,7 @@ fn index_keys<B: Backend + ?Sized>(
 }
 
 /// Whether an index of `c` starts with the fields of `key` (the `_id` index serves `{_id: 1}`).
-fn has_prefix_index<B: Backend + ?Sized>(
+pub(super) fn has_prefix_index<B: Backend + ?Sized>(
     backend: &mut B,
     c: &CollectionEntry,
     key: &Document,
@@ -413,7 +494,7 @@ fn has_prefix_index<B: Backend + ?Sized>(
 /// The chunks the documents of `c` give under `key`: sorted by it, every tenth one is a split
 /// point and the distinct points cut one chunk more than their number; with more documents than
 /// `need` × 10, evenly spaced ones stand for the sample of a `refrouter`.
-fn check_cardinality<B: Backend + ?Sized>(
+pub(super) fn check_cardinality<B: Backend + ?Sized>(
     backend: &mut B,
     c: &CollectionEntry,
     key: &Document,
@@ -447,7 +528,7 @@ fn check_cardinality<B: Backend + ?Sized>(
 }
 
 /// Calls `f` with each document of `c` in key order, read at mark `at` (now without one).
-fn for_each_document<B: Backend + ?Sized>(
+pub(super) fn for_each_document<B: Backend + ?Sized>(
     backend: &mut B,
     c: &CollectionEntry,
     at: Option<Hlc>,
@@ -475,7 +556,10 @@ fn for_each_document<B: Backend + ?Sized>(
 }
 
 /// Runs a resharding to its end.
-fn run<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>, plan: Plan) -> Result<Document, CommandError> {
+pub(super) fn run<B: Backend + ?Sized>(
+    ctx: &mut Ctx<'_, B>,
+    plan: Plan,
+) -> Result<Document, CommandError> {
     let mut r = Resharding::start(ctx.backend, ctx.shared, plan, ctx.cmd)?;
     let result = r.drive(ctx.backend, ctx.shared);
     r.finish(ctx.shared);
@@ -495,8 +579,9 @@ impl Resharding {
         let old = backend
             .collection(&ns)?
             .ok_or_else(|| CommandError::new(NAMESPACE_NOT_FOUND, "no collection"))?;
-        let uuid = if plan.refine { old.uuid } else { super::new_uuid(backend) };
-        if !plan.refine {
+        let refine = plan.provenance == Provenance::Refine;
+        let uuid = if refine { old.uuid } else { super::new_uuid(backend) };
+        if !refine {
             let desc = std::mem::take(&mut plan.description);
             plan.description = Document::new().with("reshardUUID", uuid_value(uuid));
             for (k, v) in desc.iter() {
@@ -506,10 +591,15 @@ impl Resharding {
         let temp_ns =
             Namespace { db: ns.db.clone(), coll: format!("{TEMP_PREFIX}{}", uuid_text(&uuid)) };
         let mut options = Document::from(RawDoc::from_bytes(&old.options)?);
-        options.insert(
-            SHARD_KEY,
-            Document::new().with("key", plan.key.key.clone()).with("unique", plan.key.unique),
-        );
+        if plan.provenance.unsplittable() {
+            options.remove(SHARD_KEY);
+            options.insert(UNSPLITTABLE, plan.provenance.name());
+        } else {
+            options.insert(
+                SHARD_KEY,
+                Document::new().with("key", plan.key.key.clone()).with("unique", plan.key.unique),
+            );
+        }
         backend.catalog_write(CatalogCommand::Create {
             ns: temp_ns.clone(),
             uuid,
@@ -684,7 +774,7 @@ impl Resharding {
         let rules = self.temp_rules(backend)?;
         let mut w = Writer::internal();
         for id in ids {
-            if let Some(k) = super::capped::id_key(backend, &self.temp, &id)? {
+            if let Some(k) = super::crud::id_doc_key(backend, &self.temp, &id)? {
                 let filter = Document::new().with("_id", id);
                 let gone = DocMutation::Delete {
                     filter,
@@ -745,11 +835,15 @@ impl Resharding {
         })?;
         self.target = backend.read_versions(&[])?.0;
         self.phase = Phase::Committed;
+        let Some(now) = backend.collection(&self.plan.ns)? else { return Ok(()) };
         // The zones' intervals follow the new key order (018 FR-003).
-        if let Some(now) = backend.collection(&self.plan.ns)? {
+        if !self.plan.provenance.unsplittable() {
             super::zones::rekey(backend, &self.plan.ns, &now)?;
         }
-        Ok(())
+        match self.plan.to {
+            Some(node) => super::move_collection::lead_from(backend, &now, node),
+            None => Ok(()),
+        }
     }
 
     /// Drops the copy and lifts the critical section.
@@ -828,7 +922,10 @@ impl Resharding {
         rules: &Rules,
         doc: &Document,
     ) -> Result<(), CommandError> {
-        let at = document_key(&self.temp, &self.plan.key.key, doc)?;
+        let at = match self.plan.provenance.unsplittable() {
+            true => super::crud::doc_key(&self.temp, doc.get("_id").unwrap_or(&Value::Null))?,
+            false => document_key(&self.temp, &self.plan.key.key, doc)?,
+        };
         let m =
             DocMutation::Insert { docs: vec![doc.clone()], ordered: true, rules: rules.clone() };
         let r = w.write(backend, &Bound { mutation: m, keys: vec![at] }, 0)?;
@@ -844,8 +941,7 @@ impl Resharding {
             .with("key", self.plan.key.key.clone())
             .with("unique", self.plan.key.unique.to_string())
             .with("collation", Document::new().with("locale", "simple"));
-        let provenance =
-            if self.plan.refine { REFINE_COLLECTION_SHARD_KEY } else { RESHARD_COLLECTION };
+        let provenance = self.plan.provenance.name();
         let metrics = Document::new()
             .with("originatingCommand", originating)
             .with(PROVENANCE, provenance)

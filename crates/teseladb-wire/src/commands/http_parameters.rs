@@ -112,19 +112,34 @@ fn object<'a>(name: &str, v: &'a Value) -> Result<&'a Document, ParseError> {
 }
 
 /// Whether `s` is an origin of RFC 6454: `http` or `https`, a host and maybe a port, nothing
-/// after.
+/// after. An IPv6 host goes in brackets, which hold the colons of the address.
 fn is_origin(s: &str) -> bool {
     let Some(rest) = s.strip_prefix("https://").or_else(|| s.strip_prefix("http://")) else {
         return false;
     };
-    let (host, port) = match rest.rsplit_once(':') {
-        Some((h, p)) if !h.ends_with(']') || rest.starts_with('[') => (h, Some(p)),
-        _ => (rest, None),
+    let after_host = match rest.strip_prefix('[') {
+        Some(v6) => v6.split_once(']').filter(|(addr, _)| is_v6(addr)).map(|(_, after)| after),
+        None => {
+            let (host, after) = rest.split_at(rest.find(':').unwrap_or(rest.len()));
+            is_name(host).then_some(after)
+        }
     };
-    let host_ok = !host.is_empty()
-        && host.bytes().all(|b| b.is_ascii_alphanumeric() || b"-.[]:".contains(&b));
-    let port_ok = port.is_none_or(|p| !p.is_empty() && p.parse::<u16>().is_ok());
-    host_ok && port_ok
+    after_host.is_some_and(|after| after.is_empty() || after.strip_prefix(':').is_some_and(is_port))
+}
+
+/// Whether `h` is a host name or an IPv4 address.
+fn is_name(h: &str) -> bool {
+    !h.is_empty() && h.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
+}
+
+/// Whether `a` can be an IPv6 address, the inside of the brackets.
+fn is_v6(a: &str) -> bool {
+    a.contains(':') && a.bytes().all(|b| b.is_ascii_hexdigit() || b == b':' || b == b'.')
+}
+
+/// Whether `p` is a port: digits only, at most 65535.
+fn is_port(p: &str) -> bool {
+    !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) && p.parse::<u16>().is_ok()
 }
 
 fn origins(v: &Value) -> Result<Vec<Value>, ParseError> {
@@ -333,9 +348,13 @@ mod tests {
 
     #[test]
     fn origins_are_a_scheme_a_host_and_a_port() {
-        for good in
-            ["https://a.example", "http://localhost:3000", "https://[::1]:8443", "http://10.0.0.1"]
-        {
+        for good in [
+            "https://a.example",
+            "http://localhost:3000",
+            "https://[::1]:8443",
+            "https://[::1]",
+            "http://10.0.0.1",
+        ] {
             assert!(is_origin(good), "{good}");
         }
         for bad in [
@@ -347,9 +366,39 @@ mod tests {
             "https://a:",
             "https://a:99999",
             "https://a b",
+            "https://a]:1",
+            "https://a:+1",
+            "https://[",
+            "https://[]",
+            "https://[zz]",
+            "https://[::1]x",
+            "https://[::1]:",
         ] {
             assert!(!is_origin(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn resource_uris_are_http_with_a_host_and_no_fragment() {
+        assert!(is_resource_uri("https://db.example/mcp"));
+        for bad in ["ftp://a/mcp", "https://", "https:///mcp", "https://a/mcp#f", "https://a /mcp"]
+        {
+            assert!(!is_resource_uri(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn api_keys_take_only_their_longest_life() {
+        let ok = Document::new()
+            .with(API_KEYS, Document::new().with(MAX_EXPIRES_AFTER_DAYS, Value::Int32(30)));
+        let parsed = http_parse(&ok).expect("parses");
+        let bytes = parsed.to_bytes().expect("bytes");
+        assert_eq!(http_options(Some(&bytes)).api_key_max_days, 30);
+        let unknown = Document::new().with(API_KEYS, Document::new().with("other", 1));
+        assert!(http_parse(&unknown).is_err());
+        let zero = Document::new()
+            .with(API_KEYS, Document::new().with(MAX_EXPIRES_AFTER_DAYS, Value::Int32(0)));
+        assert!(http_parse(&zero).is_err());
     }
 
     #[test]

@@ -259,3 +259,27 @@ fn a_shorter_retention_raises_the_threshold_sooner() {
     assert!(raised > old, "the threshold {raised:?} passed the version {old:?}");
     assert!(raised.physical <= c.wall() - ttl);
 }
+
+/// The load a leader measures (007 FR-006) is the leader's own: a follower serves none, and a
+/// few writes in less than ten seconds give no cut.
+#[test]
+fn only_the_leader_measures_the_load_of_its_range() {
+    let mut c = cluster();
+    for n in c.nodes.values_mut() {
+        n.host.set_load_split_ops(1);
+    }
+    let l = c.elect();
+    for v in 0..3 {
+        write(&mut c, l, v);
+    }
+    let now = c.now;
+    for (id, n) in c.nodes.iter_mut() {
+        assert!(n.host.load_cut(G, now).is_none(), "node {id:?}");
+        if *id != l {
+            assert_eq!(n.host.load(G), 0, "a follower counts nothing");
+        } else {
+            assert!(n.host.load(G) <= 3);
+        }
+    }
+    assert_eq!(c.nodes.get_mut(&l).unwrap().host.load_cut(GroupId(99), now), None);
+}

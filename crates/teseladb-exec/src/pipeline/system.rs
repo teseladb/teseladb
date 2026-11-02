@@ -313,6 +313,51 @@ fn session_user(name: &str, i: usize, u: RawValue<'_>) -> Result<(), MqlError> {
 const LIST_EXTENSIONS_SPEC: teseladb_mql::ErrorCode =
     teseladb_mql::ErrorCode { code: 10_983_502, name: "Location10983502" };
 
+/// `$listSampledQueries` (018 FR-017).
+pub const LIST_SAMPLED_QUERIES: &str = "$listSampledQueries";
+/// `$shardedDataDistribution` (018 FR-017).
+pub const SHARDED_DATA_DISTRIBUTION: &str = "$shardedDataDistribution";
+/// RefDb's code for a `$listSampledQueries` whose specification is not a document.
+const LIST_SAMPLED_QUERIES_SPEC: teseladb_mql::ErrorCode =
+    teseladb_mql::ErrorCode { code: 6_876_000, name: "Location6876000" };
+/// RefDb's code for a `$shardedDataDistribution` whose specification is not empty.
+const SHARDED_DATA_DISTRIBUTION_SPEC: teseladb_mql::ErrorCode =
+    teseladb_mql::ErrorCode { code: 6_789_100, name: "Location6789100" };
+
+/// Checks the specification of `$listSampledQueries`: a document whose `namespace`, if any, is a
+/// string (measured on a `refrouter` 9.0.4).
+pub fn list_sampled_queries(v: RawValue<'_>) -> Result<Document, MqlError> {
+    match v {
+        RawValue::Document(d) => match d.get("namespace") {
+            None | Some(RawValue::String(_)) => Ok(Document::from(d)),
+            Some(other) => Err(super::errors::wrong_type(
+                &format!("{LIST_SAMPLED_QUERIES}.namespace"),
+                other,
+                "type 'string'",
+            )),
+        },
+        other => Err(error(
+            LIST_SAMPLED_QUERIES_SPEC,
+            format!(
+                "{LIST_SAMPLED_QUERIES} must take a nested object but found: {LIST_SAMPLED_QUERIES}: {}",
+                display(&Value::from(other))
+            ),
+        )),
+    }
+}
+
+/// Checks the specification of `$shardedDataDistribution`: an empty object (measured on a
+/// `refrouter` 9.0.4).
+pub fn sharded_data_distribution(v: RawValue<'_>) -> Result<Document, MqlError> {
+    match v {
+        RawValue::Document(d) if d.iter().next().is_none() => Ok(Document::new()),
+        _ => Err(error(
+            SHARDED_DATA_DISTRIBUTION_SPEC,
+            "The $shardedDataDistribution stage specification must be an empty object",
+        )),
+    }
+}
+
 /// RefDb's code for a `$listCatalog` whose specification is not empty.
 const LIST_CATALOG_SPEC: teseladb_mql::ErrorCode =
     teseladb_mql::ErrorCode { code: 6_200_600, name: "Location6200600" };
