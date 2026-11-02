@@ -1,6 +1,7 @@
 //! Catalog changes in the first seconds of a cluster (009 FR-006, 006 FR-027): a three-node
 //! cluster that has just started takes `create`, `createIndexes`, `collMod` and `drop` well inside
-//! a command's deadline, also with the machine busy.
+//! a command's deadline, also with the machine busy, and each node reports its routing table whole
+//! (`getShardVersion`) instead of the part it has filled.
 
 mod common;
 
@@ -61,11 +62,39 @@ fn index(field: &str) -> Value {
 
 /// Runs `cmd` and checks it answers ok within [`PROMPT`].
 fn prompt(c: &mut Client, cmd: Document) {
+    prompt_on(c, "fresh", cmd);
+}
+
+/// Runs `cmd` on `db` and checks it answers ok within [`PROMPT`]: the answer.
+fn prompt_on(c: &mut Client, db: &str, cmd: Document) -> Document {
     let what = format!("{cmd:?}");
     let t = Instant::now();
-    let r = c.run("fresh", cmd);
+    let r = c.run(db, cmd);
     assert!(ok(&r), "{what}: {r:?} after {:?}", t.elapsed());
     assert!(t.elapsed() < PROMPT, "{what} took {:?}", t.elapsed());
+    r
+}
+
+/// The routing table as each node reports it right away (`getShardVersion`): the whole of a
+/// collection just sharded, one chunk from `MinKey` to `MaxKey`, never a part of it.
+fn routes_on_every_node(nodes: &[Node<MemDisk>]) {
+    for (k, n) in nodes.iter().enumerate() {
+        let mut c = Client::new(n);
+        let ns = format!("fresh.s{k}");
+        prompt(&mut c, Document::new().with("create", format!("s{k}")));
+        let key = Document::new().with("a", 1);
+        prompt_on(
+            &mut c,
+            "admin",
+            Document::new().with("shardCollection", ns.as_str()).with("key", key),
+        );
+        let version =
+            Document::new().with("getShardVersion", ns.as_str()).with("fullMetadata", true);
+        let r = prompt_on(&mut c, "admin", version);
+        let Some(Value::Array(chunks)) = r.get("chunks") else { panic!("{r:?}") };
+        assert_eq!(chunks.len(), 1, "{r:?}");
+        prompt(&mut c, Document::new().with("drop", format!("s{k}")));
+    }
 }
 
 /// The catalog changes of a collection of its own on each node, right away.
@@ -100,6 +129,7 @@ fn dev_cluster(loaded: bool) {
     let load = loaded.then(Load::start);
     let opts = DevOpts { nodes: 3, cores: 1, port: 0, test_commands: false };
     let nodes = teseladb_server::dev::start(&opts, None).unwrap();
+    routes_on_every_node(&nodes);
     changes_on_every_node(&nodes);
     drop(load);
     drop(nodes.into_iter().map(Node::stop).collect::<Vec<_>>());
@@ -127,6 +157,7 @@ fn a_cluster_whose_nodes_just_joined_takes_catalog_changes_at_once() {
         until("a node that joined", || n.wait_ready(Duration::from_millis(100)).then_some(()));
         nodes.push(n);
     }
+    routes_on_every_node(&nodes);
     changes_on_every_node(&nodes);
     drop(nodes.into_iter().map(Node::stop).collect::<Vec<_>>());
 }
