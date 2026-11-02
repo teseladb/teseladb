@@ -158,6 +158,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "teseladb-js"
+version = "0.1.0"
+dependencies = [
+ "teseladb-bson",
+]
+
+[[package]]
 name = "teseladb-json"
 version = "0.1.0"
 dependencies = [
