@@ -384,9 +384,15 @@ fn parse_text(index: &MemIndex, d: &Document, path: &str) -> Result<Operator, Se
         if fuzzy.is_some() {
             return Err(shape(path, "at most one of [fuzzy, synonyms] may be present"));
         }
-        // Measured: with `matchCriteria: "all"` a token asks for its synonyms as `phrase` does.
-        let phrase = all.then_some(0);
-        return Ok(Operator::Synonyms(synonyms::Synonyms { query, paths, mapping, phrase, score }));
+        let criteria = d.get("matchCriteria").map(|_| all);
+        return Ok(Operator::Synonyms(synonyms::Synonyms {
+            query,
+            paths,
+            mapping,
+            phrase: None,
+            criteria,
+            score,
+        }));
     }
     let text = Operator::Text { query, paths, fuzzy, score };
     Ok(if all { Operator::AllTerms(Box::new(text)) } else { text })
@@ -535,7 +541,14 @@ fn parse_phrase(index: &MemIndex, d: &Document, path: &str) -> Result<Operator, 
     let score = parse_score(d.get("score"), &at("score"))?;
     if let Some(mapping) = synonym_mapping(index, d, path)? {
         let phrase = Some(slop);
-        return Ok(Operator::Synonyms(synonyms::Synonyms { query, paths, mapping, phrase, score }));
+        return Ok(Operator::Synonyms(synonyms::Synonyms {
+            query,
+            paths,
+            mapping,
+            phrase,
+            criteria: None,
+            score,
+        }));
     }
     Ok(Operator::Phrase { query, paths, slop, score })
 }

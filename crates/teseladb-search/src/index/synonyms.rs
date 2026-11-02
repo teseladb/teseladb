@@ -21,6 +21,18 @@ enum Rule {
     Explicit { input: Vec<Vec<String>>, synonyms: Vec<Vec<String>> },
 }
 
+/// One position of a `text` query with `synonyms` and `matchCriteria` (measured 02-11-2026,
+/// `scratchpad/lane3m/m27.js`, `synonyms_all.js`).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Segment {
+    /// A token and, when a rule of single words names it, what it stands for with the token
+    /// again at the end (as [`SynonymMap::expand`] with `keep_original`).
+    Word(String, Option<Vec<String>>),
+    /// A run of tokens a rule with an entry of several words names: the rule's entries, then
+    /// the run again. RefLib asks for any of them (`DisjunctionMax`).
+    Group(Vec<Vec<String>>),
+}
+
 /// A synonym mapping as the index holds it.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub(crate) struct SynonymMap {
@@ -125,6 +137,48 @@ impl SynonymMap {
                 .collect();
         }
         Some(paths)
+    }
+
+    /// The positions of `tokens` for `matchCriteria`: at each token, the longest entry of a
+    /// rule with an entry of several words that starts there makes a [`Segment::Group`] of
+    /// every rule naming it; any other token is a [`Segment::Word`].
+    pub(crate) fn segments(&self, tokens: &[String]) -> Vec<Segment> {
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < tokens.len() {
+            let rest = &tokens[i..];
+            let mut best: Option<(&[String], Vec<Vec<String>>)> = None;
+            for rule in &self.rules {
+                let (names, alternatives) = match rule {
+                    Rule::Equivalent(words) => (words, words),
+                    Rule::Explicit { input, synonyms } => (input, synonyms),
+                };
+                let several = names.iter().chain(alternatives).any(|w| w.len() > 1);
+                for entry in
+                    names.iter().filter(|e| several && !e.is_empty() && rest.starts_with(e))
+                {
+                    match &mut best {
+                        Some((b, alts)) if b.len() == entry.len() => {
+                            alts.extend_from_slice(alternatives)
+                        }
+                        Some((b, _)) if b.len() > entry.len() => {}
+                        _ => best = Some((entry.as_slice(), alternatives.clone())),
+                    }
+                }
+            }
+            match best {
+                Some((entry, mut alts)) => {
+                    alts.push(entry.to_vec());
+                    out.push(Segment::Group(alts));
+                    i += entry.len();
+                }
+                None => {
+                    out.push(Segment::Word(tokens[i].clone(), self.expand(&tokens[i], true)));
+                    i += 1;
+                }
+            }
+        }
+        out
     }
 
     /// Whether the collection held a document that is not a synonym document.

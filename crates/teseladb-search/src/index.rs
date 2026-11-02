@@ -1099,6 +1099,7 @@ pub use dump::{DumpError, applied_of};
 pub use explain::Explanation;
 pub(crate) use explain::{FreqKind, Weight, java_double, java_float};
 pub(crate) use phrases::{MultiPhrase, PhraseAt};
+pub(crate) use synonyms::Segment as SynonymSegment;
 pub use synonyms::{EQUIVALENT, EXPLICIT};
 
 #[cfg(test)]

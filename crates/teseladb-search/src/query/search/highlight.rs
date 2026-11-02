@@ -57,20 +57,49 @@ pub(super) fn parse(index: &MemIndex, v: &Value) -> Result<Highlight, SearchErro
     let positive = |name: &str, default: usize| -> Result<usize, SearchError> {
         let at = format!("highlight.{name}");
         let n = match d.get(name) {
-            None => return Ok(default),
-            Some(Value::Int32(n)) => i64::from(*n),
-            Some(Value::Int64(n)) => *n,
-            Some(Value::Double(f)) if f.fract() == 0.0 => *f as i64,
-            Some(_) => return Err(shape(&at, "must be a integer")),
+            None | Some(Value::Null) => return Ok(default),
+            Some(v) => int32(v, &at)?,
         };
         if n <= 0 {
             return Err(shape(&at, "must be positive"));
+        }
+        // Measured: RefLib refuses the largest 32-bit integer, each option with its message.
+        if n == i32::MAX {
+            return Err(SearchError(
+                if name == "maxCharsToExamine" {
+                    "maxLength must be < Integer.MAX_VALUE"
+                } else {
+                    "IllegalArgumentException"
+                }
+                .to_owned(),
+            ));
         }
         Ok(usize::try_from(n).unwrap_or(usize::MAX))
     };
     let passages = positive("maxNumPassages", DEFAULT_PASSAGES)?;
     let chars = positive("maxCharsToExamine", DEFAULT_CHARS)?;
     Ok(Highlight { paths, passages, chars })
+}
+
+/// The 32-bit integer `v` of the option at `at`, with `refsearch`'s messages (measured 02-11-2026,
+/// `scratchpad/lane3m/m27.js` to `m29.js`): a double must be whole and a number must fit.
+fn int32(v: &Value, at: &str) -> Result<i32, SearchError> {
+    let wide = match v {
+        Value::Int32(n) => return Ok(*n),
+        Value::Int64(n) => *n as f64,
+        Value::Double(f) if f.is_nan() => return Err(shape(at, "must be an integer")),
+        Value::Double(f) if f.is_infinite() => *f,
+        Value::Double(f) if f.fract() != 0.0 => return Err(shape(at, "must be an integer")),
+        Value::Double(f) => *f,
+        _ => return Err(shape(at, "must be a integer")),
+    };
+    if wide > f64::from(i32::MAX) {
+        return Err(shape(at, "overflowed, must fit in a 32 bit integer"));
+    }
+    if wide < f64::from(i32::MIN) {
+        return Err(shape(at, "underflowed, must fit in a 32 bit integer"));
+    }
+    Ok(wide as i32)
 }
 
 /// What `op` asks for, added to `out` (the clauses that exclude ask for nothing).

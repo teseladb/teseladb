@@ -231,6 +231,18 @@ impl MemIndex {
         boost: f32,
         doc: u32,
     ) -> Option<Explanation> {
+        self.explain_multi_phrase_as(key, phrase.description(name), phrase, boost, doc)
+    }
+
+    /// [`MemIndex::explain_multi_phrase`] with the query's whole `description`.
+    pub(crate) fn explain_multi_phrase_as(
+        &self,
+        key: &str,
+        description: String,
+        phrase: &MultiPhrase,
+        boost: f32,
+        doc: u32,
+    ) -> Option<Explanation> {
         let field = self.fields.get(key)?;
         let g = self.global_of(key);
         let (_, freq) = field
@@ -238,12 +250,7 @@ impl MemIndex {
             .into_iter()
             .find(|f| f.0 == doc)?;
         let dfs = field.dfs(&phrase.terms(), g);
-        let weight = Weight {
-            description: phrase.description(name),
-            dfs: &dfs,
-            boost,
-            kind: FreqKind::Phrase,
-        };
+        let weight = Weight { description, dfs: &dfs, boost, kind: FreqKind::Phrase };
         Some(field.explain_weight(&weight, doc, freq, g))
     }
 
