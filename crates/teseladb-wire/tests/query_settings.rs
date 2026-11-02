@@ -452,3 +452,66 @@ fn set_query_settings_reads_each_field_as_refdb_does() {
         assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
     }
 }
+
+/// A target given by its hash alone keeps no representative query; removing settings that do
+/// not exist answers `ok`; the `$querySettings` stage refuses what is not a document (7746800),
+/// a `showDebugQueryShape` that is not a boolean (14) and other fields (40415). Measured on a
+/// `refnode` 9.0.4 replica set on 02-11-2026.
+#[test]
+fn settings_by_hash_removal_and_the_stage_answer_as_refdb() {
+    let mut m = seeded();
+    let hash = format!(r#""{}""#, EMPTY_HASH.to_lowercase());
+    let r = set(&mut m, &hash, r#"{"reject":true}"#);
+    assert_eq!(field(&r, "queryShapeHash"), &Value::from(EMPTY_HASH), "{r:?}");
+    assert!(r.get("representativeQuery").is_none(), "{r:?}");
+    let Value::Document(entry) = &listed(&mut m, true)[0] else { panic!() };
+    assert!(entry.get("representativeQuery").is_none() && entry.get("debugQueryShape").is_none());
+    for _ in 0..2 {
+        let r = m.run("admin", doc(&[("removeQuerySettings", Value::from(EMPTY_HASH))]));
+        assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+    }
+    assert!(listed(&mut m, false).is_empty());
+    for (stage, code, msg) in [
+        ("5", 7_746_800, "$querySettings stage expects a document as argument"),
+        (r#"{"bogus":1}"#, 40415, "BSON field '$querySettings.bogus' is an unknown field."),
+        (
+            r#"{"showDebugQueryShape":1}"#,
+            14,
+            "Field 'showDebugQueryShape' should be a boolean value, but found: int",
+        ),
+    ] {
+        let text =
+            format!(r#"{{"aggregate":1,"pipeline":[{{"$querySettings":{stage}}}],"cursor":{{}}}}"#);
+        let r = m.run("admin", cmd(&text));
+        assert_eq!(error(&r), (code, msg.to_owned()), "{stage}");
+    }
+}
+
+/// A `maxTimeMS` of the settings applies to a run that has none and does not stop a quick one,
+/// and index hints for another namespace leave the shape's plans alone.
+#[test]
+fn settings_time_limit_and_hints_of_other_namespaces() {
+    let mut m = seeded();
+    let r = m.run("qsh", cmd(r#"{"createIndexes":"c","indexes":[{"key":{"a":1},"name":"a_1"}]}"#));
+    assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+    let hints = r#"{"maxTimeMS":5000,"indexHints":[{"ns":{"db":"other","coll":"c"},"allowedIndexes":["_id_"]},{"ns":{"db":"qsh","coll":"x"},"allowedIndexes":["_id_"]}]}"#;
+    let r = set(&mut m, MATCH_QUERY, hints);
+    assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+    let r = m.run("qsh", cmd(r#"{"aggregate":"c","pipeline":[{"$match":{"a":5}}],"cursor":{}}"#));
+    assert_eq!(field(&r, "cursor.firstBatch"), &json_of(r#"[{"_id":2,"a":5}]"#), "{r:?}");
+    let r = m.run(
+        "qsh",
+        cmd(r#"{"explain":{"aggregate":"c","pipeline":[{"$match":{"a":5}}],"cursor":{}}}"#),
+    );
+    let plan = format!("{:?}", field(&r, "shards.node1.queryPlanner.winningPlan"));
+    assert!(plan.contains(r#"("indexName", String("a_1"))"#), "{plan}");
+}
+
+/// `$queryStats` with a specification that is not a document fails with 9 (measured on a
+/// `refnode` 9.0.4 replica set on 02-11-2026).
+#[test]
+fn query_stats_stage_needs_an_object() {
+    let mut m = seeded();
+    let r = m.run("admin", cmd(r#"{"aggregate":1,"pipeline":[{"$queryStats":5}],"cursor":{}}"#));
+    assert_eq!(error(&r), (9, "$queryStats value must be an object. Found: int".to_owned()));
+}

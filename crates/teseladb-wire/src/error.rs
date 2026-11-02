@@ -668,10 +668,22 @@ pub fn from_range(e: &RangeError, ctx: RangeContext) -> CommandError {
     }
 }
 
+/// An error of the node's own data that should not happen (an index definition or a bucket the
+/// node wrote and cannot read back), as `InternalError` with the error's description.
+pub fn internal(e: impl std::fmt::Debug) -> CommandError {
+    CommandError::new(INTERNAL_ERROR, format!("{e:?}"))
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_internal_error_carries_its_description() {
+        let e = internal("bad bucket");
+        assert_eq!((e.code, e.errmsg.as_str()), (INTERNAL_ERROR, "\"bad bucket\""));
+    }
 
     #[test]
     fn codes_are_unique() {

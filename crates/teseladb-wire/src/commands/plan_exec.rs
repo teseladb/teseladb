@@ -310,6 +310,9 @@ pub(crate) struct Ran {
     pub child_keys: Vec<u64>,
     /// The entries each of those scans read outside its intervals.
     pub child_past: Vec<u64>,
+    /// The entries each of those scans dropped as repeats of a document it gave (a multikey
+    /// index, `dupsDropped`).
+    pub child_dups: Vec<u64>,
     /// What each scan of a `$or` gave the `OR`: its entries, or the documents its own filter
     /// kept.
     pub child_given: Vec<u64>,
@@ -520,6 +523,7 @@ fn run<B: Backend + ?Sized>(
         docs_at: Vec::new(),
         child_keys: Vec::new(),
         child_past: Vec::new(),
+        child_dups: Vec::new(),
         child_given: Vec::new(),
         seeks: 0,
     };
@@ -569,11 +573,15 @@ fn run<B: Backend + ?Sized>(
         let child = ran.child_keys.len();
         ran.child_keys.push(0);
         ran.child_past.push(0);
+        ran.child_dups.push(0);
         ran.child_given.push(0);
         let residual = s.residual.as_ref().map(&plan_filter).transpose()?;
         let decode = read.index_keys && !index.id_index;
         let scanned = entries(backend, (coll.tenant, coll.id), index, s, read.concern, decode)?;
         ran.seeks += scanned.seeks;
+        // A multikey scan drops the other entries of a document it gave before fetching it
+        // again (`dupsDropped` of its `IXSCAN`, measured on a `refnode` 9.0.4).
+        let mut own: std::collections::BTreeSet<Vec<u8>> = std::collections::BTreeSet::new();
         for entry in scanned.entries {
             if budget.is_some_and(|b| ran.keys >= b) {
                 ended = false;
@@ -587,6 +595,10 @@ fn run<B: Backend + ?Sized>(
                 ran.child_past[child] += 1;
                 continue;
             };
+            if index.meta.multikey && !own.insert(pk.clone()) {
+                ran.child_dups[child] += 1;
+                continue;
+            }
             // A scan without filter gives its entries to the `OR`, which drops those it has
             // seen; one with a filter fetches each document first.
             let seen_before = seen.contains(&pk);
