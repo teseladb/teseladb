@@ -531,7 +531,7 @@ fn obj_to_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
             Kind::Error => "Error",
             Kind::Date(_) => "Date",
             Kind::RegExp(..) => "RegExp",
-            Kind::Arguments => "Arguments",
+            Kind::Arguments(_) => "Arguments",
             Kind::BigInt(_) => "BigInt",
             _ => "Object",
         },
@@ -707,7 +707,7 @@ fn array_from(it: &mut Interp, _: &Val, a: &[Val]) -> R {
         Val::Obj(o)
             if !matches!(
                 o.borrow().kind,
-                Kind::Array(_) | Kind::Set(_) | Kind::Map(_) | Kind::Iter(_) | Kind::Arguments
+                Kind::Array(_) | Kind::Set(_) | Kind::Map(_) | Kind::Iter(_) | Kind::Arguments(_)
             ) && !it.get(&src, "@@Symbol.iterator:0")?.is_callable() =>
         {
             let n = it.get(&src, "length")?;

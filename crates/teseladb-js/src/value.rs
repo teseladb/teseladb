@@ -178,7 +178,9 @@ pub enum Kind {
     Set(Vec<Val>),
     RegExp(Name, Name),
     Bson(Bson),
-    Arguments,
+    /// An `arguments` object; in a sloppy function with a plain parameter list its first
+    /// elements are its parameters (ECMA-262 §10.4.4.7).
+    Arguments(Option<Rc<crate::interp::Mapped>>),
     /// A `WeakMap`: its entries by key identity.
     WeakMap(Vec<(ObjRef, Val)>),
     /// A `WeakSet`.

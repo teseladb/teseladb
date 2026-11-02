@@ -64,6 +64,20 @@ pub struct EnvRec {
 
 pub type EnvRef = Rc<RefCell<EnvRec>>;
 
+/// The parameters the elements of a mapped `arguments` object stand for, `None` once deleted.
+#[derive(Debug)]
+pub struct Mapped {
+    pub env: EnvRef,
+    pub names: RefCell<Vec<Option<Name>>>,
+}
+
+impl Mapped {
+    /// The parameter element `key` stands for.
+    fn name(&self, key: &str) -> Option<Name> {
+        array_index(key).and_then(|i| self.names.borrow().get(i).cloned().flatten())
+    }
+}
+
 /// The prototypes and constructors the interpreter makes values with.
 #[derive(Clone, Debug)]
 pub struct Realm {
@@ -597,6 +611,21 @@ impl<'c> Interp<'c> {
                     Kind::Str(s) if key == "length" => {
                         return Ok(Val::Num(s.encode_utf16().count() as f64));
                     }
+                    Kind::Arguments(Some(m)) => {
+                        if let Some(n) = m.name(key) {
+                            let v = m
+                                .env
+                                .borrow()
+                                .vars
+                                .iter()
+                                .rev()
+                                .find(|(k, _)| *k == n)
+                                .and_then(|(_, b)| b.value.clone());
+                            if let Some(v) = v {
+                                return Ok(v);
+                            }
+                        }
+                    }
                     Kind::Typed(t) => {
                         if let Some(i) = crate::typed::numeric_key(key) {
                             return Ok(match i {
@@ -717,6 +746,13 @@ impl<'c> Interp<'c> {
                 }
                 if c.ptr_eq(o) {
                     let mut b = o.borrow_mut();
+                    if let Kind::Arguments(Some(m)) = &b.kind
+                        && let Some(n) = m.name(key)
+                        && let Some((_, binding)) =
+                            m.env.borrow_mut().vars.iter_mut().rev().find(|(k, _)| *k == n)
+                    {
+                        binding.value = Some(value.clone());
+                    }
                     if let (Some(i), Kind::Array(items)) = (array_index(key), &mut b.kind)
                         && let Some(slot) = items.get_mut(i)
                     {
@@ -850,6 +886,12 @@ impl<'c> Interp<'c> {
             return Ok(false);
         }
         let mut b = o.borrow_mut();
+        if let Kind::Arguments(Some(m)) = &b.kind
+            && let Some(i) = array_index(key)
+            && let Some(slot) = m.names.borrow_mut().get_mut(i)
+        {
+            *slot = None;
+        }
         if let Kind::Array(items) = &mut b.kind
             && let Some(i) = array_index(key)
         {
@@ -1015,7 +1057,21 @@ impl<'c> Interp<'c> {
             declare(&scope, name, Val::Obj(fo.clone()), true);
         }
         if !def.arrow {
-            let a = self.alloc(Some(self.realm.object.clone()), Kind::Arguments)?;
+            let plain = def.rest.is_none()
+                && def.params.iter().all(|(p, d)| d.is_none() && matches!(p, Pattern::Name(_)));
+            let mapped = (plain && !def.strict).then(|| {
+                let names = def
+                    .params
+                    .iter()
+                    .take(args.len())
+                    .map(|(p, _)| match p {
+                        Pattern::Name(n) => Some(n.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                Rc::new(Mapped { env: scope.clone(), names: RefCell::new(names) })
+            });
+            let a = self.alloc(Some(self.realm.object.clone()), Kind::Arguments(mapped))?;
             self.grow(&a, args.len() + 1)?;
             {
                 let mut b = a.borrow_mut();
@@ -1554,7 +1610,7 @@ impl<'c> Interp<'c> {
                     | Kind::Set(_)
                     | Kind::Map(_)
                     | Kind::Iter(_)
-                    | Kind::Arguments
+                    | Kind::Arguments(_)
             ),
             _ => false,
         };
@@ -1636,7 +1692,7 @@ impl<'c> Interp<'c> {
                         *pos = items.len();
                         return Ok(rest);
                     }
-                    Kind::Arguments => {
+                    Kind::Arguments(_) => {
                         let len = self.get(v, "length")?;
                         let n = self.number_of(&len)? as usize;
                         let mut out = Vec::new();

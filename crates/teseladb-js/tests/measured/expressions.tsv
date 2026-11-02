@@ -621,3 +621,8 @@ JSON.stringify([1, [2]], null, 3.7)	S:[\n   1,\n   [\n      2\n   ]\n]
 JSON.stringify({a: 1}, null, new Number(2))	S:{\n  "a": 1\n}
 JSON.parse('[1, 2]', function(k, v, ctx) { return typeof ctx + ':' + JSON.stringify(ctx) })	S:object:{}
 JSON.parse('{"a": 1.0, "b": [true, "x"]}', function(k, v, ctx) { return v === null || typeof v !== 'object' ? (ctx && ctx.source) : v })	J:{"a":"1.0","b":["true","\\"x\\""]}
+[(function(a){ arguments[0] = 2; return a })(1), (function(a){ a = 3; return arguments[0] })(1), (function(a){ "use strict"; a = 3; return arguments[0] })(1), (function(a){ delete arguments[0]; arguments[0] = 5; return a })(1), (function(a, b){ b = 9; return arguments[1] })(1), (function(a = 0){ a = 3; return arguments[0] })(1)]	J:[2,3,1,1,null,1]
+(()=>{ function f(a){ var r = []; eval('var a = 7'); r.push(a, arguments[0]); return r } return f(1) })()	J:[7,7]
+(()=>{ function f(x = 1){ var x; return x } return f() })()	J:1
+(()=>{ function f(x = x){ } try { f() } catch (e) { return e.name + ': ' + e.message } })()	S:ReferenceError: can't access lexical declaration 'x' before initialization
+(()=>{ let y = 1; try { eval('var y') } catch (e) { return e.name + ': ' + e.message } })()	S:SyntaxError: redeclaration of let y
