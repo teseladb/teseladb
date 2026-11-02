@@ -199,6 +199,8 @@ enum Change {
     Shrink,
     /// The first element is removed and the rest move (`shift`).
     Shift,
+    /// Only `length` is written again (`push()`, `pop` of an empty array).
+    Length,
 }
 
 /// The error of adding element `i` to an array whose length is read-only (`fixed`) or that is not
@@ -238,8 +240,21 @@ fn check(it: &Interp, o: &ObjRef, change: Change) -> R<()> {
         Change::Write if frozen && len > 0 => read_only(),
         Change::Shift if frozen && len > 1 => read_only(),
         Change::Shrink | Change::Shift if sealed && len > 0 => undeletable(len - 1),
+        Change::Length if locks & LENGTH_FIXED != 0 => {
+            Err(it.error("TypeError", "\"length\" is read-only"))
+        }
         _ => Ok(()),
     }
+}
+
+/// After the last element of `o` is removed: when its `length` cannot be written, the length
+/// stays with a hole at the end and the write of `length` fails (ECMA-262 §23.1.3.22).
+fn keep_length(it: &mut Interp, o: &ObjRef) -> R<()> {
+    let r = check(it, o, Change::Length);
+    if r.is_err() {
+        with_vec(o, |v| v.push(Val::Hole));
+    }
+    r
 }
 
 fn with_vec<T>(o: &ObjRef, f: impl FnOnce(&mut Vec<Val>) -> T) -> Option<T> {
@@ -278,9 +293,7 @@ fn push(it: &mut Interp, this: &Val, a: &[Val]) -> R {
         return push_generic(it, this, a);
     }
     let o = array_obj(it, this)?;
-    if !a.is_empty() {
-        check(it, &o, Change::Grow)?;
-    }
+    check(it, &o, if a.is_empty() { Change::Length } else { Change::Grow })?;
     it.grow(&o, a.len())?;
     let n = with_vec(&o, |v| {
         v.extend_from_slice(a);
@@ -297,6 +310,11 @@ fn pop(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     }
     let len = it.array_len(&o);
     let out = with_vec(&o, Vec::pop).flatten().unwrap_or(Val::Undef);
+    if len > 0 {
+        keep_length(it, &o)?
+    } else {
+        check(it, &o, Change::Length)?
+    }
     // A hole reads from the prototypes, where the index is now looked up anyway.
     if is_hole(&out) { it.get(this, &key(len - 1)) } else { Ok(out) }
 }
@@ -311,17 +329,19 @@ fn shift(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     let out = match first {
         Some(Val::Hole) => it.get(this, "0")?,
         Some(x) => x,
-        None => return Ok(Val::Undef),
+        None => {
+            check(it, &o, Change::Length)?;
+            return Ok(Val::Undef);
+        }
     };
     with_vec(&o, |v| v.remove(0));
+    keep_length(it, &o)?;
     Ok(out)
 }
 
 fn unshift(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let o = array_obj(it, this)?;
-    if !a.is_empty() {
-        check(it, &o, Change::Grow)?;
-    }
+    check(it, &o, if a.is_empty() { Change::Length } else { Change::Grow })?;
     it.grow(&o, a.len())?;
     let n = with_vec(&o, |v| {
         v.splice(0..0, a.iter().cloned());
@@ -431,6 +451,8 @@ fn splice(it: &mut Interp, this: &Val, a: &[Val]) -> R {
             check(it, &o, Change::Write)?;
         }
         check(it, &o, change)?;
+    } else {
+        check(it, &o, Change::Length)?;
     }
     it.grow(&o, insert.len())?;
     let target = species(it, this, count)?;

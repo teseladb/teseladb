@@ -3400,3 +3400,264 @@ eval('.5e1 + 5.e-1 + 0.0e0')	J:5.5
 (() => { class B { hi() { return 'b' } } class A extends B { x = super.hi() } return new A().x })()	S:b
 (() => { class B { static hi() { return 'sb' } } class A extends B { static { this.y = super.hi() } } return A.y })()	S:sb
 (() => { class B { static hi() { return 'sb' } } class A extends B { static x = () => super.hi() } return A.x() })()	S:sb
+new Array(-0).length	J:0
+Array(3.0).length	J:3
+[1, 2, 3].at(NaN)	J:1
+[1, 2, 3].at(-1)	J:3
+[1, 2, 3].at(-5)	J:undefined
+[1, 2, 3].at(Infinity)	J:undefined
+[].at(0)	J:undefined
+[1, 2, 3].with(NaN, 9)	J:[9,2,3]
+[1, 2, 3].with(-1, 9)	J:[1,2,9]
+(() => { try { return [1].with(-3, 0) } catch (e) { return e.name + ':' + e.message } })()	S:RangeError:invalid or out-of-range index
+(() => { try { return [].with(0, 0) } catch (e) { return e.name + ':' + e.message } })()	S:RangeError:invalid or out-of-range index
+[1, 2, 3, 4].splice(1, NaN)	J:[]
+[1, 2, 3, 4].splice(1, -2)	J:[]
+[1, 2, 3, 4].toSpliced(1, NaN)	J:[1,2,3,4]
+[1, 2, 3, 4].toSpliced(1, -1, 'x')	J:[1,"x",2,3,4]
+[1, 2, 3, 4].slice(3, 1)	J:[]
+[1, 2, 3].lastIndexOf(3, NaN)	J:-1
+[1, 2, 3].indexOf(1, NaN)	J:0
+[1, 2, 3].includes(3, -Infinity)	J:true
+[1, [2, [3, [4]]]].flat(NaN)	J:[1,[2,[3,[4]]]]
+[1, [2, [3, [4]]]].flat(-1)	J:[1,[2,[3,[4]]]]
+[1, [2, [3, [4]]]].flat(Infinity)	J:[1,2,3,4]
+[[1], [2]].flatMap((x) => [x, [x]])	J:[[1],[[1]],[2],[[2]]]
+(() => { 'use strict'; const a = Object.freeze([1, 2]); try { a.push(3) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:can't define array index property past the end of an array with non-writable length
+(() => { const a = Object.freeze([1, 2]); try { a.shift() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:0 is read-only
+(() => { const a = Object.freeze([1]); try { a.shift() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:property 0 is non-configurable and can't be deleted
+(() => { const a = Object.freeze([]); try { return a.shift() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:"length" is read-only
+(() => { const a = Object.seal([1, 2]); try { a.pop() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:property 1 is non-configurable and can't be deleted
+(() => { const a = Object.seal([]); try { return a.pop() } catch (e) { return e.name + ':' + e.message } })()	J:undefined
+(() => { const a = Object.seal([1, 2]); try { a.shift() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:property 1 is non-configurable and can't be deleted
+(() => { const a = Object.freeze([1, 2]); try { a.reverse() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:0 is read-only
+(() => { const a = Object.freeze([]); try { return a.reverse() } catch (e) { return e.name + ':' + e.message } })()	J:[]
+(() => { const a = Object.freeze([2, 1]); try { a.sort() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:0 is read-only
+(() => { const a = Object.freeze([1, 2]); try { a.fill(0) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:0 is read-only
+(() => { try { return [2, 1].sort(5) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:invalid Array.prototype.sort argument
+(() => { try { return [2, 1].toSorted('x') } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:non-function passed to Array.prototype.toSorted
+[1, 2, 3, 4, 5].copyWithin(1, 0, 3)	J:[1,1,2,3,5]
+[1, 2, 3, 4, 5].copyWithin(0, 2)	J:[3,4,5,4,5]
+[1, 2, 3, 4, 5].copyWithin(-2, -4, -3)	J:[1,2,3,2,5]
+Array.prototype.copyWithin.call({length: 5, 0: 'a', 2: 'c'}, 1, 0, 3)	J:{"0":"a","1":"a","3":"c","length":5}
+Array.prototype.copyWithin.call({length: 3, 1: 'b'}, 0, 1)	J:{"0":"b","length":3}
+Array.from({length: 3, 1: 'x'}).length	J:3
+Array.from({length: -1})	J:[]
+Array.from({length: NaN})	J:[]
+Array.from({length: 2.7}, (v, i) => i)	J:[0,1]
+Array.of.call(Object, 1, 2)	J:2
+Array.of.call(function () { return {} }, 1)	J:{"0":1,"length":1}
+Array.prototype.indexOf.call({length: 3, 0: 1, 2: 3}, 3)	J:2
+Array.prototype.join.call({length: 2, 0: 'a'})	S:a,
+Array.prototype.lastIndexOf.call({length: 3, 1: 'b'}, 'b', 5)	J:1
+[3, 1, 2].lastIndexOf(1, -1)	J:1
+[1, 2, 3].lastIndexOf(1, -10)	J:-1
+[1, 2, 3].fill(0, NaN, NaN)	J:[1,2,3]
+[1, 2, 3].fill(0, -2)	J:[1,0,0]
+Array(3).fill().length	J:3
+Object.is(-0, 0)	J:false
+Object.is(NaN, NaN)	J:true
+Object.is(-0, -0)	J:true
+Object.defineProperty([], 'length', {value: 2}).length	J:2
+(() => { const a = [1, 2, 3]; Object.defineProperty(a, 'length', {writable: false}); try { a.push(1) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:can't define array index property past the end of an array with non-writable length
+(() => { const a = [1, 2, 3]; Object.defineProperty(a, 'length', {value: 1, writable: false}); return [a, Object.getOwnPropertyDescriptor(a, 'length')] })()	J:[[1],{"value":1,"writable":false,"enumerable":false,"configurable":false}]
+(() => { const o = {}; Object.defineProperty(o, 'x', {get() { return 1 }, configurable: true}); Object.defineProperty(o, 'x', {value: 2}); return Object.getOwnPropertyDescriptor(o, 'x') })()	J:{"value":2,"writable":false,"enumerable":false,"configurable":true}
+(() => { const o = {x: 1}; Object.defineProperty(o, 'x', {get() { return 3 }}); return [o.x, Object.getOwnPropertyDescriptor(o, 'x').enumerable] })()	J:[3,true]
+(() => { const o = {}; Object.defineProperty(o, 'x', {value: 1}); try { Object.defineProperty(o, 'x', {get() {}}) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:can't redefine non-configurable property "x"
+(() => { const o = {}; Object.defineProperty(o, 'x', {value: 1}); try { Object.defineProperty(o, 'x', {enumerable: true}) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:can't redefine non-configurable property "x"
+(() => { const o = {}; Object.defineProperty(o, 'x', {value: 1}); try { Object.defineProperty(o, 'x', {writable: true}) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:can't redefine non-configurable property "x"
+(() => { const o = {}; Object.defineProperty(o, 'x', {value: 1}); return Object.defineProperty(o, 'x', {value: 1, writable: false}) === o })()	J:true
+(() => { const o = {}; Object.defineProperty(o, 'x', {value: NaN}); return Object.defineProperty(o, 'x', {value: NaN}) === o })()	J:true
+(() => { const o = {}; Object.defineProperty(o, 'x', {value: -0}); try { Object.defineProperty(o, 'x', {value: 0}) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:can't redefine non-configurable property "x"
+Object.getOwnPropertySymbols(Object.defineProperty({}, Symbol.iterator, {value: 1, enumerable: false})).length	J:1
+Object.assign({}, Object.defineProperty({a: 1}, Symbol('s'), {value: 2, enumerable: true}))	J:{"a":1}
+Object.entries(Object.defineProperty({a: 1}, 'b', {value: 2}))	J:[["a",1]]
+Object.isFrozen(1)	J:true
+Object.isSealed('a')	J:true
+Object.isExtensible(null)	J:false
+Object.isFrozen(Object.preventExtensions([]))	J:false
+Object.isFrozen(Object.preventExtensions([1]))	J:false
+Object.isSealed(Object.freeze([1]))	J:true
+Object.preventExtensions(5)	J:5
+Object.freeze(5)	J:5
+Object.seal('s')	S:s
+Reflect.preventExtensions(Object.preventExtensions({}))	E:ReferenceError:Reflect is not defined
+Reflect.defineProperty(Object.preventExtensions({}), 'x', {value: 1})	E:ReferenceError:Reflect is not defined
+Reflect.defineProperty(new Proxy({}, {}), 'x', {value: 1})	E:ReferenceError:Reflect is not defined
+Object.getOwnPropertyDescriptor('abc', 1)	J:{"value":"b","writable":false,"enumerable":true,"configurable":false}
+Object.getOwnPropertyDescriptor('abc', 5)	J:undefined
+Object.getOwnPropertyDescriptor(new Uint8Array(2), 1)	J:{"value":0,"writable":true,"enumerable":true,"configurable":true}
+Object.getOwnPropertyDescriptor(new Uint8Array(2), 5)	J:undefined
+(() => { const o = Object.create(null, {x: {value: 1, enumerable: true}, y: {get() { return 2 }}}); return [o.x, o.y, Object.keys(o)] })()	J:[1,2,["x"]]
+(() => { try { Object.create(null, {x: 5}) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:Property descriptor must be an object, got 5
+(() => { try { Object.defineProperty({}, 'x', {get: 5}) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:property descriptor's get field is neither undefined nor a function
+(() => { try { Object.defineProperty({}, 'x', {get() {}, value: 1}) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:property descriptors must not specify a value or be writable when a getter or setter has been specified
+new Float32Array([1.5, NaN, Infinity, -0, 3.4e38, 1e-45, 1e-40])	J:{"0":1.5,"1":null,"2":null,"3":0,"4":3.3999999521443642e+38,"5":1.401298464324817e-45,"6":9.99994610111476e-41}
+new Float64Array(new Float32Array([0.1])).length	J:1
+new Uint8Array([1, 2, 3]).at(NaN)	J:1
+new Uint8Array([1, 2, 3]).at(-1)	J:3
+new Uint8Array([1, 2, 3]).at(-9)	J:undefined
+(() => { try { return new Uint8Array([1, 2, 3]).with(5, 1) } catch (e) { return e.name + ':' + e.message } })()	S:RangeError:invalid or out-of-range index
+new Uint8Array([1, 2, 3]).with(-1, 9)	J:{"0":1,"1":2,"2":9}
+new Uint8Array([1, 2, 3]).subarray(NaN, 2)	J:{"0":1,"1":2}
+(() => { const t = new Uint8Array(4); t.set([1, 2], NaN); return t })()	J:{"0":1,"1":2,"2":0,"3":0}
+(() => { const t = new Uint8Array(4); try { t.set([1, 2, 3], 3) } catch (e) { return e.name + ':' + e.message } })()	S:RangeError:source array is too long
+new Uint8Array(5).fill(7, -2)	J:{"0":0,"1":0,"2":0,"3":7,"4":7}
+(() => { const b = new ArrayBuffer(4, {maxByteLength: 8}); try { b.resize(9) } catch (e) { return e.name + ':' + e.message } })()	S:RangeError:byte length is larger than maximum byte length
+(() => { const b = new ArrayBuffer(4, {maxByteLength: 8}); b.resize(6); return [b.byteLength, b.resizable, b.maxByteLength] })()	J:[6,true,8]
+(() => { const b = new ArrayBuffer(4, {maxByteLength: undefined}); return b.resizable })()	J:false
+(() => { const d = new DataView(new ArrayBuffer(4)); try { d.getUint32(2) } catch (e) { return e.name + ':' + e.message } })()	S:RangeError:offset is outside the bounds of the DataView
+(() => { const d = new DataView(new ArrayBuffer(4)); try { d.setUint32(2, 1) } catch (e) { return e.name + ':' + e.message } })()	S:RangeError:offset is outside the bounds of the DataView
+(() => { const d = new DataView(new ArrayBuffer(8)); d.setFloat32(0, 1.5); d.setFloat64(0, -2.25, true); return [d.getFloat64(0, true), d.getInt8(0)] })()	J:[-2.25,0]
+Uint8Array.prototype.forEach.call	J:undefined
+(() => { try { Uint8Array.prototype.forEach.call([], () => {}) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:forEach method called on incompatible Array
+(() => { try { Uint8Array.prototype.map.call([], () => {}) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:map method called on incompatible Array
+(() => { try { Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), 'length').get.call({}) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:get length method called on incompatible Object
+Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), Symbol.toStringTag).get.call(3)	J:undefined
+(() => { const a = Object.freeze([]); try { return a.pop() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:"length" is read-only
+(() => { const a = Object.freeze([]); try { return a.push() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:"length" is read-only
+(() => { const a = Object.freeze([]); try { return a.unshift() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:"length" is read-only
+(() => { const a = Object.freeze([]); try { return a.splice(0, 0) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:"length" is read-only
+(() => { const a = Object.freeze([1]); try { return a.unshift() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:"length" is read-only
+(() => { const a = Object.freeze([1]); try { return a.splice(0, 0) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:"length" is read-only
+(() => { const a = Object.freeze([1]); try { return a.pop() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:property 0 is non-configurable and can't be deleted
+(() => { const a = Object.freeze([1]); try { return a.shift() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:property 0 is non-configurable and can't be deleted
+(() => { const a = Object.seal([]); try { return a.shift() } catch (e) { return e.name + ':' + e.message } })()	J:undefined
+(() => { const a = Object.preventExtensions([]); try { return [a.shift(), a.pop()] } catch (e) { return e.name + ':' + e.message } })()	J:[null,null]
+(() => { const a = Object.freeze([]); try { return a.fill(1) } catch (e) { return e.name + ':' + e.message } })()	J:[]
+(() => { const a = Object.freeze([]); try { return a.copyWithin(0, 0) } catch (e) { return e.name + ':' + e.message } })()	J:[]
+(() => { const a = Object.freeze([]); try { return a.sort() } catch (e) { return e.name + ':' + e.message } })()	J:[]
+(() => { const a = [1, 2, 3]; Object.defineProperty(a, 'length', {writable: false}); try { a.pop() } catch (e) { return [e.message, a.length, 2 in a] } })()	J:["\\"length\\" is read-only",3,false]
+(() => { const a = [1, 2, 3]; Object.defineProperty(a, 'length', {writable: false}); try { a.shift() } catch (e) { return [e.message, a] } })()	J:["\\"length\\" is read-only",[2,3,null]]
+(() => { const a = []; Object.defineProperty(a, 'length', {writable: false}); try { a.splice(0, 0) } catch (e) { return [e.message, a] } })()	J:["\\"length\\" is read-only",[]]
+Array.sum([1, 2, 3.5])	J:6.5
+Array.sum([])	J:null
+Array.avg([2, 4])	J:3
+Array.avg([])	J:null
+Array.stdDev([2, 4, 4, 4, 5, 5, 7, 9])	J:2
+Array.stdDev([])	J:null
+Array.contains([1, 2], 2)	J:true
+Array.contains([1, 2], '2')	J:false
+(() => { try { return Array.contains(5, 2) } catch (e) { return e.name + ':' + e.message } })()	S:Error:The first argument to Array.contains must be an array
+Array.unique([1, 2, 1, '1', 2])	J:[1,2,"1"]
+(() => { try { return Array.unique('ab') } catch (e) { return e.name + ':' + e.message } })()	S:Error:The first argument to Array.unique must be an array
+Array.shuffle([7]).length	J:1
+Array.shuffle([]).length	J:0
+(() => { try { return Array.shuffle(3) } catch (e) { return e.name + ':' + e.message } })()	S:Error:The first argument to Array.shuffle must be an array
+(() => { try { return Array.sum('x') } catch (e) { return e.name + ':' + e.message } })()	S:Error:The first argument to Array.sum must be an array
+Array.sum([1, '2'])	S:12
+Array.tojson ? typeof Array.tojson : 'none'	S:function
+(1.005).toFixed(NaN)	S:1
+(1234.5678).toFixed(2)	S:1234.57
+(0.5).toFixed(0)	S:1
+(1.5).toFixed(0)	S:2
+(2.5).toFixed(0)	S:3
+(1e21).toFixed(2)	S:1e+21
+(-1.5).toFixed(0)	S:-2
+(123.456).toPrecision(NaN)	E:RangeError:precision 0 out of range
+(0).toPrecision(3)	S:0.00
+(0.000123).toPrecision(2)	S:0.00012
+(1e21).toPrecision(3)	S:1.00e+21
+(NaN).toPrecision(2)	S:NaN
+(-Infinity).toFixed(1)	S:-Infinity
+(123.456).toExponential(NaN)	S:1e+2
+(0).toExponential(2)	S:0.00e+0
+(Infinity).toExponential()	S:Infinity
+(255).toString(16.9)	S:ff
+Number.isInteger('1')	J:false
+Number.isInteger(Infinity)	J:false
+Number.isInteger(1.5)	J:false
+Number.isSafeInteger(2 ** 53)	J:false
+Number.isSafeInteger(1.5)	J:false
+Number.isSafeInteger('1')	J:false
+Number.isFinite('1')	J:false
+Number.isFinite(Infinity)	J:false
+Number.isNaN('x')	J:false
+Number.isNaN(NaN)	J:true
+new Error('m', {cause: 0}).cause	J:0
+'cause' in new Error('m', {})	J:false
+'cause' in new Error('m', 5)	J:false
+new Error('m', {get cause() { return 'g' }}).cause	S:g
+new TypeError('t', {cause: 'c'}).cause	S:c
+new AggregateError([1], 'a', {cause: 'c'}).cause	S:c
+(() => { try { return new AggregateError(5) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:5 is not iterable
+new AggregateError(new Set([1, 2])).errors	J:[1,2]
+Object.prototype.isPrototypeOf.call(5, {})	J:false
+Object.prototype.isPrototypeOf.call(Object.prototype, 5)	J:false
+Object.prototype.isPrototypeOf.call(Array.prototype, [])	J:true
+Object.prototype.isPrototypeOf.call(Array.prototype, {})	J:false
+(() => { try { return Object.prototype.isPrototypeOf.call(null, {}) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:can't convert null to object
+(() => { try { return Function.prototype.bind.call(5) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:Function.prototype.bind called on incompatible number
+(() => { try { return Function.prototype.call.call(5) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:Function.prototype.call called on incompatible number
+(() => { try { return Function.prototype.apply.call({}) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:Function.prototype.apply called on incompatible Object
+(() => { try { return Function.prototype.toString.call({}) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:Function.prototype.toString called on incompatible object
+(function () {}).bind().name	S:bound 
+(function f(a, b) {}).bind(null, 1).length	J:1
+(function f(a) {}).bind(null, 1, 2, 3).length	J:0
+(() => { const f = function () {}; Object.defineProperty(f, 'length', {value: NaN}); return f.bind().length })()	J:0
+(() => { const f = function () {}; Object.defineProperty(f, 'length', {value: -Infinity}); return f.bind().length })()	J:0
+(() => { const f = function () {}; Object.defineProperty(f, 'length', {value: 2.7}); return f.bind().length })()	J:2
+(() => { const f = function () {}; Object.defineProperty(f, 'name', {value: 5}); return f.bind().name })()	S:bound 
+new Map([[1, 'a']]).set(1, 'b').get(1)	S:b
+new Map([[NaN, 1]]).get(NaN)	J:1
+new Set([-0]).has(0)	J:true
+(() => { const m = new Map([[1, 2]]); m.delete(1); return [m.size, m.delete(1)] })()	J:[0,false]
+(() => { const s = new Set([1]); s.clear(); return s.size })()	J:0
+(() => { try { return Map.prototype.get.call(new Set(), 1) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:get method called on incompatible Set
+(() => { try { return Set.prototype.add.call(new Map(), 1) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:add method called on incompatible Map
+(() => { try { return new Map().entries().next.call({}) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:next method called on incompatible Object
+(() => { try { return new Map().entries().next.call(5) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:next method called on incompatible number
+(() => { try { return [].values().next.call(new Map().keys()) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:next method called on incompatible Map Iterator
+Map.prototype[Symbol.iterator].name	S:entries
+Set.prototype[Symbol.iterator].name	S:values
+Map.prototype[Symbol.iterator] === Map.prototype.entries	J:true
+Set.prototype.keys === Set.prototype.values	J:true
+parseFloat(' ﻿ 1.5')	J:1.5
+parseFloat('  2')	J:2
+parseInt('　 7')	J:7
+String(new RegExp('/'))	S:/\\//
+String(new RegExp('[/]'))	S:/[/]/
+String(new RegExp('\n'))	S:/\\n/
+String(new RegExp('\\\n'))	S:/\\n/
+String(new RegExp('\r'))	S:/\\r/
+String(new RegExp('\\\r'))	S:/\\r/
+String(new RegExp(' '))	S:/\\u2028/
+String(new RegExp('\\ '))	S:/\\u2029/
+String(new RegExp(' '))	S:/\\u2029/
+new RegExp('a/b', 'g').source	S:a\\/b
+(() => { try { return RegExp.prototype.exec.call({}) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:exec method called on incompatible Object
+(() => { try { return RegExp.prototype.test.call(5) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:number is not a non-null object
+(() => { try { return RegExp.prototype.toString.call(5) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:number is not a non-null object
+RegExp.prototype.toString.call({source: 'x', flags: 'g'})	S:/x/g
+(() => { try { return Object.getOwnPropertyDescriptor(RegExp.prototype, 'source').get.call({}) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:RegExp.prototype.source getter called on non-RegExp object: Object
+Object.getOwnPropertyDescriptor(RegExp.prototype, 'source').get.call(RegExp.prototype)	S:(?:)
+Object.getOwnPropertyDescriptor(RegExp.prototype, 'global').get.call(RegExp.prototype)	J:undefined
+(() => { try { return ({}).__defineGetter__('x', 5) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:invalid getter usage
+(() => { try { return ({}).__defineSetter__('x', 5) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:invalid setter usage
+(() => { try { return Object.prototype.__defineGetter__.call(null, 'x', () => 1) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:can't convert null to object
+(() => { const o = {}; o.__defineSetter__('x', function (v) { this.y = v }); o.x = 3; return [o.y, o.__lookupSetter__('x') !== undefined, o.__lookupGetter__('x')] })()	J:[3,true,null]
+(() => { try { return Object.prototype.__lookupGetter__.call(null, 'x') } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:can't convert null to object
+Object.prototype.__lookupGetter__.call(5, 'x')	J:undefined
+(() => { const p = {get x() { return 1 }}; const o = Object.create(p); return o.__lookupGetter__('x').name })()	S:get x
+(() => { try { return Date.prototype.getTime.call(Date.prototype) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:Date.prototype.getTime called on incompatible Date.prototype
+(() => { try { return Map.prototype.get.call(Map.prototype, 1) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:get method called on incompatible Map.prototype
+(() => { function F() {} F.prototype.constructor = F; try { return Date.prototype.getTime.call(F.prototype) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:Date.prototype.getTime called on incompatible Object
+(() => { const o = {constructor: {name: ''}}; try { return Date.prototype.getTime.call(o) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:Date.prototype.getTime called on incompatible Object
+Object.prototype.toString.call(Object.prototype.valueOf.call('s'))	S:[object String]
+Object.prototype.propertyIsEnumerable.call('ab', 0)	J:true
+Object.prototype.propertyIsEnumerable.call('ab', 'length')	J:false
+Object.prototype.hasOwnProperty.call('ab', 1)	J:true
+(() => { try { return Object.prototype.hasOwnProperty.call(undefined, 'x') } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:can't convert undefined to object
+(() => { try { return Object.prototype.toLocaleString.call(null) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:can't access property "toString", O is null
+Object.prototype.toString.call(Object('s'))	S:[object String]
+typeof Object.prototype.valueOf.call('s')	S:object
+Object.prototype.valueOf.call('s') instanceof String	J:true
+Object.prototype.toString.call(Object.prototype.valueOf.call(1))	S:[object Number]
+(() => { try { return RegExp.prototype.test.call(null) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:null is not a non-null object
+(() => { try { return RegExp.prototype.test.call('s') } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:string is not a non-null object
+(() => { try { return RegExp.prototype.test.call({exec() { return null }}) } catch (e) { return e.name + ':' + e.message } })()	J:false
+[(1.25).toFixed(1), (1.35).toFixed(1), (-2.5).toFixed(0), (0.000001).toFixed(7), (-0.0001).toFixed(2), (9.995).toFixed(2), (99.5).toFixed(0), (0).toFixed(2), (-0).toFixed(1), (123.456).toFixed(10)]	J:["1.3","1.4","-3","0.0000010","-0.00","9.99","100","0.00","0.0","123.4560000000"]
+[(5e-7).toFixed(20), (1.45).toFixed(1), (8.345).toFixed(2), (1e20).toFixed(2), (0.5).toFixed(1)]	J:["0.00000050000000000000","1.4","8.35","100000000000000000000.00","0.5"]
+Object.prototype.toLocaleString.call(5)	S:5
+Object.prototype.toLocaleString.call(undefined)	E:TypeError:can't access property "toString", O is undefined
+({toString() { return 'ts' }}).toLocaleString()	S:ts
