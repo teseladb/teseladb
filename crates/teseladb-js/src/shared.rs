@@ -29,7 +29,7 @@ pub(crate) struct Globals {
 
 /// An interpreter over `realm` with the call's state empty.
 pub(crate) fn interp<'c>(realm: Realm, budget: Rc<Budget>, limits: Limits) -> Interp<'c> {
-    let global_env = Rc::new(RefCell::new(EnvRec::default()));
+    let global_env = Rc::new(RefCell::new(EnvRec { var_scope: true, ..EnvRec::default() }));
     Interp {
         realm,
         budget,

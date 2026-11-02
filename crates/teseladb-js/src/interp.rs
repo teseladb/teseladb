@@ -41,6 +41,9 @@ pub type R<T = Val> = Result<T, Ctrl>;
 pub struct Binding {
     pub value: Option<Val>,
     pub mutable: bool,
+    /// A `let`, `const`, `class` or a parameter of a list with expressions: a `var` of a direct
+    /// `eval` may not redeclare it.
+    pub lexical: bool,
 }
 
 /// A scope: its bindings, its parent, and for a function scope its `this`, home object and
@@ -50,6 +53,8 @@ pub struct EnvRec {
     pub vars: Vec<(Name, Binding)>,
     /// The object of a `with` statement, whose properties are the names of this scope.
     pub with: Option<ObjRef>,
+    /// Whether this scope holds the `var`s of a function or of the program.
+    pub var_scope: bool,
     pub parent: Option<EnvRef>,
     pub this: Option<Val>,
     pub home: Option<ObjRef>,
@@ -1021,6 +1026,24 @@ impl<'c> Interp<'c> {
             }
             declare(&scope, "arguments", Val::Obj(a), true);
         }
+        // A list with defaults or patterns: each parameter is uninitialized until its turn, and
+        // the body's `var`s get a scope of their own (ECMA-262 §10.2.11).
+        let expressions = def.rest.as_ref().is_some_and(|r| !matches!(r, Pattern::Name(_)))
+            || def.params.iter().any(|(p, d)| d.is_some() || !matches!(p, Pattern::Name(_)));
+        if expressions {
+            let mut names = Vec::new();
+            for (p, _) in &def.params {
+                pattern_names(p, &mut names);
+            }
+            if let Some(r) = &def.rest {
+                pattern_names(r, &mut names);
+            }
+            let mut sc = scope.borrow_mut();
+            for n in names {
+                sc.vars.push((n, Binding { value: None, mutable: true, lexical: true }));
+            }
+        }
+        scope.borrow_mut().var_scope = true;
         for (i, (p, d)) in def.params.iter().enumerate() {
             let mut v = args.get(i).cloned().unwrap_or(Val::Undef);
             if matches!(v, Val::Undef)
@@ -1036,6 +1059,30 @@ impl<'c> Interp<'c> {
             let arr = self.array(rest)?;
             self.bind(r, arr, &scope, Some(true))?;
         }
+        let scope = if expressions {
+            let body = self.new_env(Some(scope.clone()));
+            body.borrow_mut().var_scope = true;
+            // A `var` named like a parameter starts with the parameter's value.
+            let mut names = Vec::new();
+            for st in &def.body {
+                var_names(st, &mut names);
+            }
+            for n in names {
+                let v = scope
+                    .borrow()
+                    .vars
+                    .iter()
+                    .rev()
+                    .find(|(k, _)| *k == n)
+                    .and_then(|(_, b)| b.value.clone());
+                if let Some(v) = v {
+                    declare(&body, &n, v, true);
+                }
+            }
+            body
+        } else {
+            scope
+        };
         self.hoist(&def.body, &scope, true)?;
         if def.generator {
             return crate::generators::make(self, fo, def, scope);
@@ -1309,10 +1356,14 @@ impl<'c> Interp<'c> {
                         let mut names = Vec::new();
                         pattern_names(p, &mut names);
                         for n in names {
-                            scope
-                                .borrow_mut()
-                                .vars
-                                .push((n, Binding { value: None, mutable: *k == DeclKind::Let }));
+                            scope.borrow_mut().vars.push((
+                                n,
+                                Binding {
+                                    value: None,
+                                    mutable: *k == DeclKind::Let,
+                                    lexical: true,
+                                },
+                            ));
                         }
                     }
                 }
@@ -1320,7 +1371,7 @@ impl<'c> Interp<'c> {
                     scope
                         .borrow_mut()
                         .vars
-                        .push((n.clone(), Binding { value: None, mutable: true }));
+                        .push((n.clone(), Binding { value: None, mutable: true, lexical: true }));
                 }
                 Stmt::Func(n, def) => {
                     let f = self.closure(def, scope)?;
@@ -1404,7 +1455,10 @@ impl<'c> Interp<'c> {
                             b.value = Some(v);
                             b.mutable = m;
                         }
-                        None => s.vars.push((n.clone(), Binding { value: Some(v), mutable: m })),
+                        None => s.vars.push((
+                            n.clone(),
+                            Binding { value: Some(v), mutable: m, lexical: false },
+                        )),
                     }
                     Ok(())
                 }
@@ -1748,7 +1802,11 @@ impl<'c> Interp<'c> {
                             for n in names {
                                 scope.borrow_mut().vars.push((
                                     n,
-                                    Binding { value: None, mutable: *k == DeclKind::Let },
+                                    Binding {
+                                        value: None,
+                                        mutable: *k == DeclKind::Let,
+                                        lexical: true,
+                                    },
                                 ));
                             }
                         }
@@ -2376,6 +2434,9 @@ impl<'c> Interp<'c> {
             return Err(Ctrl::Break(Some("?.".into())));
         }
         let args = self.eval_args(args, env)?;
+        if is_eval_name(callee) && is_builtin_eval(&f) {
+            return self.direct_eval(args.first().cloned().unwrap_or(Val::Undef), env);
+        }
         self.pos = pos;
         if !f.is_callable() {
             return self.type_error(&format!("{} is not a function", callee_text(callee)));
@@ -2503,6 +2564,65 @@ impl<'c> Interp<'c> {
     }
 
     /// OrdinaryHasInstance: whether `f.prototype` is on the chain of `x`.
+    /// A direct `eval(src)`: the code runs in the caller's scope, its `var`s go to the caller's
+    /// function (unless it is strict) and may not redeclare a `let` on the way (ECMA-262 §19.2.1).
+    pub fn direct_eval(&mut self, src: Val, env: &EnvRef) -> R {
+        let Val::Str(src) = src else { return Ok(src) };
+        let body =
+            crate::parser::parse_script(&src).map_err(|e| self.error("SyntaxError", &e.message))?;
+        let strict = self.strict || crate::parser::has_use_strict(&body);
+        let lex = self.new_env(Some(env.clone()));
+        let var_env = if strict { lex.clone() } else { var_scope_of(env) };
+        let mut names = Vec::new();
+        for st in &body {
+            var_names(st, &mut names);
+            if let Stmt::Func(n, _) = st {
+                names.push(n.clone());
+            }
+        }
+        if !strict {
+            for n in &names {
+                let mut cur = Some(env.clone());
+                while let Some(e) = cur {
+                    let clash = e.borrow().vars.iter().any(|(k, b)| k == n && b.lexical);
+                    if clash {
+                        return Err(self.error("SyntaxError", &format!("redeclaration of let {n}")));
+                    }
+                    if Rc::ptr_eq(&e, &var_env) {
+                        break;
+                    }
+                    cur = e.borrow().parent.clone();
+                }
+            }
+        }
+        for n in &names {
+            if !var_env.borrow().vars.iter().any(|(k, _)| k == n) {
+                declare(&var_env, n, Val::Undef, true);
+            }
+        }
+        self.hoist(&body, &lex, false)?;
+        for st in &body {
+            if let Stmt::Func(n, _) = st {
+                let f = self.read_var(&lex, n)?;
+                declare(&var_env, n, f, true);
+            }
+        }
+        let outer = std::mem::replace(&mut self.strict, strict);
+        let saved = self.last.take();
+        let mut r = Ok(());
+        for st in &body {
+            r = self.exec(st, &lex);
+            if r.is_err() {
+                break;
+            }
+        }
+        self.strict = outer;
+        let v = self.last.take().unwrap_or(Val::Undef);
+        self.last = saved;
+        r?;
+        Ok(v)
+    }
+
     /// `delete name`: a declared binding stays (`false`); a property of the global object goes.
     fn delete_name(&mut self, env: &EnvRef, name: &str) -> R {
         if self.lookup(env, name).is_some() {
@@ -2756,11 +2876,39 @@ pub fn declare(env: &EnvRef, name: &str, v: Val, mutable: bool) {
             b.value = Some(v);
             b.mutable = mutable;
         }
-        None => e.vars.push((name.into(), Binding { value: Some(v), mutable })),
+        None => e.vars.push((name.into(), Binding { value: Some(v), mutable, lexical: false })),
     }
 }
 
 /// Gives an anonymous function the name it is assigned to.
+/// Whether a call's callee is the name `eval` (a direct eval when it is the built-in one).
+fn is_eval_name(e: &Expr) -> bool {
+    match e {
+        Expr::Ident(n, _) => &**n == "eval",
+        Expr::At(_, x) => is_eval_name(x),
+        _ => false,
+    }
+}
+
+fn is_builtin_eval(f: &Val) -> bool {
+    matches!(f, Val::Obj(o) if matches!(&o.borrow().kind, Kind::Func(Func::Native(_, n)) if &**n == "eval"))
+}
+
+/// The scope that holds the `var`s for code running in `env`.
+fn var_scope_of(env: &EnvRef) -> EnvRef {
+    let mut cur = env.clone();
+    loop {
+        if cur.borrow().var_scope {
+            return cur;
+        }
+        let parent = cur.borrow().parent.clone();
+        match parent {
+            Some(p) => cur = p,
+            None => return cur,
+        }
+    }
+}
+
 /// Whether `e` is a function or class without a name, which takes the name of what it is bound
 /// to (ECMA-262 §8.4.3 IsAnonymousFunctionDefinition, parentheses included).
 fn anonymous_definition(e: &Expr) -> bool {

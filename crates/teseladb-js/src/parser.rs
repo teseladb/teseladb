@@ -152,7 +152,7 @@ struct Parser {
 }
 
 /// Whether `body` starts with the directive `"use strict"`.
-fn has_use_strict(body: &[Stmt]) -> bool {
+pub fn has_use_strict(body: &[Stmt]) -> bool {
     matches!(body.first(), Some(Stmt::Expr(Expr::Str(s))) if &**s == "use strict")
 }
 
