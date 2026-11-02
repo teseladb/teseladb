@@ -114,3 +114,55 @@ fn optimisations_beyond_the_measured_forms() {
     let filter = Document::new().with("$expr", e(r#"{"$eq":[1,1]}"#));
     assert_eq!(optimize_filter(&filter, None).expect("optimised"), Document::new());
 }
+
+/// What `optimize_filter` gives for `{$expr: <e>}` with `$$v` known: the filter in relaxed
+/// Extended JSON, or the code it fails with.
+fn optimized_expr(e: &str) -> Result<String, i32> {
+    let vars = teseladb_bson::extjson::parse(r#"{"v":1}"#).expect("vars");
+    let f = teseladb_bson::extjson::parse(&format!(r#"{{"$expr":{e}}}"#)).expect("a filter");
+    teseladb_exec::expr::optimize::optimize_filter(&f, Some(&vars))
+        .map(|d| {
+            let bytes = d.to_bytes().expect("small");
+            teseladb_bson::extjson::to_relaxed(
+                teseladb_bson::RawDoc::from_bytes(&bytes).expect("doc"),
+            )
+        })
+        .map_err(|e| e.code.code)
+}
+
+#[test]
+fn malformed_operators_reach_their_parse_errors_through_the_optimizer() {
+    let kept = |e: &str| Ok(format!(r#"{{"$and":[{{"$expr":{e}}}]}}"#));
+    assert_eq!(
+        optimized_expr(r#"{"$dateToString":{"date":"$d"}}"#),
+        kept(r#"{"$dateToString":{"date":"$d"}}"#)
+    );
+    assert_eq!(
+        optimized_expr(r#"{"$toUpper":[{"$toUpper":["$a"]}]}"#),
+        kept(r#"{"$toUpper":[{"$toUpper":["$a"]}]}"#)
+    );
+    assert_eq!(
+        optimized_expr(r#"{"$concat":[{"$concat":"$a"}]}"#),
+        kept(r#"{"$concat":[{"$concat":["$a"]}]}"#)
+    );
+    assert_eq!(
+        optimized_expr(r#"{"$ifNull":[null,"$a","$b"]}"#),
+        kept(r#"{"$ifNull":["$a","$b"]}"#)
+    );
+    assert_eq!(
+        optimized_expr(r#"{"$switch":{"branches":[{"case":false,"then":1}]}}"#),
+        kept(r#"{"$switch":{"branches":[]}}"#)
+    );
+    assert_eq!(optimized_expr(r#"{"$and":["$$v"]}"#), Ok("{}".to_owned()));
+    for (e, code) in [
+        (r#"{"$dateToString":["$d"]}"#, 18629),
+        (r#"{"$cond":["$a",1]}"#, 16020),
+        (r#"{"$switch":5}"#, 40060),
+        (r#"{"$switch":{"branches":5,"default":1}}"#, 40061),
+        (r#"{"$switch":{"branches":[5,{"case":"$a","then":1}]}}"#, 40062),
+        (r#"{"$let":5}"#, 16874),
+        (r#"{"$let":{"vars":5,"in":1}}"#, 10065),
+    ] {
+        assert_eq!(optimized_expr(e), Err(code), "{e}");
+    }
+}

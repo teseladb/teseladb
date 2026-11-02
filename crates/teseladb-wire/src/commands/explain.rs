@@ -1027,6 +1027,7 @@ pub(crate) fn learned(
         plan,
         trials,
         scores,
+        access: chosen.winner.access.clone(),
     })
 }
 

@@ -178,6 +178,32 @@ fn an_aggregate_key_has_options_in_the_measured_order() {
 }
 
 #[test]
+fn a_hint_is_part_of_the_key_after_the_client() {
+    // RefDb 9.0.4 (02-11-2026): the hint, outside the shape, after `client` and before
+    // `maxTimeMS`; an index's name as `{$hint: name}`; each hint its own entry.
+    let mut c = Client::new();
+    c.set(-1, 0.0);
+    c.ok(DB, r#"{"createIndexes":"c","indexes":[{"key":{"a":1},"name":"a_1"}]}"#);
+    c.ok(DB, r#"{"find":"c","filter":{"a":3},"hint":{"a":1},"maxTimeMS":500,"batchSize":3}"#);
+    c.ok(DB, r#"{"find":"c","filter":{"a":3},"hint":"a_1"}"#);
+    c.ok(DB, r#"{"find":"c","filter":{"a":3}}"#);
+    let e = c.entries();
+    let finds: Vec<&Document> =
+        e.iter().filter(|d| field(d, "key.queryShape.command") == &Value::from("find")).collect();
+    assert_eq!(finds.len(), 3, "{finds:?}");
+    let with = |h: &str| {
+        finds
+            .iter()
+            .find(|d| matches!(d.get("key"), Some(Value::Document(k)) if k.get("hint") == Some(&Value::Document(cmd(h)))))
+            .unwrap_or_else(|| panic!("{h} in {finds:?}"))
+    };
+    let Value::Document(k) = field(with(r#"{"a":1}"#), "key") else { panic!() };
+    assert_eq!(keys(k), ["queryShape", "readConcern", "client", "hint", "maxTimeMS", "batchSize"]);
+    let Value::Document(k) = field(with(r#"{"$hint":"a_1"}"#), "key") else { panic!() };
+    assert_eq!(keys(k), ["queryShape", "readConcern", "client", "hint"]);
+}
+
+#[test]
 fn the_parameters_decide_which_queries_count() {
     let mut c = Client::new();
     let r = c.ok("admin", &format!(r#"{{"getParameter":1,"{RATE_LIMIT}":1,"{SAMPLE_RATE}":1}}"#));
@@ -310,4 +336,156 @@ fn an_equality_lookup_reads_the_foreign_side_through_its_index() {
     };
     // The three local documents and the two foreign ones, not the 60 of `f`.
     assert!(examined < 10, "{examined}");
+}
+
+/// The `true` count of question `q` of `metrics.queryPlanner` in entry `e`.
+fn yes<'a>(e: &'a Document, q: &str) -> &'a Value {
+    field(e, &format!("metrics.queryPlanner.{q}.true"))
+}
+
+#[test]
+fn the_planner_part_says_how_each_query_was_planned() {
+    let mut c = Client::new();
+    c.set(-1, 0.0);
+    c.ok(DB, r#"{"createIndexes":"c","indexes":[{"key":{"a":1},"name":"a_1"},{"key":{"b":1},"name":"b_1"}]}"#);
+    c.ok(DB, r#"{"find":"c","filter":{"z":1},"sort":{"z":1}}"#);
+    c.ok(DB, r#"{"find":"c","filter":{},"sort":{"b":-1}}"#);
+    c.ok(DB, r#"{"find":"c","filter":{"a":2,"b":{"$gt":0}}}"#);
+    c.ok(
+        DB,
+        r#"{"aggregate":"c","pipeline":[{"$group":{"_id":"$a"}},{"$sort":{"_id":1}}],"cursor":{}}"#,
+    );
+    c.ok(
+        DB,
+        r#"{"aggregate":"c","pipeline":[{"$match":{"a":1}},{"$group":{"_id":"$b"}}],"cursor":{}}"#,
+    );
+    c.ok(DB, r#"{"distinct":"c","key":"b"}"#);
+    let e = c.entries();
+    let by = |command: &str, part: &str, v: &str| {
+        e.iter()
+            .find(|d| {
+                field(d, "key.queryShape.command") == &Value::from(command)
+                    && format!("{:?}", d.get("key")).contains(v)
+                    && format!("{:?}", d.get("key")).contains(part)
+            })
+            .unwrap_or_else(|| panic!("{command} {v} in {e:?}"))
+            .clone()
+    };
+    let one = &Value::Int64(1);
+    let none = &Value::Int64(0);
+    assert_eq!(yes(&by("find", "sort", "\"z\""), "hasSortStage"), one);
+    assert_eq!(yes(&by("find", "sort", "\"b\""), "hasSortStage"), none);
+    let multi = by("find", "filter", "$gt");
+    assert_eq!(yes(&multi, "fromMultiPlanner"), one);
+    assert_eq!(yes(&multi, "hasSortStage"), none);
+    assert_eq!(yes(&multi, "fromPlanCache"), none);
+    assert_eq!(yes(&by("aggregate", "pipeline", "$sort"), "hasSortStage"), one);
+    let grouped = by("aggregate", "pipeline", "$match");
+    assert_eq!(yes(&grouped, "hasSortStage"), none);
+    assert_eq!(yes(&grouped, "usedDisk"), none);
+    assert_eq!(field(&grouped, "metrics.queryPlanner.usedDisk.false"), one);
+    let planner = match field(&grouped, "metrics.queryPlanner") {
+        Value::Document(d) => d.clone(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(
+        keys(&planner),
+        [
+            "hasSortStage",
+            "usedDisk",
+            "fromMultiPlanner",
+            "fromPlanCache",
+            "planningTimeMicros",
+            "costBasedRanker"
+        ]
+    );
+    let metrics = match field(&grouped, "metrics") {
+        Value::Document(d) => keys(d),
+        other => panic!("{other:?}"),
+    };
+    let at = metrics.iter().position(|k| k == "queryExec").expect("queryExec");
+    assert_eq!(metrics[at + 1..at + 4], ["queryPlanner", "writes", "firstSeenTimestamp"]);
+    assert_eq!(field(&grouped, "metrics.writes.keysDeleted.sum"), &Value::Int64(0));
+    assert_eq!(
+        field(&grouped, "metrics.queryPlanner.costBasedRanker.nDocsSampled.max"),
+        &Value::Int64(0)
+    );
+    assert_eq!(yes(&by("distinct", "key", "\"b\""), "hasSortStage"), none);
+}
+
+/// The collection `q` of 50 documents with `a` cycling through 0..5 and `b` their number, and its
+/// indexes on `a` and on `b`, as the measure of `fromPlanCache` (02-11-2026) had it.
+fn fifty(c: &mut Client) {
+    let docs: Vec<String> =
+        (0..50).map(|i| format!(r#"{{"_id":{i},"a":{},"b":{i}}}"#, i % 5)).collect();
+    c.ok(DB, &format!(r#"{{"insert":"q","documents":[{}]}}"#, docs.join(",")));
+    c.ok(DB, r#"{"createIndexes":"q","indexes":[{"key":{"a":1},"name":"a_1"},{"key":{"b":1},"name":"b_1"}]}"#);
+}
+
+/// The entry of the `find` on `q` whose filter's text contains `part`.
+fn find_on_q(c: &mut Client, part: &str) -> Document {
+    c.entries()
+        .into_iter()
+        .find(|d| {
+            let key = format!("{:?}", d.get("key"));
+            field(d, "key.queryShape.command") == &Value::from("find")
+                && key.contains("\"q\"")
+                && key.contains(part)
+        })
+        .unwrap_or_else(|| panic!("the find on q with {part} in {:?}", c.entries()))
+}
+
+#[test]
+fn a_shape_runs_from_the_plan_cache_once_its_entry_is_active() {
+    // RefDb 9.0.4, six runs of `{a: 3, b: {$gt: 3}}`: the first two plans compete (the first
+    // leaves an inactive entry, the second makes it active), the other four take the cached plan.
+    let mut c = Client::new();
+    c.set(-1, 0.0);
+    fifty(&mut c);
+    for _ in 0..6 {
+        c.ok(DB, r#"{"find":"q","filter":{"a":3,"b":{"$gt":3}}}"#);
+    }
+    let e = find_on_q(&mut c, "$gt");
+    assert_eq!(yes(&e, "fromMultiPlanner"), &Value::Int64(2), "{e:?}");
+    assert_eq!(field(&e, "metrics.queryPlanner.fromMultiPlanner.false"), &Value::Int64(4));
+    assert_eq!(yes(&e, "fromPlanCache"), &Value::Int64(4), "{e:?}");
+    assert_eq!(field(&e, "metrics.queryPlanner.fromPlanCache.false"), &Value::Int64(2));
+    // The cached runs found what the competing ones found.
+    assert_eq!(field(&e, "metrics.queryExec.docsReturned.sum"), &Value::Int64(54));
+}
+
+#[test]
+fn a_cached_plan_that_works_ten_times_more_is_planned_again() {
+    let mut c = Client::new();
+    c.set(-1, 0.0);
+    fifty(&mut c);
+    let query = r#"{"find":"q","filter":{"a":3,"b":{"$gt":45}}}"#;
+    c.ok(DB, query);
+    c.ok(DB, query);
+    // Two thousand documents past `b: 45` that the filter on `a` rejects: the scan of `b` the
+    // cache holds now reads them all without giving a batch.
+    let more: Vec<String> =
+        (100..2100).map(|i| format!(r#"{{"_id":{i},"a":4,"b":{i}}}"#)).collect();
+    c.ok(DB, &format!(r#"{{"insert":"q","documents":[{}]}}"#, more.join(",")));
+    c.ok(DB, query);
+    // RefDb 9.0.4 drops the entry and keeps nothing of the plans that competed again.
+    let r = c.ok(DB, r#"{"aggregate":"q","pipeline":[{"$planCacheStats":{}}],"cursor":{}}"#);
+    assert_eq!(field(&r, "cursor.firstBatch"), &Value::Array(Vec::new()), "{r:?}");
+    let e = find_on_q(&mut c, "$gt");
+    assert_eq!(yes(&e, "fromMultiPlanner"), &Value::Int64(3), "{e:?}");
+    assert_eq!(yes(&e, "fromPlanCache"), &Value::Int64(0), "{e:?}");
+    assert_eq!(field(&e, "metrics.queryExec.docsReturned.sum"), &Value::Int64(3));
+}
+
+#[test]
+fn a_hinted_read_never_takes_the_cached_plan() {
+    let mut c = Client::new();
+    c.set(-1, 0.0);
+    fifty(&mut c);
+    for _ in 0..2 {
+        c.ok(DB, r#"{"find":"q","filter":{"a":3,"b":{"$gt":3}}}"#);
+    }
+    c.ok(DB, r#"{"find":"q","filter":{"a":3,"b":{"$gt":3}},"hint":{"a":1}}"#);
+    let e = find_on_q(&mut c, "hint");
+    assert_eq!(yes(&e, "fromPlanCache"), &Value::Int64(0), "{e:?}");
 }

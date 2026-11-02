@@ -784,10 +784,7 @@ fn run_stage(
         Stage::Lookup(l) => l.run(docs, env)?,
         Stage::UnionWith(u) => u.run(docs, env)?,
         Stage::Documents(e) => stages::run_documents(e, env)?,
-        Stage::SetWindowFields(w) => {
-            errors::check_sort_memory(&docs, env.allow_disk_use(), env.stage_memory_limit())?;
-            w.run(docs, env)?
-        }
+        Stage::SetWindowFields(w) => w.run(docs, env)?,
         Stage::Densify(d) => d.run(docs, env.collation().get())?,
         Stage::Fill(f) => f.run(docs, env)?,
         Stage::GraphLookup(g) => g.run(docs, env)?,

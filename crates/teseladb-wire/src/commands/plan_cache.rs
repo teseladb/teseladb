@@ -7,6 +7,7 @@
 //! newest first.
 
 use teseladb_bson::{Document, Value};
+use teseladb_plan::rules::Access;
 
 use super::{Backend, Ctx, args, lock, names};
 use crate::error::{BAD_VALUE, CommandError};
@@ -37,6 +38,8 @@ pub struct Learned {
     pub trials: Vec<Document>,
     /// Each plan's score, the winner first.
     pub scores: Vec<f64>,
+    /// How the winner reads, for the reads of the shape that take the cached plan.
+    pub access: Access,
 }
 
 /// One entry.
@@ -83,7 +86,23 @@ impl PlanCache {
 
     /// Whether `ns` has an active entry of `shape` learned with `catalog`.
     pub fn is_active(&self, ns: &str, shape: &str, catalog: &str) -> bool {
-        self.entries.iter().any(|e| {
+        self.active(ns, shape, catalog).is_some()
+    }
+
+    /// The plan of the active entry of `shape` on `ns` learned with `catalog`, and the works of
+    /// its trial: what a read of that shape runs without competing plans (`fromPlanCache`). The
+    /// entry becomes the newest, as in RefDb's cache of the least recently used.
+    pub fn cached(&mut self, ns: &str, shape: &str, catalog: &str) -> Option<(Access, u64)> {
+        let i = self.active(ns, shape, catalog)?;
+        let entry = self.entries.remove(i);
+        let found = (entry.learned.access.clone(), entry.learned.works);
+        self.entries.insert(0, entry);
+        Some(found)
+    }
+
+    /// The position of the active entry of `shape` on `ns` learned with `catalog`.
+    fn active(&self, ns: &str, shape: &str, catalog: &str) -> Option<usize> {
+        self.entries.iter().position(|e| {
             e.ns == ns && e.active && e.learned.shape == shape && e.learned.catalog == catalog
         })
     }
@@ -247,7 +266,26 @@ mod tests {
             plan: Document::new(),
             trials: Vec::new(),
             scores: vec![1.5],
+            access: Access::Collscan,
         }
+    }
+
+    #[test]
+    fn only_an_active_entry_of_the_same_catalog_gives_its_plan() {
+        let mut cache = PlanCache::default();
+        cache.learn("d.c", learned("s", 4), 1);
+        assert_eq!(cache.cached("d.c", "s", ""), None);
+        cache.learn("d.c", learned("s", 4), 2);
+        assert_eq!(cache.cached("d.c", "s", ""), Some((Access::Collscan, 4)));
+        assert_eq!(cache.cached("d.c", "s", "other"), None);
+        assert_eq!(cache.cached("d.c", "t", ""), None);
+        assert_eq!(cache.cached("d.o", "s", ""), None);
+        cache.learn("d.c", learned("t", 4), 3);
+        assert_eq!(cache.cached("d.c", "s", ""), Some((Access::Collscan, 4)));
+        // The entry it used is the newest and keeps the time it was created.
+        let stats = cache.stats("d.c", ("h", "s"));
+        let created: Vec<Option<&Value>> = stats.iter().map(|d| d.get("timeOfCreation")).collect();
+        assert_eq!(created, [Some(&Value::DateTime(2)), Some(&Value::DateTime(3))]);
     }
 
     #[test]
