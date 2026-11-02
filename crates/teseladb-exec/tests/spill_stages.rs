@@ -221,3 +221,28 @@ fn bucket_keeps_the_memory_limit_of_its_group() {
     assert_eq!(memory, spilled);
     assert!(stats.spills > 1);
 }
+
+#[test]
+fn without_disk_use_a_store_is_never_used() {
+    let store = MemorySpill::default();
+    let env = SpillEnv { limit: usize::MAX, disk: false, store: Some(&store) };
+    for text in [
+        r#"[{"$bucket":{"groupBy":"$v","boundaries":[0,100,200]}}]"#,
+        r#"[{"$bucketAuto":{"groupBy":"$v","buckets":3}}]"#,
+        r#"[{"$setWindowFields":{"sortBy":{"v":1},"output":{"k":{"$rank":{}}}}}]"#,
+    ] {
+        assert!(pipeline(text).run(docs(), &env).is_ok(), "{text}");
+    }
+    assert_eq!(store.written(), 0);
+}
+
+#[test]
+fn a_value_outside_every_bucket_fails_with_the_code_of_its_engine() {
+    let env = SpillEnv { limit: usize::MAX, disk: true, store: None };
+    let text = r#"[{"$bucket":{"groupBy":"$v","boundaries":[0,10]}}]"#;
+    let sbe = pipeline(text).run(docs(), &env).expect_err("no bucket");
+    let classic = pipeline(&format!(r#"[{{"$redact":"$$KEEP"}},{}"#, &text[1..]))
+        .run(docs(), &env)
+        .expect_err("no bucket");
+    assert_ne!(sbe.code.code, classic.code.code);
+}
