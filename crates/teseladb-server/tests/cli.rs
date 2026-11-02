@@ -4,6 +4,7 @@
 
 use std::path::PathBuf;
 use std::process::Command as Process;
+use teseladb_io::node_disk::{DirectIo, IoExecutor};
 
 use teseladb_server::cli::{Command, StartOpts, USAGE, parse, parse_with};
 use teseladb_server::log::{Format, Level};
@@ -30,6 +31,8 @@ fn start_defaults() {
     assert_eq!(o.dbpath, PathBuf::from("./teseladb-data"));
     assert_eq!(o.cores, None, "the machine's logical cores");
     assert_eq!(o.memory_limit, None, "three quarters of the process's memory");
+    assert_eq!((o.io_executor, o.direct_io), (IoExecutor::Auto, DirectIo::Auto));
+    assert_eq!(o.cpu_list, None, "the CPUs the process may use");
     assert_eq!((o.bind_ip.as_str(), o.port), ("127.0.0.1", 27017));
     assert_eq!(o.peer_listen.to_string(), "127.0.0.1:27100");
     assert_eq!(o.admin_listen.to_string(), "127.0.0.1:27200");
@@ -61,6 +64,17 @@ fn every_start_option_in_both_forms() {
     assert_eq!(start("start --insecure --memory-limit 8G").memory_limit, Some(8 << 30));
     assert_eq!(start("start --insecure --memory-limit=1048576").memory_limit, Some(1 << 20));
     assert!(bad("start --insecure --memory-limit 3X").starts_with("--memory-limit: "));
+    // The disk executor, O_DIRECT and the cores' CPUs (012 FR-003, FR-006, FR-007).
+    let o = start("start --insecure --io-executor uring --direct-io off --cpu-list 0-2,7");
+    assert_eq!((o.io_executor, o.direct_io), (IoExecutor::Uring, DirectIo::Off));
+    assert_eq!(o.cpu_list, Some(vec![0, 1, 2, 7]));
+    assert_eq!(start("start --insecure --io-executor threads").io_executor, IoExecutor::Threads);
+    assert_eq!(start("start --insecure --direct-io on").direct_io, DirectIo::On);
+    assert!(bad("start --insecure --io-executor fast").starts_with("--io-executor: "));
+    assert!(bad("start --insecure --direct-io yes").starts_with("--direct-io: "));
+    assert!(bad("start --insecure --cpu-list 3-1").starts_with("--cpu-list: "));
+    let few = bad("start --insecure --cores 4 --cpu-list 0-1");
+    assert!(few.contains("--cpu-list names 2 CPUs for 4 cores"), "{few}");
     assert!(!start("start --insecure --logappend=no").logappend);
     // Addresses that are not loopback with --insecure only when asked for.
     let o =
@@ -225,6 +239,23 @@ fn set_parameter_turns_the_test_commands_on() {
     );
     assert!(bad("start --insecure --setParameter enableTestCommands=2").contains("boolean"));
     assert!(bad("start --insecure --setParameter enableTestCommands").contains("<name>=<value>"));
+}
+
+/// A `--cpu-list` CPU the process may not run on stops the start (012 FR-006).
+#[test]
+fn a_cpu_the_process_may_not_use_stops_the_start() {
+    let dir = std::env::temp_dir().join(format!("teseladb-cli-cpu-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let out = Process::new(env!("CARGO_BIN_EXE_teseladb"))
+        .args(["start", "--insecure", "--cores", "1", "--port", "0", "--peer-listen"])
+        .args(["127.0.0.1:0", "--admin-listen", "127.0.0.1:0", "--cpu-list", "1023", "--dbpath"])
+        .arg(dir.join("data"))
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(err.contains("--cpu-list: the process may not run on CPU 1023"), "{err}");
 }
 
 #[test]

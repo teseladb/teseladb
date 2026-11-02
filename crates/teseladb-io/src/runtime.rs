@@ -138,6 +138,25 @@ fn ring_of<D: 'static>(disk: &mut D) -> Option<&mut crate::IoUringDisk> {
     (disk as &mut dyn std::any::Any).downcast_mut::<crate::NodeDisk>()?.uring()
 }
 
+/// The ring of a disk the loop drives itself, which [`CoreRuntime::new`] only keeps when it has
+/// one.
+#[cfg(target_os = "linux")]
+fn ring<D: 'static>(disk: &mut D) -> &mut crate::IoUringDisk {
+    ring_of(disk).expect("a disk driven by the loop has a ring")
+}
+
+/// Whether an event's token is a connection's (not the mailbox's nor the ring's).
+#[cfg(target_os = "linux")]
+fn is_socket(token: u64) -> bool {
+    token != WAKE_TOKEN && token != RING_TOKEN
+}
+
+/// Whether an event's token is a connection's (not the mailbox's).
+#[cfg(not(target_os = "linux"))]
+fn is_socket(token: u64) -> bool {
+    token != WAKE_TOKEN
+}
+
 /// Loop of one core.
 pub struct CoreRuntime<L: CoreLogic, D: Disk + Send + 'static> {
     logic: L,
@@ -244,9 +263,7 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
             Exec::Thread(t) => t.shutdown(),
             #[cfg(target_os = "linux")]
             Exec::InLoop(mut d) => {
-                if let Some(ring) = ring_of(&mut d) {
-                    ring.drain();
-                }
+                ring(&mut d).drain();
                 Some(d)
             }
         };
@@ -263,15 +280,15 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
         if let Some(ms) = self.timers.next_deadline() {
             deadline = deadline.min(Nanos::from_millis(ms));
         }
-        let mut timeout = Duration::from_nanos(deadline.0.saturating_sub(now.0));
-        if self.ring_ready() {
-            timeout = Duration::ZERO;
-        }
+        let timeout = Duration::from_nanos(deadline.0.saturating_sub(now.0));
+        // Results of the ring that no completion will signal are taken at once.
+        #[cfg(target_os = "linux")]
+        let timeout = if self.ring_ready() { Duration::ZERO } else { timeout };
         self.events.clear();
         self.events.extend_from_slice(self.poller.poll(Some(timeout))?);
         let events = std::mem::take(&mut self.events);
         for e in &events {
-            if e.token != WAKE_TOKEN && e.token != RING_TOKEN {
+            if is_socket(e.token) {
                 self.on_socket(e);
             }
         }
@@ -296,22 +313,20 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
     }
 
     /// Whether the ring has results that no completion will signal.
+    #[cfg(target_os = "linux")]
     fn ring_ready(&mut self) -> bool {
-        #[cfg(target_os = "linux")]
-        if let Exec::InLoop(d) = &mut self.disk {
-            return ring_of(d).is_some_and(|r| r.ready());
+        match &mut self.disk {
+            Exec::InLoop(d) => ring(d).ready(),
+            Exec::Thread(_) => false,
         }
-        false
     }
 
     /// Feeds the logic with the ring's completions. A ring that fails is a disk that cannot make
     /// anything durable any more: the loop ends with the error.
     fn reap_ring(&mut self) -> io::Result<()> {
         #[cfg(target_os = "linux")]
-        if let Exec::InLoop(d) = &mut self.disk
-            && let Some(ring) = ring_of(d)
-        {
-            ring.reap(&mut self.reaped)?;
+        if let Exec::InLoop(d) = &mut self.disk {
+            ring(d).reap(&mut self.reaped)?;
             let now = self.now();
             for done in std::mem::take(&mut self.reaped) {
                 self.logic.on_io_done(done, now);
@@ -326,13 +341,10 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
             let gone = match &mut self.disk {
                 Exec::Thread(t) => t.submit(op).is_err(),
                 #[cfg(target_os = "linux")]
-                Exec::InLoop(d) => match ring_of(d) {
-                    Some(ring) => {
-                        ring.submit(op);
-                        false
-                    }
-                    None => true,
-                },
+                Exec::InLoop(d) => {
+                    ring(d).submit(op);
+                    false
+                }
             };
             if gone {
                 // The disk thread is gone: nothing can be made durable any more.
@@ -343,8 +355,7 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
         // One `io_uring_enter` for the whole turn.
         #[cfg(target_os = "linux")]
         if let Exec::InLoop(d) = &mut self.disk
-            && let Some(ring) = ring_of(d)
-            && ring.flush().is_err()
+            && ring(d).flush().is_err()
         {
             self.stopped = true;
             return;

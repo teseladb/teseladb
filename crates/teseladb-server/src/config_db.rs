@@ -44,6 +44,9 @@ use crate::backend::PARAMETER_PREFIX;
 /// Group 0 and of the `Meta2` ranges (007 FR-014: they record the changes of the descriptors
 /// they hold).
 pub fn documents_with(sm: &Group0Sm, meta2: &[&Meta2Sm], coll: &str) -> Vec<Document> {
+    if coll == CHUNKS {
+        return chunks(&crate::ranges::Ranges::of_all(sm, meta2).descs, sm);
+    }
     if coll != "changelog" {
         return documents(sm, coll);
     }
@@ -63,9 +66,21 @@ pub fn documents(sm: &Group0Sm, coll: &str) -> Vec<Document> {
         "version" => vec![version(sm)],
         SETTINGS => settings(sm),
         "tags" => tags(sm),
+        CHUNKS => chunks(&sm.ranges.values().cloned().collect::<Vec<_>>(), sm),
         "changelog" => sm.changelog.changes.iter().map(|c| change(sm, c)).collect(),
         _ => Vec::new(),
     }
+}
+
+/// `config.chunks`.
+const CHUNKS: &str = "chunks";
+
+/// `config.chunks`: the chunks of every collection with a shard key over ranges `descs`, with
+/// their bounds in shard key values (018 FR-006).
+fn chunks(descs: &[teseladb_meta::group0::RangeDesc], sm: &Group0Sm) -> Vec<Document> {
+    let entries: Vec<teseladb_router::table::RouteEntry> =
+        descs.iter().map(teseladb_router::table::RouteEntry::from_desc).collect();
+    teseladb_wire::commands::chunks::config_chunks(&entries, sm.catalog.collections.iter())
 }
 
 /// The key of the Group 0 setting that keeps the document of `config.settings` with `_id` `id`.
@@ -237,21 +252,23 @@ fn tags(sm: &Group0Sm) -> Vec<Document> {
 }
 
 fn databases(sm: &Group0Sm) -> Vec<Document> {
-    let primary = sm.active_nodes().first().map_or_else(|| shard_name(1), |n| shard_name(n.0));
+    let first = sm.active_nodes().first().map_or_else(|| shard_name(1), |n| shard_name(n.0));
+    let primaries = teseladb_wire::commands::primaries::of_settings(&sm.settings);
     sm.catalog
         .databases_by_creation()
         .into_iter()
         .map(|db| {
+            let (primary, last_mod) = match primaries.get(&db) {
+                Some(p) => (shard_name(p.node.0), i32::try_from(p.last_mod).unwrap_or(i32::MAX)),
+                None => (first.clone(), 1),
+            };
             let zero = teseladb_hlc::Hlc { physical: 0, logical: 0 };
             let mark = sm.catalog.db_marks.get(&db).copied().unwrap_or(zero);
             let time = u32::try_from(mark.physical / 1_000).unwrap_or(u32::MAX);
             let version = Document::new()
                 .with("timestamp", Value::Timestamp { time, increment: mark.logical })
-                .with("lastMod", 1);
-            Document::new()
-                .with("_id", db)
-                .with("primary", primary.clone())
-                .with("version", version)
+                .with("lastMod", last_mod);
+            Document::new().with("_id", db).with("primary", primary).with("version", version)
         })
         .collect()
 }
@@ -339,6 +356,53 @@ mod tests {
         assert_eq!(listed[0].get("_id"), Some(&Value::from("app.s")));
         assert_eq!(listed[0].get("key"), Some(&Value::Document(Document::new().with("tienda", 1))));
         assert_eq!(listed[0].get("unique"), Some(&Value::Boolean(false)));
+    }
+
+    #[test]
+    fn config_chunks_lists_the_ranges_of_a_collection_with_a_shard_key() {
+        // 018 FR-006: the chunks in shard key values, the shard the range's leader.
+        use teseladb_meta::group0::{RangeDesc, ReplicaRole};
+        let mut sm = cluster();
+        let shard_key = Document::new().with("key", Document::new().with("a", 1));
+        let options = Document::new().with(sharding::SHARD_KEY, shard_key).to_bytes().unwrap();
+        let ns = Namespace { db: "app".into(), coll: "s".into() };
+        let create = CatalogCommand::Create { ns, uuid: [5; 16], options, if_absent: false };
+        sm.apply_command(5, &Group0Command::Catalog(create));
+        let desc = RangeDesc {
+            group: teseladb_types::GroupId(1),
+            start: Vec::new(),
+            end: Vec::new(),
+            core: 0,
+            replicas: vec![(NodeId(2), ReplicaRole::Voter)],
+            replica_epoch: 1,
+            generation: 1,
+            leader_hint: None,
+            leader_term: 0,
+            pending_split: None,
+            settling: false,
+        };
+        sm.insert_range(desc);
+        for listed in [documents(&sm, "chunks"), documents_with(&sm, &[], "chunks")] {
+            assert_eq!(listed.len(), 1, "app.c has no shard key");
+            let min = Document::new().with("a", Value::MinKey);
+            assert_eq!(listed[0].get("min"), Some(&Value::Document(min)));
+            assert_eq!(listed[0].get("shard"), Some(&Value::from("node2")));
+        }
+    }
+
+    #[test]
+    fn config_databases_shows_the_primary_that_move_primary_left() {
+        // 018 FR-005: the setting of `movePrimary`, with its version.
+        use teseladb_wire::commands::primaries::{Primary, key};
+        let mut sm = cluster();
+        let before = documents(&sm, "databases");
+        assert_eq!(before[0].get("primary"), Some(&Value::from("node1")));
+        let p = Primary { node: NodeId(3), last_mod: 2 };
+        sm.settings.insert(key("app"), p.encode());
+        let after = documents(&sm, "databases");
+        assert_eq!(after[0].get("primary"), Some(&Value::from("node3")));
+        let Some(Value::Document(v)) = after[0].get("version") else { panic!("{after:?}") };
+        assert_eq!(v.get("lastMod"), Some(&Value::Int32(2)));
     }
 
     #[test]

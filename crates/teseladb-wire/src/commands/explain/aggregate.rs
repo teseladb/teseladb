@@ -770,6 +770,7 @@ fn through_counted<B: Backend + ?Sized>(
     let spill = super::super::Spill {
         store: counter.clone().map(|c| c as std::sync::Arc<dyn SpillStore + Send + Sync>),
         stage_bytes: node.stage_bytes,
+        cursor_bytes: node.cursor_bytes,
     };
     let docs = super::super::aggregate::read_through_spilling(
         ctx.backend,

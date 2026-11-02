@@ -339,3 +339,160 @@ fn partial_filter_edges() {
         &Value::Document(json(r#"{"control.max.mx":{"$_internalExprGt":1}}"#))
     );
 }
+
+/// Measurements before 1970 and past what a bucket `_id` can hold are stored and read back by
+/// time, by meta value and time through the `{m: 1, t: 1}` index, and in time order, as a `refnode`
+/// 9.0.4 gave them on 02-11-2026 (015 T020, adversarial pass).
+#[test]
+fn measurements_outside_the_bucket_id_years_are_read_by_time() {
+    let mut m = Mem::new();
+    series(&mut m);
+    let far = 8_640_000_000_000_000;
+    run(
+        &mut m,
+        &format!(
+            r#"{{"insert":"ts","documents":[{{"t":{},"m":1,"v":1}},{{"t":{},"m":1,"v":2}},{{"t":{},"m":1,"v":3}},{{"t":{},"m":1,"v":4}}]}}"#,
+            date(-1),
+            date(-86_400_001),
+            date(far),
+            date(T0)
+        ),
+    );
+    let read = |m: &mut Mem, filter: String| {
+        let r = run(m, &format!(r#"{{"find":"ts","filter":{filter},"sort":{{"v":1}}}}"#));
+        values(&r)
+    };
+    let ints = |v: &[i32]| v.iter().map(|i| Value::Int32(*i)).collect::<Vec<_>>();
+    let cases = |m: &mut Mem| {
+        assert_eq!(read(m, format!(r#"{{"t":{{"$lt":{}}}}}"#, date(0))), ints(&[1, 2]));
+        assert_eq!(read(m, format!(r#"{{"t":{{"$gte":{}}}}}"#, date(T0))), ints(&[3, 4]));
+        assert_eq!(
+            read(m, format!(r#"{{"t":{{"$gt":{}}}}}"#, date(-86_400_001))),
+            ints(&[1, 3, 4])
+        );
+        assert_eq!(read(m, format!(r#"{{"t":{{"$lte":{}}}}}"#, date(-86_400_001))), ints(&[2]));
+        assert_eq!(
+            read(m, format!(r#"{{"m":1,"t":{{"$gte":{},"$lt":{}}}}}"#, date(-2), date(T0))),
+            ints(&[1])
+        );
+        assert_eq!(
+            read(m, format!(r#"{{"m":1,"t":{{"$gt":{}}}}}"#, date(4_000_000_000_000_000))),
+            ints(&[3])
+        );
+    };
+    cases(&mut m);
+    run(&mut m, r#"{"createIndexes":"ts","indexes":[{"key":{"m":1,"t":1},"name":"m_1_t_1"}]}"#);
+    cases(&mut m);
+    let r = run(&mut m, r#"{"find":"ts","sort":{"t":-1}}"#);
+    assert_eq!(values(&r), ints(&[3, 4, 1, 2]));
+    // The catalog's mark is not an option: `listCollections` does not show it and `collMod`
+    // keeps it.
+    let r = run(&mut m, r#"{"collMod":"ts","expireAfterSeconds":3600}"#);
+    assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+    let r = run(&mut m, r#"{"listCollections":1,"filter":{"name":"ts"}}"#);
+    let Value::Document(options) = field(&batch(&r)[0], "options").clone() else { panic!("{r:?}") };
+    let keys: Vec<&str> = options.iter().map(|(k, _)| k).collect();
+    assert_eq!(keys, vec!["expireAfterSeconds", "timeseries"], "{r:?}");
+    cases(&mut m);
+}
+
+/// `listCollections` shows a time series' `expireAfterSeconds` before `timeseries`, whether it
+/// came with `create` or with `collMod`, as an `int64`, and without it once `collMod` turns it
+/// off (measured on a `refnode` 9.0.4 on 02-11-2026).
+#[test]
+fn a_time_series_lists_its_expiry_before_its_buckets() {
+    let mut m = Mem::new();
+    let options = |m: &mut Mem, name: &str| {
+        let r = run(m, &format!(r#"{{"listCollections":1,"filter":{{"name":"{name}"}}}}"#));
+        let Value::Document(o) = field(&batch(&r)[0], "options").clone() else { panic!("{r:?}") };
+        o
+    };
+    run(&mut m, r#"{"create":"a","timeseries":{"timeField":"t"},"expireAfterSeconds":60}"#);
+    let o = options(&mut m, "a");
+    assert_eq!(
+        o.iter().map(|(k, _)| k).collect::<Vec<_>>(),
+        vec!["expireAfterSeconds", "timeseries"]
+    );
+    assert_eq!(o.get("expireAfterSeconds"), Some(&Value::Int64(60)));
+    run(&mut m, r#"{"collMod":"a","expireAfterSeconds":"off"}"#);
+    let o = options(&mut m, "a");
+    assert_eq!(o.iter().map(|(k, _)| k).collect::<Vec<_>>(), vec!["timeseries"]);
+    run(&mut m, r#"{"collMod":"a","expireAfterSeconds":7}"#);
+    run(&mut m, r#"{"collMod":"a","timeseries":{"granularity":"minutes"}}"#);
+    let o = options(&mut m, "a");
+    assert_eq!(
+        o.iter().map(|(k, _)| k).collect::<Vec<_>>(),
+        vec!["expireAfterSeconds", "timeseries"]
+    );
+    assert_eq!(o.get("expireAfterSeconds"), Some(&Value::Int64(7)));
+}
+
+/// Conditions on the meta value and the time inside `$and`, also repeated at the top level, pick
+/// the buckets through their index (015 T021).
+#[test]
+fn conditions_inside_and_reach_the_bucket_index() {
+    let mut m = Mem::new();
+    series(&mut m);
+    run(
+        &mut m,
+        &format!(
+            r#"{{"insert":"ts","documents":[{{"t":{},"m":1,"v":1}},{{"t":{},"m":2,"v":2}},{{"t":{},"m":1,"v":3}}]}}"#,
+            date(T0),
+            date(T0),
+            date(T0 + 3_600_000)
+        ),
+    );
+    let r = run(
+        &mut m,
+        &format!(
+            r#"{{"find":"ts","filter":{{"$and":[{{"m":1}},{{"t":{{"$gte":{}}}}}]}},"sort":{{"v":1}}}}"#,
+            date(T0 + 1000)
+        ),
+    );
+    assert_eq!(values(&r), vec![Value::Int32(3)]);
+    let r = run(
+        &mut m,
+        r#"{"find":"ts","filter":{"m":1,"$and":[{"m":1},{"v":{"$gt":0}}]},"sort":{"v":1}}"#,
+    );
+    assert_eq!(values(&r), vec![Value::Int32(1), Value::Int32(3)]);
+}
+
+/// A window with more buckets than one scan reads (each change of a field's type opens a bucket)
+/// still takes its next measurement after reading them all (015 T021).
+#[test]
+fn a_window_of_many_buckets_is_read_in_chunks() {
+    let mut m = Mem::new();
+    series(&mut m);
+    let docs: Vec<String> = (0..1001)
+        .map(|i| {
+            let x = if i % 2 == 0 { "1".to_owned() } else { r#""a""#.to_owned() };
+            format!(r#"{{"t":{},"m":1,"x":{x}}}"#, date(T0 + i))
+        })
+        .collect();
+    let r = run(&mut m, &format!(r#"{{"insert":"ts","documents":[{}]}}"#, docs.join(",")));
+    assert_eq!(field(&r, "n"), &Value::Int32(1001), "{r:?}");
+    let r = run(
+        &mut m,
+        &format!(r#"{{"insert":"ts","documents":[{{"t":{},"m":1,"x":2}}]}}"#, date(T0 + 2000)),
+    );
+    assert_eq!(field(&r, "n"), &Value::Int32(1), "{r:?}");
+    let r = run(&mut m, r#"{"count":"ts","query":{"m":1}}"#);
+    assert_eq!(field(&r, "n"), &Value::Int32(1002), "{r:?}");
+}
+
+/// Without the index on the meta value, an insert that looks up a bucket notes no index access and
+/// still lands in its window (015 T021).
+#[test]
+fn a_lookup_without_the_meta_index() {
+    let mut m = Mem::new();
+    series(&mut m);
+    run(&mut m, r#"{"createIndexes":"ts","indexes":[{"key":{"v":1},"name":"v_1"}]}"#);
+    let r = run(&mut m, r#"{"dropIndexes":"ts","index":"m_1_t_1"}"#);
+    assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+    for (t, v) in [(T0 + 10_000, 1), (T0, 2), (T0 + 5_000, 3)] {
+        let cmd = format!(r#"{{"insert":"ts","documents":[{{"t":{},"m":1,"v":{v}}}]}}"#, date(t));
+        run(&mut m, &cmd);
+    }
+    let r = run(&mut m, r#"{"find":"ts","sort":{"t":1}}"#);
+    assert_eq!(values(&r), vec![Value::Int32(2), Value::Int32(3), Value::Int32(1)]);
+}

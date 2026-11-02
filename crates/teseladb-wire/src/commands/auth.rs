@@ -125,6 +125,9 @@ pub struct AuthState {
     pub audit_uuid: Option<[u8; 16]>,
     /// `authenticationMechanisms`; empty, RefDb's default.
     pub mechanisms: Vec<SaslMechanism>,
+    /// The URI of the protected resource the connection serves (`/mcp`): an OIDC access token
+    /// must be issued for it (RFC 8707, 019 FR-027) instead of the provider's `audience`.
+    pub oidc_resource: Option<String>,
     /// The client certificate is a member's: issued by the cluster's CA with the organization,
     /// unit and domain components of the node's certificate (013 FR-034).
     pub peer_member: bool,
@@ -634,10 +637,11 @@ fn oidc_login<B: Backend + ?Sized>(
     let providers = backend.oidc_providers();
     let now = i64::try_from(backend.now_ms() / 1000).unwrap_or(i64::MAX);
     let keys = backend.oidc_keys(&token.issuer, false).map_err(|_| failed())?;
-    let identity = match token.verify(&providers, &keys, now) {
+    let resource = state.oidc_resource.as_deref();
+    let identity = match token.verify_for(&providers, &keys, now, resource) {
         Err(e) if e.0.starts_with("Unknown JWT keyId") => {
             let keys = backend.oidc_keys(&token.issuer, true).map_err(|_| failed())?;
-            token.verify(&providers, &keys, now)
+            token.verify_for(&providers, &keys, now, resource)
         }
         other => other,
     }

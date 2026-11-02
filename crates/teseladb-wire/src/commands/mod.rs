@@ -20,15 +20,19 @@ pub mod auth;
 pub mod authorize;
 pub mod authz_collections;
 pub mod authz_writes;
+pub mod balancing;
 pub mod capped;
 pub mod catalog;
 pub mod change_stream;
 pub mod change_stream_ddl;
+pub mod chunks;
 pub mod cluster_admin;
+pub mod coll_mod_kinds;
 pub mod config_db;
 pub mod config_settings;
 pub mod cross_range;
 pub mod crud;
+pub mod cursor_spill;
 pub mod diagnostic_data;
 pub mod diagnostics;
 pub mod engines;
@@ -57,6 +61,7 @@ pub mod parameters;
 pub mod partial_filter;
 pub(crate) mod plan_cache;
 pub(crate) mod plan_exec;
+pub mod primaries;
 pub mod profile;
 pub mod query;
 pub mod query_settings;
@@ -65,11 +70,13 @@ pub mod query_stats;
 pub mod registry;
 pub mod reshard;
 pub mod roles;
+pub mod router_info;
 pub mod search_indexes;
 pub mod search_ops;
 pub mod server_params;
 pub mod session;
 pub mod sharding;
+pub mod shards;
 pub mod sort;
 pub mod status;
 pub mod tenants;
@@ -77,6 +84,7 @@ pub mod text_search;
 pub mod timeseries;
 pub mod timeseries_catalog;
 pub mod timeseries_filter;
+pub mod timeseries_range;
 pub mod ttl;
 pub mod txn;
 pub mod txn_concern;
@@ -309,6 +317,21 @@ pub trait Backend {
     ) -> Result<Vec<RangeBatch>, CommandError> {
         let (rows, resolved) = self.changes(start, end, from)?;
         Ok(vec![RangeBatch { start: start.to_vec(), end: end.to_vec(), rows, resolved }])
+    }
+    /// The ranges as this node's router knows them (018 FR-004, FR-006); none by default.
+    fn route_entries(&mut self) -> Result<Vec<teseladb_router::table::RouteEntry>, CommandError> {
+        Ok(Vec::new())
+    }
+    /// Sends Group 0 an order on a range (`SplitRange`, `MergeRanges`, `SetReplicas`,
+    /// `SetLeaderHint`) for the chunk commands (018 FR-004).
+    fn range_order(
+        &mut self,
+        _cmd: teseladb_meta::command::Group0Command,
+    ) -> Result<(), CommandError> {
+        Err(CommandError::new(
+            crate::error::ILLEGAL_OPERATION,
+            "this node cannot change the ranges",
+        ))
     }
     /// Reads at most `limit` documents of `[start, end)` in key order: `(key, document)`.
     fn scan(
@@ -786,6 +809,9 @@ pub struct Spill {
     /// The memory of a stage when the node's part for aggregations (D-105) is less than
     /// RefDb's 100 MiB.
     pub stage_bytes: Option<usize>,
+    /// The bytes the open cursors' computed results may hold in memory: the node's part for
+    /// cursors (012 FR-013, D-105); `None`: no limit.
+    pub cursor_bytes: Option<usize>,
 }
 
 impl Spill {
@@ -830,7 +856,7 @@ impl<B: Backend + ?Sized> Ctx<'_, B> {
 }
 
 /// The commands of this module.
-const NAMES: [&str; 85] = [
+const NAMES: [&str; 110] = [
     fle::COMPACT,
     fle::CLEANUP,
     aggregate::AGGREGATE,
@@ -864,6 +890,31 @@ const NAMES: [&str; 85] = [
     zones::ADD_SHARD_TO_ZONE,
     zones::REMOVE_SHARD_FROM_ZONE,
     zones::UPDATE_ZONE_KEY_RANGE,
+    balancing::LIST_SHARDS,
+    balancing::BALANCER_START,
+    balancing::BALANCER_STOP,
+    balancing::BALANCER_STATUS,
+    balancing::CONFIGURE_COLLECTION_BALANCING,
+    balancing::BALANCER_COLLECTION_STATUS,
+    chunks::SPLIT,
+    chunks::SPLIT_VECTOR,
+    chunks::MOVE_CHUNK,
+    chunks::MOVE_RANGE,
+    chunks::MERGE_CHUNKS,
+    chunks::CLEAR_JUMBO_FLAG,
+    primaries::MOVE_PRIMARY,
+    shards::ADD_SHARD,
+    shards::REMOVE_SHARD,
+    shards::START_SHARD_DRAINING,
+    shards::STOP_SHARD_DRAINING,
+    shards::SHARD_DRAINING_STATUS,
+    shards::COMMIT_SHARD_REMOVAL,
+    router_info::GET_SHARD_MAP,
+    router_info::GET_SHARD_VERSION,
+    router_info::FLUSH_ROUTER_CONFIG,
+    router_info::CHECK_METADATA_CONSISTENCY,
+    router_info::APPEND_OPLOG_NOTE,
+    router_info::TRANSITION_TO_DEDICATED_CONFIG_SERVER,
     mapreduce::MAP_REDUCE,
     crud::INSERT,
     crud::UPDATE,
@@ -1244,6 +1295,33 @@ fn dispatch<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
         zones::ADD_SHARD_TO_ZONE => zones::add_shard_to_zone(ctx),
         zones::REMOVE_SHARD_FROM_ZONE => zones::remove_shard_from_zone(ctx),
         zones::UPDATE_ZONE_KEY_RANGE => zones::update_zone_key_range(ctx),
+        balancing::LIST_SHARDS => balancing::list_shards(ctx),
+        balancing::BALANCER_START => balancing::balancer_start(ctx),
+        balancing::BALANCER_STOP => balancing::balancer_stop(ctx),
+        balancing::BALANCER_STATUS => balancing::balancer_status(ctx),
+        balancing::CONFIGURE_COLLECTION_BALANCING => balancing::configure_collection_balancing(ctx),
+        balancing::BALANCER_COLLECTION_STATUS => balancing::balancer_collection_status(ctx),
+        chunks::SPLIT => chunks::split(ctx),
+        chunks::SPLIT_VECTOR => chunks::split_vector(ctx),
+        chunks::MOVE_CHUNK => chunks::move_chunk(ctx),
+        chunks::MOVE_RANGE => chunks::move_range(ctx),
+        chunks::MERGE_CHUNKS => chunks::merge_chunks(ctx),
+        chunks::CLEAR_JUMBO_FLAG => chunks::clear_jumbo_flag(ctx),
+        primaries::MOVE_PRIMARY => primaries::move_primary(ctx),
+        shards::ADD_SHARD => shards::add_shard(ctx),
+        shards::REMOVE_SHARD => shards::remove_shard(ctx),
+        shards::START_SHARD_DRAINING => shards::start_shard_draining(ctx),
+        shards::STOP_SHARD_DRAINING => shards::stop_shard_draining(ctx),
+        shards::SHARD_DRAINING_STATUS => shards::shard_draining_status(ctx),
+        shards::COMMIT_SHARD_REMOVAL => shards::commit_shard_removal(ctx),
+        router_info::GET_SHARD_MAP => router_info::get_shard_map(ctx),
+        router_info::GET_SHARD_VERSION => router_info::get_shard_version(ctx),
+        router_info::FLUSH_ROUTER_CONFIG => router_info::flush_router_config(ctx),
+        router_info::CHECK_METADATA_CONSISTENCY => router_info::check_metadata_consistency(ctx),
+        router_info::APPEND_OPLOG_NOTE => router_info::append_oplog_note(ctx),
+        router_info::TRANSITION_TO_DEDICATED_CONFIG_SERVER => {
+            router_info::transition_to_dedicated_config_server(ctx)
+        }
         mapreduce::MAP_REDUCE => mapreduce::map_reduce(ctx),
         crud::INSERT => crud::insert(ctx),
         crud::UPDATE => crud::update(ctx),
