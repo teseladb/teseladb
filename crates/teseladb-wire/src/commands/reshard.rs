@@ -7,8 +7,12 @@
 //! - Apply: the writes the collection took after that mark, read from its history as a change
 //!   stream reads them, are applied to the copy (the double write).
 //! - Critical section: the collection's options take [`CUTOVER`], so writes wait
-//!   ([`writable`]); once the copy holds every write up to a mark after it, a rename with
-//!   `dropTarget` puts the copy in the collection's place in one Group 0 entry.
+//!   ([`writable`]), and every range of the collection's keys takes a write fence
+//!   (`Reshard.tla`'s `blockedW`): a write that read the collection before and reaches a range
+//!   after its fence is refused with `StaleConfig`, and its statement goes again. Once the copy
+//!   holds every write up to the fence's mark, and up to a second fence's mark that covers the
+//!   transactions decided before the first one, a rename with `dropTarget` puts the copy in the
+//!   collection's place in one Group 0 entry. The fence stays on the dropped collection's keys.
 //! - `abortReshardCollection` (or `killOp`) before the rename drops the copy and lifts the
 //!   critical section; the command fails with 341.
 //!
@@ -19,6 +23,7 @@ use std::collections::BTreeSet;
 
 use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_hlc::Hlc;
+use teseladb_keys::KeyBuilder;
 use teseladb_meta::catalog::{CatalogCommand, CollectionEntry, Namespace};
 use teseladb_meta::indexes::{IndexCommand, IndexState};
 use teseladb_range::push::TxnView;
@@ -32,7 +37,7 @@ use super::{Backend, Ctx, Shared, display, lock, uuid_text};
 use crate::error::{
     BAD_VALUE, CommandError, INTERNAL_ERROR, INVALID_NAMESPACE, INVALID_OPTIONS,
     MAX_TIME_MS_EXPIRED, NAMESPACE_NOT_FOUND, NAMESPACE_NOT_SHARDED, NO_SUCH_RESHARD_COLLECTION,
-    RESHARD_CARDINALITY, RESHARD_COLLECTION_ABORTED, SAMPLE_SIZE,
+    RESHARD_CARDINALITY, RESHARD_COLLECTION_ABORTED, SAMPLE_SIZE, STALE_CONFIG,
 };
 use crate::ops::{Op, op_type};
 use crate::types::wrong_type;
@@ -143,6 +148,8 @@ pub struct Resharding {
     mark: Hlc,
     target: Hlc,
     phase: Phase,
+    /// The second fence's mark was taken: no write of the collection can come after it.
+    settled: bool,
     op: u32,
     to_copy: i64,
     copied: i64,
@@ -301,6 +308,21 @@ pub fn writable<B: Backend + ?Sized>(
         if !backend.pause() {
             return Err(CommandError::new(MAX_TIME_MS_EXPIRED, crate::ops::TIME_LIMIT_MESSAGE));
         }
+    }
+}
+
+/// Whether a write failed because a resharding's fence refused it (018 FR-002): nothing of it
+/// was written.
+pub fn fenced(e: &CommandError) -> bool {
+    e.code == STALE_CONFIG
+}
+
+/// Waits before a write a fence refused goes again: its critical section ends, or the
+/// operation's time does.
+pub fn after_fence<B: Backend + ?Sized>(backend: &mut B) -> Result<(), CommandError> {
+    match backend.pause() {
+        true => Ok(()),
+        false => Err(CommandError::new(MAX_TIME_MS_EXPIRED, crate::ops::TIME_LIMIT_MESSAGE)),
     }
 }
 
@@ -527,6 +549,7 @@ impl Resharding {
             mark,
             target: mark,
             phase: Phase::Clone,
+            settled: false,
             op,
             to_copy,
             copied: 0,
@@ -690,21 +713,29 @@ impl Resharding {
         let mut options = Document::from(RawDoc::from_bytes(&self.old.options)?);
         options.insert(CUTOVER, self.plan.description.clone());
         self.modify_old(backend, options, true)?;
-        self.target = backend.read_versions(&[])?.0;
         self.phase = Phase::Critical;
+        self.target = self.fence(backend, true)?;
         self.report(shared);
         Ok(())
     }
 
-    /// The rename of the copy over the collection, in one Group 0 entry. A write that found the
-    /// collection before its critical section may commit after the last read of its history:
-    /// the next catch-up, now on the collection, takes what came up to the rename.
+    /// The rename of the copy over the collection, in one Group 0 entry. The copy holds every
+    /// write up to the fence's mark, so no intent laid before the fence is pending; their
+    /// transactions may have committed above that mark, so a second fence, past their
+    /// resolutions, gives the mark the copy reaches first.
     fn rename<B: Backend + ?Sized>(
         &mut self,
         backend: &mut B,
         shared: &Shared,
     ) -> Result<(), CommandError> {
         self.check_killed(shared)?;
+        if !self.settled {
+            self.settled = true;
+            self.target = self.target.max(self.fence(backend, true)?);
+            if self.mark < self.target {
+                return Ok(());
+            }
+        }
         backend.catalog_write(CatalogCommand::Rename {
             from: self.temp_ns.clone(),
             to: self.plan.ns.clone(),
@@ -726,6 +757,7 @@ impl Resharding {
             let mut options = Document::from(RawDoc::from_bytes(&self.old.options)?);
             options.remove(CUTOVER);
             self.modify_old(backend, options, false)?;
+            self.fence(backend, false)?;
         }
         self.phase = Phase::Aborted;
         Ok(())
@@ -751,6 +783,19 @@ impl Resharding {
             .collection(&self.plan.ns)?
             .ok_or_else(|| CommandError::new(NAMESPACE_NOT_FOUND, "no collection"))?;
         Ok(())
+    }
+
+    /// Raises or lifts the write fence of the collection's keys (documents and indexes); the
+    /// mark of the fence.
+    fn fence<B: Backend + ?Sized>(&self, backend: &mut B, on: bool) -> Result<Hlc, CommandError> {
+        // Faulty variant (018 T005): the ranges take the writes of the critical section.
+        if cfg!(teseladb_bug = "reshard_without_fence") {
+            return Ok(backend.read_versions(&[])?.0);
+        }
+        let (tenant, id) = (self.old.tenant, self.old.id);
+        let start = KeyBuilder::collection_start(tenant, id);
+        let end = KeyBuilder::collection_end(tenant, id);
+        backend.fence(start.as_bytes(), end.as_bytes(), on)
     }
 
     fn check_killed(&self, shared: &Shared) -> Result<(), CommandError> {

@@ -49,9 +49,10 @@ pub(super) fn reply_of(r: RemoteReply) -> Result<Reply, RangeError> {
             Ok(Reply::Batch(rows.into_iter().map(|(k, v)| (k, (0, v))).collect()))
         }
         // A backup's, a restore's or a change stream's answer is never one of a transaction's.
-        RemoteReply::Piece { .. } | RemoteReply::Restored { .. } | RemoteReply::Changes { .. } => {
-            Err(RangeError::Unavailable)
-        }
+        RemoteReply::Piece { .. }
+        | RemoteReply::Restored { .. }
+        | RemoteReply::Changes { .. }
+        | RemoteReply::Fenced { .. } => Err(RangeError::Unavailable),
     }
 }
 

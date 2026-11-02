@@ -36,6 +36,7 @@ use crate::tscache::TsCache;
 
 mod closed;
 mod feed;
+mod fence;
 mod merge;
 mod purge;
 mod split;
@@ -43,6 +44,7 @@ mod txn;
 mod write;
 
 pub use feed::{ChangesReq, FEED_WINDOW_MS, STREAM_HOLD};
+pub use fence::FenceOutcome;
 pub use merge::MergeSource;
 pub use split::SplitDone;
 pub use txn::{CONTINUES, FIND_BATCH, TxnOp, TxnReq, continues, last_activity};
@@ -141,6 +143,9 @@ pub enum RangeError {
     },
     /// The transaction's record is aborted, or never began: RefDb's `NoSuchTransaction` (251).
     NoSuchTransaction,
+    /// A write fence holds a key of the write (018 FR-002): a resharding is in its critical
+    /// section, and nothing was written. The caller reads the catalog again and retries.
+    Fenced,
 }
 
 /// A write: its range, the documents it changes, the mutation, its idempotence record and its
@@ -225,6 +230,12 @@ pub enum Reply {
         /// The mark of the oldest pending intent.
         oldest_intent: Option<Hlc>,
     },
+    /// A `Fence` applied at mark `ts` (018): every write of the span the range took before it
+    /// is at or below it.
+    Fenced {
+        /// Mark of the entry.
+        ts: Hlc,
+    },
 }
 
 pub(crate) struct Leader {
@@ -258,6 +269,8 @@ pub(crate) struct Leader {
     /// The highest mark it closed, with the last index of its log then: a mark closed with the
     /// longer lag never goes below it, and the range reads at it once it applied that index.
     pub(crate) last_closed: (Hlc, u64),
+    /// The spans of the fences it proposed and the range has not applied yet (018).
+    pub(crate) fencing: Vec<crate::fence::Span>,
 }
 
 impl Leader {
@@ -465,6 +478,7 @@ pub(crate) enum Req {
     Changes(feed::FeedReq),
     Purge(PurgeReq),
     Round(RoundReq),
+    Fence(fence::FenceReq),
 }
 
 /// The ranges of a core.
@@ -643,6 +657,10 @@ impl RangeHost {
                 Req::Purge(PurgeReq { g: rg, .. }) | Req::Round(RoundReq { g: rg, .. }) => {
                     (*rg == g).then_some((*id, None))
                 }
+                // A `Fence` may still be applied; asking again changes nothing.
+                Req::Fence(fence::FenceReq { g: rg, .. }) => {
+                    (*rg == g).then_some((*id, Some(RangeError::Unavailable)))
+                }
             })
             .collect();
         for (id, answer) in gone {
@@ -699,7 +717,12 @@ impl RangeHost {
     pub fn proposed(&self, id: ReqId) -> Option<(Hlc, u64)> {
         match self.reqs.get(&id)? {
             Req::Mut(MutReq { term, state: MutState::Proposed(p), .. }) => Some((p.ts, *term)),
-            Req::Mut(_) | Req::Get(_) | Req::Changes(_) | Req::Purge(_) | Req::Round(_) => None,
+            Req::Mut(_)
+            | Req::Get(_)
+            | Req::Changes(_)
+            | Req::Purge(_)
+            | Req::Round(_)
+            | Req::Fence(_) => None,
         }
     }
 
@@ -966,7 +989,10 @@ impl RangeHost {
         core: &mut MultiRaftCore<S>,
         op: OpId,
         r: Result<Done<S::Output>, OpError>,
-    ) -> bool {
+    ) -> bool
+    where
+        S::Output: FenceOutcome,
+    {
         let Some(id) = self.ops.remove(&op) else { return false };
         // Requests with an operation in the core stay until it ends.
         let req = self.reqs.remove(&id).expect("an operation's request waits for it");
@@ -974,9 +1000,13 @@ impl RangeHost {
             Req::Mut(MutReq { state: MutState::Confirm(e), .. }) => {
                 self.reply(id, Err(r.map_or_else(op_error, |_| e)));
             }
-            Req::Mut(m) => self.mutation_done(core, id, m, r.map(|_| ())),
+            Req::Mut(m) => {
+                let r = r.map(|d| matches!(&d, Done::Applied(o) if fence::refused(o)));
+                self.mutation_done(core, id, m, r)
+            }
             Req::Purge(p) => self.purge_done(p, r.map(|_| ())),
             Req::Round(p) => self.round_done(p),
+            Req::Fence(f) => self.fence_done(id, f, r),
             // A stream's read has no operation in the core.
             Req::Changes(f) => self.reply(id, Err(RangeError::NotLeader { hint: f.hint })),
             Req::Get(mut q) => match r {
@@ -1076,6 +1106,7 @@ impl RangeHost {
             log_close_at: Nanos::ZERO,
             streams_until: Nanos::ZERO,
             last_closed: (ZERO, 0),
+            fencing: Vec::new(),
         });
         let lost: Vec<ReqId> = self
             .reqs
@@ -1088,7 +1119,7 @@ impl RangeHost {
                     ..
                 })
                 | Req::Changes(feed::FeedReq { g: rg, .. }) => *rg == g,
-                Req::Mut(_) | Req::Get(_) | Req::Purge(_) | Req::Round(_) => false,
+                Req::Mut(_) | Req::Get(_) | Req::Purge(_) | Req::Round(_) | Req::Fence(_) => false,
             })
             .map(|(id, _)| *id)
             .collect();
@@ -1112,7 +1143,7 @@ impl RangeHost {
             Req::Get(q) => self.step_get(core, id, q),
             Req::Changes(f) => self.step_changes(id, f),
             // The core answers for them.
-            r @ (Req::Purge(_) | Req::Round(_)) => {
+            r @ (Req::Purge(_) | Req::Round(_) | Req::Fence(_)) => {
                 self.reqs.insert(id, r);
                 false
             }

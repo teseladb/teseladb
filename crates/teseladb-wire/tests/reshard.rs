@@ -471,7 +471,6 @@ fn a_write_that_found_the_collection_before_the_cutover_is_not_lost() {
     let old = m.collection(&ns).expect("read").expect("the collection");
     let rules =
         rules_of(&ns, &old, true, None, index_rules(&mut m, &old).expect("rules")).expect("rules");
-    r.enter_critical(&mut m, &shared).expect("critical");
     m.now += 5;
     let d = json(r#"{"_id":7,"a":7,"b":7}"#);
     let key = document_key(&old, &json(r#"{"a":1}"#), &d).expect("a key");
@@ -479,12 +478,81 @@ fn a_write_that_found_the_collection_before_the_cutover_is_not_lost() {
     Writer::internal()
         .write(&mut m, &Bound { mutation: insert, keys: vec![key] }, 0)
         .expect("written");
+    // It reached its range before the fence: the critical section's catch-up takes it.
+    r.enter_critical(&mut m, &shared).expect("critical");
     m.now += 5;
     r.drive(&mut m, &shared).expect("committed");
     r.finish(&shared);
     m.shared = shared;
     let ids: Vec<Value> = find_all(&mut m).iter().map(|d| d.get("_id").cloned().unwrap()).collect();
     assert_eq!(ids, [Value::Int32(0), Value::Int32(1), Value::Int32(7)]);
+}
+
+/// 018 T005, the race the fence closes: a write that read the collection before the critical
+/// section and reaches its range after the last read of the history (here, after the rename) is
+/// refused with `StaleConfig` instead of landing in the dropped collection.
+#[test]
+fn a_write_that_reaches_the_range_after_the_last_catch_up_is_refused() {
+    use teseladb_meta::catalog::Namespace;
+    use teseladb_wire::commands::Backend;
+    use teseladb_wire::commands::crud::{Writer, index_rules, rules_of};
+    use teseladb_wire::commands::mutation::{Bound, DocMutation};
+    use teseladb_wire::commands::sharding::document_key;
+    let mut m = sharded(&docs(2));
+    let ns = Namespace { db: DB.to_owned(), coll: "c".to_owned() };
+    let (mut r, shared) =
+        started(&mut m, r#"{"reshardCollection":"rs.c","key":{"b":1},"numInitialChunks":1}"#);
+    r.copy(&mut m, &shared).expect("copied");
+    let old = m.collection(&ns).expect("read").expect("the collection");
+    let rules =
+        rules_of(&ns, &old, true, None, index_rules(&mut m, &old).expect("rules")).expect("rules");
+    m.now += 5;
+    r.drive(&mut m, &shared).expect("committed");
+    r.finish(&shared);
+    m.shared = shared;
+    m.now += 5;
+    let d = json(r#"{"_id":7,"a":7,"b":7}"#);
+    let key = document_key(&old, &json(r#"{"a":1}"#), &d).expect("a key");
+    let insert = DocMutation::Insert { docs: vec![d], ordered: true, rules };
+    let e = Writer::internal()
+        .write(&mut m, &Bound { mutation: insert, keys: vec![key] }, 0)
+        .expect_err("the fence refuses it");
+    assert_eq!(e.code.code, 13388, "{e:?}");
+    // The statement sent again finds the new collection.
+    ok(&run(&mut m, r#"{"insert":"c","documents":[{"_id":7,"a":7,"b":7}]}"#));
+    let ids: Vec<Value> = find_all(&mut m).iter().map(|d| d.get("_id").cloned().unwrap()).collect();
+    assert_eq!(ids, [Value::Int32(0), Value::Int32(1), Value::Int32(7)]);
+}
+
+/// Every key of the data space fenced, as a critical section that ends at the next pause
+/// (`lift`) or outlasts the operation.
+fn fence_all(m: &mut Mem, lift: bool) {
+    m.fences = vec![(vec![0], vec![0xff; 16])];
+    m.lift_on_pause = lift;
+}
+
+#[test]
+fn statements_a_fence_refused_go_again_after_it() {
+    let mut m = sharded(&docs(3));
+    fence_all(&mut m, true);
+    ok(&run(&mut m, r#"{"insert":"c","documents":[{"_id":9,"a":9}]}"#));
+    fence_all(&mut m, true);
+    ok(&run(&mut m, r#"{"update":"c","updates":[{"q":{"_id":1},"u":{"$set":{"z":1}}}]}"#));
+    fence_all(&mut m, true);
+    ok(&run(&mut m, r#"{"delete":"c","deletes":[{"q":{"_id":2},"limit":1}]}"#));
+    let got = find_all(&mut m);
+    assert_eq!(got.len(), 3, "{got:?}");
+    assert_eq!(got[1].get("z"), Some(&Value::Int32(1)));
+    // A fence that outlasts the operation: its time runs out.
+    fence_all(&mut m, false);
+    let w = run(&mut m, r#"{"insert":"c","documents":[{"_id":10,"a":10}]}"#);
+    assert_eq!(batch(&w, "writeErrors")[0].get("code"), Some(&Value::Int32(50)), "{w:?}");
+    let u = run(&mut m, r#"{"update":"c","updates":[{"q":{"_id":1},"u":{"$set":{"z":2}}}]}"#);
+    assert_eq!(batch(&u, "writeErrors")[0].get("code"), Some(&Value::Int32(50)), "{u:?}");
+    // A `multi` statement may have changed documents before the fence: it is not repeated.
+    fence_all(&mut m, true);
+    let u = run(&mut m, r#"{"update":"c","updates":[{"q":{},"u":{"$inc":{"n":1}},"multi":true}]}"#);
+    assert_eq!(batch(&u, "writeErrors")[0].get("code"), Some(&Value::Int32(13388)), "{u:?}");
 }
 
 #[test]

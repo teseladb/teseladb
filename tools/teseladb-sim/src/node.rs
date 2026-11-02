@@ -276,4 +276,27 @@ impl RangeState for NodeSm {
             NodeSm::Group0(_) | NodeSm::Kv(_) | NodeSm::Registered(_) => false,
         }
     }
+
+    fn fenced(&self, key: &[u8]) -> bool {
+        match self {
+            NodeSm::Range(sm) => sm.fenced(key),
+            NodeSm::Group0(_) | NodeSm::Kv(_) | NodeSm::Registered(_) => false,
+        }
+    }
+
+    fn closed_mark(&self) -> Option<(Hlc, u64)> {
+        match self {
+            NodeSm::Range(sm) => sm.closed_mark(),
+            NodeSm::Group0(_) | NodeSm::Kv(_) | NodeSm::Registered(_) => None,
+        }
+    }
+}
+
+impl teseladb_range::host::FenceOutcome for NodeOutput {
+    fn range_output(&self) -> Option<&RangeOutput> {
+        match self {
+            NodeOutput::Range(o) => Some(o),
+            NodeOutput::Group0(_) | NodeOutput::Kv(_) | NodeOutput::Bytes(_) => None,
+        }
+    }
 }

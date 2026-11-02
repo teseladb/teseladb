@@ -21,7 +21,7 @@ use std::io;
 use std::net::{SocketAddr, TcpListener};
 use std::path::Path;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use teseladb_auth::clustertime::KeySealer;
@@ -51,6 +51,7 @@ use teseladb_types::{GroupId, NodeId};
 use teseladb_wire::commands::{NodeSessions, Shared};
 
 use crate::admin::{NodeAdmin, answer};
+use crate::admin_http::{AdminListener, Handler};
 use crate::backend::NodeHandle;
 use crate::catalog_ops::{CatalogAnswer, CatalogReq};
 use crate::client_listener::{ClientConfig, ClientListener, NodeClockState, NodePresence};
@@ -61,7 +62,6 @@ use crate::enroll::{Enroller, SECRET_LEN, Token};
 use crate::hosting::Hosting;
 use crate::liveness::SharedLoads;
 use crate::logic::{Group0View, NodeLogic, NodeMsg};
-use crate::metrics_http::{AdminListener, Handler};
 use crate::ranges::SPLIT_BYTES;
 use crate::routes::SharedRoutes;
 use crate::transfer::{Transfers, transfer_dir};
@@ -205,8 +205,10 @@ pub struct NodeConfig {
     /// Where the administration port listens (`--admin-listen`, 007 FR-020); `None`: the node
     /// does not open it.
     pub admin_listen: Option<SocketAddr>,
+    /// The HTTP port of the REST API and MCP (019 FR-002); `None`: the node does not open it.
+    pub http: Option<crate::http_listener::HttpPortConfig>,
     /// TLS on the administration port, on a node with a PKI (013 FR-017).
-    pub admin_tls: Option<crate::metrics_http::AdminTls>,
+    pub admin_tls: Option<crate::admin_http::AdminTls>,
     /// The data directory, whose disk space the heartbeats carry (007 FR-010); `None`: unknown.
     pub data_dir: Option<std::path::PathBuf>,
     /// The node's tags (`--tags`), sorted by name (007 FR-013).
@@ -241,6 +243,7 @@ impl Default for NodeConfig {
             peer_tls: None,
             enroller: None,
             admin_listen: None,
+            http: None,
             admin_tls: None,
             data_dir: None,
             tags: Vec::new(),
@@ -343,6 +346,31 @@ fn random_u64() -> u64 {
     h.finish()
 }
 
+/// Answers the HTTP requests other nodes forward to this node's port (019 FR-008), each on its
+/// own thread, and hands each answer to core 0. The thread ends when core 0 drops its sender.
+fn spawn_http_forwards(
+    forwards: mpsc::Receiver<(NodeId, u64, Vec<u8>)>,
+    service: Arc<crate::http_service::NodeHttp>,
+    backend: crate::backend::ServerBackend,
+) {
+    let backend = Arc::new(Mutex::new(backend));
+    let run = move || {
+        for (from, req, body) in forwards {
+            let (service, backend) = (service.clone(), backend.clone());
+            let answer = move || {
+                let answer = service.answer_forwarded(&body);
+                backend
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .answer_http(from, req, answer);
+            };
+            // Without a thread the request goes unanswered and its sender's forward times out.
+            let _ = thread::Builder::new().name("http-forwarded".into()).spawn(answer);
+        }
+    };
+    let _ = thread::Builder::new().name("http-forwards".into()).spawn(run);
+}
+
 fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
@@ -408,6 +436,8 @@ struct CoreSpec {
     loads: Arc<SharedLoads>,
     /// Where core 0 tells the clients' port the node's state in Group 0 (007 FR-015).
     presence: Option<Arc<NodePresence>>,
+    /// Where core 0 hands the HTTP requests other nodes forward (019 FR-008).
+    http_forwards: Option<crate::logic::HttpForwards>,
     /// Which cores of the node hold each range (007 FR-011).
     hosting: Hosting,
 }
@@ -482,6 +512,9 @@ fn build_core<D: Disk>(spec: &CoreSpec, disk: &mut D) -> Result<NodeLogic, NodeE
     if let Some(p) = &spec.presence {
         logic = logic.with_presence(p.clone());
     }
+    if let Some(h) = &spec.http_forwards {
+        logic = logic.with_http_forwards(h.clone());
+    }
     Ok(logic)
 }
 
@@ -527,6 +560,7 @@ pub struct Node<D> {
     client: Option<ClientListener>,
     /// The administration port (007 FR-020).
     admin: Option<AdminListener>,
+    http: Option<crate::http_listener::HttpListener>,
     clock: ClockKeeper,
     routes: SharedRoutes,
     /// Issues enrollment tokens, on a node with a PKI.
@@ -769,6 +803,9 @@ impl<D: Disk + Send + 'static> Node<D> {
             cfg.clustertime_sealer.as_ref().map(|s| (s.clone(), Arc::new(KeySlot::default())));
         let loads = Arc::new(SharedLoads::new(usize::from(cores), cfg.data_dir.clone()));
         let presence = Arc::new(NodePresence::default());
+        // The HTTP requests other nodes forward to this node's port; without a port, the
+        // receiver drops and core 0 answers them empty.
+        let (http_forwards_tx, http_forwards_rx) = mpsc::channel();
         let mut senders = Vec::new();
         let mut threads = Vec::new();
         for k in 0..cores {
@@ -807,6 +844,7 @@ impl<D: Disk + Send + 'static> Node<D> {
                 peer_tls: cfg.peer_tls.clone(),
                 loads: loads.clone(),
                 presence: (k == 0).then(|| presence.clone()),
+                http_forwards: (k == 0).then(|| http_forwards_tx.clone()),
                 hosting: hosting.clone(),
             };
             let (tx, rx) = mpsc::channel();
@@ -891,6 +929,10 @@ impl<D: Disk + Send + 'static> Node<D> {
                 }
             }
         };
+        // The HTTP port counts its requests where `/metrics` of the administration port reads
+        // them (019 FR-030).
+        let http_metrics =
+            Arc::new(std::sync::Mutex::new(teseladb_http::metrics::HttpMetrics::default()));
         let admin = match cfg.admin_listen {
             None => None,
             Some(at) => {
@@ -907,11 +949,51 @@ impl<D: Disk + Send + 'static> Node<D> {
                     enroller: cfg.enroller.clone(),
                     certificates: cfg.client.as_ref().and_then(|c| c.certificates.clone()),
                     memory,
+                    http_metrics: Some(http_metrics.clone()),
                 };
                 let handler: Handler = Arc::new(move |req, caller| answer(req, caller, &backend));
                 match AdminListener::spawn(at, handler, cfg.admin_tls.clone()) {
                     Ok(l) => Some(l),
                     Err(e) => {
+                        if let Some(c) = client {
+                            c.stop();
+                        }
+                        acceptor.stop();
+                        stop_cores(&senders, threads);
+                        return Err(NodeError::Io(e));
+                    }
+                }
+            }
+        };
+        let http = match cfg.http {
+            None => None,
+            Some(h) => {
+                let handle = NodeHandle {
+                    node: node_id,
+                    senders: senders.iter().map(CoreSender::senders).collect(),
+                    clock: clock.clone(),
+                    sessions: sessions.clone(),
+                    routes: routes.clone(),
+                    auth: auth.clone(),
+                    shutdown: shutdown.clone(),
+                };
+                let mut state = NodeClockState::new(clock.clone(), random_u64())
+                    .with_handle(handle.clone())
+                    .with_presence(presence.clone());
+                if let Some((_, slot)) = &keys {
+                    state = state.with_keys(slot.clone());
+                }
+                let auth = cfg.client.as_ref().is_some_and(|c| c.auth);
+                let backend = crate::backend::ServerBackend::new(handle.clone(), random_u64());
+                let service =
+                    Arc::new(crate::http_service::NodeHttp::new(handle, Arc::new(state), auth));
+                spawn_http_forwards(http_forwards_rx, service.clone(), backend);
+                match crate::http_listener::HttpListener::spawn(h, service, http_metrics.clone()) {
+                    Ok(l) => Some(l),
+                    Err(e) => {
+                        if let Some(a) = admin {
+                            a.stop();
+                        }
                         if let Some(c) = client {
                             c.stop();
                         }
@@ -932,6 +1014,7 @@ impl<D: Disk + Send + 'static> Node<D> {
             acceptor,
             client,
             admin,
+            http,
             clock: clock_keeper,
             routes,
             enroller: cfg.enroller.clone(),
@@ -966,10 +1049,16 @@ impl<D: Disk + Send + 'static> Node<D> {
         self.shutdown.load(std::sync::atomic::Ordering::Acquire)
     }
 
+    /// The addresses the HTTP port listens on; none if the node did not open it.
+    pub fn http_addrs(&self) -> Vec<SocketAddr> {
+        self.http.as_ref().map(|h| h.addrs().to_vec()).unwrap_or_default()
+    }
+
     /// Where the administration port listens, if the node opened it.
     pub fn admin_addr(&self) -> Option<SocketAddr> {
         self.admin.as_ref().map(AdminListener::local_addr)
     }
+
     /// This node.
     pub fn node_id(&self) -> NodeId {
         self.node_id
@@ -1105,6 +1194,9 @@ impl<D: Disk + Send + 'static> Node<D> {
         }
         if let Some(a) = self.admin {
             a.stop();
+        }
+        if let Some(h) = self.http {
+            h.stop();
         }
         self.acceptor.stop();
         self.clock.stop();

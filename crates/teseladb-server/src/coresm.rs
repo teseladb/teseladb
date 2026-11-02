@@ -105,6 +105,23 @@ impl RangeState for CoreSm {
     fn frozen(&self) -> bool {
         self.range().is_some_and(RangeState::frozen)
     }
+
+    fn fenced(&self, key: &[u8]) -> bool {
+        self.range().is_some_and(|r| r.fenced(key))
+    }
+
+    fn closed_mark(&self) -> Option<(Hlc, u64)> {
+        self.range().and_then(RangeState::closed_mark)
+    }
+}
+
+impl teseladb_range::host::FenceOutcome for CoreOutput {
+    fn range_output(&self) -> Option<&RangeOutput> {
+        match self {
+            CoreOutput::Range(o) => Some(o),
+            CoreOutput::Group0(_) => None,
+        }
+    }
 }
 
 impl StateMachine for CoreSm {

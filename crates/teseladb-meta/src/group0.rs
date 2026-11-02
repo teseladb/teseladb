@@ -25,8 +25,10 @@ use crate::request::Requests;
 use crate::security::{Principal, Security, SecurityError};
 use crate::tenants::Tenants;
 
-/// Version of the snapshot format (17: the catalog changes of change streams, 014 FR-014).
-pub const SNAPSHOT_VERSION: u8 = 17;
+/// Version of the snapshot format (18: the API keys, 019 FR-016).
+pub const SNAPSHOT_VERSION: u8 = 18;
+/// The snapshot before the API keys (02-11-2026), still read: none.
+pub const SNAPSHOT_VERSION_WITHOUT_API_KEYS: u8 = 17;
 /// The snapshot before the catalog changes (01-11-2026), still read: none recorded.
 pub const SNAPSHOT_VERSION_WITHOUT_DDL: u8 = 16;
 /// The snapshot before tenants (01-11-2026), still read: no tenant but the default one.
@@ -749,6 +751,9 @@ impl Group0Sm {
         if version > SNAPSHOT_VERSION_WITHOUT_TENANTS {
             self.tenants.encode(&mut e);
         }
+        if version > SNAPSHOT_VERSION_WITHOUT_API_KEYS {
+            self.security.encode_keys(&mut e);
+        }
         e.finish()
     }
 
@@ -825,6 +830,9 @@ impl Group0Sm {
         }
         if version > SNAPSHOT_VERSION_WITHOUT_TENANTS {
             sm.tenants = Box::new(Tenants::decode(&mut d)?);
+        }
+        if version > SNAPSHOT_VERSION_WITHOUT_API_KEYS {
+            sm.security.decode_keys(&mut d)?;
         }
         d.finish()?;
         Ok(sm)

@@ -466,6 +466,155 @@ impl Geo {
     }
 }
 
+/// A latitude and a longitude as RefLib writes them.
+fn lat_lon(p: Pt) -> (String, String) {
+    (crate::index::java_double(p.1), crate::index::java_double(p.0))
+}
+
+/// The degrees of the 32-bit step at or above (`up`) or below `v`, `step` degrees each.
+fn on_grid(v: f64, step: f64, up: bool) -> f64 {
+    let n = v / step;
+    (if up { n.ceil() } else { n.floor() }) * step
+}
+
+impl Shape {
+    /// Each geometry as RefLib writes it (measured: `Point(lon,lat)`, `Line([lon, lat]…)`,
+    /// `Polygon[lat, lon] … , holes=[…]`).
+    fn reflib(&self) -> Vec<String> {
+        let vertices = |ring: &[Pt]| -> String {
+            ring.iter()
+                .map(|&p| {
+                    let (lat, lon) = lat_lon(p);
+                    format!("[{lat}, {lon}] ")
+                })
+                .collect()
+        };
+        let mut out: Vec<String> = self
+            .points
+            .iter()
+            .map(|&p| {
+                let (lat, lon) = lat_lon(p);
+                format!("Point({lon},{lat})")
+            })
+            .collect();
+        for line in &self.lines {
+            let all: String = line
+                .iter()
+                .map(|&p| {
+                    let (lat, lon) = lat_lon(p);
+                    format!("[{lon}, {lat}]")
+                })
+                .collect();
+            out.push(format!("Line({all})"));
+        }
+        for rings in &self.polygons {
+            let Some((outer, holes)) = rings.split_first() else { continue };
+            let mut text = format!("Polygon{}", vertices(outer));
+            if !holes.is_empty() {
+                let all: Vec<String> =
+                    holes.iter().map(|h| format!("Polygon{}", vertices(h))).collect();
+                text.push_str(&format!(", holes=[{}]", all.join(", ")));
+            }
+            out.push(text);
+        }
+        out
+    }
+}
+
+/// A list of geometries in a RefLib query's description.
+fn listed(all: &[String]) -> String {
+    let inner: String = all.iter().map(|g| format!("{g},")).collect();
+    format!("[{inner}]")
+}
+
+impl Geo {
+    /// The constant-score form of `geoWithin` and `geoShape` (measured with `scoreDetails`).
+    pub(super) fn leaf(&self) -> Option<super::explain::Leaf> {
+        use super::explain::Leaf;
+        const LAT_STEP: f64 = 180.0 / 4_294_967_296.0;
+        const LON_STEP: f64 = 360.0 / 4_294_967_296.0;
+        let d = crate::index::java_double;
+        Some(match self {
+            Geo::Within { path, region: Region::Circle(c, r), .. } => {
+                let (lat, lon) = lat_lon(*c);
+                Leaf::Bare(format!("$type:geoPoint/{path}:{lat},{lon} +/- {} meters", d(*r)))
+            }
+            Geo::Within { path, region: Region::Box(low, high), .. } => Leaf::Bare(format!(
+                "$type:geoPoint/{path}:[{} TO {}],[{} TO {}]",
+                d(on_grid(low.1, LAT_STEP, true)),
+                d(on_grid(high.1, LAT_STEP, false)),
+                d(on_grid(low.0, LON_STEP, true)),
+                d(on_grid(high.0, LON_STEP, false))
+            )),
+            Geo::Within { path, region: Region::Shape(s), .. } => Leaf::Bare(format!(
+                "LatLonPointQuery: field=$type:geoPoint/{path}:{}",
+                listed(&s.reflib())
+            )),
+            Geo::Shape { path, relation, shape: s, .. } => {
+                let one = |g: &[String]| {
+                    format!("LatLonShapeQuery: field=$type:geoShape/{path}:{}", listed(g))
+                };
+                let all = s.reflib();
+                if relation == "contains" && s.points.len() > 1 {
+                    let each: Vec<String> =
+                        all.iter().map(|g| format!("#{}", one(std::slice::from_ref(g)))).collect();
+                    Leaf::Wrapped(each.join(" "))
+                } else {
+                    Leaf::Bare(one(&all))
+                }
+            }
+            Geo::Near { .. } => return None,
+        })
+    }
+
+    /// The explanation of `near` on a `geo` field for `doc`, with weight `boost`.
+    pub(super) fn explain_near(
+        &self,
+        index: &MemIndex,
+        boost: f32,
+        doc: u32,
+        score: f32,
+    ) -> Option<crate::index::Explanation> {
+        use crate::index::Explanation;
+        let Geo::Near { paths, origin, pivot, .. } = self else { return None };
+        let d = index.document(doc)?;
+        let mut parts = Vec::new();
+        for p in paths {
+            let nearest = shapes_at(d, p)
+                .into_iter()
+                .flat_map(|s| s.points)
+                .map(|pt| (super::sloppy::haversin_meters(origin.1, origin.0, pt.1, pt.0), pt))
+                .min_by(|a, b| a.0.total_cmp(&b.0));
+            let Some((meters, pt)) = nearest else { continue };
+            let q = quantized(pt);
+            let value = (f64::from(boost) * (pivot / (pivot + meters))) as f32;
+            parts.push(Explanation::node(
+                value,
+                "Distance score, computed as weight * pivotDistance / (pivotDistance + \
+                 abs(distance)) from:",
+                vec![
+                    Explanation::leaf(boost, "weight"),
+                    Explanation::leaf(*pivot as f32, "pivotDistance"),
+                    Explanation::leaf(origin.1 as f32, "originLat"),
+                    Explanation::leaf(origin.0 as f32, "originLon"),
+                    Explanation::leaf(q.1 as f32, "current lat"),
+                    Explanation::leaf(q.0 as f32, "current lon"),
+                    Explanation::leaf(meters as f32, "distance"),
+                ],
+            ));
+        }
+        match parts.len() {
+            0 => None,
+            1 if paths.len() == 1 => parts.pop(),
+            _ => {
+                let mut e = super::explain::sum(parts);
+                e.value = score;
+                Some(e)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -495,19 +644,24 @@ mod tests {
             polygons: vec![],
         };
         let on_line = Shape { points: vec![(-1.0, 40.5)], lines: vec![], polygons: vec![] };
-        assert!(line.intersects(&on_line) && on_line.intersects(&line));
+        assert!(line.intersects(&on_line));
+        assert!(on_line.intersects(&line));
         let square = |x0: f64, y0: f64, x1: f64, y1: f64| Shape {
             points: vec![],
             lines: vec![],
             polygons: vec![vec![vec![(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)]]],
         };
         let (outer, inner) = (square(0.0, 0.0, 10.0, 10.0), square(2.0, 2.0, 3.0, 3.0));
-        assert!(outer.intersects(&inner) && inner.intersects(&outer));
-        assert!(inner.within(&outer) && !outer.within(&inner));
+        assert!(outer.intersects(&inner));
+        assert!(inner.intersects(&outer));
+        assert!(inner.within(&outer));
+        assert!(!outer.within(&inner));
         let crossing = square(5.0, 5.0, 15.0, 15.0);
-        assert!(crossing.intersects(&outer) && !crossing.within(&outer));
+        assert!(crossing.intersects(&outer));
+        assert!(!crossing.within(&outer));
         let edge_cross = square(-1.0, 4.0, 11.0, 6.0);
-        assert!(outer.intersects(&edge_cross) && !edge_cross.within(&outer));
+        assert!(outer.intersects(&edge_cross));
+        assert!(!edge_cross.within(&outer));
         assert!(!square(20.0, 20.0, 21.0, 21.0).intersects(&outer));
     }
 }

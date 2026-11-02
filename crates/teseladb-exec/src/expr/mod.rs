@@ -193,6 +193,11 @@ impl Ctx {
         out
     }
 
+    /// Whether variable `name` was defined by the command or an enclosing stage.
+    pub fn defines(&self, name: &str) -> bool {
+        self.names.iter().any(|n| n == name)
+    }
+
     /// Checks that variable `name` is defined.
     fn check(&self, name: &str) -> Result<(), MqlError> {
         if !self.checked || SYSTEM_VARIABLES.contains(&name) || self.names.iter().any(|n| n == name)

@@ -3,12 +3,13 @@
 //!
 //! - `httpOptions`: `cors.allowedOrigins`, the origins CORS lets in (none: CORS is off), and
 //!   `rateLimits` with `concurrentRequests` (1,000) and `requestsPerSecond` (10,000) per
-//!   credential;
+//!   credential, and `apiKeys.maxExpiresAfterDays` (365), the longest life of an API key;
 //! - `mcpOptions`: `readOnly` (true), `allowDestructive` (false), `maxDocuments` (100),
 //!   `maxBytes` (1 MiB) and `maxTimeMS` (30 seconds).
 //!
 //! A value given replaces the stored one; the fields it leaves out take their defaults.
 
+use teseladb_auth::apikey::DEFAULT_MAX_EXPIRES_DAYS;
 use teseladb_bson::{Document, RawDoc, Value};
 
 use crate::error::{BAD_VALUE, Code, IDL_UNKNOWN_FIELD};
@@ -34,6 +35,8 @@ const ALLOWED_ORIGINS: &str = "allowedOrigins";
 const RATE_LIMITS: &str = "rateLimits";
 const CONCURRENT_REQUESTS: &str = "concurrentRequests";
 const REQUESTS_PER_SECOND: &str = "requestsPerSecond";
+const API_KEYS: &str = "apiKeys";
+const MAX_EXPIRES_AFTER_DAYS: &str = "maxExpiresAfterDays";
 const READ_ONLY: &str = "readOnly";
 const ALLOW_DESTRUCTIVE: &str = "allowDestructive";
 const MAX_DOCUMENTS: &str = "maxDocuments";
@@ -51,6 +54,8 @@ pub struct HttpOptions {
     pub concurrent_requests: u64,
     /// Requests a credential may start each second.
     pub requests_per_second: u64,
+    /// The longest life of an API key, in days (019 FR-016).
+    pub api_key_max_days: u64,
 }
 
 /// What `mcpOptions` holds.
@@ -145,6 +150,11 @@ pub(crate) fn http_default() -> Document {
                 .with(CONCURRENT_REQUESTS, DEFAULT_CONCURRENT_REQUESTS as i64)
                 .with(REQUESTS_PER_SECOND, DEFAULT_REQUESTS_PER_SECOND as i64),
         )
+        .with(API_KEYS, api_keys_doc(DEFAULT_MAX_EXPIRES_DAYS as i64))
+}
+
+fn api_keys_doc(max_days: i64) -> Document {
+    Document::new().with(MAX_EXPIRES_AFTER_DAYS, max_days)
 }
 
 /// Reads a value of `httpOptions`.
@@ -152,6 +162,7 @@ pub(crate) fn http_parse(v: &Document) -> Result<Document, ParseError> {
     let mut allowed = Vec::new();
     let mut concurrent = DEFAULT_CONCURRENT_REQUESTS as i64;
     let mut per_second = DEFAULT_REQUESTS_PER_SECOND as i64;
+    let mut max_days = DEFAULT_MAX_EXPIRES_DAYS as i64;
     for (k, x) in v.iter() {
         match k {
             CORS => {
@@ -172,6 +183,15 @@ pub(crate) fn http_parse(v: &Document) -> Result<Document, ParseError> {
                     }
                 }
             }
+            API_KEYS => {
+                for (ak, ax) in object(API_KEYS, x)?.iter() {
+                    let path = format!("{API_KEYS}.{ak}");
+                    if ak != MAX_EXPIRES_AFTER_DAYS {
+                        return Err(unknown(&path));
+                    }
+                    max_days = positive(&path, ak, ax)?;
+                }
+            }
             _ => return Err(unknown(k)),
         }
     }
@@ -182,7 +202,8 @@ pub(crate) fn http_parse(v: &Document) -> Result<Document, ParseError> {
             Document::new()
                 .with(CONCURRENT_REQUESTS, concurrent)
                 .with(REQUESTS_PER_SECOND, per_second),
-        ))
+        )
+        .with(API_KEYS, api_keys_doc(max_days)))
 }
 
 /// `mcpOptions` without a value.
@@ -250,6 +271,11 @@ pub fn http_options(stored: Option<&[u8]>) -> HttpOptions {
         allowed_origins,
         concurrent_requests: whole(&limits, CONCURRENT_REQUESTS, DEFAULT_CONCURRENT_REQUESTS),
         requests_per_second: whole(&limits, REQUESTS_PER_SECOND, DEFAULT_REQUESTS_PER_SECOND),
+        api_key_max_days: whole(
+            &sub(&d, API_KEYS),
+            MAX_EXPIRES_AFTER_DAYS,
+            DEFAULT_MAX_EXPIRES_DAYS,
+        ),
     }
 }
 

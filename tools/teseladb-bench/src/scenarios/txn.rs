@@ -171,10 +171,10 @@ fn transient(reply: &[u8]) -> bool {
 /// server, which has no such port.
 fn uncertainty_restarts(target: &Target) -> Result<Option<i64>, String> {
     let Some(admin) = target.admin_addr() else { return Ok(None) };
-    let get = teseladb_server::metrics_http::Method::Get;
+    let get = teseladb_server::admin_http::Method::Get;
     let metrics = teseladb_server::admin::METRICS;
     let (status, body) =
-        teseladb_server::metrics_http::request(&admin.to_string(), get, metrics, b"")
+        teseladb_server::admin_http::request(&admin.to_string(), get, metrics, b"")
             .map_err(|e| format!("{admin}: {e}"))?;
     if status != 200 {
         return Err(format!("{admin}{metrics} answered {status}"));

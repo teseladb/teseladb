@@ -480,6 +480,15 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         self.inner.end_operation();
     }
 
+    fn fence(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        on: bool,
+    ) -> Result<teseladb_hlc::Hlc, CommandError> {
+        self.call(|b| b.fence(start, end, on))
+    }
+
     fn changes(
         &mut self,
         start: &[u8],
@@ -749,6 +758,14 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         let tenant = self.tenant;
         let all = self.call(|b| b.principals(kind, db))?;
         Ok(all.into_iter().filter(|d| tenants::of_principal(d) == tenant).collect())
+    }
+
+    fn principal_by_id(
+        &mut self,
+        kind: Principal,
+        id: &[u8],
+    ) -> Result<Option<Vec<u8>>, CommandError> {
+        self.call(|b| b.principal_by_id(kind, id))
     }
 
     fn security_write(

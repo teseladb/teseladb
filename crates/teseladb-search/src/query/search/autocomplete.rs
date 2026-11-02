@@ -84,6 +84,107 @@ impl Autocomplete {
             })
     }
 
+    /// The grams query `q` asks for: those of each of its words (unless `sequential`) and of
+    /// its whole text, without repeats.
+    fn gram_terms(
+        &self,
+        index: &MemIndex,
+        g: &Grams,
+        analyzer: &str,
+        q: &str,
+    ) -> Result<Vec<String>, SearchError> {
+        let whole = g.normalized(q);
+        let words: Vec<String> =
+            index.analyze(analyzer, q)?.into_iter().map(|w| g.normalized(&w)).collect();
+        let mut terms: Vec<String> = Vec::new();
+        if !self.sequential {
+            for t in words.iter().filter_map(|w| g.term(w)) {
+                if !terms.contains(&t) {
+                    terms.push(t);
+                }
+            }
+        }
+        if let Some(t) = g.term(&whole).filter(|t| !terms.contains(t)) {
+            terms.push(t);
+        }
+        Ok(terms)
+    }
+
+    /// The explanation of the score of `doc`, with weight `boost` (measured: a sum of the grams'
+    /// disjunction and of the `text` query, nested once more for several queries; with `fuzzy`
+    /// RefLib's automaton query, named by its identity, here a hash of its term, DV-083).
+    pub(super) fn explain(
+        &self,
+        ctx: &super::explain::Ctx<'_>,
+        boost: f32,
+        doc: u32,
+    ) -> Result<Option<crate::index::Explanation>, SearchError> {
+        use crate::index::Explanation;
+        let (g, analyzer) = self.field(ctx.index)?;
+        let key = autocomplete_key(&self.path);
+        let name = format!("{}{key}", ctx.prefix);
+        let mut units = Vec::new();
+        for q in &self.query {
+            let mut clauses = Vec::new();
+            if let Some(f) = &self.fuzzy {
+                let Some(term) = g.term(&g.normalized(q)) else { continue };
+                let lev = Levenshtein::new(&term, f.max_edits, f.prefix_length);
+                if ctx.index.matching_terms(&key, |t| lev.distance(t).is_some()).contains(&doc) {
+                    let hash = term
+                        .bytes()
+                        .fold(0x811c_9dc5u32, |h, b| (h ^ u32::from(b)).wrapping_mul(0x0100_0193));
+                    clauses.push(Explanation::leaf(
+                        boost,
+                        format!(
+                            "{name}:AutomatonQuery {{\norg.apache.reflib.util.automaton.Automaton@{hash:x}}}"
+                        ),
+                    ));
+                }
+                let unit = if self.sequential {
+                    clauses.pop()
+                } else {
+                    (!clauses.is_empty()).then(|| super::explain::sum(clauses))
+                };
+                units.extend(unit);
+                continue;
+            }
+            let terms = self.gram_terms(ctx.index, &g, &analyzer, q)?;
+            let found: Vec<Explanation> = terms
+                .iter()
+                .filter_map(|t| {
+                    let description = ctx.term_description(&name, t, doc);
+                    ctx.index.explain_term_as(&key, description, t, boost, doc)
+                })
+                .collect();
+            let grams = match (terms.len(), found.len()) {
+                (_, 0) => None,
+                (1, _) => found.into_iter().next(),
+                _ => Some(super::explain::sum(found)),
+            };
+            let with_text = !self.sequential && ctx.index.has_text(&self.path);
+            if !with_text {
+                units.extend(grams);
+                continue;
+            }
+            clauses.extend(grams);
+            let text = Operator::Text {
+                query: vec![q.clone()],
+                paths: vec![self.path.clone()],
+                fuzzy: None,
+                score: if boost == 1.0 { Score::Plain } else { Score::Boost(boost) },
+            };
+            clauses.extend(super::explain::explain(ctx, &text, doc, 0.0)?);
+            if !clauses.is_empty() {
+                units.push(super::explain::sum(clauses));
+            }
+        }
+        Ok(match units.len() {
+            0 => None,
+            1 if self.query.len() == 1 => units.pop(),
+            _ => Some(super::explain::sum(units)),
+        })
+    }
+
     /// The scores of the documents the query matches, with weight `boost`.
     pub(super) fn scores(
         &self,
@@ -103,19 +204,7 @@ impl Autocomplete {
                 }
                 continue;
             }
-            let words: Vec<String> =
-                index.analyze(&analyzer, q)?.into_iter().map(|w| g.normalized(&w)).collect();
-            let mut terms: Vec<String> = Vec::new();
-            if !self.sequential {
-                for t in words.iter().filter_map(|w| g.term(w)) {
-                    if !terms.contains(&t) {
-                        terms.push(t);
-                    }
-                }
-            }
-            if let Some(t) = g.term(&whole).filter(|t| !terms.contains(t)) {
-                terms.push(t);
-            }
+            let terms = self.gram_terms(index, &g, &analyzer, q)?;
             // The grams are one disjunction, a clause of the query with `text` (measured with
             // `scoreDetails`: two nested sums, each in doubles and then rounded to a float).
             for (doc, s) in index.terms_scores(&key, &terms, boost) {

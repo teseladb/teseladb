@@ -3,6 +3,7 @@
 #![cfg_attr(coverage, feature(coverage_attribute))]
 
 pub mod actions;
+pub mod apikey;
 pub mod audit;
 pub mod audit_crypt;
 pub mod audit_ocsf;
@@ -11,6 +12,7 @@ pub mod authz;
 pub mod authz_rules;
 mod authz_users;
 pub mod aws;
+pub mod bearer;
 pub mod builtin_roles;
 pub mod clustertime;
 pub mod fence;

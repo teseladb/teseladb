@@ -233,8 +233,8 @@ fn leaf_key(t: &FieldMapping, v: &Value) -> Option<Key> {
 /// An operator over indexed values.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum ValueOp {
-    /// `equals` and `in`: any of the values on any of the paths.
-    AnyOf { paths: Vec<String>, values: Vec<Key>, score: Score },
+    /// `equals` and `in` (`set`): any of the values on any of the paths.
+    AnyOf { paths: Vec<String>, values: Vec<Key>, set: bool, score: Score },
     /// `range`: the bounds, each with whether it is inclusive.
     Range {
         paths: Vec<String>,
@@ -345,7 +345,7 @@ pub(super) fn parse_equals(d: &Document, path: &str) -> Result<Operator, SearchE
         Some(v) => Key::of_query(v).ok_or_else(|| shape(&at("value"), VALUE_TYPES))?,
     };
     let score = parse_score(d.get("score"), &at("score"))?;
-    Ok(Operator::Values(ValueOp::AnyOf { paths: vec![p], values: vec![value], score }))
+    Ok(Operator::Values(ValueOp::AnyOf { paths: vec![p], values: vec![value], set: false, score }))
 }
 
 /// `in`.
@@ -374,7 +374,7 @@ pub(super) fn parse_in(d: &Document, path: &str) -> Result<Operator, SearchError
         return Err(shape(&at("value"), "must have elements of the same type"));
     }
     let score = parse_score(d.get("score"), &at("score"))?;
-    Ok(Operator::Values(ValueOp::AnyOf { paths, values, score }))
+    Ok(Operator::Values(ValueOp::AnyOf { paths, values, set: true, score }))
 }
 
 /// The name of a bound's type in `range`'s errors.

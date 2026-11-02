@@ -3,9 +3,6 @@
 //! ([`write`]); reads unpack the buckets their filter may match
 //! (`teseladb_exec::timeseries_read`).
 
-use std::collections::BTreeMap;
-use std::ops::Bound::{Excluded, Unbounded};
-
 use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_keys::KeyBuilder;
 use teseladb_meta::catalog::CollectionEntry;
@@ -37,236 +34,8 @@ pub fn legacy_buckets(db: &str, coll: &str, command: &str) -> Result<(), Command
     ))
 }
 
-/// The bucket counters of a time series on this node since it started, as RefDb's bucket
-/// catalog counts them for `collStats` (measured on a `refnode` and a `refrouter` 9.0.4 on
-/// 02-11-2026): each write of a bucket is a commit, a new bucket is an insert; the catalog keeps
-/// the buckets of each meta value open by window, archives those later than a measurement that
-/// goes back in time, reopens an archived one from memory (a fetch) or one it looks up in the
-/// collection (a query), and closes those earlier than a measurement past them.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct TsStats {
-    /// `numBucketInserts`.
-    pub bucket_inserts: i64,
-    /// `numBucketUpdates`.
-    pub bucket_updates: i64,
-    /// `numBucketsOpenedDueToMetadata`.
-    pub opened_for_meta: i64,
-    /// `numBucketsClosedDueToCount`.
-    pub closed_by_count: i64,
-    /// `numBucketsClosedDueToSize`.
-    pub closed_by_size: i64,
-    /// `numBucketsClosedDueToSchemaChange`.
-    pub closed_by_schema: i64,
-    /// `numBucketsClosedDueToTimeForward`.
-    pub closed_time_forward: i64,
-    /// `numBucketsKeptOpenDueToLargeMeasurements`.
-    pub kept_open_large: i64,
-    /// `numBucketsArchivedDueToTimeBackward`.
-    pub archived_time_backward: i64,
-    /// `numBucketsReopened`.
-    pub reopened: i64,
-    /// `numBucketsFetched`: reopened from the archive.
-    pub fetched: i64,
-    /// `numBucketsQueried`: reopened from a lookup in the collection.
-    pub queried: i64,
-    /// `numBucketQueriesFailed`: lookups that found no bucket.
-    pub queries_failed: i64,
-    /// `numCommits`.
-    pub commits: i64,
-    /// `numMeasurementsCommitted`.
-    pub measurements: i64,
-    /// The windows the catalog holds open and archived for each meta value (the five bytes of
-    /// its hash in a bucket's `_id`).
-    series: BTreeMap<[u8; 5], Series>,
-    /// The open bucket of each window and meta value (the first nine bytes of a bucket's `_id`):
-    /// where the next insert starts, as RefDb's bucket catalog keeps it in memory. A bucket
-    /// closed for a field of another type stays behind it; without an entry (after a restart)
-    /// an insert starts at the first bucket, as RefDb reopens one.
-    open: BTreeMap<[u8; 9], u32>,
-}
-
-/// The windows of one meta value the catalog holds: those it writes to and those it archived.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct Series {
-    open: std::collections::BTreeSet<[u8; 4]>,
-    archived: std::collections::BTreeSet<[u8; 4]>,
-}
-
-/// How the catalog finds the bucket of an insert ([`TsStats::route`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Route {
-    /// A bucket it holds open, or one it fetched from its archive.
-    Open,
-    /// A new bucket after it closed those of earlier windows.
-    New,
-    /// It looks one up in the collection; `fresh` for a meta value it never held.
-    Query {
-        /// The meta value is new to the catalog.
-        fresh: bool,
-    },
-}
-
-/// The counters of `collStats.timeseries` that this node never moves: memory thresholds,
-/// cache pressure, frozen buckets, compression and failed reopenings are RefDb's bucket
-/// catalog's own machinery (measured at zero on a `refnode` 9.0.4 on 02-11-2026).
-const ALWAYS_ZERO: [&str; 22] = [
-    "numBucketDocumentsTooLargeInsert",
-    "numBucketDocumentsTooLargeUpdate",
-    "numBucketFetchesFailed",
-    "numBucketReopeningsFailedDueToCompressionFailure",
-    "numBucketReopeningsFailedDueToEraMismatch",
-    "numBucketReopeningsFailedDueToHashCollision",
-    "numBucketReopeningsFailedDueToMalformedIdField",
-    "numBucketReopeningsFailedDueToMarkedClosed",
-    "numBucketReopeningsFailedDueToMarkedFrozen",
-    "numBucketReopeningsFailedDueToMinMaxCalculation",
-    "numBucketReopeningsFailedDueToSchemaGeneration",
-    "numBucketReopeningsFailedDueToUncompressedTimeColumn",
-    "numBucketReopeningsFailedDueToValidator",
-    "numBucketReopeningsFailedDueToWriteConflict",
-    "numBucketsArchivedDueToMemoryThreshold",
-    "numBucketsClosedDueToCachePressure",
-    "numBucketsClosedDueToMemoryThreshold",
-    "numBucketsClosedDueToReopening",
-    "numBucketsFrozen",
-    "numCompressedBucketsConvertedToUnsorted",
-    "numDuplicateBucketsReopened",
-    "numWaits",
-];
-
-impl TsStats {
-    /// The counters as `collStats.timeseries` writes them after `bucketsNs`, with `bucketCount`
-    /// and `avgBucketSize`, in alphabetical order as a `refrouter` merges them.
-    pub fn fields(&self, bucket_count: i64, avg_bucket_size: i64) -> Vec<(&'static str, i64)> {
-        let avg = if self.commits > 0 { self.measurements / self.commits } else { 0 };
-        let active: usize = self.series.values().map(|s| s.open.len() + s.archived.len()).sum();
-        let mut out = vec![
-            ("avgBucketSize", avg_bucket_size),
-            ("avgNumMeasurementsPerCommit", avg),
-            ("bucketCount", bucket_count),
-            ("numActiveBuckets", i64::try_from(active).unwrap_or(i64::MAX)),
-            ("numBucketInserts", self.bucket_inserts),
-            ("numBucketQueriesFailed", self.queries_failed),
-            ("numBucketUpdates", self.bucket_updates),
-            ("numBucketsArchivedDueToTimeBackward", self.archived_time_backward),
-            ("numBucketsClosedDueToCount", self.closed_by_count),
-            ("numBucketsClosedDueToSchemaChange", self.closed_by_schema),
-            ("numBucketsClosedDueToSize", self.closed_by_size),
-            ("numBucketsClosedDueToTimeForward", self.closed_time_forward),
-            ("numBucketsFetched", self.fetched),
-            ("numBucketsKeptOpenDueToLargeMeasurements", self.kept_open_large),
-            ("numBucketsOpenedDueToMetadata", self.opened_for_meta),
-            ("numBucketsQueried", self.queried),
-            ("numBucketsReopened", self.reopened),
-            ("numCommits", self.commits),
-            ("numMeasurementsCommitted", self.measurements),
-        ];
-        out.extend(ALWAYS_ZERO.iter().map(|k| (*k, 0)));
-        out.sort_by_key(|(k, _)| *k);
-        out
-    }
-
-    /// How the catalog finds the bucket for measurements of the window and meta value of bucket
-    /// `id`: a window it holds open takes them, and the later open ones are archived; an archived
-    /// window is fetched; past every open window those close and a new bucket opens; before one,
-    /// or with none, it looks a bucket up.
-    pub fn route(&mut self, id: [u8; 12]) -> Route {
-        let window: [u8; 4] = std::array::from_fn(|i| id[i]);
-        let meta: [u8; 5] = std::array::from_fn(|i| id[4 + i]);
-        let fresh = !self.series.contains_key(&meta);
-        let s = self.series.entry(meta).or_default();
-        if s.open.contains(&window) {
-            let later: Vec<[u8; 4]> =
-                s.open.range((Excluded(window), Unbounded)).copied().collect();
-            for w in later {
-                s.open.remove(&w);
-                s.archived.insert(w);
-                self.archived_time_backward += 1;
-            }
-            return Route::Open;
-        }
-        if s.archived.remove(&window) {
-            s.open.insert(window);
-            self.fetched += 1;
-            self.reopened += 1;
-            return Route::Open;
-        }
-        if s.open.iter().any(|w| *w > window) || s.open.is_empty() {
-            return Route::Query { fresh };
-        }
-        let closed = s.open.len();
-        s.open.clear();
-        self.closed_time_forward += i64::try_from(closed).unwrap_or(i64::MAX);
-        Route::New
-    }
-
-    /// Counts a commit of `taken` measurements into bucket `id` (number `n` of its window and
-    /// meta value), which `existed` or not; `closing` is why the bucket before it stopped, and
-    /// `route` how the insert found its first bucket (on its first commit only). A lookup that
-    /// lands on a bucket reopens it; one that finds none failed; an open bucket that is gone
-    /// (its documents deleted) is looked up again, and fails.
-    fn commit(&mut self, id: [u8; 12], n: u32, existed: bool, closing: Option<Full>, taken: i64) {
-        self.open.insert(window_meta(id), n);
-        self.commits += 1;
-        self.measurements += taken;
-        if existed {
-            self.bucket_updates += 1;
-            return;
-        }
-        self.bucket_inserts += 1;
-        match closing {
-            Some(Full::Count) => self.closed_by_count += 1,
-            Some(Full::Size) => self.closed_by_size += 1,
-            // Counted when the bucket closed ([`TsStats::closed_for_schema`]).
-            Some(Full::Schema) | None => {}
-        }
-    }
-
-    /// Counts what the first commit of an insert that found its bucket by `route` says of the
-    /// lookup: the bucket `existed` or not, and whether the open one before it was `full`.
-    fn routed(&mut self, id: [u8; 12], route: Route, existed: bool, full: bool) {
-        let window: [u8; 4] = std::array::from_fn(|i| id[i]);
-        let meta: [u8; 5] = std::array::from_fn(|i| id[4 + i]);
-        match route {
-            Route::Query { .. } if existed || full => {
-                self.queried += 1;
-                self.reopened += 1;
-            }
-            Route::Query { fresh } => {
-                self.queries_failed += 1;
-                self.opened_for_meta += i64::from(fresh);
-            }
-            Route::Open if !existed && !full => self.queries_failed += 1,
-            Route::Open | Route::New => {}
-        }
-        let s = self.series.entry(meta).or_default();
-        // A lookup that gave no bucket to write to (none, or a full one): the later open
-        // windows go to the archive.
-        if matches!(route, Route::Query { .. }) && (full || !existed) {
-            let later: Vec<[u8; 4]> =
-                s.open.range((Excluded(window), Unbounded)).copied().collect();
-            for w in later {
-                s.open.remove(&w);
-                s.archived.insert(w);
-                self.archived_time_backward += 1;
-            }
-        }
-        s.open.insert(window);
-    }
-
-    /// Counts bucket `n` of window and meta value `key` closed because a measurement has a
-    /// field of another type: the next insert starts after it.
-    fn closed_for_schema(&mut self, key: [u8; 9], n: u32) {
-        self.closed_by_schema += 1;
-        self.open.insert(key, n + 1);
-    }
-
-    /// The bucket an insert into window and meta value `key` starts at.
-    fn open_bucket(&self, key: [u8; 9]) -> u32 {
-        self.open.get(&key).copied().unwrap_or(0)
-    }
-}
-
+use super::timeseries_catalog::{Pass, Stored, lookup, next_free};
+pub use super::timeseries_catalog::{Route, TsStats};
 /// The first nine bytes of bucket `id`: its window and meta value.
 fn window_meta(id: [u8; 12]) -> [u8; 9] {
     std::array::from_fn(|i| id[i])
@@ -336,10 +105,14 @@ pub fn scan_range(
     Ok((from, to))
 }
 
-/// Runs `bound`, an insert of measurements into time series `coll`: those of one window and
-/// meta value go together into bucket 0 of it, and what a full bucket does not take into the
-/// next one. A measurement without a date in the time field is a write error, as RefDb's; an
-/// ordered insert takes nothing after it.
+/// Runs an insert of measurements `docs` into time series `coll`: those of one window and meta
+/// value go together, the windows of a meta value in time order as a `refnode` 9.0.4 writes a
+/// batch, each into its buckets from the one the catalog routes it to ([`TsStats::route`]). A
+/// measurement without a date in the time field is a write error; an ordered insert takes
+/// nothing after it. An ordered insert with a measurement the collection refuses is tried whole
+/// and aborted, then retried one measurement at a time up to the refused one, which fails
+/// alone (measured on a `refnode` 9.0.4 on 02-11-2026: the lookups count twice, one commit per
+/// measurement, and the refused one's bucket leaves the catalog).
 pub fn write<B: Backend + ?Sized>(
     backend: &mut B,
     shared: &super::Shared,
@@ -349,19 +122,12 @@ pub fn write<B: Backend + ?Sized>(
     stmt: u32,
 ) -> Result<MutationResult, CommandError> {
     let mut total = MutationResult::default();
-    // In order, nothing after the first measurement the leader would refuse goes in: the batch
-    // stops at it, and every bucket's write holds only measurements before it, as RefDb
-    // retries an ordered batch with the measurements before its failure.
-    let cut = match ordered {
-        true => super::mutation::timeseries::first_refused(docs, spec, rules),
-        false => None,
-    };
-    let docs = cut.map_or(docs, |e| &docs[..=e]);
-    // The measurements of each window and meta value, in order, with their place in `docs`.
-    let mut groups: Vec<([u8; 12], Vec<(usize, Document)>)> = Vec::new();
+    // The measurements with a time, and their place in `docs`.
+    let mut timed = Vec::with_capacity(docs.len());
+    let mut no_time = docs.len();
     for (index, doc) in docs.iter().enumerate() {
-        let t = match spec.time_of(doc) {
-            Ok(t) => t,
+        match spec.time_of(doc) {
+            Ok(t) => timed.push((index, t)),
             Err(e) => {
                 let msg = match e {
                     teseladb_mql::timeseries_write::TsError::NoTime(m) => m,
@@ -369,36 +135,185 @@ pub fn write<B: Backend + ?Sized>(
                 };
                 total.errors.push(WriteError { index, error: CommandError::new(BAD_VALUE, msg) });
                 if ordered {
+                    no_time = index;
                     break;
                 }
-                continue;
             }
-        };
-        let first = spec
-            .bucket_id(t, spec.meta_of(doc), 0)
-            .map_err(|e| CommandError::new(INTERNAL_ERROR, format!("{e:?}")))?;
-        // The measurements of one bucket go together, in order or not, as a `refnode` 9.0.4
-        // commits one write per bucket (measured on 02-11-2026).
-        let joined = groups.iter_mut().find(|(id, _)| *id == first);
-        match joined {
-            Some((_, g)) => g.push((index, doc.clone())),
-            None => groups.push((first, vec![(index, doc.clone())])),
         }
     }
     let batch = Batch { coll, spec, ordered, rules, stmt };
-    for (first, group) in groups {
-        let failed = write_group(backend, shared, w, &batch, (&group, first), &mut total)?;
-        // After a cut the other buckets hold measurements before the failure only.
-        if failed && ordered && cut.is_none() {
-            break;
+    let cut = match ordered {
+        true => super::mutation::timeseries::first_refused(&docs[..no_time], spec, rules),
+        false => None,
+    };
+    if let Some(cut) = cut {
+        // The measurement without a time comes after the refused one.
+        total.errors.clear();
+        write_cut(backend, shared, w, &batch, (docs, &timed), cut, &mut total)?;
+    } else {
+        let mut pass = Pass::default();
+        for (first, group) in groups(spec, docs, &timed)? {
+            let failed =
+                write_group(backend, shared, w, &batch, (&group, first), &mut pass, &mut total)?;
+            if failed && ordered {
+                break;
+            }
         }
     }
-    // An ordered insert fails at its first failure only.
+    // Unordered, the errors come batch by batch, after those of the measurements without a
+    // time; an ordered insert fails at its first failure only.
     if ordered {
         total.errors.sort_by_key(|e| e.index);
         total.errors.truncate(1);
     }
     Ok(total)
+}
+
+/// The first bucket of a window and meta value, and its measurements with their places.
+type Group = ([u8; 12], Vec<(usize, Document)>);
+
+/// The measurements of `timed` grouped by the first bucket of their window and meta value, in
+/// order inside each group; the meta values in the order they come, each one's windows in time
+/// order.
+fn groups(
+    spec: &BucketSpec,
+    docs: &[Document],
+    timed: &[(usize, i64)],
+) -> Result<Vec<Group>, CommandError> {
+    let mut groups: Vec<Group> = Vec::new();
+    for &(index, t) in timed {
+        let doc = &docs[index];
+        let first = spec
+            .bucket_id(t, spec.meta_of(doc), 0)
+            .map_err(|e| CommandError::new(INTERNAL_ERROR, format!("{e:?}")))?;
+        match groups.iter_mut().find(|(id, _)| *id == first) {
+            Some((_, g)) => g.push((index, doc.clone())),
+            None => groups.push((first, vec![(index, doc.clone())])),
+        }
+    }
+    let mut metas: Vec<[u8; 5]> = Vec::new();
+    for (id, _) in &groups {
+        let meta: [u8; 5] = std::array::from_fn(|i| id[4 + i]);
+        if !metas.contains(&meta) {
+            metas.push(meta);
+        }
+    }
+    groups.sort_by_key(|(id, _)| {
+        let meta: [u8; 5] = std::array::from_fn(|i| id[4 + i]);
+        (metas.iter().position(|m| *m == meta), *id)
+    });
+    Ok(groups)
+}
+
+/// An ordered insert whose measurement at `cut` the collection refuses: the whole batch is tried
+/// first and aborted, then the measurements up to the refused one go in one at a time.
+fn write_cut<B: Backend + ?Sized>(
+    backend: &mut B,
+    shared: &super::Shared,
+    w: &mut Writer,
+    batch: &Batch<'_>,
+    (docs, timed): (&[Document], &[(usize, i64)]),
+    cut: usize,
+    total: &mut MutationResult,
+) -> Result<(), CommandError> {
+    let mut pass = Pass::attempt();
+    for (first, group) in groups(batch.spec, docs, timed)? {
+        attempt_group(backend, shared, batch, (&group, first), &mut pass)?;
+    }
+    with_stats(shared, batch.coll.id, |s| s.abort(&pass));
+    for &(index, t) in timed.iter().take_while(|(i, _)| *i <= cut) {
+        let doc = &docs[index];
+        let first = batch
+            .spec
+            .bucket_id(t, batch.spec.meta_of(doc), 0)
+            .map_err(|e| CommandError::new(INTERNAL_ERROR, format!("{e:?}")))?;
+        let one = [(index, doc.clone())];
+        let failed =
+            write_group(backend, shared, w, batch, (&one, first), &mut Pass::default(), total)?;
+        if failed {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// Runs `f` on the bucket catalog of time series `id`.
+fn with_stats<R>(shared: &super::Shared, id: u32, f: impl FnOnce(&mut TsStats) -> R) -> R {
+    f(super::lock(shared).timeseries.entry(id).or_default())
+}
+
+/// The buckets stored for the window and meta value of bucket `first`.
+fn window_buckets<B: Backend + ?Sized>(
+    backend: &mut B,
+    coll: &CollectionEntry,
+    spec: &BucketSpec,
+    first: [u8; 12],
+) -> Result<Vec<Stored>, CommandError> {
+    let mut last = first;
+    last[9..].copy_from_slice(&MAX_BUCKETS.to_be_bytes()[1..]);
+    let (mut next, end) = (bucket_key(coll, first)?, bucket_key(coll, last)?);
+    let mut out = Vec::new();
+    loop {
+        let rows = backend.scan(&next, &end, super::query::SCAN_CHUNK, ReadConcern::Local)?;
+        let short = rows.len() < super::query::SCAN_CHUNK;
+        for (key, bytes) in rows {
+            next = [key.as_slice(), &[0]].concat();
+            out.extend(Stored::of(spec, bytes));
+        }
+        if short {
+            return Ok(out);
+        }
+    }
+}
+
+/// The earliest time of the measurements of `group`.
+fn earliest(spec: &BucketSpec, group: &[(usize, Document)]) -> i64 {
+    group.iter().filter_map(|(_, d)| spec.time_of(d).ok()).min().unwrap_or(i64::MAX)
+}
+
+/// Why bucket `b` cannot take the first of `docs`, if it cannot.
+fn full_for(spec: &BucketSpec, b: &Stored, docs: &[Document]) -> Option<Full> {
+    let raw = RawDoc::from_bytes(&b.bytes).ok()?;
+    match spec.append_all([0; 12], Some(raw), docs) {
+        Err(teseladb_mql::timeseries_write::TsError::Full(why)) => Some(why),
+        _ => None,
+    }
+}
+
+/// The aborted try of `group`, measurements of one window and meta value whose first bucket is
+/// `first`: its lookup counts, and an open bucket it finds full closes; its bucket opens only
+/// for the rest of the try.
+fn attempt_group<B: Backend + ?Sized>(
+    backend: &mut B,
+    shared: &super::Shared,
+    batch: &Batch<'_>,
+    (group, first): (&[(usize, Document)], [u8; 12]),
+    pass: &mut Pass,
+) -> Result<(), CommandError> {
+    let Batch { coll, spec, .. } = *batch;
+    let (route, open) =
+        with_stats(shared, coll.id, |s| (s.route(first, pass), s.open_bucket(window_meta(first))));
+    let buckets = window_buckets(backend, coll, spec, first)?;
+    let into = match route {
+        Route::New => None,
+        Route::Open => buckets.iter().find(|b| b.n == open),
+        Route::Query { .. } => lookup(&buckets, earliest(spec, group), spec.meta_field.is_some()),
+    };
+    let docs: Vec<Document> = group.iter().map(|(_, d)| d.clone()).collect();
+    let full = into.and_then(|b| full_for(spec, b, &docs));
+    with_stats(shared, coll.id, |s| {
+        if let Route::Query { .. } = route {
+            s.looked_up(first, into.is_some());
+            if into.is_some() {
+                s.landed(first, full.is_some(), pass);
+            }
+        }
+        if let Some(why) = full {
+            s.closed_in_attempt(why);
+        }
+        s.provisional(first, pass);
+    });
+    Ok(())
 }
 
 /// What every group of an insert of measurements shares: the collection, its buckets, the
@@ -412,17 +327,38 @@ struct Batch<'a> {
     stmt: u32,
 }
 
+/// The number of the next new bucket of the window and meta value of `first` after bucket `n`,
+/// reading the stored ones the first time.
+fn after<B: Backend + ?Sized>(
+    backend: &mut B,
+    (coll, spec): (&CollectionEntry, &BucketSpec),
+    first: [u8; 12],
+    buckets: &mut Option<Vec<Stored>>,
+    n: u32,
+) -> Result<u32, CommandError> {
+    let stored = match buckets.take() {
+        Some(b) => b,
+        None => window_buckets(backend, coll, spec, first)?,
+    };
+    let free = next_free(&stored).max(n + 1);
+    *buckets = Some(stored);
+    Ok(free)
+}
+
 /// Writes `group`, measurements of one window and meta value whose first bucket is `first`,
-/// into `total`: in its buckets from the open one on, each write the measurements one bucket
-/// takes, which go in or fail together (measured on a `refnode` 9.0.4 on 02-11-2026). Unordered,
-/// a failed write fails the rest of the group with its error; ordered, the measurements before
-/// the failing one go in and it fails alone, as the update of their bucket. Whether one failed.
+/// into `total`: from the bucket the catalog routes it to, and past a full one into a new
+/// bucket, each write the measurements one bucket takes, which go in or fail together
+/// (measured on a `refnode` 9.0.4 on 02-11-2026). Unordered, a failed write fails the rest of the
+/// group with its error; ordered, the measurements before the failing one go in and it fails
+/// alone, as the update of their bucket. A bucket whose write failed leaves the catalog. Whether
+/// one failed.
 fn write_group<B: Backend + ?Sized>(
     backend: &mut B,
     shared: &super::Shared,
     w: &mut Writer,
     batch: &Batch<'_>,
     (group, first): (&[(usize, Document)], [u8; 12]),
+    pass: &mut Pass,
     total: &mut MutationResult,
 ) -> Result<bool, CommandError> {
     let Batch { coll, spec, ordered, rules, stmt } = *batch;
@@ -434,16 +370,35 @@ fn write_group<B: Backend + ?Sized>(
     let (t, meta) = (spec.time_of(&pending[0].1), spec.meta_of(&pending[0].1).cloned());
     let t = t.map_err(|e| CommandError::new(INTERNAL_ERROR, format!("{e:?}")))?;
     let key = window_meta(first);
-    let (mut n, mut route) = {
-        let mut g = super::lock(shared);
-        let stats = g.timeseries.entry(coll.id).or_default();
-        (stats.open_bucket(key), Some(stats.route(first)))
+    let (route, open) = with_stats(shared, coll.id, |s| (s.route(first, pass), s.open_bucket(key)));
+    let mut buckets: Option<Vec<Stored>> = None;
+    // A bucket a lookup found, whose room the first write tells.
+    let mut landing = false;
+    let mut n = match route {
+        Route::Open => open,
+        Route::New => {
+            let stored = window_buckets(backend, coll, spec, first)?;
+            let n = next_free(&stored);
+            buckets = Some(stored);
+            n
+        }
+        Route::Query { .. } => {
+            let stored = window_buckets(backend, coll, spec, first)?;
+            let landed =
+                lookup(&stored, earliest(spec, group), spec.meta_field.is_some()).map(|b| b.n);
+            with_stats(shared, coll.id, |s| s.looked_up(first, landed.is_some()));
+            landing = landed.is_some();
+            let n = landed.unwrap_or_else(|| next_free(&stored));
+            buckets = Some(stored);
+            n
+        }
     };
+    let mut first_commit = Some(route);
     let mut closing = None;
     // Ordered, the failure that waits for the measurements before it to go in.
     let mut failure: Option<WriteError> = None;
     while !pending.is_empty() {
-        if n == MAX_BUCKETS {
+        if n >= MAX_BUCKETS {
             return Err(CommandError::new(WRITE_CONFLICT, "every bucket of the window is full"));
         }
         let bucket = spec
@@ -459,27 +414,31 @@ fn write_group<B: Backend + ?Sized>(
         let r = match w.write(backend, &b, stmt.saturating_add(at)) {
             Err(e) if super::mutation::timeseries::is_refusal(&e) => {
                 closing = super::mutation::timeseries::refusal(&e);
-                if closing == Some(Full::Schema) {
-                    super::lock(shared)
-                        .timeseries
-                        .entry(coll.id)
-                        .or_default()
-                        .closed_for_schema(key, n);
-                }
-                n += 1;
+                let landed = std::mem::take(&mut landing);
+                with_stats(shared, coll.id, |s| {
+                    if closing == Some(Full::Schema) {
+                        s.closed_for_schema(key, n);
+                    }
+                    if landed {
+                        s.landed(first, true, pass);
+                    }
+                });
+                n = after(backend, (coll, spec), first, &mut buckets, n)?;
                 continue;
             }
             written => written?,
         };
+        if std::mem::take(&mut landing) {
+            with_stats(shared, coll.id, |s| s.landed(first, false, pass));
+        }
         if r.n > 0 && !r.retried {
             let existed = r.n_modified & BUCKET_EXISTED != 0;
             let mut g = super::lock(shared);
             let stats = g.timeseries.entry(coll.id).or_default();
-            if let Some(route) = route.take() {
-                let full = closing.is_some();
-                stats.routed(bucket, route, existed, full);
+            if let Some(route) = first_commit.take() {
+                stats.first_commit(route, existed, closing.is_some());
             }
-            stats.commit(bucket, n, existed, closing, r.n);
+            stats.commit((bucket, n), existed, closing, r.n, pass);
             if r.n_modified & KEPT_OPEN_LARGE != 0 {
                 stats.kept_open_large += 1;
             }
@@ -497,6 +456,7 @@ fn write_group<B: Backend + ?Sized>(
         total.retried |= r.retried;
         total.warnings.extend(r.warnings);
         if let Some(e) = r.errors.into_iter().next() {
+            with_stats(shared, coll.id, |s| s.cleared(bucket));
             if ordered {
                 let mut error = e.error;
                 if e.index > 0 && !error.errmsg.starts_with(UPDATE_FAILED) {
@@ -513,7 +473,9 @@ fn write_group<B: Backend + ?Sized>(
         }
         let taken = usize::try_from(r.n).unwrap_or(0).min(pending.len());
         pending = &pending[taken..];
-        n += 1;
+        if !pending.is_empty() {
+            n = after(backend, (coll, spec), first, &mut buckets, n)?;
+        }
     }
     let failed = failure.is_some();
     total.errors.extend(failure);
