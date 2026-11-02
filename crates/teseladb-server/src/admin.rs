@@ -691,6 +691,32 @@ impl AdminBackend for NodeAdmin {
     }
 }
 
+/// `teseladb admin topology set <mode> [--name <set>] [--primary <host>]` (018 FR-007): the
+/// cluster parameter `topologyPresentation`, as `setClusterParameter` sets it.
+fn topology_set(
+    mode: &str,
+    name: Option<String>,
+    primary: Option<String>,
+) -> Result<AdminAction, String> {
+    use teseladb_wire::commands::presentation::{MODE, PRIMARY, SET_NAME, TOPOLOGY_PRESENTATION};
+    if teseladb_topology::replset::PresentationMode::from_name(mode).is_none() {
+        return Err(format!("not a presentation: {mode} (refrouter or replicaset)"));
+    }
+    let mut value = Document::new().with(MODE, mode);
+    if let Some(n) = name {
+        value.push(SET_NAME, n);
+    }
+    if let Some(p) = primary {
+        value.push(PRIMARY, p);
+    }
+    let bytes = value.to_bytes().map_err(|e| e.to_string())?;
+    let raw = teseladb_bson::RawDoc::from_bytes(&bytes).map_err(|e| e.to_string())?;
+    Ok(AdminAction::ConfigSet {
+        name: TOPOLOGY_PRESENTATION.to_owned(),
+        value: teseladb_bson::extjson::to_relaxed(raw),
+    })
+}
+
 /// What `teseladb admin` asks for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AdminAction {
@@ -865,7 +891,7 @@ pub fn parse(args: &[String]) -> Result<AdminOpts, String> {
                 }
             }
             "collection" | "at" | "ttl" | "core" | "out" | "from" | "user" | "db" | "role"
-            | "expires-after-days" => {
+            | "expires-after-days" | "name" | "primary" => {
                 opts.push((name.to_owned(), value));
             }
             other => return Err(format!("unknown option --{other}")),
@@ -908,6 +934,10 @@ pub fn parse(args: &[String]) -> Result<AdminOpts, String> {
             name: (*name).to_owned(),
             value: (*value).to_owned(),
         })?,
+        ["topology", "set", mode] => {
+            allow(&["name", "primary"])?;
+            topology_set(mode, opt("name"), opt("primary"))?
+        }
         ["cert", "rotate"] => allow(&[]).map(|()| AdminAction::CertRotate)?,
         ["backup"] => {
             allow(&["at", "out"])?;
@@ -977,6 +1007,7 @@ usage: teseladb admin [--node <ip:port>] [--format text|json] [--dbpath <dir>]
   node remove <node>
   config get <parameter>
   config set <parameter> '<Extended JSON document>'
+  topology set <refrouter|replicaset> [--name <set>] [--primary <host:port>]
   token create [--ttl <90s|30m|1h|2d>]
   cert rotate
   backup [--at <seconds.increment|now>] --out <dir>
@@ -1522,6 +1553,17 @@ mod tests {
         let odd = Document::new().with("token", 5i64);
         assert_eq!(text(&AdminAction::TokenCreate { ttl }, Some(&odd), b""), "5\n");
         assert_eq!(text(&AdminAction::CertRotate, None, b""), "certificates rotated\n");
+        // `topology set` is `setClusterParameter` of `topologyPresentation` (018 FR-007).
+        let words = |w: &[&str]| parse(&w.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>());
+        let set = words(&["topology", "set", "replicaset", "--name", "rs0", "--primary", "h:1"]);
+        assert_eq!(
+            set.map(|o| o.action),
+            Ok(AdminAction::ConfigSet {
+                name: "topologyPresentation".into(),
+                value: r#"{"mode":"replicaset","setName":"rs0","primary":"h:1"}"#.into(),
+            })
+        );
+        assert!(words(&["topology", "set", "other"]).is_err());
         // `metrics` prints Prometheus' text as the port gives it.
         let metrics = parse(&["metrics".to_owned()]).map(|o| o.action);
         assert_eq!(metrics, Ok(AdminAction::Metrics));
