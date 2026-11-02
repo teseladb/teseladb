@@ -810,7 +810,7 @@ fn fn_to_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
         Kind::Func(Func::Closure { def, .. }) => def.source.to_string(),
         Kind::Func(Func::Native(_, n)) => format!("function {n}() {{\n    [native code]\n}}"),
         // A bound function and a callable proxy (measured on a `refrouter` 9.0.4 on 02-11).
-        Kind::Func(Func::Bound(..)) | Kind::Proxy(_, true) => {
+        Kind::Func(Func::Bound(..)) | Kind::Proxy(_, true, _) => {
             "function () {\n    [native code]\n}".to_owned()
         }
         _ => return it.type_error("Function.prototype.toString called on incompatible object"),

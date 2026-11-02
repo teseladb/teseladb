@@ -119,6 +119,14 @@ pub fn own_prop(o: &ObjRef, key: &str) -> Option<Prop> {
                 };
             }
         }
+        Kind::Arguments(Some(m)) => {
+            // An element tied to its parameter has the parameter's value.
+            let current = m.name(key).and_then(|n| m.value(&n));
+            return b.get_own(key).cloned().map(|p| match current {
+                Some(value) => Prop { value, ..p },
+                None => p,
+            });
+        }
         _ => {}
     }
     b.get_own(key).cloned()
@@ -279,7 +287,27 @@ pub fn define_own(it: &mut Interp, o: &ObjRef, key: &str, d: &Desc) -> R<()> {
     if let Some(c) = d.configurable {
         p.configurable = c;
     }
-    it.define(o, key, p)
+    let Some((m, n)) = mapped_element(o, key) else { return it.define(o, key, p) };
+    // An element of a mapped `arguments` that stays tied to its parameter (§10.4.4.2).
+    if d.is_data() && d.value.is_none() && d.writable == Some(false) {
+        p.value = m.value(&n).unwrap_or(Val::Undef);
+    }
+    it.define(o, key, p)?;
+    if let Some(v) = &d.value {
+        m.set(&n, v.clone());
+    }
+    if d.is_accessor() || d.writable == Some(false) {
+        m.unmap(key);
+    }
+    Ok(())
+}
+
+/// The mapping and parameter of element `key` of a mapped `arguments` object.
+fn mapped_element(o: &ObjRef, key: &str) -> Option<(Rc<crate::interp::Mapped>, Name)> {
+    let b = o.borrow();
+    let Kind::Arguments(Some(m)) = &b.kind else { return None };
+    let n = m.name(key)?;
+    Some((m.clone(), n))
 }
 
 /// `Object.defineProperty` on an array's `length` or one of its elements.
