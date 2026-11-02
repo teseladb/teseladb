@@ -445,6 +445,11 @@ impl MemIndex {
         Ok(scores)
     }
 
+    /// Whether some document has analyzed text at `path`.
+    pub(crate) fn has_text(&self, path: &str) -> bool {
+        self.fields.contains_key(path)
+    }
+
     /// The positions of `term` in the field at `path`, by document.
     pub(crate) fn positions(&self, path: &str, term: &str) -> Option<&BTreeMap<u32, Vec<u32>>> {
         self.fields.get(path)?.postings.get(term)

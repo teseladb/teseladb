@@ -718,9 +718,18 @@ fn m3() -> MemIndex {
         Document::new().with("dynamic", true).with("fields", Document::new().with("v", v)),
     );
     let docs = vec![
-        Document::new().with("t", "el gato negro come").with("v", arr(vec![1.into(), 0.into()])),
-        Document::new().with("t", "perro negro").with("v", arr(vec![0.into(), 1.into()])),
-        Document::new().with("t", "gato").with("v", arr(vec![1.into(), 1.into()])),
+        Document::new()
+            .with("t", "el gato negro come")
+            .with("v", arr(vec![1.into(), 0.into()]))
+            .with("a", "Gatopardo"),
+        Document::new()
+            .with("t", "perro negro")
+            .with("v", arr(vec![0.into(), 1.into()]))
+            .with("a", "gato montes"),
+        Document::new()
+            .with("t", "gato")
+            .with("v", arr(vec![1.into(), 1.into()]))
+            .with("a", "Perro"),
     ];
     build(def, docs)
 }
@@ -1006,4 +1015,238 @@ fn span_errors_name_the_option() {
     assert!(found(&idx, &op("span", d)).is_ok());
     let d = Document::new().with("or", Document::new().with("clauses", arr(vec![])));
     assert_eq!(found(&idx, &op("span", d)), Ok(vec![]));
+}
+
+fn qs(q: &str) -> Document {
+    op("queryString", Document::new().with("defaultPath", "t").with("query", q))
+}
+
+#[test]
+fn query_string_joins_clauses_as_reflib_does() {
+    let idx = m3();
+    let q = |text: &str| found(&idx, &qs(text));
+    let gato = vec![(3, 0.27881568670272827), (1, 0.16532790660858154)];
+    let gato_or_perro =
+        vec![(2, 0.4735037684440613), (3, 0.27881568670272827), (1, 0.16532790660858154)];
+    assert_eq!(q("gato AND negro"), Ok(vec![(1, 0.3306558132171631)]));
+    assert_eq!(q("gato && negro"), Ok(vec![(1, 0.3306558132171631)]));
+    assert_eq!(q("gato OR perro"), Ok(gato_or_perro.clone()));
+    assert_eq!(q("gato || perro"), Ok(gato_or_perro));
+    assert_eq!(q("gato NOT negro"), Ok(vec![(3, 0.27881568670272827)]));
+    assert_eq!(q("!negro gato"), Ok(vec![(3, 0.27881568670272827)]));
+    assert_eq!(q("+gato -negro"), Ok(vec![(3, 0.27881568670272827)]));
+    assert_eq!(
+        q("gato negro"),
+        Ok(vec![(1, 0.3306558132171631), (3, 0.27881568670272827), (2, 0.22689829766750336)])
+    );
+    assert_eq!(q("\"perro negro\""), Ok(vec![(2, 0.700402021408081)]));
+    assert_eq!(q("\"gato come\"~1"), Ok(vec![(1, 0.309628963470459)]));
+    assert_eq!(q("\"el come\"~2"), Ok(vec![(1, 0.30047285556793213)]));
+    assert_eq!(q("\"gato negro\"^3"), Ok(vec![(1, 0.9919675588607788)]));
+    assert_eq!(q("t:gat*"), Ok(ones(&[1, 3])));
+    assert_eq!(q("gat?"), Ok(ones(&[1, 3])));
+    assert_eq!(q("/ga.o/"), Ok(ones(&[1, 3])));
+    assert_eq!(q("[a TO h]"), Ok(ones(&[1, 3])));
+    assert_eq!(q("{come TO gato}"), Ok(ones(&[1])));
+    assert_eq!(q("[* TO come]"), Ok(ones(&[1])));
+    assert_eq!(q("[negro TO *]"), Ok(ones(&[1, 2])));
+    assert_eq!(q("gatp~1"), Ok(vec![(3, 0.2091117799282074), (1, 0.12399594485759735)]));
+    assert_eq!(q("gatp~"), Ok(vec![(3, 0.2091117799282074), (1, 0.12399594485759735)]));
+    assert_eq!(q("GATO"), Ok(gato.clone()));
+    assert_eq!(q("g\\ato"), Ok(gato.clone()));
+    assert_eq!(
+        q("gato^2 perro"),
+        Ok(vec![(3, 0.5576313734054565), (2, 0.4735037684440613), (1, 0.3306558132171631)])
+    );
+    assert_eq!(
+        q("(gato OR perro) AND negro"),
+        Ok(vec![(2, 0.7004020810127258), (1, 0.3306558132171631)])
+    );
+    assert_eq!(q("(gato)^2"), Ok(vec![(3, 0.5576313734054565), (1, 0.3306558132171631)]));
+    assert_eq!(q("gato OR perro AND negro"), Ok(vec![(2, 0.7004020810127258)]));
+    assert_eq!(q("a:gato"), Ok(vec![(2, 0.3701242208480835)]));
+    assert_eq!(q("NOT gato"), Ok(vec![]));
+    assert_eq!(q("*"), Ok(ones(&[1, 2, 3])));
+    let boost = Document::new().with("boost", Document::new().with("value", 2));
+    let spec = op(
+        "queryString",
+        Document::new().with("defaultPath", "t").with("query", "gato").with("score", boost),
+    );
+    assert_eq!(found(&idx, &spec), Ok(vec![(3, 0.5576313734054565), (1, 0.3306558132171631)]));
+    let constant = Document::new().with("constant", Document::new().with("value", 4));
+    let spec = op(
+        "queryString",
+        Document::new().with("defaultPath", "t").with("query", "gato").with("score", constant),
+    );
+    assert_eq!(found(&idx, &spec), Ok(vec![(1, 4.0), (3, 4.0)]));
+}
+
+#[test]
+fn query_string_errors_are_the_parser_messages() {
+    let idx = m3();
+    for (query, message) in [
+        (
+            "(gato",
+            "Cannot parse '(gato': Encountered \"<EOF>\" at line 1, column 5.\nWas expecting one of:\n    <AND> ...\n    <OR> ...\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \")\" ...\n    \"*\" ...\n    \"^\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <FUZZY_SLOP> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    ",
+        ),
+        (
+            "gato)",
+            "Cannot parse 'gato)': Encountered \" \")\" \") \"\" at line 1, column 4.\nWas expecting one of:\n    <EOF> \n    <AND> ...\n    <OR> ...\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    \"^\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <FUZZY_SLOP> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    ",
+        ),
+        (
+            "AND",
+            "Cannot parse 'AND': Encountered \" <AND> \"AND \"\" at line 1, column 0.\nWas expecting one of:\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    <TERM> ...\n    ",
+        ),
+        (
+            "gato AND",
+            "Cannot parse 'gato AND': Encountered \"<EOF>\" at line 1, column 8.\nWas expecting one of:\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    <TERM> ...\n    \"*\" ...\n    ",
+        ),
+        (
+            "\"gato",
+            "Cannot parse '\"gato': Lexical error at line 1, column 6.  Encountered: <EOF> after prefix \"\\\"gato\" (in lexical state 2)",
+        ),
+        (
+            "t:",
+            "Cannot parse 't:': Encountered \"<EOF>\" at line 1, column 2.\nWas expecting one of:\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    ",
+        ),
+        (
+            "^2",
+            "Cannot parse '^2': Encountered \" \"^\" \"^ \"\" at line 1, column 0.\nWas expecting one of:\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    <TERM> ...\n    ",
+        ),
+        (
+            "gato^",
+            "Cannot parse 'gato^': Encountered \"<EOF>\" at line 1, column 5.\nWas expecting:\n    <NUMBER> ...\n    ",
+        ),
+        ("gato^x", "Cannot parse 'gato^x': Lexical error at line 1, column 7.  Encountered: <EOF>"),
+        (
+            "[a TO",
+            "Cannot parse '[a TO': Encountered \"<EOF>\" at line 1, column 5.\nWas expecting one of:\n    \"TO\" ...\n    <RANGE_QUOTED> ...\n    <RANGE_GOOP> ...\n    ",
+        ),
+        (
+            ":gato",
+            "Cannot parse ':gato': Encountered \" \":\" \": \"\" at line 1, column 0.\nWas expecting one of:\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    <TERM> ...\n    ",
+        ),
+    ] {
+        assert_eq!(found(&idx, &qs(query)).unwrap_err(), message, "{query}");
+    }
+    let err = |d: Document| found(&idx, &op("queryString", d)).unwrap_err();
+    assert_eq!(
+        err(Document::new().with("query", "gato")),
+        "\"queryString.defaultPath\" is required"
+    );
+    assert_eq!(err(Document::new().with("defaultPath", "t")), "\"queryString.query\" is required");
+    assert_eq!(
+        err(Document::new().with("defaultPath", "t").with("query", "gato").with("x", 1)),
+        "\"queryString\" unrecognized field \"x\""
+    );
+    assert_eq!(
+        err(Document::new().with("defaultPath", 5).with("query", "gato")),
+        "\"queryString.defaultPath\" must be a string"
+    );
+    assert_eq!(
+        err(Document::new().with("defaultPath", "t").with("query", 5)),
+        "\"queryString.query\" must be a string"
+    );
+    assert!(found(&idx, &qs("/ga")).unwrap_err().starts_with("Cannot parse '/ga': Lexical error"));
+    assert!(found(&idx, &qs("[a b c]")).unwrap_err().contains("<RANGE_GOOP>"));
+    assert!(found(&idx, &qs("")).unwrap_err().contains("column 0"));
+    assert!(found(&idx, &qs("gato OR")).unwrap_err().contains("column 7"));
+}
+
+fn mlt(like: impl Into<Value>) -> Document {
+    op("moreLikeThis", Document::new().with("like", like))
+}
+
+#[test]
+fn more_like_this_asks_for_the_terms_of_the_like_documents() {
+    let idx = m3();
+    let m = |like: Value| found(&idx, &mlt(like));
+    let t = |text: &str| Value::from(Document::new().with("t", text));
+    let gato = vec![(3, 0.27881568670272827), (1, 0.16532790660858154)];
+    assert_eq!(
+        m(t("gato negro")),
+        Ok(vec![(1, 0.3306558132171631), (3, 0.27881568670272827), (2, 0.22689829766750336)])
+    );
+    assert_eq!(m(arr(vec![t("gato")])), Ok(gato.clone()));
+    assert_eq!(m(t("gato gato perro")), Ok(gato.clone()));
+    assert_eq!(m(arr(vec![t("gato"), t("perro")])), Ok(gato.clone()));
+    assert_eq!(m(Document::new().with("t", "gato").with("a", "perro").into()), Ok(gato.clone()));
+    assert_eq!(m(Document::new().with("t", 5).into()), Ok(vec![]));
+    assert_eq!(
+        m(Document::new().with("t", arr(vec!["gato".into(), "perro".into()])).into()),
+        Ok(gato.clone())
+    );
+    assert_eq!(m(Document::new().with("zz", "gato").into()), Ok(vec![]));
+    assert_eq!(m(t("come")), Ok(vec![]));
+    assert_eq!(m(t("negro")), Ok(vec![(2, 0.22689829766750336), (1, 0.16532790660858154)]));
+    assert_eq!(
+        m(t("el gato negro come")),
+        Ok(vec![(1, 0.3306558132171631), (3, 0.27881568670272827), (2, 0.22689829766750336)])
+    );
+    assert_eq!(m(Document::new().with("x", Document::new().with("t", "gato")).into()), Ok(vec![]));
+    let boost = Document::new().with("boost", Document::new().with("value", 2));
+    let spec = op("moreLikeThis", Document::new().with("like", t("gato")).with("score", boost));
+    assert_eq!(found(&idx, &spec), Ok(vec![(3, 0.5576313734054565), (1, 0.3306558132171631)]));
+    let constant = Document::new().with("constant", Document::new().with("value", 2));
+    let spec = op("moreLikeThis", Document::new().with("like", t("gato")).with("score", constant));
+    assert_eq!(found(&idx, &spec), Ok(vec![(1, 2.0), (3, 2.0)]));
+    let err = |d: Document| found(&idx, &op("moreLikeThis", d)).unwrap_err();
+    assert_eq!(err(Document::new()), "\"moreLikeThis.like\" is required");
+    assert_eq!(err(Document::new().with("like", 5)), "\"moreLikeThis.like\" must be a document");
+    assert_eq!(
+        err(Document::new().with("like", arr(vec![5.into()]))),
+        "\"moreLikeThis.like\" must be a document"
+    );
+    assert_eq!(
+        err(Document::new().with("like", arr(vec![]))),
+        "\"moreLikeThis.like\" cannot be empty"
+    );
+    assert_eq!(
+        err(Document::new().with("like", t("gato")).with("x", 1)),
+        "\"moreLikeThis\" unrecognized field \"x\""
+    );
+}
+
+#[test]
+fn more_like_this_keeps_terms_in_two_documents() {
+    // The corpus of `m5.js`: "uno" in 6 of 12 documents, "dos" in 3, "tres" in 1, "cuatro" in
+    // all.
+    let def = Document::new().with("mappings", Document::new().with("dynamic", true));
+    let docs: Vec<Document> = (0..12)
+        .map(|i| {
+            let mut t = String::new();
+            for (n, w) in [(6, "uno "), (3, "dos "), (1, "tres ")] {
+                if i < n {
+                    t.push_str(w);
+                }
+            }
+            t.push_str("cuatro");
+            Document::new().with("t", t)
+        })
+        .collect();
+    let idx = build(def, docs);
+    let m = |text: &str| found(&idx, &mlt(Document::new().with("t", text)));
+    assert_eq!(m("tres"), Ok(vec![]));
+    assert_eq!(
+        m("dos"),
+        Ok(vec![(2, 0.4732475280761719), (3, 0.4732475280761719), (1, 0.40206271409988403)])
+    );
+    let all = m("uno dos tres cuatro").unwrap();
+    assert_eq!(
+        &all[..3],
+        &[(2, 0.7373802065849304), (3, 0.7373802065849304), (1, 0.6264651417732239)]
+    );
+    assert_eq!(all[3], (4, 0.32095804810523987));
+    assert_eq!(all.len(), 12);
+    assert_eq!(all[11].1, 0.021899890154600143);
+    let twice = m("uno uno dos").unwrap();
+    assert_eq!(
+        &twice[..4],
+        &[
+            (2, 0.723235011100769),
+            (3, 0.723235011100769),
+            (1, 0.6144476532936096),
+            (4, 0.30376967787742615)
+        ]
+    );
 }

@@ -108,6 +108,18 @@ enum Operator {
     Values(values::ValueOp),
     /// `knnBeta`.
     Knn(knn::Knn),
+    /// The documents with a term of `path` between the bounds, each with whether it is
+    /// inclusive (`queryString`'s `[a TO b]`): a constant score.
+    TermRange {
+        path: String,
+        lower: Option<(String, bool)>,
+        upper: Option<(String, bool)>,
+        score: Score,
+    },
+    /// Nothing (a `queryString` of only excluded clauses).
+    Empty,
+    /// An operator whose scores `score` changes as a whole.
+    Scored(Box<Operator>, Score),
     /// `span`, with its score option.
     Span(span::Span, Score),
     Compound {
@@ -185,6 +197,8 @@ fn parse(index: &MemIndex, name: &str, v: &Value, path: &str) -> Result<Operator
         "term" | "search" => parse_term(index, d, path),
         "knnBeta" => knn::parse(index, d, path),
         "span" => span::parse(d, path),
+        "queryString" => query_string::parse(index, d, path),
+        "moreLikeThis" => more_like::parse(index, d, path),
         "in" => values::parse_in(d, path),
         "range" => values::parse_range(d, path),
         "near" => values::parse_near(d, path),
@@ -501,6 +515,20 @@ fn eval(index: &MemIndex, op: &Operator) -> Result<BTreeMap<u32, f32>, SearchErr
             let s = p.scores(index, boost_of(p.score()))?;
             rescored(index, s, p.score())
         }
+        Operator::Empty => Ok(BTreeMap::new()),
+        Operator::Scored(op, score) => {
+            let s = eval(index, op)?;
+            rescored(index, s, score)
+        }
+        Operator::TermRange { path, lower, upper, score } => {
+            let inside = |t: &str| {
+                lower.as_ref().is_none_or(|(l, incl)| t > l.as_str() || (*incl && t == l))
+                    && upper.as_ref().is_none_or(|(u, incl)| t < u.as_str() || (*incl && t == u))
+            };
+            let boost = boost_of(score);
+            let s = index.matching_terms(path, inside).into_iter().map(|d| (d, boost)).collect();
+            rescored(index, s, score)
+        }
         Operator::Span(sp, score) => {
             let s = sp.scores(index, boost_of(score))?;
             rescored(index, s, score)
@@ -588,7 +616,9 @@ fn eval_compound(
 
 mod function;
 mod knn;
+mod more_like;
 mod pattern;
+mod query_string;
 mod span;
 mod values;
 

@@ -75,6 +75,16 @@ pub(super) fn parse(
 }
 
 impl Pattern {
+    /// The pattern of `query` on `paths` (`regex` or `wildcard` syntax).
+    pub(super) fn new(
+        regex: bool,
+        query: Vec<String>,
+        paths: Vec<String>,
+        score: Score,
+    ) -> Pattern {
+        Pattern { regex, query, paths, score }
+    }
+
     /// The documents each query and path match, with the number of matches times `boost`.
     pub(super) fn scores(
         &self,
