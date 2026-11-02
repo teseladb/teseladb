@@ -15,7 +15,7 @@ use teseladb_fle::write::{self as fw, Added, EcocEntry};
 use teseladb_meta::catalog::Namespace;
 
 use super::crud::write_error;
-use super::fle::{CtxEsc, ENCRYPTION_INFORMATION, binary, first_batch, from_fle, sub_command};
+use super::fle::{CtxEsc, binary, first_batch, from_fle, sub_command};
 use super::{Backend, Ctx};
 use crate::error::{BAD_VALUE, Code, CommandError};
 
@@ -29,21 +29,21 @@ const FAM_NEW: Code = Code { code: 6_371_402, name: "Location6371402" };
 /// The words a `refnode` 9.0.4 puts before an error of the write it commits in its own transaction.
 pub const COMMITTING: &str = "Command error committing internal transaction :: caused by :: ";
 
-/// Runs write command `ctx` on `ns`.
+/// Runs write command `ctx`, which carries `encryptionInformation`, on `ns`. A write without it
+/// takes the plain path: only an insert has checks there (`check_plain`).
 pub fn run<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
     ns: &Namespace,
     config: &EncryptedFieldConfig,
 ) -> Result<Document, CommandError> {
-    let processed = ctx.cmd.get(ENCRYPTION_INFORMATION).is_some();
     match ctx.name() {
-        "insert" => insert(ctx, ns, config, processed),
-        "update" => update(ctx, ns, config, processed),
-        "delete" if processed => {
+        "insert" => insert(ctx, ns, config),
+        "update" => update(ctx, ns, config),
+        "delete" => {
             let cmd = rewritten(ctx, config)?;
             sub_command(ctx, &cmd)
         }
-        "findAndModify" | "findandmodify" if processed => find_and_modify(ctx, ns, config),
+        "findAndModify" | "findandmodify" => find_and_modify(ctx, ns, config),
         _ => {
             let cmd = ctx.cmd.clone();
             sub_command(ctx, &cmd)
@@ -129,10 +129,15 @@ fn write_metadata<B: Backend + ?Sized>(
 }
 
 /// The first write error of a reply as an error.
-fn checked(reply: Document) -> Result<Document, CommandError> {
-    let Some(Value::Array(errors)) = reply.get("writeErrors") else { return Ok(reply) };
-    let Some(Value::Document(e)) = errors.first() else { return Ok(reply) };
-    Err(error_of(e))
+pub(super) fn checked(reply: Document) -> Result<Document, CommandError> {
+    let first = match reply.get("writeErrors") {
+        Some(Value::Array(errors)) => errors.first().and_then(Value::as_document),
+        _ => None,
+    };
+    match first {
+        Some(e) => Err(error_of(e)),
+        None => Ok(reply),
+    }
 }
 
 /// A write error document as an error.
@@ -153,6 +158,15 @@ fn error_of(e: &Document) -> CommandError {
     err
 }
 
+/// The checks of a document an insert without `encryptionInformation` brings to a collection
+/// with encrypted fields: no `__safeContent__`, and the implicit schema.
+pub fn check_plain(config: &EncryptedFieldConfig, doc: &Document) -> Result<(), CommandError> {
+    if doc.get(SAFE_CONTENT).is_some() {
+        return Err(safe_content_error());
+    }
+    validate(config, doc)
+}
+
 fn safe_content_error() -> CommandError {
     CommandError::new(BAD_VALUE, format!("Cannot insert a document with field name {SAFE_CONTENT}"))
 }
@@ -168,10 +182,10 @@ fn insert<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
     ns: &Namespace,
     config: &EncryptedFieldConfig,
-    processed: bool,
 ) -> Result<Document, CommandError> {
+    // No list, or an empty one, gets the command's own errors.
     let docs = match ctx.cmd.get("documents") {
-        Some(Value::Array(d)) => d.clone(),
+        Some(Value::Array(d)) if !d.is_empty() => d.clone(),
         _ => {
             let cmd = ctx.cmd.clone();
             return sub_command(ctx, &cmd);
@@ -185,7 +199,7 @@ fn insert<B: Backend + ?Sized>(
             let cmd = ctx.cmd.clone();
             return sub_command(ctx, &cmd);
         };
-        match insert_one(ctx, ns, config, d, processed) {
+        match insert_one(ctx, ns, config, d) {
             Ok(()) => n += 1,
             Err(Failure::Command(e)) => return Err(e),
             Err(Failure::Write(e)) => {
@@ -221,30 +235,23 @@ fn insert_one<B: Backend + ?Sized>(
     ns: &Namespace,
     config: &EncryptedFieldConfig,
     doc: &Document,
-    processed: bool,
 ) -> Result<(), Failure> {
     if doc.get(SAFE_CONTENT).is_some() {
         return Err(Failure::Write(safe_content_error()));
     }
     let mut doc = doc.clone();
-    if processed {
-        let (added, positions) = transform(ctx, config, &mut doc)?;
-        if !added.tags.is_empty() {
-            fw::add_tags(&mut doc, &added.tags);
-        }
-        validate(config, &doc).map_err(|e| Failure::Write(committing(e)))?;
-        write_metadata(ctx, config, &positions, &added.ecoc)?;
-    } else {
-        validate(config, &doc).map_err(Failure::Write)?;
+    let (added, positions) = transform(ctx, config, &mut doc)?;
+    if !added.tags.is_empty() {
+        fw::add_tags(&mut doc, &added.tags);
     }
+    validate(config, &doc).map_err(|e| Failure::Write(committing(e)))?;
+    write_metadata(ctx, config, &positions, &added.ecoc)?;
     let mut cmd = Document::new()
         .with("insert", ns.coll.as_str())
         .with("documents", vec![Value::Document(doc)]);
     copy_field(ctx.cmd, &mut cmd, "bypassDocumentValidation");
     let reply = sub_command(ctx, &cmd)?;
-    checked(reply)
-        .map(|_| ())
-        .map_err(|e| Failure::Write(if processed { committing(e) } else { e }))
+    checked(reply).map(|_| ()).map_err(|e| Failure::Write(committing(e)))
 }
 
 /// `e` as the error of a write the node committed in its own transaction.
@@ -413,38 +420,49 @@ fn update<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
     ns: &Namespace,
     config: &EncryptedFieldConfig,
-    processed: bool,
 ) -> Result<Document, CommandError> {
-    if !processed {
-        let cmd = ctx.cmd.clone();
-        return sub_command(ctx, &cmd);
-    }
     let cmd = rewritten(ctx, config)?;
     let statements = match cmd.get("updates") {
-        Some(Value::Array(s)) => s.clone(),
+        Some(Value::Array(s)) if !s.is_empty() => s.clone(),
         _ => return sub_command(ctx, &cmd),
     };
-    for s in &statements {
-        let Value::Document(s) = s else { continue };
-        if matches!(s.get("multi"), Some(Value::Boolean(true))) {
+    // A statement that is no document, or has no document in `q` or no document or pipeline in
+    // `u`, gets the command's own argument errors.
+    let mut parsed: Vec<(&Document, &Value)> = Vec::new();
+    for st in &statements {
+        match st {
+            Value::Document(d) => match (d.get("q"), d.get("u")) {
+                (Some(Value::Document(_)), Some(u @ (Value::Document(_) | Value::Array(_)))) => {
+                    parsed.push((d, u));
+                }
+                _ => return sub_command(ctx, &cmd),
+            },
+            _ => return sub_command(ctx, &cmd),
+        }
+    }
+    let mut checked: Vec<(&Document, &Document)> = Vec::new();
+    for (st, u) in parsed {
+        if matches!(st.get("multi"), Some(Value::Boolean(true))) {
             return Err(CommandError::new(
                 MULTI_UPDATE,
                 "FLE only supports single document updates",
             ));
         }
-        if matches!(s.get("u"), Some(Value::Array(_))) {
-            return Err(CommandError::new(
-                PIPELINE_UPDATE,
-                "FLE only supports modifier and replacement style updates",
-            ));
+        match u {
+            Value::Document(u) => checked.push((st, u)),
+            _ => {
+                return Err(CommandError::new(
+                    PIPELINE_UPDATE,
+                    "FLE only supports modifier and replacement style updates",
+                ));
+            }
         }
     }
     let ordered = !matches!(cmd.get("ordered"), Some(Value::Boolean(false)));
     let (mut n, mut modified) = (0i32, 0i32);
     let (mut upserted, mut errors) = (Vec::new(), Vec::new());
-    for (i, s) in statements.iter().enumerate() {
-        let Value::Document(s) = s else { continue };
-        match update_one(ctx, ns, config, s) {
+    for (i, (s, u)) in checked.into_iter().enumerate() {
+        match update_one(ctx, ns, config, s, u) {
             Ok(r) => {
                 n += r.n;
                 modified += r.modified;
@@ -488,10 +506,8 @@ fn update_one<B: Backend + ?Sized>(
     ns: &Namespace,
     config: &EncryptedFieldConfig,
     s: &Document,
+    u: &Document,
 ) -> Result<Updated, Failure> {
-    let Some(Value::Document(u)) = s.get("u") else {
-        return Err(Failure::Command(CommandError::new(BAD_VALUE, "update statement without u")));
-    };
     if touches_safe_content(u) {
         return Err(Failure::Write(CommandError::new(
             SAFE_CONTENT_UPDATE,

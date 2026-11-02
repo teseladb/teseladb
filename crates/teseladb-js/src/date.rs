@@ -163,7 +163,7 @@ fn parse_iso(s: &str) -> Option<f64> {
     let mut offset = 0.0;
     match b.get(i) {
         None => {}
-        Some(b'Z' | b'z') if i + 1 == b.len() => {}
+        Some(b'Z') if i + 1 == b.len() => {}
         Some(c @ (b'+' | b'-')) => {
             let h = num(i + 1, 2)?;
             let m = if b.get(i + 3) == Some(&b':') { num(i + 4, 2)? } else { num(i + 3, 2)? };
@@ -184,6 +184,21 @@ fn parse_iso(s: &str) -> Option<f64> {
     Some(time_clip(make(&parts) - offset))
 }
 
+/// The zones a date's text may name, with their offset in hours.
+const ZONES: [(&str, f64); 11] = [
+    ("UTC", 0.0),
+    ("UT", 0.0),
+    ("GMT", 0.0),
+    ("EST", -5.0),
+    ("EDT", -4.0),
+    ("CST", -6.0),
+    ("CDT", -5.0),
+    ("MST", -7.0),
+    ("MDT", -6.0),
+    ("PST", -8.0),
+    ("PDT", -7.0),
+];
+
 /// `Thu Jan 01 1970 01:00:00 GMT+0000`, `Thu, 01 Jan 1970 01:00:00 GMT`, `Jan 1, 1970` and the
 /// like: words for the month, numbers for the rest.
 fn parse_text(s: &str) -> Option<f64> {
@@ -191,7 +206,29 @@ fn parse_text(s: &str) -> Option<f64> {
     let mut nums: Vec<f64> = Vec::new();
     let mut time: Vec<f64> = Vec::new();
     let mut offset = 0.0;
+    let mut pm = None;
     for tok in s.split([' ', ',']).filter(|t| !t.is_empty()) {
+        // Measured on a `refrouter` 9.0.4 on 02-11: `1/2/2020`, `2020/1/2` and `2020-1-1` are dates
+        // (month first unless the year is), `AM`/`PM` move the hour, and the zones of North
+        // America have their offsets.
+        let parts: Vec<&str> = tok.split(['/', '-']).collect();
+        if parts.len() == 3
+            && parts.iter().all(|p| !p.is_empty() && p.bytes().all(|c| c.is_ascii_digit()))
+        {
+            let v: Vec<f64> = parts.iter().filter_map(|p| p.parse().ok()).collect();
+            let (y, m, d) = if v[0] > 31.0 { (v[0], v[1], v[2]) } else { (v[2], v[0], v[1]) };
+            month = Some(m - 1.0);
+            nums = vec![d, y];
+            continue;
+        }
+        if let Some(h) = ZONES.iter().find(|(z, _)| tok.eq_ignore_ascii_case(z)).map(|(_, h)| *h) {
+            offset = h * 3_600_000.0;
+            continue;
+        }
+        if tok.eq_ignore_ascii_case("AM") || tok.eq_ignore_ascii_case("PM") {
+            pm = Some(tok.eq_ignore_ascii_case("PM"));
+            continue;
+        }
         if let Some(m) =
             MONTHS.iter().position(|m| tok.len() >= 3 && tok[..3].eq_ignore_ascii_case(m))
         {
@@ -216,23 +253,36 @@ fn parse_text(s: &str) -> Option<f64> {
             return None;
         }
     }
-    let month = month?;
-    let (day, year) = match nums.as_slice() {
-        [a, b] if *a > 31.0 => (*b, *a),
-        [a, b] => (*a, *b),
+    let (month, day, year) = match (month, nums.as_slice()) {
+        (Some(m), [a, b]) if *a > 31.0 => (m, *b, *a),
+        (Some(m), [a, b]) => (m, *a, *b),
+        (None, [y, m, d]) if *y > 31.0 && (1.0..=12.0).contains(m) && (1.0..=31.0).contains(d) => {
+            (*m - 1.0, *d, *y)
+        }
         _ => return None,
     };
     let get = |i: usize| time.get(i).copied().unwrap_or(0.0);
-    Some(make(&[year, month, day, get(0), get(1), get(2), 0.0]) - offset)
+    let hour = match pm {
+        Some(true) if get(0) < 12.0 => get(0) + 12.0,
+        Some(false) if get(0) == 12.0 => 0.0,
+        _ => get(0),
+    };
+    Some(make(&[year, month, day, hour, get(1), get(2), 0.0]) - offset)
+}
+
+/// `Date.prototype.getTime called on incompatible Object`, with the method being called.
+fn incompatible_date(it: &Interp, this: &Val) -> crate::interp::Ctrl {
+    let class = crate::builtins::class_name(this);
+    it.error("TypeError", &format!("Date.prototype.{} called on incompatible {class}", it.native))
 }
 
 fn this_time(it: &Interp, this: &Val) -> R<f64> {
     match this {
         Val::Obj(o) => match &o.borrow().kind {
             Kind::Date(t) => Ok(*t),
-            _ => Err(crate::builtins::incompatible(it, "Date.prototype method")),
+            _ => Err(incompatible_date(it, this)),
         },
-        _ => Err(crate::builtins::incompatible(it, "Date.prototype method")),
+        _ => Err(incompatible_date(it, this)),
     }
 }
 
@@ -252,12 +302,19 @@ pub fn install(it: &mut Interp, g: &ObjRef) -> R<()> {
         &c,
         "UTC",
         |it, _, a| {
+            if a.is_empty() {
+                return Ok(Val::Num(f64::NAN));
+            }
             let mut parts = Vec::new();
             for x in a.iter().take(7) {
                 parts.push(it.number_of(x)?);
             }
             if parts.len() == 1 {
                 parts.push(0.0);
+            }
+            // A year from 0 to 99 is 1900 to 1999, as in the constructor.
+            if parts[0].is_finite() && (0.0..=99.0).contains(&parts[0].trunc()) {
+                parts[0] = 1900.0 + parts[0].trunc();
             }
             Ok(Val::Num(make(&parts)))
         },
@@ -380,19 +437,85 @@ pub fn install(it: &mut Interp, g: &ObjRef) -> R<()> {
             },
             0,
         ),
-        ("toLocaleString", date_to_string, 0),
-        (
-            "tojson",
-            |it, t, _| {
-                let x = this_time(it, t)?;
-                it.string(format!("ISODate(\"{}\")", iso(x)))
-            },
-            0,
-        ),
+        ("toLocaleString", |it, t, _| local_text(it, t, LocalPart::Both), 0),
+        ("toLocaleDateString", |it, t, _| local_text(it, t, LocalPart::Date), 0),
+        ("toLocaleTimeString", |it, t, _| local_text(it, t, LocalPart::Time), 0),
+        ("toTimeString", to_time_string, 0),
+        ("getYear", get_year, 0),
+        ("setYear", set_year, 1),
     ] {
         method(it, &proto, name, f, n)?;
     }
+    // `toGMTString` is the same function as `toUTCString`.
+    let utc = proto.borrow().get_own("toUTCString").map(|p| p.value.clone()).unwrap_or(Val::Undef);
+    it.define(&proto, "toGMTString", Prop::hidden(utc))?;
     Ok(())
+}
+
+/// What the locale methods write: the engine of the `refrouter` 9.0.4 has no ICU and uses the C
+/// locale (measured on 02-11): `Thu Jan  1 00:00:00 1970`, `01/01/1970`, `00:00:00`, and
+/// `InvalidDate` for an invalid date.
+enum LocalPart {
+    Both,
+    Date,
+    Time,
+}
+
+fn local_text(it: &mut Interp, this: &Val, part: LocalPart) -> R {
+    let x = this_time(it, this)?;
+    if x.is_nan() {
+        return Ok(Val::str("InvalidDate"));
+    }
+    let (y, m, d, h, mi, s, _, wd) = fields(x);
+    it.string(match part {
+        LocalPart::Both => {
+            format!("{} {} {d:>2} {h:02}:{mi:02}:{s:02} {y}", DAYS[wd], MONTHS[m as usize])
+        }
+        LocalPart::Date => format!("{:02}/{d:02}/{y}", m + 1),
+        LocalPart::Time => format!("{h:02}:{mi:02}:{s:02}"),
+    })
+}
+
+fn to_time_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+    let x = this_time(it, this)?;
+    if x.is_nan() {
+        return Ok(Val::str("Invalid Date"));
+    }
+    let (_, _, _, h, mi, s, _, _) = fields(x);
+    it.string(format!("{h:02}:{mi:02}:{s:02} GMT+0000 (UTC)"))
+}
+
+/// `getYear()`: the year minus 1900 (Annex B).
+fn get_year(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+    let x = this_time(it, this)?;
+    if x.is_nan() {
+        return Ok(Val::Num(f64::NAN));
+    }
+    Ok(Val::Num(fields(x).0 as f64 - 1900.0))
+}
+
+/// `setYear(y)`: a year from 0 to 99 is 1900 to 1999; an invalid date starts from 0 (Annex B).
+fn set_year(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    let t = this_time(it, this)?;
+    let y = it.number_of(&arg(a, 0))?;
+    if y.is_nan() {
+        return set_time(it, this, f64::NAN);
+    }
+    let y = y.trunc();
+    let y = if (0.0..=99.0).contains(&y) { 1900.0 + y } else { y };
+    let t = if t.is_nan() { 0.0 } else { t };
+    let f = fields(t);
+    let parts = [
+        y,
+        f64::from(f.1),
+        f64::from(f.2),
+        f64::from(f.3),
+        f64::from(f.4),
+        f64::from(f.5),
+        f64::from(f.6),
+    ];
+    let nt = time_clip(make(&parts));
+    set_time(it, this, nt)
 }
 
 fn date_to_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
@@ -428,7 +551,7 @@ fn set_time(it: &mut Interp, this: &Val, t: f64) -> R {
         *x = t;
         return Ok(Val::Num(t));
     }
-    Err(crate::builtins::incompatible(it, "Date.prototype method"))
+    Err(incompatible_date(it, this))
 }
 
 /// `setFullYear`, `setMonth`…: the arguments replace the fields from `first` on.

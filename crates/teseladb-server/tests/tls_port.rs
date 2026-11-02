@@ -28,6 +28,7 @@ impl NodeState for Fixed {
             cluster_time: ClusterTime { time: 5, increment: 1 },
             now_ms: 1,
             keys: None,
+            replica_set: None,
         }
     }
 }

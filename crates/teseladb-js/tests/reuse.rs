@@ -80,3 +80,58 @@ fn clones_of_a_program_share_its_globals_safely() {
     drop(p);
     assert_eq!(call(&q), Ok(Value::Double(1.0)));
 }
+
+/// A call that leaves the global object as it was hands it to the next call; one that changes
+/// it (assigns, deletes) does not, so the next call sees the globals of a fresh engine.
+#[test]
+fn an_unchanged_global_object_serves_the_next_call_and_a_changed_one_does_not() {
+    let p = Program::compile(
+        "function(a){ var before = [typeof y, typeof tojson].join(); \
+         if (a == 1) globalThis.y = 1; if (a == 2) delete globalThis.tojson; return before }",
+    )
+    .unwrap();
+    let with = |a: f64| p.call(None, &[Value::Double(a)], &mut JsCtx::default());
+    let fresh = Ok(Value::String("undefined,function".into()));
+    for a in [0.0, 0.0, 1.0, 0.0, 2.0, 0.0, 0.0] {
+        assert_eq!(with(a), fresh, "after {a}");
+    }
+}
+
+/// Reusing the global object charges its bytes to every call: whatever the heap limit, the
+/// calls of a program all fit or all run out of memory, never only the first.
+#[test]
+fn a_reused_global_object_is_charged_to_each_call() {
+    let p = Program::compile("function(){ return 'x'.repeat(20000).length }").unwrap();
+    let mut outcomes = std::collections::HashSet::new();
+    for step in 1..=48 {
+        let limits = Limits { heap: step * (16 << 10), ..Limits::default() };
+        let mut ctx = JsCtx { limits, ..JsCtx::default() };
+        let first = p.call(None, &[], &mut ctx);
+        for _ in 0..3 {
+            assert_eq!(p.call(None, &[], &mut ctx), first, "heap {}", limits.heap);
+        }
+        outcomes.insert(first.is_ok());
+    }
+    assert_eq!(outcomes.len(), 2, "the limits tried include one too small and one large enough");
+}
+
+/// `$where` puts the document in `obj`; the next call, which keeps the global object, sees its
+/// own document there and nothing that an earlier call assigned.
+#[test]
+fn obj_of_where_is_each_call_s_own_when_the_global_object_is_kept() {
+    let p = Program::compile(
+        "typeof y + ':' + obj.a + ':' + Object.keys(globalThis).length + (obj.a == 3 ? (y = 1, '') : '')",
+    )
+    .unwrap();
+    let mut first_keys = None;
+    for a in [1.0, 2.0, 3.0, 4.0, 5.0] {
+        let doc = Document::new().with("a", a);
+        let Ok(Value::String(s)) = p.call(Some(&doc), &[], &mut JsCtx::default()) else {
+            panic!("a string")
+        };
+        let parts: Vec<&str> = s.split(':').collect();
+        assert_eq!(parts[0], "undefined", "{s}");
+        assert_eq!(parts[1], format!("{a}"), "{s}");
+        assert_eq!(*first_keys.get_or_insert(parts[2].to_owned()), parts[2], "{s}");
+    }
+}

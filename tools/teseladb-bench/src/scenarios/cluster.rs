@@ -27,7 +27,7 @@ use teseladb_server::node::{Node, NodeConfig};
 use teseladb_types::Histogram;
 
 use crate::cli::Args;
-use crate::client::{Client, Target, check, doc};
+use crate::client::{Client, Target, check, debug, doc};
 use crate::report::{Report, Target as Goal};
 
 /// Database and collection of the documents.
@@ -139,15 +139,8 @@ pub(crate) fn admin(addr: SocketAddr, words: &[&str]) -> Result<(), String> {
 }
 
 /// Waits for `done`, at most [`CHANGE_WAIT`].
-fn wait_for(what: &str, mut done: impl FnMut() -> bool) -> Result<(), String> {
-    let until = Instant::now() + CHANGE_WAIT;
-    while !done() {
-        if Instant::now() >= until {
-            return Err(format!("{what} did not happen within {CHANGE_WAIT:?}"));
-        }
-        thread::sleep(POLL);
-    }
-    Ok(())
+fn wait_for(what: &str, done: impl FnMut() -> bool) -> Result<(), String> {
+    crate::client::poll_until(what, CHANGE_WAIT, POLL, done)
 }
 
 /// The local cluster's nodes (a remote server has none to change).
@@ -200,7 +193,7 @@ fn join(target: &Target) -> Result<Node<MemDisk>, String> {
         admin_listen: Some(loopback),
         ..NodeConfig::default()
     };
-    let n = Node::start(cfg, || Ok(MemDisk::new()), None).map_err(|e| format!("{e:?}"))?;
+    let n = Node::start(cfg, || Ok(MemDisk::new()), None).map_err(debug)?;
     if !n.wait_ready(READY) {
         n.stop();
         return Err("the new node did not join".into());

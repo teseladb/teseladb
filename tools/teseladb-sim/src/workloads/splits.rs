@@ -35,6 +35,7 @@ use crate::history::History;
 use crate::workloads::Workload;
 use crate::workloads::changestream::{self, CURSORS, Cursor};
 use crate::workloads::multirange::{CLIENTS, MultiRangeWorkload, Profile};
+use crate::workloads::search::{self, SEARCHERS, Searcher};
 use crate::world::World;
 
 /// Name of the checker in its violations.
@@ -50,6 +51,10 @@ const PROFILE: Profile = Profile {
 };
 /// The `changestream` workload: the same space and cuts, with merges (014 T003).
 const STREAMS: Profile = Profile { name: "changestream", merges: true, ..PROFILE };
+/// The `search` workload: the same space, cuts and merges, with searchers (011 T004).
+const SEARCH: Profile = Profile { name: "search", ..STREAMS };
+/// The `vector` workload: the same, with searchers of a vector index (011 T004).
+const VECTOR: Profile = Profile { name: "vector", ..STREAMS };
 /// Keys the transactions write, spread over the data keys and never a single document's.
 const TXN_KEYS: u64 = 8;
 /// Writers and readers of transactions.
@@ -105,6 +110,8 @@ enum Asker {
     Push(u32),
     /// A cursor's read of a range.
     Feed(u32),
+    /// A searcher's read of a range.
+    Search(u32),
     /// A lazy resolution nobody waits for.
     Nobody,
 }
@@ -135,6 +142,11 @@ pub struct SplitsWorkload {
     /// The change stream cursors, by client (`changestream`).
     cursors: BTreeMap<u32, Cursor>,
     streams: bool,
+    /// The searchers, by client (`search`).
+    searchers: BTreeMap<u32, Searcher>,
+    search: bool,
+    /// The searchers search a vector index (`vector`).
+    vector: bool,
 }
 
 impl SplitsWorkload {
@@ -152,11 +164,34 @@ impl SplitsWorkload {
         Box::new(wl)
     }
 
+    /// The `search` workload over `nodes` nodes of `cores` cores (011 T004).
+    pub fn searching(nodes: u32, cores: u16) -> Box<dyn Workload> {
+        Box::new(SplitsWorkload::with_searchers(nodes, cores, false))
+    }
+
+    /// The `vector` workload over `nodes` nodes of `cores` cores (011 T004).
+    pub fn vectors(nodes: u32, cores: u16) -> Box<dyn Workload> {
+        Box::new(SplitsWorkload::with_searchers(nodes, cores, true))
+    }
+
+    fn with_searchers(nodes: u32, cores: u16, vector: bool) -> SplitsWorkload {
+        let mut wl = SplitsWorkload::new(nodes, cores);
+        wl.engine = MultiRangeWorkload::new(nodes, cores, if vector { VECTOR } else { SEARCH });
+        wl.key_of = changestream::doc_key;
+        wl.streams = true;
+        wl.search = true;
+        wl.vector = vector;
+        wl
+    }
+
     fn new(nodes: u32, cores: u16) -> SplitsWorkload {
         SplitsWorkload {
             key_of: txn_key,
             cursors: BTreeMap::new(),
             streams: false,
+            searchers: BTreeMap::new(),
+            search: false,
+            vector: false,
             engine: MultiRangeWorkload::new(nodes, cores, PROFILE),
             writers: BTreeMap::new(),
             readers: BTreeMap::new(),
@@ -380,6 +415,11 @@ impl SplitsWorkload {
             }
             Asker::Read(client) => self.read_done(w, client, r),
             Asker::Push(client) => self.push_done(w, client, r),
+            Asker::Search(client) => {
+                if let Some(s) = self.searchers.get_mut(&client) {
+                    s.answered(r, tag_of);
+                }
+            }
             Asker::Feed(client) => {
                 let batch = w.rng.range(1, 4);
                 let now = self.mark_now(w);
@@ -507,6 +547,59 @@ impl SplitsWorkload {
         w.settle(node, core);
     }
 
+    /// A searcher's turn: it starts a search at a leader's mark, then reads its next range at
+    /// its leader.
+    fn search_turn(&mut self, w: &mut World, client: u32) {
+        let vector = self.vector;
+        let s = self.searchers.entry(client).or_insert_with(|| Searcher::new(vector));
+        if s.busy() {
+            return;
+        }
+        if s.idle() {
+            let n = w.rng.range(0, 25);
+            let at = self.mark_now(w);
+            if at.physical > 0 {
+                self.searchers.get_mut(&client).expect("inserted above").begin(at, n);
+            }
+            return;
+        }
+        let Some(key) = s.next() else { return };
+        let Some(g) = self.engine.range_of(&key) else { return };
+        let Some(range_end) = self.engine.bounds(g).map(|(_, e)| e.clone()) else { return };
+        let Some(node) = self.engine.leader(w, g) else { return };
+        let (now, _) = MultiRangeWorkload::times(w, node);
+        let core = self.engine.core();
+        let s = self.searchers.get_mut(&client).expect("the searcher found above");
+        s.sent(&key, &range_end);
+        let (stop, from) = (s.stop_key(), s.from());
+        let (Some(host), Some(cc)) = (self.engine.host(node), w.cluster_core(node, core)) else {
+            if let Some(s) = self.searchers.get_mut(&client) {
+                s.lost();
+            }
+            return;
+        };
+        let req = teseladb_range::host::ChangesReq { g, start: key, end: stop, from };
+        let id = host.changes(cc, req, now);
+        self.pending.insert((node, id), Asker::Search(client));
+        self.engine.pump(w, node);
+        w.settle(node, core);
+    }
+
+    /// The `search_results` checker over the searchers.
+    fn check_search(&self) -> Result<(), Violation> {
+        let mut committed = Vec::new();
+        let mut unknown = Vec::new();
+        for (tag, fate) in &self.fates {
+            match fate {
+                Fate::Committed(ts) => committed.push((*tag, *ts, self.keys_of(*tag))),
+                Fate::Unknown => unknown.push(*tag),
+                Fate::Not => {}
+            }
+        }
+        let searchers: Vec<&Searcher> = self.searchers.values().collect();
+        search::check(&committed, &unknown, &searchers)
+    }
+
     /// The `changestream_delivery` checker over the cursors.
     fn check_streams(&self) -> Result<(), Violation> {
         let mut committed = Vec::new();
@@ -532,7 +625,12 @@ impl SplitsWorkload {
 
 impl Workload for SplitsWorkload {
     fn name(&self) -> &'static str {
-        if self.streams { STREAMS.name } else { PROFILE.name }
+        match (self.search, self.streams) {
+            (true, _) if self.vector => VECTOR.name,
+            (true, _) => SEARCH.name,
+            (false, true) => STREAMS.name,
+            (false, false) => PROFILE.name,
+        }
     }
 
     fn cluster(&self) -> bool {
@@ -541,7 +639,11 @@ impl Workload for SplitsWorkload {
 
     fn start(&mut self, w: &mut World) {
         self.engine.start(w);
-        let cursors = if self.streams { CURSORS } else { 0 };
+        let cursors = match (self.search, self.streams) {
+            (true, _) => SEARCHERS,
+            (false, true) => CURSORS,
+            (false, false) => 0,
+        };
         for client in CLIENTS..CLIENTS + TXN_CLIENTS + cursors {
             MultiRangeWorkload::next_turn(w, client);
         }
@@ -550,6 +652,9 @@ impl Workload for SplitsWorkload {
     fn on_client(&mut self, w: &mut World, client: u32) {
         if client < CLIENTS {
             self.engine.on_client(w, client);
+        } else if client >= CLIENTS + TXN_CLIENTS && self.search {
+            self.search_turn(w, client);
+            MultiRangeWorkload::next_turn(w, client);
         } else if client >= CLIENTS + TXN_CLIENTS {
             self.cursor_turn(w, client);
             MultiRangeWorkload::next_turn(w, client);
@@ -595,7 +700,11 @@ impl Workload for SplitsWorkload {
     fn finish(&mut self, w: &mut World) -> Result<(), Violation> {
         self.engine.finish(w)?;
         self.check()?;
-        if self.streams { self.check_streams() } else { Ok(()) }
+        match (self.search, self.streams) {
+            (true, _) => self.check_search(),
+            (false, true) => self.check_streams(),
+            (false, false) => Ok(()),
+        }
     }
 }
 

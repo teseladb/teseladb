@@ -200,7 +200,7 @@ pub struct MultiRangeWorkload {
     /// Since when each replica `(node, range)` has waited for a snapshot with none on its way.
     unserved: BTreeMap<(u32, GroupId), Nanos>,
     /// By node: the sum of its ranges' applied indexes, since when, and whether it flushed then.
-    idle: BTreeMap<u32, (u64, Nanos, bool)>,
+    idle: BTreeMap<u32, (u64, Nanos, bool, bool)>,
     /// Answers to requests this workload did not send, for the one built on it.
     pub(crate) foreign: Vec<(u32, ReqId, Result<Reply, RangeError>)>,
     /// By range, the index from which its replicas hold the bounds of the table: the index of a
@@ -478,7 +478,8 @@ impl MultiRangeWorkload {
     }
 
     /// Flushes the memtable of `node` once its ranges applied nothing for [`IDLE_FLUSH`] and one
-    /// of them holds its log back.
+    /// of them holds its log back, or at once (once per wait) while a snapshot a replica waits
+    /// for is held back by the floor, as the server's `IdleFlush` does.
     fn flush_idle(&mut self, w: &mut World, node: u32) {
         let core = self.core();
         let now = w.now();
@@ -491,15 +492,20 @@ impl MultiRangeWorkload {
             .filter_map(|g| c.state_machine(*g))
             .map(StateMachine::applied_index)
             .fold(0u64, u64::wrapping_add);
-        let (seen, since, flushed) = self.idle.get(&node).copied().unwrap_or_default();
-        if applied != seen {
-            self.idle.insert(node, (applied, now, false));
-            return;
-        }
+        let awaits = c.snapshot_awaits_flush();
+        let (seen, since, flushed, owed) = self.idle.get(&node).copied().unwrap_or_default();
+        let for_snapshot = awaits && !owed;
         let held = ranges.iter().any(|g| lsm.borrow().release_floor(*g).is_some());
-        if !flushed && held && now.saturating_since(since) >= IDLE_FLUSH {
+        let (state, flush) = if applied != seen {
+            ((applied, now, false, awaits), for_snapshot)
+        } else if !flushed && held && now.saturating_since(since) >= IDLE_FLUSH {
+            ((applied, since, true, awaits), true)
+        } else {
+            ((applied, since, flushed, awaits), for_snapshot)
+        };
+        self.idle.insert(node, state);
+        if flush {
             lsm.borrow_mut().flush();
-            self.idle.insert(node, (applied, since, true));
             w.pump(node, core);
         }
     }

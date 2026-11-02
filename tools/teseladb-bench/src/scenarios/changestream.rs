@@ -14,7 +14,7 @@ use teseladb_bson::{Document, RawDoc, RawValue, Value};
 use teseladb_types::Histogram;
 
 use crate::cli::Args;
-use crate::client::{Client, Target, doc};
+use crate::client::{Client, Target, debug, doc};
 use crate::report::Report;
 
 /// Database and collection of the documents.
@@ -34,7 +34,7 @@ type Acked = Arc<Mutex<BTreeMap<i64, Instant>>>;
 
 /// The cursor's batch: the `_id` of each event's document, the cursor id.
 fn events(reply: &[u8]) -> Result<(Vec<i64>, i64), String> {
-    let d = RawDoc::from_bytes(reply).map_err(|e| format!("{e:?}"))?;
+    let d = RawDoc::from_bytes(reply).map_err(debug)?;
     let Some(RawValue::Document(cursor)) = d.get("cursor") else {
         return Err(format!("a reply without a cursor: {:?}", Document::from(d)));
     };
@@ -136,4 +136,45 @@ pub fn run(args: &Args) -> Result<Report, String> {
         args.target.as_deref().unwrap_or("local cluster of three nodes")
     ));
     Ok(report)
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    use super::*;
+
+    fn reply(cursor: Vec<(&str, Value)>) -> Vec<u8> {
+        doc(vec![("cursor", Value::Document(doc(cursor)))]).to_bytes().expect("bson")
+    }
+
+    fn event(id: Value) -> Value {
+        Value::Document(doc(vec![("documentKey", Value::Document(doc(vec![("_id", id)])))]))
+    }
+
+    #[test]
+    fn a_batch_gives_the_ids_of_its_events_and_the_cursor() {
+        let batch = vec![
+            event(Value::Int64(7)),
+            event(Value::Int32(8)),
+            Value::Document(doc(vec![("documentKey", Value::Int32(1))])),
+            Value::Document(Document::new()),
+            Value::Int32(9),
+            event(Value::Int64(10)),
+        ];
+        let first = reply(vec![("id", Value::Int64(3)), ("firstBatch", Value::Array(batch))]);
+        assert_eq!(events(&first), Ok((vec![7, 10], 3)));
+        let next = reply(vec![("id", Value::Int64(0)), ("nextBatch", Value::Array(vec![]))]);
+        assert_eq!(events(&next), Ok((vec![], 0)));
+    }
+
+    #[test]
+    fn a_reply_without_its_cursor_parts_is_an_error() {
+        let no_cursor = doc(vec![("ok", Value::Int32(0))]).to_bytes().expect("bson");
+        assert!(events(&no_cursor).unwrap_err().contains("without a cursor"));
+        let no_id = reply(vec![("firstBatch", Value::Array(vec![]))]);
+        assert!(events(&no_id).unwrap_err().contains("without an id"));
+        let no_batch = reply(vec![("id", Value::Int64(1))]);
+        assert!(events(&no_batch).unwrap_err().contains("without a batch"));
+        assert!(events(&[1, 2]).is_err());
+    }
 }

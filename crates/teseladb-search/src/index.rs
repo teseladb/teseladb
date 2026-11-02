@@ -33,6 +33,57 @@ struct TextField {
     ends: BTreeMap<u32, u32>,
     /// Query analyzer.
     search_analyzer: String,
+    /// How a matching term scores.
+    similarity: Similarity,
+}
+
+/// The `similarity` of a `string` or `autocomplete` field (measured on `refsearch` 1.70.6 with
+/// `scoreDetails`, `query/search/similarity_tests.rs`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Similarity {
+    /// RefLib's BM25 over the index's statistics.
+    #[default]
+    Bm25,
+    /// Each matching term scores its boost.
+    Boolean,
+    /// BM25's saturation with a rarity from the term's length and the document's.
+    StableTfl,
+}
+
+impl Similarity {
+    fn named(name: Option<&str>) -> Similarity {
+        match name {
+            Some("boolean") => Similarity::Boolean,
+            Some("stableTfl") => Similarity::StableTfl,
+            _ => Similarity::Bm25,
+        }
+    }
+}
+
+/// `stableTfl`'s multiplicative constant of the mismatch probability and decay per character.
+const STABLE_M: f32 = 0.00781;
+const STABLE_C: f32 = 0.917;
+/// Smoothing of `stableTfl`'s rarity.
+const STABLE_SMOOTHING: f64 = 0.05;
+
+/// `stableTfl`'s rarity of a term of `chars` characters in a document of `len` tokens:
+/// `log(1 + (1 - p + 0.05) / (p + 0.05))` with `p = 1 - (1 - m·2^(-c·tl))^dl`, `p` kept as a
+/// 32-bit float (measured bit for bit).
+fn rarity(chars: u32, len: u32) -> f32 {
+    rarity_of(mismatch(chars, len))
+}
+
+/// `stableTfl`'s `p`, the probability that a term of `chars` characters appears in a document of
+/// `len` tokens.
+fn mismatch(chars: u32, len: u32) -> f32 {
+    let decay = f64::from(-STABLE_C * chars as f32);
+    (1.0 - (1.0 - f64::from(STABLE_M) * decay.exp2()).powf(f64::from(len))) as f32
+}
+
+/// `stableTfl`'s rarity of a term whose `p` is `p`.
+fn rarity_of(p: f32) -> f32 {
+    let p = f64::from(p);
+    (1.0 + (1.0 - p + STABLE_SMOOTHING) / (p + STABLE_SMOOTHING)).ln() as f32
 }
 
 /// Why a document or a query cannot be analyzed.
@@ -203,8 +254,10 @@ impl MemIndex {
             if tokens.is_empty() {
                 continue;
             }
+            let similarity = self.similarity_of(&path);
             let field = self.fields.entry(path).or_insert_with(|| TextField {
                 search_analyzer: search_name.clone(),
+                similarity,
                 ..TextField::default()
             });
             let base = field.ends.get(&id).copied().unwrap_or(0);
@@ -245,6 +298,37 @@ impl MemIndex {
         }
     }
 
+    /// The similarity of the field `key` (an `autocomplete` field's grams under
+    /// [`autocomplete_key`]): its mapping's, or BM25 for a field the mapping does not name.
+    pub(crate) fn similarity_of(&self, key: &str) -> Similarity {
+        let (path, grams) = match key.strip_prefix(AUTOCOMPLETE_PREFIX) {
+            Some(p) => (p, true),
+            None => (key, false),
+        };
+        let mut mapping = &self.definition.mappings;
+        let mut parts = path.split('.').peekable();
+        while let Some(part) = parts.next() {
+            let Some((_, types)) = mapping.fields.iter().find(|(n, _)| n == part) else { break };
+            if parts.peek().is_none() {
+                let named = types.iter().find_map(|t| match t {
+                    FieldMapping::String(f) if !grams => Some(f.similarity.as_deref()),
+                    FieldMapping::Autocomplete { similarity, .. } if grams => {
+                        Some(similarity.as_deref())
+                    }
+                    _ => None,
+                });
+                return Similarity::named(named.flatten());
+            }
+            let inner = types.iter().find_map(|t| match t {
+                FieldMapping::Document(m) | FieldMapping::EmbeddedDocuments(m) => Some(m),
+                _ => None,
+            });
+            let Some(inner) = inner else { break };
+            mapping = inner;
+        }
+        Similarity::Bm25
+    }
+
     fn collect_dynamic(&self, path: &str, value: &Value, out: &mut Vec<Collected>) {
         let a = self.index_analyzer().to_owned();
         let s = self.definition.search_analyzer.clone().unwrap_or_else(|| a.clone());
@@ -282,6 +366,7 @@ impl MemIndex {
                     fold_diacritics,
                     tokenization,
                     analyzer,
+                    ..
                 },
                 Value::String(text),
             ) => {
@@ -329,8 +414,10 @@ impl MemIndex {
             return Ok(());
         }
         let terms: Vec<String> = Grams::shingles(&words).iter().flat_map(|w| g.of(w)).collect();
+        let similarity = self.similarity_of(key);
         let field = self.fields.entry(key.to_owned()).or_insert_with(|| TextField {
             search_analyzer: analyzer.to_owned(),
+            similarity,
             ..TextField::default()
         });
         let base = field.ends.get(&id).copied().unwrap_or(0);
@@ -595,7 +682,8 @@ impl MemIndex {
             n,
             terms.iter().filter_map(|t| field.postings.get(t).map(|d| field.df(t, d.len(), g))),
         );
-        let score = field.scorer(boost * idf_sum, g);
+        let names: Vec<&str> = terms.iter().map(String::as_str).collect();
+        let score = field.scorer(boost, idf_sum, &names, g);
         freqs.into_iter().map(|(doc, f)| (doc, score(doc, f))).collect()
     }
 
@@ -670,19 +758,40 @@ impl TextField {
         g.map_or(local as u64, |g| g.df.get(term).copied().unwrap_or(local as u64))
     }
 
-    /// The mean length as a 32-bit float and the score of a match frequency for `doc`.
-    fn scorer(&self, weight: f32, g: Option<&FieldStats>) -> impl Fn(u32, f32) -> f32 + '_ {
+    /// The score of a match frequency for `doc` under the field's similarity, for a query of
+    /// `terms` with weight `boost` and BM25 idf `idf`.
+    fn scorer<'t>(
+        &'t self,
+        boost: f32,
+        idf: f32,
+        terms: &[&str],
+        g: Option<&FieldStats>,
+    ) -> impl Fn(u32, f32) -> f32 + 't {
         let (n, total) = match g {
             Some(g) => (g.docs, g.length),
             None => (self.lengths.len() as u64, self.tokens.values().map(|&l| u64::from(l)).sum()),
         };
         let avg = if n == 0 { 1.0f32 } else { (total as f64 / n as f64) as f32 };
         let Bm25 { k1, b } = Bm25::DEFAULT;
+        let (k1, b) = (k1 as f32, b as f32);
+        let chars: Vec<u32> = terms.iter().map(|t| t.chars().count() as u32).collect();
+        let similarity = self.similarity;
         move |doc, freq| {
             let len = self.lengths.get(&doc).copied().unwrap_or(0);
-            let dl = norms::decode(norms::encode(len)) as f32;
-            let (k1, b) = (k1 as f32, b as f32);
-            let inverse = 1.0 / (k1 * ((1.0 - b) + b * dl / avg));
+            let (weight, inverse) = match similarity {
+                Similarity::Boolean => return boost,
+                Similarity::Bm25 => {
+                    let dl = norms::decode(norms::encode(len)) as f32;
+                    (boost * idf, 1.0 / (k1 * ((1.0 - b) + b * dl / avg)))
+                }
+                Similarity::StableTfl => {
+                    let rarity = match chars.as_slice() {
+                        [one] => rarity(*one, len),
+                        many => many.iter().map(|&c| f64::from(rarity(c, len))).sum::<f64>() as f32,
+                    };
+                    (boost * rarity, 1.0 / k1)
+                }
+            };
             weight - weight / (1.0 + freq * inverse)
         }
     }
@@ -698,7 +807,8 @@ impl TextField {
         let Some((dfs, freqs)) = self.phrase_freqs(terms, slop, g) else { return Vec::new() };
         let n = g.map_or(self.lengths.len() as u64, |g| g.docs);
         let idf_sum = idf_sum(n, dfs.iter().copied());
-        let score = self.scorer(boost * idf_sum, g);
+        let names: Vec<&str> = terms.iter().map(|t| t.text.as_str()).collect();
+        let score = self.scorer(boost, idf_sum, &names, g);
         freqs.into_iter().map(|(doc, f)| (doc, score(doc, f))).collect()
     }
 
@@ -799,7 +909,7 @@ impl TextField {
             return Vec::new();
         }
         let n = g.map_or(self.lengths.len() as u64, |g| g.docs);
-        let score = self.scorer(boost * idf(n, df) as f32, g);
+        let score = self.scorer(boost, idf(n, df) as f32, &terms[..1], g);
         freqs.into_iter().map(|(doc, freq)| (doc, score(doc, freq))).collect()
     }
 
@@ -846,7 +956,7 @@ impl TextField {
         let idf = idf(n, self.blended_df(&kept, g)) as f32;
         let mut sums: BTreeMap<u32, f32> = BTreeMap::new();
         for (t, weight) in &kept {
-            let score = self.scorer(boost * weight * idf, g);
+            let score = self.scorer(boost * weight, idf, &[t.as_str()], g);
             for (&doc, positions) in &self.postings[t] {
                 *sums.entry(doc).or_insert(0.0) += score(doc, positions.len() as f32);
             }
@@ -858,8 +968,8 @@ impl TextField {
     fn term_scores(&self, term: &str, boost: f32, g: Option<&FieldStats>) -> Vec<(u32, f32)> {
         let Some(docs) = self.postings.get(term) else { return Vec::new() };
         let n = g.map_or(self.lengths.len() as u64, |g| g.docs);
-        let weight = boost * idf(n, self.df(term, docs.len(), g)) as f32;
-        let score = self.scorer(weight, g);
+        let idf = idf(n, self.df(term, docs.len(), g)) as f32;
+        let score = self.scorer(boost, idf, &[term], g);
         docs.iter().map(|(&doc, positions)| (doc, score(doc, positions.len() as f32))).collect()
     }
 }
@@ -923,11 +1033,15 @@ impl Grams {
         if self.reverse { word.chars().rev().collect() } else { word.chars().collect() }
     }
 
-    /// The grams of `word`: its prefixes (or every slice) of `min` to `max` characters, and its
-    /// first `max` characters once more when it is longer (measured on `refsearch`, with
-    /// `rightEdgeGram` on the reversed word).
+    /// The grams of `word`: its prefixes (or every slice) of `min` to `max` characters, its
+    /// first `max` characters once more when it is longer, and the word itself when it is shorter
+    /// than `min` (RefLib's gram filter keeping the original; measured on `refsearch`, with
+    /// `rightEdgeGram` on the reversed word: two words `a` add two to `avgdl`'s sum).
     pub(crate) fn of(&self, word: &str) -> Vec<String> {
         let chars = self.chars(word);
+        if chars.len() < self.min {
+            return vec![chars.iter().collect()];
+        }
         let mut out = Vec::new();
         let starts = if self.edge { 0..1 } else { 0..chars.len() };
         for start in starts {
@@ -964,8 +1078,11 @@ impl Grams {
 }
 
 /// The key of the grams of the `autocomplete` field at `path`, apart from its text.
+/// The prefix of an `autocomplete` field's key.
+const AUTOCOMPLETE_PREFIX: &str = "$type:autocomplete/";
+
 pub(crate) fn autocomplete_key(path: &str) -> String {
-    format!("$type:autocomplete/{path}")
+    format!("{AUTOCOMPLETE_PREFIX}{path}")
 }
 
 /// The `fuzzy` option of `text` and `term`.

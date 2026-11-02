@@ -305,6 +305,41 @@ fn a_restart_waits_for_the_bound_on_disk_and_never_repeats_a_mark() {
     assert!(first > last, "{first:?} {last:?}");
 }
 
+/// A node waiting for its clock to pass the bound on disk looks at the clock again every
+/// [`START_POLL`], as the server does: once NTP steps the clock back to time, it starts then, not at
+/// the instant its old clock would have reached the bound (seed 3772 of `search`: a node whose
+/// clock had gone back three seconds slept through the heal and no write was answered after it).
+#[test]
+fn a_node_waiting_for_the_bound_starts_soon_after_its_clock_is_set_right() {
+    use teseladb_multiraft::GroupDesc;
+    use teseladb_sim::world::START_POLL;
+    use teseladb_types::NodeId;
+    let mut w = World::cluster(12, 1, 1, false);
+    w.add_group(
+        GroupDesc { group: GroupId(1), voters: vec![NodeId(1)], learners: vec![] },
+        teseladb_sim::node::SmKind::Kv,
+    );
+    assert!(drive(&mut w, |w| w.nodes[0].hlc_bound > w.wall_ms(0)), "a bound on disk");
+    w.crash_node(0);
+    w.nodes[0].clock.jump(-3_000_000_000);
+    let until = w.start_wait(0).expect("the clock is below the bound");
+    assert_eq!(w.start_recheck(0), Some(w.now() + START_POLL), "it looks again soon");
+    w.schedule(w.now(), Event::Restart { node: 0 });
+    let set_at = w.now() + Nanos::from_millis(500);
+    assert!(drive(&mut w, |w| w.now() >= set_at));
+    assert!(!w.nodes[0].alive, "still below the bound");
+    w.nodes[0].clock.resync();
+    // The bound is up to a second ahead of its last mark: it may still have that to wait.
+    let set_right = w.start_wait(0).unwrap_or(set_at);
+    assert!(set_right < until);
+    assert!(drive(&mut w, |w| w.nodes[0].alive));
+    assert!(
+        w.now() >= set_right && w.now() <= set_right + START_POLL,
+        "{:?} {set_right:?}",
+        w.now()
+    );
+}
+
 /// A frozen core runs nothing until it thaws, also what a workload would ask of it: its process is
 /// paused, so it neither serves a read with a lease that ran out meanwhile nor answers a client.
 /// Seeds 1232 and 1423 of `txn-bank`: a paused leader's core served a lease read during the pause

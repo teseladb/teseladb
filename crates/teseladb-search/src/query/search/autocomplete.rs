@@ -64,6 +64,7 @@ impl Autocomplete {
                     fold_diacritics,
                     tokenization,
                     analyzer,
+                    ..
                 } => Some((
                     Grams::new(min_grams, max_grams, fold_diacritics, &tokenization),
                     analyzer.unwrap_or_else(|| {

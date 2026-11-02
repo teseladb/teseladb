@@ -258,7 +258,11 @@ fn number(n: i64) -> Value {
 
 /// `buildInfo`.
 pub fn build_info<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
-    let facts = ctx.backend.process();
+    Ok(build_info_of(&ctx.backend.process()).with("ok", 1.0))
+}
+
+/// The fields of `buildInfo` for a node with `facts`.
+pub fn build_info_of(facts: &ProcessFacts) -> Document {
     let env = Document::new()
         .with("distmod", "")
         .with("distarch", facts.build_target.0.as_str())
@@ -271,7 +275,7 @@ pub fn build_info<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document,
         .with("target_os", facts.build_target.1.as_str())
         .with("cppdefines", "");
     let version_array: Vec<Value> = VERSION_ARRAY.iter().map(|n| Value::Int32(*n)).collect();
-    Ok(Document::new()
+    Document::new()
         .with("version", ANNOUNCED_VERSION)
         .with("versionArray", version_array)
         .with("gitVersion", facts.build.as_str())
@@ -284,7 +288,6 @@ pub fn build_info<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document,
         .with("debug", cfg!(debug_assertions))
         .with("maxBsonObjectSize", Value::Int64(MAX_BSON_OBJECT_SIZE as i64))
         .with("opentelemetry", false)
-        .with("ok", 1.0))
 }
 
 /// `hostInfo`.

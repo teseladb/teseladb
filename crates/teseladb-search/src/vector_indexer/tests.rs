@@ -216,3 +216,25 @@ fn reads_bson_vectors() {
     ix.apply([(vec![1], Some(Document::new().with("_id", 1).with("v", bin(bytes))))]);
     assert_eq!(run(&ix, &query(|_| {})), vec![(1, 1.0)]);
 }
+
+/// Equal scores go in `_id` order, a segment whose range stays keeps its graph, and an empty
+/// segment finds nothing.
+#[test]
+fn ties_kept_segments_and_empty_segments() {
+    let mut ix = VectorIndexer::new(definition("euclidean"));
+    let same = |id: i32| {
+        let d = Document::new().with("_id", id).with("v", floats(&[1.0, 0.0, 0.0]));
+        (vec![id as u8], Some(d))
+    };
+    ix.apply([same(3), same(1), same(2)]);
+    assert_eq!(ids(&ix, &query(|_| {})), [1, 2, 3]);
+    // A document without `_id` keeps its place among the ties.
+    ix.apply([(vec![4], Some(Document::new().with("v", floats(&[1.0, 0.0, 0.0]))))]);
+    assert_eq!(ix.search(&query(|_| {})).expect("runs").len(), 4);
+    ix.reshape(&[(Vec::new(), vec![3]), (vec![3], Vec::new())]);
+    let four =
+        [(Vec::new(), vec![3]), (vec![3], vec![4]), (vec![4], vec![9]), (vec![9], Vec::new())];
+    ix.reshape(&four);
+    assert_eq!(ix.segments(), 4);
+    assert_eq!(ix.search(&query(|_| {})).expect("runs").len(), 4);
+}

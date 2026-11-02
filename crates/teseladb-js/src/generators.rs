@@ -38,6 +38,7 @@ pub fn expr_yields(e: &Expr) -> bool {
         | Expr::OptChain(x)
         | Expr::Typeof(x)
         | Expr::Delete(x)
+        | Expr::PrivateIn(_, x)
         | Expr::Await(x)
         | Expr::At(_, x) => expr_yields(x),
         Expr::SuperCall(xs, _) => xs.iter().any(expr_yields),
@@ -258,6 +259,7 @@ impl Lower {
             Expr::OptChain(x) => Expr::OptChain(Box::new(self.expr(*x, pre))),
             Expr::Typeof(x) => Expr::Typeof(Box::new(self.expr(*x, pre))),
             Expr::Delete(x) => Expr::Delete(Box::new(self.expr(*x, pre))),
+            Expr::PrivateIn(n, x) => Expr::PrivateIn(n, Box::new(self.expr(*x, pre))),
             Expr::Await(x) => Expr::Await(Box::new(self.expr(*x, pre))),
             Expr::At(p, x) => Expr::At(p, Box::new(self.expr(*x, pre))),
             Expr::SuperCall(xs, pos) => Expr::SuperCall(self.spread_ordered(xs, pre), pos),
@@ -709,6 +711,7 @@ fn delegate_default(d: Expr) -> Expr {
         is_async: false,
         method: false,
         source: "function* () { [code] }".into(),
+        guessed: std::cell::OnceCell::new(),
     };
     let call = Expr::Call {
         callee: Box::new(Expr::Member {
@@ -741,6 +744,7 @@ impl Expr {
                 prop: Box::new(match &**prop {
                     MemberProp::Name(n) => MemberProp::Name(n.clone()),
                     MemberProp::Computed(k) => MemberProp::Computed(k.clone_shallow()),
+                    MemberProp::Private(n) => MemberProp::Private(n.clone()),
                 }),
                 optional: *optional,
                 pos: *pos,
@@ -812,12 +816,13 @@ impl std::fmt::Debug for GenState {
 
 /// A generator for a call of `def` whose scope `env` has its parameters bound.
 pub fn make(it: &mut Interp, fo: &ObjRef, def: &Rc<FuncDef>, env: EnvRef) -> R {
+    let fallback = if def.is_async { "AsyncGenerator" } else { "Generator" };
     let proto = match it.get(&Val::Obj(fo.clone()), "prototype")? {
         Val::Obj(p) => p,
-        _ => it.realm.proto("Generator"),
+        _ => it.realm.proto(fallback),
     };
     if def.is_async {
-        return Ok(Val::Obj(it.alloc(Some(it.realm.proto("AsyncGenerator")), Kind::Ordinary)?));
+        return Ok(Val::Obj(it.alloc(Some(proto), Kind::Ordinary)?));
     }
     let st = GenState { def: def.clone(), env, status: Status::Start, saved: Vec::new() };
     Ok(Val::Obj(it.alloc(Some(proto), Kind::Generator(Rc::new(RefCell::new(st))))?))
@@ -932,7 +937,17 @@ pub fn install(it: &mut Interp) -> R<()> {
         ("AsyncGeneratorFunction", "AsyncGenerator", "AsyncGeneratorFunction", true),
     ] {
         let gf = it.alloc(Some(fproto.clone()), Kind::Ordinary)?;
-        let gp = it.alloc(Some(it.realm.iter.clone()), Kind::Ordinary)?;
+        // %AsyncIteratorPrototype%, with only `Symbol.asyncIterator`, under the async one.
+        let above = if step {
+            let aip = it.alloc(Some(it.realm.object.clone()), Kind::Ordinary)?;
+            let f = it.native("[Symbol.asyncIterator]", iter_self, 0)?;
+            let key = crate::builtins::well_known("asyncIterator");
+            it.define(&aip, &key, Prop::hidden(Val::Obj(f)))?;
+            aip
+        } else {
+            it.realm.iter.clone()
+        };
+        let gp = it.alloc(Some(above), Kind::Ordinary)?;
         let c = it.native(ctor_name, crate::builtins::function_ctor, 1)?;
         it.define(&c, "prototype", Prop { writable: false, ..Prop::hidden(Val::Obj(gf.clone())) })?;
         // Read-only and configurable (ECMA-262 §27.3.3, §27.5.1).
@@ -944,12 +959,6 @@ pub fn install(it: &mut Interp) -> R<()> {
             for m in ["next", "return", "throw"] {
                 method(it, &gp, m, async_gen_step, 1)?;
             }
-            let f = it.native("[Symbol.asyncIterator]", iter_self, 0)?;
-            it.define(
-                &gp,
-                &crate::builtins::well_known("asyncIterator"),
-                Prop::hidden(Val::Obj(f)),
-            )?;
         } else {
             method(it, &gp, "next", gen_next, 1)?;
             method(it, &gp, "return", gen_return, 1)?;
@@ -1276,7 +1285,12 @@ impl Interp<'_> {
             }
         } else {
             let v = self.eval(obj, env)?;
-            if of { self.open_iter(&v)? } else { IterRec::Items(self.for_in_keys(&v)?, 0) }
+            if of {
+                let r = self.open_iter(&v);
+                self.name_operands(r, &[(obj, &v)])?
+            } else {
+                IterRec::Items(self.for_in_keys(&v)?, 0)
+            }
         };
         loop {
             let scope = match resumed.take() {

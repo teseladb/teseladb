@@ -242,3 +242,49 @@ fn first_batch_n(reply: &[u8]) -> Option<f64> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    use super::*;
+
+    fn bytes(d: Document) -> Vec<u8> {
+        d.to_bytes().expect("bson")
+    }
+
+    #[test]
+    fn numbers_are_read_at_their_dotted_path() {
+        let mem = doc(vec![("resident", Value::Int32(12)), ("virtual", Value::Int64(40))]);
+        let status = bytes(doc(vec![
+            ("mem", Value::Document(mem)),
+            ("uptime", Value::Double(1.5)),
+            ("host", Value::String("h".into())),
+        ]));
+        assert_eq!(number_at(&status, "mem.resident"), Some(12.0));
+        assert_eq!(number_at(&status, "mem.virtual"), Some(40.0));
+        assert_eq!(number_at(&status, "uptime"), Some(1.5));
+        assert_eq!(number_at(&status, "host"), None, "not a number");
+        assert_eq!(number_at(&status, "uptime.x"), None, "not a document on the way");
+        assert_eq!(number_at(&status, "mem.nope"), None);
+        assert_eq!(number_at(&status, ""), None);
+        assert_eq!(number_at(&[1, 2], "mem"), None);
+    }
+
+    #[test]
+    fn the_count_of_a_group_is_n_of_the_first_document() {
+        let batch = |docs: Vec<Value>| {
+            let cursor = doc(vec![("firstBatch", Value::Array(docs))]);
+            bytes(doc(vec![("cursor", Value::Document(cursor))]))
+        };
+        let n = |v: Value| Value::Document(doc(vec![("n", v)]));
+        assert_eq!(first_batch_n(&batch(vec![n(Value::Int32(3))])), Some(3.0));
+        assert_eq!(first_batch_n(&batch(vec![n(Value::Int64(4))])), Some(4.0));
+        assert_eq!(first_batch_n(&batch(vec![n(Value::Double(5.0))])), None);
+        assert_eq!(first_batch_n(&batch(vec![Value::Int32(1)])), None);
+        assert_eq!(first_batch_n(&batch(vec![])), None);
+        let no_batch = bytes(doc(vec![("cursor", Value::Document(Document::new()))]));
+        assert_eq!(first_batch_n(&no_batch), None);
+        assert_eq!(first_batch_n(&bytes(doc(vec![("ok", Value::Int32(1))]))), None);
+        assert_eq!(first_batch_n(&[1, 2]), None);
+    }
+}

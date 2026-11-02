@@ -15,7 +15,7 @@ use teseladb_bson::{RawDoc, RawValue, Value};
 
 use super::wire::each;
 use crate::cli::Args;
-use crate::client::{Client, Target, doc};
+use crate::client::{Client, Target, debug, doc};
 use crate::report::{Report, Target as Goal};
 
 /// Database and collections.
@@ -96,7 +96,7 @@ fn ingest_for(
 /// `collStats.size` of `coll`.
 fn size(c: &mut Client, coll: &str) -> Result<f64, String> {
     let reply = c.command(DB, doc(vec![("collStats", Value::String(coll.into()))]))?;
-    let raw = RawDoc::from_bytes(&reply).map_err(|e| format!("{e:?}"))?;
+    let raw = RawDoc::from_bytes(&reply).map_err(debug)?;
     match raw.get("size") {
         Some(RawValue::Int32(n)) => Ok(f64::from(n)),
         Some(RawValue::Int64(n)) => Ok(n as f64),

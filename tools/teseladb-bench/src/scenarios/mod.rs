@@ -2,9 +2,8 @@
 //! variant and the copied `deflate`; 003 adds `bson` and `keys`; 004 adds `lsm` and `lsm-compression`; 005 adds `write`, `read` and
 //! `failover`; 006 adds `wire` and `crud`; 007 adds `follower-read`, `group0-limits`, `split`, `add-node` and `rebalance`; 008 adds `txn`, `txn-readers` and `contention`; 013 adds
 //! `tls-handshake` and `scram`; 010 adds `aggregate`, `sort` and `group-large`; 015 adds
-//! `timeseries`; 014 adds `changestream-lag`; 016 adds `js`; 012 adds `cores-curve` and
-//! `disk-usage`; every specification
-//! adds its own.
+//! `timeseries`; 014 adds `changestream-lag`; 016 adds `js`; 017 adds `fle-query`; 012 adds
+//! `cores-curve` and `disk-usage`; 019 adds `rest`; every specification adds its own.
 
 pub mod bson;
 pub mod changestream;
@@ -14,6 +13,7 @@ pub mod crud;
 pub mod deflate;
 pub mod disk_usage;
 pub mod failover;
+pub mod fle;
 pub mod follower_read;
 pub mod group0_limits;
 pub mod index;
@@ -26,9 +26,12 @@ pub mod raftlog;
 pub mod read;
 pub mod reference;
 pub mod reshard;
+pub mod rest;
+pub mod search;
 pub mod security;
 pub mod timeseries;
 pub mod txn;
+pub mod vector;
 pub mod wire;
 pub mod write;
 pub mod ycsb;
@@ -166,12 +169,14 @@ pub fn run(args: &Args) -> Result<Report, String> {
         "reference" => reference::run(args),
         "wire" => wire::run(args),
         "crud" => crud::run(args),
+        "rest" => rest::run(args),
         "index-write" => index::run_write(args),
         "index-read" => index::run_read(args),
         "index-build-load" => index::run_build_load(args),
         "aggregate" => query::run_aggregate(args),
         "sort" => query::run_sort(args),
         "group-large" => query::run_group_large(args),
+        "fle-query" => fle::run(args),
         "txn" => txn::run(args),
         "txn-readers" => txn::readers_run(args),
         "contention" => txn::contention(args),
@@ -180,6 +185,10 @@ pub fn run(args: &Args) -> Result<Report, String> {
         "timeseries" => timeseries::run(args),
         "changestream-lag" => changestream::run(args),
         "reshard" => reshard::run(args),
+        "vector-search" | "vector" => vector::run(args),
+        "search-term" | "search-multi" | "search-phrase" | "search-fuzzy" | "search-visibility" => {
+            search::run(args)
+        }
         "cores-curve" => cores_curve::run(args),
         "disk-usage" => disk_usage::run(args),
         s if s.len() == 6 && s.starts_with("ycsb-") => {
@@ -187,7 +196,7 @@ pub fn run(args: &Args) -> Result<Report, String> {
         }
         other => Err(format!(
             "unknown scenario: {other} (available: raftlog, raftlog-recover, deflate, bson, js, keys, lsm, lsm-sustained, lsm-compression, \
-             write, read, failover, follower-read, group0-limits, split, add-node, rebalance, reference, wire, crud, index-write, index-read, index-build-load, aggregate, sort, group-large, txn, txn-readers, contention, tls-handshake, scram, timeseries, changestream-lag, reshard, cores-curve, disk-usage, ycsb-a … ycsb-f)"
+             write, read, failover, follower-read, group0-limits, split, add-node, rebalance, reference, wire, crud, rest, index-write, index-read, index-build-load, aggregate, sort, group-large, fle-query, txn, txn-readers, contention, tls-handshake, scram, timeseries, changestream-lag, reshard, search-term, search-multi, search-phrase, search-fuzzy, search-visibility, vector-search (vector), cores-curve, disk-usage, ycsb-a … ycsb-f)"
         )),
     }
 }

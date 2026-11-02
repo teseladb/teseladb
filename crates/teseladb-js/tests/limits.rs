@@ -115,3 +115,19 @@ fn deeply_nested_source_is_refused_without_overflowing() {
     let src = format!("function(){{ return {}1{} }}", "[".repeat(5000), "]".repeat(5000));
     assert!(matches!(Program::compile(&src), Err(JsError::Compile { .. })));
 }
+
+/// Recursion whose frames take much native stack (`for…in`, a shell function per level) ends as
+/// `too much recursion` before the thread's stack runs out (measured on a `refrouter` 9.0.4 on 02-11
+/// with `Object.extend` over an object that contains itself).
+#[test]
+fn deep_recursion_through_heavy_frames_is_too_much_recursion() {
+    let e = run(
+        "function(){ const s = {a: 1}; s.self = s; function f(o){ for (const k in o) { if (typeof o[k] == 'object') f(o[k]) } } f(s) }",
+    )
+    .unwrap_err();
+    assert_eq!(e.message(), "too much recursion");
+    let shell = run(
+        "function(){ const s = {a: 1}; s.self = s; try { Object.extend({}, s, true) } catch (e) { return e.name + ':' + e.message } }",
+    );
+    assert_eq!(shell, Ok(Value::String("InternalError:too much recursion".into())));
+}

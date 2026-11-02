@@ -34,6 +34,8 @@ pub enum Pattern {
 pub enum PropName {
     Fixed(Name),
     Computed(Box<Expr>),
+    /// A private name of a class element, `#` included.
+    Private(Name),
 }
 
 /// A function's code, shared by every closure made from it.
@@ -54,6 +56,8 @@ pub struct FuncDef {
     /// A method, getter or setter of an object literal or a class: `new` refuses it.
     pub method: bool,
     pub source: Rc<str>,
+    /// The name SpiderMonkey guesses for it when it has none ([`crate::names`]).
+    pub guessed: std::cell::OnceCell<Name>,
 }
 
 #[derive(Debug)]
@@ -64,6 +68,8 @@ pub struct ClassDef {
     pub parent: Option<Box<Expr>>,
     pub ctor: Option<Rc<FuncDef>>,
     pub members: Vec<ClassMember>,
+    /// The class's text, which `toString` of the class gives.
+    pub source: Rc<str>,
 }
 
 #[derive(Debug)]
@@ -155,12 +161,16 @@ pub enum Expr {
     /// as SpiderMonkey does (016 T021).
     At(Pos, Box<Expr>),
     Delete(Box<Expr>),
+    /// `#x in obj`.
+    PrivateIn(Name, Box<Expr>),
 }
 
 #[derive(Debug)]
 pub enum MemberProp {
     Name(Name),
     Computed(Expr),
+    /// `obj.#x`: a private name, `#` included.
+    Private(Name),
 }
 
 #[derive(Debug)]

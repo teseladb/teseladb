@@ -15,6 +15,8 @@ pub enum Tok {
     /// and column where it starts.
     Template(Rc<TemplateParts>, Vec<(String, u32, u32)>),
     Regex(Rc<str>, Rc<str>),
+    /// A private name, `#` included (`#x`).
+    Private(Rc<str>),
     Punct(&'static str),
     Eof,
 }
@@ -53,7 +55,7 @@ const PUNCTS: &[&str] = &[
     ">>>=", "...", "===", "!==", "**=", "<<=", ">>=", ">>>", "&&=", "||=", "??=", "=>", "==", "!=",
     "<=", ">=", "&&", "||", "??", "?.", "++", "--", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=",
     "**", "<<", ">>", "{", "}", "(", ")", "[", "]", ";", ",", "<", ">", "+", "-", "*", "/", "%",
-    "&", "|", "^", "!", "~", "?", ":", "=", ".", "@", "#",
+    "&", "|", "^", "!", "~", "?", ":", "=", ".", "@",
 ];
 
 /// Splits `src` into tokens.
@@ -181,26 +183,39 @@ impl Lexer {
         Ok(())
     }
 
+    /// An identifier, its `\u` escapes read.
+    fn word(&mut self) -> Result<String, SyntaxError> {
+        let mut w = String::new();
+        while let Some(c) = self.peek(0) {
+            if is_id_part(c) {
+                w.push(c);
+                self.bump();
+            } else if c == '\\' && self.peek(1) == Some('u') {
+                self.bump();
+                self.bump();
+                crate::text::push_cp(&mut w, self.unicode_escape()?);
+            } else {
+                break;
+            }
+        }
+        if w.is_empty() {
+            // A `\` that does not start `\u`: nothing was read (found by fuzzing).
+            return self.err("illegal character U+005C");
+        }
+        Ok(w)
+    }
+
     fn token(&mut self, c: char) -> Result<Tok, SyntaxError> {
+        if c == '#' {
+            self.bump();
+            if !self.peek(0).is_some_and(|n| is_id_start(n) || n == '\\') {
+                return self.err("'#' not followed by identifier");
+            }
+            let w = self.word()?;
+            return Ok(Tok::Private(format!("#{w}").into()));
+        }
         if is_id_start(c) || c == '\\' {
-            let mut w = String::new();
-            while let Some(c) = self.peek(0) {
-                if is_id_part(c) {
-                    w.push(c);
-                    self.bump();
-                } else if c == '\\' && self.peek(1) == Some('u') {
-                    self.bump();
-                    self.bump();
-                    w.push(self.unicode_escape()?);
-                } else {
-                    break;
-                }
-            }
-            if w.is_empty() {
-                // A `\` that does not start `\u`: nothing was read (found by fuzzing).
-                return self.err("illegal character U+005C");
-            }
-            return Ok(Tok::Ident(w.into()));
+            return Ok(Tok::Ident(self.word()?.into()));
         }
         if c.is_ascii_digit() || (c == '.' && self.peek(1).is_some_and(|d| d.is_ascii_digit())) {
             return self.number();
@@ -318,7 +333,8 @@ impl Lexer {
         Ok(Tok::Num(v))
     }
 
-    fn unicode_escape(&mut self) -> Result<char, SyntaxError> {
+    /// The code point of a `\\u` escape after the `u`: a scalar value or a lone surrogate.
+    fn unicode_escape(&mut self) -> Result<u32, SyntaxError> {
         let code = if self.peek(0) == Some('{') {
             self.bump();
             let mut v = 0u32;
@@ -348,16 +364,15 @@ impl Lexer {
                 let save = (self.i, self.line, self.col);
                 self.bump();
                 self.bump();
-                let low = self.unicode_escape()? as u32;
+                let low = self.unicode_escape()?;
                 if (0xDC00..0xE000).contains(&low) {
-                    return Ok(char::from_u32(0x10000 + ((v - 0xD800) << 10) + (low - 0xDC00))
-                        .unwrap_or('\u{fffd}'));
+                    return Ok(0x10000 + ((v - 0xD800) << 10) + (low - 0xDC00));
                 }
                 (self.i, self.line, self.col) = save;
             }
             v
         };
-        Ok(char::from_u32(code).unwrap_or('\u{fffd}'))
+        Ok(if code > 0x10_FFFF { 0xFFFD } else { code })
     }
 
     fn escape(&mut self, out: &mut String) -> Result<(), SyntaxError> {
@@ -380,7 +395,7 @@ impl Lexer {
                 }
                 out.push(char::from_u32(v).unwrap_or('\u{fffd}'));
             }
-            'u' => out.push(self.unicode_escape()?),
+            'u' => crate::text::push_cp(out, self.unicode_escape()?),
             '\r' => {
                 if self.peek(0) == Some('\n') {
                     self.bump();
@@ -519,16 +534,14 @@ impl Lexer {
                             for _ in 0..6 {
                                 self.bump();
                             }
-                            out.push(
-                                char::from_u32(0x10000 + ((v - 0xD800) << 10) + (low - 0xDC00))
-                                    .unwrap_or('\u{fffd}'),
-                            );
+                            let pair = 0x10000 + ((v - 0xD800) << 10) + (low - 0xDC00);
+                            crate::text::push_cp(out, pair);
                             return Ok(());
                         }
                     }
                     v
                 };
-                out.push(char::from_u32(code).unwrap_or('\u{fffd}'));
+                crate::text::push_cp(out, code);
                 Ok(())
             }
             _ => self.escape(out).map_err(|_| UNICODE),

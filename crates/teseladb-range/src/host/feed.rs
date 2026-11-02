@@ -1,8 +1,8 @@
 //! What a change stream reads on the leader of a range (014 FR-003, FR-004): the versions of
 //! `(from, to]` with `to` at or below the closed mark the range applied, at most
-//! [`FEED_WINDOW_MS`] past `from`, and the oldest intent pending there ([`crate::changes`]). While
-//! streams read the range its leader closes marks 200 ms behind its clock
-//! ([`crate::closed_ts::STREAM_CLOSE_LAG_MS`]) for [`STREAM_HOLD`] after the last read.
+//! [`FEED_WINDOW_MS`] past `from` (unless `from` is zero), and the oldest intent pending there
+//! ([`crate::changes`]). While streams read the range its leader closes marks 200 ms behind its
+//! clock ([`crate::closed_ts::STREAM_CLOSE_LAG_MS`]) for [`STREAM_HOLD`] after the last read.
 
 use teseladb_hlc::Hlc;
 use teseladb_multiraft::{MultiRaftCore, StateMachine};
@@ -78,7 +78,13 @@ impl RangeHost {
         let applied = sm.map_or(0, StateMachine::applied_index);
         let own = Some(leader.last_closed).filter(|(c, _)| *c > super::ZERO);
         let known = [core.closed(g), sm.and_then(RangeState::closed_mark), own];
-        let window = Hlc { physical: from.physical.saturating_add(FEED_WINDOW_MS), logical: 0 };
+        // A read from the start of time (a search index's first build, 011 FR-014) reads the
+        // range's whole history at once: a window would take it one second at a time from the
+        // epoch.
+        let window = match from == super::ZERO {
+            true => Hlc { physical: u64::MAX, logical: u32::MAX },
+            false => Hlc { physical: from.physical.saturating_add(FEED_WINDOW_MS), logical: 0 },
+        };
         let to = match follower_mark(&known, applied, None) {
             Some(closed) if closed > from => closed.min(window.max(from)),
             _ => {
