@@ -138,6 +138,11 @@ pub struct Mem {
     pub scanned_at: Option<Option<Hlc>>,
     /// Value types other than a document's, by key (written by transactions).
     pub types: BTreeMap<Vec<u8>, u8>,
+    /// How many times a command read a collection's catalog entry.
+    pub catalog_reads: usize,
+    /// How many `PutIntents` and one-phase commits the ranges took.
+    pub intent_puts: usize,
+    pub one_phase: usize,
     /// Every version written, at its mark: what a change stream reads (014).
     pub history: Vec<teseladb_range::changes::Versioned>,
     /// Runs before each read of the range with its first key and the data: another node's
@@ -229,6 +234,22 @@ impl Mem {
         self.history.push(teseladb_range::changes::Versioned { key: key.to_vec(), ts, value });
     }
 
+    /// Applies a committed write of a transaction at `ts`.
+    fn apply_committed(&mut self, k: Vec<u8>, w: teseladb_range::intents::IntentOp, ts: Hlc) {
+        match w {
+            teseladb_range::intents::IntentOp::Put { value_type, value } => {
+                self.record(&k, ts, Some((value_type, value.clone())));
+                self.types.insert(k.clone(), value_type);
+                self.data.insert(k, value);
+            }
+            teseladb_range::intents::IntentOp::Delete => {
+                self.record(&k, ts, None);
+                self.types.remove(&k);
+                self.data.remove(&k);
+            }
+        }
+    }
+
     /// The stored versions of the keys in `range` a range's scans return: all but those that only
     /// serve the history of a document (014).
     pub fn stored(
@@ -285,6 +306,7 @@ impl Mem {
 
 impl Backend for Mem {
     fn collection(&mut self, ns: &Namespace) -> Result<Option<CollectionEntry>, CommandError> {
+        self.catalog_reads += 1;
         Ok(self.catalog.get(ns).cloned())
     }
 
@@ -466,6 +488,7 @@ impl Backend for Mem {
         };
         match op {
             TxnOp::PutIntents { txn, writes, .. } => {
+                self.intent_puts += 1;
                 if !self.intent_errors.is_empty() {
                     if self.intents_before_error == 0 {
                         return Err(self.intent_errors.remove(0));
@@ -536,25 +559,33 @@ impl Backend for Mem {
                     return Err(self.resolve_errors.remove(0));
                 }
                 for (k, w) in self.intents.remove(&txn.0).unwrap_or_default() {
-                    if status != TxnStatus::Committed {
-                        continue;
-                    }
-                    match w {
-                        teseladb_range::intents::IntentOp::Put { value_type, value } => {
-                            self.record(&k, commit_ts, Some((value_type, value.clone())));
-                            self.types.insert(k.clone(), value_type);
-                            self.data.insert(k, value);
-                        }
-                        teseladb_range::intents::IntentOp::Delete => {
-                            self.record(&k, commit_ts, None);
-                            self.types.remove(&k);
-                            self.data.remove(&k);
-                        }
+                    if status == TxnStatus::Committed {
+                        self.apply_committed(k, w, commit_ts);
                     }
                 }
                 Ok(Reply::Intents { ts })
             }
-            TxnOp::OnePhase { .. } => Ok(Reply::Intents { ts }),
+            TxnOp::OnePhase { writes, .. } => {
+                self.one_phase += 1;
+                // It is the write and the commit: their failures are its own.
+                if !self.commit_errors.is_empty() {
+                    return Err(self.commit_errors.remove(0));
+                }
+                if !self.intent_errors.is_empty() {
+                    if self.intents_before_error == 0 {
+                        return Err(self.intent_errors.remove(0));
+                    }
+                    self.intents_before_error -= 1;
+                }
+                let keys: Vec<Vec<u8>> = writes.iter().map(|(k, _)| k.clone()).collect();
+                if self.check_fences(&keys).is_err() {
+                    return Err(teseladb_range::host::RangeError::Fenced);
+                }
+                for (k, w) in writes {
+                    self.apply_committed(k, w, ts);
+                }
+                Ok(Reply::Intents { ts })
+            }
             // Only the reaper sends these, and this node has none.
             TxnOp::FindIntents { .. } => Ok(Reply::Batch(Vec::new())),
             TxnOp::ForgetRecord { .. } => Err(teseladb_range::host::RangeError::WriteConflict),

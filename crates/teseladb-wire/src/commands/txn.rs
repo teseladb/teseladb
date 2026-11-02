@@ -96,6 +96,9 @@ struct Running {
     requests: i64,
     /// Documents its statements wrote: the position of the next one in its events (014).
     ops: u32,
+    /// The writes held until the commit, which sends them with it (in one phase when one range
+    /// has every key): `None` when each statement puts its intents.
+    deferred: Option<Vec<(Vec<u8>, IntentOp)>>,
 }
 
 impl Running {
@@ -152,13 +155,22 @@ pub struct TxnFields {
     txn_number: i64,
     autocommit: Option<bool>,
     start: bool,
+    /// Its writes wait for the commit (a transaction of the node whose statements never read
+    /// what they wrote).
+    deferred: bool,
 }
 
 impl TxnFields {
     /// The fields of a transaction of the node itself (017: the writes with encrypted fields),
     /// on session `lsid`.
     pub(crate) fn internal(lsid: u128, txn_number: i64, start: bool) -> TxnFields {
-        TxnFields { lsid, txn_number, autocommit: Some(false), start }
+        TxnFields { lsid, txn_number, autocommit: Some(false), start, deferred: false }
+    }
+
+    /// As [`TxnFields::internal`], for a transaction whose statements never read what they wrote
+    /// (017: an encrypted insert): its writes go with the commit.
+    pub(crate) fn deferring(self) -> TxnFields {
+        TxnFields { deferred: true, ..self }
     }
 }
 
@@ -201,7 +213,7 @@ pub fn fields(name: &str, cmd: &Document) -> Result<Option<TxnFields>, CommandEr
         return Ok(None);
     }
     let start = start.unwrap_or(false);
-    Ok(Some(TxnFields { lsid, txn_number, autocommit, start }))
+    Ok(Some(TxnFields { lsid, txn_number, autocommit, start, deferred: false }))
 }
 
 /// Whether command `name` ends a transaction: `commitTransaction` or `abortTransaction`.
@@ -543,6 +555,10 @@ impl TxnBackend<'_> {
     /// Writes `writes` as one statement of the transaction.
     fn statement(&mut self, writes: Vec<(Vec<u8>, IntentOp)>) -> Result<(), CommandError> {
         let writes = self.with_history(writes)?;
+        if let Some(held) = &mut self.run.deferred {
+            held.extend(writes);
+            return Ok(());
+        }
         let number = self.run.txn_number;
         let stmt =
             self.run.coord.write(&Via(&*self.inner), writes).map_err(|e| txn_error(e, number))?;
@@ -736,6 +752,7 @@ fn run_command(
                 contacted: BTreeSet::new(),
                 requests: 0,
                 ops: 0,
+                deferred: f.deferred.then(Vec::new),
             };
             txn_stats::started(&mut lock(shared));
             store(shared, f.lsid, run);
@@ -1015,6 +1032,9 @@ fn with_running(
                 run.coord = Coordinator::new(txn, (f.lsid, f.txn_number), at, now)
                     .with_budget(backend.txn_memory_budget());
                 run.ops = 0;
+                if let Some(held) = &mut run.deferred {
+                    held.clear();
+                }
             }
             OnUncertain::Fail => break result,
         }
@@ -1072,12 +1092,20 @@ fn end(
         }
         run.published = true;
     }
-    let kind = txn_stats::commit_kind(&run.contacted, &run.coord.written_ranges());
+    let held = run.deferred.take().unwrap_or_default();
+    let mut written = run.coord.written_ranges();
+    written.extend(held.iter().filter_map(|(k, _)| backend.txn_route(k)));
+    let kind = txn_stats::commit_kind(&run.contacted, &written);
     let began = backend.now_micros();
+    let clock = Hlc { physical: backend.wall_ms(), logical: 0 };
     match commit {
+        true if !held.is_empty() => {
+            txn_stats::commit_initiated(&mut lock(shared), kind);
+            run.coord.write_and_commit(&Via(&*backend), held, clock);
+        }
         true => {
             txn_stats::commit_initiated(&mut lock(shared), kind);
-            run.coord.commit(Hlc { physical: backend.wall_ms(), logical: 0 });
+            run.coord.commit(clock);
         }
         false => run.coord.abort(),
     }

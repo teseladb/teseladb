@@ -112,16 +112,73 @@ pub fn check_create(coll: &str, options: &mut Document) -> Result<(), CommandErr
     Ok(())
 }
 
-/// Reads the ESC of a collection with `find` on `_id`.
+/// Reads the ESC of a collection by `_id`: by the document's key, as a `find` on `_id` reads it,
+/// with the ESC's catalog entry read once. An ESC that is a view, has a collation or is no plain
+/// collection is read with `find` itself.
 pub struct CtxEsc<'c, 'a, B: Backend + ?Sized> {
     ctx: &'c mut Ctx<'a, B>,
     esc: String,
+    /// The ESC's entry, once read: `Some(None)` if there is none.
+    entry: Option<Option<CollectionEntry>>,
 }
 
 impl<'c, 'a, B: Backend + ?Sized> CtxEsc<'c, 'a, B> {
     /// A reader of ESC `esc` of the database of `ctx`.
     pub fn new(ctx: &'c mut Ctx<'a, B>, esc: &str) -> CtxEsc<'c, 'a, B> {
-        CtxEsc { ctx, esc: esc.to_string() }
+        CtxEsc { ctx, esc: esc.to_string(), entry: None }
+    }
+
+    /// The ESC's entry, read the first time.
+    fn entry(&mut self) -> Result<Option<CollectionEntry>, CommandError> {
+        if let Some(e) = &self.entry {
+            return Ok(e.clone());
+        }
+        let ns = Namespace { db: self.ctx.db.to_string(), coll: self.esc.clone() };
+        let e = self.ctx.backend.collection(&ns)?;
+        self.entry = Some(e.clone());
+        Ok(e)
+    }
+
+    /// The document with `_id` `id` read by its key; `Err(None)` when only `find` reads it as
+    /// RefDb does (a view, a collation, a time series or capped collection).
+    fn by_key(&mut self, id: &Value) -> Result<Option<Document>, Option<CommandError>> {
+        let Some(coll) = self.entry()? else { return Ok(None) };
+        let plain = matches!(
+            super::kinds::kind_of(&coll)?,
+            teseladb_meta::collection_types::CollectionKind::Normal
+                | teseladb_meta::collection_types::CollectionKind::Clustered { .. }
+        );
+        if !plain
+            || super::query::options_collation(&coll).is_some()
+            || super::capped::rule_of(&coll)?.is_some()
+            || super::sharding::is_sharded(&coll)
+        {
+            return Err(None);
+        }
+        let key = super::crud::doc_key(&coll, id)?;
+        let mut end = key.clone();
+        end.push(0);
+        let concern = super::args::read_concern(&Document::new(), super::query::FIND)?;
+        // The read goes through the index of `_id` (`$indexStats` counts it), as `find`'s.
+        self.ctx.backend.note_plan(super::plan_exec::used_id_index(false));
+        let rows = self.ctx.backend.scan(&key, &end, 1, concern)?;
+        match rows.into_iter().next() {
+            Some((_, bytes)) => {
+                Ok(Some(Document::from(RawDoc::from_bytes(&bytes).map_err(CommandError::from)?)))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// The document with `_id` `id` read with `find`.
+    fn by_find(&mut self, id: Value) -> Result<Option<Document>, CommandError> {
+        let cmd = Document::new()
+            .with("find", self.esc.as_str())
+            .with("filter", Document::new().with("_id", id))
+            .with("limit", 1)
+            .with("singleBatch", true);
+        let reply = sub_command(self.ctx, &cmd)?;
+        Ok(first_batch(&reply).into_iter().next())
     }
 }
 
@@ -167,13 +224,13 @@ impl<B: Backend + ?Sized> EscReader for CtxEsc<'_, '_, B> {
     type Error = CommandError;
 
     fn get(&mut self, id: &Token) -> Result<Option<Vec<u8>>, CommandError> {
-        let cmd = Document::new()
-            .with("find", self.esc.as_str())
-            .with("filter", Document::new().with("_id", binary(id.0.to_vec())))
-            .with("limit", 1)
-            .with("singleBatch", true);
-        let reply = sub_command(self.ctx, &cmd)?;
-        Ok(first_batch(&reply).first().map(|d| match d.get("value") {
+        let id = binary(id.0.to_vec());
+        let found = match self.by_key(&id) {
+            Ok(d) => d,
+            Err(Some(e)) => return Err(e),
+            Err(None) => self.by_find(id)?,
+        };
+        Ok(found.map(|d| match d.get("value") {
             Some(Value::Binary { bytes, .. }) => bytes.clone(),
             _ => Vec::new(),
         }))
@@ -395,8 +452,17 @@ pub fn in_internal_txn(
     };
     let ordered = !matches!(cmd.get("ordered"), Some(Value::Boolean(false)));
     let mut total = Document::new().with("n", 0);
+    // The statements without the list, which each one gets alone.
+    let mut rest = cmd.clone();
+    rest.remove(field);
     for (i, item) in items.iter().enumerate() {
-        let mut part = cmd.clone();
+        // Each statement reads what the previous one committed: its intents go first, as a
+        // `refnode` commits a statement's transaction before the next, instead of each read of the
+        // next one pushing a transaction that already committed (017 SC-002).
+        if i > 0 {
+            super::txn::resolve_queued(backend, shared);
+        }
+        let mut part = rest.clone();
         part.insert(field, vec![item.clone()]);
         let reply = match one_txn(backend, shared, (name, db, &part), &mut statement) {
             Ok(r) => r,
@@ -428,6 +494,12 @@ fn one_txn(
     loop {
         let lsid = u128::from_be_bytes(super::new_uuid(backend));
         let start = super::txn::TxnFields::internal(lsid, INTERNAL_TXN_NUMBER, true);
+        // An insert reads the ESC before it writes and never what it wrote: its writes go with
+        // the commit, in one phase when one range holds them (017 SC-002).
+        let start = match name {
+            super::crud::INSERT => start.deferring(),
+            _ => start,
+        };
         let then = super::txn::TxnFields::internal(lsid, INTERNAL_TXN_NUMBER, false);
         let result = super::txn::run_in_txn(backend, shared, (name, db, &begin), start, |b| {
             statement(b, cmd)
