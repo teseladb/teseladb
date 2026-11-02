@@ -240,7 +240,7 @@ fn every_change_reads_back_and_the_snapshot_carries_them() {
     catalog(&mut sm, rename);
     catalog(&mut sm, CatalogCommand::DropDatabase { db: "db".into() });
     assert_eq!(sm.ddl.records.len(), 8);
-    assert_eq!(SNAPSHOT_VERSION, SNAPSHOT_VERSION_WITHOUT_DDL + 2);
+    assert_eq!(SNAPSHOT_VERSION, SNAPSHOT_VERSION_WITHOUT_DDL + 3);
     let mut back = Group0Sm::default();
     back.restore(&sm.snapshot()).unwrap();
     assert_eq!(back.ddl, sm.ddl);

@@ -388,6 +388,68 @@ fn hashed_and_wildcard_indexes_are_prepared_but_never_unique() {
     );
 }
 
+/// The names `listIndexes` gives, in its order.
+fn names(m: &mut Mem) -> Vec<String> {
+    let r = m.run(DB, Document::new().with("listIndexes", "c"));
+    let Value::Array(batch) = field(&r, "cursor.firstBatch").clone() else { panic!("{r:?}") };
+    batch.iter().map(field_name).collect()
+}
+
+fn field_name(i: &Value) -> String {
+    match i {
+        Value::Document(d) => match d.get("name") {
+            Some(Value::String(n)) => n.clone(),
+            other => panic!("{other:?}"),
+        },
+        other => panic!("{other:?}"),
+    }
+}
+
+/// An index made unique keeps its place in `listIndexes`, also after a second conversion and in
+/// a copy of the catalog taken from a snapshot (a `refrouter` 9.0.4 keeps it, measured).
+#[test]
+fn a_converted_index_keeps_its_place_in_the_list() {
+    let mut m = Mem::new();
+    insert(&mut m, vec![one(1, "a", 1), one(2, "a", 2)]);
+    for f in ["a", "b", "c"] {
+        create(&mut m, index(f).with("prepareUnique", true));
+    }
+    assert_eq!(
+        coll_mod(&mut m, named("a_1").with("unique", true)).get("unique_new"),
+        Some(&true.into())
+    );
+    assert_eq!(names(&mut m), ["_id_", "a_1", "b_1", "c_1"]);
+    coll_mod(&mut m, named("b_1").with("unique", true));
+    assert_eq!(names(&mut m), ["_id_", "a_1", "b_1", "c_1"]);
+    m.run(DB, Document::new().with("dropIndexes", "c").with("index", "a_1"));
+    create(&mut m, index("d").with("prepareUnique", true));
+    coll_mod(&mut m, named("d_1").with("unique", true));
+    assert_eq!(names(&mut m), ["_id_", "b_1", "c_1", "d_1"]);
+}
+
+/// A hashed or wildcard index with duplicates answers them first, as a `refrouter` 9.0.4 does
+/// (measured): the groups of a hashed index go in the order of the hashes, those of a wildcard
+/// index by path and value.
+#[test]
+fn the_duplicates_come_before_the_type_of_the_index() {
+    let mut m = Mem::new();
+    let row =
+        |id: i32, h: i32, w: i32| doc(&[("_id", id.into()), ("h", h.into()), ("w", w.into())]);
+    insert(&mut m, vec![row(1, 1, 1), row(2, 1, 1), row(3, 2, 2), row(4, 2, 3), row(5, 2, 2)]);
+    create(&mut m, Document::new().with("key", doc(&[("h", "hashed".into())])).with("name", "h"));
+    create(&mut m, Document::new().with("key", doc(&[("$**", 1.into())])).with("name", "w"));
+    for name in ["h", "w"] {
+        coll_mod(&mut m, named(name).with("prepareUnique", true));
+    }
+    let r = coll_mod(&mut m, named("h").with("unique", true));
+    assert_eq!(error(&r), (359, CANNOT_CONVERT.into()));
+    assert_eq!(r.get("violations"), Some(&violations(vec![vec![3, 4, 5], vec![1, 2]])));
+    let r = coll_mod(&mut m, named("w").with("unique", true));
+    assert_eq!(error(&r), (359, CANNOT_CONVERT.into()));
+    let groups = vec![vec![1, 2], vec![3, 4, 5], vec![1, 2], vec![3, 5]];
+    assert_eq!(r.get("violations"), Some(&violations(groups)));
+}
+
 #[test]
 fn the_duplicates_of_an_index_with_buckets_are_found_after_its_bucket() {
     let mut m = Mem::new();
