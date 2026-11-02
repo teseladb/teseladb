@@ -489,7 +489,7 @@ fn sorted(it: &mut Interp, mut v: Vec<Val>, cmp: &Val) -> R<Vec<Val>> {
                     let r = it.call(cmp, &Val::Undef, &[v[idx[i]].clone(), v[idx[j]].clone()])?;
                     it.number_of(&r)?.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater)
                 } else {
-                    keys[idx[i]].encode_utf16().cmp(keys[idx[j]].encode_utf16())
+                    crate::strings::units(&keys[idx[i]]).cmp(&crate::strings::units(&keys[idx[j]]))
                         != std::cmp::Ordering::Greater
                 };
                 // `le`: element i goes first (stable).

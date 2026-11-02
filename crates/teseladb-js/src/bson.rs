@@ -403,7 +403,7 @@ pub fn to_bson(it: &mut Interp, v: &Val, name: &str, depth: usize) -> R<Value> {
         Val::Undef | Val::Null => Value::Null,
         Val::Bool(b) => Value::Boolean(*b),
         Val::Num(n) => Value::Double(*n),
-        Val::Str(s) => Value::String(s.to_string()),
+        Val::Str(s) => Value::String(crate::strings::to_utf8(s).into_owned()),
         Val::Sym(_) | Val::BigInt(_) => return Err(not_convertible(name)),
         Val::Obj(o) => {
             let kind = o.borrow().kind.clone();

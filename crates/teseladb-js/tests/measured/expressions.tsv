@@ -626,3 +626,9 @@ JSON.parse('{"a": 1.0, "b": [true, "x"]}', function(k, v, ctx) { return v === nu
 (()=>{ function f(x = 1){ var x; return x } return f() })()	J:1
 (()=>{ function f(x = x){ } try { f() } catch (e) { return e.name + ': ' + e.message } })()	S:ReferenceError: can't access lexical declaration 'x' before initialization
 (()=>{ let y = 1; try { eval('var y') } catch (e) { return e.name + ': ' + e.message } })()	S:SyntaxError: redeclaration of let y
+(()=>{ var s = Symbol('s'); var o = {...{[s]: 1, a: 2}}; var t = Object.assign({}, {[s]: 3}); return [o[s], o.a, t[s]].join() })()	S:1,2,3
+[JSON.stringify("\uD834"), JSON.stringify("𝌆"), "\uD834".length, "a\uDF06b".charCodeAt(1), "\uD834" + "\uDF06" === "𝌆", String.fromCharCode(0xD834).length, encodeURIComponent("𝌆"), JSON.parse('"\\ud834"').charCodeAt(0), [..."\uD834x"].length, "\uDF06\uD834".split('').length].join('|')	S:"\\ud834"|"𝌆"|1|57094|true|1|%F0%9D%8C%86|55348|2|2
+[encodeURI("http://a.b/c d?x=1&y=é#f"), encodeURIComponent("a b&c/é😀"), decodeURI("%41%2F%20%C3%A9"), decodeURIComponent("%41%2F%20%C3%A9%F0%9F%98%80"), escape("a b+éĀ"), unescape("%41%u0100%zz")].join('|')	S:http://a.b/c%20d?x=1&y=%C3%A9#f|a%20b%26c%2F%C3%A9%F0%9F%98%80|A%2F é|A/ é😀|a%20b+%E9%u0100|AĀ%zz
+encodeURIComponent('\uD800')	E:URIError:malformed URI sequence
+decodeURIComponent('%E0%A4%A')	E:URIError:malformed URI sequence
+decodeURI('%C0%80')	E:URIError:malformed URI sequence

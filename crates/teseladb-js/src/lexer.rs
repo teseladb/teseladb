@@ -348,7 +348,8 @@ impl Lexer {
                 let save = (self.i, self.line, self.col);
                 self.bump();
                 self.bump();
-                let low = self.unicode_escape()? as u32;
+                let low = self.unicode_escape()?;
+                let low = crate::strings::lone_unit(low).map_or(low as u32, u32::from);
                 if (0xDC00..0xE000).contains(&low) {
                     return Ok(char::from_u32(0x10000 + ((v - 0xD800) << 10) + (low - 0xDC00))
                         .unwrap_or('\u{fffd}'));
@@ -357,6 +358,9 @@ impl Lexer {
             }
             v
         };
+        if (0xD800..0xE000).contains(&code) {
+            return Ok(crate::strings::lone(code));
+        }
         Ok(char::from_u32(code).unwrap_or('\u{fffd}'))
     }
 
@@ -528,7 +532,11 @@ impl Lexer {
                     }
                     v
                 };
-                out.push(char::from_u32(code).unwrap_or('\u{fffd}'));
+                if (0xD800..0xE000).contains(&code) {
+                    out.push(crate::strings::lone(code));
+                } else {
+                    out.push(char::from_u32(code).unwrap_or('\u{fffd}'));
+                }
                 Ok(())
             }
             _ => self.escape(out).map_err(|_| UNICODE),

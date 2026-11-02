@@ -77,12 +77,63 @@ pub fn this_str(it: &mut Interp, this: &Val) -> R<Name> {
     it.str_of(this)
 }
 
-pub fn units(s: &str) -> Vec<u16> {
-    s.encode_utf16().collect()
+/// Where a string keeps a lone surrogate (a UTF-16 unit of `0xD800..0xE000` without its pair,
+/// which UTF-8 cannot hold): the last 2048 code points of plane 16, one per unit.
+const LONE_BASE: u32 = 0x10_F800;
+
+/// The character that stands for the lone surrogate `u`.
+pub fn lone(u: u32) -> char {
+    char::from_u32(LONE_BASE + (u - 0xD800)).unwrap_or('\u{fffd}')
 }
 
+/// The lone surrogate `c` stands for, if it stands for one.
+pub fn lone_unit(c: char) -> Option<u16> {
+    let v = c as u32;
+    (v >= LONE_BASE).then(|| (v - LONE_BASE + 0xD800) as u16)
+}
+
+/// The UTF-16 units of `s`, lone surrogates included.
+pub fn units(s: &str) -> Vec<u16> {
+    let mut out = Vec::with_capacity(s.len());
+    let mut buf = [0u16; 2];
+    for c in s.chars() {
+        match lone_unit(c) {
+            Some(u) => out.push(u),
+            None => out.extend_from_slice(c.encode_utf16(&mut buf)),
+        }
+    }
+    out
+}
+
+/// How many UTF-16 units `s` has.
+pub fn utf16_len(s: &str) -> usize {
+    s.chars().map(|c| if lone_unit(c).is_some() { 1 } else { c.len_utf16() }).sum()
+}
+
+/// The string of UTF-16 units `u`, its lone surrogates kept.
 pub fn from_units(u: &[u16]) -> String {
-    String::from_utf16_lossy(u)
+    char::decode_utf16(u.iter().copied())
+        .map(|r| r.unwrap_or_else(|e| lone(u32::from(e.unpaired_surrogate()))))
+        .collect()
+}
+
+/// `s` with a lone high surrogate followed by a lone low one joined into their character, as
+/// UTF-16 reads them once concatenated.
+pub fn pair_surrogates(s: String) -> String {
+    // A lone surrogate is a 4-byte character starting with 0xF4 0x8F.
+    if !s.as_bytes().windows(2).any(|w| w == [0xF4, 0x8F]) {
+        return s;
+    }
+    from_units(&units(&s))
+}
+
+/// `s` for BSON, which holds only UTF-8: a lone surrogate becomes U+FFFD.
+pub fn to_utf8(s: &str) -> std::borrow::Cow<'_, str> {
+    if s.chars().any(|c| lone_unit(c).is_some()) {
+        s.chars().map(|c| if lone_unit(c).is_some() { '\u{fffd}' } else { c }).collect()
+    } else {
+        std::borrow::Cow::Borrowed(s)
+    }
 }
 
 fn int_arg(it: &mut Interp, v: &Val, default: f64) -> R<f64> {
@@ -267,7 +318,7 @@ fn trim_end(it: &mut Interp, this: &Val, _: &[Val]) -> R {
 
 fn pad(it: &mut Interp, this: &Val, a: &[Val], start: bool) -> R {
     let s = this_str(it, this)?;
-    let len = s.encode_utf16().count();
+    let len = utf16_len(&s);
     let target = int_arg(it, &arg(a, 0), 0.0)?;
     let fill = if matches!(arg(a, 1), Val::Undef) { " ".into() } else { it.str_of(&arg(a, 1))? };
     if target <= len as f64 || fill.is_empty() {
@@ -341,7 +392,7 @@ fn split(it: &mut Interp, this: &Val, a: &[Val]) -> R {
         sep => {
             let sep = it.str_of(&sep)?;
             if sep.is_empty() {
-                s.encode_utf16().map(|c| Val::Str(from_units(&[c]).into())).collect()
+                units(&s).into_iter().map(|c| Val::Str(from_units(&[c]).into())).collect()
             } else {
                 s.split(&*sep).map(|p| Val::Str(p.into())).collect()
             }

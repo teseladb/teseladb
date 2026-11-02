@@ -154,6 +154,7 @@ pub fn install(it: &mut Interp) -> R<()> {
     crate::iterators::install(it, &g)?;
     regexp_builtins(it, &g)?;
     crate::bson::install(it, &g)?;
+    crate::uri::install(it, &g)?;
     crate::symbols::install_species(it, &g)?;
     freeze_builtins(it);
     Ok(())
@@ -341,7 +342,10 @@ fn obj_assign(it: &mut Interp, _: &Val, a: &[Val]) -> R {
         if src.is_nullish() {
             continue;
         }
-        let (o, keys) = keys_of(it, src)?;
+        let (o, mut keys) = keys_of(it, src)?;
+        if let Val::Obj(so) = &o {
+            keys.extend(crate::props::enumerable_symbol_keys(so));
+        }
         for k in keys {
             let v = it.get(&o, &k)?;
             // `Object.assign` sets as strict code does: a read-only property throws.

@@ -93,12 +93,17 @@ pub fn own_prop(o: &ObjRef, key: &str) -> Option<Prop> {
         }
         Kind::Str(s) => {
             if key == "length" {
-                return Some(fixed(Val::Num(s.encode_utf16().count() as f64), false, false, false));
+                return Some(fixed(
+                    Val::Num(crate::strings::utf16_len(s) as f64),
+                    false,
+                    false,
+                    false,
+                ));
             }
             if let Some(i) = array_index(key)
                 && let Some(c) = crate::interp::utf16_at(s, i)
             {
-                let v = Val::Str(String::from_utf16_lossy(&[c]).into());
+                let v = Val::Str(crate::strings::from_units(&[c]).into());
                 return Some(fixed(v, false, true, false));
             }
         }
@@ -382,6 +387,16 @@ fn all_keys(it: &mut Interp, o: &ObjRef) -> R<Vec<Name>> {
     }
     keys.extend(symbol_keys(o));
     Ok(keys)
+}
+
+/// The enumerable symbol keys of `o` (object spread, `Object.assign`).
+pub fn enumerable_symbol_keys(o: &ObjRef) -> Vec<Name> {
+    let b = o.borrow();
+    b.props
+        .iter()
+        .filter(|(k, p)| p.enumerable && is_symbol_key(k))
+        .map(|(k, _)| k.clone())
+        .collect()
 }
 
 fn symbol_keys(o: &ObjRef) -> Vec<Name> {

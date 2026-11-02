@@ -316,7 +316,7 @@ impl<'c> Interp<'c> {
     /// A new string, charged to the heap.
     pub fn string(&self, s: String) -> R {
         self.charge(s.len())?;
-        Ok(Val::Str(s.into()))
+        Ok(Val::Str(crate::strings::pair_surrogates(s).into()))
     }
 
     // Objects.
@@ -579,11 +579,12 @@ impl<'c> Interp<'c> {
             }
             Val::Str(s) => {
                 if key == "length" {
-                    return Ok(Val::Num(s.encode_utf16().count() as f64));
+                    return Ok(Val::Num(crate::strings::utf16_len(s) as f64));
                 }
                 if let Some(i) = array_index(key) {
-                    return Ok(utf16_at(s, i)
-                        .map_or(Val::Undef, |c| Val::Str(String::from_utf16_lossy(&[c]).into())));
+                    return Ok(utf16_at(s, i).map_or(Val::Undef, |c| {
+                        Val::Str(crate::strings::from_units(&[c]).into())
+                    }));
                 }
                 self.proto_of_primitive(v).unwrap_or_else(|| self.realm.object.clone())
             }
@@ -609,7 +610,7 @@ impl<'c> Interp<'c> {
                         }
                     }
                     Kind::Str(s) if key == "length" => {
-                        return Ok(Val::Num(s.encode_utf16().count() as f64));
+                        return Ok(Val::Num(crate::strings::utf16_len(s) as f64));
                     }
                     Kind::Arguments(Some(m)) => {
                         if let Some(n) = m.name(key) {
@@ -818,7 +819,7 @@ impl<'c> Interp<'c> {
             }
             Kind::Str(s)
                 if key == "length"
-                    || array_index(key).is_some_and(|i| i < s.encode_utf16().count()) =>
+                    || array_index(key).is_some_and(|i| i < crate::strings::utf16_len(s)) =>
             {
                 true
             }
@@ -911,7 +912,9 @@ impl<'c> Interp<'c> {
         let b = o.borrow();
         let mut out: Vec<Name> = match &b.kind {
             Kind::Array(items) => (0..items.len()).map(|i| i.to_string().into()).collect(),
-            Kind::Str(s) => (0..s.encode_utf16().count()).map(|i| i.to_string().into()).collect(),
+            Kind::Str(s) => {
+                (0..crate::strings::utf16_len(s)).map(|i| i.to_string().into()).collect()
+            }
             Kind::Typed(t) => (0..t.length()).map(|i| i.to_string().into()).collect(),
             _ => Vec::new(),
         };
@@ -2544,7 +2547,10 @@ impl<'c> Interp<'c> {
                     let v = self.eval(e, env)?;
                     match &v {
                         Val::Obj(src) => {
-                            for k in self.keys(src, true)? {
+                            // Symbol keys are copied too, after the string keys.
+                            let mut keys = self.keys(src, true)?;
+                            keys.extend(crate::props::enumerable_symbol_keys(src));
+                            for k in keys {
                                 let x = self.get(&v, &k)?;
                                 self.define(&o, &k, Prop::data(x))?;
                             }
@@ -2863,7 +2869,7 @@ impl<'c> Interp<'c> {
                 let a = self.primitive(x, "number")?;
                 let b = self.primitive(y, "number")?;
                 let ord = if let (Val::Str(p), Val::Str(q)) = (&a, &b) {
-                    Some(p.encode_utf16().cmp(q.encode_utf16()))
+                    Some(crate::strings::units(p).cmp(&crate::strings::units(q)))
                 } else if matches!(a, Val::BigInt(_)) || matches!(b, Val::BigInt(_)) {
                     crate::bigints::compare(self, &a, &b)?
                 } else {
@@ -3065,5 +3071,5 @@ fn var_names(s: &Stmt, out: &mut Vec<Name>) {
 
 /// The UTF-16 unit `i` of `s`.
 pub fn utf16_at(s: &str, i: usize) -> Option<u16> {
-    s.encode_utf16().nth(i)
+    crate::strings::units(s).get(i).copied()
 }

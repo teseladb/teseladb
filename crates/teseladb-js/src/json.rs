@@ -332,7 +332,7 @@ impl P<'_> {
                 b'"' => {
                     self.i += 1;
                     it.charge(units.len())?;
-                    return Ok(String::from_utf16_lossy(&units));
+                    return Ok(crate::strings::from_units(&units));
                 }
                 b'\\' => {
                     self.i += 1;
@@ -397,7 +397,10 @@ pub fn quote(s: &str) -> String {
             '\u{8}' => out.push_str("\\b"),
             '\u{c}' => out.push_str("\\f"),
             c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
+            c => match crate::strings::lone_unit(c) {
+                Some(u) => out.push_str(&format!("\\u{u:04x}")),
+                None => out.push(c),
+            },
         }
     }
     out.push('"');

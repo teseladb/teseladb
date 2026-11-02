@@ -31,6 +31,7 @@ mod shared;
 mod strings;
 mod symbols;
 mod typed;
+mod uri;
 mod value;
 mod weak;
 
