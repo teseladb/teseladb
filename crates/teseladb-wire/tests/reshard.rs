@@ -333,6 +333,7 @@ fn a_busy_apply_phase_chases_the_writes() {
     let mut m = sharded(&docs(100));
     let (mut r, shared) =
         started(&mut m, r#"{"reshardCollection":"rs.c","key":{"b":1},"numInitialChunks":1}"#);
+    assert!(r.temp_ns().coll.starts_with("system.resharding."), "{:?}", r.temp_ns());
     r.copy(&mut m, &shared).expect("copied");
     m.shared = shared;
     m.now += 5;

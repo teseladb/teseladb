@@ -369,6 +369,54 @@ fn unshard_collection_leaves_draining_shards_and_reads_the_first_voter() {
     fails(&admin(&mut m, r#"{"unshardCollection":"m.u"}"#), 70, "No shards found");
 }
 
+/// A namespace without a collection name fails as the bare database name does; the ranges
+/// before the collection's keys lead nothing of it, and a shard that already holds a replica
+/// of a range only takes its leadership.
+#[test]
+fn the_namespace_the_ranges_and_the_replicas_of_a_move() {
+    let mut m = cluster();
+    fails(
+        &admin(&mut m, r#"{"moveCollection":"m.","toShard":"node2"}"#),
+        73,
+        "Invalid namespace specified: m.",
+    );
+    fails(
+        &admin(&mut m, r#"{"unshardCollection":"m."}"#),
+        73,
+        "Namespace m.is not a valid collection name",
+    );
+    m.routes[0].start = vec![0x01];
+    m.routes[0].voters = vec![NodeId(1), NodeId(2)];
+    m.routes.insert(
+        0,
+        RouteEntry {
+            group: GroupId(8),
+            start: Vec::new(),
+            end: vec![0x01],
+            core: 0,
+            voters: vec![NodeId(2)],
+            generation: 1,
+            leader_hint: Some(NodeId(2)),
+        },
+    );
+    assert_eq!(node(&mut m, "u"), Some(1));
+    ok(&admin(&mut m, r#"{"moveCollection":"m.u","toShard":"node2"}"#));
+    assert_eq!(node(&mut m, "u"), Some(2));
+    assert_eq!(docs(&mut m, "u").len(), 2);
+}
+
+/// Without `numInitialChunks`, `rewriteCollection` asks for the default chunks and its event
+/// does not name them.
+#[test]
+fn rewrite_collection_without_chunks_takes_the_default() {
+    let mut m = cluster();
+    let all: Vec<String> = (10..1000).map(|i| format!(r#"{{"_id":{i},"a":{i}}}"#)).collect();
+    ok(&m.run("m", json(&format!(r#"{{"insert":"s","documents":[{}]}}"#, all.join(",")))));
+    ok(&admin(&mut m, r#"{"rewriteCollection":"m.s"}"#));
+    let n = m.run("m", json(r#"{"count":"s"}"#));
+    assert_eq!(n.get("n"), Some(&Value::Int32(992)), "{n:?}");
+}
+
 #[test]
 fn rewrite_collection_fails_and_rewrites_as_on_a_refrouter() {
     let mut m = cluster();

@@ -306,8 +306,6 @@ fn may_change(meta: &ChangeMeta, fields: &[&str]) -> bool {
 /// What a round of the catch-up knows of the key of a document's version in the copy.
 #[derive(Debug, PartialEq)]
 enum CopyKey {
-    /// The document was not in the copy: the collection did not hold it at the mark.
-    Absent,
     /// At this key.
     At(Vec<u8>),
     /// To be read from the copy's `_id_` index.
@@ -871,7 +869,6 @@ impl Resharding {
         let mut now = Vec::new();
         for (key, t) in touched {
             match self.copy_key(&t)? {
-                CopyKey::Absent => {}
                 CopyKey::At(k) => keys.push(k),
                 CopyKey::Unknown => {
                     let some = match (&t.newest, &t.seen) {
@@ -1039,8 +1036,8 @@ impl Resharding {
     }
 
     /// The key of the copy's version of a document a round touched, from the history where it
-    /// tells: a document inserted after the mark was not in the copy, and one whose first change
-    /// was an update that left the new key's fields alone is at the key of its first version.
+    /// tells: one whose first change was an update that left the new key's fields alone is at
+    /// the key of its first version. An insert writes no meta, so it is read like the others.
     fn copy_key(&self, t: &Touched) -> Result<CopyKey, CommandError> {
         if self.plan.provenance.unsplittable() {
             return Ok(CopyKey::Unknown);
@@ -1048,10 +1045,6 @@ impl Resharding {
         let (Some(meta), Some(first)) = (&t.first_meta, &t.first_doc) else {
             return Ok(CopyKey::Unknown);
         };
-        let insert = meta.update.is_none() && !meta.replace && !meta.delete;
-        if insert && meta.moved.is_none() && meta.txn.is_none() {
-            return Ok(CopyKey::Absent);
-        }
         let fields: Vec<&str> = self.plan.key.key.iter().map(|(f, _)| f).collect();
         if may_change(meta, &fields) {
             return Ok(CopyKey::Unknown);
