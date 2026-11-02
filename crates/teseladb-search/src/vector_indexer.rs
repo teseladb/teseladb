@@ -258,6 +258,7 @@ impl VectorIndexer {
                         doc: d.doc.clone(),
                         token: None,
                         details: None,
+                        highlights: None,
                     });
                 }
             }

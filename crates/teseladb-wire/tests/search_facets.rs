@@ -109,3 +109,18 @@ fn search_meta_variable_follows_a_search() {
         Err("Can't access $$SEARCH_META without a $search stage earlier in the pipeline".to_owned())
     );
 }
+
+/// `{$meta: "searchHighlights"}` (011 T035): a text of one word gives the passage `refsearch`
+/// gives for it in `scratchpad/lane3k/m17.js`.
+#[test]
+fn highlights_reach_the_documents() {
+    let mut m = corpus();
+    let got = aggregate(
+        &mut m,
+        r#"[{"$search": {"text": {"path": "t", "query": "gato"}, "highlight": {"path": "t"}}},
+            {"$match": {"_id": 4}}, {"$project": {"_id": 0, "h": {"$meta": "searchHighlights"}}}]"#,
+    );
+    let want = r#"{"v": [{"h": [{"score": 1.4219213724136353, "path": "t",
+        "texts": [{"value": "gato", "type": "hit"}]}]}]}"#;
+    assert_eq!(got, Ok(canonical(parse(want).get("v").unwrap())));
+}

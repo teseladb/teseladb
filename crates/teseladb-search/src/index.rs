@@ -516,6 +516,15 @@ impl MemIndex {
         Ok(scores)
     }
 
+    /// The tokens, with their offsets, analyzer `name` makes of `text`.
+    pub(crate) fn analyze_tokens(
+        &self,
+        name: &str,
+        text: &str,
+    ) -> Result<Vec<crate::analysis::tokenizers::Token>, IndexError> {
+        self.analyzer(name)?.analyze(text).map_err(analysis)
+    }
+
     /// The tokens analyzer `name` makes of `text`.
     pub(crate) fn analyze(&self, name: &str, text: &str) -> Result<Vec<String>, IndexError> {
         let tokens = self.analyzer(name)?.analyze(text).map_err(analysis)?;

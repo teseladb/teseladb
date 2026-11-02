@@ -45,6 +45,8 @@ const VECTOR_SEARCH_SCORE: &str = "vectorSearchScore";
 const SEQUENCE_TOKEN: &str = "searchSequenceToken";
 /// The metadata of a `$search` result with the explanation of its score.
 const SCORE_DETAILS: &str = "searchScoreDetails";
+/// The `$meta` of a document's highlights.
+const HIGHLIGHTS: &str = "searchHighlights";
 
 /// Search queries this node answered (011 FR-026).
 static QUERIES: AtomicU64 = AtomicU64::new(0);
@@ -750,6 +752,9 @@ fn scored(found: Vec<Found>, name: &str) -> Vec<Scored> {
             }
             if let Some(d) = f.details {
                 meta.insert(SCORE_DETAILS.to_owned(), Value::Document(d.to_document()));
+            }
+            if let Some(h) = f.highlights {
+                meta.insert(HIGHLIGHTS.to_owned(), h);
             }
             Scored { doc: f.doc, meta }
         })

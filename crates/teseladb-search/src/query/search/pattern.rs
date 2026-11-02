@@ -128,6 +128,19 @@ impl Pattern {
         Ok(out)
     }
 
+    /// The compiled patterns of the query for the field at `path`.
+    pub(super) fn matchers(&self, index: &MemIndex, path: &str) -> Vec<Regex> {
+        let keyword = index.query_analyzer(path) == KEYWORD;
+        self.query
+            .iter()
+            .filter_map(|q| {
+                let q: String =
+                    if keyword { q.clone() } else { q.chars().map(lowercase).collect() };
+                if self.regex { Regex::new(&q).ok() } else { Some(wildcard(&q)) }
+            })
+            .collect()
+    }
+
     /// The score option.
     pub(super) fn score(&self) -> &Score {
         &self.score

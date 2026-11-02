@@ -36,6 +36,8 @@ pub struct Found {
     pub token: Option<String>,
     /// The explanation of its score, when the query asks for `scoreDetails`.
     pub details: Option<crate::index::Explanation>,
+    /// Its highlights, when the query asks for `highlight`.
+    pub highlights: Option<teseladb_bson::Value>,
 }
 
 /// A segment written as an immutable file (FR-012): its range `[start, end)` and the bytes.
@@ -270,11 +272,29 @@ impl Indexer {
                 if let Some(doc) = s.index.document_of(&hit.key) {
                     let doc = doc.clone();
                     let details = explained.remove(&hit.key);
-                    found.push(Found { doc, key: hit.key, score: hit.score, token: None, details });
+                    found.push(Found {
+                        doc,
+                        key: hit.key,
+                        score: hit.score,
+                        token: None,
+                        details,
+                        highlights: None,
+                    });
                 }
             }
         }
-        crate::query::paginate::arrange(found, spec, &self.definition)
+        let mut found = crate::query::paginate::arrange(found, spec, &self.definition)?;
+        // Only the documents of the final result are highlighted (FR-015).
+        if spec.get("highlight").is_some() {
+            for f in &mut found {
+                let Some(s) = self.segments.iter().find(|s| s.index.document_of(&f.key).is_some())
+                else {
+                    continue;
+                };
+                f.highlights = search::highlights(&s.index, spec, &f.key)?;
+            }
+        }
+        Ok(found)
     }
 
     /// The document of `$searchMeta` for `spec`: the count and the facets over every segment,

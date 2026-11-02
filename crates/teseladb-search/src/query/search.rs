@@ -177,6 +177,18 @@ pub fn explain(
     Ok(keys.iter().filter_map(|k| Some((k.clone(), by_id.remove(&index.id_of(k)?)?))).collect())
 }
 
+/// The highlights `spec` asks for of the document of `key`, `None` without `highlight`.
+pub fn highlights(
+    index: &MemIndex,
+    spec: &Document,
+    key: &[u8],
+) -> Result<Option<Value>, SearchError> {
+    let Some(v) = spec.get("highlight") else { return Ok(None) };
+    let h = highlight::parse(index, v)?;
+    let op = parse_root(index, spec)?;
+    Ok(index.document_of(key).map(|d| h.of(index, &op, d)))
+}
+
 /// Whether `spec` asks for `scoreDetails`.
 pub fn wants_details(spec: &Document) -> bool {
     matches!(spec.get("scoreDetails"), Some(Value::Boolean(true)))
@@ -252,6 +264,9 @@ fn parse_root(index: &MemIndex, spec: &Document) -> Result<Operator, SearchError
     // `refsearch`'s check, which `$searchMeta` reaches (`refnode` checks it first for `$search`).
     if spec.get("scoreDetails").is_some_and(|v| !matches!(v, Value::Boolean(_))) {
         return Err(shape("scoreDetails", "must be a boolean"));
+    }
+    if let Some(v) = spec.get("highlight") {
+        highlight::parse(index, v)?;
     }
     if let Some(c) = collector(index, spec)? {
         return Ok(match c.operator {
@@ -857,6 +872,7 @@ mod explain;
 pub mod facet;
 mod function;
 mod geo;
+mod highlight;
 mod knn;
 mod more_like;
 mod pattern;
