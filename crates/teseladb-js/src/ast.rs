@@ -96,6 +96,8 @@ pub enum Expr {
     BigInt(Rc<crate::bigint::BigInt>),
     Str(Name),
     Template(Vec<Name>, Vec<Expr>),
+    /// The strings a tagged template gives its tag: the cooked pieces with their `raw`.
+    TemplateObject(Rc<crate::lexer::TemplateParts>),
     Regex(Name, Name),
     Bool(bool),
     Null,

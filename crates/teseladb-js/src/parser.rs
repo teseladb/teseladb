@@ -4,6 +4,7 @@
 use std::rc::Rc;
 
 use crate::ast::*;
+use crate::early::{Decl, ScopeKind, Scopes};
 use crate::lexer::{SyntaxError, Tok, Token, tokenize};
 
 /// Parses a whole script.
@@ -17,7 +18,11 @@ pub fn parse_script(src: &str) -> Result<Vec<Stmt>, SyntaxError> {
         in_gen: false,
         in_async: false,
         origin: Pos { line: 1, col: 1 },
+        scopes: Scopes::default(),
+        binding: None,
+        in_params: false,
     };
+    p.scopes.push(ScopeKind::Function);
     let mut out = Vec::new();
     while !p.at_eof() {
         out.push(p.statement()?);
@@ -42,7 +47,11 @@ fn parse_expression(
         in_gen,
         in_async,
         origin: Pos { line, col },
+        scopes: Scopes::default(),
+        binding: None,
+        in_params: false,
     };
+    p.scopes.push(ScopeKind::Function);
     let start = p.pos();
     let e = p.expression()?;
     if !p.at_eof() {
@@ -130,6 +139,12 @@ struct Parser {
     origin: Pos,
     /// Whether the code being read is the body of an async function (`await` is an operator).
     in_async: bool,
+    /// The declarations of the scopes open here, for the early errors of redeclarations.
+    scopes: Scopes,
+    /// What the names a binding pattern reads declare, while it reads a declaration.
+    binding: Option<Decl>,
+    /// Whether the code being read is a function's parameter list (no `yield` there).
+    in_params: bool,
 }
 
 /// Whether `body` starts with the directive `"use strict"`.
@@ -246,6 +261,52 @@ impl Parser {
         Err(SyntaxError { message, line: p.line, col: p.col })
     }
 
+    fn fail_at<T>(&self, p: Pos, message: String) -> Result<T, SyntaxError> {
+        Err(SyntaxError { message, line: p.line, col: p.col })
+    }
+
+    fn pos_at(&self, k: usize) -> Pos {
+        let t = &self.toks[(self.i + k).min(self.toks.len() - 1)];
+        Pos { line: t.line, col: t.col }
+    }
+
+    /// Declares `name`, read at `p`, as `decl` in the scope open here.
+    fn declare(&mut self, name: &Name, decl: Decl, p: Pos) -> Result<(), SyntaxError> {
+        if decl != Decl::Param && self.strict && matches!(&**name, "eval" | "arguments") {
+            return self.fail_at(
+                p,
+                format!("'{name}' can't be defined or assigned to in strict mode code"),
+            );
+        }
+        if matches!(decl, Decl::Let | Decl::Const) && &**name == "let" {
+            return self.fail_at(p, "a lexical declaration can't define a 'let' binding".into());
+        }
+        let strict = self.strict;
+        self.scopes.declare(name, decl, strict).map_or_else(|m| self.fail_at(p, m), Ok)
+    }
+
+    /// A name a binding pattern binds, declared when the pattern is a declaration's.
+    fn binding_name(&mut self) -> Result<Name, SyntaxError> {
+        let p = self.pos();
+        let name = self.ident()?;
+        if let Some(d) = self.binding {
+            self.declare(&name, d, p)?;
+        }
+        Ok(name)
+    }
+
+    /// `statements` inside a new scope of `kind`.
+    fn scoped<T>(
+        &mut self,
+        kind: ScopeKind,
+        f: impl FnOnce(&mut Self) -> Result<T, SyntaxError>,
+    ) -> Result<T, SyntaxError> {
+        self.scopes.push(kind);
+        let r = f(self);
+        self.scopes.pop();
+        r
+    }
+
     fn unexpected<T>(&self) -> Result<T, SyntaxError> {
         self.fail(format!("unexpected token: {}", describe(self.tok())))
     }
@@ -266,6 +327,9 @@ impl Parser {
 
     fn ident(&mut self) -> Result<Name, SyntaxError> {
         match self.tok().clone() {
+            Tok::Ident(w) if &*w == "yield" && (self.in_gen || self.strict) => {
+                self.fail("yield is a reserved identifier".into())
+            }
             Tok::Ident(w) if !is_reserved(&w) => {
                 self.i += 1;
                 Ok(w)
@@ -315,7 +379,7 @@ impl Parser {
     fn statement_inner(&mut self) -> Result<Stmt, SyntaxError> {
         let pos = self.pos();
         if self.eat("{") {
-            return Ok(Stmt::Block(self.block_rest()?));
+            return Ok(Stmt::Block(self.scoped(ScopeKind::Block, Self::block_rest)?));
         }
         if self.eat(";") {
             return Ok(Stmt::Empty);
@@ -325,6 +389,9 @@ impl Parser {
             _ => return self.expression_statement(),
         };
         if matches!(self.peek_at(1), Tok::Punct(":")) && !is_reserved(&word) {
+            if &*word == "yield" && (self.in_gen || self.strict) {
+                return self.fail("yield is a reserved identifier".into());
+            }
             self.i += 2;
             return Ok(Stmt::Labeled(word, Box::new(self.statement()?)));
         }
@@ -350,20 +417,26 @@ impl Parser {
                     && !self.toks[self.i + 1].newline_before =>
             {
                 self.i += 2;
+                let name_pos = self.pos_at(usize::from(self.is("*")));
                 let f = self.function_rest(pos, false, true)?;
                 let name = f.name.clone().map_or_else(|| self.fail("missing name".into()), Ok)?;
+                self.declare(&name, Decl::Function { plain: false }, name_pos)?;
                 Ok(Stmt::Func(name, f))
             }
             "function" => {
                 self.i += 1;
+                let name_pos = self.pos_at(usize::from(self.is("*")));
                 let f = self.function_rest(pos, false, false)?;
                 let name = f.name.clone().map_or_else(|| self.fail("missing name".into()), Ok)?;
+                self.declare(&name, Decl::Function { plain: !f.generator }, name_pos)?;
                 Ok(Stmt::Func(name, f))
             }
             "class" => {
                 self.i += 1;
+                let name_pos = self.pos();
                 let c = self.class_rest()?;
                 let name = c.name.clone().map_or_else(|| self.fail("missing name".into()), Ok)?;
+                self.declare(&name, Decl::Class, name_pos)?;
                 Ok(Stmt::Class(name, c))
             }
             "return" => {
@@ -541,8 +614,16 @@ impl Parser {
         allow_in: bool,
     ) -> Result<Vec<(Pattern, Option<Expr>)>, SyntaxError> {
         let mut out = Vec::new();
+        let decl = match kind {
+            DeclKind::Var => Decl::Var,
+            DeclKind::Let => Decl::Let,
+            DeclKind::Const => Decl::Const,
+        };
         loop {
-            let target = self.binding_pattern()?;
+            let outer = self.binding.replace(decl);
+            let target = self.binding_pattern();
+            self.binding = outer;
+            let target = target?;
             let init = if self.eat("=") {
                 let p = self.pos();
                 let e = self.assign_in(allow_in)?;
@@ -579,7 +660,7 @@ impl Parser {
                     break;
                 }
                 let p = self.binding_pattern()?;
-                let d = if self.eat("=") { Some(self.assign()?) } else { None };
+                let d = if self.eat("=") { Some(self.default_value()?) } else { None };
                 items.push(Some((p, d)));
                 if !self.is("]") {
                     self.expect(",")?;
@@ -592,20 +673,26 @@ impl Parser {
             let mut rest = None;
             while !self.eat("}") {
                 if self.eat("...") {
-                    rest = Some(Box::new(Pattern::Name(self.ident()?)));
+                    rest = Some(Box::new(Pattern::Name(self.binding_name()?)));
                     self.expect("}")?;
                     break;
                 }
+                let key_pos = self.pos();
                 let key = self.prop_name()?;
                 let target = if self.eat(":") {
                     self.binding_pattern()?
                 } else {
                     match &key {
-                        PropName::Fixed(n) => Pattern::Name(n.clone()),
+                        PropName::Fixed(n) => {
+                            if let Some(d) = self.binding {
+                                self.declare(n, d, key_pos)?;
+                            }
+                            Pattern::Name(n.clone())
+                        }
                         PropName::Computed(_) => return self.unexpected(),
                     }
                 };
-                let d = if self.eat("=") { Some(self.assign()?) } else { None };
+                let d = if self.eat("=") { Some(self.default_value()?) } else { None };
                 props.push((key, target, d));
                 if !self.is("}") {
                     self.expect(",")?;
@@ -613,10 +700,22 @@ impl Parser {
             }
             return Ok(Pattern::Object(props, rest));
         }
-        Ok(Pattern::Name(self.ident()?))
+        Ok(Pattern::Name(self.binding_name()?))
+    }
+
+    /// The default of a pattern's element: an expression, which binds nothing.
+    fn default_value(&mut self) -> Result<Expr, SyntaxError> {
+        let outer = self.binding.take();
+        let e = self.assign();
+        self.binding = outer;
+        e
     }
 
     fn for_rest(&mut self) -> Result<Stmt, SyntaxError> {
+        self.scoped(ScopeKind::Block, Self::for_rest_in)
+    }
+
+    fn for_rest_in(&mut self) -> Result<Stmt, SyntaxError> {
         self.expect("(")?;
         let decl = match self.tok() {
             Tok::Ident(w) if &**w == "var" => Some(DeclKind::Var),
@@ -632,7 +731,16 @@ impl Parser {
         let init = if let Some(kind) = decl {
             self.i += 1;
             let start = self.i;
-            let target = self.binding_pattern()?;
+            let saved = self.scopes.clone();
+            let decl = match kind {
+                DeclKind::Var => Decl::Var,
+                DeclKind::Let => Decl::Let,
+                DeclKind::Const => Decl::Const,
+            };
+            let outer = self.binding.replace(decl);
+            let target = self.binding_pattern();
+            self.binding = outer;
+            let target = target?;
             if self.is_word("of") || self.is_word("in") {
                 let of = self.is_word("of");
                 self.i += 1;
@@ -644,6 +752,7 @@ impl Parser {
                 return Ok(Stmt::ForIn { decl: Some(kind), target, of, obj, body });
             }
             self.i = start;
+            self.scopes = saved;
             Some(ForInit::Decl(kind, self.declarations(kind, false)?))
         } else if self.is(";") {
             None
@@ -674,23 +783,15 @@ impl Parser {
 
     fn try_rest(&mut self) -> Result<Stmt, SyntaxError> {
         self.expect("{")?;
-        let body = self.block_rest()?;
+        let body = self.scoped(ScopeKind::Block, Self::block_rest)?;
         let catch = if self.eat_word("catch") {
-            let param = if self.eat("(") {
-                let p = self.binding_pattern()?;
-                self.expect(")")?;
-                Some(p)
-            } else {
-                None
-            };
-            self.expect("{")?;
-            Some((param, self.block_rest()?))
+            Some(self.scoped(ScopeKind::Catch, Self::catch_rest)?)
         } else {
             None
         };
         let finally = if self.eat_word("finally") {
             self.expect("{")?;
-            Some(self.block_rest()?)
+            Some(self.scoped(ScopeKind::Block, Self::block_rest)?)
         } else {
             None
         };
@@ -700,16 +801,44 @@ impl Parser {
         Ok(Stmt::Try(body, catch, finally))
     }
 
+    /// A catch clause after `catch`: its parameter and block share a scope.
+    fn catch_rest(&mut self) -> Result<(Option<Pattern>, Vec<Stmt>), SyntaxError> {
+        let param = if self.eat("(") {
+            let simple = matches!(self.tok(), Tok::Ident(_));
+            let outer = self.binding.replace(Decl::Catch { simple });
+            let p = self.binding_pattern();
+            self.binding = outer;
+            let p = p?;
+            self.expect(")")?;
+            Some(p)
+        } else {
+            None
+        };
+        self.expect("{")?;
+        Ok((param, self.block_rest()?))
+    }
+
     fn switch_rest(&mut self) -> Result<Stmt, SyntaxError> {
         self.expect("(")?;
         let d = self.expr_at()?;
         self.expect(")")?;
         self.expect("{")?;
+        self.scoped(ScopeKind::Block, |p| p.cases(d))
+    }
+
+    /// A `switch`'s cases after `{`.
+    fn cases(&mut self, d: Expr) -> Result<Stmt, SyntaxError> {
         let mut cases = Vec::new();
+        let mut has_default = false;
         while !self.eat("}") {
             let test = if self.eat_word("case") {
                 Some(self.expression()?)
-            } else if self.eat_word("default") {
+            } else if self.is_word("default") {
+                if has_default {
+                    return self.fail("more than one switch default".into());
+                }
+                has_default = true;
+                self.i += 1;
                 None
             } else {
                 return self.unexpected();
@@ -766,23 +895,57 @@ impl Parser {
     }
 
     fn params(&mut self) -> Result<Params, SyntaxError> {
+        let outer =
+            (self.binding.replace(Decl::Param), std::mem::replace(&mut self.in_params, true));
+        let r = self.params_in();
+        (self.binding, self.in_params) = outer;
+        let ((params, rest), seen) = r?;
+        // Duplicate names: only a plain list in sloppy code may have them.
+        let simple = rest.is_none()
+            && params.iter().all(|(p, d)| d.is_none() && matches!(p, Pattern::Name(_)));
+        if !simple || self.strict {
+            for (i, (n, p)) in seen.iter().enumerate() {
+                if seen[..i].iter().any(|(m, _)| m == n) {
+                    return self.fail_at(
+                        *p,
+                        "duplicate argument names not allowed in this context".into(),
+                    );
+                }
+            }
+        }
+        Ok((params, rest))
+    }
+
+    /// The parameter list and the names it binds, where each is.
+    fn params_in(&mut self) -> Result<(Params, Vec<(Name, Pos)>), SyntaxError> {
         self.expect("(")?;
         let mut params = Vec::new();
         let mut rest = None;
+        let mut seen = Vec::new();
         while !self.eat(")") {
             if self.eat("...") {
+                seen.push((self.peek_name(), self.pos()));
                 rest = Some(self.binding_pattern()?);
                 self.expect(")")?;
                 break;
             }
+            seen.push((self.peek_name(), self.pos()));
             let p = self.binding_pattern()?;
-            let d = if self.eat("=") { Some(self.assign()?) } else { None };
+            let d = if self.eat("=") { Some(self.default_value()?) } else { None };
             params.push((p, d));
             if !self.is(")") {
                 self.expect(",")?;
             }
         }
-        Ok((params, rest))
+        Ok(((params, rest), seen))
+    }
+
+    /// The name at the current token, or an empty one for a pattern.
+    fn peek_name(&self) -> Name {
+        match self.tok() {
+            Tok::Ident(w) => w.clone(),
+            _ => "".into(),
+        }
     }
 
     /// `function` (and `async` before it) already read: an optional `*`, the name, parameters
@@ -812,7 +975,8 @@ impl Parser {
         let outer = (self.strict, self.in_gen, self.in_async);
         self.in_gen = kind.generator;
         self.in_async = kind.is_async;
-        let r = self.function_body_in(start, name, derived_ctor, kind);
+        let r = self
+            .scoped(ScopeKind::Function, |p| p.function_body_in(start, name, derived_ctor, kind));
         (self.strict, self.in_gen, self.in_async) = outer;
         r
     }
@@ -828,6 +992,19 @@ impl Parser {
         self.expect("{")?;
         // A directive is the first statement: it is read before the rest of the body.
         if matches!(self.tok(), Tok::Str(s) if &**s == "use strict") {
+            let what = if rest.is_some() {
+                Some("rest")
+            } else if params.iter().any(|(p, _)| !matches!(p, Pattern::Name(_))) {
+                Some("destructuring")
+            } else if params.iter().any(|(_, d)| d.is_some()) {
+                Some("default")
+            } else {
+                None
+            };
+            if let Some(what) = what {
+                return self
+                    .fail(format!("\"use strict\" not allowed in function with {what} parameter"));
+            }
             self.strict = true;
         }
         let body = self.block_rest();
@@ -994,7 +1171,7 @@ impl Parser {
         let outer = (self.strict, self.in_gen, self.in_async);
         self.in_gen = false;
         self.in_async = is_async;
-        let r = self.arrow_in(start, is_async);
+        let r = self.scoped(ScopeKind::Function, |p| p.arrow_in(start, is_async));
         (self.strict, self.in_gen, self.in_async) = outer;
         r
     }
@@ -1295,11 +1472,10 @@ impl Parser {
                 let args = self.arguments()?;
                 let pos = call_pos(&e, pos);
                 e = Expr::Call { callee: Box::new(e), args, optional: false, pos };
-            } else if let Tok::Template(strs, subs) = self.tok().clone() {
+            } else if let Tok::Template(parts, subs) = self.tok().clone() {
                 // A tagged template: the tag gets the strings and the values.
                 self.i += 1;
-                let parts = Expr::Array(strs.iter().map(|s| Some(Expr::Str(s.clone()))).collect());
-                let mut args = vec![parts];
+                let mut args = vec![Expr::TemplateObject(parts)];
                 for s in &subs {
                     args.push(self.substitution(s)?);
                 }
@@ -1360,8 +1536,13 @@ impl Parser {
             Tok::Num(n) => Expr::Num(n),
             Tok::BigInt(b) => Expr::BigInt(b),
             Tok::Str(s) => Expr::Str(s),
-            Tok::Template(strs, subs) => {
+            Tok::Template(parts, subs) => {
+                if let Some(e) = &parts.invalid {
+                    let p = Pos { line: e.line, col: e.col };
+                    return self.fail_at(p, e.message.clone());
+                }
                 let subs = subs.iter().map(|s| self.substitution(s)).collect::<Result<_, _>>()?;
+                let strs = parts.cooked.iter().map(|c| c.clone().unwrap_or_default()).collect();
                 Expr::Template(strs, subs)
             }
             Tok::Regex(b, f) => Expr::Regex(b, f),
@@ -1452,6 +1633,9 @@ impl Parser {
 
     /// `yield`, `yield expr` or `yield* expr` inside a generator.
     fn yield_expr(&mut self, allow_in: bool) -> Result<Expr, SyntaxError> {
+        if self.in_params {
+            return self.fail("yield expression can't be used in parameter".into());
+        }
         self.i += 1;
         let delegate = !self.toks[self.i].newline_before && self.eat("*");
         let ends = self.toks[self.i].newline_before && !delegate

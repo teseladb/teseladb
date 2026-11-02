@@ -127,6 +127,8 @@ pub struct Interp<'c> {
     pub undescribed: Vec<u64>,
     /// The registry of `Symbol.for`.
     pub registry: Vec<(Name, Val)>,
+    /// The strings arrays of the tagged templates evaluated so far, by site.
+    pub templates: Vec<(usize, Val)>,
     pub output: Vec<String>,
     /// The value of the last expression statement (a `$where` string's result).
     pub last: Option<Val>,
@@ -1987,6 +1989,7 @@ impl<'c> Interp<'c> {
                 self.joined_string(out)
             }
             Expr::Regex(b, f) => crate::builtins::make_regexp(self, b.clone(), f.clone()),
+            Expr::TemplateObject(parts) => self.template_object(parts),
             Expr::Ident(n, _) => {
                 if &**n == "undefined" && self.lookup(env, "undefined").is_none() {
                     return Ok(Val::Undef);
@@ -2388,6 +2391,25 @@ impl<'c> Interp<'c> {
     }
 
     /// OrdinaryHasInstance: whether `f.prototype` is on the chain of `x`.
+    /// The strings array of a tagged template: one per site and call, frozen, with its frozen
+    /// `raw` (ECMA-262 §13.2.8.4).
+    fn template_object(&mut self, parts: &Rc<crate::lexer::TemplateParts>) -> R {
+        let site = Rc::as_ptr(parts) as usize;
+        if let Some((_, v)) = self.templates.iter().find(|(s, _)| *s == site) {
+            return Ok(v.clone());
+        }
+        let cooked = parts.cooked.iter().map(|c| c.clone().map_or(Val::Undef, Val::Str)).collect();
+        let strings = self.array(cooked)?;
+        let raw = self.array(parts.raw.iter().cloned().map(Val::Str).collect())?;
+        let (Val::Obj(s), Val::Obj(r)) = (&strings, &raw) else { return Ok(strings) };
+        crate::props::lock(r, true);
+        let fixed = Prop { writable: false, configurable: false, ..Prop::hidden(raw.clone()) };
+        self.define(s, "raw", fixed)?;
+        crate::props::lock(s, true);
+        self.templates.push((site, strings.clone()));
+        Ok(strings)
+    }
+
     pub fn ordinary_instance_of(&mut self, x: &Val, f: &Val) -> R<bool> {
         if !f.is_callable() {
             return self.type_error(&format!("invalid 'instanceof' operand {}", self.show(f)));

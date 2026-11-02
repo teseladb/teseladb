@@ -23,6 +23,7 @@ pub fn expr_yields(e: &Expr) -> bool {
         | Expr::BigInt(_)
         | Expr::Str(_)
         | Expr::Regex(..)
+        | Expr::TemplateObject(_)
         | Expr::Bool(_)
         | Expr::Null
         | Expr::Undefined

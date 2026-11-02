@@ -11,12 +11,24 @@ pub enum Tok {
     /// A `BigInt` literal (`10n`).
     BigInt(Rc<crate::bigint::BigInt>),
     Str(Rc<str>),
-    /// A whole template literal: its cooked strings and the source of each substitution with
-    /// the line and column where it starts.
-    Template(Vec<Rc<str>>, Vec<(String, u32, u32)>),
+    /// A whole template literal: its pieces and the source of each substitution with the line
+    /// and column where it starts.
+    Template(Rc<TemplateParts>, Vec<(String, u32, u32)>),
     Regex(Rc<str>, Rc<str>),
     Punct(&'static str),
     Eof,
+}
+
+/// The pieces of a template literal between its substitutions.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TemplateParts {
+    /// Each piece with its escapes read, `None` where an escape is not valid (allowed only in
+    /// a tagged template).
+    pub cooked: Vec<Option<Rc<str>>>,
+    /// Each piece as written, line breaks as `\n`.
+    pub raw: Vec<Rc<str>>,
+    /// The first escape that is not valid: its message and where it is.
+    pub invalid: Option<SyntaxError>,
 }
 
 /// A token with where it starts and whether a line break comes before it.
@@ -101,6 +113,7 @@ impl Lexer {
             Some(Tok::Ident(w)) => matches!(
                 &**w,
                 "return"
+                    | "yield"
                     | "typeof"
                     | "instanceof"
                     | "in"
@@ -313,7 +326,9 @@ impl Lexer {
                 if c == '}' {
                     break;
                 }
-                let Some(d) = c.to_digit(16) else { return self.err("malformed Unicode escape") };
+                let Some(d) = c.to_digit(16) else {
+                    return self.err("malformed Unicode character escape sequence");
+                };
                 v = v.saturating_mul(16).saturating_add(d);
             }
             v
@@ -390,24 +405,133 @@ impl Lexer {
     }
 
     fn template(&mut self) -> Result<Tok, SyntaxError> {
-        let (mut strs, mut subs) = (Vec::new(), Vec::new());
-        let mut cur = String::new();
+        let mut parts = TemplateParts { cooked: Vec::new(), raw: Vec::new(), invalid: None };
+        let mut subs = Vec::new();
+        let (mut cur, mut raw, mut valid) = (String::new(), String::new(), true);
         loop {
-            match self.bump() {
-                None => return self.err("unterminated template literal"),
-                Some('`') => {
-                    strs.push(cur.into());
-                    return Ok(Tok::Template(strs, subs));
-                }
-                Some('\\') => self.escape(&mut cur)?,
-                Some('$') if self.peek(0) == Some('{') => {
+            let Some(c) = self.bump() else { return self.err("unterminated template literal") };
+            match c {
+                '`' | '$' if c == '`' || self.peek(0) == Some('{') => {
+                    parts.cooked.push(valid.then(|| std::mem::take(&mut cur).into()));
+                    parts.raw.push(std::mem::take(&mut raw).into());
+                    (cur, valid) = (String::new(), true);
+                    if c == '`' {
+                        return Ok(Tok::Template(Rc::new(parts), subs));
+                    }
                     self.bump();
-                    strs.push(std::mem::take(&mut cur).into());
                     let (line, col) = (self.line, self.col);
                     subs.push((self.substitution()?, line, col));
                 }
-                Some(c) => cur.push(c),
+                '\\' => {
+                    let (line, col) = (self.line, self.col - 1);
+                    let from = self.i;
+                    match self.template_escape(&mut cur) {
+                        Ok(()) => {}
+                        Err(message) => {
+                            valid = false;
+                            if parts.invalid.is_none() {
+                                parts.invalid =
+                                    Some(SyntaxError { message: message.into(), line, col });
+                            }
+                        }
+                    }
+                    raw.push('\\');
+                    for &ch in &self.s[from..self.i] {
+                        raw.push(ch);
+                    }
+                    normalize_breaks(&mut raw);
+                }
+                '\r' => {
+                    if self.peek(0) == Some('\n') {
+                        self.bump();
+                    }
+                    cur.push('\n');
+                    raw.push('\n');
+                }
+                c => {
+                    cur.push(c);
+                    raw.push(c);
+                }
             }
+        }
+    }
+
+    /// An escape of a template after `\\`, or the message of why it is not valid (its first
+    /// character read).
+    fn template_escape(&mut self, out: &mut String) -> Result<(), &'static str> {
+        const OCTAL: &str = "octal escape sequences can't be used in untagged template literals or in strict mode code";
+        const UNICODE: &str = "malformed Unicode character escape sequence";
+        const HEX: &str = "malformed hexadecimal character escape sequence";
+        let Some(c) = self.peek(0) else { return Ok(()) };
+        match c {
+            '0' if self.peek(1).is_some_and(|d| d.is_ascii_digit()) => {
+                self.bump();
+                Err(OCTAL)
+            }
+            '1'..='9' => {
+                self.bump();
+                Err(OCTAL)
+            }
+            'x' => {
+                self.bump();
+                let hex: Option<u32> = (0..2)
+                    .map(|k| self.peek(k).and_then(|d| d.to_digit(16)))
+                    .try_fold(0, |v, d| d.map(|d| v * 16 + d));
+                let Some(v) = hex else { return Err(HEX) };
+                self.bump();
+                self.bump();
+                out.push(char::from_u32(v).unwrap_or('\u{fffd}'));
+                Ok(())
+            }
+            'u' => {
+                self.bump();
+                let code = if self.peek(0) == Some('{') {
+                    let mut k = 1;
+                    let mut v = 0u32;
+                    while let Some(d) = self.peek(k).and_then(|d| d.to_digit(16)) {
+                        v = v.saturating_mul(16).saturating_add(d);
+                        k += 1;
+                    }
+                    if k == 1 || self.peek(k) != Some('}') || v > 0x10_FFFF {
+                        return Err(UNICODE);
+                    }
+                    for _ in 0..=k {
+                        self.bump();
+                    }
+                    v
+                } else {
+                    let hex: Option<u32> = (0..4)
+                        .map(|k| self.peek(k).and_then(|d| d.to_digit(16)))
+                        .try_fold(0, |v, d| d.map(|d| v * 16 + d));
+                    let Some(v) = hex else { return Err(UNICODE) };
+                    for _ in 0..4 {
+                        self.bump();
+                    }
+                    // A surrogate pair written as two escapes.
+                    if (0xD800..0xDC00).contains(&v)
+                        && self.peek(0) == Some('\\')
+                        && self.peek(1) == Some('u')
+                    {
+                        let low: Option<u32> = (2..6)
+                            .map(|k| self.peek(k).and_then(|d| d.to_digit(16)))
+                            .try_fold(0, |a, d| d.map(|d| a * 16 + d));
+                        if let Some(low) = low.filter(|l| (0xDC00..0xE000).contains(l)) {
+                            for _ in 0..6 {
+                                self.bump();
+                            }
+                            out.push(
+                                char::from_u32(0x10000 + ((v - 0xD800) << 10) + (low - 0xDC00))
+                                    .unwrap_or('\u{fffd}'),
+                            );
+                            return Ok(());
+                        }
+                    }
+                    v
+                };
+                out.push(char::from_u32(code).unwrap_or('\u{fffd}'));
+                Ok(())
+            }
+            _ => self.escape(out).map_err(|_| UNICODE),
         }
     }
 
@@ -481,5 +605,12 @@ impl Lexer {
             self.bump();
         }
         Ok(Tok::Regex(body.into(), flags.into()))
+    }
+}
+
+/// `\r\n` and `\r` in the raw text of a template become `\n` (ECMA-262 §13.2.8.6).
+fn normalize_breaks(raw: &mut String) {
+    if raw.contains('\r') {
+        *raw = raw.replace("\r\n", "\n").replace('\r', "\n");
     }
 }

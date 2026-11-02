@@ -44,6 +44,7 @@ pub(crate) fn interp<'c>(realm: Realm, budget: Rc<Budget>, limits: Limits) -> In
         symbol_ids: 0,
         undescribed: Vec::new(),
         registry: Vec::new(),
+        templates: Vec::new(),
         output: Vec::new(),
         last: None,
         pos: ast::Pos::default(),

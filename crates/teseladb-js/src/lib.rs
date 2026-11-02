@@ -14,6 +14,7 @@ mod bigints;
 mod bson;
 mod builtins;
 mod date;
+mod early;
 mod generators;
 mod interp;
 mod iterators;
@@ -167,10 +168,12 @@ impl fmt::Debug for Program {
 impl Program {
     /// Parses `source`.
     pub fn compile(source: &str) -> Result<Program, JsError> {
-        let body = parser::parse_script(source).map_err(|e| JsError::Compile {
-            message: e.message,
-            line: e.line,
-            col: e.col,
+        let body = parser::parse_script(source).map_err(|e| {
+            // RefDb compiles a function inside `(` and `)`: its first line moves one column.
+            let t = source.trim_start();
+            let wrapped = t.starts_with("function") || t.starts_with("async") || t.starts_with('(');
+            let shift = if wrapped && e.line == 1 { FUNCTION_PREFIX } else { 0 };
+            JsError::Compile { message: e.message, line: e.line, col: e.col + shift }
         })?;
         let is_function = matches!(body.as_slice(), [Stmt::Expr(Expr::Func(_))] | [Stmt::Func(..)]);
         Ok(Program { body: Rc::new(body), is_function, globals: Rc::default() })
