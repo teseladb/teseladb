@@ -130,16 +130,10 @@ fn take_position<R: EscReader>(
 
 /// The value at dotted `path` of `doc`, through embedded documents.
 pub fn get_path<'a>(doc: &'a Document, path: &str) -> Option<&'a Value> {
-    let mut cur = doc;
-    let mut parts = path.split('.').peekable();
-    while let Some(part) = parts.next() {
-        let v = cur.get(part)?;
-        if parts.peek().is_none() {
-            return Some(v);
-        }
-        cur = v.as_document()?;
+    match path.split_once('.') {
+        None => doc.get(path),
+        Some((head, rest)) => get_path(doc.get(head)?.as_document()?, rest),
     }
-    None
 }
 
 fn get_path_mut<'a>(doc: &'a mut Document, path: &str) -> Option<&'a mut Value> {
