@@ -140,6 +140,9 @@ pub struct Mem {
     pub types: BTreeMap<Vec<u8>, u8>,
     /// How many times a command read a collection's catalog entry.
     pub catalog_reads: usize,
+    /// Rounds of reads inside transactions: one per `txn_get` or `txn_scan`, one per batch of
+    /// `txn_points` or `txn_gets`.
+    pub txn_rounds: usize,
     /// How many `PutIntents` and one-phase commits the ranges took.
     pub intent_puts: usize,
     pub one_phase: usize,
@@ -615,6 +618,7 @@ impl Backend for Mem {
         uncertain_to: Option<teseladb_hlc::Hlc>,
     ) -> Result<Option<(u8, Vec<u8>)>, CommandError> {
         use teseladb_range::intents::IntentOp;
+        self.txn_rounds += 1;
         self.txn_read(at, uncertain_to)?;
         let own = view.own.and_then(|t| self.intents.get(&t.0));
         if let Some((_, w)) = own.and_then(|o| o.iter().find(|(k, _)| k.as_slice() == key)) {
@@ -638,6 +642,39 @@ impl Backend for Mem {
             .and_then(|v| v.value.clone()))
     }
 
+    fn txn_points(
+        &mut self,
+        keys: &[Vec<u8>],
+        at: Hlc,
+        view: &teseladb_range::push::TxnView,
+        uncertain_to: Option<teseladb_hlc::Hlc>,
+    ) -> Result<Vec<Option<Vec<u8>>>, CommandError> {
+        let rounds = self.txn_rounds;
+        let mut out = Vec::new();
+        for k in keys {
+            let end = teseladb_wire::commands::point_end(k);
+            out.push(self.txn_scan(k, &end, 1, at, view, uncertain_to)?.pop().map(|(_, v)| v));
+        }
+        self.txn_rounds = rounds + 1;
+        Ok(out)
+    }
+
+    fn txn_gets(
+        &mut self,
+        keys: &[Vec<u8>],
+        at: Hlc,
+        view: &teseladb_range::push::TxnView,
+        uncertain_to: Option<teseladb_hlc::Hlc>,
+    ) -> Result<Vec<Option<(u8, Vec<u8>)>>, CommandError> {
+        let rounds = self.txn_rounds;
+        let out = keys
+            .iter()
+            .map(|k| self.txn_get(k, at, view, uncertain_to))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.txn_rounds = rounds + 1;
+        Ok(out)
+    }
+
     fn txn_scan(
         &mut self,
         start: &[u8],
@@ -648,6 +685,7 @@ impl Backend for Mem {
         uncertain_to: Option<teseladb_hlc::Hlc>,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
         use teseladb_range::intents::IntentOp;
+        self.txn_rounds += 1;
         self.txn_read(at, uncertain_to)?;
         // As a range's scan: the versions that only serve the history are no documents.
         let history = teseladb_range::HISTORY_VALUE;

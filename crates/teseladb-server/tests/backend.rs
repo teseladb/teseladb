@@ -518,7 +518,9 @@ fn a_commit_quorum_counts_the_fewest_voters_of_the_ranges() {
     let mut b = backend(vec![], vec![]);
     assert_eq!(b.voters(&[1], &[4]), Ok(1));
     assert_eq!(b.voters(&[3], &[3, 1]), Ok(1));
-    assert_eq!(b.voters(&[9], &[10]).unwrap_err().code.code, 10107, "no range there");
+    // A span the table never fills waits for it until the deadline, as a write waits for its
+    // key's range, and gets the ranges' time-out (NetworkTimeout).
+    assert_eq!(b.voters(&[9], &[10]).unwrap_err().code.code, 89, "no range there");
 }
 
 #[test]
@@ -1001,4 +1003,85 @@ fn a_change_stream_reads_the_catalog_changes_and_moves_a_quiet_group_0() {
     assert_eq!(b.catalog_changes(floor).unwrap_err().code.code, 1);
     let mut b = backend(vec![], vec![]);
     assert_eq!(b.catalog_changes(floor).unwrap_err().code.code, 10107);
+}
+
+/// The reads of several keys of a transaction go to their ranges together and each key gets its
+/// own answer; a read without one (here a leader that changed) goes again on its own (017
+/// SC-002).
+#[test]
+fn reads_of_several_keys_go_together_and_each_gets_its_answer() {
+    use teseladb_range::push::TxnView;
+    let at = Hlc { physical: 1_000, logical: 0 };
+    let view = TxnView::default();
+    let rows = |r: Vec<(Vec<u8>, Vec<u8>)>| Ok(DataReply::Remote(RemoteReply::Rows(r)));
+    let moved = Err(RangeError::NotLeader { hint: NodeId(0) });
+    let keys = vec![vec![1, 1], vec![1, 2], vec![2, 5]];
+    let mut b = backend(
+        vec![
+            rows(vec![(vec![1, 1], vec![7])]),
+            rows(vec![]),
+            moved,
+            rows(vec![(vec![2, 5], vec![9])]),
+        ],
+        vec![],
+    );
+    let found = b.txn_points(&keys, at, &view, None).unwrap();
+    assert_eq!(found, vec![Some(vec![7]), None, Some(vec![9])]);
+    let value =
+        |v: Option<(u8, Vec<u8>)>| Ok(DataReply::Remote(RemoteReply::Value { ts: at, value: v }));
+    let mut b =
+        backend(vec![value(Some((3, vec![1]))), value(None), value(Some((3, vec![2])))], vec![]);
+    let found = b.txn_gets(&keys, at, &view, None).unwrap();
+    assert_eq!(found, vec![Some((3, vec![1])), None, Some((3, vec![2]))]);
+}
+
+/// A commit's answer carries its mark into this node's clock: the next transaction of the node
+/// reads at or above what it committed and does not write under it (017 SC-002, 008 FR-008).
+#[test]
+fn a_committed_mark_moves_the_clock_of_the_node() {
+    use teseladb_range::host::TxnOp;
+    use teseladb_range::intents::{TxnId, TxnRecord, TxnStatus};
+    // A mark of another node in the same millisecond and sequence as the clock takes it.
+    let ahead = Hlc { physical: u64::from(u32::MAX) * 100, logical: 9 };
+    let committed = Ok(DataReply::Remote(RemoteReply::Record(TxnRecord {
+        txn: TxnId(6),
+        lsid: 0,
+        txn_number: 0,
+        status: TxnStatus::Committed,
+        read_ts: ahead,
+        min_commit_ts: ahead,
+        commit_ts: ahead,
+        heartbeat_ts: ahead,
+        spans: vec![],
+    })));
+    let mut b = backend(vec![committed], vec![]);
+    assert!(b.cluster_mark() < ahead);
+    let op = TxnOp::ReadRecord { txn: TxnId(6) };
+    assert!(b.txn_send(GroupId(1), op).is_ok());
+    assert!(b.cluster_mark() >= ahead, "{:?}", b.cluster_mark());
+}
+
+/// The informative commands that read the routing table (`route_entries`: shards, chunks,
+/// `getShardVersion`) see the whole cluster: on a node that is starting, whose table does not hold
+/// every range yet, the read waits for it as a write waits for its key's range, and only at the
+/// deadline answers the ranges' time-out instead of a part of the table.
+#[test]
+fn the_routing_table_is_read_once_it_holds_the_whole_key_space() {
+    // The data space is `[01, 04)`: a node still filling its table holds `[1, 2)` alone.
+    let h = cores(Arc::default(), Arc::default(), Arc::default());
+    h.routes.publish(&[range(1, &[1], &[2])]);
+    let routes = h.routes.clone();
+    let mut b = ServerBackend::new(h, 7).with_deadline(Duration::from_secs(5));
+    let filler = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(150));
+        routes.publish(&[range(1, &[1], &[2]), range(2, &[2], &[4])]);
+    });
+    let entries = b.route_entries().unwrap();
+    filler.join().unwrap();
+    assert_eq!(entries.len(), 2, "{entries:?}");
+    // A table that never fills: the ranges' time-out (NetworkTimeout) at the deadline.
+    let h = cores(Arc::default(), Arc::default(), Arc::default());
+    h.routes.publish(&[range(1, &[1], &[2])]);
+    let mut b = ServerBackend::new(h, 7).with_deadline(Duration::from_millis(300));
+    assert_eq!(b.route_entries().unwrap_err().code.code, 89);
 }

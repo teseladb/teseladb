@@ -69,6 +69,46 @@ pub trait EscReader {
     /// The document with `_id` `id`: `None` if there is none, else its `value` (empty for a
     /// position).
     fn get(&mut self, id: &Token) -> Result<Option<Vec<u8>>, Self::Error>;
+    /// Reads the documents with `_id` in `ids` together, ahead of the probes that will ask for
+    /// them with [`EscReader::get`]: a reader whose reads are rounds to another thread or node
+    /// keeps them and answers those probes without one (017 SC-002). The probes and what they
+    /// find stay the same.
+    fn read_ahead(&mut self, ids: &[Token]) -> Result<(), Self::Error> {
+        let _ = ids;
+        Ok(())
+    }
+}
+
+/// Positions read ahead in the first round of a search, and the least of each later round: the
+/// search from 1 probes 1, 3, 7, 15, 31, so a value written up to 30 times takes one round.
+pub const READ_AHEAD: u64 = 31;
+/// Anchors read ahead in the first round: compaction leaves few.
+const ANCHORS_AHEAD: u64 = 2;
+
+/// The numbers from `from` a search has read ahead, up to `to`; each round past them reads at
+/// least as many again as the search has covered, so a search of `n` takes `log2(n)` rounds.
+struct Ahead {
+    from: u64,
+    to: u64,
+}
+
+impl Ahead {
+    /// Reads ahead the documents of `id` for the numbers up to `n` and beyond, if not yet read.
+    fn cover<R: EscReader>(
+        &mut self,
+        reader: &mut R,
+        n: u64,
+        id: impl Fn(u64) -> Token,
+    ) -> Result<(), R::Error> {
+        if n <= self.to {
+            return Ok(());
+        }
+        let covered = self.to.saturating_add(1).saturating_sub(self.from);
+        let to = n.max(self.to.saturating_add(READ_AHEAD.max(covered)));
+        let ids: Vec<Token> = (self.to + 1..=to).map(id).collect();
+        self.to = to;
+        reader.read_ahead(&ids)
+    }
 }
 
 /// What the ESC holds for one value.
@@ -112,17 +152,34 @@ pub fn emu_binary<E>(from: u64, mut exists: impl FnMut(u64) -> Result<bool, E>) 
 }
 
 /// What the ESC holds for the value of `keys`.
+/// The searches read ahead (`EscReader::read_ahead`): the null anchor, the first anchors and the
+/// first positions in one round, which is all a value written a few times needs.
 pub fn state<R: EscReader>(reader: &mut R, keys: &EscKeys) -> Result<EscState, R::Error> {
+    let mut first: Vec<Token> = (0..=ANCHORS_AHEAD).map(|a| keys.anchor_id(a)).collect();
+    first.extend((1..=READ_AHEAD).map(|p| keys.position_id(p)));
+    reader.read_ahead(&first)?;
     let null = reader.get(&keys.anchor_id(0))?.and_then(|v| keys.read_anchor(&v));
     let first_anchor = null.map_or(1, |(a, _)| a + 1);
-    let apos = emu_binary(first_anchor, |a| Ok(reader.get(&keys.anchor_id(a))?.is_some()))?;
+    let mut anchors = Ahead {
+        from: first_anchor,
+        to: if first_anchor == 1 { ANCHORS_AHEAD } else { first_anchor - 1 },
+    };
+    let apos = emu_binary(first_anchor, |a| {
+        anchors.cover(reader, a, |n| keys.anchor_id(n))?;
+        Ok(reader.get(&keys.anchor_id(a))?.is_some())
+    })?;
     let anchored = if apos >= first_anchor {
         let value = reader.get(&keys.anchor_id(apos))?.unwrap_or_default();
         keys.read_anchor(&value).map_or(0, |(_, c)| c)
     } else {
         null.map_or(0, |(_, c)| c)
     };
-    let count = emu_binary(anchored + 1, |p| Ok(reader.get(&keys.position_id(p))?.is_some()))?;
+    let mut positions =
+        Ahead { from: anchored + 1, to: if anchored == 0 { READ_AHEAD } else { anchored } };
+    let count = emu_binary(anchored + 1, |p| {
+        positions.cover(reader, p, |n| keys.position_id(n))?;
+        Ok(reader.get(&keys.position_id(p))?.is_some())
+    })?;
     Ok(EscState { null, apos, anchored, count })
 }
 
@@ -162,5 +219,11 @@ impl<R: EscReader> EscReader for Overlay<'_, R> {
             return Ok(Some(Vec::new()));
         }
         self.inner.get(id)
+    }
+
+    fn read_ahead(&mut self, ids: &[Token]) -> Result<(), R::Error> {
+        let unwritten: Vec<Token> =
+            ids.iter().filter(|id| !self.written.contains(id)).copied().collect();
+        self.inner.read_ahead(&unwritten)
     }
 }

@@ -7,6 +7,7 @@
 mod across;
 mod intent_wait;
 mod span;
+mod together;
 mod txn_reaper;
 
 pub(crate) use txn_reaper::SCAN_EVERY;
@@ -20,6 +21,7 @@ use std::time::{Duration, Instant};
 
 use teseladb_hlc::Hlc;
 use teseladb_io::runtime::{CoreInput, CoreSender, CoreSenders};
+use teseladb_meta::bootstrap::{DATA_END, DATA_START};
 use teseladb_meta::catalog::{Catalog, CatalogCommand, CollectionEntry, Namespace};
 use teseladb_meta::command::Group0Command;
 use teseladb_meta::group0::Group0Error;
@@ -118,6 +120,10 @@ pub struct ServerBackend {
     selection: Option<(Instant, String)>,
     /// The mark the running command's reads are served at (008 FR-012, FR-013).
     read_mark: Option<teseladb_txn::causal::ReadMark>,
+    /// The highest commit mark this backend's transactions got: the clock takes a received mark
+    /// with its own node number, which in the same millisecond and sequence sorts below another
+    /// node's, so the cluster time this backend reads at is never below it (017 SC-002).
+    committed: Hlc,
 }
 
 impl ServerBackend {
@@ -144,6 +150,7 @@ impl ServerBackend {
             read_pref: None,
             selection: None,
             read_mark: None,
+            committed: Hlc { physical: 0, logical: 0 },
         }
     }
 
@@ -260,6 +267,13 @@ impl ServerBackend {
         if let Some(core) = self.cores.first() {
             let _ = core.send(CoreInput::App(NodeMsg::HttpAnswer(to, req, body)));
         }
+    }
+
+    /// The ranges' time-out once the operation's deadline passed waiting for the routing table.
+    fn range_timeout(&self) -> CommandError {
+        let max_time_expired = self.max_until.is_some_and(|m| Instant::now() >= m);
+        let ctx = RangeContext { retryable_write: false, max_time_expired };
+        from_range(&RangeError::Timeout, ctx)
     }
 
     fn until(&self) -> Instant {
@@ -522,6 +536,18 @@ impl ServerBackend {
     }
 }
 
+/// The mark of a commit a transaction's request answered: a committed record's, or a one-phase
+/// commit's.
+fn committed_mark(reply: &teseladb_range::host::Reply) -> Option<Hlc> {
+    use teseladb_range::host::Reply;
+    use teseladb_range::intents::TxnStatus;
+    match reply {
+        Reply::Record(rec) if rec.status == TxnStatus::Committed => Some(rec.commit_ts),
+        Reply::Intents { ts } => Some(*ts),
+        _ => None,
+    }
+}
+
 /// Prefix of the Group 0 settings that hold the cluster parameters (`setClusterParameter`).
 pub const PARAMETER_PREFIX: &[u8] = b"clusterParameter.";
 
@@ -744,9 +770,7 @@ impl Backend for ServerBackend {
                 return Ok(n);
             }
             if Instant::now() >= until {
-                let max_time_expired = self.max_until.is_some_and(|m| Instant::now() >= m);
-                let ctx = RangeContext { retryable_write: false, max_time_expired };
-                return Err(from_range(&RangeError::Timeout, ctx));
+                return Err(self.range_timeout());
             }
             thread::sleep(RETRY_PAUSE);
         }
@@ -903,7 +927,15 @@ impl Backend for ServerBackend {
         if matches!(op, teseladb_range::host::TxnOp::PushTxn { .. }) {
             txn_stats::pushed(&mut lock(&self.h.sessions));
         }
-        self.ask_range(g, op).and_then(across::reply_of)
+        let reply = self.ask_range(g, op).and_then(across::reply_of)?;
+        // A commit's mark comes into the node's clock, as a received mark does: the node's next
+        // transaction reads at or above it, so it neither misses the commit nor writes under it
+        // and fails with a write conflict (017 SC-002).
+        if let Some(ts) = committed_mark(&reply) {
+            self.h.clock.0.update(ts);
+            self.committed = self.committed.max(ts);
+        }
+        Ok(reply)
     }
 
     fn txn_get(
@@ -962,6 +994,26 @@ impl Backend for ServerBackend {
             }
         }
         Ok(rows)
+    }
+
+    fn txn_gets(
+        &mut self,
+        keys: &[Vec<u8>],
+        at: Hlc,
+        view: &TxnView,
+        uncertain_to: Option<Hlc>,
+    ) -> Result<Vec<Option<(u8, Vec<u8>)>>, CommandError> {
+        self.gets_together(keys, (at, view, uncertain_to))
+    }
+
+    fn txn_points(
+        &mut self,
+        keys: &[Vec<u8>],
+        at: Hlc,
+        view: &TxnView,
+        uncertain_to: Option<Hlc>,
+    ) -> Result<Vec<Option<Vec<u8>>>, CommandError> {
+        self.points_together(keys, (at, view, uncertain_to))
     }
 
     fn read_versions(
@@ -1085,7 +1137,20 @@ impl Backend for ServerBackend {
     }
 
     fn route_entries(&mut self) -> Result<Vec<teseladb_router::table::RouteEntry>, CommandError> {
-        Ok(self.h.routes.entries())
+        // A node that is starting fills its routing table after it is ready: the commands that
+        // report it (shards, chunks, `getShardVersion`) wait until it holds the whole data space,
+        // as `voters` waits for a span's, instead of answering with a part of the cluster.
+        let until = self.until();
+        loop {
+            let entries = self.h.routes.entries();
+            if span::fewest_voters(&entries, &DATA_START, &DATA_END).is_some() {
+                return Ok(entries);
+            }
+            if Instant::now() >= until {
+                return Err(self.range_timeout());
+            }
+            thread::sleep(RETRY_PAUSE);
+        }
     }
 
     fn range_order(
@@ -1187,7 +1252,7 @@ impl Backend for ServerBackend {
     }
 
     fn cluster_mark(&self) -> Hlc {
-        self.h.clock.0.peek()
+        self.h.clock.0.peek().max(self.committed)
     }
 
     fn now_micros(&self) -> u64 {

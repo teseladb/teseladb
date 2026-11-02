@@ -270,6 +270,48 @@ pub trait Backend {
         view: &teseladb_range::push::TxnView,
         uncertain_to: Option<teseladb_hlc::Hlc>,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError>;
+    /// Reads each of `keys` as [`Backend::txn_get`] reads it, all at mark `at`: a backend that
+    /// can send the reads together answers them in one round instead of one round each
+    /// (017 SC-002).
+    fn txn_gets(
+        &mut self,
+        keys: &[Vec<u8>],
+        at: teseladb_hlc::Hlc,
+        view: &teseladb_range::push::TxnView,
+        uncertain_to: Option<teseladb_hlc::Hlc>,
+    ) -> Result<Vec<Option<(u8, Vec<u8>)>>, CommandError> {
+        keys.iter().map(|k| self.txn_get(k, at, view, uncertain_to)).collect()
+    }
+    /// The document stored at each of `keys`, read as [`Backend::txn_scan`] reads `[key, key ‖
+    /// 0)` with a limit of one, all at mark `at`; together when the backend can (017 SC-002).
+    fn txn_points(
+        &mut self,
+        keys: &[Vec<u8>],
+        at: teseladb_hlc::Hlc,
+        view: &teseladb_range::push::TxnView,
+        uncertain_to: Option<teseladb_hlc::Hlc>,
+    ) -> Result<Vec<Option<Vec<u8>>>, CommandError> {
+        let mut out = Vec::with_capacity(keys.len());
+        for k in keys {
+            let rows = self.txn_scan(k, &point_end(k), 1, at, view, uncertain_to)?;
+            out.push(rows.into_iter().next().map(|(_, v)| v));
+        }
+        Ok(out)
+    }
+    /// The document stored at each of `keys`, as [`Backend::scan`] reads `[key, key ‖ 0)` with a
+    /// limit of one; a transaction's backend reads them together at its mark (017 SC-002).
+    fn points(
+        &mut self,
+        keys: &[Vec<u8>],
+        concern: ReadConcern,
+    ) -> Result<Vec<Option<Vec<u8>>>, CommandError> {
+        let mut out = Vec::with_capacity(keys.len());
+        for k in keys {
+            let rows = self.scan(k, &point_end(k), 1, concern)?;
+            out.push(rows.into_iter().next().map(|(_, v)| v));
+        }
+        Ok(out)
+    }
     /// The fewest voters of the ranges that hold `[start, end)`: what a `commitQuorum` may ask
     /// of them (009 FR-006).
     fn voters(&mut self, start: &[u8], end: &[u8]) -> Result<usize, CommandError>;
@@ -628,6 +670,14 @@ pub const ANONYMOUS_UID: &str = "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=";
 
 /// What a node's name in `config.shards` starts with, before its number.
 pub const SHARD_PREFIX: &str = "node";
+
+/// The end of the span that holds only `key`: `key ‖ 0`.
+pub fn point_end(key: &[u8]) -> Vec<u8> {
+    let mut end = Vec::with_capacity(key.len() + 1);
+    end.extend_from_slice(key);
+    end.push(0);
+    end
+}
 
 /// The name of node `node` as `config.shards` lists it (`_id`, 007 `config-db.md`): the shard a
 /// client sees in a transaction's `recoveryToken` and in the errors a write gets as through a
