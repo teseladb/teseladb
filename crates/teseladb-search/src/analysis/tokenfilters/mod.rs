@@ -26,6 +26,11 @@ mod brazilian;
 mod cjk;
 mod delimiter;
 mod folding;
+
+/// `text` folded to ASCII as `asciiFolding` folds it.
+pub(crate) fn fold_ascii(text: &str) -> String {
+    folding::ascii(text)
+}
 mod galician;
 mod grams;
 mod greek;

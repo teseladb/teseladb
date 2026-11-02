@@ -13,6 +13,7 @@
 //! `$searchMeta` then counts `{total: 0}`; a query error is `refsearch`'s message with code 8.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_changestream::changes::{Versioned, changes};
@@ -39,6 +40,53 @@ pub const DEFAULT_INDEX: &str = "default";
 const SEARCH_SCORE: &str = "searchScore";
 /// The `$vectorSearch` metadata of a document's score.
 const VECTOR_SEARCH_SCORE: &str = "vectorSearchScore";
+/// The metadata of a `$search` result that `searchAfter` and `searchBefore` take.
+const SEQUENCE_TOKEN: &str = "searchSequenceToken";
+/// The metadata of a `$search` result with the explanation of its score.
+const SCORE_DETAILS: &str = "searchScoreDetails";
+
+/// Search queries this node answered (011 FR-026).
+static QUERIES: AtomicU64 = AtomicU64::new(0);
+/// Microseconds those queries took, from asking the index to its answer.
+static QUERY_MICROS: AtomicU64 = AtomicU64::new(0);
+/// How far behind the mark of the read the last index brought up to date was, in ms.
+static INDEXER_LAG_MS: AtomicU64 = AtomicU64::new(0);
+
+/// The search metrics of the node (011 FR-026).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SearchMetrics {
+    /// Queries answered.
+    pub queries: u64,
+    /// Microseconds they took.
+    pub query_micros: u64,
+    /// How far behind the read's mark the last index brought up to date was, in ms.
+    pub indexer_lag_ms: u64,
+    /// Segments of the `search` indexes this node serves.
+    pub segments: u64,
+    /// Segments those indexes rebuilt when their ranges split or merged.
+    pub merges: u64,
+    /// An estimate of the bytes their segments take.
+    pub memory_bytes: u64,
+}
+
+/// The search metrics of the node whose indexes `shared` holds.
+pub fn search_metrics(shared: &Shared) -> SearchMetrics {
+    let indexes = lock(shared);
+    let mut m = SearchMetrics {
+        queries: QUERIES.load(Ordering::Relaxed),
+        query_micros: QUERY_MICROS.load(Ordering::Relaxed),
+        indexer_lag_ms: INDEXER_LAG_MS.load(Ordering::Relaxed),
+        ..SearchMetrics::default()
+    };
+    for built in indexes.search.built.values() {
+        if let Segments::Search(ix) = &built.indexer {
+            m.segments += ix.segments() as u64;
+            m.merges += ix.merges();
+            m.memory_bytes += ix.memory_bytes();
+        }
+    }
+    m
+}
 
 /// The segments of an index, by its type.
 #[derive(Clone, Debug)]
@@ -396,6 +444,8 @@ fn catch_up<B: Backend + ?Sized>(
     // The search waits until every range's segments reach the read's mark, its
     // `search_applied_ts` (FR-010), no longer than the command's `maxTimeMS`.
     let target = backend.read_mark().map_or_else(|| backend.cluster_mark(), |m| m.at);
+    let lag = target.physical.saturating_sub(built.applied.physical);
+    INDEXER_LAG_MS.store(lag, Ordering::Relaxed);
     let ranges = loop {
         let ranges = backend.range_changes(&start, &end, built.applied)?;
         if ranges.iter().all(|r| r.resolved >= target) {
@@ -495,6 +545,21 @@ fn index_name(spec: &Document) -> Result<String, CommandError> {
 
 /// The documents of `$search`, `$searchMeta` or `$vectorSearch` on `ns` with `spec`.
 pub fn source<B: Backend + ?Sized>(
+    backend: &mut B,
+    shared: &Shared,
+    ns: &Namespace,
+    stage: &str,
+    spec: &Document,
+) -> Result<Vec<Scored>, CommandError> {
+    let start = backend.now_micros();
+    let out = answer(backend, shared, ns, stage, spec);
+    QUERIES.fetch_add(1, Ordering::Relaxed);
+    QUERY_MICROS.fetch_add(backend.now_micros().saturating_sub(start), Ordering::Relaxed);
+    out
+}
+
+/// What [`source`] answers.
+fn answer<B: Backend + ?Sized>(
     backend: &mut B,
     shared: &Shared,
     ns: &Namespace,
@@ -636,13 +701,20 @@ fn vector_source<B: Backend + ?Sized>(
     found.map_err(|e: SearchError| query_error(e.0))
 }
 
-/// The documents found, with their score as metadata `name`.
+/// The documents found, with their score as metadata `name` and their sequence token.
 fn scored(found: Vec<Found>, name: &str) -> Vec<Scored> {
     found
         .into_iter()
         .map(|f| {
             let score = Value::Double(f64::from(f.score));
-            Scored { doc: f.doc, meta: BTreeMap::from([(name.to_owned(), score)]) }
+            let mut meta = BTreeMap::from([(name.to_owned(), score)]);
+            if let Some(t) = f.token {
+                meta.insert(SEQUENCE_TOKEN.to_owned(), Value::String(t));
+            }
+            if let Some(d) = f.details {
+                meta.insert(SCORE_DETAILS.to_owned(), Value::Document(d.to_document()));
+            }
+            Scored { doc: f.doc, meta }
         })
         .collect()
 }

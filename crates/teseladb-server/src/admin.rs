@@ -413,6 +413,42 @@ fn stream_metrics(out: &mut String, (open, events): (u64, u64), lags: &[(u64, u6
     }
 }
 
+/// The search metrics (011 FR-026): queries and their time, the indexer's lag behind the read's
+/// mark, segments, segments rebuilt and their memory.
+fn search_metrics(out: &mut String, m: &teseladb_wire::commands::search_ops::SearchMetrics) {
+    let rows = [
+        ("teseladb_search_queries_total", "Search queries answered.", "counter", m.queries),
+        (
+            "teseladb_search_query_micros_total",
+            "Microseconds search queries took.",
+            "counter",
+            m.query_micros,
+        ),
+        (
+            "teseladb_search_indexer_lag_ms",
+            "How far behind the read's mark the last search index brought up to date was.",
+            "gauge",
+            m.indexer_lag_ms,
+        ),
+        ("teseladb_search_segments", "Segments of the search indexes served.", "gauge", m.segments),
+        (
+            "teseladb_search_merges_total",
+            "Search segments rebuilt when their ranges split or merged.",
+            "counter",
+            m.merges,
+        ),
+        (
+            "teseladb_search_segment_bytes",
+            "Estimated bytes of the search segments.",
+            "gauge",
+            m.memory_bytes,
+        ),
+    ];
+    for (name, help, kind, n) in rows {
+        let _ = writeln!(out, "# HELP {name} {help}\n# TYPE {name} {kind}\n{name} {n}");
+    }
+}
+
 impl AdminBackend for NodeAdmin {
     fn healthy(&self) -> bool {
         self.ask(0, NodeMsg::View).is_some_and(|v| v.ready())
@@ -451,6 +487,10 @@ impl AdminBackend for NodeAdmin {
         txn_metrics(&mut out, &status.txn);
         let lags = crate::backend::range_lags(crate::clock::wall_ms());
         stream_metrics(&mut out, teseladb_wire::commands::change_stream::stream_metrics(), &lags);
+        search_metrics(
+            &mut out,
+            &teseladb_wire::commands::search_ops::search_metrics(&self.handle.sessions),
+        );
         if let Some(m) = &self.memory {
             m.metrics(&mut out);
         }
@@ -1103,6 +1143,32 @@ mod tests {
             "teseladb_changestream_events_total 7",
             "teseladb_changestream_range_lag_ms{range=\"4\"} 180",
             "teseladb_changestream_range_lag_ms{range=\"9\"} 230",
+        ] {
+            assert!(out.lines().any(|l| l == line), "{line} in {out}");
+        }
+    }
+
+    #[test]
+    fn the_search_metrics_name_each_counter() {
+        let mut out = String::new();
+        let m = teseladb_wire::commands::search_ops::SearchMetrics {
+            queries: 5,
+            query_micros: 1200,
+            indexer_lag_ms: 3,
+            segments: 2,
+            merges: 1,
+            memory_bytes: 4096,
+        };
+        search_metrics(&mut out, &m);
+        for line in [
+            "teseladb_search_queries_total 5",
+            "teseladb_search_query_micros_total 1200",
+            "teseladb_search_indexer_lag_ms 3",
+            "teseladb_search_segments 2",
+            "teseladb_search_merges_total 1",
+            "teseladb_search_segment_bytes 4096",
+            "# TYPE teseladb_search_segments gauge",
+            "# TYPE teseladb_search_merges_total counter",
         ] {
             assert!(out.lines().any(|l| l == line), "{line} in {out}");
         }

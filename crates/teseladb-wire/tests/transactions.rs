@@ -1425,3 +1425,54 @@ fn an_update_in_a_transaction_moves_its_document_to_its_new_shard_key() {
     let r = run(&mut m, DB, stmt(set(7, true), 3, 2, true));
     assert_eq!(field(&r, "writeErrors.0.code"), &Value::Int32(72), "{r:?}");
 }
+
+/// A transaction that writes a key twice gives a change stream both events, the second with the
+/// document the first left as its pre-image (014 FR-006; a `refrouter` 9.0.4 gives the `insert`
+/// and the `update` of the same transaction, the second with `{_id: 1}` before it, measured on
+/// 02-11).
+#[test]
+fn a_change_stream_sees_each_write_of_a_key_in_a_transaction() {
+    let mut m = node();
+    let r = run(
+        &mut m,
+        DB,
+        Document::new()
+            .with("collMod", "c")
+            .with("changeStreamPreAndPostImages", Document::new().with("enabled", true)),
+    );
+    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+    let spec = Document::new().with("fullDocumentBeforeChange", "whenAvailable");
+    let open = Document::new()
+        .with("aggregate", "c")
+        .with(
+            "pipeline",
+            Value::Array(vec![Value::Document(Document::new().with("$changeStream", spec))]),
+        )
+        .with("cursor", Document::new());
+    let r = run(&mut m, DB, open);
+    let Value::Int64(id) = *field(&r, "cursor.id") else { panic!("{r:?}") };
+    run(&mut m, DB, stmt(insert(1), 7, 1, true));
+    let set = doc(&[("$set", Value::Document(doc(&[("a", Value::Int32(2))])))]);
+    let update = Document::new().with("update", "c").with(
+        "updates",
+        Value::Array(vec![Value::Document(doc(&[
+            ("q", Value::Document(doc(&[("_id", Value::Int32(1))]))),
+            ("u", Value::Document(set)),
+        ]))]),
+    );
+    run(&mut m, DB, stmt(update, 7, 1, false));
+    let r = run(&mut m, "admin", end("commitTransaction", 7, 1));
+    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+    let r = run(&mut m, DB, Document::new().with("getMore", id).with("collection", "c"));
+    let Value::Array(events) = field(&r, "cursor.nextBatch") else { panic!("{r:?}") };
+    let kinds: Vec<&Value> = events
+        .iter()
+        .map(|e| match e {
+            Value::Document(d) => field(d, "operationType"),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(kinds, [&Value::from("insert"), &Value::from("update")], "{r:?}");
+    let Value::Document(second) = &events[1] else { panic!() };
+    assert_eq!(field(second, "fullDocumentBeforeChange._id"), &Value::Int32(1), "{second:?}");
+}

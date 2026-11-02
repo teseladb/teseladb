@@ -1,0 +1,14 @@
+[package]
+name = "teseladb-js"
+version = "0.1.0"
+description = "TeselaDB's server-side JavaScript (016): an ECMAScript interpreter in safe Rust for $where, $function, $accumulator and mapReduce, with step, heap, recursion and deadline limits."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+teseladb-bson = { path = "../teseladb-bson" }

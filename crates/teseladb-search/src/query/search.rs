@@ -108,6 +108,36 @@ enum Operator {
     Values(values::ValueOp),
     /// `knnBeta`.
     Knn(knn::Knn),
+    /// The documents with a term of `path` between the bounds, each with whether it is
+    /// inclusive (`queryString`'s `[a TO b]`): a constant score.
+    TermRange {
+        path: String,
+        lower: Option<(String, bool)>,
+        upper: Option<(String, bool)>,
+        score: Score,
+    },
+    /// Nothing (a `queryString` of only excluded clauses).
+    Empty,
+    /// An operator whose scores `score` changes as a whole.
+    Scored(Box<Operator>, Score),
+    /// `embeddedDocument`.
+    Embedded(embedded::Embedded),
+    /// `hasRoot`: its operator, run on the documents that hold the elements.
+    HasRoot(Document),
+    /// `hasAncestor`: its operator, run on the elements of `path` that hold the elements, at
+    /// `at` of the query.
+    HasAncestor {
+        path: String,
+        operator: Document,
+        score: Score,
+        at: String,
+    },
+    /// Scores already computed, by document number (`hasRoot` inside `embeddedDocument`).
+    Precomputed(BTreeMap<u32, f32>),
+    /// `geoWithin`, `geoShape` or `near` on a `geo` field.
+    Geo(geo::Geo),
+    /// `autocomplete`.
+    Autocomplete(autocomplete::Autocomplete),
     /// `span`, with its score option.
     Span(span::Span, Score),
     Compound {
@@ -124,6 +154,23 @@ pub fn run(index: &MemIndex, spec: &Document) -> Result<Vec<Hit>, SearchError> {
     let op = parse_root(index, spec)?;
     let scores = eval(index, &op)?;
     Ok(index.hits(scores))
+}
+
+/// The explanations of the scores `spec` gives the documents of `keys` (`scoreDetails`).
+pub fn explain(
+    index: &MemIndex,
+    spec: &Document,
+    keys: &[Vec<u8>],
+) -> Result<Vec<(Vec<u8>, crate::index::Explanation)>, SearchError> {
+    let op = parse_root(index, spec)?;
+    let ids: Vec<u32> = keys.iter().filter_map(|k| index.id_of(k)).collect();
+    let mut by_id = explain::explain_all(index, &op, &ids)?;
+    Ok(keys.iter().filter_map(|k| Some((k.clone(), by_id.remove(&index.id_of(k)?)?))).collect())
+}
+
+/// Whether `spec` asks for `scoreDetails`.
+pub fn wants_details(spec: &Document) -> bool {
+    matches!(spec.get("scoreDetails"), Some(Value::Boolean(true)))
 }
 
 /// The document of `$searchMeta` (and `$$SEARCH_META`) for `spec`: the count of the documents
@@ -155,13 +202,23 @@ pub fn count_document(total: bool, n: usize) -> Document {
 }
 
 fn parse_root(index: &MemIndex, spec: &Document) -> Result<Operator, SearchError> {
+    // `refsearch`'s check, which `$searchMeta` reaches (`refnode` checks it first for `$search`).
+    if spec.get("scoreDetails").is_some_and(|v| !matches!(v, Value::Boolean(_))) {
+        return Err(shape("scoreDetails", "must be a boolean"));
+    }
+    parse_at(index, spec, "")
+}
+
+/// The operator of `spec`, at `at` of the query (empty at its root).
+fn parse_at(index: &MemIndex, spec: &Document, at: &str) -> Result<Operator, SearchError> {
     let ops: Vec<(&str, &Value)> = spec.iter().filter(|(k, _)| OPERATORS.contains(k)).collect();
     match ops.as_slice() {
         [] => Err(SearchError(format!(
             "Query should contain either an operator [{}] or a collector [facet]",
             OPERATORS.join(", ")
         ))),
-        [(name, v)] => parse(index, name, v, name),
+        [(name, v)] if at.is_empty() => parse(index, name, v, name),
+        [(name, v)] => parse(index, name, v, &format!("{at}.{name}")),
         _ => Err(SearchError(format!("at most one of [{}] may be present", OPERATORS.join(", ")))),
     }
     .and_then(|op| {
@@ -184,7 +241,20 @@ fn parse(index: &MemIndex, name: &str, v: &Value, path: &str) -> Result<Operator
         "equals" => values::parse_equals(d, path),
         "term" | "search" => parse_term(index, d, path),
         "knnBeta" => knn::parse(index, d, path),
+        "vectorSearch" => knn::parse_vector_search(index, d, path),
+        "hasRoot" => match d.get("operator") {
+            Some(Value::Document(o)) => Ok(Operator::HasRoot(o.clone())),
+            Some(_) => Err(shape(&format!("{path}.operator"), "must be a document")),
+            None => Err(shape(&format!("{path}.operator"), "is required")),
+        },
+        "hasAncestor" => parse_has_ancestor(d, path),
         "span" => span::parse(d, path),
+        "queryString" => query_string::parse(index, d, path),
+        "moreLikeThis" => more_like::parse(index, d, path),
+        "embeddedDocument" => embedded::parse(d, path),
+        "autocomplete" => autocomplete::parse(d, path),
+        "geoWithin" => geo::parse_within(d, path),
+        "geoShape" => geo::parse_shape(d, path),
         "in" => values::parse_in(d, path),
         "range" => values::parse_range(d, path),
         "near" => values::parse_near(d, path),
@@ -192,6 +262,28 @@ fn parse(index: &MemIndex, name: &str, v: &Value, path: &str) -> Result<Operator
             Err(SearchError(format!("\"{other}\" is not supported by this node's search engine")))
         }
     }
+}
+
+/// `hasAncestor` with its options `d` at `path` of the query (measured 02-11-2026,
+/// `scratchpad/lane3k/m10.js`).
+fn parse_has_ancestor(d: &Document, path: &str) -> Result<Operator, SearchError> {
+    if let Some((k, _)) = d.iter().find(|(k, _)| !["ancestorPath", "operator", "score"].contains(k))
+    {
+        return Err(SearchError(format!("\"{path}\" unrecognized field \"{k}\"")));
+    }
+    let at = |f: &str| format!("{path}.{f}");
+    let ancestor = match d.get("ancestorPath") {
+        Some(Value::String(p)) => p.clone(),
+        Some(_) => return Err(shape(&at("ancestorPath"), "must be a string")),
+        None => return Err(shape(&at("ancestorPath"), "is required")),
+    };
+    let operator = match d.get("operator") {
+        Some(Value::Document(o)) => o.clone(),
+        Some(_) => return Err(shape(&at("operator"), "must be a document")),
+        None => return Err(shape(&at("operator"), "is required")),
+    };
+    let score = parse_score(d.get("score"), &at("score"))?;
+    Ok(Operator::HasAncestor { path: ancestor, operator, score, at: path.to_owned() })
 }
 
 fn parse_text(index: &MemIndex, d: &Document, path: &str) -> Result<Operator, SearchError> {
@@ -501,6 +593,38 @@ fn eval(index: &MemIndex, op: &Operator) -> Result<BTreeMap<u32, f32>, SearchErr
             let s = p.scores(index, boost_of(p.score()))?;
             rescored(index, s, p.score())
         }
+        Operator::Empty => Ok(BTreeMap::new()),
+        Operator::Precomputed(s) => Ok(s.clone()),
+        Operator::HasRoot(_) => Err(outside_embedded("hasRoot")),
+        Operator::HasAncestor { .. } => Err(outside_embedded("hasAncestor")),
+        Operator::Geo(g) => {
+            let s = g.scores(index, boost_of(g.score()))?;
+            rescored(index, s, g.score())
+        }
+        Operator::Autocomplete(a) => {
+            let s = a.scores(index, boost_of(&a.score))?;
+            rescored(index, s, &a.score)
+        }
+        Operator::Embedded(e) => {
+            let s = e.scores(index, boost_of(&e.score))?;
+            rescored(index, s, &e.score)
+        }
+        Operator::Scored(op, score) => {
+            let mut s = eval(index, op)?;
+            if let Score::Boost(b) = score {
+                s.values_mut().for_each(|v| *v *= b);
+            }
+            rescored(index, s, score)
+        }
+        Operator::TermRange { path, lower, upper, score } => {
+            let inside = |t: &str| {
+                lower.as_ref().is_none_or(|(l, incl)| t > l.as_str() || (*incl && t == l))
+                    && upper.as_ref().is_none_or(|(u, incl)| t < u.as_str() || (*incl && t == u))
+            };
+            let boost = boost_of(score);
+            let s = index.matching_terms(path, inside).into_iter().map(|d| (d, boost)).collect();
+            rescored(index, s, score)
+        }
         Operator::Span(sp, score) => {
             let s = sp.scores(index, boost_of(score))?;
             rescored(index, s, score)
@@ -516,6 +640,42 @@ fn eval(index: &MemIndex, op: &Operator) -> Result<BTreeMap<u32, f32>, SearchErr
         Operator::Compound { must, should, filter, must_not, minimum } => {
             eval_compound(index, must, should, filter, must_not, *minimum)
         }
+    }
+}
+
+/// The error of `hasRoot` or `hasAncestor` (`name`) outside `embeddedDocument`.
+fn outside_embedded(name: &str) -> SearchError {
+    SearchError(format!(
+        "{name} operator requires embeddedDocument.path, hasAncestor.ancestorPath, or \
+         returnScope.path to be set."
+    ))
+}
+
+/// `op` with `b` times the weight of its scores.
+fn boosted(op: Operator, b: f32) -> Operator {
+    let scaled = |score: Score| match score {
+        Score::Plain => Score::Boost(b),
+        Score::Boost(x) => Score::Boost(x * b),
+        Score::Constant(c) => Score::Constant(c * b),
+        other => other,
+    };
+    match op {
+        Operator::Text { query, paths, fuzzy, score } => {
+            Operator::Text { query, paths, fuzzy, score: scaled(score) }
+        }
+        Operator::Phrase { query, paths, slop, score } => {
+            Operator::Phrase { query, paths, slop, score: scaled(score) }
+        }
+        Operator::Exists { path, score } => Operator::Exists { path, score: scaled(score) },
+        Operator::Compound { must, should, filter, must_not, minimum } => Operator::Compound {
+            must: must.into_iter().map(|o| boosted(o, b)).collect(),
+            should: should.into_iter().map(|o| boosted(o, b)).collect(),
+            filter,
+            must_not,
+            minimum,
+        },
+        other if b == 1.0 => other,
+        other => Operator::Scored(Box::new(other), Score::Boost(b)),
     }
 }
 
@@ -586,12 +746,23 @@ fn eval_compound(
     Ok(out)
 }
 
+mod autocomplete;
+mod embedded;
+mod explain;
 mod function;
+mod geo;
 mod knn;
+mod more_like;
 mod pattern;
+mod query_string;
+mod sloppy;
 mod span;
-mod values;
+pub(crate) mod values;
 
+#[cfg(test)]
+mod geo_tests;
+#[cfg(test)]
+mod m10_tests;
 #[cfg(test)]
 mod pattern_tests;
 #[cfg(test)]

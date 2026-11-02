@@ -114,6 +114,9 @@ variants!(
     ("release_log_before_flush", "lsm", Default, 1000),
     // Intents resolved before the commit is durable (008 T024): in seed 1 of `txn-append` a
     // transaction reads a list in an order no other one saw, before `intents` in `splits`.
+    // A resharding that renames without the writes after its last read of the history (018
+    // T002): the `reshard` workload reads a value of the old order the copy never took.
+    ("reshard_cutover_loses_writes", "reshard", Default, 1000),
     ("resolve_before_durable_commit", "snapshot-isolation", Default, 1000),
     ("resolved_intent_reappears", "lsm", Default, 1000),
     ("rollback_unrecorded", "rollback", Default, 1000),

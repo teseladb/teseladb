@@ -186,10 +186,14 @@ impl MemIndex {
         self.keys.push(Some(key.to_vec()));
         self.docs.push(Some(doc.clone()));
         self.by_key.insert(key.to_vec(), id);
-        let mut texts: Vec<(String, String, String, String)> = Vec::new();
+        let mut texts: Vec<Collected> = Vec::new();
         let mapping = self.definition.mappings.clone();
         self.collect(&mapping, "", doc, &mut texts);
-        for (path, analyzer_name, search_name, text) in texts {
+        for Collected { path, analyzer: analyzer_name, search: search_name, text, grams } in texts {
+            if let Some(g) = grams {
+                self.put_grams(id, &path, &analyzer_name, &g, &text)?;
+                continue;
+            }
             let tokens = self.analyzer(&analyzer_name)?.analyze(&text).map_err(analysis)?;
             // A value without tokens (an empty string) leaves no length: the document does not
             // count among those of the field (measured: `t: ""` changes no score).
@@ -223,13 +227,7 @@ impl MemIndex {
 
     /// The string values of `doc` that `mapping` indexes, as (path, index analyzer, query
     /// analyzer, text).
-    fn collect(
-        &self,
-        mapping: &Mapping,
-        prefix: &str,
-        doc: &Document,
-        out: &mut Vec<(String, String, String, String)>,
-    ) {
+    fn collect(&self, mapping: &Mapping, prefix: &str, doc: &Document, out: &mut Vec<Collected>) {
         for (name, value) in doc.iter() {
             let path = if prefix.is_empty() { name.to_owned() } else { format!("{prefix}.{name}") };
             match mapping.fields.iter().find(|(n, _)| n == name) {
@@ -244,16 +242,11 @@ impl MemIndex {
         }
     }
 
-    fn collect_dynamic(
-        &self,
-        path: &str,
-        value: &Value,
-        out: &mut Vec<(String, String, String, String)>,
-    ) {
+    fn collect_dynamic(&self, path: &str, value: &Value, out: &mut Vec<Collected>) {
         let a = self.index_analyzer().to_owned();
         let s = self.definition.search_analyzer.clone().unwrap_or_else(|| a.clone());
         match value {
-            Value::String(text) => out.push((path.to_owned(), a, s, text.clone())),
+            Value::String(text) => out.push(Collected::text(path, a, s, text)),
             Value::Array(items) => items.iter().for_each(|v| self.collect_dynamic(path, v, out)),
             Value::Document(d) => {
                 let dynamic = Mapping {
@@ -267,13 +260,7 @@ impl MemIndex {
         }
     }
 
-    fn collect_typed(
-        &self,
-        t: &FieldMapping,
-        path: &str,
-        value: &Value,
-        out: &mut Vec<(String, String, String, String)>,
-    ) {
+    fn collect_typed(&self, t: &FieldMapping, path: &str, value: &Value, out: &mut Vec<Collected>) {
         match (t, value) {
             (FieldMapping::String(f), Value::String(text)) => {
                 let a = f.analyzer.clone().unwrap_or_else(|| self.index_analyzer().to_owned());
@@ -283,7 +270,30 @@ impl MemIndex {
                     .or_else(|| f.analyzer.clone())
                     .or_else(|| self.definition.search_analyzer.clone())
                     .unwrap_or_else(|| a.clone());
-                out.push((path.to_owned(), a, s, text.clone()));
+                out.push(Collected::text(path, a, s, text));
+            }
+            (
+                FieldMapping::Autocomplete {
+                    min_grams,
+                    max_grams,
+                    fold_diacritics,
+                    tokenization,
+                    analyzer,
+                },
+                Value::String(text),
+            ) => {
+                let a = analyzer.clone().unwrap_or_else(|| self.index_analyzer().to_owned());
+                let grams = Grams::new(*min_grams, *max_grams, *fold_diacritics, tokenization);
+                out.push(Collected {
+                    path: autocomplete_key(path),
+                    analyzer: a.clone(),
+                    search: a,
+                    text: text.clone(),
+                    grams: Some(grams),
+                });
+            }
+            (FieldMapping::Autocomplete { .. }, Value::Array(items)) => {
+                items.iter().for_each(|v| self.collect_typed(t, path, v, out));
             }
             (FieldMapping::String(_) | FieldMapping::Document(_), Value::Array(items)) => {
                 items.iter().for_each(|v| self.collect_typed(t, path, v, out));
@@ -291,6 +301,63 @@ impl MemIndex {
             (FieldMapping::Document(m), Value::Document(d)) => self.collect(m, path, d, out),
             _ => {}
         }
+    }
+
+    /// Adds the grams of `text` to the `autocomplete` field `key` for document `id`: those of
+    /// each word and of each run of two or three words (measured on `refsearch`: `gato montes`
+    /// holds `gat` twice, `el gatopardo salvaje` holds `el` three times); its length is its
+    /// number of words.
+    fn put_grams(
+        &mut self,
+        id: u32,
+        key: &str,
+        analyzer: &str,
+        g: &Grams,
+        text: &str,
+    ) -> Result<(), IndexError> {
+        let words: Vec<String> = self
+            .analyzer(analyzer)?
+            .analyze(text)
+            .map_err(analysis)?
+            .into_iter()
+            .map(|t| g.normalized(&t.text))
+            .collect();
+        if words.is_empty() {
+            return Ok(());
+        }
+        let terms: Vec<String> = Grams::shingles(&words).iter().flat_map(|w| g.of(w)).collect();
+        let field = self.fields.entry(key.to_owned()).or_insert_with(|| TextField {
+            search_analyzer: analyzer.to_owned(),
+            ..TextField::default()
+        });
+        let base = field.ends.get(&id).copied().unwrap_or(0);
+        for (i, t) in terms.iter().enumerate() {
+            let at = base + i as u32;
+            field.postings.entry(t.clone()).or_default().entry(id).or_default().push(at);
+        }
+        *field.ends.entry(id).or_insert(0) += terms.len() as u32;
+        *field.lengths.entry(id).or_insert(0) += words.len() as u32;
+        *field.tokens.entry(id).or_insert(0) += terms.len() as u32;
+        Ok(())
+    }
+
+    /// The scores of `terms` on field `key` (a sum in doubles, as RefLib adds the clauses of a
+    /// disjunction, each a term query), with weight `boost`.
+    pub(crate) fn terms_scores(
+        &self,
+        key: &str,
+        terms: &[String],
+        boost: f32,
+    ) -> BTreeMap<u32, f64> {
+        let mut out: BTreeMap<u32, f64> = BTreeMap::new();
+        let Some(field) = self.fields.get(key) else { return out };
+        let g = self.global_of(key);
+        for t in terms {
+            for (doc, s) in field.term_scores(t, boost, g) {
+                *out.entry(doc).or_insert(0.0) += f64::from(s);
+            }
+        }
+        out
     }
 
     /// Removes the document of `key`, if the index has it.
@@ -443,6 +510,49 @@ impl MemIndex {
             }
         }
         Ok(scores)
+    }
+
+    /// The tokens analyzer `name` makes of `text`.
+    pub(crate) fn analyze(&self, name: &str, text: &str) -> Result<Vec<String>, IndexError> {
+        let tokens = self.analyzer(name)?.analyze(text).map_err(analysis)?;
+        Ok(tokens.into_iter().map(|t| t.text).collect())
+    }
+
+    /// An estimate of the bytes the index takes: its documents (as BSON), and per field each
+    /// term and its positions.
+    pub(crate) fn memory_bytes(&self) -> u64 {
+        let docs: usize =
+            self.docs.iter().flatten().map(|d| d.to_bytes().map_or(0, |b| b.len())).sum();
+        let postings: usize = self
+            .fields
+            .iter()
+            .map(|(name, f)| {
+                name.len()
+                    + f.postings
+                        .iter()
+                        .map(|(t, by_doc)| {
+                            t.len() + by_doc.values().map(|p| 8 + 4 * p.len()).sum::<usize>()
+                        })
+                        .sum::<usize>()
+                    + 12 * f.lengths.len()
+            })
+            .sum();
+        (docs + postings) as u64
+    }
+
+    /// The number of the document of `key`.
+    pub(crate) fn id_of(&self, key: &[u8]) -> Option<u32> {
+        self.by_key.get(key).copied()
+    }
+
+    /// The key of document number `id`.
+    pub(crate) fn key_of(&self, id: u32) -> Option<&[u8]> {
+        self.keys.get(id as usize)?.as_deref()
+    }
+
+    /// Whether some document has analyzed text at `path`.
+    pub(crate) fn has_text(&self, path: &str) -> bool {
+        self.fields.contains_key(path)
     }
 
     /// The positions of `term` in the field at `path`, by document.
@@ -711,6 +821,110 @@ impl TextField {
     }
 }
 
+/// A string value of a document the index analyzes: its path (the key of its field), index and
+/// query analyzers, text, and how an `autocomplete` field makes grams of it.
+struct Collected {
+    path: String,
+    analyzer: String,
+    search: String,
+    text: String,
+    grams: Option<Grams>,
+}
+
+impl Collected {
+    fn text(path: &str, analyzer: String, search: String, text: &str) -> Collected {
+        Collected { path: path.to_owned(), analyzer, search, text: text.to_owned(), grams: None }
+    }
+}
+
+/// How an `autocomplete` field makes grams.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Grams {
+    /// Shortest gram.
+    pub min: usize,
+    /// Longest gram.
+    pub max: usize,
+    /// Whether diacritics are folded.
+    pub fold: bool,
+    /// `edgeGram` or `rightEdgeGram` (grams from one end); otherwise every gram.
+    pub edge: bool,
+    /// `rightEdgeGram`: the grams are taken from the reversed text.
+    pub reverse: bool,
+}
+
+/// The most words `refsearch` joins into one string of an `autocomplete` field (measured
+/// 02-11-2026, `scratchpad/lane3k/m13.js`: `a1 b2 c3 d4 …` holds `a1 b2 c3` but no longer run).
+const SHINGLE_WORDS: usize = 3;
+
+impl Grams {
+    /// The grams of an `autocomplete` field of `tokenization` (`edgeGram`, `rightEdgeGram` or
+    /// `nGram`).
+    pub(crate) fn new(min: i64, max: i64, fold: bool, tokenization: &str) -> Grams {
+        Grams {
+            min: usize::try_from(min).unwrap_or(0),
+            max: usize::try_from(max).unwrap_or(0),
+            fold,
+            edge: tokenization != "nGram",
+            reverse: tokenization == "rightEdgeGram",
+        }
+    }
+
+    /// `text` lower-cased, and folded when the field folds.
+    pub(crate) fn normalized(&self, text: &str) -> String {
+        let lower: String = text.chars().flat_map(char::to_lowercase).collect();
+        if self.fold { crate::analysis::tokenfilters::fold_ascii(&lower) } else { lower }
+    }
+
+    /// The characters grams are taken from: `word`'s, reversed for `rightEdgeGram`.
+    fn chars(&self, word: &str) -> Vec<char> {
+        if self.reverse { word.chars().rev().collect() } else { word.chars().collect() }
+    }
+
+    /// The grams of `word`: its prefixes (or every slice) of `min` to `max` characters, and its
+    /// first `max` characters once more when it is longer (measured on `refsearch`, with
+    /// `rightEdgeGram` on the reversed word).
+    pub(crate) fn of(&self, word: &str) -> Vec<String> {
+        let chars = self.chars(word);
+        let mut out = Vec::new();
+        let starts = if self.edge { 0..1 } else { 0..chars.len() };
+        for start in starts {
+            for n in self.min..=self.max {
+                if start + n <= chars.len() {
+                    out.push(chars[start..start + n].iter().collect());
+                }
+            }
+        }
+        if chars.len() > self.max {
+            out.push(chars[..self.max].iter().collect());
+        }
+        out
+    }
+
+    /// The strings of a field value whose grams are indexed: its words and the runs of up to
+    /// three of them, joined by a space, in the order of their first word.
+    pub(crate) fn shingles(words: &[String]) -> Vec<String> {
+        let mut out = Vec::new();
+        for start in 0..words.len() {
+            for end in start + 1..=words.len().min(start + SHINGLE_WORDS) {
+                out.push(words[start..end].join(" "));
+            }
+        }
+        out
+    }
+
+    /// The query term of `word`: its first `max` characters (its last ones, reversed, for
+    /// `rightEdgeGram`), `None` under `min`.
+    pub(crate) fn term(&self, word: &str) -> Option<String> {
+        let chars = self.chars(word);
+        (chars.len() >= self.min).then(|| chars[..chars.len().min(self.max)].iter().collect())
+    }
+}
+
+/// The key of the grams of the `autocomplete` field at `path`, apart from its text.
+pub(crate) fn autocomplete_key(path: &str) -> String {
+    format!("$type:autocomplete/{path}")
+}
+
 /// The `fuzzy` option of `text` and `term`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Fuzzy {
@@ -829,7 +1043,9 @@ fn phrase_freq(places: &[Vec<i64>], slop: i64) -> f32 {
 }
 
 mod dump;
+mod explain;
 pub use dump::{DumpError, applied_of};
+pub use explain::Explanation;
 
 #[cfg(test)]
 mod tests;

@@ -298,3 +298,95 @@ fn a_retried_insert_commits_nothing_again() {
     let r = run(&mut m, r#"{"count":"r"}"#);
     assert_eq!(field(&r, "n"), &Value::Int32(2), "{r:?}");
 }
+
+/// `collStats.timeseries` gives RefDb's 41 fields after `bucketsNs`, in alphabetical order.
+#[test]
+fn coll_stats_gives_every_bucket_catalog_field() {
+    let mut m = Mem::new();
+    series(&mut m, "f", false);
+    let r = m.run("g", doc(&[("collStats", Value::from("f"))]));
+    let Value::Document(ts) = field(&r, "timeseries") else { panic!("{r:?}") };
+    let names: Vec<&str> = ts.iter().map(|(k, _)| k).collect();
+    assert_eq!(names.len(), 42, "{names:?}");
+    assert_eq!(names[0], "bucketsNs");
+    let mut sorted = names[1..].to_vec();
+    sorted.sort_unstable();
+    assert_eq!(names[1..], sorted[..]);
+}
+
+const CATALOG: [&str; 14] = [
+    "bucketCount",
+    "numActiveBuckets",
+    "numBucketInserts",
+    "numBucketUpdates",
+    "numBucketsOpenedDueToMetadata",
+    "numBucketsClosedDueToSchemaChange",
+    "numBucketsClosedDueToTimeForward",
+    "numBucketsArchivedDueToTimeBackward",
+    "numBucketsReopened",
+    "numBucketsFetched",
+    "numBucketsQueried",
+    "numBucketQueriesFailed",
+    "numCommits",
+    "numMeasurementsCommitted",
+];
+
+/// The bucket catalog's counters through a sequence of inserts, as a `refnode` 9.0.4 counted
+/// them on 02-11-2026: time forward closes the open bucket, time backward looks the old one up
+/// and reopens it, the next insert there archives the later one, which a later insert fetches;
+/// a schema change closes a bucket; a meta value whose bucket was deleted looks it up again.
+#[test]
+fn the_bucket_catalog_counts_as_refdb() {
+    const H: i64 = 3_600_000;
+    let mut m = Mem::new();
+    series(&mut m, "k", false);
+    let one =
+        |t: i64, meta: i32, v: &str| format!(r#"{{"t":{},"m":{meta},"v":{v}}}"#, date(T0 + t));
+    let steps: [(Vec<String>, [i64; 14]); 9] = [
+        (vec![one(0, 1, "1")], [1, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0, 1, 1, 1]),
+        (vec![one(1, 1, "1")], [1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 1, 2, 2]),
+        (vec![one(2 * H, 1, "1")], [2, 1, 2, 1, 1, 0, 1, 0, 0, 0, 0, 1, 3, 3]),
+        (vec![one(5, 1, "1")], [2, 2, 2, 2, 1, 0, 1, 0, 1, 0, 1, 1, 4, 4]),
+        (vec![one(6, 1, "1")], [2, 2, 2, 3, 1, 0, 1, 1, 1, 0, 1, 1, 5, 5]),
+        (vec![one(2 * H + 1, 1, "1")], [2, 2, 2, 4, 1, 0, 1, 1, 2, 1, 1, 1, 6, 6]),
+        (vec![one(7, 1, r#""s""#)], [3, 2, 3, 4, 1, 1, 1, 2, 2, 1, 1, 1, 7, 7]),
+        (vec![one(8, 1, "1")], [4, 2, 4, 4, 1, 2, 1, 2, 2, 1, 1, 1, 8, 8]),
+        (vec![one(0, 2, "1"), one(1, 3, "1")], [6, 4, 6, 4, 3, 2, 1, 2, 2, 1, 1, 3, 10, 10]),
+    ];
+    for (i, (docs, want)) in steps.iter().enumerate() {
+        assert_eq!(insert(&mut m, "k", docs, true).0, i32::try_from(docs.len()).unwrap());
+        assert_eq!(counters(&mut m, "k", &CATALOG), want.to_vec(), "step {i}");
+    }
+    let r = run(&mut m, r#"{"delete":"k","deletes":[{"q":{"m":3},"limit":0}]}"#);
+    assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+    assert_eq!(insert(&mut m, "k", &[one(9, 3, "1")], true).0, 1);
+    let want = [6, 4, 7, 4, 3, 2, 1, 2, 2, 1, 1, 4, 11, 11];
+    assert_eq!(counters(&mut m, "k", &CATALOG), want.to_vec(), "after the delete");
+}
+
+/// An ordered insert with meta values in turn commits once per bucket, and a refused
+/// measurement leaves out everything after it, in every bucket (measured on a `refnode` 9.0.4
+/// on 02-11-2026: `n` 2, the error at 2, two commits).
+#[test]
+fn an_ordered_insert_of_meta_values_in_turn_commits_once_per_bucket() {
+    let mut m = Mem::new();
+    series(&mut m, "o", true);
+    let ok = |x: i32| format!(r#"{{"type":"Point","coordinates":[{x},1]}}"#);
+    let docs = vec![
+        at(0, 1, &ok(1)),
+        at(1, 2, &ok(1)),
+        at(2, 1, &ok(1000)),
+        at(3, 2, &ok(1)),
+        at(4, 1, &ok(1)),
+    ];
+    let (n, errors, msgs) = insert(&mut m, "o", &docs, true);
+    assert_eq!((n, errors), (2, vec![2]), "{msgs:?}");
+    assert!(msgs[0].starts_with("Plan executor error during update :: caused by :: "), "{msgs:?}");
+    assert_eq!(counters(&mut m, "o", &COUNTED), vec![2, 2, 2, 0, 0, 2]);
+    let r = run(&mut m, r#"{"find":"o","filter":{},"projection":{"_id":0,"t":1}}"#);
+    let Value::Array(found) = field(&r, "cursor.firstBatch") else { panic!("{r:?}") };
+    assert_eq!(found.len(), 2);
+    let more = vec![at(5, 1, &ok(1)), at(6, 2, &ok(1)), at(7, 1, &ok(1)), at(8, 3, &ok(1))];
+    assert_eq!(insert(&mut m, "o", &more, true).0, 4);
+    assert_eq!(counters(&mut m, "o", &COUNTED), vec![3, 5, 3, 2, 0, 6]);
+}

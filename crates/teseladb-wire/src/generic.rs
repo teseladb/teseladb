@@ -98,6 +98,20 @@ fn own_fields(name: &str) -> Option<&'static [&'static str]> {
         "getDefaultRWConcern" => &["getDefaultRWConcern", "inMemory"],
         "setQuerySettings" => &["setQuerySettings", "settings"],
         "removeQuerySettings" => &["removeQuerySettings"],
+        "reshardCollection" => &[
+            "reshardCollection",
+            "key",
+            "unique",
+            "numInitialChunks",
+            "collation",
+            "zones",
+            "shardDistribution",
+            "forceRedistribution",
+            "reshardingUUID",
+            "demoMode",
+            "performVerification",
+        ],
+        "abortReshardCollection" => &["abortReshardCollection"],
         "setDefaultRWConcern" => {
             &["setDefaultRWConcern", "defaultReadConcern", "defaultWriteConcern"]
         }

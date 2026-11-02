@@ -28,7 +28,7 @@ const VALUE_TYPES: &str = "must be a boolean, objectId, number, string, date, uu
 
 /// A value as the index keeps it.
 #[derive(Clone, Debug, PartialEq)]
-pub(super) enum Key {
+pub(crate) enum Key {
     Number(f64),
     Date(i64),
     Bool(bool),
@@ -43,7 +43,7 @@ pub(super) enum Key {
 
 impl Key {
     /// The value a query gives, or `None` for a type no operator takes.
-    fn of_query(v: &Value) -> Option<Key> {
+    pub(crate) fn of_query(v: &Value) -> Option<Key> {
         Some(match v {
             Value::Int32(n) => Key::Number(f64::from(*n)),
             Value::Int64(n) => Key::Number(*n as f64),
@@ -91,7 +91,7 @@ impl Key {
 
 /// The values of `doc` that `definition` indexes at `path`, each with whether it sat in an
 /// array.
-pub(super) fn indexed(definition: &Definition, doc: &Document, path: &str) -> Vec<(Key, bool)> {
+pub(crate) fn indexed(definition: &Definition, doc: &Document, path: &str) -> Vec<(Key, bool)> {
     let parts: Vec<&str> = path.split('.').collect();
     let mut out = Vec::new();
     collect(definition, &definition.mappings, doc, &parts, false, &mut out);
@@ -420,7 +420,7 @@ pub(super) fn parse_range(d: &Document, path: &str) -> Result<Operator, SearchEr
                 Err(shape(path, "range operator does not support BOOLEAN point type"))
             }
             other => match Key::of_query(other) {
-                Some(k) if !matches!(k, Key::Null) => Ok(Some((k, incl))),
+                Some(k) => Ok(Some((k, incl))),
                 _ => Err(shape(&at(name), &format!("Type is not supported: {}", type_name(other)))),
             },
         }
@@ -458,10 +458,12 @@ pub(super) fn parse_near(d: &Document, path: &str) -> Result<Operator, SearchErr
     let paths = value_paths(d, path)?;
     let origin = match d.get("origin") {
         None => return Err(shape(&at("origin"), "is required")),
-        Some(Value::Int32(n)) => Key::Number(f64::from(*n)),
-        Some(Value::Int64(n)) => Key::Number(*n as f64),
-        Some(Value::Double(f)) => Key::Number(*f),
-        Some(Value::DateTime(ms)) => Key::Date(*ms),
+        Some(Value::Int32(n)) => Some(Key::Number(f64::from(*n))),
+        Some(Value::Int64(n)) => Some(Key::Number(*n as f64)),
+        Some(Value::Double(f)) => Some(Key::Number(*f)),
+        Some(Value::DateTime(ms)) => Some(Key::Date(*ms)),
+        // A GeoJSON point, for `geo` fields.
+        Some(Value::Document(_)) => None,
         Some(other) => {
             return Err(shape(&at("origin"), &format!("Unsupported type: {}", type_name(other))));
         }
@@ -477,7 +479,16 @@ pub(super) fn parse_near(d: &Document, path: &str) -> Result<Operator, SearchErr
         return Err(shape(&at("pivot"), "must be positive"));
     }
     let score = parse_score(d.get("score"), &at("score"))?;
-    Ok(Operator::Values(ValueOp::Near { paths, origin, pivot, score }))
+    match origin {
+        Some(origin) => Ok(Operator::Values(ValueOp::Near { paths, origin, pivot, score })),
+        None => super::geo::parse_near(
+            paths,
+            d.get("origin").unwrap_or(&Value::Null),
+            pivot,
+            score,
+            &at("origin"),
+        ),
+    }
 }
 
 /// The scored documents of `op` in `index`.

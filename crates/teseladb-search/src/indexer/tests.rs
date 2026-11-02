@@ -188,3 +188,20 @@ fn three_replicas_build_the_same_segments() {
         );
     }
 }
+
+#[test]
+fn merges_and_memory_are_counted() {
+    let mut ix = Indexer::new(definition());
+    assert_eq!((ix.merges(), ix.memory_bytes()), (0, 0));
+    ix.apply(changes()).expect("applied");
+    let one = ix.memory_bytes();
+    assert!(one > 0);
+    // Splitting the one range rebuilds its segment; keeping the ranges rebuilds nothing.
+    ix.reshape(&bounds(&[4])).expect("reshaped");
+    assert_eq!(ix.merges(), 1);
+    ix.reshape(&bounds(&[4])).expect("reshaped");
+    assert_eq!(ix.merges(), 1);
+    ix.reshape(&bounds(&[])).expect("reshaped");
+    assert_eq!(ix.merges(), 3);
+    assert_eq!(ix.memory_bytes(), one);
+}

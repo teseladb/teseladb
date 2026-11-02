@@ -192,6 +192,9 @@ pub struct Op {
     pub desc: Option<String>,
     /// How far an index build went (009 FR-006).
     pub progress: Option<teseladb_index::build::Progress>,
+    /// What `currentOp` shows of an operation of the node with metrics of its own, such as a
+    /// resharding (018 FR-002): fields added to its document.
+    pub metrics: Option<Document>,
 }
 
 /// What an operation read and how it planned its read, for the profiler (010 FR-015).
@@ -841,6 +844,7 @@ mod tests {
             roles: None,
             desc: None,
             progress: None,
+            metrics: None,
         };
         let mut t = OpTable { last: u32::MAX - 1, ops: BTreeMap::new(), reports: BTreeMap::new() };
         t.ops.insert(1, op.clone());

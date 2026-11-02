@@ -185,6 +185,7 @@ impl<'a> BuildOp<'a> {
             desc: None,
             // Known once the backfill counted the documents.
             progress: None,
+            metrics: None,
         };
         let id = lock(shared).ops.begin_named(op, |id| format!("{BUILD_DESC}{id}"));
         BuildOp { shared, id }

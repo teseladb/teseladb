@@ -57,6 +57,7 @@ pub mod query_settings;
 pub mod query_shape;
 pub mod query_stats;
 pub mod registry;
+pub mod reshard;
 pub mod roles;
 pub mod search_indexes;
 pub mod search_ops;
@@ -780,7 +781,7 @@ impl<B: Backend + ?Sized> Ctx<'_, B> {
 }
 
 /// The commands of this module.
-const NAMES: [&str; 76] = [
+const NAMES: [&str; 79] = [
     aggregate::AGGREGATE,
     query_settings::SET_QUERY_SETTINGS,
     query_settings::REMOVE_QUERY_SETTINGS,
@@ -806,6 +807,9 @@ const NAMES: [&str; 76] = [
     admin::REPL_SET_GET_STATUS,
     sharding::ENABLE_SHARDING,
     sharding::SHARD_COLLECTION,
+    reshard::RESHARD_COLLECTION,
+    reshard::REFINE_COLLECTION_SHARD_KEY,
+    reshard::ABORT_RESHARD_COLLECTION,
     crud::INSERT,
     crud::UPDATE,
     crud::DELETE,
@@ -1123,6 +1127,7 @@ fn returned(reply: &Document) -> i64 {
 
 /// Runs the command of `ctx` by its name.
 fn dispatch<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
+    engines::reseed(ctx.backend.random());
     match crate::concerns::canonical(ctx.name()) {
         query_settings::SET_QUERY_SETTINGS => query_settings::set_query_settings(ctx),
         query_settings::REMOVE_QUERY_SETTINGS => query_settings::remove_query_settings(ctx),
@@ -1158,6 +1163,9 @@ fn dispatch<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
         admin::REPL_SET_GET_STATUS => admin::repl_set_get_status(ctx),
         sharding::ENABLE_SHARDING => sharding::enable_sharding(ctx),
         sharding::SHARD_COLLECTION => sharding::shard_collection(ctx),
+        reshard::RESHARD_COLLECTION => reshard::reshard_collection(ctx),
+        reshard::REFINE_COLLECTION_SHARD_KEY => reshard::refine_collection_shard_key(ctx),
+        reshard::ABORT_RESHARD_COLLECTION => reshard::abort_reshard_collection(ctx),
         crud::INSERT => crud::insert(ctx),
         crud::UPDATE => crud::update(ctx),
         crud::DELETE => crud::delete(ctx),
