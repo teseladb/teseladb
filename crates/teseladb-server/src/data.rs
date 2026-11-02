@@ -56,6 +56,8 @@ pub const DOCUMENT: u8 = 1;
 /// memtable holds the range's log back (`StateMachine::release_floor`), so an idle range would
 /// keep its whole log and never take a snapshot.
 pub const IDLE_FLUSH: Nanos = Nanos::from_secs(1);
+
+pub use crate::idle_flush::IdleFlush;
 /// How long a replica waits for a snapshot that does not come before it asks for its range as
 /// its split left it.
 pub const UNSERVED_FETCH: Nanos = Nanos::from_secs(2);
@@ -216,9 +218,8 @@ pub struct DataCore {
     /// Group 0 commands for core 0 (`ReplicasSettled`, `SplitRange`, `CompleteSplit`, the
     /// merges').
     group0: Vec<Group0Command>,
-    /// The last applied index seen (summed over the ranges), since when, and whether the memtable
-    /// was flushed.
-    idle: (u64, Nanos, bool),
+    /// When the memtable is flushed for an idle core or for a snapshot a replica waits for.
+    idle: IdleFlush,
     /// Since when each replica has waited for a snapshot with none on its way.
     unserved: BTreeMap<GroupId, Nanos>,
     /// Since when each replica has waited for a snapshot no replica serves.
@@ -260,7 +261,7 @@ impl DataCore {
             leaders: Leaders::default(),
             collections: BTreeMap::new(),
             group0: Vec::new(),
-            idle: (0, Nanos::ZERO, false),
+            idle: IdleFlush::default(),
             unserved: BTreeMap::new(),
             stale: BTreeMap::new(),
             relocations: Relocations::new(core, PathBuf::from("relocate"), Hosting::default()),
@@ -804,7 +805,8 @@ impl DataCore {
     }
 
     /// Flushes the memtable once the core's ranges applied nothing for [`IDLE_FLUSH`] and one of
-    /// them holds its log back.
+    /// them holds its log back, or at once for a snapshot a replica waits for
+    /// ([`MultiRaftCore::snapshot_awaits_flush`]).
     fn flush_idle(&mut self, core: &MultiRaftCore<CoreSm>, now: Nanos) {
         let groups = core.group_ids();
         let ranges = groups.iter().filter(|g| self.host_has(**g));
@@ -813,15 +815,11 @@ impl DataCore {
             .filter_map(|g| core.state_machine(*g))
             .map(StateMachine::applied_index)
             .fold(0u64, u64::wrapping_add);
-        let (seen, since, flushed) = self.idle;
-        if applied != seen {
-            self.idle = (applied, now, false);
-            return;
-        }
         let held = ranges.clone().any(|g| self.lsm.borrow().release_floor(*g).is_some());
-        if !flushed && held && now.saturating_since(since) >= IDLE_FLUSH {
+        let (idle, flush) = self.idle.step(applied, held, core.snapshot_awaits_flush(), now);
+        self.idle = idle;
+        if flush {
             self.lsm.borrow_mut().flush();
-            self.idle.2 = true;
         }
     }
 

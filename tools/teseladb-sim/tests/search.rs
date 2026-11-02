@@ -18,3 +18,15 @@ fn searches_answer_as_one_segment_over_the_committed_documents() {
         }
     }
 }
+
+/// Heavy seeds that found defects with the cluster's third node out for good: 2361 left a range
+/// born from a split without the snapshot its other replica needed (the leader's snapshot waited
+/// for a memtable flush that a core applying something every second never did); 3772 left a node
+/// asleep until its old clock would have passed the HLC bound, after NTP had set it right.
+#[test]
+fn the_seeds_that_found_defects_pass() {
+    for seed in [2361, 3772] {
+        let r = run_seed(&cfg("search", FaultPlan::Heavy), seed);
+        assert_eq!(r.verdict, Verdict::Pass, "search seed {seed}");
+    }
+}

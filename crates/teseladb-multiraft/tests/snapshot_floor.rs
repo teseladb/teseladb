@@ -605,3 +605,41 @@ fn a_replica_behind_data_that_entered_without_the_log_receives_a_snapshot() {
     assert_eq!(c.nodes[&f].bulk.get().0, 100, "with the data the log does not have");
     assert!(c.chunks.iter().all(|(to, i)| *to == f && *i >= floor), "{:?}", c.chunks);
 }
+
+#[test]
+fn a_snapshot_a_replica_waits_for_asks_for_the_flush_the_floor_waits_on() {
+    // The leader's memtable holds every entry (its LSM never flushed): the snapshot it takes for
+    // the replica that needs one waits for the floor, and the layer above learns that a flush is
+    // owed, however busy the core is (seed 2361 of `search`: a range born from a split whose
+    // replica never applied the cut, on a core that applied something every second).
+    let mut c = Cluster::waiting(u64::MAX, &WAITING);
+    let l = c.elect();
+    c.nodes[&l].release.set(Some(0));
+    c.propose(l, b"x");
+    c.ticks(20);
+    assert_eq!(c.nodes[&l].core.snapshot_index(G), Some(0), "the snapshot waits");
+    assert!(c.chunks.is_empty(), "nothing goes meanwhile");
+    assert!(c.nodes[&l].core.snapshot_awaits_flush(), "the leader owes a flush");
+    assert!(c.nodes.iter().filter(|(n, _)| **n != l).all(|(_, n)| !n.core.snapshot_awaits_flush()));
+    // The flush: the snapshot is saved and sent, and nothing more is owed.
+    c.nodes[&l].release.set(None);
+    c.ticks(20);
+    assert!(c.nodes[&l].core.snapshot_index(G).unwrap() > 0);
+    assert!(c.chunks.iter().any(|(to, _)| *to == WAITING[0]), "the snapshot went");
+    assert!(!c.nodes[&l].core.snapshot_awaits_flush());
+}
+
+#[test]
+fn a_periodic_snapshot_held_by_the_floor_owes_no_flush() {
+    // Under writes the floor stays below the snapshot just taken: nobody waits for it, so no
+    // flush is asked for (the memtable goes down when it fills).
+    let mut c = Cluster::new(3);
+    let l = c.elect();
+    c.nodes[&l].release.set(Some(1));
+    for i in 0..AWAY_ENTRIES {
+        c.propose(l, &[i]);
+    }
+    c.ticks(5);
+    assert_eq!(c.nodes[&l].core.store().group(G).unwrap().snapshot_index, 0, "held");
+    assert!(c.nodes.values().all(|n| !n.core.snapshot_awaits_flush()));
+}

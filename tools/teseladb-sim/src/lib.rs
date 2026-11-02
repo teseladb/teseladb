@@ -402,8 +402,9 @@ fn dispatch(
         Event::Fault(a) => apply_fault(w, wl, a),
         Event::FaultEnd(a) => end_fault(w, a),
         Event::Restart { node } => {
-            // The process waits until the wall clock passes the HLC bound on disk (005 FR-003).
-            if let Some(at) = w.start_wait(node) {
+            // The process waits until the wall clock passes the HLC bound on disk (005 FR-003),
+            // looking at the clock again at least every `START_POLL`.
+            if let Some(at) = w.start_recheck(node) {
                 w.schedule(at, Event::Restart { node });
                 return Ok(());
             }
