@@ -532,3 +532,51 @@ fn a_cluster_stream_leaves_out_the_internal_databases() {
     let keys: Vec<&Value> = got.iter().map(|e| field(e, "documentKey._id")).collect();
     assert_eq!(keys, [&Value::Int32(2)], "{got:?}");
 }
+
+fn errmsg(r: &Document) -> String {
+    match r.get("errmsg") {
+        Some(Value::String(s)) => s.clone(),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Measured on a `refrouter` 9.0.4 on 02-11: an expression that fails on an event fails the
+/// `getMore`, a long `_id` is cut in the message, and `$rand` gives a number.
+#[test]
+fn the_stages_errors_and_numbers_are_those_of_a_refrouter() {
+    let mut m = Mem::new();
+    create(&mut m, "c");
+    let mut open_with = |stage: Document| {
+        id_of(&open(&mut m, DB, "c".into(), stream(Document::new(), vec![stage])))
+    };
+    let long_id = open_with(
+        Document::new().with("$addFields", doc(&[("_id", "x".repeat(200).as_str().into())])),
+    );
+    let divide = Document::new().with(
+        "$divide",
+        Value::Array(vec![
+            Value::Int32(1),
+            Value::Document(Document::new().with(
+                "$subtract",
+                Value::Array(vec![Value::from("$documentKey._id"), Value::Int32(1)]),
+            )),
+        ]),
+    );
+    let by_zero = open_with(Document::new().with("$addFields", Document::new().with("q", divide)));
+    let rand = Document::new().with("r", Document::new().with("$rand", Document::new()));
+    let random = open_with(Document::new().with("$addFields", rand));
+    insert(&mut m, "c", vec![doc(&[("_id", 1.into())])]);
+    let r = get_more(&mut m, DB, long_id, "c", Document::new());
+    assert_eq!(code(&r), 280, "{r:?}");
+    let cut = format!("but found: {{ _id: \"{}...\" }}", "x".repeat(150));
+    assert!(errmsg(&r).ends_with(&cut), "{}", errmsg(&r));
+    let r = get_more(&mut m, DB, by_zero, "c", Document::new());
+    assert_eq!(code(&r), 2, "{r:?}");
+    assert!(
+        errmsg(&r).ends_with("Executor error during getMore :: caused by :: can't $divide by zero"),
+        "{}",
+        errmsg(&r)
+    );
+    let got = batch(&get_more(&mut m, DB, random, "c", Document::new()));
+    assert!(matches!(field(&got[0], "r"), Value::Double(x) if (0.0..1.0).contains(x)), "{got:?}");
+}
