@@ -37,7 +37,8 @@ pub fn expr_yields(e: &Expr) -> bool {
         | Expr::OptChain(x)
         | Expr::Typeof(x)
         | Expr::Delete(x)
-        | Expr::Await(x) => expr_yields(x),
+        | Expr::Await(x)
+        | Expr::At(_, x) => expr_yields(x),
         Expr::SuperCall(xs, _) => xs.iter().any(expr_yields),
         Expr::Array(xs) => xs.iter().flatten().any(expr_yields),
         Expr::Object(props) => props.iter().any(|p| match p {
@@ -255,6 +256,7 @@ impl Lower {
             Expr::Typeof(x) => Expr::Typeof(Box::new(self.expr(*x, pre))),
             Expr::Delete(x) => Expr::Delete(Box::new(self.expr(*x, pre))),
             Expr::Await(x) => Expr::Await(Box::new(self.expr(*x, pre))),
+            Expr::At(p, x) => Expr::At(p, Box::new(self.expr(*x, pre))),
             Expr::SuperCall(xs, pos) => Expr::SuperCall(self.spread_ordered(xs, pre), pos),
             Expr::Array(items) => {
                 let present: Vec<bool> = items.iter().map(Option::is_some).collect();
@@ -498,6 +500,11 @@ impl Lower {
     }
 
     fn stmt(&mut self, s: Stmt, out: &mut Vec<Stmt>) {
+        // A `yield` statement keeps no position mark: its own evaluation sets none.
+        let s = match s {
+            Stmt::Expr(Expr::At(_, e)) if matches!(*e, Expr::Yield(..)) => Stmt::Expr(*e),
+            s => s,
+        };
         match s {
             Stmt::Expr(Expr::Yield(a, d)) => {
                 let a = a.map(|a| Box::new(self.expr(*a, out)));
@@ -730,6 +737,7 @@ impl Expr {
                 pos: *pos,
             },
             Expr::Func(f) => Expr::Func(f.clone()),
+            Expr::At(p, x) => Expr::At(*p, Box::new(x.clone_shallow())),
             _ => Expr::Undefined,
         }
     }

@@ -218,10 +218,18 @@ fn runtime_error(what: &str, e: &JsError) -> MqlError {
                 e.message()
             ),
         ),
+        JsError::Thrown { message, line, col, stack } => MqlError::new(
+            JS_INTERPRETER_FAILURE,
+            format!(
+                "{what} :: function id = {}: e-runtime message : '{message}', file : 'wasm:function', line : {line}, column : {col}{}",
+                next_function_id(),
+                stack.as_ref().map(|s| format!("\n{s}")).unwrap_or_default()
+            ),
+        ),
         _ => MqlError::new(
             JS_INTERPRETER_FAILURE,
             format!(
-                "{what} :: function id = {}: e-runtime message : '{}', file : 'wasm:function', line : 1, column : 1\n@wasm:function:1:1\n",
+                "{what} :: function id = {}: e-runtime message : '{}', file : 'wasm:function', line : 1, column : 1",
                 next_function_id(),
                 e.message()
             ),

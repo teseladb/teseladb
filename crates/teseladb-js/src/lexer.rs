@@ -11,8 +11,9 @@ pub enum Tok {
     /// A `BigInt` literal (`10n`).
     BigInt(Rc<crate::bigint::BigInt>),
     Str(Rc<str>),
-    /// A whole template literal: its cooked strings and the source of each substitution.
-    Template(Vec<Rc<str>>, Vec<String>),
+    /// A whole template literal: its cooked strings and the source of each substitution with
+    /// the line and column where it starts.
+    Template(Vec<Rc<str>>, Vec<(String, u32, u32)>),
     Regex(Rc<str>, Rc<str>),
     Punct(&'static str),
     Eof,
@@ -45,7 +46,12 @@ const PUNCTS: &[&str] = &[
 
 /// Splits `src` into tokens.
 pub fn tokenize(src: &str) -> Result<Vec<Token>, SyntaxError> {
-    let mut lx = Lexer { s: src.chars().collect(), i: 0, line: 1, col: 1, out: Vec::new() };
+    tokenize_at(src, 1, 1)
+}
+
+/// Splits `src`, which starts at `line` and `col` of a larger source, into tokens.
+pub fn tokenize_at(src: &str, line: u32, col: u32) -> Result<Vec<Token>, SyntaxError> {
+    let mut lx = Lexer { s: src.chars().collect(), i: 0, line, col, out: Vec::new() };
     lx.run()?;
     Ok(lx.out)
 }
@@ -393,7 +399,8 @@ impl Lexer {
                 Some('$') if self.peek(0) == Some('{') => {
                     self.bump();
                     strs.push(std::mem::take(&mut cur).into());
-                    subs.push(self.substitution()?);
+                    let (line, col) = (self.line, self.col);
+                    subs.push((self.substitution()?, line, col));
                 }
                 Some(c) => cur.push(c),
             }

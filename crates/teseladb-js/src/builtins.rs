@@ -332,7 +332,11 @@ fn obj_assign(it: &mut Interp, _: &Val, a: &[Val]) -> R {
         let (o, keys) = keys_of(it, src)?;
         for k in keys {
             let v = it.get(&o, &k)?;
-            it.set(&target, &k, v)?;
+            // `Object.assign` sets as strict code does: a read-only property throws.
+            let outer = std::mem::replace(&mut it.strict, true);
+            let r = it.set(&target, &k, v);
+            it.strict = outer;
+            r?;
         }
     }
     Ok(target)
@@ -1052,7 +1056,7 @@ fn error_ctor(it: &mut Interp, this: &Val, a: &[Val]) -> R {
         let c = it.get(&Val::Obj(opts), "cause")?;
         it.define(&o, "cause", Prop::hidden(c))?;
     }
-    it.define(&o, "stack", Prop::hidden(Val::str("")))?;
+    it.place_error(&o)?;
     Ok(Val::Obj(o))
 }
 

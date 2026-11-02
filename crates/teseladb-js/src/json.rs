@@ -91,11 +91,18 @@ impl P<'_> {
                 }
                 loop {
                     self.ws();
+                    if self.i >= self.s.len() {
+                        return Err(self.err(it, "end of data while reading object contents"));
+                    }
                     if self.s.get(self.i) != Some(&b'"') {
                         return Err(self.err(it, "expected double-quoted property name"));
                     }
                     let k = self.string(it)?;
                     self.ws();
+                    if self.i >= self.s.len() {
+                        let m = "end of data after property name when ':' was expected";
+                        return Err(self.err(it, m));
+                    }
                     if self.s.get(self.i) != Some(&b':') {
                         return Err(self.err(it, "expected ':' after property name in object"));
                     }
@@ -108,6 +115,9 @@ impl P<'_> {
                         Some(b'}') => {
                             self.i += 1;
                             return Ok(Val::Obj(o));
+                        }
+                        None => {
+                            return Err(self.err(it, "end of data after property value in object"));
                         }
                         _ => {
                             return Err(
@@ -134,6 +144,9 @@ impl P<'_> {
                         Some(b']') => {
                             self.i += 1;
                             return it.array(items);
+                        }
+                        None => {
+                            return Err(self.err(it, "end of data when ',' or ']' was expected"));
                         }
                         _ => return Err(self.err(it, "expected ',' or ']' after array element")),
                     }

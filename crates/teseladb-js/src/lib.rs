@@ -61,15 +61,19 @@ pub enum JsError {
         /// The column, from 1.
         col: u32,
     },
-    /// The code threw: the exception's message (an error's `message`, or the value as text) and
-    /// where the code that threw starts.
+    /// The code threw: the exception's message (an error's `message`, or `uncaught exception:`
+    /// and the value as text), where SpiderMonkey reports it (where an error was made, or where
+    /// the `throw` left the evaluation) in RefDb's columns, and an error's stack.
     Thrown {
         /// The message.
         message: String,
         /// The line, from 1.
         line: u32,
-        /// The column, from 1.
+        /// The column, from 1, with what RefDb puts before the code on the first line.
         col: u32,
+        /// An error's stack, one `name@file:line:column` line per call; `None` for a value that
+        /// is not an error.
+        stack: Option<String>,
     },
     /// The heap limit was reached.
     OutOfMemory,
@@ -107,6 +111,12 @@ impl fmt::Display for JsError {
         f.write_str(&self.message())
     }
 }
+
+/// What RefDb puts before a function's code on its first line: `(`.
+const FUNCTION_PREFIX: u32 = 1;
+/// What RefDb puts before a `$where` expression on its first line (measured: an error at the
+/// start of `this.a.b.c` is at column 15).
+const WHERE_PREFIX: u32 = 14;
 
 /// What a call reads from the runtime.
 #[derive(Default)]
@@ -195,6 +205,10 @@ impl Program {
                 last: None,
                 pos: ast::Pos::default(),
                 strict: false,
+                fname: "".into(),
+                frames: Vec::new(),
+                thrown_at: ast::Pos::default(),
+                col_offset: if self.is_function { FUNCTION_PREFIX } else { WHERE_PREFIX },
             };
             it.envs.push(Rc::downgrade(&global_env));
             let r = self.run(&mut it, this, args, ctx.scope, emit.is_some(), &mut emitted);
@@ -310,24 +324,30 @@ fn error_of(it: &mut Interp, c: Ctrl) -> JsError {
         Ctrl::Throw(v) => {
             // The heap may be full: the message is read without new allocations counting.
             it.budget.used.set(0);
-            let message = match &v {
-                Val::Obj(o) if matches!(o.borrow().kind, Kind::Error) => {
-                    match it.get(&v, "message") {
-                        Ok(m) => it.str_of(&m).map(|s| s.to_string()).unwrap_or_default(),
-                        Err(_) => String::new(),
-                    }
-                }
-                _ => it
-                    .str_of(&v)
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|_| "uncaught exception".into()),
+            let is_error = matches!(&v, Val::Obj(o) if matches!(o.borrow().kind, Kind::Error));
+            if !is_error {
+                let text = it.str_of(&v).map(|s| s.to_string()).unwrap_or_default();
+                let (line, col) = it.shown(it.thrown_at);
+                return JsError::Thrown {
+                    message: format!("uncaught exception: {text}"),
+                    line,
+                    col,
+                    stack: None,
+                };
+            }
+            let mut read = |key: &str| match it.get(&v, key) {
+                Ok(Val::Undef) | Err(_) => None,
+                Ok(x) => it.str_of(&x).ok().map(|s| s.to_string()),
             };
-            JsError::Thrown { message, line: it.pos.line, col: it.pos.col }
+            let message =
+                read("message").filter(|m| !m.is_empty()).unwrap_or_else(|| "none".into());
+            let line = read("lineNumber").and_then(|l| l.parse().ok()).unwrap_or(0);
+            let col = read("columnNumber").and_then(|c| c.parse().ok()).unwrap_or(0);
+            JsError::Thrown { message, line, col, stack: read("stack") }
         }
-        Ctrl::Return(_) | Ctrl::Break(_) | Ctrl::Continue(_) | Ctrl::Suspend => JsError::Thrown {
-            message: "unexpected control flow".into(),
-            line: it.pos.line,
-            col: it.pos.col,
-        },
+        Ctrl::Return(_) | Ctrl::Break(_) | Ctrl::Continue(_) | Ctrl::Suspend => {
+            let (line, col) = it.shown(it.pos);
+            JsError::Thrown { message: "unexpected control flow".into(), line, col, stack: None }
+        }
     }
 }

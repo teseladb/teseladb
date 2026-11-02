@@ -56,6 +56,8 @@ pub struct FuncDef {
 
 #[derive(Debug)]
 pub struct ClassDef {
+    /// Where `class` is: the place of what its implicit constructor does.
+    pub pos: Pos,
     pub name: Option<Name>,
     pub parent: Option<Box<Expr>>,
     pub ctor: Option<Rc<FuncDef>>,
@@ -145,6 +147,9 @@ pub enum Expr {
     Yield(Option<Box<Expr>>, bool),
     /// `await x` in an async function.
     Await(Box<Expr>),
+    /// An expression and where it starts: evaluating it moves the place errors are reported at,
+    /// as SpiderMonkey does (016 T021).
+    At(Pos, Box<Expr>),
     Delete(Box<Expr>),
 }
 

@@ -311,7 +311,7 @@ fn errors_report_the_thrown_message() {
     let e = call_with("function(){ throw new Error('boom') }", None, &[]).unwrap_err();
     assert_eq!(e.message(), "boom");
     let e = call_with("function(){ throw 'raw' }", None, &[]).unwrap_err();
-    assert_eq!(e.message(), "raw");
+    assert_eq!(e.message(), "uncaught exception: raw");
     let e = call_with("function(){ return undefinedFn() }", None, &[]).unwrap_err();
     assert_eq!(e.message(), "undefinedFn is not defined");
     let e = call_with("function(){ const o = {}; return o.f() }", None, &[]).unwrap_err();

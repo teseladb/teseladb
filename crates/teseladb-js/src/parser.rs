@@ -16,6 +16,7 @@ pub fn parse_script(src: &str) -> Result<Vec<Stmt>, SyntaxError> {
         strict: false,
         in_gen: false,
         in_async: false,
+        origin: Pos { line: 1, col: 1 },
     };
     let mut out = Vec::new();
     while !p.at_eof() {
@@ -25,21 +26,81 @@ pub fn parse_script(src: &str) -> Result<Vec<Stmt>, SyntaxError> {
 }
 
 /// Parses one expression (a template's substitution).
-fn parse_expression(src: &str, in_gen: bool, in_async: bool) -> Result<Expr, SyntaxError> {
+fn parse_expression(
+    src: &str,
+    line: u32,
+    col: u32,
+    in_gen: bool,
+    in_async: bool,
+) -> Result<Expr, SyntaxError> {
     let mut p = Parser {
-        toks: tokenize(src)?,
+        toks: crate::lexer::tokenize_at(src, line, col)?,
         i: 0,
         src: src.chars().collect(),
         depth: 0,
         strict: false,
         in_gen,
         in_async,
+        origin: Pos { line, col },
     };
+    let start = p.pos();
     let e = p.expression()?;
     if !p.at_eof() {
         return p.unexpected();
     }
-    Ok(e)
+    Ok(at(start, e))
+}
+
+/// `e` marked with the place where it starts, which becomes the place of an error inside it as
+/// SpiderMonkey reports it (016 T021); literals are not marked.
+fn at(pos: Pos, e: Expr) -> Expr {
+    match e {
+        Expr::Num(_)
+        | Expr::BigInt(_)
+        | Expr::Str(_)
+        | Expr::Bool(_)
+        | Expr::Null
+        | Expr::Regex(..)
+        | Expr::Func(_)
+        | Expr::Class(_)
+        | Expr::At(..) => e,
+        e => Expr::At(pos, Box::new(e)),
+    }
+}
+
+/// Where a call of `callee` is reported: the start of a name, the name of a property, the key of
+/// a computed member; `paren` for other callees.
+fn call_pos(callee: &Expr, paren: Pos) -> Pos {
+    match callee {
+        // A key that is not a constant string is an element: SpiderMonkey reports its `(`.
+        Expr::Member { prop, .. } if matches!(&**prop, MemberProp::Computed(k) if !constant_string(k)) => {
+            paren
+        }
+        Expr::Ident(_, p) | Expr::Member { pos: p, .. } => *p,
+        _ => paren,
+    }
+}
+
+/// Whether a computed key folds to a string (`'k'`, `'k' + 1`).
+fn constant_string(e: &Expr) -> bool {
+    match e {
+        Expr::Str(_) => true,
+        Expr::At(_, x) => constant_string(x),
+        Expr::Binary("+", a, b) => {
+            let side = |x: &Expr| matches!(x, Expr::Num(_)) || constant_string(x);
+            (constant_string(a) && side(b)) || (side(a) && constant_string(b))
+        }
+        _ => false,
+    }
+}
+
+/// `e` marked with where it starts, literals too (a declaration's initializer, what `for…of`
+/// iterates: SpiderMonkey reports an error of `let [a] = null` at the `null`).
+fn at_always(pos: Pos, e: Expr) -> Expr {
+    match e {
+        Expr::Func(_) | Expr::Class(_) | Expr::At(..) => e,
+        e => Expr::At(pos, Box::new(e)),
+    }
 }
 
 /// The deepest nesting the parser accepts before it reports too much recursion.
@@ -64,6 +125,8 @@ struct Parser {
     strict: bool,
     /// Whether the code being read is the body of a generator (`yield` is an operator).
     in_gen: bool,
+    /// Where the source starts in the program (a template's substitution starts inside it).
+    origin: Pos,
     /// Whether the code being read is the body of an async function (`await` is an operator).
     in_async: bool,
 }
@@ -311,7 +374,7 @@ impl Parser {
                 {
                     None
                 } else {
-                    Some(self.expression()?)
+                    Some(at(pos, self.expression()?))
                 };
                 self.semicolon()?;
                 Ok(Stmt::Return(e))
@@ -319,7 +382,7 @@ impl Parser {
             "if" => {
                 self.i += 1;
                 self.expect("(")?;
-                let c = self.expression()?;
+                let c = self.expr_at()?;
                 self.expect(")")?;
                 let then = Box::new(self.statement()?);
                 let other =
@@ -329,7 +392,7 @@ impl Parser {
             "while" => {
                 self.i += 1;
                 self.expect("(")?;
-                let c = self.expression()?;
+                let c = self.expr_at()?;
                 self.expect(")")?;
                 Ok(Stmt::While(c, Box::new(self.statement()?)))
             }
@@ -340,7 +403,7 @@ impl Parser {
                     return self.unexpected();
                 }
                 self.expect("(")?;
-                let c = self.expression()?;
+                let c = self.expr_at()?;
                 self.expect(")")?;
                 self.eat(";");
                 Ok(Stmt::DoWhile(body, c))
@@ -403,9 +466,61 @@ impl Parser {
     }
 
     fn expression_statement(&mut self) -> Result<Stmt, SyntaxError> {
+        let p = self.pos();
         let e = self.expression()?;
+        let e = at(p, self.paren_call(e));
         self.semicolon()?;
         Ok(Stmt::Expr(e))
+    }
+
+    /// A call of a name with arguments that is a whole statement or a whole initializer is
+    /// reported at its `(`, as SpiderMonkey does (`f(1);` and `let e = Error('m')`: the `(`;
+    /// `var q = f()`, `x = Error('m')` and `throw Error('m')`: the name; measured on a `refrouter`
+    /// 9.0.4 on 02-11).
+    fn paren_call(&self, e: Expr) -> Expr {
+        match e {
+            Expr::Call { callee, args, optional, pos }
+                if !args.is_empty() && matches!(*callee, Expr::Ident(..)) =>
+            {
+                let len = match &*callee {
+                    Expr::Ident(n, _) => n.chars().count() as u32,
+                    _ => 0,
+                };
+                let pos = self.paren_after(Pos { line: pos.line, col: pos.col + len });
+                Expr::Call { callee, args, optional, pos }
+            }
+            e => e,
+        }
+    }
+
+    /// Where the first `(` at or after `from` is in the source.
+    fn paren_after(&self, from: Pos) -> Pos {
+        let (mut line, mut col) = (self.origin.line, self.origin.col);
+        let mut seen = false;
+        for &c in &self.src {
+            seen |= line > from.line || (line == from.line && col >= from.col);
+            if seen && c == '(' {
+                return Pos { line, col };
+            }
+            if c == '\n' {
+                line += 1;
+                col = 1;
+            } else {
+                col += 1;
+            }
+        }
+        from
+    }
+
+    /// An expression marked with where it starts.
+    fn expr_at(&mut self) -> Result<Expr, SyntaxError> {
+        let p = self.pos();
+        Ok(at(p, self.expression()?))
+    }
+
+    fn assign_at(&mut self) -> Result<Expr, SyntaxError> {
+        let p = self.pos();
+        Ok(at(p, self.assign()?))
     }
 
     fn block_rest(&mut self) -> Result<Vec<Stmt>, SyntaxError> {
@@ -427,7 +542,14 @@ impl Parser {
         let mut out = Vec::new();
         loop {
             let target = self.binding_pattern()?;
-            let init = if self.eat("=") { Some(self.assign_in(allow_in)?) } else { None };
+            let init = if self.eat("=") {
+                let p = self.pos();
+                let e = self.assign_in(allow_in)?;
+                let e = self.paren_call(e);
+                Some(at_always(p, e))
+            } else {
+                None
+            };
             if init.is_none()
                 && allow_in
                 && (kind == DeclKind::Const || !matches!(target, Pattern::Name(_)))
@@ -513,7 +635,9 @@ impl Parser {
             if self.is_word("of") || self.is_word("in") {
                 let of = self.is_word("of");
                 self.i += 1;
+                let p = self.pos();
                 let obj = if of { self.assign()? } else { self.expression()? };
+                let obj = at_always(p, obj);
                 self.expect(")")?;
                 let body = Box::new(self.statement()?);
                 return Ok(Stmt::ForIn { decl: Some(kind), target, of, obj, body });
@@ -529,7 +653,9 @@ impl Parser {
                 let of = self.is_word("of");
                 self.i += 1;
                 let target = to_pattern(e).map_or_else(|m| self.fail(m), Ok)?;
+                let p = self.pos();
                 let obj = if of { self.assign()? } else { self.expression()? };
+                let obj = at_always(p, obj);
                 self.expect(")")?;
                 let body = Box::new(self.statement()?);
                 return Ok(Stmt::ForIn { decl: None, target, of, obj, body });
@@ -538,9 +664,9 @@ impl Parser {
             Some(ForInit::Expr(self.expression_in(false)?))
         };
         self.expect(";")?;
-        let test = if self.is(";") { None } else { Some(self.expression()?) };
+        let test = if self.is(";") { None } else { Some(self.expr_at()?) };
         self.expect(";")?;
-        let update = if self.is(")") { None } else { Some(self.expression()?) };
+        let update = if self.is(")") { None } else { Some(self.expr_at()?) };
         self.expect(")")?;
         Ok(Stmt::For(init, test, update, Box::new(self.statement()?)))
     }
@@ -575,7 +701,7 @@ impl Parser {
 
     fn switch_rest(&mut self) -> Result<Stmt, SyntaxError> {
         self.expect("(")?;
-        let d = self.expression()?;
+        let d = self.expr_at()?;
         self.expect(")")?;
         self.expect("{")?;
         let mut cases = Vec::new();
@@ -605,7 +731,7 @@ impl Parser {
     fn source_from(&self, start: Pos) -> Rc<str> {
         // The source text from `start` to the end of the previous token.
         let end = &self.toks[self.i.saturating_sub(1)];
-        let (mut line, mut col, mut idx) = (1u32, 1u32, 0usize);
+        let (mut line, mut col, mut idx) = (self.origin.line, self.origin.col, 0usize);
         let mut from = None;
         while idx < self.src.len() {
             if from.is_none() && line == start.line && col == start.col {
@@ -731,6 +857,10 @@ impl Parser {
     }
 
     fn class_body(&mut self) -> Result<Rc<ClassDef>, SyntaxError> {
+        let pos = {
+            let t = &self.toks[self.i.saturating_sub(1)];
+            Pos { line: t.line, col: t.col }
+        };
         let name = if matches!(self.tok(), Tok::Ident(w) if &**w != "extends") {
             Some(self.ident()?)
         } else {
@@ -774,7 +904,7 @@ impl Parser {
                 members.push(ClassMember { is_static, key, kind, field: init, func: None });
             }
         }
-        Ok(Rc::new(ClassDef { name, parent, ctor, members }))
+        Ok(Rc::new(ClassDef { pos, name, parent, ctor, members }))
     }
 
     fn prop_name(&mut self) -> Result<PropName, SyntaxError> {
@@ -818,7 +948,8 @@ impl Parser {
         }
         let mut all = vec![first];
         while self.eat(",") {
-            all.push(self.assign_in(allow_in)?);
+            let p = self.pos();
+            all.push(at(p, self.assign_in(allow_in)?));
         }
         Ok(Expr::Seq(all))
     }
@@ -1006,10 +1137,11 @@ impl Parser {
             self.i += 1;
             // `**` is right-associative.
             let next = if op == "**" { prec } else { prec + 1 };
+            let rp = self.pos();
             let right = self.binary(next, allow_in)?;
             left = match op {
                 "&&" | "||" | "??" => Expr::Logical(op, Box::new(left), Box::new(right)),
-                _ => Expr::Binary(op, Box::new(left), Box::new(right)),
+                _ => Expr::Binary(op, Box::new(left), Box::new(at(rp, right))),
             };
         }
         Ok(left)
@@ -1025,12 +1157,13 @@ impl Parser {
     fn unary_inner(&mut self) -> Result<Expr, SyntaxError> {
         match self.tok().clone() {
             Tok::Punct(op @ ("!" | "-" | "+" | "~")) => {
+                let p = self.pos();
                 self.i += 1;
                 let e = self.unary()?;
                 if self.is("**") {
                     return self.fail("unparenthesized unary expression can't appear on the left-hand side of '**'".into());
                 }
-                Ok(Expr::Unary(op, Box::new(e)))
+                Ok(at(p, Expr::Unary(op, Box::new(e))))
             }
             Tok::Punct(op @ ("++" | "--")) => {
                 self.i += 1;
@@ -1041,16 +1174,19 @@ impl Parser {
                 Ok(Expr::Update { op, prefix: true, target: Box::new(t) })
             }
             Tok::Ident(w) if &*w == "typeof" => {
+                let p = self.pos();
                 self.i += 1;
-                Ok(Expr::Typeof(Box::new(self.unary()?)))
+                Ok(at(p, Expr::Typeof(Box::new(self.unary()?))))
             }
             Tok::Ident(w) if &*w == "void" => {
+                let p = self.pos();
                 self.i += 1;
-                Ok(Expr::Unary("void", Box::new(self.unary()?)))
+                Ok(at(p, Expr::Unary("void", Box::new(self.unary()?))))
             }
             Tok::Ident(w) if &*w == "delete" => {
+                let p = self.pos();
                 self.i += 1;
-                Ok(Expr::Delete(Box::new(self.unary()?)))
+                Ok(at(p, Expr::Delete(Box::new(self.unary()?))))
             }
             Tok::Ident(w) if &*w == "await" && self.in_async => {
                 self.i += 1;
@@ -1079,9 +1215,9 @@ impl Parser {
         let mut args = Vec::new();
         while !self.eat(")") {
             if self.eat("...") {
-                args.push(Expr::Spread(Box::new(self.assign()?)));
+                args.push(Expr::Spread(Box::new(self.assign_at()?)));
             } else {
-                args.push(self.assign()?);
+                args.push(self.assign_at()?);
             }
             if !self.is(")") && !self.eat(",") {
                 return self.expect(")").map(|_| Vec::new());
@@ -1109,6 +1245,7 @@ impl Parser {
         loop {
             let pos = self.pos();
             if self.eat(".") {
+                let pos = self.pos();
                 let name = self.prop_ident()?;
                 e = Expr::Member {
                     obj: Box::new(e),
@@ -1120,6 +1257,7 @@ impl Parser {
                 chained = true;
                 if self.eat("(") {
                     let args = self.arguments()?;
+                    let pos = call_pos(&e, pos);
                     e = Expr::Call { callee: Box::new(e), args, optional: true, pos };
                 } else if self.eat("[") {
                     let p = self.expression()?;
@@ -1140,6 +1278,7 @@ impl Parser {
                     };
                 }
             } else if self.eat("[") {
+                let pos = self.pos();
                 let p = self.expression()?;
                 self.expect("]")?;
                 e = Expr::Member {
@@ -1150,6 +1289,7 @@ impl Parser {
                 };
             } else if self.eat("(") {
                 let args = self.arguments()?;
+                let pos = call_pos(&e, pos);
                 e = Expr::Call { callee: Box::new(e), args, optional: false, pos };
             } else if let Tok::Template(strs, subs) = self.tok().clone() {
                 // A tagged template: the tag gets the strings and the values.
@@ -1202,12 +1342,10 @@ impl Parser {
         }
     }
 
-    fn substitution(&self, src: &str) -> Result<Expr, SyntaxError> {
-        parse_expression(src, self.in_gen, self.in_async).map_err(|mut e| {
-            let p = self.pos();
-            e.line = p.line;
-            e
-        })
+    /// A template's substitution, positioned where it starts in the source.
+    fn substitution(&self, sub: &(String, u32, u32)) -> Result<Expr, SyntaxError> {
+        let (src, line, col) = sub;
+        parse_expression(src, *line, *col, self.in_gen, self.in_async)
     }
 
     fn primary(&mut self) -> Result<Expr, SyntaxError> {
@@ -1236,9 +1374,9 @@ impl Parser {
                         continue;
                     }
                     let item = if self.eat("...") {
-                        Expr::Spread(Box::new(self.assign()?))
+                        Expr::Spread(Box::new(self.assign_at()?))
                     } else {
-                        self.assign()?
+                        self.assign_at()?
                     };
                     items.push(Some(item));
                     if !self.is("]") {
@@ -1323,7 +1461,7 @@ impl Parser {
         while !self.eat("}") {
             let start = self.pos();
             if self.eat("...") {
-                props.push(ObjProp::Spread(self.assign()?));
+                props.push(ObjProp::Spread(self.assign_at()?));
             } else {
                 let mut kind = PropKind::Value;
                 if (self.is_word("get") || self.is_word("set"))
@@ -1342,7 +1480,12 @@ impl Parser {
                     let f = self.function_body(start, None, false, FnKind::default())?;
                     props.push(ObjProp::Accessor(key, kind, f));
                 } else if self.eat(":") {
-                    props.push(ObjProp::Value(key, self.assign()?));
+                    // Each property moves the position to its key, constants too (measured).
+                    let v = match self.assign()? {
+                        v @ (Expr::Func(_) | Expr::Class(_)) => v,
+                        v => Expr::At(start, Box::new(v)),
+                    };
+                    props.push(ObjProp::Value(key, v));
                 } else if self.is("(") {
                     let name = match &key {
                         PropName::Fixed(n) => Some(n.clone()),
@@ -1378,16 +1521,25 @@ impl Parser {
     }
 }
 
+/// `e` without its position marks.
+fn unat(e: Expr) -> Expr {
+    match e {
+        Expr::At(_, e) => unat(*e),
+        e => e,
+    }
+}
+
 /// The assignment target an expression stands for (`[a, b] = …`, `({a} = …)`).
 fn to_pattern(e: Expr) -> Result<Pattern, String> {
     match e {
+        Expr::At(_, e) => to_pattern(*e),
         Expr::Ident(n, _) => Ok(Pattern::Name(n)),
         e @ Expr::Member { .. } => Ok(Pattern::Expr(Box::new(e))),
         Expr::Array(items) => {
             let mut out = Vec::new();
             let mut rest = None;
             for item in items {
-                match item {
+                match item.map(unat) {
                     None => out.push(None),
                     Some(Expr::Spread(e)) => rest = Some(Box::new(to_pattern(*e)?)),
                     Some(Expr::Assign { op: "=", target, value }) => {
@@ -1402,6 +1554,10 @@ fn to_pattern(e: Expr) -> Result<Pattern, String> {
             let mut out = Vec::new();
             let mut rest = None;
             for p in props {
+                let p = match p {
+                    ObjProp::Value(k, v) => ObjProp::Value(k, unat(v)),
+                    p => p,
+                };
                 match p {
                     ObjProp::Value(k, Expr::Assign { op: "=", target, value }) => {
                         let target = match *target {

@@ -130,7 +130,19 @@ pub struct Interp<'c> {
     pub pos: Pos,
     /// Whether the running code is strict: assignments to read-only properties throw.
     pub strict: bool,
+    /// The name of the running function, for the stack of an error.
+    pub fname: Name,
+    /// The callers of the running function: their names and where each made its call.
+    pub frames: Vec<(Name, Pos)>,
+    /// Where the last `throw` left the evaluation: the place of a value that is not an error.
+    pub thrown_at: Pos,
+    /// What the engine of RefDb adds to the columns of the first line: the `(` it puts before a
+    /// function, or the code it puts before a `$where` expression.
+    pub col_offset: u32,
 }
+
+/// The file SpiderMonkey names in RefDb's errors.
+pub const ERROR_FILE: &str = "wasm:function";
 
 /// How often the deadline is read, in steps.
 const DEADLINE_EVERY: u64 = 1024;
@@ -190,20 +202,54 @@ fn callee_text(e: &Expr) -> String {
         Expr::Ident(n, _) => n.to_string(),
         Expr::Member { obj, prop, .. } => match &**prop {
             MemberProp::Name(n) => format!("{}.{n}", callee_text(obj)),
-            MemberProp::Computed(Expr::Str(s)) => format!("{}[\"{s}\"]", callee_text(obj)),
-            MemberProp::Computed(Expr::Num(n)) => {
-                format!("{}[{}]", callee_text(obj), number::to_string(*n))
-            }
-            MemberProp::Computed(_) => format!("{}[...]", callee_text(obj)),
+            // SpiderMonkey folds a constant key: `o['k' + 1]` is `o.k1`, `o['a b']` stays.
+            MemberProp::Computed(k) => match fold_key(k) {
+                Some(key) if is_identifier(&key) => format!("{}.{key}", callee_text(obj)),
+                Some(key) => format!("{}['{key}']", callee_text(obj)),
+                None => match k {
+                    Expr::Num(n) => format!("{}[{}]", callee_text(obj), number::to_string(*n)),
+                    Expr::Ident(n, _) => format!("{}[{n}]", callee_text(obj)),
+                    Expr::At(_, inner) if matches!(**inner, Expr::Ident(..)) => {
+                        format!("{}[{}]", callee_text(obj), callee_text(inner))
+                    }
+                    _ => format!("{}[...]", callee_text(obj)),
+                },
+            },
         },
         Expr::This => "this".into(),
         Expr::Call { callee, args, .. } if args.is_empty() => format!("{}()", callee_text(callee)),
         Expr::Call { callee, .. } => format!("{}(...)", callee_text(callee)),
         Expr::Str(s) => format!("\"{s}\""),
         Expr::Num(n) => number::to_string(*n),
-        Expr::OptChain(e) => callee_text(e),
+        Expr::OptChain(e) | Expr::At(_, e) => callee_text(e),
         _ => "(intermediate value)".into(),
     }
+}
+
+/// The string a constant key folds to: a string, or `+` of strings and numbers.
+fn fold_key(e: &Expr) -> Option<String> {
+    match e {
+        Expr::Str(s) => Some(s.to_string()),
+        Expr::At(_, x) => fold_key(x),
+        Expr::Binary("+", a, b) => {
+            let side = |x: &Expr| match x {
+                Expr::Num(n) => Some(number::to_string(*n)),
+                Expr::At(_, y) if matches!(**y, Expr::Num(_)) => match **y {
+                    Expr::Num(n) => Some(number::to_string(n)),
+                    _ => None,
+                },
+                other => fold_key(other),
+            };
+            Some(side(a)? + &side(b)?)
+        }
+        _ => None,
+    }
+}
+
+fn is_identifier(s: &str) -> bool {
+    let mut c = s.chars();
+    c.next().is_some_and(|f| f == '_' || f == '$' || f.is_alphabetic())
+        && c.all(|x| x == '_' || x == '$' || x.is_alphanumeric())
 }
 
 impl<'c> Interp<'c> {
@@ -225,6 +271,24 @@ impl<'c> Interp<'c> {
 
     pub fn charge(&self, bytes: usize) -> R<()> {
         if self.budget.charge(bytes) { Ok(()) } else { Err(Ctrl::Fatal(Fatal::OutOfMemory)) }
+    }
+
+    /// A string made by joining others (`+`, a template, `concat`). SpiderMonkey joins them
+    /// without copying and fails when the length passes its limit; here the copy fails earlier,
+    /// at the heap limit, with the same catchable error (measured: `s = s + s` in a loop gives
+    /// «allocation size overflow» on a `refrouter` 9.0.4).
+    pub fn joined_string(&self, s: String) -> R {
+        if s.len() > self.max_string() {
+            return Err(self.error("InternalError", "allocation size overflow"));
+        }
+        self.string(s)
+    }
+
+    /// The longest string a call makes: an eighth of its heap, so that the error of a string
+    /// that keeps growing comes before the heap runs out, as SpiderMonkey's limit of 2^30 - 2
+    /// characters comes before its heap of 1100 MB does.
+    pub fn max_string(&self) -> usize {
+        self.budget.limit / 8
     }
 
     /// A new string, charged to the heap.
@@ -299,7 +363,49 @@ impl<'c> Interp<'c> {
         let o = self.alloc(proto, Kind::Error)?;
         self.grow(&o, 1)?;
         o.borrow_mut().props.push(("message".into(), Prop::hidden(Val::str(message))));
+        self.place_error(&o)?;
         Ok(Val::Obj(o))
+    }
+
+    /// The column RefDb reports for `p`.
+    pub fn shown(&self, p: Pos) -> (u32, u32) {
+        (p.line, if p.line == 1 { p.col + self.col_offset } else { p.col })
+    }
+
+    /// The stack SpiderMonkey writes for an error made here: `name@file:line:column` for this
+    /// function and each caller, at most 128.
+    pub fn stack_text(&self) -> String {
+        let mut out = String::new();
+        let here = std::iter::once((&self.fname, self.pos));
+        let callers = self.frames.iter().rev().map(|(n, p)| (n, *p));
+        for (name, p) in here.chain(callers).take(128) {
+            if p.line == 0 {
+                // The call the runtime makes has no place in the code.
+                continue;
+            }
+            let (l, c) = self.shown(p);
+            out.push_str(&format!("{name}@{ERROR_FILE}:{l}:{c}\n"));
+        }
+        out
+    }
+
+    /// Gives an error object where it is made: `fileName`, `lineNumber`, `columnNumber` and
+    /// `stack`, as SpiderMonkey does.
+    pub fn place_error(&self, o: &ObjRef) -> R<()> {
+        let (l, c) = self.shown(self.pos);
+        let stack = self.stack_text();
+        self.grow(o, 4)?;
+        let mut b = o.borrow_mut();
+        for (k, v) in [
+            ("fileName", Val::str(ERROR_FILE)),
+            ("lineNumber", Val::Num(f64::from(l))),
+            ("columnNumber", Val::Num(f64::from(c))),
+            ("stack", Val::Str(stack.into())),
+        ] {
+            b.props.retain(|(x, _)| &**x != k);
+            b.props.push((k.into(), Prop::hidden(v)));
+        }
+        Ok(())
     }
 
     pub fn type_error<T>(&self, message: &str) -> R<T> {
@@ -787,6 +893,31 @@ impl<'c> Interp<'c> {
         new_target: Option<Val>,
     ) -> R {
         self.charge(0)?;
+        let name = match fo.borrow().get_own("name").map(|p| p.value.clone()) {
+            Some(Val::Str(n)) => n,
+            _ => "".into(),
+        };
+        let caller = std::mem::replace(&mut self.fname, name);
+        self.frames.push((caller, self.pos));
+        let r = self.run_closure_in(fo, def, env, this, home, args, new_target);
+        if let Some((caller, pos)) = self.frames.pop() {
+            self.fname = caller;
+            self.pos = pos;
+        }
+        r
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_closure_in(
+        &mut self,
+        fo: &ObjRef,
+        def: &Rc<FuncDef>,
+        env: &EnvRef,
+        this: Option<Val>,
+        home: Option<ObjRef>,
+        args: &[Val],
+        new_target: Option<Val>,
+    ) -> R {
         let scope = self.new_env(Some(env.clone()));
         {
             let mut s = scope.borrow_mut();
@@ -1453,8 +1584,11 @@ impl<'c> Interp<'c> {
             Stmt::Break(l) => return Err(Ctrl::Break(l.clone())),
             Stmt::Continue(l) => return Err(Ctrl::Continue(l.clone())),
             Stmt::Throw(e, pos) => {
-                let v = self.eval(e, env)?;
+                // A value that is not an error is reported where the evaluation left the
+                // position: the `throw`, or the last call or property inside it.
                 self.pos = *pos;
+                let v = self.eval(e, env)?;
+                self.thrown_at = self.pos;
                 return Err(Ctrl::Throw(v));
             }
             Stmt::Try(body, catch, finally) => {
@@ -1710,7 +1844,7 @@ impl<'c> Interp<'c> {
                 body: if derived {
                     vec![Stmt::Expr(Expr::SuperCall(
                         vec![Expr::Spread(Box::new(Expr::Ident("args".into(), Pos::default())))],
-                        Pos::default(),
+                        c.pos,
                     ))]
                 } else {
                     Vec::new()
@@ -1812,11 +1946,10 @@ impl<'c> Interp<'c> {
                         out.push_str(&self.str_of(&v)?);
                     }
                 }
-                self.string(out)
+                self.joined_string(out)
             }
             Expr::Regex(b, f) => crate::builtins::make_regexp(self, b.clone(), f.clone()),
-            Expr::Ident(n, pos) => {
-                self.pos = *pos;
+            Expr::Ident(n, _) => {
                 if &**n == "undefined" && self.lookup(env, "undefined").is_none() {
                     return Ok(Val::Undef);
                 }
@@ -1936,9 +2069,8 @@ impl<'c> Interp<'c> {
                 Err(Ctrl::Break(Some(l))) if &*l == "?." => Ok(Val::Undef),
                 r => r,
             },
-            Expr::Member { obj, prop, optional, pos } => {
+            Expr::Member { obj, prop, optional, .. } => {
                 let o = self.eval(obj, env)?;
-                self.pos = *pos;
                 if *optional && o.is_nullish() {
                     return Err(Ctrl::Break(Some("?.".into())));
                 }
@@ -1965,13 +2097,16 @@ impl<'c> Interp<'c> {
                 self.super_call(args, env)
             }
             Expr::Call { callee, args, optional, pos } => {
+                self.call_expr(callee, args, *optional, *pos, env)
+            }
+            Expr::At(pos, e) => {
                 self.pos = *pos;
-                self.call_expr(callee, args, *optional, env)
+                self.eval(e, env)
             }
             Expr::New { callee, args, pos } => {
-                self.pos = *pos;
                 let f = self.eval(callee, env)?;
                 let args = self.eval_args(args, env)?;
+                self.pos = *pos;
                 let arrow = matches!(&f, Val::Obj(o) if matches!(&o.borrow().kind, Kind::Func(Func::Closure { def, .. }) if def.arrow || def.generator || def.is_async));
                 if !f.is_callable() || arrow {
                     let text = match &**callee {
@@ -2058,7 +2193,14 @@ impl<'c> Interp<'c> {
         }
     }
 
-    fn call_expr(&mut self, callee: &Expr, args: &[Expr], optional: bool, env: &EnvRef) -> R {
+    fn call_expr(
+        &mut self,
+        callee: &Expr,
+        args: &[Expr],
+        optional: bool,
+        pos: Pos,
+        env: &EnvRef,
+    ) -> R {
         let (f, this) = match callee {
             Expr::Member { obj, prop, optional: opt_member, .. } => {
                 let o = self.eval(obj, env)?;
@@ -2082,6 +2224,7 @@ impl<'c> Interp<'c> {
             return Err(Ctrl::Break(Some("?.".into())));
         }
         let args = self.eval_args(args, env)?;
+        self.pos = pos;
         if !f.is_callable() {
             return self.type_error(&format!("{} is not a function", callee_text(callee)));
         }
@@ -2313,7 +2456,7 @@ impl<'c> Interp<'c> {
                     let mut out = String::with_capacity(sa.len() + sb.len());
                     out.push_str(&sa);
                     out.push_str(&sb);
-                    return self.string(out);
+                    return self.joined_string(out);
                 }
                 return self.binary("@+", &a, &b);
             }
