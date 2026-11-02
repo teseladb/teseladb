@@ -213,6 +213,26 @@ mod tests {
         }
     }
 
+    /// With distinct values the heap gives the `n` that go first, in order, whatever their
+    /// number and arrival order: heaps deep enough to move a hole down past both children.
+    #[test]
+    fn heap_of_distinct_values_gives_the_first_n_in_order() {
+        let mut seed = 7u32;
+        for len in 0..=12usize {
+            for n in 0..=len + 1 {
+                let mut items: Vec<u32> = (0..len as u32).collect();
+                for i in (1..items.len()).rev() {
+                    seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                    items.swap(i, (seed >> 16) as usize % (i + 1));
+                }
+                let got =
+                    heap_first_n(items, n, &mut |a: &u32, b: &u32| Ok(a < b)).expect("no error");
+                let want: Vec<u32> = (0..len.min(n) as u32).collect();
+                assert_eq!(got, want, "{len} values, first {n}");
+            }
+        }
+    }
+
     #[test]
     fn multiset_drops_the_last_for_top_and_the_first_for_bottom() {
         let items: Vec<char> = "aAab".chars().collect();

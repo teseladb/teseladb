@@ -74,6 +74,7 @@ pub fn decode(v: &[u8]) -> Result<Vec<Span>, DecodeError> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
 

@@ -63,6 +63,9 @@ pub fn documents(sm: &Group0Sm, coll: &str) -> Vec<Document> {
         "databases" => databases(sm),
         COLLECTIONS => sharded_collections(sm),
         "refrouter" => routers(sm),
+        teseladb_wire::commands::query_analysis::QUERY_ANALYZERS => {
+            teseladb_wire::commands::query_analysis::of_settings(&sm.settings)
+        }
         "version" => vec![version(sm)],
         SETTINGS => settings(sm),
         "tags" => tags(sm),
@@ -307,10 +310,7 @@ fn sharded_collections(sm: &Group0Sm) -> Vec<Document> {
     sm.catalog
         .collections
         .iter()
-        .filter_map(|(ns, c)| {
-            let key = sharding::shard_key_of(c).ok().flatten()?;
-            Some(sharding::config_entry(ns, c, &key))
-        })
+        .filter_map(|(ns, c)| sharding::tracked_entry(ns, c).ok().flatten())
         .collect()
 }
 
@@ -385,6 +385,30 @@ mod tests {
         assert_eq!(listed[0].get("_id"), Some(&Value::from("app.s")));
         assert_eq!(listed[0].get("key"), Some(&Value::Document(Document::new().with("tienda", 1))));
         assert_eq!(listed[0].get("unique"), Some(&Value::Boolean(false)));
+    }
+
+    #[test]
+    fn each_node_finds_its_member_in_the_replica_set_presentation() {
+        use teseladb_wire::commands::presentation::Presentation;
+        let mut sm = cluster();
+        assert!(presentation(&sm).is_none());
+        assert!(replica_member(&sm, NodeId(1)).is_none(), "a refrouter without the parameter");
+        let mut p = Presentation {
+            mode: teseladb_topology::replset::PresentationMode::ReplicaSet,
+            set_name: "rs0".into(),
+            primary: Some("n2:27017".into()),
+            ..Presentation::default()
+        };
+        sm.settings.insert(PRESENTATION_KEY.to_vec(), p.to_document().to_bytes().unwrap());
+        let (rs, me) = replica_member(&sm, NodeId(1)).expect("a member");
+        assert_eq!(rs.members().len(), 3);
+        assert_eq!(rs.primary(), Some("n2:27017"));
+        assert_eq!(rs.member("n1:27017"), Some(me));
+        assert!(replica_member(&sm, NodeId(9)).is_none(), "not a node of the cluster");
+        p.mode = teseladb_topology::replset::PresentationMode::RefRouter;
+        sm.settings.insert(PRESENTATION_KEY.to_vec(), p.to_document().to_bytes().unwrap());
+        assert!(replica_member(&sm, NodeId(1)).is_none());
+        assert_eq!(presentation(&sm).map(|p| p.term), Some(1));
     }
 
     #[test]

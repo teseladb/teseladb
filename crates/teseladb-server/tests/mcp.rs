@@ -19,8 +19,13 @@ use teseladb_server::http_listener::HttpPortConfig;
 use teseladb_server::node::{Node, NodeConfig};
 
 fn start(join: Vec<String>) -> Node<MemDisk> {
+    start_on(join, [127, 0, 0, 1])
+}
+
+/// [`start`], with the HTTP port on `ip`.
+fn start_on(join: Vec<String>, ip: [u8; 4]) -> Node<MemDisk> {
     let http = HttpPortConfig {
-        addrs: vec![SocketAddr::from(([127, 0, 0, 1], 0))],
+        addrs: vec![SocketAddr::from((ip, 0))],
         tls: None,
         settings: Settings::default(),
     };
@@ -32,10 +37,18 @@ fn start(join: Vec<String>) -> Node<MemDisk> {
 }
 
 fn post(at: SocketAddr, body: &str, session: Option<&str>) -> (Response, Value) {
-    let mut req = Request::new("POST", "/mcp").header("Host", "h").body(body.as_bytes().to_vec());
+    let mut req = Request::new("POST", "/mcp").body(body.as_bytes().to_vec());
     if let Some(s) = session {
         req = req.header(SESSION_HEADER, s);
     }
+    let r = send(at, req);
+    let v = parse(&r.body).unwrap_or(Value::Null);
+    (r, v)
+}
+
+/// The answer to `req`.
+fn send(at: SocketAddr, req: Request) -> Response {
+    let req = req.header("Host", "h");
     let mut s = TcpStream::connect(at).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
     s.write_all(&req.encode().unwrap()).unwrap();
@@ -45,8 +58,7 @@ fn post(at: SocketAddr, body: &str, session: Option<&str>) -> (Response, Value) 
         let n = s.read(&mut buf).unwrap();
         assert!(n > 0);
         if let Some(r) = reader.feed(&buf[..n]).unwrap() {
-            let v = parse(&r.body).unwrap_or(Value::Null);
-            return (r, v);
+            return r;
         }
     }
 }
@@ -245,5 +257,64 @@ fn the_session_stream_announces_a_change_of_the_tools() {
         seen.extend_from_slice(&buf[..n]);
     }
     assert!(String::from_utf8_lossy(&seen).starts_with("HTTP/1.1 200"));
+    drop(node.stop());
+}
+
+/// What the port's routes do with requests they do not serve, on a node without credentials
+/// whose HTTP port listens only on a wildcard address (no URI for `/mcp`, which needs none then):
+/// the metadata path takes only `GET`, `/mcp` without a session takes no `GET`, paths outside
+/// `/v1` and `/mcp` are `404`; batches and bodies that are not text are refused; a call with a
+/// `progressToken` that fails ends its stream with the error; and a session stream the client
+/// drops ends.
+#[test]
+fn the_ports_routes_answer_what_they_do_not_serve() {
+    let node = start_on(Vec::new(), [0, 0, 0, 0]);
+    let at = SocketAddr::from(([127, 0, 0, 1], node.http_addrs()[0].port()));
+    let list = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}"#;
+    let (r, v) = post(at, list, None);
+    assert_eq!(r.status, 200, "{v:?}");
+    let well_known = "/.well-known/oauth-protected-resource/mcp";
+    assert_eq!(send(at, Request::new("POST", well_known)).status, 404);
+    assert!(send(at, Request::new("GET", "/mcp")).status >= 400);
+    assert_eq!(send(at, Request::new("GET", "/elsewhere")).status, 404);
+    assert_eq!(send(at, Request::new("GET", "/v1/no/such/route")).status, 404);
+    assert!(send(at, Request::new("GET", "/v1")).status >= 400);
+    // Batches are refused (2026-07-28), and the audit log records them as such.
+    let (r, v) = post(at, &format!("[{list}]"), None);
+    assert_eq!(r.status, 400, "{v:?}");
+    let not_text = Request::new("POST", "/mcp").body(vec![0xff, 0xfe]);
+    assert!(send(at, not_text).status >= 400);
+    let no_method = Request::new("POST", "/mcp").body(b"{}".to_vec());
+    assert!(send(at, no_method).status >= 400);
+    // A call with a `progressToken` for a session that does not exist: its stream carries the
+    // refusal.
+    let in_session = r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"_meta":{"progressToken":"p"},"name":"find","arguments":{}}}"#;
+    let req = Request::new("POST", "/mcp")
+        .header("Accept", "application/json, text/event-stream")
+        .header(SESSION_HEADER, "no-such-session")
+        .body(in_session.as_bytes().to_vec());
+    let r = send(at, req);
+    assert_eq!(r.status, 200);
+    assert!(String::from_utf8_lossy(&r.body).starts_with("data: "), "{r:?}");
+    let failing = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"_meta":{"progressToken":"p","io.modelcontextprotocol/protocolVersion":"2026-07-28"},"name":"no-such-tool","arguments":{}}}"#;
+    let req = Request::new("POST", "/mcp")
+        .header("Accept", "application/json, text/event-stream")
+        .header("Content-Type", "application/json")
+        .body(failing.as_bytes().to_vec());
+    let r = send(at, req);
+    assert_eq!(r.status, 200);
+    assert!(String::from_utf8_lossy(&r.body).contains(r#""id":2"#), "{r:?}");
+    // A session stream the client drops: the node notices at its next poll.
+    let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#;
+    let (r, _) = post(at, init, None);
+    let sid = r.header(SESSION_HEADER).unwrap().to_owned();
+    let mut s = TcpStream::connect(at).unwrap();
+    let get = Request::new("GET", "/mcp").header("Host", "h").header(SESSION_HEADER, &sid);
+    s.write_all(&get.encode().unwrap()).unwrap();
+    let mut buf = [0u8; 64];
+    s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+    assert!(s.read(&mut buf).unwrap() > 0);
+    drop(s);
+    std::thread::sleep(Duration::from_millis(2_500));
     drop(node.stop());
 }

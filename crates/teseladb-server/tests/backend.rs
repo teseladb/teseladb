@@ -735,6 +735,31 @@ fn a_read_that_pushes_a_running_owner_reads_again_past_it() {
     assert_eq!(b.scan(&[1], &[2], 10, ReadConcern::Majority), Ok(rows));
 }
 
+/// A read that meets the intent of a committed owner resolves it and reads again at once, without
+/// the pause of a refusal (008 FR-003): a statement of an encrypted insert reads the ESC position
+/// the previous one just committed, so a pause there cost every insert 20 ms (017 SC-002).
+#[test]
+fn a_read_that_learns_its_owner_reads_again_without_a_pause() {
+    use teseladb_range::intents::TxnStatus;
+    const ROUNDS: usize = 25;
+    let at = Hlc { physical: 1_000, logical: 0 };
+    let rows = vec![(vec![1, 1], vec![9])];
+    let meet = || Err(RangeError::ReadIntent { owner: owner(&[1, 1]), at });
+    let resolved = Ok(DataReply::Remote(RemoteReply::Rows(vec![])));
+    // The first round pushes the owner and resolves the intent; the others learn it from the
+    // node's pushes.
+    let mut script = vec![meet(), record(TxnStatus::Committed), resolved];
+    script.extend((1..ROUNDS).map(|_| meet()));
+    script.push(Ok(DataReply::Remote(RemoteReply::Rows(rows.clone()))));
+    let h = cores(Arc::new(Mutex::new(script.into())), Arc::default(), Arc::default());
+    let mut b = ServerBackend::new(h, 7).with_deadline(Duration::from_secs(5));
+    let started = std::time::Instant::now();
+    assert_eq!(b.scan(&[1], &[2], 10, ReadConcern::Majority), Ok(rows));
+    // With a pause of 20 ms per round it took at least 500 ms.
+    let took = started.elapsed();
+    assert!(took < Duration::from_millis(400), "{took:?}");
+}
+
 /// What Group 0 refuses, and what it answers late, through the backend (006 FR-014).
 #[test]
 fn group0_refusals_and_late_answers() {

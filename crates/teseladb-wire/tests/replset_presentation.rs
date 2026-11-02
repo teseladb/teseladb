@@ -59,7 +59,9 @@ fn admin(m: &mut Mem, cmd: Document) -> Document {
 fn configuration_over_the_nodes() {
     let mut m = node();
     let r = admin(&mut m, Document::new().with("replSetGetConfig", 1));
-    assert_eq!(code(&r), (59, "no such command: 'replSetGetConfig'".into()));
+    assert_eq!(code(&r), (59, "no such cmd: replSetGetConfig".into()));
+    let r = admin(&mut m, Document::new().with("shardingState", 1));
+    assert_eq!(code(&r), (59, "no such cmd: shardingState".into()));
     replica(&mut m, N2);
     let r = admin(&mut m, Document::new().with("replSetGetConfig", 1));
     assert_eq!(field(&r, "config._id"), &Value::from("rs0"));
@@ -288,10 +290,29 @@ fn a_member_answers_as_one() {
     assert_eq!(field(&r, "topologyVersion.counter"), &Value::Int64(9));
     let r = dispatched(&mut m, "admin", Document::new().with("listShards", 1), Some(view.clone()));
     assert_eq!(code(&r), (59, "no such command: 'listShards'".into()));
+    let r = dispatched(
+        &mut m,
+        "admin",
+        Document::new().with("shardConnPoolStats", 1),
+        Some(view.clone()),
+    );
+    assert_eq!(code(&r), (59, "no such command: 'shardConnPoolStats'".into()));
+    let r =
+        dispatched(&mut m, "admin", Document::new().with("shardingState", 1), Some(view.clone()));
+    assert_eq!(r.get("enabled"), Some(&Value::Boolean(false)), "{r:?}");
     let r = dispatched(&mut m, "admin", Document::new().with("hello", 1), Some(view));
     assert_eq!(r.get("setName"), Some(&Value::from("rs0")));
     assert_eq!(r.get("secondary"), Some(&Value::Boolean(true)));
     assert_eq!(r.get("primary"), Some(&Value::from(N2)));
     assert_eq!(r.get("me"), Some(&Value::from(N1)));
     assert!(r.get("msg").is_none());
+    // On the primary, a config server's command is refused as on a `refnode` that is not one.
+    replica(&mut m, N1);
+    let (set, _) = replica_set(&mut m).expect("read").expect("a set");
+    let me = set.member(N1).expect("member");
+    let view =
+        Arc::new(ReplicaView { set, me, last: LastWrite { op_time: at, majority_op_time: at } });
+    let r =
+        dispatched(&mut m, "admin", Document::new().with("_configsvrAddShard", "x"), Some(view));
+    assert_eq!(code(&r), (20, "_configsvrAddShard can only be run on config servers".into()));
 }

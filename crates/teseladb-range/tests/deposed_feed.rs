@@ -101,3 +101,26 @@ fn a_leader_without_lease_reads_still_resolves_reads_through_the_log() {
     }
     assert!(reached, "the read never passed the write at {ts:?}");
 }
+
+/// A change stream's read only goes to the leader of the range that holds its whole interval:
+/// another range, an interval past the range or empty, and a follower answer with an error.
+#[test]
+fn a_read_outside_the_led_range_is_refused() {
+    let mut c = Cluster::standard();
+    let l = c.elect();
+    let zero = Hlc { physical: 0, logical: 0 };
+    let ask = |c: &mut Cluster, n: NodeId, g: GroupId, start: &[u8], end: &[u8]| {
+        let now = c.now;
+        let node = c.nodes.get_mut(&n).unwrap();
+        let req = ChangesReq { g, start: start.to_vec(), end: end.to_vec(), from: zero };
+        let id = node.host.changes(&mut node.core, req, now);
+        c.settle();
+        c.reply(n, id)
+    };
+    let other = GroupId(G.0 + 100);
+    assert!(matches!(ask(&mut c, l, other, START, END), Some(Err(RangeError::OutOfRange))));
+    assert!(matches!(ask(&mut c, l, G, END, START), Some(Err(RangeError::OutOfRange))));
+    let follower = c.others(l)[0];
+    let r = ask(&mut c, follower, G, START, END);
+    assert!(matches!(r, Some(Err(RangeError::NotLeader { .. }))), "{r:?}");
+}

@@ -58,6 +58,9 @@ pub struct FuncDef {
     pub source: Rc<str>,
     /// The name SpiderMonkey guesses for it when it has none ([`crate::names`]).
     pub guessed: std::cell::OnceCell<Name>,
+    /// Declared in a block of non-strict code with a `var` of the same name in the function
+    /// around it (Annex B.3.3, [`crate::annex`]).
+    pub annex: std::cell::Cell<bool>,
 }
 
 #[derive(Debug)]
