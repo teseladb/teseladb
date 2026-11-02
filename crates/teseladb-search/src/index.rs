@@ -923,11 +923,15 @@ impl Grams {
         if self.reverse { word.chars().rev().collect() } else { word.chars().collect() }
     }
 
-    /// The grams of `word`: its prefixes (or every slice) of `min` to `max` characters, and its
-    /// first `max` characters once more when it is longer (measured on `refsearch`, with
-    /// `rightEdgeGram` on the reversed word).
+    /// The grams of `word`: its prefixes (or every slice) of `min` to `max` characters, its
+    /// first `max` characters once more when it is longer, and the word itself when it is shorter
+    /// than `min` (RefLib's gram filter keeping the original; measured on `refsearch`, with
+    /// `rightEdgeGram` on the reversed word: two words `a` add two to `avgdl`'s sum).
     pub(crate) fn of(&self, word: &str) -> Vec<String> {
         let chars = self.chars(word);
+        if chars.len() < self.min {
+            return vec![chars.iter().collect()];
+        }
         let mut out = Vec::new();
         let starts = if self.edge { 0..1 } else { 0..chars.len() };
         for start in starts {
