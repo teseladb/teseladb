@@ -311,6 +311,40 @@ fn unshard_collection_drops_the_key_on_the_least_loaded_shard() {
     assert_eq!(docs(&mut m, "s").len(), 3);
 }
 
+/// Ranges past every key, each led by `node`.
+fn empty_ranges(m: &mut Mem, node: u64, first_group: u64) {
+    for i in 0..3u8 {
+        m.routes.push(RouteEntry {
+            group: GroupId(first_group + u64::from(i)),
+            start: vec![0xFF, i],
+            end: if i == 2 { Vec::new() } else { vec![0xFF, i + 1] },
+            core: 0,
+            voters: vec![NodeId(node)],
+            generation: 1,
+            leader_hint: Some(NodeId(node)),
+        });
+    }
+    m.routes[0].end = vec![0xFF, 0];
+}
+
+/// Without `toShard`, a `refrouter` 9.0.4 sends the collection to the shard with the least data,
+/// whatever the chunks each one has (measured on 02-11-2026, `u1.js` to `u5.js` in the lane's
+/// notes): here the shard that leads more ranges, all of them empty.
+#[test]
+fn unshard_collection_picks_the_shard_with_the_least_data() {
+    let mut m = cluster();
+    empty_ranges(&mut m, 2, 10);
+    ok(&admin(&mut m, r#"{"unshardCollection":"m.s"}"#));
+    assert_eq!(node(&mut m, "s"), Some(2));
+    // The data on node 2 and the empty ranges on node 1: back to node 1.
+    let mut m = cluster();
+    m.routes[0].leader_hint = Some(NodeId(2));
+    m.routes[0].voters = vec![NodeId(2)];
+    empty_ranges(&mut m, 1, 10);
+    ok(&admin(&mut m, r#"{"unshardCollection":"m.s"}"#));
+    assert_eq!(node(&mut m, "s"), Some(1));
+}
+
 #[test]
 fn rewrite_collection_fails_and_rewrites_as_on_a_refrouter() {
     let mut m = cluster();
