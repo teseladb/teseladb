@@ -124,6 +124,13 @@ pub(crate) struct MultiPhrase {
     pub slop: u32,
 }
 
+/// The document frequencies of the terms a field holds: RefLib's multi-phrase weight leaves out
+/// the synonyms no document has (measured with `refsearch` 1.70.6: the phrase
+/// `(sleepy slow lazy) (fox dog dog)` sums the idf of `lazy`, `fox`, `dog` and `dog`).
+fn present(dfs: Vec<u64>) -> Vec<u64> {
+    dfs.into_iter().filter(|df| *df > 0).collect()
+}
+
 impl MultiPhrase {
     /// Every term listed, in order.
     fn terms(&self) -> Vec<String> {
@@ -213,7 +220,7 @@ impl MemIndex {
         let Some(field) = self.fields.get(key) else { return BTreeMap::new() };
         let g = self.global_of(key);
         let n = g.map_or(field.lengths.len() as u64, |g| g.docs);
-        let idf_sum: f32 = super::idf_sum(n, field.dfs(&phrase.terms(), g));
+        let idf_sum: f32 = super::idf_sum(n, present(field.dfs(&phrase.terms(), g)));
         let score = field.scorer(boost * idf_sum, g);
         field
             .multi_phrase_freqs(&phrase.positions, phrase.slop)
@@ -249,7 +256,7 @@ impl MemIndex {
             .multi_phrase_freqs(&phrase.positions, phrase.slop)
             .into_iter()
             .find(|f| f.0 == doc)?;
-        let dfs = field.dfs(&phrase.terms(), g);
+        let dfs = present(field.dfs(&phrase.terms(), g));
         let weight = Weight { description, dfs: &dfs, boost, kind: FreqKind::Phrase };
         Some(field.explain_weight(&weight, doc, freq, g))
     }

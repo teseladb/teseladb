@@ -445,7 +445,7 @@ pub fn build_index<B: Backend + ?Sized>(
         failure: None,
     };
     lock(shared).search.building.insert(entry.id, serving);
-    let caught = catch_up(backend, coll, &mut built);
+    let caught = catch_up_to(backend, coll, &mut built, false);
     lock(shared).search.building.remove(&entry.id);
     if let Err(e) = caught {
         fail(shared, entry, built, &e);
@@ -581,11 +581,23 @@ fn with_built<B: Backend + ?Sized, R>(
     out
 }
 
-/// Applies to `built` what the ranges of its collection wrote after its mark.
+/// Applies to `built` what the ranges of its collection wrote after its mark, once every range
+/// reaches the read's mark.
 fn catch_up<B: Backend + ?Sized>(
     backend: &mut B,
     coll: &CollectionEntry,
     built: &mut Built,
+) -> Result<(), CommandError> {
+    catch_up_to(backend, coll, built, true)
+}
+
+/// [`catch_up`]; without `wait`, up to the marks the ranges have resolved now (the builder's fixed
+/// mark, FR-014: no read asks it for a later one).
+fn catch_up_to<B: Backend + ?Sized>(
+    backend: &mut B,
+    coll: &CollectionEntry,
+    built: &mut Built,
+    wait: bool,
 ) -> Result<(), CommandError> {
     let (start, end) = documents_of(coll);
     if behind_history(built.applied, history_floor(backend)?) {
@@ -602,7 +614,7 @@ fn catch_up<B: Backend + ?Sized>(
     INDEXER_LAG_MS.store(lag, Ordering::Relaxed);
     let ranges = loop {
         let ranges = backend.range_changes(&start, &end, built.applied)?;
-        if ranges.iter().all(|r| r.resolved >= target) {
+        if !wait || ranges.iter().all(|r| r.resolved >= target) {
             break ranges;
         }
         if !backend.pause() {
