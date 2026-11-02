@@ -281,6 +281,12 @@ pub fn open<B: Backend + ?Sized>(
         }
         _ => None,
     };
+    if resume_fragment.is_some() && !split {
+        return Err(CommandError::new(
+            error::CHANGE_STREAM_FATAL,
+            "To resume from a split event, the $changeStream pipeline must include a $changeStreamSplitLargeEvent stage",
+        ));
+    }
     let position = StreamPosition::new(&spec.start, ctx.backend.cluster_mark());
     // A resume point the cluster no longer keeps fails at the first `getMore` (measured).
     let resume_ts = match &spec.start {
@@ -490,6 +496,21 @@ fn images_enabled(options: &[u8]) -> bool {
     }
 }
 
+/// The collection `c` (named `ns` if it is new) among `by_id`.
+fn watched<'a>(
+    by_id: &'a mut BTreeMap<(u32, u32), Watched>,
+    ns: &Namespace,
+    c: &CollectionEntry,
+) -> &'a mut Watched {
+    by_id.entry(entry_key(c)).or_insert_with(|| Watched {
+        ns: ns.clone(),
+        entry: c.clone(),
+        renames: Vec::new(),
+        dropped: None,
+        modifies: Vec::new(),
+    })
+}
+
 /// The collections a read of `stream` reads: those of the catalog now and those the catalog
 /// changes in `records` dropped, with their renames.
 fn watched_of(
@@ -504,52 +525,29 @@ fn watched_of(
             ((entry_key(&w.entry)), w)
         })
         .collect();
-    let mut add = |ns: &Namespace, c: &CollectionEntry| {
-        by_id.entry((c.tenant, c.id)).or_insert_with(|| Watched {
-            ns: ns.clone(),
-            entry: c.clone(),
-            renames: Vec::new(),
-            dropped: None,
-            modifies: Vec::new(),
-        });
-        (c.tenant, c.id)
-    };
-    let mut drops = Vec::new();
-    let mut renames = Vec::new();
-    let mut modifies = Vec::new();
     for r in records {
         let key = ddl_key(r.mark, r.op);
         match &r.change {
+            // A dropped collection's name is the one it had when it was dropped.
             DdlChange::Drop { ns, collection } => {
-                drops.push((add(ns, collection), key, ns.clone()))
+                let w = watched(&mut by_id, ns, collection);
+                w.dropped = Some(key);
+                w.ns = ns.clone();
             }
             DdlChange::Rename { from, to, collection, target } => {
                 if let Some(t) = target {
-                    drops.push((add(to, t), key.clone(), to.clone()));
+                    let w = watched(&mut by_id, to, t);
+                    w.dropped = Some(key.clone());
+                    w.ns = to.clone();
                 }
-                renames.push((add(to, collection), key, from.clone(), to.clone()));
+                watched(&mut by_id, to, collection).renames.push((key, from.clone(), to.clone()));
             }
             DdlChange::Modify { ns, collection, .. } => {
-                modifies.push((add(ns, collection), key, collection.options.clone()));
+                watched(&mut by_id, ns, collection)
+                    .modifies
+                    .push((key, collection.options.clone()));
             }
             _ => {}
-        }
-    }
-    for (id, key, before) in modifies {
-        if let Some(w) = by_id.get_mut(&id) {
-            w.modifies.push((key, before));
-        }
-    }
-    // A dropped collection's name is the one it had when it was dropped.
-    for (id, key, ns) in drops {
-        if let Some(w) = by_id.get_mut(&id) {
-            w.dropped = Some(key);
-            w.ns = ns;
-        }
-    }
-    for (id, key, from, to) in renames {
-        if let Some(w) = by_id.get_mut(&id) {
-            w.renames.push((key, from, to));
         }
     }
     by_id.into_values().filter(|w| has_documents(&w.entry) && w.ever_in(stream)).collect()
@@ -978,5 +976,20 @@ fn shown(v: &Value) -> String {
             .and_then(|d| d.get("v"))
             .map_or_else(String::new, teseladb_bson::shell::shell_value),
         Err(_) => String::new(),
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_copied_cursor_counts_as_open_too() {
+        let first = OpenGuard::new();
+        let second = first.clone();
+        // Other tests open streams at the same time: the count holds these two at least.
+        assert!(stream_metrics().0 >= 2);
+        assert_eq!(first, second, "the guard says nothing of the cursor's contents");
     }
 }

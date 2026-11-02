@@ -275,13 +275,11 @@ impl ChangeStreamSpec {
             }
             (None, None) => {}
         }
-        if spec.all_for_cluster != (scope == Scope::Cluster) {
+        if spec.all_for_cluster && scope != Scope::Cluster {
             let msg = format!(
                 "A $changeStream with 'allChangesForCluster:true' may only be opened on the 'admin' database, and with no collection name; found {ns}"
             );
-            if spec.all_for_cluster {
-                return Err(error(codes::INVALID_OPTIONS, msg));
-            }
+            return Err(error(codes::INVALID_OPTIONS, msg));
         }
         Ok(spec)
     }

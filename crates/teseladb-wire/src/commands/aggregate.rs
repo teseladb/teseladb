@@ -54,6 +54,8 @@ struct WireEnv<'a, B: Backend + ?Sized> {
     /// What the search stages' queries gave while the pipeline was planned, by stage and
     /// specification, for the run to take (011 FR-022).
     searched: RefCell<Vec<(String, Document, Vec<teseladb_exec::pipeline::search::Scored>)>>,
+    /// The node's temporary store and the memory of a stage (010 FR-010, D-105).
+    spill: super::Spill,
 }
 
 /// An error of the node as an error of the pipeline.
@@ -360,6 +362,14 @@ impl<B: Backend + ?Sized> Env for WireEnv<'_, B> {
         self.allow_disk_use
     }
 
+    fn stage_memory_limit(&self) -> usize {
+        self.spill.stage_limit()
+    }
+
+    fn spill(&self) -> Option<&dyn teseladb_exec::pipeline::spill::SpillStore> {
+        self.spill.store.as_deref().map(|s| s as &dyn teseladb_exec::pipeline::spill::SpillStore)
+    }
+
     fn operation_memory_limit(&self) -> usize {
         match &self.node {
             Some((shared, _)) => {
@@ -381,6 +391,26 @@ impl<B: Backend + ?Sized> Env for WireEnv<'_, B> {
 
     fn collation(&self) -> Collation {
         self.collation.clone()
+    }
+
+    fn collection_matching(
+        &self,
+        name: &str,
+        filter: &Document,
+    ) -> Result<Vec<Document>, MqlError> {
+        let Some((shared, _)) = &self.node else { return self.collection(name) };
+        let ns = names::ns(self.db, name);
+        let stage = Document::new().with("$match", filter.clone());
+        let bytes = stage.to_bytes().map_err(|e| to_mql(e.into()))?;
+        let raw = RawDoc::from_bytes(&bytes).map_err(|e| to_mql(e.into()))?;
+        let mut backend = self.backend.borrow_mut();
+        let cmd = Document::new();
+        let mut ctx = Ctx { backend: &mut **backend, shared, db: self.db, cmd: &cmd };
+        let stages = [RawValue::Document(raw)];
+        match planned_read(&mut ctx, &ns, (&stages, None), self.concern, false).map_err(to_mql)? {
+            Some((docs, _)) => Ok(docs),
+            None => read(&mut **backend, &ns, self.concern).map_err(to_mql),
+        }
     }
 
     fn random(&self) -> f64 {
@@ -551,6 +581,7 @@ pub(crate) fn read_through_staged<B: Backend + ?Sized>(
         allow_disk_use: true,
         node: None,
         searched: RefCell::new(Vec::new()),
+        spill: super::Spill::default(),
     };
     let sbe = pipeline.runs_in_sbe();
     Ok(pipeline.run(docs, &env).map(|out| (out, sbe)).map_err(from_mql))
@@ -578,6 +609,7 @@ pub(crate) fn run_stages<B: Backend + ?Sized>(
         allow_disk_use: true,
         node: None,
         searched: RefCell::new(Vec::new()),
+        spill: super::Spill::default(),
     };
     pipeline.run(docs, &env).map_err(from_mql)
 }
@@ -788,6 +820,7 @@ pub fn aggregate<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
         allow_disk_use: a.allow_disk_use,
         node: Some((ctx.shared, ns.clone())),
         searched: RefCell::new(Vec::new()),
+        spill: super::lock(ctx.shared).spill.clone(),
     };
     let executor = |mut err: CommandError| {
         err.errmsg = format!(

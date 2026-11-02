@@ -68,6 +68,15 @@ pub const HASH_INTERSECTION: &str = "internalQueryPlannerEnableHashIntersection"
 pub const MAX_OPERATION_MEMORY: &str = "internalQueryMaxMemoryUsageBytesPerOperation";
 /// Its default: 1 GiB, the least RefDb gives it.
 pub const MAX_OPERATION_MEMORY_DEFAULT: i64 = 1 << 30;
+/// The memory one constant expression may hold when it is folded (010 FR-010).
+pub const MAX_EXPRESSION_MEMORY: &str = "internalQueryMaxSingleExpressionMemoryUsageBytes";
+/// How many queries a second `$queryStats` counts when it does not sample: -1 all, 0 none
+/// (010 FR-023; 0 by default on a `refrouter` 9.0.4, measured).
+pub const QUERY_STATS_RATE_LIMIT: &str = "internalQueryStatsRateLimit";
+/// The probability that `$queryStats` counts a query; 0 leaves it to the rate limit.
+pub const QUERY_STATS_SAMPLE_RATE: &str = "internalQueryStatsSampleRate";
+/// [`QUERY_STATS_SAMPLE_RATE`] by default (measured on a `refrouter` 9.0.4).
+pub const QUERY_STATS_SAMPLE_RATE_DEFAULT: f64 = 0.01;
 /// `getParameter: "*"`.
 const ALL: &str = "*";
 
@@ -166,6 +175,20 @@ pub struct ServerParams {
     pub hash_intersection: bool,
     /// `internalQueryMaxMemoryUsageBytesPerOperation`.
     pub operation_memory: i64,
+    /// `internalQueryMaxSingleExpressionMemoryUsageBytes`.
+    pub expression_memory: i64,
+    /// `internalQueryStatsRateLimit`.
+    pub query_stats_rate_limit: i64,
+    /// The bits of `internalQueryStatsSampleRate` (an `f64`, kept as bits so the parameters
+    /// compare exactly).
+    pub query_stats_sample_bits: u64,
+}
+
+impl ServerParams {
+    /// `internalQueryStatsSampleRate`.
+    pub fn query_stats_sample_rate(&self) -> f64 {
+        f64::from_bits(self.query_stats_sample_bits)
+    }
 }
 
 impl Default for ServerParams {
@@ -184,13 +207,19 @@ impl Default for ServerParams {
             tls_enabled: true,
             hash_intersection: false,
             operation_memory: MAX_OPERATION_MEMORY_DEFAULT,
+            expression_memory: i64::try_from(
+                teseladb_exec::expr::optimize::EXPRESSION_MEMORY_DEFAULT,
+            )
+            .unwrap_or(i64::MAX),
+            query_stats_rate_limit: 0,
+            query_stats_sample_bits: QUERY_STATS_SAMPLE_RATE_DEFAULT.to_bits(),
         }
     }
 }
 
 /// The parameters TeselaDB has, in name order: name, settable at runtime, settable at startup
 /// with `--setParameter` (`redactClientLogData` starts with its own option, measured).
-const KNOWN: [(&str, bool, bool); 18] = [
+const KNOWN: [(&str, bool, bool); 21] = [
     (AUDIT_AUTHORIZATION_SUCCESS, true, true),
     (AUTH_SCHEMA_VERSION, false, false),
     (CLIENT_CURSOR_MONITOR_FREQUENCY_SECS, true, true),
@@ -198,7 +227,10 @@ const KNOWN: [(&str, bool, bool); 18] = [
     (CURSOR_TIMEOUT_MILLIS, true, true),
     (ENABLE_TEST_COMMANDS, false, true),
     (MAX_OPERATION_MEMORY, true, true),
+    (MAX_EXPRESSION_MEMORY, true, true),
     (HASH_INTERSECTION, true, true),
+    (QUERY_STATS_RATE_LIMIT, true, true),
+    (QUERY_STATS_SAMPLE_RATE, true, true),
     (LOCAL_LOGICAL_SESSION_TIMEOUT_MINUTES, false, true),
     (MAX_CONCURRENT_MULTI_DOCUMENT_TRANSACTIONS, true, true),
     (OCSP_ENABLED, false, true),
@@ -240,6 +272,9 @@ fn value_of(name: &str, s: &NodeSessions) -> Value {
         USE_INTERNAL_AUTHZ_FOR_X509 => Value::Boolean(s.params.use_internal_authz_for_x509),
         HASH_INTERSECTION => Value::Boolean(s.params.hash_intersection),
         MAX_OPERATION_MEMORY => Value::Int64(s.params.operation_memory),
+        MAX_EXPRESSION_MEMORY => Value::Int64(s.params.expression_memory),
+        QUERY_STATS_RATE_LIMIT => Value::Int32(clamp_i32(s.params.query_stats_rate_limit)),
+        QUERY_STATS_SAMPLE_RATE => rate_value(s.params.query_stats_sample_rate()),
         TRANSACTION_LIFETIME_LIMIT_SECONDS => {
             Value::Int32(clamp_i32(s.params.transaction_lifetime_secs))
         }
@@ -249,6 +284,39 @@ fn value_of(name: &str, s: &NodeSessions) -> Value {
         _ => Value::Int32(clamp_i32(
             i64::try_from(s.sessions.timeout_ms() / 60_000).unwrap_or(i64::MAX),
         )),
+    }
+}
+
+/// A rate as `getParameter` gives it: an integral one as an `int` (measured).
+fn rate_value(x: f64) -> Value {
+    if x.fract() == 0.0 { Value::Int32(x as i32) } else { Value::Double(x) }
+}
+
+/// A new `internalQueryStatsSampleRate`: a number from 0 to 1 (measured on a `refrouter` 9.0.4).
+fn sample_rate(v: &Value) -> Result<f64, CommandError> {
+    let x = match v {
+        Value::Int32(_) | Value::Int64(_) | Value::Double(_) | Value::Decimal128(_) => {
+            crate::types::number(v)
+        }
+        _ => None,
+    };
+    let Some(x) = x.filter(|x| !x.is_nan()) else {
+        let msg = format!(
+            "Failed validating {QUERY_STATS_SAMPLE_RATE}: Unable to coerce value to correct type"
+        );
+        return Err(CommandError::new(BAD_VALUE, msg));
+    };
+    let bound = match x {
+        x if x < 0.0 => Some("greater than or equal to 0"),
+        x if x > 1.0 => Some("less than or equal to 1"),
+        _ => None,
+    };
+    match bound {
+        Some(b) => Err(CommandError::new(
+            BAD_VALUE,
+            format!("Invalid value for parameter {QUERY_STATS_SAMPLE_RATE}: {x} is not {b}"),
+        )),
+        None => Ok(x),
     }
 }
 
@@ -388,14 +456,26 @@ pub fn set_parameter<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Docume
             }
             AUDIT_AUTHORIZATION_SUCCESS => audit_authorization_success(ctx.shared, v)?,
             CLUSTER_AUTH_MODE => cluster_auth_mode_step(ctx.shared, v)?.index(),
+            QUERY_STATS_SAMPLE_RATE => i64::from_ne_bytes(sample_rate(v)?.to_bits().to_ne_bytes()),
+            QUERY_STATS_RATE_LIMIT => {
+                let n = integral(name, v)?;
+                if i32::try_from(n).is_err() {
+                    let msg = format!(
+                        "Failed validating {name}: Out of bounds coercing to integral value"
+                    );
+                    return Err(CommandError::new(BAD_VALUE, msg));
+                }
+                n
+            }
             _ => integral(name, v)?,
         };
         let least = match *name {
             TRANSACTION_LIFETIME_LIMIT_SECONDS => 1,
+            QUERY_STATS_RATE_LIMIT => -1,
             MAX_CONCURRENT_MULTI_DOCUMENT_TRANSACTIONS => 0,
             _ => i64::MIN,
         };
-        if *name == MAX_OPERATION_MEMORY && n <= 0 {
+        if (*name == MAX_OPERATION_MEMORY || *name == MAX_EXPRESSION_MEMORY) && n <= 0 {
             let msg = format!("Invalid value for parameter {name}: {n} is not greater than 0");
             return Err(CommandError::new(BAD_VALUE, msg));
         }
@@ -423,6 +503,11 @@ pub fn set_parameter<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Docume
             USE_INTERNAL_AUTHZ_FOR_X509 => g.params.use_internal_authz_for_x509 = n != 0,
             HASH_INTERSECTION => g.params.hash_intersection = n != 0,
             MAX_OPERATION_MEMORY => g.params.operation_memory = n,
+            MAX_EXPRESSION_MEMORY => g.params.expression_memory = n,
+            QUERY_STATS_RATE_LIMIT => g.params.query_stats_rate_limit = n,
+            QUERY_STATS_SAMPLE_RATE => {
+                g.params.query_stats_sample_bits = u64::from_ne_bytes(n.to_ne_bytes());
+            }
             CLUSTER_AUTH_MODE => g.params.cluster_auth_mode = ClusterAuthMode::from_index(n),
             AUDIT_AUTHORIZATION_SUCCESS => match g.audit.as_ref() {
                 Some(a) => {

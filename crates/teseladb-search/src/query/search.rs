@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use teseladb_bson::{Document, Value};
 
-use crate::index::{Hit, IndexError, MemIndex};
+use crate::index::{Fuzzy, Hit, IndexError, MemIndex};
 
 /// The operators `refsearch` knows, in its order.
 pub const OPERATORS: [&str; 23] = [
@@ -79,6 +79,8 @@ enum Score {
     BoostPath(String),
     /// Replaced by a number.
     Constant(f32),
+    /// Replaced by an expression over it.
+    Function(function::Expr),
 }
 
 /// An operator.
@@ -87,6 +89,7 @@ enum Operator {
     Text {
         query: Vec<String>,
         paths: Vec<String>,
+        fuzzy: Option<Fuzzy>,
         score: Score,
     },
     Exists {
@@ -101,6 +104,12 @@ enum Operator {
     },
     /// `wildcard` or `regex`.
     Pattern(pattern::Pattern),
+    /// `equals`, `in`, `range` or `near`.
+    Values(values::ValueOp),
+    /// `knnBeta`.
+    Knn(knn::Knn),
+    /// `span`, with its score option.
+    Span(span::Span, Score),
     Compound {
         must: Vec<Operator>,
         should: Vec<Operator>,
@@ -172,6 +181,13 @@ fn parse(index: &MemIndex, name: &str, v: &Value, path: &str) -> Result<Operator
         "exists" => parse_exists(d, path),
         "wildcard" | "regex" => pattern::parse(index, name, d, path),
         "compound" => parse_compound(index, d, path),
+        "equals" => values::parse_equals(d, path),
+        "term" | "search" => parse_term(index, d, path),
+        "knnBeta" => knn::parse(index, d, path),
+        "span" => span::parse(d, path),
+        "in" => values::parse_in(d, path),
+        "range" => values::parse_range(d, path),
+        "near" => values::parse_near(d, path),
         other => {
             Err(SearchError(format!("\"{other}\" is not supported by this node's search engine")))
         }
@@ -190,7 +206,79 @@ fn parse_text(index: &MemIndex, d: &Document, path: &str) -> Result<Operator, Se
         None => return Err(shape(&at("path"), "is required")),
         Some(p) => paths(index, p, &at("path"))?,
     };
-    Ok(Operator::Text { query, paths, score: parse_score(d.get("score"), &at("score"))? })
+    let fuzzy = parse_fuzzy(d.get("fuzzy"), &at("fuzzy"))?;
+    Ok(Operator::Text { query, paths, fuzzy, score: parse_score(d.get("score"), &at("score"))? })
+}
+
+/// The `fuzzy` option of `text` and `term`: RefLib's defaults of `FuzzyQuery` as `refsearch` uses
+/// them (two edits, no prefix, 50 expansions).
+fn parse_fuzzy(v: Option<&Value>, at: &str) -> Result<Option<Fuzzy>, SearchError> {
+    let Some(v) = v else { return Ok(None) };
+    let Value::Document(d) = v else { return Err(shape(at, "must be a document")) };
+    let int = |k: &str, default: f32| match d.get(k) {
+        None => Ok(default),
+        Some(v) => number(v).ok_or_else(|| shape(&format!("{at}.{k}"), "must be a number")),
+    };
+    let max_edits = int("maxEdits", 2.0)?;
+    if !(1.0..=2.0).contains(&max_edits) {
+        return Err(shape(&format!("{at}.maxEdits"), "must be within bounds [1..2]"));
+    }
+    Ok(Some(Fuzzy {
+        max_edits: max_edits as u8,
+        prefix_length: int("prefixLength", 0.0)?.max(0.0) as usize,
+        max_expansions: int("maxExpansions", 50.0)?.max(0.0) as usize,
+    }))
+}
+
+/// `term` (deprecated): `text` without synonyms, or a pattern with `prefix`, `wildcard` or
+/// `regex` (measured: a constant score of 1, as `wildcard` and `regex` score).
+fn parse_term(index: &MemIndex, d: &Document, path: &str) -> Result<Operator, SearchError> {
+    const OPTIONS: [&str; 7] = ["query", "path", "prefix", "wildcard", "regex", "fuzzy", "score"];
+    if let Some((k, _)) = d.iter().find(|(k, _)| !OPTIONS.contains(k)) {
+        return Err(SearchError(format!("\"{path}\" unrecognized field \"{k}\"")));
+    }
+    let on = |k: &str| matches!(d.get(k), Some(Value::Boolean(true)));
+    let kind = if on("regex") {
+        "regex"
+    } else if on("wildcard") || on("prefix") {
+        "wildcard"
+    } else {
+        let mut text = Document::new();
+        for (k, v) in d.iter().filter(|(k, _)| !["prefix", "wildcard", "regex"].contains(k)) {
+            text.push(k, v.clone());
+        }
+        return parse_text(index, &text, path);
+    };
+    let escape = |q: &str| -> String {
+        let mut out: String = q
+            .chars()
+            .flat_map(|c| if matches!(c, '*' | '?' | '\\') { vec!['\\', c] } else { vec![c] })
+            .collect();
+        out.push('*');
+        out
+    };
+    let prefix = kind == "wildcard" && !on("wildcard");
+    let query = match d.get("query") {
+        Some(Value::String(q)) if prefix => Value::from(escape(q)),
+        Some(Value::Array(items)) if prefix => Value::Array(
+            items
+                .iter()
+                .map(|i| match i {
+                    Value::String(q) => Value::from(escape(q)),
+                    other => other.clone(),
+                })
+                .collect(),
+        ),
+        Some(q) => q.clone(),
+        None => return Err(shape(&format!("{path}.query"), "is required")),
+    };
+    let mut p = Document::new().with("query", query).with("allowAnalyzedField", true);
+    for k in ["path", "score"] {
+        if let Some(v) = d.get(k) {
+            p.push(k, v.clone());
+        }
+    }
+    pattern::parse(index, kind, &p, path)
 }
 
 /// The `query` option of `text` and `phrase`: a string or an array of strings.
@@ -302,6 +390,10 @@ fn parse_score(v: Option<&Value>, at: &str) -> Result<Score, SearchError> {
         }
     };
     match kinds.first() {
+        Some(&"function") => {
+            let f = d.get("function").expect("one of the keys");
+            Ok(Score::Function(function::parse(f, &format!("{at}.function"))?))
+        }
         Some(&"constant") => Ok(Score::Constant(value("constant")?.unwrap_or(1.0))),
         Some(&"boost") => match value("boost")? {
             Some(b) => Ok(Score::Boost(b)),
@@ -386,9 +478,12 @@ fn number_at(doc: Option<&Document>, path: &str) -> f32 {
 
 fn eval(index: &MemIndex, op: &Operator) -> Result<BTreeMap<u32, f32>, SearchError> {
     match op {
-        Operator::Text { query, paths, score } => {
-            let s = index.text_scores(query, paths, boost_of(score))?;
-            Ok(rescored(index, s, score))
+        Operator::Text { query, paths, fuzzy, score } => {
+            let s = match fuzzy {
+                Some(f) => index.fuzzy_scores(query, paths, f, boost_of(score))?,
+                None => index.text_scores(query, paths, boost_of(score))?,
+            };
+            rescored(index, s, score)
         }
         Operator::Exists { path, score } => {
             let found = index
@@ -396,15 +491,27 @@ fn eval(index: &MemIndex, op: &Operator) -> Result<BTreeMap<u32, f32>, SearchErr
                 .filter(|&doc| index.document(doc).is_some_and(|d| value_at(d, path).is_some()))
                 .map(|doc| (doc, boost_of(score)))
                 .collect();
-            Ok(rescored(index, found, score))
+            rescored(index, found, score)
         }
         Operator::Phrase { query, paths, slop, score } => {
             let s = index.phrase_scores(query, paths, *slop, boost_of(score))?;
-            Ok(rescored(index, s, score))
+            rescored(index, s, score)
         }
         Operator::Pattern(p) => {
             let s = p.scores(index, boost_of(p.score()))?;
-            Ok(rescored(index, s, p.score()))
+            rescored(index, s, p.score())
+        }
+        Operator::Span(sp, score) => {
+            let s = sp.scores(index, boost_of(score))?;
+            rescored(index, s, score)
+        }
+        Operator::Knn(k) => {
+            let s = k.scores(index, boost_of(&k.score))?;
+            rescored(index, s, &k.score)
+        }
+        Operator::Values(v) => {
+            let s = values::scores(index, v, boost_of(v.score()));
+            rescored(index, s, v.score())
         }
         Operator::Compound { must, should, filter, must_not, minimum } => {
             eval_compound(index, must, should, filter, must_not, *minimum)
@@ -417,8 +524,12 @@ fn boost_of(score: &Score) -> f32 {
     if let Score::Boost(b) = score { *b } else { 1.0 }
 }
 
-/// The scores after `score`'s constant or field boost.
-fn rescored(index: &MemIndex, mut s: BTreeMap<u32, f32>, score: &Score) -> BTreeMap<u32, f32> {
+/// The scores after `score`'s constant, field boost or function.
+fn rescored(
+    index: &MemIndex,
+    mut s: BTreeMap<u32, f32>,
+    score: &Score,
+) -> Result<BTreeMap<u32, f32>, SearchError> {
     match score {
         Score::Constant(c) => s.values_mut().for_each(|v| *v = *c),
         Score::BoostPath(p) => {
@@ -426,9 +537,15 @@ fn rescored(index: &MemIndex, mut s: BTreeMap<u32, f32>, score: &Score) -> BTree
                 *v *= number_at(index.document(*doc), p);
             }
         }
+        Score::Function(f) => {
+            f.check(index.definition())?;
+            for (doc, v) in s.iter_mut() {
+                *v = f.score(*v, index.document(*doc));
+            }
+        }
         Score::Plain | Score::Boost(_) => {}
     }
-    s
+    Ok(s)
 }
 
 fn eval_compound(
@@ -469,9 +586,15 @@ fn eval_compound(
     Ok(out)
 }
 
+mod function;
+mod knn;
 mod pattern;
+mod span;
+mod values;
 
 #[cfg(test)]
 mod pattern_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod values_tests;

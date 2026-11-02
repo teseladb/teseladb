@@ -12,18 +12,24 @@
 //!   applied the snapshot's index, opens the files and answers each piece with a read. The export
 //!   goes once the last piece was read, or after [`EXPORT_IDLE`] without a request.
 //!
+//! - The segment files of the search indexes over the range (011 FR-013) travel behind the SST
+//!   files, as `teseladb_range::snapshot` bundles them: the source takes them from its node when
+//!   the export starts and holds them in memory with the bundle's last file; the replica hands
+//!   them to its node once the SST files are ingested.
+//!
 //! An answer "not ready", an error or a deadline sends the replica to the next source after
 //! [`FETCH_RETRY`]: a replica that waits for data does not vote, so it never waits for a leader.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use teseladb_hlc::Hlc;
 use teseladb_lsm::{FileRef, Lsm, LsmError};
 use teseladb_multiraft::{Done, MultiRaftCore, OpError, OpId};
 use teseladb_raftlog::{FileId, IoDone, IoOp};
 use teseladb_range::sm::RangeSm;
-use teseladb_range::snapshot::{Assembler, CHUNK_BYTES, Chunk, write_ops};
+use teseladb_range::snapshot::{Assembler, CHUNK_BYTES, Chunk, trailer, unbundle, write_ops};
 use teseladb_types::{Bytes, GroupId, Nanos, NodeId};
 
 use crate::coresm::CoreSm;
@@ -40,6 +46,29 @@ const FILE_BASE: u32 = 0x4000_0000;
 const FILE_SPAN: u32 = 0x3fff_0000;
 /// The newest mark: an export carries everything the source holds.
 const NEWEST: Hlc = Hlc { physical: u64::MAX, logical: u32::MAX };
+
+/// Where a core takes the segment files of the search indexes for a range snapshot and gives
+/// those it received (011 FR-013): the node's search indexes.
+pub trait SegmentExchange: Send + Sync {
+    /// The segment files of the indexes with a segment over `intervals`.
+    fn ship(&self, intervals: &[(Vec<u8>, Vec<u8>)]) -> Vec<Vec<u8>>;
+    /// Takes the segment files of an ingested snapshot.
+    fn receive(&self, files: Vec<Vec<u8>>);
+}
+
+impl SegmentExchange for teseladb_wire::commands::Shared {
+    fn ship(&self, intervals: &[(Vec<u8>, Vec<u8>)]) -> Vec<Vec<u8>> {
+        teseladb_wire::commands::lock(self).search.ship_over(intervals)
+    }
+
+    fn receive(&self, files: Vec<Vec<u8>>) {
+        let mut tables = teseladb_wire::commands::lock(self);
+        // A damaged file is left out: its index is built from the documents.
+        for f in &files {
+            tables.search.restore(f);
+        }
+    }
+}
 
 /// An export: the replica that asked, its range and the snapshot's index. Two ranges of a core
 /// can have snapshots at the same index, so the range is part of it (007).
@@ -79,6 +108,8 @@ struct Sink {
     index: u64,
     /// End of the range in the snapshot.
     end: Vec<u8>,
+    /// The segment files that came with the SST files, for the node once these are ingested.
+    segments: Vec<Vec<u8>>,
     state: SinkState,
 }
 
@@ -96,6 +127,9 @@ struct Source {
     serial: u64,
     group: GroupId,
     state: SourceState,
+    /// The files sent after the SST files, held in memory: the segment files and, once the
+    /// export is written, the bundle's last file.
+    tail: Vec<Vec<u8>>,
     /// Last request.
     touched: Nanos,
 }
@@ -118,6 +152,8 @@ pub struct Transfers {
     stale: Vec<GroupId>,
     ops: VecDeque<(IoOp, Tag)>,
     inflight: VecDeque<Tag>,
+    /// The node's search indexes; without them a snapshot carries no segment files.
+    segments: Option<Arc<dyn SegmentExchange>>,
 }
 
 fn not_ready() -> Bytes {
@@ -142,7 +178,13 @@ impl Transfers {
             stale: Vec::new(),
             ops: VecDeque::new(),
             inflight: VecDeque::new(),
+            segments: None,
         }
+    }
+
+    /// The transfers sending and receiving the segment files of `segments` with the snapshots.
+    pub fn with_segments(self, segments: Arc<dyn SegmentExchange>) -> Transfers {
+        Transfers { segments: Some(segments), ..self }
     }
 
     /// Whether a snapshot is waiting for its data here.
@@ -210,7 +252,8 @@ impl Transfers {
             self.cleanup(&[], &refs);
         }
         let serial = self.serial();
-        self.sink = Some(Sink { serial, group, index, end, state: SinkState::Idle(now) });
+        let state = SinkState::Idle(now);
+        self.sink = Some(Sink { serial, group, index, end, segments: Vec::new(), state });
     }
 
     /// Forgets the snapshots the core no longer waits for (a newer one replaced one, and its
@@ -260,7 +303,8 @@ impl Transfers {
             && let Some((group, (index, end, at))) = self.queued.pop_first()
         {
             let serial = self.serial();
-            self.sink = Some(Sink { serial, group, index, end, state: SinkState::Idle(at) });
+            let state = SinkState::Idle(at);
+            self.sink = Some(Sink { serial, group, index, end, segments: Vec::new(), state });
         }
         let Some(sink) = &self.sink else { return };
         let SinkState::Idle(at) = sink.state else { return };
@@ -339,7 +383,13 @@ impl Transfers {
                 let f = Fetch { group, index, file: after.0, offset: after.1 };
                 *waiting = fetch(core, f, *from, now);
             }
-            Ok(Some(files)) => self.write(core, lsm, &files),
+            Ok(Some(files)) => match unbundle(files) {
+                Some(b) => {
+                    sink.segments = b.segments;
+                    self.write(core, lsm, &b.ssts);
+                }
+                None => sink.state = SinkState::Idle(now + FETCH_RETRY),
+            },
             Err(_) => sink.state = SinkState::Idle(now + FETCH_RETRY),
         }
         true
@@ -416,7 +466,8 @@ impl Transfers {
                     .collect();
                 let state = SourceState::Exporting { pending, files: Vec::new() };
                 let serial = self.serial();
-                let source = Source { serial, group: f.group, state, touched: now };
+                let tail = self.segments.as_ref().map_or_else(Vec::new, |s| s.ship(&intervals));
+                let source = Source { serial, group: f.group, state, tail, touched: now };
                 self.sources.insert(key, source);
             }
             core.answer_forward(from, req, not_ready());
@@ -428,23 +479,31 @@ impl Transfers {
             core.answer_forward(from, req, not_ready());
             return;
         };
-        if files.is_empty() {
-            // An empty range: one empty piece with no files.
+        let Some((id, r)) = files.get(f.file as usize) else {
+            // A file of the tail, from memory.
+            let at = f.file as usize - files.len();
+            let Some(whole) = source.tail.get(at) else {
+                core.answer_forward(from, req, not_ready());
+                return;
+            };
+            let start = (f.offset as usize).min(whole.len());
+            let data = whole[start..whole.len().min(start + CHUNK_BYTES)].to_vec();
+            let (file, size) = (f.file, whole.len() as u64);
+            let total = files.len() + source.tail.len();
+            let last = at + 1 == source.tail.len() && f.offset + data.len() as u64 >= size;
             let c = Chunk {
                 range: f.group,
                 index: f.index,
-                file: 0,
-                files: 0,
-                offset: 0,
-                size: 0,
-                data: Vec::new(),
+                file,
+                files: total as u32,
+                offset: f.offset,
+                size,
+                data,
             };
             core.answer_forward(from, req, Bytes::from_vec(FetchReply::Chunk(c).encode()));
-            self.drop_source(key);
-            return;
-        }
-        let Some((id, r)) = files.get(f.file as usize) else {
-            core.answer_forward(from, req, not_ready());
+            if last {
+                self.drop_source(key);
+            }
             return;
         };
         let len = r.size.saturating_sub(f.offset).min(CHUNK_BYTES as u64) as u32;
@@ -501,7 +560,10 @@ impl Transfers {
             break;
         }
         let Some((key, files)) = finished else { return };
-        let serial = self.sources.get(&key).expect("found above").serial;
+        let source = self.sources.get_mut(&key).expect("found above");
+        let segments = source.tail.len();
+        source.tail.push(trailer(files.len(), segments));
+        let serial = source.serial;
         // The files are opened to be read piece by piece; an empty range has none.
         let ids: Vec<(FileId, FileRef)> = files.into_iter().map(|f| (self.file_id(), f)).collect();
         for (id, f) in &ids {
@@ -538,8 +600,12 @@ impl Transfers {
             Ok(()) => {
                 // The LSM moved the files in: their directory is empty.
                 let refs = std::mem::take(refs);
+                let segments = std::mem::take(&mut sink.segments);
                 self.remove_dirs(&refs);
                 self.sink = None;
+                if let Some(exchange) = &self.segments {
+                    exchange.receive(segments);
+                }
                 self.ingested += 1;
                 return Some(group);
             }
@@ -651,30 +717,33 @@ impl Transfers {
         data: Option<Vec<u8>>,
     ) {
         // The export may have gone (and another started) while the piece was read.
-        let source =
-            self.sources.get(&key).filter(|s| s.serial == serial).map(|s| (s.group, &s.state));
-        let (group, files, data) = match (source, data) {
-            (Some((group, SourceState::Ready(files))), Some(data)) => (group, files, data),
+        let source = self
+            .sources
+            .get(&key)
+            .filter(|s| s.serial == serial)
+            .map(|s| (s.group, &s.state, s.tail.len()));
+        let (group, files, tail, data) = match (source, data) {
+            (Some((group, SourceState::Ready(files), tail)), Some(data)) => {
+                (group, files, tail, data)
+            }
             _ => {
                 core.answer_forward(from, req, not_ready());
                 return;
             }
         };
+        // The tail always follows (at least the bundle's last file): a file of the disk is never
+        // the last piece.
         let size = files[file as usize].1.size;
-        let last = file as usize + 1 == files.len() && offset + data.len() as u64 >= size;
         let c = Chunk {
             range: group,
             index: key.2,
             file,
-            files: files.len() as u32,
+            files: (files.len() + tail) as u32,
             offset,
             size,
             data,
         };
         core.answer_forward(from, req, Bytes::from_vec(FetchReply::Chunk(c).encode()));
-        if last {
-            self.drop_source(key);
-        }
     }
 }
 
@@ -979,6 +1048,95 @@ mod tests {
         assert!(dst.left_dirs().is_empty(), "{:?}", dst.left_dirs());
     }
 
+    /// Intervals of a range.
+    type Intervals = Vec<(Vec<u8>, Vec<u8>)>;
+
+    /// The segment files a node gives and takes, as its search indexes would.
+    #[derive(Default)]
+    struct Segs {
+        gives: Vec<Vec<u8>>,
+        asked: std::sync::Mutex<Vec<Intervals>>,
+        took: std::sync::Mutex<Vec<Vec<u8>>>,
+    }
+
+    impl SegmentExchange for Segs {
+        fn ship(&self, intervals: &[(Vec<u8>, Vec<u8>)]) -> Vec<Vec<u8>> {
+            self.asked.lock().unwrap().push(intervals.to_vec());
+            self.gives.clone()
+        }
+        fn receive(&self, files: Vec<Vec<u8>>) {
+            self.took.lock().unwrap().extend(files);
+        }
+    }
+
+    fn with_segs(side: &mut Side, segs: &Arc<Segs>) {
+        let t = std::mem::replace(&mut side.t, Transfers::new(NodeId(0), PathBuf::new(), 0));
+        side.t = t.with_segments(segs.clone());
+    }
+
+    #[test]
+    fn the_segment_files_travel_behind_the_sst_files() {
+        let mut src = side(1, 300);
+        let mut dst = side(2, 0);
+        let gives = vec![vec![5u8; CHUNK_BYTES + 3], Vec::new(), vec![6]];
+        let theirs = Arc::new(Segs { gives: gives.clone(), ..Segs::default() });
+        let ours = Arc::new(Segs::default());
+        with_segs(&mut src, &theirs);
+        with_segs(&mut dst, &ours);
+        transfer(&mut src, &mut dst, 300, 30);
+        assert_eq!(dst.ready, [G]);
+        assert!(dst.has(&key(1)) && dst.has(&key(300)));
+        assert_eq!(*ours.took.lock().unwrap(), gives, "handed over once ingested");
+        let asked = theirs.asked.lock().unwrap().clone();
+        assert_eq!(asked.len(), 1);
+        assert!(asked[0].contains(&(DATA_START.to_vec(), DATA_END.to_vec())), "{asked:?}");
+        assert_eq!(src.t.exports(), 0, "the last piece of the tail ends the export");
+        assert!(src.left_dirs().is_empty() && dst.left_dirs().is_empty());
+        // A piece of the tail past its files is not there.
+        let mut src = side(1, 3);
+        with_segs(&mut src, &theirs);
+        let lsm = src.lsm.clone();
+        for file in [0, 0, 9] {
+            let f = Fetch { group: G, index: 3, file, offset: 0 };
+            src.t.on_fetch(&mut src.core, &mut lsm.borrow_mut(), (NodeId(2), 7), f, Nanos::ZERO);
+            src.io(Nanos::ZERO);
+        }
+        let last = src.core.drain_actions().send.into_iter().rev().find_map(|(_, f)| match f {
+            PeerFrame::ForwardResp { body, .. } => FetchReply::decode(&body).ok(),
+            _ => None,
+        });
+        assert_eq!(last, Some(FetchReply::NotReady));
+    }
+
+    #[test]
+    fn the_node_search_indexes_give_and_take_segment_files() {
+        use teseladb_wire::commands::search_ops::Shipped;
+        let shared = teseladb_wire::commands::Shared::default();
+        let all = [(Vec::new(), Vec::new())];
+        assert!(SegmentExchange::ship(&shared, &all).is_empty(), "nothing built");
+        let id = [4u8; 12];
+        let file = Shipped { collection: 1, version: 1, files: Vec::new() }.encode(&id);
+        SegmentExchange::receive(&shared, vec![b"damaged".to_vec(), file]);
+        // Received files wait for a query to serve them; what was built is shipped.
+        assert!(SegmentExchange::ship(&shared, &all).is_empty());
+    }
+
+    #[test]
+    fn files_that_are_not_a_bundle_start_the_transfer_again() {
+        let mut dst = side(2, 0);
+        let now = Nanos::ZERO;
+        dst.t.want(G, 3, Vec::new(), now);
+        dst.t.tick(&mut dst.core, &[NodeId(1)], now);
+        let SinkState::Fetching { op, .. } = dst.t.sink.as_ref().unwrap().state else { panic!() };
+        let whole =
+            Chunk { range: G, index: 3, file: 0, files: 1, offset: 0, size: 1, data: vec![1] };
+        let body = Bytes::from_vec(FetchReply::Chunk(whole).encode());
+        let lsm = dst.lsm.clone();
+        let r = Ok(Done::Forwarded(body));
+        assert!(dst.t.on_done(&mut dst.core, &mut lsm.borrow_mut(), op, &r, now));
+        assert!(matches!(dst.t.sink.as_ref().unwrap().state, SinkState::Idle(_)));
+    }
+
     #[test]
     fn a_replica_with_an_old_copy_clears_it_before_ingesting() {
         let mut src = side(1, 40);
@@ -1085,8 +1243,8 @@ mod tests {
         let desc = GroupDesc { group: other, voters: vec![NodeId(1), NodeId(2)], learners: vec![] };
         src.core.create_group(desc, CoreSm::Range(sm)).unwrap();
         src.io(Nanos::ZERO);
-        let answer = |src: &mut Side, group: GroupId| {
-            let f = Fetch { group, index: 1500, file: 0, offset: 0 };
+        let answer = |src: &mut Side, group: GroupId, file: u32| {
+            let f = Fetch { group, index: 1500, file, offset: 0 };
             let lsm = src.lsm.clone();
             src.t.on_fetch(&mut src.core, &mut lsm.borrow_mut(), (NodeId(2), 7), f, Nanos::ZERO);
             src.io(Nanos::ZERO);
@@ -1096,14 +1254,17 @@ mod tests {
             })
         };
         // The first request starts the export of `G` at 1500, which is then ready.
-        assert_eq!(answer(&mut src, G), Some(FetchReply::NotReady));
-        let second = answer(&mut src, G);
+        assert_eq!(answer(&mut src, G, 0), Some(FetchReply::NotReady));
+        let second = answer(&mut src, G, 0);
         assert!(matches!(&second, Some(FetchReply::Chunk(c)) if c.range == G), "{second:?}");
         // The other range at the same index gets an export of its own.
-        assert_eq!(answer(&mut src, other), Some(FetchReply::NotReady));
-        let third = answer(&mut src, other);
+        assert_eq!(answer(&mut src, other, 0), Some(FetchReply::NotReady));
+        let third = answer(&mut src, other, 0);
         assert!(matches!(&third, Some(FetchReply::Chunk(c)) if c.range == other), "{third:?}");
-        assert_eq!(src.t.exports(), 1, "the other range's single piece went, `G`'s export stays");
+        // Its SST file and the bundle's last file: that one ends the export.
+        let last = answer(&mut src, other, 1);
+        assert!(matches!(&last, Some(FetchReply::Chunk(c)) if c.files == 2), "{last:?}");
+        assert_eq!(src.t.exports(), 1, "the other range's last piece went, `G`'s export stays");
     }
 
     #[test]

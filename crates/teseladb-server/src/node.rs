@@ -393,6 +393,9 @@ struct CoreSpec {
     tick: Duration,
     /// The node's cursors and sessions (core 0, for the kills of other nodes).
     sessions: Option<Arc<Shared>>,
+    /// The node's search indexes, whose segment files travel with the snapshots of the core's
+    /// ranges (011 FR-013).
+    search: Arc<Shared>,
     /// Where core 0 publishes the node's authorization lease (013).
     auth: Option<Arc<AuthGate>>,
     /// The `root` user core 0 creates while the cluster has none (013).
@@ -416,7 +419,8 @@ fn open_data<D: Disk>(spec: &CoreSpec, disk: &mut D) -> Result<DataCore, NodeErr
     let cfg = LsmConfig { dir: dir.join("lsm"), ..spec.lsm.clone() };
     let (lsm, _) = Lsm::recover(&cfg, disk).map_err(NodeError::Lsm)?;
     let lsm = Rc::new(RefCell::new(lsm));
-    let transfers = Transfers::new(spec.node_id, transfer_dir(&dir), random_u64());
+    let transfers = Transfers::new(spec.node_id, transfer_dir(&dir), random_u64())
+        .with_segments(spec.search.clone());
     let clock = spec.clock.clone();
     let data = DataCore::new(spec.node_id, spec.core, lsm, clock, transfers, spec.split_bytes);
     let data = data.with_backups(dir.join("backup"), random_u64());
@@ -747,8 +751,17 @@ impl<D: Disk + Send + 'static> Node<D> {
             cfg.client.as_ref().map_or_else(NodeSessions::default, ClientConfig::sessions);
         if let Some(dir) = &cfg.data_dir {
             // The segments of the search indexes, one file per index (011 FR-012).
-            tables.search.open_dir(dir.join("search"))?;
+            crate::search_segments::open(dir, &mut tables.search)?;
+            // What aggregation stages write past their memory (010 FR-010).
+            let disk = teseladb_io::FileDisk::open(dir.join(crate::spill::SPILL_DIR))?;
+            let spill =
+                crate::spill::DiskSpill::open(disk).map_err(|e| io::Error::other(e.message))?;
+            tables.spill.store = Some(Arc::new(spill));
         }
+        // A stage holds at most the core's part for aggregations (D-105).
+        tables.spill.stage_bytes = memory.map(|m| {
+            usize::try_from(m.part(crate::memory::Component::Aggregations)).unwrap_or(usize::MAX)
+        });
         let sessions: Arc<Shared> = Arc::new(Mutex::new(tables));
         // Created before the cores' runtimes start: see `AuthGate`.
         let auth = Arc::new(AuthGate::default());
@@ -787,6 +800,7 @@ impl<D: Disk + Send + 'static> Node<D> {
                 hello: Hello { core: k, ..hello.clone() },
                 tick: cfg.tick,
                 sessions: (k == 0).then(|| sessions.clone()),
+                search: sessions.clone(),
                 auth: (k == 0).then(|| auth.clone()),
                 root_user: if k == 0 { cfg.root_user.clone() } else { None },
                 clustertime_keys: if k == 0 { keys.clone() } else { None },
@@ -988,12 +1002,12 @@ impl<D: Disk + Send + 'static> Node<D> {
         rx.recv_timeout(timeout).ok()
     }
 
-    /// Waits until Group 0 has the cluster created and this node's current addresses (`false` if
-    /// `timeout` passes first).
+    /// Waits until Group 0 has the cluster created, this node's current addresses and the `root`
+    /// user this node creates, if any ([`Group0View::ready`]; `false` if `timeout` passes first).
     pub fn wait_ready(&self, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
-            if self.view(timeout).is_some_and(|v| v.bootstrapped && v.addrs_current) {
+            if self.view(timeout).is_some_and(|v| v.ready()) {
                 return true;
             }
             thread::sleep(Duration::from_millis(5));

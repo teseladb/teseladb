@@ -9,3 +9,7 @@ target/
 /tests/compat/out/
 /tests/compat/.venv/
 /tests/compat/runners/*/node_modules/
+
+# Python bytecode
+__pycache__/
+*.pyc

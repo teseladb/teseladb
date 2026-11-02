@@ -250,3 +250,9 @@ fn catalog_events_have_the_fields_of_refrouter_in_its_order() {
     let inv = ChangeEvent::catalog(token(EventKind::Invalidate), ns);
     assert_eq!(keys(&inv.to_document(true)), ["_id", "operationType", "clusterTime", "wallTime"]);
 }
+
+#[test]
+fn an_insert_without_its_document_names_none() {
+    let d = event(EventKind::Insert).to_document(false);
+    assert!(!keys(&d).contains(&"fullDocument"), "{:?}", keys(&d));
+}

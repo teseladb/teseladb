@@ -1302,6 +1302,18 @@ impl Backend for TxnBackend<'_> {
         self.inner.note_plan(plan);
     }
 
+    fn op_reads(&mut self) -> crate::ops::OpReads {
+        self.inner.op_reads()
+    }
+
+    fn op_client(&mut self) -> Option<Document> {
+        self.inner.op_client()
+    }
+
+    fn thread_cpu_nanos(&mut self) -> Option<u64> {
+        self.inner.thread_cpu_nanos()
+    }
+
     fn end_operation(&mut self) {
         self.inner.end_operation();
     }

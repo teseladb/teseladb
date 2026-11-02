@@ -104,6 +104,12 @@ fn a_write_keeps_a_meta_only_for_the_documents_it_says_something_of() {
     // A replacement says so, even as the first document of a write.
     let rep = DocWrite { replace: true, ..write(b"\x01a") };
     assert_eq!(history(&[rep], None), vec![(meta_key(b"\x01a", 0), m(None, 0, None, true))]);
+    // And an update its description.
+    let upd = DocWrite { update: Some(desc()), ..write(b"\x01a") };
+    assert_eq!(
+        history(&[upd], None),
+        vec![(meta_key(b"\x01a", 0), m(None, 0, Some(desc()), false))]
+    );
 }
 
 /// The `lsid` of an event (measured on a `refrouter` 9.0.4 on 01-11): `{id: UUID, uid: BinData(0)}`.

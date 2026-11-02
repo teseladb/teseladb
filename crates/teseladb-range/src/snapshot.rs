@@ -122,13 +122,19 @@ pub struct Bundle {
 /// The files [`split`] sends for `b`: the SST files, the segment files and a last file with
 /// [`BUNDLE_MAGIC`] and the number of each.
 pub fn bundle(b: &Bundle) -> Vec<Vec<u8>> {
-    let mut last = BUNDLE_MAGIC.to_vec();
-    last.extend_from_slice(&(b.ssts.len() as u32).to_le_bytes());
-    last.extend_from_slice(&(b.segments.len() as u32).to_le_bytes());
     let mut files = b.ssts.clone();
     files.extend(b.segments.iter().cloned());
-    files.push(last);
+    files.push(trailer(b.ssts.len(), b.segments.len()));
     files
+}
+
+/// The last file of a bundle of `ssts` SST files and `segments` segment files, for a sender
+/// that reads the SST files from its disk piece by piece instead of holding them.
+pub fn trailer(ssts: usize, segments: usize) -> Vec<u8> {
+    let mut last = BUNDLE_MAGIC.to_vec();
+    last.extend_from_slice(&(ssts as u32).to_le_bytes());
+    last.extend_from_slice(&(segments as u32).to_le_bytes());
+    last
 }
 
 /// The bundle that the files [`Assembler::add`] rebuilt hold; `None` when they are not one.

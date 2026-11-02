@@ -812,6 +812,7 @@ fn server_parameters_are_read_and_set_as_a_refrouter_does() {
     assert_eq!(r.get(hash), Some(&Value::Boolean(false)), "{r:?}");
     let r = run(&mut m, &mut conn, "admin", Document::new().with("getParameter", "*"));
     let names: Vec<&str> = r.iter().map(|(k, _)| k).collect();
+    // A `refrouter` 9.0.4 lists the `internalQuery*` ones too (measured on 02-11-2026).
     // `auditAuthorizationSuccess` is RefDb Enterprise's, the OCSP ones, `authSchemaVersion` and
     // `maxConcurrentMultiDocumentTransactions` a refnode's (measured on 9.0.4; 013 FR-016, FR-030,
     // FR-031; 008 FR-020).
@@ -825,7 +826,10 @@ fn server_parameters_are_read_and_set_as_a_refrouter_does() {
             "cursorTimeoutMillis",
             "enableTestCommands",
             "internalQueryMaxMemoryUsageBytesPerOperation",
+            "internalQueryMaxSingleExpressionMemoryUsageBytes",
             "internalQueryPlannerEnableHashIntersection",
+            "internalQueryStatsRateLimit",
+            "internalQueryStatsSampleRate",
             "localLogicalSessionTimeoutMinutes",
             "maxConcurrentMultiDocumentTransactions",
             "ocspEnabled",

@@ -678,14 +678,50 @@ impl Lookup {
         Ok(Lookup { from, local, foreign, as_path, lets, pipeline, joined_error })
     }
 
+    /// The filter of the foreign documents an equality join of `docs` can reach (010 FR-009,
+    /// T023): those whose field is one of the local values, read through the foreign
+    /// collection's indexes. `None` where it would not be a superset of the join: a local value
+    /// that is missing, `null`, `undefined`, a regular expression or an empty array, or a
+    /// collation other than the binary one.
+    fn wanted(&self, docs: &[Document], env: &dyn Env) -> Option<Document> {
+        let (Some(_), Some(local), Some(foreign)) = (&self.from, &self.local, &self.foreign) else {
+            return None;
+        };
+        if env.collation().get().is_some() {
+            return None;
+        }
+        let segs: Vec<&str> = local.split('.').collect();
+        let mut values: Vec<Value> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for d in docs {
+            let mut own = Vec::new();
+            collect_local(&Value::Document(d.clone()), &segs, &mut own);
+            let unreachable = own.is_empty()
+                || own
+                    .iter()
+                    .any(|v| matches!(v, Value::Null | Value::Undefined | Value::Regex { .. }));
+            if unreachable {
+                return None;
+            }
+            for v in own {
+                if seen.insert(super::group_key(&v, None)) {
+                    values.push(v);
+                }
+            }
+        }
+        let within = Document::new().with("$in", Value::Array(values));
+        Some(Document::new().with(foreign.as_str(), within))
+    }
+
     /// Each document with the documents it joins.
     pub fn run(&self, docs: Vec<Document>, env: &dyn Env) -> Result<Vec<Document>, MqlError> {
         if let Some(e) = self.joined_error.as_ref().filter(|_| !docs.is_empty()) {
             return Err(e.clone());
         }
-        let foreign_docs = match &self.from {
-            Some(f) => env.collection(f)?,
-            None => Vec::new(),
+        let foreign_docs = match (&self.from, self.wanted(&docs, env)) {
+            (Some(f), Some(filter)) => env.collection_matching(f, &filter)?,
+            (Some(f), None) => env.collection(f)?,
+            (None, _) => Vec::new(),
         };
         let segs: Vec<&str> = self.as_path.iter().map(String::as_str).collect();
         // The foreign documents by the values of their field, read once for every document.

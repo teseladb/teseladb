@@ -312,6 +312,17 @@ mod tests {
         // Type 0 with a key is no high-water mark, and no event either.
         let keyed = format!("{data}AB");
         assert_eq!(Position::decode(&keyed), Err(TokenError::Kind(0)));
+        // Nor with a transaction, a position or a fragment number.
+        let plain = EventKey { ts, txn: 0, op: 0, key: Vec::new() };
+        for (txn, op, fragment) in [(1, 0, None), (0, 1, None), (0, 0, Some(1))] {
+            let e = EventKey { txn, op, ..plain.clone() };
+            let data = hex(&raw_fragment(&e, HIGH_WATER, fragment));
+            assert_eq!(
+                Position::decode(&data),
+                Err(TokenError::Kind(0)),
+                "{txn} {op} {fragment:?}"
+            );
+        }
         assert_eq!(Position::decode("zz"), Err(TokenError::NotHex));
     }
 

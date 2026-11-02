@@ -88,17 +88,35 @@ while IFS= read -r exe; do objects+=(-object "$exe"); done <"$OUT/bins.txt"
 IGNORE='(/\.cargo/|/rustc/|/tests/|/examples/|/target/)'
 "$BIN/llvm-cov" show "${objects[@]}" -instr-profile="$OUT/merged.profdata" \
   -ignore-filename-regex="$IGNORE" -show-branches=count -show-line-counts-or-regions > "$OUT/show.txt"
-"$BIN/llvm-cov" export "${objects[@]}" -instr-profile="$OUT/merged.profdata" \
-  -ignore-filename-regex="$IGNORE" > "$OUT/export.json"
+# One export per binary, merged below: given several binaries, llvm-cov keeps only the first
+# record of each function, and a binary that links a function without calling it carries a record
+# with no counts that hides the counts of the binary that ran it («functions have mismatched
+# data»). Only the sources of the measured crates are exported.
+sources=()
+for c in "${crates[@]}"; do
+  for d in crates/"$c"/src tools/"$c"/src; do [[ -d $d ]] && sources+=("$(cd "$d" && pwd -P)"); done
+done
+mkdir -p "$OUT/export"
+n=0
+for exe in "${objects[@]}"; do
+  [[ $exe == -object ]] && continue
+  n=$((n + 1))
+  "$BIN/llvm-cov" export "$exe" -instr-profile="$OUT/merged.profdata" \
+    -ignore-filename-regex="$IGNORE" ${sources[@]+"${sources[@]}"} > "$OUT/export/$n.json" 2>/dev/null
+done
 
 # llvm-cov writes real paths: the root without symbolic links makes them relative.
 if python3 - "$OUT" "$(pwd -P)" "${TESELADB_COV_MIN:-}" "${crates[@]}" <<'PY'
 import json
+import os
 import re
 import sys
 
 out, root, minimum, crates = sys.argv[1], sys.argv[2] + "/", sys.argv[3], sys.argv[4:]
-data = json.load(open(f"{out}/export.json"))["data"][0]
+exports = [
+    json.load(open(os.path.join(f"{out}/export", name)))["data"][0]
+    for name in sorted(os.listdir(f"{out}/export"))
+]
 crate_of_path = re.compile(r"(?:crates|tools)/([^/]+)/src/")
 
 
@@ -142,33 +160,40 @@ def line_counts(segments):
     return ran
 
 
-stats = {c: {"lines": [0, 0], "functions": {}, "branches": {}} for c in crates}
-for f in data["files"]:
-    c = crate_of(f["filename"])
-    if c is None:
-        continue
-    ran = line_counts(f["segments"])
-    stats[c]["lines"][0] += sum(ran.values())
-    stats[c]["lines"][1] += len(ran)
-    # A function compiled into two binaries with different hashes (the lib in its unit tests and as
-    # a dependency) shows up twice and llvm-cov does not merge its branches: a side counts as taken
-    # if it is taken in either of them.
-    seen = stats[c]["branches"]
-    for b in f["branches"]:
-        key = (relative(f["filename"]), b[0], b[1])
-        taken, not_taken = seen.get(key, (False, False))
-        seen[key] = (taken or b[4] > 0, not_taken or b[5] > 0)
+stats = {c: {"lines": {}, "functions": {}, "branches": {}} for c in crates}
+for data in exports:
+    for f in data["files"]:
+        c = crate_of(f["filename"])
+        if c is None:
+            continue
+        # A line runs if it ran in any binary.
+        lines = stats[c]["lines"].setdefault(relative(f["filename"]), {})
+        for line, ran in line_counts(f["segments"]).items():
+            lines[line] = lines.get(line, False) or ran
+        # A function compiled into two binaries with different hashes (the lib in its unit tests
+        # and as a dependency) shows up twice and llvm-cov does not merge its branches: a side
+        # counts as taken if it is taken in either of them.
+        seen = stats[c]["branches"]
+        for b in f["branches"]:
+            key = (relative(f["filename"]), b[0], b[1])
+            taken, not_taken = seen.get(key, (False, False))
+            seen[key] = (taken or b[4] > 0, not_taken or b[5] > 0)
 
-# Functions by the position of their first region, merged the same way.
-for fn in data["functions"]:
-    if not fn["regions"]:
-        continue
-    c = crate_of(fn["filenames"][0])
-    if c is None:
-        continue
-    key = (relative(fn["filenames"][0]), fn["regions"][0][0], fn["regions"][0][1])
-    funcs = stats[c]["functions"]
-    funcs[key] = funcs.get(key, False) or fn["count"] > 0
+    # Functions by the position of their first region, merged the same way.
+    for fn in data["functions"]:
+        if not fn["regions"]:
+            continue
+        c = crate_of(fn["filenames"][0])
+        if c is None:
+            continue
+        key = (relative(fn["filenames"][0]), fn["regions"][0][0], fn["regions"][0][1])
+        funcs = stats[c]["functions"]
+        funcs[key] = funcs.get(key, False) or fn["count"] > 0
+for s in stats.values():
+    s["lines"] = [
+        sum(sum(ran.values()) for ran in s["lines"].values()),
+        sum(len(ran) for ran in s["lines"].values()),
+    ]
 
 
 def percent(covered, count):
