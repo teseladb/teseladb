@@ -47,6 +47,26 @@ fn vector_search_runs_against_a_local_cluster() {
     }
 }
 
+/// The `$search` scenarios (011 T041) on a few hundred documents: the scenarios of SC-003 and
+/// SC-004 with a million run the same code.
+#[test]
+fn search_scenarios_run_against_a_local_cluster() {
+    let short = ["--duration", "300ms", "--warmup", "0ms", "--format", "json"];
+    for scenario in ["search-term", "search-multi", "search-phrase", "search-fuzzy", "vector"] {
+        let records = if scenario == "vector" { "100" } else { "300" };
+        let out = metrics(&bench(
+            &[&["--scenario", scenario, "--records", records][..], &short[..]].concat(),
+        ));
+        assert!(out.contains("query.p50"), "{scenario}: {out}");
+    }
+    let out = metrics(&bench(
+        &[&["--scenario", "search-visibility", "--records", "100"][..], &short[..]].concat(),
+    ));
+    for name in ["visible.p99", "visible.next"] {
+        assert!(out.contains(name), "{name}: {out}");
+    }
+}
+
 #[test]
 fn a_target_that_is_not_there_or_not_refdb_is_an_error() {
     for (target, want) in [

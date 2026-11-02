@@ -89,33 +89,6 @@ fn search(c: &mut Client, value: String) -> Result<(), String> {
     .map(drop)
 }
 
-/// Creates the `default` search index of the collection and waits until it is `READY`.
-fn search_index(c: &mut Client) -> Result<(), String> {
-    let definition =
-        doc(vec![("mappings", Value::Document(doc(vec![("dynamic", Value::Boolean(true))])))]);
-    let index = doc(vec![
-        ("name", Value::String("default".into())),
-        ("definition", Value::Document(definition)),
-    ]);
-    c.command(
-        DB,
-        doc(vec![
-            ("createSearchIndexes", Value::String(COLLECTION.into())),
-            ("indexes", Value::Array(vec![Value::Document(index)])),
-        ]),
-    )?;
-    let start = std::time::Instant::now();
-    while start.elapsed() < INDEX_READY {
-        let list = doc(vec![("listSearchIndexes", Value::String(COLLECTION.into()))]);
-        let reply = c.command(DB, list)?;
-        if reply.windows(5).any(|w| w == b"READY") {
-            return Ok(());
-        }
-        std::thread::sleep(std::time::Duration::from_millis(250));
-    }
-    Err("the search index of the reference scenario was not READY in time".to_owned())
-}
-
 /// The index of `v`.
 fn create_index(c: &mut Client) -> Result<(), String> {
     let index = doc(vec![
@@ -158,7 +131,7 @@ pub fn run(args: &Args) -> Result<Report, String> {
             ("documents", Value::Array(vec![Value::Document(probe)])),
         ]),
     )?;
-    search_index(&mut setup)?;
+    super::search::default_index(&mut setup, DB, COLLECTION, INDEX_READY)?;
     let next = AtomicU64::new(0);
     let load = Load {
         warmup: args.warmup,

@@ -7,7 +7,7 @@
 
 use std::time::{Duration, Instant};
 
-use teseladb_bson::{Document, RawDoc, RawValue, Value};
+use teseladb_bson::{Document, Value};
 use teseladb_types::Histogram;
 
 use super::ycsb_gen::Rng;
@@ -103,36 +103,7 @@ fn index(c: &mut Client) -> Result<(), String> {
         ("indexes", Value::Array(vec![Value::Document(spec)])),
     ]);
     crate::client::check(&c.command(DB, create)?)?;
-    let start = Instant::now();
-    while start.elapsed() < INDEX_READY {
-        let list = doc(vec![("listSearchIndexes", Value::String(COLLECTION.into()))]);
-        if c.command(DB, list)?.windows(5).any(|w| w == b"READY") {
-            return Ok(());
-        }
-        std::thread::sleep(Duration::from_millis(250));
-    }
-    Err("the vector index was not READY in time".to_owned())
-}
-
-/// The `_id`s a `$vectorSearch` reply holds, in its order.
-fn ids(reply: &[u8]) -> Result<Vec<i64>, String> {
-    let d = RawDoc::from_bytes(reply).map_err(|e| format!("{e:?}"))?;
-    let Some(RawValue::Document(cursor)) = d.get("cursor") else {
-        return Err(format!("a reply without a cursor: {:?}", Document::from(d)));
-    };
-    let Some(RawValue::Array(batch)) = cursor.get("firstBatch") else {
-        return Err("a cursor without a batch".into());
-    };
-    Ok(batch
-        .iter()
-        .filter_map(|e| match e {
-            RawValue::Document(e) => match e.get("_id") {
-                Some(RawValue::Int64(n)) => Some(n),
-                _ => None,
-            },
-            _ => None,
-        })
-        .collect())
+    super::search::wait_ready(c, DB, COLLECTION, INDEX_READY)
 }
 
 fn query(c: &mut Client, q: &[f64]) -> Result<Vec<i64>, String> {
@@ -155,7 +126,7 @@ fn query(c: &mut Client, q: &[f64]) -> Result<Vec<i64>, String> {
         ),
         ("cursor", Value::Document(Document::new())),
     ]);
-    ids(&c.command(DB, aggregate)?)
+    super::search::ids(&c.command(DB, aggregate)?)
 }
 
 /// Runs the scenario.
