@@ -181,6 +181,10 @@ fn equals_matches_the_indexed_values_of_the_path() {
     assert_eq!(e("o", oid(1)), Ok(ones(&[1])));
     assert_eq!(e("u", uuid()), Ok(ones(&[1])));
     assert_eq!(e("s", 5.into()), Ok(ones(&[])));
+    // A path that stops at a document, or goes past a value, holds nothing.
+    assert_eq!(e("nested", 5.into()), Ok(ones(&[])));
+    assert_eq!(e("nul.x", Value::Null), Ok(ones(&[])));
+    assert_eq!(e("n.x", 5.into()), Ok(ones(&[])));
     let with = |score: Document| {
         let mut d = Document::new().with("path", "n").with("value", 5);
         d.push("score", score);
@@ -945,6 +949,18 @@ fn span_queries_score_as_reflib_spans() {
     assert_eq!(s("contains", inner), Ok(gato.clone()));
     let none = Document::new().with("little", sterm("perro")).with("big", sterm("gato"));
     assert_eq!(s("contains", none), Ok(vec![]));
+    let apart = Document::new().with("little", sterm("negro")).with("big", sterm("gato"));
+    assert_eq!(s("contains", apart), Ok(vec![]));
+    let far = Document::new()
+        .with("clauses", arr(vec![sterm("gato"), sterm("come")]))
+        .with("inOrder", true);
+    assert_eq!(s("near", far), Ok(vec![]));
+    let far = Document::new()
+        .with("clauses", arr(vec![sterm("gato"), sterm("come")]))
+        .with("inOrder", true)
+        .with("slop", 1);
+    assert_eq!(s("near", far).map(|h| h.len()), Ok(1));
+    assert_eq!(s("near", Document::new().with("clauses", arr(vec![]))), Ok(vec![]));
     assert_eq!(
         s("term", Document::new().with("path", "t").with("query", "gato negro")),
         Ok(vec![])
@@ -1074,6 +1090,14 @@ fn query_string_joins_clauses_as_reflib_does() {
     assert_eq!(q("a:gato"), Ok(vec![(2, 0.3701242208480835)]));
     assert_eq!(q("NOT gato"), Ok(vec![]));
     assert_eq!(q("*"), Ok(ones(&[1, 2, 3])));
+    // Single `&` and `|` are terms; a boost may have decimals; escapes.
+    assert_eq!(q("gato & |"), Ok(gato.clone()));
+    assert_eq!(q("gato^1.5").map(|h| h.len()), Ok(2));
+    assert_eq!(q("\"ga\\\"to\""), Ok(vec![]));
+    assert_eq!(q("\\gato"), Ok(gato.clone()));
+    assert_eq!(q("gato\\"), Ok(gato.clone()));
+    assert_eq!(q("[a  TO  h ]"), Ok(ones(&[1, 3])));
+    assert_eq!(q("-negro AND gato"), Ok(vec![(3, 0.27881568670272827)]));
     let boost = Document::new().with("boost", Document::new().with("value", 2));
     let spec = op(
         "queryString",
@@ -1158,6 +1182,10 @@ fn query_string_errors_are_the_parser_messages() {
     assert!(found(&idx, &qs("[a b c]")).unwrap_err().contains("<RANGE_GOOP>"));
     assert!(found(&idx, &qs("")).unwrap_err().contains("column 0"));
     assert!(found(&idx, &qs("gato OR")).unwrap_err().contains("column 7"));
+    assert!(found(&idx, &qs("[a]")).unwrap_err().contains("<RANGE_GOOP>"));
+    assert!(found(&idx, &qs("()")).unwrap_err().contains("\")\""));
+    assert!(found(&idx, &qs("\"ab\\")).unwrap_err().contains("Lexical error"));
+    assert!(found(&idx, &qs("\\")).is_ok());
 }
 
 fn mlt(like: impl Into<Value>) -> Document {
@@ -1492,7 +1520,11 @@ fn autocomplete_grams_follow_the_field_options() {
         Document::new().with("a", arr(vec!["cancion".into(), 5.into()])),
         Document::new().with("a", ""),
     ];
+    let mut docs = docs;
+    docs.push(Document::new().with("a", "¡Hola!"));
+    docs.push(Document::new().with("b", "sin a"));
     let idx = build(def, docs);
+    assert_eq!(found(&idx, &autocomplete("hol", Document::new())).map(|h| h.len()), Ok(1));
     let hits = |q: &str| {
         found(&idx, &autocomplete(q, Document::new()))
             .map(|h| h.iter().map(|x| x.0).collect::<Vec<_>>())
@@ -1564,4 +1596,42 @@ fn has_root_inside_embedded_document_scores_the_root_plus_one() {
     ]);
     let both = op("compound", Document::new().with("must", must));
     assert_eq!(found(&idx, &embedded(both, None)), Ok(vec![(1, 1.6619503498077393)]));
+}
+
+#[test]
+fn fuzzy_and_prefix_edges() {
+    let idx = m3();
+    let fuzzy = |path: &str, q: &str| {
+        found(
+            &idx,
+            &op(
+                "text",
+                Document::new().with("path", path).with("query", q).with("fuzzy", Document::new()),
+            ),
+        )
+    };
+    // Several terms within two edits: the closest weigh most.
+    let near = fuzzy("t", "gato").unwrap();
+    assert!(near.len() >= 2 && near[0].0 == 3, "{near:?}");
+    assert_eq!(fuzzy("zz", "gato"), Ok(vec![]));
+    let mixed = op(
+        "term",
+        Document::new()
+            .with("path", "t")
+            .with("query", arr(vec!["gat".into(), 5.into()]))
+            .with("prefix", true),
+    );
+    assert_eq!(found(&idx, &mixed).unwrap_err(), "\"term.query\" must be a string");
+    assert_eq!(
+        found(&idx, &Document::new().with("text", 5)).unwrap_err(),
+        "\"text\" must be a document"
+    );
+    // An autocomplete field no document has.
+    let a = Document::new().with("type", "autocomplete");
+    let def = Document::new().with(
+        "mappings",
+        Document::new().with("dynamic", false).with("fields", Document::new().with("a", a)),
+    );
+    let empty = build(def, vec![Document::new().with("t", "x")]);
+    assert_eq!(found(&empty, &autocomplete("abc", Document::new())), Ok(vec![]));
 }

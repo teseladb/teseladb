@@ -114,6 +114,23 @@ fn geo_within_finds_the_points_inside() {
     let spec =
         op("geoWithin", Document::new().with("path", "g").with("box", b).with("score", boost));
     assert_eq!(found(&idx, &spec), Ok(vec![(1, 2.0), (5, 2.0)]));
+    // Points left, right, below and above a box.
+    for (x0, y0, x1, y1) in [
+        (-3.0, 40.0, 3.0, 42.0),
+        (-5.0, 40.0, -3.8, 42.0),
+        (-5.0, 40.5, 3.0, 42.0),
+        (-5.0, 35.0, 3.0, 40.45),
+    ] {
+        let b = Document::new().with("bottomLeft", point(x0, y0)).with("topRight", point(x1, y1));
+        assert!(ids(&idx, &within("box", b)).len() <= 3);
+    }
+    let line = Document::new()
+        .with("type", "LineString")
+        .with("coordinates", ring(&[(0.0, 0.0), (1.0, 1.0)]));
+    assert_eq!(
+        found(&idx, &within("geometry", line)).unwrap_err(),
+        "\"geoWithin.geometry\" Geometry must be a Polygon"
+    );
     let other = op("geoWithin", Document::new().with("path", "h").with("geometry", polygon(&BIG)));
     assert_eq!(found(&idx, &other), Ok(vec![]));
 }

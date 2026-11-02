@@ -397,8 +397,7 @@ impl Geo {
             )));
         }
         let mut out = BTreeMap::new();
-        for doc in index.live() {
-            let Some(d) = index.document(doc) else { continue };
+        for (doc, d) in index.live().filter_map(|doc| Some((doc, index.document(doc)?))) {
             let score = match self {
                 Geo::Within { path, region, .. } => {
                     let points: Vec<Pt> =
@@ -450,5 +449,51 @@ impl Geo {
             }
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn segments_meet_when_they_cross_or_touch() {
+        let s = |a: Pt, b: Pt, c: Pt, d: Pt| segments_meet(a, b, c, d);
+        assert!(s((0.0, 0.0), (2.0, 2.0), (0.0, 2.0), (2.0, 0.0)), "cross");
+        assert!(!s((0.0, 0.0), (1.0, 1.0), (2.0, 0.0), (3.0, 1.0)), "apart");
+        // Touching ends and collinear overlaps, from either side.
+        assert!(s((0.0, 0.0), (2.0, 0.0), (1.0, 0.0), (1.0, 5.0)));
+        assert!(s((0.0, 0.0), (2.0, 0.0), (1.0, 5.0), (1.0, 0.0)));
+        assert!(s((1.0, 0.0), (1.0, 5.0), (0.0, 0.0), (2.0, 0.0)));
+        assert!(s((1.0, 5.0), (1.0, 0.0), (0.0, 0.0), (2.0, 0.0)));
+        assert!(!s((0.0, 0.0), (1.0, 0.0), (2.0, 0.0), (3.0, 0.0)), "collinear apart");
+        assert!(!s((0.0, 0.0), (1.0, 0.0), (0.5, 1.0), (0.5, 2.0)), "above");
+        assert!(!s((0.0, 0.0), (1.0, 0.0), (-1.0, 0.0), (-2.0, 0.0)));
+        assert!(!s((0.0, 0.0), (0.0, 1.0), (0.0, 2.0), (0.0, 3.0)));
+        assert!(!s((0.0, 0.0), (0.0, 1.0), (0.0, -2.0), (0.0, -3.0)));
+    }
+
+    #[test]
+    fn shapes_relate_by_their_parts() {
+        let line = Shape {
+            points: vec![],
+            lines: vec![vec![(-5.0, 39.0), (3.0, 42.0)]],
+            polygons: vec![],
+        };
+        let on_line = Shape { points: vec![(-1.0, 40.5)], lines: vec![], polygons: vec![] };
+        assert!(line.intersects(&on_line) && on_line.intersects(&line));
+        let square = |x0: f64, y0: f64, x1: f64, y1: f64| Shape {
+            points: vec![],
+            lines: vec![],
+            polygons: vec![vec![vec![(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)]]],
+        };
+        let (outer, inner) = (square(0.0, 0.0, 10.0, 10.0), square(2.0, 2.0, 3.0, 3.0));
+        assert!(outer.intersects(&inner) && inner.intersects(&outer));
+        assert!(inner.within(&outer) && !outer.within(&inner));
+        let crossing = square(5.0, 5.0, 15.0, 15.0);
+        assert!(crossing.intersects(&outer) && !crossing.within(&outer));
+        let edge_cross = square(-1.0, 4.0, 11.0, 6.0);
+        assert!(outer.intersects(&edge_cross) && !edge_cross.within(&outer));
+        assert!(!square(20.0, 20.0, 21.0, 21.0).intersects(&outer));
     }
 }

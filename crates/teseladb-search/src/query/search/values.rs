@@ -420,7 +420,7 @@ pub(super) fn parse_range(d: &Document, path: &str) -> Result<Operator, SearchEr
                 Err(shape(path, "range operator does not support BOOLEAN point type"))
             }
             other => match Key::of_query(other) {
-                Some(k) if !matches!(k, Key::Null) => Ok(Some((k, incl))),
+                Some(k) => Ok(Some((k, incl))),
                 _ => Err(shape(&at(name), &format!("Type is not supported: {}", type_name(other)))),
             },
         }
