@@ -1098,8 +1098,8 @@ impl<'c> Interp<'c> {
     ) -> R {
         self.charge(0)?;
         let name = match fo.borrow().get_own("name").map(|p| p.value.clone()) {
-            Some(Val::Str(n)) => n,
-            _ => "".into(),
+            Some(Val::Str(n)) if !n.is_empty() => n,
+            _ => def.guessed.get().cloned().unwrap_or_else(|| "".into()),
         };
         let caller = std::mem::replace(&mut self.fname, name);
         self.frames.push((caller, self.pos));
@@ -2205,6 +2205,7 @@ impl<'c> Interp<'c> {
                 is_ctor_of_derived: derived,
                 strict: true,
                 source: format!("class {} {{ }}", c.name.as_deref().unwrap_or("")).into(),
+                guessed: std::cell::OnceCell::new(),
             }),
         };
         let ctor_proto = match &parent_ctor {

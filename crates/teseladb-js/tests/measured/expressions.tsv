@@ -1662,3 +1662,22 @@ BigInt(1) + 1	E:TypeError:can't convert BigInt to number
 [...{a: undefined}]	E:TypeError:({a:(void 0)}) is not iterable
 (() => { const s = Symbol("k"); const o = {[s]: 1}; return [...o] })()	E:TypeError:o is not iterable
 `${Object.create(null)}`	E:TypeError:can't convert Object.create(...) to string
+(() => new Error().stack)()	S:v<@wasm:function:1:38\n@wasm:function:1:56\n
+(function () { return new Error().stack })()	S:v<@wasm:function:1:53\n@wasm:function:1:73\n
+(() => { const f = () => new Error().stack; return f() })()	S:f@wasm:function:1:56\nv<@wasm:function:1:82\n@wasm:function:1:88\n
+(() => { const o = {}; o.m = function () { return new Error().stack }; return o.m() })()	S:v</o.m@wasm:function:1:81\nv<@wasm:function:1:111\n@wasm:function:1:117\n
+(() => { const o = {a: {b: function () { return new Error().stack }}}; return o.a.b() })()	S:b@wasm:function:1:79\nv<@wasm:function:1:113\n@wasm:function:1:119\n
+(() => { let g; g = () => new Error().stack; return g() })()	S:g@wasm:function:1:57\nv<@wasm:function:1:83\n@wasm:function:1:89\n
+[1].map(() => new Error().stack)[0]	S:v<@wasm:function:1:45\n@wasm:function:1:35\n
+(() => { function outer() { return (() => new Error().stack)() } return outer() })()	S:outer/<@wasm:function:1:73\nouter@wasm:function:1:91\nv<@wasm:function:1:103\n@wasm:function:1:113\n
+(() => { const o = {f: () => [1].map(function () { return new Error().stack })[0]}; return o.f() })()	S:f/<@wasm:function:1:89\nf@wasm:function:1:64\nv<@wasm:function:1:124\n@wasm:function:1:130\n
+(() => { const arr = [() => new Error().stack]; return arr[0]() })()	S:v</arr<@wasm:function:1:59\nv<@wasm:function:1:92\n@wasm:function:1:97\n
+(() => { const x = {}; x["k"] = () => new Error().stack; return x.k() })()	S:v</x.k@wasm:function:1:69\nv<@wasm:function:1:97\n@wasm:function:1:103\n
+(() => { return (function () { return () => new Error().stack })()() })()	S:v</</<@wasm:function:1:75\nv<@wasm:function:1:97\n@wasm:function:1:102\n
+(() => { const o = {a: [() => new Error().stack]}; return o.a[0]() })()	S:v</o.a<@wasm:function:1:61\nv<@wasm:function:1:95\n@wasm:function:1:100\n
+(() => { let q = {}; q.r = {s: [function () { return new Error().stack }]}; return q.r.s[0]() })()	S:v</q.r.s<@wasm:function:1:84\nv<@wasm:function:1:122\n@wasm:function:1:127\n
+(() => { class K { m() { return [1].map(() => new Error().stack)[0] } } return new K().m() })()	S:m/<@wasm:function:1:77\nm@wasm:function:1:67\nv<@wasm:function:1:118\n@wasm:function:1:124\n
+(() => { const o = {get g() { return (() => new Error().stack)() }}; return o.g })()	S:get g/<@wasm:function:1:75\nget g@wasm:function:1:93\nv<@wasm:function:1:100\n@wasm:function:1:113\n
+(() => { var w = 1 ? () => new Error().stack : 0; return w() })()	S:v</w@wasm:function:1:58\nv<@wasm:function:1:88\n@wasm:function:1:94\n
+(() => { const h = (x = () => new Error().stack) => x(); return h() })()	S:x@wasm:function:1:61\nh@wasm:function:1:83\nv<@wasm:function:1:95\n@wasm:function:1:101\n
+(() => { let z; z = [0].map(() => () => new Error().stack)[0]; return z() })()	S:v</z</<@wasm:function:1:71\nv<@wasm:function:1:101\n@wasm:function:1:107\n

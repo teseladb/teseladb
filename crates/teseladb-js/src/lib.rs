@@ -23,6 +23,7 @@ mod json;
 mod lexer;
 mod math;
 mod md5;
+mod names;
 mod number;
 mod parser;
 mod promise;

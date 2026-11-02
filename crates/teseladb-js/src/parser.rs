@@ -22,12 +22,14 @@ pub fn parse_script(src: &str) -> Result<Vec<Stmt>, SyntaxError> {
         binding: None,
         in_params: false,
         in_static: false,
+        namer: crate::names::Namer::default(),
     };
     p.scopes.push(ScopeKind::Function);
     let mut out = Vec::new();
     while !p.at_eof() {
         out.push(p.statement()?);
     }
+    p.namer.finish();
     Ok(out)
 }
 
@@ -52,6 +54,7 @@ fn parse_expression(
         binding: None,
         in_params: false,
         in_static: false,
+        namer: crate::names::Namer::default(),
     };
     p.scopes.push(ScopeKind::Function);
     let start = p.pos();
@@ -59,6 +62,7 @@ fn parse_expression(
     if !p.at_eof() {
         return p.unexpected();
     }
+    p.namer.finish();
     Ok(at(start, e))
 }
 
@@ -149,6 +153,17 @@ struct Parser {
     in_params: bool,
     /// Whether the code being read is a class's `static { … }` block (no `await` binding).
     in_static: bool,
+    /// The functions read and where they are written, for their guessed names.
+    namer: crate::names::Namer,
+}
+
+/// The name of a method or accessor: `m`, `get g`, `set s`.
+fn accessor_name(kind: PropKind, key: &str) -> String {
+    match kind {
+        PropKind::Get => format!("get {key}"),
+        PropKind::Set => format!("set {key}"),
+        _ => key.to_string(),
+    }
 }
 
 /// Whether `body` starts with the directive `"use strict"`.
@@ -643,8 +658,12 @@ impl Parser {
             let target = target?;
             let init = if self.eat("=") {
                 let p = self.pos();
+                let mark = self.namer.mark();
                 let e = self.assign_in(allow_in)?;
                 let e = self.paren_call(e);
+                if let Pattern::Name(n) = &target {
+                    self.namer.place(mark, n.to_string(), true, &e);
+                }
                 Some(at_always(p, e))
             } else {
                 None
@@ -1003,8 +1022,10 @@ impl Parser {
         self.in_gen = kind.generator;
         self.in_async = kind.is_async;
         self.in_static = false;
+        let entry = self.namer.enter();
         let r = self
             .scoped(ScopeKind::Function, |p| p.function_body_in(start, name, derived_ctor, kind));
+        self.namer.leave(entry, r.as_ref().ok());
         (self.strict, self.in_gen, self.in_async, self.in_static) = outer;
         r
     }
@@ -1051,6 +1072,7 @@ impl Parser {
             is_async: kind.is_async,
             method: kind.method,
             source: self.source_from(start),
+            guessed: std::cell::OnceCell::new(),
         }))
     }
 
@@ -1114,6 +1136,11 @@ impl Parser {
                     !is_static && matches!(&key, PropName::Fixed(n) if &**n == "constructor");
                 let fk = FnKind { method: !is_ctor, ..fk };
                 let f = self.function_body(start, None, is_ctor && parent.is_some(), fk)?;
+                if let PropName::Fixed(n) = &key
+                    && !is_ctor
+                {
+                    self.namer.method(&f, accessor_name(kind, n));
+                }
                 if is_ctor {
                     ctor = Some(f);
                 } else {
@@ -1146,6 +1173,7 @@ impl Parser {
             is_async: false,
             method: true,
             source: self.source_from(start),
+            guessed: std::cell::OnceCell::new(),
         }))
     }
 
@@ -1234,7 +1262,13 @@ impl Parser {
         self.in_gen = false;
         self.in_async = is_async;
         self.in_static = false;
+        let entry = self.namer.enter();
         let r = self.scoped(ScopeKind::Function, |p| p.arrow_in(start, is_async));
+        let def = match &r {
+            Ok(Expr::Func(d)) => Some(d),
+            _ => None,
+        };
+        self.namer.leave(entry, def);
         (self.strict, self.in_gen, self.in_async, self.in_static) = outer;
         r
     }
@@ -1268,6 +1302,7 @@ impl Parser {
             is_async,
             method: false,
             source: self.source_from(start),
+            guessed: std::cell::OnceCell::new(),
         })))
     }
 
@@ -1332,7 +1367,17 @@ impl Parser {
             }
         }
         .map_or_else(|m| self.fail(m), Ok)?;
+        let mark = self.namer.mark();
         let value = self.assign_in(allow_in)?;
+        if op == "=" {
+            match &target {
+                Pattern::Name(n) => self.namer.place(mark, n.to_string(), true, &value),
+                Pattern::Expr(e) if matches!(**e, Expr::Member { .. }) => {
+                    self.namer.place(mark, crate::interp::callee_text(e), false, &value)
+                }
+                _ => {}
+            }
+        }
         Ok(Expr::Assign { op, target: Box::new(target), value: Box::new(value) })
     }
 
@@ -1733,10 +1778,18 @@ impl Parser {
                 if kind != PropKind::Value {
                     let fk = FnKind { method: true, ..FnKind::default() };
                     let f = self.function_body(start, None, false, fk)?;
+                    if let PropName::Fixed(n) = &key {
+                        self.namer.method(&f, accessor_name(kind, n));
+                    }
                     props.push(ObjProp::Accessor(key, kind, f));
                 } else if self.eat(":") {
                     // Each property moves the position to its key, constants too (measured).
-                    let v = match self.assign()? {
+                    let mark = self.namer.mark();
+                    let v = self.assign()?;
+                    if let PropName::Fixed(n) = &key {
+                        self.namer.place(mark, n.to_string(), true, &v);
+                    }
+                    let v = match v {
                         v @ (Expr::Func(_) | Expr::Class(_)) => v,
                         v => Expr::At(start, Box::new(v)),
                     };

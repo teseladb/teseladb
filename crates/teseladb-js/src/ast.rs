@@ -54,6 +54,8 @@ pub struct FuncDef {
     /// A method, getter or setter of an object literal or a class: `new` refuses it.
     pub method: bool,
     pub source: Rc<str>,
+    /// The name SpiderMonkey guesses for it when it has none ([`crate::names`]).
+    pub guessed: std::cell::OnceCell<Name>,
 }
 
 #[derive(Debug)]

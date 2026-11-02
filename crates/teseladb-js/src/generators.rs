@@ -709,6 +709,7 @@ fn delegate_default(d: Expr) -> Expr {
         is_async: false,
         method: false,
         source: "function* () { [code] }".into(),
+        guessed: std::cell::OnceCell::new(),
     };
     let call = Expr::Call {
         callee: Box::new(Expr::Member {
