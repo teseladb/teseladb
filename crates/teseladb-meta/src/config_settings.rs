@@ -16,6 +16,8 @@ pub const PREFIX: &[u8] = b"configSettings.";
 pub const BALANCER_KEY: &[u8] = b"configSettings.balancer";
 /// The setting with the document of automatic merges.
 pub const AUTOMERGE_KEY: &[u8] = b"configSettings.automerge";
+/// The setting with the document of the chunk size (`value`, in MiB).
+pub const CHUNK_SIZE_KEY: &[u8] = b"configSettings.chunksize";
 
 /// Minutes in a day.
 const DAY_MINUTES: u64 = 24 * 60;
@@ -102,4 +104,17 @@ pub fn balancing(settings: &BTreeMap<Vec<u8>, Vec<u8>>, local_ms: u64) -> bool {
 pub fn automerge(settings: &BTreeMap<Vec<u8>, Vec<u8>>) -> bool {
     doc(settings, AUTOMERGE_KEY)
         .is_none_or(|d| !matches!(d.get("enabled"), Some(RawValue::Boolean(false))))
+}
+
+/// The size at which the ranges of a collection without its own split, in bytes, when
+/// `config.settings` has a `chunksize` (018 FR-004: the chunk size of a `refrouter`, in MiB, from 1
+/// to 1024 as its validator takes it).
+pub fn chunk_size_bytes(settings: &BTreeMap<Vec<u8>, Vec<u8>>) -> Option<u64> {
+    let mb = match doc(settings, CHUNK_SIZE_KEY)?.get("value")? {
+        RawValue::Int32(v) => u64::try_from(v).ok()?,
+        RawValue::Int64(v) => u64::try_from(v).ok()?,
+        RawValue::Double(v) if v >= 1.0 => v as u64,
+        _ => return None,
+    };
+    (mb > 0).then_some(mb << 20)
 }

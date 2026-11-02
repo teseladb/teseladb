@@ -21,16 +21,21 @@ const LOAD_BATCH: u64 = 1000;
 /// Seed of the workers' sources (worker `w` uses `SEED + w`).
 const SEED: u64 = 0x5943_5342;
 
-fn record(i: u64, rng: &mut Rng) -> Value {
+pub(crate) fn record(i: u64, rng: &mut Rng) -> Value {
+    Value::Document(record_doc(i, rng))
+}
+
+/// Record `i`: its key and ten fields of 100 bytes.
+pub(crate) fn record_doc(i: u64, rng: &mut Rng) -> teseladb_bson::Document {
     let mut pairs = vec![("_id", Value::String(key(i)))];
     let names: Vec<String> = (0..FIELDS).map(|f| format!("field{f}")).collect();
     for n in &names {
         pairs.push((n.as_str(), Value::String(field(rng))));
     }
-    Value::Document(doc(pairs))
+    doc(pairs)
 }
 
-fn insert(c: &mut Client, docs: Vec<Value>) -> Result<(), String> {
+pub(crate) fn insert(c: &mut Client, docs: Vec<Value>) -> Result<(), String> {
     c.command(
         DB,
         doc(vec![("insert", Value::String(COLLECTION.into())), ("documents", Value::Array(docs))]),
@@ -66,10 +71,32 @@ fn update(c: &mut Client, k: String, rng: &mut Rng) -> Result<(), String> {
 
 /// Runs workload `letter`.
 pub fn run(args: &Args, letter: char) -> Result<Report, String> {
+    let target = Target::open(args.target.as_deref())?;
+    let (out, notes) = run_on(args, letter, &target)?;
+    let mut report = Report::new(&format!("ycsb-{letter}"));
+    for (kind, h) in &out.latencies {
+        report.latency(kind, h, None, None);
+    }
+    report.push("throughput", "op/s", out.throughput(), None);
+    report.push("errors", "op", out.errors as f64, None);
+    report.notes.extend(notes);
+    report.notes.push(format!(
+        "target {}",
+        args.target.as_deref().unwrap_or("local cluster of three nodes")
+    ));
+    Ok(report)
+}
+
+/// Loads the records and runs workload `letter` against `target`: what was measured and the
+/// notes that describe it.
+pub fn run_on(
+    args: &Args,
+    letter: char,
+    target: &Target,
+) -> Result<(crate::load::Outcome, Vec<String>), String> {
     let records = args.records;
     let workload =
         Workload::new(letter, records).ok_or(format!("unknown YCSB workload {letter}"))?;
-    let target = Target::open(args.target.as_deref())?;
     let addr = target.addr()?;
     let mut setup = Client::connect(addr)?;
     // The collection may not exist yet.
@@ -115,24 +142,18 @@ pub fn run(args: &Args, letter: char) -> Result<Report, String> {
             Ok(op.name())
         },
     )?;
-    let mut report = Report::new(&format!("ycsb-{letter}"));
-    for (kind, h) in &out.latencies {
-        report.latency(kind, h, None, None);
-    }
-    report.push("throughput", "op/s", out.throughput(), None);
-    report.push("errors", "op", out.errors as f64, None);
+    let mut notes = Vec::new();
     if let Some(e) = &out.first_error {
-        report.notes.push(format!("first error: {e}"));
+        notes.push(format!("first error: {e}"));
     }
     let dist = match workload.keys {
         KeyChooser::ScrambledZipfian(_) => "scrambled zipfian",
         KeyChooser::Latest(_) => "latest",
     };
-    report.notes.push(format!(
-        "{records} records, {} workers, {}, keys {dist}, target {}",
+    notes.push(format!(
+        "{records} records, {} workers, {}, keys {dist}",
         args.concurrency.max(1),
         args.rate.map_or("closed loop".to_owned(), |r| format!("{r} op/s")),
-        args.target.as_deref().unwrap_or("local cluster of three nodes")
     ));
-    Ok(report)
+    Ok((out, notes))
 }

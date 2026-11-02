@@ -28,9 +28,10 @@ pub fn metadata_url(scheme: &str, host: &str) -> String {
     format!("{scheme}://{host}{WELL_KNOWN_MCP}")
 }
 
-/// The metadata document of `resource` with the issuers of `issuers`.
+/// The metadata document of `resource` with the issuers of `issuers` and the scopes they ask
+/// for, `scopes`.
 #[must_use]
-pub fn document(resource: &str, issuers: &[String]) -> String {
+pub fn document(resource: &str, issuers: &[String], scopes: &[String]) -> String {
     let mut o = Object::new();
     o.insert("resource", resource);
     o.insert(
@@ -38,6 +39,10 @@ pub fn document(resource: &str, issuers: &[String]) -> String {
         Value::Array(issuers.iter().map(|i| Value::String(i.clone())).collect()),
     );
     o.insert("bearer_methods_supported", Value::Array(vec![Value::from("header")]));
+    o.insert(
+        "scopes_supported",
+        Value::Array(scopes.iter().map(|s| Value::from(s.as_str())).collect()),
+    );
     o.insert("resource_name", "TeselaDB MCP");
     to_string(&Value::Object(o)).unwrap_or_default()
 }
@@ -51,10 +56,10 @@ mod tests {
     fn the_document_names_the_resource_and_its_issuers() {
         let uri = resource_uri("https", "db.example:27080");
         assert_eq!(uri, "https://db.example:27080/mcp");
-        let d = document(&uri, &["https://idp.example".to_owned()]);
+        let d = document(&uri, &["https://idp.example".to_owned()], &["openid".to_owned()]);
         assert_eq!(
             d,
-            r#"{"resource":"https://db.example:27080/mcp","authorization_servers":["https://idp.example"],"bearer_methods_supported":["header"],"resource_name":"TeselaDB MCP"}"#
+            r#"{"resource":"https://db.example:27080/mcp","authorization_servers":["https://idp.example"],"bearer_methods_supported":["header"],"scopes_supported":["openid"],"resource_name":"TeselaDB MCP"}"#
         );
         assert!(is_metadata_path(WELL_KNOWN) && is_metadata_path(WELL_KNOWN_MCP));
         assert!(!is_metadata_path("/mcp"));

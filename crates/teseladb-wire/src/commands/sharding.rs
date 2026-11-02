@@ -155,8 +155,8 @@ pub fn event_key(coll: &CollectionEntry, doc: &Document) -> Result<Document, Com
     Ok(out.with("_id", doc.get("_id").cloned().unwrap_or(Value::Null)))
 }
 
-/// `enableSharding`: every database can hold sharded collections (TeselaDB keeps no primary
-/// shard per database), so it only checks its argument.
+/// `enableSharding`: every database can hold sharded collections; it records the database and,
+/// with `primaryShard`, its primary ([`super::primaries`]).
 pub fn enable_sharding<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
 ) -> Result<Document, CommandError> {
@@ -177,7 +177,11 @@ pub fn enable_sharding<B: Backend + ?Sized>(
                 ),
             ))
         }
-        Value::String(_) => Ok(Document::new().with("ok", 1.0)),
+        Value::String(db) => {
+            let db = db.clone();
+            super::primaries::enable_with_primary(ctx, &db)?;
+            Ok(Document::new().with("ok", 1.0))
+        }
         v => Err(wrong_type(ENABLE_SHARDING, v, "string")),
     }
 }
@@ -517,7 +521,7 @@ pub fn config_entry(ns: &Namespace, c: &CollectionEntry, k: &ShardKey) -> Docume
     let mut epoch = [0u8; 12];
     epoch.copy_from_slice(&c.uuid[..12]);
     let at = u32::try_from(c.created_index).unwrap_or(u32::MAX);
-    Document::new()
+    let mut d = Document::new()
         .with("_id", full(ns))
         .with("lastmodEpoch", Value::ObjectId(epoch))
         .with("timestamp", Value::Timestamp { time: at, increment: 1 })
@@ -525,5 +529,9 @@ pub fn config_entry(ns: &Namespace, c: &CollectionEntry, k: &ShardKey) -> Docume
         .with("key", k.key.clone())
         .with("unique", k.unique)
         .with("lastmod", Value::DateTime(0))
-        .with("noBalance", false)
+        .with("noBalance", false);
+    for (k, v) in super::balancing::config_fields(&c.options).iter() {
+        d.push(k, v.clone());
+    }
+    d
 }

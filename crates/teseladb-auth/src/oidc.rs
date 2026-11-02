@@ -279,12 +279,26 @@ impl Token {
         Ok(Token { issuer, kid, hash, signed, signature, claims })
     }
 
-    /// Checks the token with `keys` of its provider in `providers` at `now` (seconds).
+    /// Checks the token with `keys` of its provider in `providers` at `now` (seconds), issued
+    /// for the provider's `audience`.
     pub fn verify(
         &self,
         providers: &Providers,
         keys: &KeySet,
         now: i64,
+    ) -> Result<Identity, OidcError> {
+        self.verify_for(providers, keys, now, None)
+    }
+
+    /// [`Token::verify`], with the token issued for `resource` instead of the provider's
+    /// `audience` when one is given: the URI of a protected resource, as MCP's tokens are
+    /// (RFC 8707; 019 FR-027).
+    pub fn verify_for(
+        &self,
+        providers: &Providers,
+        keys: &KeySet,
+        now: i64,
+        resource: Option<&str>,
     ) -> Result<Identity, OidcError> {
         let p = providers
             .by_issuer(&self.issuer)
@@ -304,7 +318,7 @@ impl Token {
             },
             _ => return fail("OIDC token must contain exactly one audience"),
         };
-        if audience != p.audience {
+        if audience != resource.unwrap_or(&p.audience) {
             return fail(format!(
                 "Unknown audience name '{audience}' for Identity Provider '{}'",
                 p.issuer

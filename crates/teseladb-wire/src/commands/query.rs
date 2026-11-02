@@ -77,6 +77,13 @@ pub enum Source {
         /// The command's `let` variables, for its `getMore`s too.
         vars: Option<Document>,
     },
+    /// The computed results wait in the node's temporary store from `offset` (012 FR-013).
+    Spilled {
+        /// The run.
+        run: std::sync::Arc<super::cursor_spill::SpilledRun>,
+        /// Where the next document starts.
+        offset: u64,
+    },
     /// Everything is in the buffer.
     Done,
 }
@@ -101,6 +108,9 @@ pub struct QueryCursor {
     /// The command that opened it and the plan that command ran, which the profiler writes for
     /// each `getMore` (010 FR-015).
     pub origin: Option<Box<Origin>>,
+    /// Bytes of computed results in `buffered`, which count in the node's part for cursors
+    /// (012 FR-013); the buffer of a scan is not counted.
+    pub held: usize,
 }
 
 /// The field of a `getMore`'s profile with the command that opened its cursor.
@@ -453,6 +463,7 @@ impl QueryCursor {
             read_mark: None,
             stream: None,
             origin: None,
+            held: 0,
         }
     }
 
@@ -482,6 +493,7 @@ impl QueryCursor {
                         self.buffered.push_front(d);
                         return Ok(self.finish(out, false));
                     }
+                    self.held = self.held.saturating_sub(n);
                     bytes += n;
                     out.push(d);
                     if let Some(t) = &mut self.tail {
@@ -513,11 +525,20 @@ impl QueryCursor {
 
     /// Reads the next chunk of the source into the buffer.
     fn refill<B: Backend + ?Sized>(&mut self, backend: &mut B) -> Result<(), CommandError> {
+        if let Source::Spilled { run, offset } = &mut self.source {
+            let (next, read) = super::cursor_spill::refill(run, *offset, &mut self.buffered)?;
+            self.held += read;
+            match next {
+                Some(o) => *offset = o,
+                None => self.source = Source::Done,
+            }
+            return Ok(());
+        }
         let (next, end, filter, projection, collation, concern, vars) = match &mut self.source {
             Source::Scan { next, end, filter, projection, collation, concern, vars } => {
                 (next, end, filter, projection, collation, concern, vars)
             }
-            Source::Done => return Ok(()),
+            Source::Done | Source::Spilled { .. } => return Ok(()),
         };
         let plan =
             Plan::new(filter, projection.as_ref(), collation.as_ref())?.with_vars(vars.as_ref());
@@ -763,6 +784,7 @@ pub fn keep<B: Backend + ?Sized>(
     if exhausted {
         return Ok(0);
     }
+    let state = within_cursor_part(ctx, state)?;
     let lsid = args::lsid(ctx.cmd)?;
     let id = cursor_id(ctx.backend.node(), ctx.backend.random());
     let c = Cursor {
@@ -776,6 +798,35 @@ pub fn keep<B: Backend + ?Sized>(
     };
     lock(ctx.shared).cursors.put(id, c);
     Ok(id)
+}
+
+/// Writes the computed results of `state` to the node's temporary store when holding them would
+/// take the open cursors past their part of memory (012 FR-013, D-105).
+fn within_cursor_part<B: Backend + ?Sized>(
+    ctx: &mut Ctx<'_, B>,
+    mut state: QueryCursor,
+) -> Result<QueryCursor, CommandError> {
+    if state.source != Source::Done || state.buffered.is_empty() {
+        return Ok(state);
+    }
+    let (limit, store, others) = {
+        let g = lock(ctx.shared);
+        (
+            g.spill.cursor_bytes,
+            g.spill.store.clone(),
+            g.cursors.iter().map(|c| c.state.held).sum::<usize>(),
+        )
+    };
+    let (Some(limit), Some(store)) = (limit, store) else { return Ok(state) };
+    let own = super::cursor_spill::bytes_of(&state.buffered);
+    if own + others <= limit {
+        state.held = own;
+        return Ok(state);
+    }
+    let run = super::cursor_spill::spill(&store, &mut state.buffered)?;
+    state.source = Source::Spilled { run, offset: 0 };
+    state.held = 0;
+    Ok(state)
 }
 
 /// Counts a read of a whole collection (`metrics.queryExecutor.collectionScans`).
@@ -838,6 +889,9 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
         vars: a.vars.as_ref(),
     };
     super::hints::check_hint(ctx.backend, (&ns, &coll), ctx.cmd, &hinted)?;
+    if let Some(near) = super::near_find::split(&a.filter) {
+        return near_find(ctx, &ns, &a, &near);
+    }
     let executor = |e: CommandError| executor_error(FIND, &ns_text, e);
     // An `_id` equality without a collation reads that document's key alone.
     let range = match super::crud::id_equality(&a.filter).filter(|_| collation.is_none()) {
@@ -928,6 +982,7 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
             read_mark: None,
             stream: None,
             origin: None,
+            held: 0,
         },
         Some(sort) => {
             sorted(ctx.backend, &coll, &a, sort, collation.as_ref(), planned).map_err(executor)?
@@ -944,6 +999,29 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
     };
     let id = keep(ctx, &ns_text, state, exhausted, a.no_timeout)?;
     Ok(cursor_reply(id, &ns_text, "firstBatch", docs))
+}
+
+/// A `find` with `$near` or `$nearSphere`: its stages read through the aggregation engine,
+/// nearest first (009 T035).
+fn near_find<B: Backend + ?Sized>(
+    ctx: &mut Ctx<'_, B>,
+    ns: &Namespace,
+    a: &FindArgs,
+    near: &super::near_find::NearFind,
+) -> Result<Document, CommandError> {
+    let ns_text = full(ns);
+    let stages = near.stages(ctx.cmd, &ns_text)?;
+    let empty = Value::Document(Document::new());
+    let sort = ctx.cmd.get("sort").cloned().unwrap_or_else(|| empty.clone());
+    let projection = ctx.cmd.get("projection").cloned().unwrap_or_else(|| empty.clone());
+    let stages = (stages.as_slice(), a.vars.as_ref());
+    let docs = super::aggregate::read_through_node(ctx.backend, ctx.shared, ns, stages, a.concern)
+        .map_err(|e| {
+            let shown = (&sort, &projection);
+            near.planner_error(e, &ns_text, &query_tree(&near.rest), shown)
+        })?;
+    let ends = a.limit.is_some_and(|l| u64::try_from(docs.len()).is_ok_and(|n| n == l));
+    buffered_reply(ctx, &ns_text, a, docs, ends)
 }
 
 /// A `find` whose filter has a `$text` (011 FR-001): the aggregation of its stages, whose first
@@ -1003,7 +1081,7 @@ fn check_tailable(
 
 /// A filter as RefDb writes its query tree in a message: each condition `path $op value`, and
 /// `$and` over them, indented by four spaces, when there are several or none.
-fn query_tree(filter: &Document) -> String {
+pub(super) fn query_tree(filter: &Document) -> String {
     let mut leaves = Vec::new();
     for (path, cond) in filter.iter() {
         match cond {

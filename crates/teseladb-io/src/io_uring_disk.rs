@@ -26,7 +26,7 @@ use teseladb_sys::uring::{Op, Probe, Ring, Target, opcode};
 use teseladb_types::Bytes;
 
 use crate::buffers::{BUFFER_BYTES, BUFFERS_PER_CORE, BufferPool, is_aligned};
-use crate::file_disk::{O_DIRECT, errno};
+use crate::file_disk::{O_DIRECT, errno, io_errno};
 
 /// Submission slots of a core's ring.
 pub const RING_ENTRIES: u32 = 64;
@@ -54,10 +54,19 @@ const O_DIRECTORY: i32 = 0o200000;
 
 /// Whether this kernel has what [`IoUringDisk`] needs: `Err` names what is missing (FR-007).
 pub fn check_support() -> Result<(), String> {
-    let ring = Ring::new(4).map_err(|e| format!("io_uring_setup failed: {e}"))?;
+    support_of(Ring::new(4))
+}
+
+/// What a ring the kernel gave (or refused) says of the support.
+fn support_of(ring: io::Result<Ring>) -> Result<(), String> {
+    let ring = ring.map_err(|e| format!("io_uring_setup failed: {e}"))?;
     let probe = ring.probe().map_err(|e| format!("IORING_REGISTER_PROBE failed: {e}"))?;
     missing_ops(&probe)
 }
+
+// Data jobs hold a buffer each and every other job runs alone, so the jobs in flight never pass
+// the buffers, which never pass the ring's slots.
+const _: () = assert!((BUFFERS_PER_CORE as u32) < RING_ENTRIES);
 
 fn missing_ops(probe: &Probe) -> Result<(), String> {
     let missing: Vec<&str> =
@@ -147,6 +156,9 @@ pub struct IoUringDisk {
     done: VecDeque<(u64, IoDone)>,
     next_seq: u64,
     wake: File,
+    /// Whether the buffers are registered: on the first read or write, from the core's thread,
+    /// so that their memory is on the NUMA node of the core's CPU (012 FR-006).
+    buffers_ready: bool,
 }
 
 fn cpath(p: &Path) -> CString {
@@ -175,13 +187,22 @@ impl IoUringDisk {
     /// Disk rooted at `root` (created if it does not exist), with its own ring, its reserve of
     /// registered buffers and, with `direct_io`, `O_DIRECT` for whole-block accesses.
     pub fn open(root: impl Into<PathBuf>, direct_io: bool) -> io::Result<IoUringDisk> {
+        IoUringDisk::open_with(root, direct_io, FILE_SLOTS)
+    }
+
+    /// [`IoUringDisk::open`] with `file_slots` slots in the registered file table: the files
+    /// opened beyond them use their plain descriptor.
+    pub fn open_with(
+        root: impl Into<PathBuf>,
+        direct_io: bool,
+        file_slots: u32,
+    ) -> io::Result<IoUringDisk> {
         let root = root.into();
         fs::create_dir_all(&root)?;
         let mut ring = Ring::new(RING_ENTRIES)?;
         let probe = ring.probe()?;
         missing_ops(&probe).map_err(io::Error::other)?;
-        ring.register_buffers(BufferPool::allocate(BUFFERS_PER_CORE))?;
-        ring.register_files(FILE_SLOTS)?;
+        ring.register_files(file_slots)?;
         let wake = File::from(teseladb_sys::uring::eventfd()?);
         ring.register_eventfd(wake.as_raw_fd())?;
         Ok(IoUringDisk {
@@ -191,13 +212,14 @@ impl IoUringDisk {
             direct: direct_io,
             ftruncate: probe.supports(opcode::FTRUNCATE),
             files: HashMap::new(),
-            free_slots: (0..FILE_SLOTS).rev().collect(),
+            free_slots: (0..file_slots).rev().collect(),
             queue: VecDeque::new(),
             running: VecDeque::new(),
             by_ring: HashMap::new(),
             done: VecDeque::new(),
             next_seq: 0,
             wake,
+            buffers_ready: false,
         })
     }
 
@@ -219,6 +241,12 @@ impl IoUringDisk {
     /// Operations submitted whose result has not been collected.
     pub fn pending(&self) -> usize {
         self.queue.len() + self.running.len() + self.done.len()
+    }
+
+    /// Uses `IORING_OP_FTRUNCATE` (`on`) or truncates from the core's thread, as on kernels
+    /// before 6.9 that do not have it.
+    pub fn set_ftruncate(&mut self, on: bool) {
+        self.ftruncate = on;
     }
 
     /// Whether results are waiting for [`IoUringDisk::reap`] without a completion to signal them
@@ -268,14 +296,14 @@ impl IoUringDisk {
 
     fn collect(&mut self) {
         while let Some(c) = self.ring.complete() {
-            let Some(seq) = self.by_ring.remove(&c.id) else { continue };
-            if let Some(i) = self.running.iter().position(|j| j.seq == seq) {
-                self.running[i].waiting = None;
-                if let (Some(fd), Work::Steps { opened, .. }) = (c.fd, &mut self.running[i].work) {
-                    opened.push(fd);
-                }
-                self.advance(i, Some(c.result));
+            // Every operation the ring completes was pushed by a job still running.
+            let seq = self.by_ring.remove(&c.id).expect("a job's ring operation");
+            let i = self.running.iter().position(|j| j.seq == seq).expect("its job is running");
+            self.running[i].waiting = None;
+            if let (Some(fd), Work::Steps { opened, .. }) = (c.fd, &mut self.running[i].work) {
+                opened.push(fd);
             }
+            self.advance(i, Some(c.result));
         }
         while self.running.front().is_some_and(|j| j.result.is_some()) {
             let j = self.running.pop_front().expect("front job");
@@ -285,9 +313,6 @@ impl IoUringDisk {
 
     /// Whether the operation at the head of the queue may start now.
     fn can_start(&self, op: &IoOp) -> bool {
-        if self.running.len() >= RING_ENTRIES as usize || self.ring.space() == 0 {
-            return false;
-        }
         let Some(new) = data_range(op) else { return self.running.is_empty() };
         if self.pool.available() == 0 {
             return false;
@@ -301,6 +326,18 @@ impl IoUringDisk {
                 return;
             }
             let (seq, op) = self.queue.pop_front().expect("front op");
+            if data_range(&op).is_some() && !self.buffers_ready {
+                match self.ring.register_buffers(BufferPool::allocate(BUFFERS_PER_CORE)) {
+                    Ok(()) => self.buffers_ready = true,
+                    Err(e) => {
+                        // Finished at once, behind the ones still running.
+                        let result = Some(fail(&op, errno(&e)));
+                        let work = Work::Steps { steps: VecDeque::new(), opened: Vec::new() };
+                        self.running.push_back(Job { seq, op, work, waiting: None, result });
+                        continue;
+                    }
+                }
+            }
             let work = match &op {
                 IoOp::WriteAt { .. } => {
                     Work::Write { pos: 0, buf: self.pool.take().expect("a free buffer") }
@@ -308,26 +345,19 @@ impl IoUringDisk {
                 IoOp::ReadAt { .. } => {
                     Work::Read { got: Vec::new(), buf: self.pool.take().expect("a free buffer") }
                 }
-                _ => Work::Steps { steps: VecDeque::new(), opened: Vec::new() },
-            };
-            self.running.push_back(Job { seq, op, work, waiting: None, result: None });
-            let i = self.running.len() - 1;
-            if matches!(self.running[i].work, Work::Steps { .. }) {
-                let op = self.running[i].op.clone();
-                match self.plan(&op) {
-                    Ok(steps) => {
-                        if let Work::Steps { steps: s, .. } = &mut self.running[i].work {
-                            *s = steps;
-                        }
-                    }
+                _ => match self.plan(&op) {
+                    Ok(steps) => Work::Steps { steps, opened: Vec::new() },
                     Err(e) => {
-                        let done = fail(&self.running[i].op, e);
-                        self.running[i].result = Some(done);
+                        // Finished at once, behind the ones still running.
+                        let result = Some(fail(&op, e));
+                        let work = Work::Steps { steps: VecDeque::new(), opened: Vec::new() };
+                        self.running.push_back(Job { seq, op, work, waiting: None, result });
                         continue;
                     }
-                }
-            }
-            self.advance(i, None);
+                },
+            };
+            self.running.push_back(Job { seq, op, work, waiting: None, result: None });
+            self.advance(self.running.len() - 1, None);
         }
         self.collect();
     }
@@ -340,7 +370,7 @@ impl IoUringDisk {
         match op {
             IoOp::Create { path, prealloc, .. } => {
                 let full = self.root.join(path);
-                fs::create_dir_all(full.parent().unwrap_or(&self.root)).map_err(|e| errno(&e))?;
+                fs::create_dir_all(full.parent().unwrap_or(&self.root)).map_err(io_errno)?;
                 let c = cpath(&full);
                 steps.push_back(Step::Open { path: c.clone(), flags: O_RDWR | O_CREAT | O_EXCL });
                 if self.direct {
@@ -370,8 +400,8 @@ impl IoUringDisk {
                 let f = self.files.get(file).ok_or(IoErrno::BadFile)?;
                 if !self.ftruncate {
                     // A kernel without IORING_OP_FTRUNCATE (before 6.9): the core truncates.
-                    let fd = f.buffered.fd.try_clone().map_err(|e| errno(&e))?;
-                    File::from(fd).set_len(*len).map_err(|e| errno(&e))?;
+                    let fd = f.buffered.fd.try_clone().map_err(io_errno)?;
+                    File::from(fd).set_len(*len).map_err(io_errno)?;
                     return Ok(steps);
                 }
                 steps.push_back(Step::Truncate { on: On::File(*file), len: *len });
@@ -401,10 +431,10 @@ impl IoUringDisk {
     fn release(&mut self, f: OpenFile) {
         for h in std::iter::once(f.buffered).chain(f.direct) {
             if let Some(s) = h.slot {
-                // A slot that cannot be cleared is not reused.
-                if self.ring.set_file(s, -1).is_ok() {
-                    self.free_slots.push(s);
-                }
+                // Clearing it only lets the kernel drop its reference now: the next file that
+                // takes the slot replaces whatever is there, so a failure here changes nothing.
+                let _ = self.ring.set_file(s, -1);
+                self.free_slots.push(s);
             }
         }
     }
@@ -435,9 +465,10 @@ impl IoUringDisk {
     /// is just starting).
     fn advance(&mut self, i: usize, last: Option<io::Result<u32>>) {
         let next = match self.running[i].work {
-            Work::Write { .. } => self.advance_write(i, last),
-            Work::Read { .. } => self.advance_read(i, last),
             Work::Steps { .. } => self.advance_steps(i, last),
+            Work::Write { .. } | Work::Read { .. } => {
+                data_step(&mut self.ring, &self.files, &mut self.running[i], last)
+            }
         };
         match next {
             Ok(Some(op)) => match self.ring.push(op) {
@@ -450,61 +481,6 @@ impl IoUringDisk {
             Ok(None) => self.finish(i, Ok(())),
             Err(e) => self.finish(i, Err(e)),
         }
-    }
-
-    fn advance_write(
-        &mut self,
-        i: usize,
-        last: Option<io::Result<u32>>,
-    ) -> Result<Option<Op>, IoErrno> {
-        let IoOp::WriteAt { file, offset, data, .. } = &self.running[i].op else { unreachable!() };
-        let (file, offset, data) = (*file, *offset, data.clone());
-        let Work::Write { pos, buf } = &mut self.running[i].work else { unreachable!() };
-        match last {
-            Some(Err(e)) => return Err(errno(&e)),
-            // A write that moves nothing would loop for ever.
-            Some(Ok(0)) => return Err(IoErrno::Io),
-            Some(Ok(n)) => *pos += n as usize,
-            None => {}
-        }
-        if *pos >= data.len() {
-            return Ok(None);
-        }
-        let (pos, buf) = (*pos, *buf);
-        let f = self.files.get(&file).ok_or(IoErrno::BadFile)?;
-        let n = (data.len() - pos).min(BUFFER_BYTES);
-        let at = offset + pos as u64;
-        let target = f.target(at, n as u64);
-        let b = self.ring.buffer(buf).expect("the job's buffer is idle between its operations");
-        b[..n].copy_from_slice(&data[pos..pos + n]);
-        Ok(Some(Op::WriteFixed { target, buf, at: 0, len: n as u32, offset: at }))
-    }
-
-    fn advance_read(
-        &mut self,
-        i: usize,
-        last: Option<io::Result<u32>>,
-    ) -> Result<Option<Op>, IoErrno> {
-        let IoOp::ReadAt { file, offset, len, .. } = &self.running[i].op else { unreachable!() };
-        let (file, offset, len) = (*file, *offset, *len as usize);
-        let Work::Read { got, buf } = &mut self.running[i].work else { unreachable!() };
-        let buf = *buf;
-        match last {
-            Some(Err(e)) => return Err(errno(&e)),
-            Some(Ok(0)) => return Ok(None),
-            Some(Ok(n)) => {
-                let b = self.ring.buffer(buf).expect("the read has completed");
-                got.extend_from_slice(&b[..n as usize]);
-            }
-            None => {}
-        }
-        if got.len() >= len {
-            return Ok(None);
-        }
-        let at = offset + got.len() as u64;
-        let n = (len - got.len()).min(BUFFER_BYTES);
-        let target = self.files.get(&file).ok_or(IoErrno::BadFile)?.target(at, n as u64);
-        Ok(Some(Op::ReadFixed { target, buf, at: 0, len: n as u32, offset: at }))
     }
 
     fn advance_steps(
@@ -569,9 +545,8 @@ impl IoUringDisk {
                 let mut fds = opened.into_iter();
                 let buffered = fds.next().map(|fd| self.handle(fd));
                 let direct = fds.next().map(|fd| self.handle(fd));
-                if let Some(buffered) = buffered
-                    && let Some(old) = self.files.insert(file, OpenFile { buffered, direct })
-                {
+                let buffered = buffered.expect("a finished open has its descriptor");
+                if let Some(old) = self.files.insert(file, OpenFile { buffered, direct }) {
                     self.release(old);
                 }
                 IoDone::Ok(op)
@@ -579,6 +554,57 @@ impl IoUringDisk {
             (Ok(()), op) => IoDone::Ok(op.without_data()),
         };
         self.running[i].result = Some(done);
+    }
+}
+
+/// The next ring operation of a read or a write after the last one ended with `last` (`None`
+/// when it is just starting); `None` when the job is done.
+fn data_step(
+    ring: &mut Ring,
+    files: &HashMap<FileId, OpenFile>,
+    job: &mut Job,
+    last: Option<io::Result<u32>>,
+) -> Result<Option<Op>, IoErrno> {
+    match (&job.op, &mut job.work) {
+        (IoOp::WriteAt { file, offset, data, .. }, Work::Write { pos, buf }) => {
+            match last {
+                Some(Err(e)) => return Err(errno(&e)),
+                // A write that moves nothing would loop for ever.
+                Some(Ok(0)) => return Err(IoErrno::Io),
+                Some(Ok(n)) => *pos += n as usize,
+                None => {}
+            }
+            if *pos >= data.len() {
+                return Ok(None);
+            }
+            let f = files.get(file).ok_or(IoErrno::BadFile)?;
+            let n = (data.len() - *pos).min(BUFFER_BYTES);
+            let at = offset + *pos as u64;
+            let target = f.target(at, n as u64);
+            let b = ring.buffer(*buf).expect("the job's buffer is idle between its operations");
+            b[..n].copy_from_slice(&data[*pos..*pos + n]);
+            Ok(Some(Op::WriteFixed { target, buf: *buf, at: 0, len: n as u32, offset: at }))
+        }
+        (IoOp::ReadAt { file, offset, len, .. }, Work::Read { got, buf }) => {
+            let len = *len as usize;
+            match last {
+                Some(Err(e)) => return Err(errno(&e)),
+                Some(Ok(0)) => return Ok(None),
+                Some(Ok(n)) => {
+                    let b = ring.buffer(*buf).expect("the read has completed");
+                    got.extend_from_slice(&b[..n as usize]);
+                }
+                None => {}
+            }
+            if got.len() >= len {
+                return Ok(None);
+            }
+            let at = offset + got.len() as u64;
+            let n = (len - got.len()).min(BUFFER_BYTES);
+            let target = files.get(file).ok_or(IoErrno::BadFile)?.target(at, n as u64);
+            Ok(Some(Op::ReadFixed { target, buf: *buf, at: 0, len: n as u32, offset: at }))
+        }
+        _ => unreachable!("a data job is a read or a write"),
     }
 }
 
@@ -592,8 +618,8 @@ fn fail(op: &IoOp, errno: IoErrno) -> IoDone {
 impl Disk for IoUringDisk {
     fn list(&mut self, dir: &Path) -> Result<Vec<PathBuf>, IoErrno> {
         let mut v = Vec::new();
-        for entry in fs::read_dir(self.root.join(dir)).map_err(|e| errno(&e))? {
-            let entry = entry.map_err(|e| errno(&e))?;
+        for entry in fs::read_dir(self.root.join(dir)).map_err(io_errno)? {
+            let entry = entry.map_err(io_errno)?;
             v.push(dir.join(entry.file_name()));
         }
         v.sort();
@@ -601,7 +627,7 @@ impl Disk for IoUringDisk {
     }
 
     fn read_all(&mut self, path: &Path) -> Result<Vec<u8>, IoErrno> {
-        fs::read(self.root.join(path)).map_err(|e| errno(&e))
+        fs::read(self.root.join(path)).map_err(io_errno)
     }
 
     /// Submits `op` and waits for it; earlier submitted results stay for [`IoUringDisk::reap`].
@@ -641,6 +667,78 @@ mod tests {
         assert!(!conflicts(r(1, 0, 10), r(1, 0, 10)));
         assert!(!conflicts(w(1, 0, 10), w(2, 0, 10)));
         assert!(!conflicts(w(1, 0, 10), w(1, 10, 20)));
+    }
+
+    fn temp(name: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("teseladb-iud-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&p);
+        p
+    }
+
+    fn ok(d: &mut IoUringDisk, op: IoOp) {
+        let r = d.execute(op);
+        assert!(matches!(r, IoDone::Ok(_)), "{r:?}");
+    }
+
+    #[test]
+    fn a_refused_ring_says_why() {
+        let e = support_of(Err(io::Error::from_raw_os_error(1))).unwrap_err();
+        assert!(e.starts_with("io_uring_setup failed: "), "{e}");
+    }
+
+    #[test]
+    fn files_past_the_registered_table_use_their_descriptor() {
+        let root = temp("slots");
+        let mut d = IoUringDisk::open_with(&root, false, 1).unwrap();
+        assert_eq!((d.root(), d.direct_io()), (root.as_path(), false));
+        for f in 1..=2 {
+            ok(&mut d, IoOp::Create { file: FileId(f), path: format!("f{f}").into(), prealloc: 0 });
+            let data = Bytes::from_vec(vec![f as u8; 10]);
+            ok(&mut d, IoOp::WriteAt { file: FileId(f), offset: 0, data, batch: 0 });
+        }
+        assert!(d.files[&FileId(2)].buffered.slot.is_none(), "the table has one slot");
+        let r = d.execute(IoOp::ReadAt { file: FileId(2), offset: 0, len: 10, token: 1 });
+        assert_eq!(r, IoDone::Read { token: 1, data: Ok(Bytes::from_vec(vec![2; 10])) });
+        ok(&mut d, IoOp::Close { file: FileId(1) });
+        ok(&mut d, IoOp::Close { file: FileId(2) });
+        // The slot the first file left is taken again.
+        ok(&mut d, IoOp::Open { file: FileId(3), path: "f2".into() });
+        assert_eq!(d.files[&FileId(3)].buffered.slot, Some(0));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn without_ftruncate_the_core_truncates() {
+        let root = temp("trunc");
+        let mut d = IoUringDisk::open(&root, false).unwrap();
+        d.set_ftruncate(false);
+        ok(&mut d, IoOp::Create { file: FileId(1), path: "f".into(), prealloc: 8192 });
+        ok(&mut d, IoOp::Truncate { file: FileId(1), len: 100 });
+        assert_eq!(fs::metadata(root.join("f")).unwrap().len(), 100);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn stopping_waits_for_what_was_submitted() {
+        let root = temp("drain");
+        let mut d = IoUringDisk::open(&root, false).unwrap();
+        d.submit(IoOp::Create { file: FileId(1), path: "f".into(), prealloc: 0 });
+        for i in 0..40u64 {
+            let data = Bytes::from_vec(vec![i as u8; 4096]);
+            d.submit(IoOp::WriteAt { file: FileId(1), offset: i * 4096, data, batch: i });
+        }
+        d.submit(IoOp::Sync { file: FileId(9), batch: 0 });
+        assert_eq!(d.pending(), 42);
+        d.drain();
+        // Writes already handed to the kernel are waited for too.
+        let data = Bytes::from_vec(vec![7; 4096]);
+        d.submit(IoOp::WriteAt { file: FileId(1), offset: 40 * 4096, data, batch: 40 });
+        d.flush().unwrap();
+        d.drain();
+        assert_eq!(d.pending(), 0);
+        assert!(!d.ready());
+        assert_eq!(fs::metadata(root.join("f")).unwrap().len(), 41 * 4096);
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

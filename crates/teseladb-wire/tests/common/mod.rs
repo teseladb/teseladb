@@ -141,6 +141,10 @@ pub struct Mem {
     pub on_scan_data: Option<ScanHook>,
     /// The nodes `config.shards` lists, by name.
     pub shards: Vec<String>,
+    /// The shards `config.shards` lists as draining.
+    pub draining: Vec<String>,
+    /// What `config.databases` lists, if set.
+    pub databases_docs: Option<Vec<Document>>,
     /// The transactions' records, as their range keeps them (008): session, state and commit mark.
     pub records: BTreeMap<u128, (u128, teseladb_range::intents::TxnStatus, Hlc)>,
     /// The records a coordinator began (a recovery's own record was not).
@@ -185,6 +189,13 @@ pub struct Mem {
     /// Changes of `config.settings` that find another change before them: each answers that a
     /// document is no longer as it was read.
     pub settings_conflicts: usize,
+    /// The ranges the router knows (018 chunks); the chunk commands' orders apply to them at
+    /// once.
+    pub routes: Vec<teseladb_router::table::RouteEntry>,
+    /// The range orders sent to Group 0, in order.
+    pub range_orders: Vec<teseladb_meta::command::Group0Command>,
+    /// Range orders Group 0 refuses, with this error.
+    pub refuse_orders: Option<CommandError>,
 }
 
 /// A change of the data before a read of `[start, …)`.
@@ -771,18 +782,71 @@ impl Backend for Mem {
             .collect())
     }
 
+    fn route_entries(&mut self) -> Result<Vec<teseladb_router::table::RouteEntry>, CommandError> {
+        Ok(self.routes.clone())
+    }
+
+    fn range_order(
+        &mut self,
+        cmd: teseladb_meta::command::Group0Command,
+    ) -> Result<(), CommandError> {
+        use teseladb_meta::command::Group0Command as C;
+        if let Some(e) = self.refuse_orders.clone() {
+            return Err(e);
+        }
+        self.range_orders.push(cmd.clone());
+        let at = |routes: &[teseladb_router::table::RouteEntry], g| {
+            routes.iter().position(|e| e.group == g)
+        };
+        match cmd {
+            C::SplitRange { group, at: key } => {
+                if let Some(i) = at(&self.routes, group) {
+                    let next = self.routes.iter().map(|e| e.group.0).max().unwrap_or(0) + 1;
+                    let mut right = self.routes[i].clone();
+                    right.group = teseladb_types::GroupId(next);
+                    right.start = key.clone();
+                    self.routes[i].end = key;
+                    self.routes.insert(i + 1, right);
+                }
+            }
+            C::MergeRanges { left, right } => {
+                if let (Some(l), Some(r)) = (at(&self.routes, left), at(&self.routes, right)) {
+                    self.routes[l].end = self.routes[r].end.clone();
+                    self.routes.remove(r);
+                }
+            }
+            C::SetLeaderHint { group, node, .. } => {
+                if let Some(i) = at(&self.routes, group) {
+                    self.routes[i].leader_hint = Some(node);
+                }
+            }
+            C::SetReplicas { group, add, remove, .. } => {
+                if let Some(i) = at(&self.routes, group) {
+                    let e = &mut self.routes[i];
+                    e.voters.retain(|n| !remove.contains(n));
+                    e.voters.extend(add);
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn config_documents(&mut self, coll: &str) -> Result<Vec<Document>, CommandError> {
         Ok(match coll {
             teseladb_wire::commands::config_db::SHARDS => {
                 // As Group 0 lists them: the name and the address of the node.
                 let host = |s: &str| format!("{s}.cluster:27018");
-                let shard =
-                    |s: &String| Document::new().with("_id", s.as_str()).with("host", host(s));
+                let shard = |s: &String| {
+                    let d = Document::new().with("_id", s.as_str()).with("host", host(s));
+                    if self.draining.contains(s) { d.with("draining", true) } else { d }
+                };
                 self.shards.iter().map(shard).collect()
             }
             teseladb_wire::commands::config_settings::SETTINGS => {
                 self.settings.clone().unwrap_or_default()
             }
+            "databases" => self.databases_docs.clone().unwrap_or_default(),
             COLLECTIONS => {
                 let mut out = Vec::new();
                 for (ns, c) in &self.catalog.collections {

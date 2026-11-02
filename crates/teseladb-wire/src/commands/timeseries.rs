@@ -46,7 +46,7 @@ const MAX_BUCKETS: u32 = 1 << 20;
 
 /// `bucketRoundingSeconds` of a granularity (RefDb's documentation of time series
 /// granularity: one minute, one hour, one day).
-fn rounding_of(g: Granularity) -> i64 {
+pub(crate) fn rounding_of(g: Granularity) -> i64 {
     match g {
         Granularity::Seconds => 60,
         Granularity::Minutes => 3_600,
@@ -80,20 +80,28 @@ pub fn bucket_key(coll: &CollectionEntry, id: [u8; 12]) -> Result<Vec<u8>, Comma
 
 /// The keys of the buckets of `coll` a read within `bounds` may need: buckets are in `_id`
 /// order, which starts with their window's start, so a bound on the time narrows the scan to the
-/// windows it reaches.
+/// windows it reaches; every bucket once `coll` has a measurement outside the windows a bucket
+/// `_id` holds in order ([`super::timeseries_range`]).
 pub fn scan_range(
     coll: &CollectionEntry,
     spec: &BucketSpec,
     bounds: &teseladb_exec::timeseries_read::Bounds,
 ) -> Result<(Vec<u8>, Vec<u8>), CommandError> {
     let (start, end) = super::query::documents_of(coll);
+    if super::timeseries_range::is_extended(coll) {
+        return Ok((start, end));
+    }
     let at = |window: i64| -> Result<Vec<u8>, CommandError> {
         let mut id = [0u8; 12];
         id[..4].copy_from_slice(&(window.clamp(0, i64::from(u32::MAX)) as u32).to_be_bytes());
         bucket_key(coll, id)
     };
+    // A bucket starts less than a span before its measurements, also one written before
+    // `collMod` widened the span.
     let from = match bounds.after {
-        Some(t) if spec.window(t) > 0 => at(spec.window(t))?,
+        Some(t) if spec.window(t) > spec.max_span_seconds => {
+            at(spec.window(t) - spec.max_span_seconds)?
+        }
         _ => start,
     };
     let to = match bounds.before {
@@ -141,6 +149,7 @@ pub fn write<B: Backend + ?Sized>(
             }
         }
     }
+    super::timeseries_range::mark(backend, (coll, spec), timed.iter().map(|(_, t)| *t))?;
     let batch = Batch { coll, spec, ordered, rules, stmt };
     let cut = match ordered {
         true => super::mutation::timeseries::first_refused(&docs[..no_time], spec, rules),
@@ -373,12 +382,13 @@ fn index_conditions(spec: &BucketSpec, filter: &Document) -> Option<Document> {
         }
     };
     take(filter);
-    if let Some(Value::Array(all)) = filter.get("$and") {
-        for c in all {
-            if let Value::Document(d) = c {
-                take(d);
-            }
-        }
+    // The filter is already parsed: each clause of its `$and` is a document.
+    let clauses = match filter.get("$and") {
+        Some(Value::Array(all)) => all.as_slice(),
+        _ => &[],
+    };
+    for d in clauses.iter().filter_map(Value::as_document) {
+        take(d);
     }
     kept.iter().next()?;
     super::timeseries_filter::bucket_filter(spec, &kept).ok()
@@ -864,7 +874,8 @@ impl Statement<'_> {
     /// An update of the meta value of every measurement of `b`, if its meta value matches.
     fn update(&self, b: &Read, u: &Value) -> Result<Change, CommandError> {
         let none = Change { new: None, n: 0, modified: 0, value: None };
-        let Some(field) = self.spec.meta_field.as_deref() else { return Ok(none) };
+        // `check_update` refuses every update of a time series without a meta field.
+        let field = self.spec.meta_field.as_deref().unwrap_or_default();
         let mut meta = teseladb_bson::Document::new();
         if let Some(v) = &b.meta {
             meta.push(field, v.clone());

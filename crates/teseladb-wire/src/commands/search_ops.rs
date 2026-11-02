@@ -175,6 +175,8 @@ const DUMP_EVERY: usize = 1024;
 pub trait SegmentStore: Send + Sync + std::fmt::Debug {
     /// Replaces the file of index `id` with `bytes`, whole or not at all.
     fn put(&self, id: &[u8; 12], bytes: &[u8]) -> Result<(), String>;
+    /// The file of index `id`, if there is one.
+    fn get(&self, id: &[u8; 12]) -> Result<Option<Vec<u8>>, String>;
     /// Removes the file of index `id`; one that is not there is already removed.
     fn remove(&self, id: &[u8; 12]) -> Result<(), String>;
 }
@@ -197,6 +199,20 @@ pub struct SearchIndexes {
     building: BTreeMap<[u8; 12], Served>,
     /// The indexes whose segments a query or the builder holds now.
     borrowed: std::collections::BTreeSet<[u8; 12]>,
+    /// Bytes the segments may take in memory: the node's part for them (012 FR-013, D-105).
+    memory_limit: Option<u64>,
+    /// Indexes written out of memory to keep within it.
+    evicted: u64,
+    /// What each index written out of memory serves; its segments wait in its file.
+    out: BTreeMap<[u8; 12], Served>,
+}
+
+/// An estimate of the bytes `built`'s segments take.
+fn memory_of(built: &Built) -> u64 {
+    match &built.indexer {
+        Segments::Search(ix) => ix.memory_bytes(),
+        Segments::Vector(_) => 0,
+    }
 }
 
 /// The segment files of a `search` index as one node sends them to a new replica with the SST
@@ -235,7 +251,13 @@ impl SearchIndexes {
             definition: b.definition.clone(),
             failure: None,
         });
-        built.or_else(|| self.failed.get(id).cloned())
+        built.or_else(|| self.out.get(id).cloned()).or_else(|| self.failed.get(id).cloned())
+    }
+
+    /// Whether the segments of index `id` are in memory (not written out to keep within the
+    /// limit, nor taken by an operation).
+    pub fn in_memory(&self, id: &[u8; 12]) -> bool {
+        self.built.contains_key(id)
     }
 
     /// The definition this node is building index `id` with when it serves none yet.
@@ -259,7 +281,58 @@ impl SearchIndexes {
         self.built.remove(id);
         self.failed.remove(id);
         self.received.remove(id);
+        self.out.remove(id);
         self.store.as_ref().map_or(Ok(()), |store| store.remove(id))
+    }
+
+    /// Keeps the segments in memory within `bytes` (012 FR-013): past it, the indexes not in use
+    /// are written to their file and leave memory, the largest first, until the rest fit; a query
+    /// that needs one reads it back. `None`: no limit.
+    pub fn set_memory_limit(&mut self, bytes: Option<u64>) {
+        self.memory_limit = bytes;
+    }
+
+    /// Indexes written out of memory to keep within the limit since the node started.
+    pub fn evicted(&self) -> u64 {
+        self.evicted
+    }
+
+    /// Writes out of memory the indexes past the limit, except `keep` (in use).
+    fn evict_over_limit(&mut self, keep: &[u8; 12]) {
+        let Some(limit) = self.memory_limit else { return };
+        let mut total: u64 = self.built.values().map(memory_of).sum();
+        while total > limit {
+            let largest = self
+                .built
+                .iter()
+                // An index on a view has no file to come back from: it stays.
+                .filter(|(id, b)| *id != keep && b.view.is_none() && memory_of(b) > 0)
+                .max_by_key(|(_, b)| memory_of(b))
+                .map(|(id, b)| (*id, memory_of(b)));
+            let Some((id, bytes)) = largest else { return };
+            // An index whose file cannot be written stays: losing it would mean a rebuild.
+            if self.store.is_none() || self.write_file(&id).is_err() {
+                return;
+            }
+            if let Some(b) = self.built.remove(&id) {
+                let served = Served {
+                    version: b.version,
+                    defined_ms: b.defined_ms,
+                    definition: b.definition,
+                    failure: None,
+                };
+                self.out.insert(id, served);
+            }
+            self.evicted += 1;
+            total -= bytes;
+        }
+    }
+
+    /// The file of index `id` when it was written out of memory, which then comes back.
+    fn read_back(&mut self, id: &[u8; 12]) -> Option<Shipped> {
+        self.out.remove(id)?;
+        let bytes = self.store.as_ref()?.get(id).ok()??;
+        Shipped::decode(&bytes).ok().map(|(_, s)| s)
     }
 
     /// Keeps the segments of each index in `store` from now on (FR-012).
@@ -416,8 +489,18 @@ pub fn with_index<B: Backend + ?Sized, R>(
     if !lock(shared).search.background {
         return with_built(backend, shared, coll, entry, synonyms, f);
     }
-    let Some(mut built) = borrow(backend, shared, &entry.id, coll.id)? else {
-        return Err(query_error(state_message(entry, coll, ns, "INITIAL_SYNC")));
+    let mut built = match borrow(backend, shared, &entry.id, coll.id)? {
+        Some(b) => b,
+        None => {
+            // An index written out of memory comes back from its file (012 FR-013).
+            let mut indexes = lock(shared);
+            let Some(shipped) = indexes.search.read_back(&entry.id) else {
+                return Err(query_error(state_message(entry, coll, ns, "INITIAL_SYNC")));
+            };
+            indexes.search.borrowed.insert(entry.id);
+            drop(indexes);
+            fresh(coll, entry, Some(shipped))?
+        }
     };
     let caught =
         catch_up(backend, coll, &mut built).and_then(|()| built.indexer.set_synonyms(synonyms));
@@ -511,6 +594,8 @@ fn give_back(
             CommandError::new(INTERNAL_ERROR, format!("cannot write a search segment: {e}"))
         })?;
     }
+    // Past the memory for segments, the indexes not in use go to their files (012 FR-013).
+    search.evict_over_limit(&id);
     Ok(())
 }
 
@@ -564,7 +649,14 @@ fn with_built<B: Backend + ?Sized, R>(
 ) -> Result<R, CommandError> {
     let (taken, received) = {
         let mut indexes = lock(shared);
-        (indexes.search.built.remove(&entry.id), indexes.search.received.remove(&entry.id))
+        let taken = indexes.search.built.remove(&entry.id);
+        let received = indexes.search.received.remove(&entry.id);
+        // An index written out of memory comes back from its file (012 FR-013).
+        let received = match (&taken, received) {
+            (None, None) => indexes.search.read_back(&entry.id),
+            (_, r) => r,
+        };
+        (taken, received)
     };
     let (mut built, fresh_build) = match taken {
         Some(b) if b.version == entry.version && b.collection == coll.id => (b, false),

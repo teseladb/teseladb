@@ -8,6 +8,7 @@ pub mod admin;
 pub mod admin_apikeys;
 pub mod admin_http;
 pub mod admin_tenants;
+pub mod affinity;
 pub mod at_rest;
 pub mod audit_log;
 pub mod authz_lease;
@@ -75,7 +76,7 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::time::Duration;
 
-use teseladb_io::FileDisk;
+use teseladb_io::NodeDisk;
 
 use crate::cli::{Command, StartOpts, USAGE, USAGE_EXIT};
 use crate::client_listener::ClientConfig;
@@ -197,6 +198,10 @@ pub fn node_config(o: &StartOpts) -> NodeConfig {
         data_dir: Some(o.dbpath.clone()),
         tags: o.tags.clone(),
         memory_limit: o.memory_limit,
+        affinity: match &o.cpu_list {
+            Some(l) => affinity::Affinity::List(l.clone()),
+            None => affinity::Affinity::Allowed,
+        },
         // The block cache takes its whole part of the node's memory (012 FR-013).
         lsm: teseladb_lsm::LsmConfig {
             cache_bytes: u64::MAX,
@@ -555,7 +560,17 @@ pub fn start(
         client.kerberos = kerberos;
     }
     let data = o.dbpath.clone();
-    let node = match Node::start(cfg, || FileDisk::open(&data), Some(lock)) {
+    // The disk executor and O_DIRECT (012 FR-003, FR-007), decided once and logged.
+    let choice = match teseladb_io::node_disk::choose(o.io_executor, o.direct_io, &data) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = writeln!(err, "teseladb: {e}");
+            return 1;
+        }
+    };
+    log.info(&choice.to_string(), &[]);
+    cfg.direct_io = choice.direct;
+    let node = match Node::start(cfg, || NodeDisk::open(&data, &choice), Some(lock)) {
         Ok(n) => n,
         Err(e) => {
             let _ = writeln!(err, "teseladb: {e}");
@@ -802,6 +817,11 @@ pub fn serve<D: teseladb_raftlog::Disk + Send + 'static>(
     let _ = out.write_all(ready_line(format, id, &node.cluster_id(), &peer).as_bytes());
     let _ = out.flush();
     log.info("node ready", &[("node_id", &id), ("cores", &node.cores())]);
+    // Where the cores run (012 FR-006): every core is pinned or none is (`affinity::core_cpus`).
+    let cpus: Vec<String> = node.cpus().iter().flatten().map(ToString::to_string).collect();
+    if !cpus.is_empty() {
+        log.info("cores' CPUs", &[("cpus", &cpus.join(","))]);
+    }
     log::mark_started();
     for a in node.client_addrs() {
         log.info("clients' port", &[("addr", &a.to_string())]);

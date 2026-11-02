@@ -227,9 +227,10 @@ impl TsStats {
             let k = key_of(w, meta);
             if !pass.touched.contains(&k) {
                 s.displaced.insert(w);
-            } else if !pass.created.contains(&k) {
-                self.closed_time_forward += 1;
+                continue;
             }
+            // A window the aborted try opened itself closes uncounted.
+            self.closed_time_forward += i64::from(!pass.created.contains(&k));
         }
     }
 
@@ -337,16 +338,15 @@ impl TsStats {
         for key in &pass.routed {
             let window: Window = std::array::from_fn(|i| key[i]);
             let meta: Meta = std::array::from_fn(|i| key[4 + i]);
-            if let Some(s) = self.series.get_mut(&meta) {
-                s.open.remove(&window);
-                s.displaced.remove(&window);
-                s.archived.remove(&window);
-            }
+            // Every window the try went to has its meta value's entry ([`TsStats::route`]).
+            let s = self.series.entry(meta).or_default();
+            s.open.remove(&window);
+            s.displaced.remove(&window);
+            s.archived.remove(&window);
         }
+        // A meta value new to the try held only windows of the try.
         for meta in &pass.new_series {
-            if self.series.get(meta).is_some_and(|s| s.open.is_empty() && s.archived.is_empty()) {
-                self.series.remove(meta);
-            }
+            self.series.remove(meta);
         }
     }
 
@@ -354,12 +354,12 @@ impl TsStats {
     /// value when it holds no other window.
     pub fn cleared(&mut self, id: [u8; 12]) {
         let (window, meta, _) = split(id);
-        if let Some(s) = self.series.get_mut(&meta) {
-            s.open.remove(&window);
-            s.displaced.remove(&window);
-            if s.open.is_empty() && s.displaced.is_empty() && s.archived.is_empty() {
-                self.series.remove(&meta);
-            }
+        // The write routed there first, which gave the meta value its entry.
+        let s = self.series.entry(meta).or_default();
+        s.open.remove(&window);
+        s.displaced.remove(&window);
+        if s.open.is_empty() && s.displaced.is_empty() && s.archived.is_empty() {
+            self.series.remove(&meta);
         }
     }
 

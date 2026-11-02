@@ -146,7 +146,9 @@ pub fn distance_to_edge(p: Point, a: Point, b: Point) -> f64 {
 
 /// Signed area of the spherical triangle `a, b, c` (positive when counterclockwise).
 fn signed_area(a: Point, b: Point, c: Point) -> f64 {
-    let det = a.dot(b.cross(c));
+    // `a · (b × c)` through the edges from `a`: the same value, without the cancellation that
+    // gives a tiny triangle the wrong sign.
+    let det = a.dot(b.add_scaled(a, -1.0).cross(c.add_scaled(a, -1.0)));
     2.0 * det.atan2(1.0 + a.dot(b) + b.dot(c) + c.dot(a))
 }
 
@@ -223,7 +225,9 @@ impl Loop {
         }
         let half = theta / 2.0;
         let bisector = Point([0.0; 3]).add_scaled(d_next, half.cos()).add_scaled(left, half.sin());
-        v.add_scaled(bisector, NUDGE).normalize()
+        // Well inside the wedge for a loop smaller than the nudge, too.
+        let step = NUDGE.min(v.angle(prev).min(v.angle(next)) / 4.0);
+        v.add_scaled(bisector, step).normalize()
     }
 
     /// Whether the reference point is inside: the probe beside vertex 1 is inside by

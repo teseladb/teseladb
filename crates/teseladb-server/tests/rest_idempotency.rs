@@ -1,6 +1,7 @@
 //! `Idempotency-Key` on three nodes (019 T018, FR-010): the same write sent again, to another
-//! node and after the node that ran it stopped (its ranges elect another leader), answers the
-//! first answer and applies once; another request with the key gets `422`.
+//! node, after its range moved under a new leader and after the node that ran it stopped (its
+//! ranges elect another leader), answers the first answer and applies once; another request with
+//! the key gets `422`.
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -15,6 +16,8 @@ use teseladb_server::http_listener::HttpPortConfig;
 use teseladb_server::node::{Node, NodeConfig};
 
 const READY: Duration = Duration::from_secs(30);
+/// What a node may take to say how its replicas are.
+const ANSWER: Duration = Duration::from_secs(5);
 const C: &str = "/v1/databases/app/collections/c";
 
 fn start(join: Vec<String>) -> Node<MemDisk> {
@@ -130,8 +133,35 @@ fn a_write_sent_again_with_its_key_applies_once_across_nodes_and_leaders() {
         Value::Document(Document::new().with("v", 2).with("n", 1)),
     ];
     assert_eq!(counts(at[1]), want);
-    drop(others.into_iter().map(Node::stop).collect::<Vec<_>>());
+    // The node that ran both writes stops once every range has a voter on each node: the two
+    // left elect new leaders, and the retries sent to them still answer the first answers.
+    assert!(replicated(&first), "{:?}", first.ranges());
     drop(first.stop());
+    let again = settled(|| send(at[2], "POST", &format!("{C}/insertOne"), one, Some("k-insert")));
+    assert_eq!((again.status, doc(&again)), (a.status, doc(&a)));
+    let again = settled(|| send(at[1], "POST", &format!("{C}/updateMany"), many, Some("k-many")));
+    assert_eq!((again.status, doc(&again)), (m.status, doc(&m)));
+    assert_eq!(counts(at[2]), want);
+    drop(others.into_iter().map(Node::stop).collect::<Vec<_>>());
+}
+
+/// Whether Group 0 and each range `node` routes have a voter on each of the three nodes, waiting
+/// at most [`READY`].
+fn replicated(node: &Node<MemDisk>) -> bool {
+    let end = Instant::now() + READY;
+    let three = |v: &[teseladb_types::NodeId]| v.len() == 3;
+    while Instant::now() < end {
+        let group0 = node.view(ANSWER).is_some_and(|v| three(&v.voters));
+        let ranges = node.ranges().iter().all(|e| {
+            node.range_status(e.group, ANSWER)
+                .is_some_and(|s| three(&s.voters) && s.learners.is_empty())
+        });
+        if group0 && ranges {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    false
 }
 
 /// `teseladb admin` on `node`'s administration port: its output.
