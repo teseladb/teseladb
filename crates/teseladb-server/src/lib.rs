@@ -54,6 +54,7 @@ pub mod replicas;
 pub mod rollback;
 pub mod routes;
 pub mod sessions_ops;
+pub mod spill;
 pub mod sts_client;
 pub mod tls_port;
 pub mod tls_stream;
