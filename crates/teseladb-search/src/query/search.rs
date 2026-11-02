@@ -134,10 +134,14 @@ enum Operator {
     },
     /// Scores already computed, by document number (`hasRoot` inside `embeddedDocument`).
     Precomputed(BTreeMap<u32, f32>),
+    /// The scores elements take from the documents that hold them (`hasRoot`, `hasAncestor`).
+    Passed(embedded::Passed),
     /// `geoWithin`, `geoShape` or `near` on a `geo` field.
     Geo(geo::Geo),
     /// `autocomplete`.
     Autocomplete(autocomplete::Autocomplete),
+    /// `text` or `phrase` with `synonyms`.
+    Synonyms(synonyms::Synonyms),
     /// `span`, with its score option.
     Span(span::Span, Score),
     Compound {
@@ -146,6 +150,9 @@ enum Operator {
         filter: Vec<Operator>,
         must_not: Vec<Operator>,
         minimum: usize,
+        /// Whether a boost of the whole `compound` weighs its clauses (their term queries then
+        /// explain as `weight(… in n)`).
+        weighted: bool,
     },
 }
 
@@ -299,7 +306,34 @@ fn parse_text(index: &MemIndex, d: &Document, path: &str) -> Result<Operator, Se
         Some(p) => paths(index, p, &at("path"))?,
     };
     let fuzzy = parse_fuzzy(d.get("fuzzy"), &at("fuzzy"))?;
-    Ok(Operator::Text { query, paths, fuzzy, score: parse_score(d.get("score"), &at("score"))? })
+    let score = parse_score(d.get("score"), &at("score"))?;
+    if let Some(mapping) = synonym_mapping(index, d, path)? {
+        if fuzzy.is_some() {
+            return Err(shape(path, "at most one of [fuzzy, synonyms] may be present"));
+        }
+        let phrase = None;
+        return Ok(Operator::Synonyms(synonyms::Synonyms { query, paths, mapping, phrase, score }));
+    }
+    Ok(Operator::Text { query, paths, fuzzy, score })
+}
+
+/// The synonym mapping `d` names in `synonyms`, checked against the definition.
+fn synonym_mapping(
+    index: &MemIndex,
+    d: &Document,
+    path: &str,
+) -> Result<Option<String>, SearchError> {
+    match d.get("synonyms") {
+        None => Ok(None),
+        Some(Value::String(name)) => {
+            if index.definition().synonyms.iter().any(|s| &s.name == name) {
+                Ok(Some(name.clone()))
+            } else {
+                Err(SearchError(format!("unknown synonym mapping name \"{name}\"")))
+            }
+        }
+        Some(_) => Err(shape(&format!("{path}.synonyms"), "must be a string")),
+    }
 }
 
 /// The `fuzzy` option of `text` and `term`: RefLib's defaults of `FuzzyQuery` as `refsearch` uses
@@ -423,7 +457,12 @@ fn parse_phrase(index: &MemIndex, d: &Document, path: &str) -> Result<Operator, 
             None => return Err(shape(&at("slop"), "must be a number")),
         },
     };
-    Ok(Operator::Phrase { query, paths, slop, score: parse_score(d.get("score"), &at("score"))? })
+    let score = parse_score(d.get("score"), &at("score"))?;
+    if let Some(mapping) = synonym_mapping(index, d, path)? {
+        let phrase = Some(slop);
+        return Ok(Operator::Synonyms(synonyms::Synonyms { query, paths, mapping, phrase, score }));
+    }
+    Ok(Operator::Phrase { query, paths, slop, score })
 }
 
 /// The indexed paths a `path` option names: a string, `{wildcard}` or an array of them.
@@ -541,12 +580,19 @@ fn parse_compound(index: &MemIndex, d: &Document, path: &str) -> Result<Operator
             "minimumShouldMatch cannot be greater than number of should clauses",
         ));
     }
-    Ok(Operator::Compound {
+    let op = Operator::Compound {
         must: clauses(index, d, "must", path)?,
         should,
         filter: clauses(index, d, "filter", path)?,
         must_not: clauses(index, d, "mustNot", path)?,
         minimum,
+        weighted: false,
+    };
+    // Measured: a boost weighs the clauses' terms; a constant or a function scores the whole.
+    Ok(match parse_score(d.get("score"), &format!("{path}.score"))? {
+        Score::Plain => op,
+        Score::Boost(b) => boosted(op, b),
+        other => Operator::Scored(Box::new(op), other),
     })
 }
 
@@ -595,6 +641,7 @@ fn eval(index: &MemIndex, op: &Operator) -> Result<BTreeMap<u32, f32>, SearchErr
         }
         Operator::Empty => Ok(BTreeMap::new()),
         Operator::Precomputed(s) => Ok(s.clone()),
+        Operator::Passed(p) => Ok(p.scores.clone()),
         Operator::HasRoot(_) => Err(outside_embedded("hasRoot")),
         Operator::HasAncestor { .. } => Err(outside_embedded("hasAncestor")),
         Operator::Geo(g) => {
@@ -625,6 +672,10 @@ fn eval(index: &MemIndex, op: &Operator) -> Result<BTreeMap<u32, f32>, SearchErr
             let s = index.matching_terms(path, inside).into_iter().map(|d| (d, boost)).collect();
             rescored(index, s, score)
         }
+        Operator::Synonyms(sy) => {
+            let s = sy.scores(index, boost_of(&sy.score))?;
+            rescored(index, s, &sy.score)
+        }
         Operator::Span(sp, score) => {
             let s = sp.scores(index, boost_of(score))?;
             rescored(index, s, score)
@@ -637,7 +688,7 @@ fn eval(index: &MemIndex, op: &Operator) -> Result<BTreeMap<u32, f32>, SearchErr
             let s = values::scores(index, v, boost_of(v.score()));
             rescored(index, s, v.score())
         }
-        Operator::Compound { must, should, filter, must_not, minimum } => {
+        Operator::Compound { must, should, filter, must_not, minimum, .. } => {
             eval_compound(index, must, should, filter, must_not, *minimum)
         }
     }
@@ -667,13 +718,19 @@ fn boosted(op: Operator, b: f32) -> Operator {
             Operator::Phrase { query, paths, slop, score: scaled(score) }
         }
         Operator::Exists { path, score } => Operator::Exists { path, score: scaled(score) },
-        Operator::Compound { must, should, filter, must_not, minimum } => Operator::Compound {
-            must: must.into_iter().map(|o| boosted(o, b)).collect(),
-            should: should.into_iter().map(|o| boosted(o, b)).collect(),
-            filter,
-            must_not,
-            minimum,
-        },
+        Operator::Synonyms(sy) => {
+            Operator::Synonyms(synonyms::Synonyms { score: scaled(sy.score), ..sy })
+        }
+        Operator::Compound { must, should, filter, must_not, minimum, weighted } => {
+            Operator::Compound {
+                must: must.into_iter().map(|o| boosted(o, b)).collect(),
+                should: should.into_iter().map(|o| boosted(o, b)).collect(),
+                filter,
+                must_not,
+                minimum,
+                weighted: weighted || b != 1.0,
+            }
+        }
         other if b == 1.0 => other,
         other => Operator::Scored(Box::new(other), Score::Boost(b)),
     }
@@ -747,6 +804,7 @@ fn eval_compound(
 }
 
 mod autocomplete;
+mod describe;
 mod embedded;
 mod explain;
 mod function;
@@ -757,6 +815,7 @@ mod pattern;
 mod query_string;
 mod sloppy;
 mod span;
+mod synonyms;
 pub(crate) mod values;
 
 #[cfg(test)]
@@ -765,6 +824,8 @@ mod geo_tests;
 mod m10_tests;
 #[cfg(test)]
 mod pattern_tests;
+#[cfg(test)]
+mod synonyms_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

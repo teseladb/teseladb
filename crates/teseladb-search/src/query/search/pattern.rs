@@ -25,12 +25,18 @@ pub(super) struct Pattern {
 }
 
 impl Pattern {
-    /// How `refsearch` names the query in `scoreDetails` (measured: `$type:string/t:gat*`).
-    pub(super) fn description(&self) -> String {
+    /// How `refsearch` names the query in `scoreDetails` (measured: `$type:string/t:gat*` and
+    /// `$type:string/t:/ga.o/`), its field names after `prefix`.
+    pub(super) fn description(&self, prefix: &str) -> String {
         let terms: Vec<String> = self
             .paths
             .iter()
-            .flat_map(|p| self.query.iter().map(move |q| format!("$type:string/{p}:{q}")))
+            .flat_map(|p| {
+                self.query.iter().map(move |q| {
+                    let q = if self.regex { format!("/{q}/") } else { q.clone() };
+                    format!("{prefix}$type:string/{p}:{q}")
+                })
+            })
             .collect();
         match terms.as_slice() {
             [one] => one.clone(),

@@ -2,6 +2,8 @@
 //! (RefLib's `Explanation` of `BM25Similarity`, measured 02-11-2026,
 //! `scratchpad/lane3k/m15.js`).
 
+use std::collections::BTreeMap;
+
 use super::{FieldStats, MemIndex, TextField};
 use crate::query::bm25::{Bm25, idf};
 use crate::segment::norms;
@@ -43,21 +45,58 @@ impl Explanation {
     }
 }
 
+/// How a weight's frequency is named in its explanation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FreqKind {
+    /// A term's occurrences.
+    Term,
+    /// A phrase's or span's matches.
+    Phrase,
+    /// The occurrences of the terms of a `Synonym` query.
+    Synonym,
+}
+
+/// A BM25 weight to explain: its description, the documents with each of its terms (one idf
+/// each, added), its boost, and how its frequency is named.
+pub(crate) struct Weight<'a> {
+    /// What the query is called.
+    pub description: String,
+    /// Documents with each term.
+    pub dfs: &'a [u64],
+    /// Factor of the weight (shown when it is not 1).
+    pub boost: f32,
+    /// How the frequency is named.
+    pub kind: FreqKind,
+}
+
 impl TextField {
-    /// The explanation of `term`'s score for `doc`, with weight `boost`, named `query`.
-    fn explain_term(
+    /// The explanation of `weight` for `doc` matched `freq` times.
+    pub(super) fn explain_weight(
         &self,
-        query: &str,
-        term: &str,
-        boost: f32,
+        weight: &Weight<'_>,
         doc: u32,
+        freq: f32,
         g: Option<&FieldStats>,
-    ) -> Option<Explanation> {
-        let docs = self.postings.get(term)?;
-        let freq = docs.get(&doc)?.len() as f32;
+    ) -> Explanation {
         let n_docs = g.map_or(self.lengths.len() as u64, |g| g.docs);
-        let df = self.df(term, docs.len(), g);
-        let idf_value = idf(n_docs, df) as f32;
+        let idf_of = |df: u64| {
+            Explanation::node(
+                idf(n_docs, df) as f32,
+                "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+                vec![
+                    Explanation::leaf(df as f32, "n, number of documents containing term"),
+                    Explanation::leaf(n_docs as f32, "N, total number of documents with field"),
+                ],
+            )
+        };
+        let idf_part = match weight.dfs {
+            [one] => idf_of(*one),
+            many => {
+                let parts: Vec<Explanation> = many.iter().map(|&df| idf_of(df)).collect();
+                let sum = parts.iter().map(|p| p.value).sum();
+                Explanation::node(sum, "idf, sum of:", parts)
+            }
+        };
         let total =
             g.map_or_else(|| self.tokens.values().map(|&l| u64::from(l)).sum(), |g| g.length);
         let avg = if n_docs == 0 { 1.0f32 } else { (total as f64 / n_docs as f64) as f32 };
@@ -65,21 +104,21 @@ impl TextField {
         let dl = norms::decode(norms::encode(len)) as f32;
         let Bm25 { k1, b } = Bm25::DEFAULT;
         let (k1, b) = (k1 as f32, b as f32);
-        let score = self.scorer(boost * idf_value, g)(doc, freq);
-        let tf = freq / (freq + k1 * (1.0 - b + b * dl / avg));
-        let idf_part = Explanation::node(
-            idf_value,
-            "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
-            vec![
-                Explanation::leaf(df as f32, "n, number of documents containing term"),
-                Explanation::leaf(n_docs as f32, "N, total number of documents with field"),
-            ],
-        );
+        let score = self.scorer(weight.boost * idf_part.value, g)(doc, freq);
+        // As RefLib's scorer: one minus one over one plus the frequency times the inverse norm.
+        let inverse = 1.0 / (k1 * ((1.0 - b) + b * dl / avg));
+        let tf = 1.0 - 1.0 / (1.0 + freq * inverse);
+        let freq_text = java_float(freq);
+        let freq_leaf = match weight.kind {
+            FreqKind::Term => "freq, occurrences of term within document".to_owned(),
+            FreqKind::Phrase => format!("phraseFreq={freq_text}"),
+            FreqKind::Synonym => format!("termFreq={freq_text}"),
+        };
         let tf_part = Explanation::node(
             tf,
             "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
             vec![
-                Explanation::leaf(freq, "freq, occurrences of term within document"),
+                Explanation::leaf(freq, freq_leaf),
                 Explanation::leaf(k1, "k1, term saturation parameter"),
                 Explanation::leaf(b, "b, length normalization parameter"),
                 Explanation::leaf(dl, "dl, length of field"),
@@ -87,22 +126,54 @@ impl TextField {
             ],
         );
         let mut parts = Vec::new();
-        if boost != 1.0 {
-            parts.push(Explanation::leaf(boost, "boost"));
+        if weight.boost != 1.0 {
+            parts.push(Explanation::leaf(weight.boost, "boost"));
         }
         parts.push(idf_part);
         parts.push(tf_part);
         let computed = Explanation::node(
             score,
-            format!("score(freq={freq:?}), computed as boost * idf * tf from:"),
+            format!("score(freq={freq_text}), computed as boost * idf * tf from:"),
             parts,
         );
-        Some(Explanation::node(
+        Explanation::node(
             score,
-            format!("{query} [BM25Similarity], result of:"),
+            format!("{} [BM25Similarity], result of:", weight.description),
             vec![computed],
-        ))
+        )
     }
+}
+
+/// `x` as Java's `Float.toString` writes it.
+pub(crate) fn java_float(x: f32) -> String {
+    java_number(f64::from(x), format!("{x:?}"), format!("{x:e}"))
+}
+
+/// `x` as Java's `Double.toString` writes it.
+pub(crate) fn java_double(x: f64) -> String {
+    java_number(x, format!("{x:?}"), format!("{x:e}"))
+}
+
+/// Java's form of a number whose shortest digits are `plain` and `sci`: plain between 10^-3
+/// and 10^7, scientific with `E` outside, always with a fraction.
+fn java_number(x: f64, plain: String, sci: String) -> String {
+    if !x.is_finite() {
+        return if x.is_nan() {
+            "NaN".to_owned()
+        } else if x > 0.0 {
+            "Infinity".to_owned()
+        } else {
+            "-Infinity".to_owned()
+        };
+    }
+    let a = x.abs();
+    if a == 0.0 || (1e-3..1e7).contains(&a) {
+        return if plain.contains('.') { plain } else { format!("{plain}.0") };
+    }
+    let (mantissa, exp) = sci.split_once('e').unwrap_or((&sci, "0"));
+    let mantissa =
+        if mantissa.contains('.') { mantissa.to_owned() } else { format!("{mantissa}.0") };
+    format!("{mantissa}E{exp}")
 }
 
 impl MemIndex {
@@ -116,8 +187,45 @@ impl MemIndex {
         boost: f32,
         doc: u32,
     ) -> Option<Explanation> {
+        self.explain_term_as(key, format!("{name}:{term}"), term, boost, doc)
+    }
+
+    /// [`MemIndex::explain_term`] with the query's whole `description`.
+    pub(crate) fn explain_term_as(
+        &self,
+        key: &str,
+        description: String,
+        term: &str,
+        boost: f32,
+        doc: u32,
+    ) -> Option<Explanation> {
         let field = self.fields.get(key)?;
-        field.explain_term(&format!("{name}:{term}"), term, boost, doc, self.global_of(key))
+        let g = self.global_of(key);
+        let docs = field.postings.get(term)?;
+        let freq = docs.get(&doc)?.len() as f32;
+        let df = field.df(term, docs.len(), g);
+        let weight = Weight { description, dfs: &[df], boost, kind: FreqKind::Term };
+        Some(field.explain_weight(&weight, doc, freq, g))
+    }
+
+    /// The explanation of `weight` on the field `key` for `doc` matched `freq` times.
+    pub(crate) fn explain_weight(
+        &self,
+        key: &str,
+        weight: &Weight<'_>,
+        doc: u32,
+        freq: f32,
+    ) -> Option<Explanation> {
+        let field = self.fields.get(key)?;
+        Some(field.explain_weight(weight, doc, freq, self.global_of(key)))
+    }
+
+    /// The number of documents with `term` in the field `key` (of the whole index when this
+    /// one is a segment of it).
+    pub(crate) fn doc_freq(&self, key: &str, term: &str) -> u64 {
+        let Some(field) = self.fields.get(key) else { return 0 };
+        let local = field.postings.get(term).map_or(0, BTreeMap::len);
+        field.df(term, local, self.global_of(key))
     }
 
     /// The query terms of `text` for the field at `path`, one per position (the terms of a

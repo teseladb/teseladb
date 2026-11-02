@@ -56,6 +56,8 @@ pub struct MemIndex {
     /// The statistics of the whole index when this one is a segment of it: its scores then use
     /// them instead of its own (FR-015, FR-016).
     global: Option<Stats>,
+    /// The synonym mappings loaded from their collections, by name.
+    synonyms: BTreeMap<String, synonyms::SynonymMap>,
 }
 
 /// What the scores of a string field depend on: its number of documents, the sum of their
@@ -135,6 +137,7 @@ impl MemIndex {
             by_key: BTreeMap::new(),
             fields: BTreeMap::new(),
             global: None,
+            synonyms: BTreeMap::new(),
         }
     }
 
@@ -393,7 +396,8 @@ impl MemIndex {
     /// The indexed string paths that `pattern` names: a path, or `*` for all of them.
     pub fn paths(&self, pattern: &str) -> Vec<String> {
         if pattern == "*" {
-            return self.fields.keys().cloned().collect();
+            // The grams of `autocomplete` fields are not a string path.
+            return self.fields.keys().filter(|k| !k.starts_with("$type:")).cloned().collect();
         }
         self.fields.keys().filter(|p| *p == pattern).cloned().collect()
     }
@@ -683,19 +687,32 @@ impl TextField {
         boost: f32,
         g: Option<&FieldStats>,
     ) -> Vec<(u32, f32)> {
-        let Some(first) = terms.first() else { return Vec::new() };
+        let Some((dfs, freqs)) = self.phrase_freqs(terms, slop, g) else { return Vec::new() };
         let n = g.map_or(self.lengths.len() as u64, |g| g.docs);
+        let idf_sum: f32 = dfs.iter().map(|&df| idf(n, df) as f32).sum();
+        let score = self.scorer(boost * idf_sum, g);
+        freqs.into_iter().map(|(doc, f)| (doc, score(doc, f))).collect()
+    }
+
+    /// The document counts of `terms` and the phrase frequency of each document with all of
+    /// them, `None` when a term is missing.
+    fn phrase_freqs(
+        &self,
+        terms: &[crate::analysis::tokenizers::Token],
+        slop: u32,
+        g: Option<&FieldStats>,
+    ) -> Option<(Vec<u64>, Vec<(u32, f32)>)> {
+        let first = terms.first()?;
         let mut lists = Vec::with_capacity(terms.len());
-        let mut idf_sum = 0.0f32;
+        let mut dfs = Vec::with_capacity(terms.len());
         for t in terms {
-            let Some(docs) = self.postings.get(&t.text) else { return Vec::new() };
-            idf_sum += idf(n, self.df(&t.text, docs.len(), g)) as f32;
+            let docs = self.postings.get(&t.text)?;
+            dfs.push(self.df(&t.text, docs.len(), g));
             lists.push((docs, i64::from(t.position) - i64::from(first.position)));
         }
-        let score = self.scorer(boost * idf_sum, g);
         let (shortest, _) =
             lists.iter().min_by_key(|(d, _)| d.len()).copied().unwrap_or((lists[0].0, 0));
-        shortest
+        let freqs = shortest
             .keys()
             .filter_map(|doc| {
                 let places: Option<Vec<Vec<i64>>> = lists
@@ -705,9 +722,10 @@ impl TextField {
                     })
                     .collect();
                 let freq = phrase_freq(&places?, i64::from(slop));
-                (freq > 0.0).then(|| (*doc, score(*doc, freq)))
+                (freq > 0.0).then_some((*doc, freq))
             })
-            .collect()
+            .collect();
+        Some((dfs, freqs))
     }
 
     /// The score of each document that `segment` matches.
@@ -777,14 +795,9 @@ impl TextField {
         freqs.into_iter().map(|(doc, freq)| (doc, score(doc, freq))).collect()
     }
 
-    /// [`MemIndex::fuzzy_scores`] for one query term.
-    fn fuzzy_scores(
-        &self,
-        term: &str,
-        fuzzy: &Fuzzy,
-        boost: f32,
-        g: Option<&FieldStats>,
-    ) -> Vec<(u32, f32)> {
+    /// The terms within `fuzzy` of `term`, closest first, each with its weight
+    /// `1 - edits / shortest length` (RefLib's top-terms blended rewrite).
+    fn fuzzy_terms(&self, term: &str, fuzzy: &Fuzzy) -> Vec<(String, f32)> {
         let lev = Levenshtein::new(term, fuzzy.max_edits, fuzzy.prefix_length);
         let len = term.chars().count();
         let mut found: Vec<(&String, f32)> = self
@@ -797,12 +810,34 @@ impl TextField {
             })
             .collect();
         found.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-        let kept: Vec<(&String, f32)> = found.into_iter().take(fuzzy.max_expansions).collect();
-        let df = kept.iter().map(|(t, _)| self.df(t, self.postings[*t].len(), g)).max();
+        let mut kept: Vec<(String, f32)> =
+            found.into_iter().take(fuzzy.max_expansions).map(|(t, w)| (t.clone(), w)).collect();
+        // The rewritten query lists its terms in term order (measured with `scoreDetails`).
+        kept.sort_by(|a, b| a.0.cmp(&b.0));
+        kept
+    }
+
+    /// The largest document count among `kept`, which every kept term's idf uses.
+    fn blended_df(&self, kept: &[(String, f32)], g: Option<&FieldStats>) -> u64 {
+        kept.iter()
+            .map(|(t, _)| self.df(t, self.postings.get(t).map_or(0, BTreeMap::len), g))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// [`MemIndex::fuzzy_scores`] for one query term.
+    fn fuzzy_scores(
+        &self,
+        term: &str,
+        fuzzy: &Fuzzy,
+        boost: f32,
+        g: Option<&FieldStats>,
+    ) -> Vec<(u32, f32)> {
+        let kept = self.fuzzy_terms(term, fuzzy);
         let n = g.map_or(self.lengths.len() as u64, |g| g.docs);
-        let idf = idf(n, df.unwrap_or(0)) as f32;
+        let idf = idf(n, self.blended_df(&kept, g)) as f32;
         let mut sums: BTreeMap<u32, f32> = BTreeMap::new();
-        for (t, weight) in kept {
+        for (t, weight) in &kept {
             let score = self.scorer(boost * weight * idf, g);
             for (&doc, positions) in &self.postings[t] {
                 *sums.entry(doc).or_insert(0.0) += score(doc, positions.len() as f32);
@@ -1044,8 +1079,13 @@ fn phrase_freq(places: &[Vec<i64>], slop: i64) -> f32 {
 
 mod dump;
 mod explain;
+mod phrases;
+mod synonyms;
 pub use dump::{DumpError, applied_of};
 pub use explain::Explanation;
+pub(crate) use explain::{FreqKind, Weight, java_double, java_float};
+pub(crate) use phrases::{MultiPhrase, PhraseAt};
+pub use synonyms::{EQUIVALENT, EXPLICIT};
 
 #[cfg(test)]
 mod tests;
