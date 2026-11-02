@@ -1676,7 +1676,7 @@ impl<'c> Interp<'c> {
 
     pub fn iterate(&mut self, v: &Val) -> R<Vec<Val>> {
         match v {
-            Val::Str(s) => Ok(s.chars().map(|c| Val::Str(c.to_string().into())).collect()),
+            Val::Str(s) => Ok(crate::text::code_points(s).map(|c| Val::Str(c.into())).collect()),
             Val::Obj(o) => {
                 let kind = o.borrow().kind.clone();
                 match kind {
@@ -2557,12 +2557,9 @@ impl<'c> Interp<'c> {
                             }
                         }
                         Val::Str(s) => {
-                            for (i, c) in s.chars().enumerate() {
-                                self.define(
-                                    &o,
-                                    &i.to_string(),
-                                    Prop::data(Val::Str(c.to_string().into())),
-                                )?;
+                            for (i, c) in crate::strings::units(s).into_iter().enumerate() {
+                                let unit = crate::strings::from_units(&[c]);
+                                self.define(&o, &i.to_string(), Prop::data(Val::Str(unit.into())))?;
                             }
                         }
                         _ => {}

@@ -712,3 +712,29 @@ JSON.parse('{"a": 1}', function(k, v) { if (k === 'a') { Object.defineProperty(t
 JSON.parse('tru')	E:SyntaxError:JSON.parse: unexpected keyword at line 1 column 1 of the JSON data
 JSON.parse('{"a" 1}')	E:SyntaxError:JSON.parse: expected ':' after property name in object at line 1 column 6 of the JSON data
 JSON.rawJSON(Symbol())	E:TypeError:can't convert symbol to string
+String.fromCodePoint(0xD800).length	J:1
+String.fromCodePoint(0xD800, 0xDC00).codePointAt(0)	J:65536
+"a😀b".split("\uDE00").length	J:2
+"a😀b".split("").length	J:4
+"😀".split("\uD83D").length	J:2
+Object.keys({..."a😀"}).length	J:3
+/^.$/.test("😀")	J:false
+/^.$/u.test("😀")	J:true
+/^..$/.test("😀")	J:true
+/\uD83D/.test("😀")	J:true
+/\uD83D/u.test("😀")	J:false
+/[\uD83D]/.test("😀")	J:true
+/😀/u.test("😀")	J:true
+"x😀y".replace(/./g, "-")	S:----
+"x😀y".replace(/./gu, "-")	S:---
+"x😀y".match(/./g).length	J:4
+/(.)/.exec("😀")[1].length	J:1
+"😀".search(/\uDE00/)	J:1
+"a😀b".split(/(?:)/).length	J:4
+"a😀b".split(/(?:)/u).length	J:3
+/😀/.test("😀")	J:true
+/^[😀]$/.test("😀")	J:false
+/^[😀]$/u.test("😀")	J:true
+/\u{1F600}/u.test("😀")	J:true
+/a/y.lastIndex	J:0
+"😀a".replace(/a/, "$`").length	J:4

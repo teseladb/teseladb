@@ -363,20 +363,14 @@ impl P<'_> {
                 }
                 0..=0x1f => return Err(self.err(it, "bad control character in string literal")),
                 _ => {
-                    // One UTF-8 character.
-                    let len = match c {
-                        0..=0x7f => 1,
-                        0xc0..=0xdf => 2,
-                        0xe0..=0xef => 3,
-                        _ => 4,
-                    };
-                    let ch = std::str::from_utf8(&self.s[self.i..(self.i + len).min(self.s.len())])
-                        .unwrap_or("\u{fffd}");
-                    let mut buf = [0u16; 2];
-                    for ch in ch.chars() {
-                        units.extend_from_slice(ch.encode_utf16(&mut buf));
-                    }
-                    self.i += len;
+                    // A run of plain characters, as the engine keeps them.
+                    let end = self.s[self.i..]
+                        .iter()
+                        .position(|&b| b == b'"' || b == b'\\' || b < 0x20)
+                        .map_or(self.s.len(), |n| self.i + n);
+                    let run = std::str::from_utf8(&self.s[self.i..end]).unwrap_or("\u{fffd}");
+                    units.extend(crate::text::units(run));
+                    self.i = end;
                 }
             }
         }
@@ -387,20 +381,18 @@ impl P<'_> {
 pub fn quote(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{8}' => out.push_str("\\b"),
-            '\u{c}' => out.push_str("\\f"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => match crate::strings::lone_unit(c) {
-                Some(u) => out.push_str(&format!("\\u{u:04x}")),
-                None => out.push(c),
-            },
+    for cp in crate::text::cps(s) {
+        match char::from_u32(cp) {
+            Some('"') => out.push_str("\\\""),
+            Some('\\') => out.push_str("\\\\"),
+            Some('\n') => out.push_str("\\n"),
+            Some('\r') => out.push_str("\\r"),
+            Some('\t') => out.push_str("\\t"),
+            Some('\u{8}') => out.push_str("\\b"),
+            Some('\u{c}') => out.push_str("\\f"),
+            Some(c) if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            Some(c) => crate::text::push_char(&mut out, c),
+            None => out.push_str(&format!("\\u{cp:04x}")),
         }
     }
     out.push('"');
@@ -432,7 +424,9 @@ fn stringify(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     };
     let indent = match space {
         Val::Num(n) => " ".repeat(n.trunc().clamp(0.0, 10.0) as usize),
-        Val::Str(s) => s.chars().take(10).collect(),
+        Val::Str(s) => {
+            crate::text::from_units(&crate::text::units(&s)[..crate::text::utf16_len(&s).min(10)])
+        }
         _ => String::new(),
     };
     let mut st = S {

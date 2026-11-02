@@ -381,3 +381,67 @@ fn a_stray_backslash_does_not_parse() {
     let e = Program::compile("function(){ return (() \\> 1) }").unwrap_err();
     assert!(matches!(e, JsError::Compile { .. }), "{e:?}");
 }
+
+/// Text with the last code points of plane 16 is data like any other: it reaches the function and
+/// comes back intact, apart from the lone surrogates that the function itself builds (measured in
+/// `$function` and `$where` of 9.0.4).
+#[test]
+fn plane_16_private_use_text_is_not_a_lone_surrogate() {
+    let s = "\u{10F800}a\u{10FFFF}\u{10F7FF}";
+    let mut doc = Document::new();
+    doc.push("k\u{10F800}", Value::Int32(1));
+    let body = r#"function(s, d){ return {s: s, len: s.length, cc: s.charCodeAt(0), cp: s.codePointAt(0),
+        eq: s === "\u{10F800}a\u{10FFFF}\u{10F7FF}", dot: /^.a..$/u.test(s), units: /^..a....$/.test(s),
+        spread: [...s].length, json: JSON.stringify(s), up: s.toUpperCase(), sl: s.slice(0,2),
+        lone: "\uD800", lonelen: "\uD800".length, cat: ("\uD800" + "\uDC00").codePointAt(0),
+        keys: Object.keys(d), split: s.split(/a/), m: s.match(/[\u{10F800}]/u)[0], conc: s + "\uDBFE",
+        repl: s.replace(/a/, "\uDBFF"), lonejson: JSON.stringify("􏠀x\uDBFE"),
+        ls: "\uDBFE" + "\uDC00", lsl: ("\uDBFE" + "\uDC00").length, lscp: ("\uDBFE" + "\uDC00").codePointAt(0)} }"#;
+    let out = call_with(body, None, &[Value::String(s.into()), Value::Document(doc)]).unwrap();
+    let Value::Document(r) = out else { panic!("{out:?}") };
+    let get = |k: &str| r.get(k).cloned().unwrap_or_else(|| panic!("{k}"));
+    let st = |v: Value| match v {
+        Value::String(x) => x,
+        o => panic!("{o:?}"),
+    };
+    let n = |v: Value| match v {
+        Value::Double(x) => x,
+        o => panic!("{o:?}"),
+    };
+    assert_eq!(st(get("s")), s);
+    assert_eq!(n(get("len")), 7.0);
+    assert_eq!(n(get("cc")), 56318.0);
+    assert_eq!(n(get("cp")), 1_112_064.0);
+    assert_eq!(get("eq"), Value::Boolean(true));
+    assert_eq!(get("dot"), Value::Boolean(true));
+    assert_eq!(get("units"), Value::Boolean(true));
+    assert_eq!(n(get("spread")), 4.0);
+    assert_eq!(st(get("json")), format!("\"{s}\""));
+    assert_eq!(st(get("up")), "\u{10F800}A\u{10FFFF}\u{10F7FF}");
+    assert_eq!(st(get("sl")), "\u{10F800}");
+    assert_eq!(st(get("lone")), "\u{FFFD}");
+    assert_eq!(n(get("lonelen")), 1.0);
+    assert_eq!(n(get("cat")), 65536.0);
+    let Value::Array(keys) = get("keys") else { panic!() };
+    assert_eq!(keys, vec![Value::String("k\u{10F800}".into())]);
+    let Value::Array(split) = get("split") else { panic!() };
+    assert_eq!(
+        split,
+        vec![Value::String("\u{10F800}".into()), Value::String("\u{10FFFF}\u{10F7FF}".into())]
+    );
+    assert_eq!(st(get("m")), "\u{10F800}");
+    assert_eq!(st(get("conc")), format!("{s}\u{FFFD}"));
+    assert_eq!(st(get("repl")), "\u{10F800}\u{FFFD}\u{10FFFF}\u{10F7FF}");
+    assert_eq!(st(get("lonejson")), "\"\u{10F800}x\\udbfe\"");
+    assert_eq!(st(get("ls")), "\u{10F800}");
+    assert_eq!(n(get("lsl")), 2.0);
+    assert_eq!(n(get("lscp")), 1_112_064.0);
+    let mut d = Document::new();
+    d.push("s", Value::String(s.into()));
+    let w = call_with(
+        "this.s === '\\u{10F800}a\\u{10FFFF}\\u{10F7FF}' && this.s.length === 7",
+        Some(&d),
+        &[],
+    );
+    assert_eq!(w.unwrap(), Value::Boolean(true));
+}

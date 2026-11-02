@@ -77,64 +77,7 @@ pub fn this_str(it: &mut Interp, this: &Val) -> R<Name> {
     it.str_of(this)
 }
 
-/// Where a string keeps a lone surrogate (a UTF-16 unit of `0xD800..0xE000` without its pair,
-/// which UTF-8 cannot hold): the last 2048 code points of plane 16, one per unit.
-const LONE_BASE: u32 = 0x10_F800;
-
-/// The character that stands for the lone surrogate `u`.
-pub fn lone(u: u32) -> char {
-    char::from_u32(LONE_BASE + (u - 0xD800)).unwrap_or('\u{fffd}')
-}
-
-/// The lone surrogate `c` stands for, if it stands for one.
-pub fn lone_unit(c: char) -> Option<u16> {
-    let v = c as u32;
-    (v >= LONE_BASE).then(|| (v - LONE_BASE + 0xD800) as u16)
-}
-
-/// The UTF-16 units of `s`, lone surrogates included.
-pub fn units(s: &str) -> Vec<u16> {
-    let mut out = Vec::with_capacity(s.len());
-    let mut buf = [0u16; 2];
-    for c in s.chars() {
-        match lone_unit(c) {
-            Some(u) => out.push(u),
-            None => out.extend_from_slice(c.encode_utf16(&mut buf)),
-        }
-    }
-    out
-}
-
-/// How many UTF-16 units `s` has.
-pub fn utf16_len(s: &str) -> usize {
-    s.chars().map(|c| if lone_unit(c).is_some() { 1 } else { c.len_utf16() }).sum()
-}
-
-/// The string of UTF-16 units `u`, its lone surrogates kept.
-pub fn from_units(u: &[u16]) -> String {
-    char::decode_utf16(u.iter().copied())
-        .map(|r| r.unwrap_or_else(|e| lone(u32::from(e.unpaired_surrogate()))))
-        .collect()
-}
-
-/// `s` with a lone high surrogate followed by a lone low one joined into their character, as
-/// UTF-16 reads them once concatenated.
-pub fn pair_surrogates(s: String) -> String {
-    // A lone surrogate is a 4-byte character starting with 0xF4 0x8F.
-    if !s.as_bytes().windows(2).any(|w| w == [0xF4, 0x8F]) {
-        return s;
-    }
-    from_units(&units(&s))
-}
-
-/// `s` for BSON, which holds only UTF-8: a lone surrogate becomes U+FFFD.
-pub fn to_utf8(s: &str) -> std::borrow::Cow<'_, str> {
-    if s.chars().any(|c| lone_unit(c).is_some()) {
-        s.chars().map(|c| if lone_unit(c).is_some() { '\u{fffd}' } else { c }).collect()
-    } else {
-        std::borrow::Cow::Borrowed(s)
-    }
-}
+pub use crate::text::{from_units, pair_surrogates, to_utf8, units, utf16_len};
 
 fn int_arg(it: &mut Interp, v: &Val, default: f64) -> R<f64> {
     if matches!(v, Val::Undef) {
@@ -164,8 +107,8 @@ fn from_code_point(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     let mut s = String::new();
     for x in a {
         let n = it.number_of(x)?;
-        match char::from_u32(n as u32).filter(|_| n.fract() == 0.0 && n >= 0.0) {
-            Some(c) => s.push(c),
+        match (n.fract() == 0.0 && (0.0..=1_114_111.0).contains(&n)).then_some(n as u32) {
+            Some(cp) => crate::text::push_cp(&mut s, cp),
             None => {
                 return Err(it.error(
                     "RangeError",
@@ -394,7 +337,21 @@ fn split(it: &mut Interp, this: &Val, a: &[Val]) -> R {
             if sep.is_empty() {
                 units(&s).into_iter().map(|c| Val::Str(from_units(&[c]).into())).collect()
             } else {
-                s.split(&*sep).map(|p| Val::Str(p.into())).collect()
+                let (su, pu) = (units(&s), units(&sep));
+                let mut out = Vec::new();
+                let mut last = 0;
+                let mut i = 0;
+                while i + pu.len() <= su.len() {
+                    if su[i..i + pu.len()] == pu[..] {
+                        out.push(Val::Str(from_units(&su[last..i]).into()));
+                        i += pu.len();
+                        last = i;
+                    } else {
+                        i += 1;
+                    }
+                }
+                out.push(Val::Str(from_units(&su[last..]).into()));
+                out
             }
         }
     };

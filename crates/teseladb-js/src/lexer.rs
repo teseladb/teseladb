@@ -191,7 +191,7 @@ impl Lexer {
                 } else if c == '\\' && self.peek(1) == Some('u') {
                     self.bump();
                     self.bump();
-                    w.push(self.unicode_escape()?);
+                    crate::text::push_cp(&mut w, self.unicode_escape()?);
                 } else {
                     break;
                 }
@@ -318,7 +318,8 @@ impl Lexer {
         Ok(Tok::Num(v))
     }
 
-    fn unicode_escape(&mut self) -> Result<char, SyntaxError> {
+    /// The code point of a `\\u` escape after the `u`: a scalar value or a lone surrogate.
+    fn unicode_escape(&mut self) -> Result<u32, SyntaxError> {
         let code = if self.peek(0) == Some('{') {
             self.bump();
             let mut v = 0u32;
@@ -349,19 +350,14 @@ impl Lexer {
                 self.bump();
                 self.bump();
                 let low = self.unicode_escape()?;
-                let low = crate::strings::lone_unit(low).map_or(low as u32, u32::from);
                 if (0xDC00..0xE000).contains(&low) {
-                    return Ok(char::from_u32(0x10000 + ((v - 0xD800) << 10) + (low - 0xDC00))
-                        .unwrap_or('\u{fffd}'));
+                    return Ok(0x10000 + ((v - 0xD800) << 10) + (low - 0xDC00));
                 }
                 (self.i, self.line, self.col) = save;
             }
             v
         };
-        if (0xD800..0xE000).contains(&code) {
-            return Ok(crate::strings::lone(code));
-        }
-        Ok(char::from_u32(code).unwrap_or('\u{fffd}'))
+        Ok(if code > 0x10_FFFF { 0xFFFD } else { code })
     }
 
     fn escape(&mut self, out: &mut String) -> Result<(), SyntaxError> {
@@ -384,7 +380,7 @@ impl Lexer {
                 }
                 out.push(char::from_u32(v).unwrap_or('\u{fffd}'));
             }
-            'u' => out.push(self.unicode_escape()?),
+            'u' => crate::text::push_cp(out, self.unicode_escape()?),
             '\r' => {
                 if self.peek(0) == Some('\n') {
                     self.bump();
@@ -523,20 +519,14 @@ impl Lexer {
                             for _ in 0..6 {
                                 self.bump();
                             }
-                            out.push(
-                                char::from_u32(0x10000 + ((v - 0xD800) << 10) + (low - 0xDC00))
-                                    .unwrap_or('\u{fffd}'),
-                            );
+                            let pair = 0x10000 + ((v - 0xD800) << 10) + (low - 0xDC00);
+                            crate::text::push_cp(out, pair);
                             return Ok(());
                         }
                     }
                     v
                 };
-                if (0xD800..0xE000).contains(&code) {
-                    out.push(crate::strings::lone(code));
-                } else {
-                    out.push(char::from_u32(code).unwrap_or('\u{fffd}'));
-                }
+                crate::text::push_cp(out, code);
                 Ok(())
             }
             _ => self.escape(out).map_err(|_| UNICODE),

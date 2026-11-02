@@ -30,6 +30,7 @@ mod regex;
 mod shared;
 mod strings;
 mod symbols;
+mod text;
 mod typed;
 mod uri;
 mod value;
@@ -171,12 +172,16 @@ impl fmt::Debug for Program {
 impl Program {
     /// Parses `source`.
     pub fn compile(source: &str) -> Result<Program, JsError> {
-        let body = parser::parse_script(source).map_err(|e| {
+        let body = parser::parse_script(&text::encode(source)).map_err(|e| {
             // RefDb compiles a function inside `(` and `)`: its first line moves one column.
             let t = source.trim_start();
             let wrapped = t.starts_with("function") || t.starts_with("async") || t.starts_with('(');
             let shift = if wrapped && e.line == 1 { FUNCTION_PREFIX } else { 0 };
-            JsError::Compile { message: e.message, line: e.line, col: e.col + shift }
+            JsError::Compile {
+                message: text::to_utf8(&e.message).into_owned(),
+                line: e.line,
+                col: e.col + shift,
+            }
         })?;
         let is_function = matches!(body.as_slice(), [Stmt::Expr(Expr::Func(_))] | [Stmt::Func(..)]);
         Ok(Program { body: Rc::new(body), is_function, globals: Rc::default() })
@@ -240,7 +245,7 @@ impl Program {
                 for (k, v) in scope.iter() {
                     let x = bson::from_bson(it, v, 0)?;
                     let g = it.realm.global.clone();
-                    it.define(&g, k, value::Prop::data(x))?;
+                    it.define(&g, &text::encode(k), value::Prop::data(x))?;
                 }
             }
             if with_emit {
@@ -319,14 +324,15 @@ pub(crate) fn error_of(it: &mut Interp, c: Ctrl) -> JsError {
         Ctrl::Fatal(Fatal::OutOfMemory) => JsError::OutOfMemory,
         Ctrl::Fatal(Fatal::Steps) => JsError::Steps,
         Ctrl::Fatal(Fatal::Deadline) => JsError::Deadline,
-        Ctrl::Fatal(Fatal::Convert(m)) => JsError::NotConvertible(m),
+        Ctrl::Fatal(Fatal::Convert(m)) => JsError::NotConvertible(text::to_utf8(&m).into_owned()),
         Ctrl::Fatal(Fatal::Trap) => JsError::Trap,
         Ctrl::Throw(v) => {
             // The heap may be full: the message is read without new allocations counting.
             it.budget.used.set(0);
             let is_error = matches!(&v, Val::Obj(o) if matches!(o.borrow().kind, Kind::Error));
             if !is_error {
-                let text = it.str_of(&v).map(|s| s.to_string()).unwrap_or_default();
+                let text =
+                    it.str_of(&v).map(|s| text::to_utf8(&s).into_owned()).unwrap_or_default();
                 let (line, col) = it.shown(it.thrown_at);
                 return JsError::Thrown {
                     message: format!("uncaught exception: {text}"),
@@ -338,7 +344,7 @@ pub(crate) fn error_of(it: &mut Interp, c: Ctrl) -> JsError {
             }
             let mut read = |key: &str| match it.get(&v, key) {
                 Ok(Val::Undef) | Err(_) => None,
-                Ok(x) => it.str_of(&x).ok().map(|s| s.to_string()),
+                Ok(x) => it.str_of(&x).ok().map(|s| text::to_utf8(&s).into_owned()),
             };
             let message =
                 read("message").filter(|m| !m.is_empty()).unwrap_or_else(|| "none".into());

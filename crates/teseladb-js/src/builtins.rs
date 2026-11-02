@@ -1507,7 +1507,7 @@ fn symbol_builtins(it: &mut Interp, g: &ObjRef) -> R<()> {
 
 fn string_iter(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     let s = it.str_of(this)?;
-    make_iter(it, s.chars().map(|c| Val::Str(c.to_string().into())).collect())
+    make_iter(it, crate::text::code_points(&s).map(|c| Val::Str(c.into())).collect())
 }
 
 // RegExp: the literal and constructor keep the source and flags; matching is in `strings`.

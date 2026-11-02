@@ -243,7 +243,7 @@ fn to_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
         Bson::MinKey => "[object MinKey]".into(),
         Bson::MaxKey => "[object MaxKey]".into(),
         Bson::DbPointer(ns, id) => format!("DBPointer(\"{ns}\", ObjectId(\"{}\"))", hex(&id)),
-        Bson::Symbol(s) | Bson::Code(s) => s,
+        Bson::Symbol(s) | Bson::Code(s) => crate::text::encode(&s).into_owned(),
     };
     it.string(s)
 }
@@ -332,7 +332,7 @@ pub fn from_bson(it: &mut Interp, v: &Value, depth: usize) -> R {
         Value::Int32(n) => Val::Num(f64::from(*n)),
         Value::Int64(n) => make(it, Bson::Long(*n))?,
         Value::Decimal128(d) => make(it, Bson::Decimal(*d))?,
-        Value::String(s) => it.string(s.clone())?,
+        Value::String(s) => it.string(crate::text::encode(s).into_owned())?,
         Value::Boolean(b) => Val::Bool(*b),
         Value::Null => Val::Null,
         Value::Undefined => Val::Undef,
@@ -344,7 +344,7 @@ pub fn from_bson(it: &mut Interp, v: &Value, depth: usize) -> R {
         Value::MaxKey => make(it, Bson::MaxKey)?,
         Value::Regex { pattern, options } => {
             let flags: String = options.chars().filter(|c| "gimsuy".contains(*c)).collect();
-            crate::builtins::make_regexp(it, pattern.as_str().into(), flags.into())?
+            crate::builtins::make_regexp(it, crate::text::encode(pattern).into(), flags.into())?
         }
         Value::DbPointer { namespace, id } => make(it, Bson::DbPointer(namespace.clone(), *id))?,
         Value::Symbol(s) => make(it, Bson::Symbol(s.clone()))?,
@@ -368,7 +368,9 @@ pub fn from_bson(it: &mut Interp, v: &Value, depth: usize) -> R {
 /// The function `code` defines, as RefDb gives a `Code` value to JavaScript (a function
 /// stored in `system.js` is called by its name); `None` when the code is not one function.
 fn function_of(it: &mut Interp, code: &str) -> R<Option<Val>> {
-    let Ok(body) = crate::parser::parse_script(code) else { return Ok(None) };
+    let Ok(body) = crate::parser::parse_script(&crate::text::encode(code)) else {
+        return Ok(None);
+    };
     let [crate::ast::Stmt::Expr(crate::ast::Expr::Func(def))] = body.as_slice() else {
         return Ok(None);
     };
@@ -381,7 +383,7 @@ pub fn from_document(it: &mut Interp, d: &Document, depth: usize) -> R {
     it.grow(&o, d.len())?;
     for (k, x) in d.iter() {
         let v = from_bson(it, x, depth + 1)?;
-        o.borrow_mut().props.push((k.into(), Prop::data(v)));
+        o.borrow_mut().props.push((crate::text::encode(k).into(), Prop::data(v)));
     }
     Ok(Val::Obj(o))
 }
@@ -423,13 +425,15 @@ pub fn to_bson(it: &mut Interp, v: &Val, name: &str, depth: usize) -> R<Value> {
                 },
                 Kind::Date(t) => Value::DateTime(if t.is_nan() { i64::MIN } else { t as i64 }),
                 Kind::Num(n) => Value::Double(n),
-                Kind::Str(s) => Value::String(s.to_string()),
+                Kind::Str(s) => Value::String(crate::text::to_utf8(&s).into_owned()),
                 Kind::Bool(b) => Value::Boolean(b),
                 Kind::RegExp(p, f) => Value::Regex {
-                    pattern: p.to_string(),
+                    pattern: crate::text::to_utf8(&p).into_owned(),
                     options: f.chars().filter(|c| *c != 'g').collect(),
                 },
-                Kind::Func(Func::Closure { def, .. }) => Value::JavaScript(def.source.to_string()),
+                Kind::Func(Func::Closure { def, .. }) => {
+                    Value::JavaScript(crate::text::to_utf8(&def.source).into_owned())
+                }
                 Kind::Func(_) => Value::JavaScript("function() { [native code] }".into()),
                 Kind::Array(items) => {
                     let mut out = Vec::with_capacity(items.len());
@@ -445,7 +449,7 @@ pub fn to_bson(it: &mut Interp, v: &Val, name: &str, depth: usize) -> R<Value> {
                         if x.is_callable() && matches!(o.borrow().kind, Kind::Error) {
                             continue;
                         }
-                        d.push(&*k, to_bson(it, &x, &k, depth + 1)?);
+                        d.push(crate::text::to_utf8(&k).as_ref(), to_bson(it, &x, &k, depth + 1)?);
                     }
                     Value::Document(d)
                 }
