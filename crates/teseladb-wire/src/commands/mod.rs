@@ -49,6 +49,7 @@ pub mod maintenance;
 pub mod mapreduce;
 pub mod mutation;
 pub mod names;
+pub mod near_find;
 pub mod out_merge;
 pub mod parameters;
 pub mod partial_filter;
