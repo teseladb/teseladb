@@ -389,6 +389,9 @@ fn a_purge_search_leaves_the_records_newer_than_its_cutoff() {
     };
     r.apply(1, ts(10), &write(0)).unwrap();
     r.apply(2, ts(1_000), &write(1)).unwrap();
+    // One already purged is not taken again.
+    r.apply(3, ts(11), &write(2)).unwrap();
+    r.apply(4, ts(12), &Command::PurgeDedup { keys: vec![dedup_key(G, 7, 1, 2)] }).unwrap();
     let mut search = PurgeScan::new(&r.lsm, G, ts(500));
     let mut batch = None;
     for _ in 0..MAX_ROUNDS {
