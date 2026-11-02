@@ -320,7 +320,8 @@ impl Parser<'_> {
             }
             'x' | 'u' => {
                 let n = if c == 'x' { 2 } else { 4 };
-                if c == 'u' && self.peek() == Some('{') {
+                // `\u{…}` is a code point only with `u`: otherwise `{…}` repeats `u`.
+                if c == 'u' && self.unicode && self.peek() == Some('{') {
                     self.i += 1;
                     let start = self.i;
                     while self.peek().is_some_and(|c| c != '}') {
@@ -905,6 +906,20 @@ fn all(it: &mut Interp, re: &Regex, s: &[u32]) -> R<Vec<Caps>> {
     Ok(out)
 }
 
+/// `String.prototype.<sym>(x)` where `x` is an object other than a `RegExp` with a method
+/// `Symbol.<sym>`: what that method gives for `this` (ECMA-262 §22.1.3.13).
+fn delegated(it: &mut Interp, a: &[Val], sym: &str, this: &Val) -> R<Option<Val>> {
+    let x = a.first().cloned().unwrap_or(Val::Undef);
+    if !matches!(&x, Val::Obj(o) if !matches!(o.borrow().kind, Kind::RegExp(..))) {
+        return Ok(None);
+    }
+    let f = it.get(&x, &crate::builtins::well_known(sym))?;
+    if !f.is_callable() {
+        return Ok(None);
+    }
+    it.call(&f, &x, std::slice::from_ref(this)).map(Some)
+}
+
 fn as_regexp(it: &mut Interp, v: &Val) -> R<Val> {
     if matches!(v, Val::Obj(o) if matches!(o.borrow().kind, Kind::RegExp(..))) {
         return Ok(v.clone());
@@ -916,6 +931,9 @@ fn as_regexp(it: &mut Interp, v: &Val) -> R<Val> {
 /// `String.prototype.match`.
 pub fn string_match(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let s = crate::strings::this_text(it, this)?;
+    if let Some(v) = delegated(it, a, "match", this)? {
+        return Ok(v);
+    }
     let rv = as_regexp(it, &a.first().cloned().unwrap_or(Val::Undef))?;
     let (src, flags) = parts(it, &rv)?;
     if !flags.contains('g') {
@@ -943,6 +961,9 @@ pub fn string_match(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 /// `String.prototype.search`.
 pub fn search(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let s = crate::strings::this_text(it, this)?;
+    if let Some(v) = delegated(it, a, "search", this)? {
+        return Ok(v);
+    }
     let rv = as_regexp(it, &a.first().cloned().unwrap_or(Val::Undef))?;
     let (src, flags) = parts(it, &rv)?;
     let re = compiled(it, &src, &flags)?;

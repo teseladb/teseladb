@@ -3661,3 +3661,67 @@ Object.prototype.toString.call(Object.prototype.valueOf.call(1))	S:[object Numbe
 Object.prototype.toLocaleString.call(5)	S:5
 Object.prototype.toLocaleString.call(undefined)	E:TypeError:can't access property "toString", O is undefined
 ({toString() { return 'ts' }}).toLocaleString()	S:ts
+(() => { try { return new RegExp('a\\') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:\\ at end of pattern
+/\p{L}/.test('p{L}')	J:true
+/(?<n>a)\k<n>/.test('aa')	J:true
+/\k<n>/.test('k<n>')	J:true
+/\x4/.test('x4')	J:true
+/\x41/.test('A')	J:true
+/\u{41}/u.test('A')	J:true
+/\u{41}/.test('u'.repeat(41))	J:true
+/[\c1]/.test('\x11')	J:true
+/[\c_]/.test('\x1f')	J:true
+/\c1/.test('\\c1')	J:true
+/[\1]/.test('\x01')	J:true
+/[\12]/.test('\n')	J:true
+/[\777]/.test('?7')	J:true
+/😀/u.test('😀')	J:true
+/\uD83D/u.test('\uD83D')	J:true
+/[😀-😁]/u.test('😁')	J:true
+/[\uD83D]/.test('\uD83D')	J:true
+/a/i.test('A')	J:true
+/ſ/i.test('s')	J:false
+/K/iu.test('K')	J:false
+/a$/m.test('a\nb')	J:true
+/a$/.test('a\nb')	J:false
+/(a)\1/.test('aa')	J:true
+/(a)\1/i.test('aA')	J:true
+/(a)?\1b/.test('b')	J:true
+/(a)\1/.test('a')	J:false
+/a{2,}/.test('aaa')	J:true
+/(?:a|b){0,3}c/.test('ababc')	J:true
+/(a*)*b/.test('aaaaaaaaaaaaaaaaaaaaac')	J:false
+/(?=a)a/.test('a')	J:true
+/(?!a)b/.test('b')	J:true
+/(?<=a)b/.test('ab')	J:true
+/(?<!a)b/.test('cb')	J:true
+'aXbXc'.split(/X/, 2)	J:["a","b"]
+'abc'.split(/(b)/)	J:["a","b","c"]
+'abc'.replace(/b/, (m, i, s) => i + s)	S:a1abcc
+'abc'.replace(/(?<x>b)/, '[$<x>]')	S:a[b]c
+'abc'.replace(/b/, '$0$1$&$`$\'$$')	S:a$0$1bac$c
+'aaa'.replace(/a/g, '$')	S:$$$
+'abc'.match(/z/g)	J:null
+'abc'.matchAll(/./g).next().value[0]	S:a
+(() => { try { return 'abc'.matchAll(/./) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:matchAll must be called with a global RegExp
+'abc'.search({[Symbol.search]() { return 7 }})	J:7
+(() => { const r = /a/g; r.lastIndex = 9; return [r.test('a'), r.lastIndex] })()	J:[false,0]
+(() => { const r = /a/y; r.lastIndex = 1; return [r.exec('ba') !== null, r.lastIndex] })()	J:[true,2]
+(() => { const r = /a/g; r.lastIndex = -3; return r.exec('a').index })()	J:0
+(() => { const r = /a/g; r.lastIndex = NaN; return r.exec('a').index })()	J:0
+/(?<g>a)|(?<h>b)/.exec('b').groups	J:{"h":"b"}
+RegExp.prototype[Symbol.replace].call(/a/g, 'aba', 'x')	S:xbx
+RegExp.prototype[Symbol.split].call(/,/, 'a,b', 1)	J:["a"]
+RegExp.prototype[Symbol.match].call(/a/g, 'aa')	J:["a","a"]
+(() => { try { return new RegExp('(?<a>x)(?<a>y)') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:duplicate capture group name in regular expression
+(() => { try { return new RegExp('[b-a]') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid range in character class
+(() => { try { return new RegExp('a', 'gg') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid regular expression flag g
+(() => { try { return new RegExp('(') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:unterminated parenthetical
+(() => { try { return new RegExp('a**') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:nothing to repeat
+(() => { try { return new RegExp('\\p{Foo}', 'u') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid property name in regular expression
+(() => { try { return new RegExp('\\u{110000}', 'u') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid unicode escape in regular expression
+(() => { try { return new RegExp('\\k<z>', 'u') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid named capture reference in regular expression
+'abc'.match({[Symbol.match](s) { return 'm:' + s }})	S:m:abc
+'abc'.match({})	J:["b"]
+'abc'.search({toString() { return 'c' }})	J:2
+/\u{2}/.test('uu')	J:true
