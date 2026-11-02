@@ -163,7 +163,7 @@ fn parse_iso(s: &str) -> Option<f64> {
     let mut offset = 0.0;
     match b.get(i) {
         None => {}
-        Some(b'Z' | b'z') if i + 1 == b.len() => {}
+        Some(b'Z') if i + 1 == b.len() => {}
         Some(c @ (b'+' | b'-')) => {
             let h = num(i + 1, 2)?;
             let m = if b.get(i + 3) == Some(&b':') { num(i + 4, 2)? } else { num(i + 3, 2)? };
@@ -184,6 +184,21 @@ fn parse_iso(s: &str) -> Option<f64> {
     Some(time_clip(make(&parts) - offset))
 }
 
+/// The zones a date's text may name, with their offset in hours.
+const ZONES: [(&str, f64); 11] = [
+    ("UTC", 0.0),
+    ("UT", 0.0),
+    ("GMT", 0.0),
+    ("EST", -5.0),
+    ("EDT", -4.0),
+    ("CST", -6.0),
+    ("CDT", -5.0),
+    ("MST", -7.0),
+    ("MDT", -6.0),
+    ("PST", -8.0),
+    ("PDT", -7.0),
+];
+
 /// `Thu Jan 01 1970 01:00:00 GMT+0000`, `Thu, 01 Jan 1970 01:00:00 GMT`, `Jan 1, 1970` and the
 /// like: words for the month, numbers for the rest.
 fn parse_text(s: &str) -> Option<f64> {
@@ -191,7 +206,29 @@ fn parse_text(s: &str) -> Option<f64> {
     let mut nums: Vec<f64> = Vec::new();
     let mut time: Vec<f64> = Vec::new();
     let mut offset = 0.0;
+    let mut pm = None;
     for tok in s.split([' ', ',']).filter(|t| !t.is_empty()) {
+        // Measured on a `refrouter` 9.0.4 on 02-11: `1/2/2020`, `2020/1/2` and `2020-1-1` are dates
+        // (month first unless the year is), `AM`/`PM` move the hour, and the zones of North
+        // America have their offsets.
+        let parts: Vec<&str> = tok.split(['/', '-']).collect();
+        if parts.len() == 3
+            && parts.iter().all(|p| !p.is_empty() && p.bytes().all(|c| c.is_ascii_digit()))
+        {
+            let v: Vec<f64> = parts.iter().filter_map(|p| p.parse().ok()).collect();
+            let (y, m, d) = if v[0] > 31.0 { (v[0], v[1], v[2]) } else { (v[2], v[0], v[1]) };
+            month = Some(m - 1.0);
+            nums = vec![d, y];
+            continue;
+        }
+        if let Some(h) = ZONES.iter().find(|(z, _)| tok.eq_ignore_ascii_case(z)).map(|(_, h)| *h) {
+            offset = h * 3_600_000.0;
+            continue;
+        }
+        if tok.eq_ignore_ascii_case("AM") || tok.eq_ignore_ascii_case("PM") {
+            pm = Some(tok.eq_ignore_ascii_case("PM"));
+            continue;
+        }
         if let Some(m) =
             MONTHS.iter().position(|m| tok.len() >= 3 && tok[..3].eq_ignore_ascii_case(m))
         {
@@ -216,14 +253,21 @@ fn parse_text(s: &str) -> Option<f64> {
             return None;
         }
     }
-    let month = month?;
-    let (day, year) = match nums.as_slice() {
-        [a, b] if *a > 31.0 => (*b, *a),
-        [a, b] => (*a, *b),
+    let (month, day, year) = match (month, nums.as_slice()) {
+        (Some(m), [a, b]) if *a > 31.0 => (m, *b, *a),
+        (Some(m), [a, b]) => (m, *a, *b),
+        (None, [y, m, d]) if *y > 31.0 && (1.0..=12.0).contains(m) && (1.0..=31.0).contains(d) => {
+            (*m - 1.0, *d, *y)
+        }
         _ => return None,
     };
     let get = |i: usize| time.get(i).copied().unwrap_or(0.0);
-    Some(make(&[year, month, day, get(0), get(1), get(2), 0.0]) - offset)
+    let hour = match pm {
+        Some(true) if get(0) < 12.0 => get(0) + 12.0,
+        Some(false) if get(0) == 12.0 => 0.0,
+        _ => get(0),
+    };
+    Some(make(&[year, month, day, hour, get(1), get(2), 0.0]) - offset)
 }
 
 /// `Date.prototype.getTime called on incompatible Object`, with the method being called.

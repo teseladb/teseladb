@@ -173,7 +173,8 @@ fn string_ctor(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 /// `this` as a string.
 pub fn this_str(it: &mut Interp, this: &Val) -> R<Name> {
     if this.is_nullish() {
-        return it.type_error(&format!("String.prototype method called on {}", it.show(this)));
+        let m = format!("String.prototype.{} called on incompatible {}", it.native, it.show(this));
+        return it.type_error(&m);
     }
     it.str_of(this)
 }
@@ -281,22 +282,20 @@ fn last_index_of(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     Ok(Val::Num(r.map_or(-1.0, |i| i as f64)))
 }
 
-fn no_regex(it: &mut Interp, v: &Val, what: &str) -> R<()> {
+fn no_regex(it: &mut Interp, v: &Val) -> R<()> {
     if matches!(v, Val::Obj(o) if matches!(o.borrow().kind, Kind::RegExp(..))) {
-        return it.type_error(&format!(
-            "first argument to String.prototype.{what} must not be a regular expression"
-        ));
+        return it.type_error(&format!("Invalid type: first can't be a Regular Expression"));
     }
     Ok(())
 }
 
 fn includes(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    no_regex(it, &arg(a, 0), "includes")?;
+    no_regex(it, &arg(a, 0))?;
     index_of(it, this, a).map(|v| Val::Bool(!matches!(v, Val::Num(n) if n < 0.0)))
 }
 
 fn starts_with(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    no_regex(it, &arg(a, 0), "startsWith")?;
+    no_regex(it, &arg(a, 0))?;
     let u = units(&this_str(it, this)?);
     let n = units(&it.str_of(&arg(a, 0))?);
     let from = clamp(int_arg(it, &arg(a, 1), 0.0)?, u.len());
@@ -304,7 +303,7 @@ fn starts_with(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 }
 
 fn ends_with(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    no_regex(it, &arg(a, 0), "endsWith")?;
+    no_regex(it, &arg(a, 0))?;
     let u = units(&this_str(it, this)?);
     let n = units(&it.str_of(&arg(a, 0))?);
     let end = clamp(int_arg(it, &arg(a, 1), u.len() as f64)?, u.len());
@@ -341,7 +340,8 @@ fn upper(it: &mut Interp, this: &Val, _: &[Val]) -> R {
 
 fn lower(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     let s = this_str(it, this)?;
-    it.string(s.to_lowercase())
+    // Each character on its own: no final sigma (measured on a `refrouter` 9.0.4 on 02-11).
+    it.string(s.chars().flat_map(char::to_lowercase).collect())
 }
 
 fn is_ws(c: char) -> bool {
@@ -390,8 +390,12 @@ fn pad_end(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 fn repeat(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let s = this_str(it, this)?;
     let n = int_arg(it, &arg(a, 0), 0.0)?;
-    if n < 0.0 || n.is_infinite() {
+    if n < 0.0 {
         return Err(it.error("RangeError", "repeat count must be non-negative"));
+    }
+    if n.is_infinite() {
+        let m = "repeat count must be less than infinity and not overflow maximum string size";
+        return Err(it.error("RangeError", m));
     }
     let total = (s.len() as f64) * n;
     // Past the longest string (`Interp::max_string`).
