@@ -992,4 +992,18 @@ mod tests {
         assert!(stream_metrics().0 >= 2);
         assert_eq!(first, second, "the guard says nothing of the cursor's contents");
     }
+
+    #[test]
+    fn options_that_do_not_read_keep_no_images() {
+        assert!(!images_enabled(&[1, 2, 3]));
+    }
+
+    #[test]
+    fn the_stages_after_the_stream_read_no_collection() {
+        use teseladb_exec::pipeline::Env;
+        let env = EventEnv { seed: std::cell::Cell::new(1) };
+        let e = env.collection("o").expect_err("no collection");
+        assert_eq!(e.code.code, 20);
+        assert_eq!(e.message, "o cannot be read in a $changeStream pipeline");
+    }
 }

@@ -351,3 +351,55 @@ fn a_database_stream_follows_a_renamed_collection_and_leaves_out_other_databases
     assert_eq!(field(&got[0], "ns.coll"), &Value::from("c"));
     assert_eq!(field(&got[2], "ns.coll"), &Value::from("r"));
 }
+
+/// Measured on a `refrouter` 9.0.4 on 02-11: a time-series collection's `create` and `drop` show
+/// no event, a `collMod` that changes nothing is a `modify` with an empty description, and the
+/// catalog changes of another database are not a collection stream's.
+#[test]
+fn time_series_catalog_changes_show_nothing_and_an_empty_coll_mod_is_a_modify() {
+    let mut m = Mem::new();
+    step(&mut m, DB, Document::new().with("create", "c"));
+    step(&mut m, DB, Document::new().with("create", "x"));
+    let expanded = Document::new().with("showExpandedEvents", true);
+    let db_stream = id_of(&open(&mut m, DB, 1.into(), expanded.clone(), vec![]));
+    let coll_stream = id_of(&open(&mut m, DB, "c".into(), expanded, vec![]));
+    step(&mut m, "other", Document::new().with("create", "o"));
+    let ts =
+        Document::new().with("create", "ts").with("timeseries", doc(&[("timeField", "t".into())]));
+    step(&mut m, DB, ts);
+    step(&mut m, DB, Document::new().with("drop", "ts"));
+    step(&mut m, DB, Document::new().with("collMod", "x"));
+    let got = batch(&get_more(&mut m, DB, db_stream, "$cmd.aggregate"));
+    assert_eq!(types(&got), ["modify"], "{got:?}");
+    assert_eq!(field(&got[0], "operationDescription"), &Value::Document(Document::new()));
+    assert!(batch(&get_more(&mut m, DB, coll_stream, "c")).is_empty());
+}
+
+/// Measured on a `refrouter` 9.0.4 on 02-11: `shardCollection` of a collection is a
+/// `shardCollection` event with the key and the options, seen with expanded events only.
+#[test]
+fn sharding_a_collection_is_a_shard_collection_event() {
+    let mut m = Mem::new();
+    step(&mut m, DB, Document::new().with("create", "c"));
+    let expanded = Document::new().with("showExpandedEvents", true);
+    let id = id_of(&open(&mut m, DB, 1.into(), expanded, vec![]));
+    let plain = id_of(&open(&mut m, DB, "c".into(), Document::new(), vec![]));
+    step(&mut m, "admin", Document::new().with("enableSharding", DB));
+    let key = doc(&[("_id", 1.into())]);
+    step(
+        &mut m,
+        "admin",
+        Document::new().with("shardCollection", format!("{DB}.c")).with("key", key.clone()),
+    );
+    let got = batch(&get_more(&mut m, DB, id, "$cmd.aggregate"));
+    assert_eq!(types(&got), ["shardCollection"], "{got:?}");
+    let want = Document::new()
+        .with("shardKey", key)
+        .with("unique", false)
+        .with("presplitHashedZones", false)
+        .with("capped", false);
+    assert_eq!(field(&got[0], "operationDescription"), &Value::Document(want));
+    assert!(keys(&got[0]).contains(&"collectionUUID"));
+    assert!(!keys(&got[0]).contains(&"stateBeforeChange"));
+    assert!(batch(&get_more(&mut m, DB, plain, "c")).is_empty());
+}
