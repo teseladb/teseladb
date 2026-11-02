@@ -39,6 +39,11 @@ pub struct Ctx<'a, E: Executor + ?Sized> {
     pub limits: Limits,
     /// The `connectionId` of the session.
     pub connection_id: &'a str,
+    /// The `comment` each command of the call carries, which `notifications/cancelled` finds
+    /// with `currentOp` (FR-026).
+    pub comment: Option<String>,
+    /// The documents read after each batch, for `notifications/progress`.
+    pub progress: Vec<u64>,
 }
 
 /// A failed call's message.
@@ -111,6 +116,11 @@ impl<E: Executor + ?Sized> Ctx<'_, E> {
         if timed && command.get("maxTimeMS").is_none() {
             command.push("maxTimeMS", self.limits.max_time_ms as i64);
         }
+        if let Some(c) = &self.comment
+            && command.get("comment").is_none()
+        {
+            command.push("comment", c.as_str());
+        }
         let reply = self.exec.run(db, command);
         if is_ok(&reply) {
             return Ok(reply);
@@ -132,6 +142,7 @@ impl<E: Executor + ?Sized> Ctx<'_, E> {
             if let Some(Bson::Array(b)) = cursor.get(field) {
                 out.extend(b.iter().filter_map(Bson::as_document).cloned());
             }
+            self.progress.push(out.len() as u64);
             let id = match cursor.get("id") {
                 Some(Bson::Int64(id)) => *id,
                 _ => 0,
@@ -151,8 +162,10 @@ impl<E: Executor + ?Sized> Ctx<'_, E> {
                 let _ = self.exec.run(db, kill);
                 return Ok(out);
             }
+            // `maxTimeMS` of a `getMore` is only the wait of a tailable cursor: the query's
+            // limit applies to the command that opened it.
             reply =
-                self.run(db, Document::new().with("getMore", id).with("collection", coll), true)?;
+                self.run(db, Document::new().with("getMore", id).with("collection", coll), false)?;
             field = "nextBatch";
         }
     }

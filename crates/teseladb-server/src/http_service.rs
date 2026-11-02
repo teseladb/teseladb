@@ -120,6 +120,7 @@ impl NodeHttp {
                     options,
                     now_ms: crate::clock::wall_ms(),
                     random: &mut random,
+                    progress: Vec::new(),
                 };
                 self.mcp.http(request, &mut call)
             }
