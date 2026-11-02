@@ -656,7 +656,7 @@ fn array_sum(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     let items = it.iterate(&arg(a, 0))?;
     let mut acc = match items.first() {
         Some(x) => x.clone(),
-        None => return Ok(Val::Num(0.0)),
+        None => return Ok(Val::Null),
     };
     for x in &items[1..] {
         acc = it.binary("+", &acc, x)?;
@@ -694,14 +694,13 @@ fn array_unique(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     it.array(out)
 }
 
+/// RefDb's `Array.shuffle` calls a `Random` its engine does not define (measured: it fails
+/// with `Random is not defined` on a `refrouter` 9.0.4); an empty array has nothing to draw.
 fn array_shuffle(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     if let Val::Obj(o) = arg(a, 0) {
         let n = it.array_len(&o);
-        for i in (1..n).rev() {
-            let j = (crate::math::next_random(it) * (i + 1) as f64) as usize;
-            if let Kind::Array(v) = &mut o.borrow_mut().kind {
-                v.swap(i, j.min(i));
-            }
+        if n > 0 {
+            return Err(it.error("ReferenceError", "Random is not defined"));
         }
     }
     Ok(arg(a, 0))
@@ -809,8 +808,12 @@ fn num_to_precision(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     if !(1.0..=100.0).contains(&p) {
         return Err(it.error("RangeError", "precision is out of range"));
     }
-    if n == 0.0 || !n.is_finite() {
+    if !n.is_finite() {
         return it.string(number::to_string(n));
+    }
+    if n == 0.0 {
+        let zeros = "0".repeat(p as usize - 1);
+        return it.string(if zeros.is_empty() { "0".into() } else { format!("0.{zeros}") });
     }
     let e = n.abs().log10().floor() as i32;
     let p = p as i32;

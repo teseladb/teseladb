@@ -171,6 +171,7 @@ fn callee_text(e: &Expr) -> String {
             MemberProp::Computed(_) => format!("{}[...]", callee_text(obj)),
         },
         Expr::This => "this".into(),
+        Expr::Call { callee, args, .. } if args.is_empty() => format!("{}()", callee_text(callee)),
         Expr::Call { callee, .. } => format!("{}(...)", callee_text(callee)),
         Expr::Str(s) => format!("\"{s}\""),
         Expr::Num(n) => number::to_string(*n),
@@ -626,8 +627,8 @@ impl<'c> Interp<'c> {
                 all.extend_from_slice(args);
                 self.call(&Val::Obj(target), &bound_this, &all)
             }
-            Func::Closure { def, env, this: arrow_this, home, derived, .. } => {
-                if derived || (def.is_ctor_of_derived) {
+            Func::Closure { def, env, this: arrow_this, home, derived, class, .. } => {
+                if class.is_some() || derived || def.is_ctor_of_derived {
                     self.depth -= 1;
                     return self.type_error("class constructors must be invoked with 'new'");
                 }
@@ -677,6 +678,9 @@ impl<'c> Interp<'c> {
                 s.func = Some(fo.clone());
                 s.new_target = Some(new_target.unwrap_or(Val::Undef));
             }
+        }
+        if let (false, Some(name)) = (def.arrow, &def.name) {
+            declare(&scope, name, Val::Obj(fo.clone()), true);
         }
         if !def.arrow {
             let a = self.alloc(Some(self.realm.object.clone()), Kind::Arguments)?;
@@ -1442,7 +1446,7 @@ impl<'c> Interp<'c> {
                     },
                     _ => {
                         return self.type_error(&format!(
-                            "class heritage {} is not a constructor",
+                            "class heritage {} is not an object or null",
                             self.show(&pv)
                         ));
                     }
@@ -1711,9 +1715,13 @@ impl<'c> Interp<'c> {
                 self.pos = *pos;
                 let f = self.eval(callee, env)?;
                 let args = self.eval_args(args, env)?;
-                if !f.is_callable() {
-                    return self
-                        .type_error(&format!("{} is not a constructor", callee_text(callee)));
+                let arrow = matches!(&f, Val::Obj(o) if matches!(&o.borrow().kind, Kind::Func(Func::Closure { def, .. }) if def.arrow));
+                if !f.is_callable() || arrow {
+                    let text = match &**callee {
+                        Expr::Func(def) => def.source.to_string(),
+                        other => callee_text(other),
+                    };
+                    return self.type_error(&format!("{text} is not a constructor"));
                 }
                 self.construct(&f, &args, &f)
             }
@@ -1922,7 +1930,7 @@ impl<'c> Interp<'c> {
 
     pub fn instance_of(&mut self, x: &Val, f: &Val) -> R<bool> {
         if !f.is_callable() {
-            return self.type_error(&format!("{} is not a function", self.show(f)));
+            return self.type_error(&format!("invalid 'instanceof' operand {}", self.show(f)));
         }
         if let Val::Obj(fo) = f
             && let Kind::Func(Func::Bound(t, ..)) = &fo.borrow().kind
@@ -2048,11 +2056,8 @@ impl<'c> Interp<'c> {
             "instanceof" => Val::Bool(self.instance_of(x, y)?),
             "in" => {
                 let Val::Obj(o) = y else {
-                    let key = self.str_of(x)?;
-                    let msg = format!(
-                        "can't use 'in' operator to search for '{key}' in {}",
-                        self.show(y)
-                    );
+                    let msg =
+                        format!("right-hand side of 'in' should be an object, got {}", y.type_of());
                     return self.type_error(&msg);
                 };
                 let k = self.key_of(x)?;

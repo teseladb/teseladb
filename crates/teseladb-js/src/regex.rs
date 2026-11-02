@@ -573,6 +573,13 @@ fn compiled(it: &Interp, src: &str, flags: &str) -> R<Regex> {
 
 /// Checks a pattern when a literal or `new RegExp` makes it.
 pub fn check(it: &mut Interp, src: &str, flags: &str) -> R<()> {
+    let mut seen = String::new();
+    for c in flags.chars() {
+        if !"dgimsuyv".contains(c) || seen.contains(c) {
+            return Err(it.error("SyntaxError", &format!("invalid regular expression flag {c}")));
+        }
+        seen.push(c);
+    }
     compiled(it, src, flags).map(|_| ())
 }
 
@@ -740,7 +747,9 @@ pub fn replace(it: &mut Interp, s: &Name, rv: &Val, replacement: &Val, all_match
                 })
             })
             .collect();
-        let r = substitute(it, replacement, &matched, utf16_pos(&chars, x), s, &groups)?;
+        let named: Vec<(String, Val)> =
+            re.names.iter().map(|(n, i)| (n.clone(), groups[*i - 1].clone())).collect();
+        let r = substitute(it, replacement, &matched, utf16_pos(&chars, x), s, &groups, &named)?;
         out.push_str(&r);
         last = y;
     }

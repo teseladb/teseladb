@@ -792,11 +792,18 @@ impl Parser {
             self.params()?
         };
         self.expect("=>")?;
+        let outer = self.strict;
         let body = if self.eat("{") {
-            self.block_rest()?
+            if matches!(self.tok(), Tok::Str(s) if &**s == "use strict") {
+                self.strict = true;
+            }
+            self.block_rest()
         } else {
-            vec![Stmt::Return(Some(self.assign()?))]
+            self.assign().map(|e| vec![Stmt::Return(Some(e))])
         };
+        let strict = self.strict;
+        self.strict = outer;
+        let body = body?;
         Ok(Expr::Func(Rc::new(FuncDef {
             name: None,
             params,
@@ -804,7 +811,7 @@ impl Parser {
             body,
             arrow: true,
             is_ctor_of_derived: false,
-            strict: self.strict,
+            strict,
             source: self.source_from(start),
         })))
     }

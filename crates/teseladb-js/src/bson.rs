@@ -95,7 +95,6 @@ pub fn install(it: &mut Interp, g: &ObjRef) -> R<()> {
         it.realm.bson.push(((*name).into(), c));
     }
     if let Some(p) = proto_of(it, "ObjectId") {
-        method(it, &p, "toHexString", object_id_hex, 0)?;
         method(it, &p, "getTimestamp", object_id_time, 0)?;
         let getter = it.native("str", object_id_hex, 0)?;
         it.define(&p, "str", Prop { getter: Some(getter), ..Prop::hidden(Val::Undef) })?;
@@ -241,8 +240,8 @@ fn to_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
         Bson::ObjectId(id) => format!("ObjectId(\"{}\")", hex(&id)),
         Bson::BinData(t, b) => format!("BinData({t},\"{}\")", base64_encode(&b)),
         Bson::Timestamp(t, i) => format!("Timestamp({t}, {i})"),
-        Bson::MinKey => "{ \"$minKey\" : 1 }".into(),
-        Bson::MaxKey => "{ \"$maxKey\" : 1 }".into(),
+        Bson::MinKey => "[object MinKey]".into(),
+        Bson::MaxKey => "[object MaxKey]".into(),
         Bson::DbPointer(ns, id) => format!("DBPointer(\"{ns}\", ObjectId(\"{}\"))", hex(&id)),
         Bson::Symbol(s) | Bson::Code(s) => s,
     };

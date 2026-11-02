@@ -141,3 +141,132 @@ null >= 0	J:true
 'b' > 'a'	J:true
 (x => x ?? 'd')(null) + (x => x?.y)(undefined)	S:dundefined
 1 / 0 + ',' + -1 / 0 + ',' + 0 / 0	S:Infinity,-Infinity,NaN
+Array.sum([1,2,3]) + ',' + Array.sum([])	S:6,null
+Array.avg([1,2,3,4])	J:2.5
+Array.contains([1,2],2) + ',' + Array.contains([1,2],'2')	S:true,false
+Array.unique([1,2,1,'1'])	J:[1,2,"1"]
+Array.stdDev([2,4,4,4,5,5,7,9])	J:2
+Array.shuffle([1,2,3]).length	E:ReferenceError:Random is not defined
+typeof print + typeof sleep + String(print('x')) + String(sleep(1))	S:functionfunctionundefinedundefined
+Object(1) instanceof Number	J:true
+Object() instanceof Object	J:true
+Object.setPrototypeOf({}, {q:7}).q	J:7
+Array.prototype.isPrototypeOf([]) + ',' + Object.prototype.isPrototypeOf(Object.create(null))	S:true,false
+(()=>{try{Function('return (')}catch(e){return e.name}})()	S:SyntaxError
+new Number(3).valueOf() + Number(true)	J:4
+[...new Map([[1,2]])]	J:[[1,2]]
+[...'ab']	J:["a","b"]
+[...new Set('aab')]	J:["a","b"]
+new RegExp('a+','g').toString() + ',' + new RegExp(/x/i).flags + ',' + /q/g.global + ',' + /w+/.source	S:/a+/g,i,true,w+
+new RegExp('a', 'y').exec('ba')	J:null
+'a.b.c'.split('.', -1)	J:["a","b","c"]
+(()=>{const r=[]; [1,2].forEach(function(x){ r.push(this.k+x) }, {k:10}); return r})()	J:[11,12]
+ObjectId('507f1f77bcf86cd799439011').equals(ObjectId('507f1f77bcf86cd799439011'))	J:true
+ObjectId('507f1f77bcf86cd799439011').toHexString()	E:TypeError:ObjectId(...).toHexString is not a function
+ObjectId().toHexString().length	E:TypeError:ObjectId().toHexString is not a function
+(()=>{try{ObjectId('zz')}catch(e){return e.name}})()	S:Error
+BinData(0,'AQID').toString()	S:BinData(0,"AQID")
+MinKey().toString() + ' ' + MaxKey().toString()	S:[object MinKey] [object MaxKey]
+(()=>{const r=DBRef('c', 1); return [r.$ref, r.$id]})()	J:["c",1]
+NumberLong('12').toNumber() + NumberLong(3).valueOf()	J:15
+(()=>{try{NumberLong('abc')}catch(e){return e.name}})()	S:Error
+(()=>{try{NumberDecimal('abc')}catch(e){return e.name}})()	S:Error
+NumberInt('7').toString() + NumberInt(2.9).valueOf()	S:NumberInt(7)2
+new Timestamp(5, 6).toString() + ',' + new Timestamp(5, 6).i	S:Timestamp(5, 6),6
+ISODate('2021-02-03T04:05:06Z').toISOString()	S:2021-02-03T04:05:06.000Z
+(()=>{try{ISODate('nope')}catch(e){return e.name}})()	S:Error
+new Date(0).getUTCFullYear() + new Date(0).getUTCMonth() + new Date(0).getUTCHours() + new Date(0).getUTCMinutes() + new Date(0).getUTCSeconds() + new Date(0).getUTCMilliseconds() + new Date(0).getUTCDay()	J:1974
+(()=>{const d=new Date(0); d.setUTCFullYear(1999,11,31); d.setUTCHours(23,59,59,999); return d.toISOString()})()	S:1999-12-31T23:59:59.999Z
+new Date(-1).toISOString() + ',' + new Date(Date.UTC(-1,0,1)).toISOString() + ',' + new Date(Date.UTC(10000,0,1)).toISOString()	S:1969-12-31T23:59:59.999Z,-000001-01-01T00:00:00.000Z,+010000-01-01T00:00:00.000Z
+(()=>{try{new Date(NaN).toISOString()}catch(e){return e.name}})()	S:RangeError
+new Date(NaN).toJSON() + ',' + new Date(NaN).toUTCString() + ',' + new Date(NaN).toDateString()	S:null,Invalid Date,Invalid Date
+typeof Date() + ',' + (Date.now() >= 0)	S:string,true
+new Date(99, 0).getFullYear()	J:1999
+new Date('2020-02-30').getTime()	J:1583020800000
+new Date('2020-06-15T10:20:30.5Z').getMilliseconds()	J:500
+new Date('Mon Jun 15 2020 10:20:30 GMT+0200').toISOString()	S:2020-06-15T08:20:30.000Z
+(1e21).toFixed(2) + ',' + (-1.5).toFixed(0) + ',' + (0).toPrecision(3) + ',' + (1e-7).toPrecision(2)	S:1e+21,-2,0.00,1.0e-7
+(()=>{try{(1).toFixed(101)}catch(e){return e.name}})()	S:RangeError
+(()=>{try{(1).toString(1)}catch(e){return e.name}})()	S:RangeError
+(()=>{try{(1).toPrecision(0)}catch(e){return e.name}})()	S:RangeError
+'abc'.at(5) + ',' + 'abc'.charAt(9) + ',' + 'abc'.charCodeAt(9) + ',' + 'abc'.codePointAt(9)	S:undefined,,NaN,undefined
+(()=>{try{'a'.repeat(-1)}catch(e){return e.name}})()	S:RangeError
+(()=>{try{String.fromCodePoint(-1)}catch(e){return e.name}})()	S:RangeError
+(()=>{try{'a'.includes(/a/)}catch(e){return e.name}})()	S:TypeError
+'aaa'.lastIndexOf('aaaa') + ',' + 'abc'.indexOf('') + ',' + 'x'.padStart(3)	S:-1,0,  x
+String(Symbol('q')) + String(null) + String(undefined) + String(true)	S:Symbol(q)nullundefinedtrue
+'a-b'.replace(/(?<x>a)/, '[$<x>|$&|$`|$\'|$$]')	S:[a|a||-b|$]-b
+'abc'.replace(/(z)?b/, (m,g)=>String(g))	S:aundefinedc
+'x1y2'.match(/\d/g) + ',' + 'xy'.match(/\d/g) + ',' + 'x1'.match(/(\d)/)[1]	S:1,2,null,1
+/a{2,3}/.test('aa') + ',' + /a{2,}/.test('a') + ',' + /^[^a-c]$/.test('d') + ',' + /[\w-]+/.exec('a-b c')[0]	S:true,false,true,a-b
+/(?<=\$)\d+/.exec('cost $42')[0] + ',' + /(?<!x)y/.test('xy') + ',' + /a(?!b)/.test('ab')	S:42,false,false
+/A/i.test('a') + ',' + /^b/m.test('a\nb') + ',' + /a.b/s.test('a\nb') + ',' + /A\x42/.test('AB')	S:true,true,true,true
+'aBc'.replace(/[a-z]/gi, c => c.toUpperCase())	S:ABC
+/(a)|(b)/.exec('b')	J:["b",null,"b"]
+/a*?b/.exec('aaab')[0] + ',' + /(a+)+$/.test('aaaa')	S:aaab,true
+'one two'.split(/(\s)/)	J:["one"," ","two"]
+''.split(/x/).length + ',' + ''.split('').length	S:1,0
+(()=>{try{new RegExp('[')}catch(e){return e.name}})()	S:SyntaxError
+(()=>{try{new RegExp('a', 'z')}catch(e){return e.name}})()	S:SyntaxError
+JSON.stringify({a:new Number(1), b:new String('s'), c:new Boolean(false)})	S:{"a":1,"b":"s","c":false}
+JSON.stringify('\u0007\b\f')	S:"\\u0007\\b\\f"
+JSON.parse(' "\\u00e9\\n" ').length	J:2
+(()=>{try{JSON.parse('[1,]')}catch(e){return e.message}})()	S:JSON.parse: unexpected character at line 1 column 4 of the JSON data
+(()=>{try{JSON.parse('')}catch(e){return e.message}})()	S:JSON.parse: unexpected end of data at line 1 column 1 of the JSON data
+JSON.stringify(JSON.parse('{"a":-1.5e2,"b":true,"c":false,"d":null}'))	S:{"a":-150,"b":true,"c":false,"d":null}
+JSON.stringify({toJSON(){ return 'custom' }})	S:"custom"
+JSON.stringify(Object.create(null))	S:{}
+(()=>{const m=new Map(); return [m.get(1), m.delete(1), [...m.entries()].length]})()	J:[null,false,0]
+(()=>{try{Map()}catch(e){return e.name}})()	S:TypeError
+(()=>{try{Set()}catch(e){return e.name}})()	S:TypeError
+(()=>{try{new Symbol()}catch(e){return e.name}})()	S:TypeError
+Math.random() < 1	J:true
+[1,2,3].indexOf(2, 2) + ',' + [1,2,3].includes(1, 1) + ',' + [NaN].includes(NaN) + ',' + [NaN].indexOf(NaN)	S:-1,false,true,-1
+[5,1,10].sort((a,b)=>b-a)	J:[10,5,1]
+[,1].length + ',' + [1,2,3].splice(-1) + ',' + [1,2,3].splice(0)	S:2,3,1,2,3
+(()=>{const a=[1,2,3]; a.length=5; return [a.length, a[4]]})()	J:[5,null]
+(()=>{try{[].length=-1}catch(e){return e.name}})()	S:RangeError
+(()=>{try{[].reduce((a,b)=>a)}catch(e){return e.name}})()	S:TypeError
+(()=>{try{[].map(1)}catch(e){return e.name}})()	S:TypeError
+Array.from({length:2, 0:'a', 1:'b'})	J:["a","b"]
+Array.prototype.join.call({length:2, 0:'x', 1:'y'}, '+')	S:x+y
+Array(3).length + ',' + Array(1,2).length	S:3,2
+(()=>{try{new Array(-1)}catch(e){return e.name}})()	S:RangeError
+Object.keys('ab') + ',' + Object.entries([7])	S:0,1,0,7
+(()=>{const o={b:1,2:1,a:1,1:1}; return Object.keys(o)})()	J:["1","2","b","a"]
+(()=>{ 'use strict'; try { Object.freeze({a:1}).a = 2 } catch(e) { return e.message } })()	S:"a" is read-only
+(()=>{ 'use strict'; try { Object.preventExtensions({}).z = 1 } catch(e) { return e.message } })()	S:can't define property "z": Object is not extensible
+(()=>{ const o = Object.seal({a:1}); o.b = 2; return Object.keys(o) })()	J:["a"]
+(()=>{ let n = 0; const o = { set x(v){ n = v } }; o.x = 5; return n })()	J:5
+(()=>{ const o = { get x(){ return 1 } }; try { (function(){'use strict'; o.x = 2})() } catch(e) { return e.message } })()	S:setting getter-only property "x"
+(()=>{ function F(){ return {own:1} } return new F().own })()	J:1
+(()=>{ try { new (()=>1) } catch(e) { return e.message } })()	S:()=>1 is not a constructor
+(()=>{ try { (class A{})() } catch(e) { return e.message } })()	S:class constructors must be invoked with 'new'
+(()=>{ try { 1 in 2 } catch(e) { return e.message } })()	S:right-hand side of 'in' should be an object, got number
+(()=>{ try { ({}) instanceof 1 } catch(e) { return e.message } })()	S:invalid 'instanceof' operand 1
+(()=>{ try { [...1] } catch(e) { return e.message } })()	S:1 is not iterable
+(()=>{ try { Symbol() + '' } catch(e) { return e.message } })()	S:can't convert symbol to string
+(()=>{ try { let x = x } catch(e) { return e.name } })()	S:ReferenceError
+(()=>{ try { const {a} = null } catch(e) { return e.name } })()	S:TypeError
+(()=>{ try { class A extends 5 {} } catch(e) { return e.message } })()	S:class heritage 5 is not an object or null
+(()=>{ class A { constructor(){ return {z:1} } } class B extends A { constructor(){ super(); } } return new B().z })()	J:1
+(()=>{ class A { m(){ return 'a' } static s(){ return 's' } } class B extends A { m(){ return super.m() + 'b' } static s(){ return super.s() + 't' } } return new B().m() + B.s() })()	S:abst
+(()=>{ const o = { m(){ return super.toString === Object.prototype.toString } }; return o.m() })()	J:true
+(()=>{ function f(a, b = a * 2, {c} = {c: 3}, ...d){ return [a, b, c, d] } return f(1) })()	J:[1,2,3,[]]
+(()=>{ const f = function g(){ return typeof g }; return f() })()	S:function
+(()=>{ var r = []; for (let i = 0, j = 5; i < j; i += 2, j--) r.push(i + ':' + j); return r })()	J:["0:5","2:4"]
+(()=>{ let s = 0; outer: while (true) { s++; while (true) { if (s > 2) break outer; continue outer } } return s })()	J:3
+(()=>{ let x = 'a'; switch (x) { case 'a': x += '1'; case 'b': x += '2'; break; default: x += '3' } return x })()	S:a12
+(()=>{ const o = {a: 1}; delete o.a; return 'a' in o })()	J:false
+(()=>{ const o = {a: {b: 1}}; return o?.a?.['b'] + (o.z?.y ?? 'n') })()	S:1n
+(()=>{ let a; a ||= 2; a &&= a + 1; a ??= 9; a **= 2; a <<= 1; a >>= 1; a >>>= 0; a |= 1; a &= 7; a ^= 2; return a })()	J:3
+(()=>{ let i = 5; return [i++, ++i, i--, --i] })()	J:[5,7,7,5]
+typeof function(){} + typeof class {} + typeof null + typeof []	S:functionfunctionobjectobject
+'b' + 'a' + +'a' + 'a'	S:baNaNa
+[1,2,3] + [4]	S:1,2,34
+0.1 + 0.7	J:0.7999999999999999
+123456789012345680000 + ',' + 0.000001 + ',' + 1.5e-10 + ',' + -1e-7	S:123456789012345680000,0.000001,1.5e-10,-1e-7
+(25).toString(36) + (0.5).toString(2) + (-0).toString()	S:p0.10
+parseFloat('.5') + parseFloat('-.5e1') + parseFloat('Infinityx') + ',' + parseFloat('x')	S:Infinity,NaN
+Number('0b101') + Number('0o17') + Number('') + Number(' 12 ') + ',' + Number('1e') + ',' + Number('-Infinity')	S:32,NaN,-Infinity
+parseInt('101', 2) + parseInt('0x', 16) + ',' + parseInt('', 10) + ',' + parseInt('12', 1)	S:NaN,NaN,NaN
