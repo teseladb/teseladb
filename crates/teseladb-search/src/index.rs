@@ -477,12 +477,9 @@ impl MemIndex {
     /// Removes the document of `key`, if the index has it.
     pub fn delete(&mut self, key: &[u8]) {
         let Some(id) = self.by_key.remove(key) else { return };
-        if let Some(k) = self.keys.get_mut(id as usize) {
-            *k = None;
-        }
-        if let Some(d) = self.docs.get_mut(id as usize) {
-            *d = None;
-        }
+        // `by_key` only holds ids of `keys` and `docs`.
+        self.keys[id as usize] = None;
+        self.docs[id as usize] = None;
         for field in self.fields.values_mut() {
             field.lengths.remove(&id);
             field.tokens.remove(&id);

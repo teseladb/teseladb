@@ -221,3 +221,17 @@ fn case_sensitive_queries_need_the_index_term_as_measured() {
     let coffee = run(&index, &scenario_docs(), "Coffee", case);
     assert_eq!(coffee.iter().map(|c| c.0).collect::<Vec<_>>(), [1, 7]);
 }
+
+#[test]
+fn dashes_inside_phrases_and_words_do_not_negate() {
+    let english = Language::named("english").expect("english");
+    let q = TextQuery::parse("\"coffee -tea\" pre-fix", english, plain());
+    assert_eq!(q.phrases, ["coffee -tea"]);
+    assert!(q.negated.is_empty(), "{:?}", q.negated);
+    assert_eq!(q.terms, ["coffe", "tea", "pre", "fix"]);
+    // A word of marks alone has no term.
+    assert!(stems("\u{301}\u{308}", english, plain()).is_empty());
+    let spec = r#"{"key": {"_fts": "text", "_ftsx": 1}, "weights": {"t": 1}, "default_language": "spanish"}"#;
+    let index = TextIndex::from_spec(&parse(spec)).expect("index");
+    assert_eq!(index.language().name(), "spanish");
+}

@@ -333,3 +333,103 @@ fn fuzzy_bounds_are_those_of_each_operator() {
     );
     assert_eq!(err("term", r#"{"maxEdits": 0, "maxExpansions": 1001}"#), Ok(()));
 }
+
+/// The answers of the query parser to options it refuses or reads twice.
+#[test]
+fn query_options_are_checked() {
+    let doc = Document::new().with("_id", 1_i64).with("t", "a b");
+    let ix = index(r#"{"mappings": {"dynamic": true}}"#, vec![doc]);
+    let refused = [
+        (
+            r#"{"facet": {"operator": {"exists": {"path": "t"}}, "facets": {}}, "bogus": 1}"#,
+            "unrecognized field \"bogus\"",
+        ),
+        (
+            r#"{"phrase": {"query": "a", "path": "t", "bogus": 1}}"#,
+            "\"phrase\" unrecognized field \"bogus\"",
+        ),
+        (
+            r#"{"text": {"query": "a", "path": "t", "score": 1}}"#,
+            "\"text.score\" must be a document",
+        ),
+        (
+            r#"{"text": {"query": "a", "path": "t", "score": {"boost": {"value": "x"}}}}"#,
+            "\"text.score.boost.value\" must be a number",
+        ),
+        (r#"{"compound": {"must": [1]}}"#, "\"compound.must\" must be a document"),
+        (
+            r#"{"compound": {"must": [{"exists": {"path": "t"}}], "bogus": 1}}"#,
+            "\"compound\" unrecognized field \"bogus\"",
+        ),
+    ];
+    for (query, message) in refused {
+        assert_eq!(ix.search(&q(query)).expect_err(query).0, message);
+    }
+    let accepted = [
+        r#"{"exists": {"path": "t"}, "returnStoredSource": false}"#,
+        r#"{"text": {"query": "a", "path": ["t", "t"]}}"#,
+        r#"{"text": {"query": "a", "path": {"wildcard": "t"}}}"#,
+        r#"{"compound": {"should": [{"exists": {"path": "t"}}], "score": {"boost": {"value": 1}}}}"#,
+    ];
+    for query in accepted {
+        assert_eq!(ix.search(&q(query)).expect(query).len(), 1, "{query}");
+    }
+}
+
+#[test]
+fn an_emptied_index_finds_nothing() {
+    let doc = Document::new().with("_id", 1_i64).with("t", "a b");
+    let mut ix = index(r#"{"mappings": {"dynamic": true}}"#, vec![doc]);
+    ix.apply(vec![(vec![0], None)]).expect("deleted");
+    assert!(ix.search(&q(r#"{"text": {"query": "a", "path": "t"}}"#)).expect("search").is_empty());
+}
+
+/// `autocomplete` with a boost, several queries, `sequential` and `fuzzy`, as `refsearch` 1.70.6
+/// answers them (`scratchpad/lane3q/m79.js`, 02-11-2026).
+#[test]
+fn autocomplete_options_score_as_refsearch() {
+    let docs = [(1, "abcd efgh", "abcd efgh"), (2, "efgh abcd", "efgh abcd"), (3, "xyz", "abd")]
+        .into_iter()
+        .map(|(id, a, s)| Document::new().with("_id", i64::from(id)).with("a", a).with("s", s))
+        .collect();
+    let ix = index(
+        r#"{"mappings": {"dynamic": false, "fields": {"a": {"type": "autocomplete"},
+            "s": [{"type": "autocomplete"}, {"type": "string"}]}}}"#,
+        docs,
+    );
+    let ranked = |query: &str| -> Vec<(i64, f32)> {
+        ix.search(&q(query))
+            .expect(query)
+            .iter()
+            .map(|f| match f.doc.get("_id") {
+                Some(teseladb_bson::Value::Int64(n)) => (*n, f.score),
+                other => panic!("an _id: {other:?}"),
+            })
+            .collect()
+    };
+    let cases: [(&str, &[(i64, f32)]); 5] = [
+        (
+            r#"{"autocomplete": {"query": "ab", "path": "a", "score": {"boost": {"value": 2}}}}"#,
+            &[(1, 0.758_070_35), (2, 0.635_140_06)],
+        ),
+        (
+            r#"{"autocomplete": {"query": ["ab", "ef"], "path": "s"}}"#,
+            &[(2, 0.469_259_08), (1, 0.425_256_64), (3, 0.096_065_745)],
+        ),
+        (
+            r#"{"autocomplete": {"query": "abcd ef", "path": "a", "tokenOrder": "sequential"}}"#,
+            &[(1, 0.662_722_47)],
+        ),
+        (
+            r#"{"autocomplete": {"query": "abx", "path": "a", "fuzzy": {"maxEdits": 1}}}"#,
+            &[(1, 1.0), (2, 1.0)],
+        ),
+        (
+            r#"{"autocomplete": {"query": "ab ef", "path": "s"}}"#,
+            &[(2, 0.469_259_08), (1, 0.425_256_64), (3, 0.096_065_745)],
+        ),
+    ];
+    for (query, want) in cases {
+        assert_eq!(ranked(query), want, "{query}");
+    }
+}
