@@ -124,7 +124,7 @@ impl NodeHttp {
                 };
                 self.mcp.http(request, &mut call)
             }
-            Err(r) => r,
+            Err(r) => self.with_metadata(request, r),
         };
         if audit {
             let (route, tool) = mcp_call(request);
@@ -333,6 +333,43 @@ fn not_found() -> Reply {
 }
 
 impl NodeHttp {
+    /// The scheme the clients reach this node's HTTP port with.
+    fn scheme(&self) -> &'static str {
+        if self.auth { "https" } else { "http" }
+    }
+
+    /// The metadata of the protected resource `/mcp` (RFC 9728, FR-027), public.
+    fn oauth_metadata(&self, request: &Request) -> Response {
+        use teseladb_mcp::oauth_metadata::{document, resource_uri};
+        let host = header_of(request, "Host").unwrap_or("localhost");
+        let backend = self.backends.lock().unwrap_or_else(PoisonError::into_inner).pop();
+        let backend =
+            backend.unwrap_or_else(|| ServerBackend::new(self.handle.clone(), random_seed()));
+        let issuers: Vec<String> =
+            backend.oidc_providers().0.into_iter().map(|p| p.issuer).collect();
+        self.backends.lock().unwrap_or_else(PoisonError::into_inner).push(backend);
+        let body = document(&resource_uri(self.scheme(), host), &issuers).into_bytes();
+        let headers = vec![("Content-Type".to_owned(), "application/json".to_owned())];
+        Response { status: 200, headers, body }
+    }
+
+    /// A `401` of `/mcp` with the URL of the resource's metadata in `WWW-Authenticate`
+    /// (RFC 9728, 5.1).
+    fn with_metadata(&self, request: &Request, mut r: Response) -> Response {
+        if r.status != 401 {
+            return r;
+        }
+        let host = header_of(request, "Host").unwrap_or("localhost");
+        let url = teseladb_mcp::oauth_metadata::metadata_url(self.scheme(), host);
+        for (k, v) in &mut r.headers {
+            if k.eq_ignore_ascii_case("WWW-Authenticate") {
+                let invalid = v.contains("invalid_token");
+                *v = teseladb_auth::bearer::challenge(invalid, Some(&url));
+            }
+        }
+        r
+    }
+
     /// `GET /mcp` of a session (revisions with `initialize`): the server's stream with the
     /// notifications of `listChanged` (FR-023). Any node serves it: what it says depends only on
     /// the cluster's `mcpOptions`.
@@ -429,6 +466,9 @@ impl HttpService for NodeHttp {
         if path == HEALTHZ && matches!(request.method.as_str(), "GET" | "HEAD") {
             let headers = vec![("Content-Type".to_owned(), "text/plain".to_owned())];
             return Reply::Whole(Response { status: 200, headers, body: b"ok\n".to_vec() });
+        }
+        if teseladb_mcp::oauth_metadata::is_metadata_path(path) && request.method == "GET" {
+            return Reply::Whole(self.oauth_metadata(request));
         }
         if path == MCP {
             if request.method == "GET" && header_of(request, SESSION_HEADER).is_some() {

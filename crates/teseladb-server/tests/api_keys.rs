@@ -339,3 +339,25 @@ fn mcp_over_stdio_relays_each_message_with_the_key() {
     assert!(String::from_utf8_lossy(&err).contains("401"));
     drop(node.stop());
 }
+
+/// 019 T031, FR-027: the metadata of `/mcp` is public, and a `401` of `/mcp` names it.
+#[test]
+fn the_mcp_resource_metadata_is_public_and_named_by_the_challenge() {
+    let node = start(Vec::new());
+    let at = node.http_addrs()[0];
+    let r = send(at, Request::new("GET", "/.well-known/oauth-protected-resource/mcp"));
+    assert_eq!(r.status, 200);
+    let d = extjson::parse(std::str::from_utf8(&r.body).unwrap()).unwrap();
+    assert_eq!(d.get("resource"), Some(&Value::from("https://h/mcp")));
+    assert_eq!(d.get("authorization_servers"), Some(&Value::Array(Vec::new())));
+    let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#;
+    let r = send(at, Request::new("POST", "/mcp").body(init.as_bytes().to_vec()));
+    assert_eq!(r.status, 401);
+    let challenge = r.header("www-authenticate").unwrap();
+    assert!(
+        challenge
+            .contains(r#"resource_metadata="https://h/.well-known/oauth-protected-resource/mcp""#),
+        "{challenge}"
+    );
+    drop(node.stop());
+}
