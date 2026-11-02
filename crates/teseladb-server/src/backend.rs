@@ -1056,6 +1056,23 @@ impl Backend for ServerBackend {
         }
     }
 
+    fn route_entries(&mut self) -> Result<Vec<teseladb_router::table::RouteEntry>, CommandError> {
+        Ok(self.h.routes.entries())
+    }
+
+    fn range_order(
+        &mut self,
+        cmd: teseladb_meta::command::Group0Command,
+    ) -> Result<(), CommandError> {
+        match self.group0_change(CatalogReq::Security(cmd))? {
+            Ok(_) => Ok(()),
+            Err(e) => Err(CommandError::new(
+                teseladb_wire::error::CONFLICTING_OPERATION_IN_PROGRESS,
+                format!("Group 0 refused the change of the ranges: {e:?}"),
+            )),
+        }
+    }
+
     fn group0_settings_write(
         &mut self,
         changes: Vec<teseladb_meta::command::SettingChange>,

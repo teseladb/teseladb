@@ -114,6 +114,15 @@ fn own_fields(name: &str) -> Option<&'static [&'static str]> {
         "abortReshardCollection" => &["abortReshardCollection"],
         "addShardToZone" => &["addShardToZone", "zone"],
         "updateZoneKeyRange" => &["updateZoneKeyRange", "min", "max", "zone"],
+        "configureCollectionBalancing" => &[
+            "configureCollectionBalancing",
+            "chunkSize",
+            "defragmentCollection",
+            "enableAutoMerger",
+            "balanceShardsByDataSize",
+        ],
+        "balancerCollectionStatus" => &["balancerCollectionStatus"],
+        "transitionToDedicatedConfigServer" => &["transitionToDedicatedConfigServer"],
         "setDefaultRWConcern" => {
             &["setDefaultRWConcern", "defaultReadConcern", "defaultWriteConcern"]
         }

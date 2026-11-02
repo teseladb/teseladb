@@ -17,6 +17,10 @@ pub struct Code {
     pub name: &'static str,
 }
 
+/// An error a `refrouter` 9.0.4 answers with `errmsg` alone, without `code` nor `codeName` (some of
+/// `split`'s, 018 FR-004).
+pub const UNCODED: Code = Code { code: 0, name: "" };
+
 macro_rules! codes {
     ($($(#[$doc:meta])* $id:ident = $n:literal, $name:literal;)*) => {
         $( $(#[$doc])* pub const $id: Code = Code { code: $n, name: $name }; )*
@@ -524,11 +528,11 @@ impl CommandError {
     /// The reply document: `ok: 0`, `errmsg`, `code`, `codeName`, the extra fields and
     /// `errorLabels`, in RefDb's order.
     pub fn to_document(&self) -> Document {
-        let mut d = Document::new()
-            .with("ok", 0.0)
-            .with("errmsg", self.errmsg.as_str())
-            .with("code", self.code.code)
-            .with("codeName", self.code.name);
+        let mut d = Document::new().with("ok", 0.0).with("errmsg", self.errmsg.as_str());
+        if self.code != UNCODED {
+            d.push("code", self.code.code);
+            d.push("codeName", self.code.name);
+        }
         for (k, v) in self.extra.iter() {
             d.push(k, v.clone());
         }

@@ -90,6 +90,11 @@ pub struct Ranges {
     pub meta2_groups: BTreeSet<GroupId>,
     /// The capped collections, each of which has a range of its own (007 FR-009).
     pub capped: BTreeSet<(u32, u32)>,
+    /// The split size of the collections that have their own (`configureCollectionBalancing`'s
+    /// `chunkSize`, 018 FR-004), by tenant and collection.
+    pub chunk_bytes: BTreeMap<(u32, u32), u64>,
+    /// The split size of the other ranges, once `config.settings` has a `chunksize`.
+    pub chunk_size: Option<u64>,
 }
 
 /// The stored value of cluster parameter `name` in a copy of Group 0.
@@ -144,6 +149,16 @@ impl Ranges {
             last_ids: BTreeMap::new(),
             meta2_groups: BTreeSet::new(),
             capped: sm.capped_collections(),
+            chunk_bytes: sm
+                .catalog
+                .collections
+                .values()
+                .filter_map(|c| {
+                    let bytes = teseladb_wire::commands::balancing::max_chunk_bytes(&c.options)?;
+                    Some(((c.tenant, c.id), bytes))
+                })
+                .collect(),
+            chunk_size: teseladb_meta::config_settings::chunk_size_bytes(&sm.settings),
         }
     }
 }
@@ -178,6 +193,8 @@ pub struct Replicas {
     all: Vec<RangeDesc>,
     /// The capped collections, cut out into ranges of their own.
     capped: BTreeSet<(u32, u32)>,
+    /// The split sizes of `Ranges::chunk_bytes` and `Ranges::chunk_size`.
+    chunks: (BTreeMap<(u32, u32), u64>, Option<u64>),
 }
 
 impl Replicas {
@@ -200,6 +217,7 @@ impl Replicas {
             hosting: (Hosting::default(), 0),
             all: Vec::new(),
             capped: BTreeSet::new(),
+            chunks: (BTreeMap::new(), None),
         }
     }
 
@@ -239,6 +257,7 @@ impl Replicas {
         self.splits = ranges.splits.clone();
         self.merges = ranges.merges.clone();
         self.capped.clone_from(&ranges.capped);
+        self.chunks = (ranges.chunk_bytes.clone(), ranges.chunk_size);
         let ids = ranges.descs.iter().map(|d| d.group).chain(ranges.meta2_groups.iter().copied());
         self.known = (ids.collect(), ranges.last_group, ranges.last_ids.clone());
     }
@@ -514,10 +533,11 @@ impl Replicas {
             return;
         }
         let size = lsm.interval_size(start, end);
-        let disk_limit = self.split_bytes.saturating_mul(SPLIT_DISK_FACTOR);
+        let split_bytes = split_size(start, &self.chunks, self.split_bytes);
+        let disk_limit = split_bytes.saturating_mul(SPLIT_DISK_FACTOR);
         // By size (FR-005) at the files' middle key, or else by load (FR-006) at the median of the
         // keys the leader served.
-        let by_size = l.live >= self.split_bytes || size.bytes >= disk_limit;
+        let by_size = l.live >= split_bytes || size.bytes >= disk_limit;
         let at = if by_size { size.cut } else { host.load_cut(g, now) };
         // A cut at a change meta (014) goes before its document, which it belongs with.
         let at = at.map(|k| {
@@ -543,6 +563,23 @@ impl Replicas {
         self.conf_ops.remove(&g);
         true
     }
+}
+
+/// The size at which a range that starts at `start` splits: its collection's own
+/// (`configureCollectionBalancing`, 018 FR-004), else `config.settings`' `chunksize`, else
+/// `default`.
+fn split_size(
+    start: &[u8],
+    chunks: &(BTreeMap<(u32, u32), u64>, Option<u64>),
+    default: u64,
+) -> u64 {
+    let word =
+        |i: usize| start.get(i..i + 4).and_then(|w| w.try_into().ok()).map(u32::from_be_bytes);
+    let own = match (word(1), word(5)) {
+        (Some(t), Some(c)) => chunks.0.get(&(t, c)).copied(),
+        _ => None,
+    };
+    own.or(chunks.1).unwrap_or(default)
 }
 
 /// The first edge of a capped collection of `capped` strictly inside `[start, end)` (an empty
@@ -1070,6 +1107,57 @@ mod tests {
             matches!(asked.as_slice(), [Group0Command::SplitRange { group: G, .. }]),
             "{asked:?}"
         );
+    }
+
+    #[test]
+    fn a_collection_s_chunk_size_is_where_its_ranges_split() {
+        // 018 FR-004: `configureCollectionBalancing`'s `chunkSize`, else `config.settings`'
+        // `chunksize`, else the node's split size.
+        use teseladb_keys::KeyBuilder;
+        use teseladb_meta::catalog::{CatalogCommand, Namespace};
+        let mut sm = Group0Sm::default();
+        let first_node = teseladb_meta::command::NodeAddrs {
+            name: b"n1".to_vec(),
+            peer_addr: b"n1:7421".to_vec(),
+            http_addr: b"n1:8080".to_vec(),
+            native_addr: b"n1:27017".to_vec(),
+            cores: 1,
+        };
+        let boot =
+            Group0Command::Bootstrap { cluster_id: [9; 16], first_node, cert_fingerprint: [1; 32] };
+        sm.apply_command(1, &boot);
+        let ns = Namespace { db: "z".into(), coll: "t".into() };
+        let options = teseladb_bson::Document::new().with(
+            "$shardKey",
+            teseladb_bson::Document::new()
+                .with("key", teseladb_bson::Document::new().with("a", 1))
+                .with(
+                    "balancing",
+                    teseladb_bson::Document::new().with("maxChunkSizeBytes", 2i64 << 20),
+                ),
+        );
+        let create = CatalogCommand::Create {
+            ns,
+            uuid: [1; 16],
+            options: options.to_bytes().unwrap(),
+            if_absent: false,
+        };
+        sm.apply_command(2, &Group0Command::Catalog(create));
+        let r = Ranges::of(&sm);
+        let id = sm.catalog.collections.values().next().map(|c| (c.tenant, c.id)).unwrap();
+        assert_eq!(r.chunk_bytes, BTreeMap::from([(id, 2 << 20)]));
+        assert_eq!(r.chunk_size, None);
+        let chunks = (r.chunk_bytes.clone(), Some(8 << 20));
+        let inside = KeyBuilder::collection_start(id.0, id.1).as_bytes().to_vec();
+        let other = KeyBuilder::collection_start(id.0, id.1 + 1).as_bytes().to_vec();
+        assert_eq!(split_size(&inside, &chunks, 64), 2 << 20);
+        assert_eq!(split_size(&other, &chunks, 64), 8 << 20);
+        assert_eq!(split_size(&[1], &chunks, 64), 8 << 20);
+        assert_eq!(split_size(&other, &(BTreeMap::new(), None), 64), 64);
+        let mut replicas = Replicas::new(ME, 0, 64);
+        let bytes = r.chunk_bytes.clone();
+        replicas.set(&Ranges { chunk_size: Some(1), ..r });
+        assert_eq!(replicas.chunks, (bytes, Some(1)));
     }
 
     #[test]
