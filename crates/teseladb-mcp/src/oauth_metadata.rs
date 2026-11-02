@@ -16,16 +16,21 @@ pub fn is_metadata_path(path: &str) -> bool {
     path == WELL_KNOWN || path == WELL_KNOWN_MCP
 }
 
-/// The URI of resource `/mcp` reached at `host` (the `Host` field) with `scheme`.
+/// The URI of resource `/mcp` reached at `authority` (`host:port`) with `scheme`.
 #[must_use]
-pub fn resource_uri(scheme: &str, host: &str) -> String {
-    format!("{scheme}://{host}/mcp")
+pub fn resource_uri(scheme: &str, authority: &str) -> String {
+    format!("{scheme}://{authority}/mcp")
 }
 
-/// The URL of the metadata of `/mcp` at `host` with `scheme`, for `WWW-Authenticate`.
+/// The URL of the metadata of the resource `resource`, for `WWW-Authenticate` (RFC 9728, 3.1):
+/// the well-known prefix between its authority and its path. `None` for a URI without
+/// `scheme://`.
 #[must_use]
-pub fn metadata_url(scheme: &str, host: &str) -> String {
-    format!("{scheme}://{host}{WELL_KNOWN_MCP}")
+pub fn metadata_url(resource: &str) -> Option<String> {
+    let (scheme, rest) = resource.split_once("://")?;
+    let (authority, path) = rest.find('/').map_or((rest, ""), |i| rest.split_at(i));
+    let path = path.split(['?', '#']).next().unwrap_or_default().trim_end_matches('/');
+    Some(format!("{scheme}://{authority}{WELL_KNOWN}{path}"))
 }
 
 /// The metadata document of `resource` with the issuers of `issuers` and the scopes they ask
@@ -63,9 +68,19 @@ mod tests {
         );
         assert!(is_metadata_path(WELL_KNOWN) && is_metadata_path(WELL_KNOWN_MCP));
         assert!(!is_metadata_path("/mcp"));
+        let url = |r: &str| metadata_url(r);
         assert_eq!(
-            metadata_url("http", "h:1"),
-            "http://h:1/.well-known/oauth-protected-resource/mcp"
+            url("http://h:1/mcp").as_deref(),
+            Some("http://h:1/.well-known/oauth-protected-resource/mcp")
         );
+        assert_eq!(
+            url("https://db.example.com/api/mcp/?x=1").as_deref(),
+            Some("https://db.example.com/.well-known/oauth-protected-resource/api/mcp")
+        );
+        assert_eq!(
+            url("https://db.example.com").as_deref(),
+            Some("https://db.example.com/.well-known/oauth-protected-resource")
+        );
+        assert_eq!(url("db.example.com/mcp"), None);
     }
 }

@@ -156,6 +156,36 @@ impl StoredSource {
         }
     }
 
+    /// What `returnStoredSource` gives of `doc` (measured on `refsearch` 1.70.6: `_id` always, then
+    /// the fields kept, in the document's order).
+    pub fn project(&self, doc: &Document) -> Document {
+        match self {
+            StoredSource::None | StoredSource::All => doc.clone(),
+            StoredSource::Include(paths) => {
+                let mut out = Document::new();
+                for (name, value) in doc.iter() {
+                    if name == "_id" {
+                        out.push(name, value.clone());
+                    } else if let Some(v) = kept(name, value, paths) {
+                        out.push(name, v);
+                    }
+                }
+                out
+            }
+            StoredSource::Exclude(paths) => {
+                let mut out = Document::new();
+                for (name, value) in doc.iter() {
+                    if name == "_id" {
+                        out.push(name, value.clone());
+                    } else if let Some(v) = left(name, value, paths) {
+                        out.push(name, v);
+                    }
+                }
+                out
+            }
+        }
+    }
+
     fn normalized(&self) -> Option<Value> {
         let names =
             |l: &[String]| Value::Array(l.iter().map(|s| Value::from(s.as_str())).collect());
@@ -166,6 +196,50 @@ impl StoredSource {
             StoredSource::Exclude(l) => Some(Document::new().with("exclude", names(l)).into()),
         }
     }
+}
+
+/// The part of field `name` (with `value`) that `paths` include, if any.
+fn kept(name: &str, value: &Value, paths: &[String]) -> Option<Value> {
+    if paths.iter().any(|p| p == name) {
+        return Some(value.clone());
+    }
+    let inner: Vec<String> = paths
+        .iter()
+        .filter_map(|p| p.strip_prefix(name)?.strip_prefix('.').map(str::to_owned))
+        .collect();
+    let Value::Document(d) = value else { return None };
+    if inner.is_empty() {
+        return None;
+    }
+    let mut out = Document::new();
+    for (n, v) in d.iter() {
+        if let Some(k) = kept(n, v, &inner) {
+            out.push(n, k);
+        }
+    }
+    (!out.is_empty()).then_some(Value::Document(out))
+}
+
+/// Field `name` (with `value`) without the parts `paths` exclude, if anything is left.
+fn left(name: &str, value: &Value, paths: &[String]) -> Option<Value> {
+    if paths.iter().any(|p| p == name) {
+        return None;
+    }
+    let inner: Vec<String> = paths
+        .iter()
+        .filter_map(|p| p.strip_prefix(name)?.strip_prefix('.').map(str::to_owned))
+        .collect();
+    let Value::Document(d) = value else { return Some(value.clone()) };
+    if inner.is_empty() {
+        return Some(value.clone());
+    }
+    let mut out = Document::new();
+    for (n, v) in d.iter() {
+        if let Some(k) = left(n, v, &inner) {
+            out.push(n, k);
+        }
+    }
+    Some(Value::Document(out))
 }
 
 /// A synonym mapping: its name, the collection with the synonyms and the analyzer they go through.

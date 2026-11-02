@@ -692,6 +692,24 @@ fn search_waits_for_the_segments_to_reach_its_mark() {
     assert_eq!(error(&r), (50, "operation exceeded time limit".to_owned()));
 }
 
+/// A range's leader answers a read of its changes at most a window past its start (014 FR-004):
+/// segments far behind the search's mark read and apply one window after another until they
+/// reach it, without spending the command's time on pauses.
+#[test]
+fn segments_far_behind_catch_up_one_window_at_a_time() {
+    let mut m = with_collection();
+    create(&mut m, "c", vec![index("default", dynamic(true))]);
+    assert_eq!(batch(&search(&mut m, "c", "$search", text("hola"))).len(), 1);
+    m.changes_window_ms = 1_000;
+    m.now += 10_000;
+    let docs = arr(vec![doc(&[("_id", 2.into()), ("t", "hola otra vez".into())])]);
+    m.run(DB, Document::new().with("insert", "c").with("documents", docs));
+    m.pauses_left = 0;
+    let before = m.change_reads;
+    assert_eq!(batch(&search(&mut m, "c", "$search", text("hola"))).len(), 2);
+    assert!(m.change_reads - before >= 10, "{} reads", m.change_reads - before);
+}
+
 fn view(m: &mut Mem, name: &str, on: &str, stages: Vec<Document>) {
     let cmd = Document::new().with("create", name).with("viewOn", on).with("pipeline", arr(stages));
     m.run(DB, cmd);

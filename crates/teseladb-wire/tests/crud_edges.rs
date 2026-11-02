@@ -800,6 +800,7 @@ fn dispatch_runs_the_data_commands_when_a_node_is_behind() {
         cluster_time: ClusterTime { time: 1, increment: 1 },
         now_ms: 1,
         keys: None,
+        replica_set: None,
     };
     let mut conn = Connection::new(1);
     let mut ask = |m: &mut Mem, cmd: Document| {

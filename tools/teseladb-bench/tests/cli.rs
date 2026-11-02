@@ -11,9 +11,12 @@ fn usage_errors_exit_with_2() {
     let out = bench(&[]);
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("usage:"));
-    let out = bench(&["--scenario", "nope"]);
-    assert_eq!(out.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("unknown scenario"));
+    // Six letters, as the YCSB scenarios have, and not one of them.
+    for name in ["nope", "ycsbxa"] {
+        let out = bench(&["--scenario", name]);
+        assert_eq!(out.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&out.stderr).contains("unknown scenario"));
+    }
 }
 
 #[test]

@@ -9,7 +9,8 @@ use crate::value::*;
 
 #[derive(Clone, Debug)]
 enum Node {
-    Char(char),
+    /// A code point, or a UTF-16 unit without the `u` flag.
+    Char(u32),
     Any,
     Class(Vec<ClassItem>, bool),
     Start,
@@ -25,14 +26,15 @@ enum Node {
 
 #[derive(Clone, Debug)]
 enum ClassItem {
-    Range(char, char),
+    Range(u32, u32),
     Digit(bool),
     Word(bool),
     Space(bool),
 }
 
 struct Parser<'a> {
-    s: &'a [char],
+    s: &'a [u32],
+    unicode: bool,
     i: usize,
     groups: usize,
     names: Vec<(String, usize)>,
@@ -48,9 +50,38 @@ struct Regex {
     dotall: bool,
 }
 
+/// What the matcher reads of `s`: its code points with the `u` flag, else its UTF-16 units.
+fn elements(s: &str, unicode: bool) -> Vec<u32> {
+    if unicode {
+        crate::text::cps(s).collect()
+    } else {
+        crate::strings::units(s).into_iter().map(u32::from).collect()
+    }
+}
+
+/// The string of the elements `e`.
+fn text_of(e: &[u32]) -> String {
+    let mut u = Vec::with_capacity(e.len());
+    for &c in e {
+        match u16::try_from(c) {
+            Ok(x) => u.push(x),
+            Err(_) => {
+                let v = c - 0x1_0000;
+                u.extend([0xD800 | (v >> 10) as u16, 0xDC00 | (v & 0x3FF) as u16]);
+            }
+        }
+    }
+    crate::strings::from_units(&u)
+}
+
+fn is_unicode(flags: &str) -> bool {
+    flags.contains('u') || flags.contains('v')
+}
+
 fn compile(src: &str, flags: &str) -> Result<Regex, String> {
-    let chars: Vec<char> = src.chars().collect();
-    let mut p = Parser { s: &chars, i: 0, groups: 0, names: Vec::new() };
+    let unicode = is_unicode(flags);
+    let chars = elements(src, unicode);
+    let mut p = Parser { s: &chars, unicode, i: 0, groups: 0, names: Vec::new() };
     let node = p.alt()?;
     if p.i < chars.len() {
         return Err("unmatched ) in regular expression".into());
@@ -67,7 +98,12 @@ fn compile(src: &str, flags: &str) -> Result<Regex, String> {
 
 impl Parser<'_> {
     fn peek(&self) -> Option<char> {
-        self.s.get(self.i).copied()
+        self.s.get(self.i).map(|&c| char::from_u32(c).unwrap_or('\u{fffd}'))
+    }
+
+    /// The text of the elements from `start` to the current one.
+    fn text_from(&self, start: usize) -> String {
+        text_of(&self.s[start..self.i])
     }
 
     fn alt(&mut self) -> Result<Node, String> {
@@ -103,7 +139,7 @@ impl Parser<'_> {
         if self.i == start {
             return None;
         }
-        self.s[start..self.i].iter().collect::<String>().parse().ok()
+        self.text_from(start).parse().ok()
     }
 
     fn quantifier(&mut self, atom: Node) -> Result<Node, String> {
@@ -127,7 +163,7 @@ impl Parser<'_> {
                             return Ok(atom);
                         }
                         if max < min {
-                            return Err("numbers out of order in {} quantifier".into());
+                            return Err("numbers out of order in {} quantifier.".into());
                         }
                         (min, max)
                     }
@@ -169,7 +205,7 @@ impl Parser<'_> {
                         Some(':') => capture = false,
                         Some('=') => look = Some((true, false)),
                         Some('!') => look = Some((true, true)),
-                        Some('<') if matches!(self.s.get(self.i + 1), Some('=' | '!')) => {
+                        Some('<') if matches!(self.s.get(self.i + 1), Some(0x3D | 0x21)) => {
                             self.i += 1;
                             look = Some((false, self.peek() == Some('!')));
                         }
@@ -179,7 +215,7 @@ impl Parser<'_> {
                             while self.peek().is_some_and(|c| c != '>') {
                                 self.i += 1;
                             }
-                            name = Some(self.s[start..self.i].iter().collect::<String>());
+                            name = Some(self.text_from(start));
                         }
                         _ => return Err("invalid regexp group".into()),
                     }
@@ -188,6 +224,9 @@ impl Parser<'_> {
                 let index = if capture && look.is_none() {
                     self.groups += 1;
                     if let Some(n) = name {
+                        if self.names.iter().any(|(m, _)| *m == n) {
+                            return Err("duplicate capture group name in regular expression".into());
+                        }
                         self.names.push((n, self.groups));
                     }
                     Some(self.groups)
@@ -196,7 +235,7 @@ impl Parser<'_> {
                 };
                 let inner = self.alt()?;
                 if self.peek() != Some(')') {
-                    return Err("missing ) in regular expression".into());
+                    return Err("unterminated parenthetical".into());
                 }
                 self.i += 1;
                 match look {
@@ -208,7 +247,7 @@ impl Parser<'_> {
             '[' => self.class()?,
             '\\' => self.escape(false)?,
             '*' | '+' | '?' => return Err("nothing to repeat".into()),
-            c => Node::Char(c),
+            _ => Node::Char(self.s[self.i - 1]),
         })
     }
 
@@ -225,23 +264,23 @@ impl Parser<'_> {
             'S' => class(ClassItem::Space(true)),
             'b' if !in_class => Node::WordB(true),
             'B' if !in_class => Node::WordB(false),
-            'b' => Node::Char('\u{8}'),
-            'n' => Node::Char('\n'),
-            'r' => Node::Char('\r'),
-            't' => Node::Char('\t'),
-            'v' => Node::Char('\u{b}'),
-            'f' => Node::Char('\u{c}'),
-            '0' => Node::Char('\0'),
+            'b' => Node::Char(0x08),
+            'n' => Node::Char(0x0A),
+            'r' => Node::Char(0x0D),
+            't' => Node::Char(0x09),
+            'v' => Node::Char(0x0B),
+            'f' => Node::Char(0x0C),
+            '0' => Node::Char(0),
             'k' if self.peek() == Some('<') => {
                 self.i += 1;
                 let start = self.i;
                 while self.peek().is_some_and(|c| c != '>') {
                     self.i += 1;
                 }
-                let name: String = self.s[start..self.i].iter().collect();
+                let name = self.text_from(start);
                 self.i += 1;
                 let idx = self.names.iter().find(|(n, _)| *n == name).map(|(_, i)| *i);
-                Node::BackRef(idx.ok_or("invalid named reference")?)
+                Node::BackRef(idx.ok_or("invalid named capture reference in regular expression")?)
             }
             '1'..='9' if !in_class => {
                 self.i -= 1;
@@ -255,30 +294,50 @@ impl Parser<'_> {
                     while self.peek().is_some_and(|c| c != '}') {
                         self.i += 1;
                     }
-                    let hex: String = self.s[start..self.i].iter().collect();
+                    let hex = self.text_from(start);
                     self.i += 1;
                     let v = u32::from_str_radix(&hex, 16).map_err(|_| "invalid Unicode escape")?;
-                    return Ok(Node::Char(char::from_u32(v).unwrap_or('\u{fffd}')));
+                    return Ok(Node::Char(v));
                 }
-                let hex: String =
-                    self.s.get(self.i..self.i + n).map(|h| h.iter().collect()).unwrap_or_default();
+                let hex = self.s.get(self.i..self.i + n).map(text_of).unwrap_or_default();
                 match u32::from_str_radix(&hex, 16) {
                     Ok(v) if hex.len() == n => {
                         self.i += n;
-                        Node::Char(char::from_u32(v).unwrap_or('\u{fffd}'))
+                        Node::Char(self.low_surrogate_after(v))
                     }
-                    _ => Node::Char(c),
+                    _ => Node::Char(c as u32),
                 }
             }
             'c' => match self.peek() {
                 Some(l) if l.is_ascii_alphabetic() => {
                     self.i += 1;
-                    Node::Char(char::from_u32(l as u32 % 32).unwrap_or('\0'))
+                    Node::Char(l as u32 % 32)
                 }
-                _ => Node::Char('\\'),
+                _ => Node::Char(u32::from(b'\\')),
             },
-            c => Node::Char(c),
+            _ => Node::Char(self.s[self.i - 1]),
         })
+    }
+
+    /// With the `u` flag, the high surrogate `v` of a `\\u` escape joined to the low one of the
+    /// escape that follows it, as one code point.
+    fn low_surrogate_after(&mut self, v: u32) -> u32 {
+        if !self.unicode || !(0xD800..0xDC00).contains(&v) {
+            return v;
+        }
+        let next = self.s.get(self.i..self.i + 6).map(text_of);
+        let low = next
+            .as_deref()
+            .and_then(|t| t.strip_prefix("\\u"))
+            .and_then(|h| u32::from_str_radix(h, 16).ok())
+            .filter(|l| (0xDC00..0xE000).contains(l));
+        match low {
+            Some(l) => {
+                self.i += 6;
+                0x1_0000 + ((v - 0xD800) << 10) + (l - 0xDC00)
+            }
+            None => v,
+        }
     }
 
     fn class(&mut self) -> Result<Node, String> {
@@ -288,11 +347,12 @@ impl Parser<'_> {
         }
         let mut items = Vec::new();
         loop {
-            let Some(c) = self.peek() else { return Err("missing ] after character class".into()) };
+            let Some(c) = self.peek() else { return Err("unterminated character class".into()) };
             self.i += 1;
             if c == ']' {
                 break;
             }
+            let raw = self.s[self.i - 1];
             let lo = if c == '\\' {
                 match self.escape(true)? {
                     Node::Char(ch) => ch,
@@ -303,11 +363,12 @@ impl Parser<'_> {
                     _ => continue,
                 }
             } else {
-                c
+                raw
             };
-            if self.peek() == Some('-') && self.s.get(self.i + 1).is_some_and(|&n| n != ']') {
+            if self.peek() == Some('-') && self.s.get(self.i + 1).is_some_and(|&n| n != 0x5D) {
                 self.i += 1;
-                let c2 = self.peek().unwrap_or(lo);
+                let c2 = self.peek().unwrap_or('\\');
+                let raw2 = self.s[self.i];
                 self.i += 1;
                 let hi = if c2 == '\\' {
                     match self.escape(true)? {
@@ -315,7 +376,7 @@ impl Parser<'_> {
                         _ => return Err("invalid range in character class".into()),
                     }
                 } else {
-                    c2
+                    raw2
                 };
                 if hi < lo {
                     return Err("invalid range in character class".into());
@@ -329,12 +390,19 @@ impl Parser<'_> {
     }
 }
 
-fn is_word(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '_'
+fn is_word(c: u32) -> bool {
+    char::from_u32(c).is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-fn fold(c: char, icase: bool) -> char {
-    if icase { c.to_lowercase().next().unwrap_or(c) } else { c }
+fn fold(c: u32, icase: bool) -> u32 {
+    match char::from_u32(c) {
+        Some(ch) if icase => ch.to_lowercase().next().map_or(c, u32::from),
+        _ => c,
+    }
+}
+
+fn upper(c: u32) -> u32 {
+    char::from_u32(c).and_then(|ch| ch.to_uppercase().next()).map_or(c, u32::from)
 }
 
 /// The capture slots: start and end of each group, by character positions.
@@ -342,7 +410,7 @@ type Caps = Vec<Option<(usize, usize)>>;
 
 struct Matcher<'a, 'i> {
     re: &'a Regex,
-    s: &'a [char],
+    s: &'a [u32],
     it: &'a mut Interp<'i>,
     fatal: Option<crate::interp::Ctrl>,
 }
@@ -361,17 +429,20 @@ impl Matcher<'_, '_> {
         }
     }
 
-    fn class_has(&self, items: &[ClassItem], c: char) -> bool {
+    fn class_has(&self, items: &[ClassItem], c: u32) -> bool {
+        let ch = char::from_u32(c);
         items.iter().any(|it| match it {
             ClassItem::Range(lo, hi) => {
                 (*lo..=*hi).contains(&c)
                     || (self.re.icase
                         && ((*lo..=*hi).contains(&fold(c, true))
-                            || c.to_uppercase().next().is_some_and(|u| (*lo..=*hi).contains(&u))))
+                            || (*lo..=*hi).contains(&upper(c))))
             }
-            ClassItem::Digit(neg) => c.is_ascii_digit() != *neg,
+            ClassItem::Digit(neg) => ch.is_some_and(|c| c.is_ascii_digit()) != *neg,
             ClassItem::Word(neg) => is_word(c) != *neg,
-            ClassItem::Space(neg) => (c.is_whitespace() || c == '\u{feff}') != *neg,
+            ClassItem::Space(neg) => {
+                ch.is_some_and(|c| c.is_whitespace() || c == '\u{feff}') != *neg
+            }
         })
     }
 
@@ -409,17 +480,17 @@ impl Matcher<'_, '_> {
             }
             Node::Any => {
                 pos < s.len()
-                    && (self.re.dotall || !matches!(s[pos], '\n' | '\r' | '\u{2028}' | '\u{2029}'))
+                    && (self.re.dotall || !matches!(s[pos], 0x0A | 0x0D | 0x2028 | 0x2029))
                     && k(self, pos + 1, caps)
             }
             Node::Class(items, neg) => {
                 pos < s.len() && self.class_has(items, s[pos]) != *neg && k(self, pos + 1, caps)
             }
             Node::Start => {
-                (pos == 0 || (self.re.multiline && s[pos - 1] == '\n')) && k(self, pos, caps)
+                (pos == 0 || (self.re.multiline && s[pos - 1] == 0x0A)) && k(self, pos, caps)
             }
             Node::End => {
-                (pos == s.len() || (self.re.multiline && s[pos] == '\n')) && k(self, pos, caps)
+                (pos == s.len() || (self.re.multiline && s[pos] == 0x0A)) && k(self, pos, caps)
             }
             Node::WordB(want) => {
                 let a = pos > 0 && is_word(s[pos - 1]);
@@ -535,7 +606,7 @@ impl Matcher<'_, '_> {
 }
 
 /// The first match at or after `start` (character positions): its captures.
-fn find(it: &mut Interp, re: &Regex, s: &[char], start: usize, sticky: bool) -> R<Option<Caps>> {
+fn find(it: &mut Interp, re: &Regex, s: &[u32], start: usize, sticky: bool) -> R<Option<Caps>> {
     let mut m = Matcher { re, s, it, fatal: None };
     let last = if sticky { start } else { s.len() };
     for st in start..=last.min(s.len()) {
@@ -567,8 +638,7 @@ fn parts(it: &Interp, v: &Val) -> R<(Name, Name)> {
 }
 
 fn compiled(it: &Interp, src: &str, flags: &str) -> R<Regex> {
-    compile(src, flags)
-        .map_err(|e| it.error("SyntaxError", &format!("invalid regular expression: {e}")))
+    compile(src, flags).map_err(|e| it.error("SyntaxError", &e))
 }
 
 /// Checks a pattern when a literal or `new RegExp` makes it.
@@ -583,27 +653,76 @@ pub fn check(it: &mut Interp, src: &str, flags: &str) -> R<()> {
     compiled(it, src, flags).map(|_| ())
 }
 
-fn utf16_pos(s: &[char], pos: usize) -> usize {
-    s[..pos].iter().map(|c| c.len_utf16()).sum()
+fn utf16_len_of(c: u32) -> usize {
+    if c > 0xFFFF { 2 } else { 1 }
 }
 
-fn char_pos(s: &[char], unit: usize) -> usize {
+fn utf16_pos(s: &[u32], pos: usize) -> usize {
+    s[..pos].iter().map(|&c| utf16_len_of(c)).sum()
+}
+
+fn char_pos(s: &[u32], unit: usize) -> usize {
     let mut u = 0;
     for (i, c) in s.iter().enumerate() {
         if u >= unit {
             return i;
         }
-        u += c.len_utf16();
+        u += utf16_len_of(*c);
     }
     s.len()
 }
 
+/// Keeps `caps` as the last match, for the legacy statics of `RegExp`.
+fn remember(it: &mut Interp, s: &[u32], caps: &Caps, input: &Name) {
+    let units = caps.iter().map(|c| c.map(|(a, b)| (utf16_pos(s, a), utf16_pos(s, b)))).collect();
+    it.last_match = Some((input.clone(), units));
+}
+
+/// The legacy statics of `RegExp` (Annex B, measured on a `refrouter` 9.0.4 on 02-11): `$1`…`$9`,
+/// `input` (`$_`), `lastMatch` (`$&`), `lastParen` (`$+`), `leftContext` (`` $` ``) and
+/// `rightContext` (`$'`), from the last successful match of the call.
+pub fn legacy_static(it: &mut Interp, _: &Val, _: &[Val]) -> R {
+    let name = it.native.clone();
+    let (input, caps) = it.last_match.clone().unwrap_or_default();
+    let units = crate::strings::units(&input);
+    let piece = |r: Option<(usize, usize)>| match r {
+        Some((a, b)) if a <= b && b <= units.len() => crate::strings::from_units(&units[a..b]),
+        _ => String::new(),
+    };
+    let whole = caps.first().copied().flatten();
+    let text = match &*name {
+        "input" | "$_" => return Ok(Val::Str(input)),
+        // Before any match there is no `lastMatch` (measured: `undefined`).
+        "lastMatch" | "$&" if whole.is_none() => return Ok(Val::Undef),
+        "lastMatch" | "$&" => piece(whole),
+        "lastParen" | "$+" => {
+            piece(if caps.len() > 1 { caps.last().copied().flatten() } else { None })
+        }
+        "leftContext" | "$`" => piece(whole.map(|(a, _)| (0, a))),
+        "rightContext" | "$'" => piece(whole.map(|(_, b)| (b, units.len()))),
+        n => {
+            let i: usize = n.trim_start_matches('$').parse().unwrap_or(0);
+            piece(caps.get(i).copied().flatten())
+        }
+    };
+    it.string(text)
+}
+
+/// Setting `RegExp.input` (or `$_`) changes the input the statics read.
+pub fn legacy_input_setter(it: &mut Interp, _: &Val, a: &[Val]) -> R {
+    let v = a.first().cloned().unwrap_or(Val::Undef);
+    let text = it.str_of(&v)?;
+    let caps = it.last_match.take().map(|(_, c)| c).unwrap_or_default();
+    it.last_match = Some((text, caps));
+    Ok(Val::Undef)
+}
+
 /// The result array of a match: the strings, `index`, `input` and `groups`.
-fn result(it: &mut Interp, re: &Regex, s: &[char], caps: &Caps, input: &Name) -> R {
+fn result(it: &mut Interp, re: &Regex, s: &[u32], caps: &Caps, input: &Name) -> R {
     let mut items = Vec::new();
     for c in caps {
         items.push(match c {
-            Some((a, b)) => Val::Str(s[*a..*b].iter().collect::<String>().into()),
+            Some((a, b)) => Val::Str(text_of(&s[*a..*b]).into()),
             None => Val::Undef,
         });
     }
@@ -636,7 +755,7 @@ pub fn exec(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let (src, flags) = parts(it, this)?;
     let input = it.str_of(&a.first().cloned().unwrap_or(Val::Undef))?;
     let re = compiled(it, &src, &flags)?;
-    let s: Vec<char> = input.chars().collect();
+    let s = elements(&input, is_unicode(&flags));
     let global = flags.contains('g') || flags.contains('y');
     let start = if global { char_pos(&s, last_index(it, this)?) } else { 0 };
     if start > s.len() {
@@ -649,6 +768,7 @@ pub fn exec(it: &mut Interp, this: &Val, a: &[Val]) -> R {
                 let end = caps[0].map_or(0, |(_, b)| b);
                 it.set(this, "lastIndex", Val::Num(utf16_pos(&s, end) as f64))?;
             }
+            remember(it, &s, &caps, &input);
             result(it, &re, &s, &caps, &input)
         }
         None => {
@@ -666,7 +786,7 @@ pub fn test(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 }
 
 /// Every match of `re` in `s` from the start: their captures.
-fn all(it: &mut Interp, re: &Regex, s: &[char]) -> R<Vec<Caps>> {
+fn all(it: &mut Interp, re: &Regex, s: &[u32]) -> R<Vec<Caps>> {
     let mut out = Vec::new();
     let mut pos = 0;
     while pos <= s.len() {
@@ -695,16 +815,19 @@ pub fn string_match(it: &mut Interp, this: &Val, a: &[Val]) -> R {
         return exec(it, &rv, &[Val::Str(s)]);
     }
     let re = compiled(it, &src, &flags)?;
-    let chars: Vec<char> = s.chars().collect();
+    let chars = elements(&s, is_unicode(&flags));
     let found = all(it, &re, &chars)?;
     if found.is_empty() {
         return Ok(Val::Null);
+    }
+    if let Some(caps) = found.last() {
+        remember(it, &chars, caps, &s);
     }
     let items = found
         .iter()
         .map(|c| {
             let (x, y) = c[0].unwrap_or((0, 0));
-            Val::Str(chars[x..y].iter().collect::<String>().into())
+            Val::Str(text_of(&chars[x..y]).into())
         })
         .collect();
     it.array(items)
@@ -716,9 +839,12 @@ pub fn search(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let rv = as_regexp(it, &a.first().cloned().unwrap_or(Val::Undef))?;
     let (src, flags) = parts(it, &rv)?;
     let re = compiled(it, &src, &flags)?;
-    let chars: Vec<char> = s.chars().collect();
+    let chars = elements(&s, is_unicode(&flags));
     Ok(Val::Num(match find(it, &re, &chars, 0, false)? {
-        Some(c) => utf16_pos(&chars, c[0].map_or(0, |(x, _)| x)) as f64,
+        Some(c) => {
+            remember(it, &chars, &c, &s);
+            utf16_pos(&chars, c[0].map_or(0, |(x, _)| x)) as f64
+        }
         None => -1.0,
     }))
 }
@@ -727,25 +853,24 @@ pub fn search(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 pub fn replace(it: &mut Interp, s: &Name, rv: &Val, replacement: &Val, all_matches: bool) -> R {
     let (src, flags) = parts(it, rv)?;
     let re = compiled(it, &src, &flags)?;
-    let chars: Vec<char> = s.chars().collect();
+    let chars = elements(s, is_unicode(&flags));
     let found = if flags.contains('g') || all_matches {
         all(it, &re, &chars)?
     } else {
         find(it, &re, &chars, 0, false)?.into_iter().collect()
     };
+    if let Some(caps) = found.last() {
+        remember(it, &chars, caps, s);
+    }
     let mut out = String::new();
     let mut last = 0;
     for caps in found {
         let (x, y) = caps[0].unwrap_or((0, 0));
-        out.extend(&chars[last..x]);
-        let matched: String = chars[x..y].iter().collect();
+        out.push_str(&text_of(&chars[last..x]));
+        let matched = text_of(&chars[x..y]);
         let groups: Vec<Val> = caps[1..]
             .iter()
-            .map(|c| {
-                c.map_or(Val::Undef, |(p, q)| {
-                    Val::Str(chars[p..q].iter().collect::<String>().into())
-                })
-            })
+            .map(|c| c.map_or(Val::Undef, |(p, q)| Val::Str(text_of(&chars[p..q]).into())))
             .collect();
         let named: Vec<(String, Val)> =
             re.names.iter().map(|(n, i)| (n.clone(), groups[*i - 1].clone())).collect();
@@ -753,7 +878,7 @@ pub fn replace(it: &mut Interp, s: &Name, rv: &Val, replacement: &Val, all_match
         out.push_str(&r);
         last = y;
     }
-    out.extend(&chars[last.min(chars.len())..]);
+    out.push_str(&text_of(&chars[last.min(chars.len())..]));
     if flags.contains('g') {
         it.set(rv, "lastIndex", Val::Num(0.0))?;
     }
@@ -764,7 +889,7 @@ pub fn replace(it: &mut Interp, s: &Name, rv: &Val, replacement: &Val, all_match
 pub fn split(it: &mut Interp, s: &Name, rv: &Val, limit: usize) -> R {
     let (src, flags) = parts(it, rv)?;
     let re = compiled(it, &src, &flags)?;
-    let chars: Vec<char> = s.chars().collect();
+    let chars = elements(s, is_unicode(&flags));
     let mut out = Vec::new();
     if chars.is_empty() {
         if find(it, &re, &chars, 0, true)?.is_none() {
@@ -781,11 +906,10 @@ pub fn split(it: &mut Interp, s: &Name, rv: &Val, limit: usize) -> R {
                     q += 1;
                     continue;
                 }
-                out.push(Val::Str(chars[p..q].iter().collect::<String>().into()));
+                remember(it, &chars, &caps, s);
+                out.push(Val::Str(text_of(&chars[p..q]).into()));
                 for c in &caps[1..] {
-                    out.push(c.map_or(Val::Undef, |(x, y)| {
-                        Val::Str(chars[x..y].iter().collect::<String>().into())
-                    }));
+                    out.push(c.map_or(Val::Undef, |(x, y)| Val::Str(text_of(&chars[x..y]).into())));
                 }
                 p = e;
                 q = e;
@@ -794,8 +918,52 @@ pub fn split(it: &mut Interp, s: &Name, rv: &Val, limit: usize) -> R {
         }
     }
     if out.len() < limit {
-        out.push(Val::Str(chars[p..].iter().collect::<String>().into()));
+        out.push(Val::Str(text_of(&chars[p..]).into()));
     }
     out.truncate(limit);
     it.array(out)
+}
+
+/// `String.prototype.matchAll`: a regular expression without `g` is an error; any other value
+/// with its own `Symbol.matchAll` method decides; a string is a pattern with `g` (measured on a
+/// `refrouter` 9.0.4 on 02-11). The matches are found when it is called.
+pub fn match_all(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    if this.is_nullish() {
+        return it.type_error(&format!(
+            "String.prototype.matchAll called on incompatible {}",
+            it.show(this)
+        ));
+    }
+    let arg = a.first().cloned().unwrap_or(Val::Undef);
+    let is_regexp = matches!(&arg, Val::Obj(o) if matches!(o.borrow().kind, Kind::RegExp(..)));
+    if !is_regexp && let Val::Obj(_) = &arg {
+        let custom = it.get(&arg, &crate::builtins::well_known("matchAll"))?;
+        if custom.is_callable() {
+            return it.call(&custom, &arg, std::slice::from_ref(this));
+        }
+    }
+    let s = it.str_of(this)?;
+    let (src, flags, start) = if is_regexp {
+        let (src, flags) = parts(it, &arg)?;
+        if !flags.contains('g') {
+            return it.type_error("matchAll must be called with a global RegExp");
+        }
+        let start = last_index(it, &arg)?;
+        (src, flags, start)
+    } else {
+        let src = if matches!(arg, Val::Undef) { "(?:)".into() } else { it.str_of(&arg)? };
+        (src, "g".into(), 0)
+    };
+    let re = compiled(it, &src, &flags)?;
+    let chars = elements(&s, is_unicode(&flags));
+    let mut pos = char_pos(&chars, start);
+    let mut items = Vec::new();
+    while pos <= chars.len() {
+        let Some(caps) = find(it, &re, &chars, pos, flags.contains('y'))? else { break };
+        let (x, y) = caps[0].unwrap_or((pos, pos));
+        pos = if x == y { y + 1 } else { y };
+        remember(it, &chars, &caps, &s);
+        items.push(result(it, &re, &chars, &caps, &s)?);
+    }
+    crate::builtins::make_iter(it, crate::builtins::REGEXP_STRING_ITERATOR, items)
 }

@@ -6,6 +6,7 @@ pub mod index_consistency;
 pub mod linearizable;
 pub mod liveness;
 pub mod raft_safety;
+pub mod search_results;
 pub mod snapshot_isolation;
 pub mod storage;
 

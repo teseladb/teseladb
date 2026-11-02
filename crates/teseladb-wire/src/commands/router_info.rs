@@ -174,6 +174,9 @@ pub fn append_oplog_note<B: Backend + ?Sized>(
             Some(CommandError::new(TYPE_MISMATCH, msg))
         }
     };
+    if let (None, Some(Value::Document(data))) = (&each, ctx.cmd.get("data")) {
+        super::oplog::append_note(ctx.backend, data)?;
+    }
     let mut raw = Document::new();
     for (_, host) in shards(ctx.backend)? {
         let answer = match &each {

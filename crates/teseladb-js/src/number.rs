@@ -64,16 +64,37 @@ pub fn to_radix(x: f64, radix: u32) -> String {
         int = (int / f64::from(radix)).trunc();
     }
     out.reverse();
-    if frac > 0.0 {
+    // The fraction's digits until they tell `x` from its neighbours: half the distance to the
+    // next double, as SpiderMonkey's shortest form in a radix (measured on a `refrouter` 9.0.4 on
+    // 02-11: `(0.1).toString(3)` has 34 digits).
+    let next = f64::from_bits(x.abs().to_bits() + 1);
+    let mut delta = (0.5 * (next - x.abs())).max(f64::from_bits(1));
+    if frac >= delta {
         out.push('.');
-        let mut n = 0;
-        while frac > 0.0 && n < 52 {
-            frac *= f64::from(radix);
+        let r = f64::from(radix);
+        let mut digits: Vec<u32> = Vec::new();
+        loop {
+            frac *= r;
+            delta *= r;
             let d = frac.trunc() as u32;
-            out.push(char::from_digit(d, radix).unwrap_or('0'));
+            digits.push(d);
             frac -= f64::from(d);
-            n += 1;
+            if (frac > 0.5 || (frac == 0.5 && d & 1 == 1)) && frac + delta > 1.0 {
+                // Round up, carrying into the digits before.
+                while let Some(last) = digits.last_mut() {
+                    *last += 1;
+                    if *last < radix {
+                        break;
+                    }
+                    digits.pop();
+                }
+                break;
+            }
+            if frac < delta {
+                break;
+            }
         }
+        out.extend(digits.into_iter().map(|d| char::from_digit(d, radix).unwrap_or('0')));
     }
     let s: String = out.into_iter().collect();
     if neg { format!("-{s}") } else { s }
@@ -85,7 +106,8 @@ pub fn to_fixed(x: f64, digits: usize) -> String {
         return to_string(x);
     }
     let s = format!("{x:.digits$}");
-    if s.starts_with("-0") && s.trim_start_matches(['-', '0', '.']).is_empty() {
+    // `-0` has no sign; a small negative number keeps it (`-0.00`).
+    if x == 0.0 && s.starts_with('-') {
         return s[1..].to_owned();
     }
     s

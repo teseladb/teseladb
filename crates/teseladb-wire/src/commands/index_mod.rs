@@ -252,11 +252,12 @@ pub fn modify_index<B: Backend + ?Sized>(
         }
     }
     if converting {
-        convertible(&spec)?;
+        // The duplicates come before the type of the index (a `refrouter` 9.0.4, measured).
         let groups = violations(backend, coll, &entry)?;
         if !groups.is_empty() {
             return Err(cannot_convert(groups));
         }
+        convertible(&spec)?;
         if how.dry_run {
             return Ok(Document::new());
         }

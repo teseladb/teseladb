@@ -372,9 +372,12 @@ impl Merges {
         // replica applies it: the left one may get it in a snapshot, whose data cannot land
         // while the right one still holds its keys.
         let mut absorbed = absorbed;
+        // Only ranges: Group 0 and the meta groups on this core are never merged away, and
+        // reading their state from disk on every poll would cost a read of the LSM each time.
         let gone: Vec<GroupId> = core
             .group_ids()
             .into_iter()
+            .filter(|g| range_sm(core, *g).is_some())
             .chain(recovered.iter().copied())
             .filter(|g| replicas.merged_away(*g) && !absorbed.iter().any(|(r, _, _)| r == g))
             .collect();

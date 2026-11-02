@@ -27,6 +27,7 @@ fn info() -> NodeInfo {
         cluster_time: ClusterTime { time: 1, increment: 1 },
         now_ms: 0,
         keys: None,
+        replica_set: None,
     }
 }
 
@@ -346,6 +347,7 @@ fn op(conn: i32) -> Op {
         started_ms: 1_700_000_000_000 - 2_500,
         deadline_ms: None,
         killed: false,
+        interrupt: None,
         user: None,
         tenant: 0,
         privileges: None,

@@ -82,3 +82,13 @@ fn text_indexes_have_no_keys_here_and_bad_specs_are_errors() {
         assert!(index_def(RawDoc::from_bytes(&bytes).unwrap(), 0).is_err(), "{bad:?}");
     }
 }
+
+/// `sparse` and `unique` given as numbers: any number but 0 sets them.
+#[test]
+fn a_number_other_than_zero_sets_an_option() {
+    let key = Document::new().with("a", 1);
+    let d = def(spec(key.clone()).with("sparse", 1).with("unique", 0.0), 0).unwrap();
+    assert!(d.sparse && !d.unique);
+    let d = def(spec(key).with("sparse", 0).with("unique", 2_i64), 0).unwrap();
+    assert!(!d.sparse && d.unique);
+}

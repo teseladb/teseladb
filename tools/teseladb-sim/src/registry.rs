@@ -60,6 +60,8 @@ impl Registry {
         r.register_workload("queries", Queries::boxed).expect("a new name");
         r.register_workload("changestream", SplitsWorkload::streams).expect("a new name");
         r.register_workload("reshard", Reshard::boxed).expect("a new name");
+        r.register_workload("search", SplitsWorkload::searching).expect("a new name");
+        r.register_workload("vector", SplitsWorkload::vectors).expect("a new name");
         r.register_workload("zones", ZonesWorkload::boxed).expect("a new name");
         r
     }

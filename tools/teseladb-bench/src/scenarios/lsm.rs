@@ -332,6 +332,39 @@ mod tests {
     }
 
     #[test]
+    fn the_writer_waits_while_the_lsm_asks_to_slow_down() {
+        // One file in level 0 slows the writes down until its compaction ends; no check falls
+        // within the run, so nothing is measured.
+        let shape = Sustained {
+            lsm: LsmConfig {
+                dir: "lsm".into(),
+                memtable_bytes: 16 << 10,
+                l1_bytes: 64 << 10,
+                target_file_bytes: 16 << 10,
+                cache_bytes: 1 << 20,
+                l0_trigger: 1,
+                l0_slow: 1,
+                // Compactions slow enough that the writer finds the LSM asking it to wait.
+                compaction_bytes_per_sec: 1 << 20,
+                ..LsmConfig::default()
+            },
+            live_keys: 500,
+            ttl_writes: 1_000,
+            check_every: std::time::Duration::from_secs(3600),
+            min_writes: 5_000,
+        };
+        let args = Args {
+            scenario: "lsm-sustained".into(),
+            duration: std::time::Duration::ZERO,
+            ..Args::default()
+        };
+        let r = sustained_with(&args, shape).unwrap();
+        let value = |name: &str| r.metrics.iter().find(|m| m.name == name).unwrap().value;
+        assert_eq!(value("lsm.sustained_writes"), 5_000.0);
+        assert_eq!(r.missed().len(), 2, "{r}");
+    }
+
+    #[test]
     fn a_run_too_short_to_measure_misses_its_targets() {
         let args = Args {
             scenario: "lsm-sustained".into(),

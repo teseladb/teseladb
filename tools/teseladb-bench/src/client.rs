@@ -86,14 +86,8 @@ impl Target {
 
     /// Waits until a local cluster's first node routes at least `n` ranges.
     pub fn wait_ranges(&self, n: usize) -> Result<(), String> {
-        let until = Instant::now() + TIMEOUT;
-        while self.ranges().is_some_and(|r| r.len() < n) {
-            if Instant::now() >= until {
-                return Err(format!("the cluster did not route {n} ranges within {TIMEOUT:?}"));
-            }
-            std::thread::sleep(RANGE_POLL);
-        }
-        Ok(())
+        let what = format!("routing {n} ranges");
+        poll_until(&what, TIMEOUT, RANGE_POLL, || self.ranges().is_none_or(|r| r.len() >= n))
     }
 }
 
@@ -206,13 +200,31 @@ impl Client {
     }
 }
 
+/// Calls `done` every `every` until it holds, at most `timeout`: past it, an error saying that
+/// `what` did not happen.
+pub fn poll_until(
+    what: &str,
+    timeout: Duration,
+    every: Duration,
+    mut done: impl FnMut() -> bool,
+) -> Result<(), String> {
+    let until = Instant::now() + timeout;
+    while !done() {
+        if Instant::now() >= until {
+            return Err(format!("{what} did not happen within {timeout:?}"));
+        }
+        std::thread::sleep(every);
+    }
+    Ok(())
+}
+
 /// An error as its message.
 fn text(e: std::io::Error) -> String {
     e.to_string()
 }
 
 /// An error of the BSON or wire crates as its debug form.
-fn debug(e: impl std::fmt::Debug) -> String {
+pub fn debug(e: impl std::fmt::Debug) -> String {
     format!("{e:?}")
 }
 
@@ -254,6 +266,31 @@ mod tests {
         let empty = doc(vec![("ok", Value::Int32(1)), ("writeErrors", Value::Array(vec![]))]);
         assert_eq!(check(&bytes(empty)), Ok(()));
         assert!(check(&[1, 2, 3]).is_err());
+    }
+
+    #[test]
+    fn the_code_of_a_reply_is_its_own_or_that_of_its_first_write_error() {
+        let coded = |c: i32| doc(vec![("code", Value::Int32(c))]);
+        assert_eq!(error_code(&bytes(coded(NOT_WRITABLE_PRIMARY))), Ok(Some(NOT_WRITABLE_PRIMARY)));
+        let written = |errors: Vec<Value>| bytes(doc(vec![("writeErrors", Value::Array(errors))]));
+        assert_eq!(error_code(&written(vec![Value::Document(coded(11000))])), Ok(Some(11000)));
+        assert_eq!(error_code(&written(vec![Value::Document(Document::new())])), Ok(None));
+        assert_eq!(error_code(&written(vec![Value::Int32(1)])), Ok(None));
+        assert_eq!(error_code(&written(vec![])), Ok(None));
+        assert_eq!(error_code(&bytes(doc(vec![("ok", Value::Int32(1))]))), Ok(None));
+        assert!(error_code(&[1, 2, 3]).is_err());
+    }
+
+    #[test]
+    fn polling_ends_when_the_condition_holds_or_the_time_is_up() {
+        let mut calls = 0;
+        let three = poll_until("three calls", TIMEOUT, Duration::ZERO, || {
+            calls += 1;
+            calls == 3
+        });
+        assert_eq!((three, calls), (Ok(()), 3));
+        let never = poll_until("nothing", Duration::ZERO, Duration::ZERO, || false);
+        assert_eq!(never, Err("nothing did not happen within 0ns".into()));
     }
 
     #[test]
