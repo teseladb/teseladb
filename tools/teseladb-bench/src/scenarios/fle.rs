@@ -3,8 +3,10 @@
 //! each `find` timed alone, over `--records` documents `{_id, ssn}` where `ssn` is encrypted with
 //! equality queries and contention 0 and each value has 10 documents. The payloads are built here
 //! from a fixed index key, as a driver builds them with librefcrypt (the same token derivations,
-//! checked against its vectors in `teseladb-fle`); the server never needs the key. Target: under
-//! 5 ms at p50 with three nodes.
+//! checked against its vectors in `teseladb-fle`); the server never needs the key. The collection
+//! is created as a driver's helper creates it, with its metadata collections and the index of
+//! `__safeContent__`. Target: under 5 ms at p50 with three nodes; `encrypted_insert` is the rate
+//! of the load.
 
 use teseladb_bson::{Document, Value};
 use teseladb_fle::tokens::{self, Collection, Token};
@@ -17,6 +19,11 @@ use crate::report::Report;
 /// Database and collection of the documents.
 const DB: &str = "bench";
 const COLLECTION: &str = "fle";
+/// The metadata collections of the collection, by their default names.
+const ESC: &str = "enxcol_.fle.esc";
+const ECOC: &str = "enxcol_.fle.ecoc";
+/// The array of tags of an encrypted document.
+const SAFE_CONTENT: &str = "__safeContent__";
 /// The encrypted field.
 const FIELD: &str = "ssn";
 /// Documents of each value.
@@ -123,17 +130,50 @@ fn encryption_information() -> Value {
     ]))
 }
 
+/// Runs `command`; its error names the command and its first argument.
 fn run_on(c: &mut Client, command: Document) -> Result<Vec<u8>, String> {
-    let reply = c.command(DB, command)?;
-    check(&reply)?;
+    let name = match command.iter().next() {
+        Some((k, Value::String(v))) => format!("{k} {v}"),
+        Some((k, _)) => k.to_owned(),
+        None => String::new(),
+    };
+    let reply = c.command(DB, command).map_err(|e| format!("{name}: {e}"))?;
+    check(&reply).map_err(|e| format!("{name}: {e}"))?;
     Ok(reply)
+}
+
+/// What a driver's helper that creates an encrypted collection sends, in order: its metadata
+/// collections, clustered on `_id`, the collection and the index of `__safeContent__`, which the
+/// server does not create (contract `fle-server.md`).
+fn setup() -> Vec<Document> {
+    let clustered = || {
+        let key = doc(vec![("_id", Value::Int32(1))]);
+        Value::Document(doc(vec![("key", Value::Document(key)), ("unique", Value::Boolean(true))]))
+    };
+    let index = doc(vec![
+        ("key", Value::Document(doc(vec![(SAFE_CONTENT, Value::Int32(1))]))),
+        ("name", Value::String(format!("{SAFE_CONTENT}_1"))),
+    ]);
+    vec![
+        doc(vec![("create", Value::String(ESC.into())), ("clusteredIndex", clustered())]),
+        doc(vec![("create", Value::String(ECOC.into())), ("clusteredIndex", clustered())]),
+        doc(vec![("create", coll()), ("encryptedFields", encrypted_fields())]),
+        doc(vec![
+            ("createIndexes", coll()),
+            ("indexes", Value::Array(vec![Value::Document(index)])),
+        ]),
+    ]
 }
 
 /// Creates the collection and writes `records` documents; the number of values.
 fn load(c: &mut Client, records: u64) -> Result<i64, String> {
     // The collection may not exist yet.
-    let _ = c.command(DB, doc(vec![("drop", coll())]));
-    run_on(c, doc(vec![("create", coll()), ("encryptedFields", encrypted_fields())]))?;
+    for name in [COLLECTION, ESC, ECOC] {
+        let _ = c.command(DB, doc(vec![("drop", Value::String(name.into()))]));
+    }
+    for command in setup() {
+        run_on(c, command)?;
+    }
     let records = i64::try_from(records).unwrap_or(i64::MAX).max(PER_VALUE);
     let mut next = 0;
     while next < records {
@@ -170,7 +210,9 @@ fn found(reply: &[u8]) -> usize {
 pub fn run(args: &Args) -> Result<Report, String> {
     let target = Target::open(args.target.as_deref())?;
     let mut c = Client::connect(target.addr()?)?;
+    let started = std::time::Instant::now();
     let values = load(&mut c, args.records)?;
+    let loaded = started.elapsed().as_secs_f64();
     let mut k = 0i64;
     let equality = each(args.warmup, args.duration, || {
         k = (k + 1) % values;
@@ -191,6 +233,9 @@ pub fn run(args: &Args) -> Result<Report, String> {
     })?;
     let mut report = Report::new("fle-query");
     report.latency("encrypted_equality_10", &equality, Some(EQUALITY_P50_NS), None);
+    // Each encrypted insert runs in its own transaction of the node (D-120).
+    let records = (values * PER_VALUE) as f64;
+    report.push("encrypted_insert", "docs/s", records / loaded.max(f64::MIN_POSITIVE), None);
     report.notes.push(format!(
         "{} documents, 10 per encrypted value, contention 0, one connection, target {}",
         args.records,
@@ -215,5 +260,10 @@ mod tests {
         assert_eq!((find.tokens.edc, find.max_contention), (edc, 0));
         assert_ne!(value_tokens(4).0, edc);
         assert_eq!(found(b"not bson"), 0);
+        let names: Vec<String> =
+            setup().iter().map(|d| format!("{:?}", d.iter().next().unwrap().1)).collect();
+        assert_eq!(names.len(), 4);
+        assert!(names[0].contains(ESC) && names[1].contains(ECOC), "{names:?}");
+        assert!(format!("{:?}", setup()[3]).contains("__safeContent___1"));
     }
 }
