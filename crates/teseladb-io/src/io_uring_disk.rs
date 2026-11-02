@@ -221,6 +221,25 @@ impl IoUringDisk {
         self.queue.len() + self.running.len() + self.done.len()
     }
 
+    /// Whether results are waiting for [`IoUringDisk::reap`] without a completion to signal them
+    /// (an operation that failed before reaching the ring).
+    pub fn ready(&self) -> bool {
+        !self.done.is_empty()
+    }
+
+    /// Waits for every submitted operation and drops the results (when the core stops).
+    pub fn drain(&mut self) {
+        while !self.queue.is_empty() || !self.running.is_empty() {
+            self.start_ready();
+            let wait = u32::from(self.running.iter().any(|j| j.waiting.is_some()));
+            if self.ring.submit(wait).is_err() {
+                break;
+            }
+            self.collect();
+        }
+        self.done.clear();
+    }
+
     /// Queues `op` behind the ones already submitted; it starts on the next [`IoUringDisk::flush`].
     pub fn submit(&mut self, op: IoOp) {
         let seq = self.next_seq;

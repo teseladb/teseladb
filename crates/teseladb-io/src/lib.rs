@@ -11,6 +11,7 @@ pub mod handshake;
 #[cfg(target_os = "linux")]
 pub mod io_uring_disk;
 pub mod mailbox;
+pub mod node_disk;
 pub mod peer;
 pub mod poller;
 pub mod runtime;
@@ -21,3 +22,4 @@ pub mod timer;
 pub use file_disk::{FileDisk, direct_io_supported};
 #[cfg(target_os = "linux")]
 pub use io_uring_disk::IoUringDisk;
+pub use node_disk::NodeDisk;
