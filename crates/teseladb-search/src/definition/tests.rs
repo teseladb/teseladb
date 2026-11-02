@@ -368,3 +368,35 @@ fn vector_definitions_are_checked_as_refsearch_does() {
         assert_eq!(err(&def), want, "{def:?}");
     }
 }
+
+/// `returnStoredSource` (measured on `refsearch` 1.70.6 with `include: ["t"]`, scenario
+/// `search-type-objectId`): `_id` and the fields kept.
+#[test]
+fn stored_source_keeps_the_id_and_the_fields_it_names() {
+    let doc = Document::new()
+        .with("_id", 1)
+        .with("o", 2)
+        .with("t", "red fox")
+        .with("a", Document::new().with("b", 1).with("c", 2))
+        .with("s", "x");
+    let names = |l: &[&str]| l.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+    let include = StoredSource::Include(names(&["t", "a.c", "s.z"]));
+    assert_eq!(
+        include.project(&doc),
+        Document::new().with("_id", 1).with("t", "red fox").with("a", Document::new().with("c", 2))
+    );
+    let exclude = StoredSource::Exclude(names(&["o", "a.b", "t.z"]));
+    assert_eq!(
+        exclude.project(&doc),
+        Document::new()
+            .with("_id", 1)
+            .with("t", "red fox")
+            .with("a", Document::new().with("c", 2))
+            .with("s", "x")
+    );
+    assert_eq!(StoredSource::All.project(&doc), doc);
+    assert_eq!(
+        StoredSource::Include(names(&["a.z"])).project(&doc),
+        Document::new().with("_id", 1)
+    );
+}

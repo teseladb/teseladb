@@ -879,9 +879,10 @@ fn answer<B: Backend + ?Sized>(
     let found = with_index(backend, shared, ns, &coll, &entry, &synonyms, |ix, stored| {
         match (ix, meta_only) {
             (Segments::Search(ix), true) => ix.meta(spec).map(|d| vec![plain(d)]),
-            (Segments::Search(ix), false) => {
-                ix.search(spec).map(|f| scored(as_read(f, stored, view.is_some()), SEARCH_SCORE))
-            }
+            (Segments::Search(ix), false) => ix.search(spec).map(|f| {
+                let found = as_read(f, stored, view.is_some());
+                scored(stored_source(ix.definition(), spec, found), SEARCH_SCORE)
+            }),
             (Segments::Vector(_), _) => Err(vector_search::not_search(&name)),
         }
     })?;
@@ -978,6 +979,20 @@ fn as_read(found: Vec<Found>, stored: &BTreeMap<Vec<u8>, Document>, on_view: boo
             if let Some(d) = stored.get(&f.key) {
                 f.doc = d.clone();
             }
+            f
+        })
+        .collect()
+}
+
+/// With `returnStoredSource: true`, each document as the index's `storedSource` keeps it.
+fn stored_source(definition: &Definition, spec: &Document, found: Vec<Found>) -> Vec<Found> {
+    if !matches!(spec.get("returnStoredSource"), Some(Value::Boolean(true))) {
+        return found;
+    }
+    found
+        .into_iter()
+        .map(|mut f| {
+            f.doc = definition.stored_source.project(&f.doc);
             f
         })
         .collect()
