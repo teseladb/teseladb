@@ -3196,3 +3196,130 @@ new RegExp('/', 'g').source + new RegExp('\n').source + new RegExp('').source + 
 (() => { function* g() { const a = {b: null}; return a.b.c + (yield 1) } const it = g(); try { it.next() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:can't access property "c", a.b is null
 (() => { function* g() { const a = {f: 5}; return new a.f(yield 1) } const it = g(); it.next(); try { it.next(2) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:a.f is not a constructor
 (() => { function* g() { const a = {b: null}; a.b.c = yield 1 } const it = g(); it.next(); try { it.next(2) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:can't access property "c", a.b is null
+eval('1 + 2')	J:3
+eval('1 + 2')	J:3
+eval('1\r+ 2')	J:3
+eval('﻿ 3')	J:3
+eval('true?.5:1')	J:0.5
+eval('1_000_0')	J:10000
+(() => { try { return eval('0x_1') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:missing hexadecimal digits after '0x'
+(() => { try { return eval('1__0') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:number cannot contain multiple adjacent underscores
+(() => { try { return eval('09n') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid BigInt syntax
+(() => { try { return eval('0b2n') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:missing binary digits after '0b'
+(() => { try { return eval("'\\u{110000}'") } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:Unicode codepoint must not be greater than 0x10FFFF in escape sequence
+(() => { try { return eval("'\\u{12'") } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:malformed Unicode character escape sequence
+(() => { try { return eval("'\\u{1g}'") } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:malformed Unicode character escape sequence
+(() => { try { return eval("'\\x4'") } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:malformed hexadecimal character escape sequence
+(() => { try { return eval("'abc\\") } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:reached end of script in the middle of an escape sequence in a '' literal
+(() => { try { return eval("'\\0'").charCodeAt(0) } catch (e) { return e.name + ':' + e.message } })()	J:0
+(() => { try { return eval("'\\08'").length } catch (e) { return e.name + ':' + e.message } })()	J:2
+(() => { try { return eval("'\\u'") } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:malformed Unicode character escape sequence
+(() => { try { return eval('`a${') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:expected expression, got end of script
+(() => { try { return eval('`a\\') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:reached end of script in the middle of an escape sequence in a `` literal
+(() => { try { return eval('`a') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:`` literal not terminated before end of script
+eval('`a\\`b`')	S:a`b
+eval('String.raw`\\u{zz}`')	S:\\u{zz}
+(() => { try { return eval('/a') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:unterminated regular expression literal
+(() => { try { return eval('/a\n/') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:unterminated regular expression literal
+eval('/[/]/.test("/")')	J:true
+eval('/\\//.source')	S:\\/
+eval('"\\uD83D\\uDE00".length')	J:2
+eval('var \\uD83D\\uDE00; 1')	E:SyntaxError:invalid escape sequence
+eval('"\\uD83D\\u0041".length')	J:2
+eval('"\\uD83D".length')	J:1
+eval('"\\uD83Dx".length')	J:2
+eval('"\\uD83D\\".length')	E:SyntaxError:"" literal not terminated before end of script
+(() => { try { return eval('a\\u0062c = 1; abc') } catch (e) { return e.name + ':' + e.message } })()	J:1
+(() => { try { return eval('\\u{61}b = 2; ab') } catch (e) { return e.name + ':' + e.message } })()	J:2
+(() => { try { return eval('\\u{zz} = 2') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid escape sequence
+(() => { try { return eval('\\x61 = 2') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid escape sequence
+(() => { try { return eval('1e') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:missing exponent
+(() => { try { return eval('3in []') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:identifier starts immediately after numeric literal
+(() => { try { return eval('08.5') } catch (e) { return e.name + ':' + e.message } })()	J:8.5
+(() => { try { return eval('"use strict"; 08') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:"0"-prefixed octal literals are deprecated; use the "0o" prefix instead
+(() => { try { return eval('"use strict"; "\\08"') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:octal escape sequences can't be used in untagged template literals or in strict mode code
+(() => { try { return eval('"use strict"; "\\1"') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:octal escape sequences can't be used in untagged template literals or in strict mode code
+(() => { try { return eval('"\\1"').charCodeAt(0) } catch (e) { return e.name + ':' + e.message } })()	J:1
+(() => { try { return eval('"\\18"').length } catch (e) { return e.name + ':' + e.message } })()	J:2
+(() => { try { return eval('"\\400"').length } catch (e) { return e.name + ':' + e.message } })()	J:2
+(() => { try { return eval('"\\8"') } catch (e) { return e.name + ':' + e.message } })()	S:8
+(() => { try { return eval('"a\nb"') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:"" string literal contains an unescaped line break
+eval('"a\\\nb"')	S:ab
+eval('"a\\\r\nb"')	S:ab
+eval('"a\\ b"')	S:ab
+(() => { try { return eval('"a b"').length } catch (e) { return e.name + ':' + e.message } })()	J:3
+eval('// c  5')	J:5
+eval('/* a\n */ 5')	J:5
+(() => { try { return eval('/* a') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:unterminated comment
+eval('<!-- x\n 6')	J:6
+eval('1\n--> x\n 7')	J:7
+(() => { try { return eval('@') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:illegal character U+0040
+(() => { try { return eval('#') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:'#' not followed by identifier
+(() => { try { return eval('a.#b') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:reference to undeclared private field or method #b
+(() => { try { return eval('"use strict"; 0o9') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:missing octal digits after '0o'
+(() => { try { return eval('0o') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:missing octal digits after '0o'
+(() => { try { return eval('0x') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:missing hexadecimal digits after '0x'
+(() => { try { return eval('0b') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:missing binary digits after '0b'
+(() => { try { return eval('1.5n') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:identifier starts immediately after numeric literal
+(() => { try { return eval('1e3n') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:identifier starts immediately after numeric literal
+eval('0x1Fn + 0o17n + 0b11n')	E:TypeError:BigInt value can't be serialized in JSON
+eval('.5e1 + 5.e-1 + 0.0e0')	J:5.5
+(() => { try { return eval('1.e') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:missing exponent
+(() => { try { return eval('1a') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:identifier starts immediately after numeric literal
+(() => { try { return eval('0_1') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:numeric separators '_' are not allowed in numbers that start with '0'
+(() => { try { return eval('1_') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:underscore can appear only between digits, not after the last digit in a number
+(() => { try { return eval('1._5') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:identifier starts immediately after numeric literal
+(() => { try { return eval('1e_5') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:missing exponent
+(() => { try { return eval('`a${1') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:missing } in template string
+(() => { try { return eval('`a${1}') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:`` literal not terminated before end of script
+(() => { try { return eval('`a${"x}') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:"" literal not terminated before end of script
+(() => { try { return eval("'abc") } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:'' literal not terminated before end of script
+(() => { try { return eval('"abc') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:"" literal not terminated before end of script
+(() => { try { return eval("'a\rb'") } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:'' string literal contains an unescaped line break
+(() => { try { return eval("'a\nb'") } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:'' string literal contains an unescaped line break
+(() => { try { return eval('"use strict"; "\\8"') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:the escapes \\8 and \\9 can't be used in untagged template literals or in strict mode code
+(() => { try { return eval('"use strict"; 07') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:"0"-prefixed octal literals are deprecated; use the "0o" prefix instead
+(() => { try { return eval('"use strict"; 0') } catch (e) { return e.name + ':' + e.message } })()	J:0
+(() => { try { return eval('"use strict"; 0.5 + 0e1') } catch (e) { return e.name + ':' + e.message } })()	J:0.5
+(() => { try { return eval('010 + 0777') } catch (e) { return e.name + ':' + e.message } })()	J:519
+(() => { try { return eval('07.5') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:unexpected token: numeric literal
+(() => { try { return eval('08e1') } catch (e) { return e.name + ':' + e.message } })()	J:80
+(() => { try { return eval('07n') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid BigInt syntax
+(() => { try { return eval('0n + 1') } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:can't convert BigInt to number
+(() => { try { return eval('07_1') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:numeric separators '_' are not allowed in numbers that start with '0'
+(() => { try { return eval('0x1__2') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:number cannot contain multiple adjacent underscores
+(() => { try { return eval('0x1_') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:underscore can appear only between digits, not after the last digit in a number
+(() => { try { return eval('0X') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:missing hexadecimal digits after '0x'
+(() => { try { return eval('0x1_f') } catch (e) { return e.name + ':' + e.message } })()	J:31
+(() => { try { return eval('1_0.5_5e1_0') } catch (e) { return e.name + ':' + e.message } })()	J:105500000000
+(() => { try { return eval('1e+_5') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:missing exponent
+(() => { try { return eval('1e5_') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:underscore can appear only between digits, not after the last digit in a number
+(() => { try { return eval('"\\377".charCodeAt(0) + "\\0".length + "\\7a".length') } catch (e) { return e.name + ':' + e.message } })()	J:258
+(() => { try { return eval("'\\u{}'") } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:malformed Unicode character escape sequence
+(() => { try { return eval("'\\u{0000000041}'") } catch (e) { return e.name + ':' + e.message } })()	S:A
+(() => { try { return eval("'\\u{41") } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:malformed Unicode character escape sequence
+(() => { try { return eval('\\u0020a') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid escape sequence
+(() => { try { return eval('a\\u0020') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid escape sequence
+(() => { try { return eval('\\ a') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid escape sequence
+(() => { try { return eval('\\') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid escape sequence
+(() => { try { return eval('\\u0031a') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid escape sequence
+(() => { try { return eval('var a\\u0031 = 4; a1') } catch (e) { return e.name + ':' + e.message } })()	J:4
+(() => { try { return eval('\\uD83D') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid escape sequence
+(() => { try { return eval('var \\u{1F600}') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid escape sequence
+(() => { try { return eval('var \\u{10FFFF}') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid escape sequence
+(() => { try { return eval('#\\u0061') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:private names aren't valid in this context
+(() => { try { return eval('x = 1 <!-- 2\n x') } catch (e) { return e.name + ':' + e.message } })()	J:1
+(() => { try { return eval('/*\n*/ --> c\n 3') } catch (e) { return e.name + ':' + e.message } })()	J:3
+(() => { try { return eval('1 /* a */ --> c\n 3') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid increment/decrement operand
+(() => { try { return eval('var x = 5; x\n-->1') } catch (e) { return e.name + ':' + e.message } })()	J:5
+(() => { try { return eval('-->1\n2') } catch (e) { return e.name + ':' + e.message } })()	J:2
+(() => { try { return eval('1 // c\r 2') } catch (e) { return e.name + ':' + e.message } })()	J:2
+(() => { try { return eval('1 // c  2') } catch (e) { return e.name + ':' + e.message } })()	J:2
+(() => { try { return eval('a = 1; a\n++\nb') } catch (e) { return e.name + ':' + e.message } })()	S:ReferenceError:b is not defined
+(() => { try { return eval('`\\08`') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:octal escape sequences can't be used in untagged template literals or in strict mode code
+(() => { try { return eval('`\\u{110000}`') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:Unicode codepoint must not be greater than 0x10FFFF in escape sequence
+(() => { try { return eval('String.raw`\\u{110000}`') } catch (e) { return e.name + ':' + e.message } })()	S:\\u{110000}
+(() => { try { return eval('²') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:illegal character U+00B2
+(() => { try { return eval('var a² = 1; a²') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:illegal character U+00B2
+(() => { try { return eval('Ⅰ = 3; Ⅰ') } catch (e) { return e.name + ':' + e.message } })()	J:3
+(() => { try { return eval('var ٠') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:illegal character U+0660

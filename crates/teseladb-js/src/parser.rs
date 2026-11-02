@@ -40,6 +40,12 @@ pub fn parse_script_in(src: &str, privates: &[Name]) -> Result<Vec<Stmt>, Syntax
     let mut out = Vec::new();
     while !p.at_eof() {
         out.push(p.statement()?);
+        if out.len() == 1 && has_use_strict(&out) {
+            p.strict = true;
+        }
+    }
+    if p.strict {
+        p.check_legacy(0)?;
     }
     p.namer.finish();
     Ok(out)
@@ -332,6 +338,15 @@ impl Parser {
     fn fail<T>(&self, message: String) -> Result<T, SyntaxError> {
         let p = self.pos();
         Err(SyntaxError { message, line: p.line, col: p.col })
+    }
+
+    /// Strict mode code from the token `from` up to here: a legacy octal number or escape
+    /// fails ([`crate::lexer::Token::legacy`]).
+    fn check_legacy(&self, from: usize) -> Result<(), SyntaxError> {
+        match self.toks[from..self.i].iter().find_map(|t| t.legacy.map(|m| (t, m))) {
+            Some((t, m)) => Err(SyntaxError { message: m.into(), line: t.line, col: t.col }),
+            None => Ok(()),
+        }
     }
 
     fn fail_at<T>(&self, p: Pos, message: String) -> Result<T, SyntaxError> {
@@ -1093,6 +1108,8 @@ impl Parser {
         derived_ctor: bool,
         kind: FnKind,
     ) -> Result<Rc<FuncDef>, SyntaxError> {
+        let outer_strict = self.strict;
+        let from = self.i;
         let (params, rest) = self.params()?;
         self.expect("{")?;
         // A directive is the first statement: it is read before the rest of the body.
@@ -1114,8 +1131,12 @@ impl Parser {
         }
         let body = self.block_rest();
         let strict = self.strict || body.as_deref().is_ok_and(has_use_strict);
+        let body = body?;
+        if strict && !outer_strict {
+            self.check_legacy(from)?;
+        }
         let body =
-            if kind.generator && !kind.is_async { crate::generators::lower(body?) } else { body? };
+            if kind.generator && !kind.is_async { crate::generators::lower(body) } else { body };
         Ok(Rc::new(FuncDef {
             name,
             params,
@@ -1136,10 +1157,15 @@ impl Parser {
     /// A class: its code is strict.
     fn class_rest(&mut self) -> Result<Rc<ClassDef>, SyntaxError> {
         let outer = self.strict;
+        let from = self.i;
         self.strict = true;
         let c = self.class_body();
         self.strict = outer;
-        c
+        let c = c?;
+        if !outer {
+            self.check_legacy(from)?;
+        }
+        Ok(c)
     }
 
     fn class_body(&mut self) -> Result<Rc<ClassDef>, SyntaxError> {
@@ -1464,6 +1490,7 @@ impl Parser {
     }
 
     fn arrow_in(&mut self, start: Pos, is_async: bool) -> Result<Expr, SyntaxError> {
+        let (outer_strict, from) = (self.strict, self.i);
         let (params, rest) = if let Tok::Ident(_) = self.tok() {
             (vec![(Pattern::Name(self.ident()?), None)], None)
         } else {
@@ -1480,6 +1507,9 @@ impl Parser {
         };
         let strict = self.strict;
         let body = body?;
+        if strict && !outer_strict {
+            self.check_legacy(from)?;
+        }
         Ok(Expr::Func(Rc::new(FuncDef {
             name: None,
             params,
