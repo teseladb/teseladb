@@ -355,6 +355,7 @@ dependencies = [
  "teseladb-session",
  "teseladb-sys",
  "teseladb-tls",
+ "teseladb-topology",
  "teseladb-txn",
  "teseladb-types",
  "teseladb-tz",
@@ -420,7 +421,7 @@ name = "teseladb-topology"
 version = "0.1.0"
 dependencies = [
  "teseladb-bson",
- "teseladb-wire",
+ "teseladb-changestream",
 ]
 
 [[package]]
@@ -480,6 +481,7 @@ dependencies = [
  "teseladb-router",
  "teseladb-search",
  "teseladb-session",
+ "teseladb-topology",
  "teseladb-txn",
  "teseladb-types",
  "teseladb-x509",

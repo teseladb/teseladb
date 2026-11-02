@@ -753,6 +753,20 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         self.call(|b| b.config_settings_write(writes))
     }
 
+    fn group0_settings(
+        &mut self,
+        prefix: &[u8],
+    ) -> Result<std::collections::BTreeMap<Vec<u8>, Vec<u8>>, CommandError> {
+        self.call(|b| b.group0_settings(prefix))
+    }
+
+    fn group0_settings_write(
+        &mut self,
+        changes: Vec<teseladb_meta::command::SettingChange>,
+    ) -> Result<bool, CommandError> {
+        self.call(|b| b.group0_settings_write(changes))
+    }
+
     fn request_shutdown(&mut self) -> Result<(), CommandError> {
         self.call(|b| b.request_shutdown())
     }

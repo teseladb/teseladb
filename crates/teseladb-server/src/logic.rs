@@ -74,6 +74,9 @@ enum IoSlot {
 
 /// Group 0 voters at most; the other nodes stay learners.
 pub const GROUP0_MAX_VOTERS: usize = 5;
+/// The states a node's `topologyVersion` counter tells apart (active, draining, removed); the
+/// presentation's changes count in multiples of it.
+const TOPOLOGY_STATES: i64 = 3;
 
 /// Certificate fingerprint of a node in `--insecure` mode: derived from its inter-node address, so
 /// that joining again from the same address gives back the same node.
@@ -341,7 +344,16 @@ impl NodeLogic {
             NodeState::Draining => teseladb_meta::drain::progress(sm, &voters, *me).replicas == 0,
             NodeState::Removed => true,
         };
-        presence.set(teseladb_meta::drain::topology_counter(state), closed);
+        // Each change of the presentation raises its term or its `setVersion`, both of which
+        // only grow: the counter grows with them and wakes the waiting `hello`s (018 FR-015).
+        let shown = crate::config_db::presentation(sm);
+        let version = shown.as_ref().map_or(0, |p| p.term.saturating_add(i64::from(p.set_version)));
+        let counter = teseladb_meta::drain::topology_counter(state)
+            .saturating_add(version.saturating_mul(TOPOLOGY_STATES));
+        if shown.is_some() {
+            presence.set_replica(crate::config_db::replica_member(sm, *me));
+        }
+        presence.set(counter, closed);
     }
 
     /// Core `core` publishes its load in `loads` at every tick; core 0 sends the node's.

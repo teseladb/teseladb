@@ -58,6 +58,9 @@ pub fn repl_set_get_status<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
 ) -> Result<Document, CommandError> {
     admin_only(REPL_SET_GET_STATUS, ctx.db)?;
+    if super::presentation::replica_set(ctx.backend)?.is_some() {
+        return super::replset::get_status(ctx);
+    }
     Ok(Document::new()
         .with("info", "refrouter")
         .with("ok", 0.0)

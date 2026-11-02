@@ -319,7 +319,17 @@ fn command<B: Backend + ?Sized>(
     // A `refrouter` reads and checks `$clusterTime` after the command's arguments and before it
     // authorizes (measured).
     cluster_time::check(&req.command, name, node)?;
-    crate::commands::names::check_db_reachable(&req.db)?;
+    let target = match req.command.iter().next() {
+        Some((_, teseladb_bson::Value::String(c))) => Some(c.as_str()),
+        _ => None,
+    };
+    crate::commands::local_db::check_reachable(&req.db, canonical(name), target)?;
+    if let Some(view) = &node.replica_set {
+        let tv = Document::new()
+            .with("processId", Value::ObjectId(node.topology.process_id))
+            .with("counter", node.topology.counter);
+        crate::commands::replset::gate(&view.set, view.me, canonical(name), tv)?;
+    }
     let privileges = match (cmds.as_mut(), auth::allowed_unauthenticated(name)) {
         (Some((backend, shared)), false) => {
             let r = authorize::authorize(conn, req, canonical(name), &mut **backend, shared);
