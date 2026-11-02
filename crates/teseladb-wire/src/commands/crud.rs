@@ -582,6 +582,13 @@ pub fn insert<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
         }
     };
     let rules = rules_of(&ns, &coll, bypass, None, index_rules(ctx.backend, &coll)?)?;
+    let mut target = (coll, rules);
+    // A chunk a resharding's fence refused goes to the collection as the catalog has it then.
+    let mut again = |ctx: &mut Ctx<'_, B>| {
+        let coll = ensure_collection(ctx, &ns)?;
+        let rules = rules_of(&ns, &coll, bypass, None, index_rules(ctx.backend, &coll)?)?;
+        Ok((coll, rules))
+    };
     let mut n: i64 = 0;
     let mut chunk: Vec<(usize, Document, Vec<u8>)> = Vec::new();
     let mut bytes = 0usize;
@@ -589,7 +596,7 @@ pub fn insert<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
     for (i, d) in docs.iter().enumerate() {
         let prepared = match d {
             Value::Document(d) => with_id(ctx.backend, ctx.shared, d)
-                .and_then(|doc| insert_key(&coll, &doc).map(|k| (doc, k))),
+                .and_then(|doc| insert_key(&target.0, &doc).map(|k| (doc, k))),
             other => Err(wrong_type(&format!("insert.documents.{i}"), other, "object")),
         };
         let prepared = prepared.and_then(|(doc, key)| {
@@ -602,8 +609,15 @@ pub fn insert<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
                 chunk.push((i, doc, key));
             }
             Err(e) => {
-                stop |=
-                    flush(ctx, &mut w, (&coll, &rules), ordered, &mut chunk, &mut n, &mut errors);
+                stop |= flush(
+                    ctx,
+                    &mut w,
+                    (&mut target, &mut again),
+                    ordered,
+                    &mut chunk,
+                    &mut n,
+                    &mut errors,
+                );
                 errors.push(write_error(i, &e));
                 if ordered {
                     stop = true;
@@ -615,14 +629,22 @@ pub fn insert<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
         }
         if chunk.len() >= INSERT_CHUNK_DOCS || bytes >= INSERT_CHUNK_BYTES {
             bytes = 0;
-            if flush(ctx, &mut w, (&coll, &rules), ordered, &mut chunk, &mut n, &mut errors) {
+            if flush(
+                ctx,
+                &mut w,
+                (&mut target, &mut again),
+                ordered,
+                &mut chunk,
+                &mut n,
+                &mut errors,
+            ) {
                 stop = true;
                 break;
             }
         }
     }
     if !stop {
-        flush(ctx, &mut w, (&coll, &rules), ordered, &mut chunk, &mut n, &mut errors);
+        flush(ctx, &mut w, (&mut target, &mut again), ordered, &mut chunk, &mut n, &mut errors);
     }
     let mut reply = Document::new().with("n", count(n));
     if !errors.is_empty() {
@@ -653,7 +675,12 @@ pub(crate) fn insert_internal<B: Backend + ?Sized>(
         chunk.push((i, d, key));
     }
     let (mut n, mut errors) = (0, Vec::new());
-    flush(ctx, &mut w, (&coll, &rules), true, &mut chunk, &mut n, &mut errors);
+    // `system.profile` is never resharded: a fence on it is an error.
+    let mut target = (coll, rules);
+    let mut again = |_: &mut Ctx<'_, B>| -> Result<(CollectionEntry, Rules), CommandError> {
+        Err(CommandError::new(crate::error::INTERNAL_ERROR, "the profile collection is fenced"))
+    };
+    flush(ctx, &mut w, (&mut target, &mut again), true, &mut chunk, &mut n, &mut errors);
     match errors.into_iter().next() {
         None => Ok(()),
         Some(e) => {
@@ -662,11 +689,16 @@ pub(crate) fn insert_internal<B: Backend + ?Sized>(
     }
 }
 
+/// What an insert reads again once a resharding's fence refused a chunk: the collection and its
+/// rules.
+type Refresh<'a, B> =
+    dyn FnMut(&mut Ctx<'_, B>) -> Result<(CollectionEntry, Rules), CommandError> + 'a;
+
 /// Writes the documents gathered; `true` if an ordered insert has to stop.
 fn flush<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
     w: &mut Writer,
-    (coll, rules): (&CollectionEntry, &Rules),
+    (target, again): (&mut (CollectionEntry, Rules), &mut Refresh<'_, B>),
     ordered: bool,
     chunk: &mut Vec<(usize, Document, Vec<u8>)>,
     n: &mut i64,
@@ -677,23 +709,44 @@ fn flush<B: Backend + ?Sized>(
     }
     let items = std::mem::take(chunk);
     // A capped collection takes its documents one by one, each at the next `seq` (015 FR-003).
-    let one_by_one = rules.capped.is_some();
+    let one_by_one = target.1.capped.is_some();
     if one_by_one && items.len() > 1 {
         for item in items {
-            if flush(ctx, w, (coll, rules), ordered, &mut vec![item], n, errors) {
+            if flush(ctx, w, (&mut *target, &mut *again), ordered, &mut vec![item], n, errors) {
                 return true;
             }
         }
         return false;
     }
     let first = items[0].0;
-    // A capped insert has no key of its own (`insert_key`).
-    let keys: Vec<Vec<u8>> =
-        items.iter().map(|(_, _, k)| k.clone()).filter(|k| !k.is_empty()).collect();
     let docs: Vec<Document> = items.iter().map(|(_, d, _)| d.clone()).collect();
-    let bound =
-        Bound { mutation: DocMutation::Insert { docs, ordered, rules: rules.clone() }, keys };
-    match run(ctx.backend, ctx.shared, w, coll, &bound, stmt_id(ctx.cmd, first)) {
+    let mut keys: Vec<Vec<u8>> = items.iter().map(|(_, _, k)| k.clone()).collect();
+    let result = loop {
+        // A capped insert has no key of its own (`insert_key`).
+        let bound = Bound {
+            mutation: DocMutation::Insert { docs: docs.clone(), ordered, rules: target.1.clone() },
+            keys: keys.iter().filter(|k| !k.is_empty()).cloned().collect(),
+        };
+        let stmt = stmt_id(ctx.cmd, first);
+        match run(ctx.backend, ctx.shared, w, &target.0, &bound, stmt) {
+            // Nothing of the chunk was written: it waits for the critical section and goes to
+            // the collection that took the old one's place (018 FR-002).
+            Err(e) if super::reshard::fenced(&e) => {
+                let refreshed = super::reshard::after_fence(ctx.backend).and_then(|()| again(ctx));
+                let keyed = refreshed.and_then(|t| {
+                    let k: Result<Vec<Vec<u8>>, CommandError> =
+                        docs.iter().map(|d| insert_key(&t.0, d)).collect();
+                    Ok((t, k?))
+                });
+                match keyed {
+                    Ok((t, k)) => (*target, keys) = (t, k),
+                    Err(e) => break Err(e),
+                }
+            }
+            r => break r,
+        }
+    };
+    match result {
         Ok(r) => {
             if r.retried {
                 // A statement that failed was not recorded: it runs again (measured).
@@ -895,8 +948,29 @@ pub struct Modify {
     pub supplied: Option<Document>,
 }
 
-/// Runs one update or delete statement: the sum of its mutations' results.
+/// Runs one update or delete statement: the sum of its mutations' results. A statement of one
+/// document that a resharding's fence refused wrote nothing: it waits for the critical section
+/// and runs again on the collection that took the old one's place (018 FR-002). A `multi` one
+/// may have changed documents before: it fails with the fence's `StaleConfig`.
 pub fn modify<B: Backend + ?Sized>(
+    ctx: &mut Ctx<'_, B>,
+    w: &mut Writer,
+    ns: &Namespace,
+    m: &Modify,
+    bypass: bool,
+    stmt: u32,
+) -> Result<MutationResult, CommandError> {
+    loop {
+        match modify_once(ctx, w, ns, m, bypass, stmt) {
+            Err(e) if !m.multi && super::reshard::fenced(&e) => {
+                super::reshard::after_fence(ctx.backend)?;
+            }
+            r => return r,
+        }
+    }
+}
+
+fn modify_once<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
     w: &mut Writer,
     ns: &Namespace,

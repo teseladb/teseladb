@@ -270,6 +270,17 @@ pub trait Backend {
     fn op_client(&mut self) -> Option<Document>;
     /// The plan the running operation noted ([`Backend::note_plan`]), for `$queryStats`.
     fn op_plan(&mut self) -> Option<Document>;
+
+    /// Raises (`on`) or lifts the write fence of `[start, end)` on every range of it (018 FR-002,
+    /// `teseladb_range::fence`): from then on those ranges refuse the writes and intents of the
+    /// span with `StaleConfig`. The highest mark of the `Fence` entries: every write the ranges
+    /// took in the span before them is at or below it.
+    fn fence(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        on: bool,
+    ) -> Result<teseladb_hlc::Hlc, CommandError>;
     /// What a change stream reads of `[start, end)` after mark `from` (014 FR-003, FR-004): the
     /// versions of every range of the interval up to the lowest resolved mark of those ranges,
     /// and that mark, below which no version appears later.

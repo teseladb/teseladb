@@ -1322,6 +1322,10 @@ impl Backend for TxnBackend<'_> {
         self.inner.end_operation();
     }
 
+    fn fence(&mut self, start: &[u8], end: &[u8], on: bool) -> Result<Hlc, CommandError> {
+        self.inner.fence(start, end, on)
+    }
+
     fn changes(
         &mut self,
         start: &[u8],

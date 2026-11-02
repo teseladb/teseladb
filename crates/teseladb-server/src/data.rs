@@ -588,6 +588,8 @@ impl DataCore {
             RemoteReq::Changes { start, end, from } => {
                 self.host.changes(core, ChangesReq { g, start, end, from }, now)
             }
+            // A resharding's write fence, on the leader (018 FR-002).
+            RemoteReq::Fence { start, end, on } => self.host.fence(core, (g, start, end), on, now),
             // A backup's or a restore's request (007 FR-021).
             r @ (RemoteReq::BackupFetch { .. }
             | RemoteReq::RestorePiece { .. }
@@ -677,6 +679,7 @@ impl DataCore {
                         Reply::Record(record) => DataReply::Get(Some(record.encode())),
                         // A stream's read comes as a remote request, never from the handle.
                         Reply::Changes { .. } => DataReply::Get(None),
+                        Reply::Fenced { ts } => DataReply::Put(ts),
                     });
                     let _ = to.send(r);
                 }
@@ -1076,6 +1079,7 @@ fn remote_reply(reply: Reply) -> RemoteReply {
         Reply::Changes { rows, to, oldest_intent } => {
             RemoteReply::Changes { rows, to, oldest_intent }
         }
+        Reply::Fenced { ts } => RemoteReply::Fenced { ts },
     }
 }
 

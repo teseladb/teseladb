@@ -480,6 +480,15 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         self.inner.end_operation();
     }
 
+    fn fence(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        on: bool,
+    ) -> Result<teseladb_hlc::Hlc, CommandError> {
+        self.call(|b| b.fence(start, end, on))
+    }
+
     fn changes(
         &mut self,
         start: &[u8],
