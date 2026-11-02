@@ -5,7 +5,8 @@
 //!   `rateLimits` with `concurrentRequests` (1,000) and `requestsPerSecond` (10,000) per
 //!   credential, and `apiKeys.maxExpiresAfterDays` (365), the longest life of an API key;
 //! - `mcpOptions`: `readOnly` (true), `allowDestructive` (false), `maxDocuments` (100),
-//!   `maxBytes` (1 MiB) and `maxTimeMS` (30 seconds).
+//!   `maxBytes` (1 MiB), `maxTimeMS` (30 seconds) and `resourceUri` (none: the URI of `/mcp` at
+//!   the `Host` of each request), the resource MCP's tokens are issued for (FR-027).
 //!
 //! A value given replaces the stored one; the fields it leaves out take their defaults.
 
@@ -42,6 +43,7 @@ const ALLOW_DESTRUCTIVE: &str = "allowDestructive";
 const MAX_DOCUMENTS: &str = "maxDocuments";
 const MAX_BYTES: &str = "maxBytes";
 const MAX_TIME_MS: &str = "maxTimeMS";
+const RESOURCE_URI: &str = "resourceUri";
 /// The structure of RefDb's errors of a cluster parameter.
 const IDL: &str = "ClusterServerParameter";
 
@@ -59,7 +61,7 @@ pub struct HttpOptions {
 }
 
 /// What `mcpOptions` holds.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct McpOptions {
     /// Only tools that read are listed and run.
     pub read_only: bool,
@@ -71,6 +73,9 @@ pub struct McpOptions {
     pub max_bytes: u64,
     /// `maxTimeMS` of each tool's operation.
     pub max_time_ms: u64,
+    /// The URI of the resource `/mcp` that tokens for MCP carry as audience (RFC 8707); `None`:
+    /// the one at the `Host` of each request.
+    pub resource_uri: Option<String>,
 }
 
 /// An error of a parameter: its code and message.
@@ -206,6 +211,16 @@ pub(crate) fn http_parse(v: &Document) -> Result<Document, ParseError> {
         .with(API_KEYS, api_keys_doc(max_days)))
 }
 
+/// Whether `u` can name a protected resource: `http` or `https`, a host, and no fragment
+/// (RFC 8707, 2).
+fn is_resource_uri(u: &str) -> bool {
+    let rest = u.strip_prefix("https://").or_else(|| u.strip_prefix("http://"));
+    rest.is_some_and(|r| {
+        let host = r.split(['/', '?']).next().unwrap_or_default();
+        !host.is_empty() && !u.contains('#') && !u.chars().any(char::is_whitespace)
+    })
+}
+
 /// `mcpOptions` without a value.
 pub(crate) fn mcp_default() -> Document {
     Document::new()
@@ -226,6 +241,16 @@ pub(crate) fn mcp_parse(v: &Document) -> Result<Document, ParseError> {
                 other => return Err(mistyped(wrong_type(&format!("{IDL}.{k}"), other, "bool"))),
             },
             MAX_DOCUMENTS | MAX_BYTES | MAX_TIME_MS => Value::Int64(positive(k, k, x)?),
+            RESOURCE_URI => match x {
+                Value::String(u) if is_resource_uri(u) => Value::String(u.clone()),
+                Value::String(u) => {
+                    let m = format!(
+                        "BSON field '{k}' is not an absolute http or https URI without a fragment: '{u}'"
+                    );
+                    return Err((BAD_VALUE, m));
+                }
+                other => return Err(mistyped(wrong_type(&format!("{IDL}.{k}"), other, "string"))),
+            },
             _ => return Err(unknown(k)),
         };
         out.insert(k, value);
@@ -293,6 +318,10 @@ pub fn mcp_options(stored: Option<&[u8]>) -> McpOptions {
         max_documents: whole(&d, MAX_DOCUMENTS, DEFAULT_MCP_MAX_DOCUMENTS),
         max_bytes: whole(&d, MAX_BYTES, DEFAULT_MCP_MAX_BYTES),
         max_time_ms: whole(&d, MAX_TIME_MS, DEFAULT_MCP_MAX_TIME_MS),
+        resource_uri: match d.get(RESOURCE_URI) {
+            Some(Value::String(u)) => Some(u.clone()),
+            _ => None,
+        },
     }
 }
 
