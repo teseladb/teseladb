@@ -580,3 +580,114 @@ fn the_stages_errors_and_numbers_are_those_of_a_refrouter() {
     let got = batch(&get_more(&mut m, DB, random, "c", Document::new()));
     assert!(matches!(field(&got[0], "r"), Value::Double(x) if (0.0..1.0).contains(x)), "{got:?}");
 }
+
+/// Measured on a `refrouter` 9.0.4 on 02-11: `$changeStreamSplitLargeEvent` takes only `{}`.
+#[test]
+fn the_split_stage_takes_an_empty_object_only() {
+    let mut m = Mem::new();
+    create(&mut m, "c");
+    let split = Document::new().with("$changeStreamSplitLargeEvent", doc(&[("a", 1.into())]));
+    let r = open(&mut m, DB, "c".into(), stream(Document::new(), vec![split]));
+    assert_eq!(code(&r), 7_182_800, "{r:?}");
+    assert_eq!(errmsg(&r), "$changeStreamSplitLargeEvent spec should be an empty object");
+}
+
+/// A `$match` on a geometry after `$changeStream` goes through the node's geometry, as a
+/// `refrouter` 9.0.4 filters `fullDocument` with `$geoWithin`.
+#[test]
+fn a_geometry_filter_after_the_stream_keeps_the_events_inside() {
+    let mut m = Mem::new();
+    create(&mut m, "c");
+    let square = r#"{"type":"Polygon","coordinates":[[[0,0],[2,0],[2,2],[0,2],[0,0]]]}"#;
+    let filter = teseladb_bson::extjson::parse(&format!(
+        r#"{{"$match":{{"fullDocument.p":{{"$geoWithin":{{"$geometry":{square}}}}}}}}}"#
+    ))
+    .expect("stage");
+    let id = id_of(&open(&mut m, DB, "c".into(), stream(Document::new(), vec![filter])));
+    let point = |x: f64| {
+        Document::new()
+            .with("type", "Point")
+            .with("coordinates", Value::Array(vec![x.into(), 1.0.into()]))
+    };
+    insert(&mut m, "c", vec![doc(&[("_id", 1.into())]).with("p", point(1.0))]);
+    insert(&mut m, "c", vec![doc(&[("_id", 2.into())]).with("p", point(5.0))]);
+    let got = batch(&get_more(&mut m, DB, id, "c", Document::new()));
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!(field(&got[0], "documentKey._id"), &Value::Int32(1));
+}
+
+/// A stream on a collection renamed into another database, opened at a mark before the
+/// rename, sees the events written under its old name.
+#[test]
+fn a_stream_opened_before_a_rename_to_another_database_sees_the_old_name_s_events() {
+    let mut m = Mem::new();
+    create(&mut m, "c");
+    m.now += 1;
+    let at = m.now;
+    insert(&mut m, "c", vec![doc(&[("_id", 1.into())])]);
+    m.now += 1;
+    let rename = Document::new().with("renameCollection", format!("{DB}.c")).with("to", "other.d");
+    let r = m.run("admin", rename);
+    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+    let time = u32::try_from(at / 1000).expect("seconds");
+    let spec =
+        Document::new().with("startAtOperationTime", Value::Timestamp { time, increment: 0 });
+    let r = open(&mut m, DB, "c".into(), stream(spec, vec![]));
+    let id = id_of(&r);
+    // A write under the new name is not this stream's.
+    let r = m.run(
+        "other",
+        Document::new().with("insert", "d").with("documents", arr(vec![doc(&[("_id", 2.into())])])),
+    );
+    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+    // Nor a write to another collection of the database.
+    create(&mut m, "o");
+    insert(&mut m, "o", vec![doc(&[("_id", 3.into())])]);
+    let got = batch(&get_more(&mut m, DB, id, "c", Document::new()));
+    let kinds: Vec<&Value> = got.iter().map(|e| field(e, "operationType")).collect();
+    assert_eq!(kinds.first(), Some(&&Value::String("insert".into())), "{got:?}");
+    let inserted: Vec<&Value> = got
+        .iter()
+        .filter(|e| field(e, "operationType") == &Value::from("insert"))
+        .map(|e| field(e, "documentKey._id"))
+        .collect();
+    assert_eq!(inserted, [&Value::Int32(1)], "{got:?}");
+}
+
+/// An event larger than a reply's 16 MiB goes alone in its batch, as a `refrouter` 9.0.4 returns
+/// an event of up to 16 MiB and 16 KiB (measured on 01-11).
+#[test]
+fn an_event_over_the_reply_s_bytes_goes_alone() {
+    let mut m = Mem::new();
+    create(&mut m, "c");
+    let id = id_of(&open(&mut m, DB, "c".into(), stream(Document::new(), vec![])));
+    let big = "x".repeat(16 * 1024 * 1024 - 64);
+    insert(&mut m, "c", vec![doc(&[("_id", 1.into()), ("a", big.as_str().into())])]);
+    let got = batch(&get_more(&mut m, DB, id, "c", Document::new()));
+    assert_eq!(got.len(), 1);
+    assert_eq!(field(&got[0], "documentKey._id"), &Value::Int32(1));
+}
+
+/// A drop seen one event per batch: the `drop` first, the `invalidate` next, and the cursor
+/// closes at the `getMore` after it.
+#[test]
+fn a_drop_read_one_event_at_a_time_ends_with_the_invalidate() {
+    let mut m = Mem::new();
+    create(&mut m, "c");
+    let id = id_of(&open(&mut m, DB, "c".into(), stream(Document::new(), vec![])));
+    m.now += 1;
+    let r = m.run(DB, Document::new().with("drop", "c"));
+    m.now += 1;
+    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+    let one = Document::new().with("batchSize", 1);
+    let first = get_more(&mut m, DB, id, "c", one.clone());
+    assert_eq!(field(&batch(&first)[0], "operationType"), &Value::from("drop"));
+    let second = get_more(&mut m, DB, id, "c", one);
+    assert_eq!(field(&batch(&second)[0], "operationType"), &Value::from("invalidate"));
+    // Measured on a `refrouter` 9.0.4 on 02-11: the batch with the `invalidate` keeps the cursor
+    // open, and the next `getMore` closes it with an empty batch.
+    assert_ne!(field(&second, "cursor.id"), &Value::Int64(0));
+    let last = get_more(&mut m, DB, id, "c", Document::new());
+    assert!(batch(&last).is_empty());
+    assert_eq!(field(&last, "cursor.id"), &Value::Int64(0));
+}

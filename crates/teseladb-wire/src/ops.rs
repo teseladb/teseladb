@@ -594,6 +594,10 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         lock(self.shared).ops.get(self.id).and_then(|o| o.metadata.clone())
     }
 
+    fn op_plan(&mut self) -> Option<Document> {
+        lock(self.shared).ops.report_mut(self.id).plan.clone()
+    }
+
     fn note_plan(&mut self, plan: Document) {
         let mut plan = plan;
         let mut g = lock(self.shared);

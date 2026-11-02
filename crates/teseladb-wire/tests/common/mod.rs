@@ -323,6 +323,10 @@ impl Backend for Mem {
         None
     }
 
+    fn op_plan(&mut self) -> Option<Document> {
+        None
+    }
+
     fn end_operation(&mut self) {
         self.ended += 1;
     }

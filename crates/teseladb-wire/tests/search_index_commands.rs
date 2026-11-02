@@ -1039,3 +1039,64 @@ fn pattern_operators_are_served() {
         )
     );
 }
+
+/// `sort` and the sequence token of each result, which `searchAfter` takes (011 T024).
+#[test]
+fn sort_and_sequence_tokens_are_served() {
+    let mut m = with_collection();
+    insert(&mut m, vec![doc(&[("_id", 2.into()), ("t", "adios mundo cruel".into())])]);
+    insert(&mut m, vec![doc(&[("_id", 3.into()), ("t", "mundo mundo".into())])]);
+    create(&mut m, "c", vec![index("default", dynamic(true))]);
+    let sorted = text("mundo").with("sort", Document::new().with("_id", -1));
+    let token = Document::new().with("$meta", "searchSequenceToken");
+    let project = Document::new().with("$project", Document::new().with("k", token));
+    let got = batch(&agg(
+        &mut m,
+        "c".into(),
+        vec![Document::new().with("$search", sorted.clone()), project],
+    ));
+    let ids: Vec<Value> = got.iter().map(|d| d.get("_id").cloned().expect("_id")).collect();
+    assert_eq!(ids, vec![Value::from(3), 2.into(), 1.into()]);
+    let Some(Value::String(first)) = got[0].get("k").cloned() else { panic!("no token: {got:?}") };
+    let after = sorted.with("searchAfter", first);
+    let rest =
+        batch(&agg(&mut m, "c".into(), vec![Document::new().with("$search", after), scored()]));
+    let ids: Vec<Value> = rest.iter().map(|d| d.get("_id").cloned().expect("_id")).collect();
+    assert_eq!(ids, vec![Value::from(2), 1.into()]);
+}
+
+/// `scoreDetails`: the explanation as metadata, and the type checks of `refnode` (`$search`) and
+/// `refsearch` (`$searchMeta`), measured on 9.0.4 (011 T025).
+#[test]
+fn score_details_are_served_and_checked() {
+    let mut m = with_collection();
+    create(&mut m, "c", vec![index("default", dynamic(true))]);
+    let details = Document::new().with("$meta", "searchScoreDetails");
+    let project = Document::new().with("$project", Document::new().with("d", details));
+    let spec = text("hola").with("scoreDetails", true);
+    let got = batch(&agg(&mut m, "c".into(), vec![Document::new().with("$search", spec), project]));
+    let Some(Value::Document(d)) = got[0].get("d").cloned() else { panic!("no details: {got:?}") };
+    assert_eq!(
+        d.get("description"),
+        Some(&Value::from("$type:string/t:hola [BM25Similarity], result of:"))
+    );
+    let wrong = search(&mut m, "c", "$search", text("hola").with("scoreDetails", "x"));
+    assert_eq!(error(&wrong), (13111, "wrong type for field (scoreDetails) string != bool".into()));
+    let wrong = search(&mut m, "c", "$searchMeta", text("hola").with("scoreDetails", 1));
+    assert_eq!(error(&wrong).0, 8);
+    assert!(error(&wrong).1.ends_with("\"scoreDetails\" must be a boolean"), "{wrong:?}");
+}
+
+/// The search metrics of the node (011 FR-026, T044): queries counted, segments of the indexes
+/// served and their memory.
+#[test]
+fn search_metrics_count_queries_and_segments() {
+    let mut m = with_collection();
+    create(&mut m, "c", vec![index("default", dynamic(true))]);
+    let before = teseladb_wire::commands::search_ops::search_metrics(&m.shared);
+    batch(&search(&mut m, "c", "$search", text("hola")));
+    let after = teseladb_wire::commands::search_ops::search_metrics(&m.shared);
+    assert!(after.queries > before.queries);
+    assert!(after.segments >= 1, "{after:?}");
+    assert!(after.memory_bytes > 0, "{after:?}");
+}

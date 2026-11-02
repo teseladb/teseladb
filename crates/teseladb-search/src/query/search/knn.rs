@@ -71,6 +71,38 @@ pub(super) fn parse(index: &MemIndex, d: &Document, path: &str) -> Result<Operat
     Ok(Operator::Knn(Knn { path: field, vector, k, filter, score }))
 }
 
+/// The `vectorSearch` operator of `$search` (measured: it finds and scores as `knnBeta` on a
+/// `knnVector` field), with `queryVector` and `limit` for `vector` and `k`.
+pub(super) fn parse_vector_search(
+    index: &MemIndex,
+    d: &Document,
+    path: &str,
+) -> Result<Operator, SearchError> {
+    const OPTIONS: [&str; 7] =
+        ["path", "queryVector", "limit", "numCandidates", "exact", "filter", "score"];
+    if let Some((k, _)) = d.iter().find(|(k, _)| !OPTIONS.contains(k)) {
+        return Err(SearchError(format!("\"{path}\" unrecognized field \"{k}\"")));
+    }
+    let mut knn = Document::new();
+    for (from, to) in [
+        ("path", "path"),
+        ("queryVector", "vector"),
+        ("limit", "k"),
+        ("filter", "filter"),
+        ("score", "score"),
+    ] {
+        if let Some(v) = d.get(from) {
+            knn.push(to, v.clone());
+        }
+    }
+    parse(index, &knn, path).map_err(|SearchError(m)| {
+        SearchError(
+            m.replace(&format!("{path}.vector"), &format!("{path}.queryVector"))
+                .replace(&format!("{path}.k\""), &format!("{path}.limit\"")),
+        )
+    })
+}
+
 impl Knn {
     /// The `k` nearest documents of `index` with their scores times `boost`.
     pub(super) fn scores(

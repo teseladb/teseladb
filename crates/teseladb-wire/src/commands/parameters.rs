@@ -2,7 +2,7 @@
 //! Group 0 so every node reads the same value, with the forms and errors of a `refrouter` 9.0.4
 //! (measured). Each specification adds its parameters to [`KNOWN`]; 006 has `defaultMaxTimeMS`,
 //! 013 `auditConfig` (FR-031) and 007 TeselaDB's own `teselaHistoryRetention` (FR-019, DV-016)
-//! and `teselaLoadSplitOpsPerSecond` (D-075). Each read and change goes to the audit log as on RefDb
+//! and `teselaLoadSplitOpsPerSecond` (D-075), and 019 `httpOptions` and `mcpOptions` (DV-016). Each read and change goes to the audit log as on RefDb
 //! Enterprise 9.0.4: `getClusterParameter` with the names asked for, `setClusterParameter` and
 //! `updateCachedClusterServerParameter` with the value before and the one given.
 
@@ -14,6 +14,7 @@ use teseladb_auth::audit::AuditType;
 
 use super::admin::admin_only;
 use super::audit as audit_log;
+use super::http_parameters;
 use super::{Backend, Ctx};
 use crate::error::{
     BAD_VALUE, Code, CommandError, IDL_DUPLICATE_FIELD, IDL_UNKNOWN_FIELD, INVALID_OPTIONS,
@@ -46,7 +47,7 @@ struct Known {
 }
 
 /// The cluster parameters TeselaDB has, in name order.
-const KNOWN: [Known; 4] = [
+const KNOWN: [Known; 6] = [
     Known {
         name: audit_log::AUDIT_CONFIG,
         default: audit_log::audit_config_default,
@@ -59,6 +60,22 @@ const KNOWN: [Known; 4] = [
         name: DEFAULT_MAX_TIME_MS,
         default: default_max_time_default,
         parse: default_max_time_parse,
+        idl: "ClusterServerParameter",
+        prefixed: true,
+        nested: false,
+    },
+    Known {
+        name: http_parameters::HTTP_OPTIONS,
+        default: http_parameters::http_default,
+        parse: http_parameters::http_parse,
+        idl: "ClusterServerParameter",
+        prefixed: true,
+        nested: false,
+    },
+    Known {
+        name: http_parameters::MCP_OPTIONS,
+        default: http_parameters::mcp_default,
+        parse: http_parameters::mcp_parse,
         idl: "ClusterServerParameter",
         prefixed: true,
         nested: false,

@@ -61,7 +61,7 @@ pub trait Env {
         self.collection(name)
     }
 
-    /// A uniform number in `[0, 1)` (`$sample`).
+    /// A uniform number in `[0, 1)` (`$sample`, and the seed of `$rand` in each scope).
     fn random(&self) -> f64;
 
     /// The documents of a stage the node answers itself (`$collStats`), with its checked
@@ -131,10 +131,19 @@ pub trait Env {
         None
     }
 
-    /// The scope of an expression over `doc`.
+    /// The scope of an expression over `doc`, its `$rand` seeded from [`Env::random`] so that
+    /// every document draws its own numbers.
     fn scope(&self, doc: &Document) -> Scope {
-        Scope::new(doc.clone(), self.vars()).with_collation(self.collation()).with_js(self.js())
+        Scope::new(doc.clone(), self.vars())
+            .with_collation(self.collation())
+            .with_js(self.js())
+            .seeded(seed_of(self.random()))
     }
+}
+
+/// The 53 bits of a draw in `[0, 1)` as a seed.
+fn seed_of(draw: f64) -> u64 {
+    (draw * (1u64 << 53) as f64) as u64
 }
 
 /// One stage, parsed.
@@ -775,10 +784,7 @@ fn run_stage(
         Stage::Lookup(l) => l.run(docs, env)?,
         Stage::UnionWith(u) => u.run(docs, env)?,
         Stage::Documents(e) => stages::run_documents(e, env)?,
-        Stage::SetWindowFields(w) => {
-            errors::check_sort_memory(&docs, env.allow_disk_use(), env.stage_memory_limit())?;
-            w.run(docs, env)?
-        }
+        Stage::SetWindowFields(w) => w.run(docs, env)?,
         Stage::Densify(d) => d.run(docs, env.collation().get())?,
         Stage::Fill(f) => f.run(docs, env)?,
         Stage::GraphLookup(g) => g.run(docs, env)?,

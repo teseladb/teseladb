@@ -256,8 +256,12 @@ pub fn shard_collection<B: Backend + ?Sized>(
     ctx.backend.catalog_write(CatalogCommand::Modify {
         ns: ns.clone(),
         options: options.to_bytes()?,
-        // Not a `collMod`: its change event is not a `modify`.
-        description: Vec::new(),
+        // Not a `collMod`: its change event is a `shardCollection` (014, measured on 02-11).
+        description: super::change_stream_ddl::shard_description(
+            &asked.key,
+            asked.unique,
+            matches!(options.get("capped"), Some(Value::Boolean(true))),
+        )?,
     })?;
     if !empty {
         let after = ctx

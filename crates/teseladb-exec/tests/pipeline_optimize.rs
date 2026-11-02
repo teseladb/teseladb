@@ -171,3 +171,44 @@ fn fields_of_the_edges_of_stages() {
     );
     assert_eq!(optimized(r#"[5,{},{"$group":{"_id":null,"x":{}}}]"#, None), Ok(()));
 }
+
+#[test]
+fn fields_of_facets_projections_windows_and_named_arguments() {
+    assert_eq!(
+        fields(r#"[{"$facet":{"a":[{"$group":{"_id":"$x"}}],"b":[{"$count":"n"}]}}]"#),
+        list(&["x"])
+    );
+    assert_eq!(fields(r#"[{"$facet":{"a":5}}]"#), None);
+    assert_eq!(fields(r#"[{"$facet":{"a":[5]}}]"#), None);
+    assert_eq!(fields(r#"[{"$facet":{"a":[{"$match":{}}]}}]"#), None);
+    assert_eq!(
+        fields(
+            r#"[{"$project":{"_id":0,"a":{"b":1,"c":false},"d":{"$add":["$e",1]},"f.g":"$h"}}]"#
+        ),
+        list(&["a.b", "e", "f", "h"])
+    );
+    assert_eq!(fields(r#"[{"$project":{"_id":1}},{"$count":"n"}]"#), list(&["_id"]));
+    assert_eq!(fields(r#"[{"$project":{"_id":0.0,"a":1.5}}]"#), list(&["a"]));
+    assert_eq!(fields(r#"[{"$project":{"_id":false,"a":{"$literal":1}}}]"#), Some(Vec::new()));
+    assert_eq!(fields(r#"[{"$project":{"a":{"$meta":"textScore"}}}]"#), None);
+    assert_eq!(fields(r#"[{"$project":{"a":{"$rand":{}}}}]"#), list(&["_id"]));
+    assert_eq!(
+        fields(r#"[{"$group":{"_id":null,"t":{"$topN":{"n":2,"output":"$s","sortBy":{"k":1}}}}}]"#),
+        list(&["k", "s"])
+    );
+    assert_eq!(
+        fields(
+            r#"[{"$setWindowFields":{"partitionBy":"$p","sortBy":{"o":1},"output":{"r":{"$sum":"$v","window":{"documents":[-1,0]}},"q":5}}},{"$group":{"_id":"$r","x":{"$first":"$w"}}}]"#
+        ),
+        list(&["o", "p", "v", "w"])
+    );
+    assert_eq!(
+        fields(
+            r#"[{"$addFields":{"n":{"m":"$a","k":{"$add":["$b",1]}}}},{"$group":{"_id":"$n.m"}}]"#
+        ),
+        list(&["a", "b"])
+    );
+    assert_eq!(fields(r#"[{"$unwind":{"preserve":true}},{"$count":"c"}]"#), None);
+    assert_eq!(fields(r#"[{"$unwind":5}]"#), None);
+    assert_eq!(fields(r#"[{"$lookup":{"from":"o","localField":1,"as":"j"}}]"#), None);
+}

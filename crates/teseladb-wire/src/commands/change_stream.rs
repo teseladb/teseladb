@@ -338,6 +338,11 @@ pub fn more<B: Backend + ?Sized>(
     max_time: Option<u64>,
 ) -> Result<StreamBatch, CommandError> {
     let deadline = backend.now_ms().saturating_add(max_time.unwrap_or(DEFAULT_AWAIT_MS));
+    // The `getMore` after the one that gave the `invalidate` closes the cursor with an empty
+    // batch (measured on a `refrouter` 9.0.4 on 02-11).
+    if let Some(end) = stream.invalidated.as_ref().filter(|_| stream.pending.is_empty()) {
+        return Ok((Vec::new(), Document::new().with("_data", end.encode()), true));
+    }
     let started = backend.cluster_mark();
     let mut out = Vec::new();
     let mut last = None;
@@ -368,7 +373,7 @@ pub fn more<B: Backend + ?Sized>(
     EVENTS_RETURNED.fetch_add(out.len() as u64, Ordering::Relaxed);
     if let Some(end) = stream.invalidated.as_ref().filter(|_| stream.pending.is_empty()) {
         let pbrt = Document::new().with("_data", end.encode());
-        return Ok((out, pbrt, true));
+        return Ok((out, pbrt, false));
     }
     stream.position.batch_ended(last.as_ref(), stream.pending.is_empty());
     let pbrt = Document::new().with("_data", stream.position.token().encode());
@@ -555,14 +560,12 @@ fn watched_of(
 
 /// Reads the changes after the stream's mark into its pending events: the documents' changes
 /// and the catalog's, merged by their place, up to the lowest resolved mark; an `invalidate`
-/// ends the read (014 FR-005, FR-014).
+/// ends the read (014 FR-005, FR-014). An invalidated stream is never read again: its next
+/// `getMore` closes it.
 fn poll<B: Backend + ?Sized>(
     backend: &mut B,
     stream: &mut ChangeStream,
 ) -> Result<(), CommandError> {
-    if stream.invalidated.is_some() {
-        return Ok(());
-    }
     let from = stream.position.from();
     let resume = stream.resume_ts.max(from);
     check_history(backend, from, resume)?;
@@ -991,5 +994,19 @@ mod tests {
         // Other tests open streams at the same time: the count holds these two at least.
         assert!(stream_metrics().0 >= 2);
         assert_eq!(first, second, "the guard says nothing of the cursor's contents");
+    }
+
+    #[test]
+    fn options_that_do_not_read_keep_no_images() {
+        assert!(!images_enabled(&[1, 2, 3]));
+    }
+
+    #[test]
+    fn the_stages_after_the_stream_read_no_collection() {
+        use teseladb_exec::pipeline::Env;
+        let env = EventEnv { seed: std::cell::Cell::new(1) };
+        let e = env.collection("o").expect_err("no collection");
+        assert_eq!(e.code.code, 20);
+        assert_eq!(e.message, "o cannot be read in a $changeStream pipeline");
     }
 }
