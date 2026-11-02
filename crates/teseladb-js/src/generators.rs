@@ -61,6 +61,15 @@ pub fn expr_yields(e: &Expr) -> bool {
     }
 }
 
+/// A name or a member, through the positions the parser wraps them in.
+fn is_reference(e: &Expr) -> bool {
+    match e {
+        Expr::At(_, x) => is_reference(x),
+        Expr::Member { .. } | Expr::Ident(..) => true,
+        _ => false,
+    }
+}
+
 pub(crate) fn key_yields(k: &PropName) -> bool {
     matches!(k, PropName::Computed(e) if expr_yields(e))
 }
@@ -273,6 +282,10 @@ impl Lower {
             Expr::OptChain(x) => self.opt_chain(*x, pre),
             Expr::Class(c) => Expr::Class(self.class(c, pre)),
             Expr::Typeof(x) => Expr::Typeof(Box::new(self.expr(*x, pre))),
+            // `delete` of a value that is not a reference is `true` once it is evaluated.
+            Expr::Delete(x) if !is_reference(&x) => {
+                Expr::Seq(vec![self.expr(*x, pre), Expr::Bool(true)])
+            }
             Expr::Delete(x) => Expr::Delete(Box::new(self.expr(*x, pre))),
             Expr::PrivateIn(n, x) => Expr::PrivateIn(n, Box::new(self.expr(*x, pre))),
             Expr::Await(x) => Expr::Await(Box::new(self.expr(*x, pre))),

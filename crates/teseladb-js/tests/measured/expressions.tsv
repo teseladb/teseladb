@@ -3323,3 +3323,80 @@ eval('.5e1 + 5.e-1 + 0.0e0')	J:5.5
 (() => { try { return eval('var a² = 1; a²') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:illegal character U+00B2
 (() => { try { return eval('Ⅰ = 3; Ⅰ') } catch (e) { return e.name + ':' + e.message } })()	J:3
 (() => { try { return eval('var ٠') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:illegal character U+0660
+(() => { function* g() { return 0 ? 1 : 2 ? 3 : yield 4 } return [...g()] })()	J:[]
+(() => { function* g() { return false ? 1 : (yield 'x') } const i = g(); return [i.next(), i.next(5)] })()	J:[{"value":"x","done":false},{"value":5,"done":true}]
+(() => { function* g() { const o = {a: 1, ...(yield 's'), get b() { return 2 }, [yield 'k']: 3, c: 4}; return o } const i = g(); i.next(); i.next({z: 9}); return i.next('kk') })()	J:{"value":{"a":1,"z":9,"b":2,"kk":3,"c":4},"done":true}
+(() => { function* g() { const o = {a: 1, get [yield 'k']() { return 7 }}; return o.q } const i = g(); i.next(); return i.next('q') })()	J:{"value":7,"done":true}
+(() => { function* g() { const o = {[yield 'k']: 1, ...(yield 's')}; return o } const i = g(); i.next(); i.next('a'); return i.next({b: 2}) })()	J:{"value":{"a":1,"b":2},"done":true}
+(() => { function* g() { return [1, ...(yield 'a'), 2, yield 'b'] } const i = g(); i.next(); i.next([7, 8]); return i.next(3) })()	J:{"value":[1,7,8,2,3],"done":true}
+(() => { function* g() { return Math.max(...[1, 2], yield 'a', ...(yield 'b')) } const i = g(); i.next(); i.next(9); return i.next([4]) })()	J:{"value":9,"done":true}
+(() => { function* g() { let a = 1; a &&= yield 'x'; let b = 0; b ||= yield 'y'; let c = null; c ??= yield 'z'; return [a, b, c] } const i = g(); i.next(); i.next(2); i.next(3); return i.next(4) })()	J:{"value":[2,3,4],"done":true}
+(() => { function* g() { let a = 0; a &&= yield 'x'; return a } return g().next() })()	J:{"value":0,"done":true}
+(() => { function* g() { const o = {p: 1}; o.p += yield 'x'; o['p'] *= yield 'y'; return o.p } const i = g(); i.next(); i.next(2); return i.next(5) })()	J:{"value":15,"done":true}
+(() => { function* g() { let s = ''; for (let i = 0; i < (yield 'n'); i++) s += i; return s } const i = g(); i.next(); i.next(2); i.next(2); return i.next(0) })()	J:{"value":"01","done":true}
+(() => { function* g() { let s = ''; for (let i = 0; i < 2; i += (yield i)) s += i; return s } const i = g(); i.next(); i.next(1); return i.next(1) })()	J:{"value":"01","done":true}
+(() => { function* g() { let s = 0; for (;;) { if (++s > 2) break; yield s } return s } return [...g()] })()	J:[1,2]
+(() => { function* g() { let s = 0; for (let i = yield 'init'; i < 2; i++) s++; return s } const i = g(); i.next(); return i.next(0) })()	J:{"value":2,"done":true}
+(() => { function* g() { outer: for (const x of [1, 2]) { for (const y of [1, 2]) { if (y === 2) continue outer; yield x * 10 + y } } } return [...g()] })()	J:[11,21]
+(() => { function* g() { a: { yield 1; break a; } return 2 } return [...g()] })()	J:[1]
+(() => { function* g() { do { yield 1 } while (yield 2) } const i = g(); return [i.next(), i.next(), i.next(false)] })()	J:[{"value":1,"done":false},{"value":2,"done":false},{"done":true}]
+(() => { function* g() { while (yield 'c') { yield 'b' } } const i = g(); return [i.next(), i.next(true), i.next(), i.next(false)] })()	J:[{"value":"c","done":false},{"value":"b","done":false},{"value":"c","done":false},{"done":true}]
+(() => { function* g() { try { yield 1 } finally { yield 2 } } const i = g(); i.next(); return [i.return(5), i.next()] })()	J:[{"value":2,"done":false},{"value":5,"done":true}]
+(() => { function* g() { try { yield 1; throw new Error('e') } catch (e) { yield e.message } finally { yield 'f' } } return [...g()] })()	J:[1,"e","f"]
+(() => { function* g() { try { throw 1 } catch { yield 'c' } } return [...g()] })()	J:["c"]
+(() => { function* g() { try { yield 1 } catch (e) { return 'caught ' + e } } const i = g(); i.next(); return i.throw(3) })()	J:{"value":"caught 3","done":true}
+(() => { function* g() { switch (yield 'd') { case 1: yield 'one'; case 2: yield 'two'; break; default: yield 'def' } } const i = g(); i.next(); return [i.next(1), i.next(), i.next()] })()	J:[{"value":"one","done":false},{"value":"two","done":false},{"done":true}]
+(() => { function* g() { switch (2) { case (yield 'a'): return 'a'; case (yield 'b'): return 'b' } } const i = g(); i.next(); i.next(1); return i.next(2) })()	J:{"value":"b","done":true}
+(() => { function* g() { switch (3) { case (yield 'a'): return 'a'; default: return 'd' } } const i = g(); i.next(); return i.next(1) })()	J:{"value":"d","done":true}
+(() => { function* g() { with ({a: 1}) { yield a } } return [...g()] })()	J:[1]
+(() => { function* g() { with (yield 'o') { return a } } const i = g(); i.next(); return i.next({a: 4}) })()	J:{"value":4,"done":true}
+(() => { function* g() { yield* [1, 2]; return yield* g2() } function* g2() { yield 3; return 4 } return [...g()] })()	J:[1,2,3]
+(() => { function* g() { const r = yield* {[Symbol.iterator]() { return {next() { return {done: true, value: 9} }} }}; return r } return g().next() })()	J:{"value":9,"done":true}
+(() => { function* g() { yield* 5 } try { g().next() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:5 is not iterable
+(() => { function* g() { yield 1 } const i = g(); i.next(); return [i.next(), i.return(3), i.throw === undefined] })()	J:[{"done":true},{"value":3,"done":true},false]
+(() => { function* g() { yield 1 } const i = g(); try { i.throw(new Error('t')) } catch (e) { return e.message } })()	S:t
+(() => { function* g() { yield 1 } try { g.prototype.next.call({}) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:next method called on incompatible Object
+(() => { function* g() { const x = yield; g2.next() } let g2; g2 = g(); g2.next(); try { g2.next() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:already executing generator
+(() => { function* g() { return new (yield 'c')(yield 'a') } const i = g(); i.next(); i.next(Array); return i.next(3) })()	J:{"value":[null,null,null],"done":true}
+(() => { function* g() { return (yield 'a') + (yield 'b') } const i = g(); i.next(); i.next(1); return i.next(2) })()	J:{"value":3,"done":true}
+(() => { function* g() { return `${yield 'a'}-${yield 'b'}` } const i = g(); i.next(); i.next(1); return i.next(2) })()	J:{"value":"1-2","done":true}
+(() => { function* g() { return typeof (yield 'a') + delete (yield 'b') } const i = g(); i.next(); i.next(1); return i.next(2) })()	J:{"value":"numbertrue","done":true}
+(() => { function* g() { let x = 1; return [x++, (yield 'a'), -(yield 'b'), !(yield 'c'), void (yield 'd')] } const i = g(); i.next(); i.next(1); i.next(2); i.next(3); return i.next(4) })()	J:{"value":[1,1,-2,false,null],"done":true}
+(() => { function* g() { return ((yield 'a'), (yield 'b'), 3) } const i = g(); i.next(); i.next(); return i.next() })()	J:{"value":3,"done":true}
+(() => { function* g() { const o = {m() { return this.v }, v: 7}; return o.m(yield 'a') } const i = g(); i.next(); return i.next(1) })()	J:{"value":7,"done":true}
+(() => { function* g() { const o = {m() { return this.v }, v: 7}; return (yield 'o').m() } const i = g(); i.next(); return i.next({m() { return 8 }}) })()	J:{"value":8,"done":true}
+(() => { function* g() { const o = {a: {b: 1}}; return o[yield 'k'].b } const i = g(); i.next(); return i.next('a') })()	J:{"value":1,"done":true}
+(() => { function* g() { const a = [1, 2]; a[yield 'i'] = yield 'v'; return a } const i = g(); i.next(); i.next(0); return i.next(9) })()	J:{"value":[9,2],"done":true}
+(() => { function* g() { let n = 0; n++; n += (yield 'a') ? 1 : 2; return n } const i = g(); i.next(); return i.next(true) })()	J:{"value":2,"done":true}
+(() => { function* g() { throw yield 'a' } const i = g(); i.next(); try { i.next('boom') } catch (e) { return e } })()	S:boom
+(() => { function* g() { if (yield 'c') return 'y'; else return 'n' } const i = g(); i.next(); return i.next(0) })()	J:{"value":"n","done":true}
+(() => { function* g() { class C extends Object { m() { return super.toString === Object.prototype.toString } } return new C().m() } return g().next() })()	J:{"value":true,"done":true}
+(() => { function* g() { return arguments.length + (yield 'a') } const i = g(1, 2); i.next(); return i.next(10) })()	J:{"value":12,"done":true}
+(() => { function* g() { const f = () => this; return f() === (yield 'a') } const o = {g}; const i = o.g(); i.next(); return i.next(o) })()	J:{"value":true,"done":true}
+(() => { try { return eval('function f() { return super.x }') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:use of super property accesses only valid within methods or eval code within methods
+(() => { try { return eval('function* f() { return super.x }') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:use of super property accesses only valid within methods or eval code within methods
+(() => { try { return eval('(() => super.x)') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:use of super property accesses only valid within methods or eval code within methods
+(() => { try { return eval('({ m() { return () => super.x } }).m()()') } catch (e) { return e.name + ':' + e.message } })()	J:undefined
+(() => { try { return eval('({ m: function () { return super.x } })') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:use of super property accesses only valid within methods or eval code within methods
+(() => { try { return eval('({ m() { return function () { return super.x } } })') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:use of super property accesses only valid within methods or eval code within methods
+(() => { try { return eval('super()') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:super() is only valid in derived class constructors
+(() => { try { return eval('({ m() { super() } })') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:super() is only valid in derived class constructors
+(() => { try { return eval('class A { m() { super() } }') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:super() is only valid in derived class constructors
+(() => { try { return eval('class A { constructor() { super() } }') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:super() is only valid in derived class constructors
+(() => { try { return eval('class A extends Object { constructor() { (() => super())() } }; new A() instanceof A') } catch (e) { return e.name + ':' + e.message } })()	J:true
+(() => { try { return eval('class A { static { super.x } }; 1') } catch (e) { return e.name + ':' + e.message } })()	J:1
+(() => { try { return eval('class A { x = super.y }; 2') } catch (e) { return e.name + ':' + e.message } })()	J:2
+(() => { try { return eval('super.x') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:use of super property accesses only valid within methods or eval code within methods
+(() => { try { return eval('super') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid use of keyword 'super'
+(() => { try { return eval('({ m() { super } })') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid use of keyword 'super'
+(() => { try { return eval('({ get m() { return super.toString === Object.prototype.toString } }).m') } catch (e) { return e.name + ':' + e.message } })()	J:true
+(() => { class A { m() { return eval('super.toString === Object.prototype.toString') } } return new A().m() })()	J:true
+(() => { class A { m() { return (() => eval('super.toString'))() === Object.prototype.toString } } return new A().m() })()	J:true
+(() => { class B extends Object { constructor() { eval('super()'); this.k = 1 } } return new B().k })()	J:1
+(() => { class A { m() { return `${super.toString === Object.prototype.toString}` } } return new A().m() })()	S:true
+(() => { class A { static s = super.toString === Function.prototype.toString } return A.s })()	J:true
+(() => { const o = { set m(v) { this.r = super.hasOwnProperty('r') } }; o.m = 1; return o.r })()	J:false
+(() => { class A { x = super.toString === Object.prototype.toString } return new A().x })()	J:true
+(() => { class B { hi() { return 'b' } } class A extends B { x = super.hi() } return new A().x })()	S:b
+(() => { class B { static hi() { return 'sb' } } class A extends B { static { this.y = super.hi() } } return A.y })()	S:sb
+(() => { class B { static hi() { return 'sb' } } class A extends B { static x = () => super.hi() } return A.x() })()	S:sb

@@ -1472,7 +1472,7 @@ impl<'c> Interp<'c> {
                 }
                 let obj = Val::Obj(self.alloc(proto, Kind::Ordinary)?);
                 if let (Some(c), Some(ce)) = (&class, &class_env) {
-                    self.init_fields(c, ce, &obj)?;
+                    self.init_fields(c, ce, &obj, home.clone())?;
                 }
                 let v = self.run_closure(
                     fo,
@@ -1488,7 +1488,6 @@ impl<'c> Interp<'c> {
         }
     }
 
-    /// The instance fields of class `c` on `obj`.
     /// The value of a field's initializer `e`: an anonymous function is named after `key`.
     fn field_value(&mut self, e: &Expr, scope: &EnvRef, key: &str) -> R {
         let v = self.eval(e, scope)?;
@@ -1498,7 +1497,15 @@ impl<'c> Interp<'c> {
         Ok(v)
     }
 
-    fn init_fields(&mut self, c: &ClassDef, env: &EnvRef, obj: &Val) -> R<()> {
+    /// The instance fields of class `c` on `obj`; `home` is the class's prototype, which
+    /// `super` in an initializer reads.
+    fn init_fields(
+        &mut self,
+        c: &ClassDef,
+        env: &EnvRef,
+        obj: &Val,
+        home: Option<ObjRef>,
+    ) -> R<()> {
         let methods = env
             .borrow()
             .vars
@@ -1514,6 +1521,7 @@ impl<'c> Interp<'c> {
         for m in c.members.iter().filter(|m| !m.is_static && m.func.is_none()) {
             let scope = self.new_env(Some(env.clone()));
             scope.borrow_mut().this = Some(obj.clone());
+            scope.borrow_mut().home = home.clone();
             let key = self.prop_key(&m.key, &scope)?;
             let v = match &m.field {
                 Some(e) => self.field_value(e, &scope, &key)?,
@@ -1644,6 +1652,20 @@ impl<'c> Interp<'c> {
         None
     }
 
+    /// The home object `super` reads in `env`: a method's, or a field initializer's or a static
+    /// block's, which have a scope of their own with no function.
+    fn home_of(&self, env: &EnvRef) -> Option<ObjRef> {
+        let mut cur = Some(env.clone());
+        while let Some(e) = cur {
+            let b = e.borrow();
+            if b.home.is_some() || b.func.is_some() {
+                return b.home.clone();
+            }
+            cur = b.parent.clone();
+        }
+        None
+    }
+
     fn function_env(&self, env: &EnvRef) -> Option<EnvRef> {
         let mut cur = Some(env.clone());
         while let Some(e) = cur {
@@ -1737,6 +1759,17 @@ impl<'c> Interp<'c> {
                 declare(var_env, &n, Val::Undef, true);
             }
         }
+    }
+
+    /// Whether the code of a direct `eval` in `env` may use `super.x` (in a method) and
+    /// `super()` (in a derived constructor).
+    fn supers_of(&self, env: &EnvRef) -> (bool, bool) {
+        let derived = self.function_env(env).is_some_and(|f| {
+            f.borrow().func.as_ref().is_some_and(|o| {
+                matches!(&o.borrow().kind, Kind::Func(Func::Closure { def, .. }) if def.is_ctor_of_derived)
+            })
+        });
+        (self.home_of(env).is_some(), derived)
     }
 
     pub fn closure(&mut self, def: &Rc<FuncDef>, env: &EnvRef) -> R {
@@ -2463,6 +2496,7 @@ impl<'c> Interp<'c> {
                 // `static { … }`: run once, with `this` the class.
                 if let Some(f) = &m.func {
                     let fv = self.closure(f, &scope)?;
+                    set_home(&fv, &ctor);
                     self.call(&fv, &Val::Obj(ctor.clone()), &[])?;
                 }
                 continue;
@@ -2511,6 +2545,7 @@ impl<'c> Interp<'c> {
             } else if m.is_static {
                 let s = self.new_env(Some(scope.clone()));
                 s.borrow_mut().this = Some(Val::Obj(ctor.clone()));
+                s.borrow_mut().home = Some(ctor.clone());
                 let v = match &m.field {
                     Some(e) => self.field_value(e, &s, &key)?,
                     None => Val::Undef,
@@ -2802,7 +2837,7 @@ impl<'c> Interp<'c> {
             Expr::SuperMember(k) => {
                 let key = self.eval(k, env)?;
                 let key = self.key_of(&key)?;
-                let home = self.function_env(env).and_then(|e| e.borrow().home.clone());
+                let home = self.home_of(env);
                 let this = self.this_of(env).map_or(Val::Undef, |(t, _)| t);
                 let proto = home.and_then(|h| h.borrow().proto.clone());
                 match proto {
@@ -2882,7 +2917,8 @@ impl<'c> Interp<'c> {
             _ => None,
         };
         if let Some((c, ce)) = class {
-            self.init_fields(&c, &ce, &this)?;
+            let home = fenv.borrow().home.clone();
+            self.init_fields(&c, &ce, &this, home)?;
         }
         // A derived constructor returns its `this`.
         Ok(this)
@@ -2991,10 +3027,8 @@ impl<'c> Interp<'c> {
                         }
                         continue;
                     }
-                    if let (Val::Obj(f), Expr::Func(_)) = (&v, e) {
-                        if let Kind::Func(Func::Closure { home, .. }) = &mut f.borrow_mut().kind {
-                            *home = Some(o.clone());
-                        }
+                    if let Expr::Func(_) = e {
+                        set_home(&v, &o);
                         name_if_anonymous(&v, &key_function_name(&key, None));
                     }
                     self.define(&o, &key, Prop::data(v))?;
@@ -3002,6 +3036,7 @@ impl<'c> Interp<'c> {
                 ObjProp::Accessor(k, kind, def) => {
                     let key = self.prop_key(k, env)?;
                     let f = self.closure(def, env)?;
+                    set_home(&f, &o);
                     name_if_anonymous(&f, &key_function_name(&key, accessor_prefix(*kind)));
                     let mut p = self
                         .get_own_prop(&o, &key)
@@ -3107,8 +3142,8 @@ impl<'c> Interp<'c> {
             privates.extend(names.cloned());
             cur = b.parent.clone();
         }
-        let body =
-            crate::parser::parse_script_in(&src, &privates).map_err(|e| self.syntax_error(&e))?;
+        let body = crate::parser::parse_script_in(&src, &privates, self.supers_of(env))
+            .map_err(|e| self.syntax_error(&e))?;
         let strict = self.strict || crate::parser::has_use_strict(&body);
         let lex = self.new_env(Some(env.clone()));
         let var_env = if strict { lex.clone() } else { var_scope_of(env) };
@@ -3492,6 +3527,15 @@ fn var_scope_of(env: &EnvRef) -> EnvRef {
             Some(p) => cur = p,
             None => return cur,
         }
+    }
+}
+
+/// Makes `home` the object `super` reads in the method `f`.
+fn set_home(f: &Val, home: &ObjRef) {
+    if let Val::Obj(fo) = f
+        && let Kind::Func(Func::Closure { home: h, .. }) = &mut fo.borrow_mut().kind
+    {
+        *h = Some(home.clone());
     }
 }
 
