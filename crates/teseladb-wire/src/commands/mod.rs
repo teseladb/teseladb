@@ -52,6 +52,9 @@ pub(crate) mod plan_cache;
 pub(crate) mod plan_exec;
 pub mod profile;
 pub mod query;
+pub mod query_settings;
+pub mod query_shape;
+pub mod query_stats;
 pub mod registry;
 pub mod roles;
 pub mod search_indexes;
@@ -610,6 +613,10 @@ pub struct NodeSessions {
     pub plan_cache: plan_cache::PlanCache,
     /// How often each index served a query plan, and since when (`$indexStats`, 010 FR-018).
     pub index_usage: index_usage::IndexUsage,
+    /// What the node counted of each query shape (`$queryStats`, 010 FR-023).
+    pub query_stats: query_stats::QueryStats,
+    /// The query settings as this node last read them (010 FR-023).
+    pub query_settings: query_settings::Cache,
     /// The profiler's settings (010 FR-015).
     pub profiler: profile::Profiler,
     /// The search indexes this node built (011 FR-009).
@@ -654,6 +661,8 @@ impl NodeSessions {
             sessions: SessionTable::with_timeout(t.session_ms),
             failpoint: None,
             profiler: profile::Profiler::default(),
+            query_stats: query_stats::QueryStats::default(),
+            query_settings: query_settings::Cache::default(),
             search: search_ops::SearchIndexes::default(),
             ops: OpTable::default(),
             counters: diagnostics::OpCounters::default(),
@@ -738,8 +747,10 @@ impl<B: Backend + ?Sized> Ctx<'_, B> {
 }
 
 /// The commands of this module.
-const NAMES: [&str; 74] = [
+const NAMES: [&str; 76] = [
     aggregate::AGGREGATE,
+    query_settings::SET_QUERY_SETTINGS,
+    query_settings::REMOVE_QUERY_SETTINGS,
     plan_cache::PLAN_CACHE_CLEAR,
     explain::EXPLAIN,
     audit::LOG_APPLICATION_MESSAGE,
@@ -854,7 +865,92 @@ fn command<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comman
     {
         timeseries::legacy_buckets(ctx.db, coll, ctx.name())?;
     }
+    if query_shape::SHAPED.contains(&ctx.name()) {
+        return shaped(ctx);
+    }
+    if ctx.name() == explain::EXPLAIN
+        && let Some(Value::Document(inner)) = ctx.cmd.get(explain::EXPLAIN)
+    {
+        // `explain` plans under the shape's index hints and ignores `reject` (measured).
+        let settings = query_settings::applying(ctx.backend, ctx.shared, ctx.db, inner)?;
+        return with_settings_indexes(ctx, inner, settings.as_ref(), dispatch);
+    }
+    dispatch(ctx)
+}
+
+/// Runs `run` on `ctx` with the indexes `settings` allow on the collection of command `target`.
+fn with_settings_indexes<B: Backend + ?Sized>(
+    ctx: &mut Ctx<'_, B>,
+    target: &Document,
+    settings: Option<&Document>,
+    run: fn(&mut Ctx<'_, B>) -> Result<Document, CommandError>,
+) -> Result<Document, CommandError> {
+    let coll = match target.iter().next() {
+        Some((_, Value::String(c))) => c.clone(),
+        _ => return run(ctx),
+    };
+    let Some(allowed) = query_settings::allowed_indexes(settings, ctx.db, &coll) else {
+        return run(ctx);
+    };
+    let ns = Namespace { db: ctx.db.to_owned(), coll };
+    match ctx.backend.collection(&ns)? {
+        Some(c) => plan_exec::with_allowed_indexes(c.id, allowed, || run(ctx)),
+        None => run(ctx),
+    }
+}
+
+/// A command with a query shape: its query settings first (010 FR-023), then the run, counted
+/// in `$queryStats`.
+fn shaped<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
+    let settings = match query_settings::applying(ctx.backend, ctx.shared, ctx.db, ctx.cmd) {
+        Ok(s) => s,
+        // A node that refuses requests (a statement refused in a transaction) still reads the
+        // command's arguments first, and their errors come first (measured).
+        Err(e) => return dispatch(ctx).and(Err(e)),
+    };
+    query_settings::check_rejected(settings.as_ref())?;
+    let limited = match query_settings::max_time_ms(settings.as_ref()) {
+        Some(ms) if ctx.cmd.get("maxTimeMS").is_none() => {
+            Some(ctx.cmd.clone().with("maxTimeMS", ms))
+        }
+        _ => None,
+    };
+    let cmd = limited.as_ref().unwrap_or(ctx.cmd);
+    let started = ctx.backend.now_ms();
+    let reply =
+        dispatch(&mut Ctx { backend: &mut *ctx.backend, shared: ctx.shared, db: ctx.db, cmd })?;
+    if let Some(shape) = query_shape::shape(ctx.db, ctx.cmd) {
+        let now = ctx.backend.now_ms();
+        let run = query_stats::Run {
+            micros: i64::try_from(now.saturating_sub(started).saturating_mul(1000))
+                .unwrap_or(i64::MAX),
+            docs_returned: returned(&reply),
+        };
+        let now = i64::try_from(now).unwrap_or(i64::MAX);
+        lock(ctx.shared).query_stats.record(ctx.db, ctx.cmd, &shape, run, now);
+    }
+    Ok(reply)
+}
+
+/// The documents a reply returned: its first batch, its values or its count.
+fn returned(reply: &Document) -> i64 {
+    let n = match (reply.get("cursor"), reply.get("values"), reply.get("n")) {
+        (Some(Value::Document(c)), _, _) => match c.get("firstBatch") {
+            Some(Value::Array(b)) => b.len(),
+            _ => 0,
+        },
+        (_, Some(Value::Array(v)), _) => v.len(),
+        (_, _, Some(_)) => 1,
+        _ => 0,
+    };
+    i64::try_from(n).unwrap_or(i64::MAX)
+}
+
+/// Runs the command of `ctx` by its name.
+fn dispatch<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     match crate::concerns::canonical(ctx.name()) {
+        query_settings::SET_QUERY_SETTINGS => query_settings::set_query_settings(ctx),
+        query_settings::REMOVE_QUERY_SETTINGS => query_settings::remove_query_settings(ctx),
         audit::LOG_APPLICATION_MESSAGE => audit::log_application_message(ctx),
         authz_collections::MERGE_AUTHZ_COLLECTIONS => authz_collections::merge(ctx),
         parameters::SET_CLUSTER_PARAMETER => parameters::set_cluster_parameter(ctx),

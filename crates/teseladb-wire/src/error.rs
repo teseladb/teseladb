@@ -215,6 +215,20 @@ codes! {
     AUDITING_NOT_ENABLED = 344, "AuditingNotEnabled";
     /// `auditConfig` changed on a node without `auditLog.runtimeConfiguration` (013 FR-031).
     RUNTIME_AUDIT_CONFIGURATION_NOT_ENABLED = 345, "RuntimeAuditConfigurationNotEnabled";
+    /// A query its shape's settings reject (010 FR-023).
+    QUERY_REJECTED_BY_SETTINGS = 411, "QueryRejectedBySettings";
+    /// `setQuerySettings` with no setting it knows.
+    QUERY_SETTINGS_EMPTY = 8_727_502, "Location8727502";
+    /// `setQuerySettings` whose merged settings are only defaults.
+    QUERY_SETTINGS_DEFAULTS = 7_746_604, "Location7746604";
+    /// A query settings target that has no query shape.
+    QUERY_SHAPE_UNSUPPORTED = 7_746_402, "Location7746402";
+    /// A query knob that query settings cannot set.
+    QUERY_KNOB_NOT_SETTABLE = 12_194_501, "Location12194501";
+    /// An index hint of query settings without its namespace.
+    INVALID_INDEX_HINT = 8_727_501, "Location8727501";
+    /// An index hint of query settings without its database.
+    INVALID_INDEX_HINT_DB = 8_727_500, "Location8727500";
     /// Required field missing in a command.
     IDL_FAILED_TO_PARSE = 40414, "IDLFailedToParse";
     /// A field given twice where it may appear once.

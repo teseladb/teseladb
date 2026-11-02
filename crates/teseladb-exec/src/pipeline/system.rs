@@ -319,6 +319,20 @@ const LIST_CATALOG_SPEC: teseladb_mql::ErrorCode =
 
 /// Checks the specification of `$listExtensions`: an empty object (measured on a `refrouter`
 /// 9.0.4).
+/// The specification of stage `name`, which must be a document; the node checks its fields.
+pub fn object_spec(name: &str, v: RawValue<'_>) -> Result<Document, MqlError> {
+    match v {
+        RawValue::Document(d) => Ok(Document::from(d)),
+        other => Err(error(
+            TYPE_MISMATCH,
+            format!(
+                "{name} stage expects a document as argument, got {}",
+                display(&Value::from(other))
+            ),
+        )),
+    }
+}
+
 pub fn list_extensions(v: RawValue<'_>) -> Result<Document, MqlError> {
     match v {
         RawValue::Document(d) if d.iter().next().is_none() => Ok(Document::new()),

@@ -95,18 +95,21 @@ impl Group {
             }
         }
         let out = groups.finish("_id", &self.outputs, col, sbe)?;
-        self.check_memory(&out, env.allow_disk_use(), sbe)?;
+        let limit = super::errors::STAGE_MEMORY_LIMIT.min(env.operation_memory_limit());
+        self.check_memory(&out, env.allow_disk_use(), sbe, limit)?;
         Ok(out)
     }
 
-    /// The 292 of a group over [`STAGE_MEMORY_LIMIT`] bytes when the command does not allow
-    /// writing to disk: the classic engine counts the groups' keys and values, the slot-based one
-    /// the arrays of `$push` and `$addToSet` (measured on a `refrouter` 9.0.4).
+    /// The 292 of a group over `limit` bytes (the stage's limit or the operation's, the lower)
+    /// when the command does not allow writing to disk: the classic engine counts the groups'
+    /// keys and values, the slot-based one the arrays of `$push` and `$addToSet` (measured on a
+    /// `refrouter` 9.0.4).
     fn check_memory(
         &self,
         out: &[Document],
         allow_disk_use: bool,
         sbe: bool,
+        limit: usize,
     ) -> Result<(), MqlError> {
         if allow_disk_use {
             return Ok(());
@@ -125,7 +128,7 @@ impl Group {
                 })
                 .sum(),
         };
-        if held <= super::errors::STAGE_MEMORY_LIMIT {
+        if held <= limit {
             return Ok(());
         }
         let name = if sbe { "group" } else { "$group" };

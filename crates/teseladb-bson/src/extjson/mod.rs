@@ -19,7 +19,7 @@ use crate::raw::RawDoc;
 use crate::read::Limits;
 use crate::value::Document;
 
-mod base64;
+pub mod base64;
 mod date;
 mod legacy;
 mod parse;

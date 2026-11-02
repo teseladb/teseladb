@@ -178,6 +178,17 @@ impl<B: Backend + ?Sized> WireEnv<'_, B> {
 
     /// `$planCacheStats`: the entries of the node's plan cache for the aggregated collection,
     /// which must exist (50933).
+    /// `$queryStats`: what this node counted of each query shape.
+    fn query_stats(&self, spec: &Document) -> Result<Vec<Document>, CommandError> {
+        if let Some((k, _)) = spec.iter().next() {
+            let msg = format!("BSON field '$queryStats.{k}' is an unknown field.");
+            return Err(CommandError::new(crate::error::IDL_UNKNOWN_FIELD, msg));
+        }
+        let Some((shared, _)) = &self.node else { return Ok(Vec::new()) };
+        let now = self.backend.borrow_mut().now_ms();
+        Ok(super::lock(shared).query_stats.listed(i64::try_from(now).unwrap_or(i64::MAX)))
+    }
+
     fn plan_cache_stats(&self) -> Result<Vec<Document>, CommandError> {
         let Some((shared, ns)) = &self.node else { return Ok(Vec::new()) };
         let mut backend = self.backend.borrow_mut();
@@ -349,6 +360,15 @@ impl<B: Backend + ?Sized> Env for WireEnv<'_, B> {
         self.allow_disk_use
     }
 
+    fn operation_memory_limit(&self) -> usize {
+        match &self.node {
+            Some((shared, _)) => {
+                usize::try_from(super::lock(shared).params.operation_memory).unwrap_or(usize::MAX)
+            }
+            None => teseladb_exec::pipeline::errors::OPERATION_MEMORY_LIMIT,
+        }
+    }
+
     fn vars(&self) -> Option<&Document> {
         Some(&self.vars)
     }
@@ -418,6 +438,12 @@ impl<B: Backend + ?Sized> Env for WireEnv<'_, B> {
             // TeselaDB loads no extensions.
             "$listExtensions" => Ok(Vec::new()),
             "$listCatalog" => self.list_catalog().map_err(to_mql),
+            super::query_settings::STAGE => {
+                let mut backend = self.backend.borrow_mut();
+                super::query_settings::listed(&mut **backend, &Value::Document(spec.clone()))
+                    .map_err(to_mql)
+            }
+            super::query_stats::STAGE => self.query_stats(spec).map_err(to_mql),
             other => Err(MqlError::new(
                 teseladb_mql::ErrorCode { code: BAD_VALUE.code, name: BAD_VALUE.name },
                 format!("{other} is not supported by this node"),

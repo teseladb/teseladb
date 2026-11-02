@@ -145,6 +145,10 @@ pub const NO_DISK_USE: ErrorCode =
 /// `$group`, 100 MiB).
 pub const STAGE_MEMORY_LIMIT: usize = 104_857_600;
 
+/// The memory an operation may hold in its stages by default
+/// (`internalQueryMaxMemoryUsageBytesPerOperation`, at least 1 GiB in RefDb 9.0.4).
+pub const OPERATION_MEMORY_LIMIT: usize = 1 << 30;
+
 /// The bytes of `docs` in BSON, whatever their size.
 pub(crate) fn bytes_of(docs: &[Document]) -> usize {
     docs.iter().map(document_size).sum()

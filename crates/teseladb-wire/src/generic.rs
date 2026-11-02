@@ -96,6 +96,8 @@ fn own_fields(name: &str) -> Option<&'static [&'static str]> {
     Some(match name {
         "explain" => &["explain", "verbosity"],
         "getDefaultRWConcern" => &["getDefaultRWConcern", "inMemory"],
+        "setQuerySettings" => &["setQuerySettings", "settings"],
+        "removeQuerySettings" => &["removeQuerySettings"],
         "setDefaultRWConcern" => {
             &["setDefaultRWConcern", "defaultReadConcern", "defaultWriteConcern"]
         }
