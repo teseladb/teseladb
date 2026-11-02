@@ -148,11 +148,15 @@ fn step(it: &mut Interp, h: &Rc<RefCell<Helper>>) -> R<Option<Val>> {
             (b.f.clone(), b.counter - 1)
         };
         let idx = Val::Num(i as f64);
+        // The engine calls the function through helpers of its own: two frames more.
+        let call = |it: &mut Interp, args: &[Val]| {
+            it.nested(crate::recursion::ITERATOR_HELPER_FRAMES, 0, false, |it| {
+                it.call(&f, &Val::Undef, args)
+            })
+        };
         let r = match op {
-            Op::Map => it.call(&f, &Val::Undef, &[v, idx]).map(Some),
-            Op::Filter => {
-                it.call(&f, &Val::Undef, &[v.clone(), idx]).map(|k| k.truthy().then_some(v))
-            }
+            Op::Map => call(it, &[v, idx]).map(Some),
+            Op::Filter => call(it, &[v.clone(), idx]).map(|k| k.truthy().then_some(v)),
             Op::Take => Ok(Some(v)),
             Op::Drop => {
                 let left = h.borrow().count;
@@ -163,7 +167,7 @@ fn step(it: &mut Interp, h: &Rc<RefCell<Helper>>) -> R<Option<Val>> {
                     Ok(Some(v))
                 }
             }
-            Op::FlatMap => it.call(&f, &Val::Undef, &[v, idx]).and_then(|m| {
+            Op::FlatMap => call(it, &[v, idx]).and_then(|m| {
                 if !matches!(m, Val::Obj(_)) {
                     return it.type_error(&crate::builtins::non_object(&m));
                 }

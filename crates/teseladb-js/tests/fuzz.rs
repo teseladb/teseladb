@@ -168,7 +168,7 @@ fn run(src: &str) {
     ] {
         let Ok(p) = Program::compile(&body) else { continue };
         let mut ctx = JsCtx {
-            limits: Limits { steps: 200_000, heap: 4 << 20, depth: 64 },
+            limits: Limits { steps: 200_000, heap: 4 << 20, depth: 64, ..Limits::default() },
             ..JsCtx::default()
         };
         let _ = p.call(None, &[], &mut ctx);

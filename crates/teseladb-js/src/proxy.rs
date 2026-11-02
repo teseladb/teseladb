@@ -55,7 +55,12 @@ fn same_proto(a: &Option<ObjRef>, b: &Option<ObjRef>) -> bool {
 pub fn get_proto(it: &mut Interp, o: &ObjRef) -> R<Option<ObjRef>> {
     let (target, handler) = live(it, o)?;
     let Some(t) = trap(it, &handler, "getPrototypeOf")? else { return it.proto_of(&target) };
-    let p = match it.call(&t, &Val::Obj(handler), &[Val::Obj(target.clone())])? {
+    let p = match it.call_back(
+        crate::recursion::PROXY_TRAP,
+        &t,
+        &Val::Obj(handler),
+        &[Val::Obj(target.clone())],
+    )? {
         Val::Obj(p) => Some(p),
         Val::Null => None,
         _ => {
@@ -79,7 +84,15 @@ pub fn set_proto(it: &mut Interp, o: &ObjRef, p: Option<ObjRef>) -> R<()> {
         return crate::builtins::set_proto_of(it, &target, p);
     };
     let arg = p.clone().map_or(Val::Null, Val::Obj);
-    if !it.call(&t, &Val::Obj(handler), &[Val::Obj(target.clone()), arg])?.truthy() {
+    if !it
+        .call_back(
+            crate::recursion::PROXY_TRAP,
+            &t,
+            &Val::Obj(handler),
+            &[Val::Obj(target.clone()), arg],
+        )?
+        .truthy()
+    {
         return it.type_error("proxy setPrototypeOf handler returned false");
     }
     if !target.borrow().extensible && !same_proto(&it.proto_of(&target)?, &p) {
@@ -95,9 +108,12 @@ fn key_val(key: &str) -> Val {
 pub fn get(it: &mut Interp, o: &ObjRef, key: &str, receiver: &Val) -> R {
     let (target, handler) = live(it, o)?;
     match trap(it, &handler, "get")? {
-        Some(t) => {
-            it.call(&t, &Val::Obj(handler), &[Val::Obj(target), key_val(key), receiver.clone()])
-        }
+        Some(t) => it.call_back(
+            crate::recursion::PROXY_TRAP,
+            &t,
+            &Val::Obj(handler),
+            &[Val::Obj(target), key_val(key), receiver.clone()],
+        ),
         None => it.get(&Val::Obj(target), key),
     }
 }
@@ -107,7 +123,8 @@ pub fn set(it: &mut Interp, o: &ObjRef, key: &str, value: Val, receiver: &Val) -
     match trap(it, &handler, "set")? {
         Some(t) => {
             let args = [Val::Obj(target), key_val(key), value, receiver.clone()];
-            let ok = it.call(&t, &Val::Obj(handler), &args)?.truthy();
+            let ok =
+                it.call_back(crate::recursion::PROXY_TRAP, &t, &Val::Obj(handler), &args)?.truthy();
             if !ok && it.strict {
                 return it.type_error(&format!(
                     "proxy set handler returned false for property '\"{key}\"'"
@@ -122,7 +139,14 @@ pub fn set(it: &mut Interp, o: &ObjRef, key: &str, value: Val, receiver: &Val) -
 pub fn has(it: &mut Interp, o: &ObjRef, key: &str) -> R<bool> {
     let (target, handler) = live(it, o)?;
     match trap(it, &handler, "has")? {
-        Some(t) => Ok(it.call(&t, &Val::Obj(handler), &[Val::Obj(target), key_val(key)])?.truthy()),
+        Some(t) => Ok(it
+            .call_back(
+                crate::recursion::PROXY_TRAP,
+                &t,
+                &Val::Obj(handler),
+                &[Val::Obj(target), key_val(key)],
+            )?
+            .truthy()),
         None => it.has(&target, key),
     }
 }
@@ -133,7 +157,7 @@ pub fn define(it: &mut Interp, o: &ObjRef, key: &str, desc: Val) -> R<bool> {
     match trap(it, &handler, "defineProperty")? {
         Some(t) => {
             let args = [Val::Obj(target), key_val(key), desc];
-            Ok(it.call(&t, &Val::Obj(handler), &args)?.truthy())
+            Ok(it.call_back(crate::recursion::PROXY_TRAP, &t, &Val::Obj(handler), &args)?.truthy())
         }
         None => {
             let d = crate::props::to_desc(it, &desc)?;
@@ -147,7 +171,14 @@ pub fn delete(it: &mut Interp, o: &ObjRef, key: &str) -> R<bool> {
     let (target, handler) = live(it, o)?;
     match trap(it, &handler, "deleteProperty")? {
         Some(t) => {
-            let ok = it.call(&t, &Val::Obj(handler), &[Val::Obj(target), key_val(key)])?.truthy();
+            let ok = it
+                .call_back(
+                    crate::recursion::PROXY_TRAP,
+                    &t,
+                    &Val::Obj(handler),
+                    &[Val::Obj(target), key_val(key)],
+                )?
+                .truthy();
             if !ok && it.strict {
                 return it.type_error(&format!(
                     "can't delete property '\"{key}\"': proxy deleteProperty handler returned false"
@@ -164,7 +195,12 @@ pub fn keys(it: &mut Interp, o: &ObjRef, only_enumerable: bool) -> R<Vec<Name>> 
     let (target, handler) = live(it, o)?;
     let all = match trap(it, &handler, "ownKeys")? {
         Some(t) => {
-            let list = it.call(&t, &Val::Obj(handler.clone()), &[Val::Obj(target.clone())])?;
+            let list = it.call_back(
+                crate::recursion::PROXY_TRAP,
+                &t,
+                &Val::Obj(handler.clone()),
+                &[Val::Obj(target.clone())],
+            )?;
             if !matches!(list, Val::Obj(_)) {
                 let m = format!("ownKeys trap must be an object, got {}", it.show(&list));
                 return it.type_error(&m);
@@ -202,9 +238,12 @@ pub fn keys(it: &mut Interp, o: &ObjRef, only_enumerable: bool) -> R<Vec<Name>> 
 /// The descriptor `getOwnPropertyDescriptor` gives for `key`, or the target's.
 fn descriptor(it: &mut Interp, target: &ObjRef, handler: &ObjRef, key: &str) -> R<Option<Val>> {
     let d = match trap(it, handler, "getOwnPropertyDescriptor")? {
-        Some(t) => {
-            it.call(&t, &Val::Obj(handler.clone()), &[Val::Obj(target.clone()), key_val(key)])?
-        }
+        Some(t) => it.call_back(
+            crate::recursion::PROXY_TRAP,
+            &t,
+            &Val::Obj(handler.clone()),
+            &[Val::Obj(target.clone()), key_val(key)],
+        )?,
         None => {
             if !it.has_own_property(target, key)? {
                 return Ok(None);
@@ -234,7 +273,12 @@ pub fn apply(it: &mut Interp, o: &ObjRef, this: &Val, args: &[Val]) -> R {
     match trap(it, &handler, "apply")? {
         Some(t) => {
             let list = it.array(args.to_vec())?;
-            it.call(&t, &Val::Obj(handler), &[Val::Obj(target), this.clone(), list])
+            it.call_back(
+                crate::recursion::PROXY_TRAP,
+                &t,
+                &Val::Obj(handler),
+                &[Val::Obj(target), this.clone(), list],
+            )
         }
         None => it.call(&Val::Obj(target), this, args),
     }
@@ -250,8 +294,12 @@ pub fn construct(it: &mut Interp, o: &ObjRef, args: &[Val], new_target: &Val) ->
     match trap(it, &handler, "construct")? {
         Some(t) => {
             let list = it.array(args.to_vec())?;
-            let r =
-                it.call(&t, &Val::Obj(handler), &[Val::Obj(target), list, new_target.clone()])?;
+            let r = it.call_back(
+                crate::recursion::PROXY_TRAP,
+                &t,
+                &Val::Obj(handler),
+                &[Val::Obj(target), list, new_target.clone()],
+            )?;
             if !matches!(r, Val::Obj(_)) {
                 return it.type_error("proxy [[Construct]] must return an object");
             }

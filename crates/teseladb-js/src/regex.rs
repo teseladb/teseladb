@@ -714,7 +714,24 @@ fn parts(it: &Interp, v: &Val) -> R<(Name, Name)> {
 }
 
 fn compiled(it: &Interp, src: &str, flags: &str) -> R<Regex> {
-    compile(src, flags).map_err(|e| it.error("SyntaxError", &e))
+    let re = compile(src, flags).map_err(|e| it.error("SyntaxError", &e))?;
+    // The engine compiles the pattern on its first match, each group nested in another taking a
+    // slice of its native stack ([`crate::recursion::NESTING`]).
+    let room = crate::recursion::NATIVE_BUDGET.saturating_sub(it.units);
+    if nesting(&re.node).saturating_mul(crate::recursion::NESTING) > room {
+        return Err(it.error("Error", "regexp too big"));
+    }
+    Ok(re)
+}
+
+/// How many groups and lookarounds `n` nests in one another.
+fn nesting(n: &Node) -> usize {
+    match n {
+        Node::Group(x, _) | Node::Look(x, ..) => 1 + nesting(x),
+        Node::Repeat(x, ..) => nesting(x),
+        Node::Alt(xs) | Node::Seq(xs) => xs.iter().map(nesting).max().unwrap_or(0),
+        _ => 0,
+    }
 }
 
 /// Checks a pattern when a literal or `new RegExp` makes it.
@@ -1137,7 +1154,12 @@ pub fn replace(it: &mut Interp, s: &Name, rv: &Val, replacement: &Val, all_match
             .collect();
         let named: Vec<(String, Val)> =
             re.names.iter().map(|(n, i)| (n.clone(), groups[*i - 1].clone())).collect();
-        let r = substitute(it, replacement, &matched, utf16_pos(&chars, x), s, &groups, &named)?;
+        let position = utf16_pos(&chars, x);
+        let helpers =
+            if replacement.is_callable() { crate::recursion::REGEXP_REPLACE_FRAMES } else { 0 };
+        let r = it.nested(helpers, 0, false, |it| {
+            substitute(it, replacement, &matched, position, s, &groups, &named)
+        })?;
         out.push_str(&r);
         last = y;
     }

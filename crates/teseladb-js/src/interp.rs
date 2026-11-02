@@ -35,6 +35,9 @@ pub enum Fatal {
     /// A function the engine of RefDb 9.0 declares and cannot run (`version()`): its
     /// WebAssembly build reaches an `unreachable` instruction.
     Unreachable,
+    /// Code whose parse exhausts the stack of the engine's WebAssembly build (arrow functions
+    /// nested in one another, which it does not check).
+    StackExhausted,
 }
 
 pub type R<T = Val> = Result<T, Ctrl>;
@@ -154,8 +157,12 @@ pub struct Limits {
     pub steps: u64,
     /// Bytes the call's live objects and strings may hold.
     pub heap: usize,
-    /// Nested calls.
+    /// Nested calls: the frames of functions, scripted or native, as SpiderMonkey counts them.
     pub depth: usize,
+    /// Bytes of native stack the calls may take: the interpreter runs each call on the native
+    /// stack, so this is the room the calling thread has left, and past it a call is `too much
+    /// recursion` instead of overflowing the thread.
+    pub stack: usize,
 }
 
 /// One interpreter, for one invocation.
@@ -165,6 +172,13 @@ pub struct Interp<'c> {
     pub limits: Limits,
     pub steps: u64,
     pub depth: usize,
+    /// The engine's native stack the calls in progress take ([`crate::recursion`]).
+    pub units: usize,
+    /// Whether the innermost call is a native function of the engine's own code.
+    pub in_native: bool,
+    /// The code of the direct `eval`s of this call, parsed: its text, the private names and
+    /// `super` forms it may use.
+    pub eval_cache: Vec<EvalEntry>,
     /// The address of the stack when the first call began, to stop before the native stack
     /// runs out (a call through `for…in` and accessors takes far more of it than a plain one).
     pub stack_base: usize,
@@ -246,13 +260,14 @@ impl Drop for Interp<'_> {
     }
 }
 
-/// How much native stack the calls of one program may take: well inside the 2 MiB of a spawned
-/// thread, so deep recursion ends as `too much recursion` instead of overflowing.
-const STACK_BUDGET: usize = 1 << 20;
+/// A parsed direct `eval` ([`Interp::eval_cache`]).
+pub type EvalEntry = (Name, Vec<Name>, (bool, bool), Rc<Vec<Stmt>>);
+/// The texts of direct `eval` a call keeps parsed.
+const EVAL_CACHE: usize = 16;
 
 /// The address of a local of the caller's frame: where the stack is now.
 #[inline(never)]
-fn stack_position() -> usize {
+pub(crate) fn stack_position() -> usize {
     let marker = 0u8;
     std::hint::black_box(&marker as *const u8 as usize)
 }
@@ -410,12 +425,12 @@ fn is_identifier(s: &str) -> bool {
 
 impl<'c> Interp<'c> {
     /// Whether the calls in progress have used up the stack budget (the stack grows downwards).
-    fn stack_exhausted(&mut self) -> bool {
+    pub(crate) fn stack_exhausted(&mut self) -> bool {
         let here = stack_position();
         if self.stack_base == 0 || self.depth == 0 {
             self.stack_base = here;
         }
-        self.stack_base.saturating_sub(here) > STACK_BUDGET
+        self.stack_base.saturating_sub(here) > self.limits.stack
     }
 
     // Limits.
@@ -583,6 +598,13 @@ impl<'c> Interp<'c> {
 
     /// The `SyntaxError` of code that `eval` or `Function` parse: at its place in that code.
     pub fn syntax_error(&self, e: &crate::lexer::SyntaxError) -> Ctrl {
+        match e.message.as_str() {
+            crate::parser::TOO_MUCH_RECURSION => {
+                return self.error("InternalError", crate::parser::TOO_MUCH_RECURSION);
+            }
+            crate::parser::STACK_EXHAUSTED => return Ctrl::Fatal(Fatal::StackExhausted),
+            _ => {}
+        }
         let o = match self.make_error_obj("SyntaxError", &e.message) {
             Ok(o) => o,
             Err(c) => return c,
@@ -681,7 +703,7 @@ impl<'c> Interp<'c> {
             }));
         }
         if exotic.is_callable() {
-            let r = self.call(&exotic, v, &[Val::str(hint)])?;
+            let r = self.call_back(0, &exotic, v, &[Val::str(hint)])?;
             if matches!(r, Val::Obj(_)) {
                 return Err(self.operand_error(v, |t| {
                     format!("can't convert {t} to {to}: its [Symbol.toPrimitive] method returned an object")
@@ -701,7 +723,7 @@ impl<'c> Interp<'c> {
             let f = self.get(v, m)?;
             if f.is_callable() {
                 called = true;
-                let r = self.call(&f, v, &[])?;
+                let r = self.call_back(0, &f, v, &[])?;
                 if !matches!(r, Val::Obj(_)) {
                     return Ok(r);
                 }
@@ -885,7 +907,7 @@ impl<'c> Interp<'c> {
             };
             if let Some(p) = found {
                 if let Some(g) = p.getter {
-                    return self.call(&Val::Obj(g), v, &[]);
+                    return self.call_back(0, &Val::Obj(g), v, &[]);
                 }
                 if p.setter.is_some() {
                     return Ok(Val::Undef);
@@ -985,7 +1007,7 @@ impl<'c> Interp<'c> {
             let found = c.borrow().get_own(key).cloned();
             if let Some(p) = found {
                 if let Some(s) = p.setter {
-                    self.call(&Val::Obj(s), target, &[value])?;
+                    self.call_back(0, &Val::Obj(s), target, &[value])?;
                     return Ok(());
                 }
                 if p.getter.is_some() {
@@ -1222,27 +1244,28 @@ impl<'c> Interp<'c> {
             _ => return self.type_error(&format!("{} is not a function", self.show(f))),
         };
         self.step()?;
-        if self.depth >= self.limits.depth || self.stack_exhausted() {
-            return Err(self.error("InternalError", "too much recursion"));
+        if let Func::Closure { def, derived, class, .. } = &func
+            && (class.is_some() || *derived || def.is_ctor_of_derived)
+        {
+            if self.too_deep(1, 0) {
+                return Err(self.error("InternalError", "too much recursion"));
+            }
+            return self.type_error("class constructors must be invoked with 'new'");
         }
-        self.depth += 1;
-        let r = match func {
+        let (frames, units, native) = self.call_cost(&func);
+        self.nested(frames, units, native, |it| match func {
             Func::Native(n, name) => {
-                self.native = name;
-                n(self, this, args)
+                it.native = name;
+                n(it, this, args)
             }
             Func::Bound(target, bound_this, bound_args) => {
                 let mut all = bound_args.clone();
                 all.extend_from_slice(args);
-                self.call(&Val::Obj(target), &bound_this, &all)
+                it.call(&Val::Obj(target), &bound_this, &all)
             }
-            Func::Closure { def, env, this: arrow_this, home, derived, class, .. } => {
-                if class.is_some() || derived || def.is_ctor_of_derived {
-                    self.depth -= 1;
-                    return self.type_error("class constructors must be invoked with 'new'");
-                }
+            Func::Closure { def, env, this: arrow_this, home, .. } => {
                 let this = arrow_this.unwrap_or_else(|| this.clone());
-                self.run_closure(
+                it.run_closure(
                     fo,
                     &def,
                     &env,
@@ -1252,9 +1275,7 @@ impl<'c> Interp<'c> {
                     None,
                 )
             }
-        };
-        self.depth -= 1;
-        r
+        })
     }
 
     pub fn new_env(&mut self, parent: Option<EnvRef>) -> EnvRef {
@@ -1470,13 +1491,8 @@ impl<'c> Interp<'c> {
             _ => return self.type_error(&format!("{} is not a constructor", self.show(f))),
         };
         self.step()?;
-        if self.depth >= self.limits.depth || self.stack_exhausted() {
-            return Err(self.error("InternalError", "too much recursion"));
-        }
-        self.depth += 1;
-        let r = self.construct_inner(fo, func, args, new_target);
-        self.depth -= 1;
-        r
+        let (frames, units, native) = self.call_cost(&func);
+        self.nested(frames, units, native, |it| it.construct_inner(fo, func, args, new_target))
     }
 
     fn construct_inner(&mut self, fo: &ObjRef, func: Func, args: &[Val], new_target: &Val) -> R {
@@ -2665,7 +2681,7 @@ impl<'c> Interp<'c> {
             return Ok(p.value);
         }
         match p.getter {
-            Some(g) => self.call(&Val::Obj(g), v, &[]),
+            Some(g) => self.call_back(0, &Val::Obj(g), v, &[]),
             None => self.type_error("getting private setter-only property"),
         }
     }
@@ -2682,7 +2698,7 @@ impl<'c> Interp<'c> {
         };
         if p.is_accessor() {
             return match p.setter {
-                Some(s) => self.call(&Val::Obj(s), v, &[value]).map(|_| ()),
+                Some(s) => self.call_back(0, &Val::Obj(s), v, &[value]).map(|_| ()),
                 None => {
                     let name = private_name(key);
                     self.type_error(&format!("setting getter-only property #{name}"))
@@ -2934,7 +2950,7 @@ impl<'c> Interp<'c> {
             let p = o.borrow().get_own(key).cloned();
             if let Some(p) = p {
                 if let Some(g) = p.getter {
-                    return self.call(&Val::Obj(g), receiver, &[]);
+                    return self.call_back(0, &Val::Obj(g), receiver, &[]);
                 }
                 return Ok(p.value);
             }
@@ -3038,7 +3054,8 @@ impl<'c> Interp<'c> {
         let exprs = args;
         let args = self.eval_args(exprs, env)?;
         if is_eval_name(callee) && is_builtin_eval(&f) {
-            return self.direct_eval(args.first().cloned().unwrap_or(Val::Undef), env);
+            let src = args.first().cloned().unwrap_or(Val::Undef);
+            return self.nested(0, crate::recursion::EVAL, false, |it| it.direct_eval(src, env));
         }
         self.pos = pos;
         if !f.is_callable() {
@@ -3046,7 +3063,12 @@ impl<'c> Interp<'c> {
             return self.type_error(&format!("{text} is not a function"));
         }
         self.conversion_called = false;
-        let r = self.call(&f, &this, &args);
+        // A call with a spread argument goes through the engine's own code.
+        let r = if exprs.iter().any(|e| matches!(e, Expr::Spread(_))) {
+            self.call_back(0, &f, &this, &args)
+        } else {
+            self.call(&f, &this, &args)
+        };
         self.name_arguments(r, &f, exprs, &args)
     }
 
@@ -3185,6 +3207,33 @@ impl<'c> Interp<'c> {
     /// OrdinaryHasInstance: whether `f.prototype` is on the chain of `x`.
     /// A direct `eval(src)`: the code runs in the caller's scope, its `var`s go to the caller's
     /// function (unless it is strict) and may not redeclare a `let` on the way (ECMA-262 §19.2.1).
+    /// The statements of a direct `eval` of `src`: from the cache of the code this call has
+    /// evaluated, as the engine keeps it (an `eval` of the same text in a deep recursion does
+    /// not parse it again), or parsed in the room the call has left.
+    fn eval_body(
+        &mut self,
+        src: &Name,
+        privates: &[Name],
+        supers: (bool, bool),
+    ) -> R<Rc<Vec<Stmt>>> {
+        let hit = self
+            .eval_cache
+            .iter()
+            .find(|(s, p, u, _)| s == src && p[..] == *privates && *u == supers);
+        if let Some((.., body)) = hit {
+            return Ok(body.clone());
+        }
+        let room = self.parse_room();
+        let body = crate::parser::parse_script_in(src, privates, supers, room)
+            .map_err(|e| self.syntax_error(&e))?;
+        let body = Rc::new(body);
+        if self.eval_cache.len() >= EVAL_CACHE {
+            self.eval_cache.remove(0);
+        }
+        self.eval_cache.push((src.clone(), privates.to_vec(), supers, body.clone()));
+        Ok(body)
+    }
+
     pub fn direct_eval(&mut self, src: Val, env: &EnvRef) -> R {
         let Val::Str(src) = src else { return Ok(src) };
         // The code may use the private names of the classes around the call.
@@ -3196,13 +3245,17 @@ impl<'c> Interp<'c> {
             privates.extend(names.cloned());
             cur = b.parent.clone();
         }
-        let body = crate::parser::parse_script_in(&src, &privates, self.supers_of(env))
-            .map_err(|e| self.syntax_error(&e))?;
-        let strict = self.strict || crate::parser::has_use_strict(&body);
+        if let Some(v) = crate::json::eval_json(self, &src)? {
+            return Ok(v);
+        }
+        let supers = self.supers_of(env);
+        let parsed = self.eval_body(&src, &privates, supers)?;
+        let body = &*parsed;
+        let strict = self.strict || crate::parser::has_use_strict(body);
         let lex = self.new_env(Some(env.clone()));
         let var_env = if strict { lex.clone() } else { var_scope_of(env) };
         let mut names = Vec::new();
-        for st in &body {
+        for st in body {
             var_names(st, &mut names);
             if let Stmt::Func(n, _) = st {
                 names.push(n.clone());
@@ -3228,11 +3281,11 @@ impl<'c> Interp<'c> {
                 declare(&var_env, n, Val::Undef, true);
             }
         }
-        self.hoist(&body, &lex, false)?;
+        self.hoist(body, &lex, false)?;
         if !strict {
-            self.eval_block_functions(&body, env, &var_env);
+            self.eval_block_functions(body, env, &var_env);
         }
-        for st in &body {
+        for st in body {
             if let Stmt::Func(n, _) = st {
                 let f = self.read_var(&lex, n)?;
                 declare(&var_env, n, f, true);
@@ -3241,7 +3294,7 @@ impl<'c> Interp<'c> {
         let outer = std::mem::replace(&mut self.strict, strict);
         let saved = self.last.take();
         let mut r = Ok(());
-        for st in &body {
+        for st in body {
             r = self.exec(st, &lex);
             if r.is_err() {
                 break;

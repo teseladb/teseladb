@@ -184,3 +184,177 @@ fn errors_made_while_the_heap_is_full_end_the_call_out_of_memory() {
         assert_eq!(run_with(src, &mut ctx), Err(JsError::OutOfMemory), "{src}");
     }
 }
+
+/// The stack a thread that runs commands has, and what it gives a call.
+const BIG_STACK: usize = 300 << 20;
+
+/// `src`'s value on a thread with [`BIG_STACK`], as a function called inside a program function
+/// like the probes of the `refrouter` (`function(){ … (expression) … }`).
+fn on_big_stack(srcs: &'static [(&'static str, &'static str)]) {
+    std::thread::Builder::new()
+        .stack_size(BIG_STACK)
+        .spawn(move || {
+            for (src, want) in srcs {
+                let limits = Limits { stack: 256 << 20, ..Limits::default() };
+                let mut ctx = JsCtx { limits, ..JsCtx::default() };
+                let body = format!("function(){{ return ({src}) }}");
+                let got = run_with(&body, &mut ctx);
+                assert_eq!(got, Ok(Value::String((*want).into())), "{src}");
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+/// With the stack of a thread that runs commands, recursion goes as deep as on a `refrouter` 9.0.4
+/// (016 A016-3-18, measured on 02-11): 51 000 frames, the self-hosted builtins included, and
+/// about 350 calls back from the engine's own code.
+#[test]
+fn recursion_on_a_large_stack_goes_as_deep_as_on_a_refrouter() {
+    const CASES: &[(&str, &str)] = &[
+        (
+            "(function(){ let n=0; function f(){ n++; f(); } try { f() } catch(e) { return n + ' ' + e.message } })()",
+            "50998 too much recursion",
+        ),
+        (
+            "(function(){ let n=0; function f(){ n++; return [1].map(f); } try { f() } catch(e) { return n + ' ' + e.message } })()",
+            "25499 too much recursion",
+        ),
+        (
+            "(function(){ let n=0; function f(){ n++; return [1].flatMap(f); } try { f() } catch(e) { return n + ' ' + e.message } })()",
+            "17000 too much recursion",
+        ),
+        (
+            "(function(){ let n=0; function f(){ n++; return 'a'.replace(/a/, f); } try { f() } catch(e) { return n + ' ' + e.message } })()",
+            "10200 too much recursion",
+        ),
+        (
+            "(function(){ let n=0; function f(){ n++; return [1].values().map(f).toArray(); } try { f() } catch(e) { return n + ' ' + e.message } })()",
+            "10200 too much recursion",
+        ),
+        (
+            "(function(){ let n=0; function* g(){ n++; yield* g(); } try { [...g()] } catch(e) { return n + ' ' + e.message } })()",
+            "25499 too much recursion",
+        ),
+        (
+            "(function(){ let n=0; function f(k){ n++; if (k==0) return 0; return 1+f(k-1); } return f(30000) + ' ' + n })()",
+            "30000 30001",
+        ),
+    ];
+    on_big_stack(CASES);
+}
+
+/// Calls back from the engine's own code take its native stack: a getter or a conversion about
+/// 349 times, through `f.call` 175, through two natives 117 (measured on a `refrouter` 9.0.4).
+#[test]
+fn calls_back_from_the_engine_end_as_on_a_refrouter() {
+    const CASES: &[(&str, &str)] = &[
+        (
+            "(function(){ let n=0; function f(){ n++; return +{valueOf: f}; } try { f() } catch(e) { return n + ' ' + e.message } })()",
+            "349 too much recursion",
+        ),
+        (
+            "(function(){ let n=0; function f(){ n++; return Object.defineProperty({}, 'x', {get: f}).x; } try { f() } catch(e) { return n + ' ' + e.message } })()",
+            "349 too much recursion",
+        ),
+        (
+            "(function(){ let n=0; function f(){ n++; return f(...[]); } try { f() } catch(e) { return n + ' ' + e.message } })()",
+            "349 too much recursion",
+        ),
+        (
+            "(function(){ let n=0; function f(){ n++; return f.call(null); } try { f() } catch(e) { return n + ' ' + e.message } })()",
+            "175 too much recursion",
+        ),
+        (
+            "(function(){ let n=0; function f(){ n++; return f.bind(null)(); } try { f() } catch(e) { return n + ' ' + e.message } })()",
+            "175 too much recursion",
+        ),
+        (
+            "(function(){ let n=0; function f(){ n++; return String({toString: f}); } try { f() } catch(e) { return n + ' ' + e.message } })()",
+            "175 too much recursion",
+        ),
+        (
+            "(function(){ let n=0; function f(){ n++; return Function.prototype.call.call(f, null); } try { f() } catch(e) { return n + ' ' + e.message } })()",
+            "117 too much recursion",
+        ),
+        (
+            "(function(){ let n=0; function f(){ n++; return f.call.call(f.call, f); } try { f() } catch(e) { return n + ' ' + e.message } })()",
+            "88 too much recursion",
+        ),
+        (
+            "(function(){ let n=0; function f(){ n++; return JSON.parse('1', f); } try { f() } catch(e) { return n + ' ' + e.message } })()",
+            "117 too much recursion",
+        ),
+        (
+            "(function(){ let n=0; const p = new Proxy({}, {get(){ n++; return p.x; }}); try { p.x } catch(e) { return n + ' ' + e.message } })()",
+            "174 too much recursion",
+        ),
+        (
+            "(function(){ let n=0; function f(){ n++; return Object.keys(new Proxy({}, {ownKeys(){ return f() }})); } try { f() } catch(e) { return n + ' ' + e.message } })()",
+            "117 too much recursion",
+        ),
+        (
+            "(function(){ let n=0; function f(){ n++; return eval('f()'); } try { f() } catch(e) { return n + ' ' + e.message } })()",
+            "343 too much recursion",
+        ),
+    ];
+    on_big_stack(CASES);
+}
+
+/// The depth of a value `JSON.stringify` writes, of an array converted to a string, of the groups
+/// of a regular expression and of the constructs an `eval` parses ends where a `refrouter` 9.0.4
+/// ends it (measured on 02-11); an array that is JSON the engine reads without that limit.
+#[test]
+fn nesting_in_values_patterns_and_eval_ends_as_on_a_refrouter() {
+    const CASES: &[(&str, &str)] = &[
+        (
+            "(function(){ const t = (d) => { let a = []; for (let i = 0; i < d; i++) a = [a]; try { return JSON.stringify(a).length } catch (e) { return e.message } }; return t(346) + ' ' + t(347) })()",
+            "694 too much recursion",
+        ),
+        (
+            "(function(){ const t = (d) => { let a = []; for (let i = 0; i < d; i++) a = [a]; try { return String(a).length } catch (e) { return e.message } }; return t(172) + ' ' + t(173) })()",
+            "0 too much recursion",
+        ),
+        (
+            "(function(){ const t = (d) => { try { return new RegExp('(?:'.repeat(d) + 'a' + ')'.repeat(d)).test('a') } catch (e) { return e.name + ':' + e.message } }; return t(346) + ' ' + t(347) })()",
+            "true Error:regexp too big",
+        ),
+        (
+            "(function(){ const t = (s) => { try { eval(s); return 'ok' } catch (e) { return e.name } }; return [t('('.repeat(69) + '1' + ')'.repeat(69)), t('('.repeat(70) + '1' + ')'.repeat(70)), t('!'.repeat(341) + '1'), t('!'.repeat(342) + '1'), t('{'.repeat(173) + '}'.repeat(173)), t('{'.repeat(174) + '}'.repeat(174)), t('Math.abs('.repeat(86) + '1' + ')'.repeat(86)), t('Math.abs('.repeat(87) + '1' + ')'.repeat(87))].join() })()",
+            "ok,InternalError,ok,InternalError,ok,InternalError,ok,InternalError",
+        ),
+        (
+            "(function(){ return eval('['.repeat(20000) + ']'.repeat(20000)).length + ' ' + JSON.parse('['.repeat(20000) + ']'.repeat(20000)).length })()",
+            "1 1",
+        ),
+    ];
+    on_big_stack(CASES);
+}
+
+/// A program nested deeper than the engine parses fails to compile with `too much recursion` and
+/// no place; arrow functions, which it does not check, exhaust its stack (measured on a `refrouter`
+/// 9.0.4 on 02-11).
+#[test]
+fn a_program_nested_too_deep_does_not_compile() {
+    let program = |d: usize| format!("function(){{ return {}1{} }}", "(".repeat(d), ")".repeat(d));
+    assert!(Program::compile(&program(66)).is_ok());
+    let e = Program::compile(&program(67)).unwrap_err();
+    assert_eq!(
+        e,
+        JsError::Compile { message: "too much recursion".into(), line: 0, col: 1 },
+        "67 parentheses"
+    );
+    let unary = |d: usize| format!("function(){{ return {}1 }}", "!".repeat(d));
+    assert!(Program::compile(&unary(330)).is_ok());
+    assert!(Program::compile(&unary(331)).is_err());
+    // A `$where` expression has the same room.
+    let script = |d: usize| format!("{}1{}", "(".repeat(d), ")".repeat(d));
+    assert!(Program::compile(&script(66)).is_ok());
+    assert!(Program::compile(&script(67)).is_err());
+    let arrows = |d: usize| format!("function(){{ return {}1 }}", "x=>".repeat(d));
+    assert!(Program::compile(&arrows(313)).is_ok());
+    assert_eq!(Program::compile(&arrows(314)).unwrap_err(), JsError::StackExhausted);
+    let e = run("function(){ return eval('x=>'.repeat(316) + '1') }").unwrap_err();
+    assert_eq!(e.message(), "wasm trap: call stack exhausted");
+}

@@ -344,7 +344,21 @@ impl Default for Hooks {
 
 /// A named thread that is not joined.
 fn spawn_thread(name: String, run: Box<dyn FnOnce() + Send>) -> io::Result<()> {
-    thread::Builder::new().name(name).spawn(run).map(drop)
+    command_thread(name).spawn(with_command_stack(run)).map(drop)
+}
+
+/// A thread that runs commands: with the stack the calls of server-side JavaScript need (016
+/// A016-3-18), which the system reserves and only commits as it is used.
+pub(crate) fn command_thread(name: String) -> thread::Builder {
+    thread::Builder::new().name(name).stack_size(teseladb_wire::commands::js::COMMAND_STACK)
+}
+
+/// `run`, after telling the calls of JavaScript the stack of [`command_thread`].
+pub(crate) fn with_command_stack<T>(run: impl FnOnce() -> T) -> impl FnOnce() -> T {
+    move || {
+        teseladb_wire::commands::js::set_stack(teseladb_wire::commands::js::COMMAND_STACK);
+        run()
+    }
 }
 
 /// A worker's executors: threads that run the commands of its connections against the node,
@@ -532,7 +546,8 @@ impl ClientListener {
                 open: open.clone(),
                 stop: stop.clone(),
             };
-            let t = thread::Builder::new().name(format!("client-{k}")).spawn(move || w.run())?;
+            let t =
+                command_thread(format!("client-{k}")).spawn(with_command_stack(move || w.run()))?;
             handles.push((waker, t));
             senders.push(tx);
         }

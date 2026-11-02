@@ -334,7 +334,11 @@ fn sleep(it: &mut Interp, _: &Val, a: &[Val]) -> R {
 /// `eval(code)`: a script in the global scope.
 fn eval(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     let Val::Str(src) = arg(a, 0) else { return Ok(arg(a, 0)) };
-    let body = crate::parser::parse_eval(&src).map_err(|e| it.syntax_error(&e))?;
+    if let Some(v) = crate::json::eval_json(it, &src)? {
+        return Ok(v);
+    }
+    let room = it.parse_room();
+    let body = crate::parser::parse_eval(&src, room).map_err(|e| it.syntax_error(&e))?;
     let env = it.global_env.clone();
     it.hoist(&body, &env, true)?;
     if !crate::parser::has_use_strict(&body) {
@@ -756,7 +760,8 @@ pub(crate) fn function_ctor(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     }
     let body = parts.pop().unwrap_or_default();
     let src = format!("(function anonymous({}\n) {{\n{body}\n}})", parts.join(","));
-    let stmts = crate::parser::parse_eval(&src).map_err(|e| it.syntax_error(&e))?;
+    let room = it.parse_room();
+    let stmts = crate::parser::parse_eval(&src, room).map_err(|e| it.syntax_error(&e))?;
     let env = it.global_env.clone();
     match stmts.first() {
         Some(crate::ast::Stmt::Expr(e)) => it.eval(e, &env),
