@@ -246,6 +246,7 @@ pub fn client_config(o: &StartOpts) -> ClientConfig {
         compressors: o.compressors.clone(),
         test_commands: o.test_commands,
         redact_client_log_data: o.redact_client_log_data,
+        javascript_enabled: !o.no_scripting,
         audit_authorization_success: o.audit.authorization_success.unwrap_or(false),
         ocsp_enabled: !o.tls.ocsp_disabled,
         use_internal_authz_for_x509: o.use_internal_authz_for_x509,
@@ -372,6 +373,12 @@ pub fn parsed_options(o: &StartOpts) -> Document {
             cli::REDACT_CLIENT_LOG_DATA => {
                 vec![(vec!["security", "redactClientLogData"], Value::Boolean(true))]
             }
+            cli::NO_SCRIPTING => {
+                vec![(vec!["security", "javascriptEnabled"], Value::Boolean(false))]
+            }
+            cli::JAVASCRIPT_ENABLED => {
+                vec![(vec!["security", "javascriptEnabled"], Value::Boolean(raw == "true"))]
+            }
             "setParameter" => {
                 let (k, v) = raw.split_once('=').unwrap_or((raw.as_str(), ""));
                 vec![(vec!["setParameter", k], Value::from(v))]
@@ -406,6 +413,12 @@ fn with_path(mut d: Document, path: &[&str], v: Value) -> Document {
     }
 }
 
+/// The monotonic clock in milliseconds since the process started: the clock of a JavaScript
+/// call's deadline (016 FR-007).
+fn js_clock_ms() -> u64 {
+    u64::try_from(backend::process_start().elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
 /// `teseladb start`: runs until `stop()` says so.
 pub fn start(
     o: &StartOpts,
@@ -413,6 +426,7 @@ pub fn start(
     err: &mut dyn Write,
     stop: &dyn Fn() -> bool,
 ) -> i32 {
+    teseladb_wire::commands::js::set_clock(js_clock_ms);
     let log = match log_output(o) {
         Ok(w) => Logger::new(o.log_level, o.log_format, w),
         Err(e) => {

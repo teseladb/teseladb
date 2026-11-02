@@ -42,9 +42,11 @@ pub mod index_mod;
 pub mod index_spec;
 pub(crate) mod index_usage;
 pub mod indexes;
+pub mod js;
 pub mod kinds;
 pub mod list_catalog;
 pub mod maintenance;
+pub mod mapreduce;
 pub mod mutation;
 pub mod names;
 pub mod out_merge;
@@ -69,6 +71,7 @@ pub mod sort;
 pub mod status;
 pub mod tenants;
 pub mod timeseries;
+pub mod timeseries_catalog;
 pub mod timeseries_filter;
 pub mod ttl;
 pub mod txn;
@@ -268,6 +271,17 @@ pub trait Backend {
     fn op_client(&mut self) -> Option<Document>;
     /// The plan the running operation noted ([`Backend::note_plan`]), for `$queryStats`.
     fn op_plan(&mut self) -> Option<Document>;
+
+    /// Raises (`on`) or lifts the write fence of `[start, end)` on every range of it (018 FR-002,
+    /// `teseladb_range::fence`): from then on those ranges refuse the writes and intents of the
+    /// span with `StaleConfig`. The highest mark of the `Fence` entries: every write the ranges
+    /// took in the span before them is at or below it.
+    fn fence(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        on: bool,
+    ) -> Result<teseladb_hlc::Hlc, CommandError>;
     /// What a change stream reads of `[start, end)` after mark `from` (014 FR-003, FR-004): the
     /// versions of every range of the interval up to the lowest resolved mark of those ranges,
     /// and that mark, below which no version appears later.
@@ -794,7 +808,7 @@ impl<B: Backend + ?Sized> Ctx<'_, B> {
 }
 
 /// The commands of this module.
-const NAMES: [&str; 79] = [
+const NAMES: [&str; 80] = [
     aggregate::AGGREGATE,
     query_settings::SET_QUERY_SETTINGS,
     query_settings::REMOVE_QUERY_SETTINGS,
@@ -823,6 +837,7 @@ const NAMES: [&str; 79] = [
     reshard::RESHARD_COLLECTION,
     reshard::REFINE_COLLECTION_SHARD_KEY,
     reshard::ABORT_RESHARD_COLLECTION,
+    mapreduce::MAP_REDUCE,
     crud::INSERT,
     crud::UPDATE,
     crud::DELETE,
@@ -1142,6 +1157,15 @@ fn returned(reply: &Document) -> i64 {
 /// Runs the command of `ctx` by its name.
 fn dispatch<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     engines::reseed(ctx.backend.random());
+    let enabled = lock(ctx.shared).params.javascript_enabled;
+    let max_time = match ctx.cmd.get("maxTimeMS") {
+        Some(Value::Int32(n)) => u64::try_from(*n).ok(),
+        Some(Value::Int64(n)) => u64::try_from(*n).ok(),
+        Some(Value::Double(x)) if *x >= 0.0 => Some(*x as u64),
+        _ => None,
+    };
+    js::begin(enabled, ctx.backend.now_ms(), js::deadline_from(max_time));
+    js::load_stored(ctx.backend, ctx.db, ctx.cmd)?;
     match crate::concerns::canonical(ctx.name()) {
         query_settings::SET_QUERY_SETTINGS => query_settings::set_query_settings(ctx),
         query_settings::REMOVE_QUERY_SETTINGS => query_settings::remove_query_settings(ctx),
@@ -1180,6 +1204,7 @@ fn dispatch<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
         reshard::RESHARD_COLLECTION => reshard::reshard_collection(ctx),
         reshard::REFINE_COLLECTION_SHARD_KEY => reshard::refine_collection_shard_key(ctx),
         reshard::ABORT_RESHARD_COLLECTION => reshard::abort_reshard_collection(ctx),
+        mapreduce::MAP_REDUCE => mapreduce::map_reduce(ctx),
         crud::INSERT => crud::insert(ctx),
         crud::UPDATE => crud::update(ctx),
         crud::DELETE => crud::delete(ctx),

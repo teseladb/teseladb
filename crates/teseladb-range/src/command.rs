@@ -41,6 +41,8 @@ pub const KIND_PURGE_DEDUP: u16 = 13;
 pub const KIND_RELOCATE: u16 = 14;
 /// `kind` of [`Command::ForgetRecord`] (008).
 pub const KIND_FORGET_RECORD: u16 = 15;
+/// `kind` of [`Command::Fence`] (018).
+pub const KIND_FENCE: u16 = 16;
 
 /// The statement a retryable write belongs to (FR-011): the driver sends it again with the same
 /// key after a lost answer.
@@ -106,6 +108,8 @@ pub struct Absorbed {
     pub live: u64,
     /// Its idempotence records.
     pub records: Vec<CopiedRecord>,
+    /// Its write fences (018, [`crate::fence`]).
+    pub fences: Vec<crate::fence::Span>,
 }
 
 /// An intent written by a [`Command::PutIntents`] at the entry's mark.
@@ -246,6 +250,16 @@ pub enum Command {
         /// The record after the push.
         record: TxnRecord,
     },
+    /// Adds (`on`) or lifts the write fence of `[start, end)` (018 FR-002, [`crate::fence`]):
+    /// from this entry on, a `Write` or `PutIntents` with a key in it is refused.
+    Fence {
+        /// First key of the span.
+        start: Vec<u8>,
+        /// End of the span (excluded).
+        end: Vec<u8>,
+        /// Whether the fence goes up.
+        on: bool,
+    },
     /// First entry of a range born from a split: its parent, the entry that cut it and its end,
     /// so that a replica that replays the range's log from its first entry knows its bounds.
     SplitGenesis {
@@ -319,6 +333,7 @@ impl Command {
             Command::EndTxn { .. } => KIND_END_TXN,
             Command::ResolveIntents { .. } => KIND_RESOLVE_INTENTS,
             Command::PushTxn { .. } => KIND_PUSH_TXN,
+            Command::Fence { .. } => KIND_FENCE,
         }
     }
 
@@ -374,7 +389,11 @@ impl Command {
                     put_hlc(&mut e, a.mark);
                     e.u64(a.live);
                     put_copied(&mut e, &a.records);
+                    crate::fence::put(&mut e, &a.fences);
                 }
+            }
+            Command::Fence { start, end, on } => {
+                e.bytes(start).bytes(end).bool(*on);
             }
             Command::SplitGenesis { parent, at_index, end } => {
                 e.u64(parent.0).u64(*at_index).bytes(end);
@@ -457,12 +476,18 @@ impl Command {
                 Command::SplitGenesis { parent, at_index, end: d.bytes()?.to_vec() }
             }
             KIND_MERGE_FREEZE => Command::MergeFreeze { merge: d.u64()? },
+            KIND_FENCE => {
+                let (start, end) = (d.bytes()?.to_vec(), d.bytes()?.to_vec());
+                Command::Fence { start, end, on: d.bool()? }
+            }
             KIND_MERGE => {
                 let (right, merge) = (GroupId(d.u64()?), d.u64()?);
                 let absorb = if d.bool()? {
                     let end = d.bytes()?.to_vec();
                     let (gc, mark, live) = (get_hlc(&mut d)?, get_hlc(&mut d)?, d.u64()?);
-                    Some(Absorbed { end, gc, mark, live, records: get_copied(&mut d)? })
+                    let records = get_copied(&mut d)?;
+                    let fences = crate::fence::get(&mut d)?;
+                    Some(Absorbed { end, gc, mark, live, records, fences })
                 } else {
                     None
                 };

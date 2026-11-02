@@ -4,8 +4,8 @@
 
 use teseladb_hlc::Hlc;
 use teseladb_range::command::{
-    Absorbed, Command, CopiedRecord, DedupKey, DedupRecord, KIND_COMPUTE_CHECKSUM, KIND_MERGE,
-    KIND_MERGE_FREEZE, KIND_NOOP, KIND_SET_GC_THRESHOLD, KIND_WRITE, Put,
+    Absorbed, Command, CopiedRecord, DedupKey, DedupRecord, KIND_COMPUTE_CHECKSUM, KIND_FENCE,
+    KIND_MERGE, KIND_MERGE_FREEZE, KIND_NOOP, KIND_SET_GC_THRESHOLD, KIND_WRITE, Put,
 };
 use teseladb_types::GroupId;
 
@@ -45,9 +45,12 @@ fn samples() -> Vec<Command> {
                     mark: ts,
                     result: b"ok".to_vec(),
                 }],
+                fences: vec![(b"a".to_vec(), b"c".to_vec())],
             }),
         },
         Command::Merge { right: GroupId(7), merge: 41, absorb: None },
+        Command::Fence { start: b"a".to_vec(), end: b"c".to_vec(), on: true },
+        Command::Fence { start: vec![], end: vec![], on: false },
     ]
 }
 
@@ -66,6 +69,8 @@ fn every_command_survives_its_encoding() {
             KIND_MERGE_FREEZE,
             KIND_MERGE,
             KIND_MERGE,
+            KIND_FENCE,
+            KIND_FENCE,
         ]
     );
     for c in samples() {

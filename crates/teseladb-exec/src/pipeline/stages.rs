@@ -577,7 +577,7 @@ impl Env for WithVars<'_> {
     }
 
     fn scope(&self, doc: &Document) -> Scope {
-        self.vars.scope(doc).with_collation(self.inner.collation())
+        self.vars.scope(doc).with_collation(self.inner.collation()).with_js(self.inner.js())
     }
 
     fn collation(&self) -> crate::collation::Collation {
@@ -590,6 +590,10 @@ impl Env for WithVars<'_> {
 
     fn random(&self) -> f64 {
         self.inner.random()
+    }
+
+    fn js(&self) -> Option<std::rc::Rc<dyn crate::expr::js::JsEngine>> {
+        self.inner.js()
     }
 }
 

@@ -9,6 +9,7 @@ use std::fs::File;
 use std::io;
 use std::os::fd::AsRawFd;
 
+pub mod aligned;
 pub mod alloc_count;
 pub mod handoff;
 pub mod host;
@@ -17,6 +18,9 @@ pub mod latest;
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+/// io_uring (Linux only, 012 FR-001).
+#[cfg(target_os = "linux")]
+pub use linux::io_uring as uring;
 pub mod memory_limit;
 pub mod poll;
 pub mod ring;

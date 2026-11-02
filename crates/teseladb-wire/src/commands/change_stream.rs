@@ -942,6 +942,10 @@ impl teseladb_exec::pipeline::Env for EventEnv {
         ))
     }
 
+    fn js(&self) -> Option<std::rc::Rc<dyn teseladb_exec::expr::js::JsEngine>> {
+        Some(super::js::engine())
+    }
+
     fn random(&self) -> f64 {
         let s = self.seed.get().wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
         self.seed.set(s);

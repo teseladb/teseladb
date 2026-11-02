@@ -182,6 +182,9 @@ pub struct ServerParams {
     /// The bits of `internalQueryStatsSampleRate` (an `f64`, kept as bits so the parameters
     /// compare exactly).
     pub query_stats_sample_bits: u64,
+    /// Whether server-side JavaScript runs: `false` with `--noscripting` or
+    /// `security.javascriptEnabled: false` (016 FR-009).
+    pub javascript_enabled: bool,
 }
 
 impl ServerParams {
@@ -213,6 +216,7 @@ impl Default for ServerParams {
             .unwrap_or(i64::MAX),
             query_stats_rate_limit: 0,
             query_stats_sample_bits: QUERY_STATS_SAMPLE_RATE_DEFAULT.to_bits(),
+            javascript_enabled: true,
         }
     }
 }

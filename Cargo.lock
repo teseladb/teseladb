@@ -111,6 +111,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "teseladb-fle"
+version = "0.1.0"
+dependencies = [
+ "teseladb-bson",
+ "teseladb-crypto",
+ "teseladb-json",
+ "teseladb-mql",
+]
+
+[[package]]
 name = "teseladb-hash"
 version = "0.1.0"
 dependencies = [
@@ -454,6 +464,7 @@ dependencies = [
  "teseladb-hash",
  "teseladb-hlc",
  "teseladb-index",
+ "teseladb-js",
  "teseladb-keys",
  "teseladb-meta",
  "teseladb-mql",
