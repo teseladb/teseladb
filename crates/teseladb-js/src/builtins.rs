@@ -784,6 +784,9 @@ fn array_from(it: &mut Interp, _: &Val, a: &[Val]) -> R {
         Val::Undef | Val::Null => {
             return it.type_error(&format!("{} is not iterable", it.show(&src)));
         }
+        // A number, boolean, symbol or bigint has no iterator and no length: no elements
+        // (measured on a `refrouter` 9.0.4 on 02-11: `Set.tojson(5)` is `new Set([ ])`).
+        Val::Num(_) | Val::Bool(_) | Val::Sym(_) | Val::BigInt(_) => Vec::new(),
         _ => it.iterate(&src)?,
     };
     let f = arg(a, 1);

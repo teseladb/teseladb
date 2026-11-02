@@ -1855,3 +1855,5 @@ JSON.stringify(Object.entries(Object.getOwnPropertyDescriptor(Object.prototype, 
 bsonsize(undefined)	E:Error:argument to bsonsize has to be an object
 bsonsize()	E:Error:bsonsize needs 1 argument
 (() => { let n = 0; for (const k in {}) n++; return n })()	J:0
+JSON.stringify([Array.from(5), Array.from(true), Array.from(Symbol()), Array.from(1n), Array.from(5, x => x)])	S:[[],[],[],[],[]]
+Set.tojson(5) + "|" + Set.tojson("ab") + "|" + Set.tojson({length:2, 0:"a"}) + "|" + Set.tojson([1,2])	S:new Set([ ])|new Set([\n\t"a",\n\t"b"\n])|new Set([\n\t"a",\n\tundefined\n])|new Set([\n\t1,\n\t2\n])
