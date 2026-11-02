@@ -743,7 +743,12 @@ impl<D: Disk + Send + 'static> Node<D> {
 
         let hosting = Hosting::default();
         let routes = SharedRoutes::default().with_hosting(hosting.clone());
-        let tables = cfg.client.as_ref().map_or_else(NodeSessions::default, ClientConfig::sessions);
+        let mut tables =
+            cfg.client.as_ref().map_or_else(NodeSessions::default, ClientConfig::sessions);
+        if let Some(dir) = &cfg.data_dir {
+            // The segments of the search indexes, one file per index (011 FR-012).
+            tables.search.open_dir(dir.join("search"))?;
+        }
         let sessions: Arc<Shared> = Arc::new(Mutex::new(tables));
         // Created before the cores' runtimes start: see `AuthGate`.
         let auth = Arc::new(AuthGate::default());

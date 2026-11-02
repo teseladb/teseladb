@@ -22,7 +22,7 @@ use teseladb_meta::catalog::{CollectionEntry, Namespace};
 use teseladb_meta::indexes::{SearchIndexEntry, SearchIndexKind};
 use teseladb_search::definition::{Definition, VectorDefinition};
 use teseladb_search::index::MemIndex;
-use teseladb_search::indexer::{Found, Indexer};
+use teseladb_search::indexer::{Found, Indexer, SegmentFile};
 use teseladb_search::query::search::SearchError;
 use teseladb_search::query::vector_search::{self, VectorQuery};
 use teseladb_search::vector_indexer::VectorIndexer;
@@ -101,7 +101,15 @@ pub struct Built {
     view: Option<IndexView>,
     /// With a view, the collection's documents as stored, by key.
     stored: BTreeMap<Vec<u8>, Document>,
+    /// Documents changed since the segments were last written to a file.
+    pending: usize,
 }
+
+/// Changed documents after which the segments of an index are written again to their file.
+const DUMP_EVERY: usize = 1024;
+
+/// Extension of the file of an index's segments in the node's directory.
+const SEGMENT_EXT: &str = "seg";
 
 /// The indexes this node built, by identifier.
 #[derive(Clone, Debug, Default)]
@@ -109,6 +117,24 @@ pub struct SearchIndexes {
     built: BTreeMap<[u8; 12], Built>,
     /// The indexes whose build failed on this node, with the version that failed.
     failed: BTreeMap<[u8; 12], Served>,
+    /// Segment files received with the SST files of the ranges or read from the node's
+    /// directory, not yet served (FR-012, FR-013).
+    received: BTreeMap<[u8; 12], Shipped>,
+    /// Where the segments of each index are written as an immutable file (FR-012).
+    dir: Option<std::path::PathBuf>,
+}
+
+/// The segment files of a `search` index as one node sends them to a new replica with the SST
+/// files of the ranges (FR-013): the replica serves them and catches up from the mark they
+/// cover instead of analyzing every document again.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Shipped {
+    /// The collection.
+    pub collection: u32,
+    /// The definition version they serve.
+    pub version: u32,
+    /// The segments, in key order.
+    pub files: Vec<SegmentFile>,
 }
 
 /// What `statusDetail` says of an index this node built: the version it serves, when it was
@@ -137,11 +163,127 @@ impl SearchIndexes {
         built.or_else(|| self.failed.get(id).cloned())
     }
 
-    /// Forgets index `id` (dropped).
+    /// Forgets index `id` (dropped), and its file.
     pub fn forget(&mut self, id: &[u8; 12]) {
         self.built.remove(id);
         self.failed.remove(id);
+        self.received.remove(id);
+        if let Some(path) = self.file_of(id) {
+            // A file that is not there is already forgotten.
+            let _ = std::fs::remove_file(path);
+        }
     }
+
+    /// Keeps the segments of each index in a file of `dir`, and takes those already there, to
+    /// serve them from the mark they cover after a restart instead of analyzing every document
+    /// again (FR-012). A file that cannot be read is removed: the index is built again.
+    pub fn open_dir(&mut self, dir: std::path::PathBuf) -> std::io::Result<()> {
+        std::fs::create_dir_all(&dir)?;
+        for entry in std::fs::read_dir(&dir)? {
+            let path = entry?.path();
+            if path.extension().and_then(|e| e.to_str()) != Some(SEGMENT_EXT) {
+                continue;
+            }
+            match Shipped::decode(&std::fs::read(&path)?) {
+                Ok((id, shipped)) => {
+                    self.received.insert(id, shipped);
+                }
+                Err(_) => std::fs::remove_file(&path)?,
+            }
+        }
+        self.dir = Some(dir);
+        Ok(())
+    }
+
+    /// The file of index `id`'s segments, with a directory.
+    fn file_of(&self, id: &[u8; 12]) -> Option<std::path::PathBuf> {
+        let hex: String = id.iter().map(|b| format!("{b:02x}")).collect();
+        Some(self.dir.as_ref()?.join(format!("{hex}.{SEGMENT_EXT}")))
+    }
+
+    /// Writes the segments of index `id` as a new file that replaces the previous one: written
+    /// and synced under another name first, so a crash leaves one whole file or the other.
+    fn write_file(&self, id: &[u8; 12]) -> std::io::Result<()> {
+        let (Some(path), Some(shipped)) = (self.file_of(id), self.ship(id)) else { return Ok(()) };
+        let tmp = path.with_extension("tmp");
+        let mut f = std::fs::File::create(&tmp)?;
+        std::io::Write::write_all(&mut f, &shipped.encode(id))?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, &path)
+    }
+
+    /// The segment files of index `id` as this node built them, covering the versions up to
+    /// the mark it applied (FR-012): `None` for an index it has not built, a `vectorSearch`
+    /// index or one on a view, which a replica builds from the documents.
+    pub fn ship(&self, id: &[u8; 12]) -> Option<Shipped> {
+        let b = self.built.get(id)?;
+        match &b.indexer {
+            Segments::Search(ix) if b.view.is_none() => Some(Shipped {
+                collection: b.collection,
+                version: b.version,
+                files: ix.dump(b.applied),
+            }),
+            _ => None,
+        }
+    }
+
+    /// Keeps the segment files of index `id` that arrived with a range's SST files, to serve
+    /// them the first time a query needs the index (FR-013).
+    pub fn receive(&mut self, id: [u8; 12], shipped: Shipped) {
+        self.built.remove(&id);
+        self.received.insert(id, shipped);
+    }
+}
+
+impl Shipped {
+    /// The segment file of a range snapshot that carries these segments of index `id` (FR-013).
+    pub fn encode(&self, id: &[u8; 12]) -> Vec<u8> {
+        let mut e = teseladb_types::Encoder::new();
+        e.bytes(id).u32(self.collection).u32(self.version).u32(self.files.len() as u32);
+        for f in &self.files {
+            e.bytes(&f.start).bytes(&f.end).bytes(&f.bytes);
+        }
+        e.finish()
+    }
+
+    /// The index and segments that a file written by [`Shipped::encode`] carries.
+    pub fn decode(b: &[u8]) -> Result<([u8; 12], Shipped), teseladb_types::DecodeError> {
+        let mut d = teseladb_types::Decoder::new(b);
+        let id: [u8; 12] = d
+            .bytes()?
+            .try_into()
+            .map_err(|_| teseladb_types::DecodeError::InvalidValue { offset: 0 })?;
+        let (collection, version, n) = (d.u32()?, d.u32()?, d.u32()?);
+        let mut files = Vec::new();
+        for _ in 0..n {
+            let (start, end) = (d.bytes()?.to_vec(), d.bytes()?.to_vec());
+            files.push(SegmentFile { start, end, bytes: d.bytes()?.to_vec() });
+        }
+        d.finish()?;
+        Ok((id, Shipped { collection, version, files }))
+    }
+}
+
+/// The segments of `entry` on `coll` that arrived with the SST files, when they serve its
+/// version and other analyzers did not make them, with the mark they cover.
+fn from_received(
+    shipped: Shipped,
+    coll: &CollectionEntry,
+    entry: &SearchIndexEntry,
+) -> Option<(Segments, Hlc)> {
+    if shipped.version != entry.version || shipped.collection != coll.id {
+        return None;
+    }
+    let (Segments::Search(empty), _, None) = definition_of(entry).ok()? else { return None };
+    let applied = shipped
+        .files
+        .iter()
+        .map(|f| Indexer::applied_of(&f.bytes).ok())
+        .min()
+        .flatten()
+        .unwrap_or(Hlc { physical: 0, logical: 0 });
+    let ix = Indexer::load(empty.definition().clone(), &shipped.files).ok()?;
+    Some((Segments::Search(Box::new(ix)), applied))
 }
 
 /// A query error of `refsearch`: its message with code 8.
@@ -179,22 +321,28 @@ pub fn with_index<B: Backend + ?Sized, R>(
     entry: &SearchIndexEntry,
     f: impl FnOnce(&Segments, &BTreeMap<Vec<u8>, Document>) -> R,
 ) -> Result<R, CommandError> {
-    let taken = lock(shared).search.built.remove(&entry.id);
+    let (taken, received) = {
+        let mut indexes = lock(shared);
+        (indexes.search.built.remove(&entry.id), indexes.search.received.remove(&entry.id))
+    };
     let mut fresh = false;
     let mut built = match taken {
         Some(b) if b.version == entry.version && b.collection == coll.id => b,
         _ => {
             fresh = true;
             let (indexer, definition, view) = definition_of(entry)?;
+            let shipped = received.and_then(|r| from_received(r, coll, entry));
+            let (indexer, applied) = shipped.unwrap_or((indexer, Hlc { physical: 0, logical: 0 }));
             Built {
                 collection: coll.id,
                 version: entry.version,
                 defined_ms: entry.defined_ms,
                 definition,
                 indexer,
-                applied: Hlc { physical: 0, logical: 0 },
+                applied,
                 view,
                 stored: BTreeMap::new(),
+                pending: 0,
             }
         }
     };
@@ -213,9 +361,18 @@ pub fn with_index<B: Backend + ?Sized, R>(
         return Err(e);
     }
     let out = f(&built.indexer, &built.stored);
+    let dump = fresh || built.pending >= DUMP_EVERY;
+    if dump {
+        built.pending = 0;
+    }
     let mut indexes = lock(shared);
     indexes.search.failed.remove(&entry.id);
     indexes.search.built.insert(entry.id, built);
+    if dump {
+        indexes.search.write_file(&entry.id).map_err(|e| {
+            CommandError::new(INTERNAL_ERROR, format!("cannot write a search segment: {e}"))
+        })?;
+    }
     Ok(out)
 }
 
@@ -271,6 +428,7 @@ fn catch_up<B: Backend + ?Sized>(
         newest = through_view(backend, "", view, newest, &mut built.stored)?;
     }
     built.indexer.reshape(&bounds)?;
+    built.pending += newest.len();
     built.indexer.apply(newest)?;
     built.applied = resolved;
     Ok(())

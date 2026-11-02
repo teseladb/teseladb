@@ -361,6 +361,31 @@ impl MemIndex {
         Ok(scores)
     }
 
+    /// The query analyzer of the field at `path`: its own, or the definition's when no document
+    /// has it.
+    pub(crate) fn query_analyzer(&self, path: &str) -> &str {
+        match self.fields.get(path) {
+            Some(f) => &f.search_analyzer,
+            None => {
+                self.definition.search_analyzer.as_deref().unwrap_or_else(|| self.index_analyzer())
+            }
+        }
+    }
+
+    /// The documents with a term of the field at `path` that `matches`.
+    pub(crate) fn matching_terms(&self, path: &str, matches: impl Fn(&str) -> bool) -> Vec<u32> {
+        let Some(field) = self.fields.get(path) else { return Vec::new() };
+        let mut docs: Vec<u32> = field
+            .postings
+            .iter()
+            .filter(|(term, _)| matches(term))
+            .flat_map(|(_, d)| d.keys().copied())
+            .collect();
+        docs.sort_unstable();
+        docs.dedup();
+        docs
+    }
+
     /// The documents where a phrase of `queries` appears in one of `paths` with at most `slop`
     /// positions between its terms, scored as `refsearch` scores a phrase (measured): the weight
     /// is `boost` times the sum of the terms' idf and the frequency counts each match as
@@ -687,6 +712,9 @@ fn phrase_freq(places: &[Vec<i64>], slop: i64) -> f32 {
         at[low] += 1;
     }
 }
+
+mod dump;
+pub use dump::{DumpError, applied_of};
 
 #[cfg(test)]
 mod tests;

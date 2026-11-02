@@ -231,3 +231,32 @@ fn a_chunk_announcing_an_impossible_size_is_refused_without_reserving_it() {
     let over = Chunk { size: 2, ..huge };
     assert_eq!(Assembler::new(G, 9).add(over), Err(SnapshotError::Gap));
 }
+
+/// The segment files of the search indexes travel with the SST files and come out apart from
+/// them (011 FR-013).
+#[test]
+fn segment_files_travel_with_the_sst_files() {
+    use teseladb_range::snapshot::{Bundle, bundle, unbundle};
+    let big = vec![9u8; CHUNK_BYTES + 17];
+    let b = Bundle {
+        ssts: vec![vec![1, 2, 3], Vec::new(), big.clone()],
+        segments: vec![big, vec![4], Vec::new()],
+    };
+    let mut asm = Assembler::new(G, 4);
+    let mut whole = None;
+    for c in split(G, 4, &bundle(&b)) {
+        whole = asm.add(Chunk::decode(&c.encode()).unwrap()).unwrap();
+    }
+    assert_eq!(unbundle(whole.expect("every chunk arrived")), Some(b));
+    let empty = Bundle::default();
+    assert_eq!(unbundle(bundle(&empty)), Some(empty));
+    // Files that are not a bundle are refused.
+    assert_eq!(unbundle(Vec::new()), None);
+    assert_eq!(unbundle(vec![vec![1, 2, 3]]), None);
+    let mut short = bundle(&Bundle { ssts: vec![vec![1]], segments: vec![] });
+    short.remove(0);
+    assert_eq!(unbundle(short), None);
+    let mut cut = bundle(&Bundle::default());
+    cut[0].pop();
+    assert_eq!(unbundle(cut), None);
+}

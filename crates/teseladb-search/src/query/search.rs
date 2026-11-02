@@ -99,6 +99,8 @@ enum Operator {
         slop: u32,
         score: Score,
     },
+    /// `wildcard` or `regex`.
+    Pattern(pattern::Pattern),
     Compound {
         must: Vec<Operator>,
         should: Vec<Operator>,
@@ -168,6 +170,7 @@ fn parse(index: &MemIndex, name: &str, v: &Value, path: &str) -> Result<Operator
         "text" => parse_text(index, d, path),
         "phrase" => parse_phrase(index, d, path),
         "exists" => parse_exists(d, path),
+        "wildcard" | "regex" => pattern::parse(index, name, d, path),
         "compound" => parse_compound(index, d, path),
         other => {
             Err(SearchError(format!("\"{other}\" is not supported by this node's search engine")))
@@ -399,6 +402,10 @@ fn eval(index: &MemIndex, op: &Operator) -> Result<BTreeMap<u32, f32>, SearchErr
             let s = index.phrase_scores(query, paths, *slop, boost_of(score))?;
             Ok(rescored(index, s, score))
         }
+        Operator::Pattern(p) => {
+            let s = p.scores(index, boost_of(p.score()))?;
+            Ok(rescored(index, s, p.score()))
+        }
         Operator::Compound { must, should, filter, must_not, minimum } => {
             eval_compound(index, must, should, filter, must_not, *minimum)
         }
@@ -462,5 +469,9 @@ fn eval_compound(
     Ok(out)
 }
 
+mod pattern;
+
+#[cfg(test)]
+mod pattern_tests;
 #[cfg(test)]
 mod tests;
