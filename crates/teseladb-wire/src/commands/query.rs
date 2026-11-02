@@ -350,21 +350,37 @@ pub fn for_each_doc<B: Backend + ?Sized>(
     let bounds = teseladb_exec::timeseries_read::Bounds::of(&spec, filter);
     let plan = Plan::new(filter, None, collation)?.with_vars(vars);
     let ctx = plan.ctx();
+    // The measurements of one bucket that match; `false` when `each` wants no more.
+    let mut bucket = |key: &[u8], bytes: &[u8]| -> Result<bool, CommandError> {
+        let bucket = RawDoc::from_bytes(bytes)?;
+        if !bounds.may_match(&spec, bucket, ctx.collation).map_err(ts_error)? {
+            return Ok(true);
+        }
+        for mb in spec.unpack_raw(bucket).map_err(ts_error)? {
+            let doc = RawDoc::from_bytes(&mb)?;
+            if plan.filter.matches(doc, &ctx).map_err(from_mql)? && !each(key.to_vec(), &mb)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    };
+    if let Some(found) = super::timeseries::indexed_buckets(backend, coll, &spec, filter, concern)?
+    {
+        for (key, bytes) in found {
+            if !bucket(&key, &bytes)? {
+                return Ok(());
+            }
+        }
+        return Ok(());
+    }
     let (mut next, end) = super::timeseries::scan_range(coll, &spec, &bounds)?;
     loop {
         let rows = backend.scan(&next, &end, SCAN_CHUNK, concern)?;
         let short = rows.len() < SCAN_CHUNK;
         for (key, bytes) in rows {
             next = after(&key);
-            let bucket = RawDoc::from_bytes(&bytes)?;
-            if !bounds.may_match(&spec, bucket, ctx.collation).map_err(ts_error)? {
-                continue;
-            }
-            for mb in spec.unpack_raw(bucket).map_err(ts_error)? {
-                let doc = RawDoc::from_bytes(&mb)?;
-                if plan.filter.matches(doc, &ctx).map_err(from_mql)? && !each(key.clone(), &mb)? {
-                    return Ok(());
-                }
+            if !bucket(&key, &bytes)? {
+                return Ok(());
             }
         }
         if short {

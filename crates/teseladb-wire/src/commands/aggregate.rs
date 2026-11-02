@@ -217,7 +217,9 @@ impl<B: Backend + ?Sized> WireEnv<'_, B> {
         let Some((shared, ns)) = &self.node else { return Ok(Vec::new()) };
         let mut backend = self.backend.borrow_mut();
         let Some(coll) = backend.collection(ns)? else { return Ok(Vec::new()) };
-        let mut specs = match super::catalog::has_id_index(ns) {
+        // A time series lists its buckets' indexes alone (measured on a `refnode` 9.0.4).
+        let series = super::timeseries::spec_of(&coll)?.is_some();
+        let mut specs = match super::catalog::has_id_index(ns) && !series {
             true => vec![super::catalog::id_index(&coll)?],
             false => Vec::new(),
         };
