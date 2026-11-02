@@ -1,7 +1,7 @@
 //! `$changeStreamSplitLargeEvent` (014 FR-011): an event larger than a document may be is
 //! returned in fragments. As a `refrouter` 9.0.4 does (measured on 01-11), the fields other than
 //! `_id` go by the size of their element, smallest first, into fragments of at most
-//! [`MAX_EVENT_BYTES`]; each fragment starts with its own `_id` (the event's token with the
+//! [`MAX_EVENT_BYTES`] with their [`metadata`]; each fragment starts with its own `_id` (the event's token with the
 //! fragment's number) and `splitEvent: {fragment, of}`. Without the stage, an event larger than
 //! [`MAX_SERIALIZED_BYTES`] fails.
 
@@ -9,11 +9,14 @@ use teseladb_bson::{BsonError, Document, Limits, Value};
 
 use crate::token::ResumeToken;
 
-/// The largest event returned whole, and the largest fragment: a document's limit.
-pub const MAX_EVENT_BYTES: usize = 16 * 1024 * 1024;
+/// The largest event returned whole, and the largest fragment, each with its [`metadata`]: 16 MiB
+/// and 8 KiB. Measured on 02-11 against a `refrouter` 9.0.4: an event of 16 785 023 bytes whose
+/// token has 168 hexadecimal digits (an `_id` element of 190 bytes) comes whole, and one of a
+/// byte more in fragments.
+pub const MAX_EVENT_BYTES: usize = 16 * 1024 * 1024 + 8 * 1024;
 /// The largest document a reply serializes (16 MiB and 16 KiB, measured: `Size … exceeds
 /// maximum 16793600`).
-pub const MAX_SERIALIZED_BYTES: usize = MAX_EVENT_BYTES + 16 * 1024;
+pub const MAX_SERIALIZED_BYTES: usize = 16 * 1024 * 1024 + 16 * 1024;
 
 /// Why an event cannot be split.
 #[derive(Clone, Debug, PartialEq)]
@@ -34,6 +37,17 @@ pub fn size(doc: &Document) -> Result<usize, BsonError> {
     Ok(doc.to_bytes_with(limits)?.len())
 }
 
+/// What a `refrouter` counts with an event or a fragment whose `_id` element has `id` bytes: the
+/// token again as its sort key, so twice the element, and 5 bytes.
+pub fn metadata(id: usize) -> usize {
+    2 * id + 5
+}
+
+/// The bytes of the `_id` element of `doc` (none without one).
+fn id_element(doc: &Document) -> Result<usize, BsonError> {
+    doc.get("_id").map_or(Ok(0), |v| element_size("_id", v))
+}
+
 /// The bytes of field `k` with value `v` as an element of a document.
 fn element_size(k: &str, v: &Value) -> Result<usize, BsonError> {
     let one = size(&Document::new().with(k, v.clone()))?;
@@ -46,7 +60,8 @@ pub fn split(
     doc: &Document,
     token: &ResumeToken,
 ) -> Result<Vec<(ResumeToken, Document)>, SplitError> {
-    if size(doc).map_err(SplitError::Bson)? <= MAX_EVENT_BYTES {
+    let id = id_element(doc).map_err(SplitError::Bson)?;
+    if size(doc).map_err(SplitError::Bson)? + metadata(id) <= MAX_EVENT_BYTES {
         return Ok(vec![(token.clone(), doc.clone())]);
     }
     let mut fields: Vec<(usize, &str, &Value)> = Vec::new();
@@ -63,23 +78,24 @@ pub fn split(
             .with("_id", Document::new().with("_data", t.encode()))
             .with("splitEvent", split))
     };
-    let head_size =
-        head(u32::MAX, u32::MAX).and_then(|h| h.to_bytes()).map_err(SplitError::Bson)?.len();
-    let mut groups: Vec<Vec<(&str, &Value)>> = vec![Vec::new()];
+    let widest = head(u32::MAX, u32::MAX).map_err(SplitError::Bson)?;
+    let head_id = id_element(&widest).map_err(SplitError::Bson)?;
+    let head_size = size(&widest).map_err(SplitError::Bson)? + metadata(head_id);
+    let mut groups: Vec<Vec<(&str, &Value)>> = Vec::new();
+    let mut group = Vec::new();
     let mut used = head_size;
     for (n, k, v) in fields {
         if head_size + n > MAX_EVENT_BYTES {
             return Err(SplitError::FieldTooLarge(n));
         }
         if used + n > MAX_EVENT_BYTES {
-            groups.push(Vec::new());
+            groups.push(std::mem::take(&mut group));
             used = head_size;
         }
         used += n;
-        if let Some(g) = groups.last_mut() {
-            g.push((k, v));
-        }
+        group.push((k, v));
     }
+    groups.push(group);
     let of = u32::try_from(groups.len()).unwrap_or(u32::MAX);
     let mut out = Vec::with_capacity(groups.len());
     for (i, group) in groups.into_iter().enumerate() {

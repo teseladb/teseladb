@@ -310,6 +310,17 @@ fn a_large_event_fails_whole_and_comes_in_fragments_with_the_split_stage() {
     assert_eq!(keys, ["_id", "splitEvent", "fullDocumentBeforeChange"]);
     // Resuming after the first fragment gives the second.
     let after = field(&seen[1], "_id").clone();
+    // Without the stage, a fragment's token is refused when the stream opens (measured on 02-11).
+    let stages =
+        vec![Document::new().with("$changeStream", spec().with("resumeAfter", after.clone()))];
+    let cmd = Document::new()
+        .with("aggregate", "c")
+        .with("pipeline", arr(stages))
+        .with("cursor", Document::new());
+    let r = m.run(DB, cmd);
+    assert_eq!(r.get("code"), Some(&Value::Int32(280)), "{r:?}");
+    let want = "To resume from a split event, the $changeStream pipeline must include a $changeStreamSplitLargeEvent stage";
+    assert_eq!(r.get("errmsg"), Some(&Value::String(want.into())));
     let resumed = open_with(&mut m, "c", spec().with("resumeAfter", after), vec![splitting]);
     let rest = batch(&get_more(&mut m, resumed, "c"));
     assert_eq!(rest.len(), 1);

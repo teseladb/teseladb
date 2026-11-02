@@ -273,3 +273,52 @@ fn paths_through_fields_named_like_numbers_are_disambiguated() {
         r#"{"updatedFields": {"arr.0.0": 2}, "removedFields": [], "truncatedArrays": [], "disambiguatedPaths": {"arr.0.0": ["arr", {"$numberInt": "0"}, "0"]}}"#,
     );
 }
+
+#[test]
+fn touches_that_change_nothing_or_overlap_give_each_path_once() {
+    use Touch::*;
+    // `$unset` and `$rename` of a missing field, `$addToSet` of an element already there.
+    check(r#"{"_id": 1, "a": 1}"#, r#"{"_id": 1, "a": 1}"#, &[Unset(s("x"))], None, NONE);
+    check(r#"{"_id": 1, "a": 1}"#, r#"{"_id": 1, "a": 1}"#, &[Rename(s("x"), s("y"))], None, NONE);
+    check(
+        r#"{"_id": 1, "t": [1, 2]}"#,
+        r#"{"_id": 1, "t": [1, 2]}"#,
+        &[Append(s("t"))],
+        None,
+        NONE,
+    );
+    // A path that an array filter stops at its first part names nothing.
+    check(r#"{"_id": 1, "a": 1}"#, r#"{"_id": 1, "a": 1}"#, &[Assign(s("$[]"))], None, NONE);
+    check(r#"{"_id": 1, "a": 1}"#, r#"{"_id": 1, "a": 1}"#, &[Unset(s("$[e]"))], None, NONE);
+    // A field given whole hides the paths inside it, and a path touched twice is named once.
+    check(
+        r#"{"_id": 1, "a": {}}"#,
+        r#"{"_id": 1, "a": {"b": 1, "c": 2}}"#,
+        &[Assign(s("a")), Assign(s("a.b")), Assign(s("a"))],
+        None,
+        &upd(r#"{"a": {"b": 1, "c": 2}}"#),
+    );
+    // A path the new document no longer has is named by the field that replaced it.
+    check(
+        r#"{"_id": 1, "a": {"b": 1}}"#,
+        r#"{"_id": 1, "a": 5}"#,
+        &[Assign(s("a.b")), Assign(s("a"))],
+        None,
+        &upd(r#"{"a": 5}"#),
+    );
+    // Elements that are not added at the end make the whole array.
+    check(
+        r#"{"_id": 1, "t": [1, 2]}"#,
+        r#"{"_id": 1, "t": [3, 1, 2]}"#,
+        &[Append(s("t"))],
+        None,
+        &upd(r#"{"t": [3, 1, 2]}"#),
+    );
+    check(
+        r#"{"_id": 1, "t": [1, 2]}"#,
+        r#"{"_id": 1, "t": [1]}"#,
+        &[Append(s("t"))],
+        None,
+        &upd(r#"{"t": [1]}"#),
+    );
+}

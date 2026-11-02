@@ -6,8 +6,10 @@
 //! the shorthands (`$toInt`, `$substr`, `$year: "$d"`) in their full form, `$and`, `$or`,
 //! `$cond`, `$ifNull`, `$switch` and `$let` without the branches their constants settle.
 
+use std::cell::Cell;
+
 use teseladb_bson::{Document, RawDoc, Value};
-use teseladb_mql::{MqlError, codes};
+use teseladb_mql::{ErrorCode, MqlError, codes};
 
 use super::{Ctx, Eval, Expr, Scope, truthy};
 
@@ -32,6 +34,91 @@ impl Optimized {
 
     fn is_const(&self) -> bool {
         matches!(self, Optimized::Const(_))
+    }
+}
+
+/// RefDb's `ExceededMemoryLimit`.
+pub const EXCEEDED_MEMORY_LIMIT: ErrorCode = ErrorCode { code: 146, name: "ExceededMemoryLimit" };
+/// `internalQueryMaxSingleExpressionMemoryUsageBytes` by default (100 MiB, measured).
+pub const EXPRESSION_MEMORY_DEFAULT: u64 = 100 * 1024 * 1024;
+/// The bytes RefDb counts for each value it holds (measured on a `refnode` 9.0.4).
+const VALUE_BYTES: u64 = 16;
+/// A string up to this length lives in its value.
+const INLINE_STRING: usize = 12;
+/// The bytes a longer string adds besides its own.
+const STRING_BYTES: u64 = 24;
+/// The bytes an array adds besides its values.
+const ARRAY_BYTES: u64 = 40;
+/// The bytes a document adds, and those of its first field and of each field.
+const DOCUMENT_BYTES: (u64, u64, u64) = (109, 64, 32);
+
+std::thread_local! {
+    /// `internalQueryMaxSingleExpressionMemoryUsageBytes` of the command on this thread.
+    static EXPRESSION_LIMIT: Cell<u64> = const { Cell::new(EXPRESSION_MEMORY_DEFAULT) };
+}
+
+/// Runs `f` with `limit` as the memory one constant expression may hold when it is folded
+/// (`internalQueryMaxSingleExpressionMemoryUsageBytes`, 010 FR-010); the previous limit comes
+/// back after it, also when it unwinds.
+pub fn with_expression_memory_limit<T>(limit: u64, f: impl FnOnce() -> T) -> T {
+    struct Restore(u64);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            EXPRESSION_LIMIT.with(|l| l.set(self.0));
+        }
+    }
+    let _restore = Restore(EXPRESSION_LIMIT.with(|l| l.replace(limit)));
+    f()
+}
+
+/// The bytes RefDb counts for value `v` beyond its own [`VALUE_BYTES`].
+fn extra_bytes(v: &Value) -> u64 {
+    let len = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
+    match v {
+        Value::String(s) if s.len() > INLINE_STRING => STRING_BYTES.saturating_add(len(s.len())),
+        Value::Array(items) => ARRAY_BYTES.saturating_add(array_bytes(items)),
+        Value::Document(d) if d.is_empty() => DOCUMENT_BYTES.0,
+        Value::Document(d) => d.iter().fold(DOCUMENT_BYTES.0 + DOCUMENT_BYTES.1, |n, (_, x)| {
+            n.saturating_add(DOCUMENT_BYTES.2).saturating_add(extra_bytes(x))
+        }),
+        _ => 0,
+    }
+}
+
+/// The bytes RefDb counts for the values of an array.
+fn array_bytes(items: &[Value]) -> u64 {
+    items.iter().fold(0, |n, x| n.saturating_add(VALUE_BYTES).saturating_add(extra_bytes(x)))
+}
+
+/// The error of constant `what` that needs `needs` bytes, over the limit; `None` within it.
+fn over_limit(what: &str, needs: u64, local: bool) -> Result<(), MqlError> {
+    let limit = EXPRESSION_LIMIT.with(Cell::get);
+    if needs <= limit {
+        return Ok(());
+    }
+    let message = match local {
+        true => format!(
+            "{what} needs too much memory. Needs: {needs} bytes. Local memory limit: {limit} bytes."
+        ),
+        false => {
+            format!(
+                "{what} needs too much memory. Needs: {needs} bytes. Memory limit: {limit} bytes"
+            )
+        }
+    };
+    Err(MqlError::new(EXCEEDED_MEMORY_LIMIT, message))
+}
+
+/// Folded operator `name` gave `v`: the operators that check what they build check it.
+fn check_folded(name: &str, v: &Optimized) -> Result<(), MqlError> {
+    match (name, v) {
+        ("$concat", Optimized::Const(Some(Value::String(s)))) => {
+            over_limit(name, u64::try_from(s.len()).unwrap_or(u64::MAX), true)
+        }
+        ("$concatArrays" | "$setUnion", Optimized::Const(Some(Value::Array(items)))) => {
+            over_limit(name, array_bytes(items), true)
+        }
+        _ => Ok(()),
     }
 }
 
@@ -145,15 +232,15 @@ impl Walk<'_> {
                 let parts: Vec<Optimized> =
                     items.iter().map(|i| self.value(i)).collect::<Result<_, _>>()?;
                 if parts.iter().all(|p| matches!(p, Optimized::Const(Some(_)))) {
-                    return Ok(Optimized::Const(Some(Value::Array(
-                        parts
-                            .into_iter()
-                            .filter_map(|p| match p {
-                                Optimized::Const(v) => v,
-                                Optimized::Expr(_) => None,
-                            })
-                            .collect(),
-                    ))));
+                    let values: Vec<Value> = parts
+                        .into_iter()
+                        .filter_map(|p| match p {
+                            Optimized::Const(v) => v,
+                            Optimized::Expr(_) => None,
+                        })
+                        .collect();
+                    over_limit("$array", array_bytes(&values), true)?;
+                    return Ok(Optimized::Const(Some(Value::Array(values))));
                 }
                 Ok(Optimized::Expr(Value::Array(parts.iter().map(Optimized::written).collect())))
             }
@@ -196,8 +283,13 @@ impl Walk<'_> {
         }
         if parts.iter().all(|(_, p)| p.is_const()) {
             let mut out = Document::new();
+            let mut needs = 0u64;
             for (k, p) in parts {
                 if let Optimized::Const(Some(v)) = p {
+                    let field = u64::try_from(k.len()).unwrap_or(u64::MAX).saturating_add(1);
+                    needs = needs.saturating_add(field).saturating_add(VALUE_BYTES);
+                    needs = needs.saturating_add(extra_bytes(&v));
+                    over_limit("$object", needs, false)?;
                     out.push(&k, v);
                 }
             }
@@ -264,7 +356,9 @@ impl Walk<'_> {
         let parts: Vec<Optimized> =
             items.iter().map(|i| self.value(i)).collect::<Result<_, _>>()?;
         if parts.iter().all(Optimized::is_const) {
-            return self.fold(whole);
+            let folded = self.fold(whole)?;
+            check_folded(name, &folded)?;
+            return Ok(folded);
         }
         let written = Value::Array(parts.iter().map(Optimized::written).collect());
         Ok(Optimized::Expr(Value::Document(Document::new().with(name, written))))

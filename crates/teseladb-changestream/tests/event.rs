@@ -173,6 +173,7 @@ fn an_event_comes_from_its_change() {
             replace: false,
             delete: false,
             doc: None,
+            moved: None,
         }),
     };
     let ns = Namespace { db: "shop".into(), coll: Some("orders".into()) };
@@ -248,4 +249,10 @@ fn catalog_events_have_the_fields_of_refrouter_in_its_order() {
     assert_eq!(d.get("wallTime"), Some(&Value::DateTime(1_730_198_400_123)));
     let inv = ChangeEvent::catalog(token(EventKind::Invalidate), ns);
     assert_eq!(keys(&inv.to_document(true)), ["_id", "operationType", "clusterTime", "wallTime"]);
+}
+
+#[test]
+fn an_insert_without_its_document_names_none() {
+    let d = event(EventKind::Insert).to_document(false);
+    assert!(!keys(&d).contains(&"fullDocument"), "{:?}", keys(&d));
 }

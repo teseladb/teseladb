@@ -1231,6 +1231,7 @@ fn a_write_keeps_the_history_of_its_documents_next_to_them() {
                 replace: false,
                 delete: false,
                 doc: None,
+                moved: None,
             },
         ),
         (
@@ -1242,6 +1243,7 @@ fn a_write_keeps_the_history_of_its_documents_next_to_them() {
                 replace: false,
                 delete: false,
                 doc: None,
+                moved: None,
             },
         ),
     ];
@@ -1256,7 +1258,15 @@ fn a_write_keeps_the_history_of_its_documents_next_to_them() {
         history(&out),
         vec![(
             meta_key(&key(2), 1),
-            ChangeMeta { txn: None, op: 1, update: None, replace: false, delete: false, doc: None }
+            ChangeMeta {
+                txn: None,
+                op: 1,
+                update: None,
+                replace: false,
+                delete: false,
+                doc: None,
+                moved: None
+            }
         )]
     );
     // A replacement says so.
@@ -1273,15 +1283,30 @@ fn a_write_keeps_the_history_of_its_documents_next_to_them() {
         keys: vec![key(1)],
     };
     let out = replace.eval(&[Some((1, &one))], ts).unwrap();
-    let want =
-        ChangeMeta { txn: None, op: 0, update: None, replace: true, delete: false, doc: None };
+    let want = ChangeMeta {
+        txn: None,
+        op: 0,
+        update: None,
+        replace: true,
+        delete: false,
+        doc: None,
+        moved: None,
+    };
     assert_eq!(history(&out), vec![(meta_key(&key(1), 0), want)]);
     let out = insert.eval(&[None, None], ts).unwrap();
     assert_eq!(
         history(&out),
         vec![(
             meta_key(&key(2), 1),
-            ChangeMeta { txn: None, op: 1, update: None, replace: false, delete: false, doc: None }
+            ChangeMeta {
+                txn: None,
+                op: 1,
+                update: None,
+                replace: false,
+                delete: false,
+                doc: None,
+                moved: None
+            }
         )]
     );
 }

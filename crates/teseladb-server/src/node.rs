@@ -752,7 +752,16 @@ impl<D: Disk + Send + 'static> Node<D> {
         if let Some(dir) = &cfg.data_dir {
             // The segments of the search indexes, one file per index (011 FR-012).
             crate::search_segments::open(dir, &mut tables.search)?;
+            // What aggregation stages write past their memory (010 FR-010).
+            let disk = teseladb_io::FileDisk::open(dir.join(crate::spill::SPILL_DIR))?;
+            let spill =
+                crate::spill::DiskSpill::open(disk).map_err(|e| io::Error::other(e.message))?;
+            tables.spill.store = Some(Arc::new(spill));
         }
+        // A stage holds at most the core's part for aggregations (D-105).
+        tables.spill.stage_bytes = memory.map(|m| {
+            usize::try_from(m.part(crate::memory::Component::Aggregations)).unwrap_or(usize::MAX)
+        });
         let sessions: Arc<Shared> = Arc::new(Mutex::new(tables));
         // Created before the cores' runtimes start: see `AuthGate`.
         let auth = Arc::new(AuthGate::default());
@@ -993,12 +1002,12 @@ impl<D: Disk + Send + 'static> Node<D> {
         rx.recv_timeout(timeout).ok()
     }
 
-    /// Waits until Group 0 has the cluster created and this node's current addresses (`false` if
-    /// `timeout` passes first).
+    /// Waits until Group 0 has the cluster created, this node's current addresses and the `root`
+    /// user this node creates, if any ([`Group0View::ready`]; `false` if `timeout` passes first).
     pub fn wait_ready(&self, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
-            if self.view(timeout).is_some_and(|v| v.bootstrapped && v.addrs_current) {
+            if self.view(timeout).is_some_and(|v| v.ready()) {
                 return true;
             }
             thread::sleep(Duration::from_millis(5));

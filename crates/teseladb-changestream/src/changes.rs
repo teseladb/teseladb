@@ -79,7 +79,7 @@ fn kind_of(meta: &ChangeMeta) -> EventKind {
 
 /// The changes of `versions`, in the merge order: one for each meta of a document at a mark (a
 /// transaction that wrote it several times left one per write), or one for its version where it
-/// has none.
+/// has none; the deletion of a document that moved to another key gives none.
 pub fn changes(versions: impl IntoIterator<Item = Versioned>) -> Result<Vec<Change>, ChangeError> {
     let mut docs: BTreeMap<(Vec<u8>, Hlc), Option<Vec<u8>>> = BTreeMap::new();
     let mut metas: BTreeMap<(Vec<u8>, Hlc), Vec<ChangeMeta>> = BTreeMap::new();
@@ -115,6 +115,10 @@ pub fn changes(versions: impl IntoIterator<Item = Versioned>) -> Result<Vec<Chan
     for ((key, ts), list) in metas {
         let version = docs.get(&(key.clone(), ts)).cloned().flatten();
         for meta in list {
+            // A document that moved with its shard key gives its event at its new key.
+            if meta.moved == Some(crate::meta::Moved::Away) {
+                continue;
+            }
             let kind = kind_of(&meta);
             let doc = match kind {
                 EventKind::Delete => None,

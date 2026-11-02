@@ -384,7 +384,7 @@ fn list_commands_names_what_the_node_answers() {
     let Value::String(help) = field(&r, "commands.setParameter.help") else { panic!() };
     assert_eq!(
         help,
-        "set administrative option(s)\n{ setParameter:1, <param>:<value> }\nsupported:\n  auditAuthorizationSuccess\n  clientCursorMonitorFrequencySecs\n  clusterAuthMode\n  cursorTimeoutMillis\n  internalQueryMaxMemoryUsageBytesPerOperation\n  internalQueryPlannerEnableHashIntersection\n  maxConcurrentMultiDocumentTransactions\n  redactClientLogData\n  transactionLifetimeLimitSeconds\n  useInternalAuthzForX509\n"
+        "set administrative option(s)\n{ setParameter:1, <param>:<value> }\nsupported:\n  auditAuthorizationSuccess\n  clientCursorMonitorFrequencySecs\n  clusterAuthMode\n  cursorTimeoutMillis\n  internalQueryMaxMemoryUsageBytesPerOperation\n  internalQueryMaxSingleExpressionMemoryUsageBytes\n  internalQueryPlannerEnableHashIntersection\n  internalQueryStatsRateLimit\n  internalQueryStatsSampleRate\n  maxConcurrentMultiDocumentTransactions\n  redactClientLogData\n  transactionLifetimeLimitSeconds\n  useInternalAuthzForX509\n"
     );
     let Value::String(help) = field(&r, "commands.getParameter.help") else { panic!() };
     assert!(help.contains("  enableTestCommands\n") && help.ends_with("to get everything\n"));

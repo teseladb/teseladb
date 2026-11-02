@@ -5,7 +5,7 @@
 
 use teseladb_bson::{Document, Value};
 use teseladb_changestream::order::EventKey;
-use teseladb_changestream::split_large::{MAX_EVENT_BYTES, SplitError, split};
+use teseladb_changestream::split_large::{MAX_EVENT_BYTES, SplitError, metadata, size, split};
 use teseladb_changestream::token::{EventKind, ResumeToken};
 use teseladb_hlc::Hlc;
 
@@ -29,6 +29,11 @@ fn event(big: usize) -> Document {
         )
         .with("fullDocument", Document::new().with("_id", 1).with("a", s.clone()).with("b", 1))
         .with("fullDocumentBeforeChange", Document::new().with("_id", 1).with("a", s))
+}
+
+/// The bytes of the `_id` element of `d`.
+fn id_element(d: &Document) -> usize {
+    size(&Document::new().with("_id", d.get("_id").unwrap().clone())).unwrap() - 5
 }
 
 fn keys(d: &Document) -> Vec<&str> {
@@ -68,7 +73,7 @@ fn a_large_event_goes_in_fragments_by_field_size() {
         let split = Document::new().with("fragment", i32::try_from(n).unwrap()).with("of", 2);
         assert_eq!(d.get("splitEvent"), Some(&Value::Document(split)));
         assert_eq!(d.get("_id"), Some(&Value::Document(Document::new().with("_data", t.encode()))));
-        assert!(teseladb_changestream::split_large::size(d).unwrap() <= MAX_EVENT_BYTES);
+        assert!(size(d).unwrap() + metadata(id_element(d)) <= MAX_EVENT_BYTES);
     }
 }
 
@@ -78,4 +83,22 @@ fn a_field_larger_than_a_fragment_cannot_be_split() {
         .with("_id", Document::new().with("_data", token().encode()))
         .with("fullDocument", Document::new().with("a", "x".repeat(MAX_EVENT_BYTES)));
     assert!(matches!(split(&huge, &token()), Err(SplitError::FieldTooLarge(_))));
+}
+
+/// The limit as measured on a `refrouter` 9.0.4: the event with its metadata up to 16 MiB and 8 KiB
+/// comes whole, a byte more goes in fragments.
+#[test]
+fn an_event_up_to_the_limit_with_its_metadata_is_whole() {
+    let base = event(8 * 1024 * 1024);
+    let room = MAX_EVENT_BYTES - size(&base).unwrap() - metadata(id_element(&base));
+    let padded = |n: usize| {
+        let mut e = base.clone();
+        e.insert("pad", Value::String("p".repeat(n)));
+        e
+    };
+    // The element `pad` takes 1 + 4 + 4 + 1 bytes besides its text.
+    let at_limit = padded(room - 10);
+    assert_eq!(size(&at_limit).unwrap() + metadata(id_element(&at_limit)), MAX_EVENT_BYTES);
+    assert_eq!(split(&at_limit, &token()).unwrap().len(), 1);
+    assert_eq!(split(&padded(room - 9), &token()).unwrap().len(), 2);
 }

@@ -163,6 +163,10 @@ fn a_command_takes_settings_for_one_run() {
 #[test]
 fn query_stats_count_each_shape_and_explain_shows_its_hash() {
     let mut m = seeded();
+    let r = m.run("admin", cmd(r#"{"setParameter":1,"internalQueryStatsRateLimit":-1}"#));
+    assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+    let r = m.run("admin", cmd(r#"{"setParameter":1,"internalQueryStatsSampleRate":0}"#));
+    assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
     for _ in 0..2 {
         let r = m.run("qsh", cmd(r#"{"aggregate":"c","pipeline":[],"cursor":{}}"#));
         assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");

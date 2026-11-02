@@ -141,6 +141,14 @@ impl Env for RequiredEnv<'_> {
         self.inner.allow_disk_use()
     }
 
+    fn stage_memory_limit(&self) -> usize {
+        self.inner.stage_memory_limit()
+    }
+
+    fn spill(&self) -> Option<&dyn super::spill::SpillStore> {
+        self.inner.spill()
+    }
+
     fn scope(&self, doc: &Document) -> Scope {
         let mut s = self.inner.scope(doc);
         s.meta_required.extend(self.names.iter().cloned());
@@ -183,6 +191,14 @@ impl Env for MetaEnv<'_> {
 
     fn allow_disk_use(&self) -> bool {
         self.inner.allow_disk_use()
+    }
+
+    fn stage_memory_limit(&self) -> usize {
+        self.inner.stage_memory_limit()
+    }
+
+    fn spill(&self) -> Option<&dyn super::spill::SpillStore> {
+        self.inner.spill()
     }
 
     fn scope(&self, doc: &Document) -> Scope {

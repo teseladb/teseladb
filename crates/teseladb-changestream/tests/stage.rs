@@ -183,3 +183,14 @@ fn resume_after_an_invalidate_is_refused_and_start_after_it_is_not() {
     let after = parse(Document::new().with("startAfter", data)).unwrap();
     assert_eq!(after.start, Start::StartAfter(Position::Event(inv)));
 }
+
+#[test]
+fn a_token_too_deep_to_write_is_shown_empty() {
+    let mut deep = Document::new().with("x", 1);
+    for _ in 0..teseladb_bson::MAX_DEPTH {
+        deep = Document::new().with("x", deep);
+    }
+    let got = parse(Document::new().with("resumeAfter", deep));
+    let want = "Bad resume token: _data of missing or of wrong type. Expected string, got {}";
+    assert_eq!(got, Err((codes::BAD_TOKEN, want.to_owned())));
+}

@@ -258,6 +258,11 @@ pub trait Backend {
     /// of its shape), for the profiler (010 FR-015). Every backend says what it does, so that a
     /// wrapper cannot drop the call.
     fn note_plan(&mut self, plan: Document);
+    /// What the running operation has examined so far, for `$queryStats` (010 FR-023). Every
+    /// backend says what it does, so that a wrapper cannot drop the call.
+    fn op_reads(&mut self) -> crate::ops::OpReads;
+    /// The client metadata of the running operation's connection, for `$queryStats`.
+    fn op_client(&mut self) -> Option<Document>;
     /// What a change stream reads of `[start, end)` after mark `from` (014 FR-003, FR-004): the
     /// versions of every range of the interval up to the lowest resolved mark of those ranges,
     /// and that mark, below which no version appears later.
@@ -621,6 +626,8 @@ pub struct NodeSessions {
     pub profiler: profile::Profiler,
     /// The search indexes this node built (011 FR-009).
     pub search: search_ops::SearchIndexes,
+    /// Where stages write what passes their memory (010 FR-010).
+    pub spill: Spill,
 }
 
 /// What a node puts after the seconds of each ObjectId it makes (ObjectId specification): five
@@ -664,6 +671,7 @@ impl NodeSessions {
             query_stats: query_stats::QueryStats::default(),
             query_settings: query_settings::Cache::default(),
             search: search_ops::SearchIndexes::default(),
+            spill: Spill::default(),
             ops: OpTable::default(),
             counters: diagnostics::OpCounters::default(),
             status: status::StatusCounters::default(),
@@ -710,7 +718,29 @@ pub fn reap(shared: &Shared, now_ms: u64) -> Reaped {
     jobs.cursors_closed = i64::try_from(cursors.len() + idle.len()).unwrap_or(i64::MAX);
     g.status.cursors_timed_out += i64::try_from(idle.len()).unwrap_or(i64::MAX);
     cursors.extend(idle);
+    for id in &cursors {
+        g.query_stats.close(*id, at);
+    }
     Reaped { sessions, cursors }
+}
+
+/// The node's temporary store for stages that pass their memory and that memory (010 FR-010):
+/// with no store, stages keep everything in memory.
+#[derive(Clone, Debug, Default)]
+pub struct Spill {
+    /// The store, over the node's files.
+    pub store: Option<std::sync::Arc<dyn teseladb_exec::pipeline::spill::SpillStore + Send + Sync>>,
+    /// The memory of a stage when the node's part for aggregations (D-105) is less than
+    /// RefDb's 100 MiB.
+    pub stage_bytes: Option<usize>,
+}
+
+impl Spill {
+    /// The memory one stage may hold.
+    pub fn stage_limit(&self) -> usize {
+        let most = teseladb_exec::pipeline::errors::STAGE_MEMORY_LIMIT;
+        self.stage_bytes.map_or(most, |n| n.min(most))
+    }
 }
 
 /// The node's cursors and sessions behind their lock.
@@ -843,7 +873,11 @@ pub fn run<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Option<Result<Document,
     Some(session_info(ctx).and_then(|()| {
         // The cluster's default concerns apply to the commands without their own (007 FR-018).
         let d = cluster_admin::current(ctx)?;
-        crate::concerns::with_defaults(d.read, d.write, || command(ctx))
+        let limit = lock(ctx.shared).params.expression_memory;
+        let limit = u64::try_from(limit).unwrap_or(u64::MAX);
+        teseladb_exec::expr::optimize::with_expression_memory_limit(limit, || {
+            crate::concerns::with_defaults(d.read, d.write, || command(ctx))
+        })
     }))
 }
 
@@ -916,20 +950,99 @@ fn shaped<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Command
         _ => None,
     };
     let cmd = limited.as_ref().unwrap_or(ctx.cmd);
-    let started = ctx.backend.now_ms();
+    let start = query_stats_start(ctx.backend);
     let reply =
         dispatch(&mut Ctx { backend: &mut *ctx.backend, shared: ctx.shared, db: ctx.db, cmd })?;
-    if let Some(shape) = query_shape::shape(ctx.db, ctx.cmd) {
-        let now = ctx.backend.now_ms();
-        let run = query_stats::Run {
-            micros: i64::try_from(now.saturating_sub(started).saturating_mul(1000))
-                .unwrap_or(i64::MAX),
-            docs_returned: returned(&reply),
-        };
-        let now = i64::try_from(now).unwrap_or(i64::MAX);
-        lock(ctx.shared).query_stats.record(ctx.db, ctx.cmd, &shape, run, now);
+    // The shape only of a sampled query: the others cost no more than the draw.
+    if sampled(ctx)
+        && let Some(shape) = query_shape::shape(ctx.db, ctx.cmd)
+    {
+        let run = query_stats_batch(ctx.backend, &start, returned(&reply));
+        let run = query_stats::Run { first_micros: run.micros, ..run };
+        count_query(ctx, &shape, run, &reply);
     }
     Ok(reply)
+}
+
+/// Whether `$queryStats` counts the query of `ctx`, by its parameters.
+fn sampled<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> bool {
+    let now = ctx.backend.now_ms();
+    let (limit, rate) = {
+        let g = lock(ctx.shared);
+        (g.params.query_stats_rate_limit, g.params.query_stats_sample_rate())
+    };
+    // A draw only where it decides something.
+    let random = if rate > 0.0 && rate < 1.0 { ctx.backend.random() } else { 0 };
+    lock(ctx.shared).query_stats.sample(limit, rate, random, now)
+}
+
+/// Where a batch started, for `$queryStats`: the clock, the thread's CPU time and what the
+/// operation had examined.
+pub(crate) struct BatchStart {
+    micros: u64,
+    cpu: Option<u64>,
+    reads: crate::ops::OpReads,
+}
+
+/// The start of a batch on `backend`.
+pub(crate) fn query_stats_start<B: Backend + ?Sized>(backend: &mut B) -> BatchStart {
+    BatchStart {
+        micros: backend.now_micros(),
+        cpu: backend.thread_cpu_nanos(),
+        reads: backend.op_reads(),
+    }
+}
+
+/// What the batch that began at `start` counted, having returned `docs` documents.
+pub(crate) fn query_stats_batch<B: Backend + ?Sized>(
+    backend: &mut B,
+    start: &BatchStart,
+    docs: i64,
+) -> query_stats::Run {
+    let long = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
+    let reads = backend.op_reads();
+    query_stats::Run {
+        micros: long(backend.now_micros().saturating_sub(start.micros)),
+        first_micros: 0,
+        docs_returned: docs,
+        keys_examined: long(reads.keys.saturating_sub(start.reads.keys)),
+        docs_examined: long(reads.docs.saturating_sub(start.reads.docs)),
+        cpu_nanos: start
+            .cpu
+            .zip(backend.thread_cpu_nanos())
+            .map(|(a, b)| long(b.saturating_sub(a))),
+    }
+}
+
+/// Counts in `$queryStats` the query of `ctx`, of shape `shape`, that counted `run` and
+/// answered `reply`, if the node samples it: now, or when its cursor ends.
+fn count_query<B: Backend + ?Sized>(
+    ctx: &mut Ctx<'_, B>,
+    shape: &query_shape::Shape,
+    run: query_stats::Run,
+    reply: &Document,
+) {
+    let now = ctx.backend.now_ms();
+    let client = ctx.backend.op_client();
+    let mut g = lock(ctx.shared);
+    let Some(keyed) = query_stats::keyed(ctx.db, ctx.cmd, shape, client.as_ref()) else { return };
+    let at = i64::try_from(now).unwrap_or(i64::MAX);
+    let open = match reply.get("cursor") {
+        Some(Value::Document(c)) => match c.get("id") {
+            Some(Value::Int64(id)) if *id != 0 => Some(*id),
+            _ => None,
+        },
+        _ => None,
+    };
+    match open {
+        Some(id) => {
+            let g = &mut *g;
+            let cursors = &g.cursors;
+            let pending = query_stats::Pending { keyed, run };
+            g.query_stats.open(id, pending, |c| cursors.get(c).is_some(), at);
+        }
+        None => g.query_stats.record(keyed, run, at),
+    }
 }
 
 /// The documents a reply returned: its first batch, its values or its count.

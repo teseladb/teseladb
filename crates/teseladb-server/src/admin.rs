@@ -413,7 +413,7 @@ fn stream_metrics(out: &mut String, (open, events): (u64, u64), lags: &[(u64, u6
 
 impl AdminBackend for NodeAdmin {
     fn healthy(&self) -> bool {
-        self.ask(0, NodeMsg::View).is_some_and(|v| v.bootstrapped && v.addrs_current)
+        self.ask(0, NodeMsg::View).is_some_and(|v| v.ready())
     }
 
     fn metrics(&self) -> String {

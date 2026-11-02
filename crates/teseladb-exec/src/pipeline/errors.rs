@@ -184,14 +184,18 @@ pub(crate) fn value_size(v: &teseladb_bson::Value) -> usize {
 
 /// The 292 of a sort over more than [`STAGE_MEMORY_LIMIT`] bytes of `docs` when the command does
 /// not allow writing to disk (measured on a `refrouter` 9.0.4).
-pub(crate) fn check_sort_memory(docs: &[Document], allow_disk_use: bool) -> Result<(), MqlError> {
-    if allow_disk_use || bytes_of(docs) <= STAGE_MEMORY_LIMIT {
+pub(crate) fn check_sort_memory(
+    docs: &[Document],
+    allow_disk_use: bool,
+    limit: usize,
+) -> Result<(), MqlError> {
+    if allow_disk_use || bytes_of(docs) <= limit {
         return Ok(());
     }
     Err(error(
         NO_DISK_USE,
         format!(
-            "Sort exceeded memory limit of {STAGE_MEMORY_LIMIT} bytes, but did not opt in to external sorting."
+            "Sort exceeded memory limit of {limit} bytes, but did not opt in to external sorting."
         ),
     ))
 }

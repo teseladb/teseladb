@@ -290,6 +290,23 @@ fn opens_on_internal_namespaces_views_and_time_series_fail_as_on_a_refrouter() {
         (
             DB,
             "c".into(),
+            Value::Array(vec![
+                Value::Document(Document::new().with("$changeStream", Document::new())),
+                Value::Int32(1),
+            ]),
+            14,
+            "Each element of the 'pipeline' array must be an object",
+        ),
+        (
+            DB,
+            "c".into(),
+            stream(Document::new(), vec![Document::new()]),
+            40_323,
+            "A pipeline stage specification object must contain exactly one field.",
+        ),
+        (
+            DB,
+            "c".into(),
             arr(vec![
                 Document::new().with("$match", Document::new()),
                 Document::new().with("$changeStream", Document::new()),
@@ -318,6 +335,16 @@ fn opens_on_internal_namespaces_views_and_time_series_fail_as_on_a_refrouter() {
             "Command aggregate does not support { readConcern: { level: \"local\", provenance: \"clientSupplied\" } } :: caused by :: Aggregation stage $changeStream cannot run with a readConcern other than 'majority'. Current readConcern: local"
         ))
     );
+    // `majority` is the stream's own read concern.
+    let r = m.run(
+        DB,
+        Document::new()
+            .with("aggregate", "c")
+            .with("pipeline", plain())
+            .with("cursor", Document::new())
+            .with("readConcern", doc(&[("level", "majority".into())])),
+    );
+    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
 }
 
 const DAY_MS: u64 = 24 * 60 * 60 * 1000;
@@ -470,4 +497,86 @@ fn the_node_counts_its_open_streams_and_the_events_they_return() {
     m.now += 10;
     assert_eq!(batch(&get_more(&mut m, DB, id, "c", Document::new())).len(), 2);
     assert!(stream_metrics().1 >= events + 2);
+}
+
+#[test]
+fn a_batch_holds_events_up_to_the_reply_s_bytes() {
+    let mut m = Mem::new();
+    create(&mut m, "c");
+    let id = id_of(&open(&mut m, DB, "c".into(), stream(Document::new(), vec![])));
+    let big = "x".repeat(9 * 1024 * 1024);
+    for n in 1..=2 {
+        insert(&mut m, "c", vec![doc(&[("_id", n.into()), ("a", big.as_str().into())])]);
+    }
+    // Two events of 9 MiB do not fit in one reply of 16 MiB: the second waits for the next.
+    for want in [1, 2] {
+        let got = batch(&get_more(&mut m, DB, id, "c", Document::new()));
+        assert_eq!(got.len(), 1);
+        assert_eq!(field(&got[0], "documentKey._id"), &Value::Int32(want));
+    }
+}
+
+#[test]
+fn a_cluster_stream_leaves_out_the_internal_databases() {
+    let mut m = Mem::new();
+    create(&mut m, "c");
+    let spec = Document::new().with("allChangesForCluster", true);
+    let id = id_of(&open(&mut m, "admin", 1.into(), stream(spec, vec![])));
+    let r = m.run(
+        "admin",
+        Document::new().with("insert", "x").with("documents", arr(vec![doc(&[("_id", 1.into())])])),
+    );
+    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+    insert(&mut m, "c", vec![doc(&[("_id", 2.into())])]);
+    let got = batch(&get_more(&mut m, "admin", id, "$cmd.aggregate", Document::new()));
+    let keys: Vec<&Value> = got.iter().map(|e| field(e, "documentKey._id")).collect();
+    assert_eq!(keys, [&Value::Int32(2)], "{got:?}");
+}
+
+fn errmsg(r: &Document) -> String {
+    match r.get("errmsg") {
+        Some(Value::String(s)) => s.clone(),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Measured on a `refrouter` 9.0.4 on 02-11: an expression that fails on an event fails the
+/// `getMore`, a long `_id` is cut in the message, and `$rand` gives a number.
+#[test]
+fn the_stages_errors_and_numbers_are_those_of_a_refrouter() {
+    let mut m = Mem::new();
+    create(&mut m, "c");
+    let mut open_with = |stage: Document| {
+        id_of(&open(&mut m, DB, "c".into(), stream(Document::new(), vec![stage])))
+    };
+    let long_id = open_with(
+        Document::new().with("$addFields", doc(&[("_id", "x".repeat(200).as_str().into())])),
+    );
+    let divide = Document::new().with(
+        "$divide",
+        Value::Array(vec![
+            Value::Int32(1),
+            Value::Document(Document::new().with(
+                "$subtract",
+                Value::Array(vec![Value::from("$documentKey._id"), Value::Int32(1)]),
+            )),
+        ]),
+    );
+    let by_zero = open_with(Document::new().with("$addFields", Document::new().with("q", divide)));
+    let rand = Document::new().with("r", Document::new().with("$rand", Document::new()));
+    let random = open_with(Document::new().with("$addFields", rand));
+    insert(&mut m, "c", vec![doc(&[("_id", 1.into())])]);
+    let r = get_more(&mut m, DB, long_id, "c", Document::new());
+    assert_eq!(code(&r), 280, "{r:?}");
+    let cut = format!("but found: {{ _id: \"{}...\" }}", "x".repeat(150));
+    assert!(errmsg(&r).ends_with(&cut), "{}", errmsg(&r));
+    let r = get_more(&mut m, DB, by_zero, "c", Document::new());
+    assert_eq!(code(&r), 2, "{r:?}");
+    assert!(
+        errmsg(&r).ends_with("Executor error during getMore :: caused by :: can't $divide by zero"),
+        "{}",
+        errmsg(&r)
+    );
+    let got = batch(&get_more(&mut m, DB, random, "c", Document::new()));
+    assert!(matches!(field(&got[0], "r"), Value::Double(x) if (0.0..1.0).contains(x)), "{got:?}");
 }

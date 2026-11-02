@@ -298,3 +298,56 @@ fn a_change_older_than_the_catalog_log_keeps_is_history_lost() {
     let label = Value::Array(vec![Value::from("NonResumableChangeStreamError")]);
     assert_eq!(r.get("errorLabels"), Some(&label));
 }
+
+#[test]
+fn a_rename_onto_the_watched_collection_ends_its_stream() {
+    let mut m = Mem::new();
+    step(&mut m, DB, Document::new().with("create", "c"));
+    step(&mut m, DB, Document::new().with("create", "r"));
+    let expanded = Document::new().with("showExpandedEvents", true);
+    let id = id_of(&open(&mut m, DB, "r".into(), expanded.clone(), vec![]));
+    let other = id_of(&open(&mut m, DB, "r".into(), expanded, vec![]));
+    // The catalog changes of another collection are not this stream's.
+    step(&mut m, DB, Document::new().with("create", "d"));
+    let rename = Document::new()
+        .with("renameCollection", format!("{DB}.c"))
+        .with("to", format!("{DB}.r"))
+        .with("dropTarget", true);
+    step(&mut m, "admin", rename);
+    let got = batch(&get_more(&mut m, DB, id, "r"));
+    assert_eq!(types(&got), ["rename", "invalidate"], "{got:?}");
+    assert_eq!(types(&batch(&get_more(&mut m, DB, other, "r"))), ["rename", "invalidate"]);
+}
+
+#[test]
+fn a_view_s_drop_carries_no_collection_uuid() {
+    let mut m = Mem::new();
+    step(&mut m, DB, Document::new().with("create", "c"));
+    let expanded = Document::new().with("showExpandedEvents", true);
+    let id = id_of(&open(&mut m, DB, 1.into(), expanded, vec![]));
+    let view =
+        Document::new().with("create", "v").with("viewOn", "c").with("pipeline", arr(vec![]));
+    step(&mut m, DB, view);
+    step(&mut m, DB, Document::new().with("drop", "v"));
+    let got = batch(&get_more(&mut m, DB, id, "$cmd.aggregate"));
+    assert_eq!(types(&got), ["create", "drop"], "{got:?}");
+    assert!(got[1].get("collectionUUID").is_none(), "{:?}", got[1]);
+}
+
+#[test]
+fn a_database_stream_follows_a_renamed_collection_and_leaves_out_other_databases() {
+    let mut m = Mem::new();
+    step(&mut m, DB, Document::new().with("create", "c"));
+    let id = id_of(&open(&mut m, DB, 1.into(), Document::new(), vec![]));
+    insert(&mut m, "c", 1);
+    let rename =
+        Document::new().with("renameCollection", format!("{DB}.c")).with("to", format!("{DB}.r"));
+    step(&mut m, "admin", rename);
+    insert(&mut m, "r", 2);
+    let other = arr(vec![doc(&[("_id", 3.into())])]);
+    step(&mut m, "elsewhere", Document::new().with("insert", "c").with("documents", other));
+    let got = batch(&get_more(&mut m, DB, id, "$cmd.aggregate"));
+    assert_eq!(types(&got), ["insert", "rename", "insert"], "{got:?}");
+    assert_eq!(field(&got[0], "ns.coll"), &Value::from("c"));
+    assert_eq!(field(&got[2], "ns.coll"), &Value::from("r"));
+}
