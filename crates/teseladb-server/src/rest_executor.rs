@@ -153,6 +153,14 @@ fn ok_reply(reply: &teseladb_bson::Document) -> Result<(), Response> {
 }
 
 impl NodeExecutor {
+    /// The cluster parameters as this node's copy of Group 0 has them.
+    pub fn cluster_parameters(
+        &mut self,
+    ) -> Result<std::collections::BTreeMap<String, Vec<u8>>, teseladb_wire::error::CommandError>
+    {
+        teseladb_wire::commands::Backend::cluster_parameters(&mut self.backend)
+    }
+
     /// Writes the `httpRequest` event of the request to the audit log (019 FR-018), with the
     /// connection's user and addresses; `0` as the result of an answer below `400`, else its
     /// status.

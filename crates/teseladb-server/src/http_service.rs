@@ -19,6 +19,7 @@ use crate::client_listener::NodeState;
 use crate::http_listener::{Caller, HttpService, Reply};
 use teseladb_auth::audit_param::{Transport, http_request};
 use teseladb_http::sse::{EVENT_STREAM, HEARTBEAT};
+use teseladb_mcp::server::SESSION_HEADER;
 use teseladb_rest::changestream::HEARTBEAT_MS;
 
 use crate::rest_executor::{
@@ -251,6 +252,47 @@ impl OpenStream {
     }
 }
 
+/// The value of field `name` of `request`, case-insensitively.
+fn header_of<'a>(request: &'a Request, name: &str) -> Option<&'a str> {
+    teseladb_rest::api::header(request, name)
+}
+
+/// How often the stream of an MCP session reads `mcpOptions` again.
+const OPTIONS_POLL: Duration = Duration::from_secs(1);
+
+/// The tools a session may see under `mcpOptions` `m`.
+fn tool_view(m: &McpOptions) -> (bool, bool) {
+    (m.read_only, m.allow_destructive)
+}
+
+/// The notifications of the server's stream of an MCP session (`GET /mcp`, FR-023): a
+/// `notifications/tools/list_changed` each time `mcpOptions` changes the tools the session
+/// sees, and the heartbeat comment after [`HEARTBEAT_MS`] without one.
+fn options_stream(mut exec: NodeExecutor, first: McpOptions) -> crate::http_listener::Pieces {
+    let mut seen = tool_view(&first);
+    let mut last = Instant::now();
+    Box::new(move |cancelled: &AtomicBool| {
+        loop {
+            if cancelled.load(Ordering::Relaxed) {
+                return None;
+            }
+            std::thread::sleep(OPTIONS_POLL);
+            let stored = exec.cluster_parameters().ok().and_then(|p| p.get(MCP_OPTIONS).cloned());
+            let now = tool_view(&mcp_options(stored.as_deref()));
+            if now != seen {
+                seen = now;
+                last = Instant::now();
+                let e = teseladb_http::sse::Event::data(teseladb_mcp::server::TOOLS_LIST_CHANGED);
+                return Some(e.encode());
+            }
+            if last.elapsed() >= Duration::from_millis(HEARTBEAT_MS) {
+                last = Instant::now();
+                return Some(HEARTBEAT.to_vec());
+            }
+        }
+    })
+}
+
 /// The `route` of the audit event of a request no route takes.
 const UNROUTED: &str = "-";
 
@@ -290,6 +332,23 @@ fn not_found() -> Reply {
 }
 
 impl NodeHttp {
+    /// `GET /mcp` of a session (revisions with `initialize`): the server's stream with the
+    /// notifications of `listChanged` (FR-023). Any node serves it: what it says depends only on
+    /// the cluster's `mcpOptions`.
+    fn mcp_stream(&self, request: &Request, who: &Credential) -> Reply {
+        let backend = ServerBackend::new(self.handle.clone(), random_seed());
+        let mut exec = NodeExecutor::new(&self.handle, backend, self.state.clone());
+        if let Err(r) = authenticate(&mut exec, request, who, self.auth) {
+            return Reply::Whole(r);
+        }
+        let headers = vec![
+            ("Content-Type".to_owned(), EVENT_STREAM.to_owned()),
+            ("Cache-Control".to_owned(), "no-store".to_owned()),
+        ];
+        let first = self.parameters().1;
+        Reply::Stream { status: 200, headers, pieces: options_stream(exec, first) }
+    }
+
     /// The REST answer to `request` of `who`: whole, or a change stream as Server-Sent Events
     /// (FR-012). With `audit`, the request goes to the audit log (019 FR-018).
     fn rest(&self, request: &Request, who: &Credential, audit: bool) -> Reply {
@@ -371,6 +430,9 @@ impl HttpService for NodeHttp {
             return Reply::Whole(Response { status: 200, headers, body: b"ok\n".to_vec() });
         }
         if path == MCP {
+            if request.method == "GET" && header_of(request, SESSION_HEADER).is_some() {
+                return self.mcp_stream(request, &Credential::of(caller));
+            }
             return Reply::Whole(self.mcp(request, &Credential::of(caller), true));
         }
         if path != BASE && !path.starts_with(&format!("{BASE}/")) {

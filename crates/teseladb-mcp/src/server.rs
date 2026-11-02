@@ -86,6 +86,10 @@ pub fn node_of(id: &str) -> Option<u64> {
     id.split_once('.').and_then(|(n, _)| n.parse().ok())
 }
 
+/// The notification that the tools a session sees changed (`listChanged`, FR-023).
+pub const TOOLS_LIST_CHANGED: &str =
+    r#"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#;
+
 fn capabilities() -> Object {
     let mut list = Object::new();
     list.insert("listChanged", Value::Bool(true));
