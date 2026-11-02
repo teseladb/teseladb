@@ -867,3 +867,46 @@ pub fn split(it: &mut Interp, s: &Name, rv: &Val, limit: usize) -> R {
     out.truncate(limit);
     it.array(out)
 }
+
+/// `String.prototype.matchAll`: a regular expression without `g` is an error; any other value
+/// with its own `Symbol.matchAll` method decides; a string is a pattern with `g` (measured on a
+/// `refrouter` 9.0.4 on 02-11). The matches are found when it is called.
+pub fn match_all(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    if this.is_nullish() {
+        return it.type_error(&format!(
+            "String.prototype.matchAll called on incompatible {}",
+            it.show(this)
+        ));
+    }
+    let arg = a.first().cloned().unwrap_or(Val::Undef);
+    let is_regexp = matches!(&arg, Val::Obj(o) if matches!(o.borrow().kind, Kind::RegExp(..)));
+    if !is_regexp && let Val::Obj(_) = &arg {
+        let custom = it.get(&arg, &crate::builtins::well_known("matchAll"))?;
+        if custom.is_callable() {
+            return it.call(&custom, &arg, std::slice::from_ref(this));
+        }
+    }
+    let s = it.str_of(this)?;
+    let (src, flags, start) = if is_regexp {
+        let (src, flags) = parts(it, &arg)?;
+        if !flags.contains('g') {
+            return it.type_error("matchAll must be called with a global RegExp");
+        }
+        let start = last_index(it, &arg)?;
+        (src, flags, start)
+    } else {
+        let src = if matches!(arg, Val::Undef) { "(?:)".into() } else { it.str_of(&arg)? };
+        (src, "g".into(), 0)
+    };
+    let re = compiled(it, &src, &flags)?;
+    let chars = elements(&s, is_unicode(&flags));
+    let mut pos = char_pos(&chars, start);
+    let mut items = Vec::new();
+    while pos <= chars.len() {
+        let Some(caps) = find(it, &re, &chars, pos, flags.contains('y'))? else { break };
+        let (x, y) = caps[0].unwrap_or((pos, pos));
+        pos = if x == y { y + 1 } else { y };
+        items.push(result(it, &re, &chars, &caps, &s)?);
+    }
+    crate::builtins::make_iter(it, crate::builtins::REGEXP_STRING_ITERATOR, items)
+}

@@ -49,11 +49,112 @@ pub fn install(it: &mut Interp, g: &ObjRef) -> R<()> {
         ("toString", value_of, 0),
         ("valueOf", value_of, 0),
         ("localeCompare", locale_compare, 1),
-        ("normalize", value_of, 0),
+        ("isWellFormed", is_well_formed, 0),
+        ("toWellFormed", to_well_formed, 0),
+        ("matchAll", crate::regex::match_all, 1),
     ] {
         method(it, &proto, name, f, n)?;
     }
+    // `trimLeft` and `trimRight` are the same functions as `trimStart` and `trimEnd`.
+    for (alias, name) in [("trimLeft", "trimStart"), ("trimRight", "trimEnd")] {
+        let f = proto.borrow().get_own(name).map(|p| p.value.clone()).unwrap_or(Val::Undef);
+        it.define(&proto, alias, Prop::hidden(f))?;
+    }
+    for (name, f, n) in HTML_METHODS {
+        method(it, &proto, name, f, n)?;
+    }
+    method(it, &c, "raw", raw, 1)?;
     Ok(())
+}
+
+/// The HTML methods of Annex B (measured on a `refrouter` 9.0.4 on 02-11).
+const HTML_METHODS: [(&str, NativeFn, usize); 13] = [
+    ("anchor", |it, t, a| html(it, t, "a", Some(("name", a))), 1),
+    ("big", |it, t, _| html(it, t, "big", None), 0),
+    ("blink", |it, t, _| html(it, t, "blink", None), 0),
+    ("bold", |it, t, _| html(it, t, "b", None), 0),
+    ("fixed", |it, t, _| html(it, t, "tt", None), 0),
+    ("fontcolor", |it, t, a| html(it, t, "font", Some(("color", a))), 1),
+    ("fontsize", |it, t, a| html(it, t, "font", Some(("size", a))), 1),
+    ("italics", |it, t, _| html(it, t, "i", None), 0),
+    ("link", |it, t, a| html(it, t, "a", Some(("href", a))), 1),
+    ("small", |it, t, _| html(it, t, "small", None), 0),
+    ("strike", |it, t, _| html(it, t, "strike", None), 0),
+    ("sub", |it, t, _| html(it, t, "sub", None), 0),
+    ("sup", |it, t, _| html(it, t, "sup", None), 0),
+];
+
+/// `this` as a string for a method that names itself when `this` is null or undefined.
+fn this_string(it: &mut Interp, this: &Val) -> R<Name> {
+    if this.is_nullish() {
+        let name = it.native.clone();
+        return it.type_error(&format!(
+            "String.prototype.{name} called on incompatible {}",
+            it.show(this)
+        ));
+    }
+    it.str_of(this)
+}
+
+/// CreateHTML: `<tag attr="value">text</tag>`, with `"` in the value as `&quot;`.
+fn html(it: &mut Interp, this: &Val, tag: &str, attr: Option<(&str, &[Val])>) -> R {
+    let text = this_string(it, this)?;
+    let open = match attr {
+        Some((name, a)) => {
+            let v = it.str_of(&arg(a, 0))?;
+            format!("<{tag} {name}=\"{}\">", v.replace('"', "&quot;"))
+        }
+        None => format!("<{tag}>"),
+    };
+    it.string(format!("{open}{text}</{tag}>"))
+}
+
+fn is_well_formed(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+    let s = this_string(it, this)?;
+    let u = units(&s);
+    Ok(Val::Bool(well_formed(&u)))
+}
+
+/// Whether `u` has no lone surrogate.
+fn well_formed(u: &[u16]) -> bool {
+    char::decode_utf16(u.iter().copied()).all(|c| c.is_ok())
+}
+
+fn to_well_formed(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+    let s = this_string(it, this)?;
+    let u = units(&s);
+    if well_formed(&u) {
+        return Ok(Val::Str(s));
+    }
+    let fixed: Vec<u16> = char::decode_utf16(u.iter().copied())
+        .flat_map(|c| {
+            let mut buf = [0u16; 2];
+            c.unwrap_or('\u{fffd}').encode_utf16(&mut buf).to_vec()
+        })
+        .collect();
+    it.string(from_units(&fixed))
+}
+
+/// `String.raw(template, ...substitutions)`.
+fn raw(it: &mut Interp, _: &Val, a: &[Val]) -> R {
+    let template = arg(a, 0);
+    let cooked = it.object_of(&template)?;
+    let strings = it.get(&Val::Obj(cooked), "raw")?;
+    let strings = Val::Obj(it.object_of(&strings)?);
+    let len = it.get(&strings, "length")?;
+    let len = it.number_of(&len)?;
+    let len = if len.is_finite() && len > 0.0 { len as usize } else { 0 };
+    let mut out = String::new();
+    for i in 0..len {
+        let part = it.get(&strings, &i.to_string())?;
+        out.push_str(&it.str_of(&part)?);
+        if i + 1 < len
+            && let Some(sub) = a.get(i + 1)
+        {
+            out.push_str(&it.str_of(sub)?);
+        }
+    }
+    it.string(out)
 }
 
 fn string_ctor(it: &mut Interp, this: &Val, a: &[Val]) -> R {

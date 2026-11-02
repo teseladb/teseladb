@@ -21,7 +21,38 @@ pub(crate) fn new_target(this: &Val) -> Option<Val> {
 
 /// How SpiderMonkey names the type of `this` in «… method called on incompatible X»: an
 /// object's class, a primitive's type.
-pub(crate) fn class_name(v: &Val) -> &'static str {
+pub(crate) fn class_name(v: &Val) -> String {
+    if let Val::Obj(o) = v {
+        if crate::proxy::is_proxy(o) {
+            return "Proxy".into();
+        }
+        // A built-in prototype is named after its constructor (measured on a `refrouter` 9.0.4 on
+        // 02-11: `Date.prototype.getTime called on incompatible Date.prototype`).
+        if let Some(name) = prototype_of_ctor(o) {
+            return format!("{name}.prototype");
+        }
+    }
+    class_kind(v).into()
+}
+
+/// The name of the constructor whose `prototype` is `o`, when `o` is that constructor's.
+fn prototype_of_ctor(o: &ObjRef) -> Option<String> {
+    let ctor = o.borrow().get_own("constructor")?.value.as_obj().cloned()?;
+    if !matches!(ctor.borrow().kind, Kind::Func(Func::Native(..))) {
+        return None;
+    }
+    let proto = ctor.borrow().get_own("prototype")?.value.as_obj().cloned()?;
+    if !proto.ptr_eq(o) {
+        return None;
+    }
+    let name = ctor.borrow().get_own("name")?.value.clone();
+    match name {
+        Val::Str(n) if !n.is_empty() => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+fn class_kind(v: &Val) -> &'static str {
     match v {
         Val::Obj(o) => match &o.borrow().kind {
             Kind::Array(_) => "Array",
@@ -1090,6 +1121,8 @@ fn errors(it: &mut Interp, g: &ObjRef) -> R<()> {
     let set = it.native("", stack_setter, 1)?;
     let p = Prop { getter: Some(get), setter: Some(set), ..Prop::hidden(Val::Undef) };
     it.define(&proto, "stack", p)?;
+    method(it, &base, "isError", |_, _, a| Ok(Val::Bool(is_error(&arg(a, 0)))), 1)?;
+    method(it, &base, "captureStackTrace", capture_stack_trace, 2)?;
     it.realm.errors.push(("Error".into(), base.clone()));
     for (name, f) in ERRORS {
         let p = it.alloc(Some(proto.clone()), Kind::Ordinary)?;
@@ -1157,6 +1190,45 @@ fn make_error_object(it: &mut Interp, proto: Option<ObjRef>, a: &[Val]) -> R {
     Ok(Val::Obj(o))
 }
 
+/// `Error.isError(v)`: whether `v` is an error object (made by an error constructor).
+fn is_error(v: &Val) -> bool {
+    matches!(v, Val::Obj(o) if matches!(o.borrow().kind, Kind::Error))
+}
+
+/// `Error.captureStackTrace(target, fn)`: gives `target` an own `stack` with the calls in
+/// progress; with `fn`, the frames from the newest down to `fn`'s are left out, and none remain
+/// when `fn` is not running (measured on a `refrouter` 9.0.4 on 02-11).
+fn capture_stack_trace(it: &mut Interp, _: &Val, a: &[Val]) -> R {
+    let Some(target) = a.first() else {
+        return it.type_error(
+            "Error.captureStackTrace: At least 1 argument required, but only 0 passed",
+        );
+    };
+    let Val::Obj(o) = target else {
+        let shown = match target {
+            Val::Num(_) => format!("the number {}", it.show(target)),
+            Val::Str(_) => format!("the string {}", it.show(target)),
+            _ => it.show(target),
+        };
+        return it.type_error(&format!(
+            "`target` argument of Error.captureStackTrace must be an object, got {shown}"
+        ));
+    };
+    let mut stack = it.stack_text();
+    let until = arg(a, 1);
+    if until.is_callable() {
+        let name = it.get(&until, "name")?;
+        let name = it.str_of(&name)?;
+        let marker = format!("{name}@");
+        stack = match stack.lines().position(|l| l.starts_with(&marker)) {
+            Some(i) => stack.lines().skip(i + 1).map(|l| format!("{l}\n")).collect(),
+            None => String::new(),
+        };
+    }
+    it.define(o, "stack", Prop::data(Val::Str(stack.into())))?;
+    Ok(Val::Undef)
+}
+
 /// `Error.prototype.stack`: the stack of the error, kept when it was made.
 fn stack_getter(_: &mut Interp, this: &Val, _: &[Val]) -> R {
     Ok(match this {
@@ -1188,45 +1260,80 @@ fn error_to_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
 
 // Map and Set.
 
+/// A method of `Map.prototype` or `Set.prototype` that first checks that `this` is one of them:
+/// `entries method called on incompatible Object` (measured on a `refrouter` 9.0.4 on 02-11).
+macro_rules! branded {
+    ($map:expr, $f:path) => {
+        |it: &mut Interp, t: &Val, a: &[Val]| {
+            brand(it, t, $map)?;
+            $f(it, t, a)
+        }
+    };
+}
+
+fn brand(it: &mut Interp, this: &Val, map: bool) -> R<()> {
+    let ok = matches!(this, Val::Obj(o) if match o.borrow().kind {
+        Kind::Map(_) => map,
+        Kind::Set(_) => !map,
+        _ => false,
+    });
+    if ok {
+        return Ok(());
+    }
+    let name = it.native.clone();
+    let name = if &*name == "[Symbol.iterator]" {
+        if map { "entries".into() } else { "values".into() }
+    } else {
+        name
+    };
+    it.type_error(&format!("{name} method called on incompatible {}", class_name(this)))
+}
+
 fn collections(it: &mut Interp, g: &ObjRef) -> R<()> {
     let mp = it.realm.map.clone();
     ctor(it, g, "Map", map_ctor, 0, &mp)?;
     for (name, f, n) in [
-        ("get", map_get as NativeFn, 1),
-        ("set", map_set, 2),
-        ("has", map_has, 1),
-        ("delete", map_delete, 1),
-        ("clear", coll_clear, 0),
-        ("forEach", coll_for_each, 1),
-        ("keys", map_keys, 0),
-        ("values", map_values, 0),
-        ("entries", coll_entries, 0),
+        ("get", branded!(true, map_get) as NativeFn, 1),
+        ("set", branded!(true, map_set), 2),
+        ("has", branded!(true, map_has), 1),
+        ("delete", branded!(true, map_delete), 1),
+        ("clear", branded!(true, coll_clear), 0),
+        ("forEach", branded!(true, coll_for_each), 1),
+        ("keys", branded!(true, map_keys), 0),
+        ("values", branded!(true, map_values), 0),
+        ("entries", branded!(true, coll_entries), 0),
     ] {
         method(it, &mp, name, f, n)?;
     }
     it.define(
         &mp,
         "size",
-        Prop { getter: Some(it.native("size", coll_size, 0)?), ..Prop::hidden(Val::Undef) },
+        Prop {
+            getter: Some(it.native("size", branded!(true, coll_size), 0)?),
+            ..Prop::hidden(Val::Undef)
+        },
     )?;
     let sp = it.realm.set.clone();
     ctor(it, g, "Set", set_ctor, 0, &sp)?;
     for (name, f, n) in [
-        ("add", set_add as NativeFn, 1),
-        ("has", map_has, 1),
-        ("delete", map_delete, 1),
-        ("clear", coll_clear, 0),
-        ("forEach", coll_for_each, 1),
-        ("values", map_values, 0),
-        ("keys", map_values, 0),
-        ("entries", coll_entries, 0),
+        ("add", branded!(false, set_add) as NativeFn, 1),
+        ("has", branded!(false, map_has), 1),
+        ("delete", branded!(false, map_delete), 1),
+        ("clear", branded!(false, coll_clear), 0),
+        ("forEach", branded!(false, coll_for_each), 1),
+        ("values", branded!(false, map_values), 0),
+        ("keys", branded!(false, map_values), 0),
+        ("entries", branded!(false, coll_entries), 0),
     ] {
         method(it, &sp, name, f, n)?;
     }
     it.define(
         &sp,
         "size",
-        Prop { getter: Some(it.native("size", coll_size, 0)?), ..Prop::hidden(Val::Undef) },
+        Prop {
+            getter: Some(it.native("size", branded!(false, coll_size), 0)?),
+            ..Prop::hidden(Val::Undef)
+        },
     )?;
     // `Map.prototype[Symbol.iterator]` is `entries` and `Set.prototype[Symbol.iterator]` is
     // `values`, the same functions (ECMA-262 §24.1.3.12, §24.2.3.11).
@@ -1235,9 +1342,16 @@ fn collections(it: &mut Interp, g: &ObjRef) -> R<()> {
         it.define(o, "@@Symbol.iterator:0", Prop::hidden(f))?;
     }
     let ip = it.realm.iter.clone();
-    method(it, &ip, "next", iter_next, 0)?;
     let f = it.native("[Symbol.iterator]", iter_self, 0)?;
     it.define(&ip, "@@Symbol.iterator:0", Prop::hidden(Val::Obj(f)))?;
+    // Each kind of iterator has its prototype, with `next` and its tag, over
+    // `Iterator.prototype` (which has no `next`).
+    for name in ITERATOR_KINDS {
+        let p = it.alloc(Some(ip.clone()), Kind::Ordinary)?;
+        method(it, &p, "next", iter_next, 0)?;
+        to_string_tag(it, &p, name)?;
+        it.realm.protos.push((name, p));
+    }
     Ok(())
 }
 
@@ -1419,9 +1533,24 @@ fn coll_for_each(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     Ok(Val::Undef)
 }
 
-pub(crate) fn make_iter(it: &Interp, items: Vec<Val>) -> R {
+/// The kinds of iterator the built-ins make, by their `Symbol.toStringTag`.
+pub(crate) const ARRAY_ITERATOR: &str = "Array Iterator";
+pub(crate) const MAP_ITERATOR: &str = "Map Iterator";
+pub(crate) const SET_ITERATOR: &str = "Set Iterator";
+pub(crate) const STRING_ITERATOR: &str = "String Iterator";
+pub(crate) const REGEXP_STRING_ITERATOR: &str = "RegExp String Iterator";
+const ITERATOR_KINDS: [&str; 5] =
+    [ARRAY_ITERATOR, MAP_ITERATOR, SET_ITERATOR, STRING_ITERATOR, REGEXP_STRING_ITERATOR];
+
+/// An iterator of kind `kind` over `items`.
+pub(crate) fn make_iter(it: &Interp, kind: &str, items: Vec<Val>) -> R {
     let state = Rc::new(std::cell::RefCell::new((items, 0usize)));
-    Ok(Val::Obj(it.alloc(Some(it.realm.iter.clone()), Kind::Iter(state))?))
+    Ok(Val::Obj(it.alloc(Some(it.realm.proto(kind)), Kind::Iter(state))?))
+}
+
+/// The kind of iterator a `Map` or a `Set` gives.
+fn coll_iter_kind(o: &ObjRef) -> &'static str {
+    if matches!(o.borrow().kind, Kind::Set(_)) { SET_ITERATOR } else { MAP_ITERATOR }
 }
 
 fn map_keys(it: &mut Interp, this: &Val, _: &[Val]) -> R {
@@ -1430,7 +1559,7 @@ fn map_keys(it: &mut Interp, this: &Val, _: &[Val]) -> R {
         Kind::Map(e) => e.iter().map(|(k, _)| k.clone()).collect(),
         _ => Vec::new(),
     };
-    make_iter(it, items)
+    make_iter(it, coll_iter_kind(&o), items)
 }
 
 fn map_values(it: &mut Interp, this: &Val, _: &[Val]) -> R {
@@ -1440,7 +1569,7 @@ fn map_values(it: &mut Interp, this: &Val, _: &[Val]) -> R {
         Kind::Set(e) => e.clone(),
         _ => Vec::new(),
     };
-    make_iter(it, items)
+    make_iter(it, coll_iter_kind(&o), items)
 }
 
 fn coll_entries(it: &mut Interp, this: &Val, _: &[Val]) -> R {
@@ -1454,7 +1583,7 @@ fn coll_entries(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     for (k, v) in pairs {
         items.push(it.array(vec![k, v])?);
     }
-    make_iter(it, items)
+    make_iter(it, coll_iter_kind(&o), items)
 }
 
 fn iter_next(it: &mut Interp, this: &Val, _: &[Val]) -> R {
@@ -1528,7 +1657,11 @@ fn symbol_builtins(it: &mut Interp, g: &ObjRef) -> R<()> {
 
 fn string_iter(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     let s = it.str_of(this)?;
-    make_iter(it, crate::text::code_points(&s).map(|c| Val::Str(c.into())).collect())
+    make_iter(
+        it,
+        STRING_ITERATOR,
+        crate::text::code_points(&s).map(|c| Val::Str(c.into())).collect(),
+    )
 }
 
 // RegExp: the literal and constructor keep the source and flags; matching is in `strings`.

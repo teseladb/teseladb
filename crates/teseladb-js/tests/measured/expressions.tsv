@@ -1754,3 +1754,56 @@ new RegExp("\\k<z>", "u")	E:SyntaxError:invalid named capture reference in regul
 new RegExp("x", "z")	E:SyntaxError:invalid regular expression flag z
 /a/.toString() + new RegExp("/", "g").toString() + new RegExp("").source + new RegExp("\n").source	S:/a//\\//g(?:)\\n
 Date.UTC(NaN) + "," + Date.UTC(2020, 0, 1, 25)	S:NaN,1577926800000
+[Object.isFrozen(Object.getPrototypeOf([].values())), Object.isFrozen(Object.getPrototypeOf(new Map().keys())), Object.isFrozen(Object.getPrototypeOf("a".matchAll(/a/g))), Object.isFrozen(Object.getPrototypeOf(Object.getPrototypeOf([].values()))), JSON.stringify(Object.getOwnPropertyDescriptor(Object.getPrototypeOf([].values()).next, "length"))].join()	S:false,false,false,true,{"value":0,"writable":false,"enumerable":false,"configurable":true}
+(() => { const r = []; const p = new Proxy(new Date(0), {get(t, k){ r.push(String(k)); return t[k] } }); try { tojson(p) } catch (e) { r.push(e.message) } return r.join() })()	S:tojson,tojson,tojson,getTime,Date.prototype.getTime called on incompatible Proxy
+(() => { const r = []; const p = new Proxy(new Map(), {get(t, k){ r.push(String(k)); return t[k] } }); try { tojson(p) } catch (e) { r.push(e.message) } return r.join() })()	S:tojson,constructor,constructor,constructor,constructor,entries,entries method called on incompatible Proxy
+tojson(Object.setPrototypeOf({a: 1}, Map.prototype))	E:TypeError:entries method called on incompatible Object
+[Array, Map, Set].map(C => { let n = 0; const o = Object.setPrototypeOf({get constructor(){ n++; return C }, a: 1, entries(){ return [] }}, C.prototype); let out; try { out = tojson(o) } catch (e) { out = "E:" + e.message } return C.name + "=" + n + ">" + out }).join(" | ")	S:Array=4>E:The first argument to Array.tojson must be an array | Map=4>new Map([ ]) | Set=4>E:values method called on incompatible Object
+[typeof ObjectId.fromDate, typeof Error.captureStackTrace].join()	S:function,function
+(() => { const r = []; const p = new Proxy(new Date(0), {get(t, k){ r.push(String(k)); return t[k] }}); try { ObjectId.fromDate(p) } catch (e) { r.push(e.message) } return r.join() })()	S:tojson,tojson,tojson,getTime,Date.prototype.getTime called on incompatible Proxy
+tojson(Object.create(Map.prototype))	E:TypeError:entries method called on incompatible Object
+tojson(Object.create(Set.prototype))	E:TypeError:values method called on incompatible Object
+tojson(Object.prototype) + "|" + tojson(Date.prototype)	E:TypeError:Date.prototype.getTime called on incompatible Date.prototype
+tojson(Map.prototype)	E:TypeError:entries method called on incompatible Map.prototype
+tojson(Set.prototype)	E:TypeError:values method called on incompatible Set.prototype
+tojson(new RegExp("x\ny"))	S:/x\\ny/
+[new Date(Date.UTC(5, 0, 1)), new Date(Date.UTC(-5, 0, 1)), new Date(Date.UTC(99999, 0, 1))].map(d => d.tojson()).join(" ")	S:ISODate("1905-01-01T00:00:00Z") ISODate("-000005-01-01T00:00:00Z") ISODate("+099999-01-01T00:00:00Z")
+String.raw`a\n${1}b` + "|" + String.raw({raw: ["x", "y", "z"]}, 1, 2, 3) + "|" + String.raw({raw: "abc"}, "-", "+") + "|" + String.raw.length + String.raw.name	S:a\\n1b|x1y2z|a-b+c|1raw
+String.raw({raw: null})	E:TypeError:can't convert null to object
+String.raw()	E:TypeError:can't convert undefined to object
+String.raw({raw: {length: 2, 0: "p", 1: "q"}}, Symbol.iterator.description)	S:pSymbol.iteratorq
+["a\ud800", "\udc00b", "ok", "😀"].map(s => s.isWellFormed() + ":" + JSON.stringify(s.toWellFormed())).join(" ") + String.prototype.isWellFormed.length + String.prototype.toWellFormed.length	S:false:"a�" false:"�b" true:"ok" true:"😀"00
+String.prototype.isWellFormed.call(null)	E:TypeError:String.prototype.isWellFormed called on incompatible null
+String.prototype.toWellFormed.call(undefined)	E:TypeError:String.prototype.toWellFormed called on incompatible undefined
+[String.prototype.trimLeft === String.prototype.trimStart, String.prototype.trimRight === String.prototype.trimEnd, String.prototype.trimLeft.name, String.prototype.trimRight.name, String.prototype.trimStart.name].join()	S:true,true,trimStart,trimEnd,trimStart
+["anchor", "big", "blink", "bold", "fixed", "fontcolor", "fontsize", "italics", "link", "small", "strike", "sub", "sup"].map(m => m + "=" + String.prototype[m].length + ":" + "x"[m]('a"b')).join(" ")	S:anchor=1:<a name="a&quot;b">x</a> big=0:<big>x</big> blink=0:<blink>x</blink> bold=0:<b>x</b> fixed=0:<tt>x</tt> fontcolor=1:<font color="a&quot;b">x</font> fontsize=1:<font size="a&quot;b">x</font> italics=0:<i>x</i> link=1:<a href="a&quot;b">x</a> small=0:<small>x</small> strike=0:<strike>x</strike> sub=0:<sub>x</sub> sup=0:<sup>x</sup>
+"x".anchor() + "|" + "x".link(undefined) + "|" + "x".fontsize(5) + "|" + "x".anchor({toString(){ return "o" }})	S:<a name="undefined">x</a>|<a href="undefined">x</a>|<font size="5">x</font>|<a name="o">x</a>
+String.prototype.bold.call(null)	E:TypeError:String.prototype.bold called on incompatible null
+String.prototype.anchor.call(5, Symbol())	E:TypeError:can't convert symbol to string
+[..."a1b22c333".matchAll(/\d+/g)].map(m => m[0] + "@" + m.index + "/" + m.input).join() + "|" + String.prototype.matchAll.length	S:1@1/a1b22c333,22@3/a1b22c333,333@6/a1b22c333|1
+"abc".matchAll(/b/)	E:TypeError:matchAll must be called with a global RegExp
+[..."aXbX".matchAll("X")].map(m => m.index).join() + "|" + [..."a.b".matchAll(".")].length	S:1,3|3
+(() => { const it = "ab".matchAll(/./g); return [Object.prototype.toString.call(it), typeof it.next, it[Symbol.iterator]() === it, Object.getPrototypeOf(Object.getPrototypeOf(it)) === Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]())), JSON.stringify(it.next())].join() })()	S:[object RegExp String Iterator],function,true,true,{"value":["a"],"done":false}
+String.prototype.matchAll.call(null, /a/g)	E:TypeError:String.prototype.matchAll called on incompatible null
+"ab".matchAll({[Symbol.matchAll]: (s) => "custom:" + s})	S:custom:ab
+[..."aaa".matchAll(/a*?/g)].length + "|" + [..."😀😀".matchAll(/(?:)/gu)].length	S:4|3
+typeof String.prototype.normalize	S:undefined
+[new Date(0).getYear(), new Date(Date.UTC(2020, 5, 1)).getYear(), new Date(NaN).getYear(), Date.prototype.getYear.length, Date.prototype.setYear.length].join()	S:70,120,NaN,0,1
+(() => { const d = new Date(Date.UTC(2020, 5, 1)); const r = [d.setYear(99), d.getFullYear(), d.setYear(5), d.getFullYear(), d.setYear(2001), d.getFullYear(), d.setYear(NaN), String(d.getTime())]; return r.join() })()	S:928195200000,1999,-2038176000000,1905,991353600000,2001,NaN,NaN
+(() => { const d = new Date(NaN); return [d.setYear(80), d.toISOString()].join() })()	S:315532800000,1980-01-01T00:00:00.000Z
+[new Date(0).toGMTString(), Date.prototype.toGMTString === Date.prototype.toUTCString, new Date(0).toTimeString(), new Date(0).toLocaleDateString(), new Date(0).toLocaleTimeString(), new Date(NaN).toTimeString(), new Date(NaN).toLocaleDateString(), new Date(1e12).toLocaleString()].join("|")	S:Thu, 01 Jan 1970 00:00:00 GMT|true|00:00:00 GMT+0000 (UTC)|01/01/1970|00:00:00|Invalid Date|InvalidDate|Sun Sep  9 01:46:40 2001
+Date.prototype.toTimeString.call({})	E:TypeError:Date.prototype.toTimeString called on incompatible Object
+Date.prototype.getYear.call({})	E:TypeError:Date.prototype.getYear called on incompatible Object
+[typeof Error.isError, Error.isError(new Error), Error.isError(new TypeError), Error.isError({}), Error.isError(Object.create(Error.prototype)), Error.isError(), Error.isError.length, Error.captureStackTrace.length].join()	S:function,true,true,false,false,false,1,2
+(() => { const o = {}; const r = Error.captureStackTrace(o); return [String(r), typeof o.stack, JSON.stringify(Object.getOwnPropertyDescriptor(o, "stack") && Object.keys(Object.getOwnPropertyDescriptor(o, "stack"))), o.stack].join("|") })()	S:undefined|string|["value","writable","enumerable","configurable"]|v<@wasm:function:1:70\n@wasm:function:1:269\n
+Error.captureStackTrace(5)	E:TypeError:`target` argument of Error.captureStackTrace must be an object, got the number 5
+Error.captureStackTrace()	E:TypeError:Error.captureStackTrace: At least 1 argument required, but only 0 passed
+(() => { function f(){ const o = {}; Error.captureStackTrace(o); return o.stack } return f() })()	S:f@wasm:function:1:74\nv<@wasm:function:1:120\n@wasm:function:1:126\n
+(() => { const o = {}; Error.captureStackTrace(o, function x(){}); return JSON.stringify(o.stack) })()	S:""
+typeof Iterator.prototype.next + "|" + typeof [].values().next	S:undefined|function
+[new Date(NaN).toLocaleTimeString(), new Date(NaN).toLocaleString(), new Date(0).toLocaleString(), new Date(-1e14).toLocaleDateString(), new Date(8.64e15).toLocaleDateString(), new Date(8.64e15).toLocaleTimeString(), new Date(8.64e15).toLocaleString(), new Date(-62198755200000).toLocaleDateString(), new Date(1e12).toTimeString()].join("|")	S:InvalidDate|InvalidDate|Thu Jan  1 00:00:00 1970|02/15/-1199|09/13/275760|00:00:00|Sat Sep 13 00:00:00 275760|01/01/-1|01:46:40 GMT+0000 (UTC)
+[Date.prototype.toLocaleDateString.length, Date.prototype.toLocaleTimeString.length, Date.prototype.toTimeString.length, Date.prototype.toLocaleString.length, Date.prototype.toGMTString.name].join()	S:0,0,0,0,toUTCString
+new Date(0).toLocaleDateString("de-DE", {year: "numeric"}) + "|" + new Date(0).toLocaleString("en-US")	S:01/01/1970|Thu Jan  1 00:00:00 1970
+(() => { const d = new Date(0); return [d.setYear("99"), d.setYear(-1), d.getFullYear(), d.setYear(100), d.getFullYear(), d.setYear(99.9), d.getFullYear(), d.setYear(), String(d.getTime())].join() })()	S:915148800000,-62198755200000,-1,-59011459200000,100,915148800000,1999,NaN,NaN
+Date.prototype.setYear.call({}, 1)	E:TypeError:Date.prototype.setYear called on incompatible Object
+Date.prototype.toLocaleDateString.call({})	E:TypeError:Date.prototype.toLocaleDateString called on incompatible Object

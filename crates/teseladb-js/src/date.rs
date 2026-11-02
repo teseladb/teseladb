@@ -268,6 +268,10 @@ pub fn install(it: &mut Interp, g: &ObjRef) -> R<()> {
             if parts.len() == 1 {
                 parts.push(0.0);
             }
+            // A year from 0 to 99 is 1900 to 1999, as in the constructor.
+            if parts[0].is_finite() && (0.0..=99.0).contains(&parts[0].trunc()) {
+                parts[0] = 1900.0 + parts[0].trunc();
+            }
             Ok(Val::Num(make(&parts)))
         },
         7,
@@ -389,11 +393,85 @@ pub fn install(it: &mut Interp, g: &ObjRef) -> R<()> {
             },
             0,
         ),
-        ("toLocaleString", date_to_string, 0),
+        ("toLocaleString", |it, t, _| local_text(it, t, LocalPart::Both), 0),
+        ("toLocaleDateString", |it, t, _| local_text(it, t, LocalPart::Date), 0),
+        ("toLocaleTimeString", |it, t, _| local_text(it, t, LocalPart::Time), 0),
+        ("toTimeString", to_time_string, 0),
+        ("getYear", get_year, 0),
+        ("setYear", set_year, 1),
     ] {
         method(it, &proto, name, f, n)?;
     }
+    // `toGMTString` is the same function as `toUTCString`.
+    let utc = proto.borrow().get_own("toUTCString").map(|p| p.value.clone()).unwrap_or(Val::Undef);
+    it.define(&proto, "toGMTString", Prop::hidden(utc))?;
     Ok(())
+}
+
+/// What the locale methods write: the engine of the `refrouter` 9.0.4 has no ICU and uses the C
+/// locale (measured on 02-11): `Thu Jan  1 00:00:00 1970`, `01/01/1970`, `00:00:00`, and
+/// `InvalidDate` for an invalid date.
+enum LocalPart {
+    Both,
+    Date,
+    Time,
+}
+
+fn local_text(it: &mut Interp, this: &Val, part: LocalPart) -> R {
+    let x = this_time(it, this)?;
+    if x.is_nan() {
+        return Ok(Val::str("InvalidDate"));
+    }
+    let (y, m, d, h, mi, s, _, wd) = fields(x);
+    it.string(match part {
+        LocalPart::Both => {
+            format!("{} {} {d:>2} {h:02}:{mi:02}:{s:02} {y}", DAYS[wd], MONTHS[m as usize])
+        }
+        LocalPart::Date => format!("{:02}/{d:02}/{y}", m + 1),
+        LocalPart::Time => format!("{h:02}:{mi:02}:{s:02}"),
+    })
+}
+
+fn to_time_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+    let x = this_time(it, this)?;
+    if x.is_nan() {
+        return Ok(Val::str("Invalid Date"));
+    }
+    let (_, _, _, h, mi, s, _, _) = fields(x);
+    it.string(format!("{h:02}:{mi:02}:{s:02} GMT+0000 (UTC)"))
+}
+
+/// `getYear()`: the year minus 1900 (Annex B).
+fn get_year(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+    let x = this_time(it, this)?;
+    if x.is_nan() {
+        return Ok(Val::Num(f64::NAN));
+    }
+    Ok(Val::Num(fields(x).0 as f64 - 1900.0))
+}
+
+/// `setYear(y)`: a year from 0 to 99 is 1900 to 1999; an invalid date starts from 0 (Annex B).
+fn set_year(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    let t = this_time(it, this)?;
+    let y = it.number_of(&arg(a, 0))?;
+    if y.is_nan() {
+        return set_time(it, this, f64::NAN);
+    }
+    let y = y.trunc();
+    let y = if (0.0..=99.0).contains(&y) { 1900.0 + y } else { y };
+    let t = if t.is_nan() { 0.0 } else { t };
+    let f = fields(t);
+    let parts = [
+        y,
+        f64::from(f.1),
+        f64::from(f.2),
+        f64::from(f.3),
+        f64::from(f.4),
+        f64::from(f.5),
+        f64::from(f.6),
+    ];
+    let nt = time_clip(make(&parts));
+    set_time(it, this, nt)
 }
 
 fn date_to_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {

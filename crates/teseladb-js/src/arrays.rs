@@ -731,12 +731,12 @@ fn at(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 
 fn keys(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     let n = items(it, this)?.len();
-    make_iter(it, (0..n).map(|i| Val::Num(i as f64)).collect())
+    make_iter(it, crate::builtins::ARRAY_ITERATOR, (0..n).map(|i| Val::Num(i as f64)).collect())
 }
 
 fn values(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     let v = items(it, this)?;
-    make_iter(it, v)
+    make_iter(it, crate::builtins::ARRAY_ITERATOR, v)
 }
 
 fn entries(it: &mut Interp, this: &Val, _: &[Val]) -> R {
@@ -745,5 +745,5 @@ fn entries(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     for (i, x) in v.into_iter().enumerate() {
         out.push(it.array(vec![Val::Num(i as f64), x])?);
     }
-    make_iter(it, out)
+    make_iter(it, crate::builtins::ARRAY_ITERATOR, out)
 }
