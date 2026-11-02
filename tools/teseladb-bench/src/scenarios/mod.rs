@@ -2,7 +2,7 @@
 //! variant and the copied `deflate`; 003 adds `bson` and `keys`; 004 adds `lsm` and `lsm-compression`; 005 adds `write`, `read` and
 //! `failover`; 006 adds `wire` and `crud`; 007 adds `follower-read`, `group0-limits`, `split`, `add-node` and `rebalance`; 008 adds `txn`, `txn-readers` and `contention`; 013 adds
 //! `tls-handshake` and `scram`; 010 adds `aggregate`, `sort` and `group-large`; 015 adds
-//! `timeseries`; 014 adds `changestream-lag`; every specification
+//! `timeseries`; 014 adds `changestream-lag`; 017 adds `fle-query`; every specification
 //! adds its own.
 
 pub mod bson;
@@ -11,6 +11,7 @@ pub mod cluster;
 pub mod crud;
 pub mod deflate;
 pub mod failover;
+pub mod fle;
 pub mod follower_read;
 pub mod group0_limits;
 pub mod keys;
@@ -162,6 +163,7 @@ pub fn run(args: &Args) -> Result<Report, String> {
         "aggregate" => query::run_aggregate(args),
         "sort" => query::run_sort(args),
         "group-large" => query::run_group_large(args),
+        "fle-query" => fle::run(args),
         "txn" => txn::run(args),
         "txn-readers" => txn::readers_run(args),
         "contention" => txn::contention(args),
@@ -174,7 +176,7 @@ pub fn run(args: &Args) -> Result<Report, String> {
         }
         other => Err(format!(
             "unknown scenario: {other} (available: raftlog, raftlog-recover, deflate, bson, keys, lsm, lsm-sustained, lsm-compression, \
-             write, read, failover, follower-read, group0-limits, split, add-node, rebalance, reference, wire, crud, aggregate, sort, group-large, txn, txn-readers, contention, tls-handshake, scram, timeseries, changestream-lag, ycsb-a … ycsb-f)"
+             write, read, failover, follower-read, group0-limits, split, add-node, rebalance, reference, wire, crud, aggregate, sort, group-large, fle-query, txn, txn-readers, contention, tls-handshake, scram, timeseries, changestream-lag, ycsb-a … ycsb-f)"
         )),
     }
 }

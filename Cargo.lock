@@ -32,6 +32,7 @@ dependencies = [
  "teseladb-bson",
  "teseladb-collation",
  "teseladb-deflate",
+ "teseladb-fle",
  "teseladb-io",
  "teseladb-json",
  "teseladb-keys",

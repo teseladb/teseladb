@@ -18,6 +18,7 @@ teseladb-x509 = { path = "../../crates/teseladb-x509" }
 teseladb-json = { path = "../../crates/teseladb-json" }
 teseladb-server = { path = "../../crates/teseladb-server" }
 teseladb-wire = { path = "../../crates/teseladb-wire" }
+teseladb-fle = { path = "../../crates/teseladb-fle" }
 teseladb-raftlog = { path = "../../crates/teseladb-raftlog" }
 teseladb-io = { path = "../../crates/teseladb-io" }
 teseladb-deflate = { path = "../../crates/teseladb-deflate" }
