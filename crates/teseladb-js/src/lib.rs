@@ -182,6 +182,7 @@ impl Program {
                 output: Vec::new(),
                 last: None,
                 pos: ast::Pos::default(),
+                strict: false,
             };
             it.envs.push(Rc::downgrade(&global_env));
             let r = self.run(&mut it, this, args, ctx.scope, emit.is_some(), &mut emitted);

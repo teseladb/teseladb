@@ -102,7 +102,50 @@ pub fn install(it: &mut Interp) -> R<()> {
     symbol_builtins(it, &g)?;
     regexp_builtins(it, &g)?;
     crate::bson::install(it, &g)?;
+    freeze_builtins(it);
     Ok(())
+}
+
+/// Freezes the objects of the globals, as RefDb's engine does (measured on a `refrouter` 9.0.4
+/// on 02-11: `Object.isFrozen(Array.prototype)` is `true`, a new property of a prototype is not
+/// kept, and strict code that assigns `name` on an error throws `"name" is read-only`).
+fn freeze_builtins(it: &Interp) {
+    fn freeze(o: &ObjRef) {
+        let mut b = o.borrow_mut();
+        b.extensible = false;
+        for (_, p) in &mut b.props {
+            p.writable = false;
+        }
+    }
+    let mut all: Vec<ObjRef> = vec![
+        it.realm.object.clone(),
+        it.realm.function.clone(),
+        it.realm.array.clone(),
+        it.realm.string.clone(),
+        it.realm.number.clone(),
+        it.realm.boolean.clone(),
+        it.realm.symbol.clone(),
+        it.realm.error.clone(),
+        it.realm.date.clone(),
+        it.realm.regexp.clone(),
+        it.realm.map.clone(),
+        it.realm.set.clone(),
+        it.realm.iter.clone(),
+    ];
+    let globals: Vec<Val> =
+        it.realm.global.borrow().props.iter().map(|(_, p)| p.value.clone()).collect();
+    for v in globals {
+        let Val::Obj(o) = v else { continue };
+        if o.ptr_eq(&it.realm.global) {
+            continue;
+        }
+        let proto = o.borrow().get_own("prototype").and_then(|p| p.value.as_obj().cloned());
+        all.extend(proto);
+        all.push(o);
+    }
+    for o in &all {
+        freeze(o);
+    }
 }
 
 // Globals.

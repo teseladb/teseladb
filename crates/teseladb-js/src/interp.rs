@@ -102,6 +102,8 @@ pub struct Interp<'c> {
     pub last: Option<Val>,
     /// Where the expression or `throw` evaluated last starts: the place of an error.
     pub pos: Pos,
+    /// Whether the running code is strict: assignments to read-only properties throw.
+    pub strict: bool,
 }
 
 /// How often the deadline is read, in steps.
@@ -173,7 +175,7 @@ fn callee_text(e: &Expr) -> String {
         Expr::Str(s) => format!("\"{s}\""),
         Expr::Num(n) => number::to_string(*n),
         Expr::OptChain(e) => callee_text(e),
-        _ => "expression".into(),
+        _ => "(intermediate value)".into(),
     }
 }
 
@@ -500,6 +502,9 @@ impl<'c> Interp<'c> {
                     return self.type_error(&format!("setting getter-only property \"{key}\""));
                 }
                 if !p.writable {
+                    if self.strict {
+                        return self.type_error(&format!("\"{key}\" is read-only"));
+                    }
                     return Ok(());
                 }
                 if c.ptr_eq(o) {
@@ -513,6 +518,11 @@ impl<'c> Interp<'c> {
             cur = c.borrow().proto.clone();
         }
         if !o.borrow().extensible {
+            if self.strict {
+                return self.type_error(&format!(
+                    "can't define property \"{key}\": Object is not extensible"
+                ));
+            }
             return Ok(());
         }
         self.grow(o, 1)?;
@@ -695,7 +705,10 @@ impl<'c> Interp<'c> {
             self.bind(r, arr, &scope, Some(true))?;
         }
         self.hoist(&def.body, &scope, true)?;
-        let v = match self.exec_block_in(&def.body, &scope) {
+        let outer = std::mem::replace(&mut self.strict, def.strict);
+        let r = self.exec_block_in(&def.body, &scope);
+        self.strict = outer;
+        let v = match r {
             Ok(()) | Err(Ctrl::Break(_) | Ctrl::Continue(_)) => Val::Undef,
             Err(Ctrl::Return(v)) => v,
             Err(e) => return Err(e),
@@ -1455,6 +1468,7 @@ impl<'c> Interp<'c> {
                 },
                 arrow: false,
                 is_ctor_of_derived: derived,
+                strict: true,
                 source: format!("class {} {{ }}", c.name.as_deref().unwrap_or("")).into(),
             }),
         };
@@ -1669,12 +1683,7 @@ impl<'c> Interp<'c> {
                 }
                 let key = self.member_key(prop, env)?;
                 if o.is_nullish() {
-                    let what = callee_text(obj);
-                    let msg = if matches!(o, Val::Undef) {
-                        format!("{what} is undefined")
-                    } else {
-                        format!("{what} is null")
-                    };
+                    let msg = null_access(obj, &key, &o);
                     return self.type_error(&msg);
                 }
                 self.get(&o, &key)
@@ -1793,8 +1802,8 @@ impl<'c> Interp<'c> {
                 }
                 let key = self.member_key(prop, env)?;
                 if o.is_nullish() {
-                    let what = callee_text(obj);
-                    return self.type_error(&format!("{what} is {}", self.show(&o)));
+                    let msg = null_access(obj, &key, &o);
+                    return self.type_error(&msg);
                 }
                 (self.get(&o, &key)?, o)
             }
@@ -1902,8 +1911,8 @@ impl<'c> Interp<'c> {
                 let o = self.eval(obj, env)?;
                 let key = self.member_key(prop, env)?;
                 if o.is_nullish() {
-                    let what = callee_text(obj);
-                    return self.type_error(&format!("{what} is {}", self.show(&o)));
+                    let msg = null_access(obj, &key, &o);
+                    return self.type_error(&msg);
                 }
                 self.set(&o, &key, v)
             }
@@ -2051,6 +2060,23 @@ impl<'c> Interp<'c> {
             }
             _ => return self.type_error(&format!("unknown operator {op}")),
         })
+    }
+}
+
+/// SpiderMonkey's message for reading `key` of `o` (null or undefined) that `obj` gave:
+/// `can't access property "x", o is null` when the expression has a name, and
+/// `can't access property "x" of null` for a literal (measured on a `refrouter` 9.0.4 on 02-11).
+fn null_access(obj: &Expr, key: &str, o: &Val) -> String {
+    let what = if matches!(o, Val::Undef) { "undefined" } else { "null" };
+    let named = match obj {
+        Expr::Ident(n, _) => &**n != "undefined",
+        Expr::Member { .. } | Expr::Call { .. } | Expr::This => true,
+        _ => false,
+    };
+    if named {
+        format!("can't access property \"{key}\", {} is {what}", callee_text(obj))
+    } else {
+        format!("can't access property \"{key}\" of {what}")
     }
 }
 

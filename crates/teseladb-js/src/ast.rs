@@ -45,6 +45,8 @@ pub struct FuncDef {
     pub body: Vec<Stmt>,
     pub arrow: bool,
     pub is_ctor_of_derived: bool,
+    /// Strict mode code (a class, or `"use strict"` in it or around it).
+    pub strict: bool,
     pub source: Rc<str>,
 }
 

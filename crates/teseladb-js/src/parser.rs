@@ -8,7 +8,8 @@ use crate::lexer::{SyntaxError, Tok, Token, tokenize};
 
 /// Parses a whole script.
 pub fn parse_script(src: &str) -> Result<Vec<Stmt>, SyntaxError> {
-    let mut p = Parser { toks: tokenize(src)?, i: 0, src: src.chars().collect(), depth: 0 };
+    let mut p =
+        Parser { toks: tokenize(src)?, i: 0, src: src.chars().collect(), depth: 0, strict: false };
     let mut out = Vec::new();
     while !p.at_eof() {
         out.push(p.statement()?);
@@ -18,7 +19,8 @@ pub fn parse_script(src: &str) -> Result<Vec<Stmt>, SyntaxError> {
 
 /// Parses one expression (a template's substitution).
 fn parse_expression(src: &str) -> Result<Expr, SyntaxError> {
-    let mut p = Parser { toks: tokenize(src)?, i: 0, src: src.chars().collect(), depth: 0 };
+    let mut p =
+        Parser { toks: tokenize(src)?, i: 0, src: src.chars().collect(), depth: 0, strict: false };
     let e = p.expression()?;
     if !p.at_eof() {
         return p.unexpected();
@@ -37,6 +39,13 @@ struct Parser {
     i: usize,
     src: Vec<char>,
     depth: usize,
+    /// Whether the code being read is strict.
+    strict: bool,
+}
+
+/// Whether `body` starts with the directive `"use strict"`.
+fn has_use_strict(body: &[Stmt]) -> bool {
+    matches!(body.first(), Some(Stmt::Expr(Expr::Str(s))) if &**s == "use strict")
 }
 
 fn describe(t: &Tok) -> String {
@@ -625,19 +634,36 @@ impl Parser {
     ) -> Result<Rc<FuncDef>, SyntaxError> {
         let (params, rest) = self.params()?;
         self.expect("{")?;
-        let body = self.block_rest()?;
+        let outer = self.strict;
+        // A directive is the first statement: it is read before the rest of the body.
+        if matches!(self.tok(), Tok::Str(s) if &**s == "use strict") {
+            self.strict = true;
+        }
+        let body = self.block_rest();
+        let strict = self.strict || body.as_deref().is_ok_and(has_use_strict);
+        self.strict = outer;
         Ok(Rc::new(FuncDef {
             name,
             params,
             rest,
-            body,
+            body: body?,
             arrow: false,
             is_ctor_of_derived: derived_ctor,
+            strict,
             source: self.source_from(start),
         }))
     }
 
+    /// A class: its code is strict.
     fn class_rest(&mut self) -> Result<Rc<ClassDef>, SyntaxError> {
+        let outer = self.strict;
+        self.strict = true;
+        let c = self.class_body();
+        self.strict = outer;
+        c
+    }
+
+    fn class_body(&mut self) -> Result<Rc<ClassDef>, SyntaxError> {
         let name = if matches!(self.tok(), Tok::Ident(w) if &**w != "extends") {
             Some(self.ident()?)
         } else {
@@ -778,6 +804,7 @@ impl Parser {
             body,
             arrow: true,
             is_ctor_of_derived: false,
+            strict: self.strict,
             source: self.source_from(start),
         })))
     }
