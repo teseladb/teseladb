@@ -257,3 +257,31 @@ fn tags_are_name_value_pairs_sorted_by_name() {
     assert_eq!(bad("start --insecure --tags =x"), "--tags =x: a tag is name=value");
     assert_eq!(bad("start --insecure --tags dc=a,dc=b"), "--tags: tag dc given twice");
 }
+
+/// The HTTP port of 019 (FR-002, contract `cli-base.md`): 27080 on the addresses of `--bind_ip`
+/// by default, 0 closes it, and with `--insecure` its addresses are loopback too.
+#[test]
+fn the_http_port_and_its_addresses() {
+    let o = start("start --insecure --bind_ip 127.0.0.1,localhost");
+    assert_eq!((o.http_port, o.http_bind.as_str()), (27_080, "127.0.0.1,localhost"));
+    let o = start("start --insecure --http-port 0 --http-bind ::1");
+    assert_eq!((o.http_port, o.http_bind.as_str()), (0, "::1"));
+    assert!(teseladb_server::http_config(&o).is_none());
+    let o = start("start --insecure --http-port=28080 --http-bind 127.0.0.1");
+    let http = teseladb_server::http_config(&o).expect("the port");
+    assert_eq!(http.addrs, ["127.0.0.1:28080".parse().unwrap()]);
+    assert!(http.tls.is_none());
+    let e = bad("start --insecure --http-bind 10.0.0.1");
+    assert!(e.contains("--http-bind 10.0.0.1: with --insecure only loopback"), "{e}");
+    let e = bad("start --insecure --http-port 70000");
+    assert!(e.contains("http-port"), "{e}");
+    let file = |_: &std::path::Path| {
+        Ok(b"teseladb:\n  insecure: true\n  http:\n    port: 29080\n    bind: 127.0.0.2\n".to_vec())
+    };
+    match parse_with(&args("start --config c.yaml"), &file) {
+        Ok(Command::Start(o)) => {
+            assert_eq!((o.http_port, o.http_bind.as_str()), (29_080, "127.0.0.2"))
+        }
+        other => panic!("{other:?}"),
+    }
+}

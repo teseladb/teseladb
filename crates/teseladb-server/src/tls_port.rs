@@ -71,6 +71,18 @@ impl TlsPort {
         self.config.as_ref().map(|c| c.read().unwrap_or_else(PoisonError::into_inner).clone())
     }
 
+    /// A port of the same mode whose server side offers the protocols `alpn` (the HTTP port's
+    /// `h2` and `http/1.1`, 019 FR-001); later rotations of this one do not reach it.
+    #[must_use]
+    pub fn with_alpn(&self, alpn: &[Vec<u8>]) -> TlsPort {
+        let config = self.config().map(|c| {
+            let mut c = (*c).clone();
+            c.alpn = alpn.to_vec();
+            c
+        });
+        TlsPort::new(self.mode, config)
+    }
+
     /// Puts the server side of `other` in place of this one, in every clone; a port without TLS
     /// keeps none.
     pub fn replace(&self, other: &TlsPort) {
@@ -176,6 +188,20 @@ impl Transport {
     /// Whether the connection is TLS and its handshake has finished.
     pub fn tls_established(&self) -> bool {
         matches!(self, Transport::Tls(c) if !c.is_handshaking())
+    }
+
+    /// The protocol ALPN agreed over TLS, if any.
+    pub fn alpn(&self) -> Option<&[u8]> {
+        match self {
+            Transport::Tls(c) => c.alpn_protocol(),
+            Transport::Plain | Transport::Undecided(_) => None,
+        }
+    }
+
+    /// Whether the connection carries plain bytes: no TLS on the port, or a client that did not
+    /// open with a handshake on a port that allows it.
+    pub fn is_plain(&self) -> bool {
+        matches!(self, Transport::Plain)
     }
 
     /// The client's certificate chain, leaf first, if it sent one over TLS.

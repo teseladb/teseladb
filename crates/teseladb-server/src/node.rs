@@ -51,6 +51,7 @@ use teseladb_types::{GroupId, NodeId};
 use teseladb_wire::commands::{NodeSessions, Shared};
 
 use crate::admin::{NodeAdmin, answer};
+use crate::admin_http::{AdminListener, Handler};
 use crate::backend::NodeHandle;
 use crate::catalog_ops::{CatalogAnswer, CatalogReq};
 use crate::client_listener::{ClientConfig, ClientListener, NodeClockState, NodePresence};
@@ -61,7 +62,6 @@ use crate::enroll::{Enroller, SECRET_LEN, Token};
 use crate::hosting::Hosting;
 use crate::liveness::SharedLoads;
 use crate::logic::{Group0View, NodeLogic, NodeMsg};
-use crate::metrics_http::{AdminListener, Handler};
 use crate::ranges::SPLIT_BYTES;
 use crate::routes::SharedRoutes;
 use crate::transfer::{Transfers, transfer_dir};
@@ -205,8 +205,10 @@ pub struct NodeConfig {
     /// Where the administration port listens (`--admin-listen`, 007 FR-020); `None`: the node
     /// does not open it.
     pub admin_listen: Option<SocketAddr>,
+    /// The HTTP port of the REST API and MCP (019 FR-002); `None`: the node does not open it.
+    pub http: Option<crate::http_listener::HttpPortConfig>,
     /// TLS on the administration port, on a node with a PKI (013 FR-017).
-    pub admin_tls: Option<crate::metrics_http::AdminTls>,
+    pub admin_tls: Option<crate::admin_http::AdminTls>,
     /// The data directory, whose disk space the heartbeats carry (007 FR-010); `None`: unknown.
     pub data_dir: Option<std::path::PathBuf>,
     /// The node's tags (`--tags`), sorted by name (007 FR-013).
@@ -241,6 +243,7 @@ impl Default for NodeConfig {
             peer_tls: None,
             enroller: None,
             admin_listen: None,
+            http: None,
             admin_tls: None,
             data_dir: None,
             tags: Vec::new(),
@@ -527,6 +530,7 @@ pub struct Node<D> {
     client: Option<ClientListener>,
     /// The administration port (007 FR-020).
     admin: Option<AdminListener>,
+    http: Option<crate::http_listener::HttpListener>,
     clock: ClockKeeper,
     routes: SharedRoutes,
     /// Issues enrollment tokens, on a node with a PKI.
@@ -891,6 +895,10 @@ impl<D: Disk + Send + 'static> Node<D> {
                 }
             }
         };
+        // The HTTP port counts its requests where `/metrics` of the administration port reads
+        // them (019 FR-030).
+        let http_metrics =
+            Arc::new(std::sync::Mutex::new(teseladb_http::metrics::HttpMetrics::default()));
         let admin = match cfg.admin_listen {
             None => None,
             Some(at) => {
@@ -907,11 +915,41 @@ impl<D: Disk + Send + 'static> Node<D> {
                     enroller: cfg.enroller.clone(),
                     certificates: cfg.client.as_ref().and_then(|c| c.certificates.clone()),
                     memory,
+                    http_metrics: Some(http_metrics.clone()),
                 };
                 let handler: Handler = Arc::new(move |req, caller| answer(req, caller, &backend));
                 match AdminListener::spawn(at, handler, cfg.admin_tls.clone()) {
                     Ok(l) => Some(l),
                     Err(e) => {
+                        if let Some(c) = client {
+                            c.stop();
+                        }
+                        acceptor.stop();
+                        stop_cores(&senders, threads);
+                        return Err(NodeError::Io(e));
+                    }
+                }
+            }
+        };
+        let http = match cfg.http {
+            None => None,
+            Some(h) => {
+                let handle = NodeHandle {
+                    node: node_id,
+                    senders: senders.iter().map(CoreSender::senders).collect(),
+                    clock: clock.clone(),
+                    sessions: sessions.clone(),
+                    routes: routes.clone(),
+                    auth: auth.clone(),
+                    shutdown: shutdown.clone(),
+                };
+                let service = Arc::new(crate::http_service::NodeHttp::new(handle));
+                match crate::http_listener::HttpListener::spawn(h, service, http_metrics.clone()) {
+                    Ok(l) => Some(l),
+                    Err(e) => {
+                        if let Some(a) = admin {
+                            a.stop();
+                        }
                         if let Some(c) = client {
                             c.stop();
                         }
@@ -932,6 +970,7 @@ impl<D: Disk + Send + 'static> Node<D> {
             acceptor,
             client,
             admin,
+            http,
             clock: clock_keeper,
             routes,
             enroller: cfg.enroller.clone(),
@@ -966,10 +1005,16 @@ impl<D: Disk + Send + 'static> Node<D> {
         self.shutdown.load(std::sync::atomic::Ordering::Acquire)
     }
 
+    /// The addresses the HTTP port listens on; none if the node did not open it.
+    pub fn http_addrs(&self) -> Vec<SocketAddr> {
+        self.http.as_ref().map(|h| h.addrs().to_vec()).unwrap_or_default()
+    }
+
     /// Where the administration port listens, if the node opened it.
     pub fn admin_addr(&self) -> Option<SocketAddr> {
         self.admin.as_ref().map(AdminListener::local_addr)
     }
+
     /// This node.
     pub fn node_id(&self) -> NodeId {
         self.node_id
@@ -1105,6 +1150,9 @@ impl<D: Disk + Send + 'static> Node<D> {
         }
         if let Some(a) = self.admin {
             a.stop();
+        }
+        if let Some(h) = self.http {
+            h.stop();
         }
         self.acceptor.stop();
         self.clock.stop();

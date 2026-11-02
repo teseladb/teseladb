@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 
 pub mod admin;
+pub mod admin_http;
 pub mod admin_tenants;
 pub mod at_rest;
 pub mod audit_log;
@@ -31,6 +32,8 @@ pub mod enroll;
 pub mod forward;
 pub mod frames;
 pub mod hosting;
+pub mod http_listener;
+pub mod http_service;
 pub mod https;
 pub mod kmip;
 pub mod ldap_client;
@@ -42,7 +45,6 @@ pub mod logic;
 pub mod memory;
 pub mod merges;
 pub mod meta2_ops;
-pub mod metrics_http;
 pub mod node;
 pub mod node_versions;
 pub mod ocsp_staple;
@@ -180,6 +182,7 @@ pub fn node_config(o: &StartOpts) -> NodeConfig {
         admin_addr: o.admin_listen.to_string(),
         admin_listen: Some(o.admin_listen),
         native_addr: format!("{}:{}", o.bind_ip, o.port),
+        http: http_config(o),
         join: o.join.clone(),
         client: Some(client_config(o)),
         data_dir: Some(o.dbpath.clone()),
@@ -192,6 +195,29 @@ pub fn node_config(o: &StartOpts) -> NodeConfig {
         },
         ..NodeConfig::default()
     }
+}
+
+/// The HTTP port of `teseladb start` (019 FR-002): each address of `--http-bind` with
+/// `--http-port`, without TLS until [`secure`] gives it the clients' port's; `None` with port 0.
+pub fn http_config(o: &StartOpts) -> Option<crate::http_listener::HttpPortConfig> {
+    use std::net::ToSocketAddrs;
+    if o.http_port == 0 {
+        return None;
+    }
+    let addrs = o
+        .http_bind
+        .split(',')
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+        .flat_map(|h| {
+            (h, o.http_port).to_socket_addrs().map(Iterator::collect).unwrap_or_else(|_| Vec::new())
+        })
+        .collect::<Vec<_>>();
+    Some(crate::http_listener::HttpPortConfig {
+        addrs,
+        tls: None,
+        settings: teseladb_http::server::Settings::default(),
+    })
 }
 
 /// The clients' port of `teseladb start`: each address of `--bind_ip` (comma separated, names
@@ -626,11 +652,15 @@ fn secure(
         params.node_names.clone(),
     )
     .with_admin(admin_tls.clone());
-    cfg.admin_tls = Some(metrics_http::AdminTls {
+    cfg.admin_tls = Some(admin_http::AdminTls {
         port: admin_tls,
         ca: pki.ca.clone(),
         node: pki.node_chain.first().map(|c| c.subject.clone()).unwrap_or_default(),
     });
+    // The HTTP port speaks TLS as the clients' port does (019 FR-002).
+    if let Some(h) = cfg.http.as_mut() {
+        h.tls = Some(tls.clone());
+    }
     cfg.root_user = pki::root_user(&o.dbpath, &mut random).map_err(|e| e.to_string())?;
     cfg.client = Some(ClientConfig {
         tls,

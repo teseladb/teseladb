@@ -24,13 +24,13 @@ use teseladb_wire::commands::roles::Graph;
 use teseladb_wire::commands::{Backend, Ctx, Shared, run as run_command};
 use teseladb_x509::{Certificate, PrivateKey};
 
+use crate::admin_http::{self, Caller, HttpRequest, HttpResponse, JSON, Method, PROMETHEUS};
 use crate::backend::{NodeHandle, ServerBackend};
 use crate::catalog_ops::{CatalogAnswer, CatalogReq};
 use crate::cli::{TLS_CA_FILE, TLS_CERTIFICATE_KEY_FILE};
 use crate::data::{DataReply, DataReq};
 use crate::enroll::Enroller;
 use crate::logic::NodeMsg;
-use crate::metrics_http::{self, Caller, HttpRequest, HttpResponse, JSON, Method, PROMETHEUS};
 
 /// `GET`: 200 if the node serves, 503 if not; no body.
 pub const HEALTHZ: &str = "/healthz";
@@ -66,7 +66,7 @@ pub const DEFAULT_TTL: Duration = Duration::from_secs(3600);
 pub const CORE_WAIT: Duration = Duration::from_secs(5);
 // The client waits for the longest handler: a core's answer and then a Group 0 change.
 const _: () = assert!(
-    metrics_http::ANSWER_WAIT.as_secs() > CORE_WAIT.as_secs() + crate::node::ENROLL_WAIT.as_secs()
+    admin_http::ANSWER_WAIT.as_secs() > CORE_WAIT.as_secs() + crate::node::ENROLL_WAIT.as_secs()
 );
 
 /// Why the port could not do what it was asked.
@@ -294,6 +294,8 @@ pub struct NodeAdmin {
     /// The node's memory and its split (012 FR-013); `None` when the system did not say how much
     /// there is and none was given.
     pub memory: Option<crate::memory::MemoryBudget>,
+    /// The metrics of the HTTP port (019 FR-030), when the node opened it.
+    pub http_metrics: Option<std::sync::Arc<std::sync::Mutex<teseladb_http::metrics::HttpMetrics>>>,
 }
 
 impl NodeAdmin {
@@ -451,6 +453,9 @@ impl AdminBackend for NodeAdmin {
         stream_metrics(&mut out, teseladb_wire::commands::change_stream::stream_metrics(), &lags);
         if let Some(m) = &self.memory {
             m.metrics(&mut out);
+        }
+        if let Some(h) = &self.http_metrics {
+            out.push_str(&h.lock().unwrap_or_else(std::sync::PoisonError::into_inner).render());
         }
         out
     }
@@ -963,7 +968,7 @@ pub fn run(o: &AdminOpts, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
             return 1;
         }
     };
-    let sent = metrics_http::request_with(&o.node, tls, method, &target, body.as_bytes());
+    let sent = admin_http::request_with(&o.node, tls, method, &target, body.as_bytes());
     let (status, answer) = match sent {
         Ok(a) => a,
         Err(e) => {
@@ -1214,11 +1219,11 @@ mod tests {
 
     fn req(method: Method, target: &str, body: &str) -> HttpRequest {
         let text = format!(
-            "{} {target} HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}",
+            "{} {target} HTTP/1.1\r\nHost: node\r\nContent-Length: {}\r\n\r\n{body}",
             if method == Method::Get { "GET" } else { "POST" },
             body.len()
         );
-        metrics_http::parse_request(text.as_bytes()).unwrap().unwrap()
+        admin_http::parse_request(text.as_bytes()).unwrap().unwrap()
     }
 
     fn did(r: &HttpResponse) -> String {
