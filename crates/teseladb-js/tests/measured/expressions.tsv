@@ -270,3 +270,54 @@ typeof function(){} + typeof class {} + typeof null + typeof []	S:functionfuncti
 parseFloat('.5') + parseFloat('-.5e1') + parseFloat('Infinityx') + ',' + parseFloat('x')	S:Infinity,NaN
 Number('0b101') + Number('0o17') + Number('') + Number(' 12 ') + ',' + Number('1e') + ',' + Number('-Infinity')	S:32,NaN,-Infinity
 parseInt('101', 2) + parseInt('0x', 16) + ',' + parseInt('', 10) + ',' + parseInt('12', 1)	S:NaN,NaN,NaN
+(10n ** 20n).toString()	S:100000000000000000000
+typeof 1n	S:bigint
+1n + 2n	E:TypeError:BigInt value can't be serialized in JSON
+String(2n ** 64n - 1n)	S:18446744073709551615
+BigInt(10) * 3n	E:TypeError:BigInt value can't be serialized in JSON
+BigInt('0x1f')	E:TypeError:BigInt value can't be serialized in JSON
+5n / 2n	E:TypeError:BigInt value can't be serialized in JSON
+-7n % 3n	E:TypeError:BigInt value can't be serialized in JSON
+1n == 1	J:true
+1n === 1	J:false
+2n > 1	J:true
+(()=>{try{return 1n + 1}catch(e){return e.name+':'+e.message}})()	S:TypeError:can't convert BigInt to number
+BigInt.asUintN(8, 257n)	E:TypeError:BigInt value can't be serialized in JSON
+BigInt.asIntN(8, 255n)	E:TypeError:BigInt value can't be serialized in JSON
+(255n).toString(16)	S:ff
+JSON.stringify({a:1n})	E:TypeError:BigInt value can't be serialized in JSON
+Number(12n)	J:12
+BigInt(1.5)	E:RangeError:1.5 can't be converted to BigInt because it isn't an integer
+typeof Object(1n)	S:object
+[3n,1n,2n].sort().join()	S:1,2,3
+-(5n)	E:TypeError:BigInt value can't be serialized in JSON
+1n << 70n	E:TypeError:BigInt value can't be serialized in JSON
+(-1n) >> 3n	E:TypeError:BigInt value can't be serialized in JSON
+5n & 3n	E:TypeError:BigInt value can't be serialized in JSON
+~0n	E:TypeError:BigInt value can't be serialized in JSON
+0n ? 'y' : 'n'	S:n
+BigInt('abc')	E:SyntaxError:invalid BigInt syntax
+String(1n + 2n) + ',' + String(BigInt(10) * 3n) + ',' + BigInt('0x1f') + ',' + 5n / 2n + ',' + -7n % 3n + ',' + -(5n)	S:3,30,31,2,-1,-5
+String(BigInt.asUintN(8, 257n)) + ',' + BigInt.asIntN(8, 255n) + ',' + (1n << 70n) + ',' + ((-1n) >> 3n) + ',' + (5n & 3n) + ',' + ~0n	S:1,-1,1180591620717411303424,-1,1,-1
+String(BigInt(' 12 ')) + BigInt(true) + BigInt('') + ',' + (2n ** 0n) + ',' + (10n).toLocaleString()	S:1210,1,10
+(()=>{try{return 1n/0n}catch(e){return e.name+':'+e.message}})()	S:RangeError:BigInt division by zero
+(()=>{try{return 2n ** -1n}catch(e){return e.name+':'+e.message}})()	S:RangeError:BigInt negative exponent
+(()=>{try{return +1n}catch(e){return e.name+':'+e.message}})()	S:TypeError:can't convert BigInt to number
+(()=>{try{return 1n >>> 0n}catch(e){return e.name+':'+e.message}})()	S:TypeError:can't convert BigInt to number
+(()=>{try{return new BigInt(1)}catch(e){return e.name+':'+e.message}})()	S:TypeError:BigInt is not a constructor
+(()=>{try{return Math.max(1n)}catch(e){return e.name+':'+e.message}})()	S:TypeError:can't convert BigInt to number
+[1n < 1.5, 2n == '2', 0n == false, 1n === 1n, Object.is(0n, -0n), typeof (0n * -1n), 3n > 2.9, NaN < 1n]	J:[true,true,true,true,true,"bigint",true,false]
+String([1n, 2n]) + `${3n}` + (4n + '')	S:1,234
+Object.prototype.toString.call(1n) + ',' + BigInt.prototype.toString.call(9n)	S:[object BigInt],9
+[new Set([1n,1n,1]).size, [1n].includes(1n), [1n].indexOf(1n), new Map([[2n,'a']]).get(2n)]	J:[2,true,0,"a"]
+String(BigInt(Number.MAX_SAFE_INTEGER)+2n) + ',' + BigInt(1e21) + ',' + BigInt('0b101') + ',' + BigInt('0o17') + ',' + BigInt('-12') + ',' + BigInt('+7') + ',' + (123n).toString(36) + ',' + BigInt(-0)	S:9007199254740993,1000000000000000000000,5,15,-12,7,3f,0
+(()=>{const r=[];for(const s of ['-0x1','1e3','1.0','12n','0x','- 1',' ']) {try{r.push(String(BigInt(s)))}catch(e){r.push(e.name+':'+e.message)}}return r.join('|')})()	S:SyntaxError:invalid BigInt syntax|SyntaxError:invalid BigInt syntax|SyntaxError:invalid BigInt syntax|SyntaxError:invalid BigInt syntax|SyntaxError:invalid BigInt syntax|SyntaxError:invalid BigInt syntax|0
+(()=>{const r=[];for(const v of [NaN,Infinity,undefined,null,Symbol('q'),{valueOf(){return 3n}},[],[5],'']) {try{r.push(String(BigInt(v)))}catch(e){r.push(e.name+':'+e.message)}}return r.join('|')})()	S:RangeError:NaN can't be converted to BigInt because it isn't an integer|RangeError:Infinity can't be converted to BigInt because it isn't an integer|TypeError:can't convert undefined to BigInt|TypeError:can't convert null to BigInt|TypeError:can't convert Symbol("q") to BigInt|3|0|5|0
+String(5n ** 3n) + ',' + (-5n / 2n) + ',' + (-5n % 2n) + ',' + ((-5n) >> 1n) + ',' + (-1n << -1n) + ',' + (5n | -3n) + ',' + (5n ^ -3n) + ',' + (-5n & 3n) + ',' + (1n - 2n) + ',' + (8n >> -2n) + ',' + (-8n << 2n)	S:125,-2,-1,-3,-1,-3,-8,3,-1,32,-32
+[0n === -0n, Number.isInteger(1n), typeof (1n + {}) , 1n + {}, String(-0n), Number(2n**1024n), Number(2n**53n+1n), typeof BigInt.prototype, BigInt.length, BigInt.name]	J:[true,false,"string","1[object Object]","0",null,9007199254740992,"object",1,"BigInt"]
+[1n < 2n, '10' > 9n, 1n < '1.5', 1n == '1.0', 2n > '1x', 10n > 9.5, 1n < Infinity, -1n > -Infinity, 1n == 1.5, 3n >= 3]	J:[true,true,false,false,false,true,true,true,false,true]
+String(BigInt.asUintN(64, -1n)) + ',' + BigInt.asIntN(64, 2n**63n) + ',' + BigInt.asIntN(0, 5n) + ',' + BigInt.asUintN(3, -1n) + ',' + BigInt.asIntN(3, 4n) + ',' + BigInt.asIntN(1,1n)	S:18446744073709551615,-9223372036854775808,0,7,-4,-1
+String(123456789012345678901234567890n * 987654321098765432109876543210n) + ',' + (10n**40n / 7n) + ',' + (10n**40n % 7n) + ',' + (-(10n**30n) / 3n)	S:121932631137021795226185032733622923332237463801111263526900,1428571428571428571428571428571428571428,4,-333333333333333333333333333333
+(0x1fn + 0o7n + 0b11n + 1_000n).toString()	S:1041
+(()=>{let a=1n;a++;a+=2n;a*=3n;a**=2n;a--;return String(a)+typeof a})()	S:143bigint
+typeof function(){} + typeof class {} + typeof null + typeof [] + typeof 1n	S:functionfunctionobjectobjectbigint

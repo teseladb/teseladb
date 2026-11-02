@@ -18,6 +18,7 @@ pub enum Val {
     Null,
     Bool(bool),
     Num(f64),
+    BigInt(Rc<crate::bigint::BigInt>),
     Str(Name),
     /// A symbol: its description and its identity.
     Sym(Rc<(Name, u64)>),
@@ -147,6 +148,7 @@ pub enum Kind {
     Date(f64),
     Bool(bool),
     Num(f64),
+    BigInt(Rc<crate::bigint::BigInt>),
     Str(Name),
     Map(Vec<(Val, Val)>),
     Set(Vec<Val>),
@@ -217,6 +219,7 @@ impl Val {
             Val::Undef | Val::Null => false,
             Val::Bool(b) => *b,
             Val::Num(n) => *n != 0.0 && !n.is_nan(),
+            Val::BigInt(b) => !b.is_zero(),
             Val::Str(s) => !s.is_empty(),
             Val::Sym(_) | Val::Obj(_) => true,
         }
@@ -228,6 +231,7 @@ impl Val {
             Val::Null => "object",
             Val::Bool(_) => "boolean",
             Val::Num(_) => "number",
+            Val::BigInt(_) => "bigint",
             Val::Str(_) => "string",
             Val::Sym(_) => "symbol",
             Val::Obj(o) => {
@@ -251,6 +255,7 @@ pub fn strict_eq(a: &Val, b: &Val) -> bool {
         (Val::Undef, Val::Undef) | (Val::Null, Val::Null) => true,
         (Val::Bool(x), Val::Bool(y)) => x == y,
         (Val::Num(x), Val::Num(y)) => x == y,
+        (Val::BigInt(x), Val::BigInt(y)) => x == y,
         (Val::Str(x), Val::Str(y)) => x == y,
         (Val::Sym(x), Val::Sym(y)) => Rc::ptr_eq(x, y),
         (Val::Obj(x), Val::Obj(y)) => x.ptr_eq(y),

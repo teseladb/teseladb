@@ -9,12 +9,12 @@ use crate::interp::{Ctrl, Interp, R, Realm};
 use crate::number;
 use crate::value::*;
 
-fn arg(args: &[Val], i: usize) -> Val {
+pub(crate) fn arg(args: &[Val], i: usize) -> Val {
     args.get(i).cloned().unwrap_or(Val::Undef)
 }
 
 /// `this` of a native constructor called with `new`: the new target.
-fn new_target(this: &Val) -> Option<Val> {
+pub(crate) fn new_target(this: &Val) -> Option<Val> {
     let Val::Obj(o) = this else { return None };
     o.borrow().get_own("@@new").map(|p| p.value.clone())
 }
@@ -24,7 +24,7 @@ pub(crate) fn method(it: &Interp, o: &ObjRef, name: &str, f: NativeFn, arity: us
     it.define(o, name, Prop::hidden(Val::Obj(fo)))
 }
 
-fn ctor(
+pub(crate) fn ctor(
     it: &Interp,
     global: &ObjRef,
     name: &str,
@@ -59,6 +59,7 @@ pub fn realm(budget: &Rc<Budget>) -> Realm {
         number: p(Kind::Num(0.0)),
         boolean: p(Kind::Bool(false)),
         symbol: p(Kind::Ordinary),
+        bigint: p(Kind::Ordinary),
         error: p(Kind::Ordinary),
         date: p(Kind::Ordinary),
         regexp: p(Kind::Ordinary),
@@ -100,6 +101,7 @@ pub fn install(it: &mut Interp) -> R<()> {
     crate::date::install(it, &g)?;
     collections(it, &g)?;
     symbol_builtins(it, &g)?;
+    crate::bigints::install(it, &g)?;
     regexp_builtins(it, &g)?;
     crate::bson::install(it, &g)?;
     freeze_builtins(it);
@@ -125,6 +127,7 @@ fn freeze_builtins(it: &Interp) {
         it.realm.number.clone(),
         it.realm.boolean.clone(),
         it.realm.symbol.clone(),
+        it.realm.bigint.clone(),
         it.realm.error.clone(),
         it.realm.date.clone(),
         it.realm.regexp.clone(),
@@ -475,9 +478,11 @@ fn obj_to_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
             Kind::Date(_) => "Date",
             Kind::RegExp(..) => "RegExp",
             Kind::Arguments => "Arguments",
+            Kind::BigInt(_) => "BigInt",
             _ => "Object",
         },
         Val::Num(_) => "Number",
+        Val::BigInt(_) => "BigInt",
         Val::Str(_) => "String",
         Val::Bool(_) => "Boolean",
         Val::Sym(_) => "Symbol",
@@ -750,7 +755,13 @@ fn number_builtins(it: &mut Interp, g: &ObjRef) -> R<()> {
 }
 
 fn number_ctor(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    let n = if a.is_empty() { 0.0 } else { it.number_of(&a[0])? };
+    let n = match a.first() {
+        None => 0.0,
+        Some(v) => match it.numeric(v)? {
+            Val::BigInt(b) => b.to_f64(),
+            n => it.number_of(&n)?,
+        },
+    };
     if new_target(this).is_some() {
         return Ok(Val::Obj(it.alloc(Some(it.realm.number.clone()), Kind::Num(n))?));
     }

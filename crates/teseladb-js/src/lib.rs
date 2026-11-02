@@ -9,6 +9,8 @@
 
 mod arrays;
 mod ast;
+mod bigint;
+mod bigints;
 mod bson;
 mod builtins;
 mod date;

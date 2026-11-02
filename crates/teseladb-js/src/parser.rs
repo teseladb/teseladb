@@ -57,7 +57,7 @@ fn describe(t: &Tok) -> String {
                 "identifier".to_owned()
             }
         }
-        Tok::Num(_) => "numeric literal".to_owned(),
+        Tok::Num(_) | Tok::BigInt(_) => "numeric literal".to_owned(),
         Tok::Str(_) => "string literal".to_owned(),
         Tok::Template(..) => "template literal".to_owned(),
         Tok::Regex(..) => "regular expression literal".to_owned(),
@@ -723,6 +723,10 @@ impl Parser {
                 self.i += 1;
                 Ok(PropName::Fixed(crate::number::to_string(n).into()))
             }
+            Tok::BigInt(b) => {
+                self.i += 1;
+                Ok(PropName::Fixed(b.to_string().into()))
+            }
             Tok::Punct("[") => {
                 self.i += 1;
                 let e = self.assign()?;
@@ -1124,6 +1128,7 @@ impl Parser {
         self.i += 1;
         Ok(match t {
             Tok::Num(n) => Expr::Num(n),
+            Tok::BigInt(b) => Expr::BigInt(b),
             Tok::Str(s) => Expr::Str(s),
             Tok::Template(strs, subs) => {
                 let subs = subs.iter().map(|s| self.substitution(s)).collect::<Result<_, _>>()?;

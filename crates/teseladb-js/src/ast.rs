@@ -85,6 +85,7 @@ pub enum ObjProp {
 #[derive(Debug)]
 pub enum Expr {
     Num(f64),
+    BigInt(Rc<crate::bigint::BigInt>),
     Str(Name),
     Template(Vec<Name>, Vec<Expr>),
     Regex(Name, Name),

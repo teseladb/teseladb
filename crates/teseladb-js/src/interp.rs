@@ -63,6 +63,7 @@ pub struct Realm {
     pub number: ObjRef,
     pub boolean: ObjRef,
     pub symbol: ObjRef,
+    pub bigint: ObjRef,
     pub error: ObjRef,
     pub date: ObjRef,
     pub regexp: ObjRef,
@@ -289,6 +290,7 @@ impl<'c> Interp<'c> {
             Kind::Num(n) => return Ok(Val::Num(n)),
             Kind::Str(s) => return Ok(Val::Str(s)),
             Kind::Bool(b) => return Ok(Val::Bool(b)),
+            Kind::BigInt(b) => return Ok(Val::BigInt(b)),
             _ => {}
         }
         let order: [&str; 2] =
@@ -317,6 +319,7 @@ impl<'c> Interp<'c> {
             Val::Num(n) => *n,
             Val::Str(s) => number::parse(s),
             Val::Sym(_) => return self.type_error("can't convert symbol to number"),
+            Val::BigInt(_) => return self.type_error("can't convert BigInt to number"),
             Val::Obj(_) => {
                 let p = self.primitive(v, "number")?;
                 self.number_of(&p)?
@@ -331,6 +334,7 @@ impl<'c> Interp<'c> {
             Val::Bool(b) => if *b { "true" } else { "false" }.into(),
             Val::Num(n) => number::to_string(*n).into(),
             Val::Str(s) => s.clone(),
+            Val::BigInt(b) => b.to_string().into(),
             Val::Sym(_) => return self.type_error("can't convert symbol to string"),
             Val::Obj(_) => {
                 let p = self.primitive(v, "string")?;
@@ -360,6 +364,7 @@ impl<'c> Interp<'c> {
             Val::Num(n) => self.alloc(Some(self.realm.number.clone()), Kind::Num(*n)),
             Val::Str(s) => self.alloc(Some(self.realm.string.clone()), Kind::Str(s.clone())),
             Val::Sym(_) => self.alloc(Some(self.realm.symbol.clone()), Kind::Ordinary),
+            Val::BigInt(b) => self.alloc(Some(self.realm.bigint.clone()), Kind::BigInt(b.clone())),
         }
     }
 
@@ -370,6 +375,7 @@ impl<'c> Interp<'c> {
             Val::Null => "null".into(),
             Val::Str(s) => format!("\"{s}\""),
             Val::Num(n) => number::to_string(*n),
+            Val::BigInt(b) => format!("{b}n"),
             Val::Bool(b) => b.to_string(),
             Val::Sym(s) => format!("Symbol({})", s.0),
             Val::Obj(o) => {
@@ -390,6 +396,7 @@ impl<'c> Interp<'c> {
             Val::Num(_) => Some(self.realm.number.clone()),
             Val::Bool(_) => Some(self.realm.boolean.clone()),
             Val::Sym(_) => Some(self.realm.symbol.clone()),
+            Val::BigInt(_) => Some(self.realm.bigint.clone()),
             _ => None,
         }
     }
@@ -1545,6 +1552,7 @@ impl<'c> Interp<'c> {
     pub fn eval(&mut self, e: &Expr, env: &EnvRef) -> R {
         match e {
             Expr::Num(n) => Ok(Val::Num(*n)),
+            Expr::BigInt(b) => Ok(Val::BigInt(b.clone())),
             Expr::Str(s) => Ok(Val::Str(s.clone())),
             Expr::Bool(b) => Ok(Val::Bool(*b)),
             Expr::Null => Ok(Val::Null),
@@ -1600,9 +1608,15 @@ impl<'c> Interp<'c> {
                 let v = self.eval(x, env)?;
                 Ok(match *op {
                     "!" => Val::Bool(!v.truthy()),
-                    "-" => Val::Num(-self.number_of(&v)?),
+                    "-" => match self.numeric(&v)? {
+                        Val::BigInt(b) => Val::BigInt(Rc::new(b.neg())),
+                        n => Val::Num(-self.number_of(&n)?),
+                    },
                     "+" => Val::Num(self.number_of(&v)?),
-                    "~" => Val::Num(f64::from(!number::to_int32(self.number_of(&v)?))),
+                    "~" => match self.numeric(&v)? {
+                        Val::BigInt(b) => Val::BigInt(Rc::new(b.not())),
+                        n => Val::Num(f64::from(!number::to_int32(self.number_of(&n)?))),
+                    },
                     _ => Val::Undef,
                 })
             }
@@ -1641,10 +1655,19 @@ impl<'c> Interp<'c> {
             },
             Expr::Update { op, prefix, target } => {
                 let old = self.eval(target, env)?;
-                let n = self.number_of(&old)?;
-                let new = if *op == "++" { n + 1.0 } else { n - 1.0 };
-                self.assign_to(target, Val::Num(new), env)?;
-                Ok(Val::Num(if *prefix { new } else { n }))
+                let (old, new) = match self.numeric(&old)? {
+                    Val::BigInt(b) => {
+                        let one = crate::bigint::BigInt::from_i64(1);
+                        let new = if *op == "++" { b.add(&one) } else { b.sub(&one) };
+                        (Val::BigInt(b), Val::BigInt(Rc::new(new)))
+                    }
+                    v => {
+                        let n = self.number_of(&v)?;
+                        (Val::Num(n), Val::Num(if *op == "++" { n + 1.0 } else { n - 1.0 }))
+                    }
+                };
+                self.assign_to(target, new.clone(), env)?;
+                Ok(if *prefix { new } else { old })
             }
             Expr::Binary(op, a, b) => {
                 let x = self.eval(a, env)?;
@@ -1951,6 +1974,15 @@ impl<'c> Interp<'c> {
     }
 
     pub fn loose_eq(&mut self, a: &Val, b: &Val) -> R<bool> {
+        match (a, b) {
+            (Val::Bool(x), y) if !matches!(y, Val::Bool(_)) => {
+                return self.loose_eq(&Val::Num(f64::from(u8::from(*x))), b);
+            }
+            (x, Val::Bool(y)) if !matches!(x, Val::Bool(_)) => {
+                return self.loose_eq(a, &Val::Num(f64::from(u8::from(*y))));
+            }
+            _ => {}
+        }
         Ok(match (a, b) {
             (Val::Undef | Val::Null, Val::Undef | Val::Null) => true,
             (Val::Undef | Val::Null, _) | (_, Val::Undef | Val::Null) => false,
@@ -1969,6 +2001,10 @@ impl<'c> Interp<'c> {
                 }
                 x == y
             }
+            (Val::BigInt(_), Val::Num(_) | Val::Str(_) | Val::BigInt(_))
+            | (Val::Num(_) | Val::Str(_), Val::BigInt(_)) => {
+                crate::bigints::compare(self, a, b)? == Some(std::cmp::Ordering::Equal)
+            }
             (Val::Obj(_), Val::Obj(_)) => strict_eq(a, b),
             (Val::Obj(_), _) => {
                 let p = self.primitive(a, "default")?;
@@ -1982,21 +2018,19 @@ impl<'c> Interp<'c> {
         })
     }
 
-    pub fn binary(&mut self, op: &str, x: &Val, y: &Val) -> R {
+    /// `ToNumeric`: a number or a `BigInt`.
+    pub fn numeric(&mut self, v: &Val) -> R {
+        let p = self.primitive(v, "number")?;
+        Ok(match p {
+            Val::BigInt(_) => p,
+            other => Val::Num(self.number_of(&other)?),
+        })
+    }
+
+    fn number_binary(&mut self, op: &str, x: &Val, y: &Val) -> R {
         let num = |s: &mut Self, v: &Val| s.number_of(v);
         Ok(match op {
-            "+" => {
-                let a = self.primitive(x, "default")?;
-                let b = self.primitive(y, "default")?;
-                if matches!(a, Val::Str(_)) || matches!(b, Val::Str(_)) {
-                    let (sa, sb) = (self.str_of(&a)?, self.str_of(&b)?);
-                    let mut out = String::with_capacity(sa.len() + sb.len());
-                    out.push_str(&sa);
-                    out.push_str(&sb);
-                    return self.string(out);
-                }
-                Val::Num(self.number_of(&a)? + self.number_of(&b)?)
-            }
+            "@+" => Val::Num(num(self, x)? + num(self, y)?),
             "-" => Val::Num(num(self, x)? - num(self, y)?),
             "*" => Val::Num(num(self, x)? * num(self, y)?),
             "/" => Val::Num(num(self, x)? / num(self, y)?),
@@ -2031,6 +2065,37 @@ impl<'c> Interp<'c> {
                 number::to_uint32(num(self, x)?)
                     .wrapping_shr(number::to_uint32(num(self, y)?) & 31),
             )),
+            _ => return self.type_error(&format!("unknown operator {op}")),
+        })
+    }
+
+    pub fn binary(&mut self, op: &str, x: &Val, y: &Val) -> R {
+        Ok(match op {
+            "+" => {
+                let a = self.primitive(x, "default")?;
+                let b = self.primitive(y, "default")?;
+                if matches!(a, Val::Str(_)) || matches!(b, Val::Str(_)) {
+                    let (sa, sb) = (self.str_of(&a)?, self.str_of(&b)?);
+                    let mut out = String::with_capacity(sa.len() + sb.len());
+                    out.push_str(&sa);
+                    out.push_str(&sb);
+                    return self.string(out);
+                }
+                return self.binary("@+", &a, &b);
+            }
+            "-" | "*" | "/" | "%" | "**" | "&" | "|" | "^" | "<<" | ">>" | ">>>" | "@+" => {
+                let a = self.numeric(x)?;
+                let b = self.numeric(y)?;
+                match (&a, &b) {
+                    (Val::BigInt(p), Val::BigInt(q)) => {
+                        return crate::bigints::binary(self, op, p, q);
+                    }
+                    (Val::BigInt(_), _) | (_, Val::BigInt(_)) => {
+                        return self.type_error("can't convert BigInt to number");
+                    }
+                    _ => self.number_binary(op, &a, &b)?,
+                }
+            }
             "==" => Val::Bool(self.loose_eq(x, y)?),
             "!=" => Val::Bool(!self.loose_eq(x, y)?),
             "===" => Val::Bool(strict_eq(x, y)),
@@ -2040,6 +2105,8 @@ impl<'c> Interp<'c> {
                 let b = self.primitive(y, "number")?;
                 let ord = if let (Val::Str(p), Val::Str(q)) = (&a, &b) {
                     Some(p.encode_utf16().cmp(q.encode_utf16()))
+                } else if matches!(a, Val::BigInt(_)) || matches!(b, Val::BigInt(_)) {
+                    crate::bigints::compare(self, &a, &b)?
                 } else {
                     let (p, q) = (self.number_of(&a)?, self.number_of(&b)?);
                     p.partial_cmp(&q)

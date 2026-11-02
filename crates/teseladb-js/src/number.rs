@@ -92,7 +92,7 @@ pub fn to_fixed(x: f64, digits: usize) -> String {
 }
 
 /// Whether `c` is white space or a line terminator for StringToNumber.
-fn is_space(c: char) -> bool {
+pub fn is_space(c: char) -> bool {
     c.is_whitespace() || c == '\u{feff}'
 }
 
