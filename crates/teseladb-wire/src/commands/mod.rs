@@ -1061,6 +1061,7 @@ fn returned(reply: &Document) -> i64 {
 
 /// Runs the command of `ctx` by its name.
 fn dispatch<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
+    engines::reseed(ctx.backend.random());
     match crate::concerns::canonical(ctx.name()) {
         query_settings::SET_QUERY_SETTINGS => query_settings::set_query_settings(ctx),
         query_settings::REMOVE_QUERY_SETTINGS => query_settings::remove_query_settings(ctx),

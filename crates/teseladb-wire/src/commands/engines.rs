@@ -40,6 +40,34 @@ pub fn check_geo(filter: &teseladb_mql::Filter) -> Result<()> {
     walk(filter.expr())
 }
 
+thread_local! {
+    /// The state of the numbers of `$rand` and `$sampleRate` the node's matcher draws, set from
+    /// the backend's random source at every command ([`reseed`]).
+    static DRAWS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Sets the state of the matcher's draws to `seed` (the dispatcher, from the backend).
+pub(crate) fn reseed(seed: u64) {
+    DRAWS.with(|d| d.set(seed));
+}
+
+/// The next 64 random bits of this thread's draws (SplitMix64).
+fn next_seed() -> u64 {
+    DRAWS.with(|d| {
+        let state = d.get().wrapping_add(0x9E37_79B9_7F4A_7C15);
+        d.set(state);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    })
+}
+
+/// A scope over `d` whose `$rand` draws from this thread's state.
+fn drawing_scope(d: &Document, vars: Option<&Document>) -> Scope {
+    Scope::new(d.clone(), vars).seeded(next_seed())
+}
+
 /// The node's extensions.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NodeExtensions;
@@ -47,7 +75,7 @@ pub struct NodeExtensions;
 impl Extensions for NodeExtensions {
     fn expr(&self, e: RawValue<'_>, doc: RawDoc<'_>, vars: Option<&Document>) -> Result<bool> {
         let (expr, d) = (Expr::parse(e)?, Document::from(doc));
-        let v = expr.eval(&d, &Scope::new(d.clone(), vars))?;
+        let v = expr.eval(&d, &drawing_scope(&d, vars))?;
         Ok(teseladb_exec::expr::truthy(&v))
     }
 
@@ -68,7 +96,7 @@ impl Extensions for NodeExtensions {
     }
 
     fn random(&self) -> f64 {
-        NoExtensions.random()
+        (next_seed() >> 11) as f64 / (1u64 << 53) as f64
     }
 
     fn meta(&self, name: &str, doc: RawDoc<'_>) -> Result<Option<Value>> {
@@ -82,7 +110,7 @@ impl Extensions for NodeExtensions {
         vars: Option<&Document>,
     ) -> Result<Option<Value>> {
         let (expr, d) = (Expr::parse(e)?, Document::from(doc));
-        expr.eval(&d, &Scope::new(d.clone(), vars))
+        expr.eval(&d, &drawing_scope(&d, vars))
     }
 
     fn eval_projection(
@@ -94,7 +122,7 @@ impl Extensions for NodeExtensions {
         let expr =
             teseladb_exec::pipeline::projected_expr(e, &teseladb_exec::expr::Ctx::default())?;
         let d = Document::from(doc);
-        expr.eval(&d, &Scope::new(d.clone(), vars))
+        expr.eval(&d, &drawing_scope(&d, vars))
     }
 
     fn update_pipeline(
@@ -176,6 +204,6 @@ impl teseladb_exec::pipeline::Env for VarsEnv {
     }
 
     fn random(&self) -> f64 {
-        0.0
+        NodeExtensions.random()
     }
 }
