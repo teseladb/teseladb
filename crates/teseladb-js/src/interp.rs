@@ -264,12 +264,23 @@ fn native_name(f: &Val) -> Option<Name> {
     }
 }
 
+/// How the key of a private name starts (`@@#x@3`): a slot no program can name or list.
+pub const PRIVATE_PREFIX: &str = "@@#";
+/// The binding of a class scope that holds the private methods of its instances.
+const PRIVATE_METHODS: &str = "#";
+
+/// The name in the key of a private name, without its `#`.
+fn private_name(key: &str) -> &str {
+    let rest = key.strip_prefix(PRIVATE_PREFIX).unwrap_or(key);
+    rest.rsplit_once('@').map_or(rest, |(n, _)| n)
+}
+
 /// The name of a key for messages: `o.f`.
 pub(crate) fn callee_text(e: &Expr) -> String {
     match e {
         Expr::Ident(n, _) => n.to_string(),
         Expr::Member { obj, prop, .. } => match &**prop {
-            MemberProp::Name(n) => format!("{}.{n}", callee_text(obj)),
+            MemberProp::Name(n) | MemberProp::Private(n) => format!("{}.{n}", callee_text(obj)),
             // SpiderMonkey folds a constant key: `o['k' + 1]` is `o.k1`, `o['a b']` stays.
             MemberProp::Computed(k) => match fold_key(k) {
                 Some(key) if is_identifier(&key) => format!("{}.{key}", callee_text(obj)),
@@ -686,6 +697,9 @@ impl<'c> Interp<'c> {
 
     /// The property `key` of `v`, through its prototypes and getters.
     pub fn get(&mut self, v: &Val, key: &str) -> R {
+        if key.starts_with(PRIVATE_PREFIX) {
+            return self.private_get(v, key);
+        }
         let start = match v {
             Val::Obj(o) => o.clone(),
             Val::Undef | Val::Null => {
@@ -773,6 +787,9 @@ impl<'c> Interp<'c> {
 
     /// Sets property `key` of `target` to `value`, through setters of its prototypes.
     pub fn set(&mut self, target: &Val, key: &str, value: Val) -> R<()> {
+        if key.starts_with(PRIVATE_PREFIX) {
+            return self.private_set(target, key, value);
+        }
         let Val::Obj(o) = target else {
             if target.is_nullish() {
                 return self.type_error(&format!("{} has no properties", self.show(target)));
@@ -1388,17 +1405,42 @@ impl<'c> Interp<'c> {
     }
 
     /// The instance fields of class `c` on `obj`.
+    /// The value of a field's initializer `e`: an anonymous function is named after `key`.
+    fn field_value(&mut self, e: &Expr, scope: &EnvRef, key: &str) -> R {
+        let v = self.eval(e, scope)?;
+        if anonymous_definition(e) {
+            name_if_anonymous(&v, &key_function_name(key, None));
+        }
+        Ok(v)
+    }
+
     fn init_fields(&mut self, c: &ClassDef, env: &EnvRef, obj: &Val) -> R<()> {
+        let methods = env
+            .borrow()
+            .vars
+            .iter()
+            .find(|(k, _)| &**k == PRIVATE_METHODS)
+            .and_then(|(_, b)| b.value.clone());
+        if let (Some(Val::Obj(h)), Val::Obj(o)) = (&methods, obj) {
+            let all = h.borrow().props.clone();
+            for (k, p) in all {
+                self.private_add(o, &k, p)?;
+            }
+        }
         for m in c.members.iter().filter(|m| !m.is_static && m.func.is_none()) {
             let scope = self.new_env(Some(env.clone()));
             scope.borrow_mut().this = Some(obj.clone());
             let key = self.prop_key(&m.key, &scope)?;
             let v = match &m.field {
-                Some(e) => self.eval(e, &scope)?,
+                Some(e) => self.field_value(e, &scope, &key)?,
                 None => Val::Undef,
             };
             if let Val::Obj(o) = obj {
-                self.define(o, &key, Prop::data(v))?;
+                if matches!(m.key, PropName::Private(_)) {
+                    self.private_add(o, &key, Prop::data(v))?;
+                } else {
+                    self.define(o, &key, Prop::data(v))?;
+                }
             }
         }
         Ok(())
@@ -1727,6 +1769,7 @@ impl<'c> Interp<'c> {
     fn prop_key(&mut self, k: &PropName, scope: &EnvRef) -> R<Name> {
         match k {
             PropName::Fixed(n) => Ok(n.clone()),
+            PropName::Private(n) => self.private_key(n, scope),
             PropName::Computed(e) => {
                 let v = self.eval(e, scope)?;
                 self.key_of(&v)
@@ -2210,6 +2253,7 @@ impl<'c> Interp<'c> {
 
     pub fn class(&mut self, c: &Rc<ClassDef>, env: &EnvRef) -> R {
         let scope = self.new_env(Some(env.clone()));
+        self.declare_privates(c, &scope)?;
         let (parent_proto, parent_ctor) = match &c.parent {
             Some(p) => {
                 let pv = self.eval(p, env)?;
@@ -2301,7 +2345,17 @@ impl<'c> Interp<'c> {
                 continue;
             }
             let key = self.prop_key(&m.key, &scope)?;
-            if let Some(cur) = self.get_own_prop(&target, &key)
+            let private = matches!(m.key, PropName::Private(_));
+            let home = target.clone();
+            let target = match self.lookup(&scope, PRIVATE_METHODS) {
+                Some((e, i)) if private && !m.is_static => match &e.borrow().vars[i].1.value {
+                    Some(Val::Obj(h)) => h.clone(),
+                    _ => target,
+                },
+                _ => target,
+            };
+            if !private
+                && let Some(cur) = self.get_own_prop(&target, &key)
                 && !cur.configurable
             {
                 let shown = crate::props::shown_key(&key);
@@ -2310,10 +2364,11 @@ impl<'c> Interp<'c> {
             }
             if let Some(f) = &m.func {
                 let fv = self.closure(f, &scope)?;
+                name_if_anonymous(&fv, &key_function_name(&key, accessor_prefix(m.kind)));
                 if let Val::Obj(fo) = &fv
-                    && let Kind::Func(Func::Closure { home, .. }) = &mut fo.borrow_mut().kind
+                    && let Kind::Func(Func::Closure { home: h, .. }) = &mut fo.borrow_mut().kind
                 {
-                    *home = Some(target.clone());
+                    *h = Some(home.clone());
                 }
                 let fo = fv.as_obj().cloned();
                 let mut p =
@@ -2324,18 +2379,121 @@ impl<'c> Interp<'c> {
                     PropKind::Get => p.getter = fo,
                     PropKind::Set => p.setter = fo,
                 }
+                if private {
+                    // A private method is read-only; a private field is enumerable.
+                    p.writable = false;
+                    p.configurable = false;
+                }
                 self.define(&target, &key, p)?;
             } else if m.is_static {
                 let s = self.new_env(Some(scope.clone()));
                 s.borrow_mut().this = Some(Val::Obj(ctor.clone()));
                 let v = match &m.field {
-                    Some(e) => self.eval(e, &s)?,
+                    Some(e) => self.field_value(e, &s, &key)?,
                     None => Val::Undef,
                 };
                 self.define(&ctor, &key, Prop::data(v))?;
             }
         }
         Ok(Val::Obj(ctor))
+    }
+
+    /// The key that stands for the private name `n` (`#x`) where `env` is: the one its class
+    /// made when it was evaluated, so each evaluation of a class has names of its own.
+    fn private_key(&mut self, n: &str, env: &EnvRef) -> R<Name> {
+        let found = self.lookup(env, n).and_then(|(e, i)| e.borrow().vars[i].1.value.clone());
+        match found {
+            Some(Val::Str(k)) => Ok(k),
+            _ => Err(self.error(
+                "SyntaxError",
+                &format!("reference to undeclared private field or method {n}"),
+            )),
+        }
+    }
+
+    /// The private names a class declares, each with a key of this evaluation, bound in its
+    /// scope; the methods and accessors of its instances go to a holder bound as `#`, which each
+    /// new instance copies.
+    fn declare_privates(&mut self, c: &ClassDef, scope: &EnvRef) -> R<()> {
+        for m in &c.members {
+            let PropName::Private(n) = &m.key else { continue };
+            if self.lookup_own(scope, n) {
+                continue;
+            }
+            self.symbol_ids += 1;
+            let key = format!("{PRIVATE_PREFIX}{}@{}", &n[1..], self.symbol_ids);
+            declare(scope, n, Val::Str(key.into()), false);
+        }
+        if c.members
+            .iter()
+            .any(|m| !m.is_static && m.func.is_some() && matches!(m.key, PropName::Private(_)))
+        {
+            let holder = self.alloc(None, Kind::Ordinary)?;
+            declare(scope, PRIVATE_METHODS, Val::Obj(holder), false);
+        }
+        Ok(())
+    }
+
+    fn lookup_own(&self, scope: &EnvRef, n: &str) -> bool {
+        scope.borrow().vars.iter().any(|(k, _)| &**k == n)
+    }
+
+    /// Reads the private member `key` of `v` (measured on a `refrouter` 9.0.4 on 02-11): only an
+    /// own member, never through a proxy or the prototypes.
+    fn private_get(&mut self, v: &Val, key: &str) -> R {
+        let p = match v {
+            Val::Obj(o) => o.borrow().get_own(key).cloned(),
+            _ => None,
+        };
+        let Some(p) = p else {
+            return self
+                .type_error("can't access private field or method: object is not the right class");
+        };
+        if !p.is_accessor() {
+            return Ok(p.value);
+        }
+        match p.getter {
+            Some(g) => self.call(&Val::Obj(g), v, &[]),
+            None => self.type_error("getting private setter-only property"),
+        }
+    }
+
+    /// Writes the private member `key` of `v`: a field (enumerable, even in a frozen object), a
+    /// setter, and the errors of a method, a getter alone or an object without it.
+    fn private_set(&mut self, v: &Val, key: &str, value: Val) -> R<()> {
+        let Val::Obj(o) = v else {
+            return self.type_error("can't set private field: object is not the right class");
+        };
+        let p = o.borrow().get_own(key).cloned();
+        let Some(p) = p else {
+            return self.type_error("can't set private field: object is not the right class");
+        };
+        if p.is_accessor() {
+            return match p.setter {
+                Some(s) => self.call(&Val::Obj(s), v, &[value]).map(|_| ()),
+                None => {
+                    let name = private_name(key);
+                    self.type_error(&format!("setting getter-only property #{name}"))
+                }
+            };
+        }
+        if !p.enumerable {
+            return self.type_error("cannot assign to private method");
+        }
+        if let Some(slot) = o.borrow_mut().get_own_mut(key) {
+            slot.value = value;
+        }
+        Ok(())
+    }
+
+    /// Adds the private member `key` to `o` as a new instance gets it: an object gets each once.
+    fn private_add(&self, o: &ObjRef, key: &str, prop: Prop) -> R<()> {
+        if o.borrow().get_own(key).is_some() {
+            return self.type_error("Initializing an object twice is an error with private fields");
+        }
+        self.grow(o, 1)?;
+        o.borrow_mut().props.push((key.into(), prop));
+        Ok(())
     }
 
     fn get_own_prop(&self, o: &ObjRef, key: &str) -> Option<Prop> {
@@ -2346,6 +2504,16 @@ impl<'c> Interp<'c> {
 
     pub fn eval(&mut self, e: &Expr, env: &EnvRef) -> R {
         match e {
+            Expr::PrivateIn(n, x) => {
+                let key = self.private_key(n, env)?;
+                let v = self.eval(x, env)?;
+                let Val::Obj(o) = &v else {
+                    let msg =
+                        format!("right-hand side of 'in' should be an object, got {}", v.type_of());
+                    return self.type_error(&msg);
+                };
+                Ok(Val::Bool(o.borrow().get_own(&key).is_some()))
+            }
             Expr::Num(n) => Ok(Val::Num(*n)),
             Expr::BigInt(b) => Ok(Val::BigInt(b.clone())),
             // The parser leaves a generator's `yield` only where `generators.rs` runs it.
@@ -2615,6 +2783,7 @@ impl<'c> Interp<'c> {
     fn member_key(&mut self, prop: &MemberProp, env: &EnvRef) -> R<Name> {
         match prop {
             MemberProp::Name(n) => Ok(n.clone()),
+            MemberProp::Private(n) => self.private_key(n, env),
             MemberProp::Computed(e) => {
                 let v = self.eval(e, env)?;
                 self.key_of(&v)
@@ -2701,16 +2870,14 @@ impl<'c> Interp<'c> {
                         if let Kind::Func(Func::Closure { home, .. }) = &mut f.borrow_mut().kind {
                             *home = Some(o.clone());
                         }
-                        let unnamed = matches!(f.borrow().get_own("name").map(|p| &p.value), Some(Val::Str(s)) if s.is_empty());
-                        if unnamed && let Some(p) = f.borrow_mut().get_own_mut("name") {
-                            p.value = Val::Str(key.clone());
-                        }
+                        name_if_anonymous(&v, &key_function_name(&key, None));
                     }
                     self.define(&o, &key, Prop::data(v))?;
                 }
                 ObjProp::Accessor(k, kind, def) => {
                     let key = self.prop_key(k, env)?;
                     let f = self.closure(def, env)?;
+                    name_if_anonymous(&f, &key_function_name(&key, accessor_prefix(*kind)));
                     let mut p = self
                         .get_own_prop(&o, &key)
                         .filter(Prop::is_accessor)
@@ -2806,7 +2973,17 @@ impl<'c> Interp<'c> {
     /// function (unless it is strict) and may not redeclare a `let` on the way (ECMA-262 §19.2.1).
     pub fn direct_eval(&mut self, src: Val, env: &EnvRef) -> R {
         let Val::Str(src) = src else { return Ok(src) };
-        let body = crate::parser::parse_script(&src).map_err(|e| self.syntax_error(&e))?;
+        // The code may use the private names of the classes around the call.
+        let mut privates = Vec::new();
+        let mut cur = Some(env.clone());
+        while let Some(e) = cur {
+            let b = e.borrow();
+            let names = b.vars.iter().map(|(k, _)| k).filter(|k| k.len() > 1 && k.starts_with('#'));
+            privates.extend(names.cloned());
+            cur = b.parent.clone();
+        }
+        let body =
+            crate::parser::parse_script_in(&src, &privates).map_err(|e| self.syntax_error(&e))?;
         let strict = self.strict || crate::parser::has_use_strict(&body);
         let lex = self.new_env(Some(env.clone()));
         let var_env = if strict { lex.clone() } else { var_scope_of(env) };
@@ -3186,6 +3363,46 @@ fn anonymous_definition(e: &Expr) -> bool {
         Expr::Class(c) => c.name.is_none(),
         Expr::At(_, x) => anonymous_definition(x),
         _ => false,
+    }
+}
+
+/// The name SetFunctionName (ECMA-262 §10.2.9) gives a function for the property `key`: a
+/// symbol's description in brackets, a private name with its `#`, with `prefix` (`get`, `set`).
+fn key_function_name(key: &str, prefix: Option<&str>) -> String {
+    let base = if key.starts_with(PRIVATE_PREFIX) {
+        format!("#{}", private_name(key))
+    } else if crate::value::is_symbol_key(key) {
+        let desc = key.strip_prefix("@@").and_then(|k| k.rsplit_once(':')).map_or("", |(d, _)| d);
+        if desc.is_empty() { String::new() } else { format!("[{desc}]") }
+    } else {
+        key.to_string()
+    };
+    match prefix {
+        Some(p) => format!("{p} {base}"),
+        None => base,
+    }
+}
+
+/// Gives the function `v` the name `name` when it has none.
+fn name_if_anonymous(v: &Val, name: &str) {
+    let Val::Obj(f) = v else { return };
+    let mut b = f.borrow_mut();
+    if !b.is_callable() {
+        return;
+    }
+    if let Some(prop) = b.get_own_mut("name")
+        && matches!(&prop.value, Val::Str(s) if s.is_empty())
+    {
+        prop.value = Val::str(name);
+    }
+}
+
+/// The prefix of the name of an accessor of `kind`.
+fn accessor_prefix(kind: PropKind) -> Option<&'static str> {
+    match kind {
+        PropKind::Get => Some("get"),
+        PropKind::Set => Some("set"),
+        PropKind::Value => None,
     }
 }
 

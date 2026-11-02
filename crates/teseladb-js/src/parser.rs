@@ -9,6 +9,12 @@ use crate::lexer::{SyntaxError, Tok, Token, tokenize};
 
 /// Parses a whole script.
 pub fn parse_script(src: &str) -> Result<Vec<Stmt>, SyntaxError> {
+    parse_script_in(src, &[])
+}
+
+/// Parses a whole script that may use the private names `privates` (the code of a direct
+/// `eval` inside a class).
+pub fn parse_script_in(src: &str, privates: &[Name]) -> Result<Vec<Stmt>, SyntaxError> {
     let mut p = Parser {
         toks: tokenize(src)?,
         i: 0,
@@ -23,7 +29,13 @@ pub fn parse_script(src: &str) -> Result<Vec<Stmt>, SyntaxError> {
         in_params: false,
         in_static: false,
         namer: crate::names::Namer::default(),
+        privates: Vec::new(),
+        loose_privates: false,
     };
+    if !privates.is_empty() {
+        let declared = privates.iter().map(|n| (n.clone(), PrivateKind::Field, false)).collect();
+        p.privates.push(PrivateScope { declared, used: Vec::new() });
+    }
     p.scopes.push(ScopeKind::Function);
     let mut out = Vec::new();
     while !p.at_eof() {
@@ -55,6 +67,8 @@ fn parse_expression(
         in_params: false,
         in_static: false,
         namer: crate::names::Namer::default(),
+        privates: Vec::new(),
+        loose_privates: true,
     };
     p.scopes.push(ScopeKind::Function);
     let start = p.pos();
@@ -118,6 +132,18 @@ fn at_always(pos: Pos, e: Expr) -> Expr {
     }
 }
 
+/// The precedence of the relational operators (`<`, `in`…).
+const RELATIONAL: u8 = 8;
+
+/// Whether `e` is a private member (`delete this.#x` is an early error).
+fn deletes_private(e: &Expr) -> bool {
+    match e {
+        Expr::Member { prop, .. } => matches!(**prop, MemberProp::Private(_)),
+        Expr::At(_, x) | Expr::OptChain(x) => deletes_private(x),
+        _ => false,
+    }
+}
+
 /// The deepest nesting the parser accepts before it reports too much recursion.
 const MAX_DEPTH: usize = 400;
 
@@ -155,6 +181,28 @@ struct Parser {
     in_static: bool,
     /// The functions read and where they are written, for their guessed names.
     namer: crate::names::Namer,
+    /// The private names of the classes open here, innermost last.
+    privates: Vec<PrivateScope>,
+    /// Whether a private name no class here declares is accepted (a template's substitution,
+    /// whose names the code around it checks).
+    loose_privates: bool,
+}
+
+/// What a private name of a class declares.
+#[derive(Clone, Copy, PartialEq)]
+enum PrivateKind {
+    Field,
+    Method,
+    Getter,
+    Setter,
+}
+
+/// The private names a class declares (with their kind and whether they are static) and those
+/// its code uses, with where.
+#[derive(Default)]
+struct PrivateScope {
+    declared: Vec<(Name, PrivateKind, bool)>,
+    used: Vec<(Name, Pos)>,
 }
 
 /// The name of a method or accessor: `m`, `get g`, `set s`.
@@ -184,6 +232,7 @@ fn describe(t: &Tok) -> String {
         Tok::Str(_) => "string literal".to_owned(),
         Tok::Template(..) => "template literal".to_owned(),
         Tok::Regex(..) => "regular expression literal".to_owned(),
+        Tok::Private(n) => format!("private name {n}"),
         Tok::Punct(p) => format!("'{p}'"),
         Tok::Eof => "end of script".to_owned(),
     }
@@ -367,7 +416,6 @@ impl Parser {
                 self.i += 1;
                 Ok(w)
             }
-            Tok::Punct("#") => self.fail("private fields are not supported".to_owned()),
             _ => self.fail(format!("missing name after . operator, got {}", describe(self.tok()))),
         }
     }
@@ -725,7 +773,7 @@ impl Parser {
                             }
                             Pattern::Name(n.clone())
                         }
-                        PropName::Computed(_) => return self.unexpected(),
+                        PropName::Computed(_) | PropName::Private(_) => return self.unexpected(),
                     }
                 };
                 let d = if self.eat("=") { Some(self.default_value()?) } else { None };
@@ -1097,6 +1145,7 @@ impl Parser {
         };
         let parent = if self.eat_word("extends") { Some(Box::new(self.lhs()?)) } else { None };
         self.expect("{")?;
+        self.privates.push(PrivateScope::default());
         let mut ctor = None;
         let mut members = Vec::new();
         while !self.eat("}") {
@@ -1131,14 +1180,27 @@ impl Parser {
             }
             let fk = self.method_prefix(kind);
             let name_pos = self.pos();
-            let key = self.prop_name()?;
+            let key = match self.tok().clone() {
+                Tok::Private(n) => {
+                    self.i += 1;
+                    let what = match kind {
+                        _ if !self.is("(") => PrivateKind::Field,
+                        PropKind::Get => PrivateKind::Getter,
+                        PropKind::Set => PrivateKind::Setter,
+                        PropKind::Value => PrivateKind::Method,
+                    };
+                    self.declare_private(&n, what, is_static, name_pos)?;
+                    PropName::Private(n)
+                }
+                _ => self.prop_name()?,
+            };
             self.class_member_rules(&key, is_static, kind, fk, start, name_pos, ctor.is_some())?;
             if self.is("(") {
                 let is_ctor =
                     !is_static && matches!(&key, PropName::Fixed(n) if &**n == "constructor");
                 let fk = FnKind { method: !is_ctor, ..fk };
                 let f = self.function_body(start, None, is_ctor && parent.is_some(), fk)?;
-                if let PropName::Fixed(n) = &key
+                if let PropName::Fixed(n) | PropName::Private(n) = &key
                     && !is_ctor
                 {
                     self.namer.method(&f, accessor_name(kind, n));
@@ -1154,8 +1216,78 @@ impl Parser {
                 members.push(ClassMember { is_static, key, kind, field: init, func: None });
             }
         }
+        self.end_private_scope()?;
         let source = self.source_from(pos);
         Ok(Rc::new(ClassDef { pos, name, parent, ctor, members, source }))
+    }
+
+    /// A use of the private name `n` at `pos`, checked when its class ends (measured on a
+    /// `refrouter` 9.0.4 on 02-11: a name no class around declares is a `SyntaxError`).
+    fn private_ref(&mut self, n: Name, pos: Pos) -> Result<(), SyntaxError> {
+        match self.privates.last_mut() {
+            Some(scope) => {
+                scope.used.push((n, pos));
+                Ok(())
+            }
+            None if self.loose_privates => Ok(()),
+            None => {
+                self.fail_at(pos, format!("reference to undeclared private field or method {n}"))
+            }
+        }
+    }
+
+    /// `#x` after `.` or `?.`: a private member.
+    fn private_member(&mut self) -> Result<Option<MemberProp>, SyntaxError> {
+        let Tok::Private(n) = self.tok().clone() else { return Ok(None) };
+        let pos = self.pos();
+        self.i += 1;
+        self.private_ref(n.clone(), pos)?;
+        Ok(Some(MemberProp::Private(n)))
+    }
+
+    /// A private name a class declares: a name once, or a getter and a setter both static or
+    /// both not (measured on a `refrouter` 9.0.4 on 02-11, with its message for any other repeat).
+    fn declare_private(
+        &mut self,
+        n: &Name,
+        kind: PrivateKind,
+        is_static: bool,
+        pos: Pos,
+    ) -> Result<(), SyntaxError> {
+        let declared = self.privates.last().map_or(&[][..], |s| &s.declared[..]);
+        if let Some(&(_, k, was_static)) = declared.iter().find(|(m, ..)| m == n) {
+            let pair = matches!(
+                (k, kind),
+                (PrivateKind::Getter, PrivateKind::Setter)
+                    | (PrivateKind::Setter, PrivateKind::Getter)
+            ) && was_static == is_static;
+            if !pair {
+                let what = if (k, kind) == (PrivateKind::Method, PrivateKind::Method) {
+                    "method"
+                } else {
+                    "name"
+                };
+                return self.fail_at(
+                    pos,
+                    format!("getter and setter for private {what} {n} should either be both static or non-static"),
+                );
+            }
+        }
+        if let Some(scope) = self.privates.last_mut() {
+            scope.declared.push((n.clone(), kind, is_static));
+        }
+        Ok(())
+    }
+
+    /// Ends a class's private names: the uses it does not declare go to the class around it.
+    fn end_private_scope(&mut self) -> Result<(), SyntaxError> {
+        let scope = self.privates.pop().unwrap_or_default();
+        for (n, pos) in scope.used {
+            if !scope.declared.iter().any(|(m, ..)| *m == n) {
+                self.private_ref(n, pos)?;
+            }
+        }
+        Ok(())
     }
 
     /// The early errors of a class member (measured on a `refrouter` 9.0.4 on 02-11): a
@@ -1171,6 +1303,12 @@ impl Parser {
         name_pos: Pos,
         has_ctor: bool,
     ) -> Result<(), SyntaxError> {
+        if matches!(key, PropName::Private(n) if &**n == "#constructor") {
+            return self.fail_at(
+                start,
+                "a class constructor definition must be a plain public method".into(),
+            );
+        }
         let PropName::Fixed(name) = key else { return Ok(()) };
         let method = self.is("(");
         if &**name == "constructor" && (!method || !is_static) {
@@ -1242,6 +1380,7 @@ impl Parser {
                 self.expect("]")?;
                 Ok(PropName::Computed(Box::new(e)))
             }
+            Tok::Private(_) => self.fail("private fields aren't valid in this context".into()),
             _ => self.fail(format!("invalid property name, got {}", describe(self.tok()))),
         }
     }
@@ -1448,7 +1587,7 @@ impl Parser {
             "^" => 5,
             "&" => 6,
             "==" | "!=" | "===" | "!==" => 7,
-            "<" | ">" | "<=" | ">=" | "instanceof" | "in" => 8,
+            "<" | ">" | "<=" | ">=" | "instanceof" | "in" => RELATIONAL,
             "<<" | ">>" | ">>>" => 9,
             "+" | "-" => 10,
             "*" | "/" | "%" => 11,
@@ -1459,7 +1598,21 @@ impl Parser {
     }
 
     fn binary(&mut self, min: u8, allow_in: bool) -> Result<Expr, SyntaxError> {
-        let mut left = self.unary()?;
+        let mut left = match self.tok().clone() {
+            Tok::Private(n) if matches!(self.peek_at(1), Tok::Ident(w) if &**w == "in") => {
+                // `#x in o` (ECMA-262 §13.10): a relational expression whose left is a name.
+                if min > RELATIONAL {
+                    return self
+                        .fail("invalid use of private name due to operator precedence".into());
+                }
+                let pos = self.pos();
+                self.i += 2;
+                self.private_ref(n.clone(), pos)?;
+                let right = self.binary(RELATIONAL + 1, allow_in)?;
+                Expr::PrivateIn(n, Box::new(right))
+            }
+            _ => self.unary()?,
+        };
         while let Some((op, prec)) = self.binary_op(allow_in) {
             if prec < min {
                 break;
@@ -1516,7 +1669,11 @@ impl Parser {
             Tok::Ident(w) if &*w == "delete" => {
                 let p = self.pos();
                 self.i += 1;
-                Ok(at(p, Expr::Delete(Box::new(self.unary()?))))
+                let target = self.unary()?;
+                if deletes_private(&target) {
+                    return self.fail_at(p, "private fields can't be deleted".into());
+                }
+                Ok(at(p, Expr::Delete(Box::new(target))))
             }
             Tok::Ident(w) if &*w == "await" && self.in_async => {
                 self.i += 1;
@@ -1576,13 +1733,11 @@ impl Parser {
             let pos = self.pos();
             if self.eat(".") {
                 let pos = self.pos();
-                let name = self.prop_ident()?;
-                e = Expr::Member {
-                    obj: Box::new(e),
-                    prop: Box::new(MemberProp::Name(name)),
-                    optional: false,
-                    pos,
+                let prop = match self.private_member()? {
+                    Some(p) => p,
+                    None => MemberProp::Name(self.prop_ident()?),
                 };
+                e = Expr::Member { obj: Box::new(e), prop: Box::new(prop), optional: false, pos };
             } else if self.eat("?.") {
                 chained = true;
                 if self.eat("(") {
@@ -1599,10 +1754,13 @@ impl Parser {
                         pos,
                     };
                 } else {
-                    let name = self.prop_ident()?;
+                    let prop = match self.private_member()? {
+                        Some(p) => p,
+                        None => MemberProp::Name(self.prop_ident()?),
+                    };
                     e = Expr::Member {
                         obj: Box::new(e),
-                        prop: Box::new(MemberProp::Name(name)),
+                        prop: Box::new(prop),
                         optional: true,
                         pos,
                     };
@@ -1649,13 +1807,11 @@ impl Parser {
         loop {
             let pos = self.pos();
             if self.eat(".") {
-                let name = self.prop_ident()?;
-                e = Expr::Member {
-                    obj: Box::new(e),
-                    prop: Box::new(MemberProp::Name(name)),
-                    optional: false,
-                    pos,
+                let prop = match self.private_member()? {
+                    Some(p) => p,
+                    None => MemberProp::Name(self.prop_ident()?),
                 };
+                e = Expr::Member { obj: Box::new(e), prop: Box::new(prop), optional: false, pos };
             } else if self.eat("[") {
                 let p = self.expression()?;
                 self.expect("]")?;
@@ -1682,6 +1838,10 @@ impl Parser {
         let t = self.tok().clone();
         self.i += 1;
         Ok(match t {
+            Tok::Private(_) => {
+                self.i -= 1;
+                return self.fail("private names aren't valid in this context".into());
+            }
             Tok::Num(n) => Expr::Num(n),
             Tok::BigInt(b) => Expr::BigInt(b),
             Tok::Str(s) => Expr::Str(s),
@@ -1738,6 +1898,9 @@ impl Parser {
                     if self.eat("(") {
                         Expr::SuperCall(self.arguments()?, pos)
                     } else if self.eat(".") {
+                        if matches!(self.tok(), Tok::Private(_)) {
+                            return self.fail("invalid access of private field on 'super'".into());
+                        }
                         Expr::SuperMember(Box::new(Expr::Str(self.prop_ident()?)))
                     } else if self.eat("[") {
                         let e = self.expression()?;
@@ -1838,7 +2001,7 @@ impl Parser {
                 } else if self.is("(") {
                     let name = match &key {
                         PropName::Fixed(n) => Some(n.clone()),
-                        PropName::Computed(_) => None,
+                        PropName::Computed(_) | PropName::Private(_) => None,
                     };
                     let f =
                         self.function_body(start, name, false, FnKind { method: true, ..fk })?;

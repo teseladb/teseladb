@@ -2355,3 +2355,102 @@ Object.getOwnPropertyNames('ab').join()	S:0,1,length
 (() => { const o = Object.create(null); try { return String(o) } catch (e) { return e.message } })()	S:can't convert o to string
 (() => { const o = { valueOf() { return {} }, toString() { return {} } }; try { return Number(o) } catch (e) { return e.message } })()	S:can't convert ({valueOf() { return {} }, toString() { return {} }}) to number
 (() => { const o = Object.create(null); try { return Symbol(o) } catch (e) { return e.message } })()	S:can't convert o to string
+(() => { class D { static #p = 1; static y() {} } return Object.getOwnPropertyNames(D).join() })()	S:prototype,y,length,name
+(() => { class A { #x = 1; g() { return this.#x } }; return new A().g() })()	J:1
+(() => { class A { static #x = 4; static g() { return A.#x } }; return A.g() })()	J:4
+(() => { class A { #m() { return 2 } g() { return this.#m() } }; return new A().g() })()	J:2
+(() => { class A { #x = 1; static has(o) { return #x in o } }; return A.has(new A()) + ',' + A.has({}) })()	S:true,false
+(() => { class A { #x = 1; static g(o) { return o.#x } }; try { return A.g({}) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:can't access private field or method: object is not the right class
+(() => { class A { #x = 1; static s(o) { o.#x = 2 } }; try { return A.s({}) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:can't set private field: object is not the right class
+(() => { class A { #m() {} static s(o) { o.#m = 2 } }; try { return A.s(new A()) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:cannot assign to private method
+(() => { class A { get #g() { return 1 } static s(o) { o.#g = 2 } }; try { return A.s(new A()) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:setting getter-only property #g
+(() => { class A { set #s(v) {} static g(o) { return o.#s } }; try { return A.g(new A()) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:getting private setter-only property
+(() => { class A { #m() {} static g(o) { return o.#m() } }; try { return A.g({}) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:can't access private field or method: object is not the right class
+(() => { try { eval('class A { m() { return this.#y } }') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:reference to undeclared private field or method #y
+(() => { try { eval('class A { #x; #x; }') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:getter and setter for private name #x should either be both static or non-static
+(() => { try { eval('class A { #x; m() { delete this.#x } }') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:private fields can't be deleted
+(() => { try { eval('class A { #constructor() {} }') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:a class constructor definition must be a plain public method
+(() => { class A { #x = 1; static g(o) { return #x in o } }; try { return A.g(5) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:right-hand side of 'in' should be an object, got number
+(() => { class A { #x = 1; constructor(o) { return o } }; class B extends A { #y = 2; static has(o) { return #y in o } }; const o = {}; new B(o); try { new B(o) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:Initializing an object twice is an error with private fields
+(() => { class A { #x = 1; static g(o) { return o?.#x } }; return String(A.g(null)) + A.g(new A()) })()	S:undefined1
+(() => { class A { #x = 1; inc() { this.#x += 2; this.#x++; return this.#x } }; return new A().inc() })()	J:4
+(() => { class A { static #c = 0; static n() { return ++A.#c } }; A.n(); return A.n() })()	J:2
+(() => { class A { #x = 1; m() { const self = this; return (() => self.#x)() } }; return new A().m() })()	J:1
+(() => { class A { #x = 'a'; m() { class B { g(o) { return o.#x } } return new B().g(this) } }; return new A().m() })()	S:a
+(() => { class A { #x = 1; static keys(o) { return Object.getOwnPropertyNames(o).join() + '|' + JSON.stringify(o) + '|' + Object.getOwnPropertySymbols(o).length } }; return A.keys(new A()) })()	S:|{}|0
+(() => { class A { #x = 1; static f(o) { return o.#x } }; try { return A.f(new Proxy(new A(), {})) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:can't access private field or method: object is not the right class
+(() => { class A { #m() { return this } static t(o) { return o.#m() === o } }; return A.t(new A()) })()	J:true
+(() => { class A { #m() {} static t(o) { return o.#m === new A().#m } }; return A.t(new A()) })()	J:true
+(() => { class A { #x; static t(o) { return o.#x } }; return String(A.t(new A())) })()	S:undefined
+(() => { class A { #x = this.constructor.name; static t(o) { return o.#x } }; return A.t(new A()) })()	S:A
+(() => { class A { static #p() { return 9 } static t() { return A.#p() } }; return A.t() })()	J:9
+(() => { class A { get #a() { return 5 } set #a(v) { this.v = v } t() { this.#a = 3; return this.#a + this.v } }; return new A().t() })()	J:8
+(() => { class A { #x = 1; t() { return this.#x } }; return A.prototype.t.toString() })()	S:t() { return this.#x }
+(() => { class A { #x = 1 }; return A.toString() })()	S:class A { #x = 1 }
+(() => { class A { static #x = 1; static t() { return Object.getOwnPropertyNames(A).join() } }; return A.t() })()	S:prototype,t,length,name
+(() => { class A { #x = 1; t() { const { x } = { x: this.#x }; return x } }; return new A().t() })()	J:1
+(() => { try { eval('#x in {}') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:reference to undeclared private field or method #x
+(() => { try { eval('class A { m() { #x in {} } }') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:reference to undeclared private field or method #x
+(() => { class A { #x = 1; static t(o) { return Object.isFrozen(o) + ':' + o.#x } }; const a = new A(); Object.freeze(a); return A.t(a) })()	S:true:1
+(() => { try { eval('class A { #x; #x() {} }') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:getter and setter for private name #x should either be both static or non-static
+(() => { try { eval('class A { get #a() {} get #a() {} }') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:getter and setter for private name #a should either be both static or non-static
+(() => { try { eval('class A { get #a() {} static set #a(v) {} }') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:getter and setter for private name #a should either be both static or non-static
+(() => { try { eval('class A { #a; get #a() {} }') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:getter and setter for private name #a should either be both static or non-static
+(() => { try { eval('class A { get #a() {} set #a(v) {} }'); return 'ok' } catch (e) { return e.name + ':' + e.message } })()	S:ok
+(() => { try { eval('class A { static #a; static #a }') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:getter and setter for private name #a should either be both static or non-static
+(() => { try { eval('class A { #m() {} #m() {} }') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:getter and setter for private method #m should either be both static or non-static
+(() => { try { eval('({ #x: 1 })') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:private fields aren't valid in this context
+(() => { try { eval('class A { m() { return this.#x } #x = 1 }'); return 'ok' } catch (e) { return e.name + ':' + e.message } })()	S:ok
+(() => { try { eval('class A { #x = 1; m() { return this?.#x } }'); return 'ok' } catch (e) { return e.name + ':' + e.message } })()	S:ok
+(() => { try { eval('class A { #x = 1; m() { return #x } }') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:private names aren't valid in this context
+(() => { try { eval('class A { #x = 1; m() { return #x + 1 } }') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:private names aren't valid in this context
+(() => { try { eval('class A { #x = 1; m(o) { return 1 + #x in o } }') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid use of private name due to operator precedence
+(() => { try { eval('class A { #x = 1; m(o) { return #x in #x in o } }') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid use of private name due to operator precedence
+(() => { class A { #x = 1; m(o) { return #x in o === true } }; return new A().m(new A()) })()	J:true
+(() => { try { eval('class A { # x = 1 }') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:'#' not followed by identifier
+(() => { try { eval('class A { #x = 1; m() { super.#x } }') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid access of private field on 'super'
+(() => { try { eval('class A { #x = 1; m() { this.#x`t` } }'); return 'ok' } catch (e) { return e.name + ':' + e.message } })()	S:ok
+(() => { class A { #x = 1; m() { return eval('this.#x') } }; try { return new A().m() } catch (e) { return e.name + ':' + e.message } })()	J:1
+(() => { class A { #x() { return 1 } m() { return this.#x.name + '|' + this.#x.length } }; return new A().m() })()	S:#x|0
+(() => { class A { get #x() { return 1 } m() { return 1 } }; return Object.getOwnPropertyNames(A.prototype).join() })()	S:constructor,m
+(() => { class A { static #x = 1; static get() { return this.#x } }; class B extends A {}; try { return B.get() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:can't access private field or method: object is not the right class
+(class { m(){} }).prototype.m.name	S:m
+Object.getOwnPropertyDescriptor((class { get g() {} }).prototype, 'g').get.name	S:get g
+Object.getOwnPropertyDescriptor((class { set g(v) {} }).prototype, 'g').set.name	S:set g
+(class { static ['x' + 1]() {} }).x1.name	S:x1
+(class { static [Symbol.iterator]() {} })[Symbol.iterator].name	S:[Symbol.iterator]
+(class { static [Symbol('d')]() {} }).name	S:
+(() => { const s = Symbol(); return (class { static [s]() {} })[s].name })()	S:
+(class { static 5() {} })[5].name	S:5
+({ m() {} }).m.name	S:m
+Object.getOwnPropertyDescriptor({ get g() {} }, 'g').get.name	S:get g
+({ [Symbol.iterator]() {} })[Symbol.iterator].name	S:[Symbol.iterator]
+({ async *ag() {} }).ag.name + '|' + (class { static async m() {} }).m.name	S:ag|m
+(class { static x = function () {} }).x.name	S:x
+(class { y = () => 1 }).name	S:
+(() => { class A { y = () => 1 }; return new A().y.name })()	S:y
+(() => { class A { ['z'] = function () {} }; return new A().z.name })()	S:z
+(() => { class A { #p = function () {}; g() { return this.#p.name } }; return new A().g() })()	S:#p
+(() => { class A { get #g() { return 1 } static f() { return 1 } }; return 'ok' })()	S:ok
+(() => { class A { #x = 3; *gen() { yield this.#x; yield this.#x * 2 } }; return [...new A().gen()].join() })()	S:3,6
+(() => { class A { static #c = 5; static { A.#c += 1 } static g() { return A.#c } }; return A.g() })()	J:6
+(() => { function mk() { return class { #x = 1; static g(o) { return o.#x } } }; const A = mk(), B = mk(); try { return B.g(new A()) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:can't access private field or method: object is not the right class
+(() => { class A { #m() { return 7 } static g(o) { return o?.#m() } }; return String(A.g(undefined)) + A.g(new A()) })()	S:undefined7
+(() => { class A { #x = 0; t() { [this.#x] = [5]; return this.#x } }; return new A().t() })()	J:5
+(() => { class A { #x = 0; t() { ({ a: this.#x } = { a: 6 }); return this.#x } }; return new A().t() })()	J:6
+(() => { class A { #x = null; t() { this.#x ??= 3; this.#x &&= this.#x + 1; this.#x ||= 9; return this.#x } }; return new A().t() })()	J:4
+(() => { class A { #x = 1; t() { for (this.#x of [4, 5]); return this.#x } }; return new A().t() })()	J:5
+(() => { class A { #x = 2; y = this.#x * 10 }; return new A().y })()	J:20
+(() => { class B { constructor(o) { return o } }; class A extends B { #x = 8; static g(o) { return o.#x } }; const o = {}; new A(o); return A.g(o) + ':' + Object.keys(o).length })()	S:8:0
+(() => { class A { #x = 1; static g(o) { return o.#x } }; class C extends A { }; return A.g(new C()) })()	J:1
+(() => { class A { #x = 1; m() { return function () { return this.#x }.call(this) } }; return new A().m() })()	J:1
+(() => { class A { static #s() { return 's' } static t() { return this.#s() } }; class B extends A {}; try { return B.t() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:can't access private field or method: object is not the right class
+(() => { class A { #x = 1; t() { return typeof this.#x } }; return new A().t() })()	S:number
+(() => { class A { #x = 1; t() { return `${this.#x}!` } }; return new A().t() })()	S:1!
+(() => { class A { #x = 1; t() { return this.#x++ + ++this.#x + this.#x-- } }; return new A().t() })()	J:7
+(() => { class A { #m() {} t() { try { this.#m++ } catch (e) { return e.name + ':' + e.message } } }; return new A().t() })()	S:TypeError:cannot assign to private method
+(() => { class A { #x = 1; static t() { return Object.getOwnPropertyNames(new A()).length + ':' + JSON.stringify(Object.getOwnPropertyDescriptors(new A())) } }; return A.t() })()	S:0:{}
+(() => { class A { #x = 1; static t(o) { return #x in o } }; return A.t(new Proxy(new A(), {})) })()	J:false
+(() => { class A { #x = 1; static t() { const a = new A(); const b = Object.assign({}, a); return #x in b } }; return A.t() })()	J:false
+(() => { class A { #x = {}; static t() { const a = new A(); return Object.prototype.toString.call(a) + typeof structuredClone } }; return A.t() })()	S:[object Object]undefined
+(() => { class A { async #am() { return 1 } t() { return typeof this.#am } }; return new A().t() })()	S:function

@@ -38,6 +38,7 @@ pub fn expr_yields(e: &Expr) -> bool {
         | Expr::OptChain(x)
         | Expr::Typeof(x)
         | Expr::Delete(x)
+        | Expr::PrivateIn(_, x)
         | Expr::Await(x)
         | Expr::At(_, x) => expr_yields(x),
         Expr::SuperCall(xs, _) => xs.iter().any(expr_yields),
@@ -258,6 +259,7 @@ impl Lower {
             Expr::OptChain(x) => Expr::OptChain(Box::new(self.expr(*x, pre))),
             Expr::Typeof(x) => Expr::Typeof(Box::new(self.expr(*x, pre))),
             Expr::Delete(x) => Expr::Delete(Box::new(self.expr(*x, pre))),
+            Expr::PrivateIn(n, x) => Expr::PrivateIn(n, Box::new(self.expr(*x, pre))),
             Expr::Await(x) => Expr::Await(Box::new(self.expr(*x, pre))),
             Expr::At(p, x) => Expr::At(p, Box::new(self.expr(*x, pre))),
             Expr::SuperCall(xs, pos) => Expr::SuperCall(self.spread_ordered(xs, pre), pos),
@@ -742,6 +744,7 @@ impl Expr {
                 prop: Box::new(match &**prop {
                     MemberProp::Name(n) => MemberProp::Name(n.clone()),
                     MemberProp::Computed(k) => MemberProp::Computed(k.clone_shallow()),
+                    MemberProp::Private(n) => MemberProp::Private(n.clone()),
                 }),
                 optional: *optional,
                 pos: *pos,

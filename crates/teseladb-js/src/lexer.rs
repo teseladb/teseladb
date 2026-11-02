@@ -15,6 +15,8 @@ pub enum Tok {
     /// and column where it starts.
     Template(Rc<TemplateParts>, Vec<(String, u32, u32)>),
     Regex(Rc<str>, Rc<str>),
+    /// A private name, `#` included (`#x`).
+    Private(Rc<str>),
     Punct(&'static str),
     Eof,
 }
@@ -53,7 +55,7 @@ const PUNCTS: &[&str] = &[
     ">>>=", "...", "===", "!==", "**=", "<<=", ">>=", ">>>", "&&=", "||=", "??=", "=>", "==", "!=",
     "<=", ">=", "&&", "||", "??", "?.", "++", "--", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=",
     "**", "<<", ">>", "{", "}", "(", ")", "[", "]", ";", ",", "<", ">", "+", "-", "*", "/", "%",
-    "&", "|", "^", "!", "~", "?", ":", "=", ".", "@", "#",
+    "&", "|", "^", "!", "~", "?", ":", "=", ".", "@",
 ];
 
 /// Splits `src` into tokens.
@@ -181,26 +183,39 @@ impl Lexer {
         Ok(())
     }
 
+    /// An identifier, its `\u` escapes read.
+    fn word(&mut self) -> Result<String, SyntaxError> {
+        let mut w = String::new();
+        while let Some(c) = self.peek(0) {
+            if is_id_part(c) {
+                w.push(c);
+                self.bump();
+            } else if c == '\\' && self.peek(1) == Some('u') {
+                self.bump();
+                self.bump();
+                crate::text::push_cp(&mut w, self.unicode_escape()?);
+            } else {
+                break;
+            }
+        }
+        if w.is_empty() {
+            // A `\` that does not start `\u`: nothing was read (found by fuzzing).
+            return self.err("illegal character U+005C");
+        }
+        Ok(w)
+    }
+
     fn token(&mut self, c: char) -> Result<Tok, SyntaxError> {
+        if c == '#' {
+            self.bump();
+            if !self.peek(0).is_some_and(|n| is_id_start(n) || n == '\\') {
+                return self.err("'#' not followed by identifier");
+            }
+            let w = self.word()?;
+            return Ok(Tok::Private(format!("#{w}").into()));
+        }
         if is_id_start(c) || c == '\\' {
-            let mut w = String::new();
-            while let Some(c) = self.peek(0) {
-                if is_id_part(c) {
-                    w.push(c);
-                    self.bump();
-                } else if c == '\\' && self.peek(1) == Some('u') {
-                    self.bump();
-                    self.bump();
-                    crate::text::push_cp(&mut w, self.unicode_escape()?);
-                } else {
-                    break;
-                }
-            }
-            if w.is_empty() {
-                // A `\` that does not start `\u`: nothing was read (found by fuzzing).
-                return self.err("illegal character U+005C");
-            }
-            return Ok(Tok::Ident(w.into()));
+            return Ok(Tok::Ident(self.word()?.into()));
         }
         if c.is_ascii_digit() || (c == '.' && self.peek(1).is_some_and(|d| d.is_ascii_digit())) {
             return self.number();

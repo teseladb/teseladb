@@ -34,6 +34,8 @@ pub enum Pattern {
 pub enum PropName {
     Fixed(Name),
     Computed(Box<Expr>),
+    /// A private name of a class element, `#` included.
+    Private(Name),
 }
 
 /// A function's code, shared by every closure made from it.
@@ -159,12 +161,16 @@ pub enum Expr {
     /// as SpiderMonkey does (016 T021).
     At(Pos, Box<Expr>),
     Delete(Box<Expr>),
+    /// `#x in obj`.
+    PrivateIn(Name, Box<Expr>),
 }
 
 #[derive(Debug)]
 pub enum MemberProp {
     Name(Name),
     Computed(Expr),
+    /// `obj.#x`: a private name, `#` included.
+    Private(Name),
 }
 
 #[derive(Debug)]
