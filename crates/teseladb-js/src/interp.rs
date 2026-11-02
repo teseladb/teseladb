@@ -776,7 +776,12 @@ impl<'c> Interp<'c> {
                     return Ok(());
                 }
                 if p.getter.is_some() {
-                    return self.type_error(&format!("setting getter-only property \"{key}\""));
+                    let shown = if array_index(key).is_some() {
+                        key.to_string()
+                    } else {
+                        format!("\"{key}\"")
+                    };
+                    return self.type_error(&format!("setting getter-only property {shown}"));
                 }
                 if !p.writable {
                     return self.read_only(key);
@@ -1718,7 +1723,18 @@ impl<'c> Interp<'c> {
             Val::Obj(o) => {
                 let kind = o.borrow().kind.clone();
                 match kind {
-                    Kind::Array(items) => return Ok(items),
+                    Kind::Array(items) if o.borrow().locks & ELEMENTS_OWN == 0 => {
+                        return Ok(items);
+                    }
+                    Kind::Array(items) => {
+                        // An element with its own attributes is read through its getter.
+                        let target = Val::Obj(o.clone());
+                        let mut out = Vec::with_capacity(items.len());
+                        for i in 0..items.len() {
+                            out.push(self.get(&target, &i.to_string())?);
+                        }
+                        return Ok(out);
+                    }
                     Kind::Typed(t) => return Ok(crate::typed::elements(&t)),
                     Kind::Set(items) => return Ok(items),
                     Kind::Map(entries) => {

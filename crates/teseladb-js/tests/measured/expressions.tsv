@@ -1611,3 +1611,21 @@ ObjectId("0123456789abcdef0123456z")	E:Error:invalid object id: not hex
 ObjectId("abc")	E:Error:invalid object id: length
 ObjectId("0123456789abcdef01234567890")	E:Error:invalid object id: length
 (function f(){}).x = 1	J:1
+(() => { const a = [1, 2, 3]; Object.defineProperty(a, 1, {get() { return 20 }}); return [a.map(x => x).join(), a.join(), a.slice(0).join(), a.indexOf(20), a.includes(20), a.filter(x => x > 5).join(), a.reduce((p, x) => p + x, 0), JSON.stringify(a), [...a].join(), a.concat([]).join(), a.toString(), a.at(1), a.find(x => x == 20), a.some(x => x == 20), a.lastIndexOf(20), a.flat().join(), Array.from(a).join(), a.toReversed().join(), a.with(0, 9).join(), a.entries().next() && [...a.values()].join()].join("|") })()	S:1,20,3|1,20,3|1,20,3|1|true|20|24|[1,20,3]|1,20,3|1,20,3|1,20,3|20|20|true|1|1,20,3|1,20,3|3,20,1|9,20,3|1,20,3
+(() => { const a = [3, 1, 2]; Object.defineProperty(a, 0, {get() { return 0 }, set(v) {}, configurable: true}); a.sort(); return a.join() })()	S:0,1,2
+(() => { const a = [1, 2]; let n = 0; Object.defineProperty(a, 0, {get() { n++; return 1 }}); a.forEach(() => {}); a.every(x => x); a.findIndex(x => x == 2); return n })()	J:3
+(() => { const a = [1, 2]; Object.defineProperty(a, 0, {get() { throw new Error("g") }}); return a.map(x => x) })()	E:Error:g
+(() => { const a = [1, 2]; Object.defineProperty(a, 0, {get() { return 7 }}); return [a.pop(), a.shift(), a.length].join() })()	S:2,7,0
+(() => { const a = [1, 2]; Object.defineProperty(a, 0, {get() { return 7 }, configurable: true}); a.reverse(); return JSON.stringify(Object.getOwnPropertyDescriptor(a, 1)) + a.join() })()	E:TypeError:setting getter-only property 0
+(() => { "use strict"; const o = {get x() { return 1 }}; o.x = 2 })()	E:TypeError:setting getter-only property "x"
+(() => { "use strict"; const o = {get 5() { return 1 }}; o[5] = 2 })()	E:TypeError:setting getter-only property 5
+(() => { "use strict"; const o = {get "a b"() { return 1 }}; o["a b"] = 2 })()	E:TypeError:setting getter-only property "a b"
+[1, 2, 3].with(-1, 9).join()	S:1,2,9
+[1, 2, 3].with(3, 9)	E:RangeError:invalid or out-of-range index
+[1, 2, 3].with(-4, 9)	E:RangeError:invalid or out-of-range index
+[1, 2, 3].with("1", 9).join()	S:1,9,3
+[1, 2, 3].toSpliced(1, 1, "a", "b").join()	S:1,a,b,3
+[1, 2, 3].toSpliced().join()	S:1,2,3
+[1, 2, 3].toSpliced(-1).join()	S:1,2
+[1, 2, 3].toSpliced(0, 0).join()	S:1,2,3
+Array.prototype.with.length + "," + Array.prototype.toSpliced.length	S:2,2

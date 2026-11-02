@@ -38,6 +38,8 @@ pub fn install(it: &mut Interp, proto: &ObjRef) -> R<()> {
         ("sort", sort, 1),
         ("toSorted", to_sorted, 1),
         ("toReversed", to_reversed, 0),
+        ("toSpliced", to_spliced, 2),
+        ("with", with, 2),
         ("flat", flat, 0),
         ("flatMap", flat_map, 1),
         ("fill", fill, 1),
@@ -55,6 +57,7 @@ pub fn install(it: &mut Interp, proto: &ObjRef) -> R<()> {
 /// The elements of `this` (an array, or an array-like object).
 fn items(it: &mut Interp, this: &Val) -> R<Vec<Val>> {
     if let Val::Obj(o) = this
+        && !has_own_elements(o)
         && let Kind::Array(v) = &o.borrow().kind
     {
         return Ok(v.clone());
@@ -68,6 +71,58 @@ fn items(it: &mut Interp, this: &Val) -> R<Vec<Val>> {
         out.push(it.get(&o, &i.to_string())?);
     }
     Ok(out)
+}
+
+/// Whether some element of the array `o` is an own property with attributes of its own (an
+/// accessor, a read-only value): the methods then go through `get` and `set`, which call its
+/// getter and setter (ECMA-262 §23.1.3).
+fn has_own_elements(o: &ObjRef) -> bool {
+    o.borrow().locks & ELEMENTS_OWN != 0
+}
+
+fn key(i: usize) -> String {
+    i.to_string()
+}
+
+/// Writes `values` to the first elements of `o` with `set`.
+fn write_back(it: &mut Interp, o: &ObjRef, values: Vec<Val>) -> R<()> {
+    let target = Val::Obj(o.clone());
+    for (i, x) in values.into_iter().enumerate() {
+        it.set(&target, &key(i), x)?;
+    }
+    Ok(())
+}
+
+/// `pop` and `shift` through `get`, `set` and `delete`.
+fn remove_generic(it: &mut Interp, o: &ObjRef, first: bool) -> R {
+    let target = Val::Obj(o.clone());
+    let len = it.array_len(o);
+    if len == 0 {
+        return Ok(Val::Undef);
+    }
+    let out = it.get(&target, &key(if first { 0 } else { len - 1 }))?;
+    if first {
+        for k in 1..len {
+            let x = it.get(&target, &key(k))?;
+            it.set(&target, &key(k - 1), x)?;
+        }
+    }
+    it.delete_key(o, &key(len - 1))?;
+    it.set(&target, "length", Val::Num((len - 1) as f64))?;
+    Ok(out)
+}
+
+/// `reverse` through `get` and `set`, pair by pair from the ends.
+fn reverse_generic(it: &mut Interp, o: &ObjRef) -> R<()> {
+    let target = Val::Obj(o.clone());
+    let len = it.array_len(o);
+    for lower in 0..len / 2 {
+        let upper = len - 1 - lower;
+        let (a, b) = (it.get(&target, &key(lower))?, it.get(&target, &key(upper))?);
+        it.set(&target, &key(lower), b)?;
+        it.set(&target, &key(upper), a)?;
+    }
+    Ok(())
 }
 
 fn array_obj(it: &Interp, this: &Val) -> R<ObjRef> {
@@ -181,12 +236,18 @@ fn push(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 fn pop(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     let o = array_obj(it, this)?;
     check(it, &o, Change::Shrink)?;
+    if has_own_elements(&o) {
+        return remove_generic(it, &o, false);
+    }
     Ok(with_vec(&o, Vec::pop).flatten().unwrap_or(Val::Undef))
 }
 
 fn shift(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     let o = array_obj(it, this)?;
     check(it, &o, Change::Shift)?;
+    if has_own_elements(&o) {
+        return remove_generic(it, &o, true);
+    }
     Ok(with_vec(&o, |v| if v.is_empty() { None } else { Some(v.remove(0)) })
         .flatten()
         .unwrap_or(Val::Undef))
@@ -292,6 +353,10 @@ fn to_locale_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
 fn reverse(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     let o = array_obj(it, this)?;
     check(it, &o, Change::Write)?;
+    if has_own_elements(&o) {
+        reverse_generic(it, &o)?;
+        return Ok(this.clone());
+    }
     with_vec(&o, |v| v.reverse());
     Ok(this.clone())
 }
@@ -531,6 +596,10 @@ fn sort(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     }
     let v = items(it, this)?;
     let s = sorted(it, v, &cmp)?;
+    if has_own_elements(&o) {
+        write_back(it, &o, s)?;
+        return Ok(this.clone());
+    }
     with_vec(&o, |v| *v = s);
     Ok(this.clone())
 }
@@ -545,6 +614,39 @@ fn to_sorted(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 fn to_reversed(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     let mut v = items(it, this)?;
     v.reverse();
+    it.charge(v.len() * PROP_BYTES)?;
+    it.array(v)
+}
+
+/// `toSpliced(start, skipCount, ...items)`: a copy with `splice` applied.
+fn to_spliced(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    let mut v = items(it, this)?;
+    let len = v.len();
+    let start = relative(it, &arg(a, 0), len, 0)?;
+    let skip = match a.len() {
+        0 => 0,
+        1 => len - start,
+        _ => {
+            let c = it.number_of(&a[1])?;
+            if c.is_nan() || c < 0.0 { 0 } else { (c as usize).min(len - start) }
+        }
+    };
+    let insert = a.get(2..).unwrap_or(&[]).to_vec();
+    v.splice(start..start + skip, insert);
+    it.charge(v.len() * PROP_BYTES)?;
+    it.array(v)
+}
+
+/// `with(index, value)`: a copy with one element replaced.
+fn with(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    let mut v = items(it, this)?;
+    let n = it.number_of(&arg(a, 0))?;
+    let n = if n.is_nan() { 0.0 } else { n.trunc() };
+    let i = if n < 0.0 { v.len() as f64 + n } else { n };
+    if i < 0.0 || i >= v.len() as f64 {
+        return Err(it.error("RangeError", "invalid or out-of-range index"));
+    }
+    v[i as usize] = arg(a, 1);
     it.charge(v.len() * PROP_BYTES)?;
     it.array(v)
 }
@@ -586,6 +688,13 @@ fn fill(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let start = relative(it, &arg(a, 1), len, 0)?;
     let end = relative(it, &arg(a, 2), len, len)?;
     let x = arg(a, 0);
+    if has_own_elements(&o) {
+        let target = Val::Obj(o.clone());
+        for i in start..end {
+            it.set(&target, &key(i), x.clone())?;
+        }
+        return Ok(this.clone());
+    }
     with_vec(&o, |v| {
         for slot in v.iter_mut().take(end).skip(start) {
             *slot = x.clone();
