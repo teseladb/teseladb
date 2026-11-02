@@ -37,9 +37,12 @@ pub const REPL_SET_RESIZE_OPLOG: &str = "replSetResizeOplog";
 pub const REPL_SET_SYNC_FROM: &str = "replSetSyncFrom";
 /// `replSetAbortPrimaryCatchUp`.
 pub const REPL_SET_ABORT_PRIMARY_CATCH_UP: &str = "replSetAbortPrimaryCatchUp";
+/// `shardingState`: a member of a replica set that is not a shard says it is not enabled.
+pub const SHARDING_STATE: &str = "shardingState";
 
 /// The `replSet*` commands of this module (`replSetGetStatus` is in [`super::admin`]).
-pub const NAMES: [&str; 9] = [
+pub const NAMES: [&str; 10] = [
+    SHARDING_STATE,
     REPL_SET_GET_CONFIG,
     REPL_SET_STEP_DOWN,
     REPL_SET_RECONFIG,
@@ -120,6 +123,39 @@ const OPERATION_FAILED: Code = Code { code: 96, name: "OperationFailed" };
 /// `InvalidSyncSource`.
 const INVALID_SYNC_SOURCE: Code = Code { code: 72, name: "InvalidSyncSource" };
 
+/// The prefix of the config server's commands.
+pub const CONFIG_SERVER_PREFIX: &str = "_configsvr";
+
+/// A config server's command on a member, which is not one (measured on 9.0.4): a secondary
+/// says it is not primary, the primary that only config servers run it.
+pub fn config_server_refusal(
+    view: &crate::hello::ReplicaView,
+    name: &str,
+    node: &crate::hello::NodeInfo,
+) -> CommandError {
+    let topology = Document::new()
+        .with("processId", Value::ObjectId(node.topology.process_id))
+        .with("counter", node.topology.counter);
+    match gate_writes(&view.set, view.me, topology) {
+        Err(e) => e,
+        Ok(()) => CommandError::new(
+            ILLEGAL_OPERATION,
+            format!("{name} can only be run on config servers"),
+        ),
+    }
+}
+
+/// `NotWritablePrimary` on a member that is not the primary.
+fn gate_writes(set: &ReplicaSet, me: MemberId, topology: Document) -> Result<(), CommandError> {
+    let primary = set.primary().is_some_and(|p| set.member(p) == Some(me));
+    if primary {
+        return Ok(());
+    }
+    let mut e = CommandError::new(NOT_WRITABLE_PRIMARY, "not primary");
+    e.extra = Document::new().with("topologyVersion", topology);
+    Err(e)
+}
+
 /// What a member refuses before it runs command `name`: writes on a secondary and the
 /// router's commands (measured on 9.0.4).
 pub fn gate(
@@ -131,11 +167,8 @@ pub fn gate(
     if ROUTER_ONLY.contains(&name) {
         return Err(CommandError::new(COMMAND_NOT_FOUND, format!("no such command: '{name}'")));
     }
-    let primary = set.primary().is_some_and(|p| set.member(p) == Some(me));
-    if !primary && PRIMARY_ONLY.contains(&name) {
-        let mut e = CommandError::new(NOT_WRITABLE_PRIMARY, "not primary");
-        e.extra = Document::new().with("topologyVersion", topology);
-        return Err(e);
+    if PRIMARY_ONLY.contains(&name) {
+        return gate_writes(set, me, topology);
     }
     Ok(())
 }
@@ -154,7 +187,8 @@ fn member_view<B: Backend + ?Sized>(
     name: &str,
 ) -> Result<(ReplicaSet, MemberId, Presentation, [u8; 12]), CommandError> {
     let Some((rs, id)) = super::presentation::replica_set(backend)? else {
-        return Err(CommandError::new(COMMAND_NOT_FOUND, format!("no such command: '{name}'")));
+        // A `refrouter` 9.0.4 does not have them (measured).
+        return Err(CommandError::new(COMMAND_NOT_FOUND, format!("no such cmd: {name}")));
     };
     let me = my_host(backend)?;
     let member = rs
@@ -437,6 +471,10 @@ pub fn run<B: Backend + ?Sized>(
         REPL_SET_INITIATE => initiate(ctx),
         REPL_SET_RESIZE_OPLOG => resize_oplog(ctx),
         REPL_SET_SYNC_FROM => sync_from(ctx),
+        SHARDING_STATE => {
+            member_view(ctx.backend, SHARDING_STATE)?;
+            Ok(Document::new().with("enabled", false).with("ok", 1.0))
+        }
         _ => abort_primary_catch_up(ctx),
     }
 }
