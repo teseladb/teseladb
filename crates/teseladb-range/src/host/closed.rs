@@ -108,15 +108,17 @@ impl RangeHost {
         let Some(c) = core.read_mark(now).and_then(|m| closing(m, lag)) else { return false };
         let c = c.max(l.last_closed.0);
         // The heartbeats carry it only within the lease (the core checks it): a deposed leader
-        // could reach a follower with it. So does this replica's own reads (a change stream's,
+        // could reach a follower with it. So do this replica's own reads (a change stream's,
         // 014 FR-003): out of its lease another leader may write below the mark. The log does not
         // need the lease: the entry commits only while this term holds a quorum, and comes after
         // every write at or below the mark. It also moves the mark of a quiet range, whose leader
-        // sends no heartbeats.
-        if core.set_closed(g, c) && c > l.last_closed.0 {
+        // sends no heartbeats, and of a leader without lease reads for the rest of its term (a
+        // leadership transfer that did not finish), which writes it at every close instead.
+        let leased = core.set_closed(g, c);
+        if leased && c > l.last_closed.0 {
             l.last_closed = (c, core.status(g).map_or(0, |s| s.last_index));
         }
-        if now < l.log_close_at {
+        if leased && now < l.log_close_at {
             return false;
         }
         l.log_close_at = now + LOG_EVERY;

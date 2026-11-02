@@ -181,3 +181,30 @@ fn unknown_languages_are_refused() {
     let bad = parse(r#"{"weights": {"t": 1}, "default_language": "xx"}"#);
     assert!(TextIndex::from_spec(&bad).is_err());
 }
+
+/// The documents of the `text-*` scenarios (011 T028), whose replies `refnode` 9.0.4 gave.
+fn scenario_docs() -> Vec<Document> {
+    [
+        r#"{"_id": 1, "title": "Coffee shop", "body": "the best coffee and cakes of the town", "lang": "english"}"#,
+        r#"{"_id": 3, "title": "Tea house", "body": "green tea, black tea and coffee", "lang": "english"}"#,
+        r#"{"_id": 4, "title": "CAFÉ", "body": "Cafés y cafeterías de la ciudad", "language": "spanish"}"#,
+        r#"{"_id": 7, "title": "Coffee", "body": "coffee coffee coffee", "lang": "none"}"#,
+    ]
+    .iter()
+    .map(|j| parse(j))
+    .collect()
+}
+
+#[test]
+fn weighted_fields_add_up_and_negations_alone_match_nothing_as_measured() {
+    let weighted = TextIndex::from_spec(&parse(
+        r#"{"key": {"title": "text", "body": "text"}, "weights": {"title": 10, "body": 2}}"#,
+    ))
+    .expect("index");
+    let got = run(&weighted, &scenario_docs(), "coffee tea", plain());
+    let want = [(1, 8.75), (3, 10.799999999999999), (7, 13.5)];
+    assert!(same(&got, &want), "{got:?}");
+    let plain_index = TextIndex::from_spec(&parse(r#"{"key": {"title": "text", "body": "text"}}"#))
+        .expect("index");
+    assert_eq!(run(&plain_index, &scenario_docs(), "-coffee", plain()), Vec::new());
+}
