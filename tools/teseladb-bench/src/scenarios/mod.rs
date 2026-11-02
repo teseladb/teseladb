@@ -13,6 +13,7 @@ pub mod deflate;
 pub mod failover;
 pub mod follower_read;
 pub mod group0_limits;
+pub mod index;
 pub mod keys;
 pub mod lsm;
 pub mod lsm_compression;
@@ -159,6 +160,8 @@ pub fn run(args: &Args) -> Result<Report, String> {
         "reference" => reference::run(args),
         "wire" => wire::run(args),
         "crud" => crud::run(args),
+        "index-write" => index::run_write(args),
+        "index-read" => index::run_read(args),
         "aggregate" => query::run_aggregate(args),
         "sort" => query::run_sort(args),
         "group-large" => query::run_group_large(args),
@@ -174,7 +177,7 @@ pub fn run(args: &Args) -> Result<Report, String> {
         }
         other => Err(format!(
             "unknown scenario: {other} (available: raftlog, raftlog-recover, deflate, bson, keys, lsm, lsm-sustained, lsm-compression, \
-             write, read, failover, follower-read, group0-limits, split, add-node, rebalance, reference, wire, crud, aggregate, sort, group-large, txn, txn-readers, contention, tls-handshake, scram, timeseries, changestream-lag, ycsb-a … ycsb-f)"
+             write, read, failover, follower-read, group0-limits, split, add-node, rebalance, reference, wire, crud, index-write, index-read, aggregate, sort, group-large, txn, txn-readers, contention, tls-handshake, scram, timeseries, changestream-lag, ycsb-a … ycsb-f)"
         )),
     }
 }
