@@ -39,6 +39,8 @@ const META2: u8 = 8;
 const GATE: u8 = 9;
 /// Tag of [`Request::CurrentOps`].
 const CURRENT_OPS: u8 = 10;
+/// Tag of [`Request::Http`].
+const HTTP: u8 = 11;
 /// The answer of a node to [`Request::Gate`] that applies the gates.
 pub const GATE_HELD: u8 = 1;
 /// The answer of a node to [`Request::Gate`] that does not apply them yet.
@@ -101,6 +103,10 @@ pub enum Request {
     /// The operations in progress on the node that receives it (`currentOp`, 010 FR-016): the
     /// answer is a BSON document whose `ops` array holds each one as `currentOp` describes it.
     CurrentOps,
+    /// A request of the HTTP port for a cursor or a session the node that receives it opened
+    /// (019 FR-008, FR-020), with the caller's certificate user (`crate::http_service::Forwarded`,
+    /// encoded): the answer is the HTTP response, encoded the same way.
+    Http(Vec<u8>),
 }
 
 impl Request {
@@ -156,6 +162,7 @@ impl Request {
                 e.finish()
             }
             Request::CurrentOps => vec![CURRENT_OPS],
+            Request::Http(b) => [&[HTTP][..], b].concat(),
         }
     }
 
@@ -175,6 +182,7 @@ impl Request {
                 Ok(Request::Fetch(f))
             }
             DATA => Ok(Request::Data(b[1..].to_vec())),
+            HTTP => Ok(Request::Http(b[1..].to_vec())),
             CATALOG => Ok(Request::Catalog(b[1..].to_vec())),
             KILL_SESSIONS => {
                 let scope = match d.u8()? {
@@ -331,6 +339,8 @@ mod tests {
         // Gates with a flag that is no bool, cut short, or with bytes after them.
         assert!(Request::decode(&[GATE, 0, 0, 0, 1, 2]).is_err());
         assert_eq!(Request::decode(&Request::CurrentOps.encode()), Ok(Request::CurrentOps));
+        let http = Request::Http(b"GET /v1".to_vec());
+        assert_eq!(Request::decode(&http.encode()), Ok(http));
         assert!(Request::decode(&[CURRENT_OPS, 0]).is_err());
         assert!(Request::decode(&[GATE, 0, 0, 0, 1]).is_err());
         assert!(Request::decode(&[GATE, 0, 0, 0, 1, 1, 0]).is_err());

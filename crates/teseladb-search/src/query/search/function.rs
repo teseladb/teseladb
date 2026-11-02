@@ -168,6 +168,32 @@ impl Expr {
         }
     }
 
+    /// How RefLib writes the expression (measured with `scoreDetails`, `m18.js` to `m20.js`).
+    pub(super) fn description(&self) -> String {
+        let d = crate::index::java_double;
+        let join = |args: &[Expr], op: &str| {
+            let all: Vec<String> = args.iter().map(Expr::description).collect();
+            format!("({})", all.join(&format!(" {op} ")))
+        };
+        match self {
+            Expr::Constant(c) => format!("constant({})", d(*c)),
+            Expr::Path(p) => p.path.clone(),
+            Expr::Relevance => "scores".to_owned(),
+            Expr::Add(args) => join(args, "+"),
+            Expr::Multiply(args) => join(args, "*"),
+            Expr::Log(a) => format!("log({})", a.description()),
+            Expr::Log1p(a) => format!("log1p({})", a.description()),
+            Expr::Gauss { at, origin, scale, decay, offset } => format!(
+                "exp((max(0, |{} - {}| - {})^2) / 2 * ({}^2 / 2 * ln({})))",
+                at.path,
+                d(*origin),
+                d(*offset),
+                d(*scale),
+                d(*decay)
+            ),
+        }
+    }
+
     /// The score of a document whose operator scored `relevance`.
     pub(super) fn score(&self, relevance: f32, doc: Option<&Document>) -> f32 {
         let v = self.value(f64::from(relevance), doc);

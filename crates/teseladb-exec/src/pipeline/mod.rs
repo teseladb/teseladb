@@ -196,6 +196,8 @@ pub struct Pipeline {
     /// The error of planning its `$sort` by a random value on an existing collection
     /// ([`sort::check_random_sort`]).
     random_sort: Option<MqlError>,
+    /// Whether a stage after its `$search` reads `$$SEARCH_META`.
+    reads_search_meta: bool,
 }
 
 impl Pipeline {
@@ -403,16 +405,28 @@ impl Pipeline {
         // The scores search stages gave: a document without them is an error until a stage
         // makes new documents, after which they read as nothing (measured on 9.0.4).
         let mut required: Vec<String> = Vec::new();
+        // `$$SEARCH_META` after a `$search`: the stage's `$searchMeta` document (measured).
+        let mut search_vars: Option<Document> = None;
         for (st, spec) in self.stages.iter().zip(&self.sbe_specs) {
             sbe = sbe && *spec && sbe_capable(st);
-            let strict = meta::RequiredEnv { inner: env, names: &required };
-            let env: &dyn Env = if required.is_empty() { env } else { &strict };
+            let strict =
+                meta::RequiredEnv { inner: env, names: &required, vars: search_vars.as_ref() };
+            let env: &dyn Env =
+                if required.is_empty() && search_vars.is_none() { env } else { &strict };
             if let Stage::Fusion(f) = st {
                 let (fused, scores) = f.run(docs, env)?;
                 (docs, metas) = (fused, Some(scores));
                 continue;
             }
             if let Stage::Search(name, spec) = st {
+                let mut next_vars = None;
+                if self.reads_search_meta && *name == "$search" {
+                    let found = env.search_source("$searchMeta", spec)?;
+                    let meta = found.into_iter().next().map(|s| s.doc).unwrap_or_default();
+                    let mut vars = env.vars().cloned().unwrap_or_default();
+                    vars.insert(meta::SEARCH_META, meta);
+                    next_vars = Some(vars);
+                }
                 let own = meta::search_score_of(name);
                 let (found, scores): (Vec<Document>, Vec<meta::Meta>) = env
                     .search_source(name, spec)?
@@ -421,6 +435,9 @@ impl Pipeline {
                     .unzip();
                 (docs, metas) = (found, Some(scores));
                 required.extend(own.map(str::to_owned));
+                if next_vars.is_some() {
+                    search_vars = next_vars;
+                }
                 continue;
             }
             if let Stage::Score(s) = st {
@@ -479,6 +496,10 @@ fn reads_search_meta(v: RawValue<'_>) -> bool {
 
 /// The stages of `pipeline`, each one's arguments checked.
 fn parse_stages(pipeline: &[RawValue<'_>], ctx: &Ctx) -> Result<Pipeline, MqlError> {
+    // After a `$search` the stages, and the pipelines inside them, may read `$$SEARCH_META`.
+    let mut searched = ctx.defines(meta::SEARCH_META);
+    let mut reads_meta = false;
+    let after_search = ctx.with([meta::SEARCH_META]);
     let mut stages = Vec::with_capacity(pipeline.len());
     let mut sbe_specs = Vec::with_capacity(pipeline.len());
     for (i, v) in pipeline.iter().enumerate() {
@@ -495,19 +516,30 @@ fn parse_stages(pipeline: &[RawValue<'_>], ctx: &Ctx) -> Result<Pipeline, MqlErr
             ));
         }
         if reads_search_meta(RawValue::Document(*d)) {
-            return Err(error(
-                SEARCH_META_WITHOUT_SEARCH,
-                "Can't access $$SEARCH_META without a $search stage earlier in the pipeline",
-            ));
+            if !searched {
+                return Err(error(
+                    SEARCH_META_WITHOUT_SEARCH,
+                    "Can't access $$SEARCH_META without a $search stage earlier in the pipeline",
+                ));
+            }
+            reads_meta = true;
         }
-        stages.push(parse_stage(*d, ctx)?);
+        stages.push(parse_stage(*d, if searched { &after_search } else { ctx })?);
+        searched |= d.get("$search").is_some();
         sbe_specs.push(d.iter().all(|(name, arg)| sbe::spec_runs_in_sbe(name, arg)));
     }
     let mut read = Vec::new();
     pipeline.iter().for_each(|v| meta::metas_read(*v, &mut read));
     let reads_sort_key = read.iter().any(|n| n == crate::expr::SORT_KEY);
     let reads_index_key = read.iter().any(|n| n == meta::INDEX_KEY);
-    Ok(Pipeline { stages, sbe_specs, reads_sort_key, reads_index_key, random_sort: None })
+    Ok(Pipeline {
+        stages,
+        sbe_specs,
+        reads_sort_key,
+        reads_index_key,
+        random_sort: None,
+        reads_search_meta: reads_meta,
+    })
 }
 
 fn parse_stage(d: RawDoc<'_>, ctx: &Ctx) -> Result<Stage, MqlError> {

@@ -1,4 +1,6 @@
-//! Linux: `posix_fallocate`.
+//! Linux: `posix_fallocate`, epoll, eventfd, affinity and io_uring.
+
+pub mod io_uring;
 
 use std::fs::File;
 use std::io;
@@ -73,6 +75,12 @@ fn owned(rc: i32) -> std::io::Result<OwnedFd> {
     let fd = cvt(rc)?;
     // SAFETY: the call has just created `fd` and nobody else owns it.
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+/// A non-blocking `eventfd` closed on `exec`.
+pub(crate) fn new_eventfd() -> std::io::Result<OwnedFd> {
+    // SAFETY: no pointers.
+    owned(unsafe { eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK) })
 }
 
 fn raw(fd: &OwnedFd) -> RawFd {

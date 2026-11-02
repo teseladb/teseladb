@@ -16,13 +16,16 @@ use teseladb_bson::{Document, RawDoc, RawValue, Value};
 use teseladb_keys::{Direction, encode};
 use teseladb_types::{DecodeError, Decoder, Encoder};
 
-/// Whether an entry is a user or a role.
+/// Whether an entry is a user, a role or an API key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Principal {
     /// A user (`admin.system.users`).
     User,
     /// A role (`admin.system.roles`).
     Role,
+    /// An API key of the HTTP API (019 FR-016): its `_id` is the SHA-256 of the key, and its
+    /// `keyId` and `db` the unique index. No collection shows them.
+    ApiKey,
 }
 
 impl Principal {
@@ -31,6 +34,7 @@ impl Principal {
         match self {
             Principal::User => USER_FIELD,
             Principal::Role => ROLE_FIELD,
+            Principal::ApiKey => KEY_ID_FIELD,
         }
     }
 
@@ -39,6 +43,7 @@ impl Principal {
         match self {
             Principal::User => "user_1_db_1",
             Principal::Role => "role_1_db_1",
+            Principal::ApiKey => "keyId_1_db_1",
         }
     }
 }
@@ -47,6 +52,8 @@ impl Principal {
 pub const USER_FIELD: &str = "user";
 /// `role`.
 pub const ROLE_FIELD: &str = "role";
+/// `keyId`, the name of an API key.
+pub const KEY_ID_FIELD: &str = "keyId";
 /// `db`, the second field of the unique indexes.
 pub const DB_FIELD: &str = "db";
 /// `_id`.
@@ -129,6 +136,11 @@ pub fn id_key(doc: &[u8]) -> Result<Vec<u8>, KeyError> {
     let raw = RawDoc::from_bytes(doc).map_err(|_| KeyError::Bson)?;
     let id = raw.get(ID_FIELD).ok_or(KeyError::NoId)?;
     Ok(key_of(&[id]))
+}
+
+/// The key of an `_id` that is the string `id`, as [`id_key`] gives it.
+pub fn string_id(id: &str) -> Vec<u8> {
+    key_of(&[RawValue::String(id)])
 }
 
 /// The key of the unique index for `name` and `db` given as strings, the one a lookup by name
@@ -315,6 +327,8 @@ pub struct Security {
     pub users: Box<Table>,
     /// `admin.system.roles`.
     pub roles: Box<Table>,
+    /// The API keys (019 FR-016).
+    pub keys: Box<Table>,
     /// Batches applied so far.
     pub version: u64,
 }
@@ -323,6 +337,7 @@ const USER: u8 = 0;
 const ROLE: u8 = 1;
 const USER_BY_ID: u8 = 2;
 const ROLE_BY_ID: u8 = 3;
+const API_KEY_BY_ID: u8 = 4;
 const ABSENT: u8 = 0;
 const PRESENT: u8 = 1;
 const EXACTLY: u8 = 2;
@@ -333,6 +348,7 @@ impl Security {
         match kind {
             Principal::User => &self.users,
             Principal::Role => &self.roles,
+            Principal::ApiKey => &self.keys,
         }
     }
 
@@ -340,6 +356,7 @@ impl Security {
         match kind {
             Principal::User => &mut self.users,
             Principal::Role => &mut self.roles,
+            Principal::ApiKey => &mut self.keys,
         }
     }
 
@@ -348,6 +365,13 @@ impl Security {
         let t = self.table(kind);
         let seq = t.by_unique(&name_key(name, db))?;
         t.entries.get(&seq).map(|s| s.doc.as_slice())
+    }
+
+    /// The document whose `_id` has key `id` ([`id_key`], [`string_id`]).
+    pub fn get_by_id(&self, kind: Principal, id: &[u8]) -> Option<&[u8]> {
+        let t = self.table(kind);
+        let seq = t.ids.get(id)?;
+        t.entries.get(seq).map(|s| s.doc.as_slice())
     }
 
     /// The documents of `db` (every document with `None`) in insertion order: those whose `db`
@@ -383,6 +407,28 @@ impl Security {
                 e.bytes(&s.doc);
             }
         }
+    }
+
+    /// Writes the API keys into Group 0's snapshot, after the rest of it.
+    pub fn encode_keys(&self, e: &mut Encoder) {
+        e.var(self.keys.entries.len() as u64);
+        for s in self.keys.entries.values() {
+            e.bytes(&s.doc);
+        }
+    }
+
+    /// Reads what [`Security::encode_keys`] wrote.
+    pub fn decode_keys(&mut self, d: &mut Decoder<'_>) -> Result<(), DecodeError> {
+        for _ in 0..d.var()? {
+            let at = d.position();
+            let doc = d.bytes()?.to_vec();
+            let stored = Stored::of(Principal::ApiKey, doc)
+                .map_err(|_| DecodeError::InvalidValue { offset: at })?;
+            if !self.keys.push(stored) {
+                return Err(DecodeError::InvalidValue { offset: at });
+            }
+        }
+        Ok(())
     }
 
     /// Writes the state as snapshots before raw documents did: each document under the
@@ -465,6 +511,7 @@ pub fn encode_ops(ops: &[SecurityOp], e: &mut Encoder) {
         e.u8(match op.kind {
             Principal::User => USER_BY_ID,
             Principal::Role => ROLE_BY_ID,
+            Principal::ApiKey => API_KEY_BY_ID,
         });
         e.bytes(&op.id);
         match &op.expect {
@@ -491,6 +538,7 @@ pub fn decode_ops(d: &mut Decoder<'_>) -> Result<Vec<SecurityOp>, DecodeError> {
         let (kind, id) = match d.u8()? {
             USER_BY_ID => (Principal::User, d.bytes()?.to_vec()),
             ROLE_BY_ID => (Principal::Role, d.bytes()?.to_vec()),
+            API_KEY_BY_ID => (Principal::ApiKey, d.bytes()?.to_vec()),
             code @ (USER | ROLE) => {
                 let kind = if code == USER { Principal::User } else { Principal::Role };
                 let (db, name) = (d.str()?, d.str()?);

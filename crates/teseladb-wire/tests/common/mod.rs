@@ -106,6 +106,10 @@ pub struct Mem {
     pub txns: Vec<(Option<teseladb_range::intents::TxnId>, Vec<Vec<u8>>)>,
     /// The next this many transactions find a conflict.
     pub conflicts: usize,
+    /// The write fences of the ranges (018): a write or an intent with a key in one is refused.
+    pub fences: Vec<(Vec<u8>, Vec<u8>)>,
+    /// The next pause lifts every fence (the critical section ended meanwhile).
+    pub lift_on_pause: bool,
     /// The intents of client transactions, by transaction (008).
     pub intents: BTreeMap<u128, Vec<(Vec<u8>, teseladb_range::intents::IntentOp)>>,
     /// The next `PutIntents` fail with this error.
@@ -182,6 +186,18 @@ pub type ScanHook = Box<dyn FnMut(&[u8], &mut BTreeMap<Vec<u8>, Vec<u8>>)>;
 impl Mem {
     pub fn new() -> Mem {
         Mem { now: 1_700_000_000_000, replicas: 3, ..Mem::default() }
+    }
+
+    /// Refuses keys a fence holds, as the ranges do (018).
+    pub fn check_fences(&self, keys: &[Vec<u8>]) -> Result<(), CommandError> {
+        let held = |k: &Vec<u8>| self.fences.iter().any(|(s, e)| s <= k && k < e);
+        match keys.iter().any(held) {
+            true => Err(teseladb_wire::error::from_range(
+                &teseladb_range::host::RangeError::Fenced,
+                Default::default(),
+            )),
+            false => Ok(()),
+        }
     }
 
     /// The node's mark now: its clock, as its writes and catalog changes get it.
@@ -315,6 +331,26 @@ impl Backend for Mem {
         self.ended += 1;
     }
 
+    fn fence(&mut self, start: &[u8], end: &[u8], on: bool) -> Result<Hlc, CommandError> {
+        let span = (start.to_vec(), end.to_vec());
+        self.fences.retain(|f| *f != span);
+        if on {
+            self.fences.push(span);
+        }
+        self.now += 1;
+        Ok(Hlc { physical: self.now, logical: 0 })
+    }
+
+    fn pause(&mut self) -> bool {
+        // The critical section ends during the pause: the fences go.
+        if self.lift_on_pause && !self.fences.is_empty() {
+            self.fences.clear();
+            self.lift_on_pause = false;
+            return true;
+        }
+        self.txn_pause()
+    }
+
     fn changes(
         &mut self,
         start: &[u8],
@@ -413,6 +449,10 @@ impl Backend for Mem {
             TxnOp::PutIntents { txn, writes, .. } => {
                 if !self.intent_errors.is_empty() {
                     return Err(self.intent_errors.remove(0));
+                }
+                let keys: Vec<Vec<u8>> = writes.iter().map(|(k, _)| k.clone()).collect();
+                if self.check_fences(&keys).is_err() {
+                    return Err(teseladb_range::host::RangeError::Fenced);
                 }
                 let mine = self.intents.entry(txn.0).or_default();
                 for (k, w) in writes {
@@ -582,6 +622,7 @@ impl Backend for Mem {
             self.conflicts -= 1;
             return Err(CommandError::new(teseladb_wire::error::WRITE_CONFLICT, "conflict"));
         }
+        self.check_fences(&writes.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>())?;
         self.now += 1;
         let ts = Hlc { physical: self.now, logical: 0 };
         let keys = writes.iter().map(|(k, _)| k.clone()).collect();
@@ -629,6 +670,7 @@ impl Backend for Mem {
         {
             return Ok(r.clone());
         }
+        self.check_fences(&op.keys)?;
         let bound = Bound::decode(&op.mutation)?;
         assert_eq!(bound.latch_keys(), op.keys);
         self.concerns.push(op.wc);

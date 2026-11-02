@@ -89,6 +89,7 @@ gate "3. real crashes with SIGKILL (50 kills)" env TESELADB_KILL_ROUNDS=50 \
 gate "3. real crashes of log and LSM with SIGKILL (50 kills, 004)" env TESELADB_KILL_ROUNDS=50 \
   cargo test -q --offline --release -p teseladb-io --test crash_real_lsm
 gate "3. tests on x86_64 Linux" scripts/test-x86_64.sh
+gate "3. tests on the Linux kernel, io_uring included (012)" scripts/test-linux.sh
 gate "3. TLS interoperability with openssl and curl (013 FR-019)" scripts/tls-interop.sh
 gate "4. tests of coverage" scripts/tests/coverage_test.sh
 gate "4. coverage (95 % per crate)" env TESELADB_COV_MIN=95 scripts/coverage.sh

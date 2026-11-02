@@ -430,7 +430,8 @@ fn the_live_bytes_follow_the_writes_and_split_between_the_halves() {
     assert_eq!(again.live_bytes(), 30);
     again.restore(&snap).unwrap();
     assert_eq!(again.live_bytes(), 30);
-    let short = &snap[..snap.len() - 1];
+    // Cut inside the last cut's field (the empty fence list after it is one byte).
+    let short = &snap[..snap.len() - 2];
     assert!(again.restore(short).is_err());
 }
 

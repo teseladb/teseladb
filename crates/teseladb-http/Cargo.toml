@@ -1,7 +1,7 @@
 [package]
 name = "teseladb-http"
 version = "0.1.0"
-description = "HTTP/1.1 of TeselaDB without I/O: the client of AWS STS and JWKS (013); 019 adds the server and HTTP/2."
+description = "HTTP of TeselaDB without I/O: the HTTP/1.1 client of AWS STS and JWKS (013), and the HTTP/1.1, HTTP/2 and SSE server of the REST API and MCP (019)."
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true

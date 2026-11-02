@@ -55,6 +55,9 @@ fn start(data: &Path, log: &Path, extra: &[&str]) -> Started {
         "127.0.0.1:0",
         "--admin-listen",
         "127.0.0.1:0",
+        // Several nodes on one machine: none opens the HTTP port of 019.
+        "--http-port",
+        "0",
         "--dbpath",
         data.to_str().unwrap(),
         "--logpath",

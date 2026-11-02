@@ -117,6 +117,13 @@ pub struct ServerBackend {
 }
 
 impl ServerBackend {
+    /// A backend over the same node, for work on another thread, with its own random numbers.
+    #[must_use]
+    pub fn fresh(&mut self) -> ServerBackend {
+        let seed = teseladb_wire::commands::Backend::random(self);
+        ServerBackend::new(self.h.clone(), seed)
+    }
+
     /// A backend over `h`, with `seed` for its random numbers.
     pub fn new(h: NodeHandle, seed: u64) -> ServerBackend {
         let cores = h.senders.iter().map(CoreSenders::sender).collect();
@@ -212,13 +219,29 @@ impl ServerBackend {
                     | RemoteReply::Record(_)
                     | RemoteReply::Piece { .. }
                     | RemoteReply::Restored { .. }
-                    | RemoteReply::Changes { .. },
+                    | RemoteReply::Changes { .. }
+                    | RemoteReply::Fenced { .. },
                 ) => {
                     return Err(CommandError::new(INTERNAL_ERROR, "a scan answered with no rows"));
                 }
             }
         }
         Ok(rows)
+    }
+
+    /// The answer of node `node` to an HTTP request forwarded to it (019 FR-008), or `None`
+    /// when it cannot be reached or has no HTTP port.
+    pub fn forward_http(&self, node: u64, body: Vec<u8>) -> Option<Vec<u8>> {
+        let until = self.until();
+        let answers = self.ask(0, |tx| NodeMsg::ForwardHttp(NodeId(node), body, tx), until)??;
+        answers.into_iter().next().filter(|a| !a.is_empty())
+    }
+
+    /// Sends node `to` the answer to the HTTP request it forwarded as its request `req`.
+    pub fn answer_http(&self, to: NodeId, req: u64, body: Vec<u8>) {
+        if let Some(core) = self.cores.first() {
+            let _ = core.send(CoreInput::App(NodeMsg::HttpAnswer(to, req, body)));
+        }
     }
 
     fn until(&self) -> Instant {
@@ -623,7 +646,8 @@ impl Backend for ServerBackend {
             | RemoteReply::Record(_)
             | RemoteReply::Piece { .. }
             | RemoteReply::Restored { .. }
-            | RemoteReply::Changes { .. } => {
+            | RemoteReply::Changes { .. }
+            | RemoteReply::Fenced { .. } => {
                 Err(CommandError::new(INTERNAL_ERROR, "a write answered with no result"))
             }
         }
@@ -732,6 +756,35 @@ impl Backend for ServerBackend {
             read.answered(r.end, r.rows, r.resolved, None);
         }
         Ok(read.finish(|r: &teseladb_range::changes::Versioned| r.ts))
+    }
+
+    fn fence(&mut self, start: &[u8], end: &[u8], on: bool) -> Result<Hlc, CommandError> {
+        // Range by range in key order, each on its leader; a range that answers no mark has
+        // nothing of the span.
+        let mut mark = Hlc { physical: 0, logical: 0 };
+        let mut walk = teseladb_changestream::read::IntervalRead::<()>::new(start, end, mark);
+        while let Some(at) = walk.next().map(<[u8]>::to_vec) {
+            let key = at.clone();
+            let build = |e: &RouteEntry, _| RemoteReq::Fence {
+                start: key.clone(),
+                end: walk.stop(&e.end),
+                on,
+            };
+            match self.data(&at, true, build)? {
+                (e, RemoteReply::Fenced { ts }) => {
+                    mark = mark.max(ts);
+                    let next = walk.stop(&e.end);
+                    walk.answered(next, Vec::new(), ts, None);
+                }
+                _ => {
+                    return Err(CommandError::new(
+                        INTERNAL_ERROR,
+                        "a fence answered with something else",
+                    ));
+                }
+            }
+        }
+        Ok(mark)
     }
 
     fn range_changes(
@@ -1088,6 +1141,15 @@ impl Backend for ServerBackend {
         name: &str,
     ) -> Result<Option<Vec<u8>>, CommandError> {
         let req = CatalogReq::Principal { kind, db: db.to_owned(), name: name.to_owned() };
+        Ok(self.principal_read(req)?.into_iter().next())
+    }
+
+    fn principal_by_id(
+        &mut self,
+        kind: Principal,
+        id: &[u8],
+    ) -> Result<Option<Vec<u8>>, CommandError> {
+        let req = CatalogReq::PrincipalById { kind, id: id.to_vec() };
         Ok(self.principal_read(req)?.into_iter().next())
     }
 

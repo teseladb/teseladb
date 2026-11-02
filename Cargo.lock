@@ -112,6 +112,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "teseladb-fle"
+version = "0.1.0"
+dependencies = [
+ "teseladb-bson",
+ "teseladb-crypto",
+ "teseladb-json",
+ "teseladb-mql",
+]
+
+[[package]]
 name = "teseladb-hash"
 version = "0.1.0"
 dependencies = [
@@ -203,7 +213,10 @@ dependencies = [
 name = "teseladb-mcp"
 version = "0.1.0"
 dependencies = [
+ "teseladb-bson",
+ "teseladb-http",
  "teseladb-json",
+ "teseladb-rest",
  "teseladb-types",
 ]
 
@@ -281,6 +294,10 @@ name = "teseladb-rest"
 version = "0.1.0"
 dependencies = [
  "teseladb-bson",
+ "teseladb-http",
+ "teseladb-json",
+ "teseladb-session",
+ "teseladb-types",
  "teseladb-wire",
 ]
 
@@ -322,6 +339,7 @@ dependencies = [
  "teseladb-json",
  "teseladb-keys",
  "teseladb-lsm",
+ "teseladb-mcp",
  "teseladb-meta",
  "teseladb-mql",
  "teseladb-multiraft",

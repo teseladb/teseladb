@@ -133,6 +133,7 @@ fn absorb(core: &mut Core, r: &RangeSm) -> Command {
         mark: r.last_mark(),
         live: r.live_bytes(),
         records,
+        fences: r.fences().to_vec(),
     };
     Command::Merge { right: R, merge: MERGE, absorb: Some(absorbed) }
 }
