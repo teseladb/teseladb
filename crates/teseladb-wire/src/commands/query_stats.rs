@@ -271,6 +271,14 @@ fn options(cmd: &Document, client: Option<&Document>, p: Policy) -> Vec<(&'stati
     if let Some(c) = client {
         out.push(("client", Value::Document(c.clone())));
     }
+    // The hint as the client sent it; an index's name goes as `{$hint: name}` (measured).
+    match cmd.get("hint") {
+        Some(Value::String(name)) => {
+            out.push(("hint", Value::Document(Document::new().with("$hint", name.clone()))));
+        }
+        Some(h) => out.push(("hint", h.clone())),
+        None => {}
+    }
     if let Some(n) = cmd.get("maxTimeMS") {
         out.push(("maxTimeMS", literal(n, p)));
     }

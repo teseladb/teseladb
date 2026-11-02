@@ -966,6 +966,9 @@ fn shaped<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Command
             from_multi_planner: plan
                 .as_ref()
                 .is_some_and(|p| p.get(plan_exec::MULTI_PLANNED) == Some(&Value::Boolean(true))),
+            from_plan_cache: plan
+                .as_ref()
+                .is_some_and(|p| p.get(plan_exec::FROM_CACHE) == Some(&Value::Boolean(true))),
             planning_micros: match plan.as_ref().and_then(|p| p.get(plan_exec::PLANNING_TIME)) {
                 Some(Value::Int64(n)) => *n,
                 _ => 0,
