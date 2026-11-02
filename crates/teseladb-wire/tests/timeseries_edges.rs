@@ -586,3 +586,17 @@ fn an_attempt_back_in_time_finds_the_closed_bucket() {
     let r = run(&mut m, r#"{"count":"ts"}"#);
     assert_eq!(field(&r, "n"), &Value::Int32(3), "{r:?}");
 }
+
+/// A raw bucket index on a field that is not a measurement's nor the meta value's is listed only
+/// with `rawData` (measured on a `refnode` 9.0.4 on 02-11-2026).
+#[test]
+fn a_raw_index_off_the_measurements_lists_only_raw() {
+    let mut m = Mem::new();
+    series(&mut m);
+    run(
+        &mut m,
+        r#"{"createIndexes":"ts","rawData":true,"indexes":[{"key":{"meta.a":1,"control.version":1},"name":"raw_mv"}]}"#,
+    );
+    assert_eq!(listed(&mut m, "raw_mv", false), None);
+    assert!(listed(&mut m, "raw_mv", true).is_some());
+}

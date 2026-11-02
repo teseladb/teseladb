@@ -973,7 +973,7 @@ pub fn list_indexes<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Documen
         // measurements' fields (015 FR-008).
         Some(ts) => super::indexes::listed(ctx.backend, &c)?
             .into_iter()
-            .map(|s| if raw { s } else { super::timeseries::user_index(&ts, &s) })
+            .filter_map(|s| if raw { Some(s) } else { super::timeseries::user_index(&ts, &s) })
             .collect(),
         None => {
             let mut specs = match has_id_index(&ns) {

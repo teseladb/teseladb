@@ -1111,8 +1111,10 @@ pub fn bucket_index(spec: &BucketSpec, index: &Document) -> Result<Document, Com
 }
 
 /// Index `stored` of time series `spec` as `listIndexes` shows it without `rawData`: as it was
-/// asked (`originalSpec`), or with its key taken back to the measurements' fields.
-pub fn user_index(spec: &BucketSpec, stored: &Document) -> Document {
+/// asked (`originalSpec`), or with its key taken back to the measurements' fields; `None` when a
+/// field of its key is neither the meta value nor a measurement's least or greatest, which
+/// `listIndexes` leaves out (measured on a `refnode` 9.0.4 on 02-11-2026).
+pub fn user_index(spec: &BucketSpec, stored: &Document) -> Option<Document> {
     if let Some(Value::Document(original)) = stored.get("originalSpec") {
         let mut out =
             Document::new().with("v", original.get("v").cloned().unwrap_or(Value::Int32(2)));
@@ -1127,22 +1129,23 @@ pub fn user_index(spec: &BucketSpec, stored: &Document) -> Document {
             }
         }
         // Shown in the order RefDb stores an index's fields, as `listIndexes` gives it.
-        return super::indexes::in_stored_order(&out);
+        return Some(super::indexes::in_stored_order(&out));
     }
     let mut out = Document::new();
     for (k, v) in stored.iter() {
         match (k, v) {
             ("key", Value::Document(key)) => {
                 let mut user = Document::new();
+                let meta = spec.meta_field.as_deref().unwrap_or_default();
                 for (path, dir) in key.iter() {
-                    if let Some(rest) = path.strip_prefix("meta") {
-                        let meta = spec.meta_field.as_deref().unwrap_or_default();
-                        user.push(format!("{meta}{rest}"), dir.clone());
-                    } else if let Some(field) = path
-                        .strip_prefix("control.min.")
-                        .or_else(|| path.strip_prefix("control.max."))
-                        && user.get(field).is_none()
-                    {
+                    let field = match path.strip_prefix("meta") {
+                        Some(rest) => format!("{meta}{rest}"),
+                        None => path
+                            .strip_prefix("control.min.")
+                            .or_else(|| path.strip_prefix("control.max."))?
+                            .to_owned(),
+                    };
+                    if user.get(&field).is_none() {
                         user.push(field, dir.clone());
                     }
                 }
@@ -1151,5 +1154,5 @@ pub fn user_index(spec: &BucketSpec, stored: &Document) -> Document {
             _ => out.push(k, v.clone()),
         }
     }
-    out
+    Some(out)
 }
