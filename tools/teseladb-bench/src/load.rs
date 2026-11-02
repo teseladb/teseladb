@@ -129,6 +129,16 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    #[test]
+    fn a_merge_keeps_the_first_error_it_had() {
+        let failed =
+            |e: &str| Outcome { errors: 1, first_error: Some(e.into()), ..Outcome::default() };
+        let mut out = Outcome::default();
+        out.merge(failed("first"));
+        out.merge(failed("second"));
+        assert_eq!((out.errors, out.first_error.as_deref()), (2, Some("first")));
+    }
+
     fn load(rate: Option<f64>, concurrency: usize) -> Load {
         Load {
             warmup: Duration::from_millis(50),

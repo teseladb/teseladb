@@ -70,9 +70,16 @@ fn group0() -> Result<(Group0Sm, u64), String> {
     }
     let replicas = vec![NodeId(1), NodeId(2), NodeId(3)];
     let create = Group0Command::CreateRange { start: Vec::new(), end: Vec::new(), replicas };
-    match apply(&mut sm, create) {
-        Group0Result::Range(_) => Ok((sm, index)),
-        other => Err(format!("the first range: {other:?}")),
+    range_of(apply(&mut sm, create), format_args!("the first range"))?;
+    Ok((sm, index))
+}
+
+/// The range a command of Group 0 created or completed; any other result is an error about
+/// `what`.
+fn range_of(result: Group0Result, what: std::fmt::Arguments<'_>) -> Result<GroupId, String> {
+    match result {
+        Group0Result::Range(g) => Ok(g),
+        other => Err(format!("{what}: {other:?}")),
     }
 }
 
@@ -85,9 +92,7 @@ fn run_with(ranges: u64) -> Result<Report, String> {
         let at = key(i);
         index += 1;
         let split = Group0Command::SplitRange { group: last, at: at.clone() };
-        let Group0Result::Range(new) = sm.apply_command(index, &split) else {
-            return Err(format!("split {i} refused"));
-        };
+        let new = range_of(sm.apply_command(index, &split), format_args!("split {i} refused"))?;
         index += 1;
         let done = Group0Command::CompleteSplit { group: last, at, at_index: index };
         if sm.apply_command(index, &done) != Group0Result::Range(new) {
@@ -137,6 +142,17 @@ fn run_with(ranges: u64) -> Result<Report, String> {
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_range_is_a_range() {
+        assert_eq!(range_of(Group0Result::Range(GroupId(4)), format_args!("x")), Ok(GroupId(4)));
+        let (sm, index) = group0().unwrap();
+        let mut sm = sm;
+        // A split of a range that does not exist is refused.
+        let split = Group0Command::SplitRange { group: GroupId(99), at: key(1) };
+        let e = range_of(sm.apply_command(index + 1, &split), format_args!("split 1")).unwrap_err();
+        assert!(e.starts_with("split 1: "), "{e}");
+    }
 
     #[test]
     fn a_short_run_measures_each_figure() {
