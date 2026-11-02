@@ -400,3 +400,139 @@ fn stored_source_keeps_the_id_and_the_fields_it_names() {
         Document::new().with("_id", 1)
     );
 }
+
+/// Synonyms, type sets, `storedSource` and whole-number options as `refsearch` 1.70.6 checks them
+/// (`scratchpad/lane3p/m63.js`, 02-11-2026).
+#[test]
+fn synonyms_type_sets_and_stored_source_errors_as_refsearch_gives_them() {
+    let p = "\"userCommand.indexes[0].";
+    let dynamic = || Document::new().with("dynamic", true);
+    let def = |k: &str, v: Value| Document::new().with("mappings", dynamic()).with(k, v);
+    let syn = |s: Document| def("synonyms", Value::Array(vec![s.into()]));
+    let source = Document::new().with("collection", "s");
+    let named = |n: bool, a: bool| {
+        let mut d = Document::new();
+        if n {
+            d.insert("name", "x");
+        }
+        if a {
+            d.insert("analyzer", "reflib.standard");
+        }
+        d
+    };
+    let cases: Vec<(Document, String)> = vec![
+        (
+            syn(named(false, true).with("source", source.clone())),
+            format!("{p}synonyms[0].name\" is required"),
+        ),
+        (
+            syn(named(true, false).with("source", source.clone())),
+            format!("{p}synonyms[0].analyzer\" is required"),
+        ),
+        (
+            syn(named(true, true).with("source", Document::new())),
+            format!("{p}synonyms[0].source.collection\" is required"),
+        ),
+        (
+            syn(named(true, true).with("source", 1)),
+            format!("{p}synonyms[0].source\" must be a document"),
+        ),
+        (syn(named(true, true)), format!("{p}synonyms[0].source\" is required")),
+        (
+            def(
+                "typeSets",
+                Value::Array(vec![
+                    Document::new().with("types", Value::Array(vec![ty("string").into()])).into(),
+                ]),
+            ),
+            format!("{p}typeSets[0].name\" is required"),
+        ),
+        (
+            def(
+                "storedSource",
+                Document::new().with("include", Value::Array(vec![1.into()])).into(),
+            ),
+            format!("{p}storedSource.include[0]\" must be a string"),
+        ),
+        (
+            def("storedSource", Document::new().with("include", "a").into()),
+            format!("{p}storedSource.include\" must be a array"),
+        ),
+        (
+            def("storedSource", Document::new().into()),
+            format!("{p}storedSource\" one of [include, exclude] must be present"),
+        ),
+        (def("storedSource", 1.into()), format!("{p}storedSource\" must be a boolean or document")),
+        (
+            def(
+                "storedSource",
+                Document::new()
+                    .with("include", Value::Array(vec!["a".into()]))
+                    .with("exclude", Value::Array(vec!["b".into()]))
+                    .into(),
+            ),
+            format!("{p}storedSource\" only one of [include, exclude] may be present"),
+        ),
+        (
+            one("t", ty("string").with("ignoreAbove", 1.5)),
+            format!("{p}mappings.fields.t.ignoreAbove\" must be an integer"),
+        ),
+    ];
+    for (d, want) in cases {
+        assert_eq!(error(&d), want);
+    }
+    assert!(Definition::parse(&one("t", ty("string").with("ignoreAbove", 2.0))).is_ok());
+}
+
+/// The automatic embedding types as `refsearch` 1.70.6 checks them without an embedding service
+/// (`scratchpad/lane3p/m70.js` to `m72.js`): the options it asks for, then the models refused.
+#[test]
+fn automatic_embedding_needs_a_service_this_engine_lacks() {
+    let p = "\"userCommand.indexes[0].";
+    let auto = |extra: &[(&str, &str)]| {
+        let mut f = ty("autoEmbedVector");
+        for (k, v) in extra {
+            f.insert(*k, *v);
+        }
+        one("t", f)
+    };
+    assert_eq!(error(&auto(&[])), format!("{p}mappings.fields.t.model\" is required"));
+    assert_eq!(
+        error(&auto(&[("model", "voyage-3")])),
+        format!("{p}mappings.fields.t.modality\" is required")
+    );
+    assert_eq!(
+        error(&auto(&[("model", "voyage-3"), ("modality", "text")])),
+        format!("{p}mappings.fields.t.sourceField\" is required")
+    );
+    let refused = "The following embedding model(s) are not supported: voyage-3. Supported \
+                   models: none (embedding service not configured).";
+    assert_eq!(
+        error(&auto(&[("model", "voyage-3"), ("modality", "text"), ("sourceField", "s")])),
+        refused
+    );
+    let vector = |fields: Vec<Document>| {
+        let def = Document::new()
+            .with("fields", Value::Array(fields.into_iter().map(Value::Document).collect()));
+        VectorDefinition::parse(&def).expect_err("refused").message("userCommand.indexes[0].")
+    };
+    let field = |kind: &str| Document::new().with("type", kind).with("path", "t");
+    assert_eq!(vector(vec![field("autoEmbed")]), format!("{p}fields[0].model\" is required"));
+    assert_eq!(
+        vector(vec![field("autoEmbed").with("model", "m")]),
+        format!("{p}fields[0].modality\" is required")
+    );
+    assert_eq!(
+        vector(vec![field("autoEmbed").with("model", "voyage-3").with("modality", "text")]),
+        "CanonicalModel: voyage-3 not registered yet, supported models are: []"
+    );
+    assert_eq!(vector(vec![field("text").with("model", "voyage-3")]), refused);
+    assert_eq!(
+        vector(vec![
+            field("text"),
+            Document::new().with("type", "text").with("path", "u").with("model", "m2")
+        ]),
+        "The following embedding model(s) are not supported: voyage-3-large, m2. Supported \
+         models: none (embedding service not configured)."
+    );
+}

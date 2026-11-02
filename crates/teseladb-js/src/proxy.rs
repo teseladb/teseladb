@@ -42,6 +42,52 @@ fn trap(it: &mut Interp, handler: &ObjRef, name: &str) -> R<Option<Val>> {
 }
 
 /// The key a trap receives: a symbol for a symbol key, a string otherwise.
+fn same_proto(a: &Option<ObjRef>, b: &Option<ObjRef>) -> bool {
+    match (a, b) {
+        (Some(x), Some(y)) => x.ptr_eq(y),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+/// `[[GetPrototypeOf]]` of a proxy: its `getPrototypeOf` trap, or its target's (ECMA-262
+/// §10.5.1; messages measured on a `refrouter` 9.0.4 on 02-11).
+pub fn get_proto(it: &mut Interp, o: &ObjRef) -> R<Option<ObjRef>> {
+    let (target, handler) = live(it, o)?;
+    let Some(t) = trap(it, &handler, "getPrototypeOf")? else { return it.proto_of(&target) };
+    let p = match it.call(&t, &Val::Obj(handler), &[Val::Obj(target.clone())])? {
+        Val::Obj(p) => Some(p),
+        Val::Null => None,
+        _ => {
+            return it
+                .type_error("proxy getPrototypeOf handler returned a non-object, non-null value");
+        }
+    };
+    if !target.borrow().extensible && !same_proto(&it.proto_of(&target)?, &p) {
+        return it.type_error(
+            "proxy getPrototypeOf handler didn't return the target object's prototype",
+        );
+    }
+    Ok(p)
+}
+
+/// `[[SetPrototypeOf]]` of a proxy: its `setPrototypeOf` trap, or its target's (ECMA-262
+/// §10.5.2).
+pub fn set_proto(it: &mut Interp, o: &ObjRef, p: Option<ObjRef>) -> R<()> {
+    let (target, handler) = live(it, o)?;
+    let Some(t) = trap(it, &handler, "setPrototypeOf")? else {
+        return crate::builtins::set_proto_of(it, &target, p);
+    };
+    let arg = p.clone().map_or(Val::Null, Val::Obj);
+    if !it.call(&t, &Val::Obj(handler), &[Val::Obj(target.clone()), arg])?.truthy() {
+        return it.type_error("proxy setPrototypeOf handler returned false");
+    }
+    if !target.borrow().extensible && !same_proto(&it.proto_of(&target)?, &p) {
+        return it.type_error("proxy setPrototypeOf handler returned true, even though the target's prototype is immutable because the target is non-extensible");
+    }
+    Ok(())
+}
+
 fn key_val(key: &str) -> Val {
     if crate::value::is_symbol_key(key) { crate::props::symbol_of_key(key) } else { Val::str(key) }
 }
@@ -235,7 +281,7 @@ fn got(v: &Val) -> String {
         Val::Sym(s) => format!("Symbol(\"{}\")", s.0),
         Val::Bool(b) => b.to_string(),
         Val::Null => "null".into(),
-        Val::Undef => "undefined".into(),
+        Val::Undef | Val::Hole => "undefined".into(),
         Val::Obj(_) => "an object".into(),
     }
 }

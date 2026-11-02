@@ -38,6 +38,11 @@ struct Parser<'a> {
     i: usize,
     groups: usize,
     names: Vec<(String, usize)>,
+    /// Whether the pattern has a named group: `\k` is then a reference (Annex B).
+    has_names: bool,
+    /// The named groups a first reading found (`None` during it), for references written before
+    /// their group.
+    known: Option<Vec<(String, usize)>>,
 }
 
 /// A compiled pattern.
@@ -48,6 +53,8 @@ struct Regex {
     icase: bool,
     multiline: bool,
     dotall: bool,
+    /// The `d` flag: a match has `indices`.
+    indices: bool,
 }
 
 /// What the matcher reads of `s`: its code points with the `u` flag, else its UTF-16 units.
@@ -81,7 +88,23 @@ fn is_unicode(flags: &str) -> bool {
 fn compile(src: &str, flags: &str) -> Result<Regex, String> {
     let unicode = is_unicode(flags);
     let chars = elements(src, unicode);
-    let mut p = Parser { s: &chars, unicode, i: 0, groups: 0, names: Vec::new() };
+    let has_names = src.match_indices("(?<").any(|(i, _)| !src[i + 3..].starts_with(['=', '!']));
+    // A first reading finds the names, which a reference may use before its group.
+    let mut first =
+        Parser { s: &chars, unicode, i: 0, groups: 0, names: Vec::new(), has_names, known: None };
+    let known = match first.alt() {
+        Ok(_) => first.names,
+        Err(_) => Vec::new(),
+    };
+    let mut p = Parser {
+        s: &chars,
+        unicode,
+        i: 0,
+        groups: 0,
+        names: Vec::new(),
+        has_names,
+        known: Some(known),
+    };
     let node = p.alt()?;
     if p.i < chars.len() {
         return Err("unmatched ) in regular expression".into());
@@ -93,6 +116,7 @@ fn compile(src: &str, flags: &str) -> Result<Regex, String> {
         icase: flags.contains('i'),
         multiline: flags.contains('m'),
         dotall: flags.contains('s'),
+        indices: flags.contains('d'),
     })
 }
 
@@ -256,6 +280,10 @@ impl Parser<'_> {
         self.i += 1;
         let class = |item| Node::Class(vec![item], false);
         Ok(match c {
+            // The engine of a `refrouter` 9.0.4 has no Unicode properties (measured on 02-11).
+            'p' | 'P' if self.unicode => {
+                return Err("invalid property name in regular expression".into());
+            }
             'd' => class(ClassItem::Digit(false)),
             'D' => class(ClassItem::Digit(true)),
             'w' => class(ClassItem::Word(false)),
@@ -271,7 +299,7 @@ impl Parser<'_> {
             'v' => Node::Char(0x0B),
             'f' => Node::Char(0x0C),
             '0' => Node::Char(0),
-            'k' if self.peek() == Some('<') => {
+            'k' if self.peek() == Some('<') && (self.unicode || self.has_names) => {
                 self.i += 1;
                 let start = self.i;
                 while self.peek().is_some_and(|c| c != '>') {
@@ -279,7 +307,11 @@ impl Parser<'_> {
                 }
                 let name = self.text_from(start);
                 self.i += 1;
-                let idx = self.names.iter().find(|(n, _)| *n == name).map(|(_, i)| *i);
+                let idx = match &self.known {
+                    Some(k) => k.iter().find(|(n, _)| *n == name).map(|(_, i)| *i),
+                    // The first reading: any name, until the groups are known.
+                    None => Some(0),
+                };
                 Node::BackRef(idx.ok_or("invalid named capture reference in regular expression")?)
             }
             '1'..='9' if !in_class => {
@@ -296,7 +328,10 @@ impl Parser<'_> {
                     }
                     let hex = self.text_from(start);
                     self.i += 1;
-                    let v = u32::from_str_radix(&hex, 16).map_err(|_| "invalid Unicode escape")?;
+                    let v = u32::from_str_radix(&hex, 16)
+                        .ok()
+                        .filter(|v| *v <= 0x10_FFFF)
+                        .ok_or("invalid unicode escape in regular expression")?;
                     return Ok(Node::Char(v));
                 }
                 let hex = self.s.get(self.i..self.i + n).map(text_of).unwrap_or_default();
@@ -308,13 +343,30 @@ impl Parser<'_> {
                     _ => Node::Char(c as u32),
                 }
             }
+            // Annex B: in a class `\c` also takes a digit or `_`; a `\c` without its letter is a
+            // `\` and the `c` is read again.
             'c' => match self.peek() {
-                Some(l) if l.is_ascii_alphabetic() => {
+                Some(l)
+                    if l.is_ascii_alphabetic()
+                        || (in_class && (l.is_ascii_digit() || l == '_')) =>
+                {
                     self.i += 1;
                     Node::Char(l as u32 % 32)
                 }
-                _ => Node::Char(u32::from(b'\\')),
+                _ => {
+                    self.i -= 1;
+                    Node::Char(u32::from(b'\\'))
+                }
             },
+            // Annex B: an octal escape in a class (`[\1]`).
+            '1'..='7' if in_class && !self.unicode => {
+                let mut v = c as u32 - u32::from(b'0');
+                while v < 32 && self.peek().is_some_and(|d| ('0'..='7').contains(&d)) {
+                    v = v * 8 + (self.s[self.i] - u32::from(b'0'));
+                    self.i += 1;
+                }
+                Node::Char(v)
+            }
             _ => Node::Char(self.s[self.i - 1]),
         })
     }
@@ -394,15 +446,22 @@ fn is_word(c: u32) -> bool {
     char::from_u32(c).is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// Canonicalize (ECMA-262 §22.2.2.7.3, without the `u` flag), which the engine of a `refrouter`
+/// 9.0.4 also applies with it (measured on 02-11: `/\u212A/iu` does not match `k`): the upper
+/// case of one character, unless it takes a non-ASCII character to ASCII.
 fn fold(c: u32, icase: bool) -> u32 {
-    match char::from_u32(c) {
-        Some(ch) if icase => ch.to_lowercase().next().map_or(c, u32::from),
+    if !icase {
+        return c;
+    }
+    let mut up = char::from_u32(c).map(char::to_uppercase);
+    match (up.as_mut().and_then(Iterator::next), up.as_mut().and_then(Iterator::next)) {
+        (Some(u), None) if !(c >= 128 && u32::from(u) < 128) => u32::from(u),
         _ => c,
     }
 }
 
-fn upper(c: u32) -> u32 {
-    char::from_u32(c).and_then(|ch| ch.to_uppercase().next()).map_or(c, u32::from)
+fn lower(c: u32) -> u32 {
+    char::from_u32(c).and_then(|ch| ch.to_lowercase().next()).map_or(c, u32::from)
 }
 
 /// The capture slots: start and end of each group, by character positions.
@@ -433,10 +492,10 @@ impl Matcher<'_, '_> {
         let ch = char::from_u32(c);
         items.iter().any(|it| match it {
             ClassItem::Range(lo, hi) => {
+                // A member whose canonical form is the character's.
+                let same = |m: u32| (*lo..=*hi).contains(&m) && fold(m, true) == fold(c, true);
                 (*lo..=*hi).contains(&c)
-                    || (self.re.icase
-                        && ((*lo..=*hi).contains(&fold(c, true))
-                            || (*lo..=*hi).contains(&upper(c))))
+                    || (self.re.icase && (same(fold(c, true)) || same(lower(c))))
             }
             ClassItem::Digit(neg) => ch.is_some_and(|c| c.is_ascii_digit()) != *neg,
             ClassItem::Word(neg) => is_word(c) != *neg,
@@ -628,13 +687,14 @@ fn find(it: &mut Interp, re: &Regex, s: &[u32], start: usize, sticky: bool) -> R
 }
 
 fn parts(it: &Interp, v: &Val) -> R<(Name, Name)> {
-    match v {
-        Val::Obj(o) => match &o.borrow().kind {
-            Kind::RegExp(s, f) => Ok((s.clone(), f.clone())),
-            _ => Err(crate::builtins::incompatible(it, "RegExp.prototype method")),
-        },
-        _ => Err(crate::builtins::incompatible(it, "RegExp.prototype method")),
+    if let Val::Obj(o) = v
+        && let Kind::RegExp(s, f) = &o.borrow().kind
+    {
+        return Ok((s.clone(), f.clone()));
     }
+    // Measured on a `refrouter` 9.0.4 on 02-11: `exec method called on incompatible Object`.
+    let class = crate::builtins::class_name(v);
+    Err(it.error("TypeError", &format!("{} method called on incompatible {class}", it.native)))
 }
 
 fn compiled(it: &Interp, src: &str, flags: &str) -> R<Regex> {
@@ -643,14 +703,20 @@ fn compiled(it: &Interp, src: &str, flags: &str) -> R<Regex> {
 
 /// Checks a pattern when a literal or `new RegExp` makes it.
 pub fn check(it: &mut Interp, src: &str, flags: &str) -> R<()> {
+    syntax(src, flags).map_err(|e| it.error("SyntaxError", &e))
+}
+
+/// The early error of a pattern and its flags, if any (a literal's is a `SyntaxError` of the
+/// code that holds it).
+pub fn syntax(src: &str, flags: &str) -> Result<(), String> {
     let mut seen = String::new();
     for c in flags.chars() {
         if !"dgimsuyv".contains(c) || seen.contains(c) {
-            return Err(it.error("SyntaxError", &format!("invalid regular expression flag {c}")));
+            return Err(format!("invalid regular expression flag {c}"));
         }
         seen.push(c);
     }
-    compiled(it, src, flags).map(|_| ())
+    compile(src, flags).map(|_| ())
 }
 
 fn utf16_len_of(c: u32) -> usize {
@@ -741,6 +807,34 @@ fn result(it: &mut Interp, re: &Regex, s: &[u32], caps: &Caps, input: &Name) -> 
         Val::Obj(g)
     };
     it.define(o, "groups", Prop::data(groups))?;
+    if re.indices {
+        // `[start, end]` of each capture in UTF-16 units, and the same by name.
+        let mut pairs = Vec::new();
+        for c in caps {
+            pairs.push(match c {
+                Some((a, b)) => {
+                    let pair =
+                        vec![Val::Num(utf16_pos(s, *a) as f64), Val::Num(utf16_pos(s, *b) as f64)];
+                    it.array(pair)?
+                }
+                None => Val::Undef,
+            });
+        }
+        let ind = it.array(pairs.clone())?;
+        let named = if re.names.is_empty() {
+            Val::Undef
+        } else {
+            let g = it.object()?;
+            for (n, i) in &re.names {
+                it.define(&g, n, Prop::data(pairs[*i].clone()))?;
+            }
+            Val::Obj(g)
+        };
+        if let Val::Obj(io) = &ind {
+            it.define(io, "groups", Prop::data(named))?;
+        }
+        it.define(o, "indices", Prop::data(ind))?;
+    }
     Ok(arr)
 }
 
@@ -808,7 +902,7 @@ fn as_regexp(it: &mut Interp, v: &Val) -> R<Val> {
 
 /// `String.prototype.match`.
 pub fn string_match(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    let s = crate::strings::this_str(it, this)?;
+    let s = crate::strings::this_text(it, this)?;
     let rv = as_regexp(it, &a.first().cloned().unwrap_or(Val::Undef))?;
     let (src, flags) = parts(it, &rv)?;
     if !flags.contains('g') {
@@ -835,7 +929,7 @@ pub fn string_match(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 
 /// `String.prototype.search`.
 pub fn search(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    let s = crate::strings::this_str(it, this)?;
+    let s = crate::strings::this_text(it, this)?;
     let rv = as_regexp(it, &a.first().cloned().unwrap_or(Val::Undef))?;
     let (src, flags) = parts(it, &rv)?;
     let re = compiled(it, &src, &flags)?;
@@ -942,7 +1036,8 @@ pub fn match_all(it: &mut Interp, this: &Val, a: &[Val]) -> R {
             return it.call(&custom, &arg, std::slice::from_ref(this));
         }
     }
-    let s = it.str_of(this)?;
+    let s = it.str_of(this);
+    let s = it.operand_named(s, "this")?;
     let (src, flags, start) = if is_regexp {
         let (src, flags) = parts(it, &arg)?;
         if !flags.contains('g') {
@@ -966,4 +1061,50 @@ pub fn match_all(it: &mut Interp, this: &Val, a: &[Val]) -> R {
         items.push(result(it, &re, &chars, &caps, &s)?);
     }
     crate::builtins::make_iter(it, crate::builtins::REGEXP_STRING_ITERATOR, items)
+}
+
+/// `this` of the methods `RegExp.prototype[Symbol.match]` and the others: a regular expression
+/// (measured on a `refrouter` 9.0.4 on 02-11: `number is not a non-null object`, `[Symbol.search]
+/// method called on incompatible Object`).
+fn symbol_this(it: &mut Interp, this: &Val) -> R<()> {
+    if !matches!(this, Val::Obj(_)) {
+        return it.type_error(&format!("{} is not a non-null object", this.type_of()));
+    }
+    parts(it, this).map(|_| ())
+}
+
+/// The string argument of a `RegExp.prototype[Symbol.*]` method.
+fn symbol_str(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    symbol_this(it, this)?;
+    Ok(Val::Str(it.str_of(&a.first().cloned().unwrap_or(Val::Undef))?))
+}
+
+/// The rest of the arguments after the string, with the regular expression first.
+fn with_this(this: &Val, a: &[Val]) -> Vec<Val> {
+    std::iter::once(this.clone()).chain(a.iter().skip(1).cloned()).collect()
+}
+
+pub fn symbol_match(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    let s = symbol_str(it, this, a)?;
+    string_match(it, &s, &with_this(this, a))
+}
+
+pub fn symbol_match_all(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    let s = symbol_str(it, this, a)?;
+    match_all(it, &s, &with_this(this, a))
+}
+
+pub fn symbol_replace(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    let s = symbol_str(it, this, a)?;
+    crate::strings::replace(it, &s, &with_this(this, a))
+}
+
+pub fn symbol_search(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    let s = symbol_str(it, this, a)?;
+    search(it, &s, &with_this(this, a))
+}
+
+pub fn symbol_split(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    let s = symbol_str(it, this, a)?;
+    crate::strings::split(it, &s, &with_this(this, a))
 }

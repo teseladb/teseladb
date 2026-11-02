@@ -884,11 +884,11 @@ fn term_runs_as_text_or_as_a_pattern() {
     assert_eq!(fuzzy(1.into()), "\"term.fuzzy\" must be a document");
     assert_eq!(
         fuzzy(Document::new().with("maxEdits", 3).into()),
-        "\"term.fuzzy.maxEdits\" must be within bounds [1..2]"
+        "\"term.fuzzy.maxEdits\" must be within bounds [0..2]"
     );
     assert_eq!(
         fuzzy(Document::new().with("prefixLength", "a").into()),
-        "\"term.fuzzy.prefixLength\" must be a number"
+        "\"term.fuzzy.prefixLength\" must be a integer"
     );
 }
 

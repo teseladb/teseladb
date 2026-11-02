@@ -37,12 +37,6 @@ pub struct NodeExecutor {
     node: u64,
 }
 
-impl std::fmt::Debug for NodeExecutor {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("NodeExecutor").field("node", &self.node).finish_non_exhaustive()
-    }
-}
-
 impl NodeExecutor {
     /// An executor on the node of `handle` with `backend`, with the node's state from `state`.
     #[must_use]
@@ -325,10 +319,12 @@ impl Executor for NodeExecutor {
     }
 
     fn random(&mut self, out: &mut [u8]) {
-        if teseladb_wire::commands::Backend::secure_random(&mut self.backend, out).is_err() {
-            for chunk in out.chunks_mut(8) {
-                let r = teseladb_wire::commands::Backend::random(&mut self.backend).to_le_bytes();
-                chunk.copy_from_slice(&r[..chunk.len()]);
+        // Mixed with the backend's generator, so that the bytes vary without the system's too.
+        let _filled = teseladb_wire::commands::Backend::secure_random(&mut self.backend, out);
+        for chunk in out.chunks_mut(8) {
+            let r = teseladb_wire::commands::Backend::random(&mut self.backend).to_le_bytes();
+            for (x, y) in chunk.iter_mut().zip(r) {
+                *x ^= y;
             }
         }
     }

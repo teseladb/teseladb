@@ -57,12 +57,6 @@ pub struct NodeHttp {
     advertised: std::sync::OnceLock<String>,
 }
 
-impl std::fmt::Debug for NodeHttp {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("NodeHttp").finish_non_exhaustive()
-    }
-}
-
 impl NodeHttp {
     /// `httpOptions` and `mcpOptions`, read from Group 0 at most once a second; with Group 0 out
     /// of reach, the last ones read or the defaults.
@@ -401,12 +395,11 @@ fn unknown_resource(status: u16) -> Response {
 }
 
 /// A `401` of `/mcp` with the URL of the metadata of `resource` in `WWW-Authenticate`
-/// (RFC 9728, 5.1).
+/// (RFC 9728, 5.1). Every refusal of [`authenticate`] is a `401` with that field. A resource
+/// always has a scheme (`mcpOptions.resourceUri` takes only `http` and `https` URIs, and the
+/// node's own is `https://`), so its metadata always has a URL.
 fn with_metadata(resource: &str, mut r: Response) -> Response {
-    if r.status != 401 {
-        return r;
-    }
-    let Some(url) = teseladb_mcp::oauth_metadata::metadata_url(resource) else { return r };
+    let url = teseladb_mcp::oauth_metadata::metadata_url(resource).unwrap_or_default();
     for (k, v) in &mut r.headers {
         if k.eq_ignore_ascii_case("WWW-Authenticate") {
             let invalid = v.contains("invalid_token");
@@ -492,10 +485,12 @@ fn run_mcp(
 ) -> Response {
     let mut random = || {
         let mut b = [0u8; 16];
-        // Without the system's generator, a hash of the clock: ids stay unique.
-        if teseladb_sys::fill_random(&mut b).is_err() {
-            b[..8].copy_from_slice(&random_seed().to_le_bytes());
-            b[8..].copy_from_slice(&random_seed().to_le_bytes());
+        // Mixed with a hash of the clock, so that ids stay unique without the system's
+        // generator too.
+        let _filled = teseladb_sys::fill_random(&mut b);
+        let seed = [random_seed().to_le_bytes(), random_seed().to_le_bytes()].concat();
+        for (x, y) in b.iter_mut().zip(seed) {
+            *x ^= y;
         }
         b
     };

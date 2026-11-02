@@ -104,6 +104,19 @@ fn the_fields_a_pipeline_uses_are_those_it_reads() {
         ),
         list(&["d", "g", "x"])
     );
+    // Measured on 02-11-2026: the partition, the order and the window function's argument.
+    assert_eq!(
+        fields(
+            r#"[{"$setWindowFields":{"partitionBy":"$g","sortBy":{"s":1},"output":{"t":{"$sum":"$n","window":{"documents":["unbounded","current"]}}}}},{"$group":{"_id":"$t"}}]"#
+        ),
+        list(&["g", "n", "s"])
+    );
+    assert_eq!(
+        fields(
+            r#"[{"$fill":{"sortBy":{"d":1},"output":{"x":{"method":"linear"}}}},{"$count":"c"}]"#
+        ),
+        list(&["d", "x"])
+    );
     assert_eq!(fields(r#"[{"$addFields":{"z":1}},{"$group":{"_id":"$z"}}]"#), list(&[]));
     assert_eq!(fields(r#"[{"$project":{"g":0}},{"$group":{"_id":"$s"}}]"#), list(&["s"]));
     assert_eq!(fields(r#"[{"$unset":"g"},{"$sortByCount":"$s"}]"#), list(&["s"]));

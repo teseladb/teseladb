@@ -7,6 +7,7 @@
 #![cfg_attr(coverage, feature(coverage_attribute))]
 #![forbid(unsafe_code)]
 
+mod annex;
 mod arrays;
 mod ast;
 mod bigint;
@@ -21,6 +22,7 @@ mod interp;
 mod iterators;
 mod json;
 mod lexer;
+mod lowering;
 mod math;
 mod md5;
 mod names;
@@ -291,6 +293,9 @@ impl Program {
                 vals.push(bson::from_bson(it, a, 0)?);
             }
             it.hoist(&self.body, &env, true)?;
+            if !crate::parser::has_use_strict(&self.body) {
+                it.hoist_block_functions(&self.body, &env, &[]);
+            }
             let result = if self.is_function {
                 let f = match self.body.first() {
                     Some(Stmt::Expr(e)) => it.eval(e, &env)?,

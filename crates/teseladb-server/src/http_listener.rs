@@ -118,12 +118,6 @@ pub struct HttpListener {
     threads: Vec<JoinHandle<()>>,
 }
 
-impl std::fmt::Debug for HttpListener {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HttpListener").field("addrs", &self.addrs).finish_non_exhaustive()
-    }
-}
-
 /// What the connections of a port share.
 struct Shared {
     service: Arc<dyn HttpService>,
@@ -197,25 +191,32 @@ impl HttpListener {
     }
 }
 
+/// A connection counted in [`Shared::open`] while it lives: on its thread, or in the closure of
+/// a thread that did not start, which drops it at once.
+struct Counted(Arc<Shared>);
+
+impl Drop for Counted {
+    fn drop(&mut self) {
+        self.0.open.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 fn accept(listener: &TcpListener, shared: &Arc<Shared>) {
-    for stream in listener.incoming() {
+    // A connection that fails to arrive (`accept` errors) is skipped.
+    for stream in listener.incoming().flatten() {
         if shared.stop.load(Ordering::SeqCst) {
             return;
         }
-        let Ok(stream) = stream else { continue };
         if shared.open.load(Ordering::SeqCst) >= MAX_CONNECTIONS {
             continue;
         }
         shared.open.fetch_add(1, Ordering::SeqCst);
-        let shared2 = shared.clone();
-        let spawned = thread::Builder::new().name("teseladb-http-conn".into()).spawn(move || {
+        let counted = Counted(shared.clone());
+        // A thread that does not start drops the connection, and `counted` gives its place back.
+        let _spawned = thread::Builder::new().name("teseladb-http-conn".into()).spawn(move || {
             // A connection that fails only loses itself.
-            let _ended = serve(stream, &shared2);
-            shared2.open.fetch_sub(1, Ordering::SeqCst);
+            let _ended = serve(stream, &counted.0);
         });
-        if spawned.is_err() {
-            shared.open.fetch_sub(1, Ordering::SeqCst);
-        }
     }
 }
 
@@ -229,6 +230,55 @@ enum Part {
     Piece(Vec<u8>),
     End,
 }
+
+/// The answer a request's thread owes its connection. Dropped before the answer is complete (the
+/// thread did not start, or the service panicked), it answers `503`, or ends the stream it began.
+struct Owed {
+    id: u32,
+    tx: mpsc::Sender<Event>,
+    state: Owing,
+}
+
+/// What an [`Owed`] still owes.
+enum Owing {
+    /// The whole answer.
+    Answer,
+    /// The end of a stream.
+    End,
+    /// Nothing.
+    Paid,
+}
+
+impl Owed {
+    /// Sends `part`; `false` when the connection is gone.
+    fn send(&mut self, part: Part) -> bool {
+        self.state = match part {
+            Part::Head(..) | Part::Piece(_) => Owing::End,
+            Part::Whole(_) | Part::End => Owing::Paid,
+        };
+        self.tx.send(Event::Part(self.id, part)).is_ok()
+    }
+
+    /// Owes nothing more.
+    fn settle(&mut self) {
+        self.state = Owing::Paid;
+    }
+}
+
+impl Drop for Owed {
+    fn drop(&mut self) {
+        let part = match self.state {
+            Owing::Answer => Part::Whole(Response::problem(UNAVAILABLE)),
+            Owing::End => Part::End,
+            Owing::Paid => return,
+        };
+        // A connection already gone needs no answer.
+        let _sent = self.tx.send(Event::Part(self.id, part));
+    }
+}
+
+/// The status of a request whose thread gave it up without answering.
+const UNAVAILABLE: u16 = 503;
 
 /// The requests of a connection that are running.
 struct Running {
@@ -270,13 +320,13 @@ fn spawn_reader(
     let run = move || {
         let mut buf = vec![0u8; READ_CHUNK];
         while !closed.load(Ordering::SeqCst) {
+            // `None` when the client closed (`Ok(0)`) or the socket failed.
             let read = match sock.read(&mut buf) {
-                Ok(0) => None,
-                Ok(n) => Some(buf[..n].to_vec()),
                 Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
                     continue;
                 }
-                Err(_) => None,
+                Ok(n) if n > 0 => Some(buf[..n].to_vec()),
+                _ => None,
             };
             let gone = read.is_none();
             if tx.send(Event::Read(read)).is_err() || gone {
@@ -426,34 +476,31 @@ fn start(
         Running { cancelled: cancelled.clone(), credential, route, started, streaming: None },
     );
     let cors_fields = cors.response_headers(origin, false);
-    let (service, caller, tx) = (shared.service.clone(), caller.clone(), tx.clone());
-    let spawned = thread::Builder::new().name("teseladb-http-req".into()).spawn(move || {
-        let send = |part| tx.send(Event::Part(id, part)).is_ok();
+    let service = shared.service.clone();
+    let caller = caller.clone();
+    let mut owed = Owed { id, tx: tx.clone(), state: Owing::Answer };
+    // A thread that does not start drops `owed`, which answers `503`.
+    let _spawned = thread::Builder::new().name("teseladb-http-req".into()).spawn(move || {
         match service.serve(&request, &caller, &cancelled) {
             Reply::Whole(mut r) => {
                 r.headers.extend(cors_fields);
-                send(Part::Whole(r));
+                owed.send(Part::Whole(r));
             }
             Reply::Stream { status, mut headers, mut pieces } => {
                 headers.extend(cors_fields);
-                if !send(Part::Head(status, headers)) {
-                    return;
-                }
+                // A connection that went away sets `cancelled`, which the loop sees.
+                owed.send(Part::Head(status, headers));
                 while let Some(p) = pieces(&cancelled) {
-                    if cancelled.load(Ordering::SeqCst) || !send(Part::Piece(p)) {
+                    if cancelled.load(Ordering::SeqCst) || !owed.send(Part::Piece(p)) {
+                        // Nobody waits for the end of the stream.
+                        owed.settle();
                         return;
                     }
                 }
-                send(Part::End);
+                owed.send(Part::End);
             }
         }
     });
-    if spawned.is_err() {
-        if let Some(r) = running.remove(&id) {
-            r.end(shared, 503);
-        }
-        c.respond(id, Response::problem(503));
-    }
 }
 
 /// Writes what a request's thread sent.
