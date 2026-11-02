@@ -209,12 +209,13 @@ impl Drop for Interp<'_> {
             }
         }
         // The global object is the call's own; the objects it holds are shared ([`crate::shared`]).
-        self.realm.global.borrow_mut().props.clear();
+        // One that the call left as it was serves the next call ([`crate::shared::Globals`]).
+        if !self.realm.global.0.pristine.get() {
+            self.realm.global.borrow_mut().props.clear();
+        }
     }
 }
 
-/// Whether `new f()` may run: a class or plain function, a native constructor (one with a
-/// `prototype`, or `Proxy`), a bound constructor or a callable proxy.
 /// How much native stack the calls of one program may take: well inside the 2 MiB of a spawned
 /// thread, so deep recursion ends as `too much recursion` instead of overflowing.
 const STACK_BUDGET: usize = 1 << 20;
@@ -226,6 +227,8 @@ fn stack_position() -> usize {
     std::hint::black_box(&marker as *const u8 as usize)
 }
 
+/// Whether `new f()` may run: a class or plain function, a native constructor (one with a
+/// `prototype`, or `Proxy`), a bound constructor or a callable proxy.
 pub fn is_constructor(f: &Val) -> bool {
     let Val::Obj(o) = f else { return false };
     let b = o.borrow();
@@ -369,6 +372,7 @@ impl<'c> Interp<'c> {
             charged: std::cell::Cell::new(size),
             budget: self.budget.clone(),
             shared: std::cell::Cell::new(false),
+            pristine: std::cell::Cell::new(false),
         })))
     }
 

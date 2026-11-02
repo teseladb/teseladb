@@ -90,6 +90,7 @@ fn bare(budget: &Rc<Budget>, proto: Option<ObjRef>, kind: Kind) -> ObjRef {
         charged: std::cell::Cell::new(0),
         budget: budget.clone(),
         shared: std::cell::Cell::new(false),
+        pristine: std::cell::Cell::new(false),
     }))
 }
 

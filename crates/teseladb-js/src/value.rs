@@ -59,6 +59,9 @@ pub struct ObjCell {
     pub budget: Rc<Budget>,
     /// Whether the object belongs to the global objects a program's calls share.
     pub shared: Cell<bool>,
+    /// Whether nothing has changed the object since it was marked: a call's global object that
+    /// stays so serves the next call as it is.
+    pub pristine: Cell<bool>,
 }
 
 impl Drop for ObjCell {
@@ -78,6 +81,7 @@ impl ObjRef {
 
     /// The object to change; changing a shared global object marks the globals as touched.
     pub fn borrow_mut(&self) -> std::cell::RefMut<'_, Obj> {
+        self.0.pristine.set(false);
         if self.0.shared.get() {
             self.0.budget.touched.set(true);
         }

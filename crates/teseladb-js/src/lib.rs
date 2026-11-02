@@ -222,7 +222,9 @@ impl Program {
             it.col_offset = if self.is_function { FUNCTION_PREFIX } else { WHERE_PREFIX };
             let r =
                 self.run(&mut it, &globals, this, args, ctx.scope, emit.is_some(), &mut emitted);
+            let global = it.realm.global.clone();
             drop(it);
+            globals.keep_global(global);
             r
         };
         if let Some(e) = emit {
@@ -269,7 +271,10 @@ impl Program {
             };
             if this.is_some() {
                 let g = it.realm.global.clone();
+                let pristine = g.0.pristine.get();
                 it.define(&g, "obj", value::Prop::data(this_val.clone()))?;
+                // `obj` is the call's own and is taken off again when the global object is kept.
+                g.0.pristine.set(pristine);
             }
             let env = it.global_env.clone();
             env.borrow_mut().this = Some(this_val.clone());

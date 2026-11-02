@@ -28,6 +28,8 @@ pub(crate) struct Globals {
     scopes: Vec<EnvRef>,
     /// Every shared object, to break their reference cycles when the globals are dropped.
     objects: Vec<ObjRef>,
+    /// The global object of the last call, kept when that call did not change it.
+    spare: RefCell<Option<ObjRef>>,
 }
 
 /// An interpreter over `realm` with the call's state empty.
@@ -101,6 +103,7 @@ impl Globals {
             globals,
             scopes,
             objects,
+            spare: RefCell::new(None),
         })
     }
 
@@ -119,6 +122,12 @@ impl Globals {
 
     /// Gives `it` its own global object, a copy of the shared one's properties.
     pub(crate) fn fill_global(&self, it: &mut Interp) -> R<()> {
+        if let Some(g) = self.spare.borrow_mut().take().filter(|g| g.0.pristine.get()) {
+            // The bytes the previous call charged for it, charged to this one.
+            it.charge(g.0.charged.get())?;
+            it.realm.global = g;
+            return Ok(());
+        }
         let g = it.alloc(Some(self.realm.object.clone()), Kind::Ordinary)?;
         it.grow(&g, self.globals.len())?;
         let mut props = self.globals.clone();
@@ -128,13 +137,34 @@ impl Globals {
             }
         }
         g.borrow_mut().props = props;
+        g.0.pristine.set(true);
         it.realm.global = g;
         Ok(())
+    }
+
+    /// Keeps the global object of a call that ended without changing it, for the next call.
+    /// `obj`, the document of `$where`, is the call's own: it goes, with the bytes it charged.
+    pub(crate) fn keep_global(&self, g: ObjRef) {
+        if !g.0.pristine.get() {
+            return;
+        }
+        let extra = {
+            let mut o = g.0.obj.borrow_mut();
+            let before = o.props.len();
+            o.props.truncate(self.globals.len());
+            before - o.props.len()
+        };
+        g.0.charged.set(g.0.charged.get() - extra * crate::interp::PROP_BYTES);
+        *self.spare.borrow_mut() = Some(g);
     }
 }
 
 impl Drop for Globals {
     fn drop(&mut self) {
+        // The spare global object holds itself (`globalThis`).
+        if let Some(g) = self.spare.borrow_mut().take() {
+            g.borrow_mut().props.clear();
+        }
         teardown(&self.objects);
         clear_scopes(&self.scopes);
     }
