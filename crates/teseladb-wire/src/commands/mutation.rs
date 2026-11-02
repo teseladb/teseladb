@@ -60,6 +60,7 @@ mod f {
     pub const ATTEMPT: &str = "attempt";
     pub const UNLOGGED: &str = "unlogged";
     pub const SHARD_KEY: &str = "shardKey";
+    pub const MOVES: &str = "moves";
     pub const PROBES: &str = "probes";
     pub const CAPPED: &str = "capped";
     pub const CAPPED_SIZE: &str = "size";
@@ -161,6 +162,10 @@ pub struct Rules {
     /// The collection's shard key (018 FR-001): its documents are keyed by it and their `_id`,
     /// which their index entries end in.
     pub shard_key: Option<Document>,
+    /// A retryable write or a statement of a transaction: an update that changes the shard key
+    /// moves its document to the key of the new values (018 FR-001), as a `refrouter` 9.0.4 moves
+    /// it there and refuses it elsewhere (measured on 02-11-2026).
+    pub moves: bool,
 }
 
 /// The buckets of a time series and the one an insert goes to.
@@ -305,6 +310,9 @@ fn rules_doc(r: &Rules, d: &mut Document, attempt: i64) {
     if let Some(k) = &r.shard_key {
         d.push(f::SHARD_KEY, k.clone());
     }
+    if r.moves {
+        d.push(f::MOVES, true);
+    }
     if let Some(c) = &r.capped {
         let saturated = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
         let mut cd = Document::new().with(f::CAPPED_SIZE, saturated(c.limits.size));
@@ -326,16 +334,48 @@ fn rules_doc(r: &Rules, d: &mut Document, attempt: i64) {
     }
 }
 
-/// Refuses an update of `old` into `new` that changes the values of shard key `key`, as a
-/// `refrouter` 9.0.4 refuses it outside a transaction or a retryable write (measured on
-/// 02-11-2026): the document's key is its shard key.
-fn same_shard_key(key: &Document, old: RawDoc<'_>, new: &Document) -> Result<(), CommandError> {
+/// Where an update of `old` into `new` moves its document when it changes the values of shard
+/// key `key` (`None` when it keeps them): the document's key is its shard key and its `_id`. As a
+/// `refrouter` 9.0.4 (measured on 02-11-2026), a multi-update cannot change them, and a single one
+/// only in a transaction or a retryable write (`home`, the tenant and the collection).
+fn moved_to(
+    key: &Document,
+    (old, new): (RawDoc<'_>, &Document),
+    multi: bool,
+    home: Option<(u32, u32)>,
+) -> Result<Option<Vec<u8>>, CommandError> {
     let before = super::sharding::shard_values(key, &Document::from(old))?;
     if before == super::sharding::shard_values(key, new)? {
-        return Ok(());
+        return Ok(None);
     }
-    let msg = "Must run update to shard key field in a multi-statement transaction or with retryWrites: true.";
-    Err(CommandError::new(crate::error::ILLEGAL_OPERATION, msg))
+    if multi {
+        let msg = "Multi-update operations are not allowed when updating the shard key field.";
+        return Err(CommandError::new(crate::error::INVALID_OPTIONS, msg));
+    }
+    let Some((tenant, collection)) = home else {
+        let msg = "Must run update to shard key field in a multi-statement transaction or with retryWrites: true.";
+        return Err(CommandError::new(crate::error::ILLEGAL_OPERATION, msg));
+    };
+    super::sharding::document_key_in((tenant, collection), key, new).map(Some)
+}
+
+/// The index entries and deletions of a document that moves from key `from` to key `to` with
+/// version `new`: it leaves the old key and its entries, and takes the new ones; an entry it
+/// keeps (that of `_id_`, with the new key in its value) is written again, not deleted.
+fn moved_entries(
+    checker: &Checker,
+    (from, to): (&[u8], &[u8]),
+    (old, new): (RawDoc<'_>, &[u8]),
+    lookup: &Lookup<'_>,
+) -> Result<(Vec<Put>, Vec<Vec<u8>>), CommandError> {
+    let (mut puts, mut deletes) = checker.entries_at(Some(from), Some(old), None, lookup)?;
+    let (added, gone) = checker.entries_at(Some(to), None, Some(new), lookup)?;
+    puts.extend(added);
+    deletes.extend(gone);
+    deletes.push(from.to_vec());
+    deletes.retain(|k| k.as_slice() != to && !puts.iter().any(|p| &p.key == k));
+    checker.moved.borrow_mut().push((from.to_vec(), to.to_vec()));
+    Ok((puts, deletes))
 }
 
 /// Bytes of a document's key before its primary key in a collection with a shard key: space,
@@ -443,6 +483,7 @@ fn read_rules(d: RawDoc<'_>) -> Result<Rules, CommandError> {
         timeseries: read_timeseries(d)?,
         unlogged: get_bool(d, f::UNLOGGED),
         shard_key: get_doc(d, f::SHARD_KEY),
+        moves: get_bool(d, f::MOVES),
     })
 }
 
@@ -742,8 +783,12 @@ struct Checker {
     /// The collection has a shard key: its index entries end in its documents' keys after
     /// their prefix.
     sharded: bool,
-    /// Its shard key, which an update cannot change.
+    /// Its shard key, which an update changes only when the write [`Rules::moves`].
     shard_key: Option<Document>,
+    /// The tenant and the collection of a write that moves documents ([`Rules::moves`]).
+    moves: Option<(u32, u32)>,
+    /// The documents the write moved, from their old key to their new one.
+    moved: std::cell::RefCell<Vec<(Vec<u8>, Vec<u8>)>>,
     /// The description of each document the write updated with operators, by its key (005
     /// FR-008, 014 FR-009).
     changes: std::cell::RefCell<Vec<(Vec<u8>, UpdateDescription)>>,
@@ -788,6 +833,8 @@ impl Checker {
             capped: r.capped.map(|_| (r.tenant, r.collection)),
             sharded: r.shard_key.is_some(),
             shard_key: r.shard_key.clone(),
+            moves: r.moves.then_some((r.tenant, r.collection)),
+            moved: std::cell::RefCell::default(),
             changes: std::cell::RefCell::default(),
         })
     }
@@ -1067,7 +1114,9 @@ impl Mutation for Bound {
             (Vec::new(), Vec::new(), MutationResult { errors, ..MutationResult::default() })
         });
         let mut change = Vec::new();
+        let mut moved = Vec::new();
         if let Ok(checker) = &checker {
+            moved = checker.moved.take();
             result.warnings.extend(checker.take_log());
             let changes = checker.take_changes().map_err(|e| e.to_mutation())?;
             if applied {
@@ -1092,7 +1141,8 @@ impl Mutation for Bound {
         // An erase removes what a dropped index or collection left: it changes no document.
         let erase = matches!(self.mutation, DocMutation::Erase { .. });
         if !self.rules().unlogged && !erase {
-            puts.extend(history_puts(&self.keys, (&puts, &deletes), &change, &replaced)?);
+            let docs = Written { change: &change, replaced: &replaced, moved: &moved };
+            puts.extend(history_puts(&self.keys, (&puts, &deletes), &docs)?);
         }
         match result.encode() {
             Ok(result) => Ok(Outcome { puts, deletes, change, result }),
@@ -1153,24 +1203,37 @@ pub fn written_docs(keys: &[Vec<u8>], puts: &[Put], deletes: &[Vec<u8>]) -> Vec<
     docs
 }
 
+/// What a write did to its documents, for their events: the encoded descriptions of its
+/// updates by operators, the documents it replaced, and those it moved with their shard key.
+struct Written<'a> {
+    change: &'a [u8],
+    replaced: &'a [Vec<u8>],
+    moved: &'a [(Vec<u8>, Vec<u8>)],
+}
+
 /// The versions next to each document a write changes with what its event needs (014 FR-005,
-/// FR-009): its position in the write and the description of an update by operators.
+/// FR-009): its position in the write and the description of an update by operators; a document
+/// that moved (018 FR-001) leaves its old key without an event and keeps the update's at the new.
 fn history_puts(
     keys: &[Vec<u8>],
     (puts, deletes): (&[Put], &[Vec<u8>]),
-    change: &[u8],
-    replaced: &[Vec<u8>],
+    w: &Written<'_>,
 ) -> Result<Vec<Put>, MutationError> {
-    use teseladb_changestream::meta::{DocWrite, history};
-    let mut updates = UpdateDescription::decode_all(change)
+    use teseladb_changestream::meta::{DocWrite, Moved, history};
+    let mut updates = UpdateDescription::decode_all(w.change)
         .map_err(|e| MutationError(format!("change description: {e:?}")))?;
     let writes: Vec<DocWrite> = written_docs(keys, puts, deletes)
         .into_iter()
         .map(|key| {
             let update = updates.iter().position(|(u, _)| *u == key).map(|i| updates.remove(i).1);
             let put = puts.iter().any(|p| p.key == key);
-            let replace = update.is_none() && replaced.contains(&key);
-            DocWrite { delete: !put, replace, update, doc: None, key }
+            let from = w.moved.iter().find(|(_, to)| *to == key).map(|(from, _)| from.clone());
+            let replace = update.is_none() && (from.is_some() || w.replaced.contains(&key));
+            let moved = match from {
+                Some(f) => Some(Moved::From(f)),
+                None => w.moved.iter().any(|(f, _)| *f == key).then_some(Moved::Away),
+            };
+            DocWrite { delete: !put, replace, update, doc: None, key, moved }
         })
         .collect();
     history(&writes, None)
@@ -1354,20 +1417,26 @@ fn modify(
                     out = UpdateOutcome { doc: filled, modified: true };
                 }
                 if out.modified {
+                    let target = match &checker.shard_key {
+                        Some(k) => {
+                            moved_to(k, (doc, &out.doc), multi, checker.moves).map_err(&during)?
+                        }
+                        None => None,
+                    };
+                    let at = target.clone().unwrap_or_else(|| key.clone());
                     if let Some(changes) = u.path_changes(false) {
                         let touches: Vec<Touch> = changes.into_iter().map(touch).collect();
                         let d = describe(&Document::from(doc), &out.doc, &touches, position);
-                        checker.changes.borrow_mut().push((key.clone(), d));
-                    }
-                    if let Some(k) = &checker.shard_key {
-                        same_shard_key(k, doc, &out.doc).map_err(&during)?;
+                        checker.changes.borrow_mut().push((at.clone(), d));
                     }
                     let new = stored_bytes(&out.doc, Stored::Update).map_err(&during)?;
                     checker.check(&new, Some(doc)).map_err(&during)?;
-                    let (entries, gone) = checker
-                        .entries_at(Some(key), Some(doc), Some(&new), lookup)
-                        .map_err(&during)?;
-                    puts.push(put(key, new));
+                    let written = match target {
+                        None => checker.entries_at(Some(key), Some(doc), Some(&new), lookup),
+                        Some(_) => moved_entries(checker, (key, &at), (doc, &new), lookup),
+                    };
+                    let (entries, gone) = written.map_err(&during)?;
+                    puts.push(put(&at, new));
                     puts.extend(entries);
                     deletes.extend(gone);
                     r.n_modified += 1;

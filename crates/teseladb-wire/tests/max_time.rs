@@ -824,6 +824,7 @@ fn server_parameters_are_read_and_set_as_a_refrouter_does() {
             "clusterAuthMode",
             "cursorTimeoutMillis",
             "enableTestCommands",
+            "internalQueryMaxMemoryUsageBytesPerOperation",
             "internalQueryPlannerEnableHashIntersection",
             "localLogicalSessionTimeoutMinutes",
             "maxConcurrentMultiDocumentTransactions",

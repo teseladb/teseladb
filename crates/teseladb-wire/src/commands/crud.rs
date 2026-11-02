@@ -351,6 +351,7 @@ pub fn rules_of(
         timeseries: None,
         unlogged: false,
         shard_key: super::sharding::shard_key_of(coll)?.map(|k| k.key),
+        moves: false,
     })
 }
 
@@ -913,6 +914,14 @@ pub fn modify<B: Backend + ?Sized>(
         teseladb_exec::expr::optimize::optimize_filter(&m.filter, m.vars.as_ref())
             .map_err(from_mql)?;
     }
+    // A retryable write outside a transaction changes one document per statement (measured on
+    // a `refnode` and a `refrouter` 9.0.4 on 02-11-2026).
+    let in_txn = ctx.cmd.get("autocommit").is_some();
+    if m.multi && w.retry.is_some() && !in_txn {
+        let what = if m.update.is_some() { "multi=true" } else { "limit=0" };
+        let msg = format!("Cannot use (or request) retryable writes with {what}");
+        return Err(CommandError::new(crate::error::INVALID_OPTIONS, msg));
+    }
     let host = super::host_port(ctx.backend);
     if let Some(e) = names::cannot_write(ns, &host) {
         return Err(e);
@@ -934,6 +943,7 @@ pub fn modify<B: Backend + ?Sized>(
     };
     let rules = Rules {
         vars: m.vars.clone(),
+        moves: w.retry.is_some(),
         ..rules_of(ns, &coll, bypass, m.collation.clone(), index_rules(ctx.backend, &coll)?)?
     };
     // The measurements of a time series live in its buckets (015 FR-007); with `rawData` the

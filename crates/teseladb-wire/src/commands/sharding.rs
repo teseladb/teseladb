@@ -102,6 +102,15 @@ pub fn document_key(
     key: &Document,
     doc: &Document,
 ) -> Result<Vec<u8>, CommandError> {
+    document_key_in((coll.tenant, coll.id), key, doc)
+}
+
+/// [`document_key`] in the collection `collection` of tenant `tenant`.
+pub fn document_key_in(
+    (tenant, collection): (u32, u32),
+    key: &Document,
+    doc: &Document,
+) -> Result<Vec<u8>, CommandError> {
     let values = shard_values(key, doc)?;
     let id = doc.get("_id").cloned().unwrap_or(Value::Null);
     let holder = values
@@ -113,7 +122,7 @@ pub fn document_key(
     let raw = RawDoc::from_bytes(&holder)?;
     let parts: Vec<teseladb_bson::RawValue<'_>> = raw.iter().map(|(_, v)| v).collect();
     let (id, shard) = parts.split_last().ok_or_else(|| CommandError::new(BAD_VALUE, "bad _id"))?;
-    let k = teseladb_keys::KeyBuilder::document_sharded(coll.tenant, coll.id, shard, *id);
+    let k = teseladb_keys::KeyBuilder::document_sharded(tenant, collection, shard, *id);
     Ok(k.as_bytes().to_vec())
 }
 

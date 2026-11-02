@@ -1392,3 +1392,36 @@ fn each_write_of_a_document_in_a_transaction_keeps_its_own_meta() {
     ];
     assert_eq!(got, want);
 }
+
+/// An update in a transaction that changes the shard key moves the document at the commit,
+/// and a multi-update that changes it fails (measured on a `refrouter` 9.0.4 on 02-11-2026; 018
+/// FR-001).
+#[test]
+fn an_update_in_a_transaction_moves_its_document_to_its_new_shard_key() {
+    let mut m = node();
+    let parse = |t: &str| teseladb_bson::extjson::parse(t).unwrap();
+    let r = run(&mut m, "admin", parse(r#"{"enableSharding":"t"}"#));
+    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+    let r = run(&mut m, "admin", parse(r#"{"shardCollection":"t.s","key":{"a":1}}"#));
+    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+    let r = run(&mut m, DB, parse(r#"{"insert":"s","documents":[{"_id":1,"a":5}]}"#));
+    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+    let shown = |m: &mut Mem| run(m, DB, parse(r#"{"find":"s","filter":{}}"#));
+    let set = |a: i32, multi: bool| {
+        let u = doc(&[("$set", Value::Document(doc(&[("a", Value::Int32(a))])))]);
+        let q = doc(&[("_id", Value::Int32(1))]);
+        let one = doc(&[("q", Value::Document(q)), ("u", Value::Document(u))]);
+        let one = if multi { one.with("multi", true) } else { one };
+        Document::new().with("update", "s").with("updates", Value::Array(vec![one.into()]))
+    };
+    let r = run(&mut m, DB, stmt(set(6, false), 3, 1, true));
+    assert_eq!(field(&r, "nModified"), &Value::Int32(1), "{r:?}");
+    let before = shown(&mut m);
+    assert_eq!(field(&before, "cursor.firstBatch.0.a"), &Value::Int32(5), "{before:?}");
+    let r = run(&mut m, "admin", end("commitTransaction", 3, 1));
+    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+    let after = shown(&mut m);
+    assert_eq!(field(&after, "cursor.firstBatch.0.a"), &Value::Int32(6), "{after:?}");
+    let r = run(&mut m, DB, stmt(set(7, true), 3, 2, true));
+    assert_eq!(field(&r, "writeErrors.0.code"), &Value::Int32(72), "{r:?}");
+}

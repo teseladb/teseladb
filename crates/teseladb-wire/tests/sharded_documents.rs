@@ -235,3 +235,119 @@ fn a_split_point_of_a_sharded_collection_comes_before_its_values() {
     let r = split_point(&plain, &json(r#"{"a":5}"#));
     assert_eq!(r.map_err(|e| e.errmsg), Err("--at needs an _id".to_owned()));
 }
+
+/// The session fields of a retryable write with `txnNumber` `n`.
+fn session(n: u32) -> String {
+    let lsid = r#""lsid":{"id":{"$binary":{"base64":"AgICAgICAgICAgICAgICAg==","subType":"04"}}}"#;
+    format!(r#"{lsid},"txnNumber":{{"$numberLong":"{n}"}}"#)
+}
+
+fn found(m: &mut Mem) -> Vec<Value> {
+    batch(&run(m, r#"{"find":"c","filter":{},"sort":{"_id":1}}"#))
+}
+
+/// A retryable write moves the document to the key of its new shard key values, and a retry
+/// answers from the first send (measured on a `refrouter` 9.0.4 on 02-11-2026).
+#[test]
+fn a_retryable_update_moves_its_document_to_its_new_shard_key() {
+    let mut m = sharded(r#"{"a":1}"#, r#"[{"_id":1,"a":5,"x":1},{"_id":2,"a":7}]"#);
+    let cmd = format!(
+        r#"{{"update":"c","updates":[{{"q":{{"_id":1}},"u":{{"$set":{{"a":6}}}}}}],{}}}"#,
+        session(1)
+    );
+    let r = run(&mut m, &cmd);
+    assert_eq!((field(&r, "n"), field(&r, "nModified")), (&Value::Int32(1), &Value::Int32(1)));
+    let r = run(&mut m, &cmd);
+    assert_eq!(field(&r, "retriedStmtIds"), &Value::Array(vec![Value::Int32(0)]), "{r:?}");
+    let six = Value::Int32(6).to_raw_bytes();
+    let one = Value::Int32(1).to_raw_bytes();
+    assert!(keyed(&m, &PrimaryKey::sharded(&[raw(&six)], raw(&one))), "the new key");
+    let five = Value::Int32(5).to_raw_bytes();
+    assert!(!keyed(&m, &PrimaryKey::sharded(&[raw(&five)], raw(&one))), "the old key is gone");
+    // By `_id`, by the new value and by a replacement and `findAndModify`.
+    let r = run(&mut m, r#"{"find":"c","filter":{"_id":1}}"#);
+    assert_eq!(batch(&r), vec![Value::Document(json(r#"{"_id":1,"a":6,"x":1}"#))]);
+    let replace = format!(
+        r#"{{"update":"c","updates":[{{"q":{{"a":7}},"u":{{"a":8,"z":1}}}}],{}}}"#,
+        session(2)
+    );
+    ok(&run(&mut m, &replace));
+    let fam = format!(
+        r#"{{"findAndModify":"c","query":{{"_id":1}},"update":{{"$set":{{"a":9}}}},"new":true,{}}}"#,
+        session(3)
+    );
+    let r = run(&mut m, &fam);
+    assert_eq!(field(&r, "value"), &Value::Document(json(r#"{"_id":1,"a":9,"x":1}"#)), "{r:?}");
+    let want = [r#"{"_id":1,"a":9,"x":1}"#, r#"{"_id":2,"a":8,"z":1}"#];
+    assert_eq!(found(&mut m), want.map(|d| Value::Document(json(d))).to_vec());
+    let r = run(&mut m, r#"{"find":"c","filter":{"a":{"$gte":8}},"sort":{"a":1}}"#);
+    assert_eq!(batch(&r).len(), 2);
+}
+
+/// A multi-update cannot change the shard key, and a retryable write cannot be a multi-update
+/// or a delete of many (measured on a `refrouter` and a `refnode` 9.0.4 on 02-11-2026).
+#[test]
+fn multi_writes_and_the_shard_key() {
+    let mut m = sharded(r#"{"a":1}"#, r#"[{"_id":1,"a":5}]"#);
+    let multi = r#"{"update":"c","updates":[{"q":{"_id":1},"u":{"$set":{"a":6}},"multi":true}]}"#;
+    let r = run(&mut m, multi);
+    assert_eq!(field(&r, "writeErrors.0.code"), &Value::Int32(72), "{r:?}");
+    assert_eq!(
+        field(&r, "writeErrors.0.errmsg"),
+        &Value::from(
+            "Plan executor error during update :: caused by :: Multi-update operations are not allowed when updating the shard key field."
+        )
+    );
+    // Keeping the values is fine.
+    let same =
+        r#"{"update":"c","updates":[{"q":{"_id":1},"u":{"$set":{"a":5,"y":1}},"multi":true}]}"#;
+    assert_eq!(field(&run(&mut m, same), "nModified"), &Value::Int32(1));
+    for (cmd, what) in [
+        (
+            r#""update":"c","updates":[{"q":{"_id":1},"u":{"$set":{"b":1}},"multi":true}]"#,
+            "multi=true",
+        ),
+        (r#""delete":"c","deletes":[{"q":{"_id":1},"limit":0}]"#, "limit=0"),
+    ] {
+        let r = run(&mut m, &format!("{{{cmd},{}}}", session(7)));
+        assert_eq!(field(&r, "writeErrors.0.code"), &Value::Int32(72), "{r:?}");
+        let msg = format!("Cannot use (or request) retryable writes with {what}");
+        assert_eq!(field(&r, "writeErrors.0.errmsg"), &Value::from(msg.as_str()));
+    }
+    assert_eq!(found(&mut m), vec![Value::Document(json(r#"{"_id":1,"a":5,"y":1}"#))]);
+}
+
+/// A moved document gives one `update` event keyed by the document before the change, as a
+/// `refrouter` 9.0.4 of one shard gives it (measured on 02-11-2026); a replacement, a `replace`.
+#[test]
+fn a_moved_document_gives_one_event_keyed_by_its_old_values() {
+    let mut m = sharded(r#"{"a":1}"#, r#"[{"_id":1,"a":5,"x":1},{"_id":2,"a":7}]"#);
+    let r = run(&mut m, r#"{"aggregate":"c","pipeline":[{"$changeStream":{}}],"cursor":{}}"#);
+    let Value::Int64(id) = field(&r, "cursor.id") else { panic!("{r:?}") };
+    let id = *id;
+    for (n, body) in [
+        (1, r#""updates":[{"q":{"_id":1},"u":{"$set":{"a":6}}}]"#),
+        (2, r#""updates":[{"q":{"_id":2},"u":{"a":8}}]"#),
+    ] {
+        ok(&run(&mut m, &format!(r#"{{"update":"c",{body},{}}}"#, session(n))));
+    }
+    let r = m.run("shk", Document::new().with("getMore", Value::Int64(id)).with("collection", "c"));
+    let Value::Array(events) = field(&r, "cursor.nextBatch") else { panic!("{r:?}") };
+    let seen: Vec<(Value, Value)> = events
+        .iter()
+        .map(|e| match e {
+            Value::Document(e) => {
+                (field(e, "operationType").clone(), field(e, "documentKey").clone())
+            }
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    let want = [("update", r#"{"a":5,"_id":1}"#), ("replace", r#"{"a":7,"_id":2}"#)]
+        .map(|(t, k)| (Value::from(t), Value::Document(json(k))));
+    assert_eq!(seen, want.to_vec());
+    let Value::Document(first) = &events[0] else { panic!() };
+    assert_eq!(
+        field(first, "updateDescription.updatedFields"),
+        &Value::Document(json(r#"{"a":6}"#))
+    );
+}

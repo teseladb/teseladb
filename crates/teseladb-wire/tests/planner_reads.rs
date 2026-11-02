@@ -250,3 +250,38 @@ fn a_unique_index_plan_finds_its_documents() {
     let r = run(&mut m, r#"{"find":"c","filter":{"b":{"$gte":5}},"sort":{"b":1}}"#);
     assert_eq!(ids(&r), expected(20, |i| i % 7 >= 5));
 }
+
+/// A wildcard index is no plan of the planner's: the query takes the index of its field, as a
+/// `refnode` 9.0.4 picks `a_1` next to `$**_1` (measured on 02-11-2026).
+#[test]
+fn a_wildcard_index_next_to_a_field_index_leaves_the_field_index() {
+    let mut m = loaded(30);
+    index(&mut m, r#"{"key":{"a":1},"name":"a_1"}"#);
+    index(&mut m, r#"{"key":{"$**":1},"name":"$**_1"}"#);
+    let r = run(&mut m, r#"{"find":"c","filter":{"a":5}}"#);
+    assert_eq!(ids(&r), expected(30, |i| i % 10 == 5));
+    let r = run(&mut m, r#"{"explain":{"find":"c","filter":{"a":5}}}"#);
+    let plan = field(&r, "queryPlanner.winningPlan.shards.0.winningPlan.inputStage.indexName");
+    assert_eq!(plan, &Value::from("a_1"), "{r:?}");
+}
+
+/// A `distinct` whose interval runs to the end of the index reads no key after it: two keys
+/// for `{a: {$gte: 5}}` over 1, 3, 5, 5, 7 (measured on a `refnode` 9.0.4 on 02-11-2026).
+#[test]
+fn a_distinct_scan_to_the_end_of_the_index_reads_no_key_after_it() {
+    let mut m = Mem::new();
+    let docs =
+        r#"[{"_id":1,"a":1},{"_id":2,"a":3},{"_id":3,"a":5},{"_id":4,"a":5},{"_id":5,"a":7}]"#;
+    let r = run(&mut m, &format!(r#"{{"insert":"c","documents":{docs}}}"#));
+    assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+    index(&mut m, r#"{"key":{"a":1},"name":"a_1"}"#);
+    for (q, keys) in [(r#"{"$gte":5}"#, 2), (r#"{"$lte":3}"#, 3)] {
+        let cmd = format!(
+            r#"{{"explain":{{"distinct":"c","key":"a","query":{{"a":{q}}}}},"verbosity":"executionStats"}}"#
+        );
+        let r = run(&mut m, &cmd);
+        let got = field(&r, "executionStats.totalKeysExamined");
+        assert_eq!(got, &Value::Int32(keys), "{q}: {r:?}");
+        assert_eq!(field(&r, "executionStats.nReturned"), &Value::Int32(2), "{q}");
+    }
+}

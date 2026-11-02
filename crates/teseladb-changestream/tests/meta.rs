@@ -22,7 +22,7 @@ fn m(
     update: Option<UpdateDescription>,
     replace: bool,
 ) -> ChangeMeta {
-    ChangeMeta { txn, op, update, replace, delete: false, doc: None }
+    ChangeMeta { txn, op, update, replace, delete: false, doc: None, moved: None }
 }
 
 fn txn() -> TxnInfo {

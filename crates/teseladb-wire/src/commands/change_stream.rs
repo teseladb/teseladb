@@ -772,11 +772,17 @@ fn event_of<B: Backend + ?Sized>(
     images: Images<'_>,
 ) -> Result<ChangeEvent, CommandError> {
     let key = &change.event.key;
-    let earlier = match images.prior {
-        Some(doc) => doc.cloned(),
-        None if change.doc.is_some() && stream.spec.before == BeforeChange::Off => None,
-        None if change.kind == EventKind::Insert => None,
-        None => previous(backend, key, change.event.ts)?,
+    // A document that moved with its shard key was at another key before (018 FR-001).
+    let from = match change.meta.as_ref().and_then(|m| m.moved.as_ref()) {
+        Some(teseladb_changestream::meta::Moved::From(k)) => Some(k),
+        _ => None,
+    };
+    let earlier = match (images.prior, from) {
+        (Some(doc), _) => doc.cloned(),
+        (None, Some(k)) => previous(backend, k, change.event.ts)?,
+        (None, None) if change.doc.is_some() && stream.spec.before == BeforeChange::Off => None,
+        (None, None) if change.kind == EventKind::Insert => None,
+        (None, None) => previous(backend, key, change.event.ts)?,
     };
     let doc_bytes = match (&change.doc, &earlier) {
         (Some(d), _) | (None, Some(d)) => d.clone(),
@@ -787,9 +793,15 @@ fn event_of<B: Backend + ?Sized>(
             ));
         }
     };
-    // A collection with a shard key gives the fields of it the document has (018 FR-001).
+    // A collection with a shard key gives the fields of it the document has (018 FR-001); a
+    // document that moved, those of the version it left, as a `refrouter` 9.0.4 keys the event
+    // (measured on 02-11-2026).
+    let keyed = match (from, &earlier) {
+        (Some(_), Some(before)) => before,
+        _ => &doc_bytes,
+    };
     let document_key =
-        super::sharding::event_key(entry, &Document::from(RawDoc::from_bytes(&doc_bytes)?))?;
+        super::sharding::event_key(entry, &Document::from(RawDoc::from_bytes(keyed)?))?;
     let event_ns = EventNs { db: ns.db.clone(), coll: Some(ns.coll.clone()) };
     let mut event = ChangeEvent::of(change, event_ns, Some(document_key), stream.spec.expanded)?;
     event.collection_uuid = Some(entry.uuid);
