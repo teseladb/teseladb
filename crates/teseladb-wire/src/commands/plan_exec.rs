@@ -874,21 +874,18 @@ fn walked<B: Backend + ?Sized>(
     Ok(Scanned { entries: out, seeks: w.seeks })
 }
 
-/// Whether `index` has an entry after the last interval of `scan`, in its direction.
+/// Whether `index` has an entry after the last interval of `scan`, a forward scan.
 pub(crate) fn key_after<B: Backend + ?Sized>(
     backend: &mut B,
     coll: &CollectionEntry,
     index: &PlanIndex,
     scan: &IndexScan,
 ) -> Result<bool, CommandError> {
+    // A `distinct` has no sort: its scan goes forward, to the end of the index.
     let ranges = key_ranges((coll.tenant, coll.id), index, &scan.bounds)?;
-    let (first, past) = index_span((coll.tenant, coll.id), index);
-    let (from, to) = match (scan.backward, ranges.first(), ranges.last()) {
-        (true, Some(r), _) => (first, r.start.clone()),
-        (false, _, Some(r)) => (r.end.clone().unwrap_or_else(|| past.clone()), past),
-        _ => return Ok(false),
-    };
-    Ok(from < to && any_entry(backend, coll.tenant, index, (&from, &to), ReadConcern::Local)?)
+    let (_, past) = index_span((coll.tenant, coll.id), index);
+    let from = ranges.last().and_then(|r| r.end.clone()).unwrap_or_else(|| past.clone());
+    Ok(from < past && any_entry(backend, coll.tenant, index, (&from, &past), ReadConcern::Local)?)
 }
 
 /// An entry an index scan reads: the document's primary key and, when the read wants it, the

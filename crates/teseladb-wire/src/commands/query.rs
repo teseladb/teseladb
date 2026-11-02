@@ -364,8 +364,12 @@ pub fn for_each_doc<B: Backend + ?Sized>(
         }
         Ok(true)
     };
-    if let Some(found) = super::timeseries::indexed_buckets(backend, coll, &spec, filter, concern)?
-    {
+    // An index of the buckets compares strings without a collation: a read with one scans them.
+    let indexed = match collation {
+        Some(_) => None,
+        None => super::timeseries::indexed_buckets(backend, coll, &spec, filter, concern)?,
+    };
+    if let Some(found) = indexed {
         for (key, bytes) in found {
             if !bucket(&key, &bytes)? {
                 return Ok(());

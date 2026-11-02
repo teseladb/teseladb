@@ -227,3 +227,79 @@ fn index_hints_limit_the_indexes_a_shape_plans_with() {
     let r = m.run("qsh", cmd(find));
     assert!(winning_index(&r).is_some(), "{r:?}");
 }
+
+/// Runs `text` on `qsh` as a client's command, so that the indexes it reads count in
+/// `$indexStats`.
+fn dispatched(m: &mut Mem, text: &str) -> Document {
+    use teseladb_wire::connection::Connection;
+    use teseladb_wire::dispatch::{Action, ClusterTime, NodeInfo, Topology, dispatch_with};
+    let info = NodeInfo {
+        topology: Topology { process_id: [1; 12], counter: 0 },
+        cluster_time: ClusterTime { time: 1, increment: 1 },
+        now_ms: 0,
+        keys: None,
+    };
+    let body = cmd(text).with("$db", "qsh").to_bytes().unwrap();
+    let mut c = Connection::new(9);
+    c.receive(&teseladb_wire::msg::OpMsg::encode(1, 0, 0, &body));
+    let req = c.next_request().unwrap().unwrap();
+    let shared = std::mem::take(&mut m.shared);
+    let r = match dispatch_with(&mut Connection::new(1), &req, &info, Some((m, &shared))) {
+        Action::Reply(d) => d,
+        other => panic!("{other:?}"),
+    };
+    m.shared = shared;
+    r
+}
+
+/// `accesses.ops` of the indexes of `coll`, by name.
+fn index_ops(m: &mut Mem, coll: &str) -> Vec<(String, i64)> {
+    let stats = r#"[{"$indexStats":{}},{"$project":{"_id":0,"name":1,"o":"$accesses.ops"}},{"$sort":{"name":1}}]"#;
+    let r = dispatched(m, &format!(r#"{{"aggregate":"{coll}","pipeline":{stats},"cursor":{{}}}}"#));
+    let Value::Array(b) = field(&r, "cursor.firstBatch") else { panic!("{r:?}") };
+    b.iter()
+        .map(|d| {
+            let Value::Document(d) = d else { panic!("{d:?}") };
+            let Value::String(n) = field(d, "name") else { panic!("{d:?}") };
+            let Value::Int64(o) = field(d, "o") else { panic!("{d:?}") };
+            (n.clone(), *o)
+        })
+        .collect()
+}
+
+/// Index hints name one collection: a `$lookup` of the shape still reads the other one with its
+/// own indexes (measured on a `refnode` 9.0.4 on 02-11-2026: `b_1` of `c` and `a_1` of `d` read
+/// once each, `a_1` of `c` never).
+#[test]
+fn index_hints_leave_the_indexes_of_other_collections_alone() {
+    let mut m = Mem::new();
+    m.shared = std::sync::Mutex::new(teseladb_wire::commands::NodeSessions::new(
+        teseladb_wire::commands::Timeouts::default(),
+    ));
+    for text in [
+        r#"{"insert":"c","documents":[{"_id":1,"a":1,"b":1},{"_id":2,"a":5,"b":5}]}"#,
+        r#"{"insert":"d","documents":[{"_id":1,"a":1},{"_id":2,"a":5}]}"#,
+        r#"{"createIndexes":"c","indexes":[{"key":{"a":1},"name":"a_1"},{"key":{"b":1},"name":"b_1"}]}"#,
+        r#"{"createIndexes":"d","indexes":[{"key":{"a":1},"name":"a_1"}]}"#,
+    ] {
+        let r = m.run("qsh", cmd(text));
+        assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+    }
+    let pipeline = r#"[{"$match":{"a":1,"b":1}},{"$lookup":{"from":"d","localField":"a","foreignField":"a","as":"j"}}]"#;
+    let target = format!(r#"{{"aggregate":"c","pipeline":{pipeline},"$db":"qsh"}}"#);
+    let hints = r#"{"indexHints":{"ns":{"db":"qsh","coll":"c"},"allowedIndexes":["b_1"]}}"#;
+    let r = set(&mut m, &target, hints);
+    assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+    let r =
+        dispatched(&mut m, &format!(r#"{{"aggregate":"c","pipeline":{pipeline},"cursor":{{}}}}"#));
+    let joined = json_of(r#"[{"_id":1,"a":1,"b":1,"j":[{"_id":1,"a":1}]}]"#);
+    assert_eq!(field(&r, "cursor.firstBatch"), &joined, "{r:?}");
+    let named =
+        |l: &[(&str, i64)]| l.iter().map(|(n, o)| ((*n).to_owned(), *o)).collect::<Vec<_>>();
+    assert_eq!(index_ops(&mut m, "c"), named(&[("_id_", 0), ("a_1", 0), ("b_1", 1)]));
+    assert_eq!(index_ops(&mut m, "d"), named(&[("_id_", 0), ("a_1", 1)]));
+}
+
+fn json_of(text: &str) -> Value {
+    cmd(&format!(r#"{{"v":{text}}}"#)).get("v").cloned().expect("a value")
+}

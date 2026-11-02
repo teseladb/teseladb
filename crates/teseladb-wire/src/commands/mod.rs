@@ -959,8 +959,14 @@ fn shaped<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Command
     };
     let cmd = limited.as_ref().unwrap_or(ctx.cmd);
     let start = query_stats_start(ctx.backend);
-    let reply =
-        dispatch(&mut Ctx { backend: &mut *ctx.backend, shared: ctx.shared, db: ctx.db, cmd })?;
+    // The shape's index hints limit the indexes of its collection in the run too (measured on a
+    // `refnode` 9.0.4 on 02-11-2026 with `$indexStats`).
+    let reply = with_settings_indexes(
+        &mut Ctx { backend: &mut *ctx.backend, shared: ctx.shared, db: ctx.db, cmd },
+        cmd,
+        settings.as_ref(),
+        dispatch,
+    )?;
     // The shape only of a sampled query: the others cost no more than the draw.
     if sampled(ctx)
         && let Some(shape) = query_shape::shape(ctx.db, ctx.cmd)
