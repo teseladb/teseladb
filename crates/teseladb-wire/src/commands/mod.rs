@@ -67,6 +67,7 @@ pub mod sharding;
 pub mod sort;
 pub mod status;
 pub mod tenants;
+pub mod text_search;
 pub mod timeseries;
 pub mod timeseries_filter;
 pub mod ttl;

@@ -84,6 +84,13 @@ pub trait Env {
         Err(search::not_enabled())
     }
 
+    /// The documents of a pipeline's first `$match` with a `$text` (011 FR-001): those of the
+    /// collection its filter selects, each with its `textScore`. Without a text index,
+    /// RefDb's `IndexNotFound`.
+    fn text_source(&self, _filter: &Document) -> Result<Vec<search::Scored>, MqlError> {
+        Err(error(errors::INDEX_NOT_FOUND, "text index required for $text query"))
+    }
+
     /// Sends a search stage's query to the search indexes while the pipeline is planned, as
     /// `refnode` does with `refsearch`: its errors are those of planning, not of running (measured on
     /// 9.0.4). Nothing to check without search.
@@ -150,6 +157,8 @@ fn seed_of(draw: f64) -> u64 {
 #[derive(Clone, Debug)]
 enum Stage {
     Match(Match),
+    /// A first `$match` with a `$text`: its filter, which the node's text index answers.
+    Text(Document),
     Project(Projection),
     AddFields(AddFields),
     ReplaceRoot(ReplaceRoot),
@@ -343,7 +352,7 @@ impl Pipeline {
     pub fn reads_collection(&self) -> bool {
         !matches!(
             self.stages.first(),
-            Some(Stage::Documents(_) | Stage::System(..) | Stage::Search(..))
+            Some(Stage::Documents(_) | Stage::System(..) | Stage::Search(..) | Stage::Text(_))
         )
     }
 
@@ -416,6 +425,15 @@ impl Pipeline {
             if let Stage::Fusion(f) = st {
                 let (fused, scores) = f.run(docs, env)?;
                 (docs, metas) = (fused, Some(scores));
+                continue;
+            }
+            if let Stage::Text(filter) = st {
+                let (found, scores): (Vec<Document>, Vec<meta::Meta>) = env
+                    .text_source(filter)?
+                    .into_iter()
+                    .map(|s| (s.doc, meta::with_score(s.meta, Some(meta::TEXT_SCORE))))
+                    .unzip();
+                (docs, metas) = (found, Some(scores));
                 continue;
             }
             if let Stage::Search(name, spec) = st {
@@ -524,7 +542,12 @@ fn parse_stages(pipeline: &[RawValue<'_>], ctx: &Ctx) -> Result<Pipeline, MqlErr
             }
             reads_meta = true;
         }
-        stages.push(parse_stage(*d, if searched { &after_search } else { ctx })?);
+        let stage = parse_stage(*d, if searched { &after_search } else { ctx })?;
+        let stage = match (i, d.get("$match")) {
+            (0, Some(RawValue::Document(m))) if has_text(m) => Stage::Text(Document::from(m)),
+            _ => stage,
+        };
+        stages.push(stage);
         searched |= d.get("$search").is_some();
         sbe_specs.push(d.iter().all(|(name, arg)| sbe::spec_runs_in_sbe(name, arg)));
     }
@@ -749,6 +772,7 @@ fn sbe_capable(st: &Stage) -> bool {
         | Stage::Fusion(_)
         | Stage::System(..)
         | Stage::Search(..)
+        | Stage::Text(_)
         | Stage::Write(_) => false,
     }
 }
@@ -828,6 +852,7 @@ fn run_stage(
         Stage::Search(name, spec) => {
             env.search_source(name, spec)?.into_iter().map(|s| s.doc).collect()
         }
+        Stage::Text(filter) => env.text_source(filter)?.into_iter().map(|s| s.doc).collect(),
         // The node writes what reaches it (`out_merge`).
         Stage::Write(_) => docs,
     })

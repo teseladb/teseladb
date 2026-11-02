@@ -419,8 +419,8 @@ pub fn with_index<B: Backend + ?Sized, R>(
     let Some(mut built) = borrow(backend, shared, &entry.id, coll.id)? else {
         return Err(query_error(state_message(entry, coll, ns, "INITIAL_SYNC")));
     };
-    let caught = catch_up(backend, coll, &mut built)
-        .and_then(|()| built.indexer.set_synonyms(synonyms));
+    let caught =
+        catch_up(backend, coll, &mut built).and_then(|()| built.indexer.set_synonyms(synonyms));
     let out = caught.map(|()| f(&built.indexer, &built.stored));
     give_back(shared, entry.id, built, false)?;
     out

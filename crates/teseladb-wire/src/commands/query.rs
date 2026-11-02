@@ -787,8 +787,14 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
     let Some(coll) = ctx.backend.collection(&ns)? else {
         // Validate the filter even when there is nothing to read, as RefDb does.
         Plan::new(&a.filter, a.projection.as_ref(), a.collation.as_ref())?;
+        if super::views::has_text(&a.filter) {
+            return text_find(ctx, &ns);
+        }
         return Ok(cursor_reply(0, &ns_text, "firstBatch", Vec::new()));
     };
+    if super::views::has_text(&a.filter) {
+        return text_find(ctx, &ns);
+    }
     let collation = a.collation.clone().or_else(|| options_collation(&coll));
     Plan::new(&a.filter, a.projection.as_ref(), collation.as_ref())?
         .check_metadata(a.sort.as_ref())?;
@@ -916,6 +922,31 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
     };
     let id = keep(ctx, &ns_text, state, exhausted, a.no_timeout)?;
     Ok(cursor_reply(id, &ns_text, "firstBatch", docs))
+}
+
+/// A `find` whose filter has a `$text` (011 FR-001): the aggregation of its stages, whose first
+/// `$match` the collection's text index answers with each document's `textScore`.
+fn text_find<B: Backend + ?Sized>(
+    ctx: &mut Ctx<'_, B>,
+    ns: &Namespace,
+) -> Result<Document, CommandError> {
+    let stages: Vec<Value> =
+        super::views::stages_of(ctx.cmd).into_iter().map(Value::Document).collect();
+    let mut cursor = Document::new();
+    if let Some(size) = ctx.cmd.get("batchSize") {
+        cursor.push("batchSize", size.clone());
+    }
+    let mut agg = Document::new()
+        .with("aggregate", ns.coll.clone())
+        .with("pipeline", Value::Array(stages))
+        .with("cursor", cursor);
+    for option in ["collation", "let", "readConcern", "maxTimeMS", "comment"] {
+        if let Some(v) = ctx.cmd.get(option) {
+            agg.push(option, v.clone());
+        }
+    }
+    let mut inner = Ctx { backend: &mut *ctx.backend, shared: ctx.shared, db: ctx.db, cmd: &agg };
+    super::aggregate::aggregate(&mut inner)
 }
 
 /// Refuses a tailable `find` on a collection that is not capped, as a `refrouter` 9.0.4 does
