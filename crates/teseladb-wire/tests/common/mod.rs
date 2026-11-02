@@ -834,12 +834,13 @@ impl Backend for Mem {
                 self.settings.clone().unwrap_or_default()
             }
             "databases" => self.databases_docs.clone().unwrap_or_default(),
+            teseladb_wire::commands::query_analysis::QUERY_ANALYZERS => {
+                teseladb_wire::commands::query_analysis::of_settings(&self.group0)
+            }
             COLLECTIONS => {
                 let mut out = Vec::new();
                 for (ns, c) in &self.catalog.collections {
-                    if let Some(k) = sharding::shard_key_of(c)? {
-                        out.push(sharding::config_entry(ns, c, &k));
-                    }
+                    out.extend(sharding::tracked_entry(ns, c)?);
                 }
                 out
             }

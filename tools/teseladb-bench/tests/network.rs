@@ -181,3 +181,24 @@ fn index_build_load_runs_against_a_local_cluster() {
         assert!(out.contains(name), "{name}: {out}");
     }
 }
+
+#[test]
+fn reshard_runs_against_a_local_cluster_without_losing_writes() {
+    let out = metrics(&bench(&[
+        "--scenario",
+        "reshard",
+        "--records",
+        "2000",
+        "--concurrency",
+        "2",
+        "--duration",
+        "300ms",
+        "--warmup",
+        "100ms",
+        "--format",
+        "json",
+    ]));
+    for name in ["\"reshard\"", "cutover", "\"lost\",\"unit\":\"doc\",\"value\":0", "writes"] {
+        assert!(out.contains(name), "{name}: {out}");
+    }
+}

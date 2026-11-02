@@ -25,6 +25,7 @@ pub mod query;
 pub mod raftlog;
 pub mod read;
 pub mod reference;
+pub mod reshard;
 pub mod security;
 pub mod timeseries;
 pub mod txn;
@@ -178,6 +179,7 @@ pub fn run(args: &Args) -> Result<Report, String> {
         "scram" => security::scram(args),
         "timeseries" => timeseries::run(args),
         "changestream-lag" => changestream::run(args),
+        "reshard" => reshard::run(args),
         "cores-curve" => cores_curve::run(args),
         "disk-usage" => disk_usage::run(args),
         s if s.len() == 6 && s.starts_with("ycsb-") => {
@@ -185,7 +187,7 @@ pub fn run(args: &Args) -> Result<Report, String> {
         }
         other => Err(format!(
             "unknown scenario: {other} (available: raftlog, raftlog-recover, deflate, bson, js, keys, lsm, lsm-sustained, lsm-compression, \
-             write, read, failover, follower-read, group0-limits, split, add-node, rebalance, reference, wire, crud, index-write, index-read, index-build-load, aggregate, sort, group-large, txn, txn-readers, contention, tls-handshake, scram, timeseries, changestream-lag, cores-curve, disk-usage, ycsb-a … ycsb-f)"
+             write, read, failover, follower-read, group0-limits, split, add-node, rebalance, reference, wire, crud, index-write, index-read, index-build-load, aggregate, sort, group-large, txn, txn-readers, contention, tls-handshake, scram, timeseries, changestream-lag, reshard, cores-curve, disk-usage, ycsb-a … ycsb-f)"
         )),
     }
 }
