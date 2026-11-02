@@ -268,6 +268,9 @@ pub struct ReplicaSet {
     primary: Option<usize>,
     set_version: i32,
     term: i64,
+    /// Members in maintenance mode (`replSetMaintenance`): `RECOVERING`, neither primary nor
+    /// secondary to the drivers.
+    recovering: Vec<usize>,
 }
 
 impl ReplicaSet {
@@ -292,7 +295,14 @@ impl ReplicaSet {
                 return Err(ConfigError::DuplicateHost(m.host.clone()));
             }
         }
-        let rs = ReplicaSet { set_name, members, primary: None, set_version, term };
+        let rs = ReplicaSet {
+            set_name,
+            members,
+            primary: None,
+            set_version,
+            term,
+            recovering: Vec::new(),
+        };
         let primary = match primary {
             Some(host) => Some(rs.electable(host)?),
             None => None,
@@ -323,6 +333,20 @@ impl ReplicaSet {
     /// The term: it grows with every new designation.
     pub fn term(&self) -> i64 {
         self.term
+    }
+
+    /// The set with the members at `hosts` in maintenance mode (`RECOVERING`); the designated
+    /// primary never is.
+    pub fn with_recovering(&self, hosts: &[&str]) -> ReplicaSet {
+        let recovering = (0..self.members.len())
+            .filter(|&i| Some(i) != self.primary && hosts.contains(&self.members[i].host.as_str()))
+            .collect();
+        ReplicaSet { recovering, ..self.clone() }
+    }
+
+    /// Whether member `id` is in maintenance mode.
+    pub fn is_recovering(&self, id: MemberId) -> bool {
+        self.recovering.contains(&id.0)
     }
 
     /// The member with this host.
@@ -366,7 +390,9 @@ impl ReplicaSet {
     }
 
     fn with_primary(&self, primary: usize, set_version: i32) -> ReplicaSet {
-        ReplicaSet { primary: Some(primary), set_version, term: self.term + 1, ..self.clone() }
+        let recovering = self.recovering.iter().copied().filter(|&i| i != primary).collect();
+        let term = self.term + 1;
+        ReplicaSet { primary: Some(primary), set_version, term, recovering, ..self.clone() }
     }
 
     /// Group 0's automatic reassignment (FR-007, `PrimaryReassign.tla`): when there is no
@@ -469,7 +495,7 @@ impl ReplicaSet {
         d.push("setName", self.set_name.as_str());
         d.push("setVersion", self.set_version);
         d.push(if ctx.legacy { "ismaster" } else { "isWritablePrimary" }, is_primary);
-        d.push("secondary", !is_primary);
+        d.push("secondary", !is_primary && !self.recovering.contains(&me.0));
         if let Some(p) = self.primary() {
             d.push("primary", p);
         }

@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 
 use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_changestream::changes::{Change, Versioned, changes, collection_of};
-use teseladb_changestream::meta::{Moved, lsid_document};
+use teseladb_changestream::meta::{Moved, RetryInfo, lsid_document};
 use teseladb_changestream::token::EventKind;
 use teseladb_hlc::Hlc;
 use teseladb_hlc::{from_timestamp, to_timestamp};
@@ -26,8 +26,8 @@ use teseladb_meta::catalog::{CollectionEntry, Namespace};
 use teseladb_meta::command::SettingChange;
 use teseladb_meta::ddl_log::{DdlChange, DdlRecord};
 use teseladb_topology::oplog::{
-    DROP_REFUSED, DROP_REFUSED_CODE, ENTRY_VERSION, OpType, Operation, OplogEntry, TxnInfo,
-    WRITE_REFUSED, transaction_entries,
+    APPLY_OPS_NS, DROP_REFUSED, DROP_REFUSED_CODE, ENTRY_VERSION, NULL_OP_TIME, OpType, Operation,
+    OplogEntry, TxnInfo, WRITE_REFUSED, transaction_entries,
 };
 use teseladb_topology::replset::{OpTime, Timestamp};
 
@@ -154,14 +154,48 @@ fn plain(operation: Operation, extra: Document, mark: Hlc, term: i64) -> Documen
     OplogEntry {
         txn: None,
         operation,
+        retry_image: None,
         stmt_id: None,
         extra,
         op_time: Some(op_time(mark, term)),
         version: ENTRY_VERSION,
         wall_ms: Some(wall(mark)),
         prev_op_time: None,
+        multi_op_type: None,
     }
     .to_document()
+}
+
+/// The entries of retryable write `r` at `mark` (018 FR-009), as a replica set member of RefDb
+/// 9.0.4 writes them (measured on 02-11-2026): one document is a plain entry with the session,
+/// several are one `applyOps` entry on `admin.$cmd` with `multiOpType: 1`, each operation with
+/// its `stmtId`; `prevOpTime` is the command's previous statement, or null for the first.
+fn retryable(r: &RetryInfo, ops: Vec<(u32, Operation)>, mark: Hlc, term: i64) -> Document {
+    let stmt = |op: u32| i32::try_from(r.stmt_id.saturating_add(op)).unwrap_or(i32::MAX);
+    let prev = r.prev.map_or(NULL_OP_TIME, |p| op_time(p, term));
+    let txn = Some(TxnInfo { lsid: lsid_document(r.lsid, &r.uid), txn_number: r.txn_number });
+    let entry = |operation, stmt_id: Option<i32>, multi_op_type| OplogEntry {
+        txn: txn.clone(),
+        operation,
+        retry_image: r.image_name().map(str::to_owned).filter(|_| stmt_id.is_some()),
+        stmt_id,
+        extra: Document::new(),
+        op_time: Some(op_time(mark, term)),
+        version: ENTRY_VERSION,
+        wall_ms: Some(wall(mark)),
+        prev_op_time: Some(prev),
+        multi_op_type,
+    };
+    if let [(op, one)] = ops.as_slice() {
+        return entry(one.clone(), Some(stmt(*op)), None).to_document();
+    }
+    let applied: Vec<Value> = ops
+        .into_iter()
+        .map(|(op, o)| Value::Document(o.to_document().with("stmtId", stmt(op))))
+        .collect();
+    let o = Document::new().with("applyOps", applied);
+    let batch = Operation::new(OpType::Command, APPLY_OPS_NS, None, o, None);
+    entry(batch, None, Some(1)).to_document()
 }
 
 fn wall(mark: Hlc) -> i64 {
@@ -193,26 +227,142 @@ fn create_options(entry: &CollectionEntry) -> Result<Document, CommandError> {
         .fold(Document::new(), |d, (k, v)| d.with(k, v.clone())))
 }
 
+/// An identifier in the form of RefDb's storage idents (a UUID's text): TeselaDB keeps no
+/// files per collection or index, so it is derived from the collection's UUID and `what` (the
+/// collection, its `_id` index or an index by name), the same on every read.
+fn ident(collection: &CollectionEntry, what: &str) -> Value {
+    let mut seed = collection.uuid.to_vec();
+    seed.extend_from_slice(what.as_bytes());
+    let mut b = teseladb_hash::sha256(&seed);
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let hex: String = b[..16].iter().map(|x| format!("{x:02x}")).collect();
+    Value::from(format!(
+        "{}-{}-{}-{}-{}",
+        &hex[..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    ))
+}
+
+/// `versionContext` of the entries a RefDb 9.0.4 member writes under its feature
+/// compatibility version (`create`, `createIndexes`, `collMod`).
+fn version_context() -> Document {
+    Document::new().with("OFCV", "9.0")
+}
+
+/// Whether `collection` is a time series.
+fn is_timeseries(collection: &CollectionEntry) -> Result<bool, CommandError> {
+    Ok(!collection.options.is_empty()
+        && doc_of(&collection.options)?.get(super::kinds::TIMESERIES).is_some())
+}
+
+/// The fields after `o2` of a catalog entry: `isTimeseries` for a time series, then
+/// `versionContext` when `versioned`.
+fn catalog_extra(collection: &CollectionEntry, versioned: bool) -> Result<Document, CommandError> {
+    let mut extra = Document::new();
+    if is_timeseries(collection)? {
+        extra.push("isTimeseries", true);
+    }
+    if versioned {
+        extra.push("versionContext", version_context());
+    }
+    Ok(extra)
+}
+
+/// `create` as a member writes it: a time series as a clustered collection with its options
+/// (`clusteredIndex`, `expireAfterSeconds`, `timeseries`) and no `_id` index; a view without
+/// one either.
+fn create_entry(ns: &Namespace, collection: &CollectionEntry) -> Result<Document, CommandError> {
+    let mut o = Document::new().with("create", ns.coll.as_str());
+    let options = create_options(collection)?;
+    let view = options.get("viewOn").is_some();
+    let series = options.get(super::kinds::TIMESERIES).is_some();
+    if series {
+        o.push("clusteredIndex", true);
+        if let Some(e) = options.get(super::kinds::EXPIRE) {
+            o.push(super::kinds::EXPIRE, e.clone());
+        }
+    }
+    for (k, v) in options.iter().filter(|(k, _)| !series || *k != super::kinds::EXPIRE) {
+        o.push(k, v.clone());
+    }
+    if !view && !series && options.get("clusteredIndex").is_none() {
+        o.push("idIndex", id_index());
+    }
+    Ok(o)
+}
+
+/// `o2` of `create`: the collection's catalog number and its idents.
+fn create_o2(collection: &CollectionEntry) -> Document {
+    Document::new()
+        .with("catalogId", i64::from(collection.id))
+        .with("ident", ident(collection, ""))
+        .with("idIndexIdent", ident(collection, "_id_"))
+}
+
+/// `collectionOptions_old` of a `collMod`: the collection's UUID and the options it had.
+fn options_before(collection: &CollectionEntry) -> Result<Document, CommandError> {
+    let uuid = Value::Binary { subtype: 4, bytes: collection.uuid.to_vec() };
+    let mut d = Document::new().with("uuid", uuid);
+    let options = create_options(collection)?;
+    if options.get(super::kinds::TIMESERIES).is_some() {
+        d.push("clusteredIndex", true);
+    }
+    for (k, v) in options.iter() {
+        d.push(k, v.clone());
+    }
+    Ok(d)
+}
+
+/// The default of an index option a spec leaves out, for `indexOptions_old`.
+fn index_default(option: &str) -> Value {
+    match option {
+        "expireAfterSeconds" => Value::Null,
+        _ => Value::Boolean(false),
+    }
+}
+
+/// `o.index` and `indexOptions_old` of the `collMod` of an index from its specification before
+/// and after: its name and each option that changed, with the new and the old value.
+fn index_change(before: &Document, after: &Document) -> (Document, Document) {
+    let name = after.get("name").cloned().unwrap_or(Value::Null);
+    let mut index = Document::new().with("name", name);
+    let mut old = Document::new();
+    let fields = after.iter().map(|(k, _)| k).chain(before.iter().map(|(k, _)| k));
+    let mut seen: Vec<&str> = Vec::new();
+    for k in fields {
+        if seen.contains(&k) || matches!(k, "v" | "key" | "name") {
+            continue;
+        }
+        seen.push(k);
+        let (b, a) = (before.get(k), after.get(k));
+        if b == a {
+            continue;
+        }
+        index.push(k, a.cloned().unwrap_or_else(|| index_default(k)));
+        old.push(k, b.cloned().unwrap_or_else(|| index_default(k)));
+    }
+    (index, old)
+}
+
 /// The `c` entry of catalog change `r`, if a replica set has one.
 fn ddl_operation(r: &DdlRecord) -> Result<Option<(Operation, Document)>, CommandError> {
     let ui = |c: &CollectionEntry| Some(c.uuid);
     let none = Document::new();
     Ok(Some(match &r.change {
         DdlChange::Create { ns, collection } => {
-            let mut o = Document::new().with("create", ns.coll.as_str());
-            let options = create_options(collection)?;
-            let view = options.get("viewOn").is_some();
-            for (k, v) in options.iter() {
-                o.push(k, v.clone());
-            }
-            if !view {
-                o.push("idIndex", id_index());
-            }
-            (Operation::new(OpType::Command, cmd_ns(&ns.db), ui(collection), o, None), none)
+            let o = create_entry(ns, collection)?;
+            let o2 = Some(create_o2(collection));
+            let extra = catalog_extra(collection, true)?;
+            (Operation::new(OpType::Command, cmd_ns(&ns.db), ui(collection), o, o2), extra)
         }
         DdlChange::Drop { ns, collection } => {
             let o = Document::new().with("drop", ns.coll.as_str());
-            (Operation::new(OpType::Command, cmd_ns(&ns.db), ui(collection), o, None), none)
+            let extra = catalog_extra(collection, false)?;
+            (Operation::new(OpType::Command, cmd_ns(&ns.db), ui(collection), o, None), extra)
         }
         DdlChange::Rename { from, to, collection, target } => {
             if super::reshard::cutover_event(from, target.as_ref())?.is_some() {
@@ -238,10 +388,9 @@ fn ddl_operation(r: &DdlRecord) -> Result<Option<(Operation, Document)>, Command
             for (k, v) in doc_of(description)?.iter().filter(|(k, _)| !k.starts_with('$')) {
                 o.push(k, v.clone());
             }
-            let uuid = Value::Binary { subtype: 4, bytes: collection.uuid.to_vec() };
-            let o2 =
-                Document::new().with("collectionOptions_old", Document::new().with("uuid", uuid));
-            (Operation::new(OpType::Command, cmd_ns(&ns.db), ui(collection), o, Some(o2)), none)
+            let o2 = Document::new().with("collectionOptions_old", options_before(collection)?);
+            let extra = catalog_extra(collection, true)?;
+            (Operation::new(OpType::Command, cmd_ns(&ns.db), ui(collection), o, Some(o2)), extra)
         }
         DdlChange::DropDatabase { db } => {
             let o = Document::new().with("dropDatabase", 1);
@@ -250,10 +399,17 @@ fn ddl_operation(r: &DdlRecord) -> Result<Option<(Operation, Document)>, Command
         }
         DdlChange::CreateIndex { ns, collection, spec } => {
             let mut o = Document::new().with("createIndexes", ns.coll.as_str());
-            for (k, v) in doc_of(spec)?.iter() {
+            let spec = doc_of(spec)?;
+            for (k, v) in spec.iter() {
                 o.push(k, v.clone());
             }
-            (Operation::new(OpType::Command, cmd_ns(&ns.db), ui(collection), o, None), none)
+            let name = match spec.get("name") {
+                Some(Value::String(n)) => n.clone(),
+                _ => String::new(),
+            };
+            let o2 = Some(Document::new().with("indexIdent", ident(collection, &name)));
+            let extra = catalog_extra(collection, true)?;
+            (Operation::new(OpType::Command, cmd_ns(&ns.db), ui(collection), o, o2), extra)
         }
         DdlChange::DropIndex { ns, collection, spec } => {
             let spec = doc_of(spec)?;
@@ -261,10 +417,14 @@ fn ddl_operation(r: &DdlRecord) -> Result<Option<(Operation, Document)>, Command
             let o = Document::new().with("dropIndexes", ns.coll.as_str()).with("index", name);
             (Operation::new(OpType::Command, cmd_ns(&ns.db), ui(collection), o, Some(spec)), none)
         }
-        DdlChange::ModifyIndex { ns, collection, after, .. } => {
-            let index = doc_of(after)?;
+        DdlChange::ModifyIndex { ns, collection, before, after } => {
+            let (index, old) = index_change(&doc_of(before)?, &doc_of(after)?);
             let o = Document::new().with("collMod", ns.coll.as_str()).with("index", index);
-            (Operation::new(OpType::Command, cmd_ns(&ns.db), ui(collection), o, None), none)
+            let o2 = Document::new()
+                .with("collectionOptions_old", options_before(collection)?)
+                .with("indexOptions_old", old);
+            let extra = catalog_extra(collection, true)?;
+            (Operation::new(OpType::Command, cmd_ns(&ns.db), ui(collection), o, Some(o2)), extra)
         }
     }))
 }
@@ -330,7 +490,15 @@ fn document_items<B: Backend + ?Sized>(
     while i < found.len() {
         let first = &found[i];
         let mut end = i + 1;
-        if first.event.txn != 0 {
+        let session = first.meta.as_ref().and_then(|m| m.retry);
+        if let Some(r) = session {
+            // The documents of one retryable write share its mark and session.
+            while found.get(end).is_some_and(|c| {
+                c.event.ts == first.event.ts && c.meta.as_ref().and_then(|m| m.retry) == Some(r)
+            }) {
+                end += 1;
+            }
+        } else if first.event.txn != 0 {
             while found
                 .get(end)
                 .is_some_and(|c| c.event.ts == first.event.ts && c.event.txn == first.event.txn)
@@ -343,6 +511,7 @@ fn document_items<B: Backend + ?Sized>(
         // The document each key's last write in the transaction left.
         let mut left: BTreeMap<&[u8], Option<&Vec<u8>>> = BTreeMap::new();
         let mut ops = Vec::new();
+        let mut positions = Vec::new();
         for change in group {
             let prior = left.insert(change.event.key.as_slice(), change.doc.as_ref());
             let Some(w) = collection_of(&change.event.key).and_then(|id| by_id.get(&id)) else {
@@ -352,13 +521,14 @@ fn document_items<B: Backend + ?Sized>(
                 continue;
             }
             ops.push(document_operation(backend, w, change, prior)?);
+            positions.push(change.meta.as_ref().map_or(0, |m| m.op));
         }
         if ops.is_empty() {
             continue;
         }
         let mark = first.event.ts;
-        match first.meta.as_ref().and_then(|m| m.txn.as_ref()) {
-            Some(t) => {
+        match (first.meta.as_ref().and_then(|m| m.txn.as_ref()), session) {
+            (Some(t), _) => {
                 let info =
                     TxnInfo { lsid: lsid_document(t.lsid, &t.uid), txn_number: t.txn_number };
                 let mut next = mark;
@@ -374,7 +544,11 @@ fn document_items<B: Backend + ?Sized>(
                     items.push(Item { mark: at, seq, doc: e.to_document() });
                 }
             }
-            None => {
+            (None, Some(r)) => {
+                let doc = retryable(&r, positions.into_iter().zip(ops).collect(), mark, term);
+                items.push(Item { mark, seq: 0, doc });
+            }
+            (None, None) => {
                 for (seq, op) in (0u32..).zip(ops) {
                     items.push(Item { mark, seq, doc: plain(op, Document::new(), mark, term) });
                 }

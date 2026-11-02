@@ -553,3 +553,68 @@ fn a_drained_node_closes_its_clients_port() {
     assert!(closed(&mut late));
     l.stop();
 }
+
+/// A running node answers the `hello`s waiting on its `topologyVersion` as soon as it applies a
+/// change of `topologyPresentation` (018 FR-015, T016): the awaitable `hello` of a driver's
+/// monitor returns well before its `maxAwaitTimeMS` with the replica set presentation and a
+/// higher counter.
+#[test]
+fn a_presentation_change_wakes_the_waiting_hellos() {
+    // The member's host is the client address the node announces.
+    let cfg = NodeConfig {
+        cores: Some(1),
+        client: Some(config(DEFAULT_MAX_CONNECTIONS)),
+        native_addr: "member.test:27017".into(),
+        ..NodeConfig::default()
+    };
+    let node = Node::start(cfg, || Ok(MemDisk::new()), None).unwrap();
+    assert!(node.wait_ready(Duration::from_secs(10)));
+    let mut admin = TcpStream::connect(node.client_addrs()[0]).unwrap();
+    admin.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    let mut monitor = TcpStream::connect(node.client_addrs()[0]).unwrap();
+    monitor.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    send(&mut monitor, 1, 0, &hello());
+    let (_, _, first) = recv(&mut monitor).unwrap();
+    let Some(Value::Document(tv)) = first.get("topologyVersion").cloned() else {
+        panic!("{first:?}")
+    };
+    let counter = |d: &Document| match d.get("topologyVersion") {
+        Some(Value::Document(t)) => match t.get("counter") {
+            Some(Value::Int64(n)) => *n,
+            other => panic!("{other:?}"),
+        },
+        other => panic!("{other:?}"),
+    };
+    let wait =
+        |tv: &Document| hello().with("topologyVersion", tv.clone()).with("maxAwaitTimeMS", 15_000);
+    send(&mut monitor, 2, 0, &wait(&tv));
+    let started = Instant::now();
+    let present = Document::new()
+        .with(
+            "setClusterParameter",
+            Document::new().with(
+                "topologyPresentation",
+                Document::new().with("mode", "replicaset").with("setName", "rs0"),
+            ),
+        )
+        .with("$db", "admin");
+    // The node's client address reaches `config.shards` once it is announced to Group 0.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        send(&mut admin, 3, 0, &present);
+        let (_, _, set) = recv(&mut admin).unwrap();
+        if set.get("ok") == Some(&Value::Double(1.0)) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "{set:?}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let (h, _, woken) = recv(&mut monitor).unwrap();
+    assert_eq!(h.response_to, 2);
+    assert!(started.elapsed() < Duration::from_secs(5), "woken after {:?}", started.elapsed());
+    assert_eq!(woken.get("setName"), Some(&Value::from("rs0")), "{woken:?}");
+    assert_eq!(woken.get("isWritablePrimary"), Some(&Value::Boolean(true)), "{woken:?}");
+    assert_eq!(woken.get("me"), Some(&Value::from("member.test:27017")));
+    assert!(counter(&woken) > counter(&first));
+    drop(node.stop());
+}

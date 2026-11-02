@@ -286,3 +286,20 @@ fn accessors() {
     assert_eq!(rs.members()[2].host(), H3);
     assert!(rs.member("x:1").is_none());
 }
+
+/// A member in maintenance mode answers `hello` with `secondary: false`, as a `RECOVERING`
+/// member of RefDb 9.0.4 does (measured on 02-11-2026, `f1.js`); the primary never is, and a
+/// member designated primary leaves it.
+#[test]
+fn a_member_in_maintenance_is_not_secondary() {
+    let rs = three().with_recovering(&[H2, H1]);
+    let b = rs.member(H2).unwrap();
+    assert!(rs.is_recovering(b));
+    assert_eq!(hello(&rs, H2).get("secondary"), Some(&Value::Boolean(false)));
+    assert_eq!(hello(&rs, H2).get("isWritablePrimary"), Some(&Value::Boolean(false)));
+    let a = rs.member(H1).unwrap();
+    assert!(!rs.is_recovering(a), "the primary is never recovering");
+    let next = rs.designate(H2).unwrap();
+    assert!(!next.is_recovering(b));
+    assert_eq!(three().with_recovering(&[]), three());
+}

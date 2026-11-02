@@ -223,6 +223,8 @@ pub struct NodeLogic {
     sent_tags: Option<crate::routes::NodeTags>,
     create_op: Option<OpId>,
     balance_op: Option<OpId>,
+    /// Group 0's automatic reassignment of the designated primary in flight (018 FR-007).
+    reassign_op: Option<OpId>,
     balance_at: Nanos,
     /// The nodes the balancer last saw, with their state and whether they started: a change runs
     /// it before its next round.
@@ -298,6 +300,7 @@ impl NodeLogic {
             sent_tags: None,
             create_op: None,
             balance_op: None,
+            reassign_op: None,
             balance_at: Nanos::ZERO,
             balanced_nodes: Vec::new(),
             settle_check_at: None,
@@ -344,10 +347,13 @@ impl NodeLogic {
             NodeState::Draining => teseladb_meta::drain::progress(sm, &voters, *me).replicas == 0,
             NodeState::Removed => true,
         };
-        // Each change of the presentation raises its term or its `setVersion`, both of which
-        // only grow: the counter grows with them and wakes the waiting `hello`s (018 FR-015).
+        // Each change of the presentation raises its term or its `setVersion`, and each change of
+        // a member's hold its version, all of which only grow: the counter grows with them and wakes the waiting `hello`s (018 FR-015).
         let shown = crate::config_db::presentation(sm);
         let version = shown.as_ref().map_or(0, |p| p.term.saturating_add(i64::from(p.set_version)));
+        // A member that enters or leaves maintenance mode changes its `hello` too.
+        let held: i64 = crate::config_db::holds(sm).iter().map(|(_, h)| h.version).sum();
+        let version = version.saturating_add(held);
         let counter = teseladb_meta::drain::topology_counter(state)
             .saturating_add(version.saturating_mul(TOPOLOGY_STATES));
         if shown.is_some() {
@@ -759,6 +765,33 @@ impl NodeLogic {
         if let Some(cmd) = cmd {
             self.balance_op = self.send_group0(cmd);
         }
+    }
+
+    /// Group 0's leader designates another primary of the replica set presentation when the
+    /// designated one's node stops being alive in its heartbeat table (018 FR-007, T019,
+    /// `PrimaryReassign.tla`): `Suspect` already, as a member of RefDb calls an election after
+    /// `electionTimeoutMillis` without hearing from the primary.
+    fn reassign_primary(&mut self) {
+        if !self.is_leader() || self.reassign_op.is_some() {
+            return;
+        }
+        let now = self.now;
+        let Some(sm) = self.core.state_machine(GROUP0).and_then(Group0Holder::group0) else {
+            return;
+        };
+        if crate::config_db::presentation(sm).is_none() {
+            return;
+        }
+        let nodes: Vec<NodeId> =
+            sm.nodes.values().filter(|n| n.state != NodeState::Removed).map(|n| n.id).collect();
+        let Some(table) = self.liveness.table_mut() else { return };
+        let limit = dead_after(sm.settings.get(DEAD_AFTER_SETTING).map(Vec::as_slice), DEAD_AFTER);
+        table.check(&nodes, now, limit);
+        let alive = |n: NodeId| {
+            table.get(n).is_some_and(|e| e.state == teseladb_meta::liveness::LiveState::Alive)
+        };
+        let Some((key, value)) = crate::config_db::reassignment(sm, &alive) else { return };
+        self.reassign_op = self.send_group0(Group0Command::SetSetting { key, value });
     }
 
     /// Whether the balancer looks now: `Some(true)` at its round, `Some(false)` between two rounds
@@ -1426,6 +1459,7 @@ impl NodeLogic {
             || mine(&mut self.versions_op)
             || mine(&mut self.create_op)
             || mine(&mut self.balance_op)
+            || mine(&mut self.reassign_op)
             || self.group0_ops.remove(&op)
         {
             return;
@@ -1522,6 +1556,7 @@ impl CoreLogic for NodeLogic {
         self.sync_tags();
         self.create_range();
         self.balance();
+        self.reassign_primary();
         self.promote();
         self.meta2_step();
         self.rollback.tick(now);

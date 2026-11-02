@@ -177,6 +177,10 @@ pub trait NodeState: Send + Sync + 'static {
     fn closed(&self) -> bool {
         false
     }
+
+    /// Wake `waker` whenever the `topologyVersion` counter changes, so the waiting `hello`s
+    /// answer at once (018 FR-015); a node without one never changes it.
+    fn watch_topology(&self, _waker: Waker) {}
 }
 
 /// What core 0 tells the clients' port of the node's state in Group 0 (007 FR-015): the
@@ -188,6 +192,8 @@ pub struct NodePresence {
     /// The replica set and the member this node is, in the replica set presentation (018
     /// FR-007).
     replica: std::sync::Mutex<Option<Arc<ReplicaMember>>>,
+    /// The client workers to wake when the counter changes.
+    watchers: std::sync::Mutex<Vec<Waker>>,
 }
 
 /// A replica set and the member this node is in it.
@@ -197,8 +203,20 @@ pub type ReplicaMember =
 impl NodePresence {
     /// The counter of the node's state, and whether it drained.
     pub fn set(&self, counter: i64, closed: bool) {
-        self.counter.store(counter, Ordering::Release);
+        let before = self.counter.swap(counter, Ordering::AcqRel);
         self.closed.store(closed, Ordering::Release);
+        if before != counter {
+            let watchers = self.watchers.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            for w in watchers.iter() {
+                // A worker that already stopped needs no wake-up.
+                let _ = w.wake();
+            }
+        }
+    }
+
+    /// Wakes `waker` at every change of the counter.
+    pub fn watch(&self, waker: Waker) {
+        self.watchers.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(waker);
     }
 
     /// The replica set presentation this node answers in (`None`: as a `refrouter`).
@@ -297,6 +315,10 @@ impl NodeState for NodeClockState {
 
     fn handle(&self) -> Option<NodeHandle> {
         self.handle.clone()
+    }
+
+    fn watch_topology(&self, waker: Waker) {
+        self.presence.watch(waker);
     }
 
     fn closed(&self) -> bool {
@@ -495,6 +517,7 @@ impl ClientListener {
         for k in 0..workers.max(1) {
             let poller = Poller::new()?;
             let waker = Arc::new(poller.waker());
+            state.watch_topology(poller.waker());
             let (tx, rx) = mailbox::channel(waker.clone());
             let pool = state.handle().map(|handle| {
                 let (give_back, returned) = mpsc::channel();
@@ -517,6 +540,7 @@ impl ClientListener {
                 mailbox: rx,
                 conns: BTreeMap::new(),
                 awaits: BTreeMap::new(),
+                seen: state.info().topology.counter,
                 next_token: 1,
                 state: state.clone(),
                 pool,
@@ -1062,6 +1086,8 @@ struct Worker {
     /// Deadlines of the awaitable `hello`s with their connection; an entry whose connection
     /// closed or already answered is skipped.
     awaits: BTreeMap<(Instant, u64), Pending>,
+    /// The `topologyVersion` counter the waiting `hello`s last saw: a change answers them.
+    seen: i64,
     next_token: u64,
     state: Arc<dyn NodeState>,
     /// The executors of the commands, if a node is behind the port.
@@ -1094,6 +1120,10 @@ impl Worker {
                 Err(_) => break,
             }
             let info = self.state.info();
+            if info.topology.counter != self.seen {
+                self.seen = info.topology.counter;
+                self.hasten_hellos();
+            }
             for e in events.drain(..) {
                 self.on_event(e.token, e.readable || e.hangup, &info);
             }
@@ -1227,6 +1257,24 @@ impl Worker {
                 }
             }
             None => self.close(token),
+        }
+    }
+
+    /// Makes every waiting `hello` due now: the node's state changed (018 FR-015, as a `refnode`
+    /// answers them at a change of its `topologyVersion`).
+    fn hasten_hellos(&mut self) {
+        let now = Instant::now();
+        let due: Vec<(Instant, u64)> = self
+            .awaits
+            .iter()
+            .filter(|(_, p)| matches!(p, Pending::Hello(_)))
+            .map(|(k, _)| *k)
+            .collect();
+        for key in due {
+            if let Some(Pending::Hello(mut h)) = self.awaits.remove(&key) {
+                h.deadline = now;
+                self.awaits.insert((now, key.1), Pending::Hello(h));
+            }
         }
     }
 
