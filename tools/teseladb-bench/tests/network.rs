@@ -178,3 +178,17 @@ fn index_write_and_read_run_against_a_local_cluster() {
         metrics(&bench(&[&["--scenario", "reference", "--rate", "100"][..], &short[..]].concat()));
     assert!(reference.contains("query.p50"), "{reference}");
 }
+
+/// `index-build-load` (009 SC-003) against a local cluster: the p99 of the writes before and
+/// while an index is built over the loaded documents, with the target of twice the first.
+#[test]
+fn index_build_load_runs_against_a_local_cluster() {
+    let short =
+        ["--duration", "300ms", "--warmup", "50ms", "--records", "2000", "--format", "json"];
+    let out = metrics(&bench(&[&["--scenario", "index-build-load"][..], &short[..]].concat()));
+    for name in
+        ["write_before.p99", "write_during_build.p99", "build_ms", "2000 documents", "\"target\""]
+    {
+        assert!(out.contains(name), "{name}: {out}");
+    }
+}

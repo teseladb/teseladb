@@ -4,6 +4,9 @@
 # and the tests are the same ones built with the pinned toolchain.
 #   scripts/coverage.sh [crate...]           (no arguments: every crate of crates/ and tools/)
 #   TESELADB_COV_MIN=95 scripts/coverage.sh  fails if a crate has lines, functions or branches below
+#   TESELADB_COV_LINUX=1 scripts/coverage.sh  measures on the Linux kernel of the local Docker engine
+#     (what only runs on Linux, such as io_uring; 012): the tests are built for
+#     `<arch>-unknown-linux-musl` and run as scripts/test-linux.sh runs them
 #
 # Writes coverage/report.txt (the table), coverage/missed.txt (functions never run and branch
 # sides never taken, by source position) and coverage/show.txt (per-line detail) under the
@@ -22,6 +25,18 @@ HOST=$(rustc +"$TOOLCHAIN" -vV | sed -n 's/^host: //p')
 BIN="$SYSROOT/lib/rustlib/$HOST/bin"
 BASE=${CARGO_TARGET_DIR:-target}
 OUT=$BASE/coverage
+cargo_target=()
+LINUX_IMAGE=teseladb-x86_64-qemu
+if [[ ${TESELADB_COV_LINUX:-0} == 1 ]]; then
+  OUT=$BASE/coverage-linux
+  case $(uname -m) in
+    arm64 | aarch64) linux_target=aarch64-unknown-linux-musl ;;
+    *) linux_target=x86_64-unknown-linux-musl ;;
+  esac
+  cargo_target=(--target "$linux_target")
+  export "CARGO_TARGET_$(echo "$linux_target" | tr 'a-z-' 'A-Z_')_LINKER"=rust-lld
+  docker build -q -t "$LINUX_IMAGE" -f scripts/docker/x86_64-qemu.Dockerfile scripts/docker >/dev/null
+fi
 rm -rf "$OUT"
 mkdir -p "$OUT/prof"
 
@@ -39,11 +54,12 @@ export RUSTFLAGS="-C instrument-coverage -Z coverage-options=branch --cfg covera
 PROF=$(cd "$OUT/prof" && pwd)
 export LLVM_PROFILE_FILE="$PROF/%p-%m.profraw"
 export CARGO_TARGET_DIR=$BASE/coverage-build
+if [[ ${TESELADB_COV_LINUX:-0} == 1 ]]; then CARGO_TARGET_DIR=$BASE/coverage-linux-build; fi
 
 # One line per test binary: `<executable> <package folder> <package name>`, from a single build;
 # and in bins.txt the programs of the packages, which their tests start (`CARGO_BIN_EXE_<name>`):
 # what only the program runs, its `main`, is measured from its own object.
-cargo +"$TOOLCHAIN" test --offline -q "${pkgs[@]}" --no-run --message-format=json >"$OUT/build.json"
+cargo +"$TOOLCHAIN" test --offline -q "${pkgs[@]}" ${cargo_target[@]+"${cargo_target[@]}"} --no-run --message-format=json >"$OUT/build.json"
 python3 - "$OUT/build.json" "$OUT/bins.txt" >"$OUT/tests.txt" <<'PY'
 import json
 import os
@@ -76,7 +92,16 @@ failures=()
 while IFS=$'\t' read -r exe package name; do
   if [[ ${#objects[@]} -eq 0 ]]; then objects+=("$exe"); else objects+=(-object "$exe"); fi
   log=$LOGS/$(basename "$exe").txt
-  if ! (cd "$package" && CARGO_MANIFEST_DIR=$package CARGO_PKG_NAME=$name "$exe" -q >"$log" 2>&1); then
+  if [[ ${TESELADB_COV_LINUX:-0} == 1 ]]; then
+    # Without the seccomp profile (Docker's refuses io_uring) and with the battery's full disk.
+    ran=(docker run --rm --security-opt seccomp=unconfined --tmpfs "/full:rw,size=1m"
+      -e TESELADB_FULL_DIR=/full -e "LLVM_PROFILE_FILE=$LLVM_PROFILE_FILE"
+      -e "CARGO_MANIFEST_DIR=$package" -e "CARGO_PKG_NAME=$name" -v "$PWD:$PWD" -w "$package"
+      "$LINUX_IMAGE" "$exe" -q)
+  else
+    ran=(env "CARGO_MANIFEST_DIR=$package" "CARGO_PKG_NAME=$name" "$exe" -q)
+  fi
+  if ! (cd "$package" && "${ran[@]}" >"$log" 2>&1); then
     failures+=("$exe")
   fi
 done <"$OUT/tests.txt"
@@ -101,8 +126,15 @@ n=0
 for exe in "${objects[@]}"; do
   [[ $exe == -object ]] && continue
   n=$((n + 1))
-  "$BIN/llvm-cov" export "$exe" -instr-profile="$OUT/merged.profdata" \
-    -ignore-filename-regex="$IGNORE" ${sources[@]+"${sources[@]}"} > "$OUT/export/$n.json" 2>/dev/null
+  # A test file of another platform (`#![cfg(target_os = ...)]`) builds an empty binary with
+  # nothing to measure: it is left out. Any other failure stops the run.
+  if ! "$BIN/llvm-cov" export "$exe" -instr-profile="$OUT/merged.profdata" \
+    -ignore-filename-regex="$IGNORE" ${sources[@]+"${sources[@]}"} > "$OUT/export/$n.json" \
+    2>"$OUT/export/$n.err"; then
+    grep -q "no coverage data found" "$OUT/export/$n.err" || { cat "$OUT/export/$n.err" >&2; exit 1; }
+    rm "$OUT/export/$n.json"
+  fi
+  rm "$OUT/export/$n.err"
 done
 
 # llvm-cov writes real paths: the root without symbolic links makes them relative.

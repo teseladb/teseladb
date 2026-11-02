@@ -21,7 +21,6 @@ const SYS_IO_URING_ENTER: i64 = 426;
 const SYS_IO_URING_REGISTER: i64 = 427;
 
 const IORING_OFF_SQ_RING: i64 = 0;
-const IORING_OFF_CQ_RING: i64 = 0x800_0000;
 const IORING_OFF_SQES: i64 = 0x1000_0000;
 const IORING_FEAT_SINGLE_MMAP: u32 = 1;
 const IORING_ENTER_GETEVENTS: u32 = 1;
@@ -367,7 +366,6 @@ pub struct Ring {
     busy: Vec<bool>,
     files: u32,
     _sqe_map: Map,
-    _cq_map: Option<Map>,
     _sq_map: Map,
     fd: OwnedFd,
 }
@@ -392,12 +390,13 @@ impl Ring {
         let raw = fd.as_raw_fd();
         let sq_len = p.sq_off.array as usize + p.sq_entries as usize * size_of::<u32>();
         let cq_len = p.cq_off.cqes as usize + p.cq_entries as usize * size_of::<RawCqe>();
-        let single = p.features & IORING_FEAT_SINGLE_MMAP != 0;
-        let sq_map =
-            Map::new(raw, if single { sq_len.max(cq_len) } else { sq_len }, IORING_OFF_SQ_RING)?;
-        let cq_map = if single { None } else { Some(Map::new(raw, cq_len, IORING_OFF_CQ_RING)?) };
+        // One mapping for both queues (Linux 5.4); the executor needs 5.15 anyway (MKDIRAT).
+        if p.features & IORING_FEAT_SINGLE_MMAP == 0 {
+            return Err(io::Error::other("io_uring without IORING_FEAT_SINGLE_MMAP"));
+        }
+        let sq_map = Map::new(raw, sq_len.max(cq_len), IORING_OFF_SQ_RING)?;
         let sqe_map = Map::new(raw, p.sq_entries as usize * size_of::<Sqe>(), IORING_OFF_SQES)?;
-        let cq = cq_map.as_ref().unwrap_or(&sq_map);
+        let cq = &sq_map;
         // SAFETY: the masks are plain integers the kernel wrote at these offsets.
         let (sq_mask, cq_mask) =
             unsafe { (*sq_map.at::<u32>(p.sq_off.ring_mask), *cq.at::<u32>(p.cq_off.ring_mask)) };
@@ -424,7 +423,6 @@ impl Ring {
             busy: Vec::new(),
             files: 0,
             _sqe_map: sqe_map,
-            _cq_map: cq_map,
             _sq_map: sq_map,
             fd,
         })
@@ -437,7 +435,7 @@ impl Ring {
             let rc =
                 unsafe { syscall(SYS_IO_URING_REGISTER, self.fd.as_raw_fd(), opcode, arg, nr) };
             match cvt(rc) {
-                Err(e) if e.raw_os_error() == Some(EINTR) => continue,
+                Err(e) if interrupted(&e) => continue,
                 r => return r,
             }
         }
@@ -680,18 +678,17 @@ impl Ring {
                     0usize,
                 )
             };
-            match cvt(rc) {
+            let e = match cvt(rc) {
                 Ok(n) => {
                     self.unsubmitted -= n.min(self.unsubmitted);
                     return Ok(n);
                 }
-                // Interrupted, or the kernel is short of memory or completion slots: what is in
-                // the queue stays there for the next call.
-                Err(e) if matches!(e.raw_os_error(), Some(EINTR | EAGAIN | EBUSY)) && wait == 0 => {
-                    return Ok(0);
-                }
-                Err(e) if e.raw_os_error() == Some(EINTR) => continue,
-                Err(e) => return Err(e),
+                Err(e) => e,
+            };
+            match enter_failure(&e, wait) {
+                EnterFailure::Retry => continue,
+                EnterFailure::Later => return Ok(0),
+                EnterFailure::Fatal => return Err(e),
             }
         }
     }
@@ -751,6 +748,34 @@ impl std::fmt::Debug for Ring {
     }
 }
 
+/// Whether a call failed only because a signal interrupted it.
+fn interrupted(e: &io::Error) -> bool {
+    e.raw_os_error() == Some(EINTR)
+}
+
+/// What a failed `io_uring_enter` means for its caller.
+#[derive(Debug, PartialEq, Eq)]
+enum EnterFailure {
+    /// Interrupted while waiting: call again.
+    Retry,
+    /// Nothing waited for, and the call was interrupted or the kernel is short of memory or
+    /// completion slots: what is in the queue stays there for the next call.
+    Later,
+    /// A real error.
+    Fatal,
+}
+
+fn enter_failure(e: &io::Error, wait: u32) -> EnterFailure {
+    let transient = matches!(e.raw_os_error(), Some(EINTR | EAGAIN | EBUSY));
+    if transient && wait == 0 {
+        EnterFailure::Later
+    } else if interrupted(e) {
+        EnterFailure::Retry
+    } else {
+        EnterFailure::Fatal
+    }
+}
+
 /// A non-blocking `eventfd` for [`Ring::register_eventfd`].
 pub fn eventfd() -> io::Result<OwnedFd> {
     super::new_eventfd()
@@ -787,6 +812,23 @@ mod tests {
 
     fn wait_one(r: &mut Ring, id: u64) -> io::Result<u32> {
         wait(r, id).result
+    }
+
+    #[test]
+    fn failed_enters_are_retried_left_for_later_or_returned() {
+        let e = |code| io::Error::from_raw_os_error(code);
+        assert_eq!(enter_failure(&e(EINTR), 1), EnterFailure::Retry);
+        assert_eq!(enter_failure(&e(EINTR), 0), EnterFailure::Later);
+        assert_eq!(enter_failure(&e(EAGAIN), 0), EnterFailure::Later);
+        assert_eq!(enter_failure(&e(EBUSY), 0), EnterFailure::Later);
+        assert_eq!(enter_failure(&e(EAGAIN), 1), EnterFailure::Fatal);
+        assert_eq!(enter_failure(&e(9), 0), EnterFailure::Fatal);
+        assert!(interrupted(&e(EINTR)) && !interrupted(&e(9)));
+    }
+
+    #[test]
+    fn a_mapping_the_kernel_refuses_is_an_error() {
+        assert!(Map::new(-1, 4096, 0).is_err());
     }
 
     #[test]
@@ -880,7 +922,10 @@ mod tests {
 
     #[test]
     fn errors_come_back_with_their_errno_and_bad_requests_are_refused() {
+        let e = Ring::new(0).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "no ring of 0 entries");
         let mut r = Ring::new(2).unwrap();
+        assert!(r.register_eventfd(-1).is_err());
         let missing = temp("missing").join("x");
         let id = r.push(Op::OpenAt { path: cpath(&missing), flags: 0, mode: 0 }).unwrap();
         assert_eq!(wait_one(&mut r, id).unwrap_err().kind(), io::ErrorKind::NotFound);

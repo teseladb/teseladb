@@ -19,7 +19,7 @@ failed=0
 
 mkdir -p "$WORK/scripts" "$WORK/crates/full/src" "$WORK/crates/half/src" "$WORK/crates/moving/src" \
   "$WORK/crates/failing/src" "$WORK/crates/generic/src" "$WORK/crates/program/src" \
-  "$WORK/crates/program/tests"
+  "$WORK/crates/program/tests" "$WORK/crates/elsewhere/src" "$WORK/crates/elsewhere/tests"
 cp "$SCRIPT" "$WORK/scripts/coverage.sh"
 cat > "$WORK/Cargo.toml" <<'EOF'
 [workspace]
@@ -29,7 +29,7 @@ members = ["crates/*"]
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(coverage)"] }
 EOF
-for c in full half moving failing generic program; do
+for c in full half moving failing generic program elsewhere; do
   printf '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "2024"\n\n[lints]\nworkspace = true\n' "$c" \
     > "$WORK/crates/$c/Cargo.toml"
 done
@@ -131,6 +131,13 @@ fn the_program_greets() {
 }
 EOF
 
+cp "$WORK/crates/full/src/lib.rs" "$WORK/crates/elsewhere/src/lib.rs"
+cat > "$WORK/crates/elsewhere/tests/other_platform.rs" <<'EOF'
+#![cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[test]
+fn runs_on_another_platform() {}
+EOF
+
 # expect NAME CODE PATTERN ARGS...: runs the script with ARGS and checks the exit code and output.
 expect() {
   local name=$1 code=$2 pattern=$3 out rc=0
@@ -156,6 +163,8 @@ expect "a line run by another instantiation of its generic function counts" 0 \
   "^generic +lines 100.00 % +functions 100.00 % +branches 100.00 %" generic
 expect "what only the program its test starts runs counts" 0 \
   "^program +lines 100.00 % +functions 100.00 % +branches 100.00 %" program
+expect "a test file of another platform has nothing to measure and is left out" 0 \
+  "^elsewhere +lines 100.00 % +functions 100.00 % +branches 100.00 %" elsewhere
 expect "a failing test fails the run naming its binary" 1 "^coverage: tests failed: .*failing-[0-9a-f]+$" failing
 expect "the coverage of a run with a failing test is still reported" 1 "^failing +lines" failing
 
