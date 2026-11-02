@@ -345,6 +345,12 @@ pub fn parsed_options(o: &StartOpts) -> Document {
             cli::REDACT_CLIENT_LOG_DATA => {
                 vec![(vec!["security", "redactClientLogData"], Value::Boolean(true))]
             }
+            cli::NO_SCRIPTING => {
+                vec![(vec!["security", "javascriptEnabled"], Value::Boolean(false))]
+            }
+            cli::JAVASCRIPT_ENABLED => {
+                vec![(vec!["security", "javascriptEnabled"], Value::Boolean(raw == "true"))]
+            }
             "setParameter" => {
                 let (k, v) = raw.split_once('=').unwrap_or((raw.as_str(), ""));
                 vec![(vec!["setParameter", k], Value::from(v))]

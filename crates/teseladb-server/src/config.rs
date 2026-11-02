@@ -55,6 +55,7 @@ const KEYS: &[(&str, Kind)] = &[
     ),
     ("net.tls.FIPSMode", Kind::Option(crate::cli::TLS_FIPS_MODE)),
     ("security.redactClientLogData", Kind::Option(crate::cli::REDACT_CLIENT_LOG_DATA)),
+    ("security.javascriptEnabled", Kind::Option(crate::cli::JAVASCRIPT_ENABLED)),
     ("security.keyFile", Kind::Option(crate::cli::KEY_FILE)),
     ("security.clusterAuthMode", Kind::Option(crate::cli::CLUSTER_AUTH_MODE)),
     ("security.enableEncryption", Kind::Option(crate::cli::ENABLE_ENCRYPTION)),
