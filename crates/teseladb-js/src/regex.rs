@@ -672,6 +672,51 @@ fn char_pos(s: &[u32], unit: usize) -> usize {
     s.len()
 }
 
+/// Keeps `caps` as the last match, for the legacy statics of `RegExp`.
+fn remember(it: &mut Interp, s: &[u32], caps: &Caps, input: &Name) {
+    let units = caps.iter().map(|c| c.map(|(a, b)| (utf16_pos(s, a), utf16_pos(s, b)))).collect();
+    it.last_match = Some((input.clone(), units));
+}
+
+/// The legacy statics of `RegExp` (Annex B, measured on a `refrouter` 9.0.4 on 02-11): `$1`…`$9`,
+/// `input` (`$_`), `lastMatch` (`$&`), `lastParen` (`$+`), `leftContext` (`` $` ``) and
+/// `rightContext` (`$'`), from the last successful match of the call.
+pub fn legacy_static(it: &mut Interp, _: &Val, _: &[Val]) -> R {
+    let name = it.native.clone();
+    let (input, caps) = it.last_match.clone().unwrap_or_default();
+    let units = crate::strings::units(&input);
+    let piece = |r: Option<(usize, usize)>| match r {
+        Some((a, b)) if a <= b && b <= units.len() => crate::strings::from_units(&units[a..b]),
+        _ => String::new(),
+    };
+    let whole = caps.first().copied().flatten();
+    let text = match &*name {
+        "input" | "$_" => return Ok(Val::Str(input)),
+        // Before any match there is no `lastMatch` (measured: `undefined`).
+        "lastMatch" | "$&" if whole.is_none() => return Ok(Val::Undef),
+        "lastMatch" | "$&" => piece(whole),
+        "lastParen" | "$+" => {
+            piece(if caps.len() > 1 { caps.last().copied().flatten() } else { None })
+        }
+        "leftContext" | "$`" => piece(whole.map(|(a, _)| (0, a))),
+        "rightContext" | "$'" => piece(whole.map(|(_, b)| (b, units.len()))),
+        n => {
+            let i: usize = n.trim_start_matches('$').parse().unwrap_or(0);
+            piece(caps.get(i).copied().flatten())
+        }
+    };
+    it.string(text)
+}
+
+/// Setting `RegExp.input` (or `$_`) changes the input the statics read.
+pub fn legacy_input_setter(it: &mut Interp, _: &Val, a: &[Val]) -> R {
+    let v = a.first().cloned().unwrap_or(Val::Undef);
+    let text = it.str_of(&v)?;
+    let caps = it.last_match.take().map(|(_, c)| c).unwrap_or_default();
+    it.last_match = Some((text, caps));
+    Ok(Val::Undef)
+}
+
 /// The result array of a match: the strings, `index`, `input` and `groups`.
 fn result(it: &mut Interp, re: &Regex, s: &[u32], caps: &Caps, input: &Name) -> R {
     let mut items = Vec::new();
@@ -723,6 +768,7 @@ pub fn exec(it: &mut Interp, this: &Val, a: &[Val]) -> R {
                 let end = caps[0].map_or(0, |(_, b)| b);
                 it.set(this, "lastIndex", Val::Num(utf16_pos(&s, end) as f64))?;
             }
+            remember(it, &s, &caps, &input);
             result(it, &re, &s, &caps, &input)
         }
         None => {
@@ -774,6 +820,9 @@ pub fn string_match(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     if found.is_empty() {
         return Ok(Val::Null);
     }
+    if let Some(caps) = found.last() {
+        remember(it, &chars, caps, &s);
+    }
     let items = found
         .iter()
         .map(|c| {
@@ -792,7 +841,10 @@ pub fn search(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let re = compiled(it, &src, &flags)?;
     let chars = elements(&s, is_unicode(&flags));
     Ok(Val::Num(match find(it, &re, &chars, 0, false)? {
-        Some(c) => utf16_pos(&chars, c[0].map_or(0, |(x, _)| x)) as f64,
+        Some(c) => {
+            remember(it, &chars, &c, &s);
+            utf16_pos(&chars, c[0].map_or(0, |(x, _)| x)) as f64
+        }
         None => -1.0,
     }))
 }
@@ -807,6 +859,9 @@ pub fn replace(it: &mut Interp, s: &Name, rv: &Val, replacement: &Val, all_match
     } else {
         find(it, &re, &chars, 0, false)?.into_iter().collect()
     };
+    if let Some(caps) = found.last() {
+        remember(it, &chars, caps, s);
+    }
     let mut out = String::new();
     let mut last = 0;
     for caps in found {
@@ -851,6 +906,7 @@ pub fn split(it: &mut Interp, s: &Name, rv: &Val, limit: usize) -> R {
                     q += 1;
                     continue;
                 }
+                remember(it, &chars, &caps, s);
                 out.push(Val::Str(text_of(&chars[p..q]).into()));
                 for c in &caps[1..] {
                     out.push(c.map_or(Val::Undef, |(x, y)| Val::Str(text_of(&chars[x..y]).into())));
@@ -906,6 +962,7 @@ pub fn match_all(it: &mut Interp, this: &Val, a: &[Val]) -> R {
         let Some(caps) = find(it, &re, &chars, pos, flags.contains('y'))? else { break };
         let (x, y) = caps[0].unwrap_or((pos, pos));
         pos = if x == y { y + 1 } else { y };
+        remember(it, &chars, &caps, &s);
         items.push(result(it, &re, &chars, &caps, &s)?);
     }
     crate::builtins::make_iter(it, crate::builtins::REGEXP_STRING_ITERATOR, items)

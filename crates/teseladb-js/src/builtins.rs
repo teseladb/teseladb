@@ -1691,6 +1691,39 @@ fn regexp_builtins(it: &mut Interp, g: &ObjRef) -> R<()> {
     }
     if let Some(Val::Obj(c)) = g.borrow().get_own("RegExp").map(|p| p.value.clone()) {
         method(it, &c, "escape", regexp_escape, 1)?;
+        let names = [
+            "input",
+            "$_",
+            "lastMatch",
+            "$&",
+            "lastParen",
+            "$+",
+            "leftContext",
+            "$`",
+            "rightContext",
+            "$'",
+            "$1",
+            "$2",
+            "$3",
+            "$4",
+            "$5",
+            "$6",
+            "$7",
+            "$8",
+            "$9",
+        ];
+        for name in names {
+            let get = it.native(name, crate::regex::legacy_static, 0)?;
+            let set = if matches!(name, "input" | "$_") {
+                Some(it.native(name, crate::regex::legacy_input_setter, 1)?)
+            } else {
+                None
+            };
+            // The long names and `$1`…`$9` are enumerable, the other short ones are not.
+            let enumerable = !name.starts_with('$') || name[1..].parse::<u8>().is_ok();
+            let p = Prop { getter: Some(get), setter: set, enumerable, ..Prop::hidden(Val::Undef) };
+            it.define(&c, name, p)?;
+        }
     }
     Ok(())
 }

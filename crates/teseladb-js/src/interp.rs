@@ -144,6 +144,9 @@ pub struct Interp<'c> {
     /// The address of the stack when the first call began, to stop before the native stack
     /// runs out (a call through `for…in` and accessors takes far more of it than a plain one).
     pub stack_base: usize,
+    /// The last successful match of a regular expression in this call: the input and the
+    /// captures in UTF-16 units, read by `RegExp.$1`, `lastMatch` and the other legacy statics.
+    pub last_match: Option<(Name, Vec<Option<(usize, usize)>>)>,
     pub envs: Vec<Weak<RefCell<EnvRec>>>,
     /// The name of the native function last called, for the messages that name it.
     pub native: Name,

@@ -1857,3 +1857,13 @@ bsonsize()	E:Error:bsonsize needs 1 argument
 (() => { let n = 0; for (const k in {}) n++; return n })()	J:0
 JSON.stringify([Array.from(5), Array.from(true), Array.from(Symbol()), Array.from(1n), Array.from(5, x => x)])	S:[[],[],[],[],[]]
 Set.tojson(5) + "|" + Set.tojson("ab") + "|" + Set.tojson({length:2, 0:"a"}) + "|" + Set.tojson([1,2])	S:new Set([ ])|new Set([\n\t"a",\n\t"b"\n])|new Set([\n\t"a",\n\tundefined\n])|new Set([\n\t1,\n\t2\n])
+(() => { /(a)(b)?c/.exec("xabcd"); return JSON.stringify([RegExp.$1, RegExp.$2, RegExp.lastMatch, RegExp["$&"], RegExp.lastParen, RegExp["$+"], RegExp.leftContext, RegExp["$`"], RegExp.rightContext, RegExp["$'"], RegExp.input, RegExp.$_, RegExp.$9]) })()	S:["a","b","abc","abc","b","b","x","x","d","d","xabcd","xabcd",""]
+(() => { "zz".replace(/z/, "q"); /x/.test("abc"); return JSON.stringify([RegExp.lastMatch, RegExp.input]) })()	S:["z","zz"]
+(() => { const d = Object.getOwnPropertyDescriptor(RegExp, "$1"); const e = Object.getOwnPropertyDescriptor(RegExp, "input"); return JSON.stringify([typeof d.get, typeof d.set, d.enumerable, d.configurable, typeof e.set]) })()	S:["function","undefined",true,false,"function"]
+(() => { RegExp.input = "set"; return RegExp.$_ })()	S:set
+["input", "$_", "lastMatch", "$&", "lastParen", "$+", "leftContext", "$`", "rightContext", "$'", "$1", "$9"].map(k => { const d = Object.getOwnPropertyDescriptor(RegExp, k); return k + (d.enumerable ? "E" : "") + (d.set ? "S" : "") }).join()	S:inputES,$_S,lastMatchE,$&,lastParenE,$+,leftContextE,$`,rightContextE,$',$1E,$9E
+(() => { const r = []; r.push(RegExp.lastMatch, RegExp.input); "a1b2".match(/\d/g); r.push(RegExp.lastMatch, RegExp.leftContext); "xyz".search(/y/); r.push(RegExp.lastMatch); "abc".split(/b/); r.push(RegExp.lastMatch); [..."q1q2".matchAll(/q(\d)/g)]; r.push(RegExp.$1); /nomatch/.exec("zzz"); r.push(RegExp.$1); return JSON.stringify(r) })()	S:[null,"","2","a1b","y","b","2","2"]
+(() => { "😀a😀".replace(/a/, ""); return JSON.stringify([RegExp.leftContext, RegExp.rightContext]) })()	S:["😀","😀"]
+(() => { /(x)|(y)/.exec("y"); return JSON.stringify([RegExp.$1, RegExp.$2, RegExp.lastParen]) })()	S:["","y","y"]
+JSON.stringify(["input", "$_", "lastMatch", "$&", "lastParen", "$+", "leftContext", "$`", "rightContext", "$'", "$1", "$9"].map(k => RegExp[k] === undefined ? "U" : RegExp[k]))	S:["","","U","U","","","","","","","",""]
+(() => { RegExp.input = "q"; return JSON.stringify([RegExp.input, RegExp.lastMatch, RegExp.$1]) })()	S:["q",null,""]
