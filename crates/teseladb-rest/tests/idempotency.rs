@@ -102,7 +102,7 @@ impl Executor for Fake {
                     return ok().with("writeErrors", Value::Array(vec![e]));
                 }
                 self.records.insert(id, doc);
-                ok()
+                ok().with("writeErrors", Value::Array(Vec::new()))
             }
             "find" => {
                 let id = command.get("filter").and_then(Value::as_document).map(id_of);
@@ -245,11 +245,17 @@ fn a_write_the_node_could_not_finish_runs_again_in_the_same_session() {
     assert_eq!((r.status, runs), (200, 1));
     assert_eq!(f.ran.last().and_then(|c| c.get("txnNumber")), Some(&Value::Int64(1)));
     // A record whose answer does not read counts as pending too.
-    let rec = f.records.values_mut().next().unwrap();
-    rec.insert("answer", Document::new().with("status", "x"));
-    rec.remove("txn");
-    let (r, runs) = send(&mut f, &req, Op::InsertOne, &Document::new(), 202);
-    assert_eq!((r.status, runs), (202, 1));
+    for broken in [
+        Document::new().with("status", "x"),
+        Document::new().with("status", 200),
+        Document::new().with("status", 200).with("headers", Value::Array(Vec::new())),
+    ] {
+        let rec = f.records.values_mut().next().unwrap();
+        rec.insert("answer", broken);
+        rec.remove("txn");
+        let (r, runs) = send(&mut f, &req, Op::InsertOne, &Document::new(), 202);
+        assert_eq!((r.status, runs), (202, 1));
+    }
 }
 
 #[test]

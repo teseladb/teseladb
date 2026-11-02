@@ -111,14 +111,13 @@ pub fn is_ok(reply: &Document) -> bool {
 }
 
 impl<E: Executor + ?Sized> Ctx<'_, E> {
-    /// Runs `command` on `db` with the call's `maxTimeMS` when `timed`.
+    /// Runs `command` on `db` with the call's `maxTimeMS` when `timed`, and its `comment`. No
+    /// tool builds a command with either field.
     fn run(&mut self, db: &str, mut command: Document, timed: bool) -> Result<Document, Failure> {
-        if timed && command.get("maxTimeMS").is_none() {
+        if timed {
             command.push("maxTimeMS", self.limits.max_time_ms as i64);
         }
-        if let Some(c) = &self.comment
-            && command.get("comment").is_none()
-        {
+        if let Some(c) = &self.comment {
             command.push("comment", c.as_str());
         }
         let reply = self.exec.run(db, command);
@@ -232,16 +231,15 @@ const CONNECTED: &str = "connected";
 /// `outcome` of `disconnect`.
 const DISCONNECTED: &str = "disconnected";
 
-/// The fields `fields` of the object `v`, in that order; `v` itself when it is not an object.
-fn keep_fields(v: &Value, fields: &[&str]) -> Value {
-    let Value::Object(o) = v else { return v.clone() };
-    let mut kept = Object::new();
+/// The fields `fields` of `d` that it has, in that order, as relaxed Extended JSON.
+fn keep_fields(d: &Document, fields: &[&str]) -> Value {
+    let mut kept = Document::new();
     for f in fields {
-        if let Some(x) = o.get(f) {
-            kept.insert(*f, x.clone());
+        if let Some(x) = d.get(f) {
+            kept.push(*f, x.clone());
         }
     }
-    Value::Object(kept)
+    to_json(&kept)
 }
 
 /// An `_id` as the text `upsertedId` carries: an ObjectId in hexadecimal, a string as it is, and
@@ -438,13 +436,13 @@ pub fn call<E: Executor + ?Sized>(
                 Ok(r) => c.drain(&db, r, usize::MAX)?,
                 Err(_) => Vec::new(),
             };
-            let (all, sr): (Vec<Value>, Vec<Value>) =
-                (classic.iter().map(to_json).collect(), search.iter().map(to_json).collect());
-            let text = to_string(&Value::Array(all.clone())).unwrap_or_default();
+            let all: Vec<Value> = classic.iter().map(to_json).collect();
+            let text = to_string(&Value::Array(all)).unwrap_or_default();
             // The structured list keeps the name and the key of each index, as the reference's
             // `outputSchema` describes it; the whole definitions go in the text.
-            let cl: Vec<Value> = all.iter().map(|i| keep_fields(i, &["name", "key"])).collect();
-            let sr: Vec<Value> = sr.iter().map(|i| keep_fields(i, SEARCH_INDEX_FIELDS)).collect();
+            let cl: Vec<Value> = classic.iter().map(|i| keep_fields(i, &["name", "key"])).collect();
+            let sr: Vec<Value> =
+                search.iter().map(|i| keep_fields(i, SEARCH_INDEX_FIELDS)).collect();
             let summary = format!(
                 "Found {} classic indexes and {} search indexes in \"{db}.{coll}\"",
                 cl.len(),

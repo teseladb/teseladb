@@ -18,6 +18,8 @@ struct Fake {
     forwarded: Vec<u64>,
     /// `drop` finds its collection (by default it answers `ns not found`).
     drops: bool,
+    /// The reply of `currentOp`, in place of one operation 42.
+    current_op: Option<&'static str>,
 }
 
 fn d(t: &str) -> Document {
@@ -46,7 +48,7 @@ impl Executor for Fake {
             ),
             "drop" if self.drops => d(r#"{"ok":1}"#),
             "drop" => d(r#"{"ok":0,"errmsg":"ns not found","code":26}"#),
-            "currentOp" => d(r#"{"inprog":[{"opid":42}],"ok":1}"#),
+            "currentOp" => d(self.current_op.unwrap_or(r#"{"inprog":[{"opid":42}],"ok":1}"#)),
             "listIndexes" => d(
                 r#"{"cursor":{"id":0,"ns":"db.c","firstBatch":[{"v":2,"key":{"_id":1},"name":"_id_"}]},"ok":1}"#,
             ),
@@ -550,4 +552,54 @@ fn every_structured_content_meets_its_output_schema() {
     let mut all: Vec<String> = TOOLS.iter().map(|t| t.name.to_owned()).collect();
     all.sort();
     assert_eq!(called, all);
+}
+
+/// What a cancellation, a progress token, a `DELETE` and an unknown tool do at their edges: a
+/// `currentOp` without operations or without their `opid` kills nothing, a cancellation without
+/// `requestId` looks for nothing, a progress token without an event stream answers JSON.
+#[test]
+fn the_edges_of_cancellation_progress_and_sessions() {
+    let server = Server::new(7);
+    let send = |f: &mut Fake, req: &Request| {
+        let mut random = || [1u8; 16];
+        let mut call = Call {
+            exec: f,
+            options: READ_ONLY,
+            now_ms: 0,
+            random: &mut random,
+            progress: Vec::new(),
+            stream: None,
+        };
+        server.http(req, &mut call)
+    };
+    let cancel = |params: &str| {
+        let body =
+            format!(r#"{{"jsonrpc":"2.0","method":"notifications/cancelled","params":{params}}}"#);
+        Request::new("POST", "/mcp").body(body.into_bytes())
+    };
+    for reply in [r#"{"ok":1}"#, r#"{"inprog":[{"desc":"x"}],"ok":1}"#] {
+        let mut f = Fake { current_op: Some(reply), ..Fake::default() };
+        assert_eq!(send(&mut f, &cancel(r#"{"requestId":"r"}"#)).status, 202);
+        assert!(f.ran.iter().all(|c| c.get("killOp").is_none()), "{:?}", f.ran);
+    }
+    let mut f = Fake::default();
+    assert_eq!(send(&mut f, &cancel(r#"{"reason":"x"}"#)).status, 202);
+    assert!(f.ran.is_empty());
+    let meta =
+        r#""_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","progressToken":"p"}"#;
+    let body = format!(
+        r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{{meta},"name":"find","arguments":{{"connectionId":"7.stateless","database":"db","collection":"c"}}}}}}"#
+    );
+    let r = send(
+        &mut f,
+        &Request::new("POST", "/mcp").header("Accept", "application/json").body(body.into_bytes()),
+    );
+    assert!(r.headers.iter().any(|(k, v)| k == "Content-Type" && v == "application/json"), "{r:?}");
+    assert!(send(&mut f, &Request::new("DELETE", "/mcp")).status >= 400);
+    let meta = r#""_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}"#;
+    let body = format!(
+        r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{{meta},"name":"nope"}}}}"#
+    );
+    let (r, v) = post(&server, &mut f, READ_ONLY, &body, None);
+    assert_eq!((r.status, v.get("error").is_some()), (200, true));
 }

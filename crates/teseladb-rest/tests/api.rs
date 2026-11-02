@@ -723,3 +723,44 @@ fn a_write_with_an_idempotency_key_runs_in_its_session() {
     assert!(r.status < 300, "{}", r.status);
     assert!(f.ran.iter().any(|(_, c)| c.get("lsid").is_some() && c.get("txnNumber").is_some()));
 }
+
+/// The edges of the answers: a transaction whose commit failed or whose writes report nothing,
+/// an `operationTime` that is not a timestamp, the options of `getMore`, a `PATCH` with a
+/// pipeline beside other fields, `listApiKeys` by user and the problems of a missing user or key.
+#[test]
+fn edges_of_answers_and_routes() {
+    use teseladb_rest::api::problem_body;
+    let body = r#"{"operations":[{"op":"insert","db":"a","coll":"c","documents":[]}]}"#;
+    let mut f = Fake {
+        replies: vec![
+            doc(r#"{"ok":1.0,"writeErrors":[]}"#),
+            doc(
+                r#"{"ok":0.0,"code":50,"codeName":"MaxTimeMSExpired","errmsg":"t","operationTime":1}"#,
+            ),
+        ],
+        ..Fake::default()
+    };
+    let r = call(&mut f, "POST", "/v1/transactions", body);
+    assert_eq!(r.status, 504);
+    assert!(json(&r).get("operationIndex").is_none());
+    assert_eq!(header(&r, OPERATION_TIME), None);
+    // A `getMore` without options asks for none.
+    let id = cursor_id(NODE, 98);
+    let mut f = Fake { cursors: vec![(id, "shop.items".to_owned())], ..Fake::default() };
+    call(&mut f, "GET", &format!("/v1/cursors/{NODE}.{id}"), "");
+    let more = &f.ran.last().unwrap().1;
+    assert!(more.get("batchSize").is_none() && more.get("maxTimeMS").is_none(), "{more:?}");
+    let (_, cmd) = built("PATCH", &format!("{C}/documents/1"), r#"{"pipeline":[],"x":1}"#);
+    assert!(format!("{cmd:?}").contains("pipeline"), "{cmd:?}");
+    let (_, cmd) = built("GET", "/v1/apiKeys?user=ana&db=admin", "");
+    assert_eq!(cmd.get("user"), Some(&Value::from("ana")));
+    let (_, cmd) = built("PUT", &format!("{C}/documents/1"), r#"{"a":1}"#);
+    assert!(format!("{cmd:?}").contains("upsert"), "{cmd:?}");
+    for (code, name) in [(11, "UserNotFound"), (211, "KeyNotFound")] {
+        let reply = doc(&format!(r#"{{"ok":0.0,"code":{code},"codeName":"{name}","errmsg":"x"}}"#));
+        assert_eq!(problem_body(&reply).0, 404, "{name}");
+    }
+    // A find whose `batchSize` is a fraction keeps the default batch.
+    let r = call(&mut Fake::default(), "POST", &format!("{C}/find"), r#"{"batchSize":2.5}"#);
+    assert!(r.status < 500);
+}

@@ -452,5 +452,11 @@ mod tests {
         assert_eq!((w.read_only, w.destructive), (false, true));
         assert!(req("a", Kind::Str).required && !opt("b", Kind::Bool).required);
         assert_eq!(tool("find").map(|t| (t.read_only, t.destructive)), Some((true, false)));
+        // `read_only` with `allow_destructive` lists every tool; `connect` takes no connection.
+        assert!(TOOLS.iter().all(|t| allowed(t, true, true)));
+        let mut args = Object::new();
+        args.insert("connectionId", "7.s");
+        let connect = tool("connect").unwrap();
+        assert_eq!(check_args(connect, &args), Err("unknown argument connectionId".to_owned()));
     }
 }

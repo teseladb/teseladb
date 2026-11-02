@@ -262,6 +262,18 @@ fn writes_report_their_ids_and_their_errors() {
         let out = ok_call(vec![("update", d(&reply))], "update-many", &json);
         assert_eq!(out.structured.get("upsertedId").and_then(Value::as_str), Some(text));
     }
+    // An update that inserts nothing has no `upsertedId`.
+    let json = format!(r#"{{{DC},"update":{{"$set":{{"a":1}}}}}}"#);
+    let out =
+        ok_call(vec![("update", d(r#"{"n":2,"nModified":2,"ok":1.0}"#))], "update-many", &json);
+    assert!(out.structured.get("upsertedId").is_none());
+    // An index listed without its key keeps what it has.
+    let bare = d(r#"{"cursor":{"id":0,"firstBatch":[{"name":"x","v":2}]},"ok":1.0}"#);
+    let out = ok_call(vec![("listIndexes", bare)], "collection-indexes", &format!("{{{DC}}}"));
+    assert_eq!(
+        format!("{:?}", out.structured.get("classicIndexes")),
+        r#"Some(Array([Object(Object { entries: [("name", String("x"))] })]))"#
+    );
     // An index without a name is named after its keys.
     let keys = r#"{"a":1,"b":"text","c":-1.0}"#;
     let json = format!(r#"{{{DC},"definition":[{{"type":"classic","keys":{keys}}}]}}"#);

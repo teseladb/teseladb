@@ -94,6 +94,8 @@ fn the_body_takes_operations_and_max_commit_time() {
     assert!(refused(r#"{"operations":1}"#).contains("wrong type"));
     assert!(refused(&format!(r#"{{"operations":[{one}],"maxCommitTimeMS":-1}}"#)).contains("type"));
     assert!(refused("{}").contains("required"));
+    let neg = format!(r#"{{"operations":[{one}],"maxCommitTimeMS":{{"$numberLong":"-1"}}}}"#);
+    assert!(refused(&neg).contains("wrong type"));
     assert!(refused(r#"{"operations":[]}"#).contains("1 to"));
     let many = vec![one; MAX_OPERATIONS + 1].join(",");
     assert!(refused(&format!(r#"{{"operations":[{many}]}}"#)).contains("1 to"));
@@ -120,7 +122,8 @@ fn a_transaction_runs_each_operation_in_its_session_and_commits() {
         "getMore",
         d(r#"{"cursor":{"id":{"$numberLong":"0"},"nextBatch":[{"_id":2}]},"ok":1}"#),
     ));
-    f.script.push_back(("insert", d(r#"{"n":1,"ok":1.0,"$clusterTime":{"x":1}}"#)));
+    f.script
+        .push_back(("insert", d(r#"{"n":1,"ok":1.0,"writeErrors":[],"$clusterTime":{"x":1}}"#)));
     f.script.push_back((
         "commitTransaction",
         d(r#"{"ok":1.0,"operationTime":{"$timestamp":{"t":1,"i":1}}}"#),
@@ -147,7 +150,7 @@ fn a_transaction_runs_each_operation_in_its_session_and_commits() {
         _ => panic!("{out:?}"),
     };
     assert_eq!(results[0], Value::Array(vec![d(r#"{"_id":1}"#).into(), d(r#"{"_id":2}"#).into()]));
-    assert_eq!(results[1], Value::Document(d(r#"{"n":1}"#)));
+    assert_eq!(results[1], Value::Document(d(r#"{"n":1,"writeErrors":[]}"#)));
     assert!(out.get("operationTime").is_some());
     assert_eq!(out.get("ok"), Some(&Value::Double(1.0)));
 }
