@@ -41,13 +41,13 @@ fn groups_on_disk(
 ) -> Result<Vec<(Value, Vec<State>)>, MqlError> {
     let collation = env.collation();
     let col = collation.get();
-    let wrapped = keyed.into_iter().map(|(k, d)| Document::new().with("k", k).with("d", d));
-    let mut out = Vec::new();
-    let mut current: Option<(Vec<u8>, Value, Vec<State>)> = None;
+    let wrapped = keyed.into_iter().map(|(k, d)| super::spill::with_key(d, k));
+    // Each group with its canonical key, in the order of their keys.
+    let mut out: Vec<(Vec<u8>, Value, Vec<State>)> = Vec::new();
     super::spill::external_sort(
         wrapped.collect(),
         |w| {
-            let k = w.get("k").cloned().unwrap_or(Value::Null);
+            let k = super::spill::key_of(w);
             Ok((canonical(&k, col), k))
         },
         // Keys of one group compare equal even where the collation still tells them apart
@@ -57,33 +57,24 @@ fn groups_on_disk(
             false => order(&Some(a.1.clone()), &Some(b.1.clone()), col),
         },
         (limit, store),
-        |(canon, _), mut w| {
-            let key = w.remove("k").unwrap_or(Value::Null);
-            let Some(Value::Document(doc)) = w.remove("d") else {
-                return Err(error(
-                    teseladb_mql::codes::INTERNAL_ERROR,
-                    "a spilled group lost its document",
-                ));
-            };
-            if current.as_ref().is_some_and(|(c, _, _)| *c != canon)
-                && let Some((_, k, states)) = current.take()
-            {
-                out.push((k, states));
-            }
-            let (_, _, states) = current.get_or_insert_with(|| {
-                (canon, key, outputs.iter().map(|(_, a)| a.start()).collect())
-            });
+        |(canon, key), w| {
+            let doc = super::spill::without_key(w);
             let scope = group_scope(env, &doc, sbe);
+            let states = match out.last_mut() {
+                Some((c, _, states)) if *c == canon => states,
+                _ => {
+                    out.push((canon, key, outputs.iter().map(|(_, a)| a.start()).collect()));
+                    let last = out.len() - 1;
+                    &mut out[last].2
+                }
+            };
             for ((_, acc), st) in outputs.iter().zip(states.iter_mut()) {
                 acc.add(st, &doc, &scope)?;
             }
             Ok(())
         },
     )?;
-    if let Some((_, k, states)) = current {
-        out.push((k, states));
-    }
-    Ok(out)
+    Ok(out.into_iter().map(|(_, k, states)| (k, states)).collect())
 }
 
 /// The bytes a group holds for the value accumulator `acc` just took into `st`, when it collects
@@ -803,21 +794,16 @@ pub(super) fn sorted_by_values(
         crate::expr::sort_by_values(&mut keyed, col)?;
         return Ok(keyed);
     };
-    let wrapped = keyed.into_iter().map(|(v, d)| Document::new().with("v", v).with("d", d));
+    let wrapped = keyed.into_iter().map(|(v, d)| super::spill::with_key(d, v));
     let mut out = Vec::new();
     super::spill::external_sort(
         wrapped.collect(),
-        |w| Ok(w.get("v").cloned().unwrap_or(Value::Null)),
+        |w| Ok(super::spill::key_of(w)),
         |a: &Value, b| order(&Some(a.clone()), &Some(b.clone()), col),
         (limit, store),
-        |v, mut w| match w.remove("d") {
-            Some(Value::Document(d)) => {
-                out.push((v, d));
-                Ok(())
-            }
-            _ => {
-                Err(error(teseladb_mql::codes::INTERNAL_ERROR, "a spilled value lost its document"))
-            }
+        |v, w| {
+            out.push((v, super::spill::without_key(w)));
+            Ok(())
         },
     )?;
     Ok(out)

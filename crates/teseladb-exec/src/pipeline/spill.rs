@@ -150,15 +150,19 @@ pub(crate) fn external_sort<K>(
     let next = |r: &mut Reader<'_>| -> Result<Option<(K, Document)>, MqlError> {
         r.next_doc()?.map(|d| Ok((keys(&d)?, d))).transpose()
     };
-    let mut heads: Vec<Option<(K, Document)>> = Vec::with_capacity(readers.len());
-    for r in &mut readers {
-        heads.push(next(r)?);
-    }
-    while let Some(i) = smallest(&heads, &cmp)? {
-        let following = next(&mut readers[i])?;
-        if let Some((k, d)) = std::mem::replace(&mut heads[i], following) {
-            emit(k, d)?;
+    // The next document of each run that has one, with its run, in the order of the runs.
+    let mut heads: Vec<(usize, K, Document)> = Vec::with_capacity(readers.len());
+    for (i, r) in readers.iter_mut().enumerate() {
+        if let Some((k, d)) = next(r)? {
+            heads.push((i, k, d));
         }
+    }
+    while let Some(pos) = smallest(&heads, &cmp)? {
+        let (run, k, d) = heads.remove(pos);
+        if let Some((nk, nd)) = next(&mut readers[run])? {
+            heads.insert(pos, (run, nk, nd));
+        }
+        emit(k, d)?;
     }
     Ok(())
 }
@@ -186,20 +190,40 @@ pub fn sort_runs(
     Ok(out)
 }
 
-/// The run whose next document comes first; the earlier run on a tie.
+/// The place in `heads` of the document that comes first; the earlier run on a tie.
 fn smallest<K>(
-    heads: &[Option<(K, Document)>],
+    heads: &[(usize, K, Document)],
     cmp: &impl Fn(&K, &K) -> Result<Ordering, MqlError>,
 ) -> Result<Option<usize>, MqlError> {
     let mut best: Option<(usize, &K)> = None;
-    for (i, h) in heads.iter().enumerate() {
-        let Some((k, _)) = h else { continue };
+    for (i, (_, k, _)) in heads.iter().enumerate() {
         best = match best {
             Some((_, b)) if cmp(k, b)? != Ordering::Less => best,
             _ => Some((i, k)),
         };
     }
     Ok(best.map(|(i, _)| i))
+}
+
+/// The field that carries a document's sort key through a run (a name that starts with a
+/// control character, as [`super::meta::MARK`]).
+const SORT_KEY: &str = "\u{1}key";
+
+/// `d` carrying sort key `key` through a run.
+pub(crate) fn with_key(mut d: Document, key: Value) -> Document {
+    d.push(SORT_KEY, key);
+    d
+}
+
+/// The key a document carried through a run.
+pub(crate) fn key_of(d: &Document) -> Value {
+    d.get(SORT_KEY).cloned().unwrap_or(Value::Null)
+}
+
+/// The document as it was before [`with_key`].
+pub(crate) fn without_key(mut d: Document) -> Document {
+    d.remove(SORT_KEY);
+    d
 }
 
 /// What a store was given: the runs, their documents and their bytes (the `spills`,
@@ -354,6 +378,27 @@ mod tests {
         let out = sort_runs(&s, docs, None, 500, &store).expect("sorted");
         assert_eq!(out, expected);
         assert!(store.written() > 10);
+        assert!(store.is_empty());
+    }
+
+    #[test]
+    fn nothing_writes_no_run_and_a_document_past_the_limit_is_a_run_of_its_own() {
+        let store = MemorySpill::default();
+        let s = spec(r#"{"k":1}"#);
+        assert_eq!(sort_runs(&s, Vec::new(), None, 10, &store).expect("sorted"), []);
+        assert_eq!(store.written(), 0);
+        let docs: Vec<Document> =
+            (0..3).map(|i: i32| Document::new().with("k", -i).with("s", "x".repeat(50))).collect();
+        let out = sort_runs(&s, docs.clone(), None, 1, &store).expect("sorted");
+        assert_eq!(out, docs.into_iter().rev().collect::<Vec<_>>());
+        assert_eq!(store.written(), 3);
+        let counted = Counting::new(&store);
+        let more = vec![Document::new().with("k", 1), Document::new().with("k", 0)];
+        sort_runs(&s, more, None, 1, &counted).expect("sorted");
+        let stats = counted.stats();
+        assert_eq!((stats.spills, stats.records), (2, 2));
+        assert_eq!(stats.minus(SpillStats { spills: 1, records: 5, bytes: 0 }).records, 0);
+        assert!(runs_written() >= 5);
         assert!(store.is_empty());
     }
 

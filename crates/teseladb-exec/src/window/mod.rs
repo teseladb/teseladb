@@ -687,53 +687,44 @@ impl SetWindowFields {
         let mut wrapped = Vec::with_capacity(docs.len());
         for d in docs {
             let key = self.partition_key(&d, env)?;
-            wrapped.push(Document::new().with("p", key).with("d", d));
+            wrapped.push(crate::pipeline::spill::with_key(d, key));
         }
-        let keys = |w: &Document| -> Result<(Value, Vec<Value>), MqlError> {
-            let p = w.get("p").cloned().unwrap_or(Value::Null);
-            let sort = match (&self.sort, w.get("d")) {
-                (Some(s), Some(Value::Document(d))) => s.key(d, col)?,
-                _ => Vec::new(),
+        type Key = (Vec<u8>, Value, Vec<Value>);
+        let keys = |w: &Document| -> Result<Key, MqlError> {
+            let p = crate::pipeline::spill::key_of(w);
+            let sort = match &self.sort {
+                Some(s) => s.key(w, col)?,
+                None => Vec::new(),
             };
-            Ok((p, sort))
+            Ok((crate::pipeline::group_key(&p, col), p, sort))
         };
-        let cmp = |a: &(Value, Vec<Value>), b: &(Value, Vec<Value>)| match order(
-            &Some(a.0.clone()),
-            &Some(b.0.clone()),
-            col,
-        )? {
-            std::cmp::Ordering::Equal => match &self.sort {
-                Some(s) => s.compare(&a.1, &b.1, col),
-                None => Ok(std::cmp::Ordering::Equal),
-            },
-            o => Ok(o),
+        // Keys of one partition compare equal even where the collation still tells them apart.
+        let cmp = |a: &Key, b: &Key| {
+            let by_partition = match a.0 == b.0 {
+                true => std::cmp::Ordering::Equal,
+                false => order(&Some(a.1.clone()), &Some(b.1.clone()), col)?,
+            };
+            match (by_partition, &self.sort) {
+                (std::cmp::Ordering::Equal, Some(s)) => s.compare(&a.2, &b.2, col),
+                (o, _) => Ok(o),
+            }
         };
-        let mut out: Vec<Vec<Document>> = Vec::new();
-        let mut last: Option<Vec<u8>> = None;
+        let mut out: Vec<(Vec<u8>, Vec<Document>)> = Vec::new();
         crate::pipeline::spill::external_sort(
             wrapped,
             keys,
             cmp,
             (limit, store),
-            |(p, _), mut w| {
-                let Some(Value::Document(d)) = w.remove("d") else {
-                    return Err(error(
-                        teseladb_mql::codes::INTERNAL_ERROR,
-                        "a spilled window lost its document",
-                    ));
-                };
-                let canon = crate::pipeline::group_key(&p, col);
+            |(canon, _, _), w| {
+                let d = crate::pipeline::spill::without_key(w);
                 match out.last_mut() {
-                    Some(part) if last.as_ref() == Some(&canon) => part.push(d),
-                    _ => {
-                        out.push(vec![d]);
-                        last = Some(canon);
-                    }
+                    Some((c, part)) if *c == canon => part.push(d),
+                    _ => out.push((canon, vec![d])),
                 }
                 Ok(())
             },
         )?;
-        Ok(out)
+        Ok(out.into_iter().map(|(_, part)| part).collect())
     }
 
     fn run_partition(&self, docs: Vec<Document>, env: &dyn Env) -> Result<Vec<Document>, MqlError> {
