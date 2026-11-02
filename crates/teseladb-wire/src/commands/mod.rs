@@ -263,6 +263,8 @@ pub trait Backend {
     fn op_reads(&mut self) -> crate::ops::OpReads;
     /// The client metadata of the running operation's connection, for `$queryStats`.
     fn op_client(&mut self) -> Option<Document>;
+    /// The plan the running operation noted ([`Backend::note_plan`]), for `$queryStats`.
+    fn op_plan(&mut self) -> Option<Document>;
     /// What a change stream reads of `[start, end)` after mark `from` (014 FR-003, FR-004): the
     /// versions of every range of the interval up to the lowest resolved mark of those ranges,
     /// and that mark, below which no version appears later.
@@ -958,10 +960,60 @@ fn shaped<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Command
         && let Some(shape) = query_shape::shape(ctx.db, ctx.cmd)
     {
         let run = query_stats_batch(ctx.backend, &start, returned(&reply));
-        let run = query_stats::Run { first_micros: run.micros, ..run };
+        let plan = ctx.backend.op_plan();
+        let planner = query_stats::Planner {
+            has_sort_stage: sorts_in_memory(ctx.cmd, plan.as_ref()),
+            from_multi_planner: plan
+                .as_ref()
+                .is_some_and(|p| p.get(plan_exec::MULTI_PLANNED) == Some(&Value::Boolean(true))),
+            planning_micros: match plan.as_ref().and_then(|p| p.get(plan_exec::PLANNING_TIME)) {
+                Some(Value::Int64(n)) => *n,
+                _ => 0,
+            },
+            ..run.planner
+        };
+        let run = query_stats::Run { first_micros: run.micros, planner, ..run };
         count_query(ctx, &shape, run, &reply);
     }
     Ok(reply)
+}
+
+/// Whether command `cmd`, whose read noted `plan`, sorts in memory or on disk (`hasSortStage`
+/// of `$queryStats`, measured on a `refrouter` 9.0.4): a `find` whose sort its index does not
+/// give, an `aggregate` with a `$sort`, `$sortByCount` or a window that sorts, unless its only
+/// sort leads the pipeline (after `$match`) and its index gives it.
+fn sorts_in_memory(cmd: &Document, plan: Option<&Document>) -> bool {
+    let served = plan.is_some_and(|p| p.get(plan_exec::SORT_SERVED) == Some(&Value::Boolean(true)));
+    let non_empty = |v: Option<&Value>| matches!(v, Some(Value::Document(d)) if !d.is_empty());
+    match cmd.iter().next().map(|(k, _)| k) {
+        Some("find") => non_empty(cmd.get("sort")) && !served,
+        Some("aggregate") => {
+            let Some(Value::Array(stages)) = cmd.get("pipeline") else { return false };
+            let mut leading = true;
+            let mut sorts = Vec::new();
+            for st in stages {
+                let Value::Document(d) = st else { continue };
+                let Some((name, spec)) = d.iter().next() else { continue };
+                let sorting = match name {
+                    "$sort" | "$sortByCount" => true,
+                    "$setWindowFields" | "$fill" => {
+                        matches!(spec, Value::Document(w) if non_empty(w.get("sortBy")))
+                    }
+                    _ => false,
+                };
+                if sorting {
+                    sorts.push(leading && name == "$sort");
+                }
+                leading &= name == "$match";
+            }
+            match sorts.as_slice() {
+                [] => false,
+                [first] => !(*first && served),
+                _ => true,
+            }
+        }
+        _ => false,
+    }
 }
 
 /// Whether `$queryStats` counts the query of `ctx`, by its parameters.
@@ -982,6 +1034,7 @@ pub(crate) struct BatchStart {
     micros: u64,
     cpu: Option<u64>,
     reads: crate::ops::OpReads,
+    spilled: u64,
 }
 
 /// The start of a batch on `backend`.
@@ -990,6 +1043,7 @@ pub(crate) fn query_stats_start<B: Backend + ?Sized>(backend: &mut B) -> BatchSt
         micros: backend.now_micros(),
         cpu: backend.thread_cpu_nanos(),
         reads: backend.op_reads(),
+        spilled: teseladb_exec::pipeline::spill::runs_written(),
     }
 }
 
@@ -1011,6 +1065,10 @@ pub(crate) fn query_stats_batch<B: Backend + ?Sized>(
             .cpu
             .zip(backend.thread_cpu_nanos())
             .map(|(a, b)| long(b.saturating_sub(a))),
+        planner: query_stats::Planner {
+            used_disk: teseladb_exec::pipeline::spill::runs_written() > start.spilled,
+            ..query_stats::Planner::default()
+        },
     }
 }
 

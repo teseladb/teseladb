@@ -311,3 +311,78 @@ fn an_equality_lookup_reads_the_foreign_side_through_its_index() {
     // The three local documents and the two foreign ones, not the 60 of `f`.
     assert!(examined < 10, "{examined}");
 }
+
+/// The `true` count of question `q` of `metrics.queryPlanner` in entry `e`.
+fn yes<'a>(e: &'a Document, q: &str) -> &'a Value {
+    field(e, &format!("metrics.queryPlanner.{q}.true"))
+}
+
+#[test]
+fn the_planner_part_says_how_each_query_was_planned() {
+    let mut c = Client::new();
+    c.set(-1, 0.0);
+    c.ok(DB, r#"{"createIndexes":"c","indexes":[{"key":{"a":1},"name":"a_1"},{"key":{"b":1},"name":"b_1"}]}"#);
+    c.ok(DB, r#"{"find":"c","filter":{"z":1},"sort":{"z":1}}"#);
+    c.ok(DB, r#"{"find":"c","filter":{},"sort":{"b":-1}}"#);
+    c.ok(DB, r#"{"find":"c","filter":{"a":2,"b":{"$gt":0}}}"#);
+    c.ok(
+        DB,
+        r#"{"aggregate":"c","pipeline":[{"$group":{"_id":"$a"}},{"$sort":{"_id":1}}],"cursor":{}}"#,
+    );
+    c.ok(
+        DB,
+        r#"{"aggregate":"c","pipeline":[{"$match":{"a":1}},{"$group":{"_id":"$b"}}],"cursor":{}}"#,
+    );
+    c.ok(DB, r#"{"distinct":"c","key":"b"}"#);
+    let e = c.entries();
+    let by = |command: &str, part: &str, v: &str| {
+        e.iter()
+            .find(|d| {
+                field(d, "key.queryShape.command") == &Value::from(command)
+                    && format!("{:?}", d.get("key")).contains(v)
+                    && format!("{:?}", d.get("key")).contains(part)
+            })
+            .unwrap_or_else(|| panic!("{command} {v} in {e:?}"))
+            .clone()
+    };
+    let one = &Value::Int64(1);
+    let none = &Value::Int64(0);
+    assert_eq!(yes(&by("find", "sort", "\"z\""), "hasSortStage"), one);
+    assert_eq!(yes(&by("find", "sort", "\"b\""), "hasSortStage"), none);
+    let multi = by("find", "filter", "$gt");
+    assert_eq!(yes(&multi, "fromMultiPlanner"), one);
+    assert_eq!(yes(&multi, "hasSortStage"), none);
+    assert_eq!(yes(&multi, "fromPlanCache"), none);
+    assert_eq!(yes(&by("aggregate", "pipeline", "$sort"), "hasSortStage"), one);
+    let grouped = by("aggregate", "pipeline", "$match");
+    assert_eq!(yes(&grouped, "hasSortStage"), none);
+    assert_eq!(yes(&grouped, "usedDisk"), none);
+    assert_eq!(field(&grouped, "metrics.queryPlanner.usedDisk.false"), one);
+    let planner = match field(&grouped, "metrics.queryPlanner") {
+        Value::Document(d) => d.clone(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(
+        keys(&planner),
+        [
+            "hasSortStage",
+            "usedDisk",
+            "fromMultiPlanner",
+            "fromPlanCache",
+            "planningTimeMicros",
+            "costBasedRanker"
+        ]
+    );
+    let metrics = match field(&grouped, "metrics") {
+        Value::Document(d) => keys(d),
+        other => panic!("{other:?}"),
+    };
+    let at = metrics.iter().position(|k| k == "queryExec").expect("queryExec");
+    assert_eq!(metrics[at + 1..at + 4], ["queryPlanner", "writes", "firstSeenTimestamp"]);
+    assert_eq!(field(&grouped, "metrics.writes.keysDeleted.sum"), &Value::Int64(0));
+    assert_eq!(
+        field(&grouped, "metrics.queryPlanner.costBasedRanker.nDocsSampled.max"),
+        &Value::Int64(0)
+    );
+    assert_eq!(yes(&by("distinct", "key", "\"b\""), "hasSortStage"), none);
+}

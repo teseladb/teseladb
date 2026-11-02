@@ -58,6 +58,43 @@ impl Aggregate {
     }
 }
 
+/// How many runs said yes and no to one question.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Tally {
+    yes: i64,
+    no: i64,
+}
+
+impl Tally {
+    fn add(&mut self, v: bool) {
+        match v {
+            true => self.yes += 1,
+            false => self.no += 1,
+        }
+    }
+
+    fn shown(&self) -> Document {
+        Document::new().with("true", self.yes).with("false", self.no)
+    }
+}
+
+/// The counters of writes in an entry, none for a read (`metrics.writes`).
+const WRITE_COUNTERS: [&str; 9] = [
+    "nMatched",
+    "nUpserted",
+    "nModified",
+    "nDeleted",
+    "nInserted",
+    "nUpdateOps",
+    "nDeleteOps",
+    "keysInserted",
+    "keysDeleted",
+];
+
+/// The ways RefDb's cost-based ranker estimates, which TeselaDB's planner does not use.
+const ESTIMATION_METHODS: [&str; 6] =
+    ["Histogram", "Sampling", "Heuristics", "Mixed", "Metadata", "Code"];
+
 /// What one query counted, over all its batches.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Run {
@@ -73,6 +110,23 @@ pub struct Run {
     pub docs_examined: i64,
     /// The CPU time of its batches, in nanoseconds; `None` where the node cannot tell.
     pub cpu_nanos: Option<i64>,
+    /// What its planner did.
+    pub planner: Planner,
+}
+
+/// What the planner did for one query (`metrics.queryPlanner`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Planner {
+    /// Whether it sorted in memory or on disk, its plan reading in another order.
+    pub has_sort_stage: bool,
+    /// Whether a stage wrote to disk.
+    pub used_disk: bool,
+    /// Whether several plans competed for it.
+    pub from_multi_planner: bool,
+    /// Whether its plan came from the plan cache.
+    pub from_plan_cache: bool,
+    /// How long choosing its plan took, in microseconds.
+    pub planning_micros: i64,
 }
 
 impl Run {
@@ -86,6 +140,10 @@ impl Run {
             keys_examined: self.keys_examined.saturating_add(more.keys_examined),
             docs_examined: self.docs_examined.saturating_add(more.docs_examined),
             cpu_nanos: self.cpu_nanos.zip(more.cpu_nanos).map(|(a, b)| a.saturating_add(b)),
+            planner: Planner {
+                used_disk: self.planner.used_disk || more.planner.used_disk,
+                ..self.planner
+            },
         }
     }
 }
@@ -120,8 +178,52 @@ struct Entry {
     docs_examined: Aggregate,
     cpu: Aggregate,
     working_ms: Aggregate,
+    has_sort_stage: Tally,
+    used_disk: Tally,
+    from_multi_planner: Tally,
+    from_plan_cache: Tally,
+    planning: Aggregate,
     first_seen_ms: i64,
     last_seen_ms: i64,
+}
+
+impl Entry {
+    /// `metrics.queryPlanner`: what the planner did, without the plan shapes RefDb counts
+    /// (DV-080).
+    fn planner(&self) -> Document {
+        let mut methods = Document::new();
+        for m in ESTIMATION_METHODS {
+            methods.push(m, 0i64);
+        }
+        let ranker = Document::new()
+            .with("cardinalityEstimationMethods", methods)
+            .with("nDocsSampled", zeros(self.count));
+        Document::new()
+            .with("hasSortStage", self.has_sort_stage.shown())
+            .with("usedDisk", self.used_disk.shown())
+            .with("fromMultiPlanner", self.from_multi_planner.shown())
+            .with("fromPlanCache", self.from_plan_cache.shown())
+            .with("planningTimeMicros", self.planning.shown())
+            .with("costBasedRanker", ranker)
+    }
+}
+
+/// The aggregate of `runs` zeros.
+fn zeros(runs: i64) -> Document {
+    let mut a = Aggregate::default();
+    if runs > 0 {
+        a.add(0);
+    }
+    a.shown()
+}
+
+/// `metrics.writes` of a read: every counter zero.
+fn writes() -> Document {
+    let mut d = Document::new();
+    for k in WRITE_COUNTERS {
+        d.push(k, Aggregate::default().shown());
+    }
+    d
 }
 
 /// The entries of the node, by key hash, the sampled queries whose cursors are open, by cursor,
@@ -267,6 +369,11 @@ impl QueryStats {
             docs_examined: Aggregate::default(),
             cpu: Aggregate::default(),
             working_ms: Aggregate::default(),
+            has_sort_stage: Tally::default(),
+            used_disk: Tally::default(),
+            from_multi_planner: Tally::default(),
+            from_plan_cache: Tally::default(),
+            planning: Aggregate::default(),
             first_seen_ms: now_ms,
             last_seen_ms: now_ms,
         });
@@ -281,6 +388,11 @@ impl QueryStats {
             e.cpu.add(n);
         }
         e.working_ms.add(run.micros / 1000);
+        e.has_sort_stage.add(run.planner.has_sort_stage);
+        e.used_disk.add(run.planner.used_disk);
+        e.from_multi_planner.add(run.planner.from_multi_planner);
+        e.from_plan_cache.add(run.planner.from_plan_cache);
+        e.planning.add(run.planner.planning_micros);
         e.last_seen_ms = now_ms;
     }
 
@@ -307,6 +419,8 @@ impl QueryStats {
                         Document::new().with("firstResponseExecMicros", e.first_response.shown()),
                     )
                     .with("queryExec", query_exec)
+                    .with("queryPlanner", e.planner())
+                    .with("writes", writes())
                     .with("firstSeenTimestamp", Value::DateTime(e.first_seen_ms))
                     .with("latestSeenTimestamp", Value::DateTime(e.last_seen_ms));
                 Document::new()

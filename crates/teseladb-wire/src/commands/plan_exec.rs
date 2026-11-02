@@ -39,6 +39,12 @@ pub(crate) const PLANNING_TIME: &str = "planningTimeMicros";
 /// `{names}`. A control character starts it, so that no field of RefDb's can be it.
 pub(crate) const USED_INDEXES: &str = "\u{1}used";
 
+/// The field of a noted plan that says several plans competed (`fromMultiPlanner` of
+/// `$queryStats`); a control character starts it, as [`USED_INDEXES`].
+pub(crate) const MULTI_PLANNED: &str = "\u{1}multi";
+/// The field of a noted plan that says its index reads in the order of the read's sort.
+pub(crate) const SORT_SERVED: &str = "\u{1}sorted";
+
 /// What a read or write of one `_id` notes: the index of `_id`, used without planning (with
 /// `planned`, the time it spent planning, none, as a write's plan).
 pub(crate) fn used_id_index(planned: bool) -> Document {
@@ -1172,7 +1178,9 @@ pub(crate) fn planned_keyed<B: Backend + ?Sized>(
         backend.note_plan(report(None, planning));
         return Ok(None);
     };
-    let plan = super::explain::plan_report(note.ns, read.parsed, &indexes, &chosen.winner);
+    let plan = super::explain::plan_report(note.ns, read.parsed, &indexes, &chosen.winner)
+        .with(MULTI_PLANNED, !chosen.others.is_empty())
+        .with(SORT_SERVED, super::explain::sorted(&chosen.winner));
     backend.note_plan(report(Some(plan), chosen.planning_micros));
     let now = i64::try_from(backend.wall_ms()).unwrap_or(i64::MAX);
     {
