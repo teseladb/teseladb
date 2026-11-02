@@ -242,6 +242,7 @@ fn current_op_lists_a_build_as_a_refnode_does() {
         roles: None,
         desc: Some(format!("{BUILD_DESC}3")),
         progress: Some(Progress { done: 500, total: 1000 }),
+        metrics: None,
     };
     lock(shared).ops.begin(op);
     let r = run_on_db(&mut m, shared, "admin", &doc(&[("currentOp", Value::Int32(1))]));
@@ -399,6 +400,7 @@ fn the_guarded_backend_passes_voters_and_ends_the_operation() {
         roles: None,
         desc: None,
         progress: None,
+        metrics: None,
     });
     let ended = m.ended;
     {

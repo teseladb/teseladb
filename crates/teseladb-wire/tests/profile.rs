@@ -491,3 +491,74 @@ fn get_more_is_profiled_with_its_originating_command() {
     // What the `getMore` of the pipeline read was read when it opened (measured: 0 and 0).
     assert_eq!(docs[1].get("docsExamined"), Some(&Value::Int64(0)));
 }
+
+/// How each read's plan was chosen, as a `refnode` 9.0.4 profiled it (measured 02-11-2026): the
+/// first two reads of a shape compete (`fromMultiPlanner`), the next take the cached plan
+/// (`fromPlanCache`), each `getMore` repeats its cursor's, and a cached plan that works ten times
+/// its entry's works is dropped (`replanned` with its `replanReason`).
+#[test]
+fn profiled_reads_say_how_their_plan_was_chosen() {
+    let mut m = node();
+    let docs: Vec<String> =
+        (0..50).map(|i| format!(r#"{{"_id":{i},"a":{},"b":{i}}}"#, i % 5)).collect();
+    run(&mut m, DB, json(&format!(r#"{{"insert":"c","documents":[{}]}}"#, docs.join(","))));
+    run(
+        &mut m,
+        DB,
+        json(
+            r#"{"createIndexes":"c","indexes":[{"key":{"a":1},"name":"a_1"},{"key":{"b":1},"name":"b_1"}]}"#,
+        ),
+    );
+    run(&mut m, DB, json(r#"{"profile":2}"#));
+    for _ in 0..3 {
+        let r =
+            run(&mut m, DB, json(r#"{"find":"c","filter":{"a":3,"b":{"$gt":45}},"batchSize":1}"#));
+        let id = field(&r, "cursor.id").clone();
+        run(&mut m, DB, Document::new().with("getMore", id).with("collection", "c"));
+    }
+    run(&mut m, DB, json(r#"{"profile":0}"#));
+    let more: Vec<String> =
+        (100..2100).map(|i| format!(r#"{{"_id":{i},"a":4,"b":{i}}}"#)).collect();
+    run(&mut m, DB, json(&format!(r#"{{"insert":"c","documents":[{}]}}"#, more.join(","))));
+    run(&mut m, DB, json(r#"{"profile":2}"#));
+    run(&mut m, DB, json(r#"{"find":"c","filter":{"a":3,"b":{"$gt":45}}}"#));
+    run(&mut m, DB, json(r#"{"profile":0}"#));
+    let how: Vec<(String, Vec<String>)> = profiled(&mut m)
+        .iter()
+        .filter(|d| matches!(d.get("op"), Some(Value::String(o)) if o == "query" || o == "getmore"))
+        .map(|d| {
+            let op = match d.get("op") {
+                Some(Value::String(o)) => o.clone(),
+                _ => String::new(),
+            };
+            let flags = d
+                .iter()
+                .map(|(k, _)| k.to_owned())
+                .filter(|k| k.starts_with("from") || k.starts_with("replan"))
+                .collect();
+            (op, flags)
+        })
+        .collect();
+    let flags = |f: &[&str]| f.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+    let multi = flags(&["fromMultiPlanner"]);
+    let cached = flags(&["fromPlanCache"]);
+    let want = vec![
+        ("query".to_owned(), multi.clone()),
+        ("getmore".to_owned(), multi.clone()),
+        ("query".to_owned(), multi.clone()),
+        ("getmore".to_owned(), multi.clone()),
+        ("query".to_owned(), cached.clone()),
+        ("getmore".to_owned(), cached),
+        ("query".to_owned(), flags(&["fromMultiPlanner", "replanned", "replanReason"])),
+    ];
+    assert_eq!(how, want);
+    let last = profiled(&mut m).pop().expect("the replanned read");
+    assert_eq!(
+        last.get("replanReason"),
+        Some(&Value::from(
+            "cached plan was less efficient than expected: expected trial execution to take 5 \
+             works but it took at least 50 works"
+        )),
+        "{last:?}"
+    );
+}

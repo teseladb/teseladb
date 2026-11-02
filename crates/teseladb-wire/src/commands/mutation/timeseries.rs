@@ -123,3 +123,23 @@ pub(super) fn insert(
     puts.push(put(key, new));
     Ok((puts, deletes, r))
 }
+
+/// The place of the first of measurements `docs` of a time series laid out by `spec` that the
+/// collection's rules refuse on their own (its validator, or an index that cannot take it): an
+/// ordered insert stops there before it writes any bucket.
+pub fn first_refused(docs: &[Document], spec: &BucketSpec, rules: &super::Rules) -> Option<usize> {
+    let checker = super::Checker::new(rules, true).ok()?;
+    let none = |_: &[u8]| -> Option<(u8, &[u8])> { None };
+    let ts = Hlc { physical: 0, logical: 0 };
+    docs.iter().position(|doc| {
+        let one = fill_timestamps(doc, ts).unwrap_or_else(|| doc.clone());
+        let alone = || -> Result<(), CommandError> {
+            let bucket = spec.append([0; 12], None, &one).map_err(ts_error)?.to_bytes()?;
+            checker.entries_at(Some(&[]), None, Some(&bucket), &none).map(|_| ())
+        };
+        stored_bytes(&one, Stored::Insert)
+            .and_then(|b| checker.check(&b, None))
+            .and_then(|()| alone())
+            .is_err()
+    })
+}

@@ -712,6 +712,10 @@ impl Backend for ServerBackend {
         None
     }
 
+    fn op_plan(&mut self) -> Option<teseladb_bson::Document> {
+        None
+    }
+
     fn end_operation(&mut self) {
         self.release_pins();
     }

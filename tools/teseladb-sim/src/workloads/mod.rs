@@ -15,6 +15,7 @@ pub mod multirange;
 pub mod queries;
 pub mod range_docs;
 pub mod relocate;
+pub mod reshard;
 pub mod special_collections;
 pub mod splits;
 pub mod storage;

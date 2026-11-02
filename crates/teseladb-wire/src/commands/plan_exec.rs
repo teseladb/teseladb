@@ -39,6 +39,21 @@ pub(crate) const PLANNING_TIME: &str = "planningTimeMicros";
 /// `{names}`. A control character starts it, so that no field of RefDb's can be it.
 pub(crate) const USED_INDEXES: &str = "\u{1}used";
 
+/// The field of a noted plan that says several plans competed (`fromMultiPlanner` of
+/// `$queryStats`); a control character starts it, as [`USED_INDEXES`].
+pub(crate) const MULTI_PLANNED: &str = "\u{1}multi";
+/// The field of a noted plan that says its plan came from the plan cache (`fromPlanCache` of
+/// `$queryStats`), as [`USED_INDEXES`].
+pub(crate) const FROM_CACHE: &str = "\u{1}cached";
+/// The field of a noted plan that holds why its cached plan was dropped (`replanReason`), as
+/// [`USED_INDEXES`]; `null` when it was not.
+pub(crate) const REPLANNED: &str = "\u{1}replanned";
+/// How many times the works of its entry's trial a cached plan may work before it gives a batch
+/// or ends; past that, the plans compete again (`internalQueryCacheEvictionRatio`).
+const EVICTION_RATIO: u64 = 10;
+/// The field of a noted plan that says its index reads in the order of the read's sort.
+pub(crate) const SORT_SERVED: &str = "\u{1}sorted";
+
 /// What a read or write of one `_id` notes: the index of `_id`, used without planning (with
 /// `planned`, the time it spent planning, none, as a write's plan).
 pub(crate) fn used_id_index(planned: bool) -> Document {
@@ -1167,12 +1182,40 @@ pub(crate) fn planned_keyed<B: Backend + ?Sized>(
         backend.note_plan(report(None, planning));
         return Ok(None);
     }
-    let Some(chosen) = choose(backend, coll, &indexes, read)? else {
+    // A hinted read plans nothing and never takes the cached plan (measured).
+    let catalog = super::plan_cache::catalog_signature(coll, &indexes);
+    let cached = match read.hint {
+        Some(_) => None,
+        None => super::lock(note.shared).plan_cache.cached(&ns, &note.shape, &catalog),
+    };
+    let outcome = match cached {
+        Some((access, works)) => Some(cached_run(backend, coll, &indexes, read, access, works)?),
+        None => None,
+    };
+    let (chosen, from_cache, replanned) = match outcome {
+        Some(Cached::Kept(c)) => (Some(*c), true, None),
+        Some(Cached::Replan(expected, reached)) => {
+            // The cached plan worked too much: its entry goes, the plans compete again and
+            // what they learn is not kept (measured).
+            super::lock(note.shared).plan_cache.clear(&ns, Some(&note.shape));
+            let reason = format!(
+                "cached plan was less efficient than expected: expected trial execution to \
+                 take {expected} works but it took at least {reached} works"
+            );
+            (choose(backend, coll, &indexes, read)?, false, Some(reason))
+        }
+        None => (choose(backend, coll, &indexes, read)?, false, None),
+    };
+    let Some(chosen) = chosen else {
         let planning = backend.now_micros().saturating_sub(started);
         backend.note_plan(report(None, planning));
         return Ok(None);
     };
-    let plan = super::explain::plan_report(note.ns, read.parsed, &indexes, &chosen.winner);
+    let plan = super::explain::plan_report(note.ns, read.parsed, &indexes, &chosen.winner)
+        .with(MULTI_PLANNED, !chosen.others.is_empty())
+        .with(FROM_CACHE, from_cache)
+        .with(REPLANNED, replanned.clone().map_or(Value::Null, Value::from))
+        .with(SORT_SERVED, super::explain::sorted(&chosen.winner));
     backend.note_plan(report(Some(plan), chosen.planning_micros));
     let now = i64::try_from(backend.wall_ms()).unwrap_or(i64::MAX);
     {
@@ -1181,15 +1224,56 @@ pub(crate) fn planned_keyed<B: Backend + ?Sized>(
             g.index_usage.used(&ns, &name, now);
         }
     }
-    if let Some(mut learned) =
-        super::explain::learned(note.ns, read.parsed, &indexes, &chosen, (note.from, note.shape))
+    // A replanned read leaves no entry (measured).
+    if replanned.is_none()
+        && let Some(mut learned) = super::explain::learned(
+            note.ns,
+            read.parsed,
+            &indexes,
+            &chosen,
+            (note.from, note.shape),
+        )
     {
-        learned.catalog = super::plan_cache::catalog_signature(coll, &indexes);
+        learned.catalog = catalog;
         let now = i64::try_from(backend.now_ms()).unwrap_or(i64::MAX);
         super::lock(note.shared).plan_cache.learn(&ns, learned, now);
     }
     let keys = chosen.winner.index_keys;
     Ok(Some((chosen.winner.found.into_iter().map(|(_, d)| d).collect(), keys)))
+}
+
+/// What became of the plan the cache holds for a read.
+enum Cached {
+    /// It gave a batch or ended within [`EVICTION_RATIO`] times its entry's works: its run.
+    Kept(Box<Chosen>),
+    /// It did not: the works its entry expected and those it reached, after which RefDb plans
+    /// again (`replanReason`).
+    Replan(u64, u64),
+}
+
+/// The run of `access`, the plan the cache holds for `read`, whose entry's trial worked `works`,
+/// as RefDb's cached plan runs: a trial of [`EVICTION_RATIO`] times those works that keeps the
+/// plan when it gives a batch or ends.
+fn cached_run<B: Backend + ?Sized>(
+    backend: &mut B,
+    coll: &CollectionEntry,
+    indexes: &[PlanIndex],
+    read: &ReadPlan<'_>,
+    access: Access,
+    works: u64,
+) -> Result<Cached, CommandError> {
+    let started = backend.now_micros();
+    let limit = works.saturating_mul(EVICTION_RATIO).max(1);
+    let trial = run(backend, coll, indexes, read, access.clone(), Some(limit))?;
+    let winner = if trial.trial.eof {
+        trial
+    } else if trial.trial.advanced >= TRIAL_RESULTS {
+        run(backend, coll, indexes, read, access, None)?
+    } else {
+        return Ok(Cached::Replan(works, limit));
+    };
+    let planning_micros = backend.now_micros().saturating_sub(started);
+    Ok(Cached::Kept(Box::new(Chosen { winner, others: Vec::new(), planning_micros })))
 }
 
 /// The documents a plan found, in order, and the index key of each when the read wants them.

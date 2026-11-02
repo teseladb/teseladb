@@ -352,6 +352,7 @@ fn op(conn: i32) -> Op {
         roles: None,
         desc: None,
         progress: None,
+        metrics: None,
     }
 }
 

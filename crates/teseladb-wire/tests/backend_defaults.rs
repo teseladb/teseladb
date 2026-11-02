@@ -86,6 +86,10 @@ impl Backend for Bare {
         None
     }
 
+    fn op_plan(&mut self) -> Option<teseladb_bson::Document> {
+        None
+    }
+
     fn end_operation(&mut self) {}
     fn changes(
         &mut self,

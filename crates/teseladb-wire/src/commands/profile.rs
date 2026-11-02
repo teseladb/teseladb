@@ -264,6 +264,25 @@ fn read_parts(e: &Ended<'_>, returned: u64) -> ReadParts {
     parts
 }
 
+/// How the planner chose the plan `plan` of a read, as a `refnode` 9.0.4 writes it after
+/// `docsExamined` (measured 02-11-2026): `fromMultiPlanner` when plans competed, then
+/// `replanned` and `replanReason` when the cached plan was dropped, or `fromPlanCache` when the
+/// cached plan ran; a `getMore` repeats its cursor's.
+fn push_planner(d: &mut Document, plan: Option<&Document>) {
+    let Some(plan) = plan else { return };
+    let yes = |k: &str| plan.get(k) == Some(&Value::Boolean(true));
+    if yes(super::plan_exec::MULTI_PLANNED) {
+        d.push("fromMultiPlanner", true);
+    }
+    if let Some(Value::String(reason)) = plan.get(super::plan_exec::REPLANNED) {
+        d.push("replanned", true);
+        d.push("replanReason", reason.clone());
+    }
+    if yes(super::plan_exec::FROM_CACHE) {
+        d.push("fromPlanCache", true);
+    }
+}
+
 /// The counters of what `e` read: the planner's for a plan of an index, the operation's own
 /// reads otherwise. A write by `_id` reads its documents in their range while it writes them,
 /// by their key, which is their `_id`: each document it matched is one key and one document
@@ -325,6 +344,7 @@ fn describe(e: &Ended<'_>, now_ms: i64) -> Document {
         let (keys, docs) = examined(e);
         d.push("keysExamined", keys);
         d.push("docsExamined", docs);
+        push_planner(&mut d, e.report.plan.as_ref());
         // TeselaDB answers each `find` and `getMore` in one batch of its own.
         if matches!(e.op, "query" | "getmore") {
             d.push("nBatches", 1);

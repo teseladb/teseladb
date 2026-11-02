@@ -534,8 +534,20 @@ fn read_through_engine<B: Backend + ?Sized>(
 pub(crate) fn read_through_staged<B: Backend + ?Sized>(
     backend: &mut B,
     ns: &Namespace,
+    stages: (&[Document], Option<&Document>),
+    concern: ReadConcern,
+) -> Result<Result<(Vec<Document>, bool), CommandError>, CommandError> {
+    read_through_spilling(backend, ns, stages, concern, (super::Spill::default(), true))
+}
+
+/// [`read_through_staged`] with the node's store `spill` for stages past their memory, used
+/// when `allow_disk_use`.
+pub(crate) fn read_through_spilling<B: Backend + ?Sized>(
+    backend: &mut B,
+    ns: &Namespace,
     (extra, vars): (&[Document], Option<&Document>),
     concern: ReadConcern,
+    (spill, allow_disk_use): (super::Spill, bool),
 ) -> Result<Result<(Vec<Document>, bool), CommandError>, CommandError> {
     // `admin.system.users`, `.roles` and `.version` come from Group 0 (013 FR-030).
     if let Some(docs) = super::authz_collections::documents(backend, ns)? {
@@ -582,10 +594,10 @@ pub(crate) fn read_through_staged<B: Backend + ?Sized>(
         vars,
         concern,
         collation,
-        allow_disk_use: true,
+        allow_disk_use,
         node: None,
         searched: RefCell::new(Vec::new()),
-        spill: super::Spill::default(),
+        spill,
     };
     let sbe = pipeline.runs_in_sbe();
     Ok(pipeline.run(docs, &env).map(|out| (out, sbe)).map_err(from_mql))
@@ -616,6 +628,27 @@ pub(crate) fn run_stages<B: Backend + ?Sized>(
         spill: super::Spill::default(),
     };
     pipeline.run(docs, &env).map_err(from_mql)
+}
+
+/// The most bytes of a document a pipeline gives (`BSONObjectMaxInternalSize`).
+const MAX_OUTPUT_DOCUMENT: usize = 16 * 1024 * 1024 + 16 * 1024;
+
+/// The 10334 of a document a classic stage cannot write.
+fn check_output_size(d: &Document) -> Result<(), CommandError> {
+    let wide = teseladb_bson::Limits {
+        max_size: usize::MAX,
+        max_depth: teseladb_bson::Limits::default().max_depth,
+    };
+    let size = d.to_bytes_with(wide)?.len();
+    if size <= MAX_OUTPUT_DOCUMENT {
+        return Ok(());
+    }
+    Err(CommandError::new(
+        crate::error::BSON_OBJECT_TOO_LARGE,
+        format!(
+            "Serializing Document failed :: caused by :: Size {size} exceeds maximum {MAX_OUTPUT_DOCUMENT}"
+        ),
+    ))
 }
 
 /// The arguments of `aggregate` besides its pipeline.
@@ -838,6 +871,14 @@ pub fn aggregate<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
         pipeline.run_with_meta(docs, metas, &env, sbe).map_err(|e| executor(from_mql(e)))?;
     let vars = env.vars.clone();
     drop(env);
+    // A classic stage at the end writes each document it gives as BSON, which may not pass
+    // 16 MiB and 16 KiB; the slot-based engine hands its documents on as they are (measured on a
+    // `refnode` 9.0.4, 02-11-2026).
+    if pipeline.write().is_none() && !(sbe && pipeline.runs_in_sbe()) {
+        for d in &results {
+            check_output_size(d).map_err(executor)?;
+        }
+    }
     // `$out` and `$merge` write what reaches them and give no documents (010 FR-012).
     if let Some(w) = pipeline.write() {
         let docs = std::mem::take(&mut results);

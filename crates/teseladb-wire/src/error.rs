@@ -110,6 +110,16 @@ codes! {
     FAILED_TO_SATISFY_READ_PREFERENCE = 133, "FailedToSatisfyReadPreference";
     /// A `maxStalenessSeconds` under 90 (007 FR-013).
     MAX_STALENESS_OUT_OF_RANGE = 160, "MaxStalenessOutOfRange";
+    /// A sharding command on a collection without a shard key (018).
+    NAMESPACE_NOT_SHARDED = 118, "NamespaceNotSharded";
+    /// No resharding of that namespace is running (018 FR-002).
+    NO_SUCH_RESHARD_COLLECTION = 339, "NoSuchReshardCollection";
+    /// The resharding was aborted (018 FR-002).
+    RESHARD_COLLECTION_ABORTED = 341, "ReshardCollectionAborted";
+    /// A new shard key without the cardinality for the chunks asked (018 FR-002).
+    RESHARD_CARDINALITY = 4_952_606, "Location4952606";
+    /// A sample size that is not a positive integer (`numInitialChunks` of a resharding).
+    SAMPLE_SIZE = 28_747, "Location28747";
     /// A forwarded request timed out.
     NETWORK_TIMEOUT = 89, "NetworkTimeout";
     /// The node is shutting down.

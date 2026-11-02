@@ -1,7 +1,7 @@
 //! The stages that group documents (measured on a `refrouter` 9.0.4): `$group`, `$bucket`,
 //! `$bucketAuto` and `$sortByCount`. Groups are keyed by values that compare equal (`1` and
 //! `1.0` are one group, a missing `_id` is `null`) and come out in the order their first document
-//! came.
+//! came; a `$group` that wrote to disk gives them in the order of their keys.
 
 use std::collections::HashMap;
 
@@ -28,6 +28,62 @@ fn group_scope(env: &dyn Env, doc: &Document, sbe: bool) -> Scope {
     let mut s = env.scope(doc);
     s.sbe = sbe;
     s
+}
+
+/// The groups of `keyed` (each document with its key) with accumulators `outputs`, sorted by
+/// key through `store` in runs of at most `limit` bytes and built one at a time, in the order of
+/// their keys; each keeps the key of its first document (010 FR-010, T024).
+fn groups_on_disk(
+    outputs: &Outputs,
+    keyed: Vec<(Value, Document)>,
+    (env, sbe): (&dyn Env, bool),
+    (limit, store): (usize, &dyn super::spill::SpillStore),
+) -> Result<Vec<(Value, Vec<State>)>, MqlError> {
+    let collation = env.collation();
+    let col = collation.get();
+    let wrapped = keyed.into_iter().map(|(k, d)| super::spill::with_key(d, k));
+    // Each group with its canonical key, in the order of their keys.
+    let mut out: Vec<(Vec<u8>, Value, Vec<State>)> = Vec::new();
+    super::spill::external_sort(
+        wrapped.collect(),
+        |w| {
+            let k = super::spill::key_of(w);
+            Ok((canonical(&k, col), k))
+        },
+        // Keys of one group compare equal even where the collation still tells them apart
+        // (`a` and `A` at strength 2), so that the group keeps its documents' order.
+        |a: &(Vec<u8>, Value), b| match a.0 == b.0 {
+            true => Ok(std::cmp::Ordering::Equal),
+            false => order(&Some(a.1.clone()), &Some(b.1.clone()), col),
+        },
+        (limit, store),
+        |(canon, key), w| {
+            let doc = super::spill::without_key(w);
+            let scope = group_scope(env, &doc, sbe);
+            let states = match out.last_mut() {
+                Some((c, _, states)) if *c == canon => states,
+                _ => {
+                    out.push((canon, key, outputs.iter().map(|(_, a)| a.start()).collect()));
+                    let last = out.len() - 1;
+                    &mut out[last].2
+                }
+            };
+            for ((_, acc), st) in outputs.iter().zip(states.iter_mut()) {
+                acc.add(st, &doc, &scope)?;
+            }
+            Ok(())
+        },
+    )?;
+    Ok(out.into_iter().map(|(_, k, states)| (k, states)).collect())
+}
+
+/// The bytes a group holds for the value accumulator `acc` just took into `st`, when it collects
+/// values (`$push`, `$addToSet`).
+fn held_by(acc: &Accumulator, st: &State) -> usize {
+    match st {
+        State::Many(items) if acc.collects() => items.last().map_or(0, super::errors::value_size),
+        _ => 0,
+    }
 }
 
 /// The accumulators of a group's fields, in the specification's order.
@@ -76,7 +132,9 @@ impl Group {
         Ok(Group { id: Expr::parse_in(id, ctx)?, outputs: read_outputs(d, "_id", ctx)? })
     }
 
-    /// The groups of `docs`.
+    /// The groups of `docs`. With `allowDiskUse` and a store, a group whose keys and collected
+    /// values pass the stage's limit sorts its documents by key through the store and builds
+    /// one group at a time, in the order of their keys (010 FR-010, T024).
     pub fn run(
         &self,
         docs: Vec<Document>,
@@ -85,60 +143,109 @@ impl Group {
     ) -> Result<Vec<Document>, MqlError> {
         let collation = env.collation();
         let col = collation.get();
+        let limit = env.stage_memory_limit().min(env.operation_memory_limit());
+        let store = env.spill().filter(|_| env.allow_disk_use());
         let mut groups: Groups = Groups::default();
-        for doc in docs {
-            let scope = group_scope(env, &doc, sbe);
-            let key = self.id.eval(&doc, &scope)?.unwrap_or(Value::Null);
+        let mut held = 0usize;
+        for doc in &docs {
+            let scope = group_scope(env, doc, sbe);
+            let key = self.id.eval(doc, &scope)?.unwrap_or(Value::Null);
+            let before = groups.list.len();
+            let size = super::errors::value_size(&key);
             let states = groups.entry(key, &self.outputs, col)?;
             for ((_, acc), st) in self.outputs.iter().zip(states.iter_mut()) {
-                acc.add(st, &doc, &scope)?;
+                acc.add(st, doc, &scope)?;
+                held += held_by(acc, st);
+            }
+            if groups.list.len() > before {
+                held += size;
+            }
+            if let Some(store) = store.filter(|_| held > limit) {
+                drop(groups);
+                return self.run_sorted(docs, env, sbe, (limit, store));
             }
         }
+        drop(docs);
         let out = groups.finish("_id", &self.outputs, col, sbe)?;
-        let limit = super::errors::STAGE_MEMORY_LIMIT.min(env.operation_memory_limit());
-        self.check_memory(&out, env.allow_disk_use(), sbe, limit)?;
+        check_memory(&self.outputs, &out, env.allow_disk_use(), sbe, limit)?;
         Ok(out)
     }
 
-    /// The 292 of a group over `limit` bytes (the stage's limit or the operation's, the lower)
-    /// when the command does not allow writing to disk: the classic engine counts the groups'
-    /// keys and values, the slot-based one the arrays of `$push` and `$addToSet` (measured on a
-    /// `refrouter` 9.0.4).
-    fn check_memory(
+    /// The groups of `docs` sorted by key through `store` in runs of at most `limit` bytes,
+    /// built one at a time.
+    fn run_sorted(
         &self,
-        out: &[Document],
-        allow_disk_use: bool,
+        docs: Vec<Document>,
+        env: &dyn Env,
         sbe: bool,
-        limit: usize,
-    ) -> Result<(), MqlError> {
-        if allow_disk_use {
-            return Ok(());
+        disk: (usize, &dyn super::spill::SpillStore),
+    ) -> Result<Vec<Document>, MqlError> {
+        let mut keyed = Vec::with_capacity(docs.len());
+        for doc in docs {
+            let key = self.id.eval(&doc, &group_scope(env, &doc, sbe))?.unwrap_or(Value::Null);
+            keyed.push((key, doc));
         }
-        let held = match sbe {
-            false => super::errors::bytes_of(out),
-            true => out
-                .iter()
-                .map(|d| {
-                    self.outputs
-                        .iter()
-                        .filter(|(_, a)| a.collects())
-                        .filter_map(|(f, _)| d.get(f))
-                        .map(super::errors::value_size)
-                        .sum::<usize>()
-                })
-                .sum(),
-        };
-        if held <= limit {
-            return Ok(());
-        }
-        let name = if sbe { "group" } else { "$group" };
-        Err(error(
-            super::errors::NO_DISK_USE,
-            format!(
-                "Exceeded memory limit for {name}, but didn't allow external spilling; pass allowDiskUse:true to opt in"
-            ),
-        ))
+        let col = env.collation();
+        groups_on_disk(&self.outputs, keyed, (env, sbe), disk)?
+            .into_iter()
+            .map(|(k, states)| self.finished(k, states, col.get(), sbe))
+            .collect()
     }
+
+    /// The document of the group of key `key` with states `states`.
+    fn finished(
+        &self,
+        key: Value,
+        states: Vec<State>,
+        col: Option<&dyn teseladb_bson::Collator>,
+        sbe: bool,
+    ) -> Result<Document, MqlError> {
+        let mut d = Document::new().with("_id", key);
+        for ((name, acc), st) in self.outputs.iter().zip(states) {
+            d.push(name.clone(), acc.finish(st, col, sbe)?);
+        }
+        Ok(d)
+    }
+}
+
+/// The 292 of a group over `limit` bytes (the stage's limit or the operation's, the lower)
+/// when the command does not allow writing to disk: the classic engine counts the groups'
+/// keys and values, the slot-based one the arrays of `$push` and `$addToSet` (measured on a
+/// `refrouter` 9.0.4).
+fn check_memory(
+    outputs: &Outputs,
+    out: &[Document],
+    allow_disk_use: bool,
+    sbe: bool,
+    limit: usize,
+) -> Result<(), MqlError> {
+    if allow_disk_use {
+        return Ok(());
+    }
+    let held = match sbe {
+        false => super::errors::bytes_of(out),
+        true => out
+            .iter()
+            .map(|d| {
+                outputs
+                    .iter()
+                    .filter(|(_, a)| a.collects())
+                    .filter_map(|(f, _)| d.get(f))
+                    .map(super::errors::value_size)
+                    .sum::<usize>()
+            })
+            .sum(),
+    };
+    if held <= limit {
+        return Ok(());
+    }
+    let name = if sbe { "group" } else { "$group" };
+    Err(error(
+        super::errors::NO_DISK_USE,
+        format!(
+            "Exceeded memory limit for {name}, but didn't allow external spilling; pass allowDiskUse:true to opt in"
+        ),
+    ))
 }
 
 /// Groups in the order they appear, with their accumulator states.
@@ -445,7 +552,9 @@ impl Bucket {
         Ok(Bucket { group_by, boundaries, default, outputs })
     }
 
-    /// The buckets of `docs`, in boundary order, the default last.
+    /// The buckets of `docs`, in boundary order, the default last. Past the stage's memory it
+    /// fails with 292 without `allowDiskUse` and builds its buckets through the node's store
+    /// with it, as the `$group` it stands for (010 FR-010).
     pub fn run(
         &self,
         docs: Vec<Document>,
@@ -454,42 +563,43 @@ impl Bucket {
     ) -> Result<Vec<Document>, MqlError> {
         let collation = env.collation();
         let col = collation.get();
+        let limit = env.stage_memory_limit().min(env.operation_memory_limit());
         let n = self.boundaries.len() - 1;
         let mut states: Vec<Option<Vec<State>>> = vec![None; n + 1];
-        for doc in docs {
-            let scope = group_scope(env, &doc, sbe);
-            let v = self.group_by.eval(&doc, &scope)?.unwrap_or(Value::Null);
-            let mut slot = None;
-            if canonical_type(&v) == canonical_type(&self.boundaries[0]) {
-                for i in 0..n {
-                    let lo = order(&Some(self.boundaries[i].clone()), &Some(v.clone()), col)?;
-                    let hi = order(&Some(v.clone()), &Some(self.boundaries[i + 1].clone()), col)?;
-                    if lo != std::cmp::Ordering::Greater && hi == std::cmp::Ordering::Less {
-                        slot = Some(i);
-                        break;
-                    }
-                }
-            }
-            let i = match (slot, &self.default) {
-                (Some(i), _) => i,
-                (None, Some(_)) => n,
-                // The slot-based engine and the classic one fail with codes of their own.
-                (None, None) => {
-                    return Err(error(
-                        if sbe { BUCKET_NO_MATCH } else { BUCKET_NO_MATCH_CLASSIC },
-                        "$switch could not find a matching branch for an input, and no default was specified.",
-                    ));
-                }
-            };
+        let mut slots = Vec::with_capacity(docs.len());
+        let mut held = 0usize;
+        for doc in &docs {
+            let scope = group_scope(env, doc, sbe);
+            let i = self.slot(doc, &scope, col, sbe)?;
+            slots.push(i);
             let st = states[i]
                 .get_or_insert_with(|| self.outputs.iter().map(|(_, a)| a.start()).collect());
             for ((_, acc), s) in self.outputs.iter().zip(st.iter_mut()) {
-                acc.add(s, &doc, &scope)?;
+                acc.add(s, doc, &scope)?;
+                held += held_by(acc, s);
             }
         }
+        let store = env.spill().filter(|_| env.allow_disk_use() && held > limit);
+        let filled: Vec<(usize, Vec<State>)> = match store {
+            Some(store) => {
+                drop(states);
+                let keyed = slots
+                    .into_iter()
+                    .zip(docs)
+                    .map(|(i, d)| (Value::Int64(i64::try_from(i).unwrap_or(i64::MAX)), d))
+                    .collect();
+                groups_on_disk(&self.outputs, keyed, (env, sbe), (limit, store))?
+                    .into_iter()
+                    .map(|(k, st)| match k {
+                        Value::Int64(i) => (usize::try_from(i).unwrap_or(n), st),
+                        _ => (n, st),
+                    })
+                    .collect()
+            }
+            None => states.into_iter().enumerate().filter_map(|(i, st)| Some((i, st?))).collect(),
+        };
         let mut out = Vec::new();
-        for (i, st) in states.into_iter().enumerate() {
-            let Some(st) = st else { continue };
+        for (i, st) in filled {
             let id = if i < n {
                 self.boundaries[i].clone()
             } else {
@@ -501,7 +611,37 @@ impl Bucket {
             }
             out.push(d);
         }
+        check_memory(&self.outputs, &out, env.allow_disk_use(), sbe, limit)?;
         Ok(out)
+    }
+
+    /// The bucket of `doc`: its boundary's place, or one past the last for the default.
+    fn slot(
+        &self,
+        doc: &Document,
+        scope: &Scope,
+        col: Option<&dyn teseladb_bson::Collator>,
+        sbe: bool,
+    ) -> Result<usize, MqlError> {
+        let n = self.boundaries.len() - 1;
+        let v = self.group_by.eval(doc, scope)?.unwrap_or(Value::Null);
+        if canonical_type(&v) == canonical_type(&self.boundaries[0]) {
+            for i in 0..n {
+                let lo = order(&Some(self.boundaries[i].clone()), &Some(v.clone()), col)?;
+                let hi = order(&Some(v.clone()), &Some(self.boundaries[i + 1].clone()), col)?;
+                if lo != std::cmp::Ordering::Greater && hi == std::cmp::Ordering::Less {
+                    return Ok(i);
+                }
+            }
+        }
+        match &self.default {
+            Some(_) => Ok(n),
+            // The slot-based engine and the classic one fail with codes of their own.
+            None => Err(error(
+                if sbe { BUCKET_NO_MATCH } else { BUCKET_NO_MATCH_CLASSIC },
+                "$switch could not find a matching branch for an input, and no default was specified.",
+            )),
+        }
     }
 }
 
@@ -581,7 +721,7 @@ impl BucketAuto {
             }
             keyed.push((v, doc));
         }
-        crate::expr::sort_by_values(&mut keyed, col)?;
+        let keyed = sorted_by_values(keyed, env)?;
         let total = keyed.len();
         let size = ((total as f64) / (self.buckets as f64)).round().max(1.0) as usize;
         // Each bucket: its range of `keyed` and its upper boundary.
@@ -638,6 +778,35 @@ impl BucketAuto {
         }
         Ok(out)
     }
+}
+
+/// `keyed` sorted by its values, through the node's store when the command allows it and the
+/// documents pass the stage's limit (010 FR-010, T024).
+pub(super) fn sorted_by_values(
+    mut keyed: Vec<(Value, Document)>,
+    env: &dyn Env,
+) -> Result<Vec<(Value, Document)>, MqlError> {
+    let collation = env.collation();
+    let col = collation.get();
+    let limit = env.stage_memory_limit();
+    let held: usize = keyed.iter().map(|(_, d)| super::errors::document_size(d)).sum();
+    let Some(store) = env.spill().filter(|_| env.allow_disk_use() && held > limit) else {
+        crate::expr::sort_by_values(&mut keyed, col)?;
+        return Ok(keyed);
+    };
+    let wrapped = keyed.into_iter().map(|(v, d)| super::spill::with_key(d, v));
+    let mut out = Vec::new();
+    super::spill::external_sort(
+        wrapped.collect(),
+        |w| Ok(super::spill::key_of(w)),
+        |a: &Value, b| order(&Some(a.clone()), &Some(b.clone()), col),
+        (limit, store),
+        |v, w| {
+            out.push((v, super::spill::without_key(w)));
+            Ok(())
+        },
+    )?;
+    Ok(out)
 }
 
 /// The `buckets` of `$bucketAuto`: a positive 32-bit integer.
@@ -700,28 +869,14 @@ pub fn run_sort_by_count(
     env: &dyn Env,
     sbe: bool,
 ) -> Result<Vec<Document>, MqlError> {
-    let collation = env.collation();
-    let col = collation.get();
-    let mut index: HashMap<Vec<u8>, usize> = HashMap::new();
-    let mut list: Vec<(Value, i64)> = Vec::new();
-    for doc in docs {
-        let scope = group_scope(env, &doc, sbe);
-        let key = e.eval(&doc, &scope)?.unwrap_or(Value::Null);
-        let c = canonical(&key, col);
-        match index.get(&c) {
-            Some(i) => list[*i].1 += 1,
-            None => {
-                index.insert(c, list.len());
-                list.push((key, 1));
-            }
-        }
-    }
-    list.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
-    Ok(list
-        .into_iter()
-        .map(|(k, n)| {
-            let count = i32::try_from(n).map_or(Value::Int64(n), Value::Int32);
-            Document::new().with("_id", k).with("count", count)
-        })
-        .collect())
+    // `$sortByCount` is a `$group` that counts, then a `$sort` by the count (with its memory).
+    let group = Group { id: e.clone(), outputs: vec![("count".to_owned(), Accumulator::Count)] };
+    let mut out = group.run(docs, env, sbe)?;
+    let count = |d: &Document| match d.get("count") {
+        Some(Value::Int32(n)) => i64::from(*n),
+        Some(Value::Int64(n)) => *n,
+        _ => 0,
+    };
+    out.sort_by_key(|d| std::cmp::Reverse(count(d)));
+    Ok(out)
 }

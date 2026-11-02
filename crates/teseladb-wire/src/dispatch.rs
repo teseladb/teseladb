@@ -517,6 +517,7 @@ fn run_op<B: Backend + ?Sized>(
         roles: conn.auth.user.as_ref().and_then(|u| u.roles.clone()),
         desc: None,
         progress: None,
+        metrics: None,
     };
     let id = lock(shared).ops.begin(op);
     let started_micros = backend.now_micros();

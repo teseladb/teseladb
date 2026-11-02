@@ -4,6 +4,7 @@
 //! (`teseladb_exec::timeseries_read`).
 
 use std::collections::BTreeMap;
+use std::ops::Bound::{Excluded, Unbounded};
 
 use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_keys::KeyBuilder;
@@ -37,9 +38,11 @@ pub fn legacy_buckets(db: &str, coll: &str, command: &str) -> Result<(), Command
 }
 
 /// The bucket counters of a time series on this node since it started, as RefDb's bucket
-/// catalog counts them for `collStats` (measured on a `refrouter` 9.0.4): each write of a bucket is
-/// a commit, a new bucket is an insert and opens for a new meta value, after a full one (by count
-/// or size) or for a later or earlier window than the last one of its meta value.
+/// catalog counts them for `collStats` (measured on a `refnode` and a `refrouter` 9.0.4 on
+/// 02-11-2026): each write of a bucket is a commit, a new bucket is an insert; the catalog keeps
+/// the buckets of each meta value open by window, archives those later than a measurement that
+/// goes back in time, reopens an archived one from memory (a fetch) or one it looks up in the
+/// collection (a query), and closes those earlier than a measurement past them.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TsStats {
     /// `numBucketInserts`.
@@ -60,12 +63,21 @@ pub struct TsStats {
     pub kept_open_large: i64,
     /// `numBucketsArchivedDueToTimeBackward`.
     pub archived_time_backward: i64,
+    /// `numBucketsReopened`.
+    pub reopened: i64,
+    /// `numBucketsFetched`: reopened from the archive.
+    pub fetched: i64,
+    /// `numBucketsQueried`: reopened from a lookup in the collection.
+    pub queried: i64,
+    /// `numBucketQueriesFailed`: lookups that found no bucket.
+    pub queries_failed: i64,
     /// `numCommits`.
     pub commits: i64,
     /// `numMeasurementsCommitted`.
     pub measurements: i64,
-    /// The last window of each meta value (the five bytes of its hash in a bucket's `_id`).
-    last_window: BTreeMap<[u8; 5], [u8; 4]>,
+    /// The windows the catalog holds open and archived for each meta value (the five bytes of
+    /// its hash in a bucket's `_id`).
+    series: BTreeMap<[u8; 5], Series>,
     /// The open bucket of each window and meta value (the first nine bytes of a bucket's `_id`):
     /// where the next insert starts, as RefDb's bucket catalog keeps it in memory. A bucket
     /// closed for a field of another type stays behind it; without an entry (after a restart)
@@ -73,29 +85,126 @@ pub struct TsStats {
     open: BTreeMap<[u8; 9], u32>,
 }
 
+/// The windows of one meta value the catalog holds: those it writes to and those it archived.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Series {
+    open: std::collections::BTreeSet<[u8; 4]>,
+    archived: std::collections::BTreeSet<[u8; 4]>,
+}
+
+/// How the catalog finds the bucket of an insert ([`TsStats::route`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Route {
+    /// A bucket it holds open, or one it fetched from its archive.
+    Open,
+    /// A new bucket after it closed those of earlier windows.
+    New,
+    /// It looks one up in the collection; `fresh` for a meta value it never held.
+    Query {
+        /// The meta value is new to the catalog.
+        fresh: bool,
+    },
+}
+
+/// The counters of `collStats.timeseries` that this node never moves: memory thresholds,
+/// cache pressure, frozen buckets, compression and failed reopenings are RefDb's bucket
+/// catalog's own machinery (measured at zero on a `refnode` 9.0.4 on 02-11-2026).
+const ALWAYS_ZERO: [&str; 22] = [
+    "numBucketDocumentsTooLargeInsert",
+    "numBucketDocumentsTooLargeUpdate",
+    "numBucketFetchesFailed",
+    "numBucketReopeningsFailedDueToCompressionFailure",
+    "numBucketReopeningsFailedDueToEraMismatch",
+    "numBucketReopeningsFailedDueToHashCollision",
+    "numBucketReopeningsFailedDueToMalformedIdField",
+    "numBucketReopeningsFailedDueToMarkedClosed",
+    "numBucketReopeningsFailedDueToMarkedFrozen",
+    "numBucketReopeningsFailedDueToMinMaxCalculation",
+    "numBucketReopeningsFailedDueToSchemaGeneration",
+    "numBucketReopeningsFailedDueToUncompressedTimeColumn",
+    "numBucketReopeningsFailedDueToValidator",
+    "numBucketReopeningsFailedDueToWriteConflict",
+    "numBucketsArchivedDueToMemoryThreshold",
+    "numBucketsClosedDueToCachePressure",
+    "numBucketsClosedDueToMemoryThreshold",
+    "numBucketsClosedDueToReopening",
+    "numBucketsFrozen",
+    "numCompressedBucketsConvertedToUnsorted",
+    "numDuplicateBucketsReopened",
+    "numWaits",
+];
+
 impl TsStats {
-    /// The counters as `collStats.timeseries` writes them, after `bucketsNs`, `bucketCount` and
-    /// `avgBucketSize` (in alphabetical order, as a `refrouter` merges them).
-    pub fn fields(&self) -> Vec<(&'static str, i64)> {
+    /// The counters as `collStats.timeseries` writes them after `bucketsNs`, with `bucketCount`
+    /// and `avgBucketSize`, in alphabetical order as a `refrouter` merges them.
+    pub fn fields(&self, bucket_count: i64, avg_bucket_size: i64) -> Vec<(&'static str, i64)> {
         let avg = if self.commits > 0 { self.measurements / self.commits } else { 0 };
-        vec![
+        let active: usize = self.series.values().map(|s| s.open.len() + s.archived.len()).sum();
+        let mut out = vec![
+            ("avgBucketSize", avg_bucket_size),
             ("avgNumMeasurementsPerCommit", avg),
+            ("bucketCount", bucket_count),
+            ("numActiveBuckets", i64::try_from(active).unwrap_or(i64::MAX)),
             ("numBucketInserts", self.bucket_inserts),
+            ("numBucketQueriesFailed", self.queries_failed),
             ("numBucketUpdates", self.bucket_updates),
             ("numBucketsArchivedDueToTimeBackward", self.archived_time_backward),
             ("numBucketsClosedDueToCount", self.closed_by_count),
             ("numBucketsClosedDueToSchemaChange", self.closed_by_schema),
             ("numBucketsClosedDueToSize", self.closed_by_size),
             ("numBucketsClosedDueToTimeForward", self.closed_time_forward),
+            ("numBucketsFetched", self.fetched),
             ("numBucketsKeptOpenDueToLargeMeasurements", self.kept_open_large),
             ("numBucketsOpenedDueToMetadata", self.opened_for_meta),
+            ("numBucketsQueried", self.queried),
+            ("numBucketsReopened", self.reopened),
             ("numCommits", self.commits),
             ("numMeasurementsCommitted", self.measurements),
-        ]
+        ];
+        out.extend(ALWAYS_ZERO.iter().map(|k| (*k, 0)));
+        out.sort_by_key(|(k, _)| *k);
+        out
+    }
+
+    /// How the catalog finds the bucket for measurements of the window and meta value of bucket
+    /// `id`: a window it holds open takes them, and the later open ones are archived; an archived
+    /// window is fetched; past every open window those close and a new bucket opens; before one,
+    /// or with none, it looks a bucket up.
+    pub fn route(&mut self, id: [u8; 12]) -> Route {
+        let window: [u8; 4] = std::array::from_fn(|i| id[i]);
+        let meta: [u8; 5] = std::array::from_fn(|i| id[4 + i]);
+        let fresh = !self.series.contains_key(&meta);
+        let s = self.series.entry(meta).or_default();
+        if s.open.contains(&window) {
+            let later: Vec<[u8; 4]> =
+                s.open.range((Excluded(window), Unbounded)).copied().collect();
+            for w in later {
+                s.open.remove(&w);
+                s.archived.insert(w);
+                self.archived_time_backward += 1;
+            }
+            return Route::Open;
+        }
+        if s.archived.remove(&window) {
+            s.open.insert(window);
+            self.fetched += 1;
+            self.reopened += 1;
+            return Route::Open;
+        }
+        if s.open.iter().any(|w| *w > window) || s.open.is_empty() {
+            return Route::Query { fresh };
+        }
+        let closed = s.open.len();
+        s.open.clear();
+        self.closed_time_forward += i64::try_from(closed).unwrap_or(i64::MAX);
+        Route::New
     }
 
     /// Counts a commit of `taken` measurements into bucket `id` (number `n` of its window and
-    /// meta value), which `existed` or not; `closing` is why the bucket before it stopped.
+    /// meta value), which `existed` or not; `closing` is why the bucket before it stopped, and
+    /// `route` how the insert found its first bucket (on its first commit only). A lookup that
+    /// lands on a bucket reopens it; one that finds none failed; an open bucket that is gone
+    /// (its documents deleted) is looked up again, and fails.
     fn commit(&mut self, id: [u8; 12], n: u32, existed: bool, closing: Option<Full>, taken: i64) {
         self.open.insert(window_meta(id), n);
         self.commits += 1;
@@ -105,23 +214,46 @@ impl TsStats {
             return;
         }
         self.bucket_inserts += 1;
+        match closing {
+            Some(Full::Count) => self.closed_by_count += 1,
+            Some(Full::Size) => self.closed_by_size += 1,
+            // Counted when the bucket closed ([`TsStats::closed_for_schema`]).
+            Some(Full::Schema) | None => {}
+        }
+    }
+
+    /// Counts what the first commit of an insert that found its bucket by `route` says of the
+    /// lookup: the bucket `existed` or not, and whether the open one before it was `full`.
+    fn routed(&mut self, id: [u8; 12], route: Route, existed: bool, full: bool) {
         let window: [u8; 4] = std::array::from_fn(|i| id[i]);
         let meta: [u8; 5] = std::array::from_fn(|i| id[4 + i]);
-        match (n, closing, self.last_window.get(&meta)) {
-            (1.., Some(Full::Count), _) => self.closed_by_count += 1,
-            (1.., Some(Full::Size), _) => self.closed_by_size += 1,
-            // Counted when the bucket closed ([`TsStats::closed_for_schema`]).
-            (1.., Some(Full::Schema), _) => {}
-            (_, _, None) => self.opened_for_meta += 1,
-            (_, _, Some(last)) if window > *last => self.closed_time_forward += 1,
-            (_, _, Some(last)) if window < *last => self.archived_time_backward += 1,
-            _ => {}
+        match route {
+            Route::Query { .. } if existed || full => {
+                self.queried += 1;
+                self.reopened += 1;
+            }
+            Route::Query { fresh } => {
+                self.queries_failed += 1;
+                self.opened_for_meta += i64::from(fresh);
+            }
+            Route::Open if !existed && !full => self.queries_failed += 1,
+            Route::Open | Route::New => {}
         }
-        self.last_window.insert(meta, window);
+        let s = self.series.entry(meta).or_default();
+        // A lookup that gave no bucket to write to (none, or a full one): the later open
+        // windows go to the archive.
+        if matches!(route, Route::Query { .. }) && (full || !existed) {
+            let later: Vec<[u8; 4]> =
+                s.open.range((Excluded(window), Unbounded)).copied().collect();
+            for w in later {
+                s.open.remove(&w);
+                s.archived.insert(w);
+                self.archived_time_backward += 1;
+            }
+        }
+        s.open.insert(window);
     }
-}
 
-impl TsStats {
     /// Counts bucket `n` of window and meta value `key` closed because a measurement has a
     /// field of another type: the next insert starts after it.
     fn closed_for_schema(&mut self, key: [u8; 9], n: u32) {
@@ -217,6 +349,14 @@ pub fn write<B: Backend + ?Sized>(
     stmt: u32,
 ) -> Result<MutationResult, CommandError> {
     let mut total = MutationResult::default();
+    // In order, nothing after the first measurement the leader would refuse goes in: the batch
+    // stops at it, and every bucket's write holds only measurements before it, as RefDb
+    // retries an ordered batch with the measurements before its failure.
+    let cut = match ordered {
+        true => super::mutation::timeseries::first_refused(docs, spec, rules),
+        false => None,
+    };
+    let docs = cut.map_or(docs, |e| &docs[..=e]);
     // The measurements of each window and meta value, in order, with their place in `docs`.
     let mut groups: Vec<([u8; 12], Vec<(usize, Document)>)> = Vec::new();
     for (index, doc) in docs.iter().enumerate() {
@@ -237,12 +377,9 @@ pub fn write<B: Backend + ?Sized>(
         let first = spec
             .bucket_id(t, spec.meta_of(doc), 0)
             .map_err(|e| CommandError::new(INTERNAL_ERROR, format!("{e:?}")))?;
-        // In order, a run of measurements of one bucket goes together; the next bucket starts a
-        // new run, as an ordered insert takes nothing after its first failure.
-        let joined = match ordered {
-            true => groups.last_mut().filter(|(id, _)| *id == first),
-            false => groups.iter_mut().find(|(id, _)| *id == first),
-        };
+        // The measurements of one bucket go together, in order or not, as a `refnode` 9.0.4
+        // commits one write per bucket (measured on 02-11-2026).
+        let joined = groups.iter_mut().find(|(id, _)| *id == first);
         match joined {
             Some((_, g)) => g.push((index, doc.clone())),
             None => groups.push((first, vec![(index, doc.clone())])),
@@ -251,7 +388,8 @@ pub fn write<B: Backend + ?Sized>(
     let batch = Batch { coll, spec, ordered, rules, stmt };
     for (first, group) in groups {
         let failed = write_group(backend, shared, w, &batch, (&group, first), &mut total)?;
-        if failed && ordered {
+        // After a cut the other buckets hold measurements before the failure only.
+        if failed && ordered && cut.is_none() {
             break;
         }
     }
@@ -296,7 +434,11 @@ fn write_group<B: Backend + ?Sized>(
     let (t, meta) = (spec.time_of(&pending[0].1), spec.meta_of(&pending[0].1).cloned());
     let t = t.map_err(|e| CommandError::new(INTERNAL_ERROR, format!("{e:?}")))?;
     let key = window_meta(first);
-    let mut n = super::lock(shared).timeseries.entry(coll.id).or_default().open_bucket(key);
+    let (mut n, mut route) = {
+        let mut g = super::lock(shared);
+        let stats = g.timeseries.entry(coll.id).or_default();
+        (stats.open_bucket(key), Some(stats.route(first)))
+    };
     let mut closing = None;
     // Ordered, the failure that waits for the measurements before it to go in.
     let mut failure: Option<WriteError> = None;
@@ -333,6 +475,10 @@ fn write_group<B: Backend + ?Sized>(
             let existed = r.n_modified & BUCKET_EXISTED != 0;
             let mut g = super::lock(shared);
             let stats = g.timeseries.entry(coll.id).or_default();
+            if let Some(route) = route.take() {
+                let full = closing.is_some();
+                stats.routed(bucket, route, existed, full);
+            }
             stats.commit(bucket, n, existed, closing, r.n);
             if r.n_modified & KEPT_OPEN_LARGE != 0 {
                 stats.kept_open_large += 1;
