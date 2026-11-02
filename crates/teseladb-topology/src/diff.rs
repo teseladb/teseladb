@@ -233,3 +233,86 @@ pub fn update_entry(before: &Document, desc: &UpdateDescription) -> Document {
     }
     Document::new().with("$v", DIFF_VERSION).with("diff", root.to_document())
 }
+
+/// Why a diff does not apply.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DiffError {
+    /// A section or a subdiff RefDb does not write.
+    Section(String),
+    /// An array subdiff on a field that is not an array.
+    NotAnArray(String),
+}
+
+fn section(diff: &Document, name: &str) -> Result<Option<Document>, DiffError> {
+    match diff.get(name) {
+        None => Ok(None),
+        Some(Value::Document(d)) => Ok(Some(d.clone())),
+        Some(_) => Err(DiffError::Section(name.to_owned())),
+    }
+}
+
+/// `doc` changed by object diff `diff` (`d`, `u`, `i` and `s<field>`), as an update entry of
+/// `local.oplog.rs` describes it (`applyOps`, `refrestore --oplogReplay`).
+pub fn apply(doc: &Document, diff: &Document) -> Result<Document, DiffError> {
+    let mut out = doc.clone();
+    for (k, _) in section(diff, "d")?.unwrap_or_default().iter() {
+        out.remove(k);
+    }
+    for name in ["u", "i"] {
+        for (k, v) in section(diff, name)?.unwrap_or_default().iter() {
+            out.insert(k, v.clone());
+        }
+    }
+    for (k, v) in diff.iter() {
+        if matches!(k, "d" | "u" | "i") {
+            continue;
+        }
+        let (Some(field), Value::Document(sub)) = (k.strip_prefix('s'), v) else {
+            return Err(DiffError::Section(k.to_owned()));
+        };
+        let current = out.get(field).cloned();
+        let next = apply_sub(current.as_ref(), field, sub)?;
+        out.insert(field, next);
+    }
+    Ok(out)
+}
+
+/// Position `i` of `items`, padded with nulls up to it.
+fn slot(items: &mut Vec<Value>, i: usize) -> &mut Value {
+    if items.len() <= i {
+        items.resize(i + 1, Value::Null);
+    }
+    &mut items[i]
+}
+
+/// The value a subdiff leaves of field `field` (`current`).
+fn apply_sub(current: Option<&Value>, field: &str, sub: &Document) -> Result<Value, DiffError> {
+    if sub.get("a") != Some(&Value::Boolean(true)) {
+        let base = match current {
+            Some(Value::Document(d)) => d.clone(),
+            _ => Document::new(),
+        };
+        return apply(&base, sub).map(Value::Document);
+    }
+    let mut items = match current {
+        Some(Value::Array(a)) => a.clone(),
+        _ => return Err(DiffError::NotAnArray(field.to_owned())),
+    };
+    for (k, v) in sub.iter() {
+        let index =
+            |rest: &str| rest.parse::<usize>().map_err(|_| DiffError::Section(k.to_owned()));
+        let length = |n: i64| usize::try_from(n).unwrap_or(0);
+        match (k.split_at(1), v) {
+            (("a", ""), _) => {}
+            (("l", ""), Value::Int32(n)) => items.truncate(length(i64::from(*n))),
+            (("l", ""), Value::Int64(n)) => items.truncate(length(*n)),
+            (("u", pos), v) => *slot(&mut items, index(pos)?) = v.clone(),
+            (("s", pos), Value::Document(inner)) => {
+                let at = slot(&mut items, index(pos)?);
+                *at = apply_sub(Some(at), k, inner)?;
+            }
+            _ => return Err(DiffError::Section(k.to_owned())),
+        }
+    }
+    Ok(Value::Array(items))
+}

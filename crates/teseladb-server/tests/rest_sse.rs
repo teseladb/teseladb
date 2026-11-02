@@ -67,6 +67,8 @@ struct Stream {
     chunked: Vec<u8>,
     reader: Reader,
     events: Vec<Event>,
+    /// Whether the last chunk came: the server ended the stream.
+    ended: bool,
 }
 
 impl Stream {
@@ -92,6 +94,7 @@ impl Stream {
             chunked: Vec::new(),
             reader: Reader::default(),
             events: Vec::new(),
+            ended: false,
         };
         let end = Instant::now() + WAIT;
         while st.head.is_empty() {
@@ -132,6 +135,7 @@ impl Stream {
             }
             let data: Vec<u8> = self.chunked[line + 2..line + 2 + size].to_vec();
             self.chunked.drain(..line + 2 + size + 2);
+            self.ended |= size == 0;
             self.raw.extend_from_slice(&data);
             let evs = self.reader.feed(&data);
             self.events.extend(evs);
@@ -143,6 +147,15 @@ impl Stream {
         let end = Instant::now() + WAIT;
         while self.events.len() < n {
             assert!(Instant::now() < end, "{} of {n} events: {:?}", self.events.len(), self.events);
+            self.read();
+        }
+    }
+
+    /// Reads until the server ends the stream.
+    fn until_ended(&mut self) {
+        let end = Instant::now() + WAIT;
+        while !self.ended {
+            assert!(Instant::now() < end, "the stream did not end: {:?}", self.events);
             self.read();
         }
     }
@@ -226,5 +239,81 @@ fn a_dropped_stream_resumes_after_its_last_event_without_losing_or_repeating_a_c
     let (st, _) =
         call(at, "GET", "/v1/databases/app/collections/c/changeStream?fullDocument=bogus", "");
     assert_eq!(st, 400);
+    drop(node.stop());
+}
+
+/// A stream ends when its cursor does: dropping the collection sends `invalidate` and the last
+/// chunk; a change the stream's pipeline cannot process ends it with an `error` event; and a
+/// client that goes away has its cursor closed.
+#[test]
+fn a_stream_ends_with_its_cursor_or_with_an_error_event() {
+    let node = start();
+    let at = node.http_addrs()[0];
+    for name in ["gone", "bad"] {
+        let (st, d) =
+            call(at, "POST", "/v1/databases/app/collections", &format!("{{\"name\":\"{name}\"}}"));
+        assert_eq!(st, 200, "{d:?}");
+    }
+    let mut gone =
+        Stream::open(at, "GET", "/v1/databases/app/collections/gone/changeStream", "", None);
+    assert!(gone.head.starts_with("HTTP/1.1 200"), "{}", gone.head);
+    insert(at, "app", "gone", 0..1);
+    gone.until_events(1);
+    let (st, d) = call(at, "DELETE", "/v1/databases/app/collections/gone", "");
+    assert_eq!(st, 200, "{d:?}");
+    gone.until_ended();
+    let kinds: Vec<String> = gone
+        .events
+        .iter()
+        .map(|e| {
+            let d = extjson::parse(&e.data).unwrap();
+            match d.get("operationType") {
+                Some(Value::String(s)) => s.clone(),
+                other => format!("{other:?}"),
+            }
+        })
+        .collect();
+    assert_eq!(kinds.last().map(String::as_str), Some("invalidate"), "{kinds:?}");
+
+    let body = r#"{"pipeline":[{"$addFields":{"q":{"$divide":[1,"$fullDocument.zero"]}}}]}"#;
+    let mut bad =
+        Stream::open(at, "POST", "/v1/databases/app/collections/bad/changeStream", body, None);
+    assert!(bad.head.starts_with("HTTP/1.1 200"), "{}", bad.head);
+    let (st, d) = call(
+        at,
+        "POST",
+        "/v1/databases/app/collections/bad/insertOne",
+        r#"{"document":{"_id":1,"zero":0}}"#,
+    );
+    assert_eq!(st, 200, "{d:?}");
+    bad.until_ended();
+    let last = bad.events.last().expect("an event");
+    assert_eq!(last.event.as_deref(), Some("error"), "{:?}", bad.events);
+
+    // A client that goes away: the stream sees it after its wait and kills its cursor, which
+    // `serverStatus` counts.
+    let watch = "/v1/databases/app/collections/c/changeStream";
+    let (st, d) = call(at, "POST", "/v1/databases/app/collections", r#"{"name":"c"}"#);
+    assert_eq!(st, 200, "{d:?}");
+    let kills = |at| {
+        let (st, d) = call(at, "POST", "/v1/databases/admin/command", r#"{"serverStatus":1}"#);
+        assert_eq!(st, 200);
+        let path = ["metrics", "commands", "killCursors"];
+        let k = path.iter().try_fold(&d, |d, k| d.get(k).and_then(Value::as_document));
+        match k.and_then(|o| o.get("total")) {
+            Some(Value::Int32(n)) => i64::from(*n),
+            Some(Value::Int64(n)) => *n,
+            other => panic!("killCursors.total is {other:?}"),
+        }
+    };
+    let before = kills(at);
+    let open = Stream::open(at, "GET", watch, "", None);
+    assert!(open.head.starts_with("HTTP/1.1 200"), "{}", open.head);
+    drop(open);
+    let end = Instant::now() + WAIT;
+    while kills(at) == before {
+        assert!(Instant::now() < end, "the stream's cursor was never killed");
+        std::thread::sleep(Duration::from_millis(200));
+    }
     drop(node.stop());
 }

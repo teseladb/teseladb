@@ -142,15 +142,20 @@ impl Dictionary {
     }
 
     /// The Japanese dictionary.
-    pub fn japanese() -> Option<&'static Dictionary> {
-        static DICT: OnceLock<Option<Dictionary>> = OnceLock::new();
-        DICT.get_or_init(|| Dictionary::parse(include_bytes!("../../data/kuromoji.bin"))).as_ref()
+    pub fn japanese() -> &'static Dictionary {
+        static DICT: OnceLock<Dictionary> = OnceLock::new();
+        // The file is part of the crate and the tests read it whole (`loads_dictionaries`).
+        DICT.get_or_init(|| {
+            Dictionary::parse(include_bytes!("../../data/kuromoji.bin")).expect("kuromoji.bin")
+        })
     }
 
     /// The Korean dictionary.
-    pub fn korean() -> Option<&'static Dictionary> {
-        static DICT: OnceLock<Option<Dictionary>> = OnceLock::new();
-        DICT.get_or_init(|| Dictionary::parse(include_bytes!("../../data/nori.bin"))).as_ref()
+    pub fn korean() -> &'static Dictionary {
+        static DICT: OnceLock<Dictionary> = OnceLock::new();
+        DICT.get_or_init(|| {
+            Dictionary::parse(include_bytes!("../../data/nori.bin")).expect("nori.bin")
+        })
     }
 
     /// String `i`.
@@ -795,7 +800,7 @@ pub const KOREAN_STOP_TAGS: &[&str] = &[
 /// its surface) and range, with `None` for words whose tag is a stop tag (they keep their
 /// position).
 pub fn kuromoji(text: &[u16]) -> Vec<Option<MorphToken>> {
-    let Some(dict) = Dictionary::japanese() else { return Vec::new() };
+    let dict = Dictionary::japanese();
     Lattice::new(dict, text)
         .run_ja()
         .into_iter()
@@ -817,7 +822,7 @@ pub fn kuromoji(text: &[u16]) -> Vec<Option<MorphToken>> {
 /// split into their morphemes, each one's reading when it has one, and `None` for tokens whose
 /// tag is a stop tag.
 pub fn nori(text: &[u16]) -> Vec<Option<MorphToken>> {
-    let Some(dict) = Dictionary::korean() else { return Vec::new() };
+    let dict = Dictionary::korean();
     let mut out = Vec::new();
     for w in Lattice::new(dict, text).run_ko() {
         let tag = dict.string(w.entry.tag);
@@ -873,7 +878,7 @@ mod tests {
         let gz = include_bytes!("../../data/kuromoji.bin");
         let raw = gzip_decompress(gz);
         assert!(raw.is_some(), "inflate");
-        assert!(Dictionary::japanese().is_some());
-        assert!(Dictionary::korean().is_some());
+        assert!(Dictionary::japanese().string_count > 0);
+        assert!(Dictionary::korean().string_count > 0);
     }
 }

@@ -25,6 +25,7 @@ pub mod query;
 pub mod raftlog;
 pub mod read;
 pub mod reference;
+pub mod reshard;
 pub mod rest;
 pub mod search;
 pub mod security;
@@ -183,6 +184,7 @@ pub fn run(args: &Args) -> Result<Report, String> {
         "scram" => security::scram(args),
         "timeseries" => timeseries::run(args),
         "changestream-lag" => changestream::run(args),
+        "reshard" => reshard::run(args),
         "vector-search" | "vector" => vector::run(args),
         "search-term" | "search-multi" | "search-phrase" | "search-fuzzy" | "search-visibility" => {
             search::run(args)
@@ -194,7 +196,7 @@ pub fn run(args: &Args) -> Result<Report, String> {
         }
         other => Err(format!(
             "unknown scenario: {other} (available: raftlog, raftlog-recover, deflate, bson, js, keys, lsm, lsm-sustained, lsm-compression, \
-             write, read, failover, follower-read, group0-limits, split, add-node, rebalance, reference, wire, crud, rest, index-write, index-read, index-build-load, aggregate, sort, group-large, fle-query, txn, txn-readers, contention, tls-handshake, scram, timeseries, changestream-lag, search-term, search-multi, search-phrase, search-fuzzy, search-visibility, vector-search (vector), cores-curve, disk-usage, ycsb-a … ycsb-f)"
+             write, read, failover, follower-read, group0-limits, split, add-node, rebalance, reference, wire, crud, rest, index-write, index-read, index-build-load, aggregate, sort, group-large, fle-query, txn, txn-readers, contention, tls-handshake, scram, timeseries, changestream-lag, reshard, search-term, search-multi, search-phrase, search-fuzzy, search-visibility, vector-search (vector), cores-curve, disk-usage, ycsb-a … ycsb-f)"
         )),
     }
 }

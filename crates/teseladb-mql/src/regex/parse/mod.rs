@@ -6,6 +6,9 @@
 
 mod escape;
 
+/// A condition `(?(*` whose assertion PCRE2 does not know or that lacks its `:`.
+const ALPHA_ASSERTION: &str = "(*alpha_assertion) not recognized";
+
 use super::ast::{Assertion, Case, Condition, Node, RepeatKind, Verb};
 use super::compile::{Bsr, Newline, NotEmpty, Options};
 use super::unicode::{category_bit, in_categories};
@@ -445,13 +448,17 @@ impl Parser {
             'P' if self.eat('>') => Node::NamedCall(self.name(')')?),
             '&' => Node::NamedCall(self.name(')')?),
             'R' if self.eat(')') => Node::Call(0),
+            'R' => {
+                let msg = "(?R (recursive pattern call) must be followed by a closing parenthesis";
+                return Err(msg.into());
+            }
             '0'..='9' | '+' | '-'
                 if c != '-' || self.peek().is_some_and(|d| d.is_ascii_digit()) =>
             {
                 self.pos -= 1;
                 let group = self.group_number()?;
                 if !self.eat(')') {
-                    return Err("(?R (recursive pattern call) must be followed by )".into());
+                    return Err("missing closing parenthesis".into());
                 }
                 Node::Call(group)
             }
@@ -482,10 +489,11 @@ impl Parser {
         let digits = self.take_while(|c| c.is_ascii_digit());
         let n: usize = digits.parse().map_err(|_| "digit expected after (?+ or (?-".to_string())?;
         let group = match sign {
-            Some('+') if n > 0 => self.groups + n,
+            Some(_) if n == 0 => return Err(escape::RELATIVE_ZERO.into()),
+            Some('+') => self.groups + n,
             Some(_) => (self.groups + 1)
                 .checked_sub(n)
-                .filter(|g| *g > 0 && n > 0)
+                .filter(|g| *g > 0)
                 .ok_or("reference to non-existent subpattern")?,
             None => n,
         };
@@ -750,10 +758,10 @@ impl Parser {
                 "nla" | "negative_lookahead" => (false, true),
                 "plb" | "positive_lookbehind" => (true, false),
                 "nlb" | "negative_lookbehind" => (true, true),
-                _ => return Err("assertion expected after (?( or (?(?C)".into()),
+                _ => return Err(ALPHA_ASSERTION.into()),
             };
             if !self.eat(':') {
-                return Err("assertion expected after (?( or (?(?C)".into());
+                return Err(ALPHA_ASSERTION.into());
             }
             self.looks += 1;
             let node = self.group_body(*flags, |p, f| p.alternation(f))?;

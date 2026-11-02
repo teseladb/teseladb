@@ -1,0 +1,127 @@
+//! `applyOps` over the in-memory node of `common` (018 FR-011, T012), with the replies of a
+//! replica set of RefDb 9.0.4 (measured on 02-11-2026).
+
+mod common;
+
+use common::{Mem, doc, field};
+use teseladb_bson::{Document, Value};
+
+fn op(op: &str, ns: &str, o: Document) -> Value {
+    Value::Document(Document::new().with("op", op).with("ns", ns).with("o", o))
+}
+
+fn op2(op: &str, ns: &str, o: Document, o2: Document) -> Value {
+    Value::Document(Document::new().with("op", op).with("ns", ns).with("o", o).with("o2", o2))
+}
+
+fn apply(m: &mut Mem, ops: Vec<Value>) -> Document {
+    m.run("admin", doc(&[("applyOps", Value::Array(ops))]))
+}
+
+fn id(n: i32) -> Document {
+    Document::new().with("_id", n)
+}
+
+fn all(m: &mut Mem) -> Value {
+    let r = m.run("ap", doc(&[("find", Value::from("t")), ("sort", Value::Document(id(1)))]));
+    field(&r, "cursor.firstBatch").clone()
+}
+
+#[test]
+fn entries_apply_one_by_one() {
+    let mut m = Mem::new();
+    let create = Document::new().with("create", "t");
+    let r = apply(
+        &mut m,
+        vec![
+            op("c", "ap.$cmd", create),
+            op("i", "ap.t", id(1).with("a", 1)),
+            op("i", "ap.t", id(2).with("a", 2)),
+        ],
+    );
+    assert_eq!(r.get("applied"), Some(&Value::Int32(3)), "{r:?}");
+    assert_eq!(r.get("results"), Some(&Value::Array(vec![Value::Boolean(true); 3])));
+    let diff = Document::new()
+        .with("u", Document::new().with("a", 5))
+        .with("i", Document::new().with("b", 1));
+    let r = apply(
+        &mut m,
+        vec![
+            op2("u", "ap.t", Document::new().with("$v", 2).with("diff", diff), id(1)),
+            op("d", "ap.t", id(2)),
+            op("d", "ap.t", id(99)),
+            op("i", "ap.t", id(1).with("a", 5).with("b", 1).with("c", 3)),
+            op("n", "", Document::new().with("msg", "hi")),
+        ],
+    );
+    assert_eq!(r.get("applied"), Some(&Value::Int32(4)), "{r:?}");
+    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)));
+    let one = id(1).with("a", 5).with("b", 1).with("c", 3);
+    assert_eq!(all(&mut m), Value::Array(vec![Value::Document(one)]));
+    // A legacy update by operators and a replacement.
+    let set = Document::new().with("$set", Document::new().with("q", 1));
+    let r = apply(
+        &mut m,
+        vec![op2("u", "ap.t", set, id(1)), op2("u", "ap.t", id(1).with("z", 1), id(1))],
+    );
+    assert_eq!(r.get("applied"), Some(&Value::Int32(2)), "{r:?}");
+    assert_eq!(all(&mut m), Value::Array(vec![Value::Document(id(1).with("z", 1))]));
+}
+
+#[test]
+fn failures_as_refdb_gives_them() {
+    let mut m = Mem::new();
+    let r = m.run("ap", doc(&[("create", Value::from("t"))]));
+    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+    let diff = Document::new()
+        .with("$v", 2)
+        .with("diff", Document::new().with("u", Document::new().with("a", 1)));
+    let r = apply(
+        &mut m,
+        vec![op("i", "ap.t", id(60)), op2("u", "ap.t", diff, id(99)), op("i", "ap.t", id(61))],
+    );
+    assert_eq!(r.get("applied"), Some(&Value::Int32(3)), "{r:?}");
+    assert_eq!(
+        r.get("results"),
+        Some(&Value::Array(vec![
+            Value::Boolean(true),
+            Value::Boolean(false),
+            Value::Boolean(true)
+        ]))
+    );
+    assert_eq!(r.get("code"), Some(&Value::Int32(8)));
+    assert_eq!(r.get("errmsg"), Some(&Value::from("applyOps had one or more errors applying ops")));
+    let r = apply(&mut m, vec![op("x", "ap.t", id(1))]);
+    assert_eq!(
+        (r.get("code"), r.get("errmsg")),
+        (
+            Some(&Value::Int32(2)),
+            Some(&Value::from(
+                "Enumeration value 'x' for field 'OplogEntryBase.op' is not a valid value."
+            ))
+        )
+    );
+    let r = apply(&mut m, vec![op("i", "ap.nope", id(1))]);
+    assert_eq!(r.get("code"), Some(&Value::Int32(26)), "{r:?}");
+    assert_eq!(
+        r.get("errmsg"),
+        Some(&Value::from(
+            "cannot apply insert or update operation on a non-existent namespace ap.nope: { op: \"i\", ns: \"ap.nope\", o: { _id: 1 } }"
+        ))
+    );
+    let r = m.run("admin", doc(&[("applyOps", Value::Int32(1))]));
+    assert_eq!(
+        r.get("errmsg"),
+        Some(&Value::from("Wrong type for \"applyOps\". Expected a array, got a int."))
+    );
+    let r = m.run(
+        "admin",
+        doc(&[("applyOps", Value::Array(vec![])), ("preCondition", Value::Array(vec![]))]),
+    );
+    assert_eq!(r.get("code"), Some(&Value::Int32(6_711_600)), "{r:?}");
+    let r = apply(&mut m, vec![]);
+    assert_eq!(
+        (r.get("applied"), r.get("ok")),
+        (Some(&Value::Int32(0)), Some(&Value::Double(1.0)))
+    );
+}

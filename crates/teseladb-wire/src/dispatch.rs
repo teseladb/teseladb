@@ -280,7 +280,7 @@ fn command<B: Backend + ?Sized>(
         return Err(p.clone());
     }
     let name = req.name();
-    let not_found = || CommandError::new(COMMAND_NOT_FOUND, format!("no such cmd: {name}"));
+    let not_found = || not_found_in(node, name);
     let shared = cmds.as_ref().map(|(_, s)| *s);
     let tests = shared.is_some_and(|s| lock(s).failpoint.is_some());
     let known = is_hello(name)
@@ -423,7 +423,7 @@ fn run_command<B: Backend + ?Sized>(
     mark: Option<teseladb_txn::causal::ReadMark>,
 ) -> Result<Action, CommandError> {
     let name = req.name();
-    let not_found = || CommandError::new(COMMAND_NOT_FOUND, format!("no such cmd: {name}"));
+    let not_found = || not_found_in(node, name);
     if is_hello(name) {
         let before = conn.auth.user.clone();
         let greeted = conn.hello.metadata.is_some();
@@ -670,6 +670,18 @@ fn hello<B: Backend + ?Sized>(
             }
             Action::Reply(with_cluster_time(d, node))
         }
+    }
+}
+
+/// `CommandNotFound` of `name`: as a `refrouter` names it, or as a `refnode` in the replica set
+/// presentation (measured on 9.0.4).
+fn not_found_in(node: &NodeInfo, name: &str) -> CommandError {
+    match &node.replica_set {
+        Some(view) if name.starts_with(crate::commands::replset::CONFIG_SERVER_PREFIX) => {
+            crate::commands::replset::config_server_refusal(view, name, node)
+        }
+        Some(_) => CommandError::new(COMMAND_NOT_FOUND, format!("no such command: '{name}'")),
+        None => CommandError::new(COMMAND_NOT_FOUND, format!("no such cmd: {name}")),
     }
 }
 

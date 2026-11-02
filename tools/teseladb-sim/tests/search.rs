@@ -24,10 +24,11 @@ fn searches_answer_as_one_segment_over_the_committed_documents() {
 /// for a memtable flush that a core applying something every second never did); 3772 left a node
 /// asleep until its old clock would have passed the HLC bound, after NTP had set it right; 3796
 /// let a deposed leader whose clock ran ahead resolve a search index's read up to a mark it closed
-/// out of its lease, below a write of the new leader.
+/// out of its lease, below a write of the new leader; 986 left a leader without lease reads (a
+/// transfer to the damaged node that never finished) closing no mark until its next log write.
 #[test]
 fn the_seeds_that_found_defects_pass() {
-    for seed in [2361, 3772, 3796] {
+    for seed in [2361, 3772, 3796, 986] {
         let r = run_seed(&cfg("search", FaultPlan::Heavy), seed);
         assert_eq!(r.verdict, Verdict::Pass, "search seed {seed}");
     }

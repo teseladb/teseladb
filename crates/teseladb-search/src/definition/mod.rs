@@ -29,6 +29,38 @@ pub enum DefinitionError {
     },
     /// Names that are no analyzer, built-in or defined (`references non-existent analyzers`).
     MissingAnalyzers(Vec<String>),
+    /// What needs a service this engine does not have, as `refsearch` words it without one: the
+    /// models of the automatic embedding types (011 T052). `createSearchIndexes` refuses it with
+    /// `BadValue`; `updateSearchIndex` takes it and the index keeps serving its older version.
+    Unsupported(String),
+}
+
+/// The models of `models` refused because no embedding service is configured (measured on
+/// `refsearch` 1.70.6, `scratchpad/lane3p/m70.js` to `m72.js`).
+pub(crate) fn no_embedding_service(models: &[String]) -> DefinitionError {
+    DefinitionError::Unsupported(format!(
+        "The following embedding model(s) are not supported: {}. Supported models: none \
+         (embedding service not configured).",
+        models.join(", ")
+    ))
+}
+
+/// The `model` of an automatic embedding field `d` at `path`, after the options `required` that
+/// `refsearch` asks for in that order.
+pub(crate) fn embedding_model(
+    d: &Document,
+    path: &str,
+    required: &[&str],
+) -> Result<String, DefinitionError> {
+    let mut model = None;
+    for f in required {
+        let v = string_of(d, path, f)?
+            .ok_or_else(|| DefinitionError::shape(&join(path, f), "is required"))?;
+        if *f == "model" {
+            model = Some(v.to_owned());
+        }
+    }
+    Ok(model.unwrap_or_default())
 }
 
 impl DefinitionError {
@@ -47,6 +79,7 @@ impl DefinitionError {
             DefinitionError::MissingAnalyzers(names) => {
                 format!("references non-existent analyzers: {}", names.join(", "))
             }
+            DefinitionError::Unsupported(message) => message.clone(),
         }
     }
 }
@@ -133,14 +166,16 @@ pub enum StoredSource {
 impl StoredSource {
     fn parse(v: Option<&Value>, path: &str) -> Result<StoredSource, DefinitionError> {
         let list = |items: &Value, at: &str| -> Result<Vec<String>, DefinitionError> {
+            // Messages measured on `refsearch` 1.70.6 (`scratchpad/lane3p/m63.js`).
             let Value::Array(items) = items else {
-                return Err(DefinitionError::shape(at, "must be an array"));
+                return Err(DefinitionError::shape(at, "must be a array"));
             };
             items
                 .iter()
-                .map(|i| match i {
+                .enumerate()
+                .map(|(n, i)| match i {
                     Value::String(s) => Ok(s.clone()),
-                    _ => Err(DefinitionError::shape(at, "must be an array of strings")),
+                    _ => Err(DefinitionError::shape(&format!("{at}[{n}]"), "must be a string")),
                 })
                 .collect()
         };
@@ -150,7 +185,13 @@ impl StoredSource {
             Some(Value::Document(d)) => match (d.get("include"), d.get("exclude")) {
                 (Some(i), None) => Ok(StoredSource::Include(list(i, &join(path, "include"))?)),
                 (None, Some(e)) => Ok(StoredSource::Exclude(list(e, &join(path, "exclude"))?)),
-                _ => Err(DefinitionError::shape(path, "must have one of [include, exclude]")),
+                (Some(_), Some(_)) => Err(DefinitionError::shape(
+                    path,
+                    "only one of [include, exclude] may be present",
+                )),
+                (None, None) => {
+                    Err(DefinitionError::shape(path, "one of [include, exclude] must be present"))
+                }
             },
             Some(_) => Err(DefinitionError::shape(path, "must be a boolean or document")),
         }

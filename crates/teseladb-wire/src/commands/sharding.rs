@@ -535,3 +535,30 @@ pub fn config_entry(ns: &Namespace, c: &CollectionEntry, k: &ShardKey) -> Docume
     }
     d
 }
+
+/// The `config.collections` document of collection `ns`, if the cluster tracks it: with its
+/// shard key, or with key `{_id: 1}` and `unsplittable: true` once `moveCollection` or
+/// `unshardCollection` left it without one, the field where each command puts it (measured on a
+/// `refrouter` 9.0.4 on 02-11-2026).
+pub fn tracked_entry(
+    ns: &Namespace,
+    c: &CollectionEntry,
+) -> Result<Option<Document>, CommandError> {
+    if let Some(k) = shard_key_of(c)? {
+        return Ok(Some(config_entry(ns, c, &k)));
+    }
+    let Some(by) = super::move_collection::unsplittable_by(c) else { return Ok(None) };
+    let id = ShardKey { key: Document::new().with("_id", 1), unique: false };
+    let entry = config_entry(ns, c, &id);
+    if by != super::move_collection::MOVE_COLLECTION {
+        return Ok(Some(entry.with("unsplittable", true)));
+    }
+    let mut out = Document::new();
+    for (k, v) in entry.iter() {
+        if k == "lastmod" {
+            out.push("unsplittable", true);
+        }
+        out.push(k, v.clone());
+    }
+    Ok(Some(out))
+}

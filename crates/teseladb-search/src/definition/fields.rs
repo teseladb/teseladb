@@ -4,7 +4,8 @@
 use teseladb_bson::{Document, Value};
 
 use super::{
-    DefinitionError, StoredSource, bool_of, int_of, join, one_of, string_of, unrecognized,
+    DefinitionError, StoredSource, bool_of, embedding_model, int_of, join, no_embedding_service,
+    one_of, string_of, unrecognized,
 };
 
 /// The field types a mapping may name, in `refsearch`'s order.
@@ -385,6 +386,10 @@ impl FieldMapping {
                 FieldMapping::EmbeddedDocuments(Mapping::parse(d, path, Owner::Embedded)?)
             }
             "knnVector" => knn_vector(d, path)?,
+            "autoEmbedVector" => {
+                let model = embedding_model(d, path, &["model", "modality", "sourceField"])?;
+                return Err(no_embedding_service(&[model]));
+            }
             _ => FieldMapping::Other(d.clone()),
         })
     }

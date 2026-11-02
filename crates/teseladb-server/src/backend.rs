@@ -460,7 +460,10 @@ impl ServerBackend {
                 }
             };
             // A refusal before the proposal can always be tried again; after it, only a
-            // retryable write or a read.
+            // retryable write or a read. An intent's round waits by itself only when its owner
+            // is not known yet: once the intent is resolved, or the read knows its owner, it goes
+            // again at once.
+            let mut paused = false;
             let again = match &e {
                 RangeError::NotLeader { .. } | RangeError::Overloaded | RangeError::OutOfRange => {
                     true
@@ -470,6 +473,7 @@ impl ServerBackend {
                 RangeError::IntentConflict(owner) if plain_write => {
                     let owner = owner.clone();
                     self.wait_for_intent(&owner);
+                    paused = true;
                     true
                 }
                 // A read pushes the owner above its mark and reads again knowing it (008 FR-003).
@@ -484,6 +488,7 @@ impl ServerBackend {
                         }
                         None => thread::sleep(RETRY_PAUSE),
                     }
+                    paused = true;
                     true
                 }
                 _ => false,
@@ -509,7 +514,9 @@ impl ServerBackend {
                 let ctx = RangeContext { retryable_write: retryable, max_time_expired };
                 return Err(from_range(&e, ctx));
             }
-            thread::sleep(RETRY_PAUSE);
+            if !paused {
+                thread::sleep(RETRY_PAUSE);
+            }
         }
     }
 }
