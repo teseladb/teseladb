@@ -518,7 +518,7 @@ fn write(
             out.push_str(&if n.is_finite() { crate::number::to_string(*n) } else { "null".into() })
         }
         Val::Str(s) => out.push_str(&quote(s)),
-        Val::Undef | Val::Sym(_) => return Ok(false),
+        Val::Undef | Val::Hole | Val::Sym(_) => return Ok(false),
         Val::BigInt(_) => return it.type_error("BigInt value can't be serialized in JSON"),
         Val::Obj(o) => {
             if o.borrow().is_callable() {

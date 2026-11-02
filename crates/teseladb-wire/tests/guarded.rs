@@ -6,6 +6,10 @@ mod common;
 
 use common::{Mem, doc, field};
 use teseladb_bson::{Document, Value};
+use teseladb_meta::command::Group0Command;
+use teseladb_meta::security::Principal;
+use teseladb_range::intents::IntentOp;
+use teseladb_types::{GroupId, NodeId};
 use teseladb_wire::commands::write_block::WriteGate;
 use teseladb_wire::commands::{Backend, Shared, lock};
 use teseladb_wire::ops::{Guarded, Op, op_type};
@@ -63,24 +67,27 @@ fn a_live_operation_reaches_the_node_with_each_call() {
     assert!(g.search_indexes(1).unwrap().is_empty());
     let zero = teseladb_hlc::Hlc { physical: 0, logical: 0 };
     assert!(g.changes(b"a", b"b", zero).is_ok());
-    assert!(g.range_changes(b"a", b"b", zero).is_ok());
-    assert!(g.fence(b"a", b"b", true).is_ok() && g.fence(b"a", b"b", false).is_ok());
-    assert!(g.route_entries().unwrap().is_empty());
-    let order = teseladb_meta::command::Group0Command::SetLeaderHint {
-        group: teseladb_types::GroupId(1),
-        node: teseladb_types::NodeId(1),
-        term: 0,
-    };
-    assert!(g.range_order(order).is_ok());
-    let key = teseladb_meta::security::string_id("k");
-    assert_eq!(g.principal_by_id(teseladb_meta::security::Principal::ApiKey, &key).unwrap(), None);
     g.set_read_preference(None);
     let refused = g.request_shutdown().unwrap_err();
     assert_eq!(refused.errmsg, "this node cannot be shut down");
     g.log_slow_query(&Document::new().with("ns", "db.c"));
+    // A key the node keeps is found and its version read.
+    let put = IntentOp::Put { value_type: 3, value: b"v".to_vec() };
+    g.transact(zero, vec![(b"k".to_vec(), put)], None).unwrap();
+    let (_, found) = g.read_versions(&[b"k".to_vec(), b"none".to_vec()]).unwrap();
+    assert_eq!((found[0].is_some(), found[1].is_some()), (true, false));
+    assert!(g.fence(b"x", b"y", true).is_ok());
+    assert_eq!(g.range_changes(b"a", b"b", zero).unwrap().len(), 1);
+    assert!(g.route_entries().unwrap().is_empty());
+    let hint = Group0Command::SetLeaderHint { group: GroupId(1), node: NodeId(2), term: 0 };
+    assert!(g.range_order(hint).is_ok());
+    let id = teseladb_meta::security::string_id("absent");
+    assert_eq!(g.principal_by_id(Principal::ApiKey, &id).unwrap(), None);
+    assert!(g.txn_wait_clock(1));
     drop(g);
-    assert_eq!((m.database_marks, m.logged.len(), m.rotations.len()), (1, 2, 1));
     assert_eq!(m.range_orders.len(), 1);
+    assert_eq!(m.fences.len(), 1);
+    assert_eq!((m.database_marks, m.logged.len(), m.rotations.len()), (1, 2, 1));
     // The operation ended: the node takes the next command.
     let r = m.run("db", doc(&[("find", Value::from("c"))]));
     assert_eq!(field(&r, "ok"), &Value::Double(1.0));
@@ -102,4 +109,5 @@ fn an_operation_past_its_time_or_killed_stops_before_the_node() {
     let mut g = Guarded::new(&mut m, &shared, id);
     assert_eq!(g.tenant_named("x").unwrap_err().code.code, INTERRUPTED);
     assert!(!g.txn_pause());
+    assert!(!g.txn_wait_clock(1), "a killed operation waits for no clock");
 }

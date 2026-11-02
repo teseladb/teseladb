@@ -16,7 +16,7 @@ use super::{
     shape, value_at,
 };
 use crate::definition::{Dynamic, FieldMapping, Mapping, StoredSource};
-use crate::index::MemIndex;
+use crate::index::{MemIndex, Stats};
 
 /// How the scores of a document's elements make its score.
 const AGGREGATES: [&str; 4] = ["maximum", "mean", "minimum", "sum"];
@@ -312,6 +312,40 @@ fn elements_of(holders: &MemIndex, path: &str, inner: Mapping) -> Result<MemInde
     Ok(elements)
 }
 
+/// The statistics of the elements of every `embeddedDocuments` path of `index`'s definition,
+/// by path: each path's elements as a query builds them (FR-015). A path whose elements cannot
+/// be analyzed is left out; a query over it gives that error when it builds them.
+pub(crate) fn element_stats(index: &MemIndex) -> BTreeMap<String, Stats> {
+    let mut out = BTreeMap::new();
+    collect_element_stats(index, &index.definition().mappings, "", &mut out);
+    out
+}
+
+fn collect_element_stats(
+    holders: &MemIndex,
+    mapping: &Mapping,
+    prefix: &str,
+    out: &mut BTreeMap<String, Stats>,
+) {
+    for (name, types) in &mapping.fields {
+        let path = format!("{prefix}{name}");
+        for t in types {
+            match t {
+                FieldMapping::Document(inner) => {
+                    collect_element_stats(holders, inner, &format!("{path}."), out);
+                }
+                FieldMapping::EmbeddedDocuments(inner) => {
+                    if let Ok(elements) = elements_of(holders, &path, inner.clone()) {
+                        collect_element_stats(&elements, inner, &format!("{path}."), out);
+                        out.insert(path.clone(), elements.stats());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 /// The mapping of `path` when it is an `embeddedDocuments` field of `index`.
 fn embedded_mapping(index: &MemIndex, path: &str) -> Option<Mapping> {
     super::values::types_at(index.definition(), path).into_iter().find_map(|t| match t {
@@ -347,7 +381,9 @@ impl Embedded {
             let holders = built.last().map_or(top.index, |(_, i)| i);
             match embedded_mapping(holders, p) {
                 Some(m) => {
-                    let elements = elements_of(holders, p, m)?;
+                    let mut elements = elements_of(holders, p, m)?;
+                    // A segment's elements score with those of the whole index (FR-015).
+                    elements.set_global(chain[0].index.element_global(p).cloned());
                     built.push((p.to_owned(), elements));
                 }
                 None if end == self.path.len() => {

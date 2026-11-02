@@ -153,6 +153,18 @@ fn sorted_reads_with_batches_counts_and_distinct_values() {
         json(r#"{"distinct": "system.users", "key": "roles.role", "query": {"db": "app"}}"#),
     );
     assert_eq!(field(&r, "values"), &Value::Array(vec![s("r1"), s("read")]));
+    // A limit bounds the count; a collation compares as it says.
+    assert_eq!(count(&mut m, r#"{"count": "system.users", "limit": 1}"#), Value::Int32(1));
+    let r = m.run(
+        ADMIN,
+        json(r#"{"find": "system.users", "filter": {"user": "U1"}, "projection": {"_id": 1}, "collation": {"locale": "en", "strength": 1}}"#),
+    );
+    assert_eq!(first_batch(&r), [json(r#"{"_id": "app.u1"}"#)]);
+    let r = m.run(
+        ADMIN,
+        json(r#"{"distinct": "system.users", "key": "db", "query": {"user": "O1"}, "collation": {"locale": "en", "strength": 2}}"#),
+    );
+    assert_eq!(field(&r, "values"), &Value::Array(vec![s("other")]));
 }
 
 #[test]

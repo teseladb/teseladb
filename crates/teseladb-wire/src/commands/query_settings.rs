@@ -18,9 +18,10 @@ use super::admin::admin_only;
 use super::query_shape::{self, Shape};
 use super::{Backend, Ctx};
 use crate::error::{
-    BAD_VALUE, CommandError, IDL_FAILED_TO_PARSE, INVALID_INDEX_HINT, INVALID_INDEX_HINT_DB,
-    INVALID_LENGTH, QUERY_KNOB_NOT_SETTABLE, QUERY_REJECTED_BY_SETTINGS, QUERY_SETTINGS_DEFAULTS,
-    QUERY_SETTINGS_EMPTY, QUERY_SHAPE_UNSUPPORTED,
+    BAD_VALUE, CommandError, EXPECTED_OBJECT, FAILED_TO_PARSE, IDL_FAILED_TO_PARSE,
+    INVALID_INDEX_HINT, INVALID_INDEX_HINT_DB, INVALID_LENGTH, QUERY_KNOB_NOT_SETTABLE,
+    QUERY_REJECTED_BY_SETTINGS, QUERY_SETTINGS_DEFAULTS, QUERY_SETTINGS_EMPTY,
+    QUERY_SHAPE_UNSUPPORTED,
 };
 use crate::types::{wrong_type, wrong_types};
 
@@ -183,11 +184,9 @@ fn target(name: &str, v: &Value) -> Result<Target, CommandError> {
 }
 
 /// One index hint: `{ns: {db, coll}, allowedIndexes: [...]}`; `None` when it allows nothing.
-/// `at` names it in the error of a hint that is not an object: its position in the list.
-fn index_hint(v: &Value, at: usize) -> Result<Option<Document>, CommandError> {
+fn index_hint(v: &Value) -> Result<Option<Document>, CommandError> {
     let Value::Document(h) = v else {
-        let msg = format!("invalid parameter: expected an object ({at})");
-        return Err(CommandError::new(crate::error::EXPECTED_OBJECT, msg));
+        return Err(wrong_type("IndexHintSpec", v, "object"));
     };
     let Some(Value::Document(ns)) = h.get("ns") else {
         let msg = "BSON field 'IndexHintSpec.ns' is missing but a required field";
@@ -216,28 +215,32 @@ fn parse_settings(given: &Document) -> Result<Document, CommandError> {
     for key in ORDER {
         let Some(v) = given.get(key) else { continue };
         let x = match (*key, v) {
-            // A null `queryFramework` or `maxTimeMS` is no setting (measured).
+            // A null `queryFramework` or `maxTimeMS` is an absent one (measured).
             ("queryFramework" | "maxTimeMS", Value::Null) => continue,
             ("indexHints", Value::Array(items)) => {
                 let mut list = Vec::new();
-                for (at, i) in items.iter().enumerate() {
-                    if let Some(h) = index_hint(i, at)? {
+                for (n, i) in items.iter().enumerate() {
+                    if !matches!(i, Value::Document(_)) {
+                        let msg = format!("invalid parameter: expected an object ({n})");
+                        return Err(CommandError::new(EXPECTED_OBJECT, msg));
+                    }
+                    if let Some(h) = index_hint(i)? {
                         list.push(Value::Document(h));
                     }
                 }
                 Value::Array(list)
             }
             ("indexHints", one @ Value::Document(_)) => {
-                Value::Array(index_hint(one, 0)?.map(Value::Document).into_iter().collect())
+                Value::Array(index_hint(one)?.map(Value::Document).into_iter().collect())
             }
             ("indexHints", _) => {
                 let msg = "'indexHints' must be an object or an array";
-                return Err(CommandError::new(crate::error::FAILED_TO_PARSE, msg));
+                return Err(CommandError::new(FAILED_TO_PARSE, msg));
             }
             ("queryFramework", Value::String(f)) if FRAMEWORKS.contains(&f.as_str()) => v.clone(),
-            ("queryFramework", Value::String(got)) => {
+            ("queryFramework", Value::String(f)) => {
                 let msg = format!(
-                    "Invalid value for 'queryFramework': expected classic or sbe, but got {got}"
+                    "Invalid value for 'queryFramework': expected classic or sbe, but got {f}"
                 );
                 return Err(CommandError::new(BAD_VALUE, msg));
             }
@@ -274,25 +277,28 @@ fn parse_settings(given: &Document) -> Result<Document, CommandError> {
         }
         Some(_) => {
             let msg = "invalid parameter: expected an object (queryKnobs)";
-            return Err(CommandError::new(crate::error::EXPECTED_OBJECT, msg));
+            return Err(CommandError::new(EXPECTED_OBJECT, msg));
         }
     }
     Ok(out)
 }
 
-/// `maxTimeMS` of a setting: a number from 0 to 2³¹ − 1. A fractional double is truncated and
-/// a decimal rounded half to even (measured: 2.5 is 2 in both, decimal 3.5 is 4 and 2.7 is 3);
-/// either one out of the 64-bit range counts as its nearest end, and NaN as 0.
+/// The types `maxTimeMS` of a setting takes, in RefDb's order.
+const MAX_TIME_TYPES: [&str; 4] = ["decimal", "double", "int", "long"];
+
+/// `maxTimeMS` of a setting: a "safe" 64-bit integer (a double truncated and saturated, NaN
+/// as 0, a decimal rounded half to even; measured: 3.7 is 3, decimal 3.5 is 4) from 0 to the
+/// largest `int`.
 fn max_time(v: &Value) -> Result<i64, CommandError> {
     let n = match v {
         Value::Int32(n) => i64::from(*n),
         Value::Int64(n) => *n,
-        // `as` truncates, saturates at the ends of `i64` and makes NaN 0.
+        // `as` truncates toward zero, saturates and gives 0 for NaN.
         Value::Double(x) => *x as i64,
-        Value::Decimal128(_) => crate::types::number(v).map_or(0.0, f64::round_ties_even) as i64,
+        Value::Decimal128(d) => teseladb_mql::decimal_saturating(*d),
         other => {
             let path = "setQuerySettings.settings.maxTimeMS";
-            return Err(wrong_types(path, other, &["decimal", "double", "int", "long"]));
+            return Err(wrong_types(path, other, &MAX_TIME_TYPES));
         }
     };
     if n < 0 {
@@ -300,7 +306,8 @@ fn max_time(v: &Value) -> Result<i64, CommandError> {
         return Err(CommandError::new(BAD_VALUE, msg));
     }
     if n > i64::from(i32::MAX) {
-        let msg = format!("BSON field 'maxTimeMS' value must be <= 2147483647, actual value '{n}'");
+        let msg =
+            format!("BSON field 'maxTimeMS' value must be <= {}, actual value '{n}'", i32::MAX);
         return Err(CommandError::new(BAD_VALUE, msg));
     }
     Ok(n)

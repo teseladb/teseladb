@@ -404,9 +404,11 @@ impl TextIndex {
             return None;
         }
         let terms: Vec<String> = query.plain_terms.clone();
+        // One running sum over every string and term, as `refnode` adds (measured: 7.5 + 2.1 +
+        // 1.2 gives 10.799999999999999, and 10.8 when each string is added up first).
         let mut total = 0.0;
         for (s, weight, language) in &strings {
-            total += string_score(s, *weight, *language, &terms);
+            add_string_score(&mut total, s, *weight, *language, &terms);
         }
         Some(total)
     }
@@ -421,8 +423,9 @@ fn number(v: &Value) -> Option<f64> {
     }
 }
 
-/// The score of string `s` (weight `weight`, language `language`) for the distinct `terms`.
-fn string_score(s: &str, weight: f64, language: Language, terms: &[String]) -> f64 {
+/// Adds to `total` the score of string `s` (weight `weight`, language `language`) for the
+/// distinct `terms`, term by term.
+fn add_string_score(total: &mut f64, s: &str, weight: f64, language: Language, terms: &[String]) {
     let all = stems(s, language, Sensitivity::default());
     let n = all.len() as f64;
     let mut seen: BTreeMap<&str, (f64, f64)> = BTreeMap::new();
@@ -431,7 +434,6 @@ fn string_score(s: &str, weight: f64, language: Language, terms: &[String]) -> f
         e.0 += 0.5f64.powi(e.1 as i32);
         e.1 += 1.0;
     }
-    let mut total = 0.0;
     for (t, (freq, count)) in seen {
         if !terms.iter().any(|q| q == t) {
             continue;
@@ -442,9 +444,8 @@ fn string_score(s: &str, weight: f64, language: Language, terms: &[String]) -> f
         } else {
             1.0
         };
-        total += weight * freq * coeff * whole;
+        *total += weight * freq * coeff * whole;
     }
-    total
 }
 
 /// A `$text` query read for one language.

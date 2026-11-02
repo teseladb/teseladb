@@ -38,6 +38,10 @@ pub const BALANCER_STOP: &str = "balancerStop";
 pub const BALANCER_STATUS: &str = "balancerStatus";
 /// `configureCollectionBalancing`.
 pub const CONFIGURE_COLLECTION_BALANCING: &str = "configureCollectionBalancing";
+/// `setAllowMigrations`.
+pub const SET_ALLOW_MIGRATIONS: &str = "setAllowMigrations";
+/// The balancing field that blocks a collection's migrations (`setAllowMigrations: false`).
+const PERMIT_MIGRATIONS: &str = "permitMigrations";
 /// `balancerCollectionStatus`.
 pub const BALANCER_COLLECTION_STATUS: &str = "balancerCollectionStatus";
 /// The balancer's round, as `teseladb_meta::balancer::BALANCE_EVERY` (2 s).
@@ -336,4 +340,51 @@ pub fn max_chunk_bytes(options: &[u8]) -> Option<u64> {
 /// Whether a catalog change's description is a change of the balancing settings.
 pub fn is_balancing_change(description: &[u8]) -> bool {
     RawDoc::from_bytes(description).is_ok_and(|d| d.get(BALANCING_CHANGE).is_some())
+}
+
+/// `setAllowMigrations`: blocks or allows the migrations of a collection with a shard key;
+/// `config.collections` shows `permitMigrations: false` while they are blocked.
+pub fn set_allow_migrations<B: Backend + ?Sized>(
+    ctx: &mut Ctx<'_, B>,
+) -> Result<Document, CommandError> {
+    let name = SET_ALLOW_MIGRATIONS;
+    let text = match ctx.first() {
+        Value::String(s) => s.clone(),
+        v => return Err(wrong_type(&format!("{name}.{name}"), v, "string")),
+    };
+    let allow = match ctx.cmd.get("allowMigrations") {
+        Some(Value::Boolean(b)) => *b,
+        Some(v) => return Err(wrong_type(&format!("{name}.allowMigrations"), v, "bool")),
+        None => return Err(super::args::missing(name, "allowMigrations")),
+    };
+    admin::admin_only(name, ctx.db)?;
+    let ns =
+        parse_full(&text).filter(|n| !n.db.is_empty() && !n.coll.is_empty()).ok_or_else(|| {
+            CommandError::new(INVALID_NAMESPACE, format!("Invalid namespace specified: {text}"))
+        })?;
+    let unsharded = || {
+        CommandError::new(
+            NAMESPACE_NOT_SHARDED,
+            "Collection must be sharded so migrations can be blocked",
+        )
+    };
+    let coll = ctx.backend.collection(&ns)?.ok_or_else(unsharded)?;
+    let (options, mut balancing) = balancing_of(&coll)?.ok_or_else(unsharded)?;
+    let blocked = balancing.get(PERMIT_MIGRATIONS).is_some();
+    if blocked == !allow {
+        return Ok(ok());
+    }
+    match allow {
+        true => {
+            balancing.remove(PERMIT_MIGRATIONS);
+        }
+        false => balancing.push(PERMIT_MIGRATIONS, false),
+    }
+    write_balancing(ctx.backend, ns, options, balancing)?;
+    Ok(ok())
+}
+
+/// Whether the migrations of collection `c` are allowed (`setAllowMigrations`).
+pub fn migrations_allowed(c: &CollectionEntry) -> bool {
+    config_fields(&c.options).get(PERMIT_MIGRATIONS).is_none()
 }

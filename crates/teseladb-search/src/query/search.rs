@@ -314,7 +314,7 @@ fn parse_at(index: &MemIndex, spec: &Document, at: &str) -> Result<Operator, Sea
 fn parse(index: &MemIndex, name: &str, v: &Value, path: &str) -> Result<Operator, SearchError> {
     let Value::Document(d) = v else { return Err(shape(path, "must be a document")) };
     match name {
-        "text" => parse_text(index, d, path),
+        "text" => parse_text(index, d, path, FuzzyOf::Text),
         "phrase" => parse_phrase(index, d, path),
         "exists" => parse_exists(d, path),
         "wildcard" | "regex" => pattern::parse(index, name, d, path),
@@ -367,7 +367,12 @@ fn parse_has_ancestor(d: &Document, path: &str) -> Result<Operator, SearchError>
     Ok(Operator::HasAncestor { path: ancestor, operator, score, at: path.to_owned() })
 }
 
-fn parse_text(index: &MemIndex, d: &Document, path: &str) -> Result<Operator, SearchError> {
+fn parse_text(
+    index: &MemIndex,
+    d: &Document,
+    path: &str,
+    of: FuzzyOf,
+) -> Result<Operator, SearchError> {
     if let Some((k, _)) = d.iter().find(|(k, _)| {
         !["query", "path", "score", "synonyms", "fuzzy", "matchCriteria"].contains(k)
     }) {
@@ -379,7 +384,7 @@ fn parse_text(index: &MemIndex, d: &Document, path: &str) -> Result<Operator, Se
         None => return Err(shape(&at("path"), "is required")),
         Some(p) => paths(index, p, &at("path"))?,
     };
-    let fuzzy = parse_fuzzy(d.get("fuzzy"), &at("fuzzy"))?;
+    let fuzzy = parse_fuzzy(d.get("fuzzy"), &at("fuzzy"), of)?;
     let all = match d.get("matchCriteria") {
         None => false,
         Some(Value::String(m)) if m == "any" => false,
@@ -390,6 +395,15 @@ fn parse_text(index: &MemIndex, d: &Document, path: &str) -> Result<Operator, Se
         Some(_) => return Err(shape(&at("matchCriteria"), "must be a string")),
     };
     let score = parse_score(d.get("score"), &at("score"))?;
+    for p in &paths {
+        let mut tokens = 0;
+        for q in &query {
+            tokens += index.analyze(index.query_analyzer(p), q)?.len();
+        }
+        if tokens > MAX_CLAUSES {
+            return Err(too_many_clauses());
+        }
+    }
     if let Some(mapping) = synonym_mapping(index, d, path)? {
         if fuzzy.is_some() {
             return Err(shape(path, "at most one of [fuzzy, synonyms] may be present"));
@@ -427,23 +441,68 @@ fn synonym_mapping(
     }
 }
 
-/// The `fuzzy` option of `text` and `term`: RefLib's defaults of `FuzzyQuery` as `refsearch` uses
-/// them (two edits, no prefix, 50 expansions).
-fn parse_fuzzy(v: Option<&Value>, at: &str) -> Result<Option<Fuzzy>, SearchError> {
+/// The operators whose `fuzzy` option takes the bounds of `text` (`autocomplete` too) or of the
+/// deprecated `term` (measured on `refsearch` 1.70.6, `scratchpad/lane3p/m57.js` to `m59.js`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum FuzzyOf {
+    /// `text` and `autocomplete`: `maxEdits` 1 or 2, `maxExpansions` from 1 to 1 000.
+    Text,
+    /// `term`: `maxEdits` from 0 to 2, any positive `maxExpansions`.
+    Term,
+}
+
+/// The largest `maxExpansions` of `text` and `autocomplete`.
+const MAX_EXPANSIONS: i64 = 1000;
+
+/// The `fuzzy` option of `text`, `term` and `autocomplete`: RefLib's defaults of `FuzzyQuery` as
+/// `refsearch` uses them (two edits, no prefix, 50 expansions), within the bounds of `of`.
+pub(super) fn parse_fuzzy(
+    v: Option<&Value>,
+    at: &str,
+    of: FuzzyOf,
+) -> Result<Option<Fuzzy>, SearchError> {
     let Some(v) = v else { return Ok(None) };
     let Value::Document(d) = v else { return Err(shape(at, "must be a document")) };
-    let int = |k: &str, default: f32| match d.get(k) {
-        None => Ok(default),
-        Some(v) => number(v).ok_or_else(|| shape(&format!("{at}.{k}"), "must be a number")),
+    let int = |k: &str, default: i64| {
+        let field = format!("{at}.{k}");
+        match d.get(k) {
+            None => Ok(default),
+            Some(v) => match number(v) {
+                None => Err(shape(&field, "must be a integer")),
+                Some(f) if f.fract() != 0.0 => Err(shape(&field, "must be an integer")),
+                Some(f) => Ok(f as i64),
+            },
+        }
     };
-    let max_edits = int("maxEdits", 2.0)?;
-    if !(1.0..=2.0).contains(&max_edits) {
-        return Err(shape(&format!("{at}.maxEdits"), "must be within bounds [1..2]"));
+    let max_edits = int("maxEdits", 2)?;
+    let prefix_length = int("prefixLength", 0)?;
+    let max_expansions = int("maxExpansions", 50)?;
+    let field = |k: &str| format!("{at}.{k}");
+    match of {
+        FuzzyOf::Text if !(1..=2).contains(&max_edits) => {
+            return Err(shape(&field("maxEdits"), "must be either 1 or 2"));
+        }
+        FuzzyOf::Term if !(0..=2).contains(&max_edits) => {
+            return Err(shape(&field("maxEdits"), "must be within bounds [0..2]"));
+        }
+        _ => {}
+    }
+    if prefix_length < 0 {
+        return Err(shape(&field("prefixLength"), "cannot be negative"));
+    }
+    match of {
+        FuzzyOf::Text if !(1..=MAX_EXPANSIONS).contains(&max_expansions) => {
+            return Err(shape(&field("maxExpansions"), "must be within bounds [1..1000]"));
+        }
+        FuzzyOf::Term if max_expansions < 1 => {
+            return Err(shape(&field("maxExpansions"), "must be positive"));
+        }
+        _ => {}
     }
     Ok(Some(Fuzzy {
-        max_edits: max_edits as u8,
-        prefix_length: int("prefixLength", 0.0)?.max(0.0) as usize,
-        max_expansions: int("maxExpansions", 50.0)?.max(0.0) as usize,
+        max_edits: u8::try_from(max_edits).unwrap_or(2),
+        prefix_length: usize::try_from(prefix_length).unwrap_or(0),
+        max_expansions: usize::try_from(max_expansions).unwrap_or(1),
     }))
 }
 
@@ -464,7 +523,7 @@ fn parse_term(index: &MemIndex, d: &Document, path: &str) -> Result<Operator, Se
         for (k, v) in d.iter().filter(|(k, _)| !["prefix", "wildcard", "regex"].contains(k)) {
             text.push(k, v.clone());
         }
-        return parse_text(index, &text, path);
+        return parse_text(index, &text, path, FuzzyOf::Term);
     };
     let escape = |q: &str| -> String {
         let mut out: String = q
@@ -657,6 +716,19 @@ fn clauses(
     }
 }
 
+/// The most clauses one of RefLib's boolean queries takes in `refsearch`: the terms of a `text`
+/// query on one path, the clauses of a `compound` (measured, `scratchpad/lane3p/m60.js` to
+/// `m62.js`).
+const MAX_CLAUSES: usize = 1024;
+
+/// The error of a query with more than [`MAX_CLAUSES`] clauses in one boolean query.
+fn too_many_clauses() -> SearchError {
+    SearchError(format!(
+        "query has expanded into too many sub-queries internally: maxClauseCount is set to \
+         {MAX_CLAUSES}"
+    ))
+}
+
 fn parse_compound(index: &MemIndex, d: &Document, path: &str) -> Result<Operator, SearchError> {
     const CLAUSES: [&str; 4] = ["filter", "must", "mustNot", "should"];
     if let Some((k, _)) =
@@ -678,14 +750,13 @@ fn parse_compound(index: &MemIndex, d: &Document, path: &str) -> Result<Operator
             "minimumShouldMatch cannot be greater than number of should clauses",
         ));
     }
-    let op = Operator::Compound {
-        must: clauses(index, d, "must", path)?,
-        should,
-        filter: clauses(index, d, "filter", path)?,
-        must_not: clauses(index, d, "mustNot", path)?,
-        minimum,
-        weighted: false,
-    };
+    let must = clauses(index, d, "must", path)?;
+    let filter = clauses(index, d, "filter", path)?;
+    let must_not = clauses(index, d, "mustNot", path)?;
+    if must.len() + should.len() + filter.len() + must_not.len() > MAX_CLAUSES {
+        return Err(too_many_clauses());
+    }
+    let op = Operator::Compound { must, should, filter, must_not, minimum, weighted: false };
     // Measured: a boost weighs the clauses' terms; a constant or a function scores the whole.
     Ok(match parse_score(d.get("score"), &format!("{path}.score"))? {
         Score::Plain => op,
@@ -929,13 +1000,15 @@ fn eval_compound(
         if matched < required {
             continue;
         }
-        let mut score = 0.0f32;
+        // In doubles, as RefLib's boolean queries add (measured: 1 024 `should` clauses give
+        // `refsearch`'s 269.5703125, and 269.56622 added in 32 bits).
+        let mut score = 0.0f64;
         for clause in must.iter().chain(should.iter()) {
             if let Some(s) = clause.get(&doc) {
-                score += s;
+                score += f64::from(*s);
             }
         }
-        out.insert(doc, score);
+        out.insert(doc, score as f32);
     }
     Ok(out)
 }
@@ -943,6 +1016,7 @@ fn eval_compound(
 mod autocomplete;
 mod describe;
 mod embedded;
+pub(crate) use embedded::element_stats;
 mod explain;
 pub mod facet;
 mod function;

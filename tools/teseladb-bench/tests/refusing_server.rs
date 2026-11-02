@@ -11,6 +11,9 @@ use teseladb_wire::msg::{HEADER_LEN, Header, OpMsg};
 
 /// The commands the server refuses; it answers `ok: 1` to every other one.
 const REFUSED: [&str; 2] = ["find", "update"];
+/// The command that lists the search indexes, which a scenario waits on (011): the server lists
+/// one `READY` index, as a node does once it built it.
+const LIST_SEARCH_INDEXES: &str = "listSearchIndexes";
 const REFUSAL: &str = "refused by the test server";
 
 /// The label of a conflict a client repeats.
@@ -36,6 +39,8 @@ fn serve(mut s: TcpStream, transient: bool) {
             } else {
                 refusal
             }
+        } else if name == LIST_SEARCH_INDEXES {
+            ready_search_index()
         } else {
             Document::new().with("ok", 1.0)
         };
@@ -44,6 +49,17 @@ fn serve(mut s: TcpStream, transient: bool) {
             return;
         }
     }
+}
+
+/// The answer of `listSearchIndexes` with one index `default` built and queryable.
+fn ready_search_index() -> Document {
+    use teseladb_bson::Value;
+    let index =
+        Document::new().with("name", "default").with("status", "READY").with("queryable", true);
+    let cursor = Document::new()
+        .with("id", Value::Int64(0))
+        .with("firstBatch", vec![Value::Document(index)]);
+    Document::new().with("cursor", cursor).with("ok", 1.0)
 }
 
 /// A server on loopback that answers each connection in its own thread, for the whole test run.

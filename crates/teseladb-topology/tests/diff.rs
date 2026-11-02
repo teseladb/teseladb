@@ -126,3 +126,48 @@ fn numeric_field_names() {
     let expected = entry(Document::new().with("u", Document::new().with("a.b", 2)));
     assert_eq!(update_entry(&doc, &d), expected);
 }
+
+/// Applying a diff gives the document the update left, also through arrays and missing
+/// parents; a diff that does not read is refused.
+#[test]
+fn applying_a_diff() {
+    use teseladb_topology::diff::{DiffError, apply};
+    let d = desc(
+        vec![
+            ("a", Value::Int32(2)),
+            ("b.c", Value::Int32(9)),
+            ("b.e", Value::Int32(1)),
+            ("arr.1", Value::Int32(7)),
+            ("n", Value::Int32(5)),
+            ("q.w", Value::Int32(1)),
+        ],
+        &["s"],
+    );
+    let entry = update_entry(&before(), &d);
+    let Some(Value::Document(diff)) = entry.get("diff") else { panic!("{entry:?}") };
+    let after = apply(&before(), diff).expect("applies");
+    let expected = Document::new()
+        .with("_id", 1)
+        .with("a", 2)
+        .with("b", Document::new().with("c", 9).with("d", 2).with("e", 1))
+        .with("arr", ints(&[1, 7, 3, 4]))
+        .with("n", 5)
+        .with("q", Document::new().with("w", 1));
+    assert_eq!(after, expected);
+    // A shorter array, then a position past the end padded with nulls.
+    let diff =
+        Document::new().with("sarr", Document::new().with("a", true).with("l", 2).with("u3", 9));
+    let after = apply(&before(), &diff).expect("applies");
+    assert_eq!(
+        after.get("arr"),
+        Some(&Value::Array(vec![Value::Int32(1), Value::Int32(2), Value::Null, Value::Int32(9)]))
+    );
+    assert_eq!(
+        apply(&before(), &Document::new().with("x", 1)),
+        Err(DiffError::Section("x".into()))
+    );
+    let bad = Document::new().with("sa", Document::new().with("a", true));
+    assert_eq!(apply(&before(), &bad), Err(DiffError::NotAnArray("a".into())));
+    let bad = Document::new().with("u", 1);
+    assert_eq!(apply(&before(), &bad), Err(DiffError::Section("u".into())));
+}

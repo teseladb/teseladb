@@ -14,7 +14,7 @@ use teseladb_search::definition::{Definition, DefinitionError, VectorDefinition}
 use super::search_ops::{self, Served};
 use super::{Backend, Ctx, Shared, args, lock, names, views};
 use crate::error::{
-    COMMAND_FAILED, CommandError, INDEX_ALREADY_EXISTS, INDEX_NOT_FOUND, INTERNAL_ERROR,
+    BAD_VALUE, COMMAND_FAILED, CommandError, INDEX_ALREADY_EXISTS, INDEX_NOT_FOUND, INTERNAL_ERROR,
     INVALID_NAMESPACE, INVALID_OPTIONS, NAMESPACE_NOT_FOUND, UNKNOWN_ERROR,
 };
 
@@ -276,6 +276,7 @@ fn check_definition(kind: SearchIndexKind, def: &Document) -> Result<(), Definit
 fn definition_error(e: &DefinitionError, prefix: Option<&str>) -> CommandError {
     match (e, prefix) {
         (DefinitionError::Shape { .. }, Some(p)) => CommandError::new(UNKNOWN_ERROR, e.message(p)),
+        (DefinitionError::Unsupported(_), Some(p)) => CommandError::new(BAD_VALUE, e.message(p)),
         (_, p) => CommandError::new(COMMAND_FAILED, e.message(p.unwrap_or(""))),
     }
 }
@@ -543,7 +544,12 @@ pub fn update<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
     let which = pick(ctx.cmd, UPDATE_SEARCH_INDEX, USER_COMMAND, BOTH)?
         .ok_or_else(|| CommandError::new(INVALID_OPTIONS, "Must set either 'name' or 'id'."))?;
     let e = find(ctx.backend, &t, &which)?;
-    check_definition(e.kind, definition).map_err(|e| definition_error(&e, None))?;
+    // A definition that needs a service this node does not have is taken, and the index keeps
+    // serving its older version as `BUILDING` (measured, `scratchpad/lane3p/m74.js`).
+    match check_definition(e.kind, definition) {
+        Ok(()) | Err(DefinitionError::Unsupported(_)) => {}
+        Err(err) => return Err(definition_error(&err, None)),
+    }
     let at_ms = i64::try_from(ctx.backend.now_ms()).unwrap_or(i64::MAX);
     ctx.backend.index_write(IndexCommand::UpdateSearch {
         at_ms,

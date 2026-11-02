@@ -272,9 +272,24 @@ fn setup_with(
         key: pki.node_key.clone(),
     }));
     let issuer = provider(config);
+    // Client certificates of the cluster's CA asked for and optional, as with `--tlsCAFile` and
+    // `--tlsAllowConnectionsWithoutCertificates`: an API key, a token or a certificate log in.
     let port_tls = tls.then(|| {
-        let opts = teseladb_server::cli::TlsOpts::default();
-        teseladb_server::tls_port::build(&opts, &pki).unwrap()
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let name = format!("teseladb-oidc-ca-{}-{n}", std::process::id());
+        let dir = std::env::temp_dir().join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ca_file = dir.join("ca.pem");
+        std::fs::write(&ca_file, pki.ca.to_pem()).unwrap();
+        let opts = teseladb_server::cli::TlsOpts {
+            ca_file: Some(ca_file.clone()),
+            allow_without_certificates: true,
+            ..teseladb_server::cli::TlsOpts::default()
+        };
+        let port = teseladb_server::tls_port::build(&opts, &pki).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        port
     });
     let node = start(&issuer, pki.ca.clone(), http, port_tls);
     let port = node.http_addrs()[0].port();
@@ -397,6 +412,9 @@ fn without_a_known_uri_mcp_takes_no_token_until_the_resource_is_set() {
     assert_eq!(st, 404, "{d:?}");
     assert!(format!("{d:?}").contains("mcpOptions.resourceUri"), "{d:?}");
     assert_eq!(mcp_find(at, id, &root).0, 200);
+    // The stream of a session needs a credential too.
+    let stream = Request::new("GET", "/mcp").header("Mcp-Session-Id", "s");
+    assert_eq!(send(at, stream).status, 401);
 
     // With `mcpOptions.resourceUri`, tokens for it are taken, whatever `Host` the client sends.
     let fixed = "https://db.example.com/mcp";
@@ -461,6 +479,121 @@ fn mcp_over_stdio_reaches_a_node_over_tls() {
     assert!(code == 1 && msg.contains("--tlsCAFile"), "{msg}");
     let (code, msg) = fails(&McpOpts { uri: "ftp://h".to_owned(), ..o.clone() });
     assert!(code == 1 && msg.contains("https:// or http://"), "{msg}");
+    drop(node.stop());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A certificate of the CA the port trusts, for the subject `CN=<cn>`.
+fn client_identity(pki: &teseladb_server::pki::Pki, cn: &str, seed: u8) -> CertifiedKey {
+    use teseladb_x509::generate::{self, CertificateParams};
+    use teseladb_x509::{Name, oid};
+    let key = PrivateKey::generate_ec(teseladb_crypto::ec::NamedCurve::P256, &[seed; 40]).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap());
+    let name = Name::build(&[(oid::COMMON_NAME, cn)]);
+    let p = CertificateParams::node([seed; 16], name, now - 60, now + 86_400);
+    let cert = generate::issue(&p, &key.public_key(), &pki.ca, &pki.ca_key).unwrap();
+    CertifiedKey { chain: vec![cert], key }
+}
+
+/// `method target` over TLS to `localhost`, showing `identity` and sending Bearer `credential`
+/// when given, and the fields of `extra`: status and body.
+fn call_tls(
+    at: SocketAddr,
+    pki: &teseladb_server::pki::Pki,
+    identity: Option<CertifiedKey>,
+    credential: Option<&str>,
+    (method, target, body): (&str, &str, &str),
+    extra: &[(&str, &str)],
+) -> (u16, Document) {
+    let mut config = teseladb_tls::ClientConfig::new(Trust::anchors(vec![pki.ca.clone()]));
+    config.identity = identity;
+    let mut req = Request::new(method, target)
+        .header("Host", HOST)
+        .header("Connection", "close")
+        .body(body.as_bytes().to_vec());
+    if let Some(c) = credential {
+        req = req.header("Authorization", &format!("Bearer {c}"));
+    }
+    for (k, v) in extra {
+        req = req.header(k, v);
+    }
+    let sock = TcpStream::connect(at).unwrap();
+    sock.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+    let mut s = TlsStream::client(sock, Arc::new(config), "localhost").unwrap();
+    s.send(&req.encode().unwrap()).unwrap();
+    let bytes = s.recv_to_end().unwrap();
+    let mut reader = ResponseReader::new(Limits::default());
+    let r = match reader.feed(&bytes).unwrap() {
+        Some(r) => r,
+        None => reader.finish().unwrap(),
+    };
+    (r.status, extjson::parse(std::str::from_utf8(&r.body).unwrap()).unwrap_or_default())
+}
+
+/// 019 FR-015 with 013 FR-007: on an HTTP port with TLS, a request without `Authorization` that
+/// shows a client certificate of a trusted CA logs in as the REFDB-X509 user of `$external`
+/// named after its subject, for REST and for `teseladb mcp --tlsCertificateKeyFile`; a
+/// certificate whose subject is no user, and a request with neither, get `401`.
+#[test]
+fn a_client_certificate_logs_in_as_its_x509_user_on_the_http_port() {
+    use teseladb_server::mcp_stdio::{McpOpts, run};
+    let (node, at, _, pki) = setup_with(SocketAddr::from(([127, 0, 0, 1], 0)), true);
+    let root = root_key(&node);
+    let user = r#"{"createUser":"CN=mcp-agent","roles":[{"role":"readWrite","db":"app"}]}"#;
+    let create = ("POST", "/v1/databases/$external/command", user);
+    let (st, d) = call_tls(at, &pki, None, Some(&root), create, &[]);
+    assert_eq!(st, 200, "{d:?}");
+    let agent = client_identity(&pki, "mcp-agent", 21);
+    let nobody = client_identity(&pki, "nobody", 22);
+    let insert =
+        ("POST", "/v1/databases/app/collections/c/insertMany", r#"{"documents":[{"_id":1}]}"#);
+    // With an Idempotency-Key, which belongs to the certificate's user: the retry gets the same
+    // answer, and inserts nothing more.
+    let key = [("Idempotency-Key", "x509-insert-1")];
+    let (st, d) = call_tls(at, &pki, Some(agent.clone()), None, insert, &key);
+    assert_eq!(st, 200, "{d:?}");
+    let (st, again) = call_tls(at, &pki, Some(agent.clone()), None, insert, &key);
+    assert_eq!((st, &again), (200, &d));
+    let find = ("POST", "/v1/databases/app/collections/c/find", r#"{"filter":{}}"#);
+    assert_eq!(call_tls(at, &pki, Some(nobody.clone()), None, find, &[]).0, 401);
+    assert_eq!(call_tls(at, &pki, None, None, find, &[]).0, 401);
+
+    // `teseladb mcp` with the certificate and no API key.
+    let dir = std::env::temp_dir().join(format!("teseladb-mcp-x509-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let ca = dir.join("ca.pem");
+    std::fs::write(&ca, pki.ca.to_pem()).unwrap();
+    let pem_of = |name: &str, id: &CertifiedKey| {
+        let file = dir.join(name);
+        let key = teseladb_x509::pem::encode("PRIVATE KEY", &id.key.to_pkcs8());
+        std::fs::write(&file, format!("{}{key}", id.chain[0].to_pem())).unwrap();
+        file
+    };
+    let o = McpOpts {
+        uri: format!("https://localhost:{}", at.port()),
+        ca_file: Some(ca),
+        certificate_key_file: Some(pem_of("agent.pem", &agent)),
+    };
+    // A stateless call, as `mcp_request` sends it.
+    let id = node.node_id().0;
+    let meta = r#""_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}"#;
+    let input = format!(
+        r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{{meta},"name":"find","arguments":{{"connectionId":"{id}.stateless","database":"app","collection":"c","filter":{{}}}}}}}}"#
+    ) + "\n";
+    let relay = |o: &McpOpts| {
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let code = run(o, &mut input.as_bytes(), &mut out, &mut err, None);
+        let out = String::from_utf8(out).unwrap();
+        (code, out, String::from_utf8_lossy(&err).into_owned())
+    };
+    let (code, out, err) = relay(&o);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains(r#""queryResultsCount":1"#), "{out}");
+    let refused = McpOpts { certificate_key_file: Some(pem_of("nobody.pem", &nobody)), ..o };
+    let (code, _, err) = relay(&refused);
+    assert_eq!((code, err.as_str()), (1, "teseladb mcp: the node refused the credential (401)\n"));
     drop(node.stop());
     std::fs::remove_dir_all(&dir).unwrap();
 }

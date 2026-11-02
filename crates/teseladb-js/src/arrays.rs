@@ -57,23 +57,59 @@ pub fn install(it: &mut Interp, proto: &ObjRef) -> R<()> {
     Ok(())
 }
 
-/// The elements of `this` (an array, or an array-like object).
+/// The elements of `this` (an array, or an array-like object), a hole read from the prototypes.
 fn items(it: &mut Interp, this: &Val) -> R<Vec<Val>> {
-    if let Val::Obj(o) = this
-        && !has_own_elements(o)
-        && let Kind::Array(v) = &o.borrow().kind
-    {
-        return Ok(v.clone());
+    if let Some(mut v) = own_elements(this) {
+        for (i, x) in v.iter_mut().enumerate() {
+            if matches!(x, Val::Hole) {
+                *x = it.get(this, &key(i))?;
+            }
+        }
+        return Ok(v);
     }
-    let o = Val::Obj(it.object_of(this)?);
+    generic_elements(it, this, false)
+}
+
+/// The elements of `this` with its holes ([`Val::Hole`]): the indices an array-like object does
+/// not have are holes too (ECMA-262 §23.1.3: `forEach`, `map`, `filter`, `reduce`, `indexOf`…
+/// skip them; measured on a `refrouter` 9.0.4 on 02-11).
+fn elements(it: &mut Interp, this: &Val) -> R<Vec<Val>> {
+    match own_elements(this) {
+        Some(v) => Ok(v),
+        None => generic_elements(it, this, true),
+    }
+}
+
+/// The elements of an array whose elements have no attributes of their own.
+fn own_elements(this: &Val) -> Option<Vec<Val>> {
+    match this {
+        Val::Obj(o)
+            if !has_own_elements(o)
+                && let Kind::Array(v) = &o.borrow().kind =>
+        {
+            Some(v.clone())
+        }
+        _ => None,
+    }
+}
+
+/// The elements of `this` through `length` and `get` (and `has` when `holes`).
+fn generic_elements(it: &mut Interp, this: &Val, holes: bool) -> R<Vec<Val>> {
+    let obj = it.object_of(this)?;
+    let o = Val::Obj(obj.clone());
     let n = it.get(&o, "length")?;
     let n = it.number_of(&n)?;
     let n = if n.is_finite() && n > 0.0 { (n as usize).min(1 << 24) } else { 0 };
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
-        out.push(it.get(&o, &i.to_string())?);
+        let k = key(i);
+        out.push(if holes && !it.has(&obj, &k)? { Val::Hole } else { it.get(&o, &k)? });
     }
     Ok(out)
+}
+
+fn is_hole(v: &Val) -> bool {
+    matches!(v, Val::Hole)
 }
 
 /// Whether some element of the array `o` is an own property with attributes of its own (an
@@ -87,11 +123,10 @@ fn key(i: usize) -> String {
     i.to_string()
 }
 
-/// Writes `values` to the first elements of `o` with `set`.
+/// Writes `values` to the first elements of `o` with `set`, deleting where one is a hole.
 fn write_back(it: &mut Interp, o: &ObjRef, values: Vec<Val>) -> R<()> {
-    let target = Val::Obj(o.clone());
     for (i, x) in values.into_iter().enumerate() {
-        it.set(&target, &key(i), x)?;
+        write_back_at(it, o, i, x)?;
     }
     Ok(())
 }
@@ -106,8 +141,7 @@ fn remove_generic(it: &mut Interp, o: &ObjRef, first: bool) -> R {
     let out = it.get(&target, &key(if first { 0 } else { len - 1 }))?;
     if first {
         for k in 1..len {
-            let x = it.get(&target, &key(k))?;
-            it.set(&target, &key(k - 1), x)?;
+            move_element(it, o, k, k - 1)?;
         }
     }
     it.delete_key(o, &key(len - 1))?;
@@ -115,17 +149,36 @@ fn remove_generic(it: &mut Interp, o: &ObjRef, first: bool) -> R {
     Ok(out)
 }
 
-/// `reverse` through `get` and `set`, pair by pair from the ends.
+/// Element `i` of `o` with `get`, or a hole when `o` does not have it.
+fn read_at(it: &mut Interp, o: &ObjRef, i: usize) -> R {
+    if it.has(o, &key(i))? { it.get(&Val::Obj(o.clone()), &key(i)) } else { Ok(Val::Hole) }
+}
+
+/// Element `from` of `o` written to `to` (deleted there when `from` is a hole).
+fn move_element(it: &mut Interp, o: &ObjRef, from: usize, to: usize) -> R<()> {
+    let x = read_at(it, o, from)?;
+    write_back_at(it, o, to, x)
+}
+
+/// `reverse` through `get`, `set` and `delete`, pair by pair from the ends.
 fn reverse_generic(it: &mut Interp, o: &ObjRef) -> R<()> {
-    let target = Val::Obj(o.clone());
     let len = it.array_len(o);
     for lower in 0..len / 2 {
         let upper = len - 1 - lower;
-        let (a, b) = (it.get(&target, &key(lower))?, it.get(&target, &key(upper))?);
-        it.set(&target, &key(lower), b)?;
-        it.set(&target, &key(upper), a)?;
+        let (a, b) = (read_at(it, o, lower)?, read_at(it, o, upper)?);
+        write_back_at(it, o, lower, b)?;
+        write_back_at(it, o, upper, a)?;
     }
     Ok(())
+}
+
+/// Writes `x` to element `i` of `o` with `set`, or deletes it when `x` is a hole.
+fn write_back_at(it: &mut Interp, o: &ObjRef, i: usize, x: Val) -> R<()> {
+    if is_hole(&x) {
+        it.delete_key(o, &key(i))?;
+        return Ok(());
+    }
+    it.set(&Val::Obj(o.clone()), &key(i), x)
 }
 
 fn array_obj(it: &Interp, this: &Val) -> R<ObjRef> {
@@ -242,7 +295,10 @@ fn pop(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     if has_own_elements(&o) {
         return remove_generic(it, &o, false);
     }
-    Ok(with_vec(&o, Vec::pop).flatten().unwrap_or(Val::Undef))
+    let len = it.array_len(&o);
+    let out = with_vec(&o, Vec::pop).flatten().unwrap_or(Val::Undef);
+    // A hole reads from the prototypes, where the index is now looked up anyway.
+    if is_hole(&out) { it.get(this, &key(len - 1)) } else { Ok(out) }
 }
 
 fn shift(it: &mut Interp, this: &Val, _: &[Val]) -> R {
@@ -251,9 +307,14 @@ fn shift(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     if has_own_elements(&o) {
         return remove_generic(it, &o, true);
     }
-    Ok(with_vec(&o, |v| if v.is_empty() { None } else { Some(v.remove(0)) })
-        .flatten()
-        .unwrap_or(Val::Undef))
+    let first = with_vec(&o, |v| v.first().cloned()).flatten();
+    let out = match first {
+        Some(Val::Hole) => it.get(this, "0")?,
+        Some(x) => x,
+        None => return Ok(Val::Undef),
+    };
+    with_vec(&o, |v| v.remove(0));
+    Ok(out)
 }
 
 fn unshift(it: &mut Interp, this: &Val, a: &[Val]) -> R {
@@ -270,7 +331,7 @@ fn unshift(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 }
 
 fn slice(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    let v = items(it, this)?;
+    let v = elements(it, this)?;
     let start = relative(it, &arg(a, 0), v.len(), 0)?;
     let end = relative(it, &arg(a, 1), v.len(), v.len())?;
     let out = if start < end { v[start..end].to_vec() } else { Vec::new() };
@@ -342,7 +403,7 @@ pub(crate) fn species_result(
         return it.array(items);
     };
     let n = items.len();
-    for (i, x) in items.into_iter().enumerate() {
+    for (i, x) in items.into_iter().enumerate().filter(|(_, x)| !is_hole(x)) {
         crate::props::create_data_property_or_throw(it, &t, &key(i), x)?;
     }
     if with_length {
@@ -380,10 +441,12 @@ fn splice(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 
 fn concat(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let target = species(it, this, 0)?;
-    let mut out = items(it, this)?;
+    let mut out = elements(it, this)?;
     for x in a {
         match x {
-            Val::Obj(o) if matches!(o.borrow().kind, Kind::Array(_)) => out.extend(items(it, x)?),
+            Val::Obj(o) if matches!(o.borrow().kind, Kind::Array(_)) => {
+                out.extend(elements(it, x)?);
+            }
             _ => out.push(x.clone()),
         }
     }
@@ -393,22 +456,33 @@ fn concat(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 
 fn join(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let sep = if matches!(arg(a, 0), Val::Undef) { ",".into() } else { it.str_of(&arg(a, 0))? };
-    let v = items(it, this)?;
+    let v = items(it, this);
+    // SpiderMonkey writes a `length` it cannot convert without the parentheses (`{}`).
+    let v = it.rename_operand(v, |_, _, t| {
+        t.strip_prefix('(').and_then(|t| t.strip_suffix(')')).unwrap_or(t).to_string()
+    })?;
     let mut out = String::new();
     for (i, x) in v.iter().enumerate() {
         if i > 0 {
             out.push_str(&sep);
         }
         if !x.is_nullish() {
-            out.push_str(&it.str_of(x)?);
+            let r = it.str_of(x);
+            out.push_str(&it.operand_as_class(r)?);
         }
         it.charge(0)?;
     }
     it.string(out)
 }
 
+/// `join()`, or `Object.prototype.toString` when `join` is not a function (ECMA-262 §23.1.3.36).
 fn to_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
-    join(it, this, &[])
+    let o = Val::Obj(it.object_of(this)?);
+    let f = it.get(&o, "join")?;
+    if f.is_callable() {
+        return it.call(&f, &o, &[]);
+    }
+    crate::builtins::obj_to_string(it, &o, &[])
 }
 
 /// Each element's `toLocaleString()`, joined with commas.
@@ -421,6 +495,11 @@ fn to_locale_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
         }
         if !x.is_nullish() {
             let f = it.get(x, "toLocaleString")?;
+            if !f.is_callable() {
+                // The names of SpiderMonkey's self-hosted code (measured on a `refrouter` 9.0.4).
+                let which = if i == 0 { "firstElement" } else { "nextElement" };
+                return it.type_error(&format!("{which}.toLocaleString is not a function"));
+            }
             let s = it.call(&f, x, &[])?;
             out.push_str(&it.str_of(&s)?);
         }
@@ -441,7 +520,8 @@ fn reverse(it: &mut Interp, this: &Val, _: &[Val]) -> R {
 }
 
 fn index_of(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    let v = items(it, this)?;
+    // A hole is never strictly equal to anything.
+    let v = elements(it, this)?;
     let from = relative(it, &arg(a, 1), v.len(), 0)?;
     let x = arg(a, 0);
     Ok(Val::Num(
@@ -454,9 +534,25 @@ fn index_of(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 }
 
 fn last_index_of(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    let v = items(it, this)?;
+    let v = elements(it, this)?;
+    if v.is_empty() {
+        return Ok(Val::Num(-1.0));
+    }
+    // From `fromIndex` down (ECMA-262 §23.1.3.20): the last element by default.
+    let last = match a.get(1) {
+        None => v.len() - 1,
+        Some(n) => {
+            let n = it.number_of(n)?;
+            let n = if n.is_nan() { 0.0 } else { n.trunc() };
+            let n = if n < 0.0 { v.len() as f64 + n } else { n.min((v.len() - 1) as f64) };
+            if n < 0.0 {
+                return Ok(Val::Num(-1.0));
+            }
+            n as usize
+        }
+    };
     let x = arg(a, 0);
-    Ok(Val::Num(v.iter().rposition(|y| strict_eq(y, &x)).map_or(-1.0, |i| i as f64)))
+    Ok(Val::Num(v[..=last].iter().rposition(|y| strict_eq(y, &x)).map_or(-1.0, |i| i as f64)))
 }
 
 fn includes(it: &mut Interp, this: &Val, a: &[Val]) -> R {
@@ -466,32 +562,39 @@ fn includes(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     Ok(Val::Bool(v.iter().skip(from).any(|y| same_value_zero(y, &x))))
 }
 
-/// Calls `f(x, i, this)` on each element in order, stopping when `stop` says so.
+/// Calls `f(x, i, this)` on each element in order, stopping when `stop` says so; with `skip`
+/// the holes are left out (`forEach`, `map`…), otherwise they are read as `undefined` (`find`…).
+/// Gives the number of elements.
 fn each(
     it: &mut Interp,
     this: &Val,
     a: &[Val],
-    rev: bool,
+    (rev, skip): (bool, bool),
     mut on: impl FnMut(&Val, usize, &Val) -> bool,
-) -> R<()> {
+) -> R<usize> {
     let f = arg(a, 0);
     if !f.is_callable() {
-        return it.type_error(&format!("{} is not a function", it.show(&f)));
+        return Err(not_a_function(it, &f));
     }
-    let v = items(it, this)?;
+    let v = if skip { elements(it, this)? } else { items(it, this)? };
     let order: Vec<usize> = if rev { (0..v.len()).rev().collect() } else { (0..v.len()).collect() };
-    for i in order {
+    for i in order.into_iter().filter(|i| !is_hole(&v[*i])) {
         let r = it.call(&f, &arg(a, 1), &[v[i].clone(), Val::Num(i as f64), this.clone()])?;
         if on(&v[i], i, &r) {
             break;
         }
     }
-    Ok(())
+    Ok(v.len())
+}
+
+/// «f is not a function» for a callback, which the call names by its expression.
+fn not_a_function(it: &mut Interp, f: &Val) -> crate::interp::Ctrl {
+    it.operand_error(f, |t| format!("{t} is not a function"))
 }
 
 fn find(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let mut out = Val::Undef;
-    each(it, this, a, false, |x, _, r| {
+    each(it, this, a, (false, false), |x, _, r| {
         r.truthy() && {
             out = x.clone();
             true
@@ -502,7 +605,7 @@ fn find(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 
 fn find_index(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let mut out = -1.0;
-    each(it, this, a, false, |_, i, r| {
+    each(it, this, a, (false, false), |_, i, r| {
         r.truthy() && {
             out = i as f64;
             true
@@ -513,7 +616,7 @@ fn find_index(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 
 fn find_last(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let mut out = Val::Undef;
-    each(it, this, a, true, |x, _, r| {
+    each(it, this, a, (true, false), |x, _, r| {
         r.truthy() && {
             out = x.clone();
             true
@@ -524,7 +627,7 @@ fn find_last(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 
 fn find_last_index(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let mut out = -1.0;
-    each(it, this, a, true, |_, i, r| {
+    each(it, this, a, (true, false), |_, i, r| {
         r.truthy() && {
             out = i as f64;
             true
@@ -536,7 +639,7 @@ fn find_last_index(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 fn filter(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let target = species(it, this, 0)?;
     let mut out = Vec::new();
-    each(it, this, a, false, |x, _, r| {
+    each(it, this, a, (false, true), |x, _, r| {
         if r.truthy() {
             out.push(x.clone());
         }
@@ -556,25 +659,27 @@ fn map(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     species_result(it, target, out, false)
 }
 
-/// What the callback gives for each element.
+/// What the callback gives for each element, a hole where the element is one.
 fn mapped(it: &mut Interp, this: &Val, a: &[Val]) -> R<Vec<Val>> {
     let mut out = Vec::new();
-    each(it, this, a, false, |_, _, r| {
+    let n = each(it, this, a, (false, true), |_, i, r| {
+        out.resize(i, Val::Hole);
         out.push(r.clone());
         false
     })?;
+    out.resize(n, Val::Hole);
     it.charge(out.len() * PROP_BYTES)?;
     Ok(out)
 }
 
 fn for_each(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    each(it, this, a, false, |_, _, _| false)?;
+    each(it, this, a, (false, true), |_, _, _| false)?;
     Ok(Val::Undef)
 }
 
 fn some(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let mut out = false;
-    each(it, this, a, false, |_, _, r| {
+    each(it, this, a, (false, true), |_, _, r| {
         out = r.truthy();
         out
     })?;
@@ -583,7 +688,7 @@ fn some(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 
 fn every(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let mut out = true;
-    each(it, this, a, false, |_, _, r| {
+    each(it, this, a, (false, true), |_, _, r| {
         out = r.truthy();
         !out
     })?;
@@ -593,11 +698,12 @@ fn every(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 fn reduce_in(it: &mut Interp, this: &Val, a: &[Val], rev: bool) -> R {
     let f = arg(a, 0);
     if !f.is_callable() {
-        return it.type_error(&format!("{} is not a function", it.show(&f)));
+        return Err(not_a_function(it, &f));
     }
-    let v = items(it, this)?;
+    let v = elements(it, this)?;
     let mut order: Vec<usize> =
         if rev { (0..v.len()).rev().collect() } else { (0..v.len()).collect() };
+    order.retain(|i| !is_hole(&v[*i]));
     let mut acc = if a.len() >= 2 {
         a[1].clone()
     } else if order.is_empty() {
@@ -622,11 +728,13 @@ fn reduce_right(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 /// A stable merge sort with the comparator (or the string order), undefined last.
 fn sorted(it: &mut Interp, mut v: Vec<Val>, cmp: &Val) -> R<Vec<Val>> {
     let undef = v.iter().filter(|x| matches!(x, Val::Undef)).count();
-    v.retain(|x| !matches!(x, Val::Undef));
+    let holes = v.iter().filter(|x| is_hole(x)).count();
+    v.retain(|x| !matches!(x, Val::Undef | Val::Hole));
     let mut keys = Vec::new();
-    if !cmp.is_callable() {
+    if !cmp.is_callable() && v.len() > 1 {
         for x in &v {
-            keys.push(it.str_of(x)?);
+            let r = it.str_of(x);
+            keys.push(it.operand_as_class(r)?);
         }
     }
     let mut idx: Vec<usize> = (0..v.len()).collect();
@@ -675,6 +783,7 @@ fn sorted(it: &mut Interp, mut v: Vec<Val>, cmp: &Val) -> R<Vec<Val>> {
     }
     let mut out: Vec<Val> = idx.into_iter().map(|i| v[i].clone()).collect();
     out.extend(std::iter::repeat_n(Val::Undef, undef));
+    out.extend(std::iter::repeat_n(Val::Hole, holes));
     Ok(out)
 }
 
@@ -685,7 +794,7 @@ fn sort(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     if !matches!(cmp, Val::Undef) && !cmp.is_callable() {
         return it.type_error("invalid Array.prototype.sort argument");
     }
-    let v = items(it, this)?;
+    let v = elements(it, this)?;
     let s = sorted(it, v, &cmp)?;
     if has_own_elements(&o) {
         write_back(it, &o, s)?;
@@ -696,6 +805,10 @@ fn sort(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 }
 
 fn to_sorted(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    let cmp = arg(a, 0);
+    if !matches!(cmp, Val::Undef) && !cmp.is_callable() {
+        return it.type_error("non-function passed to Array.prototype.toSorted");
+    }
     let v = items(it, this)?;
     let s = sorted(it, v, &arg(a, 0))?;
     it.charge(s.len() * PROP_BYTES)?;
@@ -743,10 +856,10 @@ fn with(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 }
 
 fn flatten(it: &mut Interp, v: Vec<Val>, depth: f64, out: &mut Vec<Val>) -> R<()> {
-    for x in v {
+    for x in v.into_iter().filter(|x| !is_hole(x)) {
         let nested = matches!(&x, Val::Obj(o) if matches!(o.borrow().kind, Kind::Array(_)));
         if nested && depth >= 1.0 {
-            let inner = items(it, &x)?;
+            let inner = elements(it, &x)?;
             flatten(it, inner, depth - 1.0, out)?;
         } else {
             it.charge(PROP_BYTES)?;
@@ -757,8 +870,14 @@ fn flatten(it: &mut Interp, v: Vec<Val>, depth: f64, out: &mut Vec<Val>) -> R<()
 }
 
 fn flat(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    let depth = if matches!(arg(a, 0), Val::Undef) { 1.0 } else { it.number_of(&arg(a, 0))? };
-    let v = items(it, this)?;
+    let depth = match arg(a, 0) {
+        Val::Undef => 1.0,
+        d => {
+            let r = it.number_of(&d);
+            it.operand_as_source(r)?
+        }
+    };
+    let v = elements(it, this)?;
     let target = species(it, this, 0)?;
     let mut out = Vec::new();
     flatten(it, v, depth, &mut out)?;
@@ -773,13 +892,39 @@ fn flat_map(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     species_result(it, target, out, false)
 }
 
+/// A relative index argument, named as SpiderMonkey's self-hosted code names it when it cannot
+/// be converted (`can't convert start to number`; measured on a `refrouter` 9.0.4 on 02-11).
+fn named_relative(it: &mut Interp, v: &Val, len: usize, default: usize, name: &str) -> R<usize> {
+    let r = relative(it, v, len, default);
+    it.operand_named(r, name)
+}
+
+/// The `length` of an array-like `this` for `fill` and `copyWithin` (`O.length` in their
+/// messages).
+fn generic_len(it: &mut Interp, o: &Val) -> R<usize> {
+    let n = it.get(o, "length")?;
+    let n = it.number_of(&n);
+    let n = it.operand_named(n, "O.length")?;
+    Ok(if n.is_finite() && n > 0.0 { (n as usize).min(1 << 24) } else { 0 })
+}
+
 fn fill(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    let x = arg(a, 0);
+    if !matches!(this, Val::Obj(o) if matches!(o.borrow().kind, Kind::Array(_))) {
+        let o = Val::Obj(it.object_of(this)?);
+        let len = generic_len(it, &o)?;
+        let start = named_relative(it, &arg(a, 1), len, 0, "start")?;
+        let end = named_relative(it, &arg(a, 2), len, len, "end")?;
+        for i in start..end {
+            it.set(&o, &key(i), x.clone())?;
+        }
+        return Ok(o);
+    }
     let o = array_obj(it, this)?;
     check(it, &o, Change::Write)?;
     let len = it.array_len(&o);
-    let start = relative(it, &arg(a, 1), len, 0)?;
-    let end = relative(it, &arg(a, 2), len, len)?;
-    let x = arg(a, 0);
+    let start = named_relative(it, &arg(a, 1), len, 0, "start")?;
+    let end = named_relative(it, &arg(a, 2), len, len, "end")?;
     if has_own_elements(&o) {
         let target = Val::Obj(o.clone());
         for i in start..end {
@@ -796,13 +941,30 @@ fn fill(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 }
 
 fn copy_within(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    let o = array_obj(it, this)?;
-    check(it, &o, Change::Write)?;
-    let len = it.array_len(&o);
-    let target = relative(it, &arg(a, 0), len, 0)?;
-    let start = relative(it, &arg(a, 1), len, 0)?;
-    let end = relative(it, &arg(a, 2), len, len)?;
+    let generic = !matches!(this, Val::Obj(o) if matches!(o.borrow().kind, Kind::Array(_)));
+    let o = it.object_of(this)?;
+    let len = if generic {
+        generic_len(it, &Val::Obj(o.clone()))?
+    } else {
+        check(it, &o, Change::Write)?;
+        it.array_len(&o)
+    };
+    let target = named_relative(it, &arg(a, 0), len, 0, "target")?;
+    let start = named_relative(it, &arg(a, 1), len, 0, "start")?;
+    let end = named_relative(it, &arg(a, 2), len, len, "end")?;
     let count = end.saturating_sub(start).min(len - target);
+    if generic {
+        // Backwards when the ranges overlap that way (ECMA-262 §23.1.3.4).
+        let order: Vec<usize> = if start < target && target < start + count {
+            (0..count).rev().collect()
+        } else {
+            (0..count).collect()
+        };
+        for k in order {
+            move_element(it, &o, start + k, target + k)?;
+        }
+        return Ok(Val::Obj(o));
+    }
     with_vec(&o, |v| {
         let part: Vec<Val> = v[start..start + count].to_vec();
         v[target..target + count].clone_from_slice(&part);

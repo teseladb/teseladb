@@ -191,6 +191,13 @@ impl<B: Backend + ?Sized> WireEnv<'_, B> {
         Ok(super::lock(shared).query_stats.listed(i64::try_from(now).unwrap_or(i64::MAX)))
     }
 
+    /// `$listSampledQueries`: the queries this node sampled.
+    fn sampled_queries(&self, spec: &Document) -> Result<Vec<Document>, CommandError> {
+        let Some((shared, _)) = &self.node else { return Ok(Vec::new()) };
+        let now = self.backend.borrow_mut().now_ms();
+        Ok(super::query_analysis::listed(shared, spec, now))
+    }
+
     fn plan_cache_stats(&self) -> Result<Vec<Document>, CommandError> {
         let Some((shared, ns)) = &self.node else { return Ok(Vec::new()) };
         let mut backend = self.backend.borrow_mut();
@@ -491,6 +498,13 @@ impl<B: Backend + ?Sized> Env for WireEnv<'_, B> {
                 super::query_settings::listed(&mut **backend, spec).map_err(to_mql)
             }
             super::query_stats::STAGE => self.query_stats(spec).map_err(to_mql),
+            teseladb_exec::pipeline::LIST_SAMPLED_QUERIES => {
+                self.sampled_queries(spec).map_err(to_mql)
+            }
+            teseladb_exec::pipeline::SHARDED_DATA_DISTRIBUTION => {
+                let mut backend = self.backend.borrow_mut();
+                super::data_distribution::documents(&mut **backend).map_err(to_mql)
+            }
             other => Err(MqlError::new(
                 teseladb_mql::ErrorCode { code: BAD_VALUE.code, name: BAD_VALUE.name },
                 format!("{other} is not supported by this node"),
@@ -1052,6 +1066,10 @@ fn planned_read<B: Backend + ?Sized>(
     Ok(Some((docs, metas)))
 }
 
+/// RefDb's code for a `$shardedDataDistribution` outside `admin`.
+const SHARDED_DATA_DISTRIBUTION_NOT_ADMIN: crate::error::Code =
+    crate::error::Code { code: 6_789_102, name: "Location6789102" };
+
 /// The documents an index plan read and, when the pipeline reads `{$meta: "indexKey"}`, the
 /// metadata of each with its index key.
 type PlannedRead = (Vec<Document>, Option<Vec<Meta>>);
@@ -1094,6 +1112,22 @@ fn check_system_namespace(
             crate::error::CLUSTER_CATALOG_ON_COLLECTION,
             "The $listClusterCatalog stage must run on a database, not a collection.",
         )),
+        Some(teseladb_exec::pipeline::LIST_SAMPLED_QUERIES)
+            if on_collection || ns.db != super::admin::ADMIN_DB =>
+        {
+            Err(CommandError::new(
+                INVALID_NAMESPACE,
+                "$listSampledQueries must be run against the 'admin' database with {aggregate: 1}",
+            ))
+        }
+        Some(teseladb_exec::pipeline::SHARDED_DATA_DISTRIBUTION)
+            if ns.db != super::admin::ADMIN_DB =>
+        {
+            Err(CommandError::new(
+                SHARDED_DATA_DISTRIBUTION_NOT_ADMIN,
+                "The $shardedDataDistribution stage must be run on the admin database",
+            ))
+        }
         Some("$listSessions") if !sessions => Err(CommandError::new(
             INVALID_NAMESPACE,
             teseladb_exec::pipeline::LIST_SESSIONS_NAMESPACE,

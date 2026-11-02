@@ -112,6 +112,15 @@ fn own_fields(name: &str) -> Option<&'static [&'static str]> {
             "performVerification",
         ],
         "abortReshardCollection" => &["abortReshardCollection"],
+        "moveCollection" => {
+            &["moveCollection", "toShard", "oplogBatchApplierTaskCount", "performVerification"]
+        }
+        "unshardCollection" => {
+            &["unshardCollection", "toShard", "oplogBatchApplierTaskCount", "performVerification"]
+        }
+        "rewriteCollection" => {
+            &["rewriteCollection", "numInitialChunks", "zones", "performVerification", "demoMode"]
+        }
         "addShardToZone" => &["addShardToZone", "zone"],
         "updateZoneKeyRange" => &["updateZoneKeyRange", "min", "max", "zone"],
         "configureCollectionBalancing" => &[
