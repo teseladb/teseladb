@@ -168,6 +168,9 @@ pub struct Mem {
     pub ddl: teseladb_meta::ddl_log::DdlLog,
     /// How far behind the clock the ranges' resolved mark goes, in milliseconds (014 FR-004).
     pub resolved_lag_ms: u64,
+    /// The most a read of the changes goes past its start, in milliseconds, as a range's leader
+    /// answers (014 FR-004, `FEED_WINDOW_MS`); zero: no limit. A read from zero has none.
+    pub changes_window_ms: u64,
     /// Milliseconds the clock moves on at each pause of a waiting command.
     pub pause_ms: u64,
     /// The change stream reads of ranges so far (014 FR-012).
@@ -365,14 +368,24 @@ impl Backend for Mem {
         // asked for (in milliseconds, or one millisecond for the next `changes_lag` reads).
         let lag = u64::from(self.changes_lag > 0);
         self.changes_lag = self.changes_lag.saturating_sub(1);
-        let rows = self
+        let rows: Vec<teseladb_range::changes::Versioned> = self
             .history
             .iter()
             .filter(|v| v.ts > from && start <= v.key.as_slice() && v.key.as_slice() < end)
             .cloned()
             .collect();
         let behind = self.resolved_lag_ms.saturating_add(lag);
-        Ok((rows, Hlc { physical: self.now.saturating_sub(behind), logical: 0 }))
+        let resolved = Hlc { physical: self.now.saturating_sub(behind), logical: 0 };
+        let windowed = self.changes_window_ms > 0 && from.physical > 0;
+        let resolved = match windowed {
+            true => resolved.min(Hlc {
+                physical: from.physical.saturating_add(self.changes_window_ms),
+                logical: 0,
+            }),
+            false => resolved,
+        };
+        let rows = rows.into_iter().filter(|v| v.ts <= resolved).collect();
+        Ok((rows, resolved))
     }
 
     fn catalog_changes(

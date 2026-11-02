@@ -29,8 +29,21 @@ fn ycsb_and_reference_run_against_a_local_cluster() {
     let reference =
         metrics(&bench(&[&["--scenario", "reference", "--rate", "100"][..], &short[..]].concat()));
     assert!(reference.contains("100 op/s"), "{reference}");
-    for name in ["write.p50", "write.p99", "read.p50", "read.p99"] {
+    for name in ["write.p50", "write.p99", "read.p50", "read.p99", "search.p50", "search.p99"] {
         assert!(reference.contains(name), "{name}: {reference}");
+    }
+}
+
+/// `vector-search` (011 T032) on a few hundred vectors: the scenario of SC-005 with a million
+/// runs the same code.
+#[test]
+fn vector_search_runs_against_a_local_cluster() {
+    let short = ["--duration", "300ms", "--warmup", "0ms", "--format", "json"];
+    let out = metrics(&bench(
+        &[&["--scenario", "vector-search", "--records", "300"][..], &short[..]].concat(),
+    ));
+    for name in ["query.p50", "recall@10"] {
+        assert!(out.contains(name), "{name}: {out}");
     }
 }
 

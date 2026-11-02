@@ -23,6 +23,7 @@ pub mod reference;
 pub mod security;
 pub mod timeseries;
 pub mod txn;
+pub mod vector;
 pub mod wire;
 pub mod write;
 pub mod ycsb;
@@ -169,12 +170,13 @@ pub fn run(args: &Args) -> Result<Report, String> {
         "scram" => security::scram(args),
         "timeseries" => timeseries::run(args),
         "changestream-lag" => changestream::run(args),
+        "vector-search" => vector::run(args),
         s if s.len() == 6 && s.starts_with("ycsb-") => {
             ycsb::run(args, s.chars().last().unwrap_or('?'))
         }
         other => Err(format!(
             "unknown scenario: {other} (available: raftlog, raftlog-recover, deflate, bson, keys, lsm, lsm-sustained, lsm-compression, \
-             write, read, failover, follower-read, group0-limits, split, add-node, rebalance, reference, wire, crud, aggregate, sort, group-large, txn, txn-readers, contention, tls-handshake, scram, timeseries, changestream-lag, ycsb-a … ycsb-f)"
+             write, read, failover, follower-read, group0-limits, split, add-node, rebalance, reference, wire, crud, aggregate, sort, group-large, txn, txn-readers, contention, tls-handshake, scram, timeseries, changestream-lag, vector-search, ycsb-a … ycsb-f)"
         )),
     }
 }
