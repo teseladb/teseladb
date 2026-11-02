@@ -128,7 +128,7 @@ impl Embedded {
             _ => None,
         }) else {
             return Err(SearchError(format!(
-                "embeddedDocument path {} is not indexed as embeddedDocuments",
+                "embeddedDocument requires path '{}' to be indexed as 'embeddedDocuments'",
                 self.path
             )));
         };

@@ -1416,7 +1416,7 @@ fn embedded_document_errors_name_the_option() {
     );
     assert_eq!(
         err(Document::new().with("path", "t.x").with("operator", gato("t.x.n"))),
-        "embeddedDocument path t.x is not indexed as embeddedDocuments"
+        "embeddedDocument requires path 't.x' to be indexed as 'embeddedDocuments'"
     );
 }
 
@@ -1507,4 +1507,42 @@ fn autocomplete_grams_follow_the_field_options() {
     assert_eq!(folded.of("ab"), vec!["ab".to_owned()]);
     assert_eq!(folded.of("a"), Vec::<String>::new());
     assert_eq!(folded.term("a"), None);
+}
+
+#[test]
+fn vector_search_and_the_nested_operators_answer_as_refsearch() {
+    let idx = m3();
+    let v = |extra: Document| {
+        let mut d =
+            Document::new().with("path", "v").with("queryVector", arr(vec![1.into(), 0.into()]));
+        for (k, val) in extra.iter() {
+            d.push(k, val.clone());
+        }
+        found(&idx, &op("vectorSearch", d))
+    };
+    assert_eq!(
+        v(Document::new().with("limit", 2).with("numCandidates", 5)),
+        Ok(vec![(1, 1.0), (3, 0.5)])
+    );
+    assert_eq!(
+        v(Document::new().with("limit", 2).with("exact", true)),
+        Ok(vec![(1, 1.0), (3, 0.5)])
+    );
+    assert_eq!(v(Document::new()).unwrap_err(), "\"vectorSearch.limit\" is required");
+    assert_eq!(
+        v(Document::new().with("limit", 1).with("x", 1)).unwrap_err(),
+        "\"vectorSearch\" unrecognized field \"x\""
+    );
+    let no_vector = op("vectorSearch", Document::new().with("path", "v").with("limit", 1));
+    assert_eq!(found(&idx, &no_vector).unwrap_err(), "\"vectorSearch.queryVector\" is required");
+    let inner = Document::new()
+        .with("operator", op("text", Document::new().with("path", "t").with("query", "gato")));
+    for name in ["hasAncestor", "hasRoot"] {
+        assert_eq!(
+            found(&idx, &op(name, inner.clone())).unwrap_err(),
+            format!(
+                "{name} operator requires embeddedDocument.path, hasAncestor.ancestorPath, or returnScope.path to be set."
+            )
+        );
+    }
 }

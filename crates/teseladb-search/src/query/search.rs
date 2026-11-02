@@ -202,6 +202,11 @@ fn parse(index: &MemIndex, name: &str, v: &Value, path: &str) -> Result<Operator
         "equals" => values::parse_equals(d, path),
         "term" | "search" => parse_term(index, d, path),
         "knnBeta" => knn::parse(index, d, path),
+        "vectorSearch" => knn::parse_vector_search(index, d, path),
+        "hasAncestor" | "hasRoot" => Err(SearchError(format!(
+            "{name} operator requires embeddedDocument.path, hasAncestor.ancestorPath, or \
+             returnScope.path to be set."
+        ))),
         "span" => span::parse(d, path),
         "queryString" => query_string::parse(index, d, path),
         "moreLikeThis" => more_like::parse(index, d, path),
