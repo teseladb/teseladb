@@ -162,6 +162,8 @@ const DUMP_EVERY: usize = 1024;
 pub trait SegmentStore: Send + Sync + std::fmt::Debug {
     /// Replaces the file of index `id` with `bytes`, whole or not at all.
     fn put(&self, id: &[u8; 12], bytes: &[u8]) -> Result<(), String>;
+    /// The file of index `id`, if there is one.
+    fn get(&self, id: &[u8; 12]) -> Result<Option<Vec<u8>>, String>;
     /// Removes the file of index `id`; one that is not there is already removed.
     fn remove(&self, id: &[u8; 12]) -> Result<(), String>;
 }
@@ -177,6 +179,18 @@ pub struct SearchIndexes {
     received: BTreeMap<[u8; 12], Shipped>,
     /// Where the segments of each index are written as an immutable file (FR-012).
     store: Option<std::sync::Arc<dyn SegmentStore>>,
+    /// Bytes the segments may take in memory: the node's part for them (012 FR-013, D-105).
+    memory_limit: Option<u64>,
+    /// Indexes written out of memory to keep within it.
+    evicted: u64,
+}
+
+/// An estimate of the bytes `built`'s segments take.
+fn memory_of(built: &Built) -> u64 {
+    match &built.indexer {
+        Segments::Search(ix) => ix.memory_bytes(),
+        Segments::Vector(_) => 0,
+    }
 }
 
 /// The segment files of a `search` index as one node sends them to a new replica with the SST
@@ -224,6 +238,46 @@ impl SearchIndexes {
         self.failed.remove(id);
         self.received.remove(id);
         self.store.as_ref().map_or(Ok(()), |store| store.remove(id))
+    }
+
+    /// Keeps the segments in memory within `bytes` (012 FR-013): past it, the indexes not in use
+    /// are written to their file and leave memory, the largest first, until the rest fit; a query
+    /// that needs one reads it back. `None`: no limit.
+    pub fn set_memory_limit(&mut self, bytes: Option<u64>) {
+        self.memory_limit = bytes;
+    }
+
+    /// Indexes written out of memory to keep within the limit since the node started.
+    pub fn evicted(&self) -> u64 {
+        self.evicted
+    }
+
+    /// Writes out of memory the indexes past the limit, except `keep` (in use).
+    fn evict_over_limit(&mut self, keep: &[u8; 12]) {
+        let Some(limit) = self.memory_limit else { return };
+        let mut total: u64 = self.built.values().map(memory_of).sum();
+        while total > limit {
+            let largest = self
+                .built
+                .iter()
+                .filter(|(id, b)| *id != keep && memory_of(b) > 0)
+                .max_by_key(|(_, b)| memory_of(b))
+                .map(|(id, b)| (*id, memory_of(b)));
+            let Some((id, bytes)) = largest else { return };
+            // An index whose file cannot be written stays: losing it would mean a rebuild.
+            if self.store.is_none() || self.write_file(&id).is_err() {
+                return;
+            }
+            self.built.remove(&id);
+            self.evicted += 1;
+            total -= bytes;
+        }
+    }
+
+    /// The file of index `id` the store keeps, when the index is not in memory.
+    fn read_back(&self, id: &[u8; 12]) -> Option<Shipped> {
+        let bytes = self.store.as_ref()?.get(id).ok()??;
+        Shipped::decode(&bytes).ok().map(|(_, s)| s)
     }
 
     /// Keeps the segments of each index in `store` from now on (FR-012).
@@ -374,7 +428,14 @@ pub fn with_index<B: Backend + ?Sized, R>(
 ) -> Result<R, CommandError> {
     let (taken, received) = {
         let mut indexes = lock(shared);
-        (indexes.search.built.remove(&entry.id), indexes.search.received.remove(&entry.id))
+        let taken = indexes.search.built.remove(&entry.id);
+        let received = indexes.search.received.remove(&entry.id);
+        // An index written out of memory comes back from its file (012 FR-013).
+        let received = match (&taken, received) {
+            (None, None) => indexes.search.read_back(&entry.id),
+            (_, r) => r,
+        };
+        (taken, received)
     };
     let mut fresh = false;
     let mut built = match taken {
@@ -419,6 +480,7 @@ pub fn with_index<B: Backend + ?Sized, R>(
     let mut indexes = lock(shared);
     indexes.search.failed.remove(&entry.id);
     indexes.search.built.insert(entry.id, built);
+    indexes.search.evict_over_limit(&entry.id);
     if dump {
         indexes.search.write_file(&entry.id).map_err(|e| {
             CommandError::new(INTERNAL_ERROR, format!("cannot write a search segment: {e}"))

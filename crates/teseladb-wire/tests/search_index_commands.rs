@@ -961,6 +961,54 @@ impl teseladb_wire::commands::search_ops::SegmentStore for MemStore {
         self.files.lock().unwrap().remove(id);
         Ok(())
     }
+    fn get(&self, id: &[u8; 12]) -> Result<Option<Vec<u8>>, String> {
+        if self.broken {
+            return Err("unreadable".into());
+        }
+        Ok(self.files.lock().unwrap().get(id).cloned())
+    }
+}
+
+/// With the node's part of memory for search segments (012 FR-013, D-105), indexes past it are
+/// written to their file and leave memory, the largest first; the next query that needs one
+/// reads it back from its file and gives the same results.
+#[test]
+fn indexes_past_the_memory_part_are_written_out_and_read_back() {
+    use std::sync::Arc;
+    use teseladb_wire::commands::lock;
+    use teseladb_wire::commands::search_ops::search_metrics;
+
+    let store = Arc::new(MemStore::default());
+    let mut m = with_collection();
+    lock(&m.shared).search.set_store(store.clone());
+    let reply = create(&mut m, "c", vec![index("a", dynamic(true)), index("b", dynamic(true))]);
+    let (a, b) = (id_bytes(&id_of(&reply, 0)), id_bytes(&id_of(&reply, 1)));
+    let on = |name: &str| {
+        let q = text("mundo").with("index", name);
+        vec![Document::new().with("$search", q), scored()]
+    };
+    let first_a = batch(&agg(&mut m, "c".into(), on("a")));
+    let first_b = batch(&agg(&mut m, "c".into(), on("b")));
+    let both = search_metrics(&m.shared).memory_bytes;
+    assert!(both > 0);
+    // A part that holds one index: using `b` leaves `a` out of memory, in its file.
+    lock(&m.shared).search.set_memory_limit(Some(both / 2 + 1));
+    assert_eq!(batch(&agg(&mut m, "c".into(), on("b"))), first_b);
+    assert!(search_metrics(&m.shared).memory_bytes <= both / 2 + 1);
+    assert_eq!(lock(&m.shared).search.evicted(), 1);
+    assert!(store.files.lock().unwrap().contains_key(&a));
+    assert!(lock(&m.shared).search.served(&a).is_none(), "out of memory");
+    // `a` comes back from its file, and `b` leaves in turn.
+    assert_eq!(batch(&agg(&mut m, "c".into(), on("a"))), first_a);
+    assert!(lock(&m.shared).search.served(&a).is_some());
+    assert!(lock(&m.shared).search.served(&b).is_none());
+    assert_eq!(lock(&m.shared).search.evicted(), 2);
+    // Without a part nothing leaves.
+    lock(&m.shared).search.set_memory_limit(None);
+    assert_eq!(batch(&agg(&mut m, "c".into(), on("b"))), first_b);
+    assert!(
+        lock(&m.shared).search.served(&a).is_some() && lock(&m.shared).search.served(&b).is_some()
+    );
 }
 
 /// The segments of an index are handed to the node's store when it is built, and after a

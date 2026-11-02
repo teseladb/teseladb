@@ -780,6 +780,16 @@ impl<D: Disk + Send + 'static> Node<D> {
                 crate::spill::DiskSpill::open(disk).map_err(|e| io::Error::other(e.message))?;
             tables.spill.store = Some(Arc::new(spill));
         }
+        // The search segments in memory stay within the cores' parts for them (D-105): past
+        // them, indexes go to their files until a query needs them again.
+        tables.search.set_memory_limit(
+            memory.map(|m| m.part(crate::memory::Component::SearchSegments) * u64::from(cores)),
+        );
+        // The open cursors' computed results stay within the cores' parts for cursors (D-105).
+        tables.spill.cursor_bytes = memory.map(|m| {
+            let part = m.part(crate::memory::Component::Cursors) * u64::from(cores);
+            usize::try_from(part).unwrap_or(usize::MAX)
+        });
         // A stage holds at most the core's part for aggregations (D-105).
         tables.spill.stage_bytes = memory.map(|m| {
             usize::try_from(m.part(crate::memory::Component::Aggregations)).unwrap_or(usize::MAX)

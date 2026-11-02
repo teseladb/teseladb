@@ -45,6 +45,15 @@ impl SegmentStore for SegmentDir {
         written.map_err(|e| format!("{}: {e}", path.display()))
     }
 
+    fn get(&self, id: &[u8; 12]) -> Result<Option<Vec<u8>>, String> {
+        let path = self.file_of(id);
+        match std::fs::read(&path) {
+            Ok(b) => Ok(Some(b)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!("{}: {e}", path.display())),
+        }
+    }
+
     fn remove(&self, id: &[u8; 12]) -> Result<(), String> {
         let path = self.file_of(id);
         let removed = match std::fs::remove_file(&path) {
@@ -124,8 +133,10 @@ mod tests {
         assert!(!data.join(DIRECTORY).join("half.tmp").exists());
         assert!(data.join(DIRECTORY).join("notes.txt").exists());
 
+        assert_eq!(store.get(&id).unwrap(), Some(bytes.clone()));
         store.remove(&id).expect("remove");
         assert!(!file.exists());
+        assert_eq!(store.get(&id).unwrap(), None);
         store.remove(&id).expect("a file that is not there is already removed");
         std::fs::remove_dir_all(&data).unwrap();
     }
@@ -144,6 +155,7 @@ mod tests {
         let store = SegmentDir { dir: data.clone(), direct: false };
         std::fs::create_dir_all(store.file_of(&[3u8; 12])).unwrap();
         assert!(store.remove(&[3u8; 12]).is_err());
+        assert!(store.get(&[3u8; 12]).is_err(), "a directory is not a file");
         std::fs::remove_dir_all(&data).unwrap();
     }
 }
