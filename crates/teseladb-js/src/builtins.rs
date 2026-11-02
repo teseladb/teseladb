@@ -26,6 +26,16 @@ pub(crate) fn class_name(v: &Val) -> &'static str {
         Val::Obj(o) => match &o.borrow().kind {
             Kind::Array(_) => "Array",
             Kind::Func(_) => "Function",
+            Kind::Map(_) => "Map",
+            Kind::Set(_) => "Set",
+            Kind::WeakMap(_) => "WeakMap",
+            Kind::WeakSet(_) => "WeakSet",
+            Kind::Date(_) => "Date",
+            Kind::RegExp(..) => "RegExp",
+            Kind::Error => "Error",
+            Kind::Bool(_) => "Boolean",
+            Kind::Num(_) => "Number",
+            Kind::Str(_) => "String",
             _ => "Object",
         },
         other => other.type_of(),
@@ -156,6 +166,7 @@ pub fn install(it: &mut Interp) -> R<()> {
     crate::bson::install(it, &g)?;
     crate::uri::install(it, &g)?;
     crate::symbols::install_species(it, &g)?;
+    crate::shell::install(it, &g)?;
     freeze_builtins(it);
     Ok(())
 }
@@ -194,7 +205,16 @@ fn freeze_builtins(it: &Interp) {
         all.extend(proto);
         all.push(o);
     }
+    // The functions of those objects (methods, accessors) are frozen too.
+    let mut functions = Vec::new();
     for o in &all {
+        for (_, p) in &o.borrow().props {
+            let parts = [p.value.as_obj(), p.getter.as_ref(), p.setter.as_ref()];
+            functions
+                .extend(parts.into_iter().flatten().filter(|f| f.borrow().is_callable()).cloned());
+        }
+    }
+    for o in all.iter().chain(&functions) {
         freeze(o);
     }
 }
@@ -1561,7 +1581,7 @@ fn regexp_parts(it: &Interp, this: &Val) -> R<(Name, Name)> {
     }
 }
 
-fn regexp_to_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+pub(crate) fn regexp_to_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     let (s, f) = regexp_parts(it, this)?;
     it.string(format!("/{s}/{f}"))
 }

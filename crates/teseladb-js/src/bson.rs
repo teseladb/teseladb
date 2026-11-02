@@ -44,7 +44,7 @@ fn type_name(b: &Bson) -> &'static str {
     }
 }
 
-fn proto_of(it: &Interp, name: &str) -> Option<ObjRef> {
+pub(crate) fn proto_of(it: &Interp, name: &str) -> Option<ObjRef> {
     let c = it.realm.bson.iter().find(|(n, _)| &**n == name)?.1.clone();
 
     c.borrow().get_own("prototype")?.value.as_obj().cloned()
@@ -55,7 +55,7 @@ pub fn make(it: &Interp, b: Bson) -> R {
     Ok(Val::Obj(it.alloc(proto, Kind::Bson(b))?))
 }
 
-fn this_bson(it: &Interp, this: &Val) -> R<Bson> {
+pub(crate) fn this_bson(it: &Interp, this: &Val) -> R<Bson> {
     match this {
         Val::Obj(o) => match &o.borrow().kind {
             Kind::Bson(b) => Ok(b.clone()),
@@ -65,7 +65,7 @@ fn this_bson(it: &Interp, this: &Val) -> R<Bson> {
     }
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -119,8 +119,6 @@ pub fn install(it: &mut Interp, g: &ObjRef) -> R<()> {
         it.define(&p, "t", Prop { getter: Some(t), ..Prop::hidden(Val::Undef) })?;
         it.define(&p, "i", Prop { getter: Some(i), ..Prop::hidden(Val::Undef) })?;
     }
-    // `ISODate(text)` is a `Date`.
-    method(it, g, "ISODate", iso_date, 1)?;
     Ok(())
 }
 
@@ -180,6 +178,9 @@ fn object_id(it: &mut Interp, _: &Val, a: &[Val]) -> R {
             }
             id
         }
+        // Measured on a `refrouter` 9.0.4 on 02-11: the length is checked before the digits.
+        Val::Str(s) if s.len() != 24 => return Err(it.error("Error", "invalid object id: length")),
+        Val::Str(_) => return Err(it.error("Error", "invalid object id: not hex")),
         v => return Err(it.error("Error", &format!("invalid object id: {}", it.show(&v)))),
     };
     make(it, Bson::ObjectId(id))
@@ -217,27 +218,23 @@ fn db_ref(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     Ok(Val::Obj(o))
 }
 
-fn iso_date(it: &mut Interp, _: &Val, a: &[Val]) -> R {
-    let t = match arg(a, 0) {
-        Val::Undef => it.now_ms,
-        v => {
-            let s = it.str_of(&v)?;
-            let t = crate::date::parse(&s);
-            if t.is_nan() {
-                return Err(it.error("Error", &format!("invalid ISO date: {s}")));
-            }
-            t
-        }
-    };
-    crate::date::make_date(it, t)
-}
-
 fn to_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     let s = match this_bson(it, this)? {
         Bson::Long(n) => format!("NumberLong({n})"),
         Bson::Int(n) => format!("NumberInt({n})"),
         Bson::Decimal(d) => format!("NumberDecimal(\"{d}\")"),
         Bson::ObjectId(id) => format!("ObjectId(\"{}\")", hex(&id)),
+        Bson::BinData(4, b) if b.len() == 16 => {
+            let h = hex(&b);
+            format!(
+                "UUID(\"{}-{}-{}-{}-{}\")",
+                &h[..8],
+                &h[8..12],
+                &h[12..16],
+                &h[16..20],
+                &h[20..]
+            )
+        }
         Bson::BinData(t, b) => format!("BinData({t},\"{}\")", base64_encode(&b)),
         Bson::Timestamp(t, i) => format!("Timestamp({t}, {i})"),
         Bson::MinKey => "[object MinKey]".into(),
@@ -285,7 +282,7 @@ fn object_id_time(it: &mut Interp, this: &Val, _: &[Val]) -> R {
 
 const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-fn base64_encode(b: &[u8]) -> String {
+pub(crate) fn base64_encode(b: &[u8]) -> String {
     let mut out = String::new();
     for chunk in b.chunks(3) {
         let n = (u32::from(chunk[0]) << 16)
@@ -388,6 +385,12 @@ pub fn from_document(it: &mut Interp, d: &Document, depth: usize) -> R {
     Ok(Val::Obj(o))
 }
 
+/// Whether `o` is the global `MinKey` or `MaxKey`, which RefDb's shell gives as the key itself.
+fn is_key_ctor(it: &Interp, o: &ObjRef, name: &str) -> bool {
+    matches!(name, "MinKey" | "MaxKey")
+        && it.realm.bson.iter().any(|(n, c)| &**n == name && c.ptr_eq(o))
+}
+
 /// The error of a value that has no BSON form (measured: 16662 for a symbol).
 pub fn not_convertible(name: &str) -> Ctrl {
     Ctrl::Fatal(crate::interp::Fatal::Convert(format!(
@@ -431,6 +434,13 @@ pub fn to_bson(it: &mut Interp, v: &Val, name: &str, depth: usize) -> R<Value> {
                     pattern: crate::text::to_utf8(&p).into_owned(),
                     options: f.chars().filter(|c| *c != 'g').collect(),
                 },
+                Kind::Func(Func::Native(_, n)) if is_key_ctor(it, o, &n) => {
+                    if &*n == "MinKey" {
+                        Value::MinKey
+                    } else {
+                        Value::MaxKey
+                    }
+                }
                 Kind::Func(Func::Closure { def, .. }) => {
                     Value::JavaScript(crate::text::to_utf8(&def.source).into_owned())
                 }

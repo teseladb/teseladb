@@ -202,7 +202,7 @@ fn run_full(
 fn runtime_error(what: &str, e: &JsError) -> MqlError {
     match e {
         JsError::Deadline => MqlError::new(MAX_TIME_MS_EXPIRED, "operation exceeded time limit"),
-        JsError::Trap => MqlError::new(WASM_TRAP, e.message()),
+        JsError::Trap | JsError::Unreachable => MqlError::new(WASM_TRAP, e.message()),
         JsError::NotConvertible(m) => MqlError::new(
             NOT_CONVERTIBLE,
             format!(

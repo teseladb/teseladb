@@ -445,3 +445,19 @@ fn plane_16_private_use_text_is_not_a_lone_surrogate() {
     );
     assert_eq!(w.unwrap(), Value::Boolean(true));
 }
+
+/// `version()` exists in RefDb 9.0.4's engine and ends the call with a trap (measured: code
+/// 11542340, `wasm trap: wasm \`unreachable\` instruction executed`).
+#[test]
+fn version_of_the_shell_ends_the_call_with_a_trap() {
+    let e = call_with("function(){ return typeof version + version() }", None, &[]).unwrap_err();
+    assert_eq!(e, JsError::Unreachable);
+    assert_eq!(e.message(), "wasm trap: wasm `unreachable` instruction executed");
+}
+
+/// The helpers that the shell's globals use are not globals themselves.
+#[test]
+fn the_shell_helpers_are_not_visible() {
+    let r = call_with("function(){ return typeof __teseladbShellHost }", None, &[]);
+    assert_eq!(r, Ok(Value::String("undefined".into())));
+}

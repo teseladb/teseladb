@@ -21,6 +21,7 @@ mod iterators;
 mod json;
 mod lexer;
 mod math;
+mod md5;
 mod number;
 mod parser;
 mod promise;
@@ -28,6 +29,7 @@ mod props;
 mod proxy;
 mod regex;
 mod shared;
+mod shell;
 mod strings;
 mod symbols;
 mod text;
@@ -95,6 +97,9 @@ pub enum JsError {
     /// The engine of RefDb 9.0 stops with a trap (`wasm trap: uninitialized element`): a
     /// promise job or a `FinalizationRegistry`.
     Trap,
+    /// The engine of RefDb 9.0 stops with `wasm trap: wasm \`unreachable\` instruction
+    /// executed`: a shell function it declares and cannot run (`version()`).
+    Unreachable,
     /// A function program was expected and the source is something else.
     NotAFunction,
 }
@@ -111,6 +116,7 @@ impl JsError {
             JsError::Deadline => "operation exceeded time limit".into(),
             JsError::NotAFunction => "the code is not a function".into(),
             JsError::Trap => "wasm trap: uninitialized element".into(),
+            JsError::Unreachable => "wasm trap: wasm `unreachable` instruction executed".into(),
         }
     }
 }
@@ -326,6 +332,7 @@ pub(crate) fn error_of(it: &mut Interp, c: Ctrl) -> JsError {
         Ctrl::Fatal(Fatal::Deadline) => JsError::Deadline,
         Ctrl::Fatal(Fatal::Convert(m)) => JsError::NotConvertible(text::to_utf8(&m).into_owned()),
         Ctrl::Fatal(Fatal::Trap) => JsError::Trap,
+        Ctrl::Fatal(Fatal::Unreachable) => JsError::Unreachable,
         Ctrl::Throw(v) => {
             // The heap may be full: the message is read without new allocations counting.
             it.budget.used.set(0);

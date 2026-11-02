@@ -32,6 +32,9 @@ pub enum Fatal {
     /// What the engine of RefDb 9.0 cannot run and ends the call with a trap of its
     /// WebAssembly build: a promise job (`then`, `await`) or a `FinalizationRegistry`.
     Trap,
+    /// A function the engine of RefDb 9.0 declares and cannot run (`version()`): its
+    /// WebAssembly build reaches an `unreachable` instruction.
+    Unreachable,
 }
 
 pub type R<T = Val> = Result<T, Ctrl>;
@@ -138,7 +141,12 @@ pub struct Interp<'c> {
     pub limits: Limits,
     pub steps: u64,
     pub depth: usize,
+    /// The address of the stack when the first call began, to stop before the native stack
+    /// runs out (a call through `for…in` and accessors takes far more of it than a plain one).
+    pub stack_base: usize,
     pub envs: Vec<Weak<RefCell<EnvRec>>>,
+    /// The name of the native function last called, for the messages that name it.
+    pub native: Name,
     pub global_env: EnvRef,
     pub now_ms: f64,
     pub rng: u64,
@@ -204,6 +212,17 @@ impl Drop for Interp<'_> {
 
 /// Whether `new f()` may run: a class or plain function, a native constructor (one with a
 /// `prototype`, or `Proxy`), a bound constructor or a callable proxy.
+/// How much native stack the calls of one program may take: well inside the 2 MiB of a spawned
+/// thread, so deep recursion ends as `too much recursion` instead of overflowing.
+const STACK_BUDGET: usize = 1 << 20;
+
+/// The address of a local of the caller's frame: where the stack is now.
+#[inline(never)]
+fn stack_position() -> usize {
+    let marker = 0u8;
+    std::hint::black_box(&marker as *const u8 as usize)
+}
+
 pub fn is_constructor(f: &Val) -> bool {
     let Val::Obj(o) = f else { return false };
     let b = o.borrow();
@@ -211,7 +230,11 @@ pub fn is_constructor(f: &Val) -> bool {
         Kind::Func(Func::Closure { def, .. }) => {
             !(def.arrow || def.generator || def.is_async || def.method)
         }
-        Kind::Func(Func::Native(_, name)) => b.get_own("prototype").is_some() || &**name == "Proxy",
+        // `UUID`, `MD5` and `HexData` of the RefDb shell have no `prototype` and still construct.
+        Kind::Func(Func::Native(_, name)) => {
+            b.get_own("prototype").is_some()
+                || matches!(&**name, "Proxy" | "UUID" | "MD5" | "HexData")
+        }
         Kind::Func(Func::Bound(t, ..)) => is_constructor(&Val::Obj(t.clone())),
         Kind::Proxy(_, callable) => *callable,
         _ => false,
@@ -275,6 +298,15 @@ fn is_identifier(s: &str) -> bool {
 }
 
 impl<'c> Interp<'c> {
+    /// Whether the calls in progress have used up the stack budget (the stack grows downwards).
+    fn stack_exhausted(&mut self) -> bool {
+        let here = stack_position();
+        if self.stack_base == 0 || self.depth == 0 {
+            self.stack_base = here;
+        }
+        self.stack_base.saturating_sub(here) > STACK_BUDGET
+    }
+
     // Limits.
 
     pub fn step(&mut self) -> R<()> {
@@ -612,6 +644,9 @@ impl<'c> Interp<'c> {
                     }
                     Kind::Str(s) if key == "length" => {
                         return Ok(Val::Num(crate::strings::utf16_len(s) as f64));
+                    }
+                    Kind::Str(s) if let Some(c) = array_index(key).and_then(|i| utf16_at(s, i)) => {
+                        return Ok(Val::Str(crate::strings::from_units(&[c]).into()));
                     }
                     Kind::Arguments(Some(m)) => {
                         if let Some(n) = m.name(key) {
@@ -959,12 +994,15 @@ impl<'c> Interp<'c> {
             _ => return self.type_error(&format!("{} is not a function", self.show(f))),
         };
         self.step()?;
-        if self.depth >= self.limits.depth {
+        if self.depth >= self.limits.depth || self.stack_exhausted() {
             return Err(self.error("InternalError", "too much recursion"));
         }
         self.depth += 1;
         let r = match func {
-            Func::Native(n, _) => n(self, this, args),
+            Func::Native(n, name) => {
+                self.native = name;
+                n(self, this, args)
+            }
             Func::Bound(target, bound_this, bound_args) => {
                 let mut all = bound_args.clone();
                 all.extend_from_slice(args);
@@ -1180,7 +1218,7 @@ impl<'c> Interp<'c> {
             _ => return self.type_error(&format!("{} is not a constructor", self.show(f))),
         };
         self.step()?;
-        if self.depth >= self.limits.depth {
+        if self.depth >= self.limits.depth || self.stack_exhausted() {
             return Err(self.error("InternalError", "too much recursion"));
         }
         self.depth += 1;

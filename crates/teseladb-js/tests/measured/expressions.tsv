@@ -738,3 +738,876 @@ Object.keys({..."a😀"}).length	J:3
 /\u{1F600}/u.test("😀")	J:true
 /a/y.lastIndex	J:0
 "😀a".replace(/a/, "$`").length	J:4
+Object.isFrozen(tojson) + "," + Object.isFrozen(assert) + "," + Object.isFrozen(hex_md5) + "," + Object.isFrozen(version)	S:true,true,true,true
+tojson({a:1, b:[1,"x",null], c:{d:new Date(0)}})	S:{\n\t"a" : 1,\n\t"b" : [\n\t\t1,\n\t\t"x",\n\t\tnull\n\t],\n\t"c" : {\n\t\t"d" : ISODate("1970-01-01T00:00:00Z")\n\t}\n}
+tojson([1,2,{x:NumberLong(5)}])	S:[ 1, 2, { "x" : NumberLong(5) } ]
+tojson({a:1}, "  ")	S:{\n  "a" : 1\n}
+tojson({a:1}, "", false)	S:{\n\t"a" : 1\n}
+tojsononeline({a:{b:[1,2]}, c:ObjectId("507f1f77bcf86cd799439011")})	S:{ "a" : { "b" : [ 1, 2 ] }, "c" : ObjectId("507f1f77bcf86cd799439011") }
+tojson(new Map([[1,2]]))	S:new Map([ [ 1, 2 ] ])
+tojson(new Set([1]))	S:new Set([ 1 ])
+tojson(/a/g)	S:/a/g
+tojson(undefined) + tojson(null) + tojson("q\"") + tojson(1.5) + tojson(true)	S:undefinednull"q\\""1.5true
+tojson(function f(){ return 1 })	S:function f(){ return 1 }
+tojson(MinKey) + tojson(MaxKey)	S:[object MinKey][object MaxKey]
+tojson(new Error("boom"))	S:{ }
+tojson(NumberInt(3)) + tojson(NumberDecimal("1.5")) + tojson(Timestamp(1,2)) + tojson(BinData(0,"AA=="))	S:NumberInt(3)NumberDecimal("1.5")Timestamp(1, 2)BinData(0,"AA==")
+tojson(Symbol("s"))	E:Error:tojson can't handle type symbol
+tojson(Object.create(null))	S:[Object]
+tojson(new Date(NaN))	S:ISODate("0NaN-NaN-NaNTNaN:NaN:NaNZ")
+tojson({x: undefined, y: () => 1})	S:{ "y" : () => 1 }
+hex_md5("abc")	S:900150983cd24fb0d6963f7d28e17f72
+hex_md5("")	S:d41d8cd98f00b204e9800998ecf8427e
+isNumber(1) + "," + isObject(null) + "," + isString("")	S:true,true,true
+typeof printjson({a:1})	S:undefined
+assert(true)	J:undefined
+assert(false)	E:Error:assert failed
+assert(false, "msg")	E:Error:assert failed : msg
+assert(0, {x:1})	E:Error:assert failed : { "x" : 1 }
+assert(false, () => "lazy")	E:Error:assert failed : lazy
+assert(1, 2, 3, 4)	E:Error:Too many parameters to assert().
+assert.eq(1, 1)	J:undefined
+assert.eq(1, 2)	E:ReferenceError:patchDiff is not defined
+assert.eq(1, 2, "m")	E:ReferenceError:patchDiff is not defined
+assert.eq({a:1}, {a:1})	J:undefined
+assert.throws(() => { throw new Error("e") }).message	S:e
+assert.throws(() => 1)	E:Error:did not throw exception
+assert.doesNotThrow(() => 7)	J:7
+assert.doesNotThrow(() => { throw new Error("bad") })	E:Error:threw unexpected exception: { "message" : "bad" }
+friendlyEqual({a:NumberInt(1)}, {a:1})	J:true
+_isEq(1, "1")	J:true
+formatErrorMsg("x {a} y", {a: [1]})	S:x [ 1 ] y
+toJsonForLog({a: undefined, d: new Date(0), m: new Map([[1,2]])})	S:{"a":{"$undefined":true},"d":"1970-01-01T00:00:00.000Z","m":{}}
+doassert("plain")	E:Error:plain
+doassert({o:1})	E:Error:{ "o" : 1 }
+_buildAssertionMessage("m", "p")	S:p : m
+_processMsg({a:1})	S:{ "a" : 1 }
+typeof buildInfo()	S:object
+JSON.stringify(Object.keys(buildInfo()))	S:[]
+gc()	J:undefined
+getJSHeapLimitMB()	J:100
+bsonWoCompare({a:1}, {a:2})	J:-1
+bsonWoCompare({a:1}, {a:1})	J:0
+bsonBinaryEqual({a:1}, {a:1.0})	J:true
+bsonUnorderedFieldsCompare({a:1,b:2}, {b:2,a:1})	J:0
+JSON.stringify(bsonObjToArray({a:1,b:"x"}))	S:[1,"x"]
+bsonToBase64({a:1})	S:GAAAAANhABAAAAABYQAAAAAAAADwPwAA
+bsonGetImmutable({a:1})	J:{"a":{"a":1}}
+tojson(HexData(0, "00ff"))	S:BinData(0,"AP8=")
+tojson(UUID("0123456789abcdef0123456789abcdef"))	S:BinData(3,"ASNFZ4mrze8BI0VniavN7w==")
+tojson(MD5("0123456789abcdef0123456789abcdef"))	S:BinData(5,"ASNFZ4mrze8BI0VniavN7w==")
+tojson(Code("x"))	S:{ "code" : "x" }
+tojson(DBPointer("a.b", ObjectId("507f1f77bcf86cd799439011")))	S:DBPointer("a.b", ObjectId("507f1f77bcf86cd799439011"))
+typeof UUID()	S:object
+new Code("y").toString()	S:Code({"code":"y","scope":{}"})
+Object.getOwnPropertyDescriptor(globalThis, "undefined").configurable	J:false
+tojson.MAX_DEPTH	J:100
+Array.tojson([1,[2]], "", true)	S:[ 1, [ 2 ] ]
+tojson(new Number(5)).split("\n").filter(l => /^\t"/.test(l)).map(l => l.split('"')[1]).join()	S:toPercentStr,zeroPad
+tojson(new String("s")).split("\n").filter(l => /^\t"/.test(l)).map(l => l.split('"')[1]).join()	S:0,ltrim,rtrim,pad
+tojson([undefined, null])	S:[ undefined, null ]
+[String.prototype.ltrim === String.prototype.trimStart, String.prototype.rtrim === String.prototype.trimEnd].join()	S:false,false
+JSON.stringify(["toPercentStr","zeroPad"].map(k => Object.getOwnPropertyDescriptor(Number.prototype, k)).map(d => [d.writable, d.enumerable, d.configurable]))	S:[[false,true,false],[false,true,false]]
+JSON.stringify(["ltrim","rtrim","pad"].map(k => Object.getOwnPropertyDescriptor(String.prototype, k)).map(d => [d.writable, d.enumerable, d.configurable]))	S:[[false,true,false],[false,true,false],[false,true,false]]
+JSON.stringify(["tojson","fetchRefs"].map(k => Object.getOwnPropertyDescriptor(Array, k)).map(d => [d.writable, d.enumerable, d.configurable]))	S:[[false,true,false],[false,true,false]]
+JSON.stringify([Object.getOwnPropertyDescriptor(Map, "tojson"), Object.getOwnPropertyDescriptor(Set, "tojson"), Object.getOwnPropertyDescriptor(tojson, "MAX_DEPTH"), Object.getOwnPropertyDescriptor(assert, "eq")].map(d => [d.writable, d.enumerable, d.configurable]))	S:[[false,true,false],[false,true,false],[false,true,false],[false,true,false]]
+JSON.stringify(["extend","merge","keySet","deepMerge"].map(k => Object.getOwnPropertyDescriptor(Object, k)).map(d => [d.writable, d.enumerable, d.configurable]))	S:[[false,true,false],[false,true,false],[false,true,false],[false,true,false]]
+JSON.stringify(Object.getOwnPropertyDescriptor(Date.prototype, "tojson"))	S:{"writable":false,"enumerable":true,"configurable":false}
+tojson.name + "," + tojsonObject.name + "," + isNumber.name + "," + printjson.name + "," + assert.eq.name + "," + Array.tojson.name + "," + hex_md5.name	S:tojson,tojsonObject,isNumber,printjson,,,hex_md5
+(5).zeroPad(4) + "," + (0.123).toPercentStr() + "," + "ab".pad(5) + "|" + "ab".pad(5, true, "x")	S:0005,12.30%,   ab|abxxx
+Object.isFrozen(Number.prototype.zeroPad) + "," + Object.isFrozen(Array.tojson)	S:true,true
+bsonWoCompare()	E:Error:bsonWoCompare needs 2 arguments
+bsonWoCompare({a:1})	E:Error:bsonWoCompare needs 2 arguments
+bsonWoCompare(1, 2)	J:-1
+bsonWoCompare({a:2}, {a:1})	J:1
+bsonWoCompare({a:1}, {b:1})	J:-1
+bsonWoCompare({a:"x"}, {a:1})	J:5
+bsonWoCompare({a:1, b:1}, {a:1})	J:1
+bsonBinaryEqual({a:1}, {a:2})	J:false
+bsonBinaryEqual()	E:Error:bsonBinaryEqual needs 2 arguments
+bsonBinaryEqual({a:NumberInt(1)}, {a:1})	J:false
+bsonUnorderedFieldsCompare({a:1}, {a:2})	J:-1
+bsonUnorderedFieldsCompare({a:1,b:2}, {b:2,a:3})	J:-1
+bsonUnorderedFieldsCompare()	E:Error:bsonWoCompare needs 2 arguments
+JSON.stringify(bsonObjToArray([1,2]))	S:[1,2]
+bsonObjToArray()	E:Error:bsonObjToArray needs 1 argument
+bsonObjToArray(5)	E:Error:argument must be an object
+bsonToBase64()	E:Error:bsonToBase64 needs 1 argument
+bsonToBase64({})	S:DQAAAANhAAUAAAAAAA==
+JSON.stringify(bsonGetImmutable({a:1,b:[2]}))	S:{"a":{"a":1,"b":[2]}}
+bsonGetImmutable()	E:Error:bsonGetImmutable needs 1 argument
+JSON.stringify(buildInfo(1))	S:{}
+gc(1,2)	J:undefined
+getJSHeapLimitMB(5)	J:100
+tojson(HexData(0, "zz"))	E:Error:The character \\x7a failed to parse from hex.
+HexData(0)	E:Error:HexData needs 2 arguments
+HexData()	E:Error:HexData needs 2 arguments
+tojson(HexData(4, "0123456789abcdef0123456789abcdef"))	S:UUID("01234567-89ab-cdef-0123-456789abcdef")
+UUID("abc")	E:Error:Invalid UUID string: abc
+UUID().length()	J:16
+tojson(new UUID("0123456789abcdef0123456789abcdef"))	S:BinData(3,"ASNFZ4mrze8BI0VniavN7w==")
+MD5("abc")	E:Error:MD5 string must have 32 characters
+Code()	J:{"code":""}
+tojson(Code("x", {a:1}))	S:{ "code" : "x", "scope" : { "a" : 1 } }
+Code("x").code + "|" + JSON.stringify(Code("x").scope)	S:x|undefined
+typeof Code("x") + "|" + (Code("x") instanceof Code)	S:object|true
+JSON.stringify(Object.keys(Code("x")))	S:["code"]
+DBPointer()	E:Error:DBPointer needs 2 arguments
+DBPointer("a.b")	E:Error:DBPointer needs 2 arguments
+DBPointer("a.b", "x")	E:Error:DBPointer 2nd parameter must be an ObjectId
+DBPointer("a.b", ObjectId("507f1f77bcf86cd799439011")).ns	S:a.b
+typeof DBPointer("a.b", ObjectId("507f1f77bcf86cd799439011")).id	S:object
+JSON.stringify(Object.keys(DBPointer("a.b", ObjectId("507f1f77bcf86cd799439011"))))	S:[]
+DBPointer("a.b", ObjectId("507f1f77bcf86cd799439011")).toString()	S:DBPointer("a.b", ObjectId("507f1f77bcf86cd799439011"))
+JSON.stringify(DBPointer("a.b", ObjectId("507f1f77bcf86cd799439011")))	S:{"ns":"a.b","id":{"$oid":"507f1f77bcf86cd799439011"}}
+Object.isFrozen(Array.prototype.map) + "," + Object.isFrozen(Math.max) + "," + Object.isFrozen(assert.eq) + "," + Object.isFrozen(tojson.prototype)	S:true,true,true,true
+JSON.stringify(Object.getOwnPropertyDescriptor(globalThis, "gc"))	S:{"writable":true,"enumerable":false,"configurable":true}
+JSON.stringify(Object.getOwnPropertyDescriptor(globalThis, "tojson")) + typeof Object.getOwnPropertyDescriptor(globalThis, "tojson").value	S:{"writable":true,"enumerable":true,"configurable":true}function
+Object.isFrozen(globalThis)	J:false
+(() => { tojson = 1; return typeof tojson })()	S:number
+(() => { delete globalThis.assert; return typeof assert })()	S:function
+(() => { let s = []; for (const k in new Date(0)) s.push(k); return s.join() })()	S:tojson
+(() => { let s = []; for (const k in 5..constructor.prototype) s.push(k); return s.join() })()	S:toPercentStr,zeroPad
+bsonWoCompare({a:1}, {c:1})	J:-2
+bsonWoCompare({c:1}, {a:1})	J:2
+bsonWoCompare({a:1}, {a:5})	J:-1
+bsonWoCompare({a:"a"}, {a:"c"})	J:-2
+bsonWoCompare({a:{b:"x"}}, {a:{b:1}})	J:5
+bsonWoCompare({a:[1,"x"]}, {a:[1,2]})	J:5
+bsonWoCompare({a:null}, {a:MinKey})	J:6
+bsonWoCompare({a:MaxKey}, {a:1})	J:117
+bsonWoCompare({a:true}, {a:1})	J:30
+bsonWoCompare({}, {a:1})	J:-1
+bsonWoCompare("ab", "abc")	J:-99
+bsonWoCompare(1, "1")	J:-5
+bsonWoCompare([1], [2])	J:-1
+bsonWoCompare(null, undefined)	J:5
+bsonUnorderedFieldsCompare({b:1,a:"x"}, {a:1,b:1})	J:5
+bsonBinaryEqual(1, 1)	J:true
+bsonObjToArray(null)	E:Error:argument must be an object
+bsonToBase64(5)	S:EAAAAAFhAAAAAAAAABRAAA==
+bsonToBase64("ab")	S:DwAAAAJhAAMAAABhYgAA
+new Code("y", {a:1}).toString()	S:Code({"code":"y","scope":{ a: 1.0 }"})
+Code("y").toString()	S:Code({"code":"y","scope":{}"})
+BinData(4, "ASNFZ4mrze8BI0VniavN7w==").toString()	S:UUID("01234567-89ab-cdef-0123-456789abcdef")
+BinData(3, "ASNFZ4mrze8BI0VniavN7w==").toString()	S:BinData(3,"ASNFZ4mrze8BI0VniavN7w==")
+tojson(UUID("01234567-89ab-cdef-0123-456789abcdef"))	S:UUID("01234567-89ab-cdef-0123-456789abcdef")
+tojson(UUID("0123456789ABCDEF0123456789ABCDEF"))	S:BinData(3,"ASNFZ4mrze8BI0VniavN7w==")
+MD5("0123456789abcdef0123456789abcdeZ")	E:Error:The character \\x5a failed to parse from hex.
+HexData(0, "abc")	E:Error:BinData hex string must be an even length
+tojson(HexData(0, ""))	S:BinData(0,"")
+tojson(HexData("x", "00"))	E:Error:HexData subtype must be a Number between 0 and 255 inclusive
+tojson(HexData(300, "00"))	E:Error:HexData subtype must be a Number between 0 and 255 inclusive
+UUID(5)	E:Error:Invalid UUID string: 5
+MD5(5)	E:Error:MD5 string must have 32 characters
+HexData(0, 5)	E:Error:BinData data must be a String
+tojson(HexData(0, "AB"))	S:BinData(0,"qw==")
+typeof Object.getOwnPropertyDescriptor(globalThis, "ISODate").value + Object.getOwnPropertyDescriptor(globalThis, "ISODate").enumerable	S:functiontrue
+Object.getPrototypeOf(Code("x")) === Code.prototype	J:true
+Code.prototype.toString.call({code:"z"})	E:Error:Cannot call "toString" on object of type "Object"
+DBPointer.prototype.toString.call({ns:"q", id: 1})	S:DBPointer("q", 1)
+[new Error("x") instanceof Error, new Date(0) instanceof Date, new Map() instanceof Map, [] instanceof Array, ({}) instanceof Object, new TypeError("q") instanceof Error, /a/ instanceof RegExp].join()	S:true,true,true,true,true,true,true
+JSON.stringify(/a/g)	S:{"$regex":"a","$options":"g"}
+JSON.stringify(Object.getOwnPropertyDescriptor(RegExp.prototype, "tojson")) + RegExp.prototype.tojson.name	S:{"writable":false,"enumerable":true,"configurable":false}toString
+JSON.stringify(Object.getOwnPropertyDescriptor(RegExp.prototype, "toJSON")) + RegExp.prototype.toJSON.name	S:{"writable":false,"enumerable":false,"configurable":false}toJSON
+BinData(0,"AQI=").base64() + "|" + BinData(0,"AQI=").hex() + "|" + BinData(0,"AQI=").length() + "|" + BinData(0,"AQI=").subtype()	S:AQI=|0102|2|0
+JSON.stringify(BinData(0,"AQI="))	S:{"$binary":"AQI=","$type":"00"}
+JSON.stringify([NumberLong(5), NumberInt(3), NumberDecimal("1.5"), Timestamp(1,2), ObjectId("507f1f77bcf86cd799439011"), MinKey, MaxKey])	S:[{"$numberLong":"5"},3,{"$numberDecimal":"1.5"},{"$timestamp":{"t":1,"i":2}},{"$oid":"507f1f77bcf86cd799439011"},{"$minKey":1},{"$maxKey":1}]
+JSON.stringify(["toJSON","base64","hex","length","subtype","tojson","toString"].map(k => Object.getOwnPropertyDescriptor(BinData.prototype, k)).map(d => d ? [d.writable, d.enumerable, d.configurable, typeof d.value] : 0))	S:[[false,false,false,"function"],[false,false,false,"function"],[false,false,false,"function"],[false,true,false,"function"],[false,true,false,"function"],[false,true,false,"function"],[false,false,false,"function"]]
+JSON.stringify(["toJSON","tojson","toString","isObjectId"].map(k => Object.getOwnPropertyDescriptor(ObjectId.prototype, k)).map(d => d ? [d.writable, d.enumerable, d.configurable, typeof d.value] : 0))	S:[[false,false,false,"function"],[false,true,false,"function"],[false,false,false,"function"],[false,true,false,"boolean"]]
+JSON.stringify(Object.getOwnPropertyDescriptor(String.prototype, "ltrim")) + String.prototype.ltrim.name + String.prototype.ltrim.length	S:{"writable":false,"enumerable":true,"configurable":false}trimStart0
+"  a ".ltrim() + "|" + "  a ".rtrim() + "|"	S:a |  a|
+typeof new UUID() + typeof new MD5("0123456789abcdef0123456789abcdef") + typeof new HexData(0, "00")	S:objectobjectobject
+new Error("x") instanceof Error	J:true
+Object.getPrototypeOf(new Error("x")) === Error.prototype	J:true
+(() => { try { null.x } catch (e) { return [e instanceof TypeError, e instanceof Error, Object.getPrototypeOf(e) === TypeError.prototype].join() } })()	S:true,true,true
+new Date(0) instanceof Date	J:true
+ObjectId.fromDate(new Date(0))	E:Error:Cannot create ObjectId from object: ISODate("1970-01-01T00:00:00Z")
+tojson(new TypeError("t"))	S:{ }
+toJsonForLog([new Set([1]), new Error("e")])	S:[{},{}]
+Date.prototype.tojson.call({})	E:TypeError:this.getTime is not a function
+tojson(Object.create(Date.prototype))	E:TypeError:Date.prototype.getTime called on incompatible Object
+assert.throws(function () { return this.x })	E:Error:Attempted to access 'this' during function call in assert.throws/doesNotThrow. Instead, wrap the function argument in another function.
+assertThrowsHelper(1)	E:Error:1st argument must be a function
+(() => { let s = []; for (const k in Object.extend({}, {a: {b: 1}}, true)) s.push(k); return s.join() })()	S:a
+Date.timeFunc(() => 1, 3)	J:0
+typeof Array.fetchRefs([], 0)	S:object
+Object.keySet({a: 1})	J:["a"]
+JSON.stringify(Object.deepMerge({a: [1], b: {c: 1}}, {a: [2], b: {d: 2}}))	S:{"a":[1,2],"b":{"c":1,"d":2}}
+JSON.stringify(Object.merge({a: 1}, {b: 2}))	S:{"a":1,"b":2}
+Array.tojson(1)	E:Error:The first argument to Array.tojson must be an array
+tojson({a: 1}, undefined, undefined, 101)	S:[Object]
+tojson([1], "", false, 101)	S:[Array]
+Object.getPrototypeOf(Array.tojson([1]).split) === Function.prototype	J:true
+(() => { let s=[]; for (const k in new String("ab")) s.push(k); return s.join() })()	S:0,1,ltrim,rtrim,pad
+Date.prototype.valueOf.call({})	E:TypeError:Date.prototype.valueOf called on incompatible Object
+Date.prototype.toISOString.call([])	E:TypeError:Date.prototype.toISOString called on incompatible Array
+Date.prototype.getFullYear.call(1)	E:TypeError:Date.prototype.getFullYear called on incompatible number
+Date.prototype.toString.call({})	E:TypeError:Date.prototype.toString called on incompatible Object
+Date.prototype.setTime.call(new Map(), 1)	E:TypeError:Date.prototype.setTime called on incompatible Map
+Date.prototype.getTime.call(function () {})	E:TypeError:Date.prototype.getTime called on incompatible Function
+[tojson.length, tojsononeline.length, tojsonObject.length, toJsonForLog.length, printjson.length, isString.length, isNumber.length, isObject.length, doassert.length, _processMsg.length, _buildAssertionMessage.length, formatErrorMsg.length, _doassert.length, assert.length, assert.eq.length, assert.throws.length, assert.doesNotThrow.length, friendlyEqual.length, _isEq.length, assertThrowsHelper.length, hex_md5.length, ISODate.length]	J:[3,1,3,1,1,1,1,1,1,1,2,1,3,3,4,4,4,2,2,2,1,1]
+[tojsononeline.name, toJsonForLog.name, isString.name, isObject.name, doassert.name, _processMsg.name, _buildAssertionMessage.name, formatErrorMsg.name, _doassert.name, assert.name, assert.throws.name, assert.doesNotThrow.name, friendlyEqual.name, _isEq.name, assertThrowsHelper.name, ISODate.name]	J:["tojsononeline","toJsonForLog","isString","isObject","doassert","_processMsg","_buildAssertionMessage","formatErrorMsg","_doassert","assert","","","friendlyEqual","_isEq","assertThrowsHelper","ISODate"]
+[tojson, assert.eq, hex_md5, String.prototype.pad].map(f => { try { return String(new f()) } catch (e) { return e.name } }).join()	S:[object Object],[object Object],TypeError,TypeError
+tojson({a:{b:{c:1}}})	S:{ "a" : { "b" : { "c" : 1 } } }
+tojson({a:{b:{c:1}}}, "", true)	S:{ "a" : { "b" : { "c" : 1 } } }
+tojson({a:[{b:1},{c:[]}], e:{}})	S:{ "a" : [ { "b" : 1 }, { "c" : [ ] } ], "e" : { } }
+tojson([])	S:[ ]
+tojson({})	S:{ }
+tojson([[]])	S:[ [ ] ]
+tojson([{}])	S:[ { } ]
+tojson("a\nb\t\"\\\u0001\u001f\u007f é")	S:"a\\nb\\t\\"\\\\\\u0001\\u001f é"
+tojson('x\'y')	S:"x'y"
+tojson(-0) + "," + tojson(NaN) + "," + tojson(Infinity) + "," + tojson(1e21) + "," + tojson(10n)	E:Error:tojson can't handle type bigint
+tojson(new Boolean(true))	S:{ }
+tojson({toString(){return "T"}})	S:{ "toString" : toString(){return "T"} }
+tojson({tojson(){return "MINE"}})	S:MINE
+tojson({tojson(){return 5}})	J:5
+tojson({a:{tojson(){return "IN"}}})	S:{ "a" : IN }
+tojson({tojson: 5})	S:{ "tojson" : 5 }
+tojson({a:1}, "\t", true)	S:{ "a" : 1 }
+tojson({a:1}, 5)	E:TypeError:indent.repeat is not a function
+tojson({a:1, b:2}, null)	S:{ "a" : 1, "b" : 2 }
+tojson([1,[2,[3]]], "  ")	S:[\n  1,\n  [\n    2,\n    [\n      3\n    ]\n  ]\n]
+tojson({"a b":1, "c\"d":2, 3:4})	S:{ "3" : 4, "a b" : 1, "c"d" : 2 }
+tojson({a:1}, "", true, 99)	S:{ "a" : 1 }
+tojson({a:{b:1}}, "", true, 99)	S:{ "a" : { "b" : 1 } }
+tojson({a:{b:1}}, "", false, 100)	S:{\n\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t"a" : [Object]\n\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t}
+tojson([[1]], "", false, 100)	S:[\n\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t[Array]\n\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t]
+tojson(new Date(1500000000123))	S:ISODate("2017-07-14T02:40:00.123Z")
+tojson(new Date(-1))	S:ISODate("1969-12-31T23:59:59.999Z")
+tojson(new Date(8.64e15))	S:ISODate("+275760-09-13T00:00:00Z")
+tojson(new Date(-62198755200000))	S:ISODate("-000001-01-01T00:00:00Z")
+[60,70,75,76,77,78,79,80,81,85].map(n => { const s = tojson({a: "x".repeat(n)}); return n + ":" + (s.includes("\n") ? "M" : "O") + tojsononeline({a: "x".repeat(n)}).length }).join(" ")	S:60:O72 70:M82 75:M87 76:M88 77:M89 78:M90 79:M91 80:M92 81:M93 85:M97
+[60,70,75,76,77,78,79,80,81,85].map(n => { const s = tojson(["x".repeat(n)]); return n + ":" + (s.includes("\n") ? "M" : "O") + tojsononeline(["x".repeat(n)]).length }).join(" ")	S:60:O66 70:O76 75:M81 76:M82 77:M83 78:M84 79:M85 80:M86 81:M87 85:M91
+[60,70,75,76,77,78,79,80,81,85].map(n => { const s = tojson({a: {b: "x".repeat(n)}}); return n + ":" + (s.includes("\n") ? "M" : "O") + ":" + s.split("\n").length }).join(" ")	S:60:M:5 70:M:5 75:M:5 76:M:5 77:M:5 78:M:5 79:M:5 80:M:5 81:M:5 85:M:5
+tojson({a: {b: "x".repeat(80)}, c: 1})	S:{\n\t"a" : {\n\t\t"b" : "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"\n\t},\n\t"c" : 1\n}
+tojson([{b: "x".repeat(80)}, 1])	S:[\n\t{\n\t\t"b" : "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"\n\t},\n\t1\n]
+tojson({a: [1,2], b: "x".repeat(80)})	S:{\n\t"a" : [\n\t\t1,\n\t\t2\n\t],\n\t"b" : "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"\n}
+tojson({a: "x".repeat(80)}, undefined, false)	S:{\n\t"a" : "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"\n}
+tojson({a: "x".repeat(80)}, undefined, true)	S:{ "a" : "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" }
+tojson({a: {b: 1}}, "")	S:{ "a" : { "b" : 1 } }
+tojson({a: [1, {b: 1}]}, "")	S:{ "a" : [ 1, { "b" : 1 } ] }
+tojson([1, {b: 1}], "")	S:[ 1, { "b" : 1 } ]
+tojson({a: {b: 1}}, "", false, 1)	S:{\n\t\t"a" : {\n\t\t\t"b" : 1\n\t\t}\n\t}
+tojson({a: {b: 1}}, "  ", false, 2)	S:{\n      "a" : {\n        "b" : 1\n      }\n    }
+tojson({a: {b: 1}}, "ab")	S:{\nab"a" : {\nabab"b" : 1\nab}\n}
+tojson([], "") + "|" + tojson({}, "") + "|" + tojson({a: []}, "") + "|" + tojson({a: {}}, "")	S:[ ]|{ }|{ "a" : [ ] }|{ "a" : { } }
+tojson(new Map([[1, {a: 1}]]), "")	S:new Map([ [ 1, { "a" : 1 } ] ])
+tojson(new Map([[{k:1}, [1]]]))	S:new Map([ [ { "k" : 1 }, [ 1 ] ] ])
+tojson(new Map(), "") + "|" + tojson(new Set(), "") + "|" + tojson(new Set([[1], {a:1}]), "")	S:new Map([ ])|new Set([ ])|new Set([ [ 1 ], { "a" : 1 } ])
+tojson(new Map([["x".repeat(90), 1]]))	S:new Map([\n\t[\n\t\t"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",\n\t\t1\n\t]\n])
+tojson(new Set(["x".repeat(90)]))	S:new Set([\n\t"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"\n])
+tojson(new Map([[1,2]]), "", true) + "|" + Map.tojson(new Map([[1,2]])) + "|" + Map.tojson(new Map([[1,2]]), "  ", false, 1)	S:new Map([ [ 1, 2 ] ])|new Map([\n\t[\n\t\t1,\n\t\t2\n\t]\n])|new Map([\n    [\n      1,\n      2\n    ]\n  ])
+Set.tojson(new Set([1]), "  ", false, 1) + "|" + Set.tojson(new Set([1]), "", false, 1)	S:new Set([\n    1\n  ])|new Set([\n\t\t1\n\t])
+Map.tojson(5)	E:TypeError:m.entries is not a function
+Set.tojson({})	S:new Set([ ])
+Map.tojson.call(null, new Set([1]))	S:new Map([\n\t[\n\t\t1,\n\t\t1\n\t]\n])
+[-0, NaN, Infinity, -Infinity, 1e21, 0.1, 1/3, 5e-7, 123456789012].map(x => tojson(x)).join(" ")	S:0 NaN Infinity -Infinity 1e+21 0.1 0.3333333333333333 5e-7 123456789012
+tojson({tojson(...a){return JSON.stringify(a)}})	S:["",null,0,false]
+tojson({tojson(...a){return JSON.stringify(a)}}, "  ", false, 3)	S:["  ",false,3,false]
+tojson({a: {tojson(...a){return JSON.stringify(a)}}})	S:{ "a" : ["\\t",null,1,false] }
+tojson({a: {tojson(...a){return JSON.stringify(a)}}}, "", false)	S:{\n\t"a" : ["\\t",false,1,false]\n}
+tojson([{tojson(...a){return JSON.stringify(a)}}], "  ")	S:[\n  ["  ",null,1,false]\n]
+tojson([{tojson(...a){return JSON.stringify(a)}}], undefined, true, 7)	S:[ ["",true,8,false] ]
+tojson(new Map([[{tojson(...a){return JSON.stringify(a)}}, 1]]), "", false)	S:new Map([\n\t[\n\t\t["\\t",false,2,false],\n\t\t1\n\t]\n])
+tojson({a: {tojson(){return "x".repeat(90)}}})	S:{\n\t"a" : xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n}
+tojson({a: {tojson(){return "q\nz"}}})	S:{ "a" : q z }
+tojson({a: {tojson(){return 5}}})	S:{ "a" : 5 }
+tojson({a: {tojson(){return {b:1}}}})	S:{ "a" : [object Object] }
+tojson({a: {tojson(){return undefined}}})	E:TypeError:can't access property "length", s is undefined
+tojson({a: {tojson(){ throw new Error("TJ") }}})	E:Error:TJ
+Map.tojson([[1,2]]) 	S:new Map([\n\t[\n\t\t0,\n\t\t[\n\t\t\t1,\n\t\t\t2\n\t\t]\n\t]\n])
+Map.tojson({entries(){ return [[1,2],[3]] }})	S:new Map([\n\t[\n\t\t1,\n\t\t2\n\t],\n\t[\n\t\t3\n\t]\n])
+Map.tojson({entries(){ return [5] }})	S:new Map([\n\t5\n])
+tojson(Object.create(null, {a:{value:1, enumerable:true}}))	S:[Object]
+tojson({a: Object.create(null)})	S:{ "a" : [Object] }
+tojson(Object.create({x:1}))	S:{ "x" : 1 }
+tojson(Object.create({x:1}, {y:{value:2, enumerable:true}}))	S:{ "y" : 2, "x" : 1 }
+tojson({get g(){ return 1 }})	S:{ "g" : 1 }
+tojson({get g(){ throw new Error("G") }})	E:Error:G
+tojson({[Symbol("s")]: 1, a: 2})	S:{ "a" : 2 }
+tojson({a: Symbol("s")})	E:Error:tojson can't handle type symbol
+tojson([1, , 3])	S:[ 1, undefined, 3 ]
+tojson(Object.assign([1,2], {x: 3}))	S:[ 1, 2 ]
+tojson(new Int8Array([1,2]))	S:{ "0" : 1, "1" : 2 }
+tojson(new ArrayBuffer(2))	S:{ }
+tojson(new Proxy({a:1}, {}))	S:{ "a" : 1 }
+tojson(new Proxy([1], {}))	S:[ 1 ]
+tojson(arguments)	S:{ }
+tojson((function(){ return arguments })(1, 2))	S:{ "0" : 1, "1" : 2 }
+tojson(new WeakMap())	S:{ }
+tojson(Promise)	S:function Promise() {\n    [native code]\n}
+tojson(Math)	S:{ }
+tojson(JSON)	S:{ }
+tojson(globalThis).length > 0	J:true
+tojson(async function () {})	S:async function () {}
+tojson(Object.prototype)	S:{ }
+tojson(Array.prototype)	S:[ ]
+tojson(new (class X { constructor(){ this.q = 1 } })())	S:{ "q" : 1 }
+JSON.stringify(tojson({a: {tojson(){return "q\nz"}}}))	S:"{ \\"a\\" : q z }"
+JSON.stringify(tojson({a: {tojson(){return "q\nz"}}}, "", true))	S:"{ \\"a\\" : q z }"
+JSON.stringify(tojson({a: {tojson(){return "q\nz"}}}, "", false))	S:"{\\n\\t\\"a\\" : q\\nz\\n}"
+JSON.stringify(tojson([{tojson(){return "q\nz"}}]))	S:"[ q z ]"
+tojson({a: {tojson(){return undefined}}}, "", true)	E:TypeError:can't access property "length", s is undefined
+tojson({a: {tojson(){return undefined}}}, "", false)	S:{\n\t"a" : undefined\n}
+tojson([{tojson(){return undefined}}])	E:TypeError:can't access property "length", s is undefined
+tojson([{tojson(){return null}}], "", false)	S:[\n\tnull\n]
+tojson({a:[]}, "", false) + "|" + tojson({a:{}}, "", false) + "|" + tojson([[]], "", false)	S:{\n\t"a" : [ ]\n}|{\n\t"a" : { }\n}|[\n\t[ ]\n]
+tojson({hasOwnProperty: 5, a: 1})	S:{ "hasOwnProperty" : 5, "a" : 1 }
+tojson({toString: 5, a: 1})	S:[Object]
+tojson({constructor: 5, a: 1})	S:{ "constructor" : 5, "a" : 1 }
+tojson({valueOf: 5, a: 1})	S:{ "valueOf" : 5, "a" : 1 }
+tojson(Object.create(null, {hasOwnProperty: {value: Object.prototype.hasOwnProperty}, a: {value: 1, enumerable: true}}))	S:[Object]
+tojson(Object.create(null, {toString: {value: () => "Q"}, a: {value: 1, enumerable: true}}))	S:{ "a" : 1 }
+tojson(Object.create(null, {tojson: {value: () => "TJ"}}))	S:TJ
+tojson(Object.setPrototypeOf([1], null))	S:[Object]
+tojson({b: 2, a: 1, c: {z: 1, y: 2}}, "", true, 0, true)	S:{ "a" : 1, "b" : 2, "c" : { "y" : 2, "z" : 1 } }
+tojson({b: 2, a: 1}, "", true, 0, false)	S:{ "b" : 2, "a" : 1 }
+tojson([{b: 2, a: 1}], "", true, 0, true)	S:[ { "a" : 1, "b" : 2 } ]
+tojson({b: 2, a: 1, [Symbol.iterator]: 1}, "", true, 0, 1)	S:{ "a" : 1, "b" : 2 }
+tojson({b: 2, a: 1}, undefined, undefined, undefined, true)	S:{ "a" : 1, "b" : 2 }
+tojson({10: 1, 9: 2, b: 3, B: 4, a: 5}, "", true, 0, true)	S:{ "10" : 1, "9" : 2, "B" : 4, "a" : 5, "b" : 3 }
+tojson({a: 1}, "", true, "2")	S:{ "a" : 1 }
+tojson({a: {b: 1}}, "", true, "99")	S:{ "a" : [Object] }
+tojson({a: 1}, "", true, null)	S:{ "a" : 1 }
+tojson({a: 1}, "", true, -5)	E:RangeError:repeat count must be non-negative
+tojson({a: {tojson(...a){return JSON.stringify(a)}}}, "", true, "3")	S:{ "a" : ["",true,"31",false] }
+tojson({a: 1}, "", "yes")	S:{ "a" : 1 }
+tojson({a: 1}, "", 0)	S:{\n\t"a" : 1\n}
+tojson({a: "x".repeat(90)}, "", 0)	S:{\n\t"a" : "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"\n}
+tojson({a: "x".repeat(90)}, "", null)	S:{\n\t"a" : "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"\n}
+tojson({a: "x".repeat(90)}, false)	S:{\n\t"a" : "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"\n}
+tojson({a: "x".repeat(90)}, 0)	S:{\n\t"a" : "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"\n}
+tojson({a: 1}, 0, false)	S:{\n\t"a" : 1\n}
+tojson({a: 1}, {repeat(){ return "R" }}, false)	S:{\nR[object Object]"a" : 1\nR}
+JSON.stringify(tojson({a: {tojson(){return "q\n\n\t  z\r\nw"}}}, "", true))	S:"{ \\"a\\" : q   z w }"
+JSON.stringify(tojson({tojson(){return "q\nz"}}, "", true))	S:"q z"
+JSON.stringify(tojson({a: new Function("return 1")}, "", true))	S:"{ \\"a\\" : function anonymous( ) { return 1 } }"
+JSON.stringify(tojson([new Function("return 1")], "", true))	S:"[ function anonymous( ) { return 1 } ]"
+JSON.stringify(tojson({a: new Function("return 1")}))	S:"{ \\"a\\" : function anonymous( ) { return 1 } }"
+JSON.stringify(tojson({a: "x\ny"}, "", true))	S:"{ \\"a\\" : \\"x\\\\ny\\" }"
+JSON.stringify(tojson({a: {tojson(){return ["x\ny"]}}}, "", true))	E:TypeError:s.replace is not a function
+JSON.stringify(tojson({a: {tojson(){return {length: 3}}}}, "", true))	E:TypeError:s.replace is not a function
+JSON.stringify(tojson({a: {tojson(){return new String("p\nq")}}}, "", true))	S:"{ \\"a\\" : p q }"
+JSON.stringify(tojson({a: {tojson(){return null}}}, "", true))	E:TypeError:can't access property "length", s is null
+JSON.stringify(tojson({a: {tojson(){return 12}}}, "", true))	S:"{ \\"a\\" : 12 }"
+JSON.stringify(tojson({a: {tojson(){return "x".repeat(90)}}}, "", true))	S:"{ \\"a\\" : xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx }"
+JSON.stringify(tojson({a: {b: "x".repeat(90)}}, "", true))	S:"{ \\"a\\" : { \\"b\\" : \\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\" } }"
+JSON.stringify(tojson([{tojson(){return "a\nb"}}, {tojson(){return "c\nd"}}], "", true))	S:"[ a b, c d ]"
+JSON.stringify(tojson({a: new Map([[1, {tojson(){return "m\nn"}}]])}, "", true))	S:"{ \\"a\\" : new Map([ [ 1, m n ] ]) }"
+JSON.stringify(tojson(new Map([[1, {tojson(){return "m\nn"}}]]), "", true))	S:"new Map([ [ 1, m n ] ])"
+JSON.stringify(tojson(new Set([{tojson(){return "m\nn"}}]), "", true))	S:"new Set([ m n ])"
+JSON.stringify(Map.tojson(new Map([[1, {tojson(){return "m\nn"}}]]), "", true))	S:"new Map([ [ 1, m n ] ])"
+JSON.stringify(Array.tojson([{tojson(){return "m\nn"}}], "", true))	S:"[ m n ]"
+JSON.stringify(tojsonObject({a: {tojson(){return "m\nn"}}}, "", true))	S:"{ \\"a\\" : m n }"
+JSON.stringify(tojsonObject({a: {tojson(){return "m\nn"}}}))	S:"{\\n\\t\\"a\\" : m\\nn\\n}"
+JSON.stringify(tojsononeline({a: {tojson(){return "m\nn"}}}))	S:"{ \\"a\\" : m n }"
+JSON.stringify(tojsononeline({a: new Function("return 1")}))	S:"{ \\"a\\" : function anonymous(\\n) {\\nreturn 1\\n} }"
+JSON.stringify(tojsononeline("a\nb"))	S:"\\"a\\\\nb\\""
+JSON.stringify(tojsononeline({tojson(){return "q\nz"}}))	S:"q\\nz"
+["q\nz", "q\n\nz", "q\n z", "q\n\tz", "q\t\nz", "q \nz", "q\rz", "q\r\nz", "q\n\n\t  z", "q\tz", "q  z", "\nq", "q\n", "q z", "q\u000bz"].map(S => JSON.stringify(tojson({tojson(){return S}}, "", true))).join(" ")	S:"q z" "q z" "q  z" "q z" "q z" "q  z" "q z" "q z" "q   z" "q z" "q  z" " q" "q " "q z" "q\\u000bz"
+["q\nz", "q\n\nz", "q\n z", "q\n\tz", "q\rz", "q\r\nz"].map(S => JSON.stringify(tojson({tojson(){return S}}))).join(" ")	S:"q z" "q z" "q  z" "q z" "q z" "q z"
+["q\nz", "q\n\nz", "q\n z", "q\n\tz", "q\rz", "q\r\nz"].map(S => JSON.stringify(tojson({tojson(){return S}}, "", false))).join(" ")	S:"q\\nz" "q\\n\\nz" "q\\n z" "q\\n\\tz" "q\\rz" "q\\r\\nz"
+[70,75,76,77,78,79,80,81,82,85].map(n => n + ":" + JSON.stringify(tojson({tojson(){return "a\n" + "x".repeat(n-2)}}, "", true)).includes("\\n")).join(" ")	S:70:false 75:false 76:false 77:false 78:false 79:false 80:true 81:true 82:true 85:true
+[70,75,76,77,78,79,80,81,82,85].map(n => n + ":" + JSON.stringify(tojson({tojson(){return "a\n" + "x".repeat(n-2)}})).includes("\\n")).join(" ")	S:70:false 75:false 76:false 77:false 78:false 79:false 80:true 81:true 82:true 85:true
+[76,77,78,79,80,81,82].map(n => { const t = {a: "x".repeat(n - 11)}; return n + ":" + tojsononeline(t).length + (tojson(t).includes("\n") ? "M" : "O") }).join(" ")	S:76:77O 77:78O 78:79M 79:80M 80:81M 81:82M 82:83M
+[76,77,78,79,80,81,82].map(n => { const t = ["x".repeat(n - 6)]; return n + ":" + tojsononeline(t).length + (tojson(t).includes("\n") ? "M" : "O") }).join(" ")	S:76:76O 77:77O 78:78O 79:79M 80:80M 81:81M 82:82M
+[76,77,78,79,80,81,82].map(n => { const t = {a: {b: "x".repeat(n - 21)}}; return n + ":" + tojsononeline(t).length + (tojson(t).includes("\n") ? "M" : "O") }).join(" ")	S:76:77M 77:78M 78:79M 79:80M 80:81M 81:82M 82:83M
+[70, 76,77,78,79,80,81,82].map(n => { const t = {a: {b: "x".repeat(n - 21)}, c: 1}; return n + ":" + tojsononeline(t).length + (tojson(t).includes("\n") ? "M" : "O") }).join(" ")	S:70:80M 76:86M 77:87M 78:88M 79:89M 80:90M 81:91M 82:92M
+[undefined, null, "", "  ", 0, false, "\t"].map(i => [undefined, null, true, false, 0, 1, "yes"].map(n => { try { return JSON.stringify(tojson({a: {b: {tojson(...a){ return JSON.stringify(a) + "\n|" }}}}, i, n)) } catch (e) { return "E" + e.message } }).join("  ")).join("\n")	S:"{ \\"a\\" : { \\"b\\" : [\\"\\\\t\\",null,2,false] | } }"  "{ \\"a\\" : { \\"b\\" : [\\"\\\\t\\",null,2,false] | } }"  "{ \\"a\\" : { \\"b\\" : [\\"\\",true,2,false] | } }"  "{\\n\\t\\"a\\" : {\\n\\t\\t\\"b\\" : [\\"\\\\t\\",false,2,false]\\n|\\n\\t}\\n}"  "{\\n\\t\\"a\\" : {\\n\\t\\t\\"b\\" : [\\"\\\\t\\",0,2,false]\\n|\\n\\t}\\n}"  "{ \\"a\\" : { \\"b\\" : [\\"\\",1,2,false] | } }"  "{ \\"a\\" : { \\"b\\" : [\\"\\",\\"yes\\",2,false]\\n| } }"\n"{ \\"a\\" : { \\"b\\" : [\\"\\\\t\\",null,2,false] | } }"  "{ \\"a\\" : { \\"b\\" : [\\"\\\\t\\",null,2,false] | } }"  "{ \\"a\\" : { \\"b\\" : [\\"\\",true,2,false] | } }"  "{\\n\\t\\"a\\" : {\\n\\t\\t\\"b\\" : [\\"\\\\t\\",false,2,false]\\n|\\n\\t}\\n}"  "{\\n\\t\\"a\\" : {\\n\\t\\t\\"b\\" : [\\"\\\\t\\",0,2,false]\\n|\\n\\t}\\n}"  "{ \\"a\\" : { \\"b\\" : [\\"\\",1,2,false] | } }"  "{ \\"a\\" : { \\"b\\" : [\\"\\",\\"yes\\",2,false]\\n| } }"\n"{ \\"a\\" : { \\"b\\" : [\\"\\\\t\\",null,2,false] | } }"  "{ \\"a\\" : { \\"b\\" : [\\"\\\\t\\",null,2,false] | } }"  "{ \\"a\\" : { \\"b\\" : [\\"\\",true,2,false] | } }"  "{\\n\\t\\"a\\" : {\\n\\t\\t\\"b\\" : [\\"\\\\t\\",false,2,false]\\n|\\n\\t}\\n}"  "{\\n\\t\\"a\\" : {\\n\\t\\t\\"b\\" : [\\"\\\\t\\",0,2,false]\\n|\\n\\t}\\n}"  "{ \\"a\\" : { \\"b\\" : [\\"\\",1,2,false] | } }"  "{ \\"a\\" : { \\"b\\" : [\\"\\",\\"yes\\",2,false]\\n| } }"\n"{\\n  \\"a\\" : {\\n    \\"b\\" : [\\"  \\",null,2,false]\\n|\\n  }\\n}"  "{\\n  \\"a\\" : {\\n    \\"b\\" : [\\"  \\",null,2,false]\\n|\\n  }\\n}"  "{ \\"a\\" : { \\"b\\" : [\\"\\",true,2,false] | } }"  "{\\n  \\"a\\" : {\\n    \\"b\\" : [\\"  \\",false,2,false]\\n|\\n  }\\n}"  "{\\n  \\"a\\" : {\\n    \\"b\\" : [\\"  \\",0,2,false]\\n|\\n  }\\n}"  "{ \\"a\\" : { \\"b\\" : [\\"\\",1,2,false] | } }"  "{ \\"a\\" : { \\"b\\" : [\\"\\",\\"yes\\",2,false]\\n| } }"\n"{ \\"a\\" : { \\"b\\" : [\\"\\\\t\\",null,2,false] | } }"  "{ \\"a\\" : { \\"b\\" : [\\"\\\\t\\",null,2,false] | } }"  "{ \\"a\\" : { \\"b\\" : [\\"\\",true,2,false] | } }"  "{\\n\\t\\"a\\" : {\\n\\t\\t\\"b\\" : [\\"\\\\t\\",false,2,false]\\n|\\n\\t}\\n}"  "{\\n\\t\\"a\\" : {\\n\\t\\t\\"b\\" : [\\"\\\\t\\",0,2,false]\\n|\\n\\t}\\n}"  "{ \\"a\\" : { \\"b\\" : [\\"\\",1,2,false] | } }"  "{ \\"a\\" : { \\"b\\" : [\\"\\",\\"yes\\",2,false]\\n| } }"\n"{ \\"a\\" : { \\"b\\" : [\\"\\\\t\\",null,2,false] | } }"  "{ \\"a\\" : { \\"b\\" : [\\"\\\\t\\",null,2,false] | } }"  "{ \\"a\\" : { \\"b\\" : [\\"\\",true,2,false] | } }"  "{\\n\\t\\"a\\" : {\\n\\t\\t\\"b\\" : [\\"\\\\t\\",false,2,false]\\n|\\n\\t}\\n}"  "{\\n\\t\\"a\\" : {\\n\\t\\t\\"b\\" : [\\"\\\\t\\",0,2,false]\\n|\\n\\t}\\n}"  "{ \\"a\\" : { \\"b\\" : [\\"\\",1,2,false] | } }"  "{ \\"a\\" : { \\"b\\" : [\\"\\",\\"yes\\",2,false]\\n| } }"\n"{\\n\\t\\"a\\" : {\\n\\t\\t\\"b\\" : [\\"\\\\t\\",null,2,false]\\n|\\n\\t}\\n}"  "{\\n\\t\\"a\\" : {\\n\\t\\t\\"b\\" : [\\"\\\\t\\",null,2,false]\\n|\\n\\t}\\n}"  "{ \\"a\\" : { \\"b\\" : [\\"\\",true,2,false] | } }"  "{\\n\\t\\"a\\" : {\\n\\t\\t\\"b\\" : [\\"\\\\t\\",false,2,false]\\n|\\n\\t}\\n}"  "{\\n\\t\\"a\\" : {\\n\\t\\t\\"b\\" : [\\"\\\\t\\",0,2,false]\\n|\\n\\t}\\n}"  "{ \\"a\\" : { \\"b\\" : [\\"\\",1,2,false] | } }"  "{ \\"a\\" : { \\"b\\" : [\\"\\",\\"yes\\",2,false]\\n| } }"
+[undefined, null, "", "  ", 0, false, "\t"].map(i => [undefined, null, true, false, 0, 1, "yes"].map(n => { try { return JSON.stringify(tojson({tojson(...a){ return JSON.stringify(a) + "\n|" }}, i, n)) } catch (e) { return "E" + e.message } }).join("  ")).join("\n")	S:"[\\"\\",null,0,false] |"  "[\\"\\",null,0,false] |"  "[\\"\\",true,0,false] |"  "[\\"\\",false,0,false]\\n|"  "[\\"\\",0,0,false]\\n|"  "[\\"\\",1,0,false] |"  "[\\"\\",\\"yes\\",0,false]\\n|"\n"[\\"\\",null,0,false] |"  "[\\"\\",null,0,false] |"  "[\\"\\",true,0,false] |"  "[\\"\\",false,0,false]\\n|"  "[\\"\\",0,0,false]\\n|"  "[\\"\\",1,0,false] |"  "[\\"\\",\\"yes\\",0,false]\\n|"\n"[\\"\\",null,0,false] |"  "[\\"\\",null,0,false] |"  "[\\"\\",true,0,false] |"  "[\\"\\",false,0,false]\\n|"  "[\\"\\",0,0,false]\\n|"  "[\\"\\",1,0,false] |"  "[\\"\\",\\"yes\\",0,false]\\n|"\n"[\\"  \\",null,0,false]\\n|"  "[\\"  \\",null,0,false]\\n|"  "[\\"  \\",true,0,false]\\n|"  "[\\"  \\",false,0,false]\\n|"  "[\\"  \\",0,0,false]\\n|"  "[\\"  \\",1,0,false]\\n|"  "[\\"  \\",\\"yes\\",0,false]\\n|"\n"[\\"\\",null,0,false] |"  "[\\"\\",null,0,false] |"  "[\\"\\",true,0,false] |"  "[\\"\\",false,0,false]\\n|"  "[\\"\\",0,0,false]\\n|"  "[\\"\\",1,0,false] |"  "[\\"\\",\\"yes\\",0,false]\\n|"\n"[\\"\\",null,0,false] |"  "[\\"\\",null,0,false] |"  "[\\"\\",true,0,false] |"  "[\\"\\",false,0,false]\\n|"  "[\\"\\",0,0,false]\\n|"  "[\\"\\",1,0,false] |"  "[\\"\\",\\"yes\\",0,false]\\n|"\n"[\\"\\\\t\\",null,0,false]\\n|"  "[\\"\\\\t\\",null,0,false]\\n|"  "[\\"\\\\t\\",true,0,false]\\n|"  "[\\"\\\\t\\",false,0,false]\\n|"  "[\\"\\\\t\\",0,0,false]\\n|"  "[\\"\\\\t\\",1,0,false]\\n|"  "[\\"\\\\t\\",\\"yes\\",0,false]\\n|"
+[undefined, null, "", "  ", 0, false, "\t"].map(i => [undefined, null, true, false, 0, 1, "yes"].map(n => { try { return JSON.stringify(tojson(new Map([[1, {tojson(...a){ return JSON.stringify(a) + "\n|" }}]]), i, n)) } catch (e) { return "E" + e.message } }).join("  ")).join("\n")	S:"new Map([ [ 1, [\\"\\\\t\\",null,2,false] | ] ])"  "new Map([ [ 1, [\\"\\\\t\\",null,2,false] | ] ])"  "new Map([ [ 1, [\\"\\",true,2,false] | ] ])"  "new Map([\\n\\t[\\n\\t\\t1,\\n\\t\\t[\\"\\\\t\\",false,2,false]\\n|\\n\\t]\\n])"  "new Map([\\n\\t[\\n\\t\\t1,\\n\\t\\t[\\"\\\\t\\",0,2,false]\\n|\\n\\t]\\n])"  "new Map([ [ 1, [\\"\\",1,2,false] | ] ])"  "new Map([ [ 1, [\\"\\",\\"yes\\",2,false]\\n| ] ])"\n"new Map([ [ 1, [\\"\\\\t\\",null,2,false] | ] ])"  "new Map([ [ 1, [\\"\\\\t\\",null,2,false] | ] ])"  "new Map([ [ 1, [\\"\\",true,2,false] | ] ])"  "new Map([\\n\\t[\\n\\t\\t1,\\n\\t\\t[\\"\\\\t\\",false,2,false]\\n|\\n\\t]\\n])"  "new Map([\\n\\t[\\n\\t\\t1,\\n\\t\\t[\\"\\\\t\\",0,2,false]\\n|\\n\\t]\\n])"  "new Map([ [ 1, [\\"\\",1,2,false] | ] ])"  "new Map([ [ 1, [\\"\\",\\"yes\\",2,false]\\n| ] ])"\n"new Map([ [ 1, [\\"\\\\t\\",null,2,false] | ] ])"  "new Map([ [ 1, [\\"\\\\t\\",null,2,false] | ] ])"  "new Map([ [ 1, [\\"\\",true,2,false] | ] ])"  "new Map([\\n\\t[\\n\\t\\t1,\\n\\t\\t[\\"\\\\t\\",false,2,false]\\n|\\n\\t]\\n])"  "new Map([\\n\\t[\\n\\t\\t1,\\n\\t\\t[\\"\\\\t\\",0,2,false]\\n|\\n\\t]\\n])"  "new Map([ [ 1, [\\"\\",1,2,false] | ] ])"  "new Map([ [ 1, [\\"\\",\\"yes\\",2,false]\\n| ] ])"\n"new Map([\\n  [\\n    1,\\n    [\\"  \\",null,2,false]\\n|\\n  ]\\n])"  "new Map([\\n  [\\n    1,\\n    [\\"  \\",null,2,false]\\n|\\n  ]\\n])"  "new Map([ [ 1, [\\"\\",true,2,false] | ] ])"  "new Map([\\n  [\\n    1,\\n    [\\"  \\",false,2,false]\\n|\\n  ]\\n])"  "new Map([\\n  [\\n    1,\\n    [\\"  \\",0,2,false]\\n|\\n  ]\\n])"  "new Map([ [ 1, [\\"\\",1,2,false] | ] ])"  "new Map([ [ 1, [\\"\\",\\"yes\\",2,false]\\n| ] ])"\n"new Map([ [ 1, [\\"\\\\t\\",null,2,false] | ] ])"  "new Map([ [ 1, [\\"\\\\t\\",null,2,false] | ] ])"  "new Map([ [ 1, [\\"\\",true,2,false] | ] ])"  "new Map([\\n\\t[\\n\\t\\t1,\\n\\t\\t[\\"\\\\t\\",false,2,false]\\n|\\n\\t]\\n])"  "new Map([\\n\\t[\\n\\t\\t1,\\n\\t\\t[\\"\\\\t\\",0,2,false]\\n|\\n\\t]\\n])"  "new Map([ [ 1, [\\"\\",1,2,false] | ] ])"  "new Map([ [ 1, [\\"\\",\\"yes\\",2,false]\\n| ] ])"\n"new Map([ [ 1, [\\"\\\\t\\",null,2,false] | ] ])"  "new Map([ [ 1, [\\"\\\\t\\",null,2,false] | ] ])"  "new Map([ [ 1, [\\"\\",true,2,false] | ] ])"  "new Map([\\n\\t[\\n\\t\\t1,\\n\\t\\t[\\"\\\\t\\",false,2,false]\\n|\\n\\t]\\n])"  "new Map([\\n\\t[\\n\\t\\t1,\\n\\t\\t[\\"\\\\t\\",0,2,false]\\n|\\n\\t]\\n])"  "new Map([ [ 1, [\\"\\",1,2,false] | ] ])"  "new Map([ [ 1, [\\"\\",\\"yes\\",2,false]\\n| ] ])"\n"new Map([\\n\\t[\\n\\t\\t1,\\n\\t\\t[\\"\\\\t\\",null,2,false]\\n|\\n\\t]\\n])"  "new Map([\\n\\t[\\n\\t\\t1,\\n\\t\\t[\\"\\\\t\\",null,2,false]\\n|\\n\\t]\\n])"  "new Map([ [ 1, [\\"\\",true,2,false] | ] ])"  "new Map([\\n\\t[\\n\\t\\t1,\\n\\t\\t[\\"\\\\t\\",false,2,false]\\n|\\n\\t]\\n])"  "new Map([\\n\\t[\\n\\t\\t1,\\n\\t\\t[\\"\\\\t\\",0,2,false]\\n|\\n\\t]\\n])"  "new Map([ [ 1, [\\"\\",1,2,false] | ] ])"  "new Map([ [ 1, [\\"\\",\\"yes\\",2,false]\\n| ] ])"
+tojson({a: {tojson(...a){return JSON.stringify(a)}}}, "", true, 0, "S")	S:{ "a" : ["",true,1,"S"] }
+tojson([{tojson(...a){return JSON.stringify(a)}}], "", true, 0, "S")	S:[ ["",true,1,"S"] ]
+tojson(new Map([[1, {tojson(...a){return JSON.stringify(a)}}]]), "", true, 0, "S")	S:new Map([ [ 1, ["",true,2,false] ] ])
+tojson({tojson(...a){return JSON.stringify(a)}}, "", true, 0, "S")	S:["",true,0,"S"]
+tojson(Object.assign(function f(){}, {tojson(){ return "FT" }}))	S:function f(){}
+tojson(Object.assign(function f(){}, {toString(){ return "FS" }}))	E:TypeError:"toString" is read-only
+tojson({[Symbol.toStringTag]: "Map", a: 1})	S:{ "a" : 1 }
+tojson(Object.create(Array.prototype))	E:Error:The first argument to Array.tojson must be an array
+tojson(new (class extends Map {})([[1, 2]]))	S:new Map([ [ 1, 2 ] ])
+tojson(Object.create(Map.prototype, {entries: {value: () => [[7, 8]]}}))	S:new Map([ [ 7, 8 ] ])
+tojson({tojson: 1, a: 1})	S:{ "tojson" : 1, "a" : 1 }
+tojson(/a\/b/gimsuy)	S:/a\\/b/gimsuy
+tojson("\ud800") + tojson("a\u007f\u0080")	S:"\\ud800""a"
+tojson(new Date(0), "  ", false) + "|" + new Date(0).tojson() + "|" + new Date(5).tojson()	S:ISODate("1970-01-01T00:00:00Z")|ISODate("1970-01-01T00:00:00Z")|ISODate("1970-01-01T00:00:00.005Z")
+[0, 9999, 10000, -1, -62198755200001, 253402300800000, 1e15, -1e15].map(t => new Date(t).tojson()).join(" ")	S:ISODate("1970-01-01T00:00:00Z") ISODate("1970-01-01T00:00:09.999Z") ISODate("1970-01-01T00:00:10Z") ISODate("1969-12-31T23:59:59.999Z") ISODate("-000002-12-31T23:59:59.999Z") ISODate("+010000-01-01T00:00:00Z") ISODate("+033658-09-27T01:46:40Z") ISODate("-029719-04-05T22:13:20Z")
+Date.prototype.tojson.call({getTime(){ return 0 }})	E:TypeError:this.toISOString is not a function
+Date.prototype.tojson.call({getTime(){ return 0 }, getUTCFullYear(){ return 3 }, getUTCMonth(){ return 1 }, getUTCDate(){ return 2 }, getUTCHours(){ return 3 }, getUTCMinutes(){ return 4 }, getUTCSeconds(){ return 5 }, getUTCMilliseconds(){ return 6 }})	E:TypeError:this.toISOString is not a function
+Date.prototype.tojson.call({getTime(){ return NaN }, getUTCFullYear(){ return 3 }, getUTCMonth(){ return 1 }, getUTCDate(){ return 2 }, getUTCHours(){ return 3 }, getUTCMinutes(){ return 4 }, getUTCSeconds(){ return 5 }, getUTCMilliseconds(){ return 6 }})	S:ISODate("0NaN-NaN-NaNTNaN:NaN:NaNZ")
+(() => { const r = []; const o = {}; for (const k of ["getTime","getUTCFullYear","getUTCMonth","getUTCDate","getUTCHours","getUTCMinutes","getUTCSeconds","getUTCMilliseconds","toISOString","valueOf","getFullYear","getMonth","getDate","getHours","getMinutes","getSeconds","getMilliseconds","toString"]) o[k] = function () { r.push(k); return 1 }; Date.prototype.tojson.call(o); return r.join() })()	E:TypeError:str.replace is not a function
+Date.prototype.tojson.call({getTime(){ return 0 }, getUTCFullYear(){ return "ab" }, getUTCMonth(){ return "c" }, getUTCDate(){ return 123 }, getUTCHours(){ return -1 }, getUTCMinutes(){ return 4.5 }, getUTCSeconds(){ return 5 }, getUTCMilliseconds(){ return 6 }})	E:TypeError:this.toISOString is not a function
+Date.prototype.tojson.call({getTime(){ return 0 }, getUTCFullYear(){ return 12345 }, getUTCMonth(){ return 0 }, getUTCDate(){ return 1 }, getUTCHours(){ return 0 }, getUTCMinutes(){ return 0 }, getUTCSeconds(){ return 0 }, getUTCMilliseconds(){ return 0 }})	E:TypeError:this.toISOString is not a function
+Date.prototype.tojson.call({getTime(){ return 0 }, getUTCFullYear(){ return -12 }, getUTCMonth(){ return 0 }, getUTCDate(){ return 1 }, getUTCHours(){ return 0 }, getUTCMinutes(){ return 0 }, getUTCSeconds(){ return 0 }, getUTCMilliseconds(){ return 1000 }})	E:TypeError:this.toISOString is not a function
+["2000-01-01T00:00:00.000Z", "x.000Zy", ".000Z.000Z", "abc", "1.000Z", "T.000Z"].map(s => Date.prototype.tojson.call({getTime(){ return 0 }, toISOString(){ return s }})).join(" ")	S:ISODate("2000-01-01T00:00:00Z") ISODate("xZy") ISODate("Z.000Z") ISODate("abc") ISODate("1Z") ISODate("TZ")
+Date.prototype.tojson.call({getTime(){ return "x" }, toISOString(){ return "I" }}) + Date.prototype.tojson.call({getTime(){ return undefined }, toISOString(){ return "I" }}) + Date.prototype.tojson.call({getTime(){ return "" }, toISOString(){ return "I" }})	S:ISODate("0NaN-NaN-NaNTNaN:NaN:NaNZ")ISODate("0NaN-NaN-NaNTNaN:NaN:NaNZ")ISODate("I")
+tojsonObject(Object.create(null)) + "|" + tojsonObject({toString: 5})	S:[Object]|[Object]
+tojsonObject([1, 2])	S:[\n\t1,\n\t2\n]
+tojsonObject(new Map([[1,2]]))	S:new Map([\n\t[\n\t\t1,\n\t\t2\n\t]\n])
+tojsonObject({a: 1}, "  ")	S:{\n  "a" : 1\n}
+tojsonObject({a: 1}, "", true)	S:{ "a" : 1 }
+tojsonObject({a: {b: 1}}, undefined, undefined, 3)	S:{\n\t\t\t\t"a" : {\n\t\t\t\t\t"b" : 1\n\t\t\t\t}\n\t\t\t}
+tojsonObject({a: {tojson(...a){return JSON.stringify(a)}}})	S:{\n\t"a" : ["\\t",null,1,false]\n}
+tojsonObject({a: {tojson(...a){return JSON.stringify(a)}}}, undefined, undefined, undefined, 7)	S:{\n\t"a" : ["\\t",null,1,7]\n}
+tojsonObject(5)	E:ReferenceError:patchDiff is not defined
+tojsonObject("ab")	E:ReferenceError:patchDiff is not defined
+tojsonObject(null)	E:TypeError:can't access property "tojson", x is null
+tojsonObject(undefined)	E:ReferenceError:patchDiff is not defined
+tojsonObject({})	S:{ }
+tojsonObject({a: 1}, 5)	E:TypeError:indent.repeat is not a function
+tojsonObject({a: 1}, "", false, 101)	S:[Object]
+tojsonObject(Object.create(null, {a: {value: 1, enumerable: true}, toString: {value: 1}}))	S:[Object]
+tojsonObject(new Proxy({}, {ownKeys(){ throw new Error("OK") }}))	E:Error:OK
+(() => { const r = []; const p = new Proxy({a: 1, b: 2}, {get(t, k){ r.push(String(k)); return t[k] }, ownKeys(t){ r.push("ownKeys"); return Reflect.ownKeys(t) }, getOwnPropertyDescriptor(t, k){ r.push("gopd:" + String(k)); return Reflect.getOwnPropertyDescriptor(t, k) }, has(t, k){ r.push("has:" + String(k)); return k in t } }); tojson(p); return r.join() })()	E:ReferenceError:Reflect is not defined
+(() => { const r = []; const p = new Proxy({a: 1, b: 2}, {get(t, k){ r.push(String(k)); return t[k] }, ownKeys(t){ r.push("ownKeys"); return Reflect.ownKeys(t) }, getOwnPropertyDescriptor(t, k){ r.push("gopd:" + String(k)); return Reflect.getOwnPropertyDescriptor(t, k) } }); tojson(p, "", true, 0, true); return r.join() })()	E:ReferenceError:Reflect is not defined
+(() => { const r = []; const p = new Proxy([1, 2], {get(t, k){ r.push(String(k)); return t[k] } }); tojson(p); return r.join() })()	S:tojson,constructor,constructor,constructor,constructor,length,length,0,length,1,length
+Array.tojson([1, 2], "  ") + "|" + Array.tojson([1, [2]], "", false) + "|" + Array.tojson([1], "\t", true)	S:[\n  1,\n  2\n]|[\n\t1,\n\t[\n\t\t2\n\t]\n]|[ 1 ]
+Array.tojson([]) + "|" + Array.tojson([], "  ", false)	S:[ ]|[ ]
+Array.tojson([1, {a: 1}], undefined, undefined, 2)	S:[\n\t\t\t1,\n\t\t\t{\n\t\t\t\t"a" : 1\n\t\t\t}\n\t\t]
+Array.tojson([[1]], "", false, 101)	S:[Array]
+Array.tojson([{tojson(...a){return JSON.stringify(a)}}], undefined, undefined, undefined, 9)	S:[\n\t["\\t",null,1,9]\n]
+Array.tojson([{b: 2, a: 1}], undefined, true, undefined, 9)	S:[ { "a" : 1, "b" : 2 } ]
+Array.tojson(new Proxy([1], {}))	S:[\n\t1\n]
+Array.tojson([1], 5)	E:TypeError:indent.repeat is not a function
+Array.tojson([1], "", true, -1)	E:RangeError:repeat count must be non-negative
+Array.tojson(["x".repeat(90)])	S:[\n\t"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"\n]
+(() => { const r = []; const p = new Proxy([1], {get(t, k){ r.push(String(k)); return t[k] } }); tojsonObject(p); return r.join() })()	S:tojson,constructor,constructor,constructor,constructor,length,length,0,length
+(() => { const r = []; const p = new Proxy([1], {get(t, k){ r.push(String(k)); return t[k] } }); Array.tojson(p); return r.join() })()	S:length,length,0,length
+tojson({constructor: Map, a: 1})	E:TypeError:m.entries is not a function
+tojson({constructor: Array, a: 1})	E:Error:The first argument to Array.tojson must be an array
+tojson({constructor: Set, a: 1})	S:new Set([ ])
+tojson({constructor: Date, a: 1})	S:{ "constructor" : function Date() {     [native code] }, "a" : 1 }
+tojson({constructor: Object, a: 1})	S:{ "constructor" : function Object() {     [native code] }, "a" : 1 }
+tojson({constructor: ObjectId, a: 1})	S:{ "constructor" : function ObjectId() {     [native code] }, "a" : 1 }
+tojson(Object.setPrototypeOf(new Map([[1,2]]), Object.prototype))	S:{ }
+tojson(Object.setPrototypeOf([1], Object.prototype))	S:{ "0" : 1 }
+tojson(Object.setPrototypeOf({a: 1, entries(){ return [[3,4]] }}, Map.prototype))	S:new Map([ [ 3, 4 ] ])
+[Object, Array, Map, Set, Date, undefined, null, 5, function X(){}, "Map"].map(C => { let n = 0; const seq = []; const o = {get constructor(){ n++; return C }, a: 1, entries(){ return [] }}; let out; try { out = tojson(o) } catch (e) { out = "E:" + e.message } return String(C && C.name || C) + "=" + n + ">" + out }).join(" | ")	S:Object=3>{\n\t"constructor" : function Object() {\n    [native code]\n},\n\t"a" : 1,\n\t"entries" : entries(){ return [] }\n} | Array=4>E:The first argument to Array.tojson must be an array | Map=4>new Map([ ]) | Set=4>new Set([ ]) | Date=3>{\n\t"constructor" : function Date() {\n    [native code]\n},\n\t"a" : 1,\n\t"entries" : entries(){ return [] }\n} | undefined=2>{ "a" : 1, "entries" : entries(){ return [] } } | null=2>{ "a" : 1, "entries" : entries(){ return [] } } | 5=3>{ "constructor" : 5, "a" : 1, "entries" : entries(){ return [] } } | X=3>{\n\t"constructor" : function X(){},\n\t"a" : 1,\n\t"entries" : entries(){ return [] }\n} | Map=3>{ "constructor" : "Map", "a" : 1, "entries" : entries(){ return [] } }
+[Array, Map, Set].map(C => { let n = 0; const o = Object.setPrototypeOf({get constructor(){ n++; return Object }, a: 1, entries(){ return [] }}, C.prototype); let out; try { out = tojson(o) } catch (e) { out = "E:" + e.message } return C.name + "=" + n + ">" + out }).join(" | ")	S:Array=3>{\n\t"constructor" : function Object() {\n    [native code]\n},\n\t"a" : 1,\n\t"entries" : entries(){ return [] }\n} | Map=3>{\n\t"constructor" : function Object() {\n    [native code]\n},\n\t"a" : 1,\n\t"entries" : entries(){ return [] }\n} | Set=3>{\n\t"constructor" : function Object() {\n    [native code]\n},\n\t"a" : 1,\n\t"entries" : entries(){ return [] }\n}
+(() => { let seq = []; const o = {get constructor(){ seq.push("c"); return Object }, get toString(){ seq.push("ts"); return Object.prototype.toString }, get _simpleKeys(){ seq.push("sk"); return undefined }, get tojson(){ seq.push("tj"); return undefined }, a: 1}; tojson(o); return seq.join() })()	S:tj,c,c,ts,sk,c,ts,sk,tj
+tojson({_simpleKeys: true, a: 1, b: 2})	S:{ "_simpleKeys" : true, "a" : 1, "b" : 2 }
+tojson({_simpleKeys: false, a: 1})	S:{ "_simpleKeys" : false, "a" : 1 }
+tojson(Object.assign(Object.create({inh: 1}), {_simpleKeys: true, a: 1}))	S:{ "_simpleKeys" : true, "a" : 1, "inh" : 1 }
+tojson(Object.assign(Object.create({inh: 1}), {_simpleKeys: 1, a: 1}))	S:{ "_simpleKeys" : 1, "a" : 1, "inh" : 1 }
+tojson({[Symbol.toStringTag]: "X", a: 1})	S:{ "a" : 1 }
+(() => { let seq = []; const o = {get [Symbol.toStringTag](){ seq.push("tag"); return "Q" }, a: 1}; tojson(o); return seq.join() })()	S:tag
+tojson({get [Symbol.toStringTag](){ throw new Error("TAG") }, a: 1})	S:[Object]
+tojson({toString(){ throw new Error("TS") }, a: 1})	S:[Object]
+(() => { let n = 0; tojson({toString(){ n++; return "x" }, a: 1}); return n })()	J:1
+tojson({get toString(){ throw new Error("TSG") }, a: 1})	S:[Object]
+tojson({toString: null, a: 1})	S:[Object]
+tojson({toString: {}, a: 1})	S:[Object]
+tojson(Object.create(null, {toString: {value: 5}, tojson: {value: 1}, a: {value: 1, enumerable: true}}))	S:[Object]
+[Array, Map, Set].map(C => [0,1,2,3].map(i => { let n = 0; const o = {get constructor(){ return n++ === i ? C : Object }, entries(){ return [] }}; let out; try { out = tojson(o, "", true) } catch (e) { out = "E:" + e.message } return C.name + i + "=" + n + ">" + out.slice(0, 12) }).join(" ")).join(" | ")	S:Array0=3>{ "construct Array1=4>E:x.construc Array2=3>{ "construct Array3=3>{ "construct | Map0=3>{ "construct Map1=4>E:x.construc Map2=3>{ "construct Map3=3>{ "construct | Set0=3>{ "construct Set1=4>E:x.construc Set2=3>{ "construct Set3=3>{ "construct
+[Array, Map, Set].map(C => [0,1,2,3].map(i => { let n = 0; const o = {get constructor(){ return n++ === i ? Object : C }, entries(){ return [] }}; let out; try { out = tojson(o, "", true) } catch (e) { out = "E:" + e.message } return C.name + i + "=" + n + ">" + out.slice(0, 12) }).join(" ")).join(" | ")	S:Array0=4>E:The first  Array1=3>{ "construct Array2=4>E:The first  Array3=4>E:x.construc | Map0=4>new Map([ ]) Map1=3>{ "construct Map2=4>new Map([ ]) Map3=4>E:x.construc | Set0=4>new Set([ ]) Set1=3>{ "construct Set2=4>new Set([ ]) Set3=4>E:x.construc
+(() => { let n = 0; class X extends Map {}; const m = new X([[1,2]]); Object.defineProperty(m, "constructor", {get(){ n++; return {} }}); const out = tojson(m); return n + out })()	S:2{ }
+(() => { let n = 0; const m = new Map([[1,2]]); Object.defineProperty(m, "constructor", {get(){ n++; return {} }}); const out = tojson(m); return n + out })()	S:2{ }
+(() => { let n = 0; const m = [1]; Object.defineProperty(m, "constructor", {get(){ n++; return {} }}); const out = tojson(m); return n + out })()	S:2{ "0" : 1 }
+(() => { let n = 0; const m = [1]; Object.defineProperty(m, "constructor", {get(){ n++; return undefined }}); const out = tojson(m); return n + out })()	S:1{ "0" : 1 }
+(() => { let n = 0; const m = new Set([1]); Object.defineProperty(m, "constructor", {get(){ n++; return Map }}); try { return n + tojson(m) } catch (e) { return n + e.message } })()	S:0new Map([ [ 1, 1 ] ])
+(() => { let n = 0; const m = {}; Object.defineProperty(m, "constructor", {get(){ n++; return {name: "Map"} }}); try { return n + tojson(m) } catch (e) { return n + e.message } })()	S:0{ }
+tojson({constructor: undefined, a: 1}) + "|" + tojson({constructor: null, a: 1})	S:{ "a" : 1 }|{ "a" : 1 }
+tojson({constructor: {tojson(...a){ return JSON.stringify(a) }}, a: 1}, "", true, 0, "S")	S:[{"constructor":{},"a":1},"",true,0,"S"]
+tojson({constructor: {tojson(...a){ return JSON.stringify(a.slice(1)) }}, a: 1})	S:["",null,0,false]
+tojson({_simpleKeys: true, x: undefined, f(){}, a: 1})	S:{ "_simpleKeys" : true, "f" : f(){}, "a" : 1 }
+tojson({x: undefined, a: 1})	S:{ "a" : 1 }
+tojson({x: undefined})	S:{ }
+tojson(Object.assign(Object.create({inh: 2, f(){}}), {a: 1, _simpleKeys: true}))	S:{ "a" : 1, "_simpleKeys" : true, "inh" : 2, "f" : f(){} }
+tojson({a: 1}, 5, true)	S:{ "a" : 1 }
+tojson({a: 1}, 0, false) + "|" + tojson({a: 1}, null, false)	S:{\n\t"a" : 1\n}|{\n\t"a" : 1\n}
+tojson(new Function("return 1"))	S:function anonymous(\n) {\nreturn 1\n}
+tojson(new Date(0), "", false, 200) + tojson({tojson(){return "T"}}, "", false, 200) + tojson({toString: 5}, "", false, 200)	S:ISODate("1970-01-01T00:00:00Z")T[Object]
+tojson(new Map([[1,2]]), "", false, 101) + "|" + tojson(new Map([[1,2]]), "", false, 100) + "|" + Array.tojson([], "", false, 101)	S:new Map([Array])|new Map([\n\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t[Array]\n\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t])|[Array]
+tojson({tojson(...a){return JSON.stringify(a)}}, "", true, 0, 0) + tojson({tojson(...a){return JSON.stringify(a)}}, "", true, 0, null) + tojson({tojson(...a){return JSON.stringify(a)}}, "", true, null)	S:["",true,0,0]["",true,0,null]["",true,null,false]
+["1", [1], 2, "true"].map(n => JSON.stringify(tojson({tojson(){return "q\nz"}}, "", n))).join(" ")	S:"q z" "q z" "q\\nz" "q\\nz"
+["q\fz", "q z", "q z", "q\u0085z", "q\u000bz", "q \t z"].map(S => [...tojson({tojson(){return S}}, "", true)].map(c => c.charCodeAt(0)).join(".")).join(" ")	S:113.12.122 113.8232.122 113.160.122 113.133.122 113.11.122 113.32.32.32.122
+tojsononeline({tojson(...a){return JSON.stringify(a)}}) + tojsononeline({a: {tojson(...a){return JSON.stringify(a)}}})	S:[" ",true,0,false]{ "a" : ["",true,1,false] }
+tojsononeline(5) + tojsononeline("x") + tojsononeline(undefined) + tojsononeline([1, [2]]) + tojsononeline(new Map([[1, 2]]))	S:5"x"undefined[ 1, [ 2 ] ]new Map([ [ 1, 2 ] ])
+tojsononeline({b: 1, a: 2}, 1)	S:{ "b" : 1, "a" : 2 }
+(() => { const r = []; const p = new Proxy({tojson(){ return "x" }}, {get(t, k){ r.push(String(k)); return t[k] } }); tojson(p); return r.join() })()	S:tojson,tojson,tojson
+(() => { const r = []; const p = new Proxy({constructor: Map, entries(){ return [] }}, {get(t, k){ r.push(String(k)); return t[k] } }); tojson(p); return r.join() })()	S:tojson,constructor,constructor,constructor,constructor,entries
+Object.getPrototypeOf(Array.tojson([1])) === String.prototype	J:true
+(() => { const s = new Set(); const r = Set.tojson(s); return typeof r })()	S:string
+(() => { let g; try { tojson({get a(){ g = new.target; throw 1 }}) } catch (e) {} return String(g) })()	S:undefined
+[printjson(1), printjson(), printjson({tojson(){ return 5 }})].map(String).join()	S:undefined,undefined,undefined
+printjson(Symbol())	E:Error:tojson can't handle type symbol
+(() => { const r = []; printjson({tojson(...a){ r.push(JSON.stringify(a)); return "" }}); printjson({tojson(...a){ r.push(JSON.stringify(a)); return "" }}, 1, 2, 3); return r.join() })()	S:["",null,0,false],["",null,0,false]
+(() => { const r = []; printjson({a: {tojson(...a){ r.push(JSON.stringify(a)); return "" }}}); return r.join() })()	S:["\\t",null,1,false]
+[1, "1", new Number(1), NaN, null, undefined, {}, [], "", new String(""), true, () => 1, 1n, Symbol()].map(v => [isNumber(v), isString(v), isObject(v)].map(Number).join("")).join(" ")	S:100 010 001 100 001 000 001 001 010 001 000 000 000 000
+isNumber() + "," + isString() + "," + isObject()	S:false,false,false
+toJsonForLog(1) + "|" + toJsonForLog("a") + "|" + toJsonForLog(undefined) + "|" + toJsonForLog(null) + "|" + toJsonForLog(NaN) + "|" + toJsonForLog(Infinity) + "|" + toJsonForLog(-0)	S:1|"a"|{"$undefined":true}|null|null|null|0
+toJsonForLog([1, undefined, () => 1, NaN]) + "|" + toJsonForLog({a: () => 1, b: Symbol(), c: 1n})	E:TypeError:BigInt value can't be serialized in JSON
+toJsonForLog({a: NumberLong(5), b: NumberInt(3), c: ObjectId("507f1f77bcf86cd799439011"), d: NumberDecimal("1.5"), e: Timestamp(1, 2), f: BinData(0, "AA=="), g: /a/g, h: MinKey, i: MaxKey})	S:{"a":{"$numberLong":"5"},"b":3,"c":{"$oid":"507f1f77bcf86cd799439011"},"d":{"$numberDecimal":"1.5"},"e":{"$timestamp":{"t":1,"i":2}},"f":{"$binary":"AA==","$type":"00"},"g":{"$regex":"a","$options":"g"},"h":{"$minKey":1},"i":{"$maxKey":1}}
+toJsonForLog({a: new Date(NaN)})	S:{"a":null}
+toJsonForLog(new Date(0)) + "|" + toJsonForLog(new Map([[1,2]])) + "|" + toJsonForLog(new Set([1]))	S:"1970-01-01T00:00:00.000Z"|{}|{}
+toJsonForLog({toJSON(){ return "TJ" }}) + "|" + toJsonForLog({tojson(){ return "tj" }})	S:"TJ"|{}
+toJsonForLog({a: {b: {c: undefined}}}) + "|" + toJsonForLog([undefined]) + "|" + toJsonForLog({u: [undefined, {x: undefined}]})	S:{"a":{"b":{"c":{"$undefined":true}}}}|[{"$undefined":true}]|{"u":[{"$undefined":true},{"x":{"$undefined":true}}]}
+toJsonForLog((() => { const o = {}; o.o = o; return o })())	S:{"o":"[recursive]"}
+toJsonForLog({a: 1}, 2) + "|" + toJsonForLog.length	S:{"a":1}|1
+toJsonForLog({"$undefined": 5, a: Code("x"), b: DBPointer("a.b", ObjectId("507f1f77bcf86cd799439011")), c: UUID("01234567-89ab-cdef-0123-456789abcdef")})	S:{"$undefined":5,"a":{"code":"x"},"b":{"ns":"a.b","id":{"$oid":"507f1f77bcf86cd799439011"}},"c":{"$binary":"ASNFZ4mrze8BI0VniavN7w==","$type":"04"}}
+toJsonForLog(new Error("e"))	S:{}
+toJsonForLog({x: 1n})	E:TypeError:BigInt value can't be serialized in JSON
+toJsonForLog(Symbol())	J:undefined
+toJsonForLog(() => 1) + "|" + typeof toJsonForLog(() => 1)	S:undefined|undefined
+toJsonForLog({a: "x\ny\"\u0001"})	S:{"a":"x\\ny\\"\\u0001"}
+toJsonForLog([1, undefined, () => 1, NaN]) + "|" + toJsonForLog({a: () => 1, b: Symbol()})	S:[1,{"$undefined":true},null,null]|{}
+toJsonForLog((() => { const o = {x: 1}; return {a: o, b: o, c: [o]} })())	S:{"a":{"x":1},"b":{"x":1},"c":[{"x":1}]}
+toJsonForLog((() => { const a = [1]; a.push(a); return a })())	S:[1,"[recursive]"]
+toJsonForLog((() => { const o = {x: 1}; return [o, o] })())	S:[{"x":1},{"x":1}]
+toJsonForLog({a: {toJSON(){ return undefined }}})	S:{"a":{"$undefined":true}}
+toJsonForLog({a: {toJSON(k){ return k }}})	S:{"a":"a"}
+(() => { const o = {}; const p = {}; o.p = p; p.o = o; return toJsonForLog({o, p}) })()	S:{"o":{"p":{"o":"[recursive]"}},"p":{"o":{"p":"[recursive]"}}}
+assert(1, "m") + "," + assert("x") + "," + assert({})	S:undefined,undefined,undefined
+[0, "", null, undefined, NaN, false].map(v => { try { assert(v) } catch (e) { return e.message } }).join("|")	S:assert failed|assert failed|assert failed|assert failed|assert failed|assert failed
+assert()	E:Error:assert failed
+assert(false, "")	E:Error:assert failed
+assert(false, null)	E:Error:assert failed
+assert(false, undefined)	E:Error:assert failed
+assert(false, 0)	E:Error:assert failed
+assert(false, 5)	E:Error:assert failed : 5
+assert(false, [1, 2])	E:Error:assert failed : [ 1, 2 ]
+assert(false, () => ({a: 1}))	E:Error:assert failed : { "a" : 1 }
+assert(false, () => { throw new Error("inner") })	E:Error:inner
+assert(false, "m", {a: 1})	E:Error:assert failed : m
+assert(false, "m", "x")	E:Error:assert failed : m
+assert(false, "m", undefined)	E:Error:assert failed : m
+assert(false, "m", null)	E:TypeError:can't convert null to object
+assert(false, {toString(){ return "TS" }})	E:Error:assert failed : { "toString" : toString(){ return "TS" } }
+assert(false, Symbol("q"))	E:TypeError:can't convert symbol to string
+assert(false, new Error("em"))	E:Error:assert failed : { }
+assert(false, "m", {a: 1}, 4)	E:Error:Too many parameters to assert().
+assert(true, "m", {a: 1}, 4)	E:Error:Too many parameters to assert().
+assert(false, "a {x} b", {x: [1]})	E:Error:assert failed : a {x} b
+assert(false, "a {x} b {y}", {x: 1})	E:Error:assert failed : a {x} b {y}
+assert(false, "a {x} b", {})	E:Error:assert failed : a {x} b
+assert(false, "a", {x: 1})	E:Error:assert failed : a
+assert(false, () => "lazy {x}", {x: 2})	E:Error:assert failed : lazy {x}
+(() => { try { assert(false, "m", {a: 1}) } catch (e) { return JSON.stringify(Object.getOwnPropertyNames(e)) + JSON.stringify(e.extraAttr) + "|" + e.stack.split("\n").length } })()	S:["fileName","lineNumber","columnNumber","message"]undefined|6
+[undefined, null, "", "s", 0, 5, true, [1], {a: 1}, () => "f", () => ({b: 2}), () => undefined, () => 7, new Error("E")].map(m => { try { return JSON.stringify(_processMsg(m)) } catch (e) { return "E:" + e.message } }).join(" ")	S: "null" "" "s" 0 5 true "[ 1 ]" "{ \\"a\\" : 1 }" "f" "{ \\"b\\" : 2 }"  7 "{ }"
+_processMsg(Symbol("s"))	J:undefined
+_processMsg(() => { throw new Error("pm") })	E:Error:pm
+[[undefined, undefined], ["m", undefined], [undefined, "p"], ["", "p"], [null, "p"], [0, "p"], [5, "p"], ["m", ""], ["m", 0], [{a: 1}, "p"], [() => "f", "p"], [[1], undefined]].map(a => { try { return JSON.stringify(_buildAssertionMessage(...a)) } catch (e) { return "E:" + e.message } }).join(" ")	S:"" "m" "p" "p" "p" "p" "p : 5" "m" "m" "p : { \\"a\\" : 1 }" "p : f" "[ 1 ]"
+_buildAssertionMessage("m", "p", "extra")	S:p : m
+[["x {a} y", {a: 1}], ["x {a} {a} y", {a: "s"}], ["x {a} y", {}], ["x {a} y", undefined], ["x {a} y", null], ["{a}{b}", {a: {c: 1}, b: [1]}], ["{ a }", {a: 1}], ["{a.b}", {"a.b": 2}], ["{}", {"": 3}], ["x", {a: 1}], [5, {a: 1}], [undefined, {}], ["{a}", {a: undefined}], ["{a}", {a: "q\"r"}], ["{a}", {a: () => 1}], ["{a}", {a: new Date(0)}], ["{toString}", {}], ["{a}", Object.create({a: 9})], ["{a", {a: 1}], ["{{a}}", {a: 1}], ["{a}", "str"]].map(a => { try { return JSON.stringify(formatErrorMsg(...a)) } catch (e) { return "E:" + e.message } }).join(" ")	S:"x 1 y" "x \\"s\\" \\"s\\" y" "x {a} y" "x {a} y" E:can't convert null to object "{ \\"c\\" : 1 }[ 1 ]" "{ a }" "2" "3" "x" E:msg.replaceAll is not a function  "undefined" "\\"q\\\\\\"r\\"" "() => 1" "ISODate(\\"1970-01-01T00:00:00Z\\")" "{toString}" "{a}" "{a" "{1}" "{a}"
+formatErrorMsg("{a}", {a: 1}, 5)	E:TypeError:serializeFn is not a function
+formatErrorMsg()	J:undefined
+formatErrorMsg("{a}", {a: "x".repeat(90)})	S:"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+formatErrorMsg("{a}", {a: {b: "x".repeat(90)}})	S:{\n\t"b" : "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"\n}
+formatErrorMsg("{a}", {a: Symbol()})	E:Error:tojson can't handle type symbol
+[["m"], ["m", "p"], ["m", "p", {a: 1}], [undefined, "p"], ["{a}", "p", {a: 1}], [() => "f", "p"], [{o: 1}, "p", {x: 2}], ["m", undefined, {a: 1}], ["m", "", {}], ["m", "p", null], ["m", "p", "s"]].map(a => { try { _doassert(...a); return "no" } catch (e) { return JSON.stringify(e.message) + (e.extraAttr ? "+" : "") } }).join(" ")	S:"m" "p : m" "p : m" "p" "p : {a}" "p : f" "p : { \\"o\\" : 1 }" "can't access property \\"replaceAll\\", msg is undefined" "m" "can't convert null to object" "p : m"
+[[undefined], [null], [""], [0], [5], [[1, 2]], [() => "f"], [() => ({q: 1})], ["m", {a: 1}], ["m", "x"], ["m", null], [new Error("ie")], ["a\nb"]].map(a => { try { doassert(...a); return "no" } catch (e) { return JSON.stringify(e.message) + "/" + e.name } }).join(" ")	S:""/Error "null"/Error ""/Error "0"/Error "5"/Error "[ 1, 2 ]"/Error "f"/Error "{ \\"q\\" : 1 }"/Error "m"/Error "m"/Error "m"/Error "{ }"/Error "a\\nb"/Error
+(() => { const err = new TypeError("orig"); try { doassert(err) } catch (e) { return [e === err, e.name, e.message].join() } })()	S:false,Error,{ }
+(() => { try { doassert("m", {a: 1}) } catch (e) { return JSON.stringify(Object.getOwnPropertyNames(e)) + JSON.stringify(Object.keys(e)) } })()	S:["fileName","lineNumber","columnNumber","message"][]
+(() => { try { doassert({code: 5, message: "x"}) } catch (e) { return JSON.stringify(Object.getOwnPropertyNames(e)) + e.message } })()	S:["fileName","lineNumber","columnNumber","message"]{ "code" : 5, "message" : "x" }
+doassert(Symbol())	E:TypeError:can't convert symbol to string
+[[() => "", "p"], [() => undefined, "p"], [() => null, "p"], [() => 0, "p"], [Symbol(), "p"]].map(a => { try { return JSON.stringify(_buildAssertionMessage(...a)) } catch (e) { return "E:" + e.message } }).join(" ")	S:"p : " "p : undefined" "p : null" "p : 0" E:can't convert symbol to string
+[["m", undefined, null], ["m", undefined, 0], ["m", undefined, ""], ["m", "p", undefined], ["m", "p", 0], ["m", "p", false]].map(a => { try { _doassert(...a); return "no" } catch (e) { return JSON.stringify(e.message) } }).join(" ")	S:"can't convert null to object" "m" "m" "p : m" "p : m" "p : m"
+[["x", {a: Symbol()}], ["{a}", {a: "$&"}], ["{a}", {a: "$$"}], ["{a}", {a: "$1"}], ["{a}{b}", {a: "{b}", b: 2}], ["{b}{a}", {a: 1, b: "{a}"}]].map(a => { try { return JSON.stringify(formatErrorMsg(...a)) } catch (e) { return "E:" + e.message } }).join(" ")	S:E:tojson can't handle type symbol "\\"{a}\\"" "\\"$\\"" "\\"$1\\"" "\\"2\\"2" "\\"{a}\\"1"
+(() => { const r = []; formatErrorMsg("{a}", {a: 1, b: 2}, (v) => { r.push(v); return "S" }); return r.join() })()	S:1,2
+formatErrorMsg("{a}", {a: 1}, (...v) => JSON.stringify(v))	S:[1]
+formatErrorMsg("{a}", {a: 1}, () => 5) + "|" + formatErrorMsg("{a}", {a: 1}, () => undefined)	S:5|undefined
+formatErrorMsg(new String("{a}"), {a: 1})	S:1
+(() => { const r = []; const p = new Proxy({a: 1}, {get(t, k){ r.push(String(k)); return t[k] }}); formatErrorMsg("{a}", p); return r.join() })()	S:a
+(() => { let n = 0; try { doassert("m", {get a(){ n++; throw new Error("OBJ") }}) } catch (e) { return n + e.message } })()	S:0m
+doassert("m", Symbol())	E:Error:m
+(() => { let n = 0; try { doassert("m", {tojson(){ n++; return "T" }}) } catch (e) { return n + e.message } })()	S:0m
+assert.eq(1, 1, "m") + "," + assert.eq("1", 1) + "," + assert.eq(null, undefined) + "," + assert.eq([1], [1]) + "," + assert.eq(NaN, NaN)	S:undefined,undefined,undefined,undefined,undefined
+assert.eq({a: 1}, {a: 1, b: 2})	E:ReferenceError:patchDiff is not defined
+assert.eq({a: 1, b: 2}, {b: 2, a: 1})	E:ReferenceError:patchDiff is not defined
+assert.eq(NumberLong(1), NumberLong(1)) + "," + assert.eq(NumberInt(1), 1)	S:undefined,undefined
+assert.eq(new Date(0), new Date(0))	J:undefined
+assert.eq(ObjectId("507f1f77bcf86cd799439011"), ObjectId("507f1f77bcf86cd799439011"))	J:undefined
+assert.eq({toString(){ return "x" }}, {toString(){ return "x" }})	J:undefined
+assert.eq(1, 2, "m", {a: 1}, 5)	E:ReferenceError:patchDiff is not defined
+assert.eq()	J:undefined
+assert.eq(1)	E:ReferenceError:patchDiff is not defined
+assert.eq(undefined, null)	J:undefined
+assert.eq(0, false) + "," + assert.eq("", 0)	S:undefined,undefined
+assert.eq(Symbol.iterator, Symbol.iterator)	J:undefined
+assert.eq(Symbol(), Symbol())	E:Error:tojson can't handle type symbol
+assert.eq(1n, 1n)	J:undefined
+assert.eq(1n, 2n)	E:Error:tojson can't handle type bigint
+assert.eq({a: 1n}, {a: 1n})	E:Error:tojson can't handle type bigint
+assert.eq(() => 1, () => 1)	J:undefined
+(() => { const f = () => 1; return assert.eq(f, f) })()	J:undefined
+[_isEq(1, 1), _isEq(1, 2), _isEq("1", 1), _isEq(null, undefined), _isEq(NaN, NaN), _isEq({a: 1}, {a: 1}), _isEq([1], [1]), _isEq({a: 1}, {a: 2}), _isEq(0, false), _isEq(new Date(0), new Date(0)), _isEq(NumberLong(1), NumberLong(1))].join()	S:true,false,true,true,true,true,true,false,true,true,true
+[friendlyEqual(1, 1), friendlyEqual(1, 2), friendlyEqual("1", 1), friendlyEqual(null, undefined), friendlyEqual(NaN, NaN), friendlyEqual({a: 1}, {a: 1}), friendlyEqual([1], [1]), friendlyEqual({a: 1}, {a: 2}), friendlyEqual(0, false), friendlyEqual(new Date(0), new Date(0)), friendlyEqual({b: 1, a: 2}, {a: 2, b: 1})].join()	S:true,false,true,true,true,true,true,false,true,true,false
+[[{b: 1, a: 2}, {a: 2, b: 1}], [{a: NumberInt(1)}, {a: 1}], [[1, 2], {0: 1, 1: 2}], [{a: undefined}, {}], [new Date(0), 0], ["a", new String("a")], [{a: "1"}, {a: 1}], [[1], "1"], [{}, "{ }"], [Symbol.iterator, Symbol.iterator]].map(p => { let r = []; for (const f of [_isEq, friendlyEqual]) { try { r.push(f(...p)) } catch (e) { r.push("E:" + e.message) } } return r.join("/") }).join(" ")	S:false/false true/true false/false true/true false/false true/true false/false true/true false/false true/true
+[[1n, 1n], [1n, 2n], [{a: 1n}, {a: 1n}], [Symbol(), Symbol()], [() => 1, () => 1], [{a: () => 1}, {a: () => 1}], [new Map([[1, 2]]), new Map([[1, 3]])], [NaN, "NaN"]].map(p => { let r = []; for (const f of [_isEq, friendlyEqual]) { try { r.push(f(...p)) } catch (e) { r.push("E:" + e.message) } } return r.join("/") }).join(" ")	S:true/true E:tojson can't handle type bigint/E:tojson can't handle type bigint E:tojson can't handle type bigint/E:tojson can't handle type bigint E:tojson can't handle type symbol/E:tojson can't handle type symbol true/true true/true false/false false/false
+(() => { const r = []; const a = {tojson(...x){ r.push("a" + JSON.stringify(x)); return "T" }}; const b = {tojson(...x){ r.push("b" + JSON.stringify(x)); return "T" }}; r.push(_isEq(a, b)); r.push(friendlyEqual(a, b)); return r.join() })()	S:a["",true,0,false],b["",true,0,false],true,a["",true,0,false],b["",true,0,false],true
+(() => { const r = []; const a = {get x(){ r.push("ga"); return 1 }}; const b = {get x(){ r.push("gb"); return 1 }}; r.push(friendlyEqual(a, b)); return r.join() })()	S:ga,gb,true
+_isEq() + "," + friendlyEqual() + "," + _isEq(1) + "," + friendlyEqual(1)	S:true,true,false,false
+assert.eq(1, 2, () => { throw new Error("M") })	E:ReferenceError:patchDiff is not defined
+(() => { let n = 0; try { assert.eq(1, 2, () => { n++; return "m" }) } catch (e) {} return n })()	J:0
+(() => { let n = 0; try { assert.eq({tojson(){ n++; return "x" }}, {tojson(){ n++; return "y" }}) } catch (e) {} return n })()	J:4
+assert.throws(() => { throw 5 })	J:5
+assert.throws(() => { throw undefined })	E:Error:did not throw exception
+assert.throws(() => { throw null })	E:Error:did not throw exception
+assert.throws(() => { throw new TypeError("t") }).name	S:TypeError
+assert.throws(function () { throw new Error("x") }, [], "m")	J:{}
+assert.throws((...a) => { throw JSON.stringify(a) }, [1, 2])	S:[1,2]
+assert.throws((...a) => { throw JSON.stringify(a) }, "notarray")	E:Error:2nd argument must be an Array or Arguments object
+assert.throws((...a) => { throw JSON.stringify(a) }, 5)	E:Error:2nd argument must be an Array or Arguments object
+assert.throws((...a) => { throw JSON.stringify(a) }, {length: 1, 0: "x"})	E:Error:2nd argument must be an Array or Arguments object
+assert.throws((...a) => { throw JSON.stringify(a) })	S:[]
+assert.throws(() => 1, [], "msg")	E:Error:did not throw exception : msg
+assert.throws(() => 1, [], "msg", {a: 1})	E:Error:did not throw exception : msg
+assert.throws(() => 1, [], () => "lazy")	E:Error:did not throw exception : lazy
+assert.throws(() => 1, undefined, "m {a}", {a: 2})	E:Error:2nd argument must be an Array or Arguments object
+assert.throws(5)	E:Error:1st argument must be a function
+assert.throws()	E:Error:1st argument must be a function
+assert.throws("x")	E:Error:1st argument must be a function
+assert.throws(() => { throw 1 }, [], "m", {}, 5)	J:1
+assert.throws(function () { "use strict"; return this })	E:Error:did not throw exception
+assert.throws(function () { return 1 + this })	E:Error:Attempted to access 'this' during function call in assert.throws/doesNotThrow. Instead, wrap the function argument in another function.
+assert.throws(function () { return typeof this })	E:Error:did not throw exception
+assert.throws(function () { throw new Error(typeof this) })	J:{}
+assert.throws(function () { throw new Error(String(this === undefined)) }).message	S:false
+assert.throws(function f() { this; throw 1 })	J:1
+assert.throws(() => { throw new Error(typeof this) }).message	S:object
+assert.throws(function () { return eval("this") })	E:Error:did not throw exception
+assert.throws(function () { const g = () => this; return 1 })	E:Error:did not throw exception
+assert.throws(function () { throw 1; this })	J:1
+assert.throws(function () { throw 1 } .bind({}))	J:1
+assert.throws(new Proxy(function () { throw 1 }, {}))	J:1
+assert.throws(async function () { throw 1 })	E:Error:did not throw exception
+assert.throws(function* () { throw 1 })	E:Error:did not throw exception
+assert.throws(class { })	J:{}
+[0, "", false, NaN].map(v => { try { return JSON.stringify(assert.throws(() => { throw v })) } catch (e) { return "E:" + e.message } }).join(" ")	S:E:did not throw exception E:did not throw exception E:did not throw exception E:did not throw exception
+assert.throws(() => { throw 1 }, undefined)	E:Error:2nd argument must be an Array or Arguments object
+assertThrowsHelper(() => { throw 1 })	J:{"error":1,"res":null}
+assertThrowsHelper(() => { throw 1 }, undefined)	E:Error:2nd argument must be an Array or Arguments object
+assertThrowsHelper(() => { throw 1 }, null)	E:Error:2nd argument must be an Array or Arguments object
+assertThrowsHelper(() => 1)	J:{"error":null,"res":1}
+JSON.stringify(assertThrowsHelper(() => 7))	S:{"error":null,"res":7}
+JSON.stringify(assertThrowsHelper((...a) => a, [1]))	S:{"error":null,"res":[1]}
+(function () { return JSON.stringify(assertThrowsHelper((...a) => a, arguments)) })(3, 4)	S:{"error":null,"res":[3,4]}
+(function () { return JSON.stringify(assert.throws((...a) => { throw a }, arguments)) })(3, 4)	S:[3,4]
+assert.doesNotThrow(() => { throw 5 })	E:Error:threw unexpected exception: { }
+assert.doesNotThrow(() => { throw "s" })	E:Error:threw unexpected exception: { }
+assert.doesNotThrow(() => { throw {a: 1} })	E:Error:threw unexpected exception: { }
+assert.doesNotThrow(() => { throw new TypeError("tt") })	E:Error:threw unexpected exception: { "message" : "tt" }
+assert.doesNotThrow(() => { throw undefined })	J:null
+assert.doesNotThrow(() => { throw null })	J:null
+assert.doesNotThrow(() => { throw Object.assign(new Error("m"), {code: 5}) })	E:Error:threw unexpected exception: { "code" : 5, "message" : "m" }
+assert.doesNotThrow(() => { throw {message: 1, b: 2} })	E:Error:threw unexpected exception: { "message" : 1 }
+assert.doesNotThrow(() => { throw "x".repeat(100) })	E:Error:threw unexpected exception: { }
+assert.doesNotThrow(() => { throw new Error("bad") }, [], "msg")	E:Error:threw unexpected exception: { "message" : "bad" } : msg
+assert.doesNotThrow(() => { throw new Error("bad") }, [], "msg {a}", {a: 1})	E:Error:threw unexpected exception: { "message" : "bad" } : msg {a}
+assert.doesNotThrow(() => { throw new Error("bad") }, [], () => "lazy")	E:Error:threw unexpected exception: { "message" : "bad" } : lazy
+assert.doesNotThrow((...a) => a.length, [1, 2])	J:2
+assert.doesNotThrow((...a) => a.length, 5)	E:Error:2nd argument must be an Array or Arguments object
+assert.doesNotThrow(5)	E:Error:1st argument must be a function
+assert.doesNotThrow(function () { return this.x })	E:Error:Attempted to access 'this' during function call in assert.throws/doesNotThrow. Instead, wrap the function argument in another function.
+(() => { try { assert.doesNotThrow(() => { throw new Error("bad") }) } catch (e) { return JSON.stringify(Object.getOwnPropertyNames(e)) + e.name } })()	S:["fileName","lineNumber","columnNumber","message"]Error
+(() => { try { assert.throws(function () { return this.x }) } catch (e) { return e.name + "|" + JSON.stringify(Object.getOwnPropertyNames(e)) } })()	S:Error|["fileName","lineNumber","columnNumber","message"]
+(() => { let t; try { assert.throws(function () { t = this; throw 1 }) } catch (e) {} try { return t.x } catch (e) { return e.name + ":" + (e instanceof Error) } })()	J:undefined
+assert.doesNotThrow(function () { try { this.x } catch (e) { return "caught:" + e.message.slice(0, 9) } return "no" })	E:Error:Attempted to access 'this' during function call in assert.throws/doesNotThrow. Instead, wrap the function argument in another function.
+assert.doesNotThrow(() => { throw {code: 1, codeName: "C", errmsg: "E", errorLabels: ["L"], name: "N", stack: "S", writeErrors: [1], ok: 0, message: "M", reason: "R", extraAttr: {x: 1}, errInfo: {y: 1}, errorResponse: {z: 1}, cause: 2, details: 3, errorCode: 4} })	E:Error:threw unexpected exception: { "code" : 1, "message" : "M" }
+assert.doesNotThrow(() => { throw {code: undefined, message: undefined} })	E:Error:threw unexpected exception: { }
+assert.doesNotThrow(() => { throw {message: "q {a} r"} }, [], "m", {a: 9})	E:Error:threw unexpected exception: { "message" : "q 9 r" } : m
+assert.doesNotThrow(() => { throw {get message(){ throw new Error("GM") }} })	E:Error:GM
+(() => { const r = []; try { assert.doesNotThrow(() => { throw new Proxy({}, {get(t, k){ r.push(String(k)); return undefined }}) }) } catch (e) {} return r.join() })()	S:code,message
+assert.doesNotThrow(() => { throw {code: 1, message: "x".repeat(90)} })	E:Error:threw unexpected exception: {\n\t"code" : 1,\n\t"message" : "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"\n}
+assert.throws(() => 1, [], "m {a}", {a: 9})	E:Error:did not throw exception : m {a}
+assert.throws(() => 1, [], "m", null)	E:TypeError:can't convert null to object
+assert.doesNotThrow(() => 1, [], "m", null) + ""	S:1
+assert.throws(() => 1, [], {o: 1})	E:Error:did not throw exception : { "o" : 1 }
+(() => { let n = 0; try { assert.throws(function () { n += (typeof this === "object") ? 1 : 0; const d = Object.getOwnPropertyDescriptor(this, "x"); throw 1 }) } catch (e) { return n + e.message } return n })()	J:1
+(() => { try { return String(assert.throws(function () { return Object.keys(this) })) } catch (e) { return e.message.slice(0, 20) } })()	S:did not throw except
+(() => { try { return String(assert.throws(function () { "x" in this; throw 1 })) } catch (e) { return e.message.slice(0, 20) } })()	S:Attempted to access 
+(() => { try { return String(assert.throws(function () { this.x = 1; throw 1 })) } catch (e) { return e.message.slice(0, 20) } })()	S:Attempted to access 
+(() => { try { return String(assert.throws(function () { Object.getPrototypeOf(this); throw 1 })) } catch (e) { return e.message.slice(0, 20) } })()	S:1
+(() => { try { return String(assert.throws(function () { delete this.x; throw 1 })) } catch (e) { return e.message.slice(0, 20) } })()	S:Attempted to access 
+(() => { try { return String(assert.throws(function () { Object.defineProperty(this, "x", {value: 1}); throw 1 })) } catch (e) { return e.message.slice(0, 20) } })()	S:1
+(() => { try { return String(assert.throws(function () { Object.isExtensible(this); throw 1 })) } catch (e) { return e.message.slice(0, 20) } })()	S:1
+(() => { try { return String(assert.throws(function () { Array.isArray(this); throw 1 })) } catch (e) { return e.message.slice(0, 20) } })()	S:1
+(() => { try { return String(assert.throws(function () { this(); })) } catch (e) { return e.message.slice(0, 20) } })()	S:TypeError: this is not a function
+(() => { try { return String(assert.throws(function () { const t = this; return () => t.x })) } catch (e) { return e.message.slice(0, 20) } })()	S:did not throw except
+[hex_md5("é"), hex_md5("\ud800"), hex_md5(5), hex_md5(), hex_md5(null), hex_md5({}), hex_md5("a".repeat(1000))].join(" ")	E:TypeError:can't access property "length", s is undefined
+hex_md5(Symbol())	S:d41d8cd98f00b204e9800998ecf8427e
+hex_md5("a", "b")	S:0cc175b9c0f1b6a831c399e269772661
+(() => { let n = 0; hex_md5({toString(){ n++; return "abc" }}); return n + hex_md5({toString(){ return "abc" }}) })()	S:0d41d8cd98f00b204e9800998ecf8427e
+hex_md5(1n)	S:d41d8cd98f00b204e9800998ecf8427e
+hex_md5("\u0000") + " " + hex_md5("￿") + " " + hex_md5("😀")	S:93b885adfe0da089cdf634904fd59f71 b65c5532b01074a57a20703513148301 2a02eac39d716a70ecf37579185927b6
+ISODate("2020-01-02T03:04:05Z").toISOString() + "|" + ISODate("2020-01-02").toISOString() + "|" + ISODate("20200102T030405Z").toISOString() + "|" + ISODate("2020-01-02 03:04:05").toISOString()	S:2020-01-02T03:04:05.000Z|2020-01-02T00:00:00.000Z|2020-01-02T03:04:05.000Z|2020-01-02T03:04:05.000Z
+ISODate("garbage")	E:Error:invalid ISO date: garbage
+ISODate("2020-13-01")	J:"2021-01-01T00:00:00.000Z"
+ISODate(5, 6)	E:Error:invalid ISO date: 5
+ISODate("2020-01-02T03:04:05.123456Z").toISOString() + "|" + ISODate("2020-01-02T03:04Z").toISOString() + "|" + ISODate("2020-01-02T03Z").toISOString()	S:2020-01-02T03:04:05.123Z|2020-01-02T03:04:00.000Z|2020-01-02T03:00:00.000Z
+ISODate("2020-01-02T03:04:05-0130").toISOString() + "|" + ISODate("2020-01-02T03:04:05+01").toISOString() + "|" + ISODate("2020").toISOString()	E:Error:invalid ISO date: 2020
+ISODate("2020-01").toISOString() + "|" + ISODate("  2020-01-02").toISOString()	E:Error:invalid ISO date: 2020-01
+ISODate("1969-12-31T23:59:59Z").toISOString() + "|" + ISODate("0001-01-01T00:00:00Z").toISOString() + "|" + ISODate("9999-12-31T23:59:59.999Z").toISOString()	S:1969-12-31T23:59:59.000Z|0001-01-01T00:00:00.000Z|9999-12-31T23:59:59.999Z
+ISODate("10000-01-01T00:00:00Z")	E:Error:invalid ISO date: 10000-01-01T00:00:00Z
+ISODate("2020-02-30T00:00:00Z")	J:"2020-03-01T00:00:00.000Z"
+ISODate("2020-01-02T25:00:00Z")	J:"2020-01-03T01:00:00.000Z"
+ISODate("2020-01-02t03:04:05z")	E:Error:invalid ISO date: 2020-01-02t03:04:05z
+ISODate({toString(){ return "2020-01-02" }}).toISOString()	S:2020-01-02T00:00:00.000Z
+new ISODate("2020-01-02").toISOString()	S:2020-01-02T00:00:00.000Z
+ISODate("2020-01-02T03:04:05.1Z").toISOString() + "|" + ISODate("2020-01-02T03:04:05.12Z").toISOString()	S:2020-01-02T03:04:05.100Z|2020-01-02T03:04:05.120Z
+ISODate("2020-01-02T03:04:05.Z")	E:Error:invalid ISO date: 2020-01-02T03:04:05.Z
+ISODate("2020-01-02T03:04:05Z ")	E:Error:invalid ISO date: 2020-01-02T03:04:05Z 
+["2020-01-02T03:04:05-0130", "2020-01-02T03:04:05+01", "2020-01-02T03:04:05+0100", "2020-01-02T03:04:05+01:30", "2020-01-02T03:04:05-01:30", "2020-01-02T03:04:05", "2020-01-02T03:04", "2020-01-02T03", "2020-01-02T", "2020-01-02 03:04", "  2020-01-02", "2020-01-02  ", "2020-01-02T03:04:05Z ", "2020-0102", "202001-02", "20200102", "2020-01-02T0304", "2020-01-02T030405", "2020-01-02T03:0405", "2020-01-02T0304:05", "2020-01-02T03:04:05.Z", "2020-01-02T03:04:05,5Z", "2020-01-02T03:04:05.5", "2020-01-02T03:04:5Z", "2020-1-02", "+2020-01-02", "-2020-01-02", "0000-01-01", "2020-01-02T03:04:05.99999Z", "2020-01-02T03:04:05.9999Z", "2020-01-02T03:04:05.0005Z", "2020-01-02T03:04:05Z+01:00", "2020-01-02T03:04:05+1:00", "2020-01-02T03:04:05+01:0", "2020-01-02T03:04:05+25:00", "2020-01-02T03:04:05+01:99", "2020-01-02T03:04:65Z", "2020-01-02T03:64:05Z", "2020-00-02", "2020-01-00", "2020-01-32", "2020-01-02TZ", "2020-01-02T03:04:05ZZ", "2020-01-02T03:04:05.123+01:00", "1970-01-01T00:00:00.000Z", "2020-01-02T24:00:00Z", "2020-01-02T99:99:99Z", "2020-99-99"].map(s => { try { return s + "=" + ISODate(s).toISOString() } catch (e) { return s + "=E:" + e.message } }).join("\n")	S:2020-01-02T03:04:05-0130=2020-01-02T04:34:05.000Z\n2020-01-02T03:04:05+01=2020-01-02T02:04:05.000Z\n2020-01-02T03:04:05+0100=2020-01-02T02:04:05.000Z\n2020-01-02T03:04:05+01:30=2020-01-02T01:34:05.000Z\n2020-01-02T03:04:05-01:30=2020-01-02T04:34:05.000Z\n2020-01-02T03:04:05=2020-01-02T03:04:05.000Z\n2020-01-02T03:04=2020-01-02T03:04:00.000Z\n2020-01-02T03=2020-01-02T03:00:00.000Z\n2020-01-02T=E:invalid ISO date: 2020-01-02T\n2020-01-02 03:04=2020-01-02T03:04:00.000Z\n  2020-01-02=E:invalid ISO date:   2020-01-02\n2020-01-02  =E:invalid ISO date: 2020-01-02  \n2020-01-02T03:04:05Z =E:invalid ISO date: 2020-01-02T03:04:05Z \n2020-0102=2020-01-02T00:00:00.000Z\n202001-02=2020-01-02T00:00:00.000Z\n20200102=2020-01-02T00:00:00.000Z\n2020-01-02T0304=2020-01-02T03:04:00.000Z\n2020-01-02T030405=2020-01-02T03:04:05.000Z\n2020-01-02T03:0405=2020-01-02T03:04:05.000Z\n2020-01-02T0304:05=2020-01-02T03:04:05.000Z\n2020-01-02T03:04:05.Z=E:invalid ISO date: 2020-01-02T03:04:05.Z\n2020-01-02T03:04:05,5Z=E:invalid ISO date: 2020-01-02T03:04:05,5Z\n2020-01-02T03:04:05.5=2020-01-02T03:04:05.500Z\n2020-01-02T03:04:5Z=E:invalid ISO date: 2020-01-02T03:04:5Z\n2020-1-02=E:invalid ISO date: 2020-1-02\n+2020-01-02=E:invalid ISO date: +2020-01-02\n-2020-01-02=E:invalid ISO date: -2020-01-02\n0000-01-01=0000-01-01T00:00:00.000Z\n2020-01-02T03:04:05.99999Z=2020-01-02T03:04:06.000Z\n2020-01-02T03:04:05.9999Z=2020-01-02T03:04:06.000Z\n2020-01-02T03:04:05.0005Z=2020-01-02T03:04:05.001Z\n2020-01-02T03:04:05Z+01:00=E:invalid ISO date: 2020-01-02T03:04:05Z+01:00\n2020-01-02T03:04:05+1:00=E:invalid ISO date: 2020-01-02T03:04:05+1:00\n2020-01-02T03:04:05+01:0=E:invalid ISO date: 2020-01-02T03:04:05+01:0\n2020-01-02T03:04:05+25:00=2020-01-01T02:04:05.000Z\n2020-01-02T03:04:05+01:99=2020-01-02T00:25:05.000Z\n2020-01-02T03:04:65Z=2020-01-02T03:05:05.000Z\n2020-01-02T03:64:05Z=2020-01-02T04:04:05.000Z\n2020-00-02=2019-12-02T00:00:00.000Z\n2020-01-00=2019-12-31T00:00:00.000Z\n2020-01-32=2020-02-01T00:00:00.000Z\n2020-01-02TZ=E:invalid ISO date: 2020-01-02TZ\n2020-01-02T03:04:05ZZ=E:invalid ISO date: 2020-01-02T03:04:05ZZ\n2020-01-02T03:04:05.123+01:00=2020-01-02T02:04:05.123Z\n1970-01-01T00:00:00.000Z=1970-01-01T00:00:00.000Z\n2020-01-02T24:00:00Z=2020-01-03T00:00:00.000Z\n2020-01-02T99:99:99Z=2020-01-06T04:40:39.000Z\n2020-99-99=2028-06-07T00:00:00.000Z
+["é", "\ud800", "\udc00", "😀", "￿", "Ā", "߿", "ࠀ", "a\u0000b"].map(s => hex_md5(s)).join(" ")	S:66ddcd97cfdeabb2f6fb8a999b4bc76f 546d3dc8de10fbf8b448f678a47901e4 5d0033f43ae67e27b0359cca90c6340a 2a02eac39d716a70ecf37579185927b6 b65c5532b01074a57a20703513148301 99c2cdc511a866f109a87f21f336ed94 75f6a7eb5c4446278a305c8229c8b15c 735e3d47042a26d827aafa2fde7bc1be 70350f6027bce3713f6b76473084309b
+[5, {}, {length: 2}, ["ab"], {length: 1, charCodeAt(){ return 97 }}, new String("abc"), [1, 2]].map(s => { try { return hex_md5(s) } catch (e) { return "E:" + e.message } }).join(" ")	S:d41d8cd98f00b204e9800998ecf8427e d41d8cd98f00b204e9800998ecf8427e E:s.charCodeAt is not a function E:s.charCodeAt is not a function 0cc175b9c0f1b6a831c399e269772661 900150983cd24fb0d6963f7d28e17f72 E:s.charCodeAt is not a function
+hex_md5(null)	E:TypeError:can't access property "length", s is null
+(() => { const r = []; const p = new Proxy(new String("ab"), {get(t, k){ r.push(String(k)); const v = t[k]; return typeof v === "function" ? v.bind(t) : v }}); hex_md5(p); return r.join() })()	S:length,charCodeAt,length,charCodeAt,length
+[ISODate("0050-01-01").toISOString(), ISODate("0099-12-31T23:59:59Z").toISOString(), ISODate(true) + ""].join()	E:Error:invalid ISO date: true
+ISODate("2020-01-02").getTime() + "," + ISODate("2020-01-02T03:04:05.123+01:00").getMilliseconds()	S:1577923200000,123
+ISODate("9999-12-31T23:59:59+99:99").toISOString() + "|" + ISODate("0000-01-01T00:00:00-01:00").toISOString()	S:9999-12-27T19:20:59.000Z|0000-01-01T01:00:00.000Z
+ISODate("0000-01-01T00:00:00+01:00")	E:Error:invalid ISO date: 0000-01-01T00:00:00+01:00
+typeof ISODate("2020-01-02").tojson + "|" + Object.prototype.toString.call(ISODate("2020-01-02")) + "|" + tojson(ISODate("2020-01-02"))	S:function|[object Date]|ISODate("2020-01-02T00:00:00Z")
+ISODate("0050-01-01").toISOString() + "|" + ISODate("0099-12-31T23:59:59Z").toISOString()	S:0050-01-01T00:00:00.000Z|0099-12-31T23:59:59.000Z
+["9999-12-31T23:59:59-01:00", "9999-99-99", "9999-12-31T23:59:59.9999Z", "0000-01-01T00:00:00.000-00:00", "0000-00-01"].map(s => { try { return ISODate(s).toISOString() } catch (e) { return "E:" + e.message } }).join(" ")	S:E:invalid ISO date: 9999-12-31T23:59:59-01:00 E:invalid ISO date: 9999-99-99 E:invalid ISO date: 9999-12-31T23:59:59.9999Z 0000-01-01T00:00:00.000Z E:invalid ISO date: 0000-00-01
+(() => { const d = {a: 1}; const s = {b: {c: 1}, a: 2}; const r = Object.extend(d, s); return [r === d, JSON.stringify(d), d.b === s.b].join() })()	S:true,{"a":2,"b":{"c":1}},true
+(() => { const d = {}; const s = {b: {c: 1}, l: [1, {x: 1}]}; const r = Object.extend(d, s, true); return [r === d, JSON.stringify(d), d.b === s.b, d.l === s.l, Array.isArray(d.l), d.l[1] === s.l[1]].join() })()	S:true,{"b":{"c":1},"l":[1,{"x":1}]},false,false,true,false
+(() => { const d = {}; Object.extend(d, Object.create({inh: 1}, {own: {value: 2, enumerable: true}, hid: {value: 3}})); return JSON.stringify(d) })()	S:{"own":2,"inh":1}
+(() => { const d = {}; const s = {f(){}, u: undefined, n: null, dt: new Date(0), m: new Map([[1, 2]])}; Object.extend(d, s, true); return [Object.keys(d).join(), typeof d.f, d.f === s.f, d.u, d.n, d.dt instanceof Date, d.dt === s.dt, JSON.stringify(d.dt), d.m === s.m, Object.prototype.toString.call(d.m)].join() })()	S:f,u,n,dt,m,function,true,,,false,false,{},false,[object Object]
+(() => { try { return String(Object.extend(null, {a: 1})) } catch (e) { return e.message } })()	S:can't access property "a", dst is null
+(() => { try { return JSON.stringify(Object.extend({}, null)) } catch (e) { return e.message } })()	S:{}
+(() => { try { return JSON.stringify(Object.extend({}, "ab")) } catch (e) { return e.message } })()	S:{"0":"a","1":"b"}
+(() => { try { return JSON.stringify(Object.extend({}, 5, true)) } catch (e) { return e.message } })()	S:{}
+(() => { try { return JSON.stringify(Object.extend(5, {a: 1})) } catch (e) { return e.message } })()	S:5
+(() => { const s = {a: 1}; s.self = s; try { Object.extend({}, s, true); return "ok" } catch (e) { return e.name + ":" + e.message } })()	S:InternalError:too much recursion
+(() => { const s = {a: 1}; const r = Object.merge(s, {b: 2}); return [r === s, JSON.stringify(s), JSON.stringify(r)].join() })()	S:false,{"a":1},{"a":1,"b":2}
+JSON.stringify(Object.merge({a: {x: 1}}, {a: {y: 2}}, true)) + JSON.stringify(Object.merge({a: {x: 1}}, {a: {y: 2}}))	S:{"a":{"y":2}}{"a":{"y":2}}
+(() => { const s = {a: {x: 1}}; const r = Object.merge(s, {}, true); return [r.a === s.a].join() })()	S:false
+(() => { const s = {a: {x: 1}}; const r = Object.merge(s, {}); return [r.a === s.a].join() })()	S:true
+JSON.stringify(Object.merge()) + JSON.stringify(Object.merge({a: 1})) + JSON.stringify(Object.merge(null, {a: 1}))	S:{}{"a":1}{"a":1}
+JSON.stringify(Object.deepMerge({a: 1, b: {c: [1]}}, {a: 2, b: {c: [2], d: 3}, e: 4}))	S:{"a":2,"b":{"c":[1,2],"d":3},"e":4}
+JSON.stringify(Object.deepMerge({a: [1, 2]}, {a: [3]})) + JSON.stringify(Object.deepMerge({a: {x: 1}}, {a: 5})) + JSON.stringify(Object.deepMerge({a: 5}, {a: {x: 1}}))	S:{"a":[1,2,3]}{"a":5}{"a":{"x":1}}
+(() => { const a = {x: {y: 1}}; const r = Object.deepMerge(a, {}); return [r === a, r.x === a.x].join() })()	S:false,true
+JSON.stringify(Object.deepMerge()) + "|" + JSON.stringify(Object.deepMerge({a: 1})) + "|" + JSON.stringify(Object.deepMerge({a: 1}, null)) + "|" + JSON.stringify(Object.deepMerge(null, {a: 1}))	E:TypeError:can't convert null to object
+JSON.stringify(Object.deepMerge({a: 1}, {b: 2}, {c: 3})) + JSON.stringify(Object.deepMerge({a: [1]}, {a: {0: 9}}))	S:{"a":1,"b":2,"c":3}{"a":{"0":9}}
+JSON.stringify(Object.deepMerge({d: new Date(0)}, {d: new Date(1)})) + JSON.stringify(Object.deepMerge({a: null}, {a: {b: 1}})) + JSON.stringify(Object.deepMerge({a: {b: 1}}, {a: null}))	S:{"d":{}}{"a":{"b":1}}{"a":null}
+JSON.stringify(Object.deepMerge({a: undefined}, {a: {b: 1}})) + JSON.stringify(Object.deepMerge({a: {b: 1}}, {a: undefined}))	S:{"a":{"b":1}}{}
+JSON.stringify(Object.keySet({a: 1, b: 2})) + JSON.stringify(Object.keySet(Object.create({inh: 1}, {own: {value: 1, enumerable: true}}))) + JSON.stringify(Object.keySet([5, 6])) + JSON.stringify(Object.keySet("ab"))	S:["a","b"]["own"]["0","1"]["0","1"]
+Object.keySet(null)	J:[]
+Object.keySet()	J:[]
+JSON.stringify(Object.keySet(5)) + JSON.stringify(Object.keySet({[Symbol()]: 1, 2: 1, a: 1}))	S:[]["2","a"]
+[[], [{a: 1}], [{a: 1}, null], [null, {a: 1}], [undefined, {a: 1}], [{a: 1}, undefined], [5, {a: 1}], [{a: 1}, 5], ["ab", {x: 1}], [{a: 1}, "ab"], [[1], [2]], [[1, {x: 1}], [2]]].map(a => { try { return JSON.stringify(Object.deepMerge(...a)) } catch (e) { return "E:" + e.message } }).join(" ")	S:{} {"a":1} E:can't convert null to object E:can't convert null to object {"a":1} {"a":1} {"a":1} {"a":1} {"0":"a","1":"b","x":1} {"0":"a","1":"b","a":1} {"0":2} {"0":2,"1":{"x":1}}
+JSON.stringify(Object.deepMerge({b: 1, a: {y: 1, x: 2}}, {c: 1, a: {z: 3, x: 4}}))	S:{"b":1,"a":{"y":1,"x":4,"z":3},"c":1}
+JSON.stringify(Object.deepMerge(Object.create({inh: {p: 1}}), {inh: {q: 2}}))	S:{"inh":{"q":2}}
+JSON.stringify(Object.deepMerge({inh: {p: 1}}, Object.create({inh: {q: 2}})))	S:{"inh":{"p":1}}
+JSON.stringify(Object.deepMerge({a: {length: 1, 0: "x"}}, {a: {length: 1, 0: "y"}}))	S:{"a":{"0":"y","length":1}}
+JSON.stringify(Object.deepMerge({a: new Proxy([1], {})}, {a: [2]}))	S:{"a":[1,2]}
+(() => { const r = Object.deepMerge({}, {a: {b: 1}}); const s = {a: {b: 1}}; const r2 = Object.deepMerge({}, s); return [r2.a === s.a].join() })()	S:true
+JSON.stringify(Object.deepMerge({a: 1}, {a: [2]})) + JSON.stringify(Object.deepMerge({a: [1]}, {a: 2}))	S:{"a":[2]}{"a":2}
+JSON.stringify(Object.deepMerge({a: "s"}, {a: {x: 1}})) + JSON.stringify(Object.deepMerge({a: {x: 1}}, {a: "s"}))	S:{"a":{"x":1}}{"a":"s"}
+JSON.stringify(Object.deepMerge({a: () => 1}, {a: {x: 1}}))	S:{"a":{"x":1}}
+JSON.stringify(Object.keySet(Object.create(null, {a: {value: 1, enumerable: true}})))	E:TypeError:right-hand side of 'in' should be an object, got undefined
+JSON.stringify(Object.keySet({hasOwnProperty: () => true, a: 1}))	S:["hasOwnProperty","a"]
+(() => { const d = {}; Object.extend(d, {a: {length: 2, 0: "x"}}, true); return JSON.stringify(d) + Array.isArray(d.a) })()	S:{"a":["x",null]}true
+(() => { const d = {}; Object.extend(d, {a: new Proxy([1], {})}, true); return JSON.stringify(d) + Array.isArray(d.a) })()	S:{"a":[1]}true
+(() => { const d = {}; Object.extend(d, {a: {length: "2", 0: "x"}}, true); return JSON.stringify(d) + Array.isArray(d.a) })()	S:{"a":{"0":"x","length":"2"}}false
+(() => { const d = {}; Object.extend(d, {get g(){ return 1 }}); return JSON.stringify(Object.getOwnPropertyDescriptor(d, "g")) })()	S:{"value":1,"writable":true,"enumerable":true,"configurable":true}
+(() => { const d = {}; Object.extend(d, {a: 1}, false); return JSON.stringify(d) })()	S:{"a":1}
+(() => { const d = Object.freeze({}); return JSON.stringify(Object.extend(d, {a: 1})) })()	S:{}
+(() => { const r = []; const p = new Proxy({a: {b: 1}}, {get(t, k){ r.push(String(k)); return t[k] }}); Object.extend({}, p, true); return r.join() })()	S:a
+(() => { const r = []; const p = new Proxy({a: [1]}, {get(t, k){ r.push(String(k)); return t[k] }}); Object.extend({}, p, true); return r.join() })()	S:a
+(() => { const a = {x: {p: 1}}; const r = Object.deepMerge(a, {x: {q: 2}}); return JSON.stringify(a) + (r.x === a.x) })()	S:{"x":{"p":1}}false
+JSON.stringify(Object.deepMerge({a: {x: 1}}, {a: [2]})) + JSON.stringify(Object.deepMerge({a: [1]}, {a: {x: 1}}))	S:{"a":{"0":2,"x":1}}{"a":{"0":1,"x":1}}
+(() => { const r = []; const p = new Proxy({a: 1, b: {c: 1}}, {get(t, k){ r.push("s" + String(k)); return t[k] }}); const q = new Proxy({a: 2, b: {d: 1}}, {get(t, k){ r.push("t" + String(k)); return t[k] }}); Object.deepMerge(q, p); return r.join() })()	S:ta,tb,sa,sb
+[Array.sum([1, 2, 3]), Array.sum([]), Array.sum(["a", "b"]), Array.sum([1, "2"]), Array.sum([undefined]), Array.sum([null, 1])].map(String).join()	S:6,null,ab,12,undefined,1
+Array.sum()	E:Error:The first argument to Array.sum must be an array
+Array.sum(5) + "|" + Array.sum("ab") + "|" + Array.sum({length: 2, 0: 1, 1: 2})	E:Error:The first argument to Array.sum must be an array
+[Array.avg([1, 2, 3]), Array.avg([]), Array.avg(["4"]), Array.avg([1, "2"])].map(String).join()	S:2,null,4,6
+Array.avg()	E:Error:The first argument to Array.avg must be an array
+[Array.contains([1, 2], 2), Array.contains([1, 2], "2"), Array.contains([NaN], NaN), Array.contains([{}], {}), Array.contains([], 1), Array.contains("ab", "a"), Array.contains([null], undefined)].join()	E:Error:The first argument to Array.contains must be an array
+Array.contains(5, 1)	E:Error:The first argument to Array.contains must be an array
+Array.contains()	E:Error:The first argument to Array.contains must be an array
+JSON.stringify(Array.unique([1, 2, 1, "1", 3, 2])) + JSON.stringify(Array.unique([])) + JSON.stringify(Array.unique([NaN, NaN, {}, {}])) + JSON.stringify(Array.unique(["b", "a", "b"]))	S:[1,2,"1",3][][null,{},{}]["b","a"]
+Array.unique()	E:Error:The first argument to Array.unique must be an array
+Array.unique(5)	E:Error:The first argument to Array.unique must be an array
+JSON.stringify(Array.unique("aba")) + JSON.stringify(Array.unique([null, undefined, null]))	E:Error:The first argument to Array.unique must be an array
+(() => { const a = [1, 2, 3]; const r = Array.shuffle(a); return [r === a, r.length, r.slice().sort().join()].join() })()	E:ReferenceError:Random is not defined
+Array.shuffle([]).length + "|" + JSON.stringify(Array.shuffle([7]))	S:0|[7]
+Array.shuffle()	E:Error:The first argument to Array.shuffle must be an array
+Array.shuffle(5)	E:Error:The first argument to Array.shuffle must be an array
+[Array.stdDev([1, 2, 3, 4]), Array.stdDev([5]), Array.stdDev([]), Array.stdDev([2, 4, 4, 4, 5, 5, 7, 9])].map(String).join()	S:1.118033988749895,0,NaN,2
+Array.stdDev()	E:Error:The first argument to Array.stdDev must be an array
+Array.tojson.length + Array.fetchRefs.length	J:5
+Array.fetchRefs([1, 2], "c")	E:TypeError:z.getCollection is not a function
+JSON.stringify(Array.fetchRefs([{getCollection(){ return "c" }, fetch(){ return 1 }}], "c"))	S:[1]
+JSON.stringify(Array.fetchRefs([{getCollection(){ return "c" }, fetch(){ return 1 }}, {getCollection(){ return "d" }, fetch(){ return 2 }}], "c"))	S:[1]
+JSON.stringify(Array.fetchRefs([{getCollection(){ return "c" }, fetch(){ return 1 }}]))	S:[1]
+Array.fetchRefs()	E:Error:The first argument to Array.fetchRefs must be an array
+Array.fetchRefs([{}])	E:TypeError:z.fetch is not a function
+Array.fetchRefs([{}], "c")	E:TypeError:z.getCollection is not a function
+[Array.contains([1, 2], 2), Array.contains([1, 2], "2"), Array.contains([NaN], NaN), Array.contains([{}], {}), Array.contains([], 1), Array.contains([null], undefined), Array.contains([0], -0), Array.contains([1])].join()	S:true,false,true,false,false,false,true,false
+JSON.stringify(Array.unique([null, undefined, null, 0, -0, "0"]))	S:[null,null,0,"0"]
+(() => { const r = []; const p = new Proxy([1, 2, 3], {get(t, k){ r.push(String(k)); return t[k] }}); Array.avg(p); r.push("|"); Array.stdDev(p); return r.join() })()	S:length,length,0,1,2,length,|,length,length,0,1,2,length,length,0,length,1,length,2,length,length
+[Array.stdDev([0.1, 0.2, 0.3]), Array.stdDev([1e10, 1e10 + 1]), Array.stdDev([1, 1, 1]), Array.stdDev([3, 7, 7, 19]), Array.stdDev(["1", "2"]), Array.stdDev([1, 2, 4, 8, 16])].map(String).join()	S:0.0816496580927726,0.5,0,6,4.527692569068709,5.455272678794343
+(() => { const r = []; const p = new Proxy([5, 7], {get(t, k){ r.push(String(k)); return t[k] }}); try { Array.shuffle(p) } catch (e) { r.push(e.message) } return r.join() })()	S:length,Random is not defined
+JSON.stringify(Array.fetchRefs([{getCollection(){ return 5 }, fetch(){ return 1 }}], "5")) + JSON.stringify(Array.fetchRefs([{getCollection(){ return "c" }, fetch(){ return 1 }}], ""))	S:[1][1]
+Array.fetchRefs([], "c") instanceof Array	J:true
+"ab".pad(5) + "|" + "ab".pad(1) + "|" + "ab".pad(5, false, "xy") + "|" + "ab".pad(5, true) + "|" + "ab".pad() + "|" + "ab".pad(-1) + "|" + "ab".pad("4")	S:   ab|ab|xyxab|ab   |ab|ab|  ab
+String.prototype.pad.call(5, 3, false, "0") + "|" + String.prototype.pad.call(null, 3)	E:TypeError:this.padStart is not a function
+String.prototype.pad.call({}, 20)	E:TypeError:this.padStart is not a function
+(5).zeroPad(3) + "|" + (5).zeroPad() + "|" + (-5).zeroPad(4) + "|" + (1.5).zeroPad(6) + "|" + Number.prototype.zeroPad.call("7", 3) + "|" + Number.prototype.zeroPad.call(null, 3)	S:005|5|00-5|0001.5|007|[object Object]
+Number.prototype.zeroPad.call(undefined, 3)	S:[object Object]
+(0.5).toPercentStr() + "|" + (1/3).toPercentStr() + "|" + Number.prototype.toPercentStr.call("0.25") + "|" + Number.prototype.toPercentStr.call({}) + "|" + (12345).toPercentStr(3)	S:50.00%|33.33%|25.00%|NaN%|1234500.00%
+Number.prototype.toPercentStr.call(Symbol())	E:TypeError:can't convert symbol to number
+[Array.sum([null, "a"]), Array.sum([null, null, 1]), Array.sum([undefined, 1]), Array.sum([1, , 2]), Array.sum(["", 1])].map(String).join()	S:nulla,1,NaN,NaN,1
+(() => { const r = []; const a = [1, 2]; a.reduce = function () { r.push("reduce"); return Array.prototype.reduce.apply(this, arguments) }; a.forEach = function () { r.push("forEach"); return Array.prototype.forEach.apply(this, arguments) }; Array.sum(a); return r.join() })()	S:
+(() => { let t; try { assert.throws(function () { t = this; throw 1 }) } catch (e) {} return [typeof t.toString, Object.getPrototypeOf(t) === null, JSON.stringify(Object.getOwnPropertyNames(t))].join() })()	S:undefined,false,[]
+(() => { let ks = []; try { assert.throws(function () { for (const k in this) ks.push(k); throw 1 }) } catch (e) { return "E:" + e.message.slice(0, 10) } return ks.join() })()	S:
+(() => { let n = 0; try { assert.throws(function () { n = Object.keys(this).length; throw 1 }) } catch (e) { return "E" } return n })()	J:0
+(() => { try { return String(assert.throws(function () { void this.constructor; throw 1 })) } catch (e) { return e.message.slice(0, 10) } })()	S:Attempted 
+(() => { let x; try { assert.throws(function () { try { x = this.p } catch (e) { x = "c" } throw 1 }) } catch (e) { return x + "|" + e.message.slice(0, 10) } return x })()	S:undefined|Attempted 
+(() => { let x; try { assert.throws(function () { x = this.p; throw 1 }) } catch (e) { return String(x) + "|" + e.message.slice(0, 10) } return x })()	S:undefined|Attempted 
+typeof tojson.prototype + "|" + Object.getOwnPropertyNames(tojson.prototype).join() + "|" + (tojson.prototype.constructor === tojson)	S:object|constructor|true
+(() => { const r = []; for (const k in globalThis) r.push(k); return r.join() })()	S:hex_md5,ISODate,tojsononeline,tojson,tojsonObject,toJsonForLog,printjson,isString,isNumber,isObject,doassert,_processMsg,_buildAssertionMessage,formatErrorMsg,_doassert,assert,friendlyEqual,_isEq,assertThrowsHelper
+Object.keys(globalThis).join()	S:hex_md5,ISODate,tojsononeline,tojson,tojsonObject,toJsonForLog,printjson,isString,isNumber,isObject,doassert,_processMsg,_buildAssertionMessage,formatErrorMsg,_doassert,assert,friendlyEqual,_isEq,assertThrowsHelper
+JSON.stringify(Object.keySet(Object.assign(Object.create({a: 1}), {a: 1}))) + JSON.stringify(Object.keySet(Object.assign(Object.create({a: 1}), {a: 2}))) + JSON.stringify(Object.keySet({toString: Object.prototype.toString, b: 1}))	S:[]["a"]["b"]
+(() => { const r = []; const p = new Proxy({a: 1, b: 2}, {get(t, k){ r.push(String(k)); return t[k] }, has(t, k){ r.push("has:" + String(k)); return k in t }}); Object.keySet(p); return r.join() })()	S:__proto__,__proto__
+JSON.stringify(Object.keySet(Object.create(Object.create(null), {a: {value: 1, enumerable: true}})))	E:TypeError:right-hand side of 'in' should be an object, got undefined
+JSON.stringify(Object.keySet(Object.setPrototypeOf({a: 1, NaNk: NaN}, {NaNk: NaN})))	S:["a","NaNk"]
+(() => { const r = []; const p = new Proxy(new String("😀a"), {get(t, k){ r.push(String(k)); const v = t[k]; return typeof v === "function" ? v.bind(t) : v }}); hex_md5(p); return r.join() })()	S:length,charCodeAt,length,charCodeAt,length,charCodeAt,length
+"ab".repeat(-1)	E:RangeError:repeat count must be non-negative
+tojson({a: NumberInt(1)}, "", true) + "|" + tojson({a: NumberInt(1)}, undefined, true) + "|" + tojsononeline({a: NumberInt(1)})	S:{ "a" : NumberInt(1) }|{ "a" : NumberInt(1) }|{ "a" : NumberInt(1) }
+[[{a: NumberLong(1)}, {a: 1}], [{a: {tojson(){ return "X" }}}, {a: {tojson(){ return "X" }}}], [{a: 1, b: undefined}, {a: 1}], [{a: NumberInt(1)}, {a: 2}], [NumberInt(2), NumberLong(2)], [{a: NumberInt(1)}, {a: NumberLong(1)}], [{a: NumberDecimal("1")}, {a: 1}], [[NumberInt(1)], [1]], [{a: 1}, {a: 1.0}]].map(p => [_isEq(...p), friendlyEqual(...p)].join("/")).join(" ")	S:false/false true/true true/true false/false false/false false/false false/false true/true true/true
+(() => { const r = []; const a = {tojson(...x){ r.push("a" + JSON.stringify(x)); return "T" }}; const b = {tojson(...x){ r.push("b" + JSON.stringify(x)); return "U" }}; r.push(_isEq(a, b)); r.push(friendlyEqual(a, b)); return r.join() })()	S:a["",true,0,false],b["",true,0,false],false,a["",true,0,false],b["",true,0,false],false
+(() => { const r = []; const a = {get x(){ r.push("ga"); return 1 }}; const b = {get x(){ r.push("gb"); return 2 }}; r.push(_isEq(a, b)); r.push(friendlyEqual(a, b)); return r.join() })()	S:ga,gb,false,ga,gb,false
+(() => { const r = []; const a = {get x(){ r.push("ga"); return 1 }}; const b = {get x(){ r.push("gb"); return 1 }}; r.push(_isEq(a, b)); return r.join() })()	S:ga,gb,true
+tojson({get toString(){ throw new Error("TSG") }}, "", false, 101) + "|" + tojson({}, 5) + "|" + Array.tojson([], "", false, 101) + "|" + tojson([], 5)	E:TypeError:indent.repeat is not a function
+JSON.stringify(Object.keySet(Object.assign(Object.create({a: 1}), {a: "1"})))	S:["a"]
+tojson({_simpleKeys: 1, b: 1, a: 2}, "", true, 0, true) + tojson(Object.assign(Object.create({_simpleKeys: true, inh: 1}), {a: 1}))	S:{ "_simpleKeys" : 1, "a" : 2, "b" : 1 }{ "a" : 1, "_simpleKeys" : true, "inh" : 1 }
+[[{a: "NumberInt(5)"}, {a: "5"}], [{a: NumberInt(-3)}, {a: -3}], [{a: NumberInt(1)}, {a: "1"}], ["x NumberInt(5) y", "x 5 y"], [{a: NumberLong(1)}, {a: NumberLong(1)}], [{a: NumberInt(1)}, {a: NumberInt(1)}], [{a: 1}, {a: NumberInt(1)}], [{a: NumberInt(1)}, {a: 1.5}], [{x: "NumberInt( 5 )"}, {x: "5"}], [{a: "NumberLong(5)"}, {a: "5"}], [{a: NumberInt(1)}, {a: true}], [{a: "NumberInt(5)"}, {a: 5}], [{a: "NumberInt(5)"}, {a: "NumberInt(5)"}], [{a: "NumberInt(x)"}, {a: "x"}], [{a: "NumberInt(1.5)"}, {a: "1.5"}], [{a: "NumberInt(-1)"}, {a: "-1"}], [{a: "NumberInt(5)NumberInt(6)"}, {a: "56"}]].map(p => _isEq(...p) + "/" + friendlyEqual(...p)).join(" ")	S:true/true true/true false/false true/true true/true true/true true/true false/false false/false false/false false/false false/false true/true false/false false/false true/true true/true
+[300.5, -1, "a", 70000, NaN, 65, "65", null, 0xd800, 1e10].map(c => hex_md5({length: 1, charCodeAt(){ return c }})).join(" ")	S:65c52fcf51c8f3cfdd5fae44006ff904 7215484a42c9bd1321db26ce12faed82 b18e2e55624239ca74cce3de1ea87c0d 8e5a4a0a845fb0d7c39515086ff5a088 b18e2e55624239ca74cce3de1ea87c0d 7fc56270e7a70fa81a5935b72eacbe29 7fc56270e7a70fa81a5935b72eacbe29 93b885adfe0da089cdf634904fd59f71 546d3dc8de10fbf8b448f678a47901e4 77168b5b9b07a56728121a0e2cf147be
+hex_md5({length: 2, charCodeAt(i){ return [0xd83d, 0xde00][i] }}) + " " + hex_md5({length: 2, charCodeAt(i){ return [0xde00, 0xd83d][i] }})	S:2a02eac39d716a70ecf37579185927b6 18ff608e5f3cbc5f69e0ecc7aa77f412
+(() => { const dst = null; dst["a"] = 1 })()	E:TypeError:can't access property "a", dst is null
+["2020-01-02T03:04:05.0045Z", "2020-01-02T03:04:05.0015Z", "2020-01-02Z", "2020-01-02T03:04.5Z", "2020-01-02T03:04:05.0025Z", "2020-01-02T03:04:05.1235Z", "2020-01-02T03:04:05.9995Z", "2020-01-02T03:04:05.00049999Z"].map(s => { try { return ISODate(s).toISOString() } catch (e) { return "E" } }).join(" ")	S:2020-01-02T03:04:05.005Z 2020-01-02T03:04:05.002Z E E 2020-01-02T03:04:05.003Z 2020-01-02T03:04:05.124Z 2020-01-02T03:04:06.000Z 2020-01-02T03:04:05.000Z
+tojson(Object.assign(function q(){}, {}))	S:function q(){}
+(() => { const f = function g(){}; Object.defineProperty(f, "toString", {value: () => "TS"}); return tojson(f) })()	S:TS
+(() => { const f = function g(){}; Object.defineProperty(f, "tojson", {value: () => "TJ"}); return tojson(f) + tojson({a: f}) })()	S:function g(){}{ "a" : function g(){} }
+ObjectId.fromDate(new Date(1500000000123)).toString() + "|" + ObjectId.fromDate(new Date(0)).str	E:Error:Cannot create ObjectId from object: ISODate("2017-07-14T02:40:00.123Z")
+ObjectId.fromDate(5)	E:Error:Cannot create ObjectId from number: 5
+ObjectId.fromDate()	E:Error:date missing or undefined
+ObjectId.fromDate("2020-01-01")	E:Error:Cannot create ObjectId from string: "2020-01-01"
+ObjectId.fromDate(new Date(NaN))	E:Error:Cannot create ObjectId from object: ISODate("0NaN-NaN-NaNTNaN:NaN:NaNZ")
+ObjectId.fromDate(new Date(-1000))	E:Error:Cannot create ObjectId from object: ISODate("1969-12-31T23:59:59Z")
+ObjectId.fromDate(new Date(2**32 * 1000))	E:Error:Cannot create ObjectId from object: ISODate("2106-02-07T06:28:16Z")
+ObjectId.fromDate(new Date(2**32 * 1000 - 1000)).str	E:Error:Cannot create ObjectId from object: ISODate("2106-02-07T06:28:15Z")
+ObjectId.fromDate({getTime(){ return 1000 }})	E:Error:Cannot create ObjectId from object: { "getTime" : getTime(){ return 1000 } }
+ObjectId.fromDate(Object.create(Date.prototype))	E:TypeError:Date.prototype.getTime called on incompatible Object
+ObjectId.fromDate(new Date(1500)).str	E:Error:Cannot create ObjectId from object: ISODate("1970-01-01T00:00:01.500Z")
+ObjectId.fromDate(new Date(0), 1)	E:Error:Cannot create ObjectId from object: ISODate("1970-01-01T00:00:00Z")
+ObjectId.fromDate(ISODate("2020-01-01")).str	S:5e0be1000000000000000000
+Object.getOwnPropertyNames(globalThis).filter(k => { const d = Object.getOwnPropertyDescriptor(globalThis, k); return d.enumerable }).map(k => { const d = Object.getOwnPropertyDescriptor(globalThis, k); return k + ":" + [d.writable, d.configurable].map(Number).join("") }).join(" ")	S:hex_md5:11 ISODate:11 tojsononeline:11 tojson:11 tojsonObject:11 toJsonForLog:11 printjson:11 isString:11 isNumber:11 isObject:11 doassert:10 _processMsg:10 _buildAssertionMessage:10 formatErrorMsg:10 _doassert:10 assert:10 friendlyEqual:10 _isEq:10 assertThrowsHelper:10
+(() => { const r = delete globalThis.assert; return r + typeof assert + typeof globalThis.assert })()	S:falsefunctionfunction
+(() => { const r = delete globalThis.tojson; return r + typeof tojson })()	S:trueundefined
+(() => { const r = delete globalThis.hex_md5; return r + typeof hex_md5 })()	S:trueundefined
+(() => { globalThis.assert = 5; return typeof assert })()	S:number
+(() => { delete globalThis.isString; return typeof isString })()	S:undefined
+ObjectId.fromDate(ISODate("1969-12-31T23:59:59Z")).str	E:Error:invalid object id: not hex
+ObjectId.fromDate(ISODate("2200-01-01T00:00:00Z")).str	E:Error:invalid object id: length
+ObjectId.fromDate(ISODate("0001-01-01T00:00:00Z")).str	E:Error:invalid object id: length
+ObjectId.fromDate(ISODate("2020-01-01T00:00:00.999Z")).str	S:5e0be1000000000000000000
+tojson({a: null, b: 1}) + "|" + tojson({constructor: null}) + "|" + tojson({constructor: 0, a: 1}) + "|" + tojson({b: null})	S:{ "b" : 1 }|{ }|{ "constructor" : 0, "a" : 1 }|{ }
+ObjectId("zz")	E:Error:invalid object id: length
+ObjectId("0123456789abcdef0123456z")	E:Error:invalid object id: not hex
+ObjectId("abc")	E:Error:invalid object id: length
+ObjectId("0123456789abcdef01234567890")	E:Error:invalid object id: length
+(function f(){}).x = 1	J:1

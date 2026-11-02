@@ -226,13 +226,19 @@ fn parse_text(s: &str) -> Option<f64> {
     Some(make(&[year, month, day, get(0), get(1), get(2), 0.0]) - offset)
 }
 
+/// `Date.prototype.getTime called on incompatible Object`, with the method being called.
+fn incompatible_date(it: &Interp, this: &Val) -> crate::interp::Ctrl {
+    let class = crate::builtins::class_name(this);
+    it.error("TypeError", &format!("Date.prototype.{} called on incompatible {class}", it.native))
+}
+
 fn this_time(it: &Interp, this: &Val) -> R<f64> {
     match this {
         Val::Obj(o) => match &o.borrow().kind {
             Kind::Date(t) => Ok(*t),
-            _ => Err(crate::builtins::incompatible(it, "Date.prototype method")),
+            _ => Err(incompatible_date(it, this)),
         },
-        _ => Err(crate::builtins::incompatible(it, "Date.prototype method")),
+        _ => Err(incompatible_date(it, this)),
     }
 }
 
@@ -381,14 +387,6 @@ pub fn install(it: &mut Interp, g: &ObjRef) -> R<()> {
             0,
         ),
         ("toLocaleString", date_to_string, 0),
-        (
-            "tojson",
-            |it, t, _| {
-                let x = this_time(it, t)?;
-                it.string(format!("ISODate(\"{}\")", iso(x)))
-            },
-            0,
-        ),
     ] {
         method(it, &proto, name, f, n)?;
     }
@@ -428,7 +426,7 @@ fn set_time(it: &mut Interp, this: &Val, t: f64) -> R {
         *x = t;
         return Ok(Val::Num(t));
     }
-    Err(crate::builtins::incompatible(it, "Date.prototype method"))
+    Err(incompatible_date(it, this))
 }
 
 /// `setFullYear`, `setMonth`…: the arguments replace the fields from `first` on.

@@ -249,12 +249,12 @@ fn trim(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     it.string(s.trim_matches(is_ws).to_owned())
 }
 
-fn trim_start(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+pub(crate) fn trim_start(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     let s = this_str(it, this)?;
     it.string(s.trim_start_matches(is_ws).to_owned())
 }
 
-fn trim_end(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+pub(crate) fn trim_end(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     let s = this_str(it, this)?;
     it.string(s.trim_end_matches(is_ws).to_owned())
 }

@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use crate::ast::{self, Name};
-use crate::interp::{EnvRec, Interp, Limits, R, Realm};
+use crate::interp::{EnvRec, EnvRef, Interp, Limits, R, Realm};
 use crate::value::{Budget, Func, Kind, ObjRef, Prop, Val};
 
 /// The global objects of a program, built for one heap limit.
@@ -23,6 +23,9 @@ pub(crate) struct Globals {
     symbol_ids: u64,
     /// The properties of the global object.
     globals: Vec<(Name, Prop)>,
+    /// The scopes of the shell's functions (`prelude.js`), kept alive for every call and emptied
+    /// with the globals.
+    scopes: Vec<EnvRef>,
     /// Every shared object, to break their reference cycles when the globals are dropped.
     objects: Vec<ObjRef>,
 }
@@ -36,7 +39,9 @@ pub(crate) fn interp<'c>(realm: Realm, budget: Rc<Budget>, limits: Limits) -> In
         limits,
         steps: 0,
         depth: 0,
+        stack_base: 0,
         envs: vec![Rc::downgrade(&global_env)],
+        native: Name::from(""),
         global_env,
         now_ms: 0.0,
         rng: 0,
@@ -69,11 +74,14 @@ impl Globals {
         let realm = crate::builtins::realm(&budget);
         let mut it = interp(realm, budget.clone(), limits);
         let built = crate::builtins::install(&mut it);
+        // The scopes that the shell's functions closed over outlive this interpreter.
+        let scopes: Vec<EnvRef> = it.envs.drain(1..).filter_map(|w| w.upgrade()).collect();
         let objects = reachable(&it.realm);
         if let Err(c) = built {
             let e = crate::error_of(&mut it, c);
             drop(it);
             teardown(&objects);
+            clear_scopes(&scopes);
             return Err(e);
         }
         for o in &objects {
@@ -84,7 +92,15 @@ impl Globals {
         let symbol_ids = it.symbol_ids;
         drop(it);
         budget.touched.set(false);
-        Ok(Globals { realm, baseline: budget.used.get(), budget, symbol_ids, globals, objects })
+        Ok(Globals {
+            realm,
+            baseline: budget.used.get(),
+            budget,
+            symbol_ids,
+            globals,
+            scopes,
+            objects,
+        })
     }
 
     /// Whether these globals serve a call with `limits` and no call has changed them.
@@ -119,6 +135,19 @@ impl Globals {
 impl Drop for Globals {
     fn drop(&mut self) {
         teardown(&self.objects);
+        clear_scopes(&self.scopes);
+    }
+}
+
+/// Empties `scopes`: they and the closures they hold refer to each other.
+fn clear_scopes(scopes: &[EnvRef]) {
+    for e in scopes {
+        let mut e = e.borrow_mut();
+        e.vars.clear();
+        e.parent = None;
+        e.this = None;
+        e.home = None;
+        e.func = None;
     }
 }
 
