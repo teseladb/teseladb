@@ -206,6 +206,8 @@ codes! {
     HASHED_ARRAY = 16_766, "Location16766";
     /// A unique hashed index (009).
     HASHED_UNIQUE = 16_764, "Location16764";
+    /// More than one hashed field in an index key (009).
+    HASHED_FIELDS = 31_303, "Location31303";
     /// A `2d` location in no known format (009).
     GEO_LOCATION_NOT_PAIR = 16_804, "Location16804";
     /// A regular field of a compound wildcard index holding an array (009).

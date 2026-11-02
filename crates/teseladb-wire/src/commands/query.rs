@@ -889,6 +889,9 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
         vars: a.vars.as_ref(),
     };
     super::hints::check_hint(ctx.backend, (&ns, &coll), ctx.cmd, &hinted)?;
+    if let Some(near) = super::near_find::split(&a.filter) {
+        return near_find(ctx, &ns, &a, &near);
+    }
     let executor = |e: CommandError| executor_error(FIND, &ns_text, e);
     // An `_id` equality without a collation reads that document's key alone.
     let range = match super::crud::id_equality(&a.filter).filter(|_| collation.is_none()) {
@@ -998,6 +1001,29 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
     Ok(cursor_reply(id, &ns_text, "firstBatch", docs))
 }
 
+/// A `find` with `$near` or `$nearSphere`: its stages read through the aggregation engine,
+/// nearest first (009 T035).
+fn near_find<B: Backend + ?Sized>(
+    ctx: &mut Ctx<'_, B>,
+    ns: &Namespace,
+    a: &FindArgs,
+    near: &super::near_find::NearFind,
+) -> Result<Document, CommandError> {
+    let ns_text = full(ns);
+    let stages = near.stages(ctx.cmd, &ns_text)?;
+    let empty = Value::Document(Document::new());
+    let sort = ctx.cmd.get("sort").cloned().unwrap_or_else(|| empty.clone());
+    let projection = ctx.cmd.get("projection").cloned().unwrap_or_else(|| empty.clone());
+    let stages = (stages.as_slice(), a.vars.as_ref());
+    let docs = super::aggregate::read_through_node(ctx.backend, ctx.shared, ns, stages, a.concern)
+        .map_err(|e| {
+            let shown = (&sort, &projection);
+            near.planner_error(e, &ns_text, &query_tree(&near.rest), shown)
+        })?;
+    let ends = a.limit.is_some_and(|l| u64::try_from(docs.len()).is_ok_and(|n| n == l));
+    buffered_reply(ctx, &ns_text, a, docs, ends)
+}
+
 /// A `find` whose filter has a `$text` (011 FR-001): the aggregation of its stages, whose first
 /// `$match` the collection's text index answers with each document's `textScore`.
 fn text_find<B: Backend + ?Sized>(
@@ -1055,7 +1081,7 @@ fn check_tailable(
 
 /// A filter as RefDb writes its query tree in a message: each condition `path $op value`, and
 /// `$and` over them, indented by four spaces, when there are several or none.
-fn query_tree(filter: &Document) -> String {
+pub(super) fn query_tree(filter: &Document) -> String {
     let mut leaves = Vec::new();
     for (path, cond) in filter.iter() {
         match cond {
