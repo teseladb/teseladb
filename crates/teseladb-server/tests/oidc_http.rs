@@ -154,7 +154,12 @@ fn root_user() -> Vec<u8> {
 
 /// A node that requires credentials, with REFDB-OIDC and the provider of `issuer`, which it
 /// reaches trusting `ca`, and its HTTP port on `http`.
-fn start(issuer: &str, ca: teseladb_x509::Certificate, http: SocketAddr) -> Node<MemDisk> {
+fn start(
+    issuer: &str,
+    ca: teseladb_x509::Certificate,
+    http: SocketAddr,
+    tls: Option<teseladb_server::tls_port::TlsPort>,
+) -> Node<MemDisk> {
     let json = format!(
         r#"[{{"issuer": "{issuer}", "audience": "{AUDIENCE}", "authNamePrefix": "idp", "clientId": "cid", "requestScopes": ["db.read"], "useAuthorizationClaim": true, "authorizationClaim": "groups", "supportsHumanFlows": false}}]"#
     );
@@ -167,7 +172,7 @@ fn start(issuer: &str, ca: teseladb_x509::Certificate, http: SocketAddr) -> Node
         mechanisms: vec![SaslMechanism::ScramSha256, SaslMechanism::Oidc],
         ..ClientConfig::new(Vec::new())
     };
-    let http = HttpPortConfig { addrs: vec![http], tls: None, settings: Settings::default() };
+    let http = HttpPortConfig { addrs: vec![http], tls, settings: Settings::default() };
     let cfg = NodeConfig {
         cores: Some(2),
         client: Some(client),
@@ -252,15 +257,28 @@ fn root_key(node: &Node<MemDisk>) -> String {
 /// The provider's test PKI, the provider and a node with its HTTP port on `http`: the node, the
 /// address its HTTP port answers on over loopback, and the issuer.
 fn setup(http: SocketAddr) -> (Node<MemDisk>, SocketAddr, String) {
+    let (node, at, issuer, _) = setup_with(http, false);
+    (node, at, issuer)
+}
+
+/// [`setup`], with TLS on the HTTP port when `tls`: also the PKI.
+fn setup_with(
+    http: SocketAddr,
+    tls: bool,
+) -> (Node<MemDisk>, SocketAddr, String, teseladb_server::pki::Pki) {
     let pki = pki();
     let config = Arc::new(ServerConfig::new(CertifiedKey {
         chain: pki.node_chain.clone(),
         key: pki.node_key.clone(),
     }));
     let issuer = provider(config);
-    let node = start(&issuer, pki.ca.clone(), http);
+    let port_tls = tls.then(|| {
+        let opts = teseladb_server::cli::TlsOpts::default();
+        teseladb_server::tls_port::build(&opts, &pki).unwrap()
+    });
+    let node = start(&issuer, pki.ca.clone(), http, port_tls);
     let port = node.http_addrs()[0].port();
-    (node, SocketAddr::from(([127, 0, 0, 1], port)), issuer)
+    (node, SocketAddr::from(([127, 0, 0, 1], port)), issuer, pki)
 }
 
 /// The metadata of `/mcp`: status and document.
@@ -338,6 +356,27 @@ fn tokens_of_the_provider_open_rest_and_mcp_each_with_its_own_audience() {
     assert_eq!(call(at, &forged, "GET", "/v1/databases", "").0, 401);
     let stranger = token("https://other.test", AUDIENCE, "alice", "[]");
     assert_eq!(call(at, &stranger, "GET", "/v1/databases", "").0, 401);
+    // Another scheme than Bearer is refused.
+    let basic = Request::new("GET", "/v1/databases").header("Authorization", "Basic cm9vdDp4");
+    assert_eq!(send(at, basic).status, 401);
+    // A call with progress opens its stream with an API key, and is refused without a credential
+    // the node takes.
+    let progress = |credential: &str| {
+        let body = format!(
+            r#"{{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{{"_meta":{{"io.modelcontextprotocol/protocolVersion":"2026-07-28","progressToken":"p"}},"name":"find","arguments":{{"connectionId":"{}.stateless","database":"app","collection":"c"}}}}}}"#,
+            node.node_id().0
+        );
+        let req = Request::new("POST", "/mcp")
+            .header("Authorization", &format!("Bearer {credential}"))
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream")
+            .body(body.into_bytes());
+        send(at, req)
+    };
+    let r = progress(&root);
+    assert_eq!(r.status, 200);
+    assert!(String::from_utf8_lossy(&r.body).contains("notifications/progress"));
+    assert_eq!(progress(&rest_token).status, 401);
     drop(node.stop());
 }
 
@@ -382,4 +421,46 @@ fn without_a_known_uri_mcp_takes_no_token_until_the_resource_is_set() {
     assert_eq!(st, 200);
     assert_eq!(meta.get("resource"), Some(&Bson::from(fixed)));
     drop(node.stop());
+}
+
+/// 019 FR-020: `teseladb mcp --uri https://…` reaches a node whose HTTP port has TLS, trusting
+/// the CA of `--tlsCAFile`; progress comes back as the events of a stream, one line each. Without
+/// `--tlsCAFile`, with a file that is not a CA, or with another scheme, it stops with a message.
+#[test]
+fn mcp_over_stdio_reaches_a_node_over_tls() {
+    use teseladb_server::mcp_stdio::{McpOpts, run};
+    let (node, at, _, pki) = setup_with(SocketAddr::from(([127, 0, 0, 1], 0)), true);
+    let key = root_key(&node);
+    let dir = std::env::temp_dir().join(format!("teseladb-mcp-tls-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let ca = dir.join("ca.pem");
+    std::fs::write(&ca, pki.ca.to_pem()).unwrap();
+    let uri = format!("https://localhost:{}", at.port());
+    let o = McpOpts { uri, ca_file: Some(ca), certificate_key_file: None };
+    let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#;
+    let call = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"_meta":{"progressToken":"p"},"name":"list-databases","arguments":{}}}"#;
+    let input = format!("{init}\n{call}\n");
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let code = run(&o, &mut input.as_bytes(), &mut out, &mut err, Some(key.clone()));
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.lines().count() >= 2 && text.contains(r#""id":2"#), "{text}");
+    let fails = |o: &McpOpts| {
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let code = run(o, &mut input.as_bytes(), &mut out, &mut err, Some(key.clone()));
+        (code, String::from_utf8_lossy(&err).into_owned())
+    };
+    let none = McpOpts { ca_file: None, ..o.clone() };
+    assert_eq!(fails(&none), (1, "teseladb mcp: an https:// URI needs --tlsCAFile\n".to_owned()));
+    let missing = McpOpts { ca_file: Some(dir.join("nope.pem")), ..o.clone() };
+    let (code, msg) = fails(&missing);
+    assert!(code == 1 && msg.contains("--tlsCAFile"), "{msg}");
+    let not_ca = dir.join("not.pem");
+    std::fs::write(&not_ca, "not a certificate").unwrap();
+    let (code, msg) = fails(&McpOpts { ca_file: Some(not_ca), ..o.clone() });
+    assert!(code == 1 && msg.contains("--tlsCAFile"), "{msg}");
+    let (code, msg) = fails(&McpOpts { uri: "ftp://h".to_owned(), ..o.clone() });
+    assert!(code == 1 && msg.contains("https:// or http://"), "{msg}");
+    drop(node.stop());
+    std::fs::remove_dir_all(&dir).unwrap();
 }
