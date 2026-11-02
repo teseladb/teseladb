@@ -227,6 +227,9 @@ pub enum Kind {
     Proxy(Option<(ObjRef, ObjRef)>, bool),
     /// A generator object.
     Generator(Rc<RefCell<crate::generators::GenState>>),
+    /// An async generator object: the interpreter never runs its body (`next` traps), so it
+    /// only carries its class (`AsyncGenerator`, measured on a `refrouter` 9.0.4 on 02-11).
+    AsyncGenerator,
     /// A promise.
     Promise(Rc<RefCell<crate::promise::PromiseState>>),
     /// An iterator over a snapshot of values (`entries()`, `values()`, `keys()`).

@@ -278,6 +278,9 @@ fn private_name(key: &str) -> &str {
 /// The name of a key for messages: `o.f`.
 pub(crate) fn callee_text(e: &Expr) -> String {
     match e {
+        Expr::Ident(n, _) if n.starts_with(crate::generators::TEMP_PREFIX) => {
+            n.split_once('|').map_or_else(|| INTERMEDIATE.to_string(), |(_, t)| t.to_string())
+        }
         Expr::Ident(n, _) => n.to_string(),
         Expr::Member { obj, prop, .. } => match &**prop {
             MemberProp::Name(n) | MemberProp::Private(n) => format!("{}.{n}", callee_text(obj)),
@@ -287,7 +290,7 @@ pub(crate) fn callee_text(e: &Expr) -> String {
                 Some(key) => format!("{}['{key}']", callee_text(obj)),
                 None => match k {
                     Expr::Num(n) => format!("{}[{}]", callee_text(obj), number::to_string(*n)),
-                    Expr::Ident(n, _) => format!("{}[{n}]", callee_text(obj)),
+                    Expr::Ident(..) => format!("{}[{}]", callee_text(obj), callee_text(k)),
                     Expr::At(_, inner) if matches!(**inner, Expr::Ident(..)) => {
                         format!("{}[{}]", callee_text(obj), callee_text(inner))
                     }
@@ -305,8 +308,17 @@ pub(crate) fn callee_text(e: &Expr) -> String {
         Expr::Str(s) => format!("\"{s}\""),
         Expr::Num(n) => number::to_string(*n),
         Expr::OptChain(e) | Expr::At(_, e) => callee_text(e),
-        _ => "(intermediate value)".into(),
+        _ => INTERMEDIATE.into(),
     }
+}
+
+/// What messages call a value with no source to name it by.
+pub(crate) const INTERMEDIATE: &str = "(intermediate value)";
+
+/// A temporary of a generator's rewriting with no source text: a callee that is one is named
+/// by its value (`3 is not a function`).
+fn bare_temp(e: &Expr) -> bool {
+    matches!(e, Expr::Ident(n, _) if n.starts_with(crate::generators::TEMP_PREFIX) && !n.contains('|'))
 }
 
 /// The string a constant key folds to: a string, or `+` of strings and numbers.
@@ -1341,6 +1353,16 @@ impl<'c> Interp<'c> {
             scope
         };
         self.hoist(&def.body, &scope, true)?;
+        if !def.strict {
+            let mut params = Vec::new();
+            for (p, _) in &def.params {
+                pattern_names(p, &mut params);
+            }
+            if let Some(r) = &def.rest {
+                pattern_names(r, &mut params);
+            }
+            self.hoist_block_functions(&def.body, &scope, &params);
+        }
         if def.generator {
             return crate::generators::make(self, fo, def, scope);
         }
@@ -1648,37 +1670,73 @@ impl<'c> Interp<'c> {
             }
         }
         for s in body {
-            match s {
-                Stmt::Decl(k @ (DeclKind::Let | DeclKind::Const), d) => {
-                    for (p, _) in d {
-                        let mut names = Vec::new();
-                        pattern_names(p, &mut names);
-                        for n in names {
-                            scope.borrow_mut().vars.push((
-                                n,
-                                Binding {
-                                    value: None,
-                                    mutable: *k == DeclKind::Let,
-                                    lexical: true,
-                                },
-                            ));
-                        }
-                    }
-                }
-                Stmt::Class(n, _) => {
-                    scope
-                        .borrow_mut()
-                        .vars
-                        .push((n.clone(), Binding { value: None, mutable: true, lexical: true }));
-                }
-                Stmt::Func(n, def) => {
-                    let f = self.closure(def, scope)?;
-                    declare(scope, n, f, true);
-                }
-                _ => {}
-            }
+            self.hoist_lexical(s, scope)?;
         }
         Ok(())
+    }
+
+    /// Declares the `let`, `const`, `class` or function that `s` declares in the block `scope`.
+    fn hoist_lexical(&mut self, s: &Stmt, scope: &EnvRef) -> R<()> {
+        match s {
+            Stmt::Decl(k @ (DeclKind::Let | DeclKind::Const), d) => {
+                for (p, _) in d {
+                    let mut names = Vec::new();
+                    pattern_names(p, &mut names);
+                    for n in names {
+                        scope.borrow_mut().vars.push((
+                            n,
+                            Binding { value: None, mutable: *k == DeclKind::Let, lexical: true },
+                        ));
+                    }
+                }
+            }
+            Stmt::Class(n, _) => {
+                scope
+                    .borrow_mut()
+                    .vars
+                    .push((n.clone(), Binding { value: None, mutable: true, lexical: true }));
+            }
+            Stmt::Func(n, def) => {
+                let f = self.closure(def, scope)?;
+                declare(scope, n, f, true);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// The `var`s that the functions declared in blocks of non-strict `body` take (Annex
+    /// B.3.3, [`crate::annex`]), in the function or program scope `scope`.
+    pub(crate) fn hoist_block_functions(&mut self, body: &[Stmt], scope: &EnvRef, params: &[Name]) {
+        for (n, def) in crate::annex::block_functions(body, params) {
+            def.annex.set(true);
+            if !scope.borrow().vars.iter().any(|(k, _)| *k == n) {
+                declare(scope, &n, Val::Undef, true);
+            }
+        }
+    }
+
+    /// Annex B.3.3 in a direct `eval` of non-strict code: a function of a block gets a `var` of
+    /// `var_env` unless a lexical binding between `env` and `var_env` has its name.
+    fn eval_block_functions(&mut self, body: &[Stmt], env: &EnvRef, var_env: &EnvRef) {
+        for (n, def) in crate::annex::block_functions(body, &[]) {
+            let mut cur = Some(env.clone());
+            let mut clash = false;
+            while let Some(e) = cur {
+                clash |= e.borrow().vars.iter().any(|(k, b)| *k == n && b.lexical);
+                if clash || Rc::ptr_eq(&e, var_env) {
+                    break;
+                }
+                cur = e.borrow().parent.clone();
+            }
+            if clash {
+                continue;
+            }
+            def.annex.set(true);
+            if !var_env.borrow().vars.iter().any(|(k, _)| *k == n) {
+                declare(var_env, &n, Val::Undef, true);
+            }
+        }
     }
 
     pub fn closure(&mut self, def: &Rc<FuncDef>, env: &EnvRef) -> R {
@@ -2039,6 +2097,11 @@ impl<'c> Interp<'c> {
                     }
                 }
             }
+            Stmt::Func(n, def) if def.annex.get() => {
+                // Annex B.3.3: the function's `var` takes the block's binding.
+                let v = self.read_var(env, n)?;
+                declare(&var_scope_of(env), n, v, true);
+            }
             Stmt::Func(..) | Stmt::Empty => {}
             Stmt::Suspends(s) => self.exec(s, env)?,
             Stmt::Class(n, c) => {
@@ -2112,23 +2175,9 @@ impl<'c> Interp<'c> {
             Stmt::Switch(d, cases) => {
                 let v = self.eval(d, env)?;
                 let scope = self.new_env(Some(env.clone()));
-                let all: Vec<&Stmt> = cases.iter().flat_map(|(_, b)| b.iter()).collect();
-                for s in &all {
-                    if let Stmt::Decl(k @ (DeclKind::Let | DeclKind::Const), d) = s {
-                        for (p, _) in d {
-                            let mut names = Vec::new();
-                            pattern_names(p, &mut names);
-                            for n in names {
-                                scope.borrow_mut().vars.push((
-                                    n,
-                                    Binding {
-                                        value: None,
-                                        mutable: *k == DeclKind::Let,
-                                        lexical: true,
-                                    },
-                                ));
-                            }
-                        }
+                for (_, body) in cases {
+                    for s in body {
+                        self.hoist_lexical(s, &scope)?;
                     }
                 }
                 let mut start = None;
@@ -2374,6 +2423,7 @@ impl<'c> Interp<'c> {
                 strict: true,
                 source: format!("class {} {{ }}", c.name.as_deref().unwrap_or("")).into(),
                 guessed: std::cell::OnceCell::new(),
+                annex: std::cell::Cell::new(false),
             }),
         };
         let ctor_proto = match &parent_ctor {
@@ -2902,7 +2952,8 @@ impl<'c> Interp<'c> {
         }
         self.pos = pos;
         if !f.is_callable() {
-            return self.type_error(&format!("{} is not a function", callee_text(callee)));
+            let text = if bare_temp(callee) { self.show(&f) } else { callee_text(callee) };
+            return self.type_error(&format!("{text} is not a function"));
         }
         self.conversion_called = false;
         let r = self.call(&f, &this, &args);
@@ -3089,6 +3140,9 @@ impl<'c> Interp<'c> {
             }
         }
         self.hoist(&body, &lex, false)?;
+        if !strict {
+            self.eval_block_functions(&body, env, &var_env);
+        }
         for st in &body {
             if let Stmt::Func(n, _) = st {
                 let f = self.read_var(&lex, n)?;
@@ -3443,7 +3497,7 @@ fn var_scope_of(env: &EnvRef) -> EnvRef {
 
 /// Whether `e` is a function or class without a name, which takes the name of what it is bound
 /// to (ECMA-262 §8.4.3 IsAnonymousFunctionDefinition, parentheses included).
-fn anonymous_definition(e: &Expr) -> bool {
+pub(crate) fn anonymous_definition(e: &Expr) -> bool {
     match e {
         Expr::Func(d) => d.name.is_none() && !d.method,
         Expr::Class(c) => c.name.is_none(),
@@ -3498,6 +3552,10 @@ fn name_function(v: &Val, p: &Pattern, e: &Expr) {
         return;
     }
     let (Val::Obj(f), Pattern::Name(n)) = (v, p) else { return };
+    // A temporary of a generator's rewriting gives no name.
+    if n.starts_with(crate::generators::TEMP_PREFIX) {
+        return;
+    }
     let mut b = f.borrow_mut();
     if !b.is_callable() {
         return;
@@ -3509,7 +3567,7 @@ fn name_function(v: &Val, p: &Pattern, e: &Expr) {
     }
 }
 
-fn pattern_names(p: &Pattern, out: &mut Vec<Name>) {
+pub(crate) fn pattern_names(p: &Pattern, out: &mut Vec<Name>) {
     match p {
         Pattern::Name(n) => out.push(n.clone()),
         Pattern::Object(props, rest) => {

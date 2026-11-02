@@ -215,6 +215,11 @@ fn accessor_name(kind: PropKind, key: &str) -> String {
 }
 
 /// Whether `body` starts with the directive `"use strict"`.
+/// A function declared as the branch of an `if` is in a block of its own (Annex B.3.4).
+fn in_block(s: Stmt) -> Stmt {
+    if matches!(s, Stmt::Func(..)) { Stmt::Block(vec![s]) } else { s }
+}
+
 pub fn has_use_strict(body: &[Stmt]) -> bool {
     matches!(body.first(), Some(Stmt::Expr(Expr::Str(s))) if &**s == "use strict")
 }
@@ -528,9 +533,12 @@ impl Parser {
                 self.expect("(")?;
                 let c = self.expr_at()?;
                 self.expect(")")?;
-                let then = Box::new(self.statement()?);
-                let other =
-                    if self.eat_word("else") { Some(Box::new(self.statement()?)) } else { None };
+                let then = Box::new(in_block(self.statement()?));
+                let other = if self.eat_word("else") {
+                    Some(Box::new(in_block(self.statement()?)))
+                } else {
+                    None
+                };
                 Ok(Stmt::If(c, then, other))
             }
             "while" => {
@@ -1121,6 +1129,7 @@ impl Parser {
             method: kind.method,
             source: self.source_from(start),
             guessed: std::cell::OnceCell::new(),
+            annex: std::cell::Cell::new(false),
         }))
     }
 
@@ -1353,6 +1362,7 @@ impl Parser {
             method: true,
             source: self.source_from(start),
             guessed: std::cell::OnceCell::new(),
+            annex: std::cell::Cell::new(false),
         }))
     }
 
@@ -1483,6 +1493,7 @@ impl Parser {
             method: false,
             source: self.source_from(start),
             guessed: std::cell::OnceCell::new(),
+            annex: std::cell::Cell::new(false),
         })))
     }
 

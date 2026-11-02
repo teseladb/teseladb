@@ -80,6 +80,7 @@ pub(crate) fn class_kind(v: &Val) -> &'static str {
             Kind::Iter(_, class) => class,
             Kind::Helper(_) => "Iterator Helper",
             Kind::Generator(_) => "Generator",
+            Kind::AsyncGenerator => "AsyncGenerator",
             Kind::Ordinary | Kind::Bson(_) => "Object",
         },
         other => other.type_of(),
@@ -327,6 +328,9 @@ fn eval(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     let body = crate::parser::parse_script(&src).map_err(|e| it.syntax_error(&e))?;
     let env = it.global_env.clone();
     it.hoist(&body, &env, true)?;
+    if !crate::parser::has_use_strict(&body) {
+        it.hoist_block_functions(&body, &env, &[]);
+    }
     let saved = it.last.take();
     for s in &body {
         it.exec(s, &env)?;

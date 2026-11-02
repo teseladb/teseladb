@@ -3084,3 +3084,115 @@ new RegExp('/', 'g').source + new RegExp('\n').source + new RegExp('').source + 
 (() => { 'use strict'; try { undeclared2 += 1 } catch (e) { return e.name + ':' + e.message } })()	S:ReferenceError:undeclared2 is not defined
 (() => { 'use strict'; try { [undeclared3] = [1] } catch (e) { return e.name + ':' + e.message } })()	S:ReferenceError:assignment to undeclared variable undeclared3
 (() => { 'use strict'; try { undeclared4++ } catch (e) { return e.name + ':' + e.message } })()	S:ReferenceError:undeclared4 is not defined
+(() => { function* g() { const o = { [yield 'k']: 1 }; return o } const it = g(); return [it.next(), it.next('z')] })()	J:[{"value":"k","done":false},{"value":{"z":1},"done":true}]
+(() => { function* g() { const o = {a: 3}; return o?.[yield 1] } const it = g(); return [it.next(), it.next('a')] })()	J:[{"value":1,"done":false},{"value":3,"done":true}]
+(() => { function* g() { const o = undefined; return o?.a[yield 1] } const it = g(); return [it.next()] })()	J:[{"done":true}]
+(() => { { function f() { return 1 } } return typeof f })()	S:function
+(() => { if (true) { function f() { return 2 } } return f() })()	J:2
+(() => { const r = typeof f; { function f() {} } return r })()	S:undefined
+(() => { if (false) { function f() {} } return typeof f })()	S:undefined
+(() => { 'use strict'; { function f() {} } return typeof f })()	S:undefined
+(() => { let f = 1; { function f() {} } return f })()	J:1
+(() => { { function f() { return 1 } } { function f() { return 2 } } return f() })()	J:2
+(() => { switch (1) { case 1: function h() { return 3 } } return h() })()	J:3
+(() => { { function f() { return 1 } f = 5; } return typeof f })()	S:function
+(() => { try { { function f() {} } } finally {} return typeof f })()	S:function
+(() => { function q(f) { { function f() {} } return typeof f } return q(4) })()	S:number
+(() => { async function* g() {} return Object.prototype.toString.call(g()) })()	S:[object AsyncGenerator]
+(() => { async function* g() {} const o = g(); Object.setPrototypeOf(o, null); return Object.prototype.toString.call(o) })()	S:[object Object]
+(() => { async function* g() {} return String(g()) })()	S:[object AsyncGenerator]
+(() => { function* g() {} return String(g()) })()	S:[object Generator]
+(() => { async function* g() {} const o = g(); return [typeof o.next, Object.getPrototypeOf(Object.getPrototypeOf(o)) === Object.getPrototypeOf(async function*(){}).prototype] })()	J:["function",true]
+(() => { async function* g() {} return g()[Symbol.toStringTag] })()	S:AsyncGenerator
+(() => { async function* g() {} return Object.getPrototypeOf(g).prototype[Symbol.toStringTag] })()	S:AsyncGenerator
+(() => { 'use strict'; async function* g() {} const o = g(); Object.preventExtensions(o); o.x = 1 })()	E:TypeError:can't define property "x": AsyncGenerator is not extensible
+(() => { 'use strict'; async function* g() {} const o = g(); Object.setPrototypeOf(o, null); Object.preventExtensions(o); o.x = 1 })()	E:TypeError:can't define property "x": AsyncGenerator is not extensible
+(() => { async function* g() {} const o = g(); Object.preventExtensions(o); Object.defineProperty(o, 'x', {value: 1}) })()	E:TypeError:can't define property "x": AsyncGenerator is not extensible
+(() => { async function* g() {} const o = g(); Object.setPrototypeOf(o, null); return String(o) })()	E:TypeError:can't convert o to string
+(() => { async function* g() {} const o = g(); Object.setPrototypeOf(o, null); return o + '' })()	E:TypeError:can't convert o to primitive type
+(() => { async function* g() {} const o = g(); Object.setPrototypeOf(o, null); return `${o}` })()	E:TypeError:can't convert o to string
+(() => { async function* g() {} const o = g(); Object.setPrototypeOf(o, null); return 'a'.concat(o) })()	E:TypeError:can't convert AsyncGenerator to string
+(() => { async function* g() {} const o = g(); return Date.prototype.getTime.call(o) })()	E:TypeError:Date.prototype.getTime called on incompatible AsyncGenerator
+(() => { function* g() {} const o = g(); return Date.prototype.getTime.call(o) })()	E:TypeError:Date.prototype.getTime called on incompatible Generator
+(() => { async function* g() {} const o = g(); Object.setPrototypeOf(o, null); return [].join.call([o]) })()	E:TypeError:can't convert AsyncGenerator to string
+(() => { async function* g() {} const o = g(); Object.setPrototypeOf(o, null); return encodeURI(o) })()	E:TypeError:can't convert o to string
+(() => { function* g() {} const o = g(); Object.setPrototypeOf(o, null); return encodeURI(o) })()	E:TypeError:can't convert o to string
+(() => { async function* g() {} const o = g(); return Object.prototype.toString.call(Object.getPrototypeOf(o)) })()	S:[object AsyncGenerator]
+(() => { switch (1) { case 1: return h(); function h() { return 3 } } })()	J:3
+(() => { switch (2) { case 1: function h() { return 3 } case 2: return typeof h } })()	S:function
+(() => { switch (1) { case 1: class K {} return typeof K } })()	S:function
+(() => { function* g() { switch (1) { case 1: yield h(); function h() { return 4 } } } return [...g()] })()	J:[4]
+(() => { for (let f of [1]) { function f() {} } return typeof f })()	S:undefined
+(() => { { function f() { return 1 } { function f() { return 2 } } } return f() })()	J:2
+(() => { { let f = 0; { function f() {} } } return typeof f })()	S:undefined
+(() => { if (true) function f() { return 7 } return f() })()	J:7
+(() => { label: { function f() { return 8 } } return f() })()	J:8
+(() => { try { function f() { return 9 } } catch (e) {} return f() })()	J:9
+(() => { try { throw 1 } catch (f) { { function f() { return 1 } } } return typeof f })()	S:function
+(() => { var r = []; for (var i = 0; i < 2; i++) { r.push(typeof f); { function f() {} } } return r })()	J:["undefined","function"]
+(() => { { function f() {} } return Object.getOwnPropertyDescriptor(globalThis, 'f') === undefined })()	J:true
+(() => { function* g() { { function f() { return 5 } } yield f() } return [...g()] })()	J:[5]
+(() => { const o = { m() { { function f() { return 6 } } return f() } }; return o.m() })()	J:6
+(() => { class C { m() { { function f() {} } return typeof f } } return new C().m() })()	S:undefined
+(() => { return eval('{ function ev() { return 1 } } typeof ev') })()	S:function
+(() => { return (0, eval)('{ function gev() { return 1 } } typeof gev') })()	S:function
+(() => { return Function('{ function fv() { return 2 } } return typeof fv')() })()	S:function
+(() => { let f = 1; return eval('{ function f() {} } typeof f') })()	S:number
+(() => { let f = 1; eval('{ function f() {} }'); return typeof f })()	S:number
+(() => { function* g() { const [a = yield 1] = []; return a } const it = g(); const r1 = it.next(); const r2 = it.next(7); return [r1, r2] })()	J:[{"value":1,"done":false},{"value":7,"done":true}]
+(() => { function* g() { const {a = yield 1} = {}; return a } const it = g(); const r1 = it.next(); const r2 = it.next(7); return [r1, r2] })()	J:[{"value":1,"done":false},{"value":7,"done":true}]
+(() => { function* g() { let a, b; [a = yield 1, b = yield 2] = [undefined, 5]; return [a, b] } const it = g(); return [it.next(), it.next(3), it.next(4)] })()	J:[{"value":1,"done":false},{"value":[3,5],"done":true},{"done":true}]
+(() => { function* g() { let a; ({x: a = yield 'k'} = {}); return a } const it = g(); return [it.next(), it.next(9)] })()	J:[{"value":"k","done":false},{"value":9,"done":true}]
+(() => { function* g(p) { const [[x = yield 1] = []] = [p]; return x } const it = g(undefined); return [it.next(), it.next(2)] })()	J:[{"value":1,"done":false},{"value":2,"done":true}]
+(() => { function* g() { for (const [a = yield 1] of [[], [5]]) { yield a } } return [...g()] })()	J:[1,null,5]
+(() => { function* g() { const C = class { [yield 'k']() { return 1 } }; return Object.getOwnPropertyNames(C.prototype) } const it = g(); return [it.next(), it.next('m')] })()	J:[{"value":"k","done":false},{"value":["constructor","m"],"done":true}]
+(() => { function* g() { const C = class { static [yield 'k'] = 3 }; return C.m } const it = g(); return [it.next(), it.next('m')] })()	J:[{"value":"k","done":false},{"value":3,"done":true}]
+(() => { function* g() { const o = null; return o?.[yield 1] } const it = g(); return [it.next(), it.next(2)] })()	J:[{"done":true},{"done":true}]
+(() => { function* g() { const o = null; return o?.f(yield 1) } const it = g(); return [it.next()] })()	J:[{"done":true}]
+(() => { function* g() { const f = null; return f?.(yield 1) } const it = g(); return [it.next()] })()	J:[{"done":true}]
+(() => { function* g() { const [a, [b = yield 'b'] = [], ...r] = [1, undefined, 3, 4]; return [a, b, r] } const it = g(); return [it.next(), it.next(9)] })()	J:[{"value":"b","done":false},{"value":[1,9,[3,4]],"done":true}]
+(() => { function* g() { const {a = yield 'a', ...r} = {b: 2, c: 3}; return [a, r] } const it = g(); return [it.next(), it.next(5)] })()	J:[{"value":"a","done":false},{"value":[5,{"b":2,"c":3}],"done":true}]
+(() => { function* g() { const {[yield 'k']: v = 1} = {x: 7}; return v } const it = g(); return [it.next(), it.next('x')] })()	J:[{"value":"k","done":false},{"value":7,"done":true}]
+(() => { function* g() { const {[yield 'k']: v = yield 'd'} = {}; return v } const it = g(); return [it.next(), it.next('x'), it.next(4)] })()	J:[{"value":"k","done":false},{"value":"d","done":false},{"value":4,"done":true}]
+(() => { function* g() { const [f = function () {}] = [], [h = yield] = [1]; return f.name } return g().next() })()	J:{"value":"f","done":true}
+(() => { function* g() { const [f = function () {}, h = yield] = []; return f.name } const it = g(); it.next(); return it.next() })()	J:{"value":"f","done":true}
+(() => { function* g() { let a = 0; [a = yield 'a'] = [undefined]; return a } const it = g(); return [it.next(), it.next(6)] })()	J:[{"value":"a","done":false},{"value":6,"done":true}]
+(() => { function* g() { const o = {}; [o.x = yield 'x', o['y'] = 2] = []; return o } const it = g(); return [it.next(), it.next(1)] })()	J:[{"value":"x","done":false},{"value":{"x":1,"y":2},"done":true}]
+(() => { function* g() { const r = ([a = yield 'a'] = [undefined, 2]); return r } const it = g(); it.next(); return it.next(1) })()	J:{"value":[null,2],"done":true}
+(() => { function* g() { try { throw {m: undefined} } catch ({m = yield 'm'}) { return m } } const it = g(); return [it.next(), it.next(8)] })()	J:[{"value":"m","done":false},{"value":8,"done":true}]
+(() => { function* g() { let a; for ([a = yield 'a'] of [[], [2]]) { yield a } } return [...g()] })()	J:["a",null,2]
+(() => { function* g() { for (var [a = yield 'a'] of [[]]) {} return a } const it = g(); it.next(); return it.next(3) })()	J:{"value":3,"done":true}
+(() => { function* g() { const [a = yield 'a'] = null } try { g().next() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:can't access property Symbol.iterator of null
+(() => { function* g() { const {a = yield 'a'} = null } try { g().next() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:null has no properties
+(() => { function* g() { const [a = yield 'a'] = 5 } try { g().next() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:5 is not iterable
+(() => { let closed = 0; const it = { [Symbol.iterator]() { return { next() { return {value: undefined, done: false} }, return() { closed++; return {} } } } }; function* g() { const [a = yield 'a'] = it; return a } const i = g(); i.next(); const r = i.next(4); return [r, closed] })()	J:[{"value":4,"done":true},1]
+(() => { let closed = 0; const it = { [Symbol.iterator]() { return { next() { return {value: undefined, done: false} }, return() { closed++; return {} } } } }; function* g() { const [a = yield 'a'] = it; return a } const i = g(); i.next(); const r = i.return(4); return [r, closed] })()	J:[{"value":4,"done":true},1]
+(() => { const log = []; function* g() { const [a = (log.push('a'), yield 'a'), b = log.push('b')] = []; return [a, b, log] } const it = g(); it.next(); return it.next(1) })()	J:{"value":[1,2,["a","b"]],"done":true}
+(() => { function* g() { class C extends (yield 'p') {} return Object.getPrototypeOf(C) === Array } const it = g(); return [it.next(), it.next(Array)] })()	J:[{"value":"p","done":false},{"value":true,"done":true}]
+(() => { function* g() { class C { [yield 'a']() { return 1 } [yield 'b']() { return 2 } static x = 5 } return [Object.getOwnPropertyNames(C.prototype), C.x] } const it = g(); it.next(); it.next('p'); return it.next('q') })()	J:{"value":[["constructor","p","q"],5],"done":true}
+(() => { function* g() { class C { [yield 'a']() {} } return C.prototype.m.name } const it = g(); it.next(); return it.next('m') })()	J:{"value":"m","done":true}
+(() => { function* g() { const C = class { static [yield 'a'] = function () {} }; return C.k.name } const it = g(); it.next(); return it.next('k') })()	J:{"value":"k","done":true}
+(() => { function* g() { const a = { f(x) { return [this === a, x] } }; return a.f?.(yield 1) } const it = g(); it.next(); return it.next(2) })()	J:{"value":[true,2],"done":true}
+(() => { function* g() { const a = {}; return a.f?.(yield 1) } const it = g(); return [it.next()] })()	J:[{"done":true}]
+(() => { function* g() { const a = {f: 5}; return a.f?.(yield 1) } const it = g(); it.next(); try { it.next(2) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:a.f is not a function
+(() => { function* g() { const f = 5; return f?.(yield 1) } const it = g(); it.next(); try { it.next(2) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:f is not a function
+(() => { function* g() { const o = {a: {b: null}}; return o?.a.b?.[yield 1].c } const it = g(); return [it.next()] })()	J:[{"done":true}]
+(() => { function* g() { const o = {a: {b: {x: {c: 4}}}}; return o?.a.b?.[yield 1].c } const it = g(); it.next(); return it.next('x') })()	J:{"value":4,"done":true}
+(() => { function* g() { const o = {a: null}; return o.a?.[yield 1] ?? 'n' } const it = g(); return it.next() })()	J:{"value":"n","done":true}
+(() => { function* g() { const o = {k: {m: 1}}; return o?.[yield 'a']?.[yield 'b'] } const it = g(); return [it.next(), it.next('k'), it.next('m')] })()	J:[{"value":"a","done":false},{"value":"b","done":false},{"value":1,"done":true}]
+(() => { function* g() { const o = {k: null}; return o?.[yield 'a']?.[yield 'b'] } const it = g(); return [it.next(), it.next('k')] })()	J:[{"value":"a","done":false},{"done":true}]
+(() => { function* g() { return (yield 'o')?.[yield 'k'] } const it = g(); return [it.next(), it.next(null)] })()	J:[{"value":"o","done":false},{"done":true}]
+(() => { function* g() { const a = [1, 2]; return a?.map(x => x * 2)[yield 0] } const it = g(); it.next(); return it.next(1) })()	J:{"value":4,"done":true}
+(() => { function* g() { let f = function () {}; [f = yield] = [f]; return f.name } return g().next() })()	J:{"value":"f","done":true}
+(() => { function* g() { const a = {f: 5}; return a.f(yield 1) } const it = g(); it.next(); try { it.next(2) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:a.f is not a function
+(() => { function* g() { const a = {b: {f: 5}}; return a.b.f(yield 1) } const it = g(); it.next(); try { it.next(2) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:a.b.f is not a function
+(() => { function* g() { const a = {f: 5}; return a['f'](yield 1) } const it = g(); it.next(); try { it.next(2) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:a.f is not a function
+(() => { function* g() { const a = {f: 5}; const k = 'f'; return a[k](yield 1) } const it = g(); it.next(); try { it.next(2) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:a[k] is not a function
+(() => { function* g() { return (yield 1).f() } const it = g(); it.next(); try { it.next({}) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:(intermediate value).f is not a function
+(() => { function* g() { return (yield 1)() } const it = g(); it.next(); try { it.next(3) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:3 is not a function
+(() => { function* g() { const f = 3; return f(yield 1) } const it = g(); it.next(); try { it.next(3) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:f is not a function
+(() => { function* g() { const a = {}; return a.b.c[yield 1] } const it = g(); try { it.next() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:can't access property "c", a.b is undefined
+(() => { function* g() { const a = {b: null}; return a.b[yield 1] } const it = g(); it.next(); try { it.next('x') } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:can't access property "x", a.b is null
+(() => { function* g() { const a = {b: null}; return a.b.c + (yield 1) } const it = g(); try { it.next() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:can't access property "c", a.b is null
+(() => { function* g() { const a = {f: 5}; return new a.f(yield 1) } const it = g(); it.next(); try { it.next(2) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:a.f is not a constructor
+(() => { function* g() { const a = {b: null}; a.b.c = yield 1 } const it = g(); it.next(); try { it.next(2) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:can't access property "c", a.b is null
