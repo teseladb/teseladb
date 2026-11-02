@@ -162,6 +162,7 @@ pub fn run(args: &Args) -> Result<Report, String> {
         "crud" => crud::run(args),
         "index-write" => index::run_write(args),
         "index-read" => index::run_read(args),
+        "index-build-load" => index::run_build_load(args),
         "aggregate" => query::run_aggregate(args),
         "sort" => query::run_sort(args),
         "group-large" => query::run_group_large(args),
@@ -177,7 +178,7 @@ pub fn run(args: &Args) -> Result<Report, String> {
         }
         other => Err(format!(
             "unknown scenario: {other} (available: raftlog, raftlog-recover, deflate, bson, keys, lsm, lsm-sustained, lsm-compression, \
-             write, read, failover, follower-read, group0-limits, split, add-node, rebalance, reference, wire, crud, index-write, index-read, aggregate, sort, group-large, txn, txn-readers, contention, tls-handshake, scram, timeseries, changestream-lag, ycsb-a … ycsb-f)"
+             write, read, failover, follower-read, group0-limits, split, add-node, rebalance, reference, wire, crud, index-write, index-read, index-build-load, aggregate, sort, group-large, txn, txn-readers, contention, tls-handshake, scram, timeseries, changestream-lag, ycsb-a … ycsb-f)"
         )),
     }
 }
