@@ -386,12 +386,17 @@ impl TextIndex {
     /// The score of `doc` for the stems of `query`, `None` when the document does not match it.
     pub fn score(&self, query: &TextQuery, doc: &Document) -> Option<f64> {
         let strings = self.strings(doc);
-        let found = |terms: &[String]| -> bool {
+        let found_with = |terms: &[String], sensitivity: Sensitivity| -> bool {
             strings
                 .iter()
-                .any(|(s, _, l)| stems(s, *l, query.sensitivity).iter().any(|t| terms.contains(t)))
+                .any(|(s, _, l)| stems(s, *l, sensitivity).iter().any(|t| terms.contains(t)))
         };
-        if query.terms.is_empty() || !found(&query.terms) || found(&query.negated) {
+        let found = |terms: &[String]| found_with(terms, query.sensitivity);
+        // The index finds the document by a term without case and diacritics, and only then do
+        // `$caseSensitive` and `$diacriticSensitive` filter it (measured: `CAFÉ` in a Spanish
+        // document is not found by an English case-sensitive `CAFÉ`).
+        let indexed = found_with(&query.plain_terms, Sensitivity::default());
+        if query.terms.is_empty() || !indexed || !found(&query.terms) || found(&query.negated) {
             return None;
         }
         let has_phrase = |p: &str| -> bool {

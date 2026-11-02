@@ -629,6 +629,13 @@ impl MemIndex {
         Ok(scores.into_iter().map(|(doc, s)| (doc, s as f32)).collect())
     }
 
+    /// The terms of `path` the fuzzy query `fuzzy` rewrites token `token` to, as
+    /// [`MemIndex::fuzzy_scores`] picks them: nothing on a path the index does not have.
+    pub(crate) fn fuzzy_expansions(&self, path: &str, token: &str, fuzzy: &Fuzzy) -> Vec<String> {
+        let Some(field) = self.fields.get(path) else { return Vec::new() };
+        field.fuzzy_terms(token, fuzzy).into_iter().map(|(t, _)| t).collect()
+    }
+
     /// The tokens, with their offsets, analyzer `name` makes of `text`.
     pub(crate) fn analyze_tokens(
         &self,

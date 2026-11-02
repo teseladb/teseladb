@@ -457,6 +457,12 @@ impl<B: Backend + ?Sized> Env for WireEnv<'_, B> {
         super::text_search::source(&mut **backend, &ns, filter, self.concern).map_err(to_mql)
     }
 
+    fn check_text(&self, filter: &Document) -> Result<(), MqlError> {
+        let Some((_, ns)) = &self.node else { return Ok(()) };
+        let mut backend = self.backend.borrow_mut();
+        super::text_search::check(&mut **backend, ns, filter).map_err(to_mql)
+    }
+
     fn check_search(&self, stage: &str, spec: &Document) -> Result<(), MqlError> {
         // Only `$search` asks `refsearch` while the pipeline is planned (measured on 9.0.4: the
         // errors of `$searchMeta` and `$vectorSearch` carry the executor's prefix).

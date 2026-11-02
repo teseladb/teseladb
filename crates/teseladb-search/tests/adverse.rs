@@ -171,6 +171,114 @@ fn enormous_texts_and_expanding_queries_score_as_refsearch() {
     assert_eq!(ids(&ix, &ks).expect("small"), vec![2]);
 }
 
+/// The measured index of `m51.js`, with `u` on document 3 (`m60.js`).
+fn clause_index(words: &[String]) -> Indexer {
+    let big = format!("{} b{}", "a".repeat(300), "c".repeat(40000));
+    let docs = vec![
+        Document::new().with("_id", 1_i64).with("t", big).with("k", "k".repeat(40000)),
+        Document::new().with("_id", 2_i64).with("t", words.join(" ")).with("k", "small"),
+        Document::new()
+            .with("_id", 3_i64)
+            .with("t", "aaaa bbbb")
+            .with("k", "small2")
+            .with("u", "aaaa"),
+    ];
+    index(r#"{"mappings": {"dynamic": true, "fields": {"k": {"type": "token"}}}}"#, docs)
+}
+
+/// The error of `query` on `ix`, or `ok`.
+fn outcome(ix: &Indexer, query: &str) -> String {
+    match ix.search(&q(query)) {
+        Ok(_) => "ok".to_owned(),
+        Err(e) => e.0,
+    }
+}
+
+#[test]
+fn clauses_are_counted_after_rewriting_as_refsearch() {
+    let w: Vec<String> = (0..3000_u32).map(|i| format!("w{}x", radix36(i))).collect();
+    let z: Vec<String> = (0..3000_u32).map(|i| format!("zzzzzzzzz{}", radix36(i))).collect();
+    let ix = clause_index(&w);
+    let flat = "maxClauseCount is set to 1024";
+    let nested = "Query contains too many nested clauses; maxClauseCount is set to 1024";
+    let text = |words: &[String], fuzzy: bool| {
+        let f = if fuzzy { r#", "fuzzy": {}"# } else { "" };
+        format!(r#"{{"text": {{"path": "t", "query": "{}"{f}}}}}"#, words.join(" "))
+    };
+    let should = |ops: &[String]| format!(r#"{{"compound": {{"should": [{}]}}}}"#, ops.join(", "));
+    // A `text` on two paths is a disjunction of one per path (m60 `p2_512`, `p2_513`).
+    let two = |n: usize| {
+        format!(r#"{{"text": {{"path": ["t", "u"], "query": "{}"}}}}"#, w[..n].join(" "))
+    };
+    assert_eq!(outcome(&ix, &two(512)), "ok");
+    assert_eq!(outcome(&ix, &two(513)), flat);
+    // Each fuzzy word brings its 50 expansions (m60 `fz20`, `fz21`; m64).
+    let fz = |n: usize| {
+        format!(
+            r#"{{"text": {{"path": "t", "query": "{}", "fuzzy": {{"maxEdits": 2}}}}}}"#,
+            w[..n].join(" ")
+        )
+    };
+    assert_eq!(outcome(&ix, &fz(20)), "ok");
+    assert_eq!(outcome(&ix, &fz(21)), flat);
+    // A `should` takes in the disjunctions it holds: 600 and 500 terms are too many (m61 `a`),
+    // 524 and 500 are not (m65 `plain2`).
+    assert_eq!(outcome(&ix, &should(&[text(&w[..600], false), text(&w[600..1100], false)])), flat);
+    assert_eq!(outcome(&ix, &should(&[text(&z[..524], false), text(&z[1000..1500], false)])), "ok");
+    assert_eq!(outcome(&ix, &should(&[text(&z[..525], false), text(&z[1000..1500], false)])), flat);
+    // The 1 000 expansions of 20 fuzzy words are some 550 different terms once taken in
+    // (m65 `z450`, `z480`; m64 `w400`), and one fuzzy word with 1 001 more terms is too many.
+    let fuzzy20 = text(&w[..20], true);
+    assert_eq!(outcome(&ix, &should(&[fuzzy20.clone(), text(&z[..450], false)])), "ok");
+    assert_eq!(outcome(&ix, &should(&[fuzzy20.clone(), text(&z[..480], false)])), flat);
+    assert_eq!(outcome(&ix, &should(&[fuzzy20, text(&w[100..500], false)])), "ok");
+    let one = should(&[text(&w[..1], true), text(&z[..1000], false), text(&z[1000..1001], false)]);
+    assert_eq!(outcome(&ix, &one), flat);
+    // Equal clauses of one level count once (m66 `dupText`; m61 `ex2`).
+    assert_eq!(outcome(&ix, &should(&[text(&z[..600], false), text(&z[..600], false)])), "ok");
+    let exists = |n: usize| should(&vec![r#"{"exists": {"path": "t"}}"#.to_owned(); n]);
+    assert_eq!(outcome(&ix, &should(&[exists(600), exists(500)])), "ok");
+    // A numeric `range` is two clauses (m66 `rangeShould`, `rangeMust`).
+    let ranges = |a: usize, b: usize| {
+        let r: Vec<String> =
+            (a..b).map(|i| format!(r#"{{"range": {{"path": "n", "gte": {i}}}}}"#)).collect();
+        should(&r)
+    };
+    assert_eq!(outcome(&ix, &should(&[ranges(0, 600), ranges(600, 1100)])), flat);
+    let must = |m: &str, other: &str, o: &str| {
+        format!(r#"{{"compound": {{"must": [{m}], "{other}": [{o}]}}}}"#)
+    };
+    assert_eq!(outcome(&ix, &must(&ranges(0, 600), "filter", &ranges(600, 1100))), flat);
+    // With `must` or `filter` nothing is taken in, and the whole tree counts (m61 `mixed`,
+    // m66 `eqMust`, `mustText`, `mustText2`, `dupMust`; m62 `zm1000`).
+    let equals = |a: usize, b: usize| {
+        let e: Vec<String> =
+            (a..b).map(|i| format!(r#"{{"equals": {{"path": "k", "value": "v{i}"}}}}"#)).collect();
+        should(&e)
+    };
+    assert_eq!(
+        outcome(&ix, &must(&text(&w[..600], false), "filter", &text(&w[600..1100], false))),
+        nested
+    );
+    assert_eq!(outcome(&ix, &must(&equals(0, 600), "filter", &equals(600, 1100))), nested);
+    assert_eq!(
+        outcome(&ix, &must(&text(&z[..600], false), "should", &text(&z[600..1100], false))),
+        nested
+    );
+    assert_eq!(
+        outcome(&ix, &must(&text(&z[..524], false), "should", &text(&z[600..1100], false))),
+        "ok"
+    );
+    assert_eq!(
+        outcome(&ix, &must(&text(&z[..600], false), "filter", &text(&z[..600], false))),
+        "ok"
+    );
+    assert_eq!(
+        outcome(&ix, &must(&text(&w[1..2], false), "should", &text(&z[..1000], false))),
+        "ok"
+    );
+}
+
 fn radix36(mut n: u32) -> String {
     let digits = b"0123456789abcdefghijklmnopqrstuvwxyz";
     let mut out = Vec::new();
