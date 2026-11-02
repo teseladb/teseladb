@@ -96,6 +96,9 @@ pub enum IndexError {
     Analysis(String),
 }
 
+/// The longest term, in UTF-8 bytes, that an index keeps (measured on `refsearch` 1.70.6).
+pub(crate) const MAX_TERM_BYTES: usize = 32766;
+
 /// The documents of one search index.
 #[derive(Clone, Debug)]
 pub struct MemIndex {
@@ -107,6 +110,10 @@ pub struct MemIndex {
     /// The statistics of the whole index when this one is a segment of it: its scores then use
     /// them instead of its own (FR-015, FR-016).
     global: Option<Stats>,
+    /// The statistics of the elements of each `embeddedDocuments` path over the whole index
+    /// when this one is a segment of it, by path: the indexes of elements a query builds score
+    /// with them (FR-015, FR-016).
+    element_global: BTreeMap<String, Stats>,
     /// The synonym mappings loaded from their collections, by name.
     synonyms: BTreeMap<String, synonyms::SynonymMap>,
 }
@@ -188,6 +195,7 @@ impl MemIndex {
             by_key: BTreeMap::new(),
             fields: BTreeMap::new(),
             global: None,
+            element_global: BTreeMap::new(),
             synonyms: BTreeMap::new(),
         }
     }
@@ -210,6 +218,18 @@ impl MemIndex {
     /// statistics when `None`.
     pub fn set_global(&mut self, stats: Option<Stats>) {
         self.global = stats;
+    }
+
+    /// Scores the elements of each `embeddedDocuments` path with `stats`, those of the elements
+    /// of the whole index this one is a segment of (none: with their own statistics).
+    pub fn set_element_global(&mut self, stats: BTreeMap<String, Stats>) {
+        self.element_global = stats;
+    }
+
+    /// The statistics the elements of `embeddedDocuments` path `path` score with, when they are
+    /// not their own.
+    pub(crate) fn element_global(&self, path: &str) -> Option<&Stats> {
+        self.element_global.get(path)
     }
 
     /// The statistics a field of path `path` scores with, when they are not its own.
@@ -248,7 +268,11 @@ impl MemIndex {
                 self.put_grams(id, &path, &analyzer_name, &g, &text)?;
                 continue;
             }
-            let tokens = self.analyzer(&analyzer_name)?.analyze(&text).map_err(analysis)?;
+            let mut tokens = self.analyzer(&analyzer_name)?.analyze(&text).map_err(analysis)?;
+            // A term over 32 766 bytes is not indexed, and the document keeps its other terms
+            // (measured: a `reflib.keyword` value of 40 000 characters is found by `exists`
+            // and by no query of its text).
+            tokens.retain(|t| t.text.len() <= MAX_TERM_BYTES);
             // A value without tokens (an empty string) leaves no length: the document does not
             // count among those of the field (measured: `t: ""` changes no score).
             if tokens.is_empty() {
@@ -507,7 +531,9 @@ impl MemIndex {
         paths: &[String],
         boost: f32,
     ) -> Result<BTreeMap<u32, f32>, IndexError> {
-        let mut scores: BTreeMap<u32, f32> = BTreeMap::new();
+        // The terms' scores add up in doubles, as RefLib's disjunctions do (measured: 1 024
+        // terms of one document give `refsearch`'s 269.5703125, and 269.56622 added in 32 bits).
+        let mut scores: BTreeMap<u32, f64> = BTreeMap::new();
         for path in paths {
             let Some(field) = self.fields.get(path) else { continue };
             let a = self.analyzer(&field.search_analyzer)?;
@@ -516,13 +542,12 @@ impl MemIndex {
                 for segment in segments(&tokens)? {
                     let g = self.global_of(path);
                     for (doc, score) in field.segment_scores(&segment, boost, g) {
-                        let s = scores.entry(doc).or_insert(0.0);
-                        *s += score;
+                        *scores.entry(doc).or_insert(0.0) += f64::from(score);
                     }
                 }
             }
         }
-        Ok(scores)
+        Ok(scores.into_iter().map(|(doc, s)| (doc, s as f32)).collect())
     }
 
     /// The query analyzer of the field at `path`: its own, or the definition's when no document
@@ -587,7 +612,8 @@ impl MemIndex {
         fuzzy: &Fuzzy,
         boost: f32,
     ) -> Result<BTreeMap<u32, f32>, IndexError> {
-        let mut scores: BTreeMap<u32, f32> = BTreeMap::new();
+        // In doubles, as [`MemIndex::text_scores`] adds.
+        let mut scores: BTreeMap<u32, f64> = BTreeMap::new();
         for path in paths {
             let Some(field) = self.fields.get(path) else { continue };
             let a = self.analyzer(&field.search_analyzer)?;
@@ -595,12 +621,12 @@ impl MemIndex {
                 for t in a.analyze(q).map_err(analysis)? {
                     let g = self.global_of(path);
                     for (doc, score) in field.fuzzy_scores(&t.text, fuzzy, boost, g) {
-                        *scores.entry(doc).or_insert(0.0) += score;
+                        *scores.entry(doc).or_insert(0.0) += f64::from(score);
                     }
                 }
             }
         }
-        Ok(scores)
+        Ok(scores.into_iter().map(|(doc, s)| (doc, s as f32)).collect())
     }
 
     /// The tokens, with their offsets, analyzer `name` makes of `text`.
@@ -954,14 +980,16 @@ impl TextField {
         let kept = self.fuzzy_terms(term, fuzzy);
         let n = g.map_or(self.lengths.len() as u64, |g| g.docs);
         let idf = idf(n, self.blended_df(&kept, g)) as f32;
-        let mut sums: BTreeMap<u32, f32> = BTreeMap::new();
+        // The terms' scores add up in doubles, as RefLib's disjunctions do (measured: 50 terms
+        // of one document give `refsearch`'s 8.862827, and 8.862825 added in 32 bits).
+        let mut sums: BTreeMap<u32, f64> = BTreeMap::new();
         for (t, weight) in &kept {
             let score = self.scorer(boost * weight, idf, &[t.as_str()], g);
             for (&doc, positions) in &self.postings[t] {
-                *sums.entry(doc).or_insert(0.0) += score(doc, positions.len() as f32);
+                *sums.entry(doc).or_insert(0.0) += f64::from(score(doc, positions.len() as f32));
             }
         }
-        sums.into_iter().collect()
+        sums.into_iter().map(|(doc, s)| (doc, s as f32)).collect()
     }
 
     /// The score of each document with `term`.

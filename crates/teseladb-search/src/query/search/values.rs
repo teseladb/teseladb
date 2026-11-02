@@ -18,7 +18,7 @@ use teseladb_bson::{Document, Value};
 use super::{Operator, Score, SearchError, parse_score, shape};
 use crate::analysis::unicode::lowercase;
 use crate::definition::{Definition, Dynamic, FieldMapping, Mapping, StoredSource};
-use crate::index::MemIndex;
+use crate::index::{MAX_TERM_BYTES, MemIndex};
 
 /// Binary subtype of a UUID.
 const UUID_SUBTYPE: u8 = 4;
@@ -224,9 +224,46 @@ fn leaf_key(t: &FieldMapping, v: &Value) -> Option<Key> {
         (FieldMapping::Token { normalizer }, Value::String(s)) => {
             let lower = normalizer.as_deref() == Some("lowercase");
             let s = if lower { s.chars().map(lowercase).collect() } else { s.clone() };
-            Some(Key::Token(s, lower))
+            Some(Key::Token(truncated_token(&s), lower))
         }
         _ => None,
+    }
+}
+
+/// The UTF-16 code units a `token` field keeps of a value (measured on `refsearch` 1.70.6,
+/// `scratchpad/lane3p/m53.js` and `m55.js`).
+const TOKEN_UNITS: usize = 8191;
+
+/// The value a `token` field indexes for `s`: its first [`TOKEN_UNITS`] UTF-16 code units, a
+/// character whose pair the cut splits becoming U+FFFD (measured: 4 096 emoji are found by 4 095
+/// emoji and U+FFFD, not by 4 095 emoji).
+fn truncated_token(s: &str) -> String {
+    let mut units = 0;
+    let mut out = String::new();
+    for c in s.chars() {
+        let n = c.len_utf16();
+        if units + n > TOKEN_UNITS {
+            if units < TOKEN_UNITS {
+                out.push(char::REPLACEMENT_CHARACTER);
+            }
+            break;
+        }
+        units += n;
+        out.push(c);
+    }
+    out
+}
+
+/// Refuses a string of `values` over the longest term an index keeps: `refsearch` says the path
+/// is not indexed as `token` (measured with `equals`, `in` and `range`).
+fn check_term_length<'a>(
+    paths: &[String],
+    values: impl IntoIterator<Item = &'a Key>,
+) -> Result<(), SearchError> {
+    let long = values.into_iter().any(|k| matches!(k, Key::Text(s) if s.len() > MAX_TERM_BYTES));
+    match (long, paths.first()) {
+        (true, Some(p)) => Err(SearchError(format!("Path '{p}' needs to be indexed as token"))),
+        _ => Ok(()),
     }
 }
 
@@ -345,7 +382,9 @@ pub(super) fn parse_equals(d: &Document, path: &str) -> Result<Operator, SearchE
         Some(v) => Key::of_query(v).ok_or_else(|| shape(&at("value"), VALUE_TYPES))?,
     };
     let score = parse_score(d.get("score"), &at("score"))?;
-    Ok(Operator::Values(ValueOp::AnyOf { paths: vec![p], values: vec![value], set: false, score }))
+    let paths = vec![p];
+    check_term_length(&paths, [&value])?;
+    Ok(Operator::Values(ValueOp::AnyOf { paths, values: vec![value], set: false, score }))
 }
 
 /// `in`.
@@ -374,6 +413,7 @@ pub(super) fn parse_in(d: &Document, path: &str) -> Result<Operator, SearchError
         return Err(shape(&at("value"), "must have elements of the same type"));
     }
     let score = parse_score(d.get("score"), &at("score"))?;
+    check_term_length(&paths, &values)?;
     Ok(Operator::Values(ValueOp::AnyOf { paths, values, set: true, score }))
 }
 
@@ -440,6 +480,7 @@ pub(super) fn parse_range(d: &Document, path: &str) -> Result<Operator, SearchEr
         }
     }
     let score = parse_score(d.get("score"), &at("score"))?;
+    check_term_length(&paths, lower.iter().chain(upper.iter()).map(|(k, _)| k))?;
     Ok(Operator::Values(ValueOp::Range { paths, lower, upper, score }))
 }
 
