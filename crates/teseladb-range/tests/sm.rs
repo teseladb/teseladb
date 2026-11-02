@@ -376,6 +376,35 @@ fn a_purge_search_takes_a_batch_of_expired_records_and_skips_the_rest() {
     assert!(!batch.contains(&dedup_key(G, 7, 1, u32::MAX)), "the newer record stays");
 }
 
+/// A record written after the cutoff is left for a later search, even within one batch.
+#[test]
+fn a_purge_search_leaves_the_records_newer_than_its_cutoff() {
+    use teseladb_range::dedup::PurgeScan;
+    let mut r = Replica::new();
+    let write = |stmt_id: u32| Command::Write {
+        puts: vec![],
+        deletes: vec![],
+        dedup: Some(DedupRecord { lsid: 7, txn_number: 1, stmt_id, result: vec![] }),
+        live_delta: 0,
+    };
+    r.apply(1, ts(10), &write(0)).unwrap();
+    r.apply(2, ts(1_000), &write(1)).unwrap();
+    let mut search = PurgeScan::new(&r.lsm, G, ts(500));
+    let mut batch = None;
+    for _ in 0..MAX_ROUNDS {
+        match search.step(&r.lsm) {
+            Some(found) => {
+                batch = Some(found.expect("the LSM answers"));
+                break;
+            }
+            None => {
+                r.lsm.borrow_mut().run_io(&mut r.disk, Nanos::ZERO);
+            }
+        }
+    }
+    assert_eq!(batch.expect("the search ends"), vec![dedup_key(G, 7, 1, 0)]);
+}
+
 /// 007 FR-012: a closed mark never goes back; a `SetClosedTs` at or below the one kept leaves it.
 #[test]
 fn a_closed_mark_at_or_below_the_kept_one_leaves_it() {
