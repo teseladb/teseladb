@@ -156,6 +156,23 @@ pub fn run(index: &MemIndex, spec: &Document) -> Result<Vec<Hit>, SearchError> {
     Ok(index.hits(scores))
 }
 
+/// The explanations of the scores `spec` gives the documents of `keys` (`scoreDetails`).
+pub fn explain(
+    index: &MemIndex,
+    spec: &Document,
+    keys: &[Vec<u8>],
+) -> Result<Vec<(Vec<u8>, crate::index::Explanation)>, SearchError> {
+    let op = parse_root(index, spec)?;
+    let ids: Vec<u32> = keys.iter().filter_map(|k| index.id_of(k)).collect();
+    let mut by_id = explain::explain_all(index, &op, &ids)?;
+    Ok(keys.iter().filter_map(|k| Some((k.clone(), by_id.remove(&index.id_of(k)?)?))).collect())
+}
+
+/// Whether `spec` asks for `scoreDetails`.
+pub fn wants_details(spec: &Document) -> bool {
+    matches!(spec.get("scoreDetails"), Some(Value::Boolean(true)))
+}
+
 /// The document of `$searchMeta` (and `$$SEARCH_META`) for `spec`: the count of the documents
 /// it selects, as `lowerBound` unless `count.type` is `total` (measured: the count is exact).
 pub fn meta(index: &MemIndex, spec: &Document) -> Result<Document, SearchError> {
@@ -185,6 +202,10 @@ pub fn count_document(total: bool, n: usize) -> Document {
 }
 
 fn parse_root(index: &MemIndex, spec: &Document) -> Result<Operator, SearchError> {
+    // `refsearch`'s check, which `$searchMeta` reaches (`refnode` checks it first for `$search`).
+    if spec.get("scoreDetails").is_some_and(|v| !matches!(v, Value::Boolean(_))) {
+        return Err(shape("scoreDetails", "must be a boolean"));
+    }
     parse_at(index, spec, "")
 }
 
@@ -727,6 +748,7 @@ fn eval_compound(
 
 mod autocomplete;
 mod embedded;
+mod explain;
 mod function;
 mod geo;
 mod knn;
@@ -735,7 +757,7 @@ mod pattern;
 mod query_string;
 mod sloppy;
 mod span;
-mod values;
+pub(crate) mod values;
 
 #[cfg(test)]
 mod geo_tests;

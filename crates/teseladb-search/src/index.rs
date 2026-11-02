@@ -518,6 +518,33 @@ impl MemIndex {
         Ok(tokens.into_iter().map(|t| t.text).collect())
     }
 
+    /// An estimate of the bytes the index takes: its documents (as BSON), and per field each
+    /// term and its positions.
+    pub(crate) fn memory_bytes(&self) -> u64 {
+        let docs: usize =
+            self.docs.iter().flatten().map(|d| d.to_bytes().map_or(0, |b| b.len())).sum();
+        let postings: usize = self
+            .fields
+            .iter()
+            .map(|(name, f)| {
+                name.len()
+                    + f.postings
+                        .iter()
+                        .map(|(t, by_doc)| {
+                            t.len() + by_doc.values().map(|p| 8 + 4 * p.len()).sum::<usize>()
+                        })
+                        .sum::<usize>()
+                    + 12 * f.lengths.len()
+            })
+            .sum();
+        (docs + postings) as u64
+    }
+
+    /// The number of the document of `key`.
+    pub(crate) fn id_of(&self, key: &[u8]) -> Option<u32> {
+        self.by_key.get(key).copied()
+    }
+
     /// The key of document number `id`.
     pub(crate) fn key_of(&self, id: u32) -> Option<&[u8]> {
         self.keys.get(id as usize)?.as_deref()
@@ -1016,7 +1043,9 @@ fn phrase_freq(places: &[Vec<i64>], slop: i64) -> f32 {
 }
 
 mod dump;
+mod explain;
 pub use dump::{DumpError, applied_of};
+pub use explain::Explanation;
 
 #[cfg(test)]
 mod tests;

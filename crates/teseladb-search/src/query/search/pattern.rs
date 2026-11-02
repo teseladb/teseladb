@@ -24,6 +24,21 @@ pub(super) struct Pattern {
     score: Score,
 }
 
+impl Pattern {
+    /// How `refsearch` names the query in `scoreDetails` (measured: `$type:string/t:gat*`).
+    pub(super) fn description(&self) -> String {
+        let terms: Vec<String> = self
+            .paths
+            .iter()
+            .flat_map(|p| self.query.iter().map(move |q| format!("$type:string/{p}:{q}")))
+            .collect();
+        match terms.as_slice() {
+            [one] => one.clone(),
+            _ => format!("({})", terms.join(" ")),
+        }
+    }
+}
+
 /// Operator `name` (`wildcard` or `regex`) with its options `d` at `path` of the query.
 pub(super) fn parse(
     index: &MemIndex,

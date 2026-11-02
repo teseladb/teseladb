@@ -252,7 +252,13 @@ impl VectorIndexer {
             };
             for h in hits {
                 if let Some((key, d)) = stored.get(h.doc as usize) {
-                    found.push(Found { key: (*key).clone(), score: h.score, doc: d.doc.clone() });
+                    found.push(Found {
+                        key: (*key).clone(),
+                        score: h.score,
+                        doc: d.doc.clone(),
+                        token: None,
+                        details: None,
+                    });
                 }
             }
         }

@@ -35,10 +35,25 @@ pub fn not_enabled() -> MqlError {
     )
 }
 
-/// Checks the argument of search stage `name`: an object.
+/// RefDb's error when a field of a stage has the wrong type.
+const WRONG_TYPE: ErrorCode = ErrorCode { code: 13_111, name: "Location13111" };
+
+/// Checks the argument of search stage `name`: an object, whose `scoreDetails` is a boolean in
+/// `$search` (measured on 9.0.4: `refnode` checks it before it asks `refsearch`).
 pub fn parse(name: &str, arg: RawValue<'_>) -> Result<Document, MqlError> {
     match arg {
-        RawValue::Document(d) => Ok(Document::from(d)),
+        RawValue::Document(d) => {
+            if name == "$search"
+                && let Some(v) = d.get("scoreDetails")
+                && !matches!(v, RawValue::Boolean(_))
+            {
+                return Err(error(
+                    WRONG_TYPE,
+                    format!("wrong type for field (scoreDetails) {} != bool", raw_type_name(v)),
+                ));
+            }
+            Ok(Document::from(d))
+        }
         other => Err(error(
             FAILED_TO_PARSE,
             format!("{name} value must be an object. Found: {}", raw_type_name(other)),

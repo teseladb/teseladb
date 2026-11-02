@@ -28,7 +28,7 @@ const VALUE_TYPES: &str = "must be a boolean, objectId, number, string, date, uu
 
 /// A value as the index keeps it.
 #[derive(Clone, Debug, PartialEq)]
-pub(super) enum Key {
+pub(crate) enum Key {
     Number(f64),
     Date(i64),
     Bool(bool),
@@ -43,7 +43,7 @@ pub(super) enum Key {
 
 impl Key {
     /// The value a query gives, or `None` for a type no operator takes.
-    fn of_query(v: &Value) -> Option<Key> {
+    pub(crate) fn of_query(v: &Value) -> Option<Key> {
         Some(match v {
             Value::Int32(n) => Key::Number(f64::from(*n)),
             Value::Int64(n) => Key::Number(*n as f64),
@@ -91,7 +91,7 @@ impl Key {
 
 /// The values of `doc` that `definition` indexes at `path`, each with whether it sat in an
 /// array.
-pub(super) fn indexed(definition: &Definition, doc: &Document, path: &str) -> Vec<(Key, bool)> {
+pub(crate) fn indexed(definition: &Definition, doc: &Document, path: &str) -> Vec<(Key, bool)> {
     let parts: Vec<&str> = path.split('.').collect();
     let mut out = Vec::new();
     collect(definition, &definition.mappings, doc, &parts, false, &mut out);
