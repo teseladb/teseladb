@@ -34,6 +34,7 @@ pub mod engines;
 pub mod explain;
 pub mod fcv;
 pub mod hints;
+pub mod http_parameters;
 pub mod index_build;
 pub mod index_maintenance;
 pub mod index_mod;
