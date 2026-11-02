@@ -185,6 +185,7 @@ pub(crate) fn check(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
 
@@ -220,5 +221,25 @@ mod tests {
             (changestream_delivery::CHECKER, "no cursor emitted")
         );
         check(&[], &[], &[&log(vec![])]).expect("nothing to emit");
+    }
+
+    fn answer(to: u64) -> Result<Reply, RangeError> {
+        let to = Hlc { physical: to, logical: 0 };
+        Ok(Reply::Changes { rows: Vec::new(), to, oldest_intent: None })
+    }
+
+    #[test]
+    fn answers_without_a_read_in_flight_are_dropped_and_a_lost_read_is_forgotten() {
+        let start = Hlc { physical: 1, logical: 0 };
+        let mut c = Cursor::new("c".into(), start);
+        c.answered(answer(5), 1, start);
+        c.stop = Some(b"z".to_vec());
+        c.answered(answer(5), 1, start);
+        assert!(c.stop.is_none() && !c.busy());
+        c.next().expect("a read of the whole interval");
+        c.sent(&[]);
+        assert!(c.busy());
+        c.lost();
+        assert!(!c.busy());
     }
 }

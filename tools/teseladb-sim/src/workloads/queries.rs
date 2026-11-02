@@ -204,6 +204,7 @@ impl Workload for Queries {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
 

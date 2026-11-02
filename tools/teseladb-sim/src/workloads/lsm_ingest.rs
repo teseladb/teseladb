@@ -625,6 +625,7 @@ impl Workload for LsmIngest {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
 
@@ -692,5 +693,25 @@ mod tests {
         let other =
             wl.check_interval(&mut lsm, &mut disk, (0, true), now).expect_err("another value");
         assert!(other.is_some_and(|d| d.contains("reads another value")));
+    }
+
+    #[test]
+    fn an_ingestion_cut_by_a_crash_before_its_edit_is_due_again() {
+        let mut w = World::new(1, 1, 1, false);
+        let mut wl = LsmIngest::new(1, 1);
+        for i in 0..2 {
+            let samples = vec![(interval_key(i, 1), vec![1])];
+            wl.sources.push(Source { files: Vec::new(), samples });
+        }
+        let asked = ms(5);
+        wl.clients[0].ingests =
+            [Ingest::Running { id: 1, dir: "in-0".into(), asked }, Ingest::Done { asked }];
+        // The done one holds nothing on this empty disk: the check names it.
+        let v = wl.on_restart(&mut w, 0).expect_err("ingestion 1 lost its keys");
+        assert!(v.detail.contains("interval 1: 0 of 1"), "{}", v.detail);
+        assert_eq!(wl.clients[0].ingests[0], Ingest::Due(w.now()));
+        // The heal moves only a second ingestion that is still due.
+        wl.on_heal(&mut w);
+        assert_eq!(wl.clients[0].ingests[1], Ingest::Done { asked });
     }
 }

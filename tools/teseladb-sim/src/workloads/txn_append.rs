@@ -113,6 +113,7 @@ impl Script for Append {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
 

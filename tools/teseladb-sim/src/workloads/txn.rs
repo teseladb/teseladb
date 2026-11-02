@@ -1246,6 +1246,7 @@ impl<S: Script> Workload for TxnWorkload<S> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
 

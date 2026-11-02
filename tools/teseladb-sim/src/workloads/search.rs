@@ -227,6 +227,7 @@ pub(crate) fn check(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
 
@@ -243,5 +244,36 @@ mod tests {
         // With the writes merged, the searchers answered no search: nothing to judge them by.
         let v = check(&[(1, ts, vec![b"x".to_vec()])], &[3], &[&a, &b]).expect_err("no search");
         assert_eq!((v.detail.as_str(), v.liveness), ("no search answered", true));
+    }
+
+    fn no_tag(_: &[u8]) -> Option<u64> {
+        None
+    }
+
+    fn answer(to: u64) -> Result<Reply, RangeError> {
+        let to = Hlc { physical: to, logical: 0 };
+        Ok(Reply::Changes { rows: Vec::new(), to, oldest_intent: None })
+    }
+
+    #[test]
+    fn answers_without_a_read_in_flight_are_dropped_and_a_lost_read_starts_over() {
+        let mut s = Searcher::new(false);
+        // Nothing sent: an answer changes nothing, and a send without a read stops nowhere.
+        s.answered(answer(5), no_tag);
+        s.sent(b"a", b"b");
+        assert_eq!(s.stop_key(), Vec::<u8>::new());
+        s.stop = Some(b"z".to_vec());
+        s.answered(answer(5), no_tag);
+        assert!(s.stop.is_none() && s.read.is_none());
+        // A whole read with nothing in it moves the mark; no search waits for it.
+        let first = s.next().expect("a read of the whole interval");
+        s.sent(&first, &[]);
+        s.answered(answer(9), no_tag);
+        assert_eq!(s.from(), Hlc { physical: 9, logical: 0 });
+        // A read dropped halfway starts over.
+        let _ = s.next();
+        s.sent(&first, &[]);
+        s.lost();
+        assert!(s.stop.is_none() && s.read.is_none());
     }
 }

@@ -452,6 +452,7 @@ pub fn entry_keys() -> BTreeSet<Vec<u8>> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
 mod tests {
     use teseladb_types::Nanos;
 

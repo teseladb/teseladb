@@ -131,6 +131,7 @@ impl Script for Bank {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
 mod tests {
     use teseladb_hlc::Hlc;
     use teseladb_types::Nanos;

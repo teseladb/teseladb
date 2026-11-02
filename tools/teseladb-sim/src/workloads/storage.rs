@@ -234,6 +234,7 @@ impl Workload for StorageWorkload {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
 
