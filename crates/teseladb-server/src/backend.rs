@@ -1016,6 +1016,37 @@ impl Backend for ServerBackend {
         }
     }
 
+    fn group0_settings(
+        &mut self,
+        prefix: &[u8],
+    ) -> Result<BTreeMap<Vec<u8>, Vec<u8>>, CommandError> {
+        let until = self.until();
+        loop {
+            if let Some(CatalogAnswer::Settings(all)) =
+                self.ask(0, |tx| NodeMsg::Catalog(CatalogReq::Settings, tx), until)
+            {
+                return Ok(all.into_iter().filter(|(k, _)| k.starts_with(prefix)).collect());
+            }
+            if Instant::now() >= until {
+                return Err(unavailable());
+            }
+            thread::sleep(RETRY_PAUSE);
+        }
+    }
+
+    fn group0_settings_write(
+        &mut self,
+        changes: Vec<teseladb_meta::command::SettingChange>,
+    ) -> Result<bool, CommandError> {
+        match self.group0_change(CatalogReq::SetSettings(changes))? {
+            Ok(_) => Ok(true),
+            Err(Group0Error::SettingConflict) => Ok(false),
+            Err(e) => {
+                Err(CommandError::new(INTERNAL_ERROR, format!("Group 0 refused the change: {e:?}")))
+            }
+        }
+    }
+
     fn request_shutdown(&mut self) -> Result<(), CommandError> {
         self.h.shutdown.store(true, std::sync::atomic::Ordering::Release);
         Ok(())
