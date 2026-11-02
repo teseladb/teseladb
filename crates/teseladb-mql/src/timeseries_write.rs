@@ -73,6 +73,89 @@ pub enum Full {
     Count,
     /// The next measurement would take it past [`MAX_BUCKET_BYTES`].
     Size,
+    /// The next measurement has a field of another type than the bucket's measurements
+    /// (RefDb's schema change).
+    Schema,
+}
+
+/// The class of a BSON element type RefDb compares schemas by (`canonicalizeBSONType`):
+/// the numbers one class, strings and symbols one, `null` and `undefined` apart.
+fn type_class(v: &Value) -> i32 {
+    use teseladb_bson::types as t;
+    match v.element_type() {
+        t::MIN_KEY => -1,
+        t::UNDEFINED => 0,
+        t::NULL => 5,
+        t::DOUBLE | t::INT32 | t::INT64 | t::DECIMAL128 => 10,
+        t::STRING | t::SYMBOL => 15,
+        t::DOCUMENT => 20,
+        t::ARRAY => 25,
+        t::BINARY => 30,
+        t::OBJECT_ID => 35,
+        t::BOOLEAN => 40,
+        t::DATE_TIME => 45,
+        t::TIMESTAMP => 47,
+        t::REGEX => 50,
+        t::DB_POINTER => 55,
+        t::JAVASCRIPT => 60,
+        t::JAVASCRIPT_WITH_SCOPE => 65,
+        _ => 127,
+    }
+}
+
+/// The fields of an object or the elements of an array, by name or position.
+fn parts(v: &Value) -> Vec<(String, &Value)> {
+    match v {
+        Value::Document(d) => d.iter().map(|(k, x)| (k.to_owned(), x)).collect(),
+        Value::Array(items) => items.iter().enumerate().map(|(i, x)| (i.to_string(), x)).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Whether `new` has, at every path `seen` also has, a value of the same class: what a bucket
+/// whose measurements gave `seen` still takes (measured on a `refnode` 9.0.4 on 02-11-2026).
+fn fits(seen: &Value, new: &Value) -> bool {
+    if type_class(seen) != type_class(new) {
+        return false;
+    }
+    let inner = parts(seen);
+    parts(new)
+        .into_iter()
+        .all(|(k, x)| inner.iter().find(|(s, _)| *s == k).is_none_or(|(_, s)| fits(s, x)))
+}
+
+/// `seen` with the paths of `new` it lacks; `new` fits it ([`fits`]).
+fn merged(seen: Value, new: &Value) -> Value {
+    match (seen, new) {
+        (Value::Document(d), Value::Document(n)) => Value::Document(merged_schema(d, n)),
+        (Value::Array(mut items), Value::Array(n)) => {
+            for (i, x) in n.iter().enumerate() {
+                match items.get_mut(i) {
+                    Some(old) => *old = merged(std::mem::replace(old, Value::Null), x),
+                    None => items.push(x.clone()),
+                }
+            }
+            Value::Array(items)
+        }
+        (seen, _) => seen,
+    }
+}
+
+/// The schema of a bucket's measurements: one value per path, of its class.
+fn merged_schema(mut seen: Document, row: &Document) -> Document {
+    for (k, x) in row.iter() {
+        let next = match seen.remove(k) {
+            Some(old) => merged(old, x),
+            None => x.clone(),
+        };
+        seen.insert(k, next);
+    }
+    seen
+}
+
+/// Whether measurement `row` fits schema `seen`.
+fn fits_schema(seen: &Document, row: &Document) -> bool {
+    row.iter().all(|(k, x)| seen.get(k).is_none_or(|s| fits(s, x)))
 }
 
 /// How an append ended: why the bucket stopped before the end, and whether it stayed open past
@@ -235,6 +318,7 @@ impl BucketSpec {
         };
         let mut size: usize = rows.iter().map(|r| r.to_bytes().map_or(0, |b| b.len())).sum();
         let mut meta = bucket.and_then(|b| b.get(META)).map(Value::from);
+        let mut schema = rows.iter().fold(Document::new(), merged_schema);
         let mut taken = 0;
         let mut stopped = None;
         let mut kept_open = false;
@@ -248,6 +332,11 @@ impl BucketSpec {
             if let Some(f) = &self.meta_field {
                 meta = row.remove(f).or(meta);
             }
+            if !fits_schema(&schema, &row) {
+                stopped = Some(Full::Schema);
+                break;
+            }
+            schema = merged_schema(schema, &row);
             let bytes = row.to_bytes().map_err(broken)?.len();
             // Past the size, a bucket with few measurements stays open for large ones.
             let over = size + bytes > MAX_BUCKET_BYTES;

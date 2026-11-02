@@ -624,7 +624,7 @@ fn poll<B: Backend + ?Sized>(
             at.ts == change.event.ts && at.txn == change.event.txn && at.txn != 0
         });
         let images = Images { on: w.images_at(&change.event), prior: same_txn.map(|(_, d)| d) };
-        events.push((event_of(backend, stream, change, ns, w.entry.uuid, images)?, false));
+        events.push((event_of(backend, stream, change, ns, &w.entry, images)?, false));
     }
     let watch = Watch {
         scope: stream.scope,
@@ -768,7 +768,7 @@ fn event_of<B: Backend + ?Sized>(
     stream: &ChangeStream,
     change: &Change,
     ns: &Namespace,
-    uuid: [u8; 16],
+    entry: &CollectionEntry,
     images: Images<'_>,
 ) -> Result<ChangeEvent, CommandError> {
     let key = &change.event.key;
@@ -787,11 +787,12 @@ fn event_of<B: Backend + ?Sized>(
             ));
         }
     };
-    let id = RawDoc::from_bytes(&doc_bytes)?.get("_id").map(Value::from).unwrap_or(Value::Null);
-    let document_key = Document::new().with("_id", id);
+    // A collection with a shard key gives the fields of it the document has (018 FR-001).
+    let document_key =
+        super::sharding::event_key(entry, &Document::from(RawDoc::from_bytes(&doc_bytes)?))?;
     let event_ns = EventNs { db: ns.db.clone(), coll: Some(ns.coll.clone()) };
     let mut event = ChangeEvent::of(change, event_ns, Some(document_key), stream.spec.expanded)?;
-    event.collection_uuid = Some(uuid);
+    event.collection_uuid = Some(entry.uuid);
     let as_value = |d: Option<&Vec<u8>>| -> Result<Value, CommandError> {
         match d {
             Some(b) => Ok(Value::Document(Document::from(RawDoc::from_bytes(b)?))),

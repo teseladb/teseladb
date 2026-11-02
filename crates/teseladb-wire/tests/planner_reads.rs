@@ -208,3 +208,45 @@ fn id_ranges_read_every_chunk_of_every_bucket() {
     );
     assert_eq!(ids(&r), expected(6000, |i| i >= 10));
 }
+
+/// Two clauses of an `$or` on one index use it once (measured on a `refnode` 9.0.4 on
+/// 02-11-2026): `$indexStats` counts one access, and the clauses' documents come in their
+/// clauses' order.
+#[test]
+fn or_clauses_on_one_index_count_one_access() {
+    let mut m = loaded(50);
+    index(&mut m, r#"{"key":{"a":1},"name":"a_1"}"#);
+    let r = run(
+        &mut m,
+        r#"{"find":"c","filter":{"$or":[{"a":1,"s":"x"},{"a":{"$gt":8}}]},"projection":{"_id":1}}"#,
+    );
+    let Value::Array(b) = field(&r, "cursor.firstBatch") else { panic!("{r:?}") };
+    let order: Vec<&Value> = b
+        .iter()
+        .map(|d| match d {
+            Value::Document(d) => field(d, "_id"),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    let want: Vec<Value> = [21, 9, 19, 29, 39, 49].into_iter().map(Value::Int32).collect();
+    assert_eq!(order, want.iter().collect::<Vec<_>>());
+    let r = run(
+        &mut m,
+        r#"{"aggregate":"c","pipeline":[{"$indexStats":{}},{"$match":{"name":"a_1"}}],"cursor":{}}"#,
+    );
+    let Value::Array(b) = field(&r, "cursor.firstBatch") else { panic!("{r:?}") };
+    let Some(Value::Document(a)) = b.first() else { panic!("{r:?}") };
+    assert_eq!(field(a, "accesses.ops"), &Value::Int64(1), "{r:?}");
+}
+
+/// A unique index keeps its document's primary key in the entry's value: a plan on it finds the
+/// documents (it failed with "an index entry without its document").
+#[test]
+fn a_unique_index_plan_finds_its_documents() {
+    let mut m = loaded(20);
+    index(&mut m, r#"{"key":{"b":1,"_id":1},"name":"b_id","unique":true}"#);
+    let r = run(&mut m, r#"{"find":"c","filter":{"b":3}}"#);
+    assert_eq!(ids(&r), expected(20, |i| i % 7 == 3));
+    let r = run(&mut m, r#"{"find":"c","filter":{"b":{"$gte":5}},"sort":{"b":1}}"#);
+    assert_eq!(ids(&r), expected(20, |i| i % 7 >= 5));
+}

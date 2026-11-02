@@ -65,8 +65,8 @@ pub fn id_index_rule(coll: &CollectionEntry) -> IndexRule {
     IndexRule { id: ID_INDEX, spec, buckets: 0, delete_only: false }
 }
 
-/// The key of the document of capped collection `coll` whose `_id` is `id`, read from its `_id_`
-/// index; `None` when there is none.
+/// The key of the document of capped collection `coll` (or of one with a shard key) whose `_id`
+/// is `id`, read from its `_id_` index; `None` when there is none.
 pub fn id_key<B: Backend + ?Sized>(
     backend: &mut B,
     coll: &CollectionEntry,
@@ -90,9 +90,14 @@ pub fn id_key<B: Backend + ?Sized>(
     let Some(entry) = keys.into_keys().next() else { return Ok(None) };
     let (_, versions) = backend.read_versions(&[entry.as_bytes().to_vec()])?;
     let Some(Some((_, value))) = versions.into_iter().next() else { return Ok(None) };
-    let (seq, _) =
+    let (pk, _) =
         split_unique_value(&value).map_err(|e| CommandError::new(INTERNAL_ERROR, e.to_string()))?;
-    let seq = <[u8; 8]>::try_from(seq)
+    // A collection with a shard key: the entry ends in its document's key (018 FR-001).
+    if super::sharding::is_sharded(coll) {
+        let key = teseladb_keys::KeyBuilder::document_of_sharded_pk(coll.tenant, coll.id, pk);
+        return Ok(Some(key.as_bytes().to_vec()));
+    }
+    let seq = <[u8; 8]>::try_from(pk)
         .map_err(|_| CommandError::new(INTERNAL_ERROR, "a capped _id_ entry without its seq"))?;
     Ok(Some(cap::doc_key(coll.tenant, coll.id, u64::from_be_bytes(seq))))
 }

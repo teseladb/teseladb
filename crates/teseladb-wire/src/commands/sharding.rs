@@ -11,7 +11,7 @@ use super::names::{full, parse_full};
 use super::{Backend, Ctx, display, kinds};
 use crate::error::{
     ALREADY_INITIALIZED, BAD_VALUE, COMMAND_NOT_SUPPORTED_ON_VIEW, CommandError, ILLEGAL_OPERATION,
-    INVALID_NAMESPACE, INVALID_OPTIONS,
+    INVALID_NAMESPACE, INVALID_OPTIONS, SHARD_KEY_NOT_FOUND,
 };
 use crate::types::wrong_type;
 
@@ -49,6 +49,103 @@ pub fn shard_key_of(coll: &CollectionEntry) -> Result<Option<ShardKey>, CommandE
     Ok(Some(ShardKey { key, unique: matches!(d.get("unique"), Some(Value::Boolean(true))) }))
 }
 
+/// Whether `coll` has a shard key: its documents are keyed by it ([`document_key`]).
+pub fn is_sharded(coll: &CollectionEntry) -> bool {
+    RawDoc::from_bytes(&coll.options).is_ok_and(|o| o.get(SHARD_KEY).is_some())
+}
+
+/// The value at dotted `path` of `doc`: `None` when it is missing; an array on the way is
+/// refused, as no shard key holds one (measured on a `refrouter` 9.0.4 on 02-11-2026).
+fn shard_value<'a>(doc: &'a Document, path: &str) -> Result<Option<&'a Value>, CommandError> {
+    let mut at = doc;
+    let mut parts = path.split('.').peekable();
+    while let Some(part) = parts.next() {
+        let v = match at.get(part) {
+            None => return Ok(None),
+            Some(Value::Array(_)) => {
+                let msg = "Shard key cannot contain array values or array descendants.";
+                return Err(CommandError::new(SHARD_KEY_NOT_FOUND, msg));
+            }
+            Some(v) => v,
+        };
+        match (parts.peek(), v) {
+            (None, _) => return Ok(Some(v)),
+            (Some(_), Value::Document(d)) => at = d,
+            (Some(_), _) => return Ok(None),
+        }
+    }
+    Ok(None)
+}
+
+/// The values of shard key `key` in `doc`, in order, as its document's key holds them: a
+/// missing field is `null` and a hashed field its hash.
+pub fn shard_values(key: &Document, doc: &Document) -> Result<Vec<Value>, CommandError> {
+    let mut out = Vec::new();
+    for (path, kind) in key.iter() {
+        let v = shard_value(doc, path)?.cloned().unwrap_or(Value::Null);
+        out.push(match kind {
+            Value::String(s) if s == HASHED => {
+                let holder = Document::new().with("v", v).to_bytes()?;
+                let raw =
+                    RawDoc::from_bytes(&holder)?.get("v").unwrap_or(teseladb_bson::RawValue::Null);
+                Value::Int64(teseladb_index::keygen::hashed_key(raw))
+            }
+            _ => v,
+        });
+    }
+    Ok(out)
+}
+
+/// The key of document `doc` of `coll`, whose shard key is `key`: `enc(shard key) · enc(_id)`.
+pub fn document_key(
+    coll: &CollectionEntry,
+    key: &Document,
+    doc: &Document,
+) -> Result<Vec<u8>, CommandError> {
+    let values = shard_values(key, doc)?;
+    let id = doc.get("_id").cloned().unwrap_or(Value::Null);
+    let holder = values
+        .into_iter()
+        .enumerate()
+        .fold(Document::new(), |d, (i, v)| d.with(i.to_string(), v))
+        .with("_id", id)
+        .to_bytes()?;
+    let raw = RawDoc::from_bytes(&holder)?;
+    let parts: Vec<teseladb_bson::RawValue<'_>> = raw.iter().map(|(_, v)| v).collect();
+    let (id, shard) = parts.split_last().ok_or_else(|| CommandError::new(BAD_VALUE, "bad _id"))?;
+    let k = teseladb_keys::KeyBuilder::document_sharded(coll.tenant, coll.id, shard, *id);
+    Ok(k.as_bytes().to_vec())
+}
+
+/// The key a range of `coll` is split at for `at` (`teseladb admin split --at`): the key of a
+/// document with that `_id`, and in a collection with a shard key the one of its values in `at`
+/// (a missing field `null`) before any `_id` when `at` names none.
+pub fn split_point(coll: &CollectionEntry, at: &Document) -> Result<Vec<u8>, CommandError> {
+    let Some(k) = shard_key_of(coll)? else {
+        let id = at.get("_id").ok_or_else(|| CommandError::new(BAD_VALUE, "--at needs an _id"))?;
+        return super::crud::doc_key(coll, id);
+    };
+    let mut doc = at.clone();
+    if doc.get("_id").is_none() {
+        doc.push("_id", Value::MinKey);
+    }
+    document_key(coll, &k.key, &doc)
+}
+
+/// The key a change event gives a document of `coll`: the fields of its shard key it has, by
+/// their paths, then `_id` (measured on a `refrouter` 9.0.4 on 02-11-2026).
+pub fn event_key(coll: &CollectionEntry, doc: &Document) -> Result<Document, CommandError> {
+    let mut out = Document::new();
+    if let Some(k) = shard_key_of(coll)? {
+        for (path, _) in k.key.iter() {
+            if let Ok(Some(v)) = shard_value(doc, path) {
+                out.push(path, v.clone());
+            }
+        }
+    }
+    Ok(out.with("_id", doc.get("_id").cloned().unwrap_or(Value::Null)))
+}
+
 /// `enableSharding`: every database can hold sharded collections (TeselaDB keeps no primary
 /// shard per database), so it only checks its argument.
 pub fn enable_sharding<B: Backend + ?Sized>(
@@ -56,12 +153,22 @@ pub fn enable_sharding<B: Backend + ?Sized>(
 ) -> Result<Document, CommandError> {
     super::admin::admin_only(ENABLE_SHARDING, ctx.db)?;
     match ctx.first() {
-        Value::String(db) if !db.is_empty() && !db.contains('.') => {
-            Ok(Document::new().with("ok", 1.0))
+        // The messages of a `refrouter` 9.0.4 (measured on 02-11-2026).
+        Value::String(db) if db.contains('.') => Err(CommandError::new(
+            INVALID_NAMESPACE,
+            format!("'.' is an invalid character in a db name: {db}"),
+        )),
+        Value::String(db)
+            if db.is_empty() || db.contains(super::names::DB_FORBIDDEN) || db.contains('$') =>
+        {
+            Err(CommandError::new(
+                INVALID_NAMESPACE,
+                format!(
+                    "Database {db} could not be created :: caused by :: Invalid db name specified: {db}"
+                ),
+            ))
         }
-        Value::String(db) => {
-            Err(CommandError::new(INVALID_NAMESPACE, format!("invalid db name specified: {db}")))
-        }
+        Value::String(_) => Ok(Document::new().with("ok", 1.0)),
         v => Err(wrong_type(ENABLE_SHARDING, v, "string")),
     }
 }
@@ -143,7 +250,72 @@ pub fn shard_collection<B: Backend + ?Sized>(
         // Not a `collMod`: its change event is not a `modify`.
         description: Vec::new(),
     })?;
+    if !empty {
+        let after = ctx
+            .backend
+            .collection(&ns)?
+            .ok_or_else(|| CommandError::new(crate::error::NAMESPACE_NOT_FOUND, "no collection"))?;
+        rekey(ctx.backend, &ns, &c, &after)?;
+    }
     Ok(sharded_reply(&ns))
+}
+
+/// Keys again by the shard key the documents `before` kept by their `_id` (018 FR-001): each
+/// one leaves its key and its index entries, written without the shard key, and goes in again
+/// with them as `after` keeps them, its `_id` in the `_id_` index.
+fn rekey<B: Backend + ?Sized>(
+    backend: &mut B,
+    ns: &Namespace,
+    before: &CollectionEntry,
+    after: &CollectionEntry,
+) -> Result<(), CommandError> {
+    use super::crud::{Writer, index_rules, rules_of};
+    use super::mutation::{Bound, DocMutation, Image};
+    // No change stream sees the move: the documents stay what they were.
+    let old = super::mutation::Rules {
+        unlogged: true,
+        ..rules_of(ns, before, true, None, index_rules(backend, before)?)?
+    };
+    let new = super::mutation::Rules {
+        unlogged: true,
+        ..rules_of(ns, after, true, None, index_rules(backend, after)?)?
+    };
+    let (start, end) = super::query::documents_of(before);
+    let mut rows = Vec::new();
+    let mut next = start;
+    loop {
+        let chunk = backend.scan(
+            &next,
+            &end,
+            super::query::SCAN_CHUNK,
+            teseladb_range::read::ReadConcern::Local,
+        )?;
+        let short = chunk.len() < super::query::SCAN_CHUNK;
+        if let Some((k, _)) = chunk.last() {
+            next = [k.as_slice(), &[0]].concat();
+        }
+        rows.extend(chunk);
+        if short {
+            break;
+        }
+    }
+    let mut w = Writer::internal();
+    for (key, bytes) in rows {
+        let doc = Document::from(RawDoc::from_bytes(&bytes)?);
+        let id = doc.get("_id").cloned().unwrap_or(Value::Null);
+        let filter = Document::new().with("_id", id);
+        let gone =
+            DocMutation::Delete { filter, multi: false, image: Image::None, rules: old.clone() };
+        w.write(backend, &Bound { mutation: gone, keys: vec![key] }, 0)?;
+        let at =
+            document_key(after, &shard_key_of(after)?.map(|k| k.key).unwrap_or_default(), &doc)?;
+        let back = DocMutation::Insert { docs: vec![doc], ordered: true, rules: new.clone() };
+        let r = w.write(backend, &Bound { mutation: back, keys: vec![at] }, 0)?;
+        if let Some(e) = r.errors.into_iter().next() {
+            return Err(e.error);
+        }
+    }
+    Ok(())
 }
 
 fn sharded_reply(ns: &Namespace) -> Document {

@@ -287,6 +287,8 @@ codes! {
     TIME_PROOF_MISMATCH = 204, "TimeProofMismatch";
     /// A `$clusterTime` signed with a key the node does not have for that time.
     KEY_NOT_FOUND = 211, "KeyNotFound";
+    /// A document whose shard key holds an array (018 FR-001).
+    SHARD_KEY_NOT_FOUND = 61, "ShardKeyNotFound";
     /// A collection whose UUID is not the one the command names.
     COLLECTION_UUID_MISMATCH = 361, "CollectionUUIDMismatch";
     /// An update statement with constants (`c`) that is not a pipeline.

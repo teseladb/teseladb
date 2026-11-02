@@ -493,7 +493,68 @@ fn partial_filters_list_over_the_buckets_as_refdb_writes_them() {
             "can't handle this predicate: { v: { $elemMatch: { a: { $eq: 1 } } } }",
         ),
         (r#"{"v":{"$type":"int"}}"#, "can't handle this predicate: { v: { $type: [ 16 ] } }"),
+        // Measured on a `refnode` 9.0.4 on 02-11-2026: the types once each, sorted, `number` first;
+        // the operator refused alone; an `$elemMatch` one predicate each.
+        (
+            r#"{"v":{"$type":["string","int","string"]}}"#,
+            "can't handle this predicate: { v: { $type: [ 2, 16 ] } }",
+        ),
+        (
+            r#"{"v":{"$type":["number",1,"minKey"]}}"#,
+            r#"can't handle this predicate: { v: { $type: [ "number", -1, 1 ] } }"#,
+        ),
+        (r#"{"v":{"$type":2}}"#, "can't handle this predicate: { v: { $type: [ 2 ] } }"),
+        (
+            r#"{"v":{"$exists":true,"$ne":1}}"#,
+            "can't handle this predicate: { v: { $not: { $eq: 1 } } }",
+        ),
+        (
+            r#"{"v":{"$nin":[2],"$ne":1}}"#,
+            "can't handle this predicate: { v: { $not: { $in: [ 2 ] } } }",
+        ),
+        (
+            r#"{"v":{"$gt":1,"$type":"int"}}"#,
+            "can't handle this predicate: { v: { $type: [ 16 ] } }",
+        ),
+        (
+            r#"{"v":{"$elemMatch":{"$gt":5,"$lt":9}}}"#,
+            "can't handle this predicate: { v: { $elemMatch: { $gt: 5, $lt: 9 } } }",
+        ),
+        (
+            r#"{"v":{"$elemMatch":{"a":{"$ne":1}}}}"#,
+            "can't handle this predicate: { v: { $elemMatch: { a: { $not: { $eq: 1 } } } } }",
+        ),
+        (
+            r#"{"v":{"$elemMatch":{"a":1,"b":{"$gt":2,"$lt":5}}}}"#,
+            "can't handle this predicate: { v: { $elemMatch: { $and: [ { a: { $eq: 1 } }, { b: { $gt: 2 } }, { b: { $lt: 5 } } ] } } }",
+        ),
+        (
+            r#"{"v":{"$elemMatch":{"a":{"b":1}}}}"#,
+            "can't handle this predicate: { v: { $elemMatch: { a: { $eq: { b: 1 } } } } }",
+        ),
+        (
+            r#"{"v":{"$elemMatch":{"a":{"$exists":true}}}}"#,
+            "can't handle this predicate: { v: { $elemMatch: { a: { $exists: true } } } }",
+        ),
+        (
+            r#"{"v":{"$elemMatch":{"a":{"$exists":false}}}}"#,
+            "can't handle this predicate: { v: { $elemMatch: { a: { $not: { $exists: true } } } } }",
+        ),
     ];
+    for (bad, code, msg) in [
+        (r#"{"v":{"$in":5}}"#, 2, "$in needs an array"),
+        (r#"{"$and":[1]}"#, 2, "$and argument's entries must be objects"),
+        (r#"{"$or":[{"v":1},2]}"#, 2, "$or argument's entries must be objects"),
+    ] {
+        let r = run(
+            &mut m,
+            &format!(
+                r#"{{"createIndexes":"ts","indexes":[{{"key":{{"m":1,"z":1}},"name":"z","partialFilterExpression":{bad}}}]}}"#
+            ),
+        );
+        assert_eq!(field(&r, "code"), &Value::Int32(code), "{bad}: {r:?}");
+        assert_eq!(field(&r, "errmsg"), &Value::from(msg), "{bad}");
+    }
     for (asked, msg) in refused {
         let r = run(
             &mut m,

@@ -145,8 +145,10 @@ pub(crate) fn plan_indexes<B: Backend + ?Sized>(
     if !matches!(super::kinds::kind_of(coll)?, CollectionKind::Normal) {
         return Ok(Vec::new());
     }
+    // A collection with a shard key keeps `_id` in an index of its own (018 FR-001).
+    let sharded = super::sharding::is_sharded(coll);
     let id_entry = IndexEntry {
-        id: DOCUMENTS,
+        id: if sharded { teseladb_range::capped::ID_INDEX } else { DOCUMENTS },
         collection: coll.id,
         name: ID_INDEX.to_owned(),
         spec: super::catalog::id_index(coll)?.to_bytes()?,
@@ -165,7 +167,8 @@ pub(crate) fn plan_indexes<B: Backend + ?Sized>(
             .map_err(|e| CommandError::new(INTERNAL_ERROR, e.reason))?;
         let Some(mut catalog) = catalog else { continue };
         // The index of `_id` is unique without saying so in its definition.
-        catalog.unique |= id_index;
+        let of_id = id_index || (sharded && entry.id == teseladb_range::capped::ID_INDEX);
+        catalog.unique |= of_id;
         let pattern = Document::from(RawDoc::from_bytes(&catalog.key_pattern)?);
         let ordered = pattern.iter().all(|(_, v)| {
             matches!(v, Value::Int32(_) | Value::Int64(_) | Value::Double(_) | Value::Decimal128(_))
@@ -178,7 +181,7 @@ pub(crate) fn plan_indexes<B: Backend + ?Sized>(
             && spec.get("collation").is_none()
             && pattern.iter().all(|(k, _)| !k.contains('$'))
             && allowed_by_settings(coll.id, &entry.name, &pattern);
-        let multikey_paths = if id_index {
+        let multikey_paths = if of_id {
             pattern.iter().map(|(k, _)| (k.to_owned(), Vec::new())).collect()
         } else {
             multikey_paths(backend, (coll.tenant, coll.id), &entry, &pattern)?
@@ -622,7 +625,10 @@ fn indexed_document<B: Backend + ?Sized>(
     pk: &[u8],
     concern: ReadConcern,
 ) -> Result<(Vec<u8>, Vec<u8>), CommandError> {
-    let key = KeyBuilder::document_of_pk(coll.tenant, coll.id, pk);
+    let key = match super::sharding::is_sharded(coll) {
+        true => KeyBuilder::document_of_sharded_pk(coll.tenant, coll.id, pk),
+        false => KeyBuilder::document_of_pk(coll.tenant, coll.id, pk),
+    };
     let next = [key.as_bytes(), &[0]].concat();
     backend
         .scan(key.as_bytes(), &next, 1, concern)?
@@ -935,7 +941,12 @@ fn range_entries<B: Backend + ?Sized>(
                 false => None,
             };
             let found = values.as_ref().map(|v| index.key_from(v));
-            pks.push(Entry { pk: key[cut..].to_vec(), key: found, values });
+            // A unique index keeps the primary key in the entry's value, not in its key.
+            let pk = match index.catalog.unique {
+                true => teseladb_keys::space::split_unique_value(value).map_err(|_| malformed())?.0,
+                false => &key[cut..],
+            };
+            pks.push(Entry { pk: pk.to_vec(), key: found, values });
         }
         match rows.last() {
             Some((k, _)) if !short => from = [k.as_slice(), &[0]].concat(),
