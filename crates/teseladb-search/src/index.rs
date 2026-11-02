@@ -801,7 +801,8 @@ impl TextField {
             Some(g) => (g.docs, g.length),
             None => (self.lengths.len() as u64, self.tokens.values().map(|&l| u64::from(l)).sum()),
         };
-        let avg = if n == 0 { 1.0f32 } else { (total as f64 / n as f64) as f32 };
+        // A field without documents scores none: the average only has to be finite.
+        let avg = (total as f64 / n.max(1) as f64) as f32;
         let Bm25 { k1, b } = Bm25::DEFAULT;
         let (k1, b) = (k1 as f32, b as f32);
         let chars: Vec<u32> = terms.iter().map(|t| t.chars().count() as u32).collect();
