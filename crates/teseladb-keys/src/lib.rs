@@ -27,7 +27,7 @@ mod version;
 
 pub use bounds::{FieldBounds, Interval, KeyRange, bounds, next_prefix};
 pub use bucket::{DOCUMENT_BUCKETS, bucket};
-pub use decode::{DecodeError, decode, values_len};
+pub use decode::{DecodeError, decode, decode_untyped, values_len};
 pub use encode::{Direction, class_byte, encode, encode_value, encode_value_with};
 pub use space::{DOCUMENTS, FieldSpec, IndexKeySpec, Key, KeyBuilder, KeyParts, PrimaryKey};
 pub use typebits::TypeBits;

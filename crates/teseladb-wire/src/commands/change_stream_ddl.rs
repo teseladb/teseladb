@@ -107,7 +107,10 @@ pub fn event_of(w: &Watch<'_>, r: &DdlRecord) -> Result<Option<ChangeEvent>, Com
     // A resharding's own catalog changes (018 FR-002): its critical section gives no event and
     // its rename is the `reshardCollection` or `refineCollectionShardKey` of the collection.
     match &r.change {
-        DdlChange::Modify { description, .. } if super::reshard::is_cutover_change(description) => {
+        DdlChange::Modify { description, .. }
+            if super::reshard::is_cutover_change(description)
+                || super::balancing::is_balancing_change(description) =>
+        {
             return Ok(None);
         }
         DdlChange::Rename { from, to, target, .. } => {

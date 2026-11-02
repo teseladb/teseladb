@@ -982,10 +982,12 @@ pub fn drop_database<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Docume
         if !doomed.is_empty() {
             super::write_block::ddl(ctx.backend, &db)?;
         }
-        ctx.backend.catalog_write(CatalogCommand::DropDatabase { db })?;
+        ctx.backend.catalog_write(CatalogCommand::DropDatabase { db: db.clone() })?;
         for (ns, c) in &doomed {
             purge(ctx.backend, ns, c)?;
         }
     }
+    // `config.databases` forgets it, primary included (018 FR-005).
+    super::primaries::forget(ctx.backend, &db)?;
     Ok(Document::new().with("ok", 1.0))
 }
