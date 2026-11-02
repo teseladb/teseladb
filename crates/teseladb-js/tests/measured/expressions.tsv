@@ -2454,3 +2454,83 @@ Object.getOwnPropertyDescriptor({ get g() {} }, 'g').get.name	S:get g
 (() => { class A { #x = 1; static t() { const a = new A(); const b = Object.assign({}, a); return #x in b } }; return A.t() })()	J:false
 (() => { class A { #x = {}; static t() { const a = new A(); return Object.prototype.toString.call(a) + typeof structuredClone } }; return A.t() })()	S:[object Object]undefined
 (() => { class A { async #am() { return 1 } t() { return typeof this.#am } }; return new A().t() })()	S:function
+Array.from(new Float16Array([1.5, -2, NaN, Infinity, -Infinity, 65520, 65504, 1e-8, 6e-8, 6.1e-5, 0, -0, 0.1, 2049, 1e-5, 0.00006103515625, 0.000060975551605224609])).map(String).join()	S:1.5,-2,NaN,Infinity,-Infinity,Infinity,65504,0,5.960464477539063e-8,0.00006097555160522461,0,0,0.0999755859375,2048,0.000010013580322265625,0.00006103515625,0.00006097555160522461
+[Math.f16round(1.337), Math.f16round(-1e9), Math.f16round(5e-8), Math.f16round(2.9802322387695312e-8), Math.f16round(65519.99), Math.f16round(1.0009765625), Math.f16round(1.00146484375), Math.f16round(-0)].map(String).join()	S:1.3369140625,-Infinity,5.960464477539063e-8,0,65504,1.0009765625,1.001953125,0
+(() => { const d = new DataView(new ArrayBuffer(8)); d.setFloat16(0, 3.25); d.setFloat16(2, -0.5, true); return [d.getFloat16(0), d.getFloat16(2, true), d.getUint16(0), d.buffer.byteLength].join() })()	S:3.25,-0.5,17024,8
+(() => { try { return DataView.prototype.buffer } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:get buffer method called on incompatible DataView.prototype
+(() => { try { return Object.getOwnPropertyDescriptor(DataView.prototype, 'buffer').get.call({}) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:get buffer method called on incompatible Object
+(() => { const a = new Uint8Array(4); const r = a.setFromHex('0aFF'); return JSON.stringify(r) + Array.from(a).join() })()	S:{"read":4,"written":2}10,255,0,0
+(() => { const a = new Uint8Array(2); const r = a.setFromHex('0a0b0c'); return JSON.stringify(r) + Array.from(a).join() })()	S:{"read":4,"written":2}10,11
+(() => { const a = new Uint8Array(4); const r = a.setFromBase64('AQID'); return JSON.stringify(r) + Array.from(a).join() })()	S:{"read":4,"written":3}1,2,3,0
+(() => { try { new Uint8Array(4).setFromHex(5) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:5 is not a string
+(() => { try { new Uint8Array(4).setFromBase64({}) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:({}) is not a string
+(() => { try { new Int8Array(4).setFromHex('00') } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:(new Int8Array(...)).setFromHex is not a function
+(() => { try { Uint8Array.fromHex(5) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:5 is not a string
+(() => { try { Uint8Array.fromBase64(5) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:5 is not a string
+(() => { try { return Array.from(Uint8Array.fromBase64(' AQ ID== ')).join() } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:unexpected incomplete base64 chunk
+(() => { try { Uint8Array.fromBase64('A*') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:'*' is not a valid base64 character
+(() => { try { return new Uint8Array(4).toHex.call(new Int8Array(2)) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:toHex method called on incompatible Int8Array
+(() => { const b = new ArrayBuffer(8, { maxByteLength: 16 }); const c = b.transferToFixedLength(); return [c.byteLength, c.resizable, b.detached].join() })()	S:8,false,true
+(() => { const b = new ArrayBuffer(8, { maxByteLength: 16 }); const c = b.transfer(); return [c.byteLength, c.resizable, c.maxByteLength].join() })()	S:8,true,16
+(() => { const b = new ArrayBuffer(8); b.transfer(); try { b.transfer() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:attempting to access detached ArrayBuffer
+(() => { const b = new ArrayBuffer(8); const c = b.transfer(20); return c.byteLength })()	J:20
+(() => { const b = new ArrayBuffer(8, { maxByteLength: 16 }); try { b.transfer(20) } catch (e) { return e.name + ':' + e.message } })()	S:RangeError:byte length is larger than maximum byte length
+(() => { try { ArrayBuffer(4) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:calling a builtin ArrayBuffer constructor without new is forbidden
+(() => { try { DataView(new ArrayBuffer(4)) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:calling a builtin DataView constructor without new is forbidden
+(() => { try { new ArrayBuffer(2 ** 31) } catch (e) { return e.name + ':' + e.message } })()	S:RangeError:invalid array length
+(() => { try { new ArrayBuffer(4, { maxByteLength: 2 }) } catch (e) { return e.name + ':' + e.message } })()	S:RangeError:byte length is larger than maximum byte length
+(() => { try { new ArrayBuffer(4, { maxByteLength: 2 ** 31 }) } catch (e) { return e.name + ':' + e.message } })()	S:RangeError:invalid array length
+(() => { const b = new ArrayBuffer(4, { maxByteLength: 8 }); try { b.resize(9) } catch (e) { return e.name + ':' + e.message } })()	S:RangeError:byte length is larger than maximum byte length
+(() => { try { new DataView(new ArrayBuffer(4), 5) } catch (e) { return e.name + ':' + e.message } })()	S:RangeError:start offset is outside the bounds of the buffer
+(() => { try { new DataView(new ArrayBuffer(4), 2, 3) } catch (e) { return e.name + ':' + e.message } })()	S:RangeError:invalid data view length
+(() => { try { new Int16Array(new ArrayBuffer(4), 6) } catch (e) { return e.name + ':' + e.message } })()	S:RangeError:size of buffer is too small for Int16Array with byteOffset
+(() => { try { new Int8Array(-1) } catch (e) { return e.name + ':' + e.message } })()	S:RangeError:invalid array length
+(() => { try { new Int8Array(2 ** 53) } catch (e) { return e.name + ':' + e.message } })()	S:RangeError:invalid array length
+(() => { try { new Int8Array(new BigInt64Array(1)) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:BigInt64Array elements are incompatible with Int8Array
+(() => { try { new BigInt64Array(new Int8Array(1)) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:Int8Array elements are incompatible with BigInt64Array
+(() => { try { return Array.from(Int8Array.from({ length: 2, 0: 5 }, x => (x ?? 0) * 2)).join() } catch (e) { return e.name + ':' + e.message } })()	S:10,0
+(() => { try { return Int8Array.from([1], 5) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:5 is not a function
+(() => { try { return Int8Array.from({ length: -3 }).length + ',' + Int8Array.from({ length: Infinity, 0: 1 }).length } catch (e) { return e.name + ':' + e.message } })()	S:RangeError:invalid array length
+(() => { const b = new ArrayBuffer(8); const a = new Int8Array(b, 2); b.transfer(); return [a.byteOffset, a.length, a.byteLength, a[0], JSON.stringify(Object.keys(a))].join() })()	S:0,0,0,,[]
+(() => { const a = new Int8Array([1, 2, 3]); return [a.at(NaN), a.at(-1), a.at(5), a.at(-9), a.at(1.7)].join() })()	S:1,3,,,2
+(() => { const a = new Int8Array(3); try { a.set([1, 2, 3, 4]) } catch (e) { return e.name + ':' + e.message } })()	S:RangeError:source array is too long
+(() => { const a = new Int8Array([1, 2, 3, 4, 5]); a.copyWithin(3, 0); return a.join() })()	S:1,2,3,1,2
+(() => { const a = new Int8Array([1, 2, 3, 4, 5]); a.copyWithin(0, 3, 9); return a.join() })()	S:4,5,3,4,5
+(() => { try { return new Int8Array(2).map(5) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:5 is not a function
+(() => { try { return new Int8Array(2).filter() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:missing argument 0 when calling function %TypedArray%.prototype.filter
+(() => { try { return new Int8Array([3, 1, 2]).sort(5) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:invalid %TypedArray%.prototype.sort argument
+(() => { return Array.from(new Float64Array([NaN, -0, 0, 1, -Infinity]).sort()).map(x => Object.is(x, -0) ? '-0' : String(x)).join() })()	S:-Infinity,-0,0,1,NaN
+(() => { return Array.from(new Float32Array([0, -0, NaN, -0, 0]).sort()).map(x => Object.is(x, -0) ? '-0' : String(x)).join() })()	S:-0,-0,0,0,NaN
+(() => { try { Object.getPrototypeOf(Int8Array)() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:cannot directly call builtin %TypedArray%
+(() => { try { new (Object.getPrototypeOf(Int8Array))() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:cannot directly construct builtin %TypedArray%
+(() => { const a = new Int8Array(2); try { Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Int8Array.prototype), 'buffer').get.call(a); return 'ok' } catch (e) { return e.name + ':' + e.message } })()	S:ok
+(() => { try { return Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Int8Array.prototype), 'buffer').get.call({}) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:get buffer method called on incompatible Object
+(() => { const a = new Uint8Array([1, 2]); const b = a.subarray(1); return b.buffer === a.buffer })()	J:true
+(() => { const d = new DataView(new ArrayBuffer(4)); try { d.getInt32(2) } catch (e) { return e.name + ':' + e.message } })()	S:RangeError:offset is outside the bounds of the DataView
+(() => { const b = new ArrayBuffer(4); const d = new DataView(b); b.transfer(); try { d.getInt8(0) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:attempting to access detached ArrayBuffer
+(() => { const b = new ArrayBuffer(4); b.transfer(); try { return b.slice(0) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:attempting to access detached ArrayBuffer
+(() => { const b = new ArrayBuffer(8); return [b.slice(-2).byteLength, b.slice(2, -2).byteLength, b.slice(NaN).byteLength].join() })()	S:2,4,8
+(() => { const b = new ArrayBuffer(4); b.transfer(); try { b.resize(1) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:resize method called on incompatible ArrayBuffer
+(() => { try { new Uint8Array([300, -1, 1.5]).toHex() } catch (e) { return e.name + ':' + e.message } })()	J:undefined
+new Uint8Array([300, -1, 1.5]).toHex() + new Uint8Array([255, 0, 7]).toBase64()	S:2cff01/wAH
+(() => { const a = new Uint8ClampedArray([300, -5, 1.5, 2.5, NaN]); return a.join() })()	S:255,0,2,2,0
+['map', 'forEach', 'some', 'every', 'find', 'findIndex', 'findLast', 'findLastIndex', 'reduce', 'reduceRight', 'filter'].map(m => { try { new Int8Array(2)[m](); return 'ok' } catch (e) { return e.message } }).join('|')	S:missing argument 0 when calling function %TypedArray%.prototype.map|missing argument 0 when calling function TypedArray.prototype.forEach|missing argument 0 when calling function %TypedArray%.prototype.some|missing argument 0 when calling function %TypedArray%.prototype.every|missing argument 0 when calling function %TypedArray%.prototype.find|missing argument 0 when calling function %TypedArray%.prototype.findIndex|missing argument 0 when calling function %TypedArray%.prototype.findLast|missing argument 0 when calling function %TypedArray%.prototype.findLastIndex|missing argument 0 when calling function %TypedArray%.prototype.reduce|missing argument 0 when calling function %TypedArray%.prototype.reduceRight|missing argument 0 when calling function %TypedArray%.prototype.filter
+['map', 'forEach', 'filter', 'reduce'].map(m => { try { new Int8Array(2)[m](5); return 'ok' } catch (e) { return e.message } }).join('|')	S:5 is not a function|5 is not a function|5 is not a function|5 is not a function
+['sort', 'toSorted'].map(m => { try { new Int8Array(2)[m](5); return 'ok' } catch (e) { return e.message } }).join('|')	S:invalid %TypedArray%.prototype.sort argument|5 is not a function
+(() => { try { return Int8Array.from({ length: -3 }).length } catch (e) { return e.name + ':' + e.message } })()	J:0
+(() => { try { return Int8Array.from({ length: 2 ** 31 }).length } catch (e) { return e.name + ':' + e.message } })()	S:RangeError:invalid array length
+(() => { try { return new Int8Array(new ArrayBuffer(4), 1, 5) } catch (e) { return e.name + ':' + e.message } })()	S:RangeError:attempting to construct out-of-bounds Int8Array on ArrayBuffer
+(() => { try { return new Int16Array(new ArrayBuffer(4), 1) } catch (e) { return e.name + ':' + e.message } })()	S:RangeError:start offset of Int16Array should be a multiple of 2
+(() => { try { return new Int16Array(new ArrayBuffer(5)) } catch (e) { return e.name + ':' + e.message } })()	S:RangeError:buffer length for Int16Array should be a multiple of 2
+(() => { try { return new Int8Array(new ArrayBuffer(4), -1) } catch (e) { return e.name + ':' + e.message } })()	S:RangeError:invalid or out-of-range index
+(() => { const a = new Uint8Array(4); const r = a.setFromBase64('AQIDBAUG'); return JSON.stringify(r) + Array.from(a).join() })()	S:{"read":4,"written":3}1,2,3,0
+(() => { try { return Array.from(Uint8Array.fromBase64('AQ==')).join() + '|' + Array.from(Uint8Array.fromBase64('AQI=')).join() + '|' + Array.from(Uint8Array.fromBase64('AQ')).join() } catch (e) { return e.name + ':' + e.message } })()	S:1|1,2|1
+(() => { try { return Array.from(Uint8Array.fromBase64('A')).join() } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:unexpected incomplete base64 chunk
+(() => { try { return Array.from(Uint8Array.fromBase64('AQ=')).join() } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:missing padding '=' character
+(() => { try { return Array.from(Uint8Array.fromBase64('AQ==AQ==')).join() } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:unexpected 'A' after base64 padding
+(() => { try { return Array.from(Uint8Array.fromBase64('A Q\n= =')).join() } catch (e) { return e.name + ':' + e.message } })()	S:1
+(() => { try { return Array.from(Uint8Array.fromBase64('AQID=')).join() } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:unexpected incomplete base64 chunk
+(() => { try { new Object().zz() } catch (e) { return e.message } })()	S:(new Object()).zz is not a function
+(() => { try { new Object.prototype.constructor(1).zz() } catch (e) { return e.message } })()	S:(new Object.prototype.constructor(...)).zz is not a function
+(() => { try { (new Date).zz() } catch (e) { return e.message } })()	S:(new Date()).zz is not a function
+(() => { const d = new DataView(new ArrayBuffer(2)); return d.buffer === d.buffer })()	J:true

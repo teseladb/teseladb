@@ -296,6 +296,10 @@ pub(crate) fn callee_text(e: &Expr) -> String {
             },
         },
         Expr::This => "this".into(),
+        Expr::New { callee, args, .. } if args.is_empty() => {
+            format!("(new {}())", callee_text(callee))
+        }
+        Expr::New { callee, .. } => format!("(new {}(...))", callee_text(callee)),
         Expr::Call { callee, args, .. } if args.is_empty() => format!("{}()", callee_text(callee)),
         Expr::Call { callee, .. } => format!("{}(...)", callee_text(callee)),
         Expr::Str(s) => format!("\"{s}\""),
