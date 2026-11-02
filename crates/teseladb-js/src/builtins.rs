@@ -52,7 +52,7 @@ fn prototype_of_ctor(o: &ObjRef) -> Option<String> {
     }
 }
 
-fn class_kind(v: &Val) -> &'static str {
+pub(crate) fn class_kind(v: &Val) -> &'static str {
     match v {
         Val::Obj(o) => match &o.borrow().kind {
             Kind::Array(_) => "Array",
@@ -71,6 +71,11 @@ fn class_kind(v: &Val) -> &'static str {
         },
         other => other.type_of(),
     }
+}
+
+/// The class SpiderMonkey names in «X is not extensible»: a BSON type, or the kind of object.
+pub(crate) fn object_class(it: &Interp, o: &ObjRef) -> &'static str {
+    crate::bson::bson_class(it, o).unwrap_or_else(|| class_kind(&Val::Obj(o.clone())))
 }
 
 /// The key of the well-known symbol `Symbol.<name>`.
@@ -200,6 +205,7 @@ pub fn install(it: &mut Interp) -> R<()> {
     crate::uri::install(it, &g)?;
     crate::symbols::install_species(it, &g)?;
     crate::shell::install(it, &g)?;
+    crate::order::apply(it);
     freeze_builtins(it);
     Ok(())
 }
@@ -302,8 +308,7 @@ fn sleep(it: &mut Interp, _: &Val, a: &[Val]) -> R {
 /// `eval(code)`: a script in the global scope.
 fn eval(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     let Val::Str(src) = arg(a, 0) else { return Ok(arg(a, 0)) };
-    let body =
-        crate::parser::parse_script(&src).map_err(|e| it.error("SyntaxError", &e.message))?;
+    let body = crate::parser::parse_script(&src).map_err(|e| it.syntax_error(&e))?;
     let env = it.global_env.clone();
     it.hoist(&body, &env, true)?;
     let saved = it.last.take();
@@ -516,7 +521,9 @@ fn obj_own_names(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     let o = it.object_of(&arg(a, 0))?;
     let mut keys = it.keys(&o, false)?;
     if matches!(o.borrow().kind, Kind::Array(_) | Kind::Str(_)) {
-        keys.push("length".into());
+        // After the indices and before the other keys (ECMA-262 §10.1.11.1).
+        let at = keys.iter().take_while(|k| array_index(k).is_some()).count();
+        keys.insert(at, "length".into());
     }
     it.array(keys.into_iter().map(Val::Str).collect())
 }
@@ -566,24 +573,34 @@ fn obj_group_by(it: &mut Interp, _: &Val, a: &[Val]) -> R {
 }
 
 fn obj_to_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
-    if let Val::Obj(o) = this
-        && crate::proxy::is_proxy(o)
-    {
-        let tag = if crate::proxy::is_array(it, this)? {
-            "Array"
-        } else if o.borrow().is_callable() {
-            "Function"
-        } else {
-            "Object"
-        };
-        return it.string(format!("[object {tag}]"));
-    }
+    let builtin = builtin_tag(it, this)?;
     if !this.is_nullish()
         && let Val::Str(tag) = it.get(this, &well_known("toStringTag"))?
     {
         return it.string(format!("[object {tag}]"));
     }
-    let tag = match this {
+    it.string(format!("[object {builtin}]"))
+}
+
+/// The tag `Object.prototype.toString` gives `this` when it has no `Symbol.toStringTag`.
+fn builtin_tag(it: &mut Interp, this: &Val) -> R<&'static str> {
+    if let Val::Obj(o) = this
+        && let Some(class) = crate::bson::bson_class(it, o)
+    {
+        return Ok(class);
+    }
+    if let Val::Obj(o) = this
+        && crate::proxy::is_proxy(o)
+    {
+        return Ok(if crate::proxy::is_array(it, this)? {
+            "Array"
+        } else if o.borrow().is_callable() {
+            "Function"
+        } else {
+            "Object"
+        });
+    }
+    Ok(match this {
         Val::Undef => "Undefined",
         Val::Null => "Null",
         Val::Obj(o) => match &o.borrow().kind {
@@ -601,8 +618,7 @@ fn obj_to_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
         Val::Str(_) => "String",
         Val::Bool(_) => "Boolean",
         Val::Sym(_) => "Symbol",
-    };
-    it.string(format!("[object {tag}]"))
+    })
 }
 
 fn obj_value_of(it: &mut Interp, this: &Val, _: &[Val]) -> R {
@@ -683,8 +699,7 @@ pub(crate) fn function_ctor(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     }
     let body = parts.pop().unwrap_or_default();
     let src = format!("(function anonymous({}\n) {{\n{body}\n}})", parts.join(","));
-    let stmts =
-        crate::parser::parse_script(&src).map_err(|e| it.error("SyntaxError", &e.message))?;
+    let stmts = crate::parser::parse_script(&src).map_err(|e| it.syntax_error(&e))?;
     let env = it.global_env.clone();
     match stmts.first() {
         Some(crate::ast::Stmt::Expr(e)) => it.eval(e, &env),
@@ -708,8 +723,29 @@ fn fn_bind(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let Val::Obj(target) = this else {
         return it.type_error("bind called on a value that is not a function");
     };
-    let f = Func::Bound(target.clone(), arg(a, 0), a.get(1..).unwrap_or(&[]).to_vec());
-    Ok(Val::Obj(it.alloc(Some(it.realm.function.clone()), Kind::Func(f))?))
+    let bound_args = a.get(1..).unwrap_or(&[]).to_vec();
+    // `length` is the target's less the bound arguments, `name` is `bound ` and the target's;
+    // reading them does not make the target's lazy ones (measured on a `refrouter` 9.0.4 on 02-11).
+    let mut read = |key: &str| -> R {
+        let own =
+            target.borrow().get_own(key).filter(|p| !p.is_accessor()).map(|p| p.value.clone());
+        own.map_or_else(|| it.get(this, key), Ok)
+    };
+    let length = match read("length")? {
+        Val::Num(n) if n.is_nan() => 0.0,
+        Val::Num(n) => (n.trunc() - bound_args.len() as f64).max(0.0),
+        _ => 0.0,
+    };
+    let name = match read("name")? {
+        Val::Str(s) => format!("bound {s}"),
+        _ => "bound ".to_owned(),
+    };
+    let f = Func::Bound(target.clone(), arg(a, 0), bound_args);
+    let o = it.alloc(Some(it.realm.function.clone()), Kind::Func(f))?;
+    let fixed = |v: Val| Prop { writable: false, ..Prop::hidden(v) };
+    it.define(&o, "length", fixed(Val::Num(length)))?;
+    it.define(&o, "name", fixed(Val::str(&name)))?;
+    Ok(Val::Obj(o))
 }
 
 fn fn_to_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
@@ -717,9 +753,13 @@ fn fn_to_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
         return it.type_error("Function.prototype.toString called on incompatible object");
     };
     let s = match &o.borrow().kind {
+        Kind::Func(Func::Closure { class: Some(c), .. }) => c.source.to_string(),
         Kind::Func(Func::Closure { def, .. }) => def.source.to_string(),
         Kind::Func(Func::Native(_, n)) => format!("function {n}() {{\n    [native code]\n}}"),
-        Kind::Func(Func::Bound(..)) => "function () {\n    [native code]\n}".to_owned(),
+        // A bound function and a callable proxy (measured on a `refrouter` 9.0.4 on 02-11).
+        Kind::Func(Func::Bound(..)) | Kind::Proxy(_, true) => {
+            "function () {\n    [native code]\n}".to_owned()
+        }
         _ => return it.type_error("Function.prototype.toString called on incompatible object"),
     };
     it.string(s)
@@ -762,8 +802,9 @@ fn array_is_array(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     Ok(Val::Bool(crate::proxy::is_array(it, &arg(a, 0))?))
 }
 
-fn array_from(it: &mut Interp, _: &Val, a: &[Val]) -> R {
+fn array_from(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let src = arg(a, 0);
+    let mut target = None;
     let items = match &src {
         Val::Obj(o)
             if !matches!(
@@ -775,6 +816,7 @@ fn array_from(it: &mut Interp, _: &Val, a: &[Val]) -> R {
             let n = it.number_of(&n)?;
             let n = if n.is_finite() && n > 0.0 { n as usize } else { 0 };
             it.charge(n * crate::interp::PROP_BYTES)?;
+            target = crate::arrays::made_by(it, this, &[Val::Num(n as f64)])?;
             let mut out = Vec::with_capacity(n);
             for i in 0..n {
                 out.push(it.get(&src, &i.to_string())?);
@@ -787,7 +829,10 @@ fn array_from(it: &mut Interp, _: &Val, a: &[Val]) -> R {
         // A number, boolean, symbol or bigint has no iterator and no length: no elements
         // (measured on a `refrouter` 9.0.4 on 02-11: `Set.tojson(5)` is `new Set([ ])`).
         Val::Num(_) | Val::Bool(_) | Val::Sym(_) | Val::BigInt(_) => Vec::new(),
-        _ => it.iterate(&src)?,
+        _ => {
+            target = crate::arrays::made_by(it, this, &[])?;
+            it.iterate(&src)?
+        }
     };
     let f = arg(a, 1);
     if f.is_callable() {
@@ -795,13 +840,14 @@ fn array_from(it: &mut Interp, _: &Val, a: &[Val]) -> R {
         for (i, x) in items.into_iter().enumerate() {
             out.push(it.call(&f, &Val::Undef, &[x, Val::Num(i as f64)])?);
         }
-        return it.array(out);
+        return crate::arrays::species_result(it, target, out, true);
     }
-    it.array(items)
+    crate::arrays::species_result(it, target, items, true)
 }
 
-fn array_of(it: &mut Interp, _: &Val, a: &[Val]) -> R {
-    it.array(a.to_vec())
+fn array_of(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    let target = crate::arrays::made_by(it, this, &[Val::Num(a.len() as f64)])?;
+    crate::arrays::species_result(it, target, a.to_vec(), true)
 }
 
 fn numbers(it: &mut Interp, v: &Val) -> R<Vec<f64>> {
@@ -1596,7 +1642,13 @@ fn coll_entries(it: &mut Interp, this: &Val, _: &[Val]) -> R {
 
 fn iter_next(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     let Val::Obj(o) = this else { return it.type_error("next called on incompatible object") };
-    let Kind::Iter(state) = o.borrow().kind.clone() else {
+    let kind = o.borrow().kind.clone();
+    if let Kind::ArrayIter(state) = kind {
+        let v = crate::arrays::array_iter_next(it, &state)?;
+        let done = v.is_none();
+        return iter_result(it, v.unwrap_or(Val::Undef), done);
+    }
+    let Kind::Iter(state) = kind else {
         return it.type_error("next called on incompatible object");
     };
     let (v, done) = {
@@ -1609,6 +1661,11 @@ fn iter_next(it: &mut Interp, this: &Val, _: &[Val]) -> R {
             None => (Val::Undef, true),
         }
     };
+    iter_result(it, v, done)
+}
+
+/// `{value, done}`.
+fn iter_result(it: &mut Interp, v: Val, done: bool) -> R {
     let r = it.object()?;
     it.define(&r, "value", Prop::data(v))?;
     it.define(&r, "done", Prop::data(Val::Bool(done)))?;

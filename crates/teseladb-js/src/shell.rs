@@ -62,8 +62,8 @@ fn proto_of_ctor(g: &ObjRef, name: &str) -> Option<ObjRef> {
 }
 
 /// What the shell adds to the prototypes of the built-ins and of the BSON types (measured on a
-/// `refrouter` 9.0.4 on 02-11): `tojson` and `toJSON` of each type, `ltrim` and `rtrim` of strings,
-/// the methods of `BinData`.
+/// `refrouter` 9.0.4 on 02-11): `ltrim` and `rtrim` of strings, `tojson` and `toJSON` of regular
+/// expressions.
 fn prototype_additions(it: &mut Interp, g: &ObjRef) -> R<()> {
     if let Some(p) = proto_of_ctor(g, "String") {
         assigned(it, &p, "ltrim", "trimStart", crate::strings::trim_start)?;
@@ -73,93 +73,7 @@ fn prototype_additions(it: &mut Interp, g: &ObjRef) -> R<()> {
         assigned(it, &p, "tojson", "toString", crate::builtins::regexp_to_string)?;
         method(it, &p, "toJSON", regexp_to_json, 0)?;
     }
-    for name in ["ObjectId", "NumberLong", "NumberInt", "NumberDecimal", "Timestamp", "BinData"] {
-        let Some(p) = proto_of_ctor(g, name) else { continue };
-        let tojson = p.borrow().get_own("tojson").map(|q| q.value.clone());
-        if let Some(f) = tojson {
-            it.define(&p, "tojson", Prop::data(f))?;
-        }
-        method(it, &p, "toJSON", bson_to_json, 0)?;
-    }
-    if let Some(p) = proto_of_ctor(g, "ObjectId") {
-        it.define(&p, "isObjectId", Prop::data(Val::Bool(true)))?;
-    }
-    if let Some(p) = proto_of_ctor(g, "BinData") {
-        method(it, &p, "base64", |it, t, _| bin_part(it, t, BinPart::Base64), 0)?;
-        method(it, &p, "hex", |it, t, _| bin_part(it, t, BinPart::Hex), 0)?;
-        assigned(it, &p, "length", "", |it, t, _| bin_part(it, t, BinPart::Length))?;
-        assigned(it, &p, "subtype", "", |it, t, _| bin_part(it, t, BinPart::Subtype))?;
-    }
-    for name in ["MinKey", "MaxKey"] {
-        if let Some(Val::Obj(c)) = g.borrow().get_own(name).map(|p| p.value.clone()) {
-            method(it, &c, "tojson", key_tojson, 0)?;
-            method(it, &c, "toJSON", key_to_json, 0)?;
-            method(it, &c, "toString", key_to_string, 0)?;
-        }
-    }
     Ok(())
-}
-
-enum BinPart {
-    Base64,
-    Hex,
-    Length,
-    Subtype,
-}
-
-fn bin_part(it: &mut Interp, this: &Val, part: BinPart) -> R {
-    let Bson::BinData(sub, bytes) = crate::bson::this_bson(it, this)? else {
-        return Err(crate::builtins::incompatible(it, "BinData"));
-    };
-    match part {
-        BinPart::Base64 => it.string(base64_encode(&bytes)),
-        BinPart::Hex => it.string(crate::bson::hex(&bytes)),
-        BinPart::Length => Ok(Val::Num(bytes.len() as f64)),
-        BinPart::Subtype => Ok(Val::Num(f64::from(sub))),
-    }
-}
-
-/// An object of one property, for `toJSON`.
-fn single(it: &mut Interp, key: &str, v: Val) -> R {
-    let o = it.object()?;
-    it.define(&o, key, Prop::data(v))?;
-    Ok(Val::Obj(o))
-}
-
-/// `toJSON` of the BSON types: their Extended JSON (`{"$oid": …}`, `{"$numberLong": …}`…).
-fn bson_to_json(it: &mut Interp, this: &Val, _: &[Val]) -> R {
-    Ok(match crate::bson::this_bson(it, this)? {
-        Bson::ObjectId(id) => single(it, "$oid", Val::Str(crate::bson::hex(&id).into()))?,
-        Bson::Long(n) => single(it, "$numberLong", Val::Str(n.to_string().into()))?,
-        Bson::Int(n) => Val::Num(f64::from(n)),
-        Bson::Decimal(d) => single(it, "$numberDecimal", Val::Str(d.to_string().into()))?,
-        Bson::Timestamp(t, i) => {
-            let inner = it.object()?;
-            it.define(&inner, "t", Prop::data(Val::Num(f64::from(t))))?;
-            it.define(&inner, "i", Prop::data(Val::Num(f64::from(i))))?;
-            single(it, "$timestamp", Val::Obj(inner))?
-        }
-        Bson::BinData(sub, bytes) => {
-            let o = it.object()?;
-            it.define(&o, "$binary", Prop::data(Val::Str(base64_encode(&bytes).into())))?;
-            it.define(&o, "$type", Prop::data(Val::Str(format!("{sub:02x}").into())))?;
-            Val::Obj(o)
-        }
-        _ => Val::Undef,
-    })
-}
-
-fn key_to_json(it: &mut Interp, this: &Val, _: &[Val]) -> R {
-    let is_max = matches!(this, Val::Obj(o)
-        if matches!(o.borrow().get_own("name").map(|p| p.value.clone()), Some(Val::Str(n)) if &*n == "MaxKey"));
-    single(it, if is_max { "$maxKey" } else { "$minKey" }, Val::Num(1.0))
-}
-
-/// `MinKey.toString()`: `[object MinKey]` (measured on a `refrouter` 9.0.4 on 02-11).
-fn key_to_string(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    let key = key_to_json(it, this, a)?;
-    let name = if matches!(it.get(&key, "$maxKey")?, Val::Undef) { "MinKey" } else { "MaxKey" };
-    it.string(format!("[object {name}]"))
 }
 
 fn regexp_to_json(it: &mut Interp, this: &Val, _: &[Val]) -> R {
@@ -201,17 +115,6 @@ fn units_md5(it: &mut Interp, _: &Val, a: &[Val]) -> R {
         units.push(it.number_of(&v)?);
     }
     it.string(crate::md5::hex_digest(&crate::md5::encode(&units)))
-}
-
-fn key_tojson(it: &mut Interp, this: &Val, _: &[Val]) -> R {
-    let name = match this {
-        Val::Obj(o) => match o.borrow().get_own("name").map(|p| p.value.clone()) {
-            Some(Val::Str(n)) => n,
-            _ => "Object".into(),
-        },
-        _ => "Object".into(),
-    };
-    it.string(format!("[object {name}]"))
 }
 
 fn needs(it: &Interp, a: &[Val], n: usize, name: &str) -> R<()> {
@@ -486,24 +389,7 @@ fn code_and_pointer(it: &mut Interp, g: &ObjRef) -> R<()> {
     let proto = it.object()?;
     crate::builtins::ctor(it, g, "Code", code, 0, &proto)?;
     method(it, &proto, "toString", code_to_string, 0)?;
-    let proto = it.object()?;
-    let c = crate::builtins::ctor(it, g, "DBPointer", db_pointer, 0, &proto)?;
-    it.realm.bson.push(("DBPointer".into(), c));
-    // It reads `ns` and `id` of any object.
-    let to_string: NativeFn = |it, this, _| {
-        let ns = it.get(this, "ns")?;
-        let ns = it.str_of(&ns)?;
-        let id = it.get(this, "id")?;
-        let id = it.str_of(&id)?;
-        it.string(format!("DBPointer(\"{ns}\", {id})"))
-    };
-    method(it, &proto, "toString", to_string, 0)?;
-    method(it, &proto, "tojson", to_string, 0)?;
-    method(it, &proto, "toJSON", pointer_to_json, 0)?;
-    let ns = it.native("ns", |it, this, _| pointer_part(it, this, true), 0)?;
-    it.define(&proto, "ns", Prop { getter: Some(ns), ..Prop::hidden(Val::Undef) })?;
-    let id = it.native("id", |it, this, _| pointer_part(it, this, false), 0)?;
-    it.define(&proto, "id", Prop { getter: Some(id), ..Prop::hidden(Val::Undef) })?;
+    crate::bson::install_pointer(it, g)?;
     Ok(())
 }
 
@@ -550,37 +436,4 @@ fn code_to_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
         },
     };
     it.string(format!("Code({{\"code\":{},\"scope\":{scope}\"}})", crate::json::quote(&text)))
-}
-
-fn db_pointer(it: &mut Interp, _: &Val, a: &[Val]) -> R {
-    needs(it, a, 2, "DBPointer")?;
-    let ns = it.str_of(&a[0])?;
-    let id = match &a[1] {
-        Val::Obj(o) => match &o.borrow().kind {
-            Kind::Bson(Bson::ObjectId(id)) => Some(*id),
-            _ => None,
-        },
-        _ => None,
-    };
-    let Some(id) = id else {
-        return Err(it.error("Error", "DBPointer 2nd parameter must be an ObjectId"));
-    };
-    make(it, Bson::DbPointer(crate::text::to_utf8(&ns).into_owned(), id))
-}
-
-fn pointer_part(it: &mut Interp, this: &Val, ns: bool) -> R {
-    match crate::bson::this_bson(it, this)? {
-        Bson::DbPointer(n, _) if ns => it.string(crate::text::encode(&n).into_owned()),
-        Bson::DbPointer(_, id) => make(it, Bson::ObjectId(id)),
-        _ => Err(crate::builtins::incompatible(it, "DBPointer")),
-    }
-}
-
-fn pointer_to_json(it: &mut Interp, this: &Val, _: &[Val]) -> R {
-    let o = it.object()?;
-    let ns = pointer_part(it, this, true)?;
-    let id = pointer_part(it, this, false)?;
-    it.define(&o, "ns", Prop::data(ns))?;
-    it.define(&o, "id", Prop::data(id))?;
-    Ok(Val::Obj(o))
 }

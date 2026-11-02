@@ -1130,7 +1130,9 @@ impl Parser {
                 self.i += 1;
             }
             let fk = self.method_prefix(kind);
+            let name_pos = self.pos();
             let key = self.prop_name()?;
+            self.class_member_rules(&key, is_static, kind, fk, start, name_pos, ctor.is_some())?;
             if self.is("(") {
                 let is_ctor =
                     !is_static && matches!(&key, PropName::Fixed(n) if &**n == "constructor");
@@ -1152,7 +1154,46 @@ impl Parser {
                 members.push(ClassMember { is_static, key, kind, field: init, func: None });
             }
         }
-        Ok(Rc::new(ClassDef { pos, name, parent, ctor, members }))
+        let source = self.source_from(pos);
+        Ok(Rc::new(ClassDef { pos, name, parent, ctor, members, source }))
+    }
+
+    /// The early errors of a class member (measured on a `refrouter` 9.0.4 on 02-11): a
+    /// `constructor` that is not a plain method or comes twice, and a static `prototype`.
+    #[allow(clippy::too_many_arguments)]
+    fn class_member_rules(
+        &self,
+        key: &PropName,
+        is_static: bool,
+        kind: PropKind,
+        fk: FnKind,
+        start: Pos,
+        name_pos: Pos,
+        has_ctor: bool,
+    ) -> Result<(), SyntaxError> {
+        let PropName::Fixed(name) = key else { return Ok(()) };
+        let method = self.is("(");
+        if &**name == "constructor" && (!method || !is_static) {
+            if !method || kind != PropKind::Value || fk.generator || fk.is_async {
+                return self.fail_at(
+                    start,
+                    "a class constructor definition must be a plain public method".into(),
+                );
+            }
+            if has_ctor {
+                return self.fail_at(
+                    start,
+                    "a class cannot have more than one constructor definition".into(),
+                );
+            }
+        }
+        if is_static && &**name == "prototype" {
+            return self.fail_at(
+                name_pos,
+                "a class may not have a static property named 'prototype'".into(),
+            );
+        }
+        Ok(())
     }
 
     /// A class's `static { … }` after `{`: a method of the class with no parameters.

@@ -502,6 +502,117 @@
         return ("" + this).pad(width, false, "0");
     };
 
+    // The BSON types: what the shell writes in JavaScript after the natives of each prototype,
+    // in the order in which the refrouter lists them (measured on a refrouter 9.0.4 on 02-11).
+
+    // The shell's own global object, where `db` is never defined: `fetch` reads it there.
+    var shellRealm = (function () {
+        var globalThis = {};
+        return function (ns, dbName) {
+            return dbName ? globalThis.db.getSiblingDB(dbName) : globalThis.db[ns];
+        };
+    })();
+    var parseInteger = parseInt;
+
+    NumberLong.prototype.tojson = function () {
+        return this.toString();
+    };
+    NumberInt.prototype.tojson = function () {
+        return this.toString();
+    };
+    NumberDecimal.prototype.tojson = function () {
+        return this.toString();
+    };
+    // `numberDecimalsEqual` is not defined on the refrouter: `equals` always fails there.
+    NumberDecimal.prototype.equals = function (other) {
+        return numberDecimalsEqual(this, other);
+    };
+
+    Timestamp.prototype.tojson = function () {
+        return this.toStringIncomparable();
+    };
+    Timestamp.prototype.getTime = function () {
+        return this.t;
+    };
+    Timestamp.prototype.getInc = function () {
+        return this.i;
+    };
+    Timestamp.prototype.toString = function () {
+        return this.toStringIncomparable();
+    };
+    Timestamp.prototype.toStringIncomparable = function () {
+        return "Timestamp(" + this.t + ", " + this.i + ")";
+    };
+
+    ObjectId.prototype.tojson = function () {
+        return this.toString();
+    };
+    ObjectId.prototype.valueOf = function () {
+        return this.str;
+    };
+    ObjectId.prototype.isObjectId = true;
+    ObjectId.prototype.getTimestamp = function () {
+        return new DateCtor(parseInteger(this.valueOf().slice(0, 8), 16) * 1000);
+    };
+    ObjectId.prototype.equals = function (other) {
+        return this.str === other.str;
+    };
+
+    BinData.prototype.tojson = function () {
+        return this.toString();
+    };
+    BinData.prototype.subtype = function () {
+        return this.type;
+    };
+    BinData.prototype.length = function () {
+        return this.len;
+    };
+
+    DBRef.prototype.fetch = function () {
+        assert(this.$ref, "need a ns");
+        assert(this.$id, "need an id");
+        return shellRealm(this.$ref, this.$db);
+    };
+    DBRef.prototype.tojson = function () {
+        return this.toString();
+    };
+    DBRef.prototype.getDb = function () {
+        return this.$db;
+    };
+    DBRef.prototype.getCollection = function () {
+        return this.$ref;
+    };
+    DBRef.prototype.getRef = function () {
+        return this.$ref;
+    };
+    DBRef.prototype.getId = function () {
+        return this.$id;
+    };
+    DBRef.prototype.toString = function () {
+        return "DBRef(" + tojson(this.$ref) + ", " + tojson(this.$id) + (this.$db ? ", " + tojson(this.$db) : "") + ")";
+    };
+
+    DBPointer.prototype.fetch = function () {
+        assert(this.ns, "need a ns");
+        assert(this.id, "need an id");
+        return shellRealm(this.ns);
+    };
+    DBPointer.prototype.tojson = function () {
+        return this.toString();
+    };
+    DBPointer.prototype.toJSON = function () {
+        return { ns: this.ns, id: this.id };
+    };
+    DBPointer.prototype.getCollection = function () {
+        return this.ns;
+    };
+    DBPointer.prototype.getId = function () {
+        return this.id;
+    };
+    DBPointer.prototype.toString = function () {
+        return "DBPointer(" + tojson(this.ns) + ", " + tojson(this.id) + ")";
+    };
+
     // The global functions, in the order in which the refrouter lists them.
     shellGlobal("hex_md5", hex_md5);
     shellGlobal("ISODate", ISODate);

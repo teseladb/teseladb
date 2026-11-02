@@ -66,6 +66,8 @@ pub struct ClassDef {
     pub parent: Option<Box<Expr>>,
     pub ctor: Option<Rc<FuncDef>>,
     pub members: Vec<ClassMember>,
+    /// The class's text, which `toString` of the class gives.
+    pub source: Rc<str>,
 }
 
 #[derive(Debug)]

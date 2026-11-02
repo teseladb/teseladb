@@ -1,34 +1,141 @@
 //! BSON in JavaScript (016 FR-003): the types RefDb shows with its own constructors
 //! (`ObjectId`, `NumberLong`, `NumberInt`, `NumberDecimal`, `ISODate`, `BinData`, `Timestamp`,
-//! `MinKey`, `MaxKey`, `DBRef`) and the conversions both ways, as a `refrouter` 9.0.4 does them
-//! (measured on 02-11): every number comes back as a double except a `NumberInt`, an `int32`
-//! argument is a plain number, `undefined` is `null`, a function is `Code` and a symbol cannot be
-//! written.
+//! `MinKey`, `MaxKey`, `DBRef`, `DBPointer`) and the conversions both ways, as a `refrouter` 9.0.4
+//! does them (measured on 02-11): every number comes back as a double except a `NumberInt`, an
+//! `int32` argument is a plain number, `undefined` is `null`, a function is `Code` and a symbol
+//! cannot be written.
+//!
+//! The prototypes hold, in the order the `refrouter` lists them, the natives of each type (not
+//! enumerable); `prelude.js` then assigns the methods the shell writes in JavaScript (enumerable).
+//! Each prototype is an object of its type: `NumberLong.prototype` is `NumberLong(0)`, and the
+//! natives of `ObjectId` and `BinData` refuse theirs ("Cannot call … on prototype of …").
 
 use teseladb_bson::{Decimal128, Document, Value};
 
-use crate::builtins::method;
-use crate::interp::{Ctrl, Interp, R};
+use crate::interp::{Ctrl, Fatal, Interp, R};
 use crate::value::*;
 
 fn arg(args: &[Val], i: usize) -> Val {
     args.get(i).cloned().unwrap_or(Val::Undef)
 }
 
-/// The constructor names, in the order of [`Bson`]'s variants that have one.
-const TYPES: [&str; 9] = [
-    "NumberLong",
-    "NumberInt",
-    "NumberDecimal",
-    "ObjectId",
-    "BinData",
-    "Timestamp",
-    "MinKey",
-    "MaxKey",
-    "DBRef",
-];
+/// The largest time and increment of a `Timestamp`.
+const TIMESTAMP_MAX: f64 = 4_294_967_295.0;
+/// 2⁶⁴, the modulus of the conversion of a number to a 64-bit integer.
+const TWO_TO_64: f64 = 18_446_744_073_709_551_616.0;
+/// The error code of a value BSON cannot hold (a symbol).
+const NOT_CONVERTIBLE: i32 = 16_662;
+/// `BadValue`: a malformed value of a BSON type.
+const BAD_VALUE: i32 = 2;
+/// A `Timestamp` without its `t` or its `i`.
+const MISSING_TIME: i32 = 6_900_900;
+const MISSING_INCREMENT: i32 = 6_900_901;
 
-fn type_name(b: &Bson) -> &'static str {
+/// The types whose natives are shared, by their index in [`NATIVE_TYPES`].
+const LONG: usize = 0;
+const INT: usize = 1;
+const DECIMAL: usize = 2;
+const OBJECT_ID_T: usize = 3;
+const BIN_DATA_T: usize = 4;
+const NATIVE_TYPES: [&str; 5] = ["NumberLong", "NumberInt", "NumberDecimal", "ObjectId", "BinData"];
+
+/// A native of a prototype: its name, its function and its `length`.
+type Native = (&'static str, NativeFn, usize);
+
+/// A BSON type with a constructor: its name, the constructor, the value its prototype holds,
+/// the natives and the getters (enumerable, as the `refrouter` lists them) of the prototype.
+struct TypeSpec {
+    name: &'static str,
+    ctor: NativeFn,
+    proto: fn() -> Bson,
+    natives: &'static [Native],
+    getters: &'static [(&'static str, NativeFn)],
+}
+
+const NUMBER_LONG: TypeSpec = TypeSpec {
+    name: "NumberLong",
+    ctor: number_long,
+    proto: || Bson::Long(0),
+    natives: &[
+        ("toNumber", value_of::<LONG>, 0),
+        ("toString", to_string::<LONG>, 0),
+        ("toJSON", to_json::<LONG>, 0),
+        ("valueOf", value_of::<LONG>, 0),
+        ("compare", compare, 0),
+    ],
+    getters: &[
+        ("floatApprox", float_approx),
+        ("top", top),
+        ("bottom", bottom),
+        ("exactValueString", exact_value_string),
+    ],
+};
+
+const NUMBER_INT: TypeSpec = TypeSpec {
+    name: "NumberInt",
+    ctor: number_int,
+    proto: || Bson::Int(0),
+    natives: &[
+        ("toNumber", value_of::<INT>, 0),
+        ("toString", to_string::<INT>, 0),
+        ("toJSON", to_json::<INT>, 0),
+        ("valueOf", value_of::<INT>, 0),
+    ],
+    getters: &[],
+};
+
+const NUMBER_DECIMAL: TypeSpec = TypeSpec {
+    name: "NumberDecimal",
+    ctor: number_decimal,
+    proto: || Bson::Decimal(Decimal128::from_le_bytes(DECIMAL_ZERO.to_le_bytes())),
+    natives: &[("toString", to_string::<DECIMAL>, 0), ("toJSON", to_json::<DECIMAL>, 0)],
+    getters: &[],
+};
+
+/// The bits of the decimal `0`.
+const DECIMAL_ZERO: u128 = 0x3040u128 << 112;
+
+const OBJECT_ID: TypeSpec = TypeSpec {
+    name: "ObjectId",
+    ctor: object_id,
+    proto: || Bson::ObjectId([0; 12]),
+    natives: &[("toString", to_string::<OBJECT_ID_T>, 0), ("toJSON", to_json::<OBJECT_ID_T>, 0)],
+    getters: &[("str", object_id_hex)],
+};
+
+const BIN_DATA: TypeSpec = TypeSpec {
+    name: "BinData",
+    ctor: bin_data,
+    proto: || Bson::BinData(0, Vec::new()),
+    natives: &[
+        ("base64", bin_base64, 0),
+        ("hex", bin_hex, 0),
+        ("toString", to_string::<BIN_DATA_T>, 0),
+        ("toJSON", to_json::<BIN_DATA_T>, 0),
+    ],
+    getters: &[],
+};
+
+const TIMESTAMP: TypeSpec = TypeSpec {
+    name: "Timestamp",
+    ctor: timestamp,
+    proto: || Bson::Timestamp(0, 0),
+    natives: &[("toJSON", timestamp_to_json, 0)],
+    getters: &[],
+};
+
+const DB_REF: TypeSpec =
+    TypeSpec { name: "DBRef", ctor: db_ref, proto: || Bson::DbRef, natives: &[], getters: &[] };
+
+const DB_POINTER: TypeSpec = TypeSpec {
+    name: "DBPointer",
+    ctor: db_pointer,
+    proto: || Bson::DbPointer(String::new(), [0; 12]),
+    natives: &[],
+    getters: &[],
+};
+
+pub(crate) fn type_name(b: &Bson) -> &'static str {
     match b {
         Bson::Long(_) => "NumberLong",
         Bson::Int(_) => "NumberInt",
@@ -39,30 +146,95 @@ fn type_name(b: &Bson) -> &'static str {
         Bson::MinKey => "MinKey",
         Bson::MaxKey => "MaxKey",
         Bson::DbPointer(..) => "DBPointer",
+        Bson::DbRef => "DBRef",
         Bson::Symbol(_) => "Symbol",
         Bson::Code(_) => "Code",
     }
 }
 
-pub(crate) fn proto_of(it: &Interp, name: &str) -> Option<ObjRef> {
-    let c = it.realm.bson.iter().find(|(n, _)| &**n == name)?.1.clone();
+/// The global constructor (for `MinKey` and `MaxKey`, the key itself) of the type `name`.
+fn ctor_of(it: &Interp, name: &str) -> Option<ObjRef> {
+    it.realm.bson.iter().find(|(n, _)| &**n == name).map(|(_, c)| c.clone())
+}
 
+pub(crate) fn proto_of(it: &Interp, name: &str) -> Option<ObjRef> {
+    let c = ctor_of(it, name)?;
     c.borrow().get_own("prototype")?.value.as_obj().cloned()
 }
 
-pub fn make(it: &Interp, b: Bson) -> R {
-    let proto = proto_of(it, type_name(&b)).or_else(|| Some(it.realm.object.clone()));
-    Ok(Val::Obj(it.alloc(proto, Kind::Bson(b))?))
+/// The class the `refrouter` gives a BSON object: its type, and `MinKey` or `MaxKey` for the key
+/// and the prototype of the key.
+pub(crate) fn bson_class(it: &Interp, o: &ObjRef) -> Option<&'static str> {
+    if let Kind::Bson(b) = &o.borrow().kind {
+        return Some(type_name(b));
+    }
+    ["MinKey", "MaxKey"].into_iter().find(|name| is_key(it, o, name))
 }
 
-pub(crate) fn this_bson(it: &Interp, this: &Val) -> R<Bson> {
-    match this {
-        Val::Obj(o) => match &o.borrow().kind {
-            Kind::Bson(b) => Ok(b.clone()),
-            _ => Err(crate::builtins::incompatible(it, "BSON method")),
-        },
-        _ => Err(crate::builtins::incompatible(it, "BSON method")),
+/// Whether `o` is the key `name` (`MinKey`, `MaxKey`) or its prototype.
+fn is_key(it: &Interp, o: &ObjRef, name: &str) -> bool {
+    ctor_of(it, name)
+        .is_some_and(|k| k.ptr_eq(o) || k.borrow().proto.as_ref().is_some_and(|p| p.ptr_eq(o)))
+}
+
+pub fn make(it: &Interp, b: Bson) -> R {
+    if let Bson::MinKey | Bson::MaxKey = b {
+        return ctor_of(it, type_name(&b)).map(Val::Obj).ok_or(Ctrl::Fatal(Fatal::Unreachable));
     }
+    let proto = proto_of(it, type_name(&b)).or_else(|| Some(it.realm.object.clone()));
+    let o = it.alloc(proto, Kind::Bson(b.clone()))?;
+    // Measured on a `refrouter` 9.0.4 on 02-11: the own properties of each type.
+    let fixed = |v: Val| Prop { writable: false, ..Prop::hidden(v) };
+    match b {
+        Bson::Timestamp(t, i) => {
+            it.define(&o, "t", Prop::data(Val::Num(f64::from(t))))?;
+            it.define(&o, "i", Prop::data(Val::Num(f64::from(i))))?;
+        }
+        Bson::BinData(sub, bytes) => {
+            it.define(&o, "len", fixed(Val::Num(bytes.len() as f64)))?;
+            it.define(&o, "type", fixed(Val::Num(f64::from(sub))))?;
+        }
+        Bson::DbPointer(ns, id) => {
+            let ns = it.string(crate::text::encode(&ns).into_owned())?;
+            it.define(&o, "ns", fixed(ns))?;
+            let id = make(it, Bson::ObjectId(id))?;
+            it.define(&o, "id", fixed(id))?;
+        }
+        _ => {}
+    }
+    Ok(Val::Obj(o))
+}
+
+/// The value of `this` for the native `method` of the type `ty`, with the errors of the
+/// `refrouter` 9.0.4 (measured on 02-11).
+pub(crate) fn this_of(it: &Interp, this: &Val, method: &str, ty: &str) -> R<Bson> {
+    let o = match this {
+        Val::Obj(o) => o,
+        Val::Sym(_) => return Err(it.error("Error", "unable to get type")),
+        v => {
+            let t = if matches!(v, Val::Null) { "null" } else { v.type_of() };
+            let m = format!("Cannot call \"{method}\" on non-object of type \"{t}\"");
+            return Err(it.error("Error", &m));
+        }
+    };
+    let class = if crate::proxy::is_proxy(o) {
+        "Proxy"
+    } else {
+        bson_class(it, o).unwrap_or_else(|| crate::builtins::class_kind(this))
+    };
+    if class != ty {
+        let m = format!("Cannot call \"{method}\" on object of type \"{class}\"");
+        return Err(it.error("Error", &m));
+    }
+    if matches!(ty, "ObjectId" | "BinData") && proto_of(it, ty).is_some_and(|p| p.ptr_eq(o)) {
+        let m = format!("Cannot call \"{method}\" on prototype of \"{ty}\"");
+        return Err(it.error("Error", &m));
+    }
+    Ok(match &o.borrow().kind {
+        Kind::Bson(b) => b.clone(),
+        _ if ty == "MaxKey" => Bson::MaxKey,
+        _ => Bson::MinKey,
+    })
 }
 
 pub(crate) fn hex(bytes: &[u8]) -> String {
@@ -70,56 +242,114 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 }
 
 pub fn install(it: &mut Interp, g: &ObjRef) -> R<()> {
-    let ctors: [NativeFn; 9] = [
-        number_long,
-        number_int,
-        number_decimal,
-        object_id,
-        bin_data,
-        timestamp,
-        min_key,
-        max_key,
-        db_ref,
-    ];
-    for (name, f) in TYPES.iter().zip(ctors) {
-        let proto = it.object()?;
-        let c = it.native(name, f, 1)?;
-        it.define(&c, "prototype", Prop::hidden(Val::Obj(proto.clone())))?;
-        it.define(&proto, "constructor", Prop::hidden(Val::Obj(c.clone())))?;
-        it.define(g, name, Prop::hidden(Val::Obj(c.clone())))?;
-        method(it, &proto, "toString", to_string, 0)?;
-        method(it, &proto, "tojson", to_string, 0)?;
-        method(it, &proto, "valueOf", value_of, 0)?;
-        method(it, &proto, "toNumber", value_of, 0)?;
-        method(it, &proto, "equals", equals, 1)?;
-        it.realm.bson.push(((*name).into(), c));
+    for spec in [NUMBER_LONG, NUMBER_INT, NUMBER_DECIMAL, OBJECT_ID, BIN_DATA, TIMESTAMP] {
+        install_type(it, g, &spec)?;
     }
-    if let Some(p) = proto_of(it, "ObjectId") {
-        method(it, &p, "getTimestamp", object_id_time, 0)?;
-        let getter = it.native("str", object_id_hex, 0)?;
-        it.define(&p, "str", Prop { getter: Some(getter), ..Prop::hidden(Val::Undef) })?;
+    install_key(
+        it,
+        g,
+        "MinKey",
+        [key_call::<false>, key_text::<false, true>, key_text::<false, false>],
+    )?;
+    install_key(
+        it,
+        g,
+        "MaxKey",
+        [key_call::<true>, key_text::<true, true>, key_text::<true, false>],
+    )?;
+    install_type(it, g, &DB_REF)
+}
+
+/// `DBPointer`, which the shell defines after `Code`.
+pub(crate) fn install_pointer(it: &mut Interp, g: &ObjRef) -> R<()> {
+    install_type(it, g, &DB_POINTER)
+}
+
+fn install_type(it: &mut Interp, g: &ObjRef, spec: &TypeSpec) -> R<()> {
+    let proto = it.alloc(Some(it.realm.object.clone()), Kind::Bson((spec.proto)()))?;
+    let c = it.native(spec.name, spec.ctor, 0)?;
+    // The `refrouter` lists `prototype` before `length` and `name`.
+    let fixed =
+        Prop { writable: false, configurable: false, ..Prop::hidden(Val::Obj(proto.clone())) };
+    c.borrow_mut().props.insert(0, ("prototype".into(), fixed));
+    it.define(&proto, "constructor", Prop::hidden(Val::Obj(c.clone())))?;
+    it.define(g, spec.name, Prop::hidden(Val::Obj(c.clone())))?;
+    for &(name, f, n) in spec.natives {
+        crate::builtins::method(it, &proto, name, f, n)?;
     }
-    if let Some(p) = proto_of(it, "Timestamp") {
-        let t = it.native(
-            "t",
-            |it, this, _| match this_bson(it, this)? {
-                Bson::Timestamp(t, _) => Ok(Val::Num(f64::from(t))),
-                _ => Ok(Val::Undef),
-            },
-            0,
-        )?;
-        let i = it.native(
-            "i",
-            |it, this, _| match this_bson(it, this)? {
-                Bson::Timestamp(_, i) => Ok(Val::Num(f64::from(i))),
-                _ => Ok(Val::Undef),
-            },
-            0,
-        )?;
-        it.define(&p, "t", Prop { getter: Some(t), ..Prop::hidden(Val::Undef) })?;
-        it.define(&p, "i", Prop { getter: Some(i), ..Prop::hidden(Val::Undef) })?;
+    for &(name, f) in spec.getters {
+        let getter = it.native(&format!("get {name}"), f, 0)?;
+        it.define(&proto, name, Prop { getter: Some(getter), ..Prop::data(Val::Undef) })?;
     }
+    it.realm.bson.push((spec.name.into(), c));
     Ok(())
+}
+
+/// `MinKey` and `MaxKey` (measured on a `refrouter` 9.0.4 on 02-11): a frozen callable object
+/// without properties whose call gives itself, over a callable prototype (not frozen) with
+/// `constructor`, `tojson`, `toJSON` and `singleton`, over `Object.prototype`.
+fn install_key(
+    it: &mut Interp,
+    g: &ObjRef,
+    name: &str,
+    [call, tojson, to_json]: [NativeFn; 3],
+) -> R<()> {
+    let proto =
+        it.alloc(Some(it.realm.object.clone()), Kind::Func(Func::Native(call, name.into())))?;
+    let key = it.alloc(Some(proto.clone()), Kind::Func(Func::Native(call, name.into())))?;
+    let ctor = it.native(name, call, 0)?;
+    ctor.borrow_mut().props.insert(0, ("prototype".into(), Prop::hidden(Val::Obj(proto.clone()))));
+    it.define(&proto, "constructor", Prop::hidden(Val::Obj(ctor)))?;
+    crate::builtins::method(it, &proto, "tojson", tojson, 0)?;
+    crate::builtins::method(it, &proto, "toJSON", to_json, 0)?;
+    it.define(&proto, "singleton", Prop::data(Val::Obj(key.clone())))?;
+    crate::props::lock(&key, true);
+    it.define(g, name, Prop::hidden(Val::Obj(key.clone())))?;
+    it.realm.bson.push((name.into(), key));
+    Ok(())
+}
+
+/// The key a call of `MinKey` (`MaxKey` with `MAX`), of its prototype or of its constructor
+/// gives: the key itself.
+fn key_call<const MAX: bool>(it: &mut Interp, _: &Val, _: &[Val]) -> R {
+    make(it, if MAX { Bson::MaxKey } else { Bson::MinKey })
+}
+
+/// `tojson` (`{ "$minKey" : 1 }`, `TEXT`) and `toJSON` (`{$minKey: 1}`) of `MinKey` and, with
+/// `MAX`, of `MaxKey`.
+fn key_text<const MAX: bool, const TEXT: bool>(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+    let (ty, key) = if MAX { ("MaxKey", "$maxKey") } else { ("MinKey", "$minKey") };
+    this_of(it, this, if TEXT { "tojson" } else { "toJSON" }, ty)?;
+    if TEXT {
+        return it.string(format!("{{ \"{key}\" : 1 }}"));
+    }
+    single(it, key, Val::Num(1.0))
+}
+
+/// A number made a 64-bit integer as the `refrouter` does: truncated, modulo 2⁶⁴, `NaN` is 0.
+fn to_int64(n: f64) -> i64 {
+    if !n.is_finite() {
+        return 0;
+    }
+    let m = n.trunc() % TWO_TO_64;
+    let m = if m < 0.0 { m + TWO_TO_64 } else { m };
+    m as u64 as i64
+}
+
+/// The time (`increment` false) or the increment of a `Timestamp` from `v`, with the
+/// `refrouter`'s message when it is not a number in `0..=4294967295`.
+fn timestamp_part(v: &Val, increment: bool) -> Result<u32, String> {
+    let what = if increment { "Timestamp increment" } else { "Timestamp time (seconds)" };
+    let Val::Num(n) = v else {
+        return Err(format!("{what} must be a number"));
+    };
+    let n = to_int64(*n);
+    if !(0..=TIMESTAMP_MAX as i64).contains(&n) {
+        return Err(format!(
+            "{what} must be non-negative and not greater than {TIMESTAMP_MAX}, got {n}"
+        ));
+    }
+    Ok(n as u32)
 }
 
 fn number_long(it: &mut Interp, _: &Val, a: &[Val]) -> R {
@@ -193,33 +423,67 @@ fn bin_data(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     make(it, Bson::BinData(sub as u8, bytes))
 }
 
+/// `Timestamp(t, i)` (measured on a `refrouter` 9.0.4 on 02-11): none or both, numbers truncated
+/// to `0..=4294967295`.
 fn timestamp(it: &mut Interp, _: &Val, a: &[Val]) -> R {
-    let t = if matches!(arg(a, 0), Val::Undef) { 0.0 } else { it.number_of(&arg(a, 0))? };
-    let i = if matches!(arg(a, 1), Val::Undef) { 0.0 } else { it.number_of(&arg(a, 1))? };
-    make(it, Bson::Timestamp(t as u32, i as u32))
+    let (t, i) = match a {
+        [] => (0, 0),
+        [t, i] => {
+            let t = timestamp_part(t, false).map_err(|m| it.error("Error", &m))?;
+            let i = timestamp_part(i, true).map_err(|m| it.error("Error", &m))?;
+            (t, i)
+        }
+        _ => return Err(it.error("Error", "Timestamp needs 0 or 2 arguments")),
+    };
+    make(it, Bson::Timestamp(t, i))
 }
 
-fn min_key(it: &mut Interp, _: &Val, _: &[Val]) -> R {
-    make(it, Bson::MinKey)
-}
-
-fn max_key(it: &mut Interp, _: &Val, _: &[Val]) -> R {
-    make(it, Bson::MaxKey)
-}
-
-/// `DBRef(collection, id, db)`: an object with `$ref`, `$id` and `$db`.
+/// `DBRef(collection, id, db)`: an object with `$ref`, `$id` and `$db` (measured on a `refrouter`
+/// 9.0.4 on 02-11: two or three arguments, the first and the third strings).
 fn db_ref(it: &mut Interp, _: &Val, a: &[Val]) -> R {
-    let o = it.alloc(proto_of(it, "DBRef"), Kind::Ordinary)?;
-    it.define(&o, "$ref", Prop::data(arg(a, 0)))?;
-    it.define(&o, "$id", Prop::data(arg(a, 1)))?;
-    if !matches!(arg(a, 2), Val::Undef) {
-        it.define(&o, "$db", Prop::data(arg(a, 2)))?;
+    if !(2..=3).contains(&a.len()) {
+        return Err(it.error("Error", "DBRef needs 2 or 3 arguments"));
+    }
+    if !matches!(a[0], Val::Str(_)) {
+        return Err(it.error("Error", "DBRef 1st parameter must be a string"));
+    }
+    if a.len() == 3 && !matches!(a[2], Val::Str(_)) {
+        return Err(it.error("Error", "DBRef 3rd parameter must be a string"));
+    }
+    let o = it.alloc(proto_of(it, "DBRef"), Kind::Bson(Bson::DbRef))?;
+    it.define(&o, "$ref", Prop::data(a[0].clone()))?;
+    it.define(&o, "$id", Prop::data(a[1].clone()))?;
+    if let Some(db) = a.get(2) {
+        it.define(&o, "$db", Prop::data(db.clone()))?;
     }
     Ok(Val::Obj(o))
 }
 
-fn to_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
-    let s = match this_bson(it, this)? {
+/// `DBPointer(ns, id)` (measured on a `refrouter` 9.0.4 on 02-11): exactly two arguments, a string
+/// and an `ObjectId`.
+fn db_pointer(it: &mut Interp, _: &Val, a: &[Val]) -> R {
+    let [ns, id] = a else {
+        return Err(it.error("Error", "DBPointer needs 2 arguments"));
+    };
+    let Val::Str(ns) = ns else {
+        return Err(it.error("Error", "DBPointer 1st parameter must be a string"));
+    };
+    let id = match id {
+        Val::Obj(o) => match &o.borrow().kind {
+            Kind::Bson(Bson::ObjectId(id)) => Some(*id),
+            _ => None,
+        },
+        _ => None,
+    };
+    let Some(id) = id else {
+        return Err(it.error("Error", "DBPointer 2nd parameter must be an ObjectId"));
+    };
+    make(it, Bson::DbPointer(crate::text::to_utf8(ns).into_owned(), id))
+}
+
+/// `toString` of the type `T`.
+fn to_string<const T: usize>(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+    let s = match this_of(it, this, "toString", NATIVE_TYPES[T])? {
         Bson::Long(n) => format!("NumberLong({n})"),
         Bson::Int(n) => format!("NumberInt({n})"),
         Bson::Decimal(d) => format!("NumberDecimal(\"{d}\")"),
@@ -235,49 +499,142 @@ fn to_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
                 &h[20..]
             )
         }
-        Bson::BinData(t, b) => format!("BinData({t},\"{}\")", base64_encode(&b)),
-        Bson::Timestamp(t, i) => format!("Timestamp({t}, {i})"),
-        Bson::MinKey => "[object MinKey]".into(),
-        Bson::MaxKey => "[object MaxKey]".into(),
-        Bson::DbPointer(ns, id) => format!("DBPointer(\"{ns}\", ObjectId(\"{}\"))", hex(&id)),
-        Bson::Symbol(s) | Bson::Code(s) => crate::text::encode(&s).into_owned(),
+        other => {
+            format!("BinData({},\"{}\")", binary_subtype(&other), base64_encode(&binary(other)))
+        }
     };
     it.string(s)
 }
 
-fn value_of(it: &mut Interp, this: &Val, _: &[Val]) -> R {
-    Ok(match this_bson(it, this)? {
-        Bson::Long(n) => Val::Num(n as f64),
+/// The subtype and the bytes of a `BinData` (the only type left when the others are matched).
+fn binary_subtype(b: &Bson) -> u8 {
+    if let Bson::BinData(t, _) = b { *t } else { 0 }
+}
+
+fn binary(b: Bson) -> Vec<u8> {
+    if let Bson::BinData(_, bytes) = b { bytes } else { Vec::new() }
+}
+
+/// `toJSON` of the numbers, `ObjectId` and `BinData`: their Extended JSON.
+fn to_json<const T: usize>(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+    Ok(match this_of(it, this, "toJSON", NATIVE_TYPES[T])? {
+        Bson::ObjectId(id) => single(it, "$oid", Val::Str(hex(&id).into()))?,
+        Bson::Long(n) => single(it, "$numberLong", Val::Str(n.to_string().into()))?,
         Bson::Int(n) => Val::Num(f64::from(n)),
-        Bson::Decimal(d) => Val::Num(d.to_string().parse().unwrap_or(f64::NAN)),
-        Bson::Timestamp(t, _) => Val::Num(f64::from(t)),
-        _ => this.clone(),
+        Bson::Decimal(d) => single(it, "$numberDecimal", Val::Str(d.to_string().into()))?,
+        other => {
+            let o = it.object()?;
+            let sub = binary_subtype(&other);
+            it.define(&o, "$binary", Prop::data(Val::Str(base64_encode(&binary(other)).into())))?;
+            it.define(&o, "$type", Prop::data(Val::Str(format!("{sub:02x}").into())))?;
+            Val::Obj(o)
+        }
     })
 }
 
-fn equals(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    let x = this_bson(it, this)?;
-    Ok(Val::Bool(match &arg(a, 0) {
-        Val::Obj(o) => matches!(&o.borrow().kind, Kind::Bson(y) if *y == x),
-        _ => false,
+/// `Timestamp.prototype.toJSON`: `{$timestamp: {t, i}}` from the properties `t` and `i`.
+fn timestamp_to_json(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+    this_of(it, this, "toJSON", "Timestamp")?;
+    let inner = it.object()?;
+    for key in ["t", "i"] {
+        let v = match it.get(this, key)? {
+            Val::Undef => Val::Null,
+            v => v,
+        };
+        it.define(&inner, key, Prop::data(v))?;
+    }
+    single(it, "$timestamp", Val::Obj(inner))
+}
+
+/// An object of one property, for `toJSON`.
+fn single(it: &mut Interp, key: &str, v: Val) -> R {
+    let o = it.object()?;
+    it.define(&o, key, Prop::data(v))?;
+    Ok(Val::Obj(o))
+}
+
+/// `valueOf` and `toNumber` of `NumberLong` and `NumberInt`.
+fn value_of<const T: usize>(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+    let method = if it.native.as_ref() == "toNumber" { "toNumber" } else { "valueOf" };
+    Ok(Val::Num(match this_of(it, this, method, NATIVE_TYPES[T])? {
+        Bson::Long(n) => n as f64,
+        b => f64::from(if let Bson::Int(n) = b { n } else { 0 }),
     }))
 }
 
-fn object_id_hex(it: &mut Interp, this: &Val, _: &[Val]) -> R {
-    match this_bson(it, this)? {
-        Bson::ObjectId(id) => it.string(hex(&id)),
-        _ => Err(crate::builtins::incompatible(it, "ObjectId.prototype.toHexString")),
+/// The `NumberLong` of `this` for the native `method`.
+fn this_long(it: &Interp, this: &Val, method: &str) -> R<i64> {
+    match this_of(it, this, method, "NumberLong")? {
+        Bson::Long(n) => Ok(n),
+        _ => Err(Ctrl::Fatal(Fatal::Unreachable)),
     }
 }
 
-fn object_id_time(it: &mut Interp, this: &Val, _: &[Val]) -> R {
-    match this_bson(it, this)? {
-        Bson::ObjectId(id) => {
-            let secs = u32::from_be_bytes([id[0], id[1], id[2], id[3]]);
-            crate::date::make_date(it, f64::from(secs) * 1000.0)
-        }
-        _ => Err(crate::builtins::incompatible(it, "ObjectId.prototype.getTimestamp")),
+/// `NumberLong.prototype.compare(other)`: -1, 0 or 1.
+fn compare(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    let n = this_long(it, this, "compare")?;
+    let Some(other) = a.first() else {
+        return Err(it.error("Error", "NumberLong.compare() needs 1 argument"));
+    };
+    let m = match other {
+        Val::Obj(o) => match &o.borrow().kind {
+            Kind::Bson(Bson::Long(m)) => Some(*m),
+            _ => None,
+        },
+        _ => None,
+    };
+    let Some(m) = m else {
+        return Err(it.error("Error", "NumberLong.compare() argument must be a NumberLong"));
+    };
+    Ok(Val::Num(match n.cmp(&m) {
+        std::cmp::Ordering::Less => -1.0,
+        std::cmp::Ordering::Equal => 0.0,
+        std::cmp::Ordering::Greater => 1.0,
+    }))
+}
+
+fn float_approx(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+    Ok(Val::Num(this_long(it, this, "floatApprox")? as f64))
+}
+
+/// The high 32 bits of the `NumberLong`.
+fn top(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+    Ok(Val::Num(f64::from((this_long(it, this, "top")? as u64 >> 32) as u32)))
+}
+
+/// The low 32 bits of the `NumberLong`.
+fn bottom(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+    Ok(Val::Num(f64::from(this_long(it, this, "bottom")? as u64 as u32)))
+}
+
+fn exact_value_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+    let n = this_long(it, this, "exactValueString")?;
+    it.string(n.to_string())
+}
+
+fn object_id_hex(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+    match this_of(it, this, "getter", "ObjectId")? {
+        Bson::ObjectId(id) => it.string(hex(&id)),
+        _ => Err(Ctrl::Fatal(Fatal::Unreachable)),
     }
+}
+
+/// The bytes of the `BinData` of `this` for the native `method`.
+fn this_bytes(it: &Interp, this: &Val, method: &str) -> R<Vec<u8>> {
+    match this_of(it, this, method, "BinData")? {
+        Bson::BinData(_, bytes) => Ok(bytes),
+        _ => Err(Ctrl::Fatal(Fatal::Unreachable)),
+    }
+}
+
+fn bin_base64(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+    let bytes = this_bytes(it, this, "base64")?;
+    it.string(base64_encode(&bytes))
+}
+
+fn bin_hex(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+    let bytes = this_bytes(it, this, "hex")?;
+    it.string(hex(&bytes))
 }
 
 const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -385,17 +742,57 @@ pub fn from_document(it: &mut Interp, d: &Document, depth: usize) -> R {
     Ok(Val::Obj(o))
 }
 
-/// Whether `o` is the global `MinKey` or `MaxKey`, which RefDb's shell gives as the key itself.
-fn is_key_ctor(it: &Interp, o: &ObjRef, name: &str) -> bool {
-    matches!(name, "MinKey" | "MaxKey")
-        && it.realm.bson.iter().any(|(n, c)| &**n == name && c.ptr_eq(o))
-}
-
 /// The error of a value that has no BSON form (measured: 16662 for a symbol).
 pub fn not_convertible(name: &str) -> Ctrl {
-    Ctrl::Fatal(crate::interp::Fatal::Convert(format!(
-        "unable to convert JavaScript property to ref element {name}"
-    )))
+    convert_error(
+        NOT_CONVERTIBLE,
+        format!("unable to convert JavaScript property to ref element {name}"),
+    )
+}
+
+/// A value BSON cannot hold: RefDb's code and message.
+fn convert_error(code: i32, message: String) -> Ctrl {
+    Ctrl::Fatal(Fatal::Convert(code, message))
+}
+
+/// The BSON of a `Timestamp` object: its properties `t` and `i` (measured on a `refrouter` 9.0.4
+/// on 02-11).
+fn timestamp_bson(it: &mut Interp, v: &Val) -> R<Value> {
+    let mut part = |key: &str, increment: bool| -> R<u32> {
+        let has = matches!(v, Val::Obj(o) if o.borrow().get_own(key).is_some());
+        if !has {
+            let (code, what) = if increment {
+                (MISSING_INCREMENT, "increment field, 'i'")
+            } else {
+                (MISSING_TIME, "timestamp field, 't'")
+            };
+            return Err(convert_error(
+                code,
+                format!("Malformed timestamp in JavaScript: missing {what}"),
+            ));
+        }
+        let x = it.get(v, key)?;
+        timestamp_part(&x, increment).map_err(|m| convert_error(BAD_VALUE, m))
+    };
+    let time = part("t", false)?;
+    let increment = part("i", true)?;
+    Ok(Value::Timestamp { time, increment })
+}
+
+/// A `DBPointer` as the `refrouter` writes it: a reference `{$ref, $id, $db}`, the namespace split
+/// at its dot when it has one only.
+fn pointer_bson(namespace: &str, id: [u8; 12]) -> Value {
+    let mut d = Document::new();
+    let (db, coll) = match namespace.split_once('.') {
+        Some((db, coll)) if !coll.contains('.') => (db, coll),
+        _ => ("", namespace),
+    };
+    d.push("$ref", Value::String(coll.into()));
+    d.push("$id", Value::ObjectId(id));
+    if !db.is_empty() {
+        d.push("$db", Value::String(db.into()));
+    }
+    Value::Document(d)
 }
 
 /// A JavaScript value as BSON; `name` is the field it is written to, for the error.
@@ -413,19 +810,7 @@ pub fn to_bson(it: &mut Interp, v: &Val, name: &str, depth: usize) -> R<Value> {
         Val::Obj(o) => {
             let kind = o.borrow().kind.clone();
             match kind {
-                Kind::Bson(b) => match b {
-                    Bson::Long(n) => Value::Int64(n),
-                    Bson::Int(n) => Value::Int32(n),
-                    Bson::Decimal(d) => Value::Decimal128(d),
-                    Bson::ObjectId(id) => Value::ObjectId(id),
-                    Bson::BinData(subtype, bytes) => Value::Binary { subtype, bytes },
-                    Bson::Timestamp(time, increment) => Value::Timestamp { time, increment },
-                    Bson::MinKey => Value::MinKey,
-                    Bson::MaxKey => Value::MaxKey,
-                    Bson::DbPointer(namespace, id) => Value::DbPointer { namespace, id },
-                    Bson::Symbol(s) => Value::Symbol(s),
-                    Bson::Code(c) => Value::JavaScript(c),
-                },
+                Kind::Bson(b) => bson_value(it, o, v, b, depth)?,
                 Kind::Date(t) => Value::DateTime(if t.is_nan() { i64::MIN } else { t as i64 }),
                 Kind::Num(n) => Value::Double(n),
                 Kind::Str(s) => Value::String(crate::text::to_utf8(&s).into_owned()),
@@ -434,12 +819,8 @@ pub fn to_bson(it: &mut Interp, v: &Val, name: &str, depth: usize) -> R<Value> {
                     pattern: crate::text::to_utf8(&p).into_owned(),
                     options: f.chars().filter(|c| *c != 'g').collect(),
                 },
-                Kind::Func(Func::Native(_, n)) if is_key_ctor(it, o, &n) => {
-                    if &*n == "MinKey" {
-                        Value::MinKey
-                    } else {
-                        Value::MaxKey
-                    }
+                Kind::Func(Func::Native(..)) if bson_class(it, o).is_some() => {
+                    if bson_class(it, o) == Some("MinKey") { Value::MinKey } else { Value::MaxKey }
                 }
                 Kind::Func(Func::Closure { def, .. }) => {
                     Value::JavaScript(crate::text::to_utf8(&def.source).into_owned())
@@ -452,18 +833,51 @@ pub fn to_bson(it: &mut Interp, v: &Val, name: &str, depth: usize) -> R<Value> {
                     }
                     Value::Array(out)
                 }
-                _ => {
-                    let mut d = Document::new();
-                    for k in it.keys(o, true)? {
-                        let x = it.get(v, &k)?;
-                        if x.is_callable() && matches!(o.borrow().kind, Kind::Error) {
-                            continue;
-                        }
-                        d.push(crate::text::to_utf8(&k).as_ref(), to_bson(it, &x, &k, depth + 1)?);
-                    }
-                    Value::Document(d)
-                }
+                _ => document_bson(it, o, v, depth)?,
             }
         }
     })
+}
+
+/// An object of a BSON type as BSON (measured on a `refrouter` 9.0.4 on 02-11: the prototypes of
+/// `ObjectId`, `BinData` and `DBPointer` cannot be written; a `Timestamp` is its `t` and `i`; a
+/// `DBRef` is its properties).
+fn bson_value(it: &mut Interp, o: &ObjRef, v: &Val, b: Bson, depth: usize) -> R<Value> {
+    let is_proto = |ty: &str| proto_of(it, ty).is_some_and(|p| p.ptr_eq(o));
+    let refused = match &b {
+        Bson::ObjectId(_) if is_proto("ObjectId") => "Can't call getOID on OID prototype",
+        Bson::BinData(..) if is_proto("BinData") => "Cannot call getter on BinData prototype",
+        Bson::DbPointer(..) if is_proto("DBPointer") => "can't serialize DBPointer prototype",
+        _ => "",
+    };
+    if !refused.is_empty() {
+        return Err(convert_error(BAD_VALUE, refused.into()));
+    }
+    Ok(match b {
+        Bson::Long(n) => Value::Int64(n),
+        Bson::Int(n) => Value::Int32(n),
+        Bson::Decimal(d) => Value::Decimal128(d),
+        Bson::ObjectId(id) => Value::ObjectId(id),
+        Bson::BinData(subtype, bytes) => Value::Binary { subtype, bytes },
+        Bson::Timestamp(..) => timestamp_bson(it, v)?,
+        Bson::MinKey => Value::MinKey,
+        Bson::MaxKey => Value::MaxKey,
+        Bson::DbPointer(namespace, id) => pointer_bson(&namespace, id),
+        Bson::DbRef => document_bson(it, o, v, depth)?,
+        Bson::Symbol(s) => Value::Symbol(s),
+        Bson::Code(c) => Value::JavaScript(c),
+    })
+}
+
+/// An object as a document of its enumerable properties (an error's methods left out).
+fn document_bson(it: &mut Interp, o: &ObjRef, v: &Val, depth: usize) -> R<Value> {
+    let mut d = Document::new();
+    for k in it.keys(o, true)? {
+        let x = it.get(v, &k)?;
+        if x.is_callable() && matches!(o.borrow().kind, Kind::Error) {
+            continue;
+        }
+        d.push(crate::text::to_utf8(&k).as_ref(), to_bson(it, &x, &k, depth + 1)?);
+    }
+    Ok(Value::Document(d))
 }

@@ -21,8 +21,14 @@ const WHERE_COMPILE: ErrorCode = ErrorCode { code: 6_108_306, name: "Location610
 const WHERE_DISABLED: ErrorCode = ErrorCode { code: 6_108_304, name: "Location6108304" };
 /// `$function`, `$accumulator` or `mapReduce` on a node without JavaScript.
 pub const JS_DISABLED: ErrorCode = ErrorCode { code: 31_264, name: "Location31264" };
-/// A result that BSON cannot hold.
-const NOT_CONVERTIBLE: ErrorCode = ErrorCode { code: 16_662, name: "Location16662" };
+/// A result that BSON cannot hold: a symbol, a malformed value of a BSON type (`BadValue`), a
+/// `Timestamp` without its time or its increment (measured on a `refrouter` 9.0.4 on 02-11).
+const NOT_CONVERTIBLE: [ErrorCode; 4] = [
+    ErrorCode { code: 16_662, name: "Location16662" },
+    ErrorCode { code: 2, name: "BadValue" },
+    ErrorCode { code: 6_900_900, name: "Location6900900" },
+    ErrorCode { code: 6_900_901, name: "Location6900901" },
+];
 /// The trap of the WebAssembly build of RefDb 9.0's engine (a promise job, a
 /// `FinalizationRegistry`), measured on a `refrouter` 9.0.4 on 02-11.
 const WASM_TRAP: ErrorCode = ErrorCode { code: 11_542_340, name: "Location11542340" };
@@ -203,8 +209,8 @@ fn runtime_error(what: &str, e: &JsError) -> MqlError {
     match e {
         JsError::Deadline => MqlError::new(MAX_TIME_MS_EXPIRED, "operation exceeded time limit"),
         JsError::Trap | JsError::Unreachable => MqlError::new(WASM_TRAP, e.message()),
-        JsError::NotConvertible(m) => MqlError::new(
-            NOT_CONVERTIBLE,
+        JsError::NotConvertible { code, message: m } => MqlError::new(
+            NOT_CONVERTIBLE.into_iter().find(|c| c.code == *code).unwrap_or(NOT_CONVERTIBLE[0]),
             format!(
                 "{what} :: function id = {}: e-runtime message : '{m}', file : 'none', line : 0, column : 0",
                 next_function_id()

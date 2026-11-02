@@ -1,6 +1,9 @@
 //! `Array.prototype` (ECMA-262 §23.1.3).
 
-use crate::builtins::{make_iter, method};
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use crate::builtins::method;
 use crate::interp::{Interp, PROP_BYTES, R};
 use crate::value::*;
 
@@ -271,7 +274,81 @@ fn slice(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let start = relative(it, &arg(a, 0), v.len(), 0)?;
     let end = relative(it, &arg(a, 1), v.len(), v.len())?;
     let out = if start < end { v[start..end].to_vec() } else { Vec::new() };
-    it.array(out)
+    let target = species(it, this, out.len())?;
+    species_result(it, target, out, true)
+}
+
+/// ArraySpeciesCreate (ECMA-262 §10.4.2.3): what `constructor[Symbol.species]` of an array
+/// makes with `len`, or `None` for a plain array (a value that is not an array, a constructor
+/// without species, or `Array` itself). Measured on a `refrouter` 9.0.4 on 02-11: `map`, `filter`,
+/// `slice`, `splice`, `concat`, `flat` and `flatMap` read `constructor`, and a subclass of `Array`
+/// gets its own instances.
+fn species(it: &mut Interp, this: &Val, len: usize) -> R<Option<ObjRef>> {
+    if !crate::proxy::is_array(it, this)? {
+        return Ok(None);
+    }
+    let mut c = it.get(this, "constructor")?;
+    if let Val::Obj(_) = c {
+        c = match it.get(&c, "@@Symbol.species:0")? {
+            Val::Null => Val::Undef,
+            v => v,
+        };
+    }
+    let array = it.realm.array.borrow().get_own("constructor").map(|p| p.value.clone());
+    match &c {
+        Val::Undef => return Ok(None),
+        Val::Obj(o) if array.as_ref().is_some_and(|a| matches!(a, Val::Obj(x) if x.ptr_eq(o))) => {
+            return Ok(None);
+        }
+        _ => {}
+    }
+    if !crate::interp::is_constructor(&c) {
+        return it.type_error("constructor property is not a constructor");
+    }
+    match it.construct(&c, &[Val::Num(len as f64)], &c)? {
+        Val::Obj(o) => Ok(Some(o)),
+        _ => Ok(None),
+    }
+}
+
+/// What `Array.from` and `Array.of` make when `this` is a constructor other than `Array` (a
+/// subclass): `this` constructed with `args`; `None` for a plain array.
+pub(crate) fn made_by(it: &mut Interp, this: &Val, args: &[Val]) -> R<Option<ObjRef>> {
+    let Val::Obj(c) = this else { return Ok(None) };
+    let is_array = it
+        .realm
+        .array
+        .borrow()
+        .get_own("constructor")
+        .is_some_and(|p| matches!(&p.value, Val::Obj(a) if a.ptr_eq(c)));
+    if is_array || !crate::interp::is_constructor(this) {
+        return Ok(None);
+    }
+    match it.construct(this, args, this)? {
+        Val::Obj(o) => Ok(Some(o)),
+        _ => Ok(None),
+    }
+}
+
+/// The result of a method that creates through the species: `items` in a plain array, or
+/// defined one by one on what the species made, then its `length` when `with_length`.
+pub(crate) fn species_result(
+    it: &mut Interp,
+    target: Option<ObjRef>,
+    items: Vec<Val>,
+    with_length: bool,
+) -> R {
+    let Some(t) = target else {
+        return it.array(items);
+    };
+    let n = items.len();
+    for (i, x) in items.into_iter().enumerate() {
+        crate::props::create_data_property_or_throw(it, &t, &key(i), x)?;
+    }
+    if with_length {
+        it.set(&Val::Obj(t.clone()), "length", Val::Num(n as f64))?;
+    }
+    Ok(Val::Obj(t))
 }
 
 fn splice(it: &mut Interp, this: &Val, a: &[Val]) -> R {
@@ -295,12 +372,14 @@ fn splice(it: &mut Interp, this: &Val, a: &[Val]) -> R {
         check(it, &o, change)?;
     }
     it.grow(&o, insert.len())?;
+    let target = species(it, this, count)?;
     let removed = with_vec(&o, |v| v.splice(start..start + count, insert).collect::<Vec<_>>())
         .unwrap_or_default();
-    it.array(removed)
+    species_result(it, target, removed, true)
 }
 
 fn concat(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    let target = species(it, this, 0)?;
     let mut out = items(it, this)?;
     for x in a {
         match x {
@@ -309,7 +388,7 @@ fn concat(it: &mut Interp, this: &Val, a: &[Val]) -> R {
         }
     }
     it.charge(out.len() * PROP_BYTES)?;
-    it.array(out)
+    species_result(it, target, out, true)
 }
 
 fn join(it: &mut Interp, this: &Val, a: &[Val]) -> R {
@@ -455,6 +534,7 @@ fn find_last_index(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 }
 
 fn filter(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    let target = species(it, this, 0)?;
     let mut out = Vec::new();
     each(it, this, a, false, |x, _, r| {
         if r.truthy() {
@@ -463,17 +543,28 @@ fn filter(it: &mut Interp, this: &Val, a: &[Val]) -> R {
         false
     })?;
     it.charge(out.len() * PROP_BYTES)?;
-    it.array(out)
+    species_result(it, target, out, false)
 }
 
 fn map(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    let len = match this {
+        Val::Obj(o) if let Kind::Array(v) = &o.borrow().kind => v.len(),
+        _ => 0,
+    };
+    let target = species(it, this, len)?;
+    let out = mapped(it, this, a)?;
+    species_result(it, target, out, false)
+}
+
+/// What the callback gives for each element.
+fn mapped(it: &mut Interp, this: &Val, a: &[Val]) -> R<Vec<Val>> {
     let mut out = Vec::new();
     each(it, this, a, false, |_, _, r| {
         out.push(r.clone());
         false
     })?;
     it.charge(out.len() * PROP_BYTES)?;
-    it.array(out)
+    Ok(out)
 }
 
 fn for_each(it: &mut Interp, this: &Val, a: &[Val]) -> R {
@@ -668,17 +759,18 @@ fn flatten(it: &mut Interp, v: Vec<Val>, depth: f64, out: &mut Vec<Val>) -> R<()
 fn flat(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let depth = if matches!(arg(a, 0), Val::Undef) { 1.0 } else { it.number_of(&arg(a, 0))? };
     let v = items(it, this)?;
+    let target = species(it, this, 0)?;
     let mut out = Vec::new();
     flatten(it, v, depth, &mut out)?;
-    it.array(out)
+    species_result(it, target, out, false)
 }
 
 fn flat_map(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    let m = map(it, this, a)?;
-    let v = items(it, &m)?;
+    let target = species(it, this, 0)?;
+    let v = mapped(it, this, a)?;
     let mut out = Vec::new();
     flatten(it, v, 1.0, &mut out)?;
-    it.array(out)
+    species_result(it, target, out, false)
 }
 
 fn fill(it: &mut Interp, this: &Val, a: &[Val]) -> R {
@@ -730,20 +822,51 @@ fn at(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 }
 
 fn keys(it: &mut Interp, this: &Val, _: &[Val]) -> R {
-    let n = items(it, this)?.len();
-    make_iter(it, crate::builtins::ARRAY_ITERATOR, (0..n).map(|i| Val::Num(i as f64)).collect())
+    array_iter(it, this, ArrayIterKind::Keys)
 }
 
 fn values(it: &mut Interp, this: &Val, _: &[Val]) -> R {
-    let v = items(it, this)?;
-    make_iter(it, crate::builtins::ARRAY_ITERATOR, v)
+    array_iter(it, this, ArrayIterKind::Values)
 }
 
 fn entries(it: &mut Interp, this: &Val, _: &[Val]) -> R {
-    let v = items(it, this)?;
-    let mut out = Vec::new();
-    for (i, x) in v.into_iter().enumerate() {
-        out.push(it.array(vec![Val::Num(i as f64), x])?);
+    array_iter(it, this, ArrayIterKind::Entries)
+}
+
+/// An iterator over `this`, which reads it at each step.
+fn array_iter(it: &mut Interp, this: &Val, kind: ArrayIterKind) -> R {
+    let source = Some(Val::Obj(it.object_of(this)?));
+    let state = Rc::new(RefCell::new(ArrayIter { source, pos: 0, kind }));
+    let proto = Some(it.realm.proto(crate::builtins::ARRAY_ITERATOR));
+    Ok(Val::Obj(it.alloc(proto, Kind::ArrayIter(state))?))
+}
+
+/// The next step of an array iterator: its value, or `None` once the index reaches `length`.
+pub(crate) fn array_iter_next(it: &mut Interp, state: &Rc<RefCell<ArrayIter>>) -> R<Option<Val>> {
+    let (source, pos, kind) = {
+        let s = state.borrow();
+        let Some(source) = s.source.clone() else { return Ok(None) };
+        (source, s.pos, s.kind)
+    };
+    let len = match &source {
+        Val::Obj(o) if let Kind::Array(v) = &o.borrow().kind => v.len() as f64,
+        _ => {
+            let n = it.get(&source, "length")?;
+            it.number_of(&n)?
+        }
+    };
+    if len.is_nan() || pos as f64 >= len {
+        state.borrow_mut().source = None;
+        return Ok(None);
     }
-    make_iter(it, crate::builtins::ARRAY_ITERATOR, out)
+    state.borrow_mut().pos = pos + 1;
+    let index = Val::Num(pos as f64);
+    Ok(Some(match kind {
+        ArrayIterKind::Keys => index,
+        ArrayIterKind::Values => it.get(&source, &key(pos))?,
+        ArrayIterKind::Entries => {
+            let x = it.get(&source, &key(pos))?;
+            it.array(vec![index, x])?
+        }
+    }))
 }

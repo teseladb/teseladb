@@ -27,8 +27,8 @@ pub enum Fatal {
     OutOfMemory,
     Deadline,
     Steps,
-    /// A value without a BSON form, with RefDb's message.
-    Convert(String),
+    /// A value without a BSON form, with RefDb's code and message.
+    Convert(i32, String),
     /// What the engine of RefDb 9.0 cannot run and ends the call with a trap of its
     /// WebAssembly build: a promise job (`then`, `await`) or a `FinalizationRegistry`.
     Trap,
@@ -121,6 +121,8 @@ pub enum IterRec {
     Items(Vec<Val>, usize),
     /// An iterator object and its `next`.
     Proto { it: Val, next: Val },
+    /// An array, read at each step.
+    Array(Rc<RefCell<ArrayIter>>),
 }
 
 /// The invocation's limits.
@@ -153,6 +155,9 @@ pub struct Interp<'c> {
     /// The last error about an operand (`can't convert ({}) to number`): the error, the operand
     /// and the text written for it, which the operator that sees its expression may replace.
     pub operand_failure: Option<(ObjRef, Val, String)>,
+    /// Whether the conversion to a primitive that failed last called a method of the object
+    /// (`valueOf`, `toString`): SpiderMonkey then names fewer operands.
+    pub conversion_called: bool,
     pub global_env: EnvRef,
     pub now_ms: f64,
     pub rng: u64,
@@ -242,11 +247,20 @@ pub fn is_constructor(f: &Val) -> bool {
         // `UUID`, `MD5` and `HexData` of the RefDb shell have no `prototype` and still construct.
         Kind::Func(Func::Native(_, name)) => {
             b.get_own("prototype").is_some()
-                || matches!(&**name, "Proxy" | "UUID" | "MD5" | "HexData")
+                || matches!(&**name, "Proxy" | "UUID" | "MD5" | "HexData" | "MinKey" | "MaxKey")
         }
         Kind::Func(Func::Bound(t, ..)) => is_constructor(&Val::Obj(t.clone())),
         Kind::Proxy(_, callable) => *callable,
         _ => false,
+    }
+}
+
+/// The name of `f` when it is a native function.
+fn native_name(f: &Val) -> Option<Name> {
+    let Val::Obj(o) = f else { return None };
+    match &o.borrow().kind {
+        Kind::Func(Func::Native(_, n)) => Some(n.clone()),
+        _ => None,
     }
 }
 
@@ -405,6 +419,7 @@ impl<'c> Interp<'c> {
                 Prop { writable: false, ..Prop::hidden(Val::Num(arity as f64)) },
             ));
             b.props.push(("name".into(), Prop { writable: false, ..Prop::hidden(Val::str(name)) }));
+            b.locks |= LAZY_LENGTH | LAZY_NAME;
         }
         Ok(o)
     }
@@ -472,6 +487,20 @@ impl<'c> Interp<'c> {
             b.props.push((k.into(), Prop::hidden(v)));
         }
         Ok(())
+    }
+
+    /// The `SyntaxError` of code that `eval` or `Function` parse: at its place in that code.
+    pub fn syntax_error(&self, e: &crate::lexer::SyntaxError) -> Ctrl {
+        let err = self.error("SyntaxError", &e.message);
+        if let Ctrl::Throw(Val::Obj(o)) = &err {
+            let mut b = o.borrow_mut();
+            for (k, v) in [("lineNumber", e.line), ("columnNumber", e.col)] {
+                if let Some(p) = b.get_own_mut(k) {
+                    p.value = Val::Num(f64::from(v));
+                }
+            }
+        }
+        err
     }
 
     pub fn type_error<T>(&self, message: &str) -> R<T> {
@@ -545,15 +574,18 @@ impl<'c> Interp<'c> {
             } else {
                 ["valueOf", "toString"]
             };
+        let mut called = false;
         for m in order {
             let f = self.get(v, m)?;
             if f.is_callable() {
+                called = true;
                 let r = self.call(&f, v, &[])?;
                 if !matches!(r, Val::Obj(_)) {
                     return Ok(r);
                 }
             }
         }
+        self.conversion_called = called;
         let to = match hint {
             "number" => "number",
             "string" => "string",
@@ -677,6 +709,7 @@ impl<'c> Interp<'c> {
             if crate::proxy::is_proxy(&o) {
                 return crate::proxy::get(self, &o, key, v);
             }
+            touch(&o, key);
             let found = {
                 let b = o.borrow();
                 match &b.kind {
@@ -818,6 +851,7 @@ impl<'c> Interp<'c> {
         // A setter or a read-only property along the chain.
         let mut cur = Some(o.clone());
         while let Some(c) = cur {
+            touch(&c, key);
             let found = c.borrow().get_own(key).cloned();
             if let Some(p) = found {
                 if let Some(s) = p.setter {
@@ -860,14 +894,15 @@ impl<'c> Interp<'c> {
         }
         if !o.borrow().extensible {
             if self.strict {
+                let class = crate::builtins::object_class(self, o);
                 return self.type_error(&format!(
-                    "can't define property \"{key}\": Object is not extensible"
+                    "can't define property \"{key}\": {class} is not extensible"
                 ));
             }
             return Ok(());
         }
         self.grow(o, 1)?;
-        o.borrow_mut().props.push((key.into(), Prop::data(value)));
+        o.borrow_mut().insert(key.into(), Prop::data(value));
         Ok(())
     }
 
@@ -881,13 +916,14 @@ impl<'c> Interp<'c> {
 
     pub fn define(&self, o: &ObjRef, key: &str, prop: Prop) -> R<()> {
         let mut b = o.borrow_mut();
+        b.resolve(key);
         if let Some(p) = b.get_own_mut(key) {
             *p = prop;
             return Ok(());
         }
         drop(b);
         self.grow(o, 1)?;
-        o.borrow_mut().props.push((key.into(), prop));
+        o.borrow_mut().insert(key.into(), prop);
         Ok(())
     }
 
@@ -900,6 +936,7 @@ impl<'c> Interp<'c> {
 
     /// Whether `key` is an own property of `o`.
     pub fn has_own(&self, o: &ObjRef, key: &str) -> bool {
+        touch(o, key);
         let b = o.borrow();
         match &b.kind {
             Kind::Array(items)
@@ -937,6 +974,7 @@ impl<'c> Interp<'c> {
         if crate::proxy::is_proxy(o) {
             return crate::proxy::keys(self, o, only_enumerable);
         }
+        touch_all(o);
         Ok(self.own_keys(o, only_enumerable))
     }
 
@@ -1568,7 +1606,7 @@ impl<'c> Interp<'c> {
         } else if def.is_async {
             f.borrow_mut().proto = Some(self.realm.proto("AsyncFunction"));
             None
-        } else if !def.arrow {
+        } else if !def.arrow && !def.method {
             let proto = self.object()?;
             self.define(&proto, "constructor", Prop::hidden(Val::Obj(f.clone())))?;
             Some(proto)
@@ -1586,6 +1624,9 @@ impl<'c> Interp<'c> {
         b.props.push(("length".into(), fixed(Val::Num(length))));
         let name = def.name.clone().unwrap_or_else(|| "".into());
         b.props.push(("name".into(), fixed(Val::Str(name))));
+        b.locks |= LAZY_LENGTH
+            | LAZY_NAME
+            | if b.get_own("prototype").is_some() { LAZY_PROTOTYPE } else { 0 };
         drop(b);
         Ok(Val::Obj(f))
     }
@@ -1697,16 +1738,17 @@ impl<'c> Interp<'c> {
     /// Starts iterating `v`: the values of the objects the interpreter knows, or the iterator
     /// its `Symbol.iterator` gives, read one value at a time.
     pub fn open_iter(&mut self, v: &Val) -> R<IterRec> {
+        if let Val::Obj(o) = v
+            && let Kind::Array(_) = o.borrow().kind
+        {
+            let state = ArrayIter { source: Some(v.clone()), pos: 0, kind: ArrayIterKind::Values };
+            return Ok(IterRec::Array(Rc::new(RefCell::new(state))));
+        }
         let fast = match v {
             Val::Str(_) => true,
             Val::Obj(o) => matches!(
                 o.borrow().kind,
-                Kind::Array(_)
-                    | Kind::Typed(_)
-                    | Kind::Set(_)
-                    | Kind::Map(_)
-                    | Kind::Iter(_)
-                    | Kind::Arguments(_)
+                Kind::Typed(_) | Kind::Set(_) | Kind::Map(_) | Kind::Iter(_) | Kind::Arguments(_)
             ),
             _ => false,
         };
@@ -1738,6 +1780,7 @@ impl<'c> Interp<'c> {
                 *i += 1;
                 Ok(v)
             }
+            IterRec::Array(state) => crate::arrays::array_iter_next(self, state),
             IterRec::Proto { it, next } => {
                 let (it, next) = (it.clone(), next.clone());
                 let r = self.call(&next, &it, &[])?;
@@ -1811,13 +1854,10 @@ impl<'c> Interp<'c> {
                     _ => {}
                 }
                 let it_fn = self.get(v, "@@Symbol.iterator:0")?;
-                let it = if it_fn.is_callable() {
-                    self.call(&it_fn, v, &[])?
-                } else if self.get(v, "next")?.is_callable() {
-                    v.clone()
-                } else {
+                if !it_fn.is_callable() {
                     return Err(self.not_iterable(v));
-                };
+                }
+                let it = self.call(&it_fn, v, &[])?;
                 let next = self.get(&it, "next")?;
                 let mut out = Vec::new();
                 loop {
@@ -2113,8 +2153,12 @@ impl<'c> Interp<'c> {
         label: Option<&Name>,
     ) -> R<()> {
         let v = self.eval(obj, env)?;
-        let mut rec =
-            if of { self.open_iter(&v)? } else { IterRec::Items(self.for_in_keys(&v)?, 0) };
+        let mut rec = if of {
+            let r = self.open_iter(&v);
+            self.name_operands(r, &[(obj, &v)])?
+        } else {
+            IterRec::Items(self.for_in_keys(&v)?, 0)
+        };
         while let Some(x) = self.iter_step(&mut rec)? {
             let scope = self.new_env(Some(env.clone()));
             let r = match decl {
@@ -2241,6 +2285,7 @@ impl<'c> Interp<'c> {
         };
         self.define(&ctor, "length", fixed(Val::Num(length as f64)))?;
         self.define(&ctor, "name", fixed(Val::Str(name.clone())))?;
+        ctor.borrow_mut().locks |= LAZY_LENGTH | LAZY_NAME;
         self.define(&proto, "constructor", Prop::hidden(Val::Obj(ctor.clone())))?;
         if let Some(n) = &c.name {
             declare(&scope, n, Val::Obj(ctor.clone()), false);
@@ -2256,6 +2301,13 @@ impl<'c> Interp<'c> {
                 continue;
             }
             let key = self.prop_key(&m.key, &scope)?;
+            if let Some(cur) = self.get_own_prop(&target, &key)
+                && !cur.configurable
+            {
+                let shown = crate::props::shown_key(&key);
+                return self
+                    .type_error(&format!("can't redefine non-configurable property {shown}"));
+            }
             if let Some(f) = &m.func {
                 let fv = self.closure(f, &scope)?;
                 if let Val::Obj(fo) = &fv
@@ -2405,10 +2457,13 @@ impl<'c> Interp<'c> {
             Expr::Binary(op, a, b) => {
                 let x = self.eval(a, env)?;
                 let y = self.eval(b, env)?;
+                self.conversion_called = false;
                 let r = self.binary(op, &x, &y);
-                // SpiderMonkey names only the right operand of `+` (measured: `o + 1` gives the
-                // source of `o`, `"" + Object.create(null)` gives `Object.create(...)`).
-                if *op == "+" {
+                // SpiderMonkey names the left operand of `+` only when the conversion called no
+                // method (measured: `o + 1` with a `valueOf` gives the source of `o`,
+                // `Object.create(null) + ""` names it, `"" + Object.create(null)` gives
+                // `Object.create(...)`).
+                if *op == "+" && self.conversion_called {
                     return self.name_operands(r, &[(b, &y)]);
                 }
                 self.name_operands(r, &[(a, &x), (b, &y)])
@@ -2475,9 +2530,9 @@ impl<'c> Interp<'c> {
                 self.pos = *pos;
                 self.eval(e, env)
             }
-            Expr::New { callee, args, pos } => {
+            Expr::New { callee, args: exprs, pos } => {
                 let f = self.eval(callee, env)?;
-                let args = self.eval_args(args, env)?;
+                let args = self.eval_args(exprs, env)?;
                 self.pos = *pos;
                 if !is_constructor(&f) {
                     let text = match &**callee {
@@ -2486,7 +2541,9 @@ impl<'c> Interp<'c> {
                     };
                     return self.type_error(&format!("{text} is not a constructor"));
                 }
-                self.construct(&f, &args, &f)
+                self.conversion_called = false;
+                let r = self.construct(&f, &args, &f);
+                self.name_arguments(r, &f, exprs, &args)
             }
         }
     }
@@ -2595,7 +2652,8 @@ impl<'c> Interp<'c> {
         if optional && f.is_nullish() {
             return Err(Ctrl::Break(Some("?.".into())));
         }
-        let args = self.eval_args(args, env)?;
+        let exprs = args;
+        let args = self.eval_args(exprs, env)?;
         if is_eval_name(callee) && is_builtin_eval(&f) {
             return self.direct_eval(args.first().cloned().unwrap_or(Val::Undef), env);
         }
@@ -2603,7 +2661,25 @@ impl<'c> Interp<'c> {
         if !f.is_callable() {
             return self.type_error(&format!("{} is not a function", callee_text(callee)));
         }
-        self.call(&f, &this, &args)
+        self.conversion_called = false;
+        let r = self.call(&f, &this, &args);
+        self.name_arguments(r, &f, exprs, &args)
+    }
+
+    /// `r` of a call of `f`, with the argument a native could not convert named by its
+    /// expression, unless the conversion called a method (measured on a `refrouter` 9.0.4 on 02-11:
+    /// `Math.max(o)`, `new Date(o)`; `String(o)` names it in both cases).
+    fn name_arguments(&mut self, r: R, f: &Val, exprs: &[Expr], args: &[Val]) -> R {
+        let Some(name) = native_name(f) else { return r };
+        if r.is_err()
+            && !matches!(&*name, "isNaN" | "concat")
+            && !exprs.iter().any(|e| matches!(e, Expr::Spread(_)))
+            && (!self.conversion_called || &*name == "String")
+        {
+            let pairs: Vec<(&Expr, &Val)> = exprs.iter().zip(args.iter()).collect();
+            return self.name_operands(r, &pairs);
+        }
+        r
     }
 
     fn object_literal(&mut self, props: &[ObjProp], env: &EnvRef) -> R {
@@ -2730,8 +2806,7 @@ impl<'c> Interp<'c> {
     /// function (unless it is strict) and may not redeclare a `let` on the way (ECMA-262 §19.2.1).
     pub fn direct_eval(&mut self, src: Val, env: &EnvRef) -> R {
         let Val::Str(src) = src else { return Ok(src) };
-        let body =
-            crate::parser::parse_script(&src).map_err(|e| self.error("SyntaxError", &e.message))?;
+        let body = crate::parser::parse_script(&src).map_err(|e| self.syntax_error(&e))?;
         let strict = self.strict || crate::parser::has_use_strict(&body);
         let lex = self.new_env(Some(env.clone()));
         let var_env = if strict { lex.clone() } else { var_scope_of(env) };

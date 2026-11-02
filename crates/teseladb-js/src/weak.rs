@@ -153,6 +153,16 @@ fn fr_ctor(_: &mut Interp, _: &Val, _: &[Val]) -> R {
     Err(Ctrl::Fatal(Fatal::Trap))
 }
 
+/// `register` and `unregister`: no object can be a `FinalizationRegistry` (making one traps), so
+/// every receiver is refused (measured on a `refrouter` 9.0.4 on 02-11).
+fn fr_register(it: &mut Interp, _: &Val, _: &[Val]) -> R {
+    it.type_error("Receiver of FinalizationRegistry.register call is not a FinalizationRegistry")
+}
+
+fn fr_unregister(it: &mut Interp, _: &Val, _: &[Val]) -> R {
+    it.type_error("Receiver of FinalizationRegistry.unregister call is not a FinalizationRegistry")
+}
+
 pub fn install(it: &mut Interp, g: &ObjRef) -> R<()> {
     type Methods<'a> = &'a [(&'static str, NativeFn, usize)];
     let kinds: [(&'static str, NativeFn, Methods); 4] = [
@@ -163,7 +173,11 @@ pub fn install(it: &mut Interp, g: &ObjRef) -> R<()> {
         ),
         ("WeakSet", ws_ctor, &[("add", ws_add, 1), ("has", ws_has, 1), ("delete", ws_delete, 1)]),
         ("WeakRef", wr_ctor, &[("deref", wr_deref, 0)]),
-        ("FinalizationRegistry", fr_ctor, &[]),
+        (
+            "FinalizationRegistry",
+            fr_ctor,
+            &[("register", fr_register, 2), ("unregister", fr_unregister, 1)],
+        ),
     ];
     for (name, c, methods) in kinds {
         let proto = it.alloc(Some(it.realm.object.clone()), Kind::Ordinary)?;

@@ -25,6 +25,7 @@ mod math;
 mod md5;
 mod names;
 mod number;
+mod order;
 mod parser;
 mod promise;
 mod props;
@@ -95,8 +96,14 @@ pub enum JsError {
     Steps,
     /// The caller's deadline passed.
     Deadline,
-    /// The result has a value BSON cannot hold (a symbol).
-    NotConvertible(String),
+    /// The result has a value BSON cannot hold: RefDb's code (16662 for a symbol, 2 for a
+    /// malformed `Timestamp`…) and message.
+    NotConvertible {
+        /// RefDb's error code.
+        code: i32,
+        /// What is wrong.
+        message: String,
+    },
     /// The engine of RefDb 9.0 stops with a trap (`wasm trap: uninitialized element`): a
     /// promise job or a `FinalizationRegistry`.
     Trap,
@@ -113,7 +120,7 @@ impl JsError {
         match self {
             JsError::Compile { message, .. }
             | JsError::Thrown { message, .. }
-            | JsError::NotConvertible(message) => message.clone(),
+            | JsError::NotConvertible { message, .. } => message.clone(),
             JsError::OutOfMemory => "uncaught exception: out of memory".into(),
             JsError::Steps => "uncaught exception: too many steps".into(),
             JsError::Deadline => "operation exceeded time limit".into(),
@@ -338,7 +345,9 @@ pub(crate) fn error_of(it: &mut Interp, c: Ctrl) -> JsError {
         Ctrl::Fatal(Fatal::OutOfMemory) => JsError::OutOfMemory,
         Ctrl::Fatal(Fatal::Steps) => JsError::Steps,
         Ctrl::Fatal(Fatal::Deadline) => JsError::Deadline,
-        Ctrl::Fatal(Fatal::Convert(m)) => JsError::NotConvertible(text::to_utf8(&m).into_owned()),
+        Ctrl::Fatal(Fatal::Convert(code, m)) => {
+            JsError::NotConvertible { code, message: text::to_utf8(&m).into_owned() }
+        }
         Ctrl::Fatal(Fatal::Trap) => JsError::Trap,
         Ctrl::Fatal(Fatal::Unreachable) => JsError::Unreachable,
         Ctrl::Throw(v) => {

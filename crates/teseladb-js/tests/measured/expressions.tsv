@@ -1867,3 +1867,491 @@ Set.tojson(5) + "|" + Set.tojson("ab") + "|" + Set.tojson({length:2, 0:"a"}) + "
 (() => { /(x)|(y)/.exec("y"); return JSON.stringify([RegExp.$1, RegExp.$2, RegExp.lastParen]) })()	S:["","y","y"]
 JSON.stringify(["input", "$_", "lastMatch", "$&", "lastParen", "$+", "leftContext", "$`", "rightContext", "$'", "$1", "$9"].map(k => RegExp[k] === undefined ? "U" : RegExp[k]))	S:["","","U","U","","","","","","","",""]
 (() => { RegExp.input = "q"; return JSON.stringify([RegExp.input, RegExp.lastMatch, RegExp.$1]) })()	S:["q",null,""]
+Object.getOwnPropertyNames(NumberLong.prototype).join(',')	S:constructor,toNumber,toString,toJSON,valueOf,compare,floatApprox,top,bottom,exactValueString,tojson
+Object.getOwnPropertyNames(NumberInt.prototype).join(',')	S:constructor,toNumber,toString,toJSON,valueOf,tojson
+Object.getOwnPropertyNames(NumberDecimal.prototype).join(',')	S:constructor,toString,toJSON,tojson,equals
+Object.getOwnPropertyNames(Timestamp.prototype).join(',')	S:constructor,toJSON,tojson,getTime,getInc,toString,toStringIncomparable
+Object.getOwnPropertyNames(ObjectId.prototype).join(',')	S:constructor,toString,toJSON,str,tojson,valueOf,isObjectId,getTimestamp,equals
+Object.getOwnPropertyNames(BinData.prototype).join(',')	S:constructor,base64,hex,toString,toJSON,tojson,subtype,length
+typeof DBPointer + ',' + (typeof DBPointer === 'function' ? Object.getOwnPropertyNames(DBPointer.prototype).join(',') : '')	S:function,constructor,fetch,tojson,toJSON,getCollection,getId,toString
+typeof DBRef + ',' + (typeof DBRef === 'function' ? Object.getOwnPropertyNames(DBRef.prototype).join(',') : '')	S:function,constructor,fetch,tojson,getDb,getCollection,getRef,getId,toString
+typeof MinKey + ',' + typeof MaxKey	S:function,function
+Object.getOwnPropertyNames(MinKey).join(',')	S:
+Object.getOwnPropertyNames(MaxKey).join(',')	S:
+typeof MinKey === 'function' ? Object.getOwnPropertyNames(MinKey.prototype).join(',') : 'x'	E:TypeError:can't convert undefined to object
+Object.prototype.toString.call(MinKey) + Object.prototype.toString.call(MaxKey)	S:[object MinKey][object MaxKey]
+JSON.stringify(MinKey) + JSON.stringify(MaxKey)	S:{"$minKey":1}{"$maxKey":1}
+Object.keys(MinKey).join(',')	S:
+NumberLong(5).floatApprox	J:5
+NumberLong(5).top + ',' + NumberLong(5).bottom	S:0,5
+NumberLong(5).exactValueString	S:5
+NumberLong(5).compare(NumberLong(7))	J:-1
+NumberLong("9223372036854775807").floatApprox	J:9223372036854776000
+NumberLong(-1).top + ',' + NumberLong(-1).bottom	S:4294967295,4294967295
+NumberLong(5).compare(3)	E:Error:NumberLong.compare() argument must be a NumberLong
+NumberLong(5).compare(NumberLong(5))	J:0
+Timestamp(5,6).getTime() + ',' + Timestamp(5,6).getInc()	S:5,6
+Timestamp(5,6).toStringIncomparable()	S:Timestamp(5, 6)
+Timestamp(5,6).t + ',' + Timestamp(5,6).i	S:5,6
+typeof NumberLong(5).equals + typeof NumberLong(5).toNumber + typeof NumberLong(5).valueOf	S:undefinedfunctionfunction
+NumberLong(5).valueOf()	J:5
+NumberLong(5) + 1	J:6
+NumberInt(5).valueOf() + ',' + typeof NumberInt(5).toNumber	S:5,function
+Object.getOwnPropertyNames(function f(a){}).join(',')	S:prototype,length,name
+Object.getOwnPropertyNames(function(){}).join(',')	S:prototype,length,name
+Object.getOwnPropertyNames(() => 1).join(',')	S:length,name
+Object.getOwnPropertyNames(class A {}).join(',')	S:prototype,length,name
+Object.getOwnPropertyNames(class A { static m(){} }).join(',')	S:prototype,m,length,name
+(() => { function f(){}; f.prototype; return Object.getOwnPropertyNames(f).join(',') })()	S:prototype,length,name
+(() => { function f(){}; f.x = 1; return Object.getOwnPropertyNames(f).join(',') })()	S:x,prototype,length,name
+(() => { function f(){}; f.name; f.x = 1; return Object.getOwnPropertyNames(f).join(',') })()	S:name,x,prototype,length
+Object.getOwnPropertyNames(function*(){}).join(',')	S:prototype,length,name
+Object.getOwnPropertyNames(async function(){}).join(',')	S:length,name
+Reflect.ownKeys(function f(){}).join(',')	E:ReferenceError:Reflect is not defined
+(class A {}).toString()	S:class A {}
+(class {}).toString()	S:class {}
+(class A { }).toString()	S:class A { }
+(class A extends Object {}).toString()	S:class A extends Object {}
+String(new Proxy(function(){}, {}))	S:function () {\n    [native code]\n}
+Function.prototype.toString.call(new Proxy(function(){}, {}))	S:function () {\n    [native code]\n}
+Function.prototype.toString.call(new Proxy(() => 1, {}))	S:function () {\n    [native code]\n}
+Function.prototype.toString.call(new Proxy(class A {}, {}))	S:function () {\n    [native code]\n}
+(() => { const ks = []; const p = new Proxy({}, { get(t, k) { ks.push(typeof k === 'symbol' ? 'sym:' + String(k) : 'str:' + k); return undefined } }); try { [...p] } catch (e) {} return ks.join(',') })()	S:sym:Symbol(Symbol.iterator)
+(() => { const ks = []; const p = new Proxy({}, { get(t, k) { ks.push(typeof k); return undefined } }); p[Symbol.iterator]; p[Symbol.toPrimitive]; return ks.join(',') })()	S:symbol,symbol
+(() => { const ks = []; const p = new Proxy({}, { has(t, k) { ks.push(typeof k); return false } }); Symbol.iterator in p; return ks.join(',') })()	S:symbol
+(() => { const ks = []; const p = new Proxy({}, { get(t, k) { ks.push(String(k)); return undefined } }); Object.prototype.toString.call(p); return ks.join(',') })()	S:Symbol(Symbol.toStringTag)
+Object.prototype.toString.call({ [Symbol.toStringTag]: 'X' })	S:[object X]
+Object.prototype.toString.call({ get [Symbol.toStringTag]() { return 'G' } })	S:[object G]
+Object.prototype.toString.call(Object.create({ [Symbol.toStringTag]: 'P' }))	S:[object P]
+Object.prototype.toString.call({ [Symbol.toStringTag]: 5 })	S:[object Object]
+Object.prototype.toString.call(Object.assign([], { [Symbol.toStringTag]: 'Arr' }))	S:[object Arr]
+Object.prototype.toString.call(Object.assign(function(){}, { [Symbol.toStringTag]: 'Fn' }))	S:[object Fn]
+Object.prototype.toString.call(new Map) + Object.prototype.toString.call(Promise.resolve()) + Object.prototype.toString.call(Symbol())	S:[object Map][object Promise][object Symbol]
+Object.prototype.toString.call(MinKey)	S:[object MinKey]
+(() => { const a = [1, 2]; const out = []; for (const x of a) { out.push(x); if (a.length < 4) a.push(x * 10) } return out.join(',') })()	S:1,2,10,20
+(() => { const a = [1, 2, 3]; const it = a[Symbol.iterator](); it.next(); a.length = 1; return JSON.stringify(it.next()) })()	S:{"done":true}
+(() => { const a = [1, 2, 3]; const it = a.values(); const r = [it.next().value]; a.length = 0; r.push(it.next().done); a.push(9); r.push(it.next().done); return r.join(',') })()	S:1,true,true
+(() => { const o = { length: 2, 0: 'a', 1: 'b' }; const it = Array.prototype[Symbol.iterator].call(o); const r = [it.next().value]; o.length = 5; o[2] = 'c'; r.push(it.next().value, it.next().value); return r.join(',') })()	S:a,b,c
+(() => { let n = 0; const a = [1, 2, 3]; a.constructor = { [Symbol.species]: function (len) { n++; return [] } }; a.filter(x => x > 1); return n })()	J:0
+(() => { const a = [1, 2, 3]; a.constructor = { [Symbol.species]: function (len) { return { tag: 'S', len } } }; const r = a.map(x => x * 2); return JSON.stringify(r) })()	S:[2,4,6]
+(() => { let got = 0; const a = [1, 2]; Object.defineProperty(a, 'constructor', { get() { got++; return Array } }); a.map(x => x); a.filter(x => x); a.slice(); a.concat([]); a.splice(0, 0); return got })()	J:5
+(() => { class MyA extends Array {}; const a = MyA.from([1, 2, 3]); return [a.filter(x => x > 1) instanceof MyA, a.map(x => x) instanceof MyA, a.slice() instanceof MyA].join(',') })()	S:true,true,true
+(() => { const a = [1, 2]; a.constructor = undefined; return Array.isArray(a.map(x => x)) })()	J:true
+(() => { const a = [1, 2]; a.constructor = 5; try { a.map(x => x); return 'ok' } catch (e) { return e.name + ':' + e.message } })()	S:ok
+(() => { const a = [1, 2]; a.constructor = { [Symbol.species]: 5 }; try { a.map(x => x); return 'ok' } catch (e) { return e.name + ':' + e.message } })()	S:ok
+(() => { const a = [1, 2]; a.constructor = { [Symbol.species]: null }; return Array.isArray(a.filter(x => x)) })()	J:true
+eval('(class { get constructor() {} })')	E:SyntaxError:a class constructor definition must be a plain public method
+eval('(class { set constructor(v) {} })')	E:SyntaxError:a class constructor definition must be a plain public method
+eval('(class { *constructor() {} })')	E:SyntaxError:a class constructor definition must be a plain public method
+eval('(class { async constructor() {} })')	E:SyntaxError:a class constructor definition must be a plain public method
+eval('(class { constructor() {} constructor() {} })')	E:SyntaxError:a class cannot have more than one constructor definition
+eval('(class { static constructor() { return 1 } }).constructor()')	J:1
+eval('(class { static prototype() {} })')	E:SyntaxError:a class may not have a static property named 'prototype'
+eval('(class { static get prototype() {} })')	E:SyntaxError:a class may not have a static property named 'prototype'
+Object.getPrototypeOf(MinKey) === Function.prototype	J:false
+Object.getPrototypeOf(MinKey) === Object.getPrototypeOf(MaxKey)	J:false
+Object.getOwnPropertyNames(Object.getPrototypeOf(MinKey)).join(',')	S:constructor,tojson,toJSON,singleton
+Object.getPrototypeOf(Object.getPrototypeOf(MinKey)) === Function.prototype	J:false
+MinKey.length + ',' + MinKey.name + ',' + MaxKey.name	S:undefined,undefined,undefined
+typeof MinKey.tojson + typeof MinKey.toJSON + typeof MinKey.toString	S:functionfunctionfunction
+MinKey.toString === Function.prototype.toString	J:false
+MinKey.tojson() + '|' + MaxKey.tojson()	S:{ "$minKey" : 1 }|{ "$maxKey" : 1 }
+MinKey.toString() + '|' + MaxKey.toString()	S:[object MinKey]|[object MaxKey]
+JSON.stringify(MinKey.toJSON())	S:{"$minKey":1}
+MinKey === MinKey	J:true
+(() => { try { return typeof MinKey() } catch (e) { return e.name + ':' + e.message } })()	S:function
+(() => { try { return typeof new MinKey() } catch (e) { return e.name + ':' + e.message } })()	S:function
+MinKey instanceof Function	J:false
+Object.prototype.toString.call(Object.getPrototypeOf(MinKey))	S:[object MinKey]
+Object.getOwnPropertyNames(Object.getPrototypeOf(MaxKey)).join(',')	S:constructor,tojson,toJSON,singleton
+typeof Object.getPrototypeOf(MinKey)	S:function
+Object.getPrototypeOf(MinKey) === Object.prototype	J:false
+(() => { const d = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(MinKey), 'tojson'); return d ? [d.writable, d.enumerable, d.configurable].join() : 'none' })()	S:true,false,true
+Object.isExtensible(MinKey) + ',' + Object.isFrozen(MinKey)	S:false,true
+'' + MinKey	S:[object MinKey]
+MinKey.tojson.length	J:0
+JSON.stringify({a: MinKey})	S:{"a":{"$minKey":1}}
+DBPointer.length + ',' + DBRef.length	S:0,0
+(() => { const p = new DBPointer('a.b', ObjectId('5f0000000000000000000000')); return Object.keys(p).join(',') + '|' + p.getCollection() + '|' + p.getId() + '|' + p.toString() + '|' + JSON.stringify(p) })()	S:|a.b|5f0000000000000000000000|DBPointer("a.b", ObjectId("5f0000000000000000000000"))|{"ns":"a.b","id":{"$oid":"5f0000000000000000000000"}}
+(() => { const p = new DBRef('c', 5, 'd'); return Object.keys(p).join(',') + '|' + p.getCollection() + '|' + p.getId() + '|' + p.getDb() + '|' + p.getRef() + '|' + p.toString() + '|' + JSON.stringify(p) + '|' + p.tojson() })()	S:$ref,$id,$db|c|5|d|c|DBRef("c", 5, "d")|{"$ref":"c","$id":5,"$db":"d"}|DBRef("c", 5, "d")
+(() => { const p = new DBRef('c', 5); return Object.keys(p).join(',') + '|' + p.getDb() + '|' + p.toString() + '|' + JSON.stringify(p) })()	S:$ref,$id|undefined|DBRef("c", 5)|{"$ref":"c","$id":5}
+(() => { try { new DBPointer('a', 5) } catch (e) { return e.name + ':' + e.message } })()	S:Error:DBPointer 2nd parameter must be an ObjectId
+(() => { try { new DBPointer(5, ObjectId()) } catch (e) { return e.name + ':' + e.message } })()	S:Error:DBPointer 1st parameter must be a string
+(() => { try { new DBRef(5, 5) } catch (e) { return e.name + ':' + e.message } })()	S:Error:DBRef 1st parameter must be a string
+(() => { try { new DBRef('c') } catch (e) { return e.name + ':' + e.message } })()	S:Error:DBRef needs 2 or 3 arguments
+(() => { try { DBRef('c', 1) ; return 'ok'} catch (e) { return e.name + ':' + e.message } })()	S:ok
+(() => { try { new DBPointer('a.b', ObjectId('5f0000000000000000000000')).fetch() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:can't access property "a.b", globalThis.db is undefined
+(() => { try { new DBRef('c', 1).fetch() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:can't access property "c", globalThis.db is undefined
+(() => { const p = new DBPointer('a.b', ObjectId('5f0000000000000000000000')); return p.tojson() })()	S:DBPointer("a.b", ObjectId("5f0000000000000000000000"))
+(() => { const p = new DBPointer('a.b', ObjectId('5f0000000000000000000000')); return Object.getOwnPropertyNames(p).join(',') + '|' + p.ns + '|' + typeof p.id })()	S:ns,id|a.b|object
+(() => { const p = new DBRef('c', 5, 'd'); return Object.getOwnPropertyNames(p).join(',') + '|' + p.$ref + p.$id + p.$db })()	S:$ref,$id,$db|c5d
+NumberLong(5).toNumber() + ',' + NumberLong(5).toString() + ',' + NumberLong(5).tojson()	S:5,NumberLong(5),NumberLong(5)
+NumberLong("-9223372036854775808").top + ',' + NumberLong("-9223372036854775808").bottom + ',' + NumberLong("-9223372036854775808").floatApprox	S:2147483648,0,-9223372036854776000
+NumberLong("4294967296").top + ',' + NumberLong("4294967296").bottom + ',' + NumberLong("4294967296").exactValueString	S:1,0,4294967296
+NumberLong(5).compare(NumberLong(-7)) + ',' + NumberLong("9223372036854775807").compare(NumberLong("9223372036854775806"))	S:1,1
+(() => { try { return NumberLong(5).compare() } catch (e) { return e.name + ':' + e.message } })()	S:Error:NumberLong.compare() needs 1 argument
+(() => { try { return NumberLong.prototype.compare.call(5, NumberLong(1)) } catch (e) { return e.name + ':' + e.message } })()	S:Error:Cannot call "compare" on non-object of type "number"
+(() => { try { return NumberLong.prototype.floatApprox } catch (e) { return e.name + ':' + e.message } })()	J:0
+(() => { try { return NumberLong.prototype.top } catch (e) { return e.name + ':' + e.message } })()	J:0
+(() => { try { return NumberLong.prototype.exactValueString } catch (e) { return e.name + ':' + e.message } })()	S:0
+(() => { const d = Object.getOwnPropertyDescriptor(NumberLong.prototype, 'floatApprox'); return typeof d.get + typeof d.value + d.enumerable + d.configurable })()	S:functionundefinedtruefalse
+(() => { const d = Object.getOwnPropertyDescriptor(NumberLong.prototype, 'compare'); return typeof d.get + typeof d.value + d.enumerable + d.configurable + d.writable })()	S:undefinedfunctionfalsefalsefalse
+(() => { const d = Object.getOwnPropertyDescriptor(Timestamp.prototype, 'getTime'); return typeof d.value + d.enumerable + d.configurable + d.writable })()	S:functiontruefalsefalse
+(() => { try { return Timestamp.prototype.getTime.call(5) } catch (e) { return e.name + ':' + e.message } })()	J:undefined
+(() => { try { return Timestamp.prototype.toStringIncomparable.call({}) } catch (e) { return e.name + ':' + e.message } })()	S:Timestamp(undefined, undefined)
+Timestamp(5,6).toString() + '|' + Timestamp(5,6).tojson()	S:Timestamp(5, 6)|Timestamp(5, 6)
+Timestamp(4294967295,4294967295).toStringIncomparable() + Timestamp(0, 0).getTime()	S:Timestamp(4294967295, 4294967295)0
+Object.keys(Timestamp(5, 6)).join(',') + '|' + Object.getOwnPropertyNames(Timestamp(5, 6)).join(',')	S:t,i|t,i
+NumberLong.prototype.compare.length + ',' + Timestamp.prototype.getTime.length	S:0,0
+(() => { try { return NumberLong(5).equals } catch (e) { return e.name + ':' + e.message } })()	J:undefined
+(() => { try { return typeof NumberInt(5).equals + typeof NumberDecimal('1').valueOf + typeof NumberDecimal('1').toNumber } catch (e) { return e.name + ':' + e.message } })()	S:undefinedfunctionundefined
+typeof ObjectId().toNumber + typeof BinData(0, '').valueOf + typeof BinData(0,'').equals + typeof Timestamp(1,1).valueOf + typeof Timestamp(1,1).equals	S:undefinedfunctionundefinedfunctionundefined
+['NumberLong','NumberInt','NumberDecimal','Timestamp','ObjectId','BinData','DBPointer','DBRef'].map(n => { const C = globalThis[n]; const P = C.prototype; return n + '(' + Object.getOwnPropertyNames(C).map(k => { const d = Object.getOwnPropertyDescriptor(C, k); return k + ':' + (d.get ? 'g' : 'v') + [d.writable, d.enumerable, d.configurable].map(Number).join('') }).join(' ') + ')[' + Object.getOwnPropertyNames(P).map(k => { const d = Object.getOwnPropertyDescriptor(P, k); return k + ':' + (d.get ? 'g' + (d.set ? 's' : '') : typeof d.value) + [d.writable, d.enumerable, d.configurable].map(Number).join('') + (typeof d.value === 'function' ? d.value.length : '') }).join(' ') + ']' }).join(' || ')	S:NumberLong(prototype:v000 length:v000 name:v000)[constructor:function0000 toNumber:function0000 toString:function0000 toJSON:function0000 valueOf:function0000 compare:function0000 floatApprox:gNaN10 top:gNaN10 bottom:gNaN10 exactValueString:gNaN10 tojson:function0100] || NumberInt(prototype:v000 length:v000 name:v000)[constructor:function0000 toNumber:function0000 toString:function0000 toJSON:function0000 valueOf:function0000 tojson:function0100] || NumberDecimal(prototype:v000 length:v000 name:v000)[constructor:function0000 toString:function0000 toJSON:function0000 tojson:function0100 equals:function0101] || Timestamp(prototype:v000 length:v000 name:v000)[constructor:function0000 toJSON:function0000 tojson:function0100 getTime:function0100 getInc:function0100 toString:function0100 toStringIncomparable:function0100] || ObjectId(prototype:v000 fromDate:v010 length:v000 name:v000)[constructor:function0000 toString:function0000 toJSON:function0000 str:gNaN10 tojson:function0100 valueOf:function0100 isObjectId:boolean010 getTimestamp:function0100 equals:function0101] || BinData(prototype:v000 length:v000 name:v000)[constructor:function0000 base64:function0000 hex:function0000 toString:function0000 toJSON:function0000 tojson:function0100 subtype:function0100 length:function0100] || DBPointer(prototype:v000 length:v000 name:v000)[constructor:function0000 fetch:function0100 tojson:function0100 toJSON:function0100 getCollection:function0100 getId:function0100 toString:function0100] || DBRef(prototype:v000 length:v000 name:v000)[constructor:function0000 fetch:function0100 tojson:function0100 getDb:function0100 getCollection:function0100 getRef:function0100 getId:function0100 toString:function0100]
+['NumberLong','NumberInt','NumberDecimal','Timestamp','ObjectId','BinData','DBPointer','DBRef'].map(n => { const C = globalThis[n]; return n + ':' + C.length + ':' + C.name + ':' + (Object.getPrototypeOf(C) === Function.prototype) + ':' + (Object.getPrototypeOf(C.prototype) === Object.prototype) + ':' + Object.prototype.toString.call(C.prototype) }).join(' ')	S:NumberLong:0:NumberLong:true:true:[object NumberLong] NumberInt:0:NumberInt:true:true:[object NumberInt] NumberDecimal:0:NumberDecimal:true:true:[object NumberDecimal] Timestamp:0:Timestamp:true:true:[object Timestamp] ObjectId:0:ObjectId:true:true:[object ObjectId] BinData:0:BinData:true:true:[object BinData] DBPointer:0:DBPointer:true:true:[object DBPointer] DBRef:0:DBRef:true:true:[object DBRef]
+(() => { const P = Object.getPrototypeOf(MinKey); const PP = Object.getPrototypeOf(P); return [PP === Object.prototype, PP === Function.prototype, typeof PP, PP && Object.getOwnPropertyNames(PP).join(','), PP && Object.getPrototypeOf(PP) === Object.prototype].join('|') })()	S:true|false|object|toString,toLocaleString,valueOf,hasOwnProperty,isPrototypeOf,propertyIsEnumerable,__defineGetter__,__defineSetter__,__lookupGetter__,__lookupSetter__,__proto__,constructor,bsonsize|false
+(() => { const P = Object.getPrototypeOf(MinKey); return Object.getOwnPropertyNames(P).map(k => { const d = Object.getOwnPropertyDescriptor(P, k); return k + ':' + (d.get ? 'g' : typeof d.value) + [d.writable, d.enumerable, d.configurable].map(Number).join('') + (typeof d.value === 'function' ? d.value.length : '') }).join(' ') })()	S:constructor:function1010 tojson:function1010 toJSON:function1010 singleton:function111undefined
+(() => { const P = Object.getPrototypeOf(MinKey); return [P.constructor === MinKey, P.singleton === MinKey, typeof P.singleton, P.tojson === MinKey.tojson, Object.isFrozen(P), Object.isExtensible(P)].join(',') })()	S:false,true,function,true,false,true
+MinKey() === MinKey	J:true
+new MinKey() === MinKey	J:true
+(() => { try { MinKey.x = 1; return MinKey.x } catch (e) { return e.name + ':' + e.message } })()	J:undefined
+(() => { 'use strict'; try { MinKey.x = 1; return MinKey.x } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:can't define property "x": MinKey is not extensible
+typeof Object.getPrototypeOf(MinKey).tojson.call({})	E:Error:Cannot call "tojson" on object of type "Object"
+(() => { try { return Object.getPrototypeOf(MinKey).tojson.call(5) } catch (e) { return e.name + ':' + e.message } })()	S:Error:Cannot call "tojson" on non-object of type "number"
+(() => { try { return Object.getPrototypeOf(MinKey).tojson.call({}) } catch (e) { return e.name + ':' + e.message } })()	S:Error:Cannot call "tojson" on object of type "Object"
+(() => { try { return JSON.stringify(Object.getPrototypeOf(MinKey).toJSON.call({})) } catch (e) { return e.name + ':' + e.message } })()	S:Error:Cannot call "toJSON" on object of type "Object"
+(() => { try { return Object.getPrototypeOf(MaxKey).tojson.call(MinKey) } catch (e) { return e.name + ':' + e.message } })()	S:Error:Cannot call "tojson" on object of type "MinKey"
+MinKey.call === undefined	J:true
+typeof MinKey.apply + typeof MinKey.bind + typeof MinKey.hasOwnProperty	S:undefinedundefinedfunction
+MinKey.hasOwnProperty('tojson')	J:false
+Object.prototype.toString.call(Object.getPrototypeOf(Object.getPrototypeOf(MinKey)))	S:[object Object]
+MinKey.valueOf() === MinKey	J:true
+(() => { const P = Object.getPrototypeOf(MinKey); try { return typeof P() } catch (e) { return e.name + ':' + e.message } })()	S:function
+(() => { const P = Object.getPrototypeOf(MinKey); return [P.length, P.name, typeof P.call].join() })()	S:,,undefined
+Timestamp.prototype.toString.call({t:1,i:2}) + '|' + Timestamp.prototype.tojson.call({t:1,i:2}) + '|' + Timestamp.prototype.getInc.call({i:7})	E:TypeError:this.toStringIncomparable is not a function
+JSON.stringify(Timestamp.prototype.toJSON.call({t:1,i:2}))	E:Error:Cannot call "toJSON" on object of type "Object"
+(() => { try { return Timestamp.prototype.toString.call(5) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:this.toStringIncomparable is not a function
+(() => { try { return Timestamp.prototype.toString() } catch (e) { return e.name + ':' + e.message } })()	S:Timestamp(undefined, undefined)
+(() => { try { return JSON.stringify(Timestamp.prototype.toJSON()) } catch (e) { return e.name + ':' + e.message } })()	S:{"$timestamp":{"t":null,"i":null}}
+(() => { try { return Timestamp.prototype.tojson.call(null) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:this.toStringIncomparable is not a function
+(() => { const t = Timestamp(1, 2); t.t = 9; return t.toString() + '|' + t.getTime() + '|' + JSON.stringify(t) })()	S:Timestamp(9, 2)|9|{"$timestamp":{"t":9,"i":2}}
+(() => { const t = Timestamp(1, 2); const d = Object.getOwnPropertyDescriptor(t, 't'); return [d.writable, d.enumerable, d.configurable].join() })()	S:true,true,true
+DBRef.prototype.getCollection.call({$ref: 'x'}) + '|' + DBRef.prototype.getId.call({$id: 3}) + '|' + DBRef.prototype.getDb.call({$db: 'q'}) + '|' + DBRef.prototype.getRef.call({$ref: 'y'})	S:x|3|q|y
+DBRef.prototype.toString.call({$ref: 'x', $id: 3}) + '|' + DBRef.prototype.tojson.call({$ref: 'x', $id: 'a', $db: 'z'})	S:DBRef("x", 3)|[object Object]
+DBRef.prototype.toString.call({}) + '|' + DBRef.prototype.toString.call({$ref: 'x', $id: {a: 1}})	S:DBRef(undefined, undefined)|DBRef("x", { "a" : 1 })
+(() => { try { return DBRef.prototype.toString.call(5) } catch (e) { return e.name + ':' + e.message } })()	S:DBRef(undefined, undefined)
+DBPointer.prototype.getCollection.call({ns: 'x'}) + '|' + DBPointer.prototype.getId.call({id: 3}) + '|' + DBPointer.prototype.tojson.call({ns: 'x', id: 4})	S:x|3|[object Object]
+JSON.stringify(DBPointer.prototype.toJSON.call({ns: 'x', id: 4}))	S:{"ns":"x","id":4}
+(() => { try { return DBPointer.prototype.toString.call(5) } catch (e) { return e.name + ':' + e.message } })()	S:DBPointer(undefined, undefined)
+(() => { const r = new DBRef('c', 5); r.$ref = 'z'; return r.toString() })()	S:DBRef("z", 5)
+(() => { const r = new DBRef('c', NumberLong(5), 'd'); return r.toString() + '|' + JSON.stringify(r) })()	S:DBRef("c", NumberLong(5), "d")|{"$ref":"c","$id":{"$numberLong":"5"},"$db":"d"}
+(() => { const r = new DBRef('c', {a: [1, 'x']}); return r.toString() })()	S:DBRef("c", { "a" : [ 1, "x" ] })
+(() => { const r = new DBRef('c', 5, 7); return r.toString() })()	E:Error:DBRef 3rd parameter must be a string
+(() => { try { return new DBRef('c', 5, 'd', 'e').toString() } catch (e) { return e.name + ':' + e.message } })()	S:Error:DBRef needs 2 or 3 arguments
+(() => { try { return DBRef().toString() } catch (e) { return e.name + ':' + e.message } })()	S:Error:DBRef needs 2 or 3 arguments
+(() => { try { return DBPointer().toString() } catch (e) { return e.name + ':' + e.message } })()	S:Error:DBPointer needs 2 arguments
+(() => { try { return DBPointer('a').toString() } catch (e) { return e.name + ':' + e.message } })()	S:Error:DBPointer needs 2 arguments
+(() => { try { return DBPointer('a', ObjectId('5f0000000000000000000000'), 3).toString() } catch (e) { return e.name + ':' + e.message } })()	S:Error:DBPointer needs 2 arguments
+(() => { try { return Object.getPrototypeOf(DBPointer('a', ObjectId('5f0000000000000000000000'))) === DBPointer.prototype } catch (e) { return e.name + ':' + e.message } })()	J:true
+(() => { const p = new DBPointer('a.b', ObjectId('5f0000000000000000000000')); const d = Object.getOwnPropertyDescriptor(p, 'ns'); return [typeof d.value, d.writable, d.enumerable, d.configurable, Object.isExtensible(p)].join() })()	S:string,false,false,true,true
+(() => { const p = new DBPointer('a.b', ObjectId('5f0000000000000000000000')); p.ns = 'q'; return p.toString() + p.getCollection() })()	S:DBPointer("a.b", ObjectId("5f0000000000000000000000"))a.b
+(() => { const p = new DBPointer('a.b', ObjectId('5f0000000000000000000000')); return Object.prototype.toString.call(p) })()	S:[object DBPointer]
+ObjectId('5f0000000000000000000000').valueOf()	S:5f0000000000000000000000
+ObjectId('5f0000000000000000000000').equals(ObjectId('5f0000000000000000000000')) + ',' + ObjectId('5f0000000000000000000000').equals('5f0000000000000000000000')	S:true,false
+(() => { try { return ObjectId('5f0000000000000000000000').equals(5) } catch (e) { return e.name + ':' + e.message } })()	J:false
+(() => { try { return ObjectId('5f0000000000000000000000').equals() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:can't access property "str", other is undefined
+(() => { try { return ObjectId.prototype.equals.call({str: '5f0000000000000000000000'}, ObjectId('5f0000000000000000000000')) } catch (e) { return e.name + ':' + e.message } })()	J:true
+(() => { try { return ObjectId.prototype.valueOf.call({str: 'abc'}) } catch (e) { return e.name + ':' + e.message } })()	S:abc
+(() => { try { return ObjectId.prototype.getTimestamp.call({}) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:this.valueOf().slice is not a function
+(() => { try { return ObjectId.prototype.tojson.call({str: 'abc'}) } catch (e) { return e.name + ':' + e.message } })()	S:[object Object]
+(() => { try { return ObjectId.prototype.toString.call({str: 'abc'}) } catch (e) { return e.name + ':' + e.message } })()	S:Error:Cannot call "toString" on object of type "Object"
+(() => { try { return ObjectId.prototype.str } catch (e) { return e.name + ':' + e.message } })()	S:Error:Cannot call "getter" on prototype of "ObjectId"
+NumberDecimal('1.0').equals(NumberDecimal('1')) + ',' + NumberDecimal('1').equals(NumberDecimal('1')) + ',' + NumberDecimal('1').equals(1)	E:ReferenceError:numberDecimalsEqual is not defined
+(() => { try { return NumberDecimal('1').equals() } catch (e) { return e.name + ':' + e.message } })()	S:ReferenceError:numberDecimalsEqual is not defined
+(() => { try { return NumberDecimal('1').equals('1') } catch (e) { return e.name + ':' + e.message } })()	S:ReferenceError:numberDecimalsEqual is not defined
+(() => { try { return NumberDecimal.prototype.equals.call({}, NumberDecimal('1')) } catch (e) { return e.name + ':' + e.message } })()	S:ReferenceError:numberDecimalsEqual is not defined
+(() => { try { return NumberLong.prototype.toString() } catch (e) { return e.name + ':' + e.message } })()	S:NumberLong(0)
+(() => { try { return NumberLong.prototype.compare(NumberLong(0)) } catch (e) { return e.name + ':' + e.message } })()	J:0
+(() => { try { return NumberLong.prototype.valueOf() } catch (e) { return e.name + ':' + e.message } })()	J:0
+(() => { try { return NumberLong.prototype.floatApprox + NumberLong.prototype.bottom } catch (e) { return e.name + ':' + e.message } })()	J:0
+(() => { try { return Object.getOwnPropertyDescriptor(NumberLong.prototype, 'top').get.call({}) } catch (e) { return e.name + ':' + e.message } })()	S:Error:Cannot call "top" on object of type "Object"
+(() => { try { return Object.getOwnPropertyDescriptor(NumberLong.prototype, 'top').get.call(5) } catch (e) { return e.name + ':' + e.message } })()	S:Error:Cannot call "top" on non-object of type "number"
+(() => { try { return NumberLong.prototype.compare.call({}, NumberLong(1)) } catch (e) { return e.name + ':' + e.message } })()	S:Error:Cannot call "compare" on object of type "Object"
+(() => { try { return NumberLong(1).compare({}) } catch (e) { return e.name + ':' + e.message } })()	S:Error:NumberLong.compare() argument must be a NumberLong
+(() => { try { return NumberLong(1).compare(NumberInt(1)) } catch (e) { return e.name + ':' + e.message } })()	S:Error:NumberLong.compare() argument must be a NumberLong
+(() => { try { return NumberInt.prototype.toString() } catch (e) { return e.name + ':' + e.message } })()	S:NumberInt(0)
+(() => { try { return NumberInt.prototype.toNumber.call({}) } catch (e) { return e.name + ':' + e.message } })()	S:Error:Cannot call "toNumber" on object of type "Object"
+(() => { try { return BinData.prototype.hex.call({}) } catch (e) { return e.name + ':' + e.message } })()	S:Error:Cannot call "hex" on object of type "Object"
+(() => { try { return BinData.prototype.length() } catch (e) { return e.name + ':' + e.message } })()	J:undefined
+(() => { try { return NumberDecimal.prototype.toString() } catch (e) { return e.name + ':' + e.message } })()	S:NumberDecimal("0")
+(() => { try { return ObjectId.prototype.toString() } catch (e) { return e.name + ':' + e.message } })()	S:Error:Cannot call "toString" on prototype of "ObjectId"
+(() => { try { return ObjectId.prototype.getTimestamp() } catch (e) { return e.name + ':' + e.message } })()	S:Error:Cannot call "getter" on prototype of "ObjectId"
+(() => { try { return ObjectId.prototype.valueOf() } catch (e) { return e.name + ':' + e.message } })()	S:Error:Cannot call "getter" on prototype of "ObjectId"
+(() => { try { return BinData.prototype.toString() } catch (e) { return e.name + ':' + e.message } })()	S:Error:Cannot call "toString" on prototype of "BinData"
+(() => { try { return JSON.stringify(NumberLong.prototype.toJSON()) } catch (e) { return e.name + ':' + e.message } })()	S:{"$numberLong":"0"}
+(() => { try { return NumberLong.prototype.tojson.call(NumberInt(1)) } catch (e) { return e.name + ':' + e.message } })()	S:NumberInt(1)
+(() => { try { return NumberLong.prototype.tojson.call(ObjectId('5f0000000000000000000000')) } catch (e) { return e.name + ':' + e.message } })()	S:ObjectId("5f0000000000000000000000")
+NumberLong(5).toNumber() + NumberInt(5).toNumber()	J:10
+(() => { const b = BinData(0, 'AAAA'); return Object.getOwnPropertyNames(b).map(k => { const d = Object.getOwnPropertyDescriptor(b, k); return k + ':' + typeof d.value + [d.writable, d.enumerable, d.configurable].map(Number).join('') }).join(' ') + '|' + b.length() + '|' + b.subtype() })()	S:len:number001 type:number001|3|0
+(() => { try { return BinData.prototype.subtype.call({type: 7}) + ',' + BinData.prototype.length.call({len: 9}) + ',' + BinData.prototype.subtype.call({}) } catch (e) { return e.name + ':' + e.message } })()	S:7,9,undefined
+(() => { try { return BinData.prototype.tojson.call({}) } catch (e) { return e.name + ':' + e.message } })()	S:[object Object]
+(() => { try { return BinData.prototype.subtype() } catch (e) { return e.name + ':' + e.message } })()	J:undefined
+(() => { const r = new DBRef('c', 5, ''); return r.toString() + '|' + Object.keys(r).join() })()	S:DBRef("c", 5)|$ref,$id,$db
+(() => { try { return new DBRef('c', 1, 'd').fetch() } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:can't access property "getSiblingDB", globalThis.db is undefined
+(() => { try { return DBRef.prototype.fetch.call({}) } catch (e) { return e.name + ':' + e.message } })()	S:Error:assert failed : need a ns
+(() => { try { return DBPointer.prototype.fetch.call({}) } catch (e) { return e.name + ':' + e.message } })()	S:Error:assert failed : need a ns
+(() => { globalThis.db = { c: { findOne(q) { return 'F' + JSON.stringify(q) } }, getSiblingDB(n) { return { c: { findOne(q) { return 'S' + n + JSON.stringify(q) } } } } }; try { return new DBRef('c', 1).fetch() + '|' + new DBRef('c', 2, 'd').fetch() } catch (e) { return e.name + ':' + e.message } finally { delete globalThis.db } })()	S:TypeError:can't access property "c", globalThis.db is undefined
+(() => { globalThis.db = { 'a.b': { findOne(q) { return 'F' + JSON.stringify(q) } } }; try { return new DBPointer('a.b', ObjectId('5f0000000000000000000000')).fetch() } catch (e) { return e.name + ':' + e.message } finally { delete globalThis.db } })()	S:TypeError:can't access property "a.b", globalThis.db is undefined
+DBPointer.prototype.toString.call({ns: 'x', id: {a: 1}}) + '|' + DBPointer.prototype.toString.call({ns: 5, id: 'q'})	S:DBPointer("x", { "a" : 1 })|DBPointer(5, "q")
+DBRef.prototype.toString.call({$ref: 5, $id: 'q', $db: 0}) + '|' + DBRef.prototype.toString.call({$ref: 'r', $id: 'q', $db: null}) + '|' + DBRef.prototype.toString.call({$ref: 'r', $id: 'q', $db: 'x'})	S:DBRef(5, "q")|DBRef("r", "q")|DBRef("r", "q", "x")
+(() => { const P = Object.getPrototypeOf(MinKey); return [P() === MinKey, typeof P.constructor, P.constructor === P, P.constructor.name, P.constructor === Object, P.constructor === Function].join() })()	S:true,function,false,MinKey,false,false
+(() => { const P = Object.getPrototypeOf(MaxKey); return [P() === MaxKey, P.singleton === MaxKey, new P() === MaxKey].join() })()	S:true,true,true
+(() => { const P = Object.getPrototypeOf(MinKey); return Object.getOwnPropertyNames(P.constructor).join() })()	S:prototype,length,name
+(() => { try { return Object.getPrototypeOf(MinKey).tojson() } catch (e) { return e.name + ':' + e.message } })()	S:{ "$minKey" : 1 }
+(() => { try { return MinKey.toString.call(5) } catch (e) { return e.name + ':' + e.message } })()	S:[object Number]
+MinKey.toString === Object.prototype.toString	J:true
+Object.isSealed(MinKey) + ',' + delete MinKey.tojson	S:true,true
+(() => { const P = Object.getPrototypeOf(MinKey); P.extra = 3; const r = MinKey.extra; delete P.extra; return r })()	J:3
+NumberLong.prototype.tojson.name + '|' + ObjectId.prototype.valueOf.name + '|' + NumberLong.prototype.compare.name + '|' + Object.getOwnPropertyDescriptor(NumberLong.prototype, 'top').get.name + '|' + Timestamp.prototype.getTime.name + '|' + NumberDecimal.prototype.equals.name	S:||compare|get top||
+NumberLong.prototype.toNumber.name + '|' + NumberLong.prototype.toJSON.name + '|' + Object.getOwnPropertyDescriptor(ObjectId.prototype, 'str').get.name + '|' + DBRef.prototype.getId.name + '|' + BinData.prototype.length.name + '|' + BinData.prototype.hex.name	S:toNumber|toJSON|get str|||hex
+Object.getPrototypeOf(MinKey).tojson.name + '|' + Object.getPrototypeOf(MinKey).toJSON.name + '|' + Object.getPrototypeOf(MinKey).name	S:tojson|toJSON|undefined
+NumberLong.prototype.valueOf.call(NumberLong(7)) + ',' + NumberLong.prototype.toNumber.call(NumberLong("9007199254740993"))	S:7,9007199254740992
+(() => { try { return NumberLong.prototype.valueOf.call(NumberInt(7)) } catch (e) { return e.name + ':' + e.message } })()	S:Error:Cannot call "valueOf" on object of type "NumberInt"
+(() => { try { return NumberInt.prototype.valueOf.call(NumberLong(7)) } catch (e) { return e.name + ':' + e.message } })()	S:Error:Cannot call "valueOf" on object of type "NumberLong"
+(() => { try { return NumberInt.prototype.valueOf.call(undefined) } catch (e) { return e.name + ':' + e.message } })()	S:Error:Cannot call "valueOf" on non-object of type "undefined"
+(() => { try { return NumberInt.prototype.valueOf.call('s') } catch (e) { return e.name + ':' + e.message } })()	S:Error:Cannot call "valueOf" on non-object of type "string"
+(() => { try { return NumberLong.prototype.toString.call(MinKey) } catch (e) { return e.name + ':' + e.message } })()	S:Error:Cannot call "toString" on object of type "MinKey"
+(() => { try { return NumberLong.prototype.toString.call([]) } catch (e) { return e.name + ':' + e.message } })()	S:Error:Cannot call "toString" on object of type "Array"
+(() => { try { return NumberLong.prototype.toString.call(new Date(0)) } catch (e) { return e.name + ':' + e.message } })()	S:Error:Cannot call "toString" on object of type "Date"
+(() => { try { return NumberLong.prototype.toString.call(function(){}) } catch (e) { return e.name + ':' + e.message } })()	S:Error:Cannot call "toString" on object of type "Function"
+(() => { try { return NumberLong.prototype.toString.call(Object.create(NumberLong.prototype)) } catch (e) { return e.name + ':' + e.message } })()	S:Error:Cannot call "toString" on object of type "Object"
+(() => { try { return NumberLong.prototype.toString.call(Timestamp(1, 2)) } catch (e) { return e.name + ':' + e.message } })()	S:Error:Cannot call "toString" on object of type "Timestamp"
+(() => { try { return NumberLong.prototype.toString.call(new DBRef('a', 1)) } catch (e) { return e.name + ':' + e.message } })()	S:Error:Cannot call "toString" on object of type "DBRef"
+(() => { try { return NumberLong.prototype.toString.call(Symbol()) } catch (e) { return e.name + ':' + e.message } })()	S:Error:unable to get type
+(() => { try { return NumberLong.prototype.toString.call(true) } catch (e) { return e.name + ':' + e.message } })()	S:Error:Cannot call "toString" on non-object of type "boolean"
+(() => { try { return NumberLong.prototype.toString.call(null) } catch (e) { return e.name + ':' + e.message } })()	S:Error:Cannot call "toString" on non-object of type "null"
+(() => { try { return NumberLong.prototype.toString.call(new Proxy({}, {})) } catch (e) { return e.name + ':' + e.message } })()	S:Error:Cannot call "toString" on object of type "Proxy"
+(() => { try { return NumberLong.prototype.toString.call(ObjectId.prototype) } catch (e) { return e.name + ':' + e.message } })()	S:Error:Cannot call "toString" on object of type "ObjectId"
+(() => { globalThis.db = 5; return typeof globalThis.db })()	S:number
+(() => { try { return DBRef.prototype.fetch.call({$ref: 'c'}) } catch (e) { return e.name + ':' + e.message } })()	S:Error:assert failed : need an id
+(() => { try { return DBPointer.prototype.fetch.call({ns: 'c'}) } catch (e) { return e.name + ':' + e.message } })()	S:Error:assert failed : need an id
+(() => { try { return DBPointer.prototype.fetch.call({ns: 'c', id: 0}) } catch (e) { return e.name + ':' + e.message } })()	S:Error:assert failed : need an id
+NumberDecimal('1') + 1	S:NumberDecimal("1")1
+(() => { try { return NumberDecimal('2') * 2 } catch (e) { return e.name + ':' + e.message } })()	J:null
+ObjectId('5f0000000000000000000000') + ''	S:5f0000000000000000000000
+BinData(0, 'AAAA') + ''	S:BinData(0,"AAAA")
+NumberLong(5) * 2 + ',' + NumberInt(5) * 2 + ',' + (Timestamp(5, 6) + 1)	S:10,10,Timestamp(5, 6)1
+(() => { try { return DBPointer(5, 6) } catch (e) { return e.name + ':' + e.message } })()	S:Error:DBPointer 1st parameter must be a string
+(() => { try { return DBRef(5, 6, 7) } catch (e) { return e.name + ':' + e.message } })()	S:Error:DBRef 1st parameter must be a string
+(() => { try { return DBRef('a', 6, 7, 8) } catch (e) { return e.name + ':' + e.message } })()	S:Error:DBRef needs 2 or 3 arguments
+(() => { try { return BinData.prototype.base64() } catch (e) { return e.name + ':' + e.message } })()	S:Error:Cannot call "base64" on prototype of "BinData"
+(() => { try { return JSON.stringify(ObjectId.prototype.toJSON()) } catch (e) { return e.name + ':' + e.message } })()	S:Error:Cannot call "toJSON" on prototype of "ObjectId"
+(() => { try { return JSON.stringify(BinData.prototype.toJSON()) } catch (e) { return e.name + ':' + e.message } })()	S:Error:Cannot call "toJSON" on prototype of "BinData"
+(() => { try { return JSON.stringify(NumberDecimal.prototype.toJSON()) + JSON.stringify(NumberInt.prototype.toJSON()) } catch (e) { return e.name + ':' + e.message } })()	S:{"$numberDecimal":"0"}0
+(() => { try { return NumberLong.prototype.exactValueString + NumberLong.prototype.valueOf() + NumberInt.prototype.valueOf() } catch (e) { return e.name + ':' + e.message } })()	S:000
+(() => { try { return Object.getOwnPropertyDescriptor(NumberLong.prototype, 'top').get.call(NumberInt(1)) } catch (e) { return e.name + ':' + e.message } })()	S:Error:Cannot call "top" on object of type "NumberInt"
+(() => { try { return Object.getOwnPropertyDescriptor(ObjectId.prototype, 'str').get.call({}) } catch (e) { return e.name + ':' + e.message } })()	S:Error:Cannot call "getter" on object of type "Object"
+(() => { try { return Timestamp.prototype.toJSON.call(5) } catch (e) { return e.name + ':' + e.message } })()	S:Error:Cannot call "toJSON" on non-object of type "number"
+(() => { try { return Object.getPrototypeOf(MinKey).toJSON.call(5) } catch (e) { return e.name + ':' + e.message } })()	S:Error:Cannot call "toJSON" on non-object of type "number"
+(() => { try { return Object.getPrototypeOf(MinKey).constructor() === MinKey } catch (e) { return e.name + ':' + e.message } })()	J:true
+Timestamp(-1, -1).toString() + '|' + Timestamp(2 ** 32, 1.5).toString() + '|' + Timestamp('5', null).toString()	E:Error:Timestamp time (seconds) must be non-negative and not greater than 4294967295, got -1
+(() => { try { return Timestamp('x', 1).toString() } catch (e) { return e.name + ':' + e.message } })()	S:Error:Timestamp time (seconds) must be a number
+(() => { try { return Timestamp(1).toString() } catch (e) { return e.name + ':' + e.message } })()	S:Error:Timestamp needs 0 or 2 arguments
+(() => { try { return Timestamp().toString() } catch (e) { return e.name + ':' + e.message } })()	S:Timestamp(0, 0)
+(() => { try { return Timestamp(1, 2, 3).toString() } catch (e) { return e.name + ':' + e.message } })()	S:Error:Timestamp needs 0 or 2 arguments
+(() => { try { return Timestamp(NaN, 1).toString() } catch (e) { return e.name + ':' + e.message } })()	S:Timestamp(0, 1)
+(() => { try { return Timestamp(1e20, 1).toString() } catch (e) { return e.name + ':' + e.message } })()	S:Error:Timestamp time (seconds) must be non-negative and not greater than 4294967295, got 7766279631452241920
+(() => { try { return BinData(0, 'AAAA').length() + BinData(4, 'AAAAAAAAAAAAAAAAAAAAAA==').subtype() } catch (e) { return e.name + ':' + e.message } })()	J:7
+UUID('01234567-89ab-cdef-0123-456789abcdef').length() + ',' + UUID('01234567-89ab-cdef-0123-456789abcdef').subtype() + ',' + Object.keys(UUID('01234567-89ab-cdef-0123-456789abcdef')).length	S:16,4,0
+Timestamp('5', 1).toString()	E:Error:Timestamp time (seconds) must be a number
+Timestamp(1, '5').toString()	E:Error:Timestamp increment must be a number
+Timestamp(1, null).toString()	E:Error:Timestamp increment must be a number
+Timestamp(1, 'x').toString()	E:Error:Timestamp increment must be a number
+Timestamp(1, -1).toString()	E:Error:Timestamp increment must be non-negative and not greater than 4294967295, got -1
+Timestamp(1, NaN).toString()	S:Timestamp(1, 0)
+Timestamp(1.9, 2.9).toString()	S:Timestamp(1, 2)
+Timestamp(NumberInt(1), 2).toString()	E:Error:Timestamp time (seconds) must be a number
+Timestamp(undefined, undefined).toString()	E:Error:Timestamp time (seconds) must be a number
+Timestamp(1, undefined).toString()	E:Error:Timestamp increment must be a number
+Timestamp(true, 2).toString()	E:Error:Timestamp time (seconds) must be a number
+Timestamp(1, 2 ** 32).toString()	E:Error:Timestamp increment must be non-negative and not greater than 4294967295, got 4294967296
+Timestamp(-0.5, 0).toString()	S:Timestamp(0, 0)
+Timestamp(4294967295.5, 0).toString()	S:Timestamp(4294967295, 0)
+Timestamp(1, 2).t === 1	J:true
+typeof Timestamp(1.9, 2.9).t + Timestamp(1.9, 2.9).t	S:number1
+new Timestamp(1, 2) instanceof Timestamp	J:true
+(() => { const t = Timestamp(1, 2); return JSON.stringify(Object.getOwnPropertyDescriptor(t, 'i')) })()	S:{"value":2,"writable":true,"enumerable":true,"configurable":true}
+(() => { 'use strict'; const f = Object.freeze(function(){}); try { f.x = 1 } catch (e) { return e.message } })()	S:can't define property "x": Function is not extensible
+(() => { 'use strict'; const f = Object.freeze([]); try { f.x = 1 } catch (e) { return e.message } })()	S:can't define property "x": Array is not extensible
+(() => { 'use strict'; const f = Object.freeze(new Date(0)); try { f.x = 1 } catch (e) { return e.message } })()	S:can't define property "x": Date is not extensible
+(() => { 'use strict'; const f = Object.freeze(NumberLong(1)); try { f.x = 1 } catch (e) { return e.message } })()	S:can't define property "x": NumberLong is not extensible
+(() => { 'use strict'; const f = Object.freeze(new Map()); try { f.x = 1 } catch (e) { return e.message } })()	S:can't define property "x": Map is not extensible
+(() => { try { Object.defineProperty(MinKey, 'x', {value: 1}) } catch (e) { return e.message } })()	S:can't define property "x": MinKey is not extensible
+(() => { try { Object.defineProperty(Object.preventExtensions(function(){}), 'x', {value: 1}) } catch (e) { return e.message } })()	S:can't define property "x": Function is not extensible
+(() => { try { Object.defineProperty(Object.preventExtensions(new Error('a')), 'x', {value: 1}) } catch (e) { return e.message } })()	S:can't define property "x": Error is not extensible
+(() => { try { Object.defineProperty(Object.preventExtensions(Timestamp(1, 2)), 'x', {value: 1}) } catch (e) { return e.message } })()	S:can't define property "x": Timestamp is not extensible
+Object.getOwnPropertyNames(Object.prototype).join()	S:toString,toLocaleString,valueOf,hasOwnProperty,isPrototypeOf,propertyIsEnumerable,__defineGetter__,__defineSetter__,__lookupGetter__,__lookupSetter__,__proto__,constructor,bsonsize
+(class A { constructor(){} m(){} }).toString()	S:class A { constructor(){} m(){} }
+(class A extends Object { m(){} }).toString()	S:class A extends Object { m(){} }
+(class   B{}).toString()	S:class   B{}
+(class /*c*/ C {} ).toString()	S:class /*c*/ C {}
+(() => { class D { static x = 1 } return Object.getOwnPropertyNames(D).join() })()	S:prototype,x,length,name
+(() => { const f = function () {}; Object.defineProperty(f, 'q', {value: 1}); return Object.getOwnPropertyNames(f).join() })()	S:q,prototype,length,name
+(() => { function f() {}; f.length; f.z = 1; return Object.getOwnPropertyNames(f).join() })()	S:length,z,prototype,name
+(() => { function f() {}; 'name' in f; f.z = 1; return Object.getOwnPropertyNames(f).join() })()	S:name,z,prototype,length
+(() => { function f() {}; f.hasOwnProperty('length'); f.z = 1; return Object.getOwnPropertyNames(f).join() })()	S:length,z,prototype,name
+(() => { function f() {}; Object.getOwnPropertyDescriptor(f, 'name'); f.z = 1; return Object.getOwnPropertyNames(f).join() })()	S:name,z,prototype,length
+(() => { function f() {}; Object.keys(f); f.z = 1; return Object.getOwnPropertyNames(f).join() })()	S:prototype,length,name,z
+(() => { function f() {}; for (const k in f); f.z = 1; return Object.getOwnPropertyNames(f).join() })()	S:prototype,length,name,z
+(() => { function f() {}; f.name = 'q'; f.z = 1; return Object.getOwnPropertyNames(f).join() })()	S:name,z,prototype,length
+(() => { function f() {}; f.bind(null); f.z = 1; return Object.getOwnPropertyNames(f).join() })()	S:z,prototype,length,name
+(() => { function f() {}; JSON.stringify(f); Object.freeze; f.z = 1; return Object.getOwnPropertyNames(f).join() })()	S:z,prototype,length,name
+(() => { function f() {}; f.z = 1; delete f.length; return Object.getOwnPropertyNames(f).join() })()	S:z,prototype,name
+(() => { const o = { m() {} }; o.m.z = 1; return Object.getOwnPropertyNames(o.m).join() })()	S:z,length,name
+(() => { const f = () => 1; f.z = 1; return Object.getOwnPropertyNames(f).join() })()	S:z,length,name
+(() => { function f() {}; Object.getOwnPropertyNames(f); f.z = 1; return Object.getOwnPropertyNames(f).join() })()	S:prototype,length,name,z
+(() => { const f = Math.max.bind(null); f.z = 1; return Object.getOwnPropertyNames(f).join() })()	S:length,name,z
+(() => { const f = function* () {}; f.z = 1; return Object.getOwnPropertyNames(f).join() })()	S:z,prototype,length,name
+(() => { function f() {}; Object.create(f).name; f.z = 1; return Object.getOwnPropertyNames(f).join() })()	S:name,z,prototype,length
+(() => { function f() {}; f.call; f.z = 1; return Object.getOwnPropertyNames(f).join() })()	S:z,prototype,length,name
+(() => { function f(a, b, c) {}; const g = f.bind(null, 1); return [g.name, g.length, typeof g.prototype, Object.getOwnPropertyNames(g).join()].join('|') })()	S:bound f|2|undefined|length,name
+(() => { function f(a) {}; const g = f.bind(null, 1, 2, 3); return [g.name, g.length].join('|') })()	S:bound f|0
+(() => { const g = (() => 1).bind(null); return [JSON.stringify(g.name), g.length].join('|') })()	S:"bound "|0
+(() => { function f() {}; Object.defineProperty(f, 'length', {value: 'x'}); Object.defineProperty(f, 'name', {value: 5}); const g = f.bind(); return [JSON.stringify(g.name), g.length].join('|') })()	S:"bound "|0
+(() => { function f() {}; Object.defineProperty(f, 'length', {value: 7.5}); const g = f.bind(null, 1); return g.length })()	J:6
+(() => { function f() {}; Object.defineProperty(f, 'length', {value: Infinity}); const g = f.bind(null, 1); return g.length })()	J:null
+(() => { function f() {}; Object.defineProperty(f, 'length', {value: -Infinity}); const g = f.bind(null, 1); return g.length })()	J:0
+(() => { function f() {}; const g = f.bind().bind(); return g.name })()	S:bound bound f
+(() => { function f() {}; const g = f.bind(); const d = Object.getOwnPropertyDescriptor(g, 'name'); return [d.writable, d.enumerable, d.configurable].join() + Object.getOwnPropertyDescriptor(g, 'length').configurable })()	S:false,false,truetrue
+(() => { function f() {}; delete f.name; return JSON.stringify(f.bind().name) })()	S:"bound "
+(() => { const o = { m() {} }; return typeof o.m.prototype + Object.getOwnPropertyNames(o.m).join() })()	S:undefinedlength,name
+(() => { class A { m() {} static s() {} get g() { return 1 } }; return typeof A.prototype.m.prototype + typeof A.s.prototype + Object.getOwnPropertyNames(A.prototype.m).join() })()	S:undefinedundefinedlength,name
+(() => { const f = async () => 1; return Object.getOwnPropertyNames(f).join() })()	S:length,name
+(() => { const o = { *g() {} }; return typeof o.g.prototype + Object.getOwnPropertyNames(o.g).join() })()	S:objectprototype,length,name
+(() => { try { return [...{ next() { return { done: true } } }].length } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:({next() { return { done: true } }}) is not iterable
+(() => { try { const o = { next() { return { done: true } } }; for (const x of o); return 'ok' } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:o is not iterable
+(() => { try { return Array.from({ next() { return { done: true } } }).length } catch (e) { return e.name + ':' + e.message } })()	J:0
+(() => { const a = [1, 2]; a[Symbol.iterator] = function* () { yield 9 }; return [...a].join() })()	S:1,2
+(() => { const a = [1, 2]; a[Symbol.iterator] = function* () { yield 9 }; return Array.from(a).join() + '|' + new Set(a).size })()	S:1,2|2
+(() => { const a = [1, 2]; a[Symbol.iterator] = function* () { yield 9 }; const [x] = a; return x })()	J:1
+(() => { const a = [1, 2]; a[Symbol.iterator] = function* () { yield 9 }; let s = ''; for (const x of a) s += x; return s })()	S:12
+(() => { const a = [1, 2]; a[Symbol.iterator] = function* () { yield 9 }; return Math.max(...a) })()	J:2
+(() => { const log = []; function C(n) { log.push('new:' + n); return {} } Object.defineProperty(C, Symbol.species, { get() { log.push('sp'); return C } }); const a = [1, 2, 3]; a.constructor = C; a.map(x => x); a.filter(x => x > 1); a.slice(1); a.concat([4]); a.splice(0, 2); return log.join() })()	S:
+(() => { function C() {} C[Symbol.species] = 5; const a = [1]; a.constructor = C; try { a.map(x => x); return 'ok' } catch (e) { return e.name + ':' + e.message } })()	S:ok
+(() => { function C() {} C[Symbol.species] = null; const a = [1]; a.constructor = C; return Array.isArray(a.map(x => x)) })()	J:true
+(() => { function C() {} C[Symbol.species] = undefined; const a = [1]; a.constructor = C; return Array.isArray(a.map(x => x)) })()	J:true
+(() => { function C() {} C[Symbol.species] = () => 1; const a = [1]; a.constructor = C; try { a.map(x => x); return 'ok' } catch (e) { return e.name + ':' + e.message } })()	S:ok
+(() => { const a = [1]; a.constructor = () => 1; try { return Array.isArray(a.map(x => x)) } catch (e) { return e.name + ':' + e.message } })()	J:true
+(() => { function C(n) { this.n = n } C[Symbol.species] = C; const a = [1, 2]; a.constructor = C; const r = a.map(x => x * 2); return JSON.stringify(r) + Object.getPrototypeOf(r).constructor.name })()	S:[2,4]Array
+(() => { function C(n) { return Object.freeze([]) } C[Symbol.species] = C; const a = [1, 2]; a.constructor = C; try { a.map(x => x); return 'ok' } catch (e) { return e.name + ':' + e.message } })()	S:ok
+(() => { const log = []; class B extends Array {}; const b = B.from([1, 2, 3]); Object.defineProperty(B, Symbol.species, { get() { log.push('sp'); return Array } }); const r = [b.flatMap(x => [x]), b.flat()].map(x => x instanceof B).join(); return r + log.length })()	S:false,false2
+(() => { class B extends Array {}; const b = B.from([1, 2, 3]); return [b.toSorted() instanceof B, b.toReversed() instanceof B, b.with(0, 1) instanceof B, b.toSpliced(0, 1) instanceof B].join() })()	S:false,false,false,false
+(() => { const p = new Proxy([1, 2], {}); return Array.isArray(Array.prototype.map.call(p, x => x)) })()	J:true
+(() => { const o = { length: 2, 0: 1, 1: 2, constructor: function () { return {} } }; return Array.isArray(Array.prototype.map.call(o, x => x)) })()	J:true
+(() => { const log = []; class C {} Object.defineProperty(C, Symbol.species, { get() { log.push('sp'); return C } }); const a = [1, 2, 3]; a.constructor = C; const r = a.map(x => x); return log.join() + '|' + (r instanceof C) })()	S:|false
+(() => { const log = []; class C extends Array {} Object.defineProperty(C, Symbol.species, { get() { log.push('sp'); return C } }); const a = [1, 2, 3]; a.constructor = C; const r = a.map(x => x); return log.join() + '|' + (r instanceof C) })()	S:|false
+(() => { const log = []; class C extends Array {} Object.defineProperty(C, Symbol.species, { get() { log.push('sp'); return C } }); const a = C.from([1, 2, 3]); const r = a.map(x => x); return log.join() + '|' + (r instanceof C) })()	S:sp|true
+(() => { const log = []; class C extends Array {} Object.defineProperty(C, Symbol.species, { get() { log.push('sp'); return Array } }); const a = C.from([1, 2, 3]); const r = [a.map(x => x), a.filter(x => 1), a.slice(), a.splice(0, 1), a.concat()]; return log.join() + '|' + r.map(x => x instanceof C).join() })()	S:sp,sp,sp,sp,sp|false,false,false,false,false
+(() => { const log = []; function C() {} C.prototype = Object.create(Array.prototype); Object.defineProperty(C, Symbol.species, { get() { log.push('sp'); return C } }); const a = [1]; a.constructor = C; const r = a.map(x => x); return log.join() + '|' + (r instanceof C) })()	S:|false
+(() => { const log = []; const C = function () {}; Object.setPrototypeOf(C, Array); Object.defineProperty(C, Symbol.species, { get() { log.push('sp'); return C } }); const a = [1]; a.constructor = C; const r = a.map(x => x); return log.join() + '|' + (r instanceof C) })()	S:|false
+(() => { const log = []; class C extends Array {} const a = [1, 2]; Object.setPrototypeOf(a, C.prototype); const r = a.map(x => x); return r instanceof C })()	J:true
+(() => { class C extends Array { constructor(n) { super(n); this.tag = 'T' } } const a = C.from([1, 2]); const r = a.map(x => x * 2); return JSON.stringify(r) + r.tag + r.length })()	S:[2,4]T2
+(() => { class C extends Array {} const a = C.of(1, 2, 3); return [a.filter(x => x > 1).length, a.slice(1) instanceof C, a.splice(0, 1) instanceof C, a.concat([5]) instanceof C, a.flat() instanceof C, a.flatMap(x => x) instanceof C].join() })()	S:2,true,true,true,true,true
+(() => { class C extends Array {} const a = new C(); return [a instanceof C, Array.isArray(a), a.length, C.of(1) instanceof C, C.from([1]) instanceof C].join() })()	S:true,true,0,true,true
+(() => { class C extends Array { static get [Symbol.species]() { return 5 } } try { C.from([1]).map(x => x); return 'ok' } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:constructor property is not a constructor
+(() => { class C extends Array { static get [Symbol.species]() { return () => 1 } } try { C.from([1]).filter(x => x); return 'ok' } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:constructor property is not a constructor
+(() => { class C extends Array { static get [Symbol.species]() { return null } } const r = C.from([1]).map(x => x); return Array.isArray(r) + ',' + (r instanceof C) })()	S:true,false
+(() => { class C extends Array { static get [Symbol.species]() { return function F() { return Object.freeze([]) } } } try { C.from([1]).map(x => x); return 'ok' } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:can't define array index property past the end of an array with non-writable length
+(() => { class C extends Array { static get [Symbol.species]() { return function F() { return Object.freeze({}) } } } try { C.from([1]).filter(x => x); return 'ok' } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:can't define property 0: Object is not extensible
+(() => { const log = []; class C extends Array { static get [Symbol.species]() { return function F(n) { log.push('F' + n); return {} } } } const a = C.from([1, 2, 3]); const r = [a.map(x => { log.push('cb'); return x }), a.filter(x => x > 1), a.slice(1, 2), a.splice(1, 1), a.concat([7], 8)]; return log.join() + '|' + r.map(x => JSON.stringify(x)).join(';') })()	S:F3,cb,cb,cb,F0,F1,F1,F0|{"0":1,"1":2,"2":3};{"0":2,"1":3};{"0":2,"length":1};{"0":2,"length":1};{"0":1,"1":3,"2":7,"3":8,"length":4}
+(() => { class C extends Array { static get [Symbol.species]() { return function F(n) { return { length: 'x' } } } } const a = C.from([1, 2, 3]); const r = [a.map(x => x), a.filter(x => x > 1), a.slice(1, 2), a.splice(1, 1), a.concat([7], 8)]; return r.map(x => JSON.stringify(x)).join(';') })()	S:{"0":1,"1":2,"2":3,"length":"x"};{"0":2,"1":3,"length":"x"};{"0":2,"length":1};{"0":2,"length":1};{"0":1,"1":3,"2":7,"3":8,"length":4}
+(() => { class C extends Array { static get [Symbol.species]() { return function F(n) { return {} } } } const a = C.from([[1], 2]); return [JSON.stringify(a.flat()), JSON.stringify(a.flatMap(x => x))].join(';') })()	S:{"0":1,"1":2};{"0":1,"1":2}
+(() => { class C extends Array {} const a = C.from([1, 2]); a.constructor = 5; try { return a.map(x => x) instanceof C } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:constructor property is not a constructor
+(() => { const a = [1, 2]; Object.defineProperty(a, 'constructor', { value: 5 }); try { return Array.isArray(a.map(x => x)) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:constructor property is not a constructor
+(() => { const a = [1, 2]; Object.defineProperty(a, 'constructor', { value: { [Symbol.species]: 7 } }); try { return Array.isArray(a.map(x => x)) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:constructor property is not a constructor
+(() => { const a = [1, 2]; Object.defineProperty(a, 'constructor', { value: { [Symbol.species]: null } }); try { return Array.isArray(a.map(x => x)) } catch (e) { return e.name + ':' + e.message } })()	J:true
+(() => { const a = [1, 2]; Object.defineProperty(a, 'constructor', { value: undefined }); try { return Array.isArray(a.map(x => x)) } catch (e) { return e.name + ':' + e.message } })()	J:true
+(() => { const a = [1, 2]; Object.defineProperty(a, 'constructor', { value: function G() {} }); try { return Array.isArray(a.map(x => x)) } catch (e) { return e.name + ':' + e.message } })()	J:true
+(() => { const a = [1, 2]; Object.defineProperty(a, 'constructor', { value: { [Symbol.species]: function H(n) { this.n = n } } }); try { return JSON.stringify(a.map(x => x)) } catch (e) { return e.name + ':' + e.message } })()	S:{"0":1,"1":2,"n":2}
+(() => { const o = { length: 1, 0: 1, constructor: { [Symbol.species]: function H(n) { this.n = n } } }; return Array.isArray(Array.prototype.map.call(o, x => x)) })()	J:true
+eval('(class { static prototype = 1 })')	E:SyntaxError:a class may not have a static property named 'prototype'
+eval('(class { constructor = 1 })')	E:SyntaxError:a class constructor definition must be a plain public method
+eval('(class { static constructor = 1 })')	E:SyntaxError:a class constructor definition must be a plain public method
+eval('(class { "constructor"() { return 1 } })').name	S:
+eval('(class { ["constructor"]() { return 7 } })').prototype.hasOwnProperty('constructor')	J:true
+eval('(class { "prototype"() {} })').name	S:
+eval('(class { static "prototype"() {} })')	E:SyntaxError:a class may not have a static property named 'prototype'
+eval('(class { static ["prototype"]() {} })')	E:TypeError:can't redefine non-configurable property "prototype"
+eval('(class { static set prototype(v) {} })')	E:SyntaxError:a class may not have a static property named 'prototype'
+eval('(class { static async prototype() {} })')	E:SyntaxError:a class may not have a static property named 'prototype'
+eval('(class { static *prototype() {} })')	E:SyntaxError:a class may not have a static property named 'prototype'
+eval('(class { async *constructor() {} })')	E:SyntaxError:a class constructor definition must be a plain public method
+eval('(class { get constructor() {} constructor() {} })')	E:SyntaxError:a class constructor definition must be a plain public method
+eval('(class { constructor() {} get constructor() {} })')	E:SyntaxError:a class constructor definition must be a plain public method
+eval('(class { static get constructor() { return 3 } }).constructor')	J:3
+eval('(class { "constructor"() {} constructor() {} })')	E:SyntaxError:a class cannot have more than one constructor definition
+(() => { try { eval('(class { get constructor() {} })') } catch (e) { return e.lineNumber + ':' + e.columnNumber } })()	S:1:10
+(() => { try { eval('(class {\n  constructor() {}\n  constructor() {}\n})') } catch (e) { return e.lineNumber + ':' + e.columnNumber } })()	S:3:3
+(() => { try { eval('(class {\n  static prototype() {}\n})') } catch (e) { return e.lineNumber + ':' + e.columnNumber } })()	S:2:10
+(() => { try { eval('\n\n  x y') } catch (e) { return e.lineNumber + ':' + e.columnNumber + ':' + e.message } })()	S:3:5:unexpected token: identifier
+(() => { try { eval('a b') } catch (e) { return e.lineNumber + ':' + e.columnNumber } })()	S:1:3
+(() => { try { eval('1 +') } catch (e) { return e.lineNumber + ':' + e.columnNumber + ':' + e.message } })()	S:1:4:expected expression, got end of script
+(() => { try { new Function('a b') } catch (e) { return e.lineNumber + ':' + e.columnNumber } })()	S:3:3
+(() => { try { eval('\n  null.x') } catch (e) { return e.lineNumber + ':' + e.columnNumber } })()	S:2:3
+(() => { try { eval('let a; let a;') } catch (e) { return e.lineNumber + ':' + e.columnNumber + ':' + e.message } })()	S:1:12:redeclaration of let a
+Object.getOwnPropertyNames(globalThis).join()	S:undefined,Function,Object,eval,globalThis,Array,Boolean,JSON,Date,Math,isNaN,isFinite,parseInt,parseFloat,NaN,Infinity,Number,escape,unescape,decodeURI,encodeURI,decodeURIComponent,encodeURIComponent,String,RegExp,Error,InternalError,AggregateError,EvalError,RangeError,ReferenceError,SyntaxError,TypeError,URIError,ArrayBuffer,Int8Array,Uint8Array,Int16Array,Uint16Array,Int32Array,Uint32Array,Float32Array,Float64Array,Uint8ClampedArray,BigInt64Array,BigUint64Array,Float16Array,BigInt,Proxy,WeakMap,Map,Set,DataView,Symbol,WeakSet,Promise,Iterator,FinalizationRegistry,WeakRef,sleep,gc,print,version,buildInfo,getJSHeapLimitMB,BinData,HexData,MD5,UUID,bsonWoCompare,bsonUnorderedFieldsCompare,bsonBinaryEqual,bsonObjToArray,bsonToBase64,bsonGetImmutable,Code,DBPointer,DBRef,MaxKey,MinKey,NumberDecimal,NumberInt,NumberLong,ObjectId,Timestamp,hex_md5,ISODate,tojsononeline,tojson,tojsonObject,toJsonForLog,printjson,isString,isNumber,isObject,doassert,_processMsg,_buildAssertionMessage,formatErrorMsg,_doassert,assert,friendlyEqual,_isEq,assertThrowsHelper
+Object.getOwnPropertyNames(globalThis).filter(k => typeof globalThis[k] === 'function' && /^[A-Z]/.test(k)).map(k => k + '(' + Object.getOwnPropertyNames(globalThis[k]).join() + ')').join(' ')	S:Function(prototype,length,name) Object(assign,getPrototypeOf,setPrototypeOf,getOwnPropertyDescriptor,getOwnPropertyDescriptors,keys,values,entries,is,defineProperty,defineProperties,create,getOwnPropertyNames,getOwnPropertySymbols,isExtensible,preventExtensions,freeze,isFrozen,seal,isSealed,fromEntries,hasOwn,groupBy,prototype,extend,merge,deepMerge,keySet,length,name) Array(isArray,from,fromAsync,of,prototype,sum,avg,contains,unique,shuffle,tojson,fetchRefs,stdDev,length,name) Boolean(prototype,length,name) Date(UTC,parse,now,prototype,timeFunc,length,name) Number(isFinite,isInteger,isNaN,isSafeInteger,POSITIVE_INFINITY,NEGATIVE_INFINITY,MAX_VALUE,MIN_VALUE,MAX_SAFE_INTEGER,MIN_SAFE_INTEGER,EPSILON,prototype,parseInt,parseFloat,NaN,length,name) String(fromCharCode,fromCodePoint,raw,prototype,length,name) RegExp(escape,input,lastMatch,lastParen,leftContext,rightContext,$1,$2,$3,$4,$5,$6,$7,$8,$9,$_,$&,$+,$`,$',prototype,length,name) Error(isError,captureStackTrace,prototype,length,name) InternalError(prototype,length,name) AggregateError(prototype,length,name) EvalError(prototype,length,name) RangeError(prototype,length,name) ReferenceError(prototype,length,name) SyntaxError(prototype,length,name) TypeError(prototype,length,name) URIError(prototype,length,name) ArrayBuffer(isView,prototype,length,name) Int8Array(BYTES_PER_ELEMENT,prototype,length,name) Uint8Array(fromBase64,fromHex,BYTES_PER_ELEMENT,prototype,length,name) Int16Array(BYTES_PER_ELEMENT,prototype,length,name) Uint16Array(BYTES_PER_ELEMENT,prototype,length,name) Int32Array(BYTES_PER_ELEMENT,prototype,length,name) Uint32Array(BYTES_PER_ELEMENT,prototype,length,name) Float32Array(BYTES_PER_ELEMENT,prototype,length,name) Float64Array(BYTES_PER_ELEMENT,prototype,length,name) Uint8ClampedArray(BYTES_PER_ELEMENT,prototype,length,name) BigInt64Array(BYTES_PER_ELEMENT,prototype,length,name) BigUint64Array(BYTES_PER_ELEMENT,prototype,length,name) Float16Array(BYTES_PER_ELEMENT,prototype,length,name) BigInt(asUintN,asIntN,prototype,length,name) Proxy(revocable,length,name) WeakMap(prototype,length,name) Map(groupBy,prototype,tojson,length,name) Set(prototype,tojson,length,name) DataView(prototype,length,name) Symbol(for,keyFor,prototype,isConcatSpreadable,iterator,match,replace,search,species,hasInstance,split,toPrimitive,toStringTag,unscopables,asyncIterator,matchAll,length,name) WeakSet(prototype,length,name) Promise(all,allSettled,any,race,reject,resolve,withResolvers,try,prototype,length,name) Iterator(from,prototype,length,name) FinalizationRegistry(prototype,length,name) WeakRef(prototype,length,name) BinData(prototype,length,name) HexData(length,name) MD5(length,name) UUID(length,name) Code(prototype,length,name) DBPointer(prototype,length,name) DBRef(prototype,length,name) MaxKey() MinKey() NumberDecimal(prototype,length,name) NumberInt(prototype,length,name) NumberLong(prototype,length,name) ObjectId(prototype,fromDate,length,name) Timestamp(prototype,length,name) ISODate(prototype,length,name)
+Object.getOwnPropertyNames(globalThis).filter(k => typeof globalThis[k] === 'function' && /^[A-Z]/.test(k) && globalThis[k].prototype).map(k => k + '[' + Object.getOwnPropertyNames(globalThis[k].prototype).join() + ']').join(' ')	S:Function[toString,apply,call,bind,arguments,caller,constructor,length,name] Object[toString,toLocaleString,valueOf,hasOwnProperty,isPrototypeOf,propertyIsEnumerable,__defineGetter__,__defineSetter__,__lookupGetter__,__lookupSetter__,__proto__,constructor,bsonsize] Array[length,toString,toLocaleString,join,reverse,sort,push,pop,shift,unshift,splice,concat,slice,lastIndexOf,indexOf,forEach,map,filter,reduce,reduceRight,some,every,find,findIndex,copyWithin,fill,entries,keys,values,includes,flatMap,flat,at,findLast,findLastIndex,toReversed,toSorted,toSpliced,with,constructor] Boolean[toString,valueOf,constructor] Date[getTime,getTimezoneOffset,getYear,getFullYear,getUTCFullYear,getMonth,getUTCMonth,getDate,getUTCDate,getDay,getUTCDay,getHours,getUTCHours,getMinutes,getUTCMinutes,getSeconds,getUTCSeconds,getMilliseconds,getUTCMilliseconds,setTime,setYear,setFullYear,setUTCFullYear,setMonth,setUTCMonth,setDate,setUTCDate,setHours,setUTCHours,setMinutes,setUTCMinutes,setSeconds,setUTCSeconds,setMilliseconds,setUTCMilliseconds,toUTCString,toLocaleString,toLocaleDateString,toLocaleTimeString,toDateString,toTimeString,toISOString,toJSON,toString,valueOf,constructor,toGMTString,tojson] Number[toString,toLocaleString,valueOf,toFixed,toExponential,toPrecision,constructor,toPercentStr,zeroPad] String[length,toString,valueOf,toLowerCase,toUpperCase,charAt,charCodeAt,codePointAt,at,substring,padStart,padEnd,includes,indexOf,lastIndexOf,startsWith,endsWith,trim,trimStart,trimEnd,toLocaleLowerCase,toLocaleUpperCase,localeCompare,repeat,match,matchAll,search,replace,replaceAll,split,substr,concat,slice,bold,italics,fixed,strike,small,big,blink,sup,sub,anchor,link,fontcolor,fontsize,isWellFormed,toWellFormed,constructor,trimLeft,trimRight,ltrim,rtrim,pad] RegExp[toString,compile,exec,test,flags,hasIndices,global,ignoreCase,multiline,dotAll,source,sticky,unicode,unicodeSets,constructor,toJSON,tojson] Error[toString,message,name,stack,constructor] InternalError[message,name,constructor] AggregateError[message,name,constructor] EvalError[message,name,constructor] RangeError[message,name,constructor] ReferenceError[message,name,constructor] SyntaxError[message,name,constructor] TypeError[message,name,constructor] URIError[message,name,constructor] ArrayBuffer[slice,resize,transfer,transferToFixedLength,byteLength,maxByteLength,resizable,detached,constructor] Int8Array[BYTES_PER_ELEMENT,constructor] Uint8Array[setFromBase64,setFromHex,toBase64,toHex,BYTES_PER_ELEMENT,constructor] Int16Array[BYTES_PER_ELEMENT,constructor] Uint16Array[BYTES_PER_ELEMENT,constructor] Int32Array[BYTES_PER_ELEMENT,constructor] Uint32Array[BYTES_PER_ELEMENT,constructor] Float32Array[BYTES_PER_ELEMENT,constructor] Float64Array[BYTES_PER_ELEMENT,constructor] Uint8ClampedArray[BYTES_PER_ELEMENT,constructor] BigInt64Array[BYTES_PER_ELEMENT,constructor] BigUint64Array[BYTES_PER_ELEMENT,constructor] Float16Array[BYTES_PER_ELEMENT,constructor] BigInt[valueOf,toString,toLocaleString,constructor] WeakMap[has,get,delete,set,constructor] Map[get,has,set,delete,keys,values,clear,forEach,entries,size,constructor] Set[has,add,delete,entries,clear,forEach,union,difference,intersection,symmetricDifference,isSubsetOf,isSupersetOf,isDisjointFrom,values,keys,size,constructor] DataView[getInt8,getUint8,getInt16,getUint16,getInt32,getUint32,getFloat16,getFloat32,getFloat64,getBigInt64,getBigUint64,setInt8,setUint8,setInt16,setUint16,setInt32,setUint32,setFloat16,setFloat32,setFloat64,setBigInt64,setBigUint64,buffer,byteLength,byteOffset,constructor] Symbol[toString,valueOf,description,constructor] WeakSet[add,delete,has,constructor] Promise[then,catch,finally,constructor] Iterator[map,filter,take,drop,flatMap,reduce,toArray,forEach,some,every,find,constructor] FinalizationRegistry[register,unregister,constructor] WeakRef[deref,constructor] BinData[constructor,base64,hex,toString,toJSON,tojson,subtype,length] Code[constructor,toString] DBPointer[constructor,fetch,tojson,toJSON,getCollection,getId,toString] DBRef[constructor,fetch,tojson,getDb,getCollection,getRef,getId,toString] NumberDecimal[constructor,toString,toJSON,tojson,equals] NumberInt[constructor,toNumber,toString,toJSON,valueOf,tojson] NumberLong[constructor,toNumber,toString,toJSON,valueOf,compare,floatApprox,top,bottom,exactValueString,tojson] ObjectId[constructor,toString,toJSON,str,tojson,valueOf,isObjectId,getTimestamp,equals] Timestamp[constructor,toJSON,tojson,getTime,getInc,toString,toStringIncomparable] ISODate[constructor]
+['Math', 'JSON', 'Reflect', 'Atomics', 'Intl', 'WebAssembly'].filter(k => typeof globalThis[k] === 'object').map(k => k + '{' + Object.getOwnPropertyNames(globalThis[k]).join() + '}').join(' ')	S:Math{abs,acos,asin,atan,atan2,ceil,clz32,cos,exp,floor,imul,fround,f16round,log,max,min,pow,random,round,sin,sqrt,tan,log10,log2,log1p,expm1,cosh,sinh,tanh,acosh,asinh,atanh,hypot,trunc,sign,cbrt,sumPrecise,E,LOG2E,LOG10E,LN2,LN10,PI,SQRT2,SQRT1_2} JSON{parse,stringify,isRawJSON,rawJSON}
+Object.getOwnPropertyNames(Object.getPrototypeOf(function*(){})).join() + '|' + Object.getOwnPropertyNames(Object.getPrototypeOf(function*(){}).prototype).join() + '|' + Object.getOwnPropertyNames(Object.getPrototypeOf(async function(){})).join()	S:constructor,prototype|next,throw,return,constructor|constructor
+Object.getOwnPropertyNames(Object.getPrototypeOf([][Symbol.iterator]())).join() + '|' + Object.getOwnPropertyNames(Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()))).join() + '|' + Object.getOwnPropertyNames(Object.getPrototypeOf(new Map().entries())).join() + '|' + Object.getOwnPropertyNames(Object.getPrototypeOf(''[Symbol.iterator]())).join()	S:next|map,filter,take,drop,flatMap,reduce,toArray,forEach,some,every,find,constructor|next|next
+Object.getOwnPropertyNames(Object.getPrototypeOf(Int8Array)).join() + '|' + Object.getOwnPropertyNames(Object.getPrototypeOf(Int8Array.prototype)).join()	S:from,of,prototype,length,name|subarray,set,copyWithin,every,fill,filter,find,findIndex,findLast,findLastIndex,forEach,indexOf,join,lastIndexOf,map,reduce,reduceRight,reverse,slice,some,sort,entries,keys,values,includes,toString,toLocaleString,at,toReversed,toSorted,with,length,buffer,byteLength,byteOffset,constructor
+Object.getOwnPropertyNames(Object.getPrototypeOf(async function*(){})).join() + '|' + Object.getOwnPropertyNames(Object.getPrototypeOf(async function*(){}).prototype).join() + '|' + Object.getOwnPropertyNames(Object.getPrototypeOf(Object.getPrototypeOf(async function*(){}).prototype)).join()	S:constructor,prototype|next,throw,return,constructor|
+Object.getOwnPropertyNames(Object.getPrototypeOf([].values().map(x => x))).join()	S:next,return
+Object.getOwnPropertyNames(FinalizationRegistry.prototype).map(k => k + (typeof FinalizationRegistry.prototype[k] === 'function' ? FinalizationRegistry.prototype[k].length : '')).join()	S:register2,unregister1,constructor1
+(() => { try { return FinalizationRegistry.prototype.register.call({}, {}, 1) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:Receiver of FinalizationRegistry.register call is not a FinalizationRegistry
+(() => { try { return FinalizationRegistry.prototype.unregister.call({}, {}) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:Receiver of FinalizationRegistry.unregister call is not a FinalizationRegistry
+Object.getOwnPropertyNames(Function).join() + '|' + Object.getOwnPropertyNames(Function.prototype).join()	S:prototype,length,name|toString,apply,call,bind,arguments,caller,constructor,length,name
+Object.getOwnPropertyNames(Proxy).join() + '|' + Object.getOwnPropertyNames(Reflect === undefined ? {} : {}).join()	E:ReferenceError:Reflect is not defined
+Object.getOwnPropertyNames(Object.getPrototypeOf(Object.getPrototypeOf((async function*(){})()))).join()	S:next,throw,return,constructor
+Object.getOwnPropertyNames(Code).join() + '|' + Object.getOwnPropertyNames(Code.prototype).join() + '|' + Object.getOwnPropertyNames(UUID).join() + '|' + Object.getOwnPropertyNames(HexData).join()	S:prototype,length,name|constructor,toString|length,name|length,name
+Object.getOwnPropertyNames(Object.getPrototypeOf(Iterator.prototype)).join()	S:toString,toLocaleString,valueOf,hasOwnProperty,isPrototypeOf,propertyIsEnumerable,__defineGetter__,__defineSetter__,__lookupGetter__,__lookupSetter__,__proto__,constructor,bsonsize
+(() => { async function* g() {}; const i = g(); return [Object.getPrototypeOf(i) === g.prototype, Object.getPrototypeOf(g.prototype) === Object.getPrototypeOf(g).prototype, typeof Object.getPrototypeOf(Object.getPrototypeOf(g).prototype)[Symbol.asyncIterator], Object.getPrototypeOf(Object.getPrototypeOf(Object.getPrototypeOf(g).prototype)) === Object.prototype].join() })()	S:true,true,function,true
+(() => { function* g() {}; const i = g(); return [Object.getPrototypeOf(i) === g.prototype, Object.getPrototypeOf(g.prototype) === Object.getPrototypeOf(g).prototype, Object.getPrototypeOf(Object.getPrototypeOf(g).prototype) === Iterator.prototype].join() })()	S:true,true,true
+(() => { async function* g() {}; const P = Object.getPrototypeOf(Object.getPrototypeOf(g).prototype); const f = P[Symbol.asyncIterator]; return [f.name, f.length, f.call(5), Object.prototype.toString.call(P)].join() })()	S:[Symbol.asyncIterator],0,5,[object Object]
+(() => { async function* g() {}; const AG = Object.getPrototypeOf(g).prototype; return Object.prototype.toString.call(AG) + ',' + AG.next.length + AG.return.length + AG.throw.length })()	S:[object AsyncGenerator],111
+(() => { const a = [1, 2]; a.x = 1; return Object.getOwnPropertyNames(a).join() })()	S:0,1,length,x
+(() => { const s = new String('ab'); s.x = 1; s[5] = 2; return Object.getOwnPropertyNames(s).join() })()	S:0,1,5,length,x
+Object.getOwnPropertyNames('ab').join()	S:0,1,length
+(() => { const p = new Proxy({}, {}); try { return p + '' } catch (e) { return e.message } })()	S:[object Object]
+(() => { const p = new Proxy({}, { get() { return undefined } }); try { return p + '' } catch (e) { return e.message } })()	S:can't convert p to primitive type
+(() => { const o = Object.create(null); try { return o + '' } catch (e) { return e.message } })()	S:can't convert o to primitive type
+(() => { const p = new Proxy({}, { get() { return undefined } }); try { return '' + p } catch (e) { return e.message } })()	S:can't convert p to primitive type
+(() => { const p = new Proxy({}, { get() { return undefined } }); try { return p * 2 } catch (e) { return e.message } })()	S:can't convert p to number
+(() => { const p = new Proxy({}, { get() { return undefined } }); try { return `${p}` } catch (e) { return e.message } })()	S:can't convert p to string
+(() => { const p = new Proxy({}, { get() { return undefined } }); try { return String(p) } catch (e) { return e.message } })()	S:can't convert p to string
+(() => { const o = { toString: undefined, valueOf: undefined }; try { return o + '' } catch (e) { return e.message } })()	S:can't convert o to primitive type
+(() => { const o = { [Symbol.toPrimitive]: undefined, toString: undefined, valueOf: undefined }; try { return o * 2 } catch (e) { return e.message } })()	S:can't convert o to number
+(() => { const p = new Proxy({}, { get(t, k) { return k === 'x' ? 1 : undefined } }); try { return p + 1 } catch (e) { return e.message } })()	S:can't convert p to primitive type
+(() => { const o = { valueOf() { return {} }, toString() { return {} } }; try { return o * 2 } catch (e) { return e.message } })()	S:can't convert o to number
+(() => { const o = { valueOf() { return {} }, toString() { return {} } }; try { return `${o}` } catch (e) { return e.message } })()	S:can't convert o to string
+(() => { const o = { valueOf() { return {} }, toString() { return {} } }; try { return String(o) } catch (e) { return e.message } })()	S:can't convert o to string
+(() => { const o = { valueOf() { return {} }, toString() { return {} } }; try { return o + '' } catch (e) { return e.message } })()	S:can't convert ({valueOf() { return {} }, toString() { return {} }}) to primitive type
+(() => { const o = { valueOf() { return {} }, toString: 5 }; try { return o - 1 } catch (e) { return e.message } })()	S:can't convert o to number
+(() => { const o = { valueOf: 5, toString: 5 }; try { return o - 1 } catch (e) { return e.message } })()	S:can't convert o to number
+(() => { const o = { valueOf: 5, toString: 5 }; try { return 1 - o } catch (e) { return e.message } })()	S:can't convert o to number
+(() => { const o = { valueOf() { return {} } , toString: 5 }; try { return 1 - o } catch (e) { return e.message } })()	S:can't convert o to number
+(() => { const o = Object.create(null); try { return o < 1 } catch (e) { return e.message } })()	S:can't convert o to number
+(() => { const o = Object.create(null); try { return 1 == o } catch (e) { return e.message } })()	S:can't convert o to primitive type
+(() => { const o = Object.create(null); try { return Math.max(o) } catch (e) { return e.message } })()	S:can't convert o to number
+(() => { const o = Object.create(null); try { return Number(o) } catch (e) { return e.message } })()	S:can't convert o to number
+(() => { const o = Object.create(null); try { return parseInt(o) } catch (e) { return e.message } })()	S:can't convert o to string
+(() => { const o = Object.create(null); try { return isNaN(o) } catch (e) { return e.message } })()	S:can't convert ({}) to number
+(() => { try { return Math.max(Object.create(null)) } catch (e) { return e.message } })()	S:can't convert Object.create(...) to number
+(() => { const o = Object.create(null); try { return 'a'.repeat(o) } catch (e) { return e.message } })()	S:can't convert o to number
+(() => { const o = Object.create(null); try { return [1, 2].join(o) } catch (e) { return e.message } })()	S:can't convert o to string
+(() => { const o = Object.create(null); try { return new Date(o) } catch (e) { return e.message } })()	S:can't convert o to primitive type
+(() => { const o = Object.create(null); try { return Math.max(1, o) } catch (e) { return e.message } })()	S:can't convert o to number
+(() => { const o = Object.create(null); const f = x => x * 1; try { return f(o) } catch (e) { return e.message } })()	S:can't convert x to number
+(() => { const o = Object.create(null); try { return String(o) } catch (e) { return e.message } })()	S:can't convert o to string
+(() => { const o = { valueOf() { return {} }, toString() { return {} } }; try { return Number(o) } catch (e) { return e.message } })()	S:can't convert ({valueOf() { return {} }, toString() { return {} }}) to number
+(() => { const o = Object.create(null); try { return Symbol(o) } catch (e) { return e.message } })()	S:can't convert o to string
