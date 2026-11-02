@@ -15,6 +15,7 @@ use teseladb_bson::{Document, RawDoc, RawValue, Value};
 use teseladb_collation::{Collation, ParsedCollation, parse_collation};
 use teseladb_keys::{DOCUMENTS, KeyBuilder};
 use teseladb_meta::catalog::{CollectionEntry, Namespace};
+use teseladb_meta::tenants::{qualified_db, split_db};
 use teseladb_mql::projection::{Projection, ProjectionContext};
 use teseladb_mql::{Filter, FilterUse, MatchContext};
 use teseladb_range::read::ReadConcern;
@@ -745,7 +746,8 @@ pub fn keep<B: Backend + ?Sized>(
     let lsid = args::lsid(ctx.cmd)?;
     let id = cursor_id(ctx.backend.node(), ctx.backend.random());
     let c = Cursor {
-        ns: ns.to_owned(),
+        // A cursor is its tenant's (013 FR-024).
+        ns: qualified_db(ctx.backend.tenant(), ns),
         lsid,
         owner: ctx.backend.authenticated_user().map(|u| u.to_string()),
         no_timeout,
@@ -1388,8 +1390,16 @@ fn next_batch<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
     let now = ctx.backend.now_ms();
     let taken = {
         let mut g = lock(ctx.shared);
-        let owner = g.cursors.get(id).map(|c| (c.ns.clone(), c.lsid));
-        g.cursors.take(id, &ns_text, lsid, now).map_err(|e| (e, owner))
+        let tenant = ctx.backend.tenant();
+        match g.cursors.get(id).map(|c| (split_db(&c.ns), c.lsid)) {
+            // Another tenant's cursor is not there for this one (013 FR-024).
+            Some(((t, _), _)) if t != tenant => Err((CursorError::NotFound, None)),
+            owner => {
+                let owner = owner.map(|((_, n), l)| (n.to_owned(), l));
+                let own_ns = qualified_db(tenant, &ns_text);
+                g.cursors.take(id, &own_ns, lsid, now).map_err(|e| (e, owner))
+            }
+        }
     };
     let mut c = match taken {
         Ok(c) => c,
@@ -1548,9 +1558,12 @@ pub fn kill_cursors<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Documen
     }
     let (mut killed, mut not_found) = (Vec::new(), Vec::new());
     let now = i64::try_from(ctx.backend.now_ms()).unwrap_or(i64::MAX);
+    let tenant = ctx.backend.tenant();
     let mut guard = lock(ctx.shared);
     for id in parsed {
-        if guard.cursors.remove(id) {
+        // Another tenant's cursor is not there for this one (013 FR-024).
+        let own = guard.cursors.get(id).is_some_and(|c| split_db(&c.ns).0 == tenant);
+        if own && guard.cursors.remove(id) {
             guard.query_stats.close(id, now);
             killed.push(Value::Int64(id));
         } else {
