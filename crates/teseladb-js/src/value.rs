@@ -23,6 +23,10 @@ pub enum Val {
     /// A symbol: its description and its identity.
     Sym(Rc<(Name, u64)>),
     Obj(ObjRef),
+    /// A missing element of an array (`[1, , 3]`, `delete a[1]`, a longer `length`). It lives only
+    /// in the elements of an array: reading one gives `undefined` from the prototypes, and it is
+    /// not an own property (ECMA-262 §10.4.2).
+    Hole,
 }
 
 /// The bytes the live objects of an invocation hold, against its limit.
@@ -226,7 +230,8 @@ pub enum Kind {
     /// A promise.
     Promise(Rc<RefCell<crate::promise::PromiseState>>),
     /// An iterator over a snapshot of values (`entries()`, `values()`, `keys()`).
-    Iter(Rc<RefCell<(Vec<Val>, usize)>>),
+    /// An iterator over values read in advance, and its class (`Map Iterator`…).
+    Iter(Rc<RefCell<(Vec<Val>, usize)>>, &'static str),
     /// An array iterator, which reads its array at each step.
     ArrayIter(Rc<RefCell<ArrayIter>>),
     /// A `Symbol` object (`Object(Symbol())`): its symbol.
@@ -373,7 +378,7 @@ impl Val {
 
     pub fn truthy(&self) -> bool {
         match self {
-            Val::Undef | Val::Null => false,
+            Val::Undef | Val::Hole | Val::Null => false,
             Val::Bool(b) => *b,
             Val::Num(n) => *n != 0.0 && !n.is_nan(),
             Val::BigInt(b) => !b.is_zero(),
@@ -384,7 +389,7 @@ impl Val {
 
     pub fn type_of(&self) -> &'static str {
         match self {
-            Val::Undef => "undefined",
+            Val::Undef | Val::Hole => "undefined",
             Val::Null => "object",
             Val::Bool(_) => "boolean",
             Val::Num(_) => "number",

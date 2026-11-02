@@ -81,6 +81,7 @@ pub fn own_prop(o: &ObjRef, key: &str) -> Option<Prop> {
             }
             if let Some(i) = array_index(key)
                 && let Some(x) = items.get(i)
+                && !matches!(x, Val::Hole)
             {
                 if b.locks & ELEMENTS_OWN != 0
                     && let Some(p) = b.get_own(key)
@@ -330,7 +331,7 @@ fn define_array(it: &mut Interp, o: &ObjRef, key: &str, d: &Desc) -> R<()> {
     }
     if let Kind::Array(items) = &mut o.borrow_mut().kind {
         if i >= items.len() {
-            items.resize(i + 1, Val::Undef);
+            items.resize(i + 1, Val::Hole);
         }
         items[i] = if p.is_accessor() { Val::Undef } else { p.value.clone() };
     }

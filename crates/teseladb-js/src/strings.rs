@@ -98,10 +98,12 @@ fn this_string(it: &mut Interp, this: &Val) -> R<Name> {
 
 /// CreateHTML: `<tag attr="value">text</tag>`, with `"` in the value as `&quot;`.
 fn html(it: &mut Interp, this: &Val, tag: &str, attr: Option<(&str, &[Val])>) -> R {
-    let text = this_string(it, this)?;
+    let text = this_string(it, this);
+    let text = it.operand_named(text, "this")?;
     let open = match attr {
         Some((name, a)) => {
-            let v = it.str_of(&arg(a, 0))?;
+            let v = it.str_of(&arg(a, 0));
+            let v = it.operand_as_class(v)?;
             format!("<{tag} {name}=\"{}\">", v.replace('"', "&quot;"))
         }
         None => format!("<{tag}>"),
@@ -142,16 +144,20 @@ fn raw(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     let strings = it.get(&Val::Obj(cooked), "raw")?;
     let strings = Val::Obj(it.object_of(&strings)?);
     let len = it.get(&strings, "length")?;
-    let len = it.number_of(&len)?;
+    let len = it.number_of(&len);
+    let len = it.operand_named(len, "raw.length")?;
     let len = if len.is_finite() && len > 0.0 { len as usize } else { 0 };
     let mut out = String::new();
     for i in 0..len {
         let part = it.get(&strings, &i.to_string())?;
-        out.push_str(&it.str_of(&part)?);
+        let part = it.str_of(&part);
+        // The names of SpiderMonkey's self-hosted `String.raw` (measured on a `refrouter` 9.0.4).
+        out.push_str(&it.operand_named(part, if i == 0 { "raw[0]" } else { "raw[nextIndex]" })?);
         if i + 1 < len
             && let Some(sub) = a.get(i + 1)
         {
-            out.push_str(&it.str_of(sub)?);
+            let sub = it.str_of(sub);
+            out.push_str(&it.operand_as_class(sub)?);
         }
     }
     it.string(out)
@@ -177,6 +183,14 @@ pub fn this_str(it: &mut Interp, this: &Val) -> R<Name> {
         return it.type_error(&m);
     }
     it.str_of(this)
+}
+
+/// `this` as a string for a method SpiderMonkey writes in JavaScript, which names it `this` when
+/// it cannot be converted (measured on a `refrouter` 9.0.4 on 02-11: `concat`, `padStart`, `slice`,
+/// `split`, `replace`, the HTML methods…).
+pub fn this_text(it: &mut Interp, this: &Val) -> R<Name> {
+    let r = this_str(it, this);
+    it.operand_named(r, "this")
 }
 
 pub use crate::text::{from_units, pair_surrogates, to_utf8, units, utf16_len};
@@ -311,14 +325,14 @@ fn ends_with(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 }
 
 fn slice(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    let u = units(&this_str(it, this)?);
+    let u = units(&this_text(it, this)?);
     let s = rel(int_arg(it, &arg(a, 0), 0.0)?, u.len());
     let e = rel(int_arg(it, &arg(a, 1), u.len() as f64)?, u.len());
     it.string(if s < e { from_units(&u[s..e]) } else { String::new() })
 }
 
 fn substring(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    let u = units(&this_str(it, this)?);
+    let u = units(&this_text(it, this)?);
     let s = clamp(int_arg(it, &arg(a, 0), 0.0)?, u.len());
     let e = clamp(int_arg(it, &arg(a, 1), u.len() as f64)?, u.len());
     let (s, e) = if s > e { (e, s) } else { (s, e) };
@@ -326,7 +340,7 @@ fn substring(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 }
 
 fn substr(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    let u = units(&this_str(it, this)?);
+    let u = units(&this_text(it, this)?);
     let s = rel(int_arg(it, &arg(a, 0), 0.0)?, u.len());
     let n = int_arg(it, &arg(a, 1), (u.len() - s) as f64)?;
     let e = (s + clamp(n, u.len())).min(u.len());
@@ -364,11 +378,22 @@ pub(crate) fn trim_end(it: &mut Interp, this: &Val, _: &[Val]) -> R {
 }
 
 fn pad(it: &mut Interp, this: &Val, a: &[Val], start: bool) -> R {
-    let s = this_str(it, this)?;
+    let s = this_text(it, this)?;
     let len = utf16_len(&s);
-    let target = int_arg(it, &arg(a, 0), 0.0)?;
-    let fill = if matches!(arg(a, 1), Val::Undef) { " ".into() } else { it.str_of(&arg(a, 1))? };
-    if target <= len as f64 || fill.is_empty() {
+    let target = int_arg(it, &arg(a, 0), 0.0);
+    let target = it.operand_as_source(target)?;
+    // The filler is converted only when the string grows.
+    if target <= len as f64 {
+        return Ok(Val::Str(s));
+    }
+    let fill = match arg(a, 1) {
+        Val::Undef => " ".into(),
+        v => {
+            let r = it.str_of(&v);
+            it.operand_as_class(r)?
+        }
+    };
+    if fill.is_empty() {
         return Ok(Val::Str(s));
     }
     let need = target as usize - len;
@@ -388,7 +413,7 @@ fn pad_end(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 }
 
 fn repeat(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    let s = this_str(it, this)?;
+    let s = this_text(it, this)?;
     let n = int_arg(it, &arg(a, 0), 0.0)?;
     if n < 0.0 {
         return Err(it.error("RangeError", "repeat count must be non-negative"));
@@ -410,9 +435,10 @@ fn repeat(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 }
 
 fn concat(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    let mut s = this_str(it, this)?.to_string();
+    let mut s = this_text(it, this)?.to_string();
     for x in a {
-        s.push_str(&it.str_of(x)?);
+        let r = it.str_of(x);
+        s.push_str(&it.operand_as_class(r)?);
     }
     it.joined_string(s)
 }
@@ -427,8 +453,8 @@ fn at(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     it.string(from_units(&u[i as usize..=i as usize]))
 }
 
-fn split(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    let s = this_str(it, this)?;
+pub(crate) fn split(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    let s = this_text(it, this)?;
     let limit = if matches!(arg(a, 1), Val::Undef) {
         u32::MAX as usize
     } else {
@@ -559,7 +585,7 @@ pub fn substitute(
 }
 
 fn replace_in(it: &mut Interp, this: &Val, a: &[Val], all: bool) -> R {
-    let s = this_str(it, this)?;
+    let s = this_text(it, this)?;
     let pat = arg(a, 0);
     if matches!(&pat, Val::Obj(o) if matches!(o.borrow().kind, Kind::RegExp(..))) {
         return crate::regex::replace(it, &s, &pat, &arg(a, 1), all);
@@ -584,7 +610,7 @@ fn replace_in(it: &mut Interp, this: &Val, a: &[Val], all: bool) -> R {
     it.string(out)
 }
 
-fn replace(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+pub(crate) fn replace(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     replace_in(it, this, a, false)
 }
 

@@ -902,7 +902,7 @@ fn as_regexp(it: &mut Interp, v: &Val) -> R<Val> {
 
 /// `String.prototype.match`.
 pub fn string_match(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    let s = crate::strings::this_str(it, this)?;
+    let s = crate::strings::this_text(it, this)?;
     let rv = as_regexp(it, &a.first().cloned().unwrap_or(Val::Undef))?;
     let (src, flags) = parts(it, &rv)?;
     if !flags.contains('g') {
@@ -929,7 +929,7 @@ pub fn string_match(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 
 /// `String.prototype.search`.
 pub fn search(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    let s = crate::strings::this_str(it, this)?;
+    let s = crate::strings::this_text(it, this)?;
     let rv = as_regexp(it, &a.first().cloned().unwrap_or(Val::Undef))?;
     let (src, flags) = parts(it, &rv)?;
     let re = compiled(it, &src, &flags)?;
@@ -1036,7 +1036,8 @@ pub fn match_all(it: &mut Interp, this: &Val, a: &[Val]) -> R {
             return it.call(&custom, &arg, std::slice::from_ref(this));
         }
     }
-    let s = it.str_of(this)?;
+    let s = it.str_of(this);
+    let s = it.operand_named(s, "this")?;
     let (src, flags, start) = if is_regexp {
         let (src, flags) = parts(it, &arg)?;
         if !flags.contains('g') {
@@ -1060,4 +1061,50 @@ pub fn match_all(it: &mut Interp, this: &Val, a: &[Val]) -> R {
         items.push(result(it, &re, &chars, &caps, &s)?);
     }
     crate::builtins::make_iter(it, crate::builtins::REGEXP_STRING_ITERATOR, items)
+}
+
+/// `this` of the methods `RegExp.prototype[Symbol.match]` and the others: a regular expression
+/// (measured on a `refrouter` 9.0.4 on 02-11: `number is not a non-null object`, `[Symbol.search]
+/// method called on incompatible Object`).
+fn symbol_this(it: &mut Interp, this: &Val) -> R<()> {
+    if !matches!(this, Val::Obj(_)) {
+        return it.type_error(&format!("{} is not a non-null object", this.type_of()));
+    }
+    parts(it, this).map(|_| ())
+}
+
+/// The string argument of a `RegExp.prototype[Symbol.*]` method.
+fn symbol_str(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    symbol_this(it, this)?;
+    Ok(Val::Str(it.str_of(&a.first().cloned().unwrap_or(Val::Undef))?))
+}
+
+/// The rest of the arguments after the string, with the regular expression first.
+fn with_this(this: &Val, a: &[Val]) -> Vec<Val> {
+    std::iter::once(this.clone()).chain(a.iter().skip(1).cloned()).collect()
+}
+
+pub fn symbol_match(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    let s = symbol_str(it, this, a)?;
+    string_match(it, &s, &with_this(this, a))
+}
+
+pub fn symbol_match_all(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    let s = symbol_str(it, this, a)?;
+    match_all(it, &s, &with_this(this, a))
+}
+
+pub fn symbol_replace(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    let s = symbol_str(it, this, a)?;
+    crate::strings::replace(it, &s, &with_this(this, a))
+}
+
+pub fn symbol_search(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    let s = symbol_str(it, this, a)?;
+    search(it, &s, &with_this(this, a))
+}
+
+pub fn symbol_split(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    let s = symbol_str(it, this, a)?;
+    crate::strings::split(it, &s, &with_this(this, a))
 }

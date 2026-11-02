@@ -553,6 +553,51 @@ impl<'c> Interp<'c> {
         r
     }
 
+    /// `r`, with the operand of a failed conversion written as `name` gives it from the value
+    /// and the text written so far; the call that sees the operand's expression leaves it.
+    pub fn rename_operand<T>(
+        &mut self,
+        r: R<T>,
+        name: impl FnOnce(&Self, &Val, &str) -> String,
+    ) -> R<T> {
+        let Err(Ctrl::Throw(Val::Obj(err))) = &r else { return r };
+        let Some((o, v, text)) = self.operand_failure.take() else { return r };
+        if !o.ptr_eq(err) {
+            return r;
+        }
+        let name = name(self, &v, &text);
+        let mut b = err.borrow_mut();
+        if let Some((_, p)) = b.props.iter_mut().find(|(k, _)| &**k == "message")
+            && let Val::Str(m) = &p.value
+        {
+            p.value = Val::Str(m.replacen(&text, &name, 1).into());
+        }
+        drop(b);
+        r
+    }
+
+    /// `r`, with the operand of a failed conversion named `name`, as SpiderMonkey's self-hosted
+    /// methods name their variables (`can't convert this to string`, `raw[0]`, `target`).
+    pub fn operand_named<T>(&mut self, r: R<T>, name: &str) -> R<T> {
+        self.rename_operand(r, |_, _, _| name.to_string())
+    }
+
+    /// `r`, with the operand of a failed conversion to a string named by its class, as
+    /// SpiderMonkey's self-hosted methods write a value they hold (`can't convert Object to
+    /// string`; measured on a `refrouter` 9.0.4 on 02-11).
+    pub fn operand_as_class<T>(&mut self, r: R<T>) -> R<T> {
+        self.rename_operand(r, |it, v, text| match v {
+            Val::Obj(o) => crate::builtins::object_class(it, o).to_string(),
+            _ => text.to_string(),
+        })
+    }
+
+    /// `r`, with the operand of a failed conversion written by its source (`({})`), as
+    /// SpiderMonkey's self-hosted methods write a number they convert.
+    pub fn operand_as_source<T>(&mut self, r: R<T>) -> R<T> {
+        self.rename_operand(r, |_, _, text| text.to_string())
+    }
+
     // Conversions.
 
     pub fn primitive(&mut self, v: &Val, hint: &str) -> R {
@@ -576,13 +621,6 @@ impl<'c> Interp<'c> {
             return Ok(r);
         }
         let kind = o.borrow().kind.clone();
-        match kind {
-            Kind::Num(n) => return Ok(Val::Num(n)),
-            Kind::Str(s) => return Ok(Val::Str(s)),
-            Kind::Bool(b) => return Ok(Val::Bool(b)),
-            Kind::BigInt(b) => return Ok(Val::BigInt(b)),
-            _ => {}
-        }
         let order: [&str; 2] =
             if hint == "string" || (hint == "default" && matches!(kind, Kind::Date(_))) {
                 ["toString", "valueOf"]
@@ -611,7 +649,7 @@ impl<'c> Interp<'c> {
 
     pub fn number_of(&mut self, v: &Val) -> R<f64> {
         Ok(match v {
-            Val::Undef => f64::NAN,
+            Val::Undef | Val::Hole => f64::NAN,
             Val::Null => 0.0,
             Val::Bool(b) => f64::from(u8::from(*b)),
             Val::Num(n) => *n,
@@ -627,7 +665,7 @@ impl<'c> Interp<'c> {
 
     pub fn str_of(&mut self, v: &Val) -> R<Name> {
         Ok(match v {
-            Val::Undef => "undefined".into(),
+            Val::Undef | Val::Hole => "undefined".into(),
             Val::Null => "null".into(),
             Val::Bool(b) => if *b { "true" } else { "false" }.into(),
             Val::Num(n) => number::to_string(*n).into(),
@@ -655,7 +693,7 @@ impl<'c> Interp<'c> {
     pub fn object_of(&mut self, v: &Val) -> R<ObjRef> {
         match v {
             Val::Obj(o) => Ok(o.clone()),
-            Val::Undef | Val::Null => {
+            Val::Undef | Val::Hole | Val::Null => {
                 self.type_error(&format!("can't convert {} to object", self.show(v)))
             }
             Val::Bool(b) => self.alloc(Some(self.realm.boolean.clone()), Kind::Bool(*b)),
@@ -669,7 +707,7 @@ impl<'c> Interp<'c> {
     /// A short form of a value for messages.
     pub fn show(&self, v: &Val) -> String {
         match v {
-            Val::Undef => "undefined".into(),
+            Val::Undef | Val::Hole => "undefined".into(),
             Val::Null => "null".into(),
             Val::Str(s) => format!("\"{s}\""),
             Val::Num(n) => number::to_string(*n),
@@ -737,6 +775,7 @@ impl<'c> Interp<'c> {
                         }
                         if let Some(i) = array_index(key)
                             && let Some(x) = items.get(i)
+                            && !matches!(x, Val::Hole)
                             && (b.locks & ELEMENTS_OWN == 0 || b.get_own(key).is_none())
                         {
                             return Ok(x.clone());
@@ -837,12 +876,12 @@ impl<'c> Interp<'c> {
                     let grow = n.saturating_sub(self.array_len(o));
                     self.grow(o, grow)?;
                     if let Kind::Array(items) = &mut o.borrow_mut().kind {
-                        items.resize(n, Val::Undef);
+                        items.resize(n, Val::Hole);
                     }
                     return Ok(());
                 }
                 if let Some(i) = array_index(key).filter(|_| !own) {
-                    if i < items.len() {
+                    if i < items.len() && (extensible || !matches!(items[i], Val::Hole)) {
                         if locks & ELEMENTS_FROZEN != 0 {
                             drop(b);
                             return self.read_only(key);
@@ -850,8 +889,9 @@ impl<'c> Interp<'c> {
                         items[i] = value;
                         return Ok(());
                     }
-                    if locks & LENGTH_FIXED != 0 || !extensible {
-                        let fixed = locks & LENGTH_FIXED != 0;
+                    // Past the end, or a hole of an array that cannot take new properties.
+                    let fixed = locks & LENGTH_FIXED != 0 && i >= items.len();
+                    if fixed || !extensible {
                         drop(b);
                         if !self.strict {
                             return Ok(());
@@ -862,7 +902,7 @@ impl<'c> Interp<'c> {
                     drop(b);
                     self.grow(o, grow)?;
                     if let Kind::Array(items) = &mut o.borrow_mut().kind {
-                        items.resize(i + 1, Val::Undef);
+                        items.resize(i + 1, Val::Hole);
                         items[i] = value;
                     }
                     return Ok(());
@@ -961,7 +1001,9 @@ impl<'c> Interp<'c> {
         let b = o.borrow();
         match &b.kind {
             Kind::Array(items)
-                if key == "length" || array_index(key).is_some_and(|i| i < items.len()) =>
+                if key == "length"
+                    || array_index(key)
+                        .is_some_and(|i| items.get(i).is_some_and(|x| !matches!(x, Val::Hole))) =>
             {
                 true
             }
@@ -1045,9 +1087,8 @@ impl<'c> Interp<'c> {
         if let Kind::Array(items) = &mut b.kind
             && let Some(i) = array_index(key)
         {
-            // Holes are not kept: the element becomes undefined.
             if i < items.len() {
-                items[i] = Val::Undef;
+                items[i] = Val::Hole;
             }
             b.remove(key);
             return Ok(true);
@@ -1060,7 +1101,12 @@ impl<'c> Interp<'c> {
     pub fn own_keys(&self, o: &ObjRef, only_enumerable: bool) -> Vec<Name> {
         let b = o.borrow();
         let mut out: Vec<Name> = match &b.kind {
-            Kind::Array(items) => (0..items.len()).map(|i| i.to_string().into()).collect(),
+            Kind::Array(items) => items
+                .iter()
+                .enumerate()
+                .filter(|(_, x)| !matches!(x, Val::Hole))
+                .map(|(i, _)| i.to_string().into())
+                .collect(),
             Kind::Str(s) => {
                 (0..crate::strings::utf16_len(s)).map(|i| i.to_string().into()).collect()
             }
@@ -1795,7 +1841,7 @@ impl<'c> Interp<'c> {
             Val::Str(_) => true,
             Val::Obj(o) => matches!(
                 o.borrow().kind,
-                Kind::Typed(_) | Kind::Set(_) | Kind::Map(_) | Kind::Iter(_) | Kind::Arguments(_)
+                Kind::Typed(_) | Kind::Set(_) | Kind::Map(_) | Kind::Iter(..) | Kind::Arguments(_)
             ),
             _ => false,
         };
@@ -1862,11 +1908,15 @@ impl<'c> Interp<'c> {
             Val::Obj(o) => {
                 let kind = o.borrow().kind.clone();
                 match kind {
-                    Kind::Array(items) if o.borrow().locks & ELEMENTS_OWN == 0 => {
+                    Kind::Array(items)
+                        if o.borrow().locks & ELEMENTS_OWN == 0
+                            && !items.iter().any(|x| matches!(x, Val::Hole)) =>
+                    {
                         return Ok(items);
                     }
                     Kind::Array(items) => {
-                        // An element with its own attributes is read through its getter.
+                        // An element with its own attributes is read through its getter, and a
+                        // hole from the prototypes.
                         let target = Val::Obj(o.clone());
                         let mut out = Vec::with_capacity(items.len());
                         for i in 0..items.len() {
@@ -1883,7 +1933,7 @@ impl<'c> Interp<'c> {
                         }
                         return Ok(out);
                     }
-                    Kind::Iter(state) => {
+                    Kind::Iter(state, _) => {
                         let (items, pos) = &mut *state.borrow_mut();
                         let rest = items.get(*pos..).unwrap_or(&[]).to_vec();
                         *pos = items.len();
@@ -2562,7 +2612,7 @@ impl<'c> Interp<'c> {
                 let mut out = Vec::with_capacity(items.len());
                 for it in items {
                     match it {
-                        None => out.push(Val::Undef),
+                        None => out.push(Val::Hole),
                         Some(Expr::Spread(x)) => {
                             let v = self.eval(x, env)?;
                             let all = self.iterate(&v);
@@ -2790,7 +2840,8 @@ impl<'c> Interp<'c> {
             MemberProp::Private(n) => self.private_key(n, env),
             MemberProp::Computed(e) => {
                 let v = self.eval(e, env)?;
-                self.key_of(&v)
+                let k = self.key_of(&v);
+                self.name_operands(k, &[(e, &v)])
             }
         }
     }
@@ -3095,14 +3146,22 @@ impl<'c> Interp<'c> {
         }
         let Val::Obj(o) = x else { return Ok(false) };
         let Val::Obj(proto) = self.get(f, "prototype")? else { return Ok(false) };
-        let mut cur = o.borrow().proto.clone();
+        let mut cur = self.proto_of(o)?;
         while let Some(c) = cur {
             if c.ptr_eq(&proto) {
                 return Ok(true);
             }
-            cur = c.borrow().proto.clone();
+            cur = self.proto_of(&c)?;
         }
         Ok(false)
+    }
+
+    /// `[[GetPrototypeOf]]` of `o`, through a proxy's `getPrototypeOf`.
+    pub fn proto_of(&mut self, o: &ObjRef) -> R<Option<ObjRef>> {
+        if crate::proxy::is_proxy(o) {
+            return crate::proxy::get_proto(self, o);
+        }
+        Ok(o.borrow().proto.clone())
     }
 
     pub fn loose_eq(&mut self, a: &Val, b: &Val) -> R<bool> {
