@@ -192,7 +192,7 @@ pub fn to_desc(it: &mut Interp, d: &Val) -> R<Desc> {
     Ok(out)
 }
 
-fn same_value(a: &Val, b: &Val) -> bool {
+pub(crate) fn same_value(a: &Val, b: &Val) -> bool {
     match (a, b) {
         (Val::Num(x), Val::Num(y)) => {
             (x.is_nan() && y.is_nan()) || (x == y && x.is_sign_negative() == y.is_sign_negative())

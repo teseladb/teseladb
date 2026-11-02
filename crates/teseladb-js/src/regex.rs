@@ -359,8 +359,14 @@ impl Parser<'_> {
                     Node::Char(u32::from(b'\\'))
                 }
             },
+            '1'..='7' if in_class && self.unicode => {
+                return Err("invalid decimal escape in regular expression".into());
+            }
+            '8' | '9' if in_class && self.unicode => {
+                return Err("invalid identity escape in regular expression".into());
+            }
             // Annex B: an octal escape in a class (`[\1]`).
-            '1'..='7' if in_class && !self.unicode => {
+            '1'..='7' if in_class => {
                 let mut v = c as u32 - u32::from(b'0');
                 while v < 32 && self.peek().is_some_and(|d| ('0'..='7').contains(&d)) {
                     v = v * 8 + (self.s[self.i] - u32::from(b'0'));
@@ -595,12 +601,21 @@ impl Matcher<'_, '_> {
             }
             Node::Look(inner, ahead, neg) => {
                 if !*ahead {
-                    // Lookbehind: some start before `pos` whose match ends at `pos`.
-                    let found = (0..=pos).rev().any(|st| {
+                    // Lookbehind: some start before `pos` whose match ends at `pos`, the
+                    // farthest first, as the backward match of a greedy group takes the most
+                    // (measured: `/(?<=(\d+))x/` captures `123` of `123x`); a positive one keeps
+                    // its captures.
+                    let found = (0..=pos).find_map(|st| {
                         let mut c2 = caps.clone();
-                        self.node(inner, st, &mut c2, &mut |_, p, _| p == pos)
+                        self.node(inner, st, &mut c2, &mut |_, p, _| p == pos).then_some(c2)
                     });
-                    return found != *neg && k(self, pos, caps);
+                    if found.is_some() == *neg {
+                        return false;
+                    }
+                    if !*neg {
+                        *caps = found.unwrap_or_default();
+                    }
+                    return k(self, pos, caps);
                 }
                 let mut c2 = caps.clone();
                 let found = self.node(inner, pos, &mut c2, &mut |_, _, _| true);
@@ -883,14 +898,135 @@ pub fn test(it: &mut Interp, this: &Val, a: &[Val]) -> R {
         return it.type_error(&format!("{t} is not a non-null object"));
     }
     // Another object is matched by its own `exec` (ECMA-262 §22.2.7.1 RegExpExec).
-    if !matches!(this, Val::Obj(o) if matches!(o.borrow().kind, Kind::RegExp(..))) {
-        let f = it.get(this, "exec")?;
-        if f.is_callable() {
-            let r = it.call(&f, this, a)?;
-            return Ok(Val::Bool(!matches!(r, Val::Null)));
-        }
+    if !is_regexp(this) {
+        let s = Val::Str(it.str_of(&a.first().cloned().unwrap_or(Val::Undef))?);
+        return Ok(Val::Bool(!matches!(regexp_exec(it, this, &s)?, Val::Null)));
     }
     Ok(Val::Bool(!matches!(exec(it, this, a)?, Val::Null)))
+}
+
+fn is_regexp(v: &Val) -> bool {
+    matches!(v, Val::Obj(o) if matches!(o.borrow().kind, Kind::RegExp(..)))
+}
+
+/// RegExpExec (ECMA-262 §22.2.7.1) on an object that is not a `RegExp`: its own `exec`, whose
+/// result is an object or null.
+fn regexp_exec(it: &mut Interp, rx: &Val, s: &Val) -> R {
+    let f = it.get(rx, "exec")?;
+    if !f.is_callable() {
+        return exec(it, rx, std::slice::from_ref(s));
+    }
+    let r = it.call(&f, rx, std::slice::from_ref(s))?;
+    match r {
+        Val::Obj(_) | Val::Null => Ok(r),
+        _ => it.type_error("RegExp exec method should return object or null"),
+    }
+}
+
+/// The results of matching `rx`, an object that is not a `RegExp`, against `s`: one, or every
+/// one with the `g` flag, moving `lastIndex` past an empty match (§22.2.6.8, §22.2.6.11).
+fn generic_results(it: &mut Interp, rx: &Val, s: &Val, global: bool) -> R<Vec<Val>> {
+    if global {
+        it.set(rx, "lastIndex", Val::Num(0.0))?;
+    }
+    let mut out = Vec::new();
+    loop {
+        let r = regexp_exec(it, rx, s)?;
+        if matches!(r, Val::Null) {
+            return Ok(out);
+        }
+        out.push(r.clone());
+        if !global {
+            return Ok(out);
+        }
+        let m = it.get(&r, "0")?;
+        if it.str_of(&m)?.is_empty() {
+            let i = it.get(rx, "lastIndex")?;
+            let i = to_length(it.number_of(&i)?);
+            it.set(rx, "lastIndex", Val::Num(i + 1.0))?;
+        }
+    }
+}
+
+fn to_length(n: f64) -> f64 {
+    if n.is_nan() { 0.0 } else { n.trunc().clamp(0.0, 9_007_199_254_740_991.0) }
+}
+
+fn has_flag(it: &mut Interp, rx: &Val, flag: char) -> R<bool> {
+    let f = it.get(rx, "flags")?;
+    Ok(it.str_of(&f)?.contains(flag))
+}
+
+/// `RegExp.prototype[Symbol.match]` on an object that is not a `RegExp`.
+fn generic_match(it: &mut Interp, rx: &Val, s: &Val) -> R {
+    if !has_flag(it, rx, 'g')? {
+        return regexp_exec(it, rx, s);
+    }
+    let mut items = Vec::new();
+    for r in generic_results(it, rx, s, true)? {
+        let m = it.get(&r, "0")?;
+        items.push(Val::Str(it.str_of(&m)?));
+    }
+    if items.is_empty() { Ok(Val::Null) } else { it.array(items) }
+}
+
+/// `RegExp.prototype[Symbol.search]` on an object that is not a `RegExp`.
+fn generic_search(it: &mut Interp, rx: &Val, s: &Val) -> R {
+    let before = it.get(rx, "lastIndex")?;
+    if !crate::props::same_value(&before, &Val::Num(0.0)) {
+        it.set(rx, "lastIndex", Val::Num(0.0))?;
+    }
+    let r = regexp_exec(it, rx, s)?;
+    let now = it.get(rx, "lastIndex")?;
+    if !crate::props::same_value(&now, &before) {
+        it.set(rx, "lastIndex", before)?;
+    }
+    match r {
+        Val::Null => Ok(Val::Num(-1.0)),
+        r => it.get(&r, "index"),
+    }
+}
+
+/// `RegExp.prototype[Symbol.replace]` on an object that is not a `RegExp` (§22.2.6.11).
+fn generic_replace(it: &mut Interp, rx: &Val, s: &Name, replacement: &Val) -> R {
+    let replacement = if replacement.is_callable() {
+        replacement.clone()
+    } else {
+        Val::Str(it.str_of(replacement)?)
+    };
+    let global = has_flag(it, rx, 'g')?;
+    let units = crate::strings::units(s);
+    let mut out = String::new();
+    let mut next = 0;
+    for r in generic_results(it, rx, &Val::Str(s.clone()), global)? {
+        let n = it.get(&r, "length")?;
+        let n = to_length(it.number_of(&n)?) as usize;
+        let m = it.get(&r, "0")?;
+        let matched = it.str_of(&m)?;
+        let p = it.get(&r, "index")?;
+        let p = it.number_of(&p)?;
+        let position = if p.is_nan() { 0 } else { (p.trunc().max(0.0) as usize).min(units.len()) };
+        let mut groups = Vec::new();
+        for i in 1..n.max(1) {
+            let c = it.get(&r, &i.to_string())?;
+            groups.push(if matches!(c, Val::Undef) { c } else { Val::Str(it.str_of(&c)?) });
+        }
+        let mut named = Vec::new();
+        if let Val::Obj(g) = it.get(&r, "groups")? {
+            for k in it.keys(&g, true)? {
+                let v = it.get(&Val::Obj(g.clone()), &k)?;
+                named.push((k.to_string(), v));
+            }
+        }
+        let text = substitute(it, &replacement, &matched, position, s, &groups, &named)?;
+        if position >= next {
+            out.push_str(&crate::strings::from_units(&units[next..position]));
+            out.push_str(&text);
+            next = position + crate::strings::units(&matched).len();
+        }
+    }
+    out.push_str(&crate::strings::from_units(&units[next.min(units.len())..]));
+    it.string(out)
 }
 
 /// Every match of `re` in `s` from the start: their captures.
@@ -1113,12 +1249,23 @@ fn symbol_str(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     Ok(Val::Str(it.str_of(&a.first().cloned().unwrap_or(Val::Undef))?))
 }
 
+/// The string argument when `this` is an object that is not a `RegExp`: the generic algorithm.
+fn generic_str(it: &mut Interp, this: &Val, a: &[Val]) -> R<Option<Val>> {
+    if !matches!(this, Val::Obj(_)) || is_regexp(this) {
+        return Ok(None);
+    }
+    Ok(Some(Val::Str(it.str_of(&a.first().cloned().unwrap_or(Val::Undef))?)))
+}
+
 /// The rest of the arguments after the string, with the regular expression first.
 fn with_this(this: &Val, a: &[Val]) -> Vec<Val> {
     std::iter::once(this.clone()).chain(a.iter().skip(1).cloned()).collect()
 }
 
 pub fn symbol_match(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    if let Some(s) = generic_str(it, this, a)? {
+        return generic_match(it, this, &s);
+    }
     let s = symbol_str(it, this, a)?;
     string_match(it, &s, &with_this(this, a))
 }
@@ -1129,11 +1276,17 @@ pub fn symbol_match_all(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 }
 
 pub fn symbol_replace(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    if let Some(Val::Str(s)) = generic_str(it, this, a)? {
+        return generic_replace(it, this, &s, &a.get(1).cloned().unwrap_or(Val::Undef));
+    }
     let s = symbol_str(it, this, a)?;
     crate::strings::replace(it, &s, &with_this(this, a))
 }
 
 pub fn symbol_search(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    if let Some(s) = generic_str(it, this, a)? {
+        return generic_search(it, this, &s);
+    }
     let s = symbol_str(it, this, a)?;
     search(it, &s, &with_this(this, a))
 }

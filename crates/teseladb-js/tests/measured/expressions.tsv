@@ -4227,3 +4227,151 @@ Object.prototype.toString.call(function () {}.bind())	S:[object Function]
 (() => { try { eval('function f(...a, b) {}') } catch (e) { return e.message } })()	S:parameter after rest parameter
 (() => { try { eval('do ; while 1') } catch (e) { return e.message } })()	S:missing ( before condition
 (() => { try { eval('(a b) => 1') } catch (e) { return e.message } })()	S:missing ) in parenthetical
+new RegExp('(')	E:SyntaxError:unterminated parenthetical
+new RegExp('(?:')	E:SyntaxError:unterminated parenthetical
+new RegExp('a(?=')	E:SyntaxError:unterminated parenthetical
+new RegExp('[')	E:SyntaxError:unterminated character class
+new RegExp('\\')	E:SyntaxError:\\ at end of pattern
+new RegExp('a{2')	J:{"$regex":"a{2","$options":""}
+/\x4g/.test('x4g')	J:true
+/\u12/.test('u12')	J:true
+/\u{12}/.test('u'.repeat(12))	J:true
+/[\c]/.test('c')	J:true
+/[\c*]/.test('*')	J:true
+/[\8]/.test('8')	J:true
+/[\7]/.test('\x07')	J:true
+new RegExp('[\\1]', 'u')	E:SyntaxError:invalid decimal escape in regular expression
+/^[😀]$/u.test('😀')	J:true
+/\ud83d/u.test('😀')	J:false
+/\ud83dA/u.test('\ud83dA')	J:true
+/😀/.test('😀')	J:true
+/\ud83d\ud83d/u.test('\ud83d\ud83d')	J:true
+/[\x41-\x43]/.test('B')	J:true
+/[a-\x63]/.test('b')	J:true
+/[\x41-c]/.test('b')	J:true
+/[\d-z]/.test('-')	J:true
+/[a-z]/i.test('K')	J:true
+/[K]/i.test('k')	J:false
+/[K]/iu.test('k')	J:false
+/[a-z]/iu.test('K')	J:false
+/[ſ]/i.test('s')	J:false
+/[ſ]/iu.test('S')	J:false
+/[k-m]/i.test('K')	J:false
+/a$/m.test('ab')	J:false
+/^b/m.test('a\nb')	J:true
+/(a)\1/.test('ab')	J:false
+/(ab)\1/.test('aba')	J:false
+/(a?)*b/.exec('b')	J:["b",null]
+/(?:)*/.exec('x')	J:[""]
+/(a*)+b/.exec('aab')	J:["aab","aa"]
+/(?:a|)*?c/.exec('aac')	J:["aac"]
+(() => { var r = /a/g; r.lastIndex = 10; return [r.exec('aaa'), r.lastIndex] })()	J:[null,0]
+(() => { var r = /a/y; r.lastIndex = 4; return [r.test('aaa'), r.lastIndex] })()	J:[false,0]
+RegExp.prototype.test.call({exec: 5})	E:TypeError:test method called on incompatible Object
+RegExp.prototype.test.call({exec() { return null }})	J:false
+RegExp.prototype.test.call({exec() { return 5 }})	E:TypeError:RegExp exec method should return object or null
+RegExp.prototype.exec.call({})	E:TypeError:exec method called on incompatible Object
+''.split(/a/)	J:[""]
+''.split(/(?:)/)	J:[]
+''.split(/a?/)	J:[]
+'ab'.split(/(?:)/)	J:["a","b"]
+'abc'.replace(/b/, '$`$\'$&')	S:aacbc
+RegExp.prototype[Symbol.split].call(/b/, 'abc', 0)	J:[]
+(() => { /(a)(b)?/.exec('ab'); return [RegExp.$1, RegExp.$2, RegExp.lastParen, RegExp.leftContext, RegExp.rightContext] })()	J:["a","b","b","",""]
+(() => { /(?<=(a))b/.exec('ab'); return [RegExp.$1, RegExp.lastMatch] })()	J:["a","b"]
+(() => { /(a)|b/.exec('b'); return [RegExp.$1, RegExp.lastParen] })()	J:["",""]
+'aaa'.matchAll(/a/g).next().value[0]	S:a
+[...'a1b2'.matchAll(/\d/g)].map(m => m.index)	J:[1,3]
+'x'.replace(/x/g, () => '$&')	S:$&
+'abc'.replace(/(?<n>b)/, '[$<n>]')	S:a[b]c
+'abc'.replace(/(?<n>b)/, '[$<m>]')	S:a[]c
+'abc'.replace(/(b)/, '[$<n>]')	S:a[$<n>]c
+'abc'.replace(/b/, '$0$1$01$10$')	S:a$0$1$01$10$c
+'abc'.replace(/(b)/, '$01$001$1')	S:ab$001bc
+RegExp.prototype[Symbol.replace].call({exec() { return null }, flags: ''}, 'abc', 'x')	S:abc
+RegExp.prototype[Symbol.match].call({exec() { return null }, flags: 'g'}, 'abc')	J:null
+RegExp.prototype[Symbol.search].call({exec() { return {index: 3} }, lastIndex: 0}, 'abc')	J:3
+/(?<=(a))b/.exec('ab')	J:["b","a"]
+/(?<=(a)(c))b/.exec('acb')	J:["b","a","c"]
+/(?<=(\d+))x/.exec('123x')	J:["x","123"]
+'acb'.replace(/(?<=(a)(c))b/, '[$1$2]')	S:ac[ac]
+new RegExp('[\\8]', 'u')	E:SyntaxError:invalid identity escape in regular expression
+new RegExp('[\\0]', 'u').test('\0')	J:true
+RegExp.prototype[Symbol.match].call({exec() { return {0: 'zz', index: 0} }, flags: ''}, 'abc')	J:{"0":"zz","index":0}
+(() => { let n = 0; return RegExp.prototype[Symbol.match].call({lastIndex: 0, exec() { return n++ < 2 ? {0: 'q' + n} : null }, flags: 'g'}, 'abc') })()	J:["q1","q2"]
+(() => { let n = 0; const o = {lastIndex: 0, exec() { return n++ < 2 ? {0: ''} : null }, flags: 'g'}; const r = RegExp.prototype[Symbol.match].call(o, 'abc'); return [r, o.lastIndex] })()	J:[["",""],2]
+(() => { const o = {lastIndex: 5, exec() { this.lastIndex = 9; return {index: 2} }}; return [RegExp.prototype[Symbol.search].call(o, 'abc'), o.lastIndex] })()	J:[2,5]
+(() => { const o = {lastIndex: 0, exec() { return null }}; return [RegExp.prototype[Symbol.search].call(o, 'abc'), o.lastIndex] })()	J:[-1,0]
+RegExp.prototype[Symbol.replace].call({exec() { return {0: 'b', index: 1, length: 2, 1: 'B'} }, flags: ''}, 'abc', '[$1$&]')	S:a[Bb]c
+RegExp.prototype[Symbol.replace].call({exec() { return {0: 'b', index: 1, groups: {n: 'N'}} }, flags: ''}, 'abc', '[$<n>]')	S:a[N]c
+RegExp.prototype[Symbol.replace].call({exec() { return {0: 'b', index: 1} }, flags: ''}, 'abc', (m, p, s) => m + p + s)	S:ab1abcc
+(() => { let n = 0; return RegExp.prototype[Symbol.replace].call({lastIndex: 0, exec() { return n < 2 ? {0: 'a', index: n++ * 2} : null }, flags: 'g'}, 'abab', 'X') })()	S:XbXb
+RegExp.prototype[Symbol.replace].call({exec() { return {0: 'b', index: 9} }, flags: ''}, 'abc', 'X')	S:abcX
+RegExp.prototype[Symbol.replace].call({exec() { return {0: 'b', index: -3} }, flags: ''}, 'abc', 'X')	S:Xbc
+RegExp.prototype[Symbol.replace].call({exec() { return {0: 'b', index: NaN, length: 3, 1: undefined, 2: 7} }, flags: ''}, 'abc', '$1|$2')	S:|7bc
+RegExp.prototype[Symbol.match].call({exec: 5, flags: ''}, 'abc')	E:TypeError:[Symbol.match] method called on incompatible Object
+RegExp.prototype[Symbol.search].call({exec() { return 3 }}, 'abc')	E:TypeError:RegExp exec method should return object or null
+RegExp.prototype[Symbol.match].call(5, 'abc')	E:TypeError:number is not a non-null object
+/(?<=(a|ab))c/.exec('abc')	J:["c","ab"]
+/(?<!(a))b/.exec('cb')	J:["b",null]
+/(?<=\$(\d+)\.(\d+))/.exec('$12.34')	J:["","12","3"]
+(() => { function* g() { var {a = yield 1} = {}; return a } const it = g(); it.next(); return it.next(7).value })()	J:7
+(() => { function* g() { var {[yield 'k']: a} = {k: 5}; return a } const it = g(); it.next(); return it.next('k').value })()	J:5
+(() => { function* g() { var {a: [b = yield 2]} = {a: []}; return b } const it = g(); it.next(); return it.next(8).value })()	J:8
+(() => { function* g() { return [...[1, 2], yield 3] } const it = g(); it.next(); return it.next(4).value })()	J:[1,2,4]
+(() => { function* g() { var b = [9]; return [0, ...b, yield, 5] } const it = g(); it.next(); return it.next(4).value })()	J:[0,9,4,5]
+(() => { function* g() { var s = {s: 1}; return {get x() { return 1 }, ...s, y: yield 1, z: 2} } const it = g(); it.next(); return JSON.stringify(it.next(4).value) })()	S:{"x":1,"s":1,"y":4,"z":2}
+(() => { function* g() { return {set x(v) {}, [yield 'k']: 1} } const it = g(); it.next(); return Object.keys(it.next('q').value) })()	J:["x","q"]
+(() => { function* g() { var o = {k: 6}; return o[yield 'k'] } const it = g(); it.next(); return it.next('k').value })()	J:6
+(() => { function* g() { var o = {m(x) { return x + 1 }}; return o.m(yield 1) } const it = g(); it.next(); return it.next(4).value })()	J:5
+(() => { function* g() { var o = {m(x) { return x + 2 }}; return o['m'](yield 1) } const it = g(); it.next(); return it.next(4).value })()	J:6
+(() => { function* g() { const f = (x) => x * 2; return f(yield 1) } const it = g(); it.next(); return it.next(4).value })()	J:8
+(() => { function* g() { return (yield 1).m() } const it = g(); it.next(); return it.next({m() { return 'mm' }}).value })()	S:mm
+(() => { function* g() { return (yield 1)[yield 2]() } const it = g(); it.next(); it.next({q() { return 'qq' }}); return it.next('q').value })()	S:qq
+(() => { function* g() { var a; [a = yield 1] = []; return a } const it = g(); it.next(); return it.next(4).value })()	J:4
+(() => { function* g() { var a; ({a = yield 1} = {}); return a } const it = g(); it.next(); return it.next(5).value })()	J:5
+(() => { function* g() { var a; [a] = [yield 1]; return a } const it = g(); it.next(); return it.next(6).value })()	J:6
+(() => { function* g() { var x = 1, y = 0, z = null; x &&= yield 1; y ||= yield 2; z ??= yield 3; return [x, y, z] } const it = g(); it.next(); it.next('a'); it.next('b'); return it.next('c').value })()	J:["a","b","c"]
+(() => { function* g() { var x = 0, y = 1, z = 2; x &&= yield 1; y ||= yield 2; z ??= yield 3; return [x, y, z] } return g().next().value })()	J:[0,1,2]
+(() => { function* g() { var o = {p: null, q: 1}; o.p ??= yield 1; o.q &&= yield 2; return [o.p, o.q] } const it = g(); it.next(); it.next(5); return it.next(6).value })()	J:[5,6]
+(() => { function* g() { var x = 1; x += yield 1; var o = {p: 2}; o.p *= yield 2; o['p'] -= yield 3; return [x, o.p] } const it = g(); it.next(); it.next(4); it.next(5); return it.next(6).value })()	J:[5,4]
+(() => { function* g() { var o = {}; o.x = yield 1; o['y'] = yield 2; return [o.x, o.y] } const it = g(); it.next(); it.next(3); return it.next(4).value })()	J:[3,4]
+(() => { function* g() { (yield 1) + (yield 2); return 'd' } const it = g(); it.next(); it.next(1); return it.next(2).value })()	S:d
+(() => { function* g() { var r = []; for (var i = yield 0; i < 3; i++) r.push(i); return r } const it = g(); it.next(); return it.next(1).value })()	J:[1,2]
+(() => { function* g() { var r = []; for (let [i] = [yield 0]; i < 3; i++) r.push(i); return r } const it = g(); it.next(); return it.next(1).value })()	J:[1,2]
+(() => { function* g() { var n = 0; for (;;) { n++; yield n; if (n > 2) break } return n } return [...g()] })()	J:[1,2,3]
+(() => { function* g() { var n = 0; for (; n < 3;) { yield n++ } } return [...g()] })()	J:[0,1,2]
+(() => { function* g() { var n = 0; for (;; n++) { yield n; if (n > 1) return } } return [...g()] })()	J:[0,1,2]
+(() => { function* g() { var n = 0; do { yield n++ } while (n < 3) } return [...g()] })()	J:[0,1,2]
+(() => { function* g() { var n = 0; do { n++; if (n == 2) continue; yield n } while (n < 4) } return [...g()] })()	J:[1,3,4]
+(() => { function* g() { var n = 0; a: do { n++; yield n; if (n > 1) break a } while (true) } return [...g()] })()	J:[1,2]
+(() => { function* g() { var n = 0; while ((yield n) < 3) n++; return n } const it = g(); it.next(); it.next(1); it.next(2); return it.next(5).value })()	J:2
+(() => { const log = []; const it = {[Symbol.iterator]() { let i = 0; return {next() { return {value: i++, done: i > 5} }, return() { log.push('r'); return {} }} }}; function* g() { for (const x of it) { yield x; return 'out' } } return [...g()].concat(log) })()	J:[0,"r"]
+(() => { const log = []; const it = {[Symbol.iterator]() { let i = 0; return {next() { return {value: i++, done: i > 5} }, return() { log.push('r'); return {} }} }}; function* g() { a: for (const x of it) { yield x; break a } } return [...g()].concat(log) })()	J:[0,"r"]
+(() => { const log = []; const it = {[Symbol.iterator]() { let i = 0; return {next() { return {value: i++, done: i > 5} }, return() { log.push('r'); return {} }} }}; function* g() { for (const x of it) { yield x; continue } } return [...g()].concat(log) })()	J:[0,1,2,3,4]
+(() => { const it = {[Symbol.iterator]() { return {next() { return {value: 1, done: false} }, return() { throw new Error('rt') }} }}; function* g() { for (const x of it) { yield x; throw new Error('body') } } const i = g(); i.next(); try { i.next() } catch (e) { return e.message } })()	S:body
+(() => { const it = {[Symbol.iterator]() { return {next() { return {value: 1, done: false} }, return() { throw new Error('rt') }} }}; function* g() { for (const x of it) { yield x; return 3 } } const i = g(); i.next(); try { return i.next() } catch (e) { return e.message } })()	S:rt
+(() => { function* g() { try { throw 1 } catch (e) { yield e } finally { yield 2 } yield 3 } return [...g()] })()	J:[1,2,3]
+(() => { function* g() { try { yield 1 } finally { yield 2 } } const it = g(); it.next(); return [it.return(9), it.next(), it.next()] })()	J:[{"value":2,"done":false},{"value":9,"done":true},{"done":true}]
+(() => { function* g() { try { yield 1 } catch (e) { yield 'c' + e } } const it = g(); it.next(); return [it.throw(5), it.next()] })()	J:[{"value":"c5","done":false},{"done":true}]
+(() => { function* g() { try { yield 1; throw 2 } catch (e) { yield 'c' + e } finally { yield 'f' } } return [...g()] })()	J:[1,"c2","f"]
+(() => { function* g() { try { yield 1 } catch { yield 'c' } } const it = g(); it.next(); return it.throw(1).value })()	S:c
+(() => { function* g() { try { yield 1 } finally { return 'f' } } const it = g(); it.next(); return it.throw(1) })()	J:{"value":"f","done":true}
+(() => { function* g() { switch (5) { case 1: yield 1 } return 'none' } return g().next() })()	J:{"value":"none","done":true}
+(() => { function* g() { switch (yield 0) { case 1: yield 'one'; case 2: yield 'two'; break; default: yield 'd' } } const it = g(); it.next(); return [it.next(1).value, it.next().value, it.next().done] })()	J:["one","two",true]
+(() => { function* g() { switch (2) { default: yield 'd'; case 1: yield 1 } } return [...g()] })()	J:["d",1]
+(() => { function* g() { var o = {a: 1}; with (o) { yield a; a = 2 } return o.a } const it = g(); it.next(); return it.next().value })()	J:2
+(() => { function* g() { if (yield 1) { yield 'y' } else { yield 'n' } } const it = g(); it.next(); return it.next(0).value })()	S:n
+(() => { function* g() { let x = yield 1; { let x = yield 2; } return x } const it = g(); it.next(); it.next('a'); return it.next('b').value })()	S:a
+(() => { function* g() { return (yield 1) ? yield 2 : yield 3 } const it = g(); it.next(); it.next(false); return it.next('z').value })()	S:z
+(() => { function* g() { return `a${yield 1}b${yield 2}` } const it = g(); it.next(); it.next('x'); return it.next('y').value })()	S:axby
+(() => { function* g() { return typeof (yield 1) } const it = g(); it.next(); return it.next(1).value })()	S:number
+(() => { function* g() { return new (yield 1)(yield 2) } const it = g(); it.next(); it.next(function (a) { this.a = a }); return it.next(7).value.a })()	J:7
+(() => { function* g() { return [1, 2].map(x => x)[yield 0] } const it = g(); it.next(); return it.next(1).value })()	J:2
+(() => { function* g() { return delete (yield 1).a } const it = g(); it.next(); return it.next({a: 1}).value })()	J:true
+(() => { function* g() { var o = {f() { return this.v }, v: 3}; return o?.f(yield 1) } const it = g(); it.next(); return it.next(0).value })()	J:3
+(() => { function* g() { return (yield 1)?.x } const it = g(); it.next(); return it.next(null).value })()	J:undefined
+(() => { function* g() { return (yield 1), (yield 2) } const it = g(); it.next(); it.next(1); return it.next(2).value })()	J:2
+(() => { function* g() { var a = [1, 2]; return a[0] + (a[1] = yield 1) } const it = g(); it.next(); return it.next(5).value })()	J:6
+(() => { function* g() { var i = 0; var a = [10, 20]; a[i++] += yield 1; return a } const it = g(); it.next(); return it.next(5).value })()	J:[15,20]
+(() => { function* g() { var o = {p: 1}; o.p++; ++o.p; return [o.p, yield o.p] } const it = g(); it.next(); return it.next(5).value })()	J:[3,5]
