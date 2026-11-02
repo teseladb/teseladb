@@ -518,3 +518,67 @@ fn the_busiest_node_leading_nothing_moves_no_leader() {
         .filter(|d| matches!(d, Decision::Command(Group0Command::SetLeaderHint { .. })));
     assert_eq!(hints.count(), 0);
 }
+
+/// Zone `zone` on `nodes` with the interval `[start, end)` of keys.
+fn zone(sm: &mut Group0Sm, zone: &str, nodes: &[u64], (start, end): (&[u8], &[u8])) {
+    use teseladb_meta::zones::{ZoneRange, shard_key};
+    for &i in nodes {
+        sm.settings.insert(shard_key(n(i), zone), Vec::new());
+    }
+    let r = ZoneRange {
+        ns: "db.c".into(),
+        id: [start.first().copied().unwrap_or(0); 12],
+        min: Vec::new(),
+        max: Vec::new(),
+        zone: zone.into(),
+        keys: Some((start.to_vec(), end.to_vec())),
+    };
+    sm.settings.insert(r.key(), r.encode());
+}
+
+#[test]
+fn a_zone_keeps_its_ranges_replicas_on_its_nodes() {
+    // Range 1 is `[1, 2)`, inside the zone's interval: its replica on node 3 moves to node 4.
+    let mut sm = cluster(4);
+    add_range(&mut sm, 1, &[1, 2, 3]);
+    add_range(&mut sm, 5, &[1, 2, 3]);
+    zone(&mut sm, "EU", &[1, 2, 4], (&[1], &[3]));
+    let w = World::new(sm.clone(), &[1, 2, 3]);
+    assert_eq!(w.replica_changes(), vec![(GroupId(1), 4, vec![n(4)], vec![n(3)])]);
+    // With two nodes in the zone the range keeps two replicas.
+    let mut two = sm.clone();
+    two.settings.remove(&teseladb_meta::zones::shard_key(n(4), "EU"));
+    let w = World::new(two, &[1, 2, 3]);
+    assert_eq!(w.replica_changes(), vec![(GroupId(1), 4, vec![], vec![n(3)])]);
+    // A stopped balancer leaves the zones alone.
+    let stopped = teseladb_bson::Document::new().with("_id", "balancer").with("stopped", true);
+    sm.settings
+        .insert(teseladb_meta::config_settings::BALANCER_KEY.to_vec(), stopped.to_bytes().unwrap());
+    assert!(World::new(sm, &[1, 2, 3]).replica_changes().is_empty());
+}
+
+#[test]
+fn a_range_across_a_zones_edge_is_cut_there() {
+    let mut sm = cluster(3);
+    add_range(&mut sm, 1, &[1, 2, 3]);
+    zone(&mut sm, "EU", &[1], (&[1, 5], &[9]));
+    let w = World::new(sm, &[1, 2, 3]);
+    let cuts: Vec<_> = w
+        .plan()
+        .into_iter()
+        .filter(|d| matches!(d, Decision::Command(Group0Command::SplitRange { .. })))
+        .collect();
+    let want = Group0Command::SplitRange { group: GroupId(1), at: vec![1, 5] };
+    assert_eq!(cuts, vec![Decision::Command(want)]);
+}
+
+#[test]
+fn moves_for_balance_keep_ranges_in_their_zone() {
+    // Node 4 is new and empty, but the only ranges node 1 could give it are zoned elsewhere.
+    let mut sm = cluster(4);
+    for g in [1, 3, 5] {
+        add_range(&mut sm, g, &[1, 2, 3]);
+    }
+    zone(&mut sm, "EU", &[1, 2, 3], (&[0], &[9]));
+    assert!(World::new(sm, &[1, 2, 3]).replica_changes().is_empty());
+}

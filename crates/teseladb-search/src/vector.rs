@@ -86,14 +86,46 @@ impl Quantization {
     }
 }
 
+/// Above this length RefLib's scalar code adds the terms in four accumulators.
+const UNROLL_ABOVE: usize = 32;
+
+/// `Σ term(i)` as RefLib's scalar vector code adds it: fused multiply-adds, in four accumulators
+/// for the first multiple of four terms of a long vector, then one by one (measured: the
+/// euclidean score of an 8-dimension vector of `tests/compat/scenarios/vector-quantization.json`
+/// matches `refsearch` only with fused multiply-adds).
+fn fused_sum(len: usize, term: impl Fn(usize) -> (f32, f32)) -> f32 {
+    let mut res = 0f32;
+    let mut i = 0;
+    if len > UNROLL_ABOVE {
+        let mut acc = [0f32; 4];
+        while i + 4 <= len {
+            for (k, a) in acc.iter_mut().enumerate() {
+                let (x, y) = term(i + k);
+                *a = x.mul_add(y, *a);
+            }
+            i += 4;
+        }
+        res += acc[0] + acc[1] + acc[2] + acc[3];
+    }
+    while i < len {
+        let (x, y) = term(i);
+        res = x.mul_add(y, res);
+        i += 1;
+    }
+    res
+}
+
 /// The dot product of two vectors of the same length.
 pub fn dot(a: &[f32], b: &[f32]) -> f32 {
-    a.iter().zip(b).map(|(x, y)| x * y).sum()
+    fused_sum(a.len().min(b.len()), |i| (a[i], b[i]))
 }
 
 /// The squared euclidean distance of two vectors of the same length.
 pub fn squared_distance(a: &[f32], b: &[f32]) -> f32 {
-    a.iter().zip(b).map(|(x, y)| (x - y) * (x - y)).sum()
+    fused_sum(a.len().min(b.len()), |i| {
+        let d = a[i] - b[i];
+        (d, d)
+    })
 }
 
 /// A scored candidate: its score and the document number.

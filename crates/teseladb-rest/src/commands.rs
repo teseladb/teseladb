@@ -433,7 +433,13 @@ pub fn build(
             _ => return Err(CommandError::new(FAILED_TO_PARSE, "user must be a string")),
         },
         Op::RevokeApiKey => plain("admin", Document::new().with("revokeApiKey", p.id.as_str())),
-        Op::GetMore | Op::KillCursor | Op::OpenApi => {
+        Op::GetMore
+        | Op::KillCursor
+        | Op::OpenApi
+        | Op::Transaction
+        | Op::WatchCollection
+        | Op::WatchDatabase
+        | Op::WatchCluster => {
             return Err(CommandError::new(COMMAND_NOT_SUPPORTED, "the route builds no command"));
         }
     };

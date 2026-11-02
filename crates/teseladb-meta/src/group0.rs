@@ -474,7 +474,7 @@ impl Group0Sm {
         self.tenants.add(name).map(Group0Result::Tenant).ok_or(Group0Error::OutOfGroupIds)
     }
 
-    /// `DropTenant`: a tenant without databases or users goes.
+    /// `DropTenant`: a tenant without databases, users or roles goes.
     fn drop_tenant(&mut self, name: &str) -> Result<Group0Result, Group0Error> {
         if !crate::tenants::valid_name(name) {
             return Err(Group0Error::InvalidTenantName);
@@ -482,7 +482,8 @@ impl Group0Sm {
         let id = self.tenants.id_of(name).ok_or(Group0Error::TenantNotFound)?;
         let has_db = self.catalog.dbs.keys().any(|db| crate::tenants::split_db(db).0 == id);
         let has_user = self.security.users.docs().any(|d| crate::tenants::of_user(d) == id);
-        if has_db || has_user {
+        let has_role = self.security.roles.docs().any(|d| crate::tenants::of_user(d) == id);
+        if has_db || has_user || has_role {
             return Err(Group0Error::NotEmpty);
         }
         self.tenants.remove(id);

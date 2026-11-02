@@ -745,7 +745,9 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         db: &str,
         name: &str,
     ) -> Result<Option<Vec<u8>>, CommandError> {
-        self.call(|b| b.principal(kind, db, name))
+        let tenant = self.tenant;
+        let found = self.call(|b| b.principal(kind, db, name))?;
+        Ok(found.filter(|d| tenants::of_principal(d) == tenant))
     }
 
     fn principals(
@@ -753,7 +755,9 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         kind: Principal,
         db: Option<&str>,
     ) -> Result<Vec<Vec<u8>>, CommandError> {
-        self.call(|b| b.principals(kind, db))
+        let tenant = self.tenant;
+        let all = self.call(|b| b.principals(kind, db))?;
+        Ok(all.into_iter().filter(|d| tenants::of_principal(d) == tenant).collect())
     }
 
     fn principal_by_id(
@@ -768,6 +772,9 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         &mut self,
         ops: Vec<SecurityOp>,
     ) -> Result<Result<(), SecurityError>, CommandError> {
+        let Some(ops) = tenants::own_security_ops(self.tenant, ops)? else {
+            return Ok(Err(SecurityError::Conflict));
+        };
         self.call(|b| b.security_write(ops))
     }
 

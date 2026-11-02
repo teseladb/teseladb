@@ -308,6 +308,24 @@ fn intervals_follow_refdb() {
     assert!(!exact);
     assert_eq!(b, vec![Bound::point(Value::Null)]);
     assert_eq!(intervals("$gt", &Value::Boolean(true)), None);
+    // The comparisons a time series' bucket filter makes on `control.min` and `control.max`
+    // scan the intervals of their plain forms, the buckets deciding them (015 FR-008).
+    let at = Value::DateTime(5);
+    let (plain, _) = intervals("$gte", &at).expect("a $gte");
+    assert_eq!(intervals("$_internalExprGte", &at), Some((plain, false)));
+    let (plain, _) = intervals("$lt", &at).expect("a $lt");
+    assert_eq!(intervals("$_internalExprLt", &at), Some((plain, false)));
+    assert_eq!(shown_value(&Value::DateTime(i64::MIN)), "new Date(-9223372036854775808)");
+    let (b, exact) = intervals("$gte", &at).expect("a $gte");
+    let to = Bound {
+        low: at.clone(),
+        low_inclusive: true,
+        high: Value::DateTime(i64::MAX),
+        high_inclusive: true,
+    };
+    assert_eq!((b, exact), (vec![to], true));
+    assert!(intervals("$_internalExprGt", &at).is_some());
+    assert!(intervals("$_internalExprLte", &at).is_some());
     let (b, _) = intervals("$lte", &Value::String("m".to_owned())).expect("a bound");
     assert_eq!(b[0].shown(), r#"["", "m"]"#);
     let (b, _) = intervals("$gte", &Value::String("m".to_owned())).expect("a bound");

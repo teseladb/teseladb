@@ -247,9 +247,27 @@ fn extreme(current: Option<&Value>, v: &Value, less: bool) -> Result<Value, TsEr
 }
 
 /// A 40-bit FNV-1a hash of the BSON of a meta value.
+/// Meta value `v` as a bucket keeps it: the fields of its documents sorted by name, also inside
+/// arrays, as RefDb normalizes it (measured on a `refnode` 9.0.4 on 02-11-2026).
+pub fn normalized_meta(v: &Value) -> Value {
+    match v {
+        Value::Document(d) => {
+            let mut fields: Vec<(&str, &Value)> = d.iter().collect();
+            fields.sort_by(|a, b| a.0.cmp(b.0));
+            let mut out = Document::new();
+            for (k, v) in fields {
+                out.push(k, normalized_meta(v));
+            }
+            Value::Document(out)
+        }
+        Value::Array(items) => Value::Array(items.iter().map(normalized_meta).collect()),
+        other => other.clone(),
+    }
+}
+
 fn meta_hash(meta: Option<&Value>) -> Result<[u8; 5], TsError> {
     let bytes = match meta {
-        Some(m) => Document::new().with(HOLDER, m.clone()).to_bytes().map_err(broken)?,
+        Some(m) => Document::new().with(HOLDER, normalized_meta(m)).to_bytes().map_err(broken)?,
         None => Vec::new(),
     };
     let h = bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
@@ -406,7 +424,7 @@ impl BucketSpec {
             .with(COUNT, count);
         let mut bucket = Document::new().with(ID, Value::ObjectId(id)).with(CONTROL, control);
         if let Some(m) = meta {
-            bucket.push(META, m.clone());
+            bucket.push(META, normalized_meta(m));
         }
         Ok(bucket.with(DATA, data))
     }

@@ -27,5 +27,6 @@ pub mod index;
 pub mod indexer;
 pub mod query;
 pub mod segment;
+pub mod text_index;
 pub mod vector;
 pub mod vector_indexer;

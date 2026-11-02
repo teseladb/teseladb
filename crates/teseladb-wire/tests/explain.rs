@@ -524,3 +524,38 @@ fn canonical_value(v: &Value) -> String {
 fn scans_that_check_their_keys_answer_as_refdb() {
     check_in(include_str!("explain/plan_checked.out"), false);
 }
+
+/// A `distinct` that reads one key per value reads the key after its interval when one is
+/// there, and none past the end of the index (measured on a `refnode` 9.0.4 on 02-11-2026 over
+/// `g` = "a", "b", "a", "c", 5 with an index on `g`: the values, keys read and documents read).
+#[test]
+fn a_distinct_scan_reads_the_key_after_its_interval_only_when_there_is_one() {
+    let mut m = Mem::new();
+    let docs = r#"[{"_id":1,"g":"a"},{"_id":2,"g":"b"},{"_id":3,"g":"a"},{"_id":4,"g":"c"},{"_id":5,"g":5}]"#;
+    let r = m.run(DB, extjson::parse(&format!(r#"{{"insert":"kd","documents":{docs}}}"#)).unwrap());
+    assert_eq!(field(&r, "n"), &Value::Int32(5), "{r:?}");
+    let index = r#"{"createIndexes":"kd","indexes":[{"key":{"g":1},"name":"g_1"}]}"#;
+    m.run(DB, extjson::parse(index).unwrap());
+    for (query, want) in [
+        ("{}", (4, 4, 0)),
+        (r#"{"g":{"$gte":"a"}}"#, (3, 3, 0)),
+        (r#"{"g":{"$lt":"b"}}"#, (1, 2, 0)),
+        (r#"{"g":{"$gte":"b"}}"#, (2, 2, 0)),
+    ] {
+        let cmd = format!(
+            r#"{{"explain":{{"distinct":"kd","key":"g","query":{query}}},"verbosity":"executionStats"}}"#
+        );
+        let r = m.run(DB, extjson::parse(&cmd).unwrap());
+        let n = |path: &str| match field(&r, path) {
+            Value::Int32(n) => i64::from(*n),
+            Value::Int64(n) => *n,
+            other => panic!("{path}: {other:?} in {r:?}"),
+        };
+        let got = (
+            n("executionStats.nReturned"),
+            n("executionStats.totalKeysExamined"),
+            n("executionStats.totalDocsExamined"),
+        );
+        assert_eq!(got, want, "{query}: {r:?}");
+    }
+}

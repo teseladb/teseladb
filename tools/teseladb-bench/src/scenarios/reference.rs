@@ -2,9 +2,9 @@
 //! the baselines applies to, over the wire protocol against `--target` or a local cluster. It
 //! measures a write confirmed by the majority with the journal (`insert`, `w: "majority"`,
 //! `j: true`) and a read by `_id` served by the leader's lease (`find`, `readConcern: "local"`),
-//! one after the other on each worker, on documents of 100 bytes. The query by index (009) and the
-//! search (011) join it when the server answers `createIndexes` and `$search`; until then their
-//! metrics are not in the report, so a baseline saved now stays valid.
+//! and a query by a secondary index (009 T029: `find` by equality on the indexed field `v`, which
+//! gives the document just written), one after the other on each worker, on documents of 100
+//! bytes. The search (011) joins it when the server answers `$search`.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -23,9 +23,12 @@ const SEED: u64 = 0x5245_4645;
 /// Kinds of operation in the report.
 const WRITE: &str = "write";
 const READ: &str = "read";
+const QUERY: &str = "query";
+/// The indexed field of the documents.
+const INDEXED: &str = "v";
 
-fn insert(c: &mut Client, id: String, rng: &mut Rng) -> Result<(), String> {
-    let document = doc(vec![("_id", Value::String(id)), ("v", Value::String(field(rng)))]);
+fn insert(c: &mut Client, id: String, value: String) -> Result<(), String> {
+    let document = doc(vec![("_id", Value::String(id)), (INDEXED, Value::String(value))]);
     let wc = doc(vec![("w", Value::String("majority".into())), ("j", Value::Boolean(true))]);
     c.command(
         DB,
@@ -53,6 +56,41 @@ fn read(c: &mut Client, id: String) -> Result<(), String> {
     .map(drop)
 }
 
+fn query(c: &mut Client, value: String) -> Result<(), String> {
+    let filter = doc(vec![(INDEXED, Value::String(value))]);
+    c.command(
+        DB,
+        doc(vec![
+            ("find", Value::String(COLLECTION.into())),
+            ("filter", Value::Document(filter)),
+            ("limit", Value::Int32(1)),
+        ]),
+    )
+    .map(drop)
+}
+
+/// The index of `v`.
+fn create_index(c: &mut Client) -> Result<(), String> {
+    let index = doc(vec![
+        ("key", Value::Document(doc(vec![(INDEXED, Value::Int32(1))]))),
+        ("name", Value::String(format!("{INDEXED}_1"))),
+    ]);
+    c.until_ready(
+        DB,
+        doc(vec![
+            ("createIndexes", Value::String(COLLECTION.into())),
+            ("indexes", Value::Array(vec![Value::Document(index)])),
+        ]),
+    )
+}
+
+/// What a worker does next: write a document, read it by `_id`, then query it by its index.
+enum Next {
+    Write,
+    Read(String, String),
+    Query(String),
+}
+
 /// Runs the scenario.
 pub fn run(args: &Args) -> Result<Report, String> {
     let target = Target::open(args.target.as_deref())?;
@@ -60,6 +98,17 @@ pub fn run(args: &Args) -> Result<Report, String> {
     let mut setup = Client::connect(addr)?;
     // The collection may not exist yet.
     let _ = setup.command(DB, doc(vec![("drop", Value::String(COLLECTION.into()))]));
+    create_index(&mut setup)?;
+    // A first document, not timed, waits for the cluster's leaders.
+    let probe =
+        doc(vec![("_id", Value::String("ready".into())), (INDEXED, Value::String(String::new()))]);
+    setup.until_ready(
+        DB,
+        doc(vec![
+            ("insert", Value::String(COLLECTION.into())),
+            ("documents", Value::Array(vec![Value::Document(probe)])),
+        ]),
+    )?;
     let next = AtomicU64::new(0);
     let load = Load {
         warmup: args.warmup,
@@ -67,20 +116,26 @@ pub fn run(args: &Args) -> Result<Report, String> {
         concurrency: args.concurrency,
         rate: args.rate,
     };
-    // Each call alternates: an odd call reads the document its worker wrote in the call before.
+    // Each worker cycles: it writes a document, reads it by `_id`, then queries it by its index.
     let out = drive(
         &load,
-        |w| Ok((Client::connect(addr)?, Rng::new(SEED + w as u64), None::<String>)),
-        |(c, rng, written)| match written.take() {
-            Some(id) => {
+        |w| Ok((Client::connect(addr)?, Rng::new(SEED + w as u64), Next::Write)),
+        |(c, rng, next_op)| match std::mem::replace(next_op, Next::Write) {
+            Next::Write => {
+                let id = key(next.fetch_add(1, Ordering::Relaxed));
+                let value = field(rng);
+                insert(c, id.clone(), value.clone())?;
+                *next_op = Next::Read(id, value);
+                Ok(WRITE)
+            }
+            Next::Read(id, value) => {
                 read(c, id)?;
+                *next_op = Next::Query(value);
                 Ok(READ)
             }
-            None => {
-                let id = key(next.fetch_add(1, Ordering::Relaxed));
-                insert(c, id.clone(), rng)?;
-                *written = Some(id);
-                Ok(WRITE)
+            Next::Query(value) => {
+                query(c, value)?;
+                Ok(QUERY)
             }
         },
     )?;

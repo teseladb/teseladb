@@ -224,6 +224,10 @@ impl Connection {
                 return Err(Error::Local(Alert::UnexpectedMessage));
             }
             match rec.typ {
+                // change_cipher_spec never travels protected (RFC 8446, 5; RFC 5246, 7.1).
+                ContentType::ChangeCipherSpec if rec.protected => {
+                    return Err(Error::Local(Alert::UnexpectedMessage));
+                }
                 ContentType::ChangeCipherSpec => self.change_cipher_spec(&rec.data)?,
                 ContentType::Alert => self.handle_alert(&rec.data)?,
                 ContentType::ApplicationData => {
