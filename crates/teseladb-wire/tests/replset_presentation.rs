@@ -478,3 +478,44 @@ fn sync_from_refusals() {
     let r = admin(&mut m, Document::new().with("replSetSyncFrom", 5));
     assert_eq!(code(&r), (9, "Cannot parse HostAndPort from empty string".into()));
 }
+
+/// `replicaSetPort` in `topologyPresentation` (018 FR-016): checked, kept by the next change
+/// that does not name it, dropped with 0, and refused without a set name; the replica set of the
+/// port has every member at that port.
+#[test]
+fn replica_set_port_parameter() {
+    use teseladb_wire::commands::presentation::{port_host, stored};
+    let mut m = node();
+    let refrouter = |port: Value| {
+        Document::new().with("mode", "refrouter").with("setName", "rs0").with("replicaSetPort", port)
+    };
+    let r = present(&mut m, refrouter(Value::Int32(27100)));
+    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+    let p = stored(&mut m).expect("stored");
+    assert_eq!(p.replica_set_port, Some(27100));
+    let hosts: Vec<String> = [N1, N2, N3].iter().map(|h| (*h).to_owned()).collect();
+    let rs = p.on_port(&hosts).expect("the port's replica set");
+    assert_eq!(rs.set_name(), "rs0");
+    assert!(rs.member(&port_host(N1, 27100)).is_some());
+    assert_eq!(rs.primary(), Some(port_host(N1, 27100).as_str()));
+    // A change that does not name the port keeps it; 0 closes it.
+    replica(&mut m, N2);
+    let p = stored(&mut m).expect("stored");
+    assert_eq!(p.replica_set_port, Some(27100));
+    assert_eq!(p.on_port(&hosts).expect("set").primary(), Some(port_host(N2, 27100).as_str()));
+    let r = present(&mut m, refrouter(Value::Int32(0)));
+    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+    assert_eq!(stored(&mut m).expect("stored").replica_set_port, None);
+    // Refusals.
+    let r = present(&mut m, refrouter(Value::Int32(70_000)));
+    assert_eq!(code(&r).0, 2, "{r:?}");
+    let r = present(&mut m, refrouter(Value::from("x")));
+    assert_eq!(code(&r).0, 14, "{r:?}");
+    let r = present(
+        &mut m,
+        Document::new().with("mode", "refrouter").with("setName", "").with("replicaSetPort", 27100),
+    );
+    assert_eq!(code(&r), (2, "replicaSetPort needs a setName".into()));
+    assert_eq!(port_host("a:1", 2), "a:2");
+    assert_eq!(port_host("a", 2), "a:2");
+}

@@ -358,6 +358,7 @@ impl NodeLogic {
             .saturating_add(version.saturating_mul(TOPOLOGY_STATES));
         if shown.is_some() {
             presence.set_replica(crate::config_db::replica_member(sm, *me));
+            presence.set_replica_port(crate::config_db::replica_port_member(sm, *me));
         }
         presence.set(counter, closed);
     }

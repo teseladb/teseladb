@@ -406,6 +406,17 @@ impl ReplicaSet {
         Some(self.with_primary(next, self.set_version + 1))
     }
 
+    /// Priority takeover (as a member of RefDb calls an election when it has a higher priority
+    /// than the primary and is caught up, measured on 9.0.4 on 02-11-2026): the live electable
+    /// member with the highest priority, above the primary's, becomes primary with a new term;
+    /// `None` if there is none.
+    pub fn takeover(&self, alive: &dyn Fn(&str) -> bool) -> Option<ReplicaSet> {
+        let current = self.primary?;
+        let best = self.candidate(alive, Some(current))?;
+        (self.members[best].priority > self.members[current].priority)
+            .then(|| self.with_primary(best, self.set_version))
+    }
+
     /// `replSetStepDown`: another live electable member becomes primary with a new term, as an
     /// election does; `None` if there is none.
     pub fn step_down(&self, alive: &dyn Fn(&str) -> bool) -> Option<ReplicaSet> {

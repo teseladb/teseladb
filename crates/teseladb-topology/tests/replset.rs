@@ -303,3 +303,19 @@ fn a_member_in_maintenance_is_not_secondary() {
     assert!(!next.is_recovering(b));
     assert_eq!(three().with_recovering(&[]), three());
 }
+
+/// A live member with a higher priority than the primary's takes over with a new term, as a
+/// priority takeover on RefDb 9.0.4 (measured on 02-11-2026, `s2.js`); equal priorities or a
+/// held member change nothing.
+#[test]
+fn priority_takeover() {
+    assert_eq!(three().takeover(&|_| true), None, "equal priorities");
+    let members = vec![Member::new(H1), Member::new(H2).with_priority(2.0), Member::new(H3)];
+    let rs = ReplicaSet::new("rs0", members, Some(H1), 1, 1).unwrap();
+    let next = rs.takeover(&|_| true).expect("H2 takes over");
+    assert_eq!((next.primary(), next.term(), next.set_version()), (Some(H2), 2, 1));
+    assert_eq!(rs.takeover(&|h| h != H2), None, "H2 held back");
+    assert_eq!(next.takeover(&|_| true), None);
+    let none = ReplicaSet::new("rs0", vec![Member::new(H1)], None, 1, 1).unwrap();
+    assert_eq!(none.takeover(&|_| true), None);
+}

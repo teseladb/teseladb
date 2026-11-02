@@ -194,6 +194,8 @@ pub struct NodePresence {
     replica: std::sync::Mutex<Option<Arc<ReplicaMember>>>,
     /// The client workers to wake when the counter changes.
     watchers: std::sync::Mutex<Vec<Waker>>,
+    /// The replica set port (018 FR-016) and the member this node is on it.
+    port: std::sync::Mutex<Option<(u16, Arc<ReplicaMember>)>>,
 }
 
 /// A replica set and the member this node is in it.
@@ -212,6 +214,24 @@ impl NodePresence {
                 let _ = w.wake();
             }
         }
+    }
+
+    /// The replica set port and this node's member on it (`None`: closed).
+    pub fn set_replica_port(&self, port: Option<(u16, ReplicaMember)>) {
+        let mut slot = self.port.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let same = match (slot.as_ref(), port.as_ref()) {
+            (Some((a, x)), Some((b, y))) => a == b && **x == *y,
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            *slot = port.map(|(p, m)| (p, Arc::new(m)));
+        }
+    }
+
+    /// The replica set port and this node's member on it.
+    pub fn replica_port(&self) -> Option<(u16, Arc<ReplicaMember>)> {
+        self.port.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
 
     /// Wakes `waker` at every change of the counter.
@@ -244,7 +264,7 @@ impl NodePresence {
 }
 
 /// [`NodeState`] of a running node: its process id and its HLC.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct NodeClockState {
     process_id: [u8; 12],
     clock: NodeClock,
@@ -253,6 +273,9 @@ pub struct NodeClockState {
     keys: Option<Arc<KeySlot>>,
     /// The node's state in Group 0 as core 0 publishes it (007 FR-015).
     presence: Arc<NodePresence>,
+    /// The state of the replica set port (018 FR-016): `hello` and the commands see the replica
+    /// set of that port, whatever the main port shows.
+    port_view: bool,
 }
 
 fn wall_ms() -> i64 {
@@ -272,6 +295,7 @@ impl NodeClockState {
             handle: None,
             keys: None,
             presence: Arc::new(NodePresence::default()),
+            port_view: false,
         }
     }
 
@@ -289,12 +313,21 @@ impl NodeClockState {
     pub fn with_presence(self, presence: Arc<NodePresence>) -> NodeClockState {
         NodeClockState { presence, ..self }
     }
+
+    /// The state of the replica set port (018 FR-016).
+    pub fn on_replica_set_port(self) -> NodeClockState {
+        NodeClockState { port_view: true, ..self }
+    }
 }
 
 impl NodeState for NodeClockState {
     fn info(&self) -> NodeInfo {
         let (time, increment) = to_timestamp(self.clock.0.peek());
-        let replica_set = self.presence.replica().map(|r| {
+        let member = match self.port_view {
+            true => self.presence.replica_port().map(|(_, m)| m),
+            false => self.presence.replica(),
+        };
+        let replica_set = member.map(|r| {
             let (set, me) = (*r).clone();
             // `lastWrite`: the node's mark, in the presentation's term.
             let at = teseladb_topology::replset::OpTime {

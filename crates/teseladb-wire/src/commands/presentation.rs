@@ -29,6 +29,9 @@ pub const SET_VERSION: &str = "setVersion";
 pub const TERM: &str = "term";
 /// The field with the members' attributes.
 pub const MEMBERS: &str = "members";
+/// The field with the replica set's own port (018 FR-016): every node serves the replica set
+/// presentation there, whatever the main port shows.
+pub const REPLICA_SET_PORT: &str = "replicaSetPort";
 /// The field with the mark of the latest designation.
 pub const ELECTED_AT: &str = "electedAt";
 /// The field with the reason of the latest designation.
@@ -36,6 +39,9 @@ pub const ELECTION_REASON: &str = "electionReason";
 /// The reason of a designation by `setClusterParameter` or by Group 0 when the primary fell
 /// (`lastElectionReason` of RefDb 9.0.4's `electionCandidateMetrics`).
 pub const REASON_TIMEOUT: &str = "electionTimeout";
+/// The reason of a designation by Group 0 of a live member with a higher priority than the
+/// primary's.
+pub const REASON_TAKEOVER: &str = "priorityTakeover";
 /// The reason of a designation by `replSetStepDown`, which hands over to a caught-up member.
 pub const REASON_STEP_UP: &str = "stepUpRequestSkipDryRun";
 
@@ -65,6 +71,8 @@ pub struct Presentation {
     pub members: Vec<Member>,
     /// The latest designation of a primary.
     pub election: Option<Election>,
+    /// The replica set's own port (`replicaSetPort`), if it is open.
+    pub replica_set_port: Option<u16>,
 }
 
 impl Default for Presentation {
@@ -77,6 +85,7 @@ impl Default for Presentation {
             term: FIRST_TERM,
             members: Vec::new(),
             election: None,
+            replica_set_port: None,
         }
     }
 }
@@ -164,6 +173,7 @@ impl Presentation {
             let at = teseladb_hlc::from_timestamp((*time, *increment));
             p.election = Some(Election { at, reason: reason.clone() });
         }
+        p.replica_set_port = port_of(doc.get(REPLICA_SET_PORT));
         Ok(p)
     }
 
@@ -183,7 +193,39 @@ impl Presentation {
             d.push(ELECTED_AT, Value::Timestamp { time, increment });
             d.push(ELECTION_REASON, e.reason.as_str());
         }
+        if let Some(port) = self.replica_set_port {
+            d.push(REPLICA_SET_PORT, i32::from(port));
+        }
         d
+    }
+
+    /// The replica set its own port serves (018 FR-016): the same members, primary and
+    /// attributes at each node's host with port `replicaSetPort`; without a designated primary
+    /// (the `refrouter` presentation never designated one), the electable member with the highest
+    /// priority. `None` without the port or a set name.
+    pub fn on_port(&self, hosts: &[String]) -> Option<ReplicaSet> {
+        let port = self.replica_set_port?;
+        if self.set_name.is_empty() {
+            return None;
+        }
+        let moved: Vec<String> = hosts.iter().map(|h| port_host(h, port)).collect();
+        let members = self
+            .members
+            .iter()
+            .map(|m| {
+                let mut d = member_document(m);
+                d.insert("host", port_host(m.host(), port));
+                member_of(&d)
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .ok()?;
+        let primary = self.primary.as_deref().map(|p| port_host(p, port));
+        let shown = Presentation { members, primary, ..self.clone() };
+        let rs = shown.replica_set(&moved).ok()?;
+        Some(match rs.primary() {
+            Some(_) => rs,
+            None => rs.reassign(&|_| true).unwrap_or(rs),
+        })
     }
 
     /// The presentation after a designation at mark `at` for `reason`.
@@ -207,6 +249,22 @@ impl Presentation {
         let primary = self.primary.as_deref().filter(|p| hosts.iter().any(|h| h == p));
         ReplicaSet::new(self.set_name.as_str(), members, primary, self.set_version, self.term)
     }
+}
+
+/// `host` with port `port` in place of its own.
+pub fn port_host(host: &str, port: u16) -> String {
+    let name = host.rsplit_once(':').map_or(host, |(name, _)| name);
+    format!("{name}:{port}")
+}
+
+/// A stored `replicaSetPort`: 0 or none is no port.
+fn port_of(v: Option<&Value>) -> Option<u16> {
+    let n = match v? {
+        Value::Int32(n) => i64::from(*n),
+        Value::Int64(n) => *n,
+        _ => return None,
+    };
+    u16::try_from(n).ok().filter(|p| *p != 0)
 }
 
 /// The prefix of the cluster parameter that keeps what `replSetFreeze`, `replSetMaintenance` and
@@ -361,6 +419,22 @@ pub fn parse(v: &Document) -> Result<Document, (crate::error::Code, String)> {
                 return Err((BAD_VALUE, format!("unknown topologyPresentation mode '{m}'")));
             }
             (SET_NAME | PRIMARY, Value::String(_)) => {}
+            (REPLICA_SET_PORT, Value::Int32(_) | Value::Int64(_)) => {
+                let n = match x {
+                    Value::Int32(n) => i64::from(*n),
+                    Value::Int64(n) => *n,
+                    _ => 0,
+                };
+                if u16::try_from(n).is_err() {
+                    let why = format!("replicaSetPort must be between 0 and 65535, not {n}");
+                    return Err((BAD_VALUE, why));
+                }
+            }
+            (REPLICA_SET_PORT, other) => {
+                let e =
+                    crate::types::wrong_type(&format!("ClusterServerParameter.{k}"), other, "int");
+                return Err((e.code, e.errmsg));
+            }
             (MODE | SET_NAME | PRIMARY, other) => {
                 let e = crate::types::wrong_type(
                     &format!("ClusterServerParameter.{k}"),
@@ -412,7 +486,14 @@ pub fn next(
         term: before.term.saturating_add(1),
         members: before.members.clone(),
         election: before.election.clone(),
+        replica_set_port: match request.get(REPLICA_SET_PORT) {
+            Some(v) => port_of(Some(v)),
+            None => before.replica_set_port,
+        },
     };
+    if p.replica_set_port.is_some() && p.set_name.is_empty() {
+        return Err(bad("replicaSetPort needs a setName"));
+    }
     if mode == PresentationMode::RefRouter {
         return Ok(p);
     }
