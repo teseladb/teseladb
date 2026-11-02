@@ -644,19 +644,24 @@ mod tests {
             polygons: vec![],
         };
         let on_line = Shape { points: vec![(-1.0, 40.5)], lines: vec![], polygons: vec![] };
-        assert!(line.intersects(&on_line) && on_line.intersects(&line));
+        assert!(line.intersects(&on_line));
+        assert!(on_line.intersects(&line));
         let square = |x0: f64, y0: f64, x1: f64, y1: f64| Shape {
             points: vec![],
             lines: vec![],
             polygons: vec![vec![vec![(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)]]],
         };
         let (outer, inner) = (square(0.0, 0.0, 10.0, 10.0), square(2.0, 2.0, 3.0, 3.0));
-        assert!(outer.intersects(&inner) && inner.intersects(&outer));
-        assert!(inner.within(&outer) && !outer.within(&inner));
+        assert!(outer.intersects(&inner));
+        assert!(inner.intersects(&outer));
+        assert!(inner.within(&outer));
+        assert!(!outer.within(&inner));
         let crossing = square(5.0, 5.0, 15.0, 15.0);
-        assert!(crossing.intersects(&outer) && !crossing.within(&outer));
+        assert!(crossing.intersects(&outer));
+        assert!(!crossing.within(&outer));
         let edge_cross = square(-1.0, 4.0, 11.0, 6.0);
-        assert!(outer.intersects(&edge_cross) && !edge_cross.within(&outer));
+        assert!(outer.intersects(&edge_cross));
+        assert!(!edge_cross.within(&outer));
         assert!(!square(20.0, 20.0, 21.0, 21.0).intersects(&outer));
     }
 }
