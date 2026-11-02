@@ -432,6 +432,8 @@ mod tests {
             bytes(doc(vec![("errorLabels", Value::Array(vec![Value::String(TRANSIENT.into())]))]));
         assert!(transient(&labelled));
         assert!(!transient(&bytes(doc(vec![("ok", Value::Int32(0))]))));
+        let other = doc(vec![("errorLabels", Value::Array(vec![Value::String("Other".into())]))]);
+        assert!(!transient(&bytes(other)));
         assert!(!transient(&[1, 2]));
     }
 

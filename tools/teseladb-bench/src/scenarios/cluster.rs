@@ -139,15 +139,8 @@ pub(crate) fn admin(addr: SocketAddr, words: &[&str]) -> Result<(), String> {
 }
 
 /// Waits for `done`, at most [`CHANGE_WAIT`].
-fn wait_for(what: &str, mut done: impl FnMut() -> bool) -> Result<(), String> {
-    let until = Instant::now() + CHANGE_WAIT;
-    while !done() {
-        if Instant::now() >= until {
-            return Err(format!("{what} did not happen within {CHANGE_WAIT:?}"));
-        }
-        thread::sleep(POLL);
-    }
-    Ok(())
+fn wait_for(what: &str, done: impl FnMut() -> bool) -> Result<(), String> {
+    crate::client::poll_until(what, CHANGE_WAIT, POLL, done)
 }
 
 /// The local cluster's nodes (a remote server has none to change).
