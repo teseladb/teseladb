@@ -137,24 +137,27 @@ fn types_of(definition: &Definition, mapping: &Mapping, name: &str) -> Vec<Field
     }
 }
 
-/// Whether `definition` indexes numbers at `path`.
-pub(super) fn numeric(definition: &Definition, path: &str) -> bool {
+/// The types `definition` gives the field at dotted `path`.
+pub(super) fn types_at(definition: &Definition, path: &str) -> Vec<FieldMapping> {
     let mut mapping = definition.mappings.clone();
-    let mut parts = path.split('.').peekable();
-    while let Some(part) = parts.next() {
-        let types = types_of(definition, &mapping, part);
-        if parts.peek().is_none() {
-            return types.iter().any(|t| matches!(t, FieldMapping::Number { .. }));
-        }
-        let Some(inner) = types.into_iter().find_map(|t| match t {
+    let mut parts: Vec<&str> = path.split('.').collect();
+    let last = parts.pop().unwrap_or_default();
+    for part in parts {
+        let inner = types_of(definition, &mapping, part).into_iter().find_map(|t| match t {
             FieldMapping::Document(m) => Some(m),
             _ => None,
-        }) else {
-            return false;
-        };
-        mapping = inner;
+        });
+        match inner {
+            Some(m) => mapping = m,
+            None => return Vec::new(),
+        }
     }
-    false
+    types_of(definition, &mapping, last)
+}
+
+/// Whether `definition` indexes numbers at `path`.
+pub(super) fn numeric(definition: &Definition, path: &str) -> bool {
+    types_at(definition, path).iter().any(|t| matches!(t, FieldMapping::Number { .. }))
 }
 
 fn collect(

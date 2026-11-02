@@ -706,3 +706,304 @@ fn score_function_errors_are_refsearch_messages() {
         format!("{at}.add[1]\" one of {list} must be present")
     );
 }
+
+/// The documents and index of `m3.js`.
+fn m3() -> MemIndex {
+    let v = Document::new()
+        .with("type", "knnVector")
+        .with("dimensions", 2)
+        .with("similarity", "euclidean");
+    let def = Document::new().with(
+        "mappings",
+        Document::new().with("dynamic", true).with("fields", Document::new().with("v", v)),
+    );
+    let docs = vec![
+        Document::new().with("t", "el gato negro come").with("v", arr(vec![1.into(), 0.into()])),
+        Document::new().with("t", "perro negro").with("v", arr(vec![0.into(), 1.into()])),
+        Document::new().with("t", "gato").with("v", arr(vec![1.into(), 1.into()])),
+    ];
+    build(def, docs)
+}
+
+fn knn(extra: Document) -> Document {
+    let mut d = Document::new().with("path", "v").with("vector", arr(vec![1.into(), 0.into()]));
+    for (k, v) in extra.iter() {
+        d.push(k, v.clone());
+    }
+    op("knnBeta", d)
+}
+
+#[test]
+fn knn_beta_finds_the_nearest_vectors() {
+    let idx = m3();
+    let k = |extra: Document| found(&idx, &knn(extra));
+    assert_eq!(k(Document::new().with("k", 2)), Ok(vec![(1, 1.0), (3, 0.5)]));
+    assert_eq!(
+        k(Document::new().with("k", 5)),
+        Ok(vec![(1, 1.0), (3, 0.5), (2, 0.3333333432674408)])
+    );
+    let filter = op("text", Document::new().with("path", "t").with("query", "gato"));
+    assert_eq!(
+        k(Document::new().with("k", 2).with("filter", filter)),
+        Ok(vec![(1, 1.0), (3, 0.5)])
+    );
+    let boost = Document::new().with("boost", Document::new().with("value", 2));
+    assert_eq!(k(Document::new().with("k", 2).with("score", boost)), Ok(vec![(1, 2.0), (3, 1.0)]));
+    let err = |d: Document| found(&idx, &op("knnBeta", d)).unwrap_err();
+    let three = arr(vec![1.into(), 0.into(), 0.into()]);
+    assert_eq!(
+        err(Document::new().with("path", "v").with("vector", three).with("k", 2)),
+        "knnVector field is indexed with 2 dimensions but queried with 3"
+    );
+    let v = || arr(vec![1.into(), 0.into()]);
+    assert_eq!(
+        err(Document::new().with("path", "v").with("vector", v())),
+        "\"knnBeta.k\" is required"
+    );
+    assert_eq!(
+        err(Document::new().with("path", "v").with("k", 2)),
+        "\"knnBeta.vector\" is required"
+    );
+    assert_eq!(
+        err(Document::new().with("vector", v()).with("k", 2)),
+        "\"knnBeta.path\" is required"
+    );
+    assert_eq!(
+        err(Document::new().with("path", "v").with("vector", v()).with("k", 0)),
+        "\"knnBeta.k\" must be within bounds [1..2147483647]"
+    );
+    assert_eq!(
+        err(Document::new().with("path", "v").with("vector", v()).with("k", 2).with("x", 1)),
+        "\"knnBeta\" unrecognized field \"x\""
+    );
+    assert_eq!(
+        err(Document::new().with("path", "t").with("vector", v()).with("k", 2)),
+        "t is not indexed as knnVector"
+    );
+    assert_eq!(err(Document::new().with("path", 1)), "\"knnBeta.path\" must be a string");
+    assert_eq!(
+        err(Document::new().with("path", "v").with("vector", 1)),
+        "\"knnBeta.vector\" must be an array of numbers"
+    );
+    assert_eq!(
+        err(Document::new().with("path", "v").with("vector", arr(vec!["a".into()]))),
+        "\"knnBeta.vector\" must be an array of numbers"
+    );
+    assert_eq!(
+        err(Document::new().with("path", "v").with("vector", v()).with("k", "a")),
+        "\"knnBeta.k\" must be a number"
+    );
+    assert_eq!(
+        err(Document::new().with("path", "v").with("vector", v()).with("k", 1).with("filter", 1)),
+        "\"knnBeta.filter\" must be a document"
+    );
+    // The other similarities score as `$vectorSearch` does.
+    for (sim, scores) in [
+        ("cosine", vec![(1, 1.0), (3, 0.8535534143447876)]),
+        ("dotProduct", vec![(1, 1.0), (3, 1.0)]),
+    ] {
+        let v =
+            Document::new().with("type", "knnVector").with("dimensions", 2).with("similarity", sim);
+        let def = Document::new().with(
+            "mappings",
+            Document::new().with("dynamic", false).with("fields", Document::new().with("v", v)),
+        );
+        let docs = vec![
+            Document::new().with("v", arr(vec![1.into(), 0.into()])),
+            Document::new().with("v", arr(vec![0.into(), 0.into()])),
+            Document::new().with("v", arr(vec![1.into(), 1.into()])),
+            Document::new().with("v", "not a vector"),
+        ];
+        let idx = build(def, docs);
+        let mut got = found(&idx, &knn(Document::new().with("k", 2))).unwrap();
+        got.sort_by_key(|(id, _)| *id);
+        let mut want = scores;
+        want.sort_by_key(|(id, _)| *id);
+        assert_eq!(got, want, "{sim}");
+    }
+}
+
+#[test]
+fn term_runs_as_text_or_as_a_pattern() {
+    let idx = m3();
+    let t = |extra: Document| {
+        let mut d = Document::new().with("path", "t");
+        for (k, v) in extra.iter() {
+            d.push(k, v.clone());
+        }
+        found(&idx, &op("term", d))
+    };
+    assert_eq!(t(Document::new().with("query", "gato").with("prefix", true)), Ok(ones(&[1, 3])));
+    assert_eq!(t(Document::new().with("query", "gat").with("prefix", true)), Ok(ones(&[1, 3])));
+    assert_eq!(
+        t(Document::new().with("query", arr(vec!["gat".into()])).with("prefix", true)),
+        Ok(ones(&[1, 3]))
+    );
+    assert_eq!(t(Document::new().with("query", "g.*").with("regex", true)), Ok(ones(&[1, 3])));
+    assert_eq!(t(Document::new().with("query", "g*").with("wildcard", true)), Ok(ones(&[1, 3])));
+    assert_eq!(
+        t(Document::new().with("query", "gatp").with("fuzzy", Document::new().with("maxEdits", 1))),
+        Ok(vec![(3, 0.2091117799282074), (1, 0.12399594485759735)])
+    );
+    assert_eq!(
+        t(Document::new().with("query", arr(vec!["gato".into(), "perro".into()]))),
+        Ok(vec![(2, 0.4735037684440613), (3, 0.27881568670272827), (1, 0.16532790660858154)])
+    );
+    assert_eq!(
+        found(&idx, &op("search", Document::new().with("path", "t").with("query", "gato"))),
+        Ok(vec![(3, 0.27881568670272827), (1, 0.16532790660858154)])
+    );
+    assert_eq!(
+        t(Document::new().with("query", "gato").with("x", 1)).unwrap_err(),
+        "\"term\" unrecognized field \"x\""
+    );
+    assert_eq!(t(Document::new().with("prefix", true)).unwrap_err(), "\"term.query\" is required");
+    let fuzzy = |f: Value| t(Document::new().with("query", "gato").with("fuzzy", f)).unwrap_err();
+    assert_eq!(fuzzy(1.into()), "\"term.fuzzy\" must be a document");
+    assert_eq!(
+        fuzzy(Document::new().with("maxEdits", 3).into()),
+        "\"term.fuzzy.maxEdits\" must be within bounds [1..2]"
+    );
+    assert_eq!(
+        fuzzy(Document::new().with("prefixLength", "a").into()),
+        "\"term.fuzzy.prefixLength\" must be a number"
+    );
+}
+
+fn span(kind: &str, args: Document) -> Document {
+    op("span", Document::new().with(kind, args))
+}
+
+fn sterm(q: &str) -> Value {
+    Document::new().with("term", Document::new().with("path", "t").with("query", q)).into()
+}
+
+#[test]
+fn span_queries_score_as_reflib_spans() {
+    let idx = m3();
+    let s = |kind: &str, args: Document| found(&idx, &span(kind, args));
+    let gato = vec![(3, 0.27881568670272827), (1, 0.16532790660858154)];
+    assert_eq!(
+        s("term", Document::new().with("path", "t").with("query", "gato")),
+        Ok(gato.clone())
+    );
+    assert_eq!(
+        s("first", Document::new().with("operator", sterm("gato")).with("endPositionLte", 2)),
+        Ok(gato.clone())
+    );
+    assert_eq!(
+        s("first", Document::new().with("operator", sterm("gato")).with("endPositionLte", 1)),
+        Ok(vec![(3, 0.27881568670272827)])
+    );
+    let near = Document::new()
+        .with("clauses", arr(vec![sterm("gato"), sterm("negro")]))
+        .with("slop", 0)
+        .with("inOrder", true);
+    assert_eq!(s("near", near), Ok(vec![(1, 0.3306558132171631)]));
+    let reversed = Document::new()
+        .with("clauses", arr(vec![sterm("negro"), sterm("gato")]))
+        .with("inOrder", true);
+    assert_eq!(s("near", reversed), Ok(vec![]));
+    let unordered = Document::new().with("clauses", arr(vec![sterm("negro"), sterm("gato")]));
+    assert_eq!(s("near", unordered), Ok(vec![(1, 0.3306558132171631)]));
+    let missing = Document::new().with("clauses", arr(vec![sterm("gato"), sterm("perro")]));
+    assert_eq!(s("near", missing), Ok(vec![]));
+    let or = Document::new().with("clauses", arr(vec![sterm("gato"), sterm("perro")]));
+    assert_eq!(
+        s("or", or),
+        Ok(vec![(3, 0.8606634736061096), (2, 0.700402021408081), (1, 0.5103431940078735)])
+    );
+    let sub = Document::new().with("include", sterm("gato")).with("exclude", sterm("negro"));
+    assert_eq!(s("subtract", sub), Ok(gato.clone()));
+    let sub = Document::new().with("include", sterm("gato")).with("exclude", sterm("gato"));
+    assert_eq!(s("subtract", sub), Ok(vec![]));
+    let contains = Document::new()
+        .with("little", sterm("gato"))
+        .with("big", sterm("gato"))
+        .with("spanToReturn", "outer");
+    assert_eq!(s("contains", contains), Ok(gato.clone()));
+    let inner = Document::new()
+        .with("little", sterm("gato"))
+        .with("big", sterm("gato"))
+        .with("spanToReturn", "inner");
+    assert_eq!(s("contains", inner), Ok(gato.clone()));
+    let none = Document::new().with("little", sterm("perro")).with("big", sterm("gato"));
+    assert_eq!(s("contains", none), Ok(vec![]));
+    assert_eq!(
+        s("term", Document::new().with("path", "t").with("query", "gato negro")),
+        Ok(vec![])
+    );
+    let boost = Document::new().with("boost", Document::new().with("value", 2));
+    let spec = op(
+        "span",
+        Document::new()
+            .with("term", Document::new().with("path", "t").with("query", "perro"))
+            .with("score", boost),
+    );
+    assert_eq!(found(&idx, &spec), Ok(vec![(2, 0.9470075368881226)]));
+}
+
+#[test]
+fn span_errors_name_the_option() {
+    let idx = m3();
+    let err = |d: Document| found(&idx, &op("span", d)).unwrap_err();
+    let list = "[contains, first, near, or, subtract, term]";
+    assert_eq!(err(Document::new()), format!("\"span\" one of {list} must be present"));
+    assert_eq!(
+        err(Document::new().with("term", Document::new()).with("or", Document::new())),
+        format!("\"span\" only one of {list} may be present")
+    );
+    assert_eq!(
+        err(Document::new().with("term", Document::new().with("path", "t"))),
+        "\"span.term.query\" is required"
+    );
+    assert_eq!(err(Document::new().with("term", 1)), "\"span.term\" must be a document");
+    assert_eq!(
+        err(Document::new().with("term", Document::new().with("path", 1))),
+        "\"span.term.path\" must be a string"
+    );
+    assert_eq!(
+        err(Document::new().with("first", Document::new())),
+        "\"span.first.operator\" is required"
+    );
+    assert_eq!(
+        err(Document::new().with("first", Document::new().with("operator", 1))),
+        "\"span.first.operator\" must be a document"
+    );
+    assert_eq!(
+        err(Document::new().with(
+            "first",
+            Document::new().with("operator", sterm("a")).with("endPositionLte", "x")
+        )),
+        "\"span.first.endPositionLte\" must be a number"
+    );
+    assert_eq!(err(Document::new().with("or", Document::new())), "\"span.or.clauses\" is required");
+    assert_eq!(
+        err(Document::new().with("or", Document::new().with("clauses", 1))),
+        "\"span.or.clauses\" must be an array"
+    );
+    assert_eq!(
+        err(Document::new().with("or", Document::new().with("clauses", arr(vec![1.into()])))),
+        "\"span.or.clauses\" must be a document"
+    );
+    let other = Value::from(
+        Document::new().with("term", Document::new().with("path", "u").with("query", "gato")),
+    );
+    for kind in ["or", "near"] {
+        let d = Document::new()
+            .with(kind, Document::new().with("clauses", arr(vec![sterm("gato"), other.clone()])));
+        assert_eq!(err(d), "Clauses must have same field.");
+    }
+    let d = Document::new().with(
+        "subtract",
+        Document::new().with("include", sterm("gato")).with("exclude", other.clone()),
+    );
+    assert_eq!(err(d), "Clauses must have same field.");
+    let d = Document::new()
+        .with("contains", Document::new().with("little", other.clone()).with("big", sterm("gato")));
+    assert_eq!(err(d), "Clauses must have same field.");
+    let d = Document::new().with("first", Document::new().with("operator", other));
+    assert!(found(&idx, &op("span", d)).is_ok());
+    let d = Document::new().with("or", Document::new().with("clauses", arr(vec![])));
+    assert_eq!(found(&idx, &op("span", d)), Ok(vec![]));
+}

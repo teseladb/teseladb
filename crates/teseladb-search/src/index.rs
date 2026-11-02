@@ -15,6 +15,7 @@ use crate::analysis::analyzer::Analyzer;
 use crate::analysis::jregex::RegexError;
 use crate::definition::{DEFAULT_ANALYZER, Definition, Dynamic, FieldMapping, Mapping};
 use crate::query::bm25::{Bm25, idf};
+use crate::query::fuzzy::Levenshtein;
 use crate::segment::norms;
 
 /// A string field of the index: the postings of each term (document number to positions), the
@@ -417,6 +418,65 @@ impl MemIndex {
         Ok(scores)
     }
 
+    /// The documents with a term of one of `paths` within `fuzzy.max_edits` edits of a token of
+    /// `queries`, scored as RefLib's `FuzzyQuery` with its top-terms blended rewrite (measured
+    /// on `refsearch`): the `max_expansions` closest terms, each weighted `1 - edits / shortest
+    /// length` with the largest document count among them, their scores added.
+    pub(crate) fn fuzzy_scores(
+        &self,
+        queries: &[String],
+        paths: &[String],
+        fuzzy: &Fuzzy,
+        boost: f32,
+    ) -> Result<BTreeMap<u32, f32>, IndexError> {
+        let mut scores: BTreeMap<u32, f32> = BTreeMap::new();
+        for path in paths {
+            let Some(field) = self.fields.get(path) else { continue };
+            let a = self.analyzer(&field.search_analyzer)?;
+            for q in queries {
+                for t in a.analyze(q).map_err(analysis)? {
+                    let g = self.global_of(path);
+                    for (doc, score) in field.fuzzy_scores(&t.text, fuzzy, boost, g) {
+                        *scores.entry(doc).or_insert(0.0) += score;
+                    }
+                }
+            }
+        }
+        Ok(scores)
+    }
+
+    /// The positions of `term` in the field at `path`, by document.
+    pub(crate) fn positions(&self, path: &str, term: &str) -> Option<&BTreeMap<u32, Vec<u32>>> {
+        self.fields.get(path)?.postings.get(term)
+    }
+
+    /// The query analyzer's tokens of `text` for the field at `path`.
+    pub(crate) fn query_terms(&self, path: &str, text: &str) -> Result<Vec<String>, IndexError> {
+        let a = self.analyzer(self.query_analyzer(path))?;
+        Ok(a.analyze(text).map_err(analysis)?.into_iter().map(|t| t.text).collect())
+    }
+
+    /// Scores of a span query of the field at `path` (RefLib's `SpanWeight`): the weight is
+    /// `boost` times the sum of the idf of `terms`, and `freqs` the documents' span frequencies.
+    pub(crate) fn span_scores(
+        &self,
+        path: &str,
+        terms: &[String],
+        freqs: BTreeMap<u32, f32>,
+        boost: f32,
+    ) -> BTreeMap<u32, f32> {
+        let Some(field) = self.fields.get(path) else { return BTreeMap::new() };
+        let g = self.global_of(path);
+        let n = g.map_or(field.lengths.len() as u64, |g| g.docs);
+        let idf_sum: f32 = terms
+            .iter()
+            .filter_map(|t| field.postings.get(t).map(|d| (t, d.len())))
+            .map(|(t, local)| idf(n, field.df(t, local, g)) as f32)
+            .sum();
+        let score = field.scorer(boost * idf_sum, g);
+        freqs.into_iter().map(|(doc, f)| (doc, score(doc, f))).collect()
+    }
+
     /// The numbers of the documents indexed.
     pub(crate) fn live(&self) -> impl Iterator<Item = u32> + '_ {
         self.by_key.values().copied()
@@ -607,6 +667,40 @@ impl TextField {
         freqs.into_iter().map(|(doc, freq)| (doc, score(doc, freq))).collect()
     }
 
+    /// [`MemIndex::fuzzy_scores`] for one query term.
+    fn fuzzy_scores(
+        &self,
+        term: &str,
+        fuzzy: &Fuzzy,
+        boost: f32,
+        g: Option<&FieldStats>,
+    ) -> Vec<(u32, f32)> {
+        let lev = Levenshtein::new(term, fuzzy.max_edits, fuzzy.prefix_length);
+        let len = term.chars().count();
+        let mut found: Vec<(&String, f32)> = self
+            .postings
+            .keys()
+            .filter_map(|t| {
+                let edits = lev.distance(t)?;
+                let shortest = len.min(t.chars().count()).max(1);
+                Some((t, 1.0 - f32::from(edits) / shortest as f32))
+            })
+            .collect();
+        found.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+        let kept: Vec<(&String, f32)> = found.into_iter().take(fuzzy.max_expansions).collect();
+        let df = kept.iter().map(|(t, _)| self.df(t, self.postings[*t].len(), g)).max();
+        let n = g.map_or(self.lengths.len() as u64, |g| g.docs);
+        let idf = idf(n, df.unwrap_or(0)) as f32;
+        let mut sums: BTreeMap<u32, f32> = BTreeMap::new();
+        for (t, weight) in kept {
+            let score = self.scorer(boost * weight * idf, g);
+            for (&doc, positions) in &self.postings[t] {
+                *sums.entry(doc).or_insert(0.0) += score(doc, positions.len() as f32);
+            }
+        }
+        sums.into_iter().collect()
+    }
+
     /// The score of each document with `term`.
     fn term_scores(&self, term: &str, boost: f32, g: Option<&FieldStats>) -> Vec<(u32, f32)> {
         let Some(docs) = self.postings.get(term) else { return Vec::new() };
@@ -615,6 +709,17 @@ impl TextField {
         let score = self.scorer(weight, g);
         docs.iter().map(|(&doc, positions)| (doc, score(doc, positions.len() as f32))).collect()
     }
+}
+
+/// The `fuzzy` option of `text` and `term`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Fuzzy {
+    /// Most edits from the query term (1 or 2).
+    pub max_edits: u8,
+    /// Characters at the start that must match exactly.
+    pub prefix_length: usize,
+    /// Most terms a query term expands to.
+    pub max_expansions: usize,
 }
 
 /// The most paths a query graph may expand to, RefLib's `maxClauseCount`.
