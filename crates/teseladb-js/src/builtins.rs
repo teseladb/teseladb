@@ -19,6 +19,13 @@ pub(crate) fn new_target(this: &Val) -> Option<Val> {
     o.borrow().get_own("@@new").map(|p| p.value.clone())
 }
 
+/// `number is not a non-null object`: what SpiderMonkey says of a value that had to be an
+/// object (measured on a `refrouter` 9.0.4).
+pub(crate) fn non_object(v: &Val) -> String {
+    let t = if matches!(v, Val::Null) { "null" } else { v.type_of() };
+    format!("{t} is not a non-null object")
+}
+
 /// How SpiderMonkey names the type of `this` in «… method called on incompatible X»: an
 /// object's class, a primitive's type.
 pub(crate) fn class_name(v: &Val) -> String {
@@ -876,7 +883,10 @@ fn array_from(it: &mut Interp, this: &Val, a: &[Val]) -> R {
             let n = it.get(&src, "length")?;
             let n = it.number_of(&n);
             let n = it.operand_named(n, "arrayLike.length")?;
-            let n = if n.is_finite() && n > 0.0 { n as usize } else { 0 };
+            if n > f64::from(u32::MAX) {
+                return Err(it.error("RangeError", "invalid array length"));
+            }
+            let n = if n > 0.0 { n as usize } else { 0 };
             it.charge(n * crate::interp::PROP_BYTES)?;
             target = crate::arrays::made_by(it, this, &[Val::Num(n as f64)])?;
             let mut out = Vec::with_capacity(n);

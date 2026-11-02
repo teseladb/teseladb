@@ -894,8 +894,7 @@ pub fn exec(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 pub fn test(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     // Measured on a `refrouter` 9.0.4 on 02-11: `number is not a non-null object`.
     if !matches!(this, Val::Obj(_)) {
-        let t = if matches!(this, Val::Null) { "null" } else { this.type_of() };
-        return it.type_error(&format!("{t} is not a non-null object"));
+        return it.type_error(&crate::builtins::non_object(this));
     }
     // Another object is matched by its own `exec` (ECMA-262 §22.2.7.1 RegExpExec).
     if !is_regexp(this) {

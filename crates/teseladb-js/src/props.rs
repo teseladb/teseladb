@@ -244,6 +244,9 @@ pub fn define_own(it: &mut Interp, o: &ObjRef, key: &str, d: &Desc) -> R<()> {
             return it
                 .type_error(&format!("can't define property {shown}: {class} is not extensible"));
         }
+        Some(c) if forbidden(c, d) && is_array && key == "length" => {
+            return it.type_error("can't redefine array length");
+        }
         Some(c) if forbidden(c, d) => {
             return it.type_error(&format!("can't redefine non-configurable property {shown}"));
         }

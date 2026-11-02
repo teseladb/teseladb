@@ -463,7 +463,12 @@ fn splice(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 
 fn concat(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let target = species(it, this, 0)?;
-    let mut out = elements(it, this)?;
+    // `this` is the first item: spread when it is an array, else as an object.
+    let mut out = if crate::proxy::is_array(it, this)? {
+        elements(it, this)?
+    } else {
+        vec![Val::Obj(it.object_of(this)?)]
+    };
     for x in a {
         match x {
             Val::Obj(o) if matches!(o.borrow().kind, Kind::Array(_)) => {

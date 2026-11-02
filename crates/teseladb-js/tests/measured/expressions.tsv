@@ -4375,3 +4375,201 @@ RegExp.prototype[Symbol.match].call(5, 'abc')	E:TypeError:number is not a non-nu
 (() => { function* g() { var a = [1, 2]; return a[0] + (a[1] = yield 1) } const it = g(); it.next(); return it.next(5).value })()	J:6
 (() => { function* g() { var i = 0; var a = [10, 20]; a[i++] += yield 1; return a } const it = g(); it.next(); return it.next(5).value })()	J:[15,20]
 (() => { function* g() { var o = {p: 1}; o.p++; ++o.p; return [o.p, yield o.p] } const it = g(); it.next(); return it.next(5).value })()	J:[3,5]
+new Set([1]).union(5)	E:TypeError:number is not a non-null object
+new Set([1]).union(null)	E:TypeError:null is not a non-null object
+new Set([1]).union({size: 1, has: 5, keys() {}})	E:TypeError:has property is not callable
+new Set([1]).union({size: 1, has() {}, keys: 5})	E:TypeError:keys property is not callable
+new Set([1]).union({size: 1, has() {}, keys() { return 5 }})	E:TypeError:number is not a non-null object
+new Set([1]).union({size: 1, has() {}, keys() { return {next() { return 5 }} }})	E:TypeError:iterator.next() returned a non-object value
+new Set([1]).union({size: undefined, has() {}, keys() {}})	E:TypeError:size is undefined
+new Set([1]).union({size: 'x', has() {}, keys() {}})	E:TypeError:size is NaN
+new Set([1]).union({size: -1, has() {}, keys() {}})	E:RangeError:Set size must be non-negative
+[...new Set([1]).union({size: 1, has() {}, keys() { let d = false; return {next() { const r = {done: d, value: -0}; d = true; return r }} }})].map(x => Object.is(x, -0))	J:[false,false]
+[...new Set([1, 2, 3]).intersection(new Set([2, 3, 4]))]	J:[2,3]
+[...new Set([1, 2, 3, 4, 5]).intersection(new Set([5, 2, 2]))]	J:[5,2]
+[...new Set([1, 2]).intersection({size: 9, has(v) { return v === 2 }, keys() {}})]	J:[2]
+[...new Set([1, 2, 3]).intersection({size: 1, has() {}, keys() { const a = [3, 3, 9][Symbol.iterator](); return {next: () => a.next()} }})]	J:[3]
+[...new Set([1, 2, 3]).difference(new Set([2]))]	J:[1,3]
+[...new Set([1, 2, 3]).difference({size: 1, has() {}, keys() { const a = [3, 1][Symbol.iterator](); return {next: () => a.next()} }})]	J:[2]
+[...new Set([1, 2]).difference({size: 9, has(v) { return v === 1 }, keys() {}})]	J:[2]
+[...new Set([1, 2]).symmetricDifference(new Set([2, 3, 3]))]	J:[1,3]
+[...new Set([1, 2]).symmetricDifference({size: 3, has() {}, keys() { const a = [3, 3, 1][Symbol.iterator](); return {next: () => a.next()} }})]	J:[2,3]
+new Set([1, 2]).isSubsetOf(new Set([1]))	J:false
+new Set([1, 2]).isSubsetOf(new Set([1, 2, 3]))	J:true
+new Set([1, 4]).isSubsetOf(new Set([1, 2, 3]))	J:false
+new Set([1]).isSupersetOf(new Set([1, 2]))	J:false
+new Set([1, 2, 3]).isSupersetOf(new Set([1, 2]))	J:true
+new Set([1, 2, 3]).isSupersetOf(new Set([1, 9]))	J:false
+new Set([1, 2]).isDisjointFrom(new Set([3, 4, 5]))	J:true
+new Set([1, 2]).isDisjointFrom(new Set([2, 4, 5]))	J:false
+new Set([1, 2, 3]).isDisjointFrom(new Set([4]))	J:true
+new Set([1, 2, 3]).isDisjointFrom(new Set([3]))	J:false
+Set.prototype.union.call(5, new Set())	E:TypeError:union method called on incompatible number
+Object.defineProperty([], 'length', {value: -1})	E:RangeError:invalid array length
+Object.defineProperty([], 'length', {value: 2, writable: false}).length	J:2
+(() => { const a = Object.defineProperty([1, 2], 'length', {writable: false}); try { Object.defineProperty(a, 'length', {value: 5}) } catch (e) { return e.message } })()	S:can't redefine array length
+(() => { const a = Object.defineProperty([1, 2], 'length', {writable: false}); return Object.defineProperty(a, 'length', {value: 2}).length })()	J:2
+(() => { const a = [1, 2, 3]; Object.defineProperty(a, 'length', {value: 1}); return a })()	J:[1]
+(() => { const a = [1]; Object.defineProperty(a, 0, {get() { return 5 }}); return [a[0], Object.getOwnPropertyDescriptor(a, 0).set] })()	J:[5,null]
+(() => { const a = [1]; Object.defineProperty(a, 0, {get() { return 5 }, configurable: true}); Object.defineProperty(a, 0, {value: 6}); return [a[0], Object.getOwnPropertyDescriptor(a, 0).writable] })()	J:[6,false]
+(() => { const o = {x: 1}; Object.defineProperty(o, 'x', {get() { return 3 }}); return Object.getOwnPropertyDescriptor(o, 'x').writable })()	J:undefined
+(() => { const o = {}; Object.defineProperty(o, 'x', {value: 1}); try { Object.defineProperty(o, 'x', {enumerable: true}) } catch (e) { return e.message } })()	S:can't redefine non-configurable property "x"
+(() => { const o = {}; Object.defineProperty(o, 'x', {value: 1}); try { Object.defineProperty(o, 'x', {configurable: true}) } catch (e) { return e.message } })()	S:can't redefine non-configurable property "x"
+(() => { const o = {}; Object.defineProperty(o, 'x', {value: 1}); return Object.defineProperty(o, 'x', {enumerable: false}) === o })()	J:true
+(() => { const o = {}; Object.defineProperty(o, 'x', {value: 0}); try { Object.defineProperty(o, 'x', {value: -0}) } catch (e) { return e.message } })()	S:can't redefine non-configurable property "x"
+(() => { const s = Symbol('s'); const o = {[s]: 1}; Object.defineProperty(o, Symbol('h'), {value: 2}); return Object.assign({}, o)[s] })()	J:1
+(() => { const s = Symbol('s'); return Object.getOwnPropertySymbols(Object.assign({}, {[s]: 1})).length })()	J:1
+Object.values('ab')	J:["a","b"]
+Object.getOwnPropertyDescriptors(5)	J:{}
+Object.getOwnPropertyDescriptors('ab')[1]	J:{"value":"b","writable":false,"enumerable":true,"configurable":false}
+Object.isFrozen([])	J:false
+Object.isSealed(Object.preventExtensions([1]))	J:false
+Object.isFrozen(Object.freeze([1]))	J:true
+Reflect	E:ReferenceError:Reflect is not defined
+(() => { const p = new Proxy({}, {}); return Object.preventExtensions(p) === p })()	J:true
+Object.setPrototypeOf(Object.preventExtensions({}), {})	E:TypeError:can't set prototype of this object
+Object.setPrototypeOf(Object.preventExtensions({}), Object.prototype) !== null	J:true
+new Int8Array(new ArrayBuffer(4), 1, 5)	E:RangeError:attempting to construct out-of-bounds Int8Array on ArrayBuffer
+new Int8Array(new ArrayBuffer(4), 5)	E:RangeError:size of buffer is too small for Int8Array with byteOffset
+new Int8Array(new ArrayBuffer(4), 0, 4).length	J:4
+new Float32Array([1e40, 1e-46, 3.4028235677973366e38, 1.1754943508222875e-38, 5.877471754111438e-39])	J:{"0":null,"1":0,"2":null,"3":1.1754943508222875e-38,"4":5.877471754111438e-39}
+new Float32Array([16777217, 0.1, -0, 2 ** -149, 2 ** -150])	J:{"0":16777216,"1":0.10000000149011612,"2":0,"3":1.401298464324817e-45,"4":0}
+(() => { const t = new Float16Array ? 1 : 0; return t })()	J:1
+new Int8Array(4).at(-5)	J:undefined
+new Int8Array(4).at(NaN)	J:0
+new Int8Array(4).at(4)	J:undefined
+new Int8Array([1, 2, 3]).with(5, 1)	E:RangeError:invalid or out-of-range index
+new Int8Array([1, 2, 3]).with(-1, 9)	J:{"0":1,"1":2,"2":9}
+new Int8Array([1, 2, 3]).with(NaN, 9)	J:{"0":9,"1":2,"2":3}
+new Int8Array([1, 2]).fill(7, NaN)	J:{"0":7,"1":7}
+new Int8Array([1, 2, 3]).subarray(-1).length	J:1
+(() => { const t = new Int8Array(3); t.set([1, 2], 2) })()	E:RangeError:source array is too long
+(() => { const t = new Int8Array(3); t.set([1, 2], -1) })()	E:RangeError:invalid or out-of-range index
+(() => { const t = new Int8Array(3); t.set([1, 2], Infinity) })()	E:RangeError:invalid or out-of-range index
+new Uint8Array(new ArrayBuffer(4, {maxByteLength: 8})).length	J:4
+new ArrayBuffer(4, {maxByteLength: undefined}).resizable	J:false
+new ArrayBuffer(4, {maxByteLength: 2})	E:RangeError:byte length is larger than maximum byte length
+(() => { const b = new ArrayBuffer(2, {maxByteLength: 4}); try { b.resize(9) } catch (e) { return e.message } })()	S:byte length is larger than maximum byte length
+(() => { const b = new ArrayBuffer(2, {maxByteLength: 4}); b.resize(4); return b.byteLength })()	J:4
+Int8Array.prototype.forEach.call(5)	E:TypeError:forEach method called on incompatible number
+Int8Array.prototype.map.call([], x => x)	E:TypeError:map method called on incompatible Array
+Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Int8Array.prototype), 'length').get.call(5)	E:TypeError:get length method called on incompatible number
+Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Int8Array.prototype), Symbol.toStringTag).get.call(5)	J:undefined
+Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'byteLength').get.call(5)	E:TypeError:get byteLength method called on incompatible number
+new DataView(new ArrayBuffer(2)).getInt16(1)	E:RangeError:offset is outside the bounds of the DataView
+new DataView(new ArrayBuffer(2)).setInt16(1, 1)	E:RangeError:offset is outside the bounds of the DataView
+Uint8Array.fromBase64('aGk=')	J:{"0":104,"1":105}
+Uint8Array.fromBase64('a')	E:SyntaxError:unexpected incomplete base64 chunk
+Uint8Array.fromBase64('*')	E:SyntaxError:'*' is not a valid base64 character
+new Date('2020-01-01T10:00').getTime()	J:1577872800000
+new Date('2020-01-01T10:00:00+0530').getTime()	J:1577853000000
+new Date('2020-01-01T10:00:00.12345Z').getTime()	J:1577872800123
+new Date('2020-01-01T10:00:00.1Z').getTime()	J:1577872800100
+new Date('2020-02-00').getTime()	J:1580428800000
+new Date('2020-13-01').getTime()	J:null
+new Date('2020-01-01T25:00').getTime()	J:null
+new Date('2020/1/2').getTime()	J:1577923200000
+new Date('2020/1/2 10:20').getTime()	J:1577960400000
+new Date('Jan 2 2020 10:00 GMT+0200').getTime()	J:1577952000000
+new Date('Jan 2 2020 10:00 GMT-0200').getTime()	J:1577966400000
+new Date('2 Jan 2020 (comment) Z').getTime()	J:1577923200000
+new Date('Jan 32 2020').getTime()	J:null
+new Date('2020 Jan 2').getTime()	J:1577923200000
+new Date('Jan 2020 2').getTime()	J:1577923200000
+new Date('1/2/2020 10:00 PM').getTime()	J:1578002400000
+new Date('1/2/2020 12:00 AM').getTime()	J:1577923200000
+new Date('1/2/2020 12:00 PM').getTime()	J:1577966400000
+new Date('1/2/2020 1:00 AM').getTime()	J:1577926800000
+new Date('2020-1-2').getTime()	J:1577923200000
+new Date('Thu, 01 Jan 1970 00:00:00 GMT').getTime()	J:0
+new Date(2020, 0).getUTCFullYear()	J:2020
+new Date(0).getUTCFullYear()	J:1970
+new Date(0).getUTCMonth() + new Date(0).getUTCDate() + new Date(0).getUTCHours() + new Date(0).getUTCMinutes() + new Date(0).getUTCSeconds() + new Date(0).getUTCMilliseconds() + new Date(0).getUTCDay()	J:5
+new Date(NaN).getUTCFullYear()	J:null
+Date.prototype.getUTCFullYear.call(5)	E:TypeError:Date.prototype.getUTCFullYear called on incompatible number
+Date.prototype.getUTCDay.call({})	E:TypeError:Date.prototype.getUTCDay called on incompatible Object
+typeof Date()	S:string
+Date.prototype.toString.call(Date.prototype)	E:TypeError:Date.prototype.toString called on incompatible Date.prototype
+new Promise(5)	E:TypeError:5 is not a function
+Promise(() => {})	E:TypeError:calling a builtin Promise constructor without new is forbidden
+(() => { let r; new Promise((a) => { r = a }); return typeof r })()	S:function
+(() => { const p = new Promise((res) => res(1)); return p instanceof Promise })()	J:true
+(() => { let res; const p = new Promise((r) => { res = r }); res(p); return 'ok' })()	S:ok
+(() => { const p = new Promise((res, rej) => { rej(1); res(2); rej(3) }); return 'ok' })()	S:ok
+(() => { const p = new Promise((res) => res({then: 5})); return 'ok' })()	S:ok
+(() => { const p = new Promise((res) => res({get then() { throw new Error('t') }})); return 'ok' })()	S:ok
+(() => { new Promise(() => { throw new Error('x') }); return 'ok' })()	S:ok
+Promise.resolve(Promise.resolve(1)) instanceof Promise	J:true
+Promise.resolve.call(5, 1)	E:TypeError:Receiver of Promise.resolve call is not a non-null object
+Promise.all([])	J:{}
+Promise.all(5)	J:{}
+Promise.reject(1) instanceof Promise	J:true
+Promise.prototype.then.call(5)	E:TypeError:Receiver of Promise.prototype.then call is not a non-null object
+Promise.prototype.then.call({})	E:TypeError:Promise.prototype.then called on incompatible Object
+Iterator.prototype.map.call(5, x => x)	E:TypeError:number is not a non-null object
+Iterator.prototype.map.call({}, 5)	E:TypeError:5 is not a function
+[...[1, 2, 3].values().map(x => x * 2)]	J:[2,4,6]
+[...[1, 2, 3].values().filter(x => x > 1).take(1)]	J:[2]
+[...[1, 2, 3].values().drop(1)]	J:[2,3]
+[...[[1], [2, 3]].values().flatMap(x => x)]	J:[1,2,3]
+[...[1].values().flatMap(x => 5)]	E:TypeError:number is not a non-null object
+[...[1].values().flatMap(x => 'ab')]	E:TypeError:string is not a non-null object
+[1, 2, 3].values().reduce((a, b) => a + b)	J:6
+[1, 2, 3].values().reduce((a, b) => a + b, 10)	J:16
+[].values().reduce((a, b) => a + b)	E:TypeError:reduce of empty iterator with no initial value
+(() => { const it = [1, 2].values().map(x => x); it.return(); return [...it] })()	J:[]
+(() => { const it = [1, 2].values().map(x => x); it.next(); return [it.return(), it.next()] })()	J:[{"done":true},{"done":true}]
+(() => { const it = [1, 2].values().take(5); return [it.next(), it.next(), it.next(), it.next()] })()	J:[{"value":1,"done":false},{"value":2,"done":false},{"done":true},{"done":true}]
+[...Iterator.from({next() { return {done: true} }})]	J:[]
+[...Iterator.from('ab')]	J:["a","b"]
+Iterator.from(5)	E:TypeError:number is not a non-null object
+Iterator.from({[Symbol.iterator]: 5})	E:TypeError:method is not a function
+Iterator.from(null)	E:TypeError:null is not a non-null object
+Iterator.prototype.map.call({next: 5}, x => x).next()	E:TypeError:nextMethod is not a function
+[...Iterator.from({[Symbol.iterator]() { return [7][Symbol.iterator]() }})]	J:[7]
+Array.from({length: 2.5})	J:[null,null]
+Array.from({length: Infinity}).length	E:RangeError:invalid array length
+Array.prototype.copyWithin.call({length: 5, 0: 'a', 1: 'b', 2: 'c'}, 1, 0, 3)	J:{"0":"a","1":"a","2":"b","3":"c","length":5}
+[].reduce((a, b) => a)	E:TypeError:reduce of empty array with no initial value
+[1].reduceRight((a, b) => a)	J:1
+[3, 1, 2].sort(5)	E:TypeError:invalid Array.prototype.sort argument
+[3, 1, 2].toSorted(null)	E:TypeError:non-function passed to Array.prototype.toSorted
+Array.prototype.lastIndexOf.call({length: NaN}, 1)	J:-1
+[1, 2, 1].lastIndexOf(1, 10)	J:2
+Array.of.call(function () {}, 1, 2).length	J:2
+Array.of.call(5, 1)	J:[1]
+Array.from.call(Object, [1]).length	J:1
+[].concat.call(1, 2)	J:[1,2]
+Array.prototype.at.call({length: 2, 0: 'x'}, 0)	S:x
+[,1].findLast(x => x === undefined)	J:undefined
+JSON.stringify({a: [1, {b: 2}]}, null, 2)	S:{\n  "a": [\n    1,\n    {\n      "b": 2\n    }\n  ]\n}
+JSON.stringify([1], null, -1)	S:[1]
+JSON.stringify({a: 1}, ['a', 'a', 1])	S:{"a":1}
+JSON.parse('[false, null, true]')	J:[false,null,true]
+JSON.parse('fals')	E:SyntaxError:JSON.parse: unexpected keyword at line 1 column 1 of the JSON data
+JSON.parse('nul')	E:SyntaxError:JSON.parse: unexpected keyword at line 1 column 1 of the JSON data
+JSON.parse('1.')	E:SyntaxError:JSON.parse: missing digits after decimal point at line 1 column 3 of the JSON data
+JSON.parse('1e')	E:SyntaxError:JSON.parse: missing digits after exponent indicator at line 1 column 3 of the JSON data
+JSON.parse('-')	E:SyntaxError:JSON.parse: no number after minus sign at line 1 column 2 of the JSON data
+JSON.parse('"\u0001"')	E:SyntaxError:JSON.parse: bad control character in string literal at line 1 column 2 of the JSON data
+JSON.parse('{"a": [1, {"b": 2}]}', (k, v) => typeof v === 'number' ? v * 2 : v)	J:{"a":[2,{"b":4}]}
+JSON.parse('[1, 2]', function (k, v) { if (k === '0') this.length = 0; return v })	J:[1]
+JSON.stringify({toJSON() { return [1] }})	S:[1]
+JSON.stringify(' \ud800')	S:" \\ud800"
+new Date('2020-02-31').getTime()	J:1583107200000
+new Date('2020-02-32').getTime()	J:null
+new Date('2020-00-10').getTime()	J:1575936000000
+new Date('2020-01-01T24:00').getTime()	J:1577923200000
+new Date('2020-01-01T10:60').getTime()	J:null
+new Date('13/2/2020').getTime()	J:null
+new Date('Feb 30 2020').getTime()	J:1583020800000
+new Date('Feb 0 2020').getTime()	J:null
+[].concat.call('ab', 1).length	J:2
+Array.prototype.concat.call({a: 1}, [2]).length	J:2
+Array.prototype.concat.call(new Proxy([1, 2], {}), 3)	J:[1,2,3]
+Promise.reject.call(5, 1)	E:TypeError:Receiver of Promise.reject call is not a non-null object
+Promise.race(5) instanceof Promise	J:true
+Promise.any(null) instanceof Promise	J:true
+Promise.prototype.then.call(Promise.prototype)	E:TypeError:Promise.prototype.then called on incompatible Promise.prototype
+Iterator.prototype.filter.call(null, x => x)	E:TypeError:null is not a non-null object
+Iterator.from({next() { return {done: true} }}).next()	J:{"done":true}
