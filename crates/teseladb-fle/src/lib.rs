@@ -13,13 +13,16 @@
 
 pub mod cipher;
 pub mod error;
+pub mod esc;
 pub mod fields;
 pub mod idl;
 pub mod iev;
 pub mod payloads;
+pub mod query;
 pub mod range;
 pub mod subtype;
 pub mod tokens;
 pub mod values;
+pub mod write;
 
 pub use error::FleError;
