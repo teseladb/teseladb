@@ -104,15 +104,15 @@ impl Relay {
         if let Some(v) = &self.version {
             req = req.header(VERSION_HEADER, v);
         }
-        let bytes = req.encode().map_err(|e| format!("{e:?}"))?;
+        let bytes = req.encode().map_err(debugged)?;
         let s = TcpStream::connect(&self.addr).map_err(|e| format!("{}: {e}", self.addr))?;
-        s.set_read_timeout(Some(ANSWER_WAIT)).map_err(|e| e.to_string())?;
+        s.set_read_timeout(Some(ANSWER_WAIT)).map_err(shown)?;
         let answer = match &self.tls {
             None => {
                 let mut s = s;
-                s.write_all(&bytes).map_err(|e| e.to_string())?;
+                s.write_all(&bytes).map_err(shown)?;
                 let mut out = Vec::new();
-                s.read_to_end(&mut out).map_err(|e| e.to_string())?;
+                s.read_to_end(&mut out).map_err(shown)?;
                 out
             }
             Some(config) => {
@@ -124,9 +124,9 @@ impl Relay {
             }
         };
         let mut reader = ResponseReader::new(Limits::default());
-        match reader.feed(&answer).map_err(|e| format!("{e:?}"))? {
+        match reader.feed(&answer).map_err(debugged)? {
             Some(r) => Ok(r),
-            None => reader.finish().map_err(|e| format!("{e:?}")),
+            None => reader.finish().map_err(debugged),
         }
     }
 
@@ -150,16 +150,26 @@ impl Relay {
             r.header("Content-Type").is_some_and(|t| t.starts_with(sse::EVENT_STREAM));
         if event_stream {
             for e in sse::Reader::default().feed(&r.body) {
-                writeln!(out, "{}", e.data).map_err(|e| e.to_string())?;
+                writeln!(out, "{}", e.data).map_err(shown)?;
             }
         } else if !r.body.is_empty() {
             let text = String::from_utf8_lossy(&r.body);
-            writeln!(out, "{}", text.trim_end()).map_err(|e| e.to_string())?;
+            writeln!(out, "{}", text.trim_end()).map_err(shown)?;
         } else if r.status >= 400 {
             return Err(format!("the node answered {}", r.status));
         }
-        out.flush().map_err(|e| e.to_string())
+        out.flush().map_err(shown)
     }
+}
+
+/// The message of an error that displays.
+fn shown(e: impl std::fmt::Display) -> String {
+    e.to_string()
+}
+
+/// The message of an error that only debugs.
+fn debugged(e: impl std::fmt::Debug) -> String {
+    format!("{e:?}")
 }
 
 /// The `protocolVersion` of an `initialize` result, which the requests after it carry.
@@ -279,5 +289,107 @@ mod tests {
             Some("2025-06-18".to_owned())
         );
         assert_eq!(negotiated(b"[]"), None);
+    }
+
+    /// A node that answers one request with `answer` and closes: its `--uri`.
+    fn canned(answer: &'static [u8]) -> String {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let at = l.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut s, _) = l.accept().unwrap();
+            // The whole request is read, so that closing does not reset the connection.
+            let (mut seen, mut buf) = (Vec::new(), [0u8; 4096]);
+            let whole = |seen: &[u8]| {
+                let Some(end) = seen.windows(4).position(|w| w == b"\r\n\r\n") else {
+                    return false;
+                };
+                let head = String::from_utf8_lossy(&seen[..end]).to_ascii_lowercase();
+                let length = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length: "))
+                    .map_or(0, |n| n.trim().parse::<usize>().unwrap());
+                seen.len() >= end + 4 + length
+            };
+            while !whole(&seen) {
+                let n = s.read(&mut buf).unwrap();
+                if n == 0 {
+                    return;
+                }
+                seen.extend_from_slice(&buf[..n]);
+            }
+            s.write_all(answer).unwrap();
+        });
+        format!("http://{at}")
+    }
+
+    /// `run` over `input` with `o`, writing to `out`: the code and what went to standard error.
+    fn relay_with(o: &McpOpts, input: &[u8], out: &mut dyn Write) -> (i32, String) {
+        let mut err = Vec::new();
+        let code = run(o, &mut &input[..], out, &mut err, Some("k".to_owned()));
+        (code, String::from_utf8(err).unwrap())
+    }
+
+    fn opts(uri: String) -> McpOpts {
+        McpOpts { uri, ca_file: None, certificate_key_file: None }
+    }
+
+    /// A standard output that fails.
+    struct Broken;
+
+    impl Write for Broken {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("closed"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::other("closed"))
+        }
+    }
+
+    const LINE: &[u8] = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n";
+
+    #[test]
+    fn answers_the_relay_cannot_use_stop_it_with_a_message() {
+        let failed =
+            |answer: &'static [u8]| relay_with(&opts(canned(answer)), LINE, &mut Vec::new());
+        let (code, err) =
+            failed(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n");
+        assert_eq!((code, err.as_str()), (1, "teseladb mcp: the node answered 500\n"));
+        let (code, err) = failed(b"not http at all\r\n\r\n");
+        assert!(code == 1 && err.starts_with("teseladb mcp: "), "{err}");
+        let (code, err) = failed(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nabc");
+        assert!(code == 1 && err.starts_with("teseladb mcp: "), "{err}");
+        // A standard output that fails stops the relay.
+        let json = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}";
+        assert_eq!(relay_with(&opts(canned(json)), LINE, &mut Broken).0, 1);
+        let sse = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 9\r\n\r\ndata: x\n\n";
+        assert_eq!(relay_with(&opts(canned(sse)), LINE, &mut Broken).0, 1);
+        // A node that does not listen.
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+        let (code, err) = relay_with(&opts(format!("http://{closed}")), LINE, &mut Vec::new());
+        assert!(code == 1 && err.contains(&closed.to_string()), "{err}");
+        // Standard input that is not text.
+        let (code, err) =
+            relay_with(&opts("http://127.0.0.1:1".to_owned()), b"\xff\xfe\n", &mut Vec::new());
+        assert!(code == 1 && err.starts_with("teseladb mcp: "), "{err}");
+    }
+
+    #[test]
+    fn tls_files_that_do_not_load_stop_it_with_a_message() {
+        let dir = std::env::temp_dir().join(format!("teseladb-mcp-stdio-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bad_ca = dir.join("bad-ca.pem");
+        std::fs::write(&bad_ca, "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n")
+            .unwrap();
+        let o = McpOpts {
+            uri: "https://127.0.0.1:1".to_owned(),
+            ca_file: Some(bad_ca),
+            certificate_key_file: None,
+        };
+        let (code, err) = relay_with(&o, LINE, &mut Vec::new());
+        assert!(code == 1 && err.contains("--tlsCAFile"), "{err}");
+        let o = McpOpts { certificate_key_file: Some(dir.join("missing.pem")), ..o };
+        let (code, err) = relay_with(&o, LINE, &mut Vec::new());
+        assert!(code == 1 && err.contains("--tlsCertificateKeyFile"), "{err}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
