@@ -283,12 +283,7 @@ impl MemIndex {
                 Value::String(text),
             ) => {
                 let a = analyzer.clone().unwrap_or_else(|| self.index_analyzer().to_owned());
-                let grams = Grams {
-                    min: usize::try_from(*min_grams).unwrap_or(0),
-                    max: usize::try_from(*max_grams).unwrap_or(0),
-                    fold: *fold_diacritics,
-                    edge: tokenization == "edgeGram",
-                };
+                let grams = Grams::new(*min_grams, *max_grams, *fold_diacritics, tokenization);
                 out.push(Collected {
                     path: autocomplete_key(path),
                     analyzer: a.clone(),
@@ -309,8 +304,9 @@ impl MemIndex {
     }
 
     /// Adds the grams of `text` to the `autocomplete` field `key` for document `id`: those of
-    /// the whole value and, when it has more than one word, those of each word (measured on
-    /// `refsearch`: `gato montes` holds `gat` twice); its length is its number of words.
+    /// each word and of each run of two or three words (measured on `refsearch`: `gato montes`
+    /// holds `gat` twice, `el gatopardo salvaje` holds `el` three times); its length is its
+    /// number of words.
     fn put_grams(
         &mut self,
         id: u32,
@@ -329,13 +325,7 @@ impl MemIndex {
         if words.is_empty() {
             return Ok(());
         }
-        let whole = g.normalized(text);
-        let mut terms = g.of(&whole);
-        if words.len() > 1 || words[0] != whole {
-            for w in &words {
-                terms.extend(g.of(w));
-            }
-        }
+        let terms: Vec<String> = Grams::shingles(&words).iter().flat_map(|w| g.of(w)).collect();
         let field = self.fields.entry(key.to_owned()).or_insert_with(|| TextField {
             search_analyzer: analyzer.to_owned(),
             ..TextField::default()
@@ -351,19 +341,20 @@ impl MemIndex {
         Ok(())
     }
 
-    /// The scores of `terms` on field `key` (a sum, each a term query), with weight `boost`.
+    /// The scores of `terms` on field `key` (a sum in doubles, as RefLib adds the clauses of a
+    /// disjunction, each a term query), with weight `boost`.
     pub(crate) fn terms_scores(
         &self,
         key: &str,
         terms: &[String],
         boost: f32,
-    ) -> BTreeMap<u32, f32> {
-        let mut out: BTreeMap<u32, f32> = BTreeMap::new();
+    ) -> BTreeMap<u32, f64> {
+        let mut out: BTreeMap<u32, f64> = BTreeMap::new();
         let Some(field) = self.fields.get(key) else { return out };
         let g = self.global_of(key);
         for t in terms {
             for (doc, s) in field.term_scores(t, boost, g) {
-                *out.entry(doc).or_insert(0.0) += s;
+                *out.entry(doc).or_insert(0.0) += f64::from(s);
             }
         }
         out
@@ -828,21 +819,45 @@ pub(crate) struct Grams {
     pub max: usize,
     /// Whether diacritics are folded.
     pub fold: bool,
-    /// `edgeGram` (grams from the start); otherwise every gram.
+    /// `edgeGram` or `rightEdgeGram` (grams from one end); otherwise every gram.
     pub edge: bool,
+    /// `rightEdgeGram`: the grams are taken from the reversed text.
+    pub reverse: bool,
 }
 
+/// The most words `refsearch` joins into one string of an `autocomplete` field (measured
+/// 02-11-2026, `scratchpad/lane3k/m13.js`: `a1 b2 c3 d4 …` holds `a1 b2 c3` but no longer run).
+const SHINGLE_WORDS: usize = 3;
+
 impl Grams {
+    /// The grams of an `autocomplete` field of `tokenization` (`edgeGram`, `rightEdgeGram` or
+    /// `nGram`).
+    pub(crate) fn new(min: i64, max: i64, fold: bool, tokenization: &str) -> Grams {
+        Grams {
+            min: usize::try_from(min).unwrap_or(0),
+            max: usize::try_from(max).unwrap_or(0),
+            fold,
+            edge: tokenization != "nGram",
+            reverse: tokenization == "rightEdgeGram",
+        }
+    }
+
     /// `text` lower-cased, and folded when the field folds.
     pub(crate) fn normalized(&self, text: &str) -> String {
         let lower: String = text.chars().flat_map(char::to_lowercase).collect();
         if self.fold { crate::analysis::tokenfilters::fold_ascii(&lower) } else { lower }
     }
 
+    /// The characters grams are taken from: `word`'s, reversed for `rightEdgeGram`.
+    fn chars(&self, word: &str) -> Vec<char> {
+        if self.reverse { word.chars().rev().collect() } else { word.chars().collect() }
+    }
+
     /// The grams of `word`: its prefixes (or every slice) of `min` to `max` characters, and its
-    /// first `max` characters once more when it is longer (measured on `refsearch`).
+    /// first `max` characters once more when it is longer (measured on `refsearch`, with
+    /// `rightEdgeGram` on the reversed word).
     pub(crate) fn of(&self, word: &str) -> Vec<String> {
-        let chars: Vec<char> = word.chars().collect();
+        let chars = self.chars(word);
         let mut out = Vec::new();
         let starts = if self.edge { 0..1 } else { 0..chars.len() };
         for start in starts {
@@ -852,15 +867,28 @@ impl Grams {
                 }
             }
         }
-        if chars.len() > self.max && self.edge {
+        if chars.len() > self.max {
             out.push(chars[..self.max].iter().collect());
         }
         out
     }
 
-    /// The query term of `word`: its first `max` characters, `None` under `min`.
+    /// The strings of a field value whose grams are indexed: its words and the runs of up to
+    /// three of them, joined by a space, in the order of their first word.
+    pub(crate) fn shingles(words: &[String]) -> Vec<String> {
+        let mut out = Vec::new();
+        for start in 0..words.len() {
+            for end in start + 1..=words.len().min(start + SHINGLE_WORDS) {
+                out.push(words[start..end].join(" "));
+            }
+        }
+        out
+    }
+
+    /// The query term of `word`: its first `max` characters (its last ones, reversed, for
+    /// `rightEdgeGram`), `None` under `min`.
     pub(crate) fn term(&self, word: &str) -> Option<String> {
-        let chars: Vec<char> = word.chars().collect();
+        let chars = self.chars(word);
         (chars.len() >= self.min).then(|| chars[..chars.len().min(self.max)].iter().collect())
     }
 }

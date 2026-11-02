@@ -1,10 +1,12 @@
 //! The `autocomplete` operator (011 FR-002, FR-003) as `refsearch` 1.70.6 runs it (measured
-//! 02-11-2026 with `scoreDetails`, `scratchpad/lane3j/m6.js`): the grams of an `autocomplete`
-//! field are those of its whole value and of each of its words, and a query asks for the first
-//! `maxGrams` characters of each of its words and of its whole text (`tokenOrder: "any"`), or
-//! of its whole text alone (`"sequential"`), each a term query added to the others; with
-//! `"any"` the query also runs as `text` on the field's `string` mapping when it has one. With `fuzzy` a
-//! document holding a gram within the edits scores 1.
+//! 02-11-2026 with `scoreDetails`, `scratchpad/lane3j/m6.js`, `scratchpad/lane3k/m10.js` to
+//! `m13.js`): an `autocomplete` field holds the grams of each word of its value and of each run
+//! of two or three words (`edgeGram` from the start, `rightEdgeGram` from the end, kept
+//! reversed, `nGram` everywhere), and a query asks for the first `maxGrams` characters (the last
+//! ones, reversed, for `rightEdgeGram`) of each of its words and of its whole text
+//! (`tokenOrder: "any"`), or of its whole text alone (`"sequential"`), each a term query of one
+//! disjunction; with `"any"` the query also runs as `text` on the field's `string` mapping when
+//! it has one. With `fuzzy` a document holding a gram within the edits scores 1.
 
 use std::collections::BTreeMap;
 
@@ -63,12 +65,7 @@ impl Autocomplete {
                     tokenization,
                     analyzer,
                 } => Some((
-                    Grams {
-                        min: usize::try_from(min_grams).unwrap_or(0),
-                        max: usize::try_from(max_grams).unwrap_or(0),
-                        fold: fold_diacritics,
-                        edge: tokenization == "edgeGram",
-                    },
+                    Grams::new(min_grams, max_grams, fold_diacritics, &tokenization),
                     analyzer.unwrap_or_else(|| {
                         index
                             .definition()
@@ -95,14 +92,14 @@ impl Autocomplete {
     ) -> Result<BTreeMap<u32, f32>, SearchError> {
         let (g, analyzer) = self.field(index)?;
         let key = autocomplete_key(&self.path);
-        let mut out: BTreeMap<u32, f32> = BTreeMap::new();
+        let mut out: BTreeMap<u32, f64> = BTreeMap::new();
         for q in &self.query {
             let whole = g.normalized(q);
             if let Some(f) = &self.fuzzy {
                 let Some(term) = g.term(&whole) else { continue };
                 let lev = Levenshtein::new(&term, f.max_edits, f.prefix_length);
                 for doc in index.matching_terms(&key, |t| lev.distance(t).is_some()) {
-                    *out.entry(doc).or_insert(0.0) += boost;
+                    *out.entry(doc).or_insert(0.0) += f64::from(boost);
                 }
                 continue;
             }
@@ -119,16 +116,18 @@ impl Autocomplete {
             if let Some(t) = g.term(&whole).filter(|t| !terms.contains(t)) {
                 terms.push(t);
             }
+            // The grams are one disjunction, a clause of the query with `text` (measured with
+            // `scoreDetails`: two nested sums, each in doubles and then rounded to a float).
             for (doc, s) in index.terms_scores(&key, &terms, boost) {
-                *out.entry(doc).or_insert(0.0) += s;
+                *out.entry(doc).or_insert(0.0) += f64::from(s as f32);
             }
             if !self.sequential && index.has_text(&self.path) {
                 let paths = [self.path.clone()];
                 for (doc, s) in index.text_scores(std::slice::from_ref(q), &paths, boost)? {
-                    *out.entry(doc).or_insert(0.0) += s;
+                    *out.entry(doc).or_insert(0.0) += f64::from(s);
                 }
             }
         }
-        Ok(out)
+        Ok(out.into_iter().map(|(doc, s)| (doc, s as f32)).collect())
     }
 }

@@ -1534,7 +1534,7 @@ fn autocomplete_grams_follow_the_field_options() {
     assert_eq!(hits("anc"), Ok(vec![1, 2]));
     // Without a string mapping the query asks for its grams alone.
     assert_eq!(hits("cancionero"), Ok(vec![1, 2]));
-    let folded = Grams { min: 2, max: 3, fold: true, edge: true };
+    let folded = Grams::new(2, 3, true, "edgeGram");
     assert_eq!(folded.normalized("Canción"), "cancion");
     assert_eq!(folded.of("ab"), vec!["ab".to_owned()]);
     assert_eq!(folded.of("a"), Vec::<String>::new());
@@ -1569,9 +1569,15 @@ fn vector_search_and_the_nested_operators_answer_as_refsearch() {
     assert_eq!(found(&idx, &no_vector).unwrap_err(), "\"vectorSearch.queryVector\" is required");
     let inner = Document::new()
         .with("operator", op("text", Document::new().with("path", "t").with("query", "gato")));
+    // As measured (`m8.js`), `hasAncestor` with its `ancestorPath`.
     for name in ["hasAncestor", "hasRoot"] {
+        let args = if name == "hasAncestor" {
+            inner.clone().with("ancestorPath", "e")
+        } else {
+            inner.clone()
+        };
         assert_eq!(
-            found(&idx, &op(name, inner.clone())).unwrap_err(),
+            found(&idx, &op(name, args)).unwrap_err(),
             format!(
                 "{name} operator requires embeddedDocument.path, hasAncestor.ancestorPath, or returnScope.path to be set."
             )

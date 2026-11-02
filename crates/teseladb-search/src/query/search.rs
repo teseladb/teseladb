@@ -124,6 +124,14 @@ enum Operator {
     Embedded(embedded::Embedded),
     /// `hasRoot`: its operator, run on the documents that hold the elements.
     HasRoot(Document),
+    /// `hasAncestor`: its operator, run on the elements of `path` that hold the elements, at
+    /// `at` of the query.
+    HasAncestor {
+        path: String,
+        operator: Document,
+        score: Score,
+        at: String,
+    },
     /// Scores already computed, by document number (`hasRoot` inside `embeddedDocument`).
     Precomputed(BTreeMap<u32, f32>),
     /// `geoWithin`, `geoShape` or `near` on a `geo` field.
@@ -177,13 +185,19 @@ pub fn count_document(total: bool, n: usize) -> Document {
 }
 
 fn parse_root(index: &MemIndex, spec: &Document) -> Result<Operator, SearchError> {
+    parse_at(index, spec, "")
+}
+
+/// The operator of `spec`, at `at` of the query (empty at its root).
+fn parse_at(index: &MemIndex, spec: &Document, at: &str) -> Result<Operator, SearchError> {
     let ops: Vec<(&str, &Value)> = spec.iter().filter(|(k, _)| OPERATORS.contains(k)).collect();
     match ops.as_slice() {
         [] => Err(SearchError(format!(
             "Query should contain either an operator [{}] or a collector [facet]",
             OPERATORS.join(", ")
         ))),
-        [(name, v)] => parse(index, name, v, name),
+        [(name, v)] if at.is_empty() => parse(index, name, v, name),
+        [(name, v)] => parse(index, name, v, &format!("{at}.{name}")),
         _ => Err(SearchError(format!("at most one of [{}] may be present", OPERATORS.join(", ")))),
     }
     .and_then(|op| {
@@ -212,10 +226,7 @@ fn parse(index: &MemIndex, name: &str, v: &Value, path: &str) -> Result<Operator
             Some(_) => Err(shape(&format!("{path}.operator"), "must be a document")),
             None => Err(shape(&format!("{path}.operator"), "is required")),
         },
-        "hasAncestor" => Err(SearchError(format!(
-            "{name} operator requires embeddedDocument.path, hasAncestor.ancestorPath, or \
-             returnScope.path to be set."
-        ))),
+        "hasAncestor" => parse_has_ancestor(d, path),
         "span" => span::parse(d, path),
         "queryString" => query_string::parse(index, d, path),
         "moreLikeThis" => more_like::parse(index, d, path),
@@ -230,6 +241,28 @@ fn parse(index: &MemIndex, name: &str, v: &Value, path: &str) -> Result<Operator
             Err(SearchError(format!("\"{other}\" is not supported by this node's search engine")))
         }
     }
+}
+
+/// `hasAncestor` with its options `d` at `path` of the query (measured 02-11-2026,
+/// `scratchpad/lane3k/m10.js`).
+fn parse_has_ancestor(d: &Document, path: &str) -> Result<Operator, SearchError> {
+    if let Some((k, _)) = d.iter().find(|(k, _)| !["ancestorPath", "operator", "score"].contains(k))
+    {
+        return Err(SearchError(format!("\"{path}\" unrecognized field \"{k}\"")));
+    }
+    let at = |f: &str| format!("{path}.{f}");
+    let ancestor = match d.get("ancestorPath") {
+        Some(Value::String(p)) => p.clone(),
+        Some(_) => return Err(shape(&at("ancestorPath"), "must be a string")),
+        None => return Err(shape(&at("ancestorPath"), "is required")),
+    };
+    let operator = match d.get("operator") {
+        Some(Value::Document(o)) => o.clone(),
+        Some(_) => return Err(shape(&at("operator"), "must be a document")),
+        None => return Err(shape(&at("operator"), "is required")),
+    };
+    let score = parse_score(d.get("score"), &at("score"))?;
+    Ok(Operator::HasAncestor { path: ancestor, operator, score, at: path.to_owned() })
 }
 
 fn parse_text(index: &MemIndex, d: &Document, path: &str) -> Result<Operator, SearchError> {
@@ -541,11 +574,8 @@ fn eval(index: &MemIndex, op: &Operator) -> Result<BTreeMap<u32, f32>, SearchErr
         }
         Operator::Empty => Ok(BTreeMap::new()),
         Operator::Precomputed(s) => Ok(s.clone()),
-        Operator::HasRoot(_) => Err(SearchError(
-            "hasRoot operator requires embeddedDocument.path, hasAncestor.ancestorPath, or \
-             returnScope.path to be set."
-                .to_owned(),
-        )),
+        Operator::HasRoot(_) => Err(outside_embedded("hasRoot")),
+        Operator::HasAncestor { .. } => Err(outside_embedded("hasAncestor")),
         Operator::Geo(g) => {
             let s = g.scores(index, boost_of(g.score()))?;
             rescored(index, s, g.score())
@@ -590,6 +620,14 @@ fn eval(index: &MemIndex, op: &Operator) -> Result<BTreeMap<u32, f32>, SearchErr
             eval_compound(index, must, should, filter, must_not, *minimum)
         }
     }
+}
+
+/// The error of `hasRoot` or `hasAncestor` (`name`) outside `embeddedDocument`.
+fn outside_embedded(name: &str) -> SearchError {
+    SearchError(format!(
+        "{name} operator requires embeddedDocument.path, hasAncestor.ancestorPath, or \
+         returnScope.path to be set."
+    ))
 }
 
 /// `op` with `b` times the weight of its scores.
@@ -701,6 +739,8 @@ mod values;
 
 #[cfg(test)]
 mod geo_tests;
+#[cfg(test)]
+mod m10_tests;
 #[cfg(test)]
 mod pattern_tests;
 #[cfg(test)]

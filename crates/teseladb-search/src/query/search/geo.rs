@@ -354,12 +354,26 @@ impl Shape {
     }
 }
 
-/// The shapes of the document at `path`: GeoJSON values, alone or in arrays.
+impl Shape {
+    /// The shape on RefLib's 32-bit coordinates, as a document stores it (measured
+    /// 02-11-2026, `scratchpad/lane3k/m10.js`: a stored point at 45° lies on a query line at
+    /// 45°, one at -3.5° does not lie on a line at -3.5°; the query's geometry keeps its values).
+    fn stored(self) -> Shape {
+        let q = |pts: Vec<Pt>| pts.into_iter().map(quantized).collect::<Vec<_>>();
+        Shape {
+            points: q(self.points),
+            lines: self.lines.into_iter().map(q).collect(),
+            polygons: self.polygons.into_iter().map(|p| p.into_iter().map(q).collect()).collect(),
+        }
+    }
+}
+
+/// The shapes of the document at `path` as stored: GeoJSON values, alone or in arrays.
 fn shapes_at(doc: &Document, path: &str) -> Vec<Shape> {
     let mut out = Vec::new();
     let mut add = |v: &Value| {
         if let Ok(s) = geometry(v, "") {
-            out.push(s);
+            out.push(s.stored());
         }
     };
     match value_at(doc, path) {
@@ -432,8 +446,8 @@ impl Geo {
                             .into_iter()
                             .flat_map(|s| s.points)
                             .map(|pt| {
-                                let (o, q) = (*origin, quantized(pt));
-                                super::sloppy::haversin_meters(o.1, o.0, q.1, q.0)
+                                let o = *origin;
+                                super::sloppy::haversin_meters(o.1, o.0, pt.1, pt.0)
                             })
                             .min_by(f64::total_cmp);
                         if let Some(m) = nearest {
