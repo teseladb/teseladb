@@ -120,7 +120,7 @@ fn wanted(index: &MemIndex, op: &Operator, out: &mut Vec<Wanted>) {
                 wanted(index, o, out);
             }
         }
-        Operator::Scored(inner, _) => wanted(index, inner, out),
+        Operator::Scored(inner, _) | Operator::AllTerms(inner) => wanted(index, inner, out),
         _ => {}
     }
 }

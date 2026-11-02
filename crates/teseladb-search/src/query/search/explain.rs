@@ -179,6 +179,7 @@ fn score_of(op: &Operator) -> Option<&Score> {
         Operator::Embedded(e) => &e.score,
         Operator::Knn(k) => &k.score,
         Operator::Synonyms(s) => &s.score,
+        Operator::AllTerms(inner) => return score_of(inner),
         Operator::Empty
         | Operator::All
         | Operator::Precomputed(_)
@@ -311,7 +312,7 @@ pub(super) fn describe(ctx: &Ctx<'_>, op: &Operator) -> Desc {
             add(should_mark, should);
             Desc::Bool(parts.join(" "))
         }
-        Operator::Scored(inner, _) => describe(ctx, inner),
+        Operator::Scored(inner, _) | Operator::AllTerms(inner) => describe(ctx, inner),
         Operator::Values(v) => super::describe::near_description(ctx, v)
             .unwrap_or_else(|| Desc::Other(operator_name(op).to_owned())),
         other => Desc::Other(operator_name(other).to_owned()),
@@ -503,7 +504,9 @@ fn native(
         Operator::Autocomplete(a) => a.explain(ctx, boost, doc)?,
         Operator::Embedded(e) => e.explain(ctx, boost, doc, score)?,
         Operator::Compound { .. } => compound(ctx, op, doc, score)?,
-        Operator::Scored(inner, _) => native(ctx, inner, boost, doc, score)?,
+        Operator::Scored(inner, _) | Operator::AllTerms(inner) => {
+            native(ctx, inner, boost, doc, score)?
+        }
         Operator::Passed(p) => p.explain(ctx, doc, score)?,
         Operator::Precomputed(_) => Some(Explanation::leaf(score, "Score based on child docs")),
         _ => Some(Explanation::leaf(score, describe(ctx, op).text().to_owned())),

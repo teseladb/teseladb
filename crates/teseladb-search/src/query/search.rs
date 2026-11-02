@@ -120,6 +120,9 @@ enum Operator {
     Empty,
     /// Every document, scored 1 (a `facet` collector without an operator).
     All,
+    /// `text` with `matchCriteria: "all"`: each query string on each path counts only in the
+    /// documents with all its terms (measured).
+    AllTerms(Box<Operator>),
     /// An operator whose scores `score` changes as a whole.
     Scored(Box<Operator>, Score),
     /// `embeddedDocument`.
@@ -367,15 +370,26 @@ fn parse_text(index: &MemIndex, d: &Document, path: &str) -> Result<Operator, Se
         Some(p) => paths(index, p, &at("path"))?,
     };
     let fuzzy = parse_fuzzy(d.get("fuzzy"), &at("fuzzy"))?;
+    let all = match d.get("matchCriteria") {
+        None => false,
+        Some(Value::String(m)) if m == "any" => false,
+        Some(Value::String(m)) if m == "all" => true,
+        Some(Value::String(_)) => {
+            return Err(shape(&at("matchCriteria"), "must be one of [all, any]"));
+        }
+        Some(_) => return Err(shape(&at("matchCriteria"), "must be a string")),
+    };
     let score = parse_score(d.get("score"), &at("score"))?;
     if let Some(mapping) = synonym_mapping(index, d, path)? {
         if fuzzy.is_some() {
             return Err(shape(path, "at most one of [fuzzy, synonyms] may be present"));
         }
-        let phrase = None;
+        // Measured: with `matchCriteria: "all"` a token asks for its synonyms as `phrase` does.
+        let phrase = all.then_some(0);
         return Ok(Operator::Synonyms(synonyms::Synonyms { query, paths, mapping, phrase, score }));
     }
-    Ok(Operator::Text { query, paths, fuzzy, score })
+    let text = Operator::Text { query, paths, fuzzy, score };
+    Ok(if all { Operator::AllTerms(Box::new(text)) } else { text })
 }
 
 /// The synonym mapping `d` names in `synonyms`, checked against the definition.
@@ -702,6 +716,7 @@ fn eval(index: &MemIndex, op: &Operator) -> Result<BTreeMap<u32, f32>, SearchErr
         }
         Operator::Empty => Ok(BTreeMap::new()),
         Operator::All => Ok(index.live().map(|d| (d, 1.0)).collect()),
+        Operator::AllTerms(inner) => eval_all_terms(index, inner),
         Operator::Precomputed(s) => Ok(s.clone()),
         Operator::Passed(p) => Ok(p.scores.clone()),
         Operator::HasRoot(_) => Err(outside_embedded("hasRoot")),
@@ -754,6 +769,43 @@ fn eval(index: &MemIndex, op: &Operator) -> Result<BTreeMap<u32, f32>, SearchErr
             eval_compound(index, must, should, filter, must_not, *minimum)
         }
     }
+}
+
+/// [`Operator::AllTerms`]: the scores of each query string on each path, in the order `text`
+/// adds them, kept in the documents that have every term of the string (or, with `fuzzy`, a
+/// term near each).
+fn eval_all_terms(index: &MemIndex, op: &Operator) -> Result<BTreeMap<u32, f32>, SearchError> {
+    let Operator::Text { query, paths, fuzzy, score } = op else { return eval(index, op) };
+    let mut out: BTreeMap<u32, f32> = BTreeMap::new();
+    for p in paths {
+        for q in query {
+            let unit = Operator::Text {
+                query: vec![q.clone()],
+                paths: vec![p.clone()],
+                fuzzy: fuzzy.clone(),
+                score: score.clone(),
+            };
+            let tokens = index.query_terms(p, q)?;
+            let docs_of = |t: &str| -> Vec<u32> {
+                let terms: Vec<String> = match fuzzy {
+                    Some(f) => index.fuzzy_terms(p, t, f).into_iter().map(|(t, _)| t).collect(),
+                    None => vec![t.to_owned()],
+                };
+                terms
+                    .iter()
+                    .filter_map(|t| index.positions(p, t))
+                    .flat_map(|d| d.keys().copied())
+                    .collect()
+            };
+            let lists: Vec<Vec<u32>> = tokens.iter().map(|t| docs_of(t)).collect();
+            for (doc, s) in eval(index, &unit)? {
+                if lists.iter().all(|l| l.contains(&doc)) {
+                    *out.entry(doc).or_insert(0.0) += s;
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// The error of `hasRoot` or `hasAncestor` (`name`) outside `embeddedDocument`.
