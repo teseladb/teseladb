@@ -626,7 +626,16 @@ fn oplog_find<B: Backend + ?Sized>(
     a: &FindArgs,
 ) -> Result<Document, CommandError> {
     if a.tailable.is_none() {
-        let docs = super::oplog::documents(ctx.backend, &a.filter)?;
+        // `$natural: -1` with a limit (`refdump --oplog`'s first and last entry) reads back
+        // from the newest entry only as far as it needs.
+        let newest = match (a.natural, &a.sort) {
+            (Some(false), None) if a.filter.is_empty() => a.limit.map(|l| {
+                let skip = usize::try_from(a.skip).unwrap_or(usize::MAX);
+                usize::try_from(l).unwrap_or(usize::MAX).saturating_add(skip)
+            }),
+            _ => None,
+        };
+        let docs = super::oplog::documents(ctx.backend, &a.filter, newest)?;
         return generated_find(ctx, ns, a, docs);
     }
     let ns_text = full(ns);
@@ -1324,6 +1333,10 @@ fn generated_find<B: Backend + ?Sized>(
     }
     if let Some(s) = &a.sort {
         rows.sort_by(|x, y| s.compare_keys(&x.0, &y.0, col));
+    }
+    // `$natural: -1` reads the generated documents from the last (the oplog's newest entry).
+    if a.natural == Some(false) {
+        rows.reverse();
     }
     let skip = usize::try_from(a.skip).unwrap_or(usize::MAX);
     let limit = a.limit.map_or(usize::MAX, |l| usize::try_from(l).unwrap_or(usize::MAX));

@@ -130,6 +130,8 @@ mod tests {
             voters: Vec::new(),
             generation: 0,
             leader_hint: None,
+            moved_ms: 0,
+            replica_epoch: 1,
         }
     }
 

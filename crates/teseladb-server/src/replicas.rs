@@ -70,6 +70,7 @@ mod tests {
             leader_term: 0,
             pending_split: None,
             settling,
+            moved_ms: 0,
         }
     }
 

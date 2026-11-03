@@ -111,3 +111,104 @@ fn transfer_to_a_lagging_follower_waits_until_it_catches_up() {
     assert_eq!(net.leader(), Some(to));
     assert_eq!(net.data(to).len(), 10);
 }
+
+/// Heartbeats in the queue (one per follower and round).
+fn heartbeats(net: &Net) -> usize {
+    net.queue.iter().filter(|m| m.ty == MessageType::Heartbeat).count()
+}
+
+#[test]
+fn reads_registered_in_one_step_share_one_heartbeat_round() {
+    let mut net = Net::new(3, 0, 27);
+    let l = net.elect(300);
+    net.ticks(3);
+    net.propose(l, b"v1").unwrap();
+    net.deliver();
+    let committed = net.nodes[&l].raw.status(&net.nodes[&l].store).hard_state.commit;
+    // Eight reads in the same step: one round, a heartbeat per follower.
+    let node = net.nodes.get_mut(&l).unwrap();
+    for ctx in 100..108 {
+        node.raw.read_index(ctx, &node.store).unwrap();
+    }
+    assert_eq!(heartbeats(&net), 0, "the round leaves at the end of the step, not per read");
+    net.process(l);
+    assert_eq!(heartbeats(&net), 2, "one round for the whole batch");
+    net.deliver();
+    let got: Vec<_> = net.nodes[&l].read_states.iter().filter(|r| r.ctx >= 100).copied().collect();
+    assert_eq!(got.len(), 8);
+    assert!(got.iter().all(|r| r.index >= committed), "{got:?}");
+}
+
+#[test]
+fn a_read_registered_after_its_round_left_waits_for_the_next_one() {
+    let mut net = Net::new(3, 0, 28);
+    let l = net.elect(300);
+    net.ticks(3);
+    let node = net.nodes.get_mut(&l).unwrap();
+    node.raw.read_index(200, &node.store).unwrap();
+    net.process(l);
+    // The round of 200 is out; 201 comes after it was sent.
+    let node = net.nodes.get_mut(&l).unwrap();
+    node.raw.read_index(201, &node.store).unwrap();
+    let out: Vec<_> = core::mem::take(&mut net.queue).into_iter().collect();
+    for m in out {
+        let node = net.nodes.get_mut(&m.to).unwrap();
+        node.raw.step(m, &node.store, &mut net.rng).unwrap();
+        let rd = node.raw.ready(&node.store, &mut net.rng);
+        net.queue.extend(rd.messages);
+    }
+    // The answers to the first round reach the leader: they confirm 200, never 201.
+    let mut answered = Vec::new();
+    while let Some(m) = net.queue.pop_front() {
+        let node = net.nodes.get_mut(&m.to).unwrap();
+        node.raw.step(m, &node.store, &mut net.rng).unwrap();
+        let rd = node.raw.ready(&node.store, &mut net.rng);
+        answered.extend(rd.read_states.iter().map(|r| r.ctx));
+    }
+    assert_eq!(answered, vec![200]);
+    net.deliver();
+    assert!(net.nodes[&l].read_states.iter().any(|r| r.ctx == 201), "its own round confirms it");
+}
+
+#[test]
+fn a_batch_on_a_deposed_leader_is_never_answered() {
+    let mut net = Net::new(3, 0, 29);
+    let old = net.elect(300);
+    net.ticks(3);
+    net.isolate(old);
+    // The other two elect a leader and commit a write the old one never sees.
+    let mut new = None;
+    for _ in 0..300 {
+        net.tick();
+        new = (1..=3).map(id).find(|&n| n != old && net.role(n) == teseladb_raft::Role::Leader);
+        if new.is_some() {
+            break;
+        }
+    }
+    let new = new.expect("a leader on the majority side");
+    net.ticks(2);
+    let index = net.propose(new, b"w").unwrap();
+    net.deliver();
+    // The old leader, cut off, still believes it leads for a while and registers a batch.
+    if net.role(old) == teseladb_raft::Role::Leader {
+        let node = net.nodes.get_mut(&old).unwrap();
+        for ctx in 300..306 {
+            node.raw.read_index(ctx, &node.store).unwrap();
+        }
+    }
+    net.deliver();
+    net.heal();
+    net.ticks(20);
+    assert!(net.nodes[&old].read_states.iter().all(|r| r.ctx < 300), "a stale batch answered");
+    // A batch on the new leader sees the write.
+    let leader = net.leader().unwrap();
+    let node = net.nodes.get_mut(&leader).unwrap();
+    for ctx in 400..404 {
+        node.raw.read_index(ctx, &node.store).unwrap();
+    }
+    net.deliver();
+    let got: Vec<_> =
+        net.nodes[&leader].read_states.iter().filter(|r| r.ctx >= 400).copied().collect();
+    assert_eq!(got.len(), 4);
+    assert!(got.iter().all(|r| r.index >= index), "{got:?} below {index}");
+}

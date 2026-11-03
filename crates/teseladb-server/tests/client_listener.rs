@@ -694,3 +694,22 @@ fn the_replica_set_port_opens_and_closes_without_a_restart() {
     }
     drop(node.stop());
 }
+
+/// Each worker of a clients' port is woken at a change of `topologyVersion`; a port that stops
+/// leaves the list at the next change, so opening and closing the replica set port again and
+/// again keeps nothing (018 FR-016).
+#[test]
+fn a_stopped_port_is_no_longer_woken() {
+    let presence = Arc::new(NodePresence::default());
+    let clock = teseladb_multiraft::NodeClock::for_node(teseladb_types::NodeId(1));
+    let state = Arc::new(NodeClockState::new(clock, 7).with_presence(presence.clone()));
+    let l = ClientListener::spawn(&config(DEFAULT_MAX_CONNECTIONS), 2, state.clone()).unwrap();
+    assert_eq!(presence.watchers(), 2);
+    presence.set(1, false);
+    l.stop();
+    assert_eq!(presence.watchers(), 0);
+    presence.set(2, false);
+    let again = ClientListener::spawn(&config(DEFAULT_MAX_CONNECTIONS), 1, state).unwrap();
+    assert_eq!(presence.watchers(), 1);
+    again.stop();
+}

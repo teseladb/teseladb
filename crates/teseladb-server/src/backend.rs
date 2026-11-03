@@ -245,7 +245,8 @@ impl ServerBackend {
                     | RemoteReply::Piece { .. }
                     | RemoteReply::Restored { .. }
                     | RemoteReply::Changes { .. }
-                    | RemoteReply::Fenced { .. },
+                    | RemoteReply::Fenced { .. }
+                    | RemoteReply::Live { .. },
                 ) => {
                     return Err(CommandError::new(INTERNAL_ERROR, "a scan answered with no rows"));
                 }
@@ -698,7 +699,8 @@ impl Backend for ServerBackend {
             | RemoteReply::Piece { .. }
             | RemoteReply::Restored { .. }
             | RemoteReply::Changes { .. }
-            | RemoteReply::Fenced { .. } => {
+            | RemoteReply::Fenced { .. }
+            | RemoteReply::Live { .. } => {
                 Err(CommandError::new(INTERNAL_ERROR, "a write answered with no result"))
             }
         }
@@ -1150,6 +1152,14 @@ impl Backend for ServerBackend {
                 return Err(self.range_timeout());
             }
             thread::sleep(RETRY_PAUSE);
+        }
+    }
+
+    fn range_live_bytes(&mut self, e: &RouteEntry) -> Result<u64, CommandError> {
+        // Asked of the range that holds its first key, which answers from its state machine.
+        match self.data(&e.start, true, |_, _| RemoteReq::Live)?.1 {
+            RemoteReply::Live { bytes } => Ok(bytes),
+            _ => Err(CommandError::new(INTERNAL_ERROR, "a range's size came with something else")),
         }
     }
 

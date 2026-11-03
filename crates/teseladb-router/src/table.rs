@@ -24,8 +24,12 @@ pub struct RouteEntry {
     pub voters: Vec<NodeId>,
     /// Generation of its bounds.
     pub generation: u64,
+    /// Epoch of its replicas, which a replica change names (`SetReplicas`).
+    pub replica_epoch: u64,
     /// Where Group 0 wants its leader.
     pub leader_hint: Option<NodeId>,
+    /// Cluster time, in milliseconds, of its last split or move ([`RangeDesc::moved_ms`]).
+    pub moved_ms: u64,
 }
 
 impl RouteEntry {
@@ -39,7 +43,9 @@ impl RouteEntry {
             core: d.core,
             voters: voters.collect(),
             generation: d.generation,
+            replica_epoch: d.replica_epoch,
             leader_hint: d.leader_hint,
+            moved_ms: d.moved_ms,
         }
     }
 
