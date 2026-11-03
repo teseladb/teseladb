@@ -722,7 +722,7 @@ impl Resharding {
             .collection(&temp_ns)?
             .ok_or_else(|| CommandError::new(INTERNAL_ERROR, "the resharding copy is gone"))?;
         copy_indexes(backend, &old, &temp, &plan)?;
-        let to_copy = i64::try_from(count(backend, &old)?).unwrap_or(i64::MAX);
+        let to_copy = i64::try_from(approx_documents(backend, &old)?).unwrap_or(i64::MAX);
         let mark = backend.read_versions(&[])?.0;
         let op = lock(shared).ops.begin(Op {
             conn: 0,
@@ -1172,14 +1172,38 @@ fn copy_indexes<B: Backend + ?Sized>(
     Ok(())
 }
 
-/// The documents of `c`.
-fn count<B: Backend + ?Sized>(backend: &mut B, c: &CollectionEntry) -> Result<usize, CommandError> {
-    let mut n = 0usize;
-    for_each_document(backend, c, None, |_, _| {
-        n += 1;
-        Ok(())
-    })?;
-    Ok(n)
+/// About how many documents `c` has (`approxDocumentsToCopy`) without reading them all
+/// (018 FR-002 at 100 GB): all of them when they fit in one batch; otherwise the live bytes of
+/// the ranges inside its documents (the stored bytes of the ranges at its edges) over the mean
+/// size of that first batch. TeselaDB keeps no count of a collection's documents (DV-088).
+pub fn approx_documents<B: Backend + ?Sized>(
+    backend: &mut B,
+    c: &CollectionEntry,
+) -> Result<u64, CommandError> {
+    let (lo, hi) = super::query::documents_of(c);
+    let sample = backend.scan(&lo, &hi, SCAN, ReadConcern::Local)?;
+    let n = u64::try_from(sample.len()).unwrap_or(u64::MAX);
+    if sample.len() < SCAN {
+        return Ok(n);
+    }
+    let sampled: u64 = sample
+        .iter()
+        .map(|(k, d)| u64::try_from(teseladb_range::mutate::live_size(k, d)).unwrap_or(0))
+        .sum();
+    let mut bytes = 0u64;
+    for e in backend.route_entries()? {
+        let to = if e.end.is_empty() { hi.clone() } else { e.end.clone().min(hi.clone()) };
+        let from = e.start.clone().max(lo.clone());
+        if from >= to {
+            continue;
+        }
+        let inside = e.start >= lo && !e.end.is_empty() && e.end <= hi;
+        bytes += match inside {
+            true => backend.range_live_bytes(&e)?,
+            false => backend.stored_bytes(&from, &to)?,
+        };
+    }
+    Ok((bytes.saturating_mul(n) / sampled.max(1)).max(n))
 }
 
 fn uuid_value(u: [u8; 16]) -> Value {

@@ -237,7 +237,8 @@ impl ServerBackend {
                     | RemoteReply::Piece { .. }
                     | RemoteReply::Restored { .. }
                     | RemoteReply::Changes { .. }
-                    | RemoteReply::Fenced { .. },
+                    | RemoteReply::Fenced { .. }
+                    | RemoteReply::Live { .. },
                 ) => {
                     return Err(CommandError::new(INTERNAL_ERROR, "a scan answered with no rows"));
                 }
@@ -671,7 +672,8 @@ impl Backend for ServerBackend {
             | RemoteReply::Piece { .. }
             | RemoteReply::Restored { .. }
             | RemoteReply::Changes { .. }
-            | RemoteReply::Fenced { .. } => {
+            | RemoteReply::Fenced { .. }
+            | RemoteReply::Live { .. } => {
                 Err(CommandError::new(INTERNAL_ERROR, "a write answered with no result"))
             }
         }
@@ -1082,6 +1084,14 @@ impl Backend for ServerBackend {
 
     fn route_entries(&mut self) -> Result<Vec<teseladb_router::table::RouteEntry>, CommandError> {
         Ok(self.h.routes.entries())
+    }
+
+    fn range_live_bytes(&mut self, e: &RouteEntry) -> Result<u64, CommandError> {
+        // Asked of the range that holds its first key, which answers from its state machine.
+        match self.data(&e.start, true, |_, _| RemoteReq::Live)?.1 {
+            RemoteReply::Live { bytes } => Ok(bytes),
+            _ => Err(CommandError::new(INTERNAL_ERROR, "a range's size came with something else")),
+        }
     }
 
     fn range_order(

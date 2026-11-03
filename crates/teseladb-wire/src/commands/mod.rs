@@ -331,6 +331,15 @@ pub trait Backend {
     fn route_entries(&mut self) -> Result<Vec<teseladb_router::table::RouteEntry>, CommandError> {
         Ok(Vec::new())
     }
+    /// The live bytes of range `e` as its state machine keeps them (007 FR-005, D-068), without
+    /// reading its data (018 FR-017); a backend without that count weighs the stored bytes of its
+    /// bounds.
+    fn range_live_bytes(
+        &mut self,
+        e: &teseladb_router::table::RouteEntry,
+    ) -> Result<u64, CommandError> {
+        self.stored_bytes(&e.start, &e.end)
+    }
     /// Sends Group 0 an order on a range (`SplitRange`, `MergeRanges`, `SetReplicas`,
     /// `SetLeaderHint`) for the chunk commands (018 FR-004).
     fn range_order(

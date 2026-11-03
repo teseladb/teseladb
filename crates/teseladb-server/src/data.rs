@@ -605,6 +605,14 @@ impl DataCore {
             }
             // A resharding's write fence, on the leader (018 FR-002).
             RemoteReq::Fence { start, end, on } => self.host.fence(core, (g, start, end), on, now),
+            // The live bytes, from the state machine at once (018 FR-017).
+            RemoteReq::Live => {
+                let live = core.state_machine(g).and_then(CoreSm::range).map(|sm| sm.live_bytes());
+                let hint = core.status(g).map_or(NodeId(0), |s| s.leader);
+                let r = live.map(|bytes| RemoteReply::Live { bytes });
+                self.send_answer(core, client, r.ok_or(RangeError::NotLeader { hint }), now);
+                return;
+            }
             // A backup's or a restore's request (007 FR-021).
             r @ (RemoteReq::BackupFetch { .. }
             | RemoteReq::RestorePiece { .. }

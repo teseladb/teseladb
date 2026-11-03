@@ -205,6 +205,11 @@ pub struct Mem {
     pub range_orders: Vec<teseladb_meta::command::Group0Command>,
     /// Range orders Group 0 refuses, with this error.
     pub refuse_orders: Option<CommandError>,
+    /// The live bytes the state machines of these ranges keep; a range left out has those of
+    /// the versions in its bounds.
+    pub range_live: BTreeMap<teseladb_types::GroupId, u64>,
+    /// Documents the scans gave.
+    pub scanned_rows: usize,
 }
 
 /// A change of the data before a read of `[start, …)`.
@@ -817,16 +822,33 @@ impl Backend for Mem {
         if start >= end {
             return Ok(Vec::new());
         }
-        Ok(self
+        let rows: Vec<(Vec<u8>, Vec<u8>)> = self
             .stored(start.to_vec()..end.to_vec())
             .into_iter()
             .take(limit)
             .map(|(k, v)| (k.clone(), v.clone()))
-            .collect())
+            .collect();
+        self.scanned_rows += rows.len();
+        Ok(rows)
     }
 
     fn route_entries(&mut self) -> Result<Vec<teseladb_router::table::RouteEntry>, CommandError> {
         Ok(self.routes.clone())
+    }
+
+    fn range_live_bytes(
+        &mut self,
+        e: &teseladb_router::table::RouteEntry,
+    ) -> Result<u64, CommandError> {
+        // As a range's state machine counts them, without a scan.
+        let live = |(k, v): (&Vec<u8>, &Vec<u8>)| (k.len() + 1 + v.len()) as u64;
+        Ok(match (self.range_live.get(&e.group), e.end.is_empty()) {
+            (Some(bytes), _) => *bytes,
+            (None, true) => self.stored(e.start.clone()..).into_iter().map(live).sum(),
+            (None, false) => {
+                self.stored(e.start.clone()..e.end.clone()).into_iter().map(live).sum()
+            }
+        })
     }
 
     fn range_order(
