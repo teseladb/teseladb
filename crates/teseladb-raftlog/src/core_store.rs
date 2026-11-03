@@ -792,6 +792,16 @@ impl CoreStore {
         Some((SnapshotMeta { index: f.index, term: f.term, conf }, ReadToken(token)))
     }
 
+    /// Whether every write this store took is on disk or cannot get there now: nothing waits in
+    /// a batch and no batch is in flight, or the core is out of space or stopped after an I/O
+    /// error (fail-stop). A clean stop of the core waits for it. Maintenance, which a later
+    /// batch takes, does not count.
+    pub fn writes_settled(&self) -> bool {
+        self.flush.is_failed()
+            || self.flush.is_disk_full()
+            || (self.inflight.is_none() && self.queued.is_empty() && self.open.is_empty())
+    }
+
     /// Fail-stop: fails everything pending and accepts no more writes.
     fn fail(&mut self, op: &'static str, errno: IoErrno) {
         self.flush.fail();

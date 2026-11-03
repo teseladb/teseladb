@@ -37,6 +37,11 @@ impl<D: Disk + Send + 'static> DiskThread<D> {
         self.ops.send(op).map_err(|e| e.0)
     }
 
+    /// Whether the thread still runs: a thread that panicked will complete nothing more.
+    pub fn is_running(&self) -> bool {
+        self.handle.as_ref().is_some_and(|h| !h.is_finished())
+    }
+
     /// Waits for the queued operations to finish and returns the disk. `None` if the thread
     /// panicked.
     pub fn shutdown(mut self) -> Option<D> {

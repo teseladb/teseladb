@@ -11,7 +11,7 @@ use common::*;
 use teseladb_multiraft::envelope;
 use teseladb_multiraft::{GroupDesc, PeerFrame};
 use teseladb_raft::MessageType;
-use teseladb_raftlog::LogEntry;
+use teseladb_raftlog::{Disk, LogEntry};
 use teseladb_types::NodeId;
 
 fn payloads(entries: &[(teseladb_types::GroupId, LogEntry)]) -> Vec<Vec<u8>> {
@@ -82,6 +82,59 @@ fn a_restarted_leader_hands_out_what_its_disk_kept_and_the_new_leader_overwrote(
     let node = c.nodes.get_mut(&old).unwrap();
     let desc = GroupDesc { group: G, voters: vec![], learners: vec![] };
     node.core.create_group(desc, Appender::default()).unwrap();
+    c.heal();
+    c.ticks(20);
+    let rolled = std::mem::take(&mut c.nodes.get_mut(&old).unwrap().rolled);
+    assert_eq!(payloads(&rolled), vec![b"lost-1".to_vec(), b"lost-2".to_vec()]);
+}
+
+#[test]
+fn a_leader_stopped_cleanly_keeps_the_entries_that_waited_behind_a_batch_in_flight() {
+    let mut c = Cluster::new(3);
+    let old = c.elect();
+    c.ticks(5);
+    c.propose(old, b"kept").unwrap();
+    c.settle();
+    c.isolate(old);
+    assert!(c.nodes[&old].core.writes_settled());
+    // Its disk is slow: the first entry's batch goes out and stays in flight, and the second
+    // waits for it. Both are in the leader's log, which is all a `w: 1` write asks.
+    c.slow.insert(old);
+    c.propose(old, b"lost-1").unwrap();
+    c.settle();
+    let node = c.nodes.get_mut(&old).unwrap();
+    let in_flight = node.core.poll_io(c.now).expect("the first entry's batch");
+    c.propose(old, b"lost-2").unwrap();
+    c.settle();
+    let node = c.nodes.get_mut(&old).unwrap();
+    assert!(!node.core.writes_settled(), "an entry waits behind the batch in flight");
+    // The clean stop: the core runs its disk operations until its writes settle, and only then
+    // goes. Each operation's completion may hand out the next one.
+    let (now, mut next) = (c.now, Some(in_flight));
+    while let Some(op) = next {
+        let d = node.disk.execute(op);
+        node.core.on_io_done(d, now);
+        next = node.core.poll_io(now);
+    }
+    assert!(node.core.writes_settled());
+    c.slow.clear();
+    c.restart(old);
+    let node = c.nodes.get_mut(&old).unwrap();
+    let desc = GroupDesc { group: G, voters: vec![], learners: vec![] };
+    node.core.create_group(desc, Appender::default()).unwrap();
+    // The others elect a leader of a later term that writes over both: both are rolled back.
+    let mut new = old;
+    for _ in 0..1_000 {
+        c.tick();
+        if let Some(l) = c.leader().filter(|&l| l != old) {
+            new = l;
+            break;
+        }
+    }
+    assert_ne!(new, old);
+    c.ticks(5);
+    c.propose(new, b"other").unwrap();
+    c.settle();
     c.heal();
     c.ticks(20);
     let rolled = std::mem::take(&mut c.nodes.get_mut(&old).unwrap().rolled);

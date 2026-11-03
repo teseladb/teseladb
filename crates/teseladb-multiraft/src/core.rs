@@ -1491,6 +1491,15 @@ impl<S: StateMachine> MultiRaftCore<S> {
         self.store.next_deadline()
     }
 
+    /// Whether every entry and hard state this core handed to its log is on disk, or cannot get
+    /// there now (the store is out of space or stopped after an I/O error). A clean stop waits
+    /// for it: a `w: 1` write is confirmed once in the leader's log, so a stop must not leave it
+    /// out of the disk (005 FR-010). The rollback files the log waits for are the layer above's
+    /// to count.
+    pub fn writes_settled(&self) -> bool {
+        self.store.writes_settled()
+    }
+
     /// Whether a rollback file is not durable yet, so that no disk operation runs (005 FR-010).
     pub fn rollback_pending(&self) -> bool {
         self.rolled_counts.2 < self.rolled_counts.0

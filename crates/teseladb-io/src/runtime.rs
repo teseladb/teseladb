@@ -29,6 +29,12 @@ pub const MAX_PENDING: usize = 8 << 20;
 pub const BACKOFF_MIN_MS: u64 = 10;
 /// Maximum redial delay.
 pub const BACKOFF_MAX_MS: u64 = 1_000;
+/// How long a stop waits for the logic's writes to reach the disk ([`CoreLogic::io_settled`]): a
+/// disk that takes longer (full, or hung) is left as a crash would leave it.
+pub const STOP_SETTLE_LIMIT: Duration = Duration::from_secs(10);
+/// Longest wait between two looks at a stopping core's disk, so that a disk thread that died
+/// while the core waits for it is noticed.
+const STOP_SETTLE_POLL: Duration = Duration::from_millis(10);
 
 /// What a core does; the runtime only moves bytes and time.
 pub trait CoreLogic {
@@ -52,6 +58,10 @@ pub trait CoreLogic {
     fn peer_addr(&self, node: NodeId) -> Option<String>;
     /// The connection to `node` failed or closed: what was in flight may be lost.
     fn peer_unreachable(&mut self, node: NodeId);
+    /// Whether every write the logic has taken is on disk: none waits to be handed out and none
+    /// is in flight. A stop waits for it, so that a clean stop loses nothing the logic
+    /// acknowledged (005 FR-010: a `w: 1` write is in the leader's log once confirmed).
+    fn io_settled(&self) -> bool;
 }
 
 /// Input of a core's mailbox.
@@ -180,6 +190,8 @@ pub struct CoreRuntime<L: CoreLogic, D: Disk + Send + 'static> {
     next_token: u64,
     next_tick: Nanos,
     stopped: bool,
+    /// The disk can take no more operations: a stop does not wait for it.
+    disk_gone: bool,
     inputs: Vec<CoreInput<L::Msg>>,
     outbox: Vec<(NodeId, PeerMsg)>,
     events: Vec<Event>,
@@ -235,6 +247,7 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
             start: Instant::now(),
             next_token: 1,
             stopped: false,
+            disk_gone: false,
             inputs: Vec::new(),
             outbox: Vec::new(),
             events: Vec::new(),
@@ -258,6 +271,7 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
         while !self.stopped {
             self.turn()?;
         }
+        self.settle()?;
         let CoreRuntime { logic, disk, .. } = self;
         let disk = match disk {
             Exec::Thread(t) => t.shutdown(),
@@ -268,6 +282,48 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
             }
         };
         Ok((logic, disk))
+    }
+
+    /// After a stop, hands the logic's pending writes to the disk and feeds it their completions
+    /// until [`CoreLogic::io_settled`], the disk is gone or [`STOP_SETTLE_LIMIT`] passes. Nothing
+    /// else reaches the logic: no frame, message or tick, so it takes no new work, and no frame
+    /// leaves.
+    fn settle(&mut self) -> io::Result<()> {
+        // The connections close now: a level-triggered socket nobody reads would wake every wait.
+        self.conns.clear();
+        let end = self.now().0.saturating_add(STOP_SETTLE_LIMIT.as_nanos() as u64);
+        while !self.disk_gone && !self.logic.io_settled() && self.disk_alive() {
+            let now = self.now();
+            if now.0 >= end {
+                break;
+            }
+            let mut deadline = end.min(now.0.saturating_add(STOP_SETTLE_POLL.as_nanos() as u64));
+            if let Some(d) = self.logic.next_deadline() {
+                deadline = deadline.min(d.0);
+            }
+            let timeout = Duration::from_nanos(deadline.saturating_sub(now.0));
+            #[cfg(target_os = "linux")]
+            let timeout = if self.ring_ready() { Duration::ZERO } else { timeout };
+            self.poller.poll(Some(timeout))?;
+            self.reap_ring()?;
+            self.mailbox.drain_into(&mut self.inputs);
+            for input in std::mem::take(&mut self.inputs) {
+                if let CoreInput::Disk(done) = input {
+                    self.logic.on_io_done(done, self.now());
+                }
+            }
+            self.submit_io(self.now());
+        }
+        Ok(())
+    }
+
+    /// Whether the thread that runs the disk operations still runs (the ring always does).
+    fn disk_alive(&self) -> bool {
+        match &self.disk {
+            Exec::Thread(t) => t.is_running(),
+            #[cfg(target_os = "linux")]
+            Exec::InLoop(_) => true,
+        }
     }
 
     /// One iteration of the loop.
@@ -337,6 +393,17 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
 
     /// Hands the logic's disk operations and frames to their executors.
     fn pump(&mut self, now: Nanos) {
+        if !self.submit_io(now) {
+            return;
+        }
+        self.logic.take_outbound(&mut self.outbox);
+        for (node, msg) in std::mem::take(&mut self.outbox) {
+            self.send_to(node, &msg);
+        }
+    }
+
+    /// Hands the logic's disk operations to their executor; `false` if the disk is gone.
+    fn submit_io(&mut self, now: Nanos) -> bool {
         while let Some(op) = self.logic.poll_io(now) {
             let gone = match &mut self.disk {
                 Exec::Thread(t) => t.submit(op).is_err(),
@@ -348,8 +415,8 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
             };
             if gone {
                 // The disk thread is gone: nothing can be made durable any more.
-                self.stopped = true;
-                return;
+                (self.stopped, self.disk_gone) = (true, true);
+                return false;
             }
         }
         // One `io_uring_enter` for the whole turn.
@@ -357,13 +424,10 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
         if let Exec::InLoop(d) = &mut self.disk
             && ring(d).flush().is_err()
         {
-            self.stopped = true;
-            return;
+            (self.stopped, self.disk_gone) = (true, true);
+            return false;
         }
-        self.logic.take_outbound(&mut self.outbox);
-        for (node, msg) in std::mem::take(&mut self.outbox) {
-            self.send_to(node, &msg);
-        }
+        true
     }
 
     fn on_input(&mut self, input: CoreInput<L::Msg>) -> io::Result<()> {

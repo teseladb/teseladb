@@ -17,8 +17,9 @@ use teseladb_io::FileDisk;
 use teseladb_meta::bootstrap::{DATA_RANGE, DATA_START};
 use teseladb_raft::Role;
 use teseladb_range::ack::{W, WriteConcern};
+use teseladb_range::host::RangeError;
 use teseladb_range::rollback::{ROLLBACK_DIR, RollbackDoc, read_rollback_file};
-use teseladb_server::data::DataStatus;
+use teseladb_server::data::{DataError, DataStatus};
 use teseladb_server::node::{Node, NodeConfig, lock_dir};
 use teseladb_server::rollback::INTERNAL_DIR;
 use teseladb_types::NodeId;
@@ -93,6 +94,55 @@ fn rollback_files(dir: &Path) -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
+/// Attempts at cutting a leader off before it takes the `w: 1` write.
+const CUT_OFF_ATTEMPTS: usize = 5;
+
+/// The range's leader writes with the majority, loses its two followers and a second later
+/// confirms a `w: 1`, `j: false` write of `lost` that only its log has. Returns the leader and
+/// the followers, which are stopped. If an election moved the leadership before the followers
+/// went (heartbeats late on a busy machine), the followers come back and it starts again.
+fn leader_takes_a_lost_write(
+    nodes: &mut [Option<Node<FileDisk>>],
+    dirs: &[Dir],
+    ports: &[SocketAddr],
+    lost: &[u8],
+) -> (usize, Vec<usize>) {
+    let w1 = WriteConcern { w: W::Nodes(1), j: false };
+    for _ in 0..CUT_OFF_ATTEMPTS {
+        // Through the node that leads when it is asked: an election may move the leadership.
+        let l = until("a majority write", || {
+            let l = nodes.iter().position(|n| n.as_ref().is_some_and(leads))?;
+            nodes[l].as_ref()?.put(&key("kept-before"), b"1", ASK).ok().map(|_| l)
+        });
+        let others: Vec<usize> = (0..3).filter(|i| *i != l).collect();
+        let leader = nodes[l].take().expect("started");
+        for &i in &others {
+            nodes[i].take().expect("started").stop();
+        }
+        thread::sleep(LATE);
+        // A mark the node's clock cannot give yet (its bound on disk is late on a busy machine)
+        // is refused with `Overloaded` before anything is proposed: the client tries again, as a
+        // driver retries a retryable write (005 FR-003).
+        let put = until("an answer to the w: 1 write", || {
+            match leader.put_with(lost, b"lost-value", w1, ASK) {
+                Err(DataError::Range(RangeError::Overloaded)) => None,
+                r => Some(r),
+            }
+        });
+        nodes[l] = Some(leader);
+        match put {
+            Ok(_) => return (l, others),
+            Err(DataError::Range(RangeError::NotLeader { .. })) => {
+                for &i in &others {
+                    nodes[i] = Some(start(&dirs[i], ports[i], Vec::new()));
+                }
+            }
+            Err(e) => panic!("a leader cut off for a second still takes a w: 1 write: {e:?}"),
+        }
+    }
+    panic!("the leader lost the leadership before its followers went, {CUT_OFF_ATTEMPTS} times");
+}
+
 #[test]
 fn a_write_acknowledged_with_w1_and_lost_in_a_rollback_goes_to_a_rollback_file() {
     let dirs = [Dir::new("1"), Dir::new("2"), Dir::new("3")];
@@ -108,24 +158,10 @@ fn a_write_acknowledged_with_w1_and_lost_in_a_rollback_goes_to_a_rollback_file()
         assert!(n.wait_ready(READY));
         until("three voters", || status(n).filter(|s| s.voters == three).map(|_| ()));
     }
-    let l = until("a leader", || nodes.iter().position(|n| n.as_ref().is_some_and(leads)));
-    let others: Vec<usize> = (0..3).filter(|i| *i != l).collect();
-    let leader = nodes[l].take().expect("started");
-    until("a majority write", || leader.put(&key("kept-before"), b"1", ASK).ok());
-
-    // The followers go; a second later the leader still confirms a `w: 1` write that only its
-    // log has, and goes too.
-    for &i in &others {
-        nodes[i].take().expect("started").stop();
-    }
-    thread::sleep(LATE);
-    let w1 = WriteConcern { w: W::Nodes(1), j: false };
     let lost_key = key("lost");
-    assert!(
-        leader.put_with(&lost_key, b"lost-value", w1, ASK).is_ok(),
-        "a leader cut off for a second still takes a w: 1 write"
-    );
-    leader.stop();
+    let (l, others) = leader_takes_a_lost_write(&mut nodes, &dirs, &ports, &lost_key);
+    // The leader goes too, with the write in its log only.
+    nodes[l].take().expect("started").stop();
 
     // The other two elect a leader of a later term and write over that index.
     for &i in &others {
@@ -159,8 +195,11 @@ fn a_write_acknowledged_with_w1_and_lost_in_a_rollback_goes_to_a_rollback_file()
         assert!(rollback_files(&dirs[i].0).is_empty());
     }
     let alive: Vec<&Node<FileDisk>> = nodes.iter().flatten().collect();
-    let leader = until("the leader", || alive.iter().find(|n| leads(n)));
-    let get = |k: &[u8]| until("a read", || leader.get(k, ASK).ok());
+    // The leader may change while the old one comes back (an election on a busy machine): each
+    // read goes to the node that leads at that moment.
+    let get = |k: &[u8]| {
+        until("a read", || alive.iter().filter(|n| leads(n)).find_map(|n| n.get(k, ASK).ok()))
+    };
     assert_eq!(get(&lost_key), None);
     assert_eq!(get(&key("kept-before")), Some(b"1".to_vec()));
     assert_eq!(get(&key("kept-after")), Some(b"2".to_vec()));
