@@ -8,8 +8,8 @@ fn digits(x: f64) -> (String, i32) {
     let s = format!("{x:e}");
     let (mantissa, exp) = s.split_once('e').unwrap_or((&s, "0"));
     let digits: String = mantissa.chars().filter(char::is_ascii_digit).collect();
+    // `x` is positive, so a digit is not zero.
     let digits = digits.trim_end_matches('0');
-    let digits = if digits.is_empty() { "0" } else { digits };
     (digits.to_owned(), exp.parse::<i32>().unwrap_or(0) + 1)
 }
 
@@ -53,45 +53,84 @@ pub fn to_radix(x: f64, radix: u32) -> String {
     }
     let neg = x < 0.0;
     let int = x.abs().trunc();
-    let mut frac = x.abs() - int;
+    let frac = x.abs() - int;
     // The integer part exactly, also past 2^53 (`(1e21).toString(36)` is `5v1j4f4ds79m9s`).
     let whole = crate::bigint::BigInt::from_f64(int)
         .map_or_else(|| "0".into(), |b| b.to_string_radix(radix));
     let mut out: Vec<char> = whole.chars().collect();
-    // The fraction's digits until they tell `x` from its neighbours: half the distance to the
-    // next double, as SpiderMonkey's shortest form in a radix (measured on a `refrouter` 9.0.4 on
-    // 02-11: `(0.1).toString(3)` has 34 digits).
-    let next = f64::from_bits(x.abs().to_bits() + 1);
-    let mut delta = (0.5 * (next - x.abs())).max(f64::from_bits(1));
-    if frac >= delta {
+    if frac != 0.0 {
         out.push('.');
-        let r = f64::from(radix);
-        let mut digits: Vec<u32> = Vec::new();
-        loop {
-            frac *= r;
-            delta *= r;
-            let d = frac.trunc() as u32;
-            digits.push(d);
-            frac -= f64::from(d);
-            if (frac > 0.5 || (frac == 0.5 && d & 1 == 1)) && frac + delta > 1.0 {
-                // Round up, carrying into the digits before.
-                while let Some(last) = digits.last_mut() {
-                    *last += 1;
-                    if *last < radix {
-                        break;
-                    }
-                    digits.pop();
-                }
-                break;
-            }
-            if frac < delta {
-                break;
-            }
-        }
+        let digits = fraction_digits(x.abs(), frac, radix);
         out.extend(digits.into_iter().map(|d| char::from_digit(d, radix).unwrap_or('0')));
     }
     let s: String = out.into_iter().collect();
     if neg { format!("-{s}") } else { s }
+}
+
+/// The digits in `radix` of `frac`, the fraction of `x`: the fewest that still read back as `x`,
+/// as David Gay's conversion to any base finds them (SpiderMonkey's `js_dtobasestr`; measured on
+/// a `refrouter` 9.0.4 on 03-11: `(0.99999999999999).toString(3)` ends in `202211`).
+fn fraction_digits(x: f64, frac: f64, radix: u32) -> Vec<u32> {
+    use crate::bigint::BigInt;
+    use std::cmp::Ordering;
+    let bits = x.to_bits();
+    let biased = (bits >> 52) & 0x7ff;
+    // 1 / 2^s2 is half the distance from `x` to the next double.
+    let mut s2 = if biased == 0 { 1075 } else { 1076 - biased };
+    let mut mhi = BigInt::from_u64(1);
+    // A power of two is closer to the double below it: a quarter of a digit above.
+    if bits & ((1 << 52) - 1) == 0 && biased >= 2 {
+        s2 += 1;
+        mhi = BigInt::from_u64(2);
+    }
+    let mut mlo = BigInt::from_u64(1);
+    // `frac` is `m * 2^e` with `m` whole, and `b / s` is `frac`.
+    let fbits = frac.to_bits();
+    let fexp = (fbits >> 52) & 0x7ff;
+    let (m, e) = if fexp == 0 {
+        (fbits & ((1 << 52) - 1), -1074)
+    } else {
+        ((fbits & ((1 << 52) - 1)) | (1 << 52), fexp as i64 - 1075)
+    };
+    // Without its low zero bits `m · 2^e` has `e` above `-s2`: `frac` is a multiple of the
+    // spacing of the doubles around `x`.
+    let zeros = m.trailing_zeros();
+    let (m, e) = (m >> zeros, e + i64::from(zeros));
+    let mut b = BigInt::from_u64(m).shl_bits((e + s2 as i64) as u64);
+    let s = BigInt::from_u64(1).shl_bits(s2);
+    let base = BigInt::from_u64(u64::from(radix));
+    let odd = bits & 1 == 1;
+    let mut out = Vec::new();
+    loop {
+        b = b.mul(&base);
+        let (q, r) = b.div_rem(&s).unwrap_or_default();
+        b = r;
+        let mut digit = q.to_f64() as u32;
+        mlo = mlo.mul(&base);
+        mhi = mhi.mul(&base);
+        let j = b.cmp(&mlo);
+        let delta = s.sub(&mhi);
+        let j1 = if delta.is_neg() { Ordering::Greater } else { b.cmp(&delta) };
+        let done = if j1 == Ordering::Equal && !odd {
+            digit += u32::from(j == Ordering::Greater);
+            true
+        } else if j == Ordering::Less || (j == Ordering::Equal && !odd) {
+            // Either digit reads back as `x`: the one nearer to it.
+            if j1 == Ordering::Greater && b.shl_bits(1).cmp(&s) == Ordering::Greater {
+                digit += 1;
+            }
+            true
+        } else if j1 == Ordering::Greater {
+            digit += 1;
+            true
+        } else {
+            false
+        };
+        out.push(digit);
+        if done {
+            return out;
+        }
+    }
 }
 
 /// `x.toFixed(digits)`: the nearest number with `digits` decimals, and the larger one of two

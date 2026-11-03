@@ -205,6 +205,37 @@ const ZONES: [(&str, f64); 11] = [
     ("PDT", -7.0),
 ];
 
+/// `s` without its comments: a `(` that starts a word opens one, which ends at its matching `)`
+/// or at the end (measured on a `refrouter` 9.0.4 on 03-11: `Jan 2 2020 (a (b) c) 10:00` is a date,
+/// `Jan(a)2 2020` is not).
+fn without_comments(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut depth = 0usize;
+    let mut prev = ' ';
+    for c in s.chars() {
+        if depth > 0 {
+            match c {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {}
+            }
+            // The comment is a space between the words around it.
+            prev = ' ';
+            if depth == 0 {
+                out.push(' ');
+            }
+            continue;
+        }
+        if c == '(' && matches!(prev, ' ' | ',') {
+            depth = 1;
+            continue;
+        }
+        out.push(c);
+        prev = c;
+    }
+    out
+}
+
 /// `Thu Jan 01 1970 01:00:00 GMT+0000`, `Thu, 01 Jan 1970 01:00:00 GMT`, `Jan 1, 1970` and the
 /// like: words for the month, numbers for the rest.
 fn parse_text(s: &str) -> Option<f64> {
@@ -215,6 +246,7 @@ fn parse_text(s: &str) -> Option<f64> {
     let mut pm = None;
     // `2020-02-00` is the day before February 1st; `Feb 0 2020` is no date (measured).
     let mut numeric = false;
+    let s = without_comments(s);
     for tok in s.split([' ', ',']).filter(|t| !t.is_empty()) {
         // Measured on a `refrouter` 9.0.4 on 02-11: `1/2/2020`, `2020/1/2` and `2020-1-1` are dates
         // (month first unless the year is), `AM`/`PM` move the hour, and the zones of North
@@ -233,6 +265,15 @@ fn parse_text(s: &str) -> Option<f64> {
             month = Some(m - 1.0);
             nums = vec![d, y];
             numeric = true;
+            continue;
+        }
+        // `1//2`, `/2020/`, `1..2`: numbers between slashes, dashes and dots (measured on 03-11).
+        if tok.bytes().all(|c| c.is_ascii_digit() || matches!(c, b'/' | b'-' | b'.'))
+            && (tok.contains('/') || tok[1..].contains('-') || tok.contains(".."))
+        {
+            for p in tok.split(['/', '-', '.']).filter(|p| !p.is_empty()) {
+                nums.push(p.parse().ok()?);
+            }
             continue;
         }
         if let Some(h) = ZONES.iter().find(|(z, _)| tok.eq_ignore_ascii_case(z)).map(|(_, h)| *h) {
@@ -259,24 +300,28 @@ fn parse_text(s: &str) -> Option<f64> {
                     if rest.len() <= 3 { (v, 0.0) } else { ((v / 100.0).trunc(), v % 100.0) };
                 offset = (h * 60.0 + m) * 60_000.0 * if sign == '+' { 1.0 } else { -1.0 };
             }
-        } else if tok.starts_with('(')
-            || DAYS.iter().any(|d| tok.len() >= 3 && tok[..3].eq_ignore_ascii_case(d))
-        {
+        } else if DAYS.iter().any(|d| tok.len() >= 3 && tok[..3].eq_ignore_ascii_case(d)) {
         } else if let Ok(n) = tok.parse::<f64>() {
             nums.push(n);
-        } else if tok.starts_with('(') || tok.ends_with(')') || tok == "Z" {
-        } else {
+        } else if !tok.eq_ignore_ascii_case("Z") {
             return None;
         }
     }
     let (month, day, year) = match (month, nums.as_slice()) {
         (Some(m), [a, b]) if *a > 31.0 => (m, *b, *a),
         (Some(m), [a, b]) => (m, *a, *b),
-        (None, [y, m, d]) if *y > 31.0 && (1.0..=12.0).contains(m) && (1.0..=31.0).contains(d) => {
-            (*m - 1.0, *d, *y)
-        }
+        // Three numbers are the year first when it cannot be a month or a day, else month, day
+        // and year; one number is a month of 2001, or a year when it cannot be a day (measured
+        // on a `refrouter` 9.0.4 on 03-11: `5 1 2` is May 1 2002 and `5` May 1 2001).
+        (None, [y, m, d]) if *y > 31.0 => (*m - 1.0, *d, *y),
+        (None, [m, d, y]) => (*m - 1.0, *d, *y),
+        (None, [m]) if (1.0..=12.0).contains(m) => (*m - 1.0, 1.0, 2001.0),
+        (None, [y]) if !(1.0..=31.0).contains(y) => (0.0, 1.0, *y),
         _ => return None,
     };
+    if !(0.0..12.0).contains(&month) {
+        return None;
+    }
     if day > 31.0 || (day < 1.0 && !numeric) {
         return None;
     }

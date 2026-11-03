@@ -1145,7 +1145,7 @@ fn text_find<B: Backend + ?Sized>(
         }
     }
     let mut inner = Ctx { backend: &mut *ctx.backend, shared: ctx.shared, db: ctx.db, cmd: &agg };
-    super::aggregate::aggregate(&mut inner)
+    super::aggregate::aggregate_from(&mut inner, true)
 }
 
 /// Refuses a tailable `find` on a collection that is not capped, as a `refrouter` 9.0.4 does

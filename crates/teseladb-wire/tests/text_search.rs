@@ -151,3 +151,68 @@ fn text_errors_are_refds() {
     let no_meta = m.run(DB, parse(r#"{"find": "c", "projection": {"s": {"$meta": "textScore"}}}"#));
     assert_eq!(error(&no_meta).0, 40218);
 }
+
+/// `$text` next to the operators the node's extensions run (`$expr`, `$where`, geometry,
+/// `$sampleRate`) and on a view, as a RefDb 9.0.4 replica set gives them (measured 03-11-2026, `scratchpad/lane3s/m89.js`).
+#[test]
+fn text_runs_next_to_the_other_operators() {
+    let mut m = Mem::new();
+    let docs = r#"{"insert": "c", "documents": [{"_id": 1, "t": "fox one", "loc": [0, 0]},
+        {"_id": 2, "t": "fox two", "loc": [5, 5]}, {"_id": 3, "t": "dog", "loc": [0, 0]},
+        {"_id": 6, "t": "fox six fox", "loc": [0, 0.5]}]}"#;
+    m.run(DB, parse(docs));
+    m.run(DB, parse(r#"{"createIndexes": "c", "indexes": [{"key": {"t": "text"}, "name": "t"}]}"#));
+    let by_id = r#"{"_id": 1}"#;
+    let cases: Vec<(&str, Vec<(i32, f64)>)> = vec![
+        (
+            r#"{"$text": {"$search": "fox"}, "$expr": {"$gt": ["$_id", 1]}}"#,
+            vec![(2, 0.75), (6, 1.25)],
+        ),
+        (r#"{"$text": {"$search": "fox"}, "$where": "this._id > 1"}"#, vec![(2, 0.75), (6, 1.25)]),
+        (
+            r#"{"$text": {"$search": "fox"}, "loc": {"$geoWithin": {"$center": [[0, 0], 1]}}}"#,
+            vec![(1, 0.75), (6, 1.25)],
+        ),
+        (
+            r#"{"$text": {"$search": "fox"}, "$sampleRate": 1}"#,
+            vec![(1, 0.75), (2, 0.75), (6, 1.25)],
+        ),
+        (r#"{"$text": {"$search": "fox"}, "$sampleRate": 0}"#, vec![]),
+    ];
+    for (filter, want) in cases {
+        assert_eq!(scored(&find(&mut m, filter, by_id)), want, "{filter}");
+    }
+    let agg = r#"{"aggregate": "c", "cursor": {}, "pipeline": [
+        {"$match": {"$text": {"$search": "fox"}, "$expr": {"$gt": ["$_id", 1]}}},
+        {"$project": {"s": {"$meta": "textScore"}}}, {"$sort": {"_id": 1}}]}"#;
+    assert_eq!(scored(&m.run(DB, parse(agg))), vec![(2, 0.75), (6, 1.25)]);
+    // A view has no text index of its own.
+    m.run(
+        DB,
+        parse(r#"{"create": "v", "viewOn": "c", "pipeline": [{"$match": {"_id": {"$gt": 0}}}]}"#),
+    );
+    let view = m.run(DB, parse(r#"{"find": "v", "filter": {"$text": {"$search": "fox"}}}"#));
+    assert_eq!(
+        error(&view),
+        (27, "text index required for $text query (no such collection 't.v')".to_owned())
+    );
+    let view_agg = r#"{"aggregate": "v", "cursor": {}, "pipeline": [{"$match": {"$text": {"$search": "fox"}}}]}"#;
+    assert_eq!(
+        error(&m.run(DB, parse(view_agg))),
+        (17313, "$match with $text is only allowed as the first pipeline stage".to_owned())
+    );
+}
+
+/// The text index after another index of the collection, and a `$nor` with an `$or` inside next
+/// to the `$text` (measured 03-11-2026, `scratchpad/lane3s/m91.js`).
+#[test]
+fn text_index_after_another_and_nested_nor() {
+    let mut m = Mem::new();
+    let docs = r#"{"insert": "c", "documents": [{"_id": 1, "t": "fox one"},
+        {"_id": 2, "t": "fox two"}, {"_id": 6, "t": "fox six fox"}]}"#;
+    m.run(DB, parse(docs));
+    m.run(DB, parse(r#"{"createIndexes": "c", "indexes": [{"key": {"n": 1}, "name": "n_1"}]}"#));
+    m.run(DB, parse(r#"{"createIndexes": "c", "indexes": [{"key": {"t": "text"}, "name": "t"}]}"#));
+    let filter = r#"{"$text": {"$search": "fox"}, "$nor": [{"$or": [{"_id": 1}, {"_id": 2}]}]}"#;
+    assert_eq!(scored(&find(&mut m, filter, r#"{"_id": 1}"#)), vec![(6, 1.25)]);
+}

@@ -563,3 +563,51 @@ fn profiled_reads_say_how_their_plan_was_chosen() {
         "{last:?}"
     );
 }
+
+/// A command that fails is profiled with its error and without what it would have returned; a
+/// write refused for a duplicate key with what it inserted (measured on a `refnode` 9.0.4 on
+/// 03-11-2026).
+#[test]
+fn failed_commands_are_profiled_with_their_error() {
+    let mut m = node();
+    run(&mut m, DB, json(r#"{"insert":"c","documents":[{"_id":1,"a":1}]}"#));
+    run(&mut m, DB, json(r#"{"profile":2}"#));
+    run(&mut m, DB, json(r#"{"find":"c","filter":{"$bad":1}}"#));
+    run(&mut m, DB, json(r#"{"insert":"c","documents":[{"_id":1}]}"#));
+    run(&mut m, DB, json(r#"{"profile":0}"#));
+    let docs = profiled(&mut m);
+    assert_eq!(docs.len(), 2, "{docs:?}");
+    let find = &docs[0];
+    let msg = "unknown top level operator: $bad. If you have a field name that starts with a '$' \
+               symbol, consider using $getField or $setField.";
+    assert_eq!(find.get("op"), Some(&Value::from("query")));
+    assert_eq!(find.get("ok"), Some(&Value::Double(0.0)));
+    assert_eq!(find.get("errMsg"), Some(&Value::from(msg)));
+    assert_eq!(find.get("errName"), Some(&Value::from("BadValue")));
+    assert_eq!(find.get("errCode"), Some(&Value::Int32(2)));
+    assert_eq!(find.get("nreturned"), None);
+    let insert = &docs[1];
+    assert_eq!(insert.get("ninserted"), Some(&Value::Int32(0)), "{insert:?}");
+    assert_eq!((insert.get("ok"), insert.get("keysInserted")), (None, None), "{insert:?}");
+}
+
+/// The key counts of a write that wrote no key are not shown (measured on a `refnode` 9.0.4 on
+/// 03-11-2026).
+#[test]
+fn writes_of_no_key_show_no_key_counts() {
+    let mut m = node();
+    run(&mut m, DB, json(r#"{"insert":"c","documents":[{"_id":1,"a":1}]}"#));
+    run(&mut m, DB, json(r#"{"profile":2}"#));
+    run(&mut m, DB, json(r#"{"delete":"c","deletes":[{"q":{"_id":5},"limit":1}]}"#));
+    run(&mut m, DB, json(r#"{"update":"c","updates":[{"q":{"_id":5},"u":{"$set":{"a":1}}}]}"#));
+    run(&mut m, DB, json(r#"{"update":"c","updates":[{"q":{"_id":1},"u":{"$set":{"a":1}}}]}"#));
+    run(&mut m, DB, json(r#"{"findAndModify":"c","query":{"_id":9},"update":{"$set":{"a":1}}}"#));
+    run(&mut m, DB, json(r#"{"profile":0}"#));
+    let docs = profiled(&mut m);
+    assert_eq!(docs.len(), 4, "{docs:?}");
+    for d in &docs {
+        assert_eq!((d.get("keysInserted"), d.get("keysDeleted")), (None, None), "{d:?}");
+    }
+    assert_eq!(docs[0].get("ndeleted"), Some(&Value::Int32(0)));
+    assert_eq!(docs[3].get("nUpserted"), Some(&Value::Int64(0)), "{:?}", docs[3]);
+}

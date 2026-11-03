@@ -6,6 +6,7 @@
 use std::rc::Rc;
 
 use crate::interp::{Ctrl, Interp, R, Realm};
+use crate::keyed::{Cursor, Table};
 use crate::number;
 use crate::value::*;
 
@@ -85,6 +86,7 @@ pub(crate) fn class_kind(v: &Val) -> &'static str {
             Kind::WeakRef(_) => "WeakRef",
             Kind::Arguments(_) => "Arguments",
             Kind::ArrayIter(_) => ARRAY_ITERATOR,
+            Kind::CollIter(state) => state.borrow().class,
             Kind::Iter(_, class) => class,
             Kind::Helper(_) => "Iterator Helper",
             Kind::Generator(_) => "Generator",
@@ -107,6 +109,14 @@ pub(crate) fn object_class(it: &Interp, o: &ObjRef) -> &'static str {
 /// The key of the well-known symbol `Symbol.<name>`.
 pub(crate) fn well_known(name: &str) -> String {
     format!("@@Symbol.{name}:0")
+}
+
+/// The global object `name`, which the realm installed before.
+pub(crate) fn installed(g: &ObjRef, name: &str) -> ObjRef {
+    match g.borrow().get_own(name).map(|p| &p.value) {
+        Some(Val::Obj(o)) => o.clone(),
+        _ => unreachable!("{name} is installed before"),
+    }
 }
 
 /// `proto[Symbol.toStringTag] = tag`, read by `Object.prototype.toString`.
@@ -149,7 +159,7 @@ fn bare(budget: &Rc<Budget>, proto: Option<ObjRef>, kind: Kind) -> ObjRef {
             extensible: true,
             locks: 0,
         }),
-        charged: std::cell::Cell::new(0),
+        charged: std::cell::Cell::new(crate::value::Cost::ZERO),
         budget: budget.clone(),
         shared: std::cell::Cell::new(false),
         pristine: std::cell::Cell::new(false),
@@ -315,7 +325,7 @@ fn print(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     for x in a {
         parts.push(it.str_of(x)?.to_string());
     }
-    it.charge(parts.iter().map(String::len).sum())?;
+    it.charge(crate::value::Cost::text(parts.iter().map(String::len).sum()))?;
     it.output.push(parts.join(" "));
     Ok(Val::Undef)
 }
@@ -596,9 +606,10 @@ fn obj_group_by(it: &mut Interp, _: &Val, a: &[Val]) -> R {
         let cur = it.get(&Val::Obj(o.clone()), &k)?;
         match cur {
             Val::Obj(arr) => {
-                it.grow(&arr, 1)?;
-                if let Kind::Array(v) = &mut arr.borrow_mut().kind {
-                    v.push(x);
+                it.grow_elements(&arr, 1)?;
+                match &mut arr.borrow_mut().kind {
+                    Kind::Array(v) => v.push(x),
+                    _ => unreachable!("a group made as an array"),
                 }
             }
             _ => {
@@ -862,7 +873,7 @@ fn array_ctor(it: &mut Interp, _: &Val, a: &[Val]) -> R {
             return Err(it.error("RangeError", "invalid array length"));
         }
         let n = *n as usize;
-        it.charge(n * crate::interp::PROP_BYTES)?;
+        it.reserve_elements(n)?;
         return it.array(vec![Val::Hole; n]);
     }
     it.array(a.to_vec())
@@ -889,7 +900,7 @@ fn array_from(it: &mut Interp, this: &Val, a: &[Val]) -> R {
                 return Err(it.error("RangeError", "invalid array length"));
             }
             let n = if n > 0.0 { n as usize } else { 0 };
-            it.charge(n * crate::interp::PROP_BYTES)?;
+            it.reserve_elements(n)?;
             target = crate::arrays::made_by(it, this, &[Val::Num(n as f64)])?;
             let mut out = Vec::with_capacity(n);
             for i in 0..n {
@@ -1480,7 +1491,7 @@ fn map_ctor(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     if new_target(this).is_none() {
         return it.type_error("calling a builtin Map constructor without new is forbidden");
     }
-    let m = Val::Obj(it.alloc(Some(it.realm.map.clone()), Kind::Map(Vec::new()))?);
+    let m = Val::Obj(it.alloc(Some(it.realm.map.clone()), Kind::Map(Table::default()))?);
     add_from(it, &m, &arg(a, 0), map_set, Some("Map"))?;
     Ok(m)
 }
@@ -1489,7 +1500,7 @@ fn set_ctor(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     if new_target(this).is_none() {
         return it.type_error("calling a builtin Set constructor without new is forbidden");
     }
-    let s = it.alloc(Some(it.realm.set.clone()), Kind::Set(Vec::new()))?;
+    let s = it.alloc(Some(it.realm.set.clone()), Kind::Set(Table::default()))?;
     add_from(it, &Val::Obj(s.clone()), &arg(a, 0), set_add, None)?;
     Ok(Val::Obj(s))
 }
@@ -1513,42 +1524,47 @@ fn map_get(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let o = coll(it, this)?;
     let k = arg(a, 0);
     Ok(match &o.borrow().kind {
-        Kind::Map(e) => {
-            e.iter().find(|(x, _)| same_value_zero(x, &k)).map_or(Val::Undef, |(_, v)| v.clone())
-        }
+        Kind::Map(e) => e.get(&k).map_or(Val::Undef, |(_, v)| v.clone()),
         _ => Val::Undef,
+    })
+}
+
+/// The entries of `o`, a `Map` that `set` checked.
+fn map_table(o: &ObjRef) -> std::cell::RefMut<'_, Table<(Val, Val)>> {
+    std::cell::RefMut::map(o.borrow_mut(), |b| match &mut b.kind {
+        Kind::Map(e) => e,
+        _ => unreachable!("`set` checked a Map"),
+    })
+}
+
+/// The values of `o`, a `Set` that `add` checked.
+fn set_table(o: &ObjRef) -> std::cell::RefMut<'_, Table<Val>> {
+    std::cell::RefMut::map(o.borrow_mut(), |b| match &mut b.kind {
+        Kind::Set(e) => e,
+        _ => unreachable!("`add` checked a Set"),
     })
 }
 
 fn map_set(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let o = coll(it, this)?;
     let k = norm(arg(a, 0));
-    let mut b = o.borrow_mut();
-    if let Kind::Map(e) = &mut b.kind {
-        if let Some(slot) = e.iter_mut().find(|(x, _)| same_value_zero(x, &k)) {
-            slot.1 = arg(a, 1);
-        } else {
-            drop(b);
-            it.grow(&o, 2)?;
-            if let Kind::Map(e) = &mut o.borrow_mut().kind {
-                e.push((k, arg(a, 1)));
-            }
-        }
+    if let Some(slot) = map_table(&o).get_mut(&k) {
+        slot.1 = arg(a, 1);
+        return Ok(this.clone());
     }
+    it.grow_elements(&o, 2)?;
+    map_table(&o).push((k, arg(a, 1)));
     Ok(this.clone())
 }
 
 fn set_add(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let o = coll(it, this)?;
     let k = norm(arg(a, 0));
-    let present =
-        matches!(&o.borrow().kind, Kind::Set(e) if e.iter().any(|x| same_value_zero(x, &k)));
-    if !present {
-        it.grow(&o, 1)?;
-        if let Kind::Set(e) = &mut o.borrow_mut().kind {
-            e.push(k);
-        }
+    if set_table(&o).contains(&k) {
+        return Ok(this.clone());
     }
+    it.grow_elements(&o, 1)?;
+    set_table(&o).push(k);
     Ok(this.clone())
 }
 
@@ -1556,8 +1572,8 @@ fn map_has(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let o = coll(it, this)?;
     let k = arg(a, 0);
     Ok(Val::Bool(match &o.borrow().kind {
-        Kind::Map(e) => e.iter().any(|(x, _)| same_value_zero(x, &k)),
-        Kind::Set(e) => e.iter().any(|x| same_value_zero(x, &k)),
+        Kind::Map(e) => e.contains(&k),
+        Kind::Set(e) => e.contains(&k),
         _ => false,
     }))
 }
@@ -1565,23 +1581,11 @@ fn map_has(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 fn map_delete(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let o = coll(it, this)?;
     let k = arg(a, 0);
-    let mut b = o.borrow_mut();
-    let before;
-
-    let after = match &mut b.kind {
-        Kind::Map(e) => {
-            before = e.len();
-            e.retain(|(x, _)| !same_value_zero(x, &k));
-            e.len()
-        }
-        Kind::Set(e) => {
-            before = e.len();
-            e.retain(|x| !same_value_zero(x, &k));
-            e.len()
-        }
-        _ => return Ok(Val::Bool(false)),
-    };
-    Ok(Val::Bool(before != after))
+    Ok(Val::Bool(match &mut o.borrow_mut().kind {
+        Kind::Map(e) => e.remove(&k),
+        Kind::Set(e) => e.remove(&k),
+        _ => false,
+    }))
 }
 
 fn coll_clear(it: &mut Interp, this: &Val, _: &[Val]) -> R {
@@ -1604,15 +1608,37 @@ fn coll_size(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     Ok(Val::Num(n as f64))
 }
 
+/// A cursor at the first entry of the `Map` or `Set` `o`.
+pub(crate) fn coll_cursor(o: &ObjRef) -> Cursor {
+    match &mut o.borrow_mut().kind {
+        Kind::Map(e) => e.cursor(),
+        Kind::Set(e) => e.cursor(),
+        _ => Cursor::default(),
+    }
+}
+
+/// The entry of the `Map` or `Set` `o` at or after `cursor` (a `Set`'s value twice), which then
+/// points past it.
+pub(crate) fn coll_next(o: &ObjRef, cursor: &Cursor) -> Option<(Val, Val)> {
+    match &o.borrow().kind {
+        Kind::Map(e) => e.next(cursor),
+        Kind::Set(e) => e.next(cursor).map(|v| (v.clone(), v)),
+        _ => None,
+    }
+}
+
 fn coll_for_each(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let o = coll(it, this)?;
     let f = arg(a, 0);
-    let pairs: Vec<(Val, Val)> = match &o.borrow().kind {
-        Kind::Map(e) => e.iter().map(|(k, v)| (v.clone(), k.clone())).collect(),
-        Kind::Set(e) => e.iter().map(|v| (v.clone(), v.clone())).collect(),
-        _ => Vec::new(),
-    };
-    for (v, k) in pairs {
+    if a.is_empty() {
+        // Measured on a `refrouter` 9.0.4 on 03-11.
+        return it.type_error("undefined is not a function");
+    }
+    if !f.is_callable() {
+        return Err(crate::arrays::not_a_function(it, &f));
+    }
+    let cursor = coll_cursor(&o);
+    while let Some((k, v)) = coll_next(&o, &cursor) {
         it.call(&f, &arg(a, 1), &[v, k, this.clone()])?;
     }
     Ok(Val::Undef)
@@ -1640,42 +1666,52 @@ pub(crate) fn make_iter(it: &Interp, kind: &'static str, items: Vec<Val>) -> R {
     Ok(Val::Obj(it.alloc(Some(it.realm.proto(kind)), Kind::Iter(state, kind))?))
 }
 
-/// The kind of iterator a `Map` or a `Set` gives.
-fn coll_iter_kind(o: &ObjRef) -> &'static str {
-    if matches!(o.borrow().kind, Kind::Set(_)) { SET_ITERATOR } else { MAP_ITERATOR }
+/// The state of an iteration of the `Map` or `Set` `o` that gives `kind`.
+pub(crate) fn coll_iter(o: &ObjRef, kind: ArrayIterKind) -> Rc<std::cell::RefCell<CollIter>> {
+    let class = if matches!(o.borrow().kind, Kind::Set(_)) { SET_ITERATOR } else { MAP_ITERATOR };
+    let cursor = coll_cursor(o);
+    Rc::new(std::cell::RefCell::new(CollIter { source: Some(o.clone()), cursor, kind, class }))
+}
+
+/// An iterator of `this`, a `Map` or a `Set`, that gives `kind`.
+fn coll_iter_obj(it: &mut Interp, this: &Val, kind: ArrayIterKind) -> R {
+    let o = coll(it, this)?;
+    let state = coll_iter(&o, kind);
+    let class = state.borrow().class;
+    Ok(Val::Obj(it.alloc(Some(it.realm.proto(class)), Kind::CollIter(state))?))
+}
+
+/// The next value of an iteration of a `Map` or a `Set`; once done, it stays done.
+pub(crate) fn coll_iter_next(
+    it: &mut Interp,
+    state: &Rc<std::cell::RefCell<CollIter>>,
+) -> R<Option<Val>> {
+    let (source, cursor, kind) = {
+        let s = state.borrow();
+        let Some(source) = s.source.clone() else { return Ok(None) };
+        (source, s.cursor.clone(), s.kind)
+    };
+    let Some((k, v)) = coll_next(&source, &cursor) else {
+        state.borrow_mut().source = None;
+        return Ok(None);
+    };
+    Ok(Some(match kind {
+        ArrayIterKind::Keys => k,
+        ArrayIterKind::Values => v,
+        ArrayIterKind::Entries => it.array(vec![k, v])?,
+    }))
 }
 
 fn map_keys(it: &mut Interp, this: &Val, _: &[Val]) -> R {
-    let o = coll(it, this)?;
-    let items = match &o.borrow().kind {
-        Kind::Map(e) => e.iter().map(|(k, _)| k.clone()).collect(),
-        _ => Vec::new(),
-    };
-    make_iter(it, coll_iter_kind(&o), items)
+    coll_iter_obj(it, this, ArrayIterKind::Keys)
 }
 
 fn map_values(it: &mut Interp, this: &Val, _: &[Val]) -> R {
-    let o = coll(it, this)?;
-    let items = match &o.borrow().kind {
-        Kind::Map(e) => e.iter().map(|(_, v)| v.clone()).collect(),
-        Kind::Set(e) => e.clone(),
-        _ => Vec::new(),
-    };
-    make_iter(it, coll_iter_kind(&o), items)
+    coll_iter_obj(it, this, ArrayIterKind::Values)
 }
 
 fn coll_entries(it: &mut Interp, this: &Val, _: &[Val]) -> R {
-    let o = coll(it, this)?;
-    let pairs: Vec<(Val, Val)> = match &o.borrow().kind {
-        Kind::Map(e) => e.clone(),
-        Kind::Set(e) => e.iter().map(|v| (v.clone(), v.clone())).collect(),
-        _ => Vec::new(),
-    };
-    let mut items = Vec::new();
-    for (k, v) in pairs {
-        items.push(it.array(vec![k, v])?);
-    }
-    make_iter(it, coll_iter_kind(&o), items)
+    coll_iter_obj(it, this, ArrayIterKind::Entries)
 }
 
 /// `next` of an iterator of the kind `class`.
@@ -1690,6 +1726,11 @@ fn iter_next(it: &mut Interp, this: &Val, class: &str) -> R {
     let state = match kind {
         Kind::ArrayIter(state) => {
             let v = crate::arrays::array_iter_next(it, &state)?;
+            let done = v.is_none();
+            return iter_result(it, v.unwrap_or(Val::Undef), done);
+        }
+        Kind::CollIter(state) => {
+            let v = coll_iter_next(it, &state)?;
             let done = v.is_none();
             return iter_result(it, v.unwrap_or(Val::Undef), done);
         }
@@ -1729,9 +1770,7 @@ fn symbol_builtins(it: &mut Interp, g: &ObjRef) -> R<()> {
     to_string_tag(it, &mp, "Map")?;
     to_string_tag(it, &sp, "Set")?;
     for name in ["Math", "JSON"] {
-        if let Val::Obj(o) = it.get(&Val::Obj(g.clone()), name)? {
-            to_string_tag(it, &o, name)?;
-        }
+        to_string_tag(it, &installed(g, name), name)?;
     }
     let arr = it.realm.array.clone();
     let values = it.get(&Val::Obj(arr.clone()), "values")?;
@@ -1802,7 +1841,8 @@ fn regexp_builtins(it: &mut Interp, g: &ObjRef) -> R<()> {
         let getter = it.native(&format!("get {name}"), regexp_flag, 0)?;
         it.define(&proto, name, Prop { getter: Some(getter), ..Prop::hidden(Val::Undef) })?;
     }
-    if let Some(Val::Obj(c)) = g.borrow().get_own("RegExp").map(|p| p.value.clone()) {
+    {
+        let c = installed(g, "RegExp");
         method(it, &c, "escape", regexp_escape, 1)?;
         let names = [
             "input",

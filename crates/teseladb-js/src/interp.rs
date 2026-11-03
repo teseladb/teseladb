@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use std::rc::{Rc, Weak};
 
 use crate::ast::*;
+use crate::heap::Exhausted;
 use crate::number;
 use crate::value::*;
 
@@ -151,6 +152,8 @@ pub enum IterRec {
     Proto { it: Val, next: Val },
     /// An array, read at each step.
     Array(Rc<RefCell<ArrayIter>>),
+    /// A `Map` or a `Set`, read at each step.
+    Coll(Rc<RefCell<crate::value::CollIter>>),
 }
 
 /// The invocation's limits.
@@ -158,8 +161,11 @@ pub enum IterRec {
 pub struct Limits {
     /// Statements, calls and loop turns a call may run.
     pub steps: u64,
-    /// Bytes the call's live objects and strings may hold.
+    /// Bytes of the heap of a `refrouter` 9.0.4 the call's live values may take, at the costs it
+    /// measures ([`crate::heap`]); past them `"out of memory"` is thrown, and `try` catches it.
     pub heap: usize,
+    /// Bytes of this process the call's live values may take; past them the call ends.
+    pub memory: usize,
     /// Nested calls: the frames of functions, scripted or native, as SpiderMonkey counts them.
     pub depth: usize,
     /// Bytes of native stack the calls may take: the interpreter runs each call on the native
@@ -179,6 +185,9 @@ pub struct Interp<'c> {
     pub units: usize,
     /// Whether the innermost call is a native function of the engine's own code.
     pub in_native: bool,
+    /// Whether the value in flight is the `"out of memory"` of a full heap: uncaught, it ends
+    /// the call as [`crate::JsError::OutOfMemory`], without a place in the code.
+    pub out_of_memory: std::cell::Cell<bool>,
     /// The code of the direct `eval`s of this call, parsed: its text, the private names and
     /// `super` forms it may use.
     pub eval_cache: Vec<EvalEntry>,
@@ -194,6 +203,10 @@ pub struct Interp<'c> {
     /// The last error about an operand (`can't convert ({}) to number`): the error, the operand
     /// and the text written for it, which the operator that sees its expression may replace.
     pub operand_failure: Option<(ObjRef, Val, String)>,
+    /// The argument a native refused as its callback: the call names it by the expression in
+    /// that place, whatever its value (measured on a `refrouter` 9.0.4 on 03-11:
+    /// `[].forEach.call(a, 5)` is `a is not a function`).
+    pub operand_arg: Option<usize>,
     /// Whether the conversion to a primitive that failed last called a method of the object
     /// (`valueOf`, `toString`): SpiderMonkey then names fewer operands.
     pub conversion_called: bool,
@@ -237,10 +250,10 @@ pub const ERROR_FILE: &str = "wasm:function";
 /// How often the deadline is read, in steps.
 const DEADLINE_EVERY: u64 = 1024;
 
-/// The bytes an object costs before its properties.
-pub const OBJ_BYTES: usize = 96;
-/// The bytes of a property or an element.
-pub const PROP_BYTES: usize = 48;
+/// What `"out of memory"` is: the string SpiderMonkey throws when its heap is full.
+pub const OUT_OF_MEMORY: &str = "out of memory";
+/// SpiderMonkey's longest string.
+pub const MAX_STRING: usize = (1 << 30) - 2;
 
 impl Drop for Interp<'_> {
     fn drop(&mut self) {
@@ -264,7 +277,9 @@ impl Drop for Interp<'_> {
 }
 
 /// A parsed direct `eval` ([`Interp::eval_cache`]).
-pub type EvalEntry = (Name, Vec<Name>, (bool, bool), Rc<Vec<Stmt>>);
+/// The text, the private names and `super` forms it may use, its statements and the most of the
+/// engine's stack its parse took.
+pub type EvalEntry = (Name, Vec<Name>, (bool, bool), Rc<Vec<Stmt>>, usize);
 /// The texts of direct `eval` a call keeps parsed.
 const EVAL_CACHE: usize = 16;
 
@@ -452,43 +467,77 @@ impl<'c> Interp<'c> {
         Ok(())
     }
 
-    pub fn charge(&self, bytes: usize) -> R<()> {
-        if self.budget.charge(bytes) { Ok(()) } else { Err(Ctrl::Fatal(Fatal::OutOfMemory)) }
+    /// Charges `c` to the heap until the call ends.
+    pub fn charge(&self, c: Cost) -> R<()> {
+        self.budget.charge(c).map_err(|e| self.exhausted(e))
     }
 
-    /// A string made by joining others (`+`, a template, `concat`). SpiderMonkey joins them
-    /// without copying and fails when the length passes its limit; here the copy fails earlier,
-    /// at the heap limit, with the same catchable error (measured: `s = s + s` in a loop gives
-    /// «allocation size overflow» on a `refrouter` 9.0.4).
-    pub fn joined_string(&self, s: String) -> R {
-        if s.len() > self.max_string() {
-            return Err(self.error("InternalError", "allocation size overflow"));
+    /// Whether `c` more fits in the heap, before what takes it is made and charged.
+    pub fn reserve(&self, c: Cost) -> R<()> {
+        self.budget.room(c).map_err(|e| self.exhausted(e))
+    }
+
+    /// `n` more elements fit.
+    pub fn reserve_elements(&self, n: usize) -> R<()> {
+        self.reserve(Cost::elements(n))
+    }
+
+    /// The error of a full heap: `"out of memory"`, which `try` catches, when the `refrouter` heap
+    /// is full; the end of the call when the bytes of this process are.
+    fn exhausted(&self, e: Exhausted) -> Ctrl {
+        match e {
+            Exhausted::Heap => {
+                self.out_of_memory.set(true);
+                Ctrl::Throw(Val::str(OUT_OF_MEMORY))
+            }
+            Exhausted::Memory => Ctrl::Fatal(Fatal::OutOfMemory),
         }
+    }
+
+    /// A string made by joining others (`+`, a template, `concat`): past SpiderMonkey's longest
+    /// string, the catchable «allocation size overflow» (measured: `s = s + s` in a loop on a
+    /// `refrouter` 9.0.4).
+    pub fn joined_string(&self, s: String) -> R {
+        self.check_length(s.len())?;
         self.string(s)
     }
 
-    /// The longest string a call makes: an eighth of its heap, so that the error of a string
-    /// that keeps growing comes before the heap runs out, as SpiderMonkey's limit of 2^30 - 2
-    /// characters comes before its heap of 1100 MB does.
+    /// Whether a string of `len` bytes may be made.
+    pub fn check_length(&self, len: usize) -> R<()> {
+        if len > self.max_string() {
+            return Err(self.error("InternalError", "allocation size overflow"));
+        }
+        Ok(())
+    }
+
+    /// The longest string a call makes: SpiderMonkey's 2^30 - 2 characters (a string that long
+    /// fits in the heap of a `refrouter` 9.0.4, measured on 03-11).
     pub fn max_string(&self) -> usize {
-        self.budget.limit / 8
+        MAX_STRING
     }
 
     /// A new string, charged to the heap.
     pub fn string(&self, s: String) -> R {
-        self.charge(s.len())?;
-        Ok(Val::Str(crate::strings::pair_surrogates(s).into()))
+        self.reserve(Cost::string(s.len()))?;
+        let s: Name = crate::strings::pair_surrogates(s).into();
+        self.track(&s)?;
+        Ok(Val::Str(s))
+    }
+
+    /// Charges the string `s` while it lives.
+    pub fn track(&self, s: &Name) -> R<()> {
+        self.budget.charge_string(s, s.len()).map_err(|e| self.exhausted(e))
     }
 
     // Objects.
 
     pub fn alloc(&self, proto: Option<ObjRef>, kind: Kind) -> R<ObjRef> {
-        let size = OBJ_BYTES
-            + match &kind {
-                Kind::Array(v) | Kind::Set(v) => v.len() * PROP_BYTES,
-                Kind::Map(v) => v.len() * PROP_BYTES * 2,
-                _ => 0,
-            };
+        let size = Cost::object().plus(match &kind {
+            Kind::Array(v) => Cost::elements(v.len()),
+            Kind::Set(v) => Cost::elements(v.len()),
+            Kind::Map(v) => Cost::elements(v.len() * 2),
+            _ => Cost::ZERO,
+        });
         self.charge(size)?;
         Ok(ObjRef(Rc::new(ObjCell {
             obj: RefCell::new(Obj { proto, props: Vec::new(), kind, extensible: true, locks: 0 }),
@@ -499,11 +548,21 @@ impl<'c> Interp<'c> {
         })))
     }
 
-    /// Charges `n` more properties or elements to `o`.
+    /// Charges `n` more properties to `o`.
     pub fn grow(&self, o: &ObjRef, n: usize) -> R<()> {
-        let bytes = n * PROP_BYTES;
-        self.charge(bytes)?;
-        o.0.charged.set(o.0.charged.get() + bytes);
+        let had = o.0.obj.try_borrow().map_or(0, |b| b.props.len());
+        self.attach(o, Cost::properties_after(had, n))
+    }
+
+    /// Charges `n` more elements to `o` (an array, a `Set`, a `Map`).
+    pub fn grow_elements(&self, o: &ObjRef, n: usize) -> R<()> {
+        self.attach(o, Cost::elements(n))
+    }
+
+    /// Charges `c` to `o`, which gives it back when it goes.
+    pub fn attach(&self, o: &ObjRef, c: Cost) -> R<()> {
+        self.charge(c)?;
+        o.0.charged.set(o.0.charged.get().plus(c));
         Ok(())
     }
 
@@ -636,6 +695,7 @@ impl<'c> Interp<'c> {
             Err(c) => return c,
         };
         self.operand_failure = Some((o.clone(), v.clone(), text));
+        self.operand_arg = None;
         Ctrl::Throw(Val::Obj(o))
     }
 
@@ -650,6 +710,18 @@ impl<'c> Interp<'c> {
         let Some((e, _)) = operands.iter().find(|(_, x)| strict_eq(x, &v)) else { return r };
         let name = crate::decompile::operand_text(self, e, &v);
         replace_in_message(err, &text, &name);
+        r
+    }
+
+    /// `r`, with the operand named by the expression `e` of value `v` in its place.
+    fn name_operand_at<T>(&mut self, r: R<T>, e: &Expr, v: &Val) -> R<T> {
+        match (&r, self.operand_failure.take()) {
+            (Err(Ctrl::Throw(Val::Obj(err))), Some((_, _, text))) => {
+                let name = crate::decompile::operand_text(self, e, v);
+                replace_in_message(err, &text, &name);
+            }
+            _ => unreachable!("`name_arguments` checked the failure"),
+        }
         r
     }
 
@@ -968,9 +1040,10 @@ impl<'c> Interp<'c> {
                     }
                     let n = n as usize;
                     let grow = n.saturating_sub(self.array_len(o));
-                    self.grow(o, grow)?;
-                    if let Kind::Array(items) = &mut o.borrow_mut().kind {
-                        items.resize(n, Val::Hole);
+                    self.grow_elements(o, grow)?;
+                    match &mut o.borrow_mut().kind {
+                        Kind::Array(items) => items.resize(n, Val::Hole),
+                        _ => unreachable!("the length of an array"),
                     }
                     return Ok(());
                 }
@@ -994,10 +1067,13 @@ impl<'c> Interp<'c> {
                     }
                     let grow = i + 1 - items.len();
                     drop(b);
-                    self.grow(o, grow)?;
-                    if let Kind::Array(items) = &mut o.borrow_mut().kind {
-                        items.resize(i + 1, Val::Hole);
-                        items[i] = value;
+                    self.grow_elements(o, grow)?;
+                    match &mut o.borrow_mut().kind {
+                        Kind::Array(items) => {
+                            items.resize(i + 1, Val::Hole);
+                            items[i] = value;
+                        }
+                        _ => unreachable!("an element of an array"),
                     }
                     return Ok(());
                 }
@@ -1008,6 +1084,12 @@ impl<'c> Interp<'c> {
         while let Some(c) = cur {
             touch(&c, key);
             let found = c.borrow().get_own(key).cloned();
+            // A `String` object's `length` and characters are read-only (measured on a `refrouter`
+            // 9.0.4 on 03-11: `"length" is read-only` in strict code).
+            let found = match found {
+                None if matches!(c.borrow().kind, Kind::Str(_)) => crate::props::own_prop(&c, key),
+                found => found,
+            };
             if let Some(p) = found {
                 if let Some(s) = p.setter {
                     self.call_back(0, &Val::Obj(s), target, &[value])?;
@@ -1302,7 +1384,6 @@ impl<'c> Interp<'c> {
         args: &[Val],
         new_target: Option<Val>,
     ) -> R {
-        self.charge(0)?;
         let name = match fo.borrow().get_own("name").map(|p| p.value.clone()) {
             Some(Val::Str(n)) if !n.is_empty() => n,
             _ => def.guessed.get().cloned().unwrap_or_else(|| "".into()),
@@ -2034,12 +2115,24 @@ impl<'c> Interp<'c> {
             let state = ArrayIter { source: Some(v.clone()), pos: 0, kind: ArrayIterKind::Values };
             return Ok(IterRec::Array(Rc::new(RefCell::new(state))));
         }
+        if let Val::Obj(o) = v {
+            let kind = match &o.borrow().kind {
+                Kind::Map(_) => Some(ArrayIterKind::Entries),
+                Kind::Set(_) => Some(ArrayIterKind::Values),
+                _ => None,
+            };
+            if let Some(kind) = kind {
+                return Ok(IterRec::Coll(crate::builtins::coll_iter(o, kind)));
+            }
+            if let Kind::CollIter(state) = &o.borrow().kind {
+                return Ok(IterRec::Coll(state.clone()));
+            }
+        }
         let fast = match v {
             Val::Str(_) => true,
-            Val::Obj(o) => matches!(
-                o.borrow().kind,
-                Kind::Typed(_) | Kind::Set(_) | Kind::Map(_) | Kind::Iter(..) | Kind::Arguments(_)
-            ),
+            Val::Obj(o) => {
+                matches!(o.borrow().kind, Kind::Typed(_) | Kind::Iter(..) | Kind::Arguments(_))
+            }
             _ => false,
         };
         if fast {
@@ -2071,6 +2164,7 @@ impl<'c> Interp<'c> {
                 Ok(v)
             }
             IterRec::Array(state) => crate::arrays::array_iter_next(self, state),
+            IterRec::Coll(state) => crate::builtins::coll_iter_next(self, state),
             IterRec::Proto { it, next } => {
                 let (it, next) = (it.clone(), next.clone());
                 let r = self.call(&next, &it, &[])?;
@@ -2125,11 +2219,18 @@ impl<'c> Interp<'c> {
                         crate::typed::validate(self, v)?;
                         return Ok(crate::typed::elements(&t));
                     }
-                    Kind::Set(items) => return Ok(items),
+                    Kind::Set(items) => return Ok(items.iter().cloned().collect()),
                     Kind::Map(entries) => {
                         let mut out = Vec::with_capacity(entries.len());
-                        for (k, x) in entries {
-                            out.push(self.array(vec![k, x])?);
+                        for (k, x) in entries.iter() {
+                            out.push(self.array(vec![k.clone(), x.clone()])?);
+                        }
+                        return Ok(out);
+                    }
+                    Kind::CollIter(state) => {
+                        let mut out = Vec::new();
+                        while let Some(x) = crate::builtins::coll_iter_next(self, &state)? {
+                            out.push(x);
                         }
                         return Ok(out);
                     }
@@ -2166,7 +2267,7 @@ impl<'c> Interp<'c> {
                     if self.get(&r, "done")?.truthy() {
                         return Ok(out);
                     }
-                    self.charge(PROP_BYTES)?;
+                    self.reserve_elements(1)?;
                     out.push(self.get(&r, "value")?);
                 }
             }
@@ -2271,6 +2372,7 @@ impl<'c> Interp<'c> {
                 let mut r = self.block(body, env);
                 if let (Err(Ctrl::Throw(x)), Some((param, handler))) = (&r, catch) {
                     let x = x.clone();
+                    self.out_of_memory.set(false);
                     let scope = self.new_env(Some(env.clone()));
                     if let Some(p) = param {
                         self.bind(p, x, &scope, Some(true))?;
@@ -2812,7 +2914,7 @@ impl<'c> Interp<'c> {
                             let v = self.eval(x, env)?;
                             let all = self.iterate(&v);
                             let all = self.name_operands(all, &[(x, &v)])?;
-                            self.charge(all.len() * PROP_BYTES)?;
+                            self.reserve_elements(all.len())?;
                             out.extend(all);
                         }
                         Some(x) => out.push(self.eval(x, env)?),
@@ -3099,6 +3201,15 @@ impl<'c> Interp<'c> {
     /// `Math.max(o)`, `new Date(o)`; `String(o)` names it in both cases).
     fn name_arguments(&mut self, r: R, f: &Val, exprs: &[Expr], args: &[Val]) -> R {
         let Some(name) = native_name(f) else { return r };
+        let arg = self.operand_arg.take();
+        if let Some(i) = arg
+            && let (Some(e), Some(v)) = (exprs.get(i), args.get(i))
+            && !exprs.iter().any(|e| matches!(e, Expr::Spread(_)))
+            && let (Err(Ctrl::Throw(Val::Obj(err))), Some((o, ..))) = (&r, &self.operand_failure)
+            && o.ptr_eq(err)
+        {
+            return self.name_operand_at(r, e, v);
+        }
         if r.is_err()
             && !matches!(&*name, "isNaN" | "concat")
             && !exprs.iter().any(|e| matches!(e, Expr::Spread(_)))
@@ -3243,21 +3354,22 @@ impl<'c> Interp<'c> {
         privates: &[Name],
         supers: (bool, bool),
     ) -> R<Rc<Vec<Stmt>>> {
-        let hit = self
-            .eval_cache
-            .iter()
-            .find(|(s, p, u, _)| s == src && p[..] == *privates && *u == supers);
-        if let Some((.., body)) = hit {
+        let room = self.parse_room();
+        // A kept parse serves while the room holds what it took; with less, the parse runs
+        // again and ends as it would (measured: `eval('(0, f)()')` nests 342 times).
+        let hit = self.eval_cache.iter().find(|(s, p, u, _, peak)| {
+            s == src && p[..] == *privates && *u == supers && *peak <= room.units
+        });
+        if let Some((_, _, _, body, _)) = hit {
             return Ok(body.clone());
         }
-        let room = self.parse_room();
-        let body = crate::parser::parse_script_in(src, privates, supers, room)
+        let (body, peak) = crate::parser::parse_script_in(src, privates, supers, room)
             .map_err(|e| self.syntax_error(&e))?;
         let body = Rc::new(body);
         if self.eval_cache.len() >= EVAL_CACHE {
             self.eval_cache.remove(0);
         }
-        self.eval_cache.push((src.clone(), privates.to_vec(), supers, body.clone()));
+        self.eval_cache.push((src.clone(), privates.to_vec(), supers, body.clone(), peak));
         Ok(body)
     }
 
@@ -3356,7 +3468,10 @@ impl<'c> Interp<'c> {
         let cooked = parts.cooked.iter().map(|c| c.clone().map_or(Val::Undef, Val::Str)).collect();
         let strings = self.array(cooked)?;
         let raw = self.array(parts.raw.iter().cloned().map(Val::Str).collect())?;
-        let (Val::Obj(s), Val::Obj(r)) = (&strings, &raw) else { return Ok(strings) };
+        let (s, r) = match (&strings, &raw) {
+            (Val::Obj(s), Val::Obj(r)) => (s, r),
+            _ => unreachable!("arrays made above"),
+        };
         crate::props::lock(r, true);
         let fixed = Prop { writable: false, configurable: false, ..Prop::hidden(raw.clone()) };
         self.define(s, "raw", fixed)?;
@@ -3529,6 +3644,7 @@ impl<'c> Interp<'c> {
                 let b = self.primitive(y, "default")?;
                 if matches!(a, Val::Str(_)) || matches!(b, Val::Str(_)) {
                     let (sa, sb) = (self.str_of(&a)?, self.str_of(&b)?);
+                    self.check_length(sa.len().saturating_add(sb.len()))?;
                     let mut out = String::with_capacity(sa.len() + sb.len());
                     out.push_str(&sa);
                     out.push_str(&sb);

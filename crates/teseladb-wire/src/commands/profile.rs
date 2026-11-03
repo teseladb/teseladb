@@ -428,20 +428,32 @@ fn describe(e: &Ended<'_>, now_ms: i64) -> Document {
 fn push_key_counts(d: &mut Document, e: &Ended<'_>, r: &Document) {
     let (inserted, deleted) = e.report.keys_written;
     let long = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
+    // The counts show only when a document was written, also when its keys were none (measured
+    // on a `refnode` 9.0.4 on 01-11-2026 and 03-11-2026).
+    let positive = |v: Option<&Value>| v.and_then(crate::types::number).is_some_and(|n| n > 0.0);
     let modify = e.command.iter().next().is_some_and(|(k, _)| FIND_AND_MODIFY.contains(&k));
     match e.op {
-        "insert" => d.push("keysInserted", long(inserted)),
-        "remove" => d.push("keysDeleted", long(deleted)),
+        "insert" if positive(r.get("n")) => d.push("keysInserted", long(inserted)),
+        "remove" if positive(r.get("n")) => d.push("keysDeleted", long(deleted)),
         "update" | "command" if e.op == "update" || modify => {
-            let upserted = match (r.get("upserted"), r.get("lastErrorObject")) {
+            let last = match r.get("lastErrorObject") {
+                Some(Value::Document(l)) => Some(l),
+                _ => None,
+            };
+            let upserted = match (r.get("upserted"), last) {
                 (Some(Value::Array(a)), _) => a.len(),
-                (_, Some(Value::Document(l))) => usize::from(l.get("upserted").is_some()),
+                (_, Some(l)) => usize::from(l.get("upserted").is_some()),
                 _ => 0,
             };
             d.push("nUpserted", i64::try_from(upserted).unwrap_or(i64::MAX));
-            d.push("keysInserted", long(inserted));
-            if upserted == 0 {
-                d.push("keysDeleted", long(deleted));
+            if upserted > 0
+                || positive(r.get("nModified"))
+                || positive(last.and_then(|l| l.get("n")))
+            {
+                d.push("keysInserted", long(inserted));
+                if upserted == 0 {
+                    d.push("keysDeleted", long(deleted));
+                }
             }
         }
         _ => {}

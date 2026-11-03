@@ -8,8 +8,10 @@
 //! - `c` runs the command `o` on the database of `ns`; `n` is skipped and not counted;
 //! - every entry runs even after one fails; the reply gives `applied` and `results`, and with a
 //!   failure `ok: 0` and `UnknownError` «applyOps had one or more errors applying ops»;
-//! - an insert or update into a namespace that does not exist fails the command with 26;
-//!   `preCondition` is refused (`Location6711600`) and an unknown `op` is `BadValue`.
+//! - an insert or update into a namespace that does not exist fails the command with 26, and an
+//!   unknown `op` with `BadValue`: the entries before it stay applied and the reply gives
+//!   `applied`, the error and `results` up to it (measured on 03-11-2026); `preCondition` is
+//!   refused (`Location6711600`).
 
 use teseladb_bson::{Document, Value};
 use teseladb_topology::diff::DiffError;

@@ -286,9 +286,11 @@ fn buf_of(v: &Val) -> Option<BufRef> {
 }
 
 fn new_buf(it: &mut Interp, data: Vec<u8>, max: Option<usize>) -> R<(ObjRef, BufRef)> {
-    it.charge(max.unwrap_or(0).saturating_sub(data.len()))?;
+    let bytes = max.unwrap_or(0).max(data.len());
+    it.reserve(Cost::buffer(bytes))?;
     let b = Rc::new(RefCell::new(Buf { data, max, detached: false }));
     let o = it.alloc(Some(it.realm.proto("ArrayBuffer")), Kind::ArrayBuffer(b.clone()))?;
+    it.attach(&o, Cost::buffer(bytes))?;
     Ok((o, b))
 }
 
@@ -312,9 +314,9 @@ fn typed_from(it: &mut Interp, ty: Ty, items: &[Val]) -> R<ObjRef> {
     Ok(o)
 }
 
-/// `n` zero bytes, charged to the heap before they are allocated.
+/// `n` zero bytes, if the heap has room for them.
 fn zeroed(it: &mut Interp, n: usize) -> R<Vec<u8>> {
-    it.charge(n)?;
+    it.reserve(Cost::buffer(n))?;
     Ok(vec![0; n])
 }
 
@@ -494,13 +496,15 @@ fn g_byte_offset(it: &mut Interp, this: &Val, _: &[Val]) -> R {
 fn g_buffer(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     let v = this_view(it, this)?;
     let o = it.alloc(Some(it.realm.proto("ArrayBuffer")), Kind::ArrayBuffer(v.buf.clone()))?;
-    if let Val::Obj(t) = this {
-        // The same buffer object each time.
-        if let Some(p) = t.borrow().get_own("@@buffer") {
-            return Ok(p.value.clone());
-        }
-        t.borrow_mut().props.push(("@@buffer".into(), Prop::hidden(Val::Obj(o.clone()))));
+    let t = match this {
+        Val::Obj(t) => t,
+        _ => unreachable!("`this_view` checked a typed array"),
+    };
+    // The same buffer object each time.
+    if let Some(p) = t.borrow().get_own("@@buffer") {
+        return Ok(p.value.clone());
     }
+    t.borrow_mut().props.push(("@@buffer".into(), Prop::hidden(Val::Obj(o.clone()))));
     Ok(Val::Obj(o))
 }
 
@@ -517,9 +521,19 @@ fn same_type(it: &mut Interp, v: &View, items: &[Val]) -> R {
     Ok(Val::Obj(typed_from(it, v.ty, items)?))
 }
 
+/// Whether the engine's helpers of a typed array method, `frames` deep beyond its own frame,
+/// fit before it calls back ([`crate::recursion::TYPED_HELPER_FRAMES`]).
+fn helper_room(it: &mut Interp, frames: usize) -> R<()> {
+    if it.too_deep(frames, 0) {
+        return Err(it.error("InternalError", "too much recursion"));
+    }
+    Ok(())
+}
+
 fn ta_map(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let v = live_view(it, this)?;
     let f = callable(it, &arg(a, 0))?;
+    helper_room(it, crate::recursion::TYPED_SPECIES_FRAMES)?;
     let mut out = Vec::new();
     for (i, x) in elements(&v).into_iter().enumerate() {
         out.push(it.call(&f, &arg(a, 1), &[x, Val::Num(i as f64), this.clone()])?);
@@ -530,6 +544,7 @@ fn ta_map(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 fn ta_filter(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let v = live_view(it, this)?;
     let f = callable(it, &arg(a, 0))?;
+    helper_room(it, crate::recursion::TYPED_HELPER_FRAMES)?;
     let mut out = Vec::new();
     for (i, x) in elements(&v).into_iter().enumerate() {
         if it.call(&f, &arg(a, 1), &[x.clone(), Val::Num(i as f64), this.clone()])?.truthy() {
@@ -552,6 +567,19 @@ const CALLBACK_METHODS: [&str; 9] = [
     "some",
 ];
 
+/// What runs `CALLBACK_METHODS[I]`: the array method, whatever `Array.prototype` holds.
+const CALLBACK_RUNS: [NativeFn; 9] = [
+    crate::arrays::every,
+    crate::arrays::find,
+    crate::arrays::find_index,
+    crate::arrays::find_last,
+    crate::arrays::find_last_index,
+    crate::arrays::for_each,
+    crate::arrays::reduce,
+    crate::arrays::reduce_right,
+    crate::arrays::some,
+];
+
 /// `CALLBACK_METHODS[I]` of a typed array: its callback checked as the `refrouter` 9.0.4 does, then
 /// the array method.
 fn with_callback<const I: usize>(it: &mut Interp, this: &Val, a: &[Val]) -> R {
@@ -562,8 +590,9 @@ fn with_callback<const I: usize>(it: &mut Interp, this: &Val, a: &[Val]) -> R {
         let msg = format!("missing argument 0 when calling function {owner}.prototype.{name}");
         return it.type_error(&msg);
     }
-    let f = it.get(&Val::Obj(it.realm.array.clone()), name)?;
-    it.call(&f, this, a)
+    helper_room(it, crate::recursion::TYPED_HELPER_FRAMES)?;
+    // The array method runs in this method's frame, as the engine's does.
+    CALLBACK_RUNS[I](it, this, a)
 }
 
 fn callable(it: &mut Interp, f: &Val) -> R {
@@ -728,7 +757,8 @@ fn ta_set(it: &mut Interp, this: &Val, a: &[Val]) -> R {
             let o = Val::Obj(it.object_of(&src)?);
             let n = it.get(&o, "length")?;
             let n = it.number_of(&n)?;
-            let n = if n.is_finite() && n > 0.0 { n as usize } else { 0 };
+            // ToLength: NaN and what is not above 0 are 0, and Infinity is the longest.
+            let n = if n > 0.0 { n.min(9_007_199_254_740_991.0) as usize } else { 0 };
             if offset + n > v.length() {
                 return Err(it.error("RangeError", "source array is too long"));
             }
@@ -964,7 +994,7 @@ fn ab_slice(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let s = relative(it, &arg(a, 0), data.len(), 0)?;
     let e = relative(it, &arg(a, 1), data.len(), data.len())?;
     let part = data.get(s..e.max(s)).unwrap_or(&[]);
-    it.charge(part.len())?;
+    it.reserve(Cost::buffer(part.len()))?;
     Ok(Val::Obj(new_buf(it, part.to_vec(), None)?.0))
 }
 
@@ -1002,7 +1032,7 @@ fn transfer_in(it: &mut Interp, this: &Val, a: &[Val], keep_max: bool) -> R {
             b.borrow_mut().data = data;
             return Err(it.error("RangeError", OVER_MAX));
         }
-        it.charge(n.saturating_sub(data.len()))?;
+        it.reserve(Cost::buffer(n.saturating_sub(data.len())))?;
         data.resize(n, 0);
     }
     let max = if keep_max { b.borrow().max } else { None };
@@ -1070,8 +1100,10 @@ fn dv_byte_offset(it: &mut Interp, this: &Val, _: &[Val]) -> R {
 
 fn dv_buffer(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     this_dv(it, this)?;
-    let Val::Obj(o) = this else { return Ok(Val::Undef) };
-    Ok(o.borrow().get_own("@@buffer").map_or(Val::Undef, |p| p.value.clone()))
+    match this {
+        Val::Obj(o) => Ok(o.borrow().get_own("@@buffer").map_or(Val::Undef, |p| p.value.clone())),
+        _ => unreachable!("`this_dv` checked a DataView"),
+    }
 }
 
 /// The element view of `ty` at byte `index` of a `DataView`, checked against its bounds.
