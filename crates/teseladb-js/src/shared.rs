@@ -19,7 +19,9 @@ pub(crate) struct Globals {
     realm: Realm,
     budget: Rc<Budget>,
     /// The bytes the shared objects hold: where each call's count starts.
-    baseline: usize,
+    baseline: crate::value::Cost,
+    /// The strings the globals made, which every call keeps.
+    baseline_strings: usize,
     symbol_ids: u64,
     /// The properties of the global object.
     globals: Vec<(Name, Prop)>,
@@ -43,6 +45,7 @@ pub(crate) fn interp<'c>(realm: Realm, budget: Rc<Budget>, limits: Limits) -> In
         depth: 0,
         units: 0,
         in_native: false,
+        out_of_memory: std::cell::Cell::new(false),
         eval_cache: Vec::new(),
         stack_base: 0,
         last_match: None,
@@ -74,11 +77,7 @@ impl Globals {
     /// Builds the global objects for calls with `limits`; the error is that of the build (the
     /// heap limit too small for them).
     pub(crate) fn build(limits: Limits) -> Result<Globals, crate::JsError> {
-        let budget = Rc::new(Budget {
-            used: std::cell::Cell::new(0),
-            limit: limits.heap,
-            touched: std::cell::Cell::new(false),
-        });
+        let budget = Rc::new(Budget::new(limits.heap, limits.memory));
         let realm = crate::builtins::realm(&budget);
         let mut it = interp(realm, budget.clone(), limits);
         let built = crate::builtins::install(&mut it);
@@ -103,6 +102,7 @@ impl Globals {
         Ok(Globals {
             realm,
             baseline: budget.used.get(),
+            baseline_strings: budget.strings_len(),
             budget,
             symbol_ids,
             globals,
@@ -114,12 +114,14 @@ impl Globals {
 
     /// Whether these globals serve a call with `limits` and no call has changed them.
     pub(crate) fn fits(&self, limits: &Limits) -> bool {
-        self.budget.limit == limits.heap && !self.budget.touched.get()
+        self.budget.limit == Budget::new(limits.heap, limits.memory).limit
+            && !self.budget.touched.get()
     }
 
     /// An interpreter for one call: the shared objects and a global object of its own.
     pub(crate) fn enter<'c>(&self, limits: Limits) -> Interp<'c> {
         self.budget.used.set(self.baseline);
+        self.budget.forget_strings(self.baseline_strings);
         let mut it = interp(self.realm.clone(), self.budget.clone(), limits);
         it.symbol_ids = self.symbol_ids;
         it
@@ -159,7 +161,11 @@ impl Globals {
             o.props.truncate(self.globals.len());
             before - o.props.len()
         };
-        g.0.charged.set(g.0.charged.get() - extra * crate::interp::PROP_BYTES);
+        g.0.charged.set(
+            g.0.charged
+                .get()
+                .minus(crate::value::Cost::properties_after(self.globals.len(), extra)),
+        );
         *self.spare.borrow_mut() = Some(g);
     }
 }

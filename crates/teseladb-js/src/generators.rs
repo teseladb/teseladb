@@ -1357,6 +1357,7 @@ impl Interp<'_> {
                 let Err(Ctrl::Throw(x)) = std::mem::replace(&mut r, Ok(())) else {
                     unreachable!("matched above")
                 };
+                self.out_of_memory.set(false);
                 let scope = self.new_env(Some(env.clone()));
                 if let Some(p) = param {
                     self.bind(p, x, &scope, Some(true))?;

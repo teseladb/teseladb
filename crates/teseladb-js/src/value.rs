@@ -29,28 +29,7 @@ pub enum Val {
     Hole,
 }
 
-/// The bytes the live objects of an invocation hold, against its limit.
-#[derive(Debug)]
-pub struct Budget {
-    pub used: Cell<usize>,
-    pub limit: usize,
-    /// Whether a call changed an object of the shared globals ([`ObjCell::shared`]): the globals
-    /// are then built again before the next call.
-    pub touched: Cell<bool>,
-}
-
-impl Budget {
-    /// Charges `n` bytes; `false` when the limit is passed.
-    pub fn charge(&self, n: usize) -> bool {
-        let total = self.used.get().saturating_add(n);
-        self.used.set(total);
-        total <= self.limit
-    }
-
-    pub fn release(&self, n: usize) {
-        self.used.set(self.used.get().saturating_sub(n));
-    }
-}
+pub use crate::heap::{Budget, Cost};
 
 /// A reference to an object.
 #[derive(Clone, Debug)]
@@ -59,7 +38,7 @@ pub struct ObjRef(pub Rc<ObjCell>);
 #[derive(Debug)]
 pub struct ObjCell {
     pub obj: RefCell<Obj>,
-    pub charged: Cell<usize>,
+    pub charged: Cell<Cost>,
     pub budget: Rc<Budget>,
     /// Whether the object belongs to the global objects a program's calls share.
     pub shared: Cell<bool>,
@@ -68,9 +47,31 @@ pub struct ObjCell {
     pub pristine: Cell<bool>,
 }
 
+thread_local! {
+    /// The contents of objects that went while another one was going, dropped one after another.
+    static GOING: RefCell<Vec<Obj>> = const { RefCell::new(Vec::new()) };
+    /// Whether an object's contents are being dropped on this thread.
+    static DROPPING: Cell<bool> = const { Cell::new(false) };
+}
+
 impl Drop for ObjCell {
+    /// Gives back what the object took, and drops what it holds without recursion: a chain of
+    /// two million nested arrays, which fits in the heap (A016-3-22), goes without taking the
+    /// native stack.
     fn drop(&mut self) {
         self.budget.release(self.charged.get());
+        // While the thread ends its locals may be gone: the contents then go here.
+        let Ok(dropping) = DROPPING.try_with(|d| d.replace(true)) else {
+            return;
+        };
+        let contents = std::mem::replace(self.obj.get_mut(), Obj::empty());
+        if GOING.try_with(|g| g.borrow_mut().push(contents)).is_err() || dropping {
+            return;
+        }
+        while let Some(o) = GOING.try_with(|g| g.borrow_mut().pop()).ok().flatten() {
+            drop(o);
+        }
+        let _ = DROPPING.try_with(|d| d.set(false));
     }
 }
 
@@ -252,6 +253,13 @@ pub struct Obj {
     /// What `Object.seal` and `Object.freeze` did to the elements an array holds in its kind
     /// ([`LENGTH_FIXED`], [`ELEMENTS_SEALED`], [`ELEMENTS_FROZEN`]).
     pub locks: u8,
+}
+
+impl Obj {
+    /// An object with nothing in it.
+    fn empty() -> Obj {
+        Obj { proto: None, props: Vec::new(), kind: Kind::Ordinary, extensible: true, locks: 0 }
+    }
 }
 
 /// An array's `length` is read-only.

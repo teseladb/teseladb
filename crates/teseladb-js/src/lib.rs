@@ -18,6 +18,7 @@ mod date;
 mod decompile;
 mod early;
 mod generators;
+mod heap;
 mod interp;
 mod iterators;
 mod json;
@@ -63,12 +64,24 @@ pub use crate::interp::Limits;
 pub const MAX_FRAMES: usize = 51_000;
 /// The native stack a call takes by default: well inside the 2 MiB of a spawned thread.
 pub const DEFAULT_STACK: usize = 1 << 20;
+/// The steps a call may run: a loop that fills the heap one element at a time (two steps a turn,
+/// 73 million turns) reaches `out of memory` before them, as on a `refrouter` 9.0.4, which has no
+/// limit of steps and stops a loop that never ends after about a minute.
+pub const STEPS: u64 = 200_000_000;
+/// The heap of a call: the 100 MiB `getJSHeapLimitMB()` gives on a `refrouter` 9.0.4, at the costs
+/// measured there (A016-3-22).
+pub const HEAP: usize = 100 << 20;
+/// The bytes of this process a call may take: room for the largest values that fit in [`HEAP`]
+/// (68 million numbers in an array, a string of 2^30 - 2 characters) with what this interpreter
+/// spends on them, and a limit that protects the node.
+pub const MEMORY: usize = 2 << 30;
 
 impl Default for Limits {
-    /// 100 million steps, 64 MiB of heap, the frames of a `refrouter` 9.0.4 and 1 MiB of native
-    /// stack, well inside the 2 MiB of a spawned thread (016 data model).
+    /// 200 million steps ([`STEPS`]), the heap of a `refrouter` 9.0.4 ([`HEAP`]) within 2 GiB of this
+    /// process ([`MEMORY`]), its frames and 1 MiB of native stack, well inside the 2 MiB of a
+    /// spawned thread (016 data model).
     fn default() -> Limits {
-        Limits { steps: 100_000_000, heap: 64 << 20, depth: MAX_FRAMES, stack: DEFAULT_STACK }
+        Limits { steps: STEPS, heap: HEAP, memory: MEMORY, depth: MAX_FRAMES, stack: DEFAULT_STACK }
     }
 }
 
@@ -369,9 +382,12 @@ pub(crate) fn error_of(it: &mut Interp, c: Ctrl) -> JsError {
         Ctrl::Fatal(Fatal::Trap) => JsError::Trap,
         Ctrl::Fatal(Fatal::Unreachable) => JsError::Unreachable,
         Ctrl::Fatal(Fatal::StackExhausted) => JsError::StackExhausted,
+        Ctrl::Throw(Val::Str(s)) if it.out_of_memory.get() && &*s == interp::OUT_OF_MEMORY => {
+            JsError::OutOfMemory
+        }
         Ctrl::Throw(v) => {
             // The heap may be full: the message is read without new allocations counting.
-            it.budget.used.set(0);
+            it.budget.used.set(crate::value::Cost::ZERO);
             let is_error = matches!(&v, Val::Obj(o) if matches!(o.borrow().kind, Kind::Error));
             if !is_error {
                 let text =

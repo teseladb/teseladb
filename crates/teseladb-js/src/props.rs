@@ -393,7 +393,7 @@ fn define_array(it: &mut Interp, o: &ObjRef, key: &str, d: &Desc) -> R<()> {
         if o.borrow().locks & LENGTH_FIXED != 0 {
             return Err(crate::arrays::cannot_grow(it, true, i));
         }
-        it.grow(o, i + 1 - it.array_len(o))?;
+        it.grow_elements(o, i + 1 - it.array_len(o))?;
     }
     if let Kind::Array(items) = &mut o.borrow_mut().kind {
         if i >= items.len() {

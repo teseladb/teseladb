@@ -149,7 +149,7 @@ fn bare(budget: &Rc<Budget>, proto: Option<ObjRef>, kind: Kind) -> ObjRef {
             extensible: true,
             locks: 0,
         }),
-        charged: std::cell::Cell::new(0),
+        charged: std::cell::Cell::new(crate::value::Cost::ZERO),
         budget: budget.clone(),
         shared: std::cell::Cell::new(false),
         pristine: std::cell::Cell::new(false),
@@ -315,7 +315,7 @@ fn print(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     for x in a {
         parts.push(it.str_of(x)?.to_string());
     }
-    it.charge(parts.iter().map(String::len).sum())?;
+    it.charge(crate::value::Cost::text(parts.iter().map(String::len).sum()))?;
     it.output.push(parts.join(" "));
     Ok(Val::Undef)
 }
@@ -596,7 +596,7 @@ fn obj_group_by(it: &mut Interp, _: &Val, a: &[Val]) -> R {
         let cur = it.get(&Val::Obj(o.clone()), &k)?;
         match cur {
             Val::Obj(arr) => {
-                it.grow(&arr, 1)?;
+                it.grow_elements(&arr, 1)?;
                 if let Kind::Array(v) = &mut arr.borrow_mut().kind {
                     v.push(x);
                 }
@@ -862,7 +862,7 @@ fn array_ctor(it: &mut Interp, _: &Val, a: &[Val]) -> R {
             return Err(it.error("RangeError", "invalid array length"));
         }
         let n = *n as usize;
-        it.charge(n * crate::interp::PROP_BYTES)?;
+        it.reserve_elements(n)?;
         return it.array(vec![Val::Hole; n]);
     }
     it.array(a.to_vec())
@@ -889,7 +889,7 @@ fn array_from(it: &mut Interp, this: &Val, a: &[Val]) -> R {
                 return Err(it.error("RangeError", "invalid array length"));
             }
             let n = if n > 0.0 { n as usize } else { 0 };
-            it.charge(n * crate::interp::PROP_BYTES)?;
+            it.reserve_elements(n)?;
             target = crate::arrays::made_by(it, this, &[Val::Num(n as f64)])?;
             let mut out = Vec::with_capacity(n);
             for i in 0..n {
@@ -1529,7 +1529,7 @@ fn map_set(it: &mut Interp, this: &Val, a: &[Val]) -> R {
             slot.1 = arg(a, 1);
         } else {
             drop(b);
-            it.grow(&o, 2)?;
+            it.grow_elements(&o, 2)?;
             if let Kind::Map(e) = &mut o.borrow_mut().kind {
                 e.push((k, arg(a, 1)));
             }
@@ -1544,7 +1544,7 @@ fn set_add(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let present =
         matches!(&o.borrow().kind, Kind::Set(e) if e.iter().any(|x| same_value_zero(x, &k)));
     if !present {
-        it.grow(&o, 1)?;
+        it.grow_elements(&o, 1)?;
         if let Kind::Set(e) = &mut o.borrow_mut().kind {
             e.push(k);
         }

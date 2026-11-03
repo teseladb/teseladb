@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::builtins::method;
-use crate::interp::{Interp, PROP_BYTES, R};
+use crate::interp::{Interp, R};
 use crate::value::*;
 
 fn arg(args: &[Val], i: usize) -> Val {
@@ -294,7 +294,7 @@ fn push(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     }
     let o = array_obj(it, this)?;
     check(it, &o, if a.is_empty() { Change::Length } else { Change::Grow })?;
-    it.grow(&o, a.len())?;
+    it.grow_elements(&o, a.len())?;
     let n = with_vec(&o, |v| {
         v.extend_from_slice(a);
         v.len()
@@ -342,7 +342,7 @@ fn shift(it: &mut Interp, this: &Val, _: &[Val]) -> R {
 fn unshift(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let o = array_obj(it, this)?;
     check(it, &o, if a.is_empty() { Change::Length } else { Change::Grow })?;
-    it.grow(&o, a.len())?;
+    it.grow_elements(&o, a.len())?;
     let n = with_vec(&o, |v| {
         v.splice(0..0, a.iter().cloned());
         v.len()
@@ -454,7 +454,7 @@ fn splice(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     } else {
         check(it, &o, Change::Length)?;
     }
-    it.grow(&o, insert.len())?;
+    it.grow_elements(&o, insert.len())?;
     let target = species(it, this, count)?;
     let removed = with_vec(&o, |v| v.splice(start..start + count, insert).collect::<Vec<_>>())
         .unwrap_or_default();
@@ -477,7 +477,7 @@ fn concat(it: &mut Interp, this: &Val, a: &[Val]) -> R {
             _ => out.push(x.clone()),
         }
     }
-    it.charge(out.len() * PROP_BYTES)?;
+    it.reserve_elements(out.len())?;
     species_result(it, target, out, true)
 }
 
@@ -498,7 +498,7 @@ fn join(it: &mut Interp, this: &Val, a: &[Val]) -> R {
             let r = it.str_of(x);
             out.push_str(&it.operand_as_class(r)?);
         }
-        it.charge(0)?;
+        it.reserve(crate::value::Cost::string(out.len()))?;
     }
     it.string(out)
 }
@@ -533,7 +533,7 @@ fn to_locale_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
             let s = it.call(&f, x, &[])?;
             out.push_str(&it.str_of(&s)?);
         }
-        it.charge(0)?;
+        it.reserve(crate::value::Cost::string(out.len()))?;
     }
     it.string(out)
 }
@@ -678,7 +678,7 @@ fn filter(it: &mut Interp, this: &Val, a: &[Val]) -> R {
         }
         false
     })?;
-    it.charge(out.len() * PROP_BYTES)?;
+    it.reserve_elements(out.len())?;
     species_result(it, target, out, false)
 }
 
@@ -701,7 +701,7 @@ fn mapped(it: &mut Interp, this: &Val, a: &[Val]) -> R<Vec<Val>> {
         false
     })?;
     out.resize(n, Val::Hole);
-    it.charge(out.len() * PROP_BYTES)?;
+    it.reserve_elements(out.len())?;
     Ok(out)
 }
 
@@ -844,14 +844,14 @@ fn to_sorted(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     }
     let v = items(it, this)?;
     let s = sorted(it, v, &arg(a, 0))?;
-    it.charge(s.len() * PROP_BYTES)?;
+    it.reserve_elements(s.len())?;
     it.array(s)
 }
 
 fn to_reversed(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     let mut v = items(it, this)?;
     v.reverse();
-    it.charge(v.len() * PROP_BYTES)?;
+    it.reserve_elements(v.len())?;
     it.array(v)
 }
 
@@ -870,7 +870,7 @@ fn to_spliced(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     };
     let insert = a.get(2..).unwrap_or(&[]).to_vec();
     v.splice(start..start + skip, insert);
-    it.charge(v.len() * PROP_BYTES)?;
+    it.reserve_elements(v.len())?;
     it.array(v)
 }
 
@@ -884,7 +884,7 @@ fn with(it: &mut Interp, this: &Val, a: &[Val]) -> R {
         return Err(it.error("RangeError", "invalid or out-of-range index"));
     }
     v[i as usize] = arg(a, 1);
-    it.charge(v.len() * PROP_BYTES)?;
+    it.reserve_elements(v.len())?;
     it.array(v)
 }
 
@@ -895,7 +895,7 @@ fn flatten(it: &mut Interp, v: Vec<Val>, depth: f64, out: &mut Vec<Val>) -> R<()
             let inner = elements(it, &x)?;
             flatten(it, inner, depth - 1.0, out)?;
         } else {
-            it.charge(PROP_BYTES)?;
+            it.reserve_elements(1)?;
             out.push(x);
         }
     }

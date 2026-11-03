@@ -10,23 +10,26 @@ use crate::lexer::{SyntaxError, Tok, Token, tokenize};
 /// Parses a whole program as RefDb gives it: an anonymous function may stand as a whole
 /// statement (`function(){ … }`), as RefDb reads a function's source.
 pub fn parse_script(src: &str) -> Result<Vec<Stmt>, SyntaxError> {
-    parse(src, &[], (false, false), true, Room::top())
+    parse(src, &[], (false, false), true, Room::top()).map(|(body, _)| body)
 }
 
 /// Parses the code of an indirect `eval` or of `Function`, with the `room` left: a script.
 pub fn parse_eval(src: &str, room: Room) -> Result<Vec<Stmt>, SyntaxError> {
-    parse(src, &[], (false, false), false, room)
+    parse(src, &[], (false, false), false, room).map(|(body, _)| body)
 }
 
 /// Parses a whole script that may use the private names `privates` (the code of a direct
 /// `eval` inside a class); `supers` says whether it may use `super.x` and `super()` (the code
 /// of a direct `eval` inside a method or a derived constructor).
+/// The code of a direct `eval`, which may use `privates` and the `super` forms `supers`, and the
+/// most of the engine's stack its parse took: a parse kept for a later `eval` of the same text
+/// serves it only while its room holds that much.
 pub fn parse_script_in(
     src: &str,
     privates: &[Name],
     supers: (bool, bool),
     room: Room,
-) -> Result<Vec<Stmt>, SyntaxError> {
+) -> Result<(Vec<Stmt>, usize), SyntaxError> {
     parse(src, privates, supers, false, room)
 }
 
@@ -65,13 +68,14 @@ fn parse(
     supers: (bool, bool),
     anonymous: bool,
     room: Room,
-) -> Result<Vec<Stmt>, SyntaxError> {
+) -> Result<(Vec<Stmt>, usize), SyntaxError> {
     let mut p = Parser {
         toks: tokenize(src)?,
         i: 0,
         src: src.chars().collect(),
         depth: 0,
         units: 0,
+        peak: 0,
         arrows: 0,
         room,
         stack_base: crate::interp::stack_position(),
@@ -112,7 +116,7 @@ fn parse(
         p.check_legacy(0)?;
     }
     p.namer.finish();
-    Ok(out)
+    Ok((out, p.peak))
 }
 
 /// Parses one expression (a template's substitution).
@@ -131,6 +135,7 @@ fn parse_expression(
         src: src.chars().collect(),
         depth: 0,
         units: 0,
+        peak: 0,
         arrows: 0,
         room,
         stack_base: crate::interp::stack_position(),
@@ -275,6 +280,8 @@ struct Parser {
     depth: usize,
     /// The engine's native stack the constructs open here take ([`Room::units`]).
     units: usize,
+    /// The most [`Parser::units`] took while reading.
+    peak: usize,
     /// The arrow functions open here.
     arrows: usize,
     /// What the parse may take.
@@ -590,6 +597,7 @@ impl Parser {
         run: impl FnOnce(&mut Self) -> Result<T, SyntaxError>,
     ) -> Result<T, SyntaxError> {
         self.units += cost;
+        self.peak = self.peak.max(self.units);
         let r = if checked && self.units > self.room.units { Err(recursion()) } else { run(self) };
         self.units -= cost;
         r

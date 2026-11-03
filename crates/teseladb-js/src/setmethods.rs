@@ -91,7 +91,7 @@ fn contains(items: &[Val], v: &Val) -> bool {
 
 fn new_set(it: &mut Interp, items: Vec<Val>) -> R {
     let o = it.alloc(Some(it.realm.set.clone()), Kind::Ordinary)?;
-    it.grow(&o, items.len())?;
+    it.grow_elements(&o, items.len())?;
     o.borrow_mut().kind = Kind::Set(items);
     Ok(Val::Obj(o))
 }
@@ -231,7 +231,7 @@ fn group_by(it: &mut Interp, _: &Val, a: &[Val]) -> R {
         entries.push((k, it.array(list)?));
     }
     let o = it.alloc(Some(it.realm.map.clone()), Kind::Ordinary)?;
-    it.grow(&o, entries.len() * 2)?;
+    it.grow_elements(&o, entries.len() * 2)?;
     o.borrow_mut().kind = Kind::Map(entries);
     Ok(Val::Obj(o))
 }
