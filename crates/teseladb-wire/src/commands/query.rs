@@ -958,7 +958,8 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
     }
     let Some(coll) = ctx.backend.collection(&ns)? else {
         // Validate the filter even when there is nothing to read, as RefDb does.
-        Plan::new(&a.filter, a.projection.as_ref(), a.collation.as_ref())?;
+        Plan::new(&a.filter, a.projection.as_ref(), a.collation.as_ref())
+            .map_err(CommandError::query_parse)?;
         if super::views::has_text(&a.filter) {
             return text_find(ctx, &ns);
         }
@@ -968,7 +969,9 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
         return text_find(ctx, &ns);
     }
     let collation = a.collation.clone().or_else(|| options_collation(&coll));
-    Plan::new(&a.filter, a.projection.as_ref(), collation.as_ref())?
+    // Its errors come before the statement joins a transaction (008, measured on 03-11-2026).
+    Plan::new(&a.filter, a.projection.as_ref(), collation.as_ref())
+        .map_err(CommandError::query_parse)?
         .check_metadata(a.sort.as_ref())?;
     if a.tailable.is_some() {
         check_tailable(&ns, &coll, &a)?;

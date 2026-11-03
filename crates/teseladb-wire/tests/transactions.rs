@@ -385,10 +385,13 @@ fn the_first_statement_s_read_concern_sets_the_snapshot() {
     let at = level(Level::Snapshot).with("atClusterTime", ts(9_000, 3));
     assert!(ok(&run(&mut m, DB, with_concern(at, 12, 1))));
     assert_eq!(m.txn_read_at, Some(from_timestamp((9_000, 3))));
-    // After a cluster time ahead of the cluster time: refused, as on a `refrouter` 9.0.4.
+    // After a cluster time ahead of the cluster time: the statement fails, as on a `refrouter`
+    // 9.0.4, and the transaction it started is over (measured on 03-11-2026).
     let after = level(Level::Local).with("afterClusterTime", ts(10_500, 0));
     let r = run(&mut m, DB, with_concern(after, 13, 1));
     assert_eq!(code(&r), Some(&Value::Int32(72)), "{r:?}");
+    let r = run(&mut m, "admin", end("abortTransaction", 13, 1));
+    assert_eq!(errmsg(&r), "Transaction with { txnNumber: 1 } has been aborted.");
     // The client saw a later cluster time (`$clusterTime`) than the node: at it too.
     let seen = Document::new().with("clusterTime", ts(10_200, 7));
     let gossip = stmt(find(), 16, 1, true).with("$clusterTime", seen);
@@ -396,12 +399,34 @@ fn the_first_statement_s_read_concern_sets_the_snapshot() {
     assert_eq!(m.txn_read_at, Some(from_timestamp((10_200, 7))));
     // Ahead of the cluster time: refused.
     let ahead = level(Level::Snapshot).with("atClusterTime", ts(20_000, 1));
-    let r = run(&mut m, DB, with_concern(ahead, 14, 1));
+    let r = run(&mut m, DB, with_concern(ahead.clone(), 14, 1));
     assert_eq!(code(&r), Some(&Value::Int32(72)), "{r:?}");
     let want = "readConcern atClusterTime value must not be greater than the current clusterTime. \
                 Requested clusterTime: { ts: Timestamp(20000, 1) }; current clusterTime: { ts: \
                 Timestamp(10000, 0) }";
     assert_eq!(r.get("errmsg"), Some(&Value::from(want)));
+    assert_eq!(r.get("recoveryToken"), None, "{r:?}");
+    let r = run(&mut m, DB, stmt(find(), 14, 1, false));
+    assert_eq!(errmsg(&r), "Transaction with { txnNumber: 1 } has been aborted.");
+    let r = run(&mut m, "admin", end("commitTransaction", 14, 1));
+    assert!(errmsg(&r).ends_with("was unsuccessful."), "{r:?}");
+    assert_eq!(r.get("recoveryToken"), None, "{r:?}");
+    // A write answers with the error as its first write error, from the node's host.
+    let write = stmt(insert(9), 17, 1, true).with("readConcern", ahead.clone());
+    let r = run(&mut m, DB, write);
+    assert!(ok(&r), "{r:?}");
+    let Value::String(msg) = field(&r, "writeErrors.0.errmsg") else { panic!("{r:?}") };
+    assert!(msg.starts_with("cluster write results unavailable from "), "{msg}");
+    assert!(msg.ends_with(&format!(":: caused by :: {want}")), "{msg}");
+    assert_eq!(r.get("recoveryToken"), Some(&Value::Document(Document::new())), "{r:?}");
+    let r = run(&mut m, "admin", end("abortTransaction", 17, 1));
+    assert_eq!(first_key(&r), Some("errorLabels"), "{r:?}");
+    assert_eq!(r.get("recoveryToken"), Some(&Value::Document(Document::new())), "{r:?}");
+    // After the first statement a read concern is refused, and the transaction goes on.
+    assert!(ok(&run(&mut m, DB, stmt(find(), 18, 1, true))));
+    let r = run(&mut m, DB, stmt(find(), 18, 1, false).with("readConcern", ahead));
+    assert_eq!(errmsg(&r), "Only the first command in a transaction may specify a readConcern");
+    assert!(ok(&run(&mut m, "admin", end("abortTransaction", 18, 1))));
     // Below the history: 239 with the label, and the transaction is over.
     m.history_from = Some(Hlc { physical: 8_000_000, logical: 0 });
     let old = level(Level::Snapshot).with("atClusterTime", ts(1, 1));
@@ -855,10 +880,11 @@ fn answers_inside_a_transaction_carry_the_recovery_token() {
     assert_eq!(code(&r), Some(&Value::Int32(251)), "{r:?}");
     let shard = Value::Document(Document::new().with("recoveryShardId", shard_name(1)));
     assert_eq!(token(&r), Some(shard), "{r:?}");
-    // When the first statement fails, no participant took part: the commit answers as the
-    // `refrouter` router does, without a token, and so does the abort (measured on 03-11-2026).
-    let bad = || find().with("filter", doc(&[("$bad", Value::Int32(1))]));
-    assert_eq!(code(&run(&mut m, DB, stmt(bad(), 73, 1, true))), Some(&Value::Int32(2)));
+    // When the first statement fails on the shard, the commit answers as the `refrouter` router
+    // does, without a token; the abort gets the shard's answer with an empty token and its
+    // labels first (measured on 03-11-2026 with 48 NamespaceExists).
+    let exists = || create("c");
+    assert_eq!(code(&run(&mut m, DB, stmt(exists(), 73, 1, true))), Some(&Value::Int32(48)));
     let r = run(&mut m, "admin", end("commitTransaction", 73, 1));
     assert_eq!(code(&r), Some(&Value::Int32(251)), "{r:?}");
     let failed = format!(
@@ -870,10 +896,44 @@ fn answers_inside_a_transaction_carry_the_recovery_token() {
     assert_eq!(errmsg(&r), failed);
     assert!(has_label(&r, "TransientTransactionError"), "{r:?}");
     assert_eq!(token(&r), None, "{r:?}");
-    assert_eq!(code(&run(&mut m, DB, stmt(bad(), 74, 1, true))), Some(&Value::Int32(2)));
+    assert_eq!(code(&run(&mut m, DB, stmt(exists(), 74, 1, true))), Some(&Value::Int32(48)));
     let r = run(&mut m, "admin", end("abortTransaction", 74, 1));
     assert_eq!(errmsg(&r), "Transaction with { txnNumber: 1 } has been aborted.");
+    assert_eq!(token(&r), Some(Value::Document(Document::new())), "{r:?}");
+    assert_eq!(first_key(&r), Some("errorLabels"), "{r:?}");
+    // A first statement the router refuses while it parses the query (an unknown operator)
+    // reaches no participant and leaves the transaction running: the router commits it with an
+    // integer `ok` and answers the abort itself, without a token.
+    let bad = || find().with("filter", doc(&[("$bad", Value::Int32(1))]));
+    assert_eq!(code(&run(&mut m, DB, stmt(bad(), 75, 1, true))), Some(&Value::Int32(2)));
+    let r = run(&mut m, "admin", end("commitTransaction", 75, 1));
+    assert_eq!(r.get("ok"), Some(&Value::Int32(1)), "{r:?}");
+    assert_eq!(token(&r), Some(Value::Document(Document::new())), "{r:?}");
+    assert_eq!(code(&run(&mut m, DB, stmt(bad(), 76, 1, true))), Some(&Value::Int32(2)));
+    let r = run(&mut m, "admin", end("abortTransaction", 76, 1));
+    assert_eq!(code(&r), Some(&Value::Int32(251)), "{r:?}");
+    assert_eq!(errmsg(&r), "no known command has been sent by this router for this transaction");
+    assert_eq!(first_key(&r), Some("ok"), "{r:?}");
     assert_eq!(token(&r), None, "{r:?}");
+    // A statement after it reaches the node: the transaction then commits as any other.
+    assert_eq!(code(&run(&mut m, DB, stmt(bad(), 77, 1, true))), Some(&Value::Int32(2)));
+    assert!(ok(&run(&mut m, DB, stmt(find(), 77, 1, false))));
+    let r = run(&mut m, "admin", end("commitTransaction", 77, 1));
+    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+    // A `create` names the shard in the token, as a write does.
+    let r = run(&mut m, DB, stmt(create("fresh"), 78, 1, true));
+    assert_eq!(token(&r), Some(shard_doc()), "{r:?}");
+    let r = run(&mut m, "admin", end("abortTransaction", 78, 1));
+    assert_eq!(token(&r), Some(shard_doc()), "{r:?}");
+}
+
+/// The first field of a reply.
+fn first_key(r: &Document) -> Option<&str> {
+    r.iter().next().map(|(k, _)| k)
+}
+
+fn shard_doc() -> Value {
+    Value::Document(Document::new().with("recoveryShardId", shard_name(1)))
 }
 
 /// How a session's transaction is named in RefDb's messages, for the session `lsid(n)`.

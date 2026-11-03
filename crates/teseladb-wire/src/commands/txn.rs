@@ -34,16 +34,16 @@ use teseladb_types::{GroupId, Nanos};
 use super::cross_range;
 use super::mutation::Bound;
 use super::session::KillScope;
-use super::txn_concern::{begin_mark, now_mark, snapshot_error};
+use super::txn_concern::{Begin, begin_mark, now_mark, snapshot_error};
 use super::txn_ddl::{self, Created};
 use super::txn_stats;
 use super::{ANONYMOUS_UID, Backend, Shared, WriteOp, lock, uuid_text};
 use crate::error::{
-    CONFLICTING_OPERATION_IN_PROGRESS, CommandError, FAILED_TO_SATISFY_READ_PREFERENCE,
-    INTERNAL_ERROR, INVALID_OPTIONS, MAX_TIME_MS_EXPIRED, NO_SUCH_TRANSACTION,
-    NOT_A_RETRYABLE_WRITE_COMMAND, OPERATION_NOT_SUPPORTED_IN_TRANSACTION, RECOVERY_TOKEN_REQUIRED,
-    RangeContext, SHARD_NOT_FOUND, TOO_MANY_OPEN_TRANSACTIONS, TRANSACTION_COMMITTED,
-    TRANSACTION_TOO_LARGE, TRANSACTION_TOO_OLD, TRANSIENT_TRANSACTION_ERROR,
+    CONFLICTING_OPERATION_IN_PROGRESS, CommandError, ErrorOrigin,
+    FAILED_TO_SATISFY_READ_PREFERENCE, INTERNAL_ERROR, INVALID_OPTIONS, MAX_TIME_MS_EXPIRED,
+    NO_SUCH_TRANSACTION, NOT_A_RETRYABLE_WRITE_COMMAND, OPERATION_NOT_SUPPORTED_IN_TRANSACTION,
+    RECOVERY_TOKEN_REQUIRED, RangeContext, SHARD_NOT_FOUND, TOO_MANY_OPEN_TRANSACTIONS,
+    TRANSACTION_COMMITTED, TRANSACTION_TOO_LARGE, TRANSACTION_TOO_OLD, TRANSIENT_TRANSACTION_ERROR,
     TXN_NUMBER_NOT_ALLOWED, UNAUTHORIZED, UNKNOWN_TRANSACTION_COMMIT_RESULT, WRITE_CONFLICT,
     WRITE_CONFLICT_MESSAGE, from_range,
 };
@@ -55,7 +55,7 @@ pub const COMMIT_TRANSACTION: &str = "commitTransaction";
 /// `abortTransaction`.
 pub const ABORT_TRANSACTION: &str = "abortTransaction";
 /// The field that marks a statement of a transaction.
-const AUTOCOMMIT: &str = "autocommit";
+pub(crate) const AUTOCOMMIT: &str = "autocommit";
 /// The field of a transaction's first statement.
 const START_TRANSACTION: &str = "startTransaction";
 /// `count`, which a transaction cannot run.
@@ -83,6 +83,9 @@ struct Running {
     view: TxnView,
     /// Statements run so far, which names the next one in RefDb's messages.
     statements: u32,
+    /// A statement got past the router's parse: a `refrouter` 9.0.4 sent it to a participant
+    /// (measured on 03-11-2026; until then the router answers the commit and the abort itself).
+    sent: bool,
     /// The collections it created (T019).
     created: Vec<Created>,
     /// Its collections have their names: the commit is under way.
@@ -652,10 +655,12 @@ const WRITES: [&str; 6] = [
 ];
 
 /// `result` with the `recoveryToken` a `refrouter` 9.0.4 adds inside a transaction (measured): `{}`
-/// until a write ran in it, then `recoveryShardId`, the node's name in `config.shards`. Among the
-/// errors only those of `commitTransaction` and `abortTransaction` of a transaction that started
-/// get it: a statement's error is the shard's, which the `refrouter` sends as it is (measured on
-/// 03-11-2026 with 48 `NamespaceExists` and 2 `BadValue`, before and after a write).
+/// until a write or a `create` ran in it, then `recoveryShardId`, the node's name in
+/// `config.shards`. Among the errors only those of `commitTransaction` and `abortTransaction` of a
+/// transaction that started get it, with their `errorLabels` first; not the commit after a first
+/// statement that failed, which the router answers: a statement's error is the shard's, which the
+/// `refrouter` sends as it is (measured on 03-11-2026 with 48 `NamespaceExists` and 2 `BadValue`,
+/// before and after a write, and with a time ahead of the cluster time).
 fn with_token(
     backend: &mut dyn Backend,
     shared: &Shared,
@@ -666,9 +671,15 @@ fn with_token(
     let token = {
         let mut g = lock(shared);
         let s = g.txns.entry(f.lsid).or_default();
+        // The router answers the commit after a failed first statement itself, without one.
+        let router_commit = name == COMMIT_TRANSACTION && s.failed == Some((f.txn_number, true));
+        // A write the transaction ran: not one refused as the transaction started, which never
+        // ran (measured on 03-11-2026: an empty token after a time ahead of the cluster time).
+        let ran = s.running.as_ref().is_some_and(|r| r.txn_number == f.txn_number);
         match s.token.as_mut() {
-            Some((n, wrote)) if *n == f.txn_number => {
-                *wrote |= WRITES.contains(&name);
+            Some((n, wrote)) if *n == f.txn_number && !router_commit => {
+                let created = name == super::catalog::CREATE && matches!(result, Some(Ok(_)));
+                *wrote |= ran && (WRITES.contains(&name) || created);
                 Some(*wrote)
             }
             _ => None,
@@ -682,7 +693,7 @@ fn with_token(
         (Ok(reply), t) => Ok(reply.with(RECOVERY_TOKEN, doc(t.unwrap_or(false)))),
         (Err(mut e), Some(wrote)) if ends(name) => {
             e.extra.push(RECOVERY_TOKEN, doc(wrote));
-            Err(e)
+            Err(e.with_labels_first())
         }
         (Err(e), _) => Err(e),
     })
@@ -713,9 +724,9 @@ fn run_command(
     }
     // The first statement's read concern is checked before the transaction starts: a refused
     // one starts nothing.
-    let begin_at = match ask {
+    let begin = match ask {
         Ask::Start => match begin_mark(backend, name, cmd) {
-            Ok(at) => Some(at),
+            Ok(b) => Some(b),
             Err(e) => return Some(Err(e)),
         },
         Ask::Continue | Ask::Commit | Ask::Abort => None,
@@ -767,13 +778,15 @@ fn run_command(
                 if member(backend) {
                     restore(shared, f, before);
                 }
-                return Some(refused_write(backend, name, e));
+                let shard = super::shard_name(backend.node());
+                return Some(refused_write(&shard, name, e));
             }
             lock(shared).txns.entry(f.lsid).or_default().token = Some((f.txn_number, false));
             // Any node finds its record from the session and the number (`Recovery`).
             let txn = client_txn_id(f.lsid, f.txn_number);
-            let (read_ts, uncertain_to) = match begin_at {
-                Some(at) => at,
+            let (read_ts, uncertain_to) = match begin {
+                Some(Begin::At(at, to)) => (at, to),
+                Some(Begin::Ahead(e)) => return Some(failed_at_start(backend, shared, name, f, e)),
                 None => {
                     let now = now_mark(backend, name, cmd);
                     (now, Some(window_end(now)))
@@ -789,6 +802,7 @@ fn run_command(
                 coord,
                 view,
                 statements: 0,
+                sent: false,
                 created: Vec::new(),
                 published: false,
                 uncertain_to,
@@ -810,8 +824,20 @@ fn run_command(
                 _ => Some(Err(CommandError::new(INTERNAL_ERROR, "no commit to answer again"))),
             }
         }
-        Verdict::Commit => Some(end(backend, shared, f, true).map(|()| ok())),
-        Verdict::Abort => Some(end(backend, shared, f, false).map(|()| ok())),
+        Verdict::Commit | Verdict::Abort => {
+            let commit = verdict == Verdict::Commit;
+            let sent = lock(shared)
+                .txns
+                .get(&f.lsid)
+                .and_then(|s| s.running.as_ref())
+                .is_some_and(|run| run.sent);
+            let ended = end(backend, shared, f, commit);
+            Some(match (ended, sent) {
+                (Err(e), _) => Err(e),
+                (Ok(()), true) => Ok(ok()),
+                (Ok(()), false) => nothing_sent(shared, f, commit),
+            })
+        }
     }
 }
 
@@ -856,6 +882,47 @@ fn not_in_progress(f: TxnFields, active: Option<i64>) -> CommandError {
         ),
     )
     .with_label(TRANSIENT_TRANSACTION_ERROR)
+}
+
+/// `errmsg` of the abort of a transaction none of whose statements reached a participant.
+const NOTHING_SENT: &str = "no known command has been sent by this router for this transaction";
+
+/// The answer to the commit (`commit`) or the abort of transaction `f`, which ended, when none of
+/// its statements got past the router's parse: a `refrouter` 9.0.4 answers both itself (measured on
+/// 03-11-2026), the commit with an integer `ok` and the abort with `NoSuchTransaction` and no
+/// `recoveryToken`.
+fn nothing_sent(shared: &Shared, f: TxnFields, commit: bool) -> Result<Document, CommandError> {
+    if commit {
+        return Ok(Document::new().with("ok", 1));
+    }
+    if let Some(s) = lock(shared).txns.get_mut(&f.lsid) {
+        s.token = None;
+    }
+    Err(CommandError::new(NO_SUCH_TRANSACTION, NOTHING_SENT)
+        .with_label(TRANSIENT_TRANSACTION_ERROR))
+}
+
+/// The answer to the first statement of transaction `f`, which the shard started and whose
+/// statement failed with `e` before it read anything (a time ahead of the cluster time): the
+/// transaction is over, as after any first statement that failed, and a write answers with `e` as
+/// its first write error from the node (measured on a `refrouter` 9.0.4 on 03-11-2026).
+fn failed_at_start(
+    backend: &mut dyn Backend,
+    shared: &Shared,
+    name: &str,
+    f: TxnFields,
+    e: CommandError,
+) -> Result<Document, CommandError> {
+    {
+        let mut g = lock(shared);
+        txn_stats::started(&mut g);
+        txn_stats::aborted(&mut g, e.code.name);
+        txn_stats::ended(&mut g, 0, 0, false);
+        let s = g.txns.entry(f.lsid).or_default();
+        s.rules.aborted(f.txn_number);
+        s.failed = Some((f.txn_number, true));
+    }
+    refused_write(&super::host_port(backend), name, e)
 }
 
 /// Whether a statement's error ended transaction `f`, and if it was the first statement.
@@ -1029,24 +1096,16 @@ fn too_many_open(shared: &Shared, f: TxnFields) -> Option<CommandError> {
     Some(CommandError::new(TOO_MANY_OPEN_TRANSACTIONS, msg))
 }
 
-/// The answer to a command whose transaction did not start because of `e`: a write answers as a
-/// `refrouter` 9.0.4 does (measured), `ok` with nothing written and the shard's error, under the
-/// shard's name, as its first write error; another command fails with `e`.
-fn refused_write(
-    backend: &mut dyn Backend,
-    name: &str,
-    e: CommandError,
-) -> Result<Document, CommandError> {
+/// The answer to a command whose transaction did not start, or failed as it started, because of
+/// `e`: a write answers as a `refrouter` 9.0.4 does (measured), `ok` with nothing written and the
+/// shard's error, from `from`, as its first write error; another command fails with `e`.
+fn refused_write(from: &str, name: &str, e: CommandError) -> Result<Document, CommandError> {
     let counts: &[&str] = match name {
         super::crud::INSERT | super::crud::DELETE => &["n"],
         super::crud::UPDATE => &["nModified", "n"],
         _ => return Err(e),
     };
-    let msg = format!(
-        "cluster write results unavailable from {} :: caused by :: {}",
-        super::shard_name(backend.node()),
-        e.errmsg
-    );
+    let msg = format!("cluster write results unavailable from {from} :: caused by :: {}", e.errmsg);
     let error = Document::new().with("index", 0).with("code", e.code.code).with("errmsg", msg);
     let reply = counts.iter().fold(Document::new(), |d, n| d.with(*n, 0));
     Ok(reply.with("writeErrors", Value::Array(vec![Value::Document(error)])).with("ok", 1.0))
@@ -1171,7 +1230,20 @@ fn with_running(
                 .map_err(|e| snapshot_error(e, (f.lsid, f.txn_number), number, at))
                 .map_err(|e| from_participant(&mut *backend, e))
         });
-    if let Some(cause) = result.as_ref().and_then(txn_stats::failure_cause) {
+    // The router's parse, and the shard's parse of the query of a statement that would join the
+    // transaction, leave the statement short of a participant.
+    let first = !run.sent;
+    let short = match &result {
+        Some(Err(e)) => match e.origin {
+            ErrorOrigin::Router => true,
+            ErrorOrigin::QueryParse => first,
+            ErrorOrigin::Shard => false,
+        },
+        Some(Ok(_)) | None => false,
+    };
+    run.sent |= result.is_some() && !short;
+    let failure = result.as_ref().filter(|_| !short).and_then(txn_stats::failure_cause);
+    if let Some(cause) = failure {
         run.coord.abort();
         // The abort's answer only resolves the intents: the statement's error is the answer.
         let _ = drive(backend, &mut run.coord, finished);
@@ -1181,12 +1253,7 @@ fn with_running(
         txn_stats::ended(&mut g, participants(&run), run.requests, false);
         let s = g.txns.entry(f.lsid).or_default();
         s.rules.aborted(f.txn_number);
-        s.failed = Some((f.txn_number, number == 0));
-        // No participant took part when the first statement failed: no `recoveryToken` follows,
-        // except after a `createIndexes`, whose shard did (measured on 03-11-2026).
-        if number == 0 && name != txn_ddl::CREATE_INDEXES {
-            s.token = None;
-        }
+        s.failed = Some((f.txn_number, first));
     }
     store(shared, f.lsid, run);
     result

@@ -65,7 +65,11 @@ fn a_write_waits_for_the_unlock_and_a_read_does_not() {
     m.pauses_left = 3;
     let r = m.run("t", insert("c"));
     let (code, msg) = first_write_error(&r);
-    assert_eq!((code, msg), (&Value::Int32(50), &Value::from("operation exceeded time limit")));
+    assert_eq!(code, &Value::Int32(50));
+    // As a `refrouter` 9.0.4 relays it from the shard (measured on 03-11-2026).
+    let Value::String(msg) = msg else { panic!("{r:?}") };
+    assert!(msg.starts_with("cluster write results unavailable from "), "{msg}");
+    assert!(msg.ends_with(":: caused by :: operation exceeded time limit"), "{msg}");
     let r = m.run("t", doc(&[("find", Value::from("c"))]));
     assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
     let r = m.run("t", doc(&[("drop", Value::from("c"))]));

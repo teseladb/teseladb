@@ -32,8 +32,8 @@ use crate::MAX_WRITE_BATCH_SIZE;
 use crate::concerns::{self, WriteConcernArgs, write_concern_error};
 use crate::error::{
     BAD_VALUE, CONSTANTS_ONLY_FOR_PIPELINE, CommandError, DOLLAR_PREFIXED_FIELD_NAME,
-    FAILED_TO_PARSE, IDL_UNKNOWN_FIELD, INVALID_ID_FIELD, INVALID_LENGTH, TRANSACTION_TOO_OLD,
-    UNSATISFIABLE_WRITE_CONCERN,
+    FAILED_TO_PARSE, IDL_UNKNOWN_FIELD, INVALID_ID_FIELD, INVALID_LENGTH, MAX_TIME_MS_EXPIRED,
+    TRANSACTION_TOO_OLD, UNSATISFIABLE_WRITE_CONCERN,
 };
 use crate::msg::command_limits;
 use crate::types::{BULK_SAFE_BOOL_TYPES, WRITE_SAFE_BOOL_TYPES, wrong_type};
@@ -515,6 +515,32 @@ pub(crate) fn with_id<B: Backend + ?Sized>(
     Ok(out)
 }
 
+/// The write errors of a write outside a transaction as a `refrouter` 9.0.4 relays them: one whose
+/// time limit ran out failed the shard's whole command, and its message starts with «cluster
+/// write results unavailable from <host:port> :: caused by ::» (measured on 03-11-2026 with an
+/// insert, an update and a delete that wait for a transaction's intent).
+fn relayed<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>, errors: Vec<Value>) -> Vec<Value> {
+    if ctx.cmd.get(super::txn::AUTOCOMMIT).is_some() {
+        return errors;
+    }
+    let host = super::host_port(ctx.backend);
+    let relay = |e: Document| match (e.get("code"), e.get("errmsg")) {
+        (Some(Value::Int32(c)), Some(Value::String(msg))) if *c == MAX_TIME_MS_EXPIRED.code => {
+            let msg =
+                format!("cluster write results unavailable from {host} :: caused by :: {msg}");
+            e.clone().with("errmsg", msg)
+        }
+        _ => e,
+    };
+    errors
+        .into_iter()
+        .map(|v| match v {
+            Value::Document(e) => Value::Document(relay(e)),
+            other => other,
+        })
+        .collect()
+}
+
 pub(crate) fn write_error(index: usize, e: &CommandError) -> Value {
     let mut d = Document::new()
         .with("index", index as i32)
@@ -691,7 +717,7 @@ pub fn insert<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
     }
     let mut reply = Document::new().with("n", count(n));
     if !errors.is_empty() {
-        reply.push("writeErrors", errors);
+        reply.push("writeErrors", relayed(ctx, errors));
     }
     Ok(w.finish(reply))
 }
@@ -1382,7 +1408,7 @@ pub fn update<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
         reply.push("upserted", upserted);
     }
     if !errors.is_empty() {
-        reply.push("writeErrors", errors);
+        reply.push("writeErrors", relayed(ctx, errors));
     }
     Ok(w.finish(reply))
 }
@@ -1474,7 +1500,7 @@ pub fn delete<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
     }
     let mut reply = Document::new().with("n", count(n));
     if !errors.is_empty() {
-        reply.push("writeErrors", errors);
+        reply.push("writeErrors", relayed(ctx, errors));
     }
     Ok(w.finish(reply))
 }

@@ -87,10 +87,7 @@ fn measure(args: &Args, nodes: &[Node<MemDisk>], ca: &Certificate) -> Result<Rep
     let rest = each(args.warmup, args.duration, || {
         let body = format!(r#"{{"filter":{{"_id":{}}},"limit":1}}"#, next());
         let (status, answer) = h2.post(&path, body.as_bytes())?;
-        if status != "200" || !answer.windows(5).any(|w| w == b"\"_id\"") {
-            return Err(format!("REST answered {status}: {}", String::from_utf8_lossy(&answer)));
-        }
-        Ok(())
+        found_one(&status, &answer)
     })?;
     let mut report = Report::new("rest");
     report.latency("rest-find-by-id", &rest, Some(P50_NS), Some(P99_NS));
@@ -332,6 +329,14 @@ fn take(decoder: &mut Decoder, answer: &mut Answer, id: u32, f: Frame) -> Result
     }
 }
 
+/// An error unless a REST `find` answered 200 with a document (a body with an `_id`).
+fn found_one(status: &str, answer: &[u8]) -> Result<(), String> {
+    if status != "200" || !answer.windows(5).any(|w| w == b"\"_id\"") {
+        return Err(format!("REST answered {status}: {}", String::from_utf8_lossy(answer)));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
@@ -383,5 +388,12 @@ mod tests {
         for k in [kind::GOAWAY, kind::RST_STREAM] {
             assert!(step(&mut b, k, 0, 1, b"").unwrap_err().contains("ended the stream"));
         }
+    }
+
+    #[test]
+    fn a_rest_find_has_to_answer_200_with_a_document() {
+        assert_eq!(found_one("200", br#"{"documents":[{"_id":1}]}"#), Ok(()));
+        assert!(found_one("200", br#"{"documents":[]}"#).unwrap_err().contains("answered 200"));
+        assert!(found_one("404", br#"{"_id":1}"#).unwrap_err().starts_with("REST answered 404"));
     }
 }
