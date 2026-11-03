@@ -397,7 +397,7 @@ fn build<B: Backend + ?Sized>(
 
 /// One pass of the node's builder (FR-014, T040): builds the segments of every search index
 /// whose definition version this node neither serves nor failed to build, each over the
-/// documents written up to the resolved marks of its ranges. It gives how many it built; an
+/// documents written up to the cluster's mark when its build starts. It gives how many it built; an
 /// index that fails is left `FAILED` and the pass goes on.
 pub fn build_pending<B: Backend + ?Sized>(
     backend: &mut B,

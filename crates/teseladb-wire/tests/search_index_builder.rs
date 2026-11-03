@@ -201,3 +201,34 @@ fn an_index_written_out_of_memory_stays_ready_and_comes_back() {
     assert_eq!(on(&mut m, "a"), 2, "read back from its file");
     assert_eq!(m.shared.lock().unwrap().search.evicted(), 2, "b left in turn");
 }
+
+/// The builder fills a new index up to the cluster's mark when it starts, as a query would read:
+/// every document written before `createSearchIndexes` is in the index it lists as `READY`, even
+/// while the ranges' resolved marks are still behind those writes (011 FR-014). Before, it stopped
+/// at the resolved marks: the index was `READY` without the last writes, and the first query
+/// built them inside its own command (a 300-vector index of 768 dimensions took the first query
+/// past the bench client's 30 s under load, `network` battery).
+#[test]
+fn a_new_index_holds_every_write_before_it_when_ready() {
+    let mut m = with_builder();
+    let written = m.now;
+    // The ranges resolve 200 ms behind the clock, which moves 50 ms at each pause.
+    m.resolved_lag_ms = 200;
+    m.pause_ms = 50;
+    m.pauses_left = 100;
+    let r = create(&mut m, dynamic(true));
+    let Value::String(hex) = field(&r, "indexesCreated.0.id").clone() else { panic!("{r:?}") };
+    let id: [u8; 12] = std::array::from_fn(|i| {
+        u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).expect("hex identifier")
+    });
+    assert_eq!(build(&mut m), 1);
+    assert_eq!(listed(&mut m).get("status"), Some(&Value::from("READY")));
+    let shipped = m.shared.lock().unwrap().search.ship(&id).expect("built");
+    let definition = teseladb_search::definition::Definition::parse(&dynamic(true)).expect("ok");
+    let index = teseladb_search::indexer::Indexer::load(definition, &shipped.files).expect("load");
+    assert_eq!(index.len(), 2, "both documents are in the index the builder made");
+    for f in &shipped.files {
+        let applied = teseladb_search::indexer::Indexer::applied_of(&f.bytes).expect("mark");
+        assert!(applied.physical >= written, "{applied:?} below the writes at {written}");
+    }
+}

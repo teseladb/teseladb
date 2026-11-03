@@ -166,6 +166,18 @@ pub struct Built {
     pending: usize,
 }
 
+impl Built {
+    /// What these segments serve.
+    fn served(&self) -> Served {
+        Served {
+            version: self.version,
+            defined_ms: self.defined_ms,
+            definition: self.definition.clone(),
+            failure: None,
+        }
+    }
+}
+
 /// Changed documents after which the segments of an index are written again to their file.
 const DUMP_EVERY: usize = 1024;
 
@@ -197,8 +209,9 @@ pub struct SearchIndexes {
     background: bool,
     /// The definition each index the builder is filling for the first time will serve.
     building: BTreeMap<[u8; 12], Served>,
-    /// The indexes whose segments a query or the builder holds now.
-    borrowed: std::collections::BTreeSet<[u8; 12]>,
+    /// The indexes whose segments a query holds now, with what they serve: they are still
+    /// served, so the builder does not build them again and the listing keeps their status.
+    borrowed: BTreeMap<[u8; 12], Served>,
     /// Bytes the segments may take in memory: the node's part for them (012 FR-013, D-105).
     memory_limit: Option<u64>,
     /// Indexes written out of memory to keep within it.
@@ -245,13 +258,11 @@ pub struct Served {
 impl SearchIndexes {
     /// What this node serves of index `id`, or the version it failed to build.
     pub fn served(&self, id: &[u8; 12]) -> Option<Served> {
-        let built = self.built.get(id).map(|b| Served {
-            version: b.version,
-            defined_ms: b.defined_ms,
-            definition: b.definition.clone(),
-            failure: None,
-        });
-        built.or_else(|| self.out.get(id).cloned()).or_else(|| self.failed.get(id).cloned())
+        let built = self.built.get(id).map(Built::served);
+        built
+            .or_else(|| self.borrowed.get(id).cloned())
+            .or_else(|| self.out.get(id).cloned())
+            .or_else(|| self.failed.get(id).cloned())
     }
 
     /// Whether the segments of index `id` are in memory (not written out to keep within the
@@ -314,12 +325,7 @@ impl SearchIndexes {
             if self.store.is_none() || self.write_file(&id).is_err() {
                 return;
             }
-            let served = self.built.remove(&id).map(|b| Served {
-                version: b.version,
-                defined_ms: b.defined_ms,
-                definition: b.definition,
-                failure: None,
-            });
+            let served = self.built.remove(&id).map(|b| b.served());
             self.out.extend(served.map(|s| (id, s)));
             self.evicted += 1;
             total -= bytes;
@@ -468,8 +474,8 @@ fn definition_of(
     Ok((segments, completed, view))
 }
 
-/// Brings the segments of `entry` on `coll` (of namespace `ns`) up to the resolved marks of its
-/// ranges and runs `f` over them. Without a builder (FR-014), it first builds them when this node
+/// Brings the segments of `entry` on `coll` (of namespace `ns`) up to the read's mark and runs
+/// `f` over them. Without a builder (FR-014), it first builds them when this node
 /// has none for the definition version; with one, it serves what the builder built, an older
 /// definition while a new one is built, and refuses an index not built yet as `refsearch` does
 /// while in `INITIAL_SYNC` (measured 02-11-2026, `scratchpad/lane3m/m32.js`).
@@ -493,9 +499,9 @@ pub fn with_index<B: Backend + ?Sized, R>(
             let Some(shipped) = indexes.search.read_back(&entry.id) else {
                 return Err(query_error(state_message(entry, coll, ns, "INITIAL_SYNC")));
             };
-            indexes.search.borrowed.insert(entry.id);
-            drop(indexes);
-            fresh(coll, entry, Some(shipped))?
+            let built = fresh(coll, entry, Some(shipped))?;
+            indexes.search.borrowed.insert(entry.id, built.served());
+            built
         }
     };
     let caught =
@@ -506,9 +512,12 @@ pub fn with_index<B: Backend + ?Sized, R>(
 }
 
 /// Builds this node's segments of `entry` on `coll` for its definition version, over the
-/// documents written up to the resolved marks of its ranges (FR-014, T040): the builder's work.
-/// While it runs, the index shows `BUILDING` and queries keep the version served before; a
-/// document the definition cannot analyze leaves it `FAILED`.
+/// documents written up to the cluster's mark when it starts (FR-014, T040): the builder's work.
+/// That fixed mark is the one a query would read at, so the index is `READY` with every write
+/// acknowledged before `createSearchIndexes`, also while the ranges' resolved marks (200 ms
+/// behind their leaders' clocks) are still below those writes; otherwise the first query would
+/// build them inside its command. While it runs, the index shows `BUILDING` and queries keep the
+/// version served before; a document the definition cannot analyze leaves it `FAILED`.
 pub fn build_index<B: Backend + ?Sized>(
     backend: &mut B,
     shared: &Shared,
@@ -524,7 +533,7 @@ pub fn build_index<B: Backend + ?Sized>(
         failure: None,
     };
     lock(shared).search.building.insert(entry.id, serving);
-    let caught = catch_up_to(backend, coll, &mut built, false);
+    let caught = catch_up(backend, coll, &mut built);
     lock(shared).search.building.remove(&entry.id);
     if let Err(e) = caught {
         fail(shared, entry, built, &e);
@@ -542,22 +551,26 @@ fn borrow<B: Backend + ?Sized>(
     id: &[u8; 12],
 ) -> Result<Option<Built>, CommandError> {
     loop {
-        {
-            let mut indexes = lock(shared);
-            let search = &mut indexes.search;
-            // Index ids are never reused: the segments of `id` are of `coll`.
-            if let Some(b) = search.built.remove(id) {
-                search.borrowed.insert(*id);
-                return Ok(Some(b));
-            }
-            if !search.borrowed.contains(id) {
-                return Ok(None);
-            }
+        if let Some(taken) = take(shared, id) {
+            return Ok(taken);
         }
         if !backend.pause() {
             return Err(CommandError::new(MAX_TIME_MS_EXPIRED, "operation exceeded time limit"));
         }
     }
+}
+
+/// The segments of index `id`, taken out and marked as held (`Some(None)` when there are none);
+/// `None` while another operation holds them.
+fn take(shared: &Shared, id: &[u8; 12]) -> Option<Option<Built>> {
+    let mut indexes = lock(shared);
+    let search = &mut indexes.search;
+    // Index ids are never reused: the segments of `id` are of `coll`.
+    if let Some(b) = search.built.remove(id) {
+        search.borrowed.insert(*id, b.served());
+        return Some(Some(b));
+    }
+    (!search.borrowed.contains_key(id)).then_some(None)
 }
 
 /// Puts `built` back as the segments of index `id`, unless a newer version was built meanwhile;
@@ -574,7 +587,10 @@ fn give_back(
     }
     let mut indexes = lock(shared);
     let search = &mut indexes.search;
-    search.borrowed.remove(&id);
+    // The builder's newer version leaves the mark of a query that holds the older one.
+    if search.borrowed.get(&id).is_some_and(|s| s.version == built.version) {
+        search.borrowed.remove(&id);
+    }
     if search.built.get(&id).is_some_and(|b| b.version > built.version) {
         return Ok(());
     }
@@ -667,22 +683,11 @@ fn with_built<B: Backend + ?Sized, R>(
 }
 
 /// Applies to `built` what the ranges of its collection wrote after its mark, once every range
-/// reaches the read's mark.
+/// reaches the read's mark (the cluster's mark without a read mark: the builder's fixed mark).
 fn catch_up<B: Backend + ?Sized>(
     backend: &mut B,
     coll: &CollectionEntry,
     built: &mut Built,
-) -> Result<(), CommandError> {
-    catch_up_to(backend, coll, built, true)
-}
-
-/// [`catch_up`]; without `wait`, up to the marks the ranges have resolved now (the builder's fixed
-/// mark, FR-014: no read asks it for a later one).
-fn catch_up_to<B: Backend + ?Sized>(
-    backend: &mut B,
-    coll: &CollectionEntry,
-    built: &mut Built,
-    wait: bool,
 ) -> Result<(), CommandError> {
     let (start, end) = documents_of(coll);
     if behind_history(built.applied, history_floor(backend)?) {
@@ -703,10 +708,10 @@ fn catch_up_to<B: Backend + ?Sized>(
     INDEXER_LAG_MS.store(lag, Ordering::Relaxed);
     loop {
         let before = built.applied;
-        let ranges = backend.range_changes(&start, &end, built.applied, wait.then_some(target))?;
+        let ranges = backend.range_changes(&start, &end, built.applied, Some(target))?;
         let reached = segments_reached(ranges.iter().map(|r| r.resolved), target);
         apply_changes(backend, built, ranges)?;
-        if !wait || reached {
+        if reached {
             return Ok(());
         }
         if built.applied == before && !backend.pause() {
@@ -1112,6 +1117,51 @@ mod tests {
             let err = definition_of(&e).expect_err("refused");
             assert_eq!(err.code, UNKNOWN_ERROR, "{kind:?}");
         }
+    }
+
+    /// The segments of a vector index of version `version` over collection 1.
+    fn built(version: u32) -> Built {
+        let field = Document::new()
+            .with("type", "vector")
+            .with("path", "v")
+            .with("numDimensions", 2)
+            .with("similarity", "euclidean");
+        let raw = Document::new().with("fields", Value::Array(vec![Value::Document(field)]));
+        let def = VectorDefinition::parse(&raw).expect("valid");
+        Built {
+            collection: 1,
+            version,
+            defined_ms: 0,
+            definition: def.normalized(),
+            indexer: Segments::Vector(VectorIndexer::new(def)),
+            applied: Hlc { physical: 0, logical: 0 },
+            view: None,
+            stored: BTreeMap::new(),
+            pending: 0,
+        }
+    }
+
+    /// An index a query holds is still served: the builder's pass does not build it again from
+    /// zero (it did, and on a node under load built a 300-vector index twice), and
+    /// `listSearchIndexes` keeps showing it `READY` instead of the catalog's status.
+    #[test]
+    fn an_index_a_query_holds_is_still_served() {
+        let shared = Shared::default();
+        let id = [3; 12];
+        lock(&shared).search.built.insert(id, built(0));
+        assert_eq!(lock(&shared).search.served(&id).map(|s| s.version), Some(0));
+        let held = take(&shared, &id).expect("free").expect("built");
+        assert!(!lock(&shared).search.in_memory(&id));
+        assert!(take(&shared, &id).is_none(), "a second operation waits for it");
+        assert_eq!(lock(&shared).search.served(&id).map(|s| s.version), Some(0));
+        // The builder gives back a newer version while the query holds the old one: the query's
+        // mark stays until it gives back its own, which then gives way to the newer one.
+        give_back(&shared, id, built(1), false).expect("given back");
+        assert!(lock(&shared).search.borrowed.contains_key(&id));
+        give_back(&shared, id, held, false).expect("given back");
+        assert!(lock(&shared).search.borrowed.is_empty());
+        assert_eq!(lock(&shared).search.served(&id).map(|s| s.version), Some(1));
+        assert!(take(&shared, &[4; 12]).expect("free").is_none(), "an index never built");
     }
 
     #[test]
