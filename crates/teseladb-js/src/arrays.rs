@@ -576,10 +576,8 @@ fn each(
     (rev, skip): (bool, bool),
     mut on: impl FnMut(&Val, usize, &Val) -> bool,
 ) -> R<usize> {
+    check_callback(it, this, a)?;
     let f = arg(a, 0);
-    if !f.is_callable() {
-        return Err(bad_callback(it, a));
-    }
     let v = if skip { elements(it, this)? } else { items(it, this)? };
     let order: Vec<usize> = if rev { (0..v.len()).rev().collect() } else { (0..v.len()).collect() };
     for i in order.into_iter().filter(|i| !is_hole(&v[*i])) {
@@ -593,7 +591,9 @@ fn each(
 
 /// «f is not a function» for a callback, which the call names by its expression.
 pub(crate) fn not_a_function(it: &mut Interp, f: &Val) -> crate::interp::Ctrl {
-    it.operand_error(f, |t| format!("{t} is not a function"))
+    let e = it.operand_error(f, |t| format!("{t} is not a function"));
+    it.operand_arg = Some(0);
+    e
 }
 
 /// The error of a callback `a[0]` that is not a function. Without arguments the self-hosted
@@ -661,12 +661,17 @@ pub(crate) fn find_last_index(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 
 /// The callback is checked before the new array is made (ECMA-262 §23.1.3.8, §23.1.3.21,
 /// §23.1.3.14).
-fn check_callback(it: &mut Interp, a: &[Val]) -> R<()> {
-    if arg(a, 0).is_callable() { Ok(()) } else { Err(bad_callback(it, a)) }
+fn check_callback(it: &mut Interp, this: &Val, a: &[Val]) -> R<()> {
+    if arg(a, 0).is_callable() {
+        return Ok(());
+    }
+    // `this` becomes an object first: `can't convert null to object` (measured on 03-11).
+    it.object_of(this)?;
+    Err(bad_callback(it, a))
 }
 
 fn filter(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    check_callback(it, a)?;
+    check_callback(it, this, a)?;
     let target = species(it, this, 0)?;
     let mut out = Vec::new();
     each(it, this, a, (false, true), |x, _, r| {
@@ -684,7 +689,7 @@ fn map(it: &mut Interp, this: &Val, a: &[Val]) -> R {
         Val::Obj(o) if let Kind::Array(v) = &o.borrow().kind => v.len(),
         _ => 0,
     };
-    check_callback(it, a)?;
+    check_callback(it, this, a)?;
     let target = species(it, this, len)?;
     let out = mapped(it, this, a)?;
     species_result(it, target, out, false)
@@ -727,10 +732,8 @@ pub(crate) fn every(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 }
 
 fn reduce_in(it: &mut Interp, this: &Val, a: &[Val], rev: bool) -> R {
+    check_callback(it, this, a)?;
     let f = arg(a, 0);
-    if !f.is_callable() {
-        return Err(bad_callback(it, a));
-    }
     let v = elements(it, this)?;
     let mut order: Vec<usize> =
         if rev { (0..v.len()).rev().collect() } else { (0..v.len()).collect() };
@@ -919,7 +922,7 @@ fn flat(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 }
 
 fn flat_map(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    check_callback(it, a)?;
+    check_callback(it, this, a)?;
     let target = species(it, this, 0)?;
     let v = mapped(it, this, a)?;
     let mut out = Vec::new();

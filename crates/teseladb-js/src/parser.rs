@@ -667,7 +667,7 @@ impl Parser {
             {
                 self.i += 2;
                 let name_pos = self.pos_at(usize::from(self.is("*")));
-                let f = self.function_rest(pos, false, true, false)?;
+                let f = self.function_rest(pos, true, false)?;
                 let name = self.statement_name(f.name.clone())?;
                 self.declare(&name, Decl::Function { plain: false }, name_pos)?;
                 Ok(Stmt::Func(name, f))
@@ -675,7 +675,7 @@ impl Parser {
             "function" => {
                 self.i += 1;
                 let name_pos = self.pos_at(usize::from(self.is("*")));
-                let f = self.function_rest(pos, false, false, false)?;
+                let f = self.function_rest(pos, false, false)?;
                 let name = self.statement_name(f.name.clone())?;
                 self.declare(&name, Decl::Function { plain: !f.generator }, name_pos)?;
                 Ok(Stmt::Func(name, f))
@@ -1304,7 +1304,6 @@ impl Parser {
     fn function_rest(
         &mut self,
         start: Pos,
-        method: bool,
         is_async: bool,
         expression: bool,
     ) -> Result<Rc<FuncDef>, SyntaxError> {
@@ -1315,11 +1314,7 @@ impl Parser {
         if expression {
             self.in_gen = generator;
         }
-        let name = if !method && matches!(self.tok(), Tok::Ident(_)) && !self.is("(") {
-            self.ident()
-        } else {
-            Ok("".into())
-        };
+        let name = if matches!(self.tok(), Tok::Ident(_)) { self.ident() } else { Ok("".into()) };
         self.in_gen = outer;
         let name = name?;
         let name = if name.is_empty() { None } else { Some(name) };
@@ -2224,13 +2219,13 @@ impl Parser {
             Tok::Punct("[") => self.nested(crate::recursion::PAREN, true, Self::array_literal)?,
             Tok::Punct("{") => self.nested(crate::recursion::OBJECT, true, Self::object_literal)?,
             Tok::Ident(w) => match &*w {
-                "function" => Expr::Func(self.function_rest(pos, false, false, true)?),
+                "function" => Expr::Func(self.function_rest(pos, false, true)?),
                 "async"
                     if matches!(self.tok(), Tok::Ident(w) if &**w == "function")
                         && !self.toks[self.i].newline_before =>
                 {
                     self.i += 1;
-                    Expr::Func(self.function_rest(pos, false, true, true)?)
+                    Expr::Func(self.function_rest(pos, true, true)?)
                 }
                 "class" => Expr::Class(self.class_rest()?),
                 "this" => Expr::This,
@@ -2291,7 +2286,8 @@ impl Parser {
 
     /// Whether the next token, on the same line, starts an operand: a literal or a name.
     fn operand_follows(&self) -> bool {
-        let Some(t) = self.toks.get(self.i) else { return false };
+        // The tokens end with `Eof`, which is never read past.
+        let t = &self.toks[self.i];
         !t.newline_before
             && match &t.tok {
                 Tok::Num(_) | Tok::BigInt(_) | Tok::Str(_) | Tok::Template(..) => true,

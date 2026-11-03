@@ -52,6 +52,7 @@ pub(crate) fn interp<'c>(realm: Realm, budget: Rc<Budget>, limits: Limits) -> In
         envs: vec![Rc::downgrade(&global_env)],
         native: Name::from(""),
         operand_failure: None,
+        operand_arg: None,
         conversion_called: false,
         global_env,
         now_ms: 0.0,

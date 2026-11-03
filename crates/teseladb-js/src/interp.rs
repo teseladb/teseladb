@@ -203,6 +203,10 @@ pub struct Interp<'c> {
     /// The last error about an operand (`can't convert ({}) to number`): the error, the operand
     /// and the text written for it, which the operator that sees its expression may replace.
     pub operand_failure: Option<(ObjRef, Val, String)>,
+    /// The argument a native refused as its callback: the call names it by the expression in
+    /// that place, whatever its value (measured on a `refrouter` 9.0.4 on 03-11:
+    /// `[].forEach.call(a, 5)` is `a is not a function`).
+    pub operand_arg: Option<usize>,
     /// Whether the conversion to a primitive that failed last called a method of the object
     /// (`valueOf`, `toString`): SpiderMonkey then names fewer operands.
     pub conversion_called: bool,
@@ -691,6 +695,7 @@ impl<'c> Interp<'c> {
             Err(c) => return c,
         };
         self.operand_failure = Some((o.clone(), v.clone(), text));
+        self.operand_arg = None;
         Ctrl::Throw(Val::Obj(o))
     }
 
@@ -705,6 +710,18 @@ impl<'c> Interp<'c> {
         let Some((e, _)) = operands.iter().find(|(_, x)| strict_eq(x, &v)) else { return r };
         let name = crate::decompile::operand_text(self, e, &v);
         replace_in_message(err, &text, &name);
+        r
+    }
+
+    /// `r`, with the operand named by the expression `e` of value `v` in its place.
+    fn name_operand_at<T>(&mut self, r: R<T>, e: &Expr, v: &Val) -> R<T> {
+        match (&r, self.operand_failure.take()) {
+            (Err(Ctrl::Throw(Val::Obj(err))), Some((_, _, text))) => {
+                let name = crate::decompile::operand_text(self, e, v);
+                replace_in_message(err, &text, &name);
+            }
+            _ => unreachable!("`name_arguments` checked the failure"),
+        }
         r
     }
 
@@ -3184,6 +3201,15 @@ impl<'c> Interp<'c> {
     /// `Math.max(o)`, `new Date(o)`; `String(o)` names it in both cases).
     fn name_arguments(&mut self, r: R, f: &Val, exprs: &[Expr], args: &[Val]) -> R {
         let Some(name) = native_name(f) else { return r };
+        let arg = self.operand_arg.take();
+        if let Some(i) = arg
+            && let (Some(e), Some(v)) = (exprs.get(i), args.get(i))
+            && !exprs.iter().any(|e| matches!(e, Expr::Spread(_)))
+            && let (Err(Ctrl::Throw(Val::Obj(err))), Some((o, ..))) = (&r, &self.operand_failure)
+            && o.ptr_eq(err)
+        {
+            return self.name_operand_at(r, e, v);
+        }
         if r.is_err()
             && !matches!(&*name, "isNaN" | "concat")
             && !exprs.iter().any(|e| matches!(e, Expr::Spread(_)))

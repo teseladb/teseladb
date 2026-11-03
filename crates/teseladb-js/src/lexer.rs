@@ -693,9 +693,13 @@ impl Lexer {
                         };
                         out.push(d);
                         if d == '\\' {
-                            if let Some(e) = self.bump() {
-                                out.push(e);
-                            }
+                            let Some(e) = self.bump() else {
+                                return self.err(format!(
+                                    "reached end of script in the middle of an escape sequence in \
+                                     a {c}{c} literal"
+                                ));
+                            };
+                            out.push(e);
                         } else if d == c {
                             break;
                         }

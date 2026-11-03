@@ -496,13 +496,15 @@ fn g_byte_offset(it: &mut Interp, this: &Val, _: &[Val]) -> R {
 fn g_buffer(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     let v = this_view(it, this)?;
     let o = it.alloc(Some(it.realm.proto("ArrayBuffer")), Kind::ArrayBuffer(v.buf.clone()))?;
-    if let Val::Obj(t) = this {
-        // The same buffer object each time.
-        if let Some(p) = t.borrow().get_own("@@buffer") {
-            return Ok(p.value.clone());
-        }
-        t.borrow_mut().props.push(("@@buffer".into(), Prop::hidden(Val::Obj(o.clone()))));
+    let t = match this {
+        Val::Obj(t) => t,
+        _ => unreachable!("`this_view` checked a typed array"),
+    };
+    // The same buffer object each time.
+    if let Some(p) = t.borrow().get_own("@@buffer") {
+        return Ok(p.value.clone());
     }
+    t.borrow_mut().props.push(("@@buffer".into(), Prop::hidden(Val::Obj(o.clone()))));
     Ok(Val::Obj(o))
 }
 
@@ -1098,8 +1100,10 @@ fn dv_byte_offset(it: &mut Interp, this: &Val, _: &[Val]) -> R {
 
 fn dv_buffer(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     this_dv(it, this)?;
-    let Val::Obj(o) = this else { return Ok(Val::Undef) };
-    Ok(o.borrow().get_own("@@buffer").map_or(Val::Undef, |p| p.value.clone()))
+    match this {
+        Val::Obj(o) => Ok(o.borrow().get_own("@@buffer").map_or(Val::Undef, |p| p.value.clone())),
+        _ => unreachable!("`this_dv` checked a DataView"),
+    }
 }
 
 /// The element view of `ty` at byte `index` of a `DataView`, checked against its bounds.
