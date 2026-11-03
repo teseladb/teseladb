@@ -29,9 +29,11 @@ pub const SCRATCH_PREFIX: &str = "system.teseladb.txn.";
 /// `create`.
 const CREATE: &str = "create";
 /// `createIndexes`.
-const CREATE_INDEXES: &str = "createIndexes";
+pub const CREATE_INDEXES: &str = "createIndexes";
 /// The field of `createIndexes`' reply that says whether it created the collection.
 pub const CREATED_AUTOMATICALLY: &str = "createdCollectionAutomatically";
+/// The field of a reply that holds each shard's own reply.
+const RAW: &str = "raw";
 /// `errmsg` of a view created in a transaction (measured on 9.0.4).
 pub const VIEW_IN_TRANSACTION: &str = "Cannot create a view in a multi-document transaction.";
 /// `errmsg` of a time series created in a transaction (measured on 9.0.4).
@@ -179,13 +181,29 @@ pub fn precheck(
 }
 
 /// `createIndexes`' reply on a collection the transaction created: RefDb says it created the
-/// collection, also when an earlier statement did (measured on 9.0.4).
+/// collection, also when an earlier statement did, at the top and in the shard's reply under
+/// `raw` (measured on 9.0.4 on 31-10-2026 and 03-11-2026).
 pub fn mark_created(created: &[Created], db: &str, cmd: &Document, reply: &mut Document) {
     let Some(Value::String(c)) = cmd.get(CREATE_INDEXES) else { return };
     let ns = Namespace { db: db.to_owned(), coll: c.clone() };
-    if find(created, &ns).is_some() && reply.get(CREATED_AUTOMATICALLY).is_some() {
-        reply.insert(CREATED_AUTOMATICALLY, Value::Boolean(true));
+    if find(created, &ns).is_none() || reply.get(CREATED_AUTOMATICALLY).is_none() {
+        return;
     }
+    reply.insert(CREATED_AUTOMATICALLY, Value::Boolean(true));
+    let Some(Value::Document(raw)) = reply.get(RAW) else { return };
+    let mut marked = Document::new();
+    for (shard, answer) in raw.iter() {
+        let answer = match answer {
+            Value::Document(a) if a.get(CREATED_AUTOMATICALLY).is_some() => {
+                let mut a = a.clone();
+                a.insert(CREATED_AUTOMATICALLY, Value::Boolean(true));
+                Value::Document(a)
+            }
+            other => other.clone(),
+        };
+        marked.push(shard, answer);
+    }
+    reply.insert(RAW, Value::Document(marked));
 }
 
 /// Gives the transaction's collections their names before its commit. A name another client

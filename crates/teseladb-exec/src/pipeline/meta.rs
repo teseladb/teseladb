@@ -140,6 +140,24 @@ impl Env for RequiredEnv<'_> {
         self.inner.search_source(stage, spec)
     }
 
+    fn joined_text_source(
+        &self,
+        name: &str,
+        filter: &Document,
+        vars: Option<&Document>,
+    ) -> Result<Vec<super::search::Scored>, MqlError> {
+        self.inner.joined_text_source(name, filter, vars)
+    }
+
+    fn joined_search_source(
+        &self,
+        name: &str,
+        query: (&str, &Document),
+        from_lookup: bool,
+    ) -> Result<Vec<super::search::Scored>, MqlError> {
+        self.inner.joined_search_source(name, query, from_lookup)
+    }
+
     fn collation(&self) -> crate::collation::Collation {
         self.inner.collation()
     }
@@ -180,6 +198,24 @@ pub(crate) const SEARCH_META: &str = "SEARCH_META";
 impl Env for MetaEnv<'_> {
     fn ext(&self) -> &dyn Extensions {
         self.inner.ext()
+    }
+
+    fn joined_text_source(
+        &self,
+        name: &str,
+        filter: &Document,
+        vars: Option<&Document>,
+    ) -> Result<Vec<super::search::Scored>, MqlError> {
+        self.inner.joined_text_source(name, filter, vars)
+    }
+
+    fn joined_search_source(
+        &self,
+        name: &str,
+        query: (&str, &Document),
+        from_lookup: bool,
+    ) -> Result<Vec<super::search::Scored>, MqlError> {
+        self.inner.joined_search_source(name, query, from_lookup)
     }
 
     fn vars(&self) -> Option<&Document> {
@@ -270,6 +306,14 @@ pub struct Score {
 const STAGE: &str = "$score";
 
 impl Score {
+    /// The metadata it gives every document: the score, and its details when asked for.
+    pub(crate) fn gives(&self) -> &'static [&'static str] {
+        match self.details {
+            true => &[SCORE, SCORE_DETAILS],
+            false => &[SCORE],
+        }
+    }
+
     /// Reads `$score` (measured on a `refrouter` 9.0.4).
     pub fn parse(v: RawValue<'_>, ctx: &Ctx) -> Result<Score, MqlError> {
         let RawValue::Document(d) = v else {
@@ -448,8 +492,7 @@ pub(crate) fn shown_expression(x: RawValue<'_>) -> Result<String, MqlError> {
 pub const META_MISSING: ErrorCode = ErrorCode { code: 40_218, name: "Location40218" };
 
 /// The stages after which documents have no metadata.
-const DROPPING: [&str; 6] =
-    ["$group", "$bucket", "$bucketAuto", "$sortByCount", "$count", "$unionWith"];
+const DROPPING: [&str; 5] = ["$group", "$bucket", "$bucketAuto", "$sortByCount", "$count"];
 
 /// The metadata a stage gives its documents (`$match` only with `$text`, which goes first).
 fn given_by(name: &str, arg: RawValue<'_>) -> Vec<&'static str> {
@@ -500,6 +543,9 @@ fn check_pipeline(
     on_collection: bool,
 ) -> Result<(), MqlError> {
     let mut leading = on_collection;
+    // Whether a stage before gave the text score, which a `$match` with `$text` in a `$facet`
+    // reads (measured on 9.0.4: 40218 without a first one, also after a `$group`).
+    let mut texted = false;
     for st in stages {
         let RawValue::Document(d) = st else { continue };
         let Some((name, arg)) = d.iter().next() else { continue };
@@ -509,6 +555,9 @@ fn check_pipeline(
                     for (_, p) in f.iter() {
                         if let RawValue::Array(p) = p {
                             let p: Vec<_> = p.iter().collect();
+                            if !texted && p.first().is_some_and(|s| text_match(*s)) {
+                                return Err(crate::expr::missing_meta(TEXT_SCORE));
+                            }
                             check_pipeline(&p, available.clone(), false)?;
                         }
                     }
@@ -518,6 +567,10 @@ fn check_pipeline(
             _ => {
                 let mut read = Vec::new();
                 metas_read(arg, &mut read);
+                // The `$match` with the `$text` reads the score as nothing (measured on 9.0.4).
+                if text_match(*st) {
+                    read.retain(|n| n != TEXT_SCORE);
+                }
                 for r in &read {
                     if crate::expr::meta_is_required(r) && !available.contains(&r.as_str()) {
                         let mut e = crate::expr::missing_meta(r);
@@ -530,14 +583,28 @@ fn check_pipeline(
             }
         }
         leading = leading && matches!(name, "$match" | "$sort");
-        available.extend(given_by(name, arg));
+        let given = given_by(name, arg);
+        texted |= given.contains(&TEXT_SCORE);
+        available.extend(given);
         if DROPPING.contains(&name) {
-            // The scores of a search stage stay readable, as nothing (measured on 9.0.4 after
-            // `$group`); the other metadata goes.
-            available.retain(|n| *n == SEARCH_SCORE || *n == VECTOR_SEARCH_SCORE);
+            // The scores of a search stage and of a `$text` stay readable, as nothing (measured
+            // on 9.0.4 after `$group`); the other metadata goes.
+            available.retain(|n| [SEARCH_SCORE, VECTOR_SEARCH_SCORE, TEXT_SCORE].contains(n));
+        }
+        if name == "$unionWith" {
+            // The documents keep their metadata and those it adds bring their own, missing
+            // where its pipeline gives none (measured on 9.0.4); this engine gives no
+            // `$geoNear` metadata to read then.
+            available.retain(|n| !n.starts_with("geoNear"));
         }
     }
     Ok(())
+}
+
+/// Whether stage `st` is a `$match` with `$text`.
+fn text_match(st: RawValue<'_>) -> bool {
+    matches!(st, RawValue::Document(d)
+        if matches!(d.get("$match"), Some(RawValue::Document(m)) if super::has_text(m)))
 }
 
 /// The metadata names `v` reads with `$meta` (anywhere in a stage's specification).
@@ -567,7 +634,7 @@ mod env_tests {
         let _ = env.collation();
         let none = Document::new();
         format!(
-            "{:?} {:?} {:?} {} {} {:?} {:?} {:?} {} {} {} {} {}",
+            "{:?} {:?} {:?} {} {} {:?} {:?} {:?} {} {} {} {} {} {:?} {:?} {:?} {:?}",
             env.vars(),
             env.collection("c"),
             env.collection_matching("c", &none),
@@ -581,6 +648,10 @@ mod env_tests {
             env.allow_disk_use(),
             env.stage_memory_limit(),
             env.spill().is_none(),
+            env.text_source(&none).map_err(|e| e.code.code),
+            env.joined_text_source("c", &none, None).map_err(|e| e.code.code),
+            env.joined_search_source("c", ("$search", &none), true).map_err(|e| e.code.code),
+            env.scope(&none).root,
         )
     }
 
@@ -600,6 +671,11 @@ mod env_tests {
         let meta = Meta::new();
         let wrapped = MetaEnv { inner: &inner, meta: &meta, marked: &[] };
         assert_eq!(answers(&wrapped), direct);
+        // And the environment of a joined pipeline, whose `$text` and search stages read the
+        // joined collection's indexes, which a reference without a node has not.
+        let inner = reference();
+        let joined = super::super::joined::Joined { inner: &inner, coll: "c", from_lookup: true };
+        assert_eq!(answers(&joined), direct);
     }
 
     /// Malformed stages are left to the stage parsers, which run after the check.

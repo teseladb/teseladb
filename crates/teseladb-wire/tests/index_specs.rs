@@ -46,8 +46,9 @@ fn listed(m: &mut Mem, name: &str) -> Document {
 #[test]
 fn errors_come_as_a_refrouter_forwards_them() {
     let mut m = Mem::new();
+    // `createIndexes` puts the shard's own reply first, under `raw` (measured on 03-11-2026).
     let r = create(&mut m, "c", vec![]);
-    assert_eq!(names(&r)[..4], ["code", "codeName", "ok", "errmsg"]);
+    assert_eq!(names(&r)[..5], ["raw", "code", "codeName", "ok", "errmsg"]);
     let drop = m.run(DB, Document::new().with("dropIndexes", "nope").with("index", "*"));
     assert_eq!(names(&drop)[..4], ["code", "codeName", "ok", "errmsg"]);
 }

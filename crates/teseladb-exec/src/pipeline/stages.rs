@@ -5,15 +5,16 @@
 use std::sync::Arc;
 
 use teseladb_bson::{Document, RawDoc, RawValue, Value};
-use teseladb_mql::{ErrorCode, Extensions, Filter, FilterUse, MqlError};
+use teseladb_mql::{ErrorCode, Filter, FilterUse, MqlError};
 
 use super::errors::{
     BAD_VALUE, COUNT_DOLLAR, COUNT_DOT, COUNT_EMPTY, COUNT_ID, COUNT_TYPE, FACET_ARRAY,
     FACET_EMPTY, FACET_STAGE, FAILED_TO_PARSE, LIMIT_ARGUMENT, LIMIT_ZERO, MATCH_NOT_OBJECT,
     MISSING_FIELD, NEAR_IN_MATCH, REDACT_RESULT, SAMPLE_MISSING, SAMPLE_SIZE, SKIP_ARGUMENT,
-    UNKNOWN_FIELD, UNWIND_INDEX_PREFIX, UNWIND_NO_PATH, UNWIND_OPTION, UNWIND_PREFIX,
-    UNWIND_PRESERVE, error,
+    TEXT_IN_FACET, TEXT_NOT_FIRST, UNKNOWN_FIELD, UNWIND_INDEX_PREFIX, UNWIND_NO_PATH,
+    UNWIND_OPTION, UNWIND_PREFIX, UNWIND_PRESERVE, error,
 };
+use super::joined::{Joined, LetVars, WithVars};
 use super::sort::check_path;
 use super::{Env, Pipeline};
 use crate::expr::arith::raw_type_name;
@@ -61,6 +62,11 @@ impl Match {
         }
         check_exprs(d, ctx)?;
         Ok(Match { filter: Arc::new(filter) })
+    }
+
+    /// The `$match` of a filter already read.
+    pub(crate) fn of(filter: Filter) -> Match {
+        Match { filter: Arc::new(filter) }
     }
 
     /// The documents of `docs` that match.
@@ -468,6 +474,17 @@ pub struct Facet {
     facets: Vec<(String, Pipeline)>,
 }
 
+/// RefDb's error for a `$match` with `$text` that is not the first stage of its pipeline.
+pub(crate) fn text_not_first() -> MqlError {
+    error(TEXT_NOT_FIRST, "$match with $text is only allowed as the first pipeline stage")
+}
+
+/// RefDb's error for a `$match` with `$text` in a `$facet`, which has no text index to read
+/// (measured on 9.0.4, 011 T054).
+pub(crate) fn text_in_facet() -> MqlError {
+    error(TEXT_IN_FACET, "Should never call getNext on a $match stage with $text clause")
+}
+
 impl Facet {
     /// Reads `{name: [stages]}`.
     pub fn parse(v: RawValue<'_>, ctx: &Ctx) -> Result<Facet, MqlError> {
@@ -510,6 +527,11 @@ impl Facet {
         Ok(Facet { facets })
     }
 
+    /// Whether one of its pipelines starts with a `$match` with `$text`.
+    pub(crate) fn has_text(&self) -> bool {
+        self.facets.iter().any(|(_, p)| p.starts_with_text())
+    }
+
     /// [`Facet::run`] over documents with metadata, which each facet's stages see.
     pub(crate) fn run_with_meta(
         &self,
@@ -517,6 +539,9 @@ impl Facet {
         metas: Vec<super::meta::Meta>,
         env: &dyn Env,
     ) -> Result<Vec<Document>, MqlError> {
+        if self.has_text() {
+            return Err(text_in_facet());
+        }
         let mut out = Document::new();
         for (name, p) in &self.facets {
             let (results, _) = p.run_with_meta(docs.clone(), Some(metas.clone()), env, false)?;
@@ -530,6 +555,9 @@ impl Facet {
 
     /// One document with each facet's results.
     pub fn run(&self, docs: Vec<Document>, env: &dyn Env) -> Result<Vec<Document>, MqlError> {
+        if self.has_text() {
+            return Err(text_in_facet());
+        }
         let mut out = Document::new();
         for (name, p) in &self.facets {
             let results = p.run_in(docs.clone(), env, false)?;
@@ -539,61 +567,6 @@ impl Facet {
             );
         }
         Ok(vec![out])
-    }
-}
-
-/// The variables of `$lookup`'s `let`: those bound to a value, and those bound to a missing one
-/// (`$$kk` of a missing field is missing, not `null`).
-#[derive(Clone, Debug, Default)]
-struct LetVars {
-    set: Document,
-    missing: Vec<String>,
-}
-
-impl LetVars {
-    /// A scope over `doc` with these variables.
-    fn scope(&self, doc: &Document) -> Scope {
-        let mut s = Scope::new(doc.clone(), Some(&self.set));
-        for n in &self.missing {
-            s.vars.insert(n.clone(), None);
-        }
-        s
-    }
-}
-
-/// An environment with more variables (`$lookup`'s `let`).
-struct WithVars<'a> {
-    inner: &'a dyn Env,
-    vars: &'a LetVars,
-}
-
-impl Env for WithVars<'_> {
-    fn ext(&self) -> &dyn Extensions {
-        self.inner.ext()
-    }
-
-    fn vars(&self) -> Option<&Document> {
-        Some(&self.vars.set)
-    }
-
-    fn scope(&self, doc: &Document) -> Scope {
-        self.vars.scope(doc).with_collation(self.inner.collation()).with_js(self.inner.js())
-    }
-
-    fn collation(&self) -> crate::collation::Collation {
-        self.inner.collation()
-    }
-
-    fn collection(&self, name: &str) -> Result<Vec<Document>, MqlError> {
-        self.inner.collection(name)
-    }
-
-    fn random(&self) -> f64 {
-        self.inner.random()
-    }
-
-    fn js(&self) -> Option<std::rc::Rc<dyn crate::expr::js::JsEngine>> {
-        self.inner.js()
     }
 }
 
@@ -670,7 +643,13 @@ impl Lookup {
                 joined_error = super::meta::check_joined(&s)
                     .and_then(|()| super::sort::check_random_sort(&s))
                     .err();
-                Some(Pipeline::parse(&s, &inner)?)
+                let p = Pipeline::parse(&s, &inner)?;
+                // The equality of `localField` and `foreignField` goes before the pipeline's
+                // stages, and its `$text` is no longer first (measured on 9.0.4).
+                if local.is_some() && p.starts_with_text() {
+                    joined_error = Some(text_not_first());
+                }
+                Some(p)
             }
             (Some(s), None) => {
                 super::meta::check_available(&s)?;
@@ -722,7 +701,11 @@ impl Lookup {
         if let Some(e) = self.joined_error.as_ref().filter(|_| !docs.is_empty()) {
             return Err(e.clone());
         }
+        // A pipeline whose first stage reads no input (a `$text` reads the text index) needs
+        // no foreign documents.
+        let unread = self.pipeline.as_ref().is_some_and(|p| !p.reads_collection());
         let foreign_docs = match (&self.from, self.wanted(&docs, env)) {
+            (Some(_), _) if unread => Vec::new(),
             (Some(f), Some(filter)) => env.collection_matching(f, &filter)?,
             (Some(f), None) => env.collection(f)?,
             (None, _) => Vec::new(),
@@ -760,12 +743,27 @@ impl Lookup {
                         None => vars.missing.push(n.clone()),
                     }
                 }
-                let sub = WithVars { inner: env, vars: &vars };
-                joined = match join.filter(|_| self.from.is_none()) {
-                    Some((l, f)) => {
-                        p.run_split(joined, &sub, |docs| equal_join(&d, l, f, &docs, env))?
+                let with_vars = WithVars { inner: env, vars: &vars };
+                joined = match (join, &self.from) {
+                    (Some((l, f)), None) => {
+                        p.run_split(joined, &with_vars, |docs| equal_join(&d, l, f, &docs, env))?
                     }
-                    None => p.run_in(joined, &sub, false)?,
+                    // The equality applies to what a first search stage gives, before the other
+                    // stages (measured on 9.0.4).
+                    (Some((l, f)), Some(coll)) if p.starts_with_search() => {
+                        let p = p.with_match_after_first(Match::of(equality(&d, l, f)?));
+                        p.run_in(
+                            joined,
+                            &Joined { inner: &with_vars, coll, from_lookup: true },
+                            false,
+                        )?
+                    }
+                    (_, Some(coll)) => p.run_in(
+                        joined,
+                        &Joined { inner: &with_vars, coll, from_lookup: true },
+                        false,
+                    )?,
+                    (None, None) => p.run_in(joined, &with_vars, false)?,
                 };
             }
             let mut e = d;
@@ -875,14 +873,7 @@ fn equal_join(
     docs: &[Document],
     env: &dyn Env,
 ) -> Result<Vec<Document>, MqlError> {
-    let mut values: Vec<Value> = Vec::new();
-    let segs: Vec<&str> = local.split('.').collect();
-    collect_local(&Value::Document(d.clone()), &segs, &mut values);
-    if values.is_empty() {
-        values.push(Value::Null);
-    }
-    let spec = Document::new().with(foreign, Document::new().with("$in", Value::Array(values)));
-    let filter = crate::raw::with_raw_doc(&spec, |raw| Filter::parse(raw, FilterUse::Query))?;
+    let filter = equality(d, local, foreign)?;
     let mut out = Vec::new();
     for f in docs {
         if matches(&filter, f, env)? {
@@ -890,6 +881,18 @@ fn equal_join(
         }
     }
     Ok(out)
+}
+
+/// The filter of the foreign documents whose `foreign` field equals a value of `local` in `d`.
+fn equality(d: &Document, local: &str, foreign: &str) -> Result<Filter, MqlError> {
+    let mut values: Vec<Value> = Vec::new();
+    let segs: Vec<&str> = local.split('.').collect();
+    collect_local(&Value::Document(d.clone()), &segs, &mut values);
+    if values.is_empty() {
+        values.push(Value::Null);
+    }
+    let spec = Document::new().with(foreign, Document::new().with("$in", Value::Array(values)));
+    crate::raw::with_raw_doc(&spec, |raw| Filter::parse(raw, FilterUse::Query))
 }
 
 /// The values a local path reaches: through documents and arrays of documents, an array's
@@ -979,15 +982,43 @@ impl UnionWith {
 
     /// `docs` and then the results of the other collection's pipeline.
     pub fn run(&self, mut docs: Vec<Document>, env: &dyn Env) -> Result<Vec<Document>, MqlError> {
+        docs.extend(self.joined(env)?.0);
+        Ok(docs)
+    }
+
+    /// [`UnionWith::run`] over documents with metadata `metas`: the documents it adds bring the
+    /// metadata of its pipeline, none where it gives none.
+    pub(crate) fn run_with_meta(
+        &self,
+        mut docs: Vec<Document>,
+        mut metas: Vec<super::meta::Meta>,
+        env: &dyn Env,
+    ) -> Result<(Vec<Document>, Vec<super::meta::Meta>), MqlError> {
+        let (more, more_metas) = self.joined(env)?;
+        let n = more.len();
+        docs.extend(more);
+        metas.extend(more_metas.unwrap_or_else(|| vec![super::meta::Meta::new(); n]));
+        Ok((docs, metas))
+    }
+
+    /// The results of the other collection's pipeline, with their metadata.
+    fn joined(
+        &self,
+        env: &dyn Env,
+    ) -> Result<(Vec<Document>, Option<Vec<super::meta::Meta>>), MqlError> {
         if let Some(e) = &self.joined_error {
             return Err(e.clone());
         }
-        let input = match &self.coll {
-            Some(c) => env.collection(c)?,
-            None => Vec::new(),
-        };
-        docs.extend(self.pipeline.run(input, env)?);
-        Ok(docs)
+        match &self.coll {
+            Some(c) => {
+                // A `$text` first reads the text index instead of the documents.
+                let input =
+                    if self.pipeline.reads_collection() { env.collection(c)? } else { Vec::new() };
+                let joined = Joined { inner: env, coll: c, from_lookup: false };
+                self.pipeline.run_with_meta(input, None, &joined, true)
+            }
+            None => self.pipeline.run_with_meta(Vec::new(), None, env, true),
+        }
     }
 }
 

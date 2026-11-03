@@ -650,6 +650,104 @@ fn a_primary_write_reply_has_its_election_and_op_time() {
     assert!(r.get("electionId").is_none() && r.get("opTime").is_none(), "{r:?}");
 }
 
+/// A member's answers inside a transaction carry no `recoveryToken`, which only a `refrouter`
+/// adds (measured on a replica set of `ref:9.0.4`, 03-11-2026, in `txn-lifetime`).
+#[test]
+fn a_member_answers_a_transaction_without_a_recovery_token() {
+    let mut m = node();
+    replica(&mut m, N1);
+    let (set, _) = replica_set(&mut m).expect("read").expect("a set");
+    let me = set.member(N1).expect("member");
+    let at = OpTime { ts: Timestamp { time: 5, increment: 1 }, term: set.term() };
+    let view =
+        Arc::new(ReplicaView { set, me, last: LastWrite { op_time: at, majority_op_time: at } });
+    let lsid = Document::new().with("id", Value::Binary { subtype: 4, bytes: vec![9; 16] });
+    let txn = |d: Document, start: bool| {
+        let d = d.with("lsid", lsid.clone()).with("txnNumber", Value::Int64(1));
+        let d = if start { d.with("startTransaction", true) } else { d };
+        d.with("autocommit", false)
+    };
+    let one = Value::Document(Document::new().with("_id", 1));
+    let ins = Document::new().with("insert", "c").with("documents", vec![one]);
+    let r = dispatched(&mut m, "v", txn(ins, true), Some(view.clone()));
+    assert_eq!(r.get("n"), Some(&Value::Int32(1)), "{r:?}");
+    assert!(r.get("recoveryToken").is_none(), "{r:?}");
+    let commit = txn(Document::new().with("commitTransaction", 1), false);
+    let r = dispatched(&mut m, "admin", commit.clone(), Some(view.clone()));
+    assert!(r.get("recoveryToken").is_none(), "{r:?}");
+    let r = dispatched(
+        &mut m,
+        "admin",
+        txn(Document::new().with("abortTransaction", 1), false),
+        Some(view),
+    );
+    assert!(r.get("recoveryToken").is_none(), "an error too: {r:?}");
+}
+
+/// A member's answers to a transaction it does not run, as a replica set of `ref:9.0.4` gives
+/// them (measured on 03-11-2026): a start past `maxConcurrentMultiDocumentTransactions` leaves the
+/// session as it was, so the number can start again later; `NoSuchTransaction` names the number
+/// asked and the session's active one, or says that the transaction was aborted; and an error's
+/// `errorLabels` come first.
+#[test]
+fn a_member_answers_transactions_it_does_not_run() {
+    let mut m = node();
+    replica(&mut m, N1);
+    let (set, _) = replica_set(&mut m).expect("read").expect("a set");
+    let me = set.member(N1).expect("member");
+    let at = OpTime { ts: Timestamp { time: 5, increment: 1 }, term: set.term() };
+    let view =
+        Arc::new(ReplicaView { set, me, last: LastWrite { op_time: at, majority_op_time: at } });
+    let lsid = |n: u8| Document::new().with("id", Value::Binary { subtype: 4, bytes: vec![n; 16] });
+    let txn = |d: Document, s: u8, n: i64, start: bool| {
+        let d = d.with("lsid", lsid(s)).with("txnNumber", Value::Int64(n));
+        let d = if start { d.with("startTransaction", true) } else { d };
+        d.with("autocommit", false)
+    };
+    let find = || Document::new().with("find", "c");
+    let abort = || Document::new().with("abortTransaction", 1);
+    let limit = |n: i32| {
+        Document::new().with("setParameter", 1).with("maxConcurrentMultiDocumentTransactions", n)
+    };
+    let keys = |d: &Document| d.iter().map(|(k, _)| k.to_owned()).collect::<Vec<_>>();
+    let ok = |d: &Document| d.get("ok") == Some(&Value::Double(1.0));
+    let given = |asked: i64, active: i64, r: &Document| {
+        let (c, msg) = code(r);
+        assert_eq!(c, 251, "{r:?}");
+        assert!(msg.starts_with(&format!("Given transaction number {asked} on session ")), "{msg}");
+        assert!(
+            msg.ends_with(&format!(
+                " using txnRetryCounter 0 does not match any in-progress transactions. The active \
+                 transaction number is {active}"
+            )),
+            "{msg}"
+        );
+        assert_eq!(keys(r)[..2], ["errorLabels", "ok"], "{r:?}");
+    };
+    assert!(ok(&dispatched(&mut m, "admin", limit(1), Some(view.clone()))));
+    let r = dispatched(&mut m, "v", txn(find(), 1, 1, true), Some(view.clone()));
+    assert!(ok(&r), "{r:?}");
+    let r = dispatched(&mut m, "v", txn(find(), 2, 1, true), Some(view.clone()));
+    assert_eq!(code(&r).0, 509, "{r:?}");
+    // The refused start left the session without a transaction.
+    given(1, -1, &dispatched(&mut m, "v", txn(find(), 2, 1, false), Some(view.clone())));
+    given(1, -1, &dispatched(&mut m, "admin", txn(abort(), 2, 1, false), Some(view.clone())));
+    assert!(ok(&dispatched(&mut m, "admin", txn(abort(), 1, 1, false), Some(view.clone()))));
+    let r = dispatched(&mut m, "v", txn(find(), 2, 1, true), Some(view.clone()));
+    assert!(ok(&r), "the refused number starts now: {r:?}");
+    assert!(ok(&dispatched(&mut m, "admin", txn(abort(), 2, 1, false), Some(view.clone()))));
+    given(5, 1, &dispatched(&mut m, "v", txn(find(), 2, 5, false), Some(view.clone())));
+    // A commit of a number the member never ran: the same, and the number stays unused.
+    let commit = || Document::new().with("commitTransaction", 1);
+    given(7, 1, &dispatched(&mut m, "admin", txn(commit(), 2, 7, false), Some(view.clone())));
+    given(6, 1, &dispatched(&mut m, "admin", txn(commit(), 2, 6, false), Some(view.clone())));
+    // An aborted one says so.
+    let r = dispatched(&mut m, "v", txn(find(), 1, 1, false), Some(view.clone()));
+    assert_eq!(code(&r), (251, "Transaction with { txnNumber: 1 } has been aborted.".into()));
+    assert_eq!(keys(&r)[..2], ["errorLabels", "ok"], "{r:?}");
+    assert!(ok(&dispatched(&mut m, "admin", limit(10_000), Some(view))));
+}
+
 /// A member's `drop` gives `nIndexesWas` and `ns` for a collection, `ns` for a view and nothing
 /// for what does not exist (measured on a replica set of `ref:9.0.4`, 03-11-2026).
 #[test]
