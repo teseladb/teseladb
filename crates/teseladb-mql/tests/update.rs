@@ -507,6 +507,40 @@ fn pipelines_go_to_the_integration_point() {
     assert!(out.modified);
 }
 
+/// What a pipeline gives against the stored `_id`, measured on a `refrouter` 9.0.4 (03-11-2026):
+/// without `_id` it keeps the stored one, first; another `_id` is error 66; a top-level name with
+/// `$` (from `$setField`) is stored; and the update counts as a change when the pipeline's
+/// document differs from the stored one, even if putting the `_id` back makes them equal.
+#[test]
+fn a_pipeline_keeps_the_stored_id_and_may_write_dollar_names() {
+    let u = parse(r#"[{"$set": {"a": 1}}]"#, None).unwrap();
+    let stored = bytes(r#"{"_id": 1, "a": 1}"#);
+    let apply = |piped: &str| {
+        let ext = TestExt { piped: Some(common::doc(piped)), ..TestExt::default() };
+        let ctx = UpdateContext {
+            matcher: MatchContext { collation: None, ext: &ext, vars: None },
+            position: None,
+            now: NOW,
+            insert: false,
+        };
+        u.apply(raw(&stored), &ctx).map(|o| (json(&o.doc), o.modified))
+    };
+    assert_eq!(apply(r#"{"u": {"v": 1}}"#), Ok((canon(r#"{"_id": 1, "u": {"v": 1}}"#), true)));
+    assert_eq!(apply(r#"{"b": 1, "_id": 1}"#), Ok((canon(r#"{"_id": 1, "b": 1}"#), true)));
+    assert_eq!(apply(r#"{"a": 1}"#), Ok((canon(r#"{"_id": 1, "a": 1}"#), true)));
+    assert_eq!(apply(r#"{"_id": 1, "a": 1}"#), Ok((canon(r#"{"_id": 1, "a": 1}"#), false)));
+    assert_eq!(
+        apply(r#"{"_id": 1, "a": 1, "$a": 1}"#),
+        Ok((canon(r#"{"_id": 1, "a": 1, "$a": 1}"#), true))
+    );
+    let changed = apply(r#"{"_id": 2, "b": 1}"#).unwrap_err();
+    assert_eq!(changed.code, codes::IMMUTABLE_FIELD);
+    assert_eq!(
+        changed.message,
+        "After applying the update, the (immutable) field '_id' was found to have been altered to _id: 2"
+    );
+}
+
 #[test]
 fn errors() {
     let bad = codes::BAD_VALUE;
