@@ -216,3 +216,34 @@ fn the_served_collections_of_local() {
         "Fri Jan  2 01:02:03.004"
     );
 }
+
+/// More of RefDb 9.0.4's answers: a freeze for an infinite time unfreezes, a `replSetReconfig`
+/// whose `_id` is not a string goes on to its other checks, `replSetSyncFrom ""` cannot parse,
+/// and a fractional priority is shown as a double.
+#[test]
+fn more_member_answers() {
+    let mut m = node();
+    replica(&mut m, N2);
+    let r = admin(&mut m, Document::new().with("replSetFreeze", f64::INFINITY));
+    assert_eq!(r.get("info"), Some(&Value::from("unfreezing")), "{r:?}");
+    let r = admin(&mut m, Document::new().with("replSetSyncFrom", ""));
+    assert_eq!(code(&r), 9);
+    let conf = Document::new().with("_id", 5).with("version", 9);
+    let r = admin(&mut m, Document::new().with("replSetReconfig", conf));
+    assert_eq!(code(&r), 2, "{r:?}");
+    replica(&mut m, N1);
+    let half = Document::new().with("_id", "rs0").with("version", 9).with(
+        "members",
+        vec![Value::Document(
+            Document::new().with("_id", 0).with("host", N1).with("priority", 0.5),
+        )],
+    );
+    let r = admin(&mut m, Document::new().with("replSetReconfig", half));
+    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+    let r = admin(&mut m, Document::new().with("replSetGetStatus", 1));
+    assert_eq!(
+        field(&r, "electionCandidateMetrics.priorityAtElection"),
+        &Value::Double(0.5),
+        "{r:?}"
+    );
+}
