@@ -1218,3 +1218,67 @@ fn search_metrics_count_queries_and_segments() {
     assert!(after.segments >= 1, "{after:?}");
     assert!(after.memory_bytes > 0, "{after:?}");
 }
+
+/// A `vectorSearch` index next to a `search` one: the metrics count the segments of the `search`
+/// indexes alone, a memory part reckons the vector index at no bytes and never writes it out, and
+/// past the history retention it starts over from the documents too.
+#[test]
+fn a_vector_index_stays_out_of_the_metrics_and_the_memory_part() {
+    use std::sync::Arc;
+    use teseladb_wire::commands::lock;
+    use teseladb_wire::commands::search_ops::search_metrics;
+
+    let mut m = with_collection();
+    lock(&m.shared).search.set_store(Arc::new(MemStore::default()));
+    let row =
+        |id: i32, v: &[f64]| doc(&[("_id", id.into()), ("t", "hola".into()), ("v", floats(v))]);
+    insert(&mut m, vec![row(21, &[1.0, 0.0, 0.0]), row(22, &[0.0, 1.0, 0.0])]);
+    let vector = Document::new()
+        .with("type", "vector")
+        .with("path", "v")
+        .with("numDimensions", 3)
+        .with("similarity", "euclidean");
+    let def = Document::new().with("fields", arr(vec![vector]));
+    let reply = create(&mut m, "c", vec![index("ve", def).with("type", "vectorSearch")]);
+    let ve = id_bytes(&id_of(&reply, 0));
+    create(&mut m, "c", vec![index("default", dynamic(true))]);
+    let vs = || vec![Document::new().with("$vectorSearch", vector_query("ve", &[1.0, 0.0, 0.0]))];
+    assert_eq!(batch(&agg(&mut m, "c".into(), vs())).len(), 2);
+    batch(&search(&mut m, "c", "$search", text("hola")));
+    // The one segment of the `search` index; the vector index adds none.
+    let metrics = search_metrics(&m.shared);
+    assert_eq!(metrics.segments, 1, "{metrics:?}");
+    // A part of one byte writes the `search` index out and keeps the vector index.
+    lock(&m.shared).search.set_memory_limit(Some(1));
+    assert_eq!(batch(&agg(&mut m, "c".into(), vs())).len(), 2);
+    assert!(lock(&m.shared).search.in_memory(&ve));
+    lock(&m.shared).search.set_memory_limit(None);
+    // Past the history retention the vector index starts over without the deleted document.
+    m.now += 25 * 60 * 60 * 1000;
+    let del = Document::new().with("q", doc(&[("_id", 21.into())])).with("limit", 1);
+    m.run(DB, Document::new().with("delete", "c").with("deletes", arr(vec![del])));
+    assert_eq!(batch(&agg(&mut m, "c".into(), vs())).len(), 1);
+}
+
+/// The generic arguments every command takes, an index that is no object and a view whose
+/// `$match` holds more than `$expr`.
+#[test]
+fn create_takes_generic_arguments_and_checks_each_index() {
+    let mut m = with_collection();
+    let cmd = Document::new()
+        .with("createSearchIndexes", "c")
+        .with("indexes", arr(vec![index("default", dynamic(true))]))
+        .with("comment", "generic");
+    let r = m.run(DB, cmd);
+    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+    let cmd = Document::new()
+        .with("createSearchIndexes", "c")
+        .with("indexes", Value::Array(vec![1.into()]));
+    assert_eq!(error(&m.run(DB, cmd)).0, 14);
+    let both = Document::new()
+        .with("$expr", Document::new().with("$gte", Value::Array(vec!["$n".into(), 2.into()])))
+        .with("n", 1);
+    view(&mut m, "vx", "c", vec![Document::new().with("$match", both)]);
+    let r = create(&mut m, "vx", vec![index("default", dynamic(true))]);
+    assert_eq!(error(&r).0, 10_623_001);
+}

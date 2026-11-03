@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::builtins::method;
-use crate::interp::{Interp, PROP_BYTES, R};
+use crate::interp::{Interp, R};
 use crate::value::*;
 
 fn arg(args: &[Val], i: usize) -> Val {
@@ -119,61 +119,31 @@ fn has_own_elements(o: &ObjRef) -> bool {
     o.borrow().locks & ELEMENTS_OWN != 0
 }
 
-fn key(i: usize) -> String {
+pub(crate) fn key(i: usize) -> String {
     i.to_string()
 }
 
 /// Writes `values` to the first elements of `o` with `set`, deleting where one is a hole.
-fn write_back(it: &mut Interp, o: &ObjRef, values: Vec<Val>) -> R<()> {
+pub(crate) fn write_back(it: &mut Interp, o: &ObjRef, values: Vec<Val>) -> R<()> {
     for (i, x) in values.into_iter().enumerate() {
         write_back_at(it, o, i, x)?;
     }
     Ok(())
 }
 
-/// `pop` and `shift` through `get`, `set` and `delete`.
-fn remove_generic(it: &mut Interp, o: &ObjRef, first: bool) -> R {
-    let target = Val::Obj(o.clone());
-    let len = it.array_len(o);
-    if len == 0 {
-        return Ok(Val::Undef);
-    }
-    let out = it.get(&target, &key(if first { 0 } else { len - 1 }))?;
-    if first {
-        for k in 1..len {
-            move_element(it, o, k, k - 1)?;
-        }
-    }
-    it.delete_key(o, &key(len - 1))?;
-    it.set(&target, "length", Val::Num((len - 1) as f64))?;
-    Ok(out)
-}
-
 /// Element `i` of `o` with `get`, or a hole when `o` does not have it.
-fn read_at(it: &mut Interp, o: &ObjRef, i: usize) -> R {
+pub(crate) fn read_at(it: &mut Interp, o: &ObjRef, i: usize) -> R {
     if it.has(o, &key(i))? { it.get(&Val::Obj(o.clone()), &key(i)) } else { Ok(Val::Hole) }
 }
 
 /// Element `from` of `o` written to `to` (deleted there when `from` is a hole).
-fn move_element(it: &mut Interp, o: &ObjRef, from: usize, to: usize) -> R<()> {
+pub(crate) fn move_element(it: &mut Interp, o: &ObjRef, from: usize, to: usize) -> R<()> {
     let x = read_at(it, o, from)?;
     write_back_at(it, o, to, x)
 }
 
-/// `reverse` through `get`, `set` and `delete`, pair by pair from the ends.
-fn reverse_generic(it: &mut Interp, o: &ObjRef) -> R<()> {
-    let len = it.array_len(o);
-    for lower in 0..len / 2 {
-        let upper = len - 1 - lower;
-        let (a, b) = (read_at(it, o, lower)?, read_at(it, o, upper)?);
-        write_back_at(it, o, lower, b)?;
-        write_back_at(it, o, upper, a)?;
-    }
-    Ok(())
-}
-
 /// Writes `x` to element `i` of `o` with `set`, or deletes it when `x` is a hole.
-fn write_back_at(it: &mut Interp, o: &ObjRef, i: usize, x: Val) -> R<()> {
+pub(crate) fn write_back_at(it: &mut Interp, o: &ObjRef, i: usize, x: Val) -> R<()> {
     if is_hole(&x) {
         it.delete_key(o, &key(i))?;
         return Ok(());
@@ -265,7 +235,7 @@ fn with_vec<T>(o: &ObjRef, f: impl FnOnce(&mut Vec<Val>) -> T) -> Option<T> {
 }
 
 /// A relative index (`-1` is the last) clamped to `[0, len]`.
-fn relative(it: &mut Interp, v: &Val, len: usize, default: usize) -> R<usize> {
+pub(crate) fn relative(it: &mut Interp, v: &Val, len: usize, default: usize) -> R<usize> {
     if matches!(v, Val::Undef) {
         return Ok(default);
     }
@@ -274,27 +244,13 @@ fn relative(it: &mut Interp, v: &Val, len: usize, default: usize) -> R<usize> {
     Ok(if n < 0.0 { (len as f64 + n).max(0.0) as usize } else { (n as usize).min(len) })
 }
 
-/// `push` on an object that is not an array (a proxy of one): through `length` and `set`.
-fn push_generic(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    let o = Val::Obj(it.object_of(this)?);
-    let n = it.get(&o, "length")?;
-    let mut n = it.number_of(&n)?;
-    n = if n.is_finite() && n > 0.0 { n.trunc() } else { 0.0 };
-    for x in a {
-        it.set(&o, &crate::number::to_string(n), x.clone())?;
-        n += 1.0;
-    }
-    it.set(&o, "length", Val::Num(n))?;
-    Ok(Val::Num(n))
-}
-
 fn push(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    if !matches!(this, Val::Obj(o) if matches!(o.borrow().kind, Kind::Array(_))) {
-        return push_generic(it, this, a);
+    if let Some((o, len)) = crate::array_like::of(it, this)? {
+        return crate::array_like::push(it, &o, len, a);
     }
     let o = array_obj(it, this)?;
     check(it, &o, if a.is_empty() { Change::Length } else { Change::Grow })?;
-    it.grow(&o, a.len())?;
+    it.grow_elements(&o, a.len())?;
     let n = with_vec(&o, |v| {
         v.extend_from_slice(a);
         v.len()
@@ -303,10 +259,13 @@ fn push(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 }
 
 fn pop(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+    if let Some((o, len)) = crate::array_like::of(it, this)? {
+        return crate::array_like::remove(it, &o, len, false);
+    }
     let o = array_obj(it, this)?;
     check(it, &o, Change::Shrink)?;
     if has_own_elements(&o) {
-        return remove_generic(it, &o, false);
+        return crate::array_like::remove(it, &o, it.array_len(&o), false);
     }
     let len = it.array_len(&o);
     let out = with_vec(&o, Vec::pop).flatten().unwrap_or(Val::Undef);
@@ -320,10 +279,13 @@ fn pop(it: &mut Interp, this: &Val, _: &[Val]) -> R {
 }
 
 fn shift(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+    if let Some((o, len)) = crate::array_like::of(it, this)? {
+        return crate::array_like::remove(it, &o, len, true);
+    }
     let o = array_obj(it, this)?;
     check(it, &o, Change::Shift)?;
     if has_own_elements(&o) {
-        return remove_generic(it, &o, true);
+        return crate::array_like::remove(it, &o, it.array_len(&o), true);
     }
     let first = with_vec(&o, |v| v.first().cloned()).flatten();
     let out = match first {
@@ -340,9 +302,12 @@ fn shift(it: &mut Interp, this: &Val, _: &[Val]) -> R {
 }
 
 fn unshift(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    if let Some((o, len)) = crate::array_like::of(it, this)? {
+        return crate::array_like::unshift(it, &o, len, a);
+    }
     let o = array_obj(it, this)?;
     check(it, &o, if a.is_empty() { Change::Length } else { Change::Grow })?;
-    it.grow(&o, a.len())?;
+    it.grow_elements(&o, a.len())?;
     let n = with_vec(&o, |v| {
         v.splice(0..0, a.iter().cloned());
         v.len()
@@ -364,7 +329,7 @@ fn slice(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 /// without species, or `Array` itself). Measured on a `refrouter` 9.0.4 on 02-11: `map`, `filter`,
 /// `slice`, `splice`, `concat`, `flat` and `flatMap` read `constructor`, and a subclass of `Array`
 /// gets its own instances.
-fn species(it: &mut Interp, this: &Val, len: usize) -> R<Option<ObjRef>> {
+pub(crate) fn species(it: &mut Interp, this: &Val, len: usize) -> R<Option<ObjRef>> {
     if !crate::proxy::is_array(it, this)? {
         return Ok(None);
     }
@@ -433,6 +398,9 @@ pub(crate) fn species_result(
 }
 
 fn splice(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    if let Some((o, len)) = crate::array_like::of(it, this)? {
+        return crate::array_like::splice(it, this, &o, len, a);
+    }
     let o = array_obj(it, this)?;
     let len = it.array_len(&o);
     let start = relative(it, &arg(a, 0), len, 0)?;
@@ -454,7 +422,7 @@ fn splice(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     } else {
         check(it, &o, Change::Length)?;
     }
-    it.grow(&o, insert.len())?;
+    it.grow_elements(&o, insert.len())?;
     let target = species(it, this, count)?;
     let removed = with_vec(&o, |v| v.splice(start..start + count, insert).collect::<Vec<_>>())
         .unwrap_or_default();
@@ -477,7 +445,7 @@ fn concat(it: &mut Interp, this: &Val, a: &[Val]) -> R {
             _ => out.push(x.clone()),
         }
     }
-    it.charge(out.len() * PROP_BYTES)?;
+    it.reserve_elements(out.len())?;
     species_result(it, target, out, true)
 }
 
@@ -498,7 +466,7 @@ fn join(it: &mut Interp, this: &Val, a: &[Val]) -> R {
             let r = it.str_of(x);
             out.push_str(&it.operand_as_class(r)?);
         }
-        it.charge(0)?;
+        it.reserve(crate::value::Cost::string(out.len()))?;
     }
     it.string(out)
 }
@@ -533,16 +501,19 @@ fn to_locale_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
             let s = it.call(&f, x, &[])?;
             out.push_str(&it.str_of(&s)?);
         }
-        it.charge(0)?;
+        it.reserve(crate::value::Cost::string(out.len()))?;
     }
     it.string(out)
 }
 
 fn reverse(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+    if let Some((o, len)) = crate::array_like::of(it, this)? {
+        return crate::array_like::reverse(it, &o, len);
+    }
     let o = array_obj(it, this)?;
     check(it, &o, Change::Write)?;
     if has_own_elements(&o) {
-        reverse_generic(it, &o)?;
+        crate::array_like::reverse(it, &o, it.array_len(&o))?;
         return Ok(this.clone());
     }
     with_vec(&o, |v| v.reverse());
@@ -605,10 +576,8 @@ fn each(
     (rev, skip): (bool, bool),
     mut on: impl FnMut(&Val, usize, &Val) -> bool,
 ) -> R<usize> {
+    check_callback(it, this, a)?;
     let f = arg(a, 0);
-    if !f.is_callable() {
-        return Err(not_a_function(it, &f));
-    }
     let v = if skip { elements(it, this)? } else { items(it, this)? };
     let order: Vec<usize> = if rev { (0..v.len()).rev().collect() } else { (0..v.len()).collect() };
     for i in order.into_iter().filter(|i| !is_hole(&v[*i])) {
@@ -621,11 +590,32 @@ fn each(
 }
 
 /// «f is not a function» for a callback, which the call names by its expression.
-fn not_a_function(it: &mut Interp, f: &Val) -> crate::interp::Ctrl {
-    it.operand_error(f, |t| format!("{t} is not a function"))
+pub(crate) fn not_a_function(it: &mut Interp, f: &Val) -> crate::interp::Ctrl {
+    let e = it.operand_error(f, |t| format!("{t} is not a function"));
+    it.operand_arg = Some(0);
+    e
 }
 
-fn find(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+/// The error of a callback `a[0]` that is not a function. Without arguments the self-hosted
+/// methods say which one is missing, under the name of the function that checks it (measured on
+/// a `refrouter` 9.0.4 on 03-11: `findIndex` is checked by `find` and `reduceRight` by `reduce`),
+/// and `flatMap` says `undefined is not a function`.
+pub(crate) fn bad_callback(it: &mut Interp, a: &[Val]) -> crate::interp::Ctrl {
+    let Some(f) = a.first() else {
+        let name = it.native.clone();
+        let checker = match &*name {
+            "findIndex" => "find",
+            "reduceRight" => "reduce",
+            "flatMap" => return it.error("TypeError", "undefined is not a function"),
+            n => n,
+        };
+        let m = format!("missing argument 0 when calling function Array.prototype.{checker}");
+        return it.error("TypeError", &m);
+    };
+    not_a_function(it, f)
+}
+
+pub(crate) fn find(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let mut out = Val::Undef;
     each(it, this, a, (false, false), |x, _, r| {
         r.truthy() && {
@@ -636,7 +626,7 @@ fn find(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     Ok(out)
 }
 
-fn find_index(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+pub(crate) fn find_index(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let mut out = -1.0;
     each(it, this, a, (false, false), |_, i, r| {
         r.truthy() && {
@@ -647,7 +637,7 @@ fn find_index(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     Ok(Val::Num(out))
 }
 
-fn find_last(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+pub(crate) fn find_last(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let mut out = Val::Undef;
     each(it, this, a, (true, false), |x, _, r| {
         r.truthy() && {
@@ -658,7 +648,7 @@ fn find_last(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     Ok(out)
 }
 
-fn find_last_index(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+pub(crate) fn find_last_index(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let mut out = -1.0;
     each(it, this, a, (true, false), |_, i, r| {
         r.truthy() && {
@@ -669,7 +659,19 @@ fn find_last_index(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     Ok(Val::Num(out))
 }
 
+/// The callback is checked before the new array is made (ECMA-262 §23.1.3.8, §23.1.3.21,
+/// §23.1.3.14).
+fn check_callback(it: &mut Interp, this: &Val, a: &[Val]) -> R<()> {
+    if arg(a, 0).is_callable() {
+        return Ok(());
+    }
+    // `this` becomes an object first: `can't convert null to object` (measured on 03-11).
+    it.object_of(this)?;
+    Err(bad_callback(it, a))
+}
+
 fn filter(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    check_callback(it, this, a)?;
     let target = species(it, this, 0)?;
     let mut out = Vec::new();
     each(it, this, a, (false, true), |x, _, r| {
@@ -678,7 +680,7 @@ fn filter(it: &mut Interp, this: &Val, a: &[Val]) -> R {
         }
         false
     })?;
-    it.charge(out.len() * PROP_BYTES)?;
+    it.reserve_elements(out.len())?;
     species_result(it, target, out, false)
 }
 
@@ -687,6 +689,7 @@ fn map(it: &mut Interp, this: &Val, a: &[Val]) -> R {
         Val::Obj(o) if let Kind::Array(v) = &o.borrow().kind => v.len(),
         _ => 0,
     };
+    check_callback(it, this, a)?;
     let target = species(it, this, len)?;
     let out = mapped(it, this, a)?;
     species_result(it, target, out, false)
@@ -701,16 +704,16 @@ fn mapped(it: &mut Interp, this: &Val, a: &[Val]) -> R<Vec<Val>> {
         false
     })?;
     out.resize(n, Val::Hole);
-    it.charge(out.len() * PROP_BYTES)?;
+    it.reserve_elements(out.len())?;
     Ok(out)
 }
 
-fn for_each(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+pub(crate) fn for_each(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     each(it, this, a, (false, true), |_, _, _| false)?;
     Ok(Val::Undef)
 }
 
-fn some(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+pub(crate) fn some(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let mut out = false;
     each(it, this, a, (false, true), |_, _, r| {
         out = r.truthy();
@@ -719,7 +722,7 @@ fn some(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     Ok(Val::Bool(out))
 }
 
-fn every(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+pub(crate) fn every(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let mut out = true;
     each(it, this, a, (false, true), |_, _, r| {
         out = r.truthy();
@@ -729,10 +732,8 @@ fn every(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 }
 
 fn reduce_in(it: &mut Interp, this: &Val, a: &[Val], rev: bool) -> R {
+    check_callback(it, this, a)?;
     let f = arg(a, 0);
-    if !f.is_callable() {
-        return Err(not_a_function(it, &f));
-    }
     let v = elements(it, this)?;
     let mut order: Vec<usize> =
         if rev { (0..v.len()).rev().collect() } else { (0..v.len()).collect() };
@@ -750,16 +751,16 @@ fn reduce_in(it: &mut Interp, this: &Val, a: &[Val], rev: bool) -> R {
     Ok(acc)
 }
 
-fn reduce(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+pub(crate) fn reduce(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     reduce_in(it, this, a, false)
 }
 
-fn reduce_right(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+pub(crate) fn reduce_right(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     reduce_in(it, this, a, true)
 }
 
 /// A stable merge sort with the comparator (or the string order), undefined last.
-fn sorted(it: &mut Interp, mut v: Vec<Val>, cmp: &Val) -> R<Vec<Val>> {
+pub(crate) fn sorted(it: &mut Interp, mut v: Vec<Val>, cmp: &Val) -> R<Vec<Val>> {
     let undef = v.iter().filter(|x| matches!(x, Val::Undef)).count();
     let holes = v.iter().filter(|x| is_hole(x)).count();
     v.retain(|x| !matches!(x, Val::Undef | Val::Hole));
@@ -821,12 +822,15 @@ fn sorted(it: &mut Interp, mut v: Vec<Val>, cmp: &Val) -> R<Vec<Val>> {
 }
 
 fn sort(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    let o = array_obj(it, this)?;
-    check(it, &o, Change::Write)?;
     let cmp = arg(a, 0);
     if !matches!(cmp, Val::Undef) && !cmp.is_callable() {
         return it.type_error("invalid Array.prototype.sort argument");
     }
+    if let Some((o, len)) = crate::array_like::of(it, this)? {
+        return crate::array_like::sort(it, &o, len, &cmp);
+    }
+    let o = array_obj(it, this)?;
+    check(it, &o, Change::Write)?;
     let v = elements(it, this)?;
     let s = sorted(it, v, &cmp)?;
     if has_own_elements(&o) {
@@ -844,14 +848,14 @@ fn to_sorted(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     }
     let v = items(it, this)?;
     let s = sorted(it, v, &arg(a, 0))?;
-    it.charge(s.len() * PROP_BYTES)?;
+    it.reserve_elements(s.len())?;
     it.array(s)
 }
 
 fn to_reversed(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     let mut v = items(it, this)?;
     v.reverse();
-    it.charge(v.len() * PROP_BYTES)?;
+    it.reserve_elements(v.len())?;
     it.array(v)
 }
 
@@ -870,7 +874,7 @@ fn to_spliced(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     };
     let insert = a.get(2..).unwrap_or(&[]).to_vec();
     v.splice(start..start + skip, insert);
-    it.charge(v.len() * PROP_BYTES)?;
+    it.reserve_elements(v.len())?;
     it.array(v)
 }
 
@@ -884,7 +888,7 @@ fn with(it: &mut Interp, this: &Val, a: &[Val]) -> R {
         return Err(it.error("RangeError", "invalid or out-of-range index"));
     }
     v[i as usize] = arg(a, 1);
-    it.charge(v.len() * PROP_BYTES)?;
+    it.reserve_elements(v.len())?;
     it.array(v)
 }
 
@@ -895,7 +899,7 @@ fn flatten(it: &mut Interp, v: Vec<Val>, depth: f64, out: &mut Vec<Val>) -> R<()
             let inner = elements(it, &x)?;
             flatten(it, inner, depth - 1.0, out)?;
         } else {
-            it.charge(PROP_BYTES)?;
+            it.reserve_elements(1)?;
             out.push(x);
         }
     }
@@ -918,6 +922,7 @@ fn flat(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 }
 
 fn flat_map(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    check_callback(it, this, a)?;
     let target = species(it, this, 0)?;
     let v = mapped(it, this, a)?;
     let mut out = Vec::new();
@@ -938,7 +943,9 @@ fn generic_len(it: &mut Interp, o: &Val) -> R<usize> {
     let n = it.get(o, "length")?;
     let n = it.number_of(&n);
     let n = it.operand_named(n, "O.length")?;
-    Ok(if n.is_finite() && n > 0.0 { (n as usize).min(1 << 24) } else { 0 })
+    // ToLength: an infinite length is the longest one (measured: `fill` of `{length:
+    // Infinity}` writes its elements).
+    Ok(if n > 0.0 { (n as usize).min(1 << 24) } else { 0 })
 }
 
 fn fill(it: &mut Interp, this: &Val, a: &[Val]) -> R {

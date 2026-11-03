@@ -75,7 +75,7 @@ fn wm_set(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let present =
         matches!(&m.borrow().kind, Kind::WeakMap(e) if e.iter().any(|(x, _)| x.ptr_eq(&k)));
     if !present {
-        it.grow(&m, 2)?;
+        it.grow_elements(&m, 2)?;
     }
     if let Kind::WeakMap(e) = &mut m.borrow_mut().kind {
         match e.iter_mut().find(|(x, _)| x.ptr_eq(&k)) {
@@ -108,7 +108,7 @@ fn ws_add(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let k = key(it, &arg(a, 0), "WeakSet value")?;
     let present = matches!(&s.borrow().kind, Kind::WeakSet(e) if e.iter().any(|x| x.ptr_eq(&k)));
     if !present {
-        it.grow(&s, 1)?;
+        it.grow_elements(&s, 1)?;
         if let Kind::WeakSet(e) = &mut s.borrow_mut().kind {
             e.push(k);
         }

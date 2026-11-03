@@ -630,3 +630,26 @@ fn unshard_collection_weighs_the_shards_by_their_ranges_live_bytes() {
         );
     }
 }
+
+/// A namespace without a database fails as one without a collection does; a collection no
+/// range holds has no shard; and a range without voters weighs on no shard.
+#[test]
+fn namespaces_without_database_and_ranges_without_a_leader() {
+    let mut m = cluster();
+    fails(
+        &admin(&mut m, r#"{"moveCollection":".u","toShard":"node2"}"#),
+        73,
+        "Invalid namespace specified: .u",
+    );
+    fails(
+        &admin(&mut m, r#"{"unshardCollection":".u"}"#),
+        73,
+        "Namespace .uis not a valid collection name",
+    );
+    m.routes[0].start = vec![0xFF];
+    assert_eq!(node(&mut m, "u"), None);
+    let mut m = cluster();
+    (m.routes[0].voters, m.routes[0].leader_hint) = (Vec::new(), None);
+    ok(&admin(&mut m, r#"{"shardCollection":"m.k","key":{"_id":1}}"#));
+    ok(&admin(&mut m, r#"{"unshardCollection":"m.k"}"#));
+}

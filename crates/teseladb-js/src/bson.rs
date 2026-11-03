@@ -508,11 +508,17 @@ fn to_string<const T: usize>(it: &mut Interp, this: &Val, _: &[Val]) -> R {
 
 /// The subtype and the bytes of a `BinData` (the only type left when the others are matched).
 fn binary_subtype(b: &Bson) -> u8 {
-    if let Bson::BinData(t, _) = b { *t } else { 0 }
+    match b {
+        Bson::BinData(t, _) => *t,
+        _ => unreachable!("only BinData is left"),
+    }
 }
 
 fn binary(b: Bson) -> Vec<u8> {
-    if let Bson::BinData(_, bytes) = b { bytes } else { Vec::new() }
+    match b {
+        Bson::BinData(_, bytes) => bytes,
+        _ => unreachable!("only BinData is left"),
+    }
 }
 
 /// `toJSON` of the numbers, `ObjectId` and `BinData`: their Extended JSON.
@@ -558,7 +564,8 @@ fn value_of<const T: usize>(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     let method = if it.native.as_ref() == "toNumber" { "toNumber" } else { "valueOf" };
     Ok(Val::Num(match this_of(it, this, method, NATIVE_TYPES[T])? {
         Bson::Long(n) => n as f64,
-        b => f64::from(if let Bson::Int(n) = b { n } else { 0 }),
+        Bson::Int(n) => f64::from(n),
+        _ => unreachable!("NumberLong or NumberInt"),
     }))
 }
 

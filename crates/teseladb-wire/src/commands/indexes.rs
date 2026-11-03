@@ -336,6 +336,14 @@ struct Existing {
     entry: Option<IndexEntry>,
 }
 
+/// The number of indexes of collection `c`, as `dropIndexes` counts them (`nIndexesWas`).
+pub fn count<B: Backend + ?Sized>(
+    backend: &mut B,
+    c: &CollectionEntry,
+) -> Result<i32, CommandError> {
+    Ok(i32::try_from(existing(backend, c)?.len()).unwrap_or(i32::MAX))
+}
+
 fn existing<B: Backend + ?Sized>(
     backend: &mut B,
     c: &CollectionEntry,

@@ -56,23 +56,23 @@ fn assigned(it: &Interp, o: &ObjRef, key: &str, name: &str, f: NativeFn) -> R<()
     it.define(o, key, Prop::data(Val::Obj(fo)))
 }
 
-fn proto_of_ctor(g: &ObjRef, name: &str) -> Option<ObjRef> {
-    let c = g.borrow().get_own(name)?.value.as_obj().cloned()?;
-    c.borrow().get_own("prototype")?.value.as_obj().cloned()
+fn proto_of_ctor(g: &ObjRef, name: &str) -> ObjRef {
+    match crate::builtins::installed(g, name).borrow().get_own("prototype").map(|p| &p.value) {
+        Some(Val::Obj(p)) => p.clone(),
+        _ => unreachable!("{name}.prototype is installed with {name}"),
+    }
 }
 
 /// What the shell adds to the prototypes of the built-ins and of the BSON types (measured on a
 /// `refrouter` 9.0.4 on 02-11): `ltrim` and `rtrim` of strings, `tojson` and `toJSON` of regular
 /// expressions.
 fn prototype_additions(it: &mut Interp, g: &ObjRef) -> R<()> {
-    if let Some(p) = proto_of_ctor(g, "String") {
-        assigned(it, &p, "ltrim", "trimStart", crate::strings::trim_start)?;
-        assigned(it, &p, "rtrim", "trimEnd", crate::strings::trim_end)?;
-    }
-    if let Some(p) = proto_of_ctor(g, "RegExp") {
-        assigned(it, &p, "tojson", "toString", crate::builtins::regexp_to_string)?;
-        method(it, &p, "toJSON", regexp_to_json, 0)?;
-    }
+    let p = proto_of_ctor(g, "String");
+    assigned(it, &p, "ltrim", "trimStart", crate::strings::trim_start)?;
+    assigned(it, &p, "rtrim", "trimEnd", crate::strings::trim_end)?;
+    let p = proto_of_ctor(g, "RegExp");
+    assigned(it, &p, "tojson", "toString", crate::builtins::regexp_to_string)?;
+    method(it, &p, "toJSON", regexp_to_json, 0)?;
     Ok(())
 }
 

@@ -177,10 +177,12 @@ fn is_unique<B: Backend + ?Sized>(
     for e in backend.indexes(coll.id)? {
         let spec = Document::from(teseladb_bson::RawDoc::from_bytes(&e.spec)?);
         let unique = matches!(spec.get("unique"), Some(Value::Boolean(true)));
-        if let Some(Value::Document(k)) = spec.get("key")
-            && unique
-            && k.iter().map(|(f, _)| f).eq(fields.iter().copied())
-        {
+        // Every index spec has its key document.
+        let same_key = match spec.get("key") {
+            Some(Value::Document(k)) => k.iter().map(|(f, _)| f).eq(fields.iter().copied()),
+            _ => false,
+        };
+        if unique && same_key {
             return Ok(true);
         }
     }
@@ -279,8 +281,11 @@ fn distributions(
     let mut writes = Tally::new(&WRITES, ranges);
     let mut extra = [0i64; 3];
     for s in samples {
-        let Some(Value::String(cmd_name)) = s.get("cmdName") else { continue };
-        let Some(Value::Document(cmd)) = s.get("cmd") else { continue };
+        // The node writes every sample with its command and its name.
+        let (cmd_name, cmd) = match (s.get("cmdName"), s.get("cmd")) {
+            (Some(Value::String(n)), Some(Value::Document(c))) => (n, c),
+            _ => continue,
+        };
         let (filter, multi, update) = statement(cmd_name, cmd);
         let routed = route(&filter)?;
         if READS.contains(&cmd_name.as_str()) {

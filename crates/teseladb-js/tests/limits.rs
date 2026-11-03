@@ -238,6 +238,10 @@ fn recursion_on_a_large_stack_goes_as_deep_as_on_a_refrouter() {
             "25499 too much recursion",
         ),
         (
+            "(function(){ let n=0; function f(){ n++; return new Int8Array(1).map(f); } try { f() } catch(e) { return n + ' ' + e.message } })()",
+            "25497 too much recursion",
+        ),
+        (
             "(function(){ let n=0; function f(k){ n++; if (k==0) return 0; return 1+f(k-1); } return f(30000) + ' ' + n })()",
             "30000 30001",
         ),
@@ -297,6 +301,18 @@ fn calls_back_from_the_engine_end_as_on_a_refrouter() {
         (
             "(function(){ let n=0; function f(){ n++; return eval('f()'); } try { f() } catch(e) { return n + ' ' + e.message } })()",
             "343 too much recursion",
+        ),
+        (
+            "(function(){ let n=0; function f(){ n++; return eval('(0, f)()'); } try { f() } catch(e) { return n + ' ' + e.message } })()",
+            "342 too much recursion",
+        ),
+        (
+            "(function(){ let n=0; function f(){ n++; return Array.prototype.map.call([1], f); } try { f() } catch(e) { return n + ' ' + e.message } })()",
+            "174 too much recursion",
+        ),
+        (
+            "(function(){ let n=0; const o={get g(){ n++; return this.g; }}; try { o.g } catch(e) { return n + ' ' + e.message } })()",
+            "348 too much recursion",
         ),
     ];
     on_big_stack(CASES);
@@ -375,4 +391,130 @@ fn a_small_stack_ends_deep_parses_as_too_much_recursion() {
             "{src}"
         );
     }
+}
+
+/// What `src` gives with a heap of `heap` bytes of the `refrouter` heap.
+fn run_in_heap(src: &str, heap: usize) -> Result<Value, JsError> {
+    let mut ctx = JsCtx { limits: Limits { heap, ..Limits::default() }, ..JsCtx::default() };
+    run_with(src, &mut ctx)
+}
+
+/// `make(n)` in a function that answers `ok` or what it caught.
+fn fits(make: &str, n: usize, heap: usize) -> String {
+    let src = format!(
+        "function(){{ try {{ const make = {make}; const kept = make({n}); return 'ok' }} catch (e) {{ return typeof e + ':' + e }} }}"
+    );
+    match run_in_heap(&src, heap) {
+        Ok(Value::String(s)) => s,
+        other => format!("{other:?}"),
+    }
+}
+
+const OOM: &str = "string:out of memory";
+
+/// A full heap throws the string `"out of memory"`, which `try` catches and after which the
+/// call goes on, as on a `refrouter` 9.0.4 (A016-3-22, measured on 03-11); uncaught it ends the
+/// call as `uncaught exception: out of memory` without a place in the code.
+#[test]
+fn a_full_heap_throws_out_of_memory_that_try_catches() {
+    let src = "function(){ let r; try { let a = []; for (;;) a = [a]; } catch (e) { r = typeof e + ':' + e } return r + ':' + [1, 2, 3].length }";
+    assert_eq!(run_in_heap(src, 1 << 20), Ok(Value::String(format!("{OOM}:3"))));
+    let e = run_in_heap("function(){ let a = []; for (;;) a = [a] }", 1 << 20).unwrap_err();
+    assert_eq!(e, JsError::OutOfMemory);
+    // A string the program throws is not the heap's.
+    let e = run("function(){ throw 'out of memory' }").unwrap_err();
+    assert!(matches!(e, JsError::Thrown { .. }), "{e:?}");
+}
+
+/// The bytes of this process have their own limit, which ends the call even inside a `try`.
+#[test]
+fn the_memory_of_the_process_ends_the_call_even_in_a_try() {
+    let limits = Limits { memory: 4 << 20, ..Limits::default() };
+    let mut ctx = JsCtx { limits, ..JsCtx::default() };
+    let src =
+        "function(){ try { return new Array(1e6).fill(1).length } catch (e) { return 'caught' } }";
+    assert_eq!(run_with(src, &mut ctx), Err(JsError::OutOfMemory));
+}
+
+/// The heap a call has by default is the 100 MiB of `getJSHeapLimitMB()`: 2 000 000 nested
+/// one-element arrays fit in it and 2 400 000 do not, as on a `refrouter` 9.0.4 (measured on 03-11).
+#[test]
+fn the_default_heap_holds_what_a_refrouter_holds() {
+    assert_eq!(run("function(){ return getJSHeapLimitMB() }"), Ok(Value::Double(100.0)));
+    let nested = "n => { let a = []; for (let i = 0; i < n; i++) a = [a]; return a }";
+    assert_eq!(fits(nested, 2_000_000, teseladb_js::HEAP), "ok");
+    assert_eq!(fits(nested, 2_400_000, teseladb_js::HEAP), OOM);
+}
+
+/// Each kind of value costs what it costs on a `refrouter` 9.0.4: its measured capacities (03-11),
+/// a tenth of them in a tenth of its heap.
+#[test]
+fn each_kind_of_value_costs_what_it_costs_on_a_refrouter() {
+    let heap = teseladb_js::HEAP / 10;
+    for (make, fit, over) in [
+        ("n => { let a = []; for (let i = 0; i < n; i++) a = [a]; return a }", 200_000, 240_000),
+        (
+            "n => { const a = []; for (let i = 0; i < n; i++) a.push({}); return a }",
+            200_000,
+            240_000,
+        ),
+        ("n => new Array(n).fill(1)", 6_000_000, 8_000_000),
+        (
+            "n => { const a = []; for (let i = 0; i < n; i++) a.push(i); return a }",
+            6_800_000,
+            8_000_000,
+        ),
+        (
+            "n => { const a = []; for (let i = 0; i < n; i++) a.push({a: i, b: i, c: i, d: i}); return a }",
+            180_000,
+            240_000,
+        ),
+        (
+            "n => { const a = []; for (let i = 0; i < n; i++) a.push({a:i,b:i,c:i,d:i,e:i,f:i,g:i,h:i}); return a }",
+            100_000,
+            140_000,
+        ),
+        (
+            "n => { const a = []; for (let i = 0; i < n; i++) a.push({a:i,b:i,c:i,d:i,e:i,f:i,g:i,h:i,j:i,k:i,l:i,m:i,n:i,o:i,p:i,q:i}); return a }",
+            60_000,
+            80_000,
+        ),
+        (
+            "n => { const a = []; for (let i = 0; i < n; i++) a.push('s' + i); return a }",
+            500_000,
+            850_000,
+        ),
+        ("n => 'x'.repeat(n)", ((1 << 30) - 2) / 10, (3 << 30) / 10),
+    ] {
+        assert_eq!(fits(make, fit, heap), "ok", "{make} {fit}");
+        assert_eq!(fits(make, over, heap), OOM, "{make} {over}");
+    }
+}
+
+/// What a value took goes back to the heap when nothing holds it: strings made in a loop, as
+/// objects, never fill it (on a `refrouter` 9.0.4 `x = 's' + i` ten million times gives `s9999999`).
+#[test]
+fn dead_strings_give_back_their_heap() {
+    let src = "function(){ let x; for (let i = 0; i < 1e6; i++) x = 's' + i; return x }";
+    assert_eq!(run_in_heap(src, 1 << 20), Ok(Value::String("s999999".into())));
+    let src = "function(){ let x; for (let i = 0; i < 1e4; i++) x = 'abcdefghij'.repeat(1000) + i; return x.length }";
+    assert_eq!(run_in_heap(src, 1 << 20), Ok(Value::Double(10_004.0)));
+}
+
+/// `Map` and `Set` find and delete a key without going through every entry (A016-3-23): 200 000
+/// keys go in and 100 000 of them out quickly (going through them all, 2·10^10 comparisons,
+/// would not end), in insertion order and with SameValueZero (NaN is NaN, +0 is −0), after
+/// deletes and `clear` too.
+#[test]
+fn maps_and_sets_find_their_keys_by_hash() {
+    let src = "function(){ const m = new Map(); const s = new Set(); for (let i = 0; i < 200000; i++) { m.set(i, i); s.add('k' + i) } for (let i = 0; i < 200000; i += 2) { m.delete(i); s.delete('k' + i) } let n = 0; for (const [k] of m) n += k; return m.size + ':' + s.size + ':' + m.get(199999) + ':' + m.get(8) + ':' + s.has('k7') + ':' + s.has('k8') + ':' + n + ':' + [...s].slice(0, 3) }";
+    assert_eq!(
+        run(src),
+        Ok(Value::String("100000:100000:199999:undefined:true:false:10000000000:k1,k3,k5".into()))
+    );
+    let src = "function(){ const m = new Map([[NaN, 1], [0, 2], ['0', 3]]); m.set(-0, 4); m.set(NaN, 5); m.delete('0'); m.set('0', 6); const s = new Set([1, 2]); s.clear(); s.add(2).add(1).add(2); const o = {}; m.set(o, 7); return [...m].join('|') + ':' + m.get(-0) + ':' + m.has(o) + ':' + m.has({}) + ':' + [...s].join() }";
+    assert_eq!(
+        run(src),
+        Ok(Value::String("NaN,5|0,4|0,6|[object Object],7:4:true:false:2,1".into()))
+    );
 }

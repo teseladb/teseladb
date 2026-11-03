@@ -858,6 +858,15 @@ fn is_one(v: &Value) -> bool {
 
 /// `aggregate`.
 pub fn aggregate<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
+    aggregate_from(ctx, false)
+}
+
+/// [`aggregate`]; with `find`, the command is a `find` run as a pipeline, whose `$match` may hold
+/// `$where`.
+pub(crate) fn aggregate_from<B: Backend + ?Sized>(
+    ctx: &mut Ctx<'_, B>,
+    find: bool,
+) -> Result<Document, CommandError> {
     let first = ctx.first().clone();
     let (ns, on_collection) = match &first {
         Value::String(_) => (target(ctx)?, true),
@@ -890,6 +899,7 @@ pub fn aggregate<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
     let vars = a.vars.clone().unwrap_or_default();
     let names: Vec<String> = vars.iter().map(|(k, _)| k.to_owned()).collect();
     let ctx_vars = ExprCtx::checked(names.iter().map(String::as_str));
+    let ctx_vars = if find { ctx_vars.with_where() } else { ctx_vars };
     // `$currentOp` answers its namespace before its arguments (measured).
     let first_name = match stages.first() {
         Some(RawValue::Document(d)) => d.iter().next().map(|(k, _)| k),
@@ -905,14 +915,18 @@ pub fn aggregate<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
     teseladb_exec::pipeline::optimize::optimize_stages(&stages, a.vars.as_ref())
         .map_err(from_mql)?;
     check_system_namespace(&pipeline, &ns, on_collection)?;
-    // On a view whose pipeline has stages, `$listCatalog` comes after them (measured).
-    if pipeline.system_stage() == Some("$listCatalog")
-        && let Some(c) = ctx.backend.collection(&ns)?
-        && matches!(super::kinds::kind_of(&c)?, CollectionKind::View { pipeline, .. } if !pipeline.is_empty())
-    {
+    // On a view whose pipeline has stages, `$listCatalog` and a `$match` with `$text` come after
+    // them (measured; `$text`: `scratchpad/lane3s/m89.js`).
+    if pipeline.system_stage() == Some("$listCatalog") && on_view_with_stages(ctx.backend, &ns)? {
         return Err(CommandError::new(
             crate::error::CS_NOT_FIRST,
             "$listCatalog is only valid as the first stage in a pipeline",
+        ));
+    }
+    if starts_with_text(&stages) && on_view_with_stages(ctx.backend, &ns)? {
+        return Err(CommandError::new(
+            TEXT_NOT_FIRST,
+            "$match with $text is only allowed as the first pipeline stage",
         ));
     }
     if on_collection && ctx.backend.collection(&ns)?.is_some() {
@@ -1013,6 +1027,35 @@ pub fn aggregate<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
         Document::new().with("firstBatch", batch).with("id", id).with("ns", ns_text)
     };
     Ok(Document::new().with("cursor", cursor).with("ok", 1.0))
+}
+
+/// RefDb's code for a `$match` with `$text` that is not the first stage.
+const TEXT_NOT_FIRST: crate::error::Code =
+    crate::error::Code { code: 17_313, name: "Location17313" };
+
+/// Whether `ns` is a view whose pipeline has stages.
+fn on_view_with_stages<B: Backend + ?Sized>(
+    backend: &mut B,
+    ns: &Namespace,
+) -> Result<bool, CommandError> {
+    Ok(match backend.collection(ns)? {
+        Some(c) => matches!(
+            super::kinds::kind_of(&c)?,
+            CollectionKind::View { pipeline, .. } if !pipeline.is_empty()
+        ),
+        None => false,
+    })
+}
+
+/// Whether the first of `stages` is a `$match` with `$text`.
+fn starts_with_text(stages: &[RawValue<'_>]) -> bool {
+    match stages.first() {
+        Some(RawValue::Document(d)) => match d.get("$match") {
+            Some(RawValue::Document(m)) => super::views::has_text(&Document::from(m)),
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 /// `err` as an error of running the pipeline on `ns_text`.

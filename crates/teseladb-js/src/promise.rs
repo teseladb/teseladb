@@ -264,9 +264,7 @@ pub fn install(it: &mut Interp, g: &ObjRef) -> R<()> {
     }
     crate::builtins::to_string_tag(it, &proto, "Promise")?;
     it.realm.protos.push(("Promise", proto));
-    if let Val::Obj(array) = it.get(&Val::Obj(g.clone()), "Array")? {
-        method(it, &array, "fromAsync", queues_a_job, 1)?;
-    }
+    method(it, &crate::builtins::installed(g, "Array"), "fromAsync", queues_a_job, 1)?;
     let af = it.alloc(Some(it.realm.function.clone()), Kind::Ordinary)?;
     let afc = it.native("AsyncFunction", crate::builtins::function_ctor, 1)?;
     it.define(&afc, "prototype", Prop { writable: false, ..Prop::hidden(Val::Obj(af.clone())) })?;
