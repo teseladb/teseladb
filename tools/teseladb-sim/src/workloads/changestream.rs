@@ -14,7 +14,7 @@
 //! resolved mark of its read, the changes of a transaction one after another and complete, and
 //! every committed change at or below its last resolved mark emitted.
 
-use teseladb_changestream::changes::{Versioned, changes};
+use teseladb_changestream::changes::{Versioned, changes, gives_event};
 use teseladb_changestream::cursor::StreamPosition;
 use teseladb_changestream::meta::{ChangeMeta, TxnInfo, meta_key};
 use teseladb_changestream::order::EventKey;
@@ -130,7 +130,8 @@ impl Cursor {
     fn emit(&mut self, read: IntervalRead<Versioned>, batch: usize, now: Hlc) {
         let (rows, resolved) = read.finish(|v| v.ts);
         let Ok(found) = changes(rows) else { return };
-        let wanted: Vec<_> = found.into_iter().filter(|c| self.pos.wants(&c.event)).collect();
+        let wanted: Vec<_> =
+            found.into_iter().filter(|c| gives_event(c) && self.pos.wants(&c.event)).collect();
         for c in wanted.iter().take(batch) {
             self.log.emitted.push(Emitted { change: change_of(&c.event), resolved });
         }

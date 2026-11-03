@@ -201,3 +201,72 @@ fn an_index_written_out_of_memory_stays_ready_and_comes_back() {
     assert_eq!(on(&mut m, "a"), 2, "read back from its file");
     assert_eq!(m.shared.lock().unwrap().search.evicted(), 2, "b left in turn");
 }
+
+/// `shardCollection` keys the documents again by the new shard key (018 FR-001): a search index
+/// built before follows them to their new keys, each document found once, as no change stream
+/// sees the move.
+#[test]
+fn an_index_follows_the_documents_that_shard_collection_keys_again() {
+    let mut m = with_builder();
+    create(&mut m, dynamic(true));
+    assert_eq!(build(&mut m), 1);
+    assert_eq!(found(&search(&mut m, "mundo")), 2);
+    let shard = Document::new()
+        .with("shardCollection", format!("{DB}.c"))
+        .with("key", Document::new().with("_id", 1));
+    let r = m.run("admin", shard);
+    assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+    build(&mut m);
+    let r = search(&mut m, "mundo");
+    let Value::Array(docs) = field(&r, "cursor.firstBatch") else { panic!("{r:?}") };
+    let ids: Vec<&Value> = docs
+        .iter()
+        .map(|d| match d {
+            Value::Document(d) => field(d, "_id"),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(ids.len(), 2, "{r:?}");
+    assert!(ids.contains(&&Value::Int32(1)) && ids.contains(&&Value::Int32(2)), "{r:?}");
+    // Later writes reach the documents at their new keys and leave no copy at the old ones.
+    let set = Document::new().with("$set", Document::new().with("t", "hola otra vez"));
+    let update = Document::new().with("q", Document::new().with("_id", 1)).with("u", set);
+    m.run(DB, Document::new().with("update", "c").with("updates", arr(vec![update])));
+    let gone = Document::new().with("q", Document::new().with("_id", 2)).with("limit", 1);
+    m.run(DB, Document::new().with("delete", "c").with("deletes", arr(vec![gone])));
+    build(&mut m);
+    assert_eq!(found(&search(&mut m, "mundo")), 0);
+    assert_eq!(found(&search(&mut m, "cruel")), 0);
+    assert_eq!(found(&search(&mut m, "otra")), 1);
+}
+
+/// An update that changes a document's shard key moves it to a new key (018 FR-001, D-118): the
+/// search index drops the version at the old key, which gives no change event, and holds the
+/// new one.
+#[test]
+fn an_index_drops_the_old_key_of_a_document_whose_shard_key_changed() {
+    let mut m = with_builder();
+    let index = Document::new().with("key", Document::new().with("t", 1)).with("name", "t_1");
+    m.run(DB, Document::new().with("createIndexes", "c").with("indexes", arr(vec![index])));
+    let shard = Document::new()
+        .with("shardCollection", format!("{DB}.c"))
+        .with("key", Document::new().with("t", 1));
+    let r = m.run("admin", shard);
+    assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+    create(&mut m, dynamic(true));
+    assert_eq!(build(&mut m), 1);
+    assert_eq!(found(&search(&mut m, "mundo")), 2);
+    let set = Document::new().with("$set", Document::new().with("t", "hola otra"));
+    let update = Document::new().with("q", Document::new().with("_id", 1)).with("u", set);
+    let lsid = Document::new().with("id", Value::Binary { subtype: 4, bytes: vec![2; 16] });
+    let cmd = Document::new()
+        .with("update", "c")
+        .with("updates", arr(vec![update]))
+        .with("lsid", lsid)
+        .with("txnNumber", Value::Int64(1));
+    let r = m.run(DB, cmd);
+    assert_eq!(field(&r, "nModified"), &Value::Int32(1), "{r:?}");
+    build(&mut m);
+    assert_eq!(found(&search(&mut m, "mundo")), 1);
+    assert_eq!(found(&search(&mut m, "otra")), 1);
+}

@@ -9,7 +9,8 @@
 //! 9.0.4 gives one event per write (measured on 01-11).
 //!
 //! Its bytes: format (2, or 3 with a retryable write), flags (bit 0 transaction, bit 1 description, bit 2 replacement, bit 3
-//! deletion, bit 4 document, bit 5 moved here, bit 6 moved away), position (4 bytes,
+//! deletion, bit 4 document, bit 5 moved here, bit 6 moved away, bits 5 and 6 keyed again by
+//! `shardCollection`), position (4 bytes,
 //! big-endian); with a transaction its identifier (16), `lsid.id` (16), `lsid.uid` (32) and
 //! `txnNumber` (8, big-endian); with a retryable write (flag bit 7, format 3 only) its
 //! [`RetryInfo`] in [`RetryInfo::BYTES`] bytes; with a description its length (4, big-endian) and its BSON; for a
@@ -163,6 +164,11 @@ pub enum Moved {
     From(Vec<u8>),
     /// It left this key: the deletion gives no event.
     Away,
+    /// `shardCollection` keyed it again by the new shard key: the deletion at the old key and the
+    /// insert at the new one are changes of the document's key for the indexes that follow the
+    /// versions (011), and no change stream or oplog entry, as a `refrouter` 9.0.4 gives only the
+    /// `shardCollection` event (measured on 02-11-2026).
+    Internal,
 }
 
 /// Why a stored meta does not read back.
@@ -197,6 +203,7 @@ impl ChangeMeta {
             + match self.moved {
                 Some(Moved::From(_)) => MOVED_FROM,
                 Some(Moved::Away) => MOVED_AWAY,
+                Some(Moved::Internal) => MOVED_FROM | MOVED_AWAY,
                 None => 0,
             }
             + u8::from(self.retry.is_some()) * HAS_RETRY;
@@ -238,7 +245,6 @@ impl ChangeMeta {
         let known = HAS_TXN | HAS_UPDATE | REPLACE | DELETE | HAS_DOC | MOVED_FROM | MOVED_AWAY;
         let retry_flag = if format == META_FORMAT_RETRY { HAS_RETRY } else { 0 };
         if flags & !(known | retry_flag) != 0
-            || flags & (MOVED_FROM | MOVED_AWAY) == MOVED_FROM | MOVED_AWAY
             || (format == META_FORMAT_RETRY && flags & HAS_RETRY == 0)
         {
             return Err(MetaError::Flags(flags));
@@ -267,7 +273,9 @@ impl ChangeMeta {
         } else {
             None
         };
-        let moved = if flags & MOVED_FROM != 0 {
+        let moved = if flags & (MOVED_FROM | MOVED_AWAY) == MOVED_FROM | MOVED_AWAY {
+            Some(Moved::Internal)
+        } else if flags & MOVED_FROM != 0 {
             let len = u32::from_be_bytes(take::<4>(&mut b)?) as usize;
             let (key, rest) = b.split_at_checked(len).ok_or(MetaError::Truncated)?;
             b = rest;
