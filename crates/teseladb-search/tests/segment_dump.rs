@@ -162,3 +162,17 @@ fn a_damaged_or_foreign_file_is_refused() {
     let bytes = one.dump(MARK);
     assert_eq!(MemIndex::load(definition(), &bytes).map(|m| m.contents()), Ok(one.contents()));
 }
+
+/// Documents indexed out of key order (an insert whose key sorts before the ones already there)
+/// dump with their postings in the file's document order and read back whole.
+#[test]
+fn documents_indexed_out_of_key_order_dump_and_read_back() {
+    let mut ix = Indexer::new(definition());
+    ix.apply([(vec![5], Some(doc(1)))]).expect("indexed");
+    ix.apply([(vec![2], Some(doc(0))), (vec![1], Some(doc(3)))]).expect("indexed");
+    let files = ix.dump(MARK);
+    let back = Indexer::load(definition(), &files).expect("read back");
+    assert_eq!(back.contents(), ix.contents());
+    let q = query("text", "t", "gato perro");
+    assert_eq!(scores(&back.search(&q).expect("found")), scores(&ix.search(&q).expect("found")));
+}

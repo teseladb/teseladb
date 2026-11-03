@@ -73,8 +73,8 @@ const FILTER_NOT_OBJECT: ErrorCode = ErrorCode { code: 10_065, name: "Location10
 /// query filter (measured on 9.0.4: `refsearch` checks everything else, and a missing `limit` is
 /// its error).
 pub fn parse_vector(arg: RawValue<'_>) -> Result<Document, MqlError> {
+    let RawValue::Document(raw) = arg else { return parse("$vectorSearch", arg) };
     let spec = parse("$vectorSearch", arg)?;
-    let RawValue::Document(raw) = arg else { return Ok(spec) };
     match raw.get("limit") {
         None => {}
         Some(v) => {

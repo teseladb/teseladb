@@ -103,10 +103,13 @@ impl MemIndex {
                 tokens[n] = Some(t.to_le_bytes().to_vec());
             }
             for (term, docs) in &f.postings {
-                let list = docs
+                // The file numbers documents in key order, which is not the order they were
+                // indexed in when a later key sorts first: its postings go by that number.
+                let mut list: Vec<PostingEntry> = docs
                     .iter()
                     .map(|(id, ps)| PostingEntry { doc: number[id], occurrences: occurrences(ps) })
                     .collect();
+                list.sort_unstable_by_key(|p| p.doc);
                 field.terms.insert(term.as_bytes().to_vec(), list);
             }
             let mut search = vec![None; live.len()];
