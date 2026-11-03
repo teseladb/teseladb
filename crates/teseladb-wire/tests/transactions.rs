@@ -408,6 +408,8 @@ fn the_first_statement_s_read_concern_sets_the_snapshot() {
     assert_eq!(r.get("recoveryToken"), None, "{r:?}");
     let r = run(&mut m, DB, stmt(find(), 14, 1, false));
     assert_eq!(errmsg(&r), "Transaction with { txnNumber: 1 } has been aborted.");
+    // The shard's answer to a statement: its labels go last.
+    assert_eq!(first_key(&r), Some("ok"), "{r:?}");
     let r = run(&mut m, "admin", end("commitTransaction", 14, 1));
     assert!(errmsg(&r).ends_with("was unsuccessful."), "{r:?}");
     assert_eq!(r.get("recoveryToken"), None, "{r:?}");
