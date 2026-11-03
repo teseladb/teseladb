@@ -176,10 +176,15 @@ fn uncertainty_restarts(target: &Target) -> Result<Option<i64>, String> {
     let (status, body) =
         teseladb_server::admin_http::request(&admin.to_string(), get, metrics, b"")
             .map_err(crate::client::context(admin))?;
+    restarts(&format!("{admin}{metrics}"), status, &body).map(Some)
+}
+
+/// The uncertainty restarts of the answer of metrics page `page` with HTTP `status`.
+fn restarts(page: &str, status: u16, body: &[u8]) -> Result<i64, String> {
     if status != 200 {
-        return Err(format!("{admin}{metrics} answered {status}"));
+        return Err(format!("{page} answered {status}"));
     }
-    counter(&String::from_utf8_lossy(&body), UNCERTAINTY_RESTARTS).map(Some)
+    counter(&String::from_utf8_lossy(body), UNCERTAINTY_RESTARTS)
 }
 
 /// The value of counter `name` in a page of metrics.
@@ -410,6 +415,8 @@ mod tests {
         assert!(counter("", UNCERTAINTY_RESTARTS).unwrap_err().contains("have no"));
         let bad = format!("{UNCERTAINTY_RESTARTS} x\n");
         assert!(counter(&bad, UNCERTAINTY_RESTARTS).is_err());
+        assert_eq!(restarts("m", 200, page.as_bytes()), Ok(42));
+        assert_eq!(restarts("m", 503, page.as_bytes()), Err("m answered 503".into()));
     }
 
     #[test]
