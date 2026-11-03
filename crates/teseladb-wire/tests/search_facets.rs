@@ -124,3 +124,190 @@ fn highlights_reach_the_documents() {
         "texts": [{"value": "gato", "type": "hit"}]}]}]}"#;
     assert_eq!(got, Ok(canonical(parse(want).get("v").unwrap())));
 }
+
+/// The corpus with `f` (a dynamic search index), `n` (none) and the views `vf` and `vfs` (with
+/// a stage) on `f`, as `scratchpad/lane3t/m112.js` builds them.
+fn joined_corpus() -> Mem {
+    let mut m = corpus();
+    let commands = [
+        r#"{"insert": "f", "documents": [{"_id": 10, "t": "gato pardo", "k": 1},
+            {"_id": 11, "t": "perro", "k": 2}, {"_id": 12, "t": "gato", "k": 2}]}"#,
+        r#"{"insert": "n", "documents": [{"_id": 20, "t": "gato"}]}"#,
+        r#"{"createSearchIndexes": "f", "indexes": [{"name": "default",
+            "definition": {"mappings": {"dynamic": true}}}]}"#,
+        r#"{"create": "vf", "viewOn": "f", "pipeline": []}"#,
+        r#"{"create": "vfs", "viewOn": "f", "pipeline": [{"$match": {"_id": {"$gt": 0}}}]}"#,
+    ];
+    for cmd in commands {
+        let r = m.run(DB, parse(cmd));
+        assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{cmd}: {r:?}");
+    }
+    m
+}
+
+/// Search stages first in the pipeline of a `$lookup` or `$unionWith` read the search indexes
+/// of the collection that stage reads (011 FR-004, found with T054), as a 9.0.4 replica set with
+/// `refsearch` 1.70.6 answers on 03-11-2026 (`scratchpad/lane3t/m112.js`, `m113.js`): with
+/// `localField` the equality applies to what the search gives, a collection without the index
+/// gives nothing, the errors of the query come when the pipeline runs, and the `$search` of a
+/// `$lookup` on a view without stages finds nothing.
+#[test]
+fn search_stages_in_joined_pipelines_read_the_joined_collection() {
+    let mut m = joined_corpus();
+    let search = r#"{"$search": {"text": {"query": "gato", "path": "t"}}}"#;
+    let score = r#"{"$project": {"s": {"$meta": "searchScore"}}}"#;
+    let meta =
+        r#"{"$searchMeta": {"text": {"query": "gato", "path": "t"}, "count": {"type": "total"}}}"#;
+    let bad = r#"{"$search": {"text": {"query": "gato"}}}"#;
+    let two = r#"{"$match": {"_id": {"$in": [1, 2]}}}"#;
+    let none = r#"{"$match": {"_id": 99}}"#;
+    let lookup = |pre: &str, spec: String| {
+        format!(r#"[{pre}, {{"$lookup": {spec}}}, {{"$project": {{"x": 1}}}}]"#)
+    };
+    let both = |x: &str| format!(r#"[{{"_id": 1, "x": {x}}}, {{"_id": 2, "x": {x}}}]"#);
+    let found = r#"[{"_id": 12, "s": 0.23797652125358582}, {"_id": 10, "s": 0.17735984921455383}]"#;
+    let running = "Executor error during aggregate command on namespace: t.c :: caused by :: ";
+    let cases: Vec<(String, Result<String, String>)> = vec![
+        (
+            lookup(two, format!(r#"{{"from": "f", "pipeline": [{search}, {score}], "as": "x"}}"#)),
+            Ok(both(found)),
+        ),
+        (
+            lookup(
+                two,
+                format!(
+                    r#"{{"from": "f", "localField": "_id", "foreignField": "k", "pipeline": [{search}, {score}], "as": "x"}}"#
+                ),
+            ),
+            Ok(r#"[{"_id": 1, "x": [{"_id": 10, "s": 0.17735984921455383}]},
+                {"_id": 2, "x": [{"_id": 12, "s": 0.23797652125358582}]}]"#
+                .to_owned()),
+        ),
+        (
+            lookup(
+                none,
+                format!(
+                    r#"{{"from": "f", "localField": "_id", "foreignField": "k", "pipeline": [{search}], "as": "x"}}"#
+                ),
+            ),
+            Ok("[]".to_owned()),
+        ),
+        (
+            lookup(two, format!(r#"{{"from": "f", "pipeline": [{meta}], "as": "x"}}"#)),
+            Ok(both(r#"[{"count": {"total": 2}}]"#)),
+        ),
+        (
+            lookup(
+                two,
+                format!(
+                    r#"{{"from": "f", "localField": "_id", "foreignField": "k", "pipeline": [{meta}], "as": "x"}}"#
+                ),
+            ),
+            Ok(both("[]")),
+        ),
+        (
+            lookup(
+                two,
+                r#"{"from": "f", "pipeline": [{"$search": {"text": {"query": "gato", "path": "t"},
+                "count": {"type": "total"}}}, {"$project": {"m": "$$SEARCH_META"}}], "as": "x"}"#
+                    .to_owned(),
+            ),
+            Ok(both(
+                r#"[{"_id": 12, "m": {"count": {"total": 2}}}, {"_id": 10, "m": {"count": {"total": 2}}}]"#,
+            )),
+        ),
+        (lookup(two, format!(r#"{{"from": "n", "pipeline": [{search}], "as": "x"}}"#)), Ok(both("[]"))),
+        (lookup(two, format!(r#"{{"from": "zz", "pipeline": [{search}], "as": "x"}}"#)), Ok(both("[]"))),
+        (lookup(two, format!(r#"{{"from": "zz", "pipeline": [{meta}], "as": "x"}}"#)), Ok(both("[]"))),
+        (lookup(two, format!(r#"{{"from": "vf", "pipeline": [{search}], "as": "x"}}"#)), Ok(both("[]"))),
+        (
+            lookup(two, format!(r#"{{"from": "vfs", "pipeline": [{search}], "as": "x"}}"#)),
+            Err("Cannot perform a search operation as the view definition is incompatible with RefCloud: $match stage can only contain $expr".to_owned()),
+        ),
+        (
+            lookup(none, format!(r#"{{"from": "vfs", "pipeline": [{search}], "as": "x"}}"#)),
+            Err("Cannot perform a search operation as the view definition is incompatible with RefCloud: $match stage can only contain $expr".to_owned()),
+        ),
+        (
+            format!(r#"[{none}, {{"$unionWith": {{"coll": "vfs", "pipeline": [{search}]}}}}]"#),
+            Err("Cannot perform a search operation as the view definition is incompatible with RefCloud: $match stage can only contain $expr".to_owned()),
+        ),
+        (
+            format!(r#"[{none}, {{"$unionWith": {{"coll": "vf", "pipeline": [{search}]}}}}]"#),
+            Ok(r#"[{"_id": 12, "t": "gato", "k": 2}, {"_id": 10, "t": "gato pardo", "k": 1}]"#.to_owned()),
+        ),
+        (
+            lookup(r#"{"$match": {"_id": 1}}"#, format!(r#"{{"from": "vf", "pipeline": [{meta}], "as": "x"}}"#)),
+            Ok(r#"[{"_id": 1, "x": [{"count": {"total": 2}}]}]"#.to_owned()),
+        ),
+        (
+            lookup(two, format!(r#"{{"from": "f", "pipeline": [{bad}], "as": "x"}}"#)),
+            Err(format!(r#"{running}"text.path" is required"#)),
+        ),
+        (lookup(none, format!(r#"{{"from": "f", "pipeline": [{bad}], "as": "x"}}"#)), Ok("[]".to_owned())),
+        (
+            lookup(
+                two,
+                format!(
+                    r#"{{"from": "n", "pipeline": [{{"$lookup": {{"from": "f", "pipeline": [{search}, {score}], "as": "y"}}}}], "as": "x"}}"#
+                ),
+            ),
+            Ok(both(&format!(r#"[{{"_id": 20, "t": "gato", "y": {found}}}]"#))),
+        ),
+        (
+            lookup(
+                r#"{"$match": {"_id": 3}}"#,
+                format!(r#"{{"from": "c", "pipeline": [{search}, {score}], "as": "x"}}"#),
+            ),
+            Ok(r#"[{"_id": 3, "x": [{"_id": 5, "s": 0.2524758577346802}, {"_id": 4, "s": 0.23254355788230896},
+                {"_id": 1, "s": 0.1767331063747406}, {"_id": 2, "s": 0.1767331063747406}]}]"#
+                .to_owned()),
+        ),
+        (
+            lookup(
+                two,
+                r#"{"from": "f", "pipeline": [{"$vectorSearch": {"index": "v", "path": "v", "queryVector": [1, 0],
+                "numCandidates": 5, "limit": 5}}], "as": "x"}"#
+                    .to_owned(),
+            ),
+            Ok(both("[]")),
+        ),
+        (
+            format!(
+                r#"[{{"$match": {{"_id": 3}}}}, {{"$unionWith": {{"coll": "f", "pipeline": [{search}, {score}]}}}}]"#
+            ),
+            Ok(format!(
+                r#"[{{"_id": 3, "t": "perro", "g": "Ensayo"}}, {}]"#,
+                &found[1..found.len() - 1]
+            )),
+        ),
+        (
+            format!(r#"[{{"$match": {{"_id": 3}}}}, {{"$unionWith": {{"coll": "f", "pipeline": [{meta}]}}}}]"#),
+            Ok(r#"[{"_id": 3, "t": "perro", "g": "Ensayo"}, {"count": {"total": 2}}]"#.to_owned()),
+        ),
+        (
+            format!(r#"[{none}, {{"$unionWith": {{"coll": "f", "pipeline": [{bad}]}}}}]"#),
+            Err(format!(r#"{running}"text.path" is required"#)),
+        ),
+        (
+            format!(r#"[{{"$match": {{"_id": 3}}}}, {{"$unionWith": {{"coll": "n", "pipeline": [{search}]}}}}]"#),
+            Ok(r#"[{"_id": 3, "t": "perro", "g": "Ensayo"}]"#.to_owned()),
+        ),
+        (
+            format!(r#"[{search}, {{"$unionWith": {{"coll": "f", "pipeline": [{search}]}}}}, {score}]"#),
+            Ok(r#"[{"_id": 5, "s": 0.2524758577346802}, {"_id": 4, "s": 0.23254355788230896},
+                {"_id": 1, "s": 0.1767331063747406}, {"_id": 2, "s": 0.1767331063747406},
+                {"_id": 12, "s": 0.23797652125358582}, {"_id": 10, "s": 0.17735984921455383}]"#
+                .to_owned()),
+        ),
+    ];
+    let mut wrong = Vec::new();
+    for (pipeline, want) in cases {
+        let want = want.map(|w| canonical(parse(&format!(r#"{{"v": {w}}}"#)).get("v").unwrap()));
+        let got = aggregate(&mut m, &pipeline);
+        if got != want {
+            wrong.push(format!("{pipeline}\n   got  {got:?}\n   want {want:?}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{} differ:\n{}", wrong.len(), wrong.join("\n"));
+}

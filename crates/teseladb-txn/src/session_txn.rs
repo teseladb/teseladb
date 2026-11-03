@@ -142,6 +142,11 @@ impl SessionTxn {
         self.state = Some(State::Aborted(txn_number));
     }
 
+    /// Whether the session's last transaction is `txn_number` and it aborted.
+    pub fn is_aborted(&self, txn_number: i64) -> bool {
+        self.state == Some(State::Aborted(txn_number))
+    }
+
     /// The number of the running transaction, if one runs.
     pub fn running(&self) -> Option<i64> {
         match self.state {
@@ -194,7 +199,9 @@ mod tests {
         );
         assert_eq!(s.check(7, Some(false), Ask::Start), Ok(Verdict::Begin));
         assert_eq!(s.check(7, Some(false), Ask::Abort), Ok(Verdict::Abort));
+        assert!(!s.is_aborted(7));
         s.aborted(7);
+        assert!(s.is_aborted(7) && !s.is_aborted(5));
         let gone = Err(SessionError::NoSuchTransaction { last: Some(7) });
         assert_eq!(s.check(7, Some(false), Ask::Abort), gone);
         assert_eq!(s.check(7, Some(false), Ask::Commit), gone);

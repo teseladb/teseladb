@@ -820,6 +820,19 @@ fn participant_metrics(
         .with("newTermAppliedDate", date_of(e.at))
 }
 
+/// The labels of an error reply.
+const ERROR_LABELS: &str = "errorLabels";
+
+/// `reply` with its `errorLabels`, if it has them, as its first field.
+pub fn labels_first(mut reply: Document) -> Document {
+    let Some(labels) = reply.remove(ERROR_LABELS) else { return reply };
+    let mut out = Document::new().with(ERROR_LABELS, labels);
+    for (k, v) in reply.iter() {
+        out.push(k, v.clone());
+    }
+    out
+}
+
 /// The write commands whose replies a member completes ([`member_write_reply`]).
 const MEMBER_WRITES: [&str; 3] = ["insert", "update", "delete"];
 /// The fields of a write's reply that a member gives after `electionId` and `opTime`, in its
@@ -831,13 +844,17 @@ const AFTER_OP_TIME: [&str; 3] = ["writeErrors", "upserted", "nModified"];
 /// `operationTime` and the presentation's term), then `writeErrors`, `upserted` and `nModified`,
 /// then the rest. A reply without `n` (an error) or another command's stays as it is, without the
 /// `recoveryToken` a `refrouter` adds inside a transaction, which a member never gives (measured on
-/// the same replica set).
+/// the same replica set). An error's `errorLabels` go first, as a member puts them (measured on
+/// a replica set of `ref:9.0.4`, 03-11-2026, for `NoSuchTransaction` and `WriteConflict`).
 pub fn member_write_reply(
     view: &crate::hello::ReplicaView,
     command: &str,
     mut reply: Document,
 ) -> Document {
     reply.remove("recoveryToken");
+    if reply.get("ok") != Some(&Value::Double(1.0)) {
+        return labels_first(reply);
+    }
     let (Some(n), Some(ts @ Value::Timestamp { .. })) =
         (reply.get("n"), reply.get("operationTime"))
     else {

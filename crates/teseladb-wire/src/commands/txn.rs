@@ -346,7 +346,7 @@ pub(super) fn session_name(lsid: u128) -> String {
 
 /// The `uid` of the session of `user` in RefDb's messages: the base64 of the SHA-256 of
 /// `user@db`, [`ANONYMOUS_UID`] without a login (measured on a `refrouter` 9.0.4 on 03-11-2026).
-fn user_uid(user: Option<&UserName>) -> String {
+pub(super) fn user_uid(user: Option<&UserName>) -> String {
     match user {
         Some(u) => {
             base64::encode(&teseladb_hash::sha256(format!("{}@{}", u.user, u.db).as_bytes()))
@@ -738,15 +738,28 @@ fn run_command(
             return Some(Err(CommandError::new(MAX_TIME_MS_EXPIRED, TIME_LIMIT_MESSAGE)));
         }
     }
-    let checked = {
+    let (checked, before) = {
         let mut g = lock(shared);
         let s = g.txns.entry(f.lsid).or_default();
-        s.rules.check(f.txn_number, f.autocommit, ask)
+        let before = s.rules.clone();
+        (s.rules.check(f.txn_number, f.autocommit, ask), before)
     };
     let verdict = match checked {
         Ok(v) => v,
+        // A member of a replica set has no router that recovers a decision (measured on a replica
+        // set of `ref:9.0.4`, 03-11-2026): the number stays unused.
+        Err(SessionError::Unrecorded { last, .. }) if member(backend) => {
+            restore(shared, f, before);
+            return Some(Err(not_in_progress(f, last)));
+        }
         Err(SessionError::Unrecorded { asked, last }) => {
             return Some(unrecorded(backend, shared, cmd, f.lsid, (asked, last)));
+        }
+        Err(SessionError::NoSuchTransaction { last }) if member(backend) => {
+            return Some(Err(match before.is_aborted(f.txn_number) {
+                true => txn_error(TxnError::NoSuchTransaction, f.txn_number),
+                false => not_in_progress(f, last),
+            }));
         }
         // As the shard answers through a `refrouter` 9.0.4 (measured on 01-11-2026).
         Err(SessionError::NoSuchTransaction { .. })
@@ -760,6 +773,11 @@ fn run_command(
     match verdict {
         Verdict::Begin => {
             if let Some(e) = too_many_open(shared, f) {
+                // A member leaves the session as it was: the number can start later (measured on
+                // a replica set of `ref:9.0.4`, 03-11-2026).
+                if member(backend) {
+                    restore(shared, f, before);
+                }
                 let shard = super::shard_name(backend.node());
                 return Some(refused_write(&shard, name, e));
             }
@@ -821,6 +839,49 @@ fn run_command(
             })
         }
     }
+}
+
+/// The start of the router's own `NoSuchTransaction` for a transaction that was aborted.
+const ABORTED_PREFIX: &str = "Transaction with { txnNumber: ";
+
+/// A reply as a `refrouter` 9.0.4 gives it: its own `NoSuchTransaction` for an aborted transaction
+/// carries `errorLabels` first, where an error relayed from a shard has them last (measured on
+/// 03-11-2026 for the commands after a failed statement and an abort repeated).
+pub fn router_reply(reply: Document) -> Document {
+    let aborted = reply.get("code") == Some(&Value::Int32(NO_SUCH_TRANSACTION.code))
+        && matches!(reply.get("errmsg"), Some(Value::String(m)) if m.starts_with(ABORTED_PREFIX));
+    match aborted {
+        true => super::replset::labels_first(reply),
+        false => reply,
+    }
+}
+
+/// Whether the node presents itself as a member of a replica set (018), which answers as a
+/// `refnode` and not as a `refrouter` where they differ; a presentation it cannot read is `refrouter`'s.
+fn member(backend: &mut dyn Backend) -> bool {
+    super::config_db::as_member(backend).unwrap_or(false)
+}
+
+/// Puts back the session's rules of transaction `f` as they were before its command.
+fn restore(shared: &Shared, f: TxnFields, before: SessionTxn) {
+    lock(shared).txns.entry(f.lsid).or_default().rules = before;
+}
+
+/// A member's `NoSuchTransaction` for a number of the session that no transaction runs with
+/// (measured on a replica set of `ref:9.0.4`, 03-11-2026): it names the number asked and the
+/// session's active one, -1 before the first.
+fn not_in_progress(f: TxnFields, active: Option<i64>) -> CommandError {
+    CommandError::new(
+        NO_SUCH_TRANSACTION,
+        format!(
+            "Given transaction number {} on session {} using txnRetryCounter 0 does not match any \
+             in-progress transactions. The active transaction number is {}",
+            f.txn_number,
+            session_name(f.lsid),
+            active.unwrap_or(-1)
+        ),
+    )
+    .with_label(TRANSIENT_TRANSACTION_ERROR)
 }
 
 /// `errmsg` of the abort of a transaction none of whose statements reached a participant.
@@ -1133,6 +1194,10 @@ fn with_running(
         let created = tb.run.created.clone();
         let result = match txn_ddl::precheck(&mut tb, &created, (name, db, cmd)) {
             Ok(()) => statement(&mut tb),
+            // As `createIndexes` answers its shard's errors (`indexes::forwarded`).
+            Err(e) if name == txn_ddl::CREATE_INDEXES => {
+                Some(Ok(super::indexes::shard_error(&mut tb, e)))
+            }
             Err(e) => Some(Err(e)),
         };
         // A read met a version in its uncertainty window (FR-008).

@@ -472,6 +472,48 @@ fn errmsg(r: &Document) -> &str {
     }
 }
 
+/// A `createIndexes` that fails answers as a `refrouter` 9.0.4 relays its shard's error (measured on
+/// 03-11-2026): the shard's reply under `raw`, then `code`, `codeName`, `ok` and `errmsg`, and
+/// inside a transaction its `recoveryToken`, also when it is the first statement. The abort that
+/// follows is the router's answer, `errorLabels` first.
+#[test]
+fn a_failed_create_indexes_answers_with_the_shard_reply_under_raw() {
+    let mut m = node();
+    let keys = |d: &Document| d.iter().map(|(k, _)| k.to_owned()).collect::<Vec<_>>();
+    let bad = Document::new().with("key", Document::new().with("a", "bogus")).with("name", "a_b");
+    let outside =
+        Document::new().with("createIndexes", "c").with("indexes", vec![Value::Document(bad)]);
+    let r = run(&mut m, DB, outside);
+    assert_eq!(keys(&r)[..5], ["raw", "code", "codeName", "ok", "errmsg"], "{r:?}");
+    let Some(Value::Document(raw)) = r.get("raw") else { panic!("{r:?}") };
+    let (_, shard) = raw.iter().next().expect("one shard");
+    let Value::Document(shard) = shard else { panic!("{r:?}") };
+    assert_eq!(keys(shard), ["ok", "errmsg", "code", "codeName"], "{r:?}");
+    assert_eq!(shard.get("errmsg"), r.get("errmsg"));
+    assert!(ok(&run(&mut m, DB, stmt(insert_into("c", 1), 80, 1, true))));
+    let r = run(&mut m, DB, stmt(index_on("c"), 80, 1, false));
+    assert_eq!(code(&r), Some(&Value::Int32(263)), "{r:?}");
+    assert_eq!(
+        keys(&r)[..6],
+        ["raw", "code", "codeName", "ok", "errmsg", "recoveryToken"],
+        "{r:?}"
+    );
+    let shard_token = Value::Document(Document::new().with("recoveryShardId", shard_name(1)));
+    assert_eq!(r.get("recoveryToken"), Some(&shard_token), "{r:?}");
+    let r = run(&mut m, "admin", end("abortTransaction", 80, 1));
+    assert_eq!(errmsg(&r), "Transaction with { txnNumber: 1 } has been aborted.");
+    assert_eq!(keys(&r)[..6], ["errorLabels", "ok", "errmsg", "code", "codeName", "recoveryToken"]);
+    // The first statement: an empty token, on the error and on the abort.
+    let r = run(&mut m, DB, stmt(index_on("c"), 80, 2, true));
+    assert_eq!(code(&r), Some(&Value::Int32(263)), "{r:?}");
+    let empty = Value::Document(Document::new());
+    assert_eq!(r.get("recoveryToken"), Some(&empty), "{r:?}");
+    let r = run(&mut m, "admin", end("abortTransaction", 80, 2));
+    assert_eq!(code(&r), Some(&Value::Int32(251)), "{r:?}");
+    assert_eq!(r.get("recoveryToken"), Some(&empty), "{r:?}");
+    assert_eq!(keys(&r)[0], "errorLabels", "{r:?}");
+}
+
 /// Collections a transaction creates (008 FR-014, T019), as a `refrouter` 9.0.4 answers (measured
 /// on 31-10-2026): no other client sees them before the commit, the commit gives them their name,
 /// an abort drops them, and the database stays.
@@ -489,6 +531,16 @@ fn a_transaction_creates_collections_that_show_once_it_commits() {
     assert!(ok(&run(&mut m, DB, stmt(create("n3"), 20, 1, false))));
     let r = run(&mut m, DB, stmt(index_on("n3"), 20, 1, false));
     assert_eq!(r.get("createdCollectionAutomatically"), Some(&Value::Boolean(true)), "{r:?}");
+    // The shard's reply under `raw` says so too (measured on 9.0.4 on 03-11-2026).
+    let Some(Value::Document(raw)) = r.get("raw") else { panic!("no raw: {r:?}") };
+    for (_, shard) in raw.iter() {
+        let Value::Document(shard) = shard else { panic!("raw: {r:?}") };
+        assert_eq!(
+            shard.get("createdCollectionAutomatically"),
+            Some(&Value::Boolean(true)),
+            "{r:?}"
+        );
+    }
     assert!(ok(&run(&mut m, "admin", end("commitTransaction", 20, 1))));
     assert_eq!(listed(&mut m, "n1") + listed(&mut m, "n2") + listed(&mut m, "n3"), 3);
     assert_eq!(found(&run(&mut m, DB, Document::new().with("find", "n1"))), 1);

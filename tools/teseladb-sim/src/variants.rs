@@ -48,9 +48,11 @@ variants!(
     // A capped insert that evicts only past `max`: the `special-collections` workload's next read
     // finds the collection over `size` with several documents (015 T010).
     ("capped_exceeds_size", "capped", Default, 1000),
-    // A commit below a push (008 T024): seed 6 of `txn-bank` reads every account at a mark the
-    // transfer committed below, and the total is off; `intents` in `splits` finds it later.
-    ("commit_below_push", "bank-total", Default, 1000),
+    // A commit below a push (008 T024): seed 4 of `splits` reads at a mark above the commit and
+    // misses the write (`intents`); seed 6 of `txn-bank` reads every account at a mark the
+    // transfer committed below, and the total is off. The lowest seed decides: `splits` first
+    // (measured 03-11-2026, after d195d1e changed how a range born from a split elects).
+    ("commit_below_push", "intents", Default, 1000),
     // A recovery that looks for another transaction's record (008): it finds none, answers that
     // the transaction never began and leaves that record aborted; the transaction itself goes on
     // and commits, and `txn_recovery` finds the recovery that answered «not committed».
