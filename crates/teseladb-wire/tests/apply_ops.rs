@@ -125,3 +125,40 @@ fn failures_as_refdb_gives_them() {
         (Some(&Value::Int32(0)), Some(&Value::Double(1.0)))
     );
 }
+
+/// An entry that fails the command (a namespace that does not exist, an unknown `op`) stops it
+/// there: the reply gives `applied` with the entries run up to it, the error, and `results` with
+/// `false` for it; the entries before it stay applied (measured on a replica set of
+/// `ref:9.0.4`, 03-11-2026).
+#[test]
+fn an_entry_that_fails_the_command_stops_it() {
+    let mut m = Mem::new();
+    m.run("ap", doc(&[("create", "c".into())]));
+    let keys = |d: &Document| d.iter().map(|(k, _)| k.to_owned()).collect::<Vec<_>>();
+    let r = apply(
+        &mut m,
+        vec![op("i", "ap.c", id(1)), op("i", "ap.nope", id(1)), op("i", "ap.c", id(2))],
+    );
+    assert_eq!(keys(&r), ["applied", "code", "codeName", "errmsg", "results", "ok"]);
+    assert_eq!(r.get("applied"), Some(&Value::Int32(2)));
+    assert_eq!(r.get("code"), Some(&Value::Int32(26)));
+    assert_eq!(
+        r.get("results"),
+        Some(&Value::Array(vec![Value::Boolean(true), Value::Boolean(false)]))
+    );
+    let r = apply(&mut m, vec![op("i", "ap.c", id(3)), op("x", "ap.c", id(4))]);
+    assert_eq!(keys(&r), ["applied", "code", "codeName", "errmsg", "results", "ok"]);
+    assert_eq!(r.get("code"), Some(&Value::Int32(2)));
+    let found = m.run("ap", doc(&[("find", "c".into())]));
+    let ids: Vec<Value> = match field(&found, "cursor.firstBatch") {
+        Value::Array(a) => a
+            .iter()
+            .map(|d| match d {
+                Value::Document(d) => d.get("_id").cloned().expect("_id"),
+                o => panic!("{o:?}"),
+            })
+            .collect(),
+        o => panic!("{o:?}"),
+    };
+    assert_eq!(ids, [Value::Int32(1), Value::Int32(3)]);
+}

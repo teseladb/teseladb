@@ -8,8 +8,10 @@
 //! - `c` runs the command `o` on the database of `ns`; `n` is skipped and not counted;
 //! - every entry runs even after one fails; the reply gives `applied` and `results`, and with a
 //!   failure `ok: 0` and `UnknownError` «applyOps had one or more errors applying ops»;
-//! - an insert or update into a namespace that does not exist fails the command with 26;
-//!   `preCondition` is refused (`Location6711600`) and an unknown `op` is `BadValue`.
+//! - an insert or update into a namespace that does not exist fails the command with 26, and an
+//!   unknown `op` with `BadValue`: the entries before it stay applied and the reply gives
+//!   `applied`, the error and `results` up to it (measured on 03-11-2026); `preCondition` is
+//!   refused (`Location6711600`).
 
 use teseladb_bson::{Document, Value};
 use teseladb_topology::oplog::{OpType, OplogEntry, OplogError};
@@ -134,6 +136,19 @@ fn apply_one<B: Backend + ?Sized>(
     Ok(ok(&run_on(ctx, db, &write)?))
 }
 
+/// The reply of an entry that fails the command: the entries run up to it, its error and their
+/// results, as a member gives it (measured on 9.0.4, 03-11-2026).
+fn stopped(e: &CommandError, results: Vec<Value>) -> Document {
+    let applied = i32::try_from(results.len()).unwrap_or(i32::MAX);
+    Document::new()
+        .with("applied", applied)
+        .with("code", e.code.code)
+        .with("codeName", e.code.name)
+        .with("errmsg", e.errmsg.as_str())
+        .with("results", results)
+        .with("ok", 0.0)
+}
+
 /// `applyOps`.
 pub fn apply_ops<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     let entries = match ctx.first() {
@@ -153,10 +168,23 @@ pub fn apply_ops<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
         );
         return Err(CommandError::new(NO_PRECONDITION, msg));
     }
-    let parsed = entries.iter().map(parse).collect::<Result<Vec<_>, _>>()?;
+    if entries.iter().any(|e| !matches!(e, Value::Document(_))) {
+        return Err(CommandError::new(BAD_VALUE, "applyOps entries must be documents"));
+    }
     let mut results = Vec::new();
-    for e in parsed.iter().filter(|e| e.operation.op != OpType::Noop) {
-        results.push(Value::Boolean(apply_one(ctx, e)?));
+    for v in &entries {
+        let done = parse(v).and_then(|e| match e.operation.op {
+            OpType::Noop => Ok(None),
+            _ => apply_one(ctx, &e).map(Some),
+        });
+        match done {
+            Ok(None) => {}
+            Ok(Some(r)) => results.push(Value::Boolean(r)),
+            Err(e) => {
+                results.push(Value::Boolean(false));
+                return Ok(stopped(&e, results));
+            }
+        }
     }
     let applied = i32::try_from(results.len()).unwrap_or(i32::MAX);
     let failed = results.contains(&Value::Boolean(false));
