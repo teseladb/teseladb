@@ -67,6 +67,7 @@ mod os {
     const SYS_SET_MEMPOLICY: i64 = 237;
     const MPOL_LOCAL: i64 = 4;
     const ENOSYS: i32 = 38;
+    const EPERM: i32 = 1;
 
     unsafe extern "C" {
         fn sched_getaffinity(pid: i32, size: usize, mask: *mut u64) -> i32;
@@ -90,11 +91,13 @@ mod os {
         policy_result(rc, io::Error::last_os_error())
     }
 
-    /// `set_mempolicy`'s return code and `errno` as an answer: `ENOSYS` is a kernel without NUMA.
+    /// `set_mempolicy`'s return code and `errno` as an answer: `ENOSYS` is a kernel without NUMA
+    /// and `EPERM` a sandbox that forbids memory policies (Docker's default seccomp profile):
+    /// in both the memory stays where the kernel puts it.
     pub(crate) fn policy_result(rc: i64, e: io::Error) -> io::Result<bool> {
         if rc == 0 {
             Ok(true)
-        } else if e.raw_os_error() == Some(ENOSYS) {
+        } else if matches!(e.raw_os_error(), Some(ENOSYS | EPERM)) {
             Ok(false)
         } else {
             Err(e)
@@ -147,6 +150,7 @@ mod tests {
         let e = |c| io::Error::from_raw_os_error(c);
         assert!(policy_result(0, e(0)).unwrap());
         assert!(!policy_result(-1, e(38)).unwrap(), "ENOSYS: no NUMA");
+        assert!(!policy_result(-1, e(1)).unwrap(), "EPERM: a sandbox without memory policies");
         assert!(policy_result(-1, e(22)).is_err());
     }
 
