@@ -346,7 +346,10 @@ fn version_13_snapshots_still_restore_without_meta1() {
     // Nor the catalog changes of change streams, nor the mark of the last entry (version 17).
     assert_eq!(back.ddl.applied_mark, None);
     back.ddl = sm.ddl.clone();
-    assert_eq!(back, sm);
+    // Nor the marks of the ranges' moves (version 20).
+    let mut never = sm.clone();
+    never.ranges.values_mut().for_each(|r| r.moved_ms = 0);
+    assert_eq!(back, never);
     let (sm, _, _) = handed_off();
     let mut back = Group0Sm::default();
     back.restore(&sm.encode_snapshot_as(SNAPSHOT_VERSION_WITHOUT_META1)).unwrap();
@@ -823,4 +826,25 @@ fn any_copy_of_group0_builds_the_same_meta2_range_until_it_drops_its_interval() 
     let mut fresh = cluster();
     let seeded = Group0Command::Meta2Seeded { group: GroupId(4) };
     assert_eq!(run(&mut fresh, seeded), Group0Result::Err(Group0Error::NoSuchGroup));
+}
+
+#[test]
+fn a_meta2_range_keeps_when_its_ranges_moved_and_reads_the_format_before() {
+    // 018 FR-017: a split in a Meta2 range gives both halves its time, as in Group 0.
+    let (_, mut low, _) = seeded();
+    let split = Group0Command::SplitRange { group: GroupId(1), at: b"c".to_vec() };
+    let Group0Result::Range(new) = run2(&mut low, d(split)) else { panic!("no split") };
+    let done = Group0Command::CompleteSplit { group: GroupId(1), at: b"c".to_vec(), at_index: 3 };
+    assert_eq!(run2(&mut low, d(done)), Group0Result::Range(new));
+    let now = low.time_ms;
+    assert!(now > 0);
+    assert_eq!((low.ranges[&GroupId(1)].moved_ms, low.ranges[&new].moved_ms), (now, now));
+    let mut back = Meta2Sm::default();
+    back.restore(&low.encode_snapshot_as(teseladb_meta::meta2::SNAPSHOT_VERSION)).unwrap();
+    assert_eq!(back, low);
+    let old = low.encode_snapshot_as(teseladb_meta::meta2::SNAPSHOT_VERSION_WITHOUT_RANGE_MARKS);
+    back.restore(&old).unwrap();
+    let mut never = low.clone();
+    never.ranges.values_mut().for_each(|r| r.moved_ms = 0);
+    assert_eq!(back, never);
 }

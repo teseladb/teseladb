@@ -390,8 +390,11 @@ fn dispatch(
                 return Ok(());
             }
             w.on_deliver(from, to, core, epoch, &frame);
-            if w.edge_cut.is_some_and(|(n, ..)| n == to) && answers_heartbeats(&frame) {
-                edge_cut(w, wl);
+            if let Some(cut) = w.edge_cut.filter(|(n, ..)| *n == to)
+                && answers_heartbeats(&frame)
+            {
+                w.edge_cut = None;
+                edge_cut(w, wl, cut);
             }
             if w.nodes[to as usize].alive {
                 wl.on_completions(w, to, core, teseladb_raftlog::Completions::default());
@@ -659,8 +662,11 @@ fn apply_fault(w: &mut World, wl: &mut dyn workloads::Workload, a: FaultAction) 
 /// leads: its lease reads go on to the end of the lease at marks ahead of the clock of the leader
 /// that follows it, the longest a correct leader can, and past the lease it dies (research R3e).
 /// Its clock stays at the edge: once back, it is cut off again the next time it leads.
-fn edge_cut(w: &mut World, wl: &mut dyn workloads::Workload) {
-    let Some((node, from_median_ns, dur)) = w.edge_cut.take() else { return };
+fn edge_cut(
+    w: &mut World,
+    wl: &mut dyn workloads::Workload,
+    (node, from_median_ns, dur): (u32, i64, Nanos),
+) {
     if w.healed {
         return;
     }
@@ -674,11 +680,10 @@ fn edge_cut(w: &mut World, wl: &mut dyn workloads::Workload) {
     apply_fault(w, wl, FaultAction::Partition { side: vec![node], dur });
     w.edge_cut_at = Some((node, now));
     let (lo, hi) = EDGE_DIE_PAST_LEASE_MS;
+    // The cut ([`EDGE_CUT_MS`]) outlasts the lease and the margin: it dies before it is back.
     let after = RaftConfig::new(NodeId(1)).lease_dur + Nanos::from_millis(w.rng.range(lo, hi));
-    if after < dur {
-        let down = dur.saturating_since(after);
-        w.schedule(now + after, Event::Fault(FaultAction::Crash { node, down }));
-    }
+    let down = dur.saturating_since(after);
+    w.schedule(now + after, Event::Fault(FaultAction::Crash { node, down }));
 }
 
 /// The wall clock offset (ns) that puts `node` `from_median_ns` off the median of every node's

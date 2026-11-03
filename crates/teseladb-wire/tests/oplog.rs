@@ -210,6 +210,61 @@ fn a_transaction_is_one_apply_ops_entry() {
     assert_eq!(e.get("prevOpTime"), Some(&Value::Document(null)));
 }
 
+/// A collection a transaction creates, and the index it builds there, are `create` and
+/// `createIndexes` entries under the collection's own name before the transaction's
+/// `applyOps`: the name the collection has until the commit and its rename never show
+/// (`refdump --oplog` refuses an oplog with renames, T013). An aborted transaction's
+/// collection gives no entry.
+#[test]
+fn a_collection_a_transaction_creates() {
+    let mut m = node();
+    let lsid = Document::new().with("id", Value::Binary { subtype: 4, bytes: vec![4; 16] });
+    let txn = |cmd: Document, n: i64, start: bool| {
+        let cmd = cmd.with("lsid", lsid.clone()).with("txnNumber", Value::Int64(n));
+        let cmd = if start { cmd.with("startTransaction", true) } else { cmd };
+        cmd.with("autocommit", false)
+    };
+    ok(&run(&mut m, DB, txn(Document::new().with("create", "fresh"), 1, true)));
+    let index = Document::new().with("key", Document::new().with("k", 1)).with("name", "k_1");
+    let build = Document::new()
+        .with("createIndexes", "fresh")
+        .with("indexes", vec![Value::Document(index)]);
+    ok(&run(&mut m, DB, txn(build, 1, false)));
+    let one = Document::new().with("_id", 1).with("k", 1);
+    let ins = Document::new().with("insert", "fresh").with("documents", vec![Value::Document(one)]);
+    ok(&run(&mut m, DB, txn(ins, 1, false)));
+    ok(&run(&mut m, "admin", txn(Document::new().with("commitTransaction", 1), 1, false)));
+    let gone = Document::new().with("_id", 1);
+    let ins = Document::new().with("insert", "gone").with("documents", vec![Value::Document(gone)]);
+    ok(&run(&mut m, DB, txn(ins, 2, true)));
+    ok(&run(&mut m, "admin", txn(Document::new().with("abortTransaction", 1), 2, false)));
+
+    let entries = oplog(&mut m, Document::new());
+    let shown: Vec<String> =
+        entries.iter().map(|e| format!("{:?} {:?}", e.get("op"), e.get("o"))).collect();
+    assert!(!shown.iter().any(|s| s.contains("system.teseladb") || s.contains("renameCollection")));
+    assert!(!shown.iter().any(|s| s.contains("gone")), "{shown:#?}");
+    let commands: Vec<&Document> =
+        entries.iter().filter(|e| e.get("ns") == Some(&Value::from("v.$cmd"))).collect();
+    assert_eq!(commands.len(), 2, "{shown:#?}");
+    assert_eq!(field(commands[0], "o.create"), &Value::from("fresh"));
+    assert_eq!(
+        keys(commands[0]),
+        ["op", "ns", "ui", "o", "o2", "versionContext", "ts", "t", "v", "wall"]
+    );
+    assert_eq!(field(commands[1], "o.createIndexes"), &Value::from("fresh"));
+    assert_eq!(field(commands[1], "o.name"), &Value::from("k_1"));
+    assert_eq!(commands[0].get("ui"), commands[1].get("ui"));
+    let last = entries.last().expect("entries");
+    assert!(
+        last.get("o")
+            .is_some_and(|o| matches!(o, Value::Document(d) if d.get("applyOps").is_some()))
+    );
+    let ops = docs(field(last, "o.applyOps"));
+    assert_eq!(ops[0].get("ns"), Some(&Value::from("v.fresh")));
+    assert_eq!(ops[0].get("ui"), commands[0].get("ui"));
+}
+
 /// The catalog changes are `c` entries on `<db>.$cmd`.
 #[test]
 fn catalog_changes() {

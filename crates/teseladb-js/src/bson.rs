@@ -817,7 +817,8 @@ pub fn to_bson(it: &mut Interp, v: &Val, name: &str, depth: usize) -> R<Value> {
             let kind = o.borrow().kind.clone();
             match kind {
                 Kind::Bson(b) => bson_value(it, o, v, b, depth)?,
-                Kind::Date(t) => Value::DateTime(if t.is_nan() { i64::MIN } else { t as i64 }),
+                // An invalid date is the epoch (measured on a `refrouter` 9.0.4 on 02-11).
+                Kind::Date(t) => Value::DateTime(if t.is_nan() { 0 } else { t as i64 }),
                 Kind::Num(n) => Value::Double(n),
                 Kind::Str(s) => Value::String(crate::text::to_utf8(&s).into_owned()),
                 Kind::Bool(b) => Value::Boolean(b),

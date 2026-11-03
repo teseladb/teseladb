@@ -25,8 +25,10 @@ use crate::request::Requests;
 use crate::security::{Principal, Security, SecurityError};
 use crate::tenants::Tenants;
 
-/// Version of the snapshot format (19: the places of the indexes in their list, 009 FR-007).
-pub const SNAPSHOT_VERSION: u8 = 19;
+/// Version of the snapshot format (20: when each range was last split or moved, 018 FR-017).
+pub const SNAPSHOT_VERSION: u8 = 20;
+/// The snapshot before the ranges' marks (03-11-2026), still read: every range as never moved.
+pub const SNAPSHOT_VERSION_WITHOUT_RANGE_MARKS: u8 = 19;
 /// The snapshot before the places of the indexes (02-11-2026), still read: each index at its
 /// identifier.
 pub const SNAPSHOT_VERSION_WITHOUT_INDEX_PLACES: u8 = 18;
@@ -104,6 +106,10 @@ pub struct RangeDesc {
     pub pending_split: Option<Vec<u8>>,
     /// A replica change waits for `ReplicasSettled`.
     pub settling: bool,
+    /// Cluster time, in milliseconds, of its last split or move (a replica change, or the
+    /// balancer's request for another leader), or of its creation; a merge keeps the later of
+    /// both (018 FR-017). 0 in a descriptor written before it was kept.
+    pub moved_ms: u64,
 }
 
 impl RangeDesc {
@@ -709,7 +715,7 @@ impl Group0Sm {
         }
         e.var(self.ranges.len() as u64);
         for r in self.ranges.values() {
-            put_range(&mut e, r);
+            put_range(&mut e, r, version > SNAPSHOT_VERSION_WITHOUT_RANGE_MARKS);
         }
         e.var(self.settings.len() as u64);
         for (k, v) in &self.settings {
@@ -792,7 +798,7 @@ impl Group0Sm {
             sm.nodes.insert(id, info);
         }
         for _ in 0..d.var()? {
-            let desc = get_range(&mut d)?;
+            let desc = get_range(&mut d, version > SNAPSHOT_VERSION_WITHOUT_RANGE_MARKS)?;
             sm.ranges.insert(desc.group, desc);
         }
         sm.reindex();
@@ -848,14 +854,18 @@ impl Group0Sm {
     }
 }
 
-/// A descriptor as the snapshots of Group 0 and of the Meta2 ranges write it.
-pub(crate) fn put_range(e: &mut Encoder, r: &RangeDesc) {
+/// A descriptor as the snapshots of Group 0 and of the Meta2 ranges write it; `marks`: with
+/// [`RangeDesc::moved_ms`] (the formats before it leave it out).
+pub(crate) fn put_range(e: &mut Encoder, r: &RangeDesc, marks: bool) {
     e.u64(r.group.0).bytes(&r.start).bytes(&r.end).u16(r.core);
     put_replicas(e, &r.replicas);
     e.u64(r.replica_epoch).u64(r.generation).u64(r.leader_hint.map_or(0, |n| n.0));
     e.u64(r.leader_term);
     e.bool(r.pending_split.is_some()).bytes(r.pending_split.as_deref().unwrap_or(&[]));
     e.bool(r.settling);
+    if marks {
+        e.u64(r.moved_ms);
+    }
 }
 
 /// Replicas as every node, then the learners.
@@ -883,8 +893,8 @@ pub(crate) fn get_replicas(d: &mut Decoder<'_>) -> Result<Vec<(NodeId, ReplicaRo
         .collect())
 }
 
-/// A descriptor written by [`put_range`].
-pub(crate) fn get_range(d: &mut Decoder<'_>) -> Result<RangeDesc, DecodeError> {
+/// A descriptor written by [`put_range`] with the same `marks`.
+pub(crate) fn get_range(d: &mut Decoder<'_>, marks: bool) -> Result<RangeDesc, DecodeError> {
     let group = GroupId(d.u64()?);
     let (start, end, core) = (d.bytes()?.to_vec(), d.bytes()?.to_vec(), d.u16()?);
     let replicas = get_replicas(d)?;
@@ -904,6 +914,7 @@ pub(crate) fn get_range(d: &mut Decoder<'_>) -> Result<RangeDesc, DecodeError> {
         leader_term,
         pending_split: split.then_some(at),
         settling: d.bool()?,
+        moved_ms: if marks { d.u64()? } else { 0 },
     })
 }
 

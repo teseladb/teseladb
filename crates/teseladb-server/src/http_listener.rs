@@ -480,7 +480,8 @@ fn start(
     let caller = caller.clone();
     let mut owed = Owed { id, tx: tx.clone(), state: Owing::Answer };
     // A thread that does not start drops `owed`, which answers `503`.
-    let _spawned = thread::Builder::new().name("teseladb-http-req".into()).spawn(move || {
+    let thread = crate::client_listener::command_thread("teseladb-http-req".into());
+    let _spawned = thread.spawn(crate::client_listener::with_command_stack(move || {
         match service.serve(&request, &caller, &cancelled) {
             Reply::Whole(mut r) => {
                 r.headers.extend(cors_fields);
@@ -500,7 +501,7 @@ fn start(
                 owed.send(Part::End);
             }
         }
-    });
+    }));
 }
 
 /// Writes what a request's thread sent.

@@ -714,7 +714,24 @@ fn parts(it: &Interp, v: &Val) -> R<(Name, Name)> {
 }
 
 fn compiled(it: &Interp, src: &str, flags: &str) -> R<Regex> {
-    compile(src, flags).map_err(|e| it.error("SyntaxError", &e))
+    let re = compile(src, flags).map_err(|e| it.error("SyntaxError", &e))?;
+    // The engine compiles the pattern on its first match, each group nested in another taking a
+    // slice of its native stack ([`crate::recursion::NESTING`]).
+    let room = crate::recursion::NATIVE_BUDGET.saturating_sub(it.units);
+    if nesting(&re.node).saturating_mul(crate::recursion::NESTING) > room {
+        return Err(it.error("Error", "regexp too big"));
+    }
+    Ok(re)
+}
+
+/// How many groups and lookarounds `n` nests in one another.
+fn nesting(n: &Node) -> usize {
+    match n {
+        Node::Group(x, _) | Node::Look(x, ..) => 1 + nesting(x),
+        Node::Repeat(x, ..) => nesting(x),
+        Node::Alt(xs) | Node::Seq(xs) => xs.iter().map(nesting).max().unwrap_or(0),
+        _ => 0,
+    }
 }
 
 /// Checks a pattern when a literal or `new RegExp` makes it.
@@ -1041,18 +1058,30 @@ fn all(it: &mut Interp, re: &Regex, s: &[u32]) -> R<Vec<Caps>> {
     Ok(out)
 }
 
-/// `String.prototype.<sym>(x)` where `x` is an object other than a `RegExp` with a method
-/// `Symbol.<sym>`: what that method gives for `this` (ECMA-262 §22.1.3.13).
-fn delegated(it: &mut Interp, a: &[Val], sym: &str, this: &Val) -> R<Option<Val>> {
+/// `String.prototype.<sym>(x, …rest)` where `x` is an object other than a `RegExp` with a method
+/// `Symbol.<sym>`: what that method gives for `this` and `rest` (ECMA-262 §22.1.3.13); a method
+/// that is neither callable nor `undefined` or `null` is a `TypeError` (GetMethod).
+pub(crate) fn delegated(
+    it: &mut Interp,
+    a: &[Val],
+    sym: &str,
+    this: &Val,
+    rest: &[Val],
+) -> R<Option<Val>> {
     let x = a.first().cloned().unwrap_or(Val::Undef);
     if !matches!(&x, Val::Obj(o) if !matches!(o.borrow().kind, Kind::RegExp(..))) {
         return Ok(None);
     }
     let f = it.get(&x, &crate::builtins::well_known(sym))?;
-    if !f.is_callable() {
+    if f.is_nullish() {
         return Ok(None);
     }
-    it.call(&f, &x, std::slice::from_ref(this)).map(Some)
+    if !f.is_callable() {
+        return it.type_error(&format!("{} is not a function", f.type_of()));
+    }
+    let mut args = vec![this.clone()];
+    args.extend_from_slice(rest);
+    it.call(&f, &x, &args).map(Some)
 }
 
 fn as_regexp(it: &mut Interp, v: &Val) -> R<Val> {
@@ -1066,7 +1095,7 @@ fn as_regexp(it: &mut Interp, v: &Val) -> R<Val> {
 /// `String.prototype.match`.
 pub fn string_match(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let s = crate::strings::this_text(it, this)?;
-    if let Some(v) = delegated(it, a, "match", this)? {
+    if let Some(v) = delegated(it, a, "match", this, &[])? {
         return Ok(v);
     }
     let rv = as_regexp(it, &a.first().cloned().unwrap_or(Val::Undef))?;
@@ -1096,7 +1125,7 @@ pub fn string_match(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 /// `String.prototype.search`.
 pub fn search(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let s = crate::strings::this_text(it, this)?;
-    if let Some(v) = delegated(it, a, "search", this)? {
+    if let Some(v) = delegated(it, a, "search", this, &[])? {
         return Ok(v);
     }
     let rv = as_regexp(it, &a.first().cloned().unwrap_or(Val::Undef))?;
@@ -1137,7 +1166,12 @@ pub fn replace(it: &mut Interp, s: &Name, rv: &Val, replacement: &Val, all_match
             .collect();
         let named: Vec<(String, Val)> =
             re.names.iter().map(|(n, i)| (n.clone(), groups[*i - 1].clone())).collect();
-        let r = substitute(it, replacement, &matched, utf16_pos(&chars, x), s, &groups, &named)?;
+        let position = utf16_pos(&chars, x);
+        let helpers =
+            if replacement.is_callable() { crate::recursion::REGEXP_REPLACE_FRAMES } else { 0 };
+        let r = it.nested(helpers, 0, false, |it| {
+            substitute(it, replacement, &matched, position, s, &groups, &named)
+        })?;
         out.push_str(&r);
         last = y;
     }
@@ -1199,11 +1233,8 @@ pub fn match_all(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     }
     let arg = a.first().cloned().unwrap_or(Val::Undef);
     let is_regexp = matches!(&arg, Val::Obj(o) if matches!(o.borrow().kind, Kind::RegExp(..)));
-    if !is_regexp && let Val::Obj(_) = &arg {
-        let custom = it.get(&arg, &crate::builtins::well_known("matchAll"))?;
-        if custom.is_callable() {
-            return it.call(&custom, &arg, std::slice::from_ref(this));
-        }
+    if !is_regexp && let Some(v) = delegated(it, a, "matchAll", this, &[])? {
+        return Ok(v);
     }
     let s = it.str_of(this);
     let s = it.operand_named(s, "this")?;

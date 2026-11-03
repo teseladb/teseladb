@@ -125,3 +125,42 @@ fn failures_as_refdb_gives_them() {
         (Some(&Value::Int32(0)), Some(&Value::Double(1.0)))
     );
 }
+
+/// The refusals of RefDb 9.0.4 (measured on 03-11-2026, `ap.js`): an entry that is not a
+/// document is 14, an update without `o2` is 4 with the entry, a `c` entry with a command an
+/// oplog never carries is 2; the replacement of a document that is not there does not apply.
+#[test]
+fn entries_that_do_not_apply() {
+    let mut m = Mem::new();
+    let ns = "ap.c";
+    m.run("ap", doc(&[("create", Value::from("c"))]));
+    let r = apply(&mut m, vec![op("i", ns, id(1))]);
+    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+    let r = apply(&mut m, vec![Value::Int32(1)]);
+    assert_eq!(r.get("code"), Some(&Value::Int32(14)), "{r:?}");
+    assert_eq!(
+        r.get("errmsg"),
+        Some(&Value::from("Wrong type for \"0\". Expected a object, got a int."))
+    );
+    let r = apply(
+        &mut m,
+        vec![op("u", ns, Document::new().with("$set", Document::new().with("a", 1)))],
+    );
+    assert_eq!(r.get("code"), Some(&Value::Int32(4)), "{r:?}");
+    let Some(Value::String(msg)) = r.get("errmsg") else { panic!("{r:?}") };
+    assert!(
+        msg.starts_with("Failed to apply update due to missing _id: { oplogEntry: { op: \"u\""),
+        "{msg}"
+    );
+    let r = apply(&mut m, vec![op2("u", ns, id(9).with("r", 1), id(9))]);
+    assert_eq!(field(&r, "results.0"), &Value::Boolean(false), "{r:?}");
+    let ins = Document::new().with("insert", "c").with("documents", vec![Value::Document(id(1))]);
+    let r = apply(&mut m, vec![op("c", "ap.$cmd", ins)]);
+    assert_eq!(r.get("code"), Some(&Value::Int32(2)), "{r:?}");
+    assert_eq!(
+        r.get("errmsg"),
+        Some(&Value::from(
+            "Enumeration value 'insert' for field 'commandString' is not a valid value."
+        ))
+    );
+}

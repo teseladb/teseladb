@@ -40,6 +40,7 @@ fn add_range(sm: &mut Group0Sm, g: u64, replicas: &[u64], leader: u64) {
         leader_term: 0,
         pending_split: None,
         settling: false,
+        moved_ms: 0,
     };
     sm.insert_range(desc);
 }

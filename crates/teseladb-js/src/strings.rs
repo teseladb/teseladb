@@ -456,6 +456,9 @@ fn at(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 
 pub(crate) fn split(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let s = this_text(it, this)?;
+    if let Some(v) = crate::regex::delegated(it, a, "split", this, &[arg(a, 1)])? {
+        return Ok(v);
+    }
     let limit = if matches!(arg(a, 1), Val::Undef) {
         u32::MAX as usize
     } else {
@@ -587,6 +590,9 @@ pub fn substitute(
 
 fn replace_in(it: &mut Interp, this: &Val, a: &[Val], all: bool) -> R {
     let s = this_text(it, this)?;
+    if let Some(v) = crate::regex::delegated(it, a, "replace", this, &[arg(a, 1)])? {
+        return Ok(v);
+    }
     let pat = arg(a, 0);
     if matches!(&pat, Val::Obj(o) if matches!(o.borrow().kind, Kind::RegExp(..))) {
         return crate::regex::replace(it, &s, &pat, &arg(a, 1), all);
@@ -628,11 +634,12 @@ fn replace_all(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 fn value_of(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     match this {
         Val::Str(s) => Ok(Val::Str(s.clone())),
-        Val::Obj(o) => match &o.borrow().kind {
-            Kind::Str(s) => Ok(Val::Str(s.clone())),
-            _ => Err(crate::builtins::incompatible(it, "String.prototype.valueOf")),
-        },
-        _ => Err(crate::builtins::incompatible(it, "String.prototype.valueOf")),
+        Val::Obj(o) if let Kind::Str(s) = &o.borrow().kind => Ok(Val::Str(s.clone())),
+        // Measured on a `refrouter` 9.0.4 on 02-11: `valueOf method called on incompatible number`.
+        v => {
+            let (class, name) = (crate::builtins::class_name(v), it.native.clone());
+            Err(it.error("TypeError", &format!("{name} method called on incompatible {class}")))
+        }
     }
 }
 
