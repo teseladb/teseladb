@@ -558,6 +558,12 @@ fn unique_and_compound_keys_and_conditions_that_bound_nothing() {
     let single = field(&r, "readDistribution.percentageOfSingleShardReads").clone();
     let scatter = field(&r, "readDistribution.percentageOfScatterGatherReads").clone();
     assert_eq!((single, scatter), (Value::Double(50.0), Value::Double(25.0)), "{r:?}");
+    // The unique index on `x` does not make `{x: 1, y: 1}` unique.
+    let r = admin(
+        &mut m,
+        r#"{"analyzeShardKey":"q.big","key":{"x":1,"y":1},"readWriteDistribution":false}"#,
+    );
+    assert_eq!(field(&r, "keyCharacteristics.isUnique"), &Value::Boolean(false));
 }
 
 /// A change of the configuration that finds another first is retried, and a configuration

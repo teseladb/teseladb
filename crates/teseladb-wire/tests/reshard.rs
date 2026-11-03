@@ -739,3 +739,16 @@ fn a_refined_key_keeps_the_directions_and_a_namespace_needs_a_database() {
     let r = admin(&mut m, r#"{"reshardCollection":".c","key":{"b":1}}"#);
     assert_eq!(r.get("code"), Some(&Value::Int32(73)), "{r:?}");
 }
+
+/// The copy writes in batches cut by bytes as well as by documents: twelve documents of
+/// 1 MiB pass the 8 MiB of one batch.
+#[test]
+fn the_copy_cuts_its_batches_by_bytes() {
+    let pad = "p".repeat(1 << 20);
+    let all: Vec<String> =
+        (0..12).map(|i| format!(r#"{{"_id":{i},"a":{i},"b":{i},"pad":"{pad}"}}"#)).collect();
+    let mut m = sharded(&format!("[{}]", all.join(",")));
+    ok(&admin(&mut m, r#"{"reshardCollection":"rs.c","key":{"b":1},"numInitialChunks":2}"#));
+    let r = run(&mut m, r#"{"count":"c"}"#);
+    assert_eq!(field(&r, "n"), &Value::Int32(12), "{r:?}");
+}
