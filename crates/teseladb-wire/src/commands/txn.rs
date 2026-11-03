@@ -844,11 +844,14 @@ fn run_command(
 /// The start of the router's own `NoSuchTransaction` for a transaction that was aborted.
 const ABORTED_PREFIX: &str = "Transaction with { txnNumber: ";
 
-/// A reply as a `refrouter` 9.0.4 gives it: its own `NoSuchTransaction` for an aborted transaction
-/// carries `errorLabels` first, where an error relayed from a shard has them last (measured on
-/// 03-11-2026 for the commands after a failed statement and an abort repeated).
-pub fn router_reply(reply: Document) -> Document {
-    let aborted = reply.get("code") == Some(&Value::Int32(NO_SUCH_TRANSACTION.code))
+/// The reply of command `name` as a `refrouter` 9.0.4 gives it: its own `NoSuchTransaction` to a
+/// commit or an abort of an aborted transaction carries `errorLabels` first, where an error
+/// relayed from a shard has them last (measured on 03-11-2026 for the commit and the abort after
+/// a failed statement and an abort repeated); a statement after the abort gets the shard's, with
+/// them last (`txn-errors`).
+pub fn router_reply(name: &str, reply: Document) -> Document {
+    let aborted = ends(name)
+        && reply.get("code") == Some(&Value::Int32(NO_SUCH_TRANSACTION.code))
         && matches!(reply.get("errmsg"), Some(Value::String(m)) if m.starts_with(ABORTED_PREFIX));
     match aborted {
         true => super::replset::labels_first(reply),

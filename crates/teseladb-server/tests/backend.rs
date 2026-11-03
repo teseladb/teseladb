@@ -1154,6 +1154,20 @@ fn a_committed_mark_moves_the_clock_of_the_node() {
     assert!(b.cluster_mark() >= ahead, "{:?}", b.cluster_mark());
 }
 
+/// A write's answer carries its mark into this node's clock too: a range whose leader was just
+/// elected writes up to 250 ms above the clocks, and a transaction that starts after the write
+/// answered reads at or above it instead of failing with a write conflict on its document
+/// (measured on 03-11-2026 in `txn-commit`, one run in three; 008 FR-008).
+#[test]
+fn a_written_mark_moves_the_clock_of_the_node() {
+    let ahead = Hlc { physical: u64::from(u32::MAX) * 100, logical: 9 };
+    let reply = Ok(DataReply::Remote(RemoteReply::Written { ts: ahead, result: vec![1] }));
+    let mut b = backend(vec![reply], vec![]);
+    assert!(b.cluster_mark() < ahead);
+    assert_eq!(b.write(op(false)), Ok(vec![1]));
+    assert!(b.cluster_mark() >= ahead, "{:?}", b.cluster_mark());
+}
+
 /// The informative commands that read the routing table (`route_entries`: shards, chunks,
 /// `getShardVersion`) see the whole cluster: on a node that is starting, whose table does not hold
 /// every range yet, the read waits for it as a write waits for its key's range, and only at the

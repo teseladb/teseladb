@@ -691,7 +691,14 @@ impl Backend for ServerBackend {
             deadline: Some(deadline),
         };
         match self.data(&first, dedup.is_some(), build)?.1 {
-            RemoteReply::Written { result, .. } => Ok(result),
+            // The write's mark comes into the node's clock, as a commit's does (`txn_send`): a
+            // leader just elected writes above the clocks, and the node's next transaction reads
+            // at or above the write instead of writing under it (008 FR-008).
+            RemoteReply::Written { ts, result } => {
+                self.h.clock.0.update(ts);
+                self.committed = self.committed.max(ts);
+                Ok(result)
+            }
             RemoteReply::Rows(_)
             | RemoteReply::Value { .. }
             | RemoteReply::Intents { .. }
