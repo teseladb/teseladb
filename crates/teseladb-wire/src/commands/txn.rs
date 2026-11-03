@@ -628,8 +628,10 @@ const WRITES: [&str; 6] = [
 ];
 
 /// `result` with the `recoveryToken` a `refrouter` 9.0.4 adds inside a transaction (measured): `{}`
-/// until a write ran in it, then `recoveryShardId`, the node's name in `config.shards`; an error
-/// gets it only if the transaction started.
+/// until a write ran in it, then `recoveryShardId`, the node's name in `config.shards`. Among the
+/// errors only those of `commitTransaction` and `abortTransaction` of a transaction that started
+/// get it: a statement's error is the shard's, which the `refrouter` sends as it is (measured on
+/// 03-11-2026 with 48 `NamespaceExists` and 2 `BadValue`, before and after a write).
 fn with_token(
     backend: &mut dyn Backend,
     shared: &Shared,
@@ -654,11 +656,11 @@ fn with_token(
     };
     result.map(|r| match (r, token) {
         (Ok(reply), t) => Ok(reply.with(RECOVERY_TOKEN, doc(t.unwrap_or(false)))),
-        (Err(mut e), Some(wrote)) => {
+        (Err(mut e), Some(wrote)) if ends(name) => {
             e.extra.push(RECOVERY_TOKEN, doc(wrote));
             Err(e)
         }
-        (Err(e), None) => Err(e),
+        (Err(e), _) => Err(e),
     })
 }
 

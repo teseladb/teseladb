@@ -791,6 +791,18 @@ fn answers_inside_a_transaction_carry_the_recovery_token() {
     // A commit of a transaction that never started gets none.
     let r = run(&mut m, "admin", end("commitTransaction", 71, 9));
     assert_eq!(token(&r), None, "{r:?}");
+    // A statement that fails with `ok: 0` gets none, after a write too: a `refrouter` 9.0.4 sends
+    // the shard's error as it is (measured on 03-11-2026 with 48 NamespaceExists and 2
+    // BadValue); the commit that then fails, as the router's answer, carries it.
+    assert!(ok(&run(&mut m, DB, stmt(insert(5), 72, 1, true))));
+    let bad = find().with("filter", doc(&[("$bad", Value::Int32(1))]));
+    let r = run(&mut m, DB, stmt(bad, 72, 1, false));
+    assert_eq!(code(&r), Some(&Value::Int32(2)), "{r:?}");
+    assert_eq!(token(&r), None, "{r:?}");
+    let r = run(&mut m, "admin", end("commitTransaction", 72, 1));
+    assert_eq!(code(&r), Some(&Value::Int32(251)), "{r:?}");
+    let shard = Value::Document(Document::new().with("recoveryShardId", shard_name(1)));
+    assert_eq!(token(&r), Some(shard), "{r:?}");
 }
 
 /// How a session's transaction is named in RefDb's messages, for the session `lsid(n)`.
