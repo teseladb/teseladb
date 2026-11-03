@@ -447,6 +447,13 @@ fn js_clock_ms() -> u64 {
     u64::try_from(backend::process_start().elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
+/// The user id of `root`.
+const ROOT_UID: u32 = 0;
+/// RefDb's startup warning for a process run as `root`, and its identifier.
+pub const RUNNING_AS_ROOT: &str =
+    "You are running this process as the root user, which is not recommended";
+const RUNNING_AS_ROOT_ID: i32 = 22138;
+
 /// `teseladb start`: runs until `stop()` says so.
 pub fn start(
     o: &StartOpts,
@@ -464,6 +471,11 @@ pub fn start(
     };
     if o.insecure {
         log.warn("insecure mode: no TLS nor authentication", &[]);
+    }
+    // As `refnode` and `refrouter` 9.0.4 warn at start (measured on 03-11-2026, `getLog`
+    // `startupWarnings`).
+    if teseladb_sys::effective_uid() == ROOT_UID {
+        log.warn(RUNNING_AS_ROOT, &[("id", &RUNNING_AS_ROOT_ID)]);
     }
     // `--keyFile` and `--clusterAuthMode`, checked as `refnode` checks them (013 FR-034).
     if let Err(e) = cluster_auth::mode(o) {
