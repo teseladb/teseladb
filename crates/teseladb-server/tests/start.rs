@@ -94,6 +94,19 @@ fn put(n: &Node<FileDisk>, i: u32) {
     }
 }
 
+/// Reads document `i`, asking again while the range answers that it is busy (`Overloaded` when
+/// the machine is loaded), as `put` writes.
+fn get(n: &Node<FileDisk>, i: u32) -> Option<Vec<u8>> {
+    let end = Instant::now() + READY;
+    loop {
+        match n.get(&key(i), ASK) {
+            Ok(v) => return v,
+            Err(e) => assert!(Instant::now() < end, "read {i}: {e:?}"),
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn leads(s: &DataStatus) -> bool {
     s.role == Some(Role::Leader)
 }
@@ -120,8 +133,8 @@ fn the_first_start_creates_group0_and_the_data_range() {
     let s = wait_status(&n, leads);
     assert_eq!((s.voters.as_slice(), s.learners.len()), (&[FOUNDER][..], 0));
     put(&n, 1);
-    assert_eq!(n.get(&key(1), ASK).unwrap(), Some(value(1)));
-    assert_eq!(n.get(&key(2), ASK).unwrap(), None);
+    assert_eq!(get(&n, 1), Some(value(1)));
+    assert_eq!(get(&n, 2), None);
     // Outside the data space nothing is written.
     let outside = n.put(b"\x05x", b"v", ASK);
     assert_eq!(outside, Err(DataError::Range(RangeError::OutOfRange)));
@@ -148,10 +161,10 @@ fn a_restart_recovers_the_lsm_and_replays_the_log_from_the_flushed_index() {
     let after = wait_status(&n, |s| leads(s) && s.applied >= before.applied);
     assert!(after.flushed >= before.flushed, "{before:?} then {after:?}");
     for i in 0..300 {
-        assert_eq!(n.get(&key(i), ASK).unwrap(), Some(value(i)), "document {i}");
+        assert_eq!(get(&n, i), Some(value(i)), "document {i}");
     }
     put(&n, 300);
-    assert_eq!(n.get(&key(300), ASK).unwrap(), Some(value(300)));
+    assert_eq!(get(&n, 300), Some(value(300)));
     // Group 0 has one range: the restart did not create another.
     let v = n.view(ASK).unwrap();
     assert_eq!(v.data_range.map(|d| d.group), Some(DATA_RANGE));
@@ -183,7 +196,7 @@ fn the_memtables_flush_at_their_part_of_the_memory_limit() {
     let s = wait_status(&n, |s| s.flushed > 0);
     assert!(s.flushed <= s.applied, "{s:?}");
     for i in (0..300).step_by(37) {
-        assert_eq!(n.get(&key(i), ASK).unwrap(), Some(value(i)), "document {i}");
+        assert_eq!(get(&n, i), Some(value(i)), "document {i}");
     }
     n.stop();
     // Without a limit, three quarters of the memory the process has.

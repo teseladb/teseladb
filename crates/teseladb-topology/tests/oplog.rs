@@ -276,6 +276,8 @@ fn malformed_entries_are_refused() {
     assert_eq!(parse(with("prevOpTime", bad_prev.into())), Some(OplogError::WrongType("ts")));
     let no_t = Document::new().with("ts", ts(at(1)));
     assert_eq!(parse(with("prevOpTime", no_t.into())), Some(OplogError::Missing("t")));
+    let no_ts = Document::new().with("t", 1i64);
+    assert_eq!(parse(with("prevOpTime", no_ts.into())), Some(OplogError::Missing("ts")));
 }
 
 /// What `refrestore --oplogReplay` gives `applyOps` for the operations of a transaction:
@@ -305,6 +307,9 @@ fn entries_of_refrestore() {
     let e = OplogEntry::from_document(&double_t).expect("a double term");
     assert_eq!(e.op_time.map(|o| o.term), Some(3));
     double_t.insert("t", Value::Double(3.5));
+    assert_eq!(OplogEntry::from_document(&double_t).err(), Some(OplogError::WrongType("t")));
+    // A whole double beyond a 64-bit term is not one either.
+    double_t.insert("t", Value::Double(1.0e19));
     assert_eq!(OplogEntry::from_document(&double_t).err(), Some(OplogError::WrongType("t")));
 }
 

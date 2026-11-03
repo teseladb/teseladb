@@ -306,3 +306,119 @@ fn the_version_of_a_reconfig() {
         )
     );
 }
+
+/// The members' `priority`, `votes` and `hidden` as decimals, and `hidden` as a number, as
+/// RefDb 9.0.4 takes them (measured on 03-11-2026): a decimal is a number, and a numeric
+/// `hidden` is shown as the flag it means.
+#[test]
+fn decimal_and_numeric_member_attributes() {
+    let mut m = node();
+    replica(&mut m, N1);
+    let dec = |c: u128, e: i32| {
+        Value::Decimal128(teseladb_bson::Decimal128::from_parts(false, c, e).expect("a decimal"))
+    };
+    let member = |h: &str, extra: Document| {
+        let mut d = Document::new().with("_id", 0).with("host", h);
+        for (k, v) in extra.iter() {
+            d.push(k, v.clone());
+        }
+        Value::Document(d)
+    };
+    let members = vec![
+        member(N1, Document::new().with("priority", dec(25, -1)).with("votes", dec(1, 0))),
+        member(N2, Document::new().with("priority", 0).with("hidden", 1)),
+        member(N3, Document::new().with("hidden", dec(0, 0))),
+    ];
+    let conf = Document::new().with("_id", "rs0").with("version", 40).with("members", members);
+    let r = admin(&mut m, Document::new().with("replSetReconfig", conf));
+    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+    let r = admin(&mut m, Document::new().with("replSetGetConfig", 1));
+    assert_eq!(field(&r, "config.members.0.priority"), &Value::Double(2.5));
+    assert_eq!(field(&r, "config.members.0.votes"), &Value::Int32(1));
+    assert_eq!(field(&r, "config.members.1.hidden"), &Value::Boolean(true));
+    assert_eq!(field(&r, "config.members.2.hidden"), &Value::Boolean(false));
+}
+
+/// More of `replSetReconfig`'s refusals and answers as RefDb 9.0.4 gives them (measured on
+/// 03-11-2026): a member without a host or with one that is not a string, a priority that is a
+/// boolean, a version far below 64 bits; a member without votes and priority is taken.
+#[test]
+fn reconfig_members_hosts_and_flags() {
+    let mut m = node();
+    replica(&mut m, N1);
+    let reconfig = |m: &mut Mem, members: Vec<Value>, version: Value| {
+        let conf =
+            Document::new().with("_id", "rs0").with("version", version).with("members", members);
+        admin(m, Document::new().with("replSetReconfig", conf))
+    };
+    let errmsg = |r: &Document| match (r.get("code"), r.get("errmsg")) {
+        (Some(Value::Int32(c)), Some(Value::String(s))) => (*c, s.clone()),
+        _ => panic!("{r:?}"),
+    };
+    let one = |d: Document| vec![Value::Document(d)];
+    let no_host = Document::new().with("_id", 0);
+    let r = reconfig(&mut m, one(no_host), Value::Int32(50));
+    assert_eq!(
+        errmsg(&r),
+        (
+            93,
+            "member: { _id: 0 } :: caused by :: BSON field 'MemberConfig.host' is missing but a required field".into()
+        )
+    );
+    let int_host = Document::new().with("_id", 0).with("host", 5);
+    let r = reconfig(&mut m, one(int_host), Value::Int32(50));
+    assert_eq!(
+        errmsg(&r),
+        (
+            93,
+            "member: { _id: 0, host: 5 } :: caused by :: BSON field 'MemberConfig.host' is the wrong type 'int', expected type 'string'".into()
+        )
+    );
+    let flag = Document::new().with("_id", 0).with("host", N1).with("priority", true);
+    let r = reconfig(&mut m, one(flag), Value::Int32(50));
+    assert!(
+        errmsg(&r).1.ends_with(
+            "BSON field 'MemberConfig.priority' is the wrong type 'bool', expected types '[long, double, decimal, int]'"
+        ),
+        "{r:?}"
+    );
+    let low = "Expected field \"version\" to have a value exactly representable as a 64-bit integer, but found version: -1e+30";
+    let plain = Document::new().with("_id", 0).with("host", N1);
+    assert_eq!(
+        errmsg(&reconfig(&mut m, one(plain.clone()), Value::Double(-1e30))),
+        (93, low.into())
+    );
+    let silent =
+        Document::new().with("_id", 1).with("host", N2).with("votes", 0).with("priority", 0);
+    let r =
+        reconfig(&mut m, vec![Value::Document(plain), Value::Document(silent)], Value::Int32(50));
+    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+}
+
+/// A node that is not a shard of the cluster is no member; `replSetStepDown` takes a long; while
+/// the designated primary's node is out of the cluster (before Group 0 designates another),
+/// `replSetSyncFrom` names no previous target and `replSetGetStatus` has no election;
+/// `replSetResizeOplog` without `minRetentionHours` changes nothing.
+#[test]
+fn members_without_a_primary_and_a_node_that_is_none() {
+    let mut m = node();
+    replica(&mut m, N3);
+    m.shards.pop();
+    let r = admin(&mut m, Document::new().with("replSetSyncFrom", N2));
+    assert_eq!(r.get("syncFromRequested"), Some(&Value::from(N2)), "{r:?}");
+    assert!(r.get("prevSyncTarget").is_none(), "{r:?}");
+    let r = admin(&mut m, Document::new().with("replSetGetStatus", 1));
+    assert!(r.get("electionCandidateMetrics").is_none(), "{r:?}");
+    assert!(r.get("electionParticipantMetrics").is_none(), "{r:?}");
+    let r = admin(&mut m, Document::new().with("replSetResizeOplog", 1).with("size", 2000.0));
+    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+    m.shards.push("node3".into());
+    replica(&mut m, N1);
+    let r = admin(&mut m, Document::new().with("replSetStepDown", Value::Int64(5)));
+    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+    let mut other = Mem::new();
+    other.shards = vec!["node2".into(), "node3".into()];
+    replica(&mut other, N2);
+    let r = admin(&mut other, Document::new().with("replSetGetConfig", 1));
+    assert_eq!(code(&r), 20, "{r:?}");
+}

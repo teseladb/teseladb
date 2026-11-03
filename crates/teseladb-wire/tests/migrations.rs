@@ -193,6 +193,12 @@ fn merge_all_chunks_on_shard_fails_as_on_a_refrouter() {
         14,
         "BSON field 'mergeAllChunksOnShard.mergeAllChunksOnShard' is the wrong type 'int', expected type 'string'",
     );
+    // The shard is looked up before the name is read (measured on 03-11-2026, `ch1.js`, `ch2.js`).
+    for ns in [".t", ".", "m."] {
+        let cmd = |shard: &str| format!(r#"{{"mergeAllChunksOnShard":"{ns}","shard":"{shard}"}}"#);
+        fails(&admin(&mut m, &cmd("x")), 70, "Shard x not found");
+        fails(&admin(&mut m, &cmd("node1")), 73, "invalid namespace specified for request");
+    }
 }
 
 #[test]

@@ -611,3 +611,33 @@ fn move_range_checks_in_the_order_of_a_refrouter() {
     ok(&run(&mut m, r#""z.k","toShard":"node1","min":{"a":{"$minKey":1}}"#));
     assert_eq!(m.range_orders.len(), orders);
 }
+
+/// Bounds whose first is a value of the shard key and second is not are refused like the
+/// opposite (measured on a `refrouter` 9.0.4 on 03-11-2026, `ch1.js`); a `moveRange` from a bound
+/// of a chunk moves that chunk without a cut; and a key no range holds, as the ranges read while
+/// they change, asks the client to retry.
+#[test]
+fn second_bounds_chunk_bounds_and_a_moving_table() {
+    let mut m = cluster();
+    let half = r#"[{"a":{"$minKey":1}},{"b":1}]"#;
+    fails_uncoded(
+        &admin(&mut m, &format!(r#"{{"split":"z.k","bounds":{half}}}"#)),
+        "shard key bounds [{ a: MinKey },{ b: 1 }) are not valid for shard key pattern { a: 1 }",
+    );
+    fails(
+        &admin(&mut m, &format!(r#"{{"mergeChunks":"z.k","bounds":{half}}}"#)),
+        72,
+        "shard key bounds [{ a: MinKey },{ b: 1 }) are not valid for shard key pattern { a: 1 }",
+    );
+    ok(&admin(&mut m, r#"{"split":"z.k","middle":{"a":10}}"#));
+    ok(&admin(&mut m, r#"{"split":"z.k","find":{"a":15}}"#));
+    assert_eq!(chunks(&m), [(None, Some(10), 1), (Some(10), Some(15), 1), (Some(15), None, 1)]);
+    ok(&admin(&mut m, r#"{"moveRange":"z.k","min":{"a":10},"toShard":"node2"}"#));
+    assert_eq!(chunks(&m), [(None, Some(10), 1), (Some(10), Some(15), 2), (Some(15), None, 1)]);
+    m.routes.clear();
+    fails(
+        &admin(&mut m, r#"{"split":"z.k","middle":{"a":3}}"#),
+        13388,
+        "no range holds the chunk's key",
+    );
+}

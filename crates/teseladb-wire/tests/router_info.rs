@@ -98,7 +98,10 @@ fn get_shard_version_of_a_collection_and_of_a_database() {
         "getShardVersion may only be run against the admin database.",
     );
     // A database: its primary and version, as `config.databases` has them.
-    m.databases_docs = Some(vec![json(r#"{"_id":"z","primary":"node1","version":{"lastMod":1}}"#)]);
+    m.databases_docs = Some(vec![
+        json(r#"{"_id":"a","primary":"node2","version":{"lastMod":3}}"#),
+        json(r#"{"_id":"z","primary":"node1","version":{"lastMod":1}}"#),
+    ]);
     // `z.` names the database too (measured on a `refrouter` 9.0.4 on 03-11-2026).
     for name in ["z", "z."] {
         let r = admin(&mut m, &format!(r#"{{"getShardVersion":"{name}"}}"#));
