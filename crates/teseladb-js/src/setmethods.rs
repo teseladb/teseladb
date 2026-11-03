@@ -283,8 +283,6 @@ pub fn install(it: &mut Interp, g: &ObjRef) -> R<()> {
     ] {
         method(it, &sp, name, f, 1)?;
     }
-    if let Some(Val::Obj(map)) = g.borrow().get_own("Map").map(|p| p.value.clone()) {
-        method(it, &map, "groupBy", group_by, 2)?;
-    }
+    method(it, &crate::builtins::installed(g, "Map"), "groupBy", group_by, 2)?;
     Ok(())
 }

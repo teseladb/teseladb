@@ -5387,3 +5387,125 @@ Date.parse('45 1 2')	J:2366928000000
 (function(){ const m = Map.groupBy([1,2,3,4,5,NaN,NaN,-0,0], x => x % 2); return JSON.stringify([...m.keys()]) + m.get(NaN).length + m.get(0).length })()	S:[1,0,null]24
 (function(){ const s = new Set(); for (let i = 0; i < 10; i++) s.add(i); for (let i = 0; i < 9; i++) s.delete(i); s.add(0); return [...s].join() + ':' + s.has(5) + ':' + s.has(9) + ':' + s.size })()	S:9,0:false:true:2
 (function(){ const m = new Map([[1,"a"],[2,"b"],[3,"c"]]); const it = m.keys(); it.next(); const out = []; for (const k of it) { out.push(k); if (k < 100) m.set(k * 10, 0) } return out.join() })()	S:2,3,20,30,200,300
+(function(){ const p = new Proxy([], {}); return String(p.pop()) + ':' + String(p.shift()) + ':' + p.length })()	S:undefined:undefined:0
+(function(){ const p = new Proxy({ length: -5 }, {}); return Array.prototype.push.call(p, 1) + ':' + p.length + ':' + p[0] })()	S:1:1:1
+(function(){ const p = new Proxy({ length: Infinity }, {}); return Array.prototype.push.call(p, 1) })()	E:TypeError:Too long array
+(function(){ return Array.prototype.push.call({ length: -5 }, 1, 2) })()	J:2
+(function(){ return [3, 1, 2].toSorted((a, b) => b - a).join() })()	S:3,2,1
+(function(){ const log = []; const a = [1, 2, 3]; Object.defineProperty(a, 1, { get() { return 0 }, set(v) { log.push(v) }, configurable: true }); a.fill(9); return a.join() + ':' + log.join() })()	S:9,0,9:9
+(function(){ const o = { length: 5, 0: 1, 1: 2, 2: 3, 3: 4, 4: 5 }; Array.prototype.copyWithin.call(o, 3, 0, 1); return Array.from(o).join() })()	S:1,2,3,1,5
+(function(){ return JSON.stringify([...Array.prototype.values.call({ length: 'x', 0: 1 })]) })()	S:[]
+(function(){ return new Uint8Array('abc').length + ':' + new Uint8Array(NaN).length })()	S:0:0
+(function(){ try { new Uint8Array(1).forEach() } catch (e) { return e.message } })()	S:missing argument 0 when calling function TypedArray.prototype.forEach
+(function(){ try { new Uint8Array(2).with(5, 1) } catch (e) { return e.name + ':' + e.message } })()	S:RangeError:invalid or out-of-range index
+(function(){ try { new Uint8Array(2).with(-5, 1) } catch (e) { return e.name + ':' + e.message } })()	S:RangeError:invalid or out-of-range index
+(function(){ const t = new Uint8Array(2); t.set({ length: -1 }); t.set({ length: NaN }); return t.join() })()	S:0,0
+(function(){ const t = new Uint8Array(2); try { t.set({ length: Infinity }) } catch (e) { return e.name + ':' + e.message } return 'none' })()	S:RangeError:source array is too long
+(function(){ try { new Uint8Array(2).set(new Uint8Array(3)) } catch (e) { return e.name + ':' + e.message } })()	S:RangeError:source array is too long
+(function(){ try { DataView.prototype.getInt8.call(1, 0) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:getInt8 method called on incompatible number
+(function(){ return typeof Float16Array })()	S:function
+(function(){ return String(new Float16Array([2047.9, 70000, 65520, -70000, 1e-8])) })()	S:2048,Infinity,Infinity,-Infinity,0
+(function(){ const b = new ArrayBuffer(8, { maxByteLength: 16 }); const t = new Uint8Array(b, 0, 8); b.resize(4); return t.length + ':' + t.byteLength })()	S:0:0
+(function(){ const r = /a/g; r.lastIndex = 10; return r.exec('aa') + ':' + r.lastIndex })()	S:null:0
+(function(){ try { return RegExp.prototype.exec.call(1, 'a') } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:exec method called on incompatible number
+(function(){ return JSON.stringify(/(a?){2,5}b/.exec('b')) })()	S:["b",""]
+(function(){ try { return new RegExp('[\\1]', 'u') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid decimal escape in regular expression
+(function(){ try { return new RegExp('[\\8]', 'u') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:invalid identity escape in regular expression
+(function(){ return /[\1]/.test('\x01') + ':' + /[\8]/.test('8') + ':' + /\1(a)/.test('a') })()	S:true:true:true
+(function(){ return /\x4/.test('x4') + ':' + /\u12/.test('u12') + ':' + /\x4g/.test('x4g') })()	S:true:true:true
+(function(){ return 'abc'.match(/x/) + ':' + JSON.stringify('abcb'.match(/b/)) })()	S:null:["b"]
+(function(){ return Object.getOwnPropertyDescriptor(new Uint8Array(1), 'foo') + ':' + Object.getOwnPropertyDescriptor(new Uint8Array(1), '-0') })()	S:undefined:undefined
+(function(){ try { Object.defineProperty({}, 'a', { get: {} }) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:property descriptor's get field is neither undefined nor a function
+(function(){ const o = {}; Object.defineProperty(o, 'a', { value: NaN }); try { Object.defineProperty(o, 'a', { value: 1 }) } catch (e) { return e.message } })()	S:can't redefine non-configurable property "a"
+(function(){ try { Object.defineProperty(new Uint8Array(1), 0, { value: 1, enumerable: false }) } catch (e) { return e.message } })()	S:can't redefine non-configurable property 0
+(function(){ try { Object.defineProperty(new Uint8Array(1), 0, { get() {} }) } catch (e) { return e.message } })()	S:can't redefine non-configurable property 0
+(function(){ try { Object.defineProperty(new Uint8Array(1), 0, { value: 1, writable: false }) } catch (e) { return e.message } })()	S:can't redefine non-configurable property 0
+(function(){ const t = new Uint8Array([7]); Object.defineProperty(t, 0, { writable: true }); return t[0] })()	J:7
+(function(){ const a = [1]; Object.defineProperty(a, 0, { value: 1, configurable: false }); try { Object.defineProperty(a, 0, { value: 2 }) } catch (e) { return e.message } })()	J:undefined
+(function(){ function f(a) { Object.defineProperty(arguments, 0, { value: 5, writable: false }); return a + ':' + arguments[0] } return f(1) })()	S:5:5
+(function(){ function f(a) { Object.defineProperty(arguments, 0, { get() { return 9 } }); a = 3; return a + ':' + arguments[0] } return f(1) })()	S:3:9
+(function(){ function f(a) { Object.defineProperty(arguments, 0, { writable: false }); a = 3; return a + ':' + arguments[0] } return f(1) })()	S:3:1
+(function(){ function f(a) { Object.defineProperty(arguments, 0, { enumerable: false }); a = 3; return a + ':' + arguments[0] + ':' + Object.keys(arguments) } return f(1) })()	S:3:3:
+(function(){ const a = []; Object.defineProperty(a, 'length', { writable: false }); try { Object.defineProperty(a, 0, { value: 1 }) } catch (e) { return e.message } })()	S:can't define array index property past the end of an array with non-writable length
+(function(){ const a = [1]; Object.defineProperty(a, 0, { get() { return 1 }, configurable: true }); Object.defineProperty(a, 0, { get() { return 2 } }); return a[0] })()	J:2
+(function(){ 'use strict'; Symbol.for('z'); const s = Symbol('k'); const o = Object.freeze({ [s]: 1 }); try { o[s] = 2 } catch (e) { return e.message } })()	S:Symbol("k") is read-only
+(function(){ return JSON.stringify(Object.getOwnPropertyDescriptors(new Proxy({}, { ownKeys() { return ['a'] } }))) })()	S:{}
+(function(){ return JSON.stringify(Object.defineProperties({}, Object.defineProperty({}, 'x', { value: { value: 1 } }))) })()	S:{}
+(function(){ try { Object.defineProperties(1, {}) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:1 is not an object
+(function(){ const C = function () { return new Proxy({}, {}) }; const r = Array.from.call(C, [1, 2]); return r[0] + ':' + r.length })()	S:1:2
+(function(){ try { new Map().forEach(1) } catch (e) { return e.name + ':' + e.message } return 'none' })()	S:TypeError:1 is not a function
+(function(){ try { new Set([1]).forEach() } catch (e) { return e.name + ':' + e.message } return 'none' })()	S:TypeError:undefined is not a function
+(function(){ const o = { length: 2, 0: 'a', 1: 'b' }; const r = Array.prototype.pop.call(o); return r + ':' + JSON.stringify(o) })()	S:b:{"0":"a","length":1}
+(function(){ const o = { length: 2, 0: 'a', 1: 'b' }; const r = Array.prototype.shift.call(o); return r + ':' + JSON.stringify(o) })()	S:a:{"0":"b","length":1}
+(function(){ const o = { length: 0 }; const r = Array.prototype.pop.call(o); return r + ':' + JSON.stringify(o) })()	S:undefined:{"length":0}
+(function(){ const o = {}; const r = Array.prototype.shift.call(o); return r + ':' + JSON.stringify(o) })()	S:undefined:{"length":0}
+(function(){ const o = { length: 2, 0: 'a', 1: 'b' }; const r = Array.prototype.unshift.call(o, 'z'); return r + ':' + JSON.stringify(o) })()	S:3:{"0":"z","1":"a","2":"b","length":3}
+(function(){ const o = { length: 3, 0: 'a', 2: 'c' }; Array.prototype.reverse.call(o); return JSON.stringify(o) })()	S:{"0":"c","2":"a","length":3}
+(function(){ const o = { length: 3, 0: 'a', 1: 'b', 2: 'c' }; const r = Array.prototype.splice.call(o, 1, 1, 'x', 'y'); return JSON.stringify(r) + ':' + JSON.stringify(o) })()	S:["b"]:{"0":"a","1":"x","2":"y","3":"c","length":4}
+(function(){ const o = { length: 3, 0: 3, 1: 1, 2: 2 }; Array.prototype.sort.call(o); return JSON.stringify(o) })()	S:{"0":1,"1":2,"2":3,"length":3}
+(function(){ const o = { length: 3, 0: 3, 1: 1, 2: 2 }; Array.prototype.fill.call(o, 0, 1); return JSON.stringify(o) })()	S:{"0":3,"1":0,"2":0,"length":3}
+(function(){ return Array.prototype.join.call({ length: 2, 0: 'a', 1: 'b' }, '-') + ':' + Array.prototype.indexOf.call({ length: 2, 0: 'a', 1: 'b' }, 'b') + ':' + Array.prototype.slice.call({ length: 2, 0: 'a', 1: 'b' }, 1) })()	S:a-b:1:b
+(function(){ const p = new Proxy([1, 2, 3], {}); return p.pop() + ':' + p.shift() + ':' + p.length + ':' + p.unshift(9) + ':' + p.join() + ':' + p.reverse().join() + ':' + p.splice(0, 1) + ':' + p.join() })()	S:3:1:1:2:9,2:2,9:2:9
+(function(){ const p = new Proxy([3, 1, 2], {}); return p.sort().join() + ':' + p.fill(0, 2).join() + ':' + p.copyWithin(0, 1).join() })()	S:1,2,3:1,2,0:2,0,0
+(function(){ return Array.prototype.pop.call('') })()	E:TypeError:"length" is read-only
+(function(){ try { return Array.prototype.pop.call('ab') } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:property 1 is non-configurable and can't be deleted
+(function(){ try { return Array.prototype.shift.call(null) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:can't convert null to object
+(function(){ const out = []; for (const f of [1, {}, 'x', undefined, null, [1], Symbol('q')]) { try { new Map().forEach(f) } catch (e) { out.push(e.message) } } return out.join('|') })()	S:f is not a function|f is not a function|f is not a function|f is not a function|f is not a function|f is not a function|f is not a function
+(function(){ const out = []; for (const f of [1, {}, undefined]) { try { new Set().forEach(f) } catch (e) { out.push(e.message) } } return out.join('|') })()	S:f is not a function|f is not a function|f is not a function
+(function(){ const out = []; for (const v of [1, 'a', undefined, null, true, Symbol('q')]) { try { Object.defineProperties(v, {}) } catch (e) { out.push(e.message) } } return out.join('|') })()	S:v is not an object|v is not an object|v is not an object|v is not an object|v is not an object|v is not an object
+(function(){ try { Array.prototype.pop.call({ length: Symbol() }) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:can't convert symbol to number
+(function(){ const o = { length: 9007199254740991 }; try { Array.prototype.push.call(o, 1) } catch (e) { return e.name + ':' + e.message + ':' + o.length } })()	S:TypeError:Too long array:9007199254740991
+(function(){ const o = { length: 9007199254740991 }; return Array.prototype.pop.call(o) + ':' + o.length })()	S:undefined:9007199254740990
+(function(){ const o = { length: 4, 0: 'a', 2: 'c', 3: 'd' }; const r = Array.prototype.splice.call(o, 1, 2); return JSON.stringify(r) + ':' + JSON.stringify(o) })()	S:[null,"c"]:{"0":"a","1":"d","length":2}
+(function(){ const o = { length: 2, 0: 'a', 1: 'b' }; const r = Array.prototype.splice.call(o, 0); return JSON.stringify(r) + ':' + JSON.stringify(o) })()	S:["a","b"]:{"length":0}
+(function(){ const o = { length: 2, 0: 'a', 1: 'b' }; const r = Array.prototype.splice.call(o); return JSON.stringify(r) + ':' + JSON.stringify(o) })()	S:[]:{"0":"a","1":"b","length":2}
+(function(){ const o = { length: 3, 0: 'b', 2: 'a' }; Array.prototype.sort.call(o); return JSON.stringify(o) })()	S:{"0":"a","1":"b","length":3}
+(function(){ const o = { length: 3, 0: undefined, 1: 'b', 2: 'a' }; Array.prototype.sort.call(o, (x, y) => x < y ? 1 : -1); return JSON.stringify(o) })()	S:{"0":"b","1":"a","length":3}
+(function(){ try { Array.prototype.sort.call(null, 1) } catch (e) { return e.message } })()	S:invalid Array.prototype.sort argument
+(function(){ try { Array.prototype.sort.call(null) } catch (e) { return e.message } })()	S:can't convert null to object
+(function(){ const o = { length: 1, 0: 'a' }; Array.prototype.unshift.call(o); return JSON.stringify(o) })()	S:{"0":"a","length":1}
+(function(){ const o = { length: 2, 1: 'b' }; Array.prototype.unshift.call(o, 'x', 'y'); return JSON.stringify(o) })()	S:{"0":"x","1":"y","3":"b","length":4}
+(function(){ const s = Object.freeze({ length: 1, 0: 1 }); try { Array.prototype.pop.call(s) } catch (e) { return e.message } })()	S:property 0 is non-configurable and can't be deleted
+(function(){ const s = Object.freeze({ length: 1, 0: 1 }); try { Array.prototype.reverse.call(Object.freeze({ length: 2, 0: 1, 1: 2 })) } catch (e) { return e.message } })()	S:0 is read-only
+(function(){ const a = Object.freeze([]); try { a.pop() } catch (e) { return e.message } return 'none' })()	S:"length" is read-only
+(function(){ const a = [1]; Object.defineProperty(a, 0, { get() { return 5 }, configurable: true }); return a.pop() + ':' + a.length + ':' + a.pop() + ':' + a.length })()	S:5:0:undefined:0
+(function(){ const a = [1, 2]; Object.defineProperty(a, 0, { value: 5, configurable: false }); try { a.shift() } catch (e) { return e.message + ':' + a.length + ':' + a } })()	J:undefined
+(function(){ return JSON.stringify(Array.prototype.splice.call('', 0)) })()	E:TypeError:"length" is read-only
+(function(){ try { Array.prototype.unshift.call({ length: 9007199254740991 }, 1) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:Too long array
+(function(){ try { Array.prototype.splice.call({ length: 9007199254740991 }, 0, 0, 1) } catch (e) { return e.name + ':' + e.message } })()	S:TypeError:Too long array
+(function(){ class A extends Array {} const p = new Proxy(new A(1, 2, 3), {}); const r = Array.prototype.splice.call(p, 0, 1); return (r instanceof A) + ':' + r.length })()	S:true:1
+(function(){ try { [1].forEach() } catch (e) { return e.message } })()	S:missing argument 0 when calling function Array.prototype.forEach
+(function(){ try { new Map().forEach() } catch (e) { return e.message } })()	S:undefined is not a function
+(function(){ try { new Set().forEach(undefined) } catch (e) { return e.message } })()	S:undefined is not a function
+(function(){ let u; try { new Set().forEach(u) } catch (e) { return e.message } })()	S:u is not a function
+(function(){ try { new Set().forEach(void 0) } catch (e) { return e.message } })()	S:(void 0) is not a function
+(function(){ try { [1].forEach(undefined) } catch (e) { return e.message } })()	S:undefined is not a function
+(function(){ 'use strict'; const s = new String('ab'); try { s.length = 1 } catch (e) { return e.message } return 'none' })()	S:"length" is read-only
+(function(){ const s = new String('ab'); s.length = 1; return s.length })()	J:2
+(function(){ 'use strict'; const s = new String('ab'); try { s[0] = 'x' } catch (e) { return e.message } return 'none' })()	S:0 is read-only
+(function(){ return Reflect.set(new String('ab'), 'length', 1) + ':' + Reflect.set(new String('ab'), '0', 'x') + ':' + Reflect.set(new String('ab'), '5', 'x') })()	E:ReferenceError:Reflect is not defined
+(function(){ try { [1].forEach() } catch (e) { return e.message } return 'none' })()	S:missing argument 0 when calling function Array.prototype.forEach
+(function(){ try { [1].map() } catch (e) { return e.message } return 'none' })()	S:missing argument 0 when calling function Array.prototype.map
+(function(){ try { [1].filter() } catch (e) { return e.message } return 'none' })()	S:missing argument 0 when calling function Array.prototype.filter
+(function(){ try { [1].some() } catch (e) { return e.message } return 'none' })()	S:missing argument 0 when calling function Array.prototype.some
+(function(){ try { [1].every() } catch (e) { return e.message } return 'none' })()	S:missing argument 0 when calling function Array.prototype.every
+(function(){ try { [1].find() } catch (e) { return e.message } return 'none' })()	S:missing argument 0 when calling function Array.prototype.find
+(function(){ try { [1].findIndex() } catch (e) { return e.message } return 'none' })()	S:missing argument 0 when calling function Array.prototype.find
+(function(){ try { [1].findLast() } catch (e) { return e.message } return 'none' })()	S:missing argument 0 when calling function Array.prototype.findLast
+(function(){ try { [1].findLastIndex() } catch (e) { return e.message } return 'none' })()	S:missing argument 0 when calling function Array.prototype.findLastIndex
+(function(){ try { [1].reduce() } catch (e) { return e.message } return 'none' })()	S:missing argument 0 when calling function Array.prototype.reduce
+(function(){ try { [1].reduceRight() } catch (e) { return e.message } return 'none' })()	S:missing argument 0 when calling function Array.prototype.reduce
+(function(){ try { [1].flatMap() } catch (e) { return e.message } return 'none' })()	S:undefined is not a function
+(function(){ try { [1].sort() } catch (e) { return e.message } return 'none' })()	S:none
+(function(){ try { [1].toSorted() } catch (e) { return e.message } return 'none' })()	S:none
+(function(){ try { Array.prototype.forEach.call({ length: 0 }) } catch (e) { return e.message } return 'none' })()	S:missing argument 0 when calling function Array.prototype.forEach
+(function(){ try { [].forEach() } catch (e) { return e.message } return 'none' })()	S:missing argument 0 when calling function Array.prototype.forEach
+(function(){ try { Array.prototype.map.call({ length: 0 }) } catch (e) { return e.message } return 'none' })()	S:missing argument 0 when calling function Array.prototype.map
+(function(){ try { [].map() } catch (e) { return e.message } return 'none' })()	S:missing argument 0 when calling function Array.prototype.map
+(function(){ try { Array.prototype.filter.call({ length: 0 }) } catch (e) { return e.message } return 'none' })()	S:missing argument 0 when calling function Array.prototype.filter
+(function(){ try { [].filter() } catch (e) { return e.message } return 'none' })()	S:missing argument 0 when calling function Array.prototype.filter
+(function(){ try { Array.prototype.find.call({ length: 0 }) } catch (e) { return e.message } return 'none' })()	S:missing argument 0 when calling function Array.prototype.find
+(function(){ try { [].find() } catch (e) { return e.message } return 'none' })()	S:missing argument 0 when calling function Array.prototype.find
+(function(){ try { Array.prototype.reduce.call({ length: 0 }) } catch (e) { return e.message } return 'none' })()	S:missing argument 0 when calling function Array.prototype.reduce
+(function(){ try { [].reduce() } catch (e) { return e.message } return 'none' })()	S:missing argument 0 when calling function Array.prototype.reduce
+(function(){ try { new Set([1]).forEach() } catch (e) { return e.message } return 'none' })()	S:undefined is not a function

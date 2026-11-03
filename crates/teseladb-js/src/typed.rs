@@ -755,7 +755,8 @@ fn ta_set(it: &mut Interp, this: &Val, a: &[Val]) -> R {
             let o = Val::Obj(it.object_of(&src)?);
             let n = it.get(&o, "length")?;
             let n = it.number_of(&n)?;
-            let n = if n.is_finite() && n > 0.0 { n as usize } else { 0 };
+            // ToLength: NaN and what is not above 0 are 0, and Infinity is the longest.
+            let n = if n > 0.0 { n.min(9_007_199_254_740_991.0) as usize } else { 0 };
             if offset + n > v.length() {
                 return Err(it.error("RangeError", "source array is too long"));
             }

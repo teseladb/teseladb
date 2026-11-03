@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 mod annex;
+mod array_like;
 mod arrays;
 mod ast;
 mod bigint;

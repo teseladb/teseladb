@@ -1067,6 +1067,12 @@ impl<'c> Interp<'c> {
         while let Some(c) = cur {
             touch(&c, key);
             let found = c.borrow().get_own(key).cloned();
+            // A `String` object's `length` and characters are read-only (measured on a `refrouter`
+            // 9.0.4 on 03-11: `"length" is read-only` in strict code).
+            let found = match found {
+                None if matches!(c.borrow().kind, Kind::Str(_)) => crate::props::own_prop(&c, key),
+                found => found,
+            };
             if let Some(p) = found {
                 if let Some(s) = p.setter {
                     self.call_back(0, &Val::Obj(s), target, &[value])?;

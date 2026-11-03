@@ -111,6 +111,14 @@ pub(crate) fn well_known(name: &str) -> String {
     format!("@@Symbol.{name}:0")
 }
 
+/// The global object `name`, which the realm installed before.
+pub(crate) fn installed(g: &ObjRef, name: &str) -> ObjRef {
+    match g.borrow().get_own(name).map(|p| &p.value) {
+        Some(Val::Obj(o)) => o.clone(),
+        _ => unreachable!("{name} is installed before"),
+    }
+}
+
 /// `proto[Symbol.toStringTag] = tag`, read by `Object.prototype.toString`.
 pub(crate) fn to_string_tag(it: &Interp, proto: &ObjRef, tag: &str) -> R<()> {
     it.define(
@@ -1521,32 +1529,42 @@ fn map_get(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     })
 }
 
+/// The entries of `o`, a `Map` that `set` checked.
+fn map_table(o: &ObjRef) -> std::cell::RefMut<'_, Table<(Val, Val)>> {
+    std::cell::RefMut::map(o.borrow_mut(), |b| match &mut b.kind {
+        Kind::Map(e) => e,
+        _ => unreachable!("`set` checked a Map"),
+    })
+}
+
+/// The values of `o`, a `Set` that `add` checked.
+fn set_table(o: &ObjRef) -> std::cell::RefMut<'_, Table<Val>> {
+    std::cell::RefMut::map(o.borrow_mut(), |b| match &mut b.kind {
+        Kind::Set(e) => e,
+        _ => unreachable!("`add` checked a Set"),
+    })
+}
+
 fn map_set(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let o = coll(it, this)?;
     let k = norm(arg(a, 0));
-    if let Kind::Map(e) = &mut o.borrow_mut().kind
-        && let Some(slot) = e.get_mut(&k)
-    {
+    if let Some(slot) = map_table(&o).get_mut(&k) {
         slot.1 = arg(a, 1);
         return Ok(this.clone());
     }
     it.grow_elements(&o, 2)?;
-    if let Kind::Map(e) = &mut o.borrow_mut().kind {
-        e.push((k, arg(a, 1)));
-    }
+    map_table(&o).push((k, arg(a, 1)));
     Ok(this.clone())
 }
 
 fn set_add(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let o = coll(it, this)?;
     let k = norm(arg(a, 0));
-    if matches!(&o.borrow().kind, Kind::Set(e) if e.contains(&k)) {
+    if set_table(&o).contains(&k) {
         return Ok(this.clone());
     }
     it.grow_elements(&o, 1)?;
-    if let Kind::Set(e) = &mut o.borrow_mut().kind {
-        e.push(k);
-    }
+    set_table(&o).push(k);
     Ok(this.clone())
 }
 
@@ -1612,6 +1630,13 @@ pub(crate) fn coll_next(o: &ObjRef, cursor: &Cursor) -> Option<(Val, Val)> {
 fn coll_for_each(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let o = coll(it, this)?;
     let f = arg(a, 0);
+    if a.is_empty() {
+        // Measured on a `refrouter` 9.0.4 on 03-11.
+        return it.type_error("undefined is not a function");
+    }
+    if !f.is_callable() {
+        return Err(crate::arrays::not_a_function(it, &f));
+    }
     let cursor = coll_cursor(&o);
     while let Some((k, v)) = coll_next(&o, &cursor) {
         it.call(&f, &arg(a, 1), &[v, k, this.clone()])?;
@@ -1745,9 +1770,7 @@ fn symbol_builtins(it: &mut Interp, g: &ObjRef) -> R<()> {
     to_string_tag(it, &mp, "Map")?;
     to_string_tag(it, &sp, "Set")?;
     for name in ["Math", "JSON"] {
-        if let Val::Obj(o) = it.get(&Val::Obj(g.clone()), name)? {
-            to_string_tag(it, &o, name)?;
-        }
+        to_string_tag(it, &installed(g, name), name)?;
     }
     let arr = it.realm.array.clone();
     let values = it.get(&Val::Obj(arr.clone()), "values")?;
@@ -1818,7 +1841,8 @@ fn regexp_builtins(it: &mut Interp, g: &ObjRef) -> R<()> {
         let getter = it.native(&format!("get {name}"), regexp_flag, 0)?;
         it.define(&proto, name, Prop { getter: Some(getter), ..Prop::hidden(Val::Undef) })?;
     }
-    if let Some(Val::Obj(c)) = g.borrow().get_own("RegExp").map(|p| p.value.clone()) {
+    {
+        let c = installed(g, "RegExp");
         method(it, &c, "escape", regexp_escape, 1)?;
         let names = [
             "input",

@@ -123,11 +123,10 @@ fn description(it: &mut Interp, this: &Val, _: &[Val]) -> R {
 /// `get [Symbol.species]` of the constructors that make new instances of their kind: `this`.
 pub fn install_species(it: &mut Interp, g: &ObjRef) -> R<()> {
     for name in ["Array", "Map", "Set", "RegExp", "Promise", "ArrayBuffer"] {
-        if let Val::Obj(c) = it.get(&Val::Obj(g.clone()), name)? {
-            let getter = it.native("get [Symbol.species]", species, 0)?;
-            let p = Prop { getter: Some(getter), ..Prop::hidden(Val::Undef) };
-            it.define(&c, &well_known("species"), p)?;
-        }
+        let c = crate::builtins::installed(g, name);
+        let getter = it.native("get [Symbol.species]", species, 0)?;
+        let p = Prop { getter: Some(getter), ..Prop::hidden(Val::Undef) };
+        it.define(&c, &well_known("species"), p)?;
     }
     Ok(())
 }

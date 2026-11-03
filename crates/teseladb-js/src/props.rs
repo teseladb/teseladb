@@ -568,7 +568,7 @@ pub fn define_all(it: &mut Interp, o: &ObjRef, props: &Val) -> R<()> {
 
 fn define_properties(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     let Val::Obj(o) = arg(a, 0) else {
-        return it.type_error(&format!("{} is not a non-null object", it.show(&arg(a, 0))));
+        return Err(it.operand_error(&arg(a, 0), |t| format!("{t} is not an object")));
     };
     define_all(it, &o, &arg(a, 1))?;
     Ok(Val::Obj(o))
