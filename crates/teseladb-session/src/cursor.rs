@@ -8,6 +8,8 @@
 
 use std::collections::BTreeMap;
 
+use crate::session::{SessionMatch, Uid};
+
 /// Milliseconds a cursor lives without use (`cursorTimeoutMillis`).
 pub const CURSOR_TIMEOUT_MS: u64 = 10 * 60_000;
 /// Bits of a cursor identifier that hold the node's number.
@@ -160,9 +162,25 @@ impl<S> CursorTable<S> {
         self.cursors.remove(&id).is_some()
     }
 
-    /// Kills the cursors of sessions `lsids`; their identifiers.
+    /// Kills the cursors of sessions `lsids`, whoever owns them (the sessions that expired);
+    /// their identifiers.
     pub fn kill_sessions(&mut self, lsids: &[u128]) -> Vec<i64> {
         self.kill_where(|c| c.lsid.is_some_and(|l| lsids.contains(&l)))
+    }
+
+    /// Kills the cursors of the sessions any of `matches` reaches, with `uid_of` giving the owner
+    /// of each cursor's session; their identifiers.
+    pub fn kill_matching(
+        &mut self,
+        matches: &[SessionMatch],
+        uid_of: impl Fn(&Cursor<S>) -> Uid,
+    ) -> Vec<i64> {
+        self.kill_where(|c| {
+            c.lsid.is_some_and(|l| {
+                let uid = uid_of(c);
+                matches.iter().any(|m| m.reaches(l, &uid))
+            })
+        })
     }
 
     /// Kills every cursor that belongs to a session; their identifiers.

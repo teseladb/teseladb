@@ -763,3 +763,163 @@ fn kill_all_sessions_by_pattern_with_users_asks_for_impersonate() {
     open.auth.required = false;
     assert!(ok(&run(&mut m, &mut open, ADMIN, users())));
 }
+
+/// The `uid` of a user's sessions: the SHA-256 of `user@db`.
+fn uid_of(user: &str) -> Value {
+    Value::Binary {
+        subtype: 0,
+        bytes: teseladb_hash::sha256(format!("{user}@{ADMIN}").as_bytes()).to_vec(),
+    }
+}
+
+/// Session `n`.
+fn session(n: u8) -> Value {
+    Value::Binary { subtype: 4, bytes: vec![n; 16] }
+}
+
+/// `reader` opens a cursor in session 1 and `writer` one in session 2; each pattern of
+/// `killAllSessionsByPattern` or kill command `kill` builds then runs as `killer`, and the result
+/// is which of the two cursors goes on.
+fn survivors(killer: &str, kill: Document) -> (bool, bool) {
+    let mut m = node();
+    add_role(
+        &mut m,
+        "imp",
+        vec![Privilege {
+            resource: Resource::Cluster,
+            actions: vec![ActionType::Impersonate, ActionType::KillAnySession],
+        }],
+    );
+    add_user(&mut m, "imp", &[("imp", ADMIN), ("root", ADMIN)]);
+    let mut root = conn("root");
+    let docs: Vec<Value> =
+        (0..3).map(|i| Value::Document(Document::new().with("_id", i))).collect();
+    run(&mut m, &mut root, TEST, Document::new().with("insert", "c").with("documents", docs));
+    let lsid = |n: u8| Document::new().with("id", session(n));
+    let open = |m: &mut Mem, user: &str, n: u8| {
+        let find = Document::new().with("find", "c").with("batchSize", 1).with("lsid", lsid(n));
+        let r = run(m, &mut conn(user), TEST, find);
+        match field(&r, "cursor.id") {
+            Value::Int64(id) => *id,
+            other => panic!("{other:?}"),
+        }
+    };
+    let ids = [open(&mut m, "reader", 1), open(&mut m, "writer", 2)];
+    let r = run(&mut m, &mut conn(killer), ADMIN, kill);
+    assert!(ok(&r), "{r:?}");
+    let alive = |m: &mut Mem, user: &str, n: u8, id: i64| {
+        let more = Document::new()
+            .with("getMore", Value::Int64(id))
+            .with("collection", "c")
+            .with("batchSize", 1)
+            .with("lsid", lsid(n));
+        ok(&run(m, &mut conn(user), TEST, more))
+    };
+    (alive(&mut m, "reader", 1, ids[0]), alive(&mut m, "writer", 2, ids[1]))
+}
+
+fn by(patterns: Vec<Document>) -> Document {
+    let list: Vec<Value> = patterns.into_iter().map(Value::Document).collect();
+    Document::new().with("killAllSessionsByPattern", list)
+}
+
+fn lsid_of(n: u8, user: &str) -> Document {
+    Document::new().with("id", session(n)).with("uid", uid_of(user))
+}
+
+/// Each session belongs to the user who started it, and the kills reach the sessions of their
+/// owners as on a `refrouter` 9.0.4 with authentication (measured on 03-11-2026): a `uid` reaches
+/// every session of its user, an `lsid` the one session with its `id` and `uid`, a `uid` next to
+/// an `lsid` wins, and `users` and `roles` choose nothing.
+#[test]
+fn kill_all_sessions_by_pattern_reaches_the_owners_sessions() {
+    let uid = |user: &str| Document::new().with("uid", uid_of(user));
+    assert_eq!(survivors("root", by(vec![uid("reader")])), (false, true));
+    assert_eq!(survivors("root", by(vec![uid("root")])), (true, true));
+    let nobody = Value::Binary { subtype: 0, bytes: teseladb_hash::sha256(b"").to_vec() };
+    assert_eq!(survivors("root", by(vec![Document::new().with("uid", nobody)])), (true, true));
+    let lsid = |n: u8, user: &str| Document::new().with("lsid", lsid_of(n, user));
+    assert_eq!(survivors("root", by(vec![lsid(1, "reader")])), (false, true));
+    assert_eq!(survivors("root", by(vec![lsid(1, "writer")])), (true, true));
+    let both = lsid(1, "reader").with("uid", uid_of("writer"));
+    assert_eq!(survivors("root", by(vec![both])), (true, false));
+    assert_eq!(survivors("root", by(vec![uid("reader"), lsid(2, "writer")])), (false, false));
+    let user = |u: &str| Value::Document(Document::new().with("user", u).with("db", ADMIN));
+    let users = |u: &str| Document::new().with("users", vec![user(u)]);
+    assert_eq!(survivors("imp", by(vec![users("reader")])), (false, false));
+    assert_eq!(survivors("imp", by(vec![users("nosuch")])), (false, false));
+    let role = Value::Document(Document::new().with("role", "read").with("db", TEST));
+    assert_eq!(
+        survivors("imp", by(vec![Document::new().with("roles", vec![role])])),
+        (false, false)
+    );
+    assert_eq!(
+        survivors("imp", by(vec![users("reader").with("uid", uid_of("writer"))])),
+        (true, false)
+    );
+    assert_eq!(survivors("root", by(vec![])), (false, false));
+    assert_eq!(survivors("root", by(vec![Document::new()])), (false, false));
+}
+
+/// `killAllSessions` reaches the sessions of the users it names, every session with none; and
+/// `killSessions` reaches a session of the user who runs it unless the `lsid` names its `uid`
+/// (measured on 03-11-2026).
+#[test]
+fn kill_sessions_and_kill_all_sessions_reach_the_owners_sessions() {
+    let user = |u: &str| Value::Document(Document::new().with("user", u).with("db", ADMIN));
+    let all = |users: Vec<Value>| Document::new().with("killAllSessions", users);
+    assert_eq!(survivors("root", all(vec![user("reader")])), (false, true));
+    assert_eq!(survivors("root", all(vec![user("nosuch")])), (true, true));
+    assert_eq!(survivors("root", all(vec![])), (false, false));
+    let kill = |lsid: Document| Document::new().with("killSessions", vec![Value::Document(lsid)]);
+    let id = |n: u8| Document::new().with("id", session(n));
+    assert_eq!(survivors("root", kill(id(1))), (true, true));
+    assert_eq!(survivors("reader", kill(id(1))), (false, true));
+    assert_eq!(survivors("reader", kill(id(2))), (true, true));
+    assert_eq!(survivors("root", kill(lsid_of(1, "reader"))), (false, true));
+}
+
+/// `$listLocalSessions` gives each session with its owner's `uid` and name, by default those of
+/// the user who runs it (measured on a `refrouter` 9.0.4 on 03-11-2026).
+#[test]
+fn local_sessions_carry_their_owner() {
+    let mut m = node();
+    let lsid = |n: u8| Document::new().with("id", session(n));
+    run(&mut m, &mut conn("reader"), TEST, Document::new().with("find", "c").with("lsid", lsid(1)));
+    run(&mut m, &mut conn("writer"), TEST, Document::new().with("find", "c").with("lsid", lsid(2)));
+    let list = |spec: Document| {
+        let stage = Value::Document(Document::new().with("$listLocalSessions", spec));
+        Document::new()
+            .with("aggregate", 1)
+            .with("pipeline", vec![stage])
+            .with("cursor", Document::new())
+    };
+    let r = run(&mut m, &mut conn("reader"), ADMIN, list(Document::new()));
+    let Value::Array(batch) = field(&r, "cursor.firstBatch") else { panic!("{r:?}") };
+    assert_eq!(batch.len(), 1, "{r:?}");
+    let Value::Document(only) = &batch[0] else { panic!("{r:?}") };
+    assert_eq!(field(only, "_id.id"), &session(1));
+    assert_eq!(field(only, "_id.uid"), &uid_of("reader"));
+    assert_eq!(field(only, "user"), &Value::from("reader@admin"));
+    let r = run(&mut m, &mut conn("root"), ADMIN, list(Document::new().with("allUsers", true)));
+    let Value::Array(batch) = field(&r, "cursor.firstBatch") else { panic!("{r:?}") };
+    assert_eq!(batch.len(), 2, "{r:?}");
+}
+
+/// The record of a session in `config.system.sessions` carries its owner's `uid` and, with a
+/// user, `user: {name: "user@db"}` (measured on a `refrouter` 9.0.4 on 03-11-2026).
+#[test]
+fn the_sessions_record_carries_the_owner() {
+    use teseladb_wire::commands::registry::{SESSIONS_COLL, SESSIONS_DB, refresh};
+    let mut m = node();
+    let lsid = Document::new().with("id", session(1));
+    let touch = Document::new().with("refreshSessions", vec![Value::Document(lsid)]);
+    assert!(ok(&run(&mut m, &mut conn("reader"), ADMIN, touch)));
+    let shared = std::mem::take(&mut m.shared);
+    let now = m.now;
+    assert_eq!(refresh(&mut m, &shared, 0, now).unwrap().written, 1);
+    m.shared = shared;
+    let r = m.run(SESSIONS_DB, Document::new().with("find", SESSIONS_COLL));
+    assert_eq!(field(&r, "cursor.firstBatch.0._id.uid"), &uid_of("reader"));
+    assert_eq!(field(&r, "cursor.firstBatch.0.user.name"), &Value::from("reader@admin"));
+}
