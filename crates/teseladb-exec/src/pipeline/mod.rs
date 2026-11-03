@@ -11,6 +11,7 @@ pub mod fusion;
 pub mod geo_near;
 mod granularity;
 mod group;
+mod joined;
 pub mod meta;
 pub mod optimize;
 pub mod out_merge;
@@ -90,6 +91,33 @@ pub trait Env {
     /// RefDb's `IndexNotFound`.
     fn text_source(&self, _filter: &Document) -> Result<Vec<search::Scored>, MqlError> {
         Err(error(errors::INDEX_NOT_FOUND, "text index required for $text query"))
+    }
+
+    /// The documents of a `$match` with a `$text` first in the pipeline of a `$lookup` or
+    /// `$unionWith` that reads collection `name` of the pipeline's database, with the variables
+    /// `vars` its filter sees (011 T054): those of the text index of that collection, as
+    /// [`Env::text_source`] gives them for the pipeline's own. Without a text index, RefDb's
+    /// `IndexNotFound`.
+    fn joined_text_source(
+        &self,
+        _name: &str,
+        _filter: &Document,
+        _vars: Option<&Document>,
+    ) -> Result<Vec<search::Scored>, MqlError> {
+        Err(error(errors::INDEX_NOT_FOUND, "text index required for $text query"))
+    }
+
+    /// The documents of a search stage first in the pipeline of a `$lookup` (`from_lookup`) or
+    /// `$unionWith` that reads collection `name` of the pipeline's database (011 FR-004): those
+    /// of that collection's search indexes, as [`Env::search_source`] gives them for the
+    /// pipeline's own. Without search, RefDb's `SearchNotEnabled`.
+    fn joined_search_source(
+        &self,
+        _name: &str,
+        (_stage, _spec): (&str, &Document),
+        _from_lookup: bool,
+    ) -> Result<Vec<search::Scored>, MqlError> {
+        Err(search::not_enabled())
     }
 
     /// Checks a first `$match` with a `$text` while the pipeline is planned, as `refnode` does:
@@ -332,10 +360,35 @@ impl Pipeline {
                 Stage::GeoNear(g) => g.check_plan(env)?,
                 Stage::Search(name, spec) => env.check_search(name, spec)?,
                 Stage::Text(filter) => env.check_text(filter)?,
+                // A `$match` with `$text` in a `$facet` passes the check of the metadata after
+                // a first one, and then fails when it is planned to run (measured on 9.0.4:
+                // after the error of a missing text index, also without documents).
+                Stage::Facet(f) if f.has_text() => return Err(stages::text_in_facet()),
                 _ => {}
             }
         }
         Ok(())
+    }
+
+    /// Whether the pipeline starts with a `$match` with `$text`.
+    pub(crate) fn starts_with_text(&self) -> bool {
+        matches!(self.stages.first(), Some(Stage::Text(_)))
+    }
+
+    /// Whether the pipeline starts with a search stage (`$search`, `$searchMeta`,
+    /// `$vectorSearch`).
+    pub(crate) fn starts_with_search(&self) -> bool {
+        matches!(self.stages.first(), Some(Stage::Search(..)))
+    }
+
+    /// The pipeline with `m` after its first stage (the equality of a `$lookup` whose pipeline
+    /// starts with a search stage).
+    pub(crate) fn with_match_after_first(&self, m: Match) -> Pipeline {
+        let mut p = self.clone();
+        let at = p.stages.len().min(1);
+        p.stages.insert(at, Stage::Match(m));
+        p.sbe_specs.insert(at, false);
+        p
     }
 
     /// The last `$sort` of the pipeline.
@@ -425,15 +478,21 @@ impl Pipeline {
         let mut required: Vec<String> = Vec::new();
         // `$$SEARCH_META` after a `$search`: the stage's `$searchMeta` document (measured).
         let mut search_vars: Option<Document> = None;
+        // The scores the stages so far gave every document (`$text`, `$score`): those that a
+        // `$unionWith` adds without them read as an error after it (measured on 9.0.4).
+        let mut given: Vec<String> = Vec::new();
         for (st, spec) in self.stages.iter().zip(&self.sbe_specs) {
             sbe = sbe && *spec && sbe_capable(st);
-            let strict =
-                meta::RequiredEnv { inner: env, names: &required, vars: search_vars.as_ref() };
+            // A grouping stage reads a score a document lacks as nothing (measured on 9.0.4,
+            // after a `$unionWith`).
+            let names: &[String] = if makes_new_documents(st) { &[] } else { &required };
+            let strict = meta::RequiredEnv { inner: env, names, vars: search_vars.as_ref() };
             let env: &dyn Env =
-                if required.is_empty() && search_vars.is_none() { env } else { &strict };
+                if names.is_empty() && search_vars.is_none() { env } else { &strict };
             if let Stage::Fusion(f) = st {
                 let (fused, scores) = f.run(docs, env)?;
                 (docs, metas) = (fused, Some(scores));
+                given.extend(f.gives().iter().map(|n| (*n).to_owned()));
                 continue;
             }
             if let Stage::Text(filter) = st {
@@ -443,6 +502,7 @@ impl Pipeline {
                     .map(|s| (s.doc, meta::with_score(s.meta, Some(meta::TEXT_SCORE))))
                     .unzip();
                 (docs, metas) = (found, Some(scores));
+                given.push(meta::TEXT_SCORE.to_owned());
                 continue;
             }
             if let Stage::Search(name, spec) = st {
@@ -470,6 +530,7 @@ impl Pipeline {
             if let Stage::Score(s) = st {
                 let own = metas.take().unwrap_or_else(|| vec![meta::Meta::new(); docs.len()]);
                 metas = Some(s.run(&docs, &own, env)?);
+                given.extend(s.gives().iter().map(|n| (*n).to_owned()));
                 continue;
             }
             // `$sample` gives each document it takes a random value (`{$meta: "randVal"}`).
@@ -483,6 +544,14 @@ impl Pipeline {
             };
             if makes_new_documents(st) {
                 required.clear();
+                given.clear();
+            }
+            if matches!(st, Stage::UnionWith(_)) {
+                for n in &given {
+                    if !required.contains(n) {
+                        required.push(n.clone());
+                    }
+                }
             }
         }
         Ok((docs, metas))
@@ -521,6 +590,20 @@ fn reads_search_meta(v: RawValue<'_>) -> bool {
     }
 }
 
+/// Stage `d` without the pipeline of a `$lookup` or `$unionWith`, whose `$$SEARCH_META` is that
+/// of its own `$search` (measured on 9.0.4).
+fn own_part(d: RawDoc<'_>) -> RawValue<'_> {
+    match d.iter().next() {
+        Some(("$lookup" | "$unionWith", RawValue::Document(spec))) => {
+            match spec.iter().any(|(k, x)| k != "pipeline" && reads_search_meta(x)) {
+                true => RawValue::Document(d),
+                false => RawValue::Null,
+            }
+        }
+        _ => RawValue::Document(d),
+    }
+}
+
 /// The stages of `pipeline`, each one's arguments checked.
 fn parse_stages(pipeline: &[RawValue<'_>], ctx: &Ctx) -> Result<Pipeline, MqlError> {
     // After a `$search` the stages, and the pipelines inside them, may read `$$SEARCH_META`.
@@ -537,12 +620,9 @@ fn parse_stages(pipeline: &[RawValue<'_>], ctx: &Ctx) -> Result<Pipeline, MqlErr
             ));
         };
         if i > 0 && matches!(d.get("$match"), Some(RawValue::Document(m)) if has_text(m)) {
-            return Err(error(
-                errors::TEXT_NOT_FIRST,
-                "$match with $text is only allowed as the first pipeline stage",
-            ));
+            return Err(stages::text_not_first());
         }
-        if reads_search_meta(RawValue::Document(*d)) {
+        if reads_search_meta(own_part(*d)) {
             if !searched {
                 return Err(error(
                     SEARCH_META_WITHOUT_SEARCH,
@@ -952,6 +1032,12 @@ fn run_stage_meta(
             (out.0, Some(out.1))
         }
         Stage::Facet(f) => (f.run_with_meta(docs, metas, env)?, None),
+        // The documents keep their metadata, and those it adds bring the metadata of its
+        // pipeline (measured on 9.0.4).
+        Stage::UnionWith(u) => {
+            let (docs, metas) = u.run_with_meta(docs, metas, env)?;
+            (docs, Some(metas))
+        }
         // A window keeps each document and reorders them: a mark finds each one's metadata.
         Stage::SetWindowFields(_) => {
             let empty = meta::Meta::new();

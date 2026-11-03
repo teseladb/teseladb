@@ -99,6 +99,14 @@ fn distance(a: &str, b: &str) -> usize {
 }
 
 impl Fusion {
+    /// The metadata it gives every document: the score, and its details when asked for.
+    pub(crate) fn gives(&self) -> &'static [&'static str] {
+        match self.details {
+            true => &[SCORE, SCORE_DETAILS],
+            false => &[SCORE],
+        }
+    }
+
     /// Reads `$rankFusion` (`score` false) or `$scoreFusion`.
     pub fn parse(name: &str, v: RawValue<'_>, ctx: &Ctx) -> Result<Fusion, MqlError> {
         let kind = if name == "$scoreFusion" { Kind::Score } else { Kind::Rank };

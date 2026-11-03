@@ -304,6 +304,19 @@ impl<B: Backend + ?Sized> WireEnv<'_, B> {
         super::search_indexes::stage(&mut **backend, shared, ns, spec)
     }
 
+    /// The documents of a `$match` with `$text` (`filter`, whose `$expr` sees `vars`) on `ns`,
+    /// read through a view without stages.
+    fn text_of(
+        &self,
+        ns: &Namespace,
+        filter: &Document,
+        vars: Option<&Document>,
+    ) -> Result<Vec<teseladb_exec::pipeline::search::Scored>, CommandError> {
+        let mut backend = self.backend.borrow_mut();
+        let ns = super::text_search::read_namespace(&mut **backend, ns)?;
+        super::text_search::source(&mut **backend, &ns, filter, (vars, self.concern))
+    }
+
     /// `$collStats` of the aggregated collection (015 FR-010), with the sections `spec` asks
     /// for in RefDb's order. TeselaDB has no shards: the document has no `shard` (DV-038).
     fn coll_stats(
@@ -490,14 +503,43 @@ impl<B: Backend + ?Sized> Env for WireEnv<'_, B> {
             Some((_, ns)) => ns.clone(),
             None => return Err(to_mql(super::text_search::no_index_here())),
         };
+        self.text_of(&ns, filter, Some(&self.vars)).map_err(to_mql)
+    }
+
+    fn joined_text_source(
+        &self,
+        name: &str,
+        filter: &Document,
+        vars: Option<&Document>,
+    ) -> Result<Vec<teseladb_exec::pipeline::search::Scored>, MqlError> {
+        self.text_of(&names::ns(self.db, name), filter, vars).map_err(to_mql)
+    }
+
+    fn joined_search_source(
+        &self,
+        name: &str,
+        (stage, spec): (&str, &Document),
+        from_lookup: bool,
+    ) -> Result<Vec<teseladb_exec::pipeline::search::Scored>, MqlError> {
+        let Some((shared, _)) = &self.node else { return Ok(Vec::new()) };
+        let ns = names::ns(self.db, name);
         let mut backend = self.backend.borrow_mut();
-        super::text_search::source(&mut **backend, &ns, filter, self.concern).map_err(to_mql)
+        let found =
+            super::search_ops::source(&mut **backend, shared, &ns, stage, spec).map_err(to_mql)?;
+        // The `$search` of a `$lookup` on a view finds no documents, while its `$searchMeta`
+        // counts them and a `$unionWith` reads them (measured on 9.0.4, `scratchpad/lane3t/m113.js`).
+        let on_view = super::views::resolve(&mut **backend, &ns).map_err(to_mql)?.is_some();
+        match from_lookup && on_view && stage == SEARCH {
+            true => Ok(Vec::new()),
+            false => Ok(found),
+        }
     }
 
     fn check_text(&self, filter: &Document) -> Result<(), MqlError> {
         let Some((_, ns)) = &self.node else { return Ok(()) };
         let mut backend = self.backend.borrow_mut();
-        super::text_search::check(&mut **backend, ns, filter).map_err(to_mql)
+        let ns = super::text_search::read_namespace(&mut **backend, ns).map_err(to_mql)?;
+        super::text_search::check(&mut **backend, &ns, filter).map_err(to_mql)
     }
 
     fn check_search(&self, stage: &str, spec: &Document) -> Result<(), MqlError> {
@@ -943,12 +985,10 @@ pub(crate) fn aggregate_from<B: Backend + ?Sized>(
             "$listCatalog is only valid as the first stage in a pipeline",
         ));
     }
-    if starts_with_text(&stages) && on_view_with_stages(ctx.backend, &ns)? {
-        return Err(CommandError::new(
-            TEXT_NOT_FIRST,
-            "$match with $text is only allowed as the first pipeline stage",
-        ));
+    if starts_with_text(&stages) && resolves_with_stages(ctx.backend, &ns)? {
+        return Err(text_not_first());
     }
+    check_joined_views(ctx.backend, ctx.db, &stages)?;
     if on_collection && ctx.backend.collection(&ns)?.is_some() {
         pipeline.check_collection_plan().map_err(from_mql)?;
     }
@@ -1066,6 +1106,77 @@ fn on_view_with_stages<B: Backend + ?Sized>(
         None => false,
     })
 }
+
+/// Whether `ns` is a view whose pipeline, with those of the views it stands on, has stages.
+fn resolves_with_stages<B: Backend + ?Sized>(
+    backend: &mut B,
+    ns: &Namespace,
+) -> Result<bool, CommandError> {
+    Ok(super::views::resolve(backend, ns)?.is_some_and(|v| !v.pipeline.is_empty()))
+}
+
+/// RefDb's error for a `$match` with `$text` that is not the first stage.
+fn text_not_first() -> CommandError {
+    CommandError::new(
+        TEXT_NOT_FIRST,
+        "$match with $text is only allowed as the first pipeline stage",
+    )
+}
+
+/// Refuses, anywhere in `stages` of database `db`, the pipeline of a `$lookup` or `$unionWith`
+/// that starts with a `$match` with `$text` on a view with stages (they go before it, and the
+/// `$text` is no longer first) or with a `$search` on a view whose stages it cannot read
+/// (measured on 9.0.4 when the command is planned, without input documents, after the stages are
+/// parsed; `scratchpad/lane3t/m97.js` to `m113.js`, 011 T054 and FR-004).
+fn check_joined_views<B: Backend + ?Sized>(
+    backend: &mut B,
+    db: &str,
+    stages: &[RawValue<'_>],
+) -> Result<(), CommandError> {
+    for st in stages {
+        let RawValue::Document(d) = st else { continue };
+        let (coll, sub) = match d.iter().next() {
+            Some(("$lookup", RawValue::Document(l))) => (l.get("from"), l.get("pipeline")),
+            Some(("$unionWith", RawValue::Document(u))) => (u.get("coll"), u.get("pipeline")),
+            Some(("$facet", RawValue::Document(f))) => {
+                for (_, p) in f.iter() {
+                    if let RawValue::Array(p) = p {
+                        check_joined_views(backend, db, &p.iter().collect::<Vec<_>>())?;
+                    }
+                }
+                continue;
+            }
+            _ => continue,
+        };
+        let Some(RawValue::Array(sub)) = sub else { continue };
+        let sub: Vec<RawValue<'_>> = sub.iter().collect();
+        if let Some(RawValue::String(c)) = coll {
+            let view = super::views::resolve(backend, &names::ns(db, c))?;
+            let stages = view.map(|v| v.pipeline).unwrap_or_default();
+            if starts_with_text(&sub) && !stages.is_empty() {
+                return Err(text_not_first());
+            }
+            // A `$search` refuses a view whose stages it cannot read (measured on 9.0.4, also
+            // without input documents).
+            if first_stage_name(&sub) == Some(SEARCH) {
+                super::search_indexes::check_view_stages(&stages)?;
+            }
+        }
+        check_joined_views(backend, db, &sub)?;
+    }
+    Ok(())
+}
+
+/// The name of the first of `stages`.
+fn first_stage_name<'a>(stages: &[RawValue<'a>]) -> Option<&'a str> {
+    match stages.first() {
+        Some(RawValue::Document(d)) => d.iter().next().map(|(k, _)| k),
+        _ => None,
+    }
+}
+
+/// The name of the `$search` stage.
+const SEARCH: &str = "$search";
 
 /// Whether the first of `stages` is a `$match` with `$text`.
 fn starts_with_text(stages: &[RawValue<'_>]) -> bool {

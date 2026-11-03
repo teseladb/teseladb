@@ -42,14 +42,10 @@ pub(crate) fn check_path(path: &str) -> Result<(), MqlError> {
     Ok(())
 }
 
-/// The key of metadata `name` in `meta`: `null` for a random value no stage set, an error for
-/// metadata a stage must give.
-fn meta_key(meta: &super::meta::Meta, name: &str) -> Result<Value, MqlError> {
-    match meta.get(name) {
-        Some(v) => Ok(v.clone()),
-        None if crate::expr::meta_is_required(name) => Err(crate::expr::missing_meta(name)),
-        None => Ok(Value::Null),
-    }
+/// The key of metadata `name` in `meta`: `null` when the document has none (a random value no
+/// stage set, or a score a `$unionWith` added the document without, measured on 9.0.4).
+fn meta_key(meta: &super::meta::Meta, name: &str) -> Value {
+    meta.get(name).cloned().unwrap_or(Value::Null)
 }
 
 impl SortSpec {
@@ -109,7 +105,7 @@ impl SortSpec {
         let mut keys = self.path_keys(doc, col)?;
         for (k, m) in keys.iter_mut().zip(&self.metas) {
             if let Some(name) = m {
-                *k = meta_key(meta, name)?;
+                *k = meta_key(meta, name);
             }
         }
         Ok(keys)

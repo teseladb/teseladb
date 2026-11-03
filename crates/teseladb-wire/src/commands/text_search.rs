@@ -150,6 +150,20 @@ fn count_text(filter: &Document, under_nor: bool) -> Result<usize, CommandError>
     Ok(n)
 }
 
+/// The collection a `$text` on `ns` reads: the one a view without stages stands on, through the
+/// views it stands on (measured on 9.0.4: an `aggregate` on such a view, or a `$lookup` or
+/// `$unionWith` of one, reads its collection's text index; a view with stages is refused
+/// before, `scratchpad/lane3t/m97.js` and `m100.js`).
+pub fn read_namespace<B: Backend + ?Sized>(
+    backend: &mut B,
+    ns: &Namespace,
+) -> Result<Namespace, CommandError> {
+    Ok(match super::views::resolve(backend, ns)? {
+        Some(v) => super::names::ns(&ns.db, &v.collection),
+        None => ns.clone(),
+    })
+}
+
 /// Plans the `$text` of `filter` on `ns`: one text expression, the collection's text index and
 /// the query's `$language`, in `refnode`'s order (measured: the missing index comes first).
 pub fn check<B: Backend + ?Sized>(
@@ -185,18 +199,19 @@ fn planned<B: Backend + ?Sized>(
 }
 
 /// The documents of `ns` that `filter` (with a `$text`) selects, each with its `textScore`
-/// (measured: the score of the text clause, also when an `$or` let the document in).
+/// (measured: the score of the text clause, also when an `$or` let the document in); its `$expr`
+/// sees the variables `vars`.
 pub fn source<B: Backend + ?Sized>(
     backend: &mut B,
     ns: &Namespace,
     filter: &Document,
-    concern: ReadConcern,
+    (vars, concern): (Option<&Document>, ReadConcern),
 ) -> Result<Vec<Scored>, CommandError> {
     let parsed = parse_filter(filter)?;
     let (coll, index) = planned(backend, ns, filter, &parsed)?;
     let ext = TextExtensions { index: &index };
     let query = parsed.text_query();
-    let ctx = MatchContext { collation: None, ext: &ext, vars: None };
+    let ctx = MatchContext { collation: None, ext: &ext, vars };
     let mut out = Vec::new();
     for_each_match_with(
         backend,
