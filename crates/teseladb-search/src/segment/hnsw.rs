@@ -3,7 +3,9 @@
 //!
 //! Each document with a vector gets a level, drawn as `⌊−ln(u) · mL⌋` with `mL = 1 / ln(M)` and
 //! `u` derived from the document number, so the same vectors always build the same graph (D-019:
-//! every replica builds its own segments). Level 0 keeps up to `2M` neighbours per node and the
+//! every replica builds its own segments). A graph also grows one document at a time
+//! ([`Hnsw::push`], algorithm 1 is already incremental): the same vectors pushed in the same order
+//! build the same graph. Level 0 keeps up to `2M` neighbours per node and the
 //! upper levels `M`; a node's neighbours are chosen with the heuristic of algorithm 4, and a
 //! search walks greedily down the upper levels and then keeps `ef` candidates on level 0. The
 //! prefilter is applied on level 0: rejected nodes are still walked but never returned.
@@ -12,7 +14,8 @@
 //! quantization; with a quantization, the candidates are scored again on the full vectors.
 //!
 //! Layout of the section payload (little-endian): `u32` dimensions, `u8` similarity, `u8`
-//! quantization, `u16` M, `u32` documents, then per document a `u8` flag (1 when it has a vector)
+//! quantization, `u16` M, the lowest and highest component of the scalar quantization as `f32`,
+//! `u32` documents, then per document a `u8` flag (1 when it has a vector)
 //! and its components as `f32`; then the entry point (`u32`, `u32::MAX` for none), the top level,
 //! and per document with a vector its level and per level the `u32` count and numbers of its
 //! neighbours.
@@ -42,6 +45,11 @@ pub struct Space {
     range: (f32, f32),
 }
 
+/// The lowest and highest component of `v`.
+fn bounds(v: &[f32]) -> (f32, f32) {
+    v.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &x| (lo.min(x), hi.max(x)))
+}
+
 impl Space {
     fn new(
         similarity: Similarity,
@@ -49,10 +57,8 @@ impl Space {
         vectors: &[Option<Vec<f32>>],
     ) -> Space {
         let mut range = (f32::INFINITY, f32::NEG_INFINITY);
-        for v in vectors.iter().flatten() {
-            for &x in v {
-                range = (range.0.min(x), range.1.max(x));
-            }
+        for (lo, hi) in vectors.iter().flatten().map(|v| bounds(v)) {
+            range = (range.0.min(lo), range.1.max(hi));
         }
         if range.0 > range.1 {
             range = (0.0, 0.0);
@@ -71,6 +77,12 @@ impl Space {
             }
             Quantization::Binary => v.iter().map(|&x| if x > 0.0 { 1.0 } else { -1.0 }).collect(),
         }
+    }
+
+    /// Whether the scalar quantization has to widen its range for `v`.
+    fn outside(&self, v: &[f32]) -> bool {
+        let (lo, hi) = bounds(v);
+        self.quantization == Quantization::Scalar && (lo < self.range.0 || hi > self.range.1)
     }
 
     /// How near two viewed vectors are (higher is nearer).
@@ -111,15 +123,28 @@ pub struct Hnsw {
     /// Per document its neighbours on each of its levels (empty without a vector).
     links: Vec<Vec<Vec<u32>>>,
     entry: Option<u32>,
+    /// Documents linked into the graph since it was made: what building it cost.
+    insertions: u64,
 }
 
-/// A number in `(0, 1]` derived from a document number (SplitMix64).
-fn unit(doc: u32) -> f64 {
-    let mut z = u64::from(doc).wrapping_add(0x9E37_79B9_7F4A_7C15);
+/// SplitMix64 of `x`.
+fn mix(x: u64) -> u64 {
+    let mut z = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^= z >> 31;
-    ((z >> 11) as f64 + 1.0) / (1u64 << 53) as f64
+    z ^ (z >> 31)
+}
+
+/// A number in `(0, 1]` derived from a document number.
+fn unit(doc: u32) -> f64 {
+    ((mix(u64::from(doc)) >> 11) as f64 + 1.0) / (1u64 << 53) as f64
+}
+
+/// The order in which node `node` takes candidates equally near it: a different one for each
+/// node. Taking them by document number made every copy of a repeated vector prefer the same
+/// first copies, and the later ones lost every link that led to them.
+fn tie(node: u32, doc: u32) -> u64 {
+    mix((u64::from(node) << 32) | u64::from(doc))
 }
 
 impl Hnsw {
@@ -132,23 +157,86 @@ impl Hnsw {
         vectors: Vec<Option<Vec<f32>>>,
     ) -> Hnsw {
         let space = Space::new(similarity, quantization, &vectors);
-        let views = vectors.iter().map(|v| v.as_ref().map(|v| space.view(v))).collect();
         let mut g = Hnsw {
             dims,
             m: m.max(2),
             space,
-            links: vec![Vec::new(); vectors.len()],
+            links: Vec::new(),
             vectors,
-            views,
+            views: Vec::new(),
             entry: None,
+            insertions: 0,
         };
-        for doc in 0..g.vectors.len() as u32 {
-            let usable = |v: &Vec<f32>| v.len() == dims && v.iter().all(|x| x.is_finite());
-            if g.vectors[doc as usize].as_ref().is_some_and(usable) {
-                g.insert(doc);
+        g.link_all();
+        g
+    }
+
+    /// An empty graph, which [`Hnsw::push`] fills.
+    pub fn new(dims: usize, similarity: Similarity, quantization: Quantization, m: usize) -> Hnsw {
+        Hnsw::build(dims, similarity, quantization, m, Vec::new())
+    }
+
+    /// Adds the next document, with its vector or none, and links it into the graph: its number,
+    /// the number of documents before it. A vector of other dimensions or with a component that
+    /// is not finite is kept but not linked, as in [`Hnsw::build`]. With the scalar quantization,
+    /// a vector outside the range of the components seen so far widens the range at least to
+    /// twice its width on that side and links every document again: the range only has to grow
+    /// a few times, so building stays linear.
+    pub fn push(&mut self, vector: Option<Vec<f32>>) -> u32 {
+        let doc = self.vectors.len() as u32;
+        let usable = vector.as_deref().filter(|v| self.usable(v));
+        if let Some(v) = usable.filter(|v| self.space.outside(v)) {
+            self.space.range = self.widened(v);
+            self.vectors.push(vector);
+            self.link_all();
+            return doc;
+        }
+        let linked = usable.is_some();
+        self.views.push(vector.as_ref().map(|v| self.space.view(v)));
+        self.vectors.push(vector);
+        self.links.push(Vec::new());
+        if linked {
+            self.insert(doc);
+        }
+        doc
+    }
+
+    /// The range of the scalar quantization once it takes `v`: exactly `v`'s on an empty graph;
+    /// otherwise each side `v` passes moves past it by at least the current width.
+    fn widened(&self, v: &[f32]) -> (f32, f32) {
+        let (vlo, vhi) = bounds(v);
+        let (lo, hi) = self.space.range;
+        if self.entry.is_none() {
+            return (vlo, vhi);
+        }
+        let width = hi - lo;
+        (
+            if vlo < lo { vlo.min(lo - width) } else { lo },
+            if vhi > hi { vhi.max(hi + width) } else { hi },
+        )
+    }
+
+    /// Whether `v` goes into the graph.
+    fn usable(&self, v: &[f32]) -> bool {
+        v.len() == self.dims && v.iter().all(|x| x.is_finite())
+    }
+
+    /// Views and links every document again, in document order.
+    fn link_all(&mut self) {
+        self.views = self.vectors.iter().map(|v| v.as_ref().map(|v| self.space.view(v))).collect();
+        self.links = vec![Vec::new(); self.vectors.len()];
+        self.entry = None;
+        for doc in 0..self.vectors.len() as u32 {
+            if self.vectors[doc as usize].as_deref().is_some_and(|v| self.usable(v)) {
+                self.insert(doc);
             }
         }
-        g
+    }
+
+    /// Documents linked into the graph since it was made or decoded, counting each time
+    /// [`Hnsw::push`] links them all again: the work of building it.
+    pub fn insertions(&self) -> u64 {
+        self.insertions
     }
 
     /// The dimensions.
@@ -186,6 +274,7 @@ impl Hnsw {
 
     /// Algorithm 1: inserts `doc`.
     fn insert(&mut self, doc: u32) {
+        self.insertions += 1;
         let level = self.level_of(doc);
         self.links[doc as usize] = vec![Vec::new(); level + 1];
         let Some(entry) = self.entry else {
@@ -200,7 +289,7 @@ impl Hnsw {
         for l in (0..=level.min(self.top())).rev() {
             let found = self.search_layer(&q, &ep, EF_CONSTRUCTION, l, &|_| true);
             let max = if l == 0 { 2 * self.m } else { self.m };
-            let chosen = self.select(&found, self.m);
+            let chosen = self.select(doc, &found, self.m);
             for &n in &chosen {
                 self.links[n as usize][l].push(doc);
                 if self.links[n as usize][l].len() > max {
@@ -222,14 +311,14 @@ impl Hnsw {
             .iter()
             .map(|&c| Near(self.space.nearness(&q, self.view(c)), c))
             .collect();
-        self.links[n as usize][l] = self.select(&cands, max);
+        self.links[n as usize][l] = self.select(n, &cands, max);
     }
 
-    /// Algorithm 4: the up to `m` candidates, nearest first, each nearer to the node than to any
-    /// one already chosen, then the skipped ones nearest first until there are `m`.
-    fn select(&self, cands: &[Near], m: usize) -> Vec<u32> {
+    /// Algorithm 4: the up to `m` candidates of `node`, nearest first, each nearer to the node
+    /// than to any one already chosen, then the skipped ones nearest first until there are `m`.
+    fn select(&self, node: u32, cands: &[Near], m: usize) -> Vec<u32> {
         let mut sorted = cands.to_vec();
-        sorted.sort_by(|a, b| b.cmp(a));
+        sorted.sort_by(|a, b| b.0.total_cmp(&a.0).then(tie(node, a.1).cmp(&tie(node, b.1))));
         let mut chosen: Vec<u32> = Vec::with_capacity(m);
         let mut skipped = Vec::new();
         for c in sorted {
@@ -303,6 +392,20 @@ impl Hnsw {
         limit: usize,
         keep: impl Fn(u32) -> bool,
     ) -> Vec<Scored> {
+        let mut scored = self.candidates(query, num_candidates.max(limit), keep);
+        scored.truncate(limit);
+        scored
+    }
+
+    /// Every candidate a search for `num_candidates` finds, best first, scored on the full
+    /// vectors, among those `keep` accepts: with the binary quantization, more than
+    /// `num_candidates`.
+    pub fn candidates(
+        &self,
+        query: &[f32],
+        num_candidates: usize,
+        keep: impl Fn(u32) -> bool,
+    ) -> Vec<Scored> {
         let Some(entry) = self.entry.filter(|_| query.len() == self.dims) else {
             return Vec::new();
         };
@@ -314,8 +417,7 @@ impl Hnsw {
         // With sign bits the graph only ranks coarsely: more candidates are scored again.
         let factor =
             if self.space.quantization == Quantization::Binary { BINARY_OVERSAMPLING } else { 1 };
-        let ef = num_candidates.max(limit) * factor;
-        let found = self.search_layer(&q, &ep, ef, 0, &keep);
+        let found = self.search_layer(&q, &ep, num_candidates * factor, 0, &keep);
         let mut scored: Vec<Scored> = found
             .iter()
             .filter_map(|n| {
@@ -324,7 +426,6 @@ impl Hnsw {
             })
             .collect();
         sort_best_first(&mut scored);
-        scored.truncate(limit);
         scored
     }
 
@@ -340,6 +441,8 @@ impl Hnsw {
                 as u8,
         );
         out.extend_from_slice(&(self.m as u16).to_le_bytes());
+        out.extend_from_slice(&self.space.range.0.to_le_bytes());
+        out.extend_from_slice(&self.space.range.1.to_le_bytes());
         out.extend_from_slice(&(self.vectors.len() as u32).to_le_bytes());
         for v in &self.vectors {
             match v {
@@ -369,8 +472,12 @@ impl Hnsw {
         let similarity = SIMILARITIES.get(usize::from(r.u8()?)).ok_or(BAD)?.0;
         let quantization = QUANTIZATIONS.get(usize::from(r.u8()?)).ok_or(BAD)?.0;
         let m = usize::from(r.u16()?);
+        let range = (f32::from_bits(r.u32()?), f32::from_bits(r.u32()?));
+        if range.0.is_nan() || range.1.is_nan() || range.0 > range.1 {
+            return Err(BAD);
+        }
         let docs = r.u32()? as usize;
-        let mut vectors = Vec::with_capacity(docs.min(bytes.len()));
+        let mut vectors: Vec<Option<Vec<f32>>> = Vec::with_capacity(docs.min(bytes.len()));
         for _ in 0..docs {
             vectors.push(match r.u8()? {
                 0 => None,
@@ -398,9 +505,9 @@ impl Hnsw {
         if r.at != bytes.len() || entry.is_some_and(|e| links[e as usize].is_empty()) {
             return Err(BAD);
         }
-        let space = Space::new(similarity, quantization, &vectors);
+        let space = Space { similarity, quantization, range };
         let views = vectors.iter().map(|v| v.as_ref().map(|v| space.view(v))).collect();
-        Ok(Hnsw { dims, m, space, vectors, views, links, entry })
+        Ok(Hnsw { dims, m, space, vectors, views, links, entry, insertions: 0 })
     }
 }
 

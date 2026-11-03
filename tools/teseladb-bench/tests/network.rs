@@ -37,14 +37,13 @@ fn ycsb_and_reference_run_against_a_local_cluster() {
     assert_eq!(value_of(&reference, "search.found"), 1.0, "{reference}");
 }
 
-/// `vector-search` (011 T032) on a hundred vectors: the scenario of SC-005 with a million runs
-/// the same code. With 300, the first queries of the coverage build waited for the index's
-/// rebuild past the client's 30 s timeout (the index rebuilds a segment's graph whole).
+/// `vector-search` (011 T032) on 300 vectors: the scenario of SC-005 with a million runs the same
+/// code.
 #[test]
 fn vector_search_runs_against_a_local_cluster() {
     let short = ["--duration", "300ms", "--warmup", "500ms", "--format", "json"];
     let out = metrics(&bench(
-        &[&["--scenario", "vector-search", "--records", "100"][..], &short[..]].concat(),
+        &[&["--scenario", "vector-search", "--records", "300"][..], &short[..]].concat(),
     ));
     for name in ["query.p50", "recall@10"] {
         assert!(out.contains(name), "{name}: {out}");
@@ -57,9 +56,8 @@ fn vector_search_runs_against_a_local_cluster() {
 fn search_scenarios_run_against_a_local_cluster() {
     let short = ["--duration", "300ms", "--warmup", "500ms", "--format", "json"];
     for scenario in ["search-term", "search-multi", "search-phrase", "search-fuzzy", "vector"] {
-        let records = if scenario == "vector" { "100" } else { "300" };
         let out = metrics(&bench(
-            &[&["--scenario", scenario, "--records", records][..], &short[..]].concat(),
+            &[&["--scenario", scenario, "--records", "300"][..], &short[..]].concat(),
         ));
         assert!(out.contains("query.p50"), "{scenario}: {out}");
     }

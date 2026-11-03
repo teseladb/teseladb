@@ -74,7 +74,7 @@ fn stored_documents_that_do_not_read() {
     assert!(Presentation::from_document(&Document::new().with("mode", "other")).is_err());
     let bad = Document::new().with("members", vec![Value::Int32(1)]);
     assert!(Presentation::from_document(&bad).is_err());
-    let odd = Document::new().with("mode", 5).with("setName", 5).with("setVersion", 2i64);
+    let odd = Document::new().with("mode", 5).with("setName", 5).with("setVersion", "2");
     assert_eq!(Presentation::from_document(&odd).unwrap(), Presentation::default());
     assert_eq!(Hold::from_bytes(b"no"), Hold::default());
     let wrong =
@@ -245,5 +245,64 @@ fn more_member_answers() {
         field(&r, "electionCandidateMetrics.priorityAtElection"),
         &Value::Double(0.5),
         "{r:?}"
+    );
+}
+
+/// `replSetReconfig`'s `version` as RefDb 9.0.4 reads it (measured on 03-11-2026, `rs3.js`):
+/// missing, not a number, not whole or not above 0 is 93 with RefDb's message; a whole double, a decimal
+/// and a long past 32 bits are taken, and the long is kept whole.
+#[test]
+fn the_version_of_a_reconfig() {
+    let mut m = node();
+    replica(&mut m, N1);
+    let members =
+        vec![Value::Document(Document::new().with("_id", 0).with("host", N1).with("priority", 2))];
+    let conf = |v: Option<Value>| {
+        let d = Document::new().with("_id", "rs0");
+        let d = match v {
+            Some(v) => d.with("version", v),
+            None => d,
+        };
+        d.with("members", members.clone())
+    };
+    let reconfig = |m: &mut Mem, d: Document| admin(m, Document::new().with("replSetReconfig", d));
+    let errmsg = |r: &Document| match (r.get("code"), r.get("errmsg")) {
+        (Some(Value::Int32(c)), Some(Value::String(s))) => (*c, s.clone()),
+        _ => panic!("{r:?}"),
+    };
+    let missing = "BSON field 'ReplSetConfig.version' is missing but a required field";
+    assert_eq!(errmsg(&reconfig(&mut m, conf(None))), (93, missing.into()));
+    for (v, t) in
+        [(Value::from("x"), "string"), (Value::Null, "null"), (Value::Boolean(true), "bool")]
+    {
+        let expected = format!("Expected a number, got value of type {t} for field version");
+        assert_eq!(errmsg(&reconfig(&mut m, conf(Some(v)))), (93, expected));
+    }
+    let half = "Expected field \"version\" to have a value exactly representable as a 64-bit integer, but found version: 4.5";
+    assert_eq!(errmsg(&reconfig(&mut m, conf(Some(Value::Double(4.5))))), (93, half.into()));
+    let huge = "Expected field \"version\" to have a value exactly representable as a 64-bit integer, but found version: 1e+30";
+    assert_eq!(errmsg(&reconfig(&mut m, conf(Some(Value::Double(1e30))))), (93, huge.into()));
+    for (v, n) in [(Value::Int32(0), 0), (Value::Double(-2.0), -2), (Value::Int64(-3), -3)] {
+        let expected = format!("BSON field 'version' value must be > 0, actual value '{n}'");
+        assert_eq!(errmsg(&reconfig(&mut m, conf(Some(v)))), (93, expected));
+    }
+    let ok = |r: &Document| assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+    ok(&reconfig(&mut m, conf(Some(Value::Double(20.0)))));
+    let r = admin(&mut m, Document::new().with("replSetGetConfig", 1));
+    assert_eq!(field(&r, "config.version"), &Value::Int32(20));
+    let d = teseladb_bson::Decimal128::from_parts(false, 21, 0).expect("a decimal");
+    ok(&reconfig(&mut m, conf(Some(Value::Decimal128(d)))));
+    ok(&reconfig(&mut m, conf(Some(Value::Int64(5_000_000_000)))));
+    let r = admin(&mut m, Document::new().with("replSetGetConfig", 1));
+    assert_eq!(field(&r, "config.version"), &Value::Int64(5_000_000_000));
+    let r = admin(&mut m, Document::new().with("replSetGetStatus", 1));
+    assert_eq!(field(&r, "members.0.configVersion"), &Value::Int64(5_000_000_000));
+    let r = reconfig(&mut m, conf(Some(Value::Int32(22))));
+    assert_eq!(
+        errmsg(&r),
+        (
+            103,
+            "New replica set configuration version and term must be greater than old, but {version: 22, term: 2} is not greater than {version: 5000000000, term: 2} for replica set rs0".into()
+        )
     );
 }

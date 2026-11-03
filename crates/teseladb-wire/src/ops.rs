@@ -551,8 +551,9 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         start: &[u8],
         end: &[u8],
         from: teseladb_hlc::Hlc,
+        at: Option<teseladb_hlc::Hlc>,
     ) -> Result<Vec<crate::commands::RangeBatch>, CommandError> {
-        self.call(|b| b.range_changes(start, end, from))
+        self.call(|b| b.range_changes(start, end, from, at))
     }
 
     fn set_read_preference(&mut self, pref: Option<teseladb_router::read_pref::ReadPreference>) {

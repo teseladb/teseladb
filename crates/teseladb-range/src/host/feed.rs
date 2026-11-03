@@ -3,14 +3,23 @@
 //! [`FEED_WINDOW_MS`] past `from` (unless `from` is zero), and the oldest intent pending there
 //! ([`crate::changes`]). While streams read the range its leader closes marks 200 ms behind its
 //! clock ([`crate::closed_ts::STREAM_CLOSE_LAG_MS`]) for [`STREAM_HOLD`] after the last read.
+//!
+//! A read that has to reach a mark (a search's, 011 FR-010) names it: when the closed marks are
+//! below it, the leader serves the versions up to it as a read at that mark (FR-004, FR-005 of
+//! 005): the core confirms the lease, the read waits for the writes in flight at or below the
+//! mark and records the interval in the read cache, so no write lands at or below the mark
+//! afterwards. A search then waits for its own mark instead of the closed marks, which trail the
+//! clock by 200 ms or more.
 
 use teseladb_hlc::Hlc;
 use teseladb_multiraft::{MultiRaftCore, StateMachine};
 use teseladb_types::{GroupId, Nanos, NodeId};
 
-use super::{RangeError, RangeHost, Reply, Req, ReqId};
+use super::{FUTURE_READ_MS, RangeError, RangeHost, Reply, Req, ReqId};
 use crate::changes::change_rows;
 use crate::closed_ts::follower_mark;
+use crate::latch::ReadWait;
+use crate::read::{ReadConcern, admit_read};
 use crate::sm::RangeState;
 
 /// How long after a stream's last read its range keeps the short lag of closed marks.
@@ -29,6 +38,24 @@ pub struct ChangesReq {
     pub end: Vec<u8>,
     /// The stream read the range up to this mark.
     pub from: Hlc,
+    /// The mark the reader waits for, if any: past the closed marks, the read goes up to it
+    /// (within the window) as a read at that mark.
+    pub at: Option<Hlc>,
+}
+
+/// Where a read in progress is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FeedState {
+    /// A read at a mark waits for the core to confirm the leadership.
+    Core,
+    /// It waits for the writes in flight at or below its mark and, for a mark above this
+    /// leader's own, for the wall clock to reach it.
+    Admit {
+        /// Whether the mark is at or below the leader's own read mark.
+        own: bool,
+    },
+    /// It reads the versions.
+    Read,
 }
 
 /// A read in progress: its interval and `(from, to]`.
@@ -40,6 +67,7 @@ pub(crate) struct FeedReq {
     to: Hlc,
     /// The leader to name if the range stops being led here.
     pub(crate) hint: NodeId,
+    pub(crate) state: FeedState,
 }
 
 impl RangeHost {
@@ -52,7 +80,7 @@ impl RangeHost {
     ) -> ReqId {
         self.now = now;
         let id = self.new_id();
-        let ChangesReq { g, start, end, from } = req;
+        let ChangesReq { g, start, end, from, at } = req;
         let Some(range) = self.ranges.get_mut(&g) else {
             self.reply(id, Err(RangeError::OutOfRange));
             return id;
@@ -85,23 +113,82 @@ impl RangeHost {
             true => Hlc { physical: u64::MAX, logical: u32::MAX },
             false => Hlc { physical: from.physical.saturating_add(FEED_WINDOW_MS), logical: 0 },
         };
-        let to = match follower_mark(&known, applied, None) {
-            Some(closed) if closed > from => closed.min(window.max(from)),
-            _ => {
-                self.reply(
-                    id,
-                    Ok(Reply::Changes { rows: Vec::new(), to: from, oldest_intent: None }),
-                );
-                return id;
+        let reach = window.max(from);
+        let closed =
+            follower_mark(&known, applied, None).filter(|c| *c > from).map(|c| c.min(reach));
+        let wanted = at.map(|t| t.min(reach)).filter(|t| *t > from);
+        let f = |to, state| FeedReq { g, start, end, from, to, hint: NodeId(0), state };
+        match (closed, wanted) {
+            (Some(c), w) if w.is_none_or(|w| c >= w) => {
+                self.step_changes(id, f(c, FeedState::Read));
             }
-        };
-        let f = FeedReq { g, start, end, from, to, hint: NodeId(0) };
-        self.step_changes(id, f);
+            (_, Some(w)) => match core.read(g, ReadConcern::Majority.mode(), now) {
+                Ok(op) => {
+                    self.ops.insert(op, id);
+                    self.reqs.insert(id, Req::Changes(f(w, FeedState::Core)));
+                }
+                Err(e) => self.reply(id, Err(super::op_error(e))),
+            },
+            _ => self
+                .reply(id, Ok(Reply::Changes { rows: Vec::new(), to: from, oldest_intent: None })),
+        }
         id
     }
 
+    /// The core confirmed the leadership for read `id` at a mark (or failed to).
+    pub(super) fn changes_confirmed<S: StateMachine + RangeState>(
+        &mut self,
+        core: &mut MultiRaftCore<S>,
+        id: ReqId,
+        mut f: FeedReq,
+        confirmed: bool,
+    ) {
+        if !confirmed {
+            self.reply(id, Err(RangeError::NotLeader { hint: f.hint }));
+            return;
+        }
+        let own = core.read_mark(self.now).is_some_and(|m| f.to <= m);
+        f.state = FeedState::Admit { own };
+        self.reqs.insert(id, Req::Changes(f));
+        self.step(core, id, Nanos::ZERO);
+    }
+
     /// Reads the versions of a stream's read; `true` once it is answered.
-    pub(super) fn step_changes(&mut self, id: ReqId, f: FeedReq) -> bool {
+    pub(super) fn step_changes(&mut self, id: ReqId, mut f: FeedReq) -> bool {
+        match f.state {
+            FeedState::Core => {
+                self.reqs.insert(id, Req::Changes(f));
+                return false;
+            }
+            FeedState::Admit { own } => {
+                // A mark at or below the leader's own is read as a read at its own mark would be;
+                // one above, as a read at a mark the client gave (`step_get`): once this node's
+                // wall clock reaches it, and the clock takes it so that this node's later writes
+                // go above.
+                if !own && f.to.physical > self.wall_ms {
+                    if f.to.physical > self.wall_ms + FUTURE_READ_MS {
+                        self.reply(id, Err(RangeError::Timeout));
+                        return true;
+                    }
+                    self.reqs.insert(id, Req::Changes(f));
+                    return false;
+                }
+                self.clock.0.update(f.to);
+                let Some(l) = self.ranges.get_mut(&f.g).and_then(|r| r.leader.as_mut()) else {
+                    self.reply(id, Err(RangeError::NotLeader { hint: f.hint }));
+                    return true;
+                };
+                let concern = ReadConcern::Majority;
+                if admit_read(&l.latches, &mut l.cache, &f.start, &f.end, f.to, concern)
+                    != ReadWait::Free
+                {
+                    self.reqs.insert(id, Req::Changes(f));
+                    return false;
+                }
+                f.state = FeedState::Read;
+            }
+            FeedState::Read => {}
+        }
         match change_rows(&self.lsm, (&f.start, &f.end), (f.from, f.to)) {
             None => {
                 self.reqs.insert(id, Req::Changes(f));
