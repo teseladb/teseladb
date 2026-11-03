@@ -13,7 +13,7 @@ use crate::error::{
     BAD_VALUE, CommandError, IDL_UNKNOWN_FIELD, NAMESPACE_NOT_FOUND, NO_SUCH_KEY, OPERATION_FAILED,
 };
 use crate::generic::is_generic;
-use crate::types::{number, wrong_type};
+use crate::types::{number, wrong_type, wrong_types};
 use teseladb_range::read::ReadConcern;
 
 /// `dataSize`.
@@ -42,9 +42,35 @@ fn ok() -> Document {
     Document::new().with("ok", 1.0)
 }
 
-/// A whole number of a `dataSize` limit (`maxSize`, `maxObjects`): 0 is no limit.
-fn limit(cmd: &Document, field: &str) -> u64 {
-    cmd.get(field).and_then(number).map_or(0, |x| if x > 0.0 { x as u64 } else { 0 })
+/// The types of a `dataSize` limit.
+const LIMIT_TYPES: &[&str] = &["int", "decimal", "double", "long"];
+/// The types of `dataSize.estimate`.
+const ESTIMATE_TYPES: &[&str] = &["double", "long", "int", "bool", "decimal"];
+
+/// A `dataSize` limit (`maxSize`, `maxObjects`) as a whole number, truncated toward zero: 0 (or
+/// none) is no limit, and a negative one stops the count at the first document (measured on a
+/// `refnode` 9.0.4 on 03-11-2026).
+fn limit(cmd: &Document, field: &str) -> Result<i64, CommandError> {
+    match cmd.get(field) {
+        None | Some(Value::Null) => Ok(0),
+        Some(v) => match number(v) {
+            // NaN is 0 and a value past `i64` saturates.
+            Some(x) => Ok(x as i64),
+            None => Err(wrong_types(&format!("{DATA_SIZE}.{field}"), v, LIMIT_TYPES)),
+        },
+    }
+}
+
+/// `dataSize.estimate`: a boolean or a number, true when not zero.
+fn estimate(cmd: &Document) -> Result<bool, CommandError> {
+    match cmd.get("estimate") {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::Boolean(b)) => Ok(*b),
+        Some(v) => match number(v) {
+            Some(x) => Ok(x != 0.0),
+            None => Err(wrong_types(&format!("{DATA_SIZE}.estimate"), v, ESTIMATE_TYPES)),
+        },
+    }
 }
 
 /// `dataSize`: bytes and documents of a collection, or of an `_id` range of it, stopping once
@@ -83,32 +109,33 @@ pub fn data_size<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
             return Err(CommandError::new(BAD_VALUE, "Max must not be set if min is not set."));
         }
     };
-    let (max_size, max_objects) = (limit(ctx.cmd, "maxSize"), limit(ctx.cmd, "maxObjects"));
+    let (max_size, max_objects) = (limit(ctx.cmd, "maxSize")?, limit(ctx.cmd, "maxObjects")?);
+    let estimated = estimate(ctx.cmd)?;
     let started = ctx.backend.now_ms();
-    let (mut size, mut objects) = (0u64, 0u64);
-    if let Some(c) = ctx.backend.collection(&ns)? {
-        for_each_match(
-            ctx.backend,
-            documents_of(&c),
-            &filter,
-            None,
-            ReadConcern::Local,
-            |_, d| {
-                size += d.len() as u64;
-                objects += 1;
-                let full = (max_size > 0 && size >= max_size)
-                    || (max_objects > 0 && objects > max_objects);
-                Ok(!full)
-            },
-        )?;
+    let (mut size, mut objects, mut reached) = (0i64, 0i64, false);
+    let coll = ctx.backend.collection(&ns)?;
+    if let Some(c) = &coll {
+        for_each_match(ctx.backend, documents_of(c), &filter, None, ReadConcern::Local, |_, d| {
+            size = size.saturating_add(i64::try_from(d.len()).unwrap_or(i64::MAX));
+            objects += 1;
+            reached =
+                (max_size != 0 && size >= max_size) || (max_objects != 0 && objects > max_objects);
+            Ok(!reached)
+        })?;
     }
     let millis = ctx.backend.now_ms().saturating_sub(started);
-    let count = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
-    Ok(Document::new()
-        .with("size", count(size))
-        .with("numObjects", count(objects))
-        .with("millis", count(millis))
-        .with("ok", 1.0))
+    let mut d = Document::new()
+        .with("size", size)
+        .with("numObjects", objects)
+        .with("millis", i64::try_from(millis).unwrap_or(i64::MAX));
+    // A collection that does not exist says nothing of the estimate (measured).
+    if coll.is_some() {
+        d.push("estimate", estimated);
+    }
+    if reached {
+        d.push("maxReached", true);
+    }
+    Ok(d.with("ok", 1.0))
 }
 
 /// `logRotate`: the node writes its log to the standard error, which has nothing to rotate; a

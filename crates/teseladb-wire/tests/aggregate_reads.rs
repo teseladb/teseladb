@@ -224,3 +224,77 @@ fn the_namespaces_of_the_admin_stages() {
     );
     assert_eq!(batch(&r), [json(r#"{"name":"c","type":"collection"}"#)], "{r:?}");
 }
+
+/// The storage of a collection with no document has no `avgObjSize`; a time series has no
+/// `avgBucketSize` without buckets, and no counters before its first insert (measured on a
+/// `refnode` 9.0.4 on 03-11-2026).
+#[test]
+fn the_storage_of_empty_collections_has_no_averages() {
+    let mut m = Mem::new();
+    let stats = |m: &mut Mem, coll: &str| {
+        let cmd = format!(
+            r#"{{"aggregate":"{coll}","pipeline":[{{"$collStats":{{"storageStats":{{}}}}}}],"cursor":{{}}}}"#
+        );
+        let r = run(m, "r", &cmd);
+        let Value::Document(s) = field(&batch(&r)[0], "storageStats").clone() else { panic!() };
+        s
+    };
+    run(&mut m, "r", r#"{"create":"e"}"#);
+    let s = stats(&mut m, "e");
+    assert_eq!((s.get("count"), s.get("avgObjSize")), (Some(&Value::Int32(0)), None), "{s:?}");
+    run(&mut m, "r", r#"{"create":"ts","timeseries":{"timeField":"t"}}"#);
+    let s = stats(&mut m, "ts");
+    assert_eq!(
+        s.get("timeseries"),
+        Some(&Value::Document(json(r#"{"bucketsNs":"r.ts","bucketCount":0}"#))),
+        "{s:?}"
+    );
+    run(
+        &mut m,
+        "r",
+        r#"{"insert":"ts","documents":[{"t":{"$date":"2026-01-01T00:00:00Z"},"m":1}]}"#,
+    );
+    run(&mut m, "r", r#"{"delete":"ts","deletes":[{"q":{},"limit":0}]}"#);
+    let s = stats(&mut m, "ts");
+    let Some(Value::Document(t)) = s.get("timeseries") else { panic!("{s:?}") };
+    assert_eq!(
+        (t.get("bucketCount"), t.get("avgBucketSize")),
+        (Some(&Value::Int32(0)), None),
+        "{t:?}"
+    );
+    assert_eq!(t.get("numCommits"), Some(&Value::Int32(1)), "{t:?}");
+}
+
+/// The stages of the node on a time series: `$indexStats` lists the index on its meta and time
+/// fields, `$listCatalog` its entry with that index, and `$listClusterCatalog` on `admin` lists
+/// it with the other databases (measured on a `refnode` 9.0.4 on 03-11-2026).
+#[test]
+fn the_stages_of_the_node_on_a_time_series() {
+    let mut m = Mem::new();
+    run(&mut m, "t3", r#"{"create":"ts","timeseries":{"timeField":"t","metaField":"m"}}"#);
+    run(
+        &mut m,
+        "t3",
+        r#"{"insert":"ts","documents":[{"t":{"$date":"2026-01-01T00:00:00Z"},"m":1}]}"#,
+    );
+    let r = run(
+        &mut m,
+        "t3",
+        r#"{"aggregate":"ts","pipeline":[{"$indexStats":{}},{"$project":{"name":1,"key":1,"spec":1,"_id":0}}],"cursor":{}}"#,
+    );
+    let want = r#"{"name":"m_1_t_1","key":{"m":1,"t":1},"spec":{"v":2,"key":{"m":1,"t":1},"name":"m_1_t_1"}}"#;
+    assert_eq!(batch(&r), [json(want)], "{r:?}");
+    let r = run(
+        &mut m,
+        "t3",
+        r#"{"aggregate":"ts","pipeline":[{"$listCatalog":{}},{"$project":{"name":1,"type":1,"i":"$md.indexes.spec.name","c":"$md.options.clusteredIndex","t":"$md.options.timeseries","x":"$md.timeseriesBucketsMayHaveMixedSchemaData","_id":0}}],"cursor":{}}"#,
+    );
+    let want = r#"{"name":"ts","type":"timeseries","i":["m_1_t_1"],"c":true,"t":{"timeField":"t","metaField":"m","granularity":"seconds","bucketMaxSpanSeconds":3600,"fixedBucketing":true},"x":false}"#;
+    assert_eq!(batch(&r), [json(want)], "{r:?}");
+    let r = run(
+        &mut m,
+        "admin",
+        r#"{"aggregate":1,"pipeline":[{"$listClusterCatalog":{}},{"$match":{"db":"t3"}},{"$project":{"ns":1,"type":1,"_id":0}}],"cursor":{}}"#,
+    );
+    assert_eq!(batch(&r), [json(r#"{"ns":"t3.ts","type":"timeseries"}"#)], "{r:?}");
+}
