@@ -744,3 +744,22 @@ fn connection_status_shows_the_users_privileges() {
     let r = run(&mut m, &mut conn("nobody"), ADMIN, status());
     assert_eq!(field(&r, "authInfo.authenticatedUserPrivileges"), &Value::Array(Vec::new()));
 }
+
+/// A pattern of `killAllSessionsByPattern` with `users` or `roles` asks for `impersonate`, which
+/// not even `root` has; without authorization nothing is asked (measured on 03-11-2026).
+#[test]
+fn kill_all_sessions_by_pattern_with_users_asks_for_impersonate() {
+    let mut m = node();
+    let by =
+        |p: Document| Document::new().with("killAllSessionsByPattern", vec![Value::Document(p)]);
+    let users = || by(Document::new().with("users", Vec::<Value>::new()));
+    let r = run(&mut m, &mut conn("root"), ADMIN, users());
+    assert_eq!(code(&r), Some(UNAUTHORIZED));
+    assert_eq!(msg(&r), "Not authorized to impersonate in killAllSessionsByPattern");
+    let roles = by(Document::new().with("roles", Vec::<Value>::new()));
+    assert_eq!(code(&run(&mut m, &mut conn("root"), ADMIN, roles)), Some(UNAUTHORIZED));
+    assert!(ok(&run(&mut m, &mut conn("root"), ADMIN, by(Document::new()))));
+    let mut open = conn("root");
+    open.auth.required = false;
+    assert!(ok(&run(&mut m, &mut open, ADMIN, users())));
+}
