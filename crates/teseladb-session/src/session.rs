@@ -1,16 +1,58 @@
-//! Logical sessions (FR-016, data model §2): each `lsid` the drivers send, with the cluster time
-//! of its last use and the highest `txnNumber` seen. A session nobody used for
-//! [`SESSION_TIMEOUT_MS`] expires; ending or killing one kills its cursors, which the caller does
-//! with the identifiers these functions give.
+//! Logical sessions (FR-016, data model §2): each `lsid` the drivers send, with the user who
+//! started it, the cluster time of its last use and the highest `txnNumber` seen. A session
+//! nobody used for [`SESSION_TIMEOUT_MS`] expires; ending or killing one kills its cursors, which
+//! the caller does with the identifiers these functions give.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Milliseconds a session lives without use (`logicalSessionTimeoutMinutes`: 30).
 pub const SESSION_TIMEOUT_MS: u64 = 30 * 60_000;
 
+/// The owner of a session, the `uid` of its `lsid`: the SHA-256 of `user@db` of the user who
+/// started it, or of the empty name without authentication.
+pub type Uid = [u8; 32];
+
+/// The sessions a kill or an `endSessions` reaches: every session of an owner, or the one of
+/// that owner with this `lsid`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SessionMatch {
+    /// The owner.
+    pub uid: Uid,
+    /// The session, or every session of the owner.
+    pub lsid: Option<u128>,
+}
+
+impl SessionMatch {
+    /// Every session of `uid`.
+    pub fn owner(uid: Uid) -> SessionMatch {
+        SessionMatch { uid, lsid: None }
+    }
+
+    /// Session `lsid` of `uid`.
+    pub fn one(lsid: u128, uid: Uid) -> SessionMatch {
+        SessionMatch { uid, lsid: Some(lsid) }
+    }
+
+    /// Whether it reaches session `lsid` of `uid`.
+    pub fn reaches(&self, lsid: u128, uid: &Uid) -> bool {
+        self.uid == *uid && self.lsid.is_none_or(|l| l == lsid)
+    }
+}
+
+/// Who started a session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Owner {
+    /// The `uid` of its `lsid`.
+    pub uid: Uid,
+    /// The user's `user@db`, when the node authenticates.
+    pub user: Option<String>,
+}
+
 /// A logical session.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Session {
+    /// Who started it.
+    pub owner: Owner,
     /// Cluster time of its last use, in milliseconds.
     pub last_use_ms: u64,
     /// Highest `txnNumber` seen.
@@ -23,7 +65,7 @@ pub struct SessionTable {
     sessions: BTreeMap<u128, Session>,
     timeout_ms: u64,
     /// Sessions `endSessions` named, ended at the next refresh of the record.
-    ending: BTreeSet<u128>,
+    ending: BTreeSet<SessionMatch>,
 }
 
 impl Default for SessionTable {
@@ -69,20 +111,26 @@ impl SessionTable {
         self.sessions.keys().copied().collect()
     }
 
-    /// The sessions used at or after `since_ms`, in order, with their last use.
-    pub fn used_since(&self, since_ms: u64) -> Vec<(u128, u64)> {
+    /// The sessions used at or after `since_ms`, in order, with their owner and last use.
+    pub fn used_since(&self, since_ms: u64) -> Vec<(u128, Owner, u64)> {
         self.sessions
             .iter()
-            .filter(|(l, s)| s.last_use_ms >= since_ms && !self.ending.contains(l))
-            .map(|(l, s)| (*l, s.last_use_ms))
+            .filter(|(l, s)| {
+                s.last_use_ms >= since_ms
+                    && !self.ending.iter().any(|m| m.reaches(**l, &s.owner.uid))
+            })
+            .map(|(l, s)| (*l, s.owner.clone(), s.last_use_ms))
             .collect()
     }
 
-    /// A command of session `lsid` at cluster time `now_ms` (also `refreshSessions`): it starts
-    /// the session if it is new.
-    pub fn touch(&mut self, lsid: u128, now_ms: u64) -> &mut Session {
-        let s =
-            self.sessions.entry(lsid).or_insert(Session { last_use_ms: now_ms, txn_number: None });
+    /// A command of `owner` in session `lsid` at cluster time `now_ms` (also
+    /// `refreshSessions`): it starts the session if it is new, owned by `owner`.
+    pub fn touch(&mut self, lsid: u128, owner: &Owner, now_ms: u64) -> &mut Session {
+        let s = self.sessions.entry(lsid).or_insert_with(|| Session {
+            owner: owner.clone(),
+            last_use_ms: now_ms,
+            txn_number: None,
+        });
         s.last_use_ms = s.last_use_ms.max(now_ms);
         s
     }
@@ -92,14 +140,26 @@ impl SessionTable {
         lsids.iter().filter(|l| self.sessions.remove(l).is_some()).copied().collect()
     }
 
+    /// Ends the sessions any of `matches` reaches (`killSessions`, `killAllSessions` with users,
+    /// `killAllSessionsByPattern`); their identifiers, in order.
+    pub fn end_matching(&mut self, matches: &[SessionMatch]) -> Vec<u128> {
+        let dead: Vec<u128> = self
+            .sessions
+            .iter()
+            .filter(|(l, s)| matches.iter().any(|m| m.reaches(**l, &s.owner.uid)))
+            .map(|(l, _)| *l)
+            .collect();
+        self.end(&dead)
+    }
+
     /// Marks sessions to end at the next refresh (`endSessions`): RefDb ends them and kills
     /// their cursors when its session cache refreshes, not at once.
-    pub fn mark_ending(&mut self, lsids: &[u128]) {
-        self.ending.extend(lsids.iter().copied());
+    pub fn mark_ending(&mut self, matches: &[SessionMatch]) {
+        self.ending.extend(matches.iter().copied());
     }
 
     /// The sessions marked to end, which the refresh ends now.
-    pub fn take_ending(&mut self) -> Vec<u128> {
+    pub fn take_ending(&mut self) -> Vec<SessionMatch> {
         std::mem::take(&mut self.ending).into_iter().collect()
     }
 

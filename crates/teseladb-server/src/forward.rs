@@ -10,7 +10,11 @@ use teseladb_range::checksum::Report;
 use teseladb_range::snapshot::Chunk;
 use teseladb_types::{DecodeError, Decoder, Encoder, GroupId};
 use teseladb_wire::commands::session::KillScope;
+use teseladb_wire::commands::session::{SessionMatch, Uid};
 use teseladb_wire::commands::write_block::WriteGate;
+
+/// Bytes of a session owner's `uid`.
+const UID_LEN: usize = std::mem::size_of::<Uid>();
 
 /// Tag of a Group 0 command.
 const GROUP0: u8 = 0;
@@ -22,8 +26,8 @@ const DATA: u8 = 2;
 const CATALOG: u8 = 3;
 /// Tag of the sessions to kill on the node that receives it.
 const KILL_SESSIONS: u8 = 4;
-/// What a [`KILL_SESSIONS`] request kills: the sessions it lists, every session, or one
-/// operation of the node that receives it.
+/// What a [`KILL_SESSIONS`] request kills: the sessions its owners' matches reach, every session,
+/// or one operation of the node that receives it.
 const KILL_LISTED: u8 = 0;
 const KILL_ALL: u8 = 1;
 const KILL_OP: u8 = 2;
@@ -128,10 +132,14 @@ impl Request {
                     KillScope::All => {
                         e.u8(KILL_ALL);
                     }
-                    KillScope::Sessions(ids) => {
-                        e.u8(KILL_LISTED).var(ids.len() as u64);
-                        for id in ids {
-                            e.u128(*id);
+                    KillScope::Sessions(matches) => {
+                        e.u8(KILL_LISTED).var(matches.len() as u64);
+                        for m in matches {
+                            e.raw(&m.uid);
+                            match m.lsid {
+                                Some(l) => e.bool(true).u128(l),
+                                None => e.bool(false),
+                            };
                         }
                     }
                     KillScope::Op { node, op } => {
@@ -189,14 +197,18 @@ impl Request {
                     KILL_ALL => KillScope::All,
                     KILL_LISTED => {
                         let n = d.var()?;
-                        if n > d.remaining() as u64 / 16 {
+                        // Each one is a `uid` and a flag at least.
+                        if n > d.remaining() as u64 / (UID_LEN as u64 + 1) {
                             return Err(DecodeError::InvalidValue { offset: 2 });
                         }
-                        let mut ids = Vec::new();
+                        let mut matches = Vec::new();
                         for _ in 0..n {
-                            ids.push(d.u128()?);
+                            let mut uid = [0u8; UID_LEN];
+                            uid.copy_from_slice(d.raw(UID_LEN)?);
+                            let lsid = if d.bool()? { Some(d.u128()?) } else { None };
+                            matches.push(SessionMatch { uid, lsid });
                         }
-                        KillScope::Sessions(ids)
+                        KillScope::Sessions(matches)
                     }
                     KILL_OP => KillScope::Op { node: d.u64()?, op: d.u32()? },
                     _ => return Err(DecodeError::InvalidValue { offset: 1 }),
@@ -287,7 +299,11 @@ mod tests {
             Request::Data(vec![1, 2]),
             Request::Catalog(vec![3]),
             Request::KillSessions(KillScope::All),
-            Request::KillSessions(KillScope::Sessions(vec![1, u128::MAX])),
+            Request::KillSessions(KillScope::Sessions(vec![
+                SessionMatch::one(1, [7; 32]),
+                SessionMatch::owner([9; 32]),
+                SessionMatch::one(u128::MAX, [0; 32]),
+            ])),
             Request::KillSessions(KillScope::Op { node: 3, op: u32::MAX }),
             Request::Checksum(Report {
                 range: GroupId(4),
@@ -335,6 +351,10 @@ mod tests {
         assert!(Request::decode(&[KILL_SESSIONS, 3]).is_err());
         assert!(Request::decode(&[KILL_SESSIONS]).is_err());
         assert!(Request::decode(&[KILL_SESSIONS, 0, 2, 1]).is_err());
+        // A match whose flag promises an `lsid` that is not there, or a flag that is no flag.
+        let uid = [3u8; UID_LEN];
+        assert!(Request::decode(&[&[KILL_SESSIONS, 0, 1][..], &uid, &[1]].concat()).is_err());
+        assert!(Request::decode(&[&[KILL_SESSIONS, 0, 1][..], &uid, &[2]].concat()).is_err());
         assert!(Request::decode(&[KILL_SESSIONS, 1, 0]).is_err());
         // Gates with a flag that is no bool, cut short, or with bytes after them.
         assert!(Request::decode(&[GATE, 0, 0, 0, 1, 2]).is_err());

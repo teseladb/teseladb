@@ -7,6 +7,7 @@ mod common;
 use common::{Mem, doc, field};
 use teseladb_bson::{Document, Value};
 use teseladb_hash::sha256;
+use teseladb_session::session::SessionMatch;
 use teseladb_wire::commands::session::KillScope;
 use teseladb_wire::error::{CommandError, INVALID_SSL_CONFIGURATION};
 
@@ -177,22 +178,30 @@ fn sessions_are_killed_by_pattern() {
     assert_eq!(k, vec![KillScope::All]);
     let nobody = Value::Binary { subtype: 0, bytes: sha256(b"").to_vec() };
     let lsid = |n: u8| d(&[("id", id(n)), ("uid", nobody.clone())]);
+    let one = |n: u8| SessionMatch::one(u128::from_be_bytes([n; 16]), sha256(b""));
     let (_, k) = by(&mut m, vec![d(&[("lsid", lsid(7))])]);
-    assert_eq!(k, vec![KillScope::Sessions(vec![u128::from_be_bytes([7; 16])])]);
+    assert_eq!(k, vec![KillScope::Sessions(vec![one(7)])]);
     let (_, k) = by(&mut m, vec![d(&[("uid", nobody.clone())])]);
-    assert_eq!(k, vec![KillScope::All]);
-    // A user, a role or another `uid` reaches no session until 013.
+    assert_eq!(k, vec![KillScope::Sessions(vec![SessionMatch::owner(sha256(b""))])]);
     let other = Value::Binary { subtype: 0, bytes: vec![1; 32] };
+    let (_, k) = by(&mut m, vec![d(&[("uid", other.clone())])]);
+    assert_eq!(k, vec![KillScope::Sessions(vec![SessionMatch::owner([1; 32])])]);
+    // A `uid` next to an `lsid` reaches every session of that `uid` (measured on a `refrouter`
+    // 9.0.4 with authentication on 03-11-2026).
+    let (_, k) = by(&mut m, vec![d(&[("lsid", lsid(7)), ("uid", other)])]);
+    assert_eq!(k, vec![KillScope::Sessions(vec![SessionMatch::owner([1; 32])])]);
+    // `users` and `roles` choose no session: they are whom the command acts for (measured).
     for p in [
-        d(&[("uid", other)]),
         d(&[("users", Value::Array(vec![d(&[("user", s("u")), ("db", s("admin"))])]))]),
         d(&[("roles", Value::Array(vec![d(&[("role", s("r")), ("db", s("admin"))])]))]),
     ] {
         let (r, k) = by(&mut m, vec![p]);
-        assert_eq!((field(&r, "ok"), k), (&Value::Double(1.0), vec![]));
+        assert_eq!((field(&r, "ok"), k), (&Value::Double(1.0), vec![KillScope::All]));
     }
     let (_, k) = by(&mut m, vec![d(&[("users", Value::Array(vec![])), ("lsid", lsid(3))])]);
-    assert_eq!(k, vec![KillScope::Sessions(vec![u128::from_be_bytes([3; 16])])]);
+    assert_eq!(k, vec![KillScope::Sessions(vec![one(3)])]);
+    let (_, k) = by(&mut m, vec![d(&[("lsid", lsid(3))]), d(&[("lsid", lsid(4))])]);
+    assert_eq!(k, vec![KillScope::Sessions(vec![one(3), one(4)])]);
     let list = "KillAllSessionsByPatternCmd.killAllSessionsByPattern";
     let errors = [
         (d(&[("foo", 1.into())]), 40415, format!("BSON field '{list}.foo' is an unknown field.")),
@@ -262,6 +271,26 @@ fn sessions_are_killed_by_pattern() {
             d(&[("uid", 5.into())]),
             14,
             format!("BSON field '{list}.uid' is the wrong type 'int', expected type 'binData'"),
+        ),
+        (
+            d(&[("uid", Value::Binary { subtype: 0, bytes: vec![1; 5] })]),
+            12,
+            "Unsupported SHA256Block hash length: 5".to_owned(),
+        ),
+        (
+            d(&[(
+                "lsid",
+                d(&[("id", id(1)), ("uid", Value::Binary { subtype: 0, bytes: vec![1; 5] })]),
+            )]),
+            12,
+            "Unsupported SHA256Block hash length: 5".to_owned(),
+        ),
+        (
+            d(&[("uid", Value::Binary { subtype: 5, bytes: vec![1; 32] })]),
+            14,
+            format!(
+                "BSON field '{list}.uid' is the wrong binData type 'MD5', expected type 'general'"
+            ),
         ),
         (
             d(&[("users", 5.into())]),

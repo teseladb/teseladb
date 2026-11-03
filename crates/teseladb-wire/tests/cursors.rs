@@ -250,8 +250,10 @@ fn kills_reach_the_other_nodes_and_ending_stays_local() {
     assert!(m.killed.is_empty());
     m.run("admin", doc(&[("killSessions", one())]));
     m.run("admin", doc(&[("killAllSessions", Value::Array(vec![]))]));
+    // Without authentication every session is the empty user's.
     let id = u128::from_be_bytes([1; 16]);
-    assert_eq!(m.killed, vec![KillScope::Sessions(vec![id]), KillScope::All]);
+    let reached = teseladb_session::session::SessionMatch::one(id, sha256(b""));
+    assert_eq!(m.killed, vec![KillScope::Sessions(vec![reached]), KillScope::All]);
     // A node that cannot reach the others reports it, after the local kill.
     let with = open(&mut m, Some(1));
     m.fail_kill = Some(CommandError::new(NETWORK_TIMEOUT, "no answer"));

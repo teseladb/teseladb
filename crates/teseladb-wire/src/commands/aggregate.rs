@@ -75,14 +75,21 @@ impl<B: Backend + ?Sized> WireEnv<'_, B> {
         spec: &Document,
     ) -> Result<Vec<Document>, CommandError> {
         let used = super::lock(shared).sessions.used_since(0);
+        let me = super::session::caller(&**self.backend.borrow()).uid;
         Ok(used
             .into_iter()
-            .map(|(lsid, last)| {
-                Document::new()
-                    .with("_id", super::registry::record_id(lsid))
-                    .with("lastUse", Value::DateTime(i64::try_from(last).unwrap_or(i64::MAX)))
+            .map(|(lsid, owner, last)| {
+                let mut d = Document::new()
+                    .with("_id", super::registry::record_id(lsid, &owner.uid))
+                    .with("lastUse", Value::DateTime(i64::try_from(last).unwrap_or(i64::MAX)));
+                // The user's name, as `$listLocalSessions` of a `refrouter` 9.0.4 gives it (measured
+                // on 03-11-2026).
+                if let Some(user) = owner.user {
+                    d.push("user", user);
+                }
+                d
             })
-            .filter(|d| wanted_session(d.get("_id"), spec))
+            .filter(|d| wanted_session(d.get("_id"), spec, &me))
             .collect())
     }
 
@@ -300,8 +307,9 @@ impl<B: Backend + ?Sized> WireEnv<'_, B> {
         spec: &Document,
     ) -> Result<Vec<Document>, CommandError> {
         let mut backend = self.backend.borrow_mut();
+        let me = super::session::caller(&**backend).uid;
         let records = read(&mut **backend, Some(shared), ns, self.concern)?;
-        Ok(records.into_iter().filter(|d| wanted_session(d.get("_id"), spec)).collect())
+        Ok(records.into_iter().filter(|d| wanted_session(d.get("_id"), spec, &me)).collect())
     }
 
     /// The documents of `$listSearchIndexes` on the pipeline's collection (011 FR-008).
@@ -1353,9 +1361,9 @@ fn check_system_namespace(
 }
 
 /// Whether a session record's `_id` belongs to the users a sessions stage's `spec` asks for:
-/// every user with `allUsers`, those of `users`, else the user of the command, who without a
-/// user's name in the record is the record's own (`uid` is the SHA-256 of `user@db`).
-fn wanted_session(id: Option<&Value>, spec: &Document) -> bool {
+/// every user with `allUsers`, those of `users`, else `me`, the `uid` of the command's user
+/// (`uid` is the SHA-256 of `user@db`).
+fn wanted_session(id: Option<&Value>, spec: &Document, me: &[u8; 32]) -> bool {
     if matches!(spec.get("allUsers"), Some(Value::Boolean(true))) {
         return true;
     }
@@ -1378,7 +1386,7 @@ fn wanted_session(id: Option<&Value>, spec: &Document) -> bool {
             },
             _ => false,
         }),
-        _ => uid.as_ref() == Some(&of("")),
+        _ => uid.as_ref() == Some(&Value::Binary { subtype: 0, bytes: me.to_vec() }),
     }
 }
 

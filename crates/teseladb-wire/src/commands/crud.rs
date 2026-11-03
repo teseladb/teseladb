@@ -120,10 +120,11 @@ impl Writer {
         let lsid = args::lsid(ctx.cmd)?;
         let txn = args::txn_number(ctx.cmd)?;
         let now = ctx.backend.now_ms();
+        let owner = super::session::caller(ctx.backend);
         let retry = match (lsid, txn) {
             (Some(l), Some(t)) => {
                 let mut g = lock(ctx.shared);
-                let session = g.sessions.touch(l, now);
+                let session = g.sessions.touch(l, &owner, now);
                 if let TxnCheck::TooOld { highest } = check_txn_number(session, t) {
                     return Err(CommandError::new(
                         TRANSACTION_TOO_OLD,
@@ -135,16 +136,13 @@ impl Writer {
                 Some((l, t))
             }
             (Some(l), None) => {
-                lock(ctx.shared).sessions.touch(l, now);
+                lock(ctx.shared).sessions.touch(l, &owner, now);
                 None
             }
             (None, _) => None,
         };
         let redact = lock(ctx.shared).params.redact_client_log_data;
-        let uid = match ctx.backend.authenticated_user() {
-            Some(u) => teseladb_hash::sha256(format!("{}@{}", u.user, u.db).as_bytes()),
-            None => teseladb_hash::sha256(b""),
-        };
+        let uid = owner.uid;
         let (retried, prev) = (Vec::new(), None);
         Ok(Writer { wc, retry, wc_error, args: wc_args, retried, redact, relayed, uid, prev })
     }

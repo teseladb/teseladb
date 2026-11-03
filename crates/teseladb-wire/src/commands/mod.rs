@@ -1094,7 +1094,8 @@ fn session_info<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<(), Command
     args::txn_number(ctx.cmd)?;
     if let Some(l) = lsid {
         let now = ctx.backend.now_ms();
-        lock(ctx.shared).sessions.touch(l, now);
+        let owner = session::caller(ctx.backend);
+        lock(ctx.shared).sessions.touch(l, &owner, now);
     }
     Ok(())
 }
