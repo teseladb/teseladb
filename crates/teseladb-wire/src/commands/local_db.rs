@@ -101,18 +101,15 @@ pub fn startup_document(facts: &ProcessFacts) -> Document {
         .with("buildinfo", build_info_of(facts))
 }
 
-/// The documents of `ns` when it is a served collection of `local` other than the oplog.
+/// The documents of `ns`, a served collection of `local` other than the oplog ([`generated`]).
 pub fn documents<B: Backend + ?Sized>(
     backend: &mut B,
     ns: &Namespace,
-) -> Result<Option<Vec<Document>>, CommandError> {
-    if !generated(ns) {
-        return Ok(None);
-    }
-    Ok(Some(match ns.coll.as_str() {
+) -> Result<Vec<Document>, CommandError> {
+    Ok(match ns.coll.as_str() {
         STARTUP_LOG => vec![startup_document(&backend.process())],
         _ => super::replset::system_replset(backend)?.into_iter().collect(),
-    }))
+    })
 }
 
 /// The `listCollections` entries of `local`.

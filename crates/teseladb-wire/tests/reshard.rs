@@ -871,7 +871,7 @@ fn the_catch_up_waits_for_the_history_past_its_mark() {
     ok(&run(&mut m, r#"{"insert":"c","documents":[{"_id":7,"a":7,"b":7}]}"#));
     m.resolved_lag_ms = 10;
     m.pause_ms = 5;
-    m.pauses_left = 1;
+    m.pauses_left = 0;
     assert_eq!(drive_all(&mut m, &mut r, shared), Err(50));
     assert_eq!(r.phase(), Phase::Aborted);
     assert_eq!(batch(&run(&mut m, r#"{"listCollections":1}"#), "cursor.firstBatch").len(), 1);
@@ -959,6 +959,41 @@ fn a_collection_dropped_at_the_commit_ends_the_resharding() {
     assert_eq!(r.phase(), Phase::Committed);
     let ns = Namespace { db: DB.to_owned(), coll: "c".to_owned() };
     assert_eq!(m.collection(&ns).expect("read"), None);
+}
+
+/// The ranges resolve their history 200 ms behind their clock, as a leader that streams its
+/// changes closes its marks: from the fences on, the catch-up reads the history up to the fence's
+/// mark as a read at that mark, so the critical section waits for no closed mark (no pause left),
+/// an intent below the fence still holds it back, and the writes before each fence reach the
+/// copy.
+#[test]
+fn the_critical_section_reads_up_to_the_fence_without_waiting_for_closed_marks() {
+    let mut m = sharded(&docs(3));
+    let (mut r, shared) =
+        started(&mut m, r#"{"reshardCollection":"rs.c","key":{"b":1},"numInitialChunks":1}"#);
+    r.copy(&mut m, &shared).expect("copied");
+    m.now += 5;
+    ok(&run(&mut m, r#"{"insert":"c","documents":[{"_id":7,"a":7,"b":7}]}"#));
+    // Without lag, one round of the apply phase reaches the clock.
+    r.catch_up(&mut m, &shared).expect("caught up");
+    // A write lands just before the fence, inside the resolved lag.
+    ok(&run(&mut m, r#"{"update":"c","updates":[{"q":{"_id":1},"u":{"$set":{"v":1}}}]}"#));
+    m.resolved_lag_ms = 200;
+    m.pauses_left = 0;
+    r.enter_critical(&mut m, &shared).expect("critical");
+    let fenced_at = m.now;
+    // An intent below the fence not resolved yet keeps the range's mark below it.
+    m.changes_lag = 1;
+    let held = r.catch_up(&mut m, &shared).expect("caught up");
+    assert!(held.physical < fenced_at, "{held:?} past the fence at {fenced_at} with an intent");
+    let reached = r.catch_up(&mut m, &shared).expect("caught up");
+    assert!(reached.physical >= fenced_at, "{reached:?} below the fence at {fenced_at}");
+    assert_eq!(drive_all(&mut m, &mut r, shared), Ok(()));
+    assert_eq!(r.phase(), Phase::Committed);
+    let got = find_all(&mut m);
+    assert_eq!(got.len(), 4);
+    let one = got.iter().find(|d| d.get("_id") == Some(&Value::Int32(1))).expect("_id 1");
+    assert_eq!(one.get("v"), Some(&Value::Int32(1)), "{one:?}");
 }
 
 /// A write that finds the collection in its critical section waits for it at each pause, and

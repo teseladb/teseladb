@@ -695,6 +695,74 @@ fn the_replica_set_port_opens_and_closes_without_a_restart() {
     drop(node.stop());
 }
 
+/// A replica set port that another program holds cannot open: the node goes on, and the next
+/// port Group 0 asks for opens (018 FR-016).
+#[test]
+fn a_replica_set_port_that_is_taken_waits_for_another() {
+    let cfg = NodeConfig {
+        cores: Some(1),
+        client: Some(config(DEFAULT_MAX_CONNECTIONS)),
+        native_addr: "member.test:27017".into(),
+        ..NodeConfig::default()
+    };
+    let node = Node::start(cfg, || Ok(MemDisk::new()), None).unwrap();
+    assert!(node.wait_ready(Duration::from_secs(10)));
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let busy = taken.local_addr().unwrap().port();
+    let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let mut admin = TcpStream::connect(node.client_addrs()[0]).unwrap();
+    admin.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    let mut id = 0;
+    let mut set = |admin: &mut TcpStream, port: u16| {
+        let value = Document::new()
+            .with("mode", "refrouter")
+            .with("setName", "rs0")
+            .with("replicaSetPort", i32::from(port));
+        let cmd = Document::new()
+            .with("setClusterParameter", Document::new().with("topologyPresentation", value))
+            .with("$db", "admin");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            id += 1;
+            send(admin, id, 0, &cmd);
+            let (_, _, r) = recv(admin).unwrap();
+            if r.get("ok") == Some(&Value::Double(1.0)) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "{r:?}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    set(&mut admin, busy);
+    // The keeper says why the port is closed (written by the node's loop, or drained here).
+    use teseladb_server::log::{Format, Level, Logger, drain, recent};
+    let why = format!("cannot open the replica set port {busy}");
+    let started = Instant::now();
+    while !recent().1.iter().any(|l| l.contains(&why)) {
+        drain(&Logger::new(Level::Warn, Format::Text, Box::new(std::io::sink())));
+        assert!(started.elapsed() < Duration::from_secs(5), "no warning for the taken port");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    send(&mut admin, 100, 0, &hello());
+    let (_, _, main) = recv(&mut admin).unwrap();
+    assert_eq!(main.get("msg"), Some(&Value::from("isdbgrid")), "{main:?}");
+    set(&mut admin, free);
+    let started = Instant::now();
+    let mut member = loop {
+        if let Ok(s) = TcpStream::connect(("127.0.0.1", free)) {
+            break s;
+        }
+        assert!(started.elapsed() < Duration::from_secs(5), "the free port never opened");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    member.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    send(&mut member, 101, 0, &hello());
+    let (_, _, h) = recv(&mut member).unwrap();
+    assert_eq!(h.get("setName"), Some(&Value::from("rs0")), "{h:?}");
+    drop(taken);
+    drop(node.stop());
+}
+
 /// Each worker of a clients' port is woken at a change of `topologyVersion`; a port that stops
 /// leaves the list at the next change, so opening and closing the replica set port again and
 /// again keeps nothing (018 FR-016).

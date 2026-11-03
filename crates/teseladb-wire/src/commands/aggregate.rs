@@ -94,23 +94,33 @@ impl<B: Backend + ?Sized> WireEnv<'_, B> {
         let Some((_, ns)) = &self.node else { return Ok((String::new(), Vec::new())) };
         let mut backend = self.backend.borrow_mut();
         let mut out = Vec::new();
-        if let Some(coll) = backend.collection(ns)? {
-            for entry in backend.indexes(coll.id)? {
-                if entry.state != teseladb_meta::indexes::IndexState::Ready {
-                    continue;
-                }
-                let spec = Document::from(RawDoc::from_bytes(&entry.spec)?);
-                let Some(Value::Document(key)) = spec.get("key") else { continue };
-                for (field, kind) in key.iter() {
-                    match kind {
-                        Value::String(k) if k == FLAT_INDEX || k == SPHERE_INDEX => {
-                            out.push(teseladb_exec::pipeline::geo_near::GeoIndex {
-                                field: field.to_owned(),
-                                sphere: k == SPHERE_INDEX,
-                            });
-                        }
-                        _ => {}
+        let Some(coll) = backend.collection(ns)? else {
+            // Measured on a `refnode` 9.0.4 on 03-11-2026.
+            let msg = format!(
+                "$geoNear needs a collection to run, but {} does not exist",
+                names::full(ns)
+            );
+            return Err(CommandError::new(crate::error::NAMESPACE_NOT_FOUND, msg));
+        };
+        for entry in backend.indexes(coll.id)? {
+            if entry.state != teseladb_meta::indexes::IndexState::Ready {
+                continue;
+            }
+            // The node stored the specification with its key.
+            let spec = Document::from(RawDoc::from_bytes(&entry.spec)?);
+            let key = match spec.get("key") {
+                Some(Value::Document(key)) => key.clone(),
+                _ => Document::new(),
+            };
+            for (field, kind) in key.iter() {
+                match kind {
+                    Value::String(k) if k == FLAT_INDEX || k == SPHERE_INDEX => {
+                        out.push(teseladb_exec::pipeline::geo_near::GeoIndex {
+                            field: field.to_owned(),
+                            sphere: k == SPHERE_INDEX,
+                        });
                     }
+                    _ => {}
                 }
             }
         }

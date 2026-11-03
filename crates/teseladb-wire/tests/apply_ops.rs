@@ -216,7 +216,7 @@ fn entry(n: i32) -> Document {
 
 /// RefDb 9.0.4 checks `op` and `ns` of every entry before applying any; the other fields of an
 /// entry are read when its turn comes, and an error then ends the command with what applied so
-/// far (measured on 03-11-2026, `ap9.js` and `ap10.js` in the lane's notes).
+/// far (measured on 03-11-2026, `ap9.js`, `ap10.js` and `ap11.js` in the lane's notes).
 #[test]
 fn malformed_entries_as_refdb_finds_them() {
     let mut m = Mem::new();
@@ -272,6 +272,10 @@ fn malformed_entries_as_refdb_finds_them() {
         (Value::Document(entry(2).with("prevOpTime", 5)), 10_065, "invalid parameter: expected an object (prevOpTime)".into()),
         (Value::Document(entry(2).with("prevOpTime", Document::new().with("t", 1_i64))), 40414, "BSON field 'OpTimeBase.ts' is missing but a required field".into()),
         (Value::Document(entry(2).with("lsid", Document::new().with("id", uuid(vec![0; 16], 4)))), 40414, "BSON field 'OplogEntryBase.lsid.uid' is missing but a required field".into()),
+        (Value::Document(entry(2).with("needsRetryImage", "x")), 2, "Enumeration value 'x' for field 'OplogEntryBase.needsRetryImage' is not a valid value.".into()),
+        (Value::Document(entry(2).with("needsRetryImage", "postImage")), 72, "applyOps command does not support the internal `needsRetryImage` field".into()),
+        // The other fields are read before `needsRetryImage` is refused (`ap11.js`).
+        (Value::Document(entry(2).with("needsRetryImage", "preImage").with("multiOpType", "x")), 14, idl("multiOpType", "string", "type 'int'")),
     ];
     for (bad, code, msg) in cases {
         let r = first(&mut m, bad);
@@ -280,16 +284,23 @@ fn malformed_entries_as_refdb_finds_them() {
         let results = Value::Array(vec![Value::Boolean(true), Value::Boolean(false)]);
         assert_eq!(r.get("results"), Some(&results), "{r:?}");
     }
-    // `ts` without `t` and `txnNumber` without `lsid` are taken.
+    // `ts` without `t` and `txnNumber` without `lsid` are taken, and so are a whole
+    // `multiOpType` and `stmtId`, a `prevOpTime` with its `ts` and an `lsid` with its `uid`.
     let ts = Value::Timestamp { time: 1, increment: 1 };
+    let lsid = Document::new().with("id", uuid(vec![1; 16], 4)).with("uid", uuid(vec![2; 32], 0));
     let r = apply(
         &mut m,
         vec![
-            Value::Document(entry(3).with("ts", ts)),
+            Value::Document(entry(3).with("ts", ts.clone())),
             Value::Document(entry(4).with("txnNumber", 1_i64)),
+            Value::Document(entry(6).with("multiOpType", 1)),
+            Value::Document(entry(7).with("stmtId", 0)),
+            Value::Document(entry(8).with("prevOpTime", Document::new().with("ts", ts))),
+            Value::Document(entry(9).with("lsid", lsid)),
         ],
     );
     assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+    assert_eq!(r.get("applied"), Some(&Value::Int32(6)), "{r:?}");
     // An entry whose `ui` names no collection does not apply.
     let r = apply(&mut m, vec![Value::Document(entry(5).with("ui", uuid(vec![7; 16], 4)))]);
     expect(&r, 8, "applyOps had one or more errors applying ops");

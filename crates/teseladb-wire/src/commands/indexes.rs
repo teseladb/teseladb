@@ -305,10 +305,8 @@ fn requested(spec: &Document, version: i32) -> String {
     for (k, v) in spec.iter().filter(|(k, _)| SHOWN_FIRST.contains(k)) {
         out.push(k, v.clone());
     }
-    for k in [KEY, NAME] {
-        if let Some(v) = spec.get(k) {
-            out.push(k, v.clone());
-        }
+    for (k, v) in [KEY, NAME].iter().filter_map(|k| spec.get(k).map(|v| (*k, v))) {
+        out.push(k, v.clone());
     }
     let rest = |k: &str| ![VERSION, KEY, NAME].contains(&k) && !SHOWN_FIRST.contains(&k);
     for (k, v) in spec.iter().filter(|(k, _)| rest(k)) {

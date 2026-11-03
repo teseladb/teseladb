@@ -100,6 +100,58 @@ pub const JOIN_DEADLINE: Duration = Duration::from_secs(60);
 /// Pause between two rounds of join attempts.
 const JOIN_RETRY: Duration = Duration::from_millis(200);
 
+/// Least time between two log lines about failed join rounds.
+const JOIN_REPORT: Duration = Duration::from_secs(5);
+
+/// Least time between two log lines about a node that is not ready yet.
+pub const READY_REPORT: Duration = Duration::from_secs(10);
+
+/// Receives the steps of a node's start, for its log: a start that hangs shows where.
+type StepFn = dyn Fn(&str, &[(&str, &dyn fmt::Display)]) + Send + Sync;
+
+/// Where a node's start writes its steps (`teseladb start`: the node's log); by default nowhere.
+#[derive(Clone, Default)]
+pub struct StartupLog(Option<Arc<StepFn>>);
+
+impl StartupLog {
+    /// Steps go to `f`, with their message and fields.
+    pub fn new(f: impl Fn(&str, &[(&str, &dyn fmt::Display)]) + Send + Sync + 'static) -> Self {
+        StartupLog(Some(Arc::new(f)))
+    }
+
+    /// Logs step `msg` with `fields`.
+    pub fn step(&self, msg: &str, fields: &[(&str, &dyn fmt::Display)]) {
+        if let Some(f) = &self.0 {
+            f(msg, fields);
+        }
+    }
+}
+
+impl fmt::Debug for StartupLog {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(if self.0.is_some() { "StartupLog(on)" } else { "StartupLog(off)" })
+    }
+}
+
+/// What a node that is not ready lacks, from core 0's view of Group 0 (`None`: core 0 did not
+/// answer).
+pub fn not_ready(view: Option<&Group0View>) -> String {
+    let Some(v) = view else {
+        return "core 0 does not answer".to_owned();
+    };
+    let mut missing = Vec::new();
+    if !v.bootstrapped {
+        missing.push("Group 0 has not reached this node");
+    }
+    if !v.addrs_current {
+        missing.push("Group 0 lacks this node's addresses");
+    }
+    if v.root_pending {
+        missing.push("the root user is not in Group 0 yet");
+    }
+    format!("{} (leader {})", missing.join(", "), v.leader.0)
+}
+
 /// `not_leader` hints a round follows at most.
 const JOIN_HOPS: usize = 3;
 
@@ -228,6 +280,8 @@ pub struct NodeConfig {
     /// How the clients' port starts its executors and runs the TTL monitor; a test changes them.
     #[doc(hidden)]
     pub client_hooks: crate::client_listener::Hooks,
+    /// Where the start logs its steps.
+    pub startup_log: StartupLog,
 }
 
 impl Default for NodeConfig {
@@ -261,6 +315,7 @@ impl Default for NodeConfig {
             affinity: crate::affinity::Affinity::Off,
             direct_io: false,
             client_hooks: crate::client_listener::Hooks::default(),
+            startup_log: StartupLog::default(),
         }
     }
 }
@@ -272,18 +327,22 @@ pub fn join_cluster(
     req: &JoinRequest,
     deadline: Duration,
 ) -> Result<JoinAccepted, NodeError> {
-    join_cluster_with(seeds, req, deadline, None)
+    join_cluster_with(seeds, req, deadline, None, &StartupLog::default())
 }
 
-/// [`join_cluster`] over TLS with `tls` (`None` in clear).
+/// [`join_cluster`] over TLS with `tls` (`None` in clear); the failed rounds go to `log`, the
+/// first at once and then one every [`JOIN_REPORT`].
 pub fn join_cluster_with(
     seeds: &[String],
     req: &JoinRequest,
     deadline: Duration,
     tls: Option<&PeerTls>,
+    log: &StartupLog,
 ) -> Result<JoinAccepted, NodeError> {
-    let end = Instant::now() + deadline;
+    let start = Instant::now();
+    let end = start + deadline;
     let mut last = String::from("no node answered");
+    let mut next_report = start;
     loop {
         let mut queue: VecDeque<String> = seeds.iter().cloned().collect();
         let mut hops = 0;
@@ -304,8 +363,14 @@ pub fn join_cluster_with(
                 Err(e) => last = format!("{addr}: {e}"),
             }
         }
-        if Instant::now() >= end {
+        let now = Instant::now();
+        if now >= end {
             return Err(NodeError::Join(format!("could not join the cluster: {last}")));
+        }
+        if now >= next_report {
+            let ms = now.duration_since(start).as_millis();
+            log.step("join attempt failed", &[("last", &last), ("ms", &ms)]);
+            next_report = now + JOIN_REPORT;
         }
         thread::sleep(JOIN_RETRY);
     }
@@ -632,29 +697,73 @@ pub(crate) fn enroll_token(
     raw.fill(0);
     let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis());
     let expires = u64::try_from(now_ms + ttl.as_millis()).unwrap_or(u64::MAX);
-    group0_change(core0, Group0Command::CreateEnrollToken(token.record(expires)))?;
-    Ok(token.to_text())
+    let cmd = Group0Command::CreateEnrollToken(token.record(expires));
+    match group0_ask(core0, cmd, ENROLL_WAIT)? {
+        (Ok(()), _) => Ok(token.to_text()),
+        // The identifier is random: Group 0 already has it only if an earlier attempt, which got
+        // no answer, created it.
+        (Err(Group0Error::EnrollTokenUnknown), true) => Ok(token.to_text()),
+        (Err(e), _) => Err(refusal_text(&e)),
+    }
 }
+
+/// Pause before asking Group 0 again for a change it could not take.
+const GROUP0_RETRY: Duration = Duration::from_millis(50);
 
 /// Runs `cmd` on Group 0 through core 0 and waits for the outcome.
 pub(crate) fn group0_change(core0: &CoreSender<NodeMsg>, cmd: Group0Command) -> Result<(), String> {
-    let (tx, rx) = mpsc::channel();
-    core0
-        .send_waiting(CoreInput::App(NodeMsg::Catalog(CatalogReq::Security(cmd), tx)))
-        .map_err(|_| "the node is stopping".to_owned())?;
-    match rx.recv_timeout(ENROLL_WAIT) {
-        Ok(CatalogAnswer::Done(_)) => Ok(()),
-        Ok(CatalogAnswer::Refused(Group0Error::EnrollTokenUsed)) => {
-            Err("the enrollment token was already used".to_owned())
+    group0_change_within(core0, cmd, ENROLL_WAIT)
+}
+
+/// [`group0_change`] waiting at most `wait`.
+fn group0_change_within(
+    core0: &CoreSender<NodeMsg>,
+    cmd: Group0Command,
+    wait: Duration,
+) -> Result<(), String> {
+    group0_ask(core0, cmd, wait)?.0.map_err(|e| refusal_text(&e))
+}
+
+/// Runs `cmd` on Group 0 within `wait`, asking again while core 0 answers `Unavailable` ("try
+/// again": the proposal was refused, there is no leader yet, or it ended without an answer).
+/// Group 0's verdict, and whether an earlier attempt went unanswered (its change may have gone in
+/// all the same).
+fn group0_ask(
+    core0: &CoreSender<NodeMsg>,
+    cmd: Group0Command,
+    wait: Duration,
+) -> Result<(Result<(), Group0Error>, bool), String> {
+    let deadline = Instant::now() + wait;
+    let mut retried = false;
+    loop {
+        let (tx, rx) = mpsc::channel();
+        let req = CatalogReq::Security(cmd.clone());
+        core0
+            .send_waiting(CoreInput::App(NodeMsg::Catalog(req, tx)))
+            .map_err(|_| "the node is stopping".to_owned())?;
+        let left = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(left) {
+            Ok(CatalogAnswer::Done(_)) => return Ok((Ok(()), retried)),
+            Ok(CatalogAnswer::Refused(e)) => return Ok((Err(e), retried)),
+            Ok(_) | Err(_) => {}
         }
-        Ok(CatalogAnswer::Refused(Group0Error::EnrollTokenExpired)) => {
-            Err("the enrollment token expired".to_owned())
+        if Instant::now() + GROUP0_RETRY >= deadline {
+            return Err("the cluster did not answer".to_owned());
         }
-        Ok(CatalogAnswer::Refused(Group0Error::EnrollTokenUnknown)) => {
-            Err("the enrollment token is not known to the cluster".to_owned())
+        retried = true;
+        thread::sleep(GROUP0_RETRY);
+    }
+}
+
+/// What a refusal of Group 0 means to whoever asked.
+fn refusal_text(e: &Group0Error) -> String {
+    match e {
+        Group0Error::EnrollTokenUsed => "the enrollment token was already used".to_owned(),
+        Group0Error::EnrollTokenExpired => "the enrollment token expired".to_owned(),
+        Group0Error::EnrollTokenUnknown => {
+            "the enrollment token is not known to the cluster".to_owned()
         }
-        Ok(CatalogAnswer::Refused(e)) => Err(format!("Group 0 refused it: {e:?}")),
-        Ok(_) | Err(_) => Err("the cluster did not answer".to_owned()),
+        e => format!("Group 0 refused it: {e:?}"),
     }
 }
 
@@ -686,7 +795,16 @@ fn join_first(
         native_addr: cfg.native_addr.clone(),
         cores: cfg.cores.unwrap_or(0),
     };
-    let a = join_cluster_with(&cfg.join, &req, cfg.join_deadline, cfg.peer_tls.as_ref())?;
+    let seeds = cfg.join.join(",");
+    cfg.startup_log.step("joining the cluster", &[("seeds", &seeds)]);
+    let a = join_cluster_with(
+        &cfg.join,
+        &req,
+        cfg.join_deadline,
+        cfg.peer_tls.as_ref(),
+        &cfg.startup_log,
+    )?;
+    cfg.startup_log.step("joined the cluster", &[("node_id", &a.node_id.0), ("cores", &a.cores)]);
     if cfg.cores.is_some_and(|c| c != a.cores) {
         return Err(NodeError::Join(format!(
             "CoreCountMismatch: the cluster has {} cores and --cores is {}",
@@ -717,6 +835,8 @@ impl<D: Disk + Send + 'static> Node<D> {
         let peer_addr = listener.local_addr()?;
         let advertise = cfg.advertise.clone().unwrap_or_else(|| peer_addr.ip().to_string());
         let advertised_peer = format!("{advertise}:{}", peer_addr.port());
+        let log = cfg.startup_log.clone();
+        log.step("peer port open", &[("addr", &peer_addr)]);
 
         let mut meta_disk = open_disk()?;
         let existing = read_node_meta(&mut meta_disk)?;
@@ -847,7 +967,9 @@ impl<D: Disk + Send + 'static> Node<D> {
         let (http_forwards_tx, http_forwards_rx) = mpsc::channel();
         let mut senders = Vec::new();
         let mut threads = Vec::new();
+        log.step("starting the cores", &[("node_id", &node_id.0), ("cores", &cores)]);
         for k in 0..cores {
+            let began = Instant::now();
             let disk = match open_disk() {
                 Ok(d) => d,
                 Err(e) => {
@@ -899,7 +1021,11 @@ impl<D: Disk + Send + 'static> Node<D> {
                 Err(e) => Err(NodeError::Io(e)),
             };
             match built {
-                Ok(sender) => senders.push(sender),
+                Ok(sender) => {
+                    let ms = began.elapsed().as_millis();
+                    log.step("core started", &[("core", &k), ("ms", &ms)]);
+                    senders.push(sender);
+                }
                 Err(e) => {
                     stop_cores(&senders, threads);
                     return Err(e);
@@ -969,7 +1095,12 @@ impl<D: Disk + Send + 'static> Node<D> {
                 ));
                 let state = Arc::new(state);
                 match ClientListener::spawn_with(c, cores, state, cfg.client_hooks) {
-                    Ok(l) => Some(l),
+                    Ok(l) => {
+                        for a in l.addrs() {
+                            log.step("listening for clients", &[("addr", a)]);
+                        }
+                        Some(l)
+                    }
                     Err(e) => {
                         acceptor.stop();
                         stop_cores(&senders, threads);
@@ -1167,14 +1298,35 @@ impl<D: Disk + Send + 'static> Node<D> {
     /// Waits until Group 0 has the cluster created, this node's current addresses and the `root`
     /// user this node creates, if any ([`Group0View::ready`]; `false` if `timeout` passes first).
     pub fn wait_ready(&self, timeout: Duration) -> bool {
-        let deadline = Instant::now() + timeout;
-        while Instant::now() < deadline {
-            if self.view(timeout).is_some_and(|v| v.ready()) {
+        self.wait_ready_reporting(timeout, timeout, |_| {})
+    }
+
+    /// [`Node::wait_ready`] that hands `report` what core 0 saw (`None`: it did not answer) every
+    /// `every` while the node is not ready. A view is asked for at most until `timeout` ends.
+    pub fn wait_ready_reporting(
+        &self,
+        timeout: Duration,
+        every: Duration,
+        mut report: impl FnMut(Option<&Group0View>),
+    ) -> bool {
+        let start = Instant::now();
+        let deadline = start + timeout;
+        let mut next_report = start + every;
+        loop {
+            let now = Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            let view = self.view(deadline - now);
+            if view.as_ref().is_some_and(Group0View::ready) {
                 return true;
+            }
+            if Instant::now() >= next_report {
+                report(view.as_ref());
+                next_report = Instant::now() + every;
             }
             thread::sleep(Duration::from_millis(5));
         }
-        false
     }
 
     /// The last failed write of the clock bound, while writing it keeps failing.
@@ -1306,15 +1458,21 @@ mod tests {
 
     /// A core 0 that answers the first catalog request it gets with `answer`.
     fn answering(answer: fn() -> CatalogAnswer) -> CoreSender<NodeMsg> {
+        answering_in_turn(vec![answer])
+    }
+
+    /// A core 0 that answers its catalog requests with `answers`, one each, in turn.
+    fn answering_in_turn(answers: Vec<fn() -> CatalogAnswer>) -> CoreSender<NodeMsg> {
         let (tx, mut mailbox) = channel::<CoreInput<NodeMsg>>(Arc::new(Quiet));
         thread::spawn(move || {
             let mut got = Vec::new();
+            let mut answers = answers.into_iter();
             let deadline = Instant::now() + ENROLL_WAIT;
             while Instant::now() < deadline {
                 mailbox.drain_into(&mut got);
                 if let Some(CoreInput::App(NodeMsg::Catalog(_, reply))) = got.pop() {
+                    let Some(answer) = answers.next() else { return };
                     let _ = reply.send(answer());
-                    return;
                 }
                 thread::sleep(Duration::from_millis(1));
             }
@@ -1325,13 +1483,12 @@ mod tests {
     #[test]
     fn group0s_refusals_of_a_token_say_why() {
         let tick = || Group0Command::ClusterTick { cluster_time_ms: 1 };
-        let cases: [(fn() -> CatalogAnswer, &str); 6] = [
+        let cases: [(fn() -> CatalogAnswer, &str); 5] = [
             (|| CatalogAnswer::Done(None), ""),
             (|| CatalogAnswer::Refused(Group0Error::EnrollTokenUsed), "already used"),
             (|| CatalogAnswer::Refused(Group0Error::EnrollTokenExpired), "expired"),
             (|| CatalogAnswer::Refused(Group0Error::EnrollTokenUnknown), "not known"),
             (|| CatalogAnswer::Refused(Group0Error::NoSuchNode), "Group 0 refused it"),
-            (|| CatalogAnswer::Unavailable, "did not answer"),
         ];
         for (answer, says) in cases {
             let core0 = answering(answer);
@@ -1340,6 +1497,112 @@ mod tests {
                 Err(e) => assert!(!says.is_empty() && e.contains(says), "{e}"),
             }
         }
+    }
+
+    /// A Group 0 that cannot take a change now (a proposal refused under load, no leader yet)
+    /// answers `Unavailable`, which means "try again": the change is asked again until it is
+    /// taken or the wait ends.
+    #[test]
+    fn a_change_group0_cannot_take_now_is_asked_again() {
+        let tick = || Group0Command::ClusterTick { cluster_time_ms: 1 };
+        let busy: fn() -> CatalogAnswer = || CatalogAnswer::Unavailable;
+        let core0 = answering_in_turn(vec![busy, busy, || CatalogAnswer::Done(None)]);
+        assert_eq!(group0_change(&core0, tick()), Ok(()));
+        let core0 = answering_in_turn(vec![busy; 1000]);
+        let wait = Duration::from_millis(300);
+        let e = group0_change_within(&core0, tick(), wait).unwrap_err();
+        assert!(e.contains("did not answer"), "{e}");
+    }
+
+    /// A token whose first proposal answered `Unavailable` but went in anyway is refused as known
+    /// when asked again: it was created.
+    #[test]
+    fn a_token_created_by_an_earlier_attempt_counts_as_created() {
+        let core0 = answering_in_turn(vec![|| CatalogAnswer::Unavailable, || {
+            CatalogAnswer::Refused(Group0Error::EnrollTokenUnknown)
+        }]);
+        let dir = std::env::temp_dir().join(format!("teseladb-node-token-{}", std::process::id()));
+        let pki = crate::pki::load_or_create(
+            &dir,
+            &crate::pki::PkiParams { now: 1_800_000_000, node_names: Vec::new() },
+            &mut |b| teseladb_sys::fill_random(b),
+        )
+        .unwrap();
+        let token = enroll_token(&Enroller::new(&pki), &core0, Duration::from_secs(60)).unwrap();
+        assert!(token.starts_with("tdbe1_"), "{token}");
+        // Asked once, without an earlier attempt, the same refusal is a refusal.
+        let core0 = answering(|| CatalogAnswer::Refused(Group0Error::EnrollTokenUnknown));
+        let e = enroll_token(&Enroller::new(&pki), &core0, Duration::from_secs(60)).unwrap_err();
+        assert!(e.contains("not known"), "{e}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The lines a [`StartupLog`] received, as `msg field=value...`.
+    fn captured() -> (StartupLog, Arc<Mutex<Vec<String>>>) {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let into = lines.clone();
+        let log = StartupLog::new(move |msg, fields| {
+            let mut line = msg.to_owned();
+            for (k, v) in fields {
+                line.push_str(&format!(" {k}={v}"));
+            }
+            into.lock().unwrap().push(line);
+        });
+        (log, lines)
+    }
+
+    #[test]
+    fn a_join_nobody_answers_logs_its_failed_attempts() {
+        // A port nothing listens on: bound, then released.
+        let dead = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().to_string();
+        let (log, lines) = captured();
+        let cfg = NodeConfig {
+            cores: Some(1),
+            join: vec![dead.clone()],
+            join_deadline: Duration::from_millis(1500),
+            startup_log: log,
+            ..NodeConfig::default()
+        };
+        let Err(NodeError::Join(e)) =
+            Node::start(cfg, || Ok(teseladb_raftlog::MemDisk::new()), None)
+        else {
+            panic!("the join should fail");
+        };
+        assert!(e.contains(&dead), "{e}");
+        let lines = lines.lock().unwrap();
+        assert!(lines[0].starts_with("peer port open addr=127.0.0.1:"), "{lines:?}");
+        assert_eq!(lines[1], format!("joining the cluster seeds={dead}"));
+        // The first failed round is logged at once, the next ones at most every JOIN_REPORT.
+        let failed: Vec<_> =
+            lines.iter().filter(|l| l.starts_with("join attempt failed")).collect();
+        assert_eq!(failed.len(), 1, "{lines:?}");
+        assert!(failed[0].contains(&dead), "{lines:?}");
+    }
+
+    #[test]
+    fn a_report_of_a_node_not_ready_says_what_is_missing() {
+        assert_eq!(not_ready(None), "core 0 does not answer");
+        let mut v = Group0View {
+            bootstrapped: false,
+            cluster_id: [0; 16],
+            role: None,
+            leader: NodeId(0),
+            voters: Vec::new(),
+            learners: Vec::new(),
+            nodes: Vec::new(),
+            addrs_current: false,
+            data_range: None,
+            root_pending: true,
+        };
+        assert_eq!(
+            not_ready(Some(&v)),
+            "Group 0 has not reached this node, Group 0 lacks this node's addresses, \
+             the root user is not in Group 0 yet (leader 0)"
+        );
+        v.bootstrapped = true;
+        v.addrs_current = true;
+        v.leader = NodeId(1);
+        assert_eq!(not_ready(Some(&v)), "the root user is not in Group 0 yet (leader 1)");
     }
 
     #[test]

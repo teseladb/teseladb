@@ -332,3 +332,28 @@ fn max_chunk_bytes_reads_only_a_shard_key_s_settings() {
     let bare = json(r#"{"$shardKey":{"key":{"a":1}}}"#).to_bytes().unwrap_or_default();
     assert_eq!(max_chunk_bytes(&bare), None);
 }
+
+/// The names `setAllowMigrations` and the other balancing commands refuse, as a `refrouter` 9.0.4
+/// refuses them (measured on 03-11-2026, `b3.js` to `b5.js`): `setAllowMigrations` checks the
+/// database's name, then that it exists, then the collection's; the others check the whole name.
+#[test]
+fn names_the_balancing_commands_refuse() {
+    let mut m = cluster();
+    let allow = |m: &mut Mem, ns: &str| {
+        admin(m, &format!(r#"{{"setAllowMigrations":"{ns}","allowMigrations":true}}"#))
+    };
+    for (ns, db) in [(".t", ""), (".", ""), ("", ""), ("a b.t", "a b"), ("a b", "a b")] {
+        fails(&allow(&mut m, ns), 73, &format!("{db} is not a valid db name"));
+    }
+    for (ns, db) in [("nodb.t", "nodb"), ("nodb.", "nodb"), ("a$b.t", "a$b")] {
+        fails(&allow(&mut m, ns), 26, &format!("database {db} not found"));
+    }
+    fails(&allow(&mut m, "z"), 73, "Invalid namespace specified: z");
+    fails(&allow(&mut m, "z.nope"), 118, "Collection must be sharded so migrations can be blocked");
+    for name in ["configureCollectionBalancing", "balancerCollectionStatus"] {
+        let refused = |m: &mut Mem, ns: &str| admin(m, &format!(r#"{{"{name}":"{ns}"}}"#));
+        fails(&refused(&mut m, ".t"), 73, "Invalid namespace specified '.t'");
+        fails(&refused(&mut m, "."), 73, "Invalid namespace specified ''");
+        fails(&refused(&mut m, ""), 73, "Invalid namespace specified ''");
+    }
+}

@@ -216,3 +216,205 @@ fn a_unique_index_serves_a_unique_key_and_a_hashed_id_gets_its_index() {
     let hashed = json(r#"{"key":{"_id":"hashed"},"name":"_id_hashed"}"#);
     assert_eq!(index_keys(&mut m, "id").get(1), Some(&hashed));
 }
+
+/// The arguments of `shardCollection` and `enableSharding` with the wrong type or missing, and
+/// the numbers that say 1 in a shard key and in the index that serves it, as a `refrouter` 9.0.4
+/// answers them (measured on 03-11-2026, `sh1.js`, `sh2.js`): any numeric 1, a decimal too, and
+/// an index field of another number does not serve.
+#[test]
+fn arguments_and_the_numbers_of_a_key() {
+    let mut m = Mem::new();
+    refused(
+        &shard(&mut m, r#"{"enableSharding":5}"#),
+        14,
+        "BSON field 'enableSharding.enableSharding' is the wrong type 'int', expected type 'string'",
+    );
+    refused(
+        &shard(&mut m, r#"{"shardCollection":5,"key":{"a":1}}"#),
+        73,
+        "Collection name has invalid type int",
+    );
+    refused(
+        &shard(&mut m, r#"{"shardCollection":".t","key":{"a":1}}"#),
+        73,
+        "Invalid namespace specified '.t'",
+    );
+    refused(
+        &shard(&mut m, r#"{"shardCollection":"shk.k","key":5}"#),
+        14,
+        "BSON field '.key' is the wrong type 'int', expected type 'object'",
+    );
+    refused(
+        &shard(&mut m, r#"{"shardCollection":"shk.k"}"#),
+        40414,
+        "BSON field '.key' is missing but a required field",
+    );
+    for (coll, key) in
+        [("l", r#"{"$numberLong":"1"}"#), ("d", r#"{"$numberDecimal":"1"}"#), ("f", "1.0")]
+    {
+        let r =
+            shard(&mut m, &format!(r#"{{"shardCollection":"shk.{coll}","key":{{"a":{key}}}}}"#));
+        assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{coll}: {r:?}");
+    }
+    for (coll, index, serves) in [
+        ("i1", r#"{"$numberLong":"1"}"#, true),
+        ("i2", r#"{"$numberDecimal":"1"}"#, true),
+        ("i3", "2.0", false),
+        ("i4", r#"{"$numberLong":"2"}"#, false),
+    ] {
+        let create = format!(
+            r#"{{"createIndexes":"{coll}","indexes":[{{"key":{{"a":{index}}},"name":"a"}}]}}"#
+        );
+        assert_eq!(field(&run(&mut m, "shk", &create), "ok"), &Value::Double(1.0));
+        run(&mut m, "shk", &format!(r#"{{"insert":"{coll}","documents":[{{"a":1}}]}}"#));
+        let r = shard(&mut m, &format!(r#"{{"shardCollection":"shk.{coll}","key":{{"a":1}}}}"#));
+        match serves {
+            true => assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{coll}: {r:?}"),
+            false => refused(
+                &r,
+                72,
+                "Please create an index that starts with the proposed shard key before sharding the collection. ",
+            ),
+        }
+    }
+}
+
+/// The indexes that start with the shard key but cannot serve it, as a `refrouter` 9.0.4 refuses
+/// them (measured on 03-11-2026, `sh3.js`, `sh4.js`): each index in its order with its reason,
+/// or the request for an index; the documents stay as they were.
+#[test]
+fn indexes_that_cannot_serve_the_key() {
+    let mut m = Mem::new();
+    let prefix = "can't shard collection because an index already exists on the shard key and it's a non shard key valid index. :: caused by :: couldn't find valid index for shard key\nIndex _id_ cannot be used for sharding because: Shard key is not a prefix of index key.";
+    let please = "Please create an index that starts with the proposed shard key before sharding the collection. ";
+    let cases: [(&str, &str, &str, String); 5] = [
+        (
+            "m1",
+            r#"{"key":{"a":1},"name":"a_1"}"#,
+            r#"[{"_id":1,"a":[1,2]},{"_id":2,"a":3}]"#,
+            format!(
+                "{prefix}\nIndex a_1 cannot be used for sharding because: Index key is multikey."
+            ),
+        ),
+        (
+            "m3",
+            r#"{"key":{"a":1},"name":"a_1","sparse":true}"#,
+            r#"[{"_id":1,"a":1}]"#,
+            format!(
+                "{please} Index a_1 cannot be used for sharding because [ Index key is sparse. ]"
+            ),
+        ),
+        (
+            "m4",
+            r#"{"key":{"a":1},"name":"a_1","partialFilterExpression":{"a":{"$gt":0}}}"#,
+            r#"[{"_id":1,"a":1}]"#,
+            format!(
+                "{prefix}\nIndex a_1 cannot be used for sharding because: Index key is partial."
+            ),
+        ),
+        (
+            "m6",
+            r#"{"key":{"a":1,"b":1},"name":"a_1_b_1"}"#,
+            r#"[{"_id":1,"a":1,"b":[1,2]}]"#,
+            please.to_owned(),
+        ),
+        (
+            "m7",
+            r#"{"key":{"a":1},"name":"a_1","hidden":true}"#,
+            r#"[{"_id":1,"a":1}]"#,
+            prefix.to_owned(),
+        ),
+    ];
+    for (coll, index, docs, msg) in cases {
+        let create = format!(r#"{{"createIndexes":"{coll}","indexes":[{index}]}}"#);
+        assert_eq!(field(&run(&mut m, "shk", &create), "ok"), &Value::Double(1.0), "{coll}");
+        run(&mut m, "shk", &format!(r#"{{"insert":"{coll}","documents":{docs}}}"#));
+        let r = shard(&mut m, &format!(r#"{{"shardCollection":"shk.{coll}","key":{{"a":1}}}}"#));
+        refused(&r, 72, &msg);
+        let r = run(&mut m, "shk", &format!(r#"{{"count":"{coll}"}}"#));
+        let n = docs.matches("_id").count();
+        assert_eq!(field(&r, "n"), &Value::Int32(i32::try_from(n).unwrap()), "{coll}");
+    }
+    // A multikey field after the shard key's does not stop another index that serves it.
+    let both = r#"[{"key":{"a":1,"b":1},"name":"a_1_b_1"},{"key":{"a":1},"name":"a_1"}]"#;
+    run(&mut m, "shk", &format!(r#"{{"createIndexes":"m5","indexes":{both}}}"#));
+    run(&mut m, "shk", r#"{"insert":"m5","documents":[{"_id":1,"a":1,"b":[1,2]}]}"#);
+    let r = shard(&mut m, r#"{"shardCollection":"shk.m5","key":{"a":1}}"#);
+    assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+}
+
+/// Documents of a dotted shard key: a missing or scalar parent is a null key, an array on the
+/// way is refused with each insert's error (measured on a `refrouter` 9.0.4 on 03-11-2026,
+/// `sh7.js`); a collection dropped by another client while it is sharded fails the command.
+#[test]
+fn dotted_keys_and_a_collection_dropped_meanwhile() {
+    use teseladb_meta::catalog::{CatalogCommand, Namespace};
+    use teseladb_wire::commands::Backend;
+    let mut m = Mem::new();
+    let r = shard(&mut m, r#"{"shardCollection":"shk.d1","key":{"a.b":1}}"#);
+    assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+    let r = run(
+        &mut m,
+        "shk",
+        r#"{"insert":"d1","documents":[{"_id":1,"a":5},{"_id":2,"c":1},{"_id":3,"a":{"b":2}}]}"#,
+    );
+    assert_eq!(field(&r, "n"), &Value::Int32(3), "{r:?}");
+    for doc in [r#"{"_id":4,"a":[{"b":1}]}"#, r#"{"_id":5,"a":{"b":[1]}}"#] {
+        let r = run(&mut m, "shk", &format!(r#"{{"insert":"d1","documents":[{doc}]}}"#));
+        assert_eq!(field(&r, "writeErrors.0.code"), &Value::Int32(61), "{r:?}");
+        assert_eq!(
+            field(&r, "writeErrors.0.errmsg"),
+            &Value::from("Shard key cannot contain array values or array descendants.")
+        );
+    }
+    m.after_catalog_write = Some(Box::new(|m: &mut Mem, cmd: &CatalogCommand| {
+        if let CatalogCommand::Create { ns, .. } = cmd {
+            m.catalog_write(CatalogCommand::Drop { ns: ns.clone() }).expect("dropped");
+        }
+    }));
+    let r = shard(&mut m, r#"{"shardCollection":"shk.gone","key":{"_id":1}}"#);
+    refused(&r, 26, "the collection was dropped while it was being sharded");
+    m.after_catalog_write = Some(Box::new(|m: &mut Mem, cmd: &CatalogCommand| {
+        if let CatalogCommand::Modify { ns, .. } = cmd {
+            m.catalog_write(CatalogCommand::Drop { ns: ns.clone() }).expect("dropped");
+        }
+    }));
+    let r = shard(&mut m, r#"{"shardCollection":"shk.gone2","key":{"_id":1}}"#);
+    refused(&r, 26, "the collection was dropped while it was being sharded");
+    m.after_catalog_write = None;
+    let ns = Namespace { db: "shk".into(), coll: "gone2".into() };
+    assert_eq!(m.collection(&ns).expect("read"), None);
+}
+
+/// A write that fails while the documents take the shard key's keys fails the command and leaves
+/// the collection as it was: its documents where they were and no shard key; the command can
+/// then be run again.
+#[test]
+fn a_failed_write_while_keying_again() {
+    let mut m = Mem::new();
+    run(&mut m, "shk", r#"{"insert":"w","documents":[{"_id":1,"a":1},{"_id":2,"a":2}]}"#);
+    run(&mut m, "shk", r#"{"createIndexes":"w","indexes":[{"key":{"a":1},"name":"a_1"}]}"#);
+    let busy =
+        teseladb_wire::error::CommandError::new(teseladb_wire::error::WRITE_CONFLICT, "busy");
+    m.fail_write_at = Some((1, busy));
+    let r = shard(&mut m, r#"{"shardCollection":"shk.w","key":{"a":1}}"#);
+    assert_eq!(field(&r, "code"), &Value::Int32(112), "{r:?}");
+    let r = run(&mut m, "shk", r#"{"find":"w","sort":{"_id":1}}"#);
+    let Value::Array(docs) = field(&r, "cursor.firstBatch") else { panic!("{r:?}") };
+    assert_eq!(docs.len(), 2, "{r:?}");
+    let r = m.run("config", json(r#"{"find":"collections","filter":{"_id":"shk.w"}}"#));
+    assert_eq!(field(&r, "cursor.firstBatch"), &Value::Array(vec![]), "{r:?}");
+    // Failing again after the first document moved puts it back too.
+    let busy =
+        teseladb_wire::error::CommandError::new(teseladb_wire::error::WRITE_CONFLICT, "busy");
+    m.fail_write_at = Some((2, busy));
+    let r = shard(&mut m, r#"{"shardCollection":"shk.w","key":{"a":1}}"#);
+    assert_eq!(field(&r, "code"), &Value::Int32(112), "{r:?}");
+    let r = run(&mut m, "shk", r#"{"find":"w","filter":{"a":2}}"#);
+    let Value::Array(docs) = field(&r, "cursor.firstBatch") else { panic!("{r:?}") };
+    assert_eq!(docs.len(), 1, "{r:?}");
+    let r = shard(&mut m, r#"{"shardCollection":"shk.w","key":{"a":1}}"#);
+    assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+    let r = run(&mut m, "shk", r#"{"count":"w"}"#);
+    assert_eq!(field(&r, "n"), &Value::Int32(2), "{r:?}");
+}

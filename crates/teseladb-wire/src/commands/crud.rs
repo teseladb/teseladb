@@ -861,7 +861,7 @@ fn log_validation<B: Backend + ?Sized>(
     r: &MutationResult,
     redact: bool,
 ) {
-    use super::mutation::{LOG_FAILED, LOG_WOULD_FAIL};
+    use super::mutation::LOG_FAILED;
     let ns = match &bound.mutation {
         DocMutation::Insert { rules, .. }
         | DocMutation::Update { rules, .. }
@@ -874,18 +874,15 @@ fn log_validation<B: Backend + ?Sized>(
             Some(Value::Int32(id)) => *id,
             _ => continue,
         };
-        let msg = if id == LOG_FAILED {
-            "Document failed validation"
-        } else if id == LOG_WOULD_FAIL {
-            "Document would fail validation"
-        } else {
-            continue;
+        // The write's lines are those two, which the node wrote with their document and errInfo.
+        let msg = match id {
+            LOG_FAILED => "Document failed validation",
+            _ => "Document would fail validation",
         };
         let mut attr = Document::new().with("namespace", ns);
-        for k in [super::mutation::LOG_DOCUMENT_FIELD, super::mutation::LOG_ERR_INFO_FIELD] {
-            if let Some(v) = line.get(k) {
-                attr.push(k, if redact { crate::redact::value(v) } else { v.clone() });
-            }
+        let fields = [super::mutation::LOG_DOCUMENT_FIELD, super::mutation::LOG_ERR_INFO_FIELD];
+        for (k, v) in fields.iter().filter_map(|k| line.get(k).map(|v| (*k, v))) {
+            attr.push(k, if redact { crate::redact::value(v) } else { v.clone() });
         }
         backend.log_warning(id, msg, &attr);
     }

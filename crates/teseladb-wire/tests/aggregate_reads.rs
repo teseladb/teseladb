@@ -298,3 +298,27 @@ fn the_stages_of_the_node_on_a_time_series() {
     );
     assert_eq!(batch(&r), [json(r#"{"ns":"t3.ts","type":"timeseries"}"#)], "{r:?}");
 }
+
+/// `$geoNear` on a collection that does not exist, and on one whose other indexes are not
+/// geospatial (measured on a `refnode` 9.0.4 on 03-11-2026).
+#[test]
+fn geo_near_needs_a_collection_and_its_geospatial_index() {
+    let mut m = loaded();
+    let near = r#"[{"$geoNear":{"near":[0,0],"distanceField":"d"}},{"$project":{"d":1}}]"#;
+    let r = run(&mut m, "r", &format!(r#"{{"aggregate":"nope","pipeline":{near},"cursor":{{}}}}"#));
+    assert_eq!(field(&r, "code"), &Value::Int32(26), "{r:?}");
+    let msg = "$geoNear needs a collection to run, but r.nope does not exist";
+    assert_eq!(field(&r, "errmsg"), &Value::from(msg));
+    run(
+        &mut m,
+        "r",
+        r#"{"update":"c","updates":[{"q":{},"u":{"$set":{"loc":[1,1]}},"multi":true}]}"#,
+    );
+    run(
+        &mut m,
+        "r",
+        r#"{"createIndexes":"c","indexes":[{"key":{"b":"hashed"},"name":"b_h"},{"key":{"loc":"2d"},"name":"l"}]}"#,
+    );
+    let r = run(&mut m, "r", &format!(r#"{{"aggregate":"c","pipeline":{near},"cursor":{{}}}}"#));
+    assert_eq!(batch(&r).len(), 3, "{r:?}");
+}

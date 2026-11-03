@@ -17,8 +17,8 @@ use teseladb_topology::oplog::{OpType, Operation};
 
 use super::{Backend, Ctx};
 use crate::error::{
-    BAD_VALUE, Code, CommandError, IDL_FAILED_TO_PARSE, ILLEGAL_OPERATION, INVALID_UUID,
-    NAMESPACE_NOT_FOUND, TYPE_MISMATCH,
+    BAD_VALUE, Code, CommandError, IDL_FAILED_TO_PARSE, ILLEGAL_OPERATION, INVALID_OPTIONS,
+    INVALID_UUID, NAMESPACE_NOT_FOUND, TYPE_MISMATCH,
 };
 
 /// `applyOps`.
@@ -110,6 +110,9 @@ fn precheck((i, v): (usize, &Value)) -> Result<&Document, CommandError> {
     Ok(d)
 }
 
+/// The values of `needsRetryImage` (RefDb 9.0.4's enumeration).
+const RETRY_IMAGES: [&str; 2] = ["preImage", "postImage"];
+
 /// Field `field` of an entry with the wrong type, as the parser of RefDb 9.0.4 says it.
 fn wrong_type(field: &str, v: &Value, expected: &str) -> CommandError {
     let t = crate::types::type_name(v);
@@ -143,6 +146,14 @@ fn check_field(field: &str, v: &Value) -> Result<(), CommandError> {
         // a member takes them (02-11-2026, refrestore 100.20.0 against 9.0.4).
         ("t" | "v", v) if !number && !matches!(v, Value::Null) => Err(wrong_type(field, v, NUMBER)),
         ("wall", v) if !matches!(v, Value::DateTime(_)) => Err(wrong_type(field, v, "type 'date'")),
+        ("needsRetryImage", Value::String(s)) if !RETRY_IMAGES.contains(&s.as_str()) => {
+            Err(CommandError::new(
+                BAD_VALUE,
+                format!(
+                    "Enumeration value '{s}' for field 'OplogEntryBase.needsRetryImage' is not a valid value."
+                ),
+            ))
+        }
         ("needsRetryImage", v) if !matches!(v, Value::String(_)) => {
             Err(wrong_type(field, v, "type 'string'"))
         }
@@ -188,12 +199,16 @@ fn parse(d: &Document) -> Result<Operation, CommandError> {
     for (field, v) in d.iter() {
         check_field(field, v)?;
     }
-    if d.get("o").is_none() {
+    // Every other field it reads was checked above: what is left is a missing `o`.
+    let operation = Operation::from_document(d).map_err(|_| {
         let msg = "BSON field 'OplogEntryBase.o' is missing but a required field";
-        return Err(CommandError::new(IDL_FAILED_TO_PARSE, msg));
+        CommandError::new(IDL_FAILED_TO_PARSE, msg)
+    })?;
+    if d.get("needsRetryImage").is_some() {
+        let msg = "applyOps command does not support the internal `needsRetryImage` field";
+        return Err(CommandError::new(INVALID_OPTIONS, msg));
     }
-    // Every field it reads was checked above.
-    Operation::from_document(d).map_err(|e| CommandError::new(BAD_VALUE, format!("{e:?}")))
+    Ok(operation)
 }
 
 /// The error of a diff RefDb does not write (measured on 03-11-2026, `ap7.js` and `ap8.js`).

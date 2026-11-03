@@ -57,3 +57,18 @@ fn query_shape_hashes_match_refdb() {
         wrong.iter().take(5).cloned().collect::<Vec<_>>().join("\n")
     );
 }
+
+/// A command that is not one RefDb would run has no shape: a stage that is no document, an
+/// `aggregate` without its pipeline, a `$facet` branch that is no pipeline.
+#[test]
+fn malformed_commands_have_no_shape() {
+    for cmd in [
+        r#"{"aggregate":"c","pipeline":[1],"cursor":{}}"#,
+        r#"{"aggregate":"c","cursor":{}}"#,
+        r#"{"aggregate":"c","pipeline":[{"$facet":{"x":1}}],"cursor":{}}"#,
+        r#"{"find":"c","filter":1}"#,
+    ] {
+        let parsed = extjson::parse(cmd).expect("a command");
+        assert!(shape(DB, &parsed).is_none(), "{cmd}");
+    }
+}
