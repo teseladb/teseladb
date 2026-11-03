@@ -139,7 +139,9 @@ fn check_field(field: &str, v: &Value) -> Result<(), CommandError> {
         ("ts", v) if !matches!(v, Value::Timestamp { .. }) => {
             Err(wrong_type(field, v, "type 'timestamp'"))
         }
-        ("t" | "v", v) if !number => Err(wrong_type(field, v, NUMBER)),
+        // `refrestore --oplogReplay` gives the operations of a transaction with `t: null`, and
+        // a member takes them (02-11-2026, refrestore 100.20.0 against 9.0.4).
+        ("t" | "v", v) if !number && !matches!(v, Value::Null) => Err(wrong_type(field, v, NUMBER)),
         ("wall", v) if !matches!(v, Value::DateTime(_)) => Err(wrong_type(field, v, "type 'date'")),
         ("needsRetryImage", v) if !matches!(v, Value::String(_)) => {
             Err(wrong_type(field, v, "type 'string'"))
