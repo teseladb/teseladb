@@ -567,6 +567,10 @@ fn check_pipeline(
             _ => {
                 let mut read = Vec::new();
                 metas_read(arg, &mut read);
+                // The `$match` with the `$text` reads the score as nothing (measured on 9.0.4).
+                if text_match(*st) {
+                    read.retain(|n| n != TEXT_SCORE);
+                }
                 for r in &read {
                     if crate::expr::meta_is_required(r) && !available.contains(&r.as_str()) {
                         let mut e = crate::expr::missing_meta(r);

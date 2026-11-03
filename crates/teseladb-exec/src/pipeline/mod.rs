@@ -622,6 +622,18 @@ fn parse_stages(pipeline: &[RawValue<'_>], ctx: &Ctx) -> Result<Pipeline, MqlErr
         if i > 0 && matches!(d.get("$match"), Some(RawValue::Document(m)) if has_text(m)) {
             return Err(stages::text_not_first());
         }
+        // A `$match` cannot read the text score, also right after the `$text` (measured on
+        // 9.0.4 when the pipeline is parsed, in `$lookup`, `$unionWith` and `$facet` too); the
+        // `$match` with the `$text` reads it as nothing.
+        if let Some(RawValue::Document(m)) = d.get("$match")
+            && !(i == 0 && has_text(m))
+        {
+            let mut read = Vec::new();
+            meta::metas_read(RawValue::Document(m), &mut read);
+            if read.iter().any(|n| n == meta::TEXT_SCORE) {
+                return Err(crate::expr::missing_meta(meta::TEXT_SCORE));
+            }
+        }
         if reads_search_meta(own_part(*d)) {
             if !searched {
                 return Err(error(

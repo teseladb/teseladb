@@ -947,6 +947,45 @@ fn joined_cases() -> Vec<(String, bool, &'static str)> {
                 {"_id": 3, "s": 0.015873015873015872}, {"_id": 10, "s": 5.0}, {"_id": 11, "s": 5.0},
                 {"_id": 12, "s": 5.0}, {"_id": 13, "s": 5.0}]"#,
         ),
+        // A `$match` cannot read the text score, but the one with the `$text` reads it as
+        // nothing (`m114.js`).
+        (
+            agg("c", r#"[TX, {"$match": {"$expr": {"$gt": [{"$meta": "textScore"}, 0]}}}]"#),
+            false,
+            "!! 40218 query requires text score metadata, but it is not available",
+        ),
+        (
+            agg(
+                "c",
+                r#"[TX, {"$unionWith": {"coll": "f", "pipeline": [TX]}}, {"$match": {"$expr": {"$gt": [{"$meta": "textScore"}, 0]}}}]"#,
+            ),
+            false,
+            "!! 40218 query requires text score metadata, but it is not available",
+        ),
+        (
+            lookup(
+                r#"{"from": "f", "pipeline": [TX, {"$match": {"$expr": {"$gt": [{"$meta": "textScore"}, 0]}}}], "as": "x"}"#,
+                NO_DOCS,
+            ),
+            false,
+            "!! 40218 query requires text score metadata, but it is not available",
+        ),
+        (
+            agg(
+                "c",
+                r#"[TX, {"$facet": {"a": [{"$match": {"$expr": {"$gt": [{"$meta": "textScore"}, 0]}}}]}}]"#,
+            ),
+            false,
+            "!! 40218 query requires text score metadata, but it is not available",
+        ),
+        (
+            agg(
+                "c",
+                r#"[{"$match": {"$text": {"$search": "fox"}, "$expr": {"$gt": [{"$meta": "textScore"}, 0]}}}]"#,
+            ),
+            false,
+            "=> []",
+        ),
         // The `$text` of a pipeline sees the command's variables.
         (
             agg(
