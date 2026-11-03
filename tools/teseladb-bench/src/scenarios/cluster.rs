@@ -113,7 +113,7 @@ impl Writer {
 
     fn finish(self) -> Result<Vec<(Instant, u64)>, String> {
         self.stop.store(true, Ordering::Relaxed);
-        self.thread.join().map_err(|_| "the writer panicked".to_owned())?
+        self.thread.join().map_err(crate::client::panicked("the writer"))?
     }
 }
 
@@ -217,11 +217,7 @@ fn join(target: &Target) -> Result<Node<MemDisk>, String> {
         ..NodeConfig::default()
     };
     let n = Node::start(cfg, || Ok(MemDisk::new()), None).map_err(debug)?;
-    if !n.wait_ready(READY) {
-        n.stop();
-        return Err("the new node did not join".into());
-    }
-    Ok(n)
+    super::ready(n, READY, "the new node did not join")
 }
 
 /// The ranges of which node `n` holds a replica, and whether every one of them has its data

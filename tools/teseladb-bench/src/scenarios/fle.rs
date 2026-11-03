@@ -137,8 +137,8 @@ fn run_on(c: &mut Client, command: Document) -> Result<Vec<u8>, String> {
         Some((k, _)) => k.to_owned(),
         None => String::new(),
     };
-    let reply = c.command(DB, command).map_err(|e| format!("{name}: {e}"))?;
-    check(&reply).map_err(|e| format!("{name}: {e}"))?;
+    let reply = c.command(DB, command).map_err(crate::client::context(&name))?;
+    check(&reply).map_err(crate::client::context(&name))?;
     Ok(reply)
 }
 
@@ -241,6 +241,7 @@ pub fn run(args: &Args) -> Result<Report, String> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
 
@@ -256,6 +257,9 @@ mod tests {
         assert_eq!((find.tokens.edc, find.max_contention), (edc, 0));
         assert_ne!(value_tokens(4).0, edc);
         assert_eq!(found(b"not bson"), 0);
+        let bytes = |d: Document| d.to_bytes().unwrap();
+        assert_eq!(found(&bytes(Document::new().with("ok", 1.0))), 0, "no cursor");
+        assert_eq!(found(&bytes(Document::new().with("cursor", Document::new()))), 0, "no batch");
         let names: Vec<String> =
             setup().iter().map(|d| format!("{:?}", d.iter().next().unwrap().1)).collect();
         assert_eq!(names.len(), 4);

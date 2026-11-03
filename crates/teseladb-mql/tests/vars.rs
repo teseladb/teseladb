@@ -62,7 +62,11 @@ fn values_may_not_read_documents_and_expressions_go_to_the_engine() {
     let r = resolve_let(&doc(r#"{"v": {"$fail": 1}}"#), &e).unwrap_err();
     assert_eq!(r.code.code, 2);
     let r = resolve_let(&doc(r#"{"v": {"$literal": 5}, "w": "$$v"}"#), &e).unwrap();
-    assert_eq!(r.get("w"), Some(&Value::Document(doc(r#"{"$literal": 5}"#))));
+    assert_eq!(r.get("w"), Some(&Value::Document(doc(r#"{"$literal": 5}"#)))); // What `$literal` holds is not read: a string with `$` stays a string (the drivers'
+    // `aggregate-let` test, measured on a `refrouter` 9.0.4 on 03-11-2026).
+    for v in [r#"{"$literal": "$bar"}"#, r#"{"$literal": {"x": "$$ROOT"}}"#] {
+        assert!(resolve_let(&doc(&format!(r#"{{"y": {v}}}"#)), &e).is_ok(), "{v}");
+    }
 }
 
 #[test]

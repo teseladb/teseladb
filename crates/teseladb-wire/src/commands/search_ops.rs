@@ -422,17 +422,15 @@ impl Shipped {
     }
 }
 
-/// The segments of `entry` on `coll` that arrived with the SST files, when they serve its
+/// The segments of `entry` that arrived with the SST files, when they serve its
 /// version and other analyzers did not make them, with the mark they cover.
-fn from_received(
-    shipped: Shipped,
-    coll: &CollectionEntry,
-    entry: &SearchIndexEntry,
-) -> Option<(Segments, Hlc)> {
-    if shipped.version != entry.version || shipped.collection != coll.id {
+fn from_received(shipped: Shipped, entry: &SearchIndexEntry) -> Option<(Segments, Hlc)> {
+    // Index ids are never reused, so the files of `entry` are of its collection; only a node
+    // that builds a `search` index without a view ships its files.
+    if shipped.version != entry.version {
         return None;
     }
-    let (Segments::Search(empty), _, None) = definition_of(entry).ok()? else { return None };
+    let definition = search_definition(&split_definition(&entry.definition).ok()?.0).ok()?;
     let applied = shipped
         .files
         .iter()
@@ -440,7 +438,7 @@ fn from_received(
         .min()
         .flatten()
         .unwrap_or(Hlc { physical: 0, logical: 0 });
-    let ix = Indexer::load(empty.definition().clone(), &shipped.files).ok()?;
+    let ix = Indexer::load(definition, &shipped.files).ok()?;
     Some((Segments::Search(Box::new(ix)), applied))
 }
 
@@ -487,7 +485,7 @@ pub fn with_index<B: Backend + ?Sized, R>(
     if !lock(shared).search.background {
         return with_built(backend, shared, coll, entry, synonyms, f);
     }
-    let mut built = match borrow(backend, shared, &entry.id, coll.id)? {
+    let mut built = match borrow(backend, shared, &entry.id)? {
         Some(b) => b,
         None => {
             // An index written out of memory comes back from its file (012 FR-013).
@@ -535,23 +533,20 @@ pub fn build_index<B: Backend + ?Sized>(
     give_back(shared, entry.id, built, true)
 }
 
-/// The segments of index `id` on collection `coll` that this node built, taken out while one
+/// The segments of index `id` that this node built, taken out while one
 /// operation uses them: an operation that finds them taken waits for them, no longer than its
 /// `maxTimeMS`. `None` when there are none.
 fn borrow<B: Backend + ?Sized>(
     backend: &mut B,
     shared: &Shared,
     id: &[u8; 12],
-    coll: u32,
 ) -> Result<Option<Built>, CommandError> {
     loop {
         {
             let mut indexes = lock(shared);
             let search = &mut indexes.search;
+            // Index ids are never reused: the segments of `id` are of `coll`.
             if let Some(b) = search.built.remove(id) {
-                if b.collection != coll {
-                    return Ok(None);
-                }
                 search.borrowed.insert(*id);
                 return Ok(Some(b));
             }
@@ -605,7 +600,7 @@ fn fresh(
     received: Option<Shipped>,
 ) -> Result<Built, CommandError> {
     let (indexer, definition, view) = definition_of(entry)?;
-    let shipped = received.and_then(|r| from_received(r, coll, entry));
+    let shipped = received.and_then(|r| from_received(r, entry));
     let (indexer, applied) = shipped.unwrap_or((indexer, Hlc { physical: 0, logical: 0 }));
     Ok(Built {
         collection: coll.id,
@@ -657,7 +652,7 @@ fn with_built<B: Backend + ?Sized, R>(
         (taken, received)
     };
     let (mut built, fresh_build) = match taken {
-        Some(b) if b.version == entry.version && b.collection == coll.id => (b, false),
+        Some(b) if b.version == entry.version => (b, false),
         _ => (fresh(coll, entry, received)?, true),
     };
     if let Err(e) = catch_up(backend, coll, &mut built) {
@@ -971,9 +966,9 @@ fn as_read(found: Vec<Found>, stored: &BTreeMap<Vec<u8>, Document>, on_view: boo
     found
         .into_iter()
         .map(|mut f| {
-            if let Some(d) = stored.get(&f.key) {
-                f.doc = d.clone();
-            }
+            // Every key the index found is in `stored`.
+            let doc = stored.get(&f.key).cloned();
+            f.doc = doc.unwrap_or(std::mem::take(&mut f.doc));
             f
         })
         .collect()

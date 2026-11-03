@@ -57,10 +57,10 @@ fn walk(doc: RawDoc<'_>) -> usize {
 /// Runs the scenario.
 pub fn run(args: &Args) -> Result<Report, String> {
     let doc = sample();
-    let bytes = doc.to_bytes().map_err(|e| e.to_string())?;
+    let bytes = doc.to_bytes().map_err(crate::client::text)?;
     let mut report = Report::new("bson");
     report.push("bson.doc_bytes", "B", bytes.len() as f64, None);
-    let values = walk(RawDoc::from_bytes(&bytes).map_err(|e| e.to_string())?);
+    let values = walk(RawDoc::from_bytes(&bytes).map_err(crate::client::text)?);
     report.push("bson.doc_values", "values", values as f64, None);
     let read = per_op(args.warmup, args.duration, || {
         let d = RawDoc::from_bytes(black_box(&bytes)).expect("the sample reads");

@@ -26,6 +26,11 @@ const SYSTEM_PREFIX: &str = "system.";
 /// The value of a hashed field of a shard key.
 const HASHED: &str = "hashed";
 
+/// Whether `kind`, the value of a field of a shard key, makes it hashed.
+pub(super) fn is_hashed(kind: &Value) -> bool {
+    *kind == Value::from(HASHED)
+}
+
 /// A collection's shard key.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ShardKey {
@@ -83,15 +88,13 @@ pub fn shard_values(key: &Document, doc: &Document) -> Result<Vec<Value>, Comman
     let mut out = Vec::new();
     for (path, kind) in key.iter() {
         let v = shard_value(doc, path)?.cloned().unwrap_or(Value::Null);
-        out.push(match kind {
-            Value::String(s) if s == HASHED => {
-                let holder = Document::new().with("v", v).to_bytes()?;
-                let raw =
-                    RawDoc::from_bytes(&holder)?.get("v").unwrap_or(teseladb_bson::RawValue::Null);
-                Value::Int64(teseladb_index::keygen::hashed_key(raw))
-            }
-            _ => v,
-        });
+        if !is_hashed(kind) {
+            out.push(v);
+            continue;
+        }
+        let holder = Document::new().with("v", v).to_bytes()?;
+        let raw = RawDoc::from_bytes(&holder)?.get("v").unwrap_or(teseladb_bson::RawValue::Null);
+        out.push(Value::Int64(teseladb_index::keygen::hashed_key(raw)));
     }
     Ok(out)
 }
@@ -358,8 +361,7 @@ pub(super) fn check_key(k: &ShardKey) -> Result<(), CommandError> {
         }
         let one = matches!(v, Value::Int32(1) | Value::Int64(1))
             || matches!(v, Value::Double(x) if *x == 1.0);
-        let is_hashed = matches!(v, Value::String(s) if s == HASHED);
-        if !one && !is_hashed {
+        if !one && !is_hashed(v) {
             return Err(CommandError::new(
                 BAD_VALUE,
                 format!(
@@ -367,7 +369,7 @@ pub(super) fn check_key(k: &ShardKey) -> Result<(), CommandError> {
                 ),
             ));
         }
-        hashed += usize::from(is_hashed);
+        hashed += usize::from(is_hashed(v));
         if hashed > 1 {
             return Err(CommandError::new(
                 BAD_VALUE,

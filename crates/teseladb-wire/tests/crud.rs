@@ -1248,3 +1248,64 @@ fn generated_ids_keep_the_order_of_the_inserts() {
     // One node, one random part.
     assert!(ids.windows(2).all(|w| w[0][4..9] == w[1][4..9]));
 }
+
+/// A single `bulkWrite` update or replacement takes the first matching document in its `sort`
+/// order, and `sort` with `multi` fails that operation alone (measured on a `refrouter` 9.0.4 on
+/// 03-11-2026, and the drivers' `client-bulkWrite-*-sort` tests).
+#[test]
+fn bulk_write_updates_follow_their_sort() {
+    let mut m = Mem::new();
+    insert(&mut m, "c", ids(1..4));
+    let ns_info = Value::Array(vec![d(&[("ns", s("db.c"))])]);
+    let bulk = |op: Value| {
+        doc(&[
+            ("bulkWrite", 1.into()),
+            ("ops", Value::Array(vec![op])),
+            ("nsInfo", ns_info.clone()),
+        ])
+    };
+    let gt1 = || d(&[("_id", d(&[("$gt", 1.into())]))]);
+    let sort = || d(&[("_id", (-1).into())]);
+    let r = m.run(
+        "admin",
+        bulk(d(&[
+            ("update", 0.into()),
+            ("filter", gt1()),
+            ("updateMods", d(&[("$set", d(&[("x", 1.into())]))])),
+            ("sort", sort()),
+        ])),
+    );
+    assert_eq!(field(&r, "nModified"), &Value::Int32(1));
+    let r = m.run(
+        "admin",
+        bulk(d(&[
+            ("update", 0.into()),
+            ("filter", gt1()),
+            ("updateMods", d(&[("y", 2.into())])),
+            ("sort", d(&[("_id", 1.into())])),
+        ])),
+    );
+    assert_eq!(field(&r, "nModified"), &Value::Int32(1));
+    let r = m.run("db", doc(&[("find", s("c")), ("sort", d(&[("_id", 1.into())]))]));
+    assert_eq!(
+        first_batch(&r),
+        vec![
+            d(&[("_id", 1.into()), ("a", 1.into())]),
+            d(&[("_id", 2.into()), ("y", 2.into())]),
+            d(&[("_id", 3.into()), ("a", 0.into()), ("x", 1.into())]),
+        ]
+    );
+    let r = m.run(
+        "admin",
+        bulk(d(&[
+            ("update", 0.into()),
+            ("filter", gt1()),
+            ("updateMods", d(&[("$set", d(&[("z", 1.into())]))])),
+            ("multi", true.into()),
+            ("sort", sort()),
+        ])),
+    );
+    assert_eq!(field(&r, "nErrors"), &Value::Int32(1));
+    assert_eq!(field(&r, "cursor.firstBatch.0.code"), &Value::Int32(9));
+    assert_eq!(field(&r, "cursor.firstBatch.0.errmsg"), &s("Cannot specify sort with multi=true"));
+}

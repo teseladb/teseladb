@@ -28,7 +28,7 @@ pub fn run(args: &Args) -> Result<Report, String> {
         black_box(KeyBuilder::index(1, 2, 3, &spec, black_box(&values), &pk, None));
     });
     report.latency("keys.encode_3_fields", &encode, Some(200.0), None);
-    let collation = Collation::for_locale("es").map_err(|e| e.to_string())?;
+    let collation = Collation::for_locale("es").map_err(crate::client::text)?;
     let collated = per_op(args.warmup, args.duration, || {
         black_box(KeyBuilder::index(1, 2, 3, &spec, black_box(&values), &pk, Some(&collation)));
     });

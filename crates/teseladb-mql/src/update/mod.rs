@@ -230,7 +230,9 @@ impl Update {
         let old_id = doc.get(ops::ID).map(Value::from);
         let new = match &self.kind {
             Kind::Replacement(r) => replace(r.get(), old_id.as_ref())?,
-            Kind::Pipeline(p) => ctx.matcher.ext.update_pipeline(p.get(), doc, ctx.matcher.vars)?,
+            Kind::Pipeline(p) => {
+                return self.apply_pipeline(p.get(), doc, old_id.as_ref(), ctx);
+            }
             Kind::Operators { entries, filters } => {
                 let mut root = MVal::Doc(MDoc::from_raw(doc));
                 for e in entries {
@@ -256,6 +258,25 @@ impl Update {
         // The stored limits are the server's to apply, with RefDb's words for each write.
         let bytes = new.to_bytes_with(crate::value::VALUE_LIMITS).map_err(bson_error)?;
         Ok(UpdateOutcome { modified: bytes != doc.as_bytes(), doc: new })
+    }
+
+    /// A pipeline's document, as a `refrouter` 9.0.4 stores it (measured): the stored `_id` first
+    /// (another one is an error), top-level names with `$` allowed (`$setField` writes them),
+    /// and a change whenever the pipeline's document differs from the stored one, before the
+    /// `_id` is put back.
+    fn apply_pipeline(
+        &self,
+        pipeline: RawValue<'_>,
+        doc: RawDoc<'_>,
+        old_id: Option<&Value>,
+        ctx: &UpdateContext<'_>,
+    ) -> Result<UpdateOutcome> {
+        let piped = ctx.matcher.ext.update_pipeline(pipeline, doc, ctx.matcher.vars)?;
+        let piped_bytes = piped.to_bytes_with(crate::value::VALUE_LIMITS).map_err(bson_error)?;
+        let piped = OwnedDoc::new(&piped)?;
+        let new = replace(piped.get(), old_id)?;
+        new.to_bytes_with(crate::value::VALUE_LIMITS).map_err(bson_error)?;
+        Ok(UpdateOutcome { modified: piped_bytes != doc.as_bytes(), doc: new })
     }
 }
 
