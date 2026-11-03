@@ -83,6 +83,7 @@ gate "2. tests of check-origin" scripts/tests/check_origin_test.sh
 gate "2. tests of fetch-pinned" scripts/tests/fetch_pinned_test.sh
 gate "2. tests of the battery's requires" scripts/tests/compat_requires_test.sh
 gate "2. tests of the battery's secrets scan" scripts/tests/compat_secrets_test.sh
+gate "2. tests of the battery's publication of the enrollment tokens" scripts/tests/compat_publish_test.sh
 gate "2. tests of final-phase" scripts/tests/final_phase_test.sh
 gate "3. simulated crashes (2,000 seeds × 3 lives)" env TESELADB_CRASH_SEEDS=2000 \
   cargo test -q --offline --release -p teseladb-raftlog --test crash_sim
