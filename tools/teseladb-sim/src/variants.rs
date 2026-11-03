@@ -56,8 +56,10 @@ variants!(
     // and commits, and `txn_recovery` finds the recovery that answered «not committed».
     ("decision_not_durable", "txn_recovery", Default, 1000),
     // A cursor whose resolved mark ignores the pending intents (014 T020): a transaction commits
-    // at its intents' mark below what the cursor read past, and `changestream` never emits it.
-    ("emit_above_resolved", "changestream_delivery", Default, 1000),
+    // at its intents' mark below what the cursor read past, and `changestream` never emits it
+    // (seed 6). Since a search reads up to its own mark (011 FR-010), the `search` workload finds
+    // it first, at seed 1: a search misses a transaction committed at its intents' mark.
+    ("emit_above_resolved", "search_results", Default, 1000),
     ("follower_local_read", "linearizable", Default, 1000),
     ("follower_read_above_closed", "mvcc", Default, 1000),
     ("fsync_retry_success", "recovery", Default, 1000),

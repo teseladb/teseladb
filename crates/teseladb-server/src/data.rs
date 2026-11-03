@@ -600,8 +600,8 @@ impl DataCore {
                 }
             }
             // A change stream's read, on the leader (014 FR-003).
-            RemoteReq::Changes { start, end, from } => {
-                self.host.changes(core, ChangesReq { g, start, end, from }, now)
+            RemoteReq::Changes { start, end, from, at } => {
+                self.host.changes(core, ChangesReq { g, start, end, from, at }, now)
             }
             // A resharding's write fence, on the leader (018 FR-002).
             RemoteReq::Fence { start, end, on } => self.host.fence(core, (g, start, end), on, now),
@@ -1287,7 +1287,7 @@ mod tests {
     fn a_change_streams_read_runs_on_the_leader() {
         let (mut core, mut d, mut disk) = setup_disk(&[1]);
         let from = Hlc { physical: 1, logical: 0 };
-        let changes = RemoteReq::Changes { start: vec![1], end: vec![4], from };
+        let changes = RemoteReq::Changes { start: vec![1], end: vec![4], from, at: None };
         let mut answer = None;
         for ms in (1_000..30_000).step_by(10) {
             let now = Nanos::from_millis(ms);
