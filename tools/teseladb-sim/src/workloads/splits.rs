@@ -513,14 +513,13 @@ impl SplitsWorkload {
 
     /// A cursor's turn: it opens at a leader's mark, then reads its next range at its leader.
     fn cursor_turn(&mut self, w: &mut World, client: u32) {
-        if !self.cursors.contains_key(&client) {
+        let Some(c) = self.cursors.get_mut(&client) else {
             let at = self.mark_now(w);
             if at.physical > 0 {
                 self.cursors.insert(client, Cursor::new(format!("c{client}"), at));
             }
             return;
-        }
-        let Some(c) = self.cursors.get_mut(&client) else { return };
+        };
         if c.busy() {
             return;
         }
@@ -534,9 +533,7 @@ impl SplitsWorkload {
         c.sent(&range_end);
         let stop = c.stop_key();
         let (Some(host), Some(cc)) = (self.engine.host(node), w.cluster_core(node, core)) else {
-            if let Some(c) = self.cursors.get_mut(&client) {
-                c.lost();
-            }
+            self.cursors.get_mut(&client).expect("the cursor found above").lost();
             return;
         };
         let from = self.cursors[&client].from();
@@ -573,9 +570,7 @@ impl SplitsWorkload {
         s.sent(&key, &range_end);
         let (stop, from) = (s.stop_key(), s.from());
         let (Some(host), Some(cc)) = (self.engine.host(node), w.cluster_core(node, core)) else {
-            if let Some(s) = self.searchers.get_mut(&client) {
-                s.lost();
-            }
+            self.searchers.get_mut(&client).expect("the searcher found above").lost();
             return;
         };
         let req = teseladb_range::host::ChangesReq { g, start: key, end: stop, from };

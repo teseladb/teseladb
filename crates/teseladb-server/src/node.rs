@@ -579,6 +579,8 @@ pub struct Node<D> {
     threads: Vec<CoreThread<D>>,
     acceptor: Acceptor,
     client: Option<ClientListener>,
+    /// What opens and closes the replica set port as Group 0 says (018 FR-016).
+    replica_port: Option<crate::replica_port::PortKeeper>,
     /// The administration port (007 FR-020).
     admin: Option<AdminListener>,
     http: Option<crate::http_listener::HttpListener>,
@@ -938,6 +940,7 @@ impl<D: Disk + Send + 'static> Node<D> {
             }
         };
         let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut replica_port = None;
         let client = match &cfg.client {
             None => None,
             Some(c) => {
@@ -956,6 +959,14 @@ impl<D: Disk + Send + 'static> Node<D> {
                 if let Some((_, slot)) = &keys {
                     state = state.with_keys(slot.clone());
                 }
+                let port_state = Arc::new(NodeClockState::clone(&state).on_replica_set_port());
+                replica_port = Some(crate::replica_port::PortKeeper::spawn(
+                    c.clone(),
+                    cores,
+                    port_state,
+                    presence.clone(),
+                    cfg.client_hooks,
+                ));
                 let state = Arc::new(state);
                 match ClientListener::spawn_with(c, cores, state, cfg.client_hooks) {
                     Ok(l) => Some(l),
@@ -1068,6 +1079,7 @@ impl<D: Disk + Send + 'static> Node<D> {
             threads,
             acceptor,
             client,
+            replica_port,
             admin,
             http,
             clock: clock_keeper,
@@ -1250,6 +1262,9 @@ impl<D: Disk + Send + 'static> Node<D> {
     /// Stops the cores and the acceptor. Returns each core's disk (`None` for a core whose thread
     /// failed).
     pub fn stop(self) -> Vec<Option<D>> {
+        if let Some(p) = self.replica_port {
+            p.stop();
+        }
         if let Some(c) = self.client {
             c.stop();
         }

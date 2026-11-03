@@ -24,26 +24,50 @@ pub fn start(o: &DevOpts, seed: Option<u64>) -> Result<Vec<Node<MemDisk>>, NodeE
     start_within(o, seed, READY_TIMEOUT)
 }
 
+/// The clients' port of node `k`: `base + k`, or one the system chooses when `base` is 0 (the
+/// node then has no address to announce until it binds, so its replica set presentation needs a
+/// base port).
+fn client_port(base: u16, k: u16) -> u16 {
+    if base == 0 { 0 } else { base + k }
+}
+
+/// The configuration of node `k` with its clients' port at `at`.
+fn node_config(
+    o: &DevOpts,
+    seed: Option<u64>,
+    join: Vec<String>,
+    k: u16,
+    at: SocketAddr,
+) -> NodeConfig {
+    NodeConfig {
+        cores: Some(o.cores),
+        join,
+        client: Some(ClientConfig {
+            addrs: vec![at],
+            test_commands: o.test_commands,
+            ..ClientConfig::new(Vec::new())
+        }),
+        // The members of the replica set presentation are the nodes' client addresses.
+        native_addr: if at.port() == 0 { String::new() } else { at.to_string() },
+        seed: seed.map(|s| s.wrapping_add(u64::from(k))),
+        // The administration port on a loopback port the system chooses, which the log names:
+        // what splits and merges ranges by hand (007 FR-020).
+        admin_listen: Some(SocketAddr::from((LOOPBACK, 0))),
+        ..NodeConfig::default()
+    }
+}
+
 /// [`start`], with `ready` for the first node to create the cluster.
 pub fn start_within(
     o: &DevOpts,
     seed: Option<u64>,
     ready: Duration,
 ) -> Result<Vec<Node<MemDisk>>, NodeError> {
-    let cfg = |join: Vec<String>, k: u16| NodeConfig {
-        cores: Some(o.cores),
-        join,
-        client: Some(ClientConfig {
-            addrs: vec![SocketAddr::from((LOOPBACK, if o.port == 0 { 0 } else { o.port + k }))],
-            test_commands: o.test_commands,
-            ..ClientConfig::new(Vec::new())
-        }),
-        seed: seed.map(|s| s.wrapping_add(u64::from(k))),
-        // The administration port on a loopback port the system chooses, which the log names:
-        // what splits and merges ranges by hand (007 FR-020).
-        admin_listen: Some(SocketAddr::from((LOOPBACK, 0))),
-        ..NodeConfig::default()
+    let cfg = |join: Vec<String>, k: u16| {
+        let at = SocketAddr::from((LOOPBACK, client_port(o.port, k)));
+        node_config(o, seed, join, k, at)
     };
+
     let founder = Node::start(cfg(Vec::new(), 0), || Ok(MemDisk::new()), None)?;
     if !founder.wait_ready(ready) {
         founder.stop();

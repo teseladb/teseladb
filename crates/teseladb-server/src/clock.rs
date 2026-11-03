@@ -6,7 +6,7 @@
 //! keeps the error for [`ClockKeeper::error`].
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -37,7 +37,7 @@ fn renew(clock: &NodeClock, disk: &mut dyn Disk, meta: &mut NodeMeta) -> Result<
 pub struct ClockKeeper {
     stop: Arc<AtomicBool>,
     error: Arc<Mutex<Option<StorageError>>>,
-    thread: Option<JoinHandle<()>>,
+    thread: JoinHandle<()>,
 }
 
 impl ClockKeeper {
@@ -47,11 +47,9 @@ impl ClockKeeper {
     }
 
     /// Stops the thread.
-    pub fn stop(mut self) {
+    pub fn stop(self) {
         self.stop.store(true, Ordering::Release);
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
-        }
+        let _ = self.thread.join();
     }
 }
 
@@ -75,14 +73,13 @@ pub fn start_clock<D: Disk + Send + 'static>(
         .spawn(move || {
             while !s.load(Ordering::Acquire) {
                 let result = renew(&c, &mut disk, &mut meta).err();
-                if let Ok(mut slot) = e.lock() {
-                    *slot = result;
-                }
+                // Nothing panics while holding the lock, so it is never poisoned.
+                *e.lock().unwrap_or_else(PoisonError::into_inner) = result;
                 thread::sleep(PERIOD);
             }
         })
         .map_err(|_| StorageError::Io { op: "spawn", errno: teseladb_raftlog::IoErrno::Io })?;
-    Ok((clock, ClockKeeper { stop, error, thread: Some(thread) }))
+    Ok((clock, ClockKeeper { stop, error, thread }))
 }
 
 #[cfg(test)]

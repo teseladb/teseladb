@@ -38,9 +38,15 @@ impl std::fmt::Debug for Helper {
 /// The iterator of `this` and its `next` (`GetIteratorDirect`).
 fn direct(it: &mut Interp, this: &Val) -> R<IterRec> {
     if !matches!(this, Val::Obj(_)) {
-        return it.type_error(&format!("{} is not an object", it.show(this)));
+        return it.type_error(&crate::builtins::non_object(this));
     }
     let next = it.get(this, "next")?;
+    // Measured on a `refrouter` 9.0.4: the first `next()` fails with `nextMethod is not a function`.
+    let next = if next.is_callable() {
+        next
+    } else {
+        Val::Obj(it.native("next", |it, _, _| it.type_error("nextMethod is not a function"), 0)?)
+    };
     Ok(IterRec::Proto { it: this.clone(), next })
 }
 
@@ -158,8 +164,8 @@ fn step(it: &mut Interp, h: &Rc<RefCell<Helper>>) -> R<Option<Val>> {
                 }
             }
             Op::FlatMap => it.call(&f, &Val::Undef, &[v, idx]).and_then(|m| {
-                if !matches!(m, Val::Obj(_) | Val::Str(_)) {
-                    return it.type_error(&format!("{} is not iterable", it.show(&m)));
+                if !matches!(m, Val::Obj(_)) {
+                    return it.type_error(&crate::builtins::non_object(&m));
                 }
                 let rec = it.open_iter(&m)?;
                 h.borrow_mut().inner = Some(rec);
@@ -297,8 +303,14 @@ fn iterator_ctor(it: &mut Interp, this: &Val, _: &[Val]) -> R {
 /// `Iterator.from(o)`: its iterator, or `o` itself when it has a `next`.
 fn from(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     let o = arg(a, 0);
-    let f = if o.is_nullish() { Val::Undef } else { it.get(&o, "@@Symbol.iterator:0")? };
-    if f.is_callable() {
+    if !matches!(o, Val::Obj(_) | Val::Str(_)) {
+        return it.type_error(&crate::builtins::non_object(&o));
+    }
+    let f = it.get(&o, "@@Symbol.iterator:0")?;
+    if !f.is_nullish() {
+        if !f.is_callable() {
+            return it.type_error("method is not a function");
+        }
         return it.call(&f, &o, &[]);
     }
     if matches!(o, Val::Obj(_)) {

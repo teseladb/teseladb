@@ -237,6 +237,15 @@ fn order(scans: &mut [IndexScan]) {
 
 /// The scan of `index` for `clauses`: the intervals of its leading fields, the clauses it
 /// decides alone removed.
+/// The order in which a multikey index prefers the clauses of a field for its intervals, since
+/// it takes those of one only (measured on a `refnode` 9.0.4 on 02-11-2026 with every pair of
+/// these operators on a multikey field, in both orders: `$eq`, then `$in`, `$regex`, `$lte`,
+/// `$lt`, `$gt` and `$gte`).
+fn multikey_rank(op: &str) -> usize {
+    const ORDER: [&str; 7] = ["$eq", "$in", "$regex", "$lte", "$lt", "$gt", "$gte"];
+    ORDER.iter().position(|o| *o == op).unwrap_or(ORDER.len())
+}
+
 fn scan(pos: usize, index: &IndexMeta, clauses: &[Document], sort: &[(String, i32)]) -> IndexScan {
     let mut used = vec![false; clauses.len()];
     let mut assigned = 0;
@@ -253,15 +262,18 @@ fn scan(pos: usize, index: &IndexMeta, clauses: &[Document], sort: &[(String, i3
         }
         let mut field_bounds: Option<Vec<Bound>> = None;
         let mut taken = Vec::new();
-        for (i, c) in clauses.iter().enumerate() {
-            let Some((path, op, arg)) = on_path(c) else { continue };
-            if path != field {
-                continue;
-            }
-            let Some((b, exact)) = intervals(op, arg) else { continue };
-            if index.multikey && field_bounds.is_some() {
-                continue;
-            }
+        let on_field = clauses.iter().enumerate().filter_map(|(i, c)| {
+            let (path, op, arg) = on_path(c)?;
+            let (b, exact) = intervals(op, arg).filter(|_| path == field)?;
+            Some((i, op, b, exact))
+        });
+        let mut candidates: Vec<_> = on_field.collect();
+        // A multikey index takes the intervals of one clause of the field only.
+        if index.multikey {
+            candidates.sort_by_key(|(_, op, _, _)| multikey_rank(op));
+            candidates.truncate(1);
+        }
+        for (i, _, b, exact) in candidates {
             field_bounds = Some(match field_bounds {
                 Some(prev) => intersect(&prev, &b),
                 None => b,

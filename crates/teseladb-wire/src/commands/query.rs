@@ -939,8 +939,10 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
     if let Some(view) = super::views::resolve(ctx.backend, &ns)? {
         let stages = super::views::find_stages(ctx.cmd, &ns_text)?;
         super::views::check_collation(&view, a.collation.as_ref())?;
+        // The view's stages that the node answers itself read it (`$indexStats`, measured).
+        let stages = (stages.as_slice(), a.vars.as_ref());
         let docs =
-            super::aggregate::read_through(ctx.backend, &ns, &stages, a.vars.as_ref(), a.concern)?;
+            super::aggregate::read_through_node(ctx.backend, ctx.shared, &ns, stages, a.concern)?;
         // The pipeline's `$limit` knows its end once it has given all its documents.
         let ends = a.limit.is_some_and(|l| u64::try_from(docs.len()).is_ok_and(|n| n == l));
         return buffered_reply(ctx, &ns_text, &a, docs, ends);
@@ -1850,16 +1852,21 @@ fn count_on_node<B: Backend + ?Sized>(
         }
         // The view's pipeline fails as it parses with its own error, and as it runs as the
         // aggregation a `refrouter` makes of the count (measured).
-        let (docs, _) =
-            super::aggregate::read_through_staged(ctx.backend, ns, (&stages, None), concern)?
-                .map_err(|e| {
-                    if outside_executor(&e) {
-                        return e;
-                    }
-                    let mut e = executor_error(super::aggregate::AGGREGATE, &full(ns), e);
-                    e.code = crate::error::COUNT_ON_VIEW_FAILED;
-                    e
-                })?;
+        let (docs, _) = super::aggregate::read_through_staged(
+            ctx.backend,
+            ctx.shared,
+            ns,
+            (&stages, None),
+            concern,
+        )?
+        .map_err(|e| {
+            if outside_executor(&e) {
+                return e;
+            }
+            let mut e = executor_error(super::aggregate::AGGREGATE, &full(ns), e);
+            e.code = crate::error::COUNT_ON_VIEW_FAILED;
+            e
+        })?;
         let matched = u64::try_from(docs.len()).unwrap_or(u64::MAX);
         return Ok(counted(node, matched, skip, limit));
     }
@@ -1974,7 +1981,8 @@ fn view_distinct<B: Backend + ?Sized>(
         ));
     }
     let stages = super::views::distinct_stages(filter);
-    let docs = super::aggregate::read_through(ctx.backend, ns, &stages, None, concern)?;
+    let docs =
+        super::aggregate::read_through_node(ctx.backend, ctx.shared, ns, (&stages, None), concern)?;
     let own = match &view.collation {
         Some(b) => Some(Document::from(RawDoc::from_bytes(b)?)),
         None => None,

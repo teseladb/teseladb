@@ -192,9 +192,7 @@ fn groups(
     let mut groups: Vec<Group> = Vec::new();
     for &(index, t) in timed {
         let doc = &docs[index];
-        let first = spec
-            .bucket_id(t, spec.meta_of(doc), 0)
-            .map_err(|e| CommandError::new(INTERNAL_ERROR, format!("{e:?}")))?;
+        let first = spec.bucket_id(t, spec.meta_of(doc), 0).map_err(crate::error::internal)?;
         match groups.iter_mut().find(|(id, _)| *id == first) {
             Some((_, g)) => g.push((index, doc.clone())),
             None => groups.push((first, vec![(index, doc.clone())])),
@@ -232,10 +230,8 @@ fn write_cut<B: Backend + ?Sized>(
     with_stats(shared, batch.coll.id, |s| s.abort(&pass));
     for &(index, t) in timed.iter().take_while(|(i, _)| *i <= cut) {
         let doc = &docs[index];
-        let first = batch
-            .spec
-            .bucket_id(t, batch.spec.meta_of(doc), 0)
-            .map_err(|e| CommandError::new(INTERNAL_ERROR, format!("{e:?}")))?;
+        let first =
+            batch.spec.bucket_id(t, batch.spec.meta_of(doc), 0).map_err(crate::error::internal)?;
         let one = [(index, doc.clone())];
         let failed =
             write_group(backend, shared, w, batch, (&one, first), &mut Pass::default(), total)?;
@@ -480,7 +476,7 @@ fn write_group<B: Backend + ?Sized>(
     };
     let mut pending = group;
     let (t, meta) = (spec.time_of(&pending[0].1), spec.meta_of(&pending[0].1).cloned());
-    let t = t.map_err(|e| CommandError::new(INTERNAL_ERROR, format!("{e:?}")))?;
+    let t = t.map_err(crate::error::internal)?;
     let key = window_meta(first);
     let (route, open) = with_stats(shared, coll.id, |s| (s.route(first, pass), s.open_bucket(key)));
     let mut buckets: Option<Vec<Stored>> = None;
@@ -514,9 +510,7 @@ fn write_group<B: Backend + ?Sized>(
         if n >= MAX_BUCKETS {
             return Err(CommandError::new(WRITE_CONFLICT, "every bucket of the window is full"));
         }
-        let bucket = spec
-            .bucket_id(t, meta.as_ref(), n)
-            .map_err(|e| CommandError::new(INTERNAL_ERROR, format!("{e:?}")))?;
+        let bucket = spec.bucket_id(t, meta.as_ref(), n).map_err(crate::error::internal)?;
         let mut rules = rules.clone();
         rules.timeseries = Some(TimeSeriesRule { spec: spec.clone(), bucket });
         let docs = pending.iter().map(|(_, d)| d.clone()).collect();
@@ -696,8 +690,7 @@ fn read_bucket(spec: &BucketSpec, key: Vec<u8>, bytes: &[u8]) -> Result<Read, Co
         _ => return Err(malformed()),
     };
     let data = doc.get("data").ok_or_else(malformed)?;
-    let rows =
-        spec.measurements(raw).map_err(|e| CommandError::new(INTERNAL_ERROR, format!("{e:?}")))?;
+    let rows = spec.measurements(raw).map_err(crate::error::internal)?;
     Ok(Read { key, id, meta: doc.get("meta").cloned(), rows, data: data.clone() })
 }
 
@@ -772,7 +765,7 @@ pub fn modify<B: Backend + ?Sized>(
             next = [key.as_slice(), &[0]].concat();
             if !bounds
                 .may_match(spec, RawDoc::from_bytes(&bytes)?, collator)
-                .map_err(|e| CommandError::new(INTERNAL_ERROR, format!("{e:?}")))?
+                .map_err(crate::error::internal)?
             {
                 continue;
             }
@@ -843,10 +836,8 @@ impl Statement<'_> {
             ext: &super::engines::NodeExtensions,
             vars: self.m.vars.as_ref(),
         };
-        let unpacked = self
-            .spec
-            .unpack(RawDoc::from_bytes(bytes)?)
-            .map_err(|e| CommandError::new(INTERNAL_ERROR, format!("{e:?}")))?;
+        let unpacked =
+            self.spec.unpack(RawDoc::from_bytes(bytes)?).map_err(crate::error::internal)?;
         let (mut kept, mut value, mut n) = (Vec::new(), None, 0);
         for (row, doc) in b.rows.iter().zip(unpacked) {
             let db = doc.to_bytes()?;
@@ -862,9 +853,7 @@ impl Statement<'_> {
         let new = match kept.is_empty() {
             true => None,
             false => Some(
-                self.spec
-                    .build(b.id, b.meta.as_ref(), &kept)
-                    .map_err(|e| CommandError::new(INTERNAL_ERROR, format!("{e:?}")))?,
+                self.spec.build(b.id, b.meta.as_ref(), &kept).map_err(crate::error::internal)?,
             ),
         };
         let value = value.filter(|_| self.m.image != super::mutation::Image::None);
@@ -906,10 +895,8 @@ impl Statement<'_> {
         if !out.modified {
             return Ok(Change { new: None, n, modified: 0, value: None });
         }
-        let bucket = self
-            .spec
-            .build(b.id, out.doc.get(field), &b.rows)
-            .map_err(|e| CommandError::new(INTERNAL_ERROR, format!("{e:?}")))?;
+        let bucket =
+            self.spec.build(b.id, out.doc.get(field), &b.rows).map_err(crate::error::internal)?;
         Ok(Change { new: Some(Some(bucket)), n, modified: n, value: None })
     }
 }

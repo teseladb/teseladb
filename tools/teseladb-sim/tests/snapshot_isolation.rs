@@ -181,3 +181,20 @@ fn the_real_time_order_goes_through_chains_of_transactions() {
     let later = txn(4, vec![read("y", &[1])]);
     assert_eq!(anomaly(&[aborted, unknown, reader, later]), "none");
 }
+
+#[test]
+fn values_nobody_appended_and_transactions_of_unknown_end_add_no_edges() {
+    // `x` holds 1, 2 (an append whose end is unknown) and 9, which no transaction appended.
+    let unknown = Txn { outcome: Outcome::Unknown, ..txn(2, vec![append("x", 2)]) };
+    let history = [
+        txn(1, vec![append("x", 1)]),
+        unknown,
+        txn(3, vec![read("x", &[1, 2, 9])]),
+        txn(4, vec![read("x", &[1, 2, 9]), append("y", 1)]),
+        // A transaction acknowledged before it began (a broken external history) has no edge to
+        // itself.
+        timed(5, vec![append("z", 1)], 10, 5),
+        timed(6, vec![read("z", &[1])], 20, 30),
+    ];
+    assert_eq!(anomaly(&history), "none");
+}
