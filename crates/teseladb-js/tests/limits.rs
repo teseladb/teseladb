@@ -500,3 +500,18 @@ fn dead_strings_give_back_their_heap() {
     let src = "function(){ let x; for (let i = 0; i < 1e4; i++) x = 'abcdefghij'.repeat(1000) + i; return x.length }";
     assert_eq!(run_in_heap(src, 1 << 20), Ok(Value::Double(10_004.0)));
 }
+
+/// `Map` and `Set` find a key without going through every entry (A016-3-23): 200 000 keys go
+/// in quickly (going through them all, 2·10^10 comparisons, would not end), in insertion order
+/// and with SameValueZero (NaN is NaN, +0 is −0), after deletes and `clear` too. A delete still
+/// goes through the entries.
+#[test]
+fn maps_and_sets_find_their_keys_by_hash() {
+    let src = "function(){ const m = new Map(); const s = new Set(); for (let i = 0; i < 200000; i++) { m.set(i, i); s.add('k' + i) } for (let i = 0; i < 2000; i += 2) { m.delete(i); s.delete('k' + i) } return m.size + ':' + s.size + ':' + m.get(199999) + ':' + m.get(8) + ':' + s.has('k7') + ':' + s.has('k8') }";
+    assert_eq!(run(src), Ok(Value::String("199000:199000:199999:undefined:true:false".into())));
+    let src = "function(){ const m = new Map([[NaN, 1], [0, 2], ['0', 3]]); m.set(-0, 4); m.set(NaN, 5); m.delete('0'); m.set('0', 6); const s = new Set([1, 2]); s.clear(); s.add(2).add(1).add(2); const o = {}; m.set(o, 7); return [...m].join('|') + ':' + m.get(-0) + ':' + m.has(o) + ':' + m.has({}) + ':' + [...s].join() }";
+    assert_eq!(
+        run(src),
+        Ok(Value::String("NaN,5|0,4|0,6|[object Object],7:4:true:false:2,1".into()))
+    );
+}

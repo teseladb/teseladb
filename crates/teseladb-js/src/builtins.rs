@@ -148,6 +148,7 @@ fn bare(budget: &Rc<Budget>, proto: Option<ObjRef>, kind: Kind) -> ObjRef {
             kind,
             extensible: true,
             locks: 0,
+            keys: None,
         }),
         charged: std::cell::Cell::new(crate::value::Cost::ZERO),
         budget: budget.clone(),
@@ -1514,46 +1515,79 @@ fn map_get(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let o = coll(it, this)?;
     let k = arg(a, 0);
     Ok(match &o.borrow().kind {
-        Kind::Map(e) => {
-            e.iter().find(|(x, _)| same_value_zero(x, &k)).map_or(Val::Undef, |(_, v)| v.clone())
-        }
+        Kind::Map(e) => find_entry(&o.borrow(), e, &k).map_or(Val::Undef, |i| e[i].1.clone()),
         _ => Val::Undef,
     })
 }
 
-/// The entries of a `Map` that `set` checked.
-fn map_entries<'a>(o: &'a mut std::cell::RefMut<'_, Obj>) -> &'a mut Vec<(Val, Val)> {
-    match &mut o.kind {
-        Kind::Map(e) => e,
-        _ => unreachable!("`set` checked a Map"),
+/// Where `k` is among the entries `e` of the `Map` `b`: by its index, or by going through them
+/// when it has none yet.
+fn find_entry(b: &Obj, e: &[(Val, Val)], k: &Val) -> Option<usize> {
+    match &b.keys {
+        Some(ix) => ix.borrow_mut().find_entry(e, k),
+        None => e.iter().position(|(x, _)| same_value_zero(x, k)),
+    }
+}
+
+/// Where `k` is among the values `e` of the `Set` `b` (see [`find_entry`]).
+fn find_value(b: &Obj, e: &[Val], k: &Val) -> Option<usize> {
+    match &b.keys {
+        Some(ix) => ix.borrow_mut().find_value(e, k),
+        None => e.iter().position(|x| same_value_zero(x, k)),
     }
 }
 
 fn map_set(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let o = coll(it, this)?;
     let k = norm(arg(a, 0));
-    if let Some(slot) =
-        map_entries(&mut o.borrow_mut()).iter_mut().find(|(x, _)| same_value_zero(x, &k))
     {
-        slot.1 = arg(a, 1);
-        return Ok(this.clone());
+        let mut b = o.borrow_mut();
+        let Obj { kind, keys, .. } = &mut *b;
+        let (e, ix) = match (kind, keys.get_or_insert_with(Default::default)) {
+            (Kind::Map(e), ix) => (e, ix),
+            _ => unreachable!("`set` checked a Map"),
+        };
+        if let Some(i) = ix.get_mut().find_entry(e, &k) {
+            e[i].1 = arg(a, 1);
+            return Ok(this.clone());
+        }
     }
     it.grow_elements(&o, 2)?;
-    map_entries(&mut o.borrow_mut()).push((k, arg(a, 1)));
+    let mut b = o.borrow_mut();
+    let Obj { kind, keys, .. } = &mut *b;
+    match (kind, keys) {
+        (Kind::Map(e), Some(ix)) => {
+            e.push((k.clone(), arg(a, 1)));
+            ix.get_mut().pushed(&k, e.as_ptr() as usize, e.len());
+        }
+        _ => unreachable!("`set` checked a Map and made its index"),
+    }
     Ok(this.clone())
 }
 
 fn set_add(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let o = coll(it, this)?;
     let k = norm(arg(a, 0));
-    let present =
-        matches!(&o.borrow().kind, Kind::Set(e) if e.iter().any(|x| same_value_zero(x, &k)));
-    if !present {
-        it.grow_elements(&o, 1)?;
-        match &mut o.borrow_mut().kind {
-            Kind::Set(e) => e.push(k),
+    {
+        let mut b = o.borrow_mut();
+        let Obj { kind, keys, .. } = &mut *b;
+        let (e, ix) = match (kind, keys.get_or_insert_with(Default::default)) {
+            (Kind::Set(e), ix) => (e, ix),
             _ => unreachable!("`add` checked a Set"),
+        };
+        if ix.get_mut().find_value(e, &k).is_some() {
+            return Ok(this.clone());
         }
+    }
+    it.grow_elements(&o, 1)?;
+    let mut b = o.borrow_mut();
+    let Obj { kind, keys, .. } = &mut *b;
+    match (kind, keys) {
+        (Kind::Set(e), Some(ix)) => {
+            e.push(k.clone());
+            ix.get_mut().pushed(&k, e.as_ptr() as usize, e.len());
+        }
+        _ => unreachable!("`add` checked a Set and made its index"),
     }
     Ok(this.clone())
 }
@@ -1562,8 +1596,8 @@ fn map_has(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let o = coll(it, this)?;
     let k = arg(a, 0);
     Ok(Val::Bool(match &o.borrow().kind {
-        Kind::Map(e) => e.iter().any(|(x, _)| same_value_zero(x, &k)),
-        Kind::Set(e) => e.iter().any(|x| same_value_zero(x, &k)),
+        Kind::Map(e) => find_entry(&o.borrow(), e, &k).is_some(),
+        Kind::Set(e) => find_value(&o.borrow(), e, &k).is_some(),
         _ => false,
     }))
 }

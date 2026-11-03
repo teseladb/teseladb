@@ -533,7 +533,14 @@ impl<'c> Interp<'c> {
         });
         self.charge(size)?;
         Ok(ObjRef(Rc::new(ObjCell {
-            obj: RefCell::new(Obj { proto, props: Vec::new(), kind, extensible: true, locks: 0 }),
+            obj: RefCell::new(Obj {
+                proto,
+                props: Vec::new(),
+                kind,
+                extensible: true,
+                locks: 0,
+                keys: None,
+            }),
             charged: std::cell::Cell::new(size),
             budget: self.budget.clone(),
             shared: std::cell::Cell::new(false),

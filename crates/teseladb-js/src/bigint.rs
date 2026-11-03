@@ -8,7 +8,7 @@ pub const MAX_BITS: u64 = 1 << 20;
 
 /// An integer: sign and magnitude in 32-bit limbs, least significant first, without high zero
 /// limbs; zero has no limbs and no sign.
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
 pub struct BigInt {
     neg: bool,
     mag: Vec<u32>,

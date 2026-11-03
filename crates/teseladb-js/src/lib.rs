@@ -22,6 +22,7 @@ mod heap;
 mod interp;
 mod iterators;
 mod json;
+mod keyed;
 mod lexer;
 mod lowering;
 mod math;

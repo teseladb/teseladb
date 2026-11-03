@@ -253,12 +253,22 @@ pub struct Obj {
     /// What `Object.seal` and `Object.freeze` did to the elements an array holds in its kind
     /// ([`LENGTH_FIXED`], [`ELEMENTS_SEALED`], [`ELEMENTS_FROZEN`]).
     pub locks: u8,
+    /// The index of the keys of a `Map` or a `Set` ([`crate::keyed`]), made by its first `set`
+    /// or `add`.
+    pub keys: Option<Box<std::cell::RefCell<crate::keyed::KeyIndex>>>,
 }
 
 impl Obj {
     /// An object with nothing in it.
     fn empty() -> Obj {
-        Obj { proto: None, props: Vec::new(), kind: Kind::Ordinary, extensible: true, locks: 0 }
+        Obj {
+            proto: None,
+            props: Vec::new(),
+            kind: Kind::Ordinary,
+            extensible: true,
+            locks: 0,
+            keys: None,
+        }
     }
 }
 
