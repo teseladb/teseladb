@@ -5,7 +5,7 @@
 //! stored in `members` (`{host, priority, votes, hidden, tags}`).
 
 use teseladb_bson::{Document, RawDoc, Value};
-use teseladb_topology::replset::{ConfigError, Member, PresentationMode, ReplicaSet};
+use teseladb_topology::replset::{ConfigError, Member, PresentationMode, ReplicaSet, whole_number};
 
 use super::Backend;
 use crate::error::{BAD_VALUE, CommandError};
@@ -16,7 +16,7 @@ pub const TOPOLOGY_PRESENTATION: &str = "topologyPresentation";
 /// `electionId`.
 pub const FIRST_TERM: i64 = 1;
 /// `setVersion` of a new replica set.
-pub const FIRST_SET_VERSION: i32 = 1;
+pub const FIRST_SET_VERSION: i64 = 1;
 /// The field with the mode.
 pub const MODE: &str = "mode";
 /// The field with the set's name.
@@ -64,7 +64,7 @@ pub struct Presentation {
     /// The designated primary's host.
     pub primary: Option<String>,
     /// `setVersion`.
-    pub set_version: i32,
+    pub set_version: i64,
     /// The term.
     pub term: i64,
     /// The members' attributes, by host.
@@ -155,8 +155,10 @@ impl Presentation {
         if let Some(Value::String(s)) = doc.get(PRIMARY) {
             p.primary = Some(s.clone());
         }
-        if let Some(Value::Int32(v)) = doc.get(SET_VERSION) {
-            p.set_version = *v;
+        match doc.get(SET_VERSION) {
+            Some(Value::Int32(v)) => p.set_version = i64::from(*v),
+            Some(Value::Int64(v)) => p.set_version = *v,
+            _ => {}
         }
         if let Some(Value::Int64(t)) = doc.get(TERM) {
             p.term = *t;
@@ -186,8 +188,10 @@ impl Presentation {
         }
         let members: Vec<Value> =
             self.members.iter().map(|m| Value::Document(member_document(m))).collect();
-        let mut d =
-            d.with(SET_VERSION, self.set_version).with(TERM, self.term).with(MEMBERS, members);
+        let mut d = d
+            .with(SET_VERSION, whole_number(self.set_version))
+            .with(TERM, self.term)
+            .with(MEMBERS, members);
         if let Some(e) = &self.election {
             let (time, increment) = teseladb_hlc::to_timestamp(e.at);
             d.push(ELECTED_AT, Value::Timestamp { time, increment });
