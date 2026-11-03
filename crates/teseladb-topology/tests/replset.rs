@@ -347,3 +347,18 @@ fn configuration_document_and_member_attributes() {
     let Value::Document(only) = &members[0] else { panic!() };
     assert_eq!(only.get("priority"), Some(&Value::Double(1.5)));
 }
+
+/// A `setVersion` past 32 bits (measured on RefDb 9.0.4 on 03-11-2026, version 5000000000):
+/// the configuration keeps it as a long, `hello` gives its low 32 bits as an int, and a version
+/// that fits stays an int.
+#[test]
+fn a_set_version_past_32_bits() {
+    let big = 5_000_000_000i64;
+    let rs = ReplicaSet::new("rs0", vec![Member::new(H1)], Some(H1), big, 1).expect("valid");
+    assert_eq!(rs.set_version(), big);
+    assert_eq!(rs.config_document([1; 12]).get("version"), Some(&Value::Int64(big)));
+    assert_eq!(hello(&rs, H1).get("setVersion"), Some(&Value::Int32(705_032_704)));
+    let small = ReplicaSet::new("rs0", vec![Member::new(H1)], Some(H1), 3, 1).expect("valid");
+    assert_eq!(small.config_document([1; 12]).get("version"), Some(&Value::Int32(3)));
+    assert_eq!(hello(&small, H1).get("setVersion"), Some(&Value::Int32(3)));
+}

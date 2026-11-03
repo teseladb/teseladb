@@ -41,8 +41,6 @@ enum On {
     Config,
     /// Database `admin`.
     Admin,
-    /// Any resource.
-    Anything,
 }
 
 /// A command, where its actions apply and the actions.
@@ -138,7 +136,6 @@ const ROWS: &[Row] = &[
     ("balancerStart", On::Config, &[A::Update]),
     ("balancerStop", On::Config, &[A::Update]),
     ("resetPlacementHistory", On::Admin, &[A::MoveChunk]),
-    ("applyOps", On::Anything, &[A::AnyAction]),
     ("hostInfo", On::Cluster, &[A::HostInfo]),
     ("serverStatus", On::Cluster, &[A::ServerStatus]),
     ("netstat", On::Cluster, &[A::Netstat]),
@@ -232,6 +229,7 @@ const SPECIAL: &[(&str, Rule)] = &[
     ("killCursors", |db, cmd, _| kill_cursors(db, cmd)),
     ("aggregate", |db, cmd, _| aggregate(db, cmd)),
     ("explain", explain),
+    ("applyOps", apply_ops),
     ("mapReduce", |db, cmd, _| map_reduce(db, cmd)),
     ("create", |db, cmd, _| create(db, cmd)),
     ("renameCollection", |db, cmd, _| rename(db, cmd)),
@@ -290,7 +288,6 @@ pub fn check(name: &str, db: &str, cmd: &Document, who: &Subject<'_>) -> Check {
         On::AnyNormal => Target::AnyNormal,
         On::Config => Target::database(crate::authz::CONFIG_DB),
         On::Admin => Target::database(ADMIN_DB),
-        On::Anything => Target::Any,
     };
     all(&target, actions)
 }
@@ -385,6 +382,66 @@ fn explain(db: &str, cmd: &Document, who: &Subject<'_>) -> Check {
             None => Check::Open,
         },
         _ => Check::Open,
+    }
+}
+
+/// `applyOps` (018 FR-011), as measured on RefDb 9.0.4: a command whose `applyOps` is not an
+/// array of documents with `op` needs nothing (it fails on its own); an empty array needs
+/// everything; otherwise `applyOps` on the cluster and, entry by entry until the first one that
+/// does not parse (the command fails there), what the entry does.
+fn apply_ops(db: &str, cmd: &Document, who: &Subject<'_>) -> Check {
+    let Some(Value::Array(entries)) = cmd.get("applyOps") else { return Check::Open };
+    let docs: Option<Vec<&Document>> = entries
+        .iter()
+        .map(|e| match e {
+            Value::Document(d) if d.get("op").is_some() => Some(d),
+            _ => None,
+        })
+        .collect();
+    let Some(docs) = docs else { return Check::Open };
+    if docs.is_empty() {
+        return all(&Target::Any, &[A::AnyAction]);
+    }
+    let mut out = vec![Requirement::all(&Target::Cluster, &[A::ApplyOps])];
+    for entry in docs {
+        let Some(needs) = entry_needs(db, entry, who) else { break };
+        out.extend(needs);
+    }
+    Check::Needs(out)
+}
+
+/// What one `applyOps` entry needs; `None` if it does not parse.
+fn entry_needs(db: &str, entry: &Document, who: &Subject<'_>) -> Option<Vec<Requirement>> {
+    let (Some(op), Some(ns)) = (text(entry, "op"), text(entry, "ns")) else { return None };
+    let Some(Value::Document(o)) = entry.get("o") else { return None };
+    // The namespace of the entry; without a dot, the database's unnamed collection.
+    let (ns_db, ns_coll) = ns.split_once('.').unwrap_or((ns, ""));
+    let target = Target::collection(ns_db, ns_coll);
+    let write = |action: A| {
+        let mut needs = vec![Requirement::all(&target, &[action])];
+        if entry.get("ui").is_some() {
+            needs.push(Requirement::all(&Target::Cluster, &[A::UseUUID]));
+        }
+        Some(needs)
+    };
+    match op {
+        "i" => write(A::Insert),
+        "u" => write(A::Update),
+        "d" => write(A::Remove),
+        "n" => Some(vec![Requirement::all(&Target::Cluster, &[A::AppendOplogNote])]),
+        "c" => {
+            let (name, _) = o.iter().next()?;
+            let inner_db = if ns_db.is_empty() { db } else { ns_db };
+            Some(match check(name, inner_db, o, who) {
+                Check::Open => Vec::new(),
+                Check::Needs(needs) => needs,
+                // A cursor command does not apply.
+                Check::InDatabase(_) | Check::GetMore { .. } | Check::KillCursors { .. } => {
+                    vec![Requirement::all(&Target::Any, &[A::AnyAction])]
+                }
+            })
+        }
+        _ => None,
     }
 }
 

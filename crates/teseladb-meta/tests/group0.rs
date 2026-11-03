@@ -571,3 +571,31 @@ fn a_range_keeps_the_time_of_its_last_split_or_move() {
     old.ranges.values_mut().for_each(|r| r.moved_ms = 0);
     assert_eq!(copy, old);
 }
+
+/// The range a split makes is a new Raft group, whose terms start again at 1: its descriptor
+/// takes no leader term from its parent, so its first leader's publication is recorded. Before,
+/// it kept the parent's term and a leader of a lower term was refused until an election passed
+/// that term (`admin_port`'s `range_leaders_publish_themselves_and_spread_over_the_nodes`: a range
+/// with no leader for 30 s, its leader publishing itself every 3 s in term 1 against term 2).
+#[test]
+fn the_range_a_split_makes_records_its_first_leader() {
+    let mut sm = cluster(3);
+    run(&mut sm, range("b", "y", &[1, 2, 3]));
+    let (l, r) = (GroupId(1), GroupId(2));
+    let hint = |g: GroupId, node: u64, term: u64| Group0Command::SetLeaderHint {
+        group: g,
+        node: NodeId(node),
+        term,
+    };
+    assert_eq!(run(&mut sm, hint(l, 2, 5)), Group0Result::Ok);
+    let split = Group0Command::SplitRange { group: l, at: b"m".to_vec() };
+    assert_eq!(run(&mut sm, split), Group0Result::Range(r));
+    let done = Group0Command::CompleteSplit { group: l, at: b"m".to_vec(), at_index: 7 };
+    assert_eq!(run(&mut sm, done), Group0Result::Range(r));
+    let new = &sm.ranges[&r];
+    assert_eq!((new.leader_hint, new.leader_term), (None, 0));
+    assert_eq!(run(&mut sm, hint(r, 3, 1)), Group0Result::Ok);
+    assert_eq!(sm.ranges[&r].leader_hint, Some(NodeId(3)));
+    // The parent keeps its own.
+    assert_eq!((sm.ranges[&l].leader_hint, sm.ranges[&l].leader_term), (Some(NodeId(2)), 5));
+}
