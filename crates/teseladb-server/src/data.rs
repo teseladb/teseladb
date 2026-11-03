@@ -827,8 +827,8 @@ impl DataCore {
     }
 
     /// Flushes the memtable once the core's ranges applied nothing for [`IDLE_FLUSH`] and one of
-    /// them holds its log back, or at once for a snapshot a replica waits for
-    /// ([`MultiRaftCore::snapshot_awaits_flush`]).
+    /// them holds its log back, or at once, once per mark, for a snapshot someone waits for
+    /// ([`MultiRaftCore::snapshot_flush_mark`]).
     fn flush_idle(&mut self, core: &MultiRaftCore<CoreSm>, now: Nanos) {
         let groups = core.group_ids();
         let ranges = groups.iter().filter(|g| self.host_has(**g));
@@ -838,7 +838,7 @@ impl DataCore {
             .map(StateMachine::applied_index)
             .fold(0u64, u64::wrapping_add);
         let held = ranges.clone().any(|g| self.lsm.borrow().release_floor(*g).is_some());
-        let (idle, flush) = self.idle.step(applied, held, core.snapshot_awaits_flush(), now);
+        let (idle, flush) = self.idle.step(applied, held, core.snapshot_flush_mark(), now);
         self.idle = idle;
         if flush {
             self.lsm.borrow_mut().flush();

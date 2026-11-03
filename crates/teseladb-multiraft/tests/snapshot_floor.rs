@@ -630,6 +630,76 @@ fn a_snapshot_a_replica_waits_for_asks_for_the_flush_the_floor_waits_on() {
 }
 
 #[test]
+fn a_snapshot_asked_for_now_owes_the_flush_the_floor_waits_on() {
+    // A range born from a split takes its snapshot at once, and its leader carries out neither a
+    // split nor a replica change until it is saved: held by the floor, it owes a flush however
+    // busy the core is. Before, only the snapshot a replica asked for owed one, and on a core
+    // whose ranges applied something every few hundred milliseconds (a loaded machine) the
+    // memtable never went down and the next split of that range never came (`admin_port`'s
+    // `range_leaders_publish_themselves_and_spread_over_the_nodes`).
+    let mut c = Cluster::new(3);
+    let l = c.elect();
+    c.nodes[&l].release.set(Some(0));
+    c.propose(l, b"x");
+    c.ticks(5);
+    assert!(!c.nodes[&l].core.snapshot_awaits_flush(), "nothing asked for yet");
+    assert!(c.nodes.get_mut(&l).unwrap().core.snapshot_now(G));
+    assert_eq!(c.nodes[&l].core.snapshot_index(G), Some(0), "the snapshot waits");
+    assert!(c.nodes[&l].core.snapshot_awaits_flush(), "the leader owes a flush");
+    // The flush: the snapshot is saved, and nothing more is owed.
+    c.nodes[&l].release.set(None);
+    c.ticks(5);
+    assert!(c.nodes[&l].core.snapshot_index(G).unwrap() > 0);
+    assert!(!c.nodes[&l].core.snapshot_awaits_flush());
+}
+
+#[test]
+fn a_snapshot_asked_for_while_one_waits_owes_the_flush_for_that_one() {
+    // A split's cut raises the state machine's floor, so the core takes a snapshot on its own;
+    // held by the release floor, nobody waits for it yet. The leader that then asks for one gets
+    // that one (no other is taken), and the flush is owed for it: before, `snapshot_now` answered
+    // «one is waiting» and nothing asked for the flush, so the range never split again on a busy
+    // core.
+    let mut c = Cluster::new(3);
+    let l = c.elect();
+    c.nodes[&l].release.set(Some(0));
+    c.propose(l, CUT);
+    c.ticks(5);
+    assert_eq!(c.nodes[&l].core.snapshot_index(G), Some(0), "the cut's snapshot waits");
+    assert!(!c.nodes[&l].core.snapshot_awaits_flush(), "nobody asked for it yet");
+    assert!(!c.nodes.get_mut(&l).unwrap().core.snapshot_now(G), "the waiting one is the one");
+    assert!(c.nodes[&l].core.snapshot_awaits_flush(), "the leader owes a flush");
+    c.nodes[&l].release.set(None);
+    c.ticks(5);
+    assert!(c.nodes[&l].core.snapshot_index(G).unwrap() > 0);
+    assert!(!c.nodes[&l].core.snapshot_awaits_flush());
+}
+
+#[test]
+fn a_newer_snapshot_of_a_group_waited_for_owes_another_flush() {
+    // The flush made for the snapshot waited for may not reach the newer one a cut takes in its
+    // place: the mark changes, and the layer above flushes again.
+    let mut c = Cluster::new(3);
+    let l = c.elect();
+    c.nodes[&l].release.set(Some(0));
+    c.propose(l, b"x");
+    c.ticks(5);
+    assert_eq!(c.nodes[&l].core.snapshot_flush_mark(), None);
+    assert!(c.nodes.get_mut(&l).unwrap().core.snapshot_now(G));
+    let first = c.nodes[&l].core.snapshot_flush_mark();
+    assert!(first.is_some());
+    c.ticks(5);
+    assert_eq!(c.nodes[&l].core.snapshot_flush_mark(), first, "the same wait");
+    c.propose(l, CUT);
+    c.ticks(5);
+    let second = c.nodes[&l].core.snapshot_flush_mark();
+    assert!(second.is_some() && second != first, "{first:?} {second:?}");
+    c.nodes[&l].release.set(None);
+    c.ticks(5);
+    assert_eq!(c.nodes[&l].core.snapshot_flush_mark(), None);
+}
+
+#[test]
 fn a_periodic_snapshot_held_by_the_floor_owes_no_flush() {
     // Under writes the floor stays below the snapshot just taken: nobody waits for it, so no
     // flush is asked for (the memtable goes down when it fills).
