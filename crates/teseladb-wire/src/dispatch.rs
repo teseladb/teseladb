@@ -144,7 +144,9 @@ pub fn dispatch_with<B: Backend + ?Sized>(
                 (Action::Reply(d), Some(view)) => {
                     Action::Reply(crate::commands::replset::member_write_reply(view, req.name(), d))
                 }
-                (Action::Reply(d), None) => Action::Reply(crate::commands::txn::router_reply(d)),
+                (Action::Reply(d), None) => {
+                    Action::Reply(crate::commands::txn::router_reply(req.name(), d))
+                }
                 (a, _) => a,
             };
             if let (Some((b, s)), Some(t0)) = (cmds, started) {

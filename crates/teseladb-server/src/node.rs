@@ -18,7 +18,7 @@ use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::hash::{BuildHasher, Hasher};
 use std::io;
-use std::net::{SocketAddr, TcpListener};
+use std::net::SocketAddr;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
@@ -831,7 +831,7 @@ impl<D: Disk + Send + 'static> Node<D> {
         mut open_disk: impl FnMut() -> io::Result<D>,
         lock: Option<FileLock>,
     ) -> Result<Node<D>, NodeError> {
-        let listener = TcpListener::bind(cfg.listen_peer)?;
+        let listener = crate::listen::bind(crate::listen::PEERS, cfg.listen_peer)?;
         let peer_addr = listener.local_addr()?;
         let advertise = cfg.advertise.clone().unwrap_or_else(|| peer_addr.ip().to_string());
         let advertised_peer = format!("{advertise}:{}", peer_addr.port());
@@ -1554,7 +1554,8 @@ mod tests {
     #[test]
     fn a_join_nobody_answers_logs_its_failed_attempts() {
         // A port nothing listens on: bound, then released.
-        let dead = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().to_string();
+        let dead =
+            std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().to_string();
         let (log, lines) = captured();
         let cfg = NodeConfig {
             cores: Some(1),

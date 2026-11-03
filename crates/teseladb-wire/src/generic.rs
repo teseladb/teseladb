@@ -12,8 +12,8 @@ use crate::concerns::{
     READ_CONCERN, ReadConcernArgs, WRITE_CONCERN, WriteConcernArgs, canonical, check_support,
 };
 use crate::error::{
-    BAD_VALUE, CommandError, IDL_FAILED_TO_PARSE, IDL_UNKNOWN_FIELD, INVALID_OPTIONS,
-    MAX_STALENESS_OUT_OF_RANGE,
+    BAD_VALUE, CommandError, IDL_DUPLICATE_FIELD, IDL_FAILED_TO_PARSE, IDL_UNKNOWN_FIELD,
+    INVALID_OPTIONS, MAX_STALENESS_OUT_OF_RANGE,
 };
 use crate::ops::{MAX_TIME_MS, max_time_ms};
 use crate::types::{number, wrong_type, wrong_types};
@@ -471,6 +471,8 @@ fn tag_set(v: &Value) -> TagSet {
 
 /// The field of the first statement of a transaction.
 const START_TRANSACTION: &str = "startTransaction";
+/// The session of a command.
+const LSID: &str = "lsid";
 
 /// The commands a `refrouter` 9.0.4 parses after reading their generic arguments and checking that
 /// they take the concerns they were given: an unknown field of theirs comes after those errors
@@ -483,10 +485,18 @@ const PARSED_LATE: [&str; 6] =
 pub fn parse(cmd: &Document, name: &str) -> Result<Generic, CommandError> {
     let late = PARSED_LATE.contains(&canonical(name));
     let mut g = Generic::default();
+    let mut lsid_seen = false;
     // One walk in the order of the fields: each argument, and each unknown field of a command
     // parsed early, is checked where it comes (measured with `find`).
     for (k, _) in cmd.iter().skip(1) {
         match k {
+            // A second session (measured on a `refrouter` 9.0.4 on 03-11-2026 with `find`,
+            // `commitTransaction` and `abortTransaction`).
+            LSID if lsid_seen => {
+                let msg = format!("BSON field '{name}.{LSID}' is a duplicate field");
+                return Err(CommandError::new(IDL_DUPLICATE_FIELD, msg).parsed());
+            }
+            LSID => lsid_seen = true,
             MAX_TIME_MS => g.max_time_ms = max_time_ms(cmd, name)?,
             READ_CONCERN => g.read = ReadConcernArgs::parse(cmd, canonical(name))?,
             WRITE_CONCERN => g.write = WriteConcernArgs::parse(cmd, canonical(name))?,

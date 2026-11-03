@@ -125,7 +125,8 @@ fn version_help_and_the_development_cluster() {
     assert_eq!(run_args(&["--version"]), (0, version_text(), String::new()));
     assert_eq!(version_text(), format!("teseladb {}\n", env!("CARGO_PKG_VERSION")));
     assert_eq!(run_args(&["--help"]), (0, USAGE.to_owned(), String::new()));
-    let (code, out, _) = run_args(&["dev", "--nodes", "2"]);
+    // On ports the system chooses: a node of this machine may already hold the default ones.
+    let (code, out, _) = run_args(&["dev", "--nodes", "2", "--port", "0"]);
     assert_eq!(code, 0);
     let ready: Vec<&str> = out.lines().collect();
     assert_eq!(ready.len(), 2, "{out}");
@@ -164,7 +165,7 @@ fn start_with_only_a_configuration_file() {
     let conf = d.0.join("teseladb.yaml");
     let yaml = format!(
         "storage:\n  dbPath: {}\nnet:\n  port: 0\nteseladb:\n  insecure: true\n  cores: 1\n  \
-         peerListen: 127.0.0.1:0\n",
+         peerListen: 127.0.0.1:0\n  adminListen: 127.0.0.1:0\n  http:\n    port: 0\n",
         d.0.join("data").display()
     );
     fs::write(&conf, yaml).unwrap();
