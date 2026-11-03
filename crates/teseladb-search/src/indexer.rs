@@ -141,7 +141,7 @@ impl Indexer {
         });
         self.merges += (before - old.len()) as u64;
         for (start, end) in bounds {
-            match old.iter().position(|s| s.start == *start && s.end == *end) {
+            match old.iter().position(|s| (&s.start, &s.end) == (start, end)) {
                 Some(i) => self.segments.push(old.swap_remove(i)),
                 None => self.segments.push(Segment {
                     start: start.clone(),

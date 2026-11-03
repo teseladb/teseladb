@@ -23,13 +23,10 @@ const ELECTION_TIMEOUT_MS: i32 = 10_000;
 /// `settings.catchUpTakeoverDelayMillis`.
 const CATCH_UP_TAKEOVER_DELAY_MS: i32 = 30_000;
 
-/// A priority as RefDb writes it: a whole number as a 32-bit integer.
+/// A priority as RefDb writes it: a whole number as a 32-bit integer (a member's priority is
+/// within 0 and [`MAX_PRIORITY`], checked when the set is made).
 fn priority_value(p: f64) -> Value {
-    if p.fract() == 0.0 && p.abs() <= MAX_PRIORITY {
-        Value::Int32(p as i32)
-    } else {
-        Value::Double(p)
-    }
+    if p.fract() == 0.0 { Value::Int32(p as i32) } else { Value::Double(p) }
 }
 
 /// Milliseconds per second, for `lastWriteDate` (the seconds of the optime).
@@ -268,6 +265,9 @@ pub struct ReplicaSet {
     primary: Option<usize>,
     set_version: i32,
     term: i64,
+    /// Members in maintenance mode (`replSetMaintenance`): `RECOVERING`, neither primary nor
+    /// secondary to the drivers.
+    recovering: Vec<usize>,
 }
 
 impl ReplicaSet {
@@ -292,7 +292,14 @@ impl ReplicaSet {
                 return Err(ConfigError::DuplicateHost(m.host.clone()));
             }
         }
-        let rs = ReplicaSet { set_name, members, primary: None, set_version, term };
+        let rs = ReplicaSet {
+            set_name,
+            members,
+            primary: None,
+            set_version,
+            term,
+            recovering: Vec::new(),
+        };
         let primary = match primary {
             Some(host) => Some(rs.electable(host)?),
             None => None,
@@ -323,6 +330,20 @@ impl ReplicaSet {
     /// The term: it grows with every new designation.
     pub fn term(&self) -> i64 {
         self.term
+    }
+
+    /// The set with the members at `hosts` in maintenance mode (`RECOVERING`); the designated
+    /// primary never is.
+    pub fn with_recovering(&self, hosts: &[&str]) -> ReplicaSet {
+        let recovering = (0..self.members.len())
+            .filter(|&i| Some(i) != self.primary && hosts.contains(&self.members[i].host.as_str()))
+            .collect();
+        ReplicaSet { recovering, ..self.clone() }
+    }
+
+    /// Whether member `id` is in maintenance mode.
+    pub fn is_recovering(&self, id: MemberId) -> bool {
+        self.recovering.contains(&id.0)
     }
 
     /// The member with this host.
@@ -366,7 +387,9 @@ impl ReplicaSet {
     }
 
     fn with_primary(&self, primary: usize, set_version: i32) -> ReplicaSet {
-        ReplicaSet { primary: Some(primary), set_version, term: self.term + 1, ..self.clone() }
+        let recovering = self.recovering.iter().copied().filter(|&i| i != primary).collect();
+        let term = self.term + 1;
+        ReplicaSet { primary: Some(primary), set_version, term, recovering, ..self.clone() }
     }
 
     /// Group 0's automatic reassignment (FR-007, `PrimaryReassign.tla`): when there is no
@@ -378,6 +401,17 @@ impl ReplicaSet {
         }
         let next = self.candidate(alive, None)?;
         Some(self.with_primary(next, self.set_version + 1))
+    }
+
+    /// Priority takeover (as a member of RefDb calls an election when it has a higher priority
+    /// than the primary and is caught up, measured on 9.0.4 on 02-11-2026): the live electable
+    /// member with the highest priority, above the primary's, becomes primary with a new term;
+    /// `None` if there is none.
+    pub fn takeover(&self, alive: &dyn Fn(&str) -> bool) -> Option<ReplicaSet> {
+        let current = self.primary?;
+        let best = self.candidate(alive, Some(current))?;
+        (self.members[best].priority > self.members[current].priority)
+            .then(|| self.with_primary(best, self.set_version))
     }
 
     /// `replSetStepDown`: another live electable member becomes primary with a new term, as an
@@ -469,7 +503,7 @@ impl ReplicaSet {
         d.push("setName", self.set_name.as_str());
         d.push("setVersion", self.set_version);
         d.push(if ctx.legacy { "ismaster" } else { "isWritablePrimary" }, is_primary);
-        d.push("secondary", !is_primary);
+        d.push("secondary", !is_primary && !self.recovering.contains(&me.0));
         if let Some(p) = self.primary() {
             d.push("primary", p);
         }

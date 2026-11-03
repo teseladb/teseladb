@@ -623,6 +623,34 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         Ok(rows)
     }
 
+    fn txn_gets(
+        &mut self,
+        keys: &[Vec<u8>],
+        at: teseladb_hlc::Hlc,
+        view: &teseladb_range::push::TxnView,
+        uncertain_to: Option<teseladb_hlc::Hlc>,
+    ) -> Result<Vec<Option<(u8, Vec<u8>)>>, CommandError> {
+        self.call(|b| b.txn_gets(keys, at, view, uncertain_to))
+    }
+
+    fn txn_points(
+        &mut self,
+        keys: &[Vec<u8>],
+        at: teseladb_hlc::Hlc,
+        view: &teseladb_range::push::TxnView,
+        uncertain_to: Option<teseladb_hlc::Hlc>,
+    ) -> Result<Vec<Option<Vec<u8>>>, CommandError> {
+        let found = self.call(|b| b.txn_points(keys, at, view, uncertain_to))?;
+        // Counted as the scans of each key would count them.
+        let rows: Vec<(Vec<u8>, Vec<u8>)> = keys
+            .iter()
+            .zip(&found)
+            .filter_map(|(k, v)| v.as_ref().map(|v| (k.clone(), v.clone())))
+            .collect();
+        self.tally(&rows);
+        Ok(found)
+    }
+
     fn op_reads(&mut self) -> OpReads {
         let mut g = lock(self.shared);
         let r = g.ops.report_mut(self.id);

@@ -383,3 +383,206 @@ fn config_of_a_member_is_empty_and_droppable() {
     assert_eq!(code(&drop(&mut m, "settings")).0, 20);
     assert!(replica_set(&mut m).expect("the presentation").is_some());
 }
+
+const N3: &str = "node3.cluster:27018";
+
+fn status_of(m: &mut Mem) -> Document {
+    admin(m, Document::new().with("replSetGetStatus", 1))
+}
+
+/// `replSetMaintenance` takes this secondary in and out of maintenance mode by levels, as on
+/// RefDb 9.0.4 (measured on 02-11-2026, `f1.js`): `RECOVERING` in `replSetGetStatus` while it
+/// is in, any value but `false`, 0 or null enters, and leaving it past the last level is 96.
+#[test]
+fn maintenance_mode_is_recovering() {
+    let mut m = node();
+    replica(&mut m, N2);
+    let maintain = |m: &mut Mem, v: Value| admin(m, Document::new().with("replSetMaintenance", v));
+    assert_eq!(maintain(&mut m, Value::Boolean(true)).get("ok"), Some(&Value::Double(1.0)));
+    let r = status_of(&mut m);
+    assert_eq!(r.get("myState"), Some(&Value::Int32(3)));
+    assert_eq!(field(&r, "members.0.stateStr"), &Value::from("RECOVERING"));
+    let (rs, _) = replica_set(&mut m).expect("read").expect("a set");
+    assert!(rs.is_recovering(rs.member(N1).expect("me")));
+    maintain(&mut m, Value::from("x"));
+    maintain(&mut m, Value::Boolean(false));
+    assert_eq!(status_of(&mut m).get("myState"), Some(&Value::Int32(3)), "one level left");
+    maintain(&mut m, Value::Int32(0));
+    assert_eq!(status_of(&mut m).get("myState"), Some(&Value::Int32(2)));
+    let r = maintain(&mut m, Value::Boolean(false));
+    assert_eq!(code(&r), (96, "already out of maintenance mode".into()));
+}
+
+/// `replSetFreeze` keeps this secondary from being designated for that many seconds, and the
+/// primary that steps down may not come back for `stepDownSecs`; the answers are RefDb
+/// 9.0.4's (`f1.js`, `f2.js`).
+#[test]
+fn freeze_holds_a_member_back() {
+    let mut m = node();
+    replica(&mut m, N2);
+    m.now = 1_000_000;
+    let freeze = |m: &mut Mem, v: Value| admin(m, Document::new().with("replSetFreeze", v));
+    assert_eq!(freeze(&mut m, Value::Int32(30)), doc(&[("ok", Value::Double(1.0))]));
+    let r = freeze(&mut m, Value::Double(1.5));
+    assert_eq!(
+        r.get("warning"),
+        Some(&Value::from("you really want to freeze for only 1 second?"))
+    );
+    assert_eq!(freeze(&mut m, Value::from("x")).get("info"), Some(&Value::from("unfreezing")));
+    assert_eq!(freeze(&mut m, Value::Int32(-5)).get("info"), None);
+    freeze(&mut m, Value::Int32(30));
+    let held = teseladb_wire::commands::presentation::holds(&mut m).expect("holds");
+    let me = held.iter().find(|(h, _)| h == N1).expect("this node's hold").1;
+    assert_eq!(me.frozen_until_ms, 1_000_000 + 30_000);
+    assert!(me.holds_back(1_000_000) && !me.holds_back(1_030_000));
+    // This node made primary, N2 frozen: stepping down hands over to N3.
+    replica(&mut m, N1);
+    let n2 = teseladb_wire::commands::presentation::Hold {
+        frozen_until_ms: 2_000_000,
+        ..Default::default()
+    };
+    teseladb_wire::commands::presentation::set_hold(&mut m, N2, n2).expect("stored");
+    let r = admin(&mut m, Document::new().with("replSetStepDown", 60));
+    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+    let (rs, _) = replica_set(&mut m).expect("read").expect("a set");
+    assert_eq!(rs.primary(), Some(N3));
+}
+
+/// The status of the primary carries its election (the designation) and that of a secondary its
+/// sync source and its vote, with the fields and order of RefDb 9.0.4 (`s2.js`).
+#[test]
+fn status_with_the_election() {
+    let mut m = node();
+    replica(&mut m, N2);
+    let r = status_of(&mut m);
+    let keys: Vec<&str> = r.iter().map(|(k, _)| k).collect();
+    assert_eq!(
+        keys,
+        [
+            "set",
+            "date",
+            "myState",
+            "term",
+            "syncSourceHost",
+            "syncSourceId",
+            "heartbeatIntervalMillis",
+            "majorityVoteCount",
+            "writeMajorityCount",
+            "votingMembersCount",
+            "writableVotingMembersCount",
+            "optimes",
+            "lastStableRecoveryTimestamp",
+            "electionParticipantMetrics",
+            "members",
+            "ok"
+        ]
+    );
+    assert_eq!(r.get("syncSourceHost"), Some(&Value::from(N2)));
+    assert_eq!(r.get("syncSourceId"), Some(&Value::Int32(1)));
+    assert_eq!(field(&r, "electionParticipantMetrics.electionCandidateMemberId"), &Value::Int32(1));
+    assert_eq!(field(&r, "electionParticipantMetrics.electionTerm"), &Value::Int64(2));
+    let me: Vec<String> = match field(&r, "members.0") {
+        Value::Document(d) => d.iter().map(|(k, _)| k.to_owned()).collect(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(
+        me,
+        [
+            "_id",
+            "name",
+            "health",
+            "state",
+            "stateStr",
+            "uptime",
+            "optime",
+            "optimeWritten",
+            "optimeDate",
+            "optimeWrittenDate",
+            "lastAppliedWallTime",
+            "lastDurableWallTime",
+            "lastWrittenWallTime",
+            "lastStableRecoveryTimestamp",
+            "syncSourceHost",
+            "syncSourceId",
+            "infoMessage",
+            "configVersion",
+            "configTerm",
+            "self",
+            "lastHeartbeatMessage"
+        ]
+    );
+    assert!(matches!(field(&r, "members.1.electionTime"), Value::Timestamp { .. }));
+    assert_eq!(field(&r, "members.1.syncSourceHost"), &Value::from(""));
+    replica(&mut m, N1);
+    let r = status_of(&mut m);
+    assert_eq!(
+        field(&r, "electionCandidateMetrics.lastElectionReason"),
+        &Value::from("electionTimeout")
+    );
+    assert_eq!(field(&r, "electionCandidateMetrics.electionTerm"), &Value::Int64(3));
+    assert_eq!(field(&r, "electionCandidateMetrics.priorityAtElection"), &Value::Int32(1));
+    assert_eq!(r.get("electionParticipantMetrics"), None);
+    admin(&mut m, Document::new().with("replSetStepDown", 10));
+    let r = status_of(&mut m);
+    assert_eq!(
+        field(&r, "electionParticipantMetrics.electionCandidateMemberId"),
+        &Value::Int32(1),
+        "{r:?}"
+    );
+    let held = teseladb_wire::commands::presentation::holds(&mut m).expect("holds");
+    let me = held.iter().find(|(h, _)| h == N1).expect("the old primary's hold").1;
+    assert_eq!(me.frozen_until_ms, m.now + 10_000);
+}
+
+/// `replSetSyncFrom` answers as RefDb 9.0.4 for a host outside the set and a value that is not
+/// one (`f1.js`).
+#[test]
+fn sync_from_refusals() {
+    let mut m = node();
+    replica(&mut m, N2);
+    let r = admin(&mut m, Document::new().with("replSetSyncFrom", "nohost:1"));
+    assert_eq!(code(&r), (74, "Could not find member \"nohost:1\" in replica set".into()));
+    let r = admin(&mut m, Document::new().with("replSetSyncFrom", 5));
+    assert_eq!(code(&r), (9, "Cannot parse HostAndPort from empty string".into()));
+}
+
+/// `replicaSetPort` in `topologyPresentation` (018 FR-016): checked, kept by the next change
+/// that does not name it, dropped with 0, and refused without a set name; the replica set of the
+/// port has every member at that port.
+#[test]
+fn replica_set_port_parameter() {
+    use teseladb_wire::commands::presentation::{port_host, stored};
+    let mut m = node();
+    let refrouter = |port: Value| {
+        Document::new().with("mode", "refrouter").with("setName", "rs0").with("replicaSetPort", port)
+    };
+    let r = present(&mut m, refrouter(Value::Int32(27100)));
+    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+    let p = stored(&mut m).expect("stored");
+    assert_eq!(p.replica_set_port, Some(27100));
+    let hosts: Vec<String> = [N1, N2, N3].iter().map(|h| (*h).to_owned()).collect();
+    let rs = p.on_port(&hosts).expect("the port's replica set");
+    assert_eq!(rs.set_name(), "rs0");
+    assert!(rs.member(&port_host(N1, 27100)).is_some());
+    assert_eq!(rs.primary(), Some(port_host(N1, 27100).as_str()));
+    // A change that does not name the port keeps it; 0 closes it.
+    replica(&mut m, N2);
+    let p = stored(&mut m).expect("stored");
+    assert_eq!(p.replica_set_port, Some(27100));
+    assert_eq!(p.on_port(&hosts).expect("set").primary(), Some(port_host(N2, 27100).as_str()));
+    let r = present(&mut m, refrouter(Value::Int32(0)));
+    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+    assert_eq!(stored(&mut m).expect("stored").replica_set_port, None);
+    // Refusals.
+    let r = present(&mut m, refrouter(Value::Int32(70_000)));
+    assert_eq!(code(&r).0, 2, "{r:?}");
+    let r = present(&mut m, refrouter(Value::from("x")));
+    assert_eq!(code(&r).0, 14, "{r:?}");
+    let r = present(
+        &mut m,
+        Document::new().with("mode", "refrouter").with("setName", "").with("replicaSetPort", 27100),
+    );
+    assert_eq!(code(&r), (2, "replicaSetPort needs a setName".into()));
+    assert_eq!(port_host("a:1", 2), "a:2");
+    assert_eq!(port_host("a", 2), "a:2");
+}

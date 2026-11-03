@@ -4,9 +4,11 @@
 
 use teseladb_bson::{Document, Value};
 use teseladb_changestream::meta::{
-    ChangeMeta, DocWrite, MetaError, TxnInfo, doc_of_meta, history, lsid_document, meta_key,
+    ChangeMeta, DocWrite, META_FORMAT, META_FORMAT_RETRY, MetaError, RetryInfo, TxnInfo,
+    doc_of_meta, history, history_with, lsid_document, meta_key,
 };
 use teseladb_changestream::update_desc::UpdateDescription;
+use teseladb_hlc::Hlc;
 
 fn desc() -> UpdateDescription {
     UpdateDescription {
@@ -22,7 +24,7 @@ fn m(
     update: Option<UpdateDescription>,
     replace: bool,
 ) -> ChangeMeta {
-    ChangeMeta { txn, op, update, replace, delete: false, doc: None, moved: None }
+    ChangeMeta { txn, retry: None, op, update, replace, delete: false, doc: None, moved: None }
 }
 
 fn txn() -> TxnInfo {
@@ -122,4 +124,54 @@ fn the_lsid_of_an_event_has_its_id_and_uid() {
         .with("id", Value::Binary { subtype: 4, bytes: id })
         .with("uid", Value::Binary { subtype: 0, bytes: vec![7; 32] });
     assert_eq!(d, want);
+}
+
+fn retry(prev: Option<Hlc>, image: u8) -> RetryInfo {
+    RetryInfo { lsid: 0x0a0b, uid: [3; 32], txn_number: 11, stmt_id: 4, prev, image }
+}
+
+/// A retryable write's meta (018 FR-009) is format 3 and reads back with its session; a meta
+/// without one stays format 2, and a format 2 meta with the retry flag is refused.
+#[test]
+fn a_retryable_write_keeps_its_session() {
+    let prev = Some(Hlc { physical: 1_700_000_000_000, logical: 2 });
+    for r in [retry(None, 0), retry(prev, 1), retry(prev, 2)] {
+        let meta = ChangeMeta { retry: Some(r), ..m(None, 1, Some(desc()), false) };
+        let bytes = meta.encode().unwrap();
+        assert_eq!(bytes[0], META_FORMAT_RETRY);
+        assert_eq!(ChangeMeta::decode(&bytes), Ok(meta));
+    }
+    assert_eq!(retry(None, 1).image_name(), Some("preImage"));
+    assert_eq!(retry(None, 2).image_name(), Some("postImage"));
+    assert_eq!(retry(None, 0).image_name(), None);
+    let plain = m(None, 1, None, false).encode().unwrap();
+    assert_eq!(plain[0], META_FORMAT);
+    let mut wrong =
+        ChangeMeta { retry: Some(retry(None, 0)), ..m(None, 1, None, false) }.encode().unwrap();
+    wrong[0] = META_FORMAT;
+    assert!(matches!(ChangeMeta::decode(&wrong), Err(MetaError::Flags(_))));
+    let mut unflagged = plain.clone();
+    unflagged[0] = META_FORMAT_RETRY;
+    assert!(matches!(ChangeMeta::decode(&unflagged), Err(MetaError::Flags(_))));
+    let mut image =
+        ChangeMeta { retry: Some(retry(None, 0)), ..m(None, 1, None, false) }.encode().unwrap();
+    let last = image.len() - 1;
+    image[last] = 9;
+    assert_eq!(ChangeMeta::decode(&image), Err(MetaError::Flags(9)));
+    assert_eq!(ChangeMeta::decode(&image[..20]), Err(MetaError::Truncated));
+}
+
+/// Every document of a retryable write has a meta, the first insert too; inside a transaction the
+/// transaction's session wins.
+#[test]
+fn every_write_of_a_retryable_write_has_a_meta() {
+    let writes = [DocWrite { key: b"a".to_vec(), ..DocWrite::default() }];
+    assert!(history(&writes, None).is_empty());
+    let r = retry(None, 0);
+    let metas = history_with(&writes, None, Some(&r));
+    assert_eq!(metas.len(), 1);
+    assert_eq!(metas[0].1.retry, Some(r));
+    let t = txn();
+    let in_txn = history_with(&writes, Some((&t, 0)), Some(&r));
+    assert_eq!(in_txn[0].1.retry, None);
 }

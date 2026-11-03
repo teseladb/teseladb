@@ -131,3 +131,56 @@ fn deep_recursion_through_heavy_frames_is_too_much_recursion() {
     );
     assert_eq!(shell, Ok(Value::String("InternalError:too much recursion".into())));
 }
+
+#[test]
+fn a_catastrophic_regular_expression_stops_at_the_step_limit_and_the_deadline() {
+    let steps = Limits { steps: 20_000, ..Limits::default() };
+    for src in [
+        "function(){ return /(a*)*b/.test('a'.repeat(40)) }",
+        "function(){ return /(?:a|a)*?c/.exec('a'.repeat(40)) }",
+        "function(){ return /^(a+)+$/.test('a'.repeat(40) + 'b') }",
+        "function(){ return 'a'.repeat(40).replace(/(a|aa)+b/g, 'x') }",
+    ] {
+        let mut ctx = JsCtx { limits: steps, ..JsCtx::default() };
+        assert_eq!(run_with(src, &mut ctx), Err(JsError::Steps), "{src}");
+    }
+    let reads = Cell::new(0u32);
+    let deadline = || {
+        reads.set(reads.get() + 1);
+        reads.get() > 2
+    };
+    let mut ctx = JsCtx { deadline: Some(&deadline), ..JsCtx::default() };
+    assert_eq!(
+        run_with("function(){ return /(a*)*b/.test('a'.repeat(60)) }", &mut ctx),
+        Err(JsError::Deadline)
+    );
+}
+
+#[test]
+fn a_low_call_depth_limit_is_too_much_recursion_for_calls_and_constructors() {
+    let limits = Limits { depth: 8, ..Limits::default() };
+    for src in [
+        "function(){ function f(n){ return n ? f(n - 1) : 0 } return f(20) }",
+        "function(){ function F(n){ if (n) new F(n - 1) } new F(20) }",
+        "function(){ class A { constructor(n) { if (n) new A(n - 1) } } new A(20) }",
+        "function(){ const f = (n) => n ? [n].map(x => f(x - 1)) : 0; return f(20) }",
+    ] {
+        let mut ctx = JsCtx { limits, ..JsCtx::default() };
+        let e = run_with(src, &mut ctx).unwrap_err();
+        assert_eq!(e.message(), "too much recursion", "{src}");
+    }
+}
+
+#[test]
+fn errors_made_while_the_heap_is_full_end_the_call_out_of_memory() {
+    let limits = Limits { heap: 64 * 1024, ..Limits::default() };
+    for src in [
+        "function(){ var a = []; while (true) { try { a.push(new Array(100).fill(1)); null.x } catch (e) { a.push(e) } } }",
+        "function(){ var a = []; while (true) { try { a.push('x'.repeat(100)); eval('(') } catch (e) { a.push(e) } } }",
+        "function(){ var a = []; while (true) { try { a.push({}); +Symbol() } catch (e) { a.push(e) } } }",
+        "function(){ var a = []; while (true) { try { a.push([1, 2, 3]); new (() => 1) } catch (e) { a.push(e) } } }",
+    ] {
+        let mut ctx = JsCtx { limits, ..JsCtx::default() };
+        assert_eq!(run_with(src, &mut ctx), Err(JsError::OutOfMemory), "{src}");
+    }
+}

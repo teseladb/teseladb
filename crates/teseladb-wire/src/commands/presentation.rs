@@ -29,6 +29,30 @@ pub const SET_VERSION: &str = "setVersion";
 pub const TERM: &str = "term";
 /// The field with the members' attributes.
 pub const MEMBERS: &str = "members";
+/// The field with the replica set's own port (018 FR-016): every node serves the replica set
+/// presentation there, whatever the main port shows.
+pub const REPLICA_SET_PORT: &str = "replicaSetPort";
+/// The field with the mark of the latest designation.
+pub const ELECTED_AT: &str = "electedAt";
+/// The field with the reason of the latest designation.
+pub const ELECTION_REASON: &str = "electionReason";
+/// The reason of a designation by `setClusterParameter` or by Group 0 when the primary fell
+/// (`lastElectionReason` of RefDb 9.0.4's `electionCandidateMetrics`).
+pub const REASON_TIMEOUT: &str = "electionTimeout";
+/// The reason of a designation by Group 0 of a live member with a higher priority than the
+/// primary's.
+pub const REASON_TAKEOVER: &str = "priorityTakeover";
+/// The reason of a designation by `replSetStepDown`, which hands over to a caught-up member.
+pub const REASON_STEP_UP: &str = "stepUpRequestSkipDryRun";
+
+/// The latest designation of a primary: when and why (`electionCandidateMetrics`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Election {
+    /// The cluster mark of the designation.
+    pub at: teseladb_hlc::Hlc,
+    /// `lastElectionReason`.
+    pub reason: String,
+}
 
 /// The stored presentation.
 #[derive(Clone, Debug, PartialEq)]
@@ -45,6 +69,10 @@ pub struct Presentation {
     pub term: i64,
     /// The members' attributes, by host.
     pub members: Vec<Member>,
+    /// The latest designation of a primary.
+    pub election: Option<Election>,
+    /// The replica set's own port (`replicaSetPort`), if it is open.
+    pub replica_set_port: Option<u16>,
 }
 
 impl Default for Presentation {
@@ -56,6 +84,8 @@ impl Default for Presentation {
             set_version: FIRST_SET_VERSION,
             term: FIRST_TERM,
             members: Vec::new(),
+            election: None,
+            replica_set_port: None,
         }
     }
 }
@@ -137,6 +167,13 @@ impl Presentation {
                 p.members.push(member_of(d)?);
             }
         }
+        if let (Some(Value::Timestamp { time, increment }), Some(Value::String(reason))) =
+            (doc.get(ELECTED_AT), doc.get(ELECTION_REASON))
+        {
+            let at = teseladb_hlc::from_timestamp((*time, *increment));
+            p.election = Some(Election { at, reason: reason.clone() });
+        }
+        p.replica_set_port = port_of(doc.get(REPLICA_SET_PORT));
         Ok(p)
     }
 
@@ -149,7 +186,52 @@ impl Presentation {
         }
         let members: Vec<Value> =
             self.members.iter().map(|m| Value::Document(member_document(m))).collect();
-        d.with(SET_VERSION, self.set_version).with(TERM, self.term).with(MEMBERS, members)
+        let mut d =
+            d.with(SET_VERSION, self.set_version).with(TERM, self.term).with(MEMBERS, members);
+        if let Some(e) = &self.election {
+            let (time, increment) = teseladb_hlc::to_timestamp(e.at);
+            d.push(ELECTED_AT, Value::Timestamp { time, increment });
+            d.push(ELECTION_REASON, e.reason.as_str());
+        }
+        if let Some(port) = self.replica_set_port {
+            d.push(REPLICA_SET_PORT, i32::from(port));
+        }
+        d
+    }
+
+    /// The replica set its own port serves (018 FR-016): the same members, primary and
+    /// attributes at each node's host with port `replicaSetPort`; without a designated primary
+    /// (the `refrouter` presentation never designated one), the electable member with the highest
+    /// priority. `None` without the port or a set name.
+    pub fn on_port(&self, hosts: &[String]) -> Option<ReplicaSet> {
+        let port = self.replica_set_port?;
+        if self.set_name.is_empty() {
+            return None;
+        }
+        let moved: Vec<String> = hosts.iter().map(|h| port_host(h, port)).collect();
+        let members = self
+            .members
+            .iter()
+            .map(|m| {
+                let mut d = member_document(m);
+                d.insert("host", port_host(m.host(), port));
+                member_of(&d)
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .ok()?;
+        let primary = self.primary.as_deref().map(|p| port_host(p, port));
+        let shown = Presentation { members, primary, ..self.clone() };
+        let rs = shown.replica_set(&moved).ok()?;
+        Some(match rs.primary() {
+            Some(_) => rs,
+            None => rs.reassign(&|_| true).unwrap_or(rs),
+        })
+    }
+
+    /// The presentation after a designation at mark `at` for `reason`.
+    pub fn elected(self, at: teseladb_hlc::Hlc, reason: &str) -> Presentation {
+        let election = self.primary.is_some().then(|| Election { at, reason: reason.to_owned() });
+        Presentation { election, ..self }
     }
 
     /// The replica set over the cluster's nodes `hosts`, each with its stored attributes.
@@ -167,6 +249,108 @@ impl Presentation {
         let primary = self.primary.as_deref().filter(|p| hosts.iter().any(|h| h == p));
         ReplicaSet::new(self.set_name.as_str(), members, primary, self.set_version, self.term)
     }
+}
+
+/// `host` with port `port` in place of its own.
+pub fn port_host(host: &str, port: u16) -> String {
+    let name = host.rsplit_once(':').map_or(host, |(name, _)| name);
+    format!("{name}:{port}")
+}
+
+/// A stored `replicaSetPort`: 0 or none is no port.
+fn port_of(v: Option<&Value>) -> Option<u16> {
+    let n = match v? {
+        Value::Int32(n) => i64::from(*n),
+        Value::Int64(n) => *n,
+        _ => return None,
+    };
+    u16::try_from(n).ok().filter(|p| *p != 0)
+}
+
+/// The prefix of the cluster parameter that keeps what `replSetFreeze`, `replSetMaintenance` and
+/// `replSetStepDown` hold a member to, one per host so that two members never overwrite each
+/// other's: `{frozenUntil, maintenance}`. `getClusterParameter` does not list them.
+pub const HOLD_PREFIX: &str = "topologyHold.";
+
+/// What holds a member back from being designated primary (018 FR-007).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Hold {
+    /// Cluster milliseconds until which it is frozen (`replSetFreeze`, and the stepped-down
+    /// primary for its `stepDownSecs`); 0 when it is not.
+    pub frozen_until_ms: u64,
+    /// The depth of its maintenance mode (`replSetMaintenance`): above 0 it is `RECOVERING`.
+    pub maintenance: i32,
+    /// How many times it was stored: the `topologyVersion` counters grow with it, so the
+    /// waiting `hello`s see a member enter or leave maintenance mode.
+    pub version: i64,
+}
+
+impl Hold {
+    /// The stored document.
+    pub fn to_document(self) -> Document {
+        Document::new()
+            .with("frozenUntil", i64::try_from(self.frozen_until_ms).unwrap_or(i64::MAX))
+            .with("maintenance", self.maintenance)
+            .with("version", self.version)
+    }
+
+    /// The hold stored as `bytes`; anything unreadable holds nothing.
+    pub fn from_bytes(bytes: &[u8]) -> Hold {
+        let Ok(raw) = RawDoc::from_bytes(bytes) else { return Hold::default() };
+        let d = Document::from(raw);
+        let frozen_until_ms = match d.get("frozenUntil") {
+            Some(Value::Int64(n)) => u64::try_from(*n).unwrap_or(0),
+            _ => 0,
+        };
+        let maintenance = match d.get("maintenance") {
+            Some(Value::Int32(n)) => *n,
+            _ => 0,
+        };
+        let version = match d.get("version") {
+            Some(Value::Int64(n)) => *n,
+            _ => 0,
+        };
+        Hold { frozen_until_ms, maintenance, version }
+    }
+
+    /// Whether it keeps the member from being designated at cluster time `now_ms`.
+    pub fn holds_back(self, now_ms: u64) -> bool {
+        self.frozen_until_ms > now_ms || self.maintenance > 0
+    }
+}
+
+/// The parameter of `host`'s hold.
+pub fn hold_name(host: &str) -> String {
+    format!("{HOLD_PREFIX}{host}")
+}
+
+/// The holds among cluster parameters `params`, by host.
+pub fn holds_of<'a>(params: impl IntoIterator<Item = (&'a str, &'a [u8])>) -> Vec<(String, Hold)> {
+    params
+        .into_iter()
+        .filter_map(|(k, v)| Some((k.strip_prefix(HOLD_PREFIX)?.to_owned(), Hold::from_bytes(v))))
+        .collect()
+}
+
+/// The hosts in maintenance mode among `holds`.
+pub fn recovering(holds: &[(String, Hold)]) -> Vec<&str> {
+    holds.iter().filter(|(_, h)| h.maintenance > 0).map(|(host, _)| host.as_str()).collect()
+}
+
+/// The stored holds.
+pub fn holds<B: Backend + ?Sized>(backend: &mut B) -> Result<Vec<(String, Hold)>, CommandError> {
+    let params = backend.cluster_parameters()?;
+    Ok(holds_of(params.iter().map(|(k, v)| (k.as_str(), v.as_slice()))))
+}
+
+/// Stores `host`'s hold.
+pub fn set_hold<B: Backend + ?Sized>(
+    backend: &mut B,
+    host: &str,
+    hold: Hold,
+) -> Result<(), CommandError> {
+    let hold = Hold { version: hold.version.saturating_add(1), ..hold };
+    backend.set_cluster_parameter(&hold_name(host), hold.to_document().to_bytes()?)
 }
 
 /// The stored presentation (`refrouter` by default).
@@ -215,6 +399,8 @@ pub fn replica_set<B: Backend + ?Sized>(
     }
     let hosts = hosts(backend)?;
     let rs = p.replica_set(&hosts).map_err(|e| bad(format!("{e:?}")))?;
+    let holds = holds(backend)?;
+    let rs = rs.with_recovering(&recovering(&holds));
     Ok(Some((rs, cluster_id(backend)?)))
 }
 
@@ -233,6 +419,22 @@ pub fn parse(v: &Document) -> Result<Document, (crate::error::Code, String)> {
                 return Err((BAD_VALUE, format!("unknown topologyPresentation mode '{m}'")));
             }
             (SET_NAME | PRIMARY, Value::String(_)) => {}
+            (REPLICA_SET_PORT, Value::Int32(_) | Value::Int64(_)) => {
+                let n = match x {
+                    Value::Int32(n) => i64::from(*n),
+                    Value::Int64(n) => *n,
+                    _ => 0,
+                };
+                if u16::try_from(n).is_err() {
+                    let why = format!("replicaSetPort must be between 0 and 65535, not {n}");
+                    return Err((BAD_VALUE, why));
+                }
+            }
+            (REPLICA_SET_PORT, other) => {
+                let e =
+                    crate::types::wrong_type(&format!("ClusterServerParameter.{k}"), other, "int");
+                return Err((e.code, e.errmsg));
+            }
             (MODE | SET_NAME | PRIMARY, other) => {
                 let e = crate::types::wrong_type(
                     &format!("ClusterServerParameter.{k}"),
@@ -283,7 +485,15 @@ pub fn next(
         set_version: before.set_version.saturating_add(1),
         term: before.term.saturating_add(1),
         members: before.members.clone(),
+        election: before.election.clone(),
+        replica_set_port: match request.get(REPLICA_SET_PORT) {
+            Some(v) => port_of(Some(v)),
+            None => before.replica_set_port,
+        },
     };
+    if p.replica_set_port.is_some() && p.set_name.is_empty() {
+        return Err(bad("replicaSetPort needs a setName"));
+    }
     if mode == PresentationMode::RefRouter {
         return Ok(p);
     }

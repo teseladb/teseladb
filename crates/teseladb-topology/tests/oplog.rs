@@ -51,12 +51,14 @@ fn retryable_update_matches_refdb() {
     let entry = OplogEntry {
         txn: Some(TxnInfo { lsid: lsid(), txn_number: 2 }),
         operation: Operation::new(OpType::Update, NS, Some(UI), o.clone(), Some(id(42))),
+        retry_image: None,
         stmt_id: Some(0),
         extra: Document::new(),
         op_time: Some(at(3)),
         version: 2,
         wall_ms: Some(1_793_359_031_975),
         prev_op_time: Some(NULL_OP_TIME),
+        multi_op_type: None,
     };
     let expected = Document::new()
         .with("lsid", lsid())
@@ -75,6 +77,36 @@ fn retryable_update_matches_refdb() {
     let doc = entry.to_document();
     assert_eq!(doc, expected);
     assert_eq!(OplogEntry::from_document(&doc), Ok(entry));
+}
+
+/// A retryable `findAndModify` carries `needsRetryImage` before `stmtId`, and the `applyOps`
+/// entry of a retryable insert of several documents `multiOpType: 1` after `prevOpTime`
+/// (measured on RefDb 9.0.4 on 02-11-2026).
+#[test]
+fn retry_image_and_multi_op_type_round_trip() {
+    let doc = Document::new()
+        .with("lsid", lsid())
+        .with("txnNumber", 8i64)
+        .with("op", "u")
+        .with("ns", NS)
+        .with("ui", uuid())
+        .with("o", Document::new().with("a", 1))
+        .with("o2", id(1))
+        .with("needsRetryImage", "preImage")
+        .with("stmtId", 0)
+        .with("ts", ts(at(7)))
+        .with("t", 2i64)
+        .with("v", 2i64)
+        .with("prevOpTime", null_op_time())
+        .with("multiOpType", 1);
+    let entry = OplogEntry::from_document(&doc).unwrap();
+    assert_eq!(entry.retry_image.as_deref(), Some("preImage"));
+    assert_eq!(entry.multi_op_type, Some(1));
+    assert_eq!(entry.to_document(), doc);
+    for (field, bad) in [("needsRetryImage", Value::Int32(1)), ("multiOpType", Value::from("1"))] {
+        let wrong = doc.clone().with(field, bad);
+        assert_eq!(OplogEntry::from_document(&wrong), Err(OplogError::WrongType(field)));
+    }
 }
 
 #[test]

@@ -335,12 +335,10 @@ fn emit_native(it: &mut Interp, _: &Val, a: &[Val]) -> Result<Val, Ctrl> {
         a.first().cloned().unwrap_or(Val::Undef),
         a.get(1).cloned().unwrap_or(Val::Undef),
     ])?;
-    if let Val::Obj(o) = &sink {
-        it.grow(o, 1)?;
-        if let Kind::Array(v) = &mut o.borrow_mut().kind {
-            v.push(pair);
-        }
-    }
+    // The sink is the array `run` made: no program can name it.
+    let n = it.get(&sink, "length")?;
+    let n = it.str_of(&n)?;
+    it.set(&sink, &n, pair)?;
     Ok(Val::Undef)
 }
 
@@ -421,6 +419,36 @@ mod tests {
             None,
             &[]
         ));
+    }
+
+    #[test]
+    fn map_functions_emit_pairs_and_read_their_scope() {
+        let p = Program::compile("function() { emit(this.k, this.v * n); emit(1) }").unwrap();
+        assert!(p.is_function());
+        assert!(format!("{p:?}").contains("is_function: true"));
+        let doc = Document::new().with("k", "a").with("v", 2);
+        let scope = Document::new().with("n", 10);
+        let mut pairs = Vec::new();
+        let mut sink = |k: Value, v: Value| pairs.push((k, v));
+        let mut ctx = JsCtx { emit: Some(&mut sink), scope: Some(&scope), ..JsCtx::default() };
+        assert!(format!("{ctx:?}").contains("limits"));
+        p.call(Some(&doc), &[], &mut ctx).unwrap();
+        assert_eq!(pairs.len(), 2);
+        assert_eq!(pairs[0], (Value::from("a"), Value::Double(20.0)));
+        assert!(!Program::compile("this.a").unwrap().is_function());
+    }
+
+    #[test]
+    fn a_thrown_object_without_a_place_and_strict_programs() {
+        let e = Program::compile("function() { throw {message: 'm'} }")
+            .unwrap()
+            .call(None, &[], &mut JsCtx::default())
+            .unwrap_err();
+        assert!(format!("{e:?}").contains("Thrown"));
+        assert_eq!(e.message(), "uncaught exception: [object Object]");
+        let strict = Program::compile("'use strict'; this.a = 1; 2").unwrap();
+        let doc = Document::new();
+        assert_eq!(strict.call(Some(&doc), &[], &mut JsCtx::default()), Ok(Value::Double(2.0)));
     }
 
     #[test]

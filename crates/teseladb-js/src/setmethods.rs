@@ -20,7 +20,7 @@ struct Other {
 
 fn other_set(it: &mut Interp, v: &Val) -> R<Other> {
     if !matches!(v, Val::Obj(_)) {
-        return it.type_error(&format!("{} is not an object", it.show(v)));
+        return it.type_error(&crate::builtins::non_object(v));
     }
     let raw = it.get(v, "size")?;
     let size = it.number_of(&raw)?;
@@ -53,13 +53,13 @@ impl Other {
     fn each(&self, it: &mut Interp, mut f: impl FnMut(&mut Interp, Val) -> R<bool>) -> R<()> {
         let iter = it.call(&self.keys, &self.obj, &[])?;
         if !matches!(iter, Val::Obj(_)) {
-            return it.type_error("keys method must return an object");
+            return it.type_error(&crate::builtins::non_object(&iter));
         }
         let next = it.get(&iter, "next")?;
         loop {
             let step = it.call(&next, &iter, &[])?;
             if !matches!(step, Val::Obj(_)) {
-                return it.type_error(&format!("{} is not an object", it.show(&step)));
+                return it.type_error("iterator.next() returned a non-object value");
             }
             if it.get(&step, "done")?.truthy() {
                 return Ok(());

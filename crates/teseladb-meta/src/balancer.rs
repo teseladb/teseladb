@@ -392,7 +392,8 @@ fn leader_move(v: &View<'_>) -> Option<(GroupId, NodeId)> {
 }
 
 /// Step 5: with the leaders within the count rule, the node serving the most operations per
-/// second hands one of its ranges to the one serving the fewest that replicates it, if it serves
+/// second, if it leads more than one range, hands one of them to the one serving the fewest that
+/// replicates it, if it serves
 /// [`load::BUSY_PCT`] of the mean and [`load::BUSY_GAP`] more than that one, and the move keeps the
 /// count rule.
 fn load_leader_move(v: &View<'_>) -> Option<(GroupId, NodeId)> {
@@ -404,8 +405,10 @@ fn load_leader_move(v: &View<'_>) -> Option<(GroupId, NodeId)> {
     let all: Vec<u64> = led.iter().map(|(n, _)| ops(*n)).collect();
     let (busiest, busy_led) = *led.iter().max_by_key(|(n, _)| (ops(*n), core::cmp::Reverse(*n)))?;
     let (idlest, idle_led) = *led.iter().min_by_key(|(n, _)| (ops(*n), *n))?;
-    // The busiest node may lead nothing (it has just joined, or it is being drained).
-    if busy_led == 0 || !load::too_busy(ops(busiest), ops(idlest), &all) {
+    // The busiest node may lead nothing (it has just joined, or it is being drained). One that
+    // leads a single range keeps it: its load would go with the range and the node taking it would
+    // be the busiest at the next round, which would move it back.
+    if busy_led <= 1 || !load::too_busy(ops(busiest), ops(idlest), &all) {
         return None;
     }
     let total = v.ranges.values().filter(|r| r.leader_hint.is_some()).count();

@@ -114,18 +114,21 @@ pub fn check_create(coll: &str, options: &mut Document) -> Result<(), CommandErr
 
 /// Reads the ESC of a collection by `_id`: by the document's key, as a `find` on `_id` reads it,
 /// with the ESC's catalog entry read once. An ESC that is a view, has a collation or is no plain
-/// collection is read with `find` itself.
+/// collection is read with `find` itself. What the search reads ahead comes in one round of the
+/// backend and the probes take it from there (017 SC-002).
 pub struct CtxEsc<'c, 'a, B: Backend + ?Sized> {
     ctx: &'c mut Ctx<'a, B>,
     esc: String,
     /// The ESC's entry, once read: `Some(None)` if there is none.
     entry: Option<Option<CollectionEntry>>,
+    /// The documents read ahead by `_id` (`None`: no document), until a probe reads them.
+    ahead: std::collections::HashMap<[u8; 32], Option<Vec<u8>>>,
 }
 
 impl<'c, 'a, B: Backend + ?Sized> CtxEsc<'c, 'a, B> {
     /// A reader of ESC `esc` of the database of `ctx`.
     pub fn new(ctx: &'c mut Ctx<'a, B>, esc: &str) -> CtxEsc<'c, 'a, B> {
-        CtxEsc { ctx, esc: esc.to_string(), entry: None }
+        CtxEsc { ctx, esc: esc.to_string(), entry: None, ahead: std::collections::HashMap::new() }
     }
 
     /// The ESC's entry, read the first time.
@@ -139,9 +142,10 @@ impl<'c, 'a, B: Backend + ?Sized> CtxEsc<'c, 'a, B> {
         Ok(e)
     }
 
-    /// The document with `_id` `id` read by its key; `Err(None)` when only `find` reads it as
-    /// RefDb does (a view, a collation, a time series or capped collection).
-    fn by_key(&mut self, id: &Value) -> Result<Option<Document>, Option<CommandError>> {
+    /// The ESC's entry if its documents are read by key: `Ok(None)` without an ESC, `Err(None)`
+    /// when only `find` reads them as RefDb does (a view, a collation, a time series or capped
+    /// collection, a sharded one).
+    fn by_key_entry(&mut self) -> Result<Option<CollectionEntry>, Option<CommandError>> {
         let Some(coll) = self.entry()? else { return Ok(None) };
         let plain = matches!(
             super::kinds::kind_of(&coll)?,
@@ -155,15 +159,27 @@ impl<'c, 'a, B: Backend + ?Sized> CtxEsc<'c, 'a, B> {
         {
             return Err(None);
         }
-        let key = super::crud::doc_key(&coll, id)?;
-        let mut end = key.clone();
-        end.push(0);
-        let concern = super::args::read_concern(&Document::new(), super::query::FIND)?;
+        Ok(Some(coll))
+    }
+
+    /// The document with `_id` `id` read by its key; `Err(None)` when only `find` reads it.
+    fn by_key(&mut self, id: &Token) -> Result<Option<Document>, Option<CommandError>> {
+        let Some(coll) = self.by_key_entry()? else { return Ok(None) };
         // The read goes through the index of `_id` (`$indexStats` counts it), as `find`'s.
         self.ctx.backend.note_plan(super::plan_exec::used_id_index(false));
-        let rows = self.ctx.backend.scan(&key, &end, 1, concern)?;
-        match rows.into_iter().next() {
-            Some((_, bytes)) => {
+        let bytes = match self.ahead.remove(&id.0) {
+            Some(read) => read,
+            None => {
+                let key = super::crud::doc_key(&coll, &binary(id.0.to_vec()))?;
+                let mut end = key.clone();
+                end.push(0);
+                let concern = super::args::read_concern(&Document::new(), super::query::FIND)?;
+                let rows = self.ctx.backend.scan(&key, &end, 1, concern)?;
+                rows.into_iter().next().map(|(_, bytes)| bytes)
+            }
+        };
+        match bytes {
+            Some(bytes) => {
                 Ok(Some(Document::from(RawDoc::from_bytes(&bytes).map_err(CommandError::from)?)))
             }
             None => Ok(None),
@@ -224,16 +240,32 @@ impl<B: Backend + ?Sized> EscReader for CtxEsc<'_, '_, B> {
     type Error = CommandError;
 
     fn get(&mut self, id: &Token) -> Result<Option<Vec<u8>>, CommandError> {
-        let id = binary(id.0.to_vec());
-        let found = match self.by_key(&id) {
+        let found = match self.by_key(id) {
             Ok(d) => d,
             Err(Some(e)) => return Err(e),
-            Err(None) => self.by_find(id)?,
+            Err(None) => self.by_find(binary(id.0.to_vec()))?,
         };
         Ok(found.map(|d| match d.get("value") {
             Some(Value::Binary { bytes, .. }) => bytes.clone(),
             _ => Vec::new(),
         }))
+    }
+
+    fn read_ahead(&mut self, ids: &[Token]) -> Result<(), CommandError> {
+        let coll = match self.by_key_entry() {
+            Ok(Some(coll)) => coll,
+            Ok(None) | Err(None) => return Ok(()),
+            Err(Some(e)) => return Err(e),
+        };
+        let wanted: Vec<&Token> = ids.iter().filter(|id| !self.ahead.contains_key(&id.0)).collect();
+        let keys = wanted
+            .iter()
+            .map(|id| super::crud::doc_key(&coll, &binary(id.0.to_vec())))
+            .collect::<Result<Vec<_>, _>>()?;
+        let concern = super::args::read_concern(&Document::new(), super::query::FIND)?;
+        let found = self.ctx.backend.points(&keys, concern)?;
+        self.ahead.extend(wanted.into_iter().map(|id| id.0).zip(found));
+        Ok(())
     }
 }
 

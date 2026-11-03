@@ -248,7 +248,10 @@ fn a_collection_a_transaction_creates() {
         entries.iter().filter(|e| e.get("ns") == Some(&Value::from("v.$cmd"))).collect();
     assert_eq!(commands.len(), 2, "{shown:#?}");
     assert_eq!(field(commands[0], "o.create"), &Value::from("fresh"));
-    assert_eq!(keys(commands[0]), ["op", "ns", "ui", "o", "ts", "t", "v", "wall"]);
+    assert_eq!(
+        keys(commands[0]),
+        ["op", "ns", "ui", "o", "o2", "versionContext", "ts", "t", "v", "wall"]
+    );
     assert_eq!(field(commands[1], "o.createIndexes"), &Value::from("fresh"));
     assert_eq!(field(commands[1], "o.name"), &Value::from("k_1"));
     assert_eq!(commands[0].get("ui"), commands[1].get("ui"));
@@ -362,4 +365,221 @@ fn the_oplog_is_read_only() {
     let r = run(&mut m, "local", Document::new().with("drop", "oplog.rs"));
     assert_eq!(r.get("code"), Some(&Value::Int32(5_255_000)), "{r:?}");
     assert_eq!(r.get("errmsg"), Some(&Value::from("can't drop live oplog while replicating")));
+}
+
+/// The `lsid` of the retryable writes of these tests, with the `uid` of no user.
+fn retry_lsid() -> Document {
+    Document::new().with("id", Value::Binary { subtype: 4, bytes: vec![7; 16] })
+}
+
+fn retryable(cmd: Document, txn_number: i64) -> Document {
+    cmd.with("lsid", retry_lsid()).with("txnNumber", Value::Int64(txn_number))
+}
+
+fn op_time_of(e: &Document) -> Document {
+    Document::new()
+        .with("ts", e.get("ts").cloned().expect("ts"))
+        .with("t", e.get("t").cloned().expect("t"))
+}
+
+fn null_op_time() -> Document {
+    Document::new().with("ts", Value::Timestamp { time: 0, increment: 0 }).with("t", -1i64)
+}
+
+/// A retryable write leaves its `lsid`, `txnNumber`, `stmtId` and `prevOpTime` on each entry, as a
+/// replica set member of RefDb 9.0.4 does (measured on 02-11-2026, `w1.js` and `w2.js`): the
+/// statements of one `txnNumber` chained by `prevOpTime`, an insert of several documents as one
+/// `applyOps` entry with `multiOpType: 1`, and `needsRetryImage` on a `findAndModify`.
+#[test]
+fn retryable_writes_carry_their_session() {
+    let mut m = node();
+    let one = Document::new().with("_id", 1);
+    let ins = Document::new().with("insert", "p").with("documents", vec![Value::Document(one)]);
+    ok(&run(&mut m, DB, retryable(ins, 5)));
+    let stmt = |id: i32, u: Document| {
+        Value::Document(Document::new().with("q", Document::new().with("_id", id)).with("u", u))
+    };
+    let set = Document::new().with("$set", Document::new().with("a", 1));
+    let upd = Document::new().with("update", "p").with(
+        "updates",
+        vec![stmt(1, set.clone()), stmt(1, Document::new().with("_id", 1).with("r", 1))],
+    );
+    ok(&run(&mut m, DB, retryable(upd, 6)));
+    let two = vec![
+        Value::Document(Document::new().with("_id", 2)),
+        Value::Document(Document::new().with("_id", 3)),
+    ];
+    let batch = Document::new().with("insert", "p").with("documents", two);
+    ok(&run(&mut m, DB, retryable(batch, 7)));
+    let fam = |q: i32, extra: (&str, Value)| {
+        Document::new()
+            .with("findAndModify", "p")
+            .with("query", Document::new().with("_id", q))
+            .with(extra.0, extra.1)
+    };
+    ok(&run(&mut m, DB, retryable(fam(1, ("update", Value::Document(set.clone()))), 8)));
+    let inc = Document::new().with("$inc", Document::new().with("a", 1));
+    let post = fam(1, ("update", Value::Document(inc))).with("new", true);
+    ok(&run(&mut m, DB, retryable(post, 9)));
+    ok(&run(&mut m, DB, retryable(fam(2, ("remove", Value::Boolean(true))), 10)));
+    let plain = Document::new()
+        .with("insert", "p")
+        .with("documents", vec![Value::Document(Document::new().with("_id", 4))])
+        .with("lsid", retry_lsid());
+    ok(&run(&mut m, DB, plain));
+
+    let entries = oplog(&mut m, ns_filter("v.p"));
+    assert_eq!(entries.len(), 7, "{entries:?}");
+    let lsid = retry_lsid()
+        .with("uid", Value::Binary { subtype: 0, bytes: teseladb_hash::sha256(b"").to_vec() });
+    let ins = &entries[0];
+    assert_eq!(
+        keys(ins),
+        [
+            "lsid",
+            "txnNumber",
+            "op",
+            "ns",
+            "ui",
+            "o",
+            "o2",
+            "stmtId",
+            "ts",
+            "t",
+            "v",
+            "wall",
+            "prevOpTime"
+        ]
+    );
+    assert_eq!(ins.get("lsid"), Some(&Value::Document(lsid.clone())));
+    assert_eq!(ins.get("txnNumber"), Some(&Value::Int64(5)));
+    assert_eq!(ins.get("stmtId"), Some(&Value::Int32(0)));
+    assert_eq!(ins.get("prevOpTime"), Some(&Value::Document(null_op_time())));
+
+    let (u0, u1) = (&entries[1], &entries[2]);
+    assert_eq!(u0.get("txnNumber"), Some(&Value::Int64(6)));
+    assert_eq!(u0.get("stmtId"), Some(&Value::Int32(0)));
+    assert_eq!(u0.get("prevOpTime"), Some(&Value::Document(null_op_time())));
+    assert_eq!(u1.get("stmtId"), Some(&Value::Int32(1)));
+    assert_eq!(u1.get("prevOpTime"), Some(&Value::Document(op_time_of(u0))));
+
+    let images: Vec<(Option<&Value>, Option<&Value>)> =
+        entries[3..6].iter().map(|e| (e.get("needsRetryImage"), e.get("stmtId"))).collect();
+    assert_eq!(
+        images,
+        [
+            (Some(&Value::from("preImage")), Some(&Value::Int32(0))),
+            (Some(&Value::from("postImage")), Some(&Value::Int32(0))),
+            (Some(&Value::from("preImage")), Some(&Value::Int32(0))),
+        ]
+    );
+    assert_eq!(
+        keys(&entries[3]),
+        [
+            "lsid",
+            "txnNumber",
+            "op",
+            "ns",
+            "ui",
+            "o",
+            "o2",
+            "needsRetryImage",
+            "stmtId",
+            "ts",
+            "t",
+            "v",
+            "wall",
+            "prevOpTime"
+        ]
+    );
+    // A write without `txnNumber` is not retryable.
+    assert_eq!(keys(&entries[6]), ["op", "ns", "ui", "o", "o2", "ts", "t", "v", "wall"]);
+
+    let batches = oplog(&mut m, Document::new().with("op", "c").with("ns", "admin.$cmd"));
+    assert_eq!(batches.len(), 1, "{batches:?}");
+    let b = &batches[0];
+    assert_eq!(
+        keys(b),
+        ["lsid", "txnNumber", "op", "ns", "o", "ts", "t", "v", "wall", "prevOpTime", "multiOpType"]
+    );
+    assert_eq!(b.get("txnNumber"), Some(&Value::Int64(7)));
+    assert_eq!(b.get("multiOpType"), Some(&Value::Int32(1)));
+    let ops = docs(field(b, "o.applyOps"));
+    assert_eq!(keys(&ops[0]), ["op", "ns", "ui", "o", "o2", "stmtId"]);
+    let stmts: Vec<_> = ops.iter().map(|o| o.get("stmtId").cloned()).collect();
+    assert_eq!(stmts, [Some(Value::Int32(0)), Some(Value::Int32(1))]);
+}
+
+fn uuid_string(v: Option<&Value>) -> bool {
+    let Some(Value::String(s)) = v else { return false };
+    let parts: Vec<usize> = s.split('-').map(str::len).collect();
+    parts == [8, 4, 4, 4, 12] && s.chars().all(|c| c == '-' || c.is_ascii_hexdigit())
+}
+
+/// The `o2` and `versionContext` of the catalog entries, as a member of RefDb 9.0.4 writes them
+/// (measured on 02-11-2026, `c1.js` and `c2.js`): `create` with the collection's catalog number
+/// and its idents, `createIndexes` with the index's ident, `collMod` with the options before
+/// (and the index's options before), and a time series' `create` and `drop` with
+/// `isTimeseries`.
+#[test]
+fn catalog_entries_carry_their_o2() {
+    let mut m = node();
+    ok(&run(&mut m, DB, Document::new().with("create", "a")));
+    let index = Document::new().with("key", Document::new().with("x", 1)).with("name", "x_1");
+    let ci =
+        Document::new().with("createIndexes", "a").with("indexes", vec![Value::Document(index)]);
+    ok(&run(&mut m, DB, ci));
+    let hide = Document::new().with("name", "x_1").with("hidden", true);
+    ok(&run(&mut m, DB, Document::new().with("collMod", "a").with("index", hide.clone())));
+    ok(&run(&mut m, DB, Document::new().with("collMod", "a").with("validationLevel", "moderate")));
+    let ts = Document::new().with("timeField", "t").with("metaField", "m");
+    ok(&run(&mut m, DB, Document::new().with("create", "ts").with("timeseries", ts)));
+    ok(&run(&mut m, DB, Document::new().with("drop", "ts")));
+
+    let entries = oplog(&mut m, ns_filter("v.$cmd"));
+    let version = Value::Document(Document::new().with("OFCV", "9.0"));
+    let create = &entries[0];
+    assert_eq!(
+        keys(create),
+        ["op", "ns", "ui", "o", "o2", "versionContext", "ts", "t", "v", "wall"]
+    );
+    assert!(matches!(field(create, "o2.catalogId"), Value::Int64(_)), "{create:?}");
+    assert!(uuid_string(Some(field(create, "o2.ident"))), "{create:?}");
+    assert!(uuid_string(Some(field(create, "o2.idIndexIdent"))), "{create:?}");
+    assert_ne!(field(create, "o2.ident"), field(create, "o2.idIndexIdent"));
+    assert_eq!(create.get("versionContext"), Some(&version));
+
+    let ci = &entries[1];
+    assert_eq!(keys(ci), ["op", "ns", "ui", "o", "o2", "versionContext", "ts", "t", "v", "wall"]);
+    assert!(uuid_string(Some(field(ci, "o2.indexIdent"))), "{ci:?}");
+
+    let hidden = &entries[2];
+    assert_eq!(field(hidden, "o.index"), &Value::Document(hide));
+    let uuid = create.get("ui").cloned().expect("ui");
+    let o2 = Document::new()
+        .with("collectionOptions_old", Document::new().with("uuid", uuid.clone()))
+        .with("indexOptions_old", Document::new().with("hidden", false));
+    assert_eq!(hidden.get("o2"), Some(&Value::Document(o2)));
+    assert_eq!(hidden.get("versionContext"), Some(&version));
+
+    let level = &entries[3];
+    let o2 = Document::new().with("collectionOptions_old", Document::new().with("uuid", uuid));
+    assert_eq!(level.get("o2"), Some(&Value::Document(o2)));
+    assert_eq!(level.get("versionContext"), Some(&version));
+
+    let ts_create = &entries[4];
+    let o = match ts_create.get("o") {
+        Some(Value::Document(o)) => o.clone(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(keys(&o), ["create", "clusteredIndex", "timeseries"], "{ts_create:?}");
+    assert_eq!(
+        keys(ts_create),
+        ["op", "ns", "ui", "o", "o2", "isTimeseries", "versionContext", "ts", "t", "v", "wall"]
+    );
+    let ts_drop = entries
+        .iter()
+        .find(|e| field(e, "o").clone() == Value::Document(Document::new().with("drop", "ts")))
+        .expect("the drop");
+    assert_eq!(ts_drop.get("isTimeseries"), Some(&Value::Boolean(true)));
 }

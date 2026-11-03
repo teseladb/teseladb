@@ -315,7 +315,8 @@ fn components(n: usize, adj: &[Vec<usize>]) -> Vec<Vec<usize>> {
         }
         if Some(s.low[v]) == s.index[v] {
             let mut comp = Vec::new();
-            while let Some(w) = s.stack.pop() {
+            loop {
+                let w = s.stack.pop().expect("v is on the stack until its component ends");
                 s.on_stack[w] = false;
                 comp.push(w);
                 if w == v {
