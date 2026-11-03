@@ -629,6 +629,7 @@ mod tests {
             leader_term: 0,
             pending_split: None,
             settling: false,
+            moved_ms: 0,
         }
     }
 

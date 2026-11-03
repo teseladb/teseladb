@@ -44,6 +44,8 @@ fn cluster() -> Mem {
         voters: vec![NodeId(1)],
         generation: 1,
         leader_hint: Some(NodeId(1)),
+        moved_ms: 0,
+        replica_epoch: 1,
     }];
     ok(&admin(&mut m, r#"{"shardCollection":"q.a","key":{"x":1}}"#));
     let docs: Vec<String> = (0..100)

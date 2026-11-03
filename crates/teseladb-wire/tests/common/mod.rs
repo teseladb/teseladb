@@ -848,24 +848,43 @@ impl Backend for Mem {
                     let mut right = self.routes[i].clone();
                     right.group = teseladb_types::GroupId(next);
                     right.start = key.clone();
+                    right.moved_ms = self.now;
+                    right.generation = 1;
                     self.routes[i].end = key;
+                    self.routes[i].moved_ms = self.now;
+                    self.routes[i].generation += 1;
                     self.routes.insert(i + 1, right);
                 }
             }
             C::MergeRanges { left, right } => {
                 if let (Some(l), Some(r)) = (at(&self.routes, left), at(&self.routes, right)) {
                     self.routes[l].end = self.routes[r].end.clone();
+                    self.routes[l].moved_ms = self.routes[l].moved_ms.max(self.routes[r].moved_ms);
+                    self.routes[l].generation += 1;
                     self.routes.remove(r);
                 }
             }
             C::SetLeaderHint { group, node, .. } => {
                 if let Some(i) = at(&self.routes, group) {
-                    self.routes[i].leader_hint = Some(node);
+                    let e = &mut self.routes[i];
+                    if e.leader_hint != Some(node) {
+                        e.moved_ms = self.now;
+                    }
+                    e.leader_hint = Some(node);
                 }
             }
-            C::SetReplicas { group, add, remove, .. } => {
+            C::SetReplicas { group, epoch, add, remove } => {
                 if let Some(i) = at(&self.routes, group) {
                     let e = &mut self.routes[i];
+                    // Group 0 refuses a change named with another epoch (`RangeBusy`).
+                    if e.replica_epoch != epoch {
+                        return Err(CommandError::new(
+                            teseladb_wire::error::CONFLICTING_OPERATION_IN_PROGRESS,
+                            "Group 0 refused the change of the ranges: RangeBusy",
+                        ));
+                    }
+                    e.replica_epoch += 1;
+                    e.moved_ms = self.now;
                     e.voters.retain(|n| !remove.contains(n));
                     e.voters.extend(add);
                 }

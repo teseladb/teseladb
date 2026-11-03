@@ -44,6 +44,8 @@ fn cluster() -> Mem {
         voters: vec![NodeId(1)],
         generation: 1,
         leader_hint: Some(NodeId(1)),
+        moved_ms: 0,
+        replica_epoch: 1,
     }];
     let docs = r#"[{"_id":1,"a":1},{"_id":2,"a":2}]"#;
     ok(&m.run("m", json(&format!(r#"{{"insert":"u","documents":{docs}}}"#))));
@@ -322,6 +324,8 @@ fn empty_ranges(m: &mut Mem, node: u64, first_group: u64) {
             voters: vec![NodeId(node)],
             generation: 1,
             leader_hint: Some(NodeId(node)),
+            moved_ms: 0,
+            replica_epoch: 1,
         });
     }
     m.routes[0].end = vec![0xFF, 0];
@@ -360,6 +364,8 @@ fn unshard_collection_leaves_draining_shards_and_reads_the_first_voter() {
         voters: Vec::new(),
         generation: 1,
         leader_hint: None,
+        moved_ms: 0,
+        replica_epoch: 1,
     });
     m.draining = vec!["node2".into()];
     ok(&admin(&mut m, r#"{"unshardCollection":"m.s"}"#));
@@ -397,6 +403,8 @@ fn the_namespace_the_ranges_and_the_replicas_of_a_move() {
             voters: vec![NodeId(2)],
             generation: 1,
             leader_hint: Some(NodeId(2)),
+            moved_ms: 0,
+            replica_epoch: 1,
         },
     );
     assert_eq!(node(&mut m, "u"), Some(1));

@@ -514,3 +514,60 @@ fn tags_that_cannot_be_read_are_refused() {
     assert!(Group0Command::decode(&not_utf8).is_err(), "a name that is not UTF-8");
     assert_eq!(Group0Command::decode(&good), Ok(set));
 }
+
+#[test]
+fn a_range_keeps_the_time_of_its_last_split_or_move() {
+    // 018 FR-017: `mergeAllChunksOnShard` leaves out the ranges split or moved within the
+    // history window, so Group 0 keeps when each was last split or moved (its creation first).
+    use teseladb_meta::group0::SNAPSHOT_VERSION_WITHOUT_RANGE_MARKS;
+    let mut sm = cluster(3);
+    let time = |sm: &Group0Sm| sm.cluster_time_ms;
+    let moved = |sm: &Group0Sm, g: u64| sm.ranges[&GroupId(g)].moved_ms;
+    run(&mut sm, range("b", "y", &[1, 2]));
+    let born = time(&sm);
+    assert_eq!(moved(&sm, 1), born);
+    // A leader that publishes itself is no move; the balancer's request to another node is.
+    let hint = |n, term| Group0Command::SetLeaderHint { group: GroupId(1), node: NodeId(n), term };
+    run(&mut sm, hint(2, 4));
+    assert_eq!(moved(&sm, 1), born);
+    run(&mut sm, hint(1, 0));
+    let asked = time(&sm);
+    assert!(asked > born);
+    assert_eq!(moved(&sm, 1), asked);
+    run(&mut sm, hint(1, 0));
+    assert_eq!(moved(&sm, 1), asked, "a request for the node it already has moves nothing");
+    // A replica change moves it.
+    let change = Group0Command::SetReplicas {
+        group: GroupId(1),
+        epoch: 1,
+        add: vec![NodeId(3)],
+        remove: vec![],
+    };
+    run(&mut sm, change);
+    assert_eq!(moved(&sm, 1), time(&sm));
+    run(&mut sm, Group0Command::ReplicasSettled { group: GroupId(1), epoch: 2 });
+    // The intent of a split leaves it; the split gives both halves its time.
+    run(&mut sm, Group0Command::SplitRange { group: GroupId(1), at: b"m".to_vec() });
+    let before = moved(&sm, 1);
+    assert!(before < time(&sm));
+    let done = Group0Command::CompleteSplit { group: GroupId(1), at: b"m".to_vec(), at_index: 9 };
+    run(&mut sm, done);
+    let cut = time(&sm);
+    assert_eq!((moved(&sm, 1), moved(&sm, 2)), (cut, cut));
+    // A merge keeps the later of both.
+    run(&mut sm, Group0Command::SetLeaderHint { group: GroupId(2), node: NodeId(1), term: 0 });
+    let later = moved(&sm, 2);
+    assert!(later > cut);
+    run(&mut sm, Group0Command::MergeRanges { left: GroupId(1), right: GroupId(2) });
+    run(&mut sm, Group0Command::CompleteMerge { left: GroupId(1), right: GroupId(2) });
+    assert_eq!(moved(&sm, 1), later);
+    // The snapshot keeps it; one of the format before reads as never moved.
+    let mut copy = Group0Sm::default();
+    copy.restore(&sm.snapshot()).unwrap();
+    assert_eq!(copy, sm);
+    copy.restore(&sm.encode_snapshot_as(SNAPSHOT_VERSION_WITHOUT_RANGE_MARKS)).unwrap();
+    assert_eq!(copy.ranges[&GroupId(1)].moved_ms, 0);
+    let mut old = sm.clone();
+    old.ranges.values_mut().for_each(|r| r.moved_ms = 0);
+    assert_eq!(copy, old);
+}

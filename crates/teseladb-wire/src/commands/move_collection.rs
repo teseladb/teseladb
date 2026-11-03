@@ -246,7 +246,7 @@ pub fn lead_from<B: Backend + ?Sized>(
             let leaving: Vec<NodeId> = leader.into_iter().collect();
             backend.range_order(Group0Command::SetReplicas {
                 group: e.group,
-                epoch: e.generation,
+                epoch: e.replica_epoch,
                 add: vec![node],
                 remove: leaving,
             })?;

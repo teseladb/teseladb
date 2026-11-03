@@ -2875,6 +2875,7 @@ mod tests {
             leader_term: 0,
             pending_split: None,
             settling: false,
+            moved_ms: 0,
         };
         l.on_message(NodeMsg::Ranges(Ranges { descs: vec![desc], ..Ranges::default() }), now);
         // No leader and no voters to send it to.

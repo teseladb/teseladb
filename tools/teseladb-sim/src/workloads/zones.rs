@@ -83,6 +83,7 @@ impl ZonesWorkload {
             leader_term: 0,
             pending_split: None,
             settling: false,
+            moved_ms: 0,
         });
         let states = sm.nodes.keys().map(|n| (*n, LiveState::Alive)).collect();
         Box::new(ZonesWorkload {

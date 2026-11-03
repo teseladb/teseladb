@@ -185,7 +185,10 @@ fn group0s_snapshot_carries_the_history_and_reads_the_one_before_it() {
     let mut old = Group0Sm::default();
     old.restore(&sm.encode_snapshot_as(SNAPSHOT_VERSION_WITHOUT_CHANGELOG)).unwrap();
     assert!(old.changelog.changes.is_empty());
-    assert_eq!(old.ranges, sm.ranges);
+    // That format had no marks of the ranges' moves either (018 FR-017).
+    let mut never = sm.ranges.clone();
+    never.values_mut().for_each(|r| r.moved_ms = 0);
+    assert_eq!(old.ranges, never);
 }
 
 #[test]

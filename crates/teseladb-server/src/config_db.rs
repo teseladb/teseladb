@@ -439,6 +439,7 @@ mod tests {
             leader_term: 0,
             pending_split: None,
             settling: false,
+            moved_ms: 0,
         };
         sm.insert_range(desc);
         for listed in [documents(&sm, "chunks"), documents_with(&sm, &[], "chunks")] {

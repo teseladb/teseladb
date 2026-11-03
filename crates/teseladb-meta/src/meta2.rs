@@ -50,8 +50,10 @@ pub const DEFAULT_SNAPSHOT_BYTES: u64 = 64 << 20;
 pub const DEFAULT_SPLITS_PER_SECOND: u64 = 50;
 /// Seconds every one of which must pass the rate.
 pub const WINDOW_SECONDS: u64 = 60;
-/// Version of a Meta2 range's snapshot (3: the tenant of each capped collection, 007 FR-025).
-pub const SNAPSHOT_VERSION: u8 = 3;
+/// Version of a Meta2 range's snapshot (4: when each range was last split or moved, 018 FR-017).
+pub const SNAPSHOT_VERSION: u8 = 4;
+/// The version before the ranges' marks (03-11-2026), still read: every range as never moved.
+pub const SNAPSHOT_VERSION_WITHOUT_RANGE_MARKS: u8 = 3;
 /// The version before the tenants of the capped collections, still read: all in tenant 0.
 pub const SNAPSHOT_VERSION_WITHOUT_TENANTS: u8 = 2;
 /// The version before the changelog, still read: no change recorded.
@@ -676,15 +678,22 @@ impl Meta2Sm {
     }
 
     fn encode_snapshot(&self) -> Vec<u8> {
+        self.encode_snapshot_as(SNAPSHOT_VERSION)
+    }
+
+    /// The snapshot in format `version`: the current one, or the one before it, without the
+    /// ranges' marks.
+    pub fn encode_snapshot_as(&self, version: u8) -> Vec<u8> {
+        let marks = version > SNAPSHOT_VERSION_WITHOUT_RANGE_MARKS;
         let mut e = Encoder::new();
-        e.u8(SNAPSHOT_VERSION).u64(self.group.0).bytes(&self.start).bytes(&self.end);
+        e.u8(version).u64(self.group.0).bytes(&self.start).bytes(&self.end);
         e.bool(self.meta1.is_some());
         if let Some(m) = &self.meta1 {
             m.encode(&mut e);
         }
         e.var(self.ranges.len() as u64);
         for r in self.ranges.values() {
-            put_range(&mut e, r);
+            put_range(&mut e, r, marks);
         }
         e.var(self.split_ids.len() as u64);
         for (g, new) in &self.split_ids {
@@ -727,7 +736,7 @@ impl Meta2Sm {
             sm.meta1 = Some(Meta1::decode_with(&mut d, tenants)?);
         }
         for _ in 0..d.var()? {
-            let r = get_range(&mut d)?;
+            let r = get_range(&mut d, version > SNAPSHOT_VERSION_WITHOUT_RANGE_MARKS)?;
             sm.ranges.insert(r.group, r);
         }
         sm.reindex();
