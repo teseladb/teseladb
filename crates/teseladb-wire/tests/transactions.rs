@@ -884,6 +884,24 @@ fn shard_doc() -> Value {
     Value::Document(Document::new().with("recoveryShardId", shard_name(1)))
 }
 
+/// A command with two `lsid` fields is refused before anything else, as a `refrouter` 9.0.4
+/// refuses it (measured on 03-11-2026).
+#[test]
+fn a_second_lsid_is_a_duplicate_field() {
+    let mut m = node();
+    for (db, name) in [(DB, "find"), ("admin", "commitTransaction"), ("admin", "abortTransaction")]
+    {
+        let mut cmd =
+            Document::new().with(name, if name == "find" { Value::from("c") } else { 1.into() });
+        cmd.push("lsid", lsid(90));
+        cmd.push("lsid", lsid(90));
+        let cmd = cmd.with("txnNumber", Value::Int64(1)).with("autocommit", false);
+        let r = run(&mut m, db, cmd);
+        assert_eq!(code(&r), Some(&Value::Int32(40413)), "{r:?}");
+        assert_eq!(errmsg(&r), format!("BSON field '{name}.lsid' is a duplicate field"));
+    }
+}
+
 /// How a session's transaction is named in RefDb's messages, for the session `lsid(n)`.
 fn session(n: u8) -> String {
     let h = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
