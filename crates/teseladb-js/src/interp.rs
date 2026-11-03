@@ -1021,8 +1021,9 @@ impl<'c> Interp<'c> {
                     let n = n as usize;
                     let grow = n.saturating_sub(self.array_len(o));
                     self.grow_elements(o, grow)?;
-                    if let Kind::Array(items) = &mut o.borrow_mut().kind {
-                        items.resize(n, Val::Hole);
+                    match &mut o.borrow_mut().kind {
+                        Kind::Array(items) => items.resize(n, Val::Hole),
+                        _ => unreachable!("the length of an array"),
                     }
                     return Ok(());
                 }
@@ -1047,9 +1048,12 @@ impl<'c> Interp<'c> {
                     let grow = i + 1 - items.len();
                     drop(b);
                     self.grow_elements(o, grow)?;
-                    if let Kind::Array(items) = &mut o.borrow_mut().kind {
-                        items.resize(i + 1, Val::Hole);
-                        items[i] = value;
+                    match &mut o.borrow_mut().kind {
+                        Kind::Array(items) => {
+                            items.resize(i + 1, Val::Hole);
+                            items[i] = value;
+                        }
+                        _ => unreachable!("an element of an array"),
                     }
                     return Ok(());
                 }
@@ -3409,7 +3413,10 @@ impl<'c> Interp<'c> {
         let cooked = parts.cooked.iter().map(|c| c.clone().map_or(Val::Undef, Val::Str)).collect();
         let strings = self.array(cooked)?;
         let raw = self.array(parts.raw.iter().cloned().map(Val::Str).collect())?;
-        let (Val::Obj(s), Val::Obj(r)) = (&strings, &raw) else { return Ok(strings) };
+        let (s, r) = match (&strings, &raw) {
+            (Val::Obj(s), Val::Obj(r)) => (s, r),
+            _ => unreachable!("arrays made above"),
+        };
         crate::props::lock(r, true);
         let fixed = Prop { writable: false, configurable: false, ..Prop::hidden(raw.clone()) };
         self.define(s, "raw", fixed)?;

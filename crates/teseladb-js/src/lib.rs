@@ -315,7 +315,11 @@ impl Program {
                 g.0.pristine.set(pristine);
             }
             let env = it.global_env.clone();
-            env.borrow_mut().this = Some(this_val.clone());
+            // The program's function gets `this` as its receiver; the global scope's `this`, which
+            // code of an indirect `eval` sees, is the global object (measured on 03-11).
+            let global_this =
+                if self.is_function { Val::Obj(it.realm.global.clone()) } else { this_val.clone() };
+            env.borrow_mut().this = Some(global_this);
             let mut vals = Vec::with_capacity(args.len());
             for a in args {
                 vals.push(bson::from_bson(it, a, 0)?);

@@ -551,6 +551,9 @@ impl Parser {
             Tok::Ident(w) if &*w == "await" && self.in_static => {
                 self.fail("await is a reserved identifier".into())
             }
+            Tok::Ident(w) if self.strict && is_strict_reserved(&w) => {
+                self.fail(format!("{w} is a reserved identifier"))
+            }
             Tok::Ident(w) if !is_reserved(&w) => {
                 self.i += 1;
                 Ok(w)
@@ -679,6 +682,9 @@ impl Parser {
             }
             "class" => {
                 self.i += 1;
+                if self.is("{") || self.is_word("extends") {
+                    return self.fail("class statement requires a name".into());
+                }
                 let name_pos = self.pos();
                 let c = self.class_rest()?;
                 let name = c
@@ -1002,7 +1008,12 @@ impl Parser {
             Tok::Ident(w) if &**w == "const" => Some(DeclKind::Const),
             Tok::Ident(w)
                 if &**w == "let"
-                    && matches!(self.peek_at(1), Tok::Ident(_) | Tok::Punct("[" | "{")) =>
+                    && match self.peek_at(1) {
+                        // `for (let in o)` reads the variable `let` (strict code refuses it).
+                        Tok::Ident(n) => &**n != "in",
+                        Tok::Punct("[" | "{") => true,
+                        _ => false,
+                    } =>
             {
                 Some(DeclKind::Let)
             }
@@ -2259,6 +2270,15 @@ impl Parser {
                 "yield" if self.in_gen || self.strict => {
                     return self.fail_at(pos, "yield is a reserved identifier".into());
                 }
+                _ if self.strict && is_strict_reserved(&w) => {
+                    return self.fail_at(pos, format!("{w} is a reserved identifier"));
+                }
+                // `yield 1` outside a generator: an operand right after it on the same line
+                // (measured on a `refrouter` 9.0.4 on 03-11).
+                "yield" if self.operand_follows() => {
+                    return self
+                        .fail_at(pos, "yield expression is only valid in generators".into());
+                }
                 _ => Expr::Ident(w, pos),
             },
             _ => {
@@ -2267,6 +2287,17 @@ impl Parser {
                 return self.fail(format!("expected expression, got {what}"));
             }
         })
+    }
+
+    /// Whether the next token, on the same line, starts an operand: a literal or a name.
+    fn operand_follows(&self) -> bool {
+        let Some(t) = self.toks.get(self.i) else { return false };
+        !t.newline_before
+            && match &t.tok {
+                Tok::Num(_) | Tok::BigInt(_) | Tok::Str(_) | Tok::Template(..) => true,
+                Tok::Ident(w) => !matches!(&**w, "in" | "of" | "instanceof"),
+                _ => false,
+            }
     }
 
     /// The `async` and `*` before a method's name, when they are not the name itself.
@@ -2435,4 +2466,19 @@ fn to_pattern(e: Expr) -> Result<Pattern, String> {
         }
         _ => Err("invalid assignment left-hand side".into()),
     }
+}
+
+/// The words strict code may not use as names (ECMA-262 §13.1.1).
+fn is_strict_reserved(w: &str) -> bool {
+    matches!(
+        w,
+        "implements"
+            | "interface"
+            | "let"
+            | "package"
+            | "private"
+            | "protected"
+            | "public"
+            | "static"
+    )
 }

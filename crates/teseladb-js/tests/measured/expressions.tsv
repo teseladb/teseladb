@@ -5188,3 +5188,99 @@ bsonWoCompare({a: new Date(NaN)}, {a: new Date(-8.64e15)})	J:1
 bsonWoCompare({a: new Date(NaN)}, {a: new Date(0)})	J:0
 bsonWoCompare({a: new Date(NaN)}, {a: new Date(1)})	J:-1
 bsonBinaryEqual({a: new Date(NaN)}, {a: new Date(0)})	J:true
+(function(){ 'use strict'; return typeof this })()	S:undefined
+(function(){ 'use strict'; return typeof this }).call(5)	S:number
+(function(){ 'use strict'; return this }).call(null)	J:null
+(() => typeof this).call(7)	S:object
+(function(){ return typeof this }).call(null)	S:object
+(function(){ try { x; let x = 1 } catch (e) { return e.name + ':' + e.message } })()	S:ReferenceError:can't access lexical declaration 'x' before initialization
+(function(){ let n = 0; const it = { [Symbol.iterator]() { return { next() { n++; return { done: n > 3, value: n } }, return() { return { done: true } } } } }; const [a, b] = it; return a + ',' + b + ',' + n })()	S:1,2,2
+(function(){ let n = 0; const it = { [Symbol.iterator]() { return { next() { n++; return { done: n > 2, value: n } }, return() { n += 10; return {} } } } }; const [a, b, c] = it; return a + ',' + b + ',' + c + ',' + n })()	S:1,2,undefined,3
+(function(){ const it = { [Symbol.iterator]() { return { next() { return { done: false, value: 1 } }, return() { throw new Error('r') } } } }; try { for (const x of it) { break } } catch (e) { return e.message } })()	S:r
+(function(){ const it = { [Symbol.iterator]() { return { next() { return { done: false, value: 1 } }, return() { throw new Error('r') } } } }; try { for (const x of it) { throw new Error('body') } } catch (e) { return e.message } })()	S:body
+(function(){ class A { static { this.k = 2 } static m() {} } return A.k })()	J:2
+(function(){ class A { #p() { return 1 } static #q() { return 2 } static r() { return A.#q() } t() { return this.#p() } } return A.r() + new A().t() })()	J:3
+(function(){ class A { #p() {} set() { try { this.#p = 1 } catch (e) { return e.message } } } return new A().set() })()	S:cannot assign to private method
+(function(){ return eval('this') === undefined })()	J:false
+(function(){ return (0, eval)('typeof this') })()	S:object
+(function(){ return null?.a.b })()	J:undefined
+(function(){ const o = { a: null }; return o.a?.b.c })()	J:undefined
+(function(){ var eval = (x) => 'mine:' + x; return eval('1') })()	S:mine:1
+(function(){ return eval(5) })()	J:5
+(function(){ return eval({ a: 1 }).a })()	J:1
+(function(){ try { return Math.max(...[1, {valueOf(){ throw new Error('v') }}]) } catch (e) { return e.message } })()	S:v
+(function(){ try { return isNaN(Symbol()) } catch (e) { return e.message } })()	S:can't convert symbol to number
+(function(){ function F(){} F.prototype = {}; const B = F.bind(null); return new F() instanceof B })()	J:true
+(function(){ class A { #x = 2; m() { return eval('this.#x') } } const a = eval('1'); return a + new A().m() })()	J:3
+(function(){ const o = { m() { return eval('2') } }; return eval('2') + o.m() })()	J:4
+(function(){ var f = class { static { delete this.name } }; return typeof f.name + ':' + f.name })()	S:string:
+(function(){ var o = { x: class { static name = 'k' } }; return o.x.name })()	S:k
+(function(){ var g = class { static name() {} }; return typeof g.name })()	S:function
+(function(){ let h; h = class { static name = 'z' }; return h.name })()	S:z
+(function(){ class A { constructor() { this.v = 1 } } class B extends A { x = this.v + 1 } return new B().x })()	J:2
+(function(){ try { Reflect.construct(function(){}, [], 1) } catch (e) { return e.message } })()	S:Reflect is not defined
+(function(){ const a = [1,2,3]; a.length = 5; a.length = 1; return a.length + ':' + a })()	S:1:1
+(function(){ const a = []; a[3] = 1; return a.length })()	J:4
+(function(){ 'use strict'; const o = Object.freeze({ a: 1 }); try { o.a = 2 } catch (e) { return e.message } })()	S:"a" is read-only
+(function(){ function f(){ return new.target === undefined } return f() + ':' + new f().constructor.name })()	S:true:f
+(function(){ return (0, eval)('"use strict"; this === globalThis') })()	J:true
+(function(){ return (0, eval)('this') === globalThis })()	J:true
+(function(){ return new Function('return typeof this')() })()	S:object
+(function(){ function* g(){ const a = [1, ...(yield 0), 4]; return a.join() } const it = g(); it.next(); return it.next([2, 3]).value })()	S:1,2,3,4
+(function(){ function* g(){ const o = { get x() { return 1 }, [yield 'k']: 2 }; return Object.keys(o).join() } const it = g(); it.next(); return it.next('z').value })()	S:x,z
+(function(){ function* g(){ const o = { a: 1 }; return o[yield 'k'] } const it = g(); it.next(); return it.next('a').value })()	J:1
+(function(){ function* g(){ return Math.max(1, yield 0, 3) } const it = g(); it.next(); return it.next(9).value })()	J:9
+(function(){ function* g(){ const o = { f(a, b) { return a + b } }; return o.f(yield 1, 2) } const it = g(); it.next(); return it.next(5).value })()	J:7
+(function(){ function* g(){ let x = null; x ??= yield 1; return x } const it = g(); it.next(); return it.next(7).value })()	J:7
+(function(){ function* g(){ let x = 1; x += yield 1; return x } const it = g(); it.next(); return it.next(7).value })()	J:8
+(function(){ function* g(){ const o = { v: 0 }; o.v ||= yield 1; return o.v } const it = g(); it.next(); return it.next(4).value })()	J:4
+(function(){ function* g(){ for (let i = 0; i < (yield 'c'); i++) {} return 'd' } const it = g(); it.next(); return it.next(0).value })()	S:d
+(function(){ function* g(){ let s = 0; for (let i = 0; i < 3; i += yield i) s++; return s } const it = g(); it.next(); it.next(1); it.next(1); return it.next(1).value })()	J:3
+(function(){ function* g(){ for (;;) { yield 1; break } return 2 } return [...g()].join() })()	S:1
+(function(){ function* g(){ a: { yield 1; break a } return 2 } const it = g(); it.next(); return it.next().value })()	J:2
+(function(){ function* g(){ try { yield 1; throw new Error('x') } catch { return 'caught' } } const it = g(); it.next(); return it.next().value })()	S:caught
+(function(){ function* g(){ try { yield 1 } catch (e) { return 'c:' + e } finally { } } const it = g(); it.next(); return it.throw('t').value })()	S:c:t
+(function(){ function* g(){ l: for (const x of [1, 2]) { for (const y of [3]) { yield x; continue l } } return 'e' } return [...g()].join() })()	S:1,2
+(function(){ function* g(){ let i = 0; while (i < 2) { i++; yield i } do { yield 9 } while (false) } return [...g()].join() })()	S:1,2,9
+(function(){ function* g(){ var t; t = yield 1; return t } const it = g(); it.next(); return it.next(3).value })()	J:3
+(function(){ function* g(){ const { a = yield 1 } = {}; return a } const it = g(); it.next(); return it.next(8).value })()	J:8
+(function(){ try { return eval('async function f(){ await 1 } typeof f') } catch (e) { return e.message } })()	S:function
+(function(){ try { eval('({a b})') } catch (e) { return e.message } })()	S:missing : after property id
+(function(){ try { eval('for (let in x) {}') } catch (e) { return e.name } })()	S:ReferenceError
+(function(){ try { return eval('let x = 1; x') } catch (e) { return e.message } })()	J:1
+(function(){ class A { #x = 1; static has(o) { return #x in o } } return A.has(new A()) + ':' + A.has({}) })()	S:true:false
+(function(){ try { return new (class { constructor() { return 1 } })() instanceof Object } catch (e) { return e.message } })()	J:true
+(function(){ return typeof new (class A {}) })()	S:object
+(function(){ try { eval('class { #x; #x }') } catch (e) { return e.message } })()	S:class statement requires a name
+(function(){ try { eval('function f(){ yield 1 }'); return 'ok' } catch (e) { return e.message } })()	S:yield expression is only valid in generators
+(function(){ return isFinite('5') + ':' + Number.isFinite('5') + ':' + Number.isNaN('x') + ':' + Number.isNaN(NaN) })()	S:true:false:false:true
+(function(){ return [...new Map([[1, 2]])[Symbol.iterator]()].join() + ':' + new Set([1])[Symbol.iterator].name + ':' + new Map()[Symbol.iterator].name })()	S:1,2:values:entries
+(function(){ return Number('﻿ 12 ﻿') + parseFloat('  3.5') })()	J:15.5
+(function(){ const m = new Map([[1, 'a']]); m.set(1, 'b'); const s = new Set([1]); s.add(1); return m.get(1) + s.size })()	S:b1
+(function(){ return (1.005).toFixed(2) + ':' + (2.5).toFixed(0) + ':' + (0.000001).toPrecision(1) })()	S:1.00:3:0.000001
+(function(){ try { return NumberLong.prototype.toNumber.call(NumberInt(3)) } catch (e) { return e.message } })()	S:Cannot call "toNumber" on object of type "NumberInt"
+(function(){ return NumberInt(4).valueOf() + NumberLong(5).toNumber() })()	J:9
+(function(){ try { return ObjectId.prototype.getTimestamp() } catch (e) { return e.message } })()	S:Cannot call "getter" on prototype of "ObjectId"
+(function(){ try { return BinData.prototype.length() } catch (e) { return e.message } })()	J:undefined
+(function(){ return tojson(new DBRef('c', 1, 'd')) })()	S:DBRef("c", 1, "d")
+(function(){ return tojson(new DBRef('c', 1)) })()	S:DBRef("c", 1)
+(function(){ try { eval('"use strict"; for (let in x) {}') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:let is a reserved identifier
+(function(){ var r = []; eval('for (let in {a: 1, b: 2}) r.push(let)'); return r.join() })()	S:a,b
+(function(){ try { eval('class extends Object {}') } catch (e) { return e.message } })()	S:class statement requires a name
+(function(){ try { eval('function f(){ yield "s" }'); return 'ok' } catch (e) { return e.message } })()	S:yield expression is only valid in generators
+(function(){ try { eval('function f(){ yield x }'); return 'ok' } catch (e) { return e.message } })()	S:yield expression is only valid in generators
+(function(){ try { return eval('var yield = 2; yield\n+1') } catch (e) { return e.message } })()	J:3
+(function(){ try { return eval('var yield = 2; yield * 3') } catch (e) { return e.message } })()	J:6
+(function(){ try { return eval('var yield = {}; "a" in yield') } catch (e) { return e.message } })()	J:false
+(function(){ try { eval('function f(){ yield [1] }'); return 'ok' } catch (e) { return e.message } })()	S:ok
+(function(){ try { eval('"use strict"; let = 1') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:let is a reserved identifier
+(function(){ try { eval('"use strict"; var let = 1') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:let is a reserved identifier
+(function(){ try { eval('"use strict"; let + 1') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:let is a reserved identifier
+(function(){ try { eval('"use strict"; static + 1') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:static is a reserved identifier
+(function(){ try { eval('"use strict"; var implements') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:implements is a reserved identifier
+(function(){ try { eval('"use strict"; package + 1') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:package is a reserved identifier
+(function(){ 'use strict'; const o = { static: 1, let: 2 }; return o.static + o.let })()	J:3
+(function(){ 'use strict'; class A { static m() { return 3 } } return A.m() })()	J:3
+(function(){ 'use strict'; let x = 4; return x })()	J:4
+(function(){ var let = 5; return let })()	J:5
+(function(){ try { eval('"use strict"; function f(static) {}') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:static is a reserved identifier

@@ -597,8 +597,9 @@ fn obj_group_by(it: &mut Interp, _: &Val, a: &[Val]) -> R {
         match cur {
             Val::Obj(arr) => {
                 it.grow_elements(&arr, 1)?;
-                if let Kind::Array(v) = &mut arr.borrow_mut().kind {
-                    v.push(x);
+                match &mut arr.borrow_mut().kind {
+                    Kind::Array(v) => v.push(x),
+                    _ => unreachable!("a group made as an array"),
                 }
             }
             _ => {
@@ -1520,21 +1521,25 @@ fn map_get(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     })
 }
 
+/// The entries of a `Map` that `set` checked.
+fn map_entries<'a>(o: &'a mut std::cell::RefMut<'_, Obj>) -> &'a mut Vec<(Val, Val)> {
+    match &mut o.kind {
+        Kind::Map(e) => e,
+        _ => unreachable!("`set` checked a Map"),
+    }
+}
+
 fn map_set(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let o = coll(it, this)?;
     let k = norm(arg(a, 0));
-    let mut b = o.borrow_mut();
-    if let Kind::Map(e) = &mut b.kind {
-        if let Some(slot) = e.iter_mut().find(|(x, _)| same_value_zero(x, &k)) {
-            slot.1 = arg(a, 1);
-        } else {
-            drop(b);
-            it.grow_elements(&o, 2)?;
-            if let Kind::Map(e) = &mut o.borrow_mut().kind {
-                e.push((k, arg(a, 1)));
-            }
-        }
+    if let Some(slot) =
+        map_entries(&mut o.borrow_mut()).iter_mut().find(|(x, _)| same_value_zero(x, &k))
+    {
+        slot.1 = arg(a, 1);
+        return Ok(this.clone());
     }
+    it.grow_elements(&o, 2)?;
+    map_entries(&mut o.borrow_mut()).push((k, arg(a, 1)));
     Ok(this.clone())
 }
 
@@ -1545,8 +1550,9 @@ fn set_add(it: &mut Interp, this: &Val, a: &[Val]) -> R {
         matches!(&o.borrow().kind, Kind::Set(e) if e.iter().any(|x| same_value_zero(x, &k)));
     if !present {
         it.grow_elements(&o, 1)?;
-        if let Kind::Set(e) = &mut o.borrow_mut().kind {
-            e.push(k);
+        match &mut o.borrow_mut().kind {
+            Kind::Set(e) => e.push(k),
+            _ => unreachable!("`add` checked a Set"),
         }
     }
     Ok(this.clone())
