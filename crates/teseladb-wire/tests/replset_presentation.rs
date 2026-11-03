@@ -300,6 +300,14 @@ fn a_member_answers_as_one() {
     let r =
         dispatched(&mut m, "admin", Document::new().with("shardingState", 1), Some(view.clone()));
     assert_eq!(r.get("enabled"), Some(&Value::Boolean(false)), "{r:?}");
+    // A config server's command on a secondary: not primary (measured on 9.0.4, T025).
+    let r = dispatched(
+        &mut m,
+        "admin",
+        Document::new().with("_configsvrAddShard", "x"),
+        Some(view.clone()),
+    );
+    assert_eq!(code(&r), (10107, "not primary".into()));
     let r = dispatched(&mut m, "admin", Document::new().with("hello", 1), Some(view));
     assert_eq!(r.get("setName"), Some(&Value::from("rs0")));
     assert_eq!(r.get("secondary"), Some(&Value::Boolean(true)));
@@ -312,9 +320,16 @@ fn a_member_answers_as_one() {
     let me = set.member(N1).expect("member");
     let view =
         Arc::new(ReplicaView { set, me, last: LastWrite { op_time: at, majority_op_time: at } });
-    let r =
-        dispatched(&mut m, "admin", Document::new().with("_configsvrAddShard", "x"), Some(view));
+    let r = dispatched(
+        &mut m,
+        "admin",
+        Document::new().with("_configsvrAddShard", "x"),
+        Some(view.clone()),
+    );
     assert_eq!(code(&r), (20, "_configsvrAddShard can only be run on config servers".into()));
+    // A reply with `n` of a command that is not a write stays as it is.
+    let r = dispatched(&mut m, "v", Document::new().with("count", "c"), Some(view));
+    assert!(r.get("n").is_some() && r.get("electionId").is_none(), "{r:?}");
 }
 
 fn config_names(m: &mut Mem) -> Vec<String> {

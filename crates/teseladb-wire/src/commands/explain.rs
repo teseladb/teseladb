@@ -706,7 +706,8 @@ fn find<B: Backend + ?Sized>(
         let mut s = Stage::new("EXPRESS_IXSCAN");
         s.head.push("keyPattern", Document::new().with("_id", 1));
         s.head.push("indexName", "_id_");
-        s.counters.push("keysExamined", 1);
+        // An `_id` that is not there examines no key (measured on a `refnode` 9.0.4).
+        s.counters.push("keysExamined", long(found));
         s.counters.push("docsExamined", long(found));
         s.returned = found;
         let plan = match &projection {

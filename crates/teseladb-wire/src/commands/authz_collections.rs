@@ -151,7 +151,7 @@ pub fn documents<B: Backend + ?Sized>(
         None if super::oplog::is_oplog(ns) => {
             super::oplog::documents(backend, &Document::new(), None).map(Some)
         }
-        None if super::local_db::generated(ns) => super::local_db::documents(backend, ns),
+        None if super::local_db::generated(ns) => super::local_db::documents(backend, ns).map(Some),
         // The collections of `config` that show the cluster (007 FR-017).
         None => super::config_db::documents(backend, ns),
     }

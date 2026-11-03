@@ -280,3 +280,26 @@ fn zone_edges() {
     assert_eq!(of_u.len(), 1);
     assert_eq!(of_u[0].keys, None);
 }
+
+/// A name with no database, and the same range for another zone, refused as a `refrouter` 9.0.4
+/// refuses them (measured on 03-11-2026, `z3.js`); the range then leaves its zone with
+/// `zone: null`.
+#[test]
+fn an_empty_database_and_the_same_range_in_another_zone() {
+    let mut m = cluster();
+    ok(&admin(&mut m, r#"{"addShardToZone":"node1","zone":"A"}"#));
+    ok(&admin(&mut m, r#"{"addShardToZone":"node1","zone":"B"}"#));
+    fails(
+        &admin(&mut m, r#"{"updateZoneKeyRange":".t","min":{"a":1},"max":{"a":5},"zone":"A"}"#),
+        73,
+        "invalid namespace specified for request",
+    );
+    let range = r#""min":{"a":100},"max":{"a":105}"#;
+    ok(&admin(&mut m, &format!(r#"{{"updateZoneKeyRange":"z.t",{range},"zone":"A"}}"#)));
+    fails(
+        &admin(&mut m, &format!(r#"{{"updateZoneKeyRange":"z.t",{range},"zone":"B"}}"#)),
+        178,
+        "Zone range: { a: 100 } -->> { a: 105 }  on  B is overlapping with existing: { a: 100 } -->> { a: 105 }  on  A",
+    );
+    ok(&admin(&mut m, &format!(r#"{{"updateZoneKeyRange":"z.t",{range},"zone":null}}"#)));
+}

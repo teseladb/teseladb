@@ -3,7 +3,7 @@
 
 use teseladb_bson::{Document, RawDoc, Value};
 
-use super::{MutationResult, f, read_capped, read_error, read_timeseries};
+use super::{MutationResult, f, read_capped, read_error, read_mark, read_timeseries};
 use crate::error::INTERNAL_ERROR;
 
 fn bytes(d: &Document) -> Vec<u8> {
@@ -35,4 +35,13 @@ fn a_malformed_result_is_an_internal_error() {
     // A result with no lists reads as one with no errors and no warnings.
     let r = MutationResult::decode(&bytes(&Document::new().with(f::N, 2i64))).expect("decodes");
     assert_eq!((r.n, r.errors.len(), r.warnings.len()), (2, 0, 0));
+}
+
+#[test]
+fn a_malformed_mark_reads_as_none() {
+    let half = Document::new().with("p", 1i64);
+    let b = bytes(&Document::new().with("m", half));
+    let raw = RawDoc::from_bytes(&b).expect("reads");
+    assert_eq!(read_mark(raw.get("m")), None);
+    assert_eq!(read_mark(None), None);
 }

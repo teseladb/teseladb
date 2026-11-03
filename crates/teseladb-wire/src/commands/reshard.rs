@@ -875,7 +875,7 @@ impl Resharding {
             self.check_killed(shared)?;
         }
         let (start, end) = super::query::documents_of(&self.old);
-        let (rows, resolved) = backend.changes(&start, &end, self.mark)?;
+        let (rows, resolved) = self.history(backend, &start, &end)?;
         if resolved <= self.mark {
             return Ok(self.mark);
         }
@@ -929,6 +929,27 @@ impl Resharding {
         }
         self.report(shared);
         Ok(resolved)
+    }
+
+    /// The collection's history after the mark, and the mark it is complete at. In the apply
+    /// phase, up to the ranges' resolved marks. From the critical section on, the writes wait
+    /// for the cutover and the target is a fence's mark (or the rename's): each range reads up
+    /// to it as a read at that mark, without waiting for its leader to close marks past it,
+    /// which it does 200 ms behind its clock and at a pace a busy machine stretches. A range
+    /// with an intent below the target still resolves below it, and the catch-up reads again.
+    fn history<B: Backend + ?Sized>(
+        &self,
+        backend: &mut B,
+        start: &[u8],
+        end: &[u8],
+    ) -> Result<(Vec<Versioned>, Hlc), CommandError> {
+        if self.phase == Phase::Apply {
+            return backend.changes(start, end, self.mark);
+        }
+        let ranges = backend.range_changes(start, end, self.mark, Some(self.target))?;
+        let resolved = ranges.iter().map(|r| r.resolved).min().unwrap_or(self.mark);
+        let rows = ranges.into_iter().flat_map(|r| r.rows).filter(|r| r.ts <= resolved);
+        Ok((rows.collect(), resolved))
     }
 
     /// Starts the critical section: the collection's options take [`CUTOVER`].

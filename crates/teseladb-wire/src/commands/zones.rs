@@ -215,7 +215,7 @@ pub fn interval_keys(
     let fields = field_names(&key.key);
     let full = |d: &Document| {
         let given = field_names(d);
-        (given.len() <= fields.len() && fields[..given.len()] == given[..]).then(|| {
+        fields.starts_with(&given).then(|| {
             key.key.iter().fold(Document::new(), |out, (f, _)| {
                 out.with(f, d.get(f).cloned().unwrap_or(Value::MinKey))
             })

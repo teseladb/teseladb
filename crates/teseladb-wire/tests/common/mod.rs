@@ -459,6 +459,47 @@ impl Backend for Mem {
         Ok((rows, resolved))
     }
 
+    // One range: up to its resolved mark, or with `at` up to that mark as a read at it (every
+    // write of this node is applied at once), within the window of a read. An intent not yet
+    // resolved (`changes_lag`) keeps the mark below it either way.
+    fn range_changes(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        from: Hlc,
+        at: Option<Hlc>,
+    ) -> Result<Vec<teseladb_wire::commands::RangeBatch>, CommandError> {
+        let intent = self.changes_lag > 0;
+        let (rows, resolved) = self.changes(start, end, from)?;
+        let wanted = at.filter(|a| !intent && *a > resolved && a.physical <= self.now);
+        let wanted = match (wanted, self.changes_window_ms > 0 && from.physical > 0) {
+            (Some(a), true) => Some(a.min(Hlc {
+                physical: from.physical.saturating_add(self.changes_window_ms),
+                logical: 0,
+            })),
+            (w, _) => w,
+        };
+        let (rows, resolved) = match wanted {
+            Some(a) => {
+                let rows = self
+                    .history
+                    .iter()
+                    .filter(|v| v.ts > from && v.ts <= a)
+                    .filter(|v| start <= v.key.as_slice() && v.key.as_slice() < end)
+                    .cloned()
+                    .collect();
+                (rows, a.max(resolved))
+            }
+            None => (rows, resolved),
+        };
+        Ok(vec![teseladb_wire::commands::RangeBatch {
+            start: start.to_vec(),
+            end: end.to_vec(),
+            rows,
+            resolved,
+        }])
+    }
+
     fn catalog_changes(
         &mut self,
         from: Hlc,

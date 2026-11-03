@@ -231,3 +231,38 @@ fn the_admin_command_issues_a_token_that_enrolls_a_node() {
         std::thread::sleep(Duration::from_millis(100));
     }
 }
+
+/// Every step of a start that enrolls and joins leaves its line in the log before the node is
+/// ready, so that a start that hangs shows where; the token's secret never goes to the log.
+#[test]
+fn a_node_logs_each_step_of_its_start() {
+    let d = dir("steps");
+    let first = member(&d.0.join("n1"));
+    let join = first.peer_addr().to_string();
+    let token = first.create_enroll_token(Duration::from_secs(3600)).unwrap();
+    let log = d.0.join("n2.log");
+    let second = enrolls(&d.0.join("n2"), &log, &join, &token);
+    let text = std::fs::read_to_string(&log).unwrap();
+    let steps = [
+        "enrolling with the cluster",
+        "enrolled",
+        "peer port open",
+        "joining the cluster",
+        "joined the cluster",
+        "starting the cores",
+        "core started",
+        "listening for clients",
+        "waiting for the cluster to be ready",
+        "node ready",
+    ];
+    let mut from = 0;
+    for step in steps {
+        let at =
+            text[from..].find(step).unwrap_or_else(|| panic!("no {step:?} after {from}: {text}"));
+        from += at + step.len();
+    }
+    let secret = token.split('_').next_back().unwrap();
+    assert!(!text.contains(secret), "{text}");
+    drop(second);
+    first.stop();
+}
