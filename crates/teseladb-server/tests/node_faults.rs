@@ -11,6 +11,7 @@ use std::time::Duration;
 use teseladb_raftlog::{
     Disk, FileId, IoDone, IoErrno, IoOp, MemDisk, open_node, write_atomic, write_node_meta,
 };
+use teseladb_range::host::RangeError;
 use teseladb_server::data::DataError;
 use teseladb_server::node::{
     DATA_FORMAT, DATA_FORMAT_FILE, JOIN_VOTERS, Node, NodeConfig, NodeError,
@@ -122,7 +123,9 @@ impl Disk for FaultyDisk {
             Fails::Reads | Fails::Crashes | Fails::OpsFrom(_) => return self.inner.execute(op),
         };
         if hit {
-            return IoDone::Err { op, errno };
+            // As a real disk answers: the operation without its data, which is how the store
+            // knows which of its operations failed.
+            return IoDone::Err { op: op.without_data(), errno };
         }
         self.inner.execute(op)
     }
@@ -228,11 +231,15 @@ fn a_core_whose_log_fails_after_the_start_acknowledges_no_write() {
         assert!(std::time::Instant::now() < deadline, "no write before the fault");
         std::thread::sleep(Duration::from_millis(10));
     }
-    // Fail-stop: once a log write fails, the store acknowledges nothing more.
+    // Fail-stop: once a log write fails, the store acknowledges nothing more. The write whose
+    // entry was in the failed batch gets no answer; the range's group stops with its store, and a
+    // later one finds it unavailable.
     armed.store(true, Ordering::Release);
     for value in [&b"first"[..], b"second"] {
         let put = node.put(&[1, 1], value, Duration::from_millis(500));
-        assert!(matches!(put, Err(DataError::NoAnswer)), "{put:?}");
+        let refused =
+            matches!(put, Err(DataError::NoAnswer | DataError::Range(RangeError::Unavailable)));
+        assert!(refused, "{put:?}");
     }
     node.stop();
 }
