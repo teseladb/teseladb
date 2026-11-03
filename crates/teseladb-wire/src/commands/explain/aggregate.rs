@@ -425,11 +425,11 @@ fn facet_counts<B: Backend + ?Sized>(
                 Value::Array(docs(&stages[..=k]).into_iter().map(Value::Document).collect());
             let mut run = before.to_vec();
             run.push(Document::new().with("$facet", Document::new().with("x", prefix)));
-            let found = super::super::aggregate::read_through(
+            let found = super::super::aggregate::read_through_node(
                 ctx.backend,
+                ctx.shared,
                 ns,
-                &run,
-                None,
+                (&run, None),
                 teseladb_range::read::ReadConcern::Local,
             )?;
             // The one document of the `$facet`, with the branch's documents.
@@ -456,11 +456,11 @@ fn lookup_run<B: Backend + ?Sized>(
     st: &Step,
     l: &Lookup,
 ) -> Result<(Document, Document), CommandError> {
-    let inputs = super::super::aggregate::read_through(
+    let inputs = super::super::aggregate::read_through_node(
         ctx.backend,
+        ctx.shared,
         ns,
-        before,
-        None,
+        (before, None),
         teseladb_range::read::ReadConcern::Local,
     )?;
     let vars = lookup_vars(l, inputs.last())?;
@@ -774,6 +774,7 @@ fn through_counted<B: Backend + ?Sized>(
     };
     let docs = super::super::aggregate::read_through_spilling(
         ctx.backend,
+        ctx.shared,
         ns,
         (stages, None),
         teseladb_range::read::ReadConcern::Local,
@@ -789,11 +790,11 @@ fn through<B: Backend + ?Sized>(
     ns: &Namespace,
     stages: &[Document],
 ) -> Result<u64, CommandError> {
-    let n = super::super::aggregate::read_through(
+    let n = super::super::aggregate::read_through_node(
         ctx.backend,
+        ctx.shared,
         ns,
-        stages,
-        None,
+        (stages, None),
         teseladb_range::read::ReadConcern::Local,
     )?
     .len();
