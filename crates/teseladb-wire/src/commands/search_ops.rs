@@ -314,15 +314,13 @@ impl SearchIndexes {
             if self.store.is_none() || self.write_file(&id).is_err() {
                 return;
             }
-            if let Some(b) = self.built.remove(&id) {
-                let served = Served {
-                    version: b.version,
-                    defined_ms: b.defined_ms,
-                    definition: b.definition,
-                    failure: None,
-                };
-                self.out.insert(id, served);
-            }
+            let served = self.built.remove(&id).map(|b| Served {
+                version: b.version,
+                defined_ms: b.defined_ms,
+                definition: b.definition,
+                failure: None,
+            });
+            self.out.extend(served.map(|s| (id, s)));
             self.evicted += 1;
             total -= bytes;
         }
@@ -459,7 +457,7 @@ fn definition_of(
     let (raw, view) = split_definition(&entry.definition)?;
     let (segments, completed) = match entry.kind {
         SearchIndexKind::Search => {
-            let def = Definition::parse(&raw).map_err(|e| query_error(e.message("")))?;
+            let def = search_definition(&raw)?;
             let completed = def.normalized();
             (Segments::Search(Box::new(Indexer::new(def))), completed)
         }
@@ -889,18 +887,15 @@ fn answer<B: Backend + ?Sized>(
     found.map_err(|e| query_error(e.0))
 }
 
-/// The documents of the collection of each synonym mapping of `entry`, in the database of `ns`,
-/// read at the query's mark (an absent collection has none).
+/// The documents of the collection of each synonym mapping of `search` index `entry`, in the
+/// database of `ns`, read at the query's mark (an absent collection has none).
 fn synonym_documents<B: Backend + ?Sized>(
     backend: &mut B,
     ns: &Namespace,
     entry: &SearchIndexEntry,
 ) -> Result<Vec<(String, Vec<Document>)>, CommandError> {
-    if entry.kind != SearchIndexKind::Search {
-        return Ok(Vec::new());
-    }
     let (raw, _) = split_definition(&entry.definition)?;
-    let def = Definition::parse(&raw).map_err(|e| query_error(e.message("")))?;
+    let def = search_definition(&raw)?;
     let mut out = Vec::new();
     for s in &def.synonyms {
         let source = Namespace { db: ns.db.clone(), coll: s.collection.clone() };
@@ -1000,8 +995,12 @@ fn stored_source(definition: &Definition, spec: &Document, found: Vec<Found>) ->
 
 /// The definition `{mappings: {dynamic: true}}`, to read a query with no index of its type.
 fn dynamic_definition() -> Result<Definition, CommandError> {
-    let def = Document::new().with("mappings", Document::new().with("dynamic", true));
-    Definition::parse(&def).map_err(|e| query_error(e.message("")))
+    search_definition(&Document::new().with("mappings", Document::new().with("dynamic", true)))
+}
+
+/// The `search` definition `raw` of the catalog (checked when it was stored).
+fn search_definition(raw: &Document) -> Result<Definition, CommandError> {
+    Definition::parse(raw).map_err(|e| query_error(e.message("")))
 }
 
 /// The documents of `$vectorSearch` on `ns` with `spec`: `refsearch` reads the query first, then
@@ -1097,6 +1096,27 @@ fn detail(host: u64, served: &Served, status: &str, queryable: bool) -> Document
 #[cfg(test)]
 mod tests {
     use super::*;
+    use teseladb_meta::indexes::SearchIndexStatus;
+
+    /// A definition of the catalog that no longer parses is `refsearch`'s error (code 8), for both
+    /// kinds of index.
+    #[test]
+    fn a_stored_definition_that_does_not_parse_is_a_query_error() {
+        for kind in [SearchIndexKind::Search, SearchIndexKind::VectorSearch] {
+            let e = SearchIndexEntry {
+                id: [7; 12],
+                collection: 1,
+                name: "default".to_owned(),
+                kind,
+                definition: Document::new().with("mappings", 5).to_bytes().expect("bytes"),
+                status: SearchIndexStatus::Ready,
+                version: 0,
+                defined_ms: 0,
+            };
+            let err = definition_of(&e).expect_err("refused");
+            assert_eq!(err.code, UNKNOWN_ERROR, "{kind:?}");
+        }
+    }
 
     #[test]
     fn segments_behind_the_history_floor_start_over() {

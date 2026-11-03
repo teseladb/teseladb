@@ -52,7 +52,7 @@ impl Match {
                 "the match filter must be an expression in an object",
             ));
         };
-        if uses_where(d) {
+        if !ctx.allows_where() && uses_where(d) {
             return Err(error(BAD_VALUE, "$where is not allowed in this context"));
         }
         let filter = Filter::parse(d, FilterUse::Query)?;
@@ -1014,5 +1014,23 @@ pub fn run_documents(e: &Expr, env: &dyn Env) -> Result<Vec<Document>, MqlError>
             })
             .collect(),
         _ => Err(error(DOCUMENTS_ARRAY, "an array is expected")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `$where` only in the filter of a `find` run as a pipeline (measured: `aggregate` refuses
+    /// it with code 2, `find` with `$text` runs it).
+    #[test]
+    fn where_only_in_the_match_of_a_find() {
+        let bytes = Document::new().with("$where", "true").to_bytes().expect("bytes");
+        let filter = RawValue::Document(RawDoc::from_bytes(&bytes).expect("raw"));
+        let ctx = Ctx::checked(std::iter::empty::<&str>());
+        let refused = Match::parse(filter, &ctx).expect_err("refused");
+        assert_eq!(refused.code.code, 2);
+        assert!(Match::parse(filter, &ctx.with_where()).is_ok());
+        assert!(ctx.with_where().allows_where() && !ctx.allows_where());
     }
 }
