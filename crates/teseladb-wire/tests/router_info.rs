@@ -37,6 +37,8 @@ fn cluster() -> Mem {
         voters: vec![NodeId(1)],
         generation: 1,
         leader_hint: Some(NodeId(1)),
+        moved_ms: 0,
+        replica_epoch: 1,
     }];
     ok(&admin(&mut m, r#"{"shardCollection":"z.k","key":{"a":1}}"#));
     m

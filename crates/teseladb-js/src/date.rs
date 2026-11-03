@@ -167,6 +167,10 @@ fn parse_iso(s: &str) -> Option<f64> {
         Some(c @ (b'+' | b'-')) => {
             let h = num(i + 1, 2)?;
             let m = if b.get(i + 3) == Some(&b':') { num(i + 4, 2)? } else { num(i + 3, 2)? };
+            // Measured on a `refrouter` 9.0.4 on 02-11: `+24:00` is no offset.
+            if h > 23.0 || m > 59.0 {
+                return None;
+            }
             offset = (h * 60.0 + m) * 60_000.0 * if *c == b'+' { 1.0 } else { -1.0 };
         }
         _ => return None,
@@ -176,6 +180,7 @@ fn parse_iso(s: &str) -> Option<f64> {
         || parts[2] < 1.0
         || parts[2] > 31.0
         || parts[3] > 24.0
+        || parts[3] == 24.0 && parts[4..].iter().any(|x| *x != 0.0)
         || parts[4] > 59.0
         || parts[5] > 59.0
     {
@@ -214,7 +219,9 @@ fn parse_text(s: &str) -> Option<f64> {
         // Measured on a `refrouter` 9.0.4 on 02-11: `1/2/2020`, `2020/1/2` and `2020-1-1` are dates
         // (month first unless the year is), `AM`/`PM` move the hour, and the zones of North
         // America have their offsets.
-        let parts: Vec<&str> = tok.split(['/', '-']).collect();
+        // `2020.01.02` too, when the token is no time.
+        let parts: Vec<&str> =
+            if tok.contains(':') { vec![tok] } else { tok.split(['/', '-', '.']).collect() };
         if parts.len() == 3
             && parts.iter().all(|p| !p.is_empty() && p.bytes().all(|c| c.is_ascii_digit()))
         {
@@ -247,7 +254,9 @@ fn parse_text(s: &str) -> Option<f64> {
         } else if let Some(rest) = tok.strip_prefix("GMT").or_else(|| tok.strip_prefix("UTC")) {
             if let Some(sign @ ('+' | '-')) = rest.chars().next() {
                 let v: f64 = rest[1..].parse().ok()?;
-                let (h, m) = ((v / 100.0).trunc(), v % 100.0);
+                // `GMT-5` is hours, `GMT+0130` hours and minutes (measured).
+                let (h, m) =
+                    if rest.len() <= 3 { (v, 0.0) } else { ((v / 100.0).trunc(), v % 100.0) };
                 offset = (h * 60.0 + m) * 60_000.0 * if sign == '+' { 1.0 } else { -1.0 };
             }
         } else if tok.starts_with('(')
@@ -272,6 +281,15 @@ fn parse_text(s: &str) -> Option<f64> {
         return None;
     }
     let get = |i: usize| time.get(i).copied().unwrap_or(0.0);
+    // `13:00 PM` is no date; a year under 100 is 2000 to 2049 or 1950 to 1999 (measured).
+    if pm.is_some() && get(0) > 12.0 {
+        return None;
+    }
+    let year = if (0.0..100.0).contains(&year) {
+        year + if year < 50.0 { 2000.0 } else { 1900.0 }
+    } else {
+        year
+    };
     let hour = match pm {
         Some(true) if get(0) < 12.0 => get(0) + 12.0,
         Some(false) if get(0) == 12.0 => 0.0,

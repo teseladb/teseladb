@@ -80,8 +80,10 @@ pub struct Chunk {
     pub node: NodeId,
     /// The range's voters.
     pub voters: Vec<NodeId>,
-    /// The range's generation, which a change of its replicas names.
-    pub generation: u64,
+    /// The epoch of the range's replicas, which a change of them names.
+    pub replica_epoch: u64,
+    /// Cluster time, in milliseconds, of the range's last split or move.
+    pub moved_ms: u64,
 }
 
 /// Where the documents of collection `(tenant, collection)` are: `[start, end)`.
@@ -143,7 +145,8 @@ pub fn collection_chunks(
                 end,
                 node,
                 voters: e.voters.clone(),
-                generation: e.generation,
+                replica_epoch: e.replica_epoch,
+                moved_ms: e.moved_ms,
             }
         })
         .collect();
@@ -465,7 +468,7 @@ fn move_chunk_to<B: Backend + ?Sized>(
             chunk.voters.iter().copied().filter(|n| *n == chunk.node).collect();
         backend.range_order(Group0Command::SetReplicas {
             group: chunk.group,
-            epoch: chunk.generation,
+            epoch: chunk.replica_epoch,
             add: vec![node],
             remove: leaving,
         })?;
@@ -668,10 +671,14 @@ fn merge_run<B: Backend + ?Sized>(
     Ok(())
 }
 
+/// `minSnapshotHistoryWindowInSeconds` of the shards of a `refrouter` 9.0.4 by default (measured
+/// 03-11-2026; the `refrouter` itself has no such parameter), in milliseconds.
+pub const MIN_SNAPSHOT_HISTORY_WINDOW_MS: u64 = 300_000;
+
 /// `mergeAllChunksOnShard`: every run of neighbouring chunks of the collection on the shard,
-/// of at most `maxNumberOfChunksToMerge` chunks, becomes one. A `refrouter` 9.0.4 leaves out the
-/// chunks split or moved in the last `minSnapshotHistoryWindowInSeconds`; the ranges here keep
-/// their history across a merge, so every run is merged at once.
+/// of at most `maxNumberOfChunksToMerge` chunks, becomes one. As on a `refrouter` 9.0.4, a chunk
+/// split or moved within the last `minSnapshotHistoryWindowInSeconds` stays apart (018 FR-017):
+/// the range's mark in Group 0 ([`Chunk::moved_ms`]) is not that old yet.
 pub fn merge_all_chunks_on_shard<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
 ) -> Result<Document, CommandError> {
@@ -699,12 +706,14 @@ pub fn merge_all_chunks_on_shard<B: Backend + ?Sized>(
     let key = shard_key_of(&coll)?.ok_or_else(unsharded)?;
     let s = Sharded { coll, key };
     let chunks = chunks_of(ctx.backend, &s)?;
+    let settled = ctx.backend.now_ms().saturating_sub(MIN_SNAPSHOT_HISTORY_WINDOW_MS);
+    let mergeable = |c: &Chunk| c.node == node && c.moved_ms <= settled;
     let mut runs: Vec<Vec<Chunk>> = Vec::new();
     for c in chunks.into_iter() {
         let joins = runs
             .last()
             .and_then(|r| r.last())
-            .is_some_and(|p| p.node == node && c.node == node && p.end == c.start)
+            .is_some_and(|p| mergeable(p) && mergeable(&c) && p.end == c.start)
             && runs.last().is_some_and(|r| r.len() < most);
         match joins {
             true => runs.last_mut().into_iter().for_each(|r| r.push(c.clone())),

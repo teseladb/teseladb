@@ -218,10 +218,10 @@ fn document(d: &Document, field: &'static str) -> Result<Option<Document>, Oplog
     }
 }
 
-/// An integer field written in 32 or 64 bits.
+/// An integer field written in 32 or 64 bits (null: absent, as `refrestore` writes `t`).
 fn integer(d: &Document, field: &'static str) -> Result<Option<i64>, OplogError> {
     match d.get(field) {
-        None => Ok(None),
+        None | Some(Value::Null) => Ok(None),
         Some(Value::Int64(n)) => Ok(Some(*n)),
         Some(Value::Int32(n)) => Ok(Some(i64::from(*n))),
         Some(_) => Err(OplogError::WrongType(field)),
@@ -238,10 +238,24 @@ fn timestamp(d: &Document) -> Result<Option<Timestamp>, OplogError> {
     }
 }
 
-/// `ts` and `t` of `d`: both or neither.
+/// `ts` and `t` of `d` (`prevOpTime`): both or neither.
 fn op_time(d: &Document) -> Result<Option<OpTime>, OplogError> {
     let Some(ts) = timestamp(d)? else { return Ok(None) };
     let term = integer(d, "t")?.ok_or(OplogError::Missing("t"))?;
+    Ok(Some(OpTime { ts, term }))
+}
+
+/// The term an entry has without `t`, as a `refnode` takes it.
+pub const NO_TERM: i64 = -1;
+
+/// `ts` and `t` of an entry: `t` may be absent, null or a whole double ([`NO_TERM`] without it).
+fn entry_op_time(d: &Document) -> Result<Option<OpTime>, OplogError> {
+    let Some(ts) = timestamp(d)? else { return Ok(None) };
+    let term = match d.get("t") {
+        Some(Value::Double(x)) if x.fract() == 0.0 && x.abs() < 9.0e18 => *x as i64,
+        Some(Value::Double(_)) => return Err(OplogError::WrongType("t")),
+        _ => integer(d, "t")?.unwrap_or(NO_TERM),
+    };
     Ok(Some(OpTime { ts, term }))
 }
 
@@ -327,7 +341,7 @@ impl OplogEntry {
             retry_image,
             stmt_id,
             extra,
-            op_time: op_time(d)?,
+            op_time: entry_op_time(d)?,
             version: integer(d, "v")?.unwrap_or(ENTRY_VERSION),
             wall_ms,
             prev_op_time,

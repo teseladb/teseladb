@@ -10,12 +10,12 @@ use crate::lexer::{SyntaxError, Tok, Token, tokenize};
 /// Parses a whole program as RefDb gives it: an anonymous function may stand as a whole
 /// statement (`function(){ … }`), as RefDb reads a function's source.
 pub fn parse_script(src: &str) -> Result<Vec<Stmt>, SyntaxError> {
-    parse(src, &[], (false, false), true)
+    parse(src, &[], (false, false), true, Room::top())
 }
 
-/// Parses the code of an indirect `eval` or of `Function`: a script.
-pub fn parse_eval(src: &str) -> Result<Vec<Stmt>, SyntaxError> {
-    parse(src, &[], (false, false), false)
+/// Parses the code of an indirect `eval` or of `Function`, with the `room` left: a script.
+pub fn parse_eval(src: &str, room: Room) -> Result<Vec<Stmt>, SyntaxError> {
+    parse(src, &[], (false, false), false, room)
 }
 
 /// Parses a whole script that may use the private names `privates` (the code of a direct
@@ -25,21 +25,56 @@ pub fn parse_script_in(
     src: &str,
     privates: &[Name],
     supers: (bool, bool),
+    room: Room,
 ) -> Result<Vec<Stmt>, SyntaxError> {
-    parse(src, privates, supers, false)
+    parse(src, privates, supers, false, room)
 }
+
+/// What a parse may take before the engine of a `refrouter` 9.0.4 stops it
+/// ([`crate::recursion`]): its native stack, the arrow functions nested in one another, and ours.
+#[derive(Clone, Copy, Debug)]
+pub struct Room {
+    /// The engine's native stack, in the units of [`crate::recursion`].
+    pub units: usize,
+    /// The arrow functions nested in one another: the engine does not check them, and its
+    /// stack runs out after this many.
+    pub arrows: usize,
+    /// Bytes of our native stack the parse may take.
+    pub stack: usize,
+}
+
+impl Room {
+    /// The room of a program's parse.
+    pub fn top() -> Room {
+        Room {
+            units: crate::recursion::TOP_PARSE,
+            arrows: crate::recursion::TOP_ARROWS,
+            stack: crate::DEFAULT_STACK / 2,
+        }
+    }
+}
+
+/// The message of a parse the engine stops for its depth.
+pub const TOO_MUCH_RECURSION: &str = "too much recursion";
+/// The message of a parse whose arrow functions exhaust the engine's stack.
+pub const STACK_EXHAUSTED: &str = "wasm trap: call stack exhausted";
 
 fn parse(
     src: &str,
     privates: &[Name],
     supers: (bool, bool),
     anonymous: bool,
+    room: Room,
 ) -> Result<Vec<Stmt>, SyntaxError> {
     let mut p = Parser {
         toks: tokenize(src)?,
         i: 0,
         src: src.chars().collect(),
         depth: 0,
+        units: 0,
+        arrows: 0,
+        room,
+        stack_base: crate::interp::stack_position(),
         strict: false,
         in_gen: false,
         in_async: false,
@@ -64,6 +99,10 @@ fn parse(
     while !p.at_eof() {
         let function =
             anonymous && p.is_word("function") && matches!(p.peek_at(1), Tok::Punct("("));
+        if function && out.is_empty() {
+            // The program's own function: the engine's room is measured inside it.
+            p.room.units += crate::recursion::FUNCTION;
+        }
         out.push(if function { p.expression_statement()? } else { p.statement()? });
         if out.len() == 1 && has_use_strict(&out) {
             p.strict = true;
@@ -84,12 +123,17 @@ fn parse_expression(
     in_gen: bool,
     in_async: bool,
     supers: (bool, bool),
+    room: Room,
 ) -> Result<Expr, SyntaxError> {
     let mut p = Parser {
         toks: crate::lexer::tokenize_at(src, line, col)?,
         i: 0,
         src: src.chars().collect(),
         depth: 0,
+        units: 0,
+        arrows: 0,
+        room,
+        stack_base: crate::interp::stack_position(),
         strict: false,
         in_gen,
         in_async,
@@ -186,8 +230,10 @@ fn deletes_private(e: &Expr) -> bool {
     }
 }
 
-/// The deepest nesting the parser accepts before it reports too much recursion.
-const MAX_DEPTH: usize = 400;
+/// The error of a parse the engine stops for its depth: no place, as RefDb shows it.
+fn recursion() -> SyntaxError {
+    SyntaxError { message: TOO_MUCH_RECURSION.into(), line: 0, col: 1 }
+}
 
 /// A function's parameters with their defaults, and its rest parameter.
 type Params = (Vec<(Pattern, Option<Expr>)>, Option<Pattern>);
@@ -227,6 +273,14 @@ struct Parser {
     i: usize,
     src: Vec<char>,
     depth: usize,
+    /// The engine's native stack the constructs open here take ([`Room::units`]).
+    units: usize,
+    /// The arrow functions open here.
+    arrows: usize,
+    /// What the parse may take.
+    room: Room,
+    /// Where our native stack was when the parse began.
+    stack_base: usize,
     /// Whether the code being read is strict.
     strict: bool,
     /// Whether the code being read is the body of a generator (`yield` is an operator).
@@ -520,10 +574,25 @@ impl Parser {
 
     fn enter(&mut self) -> Result<(), SyntaxError> {
         self.depth += 1;
-        if self.depth > MAX_DEPTH {
-            return self.fail("too much recursion".to_owned());
+        let used = self.stack_base.saturating_sub(crate::interp::stack_position());
+        if used > self.room.stack {
+            return Err(recursion());
         }
         Ok(())
+    }
+
+    /// Reads with `run` a construct that takes `cost` of the engine's stack; a `checked` one
+    /// stops the parse when the constructs open take more than the room.
+    fn nested<T>(
+        &mut self,
+        cost: usize,
+        checked: bool,
+        run: impl FnOnce(&mut Self) -> Result<T, SyntaxError>,
+    ) -> Result<T, SyntaxError> {
+        self.units += cost;
+        let r = if checked && self.units > self.room.units { Err(recursion()) } else { run(self) };
+        self.units -= cost;
+        r
     }
 
     // Statements.
@@ -531,7 +600,16 @@ impl Parser {
     fn statement(&mut self) -> Result<Stmt, SyntaxError> {
         self.enter()?;
         let mark = self.cover.len();
-        let s = self.statement_inner();
+        let cost = match self.tok() {
+            Tok::Punct("{") => crate::recursion::BLOCK,
+            Tok::Ident(w)
+                if matches!(&**w, "if" | "while" | "do" | "for" | "with" | "switch" | "try") =>
+            {
+                crate::recursion::COMPOUND_STATEMENT
+            }
+            _ => crate::recursion::STATEMENT,
+        };
+        let s = self.nested(cost, true, Self::statement_inner);
         self.depth -= 1;
         match self.cover.get(mark) {
             Some(p) if s.is_ok() => self.fail_at(*p, "missing : after property id".into()),
@@ -1243,8 +1321,9 @@ impl Parser {
         self.in_static = false;
         (self.super_prop, self.super_call) = (kind.method || kind.ctor, derived_ctor);
         let entry = self.namer.enter();
-        let r = self
-            .scoped(ScopeKind::Function, |p| p.function_body_in(start, name, derived_ctor, kind));
+        let r = self.nested(crate::recursion::FUNCTION, true, |p| {
+            p.scoped(ScopeKind::Function, |p| p.function_body_in(start, name, derived_ctor, kind))
+        });
         self.namer.leave(entry, r.as_ref().ok());
         (self.strict, self.in_gen, self.in_async, self.in_static) = outer;
         (self.super_prop, self.super_call) = supers;
@@ -1636,7 +1715,14 @@ impl Parser {
         self.in_async = is_async;
         self.in_static = false;
         let entry = self.namer.enter();
-        let r = self.scoped(ScopeKind::Function, |p| p.arrow_in(start, is_async));
+        // The engine does not check the depth of arrow functions: its stack runs out.
+        self.arrows += 1;
+        let r = if self.arrows > self.room.arrows {
+            Err(SyntaxError { message: STACK_EXHAUSTED.into(), line: 0, col: 0 })
+        } else {
+            self.scoped(ScopeKind::Function, |p| p.arrow_in(start, is_async))
+        };
+        self.arrows -= 1;
         let def = match &r {
             Ok(Expr::Func(d)) => Some(d),
             _ => None,
@@ -1748,7 +1834,7 @@ impl Parser {
         }
         .map_or_else(|m| self.fail(m), Ok)?;
         let mark = self.namer.mark();
-        let value = self.assign_in(allow_in)?;
+        let value = self.nested(crate::recursion::UNARY, true, |p| p.assign_in(allow_in))?;
         if op == "=" {
             match &target {
                 Pattern::Name(n) => self.namer.place(mark, n.to_string(), true, &value),
@@ -1766,9 +1852,10 @@ impl Parser {
         if !self.eat("?") {
             return Ok(c);
         }
-        let a = self.assign_in(true)?;
+        let cost = crate::recursion::CONDITIONAL;
+        let a = self.nested(cost, true, |p| p.assign_in(true))?;
         self.expect(":")?;
-        let b = self.assign_in(allow_in)?;
+        let b = self.nested(cost, true, |p| p.assign_in(allow_in))?;
         Ok(Expr::Cond(Box::new(c), Box::new(a), Box::new(b)))
     }
 
@@ -1832,7 +1919,14 @@ impl Parser {
 
     fn unary(&mut self) -> Result<Expr, SyntaxError> {
         self.enter()?;
-        let r = self.unary_inner();
+        // An operator's operand takes the engine's stack; a plain operand does not.
+        let operator = match self.tok() {
+            Tok::Punct(op) => matches!(*op, "!" | "-" | "+" | "~" | "++" | "--"),
+            Tok::Ident(w) => matches!(&**w, "typeof" | "void" | "delete" | "await"),
+            _ => false,
+        };
+        let cost = if operator { crate::recursion::UNARY } else { 0 };
+        let r = self.nested(cost, true, Self::unary_inner);
         self.depth -= 1;
         r
     }
@@ -1908,6 +2002,10 @@ impl Parser {
     }
 
     fn arguments(&mut self) -> Result<Vec<Expr>, SyntaxError> {
+        self.nested(crate::recursion::ARGUMENTS, true, Self::arguments_in)
+    }
+
+    fn arguments_in(&mut self) -> Result<Vec<Expr>, SyntaxError> {
         let mut args = Vec::new();
         while !self.eat(")") {
             if self.eat("...") {
@@ -2040,7 +2138,33 @@ impl Parser {
     fn substitution(&self, sub: &(String, u32, u32)) -> Result<Expr, SyntaxError> {
         let (src, line, col) = sub;
         let supers = (self.super_prop, self.super_call);
-        parse_expression(src, *line, *col, self.in_gen, self.in_async, supers)
+        let room = Room {
+            units: self.room.units.saturating_sub(self.units),
+            arrows: self.room.arrows.saturating_sub(self.arrows),
+            ..self.room
+        };
+        parse_expression(src, *line, *col, self.in_gen, self.in_async, supers, room)
+    }
+
+    /// An array literal after its `[`.
+    fn array_literal(&mut self) -> Result<Expr, SyntaxError> {
+        let mut items = Vec::new();
+        while !self.eat("]") {
+            if self.eat(",") {
+                items.push(None);
+                continue;
+            }
+            let item = if self.eat("...") {
+                Expr::Spread(Box::new(self.assign_at()?))
+            } else {
+                self.assign_at()?
+            };
+            items.push(Some(item));
+            if !self.is("]") {
+                self.expect_or(",", "missing ] after element list")?;
+            }
+        }
+        Ok(Expr::Array(items))
     }
 
     fn primary(&mut self) -> Result<Expr, SyntaxError> {
@@ -2060,7 +2184,9 @@ impl Parser {
                     let p = Pos { line: e.line, col: e.col };
                     return self.fail_at(p, e.message.clone());
                 }
-                let subs = subs.iter().map(|s| self.substitution(s)).collect::<Result<_, _>>()?;
+                let subs = self.nested(crate::recursion::PAREN, true, |p| {
+                    subs.iter().map(|s| p.substitution(s)).collect::<Result<_, _>>()
+                })?;
                 let strs = parts.cooked.iter().map(|c| c.clone().unwrap_or_default()).collect();
                 Expr::Template(strs, subs)
             }
@@ -2071,31 +2197,13 @@ impl Parser {
                 }
                 Expr::Regex(b, f)
             }
-            Tok::Punct("(") => {
-                let e = self.expression()?;
-                self.expect_or(")", "missing ) in parenthetical")?;
-                e
-            }
-            Tok::Punct("[") => {
-                let mut items = Vec::new();
-                while !self.eat("]") {
-                    if self.eat(",") {
-                        items.push(None);
-                        continue;
-                    }
-                    let item = if self.eat("...") {
-                        Expr::Spread(Box::new(self.assign_at()?))
-                    } else {
-                        self.assign_at()?
-                    };
-                    items.push(Some(item));
-                    if !self.is("]") {
-                        self.expect_or(",", "missing ] after element list")?;
-                    }
-                }
-                Expr::Array(items)
-            }
-            Tok::Punct("{") => self.object_literal()?,
+            Tok::Punct("(") => self.nested(crate::recursion::PAREN, true, |p| {
+                let e = p.expression()?;
+                p.expect_or(")", "missing ) in parenthetical")?;
+                Ok(e)
+            })?,
+            Tok::Punct("[") => self.nested(crate::recursion::PAREN, true, Self::array_literal)?,
+            Tok::Punct("{") => self.nested(crate::recursion::OBJECT, true, Self::object_literal)?,
             Tok::Ident(w) => match &*w {
                 "function" => Expr::Func(self.function_rest(pos, false, false, true)?),
                 "async"

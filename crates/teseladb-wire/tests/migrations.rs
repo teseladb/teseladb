@@ -10,6 +10,10 @@ use teseladb_router::table::RouteEntry;
 use teseladb_types::{GroupId, NodeId};
 use teseladb_wire::generic::parse;
 
+/// `minSnapshotHistoryWindowInSeconds` of the shards of a `refrouter` 9.0.4 by default (measured
+/// 03-11-2026), in milliseconds.
+const WINDOW_MS: u64 = 300_000;
+
 fn json(text: &str) -> Document {
     extjson::parse(text).unwrap_or_else(|e| panic!("{text}: {e:?}"))
 }
@@ -40,6 +44,8 @@ fn cluster() -> Mem {
         voters: vec![NodeId(1)],
         generation: 1,
         leader_hint: Some(NodeId(1)),
+        moved_ms: 0,
+        replica_epoch: 1,
     }];
     ok(&admin(&mut m, r#"{"shardCollection":"m.k","key":{"a":1}}"#));
     let docs: Vec<String> = (0..20).map(|i| format!(r#"{{"_id":{i},"a":{i}}}"#)).collect();
@@ -199,6 +205,8 @@ fn merge_all_chunks_on_shard_joins_the_neighbours_of_the_shard() {
     ok(&admin(&mut m, r#"{"moveChunk":"m.k","find":{"a":13},"to":"node2"}"#));
     let ranges = |m: &Mem| m.routes.len();
     assert_eq!(ranges(&m), 5);
+    // Past the history window of every split and move.
+    m.now += WINDOW_MS;
     // Two chunks at most per merge: [MinKey, 4)+[4, 8), then [8, 12) alone.
     ok(&admin(
         &mut m,
@@ -209,6 +217,38 @@ fn merge_all_chunks_on_shard_joins_the_neighbours_of_the_shard() {
     assert_eq!(ranges(&m), 3);
     ok(&admin(&mut m, r#"{"mergeAllChunksOnShard":"m.k","shard":"node2"}"#));
     assert_eq!(ranges(&m), 3);
+    let r = m.run("m", doc(&[("count", Value::from("k"))]));
+    assert_eq!(r.get("n"), Some(&Value::Int32(20)));
+}
+
+#[test]
+fn merge_all_chunks_on_shard_leaves_out_what_was_split_or_moved_within_the_window() {
+    // A `refrouter` 9.0.4 does not merge a chunk split or moved in the last
+    // `minSnapshotHistoryWindowInSeconds` (300 s by default): fresh splits stay apart at 130 s
+    // and merge after 25 minutes (measured 02/03-11-2026, `g1.js`-`g4.js`, `w1.js`, `w2.js`).
+    let mut m = cluster();
+    for at in [4, 8] {
+        ok(&admin(&mut m, &format!(r#"{{"split":"m.k","middle":{{"a":{at}}}}}"#)));
+    }
+    let ranges = |m: &Mem| m.routes.len();
+    assert_eq!(ranges(&m), 3);
+    m.now += WINDOW_MS - 1_000;
+    ok(&admin(&mut m, r#"{"mergeAllChunksOnShard":"m.k","shard":"node1"}"#));
+    assert_eq!(ranges(&m), 3, "every chunk was split within the window");
+    // [8, MaxKey) is split again: its halves are fresh, [MinKey, 4) and [4, 8) are not.
+    ok(&admin(&mut m, r#"{"split":"m.k","middle":{"a":12}}"#));
+    m.now += 1_000;
+    ok(&admin(&mut m, r#"{"mergeAllChunksOnShard":"m.k","shard":"node1"}"#));
+    assert_eq!(ranges(&m), 3, "[MinKey, 8), [8, 12) and [12, MaxKey)");
+    // A chunk moved away and back is fresh again, whatever its age.
+    m.now += WINDOW_MS;
+    ok(&admin(&mut m, r#"{"moveChunk":"m.k","find":{"a":13},"to":"node2"}"#));
+    ok(&admin(&mut m, r#"{"moveChunk":"m.k","find":{"a":13},"to":"node1"}"#));
+    ok(&admin(&mut m, r#"{"mergeAllChunksOnShard":"m.k","shard":"node1"}"#));
+    assert_eq!(ranges(&m), 2, "[MinKey, 12) and the moved [12, MaxKey)");
+    m.now += WINDOW_MS;
+    ok(&admin(&mut m, r#"{"mergeAllChunksOnShard":"m.k","shard":"node1"}"#));
+    assert_eq!(ranges(&m), 1);
     let r = m.run("m", doc(&[("count", Value::from("k"))]));
     assert_eq!(r.get("n"), Some(&Value::Int32(20)));
 }

@@ -675,4 +675,12 @@ mod tests {
         assert!(wl.checked);
         assert!(wl.finish(&mut w).is_err());
     }
+
+    #[test]
+    fn an_answer_nobody_waits_for_is_dropped() {
+        let mut w = World::cluster(1, 1, 1, false);
+        let mut wl = Meta2Workload::new(1);
+        wl.on_done(&mut w, (0, 0, OpId(9)), Err(OpError::Timeout));
+        assert!(wl.pending.is_empty());
+    }
 }

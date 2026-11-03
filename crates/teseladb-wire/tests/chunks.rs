@@ -49,6 +49,8 @@ fn cluster() -> Mem {
         voters: vec![NodeId(1)],
         generation: 1,
         leader_hint: Some(NodeId(1)),
+        moved_ms: 0,
+        replica_epoch: 1,
     }];
     ok(&admin(&mut m, r#"{"shardCollection":"z.k","key":{"a":1}}"#));
     let docs: Vec<String> = (0..20).map(|i| format!(r#"{{"_id":{i},"a":{i}}}"#)).collect();
@@ -226,6 +228,8 @@ fn config_chunks_of_odd_ranges() {
         voters: vec![NodeId(2)],
         generation: 1,
         leader_hint: leader,
+        moved_ms: 0,
+        replica_epoch: 1,
     };
     m.routes = vec![
         entry(1, Vec::new(), lo.clone(), Some(NodeId(1))),

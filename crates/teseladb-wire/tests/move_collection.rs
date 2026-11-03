@@ -44,6 +44,8 @@ fn cluster() -> Mem {
         voters: vec![NodeId(1)],
         generation: 1,
         leader_hint: Some(NodeId(1)),
+        moved_ms: 0,
+        replica_epoch: 1,
     }];
     let docs = r#"[{"_id":1,"a":1},{"_id":2,"a":2}]"#;
     ok(&m.run("m", json(&format!(r#"{{"insert":"u","documents":{docs}}}"#))));
@@ -322,6 +324,8 @@ fn empty_ranges(m: &mut Mem, node: u64, first_group: u64) {
             voters: vec![NodeId(node)],
             generation: 1,
             leader_hint: Some(NodeId(node)),
+            moved_ms: 0,
+            replica_epoch: 1,
         });
     }
     m.routes[0].end = vec![0xFF, 0];
@@ -360,6 +364,8 @@ fn unshard_collection_leaves_draining_shards_and_reads_the_first_voter() {
         voters: Vec::new(),
         generation: 1,
         leader_hint: None,
+        moved_ms: 0,
+        replica_epoch: 1,
     });
     m.draining = vec!["node2".into()];
     ok(&admin(&mut m, r#"{"unshardCollection":"m.s"}"#));
@@ -397,6 +403,8 @@ fn the_namespace_the_ranges_and_the_replicas_of_a_move() {
             voters: vec![NodeId(2)],
             generation: 1,
             leader_hint: Some(NodeId(2)),
+            moved_ms: 0,
+            replica_epoch: 1,
         },
     );
     assert_eq!(node(&mut m, "u"), Some(1));
@@ -594,5 +602,31 @@ fn their_unknown_fields_fail_as_on_a_refrouter() {
         let cmd = json(cmd);
         let name = cmd.iter().next().map(|(k, _)| k.to_owned()).unwrap();
         parse(&cmd, &name).expect("known");
+    }
+}
+
+/// The data of each shard are the live bytes its ranges' state machines keep, not what a scan
+/// of the collections finds (100 GB scale, 018 FR-017): `m.u` alone on node 1 and `m.s` on
+/// node 2, weighed only by the ranges' counts.
+#[test]
+fn unshard_collection_weighs_the_shards_by_their_ranges_live_bytes() {
+    for (one, two, chosen) in [(10, 1_000_000, 1), (1_000_000, 10, 2)] {
+        let mut m = cluster();
+        let (_, s) = m.catalog.collections.iter().find(|(ns, _)| ns.coll == "s").unwrap();
+        let mid = teseladb_keys::KeyBuilder::collection_start(s.tenant, s.id).as_bytes().to_vec();
+        m.routes[0].end = mid.clone();
+        let mut right = m.routes[0].clone();
+        (right.group, right.start, right.end) = (GroupId(2), mid, Vec::new());
+        (right.voters, right.leader_hint) = (vec![NodeId(2)], Some(NodeId(2)));
+        m.routes.push(right);
+        m.range_live = [(GroupId(1), one), (GroupId(2), two)].into_iter().collect();
+        let before = m.scanned_rows;
+        ok(&admin(&mut m, r#"{"shardCollection":"m.k","key":{"_id":1}}"#));
+        ok(&admin(&mut m, r#"{"unshardCollection":"m.k"}"#));
+        assert_eq!(node(&mut m, "k"), Some(chosen), "{one} / {two}");
+        assert_eq!(
+            m.scanned_rows, before,
+            "an empty collection is copied without reading the rest"
+        );
     }
 }

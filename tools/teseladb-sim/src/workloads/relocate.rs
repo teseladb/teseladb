@@ -897,4 +897,22 @@ mod tests {
         w.nodes[n as usize].cores[from as usize].lsm = lsm;
         assert!(!wl.moves.contains_key(&n));
     }
+
+    #[test]
+    fn a_running_replica_without_host_gets_one_and_a_frozen_core_holds_its_move() {
+        let (mut w, mut wl) = world(2, 1);
+        let core = wl.running(&mut w, 0).expect("running");
+        wl.hosts.remove(&0);
+        wl.open(&mut w, 0);
+        assert_eq!(wl.hosts.get(&0).map(|(c, _)| *c), Some(core));
+        // Either core frozen: the move waits, as it is.
+        for frozen in [0, 1] {
+            wl.moves.insert(0, (0, 1, Move::Retiring));
+            freeze(&mut w, 0, frozen);
+            wl.move_step(&mut w, 0);
+            assert!(matches!(wl.moves.get(&0), Some((0, 1, Move::Retiring))));
+            w.nodes[0].cores[frozen as usize].frozen_until = Nanos::ZERO;
+        }
+        wl.moves.remove(&0);
+    }
 }
