@@ -20,8 +20,9 @@ fn sample() -> Document {
 pub fn run(args: &Args) -> Result<Report, String> {
     let doc = sample();
     let function =
-        Program::compile("function(a, b) { return a + b }").map_err(|e| e.to_string())?;
-    let predicate = Program::compile("this.a > 40 && this.b == 'x'").map_err(|e| e.to_string())?;
+        Program::compile("function(a, b) { return a + b }").map_err(crate::client::text)?;
+    let predicate =
+        Program::compile("this.a > 40 && this.b == 'x'").map_err(crate::client::text)?;
     let fargs = [Value::Int32(41), Value::Int32(1)];
     let mut report = Report::new("js");
     let f = per_op(args.warmup, args.duration, || {

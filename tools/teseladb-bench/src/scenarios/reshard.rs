@@ -136,33 +136,39 @@ fn values(c: &mut Client) -> Result<BTreeMap<i64, i64>, String> {
     let mut reply = c.command(DB, find)?;
     loop {
         check(&reply)?;
-        let d = RawDoc::from_bytes(&reply).map_err(|e| format!("{e:?}"))?;
-        let Some(RawValue::Document(cursor)) = d.get("cursor") else {
-            return Err(format!("a reply without a cursor: {:?}", Document::from(d)));
-        };
-        let batch = match (cursor.get("firstBatch"), cursor.get("nextBatch")) {
-            (Some(RawValue::Array(a)), _) | (_, Some(RawValue::Array(a))) => a,
-            _ => return Err("a cursor without a batch".into()),
-        };
-        for e in batch.iter() {
-            if let RawValue::Document(e) = e
-                && let (Some(RawValue::Int64(id)), Some(RawValue::Int64(v))) =
-                    (e.get("_id"), e.get("v"))
-            {
-                out.insert(id, v);
-            }
-        }
-        let id = match cursor.get("id") {
-            Some(RawValue::Int64(0)) | None => return Ok(out),
-            Some(RawValue::Int64(id)) => id,
-            Some(_) => return Err("a cursor id that is not a long".into()),
-        };
+        let Some(id) = batch_values(&reply, &mut out)? else { return Ok(out) };
         let more = doc(vec![
             ("getMore", Value::Int64(id)),
             ("collection", Value::String(COLLECTION.into())),
             ("batchSize", Value::Int32(CHECK_BATCH)),
         ]);
         reply = c.command(DB, more)?;
+    }
+}
+
+/// Adds the `v` of each document of a cursor's batch in `reply` to `out`, by `_id`; the
+/// cursor's id when there is more to read.
+fn batch_values(reply: &[u8], out: &mut BTreeMap<i64, i64>) -> Result<Option<i64>, String> {
+    let d = RawDoc::from_bytes(reply).map_err(crate::client::debug)?;
+    let Some(RawValue::Document(cursor)) = d.get("cursor") else {
+        return Err(format!("a reply without a cursor: {:?}", Document::from(d)));
+    };
+    let batch = match (cursor.get("firstBatch"), cursor.get("nextBatch")) {
+        (Some(RawValue::Array(a)), _) | (_, Some(RawValue::Array(a))) => a,
+        _ => return Err("a cursor without a batch".into()),
+    };
+    for e in batch.iter() {
+        if let RawValue::Document(e) = e
+            && let (Some(RawValue::Int64(id)), Some(RawValue::Int64(v))) =
+                (e.get("_id"), e.get("v"))
+        {
+            out.insert(id, v);
+        }
+    }
+    match cursor.get("id") {
+        Some(RawValue::Int64(0)) | None => Ok(None),
+        Some(RawValue::Int64(id)) => Ok(Some(id)),
+        Some(_) => Err("a cursor id that is not a long".into()),
     }
 }
 
@@ -173,7 +179,7 @@ pub fn run(args: &Args) -> Result<Report, String> {
     let server = Server::open(args.target.as_deref())?;
     let addr = server.addr()?;
     let mut admin = Client::connect(addr)?;
-    load(&mut admin, n).map_err(|e| format!("loading: {e}"))?;
+    load(&mut admin, n).map_err(crate::client::context("loading"))?;
     let acked: Acked = Arc::default();
     let started = Arc::new(AtomicBool::new(false));
     let stop = Arc::new(AtomicBool::new(false));
@@ -196,19 +202,21 @@ pub fn run(args: &Args) -> Result<Report, String> {
     let resharded = admin
         .command("admin", reshard)
         .and_then(|r| check(&r))
-        .map_err(|e| format!("reshardCollection: {e}"));
+        .map_err(crate::client::context("reshardCollection"));
     let took = at.elapsed();
     thread::sleep(args.duration.min(Duration::from_secs(1)));
     stop.store(true, Ordering::Relaxed);
     let (mut writes, mut cutover) = (0u64, 0f64);
     for h in handles {
-        let (count, longest) =
-            h.join().map_err(|_| "a writer panicked")?.map_err(|e| format!("a writer: {e}"))?;
+        let (count, longest) = h
+            .join()
+            .map_err(crate::client::panicked("a writer"))?
+            .map_err(crate::client::context("a writer"))?;
         writes += count;
         cutover = cutover.max(longest);
     }
     resharded?;
-    let now = values(&mut admin).map_err(|e| format!("reading back: {e}"))?;
+    let now = values(&mut admin).map_err(crate::client::context("reading back"))?;
     let acked = acked.lock().map_err(|_| "a writer panicked")?;
     let lost = acked.iter().filter(|(id, v)| now.get(id) != Some(v)).count();
     let missing = n.saturating_sub(now.len() as u64);
@@ -238,5 +246,41 @@ mod tests {
         all.dedup();
         assert_eq!(all.len() as u64, n);
         assert_eq!(b_of(3, 0), 0);
+    }
+
+    fn reply(cursor: Document) -> Vec<u8> {
+        Document::new().with("cursor", cursor).with("ok", 1.0).to_bytes().unwrap()
+    }
+
+    #[test]
+    fn a_batch_gives_the_values_of_its_documents_and_the_cursor_to_go_on() {
+        let mut out = BTreeMap::new();
+        let entry =
+            |id: i64, v: Value| Value::Document(doc(vec![("_id", Value::Int64(id)), ("v", v)]));
+        let batch = vec![
+            entry(1, Value::Int64(10)),
+            // Neither a document nor one with a long `v`: not a value of the scenario.
+            Value::Int32(7),
+            entry(2, Value::Int32(20)),
+        ];
+        let first = Document::new().with("id", Value::Int64(9)).with("firstBatch", batch);
+        assert_eq!(batch_values(&reply(first), &mut out), Ok(Some(9)));
+        let next = Document::new()
+            .with("id", Value::Int64(0))
+            .with("nextBatch", vec![entry(3, Value::Int64(30))]);
+        assert_eq!(batch_values(&reply(next), &mut out), Ok(None));
+        let last = Document::new().with("nextBatch", Vec::<Value>::new());
+        assert_eq!(batch_values(&reply(last), &mut out), Ok(None));
+        assert_eq!(out, BTreeMap::from([(1, 10), (3, 30)]));
+        let odd = Document::new().with("id", "x").with("firstBatch", Vec::<Value>::new());
+        assert_eq!(
+            batch_values(&reply(odd), &mut out),
+            Err("a cursor id that is not a long".into())
+        );
+        let empty = Document::new().with("id", Value::Int64(0));
+        assert_eq!(batch_values(&reply(empty), &mut out), Err("a cursor without a batch".into()));
+        let none = Document::new().with("ok", 1.0).to_bytes().unwrap();
+        assert!(batch_values(&none, &mut out).unwrap_err().starts_with("a reply without a cursor"));
+        assert!(batch_values(b"not bson", &mut out).is_err());
     }
 }

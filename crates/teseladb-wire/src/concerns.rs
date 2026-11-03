@@ -669,9 +669,14 @@ pub fn check_support(
         (ReadSupport::NoSnapshot, _) => return Ok(()),
         (ReadSupport::LocalOnly, _) => "read concern not supported",
     };
-    Err(invalid(format!(
+    Err(read_refused(name, rc, why))
+}
+
+/// The error for command `name` refusing read concern `rc` because of `why`.
+pub fn read_refused(name: &str, rc: &ReadConcernArgs, why: &str) -> CommandError {
+    invalid(format!(
         "Command {} does not support {} :: caused by :: {why}",
         canonical(name),
         rc.describe()
-    )))
+    ))
 }

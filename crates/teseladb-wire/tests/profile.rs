@@ -611,3 +611,20 @@ fn writes_of_no_key_show_no_key_counts() {
     assert_eq!(docs[0].get("ndeleted"), Some(&Value::Int32(0)));
     assert_eq!(docs[3].get("nUpserted"), Some(&Value::Int64(0)), "{:?}", docs[3]);
 }
+
+/// `filter: "unset"` removes the profiler's filter; another string is refused (measured on a
+/// `refnode` 9.0.4 on 03-11-2026).
+#[test]
+fn a_filter_is_unset_by_name() {
+    let mut m = node();
+    run(&mut m, DB, json(r#"{"profile":0,"filter":{"op":"query"}}"#));
+    let r = run(&mut m, DB, json(r#"{"profile":-1}"#));
+    assert_eq!(field(&r, "filter"), &json(r#"{"op":{"$eq":"query"}}"#).into(), "{r:?}");
+    let r = run(&mut m, DB, json(r#"{"profile":0,"filter":"unset"}"#));
+    assert!(r.get("filter").is_some(), "the reply shows the filter before: {r:?}");
+    let r = run(&mut m, DB, json(r#"{"profile":-1}"#));
+    assert_eq!((r.get("filter"), r.get("note")), (None, None), "{r:?}");
+    let r = run(&mut m, DB, json(r#"{"profile":0,"filter":"other"}"#));
+    assert_eq!(field(&r, "code"), &Value::Int32(2), "{r:?}");
+    assert_eq!(field(&r, "errmsg"), &Value::from("Expected an object, or the string 'unset'."));
+}

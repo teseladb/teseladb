@@ -106,7 +106,7 @@ fn run_with(ranges: u64) -> Result<Report, String> {
     let snapshot_s = t1.elapsed().as_secs_f64();
     let t2 = Instant::now();
     let mut back = Group0Sm::default();
-    back.restore(&snap).map_err(|e| format!("restore: {e:?}"))?;
+    back.restore(&snap).map_err(crate::client::debug).map_err(crate::client::context("restore"))?;
     let restore_s = t2.elapsed().as_secs_f64();
     if back.ranges.len() as u64 != ranges {
         return Err(format!("{} ranges restored of {ranges}", back.ranges.len()));

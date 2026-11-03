@@ -25,7 +25,6 @@ use crate::error::{
     NO_SUCH_KEY, RANGE_OVERLAP_CONFLICT, SHARD_KEY_NOT_FOUND, SHARD_NOT_FOUND, TYPE_MISMATCH,
     WRITE_CONFLICT, ZONE_NOT_FOUND, ZONE_STILL_IN_USE,
 };
-use crate::types::wrong_type;
 
 /// `addShardToZone`.
 pub const ADD_SHARD_TO_ZONE: &str = "addShardToZone";
@@ -109,10 +108,17 @@ pub fn remove_shard_from_zone<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
 ) -> Result<Document, CommandError> {
     admin::admin_only(REMOVE_SHARD_FROM_ZONE, ctx.db)?;
-    let shard = match ctx.cmd.get(REMOVE_SHARD_FROM_ZONE) {
-        Some(Value::String(s)) => s.clone(),
-        Some(v) => return Err(wrong_type(REMOVE_SHARD_FROM_ZONE, v, "string")),
-        None => String::new(),
+    let shard = match ctx.first() {
+        Value::String(s) => s.clone(),
+        v => {
+            // Not the parser's message: a `refrouter` 9.0.4 reads this field by hand (measured on
+            // 03-11-2026).
+            let t = crate::types::type_name(v);
+            let msg = format!(
+                "\"{REMOVE_SHARD_FROM_ZONE}\" had the wrong type. Expected string, found {t}"
+            );
+            return Err(CommandError::new(TYPE_MISMATCH, msg));
+        }
     };
     let zone = match ctx.cmd.get("zone") {
         Some(Value::String(s)) => s.clone(),
@@ -145,7 +151,8 @@ fn shown(d: &Document) -> String {
     display(&Value::Document(d.clone()))
 }
 
-fn compare(a: &Document, b: &Document) -> Result<Ordering, CommandError> {
+/// How bound `a` compares with bound `b`, as BSON documents.
+pub(super) fn compare(a: &Document, b: &Document) -> Result<Ordering, CommandError> {
     let (a, b) = (a.to_bytes()?, b.to_bytes()?);
     Ok(compare_docs(RawDoc::from_bytes(&a)?, RawDoc::from_bytes(&b)?, None))
 }
@@ -170,7 +177,7 @@ fn extended(
     let mut out = Document::new();
     for (field, kind) in key.key.iter() {
         let v = bound.get(field).cloned().unwrap_or(Value::MinKey);
-        let hashed = matches!(kind, Value::String(s) if s == "hashed");
+        let hashed = super::sharding::is_hashed(kind);
         if hashed && !matches!(v, Value::Int64(_) | Value::MinKey | Value::MaxKey) {
             let msg = format!(
                 "there exists a field in the range {} -->> {} not of type NumberLong, MinKey, or \
@@ -188,13 +195,12 @@ fn extended(
 
 /// The key a bound starts at in `coll`'s documents: its values in the shard key's order, as they
 /// are (a hashed field's bound is a hash already), before any `_id`.
-fn bound_key(coll: &CollectionEntry, bound: &Document) -> Result<Vec<u8>, CommandError> {
-    let holder = bound.iter().fold(Document::new(), |d, (k, v)| d.with(k, v.clone()));
-    let bytes = holder.with("_id", Value::MinKey).to_bytes()?;
+pub(super) fn bound_key(coll: &CollectionEntry, bound: &Document) -> Result<Vec<u8>, CommandError> {
+    let bytes = bound.to_bytes()?;
     let raw = RawDoc::from_bytes(&bytes)?;
-    let parts: Vec<teseladb_bson::RawValue<'_>> = raw.iter().map(|(_, v)| v).collect();
-    let (id, shard) = parts.split_last().ok_or_else(|| CommandError::new(BAD_VALUE, "no _id"))?;
-    Ok(KeyBuilder::document_sharded(coll.tenant, coll.id, shard, *id).as_bytes().to_vec())
+    let shard: Vec<teseladb_bson::RawValue<'_>> = raw.iter().map(|(_, v)| v).collect();
+    let id = teseladb_bson::RawValue::MinKey;
+    Ok(KeyBuilder::document_sharded(coll.tenant, coll.id, &shard, id).as_bytes().to_vec())
 }
 
 /// The keys of a zone's interval of `coll`, when it has a shard key and the bounds (extended to

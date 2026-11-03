@@ -175,7 +175,7 @@ fn uncertainty_restarts(target: &Target) -> Result<Option<i64>, String> {
     let metrics = teseladb_server::admin::METRICS;
     let (status, body) =
         teseladb_server::admin_http::request(&admin.to_string(), get, metrics, b"")
-            .map_err(|e| format!("{admin}: {e}"))?;
+            .map_err(crate::client::context(admin))?;
     if status != 200 {
         return Err(format!("{admin}{metrics} answered {status}"));
     }
@@ -250,8 +250,9 @@ pub fn readers_run(args: &Args) -> Result<Report, String> {
     // The holders end whatever the readers found; one that is gone ended early and the
     // measure does not hold.
     for s in &sessions {
-        check(&end(&mut c, s, 1, false)?)
-            .map_err(|e| format!("a transaction holding intents ended before the readers: {e}"))?;
+        check(&end(&mut c, s, 1, false)?).map_err(crate::client::context(
+            "a transaction holding intents ended before the readers",
+        ))?;
     }
     let (held, _) = held?;
     let rise = held.percentile(99.0) as f64 - clean.percentile(99.0) as f64;

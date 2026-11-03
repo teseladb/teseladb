@@ -39,7 +39,7 @@ fn missing(path: &str) -> CommandError {
 }
 
 /// RefDb's name of a binary subtype in its messages (measured).
-fn subtype_name(subtype: u8) -> &'static str {
+pub(crate) fn subtype_name(subtype: u8) -> &'static str {
     match subtype {
         0 => "general",
         1 => "function",

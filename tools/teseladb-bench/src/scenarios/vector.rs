@@ -139,17 +139,18 @@ pub fn run(args: &Args) -> Result<Report, String> {
     index(&mut c)?;
     let mut latency = Histogram::new();
     let (mut found, mut queries) = (0.0, 0u64);
-    let start = Instant::now();
     let mut n = 0u64;
-    while start.elapsed() < args.warmup + args.duration || queries < MIN_QUERIES {
+    super::warm_up(args.warmup, || {
+        n += 1;
+        query(&mut c, &vector(SEED.rotate_left(17), n)).map(drop)
+    })?;
+    let start = Instant::now();
+    while start.elapsed() < args.duration || queries < MIN_QUERIES {
         n += 1;
         let q = vector(SEED.rotate_left(17), n);
         let asked = Instant::now();
         let got = query(&mut c, &q)?;
         let took = asked.elapsed();
-        if start.elapsed() < args.warmup {
-            continue;
-        }
         latency.record(took.as_nanos() as u64);
         found += recall(&got, &exact(&corpus, &q));
         queries += 1;
