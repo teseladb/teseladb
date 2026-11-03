@@ -292,10 +292,11 @@ fn forwarded_catalog_answers_wait_for_this_copy() {
 
 #[test]
 fn a_kill_reaches_the_other_nodes_or_reports_that_one_did_not_answer() {
-    use teseladb_wire::commands::session::KillScope;
+    use teseladb_wire::commands::session::{KillScope, SessionMatch};
     let mut b = backend(vec![], vec![]);
     assert_eq!(b.kill_everywhere(&KillScope::All), Ok(()));
-    let e = b.kill_everywhere(&KillScope::Sessions(vec![1])).unwrap_err();
+    let e =
+        b.kill_everywhere(&KillScope::Sessions(vec![SessionMatch::one(1, [0; 32])])).unwrap_err();
     assert_eq!(e.code.code, 89);
     // No answer at all.
     assert_eq!(b.kill_everywhere(&KillScope::All).unwrap_err().code.code, 89);

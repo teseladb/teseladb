@@ -5,8 +5,8 @@
 //! records unused for the session timeout, the work of RefDb's TTL index `lsidTTLIndex`.
 
 use teseladb_bson::{Document, Value};
-use teseladb_hash::sha256;
 use teseladb_meta::catalog::{CatalogCommand, CollectionEntry, Namespace};
+use teseladb_session::session::{Owner, Uid};
 
 use super::crud::{Modify, Writer, modify};
 use super::mutation::Image;
@@ -30,11 +30,18 @@ pub struct Refreshed {
     pub removed: i64,
 }
 
-/// The record's `_id` of session `lsid` without authentication.
-pub fn record_id(lsid: u128) -> Document {
+/// The record's `_id` of session `lsid` of the user whose `uid` it is.
+pub fn record_id(lsid: u128, uid: &Uid) -> Document {
     Document::new()
         .with("id", Value::Binary { subtype: 4, bytes: lsid.to_be_bytes().to_vec() })
-        .with("uid", Value::Binary { subtype: 0, bytes: sha256(b"").to_vec() })
+        .with("uid", Value::Binary { subtype: 0, bytes: uid.to_vec() })
+}
+
+/// What the record of a session of `owner` sets besides its last use: the user's name as
+/// `{name: "user@db"}` when there is one (measured in `config.system.sessions` of a `refrouter`
+/// 9.0.4 with authentication on 03-11-2026).
+fn record_user(owner: &Owner) -> Option<Document> {
+    owner.user.as_ref().map(|u| Document::new().with("name", u.as_str()))
 }
 
 /// The record's collection, created on first use (users cannot create `system.` collections).
@@ -105,6 +112,8 @@ fn refresh_records<B: Backend + ?Sized>(
     // The sessions `endSessions` named end now, with their cursors, as at a refresh of RefDb's
     // session cache.
     super::session::kill_local(shared, &super::session::KillScope::Sessions(ended.clone()));
+    let ended: Vec<Document> =
+        ended.iter().filter_map(|m| m.lsid.map(|l| record_id(l, &m.uid))).collect();
     let space = ns(SESSIONS_DB, SESSIONS_COLL);
     let exists = backend.collection(&space)?.is_some();
     if used.is_empty() && !exists {
@@ -115,17 +124,20 @@ fn refresh_records<B: Backend + ?Sized>(
     let mut ctx = Ctx { backend, shared, db: SESSIONS_DB, cmd: &cmd };
     let mut w = Writer::new(&ctx, "update")?;
     let mut out = Refreshed::default();
-    for (i, (lsid, last_use)) in used.iter().enumerate() {
-        let filter = Document::new().with("_id", record_id(*lsid));
+    for (i, (lsid, owner, last_use)) in used.iter().enumerate() {
+        let filter = Document::new().with("_id", record_id(*lsid, &owner.uid));
         let date = Value::DateTime(i64::try_from(*last_use).unwrap_or(i64::MAX));
-        let set = Document::new().with("$max", Document::new().with("lastUse", date));
+        let mut set = Document::new().with("$max", Document::new().with("lastUse", date));
+        if let Some(user) = record_user(owner) {
+            set.push("$set", Document::new().with("user", user));
+        }
         let m = statement(filter, Some(Value::Document(set)), false);
         modify(&mut ctx, &mut w, &space, &m, true, i as u32)?;
         out.written += 1;
     }
     if !ended.is_empty() {
         // The records of the ended sessions go too.
-        let ids: Vec<Value> = ended.iter().map(|l| Value::Document(record_id(*l))).collect();
+        let ids: Vec<Value> = ended.into_iter().map(Value::Document).collect();
         let filter = Document::new().with("_id", Document::new().with("$in", ids));
         let m = statement(filter, None, true);
         out.removed += modify(&mut ctx, &mut w, &space, &m, true, used.len() as u32)?.n;

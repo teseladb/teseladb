@@ -562,10 +562,7 @@ impl TxnBackend<'_> {
             })
             .collect();
         let (lsid, txn_number) = self.run.coord.session();
-        let uid = match self.inner.authenticated_user() {
-            Some(u) => teseladb_hash::sha256(format!("{}@{}", u.user, u.db).as_bytes()),
-            None => teseladb_hash::sha256(b""),
-        };
+        let uid = super::session::caller(&*self.inner).uid;
         let info = TxnInfo { id: self.run.coord.txn().0, lsid, uid, txn_number };
         for (key, meta) in history(&docs, Some((&info, self.run.ops))) {
             let value = meta.encode().map_err(|e| {

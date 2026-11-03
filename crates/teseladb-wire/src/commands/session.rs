@@ -3,12 +3,55 @@
 
 use teseladb_bson::{Document, Value};
 use teseladb_hash::sha256;
+pub use teseladb_session::session::{Owner, SessionMatch, Uid};
 
 use super::args::{missing, uuid_value};
 use super::{Backend, Ctx, Shared, lock, new_uuid};
 use crate::LOGICAL_SESSION_TIMEOUT_MINUTES;
 use crate::error::CommandError;
 use crate::types::wrong_type;
+
+/// The `uid` of user `user@db` (`name`), the empty name without authentication.
+pub fn uid_of(name: &str) -> Uid {
+    sha256(name.as_bytes())
+}
+
+/// Who runs the command: the owner of the sessions it starts.
+pub fn caller<B: Backend + ?Sized>(backend: &B) -> Owner {
+    match backend.authenticated_user() {
+        Some(u) => {
+            let name = format!("{}@{}", u.user, u.db);
+            Owner { uid: uid_of(&name), user: Some(name) }
+        }
+        None => Owner { uid: uid_of(""), user: None },
+    }
+}
+
+/// The owner's `uid` of a cursor opened by `owner` (`db.user`, `None` without authentication).
+fn cursor_uid(owner: Option<&str>) -> Uid {
+    match owner.and_then(|o| o.split_once('.')) {
+        Some((db, user)) => uid_of(&format!("{user}@{db}")),
+        None => uid_of(""),
+    }
+}
+
+/// A `uid` at `path`: a general binary of 32 bytes (measured on a `refrouter` 9.0.4).
+fn uid_value(v: &Value, path: &str) -> Result<Uid, CommandError> {
+    match v {
+        Value::Binary { subtype: 0, bytes } => <Uid>::try_from(bytes.as_slice()).map_err(|_| {
+            let msg = format!("Unsupported SHA256Block hash length: {}", bytes.len());
+            CommandError::new(crate::error::UNSUPPORTED_FORMAT, msg)
+        }),
+        Value::Binary { subtype, .. } => {
+            let name = crate::cluster_time::subtype_name(*subtype);
+            let msg = format!(
+                "BSON field '{path}' is the wrong binData type '{name}', expected type 'general'"
+            );
+            Err(CommandError::new(crate::error::TYPE_MISMATCH, msg))
+        }
+        other => Err(wrong_type(path, other, "binData")),
+    }
+}
 
 /// `endSessions`.
 pub const END_SESSIONS: &str = "endSessions";
@@ -33,6 +76,24 @@ fn list_name(command: &str) -> String {
 
 /// The session ids of the command's first field (an array of `{id: UUID}`).
 fn lsids<B: Backend + ?Sized>(ctx: &Ctx<'_, B>) -> Result<Vec<u128>, CommandError> {
+    Ok(named_sessions(ctx)?.into_iter().map(|(id, _)| id).collect())
+}
+
+/// The sessions of the command's first field, each of the `uid` its `lsid` names or else of
+/// the user who runs the command, as RefDb completes an `lsid` (measured on a `refrouter` 9.0.4
+/// with authentication on 03-11-2026: `killSessions` of another user's `id` reaches nothing).
+fn matches<B: Backend + ?Sized>(ctx: &Ctx<'_, B>) -> Result<Vec<SessionMatch>, CommandError> {
+    let own = caller(ctx.backend).uid;
+    Ok(named_sessions(ctx)?
+        .into_iter()
+        .map(|(id, uid)| SessionMatch::one(id, uid.unwrap_or(own)))
+        .collect())
+}
+
+/// The `id` and the `uid`, if it has one, of each element of the command's first field.
+fn named_sessions<B: Backend + ?Sized>(
+    ctx: &Ctx<'_, B>,
+) -> Result<Vec<(u128, Option<Uid>)>, CommandError> {
     let name = ctx.name().to_owned();
     let list = list_name(&name);
     let Value::Array(items) = ctx.first() else {
@@ -47,15 +108,17 @@ fn lsids<B: Backend + ?Sized>(ctx: &Ctx<'_, B>) -> Result<Vec<u128>, CommandErro
         let Value::Document(d) = v else {
             return Err(wrong_type(&format!("{list}.{i}"), v, "object"));
         };
-        match d.get("id") {
+        let id = match d.get("id") {
             Some(Value::Binary { subtype: 4, bytes }) if bytes.len() == 16 => {
                 let mut b = [0u8; 16];
                 b.copy_from_slice(bytes);
-                out.push(u128::from_be_bytes(b));
+                u128::from_be_bytes(b)
             }
             Some(v) => return Err(wrong_type(&format!("{list}.id"), v, "binData")),
             None => return Err(missing(&list, "id")),
-        }
+        };
+        let uid = d.get("uid").map(|u| uid_value(u, &format!("{list}.uid"))).transpose()?;
+        out.push((id, uid));
     }
     Ok(out)
 }
@@ -67,8 +130,9 @@ fn ok() -> Document {
 /// Which sessions a kill reaches.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum KillScope {
-    /// These sessions (`killSessions`).
-    Sessions(Vec<u128>),
+    /// The sessions these reach, by their owners (`killSessions`, `killAllSessions` with users,
+    /// `killAllSessionsByPattern`).
+    Sessions(Vec<SessionMatch>),
     /// Every session (`killAllSessions`).
     All,
     /// One operation of one node (`killOp` of `node<N>:<op>`, 010 FR-016): only that node
@@ -85,9 +149,9 @@ pub enum KillScope {
 pub fn kill_local(shared: &Shared, scope: &KillScope) {
     let mut g = lock(shared);
     match scope {
-        KillScope::Sessions(ids) => {
-            g.sessions.end(ids);
-            g.cursors.kill_sessions(ids);
+        KillScope::Sessions(matches) => {
+            g.sessions.end_matching(matches);
+            g.cursors.kill_matching(matches, |c| cursor_uid(c.owner.as_deref()));
         }
         KillScope::All => {
             g.sessions.end_all();
@@ -113,15 +177,15 @@ fn kill<B: Backend + ?Sized>(
 /// `endSessions`: the sessions end, with their cursors, at the node's next refresh of the
 /// sessions' record (`registry::refresh`), as RefDb ends them at its session cache's refresh.
 pub fn end_sessions<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
-    let ids = lsids(ctx)?;
-    lock(ctx.shared).sessions.mark_ending(&ids);
+    let ending = matches(ctx)?;
+    lock(ctx.shared).sessions.mark_ending(&ending);
     Ok(ok())
 }
 
 /// `killSessions`.
 pub fn kill_sessions<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
-    let ids = lsids(ctx)?;
-    kill(ctx, KillScope::Sessions(ids))
+    let reached = matches(ctx)?;
+    kill(ctx, KillScope::Sessions(reached))
 }
 
 /// `refreshSessions`.
@@ -130,15 +194,16 @@ pub fn refresh_sessions<B: Backend + ?Sized>(
 ) -> Result<Document, CommandError> {
     let ids = lsids(ctx)?;
     let now = ctx.backend.now_ms();
+    let owner = caller(ctx.backend);
     let mut g = lock(ctx.shared);
     for id in ids {
-        g.sessions.touch(id, now);
+        g.sessions.touch(id, &owner, now);
     }
     Ok(ok())
 }
 
-/// `killAllSessions`: every session and its cursors (without users until 013, the list of users
-/// it names covers everyone).
+/// `killAllSessions`: the sessions of the users it names, with their cursors; every session with
+/// no user named.
 pub fn kill_all_sessions<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
 ) -> Result<Document, CommandError> {
@@ -146,22 +211,25 @@ pub fn kill_all_sessions<B: Backend + ?Sized>(
     let Value::Array(users) = ctx.first().clone() else {
         return Err(wrong_type(list, ctx.first(), "array"));
     };
+    let mut owners = Vec::new();
     for (i, u) in users.iter().enumerate() {
         let Value::Document(d) = u else {
             return Err(wrong_type(&format!("{list}.{i}"), u, "object"));
         };
-        for field in ["db", "user"] {
+        let mut name = [""; 2];
+        for (slot, field) in name.iter_mut().zip(["db", "user"]) {
             match d.get(field) {
-                Some(Value::String(_)) => {}
+                Some(Value::String(v)) => *slot = v,
                 Some(v) => return Err(wrong_type(&format!("{list}.{field}"), v, "string")),
                 None => return Err(missing(list, field)),
             }
         }
+        let [db, user] = name;
+        owners.push(SessionMatch::owner(uid_of(&format!("{user}@{db}"))));
     }
-    // Without authentication (013) every session belongs to no user: a list of users reaches none.
-    match users.is_empty() {
+    match owners.is_empty() {
         true => kill(ctx, KillScope::All),
-        false => Ok(ok()),
+        false => kill(ctx, KillScope::Sessions(owners)),
     }
 }
 
@@ -169,18 +237,12 @@ pub fn kill_all_sessions<B: Backend + ?Sized>(
 pub fn start_session<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     let id = u128::from_be_bytes(new_uuid(ctx.backend));
     let now = ctx.backend.now_ms();
-    lock(ctx.shared).sessions.touch(id, now);
+    let owner = caller(ctx.backend);
+    lock(ctx.shared).sessions.touch(id, &owner, now);
     Ok(Document::new()
         .with("id", Document::new().with("id", uuid_value(id)))
         .with("timeoutMinutes", LOGICAL_SESSION_TIMEOUT_MINUTES)
         .with("ok", 1.0))
-}
-
-/// What one pattern of `killAllSessionsByPattern` reaches.
-enum Pattern {
-    Every,
-    One(u128),
-    Nothing,
 }
 
 fn session_id(v: &Value, path: &str) -> Result<u128, CommandError> {
@@ -194,41 +256,31 @@ fn session_id(v: &Value, path: &str) -> Result<u128, CommandError> {
     }
 }
 
-/// One pattern: its fields must all match a session. Until 013 every session belongs to no user,
-/// with the `uid` of the empty name, so a list of users or roles reaches none.
-fn pattern(d: &Document, list: &str) -> Result<Pattern, CommandError> {
-    let mut out = Pattern::Every;
+/// The sessions one pattern reaches, `None` for every session. A `uid` reaches every session
+/// of its owner, also next to an `lsid`; an `lsid` reaches the session with its `id` and `uid`;
+/// `users` and `roles` name whom the command acts for and choose no session (measured on a
+/// `refrouter` 9.0.4 with authentication on 03-11-2026).
+fn pattern(d: &Document, list: &str) -> Result<Option<SessionMatch>, CommandError> {
+    let (mut uid, mut one) = (None, None);
     for (k, v) in d.iter() {
-        let reaches = match (k, v) {
+        match (k, v) {
             ("lsid", Value::Document(l)) => {
                 let id = match l.get("id") {
                     Some(id) => session_id(id, &format!("{list}.lsid.id"))?,
                     None => return Err(missing(&format!("{list}.lsid"), "id")),
                 };
-                // The whole session id: `uid` too (measured on a `refrouter` 9.0.4 on 03-11-2026).
+                let path = format!("{list}.lsid.uid");
                 match l.get("uid") {
-                    Some(Value::Binary { .. }) => {}
-                    Some(other) => {
-                        return Err(wrong_type(&format!("{list}.lsid.uid"), other, "binData"));
-                    }
+                    Some(u) => one = Some(SessionMatch::one(id, uid_value(u, &path)?)),
                     None => return Err(missing(&format!("{list}.lsid"), "uid")),
                 }
-                Pattern::One(id)
             }
             ("lsid", other) => return Err(wrong_type(&format!("{list}.lsid"), other, "object")),
-            ("uid", Value::Binary { bytes, .. }) => match bytes.as_slice() == sha256(b"") {
-                true => Pattern::Every,
-                false => Pattern::Nothing,
-            },
-            ("uid", other) => return Err(wrong_type(&format!("{list}.uid"), other, "binData")),
+            ("uid", v) => uid = Some(SessionMatch::owner(uid_value(v, &format!("{list}.uid"))?)),
             ("users" | "roles", Value::Array(a)) => {
                 let name = if k == "users" { "user" } else { "role" };
                 for (i, e) in a.iter().enumerate() {
                     named(e, &format!("{list}.{k}"), i, name)?;
-                }
-                match a.is_empty() {
-                    true => Pattern::Every,
-                    false => Pattern::Nothing,
                 }
             }
             ("users" | "roles", other) => {
@@ -238,14 +290,9 @@ fn pattern(d: &Document, list: &str) -> Result<Pattern, CommandError> {
                 let msg = format!("BSON field '{list}.{k}' is an unknown field.");
                 return Err(CommandError::new(crate::error::IDL_UNKNOWN_FIELD, msg));
             }
-        };
-        out = match (out, reaches) {
-            (Pattern::Nothing, _) | (_, Pattern::Nothing) => Pattern::Nothing,
-            (Pattern::One(a), _) | (_, Pattern::One(a)) => Pattern::One(a),
-            (Pattern::Every, Pattern::Every) => Pattern::Every,
-        };
+        }
     }
-    Ok(out)
+    Ok(uid.or(one))
 }
 
 /// One user (`name` is `user`) or role (`role`) of a pattern, element `i` of the list at `path`:
@@ -309,21 +356,19 @@ pub fn kill_all_sessions_by_pattern<B: Backend + ?Sized>(
     let Value::Array(patterns) = ctx.first().clone() else {
         return Err(wrong_type(list, ctx.first(), "array"));
     };
-    let (mut every, mut ids) = (patterns.is_empty(), Vec::new());
+    let (mut every, mut reached) = (patterns.is_empty(), Vec::new());
     for (i, p) in patterns.iter().enumerate() {
         let Value::Document(d) = p else {
             return Err(wrong_type(&format!("{list}.{i}"), p, "object"));
         };
         match pattern(d, list)? {
-            Pattern::Every => every = true,
-            Pattern::One(id) => ids.push(id),
-            Pattern::Nothing => {}
+            None => every = true,
+            Some(m) => reached.push(m),
         }
     }
     may_impersonate(ctx.backend, &patterns)?;
-    match (every, ids.is_empty()) {
-        (true, _) => kill(ctx, KillScope::All),
-        (false, false) => kill(ctx, KillScope::Sessions(ids)),
-        (false, true) => Ok(ok()),
+    match every {
+        true => kill(ctx, KillScope::All),
+        false => kill(ctx, KillScope::Sessions(reached)),
     }
 }
