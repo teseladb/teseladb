@@ -455,7 +455,7 @@ pub fn start(
 ) -> i32 {
     teseladb_wire::commands::js::set_clock(js_clock_ms);
     let log = match log_output(o) {
-        Ok(w) => Logger::new(o.log_level, o.log_format, w),
+        Ok(w) => std::sync::Arc::new(Logger::new(o.log_level, o.log_format, w)),
         Err(e) => {
             let _ = writeln!(err, "teseladb: --logpath {}: {e}", display(o.logpath.as_deref()));
             return 1;
@@ -500,6 +500,8 @@ pub fn start(
     };
     let kmip_key = kmip.as_ref().map(|m| &m.key);
     let mut cfg = node_config(o);
+    let steps = log.clone();
+    cfg.startup_log = node::StartupLog::new(move |msg, fields| steps.info(msg, fields));
     if o.insecure {
         match at_rest::from_opts(&o.at_rest, kmip_key, None) {
             Ok(e) => encrypt(&mut cfg, e),
@@ -509,7 +511,7 @@ pub fn start(
             }
         }
     } else {
-        match secure(o, &mut cfg, kmip_key) {
+        match secure(o, &mut cfg, kmip_key, &log) {
             Ok(summary) => log.info(&summary, &[]),
             Err(e) => {
                 let _ = writeln!(err, "teseladb: {e}");
@@ -669,6 +671,7 @@ fn secure(
     o: &StartOpts,
     cfg: &mut NodeConfig,
     kmip_key: Option<&[u8; at_rest::KEY_LEN]>,
+    log: &Logger,
 ) -> Result<String, String> {
     let mut random = |b: &mut [u8]| teseladb_sys::fill_random(b);
     let now = std::time::SystemTime::now()
@@ -676,7 +679,10 @@ fn secure(
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
     let params = pki::PkiParams { now, node_names: pki::node_names(&o.bind_ip) };
     if let Some(token) = o.enroll_token.as_ref().filter(|_| pki::absent(&o.dbpath)) {
+        let at = o.join.first().map_or("", String::as_str);
+        log.info("enrolling with the cluster", &[("join", &at)]);
         enroll_node(o, &token.0, &mut random)?;
+        log.info("enrolled", &[]);
     }
     let pki = pki::load_or_create(&o.dbpath, &params, &mut random).map_err(|e| e.to_string())?;
     let tls = tls_port::build(&o.tls, &pki)?;
@@ -822,7 +828,11 @@ pub fn serve<D: teseladb_raftlog::Disk + Send + 'static>(
     stop: &dyn Fn() -> bool,
     ready_timeout: Duration,
 ) -> i32 {
-    if !node.wait_ready(ready_timeout) {
+    log.info("waiting for the cluster to be ready", &[]);
+    let report = |v: Option<&logic::Group0View>| {
+        log.info("not ready yet", &[("missing", &node::not_ready(v))]);
+    };
+    if !node.wait_ready_reporting(ready_timeout, node::READY_REPORT, report) {
         log.error("the cluster did not become ready", &[]);
         node.stop();
         return 1;
