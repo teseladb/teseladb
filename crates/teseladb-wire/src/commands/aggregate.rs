@@ -38,6 +38,9 @@ pub const AGGREGATE: &str = super::status::AGGREGATE;
 /// The collection of an `aggregate: 1`.
 const COLLECTIONLESS: &str = "$cmd.aggregate";
 
+/// The node's shared state and the aggregated collection, which the stages of the node read.
+type Node<'a> = (&'a super::Shared, &'a Namespace);
+
 /// What the pipeline reads besides its input, from the node.
 struct WireEnv<'a, B: Backend + ?Sized> {
     backend: RefCell<&'a mut B>,
@@ -66,8 +69,11 @@ fn to_mql(e: CommandError) -> MqlError {
 impl<B: Backend + ?Sized> WireEnv<'_, B> {
     /// `$listLocalSessions`: the sessions this node holds in memory, as the records of
     /// `config.system.sessions` write them, for the users `spec` asks for.
-    fn local_sessions(&self, spec: &Document) -> Result<Vec<Document>, CommandError> {
-        let Some((shared, _)) = &self.node else { return Ok(Vec::new()) };
+    fn local_sessions(
+        &self,
+        (shared, _): Node<'_>,
+        spec: &Document,
+    ) -> Result<Vec<Document>, CommandError> {
         let used = super::lock(shared).sessions.used_since(0);
         Ok(used
             .into_iter()
@@ -113,10 +119,14 @@ impl<B: Backend + ?Sized> WireEnv<'_, B> {
 
     /// `$listCatalog`: the catalog entry of the aggregated collection, or of every collection
     /// with `aggregate: 1` on `admin`.
-    fn list_catalog(&self) -> Result<Vec<Document>, CommandError> {
-        let Some((_, ns)) = &self.node else { return Ok(Vec::new()) };
-        let only = (ns.coll != COLLECTIONLESS).then_some(ns.coll.as_str());
-        super::list_catalog::entries(&mut **self.backend.borrow_mut(), &ns.db, only)
+    /// On a view (whose stages are none, or the command is refused) it is the entry of the
+    /// collection under it (measured on a `refnode` 9.0.4).
+    fn list_catalog(&self, (_, ns): Node<'_>) -> Result<Vec<Document>, CommandError> {
+        let mut backend = self.backend.borrow_mut();
+        let base = super::views::resolve(&mut **backend, ns)?.map(|v| v.collection);
+        let coll = base.as_deref().unwrap_or(&ns.coll);
+        let only = (coll != COLLECTIONLESS).then_some(coll);
+        super::list_catalog::entries(&mut **backend, &ns.db, only)
     }
 
     /// `$listClusterCatalog`: every collection and view of the command's database (of every
@@ -172,8 +182,7 @@ impl<B: Backend + ?Sized> WireEnv<'_, B> {
     }
 
     /// `$currentOp`: the operations running on every node, as `currentOp` describes them.
-    fn current_ops(&self) -> Result<Vec<Document>, CommandError> {
-        let Some((shared, _)) = &self.node else { return Ok(Vec::new()) };
+    fn current_ops(&self, (shared, _): Node<'_>) -> Result<Vec<Document>, CommandError> {
         let mut backend = self.backend.borrow_mut();
         super::admin::current_operations(&mut **backend, shared)
     }
@@ -181,25 +190,30 @@ impl<B: Backend + ?Sized> WireEnv<'_, B> {
     /// `$planCacheStats`: the entries of the node's plan cache for the aggregated collection,
     /// which must exist (50933).
     /// `$queryStats`: what this node counted of each query shape.
-    fn query_stats(&self, spec: &Document) -> Result<Vec<Document>, CommandError> {
+    fn query_stats(
+        &self,
+        (shared, _): Node<'_>,
+        spec: &Document,
+    ) -> Result<Vec<Document>, CommandError> {
         if let Some((k, _)) = spec.iter().next() {
             let msg = format!("BSON field '$queryStats.{k}' is an unknown field.");
             return Err(CommandError::new(crate::error::IDL_UNKNOWN_FIELD, msg));
         }
-        let Some((shared, _)) = &self.node else { return Ok(Vec::new()) };
         let now = self.backend.borrow_mut().now_ms();
         Ok(super::lock(shared).query_stats.listed(i64::try_from(now).unwrap_or(i64::MAX)))
     }
 
     /// `$listSampledQueries`: the queries this node sampled.
-    fn sampled_queries(&self, spec: &Document) -> Result<Vec<Document>, CommandError> {
-        let Some((shared, _)) = &self.node else { return Ok(Vec::new()) };
+    fn sampled_queries(
+        &self,
+        (shared, _): Node<'_>,
+        spec: &Document,
+    ) -> Result<Vec<Document>, CommandError> {
         let now = self.backend.borrow_mut().now_ms();
         Ok(super::query_analysis::listed(shared, spec, now))
     }
 
-    fn plan_cache_stats(&self) -> Result<Vec<Document>, CommandError> {
-        let Some((shared, ns)) = &self.node else { return Ok(Vec::new()) };
+    fn plan_cache_stats(&self, (shared, ns): Node<'_>) -> Result<Vec<Document>, CommandError> {
         let mut backend = self.backend.borrow_mut();
         let ns_text = names::full(ns);
         let Some(coll) = backend.collection(ns)? else {
@@ -220,8 +234,7 @@ impl<B: Backend + ?Sized> WireEnv<'_, B> {
     /// `$indexStats`: each index of the aggregated collection with how many reads and writes
     /// its plans scanned it and since when, as a `refrouter` 9.0.4 lists them (measured in
     /// `tests/aggregate/index_stats.out`); nothing for a collection that does not exist.
-    fn index_stats(&self) -> Result<Vec<Document>, CommandError> {
-        let Some((shared, ns)) = &self.node else { return Ok(Vec::new()) };
+    fn index_stats(&self, (shared, ns): Node<'_>) -> Result<Vec<Document>, CommandError> {
         let mut backend = self.backend.borrow_mut();
         let Some(coll) = backend.collection(ns)? else { return Ok(Vec::new()) };
         // A time series lists its buckets' indexes alone (measured on a `refnode` 9.0.4).
@@ -264,24 +277,33 @@ impl<B: Backend + ?Sized> WireEnv<'_, B> {
     }
 
     /// `$listSessions`: the records of `config.system.sessions` for the users `spec` asks for.
-    fn recorded_sessions(&self, spec: &Document) -> Result<Vec<Document>, CommandError> {
-        let Some((_, ns)) = &self.node else { return Ok(Vec::new()) };
+    fn recorded_sessions(
+        &self,
+        (shared, ns): Node<'_>,
+        spec: &Document,
+    ) -> Result<Vec<Document>, CommandError> {
         let mut backend = self.backend.borrow_mut();
-        let records = read(&mut **backend, ns, self.concern)?;
+        let records = read(&mut **backend, Some(shared), ns, self.concern)?;
         Ok(records.into_iter().filter(|d| wanted_session(d.get("_id"), spec)).collect())
     }
 
     /// The documents of `$listSearchIndexes` on the pipeline's collection (011 FR-008).
-    fn search_indexes(&self, spec: &Document) -> Result<Vec<Document>, CommandError> {
-        let Some((shared, ns)) = &self.node else { return Ok(Vec::new()) };
+    fn search_indexes(
+        &self,
+        (shared, ns): Node<'_>,
+        spec: &Document,
+    ) -> Result<Vec<Document>, CommandError> {
         let mut backend = self.backend.borrow_mut();
         super::search_indexes::stage(&mut **backend, shared, ns, spec)
     }
 
     /// `$collStats` of the aggregated collection (015 FR-010), with the sections `spec` asks
     /// for in RefDb's order. TeselaDB has no shards: the document has no `shard` (DV-038).
-    fn coll_stats(&self, spec: &Document) -> Result<Vec<Document>, CommandError> {
-        let Some((shared, ns)) = &self.node else { return Ok(Vec::new()) };
+    fn coll_stats(
+        &self,
+        (shared, ns): Node<'_>,
+        spec: &Document,
+    ) -> Result<Vec<Document>, CommandError> {
         let mut backend = self.backend.borrow_mut();
         let ns_text = names::full(ns);
         let mut d = Document::new()
@@ -399,7 +421,8 @@ impl<B: Backend + ?Sized> Env for WireEnv<'_, B> {
     fn collection(&self, name: &str) -> Result<Vec<Document>, MqlError> {
         let ns = names::ns(self.db, name);
         let mut backend = self.backend.borrow_mut();
-        read(&mut **backend, &ns, self.concern).map_err(to_mql)
+        let shared = self.node.as_ref().map(|(shared, _)| *shared);
+        read(&mut **backend, shared, &ns, self.concern).map_err(to_mql)
     }
 
     fn collation(&self) -> Collation {
@@ -422,7 +445,7 @@ impl<B: Backend + ?Sized> Env for WireEnv<'_, B> {
         let stages = [RawValue::Document(raw)];
         match planned_read(&mut ctx, &ns, (&stages, None), self.concern, false).map_err(to_mql)? {
             Some((docs, _)) => Ok(docs),
-            None => read(&mut **backend, &ns, self.concern).map_err(to_mql),
+            None => read(&mut **backend, Some(shared), &ns, self.concern).map_err(to_mql),
         }
     }
 
@@ -486,30 +509,38 @@ impl<B: Backend + ?Sized> Env for WireEnv<'_, B> {
 
     fn system_stage(&self, name: &str, spec: &Document) -> Result<Vec<Document>, MqlError> {
         match name {
-            "$collStats" => self.coll_stats(spec).map_err(to_mql),
-            teseladb_exec::pipeline::LIST_SEARCH_INDEXES => {
-                self.search_indexes(spec).map_err(to_mql)
-            }
-            "$listLocalSessions" => self.local_sessions(spec).map_err(to_mql),
-            "$listSessions" => self.recorded_sessions(spec).map_err(to_mql),
-            "$planCacheStats" => self.plan_cache_stats().map_err(to_mql),
-            "$indexStats" => self.index_stats().map_err(to_mql),
-            "$currentOp" => self.current_ops().map_err(to_mql),
-            "$listClusterCatalog" => self.cluster_catalog(spec).map_err(to_mql),
+            "$listClusterCatalog" => return self.cluster_catalog(spec).map_err(to_mql),
             // TeselaDB loads no extensions.
-            "$listExtensions" => Ok(Vec::new()),
-            "$listCatalog" => self.list_catalog().map_err(to_mql),
+            "$listExtensions" => return Ok(Vec::new()),
             super::query_settings::STAGE => {
                 let mut backend = self.backend.borrow_mut();
-                super::query_settings::listed(&mut **backend, spec).map_err(to_mql)
-            }
-            super::query_stats::STAGE => self.query_stats(spec).map_err(to_mql),
-            teseladb_exec::pipeline::LIST_SAMPLED_QUERIES => {
-                self.sampled_queries(spec).map_err(to_mql)
+                return super::query_settings::listed(&mut **backend, spec).map_err(to_mql);
             }
             teseladb_exec::pipeline::SHARDED_DATA_DISTRIBUTION => {
                 let mut backend = self.backend.borrow_mut();
-                super::data_distribution::documents(&mut **backend).map_err(to_mql)
+                return super::data_distribution::documents(&mut **backend).map_err(to_mql);
+            }
+            _ => {}
+        }
+        // The other stages read the node's state and the aggregated collection, which a view's
+        // pipeline read without them (the synonyms of a search index) does not have: it lists
+        // nothing.
+        let Some((shared, ns)) = &self.node else { return Ok(Vec::new()) };
+        let node = (*shared, ns);
+        match name {
+            "$collStats" => self.coll_stats(node, spec).map_err(to_mql),
+            teseladb_exec::pipeline::LIST_SEARCH_INDEXES => {
+                self.search_indexes(node, spec).map_err(to_mql)
+            }
+            "$listLocalSessions" => self.local_sessions(node, spec).map_err(to_mql),
+            "$listSessions" => self.recorded_sessions(node, spec).map_err(to_mql),
+            "$planCacheStats" => self.plan_cache_stats(node).map_err(to_mql),
+            "$indexStats" => self.index_stats(node).map_err(to_mql),
+            "$currentOp" => self.current_ops(node).map_err(to_mql),
+            "$listCatalog" => self.list_catalog(node).map_err(to_mql),
+            super::query_stats::STAGE => self.query_stats(node, spec).map_err(to_mql),
+            teseladb_exec::pipeline::LIST_SAMPLED_QUERIES => {
+                self.sampled_queries(node, spec).map_err(to_mql)
             }
             other => Err(MqlError::new(
                 teseladb_mql::ErrorCode { code: BAD_VALUE.code, name: BAD_VALUE.name },
@@ -520,23 +551,26 @@ impl<B: Backend + ?Sized> Env for WireEnv<'_, B> {
 }
 
 /// The documents of collection `ns`, read through the views it stands on (their pipelines run
-/// over the collection at the end of the chain, the innermost first).
+/// over the collection at the end of the chain, the innermost first), the stages of the node with
+/// its state `shared`.
 fn read<B: Backend + ?Sized>(
     backend: &mut B,
+    shared: Option<&super::Shared>,
     ns: &Namespace,
     concern: ReadConcern,
 ) -> Result<Vec<Document>, CommandError> {
-    read_through(backend, ns, &[], None, concern)
+    read_engine(backend, shared, ns, concern).map(|(docs, _)| docs)
 }
 
 /// [`read`], and whether the stages of the views it read through all run in RefDb's
 /// slot-based engine (the stages that follow them may then run there too).
 fn read_engine<B: Backend + ?Sized>(
     backend: &mut B,
+    shared: Option<&super::Shared>,
     ns: &Namespace,
     concern: ReadConcern,
 ) -> Result<(Vec<Document>, bool), CommandError> {
-    read_through_engine(backend, ns, &[], None, concern)
+    read_through_on(backend, shared, ns, (&[], None), concern, (super::Spill::default(), true))?
 }
 
 /// The documents of `ns` read through its views as [`read`] does, then through `extra`, the
@@ -548,18 +582,8 @@ pub(crate) fn read_through<B: Backend + ?Sized>(
     vars: Option<&Document>,
     concern: ReadConcern,
 ) -> Result<Vec<Document>, CommandError> {
-    read_through_engine(backend, ns, extra, vars, concern).map(|(docs, _)| docs)
-}
-
-/// [`read_through`], and whether its stages all run in RefDb's slot-based engine.
-fn read_through_engine<B: Backend + ?Sized>(
-    backend: &mut B,
-    ns: &Namespace,
-    extra: &[Document],
-    vars: Option<&Document>,
-    concern: ReadConcern,
-) -> Result<(Vec<Document>, bool), CommandError> {
-    read_through_spilling(backend, ns, (extra, vars), concern, (super::Spill::default(), true))?
+    let none = (super::Spill::default(), true);
+    read_through_on(backend, None, ns, (extra, vars), concern, none)?.map(|(docs, _)| docs)
 }
 
 /// [`read_through`] with the node's state `shared` (the stages of the node read it) and the
@@ -578,12 +602,13 @@ pub(crate) fn read_through_staged<B: Backend + ?Sized>(
 /// when `allow_disk_use`.
 pub(crate) fn read_through_spilling<B: Backend + ?Sized>(
     backend: &mut B,
+    shared: &super::Shared,
     ns: &Namespace,
     stages: (&[Document], Option<&Document>),
     concern: ReadConcern,
     spilling: (super::Spill, bool),
 ) -> Result<Result<(Vec<Document>, bool), CommandError>, CommandError> {
-    read_through_on(backend, None, ns, stages, concern, spilling)
+    read_through_on(backend, Some(shared), ns, stages, concern, spilling)
 }
 
 /// [`read_through`] with the node's state, so that the stages see the collection's indexes
@@ -845,6 +870,15 @@ fn check_write_stage_concern(cmd: &Document, stages: &[RawValue<'_>]) -> Result<
 
 /// `aggregate`.
 pub fn aggregate<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
+    aggregate_from(ctx, false)
+}
+
+/// [`aggregate`]; with `find`, the command is a `find` run as a pipeline, whose `$match` may hold
+/// `$where`.
+pub(crate) fn aggregate_from<B: Backend + ?Sized>(
+    ctx: &mut Ctx<'_, B>,
+    find: bool,
+) -> Result<Document, CommandError> {
     let first = ctx.first().clone();
     let (ns, on_collection) = match &first {
         Value::String(_) => (target(ctx)?, true),
@@ -878,6 +912,7 @@ pub fn aggregate<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
     let vars = a.vars.clone().unwrap_or_default();
     let names: Vec<String> = vars.iter().map(|(k, _)| k.to_owned()).collect();
     let ctx_vars = ExprCtx::checked(names.iter().map(String::as_str));
+    let ctx_vars = if find { ctx_vars.with_where() } else { ctx_vars };
     // `$currentOp` answers its namespace before its arguments (measured).
     let first_name = match stages.first() {
         Some(RawValue::Document(d)) => d.iter().next().map(|(k, _)| k),
@@ -893,14 +928,18 @@ pub fn aggregate<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
     teseladb_exec::pipeline::optimize::optimize_stages(&stages, a.vars.as_ref())
         .map_err(from_mql)?;
     check_system_namespace(&pipeline, &ns, on_collection)?;
-    // On a view whose pipeline has stages, `$listCatalog` comes after them (measured).
-    if pipeline.system_stage() == Some("$listCatalog")
-        && let Some(c) = ctx.backend.collection(&ns)?
-        && matches!(super::kinds::kind_of(&c)?, CollectionKind::View { pipeline, .. } if !pipeline.is_empty())
-    {
+    // On a view whose pipeline has stages, `$listCatalog` and a `$match` with `$text` come after
+    // them (measured; `$text`: `scratchpad/lane3s/m89.js`).
+    if pipeline.system_stage() == Some("$listCatalog") && on_view_with_stages(ctx.backend, &ns)? {
         return Err(CommandError::new(
             crate::error::CS_NOT_FIRST,
             "$listCatalog is only valid as the first stage in a pipeline",
+        ));
+    }
+    if starts_with_text(&stages) && on_view_with_stages(ctx.backend, &ns)? {
+        return Err(CommandError::new(
+            TEXT_NOT_FIRST,
+            "$match with $text is only allowed as the first pipeline stage",
         ));
     }
     if on_collection && ctx.backend.collection(&ns)?.is_some() {
@@ -921,7 +960,7 @@ pub fn aggregate<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
     let (docs, metas, sbe) = match planned {
         Some((docs, metas)) => (docs, metas, true),
         None if on_collection && pipeline.reads_collection() => {
-            let (docs, sbe) = read_engine(&mut *ctx.backend, &ns, a.concern)?;
+            let (docs, sbe) = read_engine(&mut *ctx.backend, Some(ctx.shared), &ns, a.concern)?;
             (docs, None, sbe)
         }
         None => (Vec::new(), None, true),
@@ -1001,6 +1040,35 @@ pub fn aggregate<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
         Document::new().with("firstBatch", batch).with("id", id).with("ns", ns_text)
     };
     Ok(Document::new().with("cursor", cursor).with("ok", 1.0))
+}
+
+/// RefDb's code for a `$match` with `$text` that is not the first stage.
+const TEXT_NOT_FIRST: crate::error::Code =
+    crate::error::Code { code: 17_313, name: "Location17313" };
+
+/// Whether `ns` is a view whose pipeline has stages.
+fn on_view_with_stages<B: Backend + ?Sized>(
+    backend: &mut B,
+    ns: &Namespace,
+) -> Result<bool, CommandError> {
+    Ok(match backend.collection(ns)? {
+        Some(c) => matches!(
+            super::kinds::kind_of(&c)?,
+            CollectionKind::View { pipeline, .. } if !pipeline.is_empty()
+        ),
+        None => false,
+    })
+}
+
+/// Whether the first of `stages` is a `$match` with `$text`.
+fn starts_with_text(stages: &[RawValue<'_>]) -> bool {
+    match stages.first() {
+        Some(RawValue::Document(d)) => match d.get("$match") {
+            Some(RawValue::Document(m)) => super::views::has_text(&Document::from(m)),
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 /// `err` as an error of running the pipeline on `ns_text`.
@@ -1115,12 +1183,6 @@ fn check_system_namespace(
             INVALID_NAMESPACE,
             "$listLocalSessions must be run against the database with {aggregate: 1}, not a collection",
         )),
-        Some("$currentOp") if on_collection || ns.db != super::admin::ADMIN_DB => {
-            Err(CommandError::new(
-                INVALID_NAMESPACE,
-                "$currentOp must be run against the 'admin' database with {aggregate: 1}",
-            ))
-        }
         Some("$listExtensions") if on_collection || ns.db != super::admin::ADMIN_DB => {
             Err(CommandError::new(
                 INVALID_NAMESPACE,
@@ -1178,13 +1240,15 @@ fn wanted_session(id: Option<&Value>, spec: &Document) -> bool {
         bytes: teseladb_hash::sha256(user.as_bytes()).to_vec(),
     };
     match spec.get("users") {
-        Some(Value::Array(list)) if !list.is_empty() => list.iter().any(|u| {
-            let Value::Document(u) = u else { return false };
-            let (Some(Value::String(user)), Some(Value::String(db))) = (u.get("user"), u.get("db"))
-            else {
-                return false;
-            };
-            uid.as_ref() == Some(&of(&format!("{user}@{db}")))
+        // The stage's parser checked that each user is `{user, db}`, two strings.
+        Some(Value::Array(list)) if !list.is_empty() => list.iter().any(|u| match u {
+            Value::Document(u) => match (u.get("user"), u.get("db")) {
+                (Some(Value::String(user)), Some(Value::String(db))) => {
+                    uid.as_ref() == Some(&of(&format!("{user}@{db}")))
+                }
+                _ => false,
+            },
+            _ => false,
         }),
         _ => uid.as_ref() == Some(&of("")),
     }

@@ -586,3 +586,82 @@ fn replica_set_port_parameter() {
     assert_eq!(port_host("a:1", 2), "a:2");
     assert_eq!(port_host("a", 2), "a:2");
 }
+
+/// The primary's replies to `insert`, `update` and `delete` carry `electionId` and `opTime` after
+/// `n`, and `update` gives `writeErrors`, `upserted` and `nModified` after them, in a member's
+/// order (measured on a replica set of `ref:9.0.4`, 03-11-2026); a `refrouter` has neither.
+#[test]
+fn a_primary_write_reply_has_its_election_and_op_time() {
+    let mut m = node();
+    replica(&mut m, N1);
+    let (set, _) = replica_set(&mut m).expect("read").expect("a set");
+    let me = set.member(N1).expect("member");
+    let at = OpTime { ts: Timestamp { time: 5, increment: 1 }, term: set.term() };
+    let election = Value::ObjectId(set.election_id());
+    let term = set.term();
+    let view =
+        Arc::new(ReplicaView { set, me, last: LastWrite { op_time: at, majority_op_time: at } });
+    let keys = |d: &Document| d.iter().map(|(k, _)| k.to_owned()).collect::<Vec<_>>();
+    let one = |id: i32| Value::Document(Document::new().with("_id", id));
+    let ins = Document::new().with("insert", "c").with("documents", vec![one(1)]);
+    let r = dispatched(&mut m, "v", ins.clone(), Some(view.clone()));
+    assert_eq!(keys(&r), ["n", "electionId", "opTime", "ok", "$clusterTime", "operationTime"]);
+    assert_eq!(r.get("electionId"), Some(&election));
+    assert_eq!(field(&r, "opTime.t"), &Value::Int64(term));
+    assert_eq!(field(&r, "opTime.ts"), r.get("operationTime").expect("operationTime"));
+    let r = dispatched(&mut m, "v", ins.clone(), Some(view.clone()));
+    assert_eq!(keys(&r)[..5], ["n", "electionId", "opTime", "writeErrors", "ok"]);
+    let set_id = Document::new().with("$set", Document::new().with("_id", 6));
+    let bad = Document::new().with("q", Document::new().with("_id", 1)).with("u", set_id);
+    let set_a = Document::new().with("$set", Document::new().with("a", 1));
+    let up = Document::new()
+        .with("q", Document::new().with("_id", 7))
+        .with("u", set_a)
+        .with("upsert", true);
+    let upd = Document::new()
+        .with("update", "c")
+        .with("updates", vec![Value::Document(bad), Value::Document(up)])
+        .with("ordered", false);
+    let r = dispatched(&mut m, "v", upd, Some(view.clone()));
+    assert_eq!(
+        keys(&r)[..7],
+        ["n", "electionId", "opTime", "writeErrors", "upserted", "nModified", "ok"]
+    );
+    let del = Document::new().with("q", Document::new().with("_id", 7)).with("limit", 1);
+    let del = Document::new().with("delete", "c").with("deletes", vec![Value::Document(del)]);
+    let r = dispatched(&mut m, "v", del, Some(view.clone()));
+    assert_eq!(keys(&r)[..4], ["n", "electionId", "opTime", "ok"]);
+    let r = dispatched(&mut m, "v", ins, None);
+    assert!(r.get("electionId").is_none() && r.get("opTime").is_none(), "{r:?}");
+}
+
+/// A member's `drop` gives `nIndexesWas` and `ns` for a collection, `ns` for a view and nothing
+/// for what does not exist (measured on a replica set of `ref:9.0.4`, 03-11-2026).
+#[test]
+fn a_member_drop_reply() {
+    let mut m = node();
+    replica(&mut m, N1);
+    let ok_only = |r: &Document| r.iter().map(|(k, _)| k.to_owned()).collect::<Vec<String>>();
+    let ins = Document::new()
+        .with("insert", "c")
+        .with("documents", vec![Value::Document(Document::new().with("_id", 1))]);
+    m.run("v", ins);
+    let index = Document::new().with("key", Document::new().with("x", 1)).with("name", "x_1");
+    m.run(
+        "v",
+        Document::new().with("createIndexes", "c").with("indexes", vec![Value::Document(index)]),
+    );
+    let view = Document::new()
+        .with("create", "w")
+        .with("viewOn", "c")
+        .with("pipeline", Value::Array(vec![]));
+    m.run("v", view);
+    let r = m.run("v", Document::new().with("drop", "c"));
+    assert_eq!(ok_only(&r)[..3], ["nIndexesWas", "ns", "ok"]);
+    assert_eq!(r.get("nIndexesWas"), Some(&Value::Int32(2)));
+    assert_eq!(r.get("ns"), Some(&Value::from("v.c")));
+    let r = m.run("v", Document::new().with("drop", "w"));
+    assert_eq!(ok_only(&r)[..2], ["ns", "ok"]);
+    let r = m.run("v", Document::new().with("drop", "none"));
+    assert_eq!(ok_only(&r)[0], "ok", "{r:?}");
+}

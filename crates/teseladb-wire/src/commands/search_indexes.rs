@@ -78,21 +78,22 @@ const VIEW_INCOMPATIBLE: &str =
 /// 9.0.4: `$addFields`, `$set` and a `$match` with only `$expr`).
 pub fn check_view_stages(stages: &[Vec<u8>]) -> Result<(), CommandError> {
     for bytes in stages {
-        let stage = teseladb_bson::RawDoc::from_bytes(bytes)?;
-        let Some((name, spec)) = stage.iter().next() else { continue };
-        match name {
-            "$addFields" | "$set" => {}
-            "$match" => {
-                let only_expr = matches!(spec, RawValue::Document(d)
+        // A stored view's stage has one field (the view's creation checked it).
+        for (name, spec) in teseladb_bson::RawDoc::from_bytes(bytes)?.iter().take(1) {
+            match name {
+                "$addFields" | "$set" => {}
+                "$match" => {
+                    let only_expr = matches!(spec, RawValue::Document(d)
                     if d.iter().count() == 1 && d.get("$expr").is_some());
-                if !only_expr {
-                    let msg = format!("{VIEW_INCOMPATIBLE}$match stage can only contain $expr");
-                    return Err(CommandError::new(VIEW_MATCH_NOT_EXPR, msg));
+                    if !only_expr {
+                        let msg = format!("{VIEW_INCOMPATIBLE}$match stage can only contain $expr");
+                        return Err(CommandError::new(VIEW_MATCH_NOT_EXPR, msg));
+                    }
                 }
-            }
-            other => {
-                let msg = format!("{VIEW_INCOMPATIBLE}{other} is not allowed");
-                return Err(CommandError::new(VIEW_STAGE_NOT_ALLOWED, msg));
+                other => {
+                    let msg = format!("{VIEW_INCOMPATIBLE}{other} is not allowed");
+                    return Err(CommandError::new(VIEW_STAGE_NOT_ALLOWED, msg));
+                }
             }
         }
     }

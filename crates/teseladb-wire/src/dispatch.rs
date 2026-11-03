@@ -139,6 +139,13 @@ pub fn dispatch_with<B: Backend + ?Sized>(
                 }
                 (a, _) => a,
             };
+            // A member's write replies carry its election and the write's optime (018).
+            let action = match (action, &node.replica_set) {
+                (Action::Reply(d), Some(view)) => {
+                    Action::Reply(crate::commands::replset::member_write_reply(view, req.name(), d))
+                }
+                (a, _) => a,
+            };
             if let (Some((b, s)), Some(t0)) = (cmds, started) {
                 record(conn, req, &action, s, b.now_micros().saturating_sub(t0));
             }
