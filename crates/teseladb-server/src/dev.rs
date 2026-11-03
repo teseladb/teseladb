@@ -33,6 +33,13 @@ pub fn start_within(
     let cfg = |join: Vec<String>, k: u16| NodeConfig {
         cores: Some(o.cores),
         join,
+        // A given clients' port is the host the node announces (`config.shards`, the members of
+        // the replica set presentation of 018); one the system chooses is not known yet.
+        native_addr: if o.port == 0 {
+            String::new()
+        } else {
+            SocketAddr::from((LOOPBACK, o.port + k)).to_string()
+        },
         client: Some(ClientConfig {
             addrs: vec![SocketAddr::from((LOOPBACK, if o.port == 0 { 0 } else { o.port + k }))],
             test_commands: o.test_commands,
