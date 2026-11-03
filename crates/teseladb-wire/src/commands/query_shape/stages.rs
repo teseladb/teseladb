@@ -289,18 +289,20 @@ fn outputs(o: &Document, p: Policy) -> Document {
     out
 }
 
+/// Pushes field `k` of `out` with `v`, when there is one.
+fn push_some(out: &mut Document, k: &str, v: Option<Value>) {
+    if let Some(v) = v {
+        out.push(k, v);
+    }
+}
+
 /// A `$bucketAuto`.
 fn bucket_auto(b: &Document, p: Policy) -> Document {
     let mut out = Document::new();
-    if let Some(g) = b.get("groupBy") {
-        out.push("groupBy", expression(g, p));
-    }
-    if let Some(n) = b.get("buckets") {
-        out.push("buckets", literal(n, p));
-    }
-    if let Some(g) = b.get("granularity") {
-        out.push("granularity", kept_in_representative(g, p));
-    }
+    push_some(&mut out, "groupBy", b.get("groupBy").map(|g| expression(g, p)));
+    push_some(&mut out, "buckets", b.get("buckets").map(|n| literal(n, p)));
+    let granularity = b.get("granularity").map(|g| kept_in_representative(g, p));
+    push_some(&mut out, "granularity", granularity);
     match b.get("output") {
         Some(Value::Document(o)) => out.push("output", outputs(o, p)),
         _ => {
@@ -315,9 +317,7 @@ fn bucket_auto(b: &Document, p: Policy) -> Document {
 fn lookup(l: &Document, p: Policy) -> Option<Document> {
     let mut out = Document::new();
     for k in ["from", "as", "localField", "foreignField"] {
-        if let Some(v) = l.get(k) {
-            out.push(k, v.clone());
-        }
+        push_some(&mut out, k, l.get(k).cloned());
     }
     if let Some(Value::Array(stages)) = l.get("pipeline") {
         let vars = match l.get("let") {
@@ -334,19 +334,11 @@ fn lookup(l: &Document, p: Policy) -> Option<Document> {
 fn graph_lookup(g: &Document, p: Policy) -> Document {
     let mut out = Document::new();
     for k in ["from", "as", "connectToField", "connectFromField"] {
-        if let Some(v) = g.get(k) {
-            out.push(k, v.clone());
-        }
+        push_some(&mut out, k, g.get(k).cloned());
     }
-    if let Some(v) = g.get("startWith") {
-        out.push("startWith", expression(v, p));
-    }
-    if let Some(v) = g.get("maxDepth") {
-        out.push("maxDepth", literal(v, p));
-    }
-    if let Some(v) = g.get("depthField") {
-        out.push("depthField", v.clone());
-    }
+    push_some(&mut out, "startWith", g.get("startWith").map(|v| expression(v, p)));
+    push_some(&mut out, "maxDepth", g.get("maxDepth").map(|v| literal(v, p)));
+    push_some(&mut out, "depthField", g.get("depthField").cloned());
     if let Some(Value::Document(f)) = g.get("restrictSearchWithMatch")
         && let Some(r) = filter(f, p)
     {
@@ -371,9 +363,7 @@ fn union_with(spec: &Value, p: Policy) -> Option<Document> {
         Value::String(coll) => Some(one("coll", coll.as_str())),
         Value::Document(d) => {
             let mut out = Document::new();
-            if let Some(c) = d.get("coll") {
-                out.push("coll", c.clone());
-            }
+            push_some(&mut out, "coll", d.get("coll").cloned());
             if let Some(Value::Array(stages)) = d.get("pipeline") {
                 out.push("pipeline", pipeline(stages, p)?);
             }
@@ -393,12 +383,20 @@ fn densify(dn: &Document, p: Policy) -> Vec<Document> {
         Some(Value::Array(items)) => items.clone(),
         _ => Vec::new(),
     };
-    let sort_key = one(&field, 1);
+    // The partitions sort first, unless the bounds are the whole range (measured on a `refrouter`
+    // and a `refnode` 9.0.4).
+    let full = matches!(dn.get("range"), Some(Value::Document(r)) if r.get("bounds") == Some(&Value::from("full")));
+    let mut sort_key = Document::new();
+    for part in parts.iter().filter(|_| !full).filter_map(|v| match v {
+        Value::String(s) => Some(s),
+        _ => None,
+    }) {
+        sort_key.push(part.as_str(), 1);
+    }
+    sort_key.push(field.as_str(), 1);
     let mut range = Document::new();
     if let Some(Value::Document(r)) = dn.get("range") {
-        if let Some(s) = r.get("step") {
-            range.push("step", literal(s, p));
-        }
+        push_some(&mut range, "step", r.get("step").map(|s| literal(s, p)));
         match r.get("bounds") {
             Some(Value::Array(b)) => {
                 range.push("bounds", Value::Array(b.iter().map(|x| literal(x, p)).collect()));
@@ -406,9 +404,7 @@ fn densify(dn: &Document, p: Policy) -> Vec<Document> {
             Some(other) => range.push("bounds", other.clone()),
             None => {}
         }
-        if let Some(u) = r.get("unit") {
-            range.push("unit", u.clone());
-        }
+        push_some(&mut range, "unit", r.get("unit").cloned());
     }
     let d = Document::new()
         .with("field", field.as_str())
@@ -452,12 +448,8 @@ fn set_window_fields(w: &Document, p: Policy) -> Vec<Document> {
         }
     }
     let mut d = Document::new();
-    if let Some(v) = w.get("partitionBy") {
-        d.push("partitionBy", expression(v, p));
-    }
-    if let Some(s) = w.get("sortBy") {
-        d.push("sortBy", s.clone());
-    }
+    push_some(&mut d, "partitionBy", w.get("partitionBy").map(|v| expression(v, p)));
+    push_some(&mut d, "sortBy", w.get("sortBy").cloned());
     let mut output = Document::new();
     if let Some(Value::Document(o)) = w.get("output") {
         for (k, f) in o.iter() {

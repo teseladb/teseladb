@@ -4828,3 +4828,12 @@ E2A70A2D7815E9CE586E94BEEC99ECFE3D099E218529DC867E7C4DCF8CFC1247	{"aggregate":"t
 68861873CF9561350DE06E522BBC89331907A2D0282FA80F22E569C6283750EB	{"aggregate":"t","pipeline":[{"$replaceRoot":{"newRoot":{"x":{"$getField":{"field":{"$concat":["$s"]},"input":{"abc":7}}}}}}],"cursor":{}}
 D70E0FDB5B094AF60C6EBA2C5EDDB870CBE3E16EE35E3D0620BFB5CB1599481C	{"aggregate":"t","pipeline":[{"$replaceRoot":{"newRoot":{"x":{"$getField":{"field":"$nope","input":"$o"}}}}}],"cursor":{}}
 F49AD9742304158377132B51A3DFCFDC4E922453E11E32D796A59CA8F3227B8A	{"aggregate":"t","pipeline":[{"$replaceRoot":{"newRoot":{"x":{"$getField":{"field":{"$literal":1},"input":"$o"}}}}}],"cursor":{}}
+95AED088EF14861E6F1E0B9BEDFCD5F9E7BAA7D40B1A177383FDB4FFE1066B28	{"aggregate":"c","pipeline":[{"$match":{"a":{"$numberInt":"1"}}}],"let":{},"cursor":{}}
+39541DF36AE112205E11C8C68784BDC40AD62DBD595463EBC9F7F826DE3B675D	{"aggregate":"c","pipeline":[{"$match":{"a":{"$numberInt":"1"}}}],"allowDiskUse":true,"cursor":{}}
+B4742565720E0DE5A1B2410B00B948F15FD8DA749C7F448C81322DDDA5F576BA	{"aggregate":"c","pipeline":[{"$bucketAuto":{"groupBy":"$a","buckets":{"$numberInt":"2"},"granularity":"R5"}}],"cursor":{}}
+721E0A38227CF95FC8A15591B3406F425CBB8F92B1731BF30F2ED190201BFE8B	{"aggregate":"c","pipeline":[{"$bucketAuto":{"groupBy":"$a","buckets":{"$numberInt":"2"},"output":{"n":{"$sum":{"$numberInt":"1"}}}}}],"cursor":{}}
+D3E76DABA06DC41A551F675D67FFE8B32BEA03C826330C78B78AAF6A28BD13C9	{"aggregate":"c","pipeline":[{"$unionWith":{"coll":"o","pipeline":[{"$match":{"k":{"$numberInt":"1"}}}]}}],"cursor":{}}
+A2F77937DB8E87AAC5E50CC5F8325B0209BAA0A12CBAB5A8363DCE26375003F7	{"aggregate":"c","pipeline":[{"$unionWith":{"coll":"o"}}],"cursor":{}}
+A335861D69E8468EF51C206D6BFB0DD196B8ED88AAFD65A9CFC4B8AF447BE1E5	{"aggregate":"c","pipeline":[{"$densify":{"field":"a","range":{"step":{"$numberInt":"1"},"bounds":"full"}}}],"cursor":{}}
+C9EA039505F2D8DB0CABB36F870AE52B90FBBAFC10898701882170777A0866EE	{"aggregate":"c","pipeline":[{"$densify":{"field":"a","partitionByFields":["b"],"range":{"step":{"$numberInt":"1"},"bounds":[{"$numberInt":"0"},{"$numberInt":"5"}]}}}],"cursor":{}}
+C0F7D198C0B332B8F08B25CCF8D2077E872D02BF3BDB76C2D14EC146FDA309DB	{"aggregate":"c","pipeline":[{"$project":{"r":{"$switch":{"branches":[{"case":{"$eq":["$a",{"$numberInt":"1"}]},"then":"one"}],"default":"other"}}}}],"cursor":{}}
