@@ -208,6 +208,9 @@ pub struct Mem {
     pub range_orders: Vec<teseladb_meta::command::Group0Command>,
     /// Range orders Group 0 refuses, with this error.
     pub refuse_orders: Option<CommandError>,
+    /// Range orders Group 0 takes but has not applied yet: they are kept in `range_orders` and the
+    /// routes stay as they were.
+    pub hold_orders: bool,
     /// The live bytes the state machines of these ranges keep; a range left out has those of
     /// the versions in its bounds.
     pub range_live: BTreeMap<teseladb_types::GroupId, u64>,
@@ -898,6 +901,9 @@ impl Backend for Mem {
             return Err(e);
         }
         self.range_orders.push(cmd.clone());
+        if self.hold_orders {
+            return Ok(());
+        }
         let at = |routes: &[teseladb_router::table::RouteEntry], g| {
             routes.iter().position(|e| e.group == g)
         };
