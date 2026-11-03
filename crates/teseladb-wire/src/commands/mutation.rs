@@ -821,6 +821,10 @@ pub const LOG_FAILED: i32 = 7_488_700;
 
 struct Checker {
     validator: Option<Validator>,
+    /// A client's write to a collection named as a resharding's copy: no document it would
+    /// store is written ([`super::reshard::not_a_copy`]). A resharding's own writes to its copy
+    /// are [`Rules::unlogged`].
+    not_a_copy: Option<String>,
     /// The log lines of `warn` and `errorAndLog` this write makes: they travel in the result's
     /// `warnings` to the node that runs the command, which writes them.
     log: std::cell::RefCell<Vec<Document>>,
@@ -878,6 +882,7 @@ impl Checker {
         let constraint = matches!(&r.validator, Some((_, level, _)) if level == CONSTRAINT_LEVEL);
         Ok(Checker {
             validator,
+            not_a_copy: (!r.unlogged && super::reshard::copy_name(&r.ns)).then(|| r.ns.clone()),
             log: std::cell::RefCell::default(),
             bypass: r.bypass,
             constraint,
@@ -904,8 +909,11 @@ impl Checker {
     }
 
     /// Checks a new version against the validator, keeping the log line of a `warn` or an
-    /// `errorAndLog`.
+    /// `errorAndLog`; refuses it in a collection named as a resharding's copy.
     fn check(&self, doc: &[u8], old: Option<RawDoc<'_>>) -> Result<(), CommandError> {
+        if let Some(ns) = &self.not_a_copy {
+            return Err(super::reshard::not_a_copy(ns));
+        }
         let Some(v) = &self.validator else { return Ok(()) };
         if self.bypass && self.constraint {
             let msg = "bypassDocumentValidation is not permitted with 'constraint' validationLevel";

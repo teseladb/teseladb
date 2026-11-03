@@ -426,6 +426,11 @@ fn an_abort_drops_the_copy_and_fails_the_resharding() {
     assert_eq!(op.get("recipientState"), Some(&Value::from("strict-consistency")));
     assert_eq!(op.get("documentsCopied"), Some(&Value::Int64(3)));
     assert_eq!(op.get("provenance"), Some(&Value::from("reshardCollection")));
+    fails(
+        &admin(&mut m, r#"{"abortReshardCollection":"rs.d"}"#),
+        339,
+        "Could not find resharding-related metadata that matches the given namespace",
+    );
     ok(&admin(&mut m, r#"{"abortReshardCollection":"rs.c"}"#));
     let shared = std::mem::take(&mut m.shared);
     let e = r.drive(&mut m, &shared).expect_err("aborted");
@@ -723,7 +728,11 @@ fn the_documents_to_copy_come_from_one_batch_and_the_ranges_live_bytes() {
     let n = approx_documents(&mut m, &c).unwrap();
     assert!(near(n), "{n}");
     assert_eq!(m.scanned_rows, 1_000, "one batch");
-    // A range shared with other keys is weighed by the stored bytes of the collection's part.
+    // A range shared with other keys is weighed by the stored bytes of the collection's part,
+    // also one that starts in the collection and runs to the end of the keys.
+    m.routes = vec![range(1, &[], &lo), range(2, &lo, &[])];
+    let n = approx_documents(&mut m, &c).unwrap();
+    assert!(near(n), "{n}");
     m.routes = vec![range(1, &[], &[])];
     let n = approx_documents(&mut m, &c).unwrap();
     assert!(near(n), "{n}");
@@ -736,6 +745,11 @@ fn a_refined_key_keeps_the_directions_and_a_namespace_needs_a_database() {
     let mut m = sharded(&docs(3));
     let r = admin(&mut m, r#"{"refineCollectionShardKey":"rs.c","key":{"a":"hashed","b":1}}"#);
     assert_eq!(r.get("code"), Some(&Value::Int32(72)), "{r:?}");
+    fails(
+        &admin(&mut m, r#"{"refineCollectionShardKey":"rs.c","key":{"b":1,"a":1}}"#),
+        72,
+        "refineCollectionShardKey shard key { b: 1, a: 1 } does not extend the current shard key { a: 1 }",
+    );
     let r = admin(&mut m, r#"{"reshardCollection":".c","key":{"b":1}}"#);
     assert_eq!(r.get("code"), Some(&Value::Int32(73)), "{r:?}");
 }
@@ -751,4 +765,243 @@ fn the_copy_cuts_its_batches_by_bytes() {
     ok(&admin(&mut m, r#"{"reshardCollection":"rs.c","key":{"b":1},"numInitialChunks":2}"#));
     let r = run(&mut m, r#"{"count":"c"}"#);
     assert_eq!(field(&r, "n"), &Value::Int32(12), "{r:?}");
+}
+
+/// A client's own `system.resharding.` collection (measured on a `refrouter` 9.0.4, 03-11-2026):
+/// it is created, renamed and dropped as any other and its documents are deleted, but a write
+/// that would store a document in it fails, since no resharding owns it. Its rename over a
+/// collection is a plain rename.
+#[test]
+fn a_client_collection_named_as_a_copy_is_no_resharding() {
+    let mut m = sharded(&docs(2));
+    ok(&run(&mut m, r#"{"create":"system.resharding.abc"}"#));
+    ok(&run(&mut m, r#"{"create":"system.resharding."}"#));
+    fails(
+        &run(&mut m, r#"{"create":"system.reshardingx"}"#),
+        73,
+        "Invalid system namespace: rs.system.reshardingx",
+    );
+    ok(&run(&mut m, r#"{"insert":"e","documents":[{"_id":1},{"_id":2}]}"#));
+    ok(&admin(&mut m, r#"{"renameCollection":"rs.e","to":"rs.system.resharding.def"}"#));
+    let refused = "Temporary resharding collection metadata for rs.system.resharding.def not found";
+    let w = run(&mut m, r#"{"insert":"system.resharding.def","documents":[{"_id":3},{"_id":4}]}"#);
+    assert_eq!(field(&w, "n"), &Value::Int32(0), "{w:?}");
+    let errors = batch(&w, "writeErrors");
+    assert_eq!(errors.len(), 1, "{w:?}");
+    assert_eq!(errors[0].get("code"), Some(&Value::Int32(26)), "{w:?}");
+    assert_eq!(errors[0].get("errmsg"), Some(&Value::from(refused)), "{w:?}");
+    let u = run(
+        &mut m,
+        r#"{"update":"system.resharding.def","updates":[{"q":{"_id":1},"u":{"$set":{"a":1}}}]}"#,
+    );
+    let errors = batch(&u, "writeErrors");
+    assert_eq!(errors[0].get("code"), Some(&Value::Int32(26)), "{u:?}");
+    let during = format!("Plan executor error during update :: caused by :: {refused}");
+    assert_eq!(errors[0].get("errmsg"), Some(&Value::from(during.as_str())), "{u:?}");
+    let u = run(
+        &mut m,
+        r#"{"update":"system.resharding.def","updates":[{"q":{"_id":9},"u":{"$set":{"a":1}}}]}"#,
+    );
+    ok(&u);
+    assert!(u.get("writeErrors").is_none(), "{u:?}");
+    fails(
+        &run(
+            &mut m,
+            r#"{"findAndModify":"system.resharding.def","query":{"_id":1},"update":{"$set":{"a":1}}}"#,
+        ),
+        26,
+        &format!("Plan executor error during findAndModify :: caused by :: {refused}"),
+    );
+    let d =
+        run(&mut m, r#"{"delete":"system.resharding.def","deletes":[{"q":{"_id":1},"limit":1}]}"#);
+    assert_eq!(field(&d, "n"), &Value::Int32(1), "{d:?}");
+    let r = run(&mut m, r#"{"find":"system.resharding.def"}"#);
+    assert_eq!(batch(&r, "cursor.firstBatch"), [json(r#"{"_id":2}"#)]);
+    // An insert creates the collection it fails to write in.
+    let w = run(&mut m, r#"{"insert":"system.resharding.zz","documents":[{"_id":3}]}"#);
+    assert_eq!(batch(&w, "writeErrors")[0].get("code"), Some(&Value::Int32(26)), "{w:?}");
+    let names =
+        batch(&run(&mut m, r#"{"listCollections":1,"nameOnly":true}"#), "cursor.firstBatch");
+    assert!(names.iter().any(|n| n.get("name") == Some(&Value::from("system.resharding.zz"))));
+    // Its rename over the sharded collection is a plain rename.
+    let r = run(
+        &mut m,
+        r#"{"aggregate":1,"pipeline":[{"$changeStream":{"showExpandedEvents":true}}],"cursor":{}}"#,
+    );
+    let id = match field(&r, "cursor.id") {
+        Value::Int64(n) => *n,
+        other => panic!("{other:?} in {r:?}"),
+    };
+    m.now += 1;
+    ok(&admin(
+        &mut m,
+        r#"{"renameCollection":"rs.system.resharding.def","to":"rs.c","dropTarget":true}"#,
+    ));
+    m.now += 1;
+    let more = doc(&[
+        ("getMore", Value::Int64(id)),
+        ("collection", Value::from("$cmd.aggregate")),
+        ("maxTimeMS", Value::Int32(1)),
+    ]);
+    let events = batch(&m.run(DB, more), "cursor.nextBatch");
+    let kinds: Vec<&Value> = events.iter().filter_map(|e| e.get("operationType")).collect();
+    assert_eq!(kinds, [&Value::from("rename")], "{events:?}");
+    assert_eq!(field(&events[0], "ns.coll"), &Value::from("system.resharding.def"));
+    assert_eq!(field(&events[0], "to.coll"), &Value::from("c"));
+    assert_eq!(batch(&run(&mut m, r#"{"find":"c"}"#), "cursor.firstBatch"), [json(r#"{"_id":2}"#)]);
+}
+
+/// A resharding drives its steps to their end: its run and its result.
+fn drive_all(m: &mut Mem, r: &mut Resharding, shared: Shared) -> Result<(), i32> {
+    let got = r.drive(m, &shared);
+    r.finish(&shared);
+    m.shared = shared;
+    got.map_err(|e| e.code.code)
+}
+
+/// The history resolves behind the clock: each round of the catch-up that finds it not past
+/// its mark waits, and the resharding fails once its time runs out, dropping its copy.
+#[test]
+fn the_catch_up_waits_for_the_history_past_its_mark() {
+    let mut m = sharded(&docs(3));
+    let (mut r, shared) =
+        started(&mut m, r#"{"reshardCollection":"rs.c","key":{"b":1},"numInitialChunks":1}"#);
+    r.copy(&mut m, &shared).expect("copied");
+    m.now += 5;
+    ok(&run(&mut m, r#"{"insert":"c","documents":[{"_id":7,"a":7,"b":7}]}"#));
+    m.resolved_lag_ms = 10;
+    m.pause_ms = 5;
+    m.pauses_left = 1;
+    assert_eq!(drive_all(&mut m, &mut r, shared), Err(50));
+    assert_eq!(r.phase(), Phase::Aborted);
+    assert_eq!(batch(&run(&mut m, r#"{"listCollections":1}"#), "cursor.firstBatch").len(), 1);
+    // With time enough it waits for each mark and ends.
+    let (mut r, shared) =
+        started(&mut m, r#"{"reshardCollection":"rs.c","key":{"b":1},"numInitialChunks":1}"#);
+    r.copy(&mut m, &shared).expect("copied");
+    m.now += 5;
+    m.pauses_left = 1_000;
+    assert_eq!(drive_all(&mut m, &mut r, shared), Ok(()));
+    assert_eq!(r.phase(), Phase::Committed);
+    assert!(m.pauses_left < 1_000);
+    assert_eq!(find_all(&mut m).len(), 4);
+}
+
+/// A leader answers the history a window at a time: the apply phase reads it in several
+/// rounds before its mark.
+#[test]
+fn the_apply_phase_reads_the_history_in_windows() {
+    let mut m = sharded(&docs(3));
+    let (mut r, shared) =
+        started(&mut m, r#"{"reshardCollection":"rs.c","key":{"b":1},"numInitialChunks":1}"#);
+    r.copy(&mut m, &shared).expect("copied");
+    for i in 10..14 {
+        m.now += 5;
+        ok(&run(
+            &mut m,
+            &format!(r#"{{"insert":"c","documents":[{{"_id":{i},"a":{i},"b":{i}}}]}}"#),
+        ));
+    }
+    m.now += 5;
+    m.changes_window_ms = 3;
+    let reads = m.change_reads;
+    assert_eq!(drive_all(&mut m, &mut r, shared), Ok(()));
+    assert!(m.change_reads - reads > 8, "{}", m.change_reads - reads);
+    assert_eq!(find_all(&mut m).len(), 7);
+}
+
+/// Clients that keep writing many documents through the apply phase: it chases them a bounded
+/// number of rounds, then starts the critical section, and no write is lost.
+#[test]
+fn the_chase_of_the_writes_has_an_end() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    let mut m = sharded(&docs(100));
+    let (mut r, shared) =
+        started(&mut m, r#"{"reshardCollection":"rs.c","key":{"b":1},"numInitialChunks":1}"#);
+    r.copy(&mut m, &shared).expect("copied");
+    let landed = Rc::new(Cell::new(0));
+    let seen = Rc::clone(&landed);
+    m.on_changes = Some(Box::new(move |m: &mut Mem| {
+        m.now += 1;
+        let w = run(m, r#"{"update":"c","updates":[{"q":{},"u":{"$inc":{"n":1}},"multi":true}]}"#);
+        if w.get("writeErrors").is_none() {
+            seen.set(seen.get() + 1);
+        }
+    }));
+    m.now += 5;
+    assert_eq!(drive_all(&mut m, &mut r, shared), Ok(()));
+    m.on_changes = None;
+    let n = landed.get();
+    assert!(n > 32, "{n}");
+    let got = find_all(&mut m);
+    assert_eq!(got.len(), 100);
+    assert!(got.iter().all(|d| d.get("n") == Some(&Value::Int32(n))), "{n} {:?}", got[0]);
+}
+
+/// Another client drops the collection right after the rename: the resharding ends all the
+/// same, with nothing left to rekey.
+#[test]
+fn a_collection_dropped_at_the_commit_ends_the_resharding() {
+    use teseladb_meta::catalog::{CatalogCommand, Namespace};
+    use teseladb_wire::commands::Backend;
+    let mut m = sharded(&docs(3));
+    let (mut r, shared) =
+        started(&mut m, r#"{"reshardCollection":"rs.c","key":{"b":1},"numInitialChunks":1}"#);
+    r.copy(&mut m, &shared).expect("copied");
+    m.after_catalog_write = Some(Box::new(|m: &mut Mem, cmd: &CatalogCommand| {
+        if let CatalogCommand::Rename { to, .. } = cmd {
+            m.catalog_write(CatalogCommand::Drop { ns: to.clone() }).expect("dropped");
+        }
+    }));
+    assert_eq!(drive_all(&mut m, &mut r, shared), Ok(()));
+    m.after_catalog_write = None;
+    assert_eq!(r.phase(), Phase::Committed);
+    let ns = Namespace { db: DB.to_owned(), coll: "c".to_owned() };
+    assert_eq!(m.collection(&ns).expect("read"), None);
+}
+
+/// A write that finds the collection in its critical section waits for it at each pause, and
+/// fails once its time runs out.
+#[test]
+fn a_write_waits_through_the_critical_section_until_its_time_runs_out() {
+    let mut m = sharded(&docs(3));
+    let (mut r, shared) =
+        started(&mut m, r#"{"reshardCollection":"rs.c","key":{"b":1},"numInitialChunks":1}"#);
+    r.copy(&mut m, &shared).expect("copied");
+    r.enter_critical(&mut m, &shared).expect("critical");
+    m.pauses_left = 2;
+    m.pause_ms = 7;
+    let before = m.now;
+    let w = run(&mut m, r#"{"insert":"c","documents":[{"_id":9,"b":9}]}"#);
+    assert_eq!(batch(&w, "writeErrors")[0].get("code"), Some(&Value::Int32(50)), "{w:?}");
+    assert_eq!(m.pauses_left, 0);
+    assert!(m.now >= before + 14);
+    assert_eq!(drive_all(&mut m, &mut r, shared), Ok(()));
+}
+
+/// The steps of a resharding whose operation already left `currentOp` still run.
+#[test]
+fn a_resharding_out_of_current_op_still_runs() {
+    let mut m = sharded(&docs(3));
+    let (mut r, shared) =
+        started(&mut m, r#"{"reshardCollection":"rs.c","key":{"b":1},"numInitialChunks":1}"#);
+    r.finish(&shared);
+    r.copy(&mut m, &shared).expect("copied");
+    assert_eq!(drive_all(&mut m, &mut r, shared), Ok(()));
+    let ops = batch(&admin(&mut m, r#"{"currentOp":1}"#), "inprog");
+    assert!(ops.iter().all(|o| o.get("recipientState").is_none()), "{ops:?}");
+    assert_eq!(find_all(&mut m).len(), 3);
+}
+
+/// A hashed `_id` key has no index that starts with it: the copy takes one.
+#[test]
+fn a_hashed_id_key_gets_its_index() {
+    let mut m = sharded(&docs(3));
+    ok(&admin(
+        &mut m,
+        r#"{"reshardCollection":"rs.c","key":{"_id":"hashed"},"numInitialChunks":1}"#,
+    ));
+    assert!(index_names(&mut m).contains(&"_id_hashed".to_owned()), "{:?}", index_names(&mut m));
+    assert_eq!(field(&config_entry(&mut m), "key"), &Value::Document(json(r#"{"_id":"hashed"}"#)));
 }
