@@ -213,6 +213,36 @@ fn retryable(r: &RetryInfo, ops: Vec<(u32, Operation)>, mark: Hlc, term: i64) ->
     entry(batch, None, Some(1)).to_document()
 }
 
+/// The entries of the operations of one write at `mark` that is neither a transaction nor a
+/// retryable write: the inserts of several documents in a row are one `applyOps` entry on
+/// `admin.$cmd`, without session, `stmtId` or `multiOpType`; every other operation is an entry
+/// of its own (measured on a replica set of `ref:9.0.4`, 03-11-2026).
+fn plain_entries(ops: Vec<Operation>, mark: Hlc, term: i64) -> Vec<Document> {
+    let mut out = Vec::new();
+    let mut inserts: Vec<Operation> = Vec::new();
+    let flush = |inserts: &mut Vec<Operation>, out: &mut Vec<Document>| match inserts.len() {
+        0 => {}
+        1 => out.push(plain(inserts.remove(0), Document::new(), mark, term)),
+        _ => {
+            let applied: Vec<Value> =
+                inserts.drain(..).map(|o| Value::Document(o.to_document())).collect();
+            let o = Document::new().with("applyOps", applied);
+            let batch = Operation::new(OpType::Command, APPLY_OPS_NS, None, o, None);
+            out.push(plain(batch, Document::new(), mark, term));
+        }
+    };
+    for op in ops {
+        if op.op == OpType::Insert {
+            inserts.push(op);
+            continue;
+        }
+        flush(&mut inserts, &mut out);
+        out.push(plain(op, Document::new(), mark, term));
+    }
+    flush(&mut inserts, &mut out);
+    out
+}
+
 fn wall(mark: Hlc) -> i64 {
     i64::try_from(mark.physical).unwrap_or(i64::MAX)
 }
@@ -561,11 +591,14 @@ fn document_items<B: Backend + ?Sized>(
             }) {
                 end += 1;
             }
-        } else if first.event.txn != 0 {
-            while found
-                .get(end)
-                .is_some_and(|c| c.event.ts == first.event.ts && c.event.txn == first.event.txn)
-            {
+        } else {
+            // A transaction's writes share its mark and number; the other writes of one mark are
+            // one command's (an insert of several documents is one entry, [`plain_entries`]).
+            while found.get(end).is_some_and(|c| {
+                c.event.ts == first.event.ts
+                    && c.event.txn == first.event.txn
+                    && c.meta.as_ref().and_then(|m| m.retry).is_none()
+            }) {
                 end += 1;
             }
         }
@@ -612,8 +645,8 @@ fn document_items<B: Backend + ?Sized>(
                 items.push(Item { mark, seq: 0, doc });
             }
             (None, None) => {
-                for (seq, op) in (0u32..).zip(ops) {
-                    items.push(Item { mark, seq, doc: plain(op, Document::new(), mark, term) });
+                for (seq, doc) in (0u32..).zip(plain_entries(ops, mark, term)) {
+                    items.push(Item { mark, seq, doc });
                 }
             }
         }
