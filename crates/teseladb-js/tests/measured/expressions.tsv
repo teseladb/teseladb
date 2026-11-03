@@ -5284,3 +5284,77 @@ bsonBinaryEqual({a: new Date(NaN)}, {a: new Date(0)})	J:true
 (function(){ 'use strict'; let x = 4; return x })()	J:4
 (function(){ var let = 5; return let })()	J:5
 (function(){ try { eval('"use strict"; function f(static) {}') } catch (e) { return e.name + ':' + e.message } })()	S:SyntaxError:static is a reserved identifier
+(function(){ const saved = Array.prototype.forEach; Array.prototype.forEach = () => 'mine'; let n = 0; new Int8Array(2).forEach(() => n++); Array.prototype.forEach = saved; return n })()	J:2
+Date.parse('2020-01-02T03:04:05-0130')	J:1577939645000
+Date.parse('Jan 2 2020 10:00 (CET)')	J:1577959200000
+Date.parse('2020/13/40')	J:null
+Date.parse('1/2/3/4')	J:null
+Date.parse('Thu, 01 Jan 1970 00:00:00 GMT+0100')	J:-3600000
+Date.parse('45 1 2')	J:2366928000000
+(function(){ const d = new Date(0); return Date.prototype.getTime.call(d) })()	J:0
+(function(){ const o = {}; Object.defineProperty(o, 'x', { value: 1 }); try { Object.defineProperty(o, 'x', { enumerable: true }) } catch (e) { return e.message } })()	S:can't redefine non-configurable property "x"
+(function(){ const o = {}; Object.defineProperty(o, 'x', { value: 1 }); try { Object.defineProperty(o, 'x', { get() {} }) } catch (e) { return e.message } })()	S:can't redefine non-configurable property "x"
+(function(){ const o = {}; Object.defineProperty(o, 'x', { value: 1 }); try { Object.defineProperty(o, 'x', { value: 2 }) } catch (e) { return e.message } })()	S:can't redefine non-configurable property "x"
+(function(){ const o = {}; Object.defineProperty(o, 'x', { value: NaN }); Object.defineProperty(o, 'x', { value: NaN }); return 'ok' })()	S:ok
+(function(){ const o = {}; Object.defineProperty(o, 'x', { value: -0 }); try { Object.defineProperty(o, 'x', { value: 0 }) } catch (e) { return e.message } })()	S:can't redefine non-configurable property "x"
+(function(){ const o = {}; Object.defineProperty(o, 'x', { writable: false }); return JSON.stringify(Object.getOwnPropertyDescriptor(o, 'x')) })()	S:{"writable":false,"enumerable":false,"configurable":false}
+(function(){ const a = [1, 2]; try { Object.defineProperty(a, 'length', { value: 1, configurable: true }) } catch (e) { return e.message } })()	S:can't redefine non-configurable property "length"
+(function(){ const a = [1, 2]; Object.defineProperty(a, 'length', { writable: false }); try { Object.defineProperty(a, 5, { value: 1 }) } catch (e) { return e.message } })()	S:can't define array index property past the end of an array with non-writable length
+(function(){ const a = [1, 2]; Object.defineProperty(a, 5, { value: 1, writable: true, enumerable: true, configurable: true }); return a.length })()	J:6
+(function(){ const o = {}; Object.defineProperty(o, 'x', { value: 1, writable: true, enumerable: true, configurable: true }); return JSON.stringify(o) })()	S:{"x":1}
+(function(){ const o = Object.preventExtensions({}); return Reflect === undefined })()	E:ReferenceError:Reflect is not defined
+(function(){ const o = Object.preventExtensions({}); try { Object.defineProperty(o, 'x', { value: 1 }) } catch (e) { return e.message } })()	S:can't define property "x": Object is not extensible
+(function(){ return Object.isFrozen(Object.freeze([])) + ':' + Object.isSealed(Object.preventExtensions([1])) + ':' + Object.isFrozen(Object.preventExtensions([])) })()	S:true:false:false
+(function(){ const s = Symbol.for('q'); const o = {}; try { Object.defineProperty(Object.freeze(o), s, { value: 1 }) } catch (e) { return e.message } })()	S:can't define property Symbol.for("q"): Object is not extensible
+(function(){ const o = {}; try { Object.defineProperty(Object.freeze(o), Symbol('w'), { value: 1 }) } catch (e) { return e.message } })()	S:can't define property Symbol("w"): Object is not extensible
+(function(){ return Object.assign({}, Object.create({ a: 1 }, { b: { value: 2, enumerable: false }, c: { value: 3, enumerable: true } })).c })()	J:3
+(function(){ try { return Object.entries(1).length } catch (e) { return e.message } })()	J:0
+(function(){ return Object.getOwnPropertyNames(new Proxy({ a: 1 }, {})).join() })()	S:a
+(function(){ return new Float32Array([1e40, 1e-46, 3.4028235e38])[0] + ':' + new Float16Array([65520, 1e-8, 70000])[2] })()	S:Infinity:Infinity
+(function(){ return new Float16Array([65504, 0.00006103515625, 2.98e-8, 65519])[3] })()	J:65504
+(function(){ const b = new ArrayBuffer(8); const v = new Int32Array(b, 4); return v.length })()	J:1
+(function(){ const b = new ArrayBuffer(8, { maxByteLength: 16 }); const v = new Int32Array(b); b.resize(4); return v.length + ':' + v[1] })()	S:1:undefined
+(function(){ const b = new ArrayBuffer(8, { maxByteLength: 16 }); try { b.transfer(32) } catch (e) { return e.message } })()	S:byte length is larger than maximum byte length
+(function(){ const b = new ArrayBuffer(8, { maxByteLength: 16 }); return b.transferToFixedLength(4).byteLength })()	J:4
+(function(){ const v = new Int8Array(4); try { v.set([1, 2, 3], 2) } catch (e) { return e.message } })()	S:source array is too long
+(function(){ const v = new Int8Array(4); return v.with(1, 5).join() + ':' + (() => { try { v.with(9, 1) } catch (e) { return e.message } })() })()	S:0,5,0,0:invalid or out-of-range index
+(function(){ return new Int8Array(new Array(3.5 > 1 ? 2 : 1)).length + ':' + new Int8Array(-0).length })()	S:2:0
+(function(){ return [new Int8Array([1, 2]).at(NaN), new Int8Array([1, 2]).subarray(NaN).length].join() })()	S:1,2
+(function(){ const d = new DataView(new ArrayBuffer(4)); try { d.getInt32(2) } catch (e) { return e.message } })()	S:offset is outside the bounds of the DataView
+(function(){ return Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Int8Array.prototype), 'buffer').get.call(1) })()	E:TypeError:get buffer method called on incompatible number
+(function(){ return Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Int8Array.prototype), Symbol.toStringTag).get.call({}) })()	J:undefined
+(function(){ const a = [1, 2]; try { Object.defineProperty(a, 'length', { enumerable: true }) } catch (e) { return e.message } })()	S:can't redefine non-configurable property "length"
+(function(){ const a = [1, 2]; try { Object.defineProperty(a, 'length', { get() {} }) } catch (e) { return e.message } })()	S:can't redefine non-configurable property "length"
+(function(){ const a = [1, 2]; Object.defineProperty(a, 'length', { writable: false }); try { Object.defineProperty(a, 'length', { value: 1 }) } catch (e) { return e.message } })()	S:can't redefine array length
+(function(){ const a = [1, 2]; Object.defineProperty(a, 'length', { writable: false }); try { Object.defineProperty(a, 'length', { writable: true }) } catch (e) { return e.message } })()	S:can't redefine non-configurable property "length"
+(function(){ return [].reduce.call({ length: 0 }, (a, b) => a, 5) })()	J:5
+(function(){ return Array.prototype.fill.call({ length: Infinity, 0: 1 }, 2, 0, 1)[0] })()	J:2
+(function(){ return Array.prototype.fill.call({ length: -3 }, 2).length })()	J:-3
+(function(){ try { [1, 2].sort(5) } catch (e) { return e.message } })()	S:invalid Array.prototype.sort argument
+(function(){ return [1, 2, 3, 4, 5].copyWithin(1, 0, 3).join() + ':' + [1, 2, 3, 4, 5].copyWithin(0, 2).join() })()	S:1,1,2,3,5:3,4,5,4,5
+(function(){ return Array.from({ length: -1 }).length + ':' + Array.from({ length: NaN }).length })()	S:0:0
+(function(){ return 'abc'.at(NaN) + 'abc'.codePointAt(5) })()	S:aundefined
+(function(){ return eval('var ab = 1; ab') + eval('var a‌ = 2; a‌') })()	J:3
+(function(){ return eval('var x١ = 3; x١') })()	J:3
+(function(){ try { eval('"\\08"') ; return 'ok' } catch (e) { return e.message } })()	S:ok
+(function(){ try { eval('"use strict"; "\\08"') } catch (e) { return e.message } })()	S:octal escape sequences can't be used in untagged template literals or in strict mode code
+(function(){ return eval('/[\\]a]/').test(']') + ':' + eval('/a\\/b/').source })()	S:true:a\\/b
+(function(){ try { eval('/abc\\') } catch (e) { return e.message } })()	S:unterminated regular expression literal
+(function(){ return Math.log1p(1e-20) + ':' + Math.log1p(-0.5) + ':' + Math.expm1(1e-10) + ':' + Math.log1p(0.4) })()	S:1e-20:-0.6931471805599453:1.00000000005e-10:0.33647223662121295
+(function(){ return Math.fround(1.0000001192092896) + ':' + Math.fround(3.4028235677973366e38) })()	S:1.0000001192092896:Infinity
+(function(){ return Math.sumPrecise ? Math.sumPrecise([1e308, 1e308, -1e308]) : 'none' })()	J:1e+308
+(function(){ return /[\1]/.test('\x01') + ':' + /[\8]/.test('8') + ':' + /\8/.test('8') })()	S:true:true:true
+(function(){ try { return new RegExp('[\\1]', 'u').test('\x01') } catch (e) { return e.message } })()	S:invalid decimal escape in regular expression
+(function(){ try { return new RegExp('\\u{110000}', 'u').test('a') } catch (e) { return e.message } })()	S:invalid unicode escape in regular expression
+(function(){ return /😀/u.test('😀') + ':' + /\udc00/u.test('\udc00') })()	S:true:true
+(function(){ return /ſ/i.test('s') + ':' + /K/i.test('K') + ':' + /K/iu.test('k') })()	S:false:false:false
+(function(){ return /a{2,}?/.exec('aaaa')[0] + ':' + /(?:a|)*b/.exec('b')[0] })()	S:aa:b
+(function(){ return 'abc'.replace(/(?<x>b)/, '[$<x>][$<y>]') })()	S:a[b][]c
+(function(){ return 'aaa'.lastIndexOf('a', -5) + ':' + /a/y.exec('ba') })()	S:0:null
+(function(){ const r = /a/g; r.lastIndex = 10; return r.test('aaa') + ':' + r.lastIndex })()	S:false:0
+(function(){ return 'x'.replace(/x/, '$0$1$01$&') + ':' + 'abc'.split(/(b)/).join('|') })()	S:$0$1$01x:a|b|c
+(function(){ return 'aXbX'.split(/x/i, 1).join() + ':' + ''.split(/a/).length + ':' + 'ab'.split(/(?:)/u).length })()	S:a:1:2
+(function(){ return [...'a1b2'.matchAll(/\d/g)].map(m => m.index).join() })()	S:1,3
+(function(){ return Promise.all([]) instanceof Promise })()	J:true
+(function(){ const o = { length: Infinity }; Array.prototype.copyWithin.call(o, 0, 1, 2); return Object.keys(o).join() })()	S:length
+(function(){ return Array.prototype.fill.call({ length: NaN, 0: 1 }, 2)[0] })()	J:1

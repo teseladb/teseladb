@@ -279,7 +279,17 @@ pub fn define_own(it: &mut Interp, o: &ObjRef, key: &str, d: &Desc) -> R<()> {
             return it
                 .type_error(&format!("can't define property {shown}: {class} is not extensible"));
         }
-        Some(c) if forbidden(c, d) && is_array && key == "length" => {
+        // A change of the value or writability of a fixed `length`; the attributes of a
+        // non-configurable property give the general message (measured on 03-11).
+        Some(c)
+            if forbidden(c, d)
+                && is_array
+                && key == "length"
+                && d.configurable != Some(true)
+                && d.writable != Some(true)
+                && d.enumerable.is_none_or(|e| e == c.enumerable)
+                && !d.is_accessor() =>
+        {
             return it.type_error("can't redefine array length");
         }
         Some(c) if forbidden(c, d) => {

@@ -625,7 +625,7 @@ fn not_a_function(it: &mut Interp, f: &Val) -> crate::interp::Ctrl {
     it.operand_error(f, |t| format!("{t} is not a function"))
 }
 
-fn find(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+pub(crate) fn find(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let mut out = Val::Undef;
     each(it, this, a, (false, false), |x, _, r| {
         r.truthy() && {
@@ -636,7 +636,7 @@ fn find(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     Ok(out)
 }
 
-fn find_index(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+pub(crate) fn find_index(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let mut out = -1.0;
     each(it, this, a, (false, false), |_, i, r| {
         r.truthy() && {
@@ -647,7 +647,7 @@ fn find_index(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     Ok(Val::Num(out))
 }
 
-fn find_last(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+pub(crate) fn find_last(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let mut out = Val::Undef;
     each(it, this, a, (true, false), |x, _, r| {
         r.truthy() && {
@@ -658,7 +658,7 @@ fn find_last(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     Ok(out)
 }
 
-fn find_last_index(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+pub(crate) fn find_last_index(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let mut out = -1.0;
     each(it, this, a, (true, false), |_, i, r| {
         r.truthy() && {
@@ -705,12 +705,12 @@ fn mapped(it: &mut Interp, this: &Val, a: &[Val]) -> R<Vec<Val>> {
     Ok(out)
 }
 
-fn for_each(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+pub(crate) fn for_each(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     each(it, this, a, (false, true), |_, _, _| false)?;
     Ok(Val::Undef)
 }
 
-fn some(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+pub(crate) fn some(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let mut out = false;
     each(it, this, a, (false, true), |_, _, r| {
         out = r.truthy();
@@ -719,7 +719,7 @@ fn some(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     Ok(Val::Bool(out))
 }
 
-fn every(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+pub(crate) fn every(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let mut out = true;
     each(it, this, a, (false, true), |_, _, r| {
         out = r.truthy();
@@ -750,11 +750,11 @@ fn reduce_in(it: &mut Interp, this: &Val, a: &[Val], rev: bool) -> R {
     Ok(acc)
 }
 
-fn reduce(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+pub(crate) fn reduce(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     reduce_in(it, this, a, false)
 }
 
-fn reduce_right(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+pub(crate) fn reduce_right(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     reduce_in(it, this, a, true)
 }
 
@@ -938,7 +938,9 @@ fn generic_len(it: &mut Interp, o: &Val) -> R<usize> {
     let n = it.get(o, "length")?;
     let n = it.number_of(&n);
     let n = it.operand_named(n, "O.length")?;
-    Ok(if n.is_finite() && n > 0.0 { (n as usize).min(1 << 24) } else { 0 })
+    // ToLength: an infinite length is the longest one (measured: `fill` of `{length:
+    // Infinity}` writes its elements).
+    Ok(if n > 0.0 { (n as usize).min(1 << 24) } else { 0 })
 }
 
 fn fill(it: &mut Interp, this: &Val, a: &[Val]) -> R {

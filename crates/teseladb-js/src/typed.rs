@@ -565,6 +565,19 @@ const CALLBACK_METHODS: [&str; 9] = [
     "some",
 ];
 
+/// What runs `CALLBACK_METHODS[I]`: the array method, whatever `Array.prototype` holds.
+const CALLBACK_RUNS: [NativeFn; 9] = [
+    crate::arrays::every,
+    crate::arrays::find,
+    crate::arrays::find_index,
+    crate::arrays::find_last,
+    crate::arrays::find_last_index,
+    crate::arrays::for_each,
+    crate::arrays::reduce,
+    crate::arrays::reduce_right,
+    crate::arrays::some,
+];
+
 /// `CALLBACK_METHODS[I]` of a typed array: its callback checked as the `refrouter` 9.0.4 does, then
 /// the array method.
 fn with_callback<const I: usize>(it: &mut Interp, this: &Val, a: &[Val]) -> R {
@@ -577,16 +590,7 @@ fn with_callback<const I: usize>(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     }
     helper_room(it, crate::recursion::TYPED_HELPER_FRAMES)?;
     // The array method runs in this method's frame, as the engine's does.
-    let f = it.get(&Val::Obj(it.realm.array.clone()), name)?;
-    let Val::Obj(fo) = &f else { return it.call(&f, this, a) };
-    let native = match &fo.borrow().kind {
-        Kind::Func(Func::Native(run, _)) => Some(*run),
-        _ => None,
-    };
-    match native {
-        Some(run) => run(it, this, a),
-        None => it.call(&f, this, a),
-    }
+    CALLBACK_RUNS[I](it, this, a)
 }
 
 fn callable(it: &mut Interp, f: &Val) -> R {
