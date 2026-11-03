@@ -420,9 +420,12 @@ pub struct MultiRaftCore<S: StateMachine> {
     /// Transfers this core is sending, per group and destination, with their start and size (0
     /// until the snapshot is loaded).
     sending: BTreeMap<GroupId, BTreeMap<NodeId, (Nanos, u64)>>,
-    /// Groups whose leader took a snapshot for a replica that asked for one: while it waits for
-    /// the release floor, a flush is owed ([`MultiRaftCore::snapshot_awaits_flush`]).
+    /// Groups whose snapshot was asked for now ([`MultiRaftCore::snapshot_now`]): while it waits
+    /// for the release floor, a flush is owed ([`MultiRaftCore::snapshot_awaits_flush`]).
     floor_waits: BTreeSet<GroupId>,
+    /// Counts the snapshots that began to wait in `floor_waits` (a group added, or the snapshot of
+    /// one replaced by a newer one): each owes its own flush ([`MultiRaftCore::snapshot_flush_mark`]).
+    floor_wait_mark: u64,
     /// Nodes whose connection dropped and that sent nothing since: a request forwarded to one
     /// ends at once with `Unreachable` instead of waiting for its deadline.
     unreachable: BTreeSet<NodeId>,
@@ -483,6 +486,7 @@ impl<S: StateMachine> MultiRaftCore<S> {
             installing_from: BTreeMap::new(),
             sending: BTreeMap::new(),
             floor_waits: BTreeSet::new(),
+            floor_wait_mark: 0,
             unreachable: BTreeSet::new(),
             heard: BTreeMap::new(),
             next_ping: Nanos::ZERO,
@@ -1212,7 +1216,6 @@ impl<S: StateMachine> MultiRaftCore<S> {
                 });
                 if !ok && index == 0 && leads && self.snapshot_index(group) == Some(0) {
                     self.snapshot_now(group);
-                    self.floor_waits.insert(group);
                 }
                 if let Some(grp) = self.groups.get_mut(&group) {
                     // A failed transfer goes again at once: the follower may be waiting for the
@@ -1916,6 +1919,11 @@ impl<S: StateMachine> MultiRaftCore<S> {
         grp.terms = terms;
         grp.pending_state = grp.sm.snapshot_state_index().max(index);
         grp.pending_snap = Some((meta, data));
+        if self.floor_waits.contains(&g) {
+            // A newer snapshot of a group waited for: what was flushed for the old one may not
+            // reach it.
+            self.floor_wait_mark += 1;
+        }
         self.save_pending_snapshot(g);
     }
 
@@ -2158,6 +2166,14 @@ impl<S: StateMachine> MultiRaftCore<S> {
             .any(|g| self.groups.get(g).is_some_and(|grp| grp.pending_snap.is_some()))
     }
 
+    /// While [`MultiRaftCore::snapshot_awaits_flush`], a mark that changes each time a snapshot
+    /// begins to wait: the layer above flushes once per mark, so a snapshot that starts waiting
+    /// while an earlier one still waits gets its own flush (on a busy core, the one flush owed for
+    /// the earlier one may not reach it, and the core is never idle long enough).
+    pub fn snapshot_flush_mark(&self) -> Option<u64> {
+        self.snapshot_awaits_flush().then_some(self.floor_wait_mark)
+    }
+
     /// Raft status of a group.
     pub fn status(&self, g: GroupId) -> Option<Status> {
         self.groups.get(&g).map(|grp| grp.raw.status(&GroupStore::new(&self.store, g)))
@@ -2228,9 +2244,22 @@ impl<S: StateMachine> MultiRaftCore<S> {
     /// the last one (007: a range born from a split compacts its log at once, so that a replica
     /// added later receives the data the split left in the core's LSM as a snapshot and never the
     /// log from its first entry, which does not have it). It is saved like any other, once the
-    /// release floor passes it. `false` if `g` is unknown, applied nothing past its last
-    /// snapshot, or a snapshot is already waiting.
+    /// release floor passes it. While the floor holds back the snapshot that waits, this one or
+    /// one the core took before, a flush is owed ([`MultiRaftCore::snapshot_awaits_flush`]):
+    /// whoever asks waits for it (a split or a replica change of the range, a replica that needs
+    /// it), and a busy core is never idle long enough to flush by itself. `false` if `g` is
+    /// unknown, applied nothing past its last snapshot, or a snapshot is already waiting.
     pub fn snapshot_now(&mut self, g: GroupId) -> bool {
+        let taken = self.take_snapshot_now(g);
+        if self.groups.get(&g).is_some_and(|grp| grp.pending_snap.is_some())
+            && self.floor_waits.insert(g)
+        {
+            self.floor_wait_mark += 1;
+        }
+        taken
+    }
+
+    fn take_snapshot_now(&mut self, g: GroupId) -> bool {
         let Some(grp) = self.groups.get_mut(&g) else { return false };
         // An ingest just before may have raised it (018).
         grp.raw.set_log_floor(grp.sm.log_floor());
