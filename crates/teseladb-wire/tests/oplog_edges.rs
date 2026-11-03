@@ -9,6 +9,7 @@ mod common;
 use common::{Mem, doc, field};
 use teseladb_bson::{Document, Value};
 use teseladb_hlc::Hlc;
+use teseladb_wire::commands::Backend;
 use teseladb_wire::commands::oplog::lower_bound;
 
 const DB: &str = "e";
@@ -152,6 +153,15 @@ fn catalog_edges() {
         other => panic!("{other:?}"),
     };
     assert_eq!(o, ["create", "clusteredIndex", "expireAfterSeconds", "timeseries"], "{t:?}");
+    // The options before a `collMod` of a time series show it clustered.
+    ok(&m.run(DB, Document::new().with("collMod", "t").with("expireAfterSeconds", 120)));
+    let entries = oplog(&mut m, Document::new().with("o.collMod", "t"));
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    assert_eq!(
+        field(&entries[0], "o2.collectionOptions_old.clusteredIndex"),
+        &Value::Boolean(true),
+        "{entries:?}"
+    );
     let modified = first("collMod");
     assert_eq!(field(&modified, "o.index.expireAfterSeconds"), &Value::Int32(20));
     assert_eq!(field(&modified, "o2.indexOptions_old.expireAfterSeconds"), &Value::Int32(10));
@@ -171,4 +181,84 @@ fn a_dropped_collection_keeps_its_entries_up_to_its_drop() {
     assert_eq!(x.len(), 1, "{x:?}");
     let drops = oplog(&mut m, Document::new().with("o.drop", "x"));
     assert_eq!(drops.len(), 1, "{drops:?}");
+}
+
+/// A note whose mark another write of Group 0 took goes at the next one; with every mark taken
+/// the command fails.
+#[test]
+fn a_note_takes_the_next_free_mark() {
+    let mut m = Mem::new();
+    let note = |m: &mut Mem| {
+        let data = Document::new().with("x", 1);
+        m.run("admin", Document::new().with("appendOplogNote", 1).with("data", data))
+    };
+    m.group0_conflicts = 1;
+    ok(&note(&mut m));
+    // The note is one logical tick past the cluster's mark: it shows once the mark passes it.
+    assert_eq!(oplog(&mut m, Document::new().with("op", "n")).len(), 0);
+    m.now += 1;
+    assert_eq!(oplog(&mut m, Document::new().with("op", "n")).len(), 1);
+    m.group0_conflicts = usize::MAX;
+    let r = note(&mut m);
+    assert_eq!(field(&r, "errmsg"), &Value::from("appendOplogNote found no free mark"), "{r:?}");
+}
+
+/// The `create` of a view has no `idIndex`; a collection whose catalog entry has no options
+/// gives `create` alone; the `collMod` of an index names only the options that changed, an
+/// option taken away with its default.
+#[test]
+fn more_catalog_entries() {
+    let mut m = Mem::new();
+    // As the server creates the collections of `config`: with no options at all.
+    let bare = teseladb_meta::catalog::CatalogCommand::Create {
+        ns: teseladb_meta::catalog::Namespace { db: DB.into(), coll: "bare".into() },
+        uuid: [3; 16],
+        options: Vec::new(),
+        if_absent: false,
+    };
+    m.catalog_write(bare).expect("created");
+    ok(&m.run(DB, Document::new().with("create", "p")));
+    let view = Document::new()
+        .with("create", "v")
+        .with("viewOn", "p")
+        .with("pipeline", Vec::<Value>::new());
+    ok(&m.run(DB, view));
+    let spec = Document::new()
+        .with("key", Document::new().with("x", 1))
+        .with("name", "x_1")
+        .with("sparse", true)
+        .with("hidden", true);
+    let create =
+        Document::new().with("createIndexes", "p").with("indexes", vec![Value::Document(spec)]);
+    ok(&m.run(DB, create));
+    let change = Document::new().with("name", "x_1").with("hidden", false);
+    ok(&m.run(DB, Document::new().with("collMod", "p").with("index", change)));
+    let entries = oplog(&mut m, Document::new().with("ns", "e.$cmd"));
+    let named = |name: &str, coll: &str| {
+        entries
+            .iter()
+            .find(|e| matches!(field(e, "o"), Value::Document(o) if o.get(name) == Some(&Value::from(coll))))
+            .unwrap_or_else(|| panic!("{name} {coll}: {entries:?}"))
+            .clone()
+    };
+    let v = named("create", "v");
+    assert!(matches!(field(&v, "o"), Value::Document(o) if o.get("idIndex").is_none()), "{v:?}");
+    let bare = named("create", "bare");
+    assert_eq!(
+        field(&bare, "o"),
+        &Value::Document(
+            Document::new()
+                .with("create", "bare")
+                .with("idIndex", field(&bare, "o.idIndex").clone())
+        )
+    );
+    let modified = named("collMod", "p");
+    assert_eq!(
+        field(&modified, "o.index"),
+        &Value::Document(Document::new().with("name", "x_1").with("hidden", false))
+    );
+    assert_eq!(
+        field(&modified, "o2.indexOptions_old"),
+        &Value::Document(Document::new().with("hidden", true))
+    );
 }

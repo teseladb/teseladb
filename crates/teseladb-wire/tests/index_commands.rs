@@ -180,3 +180,37 @@ fn drops_remove_the_entries_and_the_catalog_entry() {
     assert_eq!(entries(&m, c), 0);
     assert_eq!(m.indexes.of(c).count(), 0);
 }
+
+/// Two specifications of one `createIndexes` that are the same index, or that conflict as an
+/// existing index would, fail the build and create nothing (measured on a `refrouter` 9.0.4 on
+/// 03-11-2026).
+#[test]
+fn conflicting_specifications_of_one_command_fail_the_build() {
+    let mut m = Mem::new();
+    create(&mut m, vec![spec(Document::new().with("z", 1), "z_1")]);
+    let cases = [
+        (
+            spec(a1(), "a_1"),
+            96,
+            "Cannot build two identical indexes. Try again without duplicate indexes.",
+        ),
+        (spec(a1(), "x"), 85, "Index already exists with a different name: a_1"),
+        (
+            spec(a1(), "a_1").with("sparse", true),
+            86,
+            "An existing index has the same name as the requested index. When index names are \
+             not specified, they are auto generated and can cause conflicts. Please refer to our \
+             documentation. Requested index: { v: 2, key: { a: 1 }, name: \"a_1\", sparse: true \
+             }, existing index: { v: 2, key: { a: 1 }, name: \"a_1\" }",
+        ),
+    ];
+    for (second, want_code, cause) in cases {
+        let r = create(&mut m, vec![spec(a1(), "a_1"), second]);
+        assert_eq!(code(&r), want_code, "{r:?}");
+        let Some(Value::String(msg)) = r.get("errmsg") else { panic!("{r:?}") };
+        assert!(msg.starts_with("Index build failed: "), "{msg}");
+        assert!(msg.contains(" ( ") && msg.contains("Collection t.c"), "{msg}");
+        assert!(msg.ends_with(&format!(" ) :: caused by :: {cause}")), "{msg}");
+        assert_eq!(names(&mut m).len(), 2, "{r:?}");
+    }
+}

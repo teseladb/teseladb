@@ -164,12 +164,15 @@ fn applying_a_diff() {
     );
     assert_eq!(
         apply(&before(), &Document::new().with("x", 1)),
-        Err(DiffError::Section("x".into()))
+        Err(DiffError::Unexpected("x".into()))
     );
-    let bad = Document::new().with("sa", Document::new().with("a", true));
-    assert_eq!(apply(&before(), &bad), Err(DiffError::NotAnArray("a".into())));
+    // An array subdiff on a field that is not an array leaves it null, as RefDb 9.0.4 does.
+    let on_scalar = Document::new().with("sa", Document::new().with("a", true));
+    assert_eq!(apply(&before(), &on_scalar).expect("applies").get("a"), Some(&Value::Null));
     let bad = Document::new().with("u", 1);
-    assert_eq!(apply(&before(), &bad), Err(DiffError::Section("u".into())));
+    assert_eq!(apply(&before(), &bad), Err(DiffError::NotObject("u")));
+    let bad = Document::new().with("sa", 1);
+    assert_eq!(apply(&before(), &bad), Err(DiffError::NotObject("s")));
 }
 
 /// The edges of a description against the document before: an empty path, a path into an array
@@ -211,5 +214,5 @@ fn a_bad_position_is_refused() {
     use teseladb_topology::diff::{DiffError, apply};
     let doc = Document::new().with("arr", ints(&[1]));
     let diff = Document::new().with("sarr", Document::new().with("a", true).with("ux", 1));
-    assert_eq!(apply(&doc, &diff), Err(DiffError::Section("ux".to_owned())));
+    assert_eq!(apply(&doc, &diff), Err(DiffError::Unexpected("ux".to_owned())));
 }

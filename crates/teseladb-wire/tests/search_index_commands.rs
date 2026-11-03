@@ -1282,3 +1282,61 @@ fn create_takes_generic_arguments_and_checks_each_index() {
     let r = create(&mut m, "vx", vec![index("default", dynamic(true))]);
     assert_eq!(error(&r).0, 10_623_001);
 }
+
+/// After 1 024 changed documents an index writes its file out, even when no build started.
+#[test]
+fn many_changed_documents_write_the_index_file() {
+    use std::sync::Arc;
+    use teseladb_wire::commands::lock;
+
+    let store = Arc::new(MemStore::default());
+    let mut m = with_collection();
+    lock(&m.shared).search.set_store(store.clone());
+    let reply = create(&mut m, "c", vec![index("default", dynamic(true))]);
+    let id = id_bytes(&id_of(&reply, 0));
+    batch(&search(&mut m, "c", "$search", text("hola")));
+    store.files.lock().unwrap().clear();
+    let docs: Vec<Document> =
+        (100..1_200).map(|i: i32| doc(&[("_id", i.into()), ("t", "hola".into())])).collect();
+    insert(&mut m, docs);
+    batch(&search(&mut m, "c", "$search", text("hola")));
+    assert!(store.files.lock().unwrap().contains_key(&id));
+}
+
+/// A `vectorSearch` index made on a view serves that view and its collection (as it stores
+/// them), and nothing through another view of the collection (measured 03-11-2026 on `refsearch`
+/// 1.70.6, `scratchpad/lane3s/m95.js` and `m96.js`).
+#[test]
+fn a_vector_index_on_a_view_serves_its_view_and_collection_only() {
+    let mut m = with_collection();
+    insert(&mut m, vec![doc(&[("_id", 31.into()), ("v", floats(&[1.0, 0.0, 0.0]))])]);
+    view(&mut m, "vw", "c", vec![Document::new().with("$set", Document::new().with("k", 1))]);
+    view(&mut m, "vw2", "c", vec![Document::new().with("$set", Document::new().with("k", 2))]);
+    let vector = Document::new()
+        .with("type", "vector")
+        .with("path", "v")
+        .with("numDimensions", 3)
+        .with("similarity", "euclidean");
+    let def = Document::new().with("fields", arr(vec![vector]));
+    create(&mut m, "vw", vec![index("vi", def).with("type", "vectorSearch")]);
+    let vs = || vec![Document::new().with("$vectorSearch", vector_query("vi", &[1.0, 0.0, 0.0]))];
+    let one = |k: Option<i32>| {
+        let d = doc(&[("_id", 31.into()), ("v", floats(&[1.0, 0.0, 0.0]))]);
+        vec![match k {
+            Some(k) => d.with("k", k),
+            None => d,
+        }]
+    };
+    let found = |r: Document| {
+        batch(&r)
+            .into_iter()
+            .map(|mut d| {
+                d.remove("s");
+                d
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(found(agg(&mut m, "vw".into(), vs())), one(Some(1)));
+    assert_eq!(found(agg(&mut m, "c".into(), vs())), one(None));
+    assert!(batch(&agg(&mut m, "vw2".into(), vs())).is_empty());
+}

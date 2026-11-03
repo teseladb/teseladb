@@ -140,13 +140,13 @@ pub fn balancer_start<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Docum
     admin::admin_only(BALANCER_START, ctx.db)?;
     set_balancer(ctx.backend, MODE_FULL, false)?;
     for (ns, c) in ctx.backend.collections()? {
-        let Some((options, mut balancing)) = balancing_of(&c)? else { continue };
-        if balancing.get(DEFRAGMENT).is_none() {
+        let Some(mut b) = balancing_of(&c)? else { continue };
+        if b.settings.get(DEFRAGMENT).is_none() {
             continue;
         }
-        balancing.remove(DEFRAGMENT);
-        balancing.remove(DEFRAGMENTATION_PHASE);
-        write_balancing(ctx.backend, ns, options, balancing)?;
+        b.settings.remove(DEFRAGMENT);
+        b.settings.remove(DEFRAGMENTATION_PHASE);
+        write_balancing(ctx.backend, ns, b)?;
     }
     Ok(ok())
 }
@@ -199,36 +199,40 @@ fn namespace(ctx: &Ctx<'_, impl Backend + ?Sized>, name: &str) -> Result<Namespa
         Value::String(s) => s.clone(),
         v => return Err(wrong_type(&format!("{name}.{name}"), v, "string")),
     };
+    // A `refrouter` 9.0.4 names `db.` by the database (measured on 03-11-2026).
+    let shown = full.strip_suffix('.').unwrap_or(&full);
     parse_full(&full).filter(|n| !n.db.is_empty() && !n.coll.is_empty()).ok_or_else(|| {
-        CommandError::new(INVALID_NAMESPACE, format!("Invalid namespace specified '{full}'"))
+        CommandError::new(INVALID_NAMESPACE, format!("Invalid namespace specified '{shown}'"))
     })
 }
 
-/// A collection's options and its balancing settings, if it has a shard key.
-fn balancing_of(c: &CollectionEntry) -> Result<Option<(Document, Document)>, CommandError> {
-    let options = Document::from(RawDoc::from_bytes(&c.options)?);
-    let balancing = match options.get(SHARD_KEY) {
-        Some(Value::Document(key)) => match key.get(BALANCING) {
-            Some(Value::Document(b)) => b.clone(),
-            _ => Document::new(),
-        },
-        _ => return Ok(None),
-    };
-    Ok(Some((options, balancing)))
+/// A collection with a shard key as its balancing settings live: its options, its shard key's
+/// document and the settings kept there.
+struct Balancing {
+    options: Document,
+    key: Document,
+    settings: Document,
 }
 
-/// Stores `balancing` with the shard key of collection `ns`.
+/// The balancing settings of a collection, if it has a shard key.
+fn balancing_of(c: &CollectionEntry) -> Result<Option<Balancing>, CommandError> {
+    let options = Document::from(RawDoc::from_bytes(&c.options)?);
+    let Some(Value::Document(key)) = options.get(SHARD_KEY).cloned() else { return Ok(None) };
+    let settings = match key.get(BALANCING) {
+        Some(Value::Document(b)) => b.clone(),
+        _ => Document::new(),
+    };
+    Ok(Some(Balancing { options, key, settings }))
+}
+
+/// Stores the settings of `b` with the shard key of collection `ns`.
 fn write_balancing<B: Backend + ?Sized>(
     backend: &mut B,
     ns: Namespace,
-    mut options: Document,
-    balancing: Document,
+    b: Balancing,
 ) -> Result<(), CommandError> {
-    let mut key = match options.get(SHARD_KEY) {
-        Some(Value::Document(k)) => k.clone(),
-        _ => Document::new(),
-    };
-    key.insert(BALANCING, balancing);
+    let Balancing { mut options, mut key, settings } = b;
+    key.insert(BALANCING, settings);
     options.insert(SHARD_KEY, key);
     backend.catalog_write(CatalogCommand::Modify {
         ns,
@@ -256,7 +260,8 @@ pub fn configure_collection_balancing<B: Backend + ?Sized>(
     let auto_merge = super::args::bool_field(ctx.cmd, name, "enableAutoMerger")?;
     let defragment = super::args::bool_field(ctx.cmd, name, DEFRAGMENT)?;
     let coll = ctx.backend.collection(&ns)?.ok_or_else(|| not_sharded(&ns))?;
-    let (options, mut balancing) = balancing_of(&coll)?.ok_or_else(|| not_sharded(&ns))?;
+    let mut b = balancing_of(&coll)?.ok_or_else(|| not_sharded(&ns))?;
+    let balancing = &mut b.settings;
     match chunk_mb {
         Some(0) => {
             balancing.remove(MAX_CHUNK_SIZE_BYTES);
@@ -279,7 +284,7 @@ pub fn configure_collection_balancing<B: Backend + ?Sized>(
         }
         _ => {}
     }
-    write_balancing(ctx.backend, ns, options, balancing)?;
+    write_balancing(ctx.backend, ns, b)?;
     Ok(ok())
 }
 
@@ -294,7 +299,7 @@ pub fn balancer_collection_status<B: Backend + ?Sized>(
     let unsharded =
         || CommandError::new(NAMESPACE_NOT_SHARDED, "Collection unsharded or undefined");
     let coll = ctx.backend.collection(&ns)?.ok_or_else(unsharded)?;
-    let (_, balancing) = balancing_of(&coll)?.ok_or_else(unsharded)?;
+    let balancing = balancing_of(&coll)?.ok_or_else(unsharded)?.settings;
     let mb = match balancing.get(MAX_CHUNK_SIZE_BYTES) {
         Some(Value::Int64(b)) => b >> 20,
         _ => match setting(ctx.backend, CHUNK_SIZE)?.and_then(|d| d.get("value").cloned()) {
@@ -360,7 +365,8 @@ pub fn set_allow_migrations<B: Backend + ?Sized>(
     admin::admin_only(name, ctx.db)?;
     let ns =
         parse_full(&text).filter(|n| !n.db.is_empty() && !n.coll.is_empty()).ok_or_else(|| {
-            CommandError::new(INVALID_NAMESPACE, format!("Invalid namespace specified: {text}"))
+            let shown = text.strip_suffix('.').unwrap_or(&text);
+            CommandError::new(INVALID_NAMESPACE, format!("Invalid namespace specified: {shown}"))
         })?;
     let unsharded = || {
         CommandError::new(
@@ -369,7 +375,8 @@ pub fn set_allow_migrations<B: Backend + ?Sized>(
         )
     };
     let coll = ctx.backend.collection(&ns)?.ok_or_else(unsharded)?;
-    let (options, mut balancing) = balancing_of(&coll)?.ok_or_else(unsharded)?;
+    let mut b = balancing_of(&coll)?.ok_or_else(unsharded)?;
+    let balancing = &mut b.settings;
     let blocked = balancing.get(PERMIT_MIGRATIONS).is_some();
     if blocked == !allow {
         return Ok(ok());
@@ -380,7 +387,7 @@ pub fn set_allow_migrations<B: Backend + ?Sized>(
         }
         false => balancing.push(PERMIT_MIGRATIONS, false),
     }
-    write_balancing(ctx.backend, ns, options, balancing)?;
+    write_balancing(ctx.backend, ns, b)?;
     Ok(ok())
 }
 

@@ -129,43 +129,6 @@ impl Extensions for TextExtensions<'_> {
     }
 }
 
-/// The `$text` query of `filter`: at its top level or in its `$and` and `$or`.
-fn text_of(filter: &Document) -> Option<teseladb_mql::TextQuery> {
-    for (k, v) in filter.iter() {
-        match (k, v) {
-            ("$text", Value::Document(t)) => {
-                let s = |name: &str| match t.get(name) {
-                    Some(Value::Boolean(b)) => *b,
-                    _ => false,
-                };
-                return Some(teseladb_mql::TextQuery {
-                    search: match t.get("$search") {
-                        Some(Value::String(s)) => s.clone(),
-                        _ => String::new(),
-                    },
-                    language: match t.get("$language") {
-                        Some(Value::String(l)) => Some(l.clone()),
-                        _ => None,
-                    },
-                    case_sensitive: s("$caseSensitive"),
-                    diacritic_sensitive: s("$diacriticSensitive"),
-                });
-            }
-            ("$and" | "$or", Value::Array(items)) => {
-                for item in items {
-                    if let Value::Document(d) = item
-                        && let Some(q) = text_of(d)
-                    {
-                        return Some(q);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
 /// How many `$text` clauses `filter` holds, refusing one under `$nor` (measured: code 2).
 fn count_text(filter: &Document, under_nor: bool) -> Result<usize, CommandError> {
     let mut n = 0;
@@ -176,10 +139,9 @@ fn count_text(filter: &Document, under_nor: bool) -> Result<usize, CommandError>
             }
             ("$text", _) => n += 1,
             ("$and" | "$or" | "$nor", Value::Array(items)) => {
-                for item in items {
-                    if let Value::Document(d) = item {
-                        n += count_text(d, under_nor || k == "$nor")?;
-                    }
+                // A parsed filter: its `$and`, `$or` and `$nor` hold documents.
+                for d in items.iter().filter_map(Value::as_document) {
+                    n += count_text(d, under_nor || k == "$nor")?;
                 }
             }
             _ => {}
@@ -195,7 +157,14 @@ pub fn check<B: Backend + ?Sized>(
     ns: &Namespace,
     filter: &Document,
 ) -> Result<(), CommandError> {
-    planned(backend, ns, filter).map(|_| ())
+    let parsed = parse_filter(filter)?;
+    planned(backend, ns, filter, &parsed).map(|_| ())
+}
+
+/// `filter`, parsed as a query's.
+fn parse_filter(filter: &Document) -> Result<Filter, CommandError> {
+    let bytes = filter.to_bytes()?;
+    Filter::parse(RawDoc::from_bytes(&bytes)?, FilterUse::Query).map_err(from_mql)
 }
 
 /// The collection of `ns` and its text index, once the `$text` of `filter` is planned.
@@ -203,15 +172,15 @@ fn planned<B: Backend + ?Sized>(
     backend: &mut B,
     ns: &Namespace,
     filter: &Document,
+    parsed: &Filter,
 ) -> Result<(CollectionEntry, TextIndex), CommandError> {
     if count_text(filter, false)? > 1 {
         return Err(CommandError::new(BAD_VALUE, "Too many text expressions"));
     }
     let Some(coll) = backend.collection(ns)? else { return Err(no_index(ns, true)) };
     let Some(index) = text_index(backend, coll.id)? else { return Err(no_index(ns, false)) };
-    if let Some(q) = text_of(filter) {
-        TextExtensions { index: &index }.query(&q).map_err(from_mql)?;
-    }
+    let ext = TextExtensions { index: &index };
+    parsed.text_query().map(|q| ext.query(q)).transpose().map_err(from_mql)?;
     Ok((coll, index))
 }
 
@@ -223,11 +192,10 @@ pub fn source<B: Backend + ?Sized>(
     filter: &Document,
     concern: ReadConcern,
 ) -> Result<Vec<Scored>, CommandError> {
-    let bytes = filter.to_bytes()?;
-    let parsed = Filter::parse(RawDoc::from_bytes(&bytes)?, FilterUse::Query).map_err(from_mql)?;
-    let (coll, index) = planned(backend, ns, filter)?;
+    let parsed = parse_filter(filter)?;
+    let (coll, index) = planned(backend, ns, filter, &parsed)?;
     let ext = TextExtensions { index: &index };
-    let query = text_of(filter);
+    let query = parsed.text_query();
     let ctx = MatchContext { collation: None, ext: &ext, vars: None };
     let mut out = Vec::new();
     for_each_match_with(
@@ -243,7 +211,7 @@ pub fn source<B: Backend + ?Sized>(
             if !found {
                 return Ok(true);
             }
-            let score = match &query {
+            let score = match query {
                 Some(q) => ext.score(q, doc).map_err(from_mql)?.unwrap_or(0.0),
                 None => 0.0,
             };

@@ -20,12 +20,12 @@ use teseladb_router::table::RouteEntry;
 use teseladb_types::{GroupId, NodeId};
 
 use super::names::parse_full;
-use super::sharding::{ShardKey, document_key, shard_key_of};
+use super::sharding::{ShardKey, document_key, is_hashed, shard_key_of, shard_values};
 use super::{Backend, Ctx, admin, display, shard_name};
 use crate::error::{
     BAD_VALUE, CONFLICTING_OPERATION_IN_PROGRESS, CommandError, ILLEGAL_OPERATION,
     INVALID_NAMESPACE, INVALID_OPTIONS, NAMESPACE_NOT_FOUND, NAMESPACE_NOT_SHARDED,
-    SHARD_NOT_FOUND, STALE_CONFIG, UNCODED,
+    OPERATION_FAILED, SHARD_NOT_FOUND, STALE_CONFIG, UNCODED,
 };
 use crate::types::wrong_type;
 use teseladb_range::read::ReadConcern;
@@ -53,6 +53,11 @@ const NO_SHARD_KEY_IN_QUERY: crate::error::Code =
 /// `clearJumboFlag`'s code when no chunk has the bounds it names.
 const NO_JUMBO_CHUNK_AT_BOUNDS: crate::error::Code =
     crate::error::Code { code: 51_261, name: "Location51261" };
+/// `split`'s refusal of a chunk whose documents all have its start's shard key value.
+const CANNOT_SPLIT: crate::error::Code = crate::error::Code { code: 87, name: "CannotSplit" };
+/// `split`'s refusal of a `bounds` element that is not a document.
+const BOUND_NOT_OBJECT: crate::error::Code =
+    crate::error::Code { code: 10_065, name: "Location10065" };
 /// How many times a merge waits for the previous one of the same command.
 const MERGE_WAITS: usize = 200;
 /// Documents read at a time while looking for a chunk's middle.
@@ -73,6 +78,10 @@ pub struct Chunk {
     pub max: Document,
     /// The node that leads the range.
     pub node: NodeId,
+    /// The range's voters.
+    pub voters: Vec<NodeId>,
+    /// The epoch of the range's replicas, which a change of them names.
+    pub replica_epoch: u64,
     /// Cluster time, in milliseconds, of the range's last split or move.
     pub moved_ms: u64,
 }
@@ -82,11 +91,6 @@ fn documents_area(tenant: u32, collection: u32) -> (Vec<u8>, Vec<u8>) {
     let start = KeyBuilder::index_prefix(tenant, collection, teseladb_keys::DOCUMENTS);
     let end = KeyBuilder::index_prefix(tenant, collection, teseladb_keys::DOCUMENTS + 1);
     (start.as_bytes().to_vec(), end.as_bytes().to_vec())
-}
-
-/// Whether field `v` of a shard key is hashed.
-fn hashed(v: &Value) -> bool {
-    matches!(v, Value::String(s) if s == "hashed")
 }
 
 /// The bound of key `at` of the documents' area `[lo, hi)` in shard key values: `MinKey` at `lo`,
@@ -107,7 +111,7 @@ fn bound(key: &ShardKey, at: &[u8], (lo, hi): (&[u8], &[u8])) -> Document {
     for (i, (field, how)) in key.key.iter().enumerate() {
         let v = match (&edge, &values) {
             (Some(e), _) => e.clone(),
-            (None, Some(vs)) => match (&vs[i], hashed(how)) {
+            (None, Some(vs)) => match (&vs[i], is_hashed(how)) {
                 (Value::Int32(n), true) => Value::Int64(i64::from(*n)),
                 (v, _) => v.clone(),
             },
@@ -140,6 +144,8 @@ pub fn collection_chunks(
                 start,
                 end,
                 node,
+                voters: e.voters.clone(),
+                replica_epoch: e.replica_epoch,
                 moved_ms: e.moved_ms,
             }
         })
@@ -183,11 +189,14 @@ fn is_key_value(key: &ShardKey, d: &Document) -> bool {
     d.len() == key.key.len() && d.iter().zip(key.key.iter()).all(|((a, _), (b, _))| a == b)
 }
 
-/// The key where a split at shard key value `value` cuts: before every document with it.
+/// The key where a split at shard key value `value` cuts: before every document with it. A bound
+/// names its fields whole (`{"a.b": 1}`) and a hashed field by its hash, as a `refrouter` takes them.
+/// `MinKey` everywhere is where the collection's first chunk starts.
 fn cut_at(s: &Sharded, value: &Document) -> Result<Vec<u8>, CommandError> {
-    let mut doc = value.clone();
-    doc.push("_id", Value::MinKey);
-    document_key(&s.coll, &s.key.key, &doc)
+    if value.iter().all(|(_, v)| *v == Value::MinKey) {
+        return Ok(documents_area(s.coll.tenant, s.coll.id).0);
+    }
+    super::zones::bound_key(&s.coll, value)
 }
 
 /// The collection's chunks now.
@@ -203,37 +212,88 @@ fn holding(chunks: &[Chunk], at: &[u8]) -> Option<Chunk> {
     chunks.iter().find(|c| c.start.as_slice() <= at && at < c.end.as_slice()).cloned()
 }
 
+/// The chunk that holds key `at` of the collection's documents: the ranges cover every key, so
+/// only ranges read while they change can miss it.
+fn chunk_at(chunks: &[Chunk], at: &[u8]) -> Result<Chunk, CommandError> {
+    holding(chunks, at)
+        .ok_or_else(|| CommandError::new(STALE_CONFIG, "no range holds the chunk's key"))
+}
+
 /// The chunk with bounds exactly `[min, max)`.
 fn with_bounds(chunks: &[Chunk], min: &Document, max: &Document) -> Option<Chunk> {
     chunks.iter().find(|c| &c.min == min && &c.max == max).cloned()
 }
 
-/// The two bounds of a `bounds` array, if it is one.
-fn two_bounds(v: &Value) -> Option<(Document, Document)> {
-    match v {
-        Value::Array(a) => match a.as_slice() {
-            [Value::Document(min), Value::Document(max)] => Some((min.clone(), max.clone())),
-            _ => None,
-        },
-        _ => None,
+/// The documents of the `bounds` array of command `name` (`moveChunk`, `mergeChunks`,
+/// `clearJumboFlag`), checked as its parser checks them.
+fn bounds_of(name: &str, v: &Value) -> Result<Vec<Document>, CommandError> {
+    let Value::Array(a) = v else {
+        return Err(wrong_type(&format!("{name}.bounds"), v, "array"));
+    };
+    let doc = |(i, b): (usize, &Value)| match b {
+        Value::Document(d) => Ok(d.clone()),
+        other => Err(wrong_type(&format!("{name}.bounds.{i}"), other, "object")),
+    };
+    a.iter().enumerate().map(doc).collect()
+}
+
+/// The two bounds of `moveChunk` and `clearJumboFlag`.
+fn two_bounds(name: &str, v: &Value) -> Result<(Document, Document), CommandError> {
+    match <[Document; 2]>::try_from(bounds_of(name, v)?) {
+        Ok([min, max]) => Ok((min, max)),
+        Err(_) => {
+            Err(CommandError::new(INVALID_OPTIONS, "bounds can only have exactly 2 elements"))
+        }
     }
 }
 
-/// The key of the document a chunk command's `find` names: its shard key value.
+/// The two bounds of `split`, checked as a `refrouter` 9.0.4 checks them.
+fn split_bounds(s: &Sharded, v: &Value) -> Result<(Document, Document), CommandError> {
+    let Value::Array(a) = v else {
+        let msg =
+            format!("wrong type for 'bounds' field, expected array, found bounds: {}", display(v));
+        return Err(CommandError::new(UNCODED, msg));
+    };
+    match a.len() {
+        0 => return Err(CommandError::new(UNCODED, "need to specify find/bounds or middle")),
+        1 => return Err(CommandError::new(UNCODED, "upper bound not specified")),
+        _ => {}
+    }
+    let doc = |i: usize| match &a[i] {
+        Value::Document(d) => Ok(d.clone()),
+        _ => {
+            let msg = format!("invalid parameter: expected an object ({i})");
+            Err(CommandError::new(BOUND_NOT_OBJECT, msg))
+        }
+    };
+    let (min, max) = (doc(0)?, doc(1)?);
+    if !is_key_value(&s.key, &min) || !is_key_value(&s.key, &max) {
+        return Err(CommandError::new(UNCODED, invalid_bounds(s, &min, &max)));
+    }
+    Ok((min, max))
+}
+
+/// The message of bounds that are not values of the shard key.
+fn invalid_bounds(s: &Sharded, min: &Document, max: &Document) -> String {
+    format!(
+        "shard key bounds [{},{}) are not valid for shard key pattern {}",
+        shown(min),
+        shown(max),
+        shown(&s.key.key)
+    )
+}
+
+/// The key of the document a chunk command's `find` names: its shard key value, a hashed field
+/// hashed.
 fn find_key(s: &Sharded, find: &Document) -> Result<Option<Vec<u8>>, CommandError> {
-    if !s.key.key.iter().all(|(f, _)| find.get(f).is_some()) {
-        return Ok(None);
-    }
     let mut value = Document::new();
-    for (f, _) in s.key.key.iter() {
-        value.push(f, find.get(f).cloned().unwrap_or(Value::Null));
+    for (field, kind) in s.key.key.iter() {
+        let Some(v) = find.get(field) else { return Ok(None) };
+        let one = |v: Value| Document::new().with("v", v);
+        let mut held = shard_values(&one(kind.clone()), &one(v.clone()))?;
+        value.push(field, held.pop().unwrap_or(Value::Null));
     }
-    let mut doc = find.clone();
-    doc.remove("_id");
-    for (k, v) in value.iter() {
-        doc.insert(k, v.clone());
-    }
-    cut_at(s, &doc).map(Some)
+    cut_at(s, &value).map(Some)
 }
 
 /// Asks Group 0 to split `chunk` at `at`, unless `at` is one of its bounds already.
@@ -248,8 +308,7 @@ fn split_chunk<B: Backend + ?Sized>(
     backend.range_order(Group0Command::SplitRange { group: chunk.group, at })
 }
 
-/// The cut at the middle document of `chunk`, if it has documents with a shard key value after
-/// its start.
+/// The cut at the shard key value of the middle document of `chunk`, if it has documents.
 fn middle_cut<B: Backend + ?Sized>(
     backend: &mut B,
     s: &Sharded,
@@ -273,8 +332,31 @@ fn middle_cut<B: Backend + ?Sized>(
     let mut at = doc.clone();
     at.remove("_id");
     at.push("_id", Value::MinKey);
-    let at = document_key(&s.coll, &s.key.key, &at)?;
-    Ok((at > chunk.start).then_some(at))
+    document_key(&s.coll, &s.key.key, &at).map(Some)
+}
+
+/// Splits `chunk` at its middle document, as `split` with `find` or `bounds` does; a `refrouter`
+/// 9.0.4 refuses an empty collection, a chunk with no documents and one whose documents all have
+/// its start's shard key value.
+fn split_in_middle<B: Backend + ?Sized>(
+    backend: &mut B,
+    s: &Sharded,
+    chunk: &Chunk,
+) -> Result<(), CommandError> {
+    let (lo, hi) = documents_area(s.coll.tenant, s.coll.id);
+    if backend.scan(&lo, &hi, 1, ReadConcern::Local)?.is_empty() {
+        let msg = "cannot use split with find or bounds option on an empty collection";
+        return Err(CommandError::new(INVALID_OPTIONS, msg));
+    }
+    let Some(at) = middle_cut(backend, s, chunk)? else {
+        let msg = "can't open a cursor to scan the range (desired range is possibly empty)";
+        return Err(CommandError::new(OPERATION_FAILED, msg));
+    };
+    if at <= chunk.start {
+        let msg = "Unable to find median in chunk because chunk is indivisible.";
+        return Err(CommandError::new(CANNOT_SPLIT, msg));
+    }
+    split_chunk(backend, chunk, at)
 }
 
 fn ok() -> Document {
@@ -305,12 +387,8 @@ pub fn split<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comm
                 );
                 return Err(CommandError::new(UNCODED, msg));
             }
-            // `MinKey` everywhere is the first chunk's own start.
-            let lowest = m.iter().all(|(_, v)| *v == Value::MinKey);
             let at = cut_at(&s, &m)?;
-            if let Some(chunk) = holding(&chunks, &at).filter(|_| !lowest) {
-                split_chunk(ctx.backend, &chunk, at)?;
-            }
+            split_chunk(ctx.backend, &chunk_at(&chunks, &at)?, at)?;
         }
         (Some(v), _, _) => {
             let msg = format!(
@@ -320,15 +398,21 @@ pub fn split<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comm
             return Err(CommandError::new(UNCODED, msg));
         }
         (None, Some(Value::Document(f)), _) => {
-            let chunk = find_key(&s, &f)?.and_then(|at| holding(&chunks, &at));
-            if let Some(chunk) = chunk
-                && let Some(at) = middle_cut(ctx.backend, &s, &chunk)?
-            {
-                split_chunk(ctx.backend, &chunk, at)?;
-            }
+            let at = find_key(&s, &f)?.ok_or_else(|| {
+                let msg = format!("no shard key found in chunk query {}", shown(&f));
+                CommandError::new(UNCODED, msg)
+            })?;
+            split_in_middle(ctx.backend, &s, &chunk_at(&chunks, &at)?)?;
+        }
+        (None, Some(v), _) => {
+            let msg = format!(
+                "wrong type for 'find' field, expected object, found find: {}",
+                display(&v)
+            );
+            return Err(CommandError::new(UNCODED, msg));
         }
         (None, None, Some(b)) => {
-            let (min, max) = two_bounds(&b).unwrap_or_default();
+            let (min, max) = split_bounds(&s, &b)?;
             let Some(chunk) = with_bounds(&chunks, &min, &max) else {
                 let msg = format!(
                     "no chunk found with the shard key bounds [{}, {})",
@@ -337,9 +421,7 @@ pub fn split<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comm
                 );
                 return Err(CommandError::new(UNCODED, msg));
             };
-            if let Some(at) = middle_cut(ctx.backend, &s, &chunk)? {
-                split_chunk(ctx.backend, &chunk, at)?;
-            }
+            split_in_middle(ctx.backend, &s, &chunk)?;
         }
         _ => return Err(CommandError::new(UNCODED, "need to specify find/bounds or middle")),
     }
@@ -381,14 +463,12 @@ fn move_chunk_to<B: Backend + ?Sized>(
     chunk: &Chunk,
     node: NodeId,
 ) -> Result<(), CommandError> {
-    let entry = backend.route_entries()?.into_iter().find(|e| e.group == chunk.group);
-    let Some(entry) = entry else { return Ok(()) };
-    if !entry.voters.contains(&node) {
+    if !chunk.voters.contains(&node) {
         let leaving: Vec<NodeId> =
-            entry.voters.iter().copied().filter(|n| *n == chunk.node).collect();
+            chunk.voters.iter().copied().filter(|n| *n == chunk.node).collect();
         backend.range_order(Group0Command::SetReplicas {
             group: chunk.group,
-            epoch: entry.replica_epoch,
+            epoch: chunk.replica_epoch,
             add: vec![node],
             remove: leaving,
         })?;
@@ -423,7 +503,7 @@ pub fn move_chunk<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document,
             holding(&chunks, &at)
         }
         (_, Some(b)) => {
-            let (min, max) = two_bounds(b).unwrap_or_default();
+            let (min, max) = two_bounds(MOVE_CHUNK, b)?;
             let found = with_bounds(&chunks, &min, &max);
             let msg = format!(
                 "no chunk found with the shard key bounds [{},{})",
@@ -443,12 +523,23 @@ pub fn move_chunk<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document,
     Ok(Document::new().with("millis", i64::try_from(millis).unwrap_or(i64::MAX)).with("ok", 1.0))
 }
 
-/// A bound of `moveRange`, checked against the shard key.
-fn range_bound(s: &Sharded, cmd: &Document, field: &str) -> Result<Option<Document>, CommandError> {
+/// A bound of `moveRange` as its parser reads it: a document, if given.
+fn range_bound(cmd: &Document, field: &str) -> Result<Option<Document>, CommandError> {
     match cmd.get(field) {
         None => Ok(None),
-        Some(Value::Document(d)) if is_key_value(&s.key, d) => Ok(Some(d.clone())),
-        Some(Value::Document(d)) => {
+        Some(Value::Document(d)) => Ok(Some(d.clone())),
+        Some(v) => Err(wrong_type(&format!("{MOVE_RANGE}.{field}"), v, "object")),
+    }
+}
+
+/// Bound `field` of `moveRange`, checked against the shard key.
+fn check_range_bound(
+    s: &Sharded,
+    field: &str,
+    bound: Option<&Document>,
+) -> Result<(), CommandError> {
+    match bound {
+        Some(d) if !is_key_value(&s.key, d) => {
             let msg = format!(
                 "The '{field}' bound {} is not valid for shard key pattern {}",
                 shown(d),
@@ -456,7 +547,7 @@ fn range_bound(s: &Sharded, cmd: &Document, field: &str) -> Result<Option<Docume
             );
             Err(CommandError::new(INVALID_OPTIONS, msg))
         }
-        Some(v) => Err(wrong_type(&format!("{MOVE_RANGE}.{field}"), v, "object")),
+        _ => Ok(()),
     }
 }
 
@@ -479,17 +570,9 @@ fn wait_for_cut<B: Backend + ?Sized>(
 pub fn move_range<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     admin::admin_only(MOVE_RANGE, ctx.db)?;
     let to = required_string(ctx.cmd, MOVE_RANGE, "toShard")?;
-    let s = match sharded(ctx, MOVE_RANGE) {
-        Ok(s) => s,
-        Err(e) if e.code == NAMESPACE_NOT_SHARDED => {
-            let name = super::args::string(ctx.cmd, MOVE_RANGE, MOVE_RANGE)?.unwrap_or_default();
-            let msg = format!("Collection '{name}' not found in cluster catalog");
-            return Err(CommandError::new(NAMESPACE_NOT_FOUND, msg));
-        }
-        Err(e) => return Err(e),
-    };
-    let min = range_bound(&s, ctx.cmd, "min")?;
-    let max = range_bound(&s, ctx.cmd, "max")?;
+    let name = super::args::string(ctx.cmd, MOVE_RANGE, MOVE_RANGE)?.unwrap_or_default().to_owned();
+    let min = range_bound(ctx.cmd, "min")?;
+    let max = range_bound(ctx.cmd, "max")?;
     if min.is_none() && max.is_none() {
         return Err(CommandError::new(
             INVALID_OPTIONS,
@@ -500,20 +583,29 @@ pub fn move_range<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document,
         let msg = format!("Could not find destination shard :: caused by :: Shard {to} not found");
         CommandError::new(SHARD_NOT_FOUND, msg)
     })?;
+    // A `refrouter` 9.0.4 names a database alone (`db` or `db.`) by the database.
+    let s = sharded(ctx, MOVE_RANGE).map_err(|e| match e.code {
+        INVALID_NAMESPACE | NAMESPACE_NOT_SHARDED => {
+            let shown = name.strip_suffix('.').unwrap_or(&name);
+            let msg = format!("Collection '{shown}' not found in cluster catalog");
+            CommandError::new(NAMESPACE_NOT_FOUND, msg)
+        }
+        _ => e,
+    })?;
+    check_range_bound(&s, "min", min.as_ref())?;
+    check_range_bound(&s, "max", max.as_ref())?;
     check_migrations(&s)?;
     let low = min.as_ref().map(|m| cut_at(&s, m)).transpose()?;
     let high = max.as_ref().map(|m| cut_at(&s, m)).transpose()?;
     for at in [&low, &high].into_iter().flatten() {
-        if let Some(chunk) = holding(&chunks_of(ctx.backend, &s)?, at) {
-            split_chunk(ctx.backend, &chunk, at.clone())?;
-            wait_for_cut(ctx.backend, &s, at)?;
-        }
+        let chunk = chunk_at(&chunks_of(ctx.backend, &s)?, at)?;
+        split_chunk(ctx.backend, &chunk, at.clone())?;
+        wait_for_cut(ctx.backend, &s, at)?;
     }
     let chunks = chunks_of(ctx.backend, &s)?;
     let moved = match (&low, &high) {
         (Some(lo), _) => holding(&chunks, lo),
-        (None, Some(hi)) => chunks.iter().find(|c| &c.end == hi).cloned(),
-        (None, None) => None,
+        (None, hi) => chunks.iter().find(|c| Some(&c.end) == hi.as_ref()).cloned(),
     };
     if let Some(chunk) = moved.filter(|c| c.node != node) {
         move_chunk_to(ctx.backend, &chunk, node)?;
@@ -525,18 +617,26 @@ pub fn move_range<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document,
 pub fn merge_chunks<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     admin::admin_only(MERGE_CHUNKS, ctx.db)?;
     let bounds = match ctx.cmd.get("bounds") {
-        Some(Value::Array(a)) => a.clone(),
-        Some(v) => return Err(wrong_type(&format!("{MERGE_CHUNKS}.bounds"), v, "array")),
+        Some(v) => bounds_of(MERGE_CHUNKS, v)?,
         None => return Err(super::args::missing(MERGE_CHUNKS, "bounds")),
     };
     let s = sharded(ctx, MERGE_CHUNKS)?;
-    let (min, max) = two_bounds(&Value::Array(bounds))
-        .ok_or_else(|| CommandError::new(BAD_VALUE, "only a min and max bound may be specified"))?;
+    let Ok([min, max]) = <[Document; 2]>::try_from(bounds) else {
+        return Err(CommandError::new(BAD_VALUE, "only a min and max bound may be specified"));
+    };
+    if super::zones::compare(&min, &max)?.is_ge() {
+        let msg = format!("min: {} should be less than max: {}", shown(&min), shown(&max));
+        return Err(CommandError::new(BAD_VALUE, msg));
+    }
+    if !is_key_value(&s.key, &min) || !is_key_value(&s.key, &max) {
+        return Err(CommandError::new(INVALID_OPTIONS, invalid_bounds(&s, &min, &max)));
+    }
     let chunks = chunks_of(ctx.backend, &s)?;
     let first = chunks.iter().position(|c| c.min == min);
     let last = chunks.iter().position(|c| c.max == max);
+    // The bounds are in order, so the first chunk comes before the last one.
     let run = match (first, last) {
-        (Some(a), Some(b)) if a <= b => &chunks[a..=b],
+        (Some(a), Some(b)) => chunks.get(a..=b).unwrap_or_default(),
         _ => &[],
     };
     if run.is_empty() || run.iter().any(|c| c.node != run[0].node) {
@@ -548,15 +648,18 @@ pub fn merge_chunks<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Documen
         );
         return Err(CommandError::new(STALE_CONFIG, msg));
     }
-    merge_run(ctx.backend, run)?;
+    merge_run(ctx.backend, &run[0], &run[1..])?;
     Ok(ok())
 }
 
-/// Joins the neighbouring chunks of `run` into the first one's range.
-fn merge_run<B: Backend + ?Sized>(backend: &mut B, run: &[Chunk]) -> Result<(), CommandError> {
-    let Some(first) = run.first() else { return Ok(()) };
+/// Joins the neighbouring chunks `rest` into the range of `first`, the chunk before them.
+fn merge_run<B: Backend + ?Sized>(
+    backend: &mut B,
+    first: &Chunk,
+    rest: &[Chunk],
+) -> Result<(), CommandError> {
     let left = first.group;
-    for right in run[1..].iter().map(|c| c.group) {
+    for right in rest.iter().map(|c| c.group) {
         backend.range_order(Group0Command::MergeRanges { left, right })?;
         for _ in 0..MERGE_WAITS {
             let gone = !backend.route_entries()?.iter().any(|e| e.group == right);
@@ -618,7 +721,7 @@ pub fn merge_all_chunks_on_shard<B: Backend + ?Sized>(
         }
     }
     for run in runs.iter().filter(|r| r.len() > 1) {
-        merge_run(ctx.backend, run)?;
+        merge_run(ctx.backend, &run[0], &run[1..])?;
     }
     Ok(ok())
 }
@@ -644,7 +747,7 @@ pub fn clear_jumbo_flag<B: Backend + ?Sized>(
     match (ctx.cmd.get("find"), ctx.cmd.get("bounds")) {
         (Some(Value::Document(_)), _) => Ok(ok()),
         (_, Some(b)) => {
-            let (min, max) = two_bounds(b).unwrap_or_default();
+            let (min, max) = two_bounds(CLEAR_JUMBO_FLAG, b)?;
             match with_bounds(&chunks_of(ctx.backend, &s)?, &min, &max) {
                 Some(_) => Ok(ok()),
                 None => {
