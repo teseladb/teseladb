@@ -1523,6 +1523,13 @@ impl Backend for TxnBackend<'_> {
         self.inner.route_entries()
     }
 
+    fn range_live_bytes(
+        &mut self,
+        e: &teseladb_router::table::RouteEntry,
+    ) -> Result<u64, CommandError> {
+        self.inner.range_live_bytes(e)
+    }
+
     fn range_order(
         &mut self,
         cmd: teseladb_meta::command::Group0Command,

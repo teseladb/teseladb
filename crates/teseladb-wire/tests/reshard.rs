@@ -684,3 +684,47 @@ fn the_steps_follow_the_model() {
         assert_eq!(next_action(phase, caught_up), want, "{phase:?} {caught_up}");
     }
 }
+
+/// `approxDocumentsToCopy` at 100 GB scale (018 FR-002): one batch of documents and the live
+/// bytes the ranges keep, never a scan of the whole collection; a collection of less than a
+/// batch is counted exactly.
+#[test]
+fn the_documents_to_copy_come_from_one_batch_and_the_ranges_live_bytes() {
+    use teseladb_router::table::RouteEntry;
+    use teseladb_types::{GroupId, NodeId};
+    use teseladb_wire::commands::Backend;
+    use teseladb_wire::commands::reshard::approx_documents;
+    let coll =
+        |m: &Mem| m.catalog.collections.iter().find(|(ns, _)| ns.coll == "c").unwrap().1.clone();
+    let mut small = sharded(&docs(10));
+    let c = coll(&small);
+    assert_eq!(approx_documents(&mut small, &c).unwrap(), 10);
+    let mut m = sharded(&docs(2_500));
+    let c = coll(&m);
+    let (lo, hi) = teseladb_wire::commands::query::documents_of(&c);
+    let rows = m.scan(&lo, &hi, usize::MAX, teseladb_range::read::ReadConcern::Local).unwrap();
+    assert_eq!(rows.len(), 2_500);
+    let live: i64 = rows.iter().map(|(k, d)| teseladb_range::mutate::live_size(k, d)).sum();
+    let range = |g: u64, start: &[u8], end: &[u8]| RouteEntry {
+        group: GroupId(g),
+        start: start.to_vec(),
+        end: end.to_vec(),
+        core: 0,
+        voters: vec![NodeId(1)],
+        generation: 1,
+        replica_epoch: 1,
+        leader_hint: Some(NodeId(1)),
+        moved_ms: 0,
+    };
+    m.routes = vec![range(1, &[], &lo), range(2, &lo, &hi), range(3, &hi, &[])];
+    m.range_live.insert(GroupId(2), u64::try_from(live).unwrap());
+    m.scanned_rows = 0;
+    let near = |n: u64| n.abs_diff(2_500) <= 75;
+    let n = approx_documents(&mut m, &c).unwrap();
+    assert!(near(n), "{n}");
+    assert_eq!(m.scanned_rows, 1_000, "one batch");
+    // A range shared with other keys is weighed by the stored bytes of the collection's part.
+    m.routes = vec![range(1, &[], &[])];
+    let n = approx_documents(&mut m, &c).unwrap();
+    assert!(near(n), "{n}");
+}

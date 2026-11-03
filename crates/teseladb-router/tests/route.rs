@@ -262,6 +262,8 @@ fn open_ended_ranges_and_unknown_ranges() {
         voters: vec![NodeId(1)],
         generation,
         leader_hint: None,
+        moved_ms: 0,
+        replica_epoch: 1,
     };
     let t = Target { group: GroupId(1), node: NodeId(1), core: 0, generation: 1 };
     // Ranges [a, c) and [c, ∞) learnt from answers.

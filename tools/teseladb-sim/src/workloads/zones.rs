@@ -87,6 +87,7 @@ impl ZonesWorkload {
             leader_term: 0,
             pending_split: None,
             settling: false,
+            moved_ms: 0,
         });
         let states = sm.nodes.keys().map(|n| (*n, LiveState::Alive)).collect();
         ZonesWorkload { nodes, sm, index: 100, states, seq: 0, violation: None, healed: false }

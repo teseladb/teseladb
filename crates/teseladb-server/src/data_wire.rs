@@ -130,6 +130,9 @@ pub enum RemoteReq {
         /// Whether the fence goes up.
         on: bool,
     },
+    /// The range's live bytes (007 FR-005, D-068), which its state machine keeps: what the
+    /// commands that weigh the data read without scanning it (018 FR-017).
+    Live,
 }
 
 fn put_mark(e: &mut Encoder, ts: Hlc) {
@@ -212,6 +215,11 @@ pub enum RemoteReply {
         /// Mark of its entry.
         ts: Hlc,
     },
+    /// The range's live bytes.
+    Live {
+        /// The bytes.
+        bytes: u64,
+    },
 }
 
 const WRITE: u8 = 0;
@@ -225,6 +233,7 @@ const RESTORE_PIECE: u8 = 7;
 const RESTORE_INGEST: u8 = 8;
 const CHANGES: u8 = 9;
 const FENCE: u8 = 10;
+const LIVE: u8 = 11;
 
 fn put_hlc(e: &mut Encoder, ts: Hlc) {
     e.u64(ts.physical).u32(ts.logical);
@@ -392,6 +401,9 @@ impl RemoteReq {
             RemoteReq::Fence { start, end, on } => {
                 e.u8(FENCE).bytes(start).bytes(end).bool(*on);
             }
+            RemoteReq::Live => {
+                e.u8(LIVE);
+            }
         }
         e.finish()
     }
@@ -483,6 +495,7 @@ impl RemoteReq {
                 end: d.bytes()?.to_vec(),
                 on: d.bool()?,
             },
+            LIVE => RemoteReq::Live,
             _ => return Err(DecodeError::InvalidValue { offset: at }),
         };
         d.finish()?;
@@ -500,6 +513,7 @@ const OK_PIECE: u8 = 6;
 const OK_RESTORED: u8 = 7;
 const OK_CHANGES: u8 = 8;
 const OK_FENCED: u8 = 9;
+const OK_LIVE: u8 = 10;
 
 fn put_error(e: &mut Encoder, err: &RangeError) {
     let (tag, hint, text): (u8, u64, &str) = match err {
@@ -624,6 +638,9 @@ pub fn encode_reply(r: &Result<RemoteReply, RangeError>) -> Vec<u8> {
             e.u8(OK_FENCED);
             put_mark(&mut e, *ts);
         }
+        Ok(RemoteReply::Live { bytes }) => {
+            e.u8(OK_LIVE).u64(*bytes);
+        }
         Err(err) => {
             e.u8(ERR);
             put_error(&mut e, err);
@@ -696,6 +713,7 @@ pub fn decode_reply(b: &[u8]) -> Result<Result<RemoteReply, RangeError>, DecodeE
             Ok(RemoteReply::Changes { rows, to, oldest_intent: some.then_some(intent) })
         }
         OK_FENCED => Ok(RemoteReply::Fenced { ts: get_mark(&mut d)? }),
+        OK_LIVE => Ok(RemoteReply::Live { bytes: d.u64()? }),
         ERR => Err(get_error(&mut d)?),
         _ => return Err(DecodeError::InvalidValue { offset: at }),
     };
@@ -807,6 +825,7 @@ mod tests {
             },
             RemoteReq::Fence { start: vec![1], end: vec![2], on: true },
             RemoteReq::Fence { start: vec![], end: vec![9], on: false },
+            RemoteReq::Live,
         ];
         for r in reqs {
             assert_eq!(RemoteReq::decode(&r.encode()), Ok(r));
@@ -831,6 +850,7 @@ mod tests {
             }),
             Ok(RemoteReply::Intents { ts: Hlc { physical: 6, logical: 0 } }),
             Ok(RemoteReply::Fenced { ts: Hlc { physical: 6, logical: 4 } }),
+            Ok(RemoteReply::Live { bytes: 1 << 40 }),
             Err(RangeError::Fenced),
             Ok(RemoteReply::Changes {
                 rows: vec![

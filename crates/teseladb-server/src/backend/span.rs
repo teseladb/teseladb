@@ -41,6 +41,8 @@ mod tests {
             voters: (1..=voters).map(NodeId).collect(),
             generation: 1,
             leader_hint: None,
+            moved_ms: 0,
+            replica_epoch: 1,
         }
     }
 
