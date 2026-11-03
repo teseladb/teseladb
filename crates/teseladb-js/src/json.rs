@@ -1,7 +1,7 @@
 //! `JSON.parse` and `JSON.stringify` (ECMA-262 §25.5).
 
 use crate::builtins::method;
-use crate::interp::{Interp, PROP_BYTES, R};
+use crate::interp::{Interp, R};
 use crate::value::*;
 
 fn arg(args: &[Val], i: usize) -> Val {
@@ -256,7 +256,7 @@ impl P<'_> {
                     return it.array(items);
                 }
                 loop {
-                    it.charge(PROP_BYTES)?;
+                    it.reserve_elements(1)?;
                     items.push(self.value(it)?);
                     if let Some(src) = self.out.pop() {
                         parts.push(src);
@@ -348,7 +348,7 @@ impl P<'_> {
             match c {
                 b'"' => {
                     self.i += 1;
-                    it.charge(units.len())?;
+                    it.reserve(crate::value::Cost::string(units.len() * 2))?;
                     return Ok(crate::strings::from_units(&units));
                 }
                 b'\\' => {
@@ -721,7 +721,7 @@ fn write(
                 }
             }
             out.push(close);
-            it.charge(out.len().min(1 << 16))?;
+            it.reserve(crate::value::Cost::string(out.len()))?;
         }
     }
     Ok(true)

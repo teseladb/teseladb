@@ -35,11 +35,24 @@ fn oplog(c: &mut Client, filter: Document) -> Vec<Document> {
         .collect()
 }
 
+/// The inserts into `ns` among `entries`, those an insert of several documents groups in an
+/// `applyOps` entry included.
 fn inserts_of(entries: &[Document], ns: &str) -> usize {
+    let insert = |e: &Document| {
+        e.get("op") == Some(&Value::from("i")) && e.get("ns") == Some(&Value::from(ns))
+    };
     entries
         .iter()
-        .filter(|e| e.get("op") == Some(&Value::from("i")) && e.get("ns") == Some(&Value::from(ns)))
-        .count()
+        .map(|e| match e.get("o") {
+            Some(Value::Document(o)) => match o.get("applyOps") {
+                Some(Value::Array(ops)) => {
+                    ops.iter().filter(|op| matches!(op, Value::Document(op) if insert(op))).count()
+                }
+                _ => usize::from(insert(e)),
+            },
+            _ => usize::from(insert(e)),
+        })
+        .sum()
 }
 
 /// With a clients' port given, each node announces it as its host (`config.shards`), so the

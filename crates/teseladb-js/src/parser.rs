@@ -10,23 +10,26 @@ use crate::lexer::{SyntaxError, Tok, Token, tokenize};
 /// Parses a whole program as RefDb gives it: an anonymous function may stand as a whole
 /// statement (`function(){ … }`), as RefDb reads a function's source.
 pub fn parse_script(src: &str) -> Result<Vec<Stmt>, SyntaxError> {
-    parse(src, &[], (false, false), true, Room::top())
+    parse(src, &[], (false, false), true, Room::top()).map(|(body, _)| body)
 }
 
 /// Parses the code of an indirect `eval` or of `Function`, with the `room` left: a script.
 pub fn parse_eval(src: &str, room: Room) -> Result<Vec<Stmt>, SyntaxError> {
-    parse(src, &[], (false, false), false, room)
+    parse(src, &[], (false, false), false, room).map(|(body, _)| body)
 }
 
 /// Parses a whole script that may use the private names `privates` (the code of a direct
 /// `eval` inside a class); `supers` says whether it may use `super.x` and `super()` (the code
 /// of a direct `eval` inside a method or a derived constructor).
+/// The code of a direct `eval`, which may use `privates` and the `super` forms `supers`, and the
+/// most of the engine's stack its parse took: a parse kept for a later `eval` of the same text
+/// serves it only while its room holds that much.
 pub fn parse_script_in(
     src: &str,
     privates: &[Name],
     supers: (bool, bool),
     room: Room,
-) -> Result<Vec<Stmt>, SyntaxError> {
+) -> Result<(Vec<Stmt>, usize), SyntaxError> {
     parse(src, privates, supers, false, room)
 }
 
@@ -65,13 +68,14 @@ fn parse(
     supers: (bool, bool),
     anonymous: bool,
     room: Room,
-) -> Result<Vec<Stmt>, SyntaxError> {
+) -> Result<(Vec<Stmt>, usize), SyntaxError> {
     let mut p = Parser {
         toks: tokenize(src)?,
         i: 0,
         src: src.chars().collect(),
         depth: 0,
         units: 0,
+        peak: 0,
         arrows: 0,
         room,
         stack_base: crate::interp::stack_position(),
@@ -112,7 +116,7 @@ fn parse(
         p.check_legacy(0)?;
     }
     p.namer.finish();
-    Ok(out)
+    Ok((out, p.peak))
 }
 
 /// Parses one expression (a template's substitution).
@@ -131,6 +135,7 @@ fn parse_expression(
         src: src.chars().collect(),
         depth: 0,
         units: 0,
+        peak: 0,
         arrows: 0,
         room,
         stack_base: crate::interp::stack_position(),
@@ -275,6 +280,8 @@ struct Parser {
     depth: usize,
     /// The engine's native stack the constructs open here take ([`Room::units`]).
     units: usize,
+    /// The most [`Parser::units`] took while reading.
+    peak: usize,
     /// The arrow functions open here.
     arrows: usize,
     /// What the parse may take.
@@ -544,6 +551,9 @@ impl Parser {
             Tok::Ident(w) if &*w == "await" && self.in_static => {
                 self.fail("await is a reserved identifier".into())
             }
+            Tok::Ident(w) if self.strict && is_strict_reserved(&w) => {
+                self.fail(format!("{w} is a reserved identifier"))
+            }
             Tok::Ident(w) if !is_reserved(&w) => {
                 self.i += 1;
                 Ok(w)
@@ -590,6 +600,7 @@ impl Parser {
         run: impl FnOnce(&mut Self) -> Result<T, SyntaxError>,
     ) -> Result<T, SyntaxError> {
         self.units += cost;
+        self.peak = self.peak.max(self.units);
         let r = if checked && self.units > self.room.units { Err(recursion()) } else { run(self) };
         self.units -= cost;
         r
@@ -656,7 +667,7 @@ impl Parser {
             {
                 self.i += 2;
                 let name_pos = self.pos_at(usize::from(self.is("*")));
-                let f = self.function_rest(pos, false, true, false)?;
+                let f = self.function_rest(pos, true, false)?;
                 let name = self.statement_name(f.name.clone())?;
                 self.declare(&name, Decl::Function { plain: false }, name_pos)?;
                 Ok(Stmt::Func(name, f))
@@ -664,13 +675,16 @@ impl Parser {
             "function" => {
                 self.i += 1;
                 let name_pos = self.pos_at(usize::from(self.is("*")));
-                let f = self.function_rest(pos, false, false, false)?;
+                let f = self.function_rest(pos, false, false)?;
                 let name = self.statement_name(f.name.clone())?;
                 self.declare(&name, Decl::Function { plain: !f.generator }, name_pos)?;
                 Ok(Stmt::Func(name, f))
             }
             "class" => {
                 self.i += 1;
+                if self.is("{") || self.is_word("extends") {
+                    return self.fail("class statement requires a name".into());
+                }
                 let name_pos = self.pos();
                 let c = self.class_rest()?;
                 let name = c
@@ -994,7 +1008,12 @@ impl Parser {
             Tok::Ident(w) if &**w == "const" => Some(DeclKind::Const),
             Tok::Ident(w)
                 if &**w == "let"
-                    && matches!(self.peek_at(1), Tok::Ident(_) | Tok::Punct("[" | "{")) =>
+                    && match self.peek_at(1) {
+                        // `for (let in o)` reads the variable `let` (strict code refuses it).
+                        Tok::Ident(n) => &**n != "in",
+                        Tok::Punct("[" | "{") => true,
+                        _ => false,
+                    } =>
             {
                 Some(DeclKind::Let)
             }
@@ -1285,7 +1304,6 @@ impl Parser {
     fn function_rest(
         &mut self,
         start: Pos,
-        method: bool,
         is_async: bool,
         expression: bool,
     ) -> Result<Rc<FuncDef>, SyntaxError> {
@@ -1296,11 +1314,7 @@ impl Parser {
         if expression {
             self.in_gen = generator;
         }
-        let name = if !method && matches!(self.tok(), Tok::Ident(_)) && !self.is("(") {
-            self.ident()
-        } else {
-            Ok("".into())
-        };
+        let name = if matches!(self.tok(), Tok::Ident(_)) { self.ident() } else { Ok("".into()) };
         self.in_gen = outer;
         let name = name?;
         let name = if name.is_empty() { None } else { Some(name) };
@@ -2205,13 +2219,13 @@ impl Parser {
             Tok::Punct("[") => self.nested(crate::recursion::PAREN, true, Self::array_literal)?,
             Tok::Punct("{") => self.nested(crate::recursion::OBJECT, true, Self::object_literal)?,
             Tok::Ident(w) => match &*w {
-                "function" => Expr::Func(self.function_rest(pos, false, false, true)?),
+                "function" => Expr::Func(self.function_rest(pos, false, true)?),
                 "async"
                     if matches!(self.tok(), Tok::Ident(w) if &**w == "function")
                         && !self.toks[self.i].newline_before =>
                 {
                     self.i += 1;
-                    Expr::Func(self.function_rest(pos, false, true, true)?)
+                    Expr::Func(self.function_rest(pos, true, true)?)
                 }
                 "class" => Expr::Class(self.class_rest()?),
                 "this" => Expr::This,
@@ -2251,6 +2265,15 @@ impl Parser {
                 "yield" if self.in_gen || self.strict => {
                     return self.fail_at(pos, "yield is a reserved identifier".into());
                 }
+                _ if self.strict && is_strict_reserved(&w) => {
+                    return self.fail_at(pos, format!("{w} is a reserved identifier"));
+                }
+                // `yield 1` outside a generator: an operand right after it on the same line
+                // (measured on a `refrouter` 9.0.4 on 03-11).
+                "yield" if self.operand_follows() => {
+                    return self
+                        .fail_at(pos, "yield expression is only valid in generators".into());
+                }
                 _ => Expr::Ident(w, pos),
             },
             _ => {
@@ -2259,6 +2282,18 @@ impl Parser {
                 return self.fail(format!("expected expression, got {what}"));
             }
         })
+    }
+
+    /// Whether the next token, on the same line, starts an operand: a literal or a name.
+    fn operand_follows(&self) -> bool {
+        // The tokens end with `Eof`, which is never read past.
+        let t = &self.toks[self.i];
+        !t.newline_before
+            && match &t.tok {
+                Tok::Num(_) | Tok::BigInt(_) | Tok::Str(_) | Tok::Template(..) => true,
+                Tok::Ident(w) => !matches!(&**w, "in" | "of" | "instanceof"),
+                _ => false,
+            }
     }
 
     /// The `async` and `*` before a method's name, when they are not the name itself.
@@ -2427,4 +2462,19 @@ fn to_pattern(e: Expr) -> Result<Pattern, String> {
         }
         _ => Err("invalid assignment left-hand side".into()),
     }
+}
+
+/// The words strict code may not use as names (ECMA-262 §13.1.1).
+fn is_strict_reserved(w: &str) -> bool {
+    matches!(
+        w,
+        "implements"
+            | "interface"
+            | "let"
+            | "package"
+            | "private"
+            | "protected"
+            | "public"
+            | "static"
+    )
 }

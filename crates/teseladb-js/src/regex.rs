@@ -825,8 +825,9 @@ fn result(it: &mut Interp, re: &Regex, s: &[u32], caps: &Caps, input: &Name) -> 
             None => Val::Undef,
         });
     }
-    let arr = it.array(items.clone())?;
-    let Val::Obj(o) = &arr else { return Ok(arr) };
+    let obj = it.alloc(Some(it.realm.array.clone()), Kind::Array(items.clone()))?;
+    let arr = Val::Obj(obj.clone());
+    let o = &obj;
     let start = caps[0].map_or(0, |(a, _)| a);
     it.define(o, "index", Prop::data(Val::Num(utf16_pos(s, start) as f64)))?;
     it.define(o, "input", Prop::data(Val::Str(input.clone())))?;
@@ -1106,12 +1107,8 @@ pub fn string_match(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let re = compiled(it, &src, &flags)?;
     let chars = elements(&s, is_unicode(&flags));
     let found = all(it, &re, &chars)?;
-    if found.is_empty() {
-        return Ok(Val::Null);
-    }
-    if let Some(caps) = found.last() {
-        remember(it, &chars, caps, &s);
-    }
+    let Some(caps) = found.last() else { return Ok(Val::Null) };
+    remember(it, &chars, caps, &s);
     let items = found
         .iter()
         .map(|c| {

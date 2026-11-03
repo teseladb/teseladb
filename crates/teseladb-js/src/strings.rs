@@ -398,7 +398,7 @@ fn pad(it: &mut Interp, this: &Val, a: &[Val], start: bool) -> R {
         return Ok(Val::Str(s));
     }
     let need = target as usize - len;
-    it.charge(need * 2)?;
+    it.reserve(crate::value::Cost::string(len + need * 2))?;
     let f = units(&fill);
     let padding: Vec<u16> = f.iter().copied().cycle().take(need).collect();
     let padding = from_units(&padding);
@@ -431,15 +431,17 @@ fn repeat(it: &mut Interp, this: &Val, a: &[Val]) -> R {
             "repeat count must be less than infinity and not overflow maximum string size",
         ));
     }
-    it.charge(total as usize)?;
-    Ok(Val::Str(s.repeat(n as usize).into()))
+    it.reserve(crate::value::Cost::string(total as usize))?;
+    it.string(s.repeat(n as usize))
 }
 
 fn concat(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let mut s = this_text(it, this)?.to_string();
     for x in a {
         let r = it.str_of(x);
-        s.push_str(&it.operand_as_class(r)?);
+        let part = it.operand_as_class(r)?;
+        it.check_length(s.len().saturating_add(part.len()))?;
+        s.push_str(&part);
     }
     it.joined_string(s)
 }
@@ -494,7 +496,7 @@ pub(crate) fn split(it: &mut Interp, this: &Val, a: &[Val]) -> R {
         }
     };
     let parts: Vec<Val> = parts.into_iter().take(limit).collect();
-    it.charge(parts.len() * crate::interp::PROP_BYTES + s.len())?;
+    it.reserve_elements(parts.len())?;
     it.array(parts)
 }
 

@@ -8,7 +8,7 @@ pub const MAX_BITS: u64 = 1 << 20;
 
 /// An integer: sign and magnitude in 32-bit limbs, least significant first, without high zero
 /// limbs; zero has no limbs and no sign.
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
 pub struct BigInt {
     neg: bool,
     mag: Vec<u32>,
@@ -402,10 +402,10 @@ impl BigInt {
         let len = usize::try_from(bits.div_ceil(32)).unwrap_or(usize::MAX).max(self.mag.len()) + 1;
         let mut v = twos(self, len);
         v.truncate(usize::try_from(bits.div_ceil(32)).unwrap_or(usize::MAX));
-        if !bits.is_multiple_of(32)
-            && let Some(top) = v.last_mut()
-        {
-            *top &= (1u32 << (bits % 32)) - 1;
+        if !bits.is_multiple_of(32) {
+            // `bits` is at least 1, so one limb is left.
+            let top = v.len() - 1;
+            v[top] &= (1u32 << (bits % 32)) - 1;
         }
         BigInt::make(false, v)
     }

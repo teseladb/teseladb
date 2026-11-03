@@ -612,10 +612,14 @@ pub(super) fn check_cardinality<B: Backend + ?Sized>(
     key: &Document,
     need: i64,
 ) -> Result<(), CommandError> {
+    // The key of each document without its `_id` suffix, unless the shard key has `_id`.
+    let keeps_id = key.get("_id").is_some();
     let mut points = Vec::new();
     for_each_document(backend, c, None, |_, doc| {
         let mut probe = doc.clone();
-        probe.insert("_id", Value::MinKey);
+        if !keeps_id {
+            probe.insert("_id", Value::MinKey);
+        }
         points.push(document_key(c, key, &probe)?);
         Ok(())
     })?;
@@ -690,7 +694,7 @@ impl Resharding {
         let ns = plan.ns.clone();
         let old = backend
             .collection(&ns)?
-            .ok_or_else(|| CommandError::new(NAMESPACE_NOT_FOUND, "no collection"))?;
+            .ok_or(CommandError::new(NAMESPACE_NOT_FOUND, "no collection"))?;
         let refine = plan.provenance == Provenance::Refine;
         let uuid = if refine { old.uuid } else { super::new_uuid(backend) };
         if !refine {
@@ -720,7 +724,7 @@ impl Resharding {
         })?;
         let temp = backend
             .collection(&temp_ns)?
-            .ok_or_else(|| CommandError::new(INTERNAL_ERROR, "the resharding copy is gone"))?;
+            .ok_or(CommandError::new(INTERNAL_ERROR, "the resharding copy is gone"))?;
         copy_indexes(backend, &old, &temp, &plan)?;
         let to_copy = i64::try_from(approx_documents(backend, &old)?).unwrap_or(i64::MAX);
         let mark = backend.read_versions(&[])?.0;
@@ -1000,7 +1004,7 @@ impl Resharding {
         })?;
         self.old = backend
             .collection(&self.plan.ns)?
-            .ok_or_else(|| CommandError::new(NAMESPACE_NOT_FOUND, "no collection"))?;
+            .ok_or(CommandError::new(NAMESPACE_NOT_FOUND, "no collection"))?;
         Ok(())
     }
 
@@ -1165,7 +1169,7 @@ fn copy_indexes<B: Backend + ?Sized>(
             .into_iter()
             .find(|e| e.name == name)
             .map(|e| e.id)
-            .ok_or_else(|| CommandError::new(INTERNAL_ERROR, "the copied index is gone"))?;
+            .ok_or(CommandError::new(INTERNAL_ERROR, "the copied index is gone"))?;
         backend.index_write(IndexCommand::SetState { id, state: IndexState::Building })?;
         backend.index_write(IndexCommand::SetState { id, state: IndexState::Ready })?;
     }

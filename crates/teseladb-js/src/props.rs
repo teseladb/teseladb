@@ -279,7 +279,17 @@ pub fn define_own(it: &mut Interp, o: &ObjRef, key: &str, d: &Desc) -> R<()> {
             return it
                 .type_error(&format!("can't define property {shown}: {class} is not extensible"));
         }
-        Some(c) if forbidden(c, d) && is_array && key == "length" => {
+        // A change of the value or writability of a fixed `length`; the attributes of a
+        // non-configurable property give the general message (measured on 03-11).
+        Some(c)
+            if forbidden(c, d)
+                && is_array
+                && key == "length"
+                && d.configurable != Some(true)
+                && d.writable != Some(true)
+                && d.enumerable.is_none_or(|e| e == c.enumerable)
+                && !d.is_accessor() =>
+        {
             return it.type_error("can't redefine array length");
         }
         Some(c) if forbidden(c, d) => {
@@ -393,7 +403,7 @@ fn define_array(it: &mut Interp, o: &ObjRef, key: &str, d: &Desc) -> R<()> {
         if o.borrow().locks & LENGTH_FIXED != 0 {
             return Err(crate::arrays::cannot_grow(it, true, i));
         }
-        it.grow(o, i + 1 - it.array_len(o))?;
+        it.grow_elements(o, i + 1 - it.array_len(o))?;
     }
     if let Kind::Array(items) = &mut o.borrow_mut().kind {
         if i >= items.len() {
@@ -558,7 +568,7 @@ pub fn define_all(it: &mut Interp, o: &ObjRef, props: &Val) -> R<()> {
 
 fn define_properties(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     let Val::Obj(o) = arg(a, 0) else {
-        return it.type_error(&format!("{} is not a non-null object", it.show(&arg(a, 0))));
+        return Err(it.operand_error(&arg(a, 0), |t| format!("{t} is not an object")));
     };
     define_all(it, &o, &arg(a, 1))?;
     Ok(Val::Obj(o))

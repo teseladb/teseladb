@@ -1236,8 +1236,10 @@ impl Interp<'_> {
         run: &mut Run,
         labels: &[Name],
     ) -> R<()> {
-        let Some(Saved::Loop { env: mut scope, per_iteration }) = run.saved.pop() else {
-            return self.type_error("generator state lost");
+        // A loop that suspended saved its state last.
+        let (mut scope, per_iteration) = match run.saved.pop() {
+            Some(Saved::Loop { env, per_iteration }) => (env, per_iteration),
+            _ => unreachable!("a loop resumed without its state"),
         };
         let mut skip_test = run.resuming;
         loop {
@@ -1353,10 +1355,15 @@ impl Interp<'_> {
                 run.saved.push(Saved::Try { phase, env: None, pending: None });
                 return r;
             }
-            if let (Err(Ctrl::Throw(_)), Some((param, _))) = (&r, catch) {
-                let Err(Ctrl::Throw(x)) = std::mem::replace(&mut r, Ok(())) else {
-                    unreachable!("matched above")
-                };
+            let caught = match (catch, std::mem::replace(&mut r, Ok(()))) {
+                (Some((param, _)), Err(Ctrl::Throw(x))) => Some((param, x)),
+                (_, other) => {
+                    r = other;
+                    None
+                }
+            };
+            if let Some((param, x)) = caught {
+                self.out_of_memory.set(false);
                 let scope = self.new_env(Some(env.clone()));
                 if let Some(p) = param {
                     self.bind(p, x, &scope, Some(true))?;
@@ -1368,8 +1375,10 @@ impl Interp<'_> {
             }
         }
         if phase == 1 {
-            let (Some((_, handler)), Some(scope)) = (catch, catch_env.clone()) else {
-                return self.type_error("generator state lost");
+            // Phase 1 is only reached through a catch, which made its scope.
+            let (handler, scope) = match (catch, catch_env.clone()) {
+                (Some((_, handler)), Some(scope)) => (handler, scope),
+                _ => unreachable!("a catch phase without its catch"),
             };
             r = self.exec_list(handler, &scope, run, true);
             if matches!(r, Err(Ctrl::Suspend)) {

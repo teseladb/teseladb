@@ -19,7 +19,7 @@ pub const NATIVE_BUDGET: usize = 996_000;
 /// What a call back into JavaScript from the engine's own code takes of [`NATIVE_BUDGET`].
 pub const REENTRY: usize = 2_862;
 /// What a direct `eval` takes of [`NATIVE_BUDGET`]: 343 nested ones.
-pub const EVAL: usize = 2_910;
+pub const EVAL: usize = 2_878;
 /// What the handler of a proxy takes of [`NATIVE_BUDGET`] when it calls a trap, beyond
 /// [`REENTRY`]: 174 nested `get` traps, 117 nested `ownKeys` traps under `Object.keys`.
 pub const PROXY_TRAP: usize = 2_850;
@@ -29,6 +29,16 @@ pub const ITERATOR_HELPER_FRAMES: usize = 2;
 /// The frames of the helpers of `replace` with a regular expression and a function, beyond the
 /// function's own and that of `replace`: 10 200 nested calls.
 pub const REGEXP_REPLACE_FRAMES: usize = 3;
+/// The frames the engine's helpers of a typed array method that takes a callback (`forEach`,
+/// `filter`, `some`…) need beyond its own before it calls back: 25 498 nested calls.
+pub const TYPED_HELPER_FRAMES: usize = 3;
+/// The frames the creation of the result of a typed array's `map` needs beyond its own: 25 497
+/// nested calls.
+pub const TYPED_SPECIES_FRAMES: usize = 5;
+/// What a builtin the engine writes in JavaScript takes of [`NATIVE_BUDGET`] beyond [`REENTRY`]
+/// when its own code calls it (`Array.prototype.map.call`, `apply`, a bound `map`): 174 nested
+/// calls, against 175 for a function of the program.
+pub const SELF_HOSTED_ENTRY: usize = 48;
 /// What a native function takes of [`NATIVE_BUDGET`] while it runs.
 pub const NATIVE_FRAME: usize = 2_830;
 
@@ -119,7 +129,11 @@ impl Interp<'_> {
     pub(crate) fn call_cost(&self, func: &Func) -> (usize, usize, bool) {
         let back = if self.in_native { REENTRY } else { 0 };
         match func {
-            Func::Native(_, name) if self_hosted(name) => (1 + helper_frames(name), back, false),
+            Func::Native(_, name) if self_hosted(name) => (
+                1 + helper_frames(name),
+                if back > 0 { back + SELF_HOSTED_ENTRY } else { 0 },
+                false,
+            ),
             Func::Native(..) | Func::Bound(..) => (1, NATIVE_FRAME, true),
             Func::Closure { .. } => (1, back, false),
         }

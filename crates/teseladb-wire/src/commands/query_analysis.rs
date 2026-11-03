@@ -91,11 +91,9 @@ fn configuration<B: Backend + ?Sized>(
 
 /// `{mode, samplesPerSecond}` of a stored configuration.
 fn shown(d: &Document) -> Document {
-    let mut out = Document::new().with("mode", d.get("mode").cloned().unwrap_or(Value::Null));
-    if let Some(s) = d.get(SAMPLES_PER_SECOND) {
-        out.push(SAMPLES_PER_SECOND, s.clone());
-    }
-    out
+    // A stored configuration always has both: off keeps the rate it had.
+    let field = |f: &str| d.get(f).cloned().unwrap_or(Value::Null);
+    Document::new().with("mode", field("mode")).with(SAMPLES_PER_SECOND, field(SAMPLES_PER_SECOND))
 }
 
 fn number(v: &Value) -> Option<f64> {

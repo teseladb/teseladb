@@ -111,7 +111,10 @@ fn state(it: &mut Interp, this: &Val) -> R<Rc<RefCell<Helper>>> {
     {
         return Ok(h.clone());
     }
-    it.type_error("Iterator Helper method called on incompatible value")
+    // `next method called on incompatible Array Iterator` (measured on a `refrouter` 9.0.4 on 03-11).
+    let name = it.native.clone();
+    let class = crate::builtins::class_name(this);
+    it.type_error(&format!("{name} method called on incompatible {class}"))
 }
 
 /// The next value of the helper, `None` at its end.

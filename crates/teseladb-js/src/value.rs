@@ -29,28 +29,7 @@ pub enum Val {
     Hole,
 }
 
-/// The bytes the live objects of an invocation hold, against its limit.
-#[derive(Debug)]
-pub struct Budget {
-    pub used: Cell<usize>,
-    pub limit: usize,
-    /// Whether a call changed an object of the shared globals ([`ObjCell::shared`]): the globals
-    /// are then built again before the next call.
-    pub touched: Cell<bool>,
-}
-
-impl Budget {
-    /// Charges `n` bytes; `false` when the limit is passed.
-    pub fn charge(&self, n: usize) -> bool {
-        let total = self.used.get().saturating_add(n);
-        self.used.set(total);
-        total <= self.limit
-    }
-
-    pub fn release(&self, n: usize) {
-        self.used.set(self.used.get().saturating_sub(n));
-    }
-}
+pub use crate::heap::{Budget, Cost};
 
 /// A reference to an object.
 #[derive(Clone, Debug)]
@@ -59,7 +38,7 @@ pub struct ObjRef(pub Rc<ObjCell>);
 #[derive(Debug)]
 pub struct ObjCell {
     pub obj: RefCell<Obj>,
-    pub charged: Cell<usize>,
+    pub charged: Cell<Cost>,
     pub budget: Rc<Budget>,
     /// Whether the object belongs to the global objects a program's calls share.
     pub shared: Cell<bool>,
@@ -68,9 +47,31 @@ pub struct ObjCell {
     pub pristine: Cell<bool>,
 }
 
+thread_local! {
+    /// The contents of objects that went while another one was going, dropped one after another.
+    static GOING: RefCell<Vec<Obj>> = const { RefCell::new(Vec::new()) };
+    /// Whether an object's contents are being dropped on this thread.
+    static DROPPING: Cell<bool> = const { Cell::new(false) };
+}
+
 impl Drop for ObjCell {
+    /// Gives back what the object took, and drops what it holds without recursion: a chain of
+    /// two million nested arrays, which fits in the heap (A016-3-22), goes without taking the
+    /// native stack.
     fn drop(&mut self) {
         self.budget.release(self.charged.get());
+        // While the thread ends its locals may be gone: the contents then go here.
+        let Ok(dropping) = DROPPING.try_with(|d| d.replace(true)) else {
+            return;
+        };
+        let contents = std::mem::replace(self.obj.get_mut(), Obj::empty());
+        if GOING.try_with(|g| g.borrow_mut().push(contents)).is_err() || dropping {
+            return;
+        }
+        while let Some(o) = GOING.try_with(|g| g.borrow_mut().pop()).ok().flatten() {
+            drop(o);
+        }
+        let _ = DROPPING.try_with(|d| d.set(false));
     }
 }
 
@@ -190,6 +191,17 @@ pub struct ArrayIter {
     pub kind: ArrayIterKind,
 }
 
+/// An iterator of a `Map` or a `Set`: the collection (`None` once it is done), where it is in
+/// its entries, what it gives and its class (`Map Iterator` or `Set Iterator`). Entries added
+/// while it goes are visited and deleted ones are not (measured on a `refrouter` 9.0.4 on 03-11).
+#[derive(Debug)]
+pub struct CollIter {
+    pub source: Option<ObjRef>,
+    pub cursor: crate::keyed::Cursor,
+    pub kind: ArrayIterKind,
+    pub class: &'static str,
+}
+
 /// What kind of object.
 #[derive(Clone, Debug)]
 pub enum Kind {
@@ -202,8 +214,10 @@ pub enum Kind {
     Num(f64),
     BigInt(Rc<crate::bigint::BigInt>),
     Str(Name),
-    Map(Vec<(Val, Val)>),
-    Set(Vec<Val>),
+    /// A `Map`: its entries in insertion order.
+    Map(crate::keyed::Table<(Val, Val)>),
+    /// A `Set`: its values in insertion order.
+    Set(crate::keyed::Table<Val>),
     RegExp(Name, Name),
     Bson(Bson),
     /// An `arguments` object; in a sloppy function with a plain parameter list its first
@@ -238,6 +252,8 @@ pub enum Kind {
     Iter(Rc<RefCell<(Vec<Val>, usize)>>, &'static str),
     /// An array iterator, which reads its array at each step.
     ArrayIter(Rc<RefCell<ArrayIter>>),
+    /// An iterator of a `Map` or a `Set`, which reads its entries at each step.
+    CollIter(Rc<RefCell<CollIter>>),
     /// A `Symbol` object (`Object(Symbol())`): its symbol.
     Symbol(Val),
 }
@@ -252,6 +268,13 @@ pub struct Obj {
     /// What `Object.seal` and `Object.freeze` did to the elements an array holds in its kind
     /// ([`LENGTH_FIXED`], [`ELEMENTS_SEALED`], [`ELEMENTS_FROZEN`]).
     pub locks: u8,
+}
+
+impl Obj {
+    /// An object with nothing in it.
+    fn empty() -> Obj {
+        Obj { proto: None, props: Vec::new(), kind: Kind::Ordinary, extensible: true, locks: 0 }
+    }
 }
 
 /// An array's `length` is read-only.

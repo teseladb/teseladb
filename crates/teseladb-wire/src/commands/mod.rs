@@ -1198,12 +1198,19 @@ fn sorts_in_memory(cmd: &Document, plan: Option<&Document>) -> bool {
     match cmd.iter().next().map(|(k, _)| k) {
         Some("find") => non_empty(cmd.get("sort")) && !served,
         Some("aggregate") => {
-            let Some(Value::Array(stages)) = cmd.get("pipeline") else { return false };
+            // The command ran: its pipeline is an array of stages of one field each.
+            let stages = match cmd.get("pipeline") {
+                Some(Value::Array(stages)) => stages.as_slice(),
+                _ => &[],
+            };
             let mut leading = true;
             let mut sorts = Vec::new();
             for st in stages {
-                let Value::Document(d) = st else { continue };
-                let Some((name, spec)) = d.iter().next() else { continue };
+                let first = match st {
+                    Value::Document(d) => d.iter().next(),
+                    _ => None,
+                };
+                let (name, spec) = first.unwrap_or(("", &Value::Null));
                 let sorting = match name {
                     "$sort" | "$sortByCount" => true,
                     "$setWindowFields" | "$fill" => {
@@ -1334,7 +1341,8 @@ fn dispatch<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
     let max_time = match ctx.cmd.get("maxTimeMS") {
         Some(Value::Int32(n)) => u64::try_from(*n).ok(),
         Some(Value::Int64(n)) => u64::try_from(*n).ok(),
-        Some(Value::Double(x)) if *x >= 0.0 => Some(*x as u64),
+        // A negative or NaN time saturates to 0, no limit, as an absent one.
+        Some(Value::Double(x)) => Some(*x as u64),
         _ => None,
     };
     js::begin(enabled, ctx.backend.now_ms(), js::deadline_from(max_time));
