@@ -109,10 +109,13 @@ fn leader_takes_a_lost_write(
 ) -> (usize, Vec<usize>) {
     let w1 = WriteConcern { w: W::Nodes(1), j: false };
     for _ in 0..CUT_OFF_ATTEMPTS {
-        let l = until("a leader", || nodes.iter().position(|n| n.as_ref().is_some_and(leads)));
+        // Through the node that leads when it is asked: an election may move the leadership.
+        let l = until("a majority write", || {
+            let l = nodes.iter().position(|n| n.as_ref().is_some_and(leads))?;
+            nodes[l].as_ref()?.put(&key("kept-before"), b"1", ASK).ok().map(|_| l)
+        });
         let others: Vec<usize> = (0..3).filter(|i| *i != l).collect();
         let leader = nodes[l].take().expect("started");
-        until("a majority write", || leader.put(&key("kept-before"), b"1", ASK).ok());
         for &i in &others {
             nodes[i].take().expect("started").stop();
         }
