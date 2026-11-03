@@ -51,7 +51,8 @@ variants!(
     // A commit below a push (008 T024): seed 4 of `splits` reads at a mark above the commit and
     // misses the write (`intents`); seed 6 of `txn-bank` reads every account at a mark the
     // transfer committed below, and the total is off. The lowest seed decides: `splits` first
-    // (measured 03-11-2026, after d195d1e changed how a range born from a split elects).
+    // (measured 03-11-2026 after d195d1e changed how a range born from a split elects, and again
+    // on main be6ca33).
     ("commit_below_push", "intents", Default, 1000),
     // A recovery that looks for another transaction's record (008): it finds none, answers that
     // the transaction never began and leaves that record aborted; the transaction itself goes on
@@ -66,10 +67,12 @@ variants!(
     ("follower_read_above_closed", "mvcc", Default, 1000),
     ("fsync_retry_success", "recovery", Default, 1000),
     // A restarted node whose clock is behind writes below marks the range already gave out: the
-    // first thing that breaks is the order of a document's versions against the reads answered
-    // before (`mvcc`); a lost version (`durability`) needs two writes to fall on one mark, which
-    // the node number in the logical counter makes rarer (D-003).
-    ("hlc_regress_restart", "mvcc", Heavy, 1000),
+    // order of a document's versions breaks against the reads answered before (`mvcc`, seed 32
+    // of `range-docs`); a lost version (`durability`) needs two writes to fall on one mark, which
+    // the node number in the logical counter makes rarer (D-003). The `reshard` workload finds it
+    // first, at seed 17: a read of the new order shows for a document a value other than its last
+    // committed write at or below the read's mark (measured 03-11-2026 on main be6ca33).
+    ("hlc_regress_restart", "reshard", Heavy, 1000),
     // A search index that keeps a document's old version when a newer one comes (011 T018): the
     // `search` workload finds a search whose documents are not those of the collection.
     ("indexer_skips_version", "search_results", Default, 1000),
@@ -78,27 +81,39 @@ variants!(
     // ranges split, the `search` workload's scores differ from one segment's over every document.
     ("local_only_stats", "search_results", Default, 1000),
     // A range a split shrank answers the part of a stream's interval it still holds (014 T020):
-    // the cursor takes the rest as read and `changestream` misses the changes there.
-    ("lose_events_on_split", "changestream_delivery", Default, 1000),
+    // the cursor takes the rest as read and `changestream` misses the changes there (seed 3: a
+    // transaction emitted in part). A search index reads its changes through the same feed, so
+    // the `search` workload finds it first, at seed 1: a search answers documents other than
+    // those one segment over the committed documents gives (measured 03-11-2026 on main be6ca33).
+    ("lose_events_on_split", "search_results", Default, 1000),
     ("memory_raft_ack", "raft_safety", Default, 1000),
     // A range frozen for a merge goes on writing (007 T017): a write the right range acknowledged
-    // after its state went to the left one is missing on the replicas that had not applied it.
-    ("merge_without_freeze", "durability", Default, 1000),
+    // after its state went to the left one is missing on the replicas that had not applied it
+    // (`durability`, seed 4 of `split-merge`). The `changestream` workload, whose ranges split and
+    // merge under its writers, finds it first, at seed 1: after the heal no write of its
+    // documents is answered within the window (`liveness`; measured 03-11-2026 on main f3f92e6).
+    ("merge_without_freeze", "liveness", Default, 1000),
     // Group 0 goes on taking orders on the descriptors it handed over to the Meta2 ranges (007
     // T028): a change it acknowledged afterwards is missing from the Meta2 range that holds the
     // descriptor, and the next lookup there sees an older term.
     ("meta2_stale_route", "meta2", Default, 1000),
-    // Writes that do not wait for each other's latches: two read-modify-writes of one document read
-    // the same version and both succeed. Each answer names the value its write found (a fresh
-    // evaluation gives it as its result), so the history holds two writes over the same value:
-    // `durability`, which `range-docs` runs before `linearizable`, finds the first one acknowledged,
-    // overwritten by no write and missing from the chain of the last read (seed 1: write 2/157 of
-    // `c2-157`); `linearizable` also rejects that history.
     // A write across ranges that does not remove the entries of the version it replaces: the
     // `indexes` workload's next read of everything finds an entry no document needs.
     ("multirange_write_without_index_delta", "index_consistency", Default, 1000),
+    // Writes that do not wait for each other's latches: two read-modify-writes of one document read
+    // the same version and both succeed. Each answer names the value its write found (a fresh
+    // evaluation gives it as its result), so the history holds two writes over the same value:
+    // `durability`, which runs before `linearizable`, finds the first one acknowledged, overwritten
+    // by no write and missing from the chain of the last read (seed 1 of `changestream`: write
+    // 1/178 of `c1-178`, measured 03-11-2026 on main be6ca33); `linearizable` also rejects that
+    // history.
     ("no_latch_inc", "durability", Default, 1000),
-    ("no_timer_after_lost_vote", "liveness", Heavy, 1000),
+    // A node that loses a vote and does not start its election timer again: a group can stay
+    // without a leader, and `relocate` gets no write answered after the heal (`liveness`, seed
+    // 3). The cursors of `changestream` find it first, at seed 1: none of them emits a change
+    // while transactions commit, a progress failure their own checker reports
+    // (`changestream_delivery`; measured 03-11-2026 on main f3f92e6).
+    ("no_timer_after_lost_vote", "changestream_delivery", Heavy, 1000),
     // A coordinator that combines one range's partial group twice (010 T026): the `queries`
     // workload's next group differs from the reference evaluator's.
     ("partial_double_count", "queries-oracle", Default, 1000),
@@ -108,31 +123,33 @@ variants!(
     ("read_batch_without_round", "raft_safety", Default, 1000),
     ("read_before_term_commit", "raft_safety", Default, 1000),
     ("read_skips_inflight_write", "mvcc", Default, 1000),
-    // A reader that ignores an intent (008 T024): in seed 1 the index maintenance of `indexes`
-    // reads past an intent and leaves an entry missing, before `intents` in `splits` sees it.
-    ("reader_ignores_intent", "index_consistency", Default, 1000),
+    // A reader that ignores an intent (008 T024): the index maintenance of `indexes` reads past
+    // an intent and leaves an entry missing (`index_consistency`, seed 2). Seed 1 of `txn-append`
+    // finds it first: the real-time order of two transactions closes a cycle (`snapshot-isolation`,
+    // G-SI-realtime; measured 03-11-2026 on main f3f92e6).
+    ("reader_ignores_intent", "snapshot-isolation", Default, 1000),
     // A reader that ignores what its push found (008 T029): it reads below the intent of a
     // transaction that committed at or below its mark. Seed 1 fails in two workloads: `indexes`,
     // whose index maintenance reads the old document and leaves entries no document needs, and
     // `txn-bank`, whose read of every account misses one side of a transfer. `scripts/sim-mutants.sh`
     // takes the first workload by name within the lowest seed, so `indexes` decides.
     ("reader_ignores_push_result", "index_consistency", Default, 1000),
-    // A recovery that answers «aborted» for a record that does not exist and leaves none (008):
-    // the transaction's coordinator, whose first write comes after it, begins and commits it.
     // A reaper that removes a client transaction's record as soon as it is final (008 record GC):
     // `txn_recovery` finds a removal with no later transaction of its session and its session's
     // time not over.
     ("record_forgotten_early", "txn_recovery", Default, 1000),
+    // A recovery that answers «aborted» for a record that does not exist and leaves none (008):
+    // the transaction's coordinator, whose first write comes after it, begins and commits it.
     ("record_not_fenced", "txn_recovery", Default, 1000),
     ("release_log_before_flush", "lsm", Default, 1000),
-    // Intents resolved before the commit is durable (008 T024): in seed 1 of `txn-append` a
-    // transaction reads a list in an order no other one saw, before `intents` in `splits`.
     // A resharding that renames without the writes after its last read of the history (018
     // T002): the `reshard` workload reads a value of the old order the copy never took.
     ("reshard_cutover_loses_writes", "reshard", Default, 1000),
     // The ranges take the writes of a resharding's critical section (018 T005): a plain write that
     // read `old` lands in the old order after the copy's last read of it.
     ("reshard_without_fence", "reshard", Default, 1000),
+    // Intents resolved before the commit is durable (008 T024): in seed 1 of `txn-append` a
+    // transaction reads a list in an order no other one saw, before `intents` in `splits`.
     ("resolve_before_durable_commit", "snapshot-isolation", Default, 1000),
     ("resolved_intent_reappears", "lsm", Default, 1000),
     ("rollback_unrecorded", "rollback", Default, 1000),
@@ -144,15 +161,19 @@ variants!(
     // range that no split made, and the replicas past the merge still hold its keys.
     ("split_done_by_end", "range_bounds", Heavy, 1000),
     // The split retracts the intents of the half that moves (007 T017): a transaction that commits
-    // loses its write there, and `splits` reads an older value at a mark above its commit.
-    ("split_loses_intents", "intents", Default, 1000),
+    // loses its write there, and `splits` reads an older value at a mark above its commit
+    // (`intents`, seed 36). The cursors of `changestream` find it first, at seed 2: a committed
+    // change at or below a cursor's resolved mark is never emitted (measured 03-11-2026 on main
+    // f3f92e6).
+    ("split_loses_intents", "changestream_delivery", Default, 1000),
     // A stream resumed inside a transaction takes the token's mark for the whole transaction
     // (014 T020): `changestream` sees the rest of the transaction dropped after a short batch.
     ("split_txn_events", "changestream_delivery", Default, 1000),
     // A deposed leader's read: `range-docs` reads again at that mark and sees another version, which
-    // the `mvcc` check reports before the history is checked; `follower_local_read` covers
-    // `linearizable`.
-    ("stale_lease_read", "mvcc", Default, 1000),
+    // the `mvcc` check reports before the history is checked (seed 1); `follower_local_read` covers
+    // `linearizable`. Seed 1 of `changestream`, first by name, fails too: a read sees a value
+    // committed above its mark (`intents`; measured 03-11-2026 on main f3f92e6).
+    ("stale_lease_read", "intents", Default, 1000),
     // The TTL monitor's cutoff adds the index's seconds instead of taking them away: the `indexes`
     // workload's delete takes a document that has not expired.
     ("ttl_deletes_live", "ttl", Default, 1000),
