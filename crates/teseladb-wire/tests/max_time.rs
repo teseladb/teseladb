@@ -250,7 +250,10 @@ fn writes_past_their_time_limit_fail_statement_by_statement() {
     for e in &errors {
         let Value::Document(e) = e else { panic!() };
         assert_eq!(e.get("code"), Some(&Value::Int32(50)));
-        assert_eq!(e.get("errmsg"), Some(&Value::from("operation exceeded time limit")));
+        // As a `refrouter` 9.0.4 relays it from the shard (measured on 03-11-2026).
+        let Some(Value::String(msg)) = e.get("errmsg") else { panic!("{e:?}") };
+        assert!(msg.starts_with("cluster write results unavailable from "), "{msg}");
+        assert!(msg.ends_with(":: caused by :: operation exceeded time limit"), "{msg}");
     }
 }
 

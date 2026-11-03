@@ -455,6 +455,10 @@ pub struct CommandError {
     pub extra: Document,
     /// Who raises it, as a `refrouter` would: what decides whether it ends a transaction (008).
     pub origin: ErrorOrigin,
+    /// `errorLabels` go first, before `ok`: the order of a `refrouter` 9.0.4's answer to the
+    /// `commitTransaction` or `abortTransaction` it ends with `recoveryToken` (measured on
+    /// 03-11-2026).
+    pub labels_first: bool,
 }
 
 /// Who raises an error of a command, as a `refrouter` 9.0.4 and its shard share the work (measured on
@@ -465,6 +469,11 @@ pub enum ErrorOrigin {
     /// The router, while it parses the command: the command's fields and their types, and the
     /// names of the pipeline's stages.
     Router,
+    /// The shard, while it parses a query before the statement joins the transaction: a first
+    /// statement's error leaves the transaction without participants, where the router commits
+    /// it and answers its abort itself; a later statement's error ends it as any of the shard's
+    /// (measured on 01-11-2026 and 03-11-2026 with an unknown operator in `find`).
+    QueryParse,
     /// The shard: everything else.
     Shard,
 }
@@ -493,12 +502,19 @@ impl CommandError {
             labels: Vec::new(),
             extra: Document::new(),
             origin: ErrorOrigin::of(code),
+            labels_first: false,
         }
     }
 
     /// The error, raised while the router parses the command ([`ErrorOrigin::Router`]).
     pub fn parsed(self) -> CommandError {
         CommandError { origin: ErrorOrigin::Router, ..self }
+    }
+
+    /// The error, raised while the shard parses the statement's query
+    /// ([`ErrorOrigin::QueryParse`]).
+    pub fn query_parse(self) -> CommandError {
+        CommandError { origin: ErrorOrigin::QueryParse, ..self }
     }
 
     /// The error with the mark of a version in its read's uncertainty window (008 FR-008), which
@@ -527,10 +543,21 @@ impl CommandError {
         self
     }
 
+    /// The error with its `errorLabels` before `ok` ([`CommandError::labels_first`]).
+    pub fn with_labels_first(self) -> CommandError {
+        CommandError { labels_first: true, ..self }
+    }
+
     /// The reply document: `ok: 0`, `errmsg`, `code`, `codeName`, the extra fields and
-    /// `errorLabels`, in RefDb's order.
+    /// `errorLabels`, in RefDb's order (the labels first when [`CommandError::labels_first`]).
     pub fn to_document(&self) -> Document {
-        let mut d = Document::new().with("ok", 0.0).with("errmsg", self.errmsg.as_str());
+        let labels = self.labels.iter().map(|&l| Value::from(l)).collect::<Vec<_>>();
+        let mut d = Document::new();
+        if self.labels_first && !labels.is_empty() {
+            d.push("errorLabels", labels.clone());
+        }
+        d.push("ok", 0.0);
+        d.push("errmsg", self.errmsg.as_str());
         if self.code != UNCODED {
             d.push("code", self.code.code);
             d.push("codeName", self.code.name);
@@ -538,8 +565,7 @@ impl CommandError {
         for (k, v) in self.extra.iter() {
             d.push(k, v.clone());
         }
-        if !self.labels.is_empty() {
-            let labels = self.labels.iter().map(|&l| Value::from(l)).collect::<Vec<_>>();
+        if !self.labels_first && !labels.is_empty() {
             d.push("errorLabels", labels);
         }
         d
@@ -692,5 +718,20 @@ mod tests {
         }
         assert_eq!(code(59), Some(COMMAND_NOT_FOUND));
         assert_eq!(code(424_242), None);
+    }
+
+    #[test]
+    fn labels_go_last_unless_asked_first() {
+        let e = CommandError::new(NO_SUCH_TRANSACTION, "x").with_label("L");
+        let e = CommandError { extra: Document::new().with("recoveryToken", Document::new()), ..e };
+        let keys = |d: Document| d.iter().map(|(k, _)| k.to_owned()).collect::<Vec<_>>();
+        let last = ["ok", "errmsg", "code", "codeName", "recoveryToken", "errorLabels"];
+        assert_eq!(keys(e.to_document()), last);
+        let first = ["errorLabels", "ok", "errmsg", "code", "codeName", "recoveryToken"];
+        assert_eq!(keys(e.clone().with_labels_first().to_document()), first);
+        // Without labels there is nothing to put first.
+        let bare = CommandError::new(NO_SUCH_TRANSACTION, "x").with_labels_first();
+        assert_eq!(keys(bare.to_document()), ["ok", "errmsg", "code", "codeName"]);
+        assert_eq!(bare.query_parse().origin, ErrorOrigin::QueryParse);
     }
 }

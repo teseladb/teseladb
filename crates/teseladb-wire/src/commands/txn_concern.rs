@@ -67,25 +67,14 @@ pub fn causal_mark<B: Backend + ?Sized>(
     rc: Option<&ReadConcernArgs>,
     in_txn: bool,
 ) -> Result<Option<teseladb_txn::causal::ReadMark>, CommandError> {
-    let Some(rc) = rc else { return Ok(None) };
+    // A transaction's first statement checks its times once the transaction started
+    // ([`begin_mark`]); the others cannot have a read concern.
+    let (Some(rc), false) = (rc, in_txn) else { return Ok(None) };
     let current = now_mark(backend, name, cmd);
     let snapshot = rc.level == Some(Level::Snapshot);
     let at = rc.at_cluster_time.map(|t| (t, from_timestamp(t)));
     let after = rc.after_cluster_time.map(|t| (t, from_timestamp(t)));
-    for (given, mark, word) in [
-        at.map(|(t, m)| (t, m, AT_CLUSTER_TIME)),
-        after.map(|(t, m)| (t, m, if snapshot { AT_CLUSTER_TIME } else { AFTER_CLUSTER_TIME })),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        if causal::ahead(mark, current) {
-            return Err(ahead_error(word, given, current));
-        }
-    }
-    if in_txn {
-        return Ok(None);
-    }
+    not_ahead(rc, current)?;
     // Before its database was added, a `refrouter` 9.0.4 answers `MigrationConflict` (measured).
     // Only a read at a cluster time looks the database up: the lookup is a round trip to the
     // catalog that the other reads of the hot path do not pay (012 FR-008).
@@ -105,6 +94,24 @@ pub fn causal_mark<B: Backend + ?Sized>(
     }
     let asked = causal::Asked { snapshot, at: at.map(|(_, m)| m), after: after.map(|(_, m)| m) };
     Ok(causal::read_mark(asked, current))
+}
+
+/// That the times read concern `rc` asks for are not ahead of the cluster time `current`.
+fn not_ahead(rc: &ReadConcernArgs, current: Hlc) -> Result<(), CommandError> {
+    let snapshot = rc.level == Some(Level::Snapshot);
+    for (given, word) in [
+        rc.at_cluster_time.map(|t| (t, AT_CLUSTER_TIME)),
+        rc.after_cluster_time
+            .map(|t| (t, if snapshot { AT_CLUSTER_TIME } else { AFTER_CLUSTER_TIME })),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if causal::ahead(from_timestamp(given), current) {
+            return Err(ahead_error(word, given, current));
+        }
+    }
+    Ok(())
 }
 
 /// The reply of a command whose reads were served at `mark`: a reply that gives it gets
@@ -148,25 +155,39 @@ pub fn stamp(
     Ok(out)
 }
 
+/// How a transaction's first statement begins it, from its `readConcern`.
+#[derive(Debug)]
+pub(super) enum Begin {
+    /// It reads at the mark, with the end of its uncertainty window if it has one.
+    At(Hlc, Option<Hlc>),
+    /// A time ahead of the cluster time: as on a `refrouter` 9.0.4, the shard starts the
+    /// transaction and the statement fails with this error, which aborts it (measured on
+    /// 03-11-2026 with `atClusterTime` and `afterClusterTime`).
+    Ahead(CommandError),
+}
+
 /// The mark a transaction reads at, from its first statement's `readConcern` (FR-011, DV-012):
 /// `local`, `majority`, `snapshot` and none read at [`now_mark`], or at least at
-/// `afterClusterTime`; `atClusterTime` reads at it, never ahead of the cluster time. The other
-/// levels are refused, as a `refrouter` 9.0.4 refuses them (measured).
+/// `afterClusterTime`; `atClusterTime` reads at it. A time ahead of the cluster time is
+/// [`Begin::Ahead`]. The other levels are refused before the transaction starts, as a `refrouter`
+/// 9.0.4 refuses them (measured).
 pub(super) fn begin_mark<B: Backend + ?Sized>(
     backend: &B,
     name: &str,
     cmd: &Document,
-) -> Result<(Hlc, Option<Hlc>), CommandError> {
+) -> Result<Begin, CommandError> {
     let now = now_mark(backend, name, cmd);
     // A mark from the clock has an uncertainty window (FR-008); one the client gave has none.
-    let clock = |at: Hlc| Ok((at, Some(window_end(at))));
+    let clock = |at: Hlc| Ok(Begin::At(at, Some(window_end(at))));
     let Some(rc) = ReadConcernArgs::parse(cmd, name)? else { return clock(now) };
     if matches!(rc.level, Some(Level::Available | Level::Linearizable)) {
         return Err(CommandError::new(INVALID_OPTIONS, READ_CONCERN_LEVEL_IN_TRANSACTION));
     }
-    // A time ahead of the cluster time was refused before the command ran (`causal_mark`).
+    if let Err(e) = not_ahead(&rc, now) {
+        return Ok(Begin::Ahead(e));
+    }
     if let Some(at) = rc.at_cluster_time {
-        return Ok((from_timestamp(at), None));
+        return Ok(Begin::At(from_timestamp(at), None));
     }
     clock(rc.after_cluster_time.map_or(now, |t| now.max(from_timestamp(t))))
 }
