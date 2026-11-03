@@ -856,6 +856,25 @@ fn is_one(v: &Value) -> bool {
     }
 }
 
+/// The stages that write a pipeline's documents to a collection.
+const WRITE_STAGES: [&str; 2] = ["$out", "$merge"];
+
+/// A pipeline that ends writing (`$out`, `$merge`) refuses a `linearizable` read concern, as a
+/// `refrouter` 9.0.4 does (measured on 03-11-2026).
+fn check_write_stage_concern(cmd: &Document, stages: &[RawValue<'_>]) -> Result<(), CommandError> {
+    let last = match stages.last() {
+        Some(RawValue::Document(d)) => d.iter().next().map(|(k, _)| k),
+        _ => None,
+    };
+    let Some(stage) = last.filter(|k| WRITE_STAGES.contains(k)) else { return Ok(()) };
+    let Some(rc) = crate::concerns::ReadConcernArgs::parse(cmd, AGGREGATE)? else { return Ok(()) };
+    if rc.level != Some(crate::concerns::Level::Linearizable) {
+        return Ok(());
+    }
+    let why = format!("{stage} cannot be used with a 'linearizable' read concern level");
+    Err(crate::concerns::read_refused(AGGREGATE, &rc, &why))
+}
+
 /// `aggregate`.
 pub fn aggregate<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     aggregate_from(ctx, false)
@@ -896,6 +915,7 @@ pub(crate) fn aggregate_from<B: Backend + ?Sized>(
         return super::change_stream::open(ctx, &ns, on_collection, &stages);
     }
     super::change_stream::not_first(&stages)?;
+    check_write_stage_concern(ctx.cmd, &stages)?;
     let vars = a.vars.clone().unwrap_or_default();
     let names: Vec<String> = vars.iter().map(|(k, _)| k.to_owned()).collect();
     let ctx_vars = ExprCtx::checked(names.iter().map(String::as_str));

@@ -18,6 +18,8 @@ pub const LET_READS_FIELD: ErrorCode = ErrorCode { code: 4_890_500, name: "Locat
 const INTERNAL_CONSTANTS: [&str; 5] = ["NOW", "CLUSTER_TIME", "USER_ROLES", "IS_MR", "JS_SCOPE"];
 /// The one system variable a `let` may name.
 const CURRENT: &str = "CURRENT";
+/// The operator whose argument is a value, never an expression.
+const LITERAL: &str = "$literal";
 /// The variables whose path reads the document.
 const DOCUMENT_VARIABLES: [&str; 2] = ["CURRENT", "ROOT"];
 
@@ -89,6 +91,10 @@ fn needs(v: &Value) -> Result<Needs> {
     match v {
         Value::String(s) if reads_document(s) => Err(read()),
         Value::String(s) if s.starts_with("$$") => Ok(Needs::Engine),
+        // `$literal` keeps its argument as it is: nothing in it reads a document.
+        Value::Document(d) if d.iter().next().is_some_and(|(k, _)| k == LITERAL) => {
+            Ok(Needs::Engine)
+        }
         Value::Document(d) => {
             let mut n = if d.iter().next().is_some_and(|(k, _)| k.starts_with('$')) {
                 Needs::Engine

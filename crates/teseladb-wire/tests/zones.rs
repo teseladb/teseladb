@@ -236,3 +236,47 @@ fn intervals_take_the_keys_of_the_collection_and_follow_its_key() {
     let r = admin(&mut m, r#"{"addShardToZone":"node2","zone":"US"}"#);
     assert_eq!(r.get("code"), Some(&Value::Int32(112)), "{r:?}");
 }
+
+/// Refusals of a `refrouter` 9.0.4 (measured on 03-11-2026), an interval with the bounds of another
+/// interval's minimum, and intervals whose bounds name no shard key of their collection.
+#[test]
+fn zone_edges() {
+    let mut m = cluster();
+    for (v, t) in [("5", "int"), ("true", "bool")] {
+        fails(
+            &admin(&mut m, &format!(r#"{{"removeShardFromZone":{v},"zone":"x"}}"#)),
+            14,
+            &format!("\"removeShardFromZone\" had the wrong type. Expected string, found {t}"),
+        );
+    }
+    for (field, cmd) in [
+        ("min", r#"{"updateZoneKeyRange":"z.t","max":{"a":1},"zone":null}"#),
+        ("max", r#"{"updateZoneKeyRange":"z.t","min":{"a":1},"zone":null}"#),
+    ] {
+        fails(
+            &admin(&mut m, cmd),
+            40414,
+            &format!("BSON field 'updateZoneKeyRange.{field}' is missing but a required field"),
+        );
+    }
+    fails(
+        &admin(&mut m, r#"{"updateZoneKeyRange":"z.","min":{"a":1},"max":{"a":2},"zone":null}"#),
+        73,
+        "invalid namespace specified for request",
+    );
+    ok(&admin(&mut m, r#"{"addShardToZone":"node1","zone":"EU"}"#));
+    ok(&admin(&mut m, r#"{"updateZoneKeyRange":"z.t","min":{"a":0},"max":{"a":10},"zone":"EU"}"#));
+    fails(
+        &admin(&mut m, r#"{"updateZoneKeyRange":"z.t","min":{"a":0},"max":{"a":20},"zone":"EU"}"#),
+        178,
+        "Zone range: { a: 0 } -->> { a: 20 }  on  EU is overlapping with existing: { a: 0 } -->> { a: 10 }  on  EU",
+    );
+    // A collection with no shard key: its interval has no keys, and keeps none when the shard
+    // key given does not start with the bounds' fields.
+    ok(&m.run("z", json(r#"{"create":"u"}"#)));
+    ok(&admin(&mut m, r#"{"updateZoneKeyRange":"z.u","min":{"b":0},"max":{"b":10},"zone":"EU"}"#));
+    ok(&admin(&mut m, r#"{"shardCollection":"z.u","key":{"a":1}}"#));
+    let of_u: Vec<_> = zones(&m).ranges.into_iter().filter(|r| r.ns == "z.u").collect();
+    assert_eq!(of_u.len(), 1);
+    assert_eq!(of_u[0].keys, None);
+}

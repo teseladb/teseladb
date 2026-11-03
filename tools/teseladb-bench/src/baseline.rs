@@ -66,7 +66,7 @@ impl Saved {
 
     /// From the JSON of a report with its fingerprint (`--json`, `--save-baseline`).
     pub fn parse(text: &str) -> Result<Saved, String> {
-        let v = teseladb_json::parse(text.as_bytes()).map_err(|e| e.to_string())?;
+        let v = teseladb_json::parse(text.as_bytes()).map_err(crate::client::text)?;
         let scenario =
             v.get("scenario").and_then(Value::as_str).ok_or("report without `scenario`")?;
         let list = v.get("metrics").and_then(Value::as_array).ok_or("report without `metrics`")?;

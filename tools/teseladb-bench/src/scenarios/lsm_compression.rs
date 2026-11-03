@@ -100,7 +100,7 @@ fn document(rng: &mut Rng, coll: u32, i: u64) -> Vec<u8> {
 
 /// The shape of a run.
 #[derive(Clone, Copy, Debug)]
-struct Shape {
+pub struct Shape {
     /// Documents of each collection, written twice: before the dictionaries and after.
     docs: u64,
     /// Point reads timed per codec.
@@ -237,14 +237,10 @@ fn measure(
 }
 
 /// The measurement's shape: 100 000 documents of each collection, twice, and 20 000 reads.
-const MEASUREMENT: Shape = Shape { docs: 100_000, reads: 20_000 };
+pub const MEASUREMENT: Shape = Shape { docs: 100_000, reads: 20_000 };
 
-/// Runs the scenario.
-pub fn run(args: &Args) -> Result<Report, String> {
-    run_with(args, MEASUREMENT)
-}
-
-fn run_with(args: &Args, shape: Shape) -> Result<Report, String> {
+/// Runs the scenario with `shape` (`MEASUREMENT` for the measurement; the tests run a smaller one).
+pub fn run_with(args: &Args, shape: Shape) -> Result<Report, String> {
     let dir = DataDir::new(args.data.as_deref(), "lsm-compression")?;
     let mut report = Report::new("lsm-compression");
     for codec in CODECS {

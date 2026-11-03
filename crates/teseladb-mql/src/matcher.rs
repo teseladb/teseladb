@@ -9,7 +9,7 @@ use teseladb_bson::{Collator, RawDoc, RawValue, type_class};
 
 use crate::error::Result;
 use crate::ext::Extensions;
-use crate::parse::{self, BitsOp, CmpOp, Expr, FilterUse, InItem, Pred};
+use crate::parse::{self, BitsOp, CmpOp, Expr, FilterUse, InItem, Pred, TextQuery};
 use crate::regex::Regex;
 use crate::value::{cmp, equal, exact_i64, is_nan, is_number, truncate_i64};
 
@@ -90,6 +90,18 @@ impl Filter {
                 Expr::Text(_) => true,
                 Expr::And(items) | Expr::Or(items) | Expr::Nor(items) => items.iter().any(walk),
                 _ => false,
+            }
+        }
+        walk(&self.expr)
+    }
+
+    /// The `$text` query of the filter, at its top level or in its `$and` and `$or`.
+    pub fn text_query(&self) -> Option<&TextQuery> {
+        fn walk(e: &Expr) -> Option<&TextQuery> {
+            match e {
+                Expr::Text(q) => Some(q),
+                Expr::And(items) | Expr::Or(items) => items.iter().find_map(walk),
+                _ => None,
             }
         }
         walk(&self.expr)

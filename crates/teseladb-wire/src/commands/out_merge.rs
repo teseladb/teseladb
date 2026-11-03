@@ -155,15 +155,15 @@ fn target_indexes<B: Backend + ?Sized>(
         .collect())
 }
 
-/// The name of a unique index of `ns` on exactly the fields `on` (`_id_` for `_id`, which
-/// needs no index of its own).
+/// The name and the key pattern of a unique index of `ns` on exactly the fields `on` (`_id_`
+/// for `_id`, which needs no index of its own).
 fn unique_index<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
     ns: &Namespace,
     on: &[String],
-) -> Result<String, CommandError> {
+) -> Result<(String, Document), CommandError> {
     if on == ["_id"] {
-        return Ok("_id_".to_owned());
+        return Ok(("_id_".to_owned(), Document::new().with("_id", 1)));
     }
     for index in target_indexes(ctx, ns)? {
         let Value::Document(d) = index else { continue };
@@ -178,9 +178,10 @@ fn unique_index<B: Backend + ?Sized>(
         wanted.sort();
         if unique
             && sorted == wanted
-            && let Some(Value::String(name)) = d.get("name")
+            && let (Some(Value::String(name)), Some(Value::Document(pattern))) =
+                (d.get("name"), d.get("key"))
         {
-            return Ok(name.clone());
+            return Ok((name.clone(), pattern.clone()));
         }
     }
     Err(CommandError::new(
@@ -216,7 +217,7 @@ fn merge<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
     ns: &Namespace,
     m: &Merge,
-    index: &str,
+    index: &(String, Document),
     docs: Vec<Document>,
     env: &dyn Env,
 ) -> Result<(), CommandError> {
@@ -264,14 +265,51 @@ fn merge<B: Backend + ?Sized>(
     Ok(())
 }
 
-/// `whenMatched: fail` on a document whose target has the same `on` fields `key`.
-fn duplicate(ns: &Namespace, index: &str, key: &Document) -> CommandError {
+/// `whenMatched: fail` on a document whose target has the same `on` fields `key`, under unique
+/// index `(name, pattern)`; the reply carries `keyPattern` and `keyValue` in the index's order,
+/// as a `refrouter` 9.0.4's does (measured).
+fn duplicate(
+    ns: &Namespace,
+    (index, pattern): &(String, Document),
+    key: &Document,
+) -> CommandError {
+    let mut value = Document::new();
+    for (k, _) in pattern.iter() {
+        value.push(k, key.get(k).cloned().unwrap_or(Value::Null));
+    }
     let shown: Vec<String> =
-        key.iter().map(|(k, v)| format!("{k}: {}", super::display(v))).collect();
+        value.iter().map(|(k, v)| format!("{k}: {}", super::display(v))).collect();
     let msg = format!(
         "$merge with whenMatched: fail found an existing document with the same values for the 'on' fields :: caused by :: E11000 duplicate key error collection: {} index: {index} dup key: {{ {} }}",
         names::full(ns),
         shown.join(", ")
     );
-    CommandError::new(DUPLICATE_KEY, msg)
+    let mut e = CommandError::new(DUPLICATE_KEY, msg);
+    e.extra.push("keyPattern", pattern.clone());
+    e.extra.push("keyValue", value);
+    e
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_duplicate_carries_the_key_pattern_and_value() {
+        // As a `refrouter` 9.0.4 answers it (measured on 03-11-2026), for the drivers to read.
+        let ns = names::ns("db", "t");
+        let id = ("_id_".to_owned(), Document::new().with("_id", 1));
+        let e = duplicate(&ns, &id, &Document::new().with("_id", 2));
+        assert_eq!(e.code.code, 11000);
+        assert_eq!(e.extra.get("keyPattern"), Some(&Value::Document(id.1.clone())));
+        assert_eq!(e.extra.get("keyValue"), Some(&Value::Document(Document::new().with("_id", 2))));
+        // The index's order and directions, whatever the order of `on`.
+        let ba = ("b_1_a_-1".to_owned(), Document::new().with("b", 1).with("a", -1));
+        let e = duplicate(&ns, &ba, &Document::new().with("a", 1).with("b", 2));
+        assert_eq!(e.extra.get("keyPattern"), Some(&Value::Document(ba.1.clone())));
+        let value = Document::new().with("b", 2).with("a", 1);
+        assert_eq!(e.extra.get("keyValue"), Some(&Value::Document(value)));
+        assert!(e.errmsg.ends_with("index: b_1_a_-1 dup key: { b: 2, a: 1 }"), "{}", e.errmsg);
+    }
 }

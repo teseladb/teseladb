@@ -7,6 +7,7 @@ mod common;
 
 use common::{Mem, doc, field};
 use teseladb_bson::{Document, Value, extjson};
+use teseladb_keys::KeyBuilder;
 use teseladb_meta::command::Group0Command;
 use teseladb_router::table::RouteEntry;
 use teseladb_types::{GroupId, NodeId};
@@ -83,12 +84,165 @@ fn a_split_at_middle_cuts_the_range_at_the_shard_key_value() {
     assert_eq!(chunks(&m), [(None, Some(5), 1), (Some(5), Some(10), 1), (Some(10), None, 1)]);
     ok(&admin(&mut m, r#"{"split":"z.k","bounds":[{"a":10},{"a":{"$maxKey":1}}]}"#));
     assert_eq!(chunks(&m)[2..], [(Some(10), Some(15), 1), (Some(15), None, 1)]);
-    // A `find` with no shard key, or a chunk with no documents past its start, cuts nothing.
+    // Fields past the shard key in `find` do not matter.
+    ok(&admin(&mut m, r#"{"split":"z.k","find":{"a":1,"b":2}}"#));
+    assert_eq!(chunks(&m)[..2], [(None, Some(2), 1), (Some(2), Some(5), 1)]);
+    // A chunk with no documents, or whose documents all have its start's value, cannot be cut
+    // (measured on 03-11-2026).
     let orders = m.range_orders.len();
-    ok(&admin(&mut m, r#"{"split":"z.k","find":{"b":1}}"#));
     ok(&m.run("z", json(r#"{"delete":"k","deletes":[{"q":{"a":{"$gte":15}},"limit":0}]}"#)));
-    ok(&admin(&mut m, r#"{"split":"z.k","find":{"a":16}}"#));
-    assert_eq!(m.range_orders.len(), orders);
+    let empty = "can't open a cursor to scan the range (desired range is possibly empty)";
+    fails(&admin(&mut m, r#"{"split":"z.k","find":{"a":16}}"#), 96, empty);
+    fails(&admin(&mut m, r#"{"split":"z.k","bounds":[{"a":15},{"a":{"$maxKey":1}}]}"#), 96, empty);
+    ok(&admin(&mut m, r#"{"split":"z.k","middle":{"a":11}}"#));
+    ok(&m.run("z", json(r#"{"delete":"k","deletes":[{"q":{"a":{"$gt":10}},"limit":0}]}"#)));
+    fails(
+        &admin(&mut m, r#"{"split":"z.k","find":{"a":10}}"#),
+        87,
+        "Unable to find median in chunk because chunk is indivisible.",
+    );
+    assert_eq!(m.range_orders.len(), orders + 1);
+}
+
+/// `split`'s checks of `find` and `bounds`, as a `refrouter` 9.0.4 makes them (measured on
+/// 03-11-2026, `q.js` in the lane's notes).
+#[test]
+fn split_checks_find_and_bounds_as_a_refrouter() {
+    let mut m = cluster();
+    let split = |m: &mut Mem, rest: &str| admin(m, &format!(r#"{{"split":"z.k",{rest}}}"#));
+    fails_uncoded(
+        &split(&mut m, r#""find":5"#),
+        "wrong type for 'find' field, expected object, found find: 5",
+    );
+    fails_uncoded(
+        &split(&mut m, r#""find":{"b":1}"#),
+        "no shard key found in chunk query { b: 1 }",
+    );
+    fails_uncoded(
+        &split(&mut m, r#""bounds":"x""#),
+        r#"wrong type for 'bounds' field, expected array, found bounds: "x""#,
+    );
+    fails_uncoded(&split(&mut m, r#""bounds":[]"#), "need to specify find/bounds or middle");
+    fails_uncoded(&split(&mut m, r#""bounds":[{"a":1}]"#), "upper bound not specified");
+    fails(&split(&mut m, r#""bounds":[1,2]"#), 10065, "invalid parameter: expected an object (0)");
+    fails(
+        &split(&mut m, r#""bounds":[{"a":1},2]"#),
+        10065,
+        "invalid parameter: expected an object (1)",
+    );
+    fails_uncoded(
+        &split(&mut m, r#""bounds":[{"b":1},{"b":2}]"#),
+        "shard key bounds [{ b: 1 },{ b: 2 }) are not valid for shard key pattern { a: 1 }",
+    );
+    fails_uncoded(
+        &split(&mut m, r#""bounds":[{"a":1},{"a":2},{"a":3}]"#),
+        "no chunk found with the shard key bounds [{ a: 1 }, { a: 2 })",
+    );
+    fails(
+        &admin(&mut m, r#"{"split":"z.","middle":{"a":1}}"#),
+        73,
+        "Invalid namespace specified 'z.'",
+    );
+    // An empty collection: `middle` cuts, `find` and `bounds` cannot.
+    ok(&admin(&mut m, r#"{"shardCollection":"z.e","key":{"a":1}}"#));
+    let on_empty = "cannot use split with find or bounds option on an empty collection";
+    fails(&admin(&mut m, r#"{"split":"z.e","find":{"a":1}}"#), 72, on_empty);
+    fails(
+        &admin(&mut m, r#"{"split":"z.e","bounds":[{"a":{"$minKey":1}},{"a":{"$maxKey":1}}]}"#),
+        72,
+        on_empty,
+    );
+    ok(&admin(&mut m, r#"{"split":"z.e","middle":{"a":5}}"#));
+}
+
+/// A chunk of more documents than one read of the middle's search takes.
+#[test]
+fn split_finds_the_middle_of_a_large_chunk() {
+    let mut m = cluster();
+    let docs: Vec<String> = (20..4_120).map(|i| format!(r#"{{"_id":{i},"a":{i}}}"#)).collect();
+    ok(&m.run("z", json(&format!(r#"{{"insert":"k","documents":[{}]}}"#, docs.join(",")))));
+    ok(&admin(&mut m, r#"{"split":"z.k","find":{"a":7}}"#));
+    assert_eq!(chunks(&m), [(None, Some(2_060), 1), (Some(2_060), None, 1)]);
+}
+
+/// Orders Group 0 has not applied yet: `moveRange` and `mergeChunks` wait for them a while, and
+/// go on when the wait is over or cannot go on.
+#[test]
+fn move_range_and_merge_wait_for_orders_not_applied() {
+    for pauses in [0, 1_000] {
+        let mut m = cluster();
+        ok(&admin(&mut m, r#"{"split":"z.k","middle":{"a":10}}"#));
+        m.hold_orders = true;
+        m.pauses_left = pauses;
+        ok(&admin(&mut m, r#"{"moveRange":"z.k","min":{"a":5},"toShard":"node2"}"#));
+        ok(&admin(
+            &mut m,
+            r#"{"mergeChunks":"z.k","bounds":[{"a":{"$minKey":1}},{"a":{"$maxKey":1}}]}"#,
+        ));
+        assert_eq!(chunks(&m), [(None, Some(10), 1), (Some(10), None, 1)]);
+        let kinds: Vec<&str> = m
+            .range_orders
+            .iter()
+            .map(|o| match o {
+                Group0Command::SplitRange { .. } => "split",
+                Group0Command::SetReplicas { .. } => "replicas",
+                Group0Command::SetLeaderHint { .. } => "leader",
+                Group0Command::MergeRanges { .. } => "merge",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(kinds, ["split", "split", "replicas", "leader", "merge"], "{pauses}");
+    }
+}
+
+/// The bounds of a hashed shard key are `NumberLong`s, as a `refrouter` 9.0.4 lists them.
+#[test]
+fn chunks_of_a_hashed_shard_key_have_long_bounds() {
+    let mut m = cluster();
+    ok(&admin(&mut m, r#"{"shardCollection":"z.h","key":{"h":"hashed"}}"#));
+    ok(&admin(&mut m, r#"{"split":"z.h","middle":{"h":{"$numberLong":"5"}}}"#));
+    let docs = config_chunks(&m.routes, m.catalog.collections.iter());
+    let five = Value::Document(json(r#"{"h":{"$numberLong":"5"}}"#));
+    assert_eq!(field(&docs[0], "max"), &five);
+    assert_eq!(field(&docs[1], "min"), &five);
+}
+
+/// Ranges cut where no shard key value starts, ranges out of the collection, a range with no
+/// leader known, and a collection with no shard key, as `config.chunks` shows them.
+#[test]
+fn config_chunks_of_odd_ranges() {
+    let mut m = cluster();
+    ok(&m.run("z", json(r#"{"create":"u"}"#)));
+    let (_, c) = m.catalog.collections.iter().find(|(ns, _)| ns.coll == "k").unwrap();
+    let lo = KeyBuilder::index_prefix(c.tenant, c.id, teseladb_keys::DOCUMENTS).as_bytes().to_vec();
+    ok(&admin(&mut m, r#"{"split":"z.k","middle":{"a":10}}"#));
+    let cut = m.routes[0].end.clone();
+    // The class byte of `a`'s value alone: no value can be read from it.
+    let odd = cut[..=lo.len()].to_vec();
+    let class = odd[lo.len()..].to_vec();
+    let entry = |group: u64, start: Vec<u8>, end: Vec<u8>, leader: Option<NodeId>| RouteEntry {
+        group: GroupId(group),
+        start,
+        end,
+        core: 0,
+        voters: vec![NodeId(2)],
+        generation: 1,
+        leader_hint: leader,
+        moved_ms: 0,
+        replica_epoch: 1,
+    };
+    m.routes = vec![
+        entry(1, Vec::new(), lo.clone(), Some(NodeId(1))),
+        entry(2, lo, odd.clone(), None),
+        entry(3, odd.clone(), Vec::new(), Some(NodeId(1))),
+    ];
+    let docs = config_chunks(&m.routes, m.catalog.collections.iter());
+    let at = |i: usize, f: &str| field(&docs[i], f).clone();
+    assert_eq!(docs.len(), 2);
+    assert_eq!(at(0, "shard"), Value::from("node2"));
+    let raw = Value::Binary { subtype: 0, bytes: class };
+    assert_eq!(at(0, "max"), Value::Document(Document::new().with("a", raw)));
+    assert_eq!(at(1, "shard"), Value::from("node1"));
 }
 
 #[test]
@@ -375,4 +529,85 @@ fn config_chunks_shows_each_chunk_in_shard_key_values() {
         assert!(first.get(f).is_some(), "{f} in {first:?}");
     }
     assert_eq!(first.get("jumbo"), Some(&Value::Boolean(false)));
+}
+
+/// The `bounds` of `moveChunk`, `clearJumboFlag` and `mergeChunks` as their parsers check them,
+/// with the messages of a `refrouter` 9.0.4 (measured on 03-11-2026).
+#[test]
+fn bounds_are_checked_as_a_refrouter_checks_them() {
+    let mut m = cluster();
+    for (name, extra) in [("moveChunk", r#","to":"node2""#), ("clearJumboFlag", "")] {
+        let run =
+            |m: &mut Mem, b: &str| admin(m, &format!(r#"{{"{name}":"z.k","bounds":{b}{extra}}}"#));
+        fails(
+            &run(&mut m, r#""x""#),
+            14,
+            &format!(
+                "BSON field '{name}.bounds' is the wrong type 'string', expected type 'array'"
+            ),
+        );
+        fails(&run(&mut m, r#"[{"a":1}]"#), 72, "bounds can only have exactly 2 elements");
+        fails(
+            &run(&mut m, "[1,2]"),
+            14,
+            &format!(
+                "BSON field '{name}.bounds.0' is the wrong type 'int', expected type 'object'"
+            ),
+        );
+    }
+    let merge =
+        |m: &mut Mem, b: &str| admin(m, &format!(r#"{{"mergeChunks":"z.k","bounds":{b}}}"#));
+    fails(
+        &merge(&mut m, r#"[{"a":1},2]"#),
+        14,
+        "BSON field 'mergeChunks.bounds.1' is the wrong type 'int', expected type 'object'",
+    );
+    fails(
+        &merge(&mut m, r#"[{"a":1},{"a":2},{"a":3}]"#),
+        2,
+        "only a min and max bound may be specified",
+    );
+    fails(
+        &merge(&mut m, r#"[{"b":1},{"b":2}]"#),
+        72,
+        "shard key bounds [{ b: 1 },{ b: 2 }) are not valid for shard key pattern { a: 1 }",
+    );
+    fails(
+        &merge(&mut m, r#"[{"b":2},{"b":1}]"#),
+        2,
+        "min: { b: 2 } should be less than max: { b: 1 }",
+    );
+    fails(
+        &merge(&mut m, r#"[{"a":5},{"a":5}]"#),
+        2,
+        "min: { a: 5 } should be less than max: { a: 5 }",
+    );
+}
+
+/// `moveRange` checks its arguments in the order of a `refrouter` 9.0.4: the bounds given, the
+/// shard, the collection and then the bounds against the shard key (measured on 03-11-2026).
+#[test]
+fn move_range_checks_in_the_order_of_a_refrouter() {
+    let mut m = cluster();
+    let run = |m: &mut Mem, rest: &str| admin(m, &format!(r#"{{"moveRange":{rest}}}"#));
+    fails(
+        &run(&mut m, r#"5,"toShard":"node2","min":{"a":1}"#),
+        14,
+        "BSON field 'moveRange.moveRange' is the wrong type 'int', expected type 'string'",
+    );
+    fails(&run(&mut m, r#""z.k","toShard":"x""#), 72, "Missing required parameter 'min' or 'max'");
+    let no_shard = "Could not find destination shard :: caused by :: Shard x not found";
+    fails(&run(&mut m, r#""z.nope","toShard":"x","min":{"a":1}"#), 70, no_shard);
+    fails(&run(&mut m, r#""z.k","toShard":"x","min":{"b":1}"#), 70, no_shard);
+    for (ns, shown) in [("z", "z"), ("z.", "z"), (".k", ".k")] {
+        fails(
+            &run(&mut m, &format!(r#""{ns}","toShard":"node2","min":{{"a":1}}"#)),
+            26,
+            &format!("Collection '{shown}' not found in cluster catalog"),
+        );
+    }
+    // To the shard the range is on already: nothing moves.
+    let orders = m.range_orders.len();
+    ok(&run(&mut m, r#""z.k","toShard":"node1","min":{"a":{"$minKey":1}}"#));
+    assert_eq!(m.range_orders.len(), orders);
 }

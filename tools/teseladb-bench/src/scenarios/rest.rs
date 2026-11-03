@@ -108,11 +108,11 @@ fn measure(args: &Args, nodes: &[Node<MemDisk>], ca: &Certificate) -> Result<Rep
 fn certificates() -> Result<(Certificate, CertifiedKey), String> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
+        .map_err(crate::client::text)?
         .as_secs();
-    let now = i64::try_from(now).map_err(|e| e.to_string())?;
+    let now = i64::try_from(now).map_err(crate::client::text)?;
     let key = |seed: u8| {
-        PrivateKey::generate_ec(NamedCurve::P256, &[seed; 40]).map_err(|e| format!("{e:?}"))
+        PrivateKey::generate_ec(NamedCurve::P256, &[seed; 40]).map_err(crate::client::debug)
     };
     let ca_key = key(3)?;
     let mut p = CertificateParams::node(
@@ -123,7 +123,7 @@ fn certificates() -> Result<(Certificate, CertifiedKey), String> {
     );
     p.ca = Some(None);
     p.ext_key_usage.clear();
-    let ca = generate::self_signed(&p, &ca_key).map_err(|e| format!("{e:?}"))?;
+    let ca = generate::self_signed(&p, &ca_key).map_err(crate::client::debug)?;
     let node_key = key(4)?;
     let mut p = CertificateParams::node(
         [4; 16],
@@ -133,7 +133,7 @@ fn certificates() -> Result<(Certificate, CertifiedKey), String> {
     );
     p.alt_names = vec![GeneralName::Dns(HOST.into())];
     let cert =
-        generate::issue(&p, &node_key.public_key(), &ca, &ca_key).map_err(|e| format!("{e:?}"))?;
+        generate::issue(&p, &node_key.public_key(), &ca, &ca_key).map_err(crate::client::debug)?;
     Ok((ca, CertifiedKey { chain: vec![cert], key: node_key }))
 }
 
@@ -155,12 +155,8 @@ fn cluster(server: &CertifiedKey) -> Result<Vec<Node<MemDisk>>, String> {
             }),
             ..NodeConfig::default()
         };
-        let n = Node::start(cfg, || Ok(MemDisk::new()), None).map_err(|e| format!("{e:?}"))?;
-        if !n.wait_ready(READY) {
-            drop(n.stop());
-            return Err("a node did not start".into());
-        }
-        nodes.push(n);
+        let n = Node::start(cfg, || Ok(MemDisk::new()), None).map_err(crate::client::debug)?;
+        nodes.push(super::ready(n, READY, "a node did not start")?);
     }
     Ok(nodes)
 }
@@ -186,16 +182,16 @@ fn frame(k: u8, flags: u8, stream: u32, payload: &[u8]) -> Vec<u8> {
 
 impl H2 {
     fn connect(at: SocketAddr, ca: &Certificate) -> Result<H2, String> {
-        let sock = TcpStream::connect(at).map_err(|e| e.to_string())?;
-        sock.set_nodelay(true).map_err(|e| e.to_string())?;
+        let sock = TcpStream::connect(at).map_err(crate::client::text)?;
+        sock.set_nodelay(true).map_err(crate::client::text)?;
         let mut cc = teseladb_tls::ClientConfig::new(Trust::anchors(vec![ca.clone()]));
         cc.alpn = vec![http2::ALPN_H2.to_vec()];
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| e.to_string())?
+            .map_err(crate::client::text)?
             .as_millis();
         let mut entropy = [0u8; ENTROPY_LEN];
-        teseladb_sys::fill_random(&mut entropy).map_err(|e| e.to_string())?;
+        teseladb_sys::fill_random(&mut entropy).map_err(crate::client::text)?;
         let tls = Connection::client(
             Arc::new(cc),
             Some(HOST),
@@ -203,7 +199,7 @@ impl H2 {
             &entropy,
             None,
         )
-        .map_err(|e| format!("{e:?}"))?;
+        .map_err(crate::client::debug)?;
         let mut c = H2 {
             sock,
             tls,
@@ -222,26 +218,23 @@ impl H2 {
         let mut hello = PREFACE.to_vec();
         hello.extend(frame(kind::SETTINGS, 0, 0, &[]));
         hello.extend(frame(kind::WINDOW_UPDATE, 0, 0, &WINDOW.to_be_bytes()));
-        c.tls.write(&hello).map_err(|e| format!("{e:?}"))?;
+        c.tls.write(&hello).map_err(crate::client::debug)?;
         c.flush()?;
         Ok(c)
     }
 
     fn flush(&mut self) -> Result<(), String> {
-        let out = self.tls.take_output();
-        if !out.is_empty() {
-            self.sock.write_all(&out).map_err(|e| e.to_string())?;
-        }
-        Ok(())
+        // Writing nothing is a no-op: no need to tell an empty output apart.
+        self.sock.write_all(&self.tls.take_output()).map_err(crate::client::text)
     }
 
     fn pull(&mut self) -> Result<(), String> {
         let mut buf = [0u8; 65_536];
-        let n = self.sock.read(&mut buf).map_err(|e| e.to_string())?;
+        let n = self.sock.read(&mut buf).map_err(crate::client::text)?;
         if n == 0 {
             return Err("the port closed the connection".into());
         }
-        self.tls.feed(&buf[..n]).map_err(|e| format!("{e:?}"))?;
+        self.tls.feed(&buf[..n]).map_err(crate::client::debug)?;
         self.input.extend(self.tls.read());
         Ok(())
     }
@@ -261,50 +254,134 @@ impl H2 {
         ]);
         let mut out = frame(kind::HEADERS, flag::END_HEADERS, id, &block);
         out.extend(frame(kind::DATA, flag::END_STREAM, id, body));
-        self.tls.write(&out).map_err(|e| format!("{e:?}"))?;
+        self.tls.write(&out).map_err(crate::client::debug)?;
         self.flush()?;
-        let (mut status, mut answer) = (String::new(), Vec::new());
+        let mut answer = Answer::default();
         loop {
-            while self.input.len() >= 9 {
-                let len = (usize::from(self.input[0]) << 16)
-                    | (usize::from(self.input[1]) << 8)
-                    | usize::from(self.input[2]);
-                if self.input.len() < 9 + len {
-                    break;
-                }
-                let f: Vec<u8> = self.input.drain(..9 + len).collect();
-                let (k, flags) = (f[3], f[4]);
-                let stream = u32::from_be_bytes([f[5], f[6], f[7], f[8]]) & 0x7fff_ffff;
-                let payload = &f[9..];
-                match k {
-                    kind::SETTINGS if flags & flag::ACK == 0 => {
+            while let Some(f) = next_frame(&mut self.input) {
+                match take(&mut self.decoder, &mut answer, id, f)? {
+                    Step::Ack => {
                         self.tls
                             .write(&frame(kind::SETTINGS, flag::ACK, 0, &[]))
-                            .map_err(|e| format!("{e:?}"))?;
+                            .map_err(crate::client::debug)?;
                         self.flush()?;
                     }
-                    kind::HEADERS if stream == id => {
-                        let fields = self.decoder.decode(payload).map_err(|e| format!("{e:?}"))?;
-                        if let Some(s) = fields.iter().find(|f| f.name == b":status") {
-                            status = String::from_utf8_lossy(&s.value).into_owned();
-                        }
-                        if flags & flag::END_STREAM != 0 {
-                            return Ok((status, answer));
-                        }
-                    }
-                    kind::DATA if stream == id => {
-                        answer.extend_from_slice(payload);
-                        if flags & flag::END_STREAM != 0 {
-                            return Ok((status, answer));
-                        }
-                    }
-                    kind::GOAWAY | kind::RST_STREAM => {
-                        return Err(format!("the port ended the stream (frame type {k})"));
-                    }
-                    _ => {}
+                    Step::Done => return Ok((answer.status, answer.body)),
+                    Step::Wait => {}
                 }
             }
             self.pull()?;
+        }
+    }
+}
+
+/// A frame: its type, flags, stream and payload.
+type Frame = (u8, u8, u32, Vec<u8>);
+
+/// The status and the body of the answer to a request, as its frames arrive.
+#[derive(Debug, Default, PartialEq)]
+struct Answer {
+    status: String,
+    body: Vec<u8>,
+}
+
+/// What a frame asks of the client.
+#[derive(Debug, PartialEq)]
+enum Step {
+    /// Nothing: wait for the next frame.
+    Wait,
+    /// Acknowledge the server's settings.
+    Ack,
+    /// The answer is complete.
+    Done,
+}
+
+/// Takes the next whole frame out of `input`, or `None` while it has not all arrived.
+fn next_frame(input: &mut Vec<u8>) -> Option<Frame> {
+    let head = input.get(..9)?;
+    let len = (usize::from(head[0]) << 16) | (usize::from(head[1]) << 8) | usize::from(head[2]);
+    if input.len() < 9 + len {
+        return None;
+    }
+    let f: Vec<u8> = input.drain(..9 + len).collect();
+    let stream = u32::from_be_bytes([f[5], f[6], f[7], f[8]]) & 0x7fff_ffff;
+    Some((f[3], f[4], stream, f[9..].to_vec()))
+}
+
+/// Adds frame `f` to the answer of stream `id`; frames of other streams change nothing.
+fn take(decoder: &mut Decoder, answer: &mut Answer, id: u32, f: Frame) -> Result<Step, String> {
+    let (k, flags, stream, payload) = f;
+    let end = if flags & flag::END_STREAM != 0 { Step::Done } else { Step::Wait };
+    match k {
+        kind::SETTINGS if flags & flag::ACK == 0 => Ok(Step::Ack),
+        kind::HEADERS if stream == id => {
+            let fields = decoder.decode(&payload).map_err(crate::client::debug)?;
+            if let Some(s) = fields.iter().find(|f| f.name == b":status") {
+                answer.status = String::from_utf8_lossy(&s.value).into_owned();
+            }
+            Ok(end)
+        }
+        kind::DATA if stream == id => {
+            answer.body.extend_from_slice(&payload);
+            Ok(end)
+        }
+        kind::GOAWAY | kind::RST_STREAM => {
+            Err(format!("the port ended the stream (frame type {k})"))
+        }
+        _ => Ok(Step::Wait),
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frames_are_taken_whole() {
+        let mut input = frame(kind::DATA, flag::END_STREAM, 3, b"abc");
+        input.extend(frame(kind::DATA, 0, 5, b"de"));
+        let mut partial = input.split_off(input.len() - 1);
+        assert_eq!(
+            next_frame(&mut input),
+            Some((kind::DATA, flag::END_STREAM, 3, b"abc".to_vec()))
+        );
+        // The second frame lacks its last byte; then its head alone is too short.
+        assert_eq!(next_frame(&mut input), None);
+        input.append(&mut partial);
+        assert_eq!(next_frame(&mut input), Some((kind::DATA, 0, 5, b"de".to_vec())));
+        input.extend_from_slice(&[0, 0]);
+        assert_eq!(next_frame(&mut input), None);
+    }
+
+    #[test]
+    fn the_answer_of_a_stream_gathers_its_status_and_its_body() {
+        let mut decoder = Decoder::new(4096, 1 << 16);
+        let mut encoder = Encoder::new();
+        let mut a = Answer::default();
+        let mut step = |a: &mut Answer, k, flags, stream, payload: &[u8]| {
+            take(&mut decoder, a, 1, (k, flags, stream, payload.to_vec()))
+        };
+        assert_eq!(step(&mut a, kind::SETTINGS, 0, 0, b""), Ok(Step::Ack));
+        assert_eq!(step(&mut a, kind::SETTINGS, flag::ACK, 0, b""), Ok(Step::Wait));
+        let status = encoder.encode(&[Field::new(":status", "200")]);
+        // Another stream's frames are not this answer's.
+        assert_eq!(step(&mut a, kind::DATA, 0, 3, b"other"), Ok(Step::Wait));
+        let plain = encoder.encode(&[Field::new("server", "x")]);
+        assert_eq!(step(&mut a, kind::HEADERS, 0, 1, &plain), Ok(Step::Wait));
+        assert_eq!(a.status, "");
+        assert_eq!(step(&mut a, kind::HEADERS, flag::END_HEADERS, 1, &status), Ok(Step::Wait));
+        assert_eq!(step(&mut a, kind::DATA, 0, 1, b"{\"a\""), Ok(Step::Wait));
+        assert_eq!(step(&mut a, kind::DATA, flag::END_STREAM, 1, b":1}"), Ok(Step::Done));
+        assert_eq!(a, Answer { status: "200".into(), body: b"{\"a\":1}".to_vec() });
+        assert_eq!(step(&mut a, kind::PING, 0, 0, b""), Ok(Step::Wait));
+        let mut b = Answer::default();
+        let trailers = encoder.encode(&[Field::new(":status", "404")]);
+        assert_eq!(step(&mut b, kind::HEADERS, flag::END_STREAM, 3, &trailers), Ok(Step::Wait));
+        assert_eq!(step(&mut b, kind::HEADERS, flag::END_STREAM, 1, &trailers), Ok(Step::Done));
+        assert_eq!(b.status, "404");
+        for k in [kind::GOAWAY, kind::RST_STREAM] {
+            assert!(step(&mut b, k, 0, 1, b"").unwrap_err().contains("ended the stream"));
         }
     }
 }

@@ -208,12 +208,25 @@ pub struct Mem {
     pub range_orders: Vec<teseladb_meta::command::Group0Command>,
     /// Range orders Group 0 refuses, with this error.
     pub refuse_orders: Option<CommandError>,
+    /// Range orders Group 0 takes but has not applied yet: they are kept in `range_orders` and the
+    /// routes stay as they were.
+    pub hold_orders: bool,
     /// The live bytes the state machines of these ranges keep; a range left out has those of
     /// the versions in its bounds.
     pub range_live: BTreeMap<teseladb_types::GroupId, u64>,
     /// Documents the scans gave.
     pub scanned_rows: usize,
+    /// Runs before each read of the changes (another client's writes while a resharding reads
+    /// the history, 018).
+    pub on_changes: Option<NodeHook>,
+    /// Runs after each catalog write with its command (another client's DDL right after it).
+    pub after_catalog_write: Option<CatalogHook>,
 }
+
+/// A change of the node by another client.
+pub type NodeHook = Box<dyn FnMut(&mut Mem)>;
+/// A change of the node by another client after a catalog write.
+pub type CatalogHook = Box<dyn FnMut(&mut Mem, &CatalogCommand)>;
 
 /// A change of the data before a read of `[start, …)`.
 pub type ScanHook = Box<dyn FnMut(&[u8], &mut BTreeMap<Vec<u8>, Vec<u8>>)>;
@@ -347,6 +360,11 @@ impl Backend for Mem {
             other => CommandError::new(INTERNAL_ERROR, format!("{other:?}")),
         })?;
         self.ddl.record_applied(self.mark(), changes, r.as_ref());
+        // The hook is out while it runs: its own catalog writes do not call it again.
+        if let Some(mut hook) = self.after_catalog_write.take() {
+            hook(self, &cmd);
+            self.after_catalog_write = Some(hook);
+        }
         Ok(r)
     }
 
@@ -410,6 +428,10 @@ impl Backend for Mem {
         from: Hlc,
     ) -> Result<teseladb_wire::commands::ChangeBatch, CommandError> {
         self.change_reads += 1;
+        if let Some(mut hook) = self.on_changes.take() {
+            hook(self);
+            self.on_changes = Some(hook);
+        }
         if let Some(e) = self.fail_changes.take() {
             return Err(e);
         }
@@ -898,6 +920,9 @@ impl Backend for Mem {
             return Err(e);
         }
         self.range_orders.push(cmd.clone());
+        if self.hold_orders {
+            return Ok(());
+        }
         let at = |routes: &[teseladb_router::table::RouteEntry], g| {
             routes.iter().position(|e| e.group == g)
         };

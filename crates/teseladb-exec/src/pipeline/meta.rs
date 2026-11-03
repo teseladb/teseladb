@@ -81,9 +81,7 @@ pub(crate) fn unmark_doc(d: &mut Document) {
     d.remove(MARK);
     let keys: Vec<String> = d.iter().map(|(k, _)| k.to_owned()).collect();
     for k in keys {
-        if let Some(v) = d.get_mut(&k) {
-            unmark(v);
-        }
+        d.get_mut(&k).into_iter().for_each(unmark);
     }
 }
 
@@ -262,6 +260,9 @@ pub struct Score {
     shown: String,
     normalization: Normalization,
     weight: f64,
+    /// The `weight` argument as given (`1` when absent), which `scoreDetails` shows when every
+    /// score is the same under `minMaxScaler`.
+    weight_given: Value,
     details: bool,
 }
 
@@ -282,6 +283,7 @@ impl Score {
         };
         let (mut score, mut normalization, mut weight, mut details) =
             (None, Normalization::None, 1.0, false);
+        let mut weight_given = Value::Int32(1);
         let mut shown = String::new();
         for (k, x) in d.iter() {
             match k {
@@ -340,13 +342,14 @@ impl Score {
                         ));
                     }
                     weight = w;
+                    weight_given = Value::from(x);
                 }
                 "scoreDetails" => details = crate::expr::truthy(&Some(Value::from(x))),
                 other => return Err(unknown_field(STAGE, other)),
             }
         }
         let score = score.ok_or_else(|| missing_field(STAGE, "score"))?;
-        Ok(Score { score, shown, normalization, weight, details })
+        Ok(Score { score, shown, normalization, weight, weight_given, details })
     }
 
     /// The metadata of each document: its score (and details), from its own metadata `metas`.
@@ -372,34 +375,44 @@ impl Score {
                     ));
                 }
             };
-            raw.push(x);
+            raw.push((x, v));
         }
         let (lo, hi) = raw
             .iter()
-            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), x| (lo.min(*x), hi.max(*x)));
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), (x, _)| (lo.min(*x), hi.max(*x)));
         Ok(raw
             .iter()
             .zip(metas)
-            .map(|(x, m)| {
+            .map(|((x, v), m)| {
                 let normal = match self.normalization {
                     Normalization::None => *x,
                     Normalization::Sigmoid => 1.0 / (1.0 + (-x).exp()),
                     Normalization::MinMaxScaler if hi > lo => (x - lo) / (hi - lo),
-                    Normalization::MinMaxScaler => 0.0,
+                    // Every score the same: the integer 0, with the score and the weight as
+                    // given (measured on 9.0.4, `scratchpad/lane3s/m92.js` to `m94.js`).
+                    Normalization::MinMaxScaler => {
+                        let raw = v.clone().unwrap_or(Value::Null);
+                        return self.scored(m, Value::Int32(0), raw, self.weight_given.clone());
+                    }
                 };
                 let value = normal * self.weight;
-                let mut out = m.clone();
-                out.insert(SCORE.to_owned(), Value::Double(value));
-                if self.details {
-                    out.insert(SCORE_DETAILS.to_owned(), self.details_of(value, *x));
-                }
-                out
+                self.scored(m, Value::Double(value), Value::Double(*x), Value::Double(self.weight))
             })
             .collect())
     }
 
+    /// `m` with the score `value`, and its `scoreDetails` when asked.
+    fn scored(&self, m: &Meta, value: Value, raw: Value, weight: Value) -> Meta {
+        let mut out = m.clone();
+        if self.details {
+            out.insert(SCORE_DETAILS.to_owned(), self.details_of(value.clone(), raw, weight));
+        }
+        out.insert(SCORE.to_owned(), value);
+        out
+    }
+
     /// `scoreDetails` of one document.
-    fn details_of(&self, value: f64, raw: f64) -> Value {
+    fn details_of(&self, value: Value, raw: Value, weight: Value) -> Value {
         let normalization = match self.normalization {
             Normalization::None => NONE,
             Normalization::Sigmoid => SIGMOID,
@@ -414,7 +427,7 @@ impl Score {
                 )
                 .with("rawScore", raw)
                 .with("normalization", normalization)
-                .with("weight", self.weight)
+                .with("weight", weight)
                 .with("expression", self.shown.clone())
                 .with("details", Value::Array(Vec::new())),
         )
@@ -592,17 +605,15 @@ mod env_tests {
     /// Malformed stages are left to the stage parsers, which run after the check.
     #[test]
     fn malformed_stages_are_left_to_their_parsers() {
-        let stages = Value::Array(vec![
-            Value::Int32(5),
-            Value::Document(Document::new()),
-            Value::Document(Document::new().with("$facet", 5)),
-            Value::Document(Document::new().with("$facet", Document::new().with("a", 5))),
-        ]);
-        let holder = Document::new().with("p", stages);
+        // The stages as the values of one document, read back as raw values.
+        let holder = Document::new()
+            .with("0", 5)
+            .with("1", Document::new())
+            .with("2", Document::new().with("$facet", 5))
+            .with("3", Document::new().with("$facet", Document::new().with("a", 5)));
         let bytes = crate::raw::bytes_of(&holder).expect("bytes");
         let raw = teseladb_bson::RawDoc::from_bytes(&bytes).expect("raw");
-        let Some(RawValue::Array(list)) = raw.get("p") else { panic!("an array") };
-        let list: Vec<RawValue<'_>> = list.iter().collect();
+        let list: Vec<RawValue<'_>> = raw.iter().map(|(_, v)| v).collect();
         assert!(check_joined(&list).is_ok());
     }
 }

@@ -37,6 +37,8 @@ pub struct TestExt {
     pub calls: Cell<u32>,
     /// What `random` returns.
     pub random: Cell<f64>,
+    /// What an update's pipeline gives; `None`: the document with `piped: true` added.
+    pub piped: Option<Document>,
 }
 
 impl Extensions for TestExt {
@@ -83,6 +85,9 @@ impl Extensions for TestExt {
         doc: RawDoc<'_>,
         _: Option<&Document>,
     ) -> Result<Document> {
+        if let Some(d) = &self.piped {
+            return Ok(d.clone());
+        }
         let mut out = Document::from(doc);
         out.insert("piped", true);
         Ok(out)

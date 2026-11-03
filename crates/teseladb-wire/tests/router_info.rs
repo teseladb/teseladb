@@ -99,9 +99,12 @@ fn get_shard_version_of_a_collection_and_of_a_database() {
     );
     // A database: its primary and version, as `config.databases` has them.
     m.databases_docs = Some(vec![json(r#"{"_id":"z","primary":"node1","version":{"lastMod":1}}"#)]);
-    let r = admin(&mut m, r#"{"getShardVersion":"z"}"#);
-    assert_eq!(field(&r, "primaryShard"), &Value::from("node1"));
-    assert_eq!(field(&r, "version"), &Value::Document(json(r#"{"lastMod":1}"#)));
+    // `z.` names the database too (measured on a `refrouter` 9.0.4 on 03-11-2026).
+    for name in ["z", "z."] {
+        let r = admin(&mut m, &format!(r#"{{"getShardVersion":"{name}"}}"#));
+        assert_eq!(field(&r, "primaryShard"), &Value::from("node1"), "{name}");
+        assert_eq!(field(&r, "version"), &Value::Document(json(r#"{"lastMod":1}"#)));
+    }
 }
 
 #[test]
@@ -127,6 +130,12 @@ fn flush_router_config_and_check_metadata_consistency_have_nothing_to_do() {
     assert_eq!(cursor(&r), Value::from("z.k"));
     let r = m.run("z", json(r#"{"checkMetadataConsistency":{"$numberLong":"1"}}"#));
     assert_eq!(cursor(&r), Value::from("z.$cmd.aggregate"));
+    fails(
+        &admin(&mut m, r#"{"checkMetadataConsistency":2.0}"#),
+        2,
+        "Invalid command format: the 'checkMetadataConsistency' field must specify a collection \
+         name or 1",
+    );
     fails(
         &admin(&mut m, r#"{"checkMetadataConsistency":5}"#),
         2,
