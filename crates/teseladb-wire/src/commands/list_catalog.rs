@@ -98,21 +98,24 @@ fn metadata<B: Backend + ?Sized>(
 /// An index of `md`, whose fields went through arrays at `paths` (`(field, path)`).
 fn index(spec: Document, paths: &[(String, String)]) -> Value {
     let mut multikey_paths = Document::new();
-    if let Some(Value::Document(key)) = spec.get("key") {
-        for (field, _) in key.iter() {
-            let mut prefix = String::new();
-            let bytes: Vec<u8> = field
-                .split('.')
-                .map(|part| {
-                    if !prefix.is_empty() {
-                        prefix.push('.');
-                    }
-                    prefix.push_str(part);
-                    u8::from(paths.iter().any(|(f, p)| f == field && *p == prefix))
-                })
-                .collect();
-            multikey_paths.push(field, Value::Binary { subtype: 0, bytes });
-        }
+    // The node stored the specification with its key.
+    let key = match spec.get("key") {
+        Some(Value::Document(key)) => key.clone(),
+        _ => Document::new(),
+    };
+    for (field, _) in key.iter() {
+        let mut prefix = String::new();
+        let bytes: Vec<u8> = field
+            .split('.')
+            .map(|part| {
+                if !prefix.is_empty() {
+                    prefix.push('.');
+                }
+                prefix.push_str(part);
+                u8::from(paths.iter().any(|(f, p)| f == field && *p == prefix))
+            })
+            .collect();
+        multikey_paths.push(field, Value::Binary { subtype: 0, bytes });
     }
     Value::Document(
         Document::new()

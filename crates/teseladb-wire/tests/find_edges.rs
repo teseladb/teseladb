@@ -70,3 +70,23 @@ fn a_projection_computes_paths_keeps_literals_and_goes_into_sub_documents() {
     assert_eq!(field(d, "o.k"), &Value::Int32(2));
     assert!(matches!(d.get("o"), Some(Value::Document(o)) if o.get("v").is_none()), "{d:?}");
 }
+
+/// A `find` with `$text` keeps its `batchSize`, `comment` and `maxTimeMS` (the aggregation it
+/// runs as takes them): two matches in batches of one.
+#[test]
+fn a_text_find_keeps_its_batch_size_and_options() {
+    let mut m = Mem::new();
+    let json = |t: &str| teseladb_bson::extjson::parse(t).expect("command");
+    m.run(
+        "tx",
+        json(r#"{"insert":"c","documents":[{"_id":1,"s":"red fox"},{"_id":2,"s":"red hen"}]}"#),
+    );
+    m.run("tx", json(r#"{"createIndexes":"c","indexes":[{"key":{"s":"text"},"name":"s_text"}]}"#));
+    let r = m.run(
+        "tx",
+        json(r#"{"find":"c","filter":{"$text":{"$search":"red"}},"batchSize":1,"comment":"c","maxTimeMS":5000}"#),
+    );
+    let Value::Array(first) = field(&r, "cursor.firstBatch") else { panic!("{r:?}") };
+    assert_eq!(first.len(), 1, "{r:?}");
+    assert_ne!(field(&r, "cursor.id"), &Value::Int64(0), "{r:?}");
+}
