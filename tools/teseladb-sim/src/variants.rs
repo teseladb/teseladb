@@ -99,6 +99,9 @@ variants!(
     // workload's next group differs from the reference evaluator's.
     ("partial_double_count", "queries-oracle", Default, 1000),
     ("plain_write_fails_on_intent", "plain_writes", Default, 1000),
+    // A batch of ReadIndex reads answered as soon as its round leaves (005 FR-009): a leader cut
+    // off from its quorum serves a read at an index below a commit the new leader already made.
+    ("read_batch_without_round", "raft_safety", Default, 1000),
     ("read_before_term_commit", "raft_safety", Default, 1000),
     ("read_skips_inflight_write", "mvcc", Default, 1000),
     // A reader that ignores an intent (008 T024): in seed 1 the index maintenance of `indexes`

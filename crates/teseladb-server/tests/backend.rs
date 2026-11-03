@@ -124,6 +124,7 @@ fn range(g: u64, start: &[u8], end: &[u8]) -> RangeDesc {
         leader_term: 0,
         pending_split: None,
         settling: false,
+        moved_ms: 0,
     }
 }
 

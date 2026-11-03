@@ -21,11 +21,11 @@ pub struct Desc {
 }
 
 impl Desc {
-    fn is_accessor(&self) -> bool {
+    pub(crate) fn is_accessor(&self) -> bool {
         self.get.is_some() || self.set.is_some()
     }
 
-    fn is_data(&self) -> bool {
+    pub(crate) fn is_data(&self) -> bool {
         self.value.is_some() || self.writable.is_some()
     }
 }
@@ -201,7 +201,7 @@ pub(crate) fn same_value(a: &Val, b: &Val) -> bool {
     }
 }
 
-fn same_fn(a: &Option<ObjRef>, b: &Option<ObjRef>) -> bool {
+pub(crate) fn same_fn(a: &Option<ObjRef>, b: &Option<ObjRef>) -> bool {
     match (a, b) {
         (None, None) => true,
         (Some(x), Some(y)) => x.ptr_eq(y),
@@ -230,11 +230,46 @@ fn forbidden(cur: &Prop, d: &Desc) -> bool {
             || d.value.as_ref().is_some_and(|v| !same_value(v, &cur.value)))
 }
 
+/// `[[DefineOwnProperty]]` of an element of a typed array (ECMA-262 §10.4.5.3), with the
+/// messages of a `refrouter` 9.0.4 (measured on 02-11): an element is writable, enumerable and
+/// configurable, and nothing else can be made of it.
+fn define_element(
+    it: &mut Interp,
+    t: &crate::typed::View,
+    i: Option<usize>,
+    key: &str,
+    d: &Desc,
+) -> R<()> {
+    let Some(i) = i.filter(|i| *i < t.length()) else {
+        return it.type_error("can't define element for invalid or out-of-range index");
+    };
+    if d.configurable == Some(false)
+        || d.enumerable == Some(false)
+        || d.is_accessor()
+        || d.writable == Some(false)
+    {
+        let k = shown_key(it, key);
+        return it.type_error(&format!("can't redefine non-configurable property {k}"));
+    }
+    if let Some(v) = &d.value {
+        let x = crate::typed::convert(it, t.ty, v)?;
+        crate::typed::write(t, i, &x);
+    }
+    Ok(())
+}
+
 /// ValidateAndApplyPropertyDescriptor for `o[key]`, throwing as `Object.defineProperty` does.
 pub fn define_own(it: &mut Interp, o: &ObjRef, key: &str, d: &Desc) -> R<()> {
     let is_array = matches!(o.borrow().kind, Kind::Array(_));
+    let typed = match &o.borrow().kind {
+        Kind::Typed(t) => crate::typed::numeric_key(key).map(|i| (t.clone(), i)),
+        _ => None,
+    };
+    if let Some((t, i)) = typed {
+        return define_element(it, &t, i, key, d);
+    }
     let cur = own_prop(o, key);
-    let shown = shown_key(key);
+    let shown = shown_key(it, key);
     match &cur {
         None if is_array && array_index(key).is_some() && o.borrow().locks & LENGTH_FIXED != 0 => {
             return Err(crate::arrays::cannot_grow(it, true, array_index(key).unwrap_or(0)));
@@ -402,15 +437,36 @@ fn merged(base: &Prop, d: &Desc) -> Prop {
     p
 }
 
-/// A key as the engine shows it in a message: `"b"`, or `0` for an index.
-pub fn shown_key(key: &str) -> String {
+/// A key as the engine shows it in a message: `"b"`, `0` for an index, and a symbol as it is
+/// written: `Symbol.iterator`, `Symbol.for("r")`, `Symbol("k")` or `Symbol()` (measured on a
+/// `refrouter` 9.0.4 on 02-11).
+pub fn shown_key(it: &Interp, key: &str) -> String {
+    if let Val::Sym(sym) = symbol_of_key(key)
+        && key.starts_with("@@")
+    {
+        let (desc, id) = (&sym.0, sym.1);
+        return if id == 0 {
+            desc.to_string()
+        } else if it.registry.iter().any(|(_, s)| matches!(s, Val::Sym(r) if r.1 == id)) {
+            format!("Symbol.for(\"{desc}\")")
+        } else if it.undescribed.contains(&id) {
+            "Symbol()".into()
+        } else {
+            format!("Symbol(\"{desc}\")")
+        };
+    }
     if array_index(key).is_some() { key.to_string() } else { format!("\"{key}\"") }
 }
 
 fn get_own_property_descriptor(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     let o = it.object_of(&arg(a, 0))?;
     let k = it.key_of(&arg(a, 1))?;
-    match own_prop(&o, &k) {
+    let p = if crate::proxy::is_proxy(&o) {
+        crate::proxy::own_property(it, &o, &k)?
+    } else {
+        own_prop(&o, &k)
+    };
+    match p {
         Some(p) => descriptor_object(it, &p),
         None => Ok(Val::Undef),
     }
@@ -438,7 +494,7 @@ pub fn enumerable_symbol_keys(o: &ObjRef) -> Vec<Name> {
         .collect()
 }
 
-fn symbol_keys(o: &ObjRef) -> Vec<Name> {
+pub(crate) fn symbol_keys(o: &ObjRef) -> Vec<Name> {
     o.borrow().props.iter().filter(|(k, _)| is_symbol_key(k)).map(|(k, _)| k.clone()).collect()
 }
 
@@ -456,7 +512,12 @@ fn get_own_property_descriptors(it: &mut Interp, _: &Val, a: &[Val]) -> R {
 
 fn get_own_property_symbols(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     let o = it.object_of(&arg(a, 0))?;
-    let syms = symbol_keys(&o).iter().map(|k| symbol_of_key(k)).collect();
+    let keys = if crate::proxy::is_proxy(&o) {
+        crate::proxy::own_keys(it, &o)?.into_iter().filter(|k| is_symbol_key(k)).collect()
+    } else {
+        symbol_keys(&o)
+    };
+    let syms = keys.iter().map(|k| symbol_of_key(k)).collect();
     it.array(syms)
 }
 
@@ -465,6 +526,15 @@ fn define_property(it: &mut Interp, _: &Val, a: &[Val]) -> R {
         return it.type_error(&format!("{} is not a non-null object", it.show(&arg(a, 0))));
     };
     let k = it.key_of(&arg(a, 1))?;
+    if crate::proxy::is_proxy(&o) {
+        if !crate::proxy::define(it, &o, &k, arg(a, 2))? {
+            let k = shown_key(it, &k);
+            return it.type_error(&format!(
+                "proxy defineProperty handler returned false for property '{k}'"
+            ));
+        }
+        return Ok(Val::Obj(o));
+    }
     let d = to_desc(it, &arg(a, 2))?;
     define_own(it, &o, &k, &d)?;
     Ok(Val::Obj(o))
@@ -494,8 +564,12 @@ fn define_properties(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     Ok(Val::Obj(o))
 }
 
-fn is_extensible(_: &mut Interp, _: &Val, a: &[Val]) -> R {
-    Ok(Val::Bool(matches!(arg(a, 0), Val::Obj(o) if o.borrow().extensible)))
+fn is_extensible(it: &mut Interp, _: &Val, a: &[Val]) -> R {
+    Ok(Val::Bool(match arg(a, 0) {
+        Val::Obj(o) if crate::proxy::is_proxy(&o) => crate::proxy::is_extensible(it, &o)?,
+        Val::Obj(o) => o.borrow().extensible,
+        _ => false,
+    }))
 }
 
 /// Whether `o` cannot grow and none of its properties can be deleted (and, for `frozen`, none
@@ -523,15 +597,17 @@ pub fn is_locked(o: &ObjRef, frozen: bool) -> bool {
             .all(|(_, p)| !p.configurable && (!frozen || p.is_accessor() || !p.writable))
 }
 
-fn is_sealed(_: &mut Interp, _: &Val, a: &[Val]) -> R {
+fn is_sealed(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     Ok(Val::Bool(match arg(a, 0) {
+        Val::Obj(o) if crate::proxy::is_proxy(&o) => crate::proxy::is_locked(it, &o, false)?,
         Val::Obj(o) => is_locked(&o, false),
         _ => true,
     }))
 }
 
-fn is_frozen(_: &mut Interp, _: &Val, a: &[Val]) -> R {
+fn is_frozen(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     Ok(Val::Bool(match arg(a, 0) {
+        Val::Obj(o) if crate::proxy::is_proxy(&o) => crate::proxy::is_locked(it, &o, true)?,
         Val::Obj(o) => is_locked(&o, true),
         _ => true,
     }))
@@ -552,23 +628,33 @@ pub fn lock(o: &ObjRef, frozen: bool) {
     }
 }
 
-fn freeze(_: &mut Interp, _: &Val, a: &[Val]) -> R {
-    if let Val::Obj(o) = arg(a, 0) {
-        lock(&o, true);
+fn freeze(it: &mut Interp, _: &Val, a: &[Val]) -> R {
+    match arg(a, 0) {
+        Val::Obj(o) if crate::proxy::is_proxy(&o) => crate::proxy::lock(it, &o, true)?,
+        Val::Obj(o) => lock(&o, true),
+        _ => {}
     }
     Ok(arg(a, 0))
 }
 
-fn seal(_: &mut Interp, _: &Val, a: &[Val]) -> R {
-    if let Val::Obj(o) = arg(a, 0) {
-        lock(&o, false);
+fn seal(it: &mut Interp, _: &Val, a: &[Val]) -> R {
+    match arg(a, 0) {
+        Val::Obj(o) if crate::proxy::is_proxy(&o) => crate::proxy::lock(it, &o, false)?,
+        Val::Obj(o) => lock(&o, false),
+        _ => {}
     }
     Ok(arg(a, 0))
 }
 
-fn prevent_extensions(_: &mut Interp, _: &Val, a: &[Val]) -> R {
-    if let Val::Obj(o) = arg(a, 0) {
-        o.borrow_mut().extensible = false;
+fn prevent_extensions(it: &mut Interp, _: &Val, a: &[Val]) -> R {
+    match arg(a, 0) {
+        Val::Obj(o) if crate::proxy::is_proxy(&o) => {
+            if !crate::proxy::prevent_extensions(it, &o)? {
+                return it.type_error("proxy preventExtensions handler returned false");
+            }
+        }
+        Val::Obj(o) => o.borrow_mut().extensible = false,
+        _ => {}
     }
     Ok(arg(a, 0))
 }

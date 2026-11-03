@@ -52,7 +52,8 @@ pub(super) fn reply_of(r: RemoteReply) -> Result<Reply, RangeError> {
         RemoteReply::Piece { .. }
         | RemoteReply::Restored { .. }
         | RemoteReply::Changes { .. }
-        | RemoteReply::Fenced { .. } => Err(RangeError::Unavailable),
+        | RemoteReply::Fenced { .. }
+        | RemoteReply::Live { .. } => Err(RangeError::Unavailable),
     }
 }
 

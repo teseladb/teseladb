@@ -543,4 +543,10 @@ mod tests {
         assert!(s.expand(0, &BTreeMap::new()).is_empty());
         assert!(s.expand(7, &BTreeMap::new()).is_empty());
     }
+
+    #[test]
+    fn a_run_without_writes_or_checks_fails_liveness() {
+        let v = Indexes::default().finish().expect_err("nothing committed");
+        assert!(v.liveness, "{}", v.detail);
+    }
 }
