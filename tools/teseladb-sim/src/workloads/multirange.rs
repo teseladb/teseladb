@@ -1577,4 +1577,31 @@ mod tests {
         w.nodes[0].cores[core as usize].cluster = cluster;
         assert!(wl.foreign.is_empty());
     }
+
+    #[test]
+    fn a_crash_asks_again_for_what_the_node_exported_and_drops_its_own_transfers() {
+        let (mut w, mut wl) = world(1);
+        let g = GroupId(77);
+        let bounds: Bounds = (b"a".to_vec(), b"b".to_vec());
+        let exporting = |source| Transfer::Exporting {
+            source,
+            exports: vec![u64::MAX],
+            files: vec![],
+            dir: format!("export-test-{source}"),
+        };
+        wl.transfers.insert((1, g), (5, bounds.clone(), exporting(0)));
+        wl.transfers.insert((2, g), (6, bounds.clone(), exporting(2)));
+        wl.transfers
+            .insert((0, g), (7, bounds, Transfer::Ingesting { id: u64::MAX, files: vec![] }));
+        wl.on_crash(&mut w, 0);
+        w.crash_node(0);
+        assert_eq!(wl.waiting.get(&(1, g)), Some(&5), "asked again");
+        assert!(wl.transfers.contains_key(&(2, g)), "another source's export goes on");
+        assert!(!wl.transfers.contains_key(&(0, g)) && !wl.transfers.contains_key(&(1, g)));
+        wl.transfers.clear();
+        wl.waiting.clear();
+        // No replica applied an index that far: no source.
+        let g = *wl.table.keys().next().expect("a range");
+        assert_eq!(wl.source(&mut w, 1, g, u64::MAX), None);
+    }
 }

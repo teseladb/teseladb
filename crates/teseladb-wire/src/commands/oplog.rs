@@ -34,7 +34,22 @@ use teseladb_topology::replset::{OpTime, Timestamp};
 use super::Backend;
 use super::change_stream::{Watched, history_floor, previous, watched_all};
 use super::query::documents_of;
+use super::txn_ddl::is_scratch;
 use crate::error::{Code, CommandError, INTERNAL_ERROR, INVALID_NAMESPACE};
+
+/// The mark before every entry.
+const START: Hlc = Hlc { physical: 0, logical: 0 };
+
+/// The room between the positions of two catalog changes of one Group 0 entry, for the
+/// entries one change gives ([`scratch_creation`]).
+const SEQ_STRIDE: u32 = 1 << 10;
+
+/// The longest a read that is not tailable waits for the ranges to resolve the node's clock.
+pub const CATCH_UP_MS: u64 = 5_000;
+
+/// How far back each step of a read of the newest entries goes: what a range answers at a time
+/// (`teseladb_range::host::feed::FEED_WINDOW_MS`).
+const BACK_WINDOW_MS: u64 = 1_000;
 
 /// The oplog's collection.
 pub const OPLOG_COLL: &str = "oplog.rs";
@@ -348,10 +363,58 @@ fn index_change(before: &Document, after: &Document) -> (Document, Document) {
     (index, old)
 }
 
+/// The entries of a transaction's new collection, at the rename that gives it its name when the
+/// transaction commits: its `create` and the `createIndexes` of the indexes the transaction
+/// built on it, under that name and as those changes give them (without the scratch name or the
+/// rename, DV-091). `all` are the catalog changes of the history window.
+fn scratch_creation(
+    r: &DdlRecord,
+    all: &[DdlRecord],
+) -> Result<Vec<(Operation, Document)>, CommandError> {
+    let DdlChange::Rename { from, to, collection, .. } = &r.change else {
+        return Ok(Vec::new());
+    };
+    if !is_scratch(from) {
+        return Ok(Vec::new());
+    }
+    let named = |change: DdlChange| DdlRecord { mark: r.mark, op: r.op, change };
+    let create = named(DdlChange::Create { ns: to.clone(), collection: collection.clone() });
+    let mut ops: Vec<(Operation, Document)> = ddl_operation(&create)?.into_iter().collect();
+    for earlier in all.iter().filter(|e| (e.mark, e.op) < (r.mark, r.op)) {
+        if let DdlChange::CreateIndex { collection: c, spec, .. } = &earlier.change
+            && c.id == collection.id
+            && c.tenant == collection.tenant
+        {
+            let index = named(DdlChange::CreateIndex {
+                ns: to.clone(),
+                collection: c.clone(),
+                spec: spec.clone(),
+            });
+            ops.extend(ddl_operation(&index)?);
+        }
+    }
+    Ok(ops)
+}
+
 /// The `c` entry of catalog change `r`, if a replica set has one.
 fn ddl_operation(r: &DdlRecord) -> Result<Option<(Operation, Document)>, CommandError> {
     let ui = |c: &CollectionEntry| Some(c.uuid);
     let none = Document::new();
+    // A transaction's new collection under its scratch name (`super::txn_ddl`): its creation,
+    // indexes and drop show at the commit's rename, or never ([`scratch_creation`]).
+    let scratch = match &r.change {
+        DdlChange::Create { ns, .. }
+        | DdlChange::Drop { ns, .. }
+        | DdlChange::CreateIndex { ns, .. }
+        | DdlChange::DropIndex { ns, .. }
+        | DdlChange::ModifyIndex { ns, .. }
+        | DdlChange::Modify { ns, .. } => is_scratch(ns),
+        DdlChange::Rename { from, .. } => is_scratch(from),
+        DdlChange::DropDatabase { .. } => false,
+    };
+    if scratch {
+        return Ok(None);
+    }
     Ok(Some(match &r.change {
         DdlChange::Create { ns, collection } => {
             let o = create_entry(ns, collection)?;
@@ -560,8 +623,12 @@ fn document_items<B: Backend + ?Sized>(
 
 /// The entries above mark `from` (raised to the history window), up to the lowest mark every
 /// source has resolved.
+///
+/// A read from the start of the window asks the ranges for their whole history at once: a range
+/// answers a later start one second at a time (`teseladb_range::host::feed::FEED_WINDOW_MS`).
 pub fn read<B: Backend + ?Sized>(backend: &mut B, from: Hlc) -> Result<OplogRead, CommandError> {
     let floor = Hlc { physical: history_floor(backend)?, logical: 0 };
+    let ask = if from <= floor { START } else { from };
     let from = from.max(floor);
     let term = super::presentation::term(backend)?;
     let ddl = backend.catalog_changes(from)?;
@@ -574,7 +641,7 @@ pub fn read<B: Backend + ?Sized>(backend: &mut B, from: Hlc) -> Result<OplogRead
     let mut rows = Vec::new();
     for w in &colls {
         let (start, end) = documents_of(&w.entry);
-        let (more, mark) = backend.changes(&start, &end, from)?;
+        let (more, mark) = backend.changes(&start, &end, ask)?;
         resolved = resolved.min(mark);
         rows.extend(more);
     }
@@ -588,9 +655,20 @@ pub fn read<B: Backend + ?Sized>(backend: &mut B, from: Hlc) -> Result<OplogRead
         CommandError::new(INTERNAL_ERROR, format!("the oplog read a bad meta: {e:?}"))
     })?;
     let mut items = document_items(backend, &found, &by_id, term)?;
+    let renames_scratch =
+        |r: &DdlRecord| matches!(&r.change, DdlChange::Rename { from, .. } if is_scratch(from));
+    let window = match records.iter().any(renames_scratch) {
+        true => backend.catalog_changes(floor)?.records,
+        false => Vec::new(),
+    };
     for r in records.iter().filter(|r| r.mark <= resolved) {
+        let seq = r.op.saturating_mul(SEQ_STRIDE);
         if let Some((op, extra)) = ddl_operation(r)? {
-            items.push(Item { mark: r.mark, seq: r.op, doc: plain(op, extra, r.mark, term) });
+            items.push(Item { mark: r.mark, seq, doc: plain(op, extra, r.mark, term) });
+        }
+        for (k, (op, extra)) in scratch_creation(r, &window)?.into_iter().enumerate() {
+            let seq = seq.saturating_add(u32::try_from(k).unwrap_or(u32::MAX));
+            items.push(Item { mark: r.mark, seq, doc: plain(op, extra, r.mark, term) });
         }
     }
     for (key, value) in backend.group0_settings(NOTE_PREFIX)? {
@@ -604,13 +682,84 @@ pub fn read<B: Backend + ?Sized>(backend: &mut B, from: Hlc) -> Result<OplogRead
     Ok(OplogRead { items, resolved: resolved.max(from) })
 }
 
-/// Every entry of the history window, for a read that is not tailable.
+/// The entries of the history window `filter` can match, for a read that is not tailable, in
+/// commit order: up to the node's clock when the read starts, so that the newest entry is at
+/// least the last write the node acknowledged (what `refdump --oplog` takes as the end of its
+/// copy). With `newest` (a `$natural: -1` read with that limit and no lower bound on `ts`), only
+/// the newest entries, at least that many when the window has them: the read goes back from the
+/// clock one second at a time instead of reading the whole window.
 pub fn documents<B: Backend + ?Sized>(
     backend: &mut B,
     filter: &Document,
+    newest: Option<usize>,
 ) -> Result<Vec<Document>, CommandError> {
-    let from = lower_bound(filter).unwrap_or(Hlc { physical: 0, logical: 0 });
-    Ok(read(backend, from)?.items.into_iter().map(|i| i.doc).collect())
+    let target = backend.cluster_mark();
+    let lower = lower_bound(filter);
+    let items = match (newest, lower) {
+        (Some(n), None) => newest_items(backend, target, n)?,
+        _ => {
+            let mut out = read(backend, lower.unwrap_or(START))?;
+            catch_up(backend, &mut out, target)?;
+            out.items
+        }
+    };
+    Ok(items.into_iter().map(|i| i.doc).collect())
+}
+
+/// Reads on from `out` until mark `until` is resolved. The ranges close their marks a moment
+/// behind their clocks: a read that stops advancing pauses ([`Backend::pause`]) before it asks
+/// again, for at most [`CATCH_UP_MS`], and then keeps what is resolved.
+fn catch_up<B: Backend + ?Sized>(
+    backend: &mut B,
+    out: &mut OplogRead,
+    until: Hlc,
+) -> Result<(), CommandError> {
+    let mut deadline = None;
+    while out.resolved < until {
+        let more = read(backend, out.resolved)?;
+        let advanced = more.resolved > out.resolved;
+        out.items.extend(more.items);
+        out.resolved = out.resolved.max(more.resolved);
+        if advanced {
+            deadline = None;
+            continue;
+        }
+        let now = backend.wall_ms();
+        if now >= *deadline.get_or_insert(now.saturating_add(CATCH_UP_MS)) || !backend.pause() {
+            break;
+        }
+    }
+    out.items.retain(|i| i.mark <= until);
+    Ok(())
+}
+
+/// The newest entries up to mark `target`, at least `n` of them when the history window has
+/// them, read back one window of [`BACK_WINDOW_MS`] at a time, in commit order.
+fn newest_items<B: Backend + ?Sized>(
+    backend: &mut B,
+    target: Hlc,
+    n: usize,
+) -> Result<Vec<Item>, CommandError> {
+    let floor = history_floor(backend)?;
+    let mut items: Vec<Item> = Vec::new();
+    let mut upper = target;
+    while items.len() < n {
+        let start = upper.physical.saturating_sub(BACK_WINDOW_MS);
+        // The rest of the history window at once.
+        let from = match start <= floor {
+            true => START,
+            false => Hlc { physical: start, logical: 0 },
+        };
+        let mut out = read(backend, from)?;
+        catch_up(backend, &mut out, upper)?;
+        out.items.extend(items);
+        items = out.items;
+        if from == START {
+            break;
+        }
+        upper = from;
+    }
+    Ok(items)
 }
 
 /// The mark below which `filter` matches no entry: from a top-level `ts` equality, `$gt` or

@@ -361,6 +361,11 @@ mod tests {
         wl.admin_act(3, "A", NodeId(1), (0, 1), 5);
         assert!(wl.zones().ranges.is_empty());
         wl.admin_act(3, "A", NodeId(1), (0, 1), 5);
+        // The last node of a zone without ranges leaves it.
+        wl.admin_act(0, "B", NodeId(3), (0, 1), 0);
+        assert!(in_zone(&wl, "B", 3));
+        wl.admin_act(1, "B", NodeId(3), (0, 1), 0);
+        assert!(!in_zone(&wl, "B", 3));
     }
 
     #[test]

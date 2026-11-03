@@ -334,7 +334,11 @@ fn sleep(it: &mut Interp, _: &Val, a: &[Val]) -> R {
 /// `eval(code)`: a script in the global scope.
 fn eval(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     let Val::Str(src) = arg(a, 0) else { return Ok(arg(a, 0)) };
-    let body = crate::parser::parse_eval(&src).map_err(|e| it.syntax_error(&e))?;
+    if let Some(v) = crate::json::eval_json(it, &src)? {
+        return Ok(v);
+    }
+    let room = it.parse_room();
+    let body = crate::parser::parse_eval(&src, room).map_err(|e| it.syntax_error(&e))?;
     let env = it.global_env.clone();
     it.hoist(&body, &env, true)?;
     if !crate::parser::has_use_strict(&body) {
@@ -756,7 +760,8 @@ pub(crate) fn function_ctor(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     }
     let body = parts.pop().unwrap_or_default();
     let src = format!("(function anonymous({}\n) {{\n{body}\n}})", parts.join(","));
-    let stmts = crate::parser::parse_eval(&src).map_err(|e| it.syntax_error(&e))?;
+    let room = it.parse_room();
+    let stmts = crate::parser::parse_eval(&src, room).map_err(|e| it.syntax_error(&e))?;
     let env = it.global_env.clone();
     match stmts.first() {
         Some(crate::ast::Stmt::Expr(e)) => it.eval(e, &env),
@@ -838,18 +843,15 @@ fn fn_to_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
 fn array_builtins(it: &mut Interp, g: &ObjRef) -> R<()> {
     let proto = it.realm.array.clone();
     let c = ctor(it, g, "Array", array_ctor, 1, &proto)?;
-    for (name, f, n) in [
-        ("isArray", array_is_array as NativeFn, 1),
-        ("from", array_from, 1),
-        ("of", array_of, 0),
-        ("sum", array_sum, 1),
-        ("avg", array_avg, 1),
-        ("contains", array_contains, 2),
-        ("unique", array_unique, 1),
-        ("shuffle", array_shuffle, 1),
-        ("stdDev", array_std_dev, 1),
-    ] {
+    for (name, f, n) in
+        [("isArray", array_is_array as NativeFn, 1), ("from", array_from, 1), ("of", array_of, 0)]
+    {
         method(it, &c, name, f, n)?;
+    }
+    // RefDb's own helpers, which the shell's prelude defines: their places in the order of
+    // `Array`'s properties, before the prelude replaces them.
+    for name in ["sum", "avg", "contains", "unique", "shuffle", "stdDev"] {
+        method(it, &c, name, array_is_array, 1)?;
     }
     crate::arrays::install(it, &proto)
 }
@@ -920,69 +922,6 @@ fn array_from(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 fn array_of(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let target = crate::arrays::made_by(it, this, &[Val::Num(a.len() as f64)])?;
     crate::arrays::species_result(it, target, a.to_vec(), true)
-}
-
-fn numbers(it: &mut Interp, v: &Val) -> R<Vec<f64>> {
-    let mut out = Vec::new();
-    for x in it.iterate(v)? {
-        out.push(it.number_of(&x)?);
-    }
-    Ok(out)
-}
-
-/// RefDb's `Array.sum`: the elements added with `+` from the first.
-fn array_sum(it: &mut Interp, _: &Val, a: &[Val]) -> R {
-    let items = it.iterate(&arg(a, 0))?;
-    let mut acc = match items.first() {
-        Some(x) => x.clone(),
-        None => return Ok(Val::Null),
-    };
-    for x in &items[1..] {
-        acc = it.binary("+", &acc, x)?;
-    }
-    Ok(acc)
-}
-
-fn array_avg(it: &mut Interp, _: &Val, a: &[Val]) -> R {
-    let xs = numbers(it, &arg(a, 0))?;
-    if xs.is_empty() {
-        return Ok(Val::Undef);
-    }
-    Ok(Val::Num(xs.iter().sum::<f64>() / xs.len() as f64))
-}
-
-fn array_std_dev(it: &mut Interp, _: &Val, a: &[Val]) -> R {
-    let xs = numbers(it, &arg(a, 0))?;
-    let n = xs.len() as f64;
-    let mean = xs.iter().sum::<f64>() / n;
-    Ok(Val::Num((xs.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n).sqrt()))
-}
-
-fn array_contains(it: &mut Interp, _: &Val, a: &[Val]) -> R {
-    let items = it.iterate(&arg(a, 0))?;
-    Ok(Val::Bool(items.iter().any(|x| strict_eq(x, &arg(a, 1)))))
-}
-
-fn array_unique(it: &mut Interp, _: &Val, a: &[Val]) -> R {
-    let mut out: Vec<Val> = Vec::new();
-    for x in it.iterate(&arg(a, 0))? {
-        if !out.iter().any(|y| strict_eq(y, &x)) {
-            out.push(x);
-        }
-    }
-    it.array(out)
-}
-
-/// RefDb's `Array.shuffle` calls a `Random` its engine does not define (measured: it fails
-/// with `Random is not defined` on a `refrouter` 9.0.4); an empty array has nothing to draw.
-fn array_shuffle(it: &mut Interp, _: &Val, a: &[Val]) -> R {
-    if let Val::Obj(o) = arg(a, 0) {
-        let n = it.array_len(&o);
-        if n > 0 {
-            return Err(it.error("ReferenceError", "Random is not defined"));
-        }
-    }
-    Ok(arg(a, 0))
 }
 
 // Number and Boolean.
@@ -2086,20 +2025,21 @@ fn escape_pattern(source: Name) -> Name {
 }
 
 fn regexp_ctor(it: &mut Interp, _: &Val, a: &[Val]) -> R {
-    let (src, flags) = match arg(a, 0) {
-        Val::Obj(o) if matches!(o.borrow().kind, Kind::RegExp(..)) => match &o.borrow().kind {
-            Kind::RegExp(s, f) => (s.clone(), f.clone()),
-            _ => unreachable_pair(),
+    let pattern = arg(a, 0);
+    let parts = match &pattern {
+        Val::Obj(o) => match &o.borrow().kind {
+            Kind::RegExp(s, f) => Some((s.clone(), f.clone())),
+            _ => None,
         },
-        Val::Undef => ("(?:)".into(), "".into()),
-        v => (it.str_of(&v)?, "".into()),
+        _ => None,
+    };
+    let (src, flags) = match (parts, pattern) {
+        (Some(p), _) => p,
+        (None, Val::Undef) => ("(?:)".into(), "".into()),
+        (None, v) => (it.str_of(&v)?, "".into()),
     };
     let flags = if matches!(arg(a, 1), Val::Undef) { flags } else { it.str_of(&arg(a, 1))? };
     make_regexp(it, src, flags)
-}
-
-fn unreachable_pair() -> (Name, Name) {
-    ("(?:)".into(), "".into())
 }
 
 /// `__defineGetter__(key, f)` and `__defineSetter__` of Annex B: an enumerable, configurable

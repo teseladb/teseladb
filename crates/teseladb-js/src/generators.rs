@@ -880,7 +880,8 @@ fn resume(it: &mut Interp, this: &Val, how: Resume, name: &str) -> R {
                 yielded: None,
             };
             let outer = std::mem::replace(&mut it.strict, def.strict);
-            let r = it.exec_list(&def.body, &env, &mut run, false);
+            // The body runs as a frame of its own.
+            let r = it.nested(1, 0, false, |it| it.exec_list(&def.body, &env, &mut run, false));
             it.strict = outer;
             let mut b = st.borrow_mut();
             b.status = Status::Done;

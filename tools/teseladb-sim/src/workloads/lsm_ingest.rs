@@ -366,14 +366,11 @@ impl LsmIngest {
         let done = std::mem::take(&mut w.nodes[node as usize].cores[core as usize].lsm_done);
         for (id, result) in done.ingested {
             let cl = &mut self.clients[client as usize];
-            let Some(i) = cl
-                .ingests
-                .iter()
-                .position(|g| matches!(g, Ingest::Running { id: r, .. } if *r == id))
-            else {
-                continue;
-            };
-            let Ingest::Running { dir, asked, .. } = cl.ingests[i].clone() else { continue };
+            let running = cl.ingests.iter().enumerate().find_map(|(i, g)| match g {
+                Ingest::Running { id: r, dir, asked } if *r == id => Some((i, dir.clone(), *asked)),
+                _ => None,
+            });
+            let Some((i, dir, asked)) = running else { continue };
             let c = &mut w.nodes[node as usize].cores[core as usize];
             match result {
                 Ok(()) => cl.ingests[i] = Ingest::Done { asked },
@@ -628,6 +625,7 @@ impl Workload for LsmIngest {
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
+    use teseladb_raftlog::{IoErrno, StorageError};
 
     fn ms(n: u64) -> Nanos {
         Nanos::from_millis(n)
@@ -713,5 +711,118 @@ mod tests {
         // The heal moves only a second ingestion that is still due.
         wl.on_heal(&mut w);
         assert_eq!(wl.clients[0].ingests[1], Ingest::Done { asked });
+    }
+
+    /// An LSM of core 0 on `disk` holding `key` with `value`, durable.
+    fn durable_lsm(disk: &mut SimDisk, key: &[u8], value: &[u8]) -> Lsm {
+        let mut lsm = Lsm::recover(&cfg(0), disk).expect("a new LSM").0;
+        lsm.put(WRITES, 1, key, at(1), value).expect("in memory");
+        lsm.flush();
+        lsm.run_io(disk, Nanos::ZERO);
+        lsm
+    }
+
+    #[test]
+    fn a_core_that_is_down_or_without_its_lsm_or_store_takes_no_work() {
+        let mut w = World::new(1, 1, 1, false);
+        let mut wl = LsmIngest::new(1, 1);
+        // No LSM: not ready, no level 0 to check and nothing admitted.
+        assert!(!LsmIngest::ready(&mut w, 0, 0));
+        LsmIngest::check_level0(&mut w, 0, 0);
+        wl.clients[0].queue.push_back(Write {
+            arrived: Nanos::ZERO,
+            key: b"k".to_vec(),
+            value: b"v".to_vec(),
+            ts: at(1),
+        });
+        wl.admit(&mut w, 0);
+        assert_eq!(wl.clients[0].queue.len(), 1, "a core without LSM rejects");
+        // An LSM but no store: not ready.
+        let lsm = durable_lsm(&mut w.nodes[0].cores[0].disk, b"k", b"v");
+        w.nodes[0].cores[0].lsm = Some(Rc::new(RefCell::new(lsm)));
+        let store = w.nodes[0].cores[0].store.take();
+        assert!(!LsmIngest::ready(&mut w, 0, 0));
+        w.nodes[0].cores[0].store = store;
+        // A node that is down: no write arrives and its completions are left.
+        w.nodes[0].alive = false;
+        assert!(!LsmIngest::ready(&mut w, 0, 0));
+        wl.on_client(&mut w, 0);
+        assert_eq!(wl.clients[0].turns, 0);
+        wl.on_completions(&mut w, 0, 0, Completions::default());
+    }
+
+    #[test]
+    fn answers_of_ingestions_and_writes_that_are_not_waited_for_are_left() {
+        let mut w = World::new(1, 1, 1, false);
+        let mut wl = LsmIngest::new(1, 1);
+        let asked = ms(1);
+        wl.clients[0].ingests =
+            [Ingest::Running { id: 1, dir: "in-1".into(), asked }, Ingest::Due(ms(2))];
+        w.nodes[0].cores[0].lsm_done.ingested.push((7, Ok(())));
+        wl.ingested(&mut w, 0, 0);
+        assert!(matches!(wl.clients[0].ingests[0], Ingest::Running { id: 1, .. }));
+        // A write that failed in the log is not applied, nor measured.
+        let write = Write { arrived: Nanos::ZERO, key: b"k".to_vec(), value: vec![], ts: at(1) };
+        wl.clients[0].pending.insert(Ticket(3), vec![(1, write)]);
+        let failed = Completions {
+            tickets: vec![(Ticket(3), Err(StorageError::DiskFull))],
+            ..Completions::default()
+        };
+        wl.on_completions(&mut w, 0, 0, failed);
+        assert!(wl.clients[0].latencies.is_empty());
+    }
+
+    #[test]
+    fn a_write_to_a_stopped_lsm_is_not_measured() {
+        let mut w = World::new(1, 1, 1, false);
+        let mut wl = LsmIngest::new(1, 1);
+        let c = &mut w.nodes[0].cores[0];
+        let mut lsm = durable_lsm(&mut c.disk, b"k", b"v");
+        lsm.put(WRITES, 2, b"k2", at(2), b"v").expect("in memory");
+        lsm.flush();
+        c.disk.inject_error("sync", IoErrno::Io);
+        c.disk.inject_error("write", IoErrno::Io);
+        lsm.run_io(&mut c.disk, Nanos::ZERO);
+        assert!(lsm.health().is_err(), "the failed flush stops it");
+        c.lsm = Some(Rc::new(RefCell::new(lsm)));
+        let write = Write { arrived: Nanos::ZERO, key: b"k".to_vec(), value: vec![], ts: at(3) };
+        wl.clients[0].pending.insert(Ticket(3), vec![(3, write)]);
+        let ok = Completions { tickets: vec![(Ticket(3), Ok(()))], ..Completions::default() };
+        wl.on_completions(&mut w, 0, 0, ok);
+        assert!(wl.clients[0].latencies.is_empty());
+    }
+
+    #[test]
+    fn files_of_an_ingestion_the_disk_refuses_are_removed() {
+        let mut w = World::new(1, 1, 1, false);
+        let mut wl = LsmIngest::new(1, 1);
+        wl.sources.push(Source::build(0, &mut w));
+        w.nodes[0].cores[0].disk.set_capacity(0);
+        wl.start_ingest(&mut w, 0, 0);
+        assert_eq!(wl.clients[0].ingests[0], Ingest::Due(Nanos::ZERO), "tried again later");
+        let dir = PathBuf::from("core-00/incoming-1");
+        assert!(w.nodes[0].cores[0].disk.list(&dir).unwrap_or_default().is_empty());
+    }
+
+    #[test]
+    fn a_running_ingestion_found_whole_after_a_restart_is_done_and_a_broken_lsm_fails() {
+        let mut w = World::new(1, 1, 1, false);
+        let mut wl = LsmIngest::new(1, 1);
+        let key = interval_key(0, 1);
+        wl.sources.push(Source { files: Vec::new(), samples: vec![(key.clone(), vec![1])] });
+        durable_lsm(&mut w.nodes[0].cores[0].disk, &key, &[1]);
+        let asked = ms(5);
+        wl.clients[0].ingests =
+            [Ingest::Running { id: 1, dir: "in-0".into(), asked }, Ingest::Due(ms(9))];
+        wl.on_restart(&mut w, 0).expect("whole");
+        assert_eq!(wl.clients[0].ingests[0], Ingest::Done { asked });
+        // A manifest that does not read back fails the run.
+        let disk = &mut w.nodes[0].cores[0].disk;
+        let dir = PathBuf::from(&cfg(0).dir);
+        for path in disk.list(&dir).unwrap_or_default() {
+            disk.corrupt(&path, 0);
+        }
+        let v = wl.on_restart(&mut w, 0).expect_err("unreadable");
+        assert!(v.detail.contains("recovery"), "{}", v.detail);
     }
 }

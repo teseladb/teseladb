@@ -44,6 +44,8 @@ thread_local! {
     static DEADLINE_MS: Cell<Option<u64>> = const { Cell::new(None) };
     static CACHE: RefCell<HashMap<String, Rc<Program>>> = RefCell::new(HashMap::new());
     static FUNCTION_IDS: Cell<u64> = const { Cell::new(0) };
+    /// The native stack this thread gives a call ([`set_stack`]).
+    static STACK: Cell<usize> = const { Cell::new(teseladb_js::DEFAULT_STACK) };
     /// The globals the database's `system.js` stores, for the running command.
     static STORED: RefCell<Option<Document>> = const { RefCell::new(None) };
     /// What `killOp` raises for the operation running on this thread, one for the thread's
@@ -143,6 +145,18 @@ pub fn set_clock(clock: fn() -> u64) {
     let _ = CLOCK.set(clock);
 }
 
+/// The native stack of a thread that runs commands: room for the 51 000 nested calls of a
+/// `refrouter` 9.0.4 (016 A016-3-18). The system reserves it and only commits what a call uses.
+pub const COMMAND_STACK: usize = 256 << 20;
+/// What a thread that runs commands keeps of its stack for the frames below the calls.
+const STACK_SPARE: usize = 8 << 20;
+
+/// Tells the calls on this thread that it has a stack of `size` bytes ([`COMMAND_STACK`] for the
+/// threads that run commands); without it a call takes the 1 MiB that any thread has.
+pub fn set_stack(size: usize) {
+    STACK.with(|s| s.set(size.saturating_sub(STACK_SPARE).max(teseladb_js::DEFAULT_STACK)));
+}
+
 /// What the calls of the command about to run see: whether JavaScript is enabled
 /// (`--noscripting`, 016 FR-009), the cluster time and the command's deadline on the clock.
 pub(crate) fn begin(enabled: bool, now_ms: u64, deadline_ms: Option<u64>) {
@@ -207,7 +221,9 @@ fn run_full(
                 _ => false,
             }
     };
+    let limits = teseladb_js::Limits { stack: STACK.with(Cell::get), ..Default::default() };
     let mut ctx = JsCtx {
+        limits,
         now_ms: NOW_MS.with(Cell::get),
         seed: super::engines::next_seed(),
         deadline: Some(&passed),
@@ -216,7 +232,6 @@ fn run_full(
             None => None,
         },
         scope,
-        ..JsCtx::default()
     };
     p.call(this, args, &mut ctx)
 }
@@ -229,7 +244,9 @@ fn runtime_error(what: &str, e: &JsError) -> MqlError {
             MqlError::new(INTERRUPTED, "operation was interrupted")
         }
         JsError::Deadline => MqlError::new(MAX_TIME_MS_EXPIRED, "operation exceeded time limit"),
-        JsError::Trap | JsError::Unreachable => MqlError::new(WASM_TRAP, e.message()),
+        JsError::Trap | JsError::Unreachable | JsError::StackExhausted => {
+            MqlError::new(WASM_TRAP, e.message())
+        }
         JsError::NotConvertible { code, message: m } => MqlError::new(
             NOT_CONVERTIBLE.into_iter().find(|c| c.code == *code).unwrap_or(NOT_CONVERTIBLE[0]),
             format!(
@@ -356,6 +373,9 @@ impl JsEngine for NodeJs {
 }
 
 fn compile_error(text: &str, e: &JsError) -> MqlError {
+    if matches!(e, JsError::StackExhausted) {
+        return MqlError::new(WASM_TRAP, e.message());
+    }
     let (line, col) = match e {
         JsError::Compile { line, col, .. } => (*line, *col),
         _ => (1, 1),
@@ -363,8 +383,10 @@ fn compile_error(text: &str, e: &JsError) -> MqlError {
     MqlError::new(
         JS_INTERPRETER_FAILURE,
         format!(
-            "Failed to create JS function :: source = {text}: e-compile message : '{}', file : 'wasm:function', line : {line}, column : {col}",
-            e.message()
+            "Failed to create JS function :: source = {text}: e-compile message : '{}', file : '{}', line : {line}, column : {col}",
+            e.message(),
+            // A parse the engine stops for its depth has no place.
+            if line == 0 { "none" } else { "wasm:function" }
         ),
     )
 }
@@ -418,5 +440,27 @@ mod tests {
         flag.0.store(false, std::sync::atomic::Ordering::SeqCst);
         assert_eq!(e.code.code, 11_601, "{e:?}");
         assert!(!interrupted());
+    }
+
+    /// A function nested deeper than the engine parses fails with no place, and one whose arrow
+    /// functions exhaust its stack with its trap (measured on a `refrouter` 9.0.4 on 02-11).
+    #[test]
+    fn a_function_nested_too_deep_fails_as_on_a_refrouter() {
+        let deep = format!("function(){{ return {}1{} }}", "(".repeat(67), ")".repeat(67));
+        let e = compile_error(&deep, &program(&deep).unwrap_err());
+        assert_eq!(e.code.code, 139);
+        assert!(
+            e.message.ends_with(
+                "e-compile message : 'too much recursion', file : 'none', line : 0, column : 1"
+            ),
+            "{}",
+            e.message
+        );
+        let arrows = format!("function(){{ return {}1 }}", "x=>".repeat(314));
+        let e = compile_error(&arrows, &program(&arrows).unwrap_err());
+        assert_eq!(
+            (e.code.code, e.message.as_str()),
+            (11_542_340, "wasm trap: call stack exhausted")
+        );
     }
 }

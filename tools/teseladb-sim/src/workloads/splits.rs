@@ -802,4 +802,28 @@ mod tests {
         assert_eq!(tag_of(b"x42"), None);
         assert_eq!(tag_of(&[0xff]), None);
     }
+
+    #[test]
+    fn answers_for_gone_searchers_and_cursors_and_turns_of_busy_ones_change_nothing() {
+        let mut w = World::new(1, 3, 2, false);
+        let mut wl = SplitsWorkload::with_searchers(3, 2, false);
+        wl.answer(&mut w, Asker::Search(7), Err(RangeError::Unavailable));
+        wl.answer(&mut w, Asker::Feed(7), Err(RangeError::Unavailable));
+        assert!(wl.searchers.is_empty() && wl.cursors.is_empty());
+        // A read in flight: the client waits for it.
+        let mut c = Cursor::new("c7".into(), at(5));
+        c.next().expect("a first range");
+        c.sent(b"\xff");
+        assert!(c.busy());
+        wl.cursors.insert(7, c);
+        wl.cursor_turn(&mut w, 7);
+        let mut s = Searcher::new(false);
+        s.begin(at(5), 1);
+        s.next().expect("a first range");
+        s.sent(b"", b"\xff");
+        assert!(s.busy());
+        wl.searchers.insert(7, s);
+        wl.search_turn(&mut w, 7);
+        assert!(wl.pending.is_empty());
+    }
 }
