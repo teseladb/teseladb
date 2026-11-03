@@ -22,6 +22,7 @@ use teseladb_keys::KeyBuilder;
 use teseladb_meta::catalog::{CollectionEntry, Namespace};
 use teseladb_meta::collection_types::CollectionKind;
 use teseladb_meta::command::Group0Command;
+use teseladb_router::table::RouteEntry;
 use teseladb_types::NodeId;
 
 use super::names::{full, parse_full};
@@ -246,7 +247,7 @@ pub fn lead_from<B: Backend + ?Sized>(
             let leaving: Vec<NodeId> = leader.into_iter().collect();
             backend.range_order(Group0Command::SetReplicas {
                 group: e.group,
-                epoch: e.generation,
+                epoch: e.replica_epoch,
                 add: vec![node],
                 remove: leaving,
             })?;
@@ -258,8 +259,8 @@ pub fn lead_from<B: Backend + ?Sized>(
 
 /// The shard among the cluster's that holds the least data, the first listed on a tie: as a
 /// `refrouter` 9.0.4 picks the shard of `unshardCollection` without `toShard` (measured on
-/// 02-11-2026, whatever the chunks of each shard). The data of a shard are the bytes of the
-/// collections in the ranges it leads.
+/// 02-11-2026, whatever the chunks of each shard). The data of a shard are the live bytes of the
+/// ranges with collections it leads, which their state machines keep (no data is read).
 fn least_loaded<B: Backend + ?Sized>(backend: &mut B) -> Result<NodeId, CommandError> {
     let shards: Vec<NodeId> = backend
         .config_documents(super::config_db::SHARDS)?
@@ -272,22 +273,24 @@ fn least_loaded<B: Backend + ?Sized>(backend: &mut B) -> Result<NodeId, CommandE
         .map(NodeId)
         .collect();
     let entries = backend.route_entries()?;
+    let spans: Vec<(Vec<u8>, Vec<u8>)> = backend
+        .collections()?
+        .iter()
+        .map(|(_, c)| {
+            let start = KeyBuilder::collection_start(c.tenant, c.id);
+            let end = KeyBuilder::collection_end(c.tenant, c.id);
+            (start.as_bytes().to_vec(), end.as_bytes().to_vec())
+        })
+        .collect();
+    let holds = |e: &RouteEntry| {
+        spans.iter().any(|(lo, hi)| e.start < *hi && (e.end.is_empty() || e.end > *lo))
+    };
     let mut held: BTreeMap<NodeId, u64> = BTreeMap::new();
-    for (_, c) in backend.collections()? {
-        let start = KeyBuilder::collection_start(c.tenant, c.id);
-        let end = KeyBuilder::collection_end(c.tenant, c.id);
-        let (lo, hi) = (start.as_bytes(), end.as_bytes());
-        for e in entries
-            .iter()
-            .filter(|e| e.start.as_slice() < hi && (e.end.is_empty() || e.end.as_slice() > lo))
-        {
-            let Some(leader) = e.leader_hint.or_else(|| e.voters.first().copied()) else {
-                continue;
-            };
-            let from = lo.max(e.start.as_slice());
-            let to = if e.end.is_empty() { hi } else { hi.min(e.end.as_slice()) };
-            *held.entry(leader).or_default() += backend.stored_bytes(from, to)?;
-        }
+    for e in entries.iter().filter(|e| holds(e)) {
+        let Some(leader) = e.leader_hint.or_else(|| e.voters.first().copied()) else {
+            continue;
+        };
+        *held.entry(leader).or_default() += backend.range_live_bytes(e)?;
     }
     shards
         .iter()

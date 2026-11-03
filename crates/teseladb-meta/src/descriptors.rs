@@ -232,6 +232,7 @@ impl DescTable<'_> {
             leader_term: 0,
             pending_split: None,
             settling: false,
+            moved_ms: self.now_ms,
         };
         self.insert(desc);
         Ok(group)
@@ -267,6 +268,7 @@ impl DescTable<'_> {
         r.replicas.sort_unstable_by_key(|(n, _)| *n);
         r.replica_epoch += 1;
         r.settling = true;
+        r.moved_ms = now_ms;
         self.log.record(change);
         Ok(())
     }
@@ -286,10 +288,15 @@ impl DescTable<'_> {
 
     /// A leader that published itself in `term`, or with term 0 the balancer's request; a
     /// publication of a term older than the one recorded changes nothing (007 FR-010).
+    /// The balancer's request for another node moves the range (018 FR-017).
     pub fn leader_hint(&mut self, g: GroupId, node: NodeId, term: u64) -> Result<(), Group0Error> {
+        let now_ms = self.now_ms;
         let r = self.range_mut(g)?;
         if !r.nodes().contains(&node) {
             return Err(Group0Error::BadReplicas);
+        }
+        if term == 0 && r.leader_hint != Some(node) {
+            r.moved_ms = now_ms;
         }
         if term == 0 || term >= r.leader_term {
             r.leader_hint = Some(node);
@@ -345,12 +352,14 @@ impl DescTable<'_> {
         r.end = at.to_vec();
         r.generation += 1;
         r.pending_split = None;
+        r.moved_ms = now_ms;
         self.split_ids.remove(&g);
         new.group = id;
         new.start = at.to_vec();
         new.generation = 1;
         new.pending_split = None;
         new.leader_hint = None;
+        new.moved_ms = now_ms;
         let group = new.group;
         self.insert(new);
         self.log.record(change);
@@ -444,6 +453,7 @@ impl DescTable<'_> {
         let l = self.range_mut(left)?;
         l.end = gone.end;
         l.generation += 1;
+        l.moved_ms = l.moved_ms.max(gone.moved_ms);
         let change = change_of(l, now_ms, ChangeKind::Merge { other: right });
         self.log.record(change);
         Ok(())

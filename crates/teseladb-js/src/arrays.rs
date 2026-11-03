@@ -482,6 +482,7 @@ fn concat(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 }
 
 fn join(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    crate::typed::validate(it, this)?;
     let sep = if matches!(arg(a, 0), Val::Undef) { ",".into() } else { it.str_of(&arg(a, 0))? };
     let v = items(it, this);
     // SpiderMonkey writes a `length` it cannot convert without the parentheses (`{}`).
@@ -504,6 +505,7 @@ fn join(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 
 /// `join()`, or `Object.prototype.toString` when `join` is not a function (ECMA-262 §23.1.3.36).
 fn to_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+    crate::typed::validate(it, this)?;
     let o = Val::Obj(it.object_of(this)?);
     let f = it.get(&o, "join")?;
     if f.is_callable() {
@@ -514,6 +516,7 @@ fn to_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
 
 /// Each element's `toLocaleString()`, joined with commas.
 fn to_locale_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+    crate::typed::validate(it, this)?;
     let v = items(it, this)?;
     let mut out = String::new();
     for (i, x) in v.iter().enumerate() {
@@ -547,6 +550,7 @@ fn reverse(it: &mut Interp, this: &Val, _: &[Val]) -> R {
 }
 
 fn index_of(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    crate::typed::validate(it, this)?;
     // A hole is never strictly equal to anything.
     let v = elements(it, this)?;
     let from = relative(it, &arg(a, 1), v.len(), 0)?;
@@ -561,6 +565,7 @@ fn index_of(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 }
 
 fn last_index_of(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    crate::typed::validate(it, this)?;
     let v = elements(it, this)?;
     if v.is_empty() {
         return Ok(Val::Num(-1.0));
@@ -583,6 +588,7 @@ fn last_index_of(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 }
 
 fn includes(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    crate::typed::validate(it, this)?;
     let v = items(it, this)?;
     let from = relative(it, &arg(a, 1), v.len(), 0)?;
     let x = arg(a, 0);
@@ -1000,6 +1006,7 @@ fn copy_within(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 }
 
 fn at(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    crate::typed::validate(it, this)?;
     let v = items(it, this)?;
     let n = it.number_of(&arg(a, 0))?;
     let n = if n.is_nan() { 0.0 } else { n.trunc() };
@@ -1011,14 +1018,17 @@ fn at(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 }
 
 fn keys(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+    crate::typed::validate(it, this)?;
     array_iter(it, this, ArrayIterKind::Keys)
 }
 
 fn values(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+    crate::typed::validate(it, this)?;
     array_iter(it, this, ArrayIterKind::Values)
 }
 
 fn entries(it: &mut Interp, this: &Val, _: &[Val]) -> R {
+    crate::typed::validate(it, this)?;
     array_iter(it, this, ArrayIterKind::Entries)
 }
 

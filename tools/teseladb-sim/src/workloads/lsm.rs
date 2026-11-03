@@ -478,8 +478,15 @@ impl Workload for LsmWorkload {
             let store = c.store.as_mut().expect("recovered");
             let cl = &mut self.clients[client as usize];
             for g in Self::groups(client) {
-                let Some(log) = store.group(g) else { continue };
-                let last = log.last_index();
+                // An entry acknowledged in `strict` mode is in the log after the crash; one that
+                // is not was lost by the log, whatever the LSM reads.
+                let newest = cl.confirmed.get(&g).and_then(|e| e.keys().next_back().copied());
+                let last = store.group(g).map(|log| log.last_index());
+                if let Some(i) = newest.filter(|i| last.is_none_or(|l| *i > l)) {
+                    let detail = format!("n{node} c{core} {g}: acknowledged entry {i} lost");
+                    return Err(Violation::safety("durability", detail));
+                }
+                let Some(last) = last else { continue };
                 let from = flushed.get(&g).copied().unwrap_or(0) + 1;
                 let entries = match store.entries(g, from, last + 1, u64::MAX) {
                     Ok(e) => e,
@@ -564,6 +571,7 @@ impl Workload for LsmWorkload {
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
+    use teseladb_raftlog::{Disk, IoErrno};
 
     #[test]
     fn operations_round_trip_through_entries() {
@@ -592,5 +600,124 @@ mod tests {
         let v = wl.finish(&mut w).expect_err("nothing applied after the heal");
         assert_eq!((v.checker, v.liveness), ("progress", true));
         assert_eq!(v.detail, "n0 c0: nothing applied after healing");
+    }
+
+    /// A world of one node and one core whose LSM is open, and the workload's one client.
+    fn opened() -> (World, LsmWorkload) {
+        let mut w = World::new(1, 1, 1, false);
+        let mut wl = LsmWorkload { cores: 1, clients: vec![Client::default()], heal_at: None };
+        wl.start(&mut w);
+        (w, wl)
+    }
+
+    fn put(k: &[u8], physical: u64, value: &[u8]) -> Bytes {
+        Op::Write { kind: Kind::Put, key: k.to_vec(), ts: at(physical), value: value.to_vec() }
+            .encode()
+    }
+
+    /// Appends `data` as entry `index` of `g`, creating the group first.
+    fn logged(w: &mut World, g: GroupId, index: u64, data: Bytes) {
+        let s = w.store(0, 0).expect("powered on");
+        if s.group(g).is_none() {
+            s.create_group(g, Bytes::new(), Durability::Strict).expect("created");
+        }
+        let entry = LogEntry { index, term: 1, kind: EntryKind::Normal, data };
+        s.append_raft(g, &[entry], None, Durability::Strict).expect("appended");
+    }
+
+    #[test]
+    fn a_core_without_store_or_lsm_declares_no_floor() {
+        let (mut w, _) = opened();
+        let store = w.nodes[0].cores[0].store.take();
+        LsmWorkload::floors(&mut w, 0, 0, 0);
+        w.nodes[0].cores[0].store = store;
+        w.nodes[0].cores[0].lsm = None;
+        LsmWorkload::floors(&mut w, 0, 0, 0);
+    }
+
+    #[test]
+    fn an_entry_whose_acknowledgement_failed_is_read_from_the_log_when_a_later_one_is_confirmed() {
+        let (mut w, mut wl) = opened();
+        let g = GroupId(0);
+        let k = key(g, 1);
+        logged(&mut w, g, 1, put(&k, 1, b"a"));
+        wl.clients[0].confirmed.entry(g).or_default().insert(2, put(&k, 2, b"b"));
+        // Another range wrote a newer version of the same key: the LSM reads it, not the model's.
+        let lsm = w.nodes[0].cores[0].lsm.clone().expect("open");
+        lsm.borrow_mut().put(GroupId(99), 1, &k, at(9), b"other").expect("in memory");
+        wl.on_completions(&mut w, 0, 0, Completions::default());
+        assert_eq!(wl.clients[0].applied.get(&g), Some(&2));
+        let v = w.violation.take().expect("another value");
+        assert!(v.detail.contains("the model"), "{}", v.detail);
+    }
+
+    #[test]
+    fn a_stopped_lsm_leaves_the_entry_for_the_replay() {
+        let (mut w, mut wl) = opened();
+        let g = GroupId(0);
+        let c = &mut w.nodes[0].cores[0];
+        let lsm = c.lsm.clone().expect("open");
+        lsm.borrow_mut().put(GroupId(99), 1, b"x", at(1), b"x").expect("in memory");
+        lsm.borrow_mut().flush();
+        c.disk.inject_error("sync", IoErrno::Io);
+        c.disk.inject_error("write", IoErrno::Io);
+        lsm.borrow_mut().run_io(&mut c.disk, Nanos::ZERO);
+        assert!(lsm.borrow().health().is_err(), "the failed flush stops it");
+        wl.clients[0].confirmed.entry(g).or_default().insert(1, put(&key(g, 1), 1, b"a"));
+        wl.on_completions(&mut w, 0, 0, Completions::default());
+        assert!(w.violation.is_none());
+    }
+
+    #[test]
+    fn a_restart_applies_durable_entries_and_compares_the_lsm_with_the_model() {
+        let (mut w, mut wl) = opened();
+        // No group in the log yet: nothing to replay, nothing to read.
+        wl.on_restart(&mut w, 0).expect("empty");
+        // A durable entry whose acknowledgement was lost is applied all the same.
+        let g = GroupId(0);
+        let k = key(g, 1);
+        logged(&mut w, g, 1, put(&k, 1, b"a"));
+        wl.on_restart(&mut w, 0).expect("replayed");
+        assert!(wl.clients[0].confirmed[&g].contains_key(&1));
+        // Another range's newer version of the key, durable in the LSM: it reads that one.
+        let lsm = w.nodes[0].cores[0].lsm.clone().expect("open");
+        lsm.borrow_mut().put(GroupId(99), 1, &k, at(9), b"other").expect("in memory");
+        lsm.borrow_mut().flush();
+        lsm.borrow_mut().run_io(&mut w.nodes[0].cores[0].disk, Nanos::ZERO);
+        let v = wl.on_restart(&mut w, 0).expect_err("another value");
+        assert_eq!(v.checker, "lsm");
+        assert!(v.detail.contains("the model"), "{}", v.detail);
+    }
+
+    #[test]
+    fn an_acknowledged_entry_the_log_lost_breaks_durability() {
+        let (mut w, mut wl) = opened();
+        let g = GroupId(0);
+        logged(&mut w, g, 1, put(&key(g, 1), 1, b"a"));
+        wl.clients[0].confirmed.entry(g).or_default().insert(2, put(&key(g, 2), 2, b"lost"));
+        let v = wl.on_restart(&mut w, 0).expect_err("lost");
+        assert_eq!(v.checker, "durability");
+        assert!(v.detail.contains("entry 2"), "{}", v.detail);
+        // A group the log lost with its acknowledged entries.
+        let mut wl = LsmWorkload { cores: 1, clients: vec![Client::default()], heal_at: None };
+        wl.clients[0].confirmed.entry(GroupId(1)).or_default().insert(1, put(b"k", 1, b"a"));
+        let v = wl.on_restart(&mut w, 0).expect_err("lost group");
+        assert_eq!(v.checker, "durability");
+    }
+
+    #[test]
+    fn an_lsm_that_does_not_recover_fails_the_run() {
+        let (mut w, mut wl) = opened();
+        let c = &mut w.nodes[0].cores[0];
+        let lsm = c.lsm.clone().expect("open");
+        lsm.borrow_mut().put(GroupId(0), 1, b"k", at(1), b"v").expect("in memory");
+        lsm.borrow_mut().flush();
+        lsm.borrow_mut().run_io(&mut c.disk, Nanos::ZERO);
+        let dir = std::path::PathBuf::from(&cfg(0).dir);
+        for path in c.disk.list(&dir).unwrap_or_default() {
+            c.disk.corrupt(&path, 0);
+        }
+        let v = wl.on_restart(&mut w, 0).expect_err("unreadable");
+        assert!(v.detail.contains("recovery"), "{}", v.detail);
     }
 }

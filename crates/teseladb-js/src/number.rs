@@ -52,18 +52,12 @@ pub fn to_radix(x: f64, radix: u32) -> String {
         return to_string(x);
     }
     let neg = x < 0.0;
-    let mut int = x.abs().trunc();
+    let int = x.abs().trunc();
     let mut frac = x.abs() - int;
-    let mut out = Vec::new();
-    if int == 0.0 {
-        out.push('0');
-    }
-    while int >= 1.0 {
-        let d = (int % f64::from(radix)) as u32;
-        out.push(char::from_digit(d, radix).unwrap_or('0'));
-        int = (int / f64::from(radix)).trunc();
-    }
-    out.reverse();
+    // The integer part exactly, also past 2^53 (`(1e21).toString(36)` is `5v1j4f4ds79m9s`).
+    let whole = crate::bigint::BigInt::from_f64(int)
+        .map_or_else(|| "0".into(), |b| b.to_string_radix(radix));
+    let mut out: Vec<char> = whole.chars().collect();
     // The fraction's digits until they tell `x` from its neighbours: half the distance to the
     // next double, as SpiderMonkey's shortest form in a radix (measured on a `refrouter` 9.0.4 on
     // 02-11: `(0.1).toString(3)` has 34 digits).

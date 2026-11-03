@@ -26,9 +26,37 @@ const UNKNOWN_ERROR: Code = Code { code: 8, name: "UnknownError" };
 /// The refusal of `preCondition`.
 const NO_PRECONDITION: Code = Code { code: 6_711_600, name: "Location6711600" };
 
-fn parse(v: &Value) -> Result<OplogEntry, CommandError> {
+/// `NoSuchKey`: an update entry without `o2`.
+const NO_SUCH_KEY: Code = Code { code: 4, name: "NoSuchKey" };
+/// The commands a `c` entry may carry (RefDb 9.0.4 refuses any other with 2, measured on
+/// 03-11-2026, `ap.js`).
+const ENTRY_COMMANDS: [&str; 18] = [
+    "create",
+    "renameCollection",
+    "drop",
+    "collMod",
+    "applyOps",
+    "dbCheck",
+    "dropDatabase",
+    "emptycapped",
+    "createIndexes",
+    "startIndexBuild",
+    "commitIndexBuild",
+    "abortIndexBuild",
+    "dropIndexes",
+    "deleteIndexes",
+    "commitTransaction",
+    "abortTransaction",
+    "importCollection",
+    "createDatabaseMetadata",
+];
+
+/// Entry `i` of the command (measured on 9.0.4: one that is not a document is 14).
+fn parse((i, v): (usize, &Value)) -> Result<OplogEntry, CommandError> {
     let Value::Document(d) = v else {
-        return Err(CommandError::new(BAD_VALUE, "applyOps entries must be documents"));
+        let t = crate::types::type_name(v);
+        let msg = format!("Wrong type for \"{i}\". Expected a object, got a {t}.");
+        return Err(CommandError::new(TYPE_MISMATCH, msg));
     };
     OplogEntry::from_document(d).map_err(|e| match e {
         OplogError::UnknownOp(op) => CommandError::new(
@@ -88,6 +116,13 @@ fn apply_one<B: Backend + ?Sized>(
     let op = &e.operation;
     let (db, coll) = op.ns.split_once('.').unwrap_or((op.ns.as_str(), ""));
     if op.op == OpType::Command {
+        let name = op.o.iter().next().map_or("", |(k, _)| k);
+        if !ENTRY_COMMANDS.contains(&name) {
+            let msg = format!(
+                "Enumeration value '{name}' for field 'commandString' is not a valid value."
+            );
+            return Err(CommandError::new(BAD_VALUE, msg));
+        }
         return Ok(ok(&run_on(ctx, db, &op.o)?));
     }
     let ns = super::names::ns(db, coll);
@@ -114,7 +149,18 @@ fn apply_one<B: Backend + ?Sized>(
             Document::new().with("delete", coll).with("deletes", vec![Value::Document(one)])
         }
         _ => {
-            let Some(q) = op.o2.clone() else { return Ok(false) };
+            let Some(q) = op.o2.clone() else {
+                // As RefDb 9.0.4 shows the entry: with its null `ts` and `wall`.
+                let shown = op
+                    .to_document()
+                    .with("ts", Value::Timestamp { time: 0, increment: 0 })
+                    .with("wall", Value::DateTime(0));
+                let msg = format!(
+                    "Failed to apply update due to missing _id: {{ oplogEntry: {} }}",
+                    super::display(&Value::Document(shown))
+                );
+                return Err(CommandError::new(NO_SUCH_KEY, msg));
+            };
             let u = match (op.o.get("$v"), op.o.get("diff")) {
                 (Some(_), Some(Value::Document(diff))) => {
                     let Some(current) = find_one(ctx, db, coll, &q)? else { return Ok(false) };
@@ -168,12 +214,13 @@ pub fn apply_ops<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
         );
         return Err(CommandError::new(NO_PRECONDITION, msg));
     }
-    if entries.iter().any(|e| !matches!(e, Value::Document(_))) {
-        return Err(CommandError::new(BAD_VALUE, "applyOps entries must be documents"));
+    // An entry that is not a document refuses the command before any runs (`parse` names it).
+    if let Some(bad) = entries.iter().enumerate().find(|(_, e)| !matches!(e, Value::Document(_))) {
+        return Err(parse(bad).err().unwrap_or_else(|| CommandError::new(BAD_VALUE, "")));
     }
     let mut results = Vec::new();
-    for v in &entries {
-        let done = parse(v).and_then(|e| match e.operation.op {
+    for (i, v) in entries.iter().enumerate() {
+        let done = parse((i, v)).and_then(|e| match e.operation.op {
             OpType::Noop => Ok(None),
             _ => apply_one(ctx, &e).map(Some),
         });

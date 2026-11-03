@@ -180,7 +180,7 @@ pub trait NodeState: Send + Sync + 'static {
 
     /// Wake `waker` whenever the `topologyVersion` counter changes, so the waiting `hello`s
     /// answer at once (018 FR-015); a node without one never changes it.
-    fn watch_topology(&self, _waker: Waker) {}
+    fn watch_topology(&self, _waker: &Arc<Waker>) {}
 }
 
 /// What core 0 tells the clients' port of the node's state in Group 0 (007 FR-015): the
@@ -192,8 +192,9 @@ pub struct NodePresence {
     /// The replica set and the member this node is, in the replica set presentation (018
     /// FR-007).
     replica: std::sync::Mutex<Option<Arc<ReplicaMember>>>,
-    /// The client workers to wake when the counter changes.
-    watchers: std::sync::Mutex<Vec<Waker>>,
+    /// The client workers to wake when the counter changes; a worker that stopped drops its
+    /// waker and leaves the list at the next change.
+    watchers: std::sync::Mutex<Vec<std::sync::Weak<Waker>>>,
     /// The replica set port (018 FR-016) and the member this node is on it.
     port: std::sync::Mutex<Option<(u16, Arc<ReplicaMember>)>>,
 }
@@ -208,11 +209,16 @@ impl NodePresence {
         let before = self.counter.swap(counter, Ordering::AcqRel);
         self.closed.store(closed, Ordering::Release);
         if before != counter {
-            let watchers = self.watchers.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            for w in watchers.iter() {
-                // A worker that already stopped needs no wake-up.
-                let _ = w.wake();
-            }
+            let mut watchers =
+                self.watchers.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            watchers.retain(|w| match w.upgrade() {
+                // A wake-up that fails finds the worker stopping, which needs none.
+                Some(waker) => {
+                    let _ = waker.wake();
+                    true
+                }
+                None => false,
+            });
         }
     }
 
@@ -235,8 +241,15 @@ impl NodePresence {
     }
 
     /// Wakes `waker` at every change of the counter.
-    pub fn watch(&self, waker: Waker) {
-        self.watchers.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(waker);
+    pub fn watch(&self, waker: &Arc<Waker>) {
+        let weak = Arc::downgrade(waker);
+        self.watchers.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(weak);
+    }
+
+    /// How many client workers it wakes.
+    pub fn watchers(&self) -> usize {
+        let watchers = self.watchers.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        watchers.iter().filter(|w| w.strong_count() > 0).count()
     }
 
     /// The replica set presentation this node answers in (`None`: as a `refrouter`).
@@ -350,7 +363,7 @@ impl NodeState for NodeClockState {
         self.handle.clone()
     }
 
-    fn watch_topology(&self, waker: Waker) {
+    fn watch_topology(&self, waker: &Arc<Waker>) {
         self.presence.watch(waker);
     }
 
@@ -399,7 +412,21 @@ impl Default for Hooks {
 
 /// A named thread that is not joined.
 fn spawn_thread(name: String, run: Box<dyn FnOnce() + Send>) -> io::Result<()> {
-    thread::Builder::new().name(name).spawn(run).map(drop)
+    command_thread(name).spawn(with_command_stack(run)).map(drop)
+}
+
+/// A thread that runs commands: with the stack the calls of server-side JavaScript need (016
+/// A016-3-18), which the system reserves and only commits as it is used.
+pub(crate) fn command_thread(name: String) -> thread::Builder {
+    thread::Builder::new().name(name).stack_size(teseladb_wire::commands::js::COMMAND_STACK)
+}
+
+/// `run`, after telling the calls of JavaScript the stack of [`command_thread`].
+pub(crate) fn with_command_stack<T>(run: impl FnOnce() -> T) -> impl FnOnce() -> T {
+    move || {
+        teseladb_wire::commands::js::set_stack(teseladb_wire::commands::js::COMMAND_STACK);
+        run()
+    }
 }
 
 /// A worker's executors: threads that run the commands of its connections against the node,
@@ -550,7 +577,7 @@ impl ClientListener {
         for k in 0..workers.max(1) {
             let poller = Poller::new()?;
             let waker = Arc::new(poller.waker());
-            state.watch_topology(poller.waker());
+            state.watch_topology(&waker);
             let (tx, rx) = mailbox::channel(waker.clone());
             let pool = state.handle().map(|handle| {
                 let (give_back, returned) = mpsc::channel();
@@ -589,7 +616,8 @@ impl ClientListener {
                 open: open.clone(),
                 stop: stop.clone(),
             };
-            let t = thread::Builder::new().name(format!("client-{k}")).spawn(move || w.run())?;
+            let t =
+                command_thread(format!("client-{k}")).spawn(with_command_stack(move || w.run()))?;
             handles.push((waker, t));
             senders.push(tx);
         }

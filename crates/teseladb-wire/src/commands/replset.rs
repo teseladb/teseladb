@@ -309,6 +309,29 @@ fn member_error(d: &Document, why: &str) -> CommandError {
 
 /// A member of `replSetReconfig` checked as RefDb 9.0.4 checks it.
 fn reconfig_member(d: &Document) -> Result<Member, CommandError> {
+    const NUMBERS: &str = "[long, double, decimal, int]";
+    const FLAGS: &str = "[double, bool, int, long, decimal]";
+    let wrong = |f: &str, v: &Value, expected: &str| {
+        let t = crate::types::type_name(v);
+        let why = format!(
+            "BSON field 'MemberConfig.{f}' is the wrong type '{t}', expected types '{expected}'"
+        );
+        member_error(d, &why)
+    };
+    for (f, expected) in [("priority", NUMBERS), ("votes", NUMBERS), ("hidden", FLAGS)] {
+        match d.get(f) {
+            None | Some(Value::Int32(_) | Value::Int64(_) | Value::Double(_)) => {}
+            Some(Value::Boolean(_)) if f == "hidden" => {}
+            Some(v) => return Err(wrong(f, v, expected)),
+        }
+    }
+    if let Some(Value::Document(tags)) = d.get("tags")
+        && let Some((k, v)) = tags.iter().find(|(_, v)| !matches!(v, Value::String(_)))
+    {
+        let t = crate::types::type_name(v);
+        let why = format!("tags.{k} field has non-string value of type {t}");
+        return Err(CommandError::new(INVALID_REPLICA_SET_CONFIG, why));
+    }
     let num = |f: &str| match d.get(f) {
         Some(Value::Int32(n)) => Some(f64::from(*n)),
         Some(Value::Int64(n)) => Some(*n as f64),
@@ -327,8 +350,14 @@ fn reconfig_member(d: &Document) -> Result<Member, CommandError> {
             &format!("BSON field 'votes' value must be <= 1, actual value '{v}'"),
         ));
     }
-    let hidden = matches!(d.get("hidden"), Some(Value::Boolean(true)));
-    let votes = num("votes").unwrap_or(1.0);
+    let hidden = match d.get("hidden") {
+        Some(Value::Boolean(b)) => *b,
+        // A number is a flag: anything but 0 hides the member.
+        Some(_) => num("hidden").is_some_and(|n| n != 0.0),
+        None => false,
+    };
+    // RefDb keeps the whole part of `votes` (0.5 is 0, measured).
+    let votes = num("votes").unwrap_or(1.0).trunc();
     // RefDb's default priority is 1, also for a member without votes or hidden.
     let priority = num("priority").unwrap_or(1.0);
     if votes == 0.0 && priority > 0.0 {

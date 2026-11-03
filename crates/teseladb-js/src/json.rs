@@ -78,9 +78,19 @@ fn parse(it: &mut Interp, _: &Val, a: &[Val]) -> R {
 }
 
 /// A whole JSON text: its value and where each part came from.
+/// The value of an `eval` of an array that is JSON, which the engine reads as JSON, without its
+/// parser and its limit of depth (200 000 nested arrays on a `refrouter` 9.0.4); `None` for other
+/// code.
+pub fn eval_json(it: &mut Interp, src: &str) -> R<Option<Val>> {
+    if !src.trim_start().starts_with('[') || !is_json(src) {
+        return Ok(None);
+    }
+    parse_text(it, src).map(|(v, _)| Some(v))
+}
+
 fn parse_text(it: &mut Interp, text: &str) -> R<(Val, Option<Src>)> {
     let mut p = P { s: text.as_bytes(), i: 0, out: Vec::new() };
-    let v = p.value(it, 0)?;
+    let v = p.value(it)?;
     p.ws();
     if p.i < p.s.len() {
         return Err(p.err(it, "unexpected non-whitespace character after JSON data"));
@@ -131,7 +141,13 @@ fn revive(it: &mut Interp, holder: &Val, key: &str, f: &Val, src: Option<&Src>) 
         let t = it.string(text.clone())?;
         it.define(&context, "source", Prop::data(t))?;
     }
-    it.call(f, holder, &[Val::Str(key.into()), v, Val::Obj(context)])
+    // The engine calls the reviver through one more native frame (117 nested `JSON.parse`).
+    it.call_back(
+        crate::recursion::NATIVE_FRAME,
+        f,
+        holder,
+        &[Val::Str(key.into()), v, Val::Obj(context)],
+    )
 }
 
 /// What the reviver gave for `o[k]`: deleted when undefined, else set as a new data property.
@@ -166,9 +182,10 @@ impl P<'_> {
         )
     }
 
-    fn value(&mut self, it: &mut Interp, depth: usize) -> R {
+    fn value(&mut self, it: &mut Interp) -> R {
         it.step()?;
-        if depth > 1000 {
+        // The engine reads JSON without recursion: only our native stack limits the depth.
+        if it.stack_exhausted() {
             return Err(it.error("InternalError", "too much recursion"));
         }
         self.ws();
@@ -204,7 +221,7 @@ impl P<'_> {
                         return Err(self.err(it, "expected ':' after property name in object"));
                     }
                     self.i += 1;
-                    let v = self.value(it, depth + 1)?;
+                    let v = self.value(it)?;
                     if let Some(src) = self.out.pop() {
                         parts.push((k.clone(), src));
                     }
@@ -240,7 +257,7 @@ impl P<'_> {
                 }
                 loop {
                     it.charge(PROP_BYTES)?;
-                    items.push(self.value(it, depth + 1)?);
+                    items.push(self.value(it)?);
                     if let Some(src) = self.out.pop() {
                         parts.push(src);
                     }
@@ -378,6 +395,126 @@ impl P<'_> {
 }
 
 /// A string as JSON writes it.
+/// Whether `src` is JSON text, read without recursion.
+pub fn is_json(src: &str) -> bool {
+    let b = src.as_bytes();
+    let mut i = 0;
+    // The containers open, innermost last: whether each is an object.
+    let mut open: Vec<bool> = Vec::new();
+    let ws = |i: &mut usize| {
+        while *i < b.len() && matches!(b[*i], b' ' | b'\t' | b'\n' | b'\r') {
+            *i += 1;
+        }
+    };
+    loop {
+        // A value.
+        ws(&mut i);
+        match b.get(i) {
+            Some(b'[') => {
+                i += 1;
+                ws(&mut i);
+                if b.get(i) == Some(&b']') {
+                    i += 1;
+                } else {
+                    open.push(false);
+                    continue;
+                }
+            }
+            Some(b'{') => {
+                i += 1;
+                ws(&mut i);
+                if b.get(i) == Some(&b'}') {
+                    i += 1;
+                } else if json_key(b, &mut i) {
+                    open.push(true);
+                    continue;
+                } else {
+                    return false;
+                }
+            }
+            Some(b'"') => {
+                if !json_string(b, &mut i) {
+                    return false;
+                }
+            }
+            Some(_) => {
+                let start = i;
+                while i < b.len()
+                    && matches!(b[i], b'-' | b'+' | b'.' | b'0'..=b'9' | b'a'..=b'z' | b'E')
+                {
+                    i += 1;
+                }
+                let word = &src[start..i];
+                let number = word.parse::<f64>().is_ok() && !word.starts_with(['+', '.']);
+                if !(number || matches!(word, "true" | "false" | "null")) {
+                    return false;
+                }
+            }
+            None => return false,
+        }
+        // What follows a value: a separator, the end of its containers, or the end.
+        loop {
+            ws(&mut i);
+            let Some(&object) = open.last() else { return i == b.len() };
+            match b.get(i) {
+                Some(b',') if object => {
+                    i += 1;
+                    if !json_key(b, &mut i) {
+                        return false;
+                    }
+                    break;
+                }
+                Some(b',') => {
+                    i += 1;
+                    break;
+                }
+                Some(b'}') if object => {
+                    i += 1;
+                    open.pop();
+                }
+                Some(b']') if !object => {
+                    i += 1;
+                    open.pop();
+                }
+                _ => return false,
+            }
+        }
+    }
+}
+
+/// A JSON string at `b[*i]`, which is `"`; moves past it.
+fn json_string(b: &[u8], i: &mut usize) -> bool {
+    *i += 1;
+    while let Some(&c) = b.get(*i) {
+        *i += 1;
+        match c {
+            b'"' => return true,
+            b'\\' => *i += 1,
+            c if c < 0x20 => return false,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// A key and its `:` of a JSON object at `b[*i]`; moves past them.
+fn json_key(b: &[u8], i: &mut usize) -> bool {
+    while *i < b.len() && matches!(b[*i], b' ' | b'\t' | b'\n' | b'\r') {
+        *i += 1;
+    }
+    if b.get(*i) != Some(&b'"') || !json_string(b, i) {
+        return false;
+    }
+    while *i < b.len() && matches!(b[*i], b' ' | b'\t' | b'\n' | b'\r') {
+        *i += 1;
+    }
+    if b.get(*i) != Some(&b':') {
+        return false;
+    }
+    *i += 1;
+    true
+}
+
 pub fn quote(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
@@ -472,6 +609,21 @@ fn property_list(it: &mut Interp, replacer: &Val) -> R<Vec<Name>> {
 }
 
 /// Writes property `key` of `holder`; `false` when it has no JSON form.
+/// [`write`] of a value nested in another.
+fn write_nested(
+    it: &mut Interp,
+    st: &mut S,
+    holder: &Val,
+    key: &str,
+    out: &mut String,
+    gap: &str,
+) -> R<bool> {
+    let native = it.in_native;
+    it.nested(0, crate::recursion::NESTING, native, |it| write(it, st, holder, key, out, gap))
+}
+
+/// Writes `holder[key]`; each value nested in another takes a slice of the engine's native stack
+/// ([`write_nested`], 346 nested arrays measured on a `refrouter` 9.0.4 on 02-11).
 fn write(
     it: &mut Interp,
     st: &mut S,
@@ -536,7 +688,7 @@ fn write(
                 let len = it.number_of(&len)? as usize;
                 for i in 0..len {
                     let mut s = String::new();
-                    if !write(it, st, &v, &i.to_string(), &mut s, &inner)? {
+                    if !write_nested(it, st, &v, &i.to_string(), &mut s, &inner)? {
                         s = "null".into();
                     }
                     parts.push(s);
@@ -548,7 +700,7 @@ fn write(
                 };
                 for k in keys {
                     let mut s = String::new();
-                    if write(it, st, &v, &k, &mut s, &inner)? {
+                    if write_nested(it, st, &v, &k, &mut s, &inner)? {
                         let sep = if st.indent.is_empty() { ":" } else { ": " };
                         parts.push(format!("{}{sep}{s}", quote(&k)));
                     }
@@ -573,4 +725,46 @@ fn write(
         }
     }
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_json;
+
+    #[test]
+    fn json_text_is_told_from_other_code() {
+        for ok in [
+            "[]",
+            " [ ] ",
+            "[1, -2.5e3, true, false, null]",
+            "[{}]",
+            "[{ \"a\" : 1, \"b\": [true, null], \"c\": {\"d\": \"x\\\"y\"} }]",
+            "[[[1]], [2]]",
+        ] {
+            assert!(is_json(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "[",
+            "[1,]",
+            "[1}",
+            "[}",
+            "[{\"a\" 1}]",
+            "[{a: 1}]",
+            "[{\"a\": 1,}]",
+            "[{\"a\": 1, \"b\"}]",
+            "[{\"a\": 1]",
+            "[\"\u{1}\"]",
+            "[\"unterminated",
+            "[\"x\\",
+            "[+1]",
+            "[.5]",
+            "[undefined]",
+            "[1] x",
+            "[{",
+            "[{\"a\"",
+        ] {
+            assert!(!is_json(bad), "{bad}");
+        }
+    }
 }

@@ -126,5 +126,7 @@ fn a_snapshot_before_core_changes_restores_with_none() {
     let mut back = Group0Sm::default();
     back.restore(&old).unwrap();
     assert!(back.relocations.is_empty());
-    assert_eq!(back.ranges, sm.ranges);
+    let mut never = sm.ranges.clone();
+    never.values_mut().for_each(|r| r.moved_ms = 0);
+    assert_eq!(back.ranges, never);
 }

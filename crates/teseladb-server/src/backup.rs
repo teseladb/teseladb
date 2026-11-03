@@ -662,6 +662,7 @@ mod tests {
             leader_term: 0,
             pending_split: None,
             settling: true,
+            moved_ms: 0,
         };
         let entry = teseladb_router::table::RouteEntry::from_desc(&desc);
         assert_eq!(restore_nodes(&entry, Some(&desc)), vec![NodeId(1), NodeId(2), NodeId(3)]);

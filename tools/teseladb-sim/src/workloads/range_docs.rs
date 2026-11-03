@@ -1151,10 +1151,10 @@ impl RangeDocsWorkload {
                 match mine {
                     None => Some(Transfer::Ingesting { id, files }),
                     Some(Ok(())) => {
+                        // A transfer ends with its replica's crash: the core is there.
                         let now = w.local(node);
-                        if let Some(c) = w.cluster_core(node, self.core) {
-                            c.snapshot_data_ready(G, now);
-                        }
+                        let c = w.cluster_core(node, self.core).expect("powered on, not frozen");
+                        c.snapshot_data_ready(G, now);
                         w.settle(node, self.core);
                         None
                     }
@@ -1279,19 +1279,19 @@ impl Workload for RangeDocsWorkload {
         self.abandoned = kept;
         self.orphans.extend(gone.into_iter().map(|(l, _, dir)| (l, dir)));
         // A snapshot the crashed node was exporting is asked for again.
-        let lost: Vec<u32> = self
+        let lost: Vec<(u32, u64, String)> = self
             .transfers
             .iter()
-            .filter(
-                |(_, (_, t))| matches!(t, Transfer::Exporting { leader, .. } if *leader == node),
-            )
-            .map(|(n, _)| *n)
+            .filter_map(|(n, (index, t))| match t {
+                Transfer::Exporting { leader, dir, .. } if *leader == node => {
+                    Some((*n, *index, dir.clone()))
+                }
+                _ => None,
+            })
             .collect();
-        for n in lost {
-            let (index, t) = self.transfers.remove(&n).expect("listed");
-            if let Transfer::Exporting { dir, .. } = t {
-                self.orphans.push((node, dir));
-            }
+        for (n, index, dir) in lost {
+            self.transfers.remove(&n);
+            self.orphans.push((node, dir));
             self.waiting.insert(n, index);
         }
     }
@@ -1552,5 +1552,120 @@ mod tests {
         assert_eq!(wl.waiting.get(&1), Some(&5));
         assert!(matches!(wl.transfers.get(&2), Some((5, Transfer::Ingesting { .. }))));
         assert_eq!(wl.orphans, vec![(0, "export-test-0".to_owned())]);
+    }
+
+    #[test]
+    fn a_crash_drops_the_follower_reads_and_exports_of_the_node_and_its_restart_their_files() {
+        let (mut w, mut wl) = world(1);
+        // A follower read in flight keeps its client busy until the crash drops it.
+        wl.follower_reads = Some(BTreeMap::from([((2, 7), (0, 1)), ((1, 7), (1, 1))]));
+        assert!(wl.busy(0));
+        // An export for node 2 its source 0 still writes, and an abandoned one of each source.
+        let exporting = Transfer::Exporting {
+            leader: 0,
+            exports: vec![u64::MAX],
+            files: vec![],
+            dir: "export-test-2".into(),
+        };
+        wl.transfers.insert(2, (5, exporting));
+        // Node 0 waits for an export of node 1, which goes on until node 1 crashes.
+        let from_1 = Transfer::Exporting {
+            leader: 1,
+            exports: vec![u64::MAX],
+            files: vec![],
+            dir: "export-test-0".into(),
+        };
+        wl.transfers.insert(0, (6, from_1));
+        wl.abandoned.push((1, vec![u64::MAX], "export-test-1".into()));
+        wl.on_crash(&mut w, 2);
+        w.crash_node(2);
+        assert!(!wl.busy(0), "its read is gone");
+        assert!(wl.busy(1), "a read on another node stays");
+        assert_eq!(wl.abandoned.len(), 2, "the export for it goes once written");
+        wl.on_crash(&mut w, 1);
+        w.crash_node(1);
+        let orphans = vec![(1, "export-test-1".to_owned()), (1, "export-test-0".to_owned())];
+        assert_eq!(wl.orphans, orphans);
+        assert_eq!(wl.waiting.get(&0), Some(&6), "asked again");
+        // Back, node 1 removes its orphans and leaves those of others.
+        wl.orphans.push((0, "export-test-0".into()));
+        w.start_node(1).expect("started");
+        wl.on_restart(&mut w, 1).expect("restarted");
+        assert_eq!(wl.orphans, vec![(0, "export-test-0".to_owned())]);
+    }
+
+    #[test]
+    fn abandoned_exports_go_once_their_source_wrote_them_all() {
+        let (mut w, mut wl) = world(1);
+        let core = wl.core as usize;
+        wl.abandoned.push((0, vec![1, 2], "export-test".into()));
+        w.nodes[0].cores[core].lsm_done.exported = vec![(1, vec![]), (9, vec![])];
+        wl.drop_abandoned(&mut w);
+        assert_eq!(wl.abandoned, vec![(0, vec![2], "export-test".to_owned())]);
+        assert_eq!(w.nodes[0].cores[core].lsm_done.exported.len(), 1, "another's stays");
+        w.nodes[0].cores[core].lsm_done.exported.push((2, vec![]));
+        wl.drop_abandoned(&mut w);
+        assert!(wl.abandoned.is_empty());
+    }
+
+    #[test]
+    fn a_transfer_waits_for_its_own_exports_a_thawed_core_and_a_source() {
+        let (mut w, mut wl) = world(1);
+        let core = wl.core;
+        // Another export's result stays where it is.
+        let exporting = Transfer::Exporting {
+            leader: 0,
+            exports: vec![u64::MAX],
+            files: vec![],
+            dir: "export-test".into(),
+        };
+        wl.transfers.insert(2, (5, exporting));
+        w.nodes[0].cores[core as usize].lsm_done.exported.push((7, vec![]));
+        wl.transfer_step(&mut w, 2);
+        assert!(matches!(wl.transfers.get(&2), Some((5, Transfer::Exporting { .. }))));
+        assert_eq!(w.nodes[0].cores[core as usize].lsm_done.exported.len(), 1);
+        // A frozen core takes its ingestion when it thaws.
+        wl.transfers.insert(2, (5, Transfer::Ingesting { id: 3, files: vec![] }));
+        w.nodes[2].cores[core as usize].frozen_until = w.now() + Nanos::from_secs(1);
+        wl.transfer_step(&mut w, 2);
+        assert!(matches!(wl.transfers.get(&2), Some((5, Transfer::Ingesting { id: 3, .. }))));
+        w.nodes[2].cores[core as usize].frozen_until = Nanos::ZERO;
+        wl.transfers.remove(&2);
+        // A replica that waits while every other one is busy or behind keeps waiting; waits of
+        // another range, of another core or of a replica already served are left.
+        wl.transfers.insert(1, (5, Transfer::Ingesting { id: 4, files: vec![] }));
+        w.snapshot_waits = vec![
+            (2, core, G, u64::MAX),
+            (2, core, GroupId(G.0 + 1), 1),
+            (2, 1 - core, G, 1),
+            (1, core, G, 1),
+        ];
+        wl.transfer(&mut w);
+        assert_eq!(wl.waiting.get(&2), Some(&u64::MAX));
+        assert!(!wl.waiting.contains_key(&1));
+        assert!(wl.source(&mut w, 2, 0).is_some_and(|n| n != 1), "a busy node is no source");
+        wl.waiting.clear();
+        wl.transfers.clear();
+    }
+
+    #[test]
+    fn a_node_down_at_the_start_gets_no_host() {
+        let mut wl = workload();
+        let mut w = World::with_clocks(9, 3, 2, false, true, wl.clocks());
+        w.nodes[1].alive = false;
+        wl.start(&mut w);
+        assert!(wl.hosts.contains_key(&0) && !wl.hosts.contains_key(&1));
+    }
+
+    #[test]
+    fn a_follower_reads_run_where_no_follower_read_was_served_fails_liveness() {
+        let (mut w, mut wl) = world(1);
+        // A node without host has nothing to move.
+        let host = wl.hosts.remove(&0).expect("a host");
+        wl.pump(&mut w, 0);
+        wl.hosts.insert(0, host);
+        wl.follower_reads = Some(BTreeMap::new());
+        let v = wl.finish(&mut w).expect_err("no read on a follower");
+        assert!(v.liveness && v.detail.contains("follower"), "{}", v.detail);
     }
 }

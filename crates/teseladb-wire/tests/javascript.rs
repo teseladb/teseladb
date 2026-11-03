@@ -304,3 +304,38 @@ fn errors_carry_the_line_column_and_stack_of_a_refrouter() {
         "{msg}"
     );
 }
+
+/// The depth a `$function` reaches on this thread.
+fn depth_reached() -> String {
+    let mut m = Mem::new();
+    load(&mut m);
+    let r = run(
+        &mut m,
+        r#"{"aggregate":"c","pipeline":[{"$match":{"_id":0}},{"$project":{"_id":0,"v":{"$function":{"body":"function(){ let n = 0; function f(){ n++; f() } try { f() } catch (e) { return n + ' ' + e.message } }","args":[],"lang":"js"}}}}],"cursor":{}}"#,
+    );
+    match field(&r, "cursor.firstBatch.0.v") {
+        Value::String(s) => s.clone(),
+        other => panic!("{other:?} {r:?}"),
+    }
+}
+
+/// A thread with the stack of a thread that runs commands gives the calls the depth of a
+/// `refrouter` 9.0.4 (016 A016-3-18); any other thread ends deep recursion within its 1 MiB.
+#[test]
+fn a_command_thread_gives_the_calls_the_depth_of_a_refrouter() {
+    use teseladb_wire::commands::js::{COMMAND_STACK, set_stack};
+    let deep = std::thread::Builder::new()
+        .stack_size(COMMAND_STACK)
+        .spawn(|| {
+            set_stack(COMMAND_STACK);
+            depth_reached()
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+    assert_eq!(deep, "50999 too much recursion");
+    let shallow = std::thread::spawn(depth_reached).join().unwrap();
+    let (n, message) = shallow.split_once(' ').unwrap();
+    assert_eq!(message, "too much recursion");
+    assert!(n.parse::<u32>().unwrap() < 5_000, "{shallow}");
+}
