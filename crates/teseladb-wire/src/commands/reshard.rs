@@ -612,10 +612,14 @@ pub(super) fn check_cardinality<B: Backend + ?Sized>(
     key: &Document,
     need: i64,
 ) -> Result<(), CommandError> {
+    // The key of each document without its `_id` suffix, unless the shard key has `_id`.
+    let keeps_id = key.get("_id").is_some();
     let mut points = Vec::new();
     for_each_document(backend, c, None, |_, doc| {
         let mut probe = doc.clone();
-        probe.insert("_id", Value::MinKey);
+        if !keeps_id {
+            probe.insert("_id", Value::MinKey);
+        }
         points.push(document_key(c, key, &probe)?);
         Ok(())
     })?;

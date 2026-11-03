@@ -598,3 +598,31 @@ fn sharded_data_distribution_reads_a_large_chunk_in_batches() {
     let Some(Value::Document(first)) = shards.first() else { panic!("{big:?}") };
     assert_eq!(first.get("numOwnedDocuments"), Some(&long(2000)));
 }
+
+/// A key on `_id` has the cardinality of its values: the read and write distribution of
+/// `{_id: 1}` splits the 2,000 documents of `q.big` into its 100 ranges.
+#[test]
+fn a_key_on_id_has_the_cardinality_of_its_values() {
+    let mut m = cluster();
+    let r =
+        admin(&mut m, r#"{"analyzeShardKey":"q.big","key":{"_id":1},"keyCharacteristics":false}"#);
+    assert_eq!(field(&r, "readDistribution.sampleSize.total"), &long(0), "{r:?}");
+}
+
+/// The samples of a collection dropped and created again are not the new one's.
+#[test]
+fn the_samples_of_a_dropped_collection_are_not_the_new_ones() {
+    let mut m = cluster();
+    ok(&admin(&mut m, r#"{"configureQueryAnalyzer":"q.big","mode":"full","samplesPerSecond":5}"#));
+    m.now += 100;
+    ok(&m.run("q", json(r#"{"find":"big","filter":{"x":1}}"#)));
+    let r =
+        admin(&mut m, r#"{"analyzeShardKey":"q.big","key":{"_id":1},"keyCharacteristics":false}"#);
+    assert_eq!(field(&r, "readDistribution.sampleSize.total"), &long(1));
+    ok(&m.run("q", json(r#"{"drop":"big"}"#)));
+    let docs: Vec<String> = (0..2000).map(|i| format!(r#"{{"_id":{i},"x":{i}}}"#)).collect();
+    ok(&m.run("q", json(&format!(r#"{{"insert":"big","documents":[{}]}}"#, docs.join(",")))));
+    let r =
+        admin(&mut m, r#"{"analyzeShardKey":"q.big","key":{"_id":1},"keyCharacteristics":false}"#);
+    assert_eq!(field(&r, "readDistribution.sampleSize.total"), &long(0));
+}
