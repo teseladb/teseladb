@@ -1030,7 +1030,36 @@ impl RawNode {
             self.answer_read(PendingRead { ctx, index, round: 0, requester }, store);
             return;
         }
+        // The read rides on the next round sent, which leaves after it arrived; the reads of one
+        // step share it (`send_read_round`).
         self.reads.push(PendingRead { ctx, index, round: self.lease_seq + 1, requester });
+    }
+
+    /// Whether reads registered since the last round wait for one (the caller sends it with
+    /// [`RawNode::send_read_round`] once per step, so the reads of the step share it).
+    pub fn read_round_due(&self) -> bool {
+        self.role == Role::Leader && self.reads.last().is_some_and(|p| p.round > self.lease_seq)
+    }
+
+    /// Sends the heartbeat round that confirms the leadership for the reads registered since the
+    /// last one: a single round for every read of the step, each still waiting for a majority
+    /// that answers a round sent after it arrived.
+    pub fn send_read_round(&mut self, store: &dyn LogStore) {
+        if !self.read_round_due() {
+            return;
+        }
+        // Faulty variant (005 FR-009): the batch is answered as soon as its round leaves, without
+        // waiting for a majority to confirm it.
+        #[cfg(teseladb_bug = "read_batch_without_round")]
+        {
+            let seq = self.lease_seq;
+            let (ready, rest): (Vec<PendingRead>, Vec<PendingRead>) =
+                core::mem::take(&mut self.reads).into_iter().partition(|p| p.round > seq);
+            self.reads = rest;
+            for p in ready {
+                self.answer_read(p, store);
+            }
+        }
         self.bcast_heartbeat(store);
     }
 

@@ -78,6 +78,10 @@ pub const GROUP0_MAX_VOTERS: usize = 5;
 /// presentation's changes count in multiples of it.
 const TOPOLOGY_STATES: i64 = 3;
 
+/// Passes over the reads at the end of a turn: a pass can answer reads that register more; what
+/// is left goes at the next turn.
+const READ_ROUND_PASSES: usize = 4;
+
 /// Certificate fingerprint of a node in `--insecure` mode: derived from its inter-node address, so
 /// that joining again from the same address gives back the same node.
 pub fn insecure_fingerprint(peer_addr: &str) -> [u8; 32] {
@@ -270,6 +274,10 @@ impl NodeLogic {
         founder: Option<([u8; 16], NodeAddrs)>,
         me: Option<(NodeId, NodeAddrs)>,
     ) -> NodeLogic {
+        let mut core = core;
+        // The ReadIndex reads of a whole turn of the loop share one heartbeat round per range
+        // (005 FR-009): `take_outbound`, at the end of the turn, sends it.
+        core.hold_read_rounds(true);
         NodeLogic {
             core,
             founder,
@@ -1658,6 +1666,15 @@ impl CoreLogic for NodeLogic {
     }
 
     fn take_outbound(&mut self, out: &mut Vec<(NodeId, PeerMsg)>) {
+        // End of the turn: one round per range for the reads its events registered. A single
+        // voter answers them at once, and what that moves may register more.
+        for _ in 0..READ_ROUND_PASSES {
+            if !self.core.read_rounds_due() {
+                break;
+            }
+            self.core.flush_read_rounds();
+            self.data_step();
+        }
         out.append(&mut self.outbound);
     }
 

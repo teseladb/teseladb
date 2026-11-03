@@ -108,6 +108,8 @@ impl Net {
     pub fn process(&mut self, n: NodeId) {
         loop {
             let node = self.nodes.get_mut(&n).unwrap();
+            // End of the node's step: one round for the reads it registered.
+            node.raw.send_read_round(&node.store);
             if !node.raw.has_ready() {
                 break;
             }
