@@ -239,7 +239,8 @@ fn reachable(realm: &Realm) -> Vec<ObjRef> {
             }
             next.extend(b.proto.iter().cloned().map(Val::Obj));
             match &b.kind {
-                Kind::Array(v) | Kind::Set(v) => next.extend(v.iter().cloned()),
+                Kind::Array(v) => next.extend(v.iter().cloned()),
+                Kind::Set(v) => next.extend(v.iter().cloned()),
                 Kind::Map(v) => next.extend(v.iter().flat_map(|(k, x)| [k.clone(), x.clone()])),
                 Kind::Func(Func::Bound(f, this, args)) => {
                     next.push(Val::Obj(f.clone()));

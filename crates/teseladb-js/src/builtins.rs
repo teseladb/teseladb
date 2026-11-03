@@ -6,6 +6,7 @@
 use std::rc::Rc;
 
 use crate::interp::{Ctrl, Interp, R, Realm};
+use crate::keyed::{Cursor, Table};
 use crate::number;
 use crate::value::*;
 
@@ -85,6 +86,7 @@ pub(crate) fn class_kind(v: &Val) -> &'static str {
             Kind::WeakRef(_) => "WeakRef",
             Kind::Arguments(_) => "Arguments",
             Kind::ArrayIter(_) => ARRAY_ITERATOR,
+            Kind::CollIter(state) => state.borrow().class,
             Kind::Iter(_, class) => class,
             Kind::Helper(_) => "Iterator Helper",
             Kind::Generator(_) => "Generator",
@@ -148,7 +150,6 @@ fn bare(budget: &Rc<Budget>, proto: Option<ObjRef>, kind: Kind) -> ObjRef {
             kind,
             extensible: true,
             locks: 0,
-            keys: None,
         }),
         charged: std::cell::Cell::new(crate::value::Cost::ZERO),
         budget: budget.clone(),
@@ -1482,7 +1483,7 @@ fn map_ctor(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     if new_target(this).is_none() {
         return it.type_error("calling a builtin Map constructor without new is forbidden");
     }
-    let m = Val::Obj(it.alloc(Some(it.realm.map.clone()), Kind::Map(Vec::new()))?);
+    let m = Val::Obj(it.alloc(Some(it.realm.map.clone()), Kind::Map(Table::default()))?);
     add_from(it, &m, &arg(a, 0), map_set, Some("Map"))?;
     Ok(m)
 }
@@ -1491,7 +1492,7 @@ fn set_ctor(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     if new_target(this).is_none() {
         return it.type_error("calling a builtin Set constructor without new is forbidden");
     }
-    let s = it.alloc(Some(it.realm.set.clone()), Kind::Set(Vec::new()))?;
+    let s = it.alloc(Some(it.realm.set.clone()), Kind::Set(Table::default()))?;
     add_from(it, &Val::Obj(s.clone()), &arg(a, 0), set_add, None)?;
     Ok(Val::Obj(s))
 }
@@ -1515,52 +1516,23 @@ fn map_get(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let o = coll(it, this)?;
     let k = arg(a, 0);
     Ok(match &o.borrow().kind {
-        Kind::Map(e) => find_entry(&o.borrow(), e, &k).map_or(Val::Undef, |i| e[i].1.clone()),
+        Kind::Map(e) => e.get(&k).map_or(Val::Undef, |(_, v)| v.clone()),
         _ => Val::Undef,
     })
-}
-
-/// Where `k` is among the entries `e` of the `Map` `b`: by its index, or by going through them
-/// when it has none yet.
-fn find_entry(b: &Obj, e: &[(Val, Val)], k: &Val) -> Option<usize> {
-    match &b.keys {
-        Some(ix) => ix.borrow_mut().find_entry(e, k),
-        None => e.iter().position(|(x, _)| same_value_zero(x, k)),
-    }
-}
-
-/// Where `k` is among the values `e` of the `Set` `b` (see [`find_entry`]).
-fn find_value(b: &Obj, e: &[Val], k: &Val) -> Option<usize> {
-    match &b.keys {
-        Some(ix) => ix.borrow_mut().find_value(e, k),
-        None => e.iter().position(|x| same_value_zero(x, k)),
-    }
 }
 
 fn map_set(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let o = coll(it, this)?;
     let k = norm(arg(a, 0));
+    if let Kind::Map(e) = &mut o.borrow_mut().kind
+        && let Some(slot) = e.get_mut(&k)
     {
-        let mut b = o.borrow_mut();
-        let Obj { kind, keys, .. } = &mut *b;
-        let (e, ix) = match (kind, keys.get_or_insert_with(Default::default)) {
-            (Kind::Map(e), ix) => (e, ix),
-            _ => unreachable!("`set` checked a Map"),
-        };
-        if let Some(i) = ix.get_mut().find_entry(e, &k) {
-            e[i].1 = arg(a, 1);
-            return Ok(this.clone());
-        }
+        slot.1 = arg(a, 1);
+        return Ok(this.clone());
     }
     it.grow_elements(&o, 2)?;
-    let mut b = o.borrow_mut();
-    let Obj { kind, keys, .. } = &mut *b;
-    match (kind, keys) {
-        (Kind::Map(e), Some(ix)) => {
-            e.push((k.clone(), arg(a, 1)));
-            ix.get_mut().pushed(&k, e.as_ptr() as usize, e.len());
-        }
-        _ => unreachable!("`set` checked a Map and made its index"),
+    if let Kind::Map(e) = &mut o.borrow_mut().kind {
+        e.push((k, arg(a, 1)));
     }
     Ok(this.clone())
 }
@@ -1568,26 +1540,12 @@ fn map_set(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 fn set_add(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let o = coll(it, this)?;
     let k = norm(arg(a, 0));
-    {
-        let mut b = o.borrow_mut();
-        let Obj { kind, keys, .. } = &mut *b;
-        let (e, ix) = match (kind, keys.get_or_insert_with(Default::default)) {
-            (Kind::Set(e), ix) => (e, ix),
-            _ => unreachable!("`add` checked a Set"),
-        };
-        if ix.get_mut().find_value(e, &k).is_some() {
-            return Ok(this.clone());
-        }
+    if matches!(&o.borrow().kind, Kind::Set(e) if e.contains(&k)) {
+        return Ok(this.clone());
     }
     it.grow_elements(&o, 1)?;
-    let mut b = o.borrow_mut();
-    let Obj { kind, keys, .. } = &mut *b;
-    match (kind, keys) {
-        (Kind::Set(e), Some(ix)) => {
-            e.push(k.clone());
-            ix.get_mut().pushed(&k, e.as_ptr() as usize, e.len());
-        }
-        _ => unreachable!("`add` checked a Set and made its index"),
+    if let Kind::Set(e) = &mut o.borrow_mut().kind {
+        e.push(k);
     }
     Ok(this.clone())
 }
@@ -1596,8 +1554,8 @@ fn map_has(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let o = coll(it, this)?;
     let k = arg(a, 0);
     Ok(Val::Bool(match &o.borrow().kind {
-        Kind::Map(e) => find_entry(&o.borrow(), e, &k).is_some(),
-        Kind::Set(e) => find_value(&o.borrow(), e, &k).is_some(),
+        Kind::Map(e) => e.contains(&k),
+        Kind::Set(e) => e.contains(&k),
         _ => false,
     }))
 }
@@ -1605,23 +1563,11 @@ fn map_has(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 fn map_delete(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let o = coll(it, this)?;
     let k = arg(a, 0);
-    let mut b = o.borrow_mut();
-    let before;
-
-    let after = match &mut b.kind {
-        Kind::Map(e) => {
-            before = e.len();
-            e.retain(|(x, _)| !same_value_zero(x, &k));
-            e.len()
-        }
-        Kind::Set(e) => {
-            before = e.len();
-            e.retain(|x| !same_value_zero(x, &k));
-            e.len()
-        }
-        _ => return Ok(Val::Bool(false)),
-    };
-    Ok(Val::Bool(before != after))
+    Ok(Val::Bool(match &mut o.borrow_mut().kind {
+        Kind::Map(e) => e.remove(&k),
+        Kind::Set(e) => e.remove(&k),
+        _ => false,
+    }))
 }
 
 fn coll_clear(it: &mut Interp, this: &Val, _: &[Val]) -> R {
@@ -1644,15 +1590,30 @@ fn coll_size(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     Ok(Val::Num(n as f64))
 }
 
+/// A cursor at the first entry of the `Map` or `Set` `o`.
+pub(crate) fn coll_cursor(o: &ObjRef) -> Cursor {
+    match &mut o.borrow_mut().kind {
+        Kind::Map(e) => e.cursor(),
+        Kind::Set(e) => e.cursor(),
+        _ => Cursor::default(),
+    }
+}
+
+/// The entry of the `Map` or `Set` `o` at or after `cursor` (a `Set`'s value twice), which then
+/// points past it.
+pub(crate) fn coll_next(o: &ObjRef, cursor: &Cursor) -> Option<(Val, Val)> {
+    match &o.borrow().kind {
+        Kind::Map(e) => e.next(cursor),
+        Kind::Set(e) => e.next(cursor).map(|v| (v.clone(), v)),
+        _ => None,
+    }
+}
+
 fn coll_for_each(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let o = coll(it, this)?;
     let f = arg(a, 0);
-    let pairs: Vec<(Val, Val)> = match &o.borrow().kind {
-        Kind::Map(e) => e.iter().map(|(k, v)| (v.clone(), k.clone())).collect(),
-        Kind::Set(e) => e.iter().map(|v| (v.clone(), v.clone())).collect(),
-        _ => Vec::new(),
-    };
-    for (v, k) in pairs {
+    let cursor = coll_cursor(&o);
+    while let Some((k, v)) = coll_next(&o, &cursor) {
         it.call(&f, &arg(a, 1), &[v, k, this.clone()])?;
     }
     Ok(Val::Undef)
@@ -1680,42 +1641,52 @@ pub(crate) fn make_iter(it: &Interp, kind: &'static str, items: Vec<Val>) -> R {
     Ok(Val::Obj(it.alloc(Some(it.realm.proto(kind)), Kind::Iter(state, kind))?))
 }
 
-/// The kind of iterator a `Map` or a `Set` gives.
-fn coll_iter_kind(o: &ObjRef) -> &'static str {
-    if matches!(o.borrow().kind, Kind::Set(_)) { SET_ITERATOR } else { MAP_ITERATOR }
+/// The state of an iteration of the `Map` or `Set` `o` that gives `kind`.
+pub(crate) fn coll_iter(o: &ObjRef, kind: ArrayIterKind) -> Rc<std::cell::RefCell<CollIter>> {
+    let class = if matches!(o.borrow().kind, Kind::Set(_)) { SET_ITERATOR } else { MAP_ITERATOR };
+    let cursor = coll_cursor(o);
+    Rc::new(std::cell::RefCell::new(CollIter { source: Some(o.clone()), cursor, kind, class }))
+}
+
+/// An iterator of `this`, a `Map` or a `Set`, that gives `kind`.
+fn coll_iter_obj(it: &mut Interp, this: &Val, kind: ArrayIterKind) -> R {
+    let o = coll(it, this)?;
+    let state = coll_iter(&o, kind);
+    let class = state.borrow().class;
+    Ok(Val::Obj(it.alloc(Some(it.realm.proto(class)), Kind::CollIter(state))?))
+}
+
+/// The next value of an iteration of a `Map` or a `Set`; once done, it stays done.
+pub(crate) fn coll_iter_next(
+    it: &mut Interp,
+    state: &Rc<std::cell::RefCell<CollIter>>,
+) -> R<Option<Val>> {
+    let (source, cursor, kind) = {
+        let s = state.borrow();
+        let Some(source) = s.source.clone() else { return Ok(None) };
+        (source, s.cursor.clone(), s.kind)
+    };
+    let Some((k, v)) = coll_next(&source, &cursor) else {
+        state.borrow_mut().source = None;
+        return Ok(None);
+    };
+    Ok(Some(match kind {
+        ArrayIterKind::Keys => k,
+        ArrayIterKind::Values => v,
+        ArrayIterKind::Entries => it.array(vec![k, v])?,
+    }))
 }
 
 fn map_keys(it: &mut Interp, this: &Val, _: &[Val]) -> R {
-    let o = coll(it, this)?;
-    let items = match &o.borrow().kind {
-        Kind::Map(e) => e.iter().map(|(k, _)| k.clone()).collect(),
-        _ => Vec::new(),
-    };
-    make_iter(it, coll_iter_kind(&o), items)
+    coll_iter_obj(it, this, ArrayIterKind::Keys)
 }
 
 fn map_values(it: &mut Interp, this: &Val, _: &[Val]) -> R {
-    let o = coll(it, this)?;
-    let items = match &o.borrow().kind {
-        Kind::Map(e) => e.iter().map(|(_, v)| v.clone()).collect(),
-        Kind::Set(e) => e.clone(),
-        _ => Vec::new(),
-    };
-    make_iter(it, coll_iter_kind(&o), items)
+    coll_iter_obj(it, this, ArrayIterKind::Values)
 }
 
 fn coll_entries(it: &mut Interp, this: &Val, _: &[Val]) -> R {
-    let o = coll(it, this)?;
-    let pairs: Vec<(Val, Val)> = match &o.borrow().kind {
-        Kind::Map(e) => e.clone(),
-        Kind::Set(e) => e.iter().map(|v| (v.clone(), v.clone())).collect(),
-        _ => Vec::new(),
-    };
-    let mut items = Vec::new();
-    for (k, v) in pairs {
-        items.push(it.array(vec![k, v])?);
-    }
-    make_iter(it, coll_iter_kind(&o), items)
+    coll_iter_obj(it, this, ArrayIterKind::Entries)
 }
 
 /// `next` of an iterator of the kind `class`.
@@ -1730,6 +1701,11 @@ fn iter_next(it: &mut Interp, this: &Val, class: &str) -> R {
     let state = match kind {
         Kind::ArrayIter(state) => {
             let v = crate::arrays::array_iter_next(it, &state)?;
+            let done = v.is_none();
+            return iter_result(it, v.unwrap_or(Val::Undef), done);
+        }
+        Kind::CollIter(state) => {
+            let v = coll_iter_next(it, &state)?;
             let done = v.is_none();
             return iter_result(it, v.unwrap_or(Val::Undef), done);
         }

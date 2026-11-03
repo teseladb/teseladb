@@ -152,6 +152,8 @@ pub enum IterRec {
     Proto { it: Val, next: Val },
     /// An array, read at each step.
     Array(Rc<RefCell<ArrayIter>>),
+    /// A `Map` or a `Set`, read at each step.
+    Coll(Rc<RefCell<crate::value::CollIter>>),
 }
 
 /// The invocation's limits.
@@ -527,20 +529,14 @@ impl<'c> Interp<'c> {
 
     pub fn alloc(&self, proto: Option<ObjRef>, kind: Kind) -> R<ObjRef> {
         let size = Cost::object().plus(match &kind {
-            Kind::Array(v) | Kind::Set(v) => Cost::elements(v.len()),
+            Kind::Array(v) => Cost::elements(v.len()),
+            Kind::Set(v) => Cost::elements(v.len()),
             Kind::Map(v) => Cost::elements(v.len() * 2),
             _ => Cost::ZERO,
         });
         self.charge(size)?;
         Ok(ObjRef(Rc::new(ObjCell {
-            obj: RefCell::new(Obj {
-                proto,
-                props: Vec::new(),
-                kind,
-                extensible: true,
-                locks: 0,
-                keys: None,
-            }),
+            obj: RefCell::new(Obj { proto, props: Vec::new(), kind, extensible: true, locks: 0 }),
             charged: std::cell::Cell::new(size),
             budget: self.budget.clone(),
             shared: std::cell::Cell::new(false),
@@ -2096,12 +2092,24 @@ impl<'c> Interp<'c> {
             let state = ArrayIter { source: Some(v.clone()), pos: 0, kind: ArrayIterKind::Values };
             return Ok(IterRec::Array(Rc::new(RefCell::new(state))));
         }
+        if let Val::Obj(o) = v {
+            let kind = match &o.borrow().kind {
+                Kind::Map(_) => Some(ArrayIterKind::Entries),
+                Kind::Set(_) => Some(ArrayIterKind::Values),
+                _ => None,
+            };
+            if let Some(kind) = kind {
+                return Ok(IterRec::Coll(crate::builtins::coll_iter(o, kind)));
+            }
+            if let Kind::CollIter(state) = &o.borrow().kind {
+                return Ok(IterRec::Coll(state.clone()));
+            }
+        }
         let fast = match v {
             Val::Str(_) => true,
-            Val::Obj(o) => matches!(
-                o.borrow().kind,
-                Kind::Typed(_) | Kind::Set(_) | Kind::Map(_) | Kind::Iter(..) | Kind::Arguments(_)
-            ),
+            Val::Obj(o) => {
+                matches!(o.borrow().kind, Kind::Typed(_) | Kind::Iter(..) | Kind::Arguments(_))
+            }
             _ => false,
         };
         if fast {
@@ -2133,6 +2141,7 @@ impl<'c> Interp<'c> {
                 Ok(v)
             }
             IterRec::Array(state) => crate::arrays::array_iter_next(self, state),
+            IterRec::Coll(state) => crate::builtins::coll_iter_next(self, state),
             IterRec::Proto { it, next } => {
                 let (it, next) = (it.clone(), next.clone());
                 let r = self.call(&next, &it, &[])?;
@@ -2187,11 +2196,18 @@ impl<'c> Interp<'c> {
                         crate::typed::validate(self, v)?;
                         return Ok(crate::typed::elements(&t));
                     }
-                    Kind::Set(items) => return Ok(items),
+                    Kind::Set(items) => return Ok(items.iter().cloned().collect()),
                     Kind::Map(entries) => {
                         let mut out = Vec::with_capacity(entries.len());
-                        for (k, x) in entries {
-                            out.push(self.array(vec![k, x])?);
+                        for (k, x) in entries.iter() {
+                            out.push(self.array(vec![k.clone(), x.clone()])?);
+                        }
+                        return Ok(out);
+                    }
+                    Kind::CollIter(state) => {
+                        let mut out = Vec::new();
+                        while let Some(x) = crate::builtins::coll_iter_next(self, &state)? {
+                            out.push(x);
                         }
                         return Ok(out);
                     }

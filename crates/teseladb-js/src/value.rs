@@ -191,6 +191,17 @@ pub struct ArrayIter {
     pub kind: ArrayIterKind,
 }
 
+/// An iterator of a `Map` or a `Set`: the collection (`None` once it is done), where it is in
+/// its entries, what it gives and its class (`Map Iterator` or `Set Iterator`). Entries added
+/// while it goes are visited and deleted ones are not (measured on a `refrouter` 9.0.4 on 03-11).
+#[derive(Debug)]
+pub struct CollIter {
+    pub source: Option<ObjRef>,
+    pub cursor: crate::keyed::Cursor,
+    pub kind: ArrayIterKind,
+    pub class: &'static str,
+}
+
 /// What kind of object.
 #[derive(Clone, Debug)]
 pub enum Kind {
@@ -203,8 +214,10 @@ pub enum Kind {
     Num(f64),
     BigInt(Rc<crate::bigint::BigInt>),
     Str(Name),
-    Map(Vec<(Val, Val)>),
-    Set(Vec<Val>),
+    /// A `Map`: its entries in insertion order.
+    Map(crate::keyed::Table<(Val, Val)>),
+    /// A `Set`: its values in insertion order.
+    Set(crate::keyed::Table<Val>),
     RegExp(Name, Name),
     Bson(Bson),
     /// An `arguments` object; in a sloppy function with a plain parameter list its first
@@ -239,6 +252,8 @@ pub enum Kind {
     Iter(Rc<RefCell<(Vec<Val>, usize)>>, &'static str),
     /// An array iterator, which reads its array at each step.
     ArrayIter(Rc<RefCell<ArrayIter>>),
+    /// An iterator of a `Map` or a `Set`, which reads its entries at each step.
+    CollIter(Rc<RefCell<CollIter>>),
     /// A `Symbol` object (`Object(Symbol())`): its symbol.
     Symbol(Val),
 }
@@ -253,22 +268,12 @@ pub struct Obj {
     /// What `Object.seal` and `Object.freeze` did to the elements an array holds in its kind
     /// ([`LENGTH_FIXED`], [`ELEMENTS_SEALED`], [`ELEMENTS_FROZEN`]).
     pub locks: u8,
-    /// The index of the keys of a `Map` or a `Set` ([`crate::keyed`]), made by its first `set`
-    /// or `add`.
-    pub keys: Option<Box<std::cell::RefCell<crate::keyed::KeyIndex>>>,
 }
 
 impl Obj {
     /// An object with nothing in it.
     fn empty() -> Obj {
-        Obj {
-            proto: None,
-            props: Vec::new(),
-            kind: Kind::Ordinary,
-            extensible: true,
-            locks: 0,
-            keys: None,
-        }
+        Obj { proto: None, props: Vec::new(), kind: Kind::Ordinary, extensible: true, locks: 0 }
     }
 }
 

@@ -4,6 +4,7 @@
 
 use crate::builtins::method;
 use crate::interp::{Interp, R};
+use crate::keyed::Table;
 use crate::value::*;
 
 fn arg(a: &[Val], i: usize) -> Val {
@@ -73,23 +74,53 @@ impl Other {
     }
 }
 
-/// The elements of `this`, a `Set` (`union method called on incompatible Map` otherwise).
-fn this_set(it: &mut Interp, this: &Val) -> R<Vec<Val>> {
+/// `this`, a `Set` (`union method called on incompatible Map` otherwise).
+fn this_set(it: &mut Interp, this: &Val) -> R<ObjRef> {
     if let Val::Obj(o) = this
-        && let Kind::Set(e) = &o.borrow().kind
+        && let Kind::Set(_) = &o.borrow().kind
     {
-        return Ok(e.clone());
+        return Ok(o.clone());
     }
     let name = it.native.clone();
     let class = crate::builtins::class_name(this);
     it.type_error(&format!("{name} method called on incompatible {class}"))
 }
 
-fn contains(items: &[Val], v: &Val) -> bool {
-    items.iter().any(|x| same_value_zero(x, v))
+/// The values of the `Set` `o` now.
+fn values(o: &ObjRef) -> Table<Val> {
+    match &o.borrow().kind {
+        Kind::Set(e) => e.clone(),
+        _ => Table::default(),
+    }
 }
 
-fn new_set(it: &mut Interp, items: Vec<Val>) -> R {
+/// How many values the `Set` `o` has now.
+fn size(o: &ObjRef) -> f64 {
+    match &o.borrow().kind {
+        Kind::Set(e) => e.len() as f64,
+        _ => 0.0,
+    }
+}
+
+/// Whether the `Set` `o` has `v` now.
+fn has(o: &ObjRef, v: &Val) -> bool {
+    matches!(&o.borrow().kind, Kind::Set(e) if e.contains(v))
+}
+
+/// Calls `f` with each value of the `Set` `o` as it goes: values added meanwhile are visited and
+/// deleted ones are not (ECMA-262 §24.2.4: `thisSize` is read again after each call), until `f`
+/// says to stop.
+fn each_live(it: &mut Interp, o: &ObjRef, mut f: impl FnMut(&mut Interp, Val) -> R<bool>) -> R<()> {
+    let cursor = crate::builtins::coll_cursor(o);
+    while let Some((v, _)) = crate::builtins::coll_next(o, &cursor) {
+        if !f(it, v)? {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn new_set(it: &mut Interp, items: Table<Val>) -> R {
     let o = it.alloc(Some(it.realm.set.clone()), Kind::Ordinary)?;
     it.grow_elements(&o, items.len())?;
     o.borrow_mut().kind = Kind::Set(items);
@@ -97,10 +128,11 @@ fn new_set(it: &mut Interp, items: Vec<Val>) -> R {
 }
 
 fn union(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    let mut out = this_set(it, this)?;
+    let o = this_set(it, this)?;
     let other = other_set(it, &arg(a, 0))?;
+    let mut out = values(&o);
     other.each(it, |_, v| {
-        if !contains(&out, &v) {
+        if !out.contains(&v) {
             out.push(v);
         }
         Ok(true)
@@ -109,18 +141,19 @@ fn union(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 }
 
 fn intersection(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    let mine = this_set(it, this)?;
+    let o = this_set(it, this)?;
     let other = other_set(it, &arg(a, 0))?;
-    let mut out = Vec::new();
-    if mine.len() as f64 <= other.size {
-        for v in mine {
-            if other.has(it, &v)? && !contains(&out, &v) {
+    let mut out = Table::default();
+    if size(&o) <= other.size {
+        each_live(it, &o, |it, v| {
+            if other.has(it, &v)? && !out.contains(&v) {
                 out.push(v);
             }
-        }
+            Ok(true)
+        })?;
     } else {
         other.each(it, |_, v| {
-            if contains(&mine, &v) && !contains(&out, &v) {
+            if has(&o, &v) && !out.contains(&v) {
                 out.push(v);
             }
             Ok(true)
@@ -130,18 +163,19 @@ fn intersection(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 }
 
 fn difference(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    let mine = this_set(it, this)?;
+    let o = this_set(it, this)?;
     let other = other_set(it, &arg(a, 0))?;
-    let mut out = mine.clone();
-    if mine.len() as f64 <= other.size {
-        for v in mine {
+    let mut out = values(&o);
+    if out.len() as f64 <= other.size {
+        // The values of the copy, which `has` cannot change.
+        for v in out.iter().cloned().collect::<Vec<_>>() {
             if other.has(it, &v)? {
-                out.retain(|x| !same_value_zero(x, &v));
+                out.remove(&v);
             }
         }
     } else {
         other.each(it, |_, v| {
-            out.retain(|x| !same_value_zero(x, &v));
+            out.remove(&v);
             Ok(true)
         })?;
     }
@@ -149,13 +183,13 @@ fn difference(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 }
 
 fn symmetric_difference(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    let mine = this_set(it, this)?;
+    let o = this_set(it, this)?;
     let other = other_set(it, &arg(a, 0))?;
-    let mut out = mine.clone();
+    let mut out = values(&o);
     other.each(it, |_, v| {
-        if contains(&mine, &v) {
-            out.retain(|x| !same_value_zero(x, &v));
-        } else if !contains(&out, &v) {
+        if has(&o, &v) {
+            out.remove(&v);
+        } else if !out.contains(&v) {
             out.push(v);
         }
         Ok(true)
@@ -164,49 +198,48 @@ fn symmetric_difference(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 }
 
 fn is_subset_of(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    let mine = this_set(it, this)?;
+    let o = this_set(it, this)?;
     let other = other_set(it, &arg(a, 0))?;
-    if mine.len() as f64 > other.size {
+    if size(&o) > other.size {
         return Ok(Val::Bool(false));
     }
-    for v in mine {
-        if !other.has(it, &v)? {
-            return Ok(Val::Bool(false));
-        }
-    }
-    Ok(Val::Bool(true))
+    let mut all = true;
+    each_live(it, &o, |it, v| {
+        all = other.has(it, &v)?;
+        Ok(all)
+    })?;
+    Ok(Val::Bool(all))
 }
 
 fn is_superset_of(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    let mine = this_set(it, this)?;
+    let o = this_set(it, this)?;
     let other = other_set(it, &arg(a, 0))?;
-    if (mine.len() as f64) < other.size {
+    if size(&o) < other.size {
         return Ok(Val::Bool(false));
     }
     let mut all = true;
     other.each(it, |_, v| {
-        all = contains(&mine, &v);
+        all = has(&o, &v);
         Ok(all)
     })?;
     Ok(Val::Bool(all))
 }
 
 fn is_disjoint_from(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    let mine = this_set(it, this)?;
+    let o = this_set(it, this)?;
     let other = other_set(it, &arg(a, 0))?;
-    if mine.len() as f64 <= other.size {
-        for v in mine {
-            if other.has(it, &v)? {
-                return Ok(Val::Bool(false));
-            }
-        }
-        return Ok(Val::Bool(true));
-    }
     let mut disjoint = true;
-    other.each(it, |_, v| {
-        disjoint = !contains(&mine, &v);
-        Ok(disjoint)
-    })?;
+    if size(&o) <= other.size {
+        each_live(it, &o, |it, v| {
+            disjoint = !other.has(it, &v)?;
+            Ok(disjoint)
+        })?;
+    } else {
+        other.each(it, |_, v| {
+            disjoint = !has(&o, &v);
+            Ok(disjoint)
+        })?;
+    }
     Ok(Val::Bool(disjoint))
 }
 
@@ -217,17 +250,17 @@ fn group_by(it: &mut Interp, _: &Val, a: &[Val]) -> R {
         return it.type_error(&format!("{} is not a function", it.show(&f)));
     }
     let items = it.iterate(&arg(a, 0))?;
-    let mut groups: Vec<(Val, Vec<Val>)> = Vec::new();
+    let mut groups: Table<(Val, Vec<Val>)> = Table::default();
     for (i, v) in items.into_iter().enumerate() {
         let k = it.call(&f, &Val::Undef, &[v.clone(), Val::Num(i as f64)])?;
         let k = if matches!(k, Val::Num(n) if n == 0.0) { Val::Num(0.0) } else { k };
-        match groups.iter_mut().find(|(x, _)| same_value_zero(x, &k)) {
+        match groups.get_mut(&k) {
             Some((_, list)) => list.push(v),
             None => groups.push((k, vec![v])),
         }
     }
-    let mut entries = Vec::with_capacity(groups.len());
-    for (k, list) in groups {
+    let mut entries = Table::default();
+    for (k, list) in groups.iter().cloned() {
         entries.push((k, it.array(list)?));
     }
     let o = it.alloc(Some(it.realm.map.clone()), Kind::Ordinary)?;
