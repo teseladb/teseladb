@@ -13,7 +13,7 @@ use teseladb_bson::{Document, RawDoc, Value};
 use super::admin::admin_only;
 use super::{Backend, Ctx, lock};
 use crate::concerns::{Level, ReadConcernArgs, WArg, WriteConcernArgs};
-use crate::error::{BAD_VALUE, CommandError, ILLEGAL_OPERATION, UNKNOWN_REPL_WRITE_CONCERN};
+use crate::error::{BAD_VALUE, Code, CommandError, ILLEGAL_OPERATION, UNKNOWN_REPL_WRITE_CONCERN};
 use crate::types::wrong_type;
 
 /// `getDefaultRWConcern`.
@@ -288,8 +288,22 @@ pub(crate) fn raw_names<B: Backend + ?Sized>(backend: &mut B) -> Result<Vec<Stri
         .collect())
 }
 
-/// An error of `fsync` as a `refrouter` gives it: each shard's answer in `all.raw`.
-fn fsync_error<B: Backend + ?Sized>(backend: &mut B, e: CommandError) -> CommandError {
+/// The failure of a command a `refrouter` sent to every shard, with the shards' answers in `raw`:
+/// `raw`, `code`, `codeName`, `ok` and `errmsg`, in that order (measured on 9.0.4 with
+/// `fsyncUnlock` and `appendOplogNote`).
+pub(crate) fn raw_failure(raw: Document, code: Code, errmsg: &str) -> Document {
+    Document::new()
+        .with("raw", raw)
+        .with("code", code.code)
+        .with("codeName", code.name)
+        .with("ok", 0.0)
+        .with("errmsg", errmsg)
+}
+
+/// An error of `fsync` as a `refrouter` 9.0.4 gives it (measured on 03-11-2026): `numFiles`, each
+/// shard's answer in `all.raw` with the code beside it, `ok: 0` and `errmsg`, without a code of
+/// its own.
+fn fsync_error<B: Backend + ?Sized>(backend: &mut B, e: CommandError) -> Document {
     let names = raw_names(backend).unwrap_or_default();
     let each = Document::new()
         .with("ok", 0.0)
@@ -299,7 +313,7 @@ fn fsync_error<B: Backend + ?Sized>(backend: &mut B, e: CommandError) -> Command
     let raw = names.into_iter().fold(Document::new(), |d, n| d.with(n, each.clone()));
     let all =
         Document::new().with("raw", raw).with("code", e.code.code).with("codeName", e.code.name);
-    CommandError { extra: Document::new().with("numFiles", 1).with("all", all), ..e }
+    Document::new().with("numFiles", 1).with("all", all).with("ok", 0.0).with("errmsg", e.errmsg)
 }
 
 fn unknown_field(name: &str, k: &str) -> CommandError {
@@ -331,10 +345,10 @@ pub fn fsync<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comm
             }
             ("lock", v) => {
                 let e = crate::types::wrong_types(&format!("{FSYNC}.lock"), v, &LOCK_TYPES);
-                return Err(fsync_error(ctx.backend, e));
+                return Ok(fsync_error(ctx.backend, e));
             }
             (k, _) if generic(k) => {}
-            (k, _) => return Err(fsync_error(ctx.backend, unknown_field(FSYNC, k))),
+            (k, _) => return Ok(fsync_error(ctx.backend, unknown_field(FSYNC, k))),
         }
     }
     if lock {

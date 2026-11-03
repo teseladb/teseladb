@@ -98,7 +98,10 @@ fn fsync_answers_for_each_shard_and_its_errors_too() {
     assert!(ok(&r), "{r:?}");
     assert_eq!(shard(&r, "s0/s0.cluster:27018").get("ok"), Some(&Value::Int32(1)));
     let r = m.run(ADMIN, doc(&[("fsync", Value::Int32(1)), ("bogus", Value::Int32(1))]));
-    assert_eq!(code(&r), Some(&Value::Int32(UNKNOWN_FIELD)), "{r:?}");
+    assert_eq!(code(&r), None, "{r:?}");
+    assert_eq!(r.get("ok"), Some(&Value::Double(0.0)));
+    let Some(Value::Document(all)) = r.get("all") else { panic!("{r:?}") };
+    assert_eq!(code(all), Some(&Value::Int32(UNKNOWN_FIELD)), "{r:?}");
     let s1 = shard(&r, "s1/s1.cluster:27018");
     assert_eq!(s1.get("code"), Some(&Value::Int32(UNKNOWN_FIELD)));
 }

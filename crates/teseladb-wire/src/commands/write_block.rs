@@ -5,6 +5,8 @@
 
 use std::collections::BTreeMap;
 
+use teseladb_auth::actions::ActionType;
+use teseladb_auth::authz::{self, Target};
 use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_keys::space::KeyParts;
 
@@ -96,6 +98,16 @@ fn user_db(db: &str) -> bool {
     ![ADMIN_DB, CONFIG_DB, LOCAL_DB].contains(&db)
 }
 
+/// Whether the running command's user may write while user writes are blocked: its privileges
+/// have `bypassWriteBlockingMode` on the cluster (`root` has it through `restore`). They are the
+/// operation's own, kept with it in the node's table for as long as it runs, also while it
+/// waits. A node that does not authorize (`--insecure`) blocks everyone, as a RefDb without
+/// `--auth` (measured on a `refnode` 9.0.4 on 03-11-2026).
+fn bypasses<B: Backend + ?Sized>(b: &B) -> bool {
+    b.privileges()
+        .is_some_and(|p| authz::allows(&p, &Target::Cluster, ActionType::BypassWriteBlockingMode))
+}
+
 /// Waits while an `fsync` lock holds the writes back; `MaxTimeMSExpired` once the operation's
 /// time runs out.
 fn unlocked<B: Backend + ?Sized>(b: &mut B) -> Result<WriteGate, CommandError> {
@@ -112,9 +124,10 @@ fn unlocked<B: Backend + ?Sized>(b: &mut B) -> Result<WriteGate, CommandError> {
 
 /// Lets write `bound` go: it waits for the locks, and fails if user writes are blocked, it is a
 /// write to a collection of a user database and it changes something (a delete or an update
-/// that matches nothing goes, as on a `refrouter` 9.0.4).
+/// that matches nothing goes, as on a `refrouter` 9.0.4). A user with `bypassWriteBlockingMode`
+/// writes anyway ([`bypasses`]).
 pub fn data<B: Backend + ?Sized>(b: &mut B, bound: &Bound) -> Result<(), CommandError> {
-    if !unlocked(b)?.user_writes_blocked {
+    if !unlocked(b)?.user_writes_blocked || bypasses(b) {
         return Ok(());
     }
     let keys = bound.latch_keys();
@@ -136,7 +149,7 @@ pub fn data<B: Backend + ?Sized>(b: &mut B, bound: &Bound) -> Result<(), Command
 
 /// Lets a change of the catalog of database `db` go, as [`data`] does.
 pub fn ddl<B: Backend + ?Sized>(b: &mut B, db: &str) -> Result<(), CommandError> {
-    match unlocked(b)?.user_writes_blocked && user_db(db) {
+    match unlocked(b)?.user_writes_blocked && user_db(db) && !bypasses(b) {
         true => Err(CommandError::new(USER_WRITES_BLOCKED, BLOCKED_DDL)),
         false => Ok(()),
     }
@@ -167,7 +180,8 @@ pub fn lock<B: Backend + ?Sized>(b: &mut B) -> Result<Document, CommandError> {
         .with("ok", 1.0))
 }
 
-/// `fsyncUnlock`: one lock less.
+/// `fsyncUnlock`: one lock less. Without a lock, every node's `IllegalOperation` under `raw`, in
+/// the order of a `refrouter` 9.0.4's answer (measured on 03-11-2026).
 pub fn fsync_unlock<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     admin_only(FSYNC_UNLOCK, ctx.db)?;
     let b = &mut *ctx.backend;
@@ -180,8 +194,7 @@ pub fn fsync_unlock<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Documen
             .with("code", ILLEGAL_OPERATION.code)
             .with("codeName", ILLEGAL_OPERATION.name);
         let raw = by_node(b, &each)?;
-        let e = CommandError::new(ILLEGAL_OPERATION, NOT_LOCKED);
-        return Err(CommandError { extra: Document::new().with("raw", raw), ..e });
+        return Ok(super::cluster_admin::raw_failure(raw, ILLEGAL_OPERATION, NOT_LOCKED));
     }
     let want = WriteGate { fsync_locks: count - 1, ..now };
     store(b, (FSYNC_LOCKS, Value::Int64(i64::from(count - 1))), want)?;

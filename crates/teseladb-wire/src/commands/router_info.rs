@@ -189,12 +189,7 @@ pub fn append_oplog_note<B: Backend + ?Sized>(
     }
     Ok(match each {
         None => Document::new().with("raw", raw).with("ok", 1.0),
-        Some(e) => Document::new()
-            .with("raw", raw)
-            .with("code", e.code.code)
-            .with("codeName", e.code.name)
-            .with("ok", 0.0)
-            .with("errmsg", ""),
+        Some(e) => super::cluster_admin::raw_failure(raw, e.code, ""),
     })
 }
 

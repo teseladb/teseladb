@@ -7,7 +7,7 @@ use common::{Mem, doc, field};
 use teseladb_bson::{Document, Value};
 use teseladb_wire::commands::diagnostics::{
     ANNOUNCED_VERSION, ConnectionCounts, HostFacts, LogTail, NetworkCounts, OpCounters,
-    ProcessFacts, ResourceUse, listed,
+    ProcessFacts, ResourceUse, ServerCertificate, listed,
 };
 use teseladb_wire::commands::{is_data_command, lock};
 use teseladb_wire::connection::{Connection, Request};
@@ -76,6 +76,7 @@ fn facts() -> ProcessFacts {
             requests: 5,
             tls_handshakes: 4,
             tls_handshake_ms: 12,
+            tls_handshake_micros: 12_500,
         },
         resources: ResourceUse {
             resident_bytes: 121 << 20,
@@ -90,6 +91,7 @@ fn facts() -> ProcessFacts {
         fs_total: 4 << 30,
         log: LogTail { total: 3, lines: vec!["a".into(), "b".into()] },
         startup_warnings: LogTail { total: 1, lines: vec!["w".into()] },
+        server_certificate: None,
     }
 }
 
@@ -201,6 +203,10 @@ fn server_status_counts_and_hides_the_sections_asked() {
     assert_eq!(tls.get("1.2"), Some(&Value::Int64(0)));
     assert_eq!(field(&r, "metrics.network.totalIngressTLSConnections"), &Value::Int64(4));
     assert_eq!(field(&r, "metrics.network.totalIngressTLSHandshakeTimeMillis"), &Value::Int64(12));
+    assert_eq!(
+        field(&r, "metrics.network.averageTimeToCompletedTLSHandshakeMicros"),
+        &Value::Double(3125.0)
+    );
     assert_eq!(field(&r, "defaultRWConcern.defaultWriteConcern.w"), &s("majority"));
     assert_eq!(field(&r, "defaultRWConcern.defaultWriteConcern.wtimeout"), &Value::Int32(0));
     assert_eq!(field(&r, "health.state"), &s("Ok"));
@@ -669,4 +675,44 @@ fn get_diagnostic_data_samples_the_node() {
         field(&r, "errmsg"),
         &s("getDiagnosticData may only be run against the admin database.")
     );
+}
+
+/// A node with TLS names its certificate in `security`, and the average TLS handshake goes first
+/// in `metrics.network`; without handshakes there is no average (measured on a `refrouter` 9.0.4
+/// with `--tlsMode allowTLS` on 03-11-2026).
+#[test]
+fn server_status_shows_the_server_certificate_and_the_tls_handshakes() {
+    let cert = ServerCertificate { subject: "CN=localhost".into(), expires_ms: 1_793_976_060_000 };
+    let mut m =
+        Mem { facts: ProcessFacts { server_certificate: Some(cert), ..facts() }, ..Mem::new() };
+    let r = m.run("admin", doc(&[("serverStatus", 1.into())]));
+    let Some(Value::Document(sec)) = r.get("security") else { panic!("{r:?}") };
+    let names: Vec<&str> = sec.iter().map(|(k, _)| k).collect();
+    assert_eq!(
+        names,
+        ["authentication", "SSLServerSubjectName", "SSLServerCertificateExpirationDate"]
+    );
+    assert_eq!(sec.get("SSLServerSubjectName"), Some(&s("CN=localhost")));
+    assert_eq!(
+        sec.get("SSLServerCertificateExpirationDate"),
+        Some(&Value::DateTime(1_793_976_060_000))
+    );
+    let Value::Document(net) = field(&r, "metrics.network") else { panic!("{r:?}") };
+    let names: Vec<&str> = net.iter().map(|(k, _)| k).collect();
+    assert_eq!(
+        names,
+        [
+            "averageTimeToCompletedTLSHandshakeMicros",
+            "totalIngressTLSConnections",
+            "totalIngressTLSHandshakeTimeMillis"
+        ]
+    );
+    let mut plain = ProcessFacts { server_certificate: None, ..facts() };
+    plain.network.tls_handshakes = 0;
+    let mut m = Mem { facts: plain, ..Mem::new() };
+    let r = m.run("admin", doc(&[("serverStatus", 1.into())]));
+    let Some(Value::Document(sec)) = r.get("security") else { panic!("{r:?}") };
+    assert_eq!(sec.iter().map(|(k, _)| k).collect::<Vec<_>>(), ["authentication"]);
+    let Value::Document(net) = field(&r, "metrics.network") else { panic!("{r:?}") };
+    assert!(net.get("averageTimeToCompletedTLSHandshakeMicros").is_none(), "{net:?}");
 }

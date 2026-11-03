@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use teseladb_bson::{Document, RawDoc};
 use teseladb_wire::commands::diagnostics::{
-    ConnectionCounts, HostFacts, NetworkCounts, ProcessFacts, ResourceUse,
+    ConnectionCounts, HostFacts, NetworkCounts, ProcessFacts, ResourceUse, ServerCertificate,
 };
 
 use crate::log;
@@ -47,6 +47,8 @@ pub struct PortStats {
     pub tls_handshakes: AtomicI64,
     /// Milliseconds they took, summed.
     pub tls_handshake_ms: AtomicI64,
+    /// Microseconds they took, summed.
+    pub tls_handshake_micros: AtomicI64,
 }
 
 impl PortStats {
@@ -67,6 +69,7 @@ pub struct Diag {
     start_ms: u64,
     process: ProcessConfig,
     certificates: Option<Arc<crate::certs::Certificates>>,
+    tls: Option<crate::tls_port::TlsPort>,
     ldap: Option<crate::ldap_client::SharedLdap>,
     sts: Option<Arc<crate::sts_client::Sts>>,
     oidc: Option<Arc<crate::oidc_client::Oidc>>,
@@ -99,6 +102,7 @@ impl Diag {
             start_ms: wall_ms(),
             process,
             certificates: None,
+            tls: None,
             ldap: None,
             sts: None,
             oidc: None,
@@ -152,6 +156,22 @@ impl Diag {
     /// The facts with what `rotateCertificates` loads again.
     pub fn with_certificates(self, certificates: Option<Arc<crate::certs::Certificates>>) -> Diag {
         Diag { certificates, ..self }
+    }
+
+    /// The facts with the client port's TLS, whose certificate `serverStatus` names.
+    pub fn with_tls(self, tls: crate::tls_port::TlsPort) -> Diag {
+        Diag { tls: Some(tls), ..self }
+    }
+
+    /// The certificate the client port presents now (after a rotation, the new one); `None`
+    /// without TLS.
+    fn server_certificate(&self) -> Option<ServerCertificate> {
+        let config = self.tls.as_ref()?.config()?;
+        let cert = config.identity.chain.first()?;
+        Some(ServerCertificate {
+            subject: cert.subject.to_rfc4514(),
+            expires_ms: cert.not_after.saturating_mul(1000),
+        })
     }
 
     /// What `rotateCertificates` loads again; `None` on a node without a PKI.
@@ -244,6 +264,7 @@ impl Diag {
                 requests: load(&s.requests),
                 tls_handshakes: load(&s.tls_handshakes),
                 tls_handshake_ms: load(&s.tls_handshake_ms),
+                tls_handshake_micros: load(&s.tls_handshake_micros),
             },
             resources: Diag::resources(),
             fs_used,
@@ -256,6 +277,7 @@ impl Diag {
                 total: warn_total,
                 lines: warn_lines,
             },
+            server_certificate: self.server_certificate(),
         }
     }
 }

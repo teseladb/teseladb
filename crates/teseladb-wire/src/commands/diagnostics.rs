@@ -5,6 +5,7 @@
 //! that describe parts TeselaDB does not have (RefEngine, anotherproduct, shards) are left out, as
 //! the divergences of 006 record.
 
+use teseladb_auth::privileges::Privilege;
 use teseladb_auth::users::RoleName;
 use teseladb_bson::{Document, Value};
 use teseladb_keys::KeyBuilder;
@@ -90,6 +91,17 @@ pub struct NetworkCounts {
     pub tls_handshakes: i64,
     /// Milliseconds they took, summed.
     pub tls_handshake_ms: i64,
+    /// Microseconds they took, summed: their average goes in `metrics.network`.
+    pub tls_handshake_micros: i64,
+}
+
+/// The certificate the client port presents with TLS (`security` of `serverStatus`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ServerCertificate {
+    /// Its subject, as RFC 4514 writes it (`CN=localhost`).
+    pub subject: String,
+    /// Its `notAfter`, in milliseconds since the Unix epoch.
+    pub expires_ms: i64,
 }
 
 /// What `getrusage(2)` and the operating system say of the process.
@@ -196,6 +208,8 @@ pub struct ProcessFacts {
     pub log: LogTail,
     /// The `startupWarnings` log.
     pub startup_warnings: LogTail,
+    /// The client port's certificate; `None` without TLS.
+    pub server_certificate: Option<ServerCertificate>,
 }
 
 impl ProcessFacts {
@@ -364,7 +378,7 @@ pub fn server_status<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Docume
         ("opLatencies", status.latencies()),
         ("opWorkingTime", status.latencies()),
         ("opcounters", opcounters(&counters)),
-        ("security", status.security()),
+        ("security", security(status.security(), facts.server_certificate.as_ref())),
         ("transactions", status.transactions()),
         ("transportSecurity", transport_security(&facts.network)),
         ("mem", mem(&facts.resources)),
@@ -395,6 +409,17 @@ fn default_rw_concern(now: i64) -> Document {
         .with("localUpdateWallClockTime", Value::DateTime(now))
 }
 
+/// `security`: the authentications, then the client port's certificate when it has TLS (measured
+/// on a `refrouter` 9.0.4 with `--tlsMode allowTLS` on 03-11-2026).
+fn security(authentication: Document, cert: Option<&ServerCertificate>) -> Document {
+    match cert {
+        None => authentication,
+        Some(c) => authentication
+            .with("SSLServerSubjectName", c.subject.as_str())
+            .with("SSLServerCertificateExpirationDate", Value::DateTime(c.expires_ms)),
+    }
+}
+
 /// `transportSecurity`: connections by TLS version; the client port speaks TLS 1.3 only.
 fn transport_security(n: &NetworkCounts) -> Document {
     Document::new()
@@ -414,7 +439,14 @@ fn metrics(
 ) -> Document {
     let names =
         COMMANDS.iter().map(|c| c.name).filter(|name| tests || *name != "configureFailPoint");
-    let network = Document::new()
+    let mut network = Document::new();
+    // Once a client completed a handshake (measured on a `refrouter` 9.0.4). RefDb's value is its
+    // own running average; TeselaDB gives the mean of every handshake.
+    if n.tls_handshakes > 0 {
+        let mean = n.tls_handshake_micros as f64 / n.tls_handshakes as f64;
+        network.push("averageTimeToCompletedTLSHandshakeMicros", mean);
+    }
+    let network = network
         .with("totalIngressTLSConnections", Value::Int64(n.tls_handshakes))
         .with("totalIngressTLSHandshakeTimeMillis", Value::Int64(n.tls_handshake_ms));
     Document::new()
@@ -509,40 +541,52 @@ fn extra_info(r: &ResourceUse) -> Document {
 pub(crate) fn authenticated_roles<B: Backend + ?Sized>(
     backend: &mut B,
 ) -> Result<Vec<RoleName>, CommandError> {
-    let Some(name) = backend.authenticated_user() else { return Ok(Vec::new()) };
+    Ok(authenticated_grants(backend)?.0)
+}
+
+/// The roles of the running command's user ([`authenticated_roles`]) and the privileges they
+/// give, merged by resource; none without a user.
+fn authenticated_grants<B: Backend + ?Sized>(
+    backend: &mut B,
+) -> Result<(Vec<RoleName>, Vec<Privilege>), CommandError> {
+    let Some(name) = backend.authenticated_user() else { return Ok((Vec::new(), Vec::new())) };
     let direct = match backend.authenticated_roles() {
         // `__system` lists no role (measured on `refnode` 9.0.4, 013 FR-034).
         _ if super::auth::is_internal(&name) => Vec::new(),
         Some(r) => r,
         None => backend.user(&name)?.map(|u| u.roles).unwrap_or_default(),
     };
-    let inherited = super::roles::Graph::new(&mut *backend).inherit(&direct, None)?.roles;
+    let inherited = super::roles::Graph::new(&mut *backend).inherit(&direct, None)?;
     let mut all = direct;
-    for r in inherited {
+    for r in inherited.roles {
         if !all.contains(&r) {
             all.push(r);
         }
     }
-    Ok(all)
+    Ok((all, inherited.privileges))
 }
 
-/// `connectionStatus`: no user is authenticated until 013; a new UUID on each call, as 9.0.4.
+/// `connectionStatus`: the user, its roles and, with `showPrivileges`, their privileges (013); a
+/// new UUID on each call, as 9.0.4.
 pub fn connection_status<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
 ) -> Result<Document, CommandError> {
     let privileges = ctx.cmd.get("showPrivileges").and_then(crate::types::truthy) == Some(true);
-    let (mut users, mut roles) = (Vec::<Value>::new(), Vec::<Value>::new());
+    let (mut users, mut roles, mut granted) =
+        (Vec::<Value>::new(), Vec::<Value>::new(), Vec::<Value>::new());
     if let Some(name) = ctx.backend.authenticated_user() {
-        roles = authenticated_roles(&mut *ctx.backend)?
+        let (r, p) = authenticated_grants(&mut *ctx.backend)?;
+        roles = r
             .iter()
             .map(|r| Value::Document(Document::new().with("role", &*r.role).with("db", &*r.db)))
             .collect();
+        granted = p.iter().map(Privilege::to_value).collect();
         users.push(Value::Document(Document::new().with("user", name.user).with("db", name.db)));
     }
     let mut auth =
         Document::new().with("authenticatedUsers", users).with("authenticatedUserRoles", roles);
     if privileges {
-        auth.push("authenticatedUserPrivileges", Vec::<Value>::new());
+        auth.push("authenticatedUserPrivileges", granted);
     }
     let uuid = new_uuid(ctx.backend);
     Ok(Document::new()

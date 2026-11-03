@@ -40,6 +40,33 @@ fn five() -> Mem {
     m
 }
 
+/// The cluster presented as a replica set (018), whose nodes answer as a `refnode`.
+fn as_member(m: &mut Mem) {
+    m.shards = vec!["node1".into(), "node2".into(), "node3".into()];
+    let present = d(&[("mode", s("replicaset")), ("setName", s("rs0"))]);
+    let set = d(&[("topologyPresentation", present)]);
+    let r = m.run("admin", doc(&[("setClusterParameter", set)]));
+    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+}
+
+/// A `refrouter` 9.0.4 stops the count at the limits as its shard does but answers without
+/// `estimate` and `maxReached` (measured on 03-11-2026).
+#[test]
+fn data_size_through_a_refrouter_has_no_estimate_nor_max_reached() {
+    let mut m = five();
+    for extra in [None, Some(("estimate", Value::Boolean(true))), Some(("maxObjects", 1.into()))] {
+        let mut cmd = doc(&[("dataSize", s("ds.c"))]);
+        if let Some((k, v)) = extra.clone() {
+            cmd.push(k, v);
+        }
+        let r = m.run("admin", cmd);
+        let keys: Vec<&str> = r.iter().map(|(k, _)| k).collect();
+        assert_eq!(keys, ["size", "numObjects", "millis", "ok"], "{extra:?}: {r:?}");
+    }
+    let r = m.run("admin", doc(&[("dataSize", s("ds.c")), ("maxObjects", 1.into())]));
+    assert_eq!(int(&r, "numObjects"), 2, "{r:?}");
+}
+
 #[test]
 fn data_size_counts_bytes_and_documents() {
     let mut m = five();
@@ -256,10 +283,11 @@ fn rotate_certificates_answers_as_refnode_and_reports_the_failure() {
 /// The limits of `dataSize` taken as whole numbers (a negative one stops at the first document,
 /// one between -1 and 1 is none), `maxReached` when they stopped the count, `estimate` on a
 /// collection that exists, and the types of the three (measured on a `refnode` 9.0.4 on
-/// 03-11-2026).
+/// 03-11-2026): what a member of a replica set answers (018).
 #[test]
 fn data_size_limits_estimate_and_max_reached() {
     let mut m = five();
+    as_member(&mut m);
     let run = |m: &mut Mem, extra: &[(&str, Value)]| {
         let mut cmd = doc(&[("dataSize", s("ds.c"))]);
         for (k, v) in extra {
