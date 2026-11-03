@@ -161,6 +161,8 @@ pub enum Expr {
 pub struct Ctx {
     checked: bool,
     names: Vec<String>,
+    /// Whether a `$match` may hold `$where`: only the filter of a `find` run as a pipeline.
+    wheres: bool,
 }
 
 /// The binary subtype of an MD5 digest and its length, which a literal must have.
@@ -183,7 +185,7 @@ const SYSTEM_VARIABLES: [&str; 9] = [
 impl Ctx {
     /// A context that checks variables, with the command's `let` variables `names`.
     pub fn checked<'a>(names: impl IntoIterator<Item = &'a str>) -> Ctx {
-        Ctx { checked: true, names: names.into_iter().map(str::to_owned).collect() }
+        Ctx { checked: true, names: names.into_iter().map(str::to_owned).collect(), wheres: false }
     }
 
     /// This context with variables `names` defined too.
@@ -191,6 +193,18 @@ impl Ctx {
         let mut out = self.clone();
         out.names.extend(names.into_iter().map(str::to_owned));
         out
+    }
+
+    /// This context for the filter of a `find` that runs as a pipeline (one with `$text`), whose
+    /// `$where` runs as in any `find` (measured on 9.0.4, `scratchpad/lane3s/m90.js`: `find` with
+    /// `$text` and `$where` answers, `aggregate` with both in its `$match` is code 2).
+    pub fn with_where(&self) -> Ctx {
+        Ctx { wheres: true, ..self.clone() }
+    }
+
+    /// Whether a `$match` may hold `$where` ([`Ctx::with_where`]).
+    pub fn allows_where(&self) -> bool {
+        self.wheres
     }
 
     /// Whether variable `name` was defined by the command or an enclosing stage.
