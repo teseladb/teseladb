@@ -33,3 +33,14 @@ fn the_seeds_that_found_defects_pass() {
         assert_eq!(r.verdict, Verdict::Pass, "search seed {seed}");
     }
 }
+
+/// Seed 1541 of the `default` plan: a replica of the right range of a merge waited for the data
+/// of the leader's snapshot while its core was frozen for 160 ms, and the workload, which plays
+/// the server's snapshot sink, dropped the wait instead of keeping it until the core thawed. The
+/// replica never got its data and never voted again; with the third node lost to a damaged core,
+/// the range had no leader from then on and no write was answered after the heal.
+#[test]
+fn a_snapshot_wait_outlives_a_frozen_core() {
+    let r = run_seed(&cfg("search", FaultPlan::Default), 1541);
+    assert_eq!(r.verdict, Verdict::Pass);
+}

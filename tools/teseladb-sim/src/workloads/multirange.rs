@@ -907,6 +907,12 @@ impl MultiRangeWorkload {
             if !w.nodes[node as usize].alive {
                 continue;
             }
+            // A frozen core is a paused thread of the server: its sink keeps the wait, and the
+            // core asks for the data only once, when it parks the snapshot.
+            if w.frozen(node, core) {
+                self.waiting.insert((node, g), index);
+                continue;
+            }
             // The bounds of the snapshot the replica waits for; none any more: forgotten.
             let bounds = w.cluster_core(node, core).and_then(|c| {
                 let snap = c.awaited_snapshot(g)?.to_vec();
@@ -1472,6 +1478,12 @@ mod tests {
         w.nodes[2].alive = true;
         assert!(wl.waiting.is_empty() && !wl.transfers.contains_key(&(1, g)));
         assert!(matches!(wl.transfers[&(0, g)].2, Transfer::Ingesting { id: 900, .. }));
+        // A wait of a frozen core is looked at again once it thaws.
+        freeze(&mut w, 1, core);
+        wl.waiting.insert((1, g), 5);
+        wl.transfer(&mut w);
+        assert_eq!(wl.waiting.remove(&(1, g)), Some(5));
+        w.nodes[1].cores[core as usize].frozen_until = Nanos::ZERO;
         // A frozen core takes its ingestion when it thaws.
         freeze(&mut w, 0, core);
         wl.transfer_step(&mut w, (0, g));
