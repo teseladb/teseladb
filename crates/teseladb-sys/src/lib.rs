@@ -43,6 +43,13 @@ const LOCK_UN: i32 = 8;
 unsafe extern "C" {
     fn flock(fd: i32, operation: i32) -> i32;
     fn getentropy(buf: *mut u8, len: usize) -> i32;
+    fn geteuid() -> u32;
+}
+
+/// The process's effective user id (`geteuid(2)`): 0 is `root`.
+pub fn effective_uid() -> u32 {
+    // SAFETY: `geteuid` takes no argument, touches no memory of the caller and cannot fail.
+    unsafe { geteuid() }
 }
 
 /// Largest request `getentropy(3)` accepts at once.

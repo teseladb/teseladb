@@ -175,23 +175,23 @@ fn sessions_are_killed_by_pattern() {
     assert_eq!((field(&r, "ok"), k), (&Value::Double(1.0), vec![KillScope::All]));
     let (_, k) = by(&mut m, vec![d(&[])]);
     assert_eq!(k, vec![KillScope::All]);
-    let (_, k) = by(&mut m, vec![d(&[("lsid", d(&[("id", id(7))]))])]);
-    assert_eq!(k, vec![KillScope::Sessions(vec![u128::from_be_bytes([7; 16])])]);
     let nobody = Value::Binary { subtype: 0, bytes: sha256(b"").to_vec() };
-    let (_, k) = by(&mut m, vec![d(&[("uid", nobody)])]);
+    let lsid = |n: u8| d(&[("id", id(n)), ("uid", nobody.clone())]);
+    let (_, k) = by(&mut m, vec![d(&[("lsid", lsid(7))])]);
+    assert_eq!(k, vec![KillScope::Sessions(vec![u128::from_be_bytes([7; 16])])]);
+    let (_, k) = by(&mut m, vec![d(&[("uid", nobody.clone())])]);
     assert_eq!(k, vec![KillScope::All]);
     // A user, a role or another `uid` reaches no session until 013.
     let other = Value::Binary { subtype: 0, bytes: vec![1; 32] };
     for p in [
         d(&[("uid", other)]),
         d(&[("users", Value::Array(vec![d(&[("user", s("u")), ("db", s("admin"))])]))]),
-        d(&[("roles", Value::Array(vec![s("r")]))]),
+        d(&[("roles", Value::Array(vec![d(&[("role", s("r")), ("db", s("admin"))])]))]),
     ] {
         let (r, k) = by(&mut m, vec![p]);
         assert_eq!((field(&r, "ok"), k), (&Value::Double(1.0), vec![]));
     }
-    let (_, k) =
-        by(&mut m, vec![d(&[("users", Value::Array(vec![])), ("lsid", d(&[("id", id(3))]))])]);
+    let (_, k) = by(&mut m, vec![d(&[("users", Value::Array(vec![])), ("lsid", lsid(3))])]);
     assert_eq!(k, vec![KillScope::Sessions(vec![u128::from_be_bytes([3; 16])])]);
     let list = "KillAllSessionsByPatternCmd.killAllSessionsByPattern";
     let errors = [
@@ -200,6 +200,53 @@ fn sessions_are_killed_by_pattern() {
             d(&[("lsid", d(&[("id", 0.into())]))]),
             14,
             format!("BSON field '{list}.lsid.id' is the wrong type 'int', expected type 'binData'"),
+        ),
+        (
+            d(&[("lsid", d(&[("id", id(1))]))]),
+            40414,
+            format!("BSON field '{list}.lsid.uid' is missing but a required field"),
+        ),
+        (
+            d(&[("lsid", d(&[("id", id(1)), ("uid", 5.into())]))]),
+            14,
+            format!(
+                "BSON field '{list}.lsid.uid' is the wrong type 'int', expected type 'binData'"
+            ),
+        ),
+        (
+            d(&[("users", Value::Array(vec![d(&[])]))]),
+            40414,
+            format!("BSON field '{list}.users.db' is missing but a required field"),
+        ),
+        (
+            d(&[("users", Value::Array(vec![d(&[("db", s("a"))])]))]),
+            40414,
+            format!("BSON field '{list}.users.user' is missing but a required field"),
+        ),
+        (
+            d(&[("roles", Value::Array(vec![d(&[("role", s("r"))])]))]),
+            40414,
+            format!("BSON field '{list}.roles.db' is missing but a required field"),
+        ),
+        (
+            d(&[("users", Value::Array(vec![5.into()]))]),
+            14,
+            format!("BSON field '{list}.users.0' is the wrong type 'int', expected type 'object'"),
+        ),
+        (
+            d(&[("users", Value::Array(vec![d(&[("user", 5.into()), ("db", s("a"))])]))]),
+            14,
+            format!(
+                "BSON field '{list}.users.user' is the wrong type 'int', expected type 'string'"
+            ),
+        ),
+        (
+            d(&[(
+                "users",
+                Value::Array(vec![d(&[("user", s("a")), ("db", s("b")), ("x", 1.into())])]),
+            )]),
+            40415,
+            format!("BSON field '{list}.users.x' is an unknown field."),
         ),
         (
             d(&[("lsid", d(&[]))]),

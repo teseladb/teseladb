@@ -200,20 +200,37 @@ fn pattern(d: &Document, list: &str) -> Result<Pattern, CommandError> {
     let mut out = Pattern::Every;
     for (k, v) in d.iter() {
         let reaches = match (k, v) {
-            ("lsid", Value::Document(l)) => match l.get("id") {
-                Some(id) => Pattern::One(session_id(id, &format!("{list}.lsid.id"))?),
-                None => return Err(missing(&format!("{list}.lsid"), "id")),
-            },
+            ("lsid", Value::Document(l)) => {
+                let id = match l.get("id") {
+                    Some(id) => session_id(id, &format!("{list}.lsid.id"))?,
+                    None => return Err(missing(&format!("{list}.lsid"), "id")),
+                };
+                // The whole session id: `uid` too (measured on a `refrouter` 9.0.4 on 03-11-2026).
+                match l.get("uid") {
+                    Some(Value::Binary { .. }) => {}
+                    Some(other) => {
+                        return Err(wrong_type(&format!("{list}.lsid.uid"), other, "binData"));
+                    }
+                    None => return Err(missing(&format!("{list}.lsid"), "uid")),
+                }
+                Pattern::One(id)
+            }
             ("lsid", other) => return Err(wrong_type(&format!("{list}.lsid"), other, "object")),
             ("uid", Value::Binary { bytes, .. }) => match bytes.as_slice() == sha256(b"") {
                 true => Pattern::Every,
                 false => Pattern::Nothing,
             },
             ("uid", other) => return Err(wrong_type(&format!("{list}.uid"), other, "binData")),
-            ("users" | "roles", Value::Array(a)) => match a.is_empty() {
-                true => Pattern::Every,
-                false => Pattern::Nothing,
-            },
+            ("users" | "roles", Value::Array(a)) => {
+                let name = if k == "users" { "user" } else { "role" };
+                for (i, e) in a.iter().enumerate() {
+                    named(e, &format!("{list}.{k}"), i, name)?;
+                }
+                match a.is_empty() {
+                    true => Pattern::Every,
+                    false => Pattern::Nothing,
+                }
+            }
             ("users" | "roles", other) => {
                 return Err(wrong_type(&format!("{list}.{k}"), other, "array"));
             }
@@ -229,6 +246,58 @@ fn pattern(d: &Document, list: &str) -> Result<Pattern, CommandError> {
         };
     }
     Ok(out)
+}
+
+/// One user (`name` is `user`) or role (`role`) of a pattern, element `i` of the list at `path`:
+/// a document with a string `name` and `db`, nothing else (measured on a `refrouter` 9.0.4 on
+/// 03-11-2026; a missing `db` is named before a missing `name`).
+fn named(e: &Value, path: &str, i: usize, name: &str) -> Result<(), CommandError> {
+    let Value::Document(d) = e else {
+        return Err(wrong_type(&format!("{path}.{i}"), e, "object"));
+    };
+    for (k, v) in d.iter() {
+        match (k, v) {
+            (k, Value::String(_)) if k == name || k == "db" => {}
+            (k, v) if k == name || k == "db" => {
+                return Err(wrong_type(&format!("{path}.{k}"), v, "string"));
+            }
+            (k, _) => {
+                let msg = format!("BSON field '{path}.{k}' is an unknown field.");
+                return Err(CommandError::new(crate::error::IDL_UNKNOWN_FIELD, msg));
+            }
+        }
+    }
+    for field in ["db", name] {
+        if d.get(field).is_none() {
+            return Err(missing(path, field));
+        }
+    }
+    Ok(())
+}
+
+/// A pattern with `users` or `roles` asks for `impersonate` on the cluster, which only
+/// `__system` has; a node that does not authorize asks nothing (measured on a `refrouter` 9.0.4
+/// with `--keyFile` and a `refnode` without `--auth` on 03-11-2026).
+fn may_impersonate<B: Backend + ?Sized>(
+    backend: &B,
+    patterns: &[Value],
+) -> Result<(), CommandError> {
+    let names = patterns.iter().any(
+        |p| matches!(p, Value::Document(d) if d.get("users").is_some() || d.get("roles").is_some()),
+    );
+    let Some(privileges) = backend.privileges() else { return Ok(()) };
+    let allowed = teseladb_auth::authz::allows(
+        &privileges,
+        &teseladb_auth::authz::Target::Cluster,
+        teseladb_auth::actions::ActionType::Impersonate,
+    );
+    match names && !allowed {
+        true => Err(CommandError::new(
+            crate::error::UNAUTHORIZED,
+            "Not authorized to impersonate in killAllSessionsByPattern",
+        )),
+        false => Ok(()),
+    }
 }
 
 /// `killAllSessionsByPattern`: the sessions any of the patterns reaches, with their cursors;
@@ -251,6 +320,7 @@ pub fn kill_all_sessions_by_pattern<B: Backend + ?Sized>(
             Pattern::Nothing => {}
         }
     }
+    may_impersonate(ctx.backend, &patterns)?;
     match (every, ids.is_empty()) {
         (true, _) => kill(ctx, KillScope::All),
         (false, false) => kill(ctx, KillScope::Sessions(ids)),
