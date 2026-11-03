@@ -262,3 +262,150 @@ fn more_catalog_entries() {
         &Value::Document(Document::new().with("hidden", true))
     );
 }
+
+fn insert(m: &mut Mem, coll: &str, d: Document) {
+    let ins = Document::new().with("insert", coll).with("documents", vec![Value::Document(d)]);
+    ok(&m.run(DB, ins));
+}
+
+/// The catalog changes of shard keys and balancing settings give no entry; a document that
+/// moved with its shard key is one `u` entry keyed by the version it left.
+#[test]
+fn shard_keys_and_a_moved_document() {
+    let mut m = Mem::new();
+    m.shards = vec!["node1".into(), "node2".into()];
+    m.settings = Some(Vec::new());
+    let shard =
+        Document::new().with("shardCollection", "e.s").with("key", Document::new().with("a", 1));
+    ok(&m.run("admin", shard));
+    let balance = Document::new().with("configureCollectionBalancing", "e.s").with("chunkSize", 64);
+    ok(&m.run("admin", balance));
+    let entries = oplog(&mut m, Document::new().with("ns", "e.$cmd"));
+    assert!(
+        !entries.iter().any(|e| field(e, "o").clone() != Value::Null
+            && matches!(field(e, "o"), Value::Document(o) if o.get("collMod").is_some())),
+        "{entries:?}"
+    );
+    insert(&mut m, "s", Document::new().with("_id", 1).with("a", 1));
+    let set = |a: i32| Document::new().with("$set", Document::new().with("a", a));
+    let up =
+        Document::new().with("q", Document::new().with("_id", 1).with("a", 1)).with("u", set(7));
+    let retry = Document::new().with("id", Value::Binary { subtype: 4, bytes: vec![8; 16] });
+    let r = m.run(
+        DB,
+        Document::new()
+            .with("update", "s")
+            .with("updates", vec![Value::Document(up)])
+            .with("lsid", retry)
+            .with("txnNumber", Value::Int64(1)),
+    );
+    assert_eq!(r.get("nModified"), Some(&Value::Int32(1)), "{r:?}");
+    let moved = oplog(&mut m, Document::new().with("ns", "e.s").with("op", "u"));
+    assert_eq!(moved.len(), 1, "{moved:?}");
+    assert_eq!(
+        field(&moved[0], "o2"),
+        &Value::Document(Document::new().with("a", 1).with("_id", 1)),
+        "{moved:?}"
+    );
+}
+
+/// What a read keeps when the history and the ranges' marks are at their edges: versions below
+/// the history window, a note past what the ranges resolved, a read that stops advancing, a
+/// meta that does not decode, and a read of the newest entries that goes back to the start of
+/// the window.
+#[test]
+fn reads_at_the_edges_of_the_history() {
+    let mut m = Mem::new();
+    let retention =
+        Document::new().with("teselaHistoryRetention", Document::new().with("seconds", 5));
+    ok(&m.run("admin", Document::new().with("setClusterParameter", retention)));
+    insert(&mut m, "h", Document::new().with("_id", 1));
+    m.now += 10_000;
+    insert(&mut m, "h", Document::new().with("_id", 2));
+    let found = oplog(&mut m, Document::new().with("ns", "e.h"));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(field(&found[0], "o._id"), &Value::Int32(2));
+    // The newest entries, more than the window has: the read goes back to its start.
+    let newest = Document::new()
+        .with("find", "oplog.rs")
+        .with("sort", Document::new().with("$natural", -1))
+        .with("limit", 50);
+    let r = m.run("local", newest);
+    assert!(!docs(field(&r, "cursor.firstBatch")).is_empty(), "{r:?}");
+    // A note past the ranges' resolved mark waits; when the read stops advancing it is left out.
+    m.resolved_lag_ms = 1_000;
+    let note =
+        Document::new().with("appendOplogNote", 1).with("data", Document::new().with("x", 1));
+    ok(&m.run("admin", note));
+    assert!(oplog(&mut m, Document::new().with("op", "n")).is_empty());
+    // A read that does not advance while the clock goes on gives up after its catch-up time.
+    m.pauses_left = usize::MAX;
+    m.pause_ms = 1_000;
+    m.on_changes = Some(Box::new(|m: &mut Mem| m.resolved_lag_ms += 1_000));
+    let before = m.now;
+    assert!(oplog(&mut m, Document::new().with("op", "n")).is_empty());
+    assert!(m.now >= before + 5_000, "{} {before}", m.now);
+    m.on_changes = None;
+    m.resolved_lag_ms = 0;
+    m.pauses_left = 0;
+    // A meta that does not decode.
+    let last = m.history.last().cloned().expect("a version");
+    m.history.push(teseladb_range::changes::Versioned {
+        key: last.key,
+        ts: Hlc { physical: m.now - 1, logical: 7 },
+        value: Some((teseladb_range::HISTORY_VALUE, vec![0xff])),
+    });
+    let r = m.run("local", Document::new().with("find", "oplog.rs"));
+    assert_eq!(field(&r, "code"), &Value::Int32(1), "{r:?}");
+}
+
+/// An index whose stored specification has no name, as the server's own indexes may be written:
+/// its `createIndexes` entry has the identifier of an empty name.
+#[test]
+fn an_index_spec_without_a_name() {
+    use teseladb_meta::indexes::{IndexCommand, IndexState};
+    let mut m = Mem::new();
+    ok(&m.run(DB, Document::new().with("create", "q")));
+    let (_, c) = m.catalog.collections.iter().find(|(ns, _)| ns.coll == "q").expect("q");
+    let collection = c.id;
+    let spec = Document::new().with("key", Document::new().with("x", 1)).with("v", 2);
+    let create = IndexCommand::Create {
+        collection,
+        name: "x_1".into(),
+        spec: spec.to_bytes().expect("bytes"),
+        buckets: 0,
+    };
+    m.index_write(create).expect("created");
+    let id = m.indexes(collection).expect("indexes").last().expect("the index").id;
+    m.index_write(IndexCommand::SetState { id, state: IndexState::Ready }).expect("ready");
+    let entries = oplog(&mut m, Document::new().with("o.createIndexes", "q"));
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    let o = field(&entries[0], "o");
+    assert!(matches!(o, Value::Document(o) if o.get("name").is_none()), "{entries:?}");
+    assert!(matches!(field(&entries[0], "o2.indexIdent"), Value::String(_)), "{entries:?}");
+}
+
+/// A resharding's cutover, the rename of its copy over the collection and the change of its
+/// shard key, gives no entry: a replica set has no resharding.
+#[test]
+fn a_resharding_cutover_gives_no_entry() {
+    let mut m = Mem::new();
+    let shard =
+        Document::new().with("shardCollection", "e.r").with("key", Document::new().with("a", 1));
+    ok(&m.run("admin", shard));
+    insert(&mut m, "r", Document::new().with("_id", 1).with("a", 1).with("b", 2));
+    let reshard = Document::new()
+        .with("reshardCollection", "e.r")
+        .with("key", Document::new().with("b", 1))
+        .with("numInitialChunks", 1);
+    ok(&m.run("admin", reshard));
+    let entries = oplog(&mut m, Document::new().with("ns", "e.$cmd"));
+    let names: Vec<String> = entries
+        .iter()
+        .filter_map(|e| match field(e, "o") {
+            Value::Document(o) => o.iter().next().map(|(k, _)| k.to_owned()),
+            _ => None,
+        })
+        .collect();
+    assert!(!names.iter().any(|n| n == "renameCollection" || n == "collMod"), "{names:?}");
+}

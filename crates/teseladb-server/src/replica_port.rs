@@ -18,7 +18,8 @@ const LOOK_EVERY: Duration = Duration::from_millis(50);
 /// The thread that keeps the replica set port as Group 0 wants it.
 pub struct PortKeeper {
     stop: Arc<AtomicBool>,
-    thread: JoinHandle<()>,
+    /// `None` when the thread could not start: the node goes on without the port.
+    thread: Option<JoinHandle<()>>,
 }
 
 /// The main port's addresses with port `port`.
@@ -47,14 +48,14 @@ impl PortKeeper {
         let thread = thread::Builder::new()
             .name("replica-set-port".into())
             .spawn(move || keep(&main, workers, &state, &presence, hooks, &flag))
-            .unwrap_or_else(|_| thread::spawn(|| {}));
+            .ok();
         PortKeeper { stop, thread }
     }
 
     /// Stops the keeper and closes the port.
     pub fn stop(self) {
         self.stop.store(true, Ordering::Release);
-        let _ = self.thread.join();
+        let _ = self.thread.map(JoinHandle::join);
     }
 }
 

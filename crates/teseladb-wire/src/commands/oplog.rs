@@ -412,8 +412,7 @@ fn scratch_creation(
     let mut ops: Vec<(Operation, Document)> = ddl_operation(&create)?.into_iter().collect();
     for earlier in all.iter().filter(|e| (e.mark, e.op) < (r.mark, r.op)) {
         if let DdlChange::CreateIndex { collection: c, spec, .. } = &earlier.change
-            && c.id == collection.id
-            && c.tenant == collection.tenant
+            && (c.tenant, c.id) == (collection.tenant, collection.id)
         {
             let index = named(DdlChange::CreateIndex {
                 ns: to.clone(),
@@ -595,8 +594,7 @@ fn document_items<B: Backend + ?Sized>(
             // A transaction's writes share its mark and number; the other writes of one mark are
             // one command's (an insert of several documents is one entry, [`plain_entries`]).
             while found.get(end).is_some_and(|c| {
-                c.event.ts == first.event.ts
-                    && c.event.txn == first.event.txn
+                (c.event.ts, c.event.txn) == (first.event.ts, first.event.txn)
                     && c.meta.as_ref().and_then(|m| m.retry).is_none()
             }) {
                 end += 1;
@@ -610,12 +608,11 @@ fn document_items<B: Backend + ?Sized>(
         let mut positions = Vec::new();
         for change in group {
             let prior = left.insert(change.event.key.as_slice(), change.doc.as_ref());
-            let Some(w) = collection_of(&change.event.key).and_then(|id| by_id.get(&id)) else {
-                continue;
-            };
-            if w.dropped.as_ref().is_some_and(|d| change.event > *d) {
-                continue;
-            }
+            // Every change is of a document of a watched collection: its writes up to its drop.
+            let live = collection_of(&change.event.key)
+                .and_then(|id| by_id.get(&id))
+                .filter(|w| !w.dropped.as_ref().is_some_and(|d| change.event > *d));
+            let Some(w) = live else { continue };
             ops.push(document_operation(backend, w, change, prior)?);
             positions.push(change.meta.as_ref().map_or(0, |m| m.op));
         }

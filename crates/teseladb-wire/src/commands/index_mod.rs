@@ -279,7 +279,11 @@ pub fn modify_index<B: Backend + ?Sized>(
 /// of a `refrouter` 9.0.4 (measured). Nor can a wildcard one, with the error `createIndexes` gives
 /// (DV: a `refnode` 9.0.4 accepts the conversion and aborts on the invalid index it wrote).
 fn convertible(spec: &Document) -> Result<(), CommandError> {
-    let Some(Value::Document(key)) = spec.get(KEY) else { return Ok(()) };
+    // The node stored the specification with its key.
+    let key = match spec.get(KEY) {
+        Some(Value::Document(key)) => key.clone(),
+        _ => Document::new(),
+    };
     if key.iter().any(|(_, v)| v == &Value::from(HASHED)) {
         let msg = "Currently hashed indexes cannot guarantee uniqueness. Use a regular index.";
         return Err(CommandError::new(HASHED_UNIQUE, msg));

@@ -162,20 +162,33 @@ struct Sharded {
 
 /// The collection a chunk command names, refused as `split` does when it has no shard key.
 fn sharded<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>, name: &str) -> Result<Sharded, CommandError> {
+    let invalid = |text: &str| {
+        CommandError::new(INVALID_NAMESPACE, format!("Invalid namespace specified '{text}'"))
+    };
+    let unsharded = |text: &str| {
+        let msg = format!("Command not supported on unsharded collection {text}");
+        CommandError::new(NAMESPACE_NOT_SHARDED, msg)
+    };
+    sharded_or(ctx, name, invalid, unsharded)
+}
+
+/// [`sharded`] with the refusals of a name that is not a collection's (`invalid`) and of a
+/// collection without a shard key (`unsharded`), each given the name.
+fn sharded_or<B: Backend + ?Sized>(
+    ctx: &mut Ctx<'_, B>,
+    name: &str,
+    invalid: impl Fn(&str) -> CommandError,
+    unsharded: impl Fn(&str) -> CommandError,
+) -> Result<Sharded, CommandError> {
     let text = match ctx.first() {
         Value::String(s) => s.clone(),
         v => return Err(wrong_type(&format!("{name}.{name}"), v, "string")),
     };
-    let ns =
-        parse_full(&text).filter(|n| !n.db.is_empty() && !n.coll.is_empty()).ok_or_else(|| {
-            CommandError::new(INVALID_NAMESPACE, format!("Invalid namespace specified '{text}'"))
-        })?;
-    let unsharded = || {
-        let msg = format!("Command not supported on unsharded collection {text}");
-        CommandError::new(NAMESPACE_NOT_SHARDED, msg)
-    };
-    let coll = ctx.backend.collection(&ns)?.ok_or_else(unsharded)?;
-    let key = shard_key_of(&coll)?.ok_or_else(unsharded)?;
+    let ns = parse_full(&text)
+        .filter(|n| !n.db.is_empty() && !n.coll.is_empty())
+        .ok_or_else(|| invalid(&text))?;
+    let coll = ctx.backend.collection(&ns)?.ok_or_else(|| unsharded(&text))?;
+    let key = shard_key_of(&coll)?.ok_or_else(|| unsharded(&text))?;
     Ok(Sharded { coll, key })
 }
 
@@ -570,7 +583,7 @@ fn wait_for_cut<B: Backend + ?Sized>(
 pub fn move_range<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     admin::admin_only(MOVE_RANGE, ctx.db)?;
     let to = required_string(ctx.cmd, MOVE_RANGE, "toShard")?;
-    let name = super::args::string(ctx.cmd, MOVE_RANGE, MOVE_RANGE)?.unwrap_or_default().to_owned();
+    super::args::string(ctx.cmd, MOVE_RANGE, MOVE_RANGE)?;
     let min = range_bound(ctx.cmd, "min")?;
     let max = range_bound(ctx.cmd, "max")?;
     if min.is_none() && max.is_none() {
@@ -584,14 +597,12 @@ pub fn move_range<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document,
         CommandError::new(SHARD_NOT_FOUND, msg)
     })?;
     // A `refrouter` 9.0.4 names a database alone (`db` or `db.`) by the database.
-    let s = sharded(ctx, MOVE_RANGE).map_err(|e| match e.code {
-        INVALID_NAMESPACE | NAMESPACE_NOT_SHARDED => {
-            let shown = name.strip_suffix('.').unwrap_or(&name);
-            let msg = format!("Collection '{shown}' not found in cluster catalog");
-            CommandError::new(NAMESPACE_NOT_FOUND, msg)
-        }
-        _ => e,
-    })?;
+    let not_found = |text: &str| {
+        let shown = text.strip_suffix('.').unwrap_or(text);
+        let msg = format!("Collection '{shown}' not found in cluster catalog");
+        CommandError::new(NAMESPACE_NOT_FOUND, msg)
+    };
+    let s = sharded_or(ctx, MOVE_RANGE, not_found, not_found)?;
     check_range_bound(&s, "min", min.as_ref())?;
     check_range_bound(&s, "max", max.as_ref())?;
     check_migrations(&s)?;
@@ -694,12 +705,13 @@ pub fn merge_all_chunks_on_shard<B: Backend + ?Sized>(
         None => usize::MAX,
     };
     admin::admin_only(name, ctx.db)?;
+    // A `refrouter` 9.0.4 looks the shard up before it reads the name (measured on 03-11-2026).
+    let node = node_named(ctx.backend, &shard)?
+        .ok_or_else(|| CommandError::new(SHARD_NOT_FOUND, format!("Shard {shard} not found")))?;
     let ns =
         parse_full(&text).filter(|n| !n.db.is_empty() && !n.coll.is_empty()).ok_or_else(|| {
             CommandError::new(INVALID_NAMESPACE, "invalid namespace specified for request")
         })?;
-    let node = node_named(ctx.backend, &shard)?
-        .ok_or_else(|| CommandError::new(SHARD_NOT_FOUND, format!("Shard {shard} not found")))?;
     let unsharded =
         || CommandError::new(NAMESPACE_NOT_SHARDED, format!("Collection {text} is not sharded"));
     let coll = ctx.backend.collection(&ns)?.ok_or_else(unsharded)?;

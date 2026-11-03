@@ -24,7 +24,8 @@ use super::names::parse_full;
 use super::sharding::SHARD_KEY;
 use super::{Backend, Ctx, admin};
 use crate::error::{
-    CommandError, INVALID_NAMESPACE, INVALID_OPTIONS, NAMESPACE_NOT_SHARDED, WRITE_CONFLICT,
+    CommandError, INVALID_NAMESPACE, INVALID_OPTIONS, NAMESPACE_NOT_FOUND, NAMESPACE_NOT_SHARDED,
+    WRITE_CONFLICT,
 };
 use crate::types::{wrong_type, wrong_types};
 
@@ -234,12 +235,13 @@ fn write_balancing<B: Backend + ?Sized>(
     let Balancing { mut options, mut key, settings } = b;
     key.insert(BALANCING, settings);
     options.insert(SHARD_KEY, key);
-    backend.catalog_write(CatalogCommand::Modify {
-        ns,
-        options: options.to_bytes()?,
-        description: Document::new().with(BALANCING_CHANGE, true).to_bytes()?,
-    })?;
-    Ok(())
+    backend
+        .catalog_write(CatalogCommand::Modify {
+            ns,
+            options: options.to_bytes()?,
+            description: quiet_description()?,
+        })
+        .map(drop)
 }
 
 /// The refusal of a collection without a shard key.
@@ -342,6 +344,12 @@ pub fn max_chunk_bytes(options: &[u8]) -> Option<u64> {
     }
 }
 
+/// The description of a catalog change of TeselaDB's own that no change stream or oplog shows:
+/// the balancing settings, or the options a failed `shardCollection` puts back.
+pub fn quiet_description() -> Result<Vec<u8>, CommandError> {
+    Ok(Document::new().with(BALANCING_CHANGE, true).to_bytes()?)
+}
+
 /// Whether a catalog change's description is a change of the balancing settings.
 pub fn is_balancing_change(description: &[u8]) -> bool {
     RawDoc::from_bytes(description).is_ok_and(|d| d.get(BALANCING_CHANGE).is_some())
@@ -363,11 +371,18 @@ pub fn set_allow_migrations<B: Backend + ?Sized>(
         None => return Err(super::args::missing(name, "allowMigrations")),
     };
     admin::admin_only(name, ctx.db)?;
-    let ns =
-        parse_full(&text).filter(|n| !n.db.is_empty() && !n.coll.is_empty()).ok_or_else(|| {
-            let shown = text.strip_suffix('.').unwrap_or(&text);
-            CommandError::new(INVALID_NAMESPACE, format!("Invalid namespace specified: {shown}"))
-        })?;
+    // A `refrouter` 9.0.4 checks the database's name, then that it exists, then the collection's
+    // (measured on 03-11-2026).
+    let db = text.split_once('.').map_or(text.as_str(), |(db, _)| db);
+    if db.is_empty() || db.contains(super::names::DB_FORBIDDEN) {
+        return Err(CommandError::new(INVALID_NAMESPACE, format!("{db} is not a valid db name")));
+    }
+    if !super::catalog::has_database(ctx.backend, db)? {
+        return Err(CommandError::new(NAMESPACE_NOT_FOUND, format!("database {db} not found")));
+    }
+    let ns = parse_full(&text).filter(|n| !n.coll.is_empty()).ok_or_else(|| {
+        CommandError::new(INVALID_NAMESPACE, format!("Invalid namespace specified: {db}"))
+    })?;
     let unsharded = || {
         CommandError::new(
             NAMESPACE_NOT_SHARDED,

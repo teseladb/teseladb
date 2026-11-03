@@ -236,7 +236,7 @@ fn query_number(v: &Value) -> f64 {
 }
 
 /// The paths through arrays of each field of index `entry`, from the marks its writes left.
-fn multikey_paths<B: Backend + ?Sized>(
+pub(crate) fn multikey_paths<B: Backend + ?Sized>(
     backend: &mut B,
     (tenant, collection): (u32, u32),
     entry: &IndexEntry,

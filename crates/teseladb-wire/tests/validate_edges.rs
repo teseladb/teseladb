@@ -90,3 +90,22 @@ fn time_series_validates_without_id_index() {
     assert_eq!(field(&r, "valid"), &Value::Boolean(true));
     assert_eq!(field(&r, "nrecords"), &Value::Int32(1));
 }
+
+/// A time series is validated through its buckets with their index and no `_id_`; a clustered
+/// collection has no index to check (measured on a `refnode` 9.0.4 on 03-11-2026).
+#[test]
+fn time_series_and_clustered_collections_validate_without_an_id_index() {
+    let mut m = Mem::new();
+    ok(&mut m, r#"{"create":"ts","timeseries":{"timeField":"t","metaField":"m"}}"#);
+    ok(&mut m, r#"{"insert":"ts","documents":[{"t":{"$date":"2026-01-01T00:00:00Z"},"m":1}]}"#);
+    let r = ok(&mut m, r#"{"validate":"ts"}"#);
+    assert_eq!(field(&r, "valid"), &Value::Boolean(true), "{r:?}");
+    assert_eq!(field(&r, "nrecords"), &Value::Int32(1), "{r:?}");
+    assert_eq!(field(&r, "nIndexes"), &Value::Int32(1), "{r:?}");
+    assert_eq!(field(&r, "keysPerIndex"), &Value::Document(doc(&[("m_1_t_1", 1.into())])));
+    ok(&mut m, r#"{"create":"cl","clusteredIndex":{"key":{"_id":1},"unique":true}}"#);
+    ok(&mut m, r#"{"insert":"cl","documents":[{"_id":1}]}"#);
+    let r = ok(&mut m, r#"{"validate":"cl"}"#);
+    let got = (field(&r, "nIndexes"), field(&r, "keysPerIndex"), field(&r, "nrecords"));
+    assert_eq!(got, (&Value::Int32(0), &Value::Document(Document::new()), &Value::Int32(1)));
+}

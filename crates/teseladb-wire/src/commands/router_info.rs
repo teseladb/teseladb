@@ -32,15 +32,15 @@ const CONFIG: &str = "config";
 
 /// The shards as `config.shards` lists them: name and client address.
 fn shards<B: Backend + ?Sized>(backend: &mut B) -> Result<Vec<(String, String)>, CommandError> {
-    let text = |d: &Document, f: &str| match d.get(f) {
-        Some(Value::String(s)) => s.clone(),
-        _ => String::new(),
+    let text = |d: &Document, f: &str| {
+        super::args::string(d, super::config_db::SHARDS, f)
+            .map(|s| s.unwrap_or_default().to_owned())
     };
-    Ok(backend
+    backend
         .config_documents(super::config_db::SHARDS)?
         .iter()
-        .map(|d| (text(d, "_id"), text(d, "host")))
-        .collect())
+        .map(|d| Ok((text(d, "_id")?, text(d, "host")?)))
+        .collect()
 }
 
 /// `getShardMap`: each shard's address, and `config`, Group 0, at every node's address.

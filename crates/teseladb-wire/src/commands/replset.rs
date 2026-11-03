@@ -215,18 +215,15 @@ fn member_view<B: Backend + ?Sized>(
 
 /// This node's host, as `config.shards` gives it.
 fn my_host<B: Backend + ?Sized>(backend: &mut B) -> Result<String, CommandError> {
-    let id = backend.node();
-    let node = i64::try_from(id).unwrap_or(i64::MAX);
-    let name = Value::from(super::shard_name(id).as_str());
+    // Group 0 names each node's shard after the node.
+    let name = Value::from(super::shard_name(backend.node()).as_str());
     let shards = backend.config_documents(super::config_db::SHARDS)?;
-    Ok(shards
-        .iter()
-        .find(|d| d.get("node") == Some(&Value::Int64(node)) || d.get("_id") == Some(&name))
-        .and_then(|d| match d.get("host") {
-            Some(Value::String(h)) => Some(h.clone()),
-            _ => None,
-        })
-        .unwrap_or_default())
+    let host = shards.iter().find(|d| d.get("_id") == Some(&name)).and_then(|d| d.get("host"));
+    Ok(match host {
+        Some(Value::String(h)) => h.clone(),
+        // A node that is not a shard (being removed) has no host: it is no member.
+        _ => String::new(),
+    })
 }
 
 fn is_primary(rs: &ReplicaSet, me: MemberId) -> bool {
@@ -320,7 +317,9 @@ fn reconfig_member(d: &Document) -> Result<Member, CommandError> {
     };
     for (f, expected) in [("priority", NUMBERS), ("votes", NUMBERS), ("hidden", FLAGS)] {
         match d.get(f) {
-            None | Some(Value::Int32(_) | Value::Int64(_) | Value::Double(_)) => {}
+            None
+            | Some(Value::Int32(_) | Value::Int64(_) | Value::Double(_) | Value::Decimal128(_)) => {
+            }
             Some(Value::Boolean(_)) if f == "hidden" => {}
             Some(v) => return Err(wrong(f, v, expected)),
         }
@@ -332,12 +331,7 @@ fn reconfig_member(d: &Document) -> Result<Member, CommandError> {
         let why = format!("tags.{k} field has non-string value of type {t}");
         return Err(CommandError::new(INVALID_REPLICA_SET_CONFIG, why));
     }
-    let num = |f: &str| match d.get(f) {
-        Some(Value::Int32(n)) => Some(f64::from(*n)),
-        Some(Value::Int64(n)) => Some(*n as f64),
-        Some(Value::Double(x)) => Some(*x),
-        _ => None,
-    };
+    let num = |f: &str| d.get(f).and_then(crate::types::number);
     if let Some(p) = num("priority").filter(|p| *p > 1000.0) {
         return Err(member_error(
             d,
@@ -366,8 +360,19 @@ fn reconfig_member(d: &Document) -> Result<Member, CommandError> {
     if hidden && priority > 0.0 {
         return Err(member_error(d, "priority must be 0 when hidden=true"));
     }
-    let attrs = d.clone().with("priority", priority).with("votes", votes as i32);
-    member_of(&attrs).map_err(|e| member_error(d, &e.errmsg))
+    let attrs =
+        d.clone().with("priority", priority).with("votes", votes as i32).with("hidden", hidden);
+    // The attributes are checked above: what is left is the host (measured on 03-11-2026).
+    member_of(&attrs).map_err(|_| {
+        let why = match d.get("host") {
+            None => "BSON field 'MemberConfig.host' is missing but a required field".to_owned(),
+            Some(v) => format!(
+                "BSON field 'MemberConfig.host' is the wrong type '{}', expected type 'string'",
+                crate::types::type_name(v)
+            ),
+        };
+        member_error(d, &why)
+    })
 }
 
 /// The `version` of a `replSetReconfig` configuration as RefDb 9.0.4 reads it: any whole
@@ -759,11 +764,8 @@ fn stable_recovery(mark: teseladb_hlc::Hlc) -> Value {
 
 /// A priority as RefDb shows it: an integer when it is whole.
 fn priority_value(p: f64) -> Value {
-    if p.fract() == 0.0 && p.abs() < f64::from(i32::MAX) {
-        Value::Int32(p as i32)
-    } else {
-        Value::Double(p)
-    }
+    // A member's priority is within 0 and 1000, checked when the set is made.
+    if p.fract() == 0.0 { Value::Int32(p as i32) } else { Value::Double(p) }
 }
 
 /// The date of mark `at`, in milliseconds.
