@@ -217,20 +217,21 @@ pub fn update_entry(before: &Document, desc: &UpdateDescription) -> Document {
     Document::new().with("$v", DIFF_VERSION).with("diff", root.to_document())
 }
 
-/// Why a diff does not apply.
+/// Why a diff does not apply, as RefDb 9.0.4 tells (measured on 03-11-2026).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DiffError {
-    /// A section or a subdiff RefDb does not write.
-    Section(String),
-    /// An array subdiff on a field that is not an array.
-    NotAnArray(String),
+    /// A key that is no section RefDb writes: «Unexpected section: {key} in document diff».
+    Unexpected(String),
+    /// Section `d`, `u`, `i` or `s` (any subdiff) that is not a document: «Expected {section}
+    /// section to be type object».
+    NotObject(&'static str),
 }
 
-fn section(diff: &Document, name: &str) -> Result<Option<Document>, DiffError> {
+fn section(diff: &Document, name: &'static str) -> Result<Option<Document>, DiffError> {
     match diff.get(name) {
         None => Ok(None),
         Some(Value::Document(d)) => Ok(Some(d.clone())),
-        Some(_) => Err(DiffError::Section(name.to_owned())),
+        Some(_) => Err(DiffError::NotObject(name)),
     }
 }
 
@@ -250,11 +251,12 @@ pub fn apply(doc: &Document, diff: &Document) -> Result<Document, DiffError> {
         if matches!(k, "d" | "u" | "i") {
             continue;
         }
-        let (Some(field), Value::Document(sub)) = (k.strip_prefix('s'), v) else {
-            return Err(DiffError::Section(k.to_owned()));
+        let Some(field) = k.strip_prefix('s') else {
+            return Err(DiffError::Unexpected(k.to_owned()));
         };
+        let Value::Document(sub) = v else { return Err(DiffError::NotObject("s")) };
         let current = out.get(field).cloned();
-        let next = apply_sub(current.as_ref(), field, sub)?;
+        let next = apply_sub(current.as_ref(), sub)?;
         out.insert(field, next);
     }
     Ok(out)
@@ -268,8 +270,9 @@ fn slot(items: &mut Vec<Value>, i: usize) -> &mut Value {
     &mut items[i]
 }
 
-/// The value a subdiff leaves of field `field` (`current`).
-fn apply_sub(current: Option<&Value>, field: &str, sub: &Document) -> Result<Value, DiffError> {
+/// The value a subdiff leaves of field `current`: an array subdiff on a value that is not an
+/// array leaves null, as RefDb 9.0.4 does.
+fn apply_sub(current: Option<&Value>, sub: &Document) -> Result<Value, DiffError> {
     if sub.get("a") != Some(&Value::Boolean(true)) {
         let base = match current {
             Some(Value::Document(d)) => d.clone(),
@@ -279,11 +282,11 @@ fn apply_sub(current: Option<&Value>, field: &str, sub: &Document) -> Result<Val
     }
     let mut items = match current {
         Some(Value::Array(a)) => a.clone(),
-        _ => return Err(DiffError::NotAnArray(field.to_owned())),
+        _ => return Ok(Value::Null),
     };
     for (k, v) in sub.iter() {
         let index =
-            |rest: &str| rest.parse::<usize>().map_err(|_| DiffError::Section(k.to_owned()));
+            |rest: &str| rest.parse::<usize>().map_err(|_| DiffError::Unexpected(k.to_owned()));
         let length = |n: i64| usize::try_from(n).unwrap_or(0);
         match (k.split_at(1), v) {
             (("a", ""), _) => {}
@@ -292,9 +295,9 @@ fn apply_sub(current: Option<&Value>, field: &str, sub: &Document) -> Result<Val
             (("u", pos), v) => *slot(&mut items, index(pos)?) = v.clone(),
             (("s", pos), Value::Document(inner)) => {
                 let at = slot(&mut items, index(pos)?);
-                *at = apply_sub(Some(at), k, inner)?;
+                *at = apply_sub(Some(at), inner)?;
             }
-            _ => return Err(DiffError::Section(k.to_owned())),
+            _ => return Err(DiffError::Unexpected(k.to_owned())),
         }
     }
     Ok(Value::Array(items))

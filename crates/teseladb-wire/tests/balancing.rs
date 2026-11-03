@@ -252,8 +252,35 @@ fn a_defragmentation_waits_for_the_balancer() {
                 "defragmentationPhase":"finished"}"#
         )
     );
+    // `balancerStart` passes over a collection with no shard key.
+    ok(&m.run("z", json(r#"{"create":"plain"}"#)));
     ok(&admin(&mut m, r#"{"balancerStart":1}"#));
     assert_eq!(entry(&mut m), json(r#"{"noBalance":false}"#));
+    // Turning off a defragmentation that is not there changes nothing (measured on 03-11-2026).
+    ok(&admin(&mut m, r#"{"configureCollectionBalancing":"z.t","defragmentCollection":false}"#));
+    assert_eq!(entry(&mut m), json(r#"{"noBalance":false}"#));
+}
+
+/// The balancer's document with the old `stopped: true` stops it whatever its `mode` says, and a
+/// name `db.` is shown without its dot, as a `refrouter` 9.0.4 does (measured on 03-11-2026).
+#[test]
+fn an_old_stopped_flag_and_a_database_name() {
+    let mut m = cluster();
+    m.settings = Some(vec![json(r#"{"_id":"balancer","mode":"full","stopped":true}"#)]);
+    let r = admin(&mut m, r#"{"balancerStatus":1}"#);
+    assert_eq!(field(&r, "mode"), &Value::from("off"));
+    for name in ["configureCollectionBalancing", "balancerCollectionStatus"] {
+        fails(
+            &admin(&mut m, &format!(r#"{{"{name}":"z."}}"#)),
+            73,
+            "Invalid namespace specified 'z'",
+        );
+    }
+    fails(
+        &admin(&mut m, r#"{"setAllowMigrations":"z.","allowMigrations":true}"#),
+        73,
+        "Invalid namespace specified: z",
+    );
 }
 
 #[test]

@@ -82,6 +82,8 @@ pub fn get_shard_version<B: Backend + ?Sized>(
     };
     let ns = parse_full(&name).filter(|n| !n.coll.is_empty());
     let Some(ns) = ns else {
+        // A database alone, `db` or `db.`.
+        let name = name.strip_suffix('.').unwrap_or(&name);
         let db = ctx
             .backend
             .config_documents("databases")?

@@ -128,7 +128,8 @@ impl Operation {
         d
     }
 
-    fn from_document(d: &Document) -> Result<Operation, OplogError> {
+    /// Reads `op`, `ns`, `ui`, `o` and `o2` of an entry.
+    pub fn from_document(d: &Document) -> Result<Operation, OplogError> {
         let op = match d.get("op") {
             None => return Err(OplogError::Missing("op")),
             Some(Value::String(s)) => {

@@ -164,3 +164,162 @@ fn entries_that_do_not_apply() {
         ))
     );
 }
+
+fn code_and_message(r: &Document) -> (Option<&Value>, Option<&Value>) {
+    (r.get("code"), r.get("errmsg"))
+}
+
+fn expect(r: &Document, code: i32, msg: &str) {
+    assert_eq!(code_and_message(r), (Some(&Value::Int32(code)), Some(&Value::from(msg))), "{r:?}");
+}
+
+fn entry(n: i32) -> Document {
+    Document::new().with("op", "i").with("ns", "ap.t").with("o", id(n))
+}
+
+/// RefDb 9.0.4 checks `op` and `ns` of every entry before applying any; the other fields of an
+/// entry are read when its turn comes, and an error then ends the command with what applied so
+/// far (measured on 03-11-2026, `ap9.js` and `ap10.js` in the lane's notes).
+#[test]
+fn malformed_entries_as_refdb_finds_them() {
+    let mut m = Mem::new();
+    m.run("ap", doc(&[("create", Value::from("t"))]));
+    let first = |m: &mut Mem, bad: Value| apply(m, vec![Value::Document(entry(1)), bad]);
+    let without = |f: &str| {
+        let mut d = entry(2);
+        d.remove(f);
+        Value::Document(d)
+    };
+    expect(
+        &first(&mut m, without("op")),
+        4,
+        "Wrong type for \"\". Expected a string, got a missing.",
+    );
+    expect(&first(&mut m, without("ns")), 20, "op does not contain required \"ns\" field: 1");
+    expect(
+        &first(&mut m, Value::Document(entry(2).with("ns", 5))),
+        20,
+        "\"ns\" field is not a string: 1",
+    );
+    expect(
+        &first(&mut m, Value::Document(entry(2).with("op", 5))),
+        14,
+        "Wrong type for \"op\". Expected a string, got a int.",
+    );
+    expect(
+        &first(&mut m, Value::Int32(5)),
+        14,
+        "Wrong type for \"1\". Expected a object, got a int.",
+    );
+    assert_eq!(all(&mut m), Value::Array(vec![]));
+    let idl = |f: &str, t: &str, e: &str| {
+        format!("BSON field 'OplogEntryBase.{f}' is the wrong type '{t}', expected {e}")
+    };
+    let number = "types '[double, long, int, decimal]'";
+    let uuid = |b: Vec<u8>, s: u8| Value::Binary { subtype: s, bytes: b };
+    let cases: Vec<(Value, i32, String)> = vec![
+        (Value::Document(entry(2).with("op", "x")), 2, "Enumeration value 'x' for field 'OplogEntryBase.op' is not a valid value.".into()),
+        (without("o"), 40414, "BSON field 'OplogEntryBase.o' is missing but a required field".into()),
+        (Value::Document(entry(2).with("o", 5)), 14, idl("o", "int", "type 'object'")),
+        (Value::Document(entry(2).with("o2", 5)), 14, idl("o2", "int", "type 'object'")),
+        (Value::Document(entry(2).with("ts", 5)), 14, idl("ts", "int", "type 'timestamp'")),
+        (Value::Document(entry(2).with("t", "x")), 14, idl("t", "string", number)),
+        (Value::Document(entry(2).with("v", "x")), 14, idl("v", "string", number)),
+        (Value::Document(entry(2).with("wall", 5)), 14, idl("wall", "int", "type 'date'")),
+        (Value::Document(entry(2).with("needsRetryImage", 5)), 14, idl("needsRetryImage", "int", "type 'string'")),
+        (Value::Document(entry(2).with("multiOpType", "x")), 14, idl("multiOpType", "string", "type 'int'")),
+        (Value::Document(entry(2).with("ui", 5)), 14, idl("ui", "int", "type 'binData'")),
+        (Value::Document(entry(2).with("ui", uuid(vec![0; 16], 0))), 14, "BSON field 'OplogEntryBase.ui' is the wrong binData type 'general', expected type 'UUID'".into()),
+        (Value::Document(entry(2).with("ui", uuid(vec![0; 3], 4))), 207, "uuid must be a 16-byte binary field with UUID (4) subtype".into()),
+        (Value::Document(entry(2).with("stmtId", "x")), 8_109_800, "Field 'stmtId: \"x\"' is not valid.".into()),
+        (Value::Document(entry(2).with("prevOpTime", 5)), 10_065, "invalid parameter: expected an object (prevOpTime)".into()),
+        (Value::Document(entry(2).with("prevOpTime", Document::new().with("t", 1_i64))), 40414, "BSON field 'OpTimeBase.ts' is missing but a required field".into()),
+        (Value::Document(entry(2).with("lsid", Document::new().with("id", uuid(vec![0; 16], 4)))), 40414, "BSON field 'OplogEntryBase.lsid.uid' is missing but a required field".into()),
+    ];
+    for (bad, code, msg) in cases {
+        let r = first(&mut m, bad);
+        expect(&r, code, &msg);
+        assert_eq!(r.get("applied"), Some(&Value::Int32(2)), "{r:?}");
+        let results = Value::Array(vec![Value::Boolean(true), Value::Boolean(false)]);
+        assert_eq!(r.get("results"), Some(&results), "{r:?}");
+    }
+    // `ts` without `t` and `txnNumber` without `lsid` are taken.
+    let ts = Value::Timestamp { time: 1, increment: 1 };
+    let r = apply(
+        &mut m,
+        vec![
+            Value::Document(entry(3).with("ts", ts)),
+            Value::Document(entry(4).with("txnNumber", 1_i64)),
+        ],
+    );
+    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+    // An entry whose `ui` names no collection does not apply.
+    let r = apply(&mut m, vec![Value::Document(entry(5).with("ui", uuid(vec![7; 16], 4)))]);
+    expect(&r, 8, "applyOps had one or more errors applying ops");
+    assert_eq!(field(&r, "results.0"), &Value::Boolean(false));
+}
+
+/// A write error or a diff RefDb does not write ends the command with its error and what
+/// applied so far; an array subdiff on a field that is not an array leaves it null (measured on
+/// 03-11-2026, `ap4.js` to `ap8.js`).
+#[test]
+fn errors_while_applying_end_the_command() {
+    let mut m = Mem::new();
+    m.run("ap", doc(&[("create", Value::from("t"))]));
+    let index = Document::new()
+        .with("key", Document::new().with("u", 1))
+        .with("name", "u_1")
+        .with("unique", true);
+    let r = m.run(
+        "ap",
+        doc(&[
+            ("createIndexes", Value::from("t")),
+            ("indexes", Value::Array(vec![Value::Document(index)])),
+        ]),
+    );
+    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+    m.run(
+        "ap",
+        doc(&[
+            ("insert", Value::from("t")),
+            ("documents", Value::Array(vec![Value::Document(id(1).with("a", 5).with("u", 1))])),
+        ]),
+    );
+    let r = apply(
+        &mut m,
+        vec![
+            Value::Document(entry(2).with("o", id(2).with("u", 2))),
+            Value::Document(entry(3).with("o", id(3).with("u", 1))),
+            Value::Document(entry(4)),
+        ],
+    );
+    expect(&r, 11000, "E11000 duplicate key error collection: ap.t index: u_1 dup key: { u: 1 }");
+    assert_eq!(r.get("applied"), Some(&Value::Int32(2)), "{r:?}");
+    assert_eq!(field(&r, "keyValue"), &Value::Document(Document::new().with("u", 1)));
+    let diff = |d: Document| Document::new().with("$v", 2).with("diff", d);
+    let sub = |k: &str, v: Value| Document::new().with(k, v);
+    let cases = [
+        (
+            sub("sa", Value::Document(sub("x", Value::Int32(1)))),
+            4_770_503,
+            "Unexpected section: x in document diff",
+        ),
+        (
+            sub("z", Value::Document(sub("a", Value::Int32(1)))),
+            4_770_503,
+            "Unexpected section: z in document diff",
+        ),
+        (sub("d", Value::Int32(5)), 4_770_507, "Expected d section to be type object"),
+        (sub("sb", Value::Int32(5)), 4_770_507, "Expected s section to be type object"),
+    ];
+    for (d, code, msg) in cases {
+        let r = apply(&mut m, vec![op2("u", "ap.t", diff(d), id(1))]);
+        expect(&r, code, msg);
+        assert_eq!(field(&r, "results.0"), &Value::Boolean(false));
+    }
+    let array = sub("sa", Value::Document(sub("a", Value::Boolean(true)).with("u0", 5)));
+    let r = apply(&mut m, vec![op2("u", "ap.t", diff(array), id(1))]);
+    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+    let r = m.run("ap", doc(&[("find", Value::from("t")), ("filter", Value::Document(id(1)))]));
+    assert_eq!(field(&r, "cursor.firstBatch.0.a"), &Value::Null, "{r:?}");
+}
