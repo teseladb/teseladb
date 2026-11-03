@@ -696,4 +696,16 @@ mod tests {
         let bad: BTreeMap<_, _> = [(state_key(0, COLLECTION), Some(vec![1]))].into();
         assert!(s.expand(1, &bad).is_empty());
     }
+
+    #[test]
+    fn a_run_without_measurements_or_their_checks_fails_liveness() {
+        let mut s = script();
+        s.inserted = 1;
+        s.checked = 1;
+        let v = s.finish().expect_err("no measurement");
+        assert!(v.liveness && v.detail.contains("0 measurements"), "{}", v.detail);
+        s.measured = 1;
+        s.series_checked = 1;
+        s.finish().expect("both kinds");
+    }
 }

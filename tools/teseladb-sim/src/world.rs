@@ -1172,3 +1172,38 @@ impl World {
         }
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    use std::path::Path;
+
+    use super::*;
+
+    fn file() -> RollbackFile {
+        RollbackFile { path: "rollback/range-1/r-1".into(), bytes: b"doc".to_vec() }
+    }
+
+    #[test]
+    fn a_rollback_file_is_written_once_and_one_the_disk_refuses_leaves_nothing() {
+        let mut disk = SimDisk::default();
+        assert!(write_file_once(&mut disk, &file()));
+        assert!(write_file_once(&mut disk, &file()), "already there");
+        let mut full = SimDisk::default();
+        full.set_capacity(0);
+        assert!(!write_file_once(&mut full, &file()));
+        assert!(full.list(Path::new("rollback/range-1")).unwrap_or_default().is_empty());
+    }
+
+    #[test]
+    fn rollback_files_the_disk_refuses_wait_and_keep_the_log_entries() {
+        let mut w = World::cluster(1, 1, 1, false);
+        w.nodes[0].cores[0].disk.set_capacity(0);
+        w.nodes[0].cores[0].rollback.push(file());
+        w.flush(0, 0);
+        assert_eq!(w.nodes[0].cores[0].rollback.len(), 1, "written on a later flush");
+        w.nodes[0].cores[0].disk.set_capacity(u64::MAX);
+        w.flush(0, 0);
+        assert!(w.nodes[0].cores[0].rollback.is_empty());
+    }
+}

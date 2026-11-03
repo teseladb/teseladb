@@ -116,7 +116,10 @@ IGNORE='(/\.cargo/|/rustc/|/tests/|/examples/|/target/)'
 # One export per binary, merged below: given several binaries, llvm-cov keeps only the first
 # record of each function, and a binary that links a function without calling it carries a record
 # with no counts that hides the counts of the binary that ran it («functions have mismatched
-# data»). Only the sources of the measured crates are exported.
+# data»). Only the sources of the measured crates are exported. The warning `show` prints is about
+# those duplicates across binaries; one binary alone still warns for the few functions whose record
+# has another hash in the profile (in teseladb-sim only `Sim::registry`, a getter without
+# branches, measured 03-11-2026), which its export leaves out.
 sources=()
 for c in "${crates[@]}"; do
   for d in crates/"$c"/src tools/"$c"/src; do [[ -d $d ]] && sources+=("$(cd "$d" && pwd -P)"); done
