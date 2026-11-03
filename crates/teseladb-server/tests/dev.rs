@@ -98,6 +98,7 @@ fn the_nodes_announce_their_clients_address() {
     use std::io::{Read, Write};
     use teseladb_bson::{Document, RawDoc, Value};
     use teseladb_wire::msg::{HEADER_LEN, OpMsg};
+    let _ports = PORTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let (base, busy) = two_ports();
     drop(busy);
     let nodes = dev::start(&DevOpts { nodes: 1, cores: 1, port: base, test_commands: false }, None)
@@ -153,6 +154,7 @@ fn the_nodes_announce_their_clients_address() {
 /// holds, while the first node alone starts on P.
 #[test]
 fn a_node_that_cannot_start_stops_the_cluster() {
+    let _ports = PORTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let (base, busy) = two_ports();
     let o = |nodes| DevOpts { nodes, cores: 1, port: base, test_commands: false };
     let alone = dev::start(&o(1), Some(3)).expect("the first node alone starts on P");
@@ -171,6 +173,11 @@ fn a_node_that_cannot_start_stops_the_cluster() {
 
 /// A free port P and a listener on P + 1. The system hands out its ports in order, so a port
 /// next to one it just gave may be another test's: both are held until P is needed.
+/// The tests that pick two ports in a row take turns: a port one of them frees for its cluster
+/// could otherwise go to the other's next pick (seen failing `dev::start` with the tests in
+/// parallel on 03-11).
+static PORTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn two_ports() -> (u16, std::net::TcpListener) {
     use std::net::TcpListener;
     for _ in 0..100 {
