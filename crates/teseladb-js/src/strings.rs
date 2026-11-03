@@ -164,12 +164,13 @@ fn raw(it: &mut Interp, _: &Val, a: &[Val]) -> R {
 }
 
 fn string_ctor(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    let called_with_new = matches!(this, Val::Obj(o) if o.borrow().get_own("@@new").is_some());
+    // `String(symbol)` names it; `new String(symbol)` converts it, which fails.
     let s = match arg(a, 0) {
         Val::Undef if a.is_empty() => "".into(),
-        Val::Sym(s) => format!("Symbol({})", s.0).into(),
+        Val::Sym(s) if !called_with_new => format!("Symbol({})", s.0).into(),
         v => it.str_of(&v)?,
     };
-    let called_with_new = matches!(this, Val::Obj(o) if o.borrow().get_own("@@new").is_some());
     if called_with_new {
         return Ok(Val::Obj(it.alloc(Some(it.realm.string.clone()), Kind::Str(s))?));
     }

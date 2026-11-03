@@ -502,3 +502,112 @@ fn min_of(a: Value, b: Value) -> Value {
 fn max_of(a: Value, b: Value) -> Value {
     if order(&a, &b).is_ge() { a } else { b }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    use super::*;
+
+    fn d(pairs: &[(&str, Value)]) -> Document {
+        pairs.iter().fold(Document::new(), |d, (k, v)| d.with(*k, v.clone()))
+    }
+
+    #[test]
+    fn the_sample_takes_the_size_or_the_rate() {
+        let n = 10;
+        assert_eq!(sampled_count(&Document::new(), n), 10);
+        assert_eq!(sampled_count(&d(&[("sampleSize", Value::Int32(3))]), n), 3);
+        assert_eq!(sampled_count(&d(&[("sampleSize", Value::Int64(30))]), n), 10);
+        assert_eq!(sampled_count(&d(&[("sampleSize", Value::Double(-1.0))]), n), 0);
+        assert_eq!(sampled_count(&d(&[("sampleRate", Value::Double(0.25))]), n), 3);
+        assert_eq!(sampled_count(&d(&[("sampleRate", Value::from("x"))]), n), 10);
+    }
+
+    #[test]
+    fn a_statement_gives_its_filter_its_multi_and_its_update() {
+        let q = d(&[("a", Value::Int32(1))]);
+        let one = |list: &str, s: Document| d(&[(list, Value::Array(vec![Value::Document(s)]))]);
+        let upd = one(
+            "updates",
+            d(&[
+                ("q", Value::Document(q.clone())),
+                ("u", Value::Document(Document::new())),
+                ("multi", Value::Boolean(true)),
+            ]),
+        );
+        assert_eq!(
+            statement("update", &upd),
+            (q.clone(), true, Some(Value::Document(Document::new())))
+        );
+        let del =
+            one("deletes", d(&[("q", Value::Document(q.clone())), ("limit", Value::Int64(0))]));
+        assert_eq!(statement("delete", &del), (q.clone(), true, None));
+        let del1 = one("deletes", d(&[("q", Value::Int32(1)), ("limit", Value::Int32(1))]));
+        assert_eq!(statement("delete", &del1), (Document::new(), false, None));
+        assert_eq!(statement("update", &Document::new()).0, Document::new());
+        let fam = d(&[("query", Value::Document(q.clone())), ("update", Value::Int32(1))]);
+        assert_eq!(statement("findAndModify", &fam), (q.clone(), false, Some(Value::Int32(1))));
+        let find = d(&[("filter", Value::Document(q.clone()))]);
+        assert_eq!(statement("find", &find), (q, false, None));
+    }
+
+    #[test]
+    fn only_operators_on_a_key_field_change_the_key() {
+        let key = d(&[("a", Value::Int32(1))]);
+        let set =
+            |f: &str| Value::Document(d(&[("$set", Value::Document(d(&[(f, Value::Int32(2))])))]));
+        assert!(changes_key(&set("a"), &key));
+        assert!(!changes_key(&set("b"), &key));
+        assert!(!changes_key(&Value::Document(d(&[("a", Value::Int32(2))])), &key));
+        assert!(!changes_key(&Value::Array(Vec::new()), &key));
+        assert!(!changes_key(&Value::Document(d(&[("$inc", Value::Int32(1))])), &key));
+    }
+
+    #[test]
+    fn a_full_key_names_every_field_with_one_value() {
+        let key = d(&[("a", Value::Int32(1)), ("b", Value::Int32(1))]);
+        let eq = |v: Value| Value::Document(d(&[("$eq", v)]));
+        assert!(has_full_key(&d(&[("a", Value::Int32(1)), ("b", eq(Value::Int32(2)))]), &key));
+        assert!(!has_full_key(&d(&[("a", Value::Int32(1))]), &key));
+        let gt = Value::Document(d(&[("$gt", Value::Int32(2))]));
+        assert!(!has_full_key(&d(&[("a", Value::Int32(1)), ("b", gt)]), &key));
+        let two = Value::Document(d(&[("$eq", Value::Int32(2)), ("$ne", Value::Int32(3))]));
+        assert!(!has_full_key(&d(&[("a", Value::Int32(1)), ("b", two)]), &key));
+        assert!(!has_full_key(
+            &d(&[("a", Value::Int32(1)), ("b", Value::Document(Document::new()))]),
+            &key
+        ));
+    }
+
+    #[test]
+    fn conditions_come_from_the_top_level_and_and() {
+        let inner = Value::Document(d(&[("a", Value::Int32(2))]));
+        let f = d(&[
+            ("a", Value::Int32(1)),
+            ("$and", Value::Array(vec![inner, Value::Int32(3)])),
+            ("$or", Value::Array(vec![Value::Document(d(&[("a", Value::Int32(4))]))])),
+        ]);
+        assert_eq!(conditions(&f, "a"), vec![Value::Int32(1), Value::Int32(2)]);
+    }
+
+    fn row(key: u8, id: u8) -> Row {
+        Row { key: vec![key], values: Vec::new(), id: vec![id], bytes: 0 }
+    }
+
+    #[test]
+    fn the_correlation_follows_the_ids() {
+        let up: Vec<Row> = (0..5).map(|i| row(i, i)).collect();
+        assert!((correlation(&up) - 1.0).abs() < 1e-9);
+        let down: Vec<Row> = (0..5).map(|i| row(i, 9 - i)).collect();
+        assert!((correlation(&down) + 1.0).abs() < 1e-9);
+        assert!((correlation(&[row(0, 0)]) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_bounds_space_the_documents() {
+        let few: Vec<Row> = (0..30).map(|i| row(i, i)).collect();
+        assert_eq!(bounds(&few).len(), 2);
+        let many: Vec<Row> = (0..3000u32).map(|i| row((i / 12) as u8, 0)).collect();
+        assert!(bounds(&many).len() <= usize::try_from(RANGES).unwrap_or(100));
+    }
+}

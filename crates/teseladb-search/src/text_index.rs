@@ -96,7 +96,7 @@ impl Language {
                 .iter()
                 .map(|(_, _, text)| {
                     let mut words: Vec<&str> =
-                        text.lines().filter(|l| !l.is_empty() && !l.starts_with('#')).collect();
+                        text.lines().filter(|l| !l.starts_with('#')).collect();
                     words.sort_unstable();
                     words
                 })
@@ -117,7 +117,7 @@ impl Language {
 /// Code point ranges of a data file (`XXXX..YYYY` or `XXXX` per line, `#` comments).
 fn ranges(text: &str) -> Vec<(u32, u32)> {
     text.lines()
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .filter(|l| !l.starts_with('#'))
         .filter_map(|l| {
             let (a, b) = l.split_once("..").unwrap_or((l, l));
             Some((u32::from_str_radix(a, 16).ok()?, u32::from_str_radix(b, 16).ok()?))
@@ -386,12 +386,17 @@ impl TextIndex {
     /// The score of `doc` for the stems of `query`, `None` when the document does not match it.
     pub fn score(&self, query: &TextQuery, doc: &Document) -> Option<f64> {
         let strings = self.strings(doc);
-        let found = |terms: &[String]| -> bool {
+        let found_with = |terms: &[String], sensitivity: Sensitivity| -> bool {
             strings
                 .iter()
-                .any(|(s, _, l)| stems(s, *l, query.sensitivity).iter().any(|t| terms.contains(t)))
+                .any(|(s, _, l)| stems(s, *l, sensitivity).iter().any(|t| terms.contains(t)))
         };
-        if query.terms.is_empty() || !found(&query.terms) || found(&query.negated) {
+        let found = |terms: &[String]| found_with(terms, query.sensitivity);
+        // The index finds the document by a term without case and diacritics, and only then do
+        // `$caseSensitive` and `$diacriticSensitive` filter it (measured: `CAFÉ` in a Spanish
+        // document is not found by an English case-sensitive `CAFÉ`).
+        let indexed = found_with(&query.plain_terms, Sensitivity::default());
+        if query.terms.is_empty() || !indexed || !found(&query.terms) || found(&query.negated) {
             return None;
         }
         let has_phrase = |p: &str| -> bool {
@@ -493,7 +498,8 @@ impl TextQuery {
         let mut text_start: Option<usize> = None;
         let chars: Vec<(usize, char)> = search.char_indices().collect();
         let mut i = 0;
-        while i <= chars.len() {
+        // Past the last character a space ends the last word.
+        loop {
             let (at, c) = chars.get(i).copied().unwrap_or((search.len(), ' '));
             let piece = match c {
                 '"' => Piece::Quote,
@@ -503,7 +509,7 @@ impl TextQuery {
                 _ => Piece::Text,
             };
             let end = i == chars.len();
-            if (piece != Piece::Text || end)
+            if piece != Piece::Text
                 && let Some(start) = text_start.take()
             {
                 let word = &search[start..at];

@@ -464,6 +464,12 @@ impl<B: Backend + ?Sized> Env for WireEnv<'_, B> {
         super::text_search::source(&mut **backend, &ns, filter, self.concern).map_err(to_mql)
     }
 
+    fn check_text(&self, filter: &Document) -> Result<(), MqlError> {
+        let Some((_, ns)) = &self.node else { return Ok(()) };
+        let mut backend = self.backend.borrow_mut();
+        super::text_search::check(&mut **backend, ns, filter).map_err(to_mql)
+    }
+
     fn check_search(&self, stage: &str, spec: &Document) -> Result<(), MqlError> {
         // Only `$search` asks `refsearch` while the pipeline is planned (measured on 9.0.4: the
         // errors of `$searchMeta` and `$vectorSearch` carry the executor's prefix).
@@ -495,8 +501,7 @@ impl<B: Backend + ?Sized> Env for WireEnv<'_, B> {
             "$listCatalog" => self.list_catalog().map_err(to_mql),
             super::query_settings::STAGE => {
                 let mut backend = self.backend.borrow_mut();
-                super::query_settings::listed(&mut **backend, &Value::Document(spec.clone()))
-                    .map_err(to_mql)
+                super::query_settings::listed(&mut **backend, spec).map_err(to_mql)
             }
             super::query_stats::STAGE => self.query_stats(spec).map_err(to_mql),
             teseladb_exec::pipeline::LIST_SAMPLED_QUERIES => {
@@ -554,18 +559,19 @@ fn read_through_engine<B: Backend + ?Sized>(
     vars: Option<&Document>,
     concern: ReadConcern,
 ) -> Result<(Vec<Document>, bool), CommandError> {
-    read_through_staged(backend, ns, (extra, vars), concern)?
+    read_through_spilling(backend, ns, (extra, vars), concern, (super::Spill::default(), true))?
 }
 
-/// [`read_through_engine`] with the errors of running the stages apart from those of reading
-/// and parsing them (the outer error).
+/// [`read_through`] with the node's state `shared` (the stages of the node read it) and the
+/// errors of running the stages apart from those of reading and parsing them (the outer error).
 pub(crate) fn read_through_staged<B: Backend + ?Sized>(
     backend: &mut B,
+    shared: &super::Shared,
     ns: &Namespace,
     stages: (&[Document], Option<&Document>),
     concern: ReadConcern,
 ) -> Result<Result<(Vec<Document>, bool), CommandError>, CommandError> {
-    read_through_spilling(backend, ns, stages, concern, (super::Spill::default(), true))
+    read_through_on(backend, Some(shared), ns, stages, concern, (super::Spill::default(), true))
 }
 
 /// [`read_through_staged`] with the node's store `spill` for stages past their memory, used

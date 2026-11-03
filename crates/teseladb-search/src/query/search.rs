@@ -281,13 +281,12 @@ fn parse_root(index: &MemIndex, spec: &Document) -> Result<Operator, SearchError
                 .to_owned(),
         ));
     }
-    if let Some(c) = collector(index, spec)? {
-        return Ok(match c.operator {
-            Some(op) => *op,
-            None => Operator::All,
-        });
-    }
-    parse_at(index, spec, "")
+    let op = match collector(index, spec)? {
+        Some(c) => c.operator.map_or(Operator::All, |op| *op),
+        None => parse_at(index, spec, "")?,
+    };
+    clauses::check(index, &op)?;
+    Ok(op)
 }
 
 /// The operator of `spec`, at `at` of the query (empty at its root).
@@ -1014,6 +1013,7 @@ fn eval_compound(
 }
 
 mod autocomplete;
+mod clauses;
 mod describe;
 mod embedded;
 pub(crate) use embedded::element_stats;

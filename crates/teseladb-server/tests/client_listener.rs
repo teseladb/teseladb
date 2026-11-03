@@ -553,3 +553,144 @@ fn a_drained_node_closes_its_clients_port() {
     assert!(closed(&mut late));
     l.stop();
 }
+
+/// A running node answers the `hello`s waiting on its `topologyVersion` as soon as it applies a
+/// change of `topologyPresentation` (018 FR-015, T016): the awaitable `hello` of a driver's
+/// monitor returns well before its `maxAwaitTimeMS` with the replica set presentation and a
+/// higher counter.
+#[test]
+fn a_presentation_change_wakes_the_waiting_hellos() {
+    // The member's host is the client address the node announces.
+    let cfg = NodeConfig {
+        cores: Some(1),
+        client: Some(config(DEFAULT_MAX_CONNECTIONS)),
+        native_addr: "member.test:27017".into(),
+        ..NodeConfig::default()
+    };
+    let node = Node::start(cfg, || Ok(MemDisk::new()), None).unwrap();
+    assert!(node.wait_ready(Duration::from_secs(10)));
+    let mut admin = TcpStream::connect(node.client_addrs()[0]).unwrap();
+    admin.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    let mut monitor = TcpStream::connect(node.client_addrs()[0]).unwrap();
+    monitor.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    send(&mut monitor, 1, 0, &hello());
+    let (_, _, first) = recv(&mut monitor).unwrap();
+    let Some(Value::Document(tv)) = first.get("topologyVersion").cloned() else {
+        panic!("{first:?}")
+    };
+    let counter = |d: &Document| match d.get("topologyVersion") {
+        Some(Value::Document(t)) => match t.get("counter") {
+            Some(Value::Int64(n)) => *n,
+            other => panic!("{other:?}"),
+        },
+        other => panic!("{other:?}"),
+    };
+    let wait =
+        |tv: &Document| hello().with("topologyVersion", tv.clone()).with("maxAwaitTimeMS", 15_000);
+    send(&mut monitor, 2, 0, &wait(&tv));
+    let started = Instant::now();
+    let present = Document::new()
+        .with(
+            "setClusterParameter",
+            Document::new().with(
+                "topologyPresentation",
+                Document::new().with("mode", "replicaset").with("setName", "rs0"),
+            ),
+        )
+        .with("$db", "admin");
+    // The node's client address reaches `config.shards` once it is announced to Group 0.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        send(&mut admin, 3, 0, &present);
+        let (_, _, set) = recv(&mut admin).unwrap();
+        if set.get("ok") == Some(&Value::Double(1.0)) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "{set:?}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let (h, _, woken) = recv(&mut monitor).unwrap();
+    assert_eq!(h.response_to, 2);
+    assert!(started.elapsed() < Duration::from_secs(5), "woken after {:?}", started.elapsed());
+    assert_eq!(woken.get("setName"), Some(&Value::from("rs0")), "{woken:?}");
+    assert_eq!(woken.get("isWritablePrimary"), Some(&Value::Boolean(true)), "{woken:?}");
+    assert_eq!(woken.get("me"), Some(&Value::from("member.test:27017")));
+    assert!(counter(&woken) > counter(&first));
+    drop(node.stop());
+}
+
+/// The replica set port (018 FR-016, T018): opened on the running node when Group 0 says so,
+/// it answers as a member of the replica set at that port while the main port keeps answering
+/// as a `refrouter`, one application on each at the same time; 0 closes it.
+#[test]
+fn the_replica_set_port_opens_and_closes_without_a_restart() {
+    let cfg = NodeConfig {
+        cores: Some(1),
+        client: Some(config(DEFAULT_MAX_CONNECTIONS)),
+        native_addr: "member.test:27017".into(),
+        ..NodeConfig::default()
+    };
+    let node = Node::start(cfg, || Ok(MemDisk::new()), None).unwrap();
+    assert!(node.wait_ready(Duration::from_secs(10)));
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let mut admin = TcpStream::connect(node.client_addrs()[0]).unwrap();
+    admin.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    let set = |admin: &mut TcpStream, id: i32, port: i32| {
+        let value = Document::new()
+            .with("mode", "refrouter")
+            .with("setName", "rs0")
+            .with("replicaSetPort", port);
+        let cmd = Document::new()
+            .with("setClusterParameter", Document::new().with("topologyPresentation", value))
+            .with("$db", "admin");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            send(admin, id, 0, &cmd);
+            let (_, _, r) = recv(admin).unwrap();
+            if r.get("ok") == Some(&Value::Double(1.0)) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "{r:?}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    set(&mut admin, 1, i32::from(port));
+    let started = Instant::now();
+    let mut member = loop {
+        if let Ok(s) = TcpStream::connect(("127.0.0.1", port)) {
+            break s;
+        }
+        assert!(started.elapsed() < Duration::from_secs(5), "the port never opened");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    member.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    send(&mut member, 2, 0, &hello());
+    let (_, _, h) = recv(&mut member).unwrap();
+    let me = format!("member.test:{port}");
+    assert_eq!(h.get("setName"), Some(&Value::from("rs0")), "{h:?}");
+    assert_eq!(h.get("me"), Some(&Value::from(me.as_str())));
+    assert_eq!(h.get("hosts"), Some(&Value::Array(vec![Value::from(me.as_str())])));
+    assert_eq!(h.get("isWritablePrimary"), Some(&Value::Boolean(true)));
+    send(&mut admin, 3, 0, &hello());
+    let (_, _, main) = recv(&mut admin).unwrap();
+    assert_eq!(main.get("msg"), Some(&Value::from("isdbgrid")), "{main:?}");
+    // Both applications write and read the same data.
+    let ins = Document::new()
+        .with("insert", "c")
+        .with("documents", vec![Value::Document(Document::new().with("_id", 1))])
+        .with("$db", "dual");
+    send(&mut member, 4, 0, &ins);
+    let (_, _, r) = recv(&mut member).unwrap();
+    assert_eq!(r.get("n"), Some(&Value::Int32(1)), "{r:?}");
+    let count = Document::new().with("count", "c").with("$db", "dual");
+    send(&mut admin, 5, 0, &count);
+    let (_, _, r) = recv(&mut admin).unwrap();
+    assert_eq!(r.get("n"), Some(&Value::Int32(1)), "{r:?}");
+    set(&mut admin, 6, 0);
+    let started = Instant::now();
+    while TcpStream::connect(("127.0.0.1", port)).is_ok() {
+        assert!(started.elapsed() < Duration::from_secs(5), "the port never closed");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    drop(node.stop());
+}

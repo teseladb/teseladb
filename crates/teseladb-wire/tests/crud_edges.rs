@@ -1227,6 +1227,7 @@ fn a_write_keeps_the_history_of_its_documents_next_to_them() {
             meta_key(&key(1), 0),
             ChangeMeta {
                 txn: None,
+                retry: None,
                 op: 0,
                 update: Some(desc.clone()),
                 replace: false,
@@ -1239,6 +1240,7 @@ fn a_write_keeps_the_history_of_its_documents_next_to_them() {
             meta_key(&key(2), 1),
             ChangeMeta {
                 txn: None,
+                retry: None,
                 op: 1,
                 update: Some(desc),
                 replace: false,
@@ -1261,6 +1263,7 @@ fn a_write_keeps_the_history_of_its_documents_next_to_them() {
             meta_key(&key(2), 1),
             ChangeMeta {
                 txn: None,
+                retry: None,
                 op: 1,
                 update: None,
                 replace: false,
@@ -1286,6 +1289,7 @@ fn a_write_keeps_the_history_of_its_documents_next_to_them() {
     let out = replace.eval(&[Some((1, &one))], ts).unwrap();
     let want = ChangeMeta {
         txn: None,
+        retry: None,
         op: 0,
         update: None,
         replace: true,
@@ -1301,6 +1305,7 @@ fn a_write_keeps_the_history_of_its_documents_next_to_them() {
             meta_key(&key(2), 1),
             ChangeMeta {
                 txn: None,
+                retry: None,
                 op: 1,
                 update: None,
                 replace: false,

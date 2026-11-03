@@ -9,6 +9,7 @@
 
 use teseladb_bson::{BsonError, Document, Limits, MAX_DEPTH, MAX_SIZE, RawDoc, RawValue, Value};
 use teseladb_changestream::describe::{Touch, describe};
+use teseladb_changestream::meta::RetryInfo;
 use teseladb_changestream::update_desc::UpdateDescription;
 use teseladb_collation::{ParsedCollation, parse_collation};
 use teseladb_hlc::{Hlc, to_timestamp};
@@ -61,6 +62,8 @@ mod f {
     pub const UNLOGGED: &str = "unlogged";
     pub const SHARD_KEY: &str = "shardKey";
     pub const MOVES: &str = "moves";
+    pub const RETRY: &str = "retry";
+    pub const MARK: &str = "mark";
     pub const PROBES: &str = "probes";
     pub const CAPPED: &str = "capped";
     pub const CAPPED_SIZE: &str = "size";
@@ -166,6 +169,9 @@ pub struct Rules {
     /// moves its document to the key of the new values (018 FR-001), as a `refrouter` 9.0.4 moves
     /// it there and refuses it elsewhere (measured on 02-11-2026).
     pub moves: bool,
+    /// The retryable write outside a transaction that sends it (018 FR-009): its documents' metas
+    /// keep the session for their oplog entries.
+    pub retry: Option<teseladb_changestream::meta::RetryInfo>,
 }
 
 /// The buckets of a time series and the one an insert goes to.
@@ -271,12 +277,15 @@ pub struct MutationResult {
     pub attempt: i64,
     /// Set by the writer, not encoded: the range answered with the result of an earlier send.
     pub retried: bool,
+    /// The mark of a retryable write that wrote (the next statement's `prevOpTime`, 018 FR-009).
+    pub mark: Option<Hlc>,
     /// Index keys the write added and removed, the `_id` of each document it inserted or
     /// deleted counted as one (the profiler's `keysInserted` and `keysDeleted`).
     pub keys: (i64, i64),
 }
 
-fn rules_doc(r: &Rules, d: &mut Document, attempt: i64) {
+fn rules_doc(r: &Rules, d: &mut Document, send: Send<'_>) {
+    let Send { attempt, retry } = send;
     d.push(f::NS, r.ns.as_str());
     if let Some((spec, level, action)) = &r.validator {
         d.push(f::VALIDATOR, spec.clone());
@@ -312,6 +321,9 @@ fn rules_doc(r: &Rules, d: &mut Document, attempt: i64) {
     }
     if r.moves {
         d.push(f::MOVES, true);
+    }
+    if let Some(info) = retry.or(r.retry.as_ref()) {
+        d.push(f::RETRY, Value::Binary { subtype: 0, bytes: info.to_bytes() });
     }
     if let Some(c) = &r.capped {
         let saturated = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
@@ -484,24 +496,42 @@ fn read_rules(d: RawDoc<'_>) -> Result<Rules, CommandError> {
         unlogged: get_bool(d, f::UNLOGGED),
         shard_key: get_doc(d, f::SHARD_KEY),
         moves: get_bool(d, f::MOVES),
+        retry: match d.get(f::RETRY) {
+            Some(RawValue::Binary { bytes, .. }) => {
+                let mut b = bytes;
+                let info = teseladb_changestream::meta::RetryInfo::take_from(&mut b)
+                    .map_err(|_| bad_rules())?;
+                if !b.is_empty() {
+                    return Err(bad_rules());
+                }
+                Some(info)
+            }
+            None => None,
+            Some(_) => return Err(bad_rules()),
+        },
     })
 }
 
 impl DocMutation {
     /// Its encoding.
     pub fn encode(&self) -> Result<Vec<u8>, CommandError> {
-        self.encode_with_attempt(0)
+        self.encode_for(Send::default())
     }
 
     /// Its encoding with `attempt` in its rules in place of theirs (when not 0).
     pub fn encode_with_attempt(&self, attempt: i64) -> Result<Vec<u8>, CommandError> {
+        self.encode_for(Send { attempt, retry: None })
+    }
+
+    /// Its encoding for send `send`: its attempt and retryable write in place of the rules'.
+    pub fn encode_for(&self, send: Send<'_>) -> Result<Vec<u8>, CommandError> {
         let mut d = Document::new();
         match self {
             DocMutation::Insert { docs, ordered, rules } => {
                 d.push(f::KIND, INSERT);
                 d.push(f::DOCS, docs.iter().cloned().map(Value::Document).collect::<Vec<_>>());
                 d.push(f::ORDERED, *ordered);
-                rules_doc(rules, &mut d, attempt);
+                rules_doc(rules, &mut d, send);
             }
             DocMutation::Update { filter, update, array_filters, multi, upsert, image, rules } => {
                 d.push(f::KIND, UPDATE);
@@ -515,22 +545,22 @@ impl DocMutation {
                     d.push(f::UPSERT, u.clone());
                 }
                 d.push(f::IMAGE, image.code());
-                rules_doc(rules, &mut d, attempt);
+                rules_doc(rules, &mut d, send);
             }
             DocMutation::Delete { filter, multi, image, rules } => {
                 d.push(f::KIND, DELETE);
                 d.push(f::FILTER, filter.clone());
                 d.push(f::MULTI, *multi);
                 d.push(f::IMAGE, image.code());
-                rules_doc(rules, &mut d, attempt);
+                rules_doc(rules, &mut d, send);
             }
             DocMutation::Backfill { rules } => {
                 d.push(f::KIND, BACKFILL);
-                rules_doc(rules, &mut d, attempt);
+                rules_doc(rules, &mut d, send);
             }
             DocMutation::Erase { rules } => {
                 d.push(f::KIND, ERASE);
-                rules_doc(rules, &mut d, attempt);
+                rules_doc(rules, &mut d, send);
             }
         }
         Ok(d.to_bytes_with(MUTATION_LIMITS)?)
@@ -596,6 +626,12 @@ impl MutationResult {
         if self.attempt != 0 {
             d.push(f::ATTEMPT, self.attempt);
         }
+        if let Some(m) = self.mark {
+            let at = Document::new()
+                .with("p", i64::try_from(m.physical).unwrap_or(i64::MAX))
+                .with("l", i64::from(m.logical));
+            d.push(f::MARK, at);
+        }
         let errors: Vec<Value> = self
             .errors
             .iter()
@@ -634,6 +670,7 @@ impl MutationResult {
             value: get_doc(d, f::VALUE),
             attempt: num(f::ATTEMPT),
             keys: (num(f::KEYS_INSERTED), num(f::KEYS_DELETED)),
+            mark: read_mark(d.get(f::MARK)),
             ..MutationResult::default()
         };
         if let Some(RawValue::Array(a)) = d.get(f::ERRORS) {
@@ -653,6 +690,25 @@ impl MutationResult {
         }
         Ok(r)
     }
+}
+
+/// The mark [`MutationResult::encode`] wrote.
+fn read_mark(v: Option<RawValue<'_>>) -> Option<Hlc> {
+    let Some(RawValue::Document(d)) = v else { return None };
+    let (Some(RawValue::Int64(p)), Some(RawValue::Int64(l))) = (d.get("p"), d.get("l")) else {
+        return None;
+    };
+    Some(Hlc { physical: u64::try_from(p).ok()?, logical: u32::try_from(l).ok()? })
+}
+
+/// What one send of a write carries beyond its mutation: the attempt of a retryable write
+/// ([`Rules::attempt`]) and its session ([`Rules::retry`]).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Send<'a> {
+    /// The attempt (0 keeps the rules').
+    pub attempt: i64,
+    /// The retryable write (`None` keeps the rules').
+    pub retry: Option<&'a teseladb_changestream::meta::RetryInfo>,
 }
 
 fn read_error(e: RawDoc<'_>) -> Option<WriteError> {
@@ -972,9 +1028,14 @@ impl Bound {
 
     /// Its encoding with `attempt` for this send of a retryable write ([`Rules::attempt`]).
     pub fn encode_with_attempt(&self, attempt: i64) -> Result<Vec<u8>, CommandError> {
+        self.encode_for(Send { attempt, retry: None })
+    }
+
+    /// Its encoding for send `send` ([`DocMutation::encode_for`]).
+    pub fn encode_for(&self, send: Send<'_>) -> Result<Vec<u8>, CommandError> {
         let keys: Vec<Value> =
             self.keys.iter().map(|k| Value::Binary { subtype: 0, bytes: k.clone() }).collect();
-        let m = self.mutation.encode_with_attempt(attempt)?;
+        let m = self.mutation.encode_for(send)?;
         let d =
             Document::new().with("keys", keys).with("m", Value::Binary { subtype: 0, bytes: m });
         Ok(d.to_bytes_with(MUTATION_LIMITS)?)
@@ -1018,6 +1079,31 @@ impl Bound {
     /// The probes in its rules.
     pub fn probes(&self) -> &[teseladb_index::prepared::Probe] {
         &self.rules().probes
+    }
+
+    /// The bound mutation of retryable write `retry` (018 FR-009).
+    pub fn with_retry(&self, retry: teseladb_changestream::meta::RetryInfo) -> Bound {
+        let mut mutation = self.mutation.clone();
+        match &mut mutation {
+            DocMutation::Insert { rules, .. }
+            | DocMutation::Update { rules, .. }
+            | DocMutation::Delete { rules, .. }
+            | DocMutation::Backfill { rules }
+            | DocMutation::Erase { rules } => rules.retry = Some(retry),
+        }
+        Bound { mutation, keys: self.keys.clone() }
+    }
+
+    /// `needsRetryImage` of a `findAndModify` (018 FR-009): 1 the document before, 2 after.
+    fn retry_image(&self) -> u8 {
+        match &self.mutation {
+            DocMutation::Update { image, .. } | DocMutation::Delete { image, .. } => match image {
+                Image::Before => 1,
+                Image::After => 2,
+                Image::None => 0,
+            },
+            _ => 0,
+        }
     }
 
     /// The bound mutation with `probes` in its rules (009 FR-004).
@@ -1125,6 +1211,9 @@ impl Mutation for Bound {
         }
         let attempt = self.rules().attempt;
         result.attempt = attempt;
+        if applied && self.rules().retry.is_some() {
+            result.mark = Some(ts);
+        }
         if applied {
             result.keys = key_counts((&puts, &deletes), &lookup, self.rules().capped.is_some());
         }
@@ -1141,7 +1230,8 @@ impl Mutation for Bound {
         // An erase removes what a dropped index or collection left: it changes no document.
         let erase = matches!(self.mutation, DocMutation::Erase { .. });
         if !self.rules().unlogged && !erase {
-            let docs = Written { change: &change, replaced: &replaced, moved: &moved };
+            let retry = self.rules().retry.map(|r| RetryInfo { image: self.retry_image(), ..r });
+            let docs = Written { change: &change, replaced: &replaced, moved: &moved, retry };
             puts.extend(history_puts(&self.keys, (&puts, &deletes), &docs)?);
         }
         match result.encode() {
@@ -1209,6 +1299,7 @@ struct Written<'a> {
     change: &'a [u8],
     replaced: &'a [Vec<u8>],
     moved: &'a [(Vec<u8>, Vec<u8>)],
+    retry: Option<RetryInfo>,
 }
 
 /// The versions next to each document a write changes with what its event needs (014 FR-005,
@@ -1219,7 +1310,7 @@ fn history_puts(
     (puts, deletes): (&[Put], &[Vec<u8>]),
     w: &Written<'_>,
 ) -> Result<Vec<Put>, MutationError> {
-    use teseladb_changestream::meta::{DocWrite, Moved, history};
+    use teseladb_changestream::meta::{DocWrite, Moved, history_with};
     let mut updates = UpdateDescription::decode_all(w.change)
         .map_err(|e| MutationError(format!("change description: {e:?}")))?;
     let writes: Vec<DocWrite> = written_docs(keys, puts, deletes)
@@ -1236,7 +1327,7 @@ fn history_puts(
             DocWrite { delete: !put, replace, update, doc: None, key, moved }
         })
         .collect();
-    history(&writes, None)
+    history_with(&writes, None, w.retry.as_ref())
         .into_iter()
         .map(|(key, meta)| {
             let value = meta.encode().map_err(|e| MutationError(e.to_string()))?;

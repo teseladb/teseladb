@@ -76,8 +76,30 @@ pub struct Mapped {
 
 impl Mapped {
     /// The parameter element `key` stands for.
-    fn name(&self, key: &str) -> Option<Name> {
+    pub fn name(&self, key: &str) -> Option<Name> {
         array_index(key).and_then(|i| self.names.borrow().get(i).cloned().flatten())
+    }
+
+    /// The value of the parameter `n` stands for.
+    pub fn value(&self, n: &str) -> Option<Val> {
+        let e = self.env.borrow();
+        e.vars.iter().rev().find(|(k, _)| &**k == n).and_then(|(_, b)| b.value.clone())
+    }
+
+    /// Gives the parameter `n` stands for the value `v`.
+    pub fn set(&self, n: &str, v: Val) {
+        let mut e = self.env.borrow_mut();
+        if let Some((_, b)) = e.vars.iter_mut().rev().find(|(k, _)| &**k == n) {
+            b.value = Some(v);
+        }
+    }
+
+    /// Unties element `key` from its parameter.
+    pub fn unmap(&self, key: &str) {
+        let i = array_index(key).unwrap_or(usize::MAX);
+        if let Some(slot) = self.names.borrow_mut().get_mut(i) {
+            *slot = None;
+        }
     }
 }
 
@@ -250,7 +272,7 @@ pub fn is_constructor(f: &Val) -> bool {
                 || matches!(&**name, "Proxy" | "UUID" | "MD5" | "HexData" | "MinKey" | "MaxKey")
         }
         Kind::Func(Func::Bound(t, ..)) => is_constructor(&Val::Obj(t.clone())),
-        Kind::Proxy(_, callable) => *callable,
+        Kind::Proxy(_, _, constructor) => *constructor,
         _ => false,
     }
 }
@@ -284,12 +306,13 @@ pub(crate) fn callee_text(e: &Expr) -> String {
         Expr::Ident(n, _) => n.to_string(),
         Expr::Member { obj, prop, .. } => match &**prop {
             MemberProp::Name(n) | MemberProp::Private(n) => format!("{}.{n}", callee_text(obj)),
-            // SpiderMonkey folds a constant key: `o['k' + 1]` is `o.k1`, `o['a b']` stays.
+            // SpiderMonkey folds a constant key: `o['k' + 1]` is `o.k1`, `o[1 + 2]` and `o['3']`
+            // are `o[3]`, `o[1.5]` is `o['1.5']`, `o['a b']` stays.
             MemberProp::Computed(k) => match fold_key(k) {
+                Some(key) if array_index(&key).is_some() => format!("{}[{key}]", callee_text(obj)),
                 Some(key) if is_identifier(&key) => format!("{}.{key}", callee_text(obj)),
                 Some(key) => format!("{}['{key}']", callee_text(obj)),
                 None => match k {
-                    Expr::Num(n) => format!("{}[{}]", callee_text(obj), number::to_string(*n)),
                     Expr::Ident(..) => format!("{}[{}]", callee_text(obj), callee_text(k)),
                     Expr::At(_, inner) if matches!(**inner, Expr::Ident(..)) => {
                         format!("{}[{}]", callee_text(obj), callee_text(inner))
@@ -307,8 +330,22 @@ pub(crate) fn callee_text(e: &Expr) -> String {
         Expr::Call { callee, .. } => format!("{}(...)", callee_text(callee)),
         Expr::Str(s) => format!("\"{s}\""),
         Expr::Num(n) => number::to_string(*n),
+        Expr::Array(items) if items.is_empty() => "[]".into(),
+        Expr::Array(_) => "[...]".into(),
         Expr::OptChain(e) | Expr::At(_, e) => callee_text(e),
         _ => INTERMEDIATE.into(),
+    }
+}
+
+/// The text of `e`, an object that is not a constructor, in `… is not a constructor`: a
+/// function expression in parentheses unless it is an arrow, as SpiderMonkey decompiles it.
+fn constructor_text(it: &Interp, e: &Expr, v: &Val) -> String {
+    match e {
+        Expr::At(_, inner) => constructor_text(it, inner, v),
+        Expr::Func(def) if def.arrow => def.source.to_string(),
+        Expr::Func(def) => format!("({})", def.source),
+        Expr::Array(_) | Expr::New { .. } => callee_text(e),
+        _ => crate::decompile::operand_text(it, e, v),
     }
 }
 
@@ -321,23 +358,47 @@ fn bare_temp(e: &Expr) -> bool {
     matches!(e, Expr::Ident(n, _) if n.starts_with(crate::generators::TEMP_PREFIX) && !n.contains('|'))
 }
 
-/// The string a constant key folds to: a string, or `+` of strings and numbers.
-fn fold_key(e: &Expr) -> Option<String> {
-    match e {
-        Expr::Str(s) => Some(s.to_string()),
-        Expr::At(_, x) => fold_key(x),
-        Expr::Binary("+", a, b) => {
-            let side = |x: &Expr| match x {
-                Expr::Num(n) => Some(number::to_string(*n)),
-                Expr::At(_, y) if matches!(**y, Expr::Num(_)) => match **y {
-                    Expr::Num(n) => Some(number::to_string(n)),
-                    _ => None,
-                },
-                other => fold_key(other),
-            };
-            Some(side(a)? + &side(b)?)
+/// A constant that SpiderMonkey folds: a string or a number.
+enum Folded {
+    Str(String),
+    Num(f64),
+}
+
+impl Folded {
+    fn text(self) -> String {
+        match self {
+            Folded::Str(s) => s,
+            Folded::Num(n) => number::to_string(n),
         }
+    }
+}
+
+fn fold(e: &Expr) -> Option<Folded> {
+    match e {
+        Expr::Str(s) => Some(Folded::Str(s.to_string())),
+        Expr::Num(n) => Some(Folded::Num(*n)),
+        Expr::At(_, x) => fold(x),
+        Expr::Binary("+", a, b) => Some(match (fold(a)?, fold(b)?) {
+            (Folded::Num(x), Folded::Num(y)) => Folded::Num(x + y),
+            (x, y) => Folded::Str(x.text() + &y.text()),
+        }),
         _ => None,
+    }
+}
+
+/// The property key a constant key expression folds to: a string, a number, or `+` of them.
+fn fold_key(e: &Expr) -> Option<String> {
+    fold(e).map(Folded::text)
+}
+
+/// Writes `name` for the first `text` of the message of `err`, an error `make_error` made: its
+/// `message` is a string.
+fn replace_in_message(err: &ObjRef, text: &str, name: &str) {
+    for (_, p) in err.borrow_mut().props.iter_mut().filter(|(k, _)| &**k == "message") {
+        p.value = match &p.value {
+            Val::Str(m) => Val::Str(m.replacen(text, name, 1).into()),
+            v => v.clone(),
+        };
     }
 }
 
@@ -460,6 +521,10 @@ impl<'c> Interp<'c> {
     }
 
     pub fn make_error(&self, name: &str, message: &str) -> R {
+        self.make_error_obj(name, message).map(Val::Obj)
+    }
+
+    fn make_error_obj(&self, name: &str, message: &str) -> R<ObjRef> {
         let proto = self
             .realm
             .errors
@@ -471,7 +536,7 @@ impl<'c> Interp<'c> {
         self.grow(&o, 1)?;
         o.borrow_mut().props.push(("message".into(), Prop::hidden(Val::str(message))));
         self.place_error(&o)?;
-        Ok(Val::Obj(o))
+        Ok(o)
     }
 
     /// The column RefDb reports for `p`.
@@ -518,16 +583,19 @@ impl<'c> Interp<'c> {
 
     /// The `SyntaxError` of code that `eval` or `Function` parse: at its place in that code.
     pub fn syntax_error(&self, e: &crate::lexer::SyntaxError) -> Ctrl {
-        let err = self.error("SyntaxError", &e.message);
-        if let Ctrl::Throw(Val::Obj(o)) = &err {
-            let mut b = o.borrow_mut();
-            for (k, v) in [("lineNumber", e.line), ("columnNumber", e.col)] {
-                if let Some(p) = b.get_own_mut(k) {
-                    p.value = Val::Num(f64::from(v));
-                }
+        let o = match self.make_error_obj("SyntaxError", &e.message) {
+            Ok(o) => o,
+            Err(c) => return c,
+        };
+        // `place_error` gave it both properties.
+        for (k, p) in &mut o.borrow_mut().props {
+            match &**k {
+                "lineNumber" => p.value = Val::Num(f64::from(e.line)),
+                "columnNumber" => p.value = Val::Num(f64::from(e.col)),
+                _ => {}
             }
         }
-        err
+        Ctrl::Throw(Val::Obj(o))
     }
 
     pub fn type_error<T>(&self, message: &str) -> R<T> {
@@ -538,11 +606,12 @@ impl<'c> Interp<'c> {
     /// operand's expression writes the expression instead ([`Interp::name_operands`]).
     pub fn operand_error(&mut self, v: &Val, message: impl FnOnce(&str) -> String) -> Ctrl {
         let text = crate::decompile::value_source(self, v);
-        let e = self.error("TypeError", &message(&text));
-        if let Ctrl::Throw(Val::Obj(o)) = &e {
-            self.operand_failure = Some((o.clone(), v.clone(), text));
-        }
-        e
+        let o = match self.make_error_obj("TypeError", &message(&text)) {
+            Ok(o) => o,
+            Err(c) => return c,
+        };
+        self.operand_failure = Some((o.clone(), v.clone(), text));
+        Ctrl::Throw(Val::Obj(o))
     }
 
     /// `r`, with the text of the operand in an operand error replaced by its expression, as
@@ -555,13 +624,7 @@ impl<'c> Interp<'c> {
         }
         let Some((e, _)) = operands.iter().find(|(_, x)| strict_eq(x, &v)) else { return r };
         let name = crate::decompile::operand_text(self, e, &v);
-        let mut b = err.borrow_mut();
-        if let Some((_, p)) = b.props.iter_mut().find(|(k, _)| &**k == "message")
-            && let Val::Str(m) = &p.value
-        {
-            p.value = Val::Str(m.replacen(&text, &name, 1).into());
-        }
-        drop(b);
+        replace_in_message(err, &text, &name);
         r
     }
 
@@ -578,13 +641,7 @@ impl<'c> Interp<'c> {
             return r;
         }
         let name = name(self, &v, &text);
-        let mut b = err.borrow_mut();
-        if let Some((_, p)) = b.props.iter_mut().find(|(k, _)| &**k == "message")
-            && let Val::Str(m) = &p.value
-        {
-            p.value = Val::Str(m.replacen(&text, &name, 1).into());
-        }
-        drop(b);
+        replace_in_message(err, &text, &name);
         r
     }
 
@@ -1228,10 +1285,10 @@ impl<'c> Interp<'c> {
         let caller = std::mem::replace(&mut self.fname, name);
         self.frames.push((caller, self.pos));
         let r = self.run_closure_in(fo, def, env, this, home, args, new_target);
-        if let Some((caller, pos)) = self.frames.pop() {
-            self.fname = caller;
-            self.pos = pos;
-        }
+        // The frame pushed above is the last one: nothing else pushes or pops `frames`.
+        let (caller, pos) = self.frames.pop().unwrap_or_default();
+        self.fname = caller;
+        self.pos = pos;
         r
     }
 
@@ -1426,10 +1483,9 @@ impl<'c> Interp<'c> {
         match func {
             Func::Native(n, _) => {
                 // A native constructor sees `new` through `this` being the new target marker.
-                let marker = Val::Obj(self.alloc(None, Kind::Ordinary)?);
-                if let Val::Obj(m) = &marker {
-                    m.borrow_mut().props.push(("@@new".into(), Prop::hidden(new_target.clone())));
-                }
+                let m = self.alloc(None, Kind::Ordinary)?;
+                m.borrow_mut().props.push(("@@new".into(), Prop::hidden(new_target.clone())));
+                let marker = Val::Obj(m);
                 let v = n(self, &marker, args)?;
                 // A subclass of a native constructor: the result takes the subclass's prototype.
                 if let (Val::Obj(o), Val::Obj(nt)) = (&v, new_target)
@@ -1876,12 +1932,12 @@ impl<'c> Interp<'c> {
                 }
                 if let Some(r) = rest {
                     let o = self.object()?;
-                    if let Val::Obj(src) = &v {
-                        for k in self.keys(src, true)? {
-                            if !used.contains(&k) {
-                                let x = self.get(&v, &k)?;
-                                self.define(&o, &k, Prop::data(x))?;
-                            }
+                    // A string's characters are its own keys (`const {...r} = 'xy'`).
+                    let src = self.object_of(&v)?;
+                    for k in self.keys(&src, true)? {
+                        if !used.contains(&k) {
+                            let x = self.get(&v, &k)?;
+                            self.define(&o, &k, Prop::data(x))?;
                         }
                     }
                     self.bind(r, Val::Obj(o), scope, declare_mutable)?;
@@ -2156,23 +2212,13 @@ impl<'c> Interp<'c> {
                 }
             }
             Stmt::Block(body) => self.block(body, env)?,
-            Stmt::While(c, body) => {
-                while self.eval(c, env)?.truthy() {
-                    if loop_ctrl(self.exec(body, env), None)? {
-                        break;
-                    }
-                }
-            }
-            Stmt::DoWhile(body, c) => loop {
-                if loop_ctrl(self.exec(body, env), None)? || !self.eval(c, env)?.truthy() {
-                    break;
-                }
-            },
+            Stmt::While(c, body) => self.exec_while(c, body, env, &[], true)?,
+            Stmt::DoWhile(body, c) => self.exec_while(c, body, env, &[], false)?,
             Stmt::For(init, test, update, body) => {
-                self.exec_for(init.as_ref(), test.as_ref(), update.as_ref(), body, env, None)?
+                self.exec_for(init.as_ref(), test.as_ref(), update.as_ref(), body, env, &[])?
             }
             Stmt::ForIn { decl, target, of, obj, body } => {
-                self.exec_for_in(*decl, target, *of, obj, body, env, None)?
+                self.exec_for_in(*decl, target, *of, obj, body, env, &[])?
             }
             Stmt::Break(l) => return Err(Ctrl::Break(l.clone())),
             Stmt::Continue(l) => return Err(Ctrl::Continue(l.clone())),
@@ -2239,43 +2285,47 @@ impl<'c> Interp<'c> {
                 self.exec(body, &scope)?;
             }
             Stmt::Labeled(label, body) => {
-                let r = match &**body {
+                // `a: b: while …`: a `continue` to any of the labels goes on with the loop.
+                let mut labels = vec![label.clone()];
+                let mut inner = &**body;
+                while let Stmt::Labeled(l, b) = inner {
+                    labels.push(l.clone());
+                    inner = b;
+                }
+                let ls = labels.as_slice();
+                let r = match inner {
                     Stmt::For(i, t, u, b) => {
-                        self.exec_for(i.as_ref(), t.as_ref(), u.as_ref(), b, env, Some(label))
+                        self.exec_for(i.as_ref(), t.as_ref(), u.as_ref(), b, env, ls)
                     }
                     Stmt::ForIn { decl, target, of, obj, body } => {
-                        self.exec_for_in(*decl, target, *of, obj, body, env, Some(label))
+                        self.exec_for_in(*decl, target, *of, obj, body, env, ls)
                     }
-                    Stmt::While(c, b) => {
-                        let mut r = Ok(());
-                        loop {
-                            match self.eval(c, env) {
-                                Ok(v) if v.truthy() => {}
-                                Ok(_) => break,
-                                Err(e) => {
-                                    r = Err(e);
-                                    break;
-                                }
-                            }
-                            match loop_ctrl(self.exec(b, env), Some(label)) {
-                                Ok(true) => break,
-                                Ok(false) => {}
-                                Err(e) => {
-                                    r = Err(e);
-                                    break;
-                                }
-                            }
-                        }
-                        r
-                    }
+                    Stmt::While(c, b) => self.exec_while(c, b, env, ls, true),
+                    Stmt::DoWhile(b, c) => self.exec_while(c, b, env, ls, false),
                     other => self.exec(other, env),
                 };
                 match r {
-                    Err(Ctrl::Break(Some(l))) if l == *label => {}
+                    Err(Ctrl::Break(Some(l))) if labels.contains(&l) => {}
                     r => r?,
                 }
             }
         }
+        Ok(())
+    }
+
+    /// `while (c) body`, or `do body while (c)` when `test_first` is false.
+    fn exec_while(
+        &mut self,
+        c: &Expr,
+        body: &Stmt,
+        env: &EnvRef,
+        labels: &[Name],
+        test_first: bool,
+    ) -> R<()> {
+        if test_first && !self.eval(c, env)?.truthy() {
+            return Ok(());
+        }
+        while !loop_ctrl(self.exec(body, env), labels)? && self.eval(c, env)?.truthy() {}
         Ok(())
     }
 
@@ -2287,7 +2337,7 @@ impl<'c> Interp<'c> {
         update: Option<&Expr>,
         body: &Stmt,
         env: &EnvRef,
-        label: Option<&Name>,
+        labels: &[Name],
     ) -> R<()> {
         let (mut scope, per_iteration) = self.for_init(init, env)?;
         loop {
@@ -2296,7 +2346,7 @@ impl<'c> Interp<'c> {
             {
                 break;
             }
-            if loop_ctrl(self.exec(body, &scope), label)? {
+            if loop_ctrl(self.exec(body, &scope), labels)? {
                 break;
             }
             if per_iteration {
@@ -2348,7 +2398,7 @@ impl<'c> Interp<'c> {
         obj: &Expr,
         body: &Stmt,
         env: &EnvRef,
-        label: Option<&Name>,
+        labels: &[Name],
     ) -> R<()> {
         let v = self.eval(obj, env)?;
         let mut rec = if of {
@@ -2364,7 +2414,7 @@ impl<'c> Interp<'c> {
                 Some(k) => self.bind(target, x, &scope, Some(k == DeclKind::Let)),
                 None => self.bind(target, x, &scope, None),
             }
-            .and_then(|()| loop_ctrl(self.exec(body, &scope), label));
+            .and_then(|()| loop_ctrl(self.exec(body, &scope), labels));
             match r {
                 Ok(false) => {}
                 Ok(true) => return self.iter_close(&rec),
@@ -2414,18 +2464,22 @@ impl<'c> Interp<'c> {
                 let pv = self.eval(p, env)?;
                 match &pv {
                     Val::Null => (None, None),
-                    Val::Obj(_) if pv.is_callable() => match self.get(&pv, "prototype")? {
+                    _ if is_constructor(&pv) => match self.get(&pv, "prototype")? {
                         Val::Obj(pp) => (Some(pp), Some(pv)),
                         Val::Null => (None, Some(pv)),
-                        _ => {
-                            return self
-                                .type_error("class heritage prototype is not an object or null");
+                        other => {
+                            let text = self.show(&other);
+                            return self.type_error(&format!("{text} is not an object or null"));
                         }
                     },
+                    Val::Obj(_) => {
+                        let text = constructor_text(self, p, &pv);
+                        return self.type_error(&format!("{text} is not a constructor"));
+                    }
                     _ => {
+                        let text = crate::decompile::operand_text(self, p, &pv);
                         return self.type_error(&format!(
-                            "class heritage {} is not an object or null",
-                            self.show(&pv)
+                            "class heritage {text} is not an object or null"
                         ));
                     }
                 }
@@ -2758,10 +2812,10 @@ impl<'c> Interp<'c> {
                     }
                 }
                 Expr::Ident(n, _) => self.delete_name(env, n),
-                Expr::At(_, inner) if matches!(&**inner, Expr::Ident(..)) => {
-                    let Expr::Ident(n, _) = &**inner else { return Ok(Val::Bool(true)) };
-                    self.delete_name(env, n)
-                }
+                Expr::At(_, inner) => match &**inner {
+                    Expr::Ident(n, _) => self.delete_name(env, n),
+                    _ => Ok(Val::Bool(true)),
+                },
                 _ => Ok(Val::Bool(true)),
             },
             Expr::Update { op, prefix, target } => {
@@ -2862,7 +2916,7 @@ impl<'c> Interp<'c> {
                 self.pos = *pos;
                 if !is_constructor(&f) {
                     let text = match &**callee {
-                        Expr::Func(def) => def.source.to_string(),
+                        Expr::Func(_) => constructor_text(self, callee, &f),
                         other => callee_text(other),
                     };
                     return self.type_error(&format!("{text} is not a constructor"));
@@ -3478,13 +3532,13 @@ fn null_access(obj: &Expr, key: &str, o: &Val) -> String {
 
 /// Whether a loop stops: `break` (of this loop) stops it, `continue` goes on, anything else
 /// propagates.
-fn loop_ctrl(r: R<()>, label: Option<&Name>) -> R<bool> {
+fn loop_ctrl(r: R<()>, labels: &[Name]) -> R<bool> {
     match r {
         Ok(()) => Ok(false),
         Err(Ctrl::Break(None)) => Ok(true),
         Err(Ctrl::Continue(None)) => Ok(false),
-        Err(Ctrl::Continue(Some(l))) if Some(&l) == label => Ok(false),
-        Err(Ctrl::Break(Some(l))) if Some(&l) == label => Ok(true),
+        Err(Ctrl::Continue(Some(l))) if labels.contains(&l) => Ok(false),
+        Err(Ctrl::Break(Some(l))) if labels.contains(&l) => Ok(true),
         Err(e) => Err(e),
     }
 }

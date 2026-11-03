@@ -72,6 +72,15 @@ pub fn id_key<B: Backend + ?Sized>(
     coll: &CollectionEntry,
     id: &Value,
 ) -> Result<Option<Vec<u8>>, CommandError> {
+    Ok(id_keys(backend, coll, std::slice::from_ref(id))?.into_iter().next().flatten())
+}
+
+/// [`id_key`] of each of `ids`, read together.
+pub fn id_keys<B: Backend + ?Sized>(
+    backend: &mut B,
+    coll: &CollectionEntry,
+    ids: &[Value],
+) -> Result<Vec<Option<Vec<u8>>>, CommandError> {
     let rule = id_index_rule(coll);
     let spec_bytes = rule.spec.to_bytes()?;
     let def = index_def(RawDoc::from_bytes(&spec_bytes)?, 0)
@@ -79,27 +88,48 @@ pub fn id_key<B: Backend + ?Sized>(
         .flatten()
         .ok_or_else(|| CommandError::new(INTERNAL_ERROR, "the _id_ index has no definition"))?;
     let set = IndexSet { tenant: coll.tenant, collection: coll.id, indexes: vec![(ID_INDEX, def)] };
-    let holder = Document::new().with("_id", id.clone()).to_bytes()?;
-    let doc = RawDoc::from_bytes(&holder)?;
-    let pk = PrimaryKey::seq(0);
     let collation = super::index_maintenance::collation_of(RawDoc::from_bytes(&spec_bytes)?)?;
     let collator = collation.as_ref().map(|c| c as &dyn teseladb_bson::Collator);
-    let keys = set
-        .keys(Version { doc, pk: &pk }, collator)
-        .map_err(|e| super::index_maintenance::keygen_error(&e, doc))?;
-    let Some(entry) = keys.into_keys().next() else { return Ok(None) };
-    let (_, versions) = backend.read_versions(&[entry.as_bytes().to_vec()])?;
-    let Some(Some((_, value))) = versions.into_iter().next() else { return Ok(None) };
+    let pk = PrimaryKey::seq(0);
+    // The `_id_` entry of each id, where it has one.
+    let mut entries: Vec<Option<Vec<u8>>> = Vec::with_capacity(ids.len());
+    for id in ids {
+        let holder = Document::new().with("_id", id.clone()).to_bytes()?;
+        let doc = RawDoc::from_bytes(&holder)?;
+        let keys = set
+            .keys(Version { doc, pk: &pk }, collator)
+            .map_err(|e| super::index_maintenance::keygen_error(&e, doc))?;
+        entries.push(keys.into_keys().next().map(|k| k.as_bytes().to_vec()));
+    }
+    let wanted: Vec<Vec<u8>> = entries.iter().flatten().cloned().collect();
+    let mut found = match wanted.is_empty() {
+        true => Vec::new(),
+        false => backend.read_versions(&wanted)?.1,
+    }
+    .into_iter();
+    let mut out = Vec::with_capacity(ids.len());
+    for entry in &entries {
+        let value = match entry {
+            Some(_) => found.next().flatten(),
+            None => None,
+        };
+        out.push(value.map(|(_, v)| doc_key_of_entry(coll, &v)).transpose()?);
+    }
+    Ok(out)
+}
+
+/// The key of the document an `_id_` entry of `coll` holds `value` for.
+fn doc_key_of_entry(coll: &CollectionEntry, value: &[u8]) -> Result<Vec<u8>, CommandError> {
     let (pk, _) =
-        split_unique_value(&value).map_err(|e| CommandError::new(INTERNAL_ERROR, e.to_string()))?;
+        split_unique_value(value).map_err(|e| CommandError::new(INTERNAL_ERROR, e.to_string()))?;
     // A collection with a shard key: the entry ends in its document's key (018 FR-001).
     if super::sharding::is_sharded(coll) {
         let key = teseladb_keys::KeyBuilder::document_of_sharded_pk(coll.tenant, coll.id, pk);
-        return Ok(Some(key.as_bytes().to_vec()));
+        return Ok(key.as_bytes().to_vec());
     }
     let seq = <[u8; 8]>::try_from(pk)
         .map_err(|_| CommandError::new(INTERNAL_ERROR, "a capped _id_ entry without its seq"))?;
-    Ok(Some(cap::doc_key(coll.tenant, coll.id, u64::from_be_bytes(seq))))
+    Ok(cap::doc_key(coll.tenant, coll.id, u64::from_be_bytes(seq)))
 }
 
 /// The error of capped write `bound` in a transaction, as a `refrouter` 9.0.4's shard answers it

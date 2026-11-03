@@ -106,7 +106,7 @@ impl TextField {
         };
         let total =
             g.map_or_else(|| self.tokens.values().map(|&l| u64::from(l)).sum(), |g| g.length);
-        let avg = if n_docs == 0 { 1.0f32 } else { (total as f64 / n_docs as f64) as f32 };
+        let avg = (total as f64 / n_docs.max(1) as f64) as f32;
         let len = self.lengths.get(&doc).copied().unwrap_or(0);
         let dl = norms::decode(norms::encode(len)) as f32;
         let Bm25 { k1, b } = Bm25::DEFAULT;
@@ -175,7 +175,8 @@ fn java_number(x: f64, plain: String, sci: String) -> String {
     }
     let a = x.abs();
     if a == 0.0 || (1e-3..1e7).contains(&a) {
-        return if plain.contains('.') { plain } else { format!("{plain}.0") };
+        // Rust's shortest form of a number in this range always has its fraction.
+        return plain;
     }
     let (mantissa, exp) = sci.split_once('e').unwrap_or((&sci, "0"));
     let mantissa =

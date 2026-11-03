@@ -55,6 +55,7 @@ pub(crate) fn meta_write(key: &[u8], tag: u64, op: u32) -> (Vec<u8>, Vec<u8>) {
     let txn = TxnInfo { id: txn_id(tag), lsid: 1, uid: [0; 32], txn_number: tag as i64 };
     let meta = ChangeMeta {
         txn: Some(txn),
+        retry: None,
         op,
         update: None,
         replace: false,

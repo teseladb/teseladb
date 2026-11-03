@@ -223,8 +223,9 @@ pub enum Kind {
     Typed(crate::typed::View),
     /// A `DataView`.
     DataView(crate::typed::View),
-    /// A proxy: its target and handler (`None` once revoked) and whether it is callable.
-    Proxy(Option<(ObjRef, ObjRef)>, bool),
+    /// A proxy: its target and handler (`None` once revoked), whether it is callable and whether
+    /// it is a constructor.
+    Proxy(Option<(ObjRef, ObjRef)>, bool, bool),
     /// A generator object.
     Generator(Rc<RefCell<crate::generators::GenState>>),
     /// An async generator object: the interpreter never runs its body (`next` traps), so it
@@ -347,7 +348,7 @@ impl Obj {
     }
 
     pub fn is_callable(&self) -> bool {
-        matches!(self.kind, Kind::Func(_) | Kind::Proxy(_, true))
+        matches!(self.kind, Kind::Func(_) | Kind::Proxy(_, true, _))
     }
 }
 

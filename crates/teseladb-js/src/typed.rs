@@ -690,7 +690,7 @@ fn ta_fill(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 
 fn ta_set(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let v = this_view(it, this)?;
-    let offset = to_index(it, &arg(a, 1), "offset is out of bounds")?;
+    let offset = to_index(it, &arg(a, 1), "invalid or out-of-range index")?;
     let items = match view_of(&arg(a, 0)) {
         Some(src) => elements(&src),
         None => {
