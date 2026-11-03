@@ -34,13 +34,14 @@ fn ycsb_and_reference_run_against_a_local_cluster() {
     }
 }
 
-/// `vector-search` (011 T032) on a few hundred vectors: the scenario of SC-005 with a million
-/// runs the same code.
+/// `vector-search` (011 T032) on a hundred vectors: the scenario of SC-005 with a million runs
+/// the same code. With 300, the first queries of the coverage build waited for the index's
+/// rebuild past the client's 30 s timeout (the index rebuilds a segment's graph whole).
 #[test]
 fn vector_search_runs_against_a_local_cluster() {
-    let short = ["--duration", "300ms", "--warmup", "0ms", "--format", "json"];
+    let short = ["--duration", "300ms", "--warmup", "500ms", "--format", "json"];
     let out = metrics(&bench(
-        &[&["--scenario", "vector-search", "--records", "300"][..], &short[..]].concat(),
+        &[&["--scenario", "vector-search", "--records", "100"][..], &short[..]].concat(),
     ));
     for name in ["query.p50", "recall@10"] {
         assert!(out.contains(name), "{name}: {out}");
@@ -51,7 +52,7 @@ fn vector_search_runs_against_a_local_cluster() {
 /// SC-004 with a million run the same code.
 #[test]
 fn search_scenarios_run_against_a_local_cluster() {
-    let short = ["--duration", "300ms", "--warmup", "0ms", "--format", "json"];
+    let short = ["--duration", "300ms", "--warmup", "500ms", "--format", "json"];
     for scenario in ["search-term", "search-multi", "search-phrase", "search-fuzzy", "vector"] {
         let records = if scenario == "vector" { "100" } else { "300" };
         let out = metrics(&bench(
@@ -269,5 +270,23 @@ fn changestream_lag_runs_against_a_local_cluster() {
     let out = metrics(&bench(&[&["--scenario", "changestream-lag"][..], &short[..]].concat()));
     for name in ["lag.p50", "lag.p99", "\"target\"", "local cluster of three nodes"] {
         assert!(out.contains(name), "{name}: {out}");
+    }
+}
+
+/// `rest` (019 SC-002) against the local cluster of three nodes it starts with HTTP/2 over TLS,
+/// and the scenarios of a range in this process, `follower-read` (007 SC-004) and
+/// `group0-limits` (D-012): each reports its metrics with their targets.
+#[test]
+fn rest_follower_read_and_group0_limits_report_their_targets() {
+    let short = ["--duration", "0s", "--warmup", "0s"];
+    for (scenario, names) in [
+        ("rest", &["rest-find-by-id.p50", "wire-find-by-id.p50", "rest-share-of-wire"][..]),
+        ("follower-read", &["follower-read.p50", "follower-read.staleness"][..]),
+        ("group0-limits", &["group0"][..]),
+    ] {
+        let out = metrics(&bench(&[&["--scenario", scenario][..], &short[..]].concat()));
+        for name in names {
+            assert!(out.contains(name) && out.contains("target"), "{scenario} {name}: {out}");
+        }
     }
 }

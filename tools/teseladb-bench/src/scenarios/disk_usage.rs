@@ -61,6 +61,7 @@ pub fn run(args: &Args) -> Result<Report, String> {
     };
     cfg.lsm.memtable_bytes = MEMTABLE_BYTES;
     let node = Node::start(cfg, || FileDisk::open(&path), None).map_err(msg)?;
+    let node = super::ready(node, READY, "the node did not start")?;
     let measured = measure(args, &node, &path);
     node.stop();
     let (bson, sst, total) = measured?;
@@ -82,9 +83,6 @@ pub fn run(args: &Args) -> Result<Report, String> {
 
 /// Loads the records; returns their BSON bytes, the LSM's bytes and the directory's bytes.
 fn measure(args: &Args, node: &Node<FileDisk>, dir: &Path) -> Result<(u64, u64, u64), String> {
-    if !node.wait_ready(READY) {
-        return Err("the node did not start".into());
-    }
     let addr = *node.client_addrs().first().ok_or("the node has no clients' port")?;
     let mut c = Client::connect(addr)?;
     let mut rng = Rng::new(1);
