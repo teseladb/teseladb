@@ -122,8 +122,8 @@ fn put_record_op(e: &mut Encoder, op: &RecordOp) {
             put_hlc(e, *ts);
             put_spans(e, spans);
         }
-        RecordOp::Abort { spans } => {
-            e.u8(ABORT);
+        RecordOp::Abort { lsid, txn_number, spans } => {
+            e.u8(ABORT).u128(*lsid).i64(*txn_number);
             put_spans(e, spans);
         }
         RecordOp::Resolved => {
@@ -138,7 +138,7 @@ fn get_record_op(d: &mut Decoder<'_>) -> Result<RecordOp, DecodeError> {
         BEGIN => RecordOp::Begin { lsid: d.u128()?, txn_number: d.i64()?, read_ts: get_hlc(d)? },
         HEARTBEAT => RecordOp::Heartbeat { spans: get_spans(d)? },
         COMMIT => RecordOp::Commit { ts: get_hlc(d)?, spans: get_spans(d)? },
-        ABORT => RecordOp::Abort { spans: get_spans(d)? },
+        ABORT => RecordOp::Abort { lsid: d.u128()?, txn_number: d.i64()?, spans: get_spans(d)? },
         RESOLVED => RecordOp::Resolved,
         _ => return Err(DecodeError::InvalidValue { offset: at }),
     })
@@ -254,7 +254,7 @@ mod tests {
             TxnOp::EndTxn { txn, op: RecordOp::Begin { lsid: 3, txn_number: -1, read_ts: ts } },
             TxnOp::EndTxn { txn, op: RecordOp::Heartbeat { spans: spans.clone() } },
             TxnOp::EndTxn { txn, op: RecordOp::Commit { ts, spans: spans.clone() } },
-            TxnOp::EndTxn { txn, op: RecordOp::Abort { spans } },
+            TxnOp::EndTxn { txn, op: RecordOp::Abort { lsid: 4, txn_number: -3, spans } },
             TxnOp::PushTxn { txn, push: Push::To(ts) },
             TxnOp::PushTxn { txn, push: Push::AbortIfAbandoned { intent_ts: ts } },
             TxnOp::PushTxn { txn, push: Push::Abort { lsid: 9, txn_number: -2 } },

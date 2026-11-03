@@ -368,7 +368,11 @@ impl Coordinator {
             },
             Pending::Heartbeat => RecordOp::Heartbeat { spans: self.spans.intervals() },
             Pending::Commit(ts) => RecordOp::Commit { ts, spans: self.spans.intervals() },
-            Pending::Abort => RecordOp::Abort { spans: self.spans.intervals() },
+            Pending::Abort => RecordOp::Abort {
+                lsid: self.lsid,
+                txn_number: self.txn_number,
+                spans: self.spans.intervals(),
+            },
             Pending::Intents(_)
             | Pending::Push(..)
             | Pending::ResolveOther(_)
