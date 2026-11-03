@@ -316,3 +316,70 @@ fn a_member_answers_as_one() {
         dispatched(&mut m, "admin", Document::new().with("_configsvrAddShard", "x"), Some(view));
     assert_eq!(code(&r), (20, "_configsvrAddShard can only be run on config servers".into()));
 }
+
+fn config_names(m: &mut Mem) -> Vec<String> {
+    let r =
+        m.run("config", doc(&[("listCollections", Value::Int32(1)), ("nameOnly", true.into())]));
+    match field(&r, "cursor.firstBatch") {
+        Value::Array(a) => a
+            .iter()
+            .map(|d| match d {
+                Value::Document(d) => match d.get("name") {
+                    Some(Value::String(n)) => n.clone(),
+                    other => panic!("{other:?}"),
+                },
+                other => panic!("{other:?}"),
+            })
+            .collect(),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A member of a replica set has no `config.changelog`, `config.refrouter` nor `config.settings`
+/// (measured on a replica set of `ref:9.0.4`, 02-11-2026): `refdump` of the whole member
+/// does not copy them, and `refrestore` into a `refnode` does not meet the validator of
+/// `config.settings`, which a `refnode` refuses on a collection of `config` (T013).
+#[test]
+fn config_lists_what_a_member_has() {
+    let mut m = node();
+    let refrouter = config_names(&mut m);
+    for name in ["changelog", "refrouter", "settings"] {
+        assert!(refrouter.iter().any(|n| n == name), "{refrouter:?}");
+    }
+    replica(&mut m, N2);
+    assert_eq!(
+        config_names(&mut m),
+        ["chunks", "collections", "databases", "shards", "tags", "version"]
+    );
+}
+
+/// The collections of `config` that show the cluster are empty on a member and a member drops
+/// them (measured on a replica set of `ref:9.0.4`, 02-11-2026): `refdump` copies nothing of
+/// the cluster's topology into a `refnode` and `refrestore --drop` of a member's dump into
+/// TeselaDB goes through (T013), which drops and creates them again.
+#[test]
+fn config_of_a_member_is_empty_and_droppable() {
+    let mut m = node();
+    let find = |m: &mut Mem, coll: &str| {
+        let r = m.run("config", doc(&[("find", coll.into())]));
+        match field(&r, "cursor.firstBatch") {
+            Value::Array(a) => a.len(),
+            other => panic!("{other:?}"),
+        }
+    };
+    let drop = |m: &mut Mem, coll: &str| m.run("config", doc(&[("drop", coll.into())]));
+    let create = |m: &mut Mem, coll: &str| m.run("config", doc(&[("create", coll.into())]));
+    assert!(find(&mut m, "shards") > 0);
+    assert_eq!(code(&drop(&mut m, "shards")).0, 20);
+    assert_eq!(code(&create(&mut m, "chunks")).0, 20);
+    replica(&mut m, N2);
+    for coll in ["chunks", "collections", "databases", "shards", "tags", "version"] {
+        assert_eq!(find(&mut m, coll), 0, "{coll}");
+        let r = drop(&mut m, coll);
+        assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+        let r = create(&mut m, coll);
+        assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+    }
+    assert_eq!(code(&drop(&mut m, "settings")).0, 20);
+    assert!(replica_set(&mut m).expect("the presentation").is_some());
+}

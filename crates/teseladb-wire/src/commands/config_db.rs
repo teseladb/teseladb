@@ -44,18 +44,35 @@ pub const LISTED: [&str; 9] = [
     "version",
 ];
 
+/// The listed collections of `config` that a member of a replica set does not have (measured on
+/// a replica set of `ref:9.0.4`, 02-11-2026): the replica set presentation (018) leaves them
+/// out of `listCollections`.
+pub const NOT_ON_A_MEMBER: [&str; 3] = ["changelog", "refrouter", super::config_settings::SETTINGS];
+
 /// Whether `ns` is one of the generated collections of `config`.
 pub fn generated(ns: &Namespace) -> bool {
     ns.db == CONFIG_DB && GENERATED.contains(&ns.coll.as_str())
 }
 
-/// The documents of `ns` when it is a generated collection of `config`.
+/// Whether the node presents itself as a member of a replica set (018), whose collections of
+/// `config` that show a cluster are empty and can be dropped (measured on a replica set of
+/// `ref:9.0.4`, 02-11-2026).
+pub fn as_member<B: Backend + ?Sized>(backend: &mut B) -> Result<bool, CommandError> {
+    let mode = super::presentation::stored(backend)?.mode;
+    Ok(mode == teseladb_topology::replset::PresentationMode::ReplicaSet)
+}
+
+/// The documents of `ns` when it is a generated collection of `config`: none on a member of a
+/// replica set ([`as_member`]).
 pub fn documents<B: Backend + ?Sized>(
     backend: &mut B,
     ns: &Namespace,
 ) -> Result<Option<Vec<Document>>, CommandError> {
     if !generated(ns) && !super::config_settings::is_settings(ns) {
         return Ok(None);
+    }
+    if generated(ns) && as_member(backend)? {
+        return Ok(Some(Vec::new()));
     }
     backend.config_documents(&ns.coll).map(Some)
 }
