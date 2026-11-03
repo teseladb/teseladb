@@ -554,7 +554,11 @@ impl ClientListener {
         state: Arc<dyn NodeState>,
         hooks: Hooks,
     ) -> io::Result<ClientListener> {
-        let listeners = cfg.addrs.iter().map(TcpListener::bind).collect::<io::Result<Vec<_>>>()?;
+        let listeners = cfg
+            .addrs
+            .iter()
+            .map(|a| crate::listen::bind(crate::listen::CLIENTS, *a))
+            .collect::<io::Result<Vec<_>>>()?;
         let addrs =
             listeners.iter().map(TcpListener::local_addr).collect::<io::Result<Vec<_>>>()?;
         let stop = Arc::new(AtomicBool::new(false));

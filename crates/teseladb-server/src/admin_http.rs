@@ -6,7 +6,7 @@
 //! are read and written by `teseladb-http` (019 T008), the same code as the HTTP port's.
 
 use std::io::{self, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
@@ -256,7 +256,7 @@ impl AdminListener {
         handler: Handler,
         tls: Option<AdminTls>,
     ) -> io::Result<AdminListener> {
-        let listener = TcpListener::bind(addr)?;
+        let listener = crate::listen::bind(crate::listen::ADMIN, addr)?;
         let addr = listener.local_addr()?;
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = stop.clone();
@@ -683,7 +683,7 @@ mod tests {
         assert!(request_with(&p_at, client(None), Method::Get, "/", b"").is_err());
         p.stop();
         // An answer that is not HTTP.
-        let raw = TcpListener::bind("127.0.0.1:0").unwrap();
+        let raw = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let raw_at = raw.local_addr().unwrap().to_string();
         std::thread::spawn(move || {
             for (i, mut s) in raw.incoming().flatten().enumerate() {

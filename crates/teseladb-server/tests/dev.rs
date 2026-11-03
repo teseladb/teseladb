@@ -162,6 +162,9 @@ fn a_node_that_cannot_start_stops_the_cluster() {
     match dev::start(&o(2), Some(3)) {
         Err(teseladb_server::node::NodeError::Io(e)) => {
             assert_eq!(e.kind(), std::io::ErrorKind::AddrInUse, "{e}");
+            // The error names the port that could not be opened, so its owner knows which one.
+            let want = format!("clients' port 127.0.0.1:{}: ", base + 1);
+            assert!(e.to_string().starts_with(&want), "{e}");
         }
         Err(e) => panic!("{e}"),
         Ok(_) => panic!("node 2 started on a port in use"),

@@ -521,6 +521,12 @@ fn start(f: &Fixture, log: &std::path::Path, extra: &[&str]) -> std::thread::Joi
         "0",
         "--peer-listen",
         "127.0.0.1:0",
+        // A node of this machine may hold the default administration (27200) and HTTP (27080)
+        // ports: this test needs neither on a known port, nor the REST API.
+        "--admin-listen",
+        "127.0.0.1:0",
+        "--http-port",
+        "0",
         "--enableEncryption",
         "--kmipServerName",
         "127.0.0.1",

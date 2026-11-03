@@ -155,7 +155,7 @@ impl HttpListener {
         let mut addrs = Vec::new();
         let mut listeners = Vec::new();
         for a in &cfg.addrs {
-            let l = TcpListener::bind(a)?;
+            let l = crate::listen::bind(crate::listen::HTTP, *a)?;
             addrs.push(l.local_addr()?);
             listeners.push(l);
         }

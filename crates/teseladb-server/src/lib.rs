@@ -41,6 +41,7 @@ mod idle_flush;
 pub mod kmip;
 pub mod ldap_client;
 pub mod leaders;
+pub mod listen;
 pub mod liveness;
 pub mod local_zone;
 pub mod log;
