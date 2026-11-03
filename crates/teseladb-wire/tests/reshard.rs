@@ -894,7 +894,7 @@ fn the_apply_phase_reads_the_history_in_windows() {
     let mut m = sharded(&docs(3));
     let (mut r, shared) =
         started(&mut m, r#"{"reshardCollection":"rs.c","key":{"b":1},"numInitialChunks":1}"#);
-    r.copy(&mut m, &shared).expect("copied");
+    // Writes after the clone mark and before the end of the copy: the apply phase's mark.
     for i in 10..14 {
         m.now += 5;
         ok(&run(
@@ -902,7 +902,7 @@ fn the_apply_phase_reads_the_history_in_windows() {
             &format!(r#"{{"insert":"c","documents":[{{"_id":{i},"a":{i},"b":{i}}}]}}"#),
         ));
     }
-    m.now += 5;
+    r.copy(&mut m, &shared).expect("copied");
     m.changes_window_ms = 3;
     let reads = m.change_reads;
     assert_eq!(drive_all(&mut m, &mut r, shared), Ok(()));
