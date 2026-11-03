@@ -650,6 +650,40 @@ fn a_primary_write_reply_has_its_election_and_op_time() {
     assert!(r.get("electionId").is_none() && r.get("opTime").is_none(), "{r:?}");
 }
 
+/// A member's answers inside a transaction carry no `recoveryToken`, which only a `refrouter`
+/// adds (measured on a replica set of `ref:9.0.4`, 03-11-2026, in `txn-lifetime`).
+#[test]
+fn a_member_answers_a_transaction_without_a_recovery_token() {
+    let mut m = node();
+    replica(&mut m, N1);
+    let (set, _) = replica_set(&mut m).expect("read").expect("a set");
+    let me = set.member(N1).expect("member");
+    let at = OpTime { ts: Timestamp { time: 5, increment: 1 }, term: set.term() };
+    let view =
+        Arc::new(ReplicaView { set, me, last: LastWrite { op_time: at, majority_op_time: at } });
+    let lsid = Document::new().with("id", Value::Binary { subtype: 4, bytes: vec![9; 16] });
+    let txn = |d: Document, start: bool| {
+        let d = d.with("lsid", lsid.clone()).with("txnNumber", Value::Int64(1));
+        let d = if start { d.with("startTransaction", true) } else { d };
+        d.with("autocommit", false)
+    };
+    let one = Value::Document(Document::new().with("_id", 1));
+    let ins = Document::new().with("insert", "c").with("documents", vec![one]);
+    let r = dispatched(&mut m, "v", txn(ins, true), Some(view.clone()));
+    assert_eq!(r.get("n"), Some(&Value::Int32(1)), "{r:?}");
+    assert!(r.get("recoveryToken").is_none(), "{r:?}");
+    let commit = txn(Document::new().with("commitTransaction", 1), false);
+    let r = dispatched(&mut m, "admin", commit.clone(), Some(view.clone()));
+    assert!(r.get("recoveryToken").is_none(), "{r:?}");
+    let r = dispatched(
+        &mut m,
+        "admin",
+        txn(Document::new().with("abortTransaction", 1), false),
+        Some(view),
+    );
+    assert!(r.get("recoveryToken").is_none(), "an error too: {r:?}");
+}
+
 /// A member's `drop` gives `nIndexesWas` and `ns` for a collection, `ns` for a view and nothing
 /// for what does not exist (measured on a replica set of `ref:9.0.4`, 03-11-2026).
 #[test]
