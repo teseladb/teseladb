@@ -23,6 +23,9 @@ use super::index_maintenance::{self, IndexRule, Maintainer};
 use teseladb_range::capped::CappedLimits;
 
 pub(crate) mod capped;
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests;
 pub(crate) mod timeseries;
 use crate::error::{BSON_OBJECT_TOO_LARGE, CommandError, DUPLICATE_KEY, INTERNAL_ERROR, OVERFLOW};
 use crate::msg::command_limits;

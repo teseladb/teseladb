@@ -73,19 +73,21 @@ impl Entry {
         d
     }
 
+    /// The entry the node wrote with [`Entry::to_document`].
     fn from_document(d: &Document) -> Option<Entry> {
-        let Some(Value::String(hash)) = d.get(HASH) else { return None };
-        let Some(Value::Document(settings)) = d.get(SETTINGS) else { return None };
         let doc = |k: &str| match d.get(k) {
             Some(Value::Document(x)) => Some(x.clone()),
             _ => None,
         };
-        Some(Entry {
-            hash: hash.clone(),
-            settings: settings.clone(),
-            representative: doc(REPRESENTATIVE),
-            debug: doc(DEBUG),
-        })
+        match (d.get(HASH), doc(SETTINGS)) {
+            (Some(Value::String(hash)), Some(settings)) => Some(Entry {
+                hash: hash.clone(),
+                settings,
+                representative: doc(REPRESENTATIVE),
+                debug: doc(DEBUG),
+            }),
+            _ => None,
+        }
     }
 }
 
@@ -95,13 +97,15 @@ fn stored<B: Backend + ?Sized>(backend: &mut B) -> Result<BTreeMap<String, Entry
     let mut out = BTreeMap::new();
     let Some(bytes) = all.get(PARAMETER) else { return Ok(out) };
     let d = Document::from(RawDoc::from_bytes(bytes)?);
-    if let Some(Value::Array(items)) = d.get(ENTRIES) {
-        for e in items.iter().filter_map(|i| match i {
-            Value::Document(x) => Entry::from_document(x),
-            _ => None,
-        }) {
-            out.insert(e.hash.clone(), e);
-        }
+    let items = match d.get(ENTRIES) {
+        Some(Value::Array(items)) => items.as_slice(),
+        _ => &[],
+    };
+    for e in items.iter().filter_map(|i| match i {
+        Value::Document(x) => Entry::from_document(x),
+        _ => None,
+    }) {
+        out.insert(e.hash.clone(), e);
     }
     Ok(out)
 }

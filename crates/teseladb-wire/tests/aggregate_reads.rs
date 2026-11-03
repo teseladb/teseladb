@@ -151,3 +151,76 @@ fn a_view_over_a_stage_of_the_node_reads_the_collection_under_it() {
         view(&mut m, r#"[{"$geoNear":{"near":[0,0],"distanceField":"d"}},{"$project":{"d":1}}]"#);
     assert_eq!(near.len(), 3, "{near:?}");
 }
+
+/// A view whose pipeline starts with a stage of the node, read from another pipeline (`$lookup`,
+/// `$unionWith`), by `aggregate` and inside an explained `$facet`, sees the node as a `find` on it
+/// does (measured on a `refnode` 9.0.4 on 03-11-2026: the `_id_` index of the collection).
+#[test]
+fn a_view_over_a_stage_of_the_node_read_from_another_pipeline() {
+    let mut m = loaded();
+    let r = run(
+        &mut m,
+        "r",
+        r#"{"create":"v","viewOn":"c","pipeline":[{"$indexStats":{}},{"$project":{"name":1,"_id":0}}]}"#,
+    );
+    assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+    let names = |docs: Vec<Document>| {
+        let mut n: Vec<String> = docs.iter().map(|d| format!("{:?}", d.get("name"))).collect();
+        n.sort();
+        n
+    };
+    let both = vec![r#"Some(String("_id_"))"#.to_owned(), r#"Some(String("a_1"))"#.to_owned()];
+    let r = run(&mut m, "r", r#"{"aggregate":"v","pipeline":[],"cursor":{}}"#);
+    assert_eq!(names(batch(&r)), both, "{r:?}");
+    let r = run(
+        &mut m,
+        "r",
+        r#"{"aggregate":"c","pipeline":[{"$limit":1},{"$lookup":{"from":"v","pipeline":[],"as":"x"}},{"$unwind":"$x"},{"$replaceWith":"$x"}],"cursor":{}}"#,
+    );
+    assert_eq!(names(batch(&r)), both, "{r:?}");
+    let r = run(
+        &mut m,
+        "r",
+        r#"{"aggregate":"c","pipeline":[{"$match":{"_id":0}},{"$unionWith":"v"}],"cursor":{}}"#,
+    );
+    assert_eq!(names(batch(&r)), both, "{r:?}");
+    let r = run(
+        &mut m,
+        "r",
+        r#"{"aggregate":"c","pipeline":[{"$limit":1},{"$lookup":{"from":"v","localField":"b","foreignField":"name","as":"x"}}],"cursor":{}}"#,
+    );
+    assert_eq!(batch(&r).len(), 1, "{r:?}");
+}
+
+/// The namespaces of `$listExtensions`, `$listCatalog` and `$listSampledQueries` that run
+/// (measured on a `refnode` 9.0.4 on 03-11-2026): the first two on `admin` with `aggregate: 1`,
+/// `$listCatalog` on a view with no stages lists the collection under it, `$listSampledQueries`
+/// on a collection of `admin` is refused.
+#[test]
+fn the_namespaces_of_the_admin_stages() {
+    let mut m = loaded();
+    let r =
+        run(&mut m, "admin", r#"{"aggregate":1,"pipeline":[{"$listExtensions":{}}],"cursor":{}}"#);
+    assert_eq!(batch(&r), Vec::<Document>::new(), "{r:?}");
+    let r = run(
+        &mut m,
+        "admin",
+        r#"{"aggregate":1,"pipeline":[{"$listCatalog":{}},{"$match":{"db":"r","name":"c"}},{"$project":{"name":1,"db":1,"_id":0}}],"cursor":{}}"#,
+    );
+    assert_eq!(batch(&r), [json(r#"{"db":"r","name":"c"}"#)], "{r:?}");
+    let r = run(
+        &mut m,
+        "admin",
+        r#"{"aggregate":"c","pipeline":[{"$listSampledQueries":{}}],"cursor":{}}"#,
+    );
+    assert_eq!(field(&r, "code"), &Value::Int32(73), "{r:?}");
+    let msg = "$listSampledQueries must be run against the 'admin' database with {aggregate: 1}";
+    assert_eq!(field(&r, "errmsg"), &Value::from(msg));
+    run(&mut m, "r", r#"{"create":"ve","viewOn":"c","pipeline":[]}"#);
+    let r = run(
+        &mut m,
+        "r",
+        r#"{"aggregate":"ve","pipeline":[{"$listCatalog":{}},{"$project":{"name":1,"type":1,"_id":0}}],"cursor":{}}"#,
+    );
+    assert_eq!(batch(&r), [json(r#"{"name":"c","type":"collection"}"#)], "{r:?}");
+}
