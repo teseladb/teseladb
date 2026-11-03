@@ -8,10 +8,8 @@
 //! - `c` runs the command `o` on the database of `ns`; `n` is skipped and not counted;
 //! - every entry runs even after one fails; the reply gives `applied` and `results`, and with a
 //!   failure `ok: 0` and `UnknownError` «applyOps had one or more errors applying ops»;
-//! - an insert or update into a namespace that does not exist fails the command with 26, and an
-//!   unknown `op` with `BadValue`: the entries before it stay applied and the reply gives
-//!   `applied`, the error and `results` up to it (measured on 03-11-2026); `preCondition` is
-//!   refused (`Location6711600`).
+//! - an insert or update into a namespace that does not exist fails the command with 26;
+//!   `preCondition` is refused (`Location6711600`) and an unknown `op` is `BadValue`.
 
 use teseladb_bson::{Document, Value};
 use teseladb_topology::diff::DiffError;
@@ -141,7 +139,9 @@ fn check_field(field: &str, v: &Value) -> Result<(), CommandError> {
         ("ts", v) if !matches!(v, Value::Timestamp { .. }) => {
             Err(wrong_type(field, v, "type 'timestamp'"))
         }
-        ("t" | "v", v) if !number => Err(wrong_type(field, v, NUMBER)),
+        // `refrestore --oplogReplay` gives the operations of a transaction with `t: null`, and
+        // a member takes them (02-11-2026, refrestore 100.20.0 against 9.0.4).
+        ("t" | "v", v) if !number && !matches!(v, Value::Null) => Err(wrong_type(field, v, NUMBER)),
         ("wall", v) if !matches!(v, Value::DateTime(_)) => Err(wrong_type(field, v, "type 'date'")),
         ("needsRetryImage", v) if !matches!(v, Value::String(_)) => {
             Err(wrong_type(field, v, "type 'string'"))

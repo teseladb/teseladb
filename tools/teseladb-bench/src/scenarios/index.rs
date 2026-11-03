@@ -220,7 +220,7 @@ pub fn run_build_load(args: &Args) -> Result<Report, String> {
             h.record(t0.elapsed().as_nanos() as u64);
             runs += 1;
         }
-        let ms = builder.join().map_err(|_| "the index build panicked".to_owned())??;
+        let ms = builder.join().map_err(crate::client::panicked("the index build"))??;
         Ok((h, ms))
     })?;
     let mut report = Report::new("index-build-load");

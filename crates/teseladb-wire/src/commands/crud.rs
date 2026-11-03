@@ -1784,7 +1784,11 @@ fn parse_bulk_op(
                 multi,
                 upsert,
                 collation: args::doc(d, name, "collation")?.cloned(),
-                sort: None,
+                // A single update or replacement takes the first document in this order.
+                sort: match args::doc(d, name, "sort")? {
+                    Some(s) if !s.is_empty() => Some(SortSpec::parse(s)?),
+                    _ => None,
+                },
                 image: Image::None,
                 vars: None,
                 hint: d.get("hint").cloned(),
@@ -1844,6 +1848,10 @@ fn bulk_op<B: Backend + ?Sized>(
                     Ok((BulkKind::Insert, MutationResult { n: r.n, ..MutationResult::default() }))
                 }
             }
+        }
+        // Fails this operation alone, as a `refrouter` 9.0.4 does (measured).
+        BulkBody::Modify(m) if m.multi && m.sort.is_some() => {
+            Err(CommandError::new(FAILED_TO_PARSE, "Cannot specify sort with multi=true"))
         }
         BulkBody::Modify(m) => {
             let bypass = bypass && *kind == BulkKind::Update;

@@ -733,6 +733,14 @@ pub fn db_stats<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, C
     Ok(out)
 }
 
+/// The average size of `count` documents (buckets) of `bytes` bytes, none without documents.
+fn average(bytes: u64, count: i64) -> Option<i64> {
+    u64::try_from(count)
+        .ok()
+        .filter(|n| *n > 0)
+        .map(|n| i64::try_from(bytes / n).unwrap_or(i64::MAX))
+}
+
 /// The `storageStats` of `$collStats` for collection `c` of `ns`, sizes divided by `scale`, in
 /// the order of a `refrouter` 9.0.4 (measured 31-10-2026): a capped collection shows its limits, a
 /// time series its buckets instead of documents, and the index of a time series is on its
@@ -754,22 +762,27 @@ pub(crate) fn storage_stats<B: Backend + ?Sized>(
     let sizes = index_sizes(backend, (ns, c), &kind, key_bytes)?;
     let mut d = Document::new().with("size", scaled(bytes));
     match &kind {
+        // Without documents (buckets) there is no average, and before its first insert a time
+        // series has no counters (measured on a `refnode` 9.0.4 on 03-11-2026).
         CollectionKind::TimeSeries(_) => {
-            let avg_bucket = if count > 0 { bytes / u64::try_from(count).unwrap_or(1) } else { 0 };
-            let stats = lock(shared).timeseries.get(&c.id).cloned().unwrap_or_default();
+            let stats = lock(shared).timeseries.get(&c.id).cloned();
             let mut series = Document::new().with("bucketsNs", full(ns));
-            let avg = i64::try_from(avg_bucket).unwrap_or(i64::MAX);
-            for (k, v) in stats.fields(count, avg) {
+            let avg = average(bytes, count);
+            let fields = match stats {
+                Some(stats) => stats.fields(count, avg.unwrap_or(0)),
+                None => vec![("bucketCount", count)],
+            };
+            for (k, v) in fields.into_iter().filter(|(k, _)| avg.is_some() || *k != "avgBucketSize")
+            {
                 series.push(k, number(v));
             }
             d.push("timeseries", series);
         }
         _ => {
             d.push("count", number(count));
-            d.push(
-                "avgObjSize",
-                number(if count > 0 { i64::try_from(bytes).unwrap_or(0) / count } else { 0 }),
-            );
+            if let Some(avg) = average(bytes, count) {
+                d.push("avgObjSize", number(avg));
+            }
         }
     }
     let index_bytes: u64 = sizes.iter().map(|(_, b)| b).sum();

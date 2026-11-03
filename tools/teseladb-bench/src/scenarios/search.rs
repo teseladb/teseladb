@@ -69,9 +69,9 @@ pub fn words(i: u64) -> Vec<String> {
 /// `w` with its last letter changed: one edit away.
 pub fn misspelled(w: &str) -> String {
     let mut s: Vec<u8> = w.bytes().collect();
-    if let Some(last) = s.last_mut() {
-        *last = if *last == b'z' { b'y' } else { *last + 1 };
-    }
+    // An empty word, which the vocabulary never has, becomes `a`.
+    let last = s.pop().unwrap_or(b'a' - 1);
+    s.push(if last == b'z' { b'y' } else { last + 1 });
     String::from_utf8(s).expect("ASCII")
 }
 
@@ -105,15 +105,11 @@ pub fn wait_ready(
     collection: &str,
     limit: Duration,
 ) -> Result<(), String> {
-    let start = Instant::now();
-    while start.elapsed() < limit {
-        let list = doc(vec![("listSearchIndexes", Value::String(collection.into()))]);
-        if c.command(db, list)?.windows(5).any(|w| w == b"READY") {
-            return Ok(());
-        }
-        std::thread::sleep(Duration::from_millis(250));
-    }
-    Err(format!("the search index of {collection} was not READY in time"))
+    let list = doc(vec![("listSearchIndexes", Value::String(collection.into()))]);
+    let listed = crate::client::retry(limit, Duration::from_millis(250), || {
+        Ok(c.command(db, list.clone())?.windows(5).any(|w| w == b"READY").then_some(()))
+    })?;
+    listed.map(drop).ok_or(format!("the search index of {collection} was not READY in time"))
 }
 
 fn load(c: &mut Client, records: u64) -> Result<(), String> {
@@ -188,7 +184,7 @@ fn search(c: &mut Client, op: &str, body: Document) -> Result<Vec<i64>, String> 
 
 /// The `_id`s of a cursor's first batch, in order.
 pub fn ids(reply: &[u8]) -> Result<Vec<i64>, String> {
-    let d = RawDoc::from_bytes(reply).map_err(|e| format!("{e:?}"))?;
+    let d = RawDoc::from_bytes(reply).map_err(crate::client::debug)?;
     let Some(RawValue::Document(cursor)) = d.get("cursor") else {
         return Err(format!("a reply without a cursor: {:?}", Document::from(d)));
     };
@@ -209,9 +205,9 @@ pub fn ids(reply: &[u8]) -> Result<Vec<i64>, String> {
 
 /// The queries of `search-term`, `search-multi`, `search-phrase` and `search-fuzzy`.
 fn queries(c: &mut Client, args: &Args, report: &mut Report) -> Result<(), String> {
-    let mut latency = Histogram::new();
-    let (start, mut n, mut measured) = (Instant::now(), 0u64, 0u64);
-    while start.elapsed() < args.warmup + args.duration || measured < MIN_QUERIES {
+    let mut n = 0u64;
+    // One query: how long it took.
+    let mut one = |c: &mut Client| -> Result<Duration, String> {
         n += 1;
         let (op, body) = operator(&args.scenario, n, args.records)?;
         let asked = Instant::now();
@@ -220,10 +216,14 @@ fn queries(c: &mut Client, args: &Args, report: &mut Report) -> Result<(), Strin
         if found.is_empty() {
             return Err(format!("{} query {n} found nothing", args.scenario));
         }
-        if start.elapsed() >= args.warmup {
-            latency.record(took.as_nanos() as u64);
-            measured += 1;
-        }
+        Ok(took)
+    };
+    super::warm_up(args.warmup, || one(c).map(drop))?;
+    let mut latency = Histogram::new();
+    let (start, mut measured) = (Instant::now(), 0u64);
+    while start.elapsed() < args.duration || measured < MIN_QUERIES {
+        latency.record(one(c)?.as_nanos() as u64);
+        measured += 1;
     }
     let goal = (args.scenario == "search-term").then_some(TERM_P50_NS);
     report.latency("query", &latency, goal, None);
@@ -232,9 +232,9 @@ fn queries(c: &mut Client, args: &Args, report: &mut Report) -> Result<(), Strin
 
 /// `search-visibility`: each insert is searched for at once, and again until it is found.
 fn visibility(c: &mut Client, args: &Args, report: &mut Report) -> Result<(), String> {
-    let mut wait = Histogram::new();
-    let (start, mut n, mut first, mut measured) = (Instant::now(), 0u64, 0u64, 0u64);
-    while start.elapsed() < args.warmup + args.duration || measured < MIN_QUERIES {
+    let mut n = 0u64;
+    // One insert: how long until a search found it, and the searches that did not.
+    let mut one = |c: &mut Client| -> Result<(Duration, u32), String> {
         n += 1;
         let id = (args.records + n) as i64;
         let unique = word(VOCABULARY + n);
@@ -249,18 +249,20 @@ fn visibility(c: &mut Client, args: &Args, report: &mut Report) -> Result<(), St
             ]),
         )?)?;
         let written = Instant::now();
-        let mut tries = 0u32;
-        while !search(c, "text", text(&unique))?.contains(&id) {
-            tries += 1;
-            if written.elapsed() > INDEX_READY {
-                return Err(format!("document {id} never became visible"));
-            }
-        }
-        if start.elapsed() >= args.warmup {
-            wait.record(written.elapsed().as_nanos() as u64);
-            first += u64::from(tries == 0);
-            measured += 1;
-        }
+        let found = crate::client::retry(INDEX_READY, Duration::ZERO, || {
+            Ok(search(c, "text", text(&unique))?.contains(&id).then_some(()))
+        })?;
+        let ((), tries) = found.ok_or(format!("document {id} never became visible"))?;
+        Ok((written.elapsed(), tries))
+    };
+    super::warm_up(args.warmup, || one(c).map(drop))?;
+    let mut wait = Histogram::new();
+    let (start, mut first, mut measured) = (Instant::now(), 0u64, 0u64);
+    while start.elapsed() < args.duration || measured < MIN_QUERIES {
+        let (waited, tries) = one(c)?;
+        wait.record(waited.as_nanos() as u64);
+        first += u64::from(tries == 0);
+        measured += 1;
     }
     report.latency("visible", &wait, None, Some(VISIBLE_P99_NS));
     report.push("visible.next", "ratio", first as f64 / measured as f64, Some(Goal::AtLeast(1.0)));
@@ -301,6 +303,7 @@ mod tests {
         assert_eq!(words(5).len(), WORDS);
         assert_eq!(misspelled("tesaz"), "tesay");
         assert_eq!(misspelled("tesab"), "tesac");
+        assert_eq!(misspelled(""), "a");
         for s in ["search-term", "search-multi", "search-phrase", "search-fuzzy"] {
             assert!(operator(s, 3, 100).is_ok(), "{s}");
         }
@@ -308,5 +311,22 @@ mod tests {
         let (op, body) = operator("search-fuzzy", 3, 100).unwrap();
         assert_eq!(op, "text");
         assert!(body.get("fuzzy").is_some());
+    }
+
+    #[test]
+    fn the_ids_come_from_the_first_batch() {
+        let bytes = |d: Document| d.to_bytes().unwrap();
+        let batch = vec![
+            Value::Document(doc(vec![("_id", Value::Int64(4))])),
+            Value::Document(doc(vec![("_id", Value::Int32(5))])),
+            Value::Int32(6),
+        ];
+        let cursor = Document::new().with("firstBatch", batch);
+        assert_eq!(ids(&bytes(Document::new().with("cursor", cursor))), Ok(vec![4]));
+        let no_batch = Document::new().with("cursor", Document::new());
+        assert_eq!(ids(&bytes(no_batch)), Err("a cursor without a batch".into()));
+        let no_cursor = ids(&bytes(Document::new().with("ok", 1.0))).unwrap_err();
+        assert!(no_cursor.starts_with("a reply without a cursor"), "{no_cursor}");
+        assert!(ids(b"not bson").is_err());
     }
 }

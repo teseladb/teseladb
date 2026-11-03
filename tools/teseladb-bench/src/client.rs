@@ -189,14 +189,23 @@ impl Client {
     /// [`TIMEOUT`], as a driver retries: a local cluster that just started may still be electing
     /// its leaders. For the setup of a scenario, outside its timing.
     pub fn until_ready(&mut self, db: &str, command: Document) -> Result<(), String> {
-        let until = Instant::now() + TIMEOUT;
-        loop {
-            let reply = self.send(db, command.clone())?;
-            if error_code(&reply)? != Some(NOT_WRITABLE_PRIMARY) || Instant::now() >= until {
-                return check(&reply);
-            }
-            std::thread::sleep(RANGE_POLL);
-        }
+        self.until_ready_within(db, command, TIMEOUT)
+    }
+
+    /// [`Client::until_ready`] for at most `timeout`; past it, the last reply's error.
+    fn until_ready_within(
+        &mut self,
+        db: &str,
+        command: Document,
+        timeout: Duration,
+    ) -> Result<(), String> {
+        let mut last = Vec::new();
+        // Settled or not, the last reply says how the command went.
+        retry(timeout, RANGE_POLL, || {
+            last = self.send(db, command.clone())?;
+            Ok((error_code(&last)? != Some(NOT_WRITABLE_PRIMARY)).then_some(()))
+        })?;
+        check(&last)
     }
 }
 
@@ -208,19 +217,45 @@ pub fn poll_until(
     every: Duration,
     mut done: impl FnMut() -> bool,
 ) -> Result<(), String> {
+    let polled = retry(timeout, every, || Ok(done().then_some(())))?;
+    polled.map(drop).ok_or(format!("{what} did not happen within {timeout:?}"))
+}
+
+/// Calls `step` every `every` until it gives a value, at most `timeout` (it runs at least once):
+/// the value and how many calls came before it, or `None` past the timeout. An error of `step`
+/// ends the wait.
+pub fn retry<T>(
+    timeout: Duration,
+    every: Duration,
+    mut step: impl FnMut() -> Result<Option<T>, String>,
+) -> Result<Option<(T, u32)>, String> {
     let until = Instant::now() + timeout;
-    while !done() {
-        if Instant::now() >= until {
-            return Err(format!("{what} did not happen within {timeout:?}"));
+    let mut before = 0u32;
+    loop {
+        if let Some(v) = step()? {
+            return Ok(Some((v, before)));
         }
+        if Instant::now() >= until {
+            return Ok(None);
+        }
+        before += 1;
         std::thread::sleep(every);
     }
-    Ok(())
 }
 
 /// An error as its message.
-fn text(e: std::io::Error) -> String {
+pub fn text(e: impl std::fmt::Display) -> String {
     e.to_string()
+}
+
+/// An error as its message after `what`, the step that failed.
+pub fn context<E: std::fmt::Display>(what: impl std::fmt::Display) -> impl FnOnce(E) -> String {
+    move |e| format!("{what}: {e}")
+}
+
+/// The error of a thread of `what` that panicked.
+pub fn panicked<P>(what: &str) -> impl FnOnce(P) -> String + '_ {
+    move |_| format!("{what} panicked")
 }
 
 /// An error of the BSON or wire crates as its debug form.
@@ -244,6 +279,64 @@ mod tests {
 
     fn bytes(d: Document) -> Vec<u8> {
         d.to_bytes().expect("bson")
+    }
+
+    #[test]
+    fn retry_waits_for_a_value_until_its_timeout_or_an_error() {
+        assert_eq!(retry(TIMEOUT, Duration::ZERO, || Ok(Some(7))), Ok(Some((7, 0))));
+        let mut calls = 0;
+        let third = retry(TIMEOUT, Duration::ZERO, || {
+            calls += 1;
+            Ok((calls == 3).then_some("done"))
+        });
+        assert_eq!(third, Ok(Some(("done", 2))));
+        assert_eq!(retry(Duration::ZERO, Duration::ZERO, || Ok(None::<()>)), Ok(None));
+        let failed = retry(TIMEOUT, Duration::ZERO, || Err::<Option<()>, _>("broken".into()));
+        assert_eq!(failed, Err("broken".to_string()));
+    }
+
+    /// A server on the loopback that answers each command with the next of `replies`.
+    fn answering(replies: Vec<Document>) -> SocketAddr {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            for reply in replies {
+                let mut whole = vec![0u8; HEADER_LEN];
+                s.read_exact(&mut whole).unwrap();
+                let header = Header::parse(&whole);
+                whole.resize(usize::try_from(header.length).unwrap(), 0);
+                s.read_exact(&mut whole[HEADER_LEN..]).unwrap();
+                let bytes = reply.to_bytes().unwrap();
+                s.write_all(&OpMsg::encode(1, header.request_id, 0, &bytes)).unwrap();
+            }
+        });
+        addr
+    }
+
+    #[test]
+    fn until_ready_repeats_a_command_while_the_primary_is_not_writable() {
+        let not_writable = || {
+            Document::new()
+                .with("ok", 0.0)
+                .with("errmsg", "not primary")
+                .with("code", NOT_WRITABLE_PRIMARY)
+        };
+        let ok = Document::new().with("ok", 1.0);
+        let mut c = Client::connect(answering(vec![not_writable(), ok])).unwrap();
+        assert_eq!(c.until_ready("db", Document::new().with("ping", 1)), Ok(()));
+        // Past the timeout the last refusal is the error.
+        let mut c = Client::connect(answering(vec![not_writable()])).unwrap();
+        let err = c.until_ready_within("db", Document::new().with("ping", 1), Duration::ZERO);
+        assert!(err.unwrap_err().contains("not primary"));
+    }
+
+    #[test]
+    fn errors_read_as_their_message_with_the_step_that_failed() {
+        assert_eq!(text("broken"), "broken");
+        assert_eq!(debug("broken"), "\"broken\"");
+        assert_eq!(context("loading")("broken"), "loading: broken");
+        assert_eq!(panicked("the writer")(()), "the writer panicked");
     }
 
     #[test]

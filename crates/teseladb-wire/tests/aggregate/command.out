@@ -73,6 +73,7 @@
 {"aggregate":"c","pipeline":[{"$limit":1},{"$project":{"_id":0,"x":"$$SEARCH_META"}}],"cursor":{}}	!! 6347902	Location6347902	Can't access $$SEARCH_META without a $search stage earlier in the pipeline
 {"aggregate":"c","pipeline":[{"$limit":1},{"$project":{"_id":0,"x":"$$nope"}}],"cursor":{}}	!! 17276	Location17276	Invalid $project :: caused by :: Use of undefined variable: nope
 {"aggregate":"c","pipeline":[{"$limit":1},{"$project":{"_id":0,"x":"$$v"}}],"cursor":{},"let":{"v":1}}	=> {"cursor":{"id":{"$numberLong":"0"},"ns":"xa.c","firstBatch":[{"x":{"$numberInt":"1"}}]},"ok":{"$numberDouble":"1.0"}}
+{"aggregate":"c","pipeline":[{"$limit":1},{"$project":{"_id":0,"x":"$$v"}}],"cursor":{},"let":{"v":{"$literal":"$bar"}}}	=> {"cursor":{"id":{"$numberLong":"0"},"ns":"xa.c","firstBatch":[{"x":"$bar"}]},"ok":{"$numberDouble":"1.0"}}
 {"aggregate":"c","pipeline":[{"$limit":1},{"$project":{"_id":0,"x":"$$v"}}],"cursor":{},"let":{"V":1}}	!! 9	FailedToParse	Invalid 'let' parameter :: caused by :: 'V' starts with an invalid character for a user variable name
 {"aggregate":"c","pipeline":[{"$limit":1},{"$project":{"_id":0,"x":"$$NOW"}}],"cursor":{},"let":{"NOW":1}}	!! 4738901	Location4738901	Attempt to set internal constant: NOW
 {"aggregate":"c","pipeline":[{"$limit":1},{"$project":{"_id":0,"x":"$$CLUSTER_TIME"}}],"cursor":{},"let":{"CLUSTER_TIME":1}}	!! 4738901	Location4738901	Attempt to set internal constant: CLUSTER_TIME
@@ -168,3 +169,5 @@
 {"find":"c","filter":{"t":{"$elemMatch":{"c":{"$geoWithin":{"$center":[[0,0],-1]}}}}}}	!! 2	BadValue	Radius must be a non-negative number: -1
 {"find":"c","filter":{"t":{"$not":{"$geoWithin":{"$center":[[0,0],1]}}},"_id":1},"projection":{"_id":1}}	=> {"cursor":{"firstBatch":[{"_id":{"$numberInt":"1"}}],"id":{"$numberLong":"0"},"ns":"xa.c"},"ok":{"$numberDouble":"1.0"}}
 {"find":"c","filter":{"_id":1},"projection":{"m":{"$meta":"textScore"}}}	!! 40218	Location40218	query requires text score metadata, but it is not available
+{"aggregate":"c","pipeline":[{"$out":"o"}],"cursor":{},"readConcern":{"level":"linearizable"}}	!! 72	InvalidOptions	Command aggregate does not support { readConcern: { level: "linearizable", provenance: "clientSupplied" } } :: caused by :: $out cannot be used with a 'linearizable' read concern level
+{"aggregate":"c","pipeline":[{"$merge":{"into":"o"}}],"cursor":{},"readConcern":{"level":"linearizable"}}	!! 72	InvalidOptions	Command aggregate does not support { readConcern: { level: "linearizable", provenance: "clientSupplied" } } :: caused by :: $merge cannot be used with a 'linearizable' read concern level
