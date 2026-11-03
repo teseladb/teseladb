@@ -431,8 +431,7 @@ fn ldap_opts(o: &Opts, fips: bool) -> Result<crate::ldap_client::LdapOpts, CliEr
 /// `--setParameter ldapUserCacheInvalidationInterval`, with RefDb's messages.
 fn cache_interval(o: &Opts) -> Result<Option<u64>, CliError> {
     let mut out = None;
-    for item in o.get(SET_PARAMETER).into_iter().flat_map(|v| v.split('\n')) {
-        let Some((LDAP_CACHE_INTERVAL, v)) = item.split_once('=') else { continue };
+    for v in set_parameters(o, LDAP_CACHE_INTERVAL) {
         let secs: u64 = v.parse().map_err(|_| {
             CliError(format!("{LDAP_CACHE_INTERVAL} must be a numeric value, '{v}' provided"))
         })?;
@@ -473,8 +472,7 @@ pub const OCSP_ENABLED: &str = "ocspEnabled";
 
 fn ocsp_enabled(o: &Opts) -> Result<bool, CliError> {
     let mut on = true;
-    for item in o.get(SET_PARAMETER).into_iter().flat_map(|v| v.split('\n')) {
-        let Some((OCSP_ENABLED, v)) = item.split_once('=') else { continue };
+    for v in set_parameters(o, OCSP_ENABLED) {
         on = match v {
             "true" | "1" => true,
             "false" | "0" => false,
@@ -496,8 +494,7 @@ const USE_INTERNAL_AUTHZ_FOR_X509: &str =
 /// 9.0.4 takes it (measured); false by default.
 fn use_internal_authz_for_x509(o: &Opts) -> Result<bool, CliError> {
     let mut on = false;
-    for item in o.get(SET_PARAMETER).into_iter().flat_map(|v| v.split('\n')) {
-        let Some((USE_INTERNAL_AUTHZ_FOR_X509, v)) = item.split_once('=') else { continue };
+    for v in set_parameters(o, USE_INTERNAL_AUTHZ_FOR_X509) {
         on = match v {
             "true" | "1" => true,
             "false" | "0" => false,
@@ -515,8 +512,7 @@ fn use_internal_authz_for_x509(o: &Opts) -> Result<bool, CliError> {
 /// not a boolean (measured).
 fn authorization_success(o: &Opts) -> Result<Option<bool>, CliError> {
     let mut out = None;
-    for item in o.get(SET_PARAMETER).into_iter().flat_map(|v| v.split('\n')) {
-        let Some((AUDIT_AUTHORIZATION_SUCCESS, v)) = item.split_once('=') else { continue };
+    for v in set_parameters(o, AUDIT_AUTHORIZATION_SUCCESS) {
         out = Some(match v {
             "true" | "1" => true,
             "false" | "0" => false,
@@ -605,6 +601,15 @@ fn kmip_opts(o: &Opts, fips: bool) -> Result<Option<crate::kmip::KmipOpts>, CliE
 
 /// `--setParameter <name>=<value>`, which may come several times.
 const SET_PARAMETER: &str = "setParameter";
+
+/// The values of `--setParameter <name>=<value>` for `name`, in order. An item without `=` is
+/// refused by [`test_commands`]' check of every item, so here it names nothing.
+fn set_parameters<'a>(o: &'a Opts, name: &'a str) -> impl Iterator<Item = &'a str> + 'a {
+    o.get(SET_PARAMETER)
+        .into_iter()
+        .flat_map(|v| v.split('\n'))
+        .filter_map(move |item| item.split_once('=').filter(|(n, _)| *n == name).map(|(_, v)| v))
+}
 /// The startup parameter of the mechanisms the node takes (013 FR-025).
 const AUTHENTICATION_MECHANISMS: &str = "authenticationMechanisms";
 
@@ -630,8 +635,7 @@ fn mechanisms(o: &Opts, fips: bool) -> Result<Vec<teseladb_auth::sasl::SaslMecha
 fn named_mechanisms(o: &Opts) -> Result<Vec<teseladb_auth::sasl::SaslMechanism>, CliError> {
     use teseladb_auth::sasl::SaslMechanism;
     let mut out = Vec::new();
-    for item in o.get(SET_PARAMETER).into_iter().flat_map(|v| v.split('\n')) {
-        let Some((AUTHENTICATION_MECHANISMS, names)) = item.split_once('=') else { continue };
+    for names in set_parameters(o, AUTHENTICATION_MECHANISMS) {
         out.clear();
         for name in names.split(',').map(str::trim) {
             let m = SaslMechanism::from_name(name).ok_or_else(|| {
@@ -649,8 +653,7 @@ pub const AWS_STS_URL: &str = "awsSTSUrl";
 /// `--setParameter awsSTSUrl=<https URL>`, refused with RefDb's message when it is not HTTPS.
 fn aws_sts_url(o: &Opts) -> Result<Option<String>, CliError> {
     let mut out = None;
-    for item in o.get(SET_PARAMETER).into_iter().flat_map(|v| v.split('\n')) {
-        let Some((AWS_STS_URL, url)) = item.split_once('=') else { continue };
+    for url in set_parameters(o, AWS_STS_URL) {
         teseladb_auth::aws::sts_host(url).map_err(|e| CliError(e.0))?;
         out = Some(url.to_owned());
     }
@@ -663,8 +666,7 @@ pub const OIDC_IDENTITY_PROVIDERS: &str = "oidcIdentityProviders";
 /// `--setParameter oidcIdentityProviders=<JSON array>`, refused when it does not read.
 fn oidc_providers(o: &Opts) -> Result<Option<String>, CliError> {
     let mut out = None;
-    for item in o.get(SET_PARAMETER).into_iter().flat_map(|v| v.split('\n')) {
-        let Some((OIDC_IDENTITY_PROVIDERS, json)) = item.split_once('=') else { continue };
+    for json in set_parameters(o, OIDC_IDENTITY_PROVIDERS) {
         teseladb_auth::oidc::Providers::parse(json).map_err(|e| CliError(e.0))?;
         out = Some(json.to_owned());
     }
@@ -686,11 +688,7 @@ const MAX_TRANSACTIONS_DEFAULT: i64 =
 /// `refnode` 9.0.4's messages (measured).
 fn integer_parameter(o: &Opts, name: &str, default: i64, least: i64) -> Result<i64, CliError> {
     let mut value = default;
-    for item in o.get(SET_PARAMETER).into_iter().flat_map(|v| v.split('\n')) {
-        let Some((n, v)) = item.split_once('=') else { continue };
-        if n != name {
-            continue;
-        }
+    for v in set_parameters(o, name) {
         let bad = |why: String| err(format!("Bad value for parameter \"{name}\": {why}"));
         value = match v.parse::<i32>() {
             Ok(x) => i64::from(x),

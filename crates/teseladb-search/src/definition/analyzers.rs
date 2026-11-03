@@ -218,25 +218,26 @@ fn int(doc: &Document, at: &str, field: &str) -> Result<Option<i64>, DefinitionE
         None => return Ok(None),
         Some(Value::Int32(n)) => i64::from(*n),
         Some(Value::Int64(n)) => *n,
-        Some(Value::Double(f)) if f.fract() == 0.0 && f.is_finite() => {
-            if *f > i64::MAX as f64 || *f < i64::MIN as f64 {
-                return Err(overflow(&path));
-            }
-            *f as i64
-        }
+        // Saturating: an infinity or a double beyond 64 bits stays out of 32 bits with its sign.
+        Some(Value::Double(f)) if f.is_infinite() || f.fract() == 0.0 => *f as i64,
         Some(Value::Double(_)) => {
             return Err(DefinitionError::shape(&path, "must be an integer"));
         }
         Some(_) => return Err(DefinitionError::shape(&path, "must be a integer")),
     };
     if i32::try_from(n).is_err() {
-        return Err(overflow(&path));
+        return Err(if n < 0 { underflow(&path) } else { overflow(&path) });
     }
     Ok(Some(n))
 }
 
 fn overflow(path: &str) -> DefinitionError {
     DefinitionError::shape(path, "overflowed, must fit in a 32 bit integer")
+}
+
+/// The error of a value below 32 bits (measured in `m84.js` and `m85.js` of lane 3).
+fn underflow(path: &str) -> DefinitionError {
+    DefinitionError::shape(path, "underflowed, must fit in a 32 bit integer")
 }
 
 /// A required 32-bit integer attribute.

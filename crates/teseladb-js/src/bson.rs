@@ -419,7 +419,7 @@ fn object_id(it: &mut Interp, _: &Val, a: &[Val]) -> R {
 fn bin_data(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     let sub = it.number_of(&arg(a, 0))?;
     let text = it.str_of(&arg(a, 1))?;
-    let bytes = base64_decode(&text).ok_or_else(|| it.error("Error", "BinData: invalid base64"))?;
+    let bytes = base64_decode(&text).map_err(|m| it.error("Error", m))?;
     make(it, Bson::BinData(sub as u8, bytes))
 }
 
@@ -656,14 +656,20 @@ pub(crate) fn base64_encode(b: &[u8]) -> String {
     out
 }
 
-fn base64_decode(s: &str) -> Option<Vec<u8>> {
+/// The bytes of `s`, base64 in groups of four with at most two `=` at the end; the errors are
+/// RefDb's (measured on a `refrouter` 9.0.4).
+fn base64_decode(s: &str) -> Result<Vec<u8>, &'static str> {
+    if !s.len().is_multiple_of(4) {
+        return Err("invalid base64");
+    }
+    let data = s.trim_end_matches('=');
+    if s.len() - data.len() > 2 {
+        return Err("Invalid base64 character");
+    }
     let mut out = Vec::new();
     let (mut acc, mut bits) = (0u32, 0);
-    for c in s.bytes() {
-        if c == b'=' {
-            break;
-        }
-        let v = B64.iter().position(|&x| x == c)? as u32;
+    for c in data.bytes() {
+        let v = B64.iter().position(|&x| x == c).ok_or("Invalid base64 character")? as u32;
         acc = (acc << 6) | v;
         bits += 6;
         if bits >= 8 {
@@ -671,7 +677,7 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
             out.push((acc >> bits) as u8);
         }
     }
-    Some(out)
+    Ok(out)
 }
 
 // Conversions.

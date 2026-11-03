@@ -179,7 +179,8 @@ fn parse_iso(s: &str) -> Option<f64> {
         || parts[4] > 59.0
         || parts[5] > 59.0
     {
-        return Some(f64::NAN);
+        // Out of range: the legacy parser reads it (measured: `2020-02-00` is January 31).
+        return None;
     }
     Some(time_clip(make(&parts) - offset))
 }
@@ -207,6 +208,8 @@ fn parse_text(s: &str) -> Option<f64> {
     let mut time: Vec<f64> = Vec::new();
     let mut offset = 0.0;
     let mut pm = None;
+    // `2020-02-00` is the day before February 1st; `Feb 0 2020` is no date (measured).
+    let mut numeric = false;
     for tok in s.split([' ', ',']).filter(|t| !t.is_empty()) {
         // Measured on a `refrouter` 9.0.4 on 02-11: `1/2/2020`, `2020/1/2` and `2020-1-1` are dates
         // (month first unless the year is), `AM`/`PM` move the hour, and the zones of North
@@ -217,8 +220,12 @@ fn parse_text(s: &str) -> Option<f64> {
         {
             let v: Vec<f64> = parts.iter().filter_map(|p| p.parse().ok()).collect();
             let (y, m, d) = if v[0] > 31.0 { (v[0], v[1], v[2]) } else { (v[2], v[0], v[1]) };
+            if !(1.0..=12.0).contains(&m) {
+                return None;
+            }
             month = Some(m - 1.0);
             nums = vec![d, y];
+            numeric = true;
             continue;
         }
         if let Some(h) = ZONES.iter().find(|(z, _)| tok.eq_ignore_ascii_case(z)).map(|(_, h)| *h) {
@@ -261,6 +268,9 @@ fn parse_text(s: &str) -> Option<f64> {
         }
         _ => return None,
     };
+    if day > 31.0 || (day < 1.0 && !numeric) {
+        return None;
+    }
     let get = |i: usize| time.get(i).copied().unwrap_or(0.0);
     let hour = match pm {
         Some(true) if get(0) < 12.0 => get(0) + 12.0,

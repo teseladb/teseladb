@@ -120,6 +120,11 @@ fn a_read_outside_the_led_range_is_refused() {
     let other = GroupId(G.0 + 100);
     assert!(matches!(ask(&mut c, l, other, START, END), Some(Err(RangeError::OutOfRange))));
     assert!(matches!(ask(&mut c, l, G, END, START), Some(Err(RangeError::OutOfRange))));
+    // The last range, open at its end, takes any interval past its start.
+    let last = GroupId(G.0 + 1);
+    c.nodes.get_mut(&l).unwrap().host.add_range(last, END.to_vec(), Vec::new());
+    let r = ask(&mut c, l, last, END, b"\xff");
+    assert!(matches!(r, Some(Err(RangeError::NotLeader { .. }))), "no group leads it: {r:?}");
     let follower = c.others(l)[0];
     let r = ask(&mut c, follower, G, START, END);
     assert!(matches!(r, Some(Err(RangeError::NotLeader { .. }))), "{r:?}");

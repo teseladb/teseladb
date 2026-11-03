@@ -140,3 +140,12 @@ fn a_history_checker_fails_the_seed_and_runs_only_on_workloads_with_history() {
     assert_eq!(sim.run_seed(&cfg("storage"), 5).verdict, Verdict::Pass);
     assert_eq!(sim.registry().checker_names(), ["picky"]);
 }
+
+#[test]
+fn every_workload_answers_to_its_registered_name() {
+    let reg = Registry::builtin();
+    for name in reg.workload_names() {
+        let wl = reg.workload(name, 3, 2).expect("registered");
+        assert_eq!(wl.name(), name);
+    }
+}

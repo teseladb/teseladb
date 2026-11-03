@@ -428,9 +428,18 @@ pub(crate) fn id_doc_key<B: Backend + ?Sized>(
     coll: &CollectionEntry,
     id: &Value,
 ) -> Result<Option<Vec<u8>>, CommandError> {
+    Ok(id_doc_keys(backend, coll, std::slice::from_ref(id))?.into_iter().next().flatten())
+}
+
+/// [`id_doc_key`] of each of `ids`, read together.
+pub(crate) fn id_doc_keys<B: Backend + ?Sized>(
+    backend: &mut B,
+    coll: &CollectionEntry,
+    ids: &[Value],
+) -> Result<Vec<Option<Vec<u8>>>, CommandError> {
     match (super::capped::rule_of(coll)?, super::sharding::is_sharded(coll)) {
-        (Some(_), _) | (None, true) => super::capped::id_key(backend, coll, id),
-        (None, false) => doc_key(coll, id).map(Some),
+        (Some(_), _) | (None, true) => super::capped::id_keys(backend, coll, ids),
+        (None, false) => ids.iter().map(|id| doc_key(coll, id).map(Some)).collect(),
     }
 }
 

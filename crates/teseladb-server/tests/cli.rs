@@ -325,3 +325,20 @@ fn the_http_port_and_its_addresses() {
         other => panic!("{other:?}"),
     }
 }
+
+/// 013 FR-031 and FR-025: `ocspEnabled` takes `1`/`0` as well as `true`/`false`, the last one
+/// given counts, another parameter leaves it on, and in FIPS mode the mechanisms named are kept as
+/// given.
+#[test]
+fn set_parameter_ocsp_and_the_mechanisms_in_fips_mode() {
+    use teseladb_auth::sasl::SaslMechanism;
+    assert!(!start("start").tls.ocsp_disabled);
+    assert!(start("start --setParameter ocspEnabled=0").tls.ocsp_disabled);
+    let on = "start --setParameter ocspEnabled=false --setParameter ocspEnabled=1";
+    assert!(!start(on).tls.ocsp_disabled);
+    let o = start("start --setParameter enableTestCommands=1");
+    assert!(!o.tls.ocsp_disabled);
+    assert_eq!(o.transaction_lifetime_secs, 60);
+    let fips = "start --tlsFIPSMode --setParameter authenticationMechanisms=SCRAM-SHA-256";
+    assert_eq!(start(fips).mechanisms, vec![SaslMechanism::ScramSha256]);
+}

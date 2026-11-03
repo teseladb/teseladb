@@ -444,10 +444,11 @@ fn edges_of_the_rules() {
         )[0],
         r#"g_1: g["[\"a\", \"a\"]"] | {"$and":[{"$expr":{"$eq":["$g","a"]}},{"g":{"$exists":true}}]}"#
     );
-    // On arrays, a second clause on the field keeps to the first one's intervals.
+    // On arrays, the field keeps to the intervals of one clause, `$lt` before `$gt` (measured
+    // on a `refnode` 9.0.4), and the other stays for the documents.
     assert_eq!(
         plans(r#"{"$and":[{"t":{"$gt":"a"}},{"t":{"$lt":"m"}}]}"#, &[], &c),
-        [r#"t_1: t["(\"a\", {})"] | {"t":{"$lt":"m"}}"#]
+        [r#"t_1: t["[\"\", \"m\")"] | {"t":{"$gt":"a"}}"#]
     );
     // A hint over a `$or` plans the hinted index alone.
     let parsed = doc(r#"{"$or":[{"g":{"$eq":"a"}},{"s":{"$eq":"x"}}]}"#);

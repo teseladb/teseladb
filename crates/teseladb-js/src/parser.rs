@@ -7,9 +7,15 @@ use crate::ast::*;
 use crate::early::{Decl, ScopeKind, Scopes};
 use crate::lexer::{SyntaxError, Tok, Token, tokenize};
 
-/// Parses a whole script.
+/// Parses a whole program as RefDb gives it: an anonymous function may stand as a whole
+/// statement (`function(){ … }`), as RefDb reads a function's source.
 pub fn parse_script(src: &str) -> Result<Vec<Stmt>, SyntaxError> {
-    parse_script_in(src, &[], (false, false))
+    parse(src, &[], (false, false), true)
+}
+
+/// Parses the code of an indirect `eval` or of `Function`: a script.
+pub fn parse_eval(src: &str) -> Result<Vec<Stmt>, SyntaxError> {
+    parse(src, &[], (false, false), false)
 }
 
 /// Parses a whole script that may use the private names `privates` (the code of a direct
@@ -19,6 +25,15 @@ pub fn parse_script_in(
     src: &str,
     privates: &[Name],
     supers: (bool, bool),
+) -> Result<Vec<Stmt>, SyntaxError> {
+    parse(src, privates, supers, false)
+}
+
+fn parse(
+    src: &str,
+    privates: &[Name],
+    supers: (bool, bool),
+    anonymous: bool,
 ) -> Result<Vec<Stmt>, SyntaxError> {
     let mut p = Parser {
         toks: tokenize(src)?,
@@ -36,6 +51,7 @@ pub fn parse_script_in(
         namer: crate::names::Namer::default(),
         privates: Vec::new(),
         loose_privates: false,
+        cover: Vec::new(),
         super_prop: supers.0,
         super_call: supers.1,
     };
@@ -46,7 +62,9 @@ pub fn parse_script_in(
     p.scopes.push(ScopeKind::Function);
     let mut out = Vec::new();
     while !p.at_eof() {
-        out.push(p.statement()?);
+        let function =
+            anonymous && p.is_word("function") && matches!(p.peek_at(1), Tok::Punct("("));
+        out.push(if function { p.expression_statement()? } else { p.statement()? });
         if out.len() == 1 && has_use_strict(&out) {
             p.strict = true;
         }
@@ -83,14 +101,22 @@ fn parse_expression(
         namer: crate::names::Namer::default(),
         privates: Vec::new(),
         loose_privates: true,
+        cover: Vec::new(),
         super_prop: supers.0,
         super_call: supers.1,
     };
     p.scopes.push(ScopeKind::Function);
     let start = p.pos();
+    // The substitution ends at its `}`.
+    if p.at_eof() {
+        return p.fail("expected expression, got '}'".into());
+    }
     let e = p.expression()?;
     if !p.at_eof() {
-        return p.unexpected();
+        return p.fail("missing } in template string".into());
+    }
+    if let Some(at) = p.cover.first() {
+        return p.fail_at(*at, "missing : after property id".into());
     }
     p.namer.finish();
     Ok(at(start, e))
@@ -166,6 +192,26 @@ const MAX_DEPTH: usize = 400;
 /// A function's parameters with their defaults, and its rest parameter.
 type Params = (Vec<(Pattern, Option<Expr>)>, Option<Pattern>);
 
+/// A word that goes between two operands (`a in b`) or ends an expression.
+fn is_operator_word(w: &str) -> bool {
+    matches!(w, "in" | "instanceof" | "of")
+}
+
+/// The names `p` binds.
+fn bound_names(p: &Pattern) -> Vec<Name> {
+    let mut out = Vec::new();
+    crate::interp::pattern_names(p, &mut out);
+    out
+}
+
+/// The first name of `seen` that an earlier one already has, and where it is.
+fn first_duplicate(seen: &[(Name, Pos)]) -> Option<(Name, Pos)> {
+    seen.iter()
+        .enumerate()
+        .find(|(i, (n, _))| seen[..*i].iter().any(|(m, _)| m == n))
+        .map(|(_, x)| x.clone())
+}
+
 /// What kind of function a body belongs to.
 #[derive(Clone, Copy, Default)]
 struct FnKind {
@@ -209,6 +255,9 @@ struct Parser {
     /// Whether a private name no class here declares is accepted (a template's substitution,
     /// whose names the code around it checks).
     loose_privates: bool,
+    /// Where each `{a = 1}` of an object literal is that no assignment has made a pattern yet:
+    /// one left when its statement ends is an error.
+    cover: Vec<Pos>,
 }
 
 /// What a private name of a class declares.
@@ -435,6 +484,9 @@ impl Parser {
             Tok::Ident(w) if &*w == "yield" && (self.in_gen || self.strict) => {
                 self.fail("yield is a reserved identifier".into())
             }
+            Tok::Ident(w) if &*w == "await" && self.in_async => {
+                self.fail("await is a reserved identifier".into())
+            }
             Tok::Ident(w) if &*w == "await" && self.in_static => {
                 self.fail("await is a reserved identifier".into())
             }
@@ -478,9 +530,13 @@ impl Parser {
 
     fn statement(&mut self) -> Result<Stmt, SyntaxError> {
         self.enter()?;
+        let mark = self.cover.len();
         let s = self.statement_inner();
         self.depth -= 1;
-        s
+        match self.cover.get(mark) {
+            Some(p) if s.is_ok() => self.fail_at(*p, "missing : after property id".into()),
+            _ => s,
+        }
     }
 
     fn statement_inner(&mut self) -> Result<Stmt, SyntaxError> {
@@ -516,9 +572,6 @@ impl Parser {
                 self.semicolon()?;
                 Ok(Stmt::Decl(DeclKind::Let, d))
             }
-            // An anonymous function at the start of a statement is an expression, as RefDb
-            // reads a function's source.
-            "function" if matches!(self.peek_at(1), Tok::Punct("(")) => self.expression_statement(),
             "async"
                 if matches!(self.peek_at(1), Tok::Ident(w) if &**w == "function")
                     && !self.toks[self.i + 1].newline_before =>
@@ -526,7 +579,7 @@ impl Parser {
                 self.i += 2;
                 let name_pos = self.pos_at(usize::from(self.is("*")));
                 let f = self.function_rest(pos, false, true, false)?;
-                let name = f.name.clone().map_or_else(|| self.fail("missing name".into()), Ok)?;
+                let name = self.statement_name(f.name.clone())?;
                 self.declare(&name, Decl::Function { plain: false }, name_pos)?;
                 Ok(Stmt::Func(name, f))
             }
@@ -534,7 +587,7 @@ impl Parser {
                 self.i += 1;
                 let name_pos = self.pos_at(usize::from(self.is("*")));
                 let f = self.function_rest(pos, false, false, false)?;
-                let name = f.name.clone().map_or_else(|| self.fail("missing name".into()), Ok)?;
+                let name = self.statement_name(f.name.clone())?;
                 self.declare(&name, Decl::Function { plain: !f.generator }, name_pos)?;
                 Ok(Stmt::Func(name, f))
             }
@@ -542,7 +595,10 @@ impl Parser {
                 self.i += 1;
                 let name_pos = self.pos();
                 let c = self.class_rest()?;
-                let name = c.name.clone().map_or_else(|| self.fail("missing name".into()), Ok)?;
+                let name = c
+                    .name
+                    .clone()
+                    .map_or_else(|| self.fail("class statement requires a name".into()), Ok)?;
                 self.declare(&name, Decl::Class, name_pos)?;
                 Ok(Stmt::Class(name, c))
             }
@@ -562,9 +618,7 @@ impl Parser {
             }
             "if" => {
                 self.i += 1;
-                self.expect("(")?;
-                let c = self.expr_at()?;
-                self.expect(")")?;
+                let c = self.condition()?;
                 let then = Box::new(in_block(self.statement()?));
                 let other = if self.eat_word("else") {
                     Some(Box::new(in_block(self.statement()?)))
@@ -575,9 +629,7 @@ impl Parser {
             }
             "while" => {
                 self.i += 1;
-                self.expect("(")?;
-                let c = self.expr_at()?;
-                self.expect(")")?;
+                let c = self.condition()?;
                 Ok(Stmt::While(c, Box::new(self.statement()?)))
             }
             "do" => {
@@ -586,9 +638,7 @@ impl Parser {
                 if !self.eat_word("while") {
                     return self.unexpected();
                 }
-                self.expect("(")?;
-                let c = self.expr_at()?;
-                self.expect(")")?;
+                let c = self.condition()?;
                 self.eat(";");
                 Ok(Stmt::DoWhile(body, c))
             }
@@ -604,6 +654,13 @@ impl Parser {
                         ])),
                         _ => self.fail("for await needs of".into()),
                     };
+                }
+                if self.is_word("await") {
+                    return self.fail(
+                        "for await (... of ...) is only valid in async functions and async \
+                         generators"
+                            .into(),
+                    );
                 }
                 self.for_rest()
             }
@@ -657,6 +714,18 @@ impl Parser {
             "import" | "export" => self.fail(format!("{word} is not supported")),
             _ => self.expression_statement(),
         }
+    }
+
+    /// The `(c)` of `if`, `while` and `do … while`.
+    fn condition(&mut self) -> Result<Expr, SyntaxError> {
+        self.expect_or("(", "missing ( before condition")?;
+        let c = self.expr_at()?;
+        self.expect_or(")", "missing ) after condition")?;
+        Ok(c)
+    }
+
+    fn statement_name(&self, name: Option<Name>) -> Result<Name, SyntaxError> {
+        name.map_or_else(|| self.fail("function statement requires a name".into()), Ok)
     }
 
     fn expression_statement(&mut self) -> Result<Stmt, SyntaxError> {
@@ -756,10 +825,11 @@ impl Parser {
             } else {
                 None
             };
-            if init.is_none()
-                && allow_in
-                && (kind == DeclKind::Const || !matches!(target, Pattern::Name(_)))
-            {
+            // The head of a `for (… in/of …)` was read before: here every declaration ends.
+            if init.is_none() && !matches!(target, Pattern::Name(_)) {
+                return self.fail("missing = in destructuring declaration".into());
+            }
+            if init.is_none() && kind == DeclKind::Const {
                 return self.fail("missing = in const declaration".into());
             }
             out.push((target, init));
@@ -877,14 +947,20 @@ impl Parser {
             }
             self.i = start;
             self.scopes = saved;
-            Some(ForInit::Decl(kind, self.declarations(kind, false)?))
+            let d = self.declarations(kind, false)?;
+            if self.is_word("in") || self.is_word("of") {
+                return self.for_in_initializer(kind, d);
+            }
+            Some(ForInit::Decl(kind, d))
         } else if self.is(";") {
             None
         } else {
             let start = self.i;
+            let cover = self.cover.len();
             let e = self.lhs()?;
             if self.is_word("of") || self.is_word("in") {
                 let of = self.is_word("of");
+                self.cover.truncate(cover);
                 self.i += 1;
                 let target = to_pattern(e).map_or_else(|m| self.fail(m), Ok)?;
                 let p = self.pos();
@@ -895,14 +971,63 @@ impl Parser {
                 return Ok(Stmt::ForIn { decl: None, target, of, obj, body });
             }
             self.i = start;
-            Some(ForInit::Expr(self.expression_in(false)?))
+            self.cover.truncate(cover);
+            let e = self.expression_in(false)?;
+            if self.is_word("in") || self.is_word("of") {
+                return self.fail("invalid for-in/of left-hand side".into());
+            }
+            Some(ForInit::Expr(e))
         };
-        self.expect(";")?;
+        self.expect_or(";", "missing ; after for-loop initializer")?;
         let test = if self.is(";") { None } else { Some(self.expr_at()?) };
-        self.expect(";")?;
+        self.expect_or(";", "missing ; after for-loop condition")?;
         let update = if self.is(")") { None } else { Some(self.expr_at()?) };
-        self.expect(")")?;
+        self.expect_or(")", "missing ) after for-loop control")?;
         Ok(Stmt::For(init, test, update, Box::new(self.statement()?)))
+    }
+
+    fn expect_or(&mut self, p: &str, message: &str) -> Result<(), SyntaxError> {
+        if self.eat(p) { Ok(()) } else { self.fail(message.into()) }
+    }
+
+    /// `for (var x = 1 in o)`: Annex B.3.5 lets sloppy code give a `var` of a name an
+    /// initializer, evaluated before the object; every other declaration with one is an error.
+    fn for_in_initializer(
+        &mut self,
+        kind: DeclKind,
+        mut d: Vec<(Pattern, Option<Expr>)>,
+    ) -> Result<Stmt, SyntaxError> {
+        if self.is_word("of") {
+            return self.fail(
+                "a declaration in the head of a for-of loop can't have an initializer".into(),
+            );
+        }
+        if kind != DeclKind::Var {
+            return self.fail(
+                "a lexical declaration in the head of a for-in loop can't have an initializer"
+                    .into(),
+            );
+        }
+        if self.strict {
+            return self.fail("for-in loop head declarations may not have initializers".into());
+        }
+        let name = match d.pop() {
+            Some((Pattern::Name(n), init)) if d.is_empty() => {
+                d.push((Pattern::Name(n.clone()), init));
+                n
+            }
+            _ => return self.fail("missing ; after for-loop initializer".into()),
+        };
+        self.i += 1;
+        let p = self.pos();
+        let obj = at_always(p, self.expression()?);
+        self.expect(")")?;
+        let body = Box::new(self.statement()?);
+        let target = Pattern::Name(name);
+        Ok(Stmt::Block(vec![
+            Stmt::Decl(DeclKind::Var, d),
+            Stmt::ForIn { decl: Some(DeclKind::Var), target, of: false, obj, body },
+        ]))
     }
 
     fn try_rest(&mut self) -> Result<Stmt, SyntaxError> {
@@ -965,13 +1090,13 @@ impl Parser {
                 self.i += 1;
                 None
             } else {
-                return self.unexpected();
+                return self.fail("invalid switch statement".into());
             };
             self.expect(":")?;
             let mut body = Vec::new();
             while !self.is("}") && !self.is_word("case") && !self.is_word("default") {
                 if self.at_eof() {
-                    return self.unexpected();
+                    return self.fail("expected expression, got end of script".into());
                 }
                 body.push(self.statement()?);
             }
@@ -1018,58 +1143,63 @@ impl Parser {
         self.src[from..stop.min(self.src.len())].iter().collect::<String>().into()
     }
 
-    fn params(&mut self) -> Result<Params, SyntaxError> {
+    /// The parameters and the names they bind, where each is. Duplicate names: only a plain
+    /// list of a function that is not an arrow or a method may have them, in sloppy code.
+    fn params(
+        &mut self,
+        unique: bool,
+        unclosed: &str,
+    ) -> Result<(Params, Vec<(Name, Pos)>), SyntaxError> {
         let outer =
             (self.binding.replace(Decl::Param), std::mem::replace(&mut self.in_params, true));
-        let r = self.params_in();
+        let r = self.params_in(unclosed);
         (self.binding, self.in_params) = outer;
         let ((params, rest), seen) = r?;
-        // Duplicate names: only a plain list in sloppy code may have them.
         let simple = rest.is_none()
             && params.iter().all(|(p, d)| d.is_none() && matches!(p, Pattern::Name(_)));
-        if !simple || self.strict {
-            for (i, (n, p)) in seen.iter().enumerate() {
-                if seen[..i].iter().any(|(m, _)| m == n) {
-                    return self.fail_at(
-                        *p,
-                        "duplicate argument names not allowed in this context".into(),
-                    );
-                }
-            }
+        if let Some((_, p)) = first_duplicate(&seen).filter(|_| unique || !simple) {
+            return self.fail_at(p, "duplicate argument names not allowed in this context".into());
         }
-        Ok((params, rest))
+        self.strict_params(&seen)?;
+        Ok(((params, rest), seen))
+    }
+
+    /// In strict code no two parameters have the same name.
+    fn strict_params(&self, seen: &[(Name, Pos)]) -> Result<(), SyntaxError> {
+        match first_duplicate(seen).filter(|_| self.strict) {
+            Some((n, p)) => self.fail_at(p, format!("duplicate formal argument {n}")),
+            None => Ok(()),
+        }
     }
 
     /// The parameter list and the names it binds, where each is.
-    fn params_in(&mut self) -> Result<(Params, Vec<(Name, Pos)>), SyntaxError> {
-        self.expect("(")?;
+    fn params_in(&mut self, unclosed: &str) -> Result<(Params, Vec<(Name, Pos)>), SyntaxError> {
+        self.expect_or("(", "missing ( before formal parameters")?;
         let mut params = Vec::new();
         let mut rest = None;
         let mut seen = Vec::new();
         while !self.eat(")") {
             if self.eat("...") {
-                seen.push((self.peek_name(), self.pos()));
-                rest = Some(self.binding_pattern()?);
-                self.expect(")")?;
+                let at = self.pos();
+                let p = self.binding_pattern()?;
+                seen.extend(bound_names(&p).into_iter().map(|n| (n, at)));
+                rest = Some(p);
+                if self.is(",") {
+                    return self.fail("parameter after rest parameter".into());
+                }
+                self.expect_or(")", unclosed)?;
                 break;
             }
-            seen.push((self.peek_name(), self.pos()));
+            let at = self.pos();
             let p = self.binding_pattern()?;
+            seen.extend(bound_names(&p).into_iter().map(|n| (n, at)));
             let d = if self.eat("=") { Some(self.default_value()?) } else { None };
             params.push((p, d));
             if !self.is(")") {
-                self.expect(",")?;
+                self.expect_or(",", unclosed)?;
             }
         }
         Ok(((params, rest), seen))
-    }
-
-    /// The name at the current token, or an empty one for a pattern.
-    fn peek_name(&self) -> Name {
-        match self.tok() {
-            Tok::Ident(w) => w.clone(),
-            _ => "".into(),
-        }
     }
 
     /// `function` (and `async` before it) already read: an optional `*`, the name, parameters
@@ -1130,7 +1260,8 @@ impl Parser {
     ) -> Result<Rc<FuncDef>, SyntaxError> {
         let outer_strict = self.strict;
         let from = self.i;
-        let (params, rest) = self.params()?;
+        let ((params, rest), seen) =
+            self.params(kind.method || kind.ctor, "missing ) after formal parameters")?;
         self.expect("{")?;
         // A directive is the first statement: it is read before the rest of the body.
         if matches!(self.tok(), Tok::Str(s) if &**s == "use strict") {
@@ -1148,6 +1279,7 @@ impl Parser {
                     .fail(format!("\"use strict\" not allowed in function with {what} parameter"));
             }
             self.strict = true;
+            self.strict_params(&seen)?;
         }
         let body = self.block_rest();
         let strict = self.strict || body.as_deref().is_ok_and(has_use_strict);
@@ -1519,7 +1651,7 @@ impl Parser {
         let (params, rest) = if let Tok::Ident(_) = self.tok() {
             (vec![(Pattern::Name(self.ident()?), None)], None)
         } else {
-            self.params()?
+            self.params(true, "missing ) in parenthetical")?.0
         };
         self.expect("=>")?;
         let body = if self.eat("{") {
@@ -1577,6 +1709,7 @@ impl Parser {
         if self.is_arrow_ahead() {
             return self.arrow(start, false);
         }
+        let cover = self.cover.len();
         let left = self.conditional(allow_in)?;
         let op = match self.tok() {
             Tok::Punct(p)
@@ -1605,6 +1738,7 @@ impl Parser {
         };
         self.i += 1;
         let target = if op == "=" {
+            self.cover.truncate(cover);
             to_pattern(left)
         } else {
             match left {
@@ -1745,9 +1879,18 @@ impl Parser {
                 self.i += 1;
                 Ok(Expr::Await(Box::new(self.unary()?)))
             }
-            Tok::Ident(w) if &*w == "await" => self.fail(
-                "await is only valid in async functions, async generators and modules".into(),
-            ),
+            // Outside async functions `await` is a name; one followed on its line by an operand
+            // was meant as an operator.
+            Tok::Ident(w)
+                if &*w == "await"
+                    && !self.toks[self.i + 1].newline_before
+                    && matches!(self.peek_at(1), Tok::Num(_) | Tok::Str(_) | Tok::BigInt(_))
+                        | matches!(self.peek_at(1), Tok::Ident(n) if !is_operator_word(n)) =>
+            {
+                self.fail(
+                    "await is only valid in async functions, async generators and modules".into(),
+                )
+            }
             _ => {
                 let e = self.lhs()?;
                 if let Tok::Punct(op @ ("++" | "--")) = self.tok().clone()
@@ -1773,7 +1916,7 @@ impl Parser {
                 args.push(self.assign_at()?);
             }
             if !self.is(")") && !self.eat(",") {
-                return self.expect(")").map(|_| Vec::new());
+                return self.fail("missing ) after argument list".into());
             }
         }
         Ok(args)
@@ -1930,7 +2073,7 @@ impl Parser {
             }
             Tok::Punct("(") => {
                 let e = self.expression()?;
-                self.expect(")")?;
+                self.expect_or(")", "missing ) in parenthetical")?;
                 e
             }
             Tok::Punct("[") => {
@@ -1947,7 +2090,7 @@ impl Parser {
                     };
                     items.push(Some(item));
                     if !self.is("]") {
-                        self.expect(",")?;
+                        self.expect_or(",", "missing ] after element list")?;
                     }
                 }
                 Expr::Array(items)
@@ -2060,6 +2203,9 @@ impl Parser {
                     _ => None,
                 };
                 let key = self.prop_name()?;
+                if (kind != PropKind::Value || fk.is_async || fk.generator) && !self.is("(") {
+                    return self.fail("invalid property id".into());
+                }
                 if kind != PropKind::Value {
                     let fk = FnKind { method: true, ..FnKind::default() };
                     let f = self.function_body(start, None, false, fk)?;
@@ -2087,10 +2233,14 @@ impl Parser {
                     let f =
                         self.function_body(start, name, false, FnKind { method: true, ..fk })?;
                     props.push(ObjProp::Value(key, Expr::Func(f)));
-                } else if let Some(name) = shorthand {
+                } else if let Some(name) = shorthand
+                    && matches!(self.tok(), Tok::Punct("=" | "," | "}"))
+                {
                     // `{a}` and, inside a pattern, `{a = 1}`.
                     let value = Expr::Ident(name, start);
-                    if self.eat("=") {
+                    if self.is("=") {
+                        self.cover.push(self.pos());
+                        self.i += 1;
                         let d = self.assign()?;
                         props.push(ObjProp::Value(
                             key,
@@ -2104,11 +2254,11 @@ impl Parser {
                         props.push(ObjProp::Value(key, value));
                     }
                 } else {
-                    return self.unexpected();
+                    return self.fail("missing : after property id".into());
                 }
             }
             if !self.is("}") {
-                self.expect(",")?;
+                self.expect_or(",", "missing } after property list")?;
             }
         }
         Ok(Expr::Object(props))

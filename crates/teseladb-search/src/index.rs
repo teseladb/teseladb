@@ -477,12 +477,9 @@ impl MemIndex {
     /// Removes the document of `key`, if the index has it.
     pub fn delete(&mut self, key: &[u8]) {
         let Some(id) = self.by_key.remove(key) else { return };
-        if let Some(k) = self.keys.get_mut(id as usize) {
-            *k = None;
-        }
-        if let Some(d) = self.docs.get_mut(id as usize) {
-            *d = None;
-        }
+        // `by_key` only holds ids of `keys` and `docs`.
+        self.keys[id as usize] = None;
+        self.docs[id as usize] = None;
         for field in self.fields.values_mut() {
             field.lengths.remove(&id);
             field.tokens.remove(&id);
@@ -627,6 +624,13 @@ impl MemIndex {
             }
         }
         Ok(scores.into_iter().map(|(doc, s)| (doc, s as f32)).collect())
+    }
+
+    /// The terms of `path` the fuzzy query `fuzzy` rewrites token `token` to, as
+    /// [`MemIndex::fuzzy_scores`] picks them: among those of the whole index when this one is a
+    /// segment of it, and nothing on a path no segment has.
+    pub(crate) fn fuzzy_expansions(&self, path: &str, token: &str, fuzzy: &Fuzzy) -> Vec<String> {
+        self.fuzzy_terms(path, token, fuzzy).into_iter().map(|(t, _)| t).collect()
     }
 
     /// The tokens, with their offsets, analyzer `name` makes of `text`.
@@ -797,7 +801,8 @@ impl TextField {
             Some(g) => (g.docs, g.length),
             None => (self.lengths.len() as u64, self.tokens.values().map(|&l| u64::from(l)).sum()),
         };
-        let avg = if n == 0 { 1.0f32 } else { (total as f64 / n as f64) as f32 };
+        // A field without documents scores none: the average only has to be finite.
+        let avg = (total as f64 / n.max(1) as f64) as f32;
         let Bm25 { k1, b } = Bm25::DEFAULT;
         let (k1, b) = (k1 as f32, b as f32);
         let chars: Vec<u32> = terms.iter().map(|t| t.chars().count() as u32).collect();
@@ -939,26 +944,15 @@ impl TextField {
         freqs.into_iter().map(|(doc, freq)| (doc, score(doc, freq))).collect()
     }
 
-    /// The terms within `fuzzy` of `term`, closest first, each with its weight
-    /// `1 - edits / shortest length` (RefLib's top-terms blended rewrite).
-    fn fuzzy_terms(&self, term: &str, fuzzy: &Fuzzy) -> Vec<(String, f32)> {
-        let lev = Levenshtein::new(term, fuzzy.max_edits, fuzzy.prefix_length);
-        let len = term.chars().count();
-        let mut found: Vec<(&String, f32)> = self
-            .postings
-            .keys()
-            .filter_map(|t| {
-                let edits = lev.distance(t)?;
-                let shortest = len.min(t.chars().count()).max(1);
-                Some((t, 1.0 - f32::from(edits) / shortest as f32))
-            })
-            .collect();
-        found.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-        let mut kept: Vec<(String, f32)> =
-            found.into_iter().take(fuzzy.max_expansions).map(|(t, w)| (t.clone(), w)).collect();
-        // The rewritten query lists its terms in term order (measured with `scoreDetails`).
-        kept.sort_by(|a, b| a.0.cmp(&b.0));
-        kept
+    /// The terms within `fuzzy` of `term`, in term order, each with its weight
+    /// `1 - edits / shortest length` (RefLib's top-terms blended rewrite): the closest among
+    /// those of the whole index when `g` has them, as `refsearch` rewrites the query once for all
+    /// its segments (measured in `m80.js`).
+    fn fuzzy_terms(&self, term: &str, fuzzy: &Fuzzy, g: Option<&FieldStats>) -> Vec<(String, f32)> {
+        match g {
+            Some(g) => closest_terms(g.df.keys(), term, fuzzy),
+            None => closest_terms(self.postings.keys(), term, fuzzy),
+        }
     }
 
     /// The largest document count among `kept`, which every kept term's idf uses.
@@ -977,7 +971,7 @@ impl TextField {
         boost: f32,
         g: Option<&FieldStats>,
     ) -> Vec<(u32, f32)> {
-        let kept = self.fuzzy_terms(term, fuzzy);
+        let kept = self.fuzzy_terms(term, fuzzy, g);
         let n = g.map_or(self.lengths.len() as u64, |g| g.docs);
         let idf = idf(n, self.blended_df(&kept, g)) as f32;
         // The terms' scores add up in doubles, as RefLib's disjunctions do (measured: 50 terms
@@ -985,7 +979,8 @@ impl TextField {
         let mut sums: BTreeMap<u32, f64> = BTreeMap::new();
         for (t, weight) in &kept {
             let score = self.scorer(boost * weight, idf, &[t.as_str()], g);
-            for (&doc, positions) in &self.postings[t] {
+            let Some(docs) = self.postings.get(t) else { continue };
+            for (&doc, positions) in docs {
                 *sums.entry(doc).or_insert(0.0) += f64::from(score(doc, positions.len() as f32));
             }
         }
@@ -1246,6 +1241,30 @@ pub(crate) use explain::{FreqKind, Weight, java_double, java_float};
 pub(crate) use phrases::{MultiPhrase, PhraseAt};
 pub(crate) use synonyms::Segment as SynonymSegment;
 pub use synonyms::{EQUIVALENT, EXPLICIT};
+
+/// The `fuzzy.max_expansions` terms of `terms` closest to `term` within `fuzzy`, in term order,
+/// each with its weight (see [`TextField::fuzzy_terms`]).
+fn closest_terms<'t>(
+    terms: impl Iterator<Item = &'t String>,
+    term: &str,
+    fuzzy: &Fuzzy,
+) -> Vec<(String, f32)> {
+    let lev = Levenshtein::new(term, fuzzy.max_edits, fuzzy.prefix_length);
+    let len = term.chars().count();
+    let mut found: Vec<(&String, f32)> = terms
+        .filter_map(|t| {
+            let edits = lev.distance(t)?;
+            let shortest = len.min(t.chars().count()).max(1);
+            Some((t, 1.0 - f32::from(edits) / shortest as f32))
+        })
+        .collect();
+    found.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    let mut kept: Vec<(String, f32)> =
+        found.into_iter().take(fuzzy.max_expansions).map(|(t, w)| (t.clone(), w)).collect();
+    // The rewritten query lists its terms in term order (measured with `scoreDetails`).
+    kept.sort_by(|a, b| a.0.cmp(&b.0));
+    kept
+}
 
 #[cfg(test)]
 mod tests;

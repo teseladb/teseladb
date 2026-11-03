@@ -117,7 +117,17 @@ fn promise_ctor(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     Ok(Val::Obj(p))
 }
 
-fn promise_resolve(it: &mut Interp, _: &Val, a: &[Val]) -> R {
+/// `Promise.resolve` and `reject` need an object as `this` (a constructor).
+fn receiver(it: &mut Interp, this: &Val) -> R<()> {
+    if matches!(this, Val::Obj(_)) {
+        return Ok(());
+    }
+    let m = format!("Receiver of Promise.{} call is not a non-null object", it.native);
+    it.type_error(&m)
+}
+
+fn promise_resolve(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    receiver(it, this)?;
     let v = arg(a, 0);
     if state_of(&v).is_some() {
         return Ok(v);
@@ -128,7 +138,8 @@ fn promise_resolve(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     Ok(p)
 }
 
-fn promise_reject(it: &mut Interp, _: &Val, a: &[Val]) -> R {
+fn promise_reject(it: &mut Interp, this: &Val, a: &[Val]) -> R {
+    receiver(it, this)?;
     let (p, _) = new_promise(it)?;
     let p = Val::Obj(p);
     reject_with(&p, arg(a, 0));
@@ -162,7 +173,17 @@ fn with_resolvers(it: &mut Interp, _: &Val, _: &[Val]) -> R {
 /// `Promise.all`, `allSettled`, `any` and `race`: over no value they settle at once; a value
 /// would be followed with `then`.
 fn combinator(it: &mut Interp, a: &[Val], which: u8) -> R {
-    if !it.iterate(&arg(a, 0))?.is_empty() {
+    let items = match it.iterate(&arg(a, 0)) {
+        Err(Ctrl::Throw(e)) => {
+            // What cannot be iterated rejects the promise.
+            let (p, _) = new_promise(it)?;
+            let p = Val::Obj(p);
+            reject_with(&p, e);
+            return Ok(p);
+        }
+        r => r?,
+    };
+    if !items.is_empty() {
         return trap();
     }
     let (p, st) = new_promise(it)?;
@@ -198,6 +219,10 @@ fn race(it: &mut Interp, _: &Val, a: &[Val]) -> R {
 fn then(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     if !matches!(this, Val::Obj(_)) {
         return it.type_error("Receiver of Promise.prototype.then call is not a non-null object");
+    }
+    if state_of(this).is_none() {
+        let class = crate::builtins::class_name(this);
+        return it.type_error(&format!("Promise.prototype.then called on incompatible {class}"));
     }
     trap()
 }

@@ -1513,6 +1513,29 @@ mod tests {
     }
 
     #[test]
+    fn the_api_key_and_tenant_routes_reach_their_commands() {
+        let b = Fake::default();
+        let keys = crate::admin_apikeys::API_KEYS;
+        assert_eq!(did(&route(&req(Method::Get, keys, ""), &b)), "apikeys listApiKeys");
+        let mine = format!("{keys}?user=ann");
+        assert_eq!(did(&route(&req(Method::Get, &mine, ""), &b)), "apikeys listApiKeys");
+        let body = r#"{"user": "ann", "db": "admin", "expiresAfterDays": 3}"#;
+        assert_eq!(did(&route(&req(Method::Post, keys, body), &b)), "apikeys createApiKey");
+        let revoke = format!("{keys}/k1/revoke");
+        assert_eq!(did(&route(&req(Method::Post, &revoke, ""), &b)), "apikeys revokeApiKey");
+        let status = |m, t: &str, body: &str| route(&req(m, t, body), &b).status;
+        assert_eq!(status(Method::Post, keys, ""), 400);
+        assert_eq!(status(Method::Post, keys, r#"{"user": 1}"#), 400);
+        assert_eq!(status(Method::Get, &revoke, ""), 405);
+        assert_eq!(status(Method::Post, &format!("{keys}/k1"), ""), 404);
+        assert_eq!(status(Method::Post, &format!("{keys}/k1/rotate"), ""), 404);
+        assert_eq!(status(Method::Get, "/admin/tenants/acme", ""), 405);
+        assert_eq!(status(Method::Post, "/admin/tenants", ""), 405);
+        let calls = b.calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 4, "{calls:?}");
+    }
+
+    #[test]
     fn wrong_requests_get_their_status() {
         let b = Fake::default();
         let status = |m, t: &str, body: &str| route(&req(m, t, body), &b).status;
