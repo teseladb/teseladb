@@ -276,7 +276,36 @@ fn malformed_entries_are_refused() {
     assert_eq!(parse(with("prevOpTime", bad_prev.into())), Some(OplogError::WrongType("ts")));
     let no_t = Document::new().with("ts", ts(at(1)));
     assert_eq!(parse(with("prevOpTime", no_t.into())), Some(OplogError::Missing("t")));
-    assert_eq!(parse(without("t")), Some(OplogError::Missing("t")));
+}
+
+/// What `refrestore --oplogReplay` gives `applyOps` for the operations of a transaction:
+/// `ts: Timestamp(0, 0)`, `t: null` and `v: 0` (captured on 02-11-2026 from refrestore
+/// 100.20.0). A `refnode` 9.0.4 takes an entry with `ts` and no `t`, with a null `t` or `v`, and
+/// a term written as a double (measured on 02-11-2026); the term it does not have is -1.
+#[test]
+fn entries_of_refrestore() {
+    let d = Document::new()
+        .with("ts", ts(at(0)))
+        .with("t", Value::Null)
+        .with("v", 0)
+        .with("op", "i")
+        .with("ns", NS)
+        .with("o", id(1));
+    let e = OplogEntry::from_document(&d).expect("a nested operation of refrestore");
+    assert_eq!(e.op_time.map(|o| o.term), Some(-1));
+    assert_eq!(e.version, 0);
+    let mut no_t = d.clone();
+    no_t.remove("t");
+    let e = OplogEntry::from_document(&no_t).expect("ts without t");
+    assert_eq!(e.op_time.map(|o| o.term), Some(-1));
+    let null_v = d.clone().with("v", Value::Null);
+    assert_eq!(OplogEntry::from_document(&null_v).expect("null v").version, 2);
+    let mut double_t = d.clone();
+    double_t.insert("t", Value::Double(3.0));
+    let e = OplogEntry::from_document(&double_t).expect("a double term");
+    assert_eq!(e.op_time.map(|o| o.term), Some(3));
+    double_t.insert("t", Value::Double(3.5));
+    assert_eq!(OplogEntry::from_document(&double_t).err(), Some(OplogError::WrongType("t")));
 }
 
 /// An entry given to `applyOps` may come without `ts`, `t`, `v` or `wall`; integer terms and

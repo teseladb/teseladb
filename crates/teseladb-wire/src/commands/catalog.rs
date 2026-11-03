@@ -200,6 +200,11 @@ pub(crate) fn id_index(c: &CollectionEntry) -> Result<Document, CommandError> {
 /// `create`.
 pub fn create<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     let ns = target(ctx)?;
+    // A member of a replica set creates them again after a drop (`refrestore --drop`); they
+    // stay generated and empty there.
+    if super::config_db::generated(&ns) && super::config_db::as_member(ctx.backend)? {
+        return Ok(Document::new().with("ok", 1.0));
+    }
     names::check_creatable(&ns)?;
     let mut options = options_from(ctx.cmd);
     super::fle::check_create(&ns.coll, &mut options)?;
@@ -446,6 +451,10 @@ pub fn drop<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
     let ns = target(ctx)?;
     if super::oplog::is_oplog(&ns) {
         return Err(super::oplog::drop_refused());
+    }
+    // A member of a replica set drops them; they stay generated and empty there.
+    if super::config_db::generated(&ns) && super::config_db::as_member(ctx.backend)? {
+        return Ok(Document::new().with("ok", 1.0));
     }
     names::check_droppable(&ns)?;
     if let Some(u) = uuid::expected(ctx.cmd, DROP)? {
@@ -913,7 +922,11 @@ pub fn list_collections<B: Backend + ?Sized>(
     }
     // The collections of `config` that show the cluster, generated from Group 0 (007 FR-017).
     if db == super::config_db::CONFIG_DB {
+        let member = super::config_db::as_member(ctx.backend)?;
         for name in super::config_db::LISTED {
+            if member && super::config_db::NOT_ON_A_MEMBER.contains(&name) {
+                continue;
+            }
             let shown = super::authorize::collection_shown(only.as_deref(), &db, name);
             let d = super::config_db::listed(name, name_only);
             if shown && passes(filter.as_ref(), &d)? {
