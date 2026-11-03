@@ -599,3 +599,59 @@ fn an_intersection_filters_the_documents_both_scans_hold() {
     assert_eq!(found.len(), 1, "{r:?}");
     assert_eq!(field(&r, "cursor.firstBatch.0._id"), &Value::Int32(2), "{r:?}");
 }
+
+/// The stages of an execution plan, as `stage` with `keysExamined`, `docsExamined`, `nReturned`
+/// and `skipAmount`, nested by `inputStage`.
+fn stages_of(v: &Value) -> String {
+    let Value::Document(d) = v else { return String::new() };
+    let mut out = format!("{:?}", d.get("stage"));
+    for k in ["keysExamined", "docsExamined", "nReturned", "skipAmount"] {
+        if let Some(n) = d.get(k).and_then(teseladb_wire::types::number) {
+            out.push_str(&format!(" {k}={n}"));
+        }
+    }
+    if let Some(input) = d.get("inputStage") {
+        out.push_str(&format!(" < {}", stages_of(input)));
+    }
+    out
+}
+
+/// An `_id` equality that finds nothing examines no key; one on a capped collection reads the
+/// index too; with a collation and strings, or a skip and a collation, it reads the collection
+/// (measured on a `refnode` 9.0.4 on 03-11-2026).
+#[test]
+fn id_equalities_of_explained_finds() {
+    let mut m = Mem::new();
+    let run = |m: &mut Mem, cmd: &str| m.run("ex", extjson::parse(cmd).expect("command"));
+    run(&mut m, r#"{"create":"cap","capped":true,"size":4096}"#);
+    run(&mut m, r#"{"insert":"cap","documents":[{"_id":1}]}"#);
+    run(&mut m, r#"{"insert":"s","documents":[{"_id":"a"},{"_id":"b"}]}"#);
+    let cases = [
+        (
+            r#"{"find":"cap","filter":{"_id":99}}"#,
+            r#"Some(String("EXPRESS_IXSCAN")) keysExamined=0 docsExamined=0 nReturned=0"#,
+        ),
+        (
+            r#"{"find":"cap","filter":{"_id":1}}"#,
+            r#"Some(String("EXPRESS_IXSCAN")) keysExamined=1 docsExamined=1 nReturned=1"#,
+        ),
+        (
+            r#"{"find":"s","filter":{"_id":"zz"}}"#,
+            r#"Some(String("EXPRESS_IXSCAN")) keysExamined=0 docsExamined=0 nReturned=0"#,
+        ),
+        (
+            r#"{"find":"s","filter":{"_id":"a"},"skip":1,"collation":{"locale":"en"}}"#,
+            r#"Some(String("SKIP")) nReturned=0 skipAmount=1 < Some(String("COLLSCAN")) docsExamined=2 nReturned=1"#,
+        ),
+        (
+            r#"{"find":"s","filter":{"_id":"a"},"collation":{"locale":"en"}}"#,
+            r#"Some(String("COLLSCAN")) docsExamined=2 nReturned=1"#,
+        ),
+    ];
+    for (find, want) in cases {
+        let cmd = format!(r#"{{"explain":{find},"verbosity":"executionStats"}}"#);
+        let r = run(&mut m, &cmd);
+        let stages = field(&r, "executionStats.executionStages.shards.0.executionStages");
+        assert_eq!(stages_of(stages), want, "{find}: {r:?}");
+    }
+}

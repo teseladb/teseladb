@@ -85,3 +85,27 @@ fn statements_answered_from_an_earlier_send_are_listed() {
     ]);
     assert_eq!(ids(&m.run("admin", plain)), Some(vec![]));
 }
+
+/// A retryable `bulkWrite` insert, into a collection and into a capped one, sent again lists its
+/// statements and writes nothing more (as the deletes above, measured on 30-10-2026).
+#[test]
+fn bulk_write_inserts_sent_again_are_listed() {
+    let mut m = Mem::new();
+    let r =
+        m.run("db", doc(&[("create", s("cap")), ("capped", true.into()), ("size", 4096.into())]));
+    assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+    let ops = Value::Array(vec![
+        d(&[("insert", 0.into()), ("document", d(&[("_id", 1.into())]))]),
+        d(&[("insert", 1.into()), ("document", d(&[("_id", 2.into())]))]),
+    ]);
+    let ns = Value::Array(vec![d(&[("ns", s("db.c"))]), d(&[("ns", s("db.cap"))])]);
+    let bulk = retryable(doc(&[("bulkWrite", 1.into()), ("ops", ops), ("nsInfo", ns)]), 5);
+    let first = m.run("admin", bulk.clone());
+    assert_eq!((field(&first, "nInserted"), ids(&first)), (&Value::Int32(2), Some(vec![])));
+    let again = m.run("admin", bulk);
+    assert_eq!(ids(&again), Some(vec![Value::Int32(0), Value::Int32(1)]), "{again:?}");
+    for coll in ["c", "cap"] {
+        let r = m.run("db", doc(&[("count", s(coll))]));
+        assert_eq!(field(&r, "n"), &Value::Int32(1), "{coll}: {r:?}");
+    }
+}
