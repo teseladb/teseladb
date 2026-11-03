@@ -504,6 +504,20 @@ pub fn writable<B: Backend + ?Sized>(
     }
 }
 
+/// Whether namespace text `db.coll` names a collection as a resharding's copy.
+pub fn copy_name(ns: &str) -> bool {
+    ns.split_once('.').is_some_and(|(_, coll)| coll.starts_with(TEMP_PREFIX))
+}
+
+/// The refusal of a client's write that would store a document in `ns`, a collection named as a
+/// resharding's copy that no resharding owns (measured on a `refrouter` 9.0.4, 03-11-2026).
+pub fn not_a_copy(ns: &str) -> CommandError {
+    CommandError::new(
+        NAMESPACE_NOT_FOUND,
+        format!("Temporary resharding collection metadata for {ns} not found"),
+    )
+}
+
 /// Whether a write failed because a resharding's fence refused it (018 FR-002): nothing of it
 /// was written.
 pub fn fenced(e: &CommandError) -> bool {
@@ -573,18 +587,13 @@ fn parse_ns(name: &str) -> Result<Namespace, CommandError> {
     })
 }
 
-/// The index keys of collection `c` (its ready secondary indexes).
-fn index_keys<B: Backend + ?Sized>(
+/// The specs of collection `c`'s ready secondary indexes.
+fn ready_specs<B: Backend + ?Sized>(
     backend: &mut B,
     c: &CollectionEntry,
 ) -> Result<Vec<Document>, CommandError> {
-    let mut out = Vec::new();
-    for e in backend.indexes(c.id)?.into_iter().filter(|e| e.state == IndexState::Ready) {
-        if let Some(Value::Document(k)) = Document::from(RawDoc::from_bytes(&e.spec)?).get("key") {
-            out.push(k.clone());
-        }
-    }
-    Ok(out)
+    let ready = backend.indexes(c.id)?.into_iter().filter(|e| e.state == IndexState::Ready);
+    ready.map(|e| Ok(Document::from(RawDoc::from_bytes(&e.spec)?))).collect()
 }
 
 /// Whether an index of `c` starts with the fields of `key` (the `_id` index serves `{_id: 1}`).
@@ -597,9 +606,13 @@ pub(super) fn has_prefix_index<B: Backend + ?Sized>(
     if fields.len() == 1 && fields[0].0 == "_id" && same_value(&Value::Int32(1), fields[0].1) {
         return Ok(true);
     }
-    Ok(index_keys(backend, c)?.iter().any(|ik| {
-        ik.len() >= fields.len()
-            && ik.iter().zip(&fields).all(|((f, v), (sf, sv))| f == *sf && same_value(v, sv))
+    // Every index spec has its key document.
+    Ok(ready_specs(backend, c)?.iter().any(|spec| match spec.get("key") {
+        Some(Value::Document(ik)) => {
+            ik.len() >= fields.len()
+                && ik.iter().zip(&fields).all(|((f, v), (sf, sv))| f == *sf && same_value(v, sv))
+        }
+        _ => false,
     }))
 }
 
@@ -945,11 +958,11 @@ impl Resharding {
     ) -> Result<(), CommandError> {
         self.check_killed(shared)?;
         if !self.settled {
+            // The next step catches up to the second fence's mark, or renames when the copy
+            // already holds it.
             self.settled = true;
             self.target = self.target.max(self.fence(backend, true)?);
-            if self.mark < self.target {
-                return Ok(());
-            }
+            return Ok(());
         }
         backend.catalog_write(CatalogCommand::Rename {
             from: self.temp_ns.clone(),

@@ -62,15 +62,18 @@ pub fn check_writable(ns: &Namespace) -> Result<(), CommandError> {
 /// measured on a `refrouter` 9.0.4 on 02-11).
 pub const SYSTEM_JS: &str = "system.js";
 
-/// Faults of `db.coll`'s name; a `system.` collection other than `system.js` is one when
-/// `system` says so.
+/// Faults of `db.coll`'s name; a `system.` collection other than `system.js` and the
+/// `system.resharding.` ones is one when `system` says so.
 fn check_name(ns: &Namespace, system: bool) -> Result<(), CommandError> {
     let full = format!("{}.{}", ns.db, ns.coll);
     if ns.coll.contains('$') {
         let msg = format!("Invalid collection name: {}", ns.coll);
         return Err(CommandError::new(INVALID_NAMESPACE, msg));
     }
-    if system && ns.coll.starts_with(SYSTEM_PREFIX) && ns.coll != SYSTEM_JS {
+    // A client may name a collection as a resharding's copy (measured on a `refrouter` 9.0.4,
+    // 03-11-2026): it is no copy of any resharding, and its documents cannot be written.
+    let allowed = ns.coll == SYSTEM_JS || ns.coll.starts_with(super::reshard::TEMP_PREFIX);
+    if system && ns.coll.starts_with(SYSTEM_PREFIX) && !allowed {
         return Err(CommandError::new(
             INVALID_NAMESPACE,
             format!("Invalid system namespace: {full}"),
