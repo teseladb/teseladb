@@ -827,12 +827,15 @@ const AFTER_OP_TIME: [&str; 3] = ["writeErrors", "upserted", "nModified"];
 /// The reply of write `command` as a replica set member gives it (measured on a replica set of
 /// `ref:9.0.4`, 03-11-2026): `n`, then `electionId` and `opTime` (the write's optime: its
 /// `operationTime` and the presentation's term), then `writeErrors`, `upserted` and `nModified`,
-/// then the rest. A reply without `n` (an error) or another command's stays as it is.
+/// then the rest. A reply without `n` (an error) or another command's stays as it is, without the
+/// `recoveryToken` a `refrouter` adds inside a transaction, which a member never gives (measured on
+/// the same replica set).
 pub fn member_write_reply(
     view: &crate::hello::ReplicaView,
     command: &str,
-    reply: Document,
+    mut reply: Document,
 ) -> Document {
+    reply.remove("recoveryToken");
     let (Some(n), Some(ts @ Value::Timestamp { .. })) =
         (reply.get("n"), reply.get("operationTime"))
     else {

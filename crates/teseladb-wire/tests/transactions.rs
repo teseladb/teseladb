@@ -803,6 +803,25 @@ fn answers_inside_a_transaction_carry_the_recovery_token() {
     assert_eq!(code(&r), Some(&Value::Int32(251)), "{r:?}");
     let shard = Value::Document(Document::new().with("recoveryShardId", shard_name(1)));
     assert_eq!(token(&r), Some(shard), "{r:?}");
+    // When the first statement fails, no participant took part: the commit answers as the
+    // `refrouter` router does, without a token, and so does the abort (measured on 03-11-2026).
+    let bad = || find().with("filter", doc(&[("$bad", Value::Int32(1))]));
+    assert_eq!(code(&run(&mut m, DB, stmt(bad(), 73, 1, true))), Some(&Value::Int32(2)));
+    let r = run(&mut m, "admin", end("commitTransaction", 73, 1));
+    assert_eq!(code(&r), Some(&Value::Int32(251)), "{r:?}");
+    let failed = format!(
+        "{}:1 Failed to commit transaction because a previous statement on the transaction \
+         participant {} was unsuccessful.",
+        session(73),
+        shard_name(1)
+    );
+    assert_eq!(errmsg(&r), failed);
+    assert!(has_label(&r, "TransientTransactionError"), "{r:?}");
+    assert_eq!(token(&r), None, "{r:?}");
+    assert_eq!(code(&run(&mut m, DB, stmt(bad(), 74, 1, true))), Some(&Value::Int32(2)));
+    let r = run(&mut m, "admin", end("abortTransaction", 74, 1));
+    assert_eq!(errmsg(&r), "Transaction with { txnNumber: 1 } has been aborted.");
+    assert_eq!(token(&r), None, "{r:?}");
 }
 
 /// How a session's transaction is named in RefDb's messages, for the session `lsid(n)`.
