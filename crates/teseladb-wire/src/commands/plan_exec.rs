@@ -596,7 +596,9 @@ fn run<B: Backend + ?Sized>(
                     continue;
                 }
             }
-            let (dk, bytes) = indexed_document(backend, coll, &pk, read.concern)?;
+            let Some((dk, bytes)) = indexed_document(backend, coll, &pk, read.concern)? else {
+                continue;
+            };
             ran.docs += 1;
             ran.docs_at.push(ran.keys);
             let keep = match &residual {
@@ -642,13 +644,15 @@ fn run<B: Backend + ?Sized>(
 }
 
 /// The document an index entry with primary key `pk` names, with its key. An index entry and its
-/// document are written in the same write, so a read sees both or neither.
+/// document are written in the same write, but a read that is not at a snapshot reads the index
+/// and the documents one after the other: a delete in between leaves an entry whose document is
+/// gone (`None`), which the read skips, as RefDb skips a record deleted while a read yields.
 fn indexed_document<B: Backend + ?Sized>(
     backend: &mut B,
     coll: &CollectionEntry,
     pk: &[u8],
     concern: ReadConcern,
-) -> Result<(Vec<u8>, Vec<u8>), CommandError> {
+) -> Result<Option<(Vec<u8>, Vec<u8>)>, CommandError> {
     // The buckets of a time series are kept in `_id` order without hash bucket, as the
     // documents of a collection with a shard key (015 FR-008).
     let unbucketed = super::sharding::is_sharded(coll)
@@ -658,11 +662,7 @@ fn indexed_document<B: Backend + ?Sized>(
         false => KeyBuilder::document_of_pk(coll.tenant, coll.id, pk),
     };
     let next = [key.as_bytes(), &[0]].concat();
-    backend
-        .scan(key.as_bytes(), &next, 1, concern)?
-        .into_iter()
-        .next()
-        .ok_or_else(|| CommandError::new(INTERNAL_ERROR, "an index entry without its document"))
+    Ok(backend.scan(key.as_bytes(), &next, 1, concern)?.into_iter().next())
 }
 
 /// Runs an intersection of index scans (`AND_HASH`): the primary keys of all but the last scan
@@ -724,7 +724,9 @@ fn intersected<B: Backend + ?Sized>(
         if !sets.iter().all(|set| set.contains(&pk)) {
             continue;
         }
-        let (dk, bytes) = indexed_document(backend, coll, &pk, read.concern)?;
+        let Some((dk, bytes)) = indexed_document(backend, coll, &pk, read.concern)? else {
+            continue;
+        };
         // A document both scans hold comes out of the intersection one unit of work later.
         ran.docs += 1;
         ran.docs_at.push(ran.keys + 1);
