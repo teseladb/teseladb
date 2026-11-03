@@ -74,7 +74,8 @@ fn estimate(cmd: &Document) -> Result<bool, CommandError> {
 }
 
 /// `dataSize`: bytes and documents of a collection, or of an `_id` range of it, stopping once
-/// `maxSize` bytes or more than `maxObjects` documents are counted.
+/// `maxSize` bytes or more than `maxObjects` documents are counted; `estimate` and `maxReached`
+/// only from a member of a replica set (018), as a `refnode` answers.
 pub fn data_size<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     let Value::String(text) = ctx.first().clone() else {
         let path = format!("{DATA_SIZE}.{}", ctx.name());
@@ -128,11 +129,13 @@ pub fn data_size<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
         .with("size", size)
         .with("numObjects", objects)
         .with("millis", i64::try_from(millis).unwrap_or(i64::MAX));
-    // A collection that does not exist says nothing of the estimate (measured).
-    if coll.is_some() {
+    // A `refrouter` 9.0.4 answers without either; a `refnode` says nothing of the estimate of a
+    // collection that does not exist (measured on 03-11-2026).
+    let member = super::config_db::as_member(ctx.backend)?;
+    if member && coll.is_some() {
         d.push("estimate", estimated);
     }
-    if reached {
+    if member && reached {
         d.push("maxReached", true);
     }
     Ok(d.with("ok", 1.0))

@@ -37,6 +37,11 @@ fn locks_count_and_each_unlock_takes_one_away() {
     let not_locked = Value::from("fsyncUnlock called when not locked");
     let r = m.run("admin", unlock());
     assert_eq!(err(&r), (Some(&Value::Int32(20)), Some(&not_locked)));
+    // In the order of a `refrouter` 9.0.4's answer (measured on 03-11-2026).
+    let keys: Vec<&str> =
+        r.iter().map(|(k, _)| k).filter(|k| !k.starts_with('$') && *k != "operationTime").collect();
+    assert_eq!(keys, ["raw", "code", "codeName", "ok", "errmsg"], "{r:?}");
+    assert_eq!(r.get("ok"), Some(&Value::Double(0.0)));
     for _ in 0..2 {
         let r = m.run("admin", lock());
         assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");

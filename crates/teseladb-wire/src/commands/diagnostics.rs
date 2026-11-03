@@ -5,6 +5,7 @@
 //! that describe parts TeselaDB does not have (RefEngine, anotherproduct, shards) are left out, as
 //! the divergences of 006 record.
 
+use teseladb_auth::privileges::Privilege;
 use teseladb_auth::users::RoleName;
 use teseladb_bson::{Document, Value};
 use teseladb_keys::KeyBuilder;
@@ -509,40 +510,52 @@ fn extra_info(r: &ResourceUse) -> Document {
 pub(crate) fn authenticated_roles<B: Backend + ?Sized>(
     backend: &mut B,
 ) -> Result<Vec<RoleName>, CommandError> {
-    let Some(name) = backend.authenticated_user() else { return Ok(Vec::new()) };
+    Ok(authenticated_grants(backend)?.0)
+}
+
+/// The roles of the running command's user ([`authenticated_roles`]) and the privileges they
+/// give, merged by resource; none without a user.
+fn authenticated_grants<B: Backend + ?Sized>(
+    backend: &mut B,
+) -> Result<(Vec<RoleName>, Vec<Privilege>), CommandError> {
+    let Some(name) = backend.authenticated_user() else { return Ok((Vec::new(), Vec::new())) };
     let direct = match backend.authenticated_roles() {
         // `__system` lists no role (measured on `refnode` 9.0.4, 013 FR-034).
         _ if super::auth::is_internal(&name) => Vec::new(),
         Some(r) => r,
         None => backend.user(&name)?.map(|u| u.roles).unwrap_or_default(),
     };
-    let inherited = super::roles::Graph::new(&mut *backend).inherit(&direct, None)?.roles;
+    let inherited = super::roles::Graph::new(&mut *backend).inherit(&direct, None)?;
     let mut all = direct;
-    for r in inherited {
+    for r in inherited.roles {
         if !all.contains(&r) {
             all.push(r);
         }
     }
-    Ok(all)
+    Ok((all, inherited.privileges))
 }
 
-/// `connectionStatus`: no user is authenticated until 013; a new UUID on each call, as 9.0.4.
+/// `connectionStatus`: the user, its roles and, with `showPrivileges`, their privileges (013); a
+/// new UUID on each call, as 9.0.4.
 pub fn connection_status<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
 ) -> Result<Document, CommandError> {
     let privileges = ctx.cmd.get("showPrivileges").and_then(crate::types::truthy) == Some(true);
-    let (mut users, mut roles) = (Vec::<Value>::new(), Vec::<Value>::new());
+    let (mut users, mut roles, mut granted) =
+        (Vec::<Value>::new(), Vec::<Value>::new(), Vec::<Value>::new());
     if let Some(name) = ctx.backend.authenticated_user() {
-        roles = authenticated_roles(&mut *ctx.backend)?
+        let (r, p) = authenticated_grants(&mut *ctx.backend)?;
+        roles = r
             .iter()
             .map(|r| Value::Document(Document::new().with("role", &*r.role).with("db", &*r.db)))
             .collect();
+        granted = p.iter().map(Privilege::to_value).collect();
         users.push(Value::Document(Document::new().with("user", name.user).with("db", name.db)));
     }
     let mut auth =
         Document::new().with("authenticatedUsers", users).with("authenticatedUserRoles", roles);
     if privileges {
-        auth.push("authenticatedUserPrivileges", Vec::<Value>::new());
+        auth.push("authenticatedUserPrivileges", granted);
     }
     let uuid = new_uuid(ctx.backend);
     Ok(Document::new()

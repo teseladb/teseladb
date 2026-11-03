@@ -168,10 +168,17 @@ fn fsync_compact_and_shutdown_check_their_fields() {
     assert_eq!(r.get("code"), Some(&Value::Int32(13)));
     let r = m.run("admin", doc(&[("fsync", Value::Int32(1)), ("lock", Value::from("x"))]));
     let want = "BSON field 'fsync.lock' is the wrong type 'string', expected types '[decimal, int, long, bool, double]'";
-    assert_eq!(err(&r), (Some(&Value::Int32(14)), Some(&Value::from(want))));
+    // The code goes only in `all`, after each shard's answer, as a `refrouter` 9.0.4 answers
+    // (measured on 03-11-2026).
+    assert_eq!(err(&r), (None, Some(&Value::from(want))));
+    assert_eq!(field(&r, "all.code"), &Value::Int32(14));
     assert_eq!(field(&r, "numFiles"), &Value::Int32(1), "with each shard's answer");
+    let keys: Vec<&str> =
+        r.iter().map(|(k, _)| k).filter(|k| !k.starts_with('$') && *k != "operationTime").collect();
+    assert_eq!(keys, ["numFiles", "all", "ok", "errmsg"], "{r:?}");
+    assert_eq!(r.get("ok"), Some(&Value::Double(0.0)));
     let r = m.run("admin", doc(&[("fsync", Value::Int32(1)), ("foo", Value::Int32(1))]));
-    assert_eq!(r.get("code"), Some(&Value::Int32(40415)));
+    assert_eq!(field(&r, "all.code"), &Value::Int32(40415));
     let r = m.run("admin", doc(&[("fsync", Value::Int32(1)), ("lock", Value::Boolean(false))]));
     assert_eq!(r.get("ok"), Some(&Value::Double(1.0)));
     m.run("t", doc(&[("create", Value::from("c"))]));

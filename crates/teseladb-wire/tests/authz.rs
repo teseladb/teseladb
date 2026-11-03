@@ -647,3 +647,100 @@ fn a_time_series_is_read_with_privileges_on_its_own_namespace() {
     assert_eq!(code(&run(&mut m, &mut o, TEST, raw())), Some(UNAUTHORIZED));
     assert_eq!(code(&run(&mut m, &mut o, TEST, find())), Some(UNAUTHORIZED));
 }
+
+/// What a write answers: its first write error's code, the command's, or `None` when it went.
+fn refusal(r: &Document) -> Option<i32> {
+    match r.get("writeErrors") {
+        Some(_) => match field(r, "writeErrors.0.code") {
+            Value::Int32(n) => Some(*n),
+            other => panic!("{other:?}"),
+        },
+        None => code(r),
+    }
+}
+
+#[test]
+fn bypass_write_blocking_mode_lets_its_user_write_while_user_writes_are_blocked() {
+    const BLOCKED: i32 = 371;
+    let mut m = node();
+    add_role(
+        &mut m,
+        "unblocked",
+        vec![
+            Privilege {
+                resource: Resource::Cluster,
+                actions: vec![ActionType::BypassWriteBlockingMode],
+            },
+            Privilege {
+                resource: Resource::Ns { db: TEST.into(), collection: String::new() },
+                actions: vec![ActionType::Insert],
+            },
+        ],
+    );
+    add_user(&mut m, "unblocked", &[("unblocked", ADMIN)]);
+    let mut root = conn("root");
+    let insert = || {
+        Document::new()
+            .with("insert", "c")
+            .with("documents", vec![Value::Document(Document::new())])
+    };
+    let block = |on: bool| Document::new().with("setUserWriteBlockMode", 1).with("global", on);
+    assert!(ok(&run(&mut m, &mut root, TEST, insert())));
+    assert!(ok(&run(&mut m, &mut root, TEST, Document::new().with("create", "d"))));
+    assert!(ok(&run(&mut m, &mut root, ADMIN, block(true))));
+    // Without the privilege: blocked, writes and changes of the catalog.
+    let mut writer = conn("writer");
+    assert_eq!(refusal(&run(&mut m, &mut writer, TEST, insert())), Some(BLOCKED));
+    let drop_d = || Document::new().with("drop", "d");
+    assert_eq!(refusal(&run(&mut m, &mut writer, TEST, drop_d())), Some(BLOCKED));
+    // A node that does not authorize (`--insecure`) blocks everyone, as a RefDb without `--auth`
+    // (measured on a `refnode` 9.0.4 on 03-11-2026).
+    let mut open = conn("root");
+    open.auth.required = false;
+    assert_eq!(refusal(&run(&mut m, &mut open, TEST, insert())), Some(BLOCKED));
+    // With it, as `root` has through `restore` (measured on a `refrouter` 9.0.4 on 03-11-2026).
+    let mut unblocked = conn("unblocked");
+    assert_eq!(refusal(&run(&mut m, &mut unblocked, TEST, insert())), None);
+    assert_eq!(refusal(&run(&mut m, &mut root, TEST, insert())), None);
+    let idx = Document::new().with("createIndexes", "c").with(
+        "indexes",
+        vec![Value::Document(
+            Document::new().with("key", Document::new().with("y", 1)).with("name", "y"),
+        )],
+    );
+    assert_eq!(refusal(&run(&mut m, &mut root, TEST, idx)), None);
+    assert_eq!(refusal(&run(&mut m, &mut root, TEST, drop_d())), None);
+    assert!(ok(&run(&mut m, &mut root, ADMIN, block(false))));
+    assert_eq!(refusal(&run(&mut m, &mut writer, TEST, insert())), None);
+}
+
+/// `connectionStatus` with `showPrivileges` lists the privileges of the user's roles, merged by
+/// resource, as a `refrouter` 9.0.4 does (measured on 03-11-2026; its order changes from one start
+/// to the next, and the battery compares them as a multiset).
+#[test]
+fn connection_status_shows_the_users_privileges() {
+    let mut m = node();
+    let status = || Document::new().with("connectionStatus", 1).with("showPrivileges", true);
+    let r = run(&mut m, &mut conn("fast"), ADMIN, status());
+    let want = vec![Value::Document(
+        Document::new()
+            .with("resource", Document::new().with("cluster", true))
+            .with("actions", vec![Value::from("bypassDefaultMaxTimeMS")]),
+    )];
+    assert_eq!(field(&r, "authInfo.authenticatedUserPrivileges"), &Value::Array(want), "{r:?}");
+    let r = run(&mut m, &mut conn("root"), ADMIN, status());
+    let Value::Array(all) = field(&r, "authInfo.authenticatedUserPrivileges") else { panic!() };
+    let cluster = all.iter().find_map(|p| match p {
+        Value::Document(d)
+            if d.get("resource")
+                == Some(&Value::Document(Document::new().with("cluster", true))) =>
+        {
+            d.get("actions").cloned()
+        }
+        _ => None,
+    });
+    let Some(Value::Array(actions)) = cluster else { panic!("{r:?}") };
+    assert!(actions.contains(&Value::from("bypassWriteBlockingMode")), "{actions:?}");
+    let r = run(&mut m, &mut conn("nobody"), ADMIN, status());
+    assert_eq!(field(&r, "authInfo.authenticatedUserPrivileges"), &Value::Array(Vec::new()));
+}
