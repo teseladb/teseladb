@@ -522,3 +522,79 @@ fn sharded_data_distribution_lists_each_shards_documents() {
         "The $shardedDataDistribution stage must be run on the admin database",
     );
 }
+
+/// A unique index makes the key unique; a compound key routes by its first field, and the
+/// conditions that do not bound it (a document, `$exists`, an empty `$in`) count as they do on
+/// a `refrouter`: the samples are all counted.
+#[test]
+fn unique_and_compound_keys_and_conditions_that_bound_nothing() {
+    let mut m = cluster();
+    ok(&m.run(
+        "q",
+        json(r#"{"createIndexes":"big","indexes":[{"key":{"x":1},"name":"x_1","unique":true}]}"#),
+    ));
+    let r =
+        admin(&mut m, r#"{"analyzeShardKey":"q.big","key":{"x":1},"readWriteDistribution":false}"#);
+    assert_eq!(field(&r, "keyCharacteristics.isUnique"), &Value::Boolean(true));
+    ok(&admin(&mut m, r#"{"configureQueryAnalyzer":"q.big","mode":"full","samplesPerSecond":50}"#));
+    for c in [
+        r#"{"find":"big","filter":{"x":{"k":1}}}"#,
+        r#"{"find":"big","filter":{"x":{"$exists":true}}}"#,
+        r#"{"find":"big","filter":{"x":{"$in":[]}}}"#,
+        r#"{"find":"big","filter":{"x":{"$gte":3,"$lt":9}}}"#,
+    ] {
+        m.now += 100;
+        ok(&m.run("q", json(c)));
+    }
+    ok(&m.run(
+        "q",
+        json(r#"{"createIndexes":"big","indexes":[{"key":{"x":1,"y":1},"name":"x_1_y_1"}]}"#),
+    ));
+    let r = admin(
+        &mut m,
+        r#"{"analyzeShardKey":"q.big","key":{"x":1,"y":1},"keyCharacteristics":false}"#,
+    );
+    assert_eq!(field(&r, "readDistribution.sampleSize.find"), &long(4));
+    let single = field(&r, "readDistribution.percentageOfSingleShardReads").clone();
+    let scatter = field(&r, "readDistribution.percentageOfScatterGatherReads").clone();
+    assert_eq!((single, scatter), (Value::Double(50.0), Value::Double(25.0)), "{r:?}");
+}
+
+/// A change of the configuration that finds another first is retried, and a configuration
+/// turned off keeps its rate.
+#[test]
+fn configurations_retry_and_keep_their_rate_when_off() {
+    let mut m = cluster();
+    ok(&admin(&mut m, r#"{"configureQueryAnalyzer":"q.big","mode":"full","samplesPerSecond":5}"#));
+    m.group0_conflicts = 1;
+    let r = admin(&mut m, r#"{"configureQueryAnalyzer":"q.big","mode":"off"}"#);
+    assert_eq!(m.group0_conflicts, 0, "retried after the conflict");
+    assert_eq!(
+        field(&r, "oldConfiguration"),
+        &Value::Document(json(r#"{"mode":"full","samplesPerSecond":5}"#))
+    );
+    // Turning off what was never on records nothing.
+    let r = admin(&mut m, r#"{"configureQueryAnalyzer":"q.a","mode":"off"}"#);
+    assert_eq!(r.get("oldConfiguration"), None);
+    fails(
+        &admin(&mut m, r#"{"configureQueryAnalyzer":".big","mode":"off"}"#),
+        73,
+        "The namespace is invalid",
+    );
+}
+
+/// `$shardedDataDistribution` counts a chunk of more documents than one read gives.
+#[test]
+fn sharded_data_distribution_reads_a_large_chunk_in_batches() {
+    let mut m = cluster();
+    ok(&admin(&mut m, r#"{"shardCollection":"q.big","key":{"_id":1}}"#));
+    let r = admin(
+        &mut m,
+        r#"{"aggregate":1,"pipeline":[{"$shardedDataDistribution":{}}],"cursor":{}}"#,
+    );
+    let big = cursor(&r).into_iter().find(|d| d.get("ns") == Some(&Value::from("q.big")));
+    let big = big.expect("q.big listed");
+    let Value::Array(shards) = field(&big, "shards") else { panic!("{big:?}") };
+    let Some(Value::Document(first)) = shards.first() else { panic!("{big:?}") };
+    assert_eq!(first.get("numOwnedDocuments"), Some(&long(2000)));
+}

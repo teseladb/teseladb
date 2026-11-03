@@ -728,3 +728,14 @@ fn the_documents_to_copy_come_from_one_batch_and_the_ranges_live_bytes() {
     let n = approx_documents(&mut m, &c).unwrap();
     assert!(near(n), "{n}");
 }
+
+/// A refined key extends the current one only with its fields in the same directions, and a
+/// namespace without a database is refused.
+#[test]
+fn a_refined_key_keeps_the_directions_and_a_namespace_needs_a_database() {
+    let mut m = sharded(&docs(3));
+    let r = admin(&mut m, r#"{"refineCollectionShardKey":"rs.c","key":{"a":"hashed","b":1}}"#);
+    assert_eq!(r.get("code"), Some(&Value::Int32(72)), "{r:?}");
+    let r = admin(&mut m, r#"{"reshardCollection":".c","key":{"b":1}}"#);
+    assert_eq!(r.get("code"), Some(&Value::Int32(73)), "{r:?}");
+}
