@@ -583,3 +583,36 @@ fn catalog_entries_carry_their_o2() {
         .expect("the drop");
     assert_eq!(ts_drop.get("isTimeseries"), Some(&Value::Boolean(true)));
 }
+
+/// An insert of several documents that is not a retryable write is one `applyOps` entry on
+/// `admin.$cmd` with the inserts, without session, `stmtId` nor `multiOpType`; one document is a
+/// plain `i` entry, and an update of several documents stays one `u` entry each (measured on a
+/// replica set of `ref:9.0.4`, 03-11-2026).
+#[test]
+fn an_insert_of_several_documents_is_one_apply_ops_entry() {
+    let mut m = node();
+    let two: Vec<Value> =
+        (1..=2).map(|i| Value::Document(Document::new().with("_id", i))).collect();
+    ok(&run(&mut m, DB, Document::new().with("insert", "p").with("documents", two)));
+    insert(&mut m, Document::new().with("_id", 3));
+    let all = Document::new()
+        .with("q", Document::new())
+        .with("u", Document::new().with("$set", Document::new().with("z", 1)))
+        .with("multi", true);
+    ok(&run(
+        &mut m,
+        DB,
+        Document::new().with("update", "p").with("updates", vec![Value::Document(all)]),
+    ));
+
+    let batches = oplog(&mut m, ns_filter("admin.$cmd"));
+    assert_eq!(batches.len(), 1, "{batches:?}");
+    assert_eq!(keys(&batches[0]), ["op", "ns", "o", "ts", "t", "v", "wall"]);
+    let ops = docs(field(&batches[0], "o.applyOps"));
+    assert_eq!(ops.len(), 2);
+    assert_eq!(keys(&ops[0]), ["op", "ns", "ui", "o", "o2"]);
+    assert_eq!(ops[1].get("o"), Some(&Value::Document(Document::new().with("_id", 2))));
+    let plain = oplog(&mut m, ns_filter(&format!("{DB}.p")));
+    let kinds: Vec<&Value> = plain.iter().filter_map(|e| e.get("op")).collect();
+    assert_eq!(kinds, [&Value::from("i"), &Value::from("u"), &Value::from("u"), &Value::from("u")]);
+}

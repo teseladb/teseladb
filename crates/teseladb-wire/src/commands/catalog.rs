@@ -460,14 +460,25 @@ pub fn drop<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
     if let Some(u) = uuid::expected(ctx.cmd, DROP)? {
         uuid::check(ctx.backend, &ns, u)?;
     }
+    let member = super::config_db::as_member(ctx.backend)?;
     let Some(c) = ctx.backend.collection(&ns)? else {
-        // Measured on a `refrouter` 9.0.4: the database has no entry either.
-        if !has_database(ctx.backend, &ns.db)? {
+        // Measured on a `refrouter` 9.0.4: the database has no entry either. A member says nothing
+        // more (measured on a replica set of 9.0.4, 03-11-2026).
+        if !member && !has_database(ctx.backend, &ns.db)? {
             return Ok(Document::new().with("info", "database does not exist").with("ok", 1.0));
         }
         return Ok(Document::new().with("ok", 1.0));
     };
     super::write_block::ddl(ctx.backend, &ns.db)?;
+    // A member gives the indexes a collection had and its namespace; a view only the namespace
+    // (measured on a replica set of 9.0.4, 03-11-2026); a `refrouter` neither.
+    let mut reply = Document::new();
+    if member {
+        if !matches!(kinds::kind_of(&c)?, CollectionKind::View { .. }) {
+            reply.push("nIndexesWas", super::indexes::count(ctx.backend, &c)?);
+        }
+        reply.push("ns", names::full(&ns));
+    }
     ctx.backend.catalog_write(CatalogCommand::Drop { ns: ns.clone() })?;
     purge(ctx.backend, &ns, &c)?;
     // `system.views` holds the views of its database: they go with it (measured on 9.0.4).
@@ -476,7 +487,7 @@ pub fn drop<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
             ctx.backend.catalog_write(CatalogCommand::Drop { ns: view })?;
         }
     }
-    Ok(Document::new().with("ok", 1.0))
+    Ok(reply.with("ok", 1.0))
 }
 
 /// Prefix of the bucket namespaces of RefDb's time series before 9.0.
