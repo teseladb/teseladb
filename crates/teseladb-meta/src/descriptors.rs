@@ -359,6 +359,8 @@ impl DescTable<'_> {
         new.generation = 1;
         new.pending_split = None;
         new.leader_hint = None;
+        // A new Raft group: its terms start again, and its first leader's must be recorded.
+        new.leader_term = 0;
         new.moved_ms = now_ms;
         let group = new.group;
         self.insert(new);
