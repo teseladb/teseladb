@@ -39,3 +39,14 @@ fn an_append_never_goes_on_without_its_read() {
         assert_eq!(r.verdict, Verdict::Pass, "txn-append seed {seed}");
     }
 }
+
+/// A record that a writer's push created before its coordinator's `Begin` landed has no session;
+/// the `Begin` timed out, the coordinator aborted, and record GC removed the aborted record by the
+/// rule of a transaction without a session, five seconds after its intent's mark, while the
+/// client's session had neither a later transaction nor its time over (`txn-bank` 996, `heavy`).
+#[test]
+fn a_record_created_by_a_push_lives_as_long_as_its_session() {
+    let cfg = SimConfig { faults: FaultPlan::Heavy, ..cfg("txn-bank") };
+    let r = run_workload(&cfg, 996, Bank::boxed(3, 2));
+    assert_eq!(r.verdict, Verdict::Pass, "txn-bank heavy seed 996");
+}

@@ -122,6 +122,11 @@ fn begin() -> RecordOp {
     RecordOp::Begin { lsid: 7, txn_number: 3, read_ts: ts(100) }
 }
 
+/// The abort of session 7's transaction 3, the one [`begin`] begins.
+fn abort(spans: Vec<(Vec<u8>, Vec<u8>)>) -> RecordOp {
+    RecordOp::Abort { lsid: 7, txn_number: 3, spans }
+}
+
 #[test]
 fn end_txn_follows_the_record_transitions() {
     let spans = vec![(b"\x01a".to_vec(), b"\x01c".to_vec())];
@@ -148,13 +153,16 @@ fn end_txn_follows_the_record_transitions() {
     // Committed is final: a retried commit and a late abort see it as it is.
     let committed = c.encode();
     assert_eq!(end_txn(Some(&committed), T1, commit(900), ts(910)), Ok(c.clone()));
-    assert_eq!(end_txn(Some(&committed), T1, RecordOp::Abort { spans: vec![] }, ts(910)), Ok(c));
-    // Abort, also with no record.
-    let a = end_txn(Some(&stored), T1, RecordOp::Abort { spans: spans.clone() }, ts(140)).unwrap();
-    assert_eq!(a.status, TxnStatus::Aborted);
-    let a0 = end_txn(None, T1, RecordOp::Abort { spans: spans.clone() }, ts(140)).unwrap();
-    assert_eq!((a0.status, a0.spans), (TxnStatus::Aborted, spans.clone()));
-    // Aborted is final: a late coordinator gets NoSuchTransaction, whatever it asks.
+    assert_eq!(end_txn(Some(&committed), T1, abort(vec![]), ts(910)), Ok(c));
+    // Abort, also with no record; the abort is the session's last use.
+    let a = end_txn(Some(&stored), T1, abort(spans.clone()), ts(140)).unwrap();
+    assert_eq!((a.status, a.heartbeat_ts), (TxnStatus::Aborted, ts(140)));
+    let a0 = end_txn(None, T1, abort(spans.clone()), ts(140)).unwrap();
+    assert_eq!(
+        (a0.status, a0.spans, a0.lsid, a0.txn_number),
+        (TxnStatus::Aborted, spans.clone(), 7, 3)
+    );
+    // Aborted is final: a late coordinator gets NoSuchTransaction for anything but its abort.
     let aborted = a.encode();
     for op in [begin(), commit(150), RecordOp::Heartbeat { spans: vec![] }] {
         assert_eq!(end_txn(Some(&aborted), T1, op, ts(150)), Err(RecordError::NoSuchTransaction));
@@ -193,6 +201,40 @@ fn a_coordinator_adopts_the_record_a_push_created() {
         end_txn(Some(&aborted.encode()), T1, begin(), ts(130)),
         Err(RecordError::NoSuchTransaction)
     );
+}
+
+/// A record a push created before the coordinator's `Begin` landed has no session. When the
+/// `Begin` never lands, the coordinator's abort gives the record its session and its mark, so that
+/// record GC keeps it as long as the session (`txn-bank` 996, `heavy`).
+#[test]
+fn the_abort_gives_a_pushed_record_its_session_and_its_last_use() {
+    let spans = vec![(b"\x01a".to_vec(), b"\x01a\x00".to_vec())];
+    let waiting = push_txn(None, T1, Push::To(ts(500)), ts(120)).unwrap();
+    assert_eq!((waiting.lsid, waiting.txn_number, waiting.read_ts), (0, 0, ts(0)));
+    let a = end_txn(Some(&waiting.encode()), T1, abort(spans.clone()), ts(900)).unwrap();
+    assert_eq!(
+        (a.status, a.lsid, a.txn_number, a.heartbeat_ts, a.spans.clone()),
+        (TxnStatus::Aborted, 7, 3, ts(900), spans.clone())
+    );
+    // Aborted by a push first: the late abort still gives it the session and its mark, and keeps
+    // what the record says.
+    let old = Push::AbortIfAbandoned { intent_ts: ts(100) };
+    let pushed = push_txn(None, T1, old, ts(101 + ABANDONED_AFTER_MS)).unwrap();
+    assert_eq!((pushed.status, pushed.lsid), (TxnStatus::Aborted, 0));
+    let late = end_txn(Some(&pushed.encode()), T1, abort(spans), ts(9_000)).unwrap();
+    assert_eq!(
+        late,
+        TxnRecord { lsid: 7, txn_number: 3, heartbeat_ts: ts(9_000), ..pushed.clone() }
+    );
+    // A mark below the record's last use does not take it back; a session it has stays.
+    let earlier = end_txn(Some(&late.encode()), T1, abort(vec![]), ts(50)).unwrap();
+    assert_eq!(earlier, late);
+    let other = RecordOp::Abort { lsid: 8, txn_number: 1, spans: vec![] };
+    assert_eq!(end_txn(Some(&late.encode()), T1, other, ts(9_500)).unwrap().lsid, 7);
+    // An internal transaction's abort (no session) leaves the session as it is.
+    let internal = RecordOp::Abort { lsid: 0, txn_number: 0, spans: vec![] };
+    let a = end_txn(Some(&pushed.encode()), T1, internal, ts(9_000)).unwrap();
+    assert_eq!((a.lsid, a.heartbeat_ts), (0, ts(9_000)));
 }
 
 #[test]

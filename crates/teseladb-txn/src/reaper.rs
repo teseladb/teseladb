@@ -34,6 +34,8 @@ pub const SESSION_TTL_MS: u64 = 30 * 60_000;
 
 /// The cut of a removal for a session that has a later transaction: no age is needed.
 const NO_CUT: Hlc = Hlc { physical: u64::MAX, logical: u32::MAX };
+/// The read mark of a record no coordinator began: a push created it.
+const NEVER_BEGUN: Hlc = Hlc { physical: 0, logical: 0 };
 
 /// What a request of the reaper was.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -237,9 +239,12 @@ impl Reaper {
     /// Starts the removal of final record `r` if it is old enough at `now`; a client one that is
     /// not looks for the record of its session's next transaction.
     fn remove_if_old(&mut self, route: &dyn Route, now: Hlc, r: TxnRecord) {
-        let ttl = match r.lsid {
-            0 => ABANDONED_AFTER_MS,
-            _ => self.session_ttl_ms.unwrap_or(SESSION_TTL_MS),
+        // A record no coordinator began (a push created it, and its `Begin` and abort never
+        // landed) may be a client transaction's: it stays as long as a session.
+        let internal = r.lsid == 0 && r.read_ts != NEVER_BEGUN;
+        let ttl = match internal {
+            true => ABANDONED_AFTER_MS,
+            false => self.session_ttl_ms.unwrap_or(SESSION_TTL_MS),
         };
         let before = now.physical.checked_sub(ttl).map(|cut| Hlc { physical: cut, logical: 0 });
         // Faulty variant (008): a client transaction's record goes as soon as it is final.
@@ -577,7 +582,7 @@ mod tests {
     /// intervals of `keys`.
     fn finished(txn: u128, lsid: u128, at: u64, keys: &[&[u8]]) -> TxnRecord {
         let r = record(txn, at, keys);
-        TxnRecord { status: TxnStatus::Committed, commit_ts: ts(at), lsid, ..r }
+        TxnRecord { status: TxnStatus::Committed, commit_ts: ts(at), lsid, read_ts: ts(1), ..r }
     }
 
     fn ops(reqs: &[Request]) -> Vec<(GroupId, TxnOp)> {
@@ -718,5 +723,27 @@ mod tests {
         let mut r = Reaper::default();
         r.scan(&Two, now, [TxnRecord { spans: Vec::new(), ..finished(13, 0, at, &[]) }]);
         assert!(r.take_requests().is_empty());
+    }
+
+    /// A record a push created and no coordinator began has no session to say whose it is: it
+    /// may be a client transaction's whose `Begin` and abort never landed, so it stays as long as
+    /// a session, not the while of an internal one (`txn-bank` 996, `heavy`).
+    #[test]
+    fn a_record_no_coordinator_began_stays_as_long_as_a_session() {
+        let mut r = Reaper::with_session_ttl(60_000);
+        let now = ts(100_000);
+        let pushed = TxnRecord {
+            status: TxnStatus::Aborted,
+            read_ts: NEVER_BEGUN,
+            spans: Vec::new(),
+            ..record(20, now.physical - 10_000, &[])
+        };
+        r.scan(&Two, now, [pushed.clone()]);
+        assert!(r.take_requests().is_empty(), "younger than a session, and no session to look at");
+        let old = TxnRecord { heartbeat_ts: ts(now.physical - 61_000), ..pushed };
+        r.scan(&Two, now, [old]);
+        let reqs = r.take_requests();
+        let resolved = TxnOp::EndTxn { txn: TxnId(20), op: RecordOp::Resolved };
+        assert_eq!(ops(&reqs), [(GroupId(2), resolved)]);
     }
 }

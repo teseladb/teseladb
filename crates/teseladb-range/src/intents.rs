@@ -325,8 +325,13 @@ pub enum RecordOp {
         /// Intervals with intents.
         spans: Vec<(Vec<u8>, Vec<u8>)>,
     },
-    /// Aborts.
+    /// Aborts. It carries the session, as `Begin` does: a push may have created the record
+    /// before the `Begin` landed, and a `Begin` that never lands leaves it without one.
     Abort {
+        /// RefDb's session (0 for an internal transaction).
+        lsid: u128,
+        /// RefDb's `txnNumber`.
+        txn_number: i64,
         /// Intervals with intents.
         spans: Vec<(Vec<u8>, Vec<u8>)>,
     },
@@ -388,8 +393,13 @@ pub fn end_txn(
         (_, RecordOp::Resolved) | (None, RecordOp::Heartbeat { .. } | RecordOp::Commit { .. }) => {
             Err(RecordError::NoSuchTransaction)
         }
-        (None, RecordOp::Abort { spans }) => {
-            Ok(TxnRecord { spans, ..fresh(txn, TxnStatus::Aborted, at) })
+        (None, RecordOp::Abort { lsid, txn_number, spans }) => {
+            Ok(TxnRecord { lsid, txn_number, spans, ..fresh(txn, TxnStatus::Aborted, at) })
+        }
+        // The coordinator's abort is the session's last use, also once a push aborted the
+        // record: record GC counts the session's time from it.
+        (Some(r), RecordOp::Abort { lsid, txn_number, .. }) if r.status == TxnStatus::Aborted => {
+            Ok(aborted_by_session(r, (lsid, txn_number), at))
         }
         (Some(r), _) if r.status == TxnStatus::Aborted => Err(RecordError::NoSuchTransaction),
         // A retried commit, or an abort that arrives after the commit: the record says what
@@ -406,10 +416,19 @@ pub fn end_txn(
             let commit_ts = ts;
             Ok(TxnRecord { status: TxnStatus::Committed, commit_ts, spans, ..r })
         }
-        (Some(r), RecordOp::Abort { spans }) => {
-            Ok(TxnRecord { status: TxnStatus::Aborted, spans, ..r })
+        (Some(r), RecordOp::Abort { lsid, txn_number, spans }) => {
+            let r = TxnRecord { status: TxnStatus::Aborted, spans, ..r };
+            Ok(aborted_by_session(r, (lsid, txn_number), at))
         }
     }
+}
+
+/// Aborted record `r` after its coordinator's abort of session `(lsid, txn_number)` at mark
+/// `at`: the record keeps a session it has and takes the abort's one if a push created it, and
+/// its last use is no older than the abort.
+fn aborted_by_session(r: TxnRecord, (lsid, txn_number): (u128, i64), at: Hlc) -> TxnRecord {
+    let session = if r.lsid == 0 { (lsid, txn_number) } else { (r.lsid, r.txn_number) };
+    TxnRecord { lsid: session.0, txn_number: session.1, heartbeat_ts: r.heartbeat_ts.max(at), ..r }
 }
 
 /// What a `PushTxn` asks (FR-002, FR-003).

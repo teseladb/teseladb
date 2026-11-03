@@ -462,7 +462,10 @@ fn a_plain_write_resolves_the_intent_on_the_index_entry_it_read() {
     };
     let r = ask(put);
     assert!(matches!(r, Ok(DataReply::Remote(RemoteReply::Intents { .. }))), "{r:?}");
-    let r = ask(TxnOp::EndTxn { txn, op: RecordOp::Abort { spans: Vec::new() } });
+    let r = ask(TxnOp::EndTxn {
+        txn,
+        op: RecordOp::Abort { lsid: 1, txn_number: 1, spans: Vec::new() },
+    });
     assert!(matches!(r, Ok(DataReply::Remote(RemoteReply::Record(_)))), "{r:?}");
     let two = Document::new().with("_id", 2).with("u", 5);
     let insert = Document::new()
@@ -671,7 +674,7 @@ fn insert_after_pending_unique_entry(commit: bool) -> Document {
     let end = if commit {
         RecordOp::Commit { ts: hlc(now.physical + 1), spans }
     } else {
-        RecordOp::Abort { spans }
+        RecordOp::Abort { lsid: 1, txn_number: 1, spans }
     };
     let r = std::thread::scope(|s| {
         let ender = s.spawn(|| {
