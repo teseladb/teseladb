@@ -1741,6 +1741,42 @@ impl<S: StateMachine> MultiRaftCore<S> {
         self.note_rolled(g, writes);
     }
 
+    /// Ends with `ProposalDropped` the proposals of `g` from `index` on of a term below `term`, the
+    /// term of the committed entry at `index`. Every later leader's log has that entry, and the
+    /// terms of a log never go down, so none of them has an entry of an older term after it: those
+    /// proposals can no longer commit. They end now, also those past the new leader's last entry,
+    /// which no entry of its may reach for a long time, rather than at their deadline.
+    fn drop_proposals_after(&mut self, g: GroupId, index: u64, term: u64) {
+        let grp = self.groups.get(&g).expect("group");
+        let lost: Vec<OpId> = grp
+            .proposals
+            .range(index..)
+            .filter(|(_, (t, _))| *t < term)
+            .map(|(_, (_, op))| *op)
+            .collect();
+        for op in lost {
+            self.finish(op, Err(OpError::ProposalDropped));
+        }
+    }
+
+    /// Ends the proposals of `g` the installed snapshot at `index` of term `term` contradicts:
+    /// those up to `index` whose term is not the committed log's at their index, and those after it
+    /// of an older term ([`MultiRaftCore::drop_proposals_after`]). Those whose entry the snapshot
+    /// holds have no answer to give: they end at their deadline.
+    fn drop_proposals_under_snapshot(&mut self, g: GroupId, index: u64, term: u64) {
+        let grp = self.groups.get(&g).expect("group");
+        let lost: Vec<OpId> = grp
+            .proposals
+            .range(..=index)
+            .filter(|(i, (t, _))| grp.terms.term_of(**i).is_some_and(|c| c != *t))
+            .map(|(_, (_, op))| *op)
+            .collect();
+        for op in lost {
+            self.finish(op, Err(OpError::ProposalDropped));
+        }
+        self.drop_proposals_after(g, index + 1, term);
+    }
+
     /// Keeps the entries of `g`'s log up to the installed snapshot's `index` whose term is not the
     /// committed log's term at their index, as the snapshot's terms give it: the store drops them
     /// when the snapshot compacts the log, and they were never committed. Those whose term
@@ -1827,15 +1863,16 @@ impl<S: StateMachine> MultiRaftCore<S> {
             });
         }
         let grp = self.groups.get_mut(&g).expect("group");
-        // If another leader's entry ended up at that index, the proposal was lost.
-        let op = match grp.proposals.remove(&e.index) {
-            Some((t, op)) if t == e.term => Some(op),
-            Some((_, op)) => {
-                self.finish(op, Err(OpError::ProposalDropped));
-                None
+        let op = match grp.proposals.get(&e.index) {
+            Some(&(t, op)) if t == e.term => {
+                grp.proposals.remove(&e.index);
+                Some(op)
             }
-            None => None,
+            _ => None,
         };
+        // Another leader's entry ended up at that index: the proposal there was lost, and so were
+        // those after it of an older term.
+        self.drop_proposals_after(g, e.index, e.term);
         let grp = self.groups.get_mut(&g).expect("group");
         if e.kind == EntryKind::ConfChange {
             // Raft applied the change when it handed the entry out.
@@ -2030,6 +2067,7 @@ impl<S: StateMachine> MultiRaftCore<S> {
         // Faulty variant (005 T033): the entries the snapshot contradicts leave no record.
         #[cfg(not(teseladb_bug = "rollback_unrecorded"))]
         self.note_superseded(g, d.index);
+        self.drop_proposals_under_snapshot(g, snap.meta.index, snap.meta.term);
         let meta = SnapshotMeta {
             index: snap.meta.index,
             term: snap.meta.term,

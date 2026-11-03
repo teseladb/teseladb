@@ -27,3 +27,15 @@ fn without_faults_it_passes() {
         assert_eq!(run_seed(&cfg(FaultPlan::None), seed).verdict, Verdict::Pass, "seed {seed}");
     }
 }
+
+/// Seeds 247 and 798 of the `light` plan: during a partition the cut-off leader of both Meta2
+/// ranges took one change from every client, and after the heal those changes waited for their
+/// deadline (5 s) instead of ending when the new leader's first entry was committed, so no change
+/// was answered within 4.5 s of the heal.
+#[test]
+fn changes_a_deposed_leader_took_end_soon_after_the_heal() {
+    for seed in [247, 798] {
+        let r = run_seed(&cfg(FaultPlan::Light), seed);
+        assert_eq!(r.verdict, Verdict::Pass, "seed {seed}");
+    }
+}

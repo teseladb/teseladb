@@ -6,7 +6,7 @@ mod common;
 
 use common::*;
 use teseladb_multiraft::{
-    CoreConfig, Done, GroupDesc, NodeClock, OpError, PeerFrame, ProposeAt, ReadMode,
+    CoreConfig, Done, GroupDesc, NodeClock, OpError, OpId, PeerFrame, ProposeAt, ReadMode,
 };
 use teseladb_raft::{ConfChange, ConfChangeKind, MAX_ENTRY_BYTES};
 use teseladb_types::{Bytes, GroupId, Nanos};
@@ -81,6 +81,67 @@ fn a_proposal_overwritten_by_another_leader_is_dropped() {
     c.ticks(100);
     assert_eq!(c.results(old, op), vec![Err(OpError::ProposalDropped)]);
     assert_eq!(c.sm(old).data, b"new");
+}
+
+/// A deposed leader took three proposals the majority never saw, and the new leader writes only
+/// its first entry, at the index of the first of them. Once that entry is committed none of the
+/// three can commit, and all three end then with `ProposalDropped`, also the two at indexes the
+/// new leader's log has not reached, which used to wait for their deadline (the `meta2` seeds 247
+/// and 798 of the `light` plan: every client waited on such a proposal and nothing was answered
+/// in the 4.5 s after the heal).
+#[test]
+fn proposals_past_a_new_leaders_log_end_when_their_suffix_is_dropped() {
+    let mut c = Cluster::new(3);
+    let old = c.elect();
+    c.isolate(old);
+    let ops: Vec<OpId> =
+        [&b"a"[..], b"b", b"c"].iter().map(|p| c.propose(old, p).unwrap()).collect();
+    c.settle();
+    let rest = c.others(old);
+    while !rest
+        .iter()
+        .any(|n| c.nodes[n].core.status(G).is_some_and(|s| s.role == teseladb_raft::Role::Leader))
+    {
+        c.tick();
+    }
+    c.heal();
+    // Well under the operation timeout (5 s): 50 ticks of 10 ms.
+    c.ticks(50);
+    for op in ops {
+        assert_eq!(c.results(old, op), vec![Err(OpError::ProposalDropped)], "{op:?}");
+    }
+    assert!(c.sm(old).data.is_empty(), "none of them was applied");
+}
+
+/// The same with a snapshot: the new leader commits five entries with a snapshot every three, so
+/// the deposed leader catches up with a snapshot that covers some of its six proposals; those
+/// under the snapshot and those above it end at once.
+#[test]
+fn proposals_a_snapshot_contradicts_end_when_it_is_installed() {
+    let mut c = Cluster::with(3, |i| CoreConfig { snapshot_entries: 3, ..cfg(i) });
+    let old = c.elect();
+    c.isolate(old);
+    let ops: Vec<OpId> = (0..6u8).map(|i| c.propose(old, &[b'L', i]).unwrap()).collect();
+    c.settle();
+    let new = loop {
+        c.tick();
+        if let Some(l) = c.leader().filter(|&l| l != old) {
+            break l;
+        }
+    };
+    for i in 0..5u8 {
+        c.propose(new, &[b'N', i]).unwrap();
+        c.ticks(1);
+    }
+    let snap = c.nodes[&new].core.snapshot_index(G).unwrap_or(0);
+    let first = c.nodes[&old].core.status(G).unwrap().last_index - 5;
+    assert!(snap > first, "the snapshot covers some of the proposals");
+    c.heal();
+    c.ticks(30);
+    for op in ops {
+        assert_eq!(c.results(old, op), vec![Err(OpError::ProposalDropped)], "{op:?}");
+    }
+    assert_eq!(c.sm(old).data, c.sm(new).data, "it caught up with the snapshot");
 }
 
 #[test]
