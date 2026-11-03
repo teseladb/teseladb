@@ -632,3 +632,26 @@ fn the_samples_of_a_dropped_collection_are_not_the_new_ones() {
         admin(&mut m, r#"{"analyzeShardKey":"q.big","key":{"_id":1},"keyCharacteristics":false}"#);
     assert_eq!(field(&r, "readDistribution.sampleSize.total"), &long(0));
 }
+
+/// The node keeps the newest 10,000 samples, and an analysis counts only those of its
+/// collection.
+#[test]
+fn the_node_keeps_ten_thousand_samples_of_each_collection_apart() {
+    let mut m = cluster();
+    ok(&admin(&mut m, r#"{"configureQueryAnalyzer":"q.a","mode":"full","samplesPerSecond":50}"#));
+    ok(&admin(&mut m, r#"{"configureQueryAnalyzer":"q.big","mode":"full","samplesPerSecond":50}"#));
+    m.now += 1_000;
+    ok(&m.run("q", json(r#"{"find":"a","filter":{"x":1}}"#)));
+    m.now += 1_000;
+    ok(&m.run("q", json(r#"{"find":"big","filter":{"x":1}}"#)));
+    let r =
+        admin(&mut m, r#"{"analyzeShardKey":"q.big","key":{"_id":1},"keyCharacteristics":false}"#);
+    assert_eq!(field(&r, "readDistribution.sampleSize.total"), &long(1), "q.a's is not q.big's");
+    for _ in 0..10_000 {
+        m.now += 1_000;
+        ok(&m.run("q", json(r#"{"find":"big","filter":{"x":2}}"#)));
+    }
+    let r =
+        admin(&mut m, r#"{"analyzeShardKey":"q.big","key":{"_id":1},"keyCharacteristics":false}"#);
+    assert_eq!(field(&r, "readDistribution.sampleSize.total"), &long(10_000));
+}
