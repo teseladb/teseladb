@@ -393,6 +393,12 @@ pub struct MultiRaftCore<S: StateMachine> {
     loads: BTreeMap<ReadToken, Load>,
     /// Raft messages for other nodes.
     outbox: Vec<(GroupId, Message)>,
+    /// Groups whose leader registered ReadIndex reads that wait for a heartbeat round: one round
+    /// per group and step confirms them all (005 FR-009).
+    read_rounds: BTreeSet<GroupId>,
+    /// The caller sends those rounds itself at the end of its turn ([`MultiRaftCore::flush_read_rounds`])
+    /// instead of at each [`MultiRaftCore::drain_actions`].
+    hold_read_rounds: bool,
     /// Other frames for other nodes.
     frames: Vec<(NodeId, PeerFrame)>,
     done: Vec<(OpId, Result<Done<S::Output>, OpError>)>,
@@ -462,6 +468,8 @@ impl<S: StateMachine> MultiRaftCore<S> {
             waits: BTreeMap::new(),
             loads: BTreeMap::new(),
             outbox: Vec::new(),
+            read_rounds: BTreeSet::new(),
+            hold_read_rounds: false,
             frames: Vec::new(),
             done: Vec::new(),
             forwarded: Vec::new(),
@@ -1488,6 +1496,9 @@ impl<S: StateMachine> MultiRaftCore<S> {
     /// What the core loop has to do: frames (Raft messages grouped per node), operations that
     /// ended and forwarded requests.
     pub fn drain_actions(&mut self) -> Actions<S::Output> {
+        if !self.hold_read_rounds {
+            self.flush_read_rounds();
+        }
         let hlc = self.cfg.clock.0.peek();
         // A received mark passed the bound on disk: no frame leaves, an answer to a leader
         // included, until a bound above it is written (005 FR-003, research R13); a voter that
@@ -1564,10 +1575,39 @@ impl<S: StateMachine> MultiRaftCore<S> {
             let grp = self.groups.get_mut(&g).expect("group");
             grp.sync_awaiting();
             if grp.stopped || grp.installing || grp.loading || !grp.raw.has_ready() {
-                return;
+                break;
             }
             let rd = grp.raw.ready(&GroupStore::new(&self.store, g), &mut self.rng);
             self.handle_ready(g, rd);
+        }
+        if self.groups.get(&g).is_some_and(|grp| grp.raw.read_round_due()) {
+            self.read_rounds.insert(g);
+        }
+    }
+
+    /// The caller sends the heartbeat rounds of the ReadIndex reads itself, once per turn, with
+    /// [`MultiRaftCore::flush_read_rounds`]: the reads of every event of the turn share one round
+    /// per group. Off by default: each [`MultiRaftCore::drain_actions`] sends them.
+    pub fn hold_read_rounds(&mut self, hold: bool) {
+        self.hold_read_rounds = hold;
+    }
+
+    /// Whether ReadIndex reads wait for a round that has not been sent.
+    pub fn read_rounds_due(&self) -> bool {
+        !self.read_rounds.is_empty()
+    }
+
+    /// Sends one heartbeat round per group for the ReadIndex reads registered since its last
+    /// round (005 FR-009): each read was registered at the commit index when it arrived and is
+    /// answered once a majority confirms a round sent after it.
+    pub fn flush_read_rounds(&mut self) {
+        for g in core::mem::take(&mut self.read_rounds) {
+            let Some(grp) = self.groups.get_mut(&g) else { continue };
+            if grp.stopped || grp.installing || grp.loading {
+                continue;
+            }
+            grp.raw.send_read_round(&GroupStore::new(&self.store, g));
+            self.drive(g);
         }
     }
 
