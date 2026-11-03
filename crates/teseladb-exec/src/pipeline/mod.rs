@@ -92,6 +92,13 @@ pub trait Env {
         Err(error(errors::INDEX_NOT_FOUND, "text index required for $text query"))
     }
 
+    /// Checks a first `$match` with a `$text` while the pipeline is planned, as `refnode` does:
+    /// the text index and the query's `$language` fail as planning errors, not as running ones
+    /// (measured on 9.0.4). Without a node, [`Env::text_source`] answers.
+    fn check_text(&self, _filter: &Document) -> Result<(), MqlError> {
+        Ok(())
+    }
+
     /// Sends a search stage's query to the search indexes while the pipeline is planned, as
     /// `refnode` does with `refsearch`: its errors are those of planning, not of running (measured on
     /// 9.0.4). Nothing to check without search.
@@ -324,6 +331,7 @@ impl Pipeline {
             match st {
                 Stage::GeoNear(g) => g.check_plan(env)?,
                 Stage::Search(name, spec) => env.check_search(name, spec)?,
+                Stage::Text(filter) => env.check_text(filter)?,
                 _ => {}
             }
         }

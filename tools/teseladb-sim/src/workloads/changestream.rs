@@ -55,6 +55,7 @@ pub(crate) fn meta_write(key: &[u8], tag: u64, op: u32) -> (Vec<u8>, Vec<u8>) {
     let txn = TxnInfo { id: txn_id(tag), lsid: 1, uid: [0; 32], txn_number: tag as i64 };
     let meta = ChangeMeta {
         txn: Some(txn),
+        retry: None,
         op,
         update: None,
         replace: false,
@@ -182,4 +183,64 @@ pub(crate) fn check(
         return Err(Violation::liveness(changestream_delivery::CHECKER, "no cursor emitted"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    use super::*;
+
+    fn change(p: u64, txn: Option<u128>, key: &[u8]) -> Change {
+        Change { ts: Hlc { physical: p, logical: 0 }, txn, op: 0, key: key.to_vec() }
+    }
+
+    fn log(emitted: Vec<Change>) -> CursorLog {
+        let resolved = Hlc { physical: 100, logical: 0 };
+        let emitted: Vec<Emitted> =
+            emitted.into_iter().map(|change| Emitted { change, resolved }).collect();
+        let after = Hlc { physical: 0, logical: 0 };
+        let resolved = if emitted.is_empty() { after } else { resolved };
+        CursorLog { name: "c".into(), after, emitted, resolved }
+    }
+
+    #[test]
+    fn changes_of_unknown_transactions_count_once_some_cursor_emits_them() {
+        let known = change(5, None, b"a");
+        let maybe = change(6, Some(txn_id(7)), b"b");
+        let other = change(6, Some(txn_id(7)), b"z");
+        let unknown = [(7, vec![b"b".to_vec()]), (8, vec![b"c".to_vec()])];
+        // Two cursors emit the change of the unknown transaction: it counts once.
+        let (one, two) = (log(vec![known.clone(), maybe.clone()]), log(vec![known.clone(), maybe]));
+        check(std::slice::from_ref(&known), &unknown, &[&one, &two]).expect("both saw it");
+        // A key the unknown transaction did not write is no change of it.
+        let three = log(vec![known.clone(), other]);
+        check(std::slice::from_ref(&known), &unknown, &[&three]).expect_err("a change nobody made");
+        // Nothing emitted while something committed.
+        let v = check(&[known], &[], &[&log(vec![])]).expect_err("silent");
+        assert_eq!(
+            (v.checker, v.detail.as_str()),
+            (changestream_delivery::CHECKER, "no cursor emitted")
+        );
+        check(&[], &[], &[&log(vec![])]).expect("nothing to emit");
+    }
+
+    fn answer(to: u64) -> Result<Reply, RangeError> {
+        let to = Hlc { physical: to, logical: 0 };
+        Ok(Reply::Changes { rows: Vec::new(), to, oldest_intent: None })
+    }
+
+    #[test]
+    fn answers_without_a_read_in_flight_are_dropped_and_a_lost_read_is_forgotten() {
+        let start = Hlc { physical: 1, logical: 0 };
+        let mut c = Cursor::new("c".into(), start);
+        c.answered(answer(5), 1, start);
+        c.stop = Some(b"z".to_vec());
+        c.answered(answer(5), 1, start);
+        assert!(c.stop.is_none() && !c.busy());
+        c.next().expect("a read of the whole interval");
+        c.sent(&[]);
+        assert!(c.busy());
+        c.lost();
+        assert!(!c.busy());
+    }
 }

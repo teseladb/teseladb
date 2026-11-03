@@ -177,6 +177,10 @@ pub trait NodeState: Send + Sync + 'static {
     fn closed(&self) -> bool {
         false
     }
+
+    /// Wake `waker` whenever the `topologyVersion` counter changes, so the waiting `hello`s
+    /// answer at once (018 FR-015); a node without one never changes it.
+    fn watch_topology(&self, _waker: Waker) {}
 }
 
 /// What core 0 tells the clients' port of the node's state in Group 0 (007 FR-015): the
@@ -188,6 +192,10 @@ pub struct NodePresence {
     /// The replica set and the member this node is, in the replica set presentation (018
     /// FR-007).
     replica: std::sync::Mutex<Option<Arc<ReplicaMember>>>,
+    /// The client workers to wake when the counter changes.
+    watchers: std::sync::Mutex<Vec<Waker>>,
+    /// The replica set port (018 FR-016) and the member this node is on it.
+    port: std::sync::Mutex<Option<(u16, Arc<ReplicaMember>)>>,
 }
 
 /// A replica set and the member this node is in it.
@@ -197,8 +205,38 @@ pub type ReplicaMember =
 impl NodePresence {
     /// The counter of the node's state, and whether it drained.
     pub fn set(&self, counter: i64, closed: bool) {
-        self.counter.store(counter, Ordering::Release);
+        let before = self.counter.swap(counter, Ordering::AcqRel);
         self.closed.store(closed, Ordering::Release);
+        if before != counter {
+            let watchers = self.watchers.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            for w in watchers.iter() {
+                // A worker that already stopped needs no wake-up.
+                let _ = w.wake();
+            }
+        }
+    }
+
+    /// The replica set port and this node's member on it (`None`: closed).
+    pub fn set_replica_port(&self, port: Option<(u16, ReplicaMember)>) {
+        let mut slot = self.port.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let same = match (slot.as_ref(), port.as_ref()) {
+            (Some((a, x)), Some((b, y))) => a == b && **x == *y,
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            *slot = port.map(|(p, m)| (p, Arc::new(m)));
+        }
+    }
+
+    /// The replica set port and this node's member on it.
+    pub fn replica_port(&self) -> Option<(u16, Arc<ReplicaMember>)> {
+        self.port.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    }
+
+    /// Wakes `waker` at every change of the counter.
+    pub fn watch(&self, waker: Waker) {
+        self.watchers.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(waker);
     }
 
     /// The replica set presentation this node answers in (`None`: as a `refrouter`).
@@ -226,7 +264,7 @@ impl NodePresence {
 }
 
 /// [`NodeState`] of a running node: its process id and its HLC.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct NodeClockState {
     process_id: [u8; 12],
     clock: NodeClock,
@@ -235,6 +273,9 @@ pub struct NodeClockState {
     keys: Option<Arc<KeySlot>>,
     /// The node's state in Group 0 as core 0 publishes it (007 FR-015).
     presence: Arc<NodePresence>,
+    /// The state of the replica set port (018 FR-016): `hello` and the commands see the replica
+    /// set of that port, whatever the main port shows.
+    port_view: bool,
 }
 
 fn wall_ms() -> i64 {
@@ -254,6 +295,7 @@ impl NodeClockState {
             handle: None,
             keys: None,
             presence: Arc::new(NodePresence::default()),
+            port_view: false,
         }
     }
 
@@ -271,12 +313,21 @@ impl NodeClockState {
     pub fn with_presence(self, presence: Arc<NodePresence>) -> NodeClockState {
         NodeClockState { presence, ..self }
     }
+
+    /// The state of the replica set port (018 FR-016).
+    pub fn on_replica_set_port(self) -> NodeClockState {
+        NodeClockState { port_view: true, ..self }
+    }
 }
 
 impl NodeState for NodeClockState {
     fn info(&self) -> NodeInfo {
         let (time, increment) = to_timestamp(self.clock.0.peek());
-        let replica_set = self.presence.replica().map(|r| {
+        let member = match self.port_view {
+            true => self.presence.replica_port().map(|(_, m)| m),
+            false => self.presence.replica(),
+        };
+        let replica_set = member.map(|r| {
             let (set, me) = (*r).clone();
             // `lastWrite`: the node's mark, in the presentation's term.
             let at = teseladb_topology::replset::OpTime {
@@ -297,6 +348,10 @@ impl NodeState for NodeClockState {
 
     fn handle(&self) -> Option<NodeHandle> {
         self.handle.clone()
+    }
+
+    fn watch_topology(&self, waker: Waker) {
+        self.presence.watch(waker);
     }
 
     fn closed(&self) -> bool {
@@ -495,6 +550,7 @@ impl ClientListener {
         for k in 0..workers.max(1) {
             let poller = Poller::new()?;
             let waker = Arc::new(poller.waker());
+            state.watch_topology(poller.waker());
             let (tx, rx) = mailbox::channel(waker.clone());
             let pool = state.handle().map(|handle| {
                 let (give_back, returned) = mpsc::channel();
@@ -517,6 +573,7 @@ impl ClientListener {
                 mailbox: rx,
                 conns: BTreeMap::new(),
                 awaits: BTreeMap::new(),
+                seen: state.info().topology.counter,
                 next_token: 1,
                 state: state.clone(),
                 pool,
@@ -1062,6 +1119,8 @@ struct Worker {
     /// Deadlines of the awaitable `hello`s with their connection; an entry whose connection
     /// closed or already answered is skipped.
     awaits: BTreeMap<(Instant, u64), Pending>,
+    /// The `topologyVersion` counter the waiting `hello`s last saw: a change answers them.
+    seen: i64,
     next_token: u64,
     state: Arc<dyn NodeState>,
     /// The executors of the commands, if a node is behind the port.
@@ -1094,6 +1153,10 @@ impl Worker {
                 Err(_) => break,
             }
             let info = self.state.info();
+            if info.topology.counter != self.seen {
+                self.seen = info.topology.counter;
+                self.hasten_hellos();
+            }
             for e in events.drain(..) {
                 self.on_event(e.token, e.readable || e.hangup, &info);
             }
@@ -1227,6 +1290,24 @@ impl Worker {
                 }
             }
             None => self.close(token),
+        }
+    }
+
+    /// Makes every waiting `hello` due now: the node's state changed (018 FR-015, as a `refnode`
+    /// answers them at a change of its `topologyVersion`).
+    fn hasten_hellos(&mut self) {
+        let now = Instant::now();
+        let due: Vec<(Instant, u64)> = self
+            .awaits
+            .iter()
+            .filter(|(_, p)| matches!(p, Pending::Hello(_)))
+            .map(|(k, _)| *k)
+            .collect();
+        for key in due {
+            if let Some(Pending::Hello(mut h)) = self.awaits.remove(&key) {
+                h.deadline = now;
+                self.awaits.insert((now, key.1), Pending::Hello(h));
+            }
         }
     }
 

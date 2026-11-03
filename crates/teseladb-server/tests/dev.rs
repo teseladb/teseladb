@@ -91,6 +91,63 @@ fn one_node_is_a_cluster_of_its_own() {
     nodes.into_iter().for_each(|n| drop(n.stop()));
 }
 
+/// Each node announces its clients' address, so the dev cluster can present itself as a replica
+/// set over those addresses (018 FR-007, found measuring T017).
+#[test]
+fn the_nodes_announce_their_clients_address() {
+    use std::io::{Read, Write};
+    use teseladb_bson::{Document, RawDoc, Value};
+    use teseladb_wire::msg::{HEADER_LEN, OpMsg};
+    let (base, busy) = two_ports();
+    drop(busy);
+    let nodes = dev::start(&DevOpts { nodes: 1, cores: 1, port: base, test_commands: false }, None)
+        .expect("dev cluster");
+    let addr = nodes[0].client_addrs()[0];
+    let mut s = std::net::TcpStream::connect(addr).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    let mut ask = |id: i32, cmd: Document| -> Document {
+        let bytes = OpMsg::encode(id, 0, 0, &cmd.with("$db", "admin").to_bytes().unwrap());
+        s.write_all(&bytes).unwrap();
+        let mut h = [0u8; HEADER_LEN];
+        s.read_exact(&mut h).unwrap();
+        let len = i32::from_le_bytes([h[0], h[1], h[2], h[3]]) as usize;
+        let mut rest = vec![0u8; len - HEADER_LEN];
+        s.read_exact(&mut rest).unwrap();
+        // flags (4) and the section kind (1), then the body.
+        Document::from(RawDoc::from_bytes(&rest[5..]).unwrap())
+    };
+    let set = Document::new().with(
+        "setClusterParameter",
+        Document::new().with(
+            "topologyPresentation",
+            Document::new().with("mode", "replicaset").with("setName", "dev"),
+        ),
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut id = 1;
+    loop {
+        let r = ask(id, set.clone());
+        id += 1;
+        if r.get("ok") == Some(&Value::Double(1.0)) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "{r:?}");
+        thread::sleep(Duration::from_millis(50));
+    }
+    // The node applies the presentation at its next tick.
+    let me = Value::from(addr.to_string().as_str());
+    loop {
+        id += 1;
+        let hello = ask(id, Document::new().with("hello", 1));
+        if hello.get("me") == Some(&me) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "{hello:?}");
+        thread::sleep(Duration::from_millis(20));
+    }
+    nodes.into_iter().for_each(|n| drop(n.stop()));
+}
+
 /// A node after the first one that cannot start stops the ones already started and fails the
 /// cluster with its error: node 2 of a cluster on base port P takes P + 1, which another process
 /// holds, while the first node alone starts on P.

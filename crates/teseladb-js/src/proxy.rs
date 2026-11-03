@@ -11,7 +11,7 @@ const REVOKED: &str = "illegal operation attempted on a revoked proxy";
 /// The target and handler of `o` when it is a proxy; `Some(None)` when it was revoked.
 pub fn parts(o: &ObjRef) -> Option<Option<(ObjRef, ObjRef)>> {
     match &o.borrow().kind {
-        Kind::Proxy(p, _) => Some(p.clone()),
+        Kind::Proxy(p, ..) => Some(p.clone()),
         _ => None,
     }
 }
@@ -299,8 +299,9 @@ fn make(it: &mut Interp, a: &[Val]) -> R<ObjRef> {
         }
     };
     let callable = target.borrow().is_callable();
+    let constructor = crate::interp::is_constructor(&Val::Obj(target.clone()));
     let proto = target.borrow().proto.clone();
-    it.alloc(proto, Kind::Proxy(Some((target, handler)), callable))
+    it.alloc(proto, Kind::Proxy(Some((target, handler)), callable, constructor))
 }
 
 fn proxy_ctor(it: &mut Interp, this: &Val, a: &[Val]) -> R {
@@ -312,7 +313,7 @@ fn proxy_ctor(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 
 fn revoke(_: &mut Interp, this: &Val, _: &[Val]) -> R {
     if let Val::Obj(o) = this
-        && let Kind::Proxy(p, _) = &mut o.borrow_mut().kind
+        && let Kind::Proxy(p, ..) = &mut o.borrow_mut().kind
     {
         *p = None;
     }

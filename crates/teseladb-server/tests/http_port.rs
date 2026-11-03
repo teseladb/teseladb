@@ -81,3 +81,22 @@ fn a_node_serves_healthz_and_cors_from_its_cluster_parameter() {
     assert_eq!(batch(&c.run("db", Document::new().with("find", "c")), "firstBatch").len(), 2);
     drop(node.stop());
 }
+
+/// An HTTP port that cannot be bound stops the node's start: the administration and clients'
+/// ports it had opened are closed again, and the error names the port.
+#[test]
+fn a_taken_http_port_stops_the_start_and_closes_what_it_opened() {
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let at = taken.local_addr().unwrap();
+    let http = || HttpPortConfig { addrs: vec![at], tls: None, settings: Settings::default() };
+    let admin = Some(SocketAddr::from(([127, 0, 0, 1], 0)));
+    let full = NodeConfig { http: Some(http()), admin_listen: admin, ..config(Vec::new()) };
+    let bare = NodeConfig { http: Some(http()), client: None, ..config(Vec::new()) };
+    for cfg in [full, bare] {
+        let Err(e) = Node::start(cfg, || Ok(MemDisk::new()), None) else {
+            panic!("the node started on a taken HTTP port");
+        };
+        assert!(matches!(e, teseladb_server::node::NodeError::Io(_)), "{e:?}");
+    }
+    drop(taken);
+}

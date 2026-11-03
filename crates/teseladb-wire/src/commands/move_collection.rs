@@ -6,7 +6,7 @@
 //!   leadership of its ranges to the shard it names. From then on `config.collections` lists it
 //!   with key `{_id: 1}` and `unsplittable: true` ([`reshard::UNSPLITTABLE`]).
 //! - `unshardCollection` writes a collection with a shard key again in `_id` order without it, on
-//!   the shard it names or else on the one that leads the fewest ranges.
+//!   the shard it names or else on the one that holds the least data.
 //! - `rewriteCollection` writes a collection with a shard key again with the same key.
 //! - A capped or time series collection keeps its documents and UUID: `moveCollection` only
 //!   sends the leadership of its ranges (its documents are keyed by insertion order or by bucket,
@@ -14,6 +14,8 @@
 //!
 //! The replies, messages and codes are those of a `refrouter` 9.0.4 of two shards (measured on
 //! 02-11-2026, `t1.js` to `t12.js` in the lane's notes).
+
+use std::collections::BTreeMap;
 
 use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_keys::KeyBuilder;
@@ -96,7 +98,7 @@ pub fn move_collection<B: Backend + ?Sized>(
 }
 
 /// `unshardCollection`: the collection loses its shard key, on shard `toShard` or on the one
-/// that leads the fewest ranges.
+/// that holds the least data.
 pub fn unshard_collection<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
 ) -> Result<Document, CommandError> {
@@ -254,7 +256,10 @@ pub fn lead_from<B: Backend + ?Sized>(
     Ok(())
 }
 
-/// The shard among the cluster's that leads the fewest ranges, the first listed on a tie.
+/// The shard among the cluster's that holds the least data, the first listed on a tie: as a
+/// `refrouter` 9.0.4 picks the shard of `unshardCollection` without `toShard` (measured on
+/// 02-11-2026, whatever the chunks of each shard). The data of a shard are the bytes of the
+/// collections in the ranges it leads.
 fn least_loaded<B: Backend + ?Sized>(backend: &mut B) -> Result<NodeId, CommandError> {
     let shards: Vec<NodeId> = backend
         .config_documents(super::config_db::SHARDS)?
@@ -267,16 +272,27 @@ fn least_loaded<B: Backend + ?Sized>(backend: &mut B) -> Result<NodeId, CommandE
         .map(NodeId)
         .collect();
     let entries = backend.route_entries()?;
-    let led = |n: NodeId| {
-        entries
+    let mut held: BTreeMap<NodeId, u64> = BTreeMap::new();
+    for (_, c) in backend.collections()? {
+        let start = KeyBuilder::collection_start(c.tenant, c.id);
+        let end = KeyBuilder::collection_end(c.tenant, c.id);
+        let (lo, hi) = (start.as_bytes(), end.as_bytes());
+        for e in entries
             .iter()
-            .filter(|e| e.leader_hint.or_else(|| e.voters.first().copied()) == Some(n))
-            .count()
-    };
+            .filter(|e| e.start.as_slice() < hi && (e.end.is_empty() || e.end.as_slice() > lo))
+        {
+            let Some(leader) = e.leader_hint.or_else(|| e.voters.first().copied()) else {
+                continue;
+            };
+            let from = lo.max(e.start.as_slice());
+            let to = if e.end.is_empty() { hi } else { hi.min(e.end.as_slice()) };
+            *held.entry(leader).or_default() += backend.stored_bytes(from, to)?;
+        }
+    }
     shards
         .iter()
         .copied()
-        .min_by_key(|n| led(*n))
+        .min_by_key(|n| held.get(n).copied().unwrap_or(0))
         .ok_or_else(|| CommandError::new(SHARD_NOT_FOUND, "No shards found"))
 }
 

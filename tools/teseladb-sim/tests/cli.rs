@@ -192,3 +192,20 @@ fn variants_and_usage_errors() {
     assert!(stdout(&help).starts_with("usage: teseladb-sim"), "{}", stdout(&help));
     std::fs::remove_dir_all(&d).unwrap();
 }
+
+#[test]
+fn a_failing_seed_fails_the_run_here_and_in_child_processes() {
+    // In 1 ms of simulated time no transfer commits: `bank-total` fails the seed on liveness.
+    let d = tmp("failing");
+    let args = ["--sim-time", "1ms", "--plan", "none", "--workload", "txn-bank"];
+    let o = sim(&d, &[&["--seed", "3"][..], &args].concat());
+    assert_eq!(o.status.code(), Some(1), "{}{}", stdout(&o), stderr(&o));
+    let text = stdout(&o);
+    assert!(text.starts_with("FAIL seed=3 workload=txn-bank"), "{text}");
+    assert!(text.contains("seeds=1 pass=0 fail=1"), "{text}");
+    // With child processes and a trace file per seed.
+    let o = sim(&d, &[&["--seeds", "2", "--jobs", "2", "--trace", "t.log"][..], &args].concat());
+    assert_eq!(o.status.code(), Some(1), "{}{}", stdout(&o), stderr(&o));
+    assert!(stdout(&o).contains("seeds=2 pass=0 fail=2"), "{}", stdout(&o));
+    std::fs::remove_dir_all(&d).unwrap();
+}

@@ -112,11 +112,21 @@ fn describe(chars: &[char], error: &SyntaxError) -> (String, Option<usize>) {
             let name = enclosed(chars, at, '{', '}');
             return (format!("Unknown character property name {{{name}}}"), Some(at - 1));
         }
-        ErrorKind::UnknownGroup if char_at(at.wrapping_sub(1)) == Some('?') => {
-            "Unknown inline modifier".into()
+        // `(?$` and `(?@` (measured in `m82.js`); any other unknown flag is a modifier.
+        ErrorKind::UnknownGroup
+            if matches!(char_at(at), Some('$' | '@'))
+                && char_at(at.wrapping_sub(1)) == Some('?') =>
+        {
+            "Unknown group type".into()
         }
-        ErrorKind::UnknownGroup => "Unknown group type".into(),
+        ErrorKind::UnknownGroup => "Unknown inline modifier".into(),
         ErrorKind::BadGroupName => return bad_group_name(chars, at),
+        ErrorKind::UnclosedCounted => "Unclosed counted closure".into(),
+        ErrorKind::UnclosedGroupName => "named capturing group is missing trailing '>'".into(),
+        ErrorKind::BareNamedReference => {
+            "\\k is not followed by '<' for named capturing group".into()
+        }
+        ErrorKind::BadBoundary => "Illegal/unsupported escape sequence".into(),
     };
     (text, Some(at))
 }
