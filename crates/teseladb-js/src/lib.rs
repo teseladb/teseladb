@@ -32,6 +32,7 @@ mod parser;
 mod promise;
 mod props;
 mod proxy;
+mod recursion;
 mod regex;
 mod setmethods;
 mod shared;
@@ -57,10 +58,17 @@ use crate::value::{Kind, Val};
 
 pub use crate::interp::Limits;
 
+/// The frames a call may hold before `too much recursion`, as a `refrouter` 9.0.4 counts them (the
+/// program's function and every function it calls, a builtin included; measured on 02-11).
+pub const MAX_FRAMES: usize = 51_000;
+/// The native stack a call takes by default: well inside the 2 MiB of a spawned thread.
+pub const DEFAULT_STACK: usize = 1 << 20;
+
 impl Default for Limits {
-    /// 100 million steps, 64 MiB of heap and 400 nested calls (016 data model).
+    /// 100 million steps, 64 MiB of heap, the frames of a `refrouter` 9.0.4 and 1 MiB of native
+    /// stack, well inside the 2 MiB of a spawned thread (016 data model).
     fn default() -> Limits {
-        Limits { steps: 100_000_000, heap: 64 << 20, depth: 400 }
+        Limits { steps: 100_000_000, heap: 64 << 20, depth: MAX_FRAMES, stack: DEFAULT_STACK }
     }
 }
 
@@ -114,6 +122,9 @@ pub enum JsError {
     Unreachable,
     /// A function program was expected and the source is something else.
     NotAFunction,
+    /// The engine of RefDb 9.0 stops with `wasm trap: call stack exhausted`: code whose
+    /// parse nests more arrow functions than its stack holds.
+    StackExhausted,
 }
 
 impl JsError {
@@ -129,6 +140,7 @@ impl JsError {
             JsError::NotAFunction => "the code is not a function".into(),
             JsError::Trap => "wasm trap: uninitialized element".into(),
             JsError::Unreachable => "wasm trap: wasm `unreachable` instruction executed".into(),
+            JsError::StackExhausted => parser::STACK_EXHAUSTED.into(),
         }
     }
 }
@@ -191,6 +203,9 @@ impl Program {
     /// Parses `source`.
     pub fn compile(source: &str) -> Result<Program, JsError> {
         let body = parser::parse_script(&text::encode(source)).map_err(|e| {
+            if e.message == parser::STACK_EXHAUSTED {
+                return JsError::StackExhausted;
+            }
             // RefDb compiles a function inside `(` and `)`: its first line moves one column.
             let t = source.trim_start();
             let wrapped = t.starts_with("function") || t.starts_with("async") || t.starts_with('(');
@@ -353,6 +368,7 @@ pub(crate) fn error_of(it: &mut Interp, c: Ctrl) -> JsError {
         }
         Ctrl::Fatal(Fatal::Trap) => JsError::Trap,
         Ctrl::Fatal(Fatal::Unreachable) => JsError::Unreachable,
+        Ctrl::Fatal(Fatal::StackExhausted) => JsError::StackExhausted,
         Ctrl::Throw(v) => {
             // The heap may be full: the message is read without new allocations counting.
             it.budget.used.set(0);

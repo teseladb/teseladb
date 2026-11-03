@@ -82,6 +82,14 @@ pub struct View {
 }
 
 impl View {
+    /// Whether the view lies outside its buffer: detached, or shrunk below the view's end.
+    pub fn out_of_bounds(&self) -> bool {
+        let b = self.buf.borrow();
+        b.detached
+            || self.offset > b.data.len()
+            || self.len.is_some_and(|n| self.offset + n * self.ty.size() > b.data.len())
+    }
+
     /// The current element count (zero once the buffer is detached or too short).
     pub fn length(&self) -> usize {
         let b = self.buf.borrow();
@@ -243,6 +251,28 @@ fn this_view(it: &mut Interp, this: &Val) -> R<View> {
             crate::builtins::class_name(this)
         )),
     }
+}
+
+/// ValidateTypedArray for the methods typed arrays share with arrays: an error for a typed
+/// array outside its buffer, nothing for anything else.
+pub fn validate(it: &mut Interp, this: &Val) -> R<()> {
+    if view_of(this).is_some() {
+        live_view(it, this)?;
+    }
+    Ok(())
+}
+
+/// `this` for a method of a typed array (ValidateTypedArray): a view inside its buffer, with the
+/// messages of a `refrouter` 9.0.4 (measured on 02-11).
+fn live_view(it: &mut Interp, this: &Val) -> R<View> {
+    let v = this_view(it, this)?;
+    if v.buf.borrow().detached {
+        return it.type_error("attempting to access detached ArrayBuffer");
+    }
+    if v.out_of_bounds() {
+        return it.type_error("attempting to access outside the bounds of resized ArrayBuffer");
+    }
+    Ok(v)
 }
 
 fn buf_of(v: &Val) -> Option<BufRef> {
@@ -458,7 +488,7 @@ fn g_byte_length(it: &mut Interp, this: &Val, _: &[Val]) -> R {
 
 fn g_byte_offset(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     let v = this_view(it, this)?;
-    Ok(Val::Num(if v.buf.borrow().detached { 0.0 } else { v.offset as f64 }))
+    Ok(Val::Num(if v.out_of_bounds() { 0.0 } else { v.offset as f64 }))
 }
 
 fn g_buffer(it: &mut Interp, this: &Val, _: &[Val]) -> R {
@@ -488,7 +518,7 @@ fn same_type(it: &mut Interp, v: &View, items: &[Val]) -> R {
 }
 
 fn ta_map(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    let v = this_view(it, this)?;
+    let v = live_view(it, this)?;
     let f = callable(it, &arg(a, 0))?;
     let mut out = Vec::new();
     for (i, x) in elements(&v).into_iter().enumerate() {
@@ -498,7 +528,7 @@ fn ta_map(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 }
 
 fn ta_filter(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    let v = this_view(it, this)?;
+    let v = live_view(it, this)?;
     let f = callable(it, &arg(a, 0))?;
     let mut out = Vec::new();
     for (i, x) in elements(&v).into_iter().enumerate() {
@@ -525,7 +555,7 @@ const CALLBACK_METHODS: [&str; 9] = [
 /// `CALLBACK_METHODS[I]` of a typed array: its callback checked as the `refrouter` 9.0.4 does, then
 /// the array method.
 fn with_callback<const I: usize>(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    this_view(it, this)?;
+    live_view(it, this)?;
     let name = CALLBACK_METHODS[I];
     if matches!(arg(a, 0), Val::Undef) {
         let owner = if name == "forEach" { "TypedArray" } else { "%TypedArray%" };
@@ -560,7 +590,7 @@ fn relative(it: &mut Interp, v: &Val, len: usize, default: usize) -> R<usize> {
 }
 
 fn ta_slice(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    let v = this_view(it, this)?;
+    let v = live_view(it, this)?;
     let all = elements(&v);
     let s = relative(it, &arg(a, 0), all.len(), 0)?;
     let e = relative(it, &arg(a, 1), all.len(), all.len())?;
@@ -568,7 +598,7 @@ fn ta_slice(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 }
 
 fn ta_subarray(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    let v = this_view(it, this)?;
+    let v = live_view(it, this)?;
     let n = v.length();
     let s = relative(it, &arg(a, 0), n, 0)?;
     let e = relative(it, &arg(a, 1), n, n)?;
@@ -632,7 +662,7 @@ fn store(v: &View, items: &[Val]) {
 }
 
 fn ta_sort(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    let v = this_view(it, this)?;
+    let v = live_view(it, this)?;
     if !matches!(arg(a, 0), Val::Undef) && !arg(a, 0).is_callable() {
         return it.type_error("invalid %TypedArray%.prototype.sort argument");
     }
@@ -642,13 +672,13 @@ fn ta_sort(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 }
 
 fn ta_to_sorted(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    let v = this_view(it, this)?;
+    let v = live_view(it, this)?;
     let items = sorted(it, &v, &arg(a, 0))?;
     same_type(it, &v, &items)
 }
 
 fn ta_reverse(it: &mut Interp, this: &Val, _: &[Val]) -> R {
-    let v = this_view(it, this)?;
+    let v = live_view(it, this)?;
     let mut items = elements(&v);
     items.reverse();
     store(&v, &items);
@@ -656,14 +686,14 @@ fn ta_reverse(it: &mut Interp, this: &Val, _: &[Val]) -> R {
 }
 
 fn ta_to_reversed(it: &mut Interp, this: &Val, _: &[Val]) -> R {
-    let v = this_view(it, this)?;
+    let v = live_view(it, this)?;
     let mut items = elements(&v);
     items.reverse();
     same_type(it, &v, &items)
 }
 
 fn ta_with(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    let v = this_view(it, this)?;
+    let v = live_view(it, this)?;
     let mut items = elements(&v);
     let n = it.number_of(&arg(a, 0))?;
     let n = if n.is_nan() { 0.0 } else { n.trunc() };
@@ -677,7 +707,7 @@ fn ta_with(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 }
 
 fn ta_fill(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    let v = this_view(it, this)?;
+    let v = live_view(it, this)?;
     let x = convert(it, v.ty, &arg(a, 0))?;
     let n = v.length();
     let s = relative(it, &arg(a, 1), n, 0)?;
@@ -689,7 +719,7 @@ fn ta_fill(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 }
 
 fn ta_set(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    let v = this_view(it, this)?;
+    let v = live_view(it, this)?;
     let offset = to_index(it, &arg(a, 1), "invalid or out-of-range index")?;
     let items = match view_of(&arg(a, 0)) {
         Some(src) => elements(&src),
@@ -720,7 +750,7 @@ fn ta_set(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 }
 
 fn ta_copy_within(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    let v = this_view(it, this)?;
+    let v = live_view(it, this)?;
     let items = elements(&v);
     let n = items.len();
     let target = relative(it, &arg(a, 0), n, 0)?;
@@ -738,7 +768,7 @@ const HEX: &[u8; 16] = b"0123456789abcdef";
 const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 fn bytes_of(it: &mut Interp, this: &Val) -> R<Vec<u8>> {
-    let v = this_view(it, this)?;
+    let v = live_view(it, this)?;
     if v.ty != Ty::U8 {
         let m = format!("{} method called on incompatible {}", it.native, v.ty.name());
         return it.type_error(&m);
@@ -1258,7 +1288,7 @@ pub fn install(it: &mut Interp, g: &ObjRef) -> R<()> {
 
 /// `setFromHex` and `setFromBase64`: the bytes decoded into the array, `{read, written}`.
 fn set_from(it: &mut Interp, this: &Val, decoded: Val, read: usize) -> R {
-    let v = this_view(it, this)?;
+    let v = live_view(it, this)?;
     let src = view_of(&decoded).map(|d| elements(&d)).unwrap_or_default();
     let n = src.len().min(v.length());
     for (i, x) in src.iter().take(n).enumerate() {
@@ -1272,14 +1302,14 @@ fn set_from(it: &mut Interp, this: &Val, decoded: Val, read: usize) -> R {
 
 fn set_from_hex(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let d = from_hex(it, &Val::Undef, a)?;
-    let room = this_view(it, this)?.length();
+    let room = live_view(it, this)?.length();
     let n = view_of(&d).map_or(0, |v| v.length()).min(room);
     // Two characters each byte written.
     set_from(it, this, d, 2 * n)
 }
 
 fn set_from_base64(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    let room = this_view(it, this)?.length();
+    let room = live_view(it, this)?.length();
     let s = string_arg(it, a)?;
     let chunks = base64_chunks(&s).map_err(|m| it.error("SyntaxError", &m))?;
     // Whole chunks while they fit.
