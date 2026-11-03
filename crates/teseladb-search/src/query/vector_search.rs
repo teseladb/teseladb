@@ -68,18 +68,18 @@ fn integer(spec: &Document, name: &str) -> Result<Option<i64>, SearchError> {
         None => return Ok(None),
         Some(Value::Int32(n)) => i64::from(*n),
         Some(Value::Int64(n)) => *n,
-        Some(Value::Double(d)) if d.fract() == 0.0 && d.is_finite() => {
-            if d.abs() >= 9.2e18 {
-                i64::MAX
-            } else {
-                *d as i64
-            }
-        }
+        // Saturating: an infinity or a double beyond 64 bits keeps its sign out of 32 bits.
+        Some(Value::Double(d)) if d.is_infinite() || d.fract() == 0.0 => *d as i64,
         Some(Value::Double(_)) => return Err(shape(name, "must be an integer")),
         // `refsearch`'s own wording.
         Some(_) => return Err(shape(name, "must be a integer")),
     };
-    Ok(Some(n))
+    // Measured in `m88.js` of lane 3.
+    match i32::try_from(n) {
+        Ok(_) => Ok(Some(n)),
+        Err(_) if n < 0 => Err(shape(name, "underflowed, must fit in a 32 bit integer")),
+        Err(_) => Err(shape(name, "overflowed, must fit in a 32 bit integer")),
+    }
 }
 
 /// `refsearch`'s name of a BSON type.

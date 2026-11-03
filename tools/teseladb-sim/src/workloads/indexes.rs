@@ -450,3 +450,97 @@ fn value_type_of(key: &[u8]) -> u8 {
 pub fn entry_keys() -> BTreeSet<Vec<u8>> {
     Indexes::new().entries.into_keys().collect()
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    use teseladb_types::Nanos;
+
+    use super::*;
+
+    fn done(ops: Vec<Op>, outcome: Outcome) -> Finished {
+        Finished {
+            ops,
+            read_ts: EVAL_MARK,
+            outcome,
+            began: Nanos::ZERO,
+            acked: None,
+            in_window: true,
+        }
+    }
+
+    fn doc_at(t: Option<i64>) -> Vec<u8> {
+        let d = Document::new().with("_id", 0);
+        let d = match t {
+            Some(t) => d.with("t", Value::DateTime(t)),
+            None => d,
+        };
+        d.to_bytes().expect("small")
+    }
+
+    fn ttl_delete(t: Option<i64>) -> Vec<Op> {
+        vec![Op::Read(doc_key(0), Some(doc_at(t))), Op::Write(doc_key(0), None)]
+    }
+
+    #[test]
+    fn a_ttl_delete_of_a_document_not_expired_or_without_a_date_fails() {
+        let now = EPOCH_MS + 10_000;
+        let committed = Outcome::Committed(EVAL_MARK);
+        expired_when_deleted(&done(ttl_delete(Some(now - 5_000)), committed.clone()), now)
+            .expect("expired");
+        let v = expired_when_deleted(&done(ttl_delete(None), committed.clone()), now)
+            .expect_err("no date");
+        assert!(v.detail.contains("without a date"), "{}", v.detail);
+        let v = expired_when_deleted(&done(ttl_delete(Some(now)), committed.clone()), now)
+            .expect_err("live");
+        assert_eq!(v.checker, TTL_CHECKER);
+        let bad = vec![Op::Read(doc_key(0), Some(vec![1])), Op::Write(doc_key(0), None)];
+        expired_when_deleted(&done(bad, committed.clone()), now).expect_err("unreadable");
+        // The script keeps the first violation, and finish reports it.
+        let mut s = Indexes::new();
+        let write = Turn::Write {
+            bound: Box::new(Bound { mutation: s.expired(0, now), keys: vec![] }),
+            keys: vec![],
+            values: BTreeMap::new(),
+        };
+        s.turns.insert(0, Turn::Ttl { write: Box::new(write), now_ms: now });
+        s.ended(0, done(ttl_delete(Some(now)), committed.clone()));
+        s.turns.insert(0, Turn::Ttl { write: Box::new(Turn::Check), now_ms: now });
+        s.ended(0, done(ttl_delete(None), committed));
+        let v = s.finish().expect_err("kept");
+        assert!(v.detail.contains("expires at"), "{}", v.detail);
+    }
+
+    #[test]
+    fn checks_judge_what_they_read_and_finish_wants_both_kinds() {
+        let mut s = Indexes::new();
+        let committed = Outcome::Committed(EVAL_MARK);
+        let v = s.finish().expect_err("nothing committed");
+        assert!(v.liveness);
+        // A check that read a key it does not know, and one whose document cannot be read.
+        s.turns.insert(1, Turn::Check);
+        s.ended(1, done(vec![Op::Read(vec![9, 9], Some(vec![1]))], committed.clone()));
+        assert_eq!((s.checked, s.violation.is_none()), (1, true));
+        s.turns.insert(1, Turn::Check);
+        s.ended(1, done(vec![Op::Read(doc_key(1), Some(vec![1]))], committed.clone()));
+        let first = s.violation.clone().expect("an unreadable document");
+        s.turns.insert(1, Turn::Check);
+        s.ended(1, done(vec![Op::Read(doc_key(1), Some(vec![2]))], committed));
+        assert_eq!(s.violation, Some(first));
+        assert!(s.finish().is_err());
+        let v = s.finish().expect_err("no write committed");
+        assert!(v.detail.contains("0 writes and 3 checks"), "{}", v.detail);
+    }
+
+    #[test]
+    fn healed_turns_check_and_checks_expand_to_nothing() {
+        let mut s = Indexes::new();
+        let mut w = World::new(1, 3, 1, false);
+        s.healed();
+        let steps = s.plan(&mut w, 0);
+        assert!(matches!(s.turns.get(&0), Some(Turn::Check)));
+        assert!(steps.len() > DOCS as usize && matches!(steps.last(), Some(Step::Commit)));
+        assert!(s.expand(0, &BTreeMap::new()).is_empty());
+        assert!(s.expand(7, &BTreeMap::new()).is_empty());
+    }
+}

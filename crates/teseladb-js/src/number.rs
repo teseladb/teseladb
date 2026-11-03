@@ -100,17 +100,38 @@ pub fn to_radix(x: f64, radix: u32) -> String {
     if neg { format!("-{s}") } else { s }
 }
 
-/// `x.toFixed(digits)`.
+/// `x.toFixed(digits)`: the nearest number with `digits` decimals, and the larger one of two
+/// at the same distance (ECMA-262 §21.1.3.3: `(0.5).toFixed(0)` is `1`, `(2.5).toFixed(0)`
+/// is `3`; Rust's formatting rounds those to even).
 pub fn to_fixed(x: f64, digits: usize) -> String {
+    // Every decimal digit of a double: the smallest one has 1074.
+    const EXACT: usize = 1100;
     if !x.is_finite() || x.abs() >= 1e21 {
         return to_string(x);
     }
-    let s = format!("{x:.digits$}");
-    // `-0` has no sign; a small negative number keeps it (`-0.00`).
-    if x == 0.0 && s.starts_with('-') {
-        return s[1..].to_owned();
+    let exact = format!("{:.*}", digits + EXACT, x.abs());
+    let (keep, rest) = exact.split_at(exact.len() - EXACT);
+    let mut out: Vec<u8> = keep.trim_end_matches('.').bytes().collect();
+    if rest.as_bytes()[0] >= b'5' {
+        increment(&mut out);
     }
-    s
+    let s = String::from_utf8(out).unwrap_or_default();
+    if x < 0.0 { format!("-{s}") } else { s }
+}
+
+/// Adds one in the last place of the decimal digits `d` (a `.` may be among them).
+fn increment(d: &mut Vec<u8>) {
+    for i in (0..d.len()).rev() {
+        match d[i] {
+            b'.' => {}
+            b'9' => d[i] = b'0',
+            c => {
+                d[i] = c + 1;
+                return;
+            }
+        }
+    }
+    d.insert(0, b'1');
 }
 
 /// Whether `c` is white space or a line terminator for StringToNumber.

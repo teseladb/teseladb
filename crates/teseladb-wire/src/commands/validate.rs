@@ -334,7 +334,7 @@ fn indexes<B: Backend + ?Sized>(
         let spec = Document::from(RawDoc::from_bytes(&e.spec)?);
         let multikey = has_marks(backend, c, e.id)?;
         let text = index_def(RawDoc::from_bytes(&e.spec)?, e.buckets)
-            .map_err(|e| CommandError::new(INTERNAL_ERROR, format!("{e:?}")))?
+            .map_err(crate::error::internal)?
             .is_none();
         let held_only = match text {
             true => Some(held(backend, c, e.id)?.len() as u64),
@@ -429,13 +429,16 @@ fn verify<B: Backend + ?Sized>(
         if index.id == teseladb_keys::DOCUMENTS {
             continue;
         }
-        let spec_bytes = index.spec.to_bytes()?;
+        // The `_id_` index of a capped collection is written unique, which its shown
+        // specification does not say: its entries are checked as they are written.
+        let spec_bytes = match index.id == teseladb_range::capped::ID_INDEX {
+            true => super::capped::id_index_rule(c).spec.to_bytes()?,
+            false => index.spec.to_bytes()?,
+        };
         let spec = RawDoc::from_bytes(&spec_bytes)?;
         let buckets =
             backend.indexes(c.id)?.into_iter().find(|e| e.id == index.id).map_or(0, |e| e.buckets);
-        let Some(def) = index_def(spec, buckets)
-            .map_err(|e| CommandError::new(INTERNAL_ERROR, format!("{e:?}")))?
-        else {
+        let Some(def) = index_def(spec, buckets).map_err(crate::error::internal)? else {
             continue;
         };
         let wildcard = index.spec.get("key").is_some_and(|k| match k {

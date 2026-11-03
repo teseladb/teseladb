@@ -168,6 +168,7 @@ fn an_event_comes_from_its_change() {
         doc: Some(doc.to_bytes().unwrap()),
         meta: Some(ChangeMeta {
             txn: Some(txn),
+            retry: None,
             op: 2,
             update: Some(update.clone()),
             replace: false,

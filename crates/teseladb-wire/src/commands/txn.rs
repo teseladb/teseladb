@@ -1315,11 +1315,8 @@ impl Backend for TxnBackend<'_> {
         for k in keys {
             self.contact(k);
         }
-        let values = keys
-            .iter()
-            .map(|k| self.inner.txn_get(k, at, &view, window))
-            .collect::<Result<_, _>>()
-            .map_err(|e| self.run.note_uncertain(e))?;
+        let values =
+            self.inner.txn_gets(keys, at, &view, window).map_err(|e| self.run.note_uncertain(e))?;
         Ok((at, values))
     }
 
@@ -1495,6 +1492,19 @@ impl Backend for TxnBackend<'_> {
         self.inner
             .txn_scan(start, end, limit, at, &view, window)
             .map_err(|e| self.run.note_uncertain(e))
+    }
+
+    fn points(
+        &mut self,
+        keys: &[Vec<u8>],
+        _concern: ReadConcern,
+    ) -> Result<Vec<Option<Vec<u8>>>, CommandError> {
+        // As `scan` reads each one, at the transaction's mark, all of them together.
+        for k in keys {
+            self.contact(k);
+        }
+        let (at, view, window) = (self.run.read_ts(), self.run.view.clone(), self.run.uncertain_to);
+        self.inner.txn_points(keys, at, &view, window).map_err(|e| self.run.note_uncertain(e))
     }
 
     fn kill_everywhere(&mut self, scope: &KillScope) -> Result<(), CommandError> {

@@ -219,6 +219,10 @@ pub struct LsmIngest {
 impl LsmIngest {
     /// The workload as a [`crate::registry::WorkloadFactory`].
     pub fn boxed(nodes: u32, cores: u16) -> Box<dyn Workload> {
+        Box::new(Self::new(nodes, cores))
+    }
+
+    fn new(nodes: u32, cores: u16) -> LsmIngest {
         let clients = (0..nodes * u32::from(cores))
             .map(|_| Client {
                 queue: VecDeque::new(),
@@ -231,7 +235,7 @@ impl LsmIngest {
             })
             .collect();
         let restarted = vec![Vec::new(); nodes as usize];
-        Box::new(LsmIngest { cores, clients, sources: Vec::new(), restarted })
+        LsmIngest { cores, clients, sources: Vec::new(), restarted }
     }
 
     fn place(&self, client: u32) -> (u32, u16) {
@@ -617,5 +621,97 @@ impl Workload for LsmIngest {
             self.check_latency(client)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    use super::*;
+
+    fn ms(n: u64) -> Nanos {
+        Nanos::from_millis(n)
+    }
+
+    #[test]
+    fn the_latency_check_wants_writes_on_both_sides_and_at_most_twice_the_p99() {
+        let mut wl = LsmIngest::new(1, 1);
+        let asked = ms(10_000);
+        // Not done yet: nothing to check.
+        wl.check_latency(0).expect("not done");
+        wl.clients[0].ingests[1] = Ingest::Done { asked };
+        let v = wl.check_latency(0).expect_err("no writes");
+        assert!(v.liveness && v.detail.contains("no writes around"), "{}", v.detail);
+        wl.clients[0].latencies = vec![(ms(9_000), ms(2)), (ms(10_500), ms(5))];
+        let v = wl.check_latency(0).expect_err("5 ms against 2 ms");
+        assert_eq!(v.checker, "ingest-pressure");
+        wl.clients[0].latencies[1].1 = ms(4);
+        wl.check_latency(0).expect("twice is allowed");
+        // A restart in the windows leaves the latencies out.
+        wl.clients[0].latencies[1].1 = ms(50);
+        wl.restarted[0].push(ms(10_200));
+        wl.check_latency(0).expect("restarted");
+    }
+
+    #[test]
+    fn finish_wants_every_ingestion_ended_on_the_nodes_it_did_not_lose() {
+        let mut w = World::new(1, 2, 1, false);
+        let mut wl = LsmIngest::new(2, 1);
+        for c in &mut wl.clients {
+            c.ingests = [Ingest::Done { asked: ms(1) }, Ingest::Done { asked: ms(2) }];
+        }
+        // Client 0 has its second ingestion due well after the end; client 1's is late.
+        wl.clients[0].ingests[1] = Ingest::Due(Nanos::from_secs(1_000));
+        wl.clients[1].ingests[1] = Ingest::Due(Nanos::ZERO);
+        let later = WINDOW + ms(1);
+        w.schedule(later, Event::Heal);
+        while w.now() < later {
+            w.pop().expect("the heal is due");
+        }
+        let v = wl.finish(&mut w).expect_err("ingestion 1 of n1");
+        assert_eq!(v.detail, "n1 c0: ingestion 1 did not end");
+        w.nodes[1].lost = true;
+        wl.finish(&mut w).expect("a lost node is not checked");
+    }
+
+    #[test]
+    fn a_restarted_interval_holds_all_or_none_of_its_samples() {
+        let mut wl = LsmIngest::new(1, 1);
+        let samples = vec![(interval_key(0, 1), vec![1]), (interval_key(0, 2), vec![2])];
+        wl.sources.push(Source { files: Vec::new(), samples });
+        let mut disk = SimDisk::default();
+        let mut lsm = Lsm::recover(&cfg(0), &mut disk).expect("a new LSM").0;
+        let now = Nanos::from_secs(1);
+        assert_eq!(wl.check_interval(&mut lsm, &mut disk, (0, false), now), Ok(false));
+        assert!(wl.check_interval(&mut lsm, &mut disk, (0, true), now).is_err());
+        lsm.put(GroupId(1), 1, &interval_key(0, 1), at(1), &[1]).expect("in memory");
+        let half = wl.check_interval(&mut lsm, &mut disk, (0, false), now).expect_err("half");
+        assert!(half.is_some_and(|d| d.contains("1 of 2 sampled keys")));
+        lsm.put(GroupId(1), 2, &interval_key(0, 2), at(2), &[2]).expect("in memory");
+        assert_eq!(wl.check_interval(&mut lsm, &mut disk, (0, true), now), Ok(true));
+        lsm.put(GroupId(1), 3, &interval_key(0, 2), at(3), &[3]).expect("in memory");
+        let other =
+            wl.check_interval(&mut lsm, &mut disk, (0, true), now).expect_err("another value");
+        assert!(other.is_some_and(|d| d.contains("reads another value")));
+    }
+
+    #[test]
+    fn an_ingestion_cut_by_a_crash_before_its_edit_is_due_again() {
+        let mut w = World::new(1, 1, 1, false);
+        let mut wl = LsmIngest::new(1, 1);
+        for i in 0..2 {
+            let samples = vec![(interval_key(i, 1), vec![1])];
+            wl.sources.push(Source { files: Vec::new(), samples });
+        }
+        let asked = ms(5);
+        wl.clients[0].ingests =
+            [Ingest::Running { id: 1, dir: "in-0".into(), asked }, Ingest::Done { asked }];
+        // The done one holds nothing on this empty disk: the check names it.
+        let v = wl.on_restart(&mut w, 0).expect_err("ingestion 1 lost its keys");
+        assert!(v.detail.contains("interval 1: 0 of 1"), "{}", v.detail);
+        assert_eq!(wl.clients[0].ingests[0], Ingest::Due(w.now()));
+        // The heal moves only a second ingestion that is still due.
+        wl.on_heal(&mut w);
+        assert_eq!(wl.clients[0].ingests[1], Ingest::Done { asked });
     }
 }

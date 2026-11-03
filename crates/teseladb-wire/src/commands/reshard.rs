@@ -1227,6 +1227,7 @@ mod tests {
             delete: false,
             doc: None,
             moved: None,
+            retry: None,
         }
     }
 

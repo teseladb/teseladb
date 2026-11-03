@@ -10,7 +10,10 @@
 //! the Spanish Snowball vocabulary (`tests/fixtures/refsearch/stem/spanishPluralStemming.txt`):
 //! words under four characters stay as they are; longer words lose the acute accent and the
 //! diaeresis of their vowels and then a plural ending, by the rules of [`spanish_plural`]. The
-//! words that keep their `s` are the ones observed (`INVARIANT`).
+//! words that keep their `s` are the ones observed (`INVARIANT`). The rules for `-ies`, `-us` and
+//! `-umes` were then checked on 238 words asked one by one (`tests/fixtures/refsearch/filters/
+//! spanishPluralStemming.txt`, 02-11-2026): the `-us` words that keep their `s` are a list, not an
+//! ending, and so are `albumes` and `sies`.
 //!
 //! `kStemming` and `stempel` are tables of word endings learned from the stems `refsearch` gives
 //! (D-051), with the words of their fixtures that the endings alone get wrong; how each table was
@@ -29,35 +32,47 @@ const INVARIANT: &[&str] = &[
     "apocalipsis",
     "arcoiris",
     "boris",
+    "cactus",
+    "caries",
     "corpus",
+    "cosmos",
     "creces",
     "crisis",
     "cumpleaños",
     "doscientas",
     "dosis",
     "entonces",
+    "estatus",
     "gris",
     "honorarios",
+    "ictus",
     "jueves",
+    "lapsus",
     "lavacoches",
     "lunes",
     "martes",
     "nupcias",
+    "pais",
     "parabrisas",
     "paracaidas",
-    "pais",
     "paris",
+    "rictus",
     "seis",
     "sintesis",
     "tenis",
+    "tifus",
     "vacaciones",
     "venus",
     "versus",
+    "virus",
     "viveres",
 ];
 
 /// Plurals whose singular the rules do not give, as observed.
-const IRREGULAR: &[(&str, &str)] = &[("clubes", "club")];
+const IRREGULAR: &[(&str, &str)] = &[("albumes", "album"), ("clubes", "club"), ("sies", "si")];
+
+/// Letters before `ies` after which only `es` goes, with or without an accent on the `i`.
+const IES_KEEP_I: &[char] = &['l', 'n', 'r', 't', 'u'];
 
 /// Letters before `es` that make a plural of `-es` when a vowel precedes them.
 const ES_CONSONANTS: &[char] = &['l', 'r', 'n', 'd', 'z', 's', 'x', 'y'];
@@ -105,11 +120,10 @@ fn plain(c: char) -> char {
 
 /// The stem `spanishPluralStemming` gives `word`.
 pub(super) fn spanish_plural(word: &str) -> String {
-    let original: Vec<char> = word.chars().collect();
-    if original.len() < 4 {
+    let v: Vec<char> = word.chars().map(plain).collect();
+    if v.len() < 4 {
         return word.to_string();
     }
-    let v: Vec<char> = original.iter().copied().map(plain).collect();
     let text: String = v.iter().collect();
     if INVARIANT.contains(&text.as_str()) {
         return text;
@@ -128,7 +142,7 @@ pub(super) fn spanish_plural(word: &str) -> String {
         'a' | 'o' => keep(1),
         'e' if ends("ces") => keep(3) + "z",
         'e' if ends("ies") => {
-            if original[n - 3] == 'í' || matches!(before3, 'r' | 't') {
+            if IES_KEEP_I.contains(&before3) {
                 keep(2)
             } else {
                 keep(1)

@@ -459,6 +459,26 @@ fn the_leader_of_a_busy_node_moves_to_an_idle_one_within_the_count_rule() {
     assert_eq!(hint(&w), None);
 }
 
+/// A node that leads a single range keeps it whatever its load: its load goes with the range, the
+/// node that takes it becomes the busiest and the next round would move it back, every 2 s, each
+/// move a new term of the range with its reads and writes waiting for it (017 SC-002).
+#[test]
+fn the_only_range_a_busy_node_leads_does_not_move_for_load() {
+    let mut sm = cluster(3);
+    add_range(&mut sm, 1, &[1, 2, 3]);
+    sm.ranges.get_mut(&GroupId(1)).unwrap().leader_hint = Some(n(1));
+    let ops = |o| NodeLoad { ops: o, ..NodeLoad::default() };
+    let mut w = World::new(sm, &[1, 2, 3]);
+    w.loads.insert(n(1), ops(3_000));
+    w.loads.insert(n(2), ops(100));
+    w.loads.insert(n(3), ops(50));
+    let moves = w
+        .plan()
+        .into_iter()
+        .any(|d| matches!(d, Decision::Command(Group0Command::SetLeaderHint { .. })));
+    assert!(!moves);
+}
+
 #[test]
 fn a_stopped_balancer_moves_nothing_for_balance_but_still_repairs() {
     let stopped = teseladb_bson::Document::new().with("_id", "balancer").with("stopped", true);

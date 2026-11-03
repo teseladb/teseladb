@@ -162,3 +162,17 @@ fn autocomplete_keeps_words_shorter_than_the_shortest_gram() {
     assert_eq!(right.of("x"), ["x"]);
     assert_eq!(right.of("abcd"), ["dc", "dcb", "dcb"]);
 }
+
+/// Java's `Float.toString` and `Double.toString`: the values outside 10^-3 to 10^7 in
+/// scientific form with a fraction, and the special values by name.
+#[test]
+fn java_number_forms() {
+    assert_eq!(java_float(f32::NAN), "NaN");
+    assert_eq!(java_float(f32::INFINITY), "Infinity");
+    assert_eq!(java_float(f32::NEG_INFINITY), "-Infinity");
+    assert_eq!(java_float(1e10), "1.0E10");
+    assert_eq!(java_float(1.5e-5), "1.5E-5");
+    assert_eq!(java_float(0.0), "0.0");
+    assert_eq!(java_double(100.0), "100.0");
+    assert_eq!(java_double(1e7), "1.0E7");
+}
