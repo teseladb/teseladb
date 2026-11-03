@@ -442,11 +442,18 @@ impl Replicas {
 
     /// Whether range `g` may change its replicas: once its log no longer starts at its first
     /// entry, which this asks for, and its snapshot is not older than its last split, which the
-    /// core takes after it (D-067): a replica added sooner would wait for it anyway.
+    /// core takes after it and this asks for too (D-067): a replica added sooner would wait for it
+    /// anyway.
     fn compacted(&self, core: &mut MultiRaftCore<CoreSm>, g: GroupId) -> bool {
         let floor = core.state_machine(g).map_or(0, StateMachine::snapshot_floor);
         if let Some(saved) = core.store().group(g).map(|l| l.snapshot_index).filter(|i| *i > 0) {
-            return saved >= floor;
+            if saved >= floor {
+                return true;
+            }
+            // The core took the newer one by itself after the cut; asked for, it owes the flush
+            // the release floor waits for (a busy core is never idle long enough to flush).
+            core.snapshot_now(g);
+            return false;
         }
         // A range born from a split takes its snapshot once it wrote (its `SplitGenesis`): a
         // snapshot with no write says the replica that receives it needs no data, and the data
@@ -850,6 +857,56 @@ mod tests {
         );
         assert!(o.lead().is_empty());
         assert!(!o.r.on_done(OpId(12345)));
+    }
+
+    /// After a cut the range's snapshot floor is past its saved snapshot, and its leader neither
+    /// splits it nor changes its replicas until a newer one is saved. The core takes that one by
+    /// itself, held by the release floor until the memtable is flushed: the leader asks for it, so
+    /// that the flush is owed. Before, nobody waited for it, and on a core that applied something
+    /// every few hundred milliseconds the memtable never went down (`admin_port`'s
+    /// `range_leaders_publish_themselves_and_spread_over_the_nodes`, load 80 on 18 cores).
+    #[test]
+    fn a_leader_waits_for_the_snapshot_past_its_cut_with_the_flush_owed() {
+        let mut o = One::new();
+        o.set(vec![desc(1, &[1], &[4])], &[]);
+        let lsm = o.lsm.clone();
+        o.r.open(&mut o.core, &mut o.host, &lsm);
+        o.run(20);
+        for _ in 0..200 {
+            o.lead();
+            if o.core.store().group(G).is_some_and(|l| l.snapshot_index > 0) {
+                break;
+            }
+            o.lsm.borrow_mut().flush();
+            o.run(20);
+        }
+        let saved = o.core.store().group(G).map_or(0, |l| l.snapshot_index);
+        assert!(saved > 0, "compacted first");
+        let mut pending = desc(1, &[1], &[4]);
+        pending.pending_split = Some(vec![2]);
+        o.set(vec![pending], &[(1, 7)]);
+        let mut done = Vec::new();
+        for _ in 0..50 {
+            done = o.lead();
+            if !done.is_empty() {
+                break;
+            }
+            o.run(20);
+        }
+        assert!(!done.is_empty(), "the cut is applied");
+        o.set(vec![desc(1, &[1], &[2])], &[]);
+        o.run(20);
+        o.lead();
+        let floor = o.core.state_machine(G).map_or(0, StateMachine::snapshot_floor);
+        assert!(o.core.store().group(G).map_or(0, |l| l.snapshot_index) < floor, "held");
+        assert!(o.core.snapshot_awaits_flush(), "the leader waits for it: a flush is owed");
+        o.lsm.borrow_mut().flush();
+        for _ in 0..50 {
+            o.run(20);
+            o.lead();
+        }
+        assert!(o.core.store().group(G).map_or(0, |l| l.snapshot_index) >= floor);
+        assert!(!o.core.snapshot_awaits_flush());
     }
 
     #[test]

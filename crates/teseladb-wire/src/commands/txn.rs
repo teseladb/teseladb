@@ -1377,8 +1377,9 @@ impl Backend for TxnBackend<'_> {
         start: &[u8],
         end: &[u8],
         from: Hlc,
+        at: Option<Hlc>,
     ) -> Result<Vec<super::RangeBatch>, CommandError> {
-        self.inner.range_changes(start, end, from)
+        self.inner.range_changes(start, end, from, at)
     }
 
     fn txn_route(&self, key: &[u8]) -> Option<teseladb_types::GroupId> {

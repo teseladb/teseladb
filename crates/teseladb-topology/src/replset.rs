@@ -23,6 +23,12 @@ const ELECTION_TIMEOUT_MS: i32 = 10_000;
 /// `settings.catchUpTakeoverDelayMillis`.
 const CATCH_UP_TAKEOVER_DELAY_MS: i32 = 30_000;
 
+/// A whole number as RefDb writes a configuration's version: an int when it fits in 32 bits,
+/// a long otherwise.
+pub fn whole_number(n: i64) -> Value {
+    i32::try_from(n).map_or(Value::Int64(n), Value::Int32)
+}
+
 /// A priority as RefDb writes it: a whole number as a 32-bit integer (a member's priority is
 /// within 0 and [`MAX_PRIORITY`], checked when the set is made).
 fn priority_value(p: f64) -> Value {
@@ -263,7 +269,7 @@ pub struct ReplicaSet {
     set_name: String,
     members: Vec<Member>,
     primary: Option<usize>,
-    set_version: i32,
+    set_version: i64,
     term: i64,
     /// Members in maintenance mode (`replSetMaintenance`): `RECOVERING`, neither primary nor
     /// secondary to the drivers.
@@ -276,7 +282,7 @@ impl ReplicaSet {
         set_name: impl Into<String>,
         members: Vec<Member>,
         primary: Option<&str>,
-        set_version: i32,
+        set_version: i64,
         term: i64,
     ) -> Result<ReplicaSet, ConfigError> {
         let set_name = set_name.into();
@@ -323,7 +329,7 @@ impl ReplicaSet {
     }
 
     /// `setVersion`.
-    pub fn set_version(&self) -> i32 {
+    pub fn set_version(&self) -> i64 {
         self.set_version
     }
 
@@ -386,7 +392,7 @@ impl ReplicaSet {
         best
     }
 
-    fn with_primary(&self, primary: usize, set_version: i32) -> ReplicaSet {
+    fn with_primary(&self, primary: usize, set_version: i64) -> ReplicaSet {
         let recovering = self.recovering.iter().copied().filter(|&i| i != primary).collect();
         let term = self.term + 1;
         ReplicaSet { primary: Some(primary), set_version, term, recovering, ..self.clone() }
@@ -470,7 +476,7 @@ impl ReplicaSet {
             .with("replicaSetId", Value::ObjectId(replica_set_id));
         Document::new()
             .with("_id", self.set_name.as_str())
-            .with("version", self.set_version)
+            .with("version", whole_number(self.set_version))
             .with("term", i32::try_from(self.term).unwrap_or(i32::MAX))
             .with("members", members)
             .with("protocolVersion", 1i64)
@@ -501,7 +507,9 @@ impl ReplicaSet {
             d.push("passives", passives);
         }
         d.push("setName", self.set_name.as_str());
-        d.push("setVersion", self.set_version);
+        // RefDb 9.0.4 gives `hello` the version's low 32 bits as an int (measured with version
+        // 5000000000, which `hello` shows as 705032704).
+        d.push("setVersion", self.set_version as i32);
         d.push(if ctx.legacy { "ismaster" } else { "isWritablePrimary" }, is_primary);
         d.push("secondary", !is_primary && !self.recovering.contains(&me.0));
         if let Some(p) = self.primary() {

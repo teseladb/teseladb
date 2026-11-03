@@ -465,6 +465,15 @@ fn a_range_gives_its_versions_and_its_oldest_pending_intent() {
     let at = intents_mark(n.txn(intents(T1, b, &[(C, put(b"c"))])));
     let got = rows(&n, b, far());
     assert_eq!((got.rows.len(), got.oldest_intent), (0, Some(at)));
+    // A stored version without its value type is damage: the read fails instead of guessing.
+    let late = Hlc { physical: at.physical + 1_000, logical: 0 };
+    n.host.lsm().borrow_mut().put(G, u64::MAX / 2, b"\x01d", late, &[]).expect("written");
+    let read = loop {
+        if let Some(r) = change_rows(n.host.lsm(), (b"\x01", b"\x02"), (at, far())) {
+            break r;
+        }
+    };
+    assert!(read.is_err(), "{read:?}");
 }
 
 /// What the leader gives a change stream (014 FR-003, FR-004): the versions of the range up to
@@ -478,7 +487,8 @@ fn the_leader_gives_a_stream_its_versions_up_to_the_closed_mark() {
     let a = n.write(A, b"a0");
     let from = Hlc { physical: a.physical - 1, logical: 0 };
     let ask = |n: &mut Node, from: Hlc| {
-        let req = ChangesReq { g: G, start: b"\x01".to_vec(), end: b"\x02".to_vec(), from };
+        let req =
+            ChangesReq { g: G, start: b"\x01".to_vec(), end: b"\x02".to_vec(), from, at: None };
         let now = n.now;
         let id = n.host.changes(&mut n.core, req, now);
         n.answer(id)
@@ -540,7 +550,7 @@ fn the_leader_gives_a_stream_its_versions_up_to_the_closed_mark() {
     // 014 FR-010: an interval the range no longer holds whole (a split shrank it under a stale
     // table) is refused, never answered for the part it holds, so the cursor reads it again.
     for (start, end) in [(&b"\x01"[..], &b"\x04"[..]), (b"\x00", b"\x02"), (b"\x01b", b"\x01b")] {
-        let req = ChangesReq { g: G, start: start.to_vec(), end: end.to_vec(), from: a };
+        let req = ChangesReq { g: G, start: start.to_vec(), end: end.to_vec(), from: a, at: None };
         let now = n.now;
         let id = n.host.changes(&mut n.core, req, now);
         assert_eq!(n.answer(id), Err(RangeError::OutOfRange), "{start:?}..{end:?}");
