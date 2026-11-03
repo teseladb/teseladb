@@ -54,6 +54,9 @@ pub(crate) enum FeedState {
         /// Whether the mark is at or below the leader's own read mark.
         own: bool,
     },
+    /// A mark above this leader's own and ahead of its wall clock: it waits for the clock to
+    /// reach the mark, and the core confirms the leadership again then.
+    Clock,
     /// It reads the versions.
     Read,
 }
@@ -120,7 +123,7 @@ impl RangeHost {
         let f = |to, state| FeedReq { g, start, end, from, to, hint: NodeId(0), state };
         match (closed, wanted) {
             (Some(c), w) if w.is_none_or(|w| c >= w) => {
-                self.step_changes(id, f(c, FeedState::Read));
+                self.step_changes(core, id, f(c, FeedState::Read));
             }
             (_, Some(w)) => match core.read(g, ReadConcern::Majority.mode(), now) {
                 Ok(op) => {
@@ -153,25 +156,54 @@ impl RangeHost {
         self.step(core, id, Nanos::ZERO);
     }
 
+    /// A read waiting for this node's wall clock to reach its mark: once it does, the core
+    /// confirms the leadership for it (a lease confirmed before may have ended meanwhile, and a
+    /// leader elected since may have written below the mark); `true` if it moved.
+    fn changes_clock<S: StateMachine>(
+        &mut self,
+        core: &mut MultiRaftCore<S>,
+        id: ReqId,
+        f: FeedReq,
+    ) -> bool {
+        if f.to.physical > self.wall_ms + FUTURE_READ_MS {
+            self.reply(id, Err(RangeError::Timeout));
+            return true;
+        }
+        if f.to.physical > self.wall_ms {
+            self.reqs.insert(id, Req::Changes(f));
+            return false;
+        }
+        match core.read(f.g, ReadConcern::Majority.mode(), self.now) {
+            Ok(op) => {
+                self.ops.insert(op, id);
+                self.reqs.insert(id, Req::Changes(FeedReq { state: FeedState::Core, ..f }));
+            }
+            Err(e) => self.reply(id, Err(super::op_error(e))),
+        }
+        true
+    }
+
     /// Reads the versions of a stream's read; `true` once it is answered.
-    pub(super) fn step_changes(&mut self, id: ReqId, mut f: FeedReq) -> bool {
+    pub(super) fn step_changes<S: StateMachine>(
+        &mut self,
+        core: &mut MultiRaftCore<S>,
+        id: ReqId,
+        mut f: FeedReq,
+    ) -> bool {
         match f.state {
             FeedState::Core => {
                 self.reqs.insert(id, Req::Changes(f));
                 return false;
             }
+            FeedState::Clock => return self.changes_clock(core, id, f),
             FeedState::Admit { own } => {
                 // A mark at or below the leader's own is read as a read at its own mark would be;
                 // one above, as a read at a mark the client gave (`step_get`): once this node's
-                // wall clock reaches it, and the clock takes it so that this node's later writes
-                // go above.
+                // wall clock reaches it, with the leadership confirmed again then, and the clock
+                // takes it so that this node's later writes go above.
                 if !own && f.to.physical > self.wall_ms {
-                    if f.to.physical > self.wall_ms + FUTURE_READ_MS {
-                        self.reply(id, Err(RangeError::Timeout));
-                        return true;
-                    }
-                    self.reqs.insert(id, Req::Changes(f));
-                    return false;
+                    f.state = FeedState::Clock;
+                    return self.changes_clock(core, id, f);
                 }
                 self.clock.0.update(f.to);
                 let Some(l) = self.ranges.get_mut(&f.g).and_then(|r| r.leader.as_mut()) else {

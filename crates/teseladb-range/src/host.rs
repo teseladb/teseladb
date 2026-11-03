@@ -403,6 +403,9 @@ pub(crate) struct MutReq {
 }
 
 enum GetState {
+    /// A mark the client gave ahead of this node's wall clock: the read waits for the clock to
+    /// reach it before the core confirms the leadership.
+    Clock,
     /// The core confirms the leadership (its operation is in `RangeHost::ops`).
     Core,
     /// Waiting for the latches at its mark.
@@ -416,6 +419,16 @@ enum GetState {
 }
 
 pub use crate::push::Row;
+
+/// Where a node's wall clock is against the mark a client gave a read.
+enum ClockAt {
+    /// At or past it, or the read has no mark of the client's.
+    Reached,
+    /// Behind it, within the time a read waits for.
+    Behind,
+    /// Too far behind it to wait for.
+    TooFar,
+}
 
 pub(crate) struct GetReq {
     g: GroupId,
@@ -855,9 +868,9 @@ impl RangeHost {
         self.read(core, req, true, now)
     }
 
-    /// A read of `key` at mark `ts` (contract `ReadSpec::ts`): ReadIndex confirms the leadership,
-    /// then it waits for the writes proposed at or below `ts` and enters the read cache there, so
-    /// that nothing is written below it later.
+    /// A read of `key` at mark `ts` (contract `ReadSpec::ts`): once this node's wall clock reaches
+    /// `ts`, the core confirms the leadership, then the read waits for the writes proposed at or
+    /// below `ts` and enters the read cache there, so that nothing is written below it later.
     pub fn get_at<S: StateMachine + RangeState>(
         &mut self,
         core: &mut MultiRaftCore<S>,
@@ -973,14 +986,40 @@ impl RangeHost {
             self.step(core, id, now);
             return id;
         }
-        match core.read(req.g, req.concern.mode(), now) {
+        match self.clock_at(&req) {
+            ClockAt::Reached => self.confirm(core, id, req, now),
+            ClockAt::Behind => {
+                self.reqs.insert(id, Req::Get(GetReq { state: GetState::Clock, ..req }));
+            }
+            ClockAt::TooFar => self.reply(id, Err(RangeError::Timeout)),
+        }
+        id
+    }
+
+    /// Where this node's wall clock is against the mark the client gave read `q`, if any.
+    fn clock_at(&self, q: &GetReq) -> ClockAt {
+        match q.at {
+            Some(at) if at.physical > self.wall_ms + FUTURE_READ_MS => ClockAt::TooFar,
+            Some(at) if at.physical > self.wall_ms => ClockAt::Behind,
+            Some(_) | None => ClockAt::Reached,
+        }
+    }
+
+    /// Asks the core to confirm the leadership for read `id`.
+    fn confirm<S: StateMachine>(
+        &mut self,
+        core: &mut MultiRaftCore<S>,
+        id: ReqId,
+        q: GetReq,
+        now: Nanos,
+    ) {
+        match core.read(q.g, q.concern.mode(), now) {
             Ok(op) => {
                 self.ops.insert(op, id);
-                self.reqs.insert(id, Req::Get(req));
+                self.reqs.insert(id, Req::Get(GetReq { state: GetState::Core, ..q }));
             }
             Err(e) => self.reply(id, Err(op_error(e))),
         }
-        id
     }
 
     /// A result of the core; `true` if it was one of the host's operations.
@@ -1142,7 +1181,7 @@ impl RangeHost {
         match req {
             Req::Mut(m) => self.step_mut(core, id, m, now),
             Req::Get(q) => self.step_get(core, id, q),
-            Req::Changes(f) => self.step_changes(id, f),
+            Req::Changes(f) => self.step_changes(core, id, f),
             // The core answers for them.
             r @ (Req::Purge(_) | Req::Round(_) | Req::Fence(_)) => {
                 self.reqs.insert(id, r);
@@ -1153,25 +1192,45 @@ impl RangeHost {
 
     fn step_get<S: StateMachine>(
         &mut self,
-        core: &MultiRaftCore<S>,
+        core: &mut MultiRaftCore<S>,
         id: ReqId,
         mut q: GetReq,
     ) -> bool {
         let mut moved = false;
+        if matches!(q.state, GetState::Clock) {
+            // A mark the client gave (008 FR-008, FR-012) is served once this node's wall clock
+            // reaches it (its HLC may already be past it, carried by a faster node), as a mark of
+            // its own would be, and the leadership is confirmed only then. A lease confirmed
+            // when the read arrived may end while the clock catches up, and a leader elected
+            // after it starts its read cache only 250 ms above its own clock, so it may write
+            // below the mark (seed 1069 of `special-collections`).
+            match self.clock_at(&q) {
+                ClockAt::Reached => {
+                    let now = self.now;
+                    self.confirm(core, id, q, now);
+                }
+                ClockAt::Behind => {
+                    self.reqs.insert(id, Req::Get(q));
+                    return false;
+                }
+                ClockAt::TooFar => self.reply(id, Err(RangeError::Timeout)),
+            }
+            return true;
+        }
         if let GetState::Admit(ts) = q.state {
-            // A mark the client gave (008 FR-008, FR-012) is served once this node's clock reaches
-            // it on its wall clock (its HLC may already be past it, carried by a faster node), as a
-            // mark of its own would be: a leader of a later term starts its read cache
-            // 250 ms above its clock, so it never writes below a read this one served. The HLC
-            // takes the mark, so this node's later writes go above it too.
-            let clock = self.wall_ms;
-            if q.at.is_some_and(|at| at.physical > clock) {
-                if ts.physical > clock + FUTURE_READ_MS {
+            // The leadership was confirmed with the clock at or past the mark; a wall clock that
+            // stepped back since waits and confirms again. The HLC takes the mark, so this
+            // node's later writes go above it.
+            match self.clock_at(&q) {
+                ClockAt::Reached => {}
+                ClockAt::Behind => {
+                    self.reqs.insert(id, Req::Get(GetReq { state: GetState::Clock, ..q }));
+                    return true;
+                }
+                ClockAt::TooFar => {
                     self.reply(id, Err(RangeError::Timeout));
                     return true;
                 }
-                self.reqs.insert(id, Req::Get(q));
-                return false;
             }
             if q.at.is_some() {
                 self.clock.0.update(ts);
@@ -1240,7 +1299,7 @@ impl RangeHost {
                 scan.step(&self.lsm, &q.view, limit)
                     .map(|r| r.map(Reply::Batch).map_err(|e| read_fault(e, at)))
             }
-            GetState::Core | GetState::Admit(_) | GetState::Window(..) => None,
+            GetState::Clock | GetState::Core | GetState::Admit(_) | GetState::Window(..) => None,
         };
         match outcome {
             Some(r) => {
