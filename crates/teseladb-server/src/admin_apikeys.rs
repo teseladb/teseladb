@@ -173,3 +173,84 @@ pub fn text(a: &ApiKeyAction, doc: Option<&Document>) -> String {
         }
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    use super::*;
+
+    fn opts(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect()
+    }
+
+    #[test]
+    fn create_takes_roles_and_days_and_refuses_what_does_not_parse() {
+        let create = ["apikey", "create"];
+        let all = opts(&[
+            ("user", "ann"),
+            ("db", "admin"),
+            ("role", "read@db1"),
+            ("role", "a@b@db2"),
+            ("expires-after-days", "30"),
+        ]);
+        let a = parse(&create, &all).unwrap().unwrap();
+        let want = ApiKeyAction::Create {
+            user: "ann".into(),
+            db: "admin".into(),
+            roles: vec!["read@db1".into(), "a@b@db2".into()],
+            days: Some(30),
+        };
+        assert_eq!(a, want);
+        let (m, t, body) = request(&a).unwrap();
+        assert_eq!((m, t.as_str()), (Method::Post, API_KEYS));
+        let d =
+            teseladb_rest::media::decode(body.as_bytes(), teseladb_rest::media::Format::Relaxed)
+                .unwrap();
+        let role =
+            |r: &str, db: &str| Value::Document(Document::new().with("role", r).with("db", db));
+        assert_eq!(
+            d.get("roles"),
+            Some(&Value::Array(vec![role("read", "db1"), role("a@b", "db2")]))
+        );
+        assert!(
+            matches!(d.get("expiresAfterDays"), Some(Value::Int32(30) | Value::Int64(30))),
+            "{d:?}"
+        );
+        let refused = |o: &[(&str, &str)]| parse(&create, &opts(o)).unwrap().unwrap_err();
+        assert_eq!(refused(&[("db", "admin")]), "apikey create needs --user");
+        assert_eq!(refused(&[("user", "ann")]), "apikey create needs --db");
+        let days = [("user", "ann"), ("db", "admin"), ("expires-after-days", "x")];
+        assert_eq!(refused(&days), "not a number of days: x");
+        let role = [("user", "ann"), ("db", "admin"), ("role", "read")];
+        assert_eq!(refused(&role), "--role takes <role>@<db>, not read");
+        assert_eq!(refused(&[("bogus", "1")]), "--bogus does not go with this subcommand");
+        let list = parse(&["apikey", "list"], &opts(&[("user", "a b")])).unwrap().unwrap();
+        let (m, t, _) = request(&list).unwrap();
+        assert_eq!((m, t.as_str()), (Method::Get, "/admin/apiKeys?user=a%20b"));
+        let revoke = parse(&["apikey", "revoke", "k/1"], &[]).unwrap().unwrap();
+        let (m, t, _) = request(&revoke).unwrap();
+        assert_eq!((m, t.as_str()), (Method::Post, "/admin/apiKeys/k%2F1/revoke"));
+        assert_eq!(parse(&["apikey", "rotate"], &[]), None);
+    }
+
+    #[test]
+    fn the_list_shows_one_line_per_key_and_values_that_are_not_text() {
+        let list = ApiKeyAction::List { user: None };
+        let key = Document::new()
+            .with("keyId", "k1")
+            .with("prefix", "tsk_ab")
+            .with("user", "ann")
+            .with("db", "admin")
+            .with("expiresAt", 7_i32);
+        let keys = Value::Array(vec![Value::Document(key), Value::Int32(1)]);
+        let d = Document::new().with("keys", keys);
+        assert_eq!(text(&list, Some(&d)), "k1\ttsk_ab\tann@admin\t7\n");
+        assert_eq!(text(&list, None), "");
+        let create =
+            ApiKeyAction::Create { user: "a".into(), db: "b".into(), roles: vec![], days: None };
+        assert_eq!(text(&create, Some(&Document::new().with("key", "tsk_x"))), "tsk_x\n");
+        assert_eq!(text(&create, Some(&Document::new())), "\n");
+        assert_eq!(text(&create, None), "");
+        assert_eq!(text(&ApiKeyAction::Revoke("k1".into()), None), "API key k1 revoked\n");
+    }
+}

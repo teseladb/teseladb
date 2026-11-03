@@ -542,3 +542,67 @@ pub(crate) fn metas_read(v: RawValue<'_>, out: &mut Vec<String>) {
         _ => {}
     }
 }
+
+#[cfg(test)]
+mod env_tests {
+    use super::*;
+    use crate::reference::Reference;
+
+    /// What `env` answers, to compare with the environment it wraps.
+    fn answers(env: &dyn Env) -> String {
+        let _ = env.ext();
+        let _ = env.collation();
+        let none = Document::new();
+        format!(
+            "{:?} {:?} {:?} {} {} {:?} {:?} {:?} {} {} {} {} {}",
+            env.vars(),
+            env.collection("c"),
+            env.collection_matching("c", &none),
+            env.operation_memory_limit(),
+            env.random(),
+            env.system_stage("$x", &none).is_ok(),
+            env.check_search("$search", &none).is_ok(),
+            env.search_source("$search", &none).is_ok(),
+            env.geo_indexes().is_ok(),
+            env.js().is_none(),
+            env.allow_disk_use(),
+            env.stage_memory_limit(),
+            env.spill().is_none(),
+        )
+    }
+
+    fn reference() -> Reference {
+        Reference::new(7).with_collection("c", vec![Document::new().with("a", 1)])
+    }
+
+    /// The metadata environments pass every question on to the one they wrap.
+    #[test]
+    fn wrapped_environments_answer_as_their_inner_one() {
+        let direct = answers(&reference());
+        let inner = reference();
+        let names = vec!["searchScore".to_owned()];
+        let required = RequiredEnv { inner: &inner, names: &names, vars: None };
+        assert_eq!(answers(&required), direct);
+        let inner = reference();
+        let meta = Meta::new();
+        let wrapped = MetaEnv { inner: &inner, meta: &meta, marked: &[] };
+        assert_eq!(answers(&wrapped), direct);
+    }
+
+    /// Malformed stages are left to the stage parsers, which run after the check.
+    #[test]
+    fn malformed_stages_are_left_to_their_parsers() {
+        let stages = Value::Array(vec![
+            Value::Int32(5),
+            Value::Document(Document::new()),
+            Value::Document(Document::new().with("$facet", 5)),
+            Value::Document(Document::new().with("$facet", Document::new().with("a", 5))),
+        ]);
+        let holder = Document::new().with("p", stages);
+        let bytes = crate::raw::bytes_of(&holder).expect("bytes");
+        let raw = teseladb_bson::RawDoc::from_bytes(&bytes).expect("raw");
+        let Some(RawValue::Array(list)) = raw.get("p") else { panic!("an array") };
+        let list: Vec<RawValue<'_>> = list.iter().collect();
+        assert!(check_joined(&list).is_ok());
+    }
+}

@@ -108,6 +108,23 @@ fn checks_fields_in_refsearch_order() {
     assert_eq!(err(spec(|d| set(d, "numCandidates", "5"))), "\"numCandidates\" must be a integer");
     assert_eq!(err(spec(|d| drop(d.remove("limit")))), "\"limit\" is required");
     assert_eq!(err(spec(|d| set(d, "limit", 2.5))), "\"limit\" must be an integer");
+    // Beyond 32 bits (`m88.js` of lane 3, `refsearch` 1.70.6).
+    let over = "\"numCandidates\" overflowed, must fit in a 32 bit integer";
+    let under = "\"numCandidates\" underflowed, must fit in a 32 bit integer";
+    for (n, want) in [
+        (Value::Double(1e19), over),
+        (Value::Double(f64::INFINITY), over),
+        (Value::Double(3e9), over),
+        (Value::Int64(3_000_000_000), over),
+        (Value::Double(-1e19), under),
+        (Value::Double(f64::NEG_INFINITY), under),
+        (Value::Int64(-3_000_000_000), under),
+        (Value::Double(f64::NAN), "\"numCandidates\" must be an integer"),
+    ] {
+        assert_eq!(err(spec(|d| set(d, "numCandidates", n))), want);
+    }
+    let limit = "\"limit\" overflowed, must fit in a 32 bit integer";
+    assert_eq!(err(spec(|d| set(d, "limit", f64::INFINITY))), limit);
     assert_eq!(
         err(spec(|d| {
             d.remove("numCandidates");

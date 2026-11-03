@@ -11,7 +11,7 @@ fn m(
     update: Option<UpdateDescription>,
     replace: bool,
 ) -> ChangeMeta {
-    ChangeMeta { txn, op, update, replace, delete: false, doc: None, moved: None }
+    ChangeMeta { txn, retry: None, op, update, replace, delete: false, doc: None, moved: None }
 }
 use teseladb_changestream::order::EventKey;
 use teseladb_changestream::token::EventKind;

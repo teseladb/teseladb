@@ -22,18 +22,22 @@
 //! The replies, messages and events are those of a `refrouter` 9.0.4 of two shards (measured on
 //! 02-11-2026). `currentOp` lists the operation as `ReshardingMetricsRecipientService <uuid>`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use teseladb_bson::{Document, RawDoc, Value};
+use teseladb_changestream::meta::{ChangeMeta, doc_of_meta};
 use teseladb_hlc::Hlc;
 use teseladb_keys::KeyBuilder;
 use teseladb_meta::catalog::{CatalogCommand, CollectionEntry, Namespace};
 use teseladb_meta::indexes::{IndexCommand, IndexState};
+use teseladb_range::changes::Versioned;
 use teseladb_range::push::TxnView;
 use teseladb_range::read::ReadConcern;
 use teseladb_types::NodeId;
 
-use super::crud::{Writer, index_rules, rules_of};
+use super::crud::{
+    INSERT_CHUNK_BYTES, INSERT_CHUNK_DOCS, MODIFY_CHUNK_KEYS, Writer, index_rules, rules_of,
+};
 use super::mutation::{Bound, DocMutation, Image, Rules};
 use super::names::{full, parse_full};
 use super::sharding::{SHARD_KEY, ShardKey, document_key, same_value, shard_key_of};
@@ -68,6 +72,12 @@ pub(super) const DEFAULT_CHUNKS: i64 = 90;
 /// The documents sampled per chunk, every tenth one a split point (measured).
 const SAMPLES_PER_CHUNK: usize = 10;
 const SCAN: usize = super::query::SCAN_CHUNK;
+/// Documents a round of the apply phase may apply before the critical section starts: with more,
+/// the clients wrote meanwhile, and it reads the history again first.
+const CHASE_KEYS: usize = 64;
+/// Rounds of the apply phase that chase the clients' writes before the critical section starts
+/// anyway.
+const CHASE_ROUNDS: u32 = 32;
 pub(super) const PROVENANCE: &str = "provenance";
 
 /// The phase of a resharding, as `Reshard.tla` names it.
@@ -198,6 +208,108 @@ pub struct Resharding {
     copied: i64,
     bytes: i64,
     applied: i64,
+    /// Rounds of the apply phase that read the history again because the clients kept writing.
+    chased: u32,
+}
+
+/// Documents waiting to go to the copy in one insert.
+#[derive(Default)]
+struct Pending {
+    docs: Vec<Document>,
+    keys: Vec<Vec<u8>>,
+    bytes: usize,
+}
+
+/// What a round of the catch-up read of one document key: the mark of its first change, its
+/// newest version (`None` once deleted), a version that holds its `_id`, and its version and the
+/// meta of its first write at the first change.
+struct Touched {
+    first: Hlc,
+    first_doc: Option<Vec<u8>>,
+    first_meta: Option<ChangeMeta>,
+    newest_ts: Hlc,
+    newest: Option<Vec<u8>>,
+    seen: Option<Vec<u8>>,
+}
+
+/// The document keys `rows` changed up to `resolved`, in key order.
+fn touched_documents(rows: Vec<Versioned>, resolved: Hlc) -> BTreeMap<Vec<u8>, Touched> {
+    let mut out: BTreeMap<Vec<u8>, Touched> = BTreeMap::new();
+    let mut metas: BTreeMap<(Vec<u8>, Hlc), ChangeMeta> = BTreeMap::new();
+    for r in rows.into_iter().filter(|r| r.ts <= resolved) {
+        let doc = match r.value {
+            Some((teseladb_changestream::DOCUMENT_VALUE, b)) => Some(b),
+            None => None,
+            // The history's metas: the first write of each document at each mark. One that
+            // does not read back is as if missing.
+            Some((teseladb_changestream::HISTORY_VALUE, b)) => {
+                if let (Some(d), Ok(m)) = (doc_of_meta(&r.key), ChangeMeta::decode(&b)) {
+                    match metas.get(&(d.to_vec(), r.ts)) {
+                        Some(old) if old.op <= m.op => {}
+                        _ => {
+                            metas.insert((d.to_vec(), r.ts), m);
+                        }
+                    }
+                }
+                continue;
+            }
+            Some(_) => continue,
+        };
+        let t = out.entry(r.key).or_insert_with(|| Touched {
+            first: r.ts,
+            first_doc: None,
+            first_meta: None,
+            newest_ts: r.ts,
+            newest: None,
+            seen: None,
+        });
+        if r.ts <= t.first {
+            t.first = r.ts;
+            t.first_doc.clone_from(&doc);
+        }
+        if t.seen.is_none() {
+            t.seen.clone_from(&doc);
+        }
+        if r.ts >= t.newest_ts {
+            t.newest_ts = r.ts;
+            t.newest = doc;
+        }
+    }
+    for (key, t) in &mut out {
+        t.first_meta = metas.remove(&(key.clone(), t.first));
+    }
+    out
+}
+
+/// Whether a write with `meta` may have changed the values of `fields` (a shard key's) of its
+/// document: anything but an update by operators that touches none of their paths.
+fn may_change(meta: &ChangeMeta, fields: &[&str]) -> bool {
+    let Some(u) = &meta.update else { return true };
+    if meta.replace || meta.delete || meta.moved.is_some() || !u.disambiguated.is_empty() {
+        return true;
+    }
+    let touches = |path: &str| {
+        fields.iter().any(|f| {
+            path == *f
+                || path.strip_prefix(*f).is_some_and(|r| r.starts_with('.'))
+                || f.strip_prefix(path).is_some_and(|r| r.starts_with('.'))
+        })
+    };
+    u.updated
+        .iter()
+        .map(|(p, _)| p)
+        .chain(&u.removed)
+        .chain(u.truncated.iter().map(|(p, _)| p))
+        .any(|p| touches(p))
+}
+
+/// What a round of the catch-up knows of the key of a document's version in the copy.
+#[derive(Debug, PartialEq)]
+enum CopyKey {
+    /// At this key.
+    At(Vec<u8>),
+    /// To be read from the copy's `_id_` index.
+    Unknown,
 }
 
 /// `reshardCollection`.
@@ -646,6 +758,7 @@ impl Resharding {
             copied: 0,
             bytes: 0,
             applied: 0,
+            chased: 0,
         };
         r.report(shared);
         Ok(r)
@@ -714,11 +827,13 @@ impl Resharding {
         let mark = self.mark;
         let old = self.old.clone();
         let mut done = (0i64, 0i64);
+        let mut pending = Pending::default();
         for_each_document(backend, &old, Some(mark), |b, doc| {
             done.0 += 1;
             done.1 += i64::try_from(doc.to_bytes()?.len()).unwrap_or(i64::MAX);
-            self.put(b, &mut w, &rules, doc)
+            self.add(b, &mut w, &rules, &mut pending, doc.clone())
         })?;
+        self.flush(backend, &mut w, &rules, &mut pending)?;
         self.copied = done.0;
         self.bytes = done.1;
         self.target = backend.read_versions(&[])?.0;
@@ -728,8 +843,11 @@ impl Resharding {
     }
 
     /// Applies to the copy the writes the collection took after the mark, up to the newest
-    /// mark its history is complete at: each key's document as it is now replaces the one of
-    /// its `_id`. The mark it reached.
+    /// mark its history is complete at: each key's document at that mark replaces the one of
+    /// its `_id`. The writes go in batches (one request per batch of documents, and the keys
+    /// of the copy's documents read together), so that it keeps up with the clients' writes.
+    /// In the apply phase, a round that had many documents to apply reads the history again
+    /// before the critical section starts, which then has few left. The mark it reached.
     pub fn catch_up<B: Backend + ?Sized>(
         &mut self,
         backend: &mut B,
@@ -744,52 +862,54 @@ impl Resharding {
         if resolved <= self.mark {
             return Ok(self.mark);
         }
-        let mut first: Vec<(Vec<u8>, Hlc)> = Vec::new();
-        for r in rows.iter().filter(|r| r.ts <= resolved) {
-            match first.iter_mut().find(|(k, _)| *k == r.key) {
-                Some((_, ts)) => *ts = (*ts).min(r.ts),
-                None => first.push((r.key.clone(), r.ts)),
-            }
-        }
+        let touched = touched_documents(rows, resolved);
+        let many = touched.len() > CHASE_KEYS;
         let mut ids = Vec::new();
+        let mut keys = Vec::new();
         let mut now = Vec::new();
-        for (key, ts) in first {
-            let current = current_doc(backend, &key)?;
-            let seen = rows.iter().find_map(|r| match &r.value {
-                Some((teseladb_changestream::DOCUMENT_VALUE, b)) if r.key == key => Some(b.clone()),
-                _ => None,
-            });
-            let some = match (&current, seen) {
-                (Some(d), _) => Some(d.clone()),
-                (None, Some(b)) => Some(Document::from(RawDoc::from_bytes(&b)?)),
-                (None, None) => super::change_stream::previous(backend, &key, ts)?
-                    .map(|b| RawDoc::from_bytes(&b).map(Document::from))
-                    .transpose()?,
-            };
-            if let Some(id) = some.and_then(|d| d.get("_id").cloned()) {
-                ids.push(id);
+        for (key, t) in touched {
+            match self.copy_key(&t)? {
+                CopyKey::At(k) => keys.push(k),
+                CopyKey::Unknown => {
+                    let some = match (&t.newest, &t.seen) {
+                        (Some(b), _) | (None, Some(b)) => Some(b.clone()),
+                        (None, None) => super::change_stream::previous(backend, &key, t.first)?,
+                    };
+                    let some =
+                        some.map(|b| RawDoc::from_bytes(&b).map(Document::from)).transpose()?;
+                    ids.extend(some.and_then(|d| d.get("_id").cloned()));
+                }
             }
-            now.extend(current);
+            now.extend(t.newest.map(|b| RawDoc::from_bytes(&b).map(Document::from)).transpose()?);
         }
         let rules = self.temp_rules(backend)?;
         let mut w = Writer::internal();
-        for id in ids {
-            if let Some(k) = super::crud::id_doc_key(backend, &self.temp, &id)? {
-                let filter = Document::new().with("_id", id);
-                let gone = DocMutation::Delete {
-                    filter,
-                    multi: false,
-                    image: Image::None,
-                    rules: rules.clone(),
-                };
-                w.write(backend, &Bound { mutation: gone, keys: vec![k] }, 0)?;
-            }
-        }
-        for doc in &now {
-            self.put(backend, &mut w, &rules, doc)?;
+        keys.extend(super::crud::id_doc_keys(backend, &self.temp, &ids)?.into_iter().flatten());
+        for chunk in keys.chunks(MODIFY_CHUNK_KEYS) {
+            let gone = DocMutation::Delete {
+                filter: Document::new(),
+                multi: true,
+                image: Image::None,
+                rules: rules.clone(),
+            };
+            w.write(backend, &Bound { mutation: gone, keys: chunk.to_vec() }, 0)?;
         }
         self.applied += i64::try_from(now.len()).unwrap_or(i64::MAX);
+        let mut pending = Pending::default();
+        for doc in now {
+            self.add(backend, &mut w, &rules, &mut pending, doc)?;
+        }
+        self.flush(backend, &mut w, &rules, &mut pending)?;
         self.mark = resolved;
+        // The clients kept writing while this round applied many documents: chase them.
+        if self.phase == Phase::Apply
+            && self.mark >= self.target
+            && many
+            && self.chased < CHASE_ROUNDS
+        {
+            self.chased += 1;
+            self.target = backend.read_versions(&[])?.0;
+        }
         self.report(shared);
         Ok(resolved)
     }
@@ -915,20 +1035,66 @@ impl Resharding {
         })
     }
 
-    fn put<B: Backend + ?Sized>(
+    /// The key of the copy's version of a document a round touched, from the history where it
+    /// tells: one whose first change was an update that left the new key's fields alone is at
+    /// the key of its first version. An insert writes no meta, so it is read like the others.
+    fn copy_key(&self, t: &Touched) -> Result<CopyKey, CommandError> {
+        if self.plan.provenance.unsplittable() {
+            return Ok(CopyKey::Unknown);
+        }
+        let (Some(meta), Some(first)) = (&t.first_meta, &t.first_doc) else {
+            return Ok(CopyKey::Unknown);
+        };
+        let fields: Vec<&str> = self.plan.key.key.iter().map(|(f, _)| f).collect();
+        if may_change(meta, &fields) {
+            return Ok(CopyKey::Unknown);
+        }
+        let doc = Document::from(RawDoc::from_bytes(first)?);
+        Ok(CopyKey::At(self.key_of(&doc)?))
+    }
+
+    /// The key of `doc` in the copy.
+    fn key_of(&self, doc: &Document) -> Result<Vec<u8>, CommandError> {
+        match self.plan.provenance.unsplittable() {
+            true => super::crud::doc_key(&self.temp, doc.get("_id").unwrap_or(&Value::Null)),
+            false => document_key(&self.temp, &self.plan.key.key, doc),
+        }
+    }
+
+    /// Adds `doc` to the documents `pending` for the copy, and writes them once they make a
+    /// batch.
+    fn add<B: Backend + ?Sized>(
         &self,
         backend: &mut B,
         w: &mut Writer,
         rules: &Rules,
-        doc: &Document,
+        pending: &mut Pending,
+        doc: Document,
     ) -> Result<(), CommandError> {
-        let at = match self.plan.provenance.unsplittable() {
-            true => super::crud::doc_key(&self.temp, doc.get("_id").unwrap_or(&Value::Null))?,
-            false => document_key(&self.temp, &self.plan.key.key, doc)?,
-        };
-        let m =
-            DocMutation::Insert { docs: vec![doc.clone()], ordered: true, rules: rules.clone() };
-        let r = w.write(backend, &Bound { mutation: m, keys: vec![at] }, 0)?;
+        let at = self.key_of(&doc)?;
+        pending.bytes += doc.to_bytes()?.len();
+        pending.keys.push(at);
+        pending.docs.push(doc);
+        if pending.docs.len() >= INSERT_CHUNK_DOCS || pending.bytes >= INSERT_CHUNK_BYTES {
+            self.flush(backend, w, rules, pending)?;
+        }
+        Ok(())
+    }
+
+    /// Writes the documents `pending` for the copy in one insert.
+    fn flush<B: Backend + ?Sized>(
+        &self,
+        backend: &mut B,
+        w: &mut Writer,
+        rules: &Rules,
+        pending: &mut Pending,
+    ) -> Result<(), CommandError> {
+        let Pending { docs, keys, .. } = std::mem::take(pending);
+        if docs.is_empty() {
+            return Ok(());
+        }
+        let m = DocMutation::Insert { docs, ordered: true, rules: rules.clone() };
+        let r = w.write(backend, &Bound { mutation: m, keys }, 0)?;
         match r.errors.into_iter().next() {
             Some(e) => Err(e.error),
             None => Ok(()),
@@ -1016,19 +1182,105 @@ fn count<B: Backend + ?Sized>(backend: &mut B, c: &CollectionEntry) -> Result<us
     Ok(n)
 }
 
-/// The document at `key` now, if any.
-fn current_doc<B: Backend + ?Sized>(
-    backend: &mut B,
-    key: &[u8],
-) -> Result<Option<Document>, CommandError> {
-    let end = [key, &[0]].concat();
-    let rows = backend.scan(key, &end, 1, ReadConcern::Local)?;
-    match rows.into_iter().find(|(k, _)| k == key) {
-        Some((_, b)) => Ok(Some(Document::from(RawDoc::from_bytes(&b)?))),
-        None => Ok(None),
-    }
-}
-
 fn uuid_value(u: [u8; 16]) -> Value {
     Value::Binary { subtype: super::uuid::UUID_SUBTYPE, bytes: u.to_vec() }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    use teseladb_changestream::meta::{Moved, meta_key};
+    use teseladb_changestream::update_desc::{PathPart, UpdateDescription};
+
+    use super::*;
+
+    fn meta(update: Option<UpdateDescription>) -> ChangeMeta {
+        ChangeMeta {
+            txn: None,
+            op: 0,
+            update,
+            replace: false,
+            delete: false,
+            doc: None,
+            moved: None,
+            retry: None,
+        }
+    }
+
+    fn set(paths: &[&str]) -> Option<UpdateDescription> {
+        Some(UpdateDescription {
+            updated: paths.iter().map(|p| ((*p).to_owned(), Value::Int32(1))).collect(),
+            ..UpdateDescription::default()
+        })
+    }
+
+    #[test]
+    fn only_an_update_away_from_the_key_keeps_it() {
+        let key = ["b", "c.d"];
+        assert!(!may_change(&meta(set(&["x", "bb", "c.e", "cd"])), &key));
+        for path in ["b", "b.x", "c", "c.d", "c.d.e"] {
+            assert!(may_change(&meta(set(&[path])), &key), "{path}");
+        }
+        let removed =
+            UpdateDescription { removed: vec!["b".into()], ..UpdateDescription::default() };
+        assert!(may_change(&meta(Some(removed)), &key));
+        let cut =
+            UpdateDescription { truncated: vec![("c".into(), 1)], ..UpdateDescription::default() };
+        assert!(may_change(&meta(Some(cut)), &key));
+        let ambiguous = UpdateDescription {
+            disambiguated: vec![(
+                "x.0".into(),
+                vec![PathPart::Field("x".into()), PathPart::Index(0)],
+            )],
+            ..set(&["x.0"]).unwrap_or_default()
+        };
+        assert!(may_change(&meta(Some(ambiguous)), &key));
+        assert!(may_change(&meta(None), &key));
+        for m in [
+            ChangeMeta { replace: true, ..meta(set(&["x"])) },
+            ChangeMeta { delete: true, ..meta(set(&["x"])) },
+            ChangeMeta { moved: Some(Moved::Away), ..meta(set(&["x"])) },
+        ] {
+            assert!(may_change(&m, &key), "{m:?}");
+        }
+    }
+
+    fn hlc(physical: u64) -> Hlc {
+        Hlc { physical, logical: 0 }
+    }
+
+    fn row(key: &[u8], ts: u64, value: Option<(u8, &[u8])>) -> Versioned {
+        Versioned { key: key.to_vec(), ts: hlc(ts), value: value.map(|(t, v)| (t, v.to_vec())) }
+    }
+
+    #[test]
+    fn a_round_keeps_the_first_and_newest_version_of_each_document() {
+        use teseladb_changestream::{DOCUMENT_VALUE, HISTORY_VALUE};
+        let (a, b) = (b"doc-a".as_slice(), b"doc-b".as_slice());
+        let first = meta(set(&["x"]));
+        let second = ChangeMeta { op: 1, ..meta(None) };
+        let rows = vec![
+            row(a, 3, Some((DOCUMENT_VALUE, b"a3"))),
+            row(a, 2, Some((DOCUMENT_VALUE, b"a2"))),
+            row(&meta_key(a, 1), 2, Some((HISTORY_VALUE, &second.encode().unwrap()))),
+            row(&meta_key(a, 0), 2, Some((HISTORY_VALUE, &first.encode().unwrap()))),
+            row(&meta_key(a, 2), 2, Some((HISTORY_VALUE, &second.encode().unwrap()))),
+            row(&meta_key(a, 3), 2, Some((HISTORY_VALUE, b"not a meta"))),
+            row(a, 4, None),
+            row(b, 5, Some((DOCUMENT_VALUE, b"b5"))),
+            row(b, 9, Some((DOCUMENT_VALUE, b"after"))),
+            row(b, 6, Some((7, b"another type"))),
+        ];
+        let got = touched_documents(rows, hlc(6));
+        assert_eq!(got.len(), 2);
+        let ta = &got[a];
+        assert_eq!((ta.first, ta.newest_ts), (hlc(2), hlc(4)));
+        assert_eq!(ta.first_doc.as_deref(), Some(b"a2".as_slice()));
+        assert_eq!(ta.newest, None);
+        assert_eq!(ta.seen.as_deref(), Some(b"a3".as_slice()));
+        assert_eq!(ta.first_meta.as_ref(), Some(&first));
+        let tb = &got[b];
+        assert_eq!(tb.newest.as_deref(), Some(b"b5".as_slice()));
+        assert_eq!(tb.first_meta, None);
+    }
 }

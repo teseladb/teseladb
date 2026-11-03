@@ -225,3 +225,29 @@ fn kept_segments_stray_keys_and_unchained_files() {
     files.reverse();
     assert!(Indexer::load(definition(), &files).is_err());
 }
+
+/// Every segment gets the synonym documents, read again only when they change.
+#[test]
+fn synonyms_reach_every_segment() {
+    let def = teseladb_bson::extjson::parse(
+        r#"{"mappings":{"dynamic":true},"synonyms":[{"name":"sy","analyzer":"reflib.standard","source":{"collection":"syn"}}]}"#,
+    )
+    .expect("JSON");
+    let mut ix = Indexer::new(Definition::parse(&def).expect("valid"));
+    ix.apply(changes()).expect("applied");
+    ix.reshape(&bounds(&[4])).expect("split");
+    let minino = Document::new().with(
+        "text",
+        Document::new().with("query", "minino").with("path", "t").with("synonyms", "sy"),
+    );
+    let gato = Document::new()
+        .with("mappingType", "equivalent")
+        .with("synonyms", Value::Array(vec!["gato".into(), "minino".into()]));
+    ix.set_synonyms("sy", std::slice::from_ref(&gato)).expect("set");
+    let found = ix.search(&minino).expect("search").len();
+    assert_eq!(found, 5);
+    ix.set_synonyms("sy", std::slice::from_ref(&gato)).expect("unchanged");
+    assert_eq!(ix.search(&minino).expect("search").len(), found);
+    ix.set_synonyms("sy", &[]).expect("emptied");
+    assert!(ix.search(&minino).expect("search").is_empty());
+}

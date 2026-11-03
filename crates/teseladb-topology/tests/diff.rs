@@ -171,3 +171,45 @@ fn applying_a_diff() {
     let bad = Document::new().with("u", 1);
     assert_eq!(apply(&before(), &bad), Err(DiffError::Section("u".into())));
 }
+
+/// The edges of a description against the document before: an empty path, a path into an array
+/// by a name that is no position, `$unset` of a position (null), a truncation inside an array and
+/// below a missing parent, and a removal below a missing parent (nothing to write).
+#[test]
+fn edges_of_a_description() {
+    let doc = Document::new()
+        .with("arr", Value::Array(vec![ints(&[1, 2, 3]), Value::Document(Document::new())]))
+        .with("x", 1);
+    let d = UpdateDescription {
+        updated: vec![
+            ("arr.k".to_owned(), Value::Int32(9)),
+            ("e".to_owned(), Value::Int32(9)),
+            ("arr.5.z".to_owned(), Value::Int32(1)),
+            ("arr.0.4".to_owned(), Value::Int32(4)),
+        ],
+        removed: vec![
+            "arr.1".to_owned(),
+            "gone.y".to_owned(),
+            "x.y".to_owned(),
+            "arr.7.q".to_owned(),
+        ],
+        truncated: vec![("arr.0".to_owned(), 1), ("nope.a".to_owned(), 2)],
+        disambiguated: vec![("e".to_owned(), Vec::new())],
+    };
+    let arr = Document::new()
+        .with("a", true)
+        .with("s0", Document::new().with("a", true).with("l", 1).with("u4", 4))
+        .with("u1", Value::Null)
+        .with("u5", Document::new().with("z", 1));
+    let got = update_entry(&doc, &d);
+    assert_eq!(got, entry(Document::new().with("sarr", arr)), "{got:?}");
+}
+
+/// A position that is no number in an array subdiff is refused.
+#[test]
+fn a_bad_position_is_refused() {
+    use teseladb_topology::diff::{DiffError, apply};
+    let doc = Document::new().with("arr", ints(&[1]));
+    let diff = Document::new().with("sarr", Document::new().with("a", true).with("ux", 1));
+    assert_eq!(apply(&doc, &diff), Err(DiffError::Section("ux".to_owned())));
+}

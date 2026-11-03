@@ -31,7 +31,6 @@ pub struct Dictionary {
     surface_units: usize,
     first_entry: usize,
     entries: usize,
-    right_ids: usize,
     left_ids: usize,
     matrix: usize,
     classes: usize,
@@ -92,10 +91,8 @@ impl Dictionary {
     fn parse(gz: &[u8]) -> Option<Dictionary> {
         let data = gzip_decompress(gz)?;
         let mut c = Cursor { data: &data, at: 0 };
-        let magic = c.take(8)?;
-        if &data[magic..magic + 8] != b"TSLMOR01" {
-            return None;
-        }
+        // The magic `TSLMOR01` of the file the build embeds.
+        c.take(8)?;
         let string_count = c.u32()?;
         let strings = c.take(4 * (string_count + 1))?;
         let string_bytes = c.at;
@@ -131,7 +128,6 @@ impl Dictionary {
             surface_units,
             first_entry,
             entries,
-            right_ids,
             left_ids,
             matrix,
             classes,
@@ -198,10 +194,8 @@ impl Dictionary {
 
     /// The connection cost from right context `right` to left context `left`.
     fn connection(&self, right: u16, left: u16) -> i32 {
+        // Every context id of the dictionary is inside its matrix.
         let (r, l) = (usize::from(right), usize::from(left));
-        if r >= self.right_ids || l >= self.left_ids {
-            return 0;
-        }
         i32::from(read_u16(&self.data, self.matrix + 2 * (r * self.left_ids + l)) as i16)
     }
 

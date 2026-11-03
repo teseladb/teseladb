@@ -8,11 +8,19 @@
 //! `replSetInitiate` answers `already initialized`; `replSetFreeze`, `replSetMaintenance` and
 //! `replSetSyncFrom` refuse on the primary with 95; `replSetAbortPrimaryCatchUp` outside a
 //! catch-up is 20; `replSetStepDown` on a secondary is 10107.
+//!
+//! A member's holds (`replSetFreeze`, `replSetMaintenance` and the stepped-down primary's
+//! `stepDownSecs`) are kept in Group 0 ([`super::presentation::Hold`]) and keep it from being
+//! designated; one in maintenance mode is `RECOVERING` to every member and to the drivers, as on
+//! RefDb 9.0.4 (measured on 02-11-2026, `f1.js`, `f2.js`).
 
 use teseladb_bson::{Document, Value};
 use teseladb_topology::replset::{Member, MemberId, ReplicaSet};
 
-use super::presentation::{Presentation, TOPOLOGY_PRESENTATION, hosts, member_of, stored};
+use super::presentation::{
+    Hold, Presentation, REASON_STEP_UP, TOPOLOGY_PRESENTATION, holds, hosts, member_of, set_hold,
+    stored,
+};
 use super::{Backend, Ctx};
 use crate::error::{
     BAD_VALUE, COMMAND_NOT_FOUND, Code, CommandError, ILLEGAL_OPERATION, INVALID_OPTIONS,
@@ -120,8 +128,16 @@ const NEW_CONFIG_INCOMPATIBLE: Code =
     Code { code: 103, name: "NewReplicaSetConfigurationIncompatible" };
 /// `AlreadyInitialized` is not maintenance's: out of maintenance mode is `OperationFailed`.
 const OPERATION_FAILED: Code = Code { code: 96, name: "OperationFailed" };
-/// `InvalidSyncSource`.
-const INVALID_SYNC_SOURCE: Code = Code { code: 72, name: "InvalidSyncSource" };
+/// `InvalidOptions`: a member asked to sync from itself.
+const INVALID_SYNC_SOURCE: Code = Code { code: 72, name: "InvalidOptions" };
+/// `NodeNotFound`.
+const NODE_NOT_FOUND: Code = Code { code: 74, name: "NodeNotFound" };
+/// `FailedToParse`.
+const FAILED_TO_PARSE: Code = Code { code: 9, name: "FailedToParse" };
+/// `replSetStepDown`'s default `stepDownSecs`.
+const STEP_DOWN_SECS: i64 = 60;
+/// Milliseconds in a second.
+const MS_PER_SECOND: i64 = 1000;
 
 /// The prefix of the config server's commands.
 pub const CONFIG_SERVER_PREFIX: &str = "_configsvr";
@@ -236,15 +252,52 @@ pub fn step_down<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
     if !is_primary(&rs, me) {
         return Err(CommandError::new(NOT_WRITABLE_PRIMARY, "not primary so can't step down"));
     }
-    let Some(next) = rs.step_down(&|_| true) else {
+    let now = ctx.backend.now_ms();
+    let held = holds(ctx.backend)?;
+    let free = |host: &str| !held.iter().any(|(h, x)| h == host && x.holds_back(now));
+    let Some(next) = rs.step_down(&free) else {
         return Err(CommandError::new(
             Code { code: 262, name: "ExceededTimeLimit" },
             "No electable secondaries caught up as of the step down deadline",
         ));
     };
-    let p = Presentation { primary: next.primary().map(str::to_owned), term: next.term(), ..p };
+    // The old primary may not be designated again for `stepDownSecs`, as RefDb freezes it.
+    let secs = seconds(ctx.first()).unwrap_or(STEP_DOWN_SECS).max(0);
+    let me_host = rs.members()[member_index(&rs, me)].host().to_owned();
+    let hold = held.iter().find(|(h, _)| *h == me_host).map(|(_, x)| *x).unwrap_or_default();
+    let until = now.saturating_add(u64::try_from(secs.saturating_mul(MS_PER_SECOND)).unwrap_or(0));
+    set_hold(ctx.backend, &me_host, Hold { frozen_until_ms: until, ..hold })?;
+    let mark = ctx.backend.cluster_mark();
+    let p = Presentation { primary: next.primary().map(str::to_owned), term: next.term(), ..p }
+        .elected(mark, REASON_STEP_UP);
     store(ctx.backend, &p)?;
     Ok(Document::new().with("ok", 1.0))
+}
+
+/// The position of member `me` in the configuration.
+fn member_index(rs: &ReplicaSet, me: MemberId) -> usize {
+    rs.members().iter().position(|m| rs.member(m.host()) == Some(me)).unwrap_or(0)
+}
+
+/// A number of seconds as RefDb reads it (a double truncated); `None` for anything else.
+fn seconds(v: &Value) -> Option<i64> {
+    match v {
+        Value::Int32(n) => Some(i64::from(*n)),
+        Value::Int64(n) => Some(*n),
+        Value::Double(d) if d.is_finite() => Some(*d as i64),
+        _ => None,
+    }
+}
+
+/// This member's host and its stored hold.
+fn my_hold<B: Backend + ?Sized>(
+    backend: &mut B,
+    rs: &ReplicaSet,
+    me: MemberId,
+) -> Result<(String, Hold), CommandError> {
+    let host = rs.members()[member_index(rs, me)].host().to_owned();
+    let hold = holds(backend)?.into_iter().find(|(h, _)| *h == host).map(|(_, x)| x);
+    Ok((host, hold.unwrap_or_default()))
 }
 
 fn member_error(d: &Document, why: &str) -> CommandError {
@@ -357,8 +410,9 @@ pub fn reconfig<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, C
     Ok(Document::new().with("ok", 1.0))
 }
 
-/// `replSetFreeze`: a secondary accepts it (Group 0 designates the primary, so it changes
-/// nothing); the primary refuses.
+/// `replSetFreeze`: a secondary may not be designated primary for that many seconds (0, or what
+/// is not a number, unfreezes it); the primary refuses. The answers are RefDb 9.0.4's
+/// (measured on 02-11-2026, `f1.js`).
 pub fn freeze<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     super::admin::admin_only(REPL_SET_FREEZE, ctx.db)?;
     let (rs, me, _, _) = member_view(ctx.backend, REPL_SET_FREEZE)?;
@@ -368,23 +422,45 @@ pub fn freeze<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
             "Cannot freeze node when primary or running for election, state: Primary",
         ));
     }
-    let unfreeze = matches!(ctx.first(), Value::Int32(0) | Value::Int64(0))
-        || matches!(ctx.first(), Value::Double(d) if *d == 0.0);
-    let d = Document::new();
-    let d = if unfreeze { d.with("info", "unfreezing") } else { d };
+    let secs = seconds(ctx.first()).unwrap_or(0);
+    let (host, hold) = my_hold(ctx.backend, &rs, me)?;
+    let now = ctx.backend.now_ms();
+    let until = match u64::try_from(secs.saturating_mul(MS_PER_SECOND)) {
+        Ok(ms) if ms > 0 => now.saturating_add(ms),
+        _ => 0,
+    };
+    set_hold(ctx.backend, &host, Hold { frozen_until_ms: until, ..hold })?;
+    let d = match secs {
+        0 => Document::new().with("info", "unfreezing"),
+        1 => Document::new().with("warning", "you really want to freeze for only 1 second?"),
+        _ => Document::new(),
+    };
     Ok(d.with("ok", 1.0))
 }
 
-/// `replSetMaintenance`: a secondary accepts it; the primary refuses.
+/// Whether `v` is true as RefDb reads a flag (anything but `false`, 0 and null).
+fn truthy(v: &Value) -> bool {
+    !matches!(v, Value::Boolean(false) | Value::Null | Value::Undefined)
+        && seconds(v).is_none_or(|n| n != 0)
+}
+
+/// `replSetMaintenance`: `true` takes a secondary one level deeper into maintenance mode
+/// (`RECOVERING`), `false` one level out; the primary refuses (measured on 9.0.4, `f1.js`).
 pub fn maintenance<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     super::admin::admin_only(REPL_SET_MAINTENANCE, ctx.db)?;
     let (rs, me, _, _) = member_view(ctx.backend, REPL_SET_MAINTENANCE)?;
     if is_primary(&rs, me) {
         return Err(CommandError::new(NOT_SECONDARY, "primaries can't modify maintenance mode"));
     }
-    if matches!(ctx.first(), Value::Boolean(false)) {
+    let (host, hold) = my_hold(ctx.backend, &rs, me)?;
+    let maintenance = if truthy(ctx.first()) {
+        hold.maintenance.saturating_add(1)
+    } else if hold.maintenance > 0 {
+        hold.maintenance - 1
+    } else {
         return Err(CommandError::new(OPERATION_FAILED, "already out of maintenance mode"));
-    }
+    };
+    set_hold(ctx.backend, &host, Hold { maintenance, ..hold })?;
     Ok(Document::new().with("ok", 1.0))
 }
 
@@ -435,11 +511,22 @@ pub fn sync_from<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
     if is_primary(&rs, me) {
         return Err(CommandError::new(NOT_SECONDARY, "primaries don't sync"));
     }
-    let Value::String(host) = ctx.first().clone() else {
-        return Err(CommandError::new(BAD_VALUE, "replSetSyncFrom needs a host"));
+    let host = match ctx.first() {
+        Value::String(h) if !h.is_empty() => h.clone(),
+        _ => {
+            let why = "Cannot parse HostAndPort from empty string";
+            return Err(CommandError::new(FAILED_TO_PARSE, why));
+        }
     };
-    if rs.member(&host) == Some(me) {
-        return Err(CommandError::new(INVALID_SYNC_SOURCE, "I cannot sync from myself"));
+    match rs.member(&host) {
+        Some(id) if id == me => {
+            return Err(CommandError::new(INVALID_SYNC_SOURCE, "I cannot sync from myself"));
+        }
+        Some(_) => {}
+        None => {
+            let why = format!("Could not find member \"{host}\" in replica set");
+            return Err(CommandError::new(NODE_NOT_FOUND, why));
+        }
     }
     let mut d = Document::new().with("syncFromRequested", host.as_str());
     if let Some(p) = rs.primary() {
@@ -481,22 +568,40 @@ pub fn run<B: Backend + ?Sized>(
 
 /// `heartbeatIntervalMillis` of `replSetGetStatus`.
 const HEARTBEAT_INTERVAL_MS: i64 = 2000;
+/// `electionTimeoutMillis` of RefDb's default `settings`.
+const ELECTION_TIMEOUT_MS: i64 = 10_000;
 
-/// `replSetGetStatus` in the replica set presentation: every member healthy and caught up to the
-/// node's mark (the ranges replicate by Raft, not by the oplog), with the fields of a RefDb
-/// 9.0.4 member (measured on 02-11-2026; the election metrics and the recovery timestamps are
-/// left out, DV-088).
+/// `replSetGetStatus` in the replica set presentation (measured on a replica set of three
+/// members of RefDb 9.0.4 on 02-11-2026, `s1.js`, `s2.js`): a member in maintenance mode is
+/// `RECOVERING`, the secondaries name the primary as their sync source, and the latest
+/// designation by Group 0 is the election (`electionTime`, `electionCandidateMetrics` on the
+/// primary, `electionParticipantMetrics` on the others). The ranges replicate by Raft, not by the
+/// oplog, so every member's optimes are the node's mark; the members do not send each other
+/// heartbeats (each node sends its own to Group 0's leader), so there are no `lastHeartbeat`,
+/// `lastHeartbeatRecv` or `pingMs` (DV-088).
 pub fn get_status<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
-    let (rs, me, _, _) = member_view(ctx.backend, super::admin::REPL_SET_GET_STATUS)?;
-    let (time, increment) = teseladb_hlc::to_timestamp(ctx.backend.cluster_mark());
-    let op = Document::new().with("ts", Value::Timestamp { time, increment }).with("t", rs.term());
-    let wall = Value::DateTime(i64::try_from(ctx.backend.now_ms()).unwrap_or(i64::MAX));
-    let op_date = Value::DateTime(i64::from(time) * 1000);
+    let (rs, me, p, _) = member_view(ctx.backend, super::admin::REPL_SET_GET_STATUS)?;
+    let mark = ctx.backend.cluster_mark();
+    let op = op_time_doc(mark, rs.term());
+    let now = i64::try_from(ctx.backend.now_ms()).unwrap_or(i64::MAX);
+    let wall = Value::DateTime(now);
+    let (time, _) = teseladb_hlc::to_timestamp(mark);
+    let op_date = Value::DateTime(i64::from(time) * MS_PER_SECOND);
     let voting = rs.members().iter().filter(|m| m.votes() > 0).count();
     let voting = i32::try_from(voting).unwrap_or(i32::MAX);
     let majority = voting / 2 + 1;
-    let primary = rs.primary().and_then(|p| rs.member(p));
-    let state = |id: MemberId| if Some(id) == primary { (1, "PRIMARY") } else { (2, "SECONDARY") };
+    let primary = rs.primary().and_then(|h| rs.member(h));
+    let primary_index = primary.map(|id| member_index(&rs, id));
+    let index = |i: usize| i32::try_from(i).unwrap_or(i32::MAX);
+    let state = |id: MemberId| match () {
+        () if Some(id) == primary => (1, "PRIMARY"),
+        () if rs.is_recovering(id) => (3, "RECOVERING"),
+        () => (2, "SECONDARY"),
+    };
+    let source = |id: MemberId| match (Some(id) == primary, primary_index) {
+        (false, Some(i)) => (Value::from(rs.members()[i].host()), index(i)),
+        _ => (Value::from(""), -1),
+    };
     let mut optimes = Document::new().with("lastCommittedOpTime", op.clone());
     optimes.push("lastCommittedWallTime", wall.clone());
     for f in ["readConcernMajorityOpTime", "appliedOpTime", "durableOpTime", "writtenOpTime"] {
@@ -508,47 +613,153 @@ pub fn get_status<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document,
     let facts = ctx.backend.process();
     let uptime =
         i32::try_from(facts.now_ms.saturating_sub(facts.start_ms) / 1000).unwrap_or(i32::MAX);
+    let election = p.election.as_ref().filter(|_| primary.is_some());
     let mut members = Vec::new();
     for (i, m) in rs.members().iter().enumerate() {
         let id = rs.member(m.host()).unwrap_or(me);
         let (code, name) = state(id);
+        let (sync_host, sync_id) = source(id);
         let mut d = Document::new()
-            .with("_id", i32::try_from(i).unwrap_or(i32::MAX))
+            .with("_id", index(i))
             .with("name", m.host())
             .with("health", 1)
             .with("state", code)
             .with("stateStr", name)
             .with("uptime", uptime)
-            .with("optime", op.clone())
-            .with("optimeDate", op_date.clone())
-            .with("lastAppliedWallTime", wall.clone())
-            .with("lastDurableWallTime", wall.clone())
-            .with("lastWrittenWallTime", wall.clone())
-            .with("syncSourceHost", "")
-            .with("syncSourceId", -1)
-            .with("infoMessage", "")
-            .with("configVersion", rs.set_version())
-            .with("configTerm", i32::try_from(rs.term()).unwrap_or(i32::MAX));
+            .with("optime", op.clone());
+        if id != me {
+            d.push("optimeDurable", op.clone());
+        }
+        d.push("optimeWritten", op.clone());
+        d.push("optimeDate", op_date.clone());
+        if id != me {
+            d.push("optimeDurableDate", op_date.clone());
+        }
+        d.push("optimeWrittenDate", op_date.clone());
+        for f in ["lastAppliedWallTime", "lastDurableWallTime", "lastWrittenWallTime"] {
+            d.push(f, wall.clone());
+        }
+        d.push("lastStableRecoveryTimestamp", stable_recovery(mark));
+        if id != me {
+            d.push("lastHeartbeatMessage", "");
+        }
+        d.push("syncSourceHost", sync_host);
+        d.push("syncSourceId", sync_id);
+        d.push("infoMessage", "");
+        if let (Some(e), true) = (election, Some(id) == primary) {
+            let (t, inc) = teseladb_hlc::to_timestamp(e.at);
+            d.push("electionTime", Value::Timestamp { time: t, increment: inc });
+            d.push("electionDate", Value::DateTime(i64::from(t) * MS_PER_SECOND));
+        }
+        d.push("configVersion", rs.set_version());
+        d.push("configTerm", i32::try_from(rs.term()).unwrap_or(i32::MAX));
         if id == me {
             d.push("self", true);
+            d.push("lastHeartbeatMessage", "");
         }
-        d.push("lastHeartbeatMessage", "");
         members.push(Value::Document(d));
     }
     let (my_state, _) = state(me);
-    Ok(Document::new()
+    let (sync_host, sync_id) = source(me);
+    let mut out = Document::new()
         .with("set", rs.set_name())
         .with("date", wall.clone())
         .with("myState", my_state)
         .with("term", rs.term())
-        .with("syncSourceHost", "")
-        .with("syncSourceId", -1)
+        .with("syncSourceHost", sync_host)
+        .with("syncSourceId", sync_id)
         .with("heartbeatIntervalMillis", HEARTBEAT_INTERVAL_MS)
         .with("majorityVoteCount", majority)
         .with("writeMajorityCount", majority)
         .with("votingMembersCount", voting)
         .with("writableVotingMembersCount", voting)
         .with("optimes", optimes)
-        .with("members", members)
-        .with("ok", 1.0))
+        .with("lastStableRecoveryTimestamp", stable_recovery(mark));
+    if let (Some(e), Some(pi)) = (election, primary_index) {
+        let me_index = member_index(&rs, me);
+        let priority = rs.members()[me_index].priority();
+        if Some(me_index) == primary_index {
+            out.push("electionCandidateMetrics", candidate_metrics(e, &rs, majority, priority));
+        } else {
+            out.push(
+                "electionParticipantMetrics",
+                participant_metrics(e, &rs, index(pi), priority),
+            );
+        }
+    }
+    Ok(out.with("members", members).with("ok", 1.0))
+}
+
+/// The optime of mark `mark` in term `term`.
+fn op_time_doc(mark: teseladb_hlc::Hlc, term: i64) -> Document {
+    let (time, increment) = teseladb_hlc::to_timestamp(mark);
+    Document::new().with("ts", Value::Timestamp { time, increment }).with("t", term)
+}
+
+/// `lastStableRecoveryTimestamp`: what a restart recovers to is every applied entry (the ranges
+/// persist their Raft logs), so it is the node's mark.
+fn stable_recovery(mark: teseladb_hlc::Hlc) -> Value {
+    let (time, increment) = teseladb_hlc::to_timestamp(mark);
+    Value::Timestamp { time, increment }
+}
+
+/// A priority as RefDb shows it: an integer when it is whole.
+fn priority_value(p: f64) -> Value {
+    if p.fract() == 0.0 && p.abs() < f64::from(i32::MAX) {
+        Value::Int32(p as i32)
+    } else {
+        Value::Double(p)
+    }
+}
+
+/// The date of mark `at`, in milliseconds.
+fn date_of(at: teseladb_hlc::Hlc) -> Value {
+    Value::DateTime(i64::try_from(at.physical).unwrap_or(i64::MAX))
+}
+
+/// `electionCandidateMetrics` of the designated primary: the designation as its election, with
+/// the optimes at the designation in the term before it.
+fn candidate_metrics(
+    e: &super::presentation::Election,
+    rs: &ReplicaSet,
+    majority: i32,
+    priority: f64,
+) -> Document {
+    let before = op_time_doc(e.at, rs.term().saturating_sub(1));
+    Document::new()
+        .with("lastElectionReason", e.reason.as_str())
+        .with("lastElectionDate", date_of(e.at))
+        .with("electionTerm", rs.term())
+        .with("lastCommittedOpTimeAtElection", before.clone())
+        .with("lastSeenWrittenOpTimeAtElection", before.clone())
+        .with("lastSeenOpTimeAtElection", before)
+        .with("numVotesNeeded", majority)
+        .with("priorityAtElection", priority_value(priority))
+        .with("electionTimeoutMillis", ELECTION_TIMEOUT_MS)
+        .with("numCatchUpOps", 0i64)
+        .with("newTermStartDate", date_of(e.at))
+        .with("wMajorityWriteAvailabilityDate", date_of(e.at))
+}
+
+/// `electionParticipantMetrics` of the other members: each took the designation as its vote.
+fn participant_metrics(
+    e: &super::presentation::Election,
+    rs: &ReplicaSet,
+    candidate: i32,
+    priority: f64,
+) -> Document {
+    let before = op_time_doc(e.at, rs.term().saturating_sub(1));
+    Document::new()
+        .with("votedForCandidate", true)
+        .with("electionTerm", rs.term())
+        .with("lastVoteDate", date_of(e.at))
+        .with("electionCandidateMemberId", candidate)
+        .with("voteReason", "")
+        .with("lastWrittenOpTimeAtElection", before.clone())
+        .with("maxWrittenOpTimeInSet", before.clone())
+        .with("lastAppliedOpTimeAtElection", before.clone())
+        .with("maxAppliedOpTimeInSet", before)
+        .with("priorityAtElection", priority_value(priority))
+        .with("newTermStartDate", date_of(e.at))
+        .with("newTermAppliedDate", date_of(e.at))
 }

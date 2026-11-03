@@ -129,3 +129,47 @@ impl Script for Bank {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    use teseladb_hlc::Hlc;
+    use teseladb_types::Nanos;
+
+    use super::*;
+
+    /// A read of every account: the opening balance but `moved` more on the first two.
+    fn read_all(moved: (i64, i64), outcome: Outcome) -> Finished {
+        let ops = ACCOUNTS
+            .iter()
+            .enumerate()
+            .map(|(i, k)| {
+                let b = OPENING + [moved.0, moved.1].get(i).copied().unwrap_or(0);
+                Op::Read(k.to_vec(), Some(b.to_string().into_bytes()))
+            })
+            .collect();
+        let read_ts = Hlc { physical: 10_000, logical: 0 };
+        Finished { ops, read_ts, outcome, began: Nanos::ZERO, acked: None, in_window: true }
+    }
+
+    #[test]
+    fn a_committed_read_of_every_account_must_add_up_to_the_opening_total() {
+        let mut bank = Bank::default();
+        assert!(bank.finish().expect_err("nothing committed").liveness);
+        let at = |p| Outcome::Committed(Hlc { physical: p, logical: 0 });
+        // A transfer near the read, one far from it, and a read that did not commit.
+        let mut transfer = read_all((-5, 5), at(10_500));
+        transfer.ops.push(Op::Write(ACCOUNTS[0].to_vec(), Some(b"1".to_vec())));
+        bank.ended(0, transfer.clone());
+        transfer.outcome = at(50_000);
+        bank.ended(0, transfer);
+        bank.ended(1, read_all((0, 1), Outcome::Aborted));
+        bank.finish().expect("what committed adds up");
+        bank.ended(1, read_all((0, 1), at(10_000)));
+        bank.ended(1, read_all((0, 2), at(10_000)));
+        let v = bank.finish().expect_err("one more than the total");
+        let total = OPENING * ACCOUNTS.len() as i64 + 1;
+        assert!(v.detail.contains(&format!("adds up to {total}")), "{}", v.detail);
+        assert!(v.detail.contains("10500") && !v.detail.contains("50000"), "{}", v.detail);
+    }
+}

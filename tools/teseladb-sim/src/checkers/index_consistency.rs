@@ -85,6 +85,7 @@ pub fn check(state: &RangeState) -> Result<(), Violation> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
 mod tests {
     use teseladb_bson::{RawValue, extjson};
     use teseladb_index::keygen::{IndexDef, IndexField, entry_value, index_entries};
