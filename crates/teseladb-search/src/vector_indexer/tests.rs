@@ -238,3 +238,198 @@ fn ties_kept_segments_and_empty_segments() {
     assert_eq!(ix.segments(), 4);
     assert_eq!(ix.search(&query(|_| {})).expect("runs").len(), 4);
 }
+
+/// Deterministic pseudo-random vectors (SplitMix64) with components in [-1, 1).
+fn random_vectors(n: usize, dims: usize, seed: u64) -> Vec<Vec<f64>> {
+    let mut s = seed;
+    let mut next = move || {
+        s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = s;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        ((z ^ (z >> 31)) >> 40) as f64 / (1u64 << 23) as f64 * 2.0 - 1.0
+    };
+    (0..n).map(|_| (0..dims).map(|_| next()).collect()).collect()
+}
+
+const DIMS: usize = 16;
+
+fn wide_definition() -> VectorDefinition {
+    let vector = Document::new()
+        .with("type", "vector")
+        .with("path", "v")
+        .with("numDimensions", DIMS as i32)
+        .with("similarity", "euclidean");
+    let def = Document::new().with("fields", Value::Array(vec![Value::Document(vector)]));
+    VectorDefinition::parse(&def).expect("valid")
+}
+
+/// Document `id` with vector `v`, under a key in `_id` order.
+fn numbered(id: usize, v: &[f64]) -> (Vec<u8>, Option<Document>) {
+    let doc = Document::new().with("_id", id as i32).with("v", floats(v));
+    ((id as u32).to_be_bytes().to_vec(), Some(doc))
+}
+
+fn key(id: usize) -> Vec<u8> {
+    (id as u32).to_be_bytes().to_vec()
+}
+
+fn near(v: &[f64], limit: i32, exact: bool) -> VectorQuery {
+    let mut d =
+        Document::new().with("index", "ve").with("path", "v").with("queryVector", floats(v));
+    d = d.with("limit", limit);
+    d = if exact { d.with("exact", true) } else { d.with("numCandidates", limit * 10) };
+    VectorQuery::parse(&d).expect("valid")
+}
+
+/// The mean recall@10 of `ix` over `queries` against the exact search.
+fn recall(ix: &VectorIndexer, queries: &[Vec<f64>]) -> f64 {
+    let (mut hits, mut total) = (0, 0);
+    for q in queries {
+        let want = ids(ix, &near(q, 10, true));
+        let got = ids(ix, &near(q, 10, false));
+        hits += want.iter().filter(|d| got.contains(d)).count();
+        total += want.len();
+    }
+    hits as f64 / total as f64
+}
+
+/// Documents linked into every graph of `ix` so far: the work of building it.
+fn insertions(ix: &VectorIndexer) -> u64 {
+    ix.segments.iter().flat_map(|s| &s.graphs).map(|g| g.hnsw.insertions()).sum()
+}
+
+fn dead(ix: &VectorIndexer) -> usize {
+    ix.segments.iter().map(|s| s.dead).sum()
+}
+
+/// Linking documents one change at a time, in an order that is not the key order, finds what a
+/// segment built whole in key order finds.
+#[test]
+fn incremental_links_find_what_a_whole_build_finds() {
+    let n = 1_500;
+    let data = random_vectors(n, DIMS, 11);
+    let queries = random_vectors(50, DIMS, 12);
+    let mut ix = VectorIndexer::new(wide_definition());
+    for i in 0..n {
+        let id = i * 7_919 % n;
+        ix.apply([numbered(id, &data[id])]);
+    }
+    assert_eq!((ix.len(), insertions(&ix), dead(&ix)), (n, n as u64, 0));
+    let mut whole = ix.clone();
+    let fields = whole.fields.clone();
+    whole.segments.iter_mut().for_each(|s| s.rebuild(&fields));
+    let (linked, built) = (recall(&ix, &queries), recall(&whole, &queries));
+    assert!(linked >= 0.95, "incremental recall {linked}");
+    assert!(linked >= built - 0.01, "incremental {linked}, whole {built}");
+    // The same changes in the same order build the same graph.
+    let mut again = VectorIndexer::new(wide_definition());
+    for i in 0..n {
+        let id = i * 7_919 % n;
+        again.apply([numbered(id, &data[id])]);
+    }
+    let graph = |ix: &VectorIndexer| ix.segments[0].graphs[0].hnsw.encode();
+    assert_eq!(graph(&again), graph(&ix));
+}
+
+/// Deleted and replaced versions stay in the graph as tombstones and are never returned; past
+/// the share of tombstones the segment is built again without them.
+#[test]
+fn deleted_and_replaced_versions_are_never_returned() {
+    let n = 400;
+    let data = random_vectors(n, DIMS, 21);
+    let mut ix = VectorIndexer::new(wide_definition());
+    ix.apply((0..n).map(|i| numbered(i, &data[i])));
+    let far = [5.0; DIMS];
+    let deleted: Vec<usize> = (0..n).step_by(10).collect();
+    let replaced: Vec<usize> = (1..n).step_by(10).collect();
+    ix.apply(deleted.iter().map(|&i| (key(i), None)));
+    ix.apply(replaced.iter().map(|&i| numbered(i, &far)));
+    assert_eq!((ix.len(), dead(&ix)), (n - deleted.len(), deleted.len() + replaced.len()));
+    let current = |id: i32| match id as usize {
+        i if replaced.contains(&i) => far.to_vec(),
+        i => data[i].clone(),
+    };
+    let check = |ix: &VectorIndexer, q: &[f64], exact: bool| {
+        let found = run(ix, &near(q, 50, exact));
+        assert_eq!(found.len(), 50);
+        for (id, score) in found {
+            assert!(!deleted.contains(&(id as usize)), "deleted {id} returned");
+            let v: Vec<f32> = current(id).iter().map(|x| *x as f32).collect();
+            let q: Vec<f32> = q.iter().map(|x| *x as f32).collect();
+            assert_eq!(score, f64::from(Similarity::Euclidean.score(&v, &q)), "{id}");
+        }
+    };
+    for &i in deleted.iter().chain(&replaced).take(20) {
+        check(&ix, &data[i], true);
+        check(&ix, &data[i], false);
+    }
+    // The replaced documents are found at their new vector, all copies of the same one: in the
+    // graph and once built again whole.
+    let replaced_ids: Vec<i32> = replaced.iter().map(|&i| i as i32).collect();
+    let at_far = near(&far, replaced.len() as i32, false);
+    assert_eq!(ids(&ix, &at_far), replaced_ids);
+    let mut whole = ix.clone();
+    let fields = whole.fields.clone();
+    whole.segments.iter_mut().for_each(|s| s.rebuild(&fields));
+    assert_eq!(ids(&whole, &at_far), replaced_ids);
+    // More than a quarter of the nodes as tombstones builds the segment again, in key order.
+    ix.apply((2..n).step_by(10).map(|i| (key(i), None)));
+    assert_eq!(dead(&ix), 0);
+    assert_eq!(ix.segments[0].nodes.len(), ix.len());
+    assert!(ix.segments[0].docs.values().enumerate().all(|(i, d)| d.node as usize == i));
+    check(&ix, &data[3], false);
+}
+
+/// The work of building grows with the changes, not with their square: one document per change,
+/// then one replacement per change, then deletes.
+#[test]
+fn building_costs_grow_linearly_with_the_changes() {
+    let cost = |n: usize| {
+        let data = random_vectors(n, DIMS, 31);
+        let mut ix = VectorIndexer::new(wide_definition());
+        for (i, v) in data.iter().enumerate() {
+            ix.apply([numbered(i, v)]);
+        }
+        assert_eq!(insertions(&ix), n as u64, "one link per new document");
+        for (i, v) in data.iter().enumerate() {
+            ix.apply([numbered(i, &v.iter().map(|x| -x).collect::<Vec<_>>())]);
+        }
+        for i in (0..n).step_by(2) {
+            ix.apply([(key(i), None)]);
+        }
+        insertions(&ix)
+    };
+    let (small, large) = (cost(200), cost(400));
+    // Each change links at most a few documents, rebuilds included.
+    assert!(small <= 4 * 200 * 2, "{small}");
+    assert!(large <= 4 * 400 * 2, "{large}");
+    assert!(large as f64 <= 2.2 * small as f64, "200: {small}, 400: {large}");
+}
+
+/// Splitting and merging ranges builds the segments that take documents again: a query finds
+/// the same, and no tombstone travels.
+#[test]
+fn reshaping_builds_the_segments_that_take_documents() {
+    let n = 300;
+    let data = random_vectors(n, DIMS, 41);
+    let mut ix = VectorIndexer::new(wide_definition());
+    for (i, v) in data.iter().enumerate() {
+        ix.apply([numbered(i, v)]);
+    }
+    ix.apply((0..n).step_by(7).map(|i| (key(i), None)));
+    assert!(dead(&ix) > 0);
+    let q = near(&data[5], 10, true);
+    let before = run(&ix, &q);
+    ix.reshape(&[(Vec::new(), key(150)), (key(150), Vec::new())]);
+    assert_eq!((ix.segments(), dead(&ix)), (2, 0));
+    assert_eq!(run(&ix, &q), before);
+    // A segment whose range stays keeps its graph and its tombstones.
+    ix.apply([(key(1), None)]);
+    ix.reshape(&[(Vec::new(), key(150)), (key(150), key(200)), (key(200), Vec::new())]);
+    assert_eq!((ix.segments(), dead(&ix)), (3, 1));
+    assert_eq!(ix.segments[0].graphs[0].hnsw.insertions(), ix.segments[0].nodes.len() as u64);
+    let found = ids(&ix, &q);
+    assert_eq!(found.len(), 10);
+    assert!(!found.contains(&1));
+}

@@ -358,7 +358,7 @@ impl NodeLogic {
         // Each change of the presentation raises its term or its `setVersion`, and each change of
         // a member's hold its version, all of which only grow: the counter grows with them and wakes the waiting `hello`s (018 FR-015).
         let shown = crate::config_db::presentation(sm);
-        let version = shown.as_ref().map_or(0, |p| p.term.saturating_add(i64::from(p.set_version)));
+        let version = shown.as_ref().map_or(0, |p| p.term.saturating_add(p.set_version));
         // A member that enters or leaves maintenance mode changes its `hello` too.
         let held: i64 = crate::config_db::holds(sm).iter().map(|(_, h)| h.version).sum();
         let version = version.saturating_add(held);

@@ -15,7 +15,7 @@
 //! RefDb 9.0.4 (measured on 02-11-2026, `f1.js`, `f2.js`).
 
 use teseladb_bson::{Document, Value};
-use teseladb_topology::replset::{Member, MemberId, ReplicaSet};
+use teseladb_topology::replset::{Member, MemberId, ReplicaSet, whole_number};
 
 use super::presentation::{
     Hold, Presentation, REASON_STEP_UP, TOPOLOGY_PRESENTATION, holds, hosts, member_of, set_hold,
@@ -370,6 +370,35 @@ fn reconfig_member(d: &Document) -> Result<Member, CommandError> {
     member_of(&attrs).map_err(|e| member_error(d, &e.errmsg))
 }
 
+/// The `version` of a `replSetReconfig` configuration as RefDb 9.0.4 reads it: any whole
+/// number within 64 bits.
+fn config_version(v: Option<&Value>) -> Result<i64, CommandError> {
+    let invalid = |why: String| CommandError::new(INVALID_REPLICA_SET_CONFIG, why);
+    let Some(v) = v else {
+        return Err(invalid(
+            "BSON field 'ReplSetConfig.version' is missing but a required field".into(),
+        ));
+    };
+    let Some(x) = crate::types::number(v) else {
+        let t = crate::types::type_name(v);
+        return Err(invalid(format!("Expected a number, got value of type {t} for field version")));
+    };
+    let n = match v {
+        Value::Int64(n) => *n,
+        _ if x.fract() == 0.0 && x >= -(2f64.powi(63)) && x < 2f64.powi(63) => x as i64,
+        _ => {
+            return Err(invalid(format!(
+                "Expected field \"version\" to have a value exactly representable as a 64-bit integer, but found version: {}",
+                super::display(v)
+            )));
+        }
+    };
+    if n <= 0 {
+        return Err(invalid(format!("BSON field 'version' value must be > 0, actual value '{n}'")));
+    }
+    Ok(n)
+}
+
 /// `replSetReconfig`: the members' attributes (priority, votes, hidden, tags) over the
 /// cluster's nodes, with a `version` above the current one.
 pub fn reconfig<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
@@ -389,11 +418,7 @@ pub fn reconfig<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, C
             ),
         ));
     }
-    let version = match conf.get("version") {
-        Some(Value::Int32(v)) => *v,
-        Some(Value::Int64(v)) => i32::try_from(*v).unwrap_or(i32::MAX),
-        _ => return Err(CommandError::new(BAD_VALUE, "replSetReconfig needs a version")),
-    };
+    let version = config_version(conf.get("version"))?;
     if version <= rs.set_version() {
         return Err(CommandError::new(
             NEW_CONFIG_INCOMPATIBLE,
@@ -680,7 +705,7 @@ pub fn get_status<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document,
             d.push("electionTime", Value::Timestamp { time: t, increment: inc });
             d.push("electionDate", Value::DateTime(i64::from(t) * MS_PER_SECOND));
         }
-        d.push("configVersion", rs.set_version());
+        d.push("configVersion", whole_number(rs.set_version()));
         d.push("configTerm", i32::try_from(rs.term()).unwrap_or(i32::MAX));
         if id == me {
             d.push("self", true);

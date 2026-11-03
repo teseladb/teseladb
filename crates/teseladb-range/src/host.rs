@@ -1007,8 +1007,8 @@ impl RangeHost {
             Req::Purge(p) => self.purge_done(p, r.map(|_| ())),
             Req::Round(p) => self.round_done(p),
             Req::Fence(f) => self.fence_done(id, f, r),
-            // A stream's read has no operation in the core.
-            Req::Changes(f) => self.reply(id, Err(RangeError::NotLeader { hint: f.hint })),
+            // Only a stream's read at a mark has an operation in the core.
+            Req::Changes(f) => self.changes_confirmed(core, id, f, r.is_ok()),
             Req::Get(mut q) => match r {
                 // The mark comes from the clock the core's clock rule checked (FR-006).
                 Ok(_) => match q.at.or_else(|| core.read_mark(self.now)) {
@@ -1117,8 +1117,9 @@ impl RangeHost {
                     g: rg,
                     state: GetState::Admit(_) | GetState::Read(_) | GetState::Scanning(..),
                     ..
-                })
-                | Req::Changes(feed::FeedReq { g: rg, .. }) => *rg == g,
+                }) => *rg == g,
+                // A read waiting for the core is answered by the core.
+                Req::Changes(f) => f.g == g && f.state != feed::FeedState::Core,
                 Req::Mut(_) | Req::Get(_) | Req::Purge(_) | Req::Round(_) | Req::Fence(_) => false,
             })
             .map(|(id, _)| *id)

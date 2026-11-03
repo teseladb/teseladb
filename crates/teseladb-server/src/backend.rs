@@ -806,7 +806,7 @@ impl Backend for ServerBackend {
     ) -> Result<teseladb_wire::commands::ChangeBatch, CommandError> {
         // The batch is resolved up to the lowest resolved mark of its ranges (FR-004, FR-005).
         let mut read = teseladb_changestream::read::IntervalRead::new(start, end, from);
-        for r in self.range_changes(start, end, from)? {
+        for r in self.range_changes(start, end, from, None)? {
             read.answered(r.end, r.rows, r.resolved, None);
         }
         Ok(read.finish(|r: &teseladb_range::changes::Versioned| r.ts))
@@ -846,10 +846,12 @@ impl Backend for ServerBackend {
         start: &[u8],
         end: &[u8],
         from: Hlc,
+        at: Option<Hlc>,
     ) -> Result<Vec<teseladb_wire::commands::RangeBatch>, CommandError> {
         // Range by range in key order, each read on its leader (014 FR-003, FR-010) and kept up
-        // to its own resolved mark.
+        // to its own resolved mark; with `at`, past the closed marks up to it (011 FR-010).
         let mut out = Vec::new();
+        let wanted = at;
         let mut walk = teseladb_changestream::read::IntervalRead::<()>::new(start, end, from);
         while let Some(at) = walk.next().map(<[u8]>::to_vec) {
             let key = at.clone();
@@ -857,6 +859,7 @@ impl Backend for ServerBackend {
                 start: key.clone(),
                 end: walk.stop(&e.end),
                 from,
+                at: wanted,
             };
             match self.data(&at, false, build)? {
                 (e, RemoteReply::Changes { mut rows, to, oldest_intent }) => {
