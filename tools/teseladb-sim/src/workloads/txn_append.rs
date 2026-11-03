@@ -111,3 +111,15 @@ impl Script for Append {
         snapshot_isolation::check(&self.history)
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_run_without_a_committed_transaction_fails_liveness() {
+        let v = Append::default().finish().expect_err("nothing committed");
+        assert_eq!((v.checker, v.liveness), (snapshot_isolation::NAME, true));
+    }
+}

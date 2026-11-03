@@ -997,7 +997,7 @@ impl Interp<'_> {
             (0, env.clone())
         };
         for (idx, s) in body.iter().enumerate().skip(start) {
-            match self.exec_gen(s, &env, run, None) {
+            match self.exec_gen(s, &env, run, &[]) {
                 Err(Ctrl::Suspend) => {
                     run.saved.push(Saved::List { idx, env });
                     return Err(Ctrl::Suspend);
@@ -1008,7 +1008,7 @@ impl Interp<'_> {
         Ok(())
     }
 
-    fn exec_gen(&mut self, s: &Stmt, env: &EnvRef, run: &mut Run, label: Option<&Name>) -> R<()> {
+    fn exec_gen(&mut self, s: &Stmt, env: &EnvRef, run: &mut Run, labels: &[Name]) -> R<()> {
         let Stmt::Suspends(inner) = s else { return self.exec(s, env) };
         if !run.resuming {
             self.step()?;
@@ -1032,8 +1032,8 @@ impl Interp<'_> {
                     self.eval(c, env)?.truthy()
                 };
                 let r = match (branch, b) {
-                    (true, _) => self.exec_gen(a, env, run, None),
-                    (false, Some(b)) => self.exec_gen(b, env, run, None),
+                    (true, _) => self.exec_gen(a, env, run, &[]),
+                    (false, Some(b)) => self.exec_gen(b, env, run, &[]),
                     (false, None) => Ok(()),
                 };
                 if matches!(r, Err(Ctrl::Suspend)) {
@@ -1041,8 +1041,8 @@ impl Interp<'_> {
                 }
                 r
             }
-            Stmt::While(c, body) => self.gen_loop(Some(c), None, body, env, run, label, false),
-            Stmt::DoWhile(body, c) => self.gen_loop(Some(c), None, body, env, run, label, true),
+            Stmt::While(c, body) => self.gen_loop(Some(c), None, body, env, run, labels, false),
+            Stmt::DoWhile(body, c) => self.gen_loop(Some(c), None, body, env, run, labels, true),
             Stmt::For(init, test, update, body) => {
                 let (scope, per_iteration) = if run.resuming {
                     match run.saved.pop() {
@@ -1053,19 +1053,24 @@ impl Interp<'_> {
                     self.for_init(init.as_ref(), env)?
                 };
                 run.saved.push(Saved::Loop { env: scope, per_iteration });
-                self.gen_for(test.as_ref(), update.as_ref(), body, env, run, label)
+                self.gen_for(test.as_ref(), update.as_ref(), body, env, run, labels)
             }
             Stmt::ForIn { decl, target, of, obj, body } => {
-                self.gen_for_in(*decl, target, *of, obj, body, env, run, label)
+                self.gen_for_in(*decl, target, *of, obj, body, env, run, labels)
             }
             Stmt::Try(body, catch, finally) => {
                 self.gen_try(body, catch.as_ref(), finally.as_ref(), env, run)
             }
             Stmt::Switch(d, cases) => self.gen_switch(d, cases, env, run),
-            Stmt::Labeled(l, body) => match self.exec_gen(body, env, run, Some(l)) {
-                Err(Ctrl::Break(Some(x))) if x == *l => Ok(()),
-                r => r,
-            },
+            Stmt::Labeled(l, body) => {
+                // `a: b: while …`: a `continue` to any of the labels goes on with the loop.
+                let mut ls = labels.to_vec();
+                ls.push(l.clone());
+                match self.exec_gen(body, env, run, &ls) {
+                    Err(Ctrl::Break(Some(x))) if x == *l => Ok(()),
+                    r => r,
+                }
+            }
             Stmt::With(o, body) => {
                 let scope = if run.resuming {
                     match run.saved.pop() {
@@ -1076,7 +1081,7 @@ impl Interp<'_> {
                     let o = self.eval(o, env)?;
                     self.with_scope(&o, env)?
                 };
-                let r = self.exec_gen(body, &scope, run, None);
+                let r = self.exec_gen(body, &scope, run, &[]);
                 if matches!(r, Err(Ctrl::Suspend)) {
                     run.saved.push(Saved::Loop { env: scope, per_iteration: false });
                 }
@@ -1184,7 +1189,7 @@ impl Interp<'_> {
         body: &Stmt,
         env: &EnvRef,
         run: &mut Run,
-        label: Option<&Name>,
+        labels: &[Name],
         do_while: bool,
     ) -> R<()> {
         let mut first = do_while;
@@ -1201,7 +1206,7 @@ impl Interp<'_> {
             {
                 return Ok(());
             }
-            match loop_result(self.exec_gen(body, env, run, None), label) {
+            match loop_result(self.exec_gen(body, env, run, &[]), labels) {
                 Err(Ctrl::Suspend) => {
                     run.saved.push(Saved::Loop { env: env.clone(), per_iteration: false });
                     return Err(Ctrl::Suspend);
@@ -1228,7 +1233,7 @@ impl Interp<'_> {
         body: &Stmt,
         env: &EnvRef,
         run: &mut Run,
-        label: Option<&Name>,
+        labels: &[Name],
     ) -> R<()> {
         let Some(Saved::Loop { env: mut scope, per_iteration }) = run.saved.pop() else {
             return self.type_error("generator state lost");
@@ -1242,7 +1247,7 @@ impl Interp<'_> {
                 return Ok(());
             }
             skip_test = false;
-            match loop_result(self.exec_gen(body, &scope, run, None), label) {
+            match loop_result(self.exec_gen(body, &scope, run, &[]), labels) {
                 Err(Ctrl::Suspend) => {
                     run.saved.push(Saved::Loop { env: scope, per_iteration });
                     return Err(Ctrl::Suspend);
@@ -1272,7 +1277,7 @@ impl Interp<'_> {
         body: &Stmt,
         env: &EnvRef,
         run: &mut Run,
-        label: Option<&Name>,
+        labels: &[Name],
     ) -> R<()> {
         let mut resumed = None;
         let mut rec = if run.resuming {
@@ -1306,7 +1311,7 @@ impl Interp<'_> {
                     scope
                 }
             };
-            match loop_result(self.exec_gen(body, &scope, run, None), label) {
+            match loop_result(self.exec_gen(body, &scope, run, &[]), labels) {
                 Err(Ctrl::Suspend) => {
                     run.saved.push(Saved::ForIn { rec, env: scope });
                     return Err(Ctrl::Suspend);
@@ -1419,7 +1424,7 @@ impl Interp<'_> {
         for (case, (_, body)) in cases.iter().enumerate().skip(start) {
             let from = std::mem::take(&mut first_idx);
             for (idx, s) in body.iter().enumerate().skip(from) {
-                match self.exec_gen(s, &scope, run, None) {
+                match self.exec_gen(s, &scope, run, &[]) {
                     Err(Ctrl::Suspend) => {
                         run.saved.push(Saved::Switch { case, idx, env: scope });
                         return Err(Ctrl::Suspend);
@@ -1443,13 +1448,13 @@ fn needs_scope(body: &[Stmt]) -> bool {
 }
 
 /// A loop body's completion: `Ok(true)` to leave the loop.
-fn loop_result(r: R<()>, label: Option<&Name>) -> R<bool> {
+fn loop_result(r: R<()>, labels: &[Name]) -> R<bool> {
     match r {
         Ok(()) => Ok(false),
         Err(Ctrl::Break(None)) => Ok(true),
         Err(Ctrl::Continue(None)) => Ok(false),
-        Err(Ctrl::Continue(Some(l))) if Some(&l) == label => Ok(false),
-        Err(Ctrl::Break(Some(l))) if Some(&l) == label => Ok(true),
+        Err(Ctrl::Continue(Some(l))) if labels.contains(&l) => Ok(false),
+        Err(Ctrl::Break(Some(l))) if labels.contains(&l) => Ok(true),
         Err(e) => Err(e),
     }
 }

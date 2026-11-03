@@ -56,6 +56,7 @@ pub mod oidc_client;
 pub mod pki;
 pub mod ranges;
 pub mod relocations;
+pub mod replica_port;
 pub mod replicas;
 pub mod rest_executor;
 pub mod rollback;

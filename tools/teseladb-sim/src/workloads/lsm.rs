@@ -582,4 +582,15 @@ mod tests {
             assert_eq!(Op::decode(&op.encode()), op);
         }
     }
+
+    #[test]
+    fn a_client_with_nothing_applied_after_the_heal_fails_liveness() {
+        let mut w = World::new(1, 1, 1, false);
+        let mut wl = LsmWorkload { cores: 1, clients: vec![Client::default()], heal_at: None };
+        wl.finish(&mut w).expect("no fault window, nothing to check");
+        wl.heal_at = Some(Nanos::from_millis(5));
+        let v = wl.finish(&mut w).expect_err("nothing applied after the heal");
+        assert_eq!((v.checker, v.liveness), ("progress", true));
+        assert_eq!(v.detail, "n0 c0: nothing applied after healing");
+    }
 }

@@ -141,7 +141,8 @@ fn text_errors_are_refds() {
     for (filter, code, msg) in cases {
         let (c, e) = error(&find(&mut m, filter, r#"{"_id": 1}"#));
         assert_eq!(c, code, "{filter}: {e}");
-        assert!(e.ends_with(msg), "{filter}: {e}");
+        // A planning error, without the prefix of an error while running (measured).
+        assert_eq!(e, msg, "{filter}");
     }
     let text = doc(&[("$search", "x".into())]);
     let missing =

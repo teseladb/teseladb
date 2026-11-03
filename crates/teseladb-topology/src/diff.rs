@@ -23,13 +23,15 @@ enum Leaf {
     Truncate(u32),
 }
 
-/// The diff of a document.
+/// The diff of a document. A field's subdiff is a document's or an array's as its value before
+/// the write is one or the other, so the two kinds go apart.
 #[derive(Debug, Default)]
 struct ObjDiff {
     removed: BTreeMap<String, ()>,
     updated: BTreeMap<String, Value>,
     inserted: BTreeMap<String, Value>,
-    sub: BTreeMap<String, Node>,
+    objs: BTreeMap<String, ObjDiff>,
+    arrs: BTreeMap<String, ArrDiff>,
 }
 
 /// The diff of an array.
@@ -37,13 +39,26 @@ struct ObjDiff {
 struct ArrDiff {
     length: Option<u32>,
     updated: BTreeMap<u32, Value>,
-    sub: BTreeMap<u32, Node>,
+    objs: BTreeMap<u32, ObjDiff>,
+    arrs: BTreeMap<u32, ArrDiff>,
 }
 
-#[derive(Debug)]
-enum Node {
-    Obj(ObjDiff),
-    Arr(ArrDiff),
+/// A path's next part and the parts below it.
+type Step<'a> = (&'a PathPart, &'a [PathPart]);
+
+/// The first part of `rest` and the parts below it; `rest` is never empty here, since a path
+/// with nothing below its end stopped there.
+fn split(rest: &[PathPart]) -> Step<'_> {
+    (&rest[0], &rest[1..])
+}
+
+/// The subdiffs `objs` and `arrs` as documents, in key order.
+fn subdiffs<K: Ord + Clone>(
+    objs: &BTreeMap<K, ObjDiff>,
+    arrs: &BTreeMap<K, ArrDiff>,
+) -> BTreeMap<K, Document> {
+    let o = objs.iter().map(|(k, d)| (k.clone(), d.to_document()));
+    o.chain(arrs.iter().map(|(k, a)| (k.clone(), a.to_document()))).collect()
 }
 
 /// A document holding `leaf`'s value at `rest` (the parts below a missing parent).
@@ -73,8 +88,7 @@ fn position(part: &PathPart) -> Option<u32> {
 }
 
 impl ObjDiff {
-    fn apply(&mut self, before: Option<&Document>, parts: &[PathPart], leaf: Leaf) {
-        let Some((first, rest)) = parts.split_first() else { return };
+    fn apply(&mut self, before: Option<&Document>, (first, rest): Step<'_>, leaf: Leaf) {
         let name = field_name(first);
         let current = before.and_then(|d| d.get(&name));
         if rest.is_empty() {
@@ -88,28 +102,16 @@ impl ObjDiff {
                 Leaf::Remove => {
                     self.removed.insert(name, ());
                 }
-                Leaf::Truncate(n) => {
-                    let node =
-                        self.sub.entry(name).or_insert_with(|| Node::Arr(ArrDiff::default()));
-                    if let Node::Arr(a) = node {
-                        a.length = Some(n);
-                    }
-                }
+                Leaf::Truncate(n) => self.arrs.entry(name).or_default().length = Some(n),
             }
             return;
         }
         match current {
             Some(Value::Document(d)) => {
-                let node = self.sub.entry(name).or_insert_with(|| Node::Obj(ObjDiff::default()));
-                if let Node::Obj(o) = node {
-                    o.apply(Some(d), rest, leaf);
-                }
+                self.objs.entry(name).or_default().apply(Some(d), split(rest), leaf)
             }
             Some(Value::Array(items)) => {
-                let node = self.sub.entry(name).or_insert_with(|| Node::Arr(ArrDiff::default()));
-                if let Node::Arr(a) = node {
-                    a.apply(items, rest, leaf);
-                }
+                self.arrs.entry(name).or_default().apply(items, split(rest), leaf)
             }
             // A missing parent goes in whole with what the path sets.
             _ => {
@@ -132,16 +134,15 @@ impl ObjDiff {
                 d.push(section, s);
             }
         }
-        for (k, node) in &self.sub {
-            d.push(format!("s{k}"), node.to_document());
+        for (k, sub) in subdiffs(&self.objs, &self.arrs) {
+            d.push(format!("s{k}"), sub);
         }
         d
     }
 }
 
 impl ArrDiff {
-    fn apply(&mut self, items: &[Value], parts: &[PathPart], leaf: Leaf) {
-        let Some((first, rest)) = parts.split_first() else { return };
+    fn apply(&mut self, items: &[Value], (first, rest): Step<'_>, leaf: Leaf) {
         let Some(pos) = position(first) else { return };
         let current = usize::try_from(pos).ok().and_then(|i| items.get(i));
         if rest.is_empty() {
@@ -149,12 +150,7 @@ impl ArrDiff {
                 Leaf::Set(v) => {
                     self.updated.insert(pos, v);
                 }
-                Leaf::Truncate(n) => {
-                    let node = self.sub.entry(pos).or_insert_with(|| Node::Arr(ArrDiff::default()));
-                    if let Node::Arr(a) = node {
-                        a.length = Some(n);
-                    }
-                }
+                Leaf::Truncate(n) => self.arrs.entry(pos).or_default().length = Some(n),
                 // `$unset` of a position sets it to null.
                 Leaf::Remove => {
                     self.updated.insert(pos, Value::Null);
@@ -164,16 +160,10 @@ impl ArrDiff {
         }
         match current {
             Some(Value::Document(d)) => {
-                let node = self.sub.entry(pos).or_insert_with(|| Node::Obj(ObjDiff::default()));
-                if let Node::Obj(o) = node {
-                    o.apply(Some(d), rest, leaf);
-                }
+                self.objs.entry(pos).or_default().apply(Some(d), split(rest), leaf)
             }
             Some(Value::Array(inner)) => {
-                let node = self.sub.entry(pos).or_insert_with(|| Node::Arr(ArrDiff::default()));
-                if let Node::Arr(a) = node {
-                    a.apply(inner, rest, leaf);
-                }
+                self.arrs.entry(pos).or_default().apply(inner, split(rest), leaf)
             }
             _ => {
                 if let Leaf::Set(v) = leaf {
@@ -188,26 +178,18 @@ impl ArrDiff {
         if let Some(l) = self.length {
             d.push("l", i32::try_from(l).unwrap_or(i32::MAX));
         }
+        let mut subs = subdiffs(&self.objs, &self.arrs);
         let positions: std::collections::BTreeSet<u32> =
-            self.updated.keys().chain(self.sub.keys()).copied().collect();
+            self.updated.keys().chain(subs.keys()).copied().collect();
         for p in positions {
             if let Some(v) = self.updated.get(&p) {
                 d.push(format!("u{p}"), v.clone());
             }
-            if let Some(n) = self.sub.get(&p) {
-                d.push(format!("s{p}"), n.to_document());
+            if let Some(sub) = subs.remove(&p) {
+                d.push(format!("s{p}"), sub);
             }
         }
         d
-    }
-}
-
-impl Node {
-    fn to_document(&self) -> Document {
-        match self {
-            Node::Obj(o) => o.to_document(),
-            Node::Arr(a) => a.to_document(),
-        }
     }
 }
 
@@ -222,14 +204,15 @@ fn parts_of(desc: &UpdateDescription, path: &str) -> Vec<PathPart> {
 /// `{$v: 2, diff}` of an update by operators that changed `before` as `desc` describes.
 pub fn update_entry(before: &Document, desc: &UpdateDescription) -> Document {
     let mut root = ObjDiff::default();
-    for (path, n) in &desc.truncated {
-        root.apply(Some(before), &parts_of(desc, path), Leaf::Truncate(*n));
-    }
-    for path in &desc.removed {
-        root.apply(Some(before), &parts_of(desc, path), Leaf::Remove);
-    }
-    for (path, v) in &desc.updated {
-        root.apply(Some(before), &parts_of(desc, path), Leaf::Set(v.clone()));
+    let leaves = desc.truncated.iter().map(|(p, n)| (p, Leaf::Truncate(*n)));
+    let leaves = leaves.chain(desc.removed.iter().map(|p| (p, Leaf::Remove)));
+    let leaves = leaves.chain(desc.updated.iter().map(|(p, v)| (p, Leaf::Set(v.clone()))));
+    for (path, leaf) in leaves {
+        let parts = parts_of(desc, path);
+        // An empty path names no field.
+        if let Some((first, rest)) = parts.split_first() {
+            root.apply(Some(before), (first, rest), leaf);
+        }
     }
     Document::new().with("$v", DIFF_VERSION).with("diff", root.to_document())
 }

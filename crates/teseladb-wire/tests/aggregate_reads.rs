@@ -116,3 +116,38 @@ fn list_local_sessions_checks_its_users() {
     );
     assert_eq!(batch(&r), Vec::<Document>::new(), "{r:?}");
 }
+
+/// A `find` on a view whose pipeline starts with a stage of the node itself sees the node as an
+/// aggregation does (measured on a `refrouter` 9.0.4 on 02-11-2026): the indexes of the collection
+/// under the view, its count, its catalog entry and its geospatial index.
+#[test]
+fn a_view_over_a_stage_of_the_node_reads_the_collection_under_it() {
+    let mut m = loaded();
+    run(
+        &mut m,
+        "r",
+        r#"{"update":"c","updates":[{"q":{},"u":{"$set":{"loc":[0,0]}},"multi":true}]}"#,
+    );
+    run(&mut m, "r", r#"{"createIndexes":"c","indexes":[{"key":{"loc":"2d"},"name":"loc_2d"}]}"#);
+    let view = |m: &mut Mem, pipeline: &str| {
+        run(m, "r", r#"{"drop":"v"}"#);
+        let r = run(m, "r", &format!(r#"{{"create":"v","viewOn":"c","pipeline":{pipeline}}}"#));
+        assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{pipeline}: {r:?}");
+        batch(&run(m, "r", r#"{"find":"v"}"#))
+    };
+    let mut names: Vec<String> =
+        view(&mut m, r#"[{"$indexStats":{}},{"$project":{"name":1,"_id":0}}]"#)
+            .iter()
+            .map(|d| format!("{:?}", d.get("name")))
+            .collect();
+    names.sort();
+    assert_eq!(names.len(), 3, "{names:?}");
+    let counted = view(&mut m, r#"[{"$collStats":{"count":{}}},{"$project":{"count":1,"_id":0}}]"#);
+    assert_eq!(counted, [json(r#"{"count":3}"#)]);
+    assert!(view(&mut m, r#"[{"$planCacheStats":{}}]"#).is_empty());
+    let catalog = view(&mut m, r#"[{"$listCatalog":{}},{"$project":{"name":1,"_id":0}}]"#);
+    assert_eq!(catalog, [json(r#"{"name":"c"}"#)]);
+    let near =
+        view(&mut m, r#"[{"$geoNear":{"near":[0,0],"distanceField":"d"}},{"$project":{"d":1}}]"#);
+    assert_eq!(near.len(), 3, "{near:?}");
+}

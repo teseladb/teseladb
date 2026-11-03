@@ -371,3 +371,45 @@ pub fn samples_of(
         })
         .collect()
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn numbers_of_every_numeric_type() {
+        assert_eq!(number(&Value::Int32(2)), Some(2.0));
+        assert_eq!(number(&Value::Int64(3)), Some(3.0));
+        assert_eq!(number(&Value::Double(0.5)), Some(0.5));
+        let dec = teseladb_mql::to_decimal128(&Value::Double(1.5)).expect("a decimal");
+        assert_eq!(number(&Value::Decimal128(dec)), Some(1.5));
+        assert_eq!(number(&Value::from("x")), None);
+    }
+
+    #[test]
+    fn a_sample_keeps_what_the_command_has() {
+        let id = Value::Int32(7);
+        let stage = |v: Value| {
+            Document::new().with("aggregate", "c").with("pipeline", Value::Array(vec![v]))
+        };
+        let other = sampled_command("aggregate", &stage(Value::Int32(1)), "db", &id);
+        assert_eq!(other.get("filter"), Some(&Value::Document(Document::new())));
+        let no_list = Document::new().with("aggregate", "c");
+        let s = sampled_command("aggregate", &no_list, "db", &id);
+        assert_eq!(s.get("filter"), Some(&Value::Document(Document::new())));
+        let fam = Document::new().with("findAndModify", "c").with("remove", true);
+        let s = sampled_command("findAndModify", &fam, "db", &id);
+        assert_eq!(s.get("update"), None);
+        assert_eq!(s.get("remove"), Some(&Value::Boolean(true)));
+        let bad = Document::new().with("update", "c").with("updates", 1);
+        let s = sampled_command("update", &bad, "db", &id);
+        assert_eq!(s.get("updates"), Some(&Value::Array(vec![Value::Null])));
+        let del = Document::new()
+            .with("delete", "c")
+            .with("deletes", Value::Array(vec![Value::Document(Document::new())]));
+        let s = sampled_command("delete", &del, "db", &id);
+        let Some(Value::Array(a)) = s.get("deletes") else { panic!("{s:?}") };
+        assert_eq!(a[0], Value::Document(Document::new().with("sampleId", id.clone())));
+    }
+}

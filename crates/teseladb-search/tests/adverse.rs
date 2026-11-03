@@ -171,6 +171,114 @@ fn enormous_texts_and_expanding_queries_score_as_refsearch() {
     assert_eq!(ids(&ix, &ks).expect("small"), vec![2]);
 }
 
+/// The measured index of `m51.js`, with `u` on document 3 (`m60.js`).
+fn clause_index(words: &[String]) -> Indexer {
+    let big = format!("{} b{}", "a".repeat(300), "c".repeat(40000));
+    let docs = vec![
+        Document::new().with("_id", 1_i64).with("t", big).with("k", "k".repeat(40000)),
+        Document::new().with("_id", 2_i64).with("t", words.join(" ")).with("k", "small"),
+        Document::new()
+            .with("_id", 3_i64)
+            .with("t", "aaaa bbbb")
+            .with("k", "small2")
+            .with("u", "aaaa"),
+    ];
+    index(r#"{"mappings": {"dynamic": true, "fields": {"k": {"type": "token"}}}}"#, docs)
+}
+
+/// The error of `query` on `ix`, or `ok`.
+fn outcome(ix: &Indexer, query: &str) -> String {
+    match ix.search(&q(query)) {
+        Ok(_) => "ok".to_owned(),
+        Err(e) => e.0,
+    }
+}
+
+#[test]
+fn clauses_are_counted_after_rewriting_as_refsearch() {
+    let w: Vec<String> = (0..3000_u32).map(|i| format!("w{}x", radix36(i))).collect();
+    let z: Vec<String> = (0..3000_u32).map(|i| format!("zzzzzzzzz{}", radix36(i))).collect();
+    let ix = clause_index(&w);
+    let flat = "maxClauseCount is set to 1024";
+    let nested = "Query contains too many nested clauses; maxClauseCount is set to 1024";
+    let text = |words: &[String], fuzzy: bool| {
+        let f = if fuzzy { r#", "fuzzy": {}"# } else { "" };
+        format!(r#"{{"text": {{"path": "t", "query": "{}"{f}}}}}"#, words.join(" "))
+    };
+    let should = |ops: &[String]| format!(r#"{{"compound": {{"should": [{}]}}}}"#, ops.join(", "));
+    // A `text` on two paths is a disjunction of one per path (m60 `p2_512`, `p2_513`).
+    let two = |n: usize| {
+        format!(r#"{{"text": {{"path": ["t", "u"], "query": "{}"}}}}"#, w[..n].join(" "))
+    };
+    assert_eq!(outcome(&ix, &two(512)), "ok");
+    assert_eq!(outcome(&ix, &two(513)), flat);
+    // Each fuzzy word brings its 50 expansions (m60 `fz20`, `fz21`; m64).
+    let fz = |n: usize| {
+        format!(
+            r#"{{"text": {{"path": "t", "query": "{}", "fuzzy": {{"maxEdits": 2}}}}}}"#,
+            w[..n].join(" ")
+        )
+    };
+    assert_eq!(outcome(&ix, &fz(20)), "ok");
+    assert_eq!(outcome(&ix, &fz(21)), flat);
+    // A `should` takes in the disjunctions it holds: 600 and 500 terms are too many (m61 `a`),
+    // 524 and 500 are not (m65 `plain2`).
+    assert_eq!(outcome(&ix, &should(&[text(&w[..600], false), text(&w[600..1100], false)])), flat);
+    assert_eq!(outcome(&ix, &should(&[text(&z[..524], false), text(&z[1000..1500], false)])), "ok");
+    assert_eq!(outcome(&ix, &should(&[text(&z[..525], false), text(&z[1000..1500], false)])), flat);
+    // The 1 000 expansions of 20 fuzzy words are some 550 different terms once taken in
+    // (m65 `z450`, `z480`; m64 `w400`), and one fuzzy word with 1 001 more terms is too many.
+    let fuzzy20 = text(&w[..20], true);
+    assert_eq!(outcome(&ix, &should(&[fuzzy20.clone(), text(&z[..450], false)])), "ok");
+    assert_eq!(outcome(&ix, &should(&[fuzzy20.clone(), text(&z[..480], false)])), flat);
+    assert_eq!(outcome(&ix, &should(&[fuzzy20, text(&w[100..500], false)])), "ok");
+    let one = should(&[text(&w[..1], true), text(&z[..1000], false), text(&z[1000..1001], false)]);
+    assert_eq!(outcome(&ix, &one), flat);
+    // Equal clauses of one level count once (m66 `dupText`; m61 `ex2`).
+    assert_eq!(outcome(&ix, &should(&[text(&z[..600], false), text(&z[..600], false)])), "ok");
+    let exists = |n: usize| should(&vec![r#"{"exists": {"path": "t"}}"#.to_owned(); n]);
+    assert_eq!(outcome(&ix, &should(&[exists(600), exists(500)])), "ok");
+    // A numeric `range` is two clauses (m66 `rangeShould`, `rangeMust`).
+    let ranges = |a: usize, b: usize| {
+        let r: Vec<String> =
+            (a..b).map(|i| format!(r#"{{"range": {{"path": "n", "gte": {i}}}}}"#)).collect();
+        should(&r)
+    };
+    assert_eq!(outcome(&ix, &should(&[ranges(0, 600), ranges(600, 1100)])), flat);
+    let must = |m: &str, other: &str, o: &str| {
+        format!(r#"{{"compound": {{"must": [{m}], "{other}": [{o}]}}}}"#)
+    };
+    assert_eq!(outcome(&ix, &must(&ranges(0, 600), "filter", &ranges(600, 1100))), flat);
+    // With `must` or `filter` nothing is taken in, and the whole tree counts (m61 `mixed`,
+    // m66 `eqMust`, `mustText`, `mustText2`, `dupMust`; m62 `zm1000`).
+    let equals = |a: usize, b: usize| {
+        let e: Vec<String> =
+            (a..b).map(|i| format!(r#"{{"equals": {{"path": "k", "value": "v{i}"}}}}"#)).collect();
+        should(&e)
+    };
+    assert_eq!(
+        outcome(&ix, &must(&text(&w[..600], false), "filter", &text(&w[600..1100], false))),
+        nested
+    );
+    assert_eq!(outcome(&ix, &must(&equals(0, 600), "filter", &equals(600, 1100))), nested);
+    assert_eq!(
+        outcome(&ix, &must(&text(&z[..600], false), "should", &text(&z[600..1100], false))),
+        nested
+    );
+    assert_eq!(
+        outcome(&ix, &must(&text(&z[..524], false), "should", &text(&z[600..1100], false))),
+        "ok"
+    );
+    assert_eq!(
+        outcome(&ix, &must(&text(&z[..600], false), "filter", &text(&z[..600], false))),
+        "ok"
+    );
+    assert_eq!(
+        outcome(&ix, &must(&text(&w[1..2], false), "should", &text(&z[..1000], false))),
+        "ok"
+    );
+}
+
 fn radix36(mut n: u32) -> String {
     let digits = b"0123456789abcdefghijklmnopqrstuvwxyz";
     let mut out = Vec::new();
@@ -224,4 +332,159 @@ fn fuzzy_bounds_are_those_of_each_operator() {
         Err("\"term.fuzzy.maxExpansions\" must be positive".to_owned())
     );
     assert_eq!(err("term", r#"{"maxEdits": 0, "maxExpansions": 1001}"#), Ok(()));
+}
+
+/// The answers of the query parser to options it refuses or reads twice.
+#[test]
+fn query_options_are_checked() {
+    let doc = Document::new().with("_id", 1_i64).with("t", "a b");
+    let ix = index(r#"{"mappings": {"dynamic": true}}"#, vec![doc]);
+    let refused = [
+        (
+            r#"{"facet": {"operator": {"exists": {"path": "t"}}, "facets": {}}, "bogus": 1}"#,
+            "unrecognized field \"bogus\"",
+        ),
+        (
+            r#"{"phrase": {"query": "a", "path": "t", "bogus": 1}}"#,
+            "\"phrase\" unrecognized field \"bogus\"",
+        ),
+        (
+            r#"{"text": {"query": "a", "path": "t", "score": 1}}"#,
+            "\"text.score\" must be a document",
+        ),
+        (
+            r#"{"text": {"query": "a", "path": "t", "score": {"boost": {"value": "x"}}}}"#,
+            "\"text.score.boost.value\" must be a number",
+        ),
+        (r#"{"compound": {"must": [1]}}"#, "\"compound.must\" must be a document"),
+        (
+            r#"{"compound": {"must": [{"exists": {"path": "t"}}], "bogus": 1}}"#,
+            "\"compound\" unrecognized field \"bogus\"",
+        ),
+    ];
+    for (query, message) in refused {
+        assert_eq!(ix.search(&q(query)).expect_err(query).0, message);
+    }
+    let accepted = [
+        r#"{"exists": {"path": "t"}, "returnStoredSource": false}"#,
+        r#"{"text": {"query": "a", "path": ["t", "t"]}}"#,
+        r#"{"text": {"query": "a", "path": {"wildcard": "t"}}}"#,
+        r#"{"compound": {"should": [{"exists": {"path": "t"}}], "score": {"boost": {"value": 1}}}}"#,
+    ];
+    for query in accepted {
+        assert_eq!(ix.search(&q(query)).expect(query).len(), 1, "{query}");
+    }
+}
+
+#[test]
+fn an_emptied_index_finds_nothing() {
+    let doc = Document::new().with("_id", 1_i64).with("t", "a b");
+    let mut ix = index(r#"{"mappings": {"dynamic": true}}"#, vec![doc]);
+    ix.apply(vec![(vec![0], None)]).expect("deleted");
+    assert!(ix.search(&q(r#"{"text": {"query": "a", "path": "t"}}"#)).expect("search").is_empty());
+}
+
+/// `autocomplete` with a boost, several queries, `sequential` and `fuzzy`, as `refsearch` 1.70.6
+/// answers them (`scratchpad/lane3q/m79.js`, 02-11-2026).
+#[test]
+fn autocomplete_options_score_as_refsearch() {
+    let docs = [(1, "abcd efgh", "abcd efgh"), (2, "efgh abcd", "efgh abcd"), (3, "xyz", "abd")]
+        .into_iter()
+        .map(|(id, a, s)| Document::new().with("_id", i64::from(id)).with("a", a).with("s", s))
+        .collect();
+    let ix = index(
+        r#"{"mappings": {"dynamic": false, "fields": {"a": {"type": "autocomplete"},
+            "s": [{"type": "autocomplete"}, {"type": "string"}]}}}"#,
+        docs,
+    );
+    let ranked = |query: &str| -> Vec<(i64, f32)> {
+        ix.search(&q(query))
+            .expect(query)
+            .iter()
+            .map(|f| match f.doc.get("_id") {
+                Some(teseladb_bson::Value::Int64(n)) => (*n, f.score),
+                other => panic!("an _id: {other:?}"),
+            })
+            .collect()
+    };
+    let cases: [(&str, &[(i64, f32)]); 5] = [
+        (
+            r#"{"autocomplete": {"query": "ab", "path": "a", "score": {"boost": {"value": 2}}}}"#,
+            &[(1, 0.758_070_35), (2, 0.635_140_06)],
+        ),
+        (
+            r#"{"autocomplete": {"query": ["ab", "ef"], "path": "s"}}"#,
+            &[(2, 0.469_259_08), (1, 0.425_256_64), (3, 0.096_065_745)],
+        ),
+        (
+            r#"{"autocomplete": {"query": "abcd ef", "path": "a", "tokenOrder": "sequential"}}"#,
+            &[(1, 0.662_722_47)],
+        ),
+        (
+            r#"{"autocomplete": {"query": "abx", "path": "a", "fuzzy": {"maxEdits": 1}}}"#,
+            &[(1, 1.0), (2, 1.0)],
+        ),
+        (
+            r#"{"autocomplete": {"query": "ab ef", "path": "s"}}"#,
+            &[(2, 0.469_259_08), (1, 0.425_256_64), (3, 0.096_065_745)],
+        ),
+    ];
+    for (query, want) in cases {
+        assert_eq!(ranked(query), want, "{query}");
+    }
+}
+
+/// The index of `m80.js`: document `i` has `t: "w1x" + suffix i`, the suffixes being the pairs of
+/// `[a-z0-9]` in that order, documents 0 to 599 in one segment and 600 to 1 199 in another
+/// (inserted in two waves on `refsearch`), or all in one segment.
+fn fuzzy_waves(split: bool) -> Indexer {
+    let alphabet: Vec<char> = "abcdefghijklmnopqrstuvwxyz0123456789".chars().collect();
+    let def = r#"{"mappings": {"dynamic": false, "fields": {"t": {"type": "string"}}}}"#;
+    let def = Definition::parse(&extjson::parse(def).expect("JSON")).expect("definition");
+    let mut ix = Indexer::new(def);
+    let key = |i: u16| i.to_be_bytes().to_vec();
+    let changes = (0..1200_u16).map(|i| {
+        let suffix: String =
+            [alphabet[usize::from(i) / 36], alphabet[usize::from(i) % 36]].iter().collect();
+        let doc = Document::new().with("_id", i64::from(i)).with("t", format!("w1x{suffix}"));
+        (key(i), Some(doc))
+    });
+    ix.apply(changes).expect("applied");
+    if split {
+        ix.reshape(&[(Vec::new(), key(600)), (key(600), Vec::new())]).expect("split");
+        assert_eq!(ix.segments(), 2);
+    }
+    ix
+}
+
+#[test]
+fn fuzzy_expansions_are_the_terms_of_the_whole_index() {
+    // Measured on `refsearch` 1.70.6 (`scratchpad/lane3r/m80.js`): 600 expansions and 300 terms are
+    // fine with the first wave, and 1 000 expansions of the two waves and those 300 terms are too
+    // many, though each segment has 600 only.
+    let z: Vec<String> = (0..300_u32).map(|i| format!("zzzzzzzzz{}", radix36(i))).collect();
+    let big = format!(
+        r#"{{"compound": {{"should": [
+            {{"text": {{"path": "t", "query": "w1x", "fuzzy": {{"maxEdits": 2, "maxExpansions": 1000}}}}}},
+            {{"text": {{"path": "t", "query": "{}"}}}}]}}}}"#,
+        z.join(" ")
+    );
+    let f50 = q(r#"{"text": {"path": "t", "query": "w1x", "fuzzy": {"maxEdits": 2}}}"#);
+    let near = q(r#"{"text": {"path": "t", "query": "w1xzz", "fuzzy": {"maxEdits": 1}}}"#);
+    for split in [true, false] {
+        let ix = fuzzy_waves(split);
+        assert_eq!(outcome(&ix, &big), "maxClauseCount is set to 1024", "split {split}");
+        // The 50 expansions are the first terms of the whole index in byte order, all of the
+        // second wave: `w1x00` to `w1x0z` and `w1x10` to `w1x1d` (m80 `AB_f50`).
+        let found = ids(&ix, &f50).expect("fuzzy");
+        let expected: Vec<i64> = (936..972).chain(972..976).chain(998..1008).collect();
+        assert_eq!(found, expected, "split {split}");
+        let s = scores(&ix, &f50).expect("fuzzy");
+        assert!(s.iter().all(|&x| x == 1.012_946_1_f32), "split {split}: {s:?}");
+        // m80 `AB_f50_b`: 50 documents, from 25 to 1 177, scored 3.0388384 to 2.4310706.
+        let found = ids(&ix, &near).expect("near");
+        assert_eq!((found.len(), found[0], found[49]), (50, 25, 1177), "split {split}");
+        let s = scores(&ix, &near).expect("near");
+        assert_eq!((s[0], s[49]), (3.038_838_4_f32, 2.431_070_6_f32), "split {split}");
+    }
 }

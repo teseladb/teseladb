@@ -308,7 +308,10 @@ pub fn set_cluster_parameter<B: Backend + ?Sized>(
     if k.name == super::presentation::TOPOLOGY_PRESENTATION {
         let before = super::presentation::stored(ctx.backend)?;
         let hosts = super::presentation::hosts(ctx.backend)?;
-        parsed = super::presentation::next(&before, &parsed, &hosts)?.to_document();
+        let mark = ctx.backend.cluster_mark();
+        parsed = super::presentation::next(&before, &parsed, &hosts)?
+            .elected(mark, super::presentation::REASON_TIMEOUT)
+            .to_document();
     }
     let secs = u32::try_from(ctx.backend.now_ms() / 1000).unwrap_or(u32::MAX);
     let time_value = Value::Timestamp { time: secs, increment: 1 };

@@ -133,5 +133,17 @@ mod tests {
         let mut tail = out;
         tail.push(0);
         assert!(Table::open(&tail).is_err());
+        // One entry: offsets and data written by hand.
+        let raw = |offsets: [u64; 2], data: &[u8]| {
+            let mut b = 1_u64.to_le_bytes().to_vec();
+            offsets.iter().for_each(|o| b.extend_from_slice(&o.to_le_bytes()));
+            b.extend_from_slice(data);
+            b
+        };
+        assert!(Table::open(&raw([0, 2], &[1, 9])).is_ok());
+        // The end of the last entry past the data.
+        assert!(Table::open(&raw([0, 5], &[1, 9])).is_err());
+        // The first entry not at the start of the data.
+        assert!(Table::open(&raw([1, 2], &[0, 1])).is_err());
     }
 }

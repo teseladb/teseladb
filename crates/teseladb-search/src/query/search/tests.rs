@@ -320,3 +320,20 @@ fn search_meta_counts_as_refsearch() {
         Err(SearchError("\"count.type\" must be one of [lowerBound, total]".to_owned()))
     );
 }
+
+/// `returnStoredSource: true` needs `storedSource` in the definition (measured on `refsearch`), and
+/// a query without `highlight` has no highlights.
+#[test]
+fn stored_source_and_absent_highlights() {
+    let gato = Document::new().with("query", "gato").with("path", "t");
+    let spec = Document::new().with("text", gato).with("returnStoredSource", true);
+    let err = run(&index(), &spec).map(|_| ()).unwrap_err();
+    assert!(err.0.starts_with("storedSource is not configured for this index."), "{err:?}");
+    let def = Document::new()
+        .with("mappings", Document::new().with("dynamic", true))
+        .with("storedSource", true);
+    let mut stored = MemIndex::new(Definition::parse(&def).expect("valid"));
+    stored.put(&[0], &Document::new().with("_id", 0).with("t", "gato")).expect("indexed");
+    assert_eq!(run(&stored, &spec).expect("stored").len(), 1);
+    assert_eq!(highlights(&stored, &spec, &[0]), Ok(None));
+}

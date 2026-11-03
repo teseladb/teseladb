@@ -44,14 +44,26 @@ impl Notify for Quiet {
 type DataScript = Arc<Mutex<VecDeque<Result<DataReply, RangeError>>>>;
 type CatalogScript = Arc<Mutex<VecDeque<CatalogAnswer>>>;
 type KillScript = Arc<Mutex<VecDeque<bool>>>;
+type OpsScript = Arc<Mutex<VecDeque<Option<Vec<Vec<u8>>>>>>;
 
 /// Two cores that answer from their scripts (nothing left: no answer).
 fn cores(data: DataScript, catalog: CatalogScript, kills: KillScript) -> NodeHandle {
+    cores_with_ops(data, catalog, kills, OpsScript::default())
+}
+
+/// [`cores`], with core 0 answering `currentOp` of the other nodes from `ops`.
+fn cores_with_ops(
+    data: DataScript,
+    catalog: CatalogScript,
+    kills: KillScript,
+    ops: OpsScript,
+) -> NodeHandle {
     let mut senders = Vec::new();
     for core in 0..2 {
         let (tx, mut rx) = mailbox::channel::<CoreInput<NodeMsg>>(Arc::new(Quiet));
         senders.push(tx.senders());
         let (data, catalog, kills) = (data.clone(), catalog.clone(), kills.clone());
+        let ops = ops.clone();
         thread::spawn(move || {
             let mut inbox = Vec::new();
             for _ in 0..4000 {
@@ -65,6 +77,11 @@ fn cores(data: DataScript, catalog: CatalogScript, kills: KillScript) -> NodeHan
                         }
                         CoreInput::App(NodeMsg::KillSessions(_, reply)) if core == 0 => {
                             if let Some(a) = kills.lock().unwrap().pop_front() {
+                                let _ = reply.send(a);
+                            }
+                        }
+                        CoreInput::App(NodeMsg::CurrentOps(reply)) if core == 0 => {
+                            if let Some(a) = ops.lock().unwrap().pop_front() {
                                 let _ = reply.send(a);
                             }
                         }
@@ -1003,6 +1020,81 @@ fn a_change_stream_reads_the_catalog_changes_and_moves_a_quiet_group_0() {
     assert_eq!(b.catalog_changes(floor).unwrap_err().code.code, 1);
     let mut b = backend(vec![], vec![]);
     assert_eq!(b.catalog_changes(floor).unwrap_err().code.code, 10107);
+}
+
+/// 007 FR-025 and 010 T033: a tenant's number and the Group 0 settings once core 0 has Group 0, or
+/// unavailable at the deadline; the other nodes' operations, a bad list or no answer.
+#[test]
+fn tenants_settings_and_other_operations_wait_for_core_zero() {
+    use std::collections::BTreeMap;
+    use teseladb_bson::{Document, Value};
+    let tenants = CatalogAnswer::Tenants(vec![(4, "acme".into())]);
+    let mut b = backend(vec![], vec![CatalogAnswer::Unavailable, tenants.clone(), tenants]);
+    assert_eq!(b.tenant_named("acme"), Ok(Some(4)));
+    assert_eq!(b.tenant_named("other"), Ok(None));
+    assert_eq!(b.tenant_named("acme").unwrap_err().code.code, 10107);
+    let settings: BTreeMap<Vec<u8>, Vec<u8>> =
+        [(b"zone/a".to_vec(), vec![1]), (b"other".to_vec(), vec![2])].into();
+    let answers = vec![CatalogAnswer::Unavailable, CatalogAnswer::Settings(settings)];
+    let mut b = backend(vec![], answers);
+    let zones = b.group0_settings(b"zone/").unwrap();
+    assert_eq!(zones.into_iter().collect::<Vec<_>>(), vec![(b"zone/a".to_vec(), vec![1])]);
+    assert_eq!(b.group0_settings(b"zone/").unwrap_err().code.code, 10107);
+    let op = Document::new().with("opid", 9);
+    let listed = Document::new()
+        .with("ops", Value::Array(vec![Value::Document(op.clone()), Value::Int32(1)]));
+    let script = vec![
+        Some(vec![listed.to_bytes().unwrap(), Document::new().to_bytes().unwrap()]),
+        Some(vec![vec![1, 2]]),
+        None,
+    ];
+    let h = cores_with_ops(
+        Arc::default(),
+        Arc::default(),
+        Arc::default(),
+        Arc::new(Mutex::new(script.into())),
+    );
+    let mut b = ServerBackend::new(h, 7).with_deadline(Duration::from_millis(300));
+    assert_eq!(b.other_operations(), Ok(vec![op]));
+    assert_eq!(b.other_operations().unwrap_err().errmsg, "a node answered a bad list");
+    for _ in 0..2 {
+        let e = b.other_operations().unwrap_err();
+        assert_eq!(e.errmsg, "a node of the cluster did not answer the list of its operations");
+    }
+}
+
+/// 008 FR-014: the reaper reads the records of a range it leads page by page, skipping a row that
+/// is not a record; a range this node does not lead is left alone.
+#[test]
+fn the_reaper_reads_every_page_of_the_records_it_leads() {
+    use std::collections::BTreeMap;
+    use teseladb_server::data::DataStatus;
+    let leader = DataStatus { role: Some(teseladb_raft::Role::Leader), ..DataStatus::default() };
+    let page: Vec<(Vec<u8>, Vec<u8>)> = (0..256u16)
+        .map(|i| ([2, 0].into_iter().chain(i.to_be_bytes()).collect(), vec![0xff]))
+        .collect();
+    let data = vec![
+        Ok(DataReply::Status(leader.clone())),
+        Ok(DataReply::Remote(RemoteReply::Rows(page))),
+        Ok(DataReply::Remote(RemoteReply::Rows(vec![(vec![2, 1], vec![1, 2, 3])]))),
+        Ok(DataReply::Status(leader.clone())),
+        Ok(DataReply::Remote(RemoteReply::Rows(vec![]))),
+        Ok(DataReply::Status(DataStatus::default())),
+        Ok(DataReply::Status(leader)),
+    ];
+    let mut b = backend(data, vec![]);
+    // Each pass creates the reaper of the range's core once its records are read: the second
+    // pass finds its leader's answer next, so the first read both pages.
+    let pass = |b: &mut ServerBackend| {
+        let mut reapers = BTreeMap::new();
+        assert_eq!(b.reap_transactions(&mut reapers), 0);
+        reapers.len()
+    };
+    assert_eq!(pass(&mut b), 1);
+    assert_eq!(pass(&mut b), 1);
+    // A follower, then a leader whose scan gets no answer: neither is read.
+    assert_eq!(pass(&mut b), 0);
+    assert_eq!(pass(&mut b), 0);
 }
 
 /// The reads of several keys of a transaction go to their ranges together and each key gets its

@@ -745,3 +745,52 @@ fn validate_reports_missing_and_extra_entries() {
     );
     assert!(shown("advice").contains("A corrupt namespace has been detected."));
 }
+
+/// An error of a filter read through an index (`$expr` dividing by zero after the index on `a`
+/// chose the documents) is an executor error of the namespace, as a `refrouter` 9.0.4 gives it
+/// (measured on 02-11-2026).
+#[test]
+fn an_error_of_an_index_read_names_the_namespace() {
+    let mut m = Mem::new();
+    load(&mut m, "ex", r#"[{"_id":1,"a":1},{"_id":2,"a":2}]"#);
+    let r = m.run(
+        DB,
+        extjson::parse(r#"{"createIndexes":"ex","indexes":[{"key":{"a":1},"name":"a_1"}]}"#)
+            .expect("command"),
+    );
+    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+    let cmd = r#"{"aggregate":"ex","pipeline":[{"$match":{"a":1,"$expr":{"$divide":["$a",0]}}}],"cursor":{}}"#;
+    let r = m.run(DB, extjson::parse(cmd).expect("command"));
+    assert_eq!(r.get("code"), Some(&Value::Int32(2)), "{r:?}");
+    let want = format!(
+        "Executor error during aggregate command on namespace: {DB}.ex :: caused by :: can't $divide by zero"
+    );
+    assert_eq!(r.get("errmsg"), Some(&Value::from(want)), "{r:?}");
+}
+
+/// The same error through `count` and `distinct` names their command, `count` behind the shard
+/// as a `refrouter` 9.0.4 relays it (measured on 02-11-2026); a `count` with `limit` through the
+/// index counts up to it.
+#[test]
+fn count_and_distinct_errors_of_an_index_read_name_the_command() {
+    let mut m = Mem::new();
+    load(&mut m, "ex", r#"[{"_id":1,"a":1},{"_id":2,"a":2}]"#);
+    let index = r#"{"createIndexes":"ex","indexes":[{"key":{"a":1},"name":"a_1"}]}"#;
+    let r = m.run(DB, extjson::parse(index).expect("command"));
+    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+    let q = r#"{"a":1,"$expr":{"$divide":["$a",0]}}"#;
+    for (name, cmd, shard) in [
+        ("count", format!(r#"{{"count":"ex","query":{q}}}"#), "failed on: node1 :: caused by :: "),
+        ("distinct", format!(r#"{{"distinct":"ex","key":"a","query":{q}}}"#), ""),
+    ] {
+        let r = m.run(DB, extjson::parse(&cmd).expect("command"));
+        let want = format!(
+            "{shard}Executor error during {name} command on namespace: {DB}.ex :: caused by :: \
+             can't $divide by zero"
+        );
+        assert_eq!(r.get("errmsg"), Some(&Value::from(want)), "{r:?}");
+    }
+    let cmd = r#"{"count":"ex","query":{"a":{"$gte":1}},"limit":1}"#;
+    let r = m.run(DB, extjson::parse(cmd).expect("command"));
+    assert_eq!(r.get("n"), Some(&Value::Int32(1)), "{r:?}");
+}

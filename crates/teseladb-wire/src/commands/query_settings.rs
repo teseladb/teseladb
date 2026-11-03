@@ -19,9 +19,9 @@ use super::query_shape::{self, Shape};
 use super::{Backend, Ctx};
 use crate::error::{
     BAD_VALUE, CommandError, EXPECTED_OBJECT, FAILED_TO_PARSE, IDL_FAILED_TO_PARSE,
-    IDL_UNKNOWN_FIELD, INVALID_INDEX_HINT, INVALID_INDEX_HINT_DB, INVALID_LENGTH,
-    QUERY_KNOB_NOT_SETTABLE, QUERY_REJECTED_BY_SETTINGS, QUERY_SETTINGS_DEFAULTS,
-    QUERY_SETTINGS_EMPTY, QUERY_SHAPE_UNSUPPORTED,
+    INVALID_INDEX_HINT, INVALID_INDEX_HINT_DB, INVALID_LENGTH, QUERY_KNOB_NOT_SETTABLE,
+    QUERY_REJECTED_BY_SETTINGS, QUERY_SETTINGS_DEFAULTS, QUERY_SETTINGS_EMPTY,
+    QUERY_SHAPE_UNSUPPORTED,
 };
 use crate::types::{wrong_type, wrong_types};
 
@@ -386,27 +386,13 @@ pub fn remove_query_settings<B: Backend + ?Sized>(
     Ok(Document::new().with("ok", 1.0))
 }
 
-/// The documents of a `$querySettings` stage with specification `spec`.
+/// The documents of a `$querySettings` stage with specification `s` (the pipeline's parser
+/// checks it).
 pub fn listed<B: Backend + ?Sized>(
     backend: &mut B,
-    spec: &Value,
+    s: &Document,
 ) -> Result<Vec<Document>, CommandError> {
-    let Value::Document(s) = spec else {
-        return Err(wrong_type(STAGE, spec, "object"));
-    };
-    let mut debug = false;
-    for (k, v) in s.iter() {
-        match (k, v) {
-            ("showDebugQueryShape", Value::Boolean(b)) => debug = *b,
-            ("showDebugQueryShape", other) => {
-                return Err(wrong_type("$querySettings.showDebugQueryShape", other, "bool"));
-            }
-            _ => {
-                let msg = format!("BSON field '$querySettings.{k}' is an unknown field.");
-                return Err(CommandError::new(IDL_UNKNOWN_FIELD, msg).parsed());
-            }
-        }
-    }
+    let debug = matches!(s.get("showDebugQueryShape"), Some(Value::Boolean(true)));
     Ok(stored(backend)?.values().map(|e| e.to_document(debug)).collect())
 }
 

@@ -38,6 +38,14 @@ pub enum ErrorKind {
     UnknownGroup,
     /// A group name that is malformed or used twice, or a `\k` to a name that does not exist.
     BadGroupName,
+    /// A `{n` or `{n,m` without its `}`.
+    UnclosedCounted,
+    /// A group name not followed by `>`.
+    UnclosedGroupName,
+    /// A `\k` not followed by `<`.
+    BareNamedReference,
+    /// A `\b{g` not followed by `}`.
+    BadBoundary,
 }
 
 /// A syntax error and the character index where it was found.
@@ -257,7 +265,10 @@ impl Parser {
                 self.pos += 1;
                 let min = self.number()?.ok_or(self.error(ErrorKind::IllegalRepetition))?;
                 let max = if self.eat(',') { self.number()? } else { Some(min) };
-                if !self.eat('}') || max.is_some_and(|m| m < min) {
+                if !self.eat('}') {
+                    return Err(self.error(ErrorKind::UnclosedCounted));
+                }
+                if max.is_some_and(|m| m < min) {
                     return Err(self.error(ErrorKind::IllegalRepetition));
                 }
                 match max {
@@ -347,8 +358,11 @@ impl Parser {
         }
         let name: String = self.chars[start..self.pos].iter().collect();
         let valid = name.starts_with(|c: char| c.is_ascii_alphabetic());
-        if !valid || !self.eat('>') {
+        if !valid {
             return Err(self.error(ErrorKind::BadGroupName));
+        }
+        if !self.eat('>') {
+            return Err(self.error(ErrorKind::UnclosedGroupName));
         }
         Ok(name)
     }
@@ -576,12 +590,11 @@ impl Parser {
                 }
                 Escape::Quote(quoted)
             }
-            'b' if self.peek() == Some('{') => {
-                if !(self.eat('{') && self.eat('g') && self.eat('}')) {
-                    return Err(SyntaxError {
-                        kind: ErrorKind::IllegalEscape,
-                        index: self.pos - 1,
-                    });
+            // `\b{` without the `g` of `\b{g}` is a word boundary and a repetition.
+            'b' if self.peek() == Some('{') && self.peek_at(1) == Some('g') => {
+                self.pos += 2;
+                if !self.eat('}') {
+                    return Err(self.error(ErrorKind::BadBoundary));
                 }
                 anchor(self, "\\b{g}".to_string())?
             }
@@ -594,7 +607,7 @@ impl Parser {
             'X' => anchor(self, "\\X".to_string())?,
             'k' if !in_class => {
                 if !self.eat('<') {
-                    return Err(self.error(ErrorKind::BadGroupName));
+                    return Err(self.error(ErrorKind::BareNamedReference));
                 }
                 let name = self.group_name()?;
                 if !self.names.iter().any(|(n, _)| *n == name) {

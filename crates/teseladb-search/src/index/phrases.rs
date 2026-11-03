@@ -150,14 +150,19 @@ impl MultiPhrase {
 }
 
 impl MemIndex {
-    /// The terms of the field `key` within `fuzzy` of `term`, each with its weight.
+    /// The terms of the field `key` within `fuzzy` of `term`, each with its weight: those of the
+    /// whole index when this one is a segment of it.
     pub(crate) fn fuzzy_terms(
         &self,
         key: &str,
         term: &str,
         fuzzy: &super::Fuzzy,
     ) -> Vec<(String, f32)> {
-        self.fields.get(key).map_or_else(Vec::new, |f| f.fuzzy_terms(term, fuzzy))
+        match (self.fields.get(key), self.global_of(key)) {
+            (_, Some(g)) => super::closest_terms(g.df.keys(), term, fuzzy),
+            (Some(f), None) => f.fuzzy_terms(term, fuzzy, None),
+            (None, None) => Vec::new(),
+        }
     }
 
     /// The explanation of fuzzy term `term`, one of `kept`, with weight `boost`, for `doc`.

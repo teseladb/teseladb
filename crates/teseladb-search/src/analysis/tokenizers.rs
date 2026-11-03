@@ -684,6 +684,8 @@ mod tests {
     fn grams_shorter_than_the_minimum_are_dropped() {
         assert_eq!(texts(Tokenizer::NGram { min: 2, max: 3 }, "abc"), ["ab", "abc", "bc"]);
         assert!(texts(Tokenizer::NGram { min: 4, max: 5 }, "abc").is_empty());
+        // An empty text has no grams, not one empty gram.
+        assert!(texts(Tokenizer::EdgeGram { min: 1, max: 2 }, "").is_empty());
     }
 
     #[test]
