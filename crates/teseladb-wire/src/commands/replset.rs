@@ -763,3 +763,42 @@ fn participant_metrics(
         .with("newTermStartDate", date_of(e.at))
         .with("newTermAppliedDate", date_of(e.at))
 }
+
+/// The write commands whose replies a member completes ([`member_write_reply`]).
+const MEMBER_WRITES: [&str; 3] = ["insert", "update", "delete"];
+/// The fields of a write's reply that a member gives after `electionId` and `opTime`, in its
+/// order.
+const AFTER_OP_TIME: [&str; 3] = ["writeErrors", "upserted", "nModified"];
+
+/// The reply of write `command` as a replica set member gives it (measured on a replica set of
+/// `ref:9.0.4`, 03-11-2026): `n`, then `electionId` and `opTime` (the write's optime: its
+/// `operationTime` and the presentation's term), then `writeErrors`, `upserted` and `nModified`,
+/// then the rest. A reply without `n` (an error) or another command's stays as it is.
+pub fn member_write_reply(
+    view: &crate::hello::ReplicaView,
+    command: &str,
+    reply: Document,
+) -> Document {
+    let (Some(n), Some(ts @ Value::Timestamp { .. })) =
+        (reply.get("n"), reply.get("operationTime"))
+    else {
+        return reply;
+    };
+    if !MEMBER_WRITES.contains(&command) {
+        return reply;
+    }
+    let op_time = Document::new().with("ts", ts.clone()).with("t", view.set.term());
+    let mut out = Document::new()
+        .with("n", n.clone())
+        .with("electionId", Value::ObjectId(view.set.election_id()))
+        .with("opTime", op_time);
+    for k in AFTER_OP_TIME {
+        if let Some(v) = reply.get(k) {
+            out.push(k, v.clone());
+        }
+    }
+    for (k, v) in reply.iter().filter(|(k, _)| *k != "n" && !AFTER_OP_TIME.contains(k)) {
+        out.push(k, v.clone());
+    }
+    out
+}
