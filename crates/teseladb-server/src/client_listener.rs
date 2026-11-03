@@ -563,6 +563,7 @@ impl ClientListener {
         let diag = Arc::new(
             Diag::new(cfg.process.clone(), port, open.clone(), cfg.max_connections)
                 .with_certificates(cfg.certificates.clone())
+                .with_tls(cfg.tls.clone())
                 .with_ldap(cfg.ldap.clone())
                 .with_sts(cfg.sts.clone())
                 .with_oidc(cfg.oidc.clone())
@@ -934,9 +935,12 @@ impl Client {
             && self.transport.tls_established()
         {
             self.handshake_from = None;
-            let ms = usize::try_from(from.elapsed().as_millis()).unwrap_or(usize::MAX);
+            let took = from.elapsed();
+            let ms = usize::try_from(took.as_millis()).unwrap_or(usize::MAX);
+            let micros = usize::try_from(took.as_micros()).unwrap_or(usize::MAX);
             PortStats::add(&self.diag.stats.tls_handshakes, 1);
             PortStats::add(&self.diag.stats.tls_handshake_ms, ms);
+            PortStats::add(&self.diag.stats.tls_handshake_micros, micros);
         }
     }
 

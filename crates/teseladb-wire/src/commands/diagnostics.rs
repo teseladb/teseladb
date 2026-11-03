@@ -91,6 +91,17 @@ pub struct NetworkCounts {
     pub tls_handshakes: i64,
     /// Milliseconds they took, summed.
     pub tls_handshake_ms: i64,
+    /// Microseconds they took, summed: their average goes in `metrics.network`.
+    pub tls_handshake_micros: i64,
+}
+
+/// The certificate the client port presents with TLS (`security` of `serverStatus`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ServerCertificate {
+    /// Its subject, as RFC 4514 writes it (`CN=localhost`).
+    pub subject: String,
+    /// Its `notAfter`, in milliseconds since the Unix epoch.
+    pub expires_ms: i64,
 }
 
 /// What `getrusage(2)` and the operating system say of the process.
@@ -197,6 +208,8 @@ pub struct ProcessFacts {
     pub log: LogTail,
     /// The `startupWarnings` log.
     pub startup_warnings: LogTail,
+    /// The client port's certificate; `None` without TLS.
+    pub server_certificate: Option<ServerCertificate>,
 }
 
 impl ProcessFacts {
@@ -365,7 +378,7 @@ pub fn server_status<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Docume
         ("opLatencies", status.latencies()),
         ("opWorkingTime", status.latencies()),
         ("opcounters", opcounters(&counters)),
-        ("security", status.security()),
+        ("security", security(status.security(), facts.server_certificate.as_ref())),
         ("transactions", status.transactions()),
         ("transportSecurity", transport_security(&facts.network)),
         ("mem", mem(&facts.resources)),
@@ -396,6 +409,17 @@ fn default_rw_concern(now: i64) -> Document {
         .with("localUpdateWallClockTime", Value::DateTime(now))
 }
 
+/// `security`: the authentications, then the client port's certificate when it has TLS (measured
+/// on a `refrouter` 9.0.4 with `--tlsMode allowTLS` on 03-11-2026).
+fn security(authentication: Document, cert: Option<&ServerCertificate>) -> Document {
+    match cert {
+        None => authentication,
+        Some(c) => authentication
+            .with("SSLServerSubjectName", c.subject.as_str())
+            .with("SSLServerCertificateExpirationDate", Value::DateTime(c.expires_ms)),
+    }
+}
+
 /// `transportSecurity`: connections by TLS version; the client port speaks TLS 1.3 only.
 fn transport_security(n: &NetworkCounts) -> Document {
     Document::new()
@@ -415,7 +439,14 @@ fn metrics(
 ) -> Document {
     let names =
         COMMANDS.iter().map(|c| c.name).filter(|name| tests || *name != "configureFailPoint");
-    let network = Document::new()
+    let mut network = Document::new();
+    // Once a client completed a handshake (measured on a `refrouter` 9.0.4). RefDb's value is its
+    // own running average; TeselaDB gives the mean of every handshake.
+    if n.tls_handshakes > 0 {
+        let mean = n.tls_handshake_micros as f64 / n.tls_handshakes as f64;
+        network.push("averageTimeToCompletedTLSHandshakeMicros", mean);
+    }
+    let network = network
         .with("totalIngressTLSConnections", Value::Int64(n.tls_handshakes))
         .with("totalIngressTLSHandshakeTimeMillis", Value::Int64(n.tls_handshake_ms));
     Document::new()
