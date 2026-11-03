@@ -261,25 +261,37 @@ pub fn shard_collection<B: Backend + ?Sized>(
         Document::new().with("key", asked.key.clone()).with("unique", asked.unique),
     );
     super::write_block::ddl(ctx.backend, &ns.db)?;
+    // Not a `collMod`: its change event is a `shardCollection` (014, measured on 02-11).
+    let sharded = super::change_stream_ddl::shard_description(
+        &asked.key,
+        asked.unique,
+        matches!(options.get("capped"), Some(Value::Boolean(true))),
+    )?;
+    let options = options.to_bytes()?;
+    // A collection with documents takes its shard key quietly and gives its event once every
+    // document has its new key: a call that fails meanwhile is no change for a stream.
+    let first = if empty { sharded.clone() } else { super::balancing::quiet_description()? };
     ctx.backend.catalog_write(CatalogCommand::Modify {
         ns: ns.clone(),
-        options: options.to_bytes()?,
-        // Not a `collMod`: its change event is a `shardCollection` (014, measured on 02-11).
-        description: super::change_stream_ddl::shard_description(
-            &asked.key,
-            asked.unique,
-            matches!(options.get("capped"), Some(Value::Boolean(true))),
-        )?,
+        options: options.clone(),
+        description: first,
     })?;
     let after = ctx.backend.collection(&ns)?.ok_or_else(no_collection)?;
-    if !empty && let Err(e) = rekey(ctx.backend, &ns, &c, &after) {
-        // The collection goes back to its options without the shard key.
+    if !empty {
+        if let Err(e) = rekey(ctx.backend, &ns, &c, &after) {
+            // The collection goes back to its options without the shard key.
+            ctx.backend.catalog_write(CatalogCommand::Modify {
+                ns: ns.clone(),
+                options: c.options.clone(),
+                description: super::balancing::quiet_description()?,
+            })?;
+            return Err(e);
+        }
         ctx.backend.catalog_write(CatalogCommand::Modify {
             ns: ns.clone(),
-            options: c.options.clone(),
-            description: super::balancing::quiet_description()?,
+            options,
+            description: sharded,
         })?;
-        return Err(e);
     }
     // The zones' intervals given before take the shard key's keys (018 FR-003).
     super::zones::rekey(ctx.backend, &ns, &after)?;
@@ -297,13 +309,14 @@ fn rekey<B: Backend + ?Sized>(
     after: &CollectionEntry,
 ) -> Result<(), CommandError> {
     use super::crud::{index_rules, rules_of};
-    // No change stream sees the move: the documents stay what they were.
+    // No change stream or oplog sees the move, the search indexes do: the documents stay what
+    // they were at new keys.
     let old = super::mutation::Rules {
-        unlogged: true,
+        rekeys: true,
         ..rules_of(ns, before, true, None, index_rules(backend, before)?)?
     };
     let new = super::mutation::Rules {
-        unlogged: true,
+        rekeys: true,
         ..rules_of(ns, after, true, None, index_rules(backend, after)?)?
     };
     let (start, end) = super::query::documents_of(before);

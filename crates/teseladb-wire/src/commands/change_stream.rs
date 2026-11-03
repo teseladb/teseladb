@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use teseladb_bson::{Document, RawDoc, RawValue, Value};
-use teseladb_changestream::changes::{Change, Versioned, changes, collection_of};
+use teseladb_changestream::changes::{Change, Versioned, changes, collection_of, gives_event};
 use teseladb_changestream::cursor::StreamPosition;
 use teseladb_changestream::ddl::{ddl_key, invalidate_of};
 use teseladb_changestream::event::{ChangeEvent, Namespace as EventNs};
@@ -631,7 +631,7 @@ fn poll<B: Backend + ?Sized>(
     // The document each key's last change left, for the pre-image of a later write of the same
     // transaction.
     let mut left: BTreeMap<&[u8], (&EventKey, Option<&Vec<u8>>)> = BTreeMap::new();
-    for change in &found {
+    for change in found.iter().filter(|c| gives_event(c)) {
         let key = change.event.key.as_slice();
         let prior = left.insert(key, (&change.event, change.doc.as_ref()));
         let Some(w) = collection_of(key).and_then(|id| by_id.get(&id)) else {

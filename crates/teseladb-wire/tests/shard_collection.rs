@@ -386,14 +386,30 @@ fn dotted_keys_and_a_collection_dropped_meanwhile() {
     assert_eq!(m.collection(&ns).expect("read"), None);
 }
 
+/// The events a change stream of database `shk` with expanded events has seen since `cursor`.
+fn shk_events(m: &mut Mem, cursor: i64) -> Vec<Value> {
+    let more =
+        Document::new().with("getMore", Value::Int64(cursor)).with("collection", "$cmd.aggregate");
+    let r = m.run("shk", more);
+    let Value::Array(events) = field(&r, "cursor.nextBatch") else { panic!("{r:?}") };
+    events.clone()
+}
+
 /// A write that fails while the documents take the shard key's keys fails the command and leaves
-/// the collection as it was: its documents where they were and no shard key; the command can
-/// then be run again.
+/// the collection as it was: its documents where they were, no shard key and no
+/// `shardCollection` event; the command can then be run again.
 #[test]
 fn a_failed_write_while_keying_again() {
     let mut m = Mem::new();
     run(&mut m, "shk", r#"{"insert":"w","documents":[{"_id":1,"a":1},{"_id":2,"a":2}]}"#);
     run(&mut m, "shk", r#"{"createIndexes":"w","indexes":[{"key":{"a":1},"name":"a_1"}]}"#);
+    let r = run(
+        &mut m,
+        "shk",
+        r#"{"aggregate":1,"pipeline":[{"$changeStream":{"showExpandedEvents":true}}],"cursor":{}}"#,
+    );
+    let Value::Int64(stream) = field(&r, "cursor.id") else { panic!("{r:?}") };
+    let stream = *stream;
     let busy =
         teseladb_wire::error::CommandError::new(teseladb_wire::error::WRITE_CONFLICT, "busy");
     m.fail_write_at = Some((1, busy));
@@ -413,8 +429,20 @@ fn a_failed_write_while_keying_again() {
     let r = run(&mut m, "shk", r#"{"find":"w","filter":{"a":2}}"#);
     let Value::Array(docs) = field(&r, "cursor.firstBatch") else { panic!("{r:?}") };
     assert_eq!(docs.len(), 1, "{r:?}");
+    // Neither failed call is a change: no stream sees a `shardCollection` of either.
+    let events = shk_events(&mut m, stream);
+    assert!(events.is_empty(), "{events:?}");
     let r = shard(&mut m, r#"{"shardCollection":"shk.w","key":{"a":1}}"#);
     assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+    let events = shk_events(&mut m, stream);
+    let types: Vec<&Value> = events
+        .iter()
+        .map(|e| match e {
+            Value::Document(e) => field(e, "operationType"),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(types, [&Value::from("shardCollection")], "{events:?}");
     let r = run(&mut m, "shk", r#"{"count":"w"}"#);
     assert_eq!(field(&r, "n"), &Value::Int32(2), "{r:?}");
 }

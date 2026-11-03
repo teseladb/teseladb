@@ -17,7 +17,7 @@
 use std::collections::BTreeMap;
 
 use teseladb_bson::{Document, RawDoc, Value};
-use teseladb_changestream::changes::{Change, Versioned, changes, collection_of};
+use teseladb_changestream::changes::{Change, Versioned, changes, collection_of, gives_event};
 use teseladb_changestream::meta::{Moved, RetryInfo, lsid_document};
 use teseladb_changestream::token::EventKind;
 use teseladb_hlc::Hlc;
@@ -684,6 +684,9 @@ pub fn read<B: Backend + ?Sized>(backend: &mut B, from: Hlc) -> Result<OplogRead
     let found = changes(versions).map_err(|e| {
         CommandError::new(INTERNAL_ERROR, format!("the oplog read a bad meta: {e:?}"))
     })?;
+    // A deletion at the old key of a document that moved, and the moves of `shardCollection`,
+    // are no operation (018 FR-001).
+    let found: Vec<Change> = found.into_iter().filter(gives_event).collect();
     let mut items = document_items(backend, &found, &by_id, term)?;
     let renames_scratch =
         |r: &DdlRecord| matches!(&r.change, DdlChange::Rename { from, .. } if is_scratch(from));
