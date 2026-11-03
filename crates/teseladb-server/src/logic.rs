@@ -1615,6 +1615,11 @@ impl CoreLogic for NodeLogic {
         self.core.next_deadline()
     }
 
+    fn io_settled(&self) -> bool {
+        // The log waits for the rollback files (005 FR-010), so both go to disk before a stop.
+        self.core.writes_settled() && self.rollback.idle()
+    }
+
     fn on_peer(&mut self, from: NodeId, msg: PeerMsg, now: Nanos) {
         self.now = now;
         let msg = match &self.me {

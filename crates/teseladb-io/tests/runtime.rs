@@ -15,7 +15,7 @@ use teseladb_io::handshake::{self, Acceptor, HandshakeError};
 use teseladb_io::mailbox::MailboxSender;
 use teseladb_io::peer::{Hello, PeerMsg, Versions, encode_frame};
 use teseladb_io::runtime::{CoreInput, CoreLogic, CoreRuntime, RuntimeConfig};
-use teseladb_raftlog::{FileId, IoDone, IoOp, MemDisk};
+use teseladb_raftlog::{Disk, FileId, IoDone, IoOp, MemDisk};
 use teseladb_types::{Bytes, Nanos, NodeId};
 
 const CLUSTER: [u8; 16] = [7; 16];
@@ -42,6 +42,9 @@ enum Cmd {
     Disk,
     /// Send `n` `Goodbye` frames of `size` bytes to a node.
     Bulk(NodeId, usize, usize),
+    /// Create a file and write to it, one operation at a time: the write is handed out only
+    /// once the creation is done, the way the log's next batch waits for the one in flight.
+    OneByOne,
 }
 
 #[derive(Default)]
@@ -61,6 +64,10 @@ struct Toy {
     shared_ticks: Arc<AtomicU64>,
     /// How many times a peer was unreachable, as the test sees it.
     shared_unreachable: Arc<AtomicU64>,
+    /// Hand out one operation at a time ([`Cmd::OneByOne`]).
+    one_by_one: bool,
+    /// Operations handed out and not done yet.
+    in_flight: usize,
 }
 
 fn ack(req: u64) -> PeerMsg {
@@ -77,10 +84,15 @@ impl CoreLogic for Toy {
     }
 
     fn poll_io(&mut self, _now: Nanos) -> Option<IoOp> {
-        if self.io.is_empty() { None } else { Some(self.io.remove(0)) }
+        if self.io.is_empty() || (self.one_by_one && self.in_flight > 0) {
+            return None;
+        }
+        self.in_flight += 1;
+        Some(self.io.remove(0))
     }
 
     fn on_io_done(&mut self, done: IoDone, _now: Nanos) {
+        self.in_flight -= 1;
         self.done.push(done);
     }
 
@@ -118,6 +130,13 @@ impl CoreLogic for Toy {
                     self.out.push((node, PeerMsg::Goodbye { reason: "x".repeat(size) }));
                 }
             }
+            Cmd::OneByOne => {
+                self.one_by_one = true;
+                let file = FileId(1);
+                self.io.push(IoOp::Create { file, path: PathBuf::from("x"), prealloc: 0 });
+                let data = Bytes::from_vec(b"abc".to_vec());
+                self.io.push(IoOp::WriteAt { file, offset: 0, data, batch: 1 });
+            }
         }
     }
 
@@ -132,6 +151,10 @@ impl CoreLogic for Toy {
     fn peer_unreachable(&mut self, node: NodeId) {
         self.unreachable.push(node);
         self.shared_unreachable.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn io_settled(&self) -> bool {
+        self.io.is_empty() && self.in_flight == 0
     }
 }
 
@@ -502,6 +525,44 @@ fn the_logic_is_reachable_before_the_loop_runs() {
     tx.send(CoreInput::Stop).ok().unwrap();
     let toy = thread.join().unwrap();
     assert_eq!(toy.addrs[&NodeId(41)], "set before running");
+}
+
+#[test]
+fn a_stop_waits_for_the_writes_the_logic_still_holds() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let (rt, tx) = CoreRuntime::new(
+        Toy::default(),
+        MemDisk::new(),
+        hello(42, &addr),
+        RuntimeConfig::default(),
+    )
+    .unwrap();
+    // Both reach the first turn: the creation goes to the disk, the write waits for it, and the
+    // stop comes before its completion.
+    tx.send(CoreInput::App(Cmd::OneByOne)).ok().unwrap();
+    tx.send(CoreInput::Stop).ok().unwrap();
+    let (toy, disk) = rt.run().unwrap();
+    assert_eq!(toy.done.len(), 2, "{:?}", toy.done);
+    assert!(toy.io.is_empty() && toy.in_flight == 0);
+    let mut disk = disk.expect("the disk thread lives");
+    assert_eq!(disk.read_all(std::path::Path::new("x")).unwrap(), b"abc");
+}
+
+#[test]
+fn a_stop_does_not_wait_for_a_disk_thread_that_died() {
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let h = hello(43, &l.local_addr().unwrap().to_string());
+    let (rt, tx) =
+        CoreRuntime::new(Toy::default(), PanicDisk, h, RuntimeConfig::default()).unwrap();
+    // The creation kills the disk thread: its completion never comes, and the stop ends anyway.
+    tx.send(CoreInput::App(Cmd::OneByOne)).ok().unwrap();
+    tx.send(CoreInput::Stop).ok().unwrap();
+    let start = Instant::now();
+    let (toy, disk) = rt.run().unwrap();
+    assert!(disk.is_none());
+    assert!(toy.done.is_empty());
+    assert!(start.elapsed() < Duration::from_secs(5), "{:?}", start.elapsed());
 }
 
 /// A node of node `node` that speaks protocol versions `min` to `max`.

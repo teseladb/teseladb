@@ -115,6 +115,8 @@ fn disk_full_writes_nothing_and_retries() {
     assert!(c.tickets.is_empty(), "nothing is acknowledged: {c:?}");
     assert!(s.is_disk_full());
     assert_eq!(disk.used(), used, "nothing has been written");
+    // A stop does not wait for space that may never come.
+    assert!(s.writes_settled());
     // Read-only: new writes fail and reads go on.
     assert_eq!(
         s.append_raft(g, &[entry(2)], None, Durability::Strict),
@@ -134,6 +136,7 @@ fn disk_full_writes_nothing_and_retries() {
     let c = settle(&mut s, &mut disk, &mut now);
     assert!(ok_tickets(&c).contains(&t));
     assert!(!s.is_disk_full());
+    assert!(s.writes_settled());
     s.append_raft(g, &[entry(2)], None, Durability::Strict).unwrap();
 }
 
@@ -187,6 +190,37 @@ fn sync_error_is_fail_stop_for_this_and_later_batches() {
     );
     assert!(s.poll_io(now + Nanos::from_secs(10)).is_none());
     assert_eq!(s.next_deadline(), None);
+    // A stop has nothing to wait for: none of it will reach the disk.
+    assert!(s.writes_settled());
+}
+
+#[test]
+fn writes_settle_once_none_waits_behind_the_batch_in_flight() {
+    let cfg = small_cfg();
+    let mut disk = MemDisk::new();
+    let mut s = recover(&cfg, &mut disk);
+    let mut now = Nanos::ZERO;
+    let g = GroupId(1);
+    s.create_group(g, Bytes::new(), Durability::Strict).unwrap();
+    settle(&mut s, &mut disk, &mut now);
+    assert!(s.writes_settled());
+    // A batch goes out and is in flight; the next entry waits for it in the open batch.
+    s.append_raft(g, &[entry(1)], None, Durability::Strict).unwrap();
+    assert!(!s.writes_settled(), "an open batch");
+    let first = s.poll_io(now).expect("the first batch goes out");
+    s.append_raft(g, &[entry(2)], None, Durability::Strict).unwrap();
+    assert!(!s.writes_settled(), "an entry behind the batch in flight");
+    s.on_io_done(disk.execute(first), now);
+    settle(&mut s, &mut disk, &mut now);
+    assert!(s.writes_settled());
+    // Both are on disk.
+    let s2 = recover(&cfg, &mut disk);
+    assert_eq!(s2.entries(g, 1, 3, u64::MAX).unwrap(), &[entry(1), entry(2)]);
+    // `memory` writes count too: they are acknowledged before they reach the disk.
+    s.append_raft(g, &[entry(3)], None, Durability::Memory).unwrap();
+    assert!(!s.writes_settled());
+    settle(&mut s, &mut disk, &mut now);
+    assert!(s.writes_settled());
 }
 
 #[test]

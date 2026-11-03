@@ -46,6 +46,9 @@ impl CoreLogic for Writer {
         None
     }
     fn peer_unreachable(&mut self, _node: NodeId) {}
+    fn io_settled(&self) -> bool {
+        self.io.is_empty()
+    }
 }
 
 fn hello() -> Hello {
