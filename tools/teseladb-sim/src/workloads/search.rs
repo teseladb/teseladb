@@ -145,6 +145,12 @@ impl Searcher {
         self.applied
     }
 
+    /// The mark of the search in progress, which its reads ask the leaders to reach as the
+    /// server's do (011 FR-010).
+    pub(crate) fn mark(&self) -> Option<Hlc> {
+        self.target.as_ref().map(|(at, _)| *at)
+    }
+
     /// The searcher is dropped in the middle of a read (its node crashed): the read starts over.
     pub(crate) fn lost(&mut self) {
         self.stop = None;

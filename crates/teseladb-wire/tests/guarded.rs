@@ -77,7 +77,7 @@ fn a_live_operation_reaches_the_node_with_each_call() {
     let (_, found) = g.read_versions(&[b"k".to_vec(), b"none".to_vec()]).unwrap();
     assert_eq!((found[0].is_some(), found[1].is_some()), (true, false));
     assert!(g.fence(b"x", b"y", true).is_ok());
-    assert_eq!(g.range_changes(b"a", b"b", zero).unwrap().len(), 1);
+    assert_eq!(g.range_changes(b"a", b"b", zero, None).unwrap().len(), 1);
     assert!(g.route_entries().unwrap().is_empty());
     let hint = Group0Command::SetLeaderHint { group: GroupId(1), node: NodeId(2), term: 0 };
     assert!(g.range_order(hint).is_ok());

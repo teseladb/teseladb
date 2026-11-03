@@ -843,6 +843,15 @@ fn an_analyzer_that_cannot_be_built_fails_the_index() {
     assert!(
         batch(&search(&mut m, "c", "$search", text("hola").with("index", "unused"))).len() == 1
     );
+    // A new definition that builds leaves the failure behind.
+    let update = Document::new()
+        .with("updateSearchIndex", "c")
+        .with("name", "bad")
+        .with("definition", dynamic(true));
+    let r = m.run(DB, update);
+    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+    assert_eq!(batch(&search(&mut m, "c", "$search", text("hola").with("index", "bad"))).len(), 1);
+    assert_eq!(field(&batch(&list(&mut m, &[]))[0], "status"), &Value::from("READY"));
 }
 
 /// Segments left a whole history retention behind start over from what the ranges hold, so a

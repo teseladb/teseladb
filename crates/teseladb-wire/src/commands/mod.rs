@@ -359,13 +359,17 @@ pub trait Backend {
     fn catalog_changes(&mut self, from: teseladb_hlc::Hlc) -> Result<DdlBatch, CommandError>;
 
     /// [`Backend::changes`] range by range, each up to its own resolved mark, for the search
-    /// indexes' segments (011 FR-009, FR-013). A backend of one range gives the interval as one.
+    /// indexes' segments (011 FR-009, FR-013). With `at`, the mark a search waits for (FR-010),
+    /// a range whose closed marks are behind it reads up to it as a read at that mark. A backend
+    /// of one range gives the interval as one.
     fn range_changes(
         &mut self,
         start: &[u8],
         end: &[u8],
         from: teseladb_hlc::Hlc,
+        at: Option<teseladb_hlc::Hlc>,
     ) -> Result<Vec<RangeBatch>, CommandError> {
+        let _ = at;
         let (rows, resolved) = self.changes(start, end, from)?;
         Ok(vec![RangeBatch { start: start.to_vec(), end: end.to_vec(), rows, resolved }])
     }

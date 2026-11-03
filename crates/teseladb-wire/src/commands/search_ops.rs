@@ -695,14 +695,15 @@ fn catch_up_to<B: Backend + ?Sized>(
     // The search waits until every range's segments reach the read's mark, its
     // `search_applied_ts` (FR-010), no longer than the command's `maxTimeMS`. Each read of a
     // range's changes goes at most a window past `from` (014 FR-004): the segments apply what
-    // they read and read again from there, so a range far behind, or one without writes whose
-    // leader only closes marks as time goes by, gets there too.
+    // they read and read again from there, so a range far behind gets there too. The read names
+    // the search's mark: a leader whose closed marks are behind it, 200 ms or more behind its
+    // clock, reads up to the mark as a read at that mark, and the search does not wait for them.
     let target = backend.read_mark().map_or_else(|| backend.cluster_mark(), |m| m.at);
     let lag = target.physical.saturating_sub(built.applied.physical);
     INDEXER_LAG_MS.store(lag, Ordering::Relaxed);
     loop {
         let before = built.applied;
-        let ranges = backend.range_changes(&start, &end, built.applied)?;
+        let ranges = backend.range_changes(&start, &end, built.applied, wait.then_some(target))?;
         let reached = segments_reached(ranges.iter().map(|r| r.resolved), target);
         apply_changes(backend, built, ranges)?;
         if !wait || reached {

@@ -537,7 +537,7 @@ impl SplitsWorkload {
             return;
         };
         let from = self.cursors[&client].from();
-        let req = teseladb_range::host::ChangesReq { g, start: key, end: stop, from };
+        let req = teseladb_range::host::ChangesReq { g, start: key, end: stop, from, at: None };
         let id = host.changes(cc, req, now);
         self.pending.insert((node, id), Asker::Feed(client));
         self.engine.pump(w, node);
@@ -568,12 +568,12 @@ impl SplitsWorkload {
         let core = self.engine.core();
         let s = self.searchers.get_mut(&client).expect("the searcher found above");
         s.sent(&key, &range_end);
-        let (stop, from) = (s.stop_key(), s.from());
+        let (stop, from, at) = (s.stop_key(), s.from(), s.mark());
         let (Some(host), Some(cc)) = (self.engine.host(node), w.cluster_core(node, core)) else {
             self.searchers.get_mut(&client).expect("the searcher found above").lost();
             return;
         };
-        let req = teseladb_range::host::ChangesReq { g, start: key, end: stop, from };
+        let req = teseladb_range::host::ChangesReq { g, start: key, end: stop, from, at };
         let id = host.changes(cc, req, now);
         self.pending.insert((node, id), Asker::Search(client));
         self.engine.pump(w, node);

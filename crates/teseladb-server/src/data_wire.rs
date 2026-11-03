@@ -120,6 +120,9 @@ pub enum RemoteReq {
         end: Vec<u8>,
         /// The stream read the range up to this mark.
         from: Hlc,
+        /// The mark the reader waits for (a search's, 011 FR-010): past the closed marks, the
+        /// leader reads up to it as a read at that mark.
+        at: Option<Hlc>,
     },
     /// Raises (`on`) or lifts the write fence of `[start, end)` (018 FR-002), on the leader.
     Fence {
@@ -394,9 +397,11 @@ impl RemoteReq {
             RemoteReq::RestoreIngest { files } => {
                 e.u8(RESTORE_INGEST).u32(*files);
             }
-            RemoteReq::Changes { start, end, from } => {
+            RemoteReq::Changes { start, end, from, at } => {
                 e.u8(CHANGES).bytes(start).bytes(end);
                 put_mark(&mut e, *from);
+                e.bool(at.is_some());
+                put_mark(&mut e, at.unwrap_or(Hlc { physical: 0, logical: 0 }));
             }
             RemoteReq::Fence { start, end, on } => {
                 e.u8(FENCE).bytes(start).bytes(end).bool(*on);
@@ -489,6 +494,11 @@ impl RemoteReq {
                 start: d.bytes()?.to_vec(),
                 end: d.bytes()?.to_vec(),
                 from: get_mark(&mut d)?,
+                at: {
+                    let some = d.bool()?;
+                    let mark = get_mark(&mut d)?;
+                    some.then_some(mark)
+                },
             },
             FENCE => RemoteReq::Fence {
                 start: d.bytes()?.to_vec(),
@@ -822,6 +832,13 @@ mod tests {
                 start: vec![1],
                 end: vec![2],
                 from: Hlc { physical: 7, logical: 3 },
+                at: None,
+            },
+            RemoteReq::Changes {
+                start: vec![1],
+                end: vec![2],
+                from: Hlc { physical: 7, logical: 3 },
+                at: Some(Hlc { physical: 9, logical: 1 }),
             },
             RemoteReq::Fence { start: vec![1], end: vec![2], on: true },
             RemoteReq::Fence { start: vec![], end: vec![9], on: false },
