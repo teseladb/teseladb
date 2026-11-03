@@ -277,8 +277,8 @@ codes! {
     CS_SPLIT_SPEC = 7_182_800, "Location7182800";
     /// `$changeStreamSplitLargeEvent` not last (014).
     CS_SPLIT_NOT_LAST = 7_182_802, "Location7182802";
-    /// `getMore` in a session on a cursor opened outside any.
-    CURSOR_NOT_IN_SESSION = 50799, "Location50799";
+    /// `getMore` in a session on a cursor opened outside any, on a member of a replica set.
+    CURSOR_NOT_IN_SESSION = 50736, "Location50736";
     /// `killOp` without `op`.
     KILL_OP_MISSING_OP = 50759, "Location50759";
     /// `killOp` with an `op` of a type it does not take.
@@ -293,10 +293,10 @@ codes! {
     ILLEGAL_CLUSTER_AUTH_MODE_TRANSITION = 5_579_202, "Location5579202";
     /// `killOp` naming a shard; TeselaDB has none (DV-031).
     SHARD_NOT_FOUND = 70, "ShardNotFound";
-    /// `getMore` without a session on a session's cursor.
-    CURSOR_SESSION_REQUIRED = 50800, "Location50800";
-    /// `getMore` in a session other than its cursor's.
-    CURSOR_OTHER_SESSION = 50801, "Location50801";
+    /// `getMore` without a session on a session's cursor, on a member of a replica set.
+    CURSOR_SESSION_REQUIRED = 50737, "Location50737";
+    /// `getMore` in a session other than its cursor's, on a member of a replica set.
+    CURSOR_OTHER_SESSION = 50738, "Location50738";
     /// A command that could not do what it was asked (`getLog` of an unknown log).
     OPERATION_FAILED = 96, "OperationFailed";
     /// A UUID that is not 16 bytes of subtype 4.

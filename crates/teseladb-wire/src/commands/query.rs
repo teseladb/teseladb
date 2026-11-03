@@ -1636,7 +1636,11 @@ fn next_batch<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
     };
     let mut c = match taken {
         Ok(c) => c,
-        Err((e, owner)) => return Err(get_more_refused(id, &ns_text, lsid, e, owner)),
+        Err((e, owner)) => {
+            let member = super::config_db::as_member(ctx.backend)?;
+            let uid = super::txn::user_uid(ctx.backend.authenticated_user().as_ref());
+            return Err(get_more_refused((id, &ns_text, lsid), e, owner, (member, &uid)));
+        }
     };
     // At the mark of the command that opened it (008 FR-012).
     ctx.backend.set_read_mark(c.state.read_mark);
@@ -1730,17 +1734,34 @@ fn tail_more<B: Backend + ?Sized>(
 }
 
 /// The error of a `getMore` on `ns` in session `lsid` that cursor `id`, of namespace and session
-/// `owner`, refused with `e` (`refrouter` 9.0.4, measured).
+/// `owner`, refused with `e`: as a `refrouter` 9.0.4 gives it, or as a `refnode` 9.0.4 when the node
+/// presents itself as a member of a replica set (`member`), with the sessions named with `uid`,
+/// the user's (measured on 03-11-2026).
 fn get_more_refused(
-    id: i64,
-    ns: &str,
-    lsid: Option<u128>,
+    (id, ns, lsid): (i64, &str, Option<u128>),
     e: CursorError,
     owner: Option<(String, Option<u128>)>,
+    (member, uid): (bool, &str),
 ) -> CommandError {
     let (cursor_ns, cursor_lsid) = owner.unwrap_or_default();
-    let created = |l: Option<u128>| session_text(l.unwrap_or_default());
+    let named = |l: u128| session_text(l).replace(super::ANONYMOUS_UID, uid);
+    let created = |l: Option<u128>| named(l.unwrap_or_default());
+    let shown = |l: Option<u128>| l.map_or_else(|| NO_SESSION.to_owned(), named);
+    let other_session = || {
+        CommandError::new(
+            UNAUTHORIZED,
+            format!(
+                "Cursor session id ({}) is not the same as the operation context's session id \
+                 ({})",
+                shown(cursor_lsid),
+                shown(lsid)
+            ),
+        )
+    };
     match e {
+        CursorError::NotFound if member => {
+            CommandError::new(CURSOR_NOT_FOUND, format!("cursor id {id} not found"))
+        }
         CursorError::NotFound => {
             CommandError::new(CURSOR_NOT_FOUND, format!("Cursor not found (id: {id})."))
         }
@@ -1751,6 +1772,11 @@ fn get_more_refused(
                  namespace {cursor_ns}"
             ),
         ),
+        CursorError::NotInSession | CursorError::SessionRequired | CursorError::OtherSession
+            if !member =>
+        {
+            other_session()
+        }
         CursorError::NotInSession => CommandError::new(
             CURSOR_NOT_IN_SESSION,
             format!(
@@ -1778,6 +1804,9 @@ fn get_more_refused(
         ),
     }
 }
+
+/// How a `refrouter` names a missing session in its messages.
+const NO_SESSION: &str = "none";
 
 /// `killCursors`: the namespace is validated but, as on a `refrouter` 9.0.4 (measured), it does
 /// not have to be the cursor's.

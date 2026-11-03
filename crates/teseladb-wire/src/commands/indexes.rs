@@ -243,13 +243,16 @@ fn text_spec(spec: Document, key: &Document) -> Document {
 /// A `refrouter` 9.0.4 forwards the shard's error of `createIndexes` and `dropIndexes` with `code`
 /// and `codeName` first, then the other fields, `ok` and `errmsg` (measured).
 fn forwarded(r: Result<Document, CommandError>) -> Result<Document, CommandError> {
-    r.or_else(|e| {
-        let mut d = Document::new().with("code", e.code.code).with("codeName", e.code.name);
-        for (k, v) in e.extra.iter() {
-            d.push(k, v.clone());
-        }
-        Ok(d.with("ok", 0.0).with("errmsg", e.errmsg))
-    })
+    r.or_else(|e| Ok(code_first(&e)))
+}
+
+/// Error `e` with `code` and `codeName` first, then the other fields, `ok` and `errmsg`.
+fn code_first(e: &CommandError) -> Document {
+    let mut d = Document::new().with("code", e.code.code).with("codeName", e.code.name);
+    for (k, v) in e.extra.iter() {
+        d.push(k, v.clone());
+    }
+    d.with("ok", 0.0).with("errmsg", e.errmsg.as_str())
 }
 
 /// A specification error of `createIndexes` inside «Error in specification <spec> :: caused by
@@ -404,7 +407,22 @@ fn compare(
 
 /// `createIndexes`.
 pub fn create_indexes<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
-    forwarded(create(ctx))
+    match create(ctx) {
+        Err(e) if e.origin == crate::error::ErrorOrigin::Shard => Ok(shard_error(ctx.backend, e)),
+        other => other,
+    }
+}
+
+/// A shard's error of `createIndexes` as a `refrouter` 9.0.4 relays it (measured on 03-11-2026): the
+/// shard's own reply under `raw`, then `code`, `codeName`, the other fields, `ok` and `errmsg`.
+/// An error of the router's parse goes as any other.
+pub fn shard_error<B: Backend + ?Sized>(backend: &mut B, e: CommandError) -> Document {
+    let raw = Document::new().with(super::raw_name(backend), e.to_document());
+    let mut out = Document::new().with("raw", raw);
+    for (k, v) in code_first(&e).iter() {
+        out.push(k, v.clone());
+    }
+    out
 }
 
 /// Whether a specification asks for a unique index.

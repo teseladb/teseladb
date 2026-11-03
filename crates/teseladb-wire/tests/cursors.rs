@@ -112,14 +112,51 @@ fn a_get_more_on_another_namespace_is_refused_and_the_cursor_stays_open() {
     assert!(matches!(field(&r, "cursor.nextBatch"), Value::Array(a) if a.len() == 4));
 }
 
+/// A `getMore` in a session other than its cursor's: a `refrouter` 9.0.4 refuses it with 13
+/// `Unauthorized` naming both sessions, `none` for a missing one (measured on 03-11-2026).
 #[test]
 fn a_get_more_from_another_session_names_both_sessions() {
     let mut m = node();
     let anon = format!("{ANONYMOUS_UID} -  - ");
+    let refused = |cursor: &str, op: &str| {
+        format!(
+            "Cursor session id ({cursor}) is not the same as the operation context's session id \
+             ({op})"
+        )
+    };
+    let named = |n: u8| format!("{} - {anon}", uuid(n));
     let without = open(&mut m, None);
     let r = get_more(&mut m, "db", without, "c", Some(2));
-    assert_eq!(code(&r), 50799);
-    assert_eq!(field(&r, "codeName"), &s("Location50799"));
+    assert_eq!((code(&r), errmsg(&r)), (13, refused("none", &named(2))));
+    assert_eq!(field(&r, "codeName"), &s("Unauthorized"));
+    let with = open(&mut m, Some(1));
+    let r = get_more(&mut m, "db", with, "c", None);
+    assert_eq!((code(&r), errmsg(&r)), (13, refused(&named(1), "none")));
+    let r = get_more(&mut m, "db", with, "c", Some(2));
+    assert_eq!((code(&r), errmsg(&r)), (13, refused(&named(1), &named(2))));
+    // Refused, it is still there for its own session.
+    let r = get_more(&mut m, "db", with, "c", Some(1));
+    assert!(matches!(field(&r, "cursor.nextBatch"), Value::Array(a) if a.len() == 4));
+}
+
+/// The same refusals from a member of a replica set, as a `refnode` 9.0.4 gives them (measured on
+/// 03-11-2026), and its message for a cursor that does not exist.
+#[test]
+fn a_member_refuses_a_get_more_from_another_session_as_a_refnode() {
+    let mut m = node();
+    m.shards = vec!["node1".into(), "node2".into(), "node3".into()];
+    let present = Document::new().with("mode", "replicaset").with("setName", "rs0");
+    let r = m.run(
+        "admin",
+        Document::new()
+            .with("setClusterParameter", Document::new().with("topologyPresentation", present)),
+    );
+    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+    let anon = format!("{ANONYMOUS_UID} -  - ");
+    let without = open(&mut m, None);
+    let r = get_more(&mut m, "db", without, "c", Some(2));
+    assert_eq!(code(&r), 50736);
+    assert_eq!(field(&r, "codeName"), &s("Location50736"));
     assert_eq!(
         errmsg(&r),
         format!(
@@ -130,7 +167,7 @@ fn a_get_more_from_another_session_names_both_sessions() {
     );
     let with = open(&mut m, Some(1));
     let r = get_more(&mut m, "db", with, "c", None);
-    assert_eq!(code(&r), 50800);
+    assert_eq!(code(&r), 50737);
     assert_eq!(
         errmsg(&r),
         format!(
@@ -140,7 +177,7 @@ fn a_get_more_from_another_session_names_both_sessions() {
         )
     );
     let r = get_more(&mut m, "db", with, "c", Some(2));
-    assert_eq!(code(&r), 50801);
+    assert_eq!(code(&r), 50738);
     assert_eq!(
         errmsg(&r),
         format!(
@@ -150,9 +187,8 @@ fn a_get_more_from_another_session_names_both_sessions() {
             uuid(2)
         )
     );
-    // Refused, it is still there for its own session.
-    let r = get_more(&mut m, "db", with, "c", Some(1));
-    assert!(matches!(field(&r, "cursor.nextBatch"), Value::Array(a) if a.len() == 4));
+    let r = get_more(&mut m, "db", 77, "c", None);
+    assert_eq!((code(&r), errmsg(&r)), (43, "cursor id 77 not found".to_owned()));
 }
 
 #[test]

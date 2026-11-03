@@ -837,9 +837,9 @@ fn sessions_end_with_their_cursors() {
         field(&m.run("admin", doc(&[("refreshSessions", Value::Array(vec![lsid.clone()]))])), "ok"),
         &Value::Double(1.0)
     );
-    // Without the session the cursor is not its.
+    // Without the session the cursor is not its (13 on a `refrouter` 9.0.4, measured on 03-11-2026).
     let r = m.run("db", doc(&[("getMore", Value::Int64(id)), ("collection", s("c"))]));
-    assert_eq!(code(&r), 50800);
+    assert_eq!(code(&r), 13);
     // `endSessions` leaves the cursor until the next refresh of the sessions' record, as
     // `refrouter` 9.0.4 does; the refresh kills it.
     m.run("admin", doc(&[("endSessions", Value::Array(vec![lsid.clone()]))]));
