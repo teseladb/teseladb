@@ -16,7 +16,7 @@ use super::{Backend, Ctx, display, index_spec};
 use crate::error::{
     BAD_VALUE, CANNOT_CREATE_INDEX, CommandError, FAILED_TO_PARSE, HASHED_FIELDS, HASHED_UNIQUE,
     INTERNAL_ERROR, INVALID_INDEX_SPECIFICATION_OPTION, INVALID_NAMESPACE, INVALID_OPTIONS,
-    TYPE_MISMATCH,
+    OPERATION_FAILED, TYPE_MISMATCH,
 };
 use teseladb_collation::{ParsedCollation, parse_collation};
 use teseladb_index::build::CommitQuorum;
@@ -265,6 +265,10 @@ fn in_specification(spec: &Document, e: CommandError) -> CommandError {
     CommandError { errmsg: format!("{IN_SPECIFICATION} {shown} :: caused by :: {}", e.errmsg), ..e }
 }
 
+/// The cause of a build of two identical specifications (measured on a `refrouter` 9.0.4).
+const IDENTICAL_INDEXES: &str =
+    "Cannot build two identical indexes. Try again without duplicate indexes.";
+
 /// «Index build failed» around `cause`, with a new build identifier and the collection's UUID
 /// (measured on a `refrouter` 9.0.4).
 fn build_failed<B: Backend + ?Sized>(
@@ -282,6 +286,16 @@ fn build_failed<B: Backend + ?Sized>(
         ),
         build,
     )
+}
+
+/// The specification as the build shows it when it conflicts with another of the same command:
+/// `v`, then its fields as given (measured on a `refrouter` 9.0.4 on 03-11-2026).
+fn as_given(spec: &Document, version: i32) -> String {
+    let mut out = Document::new().with(VERSION, version);
+    for (k, v) in spec.iter().filter(|(k, _)| *k != VERSION) {
+        out.push(k, v.clone());
+    }
+    display(&Value::Document(out))
 }
 
 /// The specification as a `refrouter` 9.0.4 shows a requested index in its errors: `v`, the
@@ -339,7 +353,13 @@ fn existing<B: Backend + ?Sized>(
 }
 
 /// What a requested index is next to the existing ones: new, already there, or a conflict.
-fn compare(spec: &Document, version: i32, all: &[Existing]) -> Result<bool, CommandError> {
+/// `shown`: the requested index as the error shows it.
+fn compare(
+    spec: &Document,
+    version: i32,
+    all: &[Existing],
+    shown: &str,
+) -> Result<bool, CommandError> {
     let normal = stored(spec, version)?;
     let name = normal.get(NAME);
     let key = normal.get(KEY);
@@ -350,8 +370,7 @@ fn compare(spec: &Document, version: i32, all: &[Existing]) -> Result<bool, Comm
         let msg = format!(
             "An existing index has the same name as the requested index. When index names are \
              not specified, they are auto generated and can cause conflicts. Please refer to our \
-             documentation. Requested index: {}, existing index: {}",
-            requested(spec, version),
+             documentation. Requested index: {shown}, existing index: {}",
             display(&Value::Document(same.spec.clone()))
         );
         return Err(CommandError::new(INDEX_KEY_SPECS_CONFLICT, msg));
@@ -362,8 +381,7 @@ fn compare(spec: &Document, version: i32, all: &[Existing]) -> Result<bool, Comm
         if options(&other.spec) != options(&normal) {
             let msg = format!(
                 "An equivalent index already exists with a different name and options. \
-                 Requested index: {}, existing index: {}",
-                requested(spec, version),
+                 Requested index: {shown}, existing index: {}",
                 display(&Value::Document(other.spec.clone()))
             );
             return Err(CommandError::new(INDEX_OPTIONS_CONFLICT, msg));
@@ -486,10 +504,20 @@ fn create<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Command
     let all = existing(ctx.backend, &coll)?;
     let before = all.len();
     let mut new = Vec::new();
+    // The specifications before this one in the command, as the build compares them.
+    let mut asked: Vec<Existing> = Vec::new();
     for (spec, version) in specs.iter().zip(&versions) {
-        if compare(spec, *version, &all)?
-            && !new.iter().any(|(s, _): &(Document, i32)| s.get(NAME) == spec.get(NAME))
-        {
+        let cause = match compare(spec, *version, &asked, &as_given(spec, *version)) {
+            Ok(true) => None,
+            Ok(false) => Some(CommandError::new(OPERATION_FAILED, IDENTICAL_INDEXES)),
+            Err(e) => Some(e),
+        };
+        if let Some(e) = cause {
+            let (msg, _) = build_failed(ctx.backend, &ns, &coll, &e.errmsg);
+            return Err(CommandError::new(e.code, msg));
+        }
+        asked.push(Existing { spec: stored(spec, *version)?, entry: None });
+        if compare(spec, *version, &all, &requested(spec, *version))? {
             new.push((spec.clone(), *version));
         }
     }

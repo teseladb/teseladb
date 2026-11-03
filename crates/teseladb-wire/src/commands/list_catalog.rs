@@ -34,10 +34,7 @@ pub fn entries<B: Backend + ?Sized>(
         let mut d = Document::new()
             .with("db", ns.db.as_str())
             .with("name", ns.coll.as_str())
-            .with(
-                "type",
-                if matches!(kind, CollectionKind::View { .. }) { "view" } else { "collection" },
-            )
+            .with("type", kind.type_name())
             .with("shard", shard.as_str());
         match &kind {
             CollectionKind::View { view_on, pipeline, .. } => {
@@ -49,7 +46,7 @@ pub fn entries<B: Backend + ?Sized>(
                     .collect::<Result<Vec<_>, CommandError>>()?;
                 d.push("pipeline", Value::Array(stages));
             }
-            _ => d.push("md", metadata(backend, &ns, &c)?),
+            _ => d.push("md", metadata(backend, &ns, &c, &kind)?),
         }
         d.push("ns", names::full(&ns));
         out.push(d);
@@ -57,19 +54,26 @@ pub fn entries<B: Backend + ?Sized>(
     Ok(out)
 }
 
-/// `md` of collection `c`.
+/// `md` of collection `c` of kind `kind`. A time series is its buckets' collection, clustered
+/// by `_id`, with their indexes, and says whether its buckets may mix schemas (measured on a
+/// `refnode` and a `refrouter` 9.0.4 on 03-11-2026).
 fn metadata<B: Backend + ?Sized>(
     backend: &mut B,
     ns: &Namespace,
     c: &CollectionEntry,
+    kind: &CollectionKind,
 ) -> Result<Document, CommandError> {
+    let series = matches!(kind, CollectionKind::TimeSeries(_));
     let mut options =
         Document::new().with("uuid", Value::Binary { subtype: 4, bytes: c.uuid.to_vec() });
+    if series {
+        options.push("clusteredIndex", true);
+    }
     for (k, v) in super::catalog::options_of(c)?.iter() {
         options.push(k, v.clone());
     }
     let mut indexes = Vec::new();
-    if super::catalog::has_id_index(ns) {
+    if super::catalog::has_id_index(ns) && !series {
         let spec = super::catalog::id_index(c)?;
         indexes.push(index(spec, &[]));
     }
@@ -81,10 +85,14 @@ fn metadata<B: Backend + ?Sized>(
         let paths = marks(backend, c, e.id)?;
         indexes.push(index(spec, &paths));
     }
-    Ok(Document::new()
+    let mut md = Document::new()
         .with("ns", names::full(ns))
         .with("options", options)
-        .with("indexes", Value::Array(indexes)))
+        .with("indexes", Value::Array(indexes));
+    if series {
+        md.push("timeseriesBucketsMayHaveMixedSchemaData", false);
+    }
+    Ok(md)
 }
 
 /// An index of `md`, whose fields went through arrays at `paths` (`(field, path)`).

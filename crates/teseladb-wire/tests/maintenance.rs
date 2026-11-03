@@ -252,3 +252,63 @@ fn rotate_certificates_answers_as_refnode_and_reports_the_failure() {
     assert_eq!((code(&r), field(&r, "codeName")), (140, &s("InvalidSSLConfiguration")));
     assert_eq!(m.rotations.len(), 2);
 }
+
+/// The limits of `dataSize` taken as whole numbers (a negative one stops at the first document,
+/// one between -1 and 1 is none), `maxReached` when they stopped the count, `estimate` on a
+/// collection that exists, and the types of the three (measured on a `refnode` 9.0.4 on
+/// 03-11-2026).
+#[test]
+fn data_size_limits_estimate_and_max_reached() {
+    let mut m = five();
+    let run = |m: &mut Mem, extra: &[(&str, Value)]| {
+        let mut cmd = doc(&[("dataSize", s("ds.c"))]);
+        for (k, v) in extra {
+            cmd.push(*k, v.clone());
+        }
+        m.run("admin", cmd)
+    };
+    let reached = |r: &Document| r.get("maxReached").cloned();
+    let cases: [(&str, Value, i64); 6] = [
+        ("maxSize", Value::Int32(-5), 1),
+        ("maxObjects", Value::Int64(-1), 1),
+        ("maxSize", Value::Double(-0.5), 5),
+        ("maxSize", Value::Double(2.5), 1),
+        ("maxObjects", Value::Double(1.9), 2),
+        ("maxSize", Value::Double(f64::NAN), 5),
+    ];
+    for (k, v, n) in cases {
+        let r = run(&mut m, &[(k, v.clone())]);
+        assert_eq!(int(&r, "numObjects"), n, "{k} {v:?}: {r:?}");
+        let want = (n < 5).then_some(Value::Boolean(true));
+        assert_eq!(reached(&r), want, "{k} {v:?}: {r:?}");
+        assert_eq!(field(&r, "estimate"), &Value::Boolean(false));
+    }
+    let keys: Vec<String> =
+        run(&mut m, &[("maxObjects", 1.into())]).iter().map(|(k, _)| k.to_owned()).collect();
+    assert_eq!(keys, ["size", "numObjects", "millis", "estimate", "maxReached", "ok"]);
+    let r = run(&mut m, &[("estimate", 1.into()), ("maxSize", Value::Null)]);
+    assert_eq!((field(&r, "estimate"), reached(&r)), (&Value::Boolean(true), None));
+    let r = m.run("admin", doc(&[("dataSize", s("ds.none"))]));
+    assert_eq!(r.get("estimate"), None, "{r:?}");
+    let errors = [
+        (
+            "maxSize",
+            s("x"),
+            "BSON field 'dataSize.maxSize' is the wrong type 'string', expected types '[int, decimal, double, long]'",
+        ),
+        (
+            "maxObjects",
+            true.into(),
+            "BSON field 'dataSize.maxObjects' is the wrong type 'bool', expected types '[int, decimal, double, long]'",
+        ),
+        (
+            "estimate",
+            s("x"),
+            "BSON field 'dataSize.estimate' is the wrong type 'string', expected types '[double, long, int, bool, decimal]'",
+        ),
+    ];
+    for (k, v, msg) in errors {
+        let r = run(&mut m, &[(k, v)]);
+        assert_eq!((code(&r), field(&r, "errmsg")), (14, &s(msg)), "{r:?}");
+    }
+}

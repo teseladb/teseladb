@@ -237,13 +237,20 @@ impl<B: Backend + ?Sized> WireEnv<'_, B> {
     fn index_stats(&self, (shared, ns): Node<'_>) -> Result<Vec<Document>, CommandError> {
         let mut backend = self.backend.borrow_mut();
         let Some(coll) = backend.collection(ns)? else { return Ok(Vec::new()) };
-        // A time series lists its buckets' indexes alone (measured on a `refnode` 9.0.4).
-        let series = super::timeseries::spec_of(&coll)?.is_some();
-        let mut specs = match super::catalog::has_id_index(ns) && !series {
+        // A time series lists its buckets' indexes alone, as `listIndexes` shows them (measured
+        // on a `refnode` and a `refrouter` 9.0.4 on 03-11-2026).
+        let series = super::timeseries::spec_of(&coll)?;
+        let mut specs = match super::catalog::has_id_index(ns) && series.is_none() {
             true => vec![super::catalog::id_index(&coll)?],
             false => Vec::new(),
         };
-        specs.extend(super::indexes::listed(&mut **backend, &coll)?);
+        let listed = super::indexes::listed(&mut **backend, &coll)?;
+        match &series {
+            Some(ts) => {
+                specs.extend(listed.iter().filter_map(|s| super::timeseries::user_index(ts, s)))
+            }
+            None => specs.extend(listed),
+        }
         let facts = backend.process();
         let host = format!("{}:{}", facts.host.hostname, facts.port);
         let shard = super::shard_name(backend.node());
