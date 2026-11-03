@@ -2,8 +2,8 @@
 //! with the meta written next to it at the same mark, in the merge order, and the type of its
 //! event.
 
-use teseladb_changestream::changes::{Change, ChangeError, Versioned, changes};
-use teseladb_changestream::meta::{ChangeMeta, TxnInfo, meta_key};
+use teseladb_changestream::changes::{Change, ChangeError, Versioned, changes, gives_event};
+use teseladb_changestream::meta::{ChangeMeta, Moved, TxnInfo, meta_key};
 
 fn m(
     txn: Option<TxnInfo>,
@@ -95,6 +95,64 @@ fn versions_become_changes_in_the_merge_order() {
         },
     ];
     assert_eq!(got, want);
+}
+
+/// A document that `shardCollection` keys again (018 FR-001) leaves its old key and takes its new
+/// one with an internal meta: both are changes, so the search indexes follow the document, and
+/// the meta says that no change stream or oplog shows them.
+#[test]
+fn a_move_that_keys_a_document_again_is_a_delete_and_an_insert() {
+    let gone = ChangeMeta { delete: true, moved: Some(Moved::Internal), ..m(None, 0, None, false) };
+    let back = ChangeMeta { moved: Some(Moved::Internal), ..m(None, 0, None, false) };
+    let items = vec![
+        Versioned { key: doc(1), ts: ts(10), value: None },
+        put(meta_key(&doc(1), 0), 10, HISTORY_VALUE, &meta(&gone)),
+        put(doc(2), 10, DOCUMENT_VALUE, b"d"),
+        put(meta_key(&doc(2), 0), 10, HISTORY_VALUE, &meta(&back)),
+    ];
+    let got = changes(items).unwrap();
+    let kinds: Vec<(Vec<u8>, EventKind, Option<Moved>)> =
+        got.into_iter().map(|c| (c.event.key, c.kind, c.meta.and_then(|m| m.moved))).collect();
+    assert_eq!(
+        kinds,
+        [
+            (doc(1), EventKind::Delete, Some(Moved::Internal)),
+            (doc(2), EventKind::Insert, Some(Moved::Internal)),
+        ]
+    );
+}
+
+/// A document whose shard key an update changed (018 FR-001, D-118) leaves its old key with a
+/// deletion that is a change for the indexes and no event; the version at the new key gives the
+/// update's event; a move of `shardCollection` gives none on either side.
+#[test]
+fn only_the_changes_a_client_made_give_events() {
+    let away = ChangeMeta { delete: true, moved: Some(Moved::Away), ..m(None, 0, None, false) };
+    let here = ChangeMeta { moved: Some(Moved::From(doc(1))), ..m(None, 0, None, true) };
+    let internal = ChangeMeta { moved: Some(Moved::Internal), ..m(None, 0, None, false) };
+    let items = vec![
+        Versioned { key: doc(1), ts: ts(10), value: None },
+        put(meta_key(&doc(1), 0), 10, HISTORY_VALUE, &meta(&away)),
+        put(doc(2), 10, DOCUMENT_VALUE, b"d"),
+        put(meta_key(&doc(2), 0), 10, HISTORY_VALUE, &meta(&here)),
+        put(doc(3), 20, DOCUMENT_VALUE, b"e"),
+        put(meta_key(&doc(3), 0), 20, HISTORY_VALUE, &meta(&internal)),
+        put(doc(4), 30, DOCUMENT_VALUE, b"f"),
+    ];
+    let got: Vec<(Vec<u8>, EventKind, bool)> = changes(items)
+        .unwrap()
+        .iter()
+        .map(|c| (c.event.key.clone(), c.kind, gives_event(c)))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (doc(1), EventKind::Delete, false),
+            (doc(2), EventKind::Replace, true),
+            (doc(3), EventKind::Insert, false),
+            (doc(4), EventKind::Insert, true),
+        ]
+    );
 }
 
 #[test]

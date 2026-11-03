@@ -65,6 +65,7 @@ mod f {
     pub const UNLOGGED: &str = "unlogged";
     pub const SHARD_KEY: &str = "shardKey";
     pub const MOVES: &str = "moves";
+    pub const REKEYS: &str = "rekeys";
     pub const RETRY: &str = "retry";
     pub const MARK: &str = "mark";
     pub const PROBES: &str = "probes";
@@ -172,6 +173,10 @@ pub struct Rules {
     /// moves its document to the key of the new values (018 FR-001), as a `refrouter` 9.0.4 moves
     /// it there and refuses it elsewhere (measured on 02-11-2026).
     pub moves: bool,
+    /// A move of `shardCollection` keying the documents again by the new shard key (018 FR-001):
+    /// each write keeps an internal meta ([`teseladb_changestream::meta::Moved::Internal`]), so
+    /// the search indexes follow the documents' new keys and no change stream or oplog shows it.
+    pub rekeys: bool,
     /// The retryable write outside a transaction that sends it (018 FR-009): its documents' metas
     /// keep the session for their oplog entries.
     pub retry: Option<teseladb_changestream::meta::RetryInfo>,
@@ -324,6 +329,9 @@ fn rules_doc(r: &Rules, d: &mut Document, send: Send<'_>) {
     }
     if r.moves {
         d.push(f::MOVES, true);
+    }
+    if r.rekeys {
+        d.push(f::REKEYS, true);
     }
     if let Some(info) = retry.or(r.retry.as_ref()) {
         d.push(f::RETRY, Value::Binary { subtype: 0, bytes: info.to_bytes() });
@@ -499,6 +507,7 @@ fn read_rules(d: RawDoc<'_>) -> Result<Rules, CommandError> {
         unlogged: get_bool(d, f::UNLOGGED),
         shard_key: get_doc(d, f::SHARD_KEY),
         moves: get_bool(d, f::MOVES),
+        rekeys: get_bool(d, f::REKEYS),
         retry: match d.get(f::RETRY) {
             Some(RawValue::Binary { bytes, .. }) => {
                 let mut b = bytes;
@@ -1242,7 +1251,9 @@ impl Mutation for Bound {
         let erase = matches!(self.mutation, DocMutation::Erase { .. });
         if !self.rules().unlogged && !erase {
             let retry = self.rules().retry.map(|r| RetryInfo { image: self.retry_image(), ..r });
-            let docs = Written { change: &change, replaced: &replaced, moved: &moved, retry };
+            let rekeys = self.rules().rekeys;
+            let docs =
+                Written { change: &change, replaced: &replaced, moved: &moved, retry, rekeys };
             puts.extend(history_puts(&self.keys, (&puts, &deletes), &docs)?);
         }
         match result.encode() {
@@ -1311,6 +1322,7 @@ struct Written<'a> {
     replaced: &'a [Vec<u8>],
     moved: &'a [(Vec<u8>, Vec<u8>)],
     retry: Option<RetryInfo>,
+    rekeys: bool,
 }
 
 /// The versions next to each document a write changes with what its event needs (014 FR-005,
@@ -1332,6 +1344,7 @@ fn history_puts(
             let from = w.moved.iter().find(|(_, to)| *to == key).map(|(from, _)| from.clone());
             let replace = update.is_none() && (from.is_some() || w.replaced.contains(&key));
             let moved = match from {
+                _ if w.rekeys => Some(Moved::Internal),
                 Some(f) => Some(Moved::From(f)),
                 None => w.moved.iter().any(|(f, _)| *f == key).then_some(Moved::Away),
             };
