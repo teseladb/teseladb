@@ -4,7 +4,7 @@
 
 use teseladb_bson::{Document, Value};
 use teseladb_changestream::meta::{
-    ChangeMeta, DocWrite, META_FORMAT, META_FORMAT_RETRY, MetaError, RetryInfo, TxnInfo,
+    ChangeMeta, DocWrite, META_FORMAT, META_FORMAT_RETRY, MetaError, Moved, RetryInfo, TxnInfo,
     doc_of_meta, history, history_with, lsid_document, meta_key,
 };
 use teseladb_changestream::update_desc::UpdateDescription;
@@ -41,6 +41,11 @@ fn a_meta_reads_back_what_it_was_made_of() {
         m(None, 0, None, true),
         ChangeMeta { delete: true, doc: None, ..m(Some(txn()), 2, None, false) },
         ChangeMeta { doc: Some(b"doc".to_vec()), ..m(Some(txn()), 2, Some(desc()), false) },
+        ChangeMeta { moved: Some(Moved::From(b"old".to_vec())), ..m(None, 0, None, true) },
+        ChangeMeta { delete: true, moved: Some(Moved::Away), ..m(None, 0, None, false) },
+        // A move of `shardCollection` keying the documents again (018 FR-001).
+        ChangeMeta { moved: Some(Moved::Internal), ..m(None, 0, None, false) },
+        ChangeMeta { delete: true, moved: Some(Moved::Internal), ..m(None, 0, None, false) },
     ];
     for m in all {
         let bytes = m.encode().unwrap();

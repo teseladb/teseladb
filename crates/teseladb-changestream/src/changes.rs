@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use teseladb_hlc::Hlc;
 
-use crate::meta::{ChangeMeta, MetaError, doc_of_meta};
+use crate::meta::{ChangeMeta, MetaError, Moved, doc_of_meta};
 use crate::order::EventKey;
 use crate::token::EventKind;
 
@@ -64,6 +64,17 @@ pub fn collection_of(key: &[u8]) -> Option<(u32, u32)> {
     Some((word(1)?, word(5)?))
 }
 
+/// Whether `change` is an event of a change stream or an entry of the oplog: every change but the
+/// deletion of a document that moved with its shard key to another key, whose event is the
+/// update's at the new key (D-118), and the moves of `shardCollection` keying the documents again
+/// ([`Moved::Internal`]). The indexes that follow the versions (011) take every change.
+pub fn gives_event(change: &Change) -> bool {
+    !matches!(
+        change.meta.as_ref().and_then(|m| m.moved.as_ref()),
+        Some(Moved::Away | Moved::Internal)
+    )
+}
+
 /// The type of the event of the write `meta` describes.
 fn kind_of(meta: &ChangeMeta) -> EventKind {
     if meta.delete {
@@ -79,7 +90,7 @@ fn kind_of(meta: &ChangeMeta) -> EventKind {
 
 /// The changes of `versions`, in the merge order: one for each meta of a document at a mark (a
 /// transaction that wrote it several times left one per write), or one for its version where it
-/// has none; the deletion of a document that moved to another key gives none.
+/// has none ([`gives_event`] says which of them a change stream shows).
 pub fn changes(versions: impl IntoIterator<Item = Versioned>) -> Result<Vec<Change>, ChangeError> {
     let mut docs: BTreeMap<(Vec<u8>, Hlc), Option<Vec<u8>>> = BTreeMap::new();
     let mut metas: BTreeMap<(Vec<u8>, Hlc), Vec<ChangeMeta>> = BTreeMap::new();
@@ -115,10 +126,6 @@ pub fn changes(versions: impl IntoIterator<Item = Versioned>) -> Result<Vec<Chan
     for ((key, ts), list) in metas {
         let version = docs.get(&(key.clone(), ts)).cloned().flatten();
         for meta in list {
-            // A document that moved with its shard key gives its event at its new key.
-            if meta.moved == Some(crate::meta::Moved::Away) {
-                continue;
-            }
             let kind = kind_of(&meta);
             let doc = match kind {
                 EventKind::Delete => None,

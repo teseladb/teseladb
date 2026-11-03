@@ -380,6 +380,7 @@ pub fn rules_of(
         unlogged: false,
         shard_key: super::sharding::shard_key_of(coll)?.map(|k| k.key),
         moves: false,
+        rekeys: false,
         retry: None,
     })
 }
