@@ -230,6 +230,45 @@ mod tests {
         Ok(Reply::Changes { rows: Vec::new(), to, oldest_intent: None })
     }
 
+    /// A document that `shardCollection` keyed again by its new shard key (018 FR-001) is no
+    /// event: the cursor emits only the other document's insert.
+    #[test]
+    fn a_move_that_keys_a_document_again_is_not_emitted() {
+        use teseladb_changestream::meta::Moved;
+        use teseladb_changestream::{DOCUMENT_VALUE, HISTORY_VALUE};
+        let at = |p: u64| Hlc { physical: p, logical: 0 };
+        let row = |key: Vec<u8>, ts: u64, value: Option<(u8, Vec<u8>)>| {
+            teseladb_range::changes::Versioned { key, ts: at(ts), value }
+        };
+        let internal = ChangeMeta {
+            txn: None,
+            retry: None,
+            op: 0,
+            update: None,
+            replace: false,
+            delete: false,
+            doc: None,
+            moved: Some(Moved::Internal),
+        };
+        let rows = vec![
+            row(doc_key(1), 3, Some((DOCUMENT_VALUE, b"moved".to_vec()))),
+            row(
+                meta_key(&doc_key(1), 0),
+                3,
+                Some((HISTORY_VALUE, internal.encode().expect("meta"))),
+            ),
+            row(doc_key(2), 4, Some((DOCUMENT_VALUE, b"new".to_vec()))),
+        ];
+        let start = at(1);
+        let mut c = Cursor::new("c".into(), start);
+        c.next().expect("a read of the whole interval");
+        c.sent(&[]);
+        let reply = Ok(Reply::Changes { rows, to: at(5), oldest_intent: None });
+        c.answered(reply, MAX_BATCH, start);
+        let keys: Vec<&[u8]> = c.log.emitted.iter().map(|e| e.change.key.as_slice()).collect();
+        assert_eq!(keys, [doc_key(2).as_slice()]);
+    }
+
     #[test]
     fn answers_without_a_read_in_flight_are_dropped_and_a_lost_read_is_forgotten() {
         let start = Hlc { physical: 1, logical: 0 };
