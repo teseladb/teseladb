@@ -6,6 +6,7 @@
 use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_meta::catalog::{CatalogCommand, CollectionEntry, Namespace};
 use teseladb_meta::collection_types::CollectionKind;
+use teseladb_meta::indexes::{IndexEntry, IndexState};
 
 use super::names::{full, parse_full};
 use super::{Backend, Ctx, display, kinds};
@@ -47,10 +48,7 @@ pub fn shard_key_of(coll: &CollectionEntry) -> Result<Option<ShardKey>, CommandE
         return Ok(None);
     };
     let d = Document::from(d);
-    let key = match d.get("key") {
-        Some(Value::Document(k)) => k.clone(),
-        _ => Document::new(),
-    };
+    let key = super::args::doc(&d, SHARD_KEY, "key")?.cloned().unwrap_or_default();
     Ok(Some(ShardKey { key, unique: matches!(d.get("unique"), Some(Value::Boolean(true))) }))
 }
 
@@ -62,24 +60,25 @@ pub fn is_sharded(coll: &CollectionEntry) -> bool {
 /// The value at dotted `path` of `doc`: `None` when it is missing; an array on the way is
 /// refused, as no shard key holds one (measured on a `refrouter` 9.0.4 on 02-11-2026).
 fn shard_value<'a>(doc: &'a Document, path: &str) -> Result<Option<&'a Value>, CommandError> {
+    let array = || {
+        let msg = "Shard key cannot contain array values or array descendants.";
+        CommandError::new(SHARD_KEY_NOT_FOUND, msg)
+    };
+    let mut parts = path.split('.');
+    // `split` gives at least one part.
+    let last = parts.next_back().unwrap_or_default();
     let mut at = doc;
-    let mut parts = path.split('.').peekable();
-    while let Some(part) = parts.next() {
-        let v = match at.get(part) {
-            None => return Ok(None),
-            Some(Value::Array(_)) => {
-                let msg = "Shard key cannot contain array values or array descendants.";
-                return Err(CommandError::new(SHARD_KEY_NOT_FOUND, msg));
-            }
-            Some(v) => v,
-        };
-        match (parts.peek(), v) {
-            (None, _) => return Ok(Some(v)),
-            (Some(_), Value::Document(d)) => at = d,
-            (Some(_), _) => return Ok(None),
+    for part in parts {
+        match at.get(part) {
+            Some(Value::Array(_)) => return Err(array()),
+            Some(Value::Document(d)) => at = d,
+            _ => return Ok(None),
         }
     }
-    Ok(None)
+    match at.get(last) {
+        Some(Value::Array(_)) => Err(array()),
+        v => Ok(v),
+    }
 }
 
 /// The values of shard key `key` in `doc`, in order, as its document's key holds them: a
@@ -124,7 +123,8 @@ pub fn document_key_in(
         .to_bytes()?;
     let raw = RawDoc::from_bytes(&holder)?;
     let parts: Vec<teseladb_bson::RawValue<'_>> = raw.iter().map(|(_, v)| v).collect();
-    let (id, shard) = parts.split_last().ok_or_else(|| CommandError::new(BAD_VALUE, "bad _id"))?;
+    // The holder ends with `_id`, so it has a last value.
+    let (id, shard) = parts.split_last().unwrap_or((&teseladb_bson::RawValue::Null, &[]));
     let k = teseladb_keys::KeyBuilder::document_sharded(tenant, collection, shard, *id);
     Ok(k.as_bytes().to_vec())
 }
@@ -185,7 +185,7 @@ pub fn enable_sharding<B: Backend + ?Sized>(
             super::primaries::enable_with_primary(ctx, &db)?;
             Ok(Document::new().with("ok", 1.0))
         }
-        v => Err(wrong_type(ENABLE_SHARDING, v, "string")),
+        v => Err(wrong_type(&format!("{ENABLE_SHARDING}.{ENABLE_SHARDING}"), v, "string")),
     }
 }
 
@@ -194,9 +194,13 @@ pub fn shard_collection<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
 ) -> Result<Document, CommandError> {
     super::admin::admin_only(SHARD_COLLECTION, ctx.db)?;
+    // The messages of a `refrouter` 9.0.4 (measured on 03-11-2026).
     let name = match ctx.first() {
         Value::String(s) => s.clone(),
-        v => return Err(wrong_type(SHARD_COLLECTION, v, "string")),
+        v => {
+            let msg = format!("Collection name has invalid type {}", crate::types::type_name(v));
+            return Err(CommandError::new(INVALID_NAMESPACE, msg));
+        }
     };
     let ns =
         parse_full(&name).filter(|n| !n.db.is_empty() && !n.coll.is_empty()).ok_or_else(|| {
@@ -204,8 +208,8 @@ pub fn shard_collection<B: Backend + ?Sized>(
         })?;
     let key = match ctx.cmd.get("key") {
         Some(Value::Document(k)) => k.clone(),
-        Some(v) => return Err(wrong_type("shardCollection.key", v, "object")),
-        None => return Err(super::args::missing(SHARD_COLLECTION, "key")),
+        Some(v) => return Err(wrong_type(".key", v, "object")),
+        None => return Err(super::args::missing("", "key")),
     };
     let unique = matches!(ctx.cmd.get("unique"), Some(Value::Boolean(true)));
     let asked = ShardKey { key, unique };
@@ -249,11 +253,8 @@ pub fn shard_collection<B: Backend + ?Sized>(
             Ctx { backend: &mut *ctx.backend, shared: ctx.shared, db: &ns.db, cmd: &create };
         super::catalog::create(&mut sub)?;
     }
-    supporting_index(ctx, &ns, &asked, empty)?;
-    let c = ctx
-        .backend
-        .collection(&ns)?
-        .ok_or_else(|| CommandError::new(crate::error::NAMESPACE_NOT_FOUND, "no collection"))?;
+    let c = ctx.backend.collection(&ns)?.ok_or_else(no_collection)?;
+    supporting_index(ctx, (&ns, &c), &asked, empty)?;
     let mut options = Document::from(RawDoc::from_bytes(&c.options)?);
     options.push(
         SHARD_KEY,
@@ -270,12 +271,15 @@ pub fn shard_collection<B: Backend + ?Sized>(
             matches!(options.get("capped"), Some(Value::Boolean(true))),
         )?,
     })?;
-    let after = ctx
-        .backend
-        .collection(&ns)?
-        .ok_or_else(|| CommandError::new(crate::error::NAMESPACE_NOT_FOUND, "no collection"))?;
-    if !empty {
-        rekey(ctx.backend, &ns, &c, &after)?;
+    let after = ctx.backend.collection(&ns)?.ok_or_else(no_collection)?;
+    if !empty && let Err(e) = rekey(ctx.backend, &ns, &c, &after) {
+        // The collection goes back to its options without the shard key.
+        ctx.backend.catalog_write(CatalogCommand::Modify {
+            ns: ns.clone(),
+            options: c.options.clone(),
+            description: super::balancing::quiet_description()?,
+        })?;
+        return Err(e);
     }
     // The zones' intervals given before take the shard key's keys (018 FR-003).
     super::zones::rekey(ctx.backend, &ns, &after)?;
@@ -284,15 +288,15 @@ pub fn shard_collection<B: Backend + ?Sized>(
 
 /// Keys again by the shard key the documents `before` kept by their `_id` (018 FR-001): each
 /// one leaves its key and its index entries, written without the shard key, and goes in again
-/// with them as `after` keeps them, its `_id` in the `_id_` index.
+/// with them as `after` keeps them, its `_id` in the `_id_` index. A write that fails puts the
+/// documents moved so far back where they were.
 fn rekey<B: Backend + ?Sized>(
     backend: &mut B,
     ns: &Namespace,
     before: &CollectionEntry,
     after: &CollectionEntry,
 ) -> Result<(), CommandError> {
-    use super::crud::{Writer, index_rules, rules_of};
-    use super::mutation::{Bound, DocMutation, Image};
+    use super::crud::{index_rules, rules_of};
     // No change stream sees the move: the documents stay what they were.
     let old = super::mutation::Rules {
         unlogged: true,
@@ -321,23 +325,57 @@ fn rekey<B: Backend + ?Sized>(
             break;
         }
     }
-    let mut w = Writer::internal();
-    for (key, bytes) in rows {
+    // Every new key first: a document whose shard key cannot be keyed moves nothing.
+    let key = shard_key_of(after)?.map(|k| k.key).unwrap_or_default();
+    let mut moves = Vec::new();
+    for (from, bytes) in rows {
         let doc = Document::from(RawDoc::from_bytes(&bytes)?);
-        let id = doc.get("_id").cloned().unwrap_or(Value::Null);
-        let filter = Document::new().with("_id", id);
-        let gone =
-            DocMutation::Delete { filter, multi: false, image: Image::None, rules: old.clone() };
-        w.write(backend, &Bound { mutation: gone, keys: vec![key] }, 0)?;
-        let at =
-            document_key(after, &shard_key_of(after)?.map(|k| k.key).unwrap_or_default(), &doc)?;
-        let back = DocMutation::Insert { docs: vec![doc], ordered: true, rules: new.clone() };
-        let r = w.write(backend, &Bound { mutation: back, keys: vec![at] }, 0)?;
-        if let Some(e) = r.errors.into_iter().next() {
-            return Err(e.error);
+        moves.push((from, document_key(after, &key, &doc)?, doc));
+    }
+    let mut moved: Vec<(Vec<u8>, Vec<u8>, Document)> = Vec::new();
+    for (from, to, doc) in moves {
+        if let Err(e) = move_document(backend, (&old, &from), (&new, &to), &doc) {
+            // The document itself may have left its key: it goes back with the others.
+            moved.push((from, to, doc));
+            for (from, to, doc) in moved.into_iter().rev() {
+                move_document(backend, (&new, &to), (&old, &from), &doc)?;
+            }
+            return Err(e);
         }
+        moved.push((from, to, doc));
     }
     Ok(())
+}
+
+/// Moves `doc` from key `from` (written with rules `old`) to key `to` (with rules `new`); a
+/// document already gone from `from`, or already at `to`, is left as it is.
+fn move_document<B: Backend + ?Sized>(
+    backend: &mut B,
+    (old, from): (&super::mutation::Rules, &[u8]),
+    (new, to): (&super::mutation::Rules, &[u8]),
+    doc: &Document,
+) -> Result<(), CommandError> {
+    use super::crud::Writer;
+    use super::mutation::{Bound, DocMutation, Image};
+    let mut w = Writer::internal();
+    let id = doc.get("_id").cloned().unwrap_or(Value::Null);
+    let filter = Document::new().with("_id", id);
+    let gone = DocMutation::Delete { filter, multi: false, image: Image::None, rules: old.clone() };
+    w.write(backend, &Bound { mutation: gone, keys: vec![from.to_vec()] }, 0)?;
+    let back = DocMutation::Insert { docs: vec![doc.clone()], ordered: true, rules: new.clone() };
+    let r = w.write(backend, &Bound { mutation: back, keys: vec![to.to_vec()] }, 0)?;
+    match r.errors.into_iter().next() {
+        Some(e) if e.error.code != crate::error::DUPLICATE_KEY => Err(e.error),
+        _ => Ok(()),
+    }
+}
+
+/// The collection `shardCollection` works on was dropped meanwhile by another client.
+fn no_collection() -> CommandError {
+    CommandError::new(
+        crate::error::NAMESPACE_NOT_FOUND,
+        "the collection was dropped while it was being sharded",
+    )
 }
 
 fn sharded_reply(ns: &Namespace) -> Document {
@@ -359,9 +397,7 @@ pub(super) fn check_key(k: &ShardKey) -> Result<(), CommandError> {
                 format!("Field {field} contains parts that start with '$'"),
             ));
         }
-        let one = matches!(v, Value::Int32(1) | Value::Int64(1))
-            || matches!(v, Value::Double(x) if *x == 1.0);
-        if !one && !is_hashed(v) {
+        if crate::types::number(v) != Some(1.0) && !is_hashed(v) {
             return Err(CommandError::new(
                 BAD_VALUE,
                 format!(
@@ -429,11 +465,14 @@ pub(super) fn is_empty<B: Backend + ?Sized>(
 }
 
 /// The index whose key starts with the shard key: one that exists (unique when the shard key
-/// is), or the one `shardCollection` makes on an empty collection; the index of `_id` serves a
-/// key `{_id: 1}`.
+/// is), or the one `shardCollection` makes on empty collection `c`; the index of `_id` serves a
+/// key `{_id: 1}`. An index serves when it is not sparse, partial, hidden or multikey; without
+/// one, an index on exactly the shard key that is not sparse refuses the command with each
+/// index's reason, and a collection with documents asks for an index (measured on a `refrouter`
+/// 9.0.4 on 03-11-2026, `sh3.js` to `sh6.js`).
 fn supporting_index<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
-    ns: &Namespace,
+    (ns, c): (&Namespace, &CollectionEntry),
     k: &ShardKey,
     empty: bool,
 ) -> Result<(), CommandError> {
@@ -441,32 +480,44 @@ fn supporting_index<B: Backend + ?Sized>(
     if fields.len() == 1 && fields[0].0 == "_id" && fields[0].1 != &Value::from(HASHED) {
         return Ok(());
     }
-    let list = Document::new().with("listIndexes", ns.coll.as_str());
-    let mut sub = Ctx { backend: &mut *ctx.backend, shared: ctx.shared, db: &ns.db, cmd: &list };
-    let listed = super::catalog::list_indexes(&mut sub)?;
-    let specs = match listed.get("cursor") {
-        Some(Value::Document(c)) => match c.get("firstBatch") {
-            Some(Value::Array(b)) => b.clone(),
-            _ => Vec::new(),
-        },
-        _ => Vec::new(),
-    };
-    let prefix = |spec: &Document| match spec.get("key") {
-        Some(Value::Document(ik)) => {
-            ik.len() >= fields.len()
-                && ik.iter().zip(&fields).all(|((f, v), (sf, sv))| f == *sf && same_value(v, sv))
+    let flag = |spec: &Document, f: &str| matches!(spec.get(f), Some(Value::Boolean(true)));
+    // The index of `_id` comes first and never starts with another shard key.
+    let mut reasons = vec![
+        "Index _id_ cannot be used for sharding because: Shard key is not a prefix of index key."
+            .to_owned(),
+    ];
+    let mut on_key = false;
+    let mut sparse = None;
+    let mut serving: Vec<Document> = Vec::new();
+    let ready = ctx.backend.indexes(c.id)?.into_iter().filter(|e| e.state == IndexState::Ready);
+    for entry in ready.collect::<Vec<_>>() {
+        let spec = Document::from(RawDoc::from_bytes(&entry.spec)?);
+        let ik = super::args::doc(&spec, "index", "key")?.cloned().unwrap_or_default();
+        let is_prefix = ik.len() >= fields.len()
+            && ik.iter().zip(&fields).all(|((f, v), (sf, sv))| f == *sf && same_value(v, sv));
+        let hidden = flag(&spec, "hidden");
+        on_key |= is_prefix && ik.len() == fields.len() && !flag(&spec, "sparse");
+        let why = match () {
+            () if !is_prefix => Some("Shard key is not a prefix of index key."),
+            () if flag(&spec, "sparse") => {
+                sparse = Some(entry.name.clone());
+                None
+            }
+            () if spec.get("partialFilterExpression").is_some() => Some("Index key is partial."),
+            () if is_multikey(ctx.backend, c, &entry, &ik)? => Some("Index key is multikey."),
+            () if hidden => None,
+            () => {
+                serving.push(spec.clone());
+                None
+            }
+        };
+        if let (Some(why), false) = (why, hidden) {
+            let name = &entry.name;
+            reasons.push(format!("Index {name} cannot be used for sharding because: {why}"));
         }
-        _ => false,
-    };
-    let found: Vec<Document> = specs
-        .into_iter()
-        .filter_map(|s| match s {
-            Value::Document(d) if prefix(&d) => Some(d),
-            _ => None,
-        })
-        .collect();
-    if let Some(first) = found.first() {
-        let is_unique = found.iter().any(|d| matches!(d.get("unique"), Some(Value::Boolean(true))));
+    }
+    if let Some(first) = serving.first() {
+        let is_unique = serving.iter().any(|d| flag(d, "unique"));
         if k.unique && !is_unique {
             return Err(CommandError::new(
                 INVALID_OPTIONS,
@@ -479,13 +530,44 @@ fn supporting_index<B: Backend + ?Sized>(
         }
         return Ok(());
     }
-    if !empty {
-        return Err(CommandError::new(
-            INVALID_OPTIONS,
-            "Please create an index that starts with the proposed shard key before sharding the collection. ",
-        ));
+    if on_key {
+        let msg = format!(
+            "can't shard collection because an index already exists on the shard key and it's a non shard key valid index. :: caused by :: couldn't find valid index for shard key\n{}",
+            reasons.join("\n")
+        );
+        return Err(CommandError::new(INVALID_OPTIONS, msg));
     }
-    let name: Vec<String> = fields
+    if !empty {
+        let mut msg = "Please create an index that starts with the proposed shard key before sharding the collection. ".to_owned();
+        if let Some(name) = sparse {
+            msg.push_str(&format!(
+                " Index {name} cannot be used for sharding because [ Index key is sparse. ]"
+            ));
+        }
+        return Err(CommandError::new(INVALID_OPTIONS, msg));
+    }
+    create_supporting(ctx, ns, k)
+}
+
+/// Whether index `entry` of collection `c` holds an array in one of the fields of `key`.
+fn is_multikey<B: Backend + ?Sized>(
+    backend: &mut B,
+    c: &CollectionEntry,
+    entry: &IndexEntry,
+    key: &Document,
+) -> Result<bool, CommandError> {
+    let paths = super::plan_exec::multikey_paths(backend, (c.tenant, c.id), entry, key)?;
+    Ok(paths.iter().any(|(_, p)| !p.is_empty()))
+}
+
+/// Builds the index of shard key `k` on `ns`, named after its fields.
+fn create_supporting<B: Backend + ?Sized>(
+    ctx: &mut Ctx<'_, B>,
+    ns: &Namespace,
+    k: &ShardKey,
+) -> Result<(), CommandError> {
+    let name: Vec<String> = k
+        .key
         .iter()
         .map(|(f, v)| match v {
             Value::String(s) => format!("{f}_{s}"),
@@ -506,15 +588,10 @@ fn supporting_index<B: Backend + ?Sized>(
 /// Whether an index key value and a shard key value say the same: `1` in any numeric type, or
 /// `"hashed"`.
 pub(super) fn same_value(index: &Value, shard: &Value) -> bool {
-    let number = |v: &Value| match v {
-        Value::Int32(n) => Some(f64::from(*n)),
-        Value::Int64(n) => Some(*n as f64),
-        Value::Double(x) => Some(*x),
-        _ => None,
-    };
     match (index, shard) {
         (Value::String(a), Value::String(b)) => a == b,
-        (a, b) => number(a).is_some_and(|x| x > 0.0) && number(b) == Some(1.0),
+        // Only an ascending field of 1, in any numeric type, serves (measured on 03-11-2026).
+        (a, b) => crate::types::number(a) == Some(1.0) && crate::types::number(b) == Some(1.0),
     }
 }
 

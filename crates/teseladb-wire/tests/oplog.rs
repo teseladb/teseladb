@@ -616,3 +616,35 @@ fn an_insert_of_several_documents_is_one_apply_ops_entry() {
     let kinds: Vec<&Value> = plain.iter().filter_map(|e| e.get("op")).collect();
     assert_eq!(kinds, [&Value::from("i"), &Value::from("u"), &Value::from("u"), &Value::from("u")]);
 }
+
+/// A transaction that writes one document twice gives each write its own operation, the second
+/// one's diff from the document the first one left.
+#[test]
+fn a_document_written_twice_in_a_transaction() {
+    let mut m = node();
+    let lsid = Document::new().with("id", Value::Binary { subtype: 4, bytes: vec![9; 16] });
+    let txn = |cmd: Document, start: bool| {
+        let cmd = cmd.with("lsid", lsid.clone()).with("txnNumber", Value::Int64(1));
+        let cmd = if start { cmd.with("startTransaction", true) } else { cmd };
+        cmd.with("autocommit", false)
+    };
+    let five = Document::new().with("_id", 5).with("b", 1);
+    let ins = Document::new().with("insert", "w").with("documents", vec![Value::Document(five)]);
+    ok(&run(&mut m, DB, Document::new().with("create", "w")));
+    ok(&run(&mut m, DB, txn(ins, true)));
+    let up = Document::new()
+        .with("q", Document::new().with("_id", 5))
+        .with("u", Document::new().with("$set", Document::new().with("b", 2)));
+    let update = Document::new().with("update", "w").with("updates", vec![Value::Document(up)]);
+    ok(&run(&mut m, DB, txn(update, false)));
+    ok(&run(&mut m, "admin", txn(Document::new().with("commitTransaction", 1), false)));
+    let entries = oplog(&mut m, Document::new().with("ns", "admin.$cmd"));
+    let ops = docs(field(&entries[0], "o.applyOps"));
+    assert_eq!(ops.len(), 2, "{ops:?}");
+    let diff = Document::new().with("u", Document::new().with("b", 2));
+    assert_eq!(
+        ops[1].get("o"),
+        Some(&Value::Document(Document::new().with("$v", 2).with("diff", diff))),
+        "{ops:?}"
+    );
+}
