@@ -2,6 +2,7 @@
 # Unified_Ideograph and blocks (implicit weights), scripts and their codes (script reordering), the
 # UCD version of ICU 57.1 (decision D-043).
 # source https://www.unicode.org/Public/8.0.0/ucd
+# mirror https://raw.githubusercontent.com/unicode-org/unicodetools/main/unicodetools/data/ucd/8.0.0-Update
 # dest .tools/unicode/ucd-8.0.0
 38b17e1118206489a7e0ab5d29d7932212d38838df7d3ec025ecb58e8798ec20  UnicodeData.txt
 70d40297f1bf91397fbdab5a770c12100733e67c5c3398446c5e950715d5e535  PropList.txt

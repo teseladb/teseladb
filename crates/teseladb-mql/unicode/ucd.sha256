@@ -2,6 +2,7 @@
 # scripts and script extensions, binary properties and bidi classes (`\p`), grapheme cluster breaks and
 # extended pictographics (`\X`).
 # source https://www.unicode.org/Public/16.0.0/ucd
+# mirror https://raw.githubusercontent.com/unicode-org/unicodetools/main/unicodetools/data/ucd/16.0.0
 # dest .tools/unicode/ucd-16.0.0
 ff58e5823bd095166564a006e47d111130813dcf8bf234ef79fa51a870edb48f  UnicodeData.txt
 9e88f0a677df47311106340be8ede2ecdacd9c1c931831218d2be6d5508e0039  Scripts.txt

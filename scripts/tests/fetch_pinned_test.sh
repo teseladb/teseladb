@@ -67,6 +67,36 @@ rm "$WORK/source/sub/two.json"
 out=$(fetch 2>&1) && rc=0 || rc=$?
 check "a missing file fails (exit $rc)" "$([[ $rc -eq 1 ]] && grep -q "cannot download" <<<"$out" && echo 0 || echo 1)" "$out"
 
+# A source that does not answer gives way to the `# mirror` lines of the list, in order; a
+# mirror is held to the same SHA-256, so one that serves other bytes is passed over.
+printf '{"b": 2}\n' >"$WORK/source/sub/two.json"
+mkdir -p "$WORK/bad/sub"
+printf '{"a": 9}\n' >"$WORK/bad/one.json"
+printf '{"b": 9}\n' >"$WORK/bad/sub/two.json"
+MIRRORED=$WORK/repo/scripts/mirrored.sha256
+{
+  echo "# source file://$WORK/nowhere"
+  echo "# mirror file://$WORK/bad"
+  echo "# mirror file://$WORK/source"
+  echo "# dest .tools/mirrored"
+  (cd "$WORK/source" && shasum -a 256 one.json sub/two.json)
+} >"$MIRRORED"
+out=$(TESELADB_FETCH_RETRIES=0 "$WORK/repo/scripts/fetch-pinned.sh" "$MIRRORED" 2>&1) && rc=0 || rc=$?
+mirrored=$WORK/repo/.tools/mirrored
+ok=1
+[[ $rc -eq 0 ]] && cmp -s "$mirrored/one.json" "$WORK/source/one.json" &&
+  cmp -s "$mirrored/sub/two.json" "$WORK/source/sub/two.json" && grep -q "2 downloaded" <<<"$out" && ok=0
+check "a mirror with the right SHA-256 stands in for the source (exit $rc)" "$ok" "$out"
+
+# With no source nor mirror that has the file, the error names every place it tried.
+grep -v "^# mirror file://$WORK/source$" "$MIRRORED" | sed 's|^# dest .*|# dest .tools/unmirrored|' \
+  >"$WORK/repo/scripts/unmirrored.sha256"
+out=$(TESELADB_FETCH_RETRIES=0 "$WORK/repo/scripts/fetch-pinned.sh" "$WORK/repo/scripts/unmirrored.sha256" 2>&1) &&
+  rc=0 || rc=$?
+ok=1
+[[ $rc -eq 1 ]] && grep -q "cannot download one.json from file://$WORK/nowhere file://$WORK/bad" <<<"$out" && ok=0
+check "no source nor mirror with the file fails and names them (exit $rc)" "$ok" "$out"
+
 # A list without its source or destination, and no list at all, are usage errors.
 for header in "# source" "# dest"; do
   grep -v "^$header " "$LIST" >"$WORK/partial.sha256"

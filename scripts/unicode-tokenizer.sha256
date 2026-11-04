@@ -5,6 +5,7 @@
 # 011 T009). The word-break conformance test of the same version checks the segmentation.
 # Unicode License v3 (https://www.unicode.org/license.txt).
 # source https://www.unicode.org/Public/12.1.0/ucd
+# mirror https://raw.githubusercontent.com/unicode-org/unicodetools/main/unicodetools/data/ucd/12.1.0-Update
 # dest .tools/unicode/ucd-12.1.0
 f221f89fe3bb3becc00de726d5694c4b7f464c316baff6d339b2ff3900bcb96c  auxiliary/WordBreakProperty.txt
 3e3320bbbe775de7f1a0b9a30021eb949116a9b05cb461c90596c5ecf1743831  auxiliary/WordBreakTest.txt
