@@ -338,6 +338,10 @@ fn a_large_event_fails_whole_and_comes_in_fragments_with_the_split_stage() {
 /// gone; the batches before it come out. Before, the event before the large one came out and
 /// the `getMore` after it failed.
 fn too_large_stream(m: &mut Mem) -> i64 {
+    // Each read of the range gives one millisecond of its history, so that each event comes in
+    // a read of its own, as the node's reads of 4 MiB cut a history of large versions (014
+    // FR-003): the batch of the shard goes on reading until it holds 16 MiB.
+    m.changes_window_ms = 1;
     run(m, Document::new().with("create", "c").with("changeStreamPreAndPostImages", images(true)));
     let spec = Document::new()
         .with("fullDocument", "required")
@@ -346,6 +350,7 @@ fn too_large_stream(m: &mut Mem) -> i64 {
 }
 
 fn insert_big(m: &mut Mem, id: i32) {
+    m.now += 1;
     let big = "x".repeat(9 * 1024 * 1024);
     let one = doc(&[("_id", id.into()), ("a", big.as_str().into())]);
     run(m, Document::new().with("insert", "c").with("documents", arr(vec![one])));
@@ -353,6 +358,7 @@ fn insert_big(m: &mut Mem, id: i32) {
 
 /// An update of document `id` of 9 MiB: its event, with the two images, passes 16 MiB.
 fn update_big(m: &mut Mem, id: i32) {
+    m.now += 1;
     let set = Document::new().with("$set", doc(&[("b", 1.into())]));
     let u = Document::new().with("q", doc(&[("_id", id.into())])).with("u", set);
     run(m, Document::new().with("update", "c").with("updates", arr(vec![u])));
