@@ -243,7 +243,11 @@ fn text_spec(spec: Document, key: &Document) -> Document {
 /// A `refrouter` 9.0.4 forwards the shard's error of `createIndexes` and `dropIndexes` with `code`
 /// and `codeName` first, then the other fields, `ok` and `errmsg` (measured).
 fn forwarded(r: Result<Document, CommandError>) -> Result<Document, CommandError> {
-    r.or_else(|e| Ok(code_first(&e)))
+    r.or_else(|e| match e.origin {
+        // The router's own error goes as any error: no shard answered it.
+        crate::error::ErrorOrigin::Router => Err(e),
+        _ => Ok(code_first(&e)),
+    })
 }
 
 /// Error `e` with `code` and `codeName` first, then the other fields, `ok` and `errmsg`.

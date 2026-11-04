@@ -159,6 +159,10 @@ fn commands_on_a_missing_database_name_it() {
         };
         let r = m.run(&db("none"), missing);
         assert_eq!(error(&r), (26, "database none not found".to_owned()), "{name}");
+        // The router answers it, with the fields of any error (a `refrouter` 9.0.4's `dropIndexes`,
+        // battery's crud-database-entries on 04-11-2026).
+        let keys: Vec<&str> = r.iter().map(|(k, _)| k).collect();
+        assert_eq!(keys, ["ok", "errmsg", "code", "codeName"], "{name}");
         let r = m.run(&db("empty"), cmd);
         if in_empty.is_empty() {
             assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{name}");

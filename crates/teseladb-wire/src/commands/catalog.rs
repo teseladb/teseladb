@@ -717,15 +717,18 @@ pub(crate) fn has_database<B: Backend + ?Sized>(
 }
 
 /// The error of a command on a collection that does not exist: `msg`, or, when its database is
-/// not in the catalog either, the one a `refrouter` 9.0.4 gives (measured).
+/// not in the catalog either, the one a `refrouter` 9.0.4 gives (measured), which is the router's:
+/// no shard gets the command (`dropIndexes` answers it as any error, measured on 04-11-2026).
 pub(crate) fn missing_namespace<B: Backend + ?Sized>(
     backend: &mut B,
     ns: &Namespace,
     msg: String,
 ) -> Result<CommandError, CommandError> {
-    let msg =
-        if has_database(backend, &ns.db)? { msg } else { format!("database {} not found", ns.db) };
-    Ok(CommandError::new(NAMESPACE_NOT_FOUND, msg))
+    if has_database(backend, &ns.db)? {
+        return Ok(CommandError::new(NAMESPACE_NOT_FOUND, msg));
+    }
+    let msg = format!("database {} not found", ns.db);
+    Ok(CommandError::new(NAMESPACE_NOT_FOUND, msg).parsed())
 }
 
 /// Runs `cmd`, which may add database `db` to the catalog. When Group 0 refuses it because
