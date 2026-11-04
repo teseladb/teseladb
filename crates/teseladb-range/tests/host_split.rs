@@ -172,3 +172,44 @@ fn a_new_leader_refuses_the_keys_a_cut_it_applied_gave_away_before_its_host_foll
     assert_eq!(c.reply(f, w), Some(Err(RangeError::OutOfRange)));
     assert!(!c.nodes[&f].core.has_stopped_group(), "the range never applies a key it gave away");
 }
+
+/// A change stream's read of the whole range that waits (here for the wall clock to reach its
+/// mark) while a split cuts the range: once it can go on, the part split off is no longer this
+/// range's, and on a replica of the new range waiting for a snapshot its data may be gone (cleared
+/// for the ingest). The read is refused with `OutOfRange` and the reader asks the ranges again;
+/// it does not resolve the whole interval up to its mark without the versions on the part split
+/// off (seed 548 of the simulator's `search`, plan `default`: a search missed a committed write).
+#[test]
+fn a_stream_read_that_waits_across_a_split_is_refused() {
+    let mut c = Cluster::standard();
+    let l = c.elect();
+    let w = write_on(&mut c, l, G, b"\x01q", 1, 1);
+    c.follow();
+    mutated_ts(c.reply(l, w));
+    let mark = Hlc { physical: c.wall_of(l) + 300, logical: 0 };
+    let now = c.now;
+    let node = c.nodes.get_mut(&l).unwrap();
+    let zero = Hlc { physical: 0, logical: 0 };
+    let req = teseladb_range::host::ChangesReq {
+        g: G,
+        start: START.to_vec(),
+        end: END.to_vec(),
+        from: zero,
+        at: Some(mark),
+    };
+    let read = node.host.changes(&mut node.core, req, now);
+    c.settle();
+    assert_eq!(c.reply(l, read), None, "it waits for the clock");
+    assert!(c.nodes.get_mut(&l).unwrap().host.split(G, AT, NEW));
+    c.follow();
+    for node in c.nodes.values() {
+        assert_eq!(node.core.state_machine(G).and_then(RangeState::end), Some(AT));
+    }
+    for _ in 0..100 {
+        c.ticks_following(1);
+        if c.reply(l, read).is_some() {
+            break;
+        }
+    }
+    assert_eq!(c.reply(l, read), Some(Err(RangeError::OutOfRange)));
+}

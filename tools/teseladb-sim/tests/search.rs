@@ -44,3 +44,41 @@ fn a_snapshot_wait_outlives_a_frozen_core() {
     let r = run_seed(&cfg("search", FaultPlan::Default), 1541);
     assert_eq!(r.verdict, Verdict::Pass);
 }
+
+/// Seed 3541 of the `default` plan (`search` and `vector`): it turned red with the same schedule
+/// change as seed 883 of `indexes`, and its run restarts replicas from their own snapshots, older
+/// than what their LSMs flushed, that replay transactions' intents over the documents it
+/// searches. It passes once such a replay no longer writes again what the LSM holds.
+#[test]
+fn a_restart_from_an_older_snapshot_answers_the_committed_documents() {
+    for workload in ["search", "vector"] {
+        let r = run_seed(&cfg(workload, FaultPlan::Default), 3541);
+        assert_eq!(r.verdict, Verdict::Pass, "{workload} seed 3541");
+    }
+}
+
+/// Seed 790 of the `heavy` plan (`search` and `vector`): the first transaction lost the answers of
+/// its `Begin` and its intents and its abort found no leader. The coordinator gave up on the abort,
+/// so the record, which pushes kept pending, never learnt the intervals of the intent it had
+/// written; the reaper aborted it without resolving the intent, and every search waited below it
+/// for the rest of the run. The abort goes again until a range answers it.
+#[test]
+fn an_abort_without_an_answer_goes_again_and_every_search_answers() {
+    for workload in ["search", "vector"] {
+        let r = run_seed(&cfg(workload, FaultPlan::Heavy), 790);
+        assert_eq!(r.verdict, Verdict::Pass, "{workload} seed 790");
+    }
+}
+
+/// Seed 548 of the `default` plan (`search` and `vector`): a searcher's read of the whole first
+/// range waited on its leader while a split cut the range, and the node's replica of the new range
+/// cleared its interval for a snapshot. The read then went on over the old interval, found nothing
+/// on the part split off and took it as read up to its mark, so the search missed a committed
+/// write there. The read is refused once its range no longer covers its interval.
+#[test]
+fn a_search_read_that_waits_across_a_split_starts_again() {
+    for workload in ["search", "vector"] {
+        let r = run_seed(&cfg(workload, FaultPlan::Default), 548);
+        assert_eq!(r.verdict, Verdict::Pass, "{workload} seed 548");
+    }
+}
