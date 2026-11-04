@@ -119,10 +119,16 @@ pub(crate) fn on_privileges(cmd: &Document, action: A) -> Check {
 }
 
 /// `usersInfo`; with `authenticatedMechanism` also `internal` on the cluster (013 FR-033: a
-/// probe of minimal privileges on RefDb Enterprise 9.0.4 found `viewUser` and `internal`).
+/// probe of minimal privileges on RefDb Enterprise 9.0.4 found `viewUser` and `internal`). A
+/// value that names no mechanism needs nothing more: the command refuses it first (measured on a
+/// `refrouter` 9.0.4 with `root`, which has no `internal`).
 pub(crate) fn users_info(db: &str, cmd: &Document, who: &Subject<'_>) -> Check {
     let check = info(true, db, cmd, who);
-    if cmd.get("authenticatedMechanism").is_none() {
+    let names_a_mechanism = matches!(
+        cmd.get("authenticatedMechanism"),
+        Some(Value::String(m)) if crate::sasl::SaslMechanism::from_name(m).is_some()
+    );
+    if !names_a_mechanism {
         return check;
     }
     let internal = Requirement::all(&Target::Cluster, &[A::Internal]);
