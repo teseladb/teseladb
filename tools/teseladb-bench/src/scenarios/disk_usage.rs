@@ -36,9 +36,12 @@ pub fn bytes_under(dir: &Path, suffix: &str) -> std::io::Result<u64> {
     let mut total = 0;
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
-        for e in std::fs::read_dir(&d)? {
-            let e = e?;
-            let meta = e.metadata()?;
+        // A folder or file the LSM removed while it is read (a compaction drops its inputs) holds
+        // no bytes any more; only the folder asked for must exist.
+        let Some(entries) = vanished_as_none(std::fs::read_dir(&d), d != dir)? else { continue };
+        for e in entries {
+            let Some(e) = vanished_as_none(e, true)? else { continue };
+            let Some(meta) = vanished_as_none(e.metadata(), true)? else { continue };
             if meta.is_dir() {
                 stack.push(e.path());
             } else if e.file_name().to_string_lossy().ends_with(suffix) {
@@ -47,6 +50,15 @@ pub fn bytes_under(dir: &Path, suffix: &str) -> std::io::Result<u64> {
         }
     }
     Ok(total)
+}
+
+/// `r`, with a missing file or folder as `None` when `may_vanish`.
+fn vanished_as_none<T>(r: std::io::Result<T>, may_vanish: bool) -> std::io::Result<Option<T>> {
+    match r {
+        Ok(v) => Ok(Some(v)),
+        Err(e) if may_vanish && e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 /// Runs the measurement.
@@ -130,6 +142,16 @@ mod tests {
         assert_eq!(bytes_under(&d.path, ".sst").unwrap(), 10);
         assert_eq!(bytes_under(&d.path, "").unwrap(), 15);
         assert!(bytes_under(&d.path.join("missing"), "").is_err());
+    }
+
+    #[test]
+    fn a_file_removed_while_counting_counts_nothing() {
+        let gone = || Err::<u64, _>(std::io::Error::from(std::io::ErrorKind::NotFound));
+        assert_eq!(vanished_as_none(gone(), true).unwrap(), None);
+        assert!(vanished_as_none(gone(), false).is_err(), "the folder asked for must exist");
+        let denied = Err::<u64, _>(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        assert!(vanished_as_none(denied, true).is_err(), "only a missing file is skipped");
+        assert_eq!(vanished_as_none(Ok(3), true).unwrap(), Some(3));
     }
 
     #[test]
