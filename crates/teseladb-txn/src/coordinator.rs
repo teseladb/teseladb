@@ -202,6 +202,10 @@ pub struct Coordinator {
     retry_resolve: BTreeSet<GroupId>,
     /// Ranges whose resolution in flight lacks keys that moved there: sent again once it answers.
     resolve_again: BTreeSet<GroupId>,
+    /// Aborts sent that got no answer, and whether one goes again at the next tick: the abort
+    /// gives the record the intervals of the intents, which nothing else may have given it.
+    abort_attempts: u32,
+    retry_abort: bool,
     /// Why the answer of a one-phase commit was lost.
     one_phase_lost: Option<RangeError>,
     out: Vec<Request>,
@@ -265,6 +269,8 @@ impl Coordinator {
             resolving: BTreeMap::new(),
             retry_resolve: BTreeSet::new(),
             resolve_again: BTreeSet::new(),
+            abort_attempts: 0,
+            retry_abort: false,
             one_phase_lost: None,
             out: Vec::new(),
             events: Vec::new(),
@@ -604,6 +610,9 @@ impl Coordinator {
         for g in std::mem::take(&mut self.retry_resolve) {
             self.resolve_in(route, g);
         }
+        if std::mem::take(&mut self.retry_abort) {
+            self.send_record(Pending::Abort);
+        }
         self.try_commit();
     }
 
@@ -860,6 +869,13 @@ impl Coordinator {
                 self.ended(Outcome::Committed(rec.commit_ts));
             }
             Ok(_) | Err(RangeError::NoSuchTransaction) => self.ended(Outcome::Aborted),
+            // No answer: the abort goes again at the next tick. Intents whose answers were lost
+            // may be in their ranges while the record, if a push created it, has none of their
+            // intervals; the reaper aborts an abandoned record but only resolves those intervals.
+            Err(_) if self.abort_attempts + 1 < MAX_RESOLVE_ATTEMPTS => {
+                self.abort_attempts += 1;
+                self.retry_abort = true;
+            }
             // The record may stay pending: the reaper aborts it once it has no heartbeat.
             Err(_) => self.ended(Outcome::Aborted),
         }
@@ -924,6 +940,7 @@ impl Coordinator {
 mod tests {
     use super::*;
     use teseladb_range::intents::TxnRecord;
+    use teseladb_types::NodeId;
 
     const G1: GroupId = GroupId(1);
     const G2: GroupId = GroupId(2);
@@ -1198,6 +1215,7 @@ mod tests {
         let events = c.take_events();
         assert!(events.contains(&Event::Ended(Outcome::Aborted)), "{events:?}");
         // An abort that finds it committed, and one whose answer is lost.
+        // The lost one goes again at the next tick.
         for (answer, want) in [
             (Ok(Reply::Record(rec(TxnStatus::Committed, 7))), Outcome::Committed(ts(7))),
             (Err(RangeError::Timeout), Outcome::Aborted),
@@ -1214,6 +1232,8 @@ mod tests {
                 }
                 _ => ok_for(r, &record),
             });
+            c.tick(&Two, Nanos::ZERO, WALL);
+            answer_all(&mut c, |r| ok_for(r, &record));
             assert!(c.take_events().contains(&Event::Ended(want)));
         }
         // Resolutions that fail are sent again at the next tick, up to their limit.
@@ -1575,5 +1595,63 @@ mod tests {
         let mut c = coord().with_part_bytes(100);
         c.write_and_commit(&Two, vec![big(b"a1"), big(b"a2")], ts(9));
         assert!(matches!(c.take_requests()[..], [Request { op: TxnOp::OnePhase { .. }, .. }]));
+    }
+
+    /// The `Begin` and the intents of a transaction lose their answers (their node went down) and
+    /// its abort finds no leader. The intents may be in the range, and the record, if a push
+    /// created it, has none of their intervals: only the abort gives them to it, and the reaper
+    /// resolves no more than those (seed 790 of the simulator's `search`, plan `heavy`: an intent
+    /// no one resolved held back every search for the rest of the run). The abort goes again at
+    /// the next ticks until a range answers it, and the transaction ends then.
+    #[test]
+    fn an_abort_without_an_answer_goes_again_until_the_record_has_its_intervals() {
+        let mut c = coord();
+        c.write(&Two, vec![(b"a".to_vec(), put())]).unwrap();
+        answer_all(&mut c, |_| Err(RangeError::Unavailable));
+        c.abort();
+        let mut aborts = Vec::new();
+        for answer in [Err(RangeError::NotLeader { hint: NodeId(0) }), Err(RangeError::Timeout)] {
+            answer_all(&mut c, |r| {
+                if let TxnOp::EndTxn { op: RecordOp::Abort { spans, .. }, .. } = &r.op {
+                    aborts.push(spans.clone());
+                }
+                answer.clone()
+            });
+            let events = c.take_events();
+            assert!(
+                !events.iter().any(|e| matches!(e, Event::Ended(_))),
+                "not ended while the abort has no answer: {events:?}"
+            );
+            c.tick(&Two, Nanos::ZERO, WALL);
+        }
+        let record = rec(TxnStatus::Pending, 0);
+        answer_all(&mut c, |r| {
+            if let TxnOp::EndTxn { op: RecordOp::Abort { spans, .. }, .. } = &r.op {
+                aborts.push(spans.clone());
+            }
+            ok_for(r, &record)
+        });
+        let want = vec![(b"a".to_vec(), b"a\0".to_vec())];
+        assert_eq!(aborts, vec![want.clone(), want.clone(), want]);
+        let events = c.take_events();
+        assert!(events.contains(&Event::Ended(Outcome::Aborted)), "{events:?}");
+        assert!(events.contains(&Event::Resolved), "{events:?}");
+        // A range that never answers: the abort gives up after as many attempts as a resolution.
+        let mut c = coord();
+        c.write(&Two, vec![(b"a".to_vec(), put())]).unwrap();
+        answer_all(&mut c, |_| Err(RangeError::Unavailable));
+        c.abort();
+        let mut sent = 0;
+        for _ in 0..MAX_RESOLVE_ATTEMPTS + 2 {
+            answer_all(&mut c, |r| {
+                if matches!(r.op, TxnOp::EndTxn { op: RecordOp::Abort { .. }, .. }) {
+                    sent += 1;
+                }
+                Err(RangeError::Timeout)
+            });
+            c.tick(&Two, Nanos::ZERO, WALL);
+        }
+        assert_eq!(sent, MAX_RESOLVE_ATTEMPTS);
+        assert!(c.take_events().contains(&Event::Ended(Outcome::Aborted)));
     }
 }

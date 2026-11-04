@@ -56,3 +56,16 @@ fn a_restart_from_an_older_snapshot_answers_the_committed_documents() {
         assert_eq!(r.verdict, Verdict::Pass, "{workload} seed 3541");
     }
 }
+
+/// Seed 790 of the `heavy` plan (`search` and `vector`): the first transaction lost the answers of
+/// its `Begin` and its intents and its abort found no leader. The coordinator gave up on the abort,
+/// so the record, which pushes kept pending, never learnt the intervals of the intent it had
+/// written; the reaper aborted it without resolving the intent, and every search waited below it
+/// for the rest of the run. The abort goes again until a range answers it.
+#[test]
+fn an_abort_without_an_answer_goes_again_and_every_search_answers() {
+    for workload in ["search", "vector"] {
+        let r = run_seed(&cfg(workload, FaultPlan::Heavy), 790);
+        assert_eq!(r.verdict, Verdict::Pass, "{workload} seed 790");
+    }
+}
