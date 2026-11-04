@@ -58,6 +58,9 @@ aws s3 cp "dist/downloads/v$VERSION" "$BUCKET/v$VERSION" --recursive --cache-con
 sed "s#https://downloads.teseladb.com#https://$HOST#" dist/downloads/install.sh >dist/downloads/install.stage.sh
 aws s3 cp dist/downloads/install.stage.sh "$BUCKET/install.sh" --content-type "text/x-shellscript; charset=utf-8" --cache-control "public, max-age=300"
 aws s3 cp dist/downloads/latest.txt "$BUCKET/latest.txt" --content-type "text/plain; charset=utf-8" --cache-control "public, max-age=300"
+for file in LICENSE COMMERCIAL.md; do
+  aws s3 cp "dist/downloads/$file" "$BUCKET/$file" --content-type "text/plain; charset=utf-8" --cache-control "public, max-age=300"
+done
 
 step "push the image of each architecture"
 printf '%s' "$DOCKERHUB_TOKEN" | docker login --username "$DOCKERHUB_USER" --password-stdin
@@ -66,6 +69,7 @@ for pair in amd64=x86_64-unknown-linux-gnu arm64=aarch64-unknown-linux-gnu; do
   triple=${pair#*=}
   mkdir -p "dist/image/$arch/data"
   install -m 0755 "target-release/$triple/dist/teseladb" "dist/image/$arch/teseladb"
+  cp LICENSE COMMERCIAL.md "dist/image/$arch/"
   DOCKER_BUILDKIT=0 docker build --platform "linux/$arch" -f docker/release.Dockerfile -t "$IMAGE:$VERSION-$arch" "dist/image/$arch"
   docker push "$IMAGE:$VERSION-$arch"
 done

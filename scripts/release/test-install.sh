@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Runs install.sh against a release served over HTTP on localhost, as users run it against the downloads host: it must
-# pick this machine's archive, install the binary, and stop without installing anything when the SHA-256 does not match.
+# Packs a release with package.sh and runs install.sh against it, served over HTTP on localhost as users run it against
+# the downloads host: each archive must carry the license, and install.sh must pick this machine's archive, install the
+# binary, and stop without installing anything when the SHA-256 does not match.
 #   scripts/release/test-install.sh <teseladb binary built for this machine> <version>
 set -euo pipefail
 
@@ -26,11 +27,15 @@ cleanup() {
 trap cleanup EXIT
 
 archive="teseladb-$VERSION-$PLATFORM.tar.gz"
-mkdir -p "$WORK/site/v$VERSION" "$WORK/pack"
-cp "$BINARY" "$WORK/pack/teseladb"
-tar -czf "$WORK/site/v$VERSION/$archive" -C "$WORK/pack" teseladb
-(cd "$WORK/site/v$VERSION" && { sha256sum "$archive" 2>/dev/null || shasum -a 256 "$archive"; } >"$archive.sha256")
-echo "$VERSION" >"$WORK/site/latest.txt"
+# The release as package.sh packs it, with this machine's binary standing in for every platform.
+for triple in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu aarch64-apple-darwin; do
+  mkdir -p "$WORK/target/$triple/dist"
+  cp "$BINARY" "$WORK/target/$triple/dist/teseladb"
+done
+"$HERE/package.sh" "$VERSION" "$WORK/target" "$WORK/site" >/dev/null
+# Every archive carries the license next to the binary (LICENSE and COMMERCIAL.md).
+[[ $(tar -tzf "$WORK/site/v$VERSION/$archive" | sort | tr '\n' ' ') == "COMMERCIAL.md LICENSE teseladb " ]] ||
+  { echo "test-install: $archive does not hold the binary and the license" >&2; exit 1; }
 PORT=$((38000 + RANDOM % 1000))
 (cd "$WORK/site" && exec python3 -m http.server "$PORT" --bind 127.0.0.1 >/dev/null 2>&1) &
 SERVER=$!

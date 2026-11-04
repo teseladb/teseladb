@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Packs the release binaries the workflow cross-compiled: one teseladb-<version>-<platform>.tar.gz per platform, with the
-# binary at its root, and its .sha256 in the format of sha256sum. Also writes latest.txt and the install script.
+# binary, LICENSE and COMMERCIAL.md at its root, and its .sha256 in the format of sha256sum. Also writes latest.txt, the
+# install script and the license files at the root of the downloads.
 #   scripts/release/package.sh <version> <target dir> <out dir>
 # <target dir> is the CARGO_TARGET_DIR of the build, with <triple>/dist/teseladb for each triple below.
 set -euo pipefail
@@ -13,6 +14,7 @@ VERSION=${1#v}
 TARGET_DIR=$2
 OUT=$3
 HERE=$(cd "$(dirname "$0")" && pwd)
+ROOT=$(cd "$HERE/../.." && pwd)
 
 # platform name of the downloads = Rust triple of the build
 PLATFORMS=(
@@ -34,10 +36,12 @@ for entry in "${PLATFORMS[@]}"; do
   archive="teseladb-$VERSION-$platform.tar.gz"
   stage=$(mktemp -d)
   cp "$binary" "$stage/teseladb"
-  tar -czf "$OUT/v$VERSION/$archive" -C "$stage" teseladb
+  cp "$ROOT/LICENSE" "$ROOT/COMMERCIAL.md" "$stage/"
+  tar -czf "$OUT/v$VERSION/$archive" -C "$stage" teseladb LICENSE COMMERCIAL.md
   rm -rf "$stage"
   (cd "$OUT/v$VERSION" && sha256 "$archive" >"$archive.sha256")
   echo "packed $archive"
 done
 echo "$VERSION" >"$OUT/latest.txt"
 cp "$HERE/install.sh" "$OUT/install.sh"
+cp "$ROOT/LICENSE" "$ROOT/COMMERCIAL.md" "$OUT/"
