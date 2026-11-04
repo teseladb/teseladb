@@ -2287,7 +2287,7 @@ mod tests {
         {
             l.on_peer(
                 NodeId(1),
-                PeerMsg::Forward { req, deadline_ms: 100, body: Bytes::from_vec(body) },
+                PeerMsg::Forward { req, deadline_ms: 100, hlc: None, body: Bytes::from_vec(body) },
                 now,
             );
             let mut out = Vec::new();
@@ -2904,13 +2904,13 @@ mod tests {
         assert_eq!(l.next_deadline(), None);
         l.peer_unreachable(NodeId(2));
         // A forwarded request gets an empty answer.
-        let fwd = PeerMsg::Forward { req: 3, deadline_ms: 100, body: Bytes::new() };
+        let fwd = PeerMsg::Forward { req: 3, deadline_ms: 100, hlc: None, body: Bytes::new() };
         l.on_peer(NodeId(2), fwd, now);
         let mut out = Vec::new();
         l.take_outbound(&mut out);
         assert!(
             out.iter().any(|(to, m)| *to == NodeId(2)
-                && matches!(m, PeerMsg::ForwardResp { req: 3, body } if body.is_empty())),
+                && matches!(m, PeerMsg::ForwardResp { req: 3, body, .. } if body.is_empty())),
             "{out:?}"
         );
     }
@@ -3004,7 +3004,8 @@ mod tests {
         other.peer_addr = b"127.0.0.1:6666".to_vec();
         let cmd =
             Request::Group0(Group0Command::SetNodeAddrs { node: NodeId(3), addrs: other }).encode();
-        let fwd = PeerMsg::Forward { req: 1, deadline_ms: 100, body: Bytes::from_vec(cmd) };
+        let fwd =
+            PeerMsg::Forward { req: 1, deadline_ms: 100, hlc: None, body: Bytes::from_vec(cmd) };
         c.deliver(NodeId(1), fwd, NodeId(2));
         for _ in 0..50 {
             c.step();

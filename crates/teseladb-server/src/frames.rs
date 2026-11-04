@@ -50,10 +50,10 @@ pub fn to_wire(f: PeerFrame) -> PeerMsg {
         PeerFrame::SnapshotAck { group, index, offset, ok } => {
             PeerMsg::SnapshotAck { group: group.0, index, offset, ok }
         }
-        PeerFrame::Forward { req, deadline_ms, body } => {
-            PeerMsg::Forward { req, deadline_ms, body }
+        PeerFrame::Forward { req, deadline_ms, hlc, body } => {
+            PeerMsg::Forward { req, deadline_ms, hlc, body }
         }
-        PeerFrame::ForwardResp { req, body } => PeerMsg::ForwardResp { req, body },
+        PeerFrame::ForwardResp { req, hlc, body } => PeerMsg::ForwardResp { req, hlc, body },
     }
 }
 
@@ -102,10 +102,10 @@ pub fn from_wire(m: PeerMsg) -> Option<PeerFrame> {
         PeerMsg::SnapshotAck { group, index, offset, ok } => {
             PeerFrame::SnapshotAck { group: GroupId(group), index, offset, ok }
         }
-        PeerMsg::Forward { req, deadline_ms, body } => {
-            PeerFrame::Forward { req, deadline_ms, body }
+        PeerMsg::Forward { req, deadline_ms, hlc, body } => {
+            PeerFrame::Forward { req, deadline_ms, hlc, body }
         }
-        PeerMsg::ForwardResp { req, body } => PeerFrame::ForwardResp { req, body },
+        PeerMsg::ForwardResp { req, hlc, body } => PeerFrame::ForwardResp { req, hlc, body },
         _ => return None,
     })
 }
@@ -114,6 +114,7 @@ pub fn from_wire(m: PeerMsg) -> Option<PeerFrame> {
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
+    use teseladb_hlc::Hlc;
     use teseladb_types::Bytes;
 
     fn frames() -> Vec<PeerFrame> {
@@ -149,8 +150,19 @@ mod tests {
                 data: Bytes::from(vec![1, 2, 3]),
             }),
             PeerFrame::SnapshotAck { group: g, index: 9, offset: 3, ok: false },
-            PeerFrame::Forward { req: 5, deadline_ms: 100, body: Bytes::from(vec![8]) },
-            PeerFrame::ForwardResp { req: 5, body: Bytes::new() },
+            PeerFrame::Forward { req: 5, deadline_ms: 100, hlc: None, body: Bytes::from(vec![8]) },
+            PeerFrame::ForwardResp { req: 5, hlc: None, body: Bytes::new() },
+            PeerFrame::Forward {
+                req: 6,
+                deadline_ms: 100,
+                hlc: Some(Hlc { physical: 1_793_817_549_000, logical: 7 }),
+                body: Bytes::from(vec![8]),
+            },
+            PeerFrame::ForwardResp {
+                req: 6,
+                hlc: Some(Hlc { physical: 1_793_817_549_001, logical: 0 }),
+                body: Bytes::new(),
+            },
         ]
     }
 

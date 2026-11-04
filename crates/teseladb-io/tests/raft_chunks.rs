@@ -257,8 +257,8 @@ fn body(len: usize) -> Bytes {
 fn a_forward_larger_than_a_frame_travels_in_pieces_to_a_node_that_reads_them() {
     let big = 18 << 20;
     let msgs = [
-        PeerMsg::ForwardResp { req: 7, body: body(big) },
-        PeerMsg::Forward { req: 8, deadline_ms: 5_000, body: body(big) },
+        PeerMsg::ForwardResp { req: 7, hlc: None, body: body(big) },
+        PeerMsg::Forward { req: 8, deadline_ms: 5_000, hlc: None, body: body(big) },
     ];
     for msg in msgs {
         let mut out = Vec::new();
@@ -273,12 +273,12 @@ fn a_forward_larger_than_a_frame_travels_in_pieces_to_a_node_that_reads_them() {
         assert!(matches!(refused, Err(FrameError::TooLarge { .. })) && old.is_empty());
     }
     // Below a frame, one frame as always.
-    let small = PeerMsg::ForwardResp { req: 9, body: body(1 << 20) };
+    let small = PeerMsg::ForwardResp { req: 9, hlc: None, body: body(1 << 20) };
     let mut out = Vec::new();
     encode_frame_for(&small, false, CHUNKED_FORWARD_VERSION, &mut out).unwrap();
     assert_eq!(out, encode(&small));
     // Above what pieces carry, nothing is written.
-    let huge = PeerMsg::ForwardResp { req: 10, body: body(MAX_CHUNKED_LEN) };
+    let huge = PeerMsg::ForwardResp { req: 10, hlc: None, body: body(MAX_CHUNKED_LEN) };
     let mut out = Vec::new();
     let r = encode_frame_for(&huge, false, CHUNKED_FORWARD_VERSION, &mut out);
     assert!(matches!(r, Err(FrameError::TooLarge { .. })) && out.is_empty());
@@ -293,7 +293,7 @@ fn a_forward_larger_than_a_frame_travels_in_pieces_to_a_node_that_reads_them() {
 /// are refused.
 #[test]
 fn broken_forward_pieces_are_rejected() {
-    let msg = PeerMsg::ForwardResp { req: 3, body: body(100) };
+    let msg = PeerMsg::ForwardResp { req: 3, hlc: None, body: body(100) };
     let mut payload = vec![0x31];
     payload.extend_from_slice(&encode(&msg)[HEADER_LEN..]);
     let total = payload.len() as u64;

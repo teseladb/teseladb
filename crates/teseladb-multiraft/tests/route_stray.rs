@@ -70,8 +70,8 @@ fn frames_every_core_takes_never_stray() {
     let frames = [
         PeerFrame::Heartbeats { wall_ms: 1, hlc: HLC, beats: vec![] },
         PeerFrame::HeartbeatResps { wall_ms: 1, hlc: HLC, resps: vec![] },
-        PeerFrame::Forward { req: 1, deadline_ms: 10, body: Bytes::from_vec(vec![1]) },
-        PeerFrame::ForwardResp { req: 1, body: Bytes::from_vec(vec![2]) },
+        PeerFrame::Forward { req: 1, deadline_ms: 10, hlc: None, body: Bytes::from_vec(vec![1]) },
+        PeerFrame::ForwardResp { req: 1, hlc: None, body: Bytes::from_vec(vec![2]) },
     ];
     for f in frames {
         assert!(route_stray(f, holder).is_empty());

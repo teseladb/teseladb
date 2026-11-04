@@ -6,6 +6,7 @@ use teseladb_io::peer::{
     HEADER_LEN, Hello, JoinAccepted, MAX_FRAME_LEN, PROTOCOL_VERSION, PeerMsg, RAFT_CHUNK_KIND,
     Versions, decode_frame, encode_frame,
 };
+use teseladb_keys::Hlc;
 use teseladb_raft::{Entry, EntryKind, Message, MessageType};
 use teseladb_types::{Bytes, GroupId, NodeId};
 
@@ -93,8 +94,19 @@ fn all() -> Vec<PeerMsg> {
             data: Bytes::new(),
         },
         PeerMsg::SnapshotAck { group: 5, index: 100, offset: 3, ok: true },
-        PeerMsg::Forward { req: 1, deadline_ms: 5000, body: Bytes::from("request") },
-        PeerMsg::ForwardResp { req: 1, body: Bytes::from("response") },
+        PeerMsg::Forward { req: 1, deadline_ms: 5000, hlc: None, body: Bytes::from("request") },
+        PeerMsg::ForwardResp { req: 1, hlc: None, body: Bytes::from("response") },
+        PeerMsg::Forward {
+            req: 2,
+            deadline_ms: 5000,
+            hlc: Some(Hlc { physical: 1_800_000_000_400, logical: 9 }),
+            body: Bytes::from("request"),
+        },
+        PeerMsg::ForwardResp {
+            req: 2,
+            hlc: Some(Hlc { physical: 1_800_000_000_401, logical: 0 }),
+            body: Bytes::from("response"),
+        },
         PeerMsg::ProxyOpen {
             stream: 9,
             route: 4,
@@ -171,7 +183,7 @@ fn every_kind_round_trips() {
         assert_eq!(decode_frame(&f), Ok(Some((m.clone(), f.len()))), "{m:?}");
         kinds.insert(m.kind());
     }
-    assert_eq!(kinds.len(), 22);
+    assert_eq!(kinds.len(), 24);
     // A `RaftBatch` that does not fit a frame of 1 MiB travels in `RaftChunk` pieces (005 FR-023).
     kinds.insert(RAFT_CHUNK_KIND);
     // Every other kind is rejected as unknown: the decoder knows exactly these.
@@ -275,7 +287,7 @@ fn length_limits() {
 fn unknown_kinds_and_flags() {
     // Unknown: rejected as soon as the kind byte arrives.
     for kind in [
-        0x00u8, 0x05, 0x0f, 0x10, 0x18, 0x19, 0x1b, 0x22, 0x35, 0x43, 0x4a, 0x60, 0x63, 0x66, 0x7e,
+        0x00u8, 0x05, 0x0f, 0x10, 0x18, 0x19, 0x1b, 0x22, 0x37, 0x43, 0x4a, 0x60, 0x63, 0x66, 0x7e,
         0x80, 0xff,
     ] {
         assert_eq!(

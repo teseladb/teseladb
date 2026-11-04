@@ -175,8 +175,8 @@ fn every_frame_crosses_the_simulated_network_unchanged() {
         },
         PeerFrame::SnapshotChunk(split(GroupId(3), 9, 2, b"state")[0].clone()),
         PeerFrame::SnapshotAck { group: GroupId(3), index: 9, offset: 5, ok: true },
-        PeerFrame::Forward { req: 77, deadline_ms: 500, body: Bytes::from("q") },
-        PeerFrame::ForwardResp { req: 77, body: Bytes::from("a") },
+        PeerFrame::Forward { req: 77, deadline_ms: 500, hlc: None, body: Bytes::from("q") },
+        PeerFrame::ForwardResp { req: 77, hlc: None, body: Bytes::from("a") },
     ];
     for f in all {
         assert_eq!(decode_frame(&encode_frame(&f)), f);

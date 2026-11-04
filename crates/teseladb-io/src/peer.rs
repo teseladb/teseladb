@@ -25,13 +25,17 @@ pub const HEADER_LEN: usize = 8;
 pub(crate) const LEN_COVERED: usize = 4;
 /// Handshake marker.
 pub const MAGIC: &[u8; 8] = b"TSLPEER1";
-/// The highest protocol version this binary speaks: 6 since a `Forward` or `ForwardResp` larger
-/// than a frame goes in pieces ([`encode_frame_for`]). 5 since a forwarded request asks a node
+/// The highest protocol version this binary speaks: 7 since a `Forward` or `ForwardResp` carries
+/// its sender's HLC (005 FR-003). 6 since a `Forward` or `ForwardResp` larger than a frame goes in
+/// pieces ([`encode_frame_for`]). 5 since a forwarded request asks a node
 /// whether it applies the cluster's write gates (007 FR-029). 4 since a heartbeat carries its
 /// range's closed mark (007 FR-012).
-pub const PROTOCOL_VERSION: u16 = 6;
+pub const PROTOCOL_VERSION: u16 = 7;
 /// The first protocol version whose nodes read a forwarded request or answer in pieces.
 pub const CHUNKED_FORWARD_VERSION: u16 = 6;
+/// The first protocol version whose nodes read a forwarded request or answer with its sender's
+/// HLC (`0x35` and `0x36`).
+pub const CLOCKED_FORWARD_VERSION: u16 = 7;
 /// The lowest protocol version this binary speaks: a node that does not know a forwarded request
 /// of 5 answers it with nothing, and the asker counts it as down (007 FR-027).
 pub const PROTOCOL_MIN: u16 = 4;
@@ -267,19 +271,24 @@ pub enum PeerMsg {
         /// Correct.
         ok: bool,
     },
-    /// `0x30`: client request forwarded to the leader's node and core.
+    /// `0x30`: client request forwarded to the leader's node and core; `0x35` with its sender's
+    /// HLC, which moves the receiver's clock past it (005 FR-003, protocol 7).
     Forward {
         /// Request.
         req: u64,
         /// Deadline.
         deadline_ms: u32,
+        /// Sender's HLC (`None` from a node of protocol 6 or older).
+        hlc: Option<Hlc>,
         /// Encoded request.
         body: Bytes,
     },
-    /// `0x31`.
+    /// `0x31`; `0x36` with its sender's HLC.
     ForwardResp {
         /// Request.
         req: u64,
+        /// Sender's HLC (`None` from a node of protocol 6 or older).
+        hlc: Option<Hlc>,
         /// Encoded response.
         body: Bytes,
     },
@@ -401,8 +410,10 @@ impl PeerMsg {
             PeerMsg::HeartbeatResps { .. } => 0x04,
             PeerMsg::SnapshotChunk { .. } => 0x20,
             PeerMsg::SnapshotAck { .. } => 0x21,
-            PeerMsg::Forward { .. } => 0x30,
-            PeerMsg::ForwardResp { .. } => 0x31,
+            PeerMsg::Forward { hlc: None, .. } => 0x30,
+            PeerMsg::ForwardResp { hlc: None, .. } => 0x31,
+            PeerMsg::Forward { hlc: Some(_), .. } => 0x35,
+            PeerMsg::ForwardResp { hlc: Some(_), .. } => 0x36,
             PeerMsg::ProxyOpen { .. } => 0x32,
             PeerMsg::ProxyData { .. } => 0x33,
             PeerMsg::ProxyClose { .. } => 0x34,
@@ -458,11 +469,19 @@ impl PeerMsg {
             PeerMsg::SnapshotAck { group, index, offset, ok } => {
                 e.u64(*group).u64(*index).u64(*offset).bool(*ok);
             }
-            PeerMsg::Forward { req, deadline_ms, body } => {
-                e.u64(*req).u32(*deadline_ms).bytes(body);
+            PeerMsg::Forward { req, deadline_ms, hlc, body } => {
+                e.u64(*req).u32(*deadline_ms);
+                if let Some(h) = hlc {
+                    e.u64(h.physical).u32(h.logical);
+                }
+                e.bytes(body);
             }
-            PeerMsg::ForwardResp { req, body } => {
-                e.u64(*req).bytes(body);
+            PeerMsg::ForwardResp { req, hlc, body } => {
+                e.u64(*req);
+                if let Some(h) = hlc {
+                    e.u64(h.physical).u32(h.logical);
+                }
+                e.bytes(body);
             }
             PeerMsg::ProxyOpen { stream, route, proto, principal, data } => {
                 e.u64(*stream).u64(*route).u8(*proto).bytes(principal).bytes(data);
@@ -603,14 +622,17 @@ impl PeerMsg {
                 offset: d.u64()?,
                 ok: d.bool()?,
             },
-            0x30 => PeerMsg::Forward {
+            0x30 | 0x35 => PeerMsg::Forward {
                 req: d.u64()?,
                 deadline_ms: d.u32()?,
+                hlc: if kind == 0x35 { Some(decode_hlc(d)?) } else { None },
                 body: Bytes::copy_from_slice(d.bytes()?),
             },
-            0x31 => {
-                PeerMsg::ForwardResp { req: d.u64()?, body: Bytes::copy_from_slice(d.bytes()?) }
-            }
+            0x31 | 0x36 => PeerMsg::ForwardResp {
+                req: d.u64()?,
+                hlc: if kind == 0x36 { Some(decode_hlc(d)?) } else { None },
+                body: Bytes::copy_from_slice(d.bytes()?),
+            },
             0x32 => PeerMsg::ProxyOpen {
                 stream: d.u64()?,
                 route: d.u64()?,
@@ -721,7 +743,7 @@ fn known_kind(kind: u8) -> bool {
             | RAFT_CHUNK_KIND
             | 0x20
             | 0x21
-            | 0x30..=0x34
+            | 0x30..=0x36
             | 0x40
             | 0x41
             | 0x42
@@ -804,6 +826,13 @@ pub fn encode_frame_for(
     out: &mut Vec<u8>,
 ) -> Result<(), FrameError> {
     let forward = matches!(msg, PeerMsg::Forward { .. } | PeerMsg::ForwardResp { .. });
+    let bare;
+    let msg = if version < CLOCKED_FORWARD_VERSION {
+        bare = without_clock(msg);
+        bare.as_ref().unwrap_or(msg)
+    } else {
+        msg
+    };
     match encode_frame(msg, compress, out) {
         Err(FrameError::TooLarge { .. }) if forward && version >= CHUNKED_FORWARD_VERSION => {
             let mut e = Encoder::new();
@@ -811,6 +840,23 @@ pub fn encode_frame_for(
             chunk::encode_forward(msg.kind(), &e.finish(), out)
         }
         r => r,
+    }
+}
+
+/// `msg` without its sender's HLC, for a node of a protocol that does not read it (`None`: `msg` has
+/// none).
+fn without_clock(msg: &PeerMsg) -> Option<PeerMsg> {
+    match msg {
+        PeerMsg::Forward { req, deadline_ms, hlc: Some(_), body } => Some(PeerMsg::Forward {
+            req: *req,
+            deadline_ms: *deadline_ms,
+            hlc: None,
+            body: body.clone(),
+        }),
+        PeerMsg::ForwardResp { req, hlc: Some(_), body } => {
+            Some(PeerMsg::ForwardResp { req: *req, hlc: None, body: body.clone() })
+        }
+        _ => None,
     }
 }
 

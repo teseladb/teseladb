@@ -1410,7 +1410,7 @@ mod tests {
             .send
             .into_iter()
             .filter_map(|(_, f)| match f {
-                PeerFrame::ForwardResp { req, body } => Some((req, body.to_vec())),
+                PeerFrame::ForwardResp { req, body, .. } => Some((req, body.to_vec())),
                 _ => None,
             })
             .collect()
