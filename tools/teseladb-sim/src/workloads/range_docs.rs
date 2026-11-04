@@ -122,6 +122,9 @@ pub struct RetryStats {
     pub retried: u64,
     /// Attempts sent for them (one per retry, plus those that followed a `NotLeader`).
     pub sent: u64,
+    /// Retries still waiting for their turn when the run ended: a write lost near the end has
+    /// none sent.
+    pub unsent: u64,
     /// Retried writes that got a definite answer (applied, or failed on their expected value),
     /// which closed their history op.
     pub definite: u64,
@@ -1319,6 +1322,9 @@ impl Workload for RangeDocsWorkload {
     }
 
     fn finish(&mut self, w: &mut World) -> Result<(), Violation> {
+        let mut stats = self.stats.get();
+        stats.unsent = self.retries.len() as u64;
+        self.stats.set(stats);
         if let Some(v) = self.mvcc.take() {
             return Err(v);
         }
