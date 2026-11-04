@@ -213,3 +213,44 @@ fn fsync_compact_and_shutdown_check_their_fields() {
     let want = "shutdown may only be run against the admin database.";
     assert_eq!(err(&r), (Some(&Value::Int32(13)), Some(&Value::from(want))));
 }
+
+/// `serverStatus` shows in `defaultRWConcern` what `getDefaultRWConcern` answers, the time of the
+/// last change included (a `refrouter` 9.0.4, measured by the battery's `admin-status` on 04-11-2026).
+#[test]
+fn server_status_shows_the_defaults_set() {
+    let mut m = Mem::new();
+    let status = |m: &mut Mem| match m
+        .run("admin", doc(&[("serverStatus", Value::Int32(1))]))
+        .get("defaultRWConcern")
+    {
+        Some(Value::Document(d)) => d.clone(),
+        other => panic!("defaultRWConcern: {other:?}"),
+    };
+    let before = status(&mut m);
+    assert_eq!(before.get("updateOpTime"), None);
+    assert_eq!(before.get("defaultReadConcernSource"), Some(&Value::from("implicit")));
+    let majority = Document::new().with("level", "majority");
+    m.run("admin", set().with("defaultReadConcern", majority.clone()));
+    let after = status(&mut m);
+    let shown = m.run("admin", get());
+    assert_eq!(sub(&after, "defaultReadConcern"), &majority);
+    assert_eq!(after.get("defaultReadConcernSource"), Some(&Value::from("global")));
+    assert!(matches!(after.get("updateOpTime"), Some(Value::Timestamp { .. })));
+    assert_eq!(after.get("updateOpTime"), shown.get("updateOpTime"));
+    assert_eq!(after.get("updateWallClockTime"), shown.get("updateWallClockTime"));
+    assert!(matches!(after.get("updateWallClockTime"), Some(Value::DateTime(_))));
+    assert_eq!(after.get("ok"), None);
+    let order: Vec<&str> = after.iter().map(|(k, _)| k).collect();
+    assert_eq!(
+        order,
+        [
+            "defaultReadConcern",
+            "defaultWriteConcern",
+            "updateOpTime",
+            "updateWallClockTime",
+            "defaultWriteConcernSource",
+            "defaultReadConcernSource",
+            "localUpdateWallClockTime"
+        ]
+    );
+}

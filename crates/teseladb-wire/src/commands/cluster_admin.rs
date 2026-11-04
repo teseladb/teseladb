@@ -91,6 +91,16 @@ pub fn current<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Defaults, Co
     Ok(fresh)
 }
 
+/// `serverStatus`'s `defaultRWConcern`: what `getDefaultRWConcern` answers, without `ok`.
+pub fn server_status_section<B: Backend + ?Sized>(
+    backend: &mut B,
+) -> Result<Document, CommandError> {
+    let now = backend.now_ms();
+    let mut d = shown(stored(backend)?.as_ref(), now, false);
+    d.remove("ok");
+    Ok(d)
+}
+
 /// The reply of both commands: the defaults over the implicit ones.
 fn shown(stored: Option<&Document>, now_ms: u64, in_memory: bool) -> Document {
     let rc = stored.and_then(|d| d.get(DEFAULT_READ_CONCERN)).cloned();

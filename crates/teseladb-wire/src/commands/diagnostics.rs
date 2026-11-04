@@ -348,7 +348,6 @@ pub fn server_status<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Docume
         (g.counters, super::txn_stats::status(&g), g.sessions.len(), g.cursors.len())
     };
     let count = |n: usize| i64::try_from(n).unwrap_or(i64::MAX);
-    let now = i64::try_from(facts.now_ms).unwrap_or(i64::MAX);
     let started = i64::try_from(facts.start_ms).unwrap_or(i64::MAX);
     let uptime_ms = facts.now_ms.saturating_sub(facts.start_ms);
     let mut d = Document::new()
@@ -364,7 +363,7 @@ pub fn server_status<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Docume
     let sections = [
         ("asserts", asserts(&counters)),
         ("connections", connections(&facts.connections)),
-        ("defaultRWConcern", default_rw_concern(now)),
+        ("defaultRWConcern", super::cluster_admin::server_status_section(ctx.backend)?),
         ("extra_info", extra_info(&facts.resources)),
         (
             "health",
@@ -396,17 +395,6 @@ pub fn server_status<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Docume
 /// Whether the node runs with `enableTestCommands` (`configureFailPoint` is one of its commands).
 fn self_tests(shared: &super::Shared) -> bool {
     lock(shared).failpoint.is_some()
-}
-
-/// `defaultRWConcern`: the defaults TeselaDB applies when no `setDefaultRWConcern` set others
-/// (007), read as of `now`.
-fn default_rw_concern(now: i64) -> Document {
-    Document::new()
-        .with("defaultReadConcern", Document::new().with("level", "local"))
-        .with("defaultWriteConcern", Document::new().with("w", "majority").with("wtimeout", 0))
-        .with("defaultWriteConcernSource", "implicit")
-        .with("defaultReadConcernSource", "implicit")
-        .with("localUpdateWallClockTime", Value::DateTime(now))
 }
 
 /// `security`: the authentications, then the client port's certificate when it has TLS (measured
