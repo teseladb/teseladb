@@ -2,9 +2,10 @@
 //! compare-and-swap), `lsm` (each core's log with its LSM, 004), `lsm-ingest` (an ingestion under sustained writes, 004) and `range-docs` (replicated
 //! document ranges, 005), `multirange`, `splits`, `relocate` and `meta2` (007) and `txn-bank` and `txn-append` (transactions
 //! across two ranges, 008), `indexes` (documents and their index entries in two ranges, 009),
-//! `special-collections` (a capped collection, 015) and `search` (search indexes over splitting
-//! ranges, 011).
+//! `special-collections` (a capped collection, 015), `search` (search indexes over splitting
+//! ranges, 011) and `authz-fence` (the authorization fence over Group 0, 013).
 
+pub mod authz_fence;
 pub mod changestream;
 pub mod data_ship;
 pub mod indexes;

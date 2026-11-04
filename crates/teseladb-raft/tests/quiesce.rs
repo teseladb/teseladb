@@ -251,3 +251,45 @@ fn committed_entries_not_yet_applied_keep_the_leader_awake() {
     }
     assert!(net.nodes[&l].raw.is_quiesced());
 }
+
+/// The authorization fence (013 FR-012, D-073) asks the leader for a round and reads back when the
+/// latest round a majority acknowledged left: a quiet leader wakes up to send it, a leader cut off
+/// never sees it acknowledged, and a follower has none.
+#[test]
+fn a_confirm_round_tells_when_a_majority_last_heard_the_leader() {
+    let (mut net, l) = group(3);
+    let f = (1..=3).map(id).find(|n| *n != l).unwrap();
+    assert_eq!(net.nodes[&f].raw.quorum_heard_at(), None, "a follower");
+    let now = net.now;
+    let node = net.nodes.get_mut(&f).unwrap();
+    node.raw.send_confirm_round(&node.store, now);
+    assert!(node.raw.quorum_heard_at().is_none(), "a follower sends nothing");
+    for _ in 0..QUIET_AFTER + 10 {
+        counted_tick(&mut net);
+    }
+    assert!(net.nodes[&l].raw.is_quiesced());
+    let before = net.nodes[&l].raw.quorum_heard_at().expect("rounds before it went quiet");
+    let asked = net.now;
+    assert!(before < asked);
+    // A round between two ticks leaves at the time it is given.
+    let now = asked + teseladb_types::Nanos::from_millis(3);
+    let node = net.nodes.get_mut(&l).unwrap();
+    node.raw.send_confirm_round(&node.store, now);
+    assert!(!net.nodes[&l].raw.is_quiesced(), "the round woke it");
+    net.process_all();
+    net.deliver();
+    net.process_all();
+    net.deliver();
+    assert_eq!(net.nodes[&l].raw.quorum_heard_at(), Some(now));
+    // While awake, another round on request; cut off, none is acknowledged any more.
+    counted_tick(&mut net);
+    let now = net.now;
+    let node = net.nodes.get_mut(&l).unwrap();
+    node.raw.send_confirm_round(&node.store, now);
+    net.isolate(l);
+    for _ in 0..10 {
+        counted_tick(&mut net);
+    }
+    let heard = net.nodes[&l].raw.quorum_heard_at();
+    assert!(heard.is_some_and(|h| h <= asked + TICK), "{heard:?}");
+}

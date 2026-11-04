@@ -22,6 +22,7 @@ pub mod kmip;
 pub mod ldap;
 pub mod ldap_ber;
 pub mod ldap_filter;
+pub mod lease_driver;
 pub mod oidc;
 pub mod plain;
 pub mod privileges;

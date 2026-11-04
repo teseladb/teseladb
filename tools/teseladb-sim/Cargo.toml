@@ -11,6 +11,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+teseladb-auth = { path = "../../crates/teseladb-auth" }
 teseladb-types = { path = "../../crates/teseladb-types" }
 teseladb-hash = { path = "../../crates/teseladb-hash" }
 teseladb-raftlog = { path = "../../crates/teseladb-raftlog" }

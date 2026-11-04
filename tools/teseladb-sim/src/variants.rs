@@ -45,6 +45,10 @@ macro_rules! variants {
 variants!(
     ("ack_before_fsync", "durability", Default, 1000),
     ("apply_uncommitted", "raft_safety", Default, 1000),
+    // Group 0's leader grants authorization leases, its own included, on its Raft role alone
+    // (013 FR-012, D-073): cut off from the others it keeps authorizing while the rest elect a
+    // leader and commit changes it never applies (`authz-fence`).
+    ("authz_lease_without_quorum", "authz_fence", Default, 1000),
     // A capped insert that evicts only past `max`: the `special-collections` workload's next read
     // finds the collection over `size` with several documents (015 T010).
     ("capped_exceeds_size", "capped", Default, 1000),
@@ -110,10 +114,11 @@ variants!(
     ("no_latch_inc", "durability", Default, 1000),
     // A node that loses a vote and does not start its election timer again: a group can stay
     // without a leader, and `relocate` gets no write answered after the heal (`liveness`, seed
-    // 3). The cursors of `changestream` find it first, at seed 1: none of them emits a change
-    // while transactions commit, a progress failure their own checker reports
-    // (`changestream_delivery`; measured 03-11-2026 on main f3f92e6).
-    ("no_timer_after_lost_vote", "changestream_delivery", Heavy, 1000),
+    // 3). On main f3f92e6 the cursors of `changestream` found it first, at seed 1 (none emitted a
+    // change while transactions committed); since then seed 1 of `changestream` heals in time and
+    // `relocate` at seed 3 is the first (measured 04-11-2026 on main f55d8d7, before the
+    // `authz-fence` workload, and again with it).
+    ("no_timer_after_lost_vote", "liveness", Heavy, 1000),
     // A coordinator that combines one range's partial group twice (010 T026): the `queries`
     // workload's next group differs from the reference evaluator's.
     ("partial_double_count", "queries-oracle", Default, 1000),

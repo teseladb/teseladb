@@ -9,6 +9,7 @@ mod common;
 
 use common::*;
 use teseladb_raft::Role;
+use teseladb_types::GroupId;
 
 /// Longest a majority may take to elect after the cut: a few election timeouts.
 const ELECT_WITHIN_TICKS: u32 = 300;
@@ -58,4 +59,32 @@ fn a_silent_follower_does_not_wake_the_other_quiet_follower() {
     c.ticks(ELECT_WITHIN_TICKS);
     assert!(c.nodes[&f].core.is_quiesced(G), "its leader still answers");
     assert_eq!(c.nodes[&f].core.status(G).unwrap().leader, l);
+}
+
+/// The round the authorization fence asks for (013 FR-012, D-073): a quiet leader wakes up to send
+/// it and reads back when it left once a majority answered; cut off, it never gets there.
+#[test]
+fn a_confirm_round_wakes_a_quiet_leader_and_needs_a_majority() {
+    let mut c = Cluster::new(3);
+    let l = c.elect();
+    c.propose(l, b"a").unwrap();
+    c.ticks(400);
+    assert!(c.nodes[&l].core.is_quiesced(G));
+    let f = c.others(l)[0];
+    assert_eq!(c.nodes[&f].core.quorum_heard_at(G), None, "a follower");
+    assert_eq!(c.nodes[&l].core.quorum_heard_at(GroupId(999)), None, "no such group");
+    let asked = c.now;
+    let now = c.now;
+    c.nodes.get_mut(&l).unwrap().core.send_confirm_round(G, now);
+    c.nodes.get_mut(&f).unwrap().core.send_confirm_round(GroupId(999), now);
+    assert!(!c.nodes[&l].core.is_quiesced(G));
+    c.ticks(3);
+    assert!(c.nodes[&l].core.quorum_heard_at(G).is_some_and(|h| h >= asked));
+    c.isolate(l);
+    c.ticks(1);
+    let cut = c.now;
+    let now = c.now;
+    c.nodes.get_mut(&l).unwrap().core.send_confirm_round(G, now);
+    c.ticks(50);
+    assert!(c.nodes[&l].core.quorum_heard_at(G).is_some_and(|h| h < cut));
 }

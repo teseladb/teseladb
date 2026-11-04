@@ -3,7 +3,10 @@
 //! never let a node authorize with a revoked state once the revocation answered or a lease after
 //! it.
 
-use teseladb_auth::fence::{AUTH_LEASE_MS, AuthLease, DRIFT_MARGIN_MS, FenceTable};
+use teseladb_auth::fence::{
+    AUTH_LEASE_MS, AuthLease, DRIFT_MARGIN_MS, FenceTable, HeldAsk, HeldAsks,
+};
+use teseladb_auth::lease_driver::{FenceMsg, Group0Host, Group0View, LeaseDriver};
 
 #[test]
 fn a_node_holds_a_lease_from_when_it_asked() {
@@ -166,4 +169,151 @@ fn random_schedules_keep_the_fence() {
             }
         }
     }
+}
+
+fn ask(node: u64, at_ns: u64) -> HeldAsk {
+    HeldAsk { node, seq: at_ns, applied: 3, at_ns }
+}
+
+/// The leader answers a request only once a majority acknowledged a round it sent no earlier
+/// than the request arrived (D-073).
+#[test]
+fn a_request_waits_for_a_round_sent_after_it() {
+    let mut held = HeldAsks::new();
+    assert!(!held.round_due());
+    held.hold(ask(1, 100));
+    held.hold(ask(2, 150));
+    assert!(held.round_due(), "nothing was sent for them");
+    assert!(held.release(None).is_empty(), "no round acknowledged in the term");
+    assert!(held.release(Some(99)).is_empty(), "a round older than both requests");
+    held.round_sent(150);
+    assert!(!held.round_due());
+    assert_eq!(held.release(Some(120)), vec![ask(1, 100)]);
+    // A later request of the same node replaces the one held.
+    held.hold(ask(2, 160));
+    assert!(held.round_due(), "it arrived after the round");
+    held.round_sent(160);
+    assert!(held.release(Some(150)).is_empty());
+    assert_eq!(held.release(Some(160)), vec![ask(2, 160)]);
+    assert!(held.release(Some(u64::MAX)).is_empty(), "each request answers once");
+    // A leader that stops leading drops what it held.
+    held.hold(ask(3, 200));
+    held.clear();
+    assert!(!held.round_due());
+    assert!(held.release(Some(u64::MAX)).is_empty());
+}
+
+/// A replica of Group 0 the test drives by hand.
+#[derive(Default)]
+struct FakeHost {
+    view: Option<Group0View>,
+    heard: Option<u64>,
+    rounds: Vec<u64>,
+}
+
+impl Group0Host for FakeHost {
+    fn view(&self) -> Option<Group0View> {
+        self.view
+    }
+
+    fn known_nodes(&self) -> Vec<u64> {
+        vec![1, 2]
+    }
+
+    fn quorum_heard_at_ns(&self) -> Option<u64> {
+        self.heard
+    }
+
+    fn send_confirm_round(&mut self, now_ns: u64) {
+        self.rounds.push(now_ns);
+    }
+}
+
+const MS: u64 = 1_000_000;
+const ASK_EVERY: u64 = 500 * MS;
+
+fn same(applied: u64) -> u64 {
+    applied
+}
+
+/// A follower asks the leader it knows and takes the grant; a node without a replica, or that
+/// knows no leader, asks nothing.
+#[test]
+fn a_follower_asks_its_leader() {
+    let mut d = LeaseDriver::new(ASK_EVERY);
+    let mut host = FakeHost::default();
+    assert!(d.tick(&mut host, 2, 0, &same).is_empty(), "no replica");
+    host.view = Some(Group0View { term: 1, leads: false, leader: 0, commit: 4, applied: 4 });
+    assert!(d.tick(&mut host, 2, MS, &same).is_empty(), "no leader known");
+    host.view = Some(Group0View { term: 1, leads: false, leader: 1, commit: 4, applied: 4 });
+    let out = d.tick(&mut host, 2, ASK_EVERY + MS, &|a| a - 1);
+    let [FenceMsg::Ask { to: 1, node: 2, seq, applied: 3 }] = out[..] else { panic!("{out:?}") };
+    assert!(d.tick(&mut host, 2, ASK_EVERY + 2 * MS, &same).is_empty(), "one request a period");
+    d.on_ask(3, 1, 4, ASK_EVERY + 2 * MS);
+    assert!(!d.leads(), "a follower holds no request");
+    d.on_grant(seq, 4, 4, 4);
+    assert_eq!(d.fenced(), 4);
+    assert!(d.holds(ASK_EVERY + 2 * MS));
+    assert_eq!(d.until_ms(), 501 + AUTH_LEASE_MS - DRIFT_MARGIN_MS);
+    d.restart();
+    assert!(!d.holds(ASK_EVERY + 2 * MS));
+    assert_eq!(d.fenced(), 0);
+}
+
+/// The leader grants nothing, to itself or to others, until a majority acknowledges a round sent
+/// after each request, and it takes over only once its copy holds every committed entry (D-073).
+#[test]
+fn the_leader_grants_only_on_a_round_a_majority_acknowledged() {
+    let mut d = LeaseDriver::new(ASK_EVERY);
+    let mut host = FakeHost {
+        view: Some(Group0View { term: 1, leads: true, leader: 1, commit: 5, applied: 4 }),
+        ..FakeHost::default()
+    };
+    assert!(d.tick(&mut host, 1, 0, &same).is_empty());
+    assert!(!d.leads(), "its copy is behind the commit index");
+    host.view = Some(Group0View { term: 1, leads: true, leader: 1, commit: 5, applied: 5 });
+    assert!(d.tick(&mut host, 1, ASK_EVERY, &same).is_empty());
+    assert!(d.leads());
+    assert_eq!(host.rounds, vec![ASK_EVERY], "a round for its own request");
+    assert!(!d.holds(ASK_EVERY), "nothing acknowledged yet");
+    d.on_ask(2, 9, 5, ASK_EVERY + MS);
+    // A round acknowledged from before the requests answers none of them.
+    host.heard = Some(ASK_EVERY - MS);
+    assert!(d.tick(&mut host, 1, ASK_EVERY + 2 * MS, &same).is_empty());
+    assert_eq!(host.rounds, vec![ASK_EVERY, ASK_EVERY + 2 * MS], "a round for the other");
+    assert!(!d.holds(ASK_EVERY + 2 * MS));
+    host.heard = Some(ASK_EVERY + 2 * MS);
+    let out = d.tick(&mut host, 1, ASK_EVERY + 3 * MS, &same);
+    assert_eq!(out, vec![FenceMsg::Grant { to: 2, seq: 9, commit: 5, fenced: 5 }]);
+    assert!(d.holds(ASK_EVERY + 3 * MS));
+    // It stops leading: what it holds goes, and it asks the new leader.
+    d.on_ask(2, 10, 5, ASK_EVERY + 4 * MS);
+    host.view = Some(Group0View { term: 1, leads: false, leader: 3, commit: 5, applied: 5 });
+    host.heard = Some(u64::MAX);
+    let out = d.tick(&mut host, 1, 2 * ASK_EVERY, &same);
+    assert!(matches!(out[..], [FenceMsg::Ask { to: 3, node: 1, .. }]), "{out:?}");
+    assert!(!d.leads());
+}
+
+/// A replica that loses its term and wins a later one between two ticks takes over afresh: the
+/// requests it held go, and every node it knows counts as holding a lease of the term between.
+#[test]
+fn a_leader_of_a_new_term_takes_over_afresh() {
+    let mut d = LeaseDriver::new(ASK_EVERY);
+    let mut host = FakeHost {
+        view: Some(Group0View { term: 1, leads: true, leader: 1, commit: 5, applied: 5 }),
+        heard: Some(0),
+        ..FakeHost::default()
+    };
+    assert!(d.tick(&mut host, 1, 0, &same).is_empty());
+    d.on_ask(2, 9, 5, MS);
+    // Node 2 acknowledged nothing of term 2: index 6 waits for its lease to run out.
+    host.view = Some(Group0View { term: 2, leads: true, leader: 1, commit: 6, applied: 6 });
+    host.heard = Some(u64::MAX);
+    let out = d.tick(&mut host, 1, 2 * MS, &same);
+    assert!(out.is_empty(), "the request of term 1 is not answered: {out:?}");
+    assert!(d.fenced() < 6);
+    let late = (2 + AUTH_LEASE_MS) * MS;
+    d.tick(&mut host, 1, late, &same);
+    assert_eq!(d.fenced(), 6, "the leases of the term between ran out");
 }
