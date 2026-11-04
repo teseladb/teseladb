@@ -539,7 +539,9 @@ fn strict_commands_reject_unknown_fields() {
         let good = d(&[(name, 1.into()), (ok_field, 1.into())]);
         assert!(check_unknown_fields(&good, name).is_ok(), "{name}.{ok_field}");
         let bad = d(&[(name, 1.into()), ("zz", 1.into())]);
-        let want = format!("BSON field '{}.zz' is an unknown field.", canonical(name));
+        // `listCollections` is named after the structure of a `refrouter` 9.0.4 (measured, 04-11).
+        let owner = if name == "listCollections" { "ListCollection" } else { canonical(name) };
+        let want = format!("BSON field '{owner}.zz' is an unknown field.");
         assert_eq!(err(check_unknown_fields(&bad, name)), (40415, want));
     }
     // The commands RefDb reads loosely take anything.
