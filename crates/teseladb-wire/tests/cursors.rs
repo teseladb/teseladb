@@ -260,3 +260,37 @@ fn kills_reach_the_other_nodes_and_ending_stays_local() {
     assert_eq!(code(&m.run("admin", doc(&[("killSessions", one())]))), 89);
     assert_eq!(code(&get_more(&mut m, "db", with, "c", Some(1))), 43);
 }
+
+/// `aggregate` on a collection answers its cursor as a `refrouter` 9.0.4 does (`id`, `ns`,
+/// `firstBatch`), and in the replica set presentation (018) as a `refnode` does (`firstBatch`,
+/// `id`, `ns`; measured by the battery's `autocomplete-options` on 04-11-2026).
+#[test]
+fn aggregate_orders_its_cursor_as_the_presented_process_does() {
+    let mut m = Mem::new();
+    m.shards = vec!["node1".into(), "node2".into(), "node3".into()];
+    m.run(
+        "db",
+        Document::new()
+            .with("insert", "c")
+            .with("documents", vec![Value::Document(Document::new())]),
+    );
+    let agg = || {
+        Document::new()
+            .with("aggregate", "c")
+            .with("pipeline", Vec::<Value>::new())
+            .with("cursor", Document::new())
+    };
+    let keys = |r: &Document| match r.get("cursor") {
+        Some(Value::Document(c)) => c.iter().map(|(k, _)| k.to_string()).collect::<Vec<_>>(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(keys(&m.run("db", agg())), ["id", "ns", "firstBatch"]);
+    let present = Document::new().with("mode", "replicaset").with("setName", "rs0");
+    let r = m.run(
+        "admin",
+        Document::new()
+            .with("setClusterParameter", Document::new().with("topologyPresentation", present)),
+    );
+    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+    assert_eq!(keys(&m.run("db", agg())), ["firstBatch", "id", "ns"]);
+}

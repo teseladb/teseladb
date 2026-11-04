@@ -1099,7 +1099,10 @@ pub(crate) fn aggregate_from<B: Backend + ?Sized>(
         Some("$currentOp") => !local_ops,
         _ => false,
     };
-    let cursor = if on_collection || forwarded {
+    // A `refrouter` 9.0.4 answers `id`, `ns`, `firstBatch` for a collection; a `refnode`, which the
+    // replica set presentation (018) is, `firstBatch`, `id`, `ns` (measured on 04-11-2026).
+    let as_refrouter = forwarded || (on_collection && !super::config_db::as_member(ctx.backend)?);
+    let cursor = if as_refrouter {
         Document::new().with("id", id).with("ns", ns_text).with("firstBatch", batch)
     } else {
         Document::new().with("firstBatch", batch).with("id", id).with("ns", ns_text)
