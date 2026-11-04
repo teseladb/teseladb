@@ -169,8 +169,9 @@ pub struct ServerParams {
     pub use_internal_authz_for_x509: bool,
     /// `clusterAuthMode`.
     pub cluster_auth_mode: ClusterAuthMode,
-    /// Whether the node has TLS: the modes other than `keyFile` need it.
-    pub tls_enabled: bool,
+    /// Whether the connections the node opens use TLS (`preferTLS` or `requireTLS`): the modes
+    /// other than `keyFile` need it.
+    pub tls_outgoing: bool,
     /// `internalQueryPlannerEnableHashIntersection`.
     pub hash_intersection: bool,
     /// `internalQueryMaxMemoryUsageBytesPerOperation`.
@@ -207,7 +208,7 @@ impl Default for ServerParams {
             ocsp_enabled: true,
             use_internal_authz_for_x509: false,
             cluster_auth_mode: ClusterAuthMode::Undefined,
-            tls_enabled: true,
+            tls_outgoing: true,
             hash_intersection: false,
             operation_memory: MAX_OPERATION_MEMORY_DEFAULT,
             expression_memory: i64::try_from(
@@ -406,7 +407,8 @@ pub fn get_parameter<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Docume
 }
 
 /// The `clusterAuthMode` that `v` asks, one step after the node's (measured on `refnode` 9.0.4):
-/// any mode but `keyFile` needs TLS; another step is refused.
+/// any mode but `keyFile` needs TLS on the connections the node opens (not with `allowTLS`, as a
+/// `refrouter` 9.0.4 answers); another step is refused.
 fn cluster_auth_mode_step(
     shared: &super::Shared,
     v: &Value,
@@ -420,7 +422,7 @@ fn cluster_auth_mode_step(
     };
     let g = lock(shared);
     let from = g.params.cluster_auth_mode;
-    if to != ClusterAuthMode::KeyFile && !g.params.tls_enabled {
+    if to != ClusterAuthMode::KeyFile && !g.params.tls_outgoing {
         let msg = "Illegal state transition for clusterAuthMode, need to enable SSL for outgoing connections";
         return Err(CommandError::new(BAD_VALUE, msg));
     }

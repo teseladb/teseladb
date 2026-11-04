@@ -6,7 +6,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use teseladb_server::cli::{Command, StartOpts, parse_with};
-use teseladb_server::cluster_auth::{mode, read_key_file, relaxations};
+use teseladb_server::cluster_auth::{mode, outgoing_tls, read_key_file, relaxations};
 use teseladb_server::run;
 use teseladb_wire::commands::server_params::ClusterAuthMode;
 
@@ -102,6 +102,20 @@ fn the_mode_follows_the_options() {
         panic!("the configuration file");
     };
     assert_eq!(mode(&o), Ok(ClusterAuthMode::SendKeyFile));
+}
+
+/// The connections a node opens use TLS with `preferTLS` and `requireTLS` (the default), not with
+/// `allowTLS` or without TLS: a `setParameter` of `clusterAuthMode` past `keyFile` then needs
+/// them (measured on 04-11-2026: a `refrouter` 9.0.4 with `allowTLS` answers 2 `BadValue`, a `refnode`
+/// with `preferTLS` 5579202).
+#[test]
+fn outgoing_connections_use_tls_with_prefer_and_require() {
+    assert!(outgoing_tls(&start("start")));
+    assert!(outgoing_tls(&start("start --tlsMode requireTLS")));
+    assert!(outgoing_tls(&start("start --tlsMode preferTLS")));
+    assert!(!outgoing_tls(&start("start --tlsMode allowTLS")));
+    assert!(!outgoing_tls(&start("start --tlsMode disabled")));
+    assert!(!outgoing_tls(&start("start --insecure")));
 }
 
 #[test]

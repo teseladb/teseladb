@@ -59,6 +59,13 @@ pub fn tls_enabled(o: &StartOpts) -> bool {
     !o.insecure && o.tls.mode != Some(TlsMode::Disabled)
 }
 
+/// Whether the connections the node opens use TLS: with `preferTLS` and `requireTLS` (the
+/// default), not with `allowTLS` (measured on a `refrouter` 9.0.4 and a `refnode` 9.0.4, 04-11-2026).
+/// A `clusterAuthMode` past `keyFile` needs them.
+pub fn outgoing_tls(o: &StartOpts) -> bool {
+    tls_enabled(o) && o.tls.mode != Some(TlsMode::AllowTls)
+}
+
 /// The node's `clusterAuthMode`: the one given, `keyFile` with a key file, `undefined`
 /// otherwise; checked as `refnode` checks it, with the key file read.
 pub fn mode(o: &StartOpts) -> Result<ClusterAuthMode, String> {

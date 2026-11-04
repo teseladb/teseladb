@@ -279,7 +279,7 @@ pub fn client_config(o: &StartOpts) -> ClientConfig {
         ocsp_enabled: !o.tls.ocsp_disabled,
         use_internal_authz_for_x509: o.use_internal_authz_for_x509,
         cluster_auth_mode: cluster_auth::mode_or_undefined(o),
-        tls_enabled: cluster_auth::tls_enabled(o),
+        tls_outgoing: cluster_auth::outgoing_tls(o),
         transaction_lifetime_secs: o.transaction_lifetime_secs,
         max_concurrent_transactions: o.max_concurrent_transactions,
         process,

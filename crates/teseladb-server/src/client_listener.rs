@@ -80,8 +80,9 @@ pub struct ClientConfig {
     pub use_internal_authz_for_x509: bool,
     /// `clusterAuthMode` at start (013 FR-034).
     pub cluster_auth_mode: teseladb_wire::commands::server_params::ClusterAuthMode,
-    /// TLS on the port, which the modes of `clusterAuthMode` past `keyFile` need.
-    pub tls_enabled: bool,
+    /// TLS on the connections the node opens (`preferTLS` or `requireTLS`), which the modes of
+    /// `clusterAuthMode` past `keyFile` need.
+    pub tls_outgoing: bool,
     /// `transactionLifetimeLimitSeconds` (008 FR-010).
     pub transaction_lifetime_secs: i64,
     /// `maxConcurrentMultiDocumentTransactions` (008 FR-020).
@@ -120,7 +121,7 @@ impl ClientConfig {
         s.params.ocsp_enabled = self.ocsp_enabled;
         s.params.use_internal_authz_for_x509 = self.use_internal_authz_for_x509;
         s.params.cluster_auth_mode = self.cluster_auth_mode;
-        s.params.tls_enabled = self.tls_enabled;
+        s.params.tls_outgoing = self.tls_outgoing;
         s.params.transaction_lifetime_secs = self.transaction_lifetime_secs;
         s.params.max_concurrent_transactions = self.max_concurrent_transactions;
         if self.test_commands { s.with_test_commands() } else { s }
@@ -142,7 +143,7 @@ impl ClientConfig {
             ocsp_enabled: true,
             use_internal_authz_for_x509: false,
             cluster_auth_mode: teseladb_wire::commands::server_params::ClusterAuthMode::Undefined,
-            tls_enabled: true,
+            tls_outgoing: true,
             transaction_lifetime_secs:
                 teseladb_wire::commands::server_params::TRANSACTION_LIFETIME_DEFAULT_SECS,
             max_concurrent_transactions:

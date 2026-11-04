@@ -1400,7 +1400,7 @@ fn cluster_auth_mode_moves_one_step_at_a_time() {
     );
     // Without TLS only `keyFile` can be reached.
     let mut m = node();
-    m.shared.lock().unwrap().params.tls_enabled = false;
+    m.shared.lock().unwrap().params.tls_outgoing = false;
     let r = set(&mut m, &mut c, s("sendKeyFile"));
     let msg =
         "Illegal state transition for clusterAuthMode, need to enable SSL for outgoing connections";
