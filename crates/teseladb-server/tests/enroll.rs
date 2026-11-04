@@ -261,8 +261,12 @@ fn a_node_logs_each_step_of_its_start() {
             text[from..].find(step).unwrap_or_else(|| panic!("no {step:?} after {from}: {text}"));
         from += at + step.len();
     }
-    let secret = token.split('_').next_back().unwrap();
-    assert!(!text.contains(secret), "{text}");
+    // The token is `tdbe1_` and Base64url, whose alphabet has `_` too: neither the encoded token
+    // nor its end, where the secret is, goes to the log (a piece after an `_` inside it can be a
+    // couple of characters that any log line has).
+    let encoded = token.strip_prefix(teseladb_server::enroll::TOKEN_PREFIX).expect("a token");
+    let tail = &encoded[encoded.len() - 32..];
+    assert!(!text.contains(encoded) && !text.contains(tail), "{text}");
     drop(second);
     first.stop();
 }
