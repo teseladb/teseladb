@@ -713,11 +713,9 @@ impl RangeHost {
         })
     }
 
-    /// A request of range `g` waits for a latch.
+    /// A request of range `g`, which this host leads, waits for a latch.
     fn count_wait(&mut self, g: GroupId) {
-        if let Some(r) = self.ranges.get_mut(&g) {
-            r.counters.latch_waits += 1;
-        }
+        self.ranges.get_mut(&g).expect("a range of this host").counters.latch_waits += 1;
     }
 
     /// The answers since the last call.

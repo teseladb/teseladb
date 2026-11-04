@@ -676,6 +676,15 @@ mod env_tests {
         let inner = reference();
         let joined = super::super::joined::Joined { inner: &inner, coll: "c", from_lookup: true };
         assert_eq!(answers(&joined), direct);
+        // And the environment of `$lookup`'s `let`, which only adds its variables.
+        let inner = reference();
+        let vars = super::super::joined::LetVars::default();
+        let with_vars = super::super::joined::WithVars { inner: &inner, vars: &vars };
+        assert_eq!(with_vars.vars(), Some(&Document::new()));
+        let set = format!("{:?} ", Some(&Document::new()));
+        let answered = answers(&with_vars);
+        let rest = direct.strip_prefix("None ").expect("the reference has no variables");
+        assert_eq!(answered.strip_prefix(&set), Some(rest));
     }
 
     /// Malformed stages are left to the stage parsers, which run after the check.

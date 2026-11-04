@@ -16,6 +16,7 @@ use teseladb_range::intents::{
 };
 use teseladb_range::push::{Known, TxnView};
 use teseladb_range::read::ReadConcern;
+use teseladb_types::GroupId;
 use txn_node::*;
 
 const C: &[u8] = b"\x01c";
@@ -186,6 +187,21 @@ fn scans_apply_the_same_rules_key_by_key() {
     let got = rows(n.scan_view(old, 10, own));
     let want = [(A, b"a0"), (B, b"b0")];
     assert_eq!(got, want.iter().map(|(k, v)| (k.to_vec(), v.to_vec())).collect::<Vec<_>>());
+    // A scan that ends past the range, or on a range this node lacks, is not its to answer.
+    for (g, end) in [(G, [END, b"\x01"].concat()), (GroupId(99), b"\x02".to_vec())] {
+        let spec = ReadSpec {
+            g,
+            key: A.to_vec(),
+            scan: Some((end, 10)),
+            at: Some(read_at),
+            concern: ReadConcern::Majority,
+            view: TxnView::default(),
+            uncertain_to: None,
+        };
+        let (now, wall) = (n.now, n.wall());
+        let id = n.host.read_with(&mut n.core, spec, now, wall);
+        assert_eq!(n.answer(id), Err(RangeError::OutOfRange));
+    }
 }
 
 #[test]

@@ -885,7 +885,7 @@ impl RangeState for RangeSm {
     fn fenced(&self, key: &[u8]) -> bool {
         // Faulty variant (018 T005): the range takes the writes of a resharding's critical
         // section, so one that found the collection before it may land after the last catch-up.
-        !cfg!(teseladb_bug = "reshard_without_fence") && crate::fence::covers(&self.fences, key)
+        crate::fence::covers(&self.fences, key) && !cfg!(teseladb_bug = "reshard_without_fence")
     }
 }
 
