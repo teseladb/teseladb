@@ -193,8 +193,9 @@ pub struct Mem {
     pub ddl: teseladb_meta::ddl_log::DdlLog,
     /// How far behind the clock the ranges' resolved mark goes, in milliseconds (014 FR-004).
     pub resolved_lag_ms: u64,
-    /// The most a read of the changes goes past its start, in milliseconds, as a range's leader
-    /// answers (014 FR-004, `FEED_WINDOW_MS`); zero: no limit. A read from zero has none.
+    /// The most a read of the changes goes past its start, in milliseconds: a range's leader
+    /// answers part of what was asked when its budget of bytes runs out (014 FR-004,
+    /// `teseladb_range::changes::ANSWER_BYTES`); zero: no limit. A read from zero has none.
     pub changes_window_ms: u64,
     /// Milliseconds the clock moves on at each pause of a waiting command.
     pub pause_ms: u64,

@@ -9,7 +9,9 @@ use std::fmt;
 
 mod chunk;
 
-pub use chunk::{MAX_CHUNKED_LEN, MAX_PIECE_LEN, RAFT_CHUNK_KIND, RAFT_CHUNK_VERSION};
+pub use chunk::{
+    FORWARD_CHUNK_VERSION, MAX_CHUNKED_LEN, MAX_PIECE_LEN, RAFT_CHUNK_KIND, RAFT_CHUNK_VERSION,
+};
 
 use teseladb_keys::Hlc;
 use teseladb_raft::Message;
@@ -23,10 +25,13 @@ pub const HEADER_LEN: usize = 8;
 pub(crate) const LEN_COVERED: usize = 4;
 /// Handshake marker.
 pub const MAGIC: &[u8; 8] = b"TSLPEER1";
-/// The highest protocol version this binary speaks: 5 since a forwarded request asks a node
+/// The highest protocol version this binary speaks: 6 since a `Forward` or `ForwardResp` larger
+/// than a frame goes in pieces ([`encode_frame_for`]). 5 since a forwarded request asks a node
 /// whether it applies the cluster's write gates (007 FR-029). 4 since a heartbeat carries its
 /// range's closed mark (007 FR-012).
-pub const PROTOCOL_VERSION: u16 = 5;
+pub const PROTOCOL_VERSION: u16 = 6;
+/// The first protocol version whose nodes read a forwarded request or answer in pieces.
+pub const CHUNKED_FORWARD_VERSION: u16 = 6;
 /// The lowest protocol version this binary speaks: a node that does not know a forwarded request
 /// of 5 answers it with nothing, and the asker counts it as down (007 FR-027).
 pub const PROTOCOL_MIN: u16 = 4;
@@ -785,6 +790,28 @@ pub fn encode_frame(msg: &PeerMsg, compress: bool, out: &mut Vec<u8>) -> Result<
     out.extend_from_slice(&[msg.kind(), flags, spare[0], spare[1]]);
     out.extend_from_slice(&payload);
     Ok(())
+}
+
+/// Writes the frames of `msg` for a node that speaks protocol `version`, at the end of `out`: as
+/// [`encode_frame`], but from [`CHUNKED_FORWARD_VERSION`] on a `Forward` or `ForwardResp` too
+/// large for a frame goes as `RaftChunk` pieces of version [`FORWARD_CHUNK_VERSION`], up to
+/// [`MAX_CHUNKED_LEN`]. Before, it was refused, and its asker waited for an answer that never
+/// came.
+pub fn encode_frame_for(
+    msg: &PeerMsg,
+    compress: bool,
+    version: u16,
+    out: &mut Vec<u8>,
+) -> Result<(), FrameError> {
+    let forward = matches!(msg, PeerMsg::Forward { .. } | PeerMsg::ForwardResp { .. });
+    match encode_frame(msg, compress, out) {
+        Err(FrameError::TooLarge { .. }) if forward && version >= CHUNKED_FORWARD_VERSION => {
+            let mut e = Encoder::new();
+            msg.encode_payload(&mut e);
+            chunk::encode_forward(msg.kind(), &e.finish(), out)
+        }
+        r => r,
+    }
 }
 
 /// Reads a frame from the start of `buf`: `Ok(None)` if bytes are still missing; otherwise the

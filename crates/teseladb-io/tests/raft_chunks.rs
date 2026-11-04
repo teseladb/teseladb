@@ -4,8 +4,9 @@
 //! Interrupted, out of order, oversized and damaged sequences are rejected without a panic.
 
 use teseladb_io::peer::{
-    FrameError, HEADER_LEN, MAX_CHUNKED_LEN, MAX_PIECE_LEN, PeerMsg, RAFT_CHUNK_KIND,
-    RAFT_CHUNK_VERSION, decode_frame, encode_frame,
+    CHUNKED_FORWARD_VERSION, FORWARD_CHUNK_VERSION, FrameError, HEADER_LEN, MAX_CHUNKED_LEN,
+    MAX_FRAME_LEN, MAX_PIECE_LEN, PeerMsg, RAFT_CHUNK_KIND, RAFT_CHUNK_VERSION, decode_frame,
+    encode_frame, encode_frame_for,
 };
 use teseladb_raft::{Entry, EntryKind, MAX_ENTRY_BYTES, Message, MessageType};
 use teseladb_types::{Bytes, GroupId, NodeId};
@@ -240,5 +241,79 @@ fn damaged_piece_sequences_never_panic() {
     // Cut anywhere: more bytes are needed, never a wrong batch.
     for cut in (0..stream.len()).step_by(99_991) {
         assert_eq!(decode_frame(&stream[..cut]), Ok(None), "cut at {cut}");
+    }
+}
+
+/// A body of `len` bytes.
+fn body(len: usize) -> Bytes {
+    Bytes::from_vec((0..len).map(|i| (i % 241) as u8).collect())
+}
+
+/// A forwarded answer above a frame's 16 MiB (a range's history of two versions of 9 MiB, e2e
+/// battery of 04-11-2026) goes in pieces of at most 1 MiB to a node of protocol 6 and comes back
+/// whole; for a node of an older protocol it is refused as before, and below 16 MiB nothing
+/// changes. A forwarded request does the same.
+#[test]
+fn a_forward_larger_than_a_frame_travels_in_pieces_to_a_node_that_reads_them() {
+    let big = 18 << 20;
+    let msgs = [
+        PeerMsg::ForwardResp { req: 7, body: body(big) },
+        PeerMsg::Forward { req: 8, deadline_ms: 5_000, body: body(big) },
+    ];
+    for msg in msgs {
+        let mut out = Vec::new();
+        encode_frame_for(&msg, false, CHUNKED_FORWARD_VERSION, &mut out).unwrap();
+        let f = frames(&out);
+        assert!(f.len() > 16, "{} pieces", f.len());
+        assert!(f.iter().all(|(k, len)| *k == RAFT_CHUNK_KIND && *len <= MAX_PIECE_LEN));
+        assert_eq!(out[HEADER_LEN], FORWARD_CHUNK_VERSION);
+        assert_eq!(decode_all(&out, 1 << 16), vec![msg.clone()]);
+        let mut old = Vec::new();
+        let refused = encode_frame_for(&msg, false, CHUNKED_FORWARD_VERSION - 1, &mut old);
+        assert!(matches!(refused, Err(FrameError::TooLarge { .. })) && old.is_empty());
+    }
+    // Below a frame, one frame as always.
+    let small = PeerMsg::ForwardResp { req: 9, body: body(1 << 20) };
+    let mut out = Vec::new();
+    encode_frame_for(&small, false, CHUNKED_FORWARD_VERSION, &mut out).unwrap();
+    assert_eq!(out, encode(&small));
+    // Above what pieces carry, nothing is written.
+    let huge = PeerMsg::ForwardResp { req: 10, body: body(MAX_CHUNKED_LEN) };
+    let mut out = Vec::new();
+    let r = encode_frame_for(&huge, false, CHUNKED_FORWARD_VERSION, &mut out);
+    assert!(matches!(r, Err(FrameError::TooLarge { .. })) && out.is_empty());
+    // Only forwards go in pieces: any other message keeps the frame's limit.
+    let hello_sized = PeerMsg::Goodbye { reason: "x".repeat(MAX_FRAME_LEN) };
+    let mut out = Vec::new();
+    let r = encode_frame_for(&hello_sized, false, CHUNKED_FORWARD_VERSION, &mut out);
+    assert!(matches!(r, Err(FrameError::TooLarge { .. })) && out.is_empty());
+}
+
+/// Pieces of a forward whose joined data does not start with a forward's kind, or mix versions,
+/// are refused.
+#[test]
+fn broken_forward_pieces_are_rejected() {
+    let msg = PeerMsg::ForwardResp { req: 3, body: body(100) };
+    let mut payload = vec![0x31];
+    payload.extend_from_slice(&encode(&msg)[HEADER_LEN..]);
+    let total = payload.len() as u64;
+    let (a, b) = payload.split_at(30);
+    let good =
+        [piece(FORWARD_CHUNK_VERSION, total, 0, a), piece(FORWARD_CHUNK_VERSION, total, 30, b)]
+            .concat();
+    assert_eq!(decode_frame(&good), Ok(Some((msg, good.len()))));
+    let mut goodbye = vec![0x50];
+    goodbye.extend_from_slice(&payload[1..]);
+    let cases: Vec<(&str, Vec<u8>)> = vec![
+        ("another kind", piece(FORWARD_CHUNK_VERSION, goodbye.len() as u64, 0, &goodbye)),
+        (
+            "mixed versions",
+            [piece(FORWARD_CHUNK_VERSION, total, 0, a), piece(RAFT_CHUNK_VERSION, total, 30, b)]
+                .concat(),
+        ),
+        ("a bad payload", piece(FORWARD_CHUNK_VERSION, 3, 0, &[0x31, 1, 2])),
+    ];
+    for (what, f) in cases {
+        assert!(malformed(decode_frame(&f)), "{what}: {:?}", decode_frame(&f));
     }
 }

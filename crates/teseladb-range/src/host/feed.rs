@@ -1,8 +1,10 @@
 //! What a change stream reads on the leader of a range (014 FR-003, FR-004): the versions of
-//! `(from, to]` with `to` at or below the closed mark the range applied, at most
-//! [`FEED_WINDOW_MS`] past `from` (unless `from` is zero), and the oldest intent pending there
-//! ([`crate::changes`]). While streams read the range its leader closes marks 200 ms behind its
-//! clock ([`crate::closed_ts::STREAM_CLOSE_LAG_MS`]) for [`STREAM_HOLD`] after the last read.
+//! `(from, to]` with `to` at or below the closed mark the range applied, and the oldest intent
+//! pending there ([`crate::changes`]). An answer keeps to [`crate::changes::ANSWER_BYTES`]: past
+//! it, `to` stops below the first mark it leaves out and the reader asks again from there, so a
+//! history of any size comes in answers that cross the link between nodes. While streams read the
+//! range its leader closes marks 200 ms behind its clock
+//! ([`crate::closed_ts::STREAM_CLOSE_LAG_MS`]) for [`STREAM_HOLD`] after the last read.
 //!
 //! A read that has to reach a mark (a search's, 011 FR-010) names it: when the closed marks are
 //! below it, the leader serves the versions up to it as a read at that mark (FR-004, FR-005 of
@@ -24,8 +26,6 @@ use crate::sm::RangeState;
 
 /// How long after a stream's last read its range keeps the short lag of closed marks.
 pub const STREAM_HOLD: Nanos = Nanos::from_secs(10);
-/// The most a read of a stream goes past its start, so that its answer stays small.
-pub const FEED_WINDOW_MS: u64 = 1_000;
 
 /// A change stream's read of `[start, end)` of range `g` after mark `from`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -111,17 +111,11 @@ impl RangeHost {
         let applied = sm.map_or(0, StateMachine::applied_index);
         let own = Some(leader.last_closed).filter(|(c, _)| *c > super::ZERO);
         let known = [core.closed(g), sm.and_then(RangeState::closed_mark), own];
-        // A read from the start of time (a search index's first build, 011 FR-014) reads the
-        // range's whole history at once: a window would take it one second at a time from the
-        // epoch.
-        let window = match from == super::ZERO {
-            true => Hlc { physical: u64::MAX, logical: u32::MAX },
-            false => Hlc { physical: from.physical.saturating_add(FEED_WINDOW_MS), logical: 0 },
-        };
-        let reach = window.max(from);
-        let closed =
-            follower_mark(&known, applied, None).filter(|c| *c > from).map(|c| c.min(reach));
-        let wanted = at.map(|t| t.min(reach)).filter(|t| *t > from);
+        // No window of time: the answer's budget of bytes bounds it, so a reader far behind (a
+        // search index's first build, 011 FR-014, or the oplog from the start of its window)
+        // does not go one second at a time.
+        let closed = follower_mark(&known, applied, None).filter(|c| *c > from);
+        let wanted = at.filter(|t| *t > from);
         let f = |to, state| FeedReq { g, start, end, from, to, hint: NodeId(0), state, scan: None };
         match (closed, wanted) {
             (Some(c), w) if w.is_none_or(|w| c >= w) => {
@@ -244,8 +238,9 @@ impl RangeHost {
                 false
             }
             Some(Ok(c)) => {
-                let reply =
-                    Reply::Changes { rows: c.rows, to: f.to, oldest_intent: c.oldest_intent };
+                // Up to where the budget let it read.
+                let to = scan.to();
+                let reply = Reply::Changes { rows: c.rows, to, oldest_intent: c.oldest_intent };
                 self.reply(id, Ok(reply));
                 true
             }

@@ -3,8 +3,8 @@
 
 use teseladb_io::peer::{
     EnrollAccepted, EnrollRequest, FLAG_DEFLATE, FrameError, GroupHeartbeat, GroupHeartbeatResp,
-    HEADER_LEN, Hello, JoinAccepted, MAX_FRAME_LEN, PeerMsg, RAFT_CHUNK_KIND, Versions,
-    decode_frame, encode_frame,
+    HEADER_LEN, Hello, JoinAccepted, MAX_FRAME_LEN, PROTOCOL_VERSION, PeerMsg, RAFT_CHUNK_KIND,
+    Versions, decode_frame, encode_frame,
 };
 use teseladb_raft::{Entry, EntryKind, Message, MessageType};
 use teseladb_types::{Bytes, GroupId, NodeId};
@@ -403,7 +403,8 @@ fn specific_rejections() {
     let mut f = frame(&all()[0]);
     // A lowest version above the highest the header gives (versions themselves are judged by
     // the handshake, 007 FR-027).
-    f[HEADER_LEN + 8] = f[HEADER_LEN + 8].wrapping_add(2);
+    // One above the highest, whatever the gap between the two.
+    f[HEADER_LEN + 8] = (PROTOCOL_VERSION + 1) as u8;
     assert!(matches!(decode_frame(&f), Err(FrameError::Malformed { kind: 0x01, .. })));
     // A list claiming more elements than fit.
     let mut f = frame(&PeerMsg::Heartbeats { wall_ms: 7, hlc: HLC, beats: vec![] });

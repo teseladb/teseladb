@@ -75,3 +75,77 @@ fn a_history_larger_than_the_cache_is_read_to_the_end() {
     keys.sort();
     assert_eq!(keys, sorted);
 }
+
+/// Reads `[1, 2)` in `(from, to]` to the end, with the LSM's I/O between steps.
+fn read_all(
+    lsm: &RefCell<Lsm>,
+    disk: &mut MemDisk,
+    from: Hlc,
+    to: Hlc,
+    budget: usize,
+) -> (Vec<Hlc>, Hlc) {
+    let mut scan = ChangeScan::new(lsm, (&[1u8], &[2u8]), (from, to)).with_budget(budget);
+    let rows = loop {
+        match scan.step(lsm) {
+            Some(r) => break r.expect("readable").rows,
+            None => {
+                lsm.borrow_mut().run_io(disk, Nanos::ZERO);
+            }
+        }
+    };
+    (rows.iter().map(|r| r.ts).collect(), scan.to())
+}
+
+/// A read answers at most its budget of versions: it stops below the first mark that would pass
+/// it and says so with its `to`, so the reader asks again from there and gets every version once,
+/// whatever the size of the history (e2e battery of 04-11-2026: two versions of 9 MiB passed the
+/// 16 MiB of a frame between nodes, and the answer never reached the reader). A mark's versions
+/// go together, so the first one goes even when it alone passes the budget.
+#[test]
+fn a_read_answers_its_budget_and_the_rest_comes_from_its_mark() {
+    let mut disk = MemDisk::new();
+    let mut lsm =
+        Lsm::recover(&LsmConfig { dir: "core-00/lsm".into(), ..LsmConfig::default() }, &mut disk)
+            .expect("recovery")
+            .0;
+    let ts = |p: u64| Hlc { physical: p, logical: 0 };
+    let mut value = vec![1u8];
+    value.extend(std::iter::repeat_n(7u8, VALUE_BYTES));
+    // Marks 10 to 19, two keys each; mark 15 has five keys.
+    let mut written = Vec::new();
+    for p in 10..20u64 {
+        let keys = if p == 15 { 5u8 } else { 2 };
+        for k in 0..keys {
+            let key = [1u8, k, p as u8];
+            lsm.put(G, written.len() as u64 + 1, &key, ts(p), &value).expect("written");
+            written.push(ts(p));
+        }
+    }
+    let lsm = RefCell::new(lsm);
+    let budget = 3 * VALUE_BYTES;
+    let mut from = ts(0);
+    let mut got = Vec::new();
+    let mut answers = 0;
+    while from < ts(19) {
+        let (rows, to) = read_all(&lsm, &mut disk, from, ts(1_000), budget);
+        assert!(to > from, "every answer moves on");
+        assert!(rows.iter().all(|t| *t > from && *t <= to));
+        // Never a mark in part: every version of the marks it answers.
+        let marks: std::collections::BTreeSet<Hlc> = rows.iter().copied().collect();
+        for m in &marks {
+            let all = written.iter().filter(|w| *w == m).count();
+            assert_eq!(rows.iter().filter(|t| *t == m).count(), all, "mark {m:?}");
+        }
+        // Over the budget only with a single mark.
+        assert!(rows.len() * VALUE_BYTES <= budget + VALUE_BYTES || marks.len() == 1, "{rows:?}");
+        got.extend(rows);
+        from = to;
+        answers += 1;
+    }
+    got.sort();
+    assert_eq!(got, written);
+    assert!(answers >= 7, "{answers} answers");
+    // Without a budget the whole interval comes at once, up to the mark asked.
+    let (rows, to) = read_all(&lsm, &mut disk, ts(0), ts(1_000), usize::MAX);
+    assert_eq!((rows.len(), to), (written.len(), ts(1_000)));
+}

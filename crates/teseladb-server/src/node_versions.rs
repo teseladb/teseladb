@@ -101,7 +101,7 @@ mod tests {
         // The range of protocol versions it speaks, from the lowest to the highest.
         let d = Document::from(RawDoc::from_bytes(&ours()).unwrap());
         let range = (d.get(PROTOCOL_MIN).cloned(), d.get(PROTOCOL).cloned());
-        assert_eq!(range, (Some(Value::Int64(4)), Some(Value::Int64(5))));
+        assert_eq!(range, (Some(Value::Int64(4)), Some(Value::Int64(6))));
         assert_eq!(fcv_of(b"x"), None);
         assert_eq!(key(NodeId(12)), b"nodeVersions.12".to_vec());
     }

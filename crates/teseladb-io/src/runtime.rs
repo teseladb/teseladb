@@ -18,7 +18,7 @@ use teseladb_types::{Nanos, NodeId, Rng};
 use crate::disk_thread::DiskThread;
 use crate::handshake::{self, Inbound, Outbound};
 use crate::mailbox::{self, Mailbox, MailboxSender};
-use crate::peer::{Hello, PeerMsg, decode_frame, encode_frame};
+use crate::peer::{Hello, PeerMsg, decode_frame, encode_frame_for};
 use crate::poller::{Event, Interest, Poller, WAKE_TOKEN};
 use crate::secure::{Channel, PeerTls};
 use crate::timer::TimerWheel;
@@ -128,6 +128,9 @@ struct Link {
     state: LinkState,
     pending: Vec<u8>,
     backoff_ms: u64,
+    /// The protocol version both nodes spoke on the last connection (0: none yet): what the
+    /// frames for this node may use.
+    version: u16,
 }
 
 /// Poller token of the ring's `eventfd`.
@@ -443,10 +446,12 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
             }
             CoreInput::Outbound(Outbound { node, result }) => match result {
                 Ok((stream, channel, got)) => {
+                    let version = got.version;
                     let token = self.add_conn(stream, channel, node, true, got.rest)?;
                     let link = self.links.get_mut(&node).expect("link of a dial");
                     link.state = LinkState::Up(token);
                     link.backoff_ms = 0;
+                    link.version = version;
                     let pending = std::mem::take(&mut link.pending);
                     // Frames that came with the handshake go first; garbage there closes it.
                     if self.deliver(token) {
@@ -603,15 +608,18 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
 
     fn send_to(&mut self, node: NodeId, msg: &PeerMsg) {
         let mut frame = Vec::new();
-        // A frame that cannot be encoded (too large) is the logic's bug; it is dropped like a
-        // lost message rather than taking the core down.
-        if encode_frame(msg, false, &mut frame).is_err() {
+        // A forwarded request or answer larger than a frame goes in pieces to a node that reads
+        // them (protocol 6). A frame that cannot be encoded even so is the logic's bug; it is
+        // dropped like a lost message rather than taking the core down.
+        let version = self.links.get(&node).map_or(0, |l| l.version);
+        if encode_frame_for(msg, false, version, &mut frame).is_err() {
             return;
         }
         let link = self.links.entry(node).or_insert(Link {
             state: LinkState::Idle,
             pending: Vec::new(),
             backoff_ms: 0,
+            version: 0,
         });
         match link.state {
             LinkState::Up(token) => self.queue_on(token, &frame),

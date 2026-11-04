@@ -43,7 +43,7 @@ mod split;
 mod txn;
 mod write;
 
-pub use feed::{ChangesReq, FEED_WINDOW_MS, STREAM_HOLD};
+pub use feed::{ChangesReq, STREAM_HOLD};
 pub use fence::FenceOutcome;
 pub use merge::MergeSource;
 pub use split::SplitDone;
