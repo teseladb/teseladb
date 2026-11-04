@@ -1035,6 +1035,39 @@ impl RawNode {
         self.reads.push(PendingRead { ctx, index, round: self.lease_seq + 1, requester });
     }
 
+    /// Leads, and has committed and applied the first entry of its term: its commit index then
+    /// covers every entry an earlier leader committed.
+    pub fn leader_ready(&self) -> bool {
+        self.role == Role::Leader && self.ready_for_reads()
+    }
+
+    /// As leader, the send time of the latest heartbeat round of its term that a majority of the
+    /// voters acknowledged: no later leader was elected before then, since a voter that had
+    /// moved to a later term would not have answered it. `None` if it does not lead or no round
+    /// of its term was acknowledged yet (with a single voter every round is, as it leaves).
+    pub fn quorum_heard_at(&self) -> Option<Nanos> {
+        if self.role != Role::Leader {
+            return None;
+        }
+        self.rounds.iter().rev().find(|r| r.done).map(|r| r.sent_at)
+    }
+
+    /// As leader, sends a heartbeat round at `now` (the clock of [`RawNode::tick`], which it
+    /// moves forward), waking a quiet group, so that [`RawNode::quorum_heard_at`] can reach the
+    /// present once a majority answers it.
+    pub fn send_confirm_round(&mut self, store: &dyn LogStore, now: Nanos) {
+        if self.role != Role::Leader {
+            return;
+        }
+        self.now = self.now.max(now);
+        if self.quiesced {
+            // Waking up sends the round.
+            self.unquiesce(store);
+        } else {
+            self.bcast_heartbeat(store);
+        }
+    }
+
     /// Whether reads registered since the last round wait for one (the caller sends it with
     /// [`RawNode::send_read_round`] once per step, so the reads of the step share it).
     pub fn read_round_due(&self) -> bool {

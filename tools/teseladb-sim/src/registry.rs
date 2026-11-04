@@ -4,8 +4,8 @@
 use crate::checkers::Violation;
 use crate::history::History;
 use crate::workloads::{
-    Workload, indexes::Indexes, kv::KvWorkload, lsm::LsmWorkload, lsm_ingest::LsmIngest,
-    meta2::Meta2Workload, multirange::MultiRangeWorkload, queries::Queries,
+    Workload, authz_fence::AuthzFence, indexes::Indexes, kv::KvWorkload, lsm::LsmWorkload,
+    lsm_ingest::LsmIngest, meta2::Meta2Workload, multirange::MultiRangeWorkload, queries::Queries,
     range_docs::RangeDocsWorkload, relocate::RelocateWorkload, reshard::Reshard,
     special_collections::SpecialCollections, splits::SplitsWorkload, storage::StorageWorkload,
     txn_append::Append, txn_bank::Bank, zones::ZonesWorkload,
@@ -37,7 +37,7 @@ pub struct Registry {
 
 impl Registry {
     /// The workloads of 001 (`storage`, `testkv`), 004 (`lsm`, `lsm-ingest`), 005 (`range-docs`), 007
-    /// (`multirange`, `splits`, `split-merge`, `follower-reads`, `relocate`, `meta2`), 008 (`txn-append`), 009 (`indexes`) and 015 (`special-collections`), in the order `--workload all` runs them, and no
+    /// (`multirange`, `splits`, `split-merge`, `follower-reads`, `relocate`, `meta2`), 008 (`txn-append`), 009 (`indexes`), 013 (`authz-fence`) and 015 (`special-collections`), in the order `--workload all` runs them, and no
     /// extra checkers: the generic ones live in the workloads and the world.
     pub fn builtin() -> Registry {
         let mut r = Registry::default();
@@ -63,6 +63,7 @@ impl Registry {
         r.register_workload("search", SplitsWorkload::searching).expect("a new name");
         r.register_workload("vector", SplitsWorkload::vectors).expect("a new name");
         r.register_workload("zones", ZonesWorkload::boxed).expect("a new name");
+        r.register_workload("authz-fence", AuthzFence::boxed).expect("a new name");
         r
     }
 

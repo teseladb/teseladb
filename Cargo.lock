@@ -372,6 +372,7 @@ version = "0.1.0"
 name = "teseladb-sim"
 version = "0.1.0"
 dependencies = [
+ "teseladb-auth",
  "teseladb-bson",
  "teseladb-changestream",
  "teseladb-exec",

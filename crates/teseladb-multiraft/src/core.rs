@@ -2221,6 +2221,31 @@ impl<S: StateMachine> MultiRaftCore<S> {
         self.snapshot_awaits_flush().then_some(self.floor_wait_mark)
     }
 
+    /// Whether this replica leads `g` and has committed and applied the first entry of its term
+    /// ([`RawNode::leader_ready`]): its commit index covers every entry committed before.
+    pub fn leader_ready(&self, g: GroupId) -> bool {
+        self.groups.get(&g).is_some_and(|grp| !grp.stopped && grp.raw.leader_ready())
+    }
+
+    /// As leader of `g`, the send time of the latest heartbeat round of its term a majority of
+    /// the voters acknowledged ([`RawNode::quorum_heard_at`]): no later leader of `g` was elected
+    /// before it. `None` if it does not lead `g` or no round of its term was acknowledged yet.
+    pub fn quorum_heard_at(&self, g: GroupId) -> Option<Nanos> {
+        self.groups.get(&g).filter(|grp| !grp.stopped).and_then(|grp| grp.raw.quorum_heard_at())
+    }
+
+    /// As leader of `g`, sends a heartbeat round now (waking `g` if it is quiet): once a majority
+    /// answers it, [`MultiRaftCore::quorum_heard_at`] reaches the time it left.
+    pub fn send_confirm_round(&mut self, g: GroupId, now: Nanos) {
+        self.now = now;
+        let Ok(grp) = usable(&mut self.groups, g) else { return };
+        if grp.installing {
+            return;
+        }
+        grp.raw.send_confirm_round(&GroupStore::new(&self.store, g), now);
+        self.drive(g);
+    }
+
     /// Raft status of a group.
     pub fn status(&self, g: GroupId) -> Option<Status> {
         self.groups.get(&g).map(|grp| grp.raw.status(&GroupStore::new(&self.store, g)))

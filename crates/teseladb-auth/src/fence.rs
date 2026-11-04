@@ -138,3 +138,80 @@ impl AuthLease {
         self.asked = None;
     }
 }
+
+/// A request for a lease that Group 0's leader holds until it knows it still led after the
+/// request arrived.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HeldAsk {
+    /// The node that asked.
+    pub node: u64,
+    /// The request's number.
+    pub seq: u64,
+    /// The index of the node's copy of Group 0 it acknowledges.
+    pub applied: u64,
+    /// When the request reached the leader, in nanoseconds of the leader's clock.
+    pub at_ns: u64,
+}
+
+/// The leader's side of the check that it still leads (013 FR-012, D-073). A leader cut off
+/// from the other voters keeps its Raft role until it steps down, and a quiet one keeps it for
+/// good; meanwhile the others may elect a leader that counts the leases of the old term as
+/// ending one lease after it took over. So the leader answers a request, its own included, only
+/// once a majority of the voters has acknowledged a heartbeat round it sent no earlier than the
+/// request arrived: those voters were still in its term then, so no later leader had been
+/// elected, and the lease, which runs from when the node asked, ends before the next leader
+/// stops counting it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HeldAsks {
+    held: Vec<HeldAsk>,
+    /// When the leader last asked for a round to leave.
+    round_ns: Option<u64>,
+}
+
+impl HeldAsks {
+    /// No request held.
+    pub fn new() -> HeldAsks {
+        HeldAsks::default()
+    }
+
+    /// Holds request `ask`; it replaces one of the same node still held.
+    pub fn hold(&mut self, ask: HeldAsk) {
+        self.held.retain(|a| a.node != ask.node);
+        self.held.push(ask);
+    }
+
+    /// Whether a request arrived after the last round the leader asked for: a round has to leave
+    /// now for it.
+    pub fn round_due(&self) -> bool {
+        self.held.iter().any(|a| self.round_ns.is_none_or(|r| a.at_ns > r))
+    }
+
+    /// A round left at `now_ns`.
+    pub fn round_sent(&mut self, now_ns: u64) {
+        self.round_ns = Some(now_ns);
+    }
+
+    /// The requests a majority's acknowledgement of a round sent at `heard_ns` answers: those
+    /// that arrived no later than it left. `None` (no round acknowledged in the leader's term)
+    /// answers none.
+    pub fn release(&mut self, heard_ns: Option<u64>) -> Vec<HeldAsk> {
+        // Faulty variant (013 FR-012): the leader answers on its role alone, as if every round
+        // were acknowledged; cut off from the others, it goes on granting leases.
+        #[cfg(teseladb_bug = "authz_lease_without_quorum")]
+        let heard_ns = {
+            let _ = heard_ns; // the faulty variant ignores the real value
+            Some(u64::MAX)
+        };
+        let Some(heard) = heard_ns else { return Vec::new() };
+        let (ready, rest) =
+            core::mem::take(&mut self.held).into_iter().partition(|a| a.at_ns <= heard);
+        self.held = rest;
+        ready
+    }
+
+    /// The node stopped leading: what it held is not answered.
+    pub fn clear(&mut self) {
+        self.held.clear();
+        self.round_ns = None;
+    }
+}

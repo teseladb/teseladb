@@ -1,8 +1,10 @@
-//! The authorization fence on core 0 (013 FR-012, `spec/tla/AuthzFence.tla`): every
-//! [`NODE_HEARTBEAT`] a node asks Group 0's leader for an authorization lease with the index of
-//! its copy (`AuthLeaseAsk`); the leader records it and answers with its commit index and the
-//! index up to which every change of users and roles is fenced (`AuthLeaseGrant`). The node
-//! authorizes commands only while its lease holds, which its client workers read from the
+//! The authorization fence on core 0 (013 FR-012, `spec/tla/AuthzFence.tla`,
+//! `spec/tla/AuthzFenceLeaders.tla`): core 0 runs the protocol of [`LeaseDriver`] over its
+//! replica of Group 0, carrying its messages as `AuthLeaseAsk` and `AuthLeaseGrant`. Every
+//! [`NODE_HEARTBEAT`] the node asks Group 0's leader for an authorization lease; the leader
+//! answers once a majority of the voters has acknowledged a heartbeat round it sent after the
+//! request arrived, so a leader cut off from the others grants nothing, not even to itself. The
+//! node authorizes commands only while its lease holds, which its client workers read from the
 //! [`AuthGate`]; a change that takes privileges away answers once its index is fenced.
 
 use std::collections::BTreeMap;
@@ -10,10 +12,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use teseladb_auth::fence::{AuthLease, FenceTable};
+use teseladb_auth::lease_driver::{FenceMsg, Group0Host, Group0View, LeaseDriver};
 use teseladb_hlc::guard::MAX_CLOCK_OFFSET_MS;
 use teseladb_io::peer::PeerMsg;
-use teseladb_meta::group0::GROUP0;
+use teseladb_meta::group0::{GROUP0, Group0Sm};
 use teseladb_meta::liveness::NODE_HEARTBEAT;
 use teseladb_multiraft::{MultiRaftCore, StateMachine};
 use teseladb_raft::Role;
@@ -145,34 +147,87 @@ impl AuthGate {
     }
 }
 
-/// The lease of this node and, while it leads Group 0, the table of the others'.
-#[derive(Debug, Default)]
+/// The lease of this node and, while it leads Group 0, the table of the others'
+/// ([`LeaseDriver`]), publishing the lease in the node's [`AuthGate`].
+#[derive(Debug)]
 pub struct AuthLeaseDriver {
-    next: Nanos,
-    lease: AuthLease,
-    table: Option<FenceTable>,
-    /// Every change of users and roles up to this index of Group 0 is fenced.
-    fenced: u64,
+    driver: LeaseDriver,
     gate: Arc<AuthGate>,
 }
 
-fn ms(n: Nanos) -> u64 {
-    n.0 / NANOS_PER_MS
+impl Default for AuthLeaseDriver {
+    fn default() -> AuthLeaseDriver {
+        AuthLeaseDriver::with_gate(Arc::default())
+    }
+}
+
+/// Core 0's replica of Group 0, for the protocol.
+struct Host<'a, S: StateMachine + Group0Holder> {
+    core: &'a mut MultiRaftCore<S>,
+    now: Nanos,
+}
+
+fn group0<S: StateMachine + Group0Holder>(core: &MultiRaftCore<S>) -> Option<&Group0Sm> {
+    core.state_machine(GROUP0).and_then(Group0Holder::group0)
 }
 
 fn applied<S: StateMachine + Group0Holder>(core: &MultiRaftCore<S>) -> u64 {
-    core.state_machine(GROUP0).and_then(Group0Holder::group0).map_or(0, |sm| sm.applied)
+    group0(core).map_or(0, |sm| sm.applied)
+}
+
+impl<S: StateMachine + Group0Holder> Group0Host for Host<'_, S> {
+    fn view(&self) -> Option<Group0View> {
+        let st = self.core.status(GROUP0)?;
+        Some(Group0View {
+            leads: st.role == Role::Leader && self.core.leader_ready(GROUP0),
+            leader: st.leader.0,
+            term: st.hard_state.term,
+            commit: st.hard_state.commit,
+            applied: applied(self.core),
+        })
+    }
+
+    fn known_nodes(&self) -> Vec<u64> {
+        let recorded = group0(self.core).map(|sm| sm.nodes.keys().map(|n| n.0).collect());
+        let mut all: Vec<u64> = recorded.unwrap_or_default();
+        if let Some(c) = self.core.conf(GROUP0) {
+            all.extend(c.voters.iter().chain(&c.learners).map(|n| n.0));
+        }
+        all.sort_unstable();
+        all.dedup();
+        all
+    }
+
+    fn quorum_heard_at_ns(&self) -> Option<u64> {
+        self.core.quorum_heard_at(GROUP0).map(|n| n.0)
+    }
+
+    fn send_confirm_round(&mut self, _now_ns: u64) {
+        self.core.send_confirm_round(GROUP0, self.now);
+    }
+}
+
+fn to_peer(m: FenceMsg) -> (NodeId, PeerMsg) {
+    match m {
+        FenceMsg::Ask { to, node, seq, applied } => {
+            (NodeId(to), PeerMsg::AuthLeaseAsk { node: NodeId(node), seq, applied })
+        }
+        FenceMsg::Grant { to, seq, commit, fenced } => {
+            let node = NodeId(to);
+            (node, PeerMsg::AuthLeaseGrant { node, seq, commit, fenced })
+        }
+    }
 }
 
 impl AuthLeaseDriver {
     /// A driver that publishes its lease in `gate`.
     pub fn with_gate(gate: Arc<AuthGate>) -> AuthLeaseDriver {
-        AuthLeaseDriver { gate, ..AuthLeaseDriver::default() }
+        AuthLeaseDriver { driver: LeaseDriver::new(NODE_HEARTBEAT.0), gate }
     }
 
     /// Whether this node holds its authorization lease at `now`.
     pub fn holds(&self, now: Nanos) -> bool {
-        self.lease.valid(ms(now))
+        self.driver.holds(now.0)
     }
 
     /// The catalog reads of the node's running operations.
@@ -182,56 +237,26 @@ impl AuthLeaseDriver {
 
     /// The index up to which changes of users and roles are fenced.
     pub fn fenced(&self) -> u64 {
-        self.fenced
+        self.driver.fenced()
     }
 
-    /// A tick of core 0 of node `me`: the request to Group 0's leader, answered in place on the
-    /// leader itself. Returns what to send.
+    /// A tick of core 0 of node `me` ([`LeaseDriver::tick`]). Returns what to send.
     pub fn tick<S: StateMachine + Group0Holder>(
         &mut self,
         core: &mut MultiRaftCore<S>,
         me: NodeId,
         now: Nanos,
     ) -> Vec<(NodeId, PeerMsg)> {
-        let Some(st) = core.status(GROUP0) else { return Vec::new() };
-        let commit = st.hard_state.commit;
-        if st.role == Role::Leader {
-            if self.table.is_none() {
-                let nodes: Vec<u64> = core
-                    .state_machine(GROUP0)
-                    .and_then(Group0Holder::group0)
-                    .map(|sm| sm.nodes.keys().map(|n| n.0).collect())
-                    .unwrap_or_default();
-                self.table = Some(FenceTable::take_over(&nodes, ms(now)));
-            }
-        } else {
-            self.table = None;
-        }
-        if let Some(table) = &self.table {
-            self.fenced = self.fenced.max(table.fenced(commit, ms(now)));
-        }
-        if now < self.next {
-            return Vec::new();
-        }
-        self.next = now + NODE_HEARTBEAT;
-        let seq = self.lease.ask(ms(now));
-        let applied = applied(core);
+        let pins = &self.gate.pins;
         // What the node acknowledges waits for its running operations (009 FR-006).
-        let acked = self.gate.pins.acked(applied, now);
-        if let Some(table) = &mut self.table {
-            let commit = table.request(me.0, acked, commit, ms(now));
-            self.lease.granted(seq, commit, applied);
-            self.publish();
-            return Vec::new();
-        }
-        if st.leader.0 == 0 {
-            return Vec::new();
-        }
-        vec![(st.leader, PeerMsg::AuthLeaseAsk { node: me, seq, applied: acked })]
+        let acked = |applied: u64| pins.acked(applied, now);
+        let out = self.driver.tick(&mut Host { core, now }, me.0, now.0, &acked);
+        self.publish();
+        out.into_iter().map(to_peer).collect()
     }
 
-    /// A message for core 0: a request on the leader (answered), a grant on its node. Any other
-    /// message is given back.
+    /// A message for core 0: a request on the leader (held until a majority confirms it still
+    /// leads), a grant on its node. Any other message is given back.
     pub fn on_peer<S: StateMachine + Group0Holder>(
         &mut self,
         core: &MultiRaftCore<S>,
@@ -240,15 +265,11 @@ impl AuthLeaseDriver {
     ) -> Result<Vec<(NodeId, PeerMsg)>, PeerMsg> {
         match msg {
             PeerMsg::AuthLeaseAsk { node, seq, applied } => {
-                let Some(table) = &mut self.table else { return Ok(Vec::new()) };
-                let commit = core.status(GROUP0).map_or(0, |s| s.hard_state.commit);
-                let commit = table.request(node.0, applied, commit, ms(now));
-                let fenced = table.fenced(commit, ms(now));
-                Ok(vec![(node, PeerMsg::AuthLeaseGrant { node, seq, commit, fenced })])
+                self.driver.on_ask(node.0, seq, applied, now.0);
+                Ok(Vec::new())
             }
             PeerMsg::AuthLeaseGrant { seq, commit, fenced, .. } => {
-                self.lease.granted(seq, commit, applied(core));
-                self.fenced = self.fenced.max(fenced);
+                self.driver.on_grant(seq, commit, fenced, applied(core));
                 self.publish();
                 Ok(Vec::new())
             }
@@ -257,7 +278,7 @@ impl AuthLeaseDriver {
     }
 
     fn publish(&self) {
-        self.gate.set(self.lease.until_ms());
+        self.gate.set(self.driver.until_ms());
     }
 }
 
@@ -266,7 +287,7 @@ impl AuthLeaseDriver {
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use teseladb_auth::fence::AUTH_LEASE_MS;
+    use teseladb_auth::fence::{AUTH_LEASE_MS, DRIFT_MARGIN_MS};
     use teseladb_meta::command::Group0Command;
     use teseladb_meta::group0::Group0Sm;
     use teseladb_multiraft::{CoreConfig, GroupDesc};
@@ -365,6 +386,60 @@ mod tests {
             self.nodes[&self.leader()].core.status(GROUP0).unwrap().hard_state.commit
         }
 
+        /// The node other than `out` that leads Group 0, if any.
+        fn leader_without(&self, out: NodeId) -> Option<NodeId> {
+            self.nodes
+                .iter()
+                .find(|(id, n)| {
+                    **id != out && n.core.status(GROUP0).is_some_and(|s| s.role == Role::Leader)
+                })
+                .map(|(id, _)| *id)
+        }
+
+        /// Cuts off Group 0's leader for 30 s while the other two elect a leader and commit a
+        /// change through it. Returns how long after the cut the old leader still authorized,
+        /// and checks at every step that it never authorizes once the change has passed the
+        /// fence.
+        fn cut_off_the_leader(&mut self) -> Nanos {
+            let old = self.leader();
+            let cut_at = self.now;
+            self.cut.insert(old);
+            let mut last_held = Nanos::ZERO;
+            let mut change: Option<(NodeId, u64)> = None;
+            while self.now < cut_at + Nanos::from_secs(30) {
+                self.step();
+                let now = self.now;
+                if self.nodes[&old].driver.holds(now) {
+                    last_held = now.saturating_since(cut_at);
+                }
+                let Some(new) = self.leader_without(old) else { continue };
+                match change {
+                    None => {
+                        let cmd = Group0Command::SetSetting { key: b"k".to_vec(), value: vec![] };
+                        let n = self.nodes.get_mut(&new).unwrap();
+                        if n.core.propose(GROUP0, &cmd.encode(), now).is_ok() {
+                            let index = n.core.status(GROUP0).unwrap().last_index;
+                            change = Some((new, index));
+                        }
+                    }
+                    Some((by, index)) => {
+                        if self.nodes[&by].driver.fenced() >= index {
+                            assert!(
+                                applied(&self.nodes[&old].core) >= index
+                                    || !self.nodes[&old].driver.holds(now),
+                                "the change passed the fence while the old leader authorizes \
+                                 without it, {} ms after the cut",
+                                now.saturating_since(cut_at).as_millis()
+                            );
+                        }
+                    }
+                }
+            }
+            let (by, index) = change.expect("the other two elect a leader and commit");
+            assert!(self.nodes[&by].driver.fenced() >= index, "the change passed the fence");
+            last_held
+        }
+
         /// Commits a change in Group 0 through its leader.
         fn change(&mut self) {
             let l = self.leader();
@@ -423,6 +498,44 @@ mod tests {
         c.cut.clear();
         c.steps(200);
         assert!(c.nodes[&f].driver.holds(c.now), "back in the cluster, it holds a lease again");
+    }
+
+    /// The longest a node cut off may still authorize: a lease taken at the cut, plus the tick
+    /// in which the test sees it.
+    const CUT_OFF_LIMIT: Nanos = Nanos::from_millis(AUTH_LEASE_MS - DRIFT_MARGIN_MS + 10);
+
+    /// Group 0's leader cut off from the rest keeps no lease of its own past one lease after the
+    /// last round a quorum acknowledged, which it sent before the cut (013 FR-012, D-073).
+    #[test]
+    fn a_leader_cut_off_stops_authorizing_within_a_lease() {
+        let mut c = Cluster::new();
+        c.steps(300);
+        let held = c.cut_off_the_leader();
+        assert!(
+            held <= CUT_OFF_LIMIT,
+            "the leader cut off authorized {} ms after the cut",
+            held.as_millis()
+        );
+    }
+
+    /// The same with Group 0 quiet: a quiescent leader no longer counts ticks towards stepping
+    /// down, so its role alone would keep its lease for good.
+    #[test]
+    fn a_quiet_leader_cut_off_stops_authorizing_within_a_lease() {
+        let mut c = Cluster::new();
+        c.steps(300);
+        for _ in 0..1000 {
+            if c.nodes[&c.leader()].core.is_quiesced(GROUP0) {
+                break;
+            }
+            c.step();
+        }
+        let held = c.cut_off_the_leader();
+        assert!(
+            held <= CUT_OFF_LIMIT,
+            "the quiet leader cut off authorized {} ms after the cut",
+            held.as_millis()
+        );
     }
 
     #[test]
