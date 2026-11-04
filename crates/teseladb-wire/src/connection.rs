@@ -111,6 +111,11 @@ pub struct Connection {
     pub tenant: u32,
 }
 
+/// The longest message a connection takes before it authenticates, with authentication on: a
+/// longer one closes it at its header, without an answer (measured on 04-11-2026 on a `refrouter`
+/// and a `refnode` 9.0.4: 16,384 bytes answered, 16,385 closed).
+pub const UNAUTHENTICATED_MAX_MESSAGE: usize = 16 * 1024;
+
 impl Connection {
     /// A new connection with `connectionId` `id` and every compressor enabled.
     pub fn new(id: i32) -> Connection {
@@ -158,6 +163,9 @@ impl Connection {
             .ok()
             .filter(|n| (HEADER_LEN..=MAX_MESSAGE_SIZE).contains(n))
             .ok_or(WireError::MessageLength(len))?;
+        if size > UNAUTHENTICATED_MAX_MESSAGE && self.auth.required && self.auth.user.is_none() {
+            return Err(WireError::UnauthenticatedLength(len));
+        }
         if self.buf.len() < size {
             return Ok(None);
         }

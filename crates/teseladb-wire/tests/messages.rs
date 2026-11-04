@@ -213,6 +213,35 @@ fn messages_arrive_in_pieces() {
     assert!(c.next_request().unwrap().is_none());
 }
 
+/// With authentication on, a connection not yet authenticated takes messages of at most 16 KiB
+/// and closes at the header of a longer one, without an answer (measured on 04-11-2026 on a
+/// `refrouter` and a `refnode` 9.0.4: 16,384 bytes answered, 16,385 closed). Once authenticated, or
+/// with authentication off, the limit is RefDb's.
+#[test]
+fn an_unauthenticated_connection_takes_messages_of_16_kib() {
+    use teseladb_wire::connection::UNAUTHENTICATED_MAX_MESSAGE;
+    let header = |len: i32| {
+        let mut h = Vec::new();
+        Header { length: len, request_id: 1, response_to: 0, op_code: opcode::OP_MSG }
+            .write(&mut h);
+        h
+    };
+    let over = UNAUTHENTICATED_MAX_MESSAGE as i32 + 1;
+    let mut c = Connection::new(1);
+    c.auth.required = true;
+    c.receive(&header(over));
+    assert_eq!(c.next_request().err(), Some(WireError::UnauthenticatedLength(over)));
+    // At the limit the message is read as any other.
+    let mut c = Connection::new(1);
+    c.auth.required = true;
+    c.receive(&header(UNAUTHENTICATED_MAX_MESSAGE as i32));
+    assert_eq!(c.next_request(), Ok(None), "waits for the rest");
+    // Without authentication required, the same header waits for its body.
+    let mut c = Connection::new(1);
+    c.receive(&header(over));
+    assert_eq!(c.next_request(), Ok(None));
+}
+
 #[test]
 fn message_length_limits() {
     for len in [15i32, -1, MAX_MESSAGE_SIZE as i32 + 1] {

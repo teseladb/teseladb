@@ -47,6 +47,9 @@ pub const LOGICAL_SESSION_TIMEOUT_MINUTES: i32 = 30;
 pub enum WireError {
     /// `messageLength` below the header or above [`MAX_MESSAGE_SIZE`].
     MessageLength(i32),
+    /// `messageLength` above [`connection::UNAUTHENTICATED_MAX_MESSAGE`] on a connection that
+    /// has not authenticated yet, with authentication on (013).
+    UnauthenticatedLength(i32),
     /// An opcode the server does not take (the legacy ones included).
     UnsupportedOpcode(i32),
     /// Required `OP_MSG` flag bits the server does not know.
@@ -69,6 +72,11 @@ impl fmt::Display for WireError {
             WireError::MessageLength(n) => {
                 write!(f, "message length {n} is invalid. Min 16 Max: {MAX_MESSAGE_SIZE}")
             }
+            WireError::UnauthenticatedLength(n) => write!(
+                f,
+                "message length {n} is too long for a connection that has not authenticated. Max: {}",
+                connection::UNAUTHENTICATED_MAX_MESSAGE
+            ),
             WireError::UnsupportedOpcode(op) => write!(f, "Message type {op} is not supported."),
             WireError::IllegalFlags(bits) => {
                 write!(f, "Message contains illegal flags value: Ob{bits:032b}")

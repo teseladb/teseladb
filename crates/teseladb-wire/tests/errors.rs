@@ -115,6 +115,10 @@ fn wire_errors_name_their_fault() {
         WireError::MessageLength(10).to_string(),
         "message length 10 is invalid. Min 16 Max: 48000000"
     );
+    assert_eq!(
+        WireError::UnauthenticatedLength(16_385).to_string(),
+        "message length 16385 is too long for a connection that has not authenticated. Max: 16384"
+    );
 }
 
 #[test]
