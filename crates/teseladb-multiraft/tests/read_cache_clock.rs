@@ -134,3 +134,35 @@ fn a_leader_keeps_its_clock_at_its_wall_clock_for_its_whole_term_and_its_voters_
         );
     }
 }
+
+/// A leader cut off from its voters whose wall clock jumps ahead does not carry that clock into
+/// the cluster time (005 FR-006): nothing vouches for its clock, so it gives out no mark and its
+/// clock stays where the others left it. Seed 313 of `multirange` (plan `heavy` at 200 %): a node
+/// whose clock had jumped 6 s ahead kept leading a range while cut off, raised the cluster time
+/// to its wall clock each tick and, once healed, handed it to the others; a node that restarted
+/// afterwards waited for its wall clock to pass a bound 3 s ahead, past the end of the run, and
+/// with a third node lost no write was answered after the heal.
+#[test]
+fn a_leader_cut_off_with_a_clock_ahead_leaves_the_cluster_time_alone() {
+    const AHEAD_MS: u64 = 6_000;
+    let (mut c, clocks) = cluster();
+    let l = c.elect();
+    c.ticks(20);
+    c.isolate(l);
+    c.skew.insert(l, AHEAD_MS);
+    // Longer than the second a jump keeps a clock aside: after it, cut off, the node is its own
+    // median.
+    c.ticks(300);
+    assert!(c.nodes[&l].core.status(G).is_some_and(|s| s.role == teseladb_raft::Role::Leader));
+    let wall = WALL0 + c.now.as_millis();
+    let ahead = clock_of(&clocks, l);
+    assert!(ahead.physical < wall + AHEAD_MS / 2, "its clock went to {ahead:?} at {wall}");
+    c.heal();
+    c.skew.remove(&l);
+    c.ticks(50);
+    let wall = WALL0 + c.now.as_millis();
+    for n in (1..=3).map(id) {
+        let clock = clock_of(&clocks, n);
+        assert!(clock.physical < wall + AHEAD_MS / 2, "{n:?} at {clock:?}, the wall at {wall}");
+    }
+}

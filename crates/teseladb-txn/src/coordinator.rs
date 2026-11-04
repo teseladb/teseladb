@@ -172,6 +172,15 @@ struct Write {
     rounds: u32,
 }
 
+/// Which range a request a range refused with `OutOfRange` may go to now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Again {
+    /// Only one the route names instead: it was just refused.
+    OtherRange,
+    /// The one the route names, also the same: it waited a tick.
+    SameRange,
+}
+
 /// The coordinator of one transaction.
 #[derive(Debug)]
 pub struct Coordinator {
@@ -605,7 +614,7 @@ impl Coordinator {
             self.send_record(Pending::Heartbeat);
         }
         for (g, p) in std::mem::take(&mut self.stalled) {
-            self.reroute(route, g, p);
+            self.reroute(route, g, p, Again::SameRange);
         }
         for g in std::mem::take(&mut self.retry_resolve) {
             self.resolve_in(route, g);
@@ -674,7 +683,7 @@ impl Coordinator {
     pub fn on_reply(&mut self, route: &dyn Route, id: ReqNo, r: Result<Reply, RangeError>) {
         let Some((g, p)) = self.pending.remove(&id) else { return };
         if matches!(r, Err(RangeError::OutOfRange)) && !matches!(p, Pending::Resolve(_)) {
-            self.reroute(route, g, p);
+            self.reroute(route, g, p, Again::OtherRange);
             return self.try_commit();
         }
         match p {
@@ -701,7 +710,7 @@ impl Coordinator {
     /// Sends again a request range `from` refused with `OutOfRange`, cut by the ranges `route`
     /// gives its keys now; it waits for the next tick while `route` puts every key in `from` or
     /// knows no range for one.
-    fn reroute(&mut self, route: &dyn Route, from: GroupId, p: Pending) {
+    fn reroute(&mut self, route: &dyn Route, from: GroupId, p: Pending, again: Again) {
         let record = record_key(self.txn);
         let keys: Vec<&[u8]> = match &p {
             Pending::Begin | Pending::Heartbeat | Pending::Commit(_) | Pending::Abort => {
@@ -722,7 +731,11 @@ impl Coordinator {
             // The transaction ended while the statement waited: its intents are not written.
             return self.write_done(w.stmt, Some(TxnError::NoSuchTransaction));
         }
-        let Some(ranges) = ranges.filter(|r| r.len() > 1 || !r.contains(&from)) else {
+        // Right after the refusal the request waits for the route to change (a split or a
+        // merge moves its keys); at the next tick it goes again even to the same range, which
+        // thaws if its merge was given up.
+        let moved = |r: &BTreeSet<GroupId>| r.len() > 1 || !r.contains(&from);
+        let Some(ranges) = ranges.filter(|r| again == Again::SameRange || moved(r)) else {
             return self.stalled.push((from, p));
         };
         match p {

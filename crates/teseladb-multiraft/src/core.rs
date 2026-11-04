@@ -1573,6 +1573,11 @@ impl<S: StateMachine> MultiRaftCore<S> {
         if cfg!(teseladb_bug = "write_below_read") {
             return;
         }
+        // A clock out of margin, or one no other clock vouches for, gives out no mark (005
+        // FR-006): nor does it carry its wall clock to the voters.
+        if !self.clock_rule.in_margin(self.now) || !self.clock_rule.vouched(self.now) {
+            return;
+        }
         let leads = self
             .groups
             .values()

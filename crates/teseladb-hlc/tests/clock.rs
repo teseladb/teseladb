@@ -423,3 +423,29 @@ fn a_clock_out_of_margin_raises_no_peak_while_it_hears_nobody() {
     g.tick(at(4_000), 18_000);
     assert_eq!(g.peak_ms(), 18_000, "the last verdict was in margin");
 }
+
+#[test]
+fn samples_taken_before_a_jump_vouch_for_nothing_after_it() {
+    // Seed 313 of `multirange` (plan `heavy` at 200 %): a leader's wall clock jumped 6 s ahead
+    // while it was cut off. The samples of its peers from just before the jump still counted for
+    // a second and said it was in margin; once they expired, that verdict stood, the node took
+    // its wall clock as vouched for and carried it into the cluster time (005 FR-006).
+    use teseladb_hlc::{ClockGuard, PEER_WINDOW};
+    use teseladb_types::{Nanos, NodeId};
+    let at = Nanos::from_secs(4);
+    let mut g = ClockGuard::default();
+    g.tick(at, 4_000);
+    g.observe(NodeId(2), 4_000, 4_000, at);
+    g.observe(NodeId(3), 4_000, 4_000, at);
+    g.report(0, at);
+    g.tick(at, 4_000);
+    assert!(g.vouched(at));
+    let jump = at + Nanos::from_millis(10);
+    g.tick(jump, 10_010);
+    assert!(!g.vouched(jump), "its peers measured the clock before the jump");
+    let later = jump + PEER_WINDOW + Nanos::from_millis(10);
+    g.tick(later, 10_010 + 1_010);
+    assert!(g.in_margin(later), "alone, it is its own median");
+    assert!(!g.vouched(later), "and nothing vouches for it");
+    assert_eq!(g.peak_ms(), 4_000, "its peak stays below the jump");
+}
