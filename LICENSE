@@ -21,23 +21,25 @@ You may install and run the Software, at no cost, to develop, test, evaluate,
 study and demonstrate it, and in continuous integration, provided that it holds
 no data of a production system.
 
+"Production" means any use of the Software that stores, processes or serves data
+of a real business, service, organization or person, or that backs a system that
+real users rely on. Development, testing, evaluation, demonstration and continuous
+integration with data made for those purposes are not production.
+
 3. Free production use, including commercial use
 
 You may run the Software in production, at no cost and for any purpose,
-including commercial purposes, when You do not offer it to third parties as a
-hosted or managed service (section 5) and at least one of these conditions holds:
+including commercial purposes, when all of these conditions hold:
 
   (a) the nodes of the Software that Your organization runs in production at the
-      same time, in every cluster, use 32 GB of RAM or less in total, whatever the
-      revenue of Your organization; or
+      same time, in every cluster, use 32 GB of RAM or less in total; and
 
   (b) the total revenue of Your organization in its last completed fiscal year was
       less than EUR 1,000,000 (one million euros) or its equivalent in other
-      currencies, whatever the RAM of its nodes; or
+      currencies; and
 
-  (c) Your use is non-commercial: personal use, education, academic research, or
-      use by a non-profit organization or a public administration, in each case
-      not for the commercial benefit of a third party.
+  (c) You do not offer the Software to third parties as a hosted or managed
+      service (section 5).
 
 "Your organization" includes every entity that controls, is controlled by, or is
 under common control with You.
@@ -47,13 +49,18 @@ container or control group (cgroup) when there is one, or the total memory of th
 machine otherwise, rounded up to the whole gigabyte. The total is the sum of the
 RAM of the nodes.
 
+At the written request of the Licensor, at most once a year, You will state in
+writing the total RAM of Your nodes in production and the revenue of Your
+organization that make Your use free under this section.
+
 4. Commercial license
 
 A separate commercial license from the Licensor is required for any production
-use when none of the conditions of section 3 holds, that is, when the nodes of
-Your organization use more than 32 GB of RAM in total, its revenue was
-EUR 1,000,000 or more and the use is commercial. It is also required for the uses
-of sections 5 and 6(e). See COMMERCIAL.md or https://teseladb.com/pricing.
+use when the nodes of Your organization use more than 32 GB of RAM in total, or
+when the revenue of Your organization was EUR 1,000,000 or more in its last
+completed fiscal year, in every case and whatever the purpose of the use. It is
+also required for the uses of sections 5 and 6(e). See COMMERCIAL.md or
+https://teseladb.com/pricing.
 
 5. Hosted or managed services
 
