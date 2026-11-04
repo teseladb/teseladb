@@ -96,6 +96,10 @@ impl ClockGuard {
             if (moved - elapsed).abs() > i128::from(MAX_CLOCK_OFFSET_MS) {
                 self.jumped = Some(now);
                 self.vouched = false;
+                // The peers' samples and Group 0's report measured the clock before the jump:
+                // they say nothing of the clock it reads now.
+                self.peers = PeerClocks::default();
+                self.report = None;
             }
         }
         self.last = Some((now, wall_ms));

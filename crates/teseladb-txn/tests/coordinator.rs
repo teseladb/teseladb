@@ -535,3 +535,35 @@ fn the_reaper_removes_a_finished_record_only_after_resolving_every_intent() {
     assert_eq!(n.get(A), doc(b"a"));
     assert_eq!(n.get(&long), doc(b"long"), "resolved before the removal");
 }
+
+/// A statement sent to a range frozen for a merge gets `OutOfRange` while the route still names
+/// that range. If the merge is given up and the range thaws, the keys stay where they were: the
+/// coordinator sends the statement to the same range again at its next tick and it is written
+/// (seeds 160 and 683 of `changestream` and 381 of `search`, plan `heavy` at 200 %, where the
+/// statements waited for good for a route that never changed).
+#[test]
+fn a_statement_refused_by_a_range_that_thaws_goes_to_it_again() {
+    let mut n = Node::new();
+    n.begin(1, TxnId(1));
+    assert_eq!(n.write(1, &[(A, put(b"a1"))]), Ok(()));
+    assert!(n.host.freeze(G1, 5));
+    n.settle();
+    let frozen = n.core.state_machine(G1).and_then(|sm| sm.frozen_for());
+    assert_eq!(frozen, Some(5), "the merge froze the range");
+    let stmt = n.send_write(1, &[(A, put(b"a2"))]);
+    n.settle();
+    n.advance(300, &[1]);
+    assert!(
+        !n.events.get(&1).is_some_and(|e| e
+            .iter()
+            .any(|e| matches!(e, Event::Written { stmt: s, .. } if *s == stmt))),
+        "a frozen range writes nothing"
+    );
+    let now = n.now;
+    assert!(n.host.thaw(&mut n.core, G1, now), "the merge is given up");
+    n.settle();
+    n.advance(300, &[1]);
+    assert_eq!(n.written(1, stmt), Ok(()));
+    assert!(matches!(n.commit(1), Outcome::Committed(_)));
+    assert_eq!(n.get(A), doc(b"a2"));
+}
