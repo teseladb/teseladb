@@ -136,8 +136,8 @@ fn a_leader_keeps_its_clock_at_its_wall_clock_for_its_whole_term_and_its_voters_
 }
 
 /// A leader cut off from its voters whose wall clock jumps ahead does not carry that clock into
-/// the cluster time (005 FR-006): nothing vouches for its clock, so it gives out no mark and its
-/// clock stays where the others left it. Seed 313 of `multirange` (plan `heavy` at 200 %): a node
+/// the cluster time (005 FR-006): nothing vouches for its clock, so it gives out no mark, for a
+/// write or a read, and its clock stays where the others left it. Seed 313 of `multirange` (plan `heavy` at 200 %): a node
 /// whose clock had jumped 6 s ahead kept leading a range while cut off, raised the cluster time
 /// to its wall clock each tick and, once healed, handed it to the others; a node that restarted
 /// afterwards waited for its wall clock to pass a bound 3 s ahead, past the end of the run, and
@@ -157,6 +157,10 @@ fn a_leader_cut_off_with_a_clock_ahead_leaves_the_cluster_time_alone() {
     let wall = WALL0 + c.now.as_millis();
     let ahead = clock_of(&clocks, l);
     assert!(ahead.physical < wall + AHEAD_MS / 2, "its clock went to {ahead:?} at {wall}");
+    // Nor does it give a read a mark from that clock: a read's mark goes into the clock too
+    // (seeds 1 569 of `multirange` and 1 392 of `splits`, plan `heavy`).
+    let now = c.now;
+    assert_eq!(c.nodes[&l].core.read_mark(now), None, "nothing vouches for its clock");
     c.heal();
     c.skew.remove(&l);
     c.ticks(50);

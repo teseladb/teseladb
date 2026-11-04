@@ -179,6 +179,9 @@ pub struct MultiRangeWorkload {
     /// The ranges, as Group 0 records them: bounds by range.
     table: BTreeMap<GroupId, (Vec<u8>, Vec<u8>)>,
     next_group: u64,
+    /// The keys of cuts a merge undid: a later split cuts there again now and then, as a split
+    /// at a key where a merge just joined two ranges does (A007-3-1).
+    undone: Vec<Vec<u8>>,
     next_merge: u64,
     /// The split in progress: range, cut key and new range.
     split: Option<(GroupId, Vec<u8>, GroupId)>,
@@ -236,6 +239,7 @@ impl MultiRangeWorkload {
             heal_at: None,
             table: BTreeMap::from([(FIRST, (START.to_vec(), profile.end.to_vec()))]),
             next_group: FIRST.0,
+            undone: Vec::new(),
             next_merge: 0,
             split: None,
             merge: None,
@@ -683,7 +687,10 @@ impl MultiRangeWorkload {
             [one] => *one,
             many => many[w.rng.range(0, many.len() as u64) as usize],
         };
-        let at = vec![space, w.rng.range(1, 256) as u8];
+        let mut at = vec![space, w.rng.range(1, 256) as u8];
+        if !self.undone.is_empty() && w.rng.chance(0.5) {
+            at = self.undone[w.rng.range(0, self.undone.len() as u64) as usize].clone();
+        }
         let merging = self.merge.is_some_and(|m| m.left == g || m.right == g);
         if s < at && at < e && !merging {
             self.next_group += u64::from(self.cores);
@@ -747,7 +754,8 @@ impl MultiRangeWorkload {
         let core = self.core();
         let absorbed = self.first_index(w, m.left, |sm| sm.absorbed() == Some((m.right, m.id)));
         if let Some(index) = absorbed {
-            let end = self.table.remove(&m.right).map(|(_, e)| e).unwrap_or_default();
+            let (cut, end) = self.table.remove(&m.right).unwrap_or_default();
+            self.undone.push(cut);
             self.table.entry(m.left).and_modify(|b| b.1 = end);
             self.settled.remove(&m.right);
             self.settled.insert(m.left, index);

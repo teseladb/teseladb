@@ -691,6 +691,12 @@ impl<S: StateMachine> MultiRaftCore<S> {
         if !self.clock_rule.in_margin(now) {
             return None;
         }
+        // With other voters, no mark while no other clock vouches for this one (005 FR-006): a
+        // read's mark goes into the clock like a write's.
+        let others = self.groups.values().any(|g| g.raw.conf().voters.len() > 1);
+        if others && !self.clock_rule.vouched(now) {
+            return None;
+        }
         match self.cfg.clock.0.now(self.wall_ms) {
             Next::Mark(ts) => Some(ts),
             Next::WaitUntil(_) | Next::AboveBound => None,

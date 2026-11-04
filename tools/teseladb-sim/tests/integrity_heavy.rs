@@ -10,6 +10,9 @@
 //! - `changestream` 160 and 683, `search` 381: a merge froze a range and was then given up; the
 //!   statements its frozen range refused waited for good for the route to change, so no
 //!   transaction committed after the heal (008).
+//! - `multirange` 1 569 and `splits` 1 392 of the `heavy` plan (at its usual rate), found while
+//!   checking the fix above: a node whose wall clock had jumped and that nothing vouched for gave
+//!   reads marks from it, which raised the cluster time the same way (005 FR-006).
 //! - `changestream` 87 and 304: cursors that could not read until the heal caught up one second
 //!   of history per read and never reached the transactions committed after it; a range's
 //!   answer is now bounded by bytes instead of a window of time (014 FR-003, T027).
@@ -37,6 +40,18 @@ fn the_seeds_of_the_integrity_run_pass() {
             workload: workload.into(),
             faults: FaultPlan::Heavy,
             fault_rate_pct: DOUBLE_FAULTS,
+            ..SimConfig::default()
+        };
+        assert_eq!(run_seed(&cfg, seed).verdict, Verdict::Pass, "{workload} {seed}");
+    }
+}
+
+#[test]
+fn the_heavy_seeds_of_the_clock_rule_pass() {
+    for (workload, seed) in [("multirange", 1_569), ("splits", 1_392)] {
+        let cfg = SimConfig {
+            workload: workload.into(),
+            faults: FaultPlan::Heavy,
             ..SimConfig::default()
         };
         assert_eq!(run_seed(&cfg, seed).verdict, Verdict::Pass, "{workload} {seed}");
