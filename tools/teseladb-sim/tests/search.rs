@@ -69,3 +69,16 @@ fn an_abort_without_an_answer_goes_again_and_every_search_answers() {
         assert_eq!(r.verdict, Verdict::Pass, "{workload} seed 790");
     }
 }
+
+/// Seed 548 of the `default` plan (`search` and `vector`): a searcher's read of the whole first
+/// range waited on its leader while a split cut the range, and the node's replica of the new range
+/// cleared its interval for a snapshot. The read then went on over the old interval, found nothing
+/// on the part split off and took it as read up to its mark, so the search missed a committed
+/// write there. The read is refused once its range no longer covers its interval.
+#[test]
+fn a_search_read_that_waits_across_a_split_starts_again() {
+    for workload in ["search", "vector"] {
+        let r = run_seed(&cfg(workload, FaultPlan::Default), 548);
+        assert_eq!(r.verdict, Verdict::Pass, "{workload} seed 548");
+    }
+}
