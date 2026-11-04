@@ -367,6 +367,9 @@ fn command<B: Backend + ?Sized>(
     // A `refrouter` reads and checks `$clusterTime` after the command's arguments and before it
     // authorizes (measured).
     cluster_time::check(&req.command, name, node)?;
+    if let Some((backend, _)) = cmds.as_mut() {
+        cluster_time::take(&req.command, name, &mut **backend)?;
+    }
     let target = match req.command.iter().next() {
         Some((_, teseladb_bson::Value::String(c))) => Some(c.as_str()),
         _ => None,

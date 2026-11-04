@@ -307,6 +307,8 @@ codes! {
     TIME_PROOF_MISMATCH = 204, "TimeProofMismatch";
     /// A `$clusterTime` signed with a key the node does not have for that time.
     KEY_NOT_FOUND = 211, "KeyNotFound";
+    /// A `$clusterTime` too far ahead of the node's wall clock (008 FR-013, DV-101).
+    CLUSTER_TIME_FAILS_RATE_LIMITER = 205, "ClusterTimeFailsRateLimiter";
     /// A document whose shard key holds an array (018 FR-001).
     SHARD_KEY_NOT_FOUND = 61, "ShardKeyNotFound";
     /// A zone no shard is in (018 FR-003).

@@ -1275,6 +1275,10 @@ impl Backend for ServerBackend {
         self.h.clock.0.peek().max(self.committed)
     }
 
+    fn observe_mark(&mut self, mark: Hlc) {
+        self.h.clock.0.update(mark);
+    }
+
     fn last_commit(&self) -> Option<Hlc> {
         Some(self.committed).filter(|c| *c > Hlc { physical: 0, logical: 0 })
     }

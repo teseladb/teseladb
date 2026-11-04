@@ -126,7 +126,10 @@ fn a_read_after_a_cluster_time_is_served_at_the_cluster_time() {
     assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
     assert!(!cursor_keys(&r, "cursor").contains(&"atClusterTime".to_owned()), "{r:?}");
     assert_eq!(m.scanned_at, Some(Some(from_timestamp(CLUSTER_TS))));
-    // The cluster time the client saw counts.
+    // The cluster time the client saw counts. It came from another node, whose clock is half a
+    // second ahead of this one's wall clock: a node takes no `$clusterTime` more than 1 s ahead of
+    // its wall clock (008 FR-013, DV-101).
+    m.now = 10_004_500;
     let seen = Document::new().with("clusterTime", ts(10_005, 2));
     let after = concern(Level::Majority).with("afterClusterTime", ts(10_005, 1));
     let r = run(&mut m, DB, find_with(after).with("$clusterTime", seen));

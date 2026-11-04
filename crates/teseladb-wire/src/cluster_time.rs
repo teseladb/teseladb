@@ -8,11 +8,13 @@
 
 use teseladb_auth::clustertime::{self, ClusterTimeError, KEY_LEN, Time};
 use teseladb_bson::{Document, Value};
+use teseladb_hlc::AHEAD_MS;
 use teseladb_mql::decimal_saturating;
 
+use crate::commands::Backend;
 use crate::error::{
-    CommandError, IDL_FAILED_TO_PARSE, KEY_NOT_FOUND, TIME_PROOF_MISMATCH, TYPE_MISMATCH,
-    UNSUPPORTED_FORMAT,
+    CLUSTER_TIME_FAILS_RATE_LIMITER, CommandError, IDL_FAILED_TO_PARSE, KEY_NOT_FOUND,
+    TIME_PROOF_MISMATCH, TYPE_MISMATCH, UNSUPPORTED_FORMAT,
 };
 use crate::hello::NodeInfo;
 use crate::types::{wrong_type, wrong_types};
@@ -141,4 +143,30 @@ pub fn check(cmd: &Document, name: &str, node: &NodeInfo) -> Result<(), CommandE
     let current = Time { secs: node.cluster_time.time, inc: node.cluster_time.increment };
     let signature = given.signature.as_ref().map(|(hash, id)| (hash, *id));
     ring.check(given.time, current, signature).map_err(|e| error(&e))
+}
+
+/// Takes the `$clusterTime` of command `name`, already checked, into the node's clock (008
+/// FR-013), as a `refrouter` 9.0.4 advances its clock with it: a write that follows lands above what
+/// the client saw, even on another node. One more than [`AHEAD_MS`] ahead of the node's wall
+/// clock fails with 205 and the node's clock is left alone (DV-101): a `refrouter` allows 365 days,
+/// but the HLC's bound on disk would then keep the node from starting again until its wall clock
+/// passed it.
+pub fn take<B: Backend + ?Sized>(
+    cmd: &Document,
+    name: &str,
+    backend: &mut B,
+) -> Result<(), CommandError> {
+    let Some(given) = parse(cmd, name)? else { return Ok(()) };
+    let mark = teseladb_hlc::from_timestamp((given.time.secs, given.time.inc));
+    let wall = backend.wall_ms();
+    if mark.physical > wall.saturating_add(AHEAD_MS) {
+        let msg = format!(
+            "New $clusterTime, {}, is too far from this node's wall clock time, {}.",
+            given.time.secs,
+            wall / 1000
+        );
+        return Err(CommandError::new(CLUSTER_TIME_FAILS_RATE_LIMITER, msg));
+    }
+    backend.observe_mark(mark);
+    Ok(())
 }

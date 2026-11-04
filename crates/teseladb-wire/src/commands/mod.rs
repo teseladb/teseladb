@@ -528,6 +528,9 @@ pub trait Backend {
     fn audit_event(&mut self, _atype: teseladb_auth::audit::AuditType, _param: Document) {}
     /// The node's clock as a mark: at or above every mark the node issued or received (008).
     fn cluster_mark(&self) -> teseladb_hlc::Hlc;
+    /// Takes a mark a client sent in its `$clusterTime` into the node's clock (008 FR-013): the
+    /// node's next mark is above it. Without a clock of its own, nothing.
+    fn observe_mark(&mut self, _mark: teseladb_hlc::Hlc) {}
     /// The mark of the last write this backend committed, if any: a command that commits writes
     /// answers it as its `operationTime`, the optime of a write in RefDb.
     fn last_commit(&self) -> Option<teseladb_hlc::Hlc> {
