@@ -33,7 +33,7 @@ pub const AUTHENTICATE: &str = "authenticate";
 pub const SPECULATIVE_AUTHENTICATE: &str = "speculativeAuthenticate";
 
 /// The commands of this module.
-const NAMES: [&str; 3] = [SASL_START, SASL_CONTINUE, AUTHENTICATE];
+pub const NAMES: [&str; 3] = [SASL_START, SASL_CONTINUE, AUTHENTICATE];
 
 /// The commands a client runs before it authenticates (measured: everything else answers
 /// `Unauthorized`).

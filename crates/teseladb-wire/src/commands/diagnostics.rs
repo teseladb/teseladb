@@ -16,11 +16,13 @@ use teseladb_range::read::ReadConcern;
 use super::admin::admin_only;
 use super::args::uuid_value;
 use super::catalog::collection_size;
+use super::command_list::COMMANDS;
 use super::names::{self, full};
 use super::query::{SCAN_CHUNK, documents_of};
 use super::{Backend, Ctx, lock, new_uuid};
 use crate::MAX_BSON_OBJECT_SIZE;
 use crate::error::{BAD_VALUE, CommandError, INVALID_NAMESPACE, OPERATION_FAILED};
+use crate::failpoint::CONFIGURE_FAIL_POINT;
 use crate::types::{type_name, wrong_type, wrong_types};
 
 /// `buildInfo`.
@@ -426,7 +428,7 @@ fn metrics(
     tests: bool,
 ) -> Document {
     let names =
-        COMMANDS.iter().map(|c| c.name).filter(|name| tests || *name != "configureFailPoint");
+        COMMANDS.iter().map(|c| c.name).filter(|name| tests || *name != CONFIGURE_FAIL_POINT);
     let mut network = Document::new();
     // Once a client completed a handshake (measured on a `refrouter` 9.0.4). RefDb's value is its
     // own running average; TeselaDB gives the mean of every handshake.
@@ -934,212 +936,6 @@ pub fn coll_stats<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document,
         .with("ok", 1.0))
 }
 
-/// One command of `listCommands`, with the fields a `refrouter` 9.0.4 gives it.
-struct CommandInfo {
-    name: &'static str,
-    help: &'static str,
-    requires_auth: bool,
-    requires_authz_checks: bool,
-    secondary_ok: bool,
-    admin_only: bool,
-    api_v1: bool,
-}
-
-const NO_HELP: &str = "no help defined";
-const HELLO_HELP: &str = "Status information for clients negotiating a connection with this server";
-
-const fn info(
-    name: &'static str,
-    help: &'static str,
-    flags: [bool; 4],
-    api_v1: bool,
-) -> CommandInfo {
-    let [requires_auth, requires_authz_checks, secondary_ok, admin_only] = flags;
-    CommandInfo {
-        name,
-        help,
-        requires_auth,
-        requires_authz_checks,
-        secondary_ok,
-        admin_only,
-        api_v1,
-    }
-}
-
-/// The commands TeselaDB answers, in name order, as `listCommands` of a `refrouter` 9.0.4 shows
-/// them; the help of `getParameter` and `setParameter` lists TeselaDB's parameters.
-const COMMANDS: [CommandInfo; 64] = [
-    info(BUILD_INFO, NO_HELP, [true, false, true, false], false),
-    info(
-        "bulkWrite",
-        "command to apply inserts, updates and deletes in bulk",
-        [true, true, false, true],
-        true,
-    ),
-    info(super::fle::CLEANUP, NO_HELP, [true, true, false, false], false),
-    info("collMod", NO_HELP, [true, true, false, false], true),
-    info(COLL_STATS, NO_HELP, [true, true, true, false], false),
-    info("compact", NO_HELP, [true, true, true, false], false),
-    info(super::fle::COMPACT, NO_HELP, [true, true, false, false], false),
-    info(
-        "configureFailPoint",
-        "modifies the settings of a fail point",
-        [false, false, true, true],
-        false,
-    ),
-    info(
-        super::maintenance::CONN_POOL_STATS,
-        "stats about connections between servers in a replica set or sharded cluster.",
-        [true, true, true, false],
-        false,
-    ),
-    info(CONNECTION_STATUS, NO_HELP, [false, false, true, false], false),
-    info(super::capped::CONVERT_TO_CAPPED, NO_HELP, [true, true, false, false], false),
-    info("count", NO_HELP, [true, true, true, false], true),
-    info("create", NO_HELP, [true, true, false, false], true),
-    info("currentOp", NO_HELP, [true, true, true, true], false),
-    info(super::maintenance::DATA_SIZE, NO_HELP, [true, true, true, false], false),
-    info(DB_STATS, NO_HELP, [true, true, true, false], false),
-    info("delete", "delete documents", [true, true, false, false], true),
-    info(
-        "distinct",
-        "{ distinct : 'collection name' , key : 'a.b' , query : {} }",
-        [true, true, true, false],
-        false,
-    ),
-    info("drop", NO_HELP, [true, true, true, false], true),
-    info(
-        super::maintenance::DROP_CONNECTIONS,
-        "Drop egress connections to specified host and port",
-        [true, true, true, true],
-        false,
-    ),
-    info("dropDatabase", NO_HELP, [true, true, true, false], true),
-    info("endSessions", "end a set of logical sessions", [true, false, true, false], true),
-    info("find", "query for documents", [true, true, false, false], true),
-    info("findAndModify", NO_HELP, [true, true, true, false], true),
-    info(
-        "fsync",
-        "invoke fsync on all shards belonging to the cluster",
-        [true, true, true, true],
-        false,
-    ),
-    info(
-        "getClusterParameter",
-        "Refresh and get cached cluster server parameter value from refrouter.",
-        [true, true, true, true],
-        false,
-    ),
-    info(GET_CMD_LINE_OPTS, NO_HELP, [true, true, true, true], false),
-    info(
-        super::diagnostic_data::GET_DIAGNOSTIC_DATA,
-        "get latest diagnostic data collection snapshot",
-        [true, true, true, true],
-        false,
-    ),
-    info(GET_LOG, "{ getLog : '*' }  OR { getLog : 'global' }", [true, true, true, true], false),
-    info(
-        "getDefaultRWConcern",
-        "Gets the default read or write concern for a cluster",
-        [true, true, false, true],
-        false,
-    ),
-    info("getMore", "retrieve more documents for a cursor id", [true, true, true, false], true),
-    info("getParameter", "", [true, true, true, true], false),
-    info("hello", HELLO_HELP, [false, true, true, false], true),
-    info(HOST_INFO, NO_HELP, [true, true, true, false], false),
-    info("insert", "insert documents", [true, true, false, false], true),
-    info("isMaster", HELLO_HELP, [false, true, true, false], false),
-    info(super::maintenance::IS_DB_GRID, NO_HELP, [true, true, true, false], false),
-    info(
-        "killAllSessions",
-        "kill all logical sessions, for a user, and their operations",
-        [true, true, true, false],
-        false,
-    ),
-    info("killCursors", "Kill a list of cursor ids", [true, false, true, false], true),
-    info("killOp", NO_HELP, [true, true, true, true], false),
-    info(
-        super::session::KILL_ALL_SESSIONS_BY_PATTERN,
-        "kill logical sessions by pattern",
-        [true, true, true, false],
-        false,
-    ),
-    info(
-        "killSessions",
-        "kill a logical session and its operations",
-        [true, false, true, false],
-        false,
-    ),
-    info("listCollections", NO_HELP, [true, true, true, false], true),
-    info(LIST_COMMANDS, "get a list of all db commands", [false, false, true, false], false),
-    info("listDatabases", NO_HELP, [true, true, true, true], true),
-    info("listIndexes", NO_HELP, [true, true, true, false], true),
-    info(super::maintenance::LOCK_INFO, NO_HELP, [true, true, true, true], false),
-    info(super::maintenance::LOG_ROTATE, NO_HELP, [true, true, true, true], false),
-    info(
-        "ping",
-        "a way to check that the server is alive. responds immediately even if server is in a db lock.",
-        [false, false, true, false],
-        true,
-    ),
-    info("refreshSessions", "renew a set of logical sessions", [true, false, true, false], true),
-    info(
-        super::query_settings::REMOVE_QUERY_SETTINGS,
-        "Removes the query settings for the query shape of a given query.",
-        [true, true, false, true],
-        false,
-    ),
-    info("renameCollection", NO_HELP, [true, true, false, true], true),
-    info(
-        super::admin::REPL_SET_GET_STATUS,
-        "Not supported through refrouter",
-        [true, true, true, true],
-        false,
-    ),
-    info(
-        super::maintenance::ROTATE_CERTIFICATES,
-        "Rotate certificates for new SSL connections",
-        [true, true, true, true],
-        false,
-    ),
-    info(
-        SERVER_STATUS,
-        "returns lots of administrative server statistics. Optionally set {..., all: 1} to retrieve all server status sections.",
-        [true, true, true, false],
-        false,
-    ),
-    info(
-        "setClusterParameter",
-        "Set a cluster wide parameter on every node",
-        [true, true, false, true],
-        false,
-    ),
-    info(
-        "setDefaultRWConcern",
-        "Sets the default read or write concern for a cluster",
-        [true, true, false, true],
-        false,
-    ),
-    info("setParameter", "", [true, true, true, true], false),
-    info(
-        super::query_settings::SET_QUERY_SETTINGS,
-        "Sets the query settings for the query shape of a given query.",
-        [true, true, false, true],
-        false,
-    ),
-    info(
-        "shutdown",
-        "Shuts down the refrouter. Must be run against the admin database and either (1) run from localhost or (2) run while authenticated with the shutdown privilege. Spends 'timeoutSecs' in quiesce mode, where the refrouter continues to allow operations to run, but directs clients to route new operations to other refrouter nodes.",
-        [true, true, true, true],
-        false,
-    ),
-    info("startSession", "start a logical session", [true, false, true, false], false),
-    info("update", "update documents", [true, true, false, false], true),
-    info(super::validate::VALIDATE, NO_HELP, [true, true, true, false], false),
-    info(WHATS_MY_URI, "{whatsmyuri:1}", [true, true, true, false], false),
-];
-
 /// The help of `getParameter`, as 9.0.4 writes it, with TeselaDB's parameters.
 fn get_parameter_help() -> String {
     let mut h = String::from(
@@ -1165,14 +961,13 @@ fn set_parameter_help() -> String {
     h
 }
 
-/// `listCommands`: `configureFailPoint` only on a node with `enableTestCommands`.
+/// `listCommands`: every command the node answers ([`crate::dispatch::command_names`]), in
+/// byte order of their names as a `refrouter` 9.0.4 lists them, with the fields measured there;
+/// `configureFailPoint` only on a node with `enableTestCommands`.
 pub fn list_commands<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     let tests = lock(ctx.shared).failpoint.is_some();
     let mut commands = Document::new();
-    for c in &COMMANDS {
-        if c.name == "configureFailPoint" && !tests {
-            continue;
-        }
+    for c in COMMANDS.iter().filter(|c| tests || c.name != CONFIGURE_FAIL_POINT) {
         let help = match c.name {
             "getParameter" => get_parameter_help(),
             "setParameter" => set_parameter_help(),
@@ -1184,7 +979,7 @@ pub fn list_commands<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Docume
             .with("requiresAuthzChecks", c.requires_authz_checks)
             .with("secondaryOk", c.secondary_ok)
             .with("adminOnly", c.admin_only);
-        if c.name == "find" {
+        if c.secondary_override_ok {
             entry.push("secondaryOverrideOk", true);
         }
         let api: Vec<Value> = if c.api_v1 { vec![Value::from("1")] } else { Vec::new() };
@@ -1195,8 +990,8 @@ pub fn list_commands<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Docume
     Ok(Document::new().with("commands", commands).with("ok", 1.0))
 }
 
-/// Whether TeselaDB's `listCommands` names `name`, so tests can check the table against the
-/// commands the dispatch runs.
-pub fn listed(name: &str) -> bool {
-    COMMANDS.iter().any(|c| c.name == name)
+/// The names `listCommands` gives, `configureFailPoint` included, in its order: tests check them
+/// against the commands the dispatch takes.
+pub fn listed_names() -> impl Iterator<Item = &'static str> {
+    COMMANDS.iter().map(|c| c.name)
 }

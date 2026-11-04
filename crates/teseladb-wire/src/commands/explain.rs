@@ -244,7 +244,7 @@ pub fn explain<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Co
         None => {}
     }
     if !EXPLAINABLE.contains(&name.as_str()) {
-        let known = is_data_command(&name) || super::diagnostics::listed(&name);
+        let known = is_data_command(&name) || super::diagnostics::listed_names().any(|n| n == name);
         if known {
             // A known command parses before it is refused.
             crate::generic::parse(&inner, &name)?;

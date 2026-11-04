@@ -9,6 +9,11 @@
 //!
 //! The pieces of one batch go one after another on the connection; the decoder gives the batch
 //! back once its last piece is in the buffer, reading only the headers until then.
+//!
+//! From protocol 6 on, a `Forward` or `ForwardResp` that does not fit a frame's 16 MiB goes the
+//! same way as pieces of version [`FORWARD_CHUNK_VERSION`], whose joined data is the message's
+//! kind followed by its payload: a forwarded write of a document of 16 MiB, or a range's answer
+//! with the versions of one commit, can pass a frame.
 
 use teseladb_keys::Hlc;
 use teseladb_raft::{MAX_ENTRY_BYTES, Message};
@@ -24,8 +29,14 @@ pub const MAX_CHUNKED_LEN: usize = MAX_ENTRY_BYTES + (1 << 20);
 pub const RAFT_CHUNK_KIND: u8 = 0x59;
 /// Version of a piece's body.
 pub const RAFT_CHUNK_VERSION: u8 = 1;
+/// Version of the pieces of a `Forward` or `ForwardResp` (protocol 6).
+pub const FORWARD_CHUNK_VERSION: u8 = 2;
 /// `kind` of a `RaftBatch`.
 pub(super) const RAFT_BATCH_KIND: u8 = 0x02;
+/// `kind` of a `Forward`.
+pub(super) const FORWARD_KIND: u8 = 0x30;
+/// `kind` of a `ForwardResp`.
+pub(super) const FORWARD_RESP_KIND: u8 = 0x31;
 
 /// Bytes of a piece's body before its data.
 const PIECE_PREFIX: usize = 1 + 8 + 8;
@@ -97,20 +108,42 @@ fn push_frame(kind: u8, payload: &[u8], frames: &mut Vec<u8>) {
 
 /// Cuts a batch payload into `RaftChunk` frames.
 fn pieces(payload: &[u8], frames: &mut Vec<u8>) -> Result<(), FrameError> {
+    cut(RAFT_CHUNK_VERSION, payload, frames)
+}
+
+/// Cuts `payload` into `RaftChunk` frames of version `version`.
+fn cut(version: u8, payload: &[u8], frames: &mut Vec<u8>) -> Result<(), FrameError> {
     if payload.len() > MAX_CHUNKED_LEN {
         return Err(FrameError::TooLarge { len: payload.len() as u64 });
     }
     let total = payload.len() as u64;
     for (i, data) in payload.chunks(PIECE_DATA).enumerate() {
         let mut e = Encoder::with_capacity(PIECE_PREFIX + data.len());
-        e.u8(RAFT_CHUNK_VERSION).u64(total).u64((i * PIECE_DATA) as u64).raw(data);
+        e.u8(version).u64(total).u64((i * PIECE_DATA) as u64).raw(data);
         push_frame(RAFT_CHUNK_KIND, &e.finish(), frames);
     }
     Ok(())
 }
 
+/// Writes a forwarded request or answer of kind `kind` and payload `payload`, too large for a
+/// frame, as pieces at the end of `out`; nothing is written if it passes [`MAX_CHUNKED_LEN`].
+pub(super) fn encode_forward(
+    kind: u8,
+    payload: &[u8],
+    out: &mut Vec<u8>,
+) -> Result<(), FrameError> {
+    let mut joined = Vec::with_capacity(1 + payload.len());
+    joined.push(kind);
+    joined.extend_from_slice(payload);
+    let mut frames = Vec::new();
+    cut(FORWARD_CHUNK_VERSION, &joined, &mut frames)?;
+    out.extend_from_slice(&frames);
+    Ok(())
+}
+
 /// A piece read from the buffer.
 struct Piece<'a> {
+    version: u8,
     total: u64,
     offset: u64,
     data: &'a [u8],
@@ -138,10 +171,11 @@ fn read_piece(buf: &[u8], at: usize) -> Result<Option<Piece<'_>>, FrameError> {
     let Ok((version, total, offset)) = prefix else { return Err(bad(at)) };
     let data = &frame[HEADER_LEN + PIECE_PREFIX..];
     let end = offset.checked_add(data.len() as u64);
-    if version != RAFT_CHUNK_VERSION || data.is_empty() || end.is_none_or(|e| e > total) {
+    let known = version == RAFT_CHUNK_VERSION || version == FORWARD_CHUNK_VERSION;
+    if !known || data.is_empty() || end.is_none_or(|e| e > total) {
         return Err(bad(at));
     }
-    Ok(Some(Piece { total, offset, data, len: 4 + len }))
+    Ok(Some(Piece { version, total, offset, data, len: 4 + len }))
 }
 
 /// Reads the pieces of a batch from the start of `buf`: `Ok(None)` until the last one is there,
@@ -150,14 +184,14 @@ pub(super) fn decode_pieces(buf: &[u8]) -> Result<Option<(PeerMsg, usize)>, Fram
     // First the headers, to know whether the batch is complete without copying anything.
     let mut at = 0;
     let mut got = 0u64;
-    let mut total = None;
+    let mut first: Option<(u64, u8)> = None;
     let mut found: Vec<&[u8]> = Vec::new();
-    while total.is_none_or(|t| got < t) {
+    while first.is_none_or(|(t, _)| got < t) {
         let Some(p) = read_piece(&buf[at..], at)? else { return Ok(None) };
-        if total.is_none() && p.total > MAX_CHUNKED_LEN as u64 {
+        if first.is_none() && p.total > MAX_CHUNKED_LEN as u64 {
             return Err(FrameError::TooLarge { len: p.total });
         }
-        if *total.get_or_insert(p.total) != p.total || p.offset != got {
+        if *first.get_or_insert((p.total, p.version)) != (p.total, p.version) || p.offset != got {
             return Err(bad(at));
         }
         got += p.data.len() as u64;
@@ -165,8 +199,15 @@ pub(super) fn decode_pieces(buf: &[u8]) -> Result<Option<(PeerMsg, usize)>, Fram
         at += p.len;
     }
     let payload = found.concat();
-    let mut d = Decoder::new(&payload);
-    let msg = PeerMsg::decode_payload(RAFT_BATCH_KIND, &mut d)
+    let (kind, body) = match first.map(|(_, v)| v) {
+        Some(FORWARD_CHUNK_VERSION) => match payload.split_first() {
+            Some((&k, body)) if k == FORWARD_KIND || k == FORWARD_RESP_KIND => (k, body),
+            _ => return Err(bad(0)),
+        },
+        _ => (RAFT_BATCH_KIND, &payload[..]),
+    };
+    let mut d = Decoder::new(body);
+    let msg = PeerMsg::decode_payload(kind, &mut d)
         .and_then(|m| d.finish().map(|()| m))
         .map_err(|err| FrameError::Malformed { kind: RAFT_CHUNK_KIND, err })?;
     Ok(Some((msg, at)))

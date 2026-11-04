@@ -23,6 +23,7 @@ fn measured() -> UpdateDescription {
                 PathPart::Field("x".into()),
             ],
         )],
+        pipeline: false,
     }
 }
 

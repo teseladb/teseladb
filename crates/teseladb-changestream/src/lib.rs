@@ -10,6 +10,7 @@ pub mod describe;
 pub mod event;
 pub mod meta;
 pub mod order;
+pub mod pipeline_diff;
 pub mod pushdown;
 pub mod read;
 pub mod resolved;

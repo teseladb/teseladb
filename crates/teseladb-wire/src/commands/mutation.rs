@@ -10,6 +10,7 @@
 use teseladb_bson::{BsonError, Document, Limits, MAX_DEPTH, MAX_SIZE, RawDoc, RawValue, Value};
 use teseladb_changestream::describe::{Touch, describe};
 use teseladb_changestream::meta::RetryInfo;
+use teseladb_changestream::pipeline_diff::{describe_diff, pipeline_diff};
 use teseladb_changestream::update_desc::UpdateDescription;
 use teseladb_collation::{ParsedCollation, parse_collation};
 use teseladb_hlc::{Hlc, to_timestamp};
@@ -1576,6 +1577,12 @@ fn modify(
                         let touches: Vec<Touch> = changes.into_iter().map(touch).collect();
                         let d = describe(&Document::from(doc), &out.doc, &touches, position);
                         checker.changes.borrow_mut().push((at.clone(), d));
+                    } else if u.is_pipeline() {
+                        // A pipeline has no operators: its description compares the documents,
+                        // and one whose diff is as large as the document replaced it (014 FR-009).
+                        if let Some(diff) = pipeline_diff(&Document::from(doc), &out.doc) {
+                            checker.changes.borrow_mut().push((at.clone(), describe_diff(&diff)));
+                        }
                     }
                     let new = stored_bytes(&out.doc, Stored::Update).map_err(&during)?;
                     checker.check(&new, Some(doc)).map_err(&during)?;

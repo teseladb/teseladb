@@ -64,8 +64,10 @@ variants!(
     // A cursor whose resolved mark ignores the pending intents (014 T020): a transaction commits
     // at its intents' mark below what the cursor read past, and `changestream` never emits it
     // (seed 6). Since a search reads up to its own mark (011 FR-010), the `search` workload finds
-    // it first, at seed 1: a search misses a transaction committed at its intents' mark.
-    ("emit_above_resolved", "search_results", Default, 1000),
+    // it too (seed 11): a search misses a transaction committed at its intents' mark. Since a
+    // range answers by bytes instead of one second at a time (014 T027), `changestream` finds it
+    // first, at seed 7 (`changestream_delivery`; measured 04-11-2026 on main e64db16).
+    ("emit_above_resolved", "changestream_delivery", Default, 1000),
     ("follower_local_read", "linearizable", Default, 1000),
     ("follower_read_above_closed", "mvcc", Default, 1000),
     ("fsync_retry_success", "recovery", Default, 1000),
@@ -169,18 +171,19 @@ variants!(
     ("split_done_by_end", "range_bounds", Heavy, 1000),
     // The split retracts the intents of the half that moves (007 T017): a transaction that commits
     // loses its write there, and `splits` reads an older value at a mark above its commit
-    // (`intents`, seed 36). The cursors of `changestream` find it first, at seed 2: a committed
-    // change at or below a cursor's resolved mark is never emitted (measured 03-11-2026 on main
-    // f3f92e6).
-    ("split_loses_intents", "changestream_delivery", Default, 1000),
+    // (`intents`), first at seed 7 since a range answers changes by bytes (014 T027). The cursors
+    // of `changestream` find it too, at seed 55: a transaction emitted in part
+    // (`changestream_delivery`; measured 04-11-2026 on main e64db16).
+    ("split_loses_intents", "intents", Default, 1000),
     // A stream resumed inside a transaction takes the token's mark for the whole transaction
     // (014 T020): `changestream` sees the rest of the transaction dropped after a short batch.
     ("split_txn_events", "changestream_delivery", Default, 1000),
     // A deposed leader's read: `range-docs` reads again at that mark and sees another version, which
-    // the `mvcc` check reports before the history is checked (seed 1); `follower_local_read` covers
-    // `linearizable`. Seed 1 of `changestream`, first by name, fails too: a read sees a value
-    // committed above its mark (`intents`; measured 03-11-2026 on main f3f92e6).
-    ("stale_lease_read", "intents", Default, 1000),
+    // the `mvcc` check reports before the history is checked (seed 1), and `splits` reads a value
+    // committed above its mark (`intents`, seed 1). Seed 1 of `changestream`, first by name, fails
+    // too: since a range answers changes by bytes (014 T027) its documents' history is not
+    // linearizable (`linearizable`; measured 04-11-2026 on main e64db16).
+    ("stale_lease_read", "linearizable", Default, 1000),
     // The TTL monitor's cutoff adds the index's seconds instead of taking them away: the `indexes`
     // workload's delete takes a document that has not expired.
     ("ttl_deletes_live", "ttl", Default, 1000),

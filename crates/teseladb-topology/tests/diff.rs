@@ -198,6 +198,7 @@ fn edges_of_a_description() {
         ],
         truncated: vec![("arr.0".to_owned(), 1), ("nope.a".to_owned(), 2)],
         disambiguated: vec![("e".to_owned(), Vec::new())],
+        pipeline: false,
     };
     let arr = Document::new()
         .with("a", true)

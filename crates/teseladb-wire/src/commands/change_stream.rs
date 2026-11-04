@@ -117,6 +117,10 @@ pub struct ChangeStream {
     /// The token of the `invalidate` that ended the stream: nothing is read after it, and the
     /// cursor closes once the events before it are returned, with it as `postBatchResumeToken`.
     invalidated: Option<ResumeToken>,
+    /// The error of a read that failed on an event after queueing the events before it: it is
+    /// the answer once those are returned, instead of reading again (the read would give them
+    /// again, as the stream's mark stays below them).
+    failed: Option<CommandError>,
 }
 
 fn stage_error(e: StageError) -> CommandError {
@@ -317,6 +321,7 @@ pub fn open<B: Backend + ?Sized>(
         resume_check: resume_event,
         resume_ts,
         invalidated: None,
+        failed: None,
     };
     resumed_on_end(&mut stream, ctx.backend.random())?;
     let mut state = QueryCursor::buffered(Vec::new());
@@ -354,18 +359,25 @@ pub fn more<B: Backend + ?Sized>(
     let started = backend.cluster_mark();
     let mut out = Vec::new();
     let mut last = None;
+    // The bytes of the batch, across every read of the ranges this `getMore` makes.
+    let mut bytes = 0usize;
     loop {
-        if stream.pending.is_empty() {
+        // A read that fails on an event (one too large to serialize) has queued the events
+        // before it: the batch takes them, and fails only if it reaches that event, as a
+        // `refrouter` 9.0.4 fails the `getMore` whose batch comes to it (`cs-split-large`).
+        let mut failure = None;
+        if stream.pending.is_empty() && stream.failed.is_some() {
+            failure = stream.failed.take();
+        } else if stream.pending.is_empty() {
             match poll(backend, stream) {
                 Ok(()) => {}
                 // The wait ran out while the node read the ranges: an empty `getMore` answers
                 // with what it has, it does not fail (a `refrouter` never answers
                 // `MaxTimeMSExpired` to the `getMore` of a stream).
                 Err(e) if e.code.code == error::MAX_TIME_MS_EXPIRED.code => break,
-                Err(e) => return Err(resumable(e)),
+                Err(e) => failure = Some(e),
             }
         }
-        let mut bytes = 0usize;
         while batch.is_none_or(|b| out.len() < b) {
             let Some((token, doc)) = stream.pending.pop_front() else { break };
             let n = teseladb_changestream::split_large::size(&doc).unwrap_or(usize::MAX);
@@ -379,6 +391,15 @@ pub fn more<B: Backend + ?Sized>(
         }
         // Events left waiting: the batch is full (or the stream ended with them still to give).
         let full = !stream.pending.is_empty();
+        if let Some(e) = failure {
+            // The batch filled (its size or its bytes) before the failing event, which waits
+            // for a later `getMore`.
+            if full || batch.is_some_and(|b| out.len() >= b) {
+                stream.failed = Some(e);
+                break;
+            }
+            return Err(resumable(e));
+        }
         let ended = stream.invalidated.is_some() && !full;
         let caught_up = !out.is_empty() && stream.position.from() >= started;
         if full || ended || caught_up || backend.now_ms() >= deadline || !backend.pause() {
@@ -716,7 +737,8 @@ fn check_resume_event(
                 "cannot resume stream; the resume token was not found. {{_data: \"{}\"}}",
                 token.encode()
             ),
-        ));
+        )
+        .with_label(NON_RESUMABLE_LABEL));
     }
     Ok(())
 }

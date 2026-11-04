@@ -217,6 +217,15 @@ pub fn update_entry(before: &Document, desc: &UpdateDescription) -> Document {
     Document::new().with("$v", DIFF_VERSION).with("diff", root.to_document())
 }
 
+/// The `o` of a pipeline update that took `before` to `after`: `{$v: 2, diff}` with the diff of
+/// the documents, or `after` whole when that diff makes it a replacement (014 FR-009, 018 FR-009).
+pub fn pipeline_entry(before: &Document, after: &Document) -> Document {
+    match teseladb_changestream::pipeline_diff::pipeline_diff(before, after) {
+        Some(diff) => Document::new().with("$v", DIFF_VERSION).with("diff", diff),
+        None => after.clone(),
+    }
+}
+
 /// Why a diff does not apply, as RefDb 9.0.4 tells (measured on 03-11-2026).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DiffError {

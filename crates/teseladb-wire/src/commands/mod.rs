@@ -29,6 +29,7 @@ pub mod change_stream_ddl;
 pub mod chunks;
 pub mod cluster_admin;
 pub mod coll_mod_kinds;
+mod command_list;
 pub mod config_db;
 pub mod config_settings;
 pub mod cross_range;
@@ -1061,15 +1062,23 @@ const NAMES: [&str; 122] = [
     diagnostic_data::GET_DIAGNOSTIC_DATA,
 ];
 
+/// The commands of this module and its submodules, as [`run`] takes them (with the lower-case
+/// `findandmodify` that [`crate::concerns::canonical`] names `findAndModify`).
+pub fn data_command_names() -> impl Iterator<Item = &'static str> {
+    NAMES
+        .iter()
+        .chain(&[txn::COMMIT_TRANSACTION, txn::ABORT_TRANSACTION])
+        .chain(&users::NAMES)
+        .chain(&roles::NAMES)
+        .chain(&api_keys::NAMES)
+        .chain(&replset::NAMES)
+        .copied()
+}
+
 /// Whether `name` is one of this module's commands.
 pub fn is_data_command(name: &str) -> bool {
-    NAMES.contains(&crate::concerns::canonical(name))
-        || name == txn::COMMIT_TRANSACTION
-        || name == txn::ABORT_TRANSACTION
-        || users::NAMES.contains(&name)
-        || roles::NAMES.contains(&name)
-        || api_keys::NAMES.contains(&name)
-        || replset::NAMES.contains(&name)
+    let name = crate::concerns::canonical(name);
+    data_command_names().any(|n| crate::concerns::canonical(n) == name)
 }
 
 /// Runs the command of `ctx`; `None` if it is not one of this module's.

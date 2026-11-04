@@ -47,8 +47,7 @@ const SEQ_STRIDE: u32 = 1 << 10;
 /// The longest a read that is not tailable waits for the ranges to resolve the node's clock.
 pub const CATCH_UP_MS: u64 = 5_000;
 
-/// How far back each step of a read of the newest entries goes: what a range answers at a time
-/// (`teseladb_range::host::feed::FEED_WINDOW_MS`).
+/// How far back each step of a read of the newest entries goes.
 const BACK_WINDOW_MS: u64 = 1_000;
 
 /// The oplog's collection.
@@ -563,7 +562,13 @@ fn document_operation<B: Backend + ?Sized>(
         _ => {
             let desc = change.meta.as_ref().and_then(|m| m.update.as_ref()).ok_or_else(missing)?;
             let before = earlier.as_ref().ok_or_else(missing)?;
-            let o = teseladb_topology::diff::update_entry(&doc_of(before)?, desc);
+            let o = match (desc.pipeline, change.doc.as_ref()) {
+                // A pipeline update's entry is the diff of the documents (018 FR-009).
+                (true, Some(after)) => {
+                    teseladb_topology::diff::pipeline_entry(&doc_of(before)?, &doc_of(after)?)
+                }
+                _ => teseladb_topology::diff::update_entry(&doc_of(before)?, desc),
+            };
             Operation::new(OpType::Update, ns, ui, o, Some(keyed(before)?))
         }
     };
@@ -654,8 +659,9 @@ fn document_items<B: Backend + ?Sized>(
 /// The entries above mark `from` (raised to the history window), up to the lowest mark every
 /// source has resolved.
 ///
-/// A read from the start of the window asks the ranges for their whole history at once: a range
-/// answers a later start one second at a time (`teseladb_range::host::feed::FEED_WINDOW_MS`).
+/// A read from the start of the window asks the ranges for their whole history: each range
+/// answers as much as its budget of bytes lets it (`teseladb_range::changes::ANSWER_BYTES`) and
+/// the resolved mark stops there, so a large history comes in several reads.
 pub fn read<B: Backend + ?Sized>(backend: &mut B, from: Hlc) -> Result<OplogRead, CommandError> {
     let floor = Hlc { physical: history_floor(backend)?, logical: 0 };
     let ask = if from <= floor { START } else { from };

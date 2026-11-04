@@ -220,7 +220,7 @@ impl ChangeMeta {
             out.extend(r.to_bytes());
         }
         if let Some(d) = &self.update {
-            let bytes = d.to_document(true).to_bytes_with(DESCRIPTION_LIMITS)?;
+            let bytes = d.stored().to_bytes_with(DESCRIPTION_LIMITS)?;
             // A description is at most `DESCRIPTION_LIMITS`, far below 4 GiB.
             out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
             out.extend(bytes);

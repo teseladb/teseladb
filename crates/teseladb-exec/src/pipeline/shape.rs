@@ -386,8 +386,7 @@ impl AddFields {
         let mut tree = Tree::default();
         for (k, x) in d.iter() {
             check_path(k)?;
-            tree.put(k, k, Item::Include)?;
-            fields.push((k.to_owned(), Expr::parse_in(x, ctx)?));
+            add_field(k, x, (d, ctx), &mut tree, &mut fields)?;
         }
         Ok(AddFields { fields })
     }
@@ -403,6 +402,43 @@ impl AddFields {
         }
         Ok(out)
     }
+}
+
+/// One field of `$addFields` at `path`: a document that is not an expression (its first field
+/// does not start with `$`) adds each of its fields inside the field's document, or inside each
+/// element of its array, as a dotted path does; any other value is an expression. An empty
+/// document is the value `{}` (measured on a `refnode` 9.0.4 on 04-11-2026).
+fn add_field(
+    path: &str,
+    x: RawValue<'_>,
+    (spec, ctx): (teseladb_bson::RawDoc<'_>, &Ctx),
+    tree: &mut Tree,
+    fields: &mut Vec<(String, Expr)>,
+) -> Result<(), MqlError> {
+    let nested = match x {
+        RawValue::Document(sub) => match sub.iter().next() {
+            Some((first, _)) if !first.starts_with('$') => Some(sub),
+            _ => None,
+        },
+        _ => None,
+    };
+    let Some(sub) = nested else {
+        tree.put(path, path, Item::Include)?;
+        fields.push((path.to_owned(), Expr::parse_in(x, ctx)?));
+        return Ok(());
+    };
+    for (k, y) in sub.iter() {
+        if k.contains('.') {
+            let msg = format!(
+                "cannot use dotted field name '{k}' in a sub object: {}",
+                teseladb_bson::shell::shell_doc(spec)
+            );
+            return Err(error(super::errors::ADD_FIELDS_DOTTED_SUB_OBJECT, msg));
+        }
+        check_path(k)?;
+        add_field(&format!("{path}.{k}"), y, (spec, ctx), tree, fields)?;
+    }
+    Ok(())
 }
 
 /// Sets `v` at `segs` of `doc`.
