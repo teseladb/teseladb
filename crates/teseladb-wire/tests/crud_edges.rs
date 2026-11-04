@@ -841,6 +841,8 @@ fn boolean_options_take_the_types_refdb_takes() {
         (&ins[..], "ordered", Value::Int32(1), "BSON field 'insert.ordered' is the wrong type 'int', expected type 'bool'".to_owned()),
         (&ins[..], "bypassDocumentValidation", s("x"), format!("BSON field 'insert.bypassDocumentValidation' is the wrong type 'string', expected types {safe}")),
         (&[("listCollections", 1.into())][..], "nameOnly", Value::Int32(1), "BSON field 'listCollections.nameOnly' is the wrong type 'int', expected type 'bool'".to_owned()),
+        // A `refrouter` 9.0.4 names `filter` after its own structure (crud-opt-catalog, 04-11-2026).
+        (&[("listCollections", 1.into())][..], "filter", Value::Int32(1), "BSON field 'ListCollection.filter' is the wrong type 'int', expected type 'object'".to_owned()),
         (&[("listDatabases", 1.into())][..], "nameOnly", s("x"), "BSON field 'listDatabases.nameOnly' is the wrong type 'string', expected types '[decimal, long, int, bool, double]'".to_owned()),
         (&[("findAndModify", s("c")), ("remove", true.into())][..], "new", s("x"), format!("BSON field 'findAndModify.new' is the wrong type 'string', expected types {safe}")),
     ] {

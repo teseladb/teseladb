@@ -26,6 +26,10 @@ use crate::error::{
 use crate::types::wrong_type;
 use teseladb_collation::ParsedCollation;
 
+/// The structure a `refrouter` 9.0.4 names in the type error of `listCollections.filter` (measured
+/// in the battery's `crud-opt-catalog` on 04-11-2026).
+const LIST_COLLECTION_STRUCT: &str = "ListCollection";
+
 /// `create`.
 pub const CREATE: &str = "create";
 /// `drop`.
@@ -876,7 +880,7 @@ pub fn list_collections<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
 ) -> Result<Document, CommandError> {
     let name_only = args::bool_field(ctx.cmd, LIST_COLLECTIONS, "nameOnly")?.unwrap_or(false);
-    let filter = args::doc(ctx.cmd, LIST_COLLECTIONS, "filter")?.cloned();
+    let filter = args::doc(ctx.cmd, LIST_COLLECTION_STRUCT, "filter")?.cloned();
     let batch = match args::doc(ctx.cmd, LIST_COLLECTIONS, "cursor")? {
         Some(c) => args::int(c, "cursor", "batchSize")?.map(|n| usize::try_from(n).unwrap_or(0)),
         None => None,
