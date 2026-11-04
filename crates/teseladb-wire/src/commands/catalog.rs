@@ -26,9 +26,10 @@ use crate::error::{
 use crate::types::wrong_type;
 use teseladb_collation::ParsedCollation;
 
-/// The structure a `refrouter` 9.0.4 names in the type error of `listCollections.filter` (measured
-/// in the battery's `crud-opt-catalog` on 04-11-2026).
-const LIST_COLLECTION_STRUCT: &str = "ListCollection";
+/// The structure a `refrouter` 9.0.4 names in the errors of the fields of `listCollections`: the type
+/// of `filter` and an unknown field (measured in the battery's `crud-opt-catalog` and
+/// `errors-idl` on 04-11-2026).
+pub const LIST_COLLECTION_STRUCT: &str = "ListCollection";
 
 /// `create`.
 pub const CREATE: &str = "create";

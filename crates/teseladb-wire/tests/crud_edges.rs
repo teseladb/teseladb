@@ -1318,3 +1318,18 @@ fn a_write_keeps_the_history_of_its_documents_next_to_them() {
         )]
     );
 }
+
+/// A field `listCollections` does not take is named after the structure of a `refrouter` 9.0.4,
+/// `ListCollection` (battery's `errors-idl`, 04-11-2026); other commands by their own name.
+#[test]
+fn an_unknown_field_of_list_collections_names_its_structure() {
+    use teseladb_wire::generic::check_unknown_fields;
+    let unknown = |name: &str| {
+        let cmd = doc(&[(name, 1.into()), ("zzUnknown", 1.into())]);
+        let e = check_unknown_fields(&cmd, name).expect_err("an unknown field");
+        (e.code.code, e.errmsg)
+    };
+    let msg = |s: &str| format!("BSON field '{s}.zzUnknown' is an unknown field.");
+    assert_eq!(unknown("listCollections"), (40415, msg("ListCollection")));
+    assert_eq!(unknown("find"), (40415, msg("find")));
+}

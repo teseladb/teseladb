@@ -382,9 +382,16 @@ pub fn check_unknown_fields(cmd: &Document, name: &str) -> Result<(), CommandErr
     }
 }
 
-/// `IDLUnknownField` for field `k` of command `name`.
+/// `IDLUnknownField` for field `k` of command `name`, named as a `refrouter` 9.0.4 names the
+/// structure that parses it.
 fn unknown_field(name: &str, k: &str) -> CommandError {
-    let msg = format!("BSON field '{}.{k}' is an unknown field.", canonical(name));
+    let owner = match canonical(name) {
+        crate::commands::catalog::LIST_COLLECTIONS => {
+            crate::commands::catalog::LIST_COLLECTION_STRUCT
+        }
+        other => other,
+    };
+    let msg = format!("BSON field '{owner}.{k}' is an unknown field.");
     CommandError::new(IDL_UNKNOWN_FIELD, msg)
 }
 
