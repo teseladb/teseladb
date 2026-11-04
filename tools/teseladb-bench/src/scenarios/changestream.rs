@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -30,6 +30,8 @@ const AWAIT_MS: i32 = 1000;
 const MIN_EVENTS: u64 = 200;
 /// How long the reader waits, after the writer stops, for the events still to come.
 const DELIVERY_WAIT: Duration = Duration::from_secs(30);
+/// How many of the events the stream did not give the error names.
+const MISSING_SHOWN: usize = 10;
 
 /// When each insert answered, by `_id`.
 type Acked = Arc<Mutex<BTreeMap<i64, Instant>>>;
@@ -72,7 +74,12 @@ type Arrivals = BTreeMap<i64, Instant>;
 /// the end ([`lags`]); before, such an event was never timed and the reader waited forever for
 /// the last ones (a test of the gate hung for hours, 04-11-2026). Events that do not come within
 /// [`DELIVERY_WAIT`] after `stop` are an error.
-fn follow(mut c: Client, acked: &Acked, stop: &AtomicBool) -> Result<Arrivals, String> {
+fn follow(
+    mut c: Client,
+    acked: &Acked,
+    stop: &AtomicBool,
+    open_sent: mpsc::Sender<()>,
+) -> Result<Arrivals, String> {
     let open = doc(vec![
         ("aggregate", Value::String(COLLECTION.into())),
         (
@@ -85,21 +92,31 @@ fn follow(mut c: Client, acked: &Acked, stop: &AtomicBool) -> Result<Arrivals, S
         ("cursor", Value::Document(Document::new())),
     ]);
     let (_, id) = events(&c.command(DB, open)?)?;
+    // The writer starts once the stream is open: a stream opened now has no event of a write
+    // before it, and the first insert raced the opening (it came first 1 time in 320 under load,
+    // 05-11-2026, and the reader waited for it).
+    let _ = open_sent.send(());
     let mut arrivals = Arrivals::new();
     let mut stopped: Option<Instant> = None;
     loop {
         if stop.load(Ordering::Relaxed) {
             let since = *stopped.get_or_insert_with(Instant::now);
             let acked = acked.lock().map_err(|_| "a writer panicked")?;
-            let missing = acked.keys().filter(|i| !arrivals.contains_key(i)).count();
-            if missing == 0 {
+            let missing: Vec<i64> =
+                acked.keys().filter(|i| !arrivals.contains_key(i)).copied().collect();
+            if missing.is_empty() {
                 return Ok(arrivals);
             }
             if since.elapsed() > DELIVERY_WAIT {
+                let shown: Vec<i64> = missing.iter().take(MISSING_SHOWN).copied().collect();
                 return Err(format!(
-                    "the stream did not give {missing} of {} events in {} s",
+                    "the stream did not give {} of {} events in {} s (_id {shown:?}; it gave {} \
+                     events, the last {:?})",
+                    missing.len(),
                     acked.len(),
-                    DELIVERY_WAIT.as_secs()
+                    DELIVERY_WAIT.as_secs(),
+                    arrivals.len(),
+                    arrivals.keys().next_back()
                 ));
             }
         }
@@ -137,10 +154,18 @@ pub fn run(args: &Args) -> Result<Report, String> {
     w.command(DB, doc(vec![("create", Value::String(COLLECTION.into()))]))?;
     let acked: Acked = Arc::default();
     let stop = Arc::new(AtomicBool::new(false));
+    let (open_sent, opened) = mpsc::channel();
     let reader = {
         let (c, acked, stop) = (Client::connect(addr)?, acked.clone(), stop.clone());
-        thread::spawn(move || follow(c, &acked, &stop))
+        thread::spawn(move || follow(c, &acked, &stop, open_sent))
     };
+    if opened.recv().is_err() {
+        // The reader ended before its stream opened: its error says why.
+        return Err(match reader.join() {
+            Ok(Err(e)) => e,
+            _ => "the reader stopped before its stream opened".to_owned(),
+        });
+    }
     let start = Instant::now();
     let (mut next, mut recorded) = (0i64, 0u64);
     while start.elapsed() < args.warmup + args.duration || recorded < MIN_EVENTS {
