@@ -37,6 +37,8 @@ pub(super) const RAFT_BATCH_KIND: u8 = 0x02;
 pub(super) const FORWARD_KIND: u8 = 0x30;
 /// `kind` of a `ForwardResp`.
 pub(super) const FORWARD_RESP_KIND: u8 = 0x31;
+/// The kinds of a forwarded request or answer, with its sender's HLC (`0x35`, `0x36`) or without.
+const FORWARD_KINDS: [u8; 4] = [FORWARD_KIND, FORWARD_RESP_KIND, 0x35, 0x36];
 
 /// Bytes of a piece's body before its data.
 const PIECE_PREFIX: usize = 1 + 8 + 8;
@@ -201,7 +203,7 @@ pub(super) fn decode_pieces(buf: &[u8]) -> Result<Option<(PeerMsg, usize)>, Fram
     let payload = found.concat();
     let (kind, body) = match first.map(|(_, v)| v) {
         Some(FORWARD_CHUNK_VERSION) => match payload.split_first() {
-            Some((&k, body)) if k == FORWARD_KIND || k == FORWARD_RESP_KIND => (k, body),
+            Some((&k, body)) if FORWARD_KINDS.contains(&k) => (k, body),
             _ => return Err(bad(0)),
         },
         _ => (RAFT_BATCH_KIND, &payload[..]),

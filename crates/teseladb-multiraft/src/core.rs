@@ -994,13 +994,15 @@ impl<S: StateMachine> MultiRaftCore<S> {
             return op;
         }
         let deadline_ms = u32::try_from(self.cfg.op_timeout.as_millis()).unwrap_or(u32::MAX);
-        self.frames.push((to, PeerFrame::Forward { req, deadline_ms, body }));
+        let hlc = Some(self.cfg.clock.0.peek());
+        self.frames.push((to, PeerFrame::Forward { req, deadline_ms, hlc, body }));
         op
     }
 
     /// Answers a request `to` forwarded to this node.
     pub fn answer_forward(&mut self, to: NodeId, req: u64, body: Bytes) {
-        self.frames.push((to, PeerFrame::ForwardResp { req, body }));
+        let hlc = Some(self.cfg.clock.0.peek());
+        self.frames.push((to, PeerFrame::ForwardResp { req, hlc, body }));
     }
 
     // ----- time, network and disk -----
@@ -1146,6 +1148,18 @@ impl<S: StateMachine> MultiRaftCore<S> {
         }
     }
 
+    /// The HLC of a forwarded request or answer moves this node's clock past it (005 FR-003): the
+    /// request runs, or the answer is read, above every mark its sender gave out.
+    fn receive_clock(&mut self, hlc: Option<Hlc>) {
+        // Faulty variant `hlc_regress_restart`: the clock takes no mark it receives.
+        #[cfg(not(teseladb_bug = "hlc_regress_restart"))]
+        if let Some(h) = hlc {
+            self.cfg.clock.0.update(h);
+        }
+        #[cfg(teseladb_bug = "hlc_regress_restart")]
+        let _ = hlc;
+    }
+
     /// The clocks of a frame from `from`: its HLC moves this node's clock past it (005 FR-003);
     /// its wall clock is a sample for the clock rule (FR-006) only from a voter of one of this
     /// core's groups, as the median is the voters'.
@@ -1230,10 +1244,12 @@ impl<S: StateMachine> MultiRaftCore<S> {
                     self.drive(group);
                 }
             }
-            PeerFrame::Forward { req, deadline_ms, body } => {
+            PeerFrame::Forward { req, deadline_ms, hlc, body } => {
+                self.receive_clock(hlc);
                 self.forwarded.push(Forwarded { from, req, deadline_ms, body });
             }
-            PeerFrame::ForwardResp { req, body } => {
+            PeerFrame::ForwardResp { req, hlc, body } => {
+                self.receive_clock(hlc);
                 let op = self.ops.iter().find_map(|(id, o)| match o.kind {
                     OpKind::Forward { req: r, .. } if r == req => Some(*id),
                     _ => None,

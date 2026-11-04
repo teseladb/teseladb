@@ -93,6 +93,9 @@ pub enum PeerFrame {
         req: u64,
         /// Milliseconds the sender waits for the answer.
         deadline_ms: u32,
+        /// Sender's HLC, which moves the receiver's clock past it before the request runs (005
+        /// FR-003); `None` from a node of protocol 6 or older.
+        hlc: Option<Hlc>,
         /// Request, encoded by the layer above.
         body: Bytes,
     },
@@ -100,6 +103,8 @@ pub enum PeerFrame {
     ForwardResp {
         /// Request number.
         req: u64,
+        /// Sender's HLC (005 FR-003); `None` from a node of protocol 6 or older.
+        hlc: Option<Hlc>,
         /// Answer, encoded by the layer above.
         body: Bytes,
     },

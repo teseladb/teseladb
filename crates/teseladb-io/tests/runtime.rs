@@ -71,7 +71,7 @@ struct Toy {
 }
 
 fn ack(req: u64) -> PeerMsg {
-    PeerMsg::ForwardResp { req, body: Bytes::new() }
+    PeerMsg::ForwardResp { req, hlc: None, body: Bytes::new() }
 }
 
 impl CoreLogic for Toy {

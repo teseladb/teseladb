@@ -13,6 +13,7 @@ use std::collections::BinaryHeap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
+use teseladb_hlc::Hlc;
 use teseladb_lsm::{Lsm, LsmConfig, LsmError};
 use teseladb_multiraft::chunks::Chunk;
 use teseladb_multiraft::{
@@ -95,14 +96,34 @@ pub fn encode_frame(f: &PeerFrame) -> Bytes {
         PeerFrame::SnapshotAck { group, index, offset, ok } => {
             e.u8(FRAME_ACK).u64(group.0).u64(*index).u64(*offset).bool(*ok);
         }
-        PeerFrame::Forward { req, deadline_ms, body } => {
-            e.u8(FRAME_FORWARD).u64(*req).u32(*deadline_ms).bytes(body);
+        PeerFrame::Forward { req, deadline_ms, hlc, body } => {
+            e.u8(FRAME_FORWARD).u64(*req).u32(*deadline_ms);
+            encode_clock(&mut e, *hlc);
+            e.bytes(body);
         }
-        PeerFrame::ForwardResp { req, body } => {
-            e.u8(FRAME_FORWARD_RESP).u64(*req).bytes(body);
+        PeerFrame::ForwardResp { req, hlc, body } => {
+            e.u8(FRAME_FORWARD_RESP).u64(*req);
+            encode_clock(&mut e, *hlc);
+            e.bytes(body);
         }
     }
     Bytes::from_vec(e.finish())
+}
+
+/// Writes the sender's HLC of a forwarded request or answer, if it has one.
+fn encode_clock(e: &mut Encoder, hlc: Option<Hlc>) {
+    e.bool(hlc.is_some());
+    if let Some(h) = hlc {
+        e.u64(h.physical).u32(h.logical);
+    }
+}
+
+/// Reads what [`encode_clock`] wrote.
+fn decode_clock(d: &mut Decoder<'_>) -> Option<Hlc> {
+    let bad = "a frame the simulator encoded";
+    d.bool()
+        .expect(bad)
+        .then(|| Hlc { physical: d.u64().expect(bad), logical: d.u32().expect(bad) })
 }
 
 /// The frame answers heartbeats: the leader that gets it renews its lease with it.
@@ -184,10 +205,12 @@ pub fn decode_frame(b: &[u8]) -> PeerFrame {
         FRAME_FORWARD => PeerFrame::Forward {
             req: d.u64().expect(bad),
             deadline_ms: d.u32().expect(bad),
+            hlc: decode_clock(&mut d),
             body: Bytes::copy_from_slice(d.bytes().expect(bad)),
         },
         _ => PeerFrame::ForwardResp {
             req: d.u64().expect(bad),
+            hlc: decode_clock(&mut d),
             body: Bytes::copy_from_slice(d.bytes().expect(bad)),
         },
     };
