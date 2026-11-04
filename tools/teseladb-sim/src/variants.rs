@@ -66,8 +66,10 @@ variants!(
     // (seed 6). Since a search reads up to its own mark (011 FR-010), the `search` workload finds
     // it too (seed 11): a search misses a transaction committed at its intents' mark. Since a
     // range answers by bytes instead of one second at a time (014 T027), `changestream` finds it
-    // first, at seed 7 (`changestream_delivery`; measured 04-11-2026 on main e64db16).
-    ("emit_above_resolved", "changestream_delivery", Default, 1000),
+    // first, at seed 7 (`changestream_delivery`; measured 04-11-2026 on main e64db16). Since the
+    // workloads split again where a merge undid a cut, `search` finds it first, at seed 6
+    // (`search_results`; measured 04-11-2026 on lane1 89c89a1).
+    ("emit_above_resolved", "search_results", Default, 1000),
     ("follower_local_read", "linearizable", Default, 1000),
     ("follower_read_above_closed", "mvcc", Default, 1000),
     ("fsync_retry_success", "recovery", Default, 1000),
@@ -187,8 +189,10 @@ variants!(
     // the `mvcc` check reports before the history is checked (seed 1), and `splits` reads a value
     // committed above its mark (`intents`, seed 1). Seed 1 of `changestream`, first by name, fails
     // too: since a range answers changes by bytes (014 T027) its documents' history is not
-    // linearizable (`linearizable`; measured 04-11-2026 on main e64db16).
-    ("stale_lease_read", "linearizable", Default, 1000),
+    // linearizable (`linearizable`; measured 04-11-2026 on main e64db16). Since the workloads
+    // split again where a merge undid a cut, seed 1 of `changestream` first reads a value committed
+    // above its mark (`intents`; measured 04-11-2026 on lane1 89c89a1).
+    ("stale_lease_read", "intents", Default, 1000),
     // The TTL monitor's cutoff adds the index's seconds instead of taking them away: the `indexes`
     // workload's delete takes a document that has not expired.
     ("ttl_deletes_live", "ttl", Default, 1000),
