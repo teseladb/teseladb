@@ -107,6 +107,10 @@ fn databases_that_differ_only_in_case_fail_the_whole_command() {
         let r = m.run("UP", cmd.clone());
         assert_eq!(error(&r), (13297, CLASH.to_owned()), "{cmd:?}");
         assert_eq!(field(&r, "codeName"), &s("DatabaseDifferCase"));
+        // The router refuses the database: no shard's reply under `raw`, the fields as any error
+        // (a `refrouter` 9.0.4's `createIndexes`, battery's crud-database-entries on 04-11-2026).
+        let keys: Vec<&str> = r.iter().map(|(k, _)| k).collect();
+        assert_eq!(keys, ["ok", "errmsg", "code", "codeName"], "{cmd:?}");
     }
     let rename = doc(&[("renameCollection", s("up.c")), ("to", s("UP.c"))]);
     assert_eq!(error(&m.run("admin", rename)), (13297, CLASH.to_owned()));

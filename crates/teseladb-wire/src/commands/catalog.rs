@@ -729,7 +729,9 @@ pub(crate) fn missing_namespace<B: Backend + ?Sized>(
 
 /// Runs `cmd`, which may add database `db` to the catalog. When Group 0 refuses it because
 /// another database differs from `db` only in case, the error names both, as RefDb's 13297;
-/// if that database is gone by then, Group 0's refusal goes as it is.
+/// if that database is gone by then, Group 0's refusal goes as it is. Either way it is the
+/// router's error: a `refrouter` 9.0.4 refuses the database before any shard (`createIndexes` gives
+/// it without `raw`, measured on 04-11-2026).
 pub(crate) fn write_adding_database<B: Backend + ?Sized>(
     backend: &mut B,
     db: &str,
@@ -737,7 +739,7 @@ pub(crate) fn write_adding_database<B: Backend + ?Sized>(
 ) -> Result<Option<CollectionEntry>, CommandError> {
     super::write_block::ddl(backend, db)?;
     let refused = match backend.catalog_write(cmd) {
-        Err(e) if e.code == DATABASE_DIFFER_CASE => e,
+        Err(e) if e.code == DATABASE_DIFFER_CASE => e.parsed(),
         other => return other,
     };
     let have = backend.databases()?.into_iter().find(|d| d != db && d.eq_ignore_ascii_case(db));
@@ -746,7 +748,7 @@ pub(crate) fn write_adding_database<B: Backend + ?Sized>(
             "Database {db} could not be created :: caused by :: can't have 2 databases that \
              just differ on case  have: {have} want to add: {db}"
         );
-        CommandError::new(DATABASE_DIFFER_CASE, msg)
+        CommandError::new(DATABASE_DIFFER_CASE, msg).parsed()
     }))
 }
 
