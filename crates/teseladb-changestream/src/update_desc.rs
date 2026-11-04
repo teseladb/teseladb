@@ -27,6 +27,9 @@ pub struct UpdateDescription {
     pub truncated: Vec<(String, u32)>,
     /// Ambiguous paths of `updated` and `removed`, part by part.
     pub disambiguated: Vec<(String, Vec<PathPart>)>,
+    /// It describes a pipeline update ([`crate::pipeline_diff`]), whose oplog entry is the diff of
+    /// the document and not of its operators (018 FR-009).
+    pub pipeline: bool,
 }
 
 /// Why a stored description does not read back.
@@ -44,6 +47,8 @@ const TRUNCATED: &str = "truncatedArrays";
 const DISAMBIGUATED: &str = "disambiguatedPaths";
 const FIELD: &str = "field";
 const NEW_SIZE: &str = "newSize";
+/// The mark a stored description of a pipeline update carries; the event does not show it.
+const PIPELINE: &str = "$pipeline";
 /// Where a change description's framing is cut short.
 const UPDATES: &str = "changes";
 
@@ -86,7 +91,17 @@ impl UpdateDescription {
 
     /// The bytes kept with the version.
     pub fn encode(&self) -> Result<Vec<u8>, BsonError> {
-        self.to_document(true).to_bytes()
+        self.stored().to_bytes()
+    }
+
+    /// What is kept with the version: the event's description with every field, and the mark of
+    /// a pipeline update.
+    pub(crate) fn stored(&self) -> Document {
+        let mut d = self.to_document(true);
+        if self.pipeline {
+            d.push(PIPELINE, true);
+        }
+        d
     }
 
     /// The change description of a write (005 FR-008): the description of each document it
@@ -97,7 +112,7 @@ impl UpdateDescription {
     pub fn encode_all(updates: &[(Vec<u8>, UpdateDescription)]) -> Result<Vec<u8>, BsonError> {
         let mut out = Vec::new();
         for (key, d) in updates {
-            let desc = d.to_document(true).to_bytes_with(DESCRIPTION_LIMITS)?;
+            let desc = d.stored().to_bytes_with(DESCRIPTION_LIMITS)?;
             for part in [key.as_slice(), desc.as_slice()] {
                 // A key is a few bytes and a description at most `DESCRIPTION_LIMITS`.
                 out.extend_from_slice(&(part.len() as u32).to_le_bytes());
@@ -183,6 +198,7 @@ impl UpdateDescription {
                 Ok((path.to_owned(), parts))
             })
             .collect::<Result<_, _>>()?;
-        Ok(UpdateDescription { updated, removed, truncated, disambiguated })
+        let pipeline = d.get(PIPELINE) == Some(&Value::Boolean(true));
+        Ok(UpdateDescription { updated, removed, truncated, disambiguated, pipeline })
     }
 }

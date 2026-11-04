@@ -562,7 +562,13 @@ fn document_operation<B: Backend + ?Sized>(
         _ => {
             let desc = change.meta.as_ref().and_then(|m| m.update.as_ref()).ok_or_else(missing)?;
             let before = earlier.as_ref().ok_or_else(missing)?;
-            let o = teseladb_topology::diff::update_entry(&doc_of(before)?, desc);
+            let o = match (desc.pipeline, change.doc.as_ref()) {
+                // A pipeline update's entry is the diff of the documents (018 FR-009).
+                (true, Some(after)) => {
+                    teseladb_topology::diff::pipeline_entry(&doc_of(before)?, &doc_of(after)?)
+                }
+                _ => teseladb_topology::diff::update_entry(&doc_of(before)?, desc),
+            };
             Operation::new(OpType::Update, ns, ui, o, Some(keyed(before)?))
         }
     };
