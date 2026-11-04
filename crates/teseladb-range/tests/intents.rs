@@ -496,6 +496,62 @@ fn a_replica_applies_intents_records_and_resolutions_and_keeps_them_across_a_res
     assert_eq!(TxnRecord::decode(&r.get(&record_key(T2), 70).unwrap().1).unwrap(), pushed);
 }
 
+/// After a restart the core restores the replica's own snapshot, which may be older than what
+/// its LSM flushed, and the log goes on from that snapshot. The entries the LSM holds are not
+/// written again: an intent written again over the commit that replaced it at the same mark
+/// hides that commit until its resolution comes back, and for good if the node stops in between
+/// with the intent flushed. Seed 883 of the simulator's `indexes` (plan `heavy`): a replica
+/// restarted from a snapshot 38 entries behind its LSM, flushed the intent of a deletion of an
+/// index entry again and stopped before the resolution; after the next restart it led the range
+/// and a check read the entry the transaction had deleted.
+#[test]
+fn a_restart_from_an_older_snapshot_does_not_write_again_what_the_lsm_holds() {
+    let a = b"\x01a";
+    let mut r = Replica::new();
+    let write = Command::Write {
+        puts: vec![teseladb_range::command::Put {
+            key: a.to_vec(),
+            value_type: DOC,
+            value: b"old".to_vec(),
+        }],
+        deletes: vec![],
+        dedup: None,
+        live_delta: 6,
+    };
+    r.apply(1, 10, &write).unwrap();
+    let snap = r.sm.snapshot();
+    let intent = intents_of(T1, &[(a, IntentOp::Delete, None)]);
+    let resolve = Command::ResolveIntents {
+        txn: T1,
+        status: TxnStatus::Committed,
+        commit_ts: ts(20),
+        resolutions: vec![Resolution {
+            key: a.to_vec(),
+            intent_ts: ts(20),
+            commit: Some(IntentOp::Delete),
+        }],
+        live_delta: -6,
+    };
+    r.apply(2, 20, &intent).unwrap();
+    r.apply(3, 21, &resolve).unwrap();
+    assert_eq!(r.get(a, 30), None, "deleted at 20");
+    let mut r = r.restart();
+    r.sm.restore(&snap).unwrap();
+    // The log goes on from the snapshot: entry 2 comes first.
+    r.apply(2, 20, &intent).unwrap();
+    assert_eq!(r.get(a, 30), None, "the commit's deletion, not the intent written again");
+    // The node stops before entry 3 comes again.
+    let mut r = r.restart();
+    assert_eq!(r.get(a, 30), None, "no intent flushed over the deletion");
+    r.sm.restore(&snap).unwrap();
+    r.apply(2, 20, &intent).unwrap();
+    r.apply(3, 21, &resolve).unwrap();
+    assert_eq!(r.get(a, 30), None);
+    assert_eq!(r.get(a, 19).unwrap(), (Kind::Put, b"\x01old".to_vec()));
+    assert_eq!(r.sm.live_bytes(), 0);
+    assert_eq!(r.sm.last_mark(), ts(21));
+}
+
 #[test]
 fn entries_that_break_the_rules_stop_the_group() {
     let mut r = Replica::new();

@@ -44,3 +44,15 @@ fn a_snapshot_wait_outlives_a_frozen_core() {
     let r = run_seed(&cfg("search", FaultPlan::Default), 1541);
     assert_eq!(r.verdict, Verdict::Pass);
 }
+
+/// Seed 3541 of the `default` plan (`search` and `vector`): it turned red with the same schedule
+/// change as seed 883 of `indexes`, and its run restarts replicas from their own snapshots, older
+/// than what their LSMs flushed, that replay transactions' intents over the documents it
+/// searches. It passes once such a replay no longer writes again what the LSM holds.
+#[test]
+fn a_restart_from_an_older_snapshot_answers_the_committed_documents() {
+    for workload in ["search", "vector"] {
+        let r = run_seed(&cfg(workload, FaultPlan::Default), 3541);
+        assert_eq!(r.verdict, Verdict::Pass, "{workload} seed 3541");
+    }
+}

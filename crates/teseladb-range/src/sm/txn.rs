@@ -52,10 +52,11 @@ impl RangeSm {
                 value: &live_value,
             });
         }
-        self.lsm
-            .borrow_mut()
-            .write_versions(self.range, ctx.index, &versions)
-            .map_err(|e| ApplyError(format!("range {}: entry {}: {e}", self.range.0, ctx.index)))?;
+        if ctx.index > self.in_files {
+            self.lsm.borrow_mut().write_versions(self.range, ctx.index, &versions).map_err(
+                |e| ApplyError(format!("range {}: entry {}: {e}", self.range.0, ctx.index)),
+            )?;
+        }
         self.last_write = ctx.index;
         self.last_mark = ctx.ts;
         if let Some(live) = live {
