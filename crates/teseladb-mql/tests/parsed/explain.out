@@ -4,6 +4,9 @@
 {"a":{"$type":"int"}}	{"a":{"$type":[{"$numberInt":"16"}]}}
 {"a":{"$type":["int","string"]}}	{"a":{"$type":[{"$numberInt":"2"},{"$numberInt":"16"}]}}
 {"a":{"$type":{"$numberInt":"2"}}}	{"a":{"$type":[{"$numberInt":"2"}]}}
+{"a":{"$type":"number"}}	{"a":{"$type":["number"]}}
+{"a":{"$type":["number","string"]}}	{"a":{"$type":["number",{"$numberInt":"2"}]}}
+{"a":{"$type":[{"$numberInt":"-1"}]}}	{"a":{"$type":[{"$numberInt":"-1"}]}}
 {"a":{"$mod":[{"$numberInt":"2"},{"$numberInt":"1"}]}}	{"a":{"$mod":[{"$numberLong":"2"},{"$numberLong":"1"}]}}
 {"a":{"$size":{"$numberInt":"2"}}}	{"a":{"$size":{"$numberInt":"2"}}}
 {"a":{"$all":[{"$numberInt":"1"},{"$numberInt":"2"}]}}	{"$and":[{"a":{"$eq":{"$numberInt":"1"}}},{"a":{"$eq":{"$numberInt":"2"}}}]}

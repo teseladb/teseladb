@@ -12,8 +12,9 @@ use crate::ops;
 use crate::parse::{BitsOp, CmpOp, Expr, InItem, Pred};
 use crate::types::TypeSpec;
 
-/// The code `$type` writes for `"number"`.
-const NUMBER_CODE: i32 = -1;
+/// The alias `$type` writes for the four numeric types, before the codes (measured on a
+/// `refrouter` 9.0.4 on 04-11-2026: `["number", 2]`).
+const NUMBER_ALIAS: &str = "number";
 
 impl Filter {
     /// The filter as RefDb writes it back after parsing it: `$alwaysTrue` alone as given, an
@@ -145,15 +146,18 @@ fn pred_doc(p: &Pred) -> Document {
         }
         Pred::Exists => one("$exists", Value::Boolean(true)),
         Pred::Type(specs) => {
+            // A type's code as `$type` takes it: `MinKey` is -1, its byte read as signed.
             let mut codes: Vec<i32> = specs
                 .iter()
-                .map(|s| match s {
-                    TypeSpec::Element(t) => i32::from(*t),
-                    TypeSpec::Number => NUMBER_CODE,
+                .filter_map(|s| match s {
+                    TypeSpec::Element(t) => Some(i32::from(*t as i8)),
+                    TypeSpec::Number => None,
                 })
                 .collect();
             codes.sort_unstable();
-            one("$type", Value::Array(codes.into_iter().map(Value::Int32).collect()))
+            let number = specs.contains(&TypeSpec::Number).then(|| Value::from(NUMBER_ALIAS));
+            let list = number.into_iter().chain(codes.into_iter().map(Value::Int32)).collect();
+            one("$type", Value::Array(list))
         }
         Pred::Mod { divisor, remainder } => {
             one("$mod", Value::Array(vec![Value::Int64(*divisor), Value::Int64(*remainder)]))

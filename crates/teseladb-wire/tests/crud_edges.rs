@@ -1333,3 +1333,33 @@ fn an_unknown_field_of_list_collections_names_its_structure() {
     assert_eq!(unknown("listCollections"), (40415, msg("ListCollection")));
     assert_eq!(unknown("find"), (40415, msg("find")));
 }
+
+/// `$type: "number"` does not take `MinKey`, also when a sort reads the documents: the
+/// `find` of the battery's `query-type` failed with `InternalError` "a matched document matches
+/// no more" over `{a: MinKey}` (04-11-2026).
+#[test]
+fn type_number_leaves_min_key_out_of_a_sorted_find() {
+    let mut m = Mem::new();
+    let docs = Value::Array(vec![
+        (d(&[("_id", 1.into()), ("a", 1.into())])),
+        (d(&[("_id", 17.into()), ("a", Value::MinKey)])),
+        (d(&[("_id", 18.into()), ("a", Value::MaxKey)])),
+    ]);
+    m.run("db", doc(&[("insert", s("c")), ("documents", docs)]));
+    for sort in [None, Some(d(&[("_id", 1.into())]))] {
+        let mut cmd = doc(&[
+            ("find", s("c")),
+            ("filter", d(&[("a", d(&[("$type", s("number"))]))])),
+            ("projection", d(&[("_id", 1.into())])),
+        ]);
+        if let Some(sort) = sort.clone() {
+            cmd.push("sort", sort);
+        }
+        let r = m.run("db", cmd);
+        assert_eq!(
+            field(&r, "cursor.firstBatch"),
+            &Value::Array(vec![(d(&[("_id", 1.into())]))]),
+            "{sort:?} {r:?}"
+        );
+    }
+}

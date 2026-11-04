@@ -788,3 +788,21 @@ fn regex_options_and_geo_operator_documents() {
         assert!(Filter::parse(common::raw(&f), q).is_ok(), "{filter}");
     }
 }
+
+/// `matches` and `match_position` agree, also on `$type: "number"` over `MinKey`, which takes
+/// none of the numeric types (the battery's `query-type`, 04-11-2026).
+#[test]
+fn matches_and_match_position_agree_on_type() {
+    let ext = NoExtensions;
+    let ctx = MatchContext { collation: None, ext: &ext, vars: None };
+    for doc in [r#"{"a": {"$minKey": 1}}"#, r#"{"a": {"$maxKey": 1}}"#, r#"{"a": 1}"#] {
+        let f = bytes(r#"{"a": {"$type": "number"}}"#);
+        let filter = Filter::parse(raw(&f), FilterUse::Query).unwrap();
+        let b = bytes(doc);
+        let doc_raw = raw(&b);
+        let whole = filter.matches(doc_raw, &ctx).unwrap();
+        let positioned = filter.match_position(doc_raw, &ctx).unwrap().is_some();
+        assert_eq!(whole, positioned, "{doc}");
+        assert_eq!(whole, doc == r#"{"a": 1}"#, "{doc}");
+    }
+}
