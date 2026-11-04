@@ -454,8 +454,8 @@ pub(super) fn parse_range(d: &Document, path: &str) -> Result<Operator, SearchEr
             (None, Some(v)) => (inclusive, v, true),
             (None, None) => return Ok(None),
         };
+        // A document was refused above, for its missing `type`.
         match v {
-            Value::Document(_) => Err(shape(&format!("{}.type", at(name)), "is required")),
             Value::Boolean(_) => {
                 Err(shape(path, "range operator does not support BOOLEAN point type"))
             }
@@ -465,6 +465,13 @@ pub(super) fn parse_range(d: &Document, path: &str) -> Result<Operator, SearchEr
             },
         }
     };
+    // A bound that is a document needs its `type`, checked before the bounds are paired and in
+    // this order whatever theirs in the query (measured on refsearch 1.70.6 on 05-11-2026).
+    for name in ["lt", "lte", "gt", "gte"] {
+        if let Some(Value::Document(_)) = present(name) {
+            return Err(shape(&format!("{}.type", at(name)), "is required"));
+        }
+    }
     let lower = bound("gt", "gte")?;
     let upper = bound("lt", "lte")?;
     if lower.is_none() && upper.is_none() {

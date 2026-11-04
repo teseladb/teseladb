@@ -425,6 +425,22 @@ fn range_errors_are_refsearch_messages() {
         err(n(), &[("gte", Document::new().with("a", 1).into())]),
         "\"range.gte.type\" is required"
     );
+    // A bound that is a document needs its `type`, checked in the order lt, lte, gt, gte and
+    // before the bounds are paired, whatever their order in the query (measured on refsearch
+    // 1.70.6 on 05-11-2026, `search-op-range` step 1).
+    let doc = || Value::from(Document::new().with("$date", "2024-01-01T00:00:00Z"));
+    for (bounds, named) in [
+        (&["gte", "lt"][..], "lt"),
+        (&["lt", "gte"][..], "lt"),
+        (&["gt", "lte"][..], "lte"),
+        (&["lte", "gt"][..], "lte"),
+        (&["gt", "gte"][..], "gt"),
+        (&["lt", "lte"][..], "lt"),
+        (&["lte", "lt", "gte", "gt"][..], "lt"),
+    ] {
+        let b: Vec<(&str, Value)> = bounds.iter().map(|k| (*k, doc())).collect();
+        assert_eq!(err(n(), &b), format!("\"range.{named}.type\" is required"), "{bounds:?}");
+    }
     assert_eq!(err(5.into(), &[("gte", 1.into())]), "\"range.path\" must be a document or string");
     assert_eq!(
         err(n(), &[("gte", 5.into()), ("x", 1.into())]),
