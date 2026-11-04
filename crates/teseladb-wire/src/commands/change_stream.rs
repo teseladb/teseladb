@@ -292,7 +292,9 @@ pub fn open<B: Backend + ?Sized>(
         return Err(CommandError::new(
             error::CHANGE_STREAM_FATAL,
             "To resume from a split event, the $changeStream pipeline must include a $changeStreamSplitLargeEvent stage",
-        ));
+        )
+        // A `refrouter` 9.0.4 marks it so that a driver does not resume (measured on 04-11-2026).
+        .with_label(NON_RESUMABLE_LABEL));
     }
     let resume_event = match &spec.start {
         Start::ResumeAfter(Position::Event(t)) => Some(t.clone()),
@@ -363,8 +365,8 @@ pub fn more<B: Backend + ?Sized>(
     let mut bytes = 0usize;
     loop {
         // A read that fails on an event (one too large to serialize) has queued the events
-        // before it: the batch takes them, and fails only if it reaches that event, as a
-        // `refrouter` 9.0.4 fails the `getMore` whose batch comes to it (`cs-split-large`).
+        // before it; they come out as far as the shard batches before the failing one go
+        // ([`cut_at_failing_batch`]).
         let mut failure = None;
         if stream.pending.is_empty() && stream.failed.is_some() {
             failure = stream.failed.take();
@@ -375,6 +377,10 @@ pub fn more<B: Backend + ?Sized>(
                 // with what it has, it does not fail (a `refrouter` never answers
                 // `MaxTimeMSExpired` to the `getMore` of a stream).
                 Err(e) if e.code.code == error::MAX_TIME_MS_EXPIRED.code => break,
+                Err(e) if e.code.code == error::BSON_OBJECT_TOO_LARGE.code => {
+                    let host = super::host_port(backend);
+                    failure = cut_at_failing_batch(stream, from_shard(&host, e));
+                }
                 Err(e) => failure = Some(e),
             }
         }
@@ -414,6 +420,37 @@ pub fn more<B: Backend + ?Sized>(
     stream.position.batch_ended(last.as_ref(), stream.pending.is_empty());
     let pbrt = Document::new().with("_data", stream.position.token().encode());
     Ok((out, pbrt, false))
+}
+
+/// After a read that met an event too large to serialize, keeps of the queued events those of
+/// the shard batches before the one the event falls in, as a `refrouter` 9.0.4 reads a stream
+/// (measured on 04-11-2026): a shard fills a batch with the events in order until the next one
+/// does not fit in what is left of 16 MiB, which starts the next batch, and an event too large
+/// to serialize fails the batch it falls in, whose events are lost. The error comes now when
+/// no batch comes before it (`Some`), or at the `getMore` that reaches it.
+fn cut_at_failing_batch(stream: &mut ChangeStream, e: CommandError) -> Option<CommandError> {
+    let mut start = 0;
+    let mut bytes = 0usize;
+    for (i, (_, doc)) in stream.pending.iter().enumerate() {
+        let n = teseladb_changestream::split_large::size(doc).unwrap_or(usize::MAX);
+        if bytes.saturating_add(n) > super::query::MAX_BATCH_BYTES {
+            start = i;
+            bytes = 0;
+        }
+        bytes = bytes.saturating_add(n);
+    }
+    stream.pending.truncate(start);
+    if stream.pending.is_empty() {
+        return Some(e);
+    }
+    stream.failed = Some(e);
+    None
+}
+
+/// Error `e` as a `refrouter` 9.0.4 relays it from the shard `host` that met it.
+fn from_shard(host: &str, e: CommandError) -> CommandError {
+    let errmsg = format!("Error on remote shard {host} :: caused by :: {}", e.errmsg);
+    CommandError { errmsg, ..e }
 }
 
 /// The codes after which a driver resumes the stream (`ResumableChangeStreamError`): the node or

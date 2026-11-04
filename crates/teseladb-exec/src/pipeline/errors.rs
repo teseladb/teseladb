@@ -21,6 +21,8 @@ macro_rules! location {
 pub const BAD_VALUE: ErrorCode = ErrorCode { code: 2, name: "BadValue" };
 /// `FailedToParse`.
 pub const FAILED_TO_PARSE: ErrorCode = ErrorCode { code: 9, name: "FailedToParse" };
+/// `IllegalOperation`.
+pub const ILLEGAL_OPERATION: ErrorCode = ErrorCode { code: 20, name: "IllegalOperation" };
 /// `TypeMismatch`.
 pub const TYPE_MISMATCH: ErrorCode = ErrorCode { code: 14, name: "TypeMismatch" };
 /// `IndexNotFound`.
