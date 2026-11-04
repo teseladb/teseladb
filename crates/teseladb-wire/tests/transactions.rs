@@ -392,11 +392,16 @@ fn the_first_statement_s_read_concern_sets_the_snapshot() {
     assert_eq!(code(&r), Some(&Value::Int32(72)), "{r:?}");
     let r = run(&mut m, "admin", end("abortTransaction", 13, 1));
     assert_eq!(errmsg(&r), "Transaction with { txnNumber: 1 } has been aborted.");
-    // The client saw a later cluster time (`$clusterTime`) than the node: at it too.
+    // The client saw a later cluster time (`$clusterTime`) than the node: at it too. It came
+    // from a node whose clock is half a second ahead of this one's wall clock: a node takes no
+    // `$clusterTime` more than 1 s ahead of its wall clock (008 FR-013, DV-101).
+    let wall = m.now;
+    m.now = 10_199_500;
     let seen = Document::new().with("clusterTime", ts(10_200, 7));
     let gossip = stmt(find(), 16, 1, true).with("$clusterTime", seen);
     assert!(ok(&run(&mut m, DB, gossip)));
     assert_eq!(m.txn_read_at, Some(from_timestamp((10_200, 7))));
+    m.now = wall;
     // Ahead of the cluster time: refused.
     let ahead = level(Level::Snapshot).with("atClusterTime", ts(20_000, 1));
     let r = run(&mut m, DB, with_concern(ahead.clone(), 14, 1));
