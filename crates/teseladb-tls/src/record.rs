@@ -223,7 +223,9 @@ pub struct RecordLayer {
     pub read: Option<Protection>,
     /// Protection of records written, once keys exist.
     pub write: Option<Protection>,
+    /// Bytes received; those before `read_at` are records already read.
     input: Vec<u8>,
+    read_at: usize,
 }
 
 /// One record as read, without protection.
@@ -240,20 +242,27 @@ pub struct Record {
 impl RecordLayer {
     /// Appends bytes received from the peer.
     pub fn push_input(&mut self, data: &[u8]) {
+        // The records read leave once they are at least half the buffer, so each byte moves a
+        // bounded number of times however many records arrive at once.
+        if self.read_at > 0 && self.read_at * 2 >= self.input.len() {
+            self.input.drain(..self.read_at);
+            self.read_at = 0;
+        }
         self.input.extend_from_slice(data);
     }
 
     /// Whether received bytes are waiting.
     pub fn has_input(&self) -> bool {
-        !self.input.is_empty()
+        self.read_at < self.input.len()
     }
 
     /// The next complete record, if the input holds one.
     pub fn next_record(&mut self) -> Result<Option<Record>, Error> {
-        if self.input.len() < HEADER_LEN {
+        let pending = &self.input[self.read_at..];
+        if pending.len() < HEADER_LEN {
             return Ok(None);
         }
-        let mut r = Reader::new(&self.input[..HEADER_LEN]);
+        let mut r = Reader::new(&pending[..HEADER_LEN]);
         let code = r.u8()?;
         let version = r.u16()?;
         let len = usize::from(r.u16()?);
@@ -264,11 +273,12 @@ impl RecordLayer {
         if len > MAX_CIPHERTEXT || (self.read.is_none() && len > MAX_PLAINTEXT) {
             return Err(Error::Local(Alert::RecordOverflow));
         }
-        if self.input.len() < HEADER_LEN + len {
+        if pending.len() < HEADER_LEN + len {
             return Ok(None);
         }
-        let rec: Vec<u8> = self.input.drain(..HEADER_LEN + len).collect();
-        let (head, body) = rec.split_at(HEADER_LEN);
+        let start = self.read_at;
+        self.read_at += HEADER_LEN + len;
+        let (head, body) = self.input[start..self.read_at].split_at(HEADER_LEN);
         let record = match (typ, self.read.as_mut()) {
             // The compatibility change_cipher_spec stays unprotected (RFC 8446, 5), and TLS 1.2's
             // is never protected.
@@ -342,6 +352,35 @@ impl HandshakeBuffer {
 #[cfg(test)]
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
+    /// Many records received at once are read in time linear in their size: a message of the
+    /// wire protocol of tens of MB arrives as thousands of records (found in the e2e battery of
+    /// 04-11-2026: a 22 MB write kept a core busy for minutes moving the rest of the input on each
+    /// record).
+    #[test]
+    fn many_records_at_once_are_read_in_linear_time() {
+        const RECORDS: usize = 8_192;
+        let mut w = RecordLayer::default();
+        let mut out = Vec::new();
+        w.write(ContentType::ApplicationData, &vec![3u8; RECORDS * MAX_PLAINTEXT], &mut out)
+            .unwrap();
+        let mut r = RecordLayer::default();
+        let start = std::time::Instant::now();
+        r.push_input(&out);
+        let mut read = 0;
+        while let Some(rec) = r.next_record().unwrap() {
+            read += rec.data.len();
+            // Input arriving while records are read joins the rest.
+            if read == MAX_PLAINTEXT {
+                r.push_input(&header(ContentType::ApplicationData, 1));
+                r.push_input(&[9]);
+            }
+        }
+        assert_eq!(read, RECORDS * MAX_PLAINTEXT + 1);
+        assert!(!r.has_input());
+        // 128 MiB moved once take a fraction of a second; moved again on each record, minutes.
+        assert!(start.elapsed() < std::time::Duration::from_secs(10), "{:?}", start.elapsed());
+    }
+
     use super::*;
     use crate::keyschedule::Secret;
 
