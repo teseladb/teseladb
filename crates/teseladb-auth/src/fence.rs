@@ -84,11 +84,18 @@ impl FenceTable {
     }
 }
 
-/// The node's side: its lease and the request in flight.
+/// The requests a node waits an answer for: those of the last lease (one every 500 ms takes four).
+const IN_FLIGHT: usize = 8;
+
+/// The node's side: its lease and the requests in flight. An answer to any of them counts, from
+/// when that request left: a leader slower than the period between requests (a loaded machine)
+/// would otherwise answer each request after the next one replaced it, and the node would stop
+/// authorizing although every answer came within a lease.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AuthLease {
     until_ms: u64,
-    asked: Option<(u64, u64)>,
+    /// `(seq, asked_ms)` of each request in flight.
+    asked: [Option<(u64, u64)>; IN_FLIGHT],
     next_seq: u64,
 }
 
@@ -98,28 +105,38 @@ impl AuthLease {
         AuthLease::default()
     }
 
-    /// Asks for a lease at `now_ms`: the sequence number the request carries. A new request
-    /// replaces one still in flight.
+    /// Asks for a lease at `now_ms`: the sequence number the request carries. The requests
+    /// whose answer could no longer give a lease are forgotten; with every slot taken, the
+    /// oldest request makes room.
     pub fn ask(&mut self, now_ms: u64) -> u64 {
         self.next_seq += 1;
-        self.asked = Some((self.next_seq, now_ms));
+        for slot in &mut self.asked {
+            if slot.is_some_and(|(_, at)| lease_end(at) <= now_ms) {
+                *slot = None;
+            }
+        }
+        let free = self.asked.iter().position(Option::is_none);
+        let oldest = || {
+            let slots = self.asked.iter().enumerate();
+            slots.min_by_key(|(_, a)| a.map(|(seq, _)| seq)).map_or(0, |(i, _)| i)
+        };
+        let at = free.unwrap_or_else(oldest);
+        self.asked[at] = Some((self.next_seq, now_ms));
         self.next_seq
     }
 
     /// The leader answered request `seq` with commit index `commit`; with the node's copy at
-    /// `applied`, the lease runs from when it asked, less the drift margin. A late or unknown
-    /// answer, or a copy behind the leader, gives nothing.
+    /// `applied`, the lease runs from when that request left, less the drift margin. An answer
+    /// already taken or unknown, or a copy behind the leader, gives nothing.
     pub fn granted(&mut self, seq: u64, commit: u64, applied: u64) {
-        let Some((asked_seq, asked_ms)) = self.asked else { return };
-        if asked_seq != seq {
+        let Some(slot) = self.asked.iter_mut().find(|a| a.is_some_and(|(s, _)| s == seq)) else {
             return;
-        }
-        self.asked = None;
+        };
+        let Some((_, asked_ms)) = slot.take() else { return };
         if applied < commit {
             return;
         }
-        let until = asked_ms.saturating_add(AUTH_LEASE_MS - DRIFT_MARGIN_MS);
-        self.until_ms = self.until_ms.max(until);
+        self.until_ms = self.until_ms.max(lease_end(asked_ms));
     }
 
     /// When the lease ends (0 without one).
@@ -135,8 +152,13 @@ impl AuthLease {
     /// The node restarted or lost its copy: no lease until the next grant.
     pub fn drop_lease(&mut self) {
         self.until_ms = 0;
-        self.asked = None;
+        self.asked = [None; IN_FLIGHT];
     }
+}
+
+/// The end of a lease asked at `asked_ms`: one lease less the drift margin.
+fn lease_end(asked_ms: u64) -> u64 {
+    asked_ms.saturating_add(AUTH_LEASE_MS - DRIFT_MARGIN_MS)
 }
 
 /// A request for a lease that Group 0's leader holds until it knows it still led after the

@@ -24,11 +24,14 @@ fn a_node_holds_a_lease_from_when_it_asked() {
     assert!(!lease.valid(until));
     lease.granted(seq, 7, 7);
     assert!(!lease.valid(until), "the request was already answered");
+    // An answer to an earlier request still in flight counts, from when that request left: the
+    // lease it gives ends no later than the one the leader counts from answering it.
     let old = lease.ask(until + 1);
     let new = lease.ask(until + 2);
     lease.granted(old, 7, 7);
-    assert!(!lease.valid(until + 3));
+    assert_eq!(lease.until_ms(), until + 1 + AUTH_LEASE_MS - DRIFT_MARGIN_MS);
     lease.granted(new, 7, 7);
+    assert_eq!(lease.until_ms(), until + 2 + AUTH_LEASE_MS - DRIFT_MARGIN_MS);
     assert!(lease.valid(until + 3));
     // A shorter grant never shortens the lease.
     let back = lease.ask(0);
@@ -38,6 +41,41 @@ fn a_node_holds_a_lease_from_when_it_asked() {
     assert!(!lease.valid(until + 3));
     lease.granted(back, 7, 7);
     assert!(!lease.valid(until + 3));
+}
+
+/// Answers slower than the period between requests keep the lease without a gap (seen in the
+/// e2e battery of 04-11-2026: under load a node answered 13436 between two leases, since each
+/// request replaced the one in flight and its late answer gave nothing).
+#[test]
+fn answers_slower_than_the_requests_keep_the_lease() {
+    const EVERY: u64 = 500;
+    const LATE: u64 = 900;
+    let mut lease = AuthLease::new();
+    let mut asked = Vec::new();
+    let mut held_from = None;
+    for now in (0..10_000).step_by(10) {
+        if now % EVERY == 0 {
+            asked.push((lease.ask(now), now));
+        }
+        while asked.first().is_some_and(|(_, at)| at + LATE <= now) {
+            let (seq, _) = asked.remove(0);
+            lease.granted(seq, 1, 1);
+        }
+        if lease.valid(now) {
+            held_from.get_or_insert(now);
+        } else {
+            assert!(held_from.is_none(), "a gap at {now} ms after holding from {held_from:?}");
+        }
+    }
+    assert_eq!(held_from, Some(LATE));
+    // A request older than a lease is no longer waited for: its answer would give nothing.
+    let mut lease = AuthLease::new();
+    let stale = lease.ask(0);
+    for t in (EVERY..=AUTH_LEASE_MS).step_by(EVERY as usize) {
+        lease.ask(t);
+    }
+    lease.granted(stale, 1, 1);
+    assert!(!lease.valid(AUTH_LEASE_MS));
 }
 
 #[test]
