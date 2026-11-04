@@ -340,3 +340,4 @@
 [{"$limit": 1}, {"$project": {"_id": 0, "x": {"$let": {"vars": {"REMOVE": 1}, "in": 1}}}}]	!! 9	'REMOVE' starts with an invalid character for a user variable name
 [{"$limit": 1}, {"$project": {"_id": 0, "x": {"$let": {"vars": {"ROOT": 1}, "in": 1}}}}]	!! 9	'ROOT' starts with an invalid character for a user variable name
 [{"$limit": 1}, {"$project": {"_id": 0, "x": {"$let": {"vars": {"a-b": 1}, "in": 1}}}}]	!! 9	'a-b' contains an invalid character for a variable name: '-'
+[{"$addFields": {"o": {"a.b": 1}}}]	!! 40183	cannot use dotted field name 'a.b' in a sub object: { o: { a.b: 1 } }
