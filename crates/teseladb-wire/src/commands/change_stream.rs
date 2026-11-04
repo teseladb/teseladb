@@ -716,7 +716,8 @@ fn check_resume_event(
                 "cannot resume stream; the resume token was not found. {{_data: \"{}\"}}",
                 token.encode()
             ),
-        ));
+        )
+        .with_label(NON_RESUMABLE_LABEL));
     }
     Ok(())
 }

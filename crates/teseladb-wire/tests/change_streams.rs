@@ -189,6 +189,9 @@ fn resuming_after_an_event_the_stages_leave_out_is_fatal() {
     let want =
         format!("cannot resume stream; the resume token was not found. {{_data: \"{hex}\"}}");
     assert_eq!(msg, &want);
+    // A driver does not resume after it (measured: the label of a `refrouter` 9.0.4).
+    let label = Value::Array(vec![Value::from("NonResumableChangeStreamError")]);
+    assert_eq!(r.get("errorLabels"), Some(&label));
     assert_eq!(code(&get_more(&mut m, DB, id_of(&lost), "c", Document::new())), 43);
     // A `$match` that keeps the event resumes after it.
     let kept = open(&mut m, DB, "c".into(), stream(spec, only(1)));
