@@ -64,6 +64,8 @@ pub struct Mem {
     pub invalidations: usize,
     /// Lookups of the mark at which a database was added.
     pub database_marks: usize,
+    /// The marks of the `$clusterTime`s clients sent (`Backend::observe_mark`).
+    pub observed: Vec<Hlc>,
     /// What the STS answers to REFDB-AWS (status and body); `None`: unreachable.
     pub sts: Option<(u16, Vec<u8>)>,
     /// `oidcIdentityProviders` and the JWKS each provider gives, as JSON.
@@ -550,6 +552,10 @@ impl Backend for Mem {
 
     fn cluster_mark(&self) -> Hlc {
         Hlc { physical: self.now + self.mark_ahead, logical: 0 }
+    }
+
+    fn observe_mark(&mut self, mark: Hlc) {
+        self.observed.push(mark);
     }
 
     fn last_commit(&self) -> Option<Hlc> {

@@ -756,6 +756,14 @@ fn parse_stage(d: RawDoc<'_>, ctx: &Ctx) -> Result<Stage, MqlError> {
         "$setWindowFields" => {
             Stage::SetWindowFields(Box::new(crate::window::SetWindowFields::parse(arg, ctx)?))
         }
+        // Inside a change stream the stream reads it (014 FR-011); anywhere else it is refused
+        // as a `refrouter` 9.0.4 refuses it (measured on 04-11-2026).
+        "$changeStreamSplitLargeEvent" => {
+            return Err(error(
+                errors::ILLEGAL_OPERATION,
+                "$changeStreamSplitLargeEvent can only be used in a $changeStream pipeline",
+            ));
+        }
         other => {
             return Err(error(
                 errors::BAD_VALUE,

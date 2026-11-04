@@ -460,3 +460,54 @@ fn the_operation_time_of_a_write_is_its_commit() {
     let r = run(&mut m, &mut c, find);
     assert_eq!(field(&r, "operationTime"), &node);
 }
+
+/// Runs `ping` with `$clusterTime` `t` on a node without keys whose wall clock is `m.now`.
+fn ping_on(m: &mut Mem, t: Value) -> Document {
+    let sig = Document::new().with("hash", hash(&[0; 20], 0)).with("keyId", Value::Int64(0));
+    let ct = Document::new().with("clusterTime", t).with("signature", sig);
+    let cmd = Document::new().with("ping", 1).with("$db", ADMIN).with("$clusterTime", ct);
+    let shared = std::mem::take(&mut m.shared);
+    let a = dispatch_with(
+        &mut Connection::new(4),
+        &request(&cmd, opcode::OP_MSG),
+        &info(None),
+        Some((m, &shared)),
+    );
+    m.shared = shared;
+    reply(a)
+}
+
+/// A client's `$clusterTime` ahead of the node's clock moves the node's HLC up to it before the
+/// command runs, as a `refrouter` 9.0.4 does (008 FR-013, measured 04-11-2026): a write that follows
+/// lands above what the client saw, even on another node.
+#[test]
+fn a_clients_cluster_time_moves_the_nodes_clock() {
+    let mut m = Mem::new();
+    let secs = (m.now / 1000) as u32;
+    let r = ping_on(&mut m, ts(secs, 5));
+    assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+    assert_eq!(m.observed, vec![teseladb_hlc::from_timestamp((secs, 5))]);
+    // One behind the node's clock passes and leaves it alone.
+    let r = ping_on(&mut m, ts(secs - 3600, 1));
+    assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+}
+
+/// One more than 1 s ahead of the node's wall clock fails with 205 and the message of a `refrouter`
+/// 9.0.4, which allows 365 days (DV-101): the HLC's bound on disk would keep the node from
+/// starting again until its wall clock passed it.
+#[test]
+fn a_cluster_time_too_far_ahead_fails_with_205() {
+    let mut m = Mem::new();
+    let secs = (m.now / 1000) as u32;
+    let r = ping_on(&mut m, ts(secs + 2, 1));
+    let msg = format!(
+        "New $clusterTime, {}, is too far from this node's wall clock time, {secs}.",
+        secs + 2
+    );
+    assert_eq!(code(&r), (205, msg), "{r:?}");
+    assert_eq!(field(&r, "codeName"), &Value::from("ClusterTimeFailsRateLimiter"));
+    assert!(m.observed.is_empty(), "the clock is left alone");
+    // Within the second it is taken.
+    let r = ping_on(&mut m, ts(secs + 1, 0));
+    assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+}

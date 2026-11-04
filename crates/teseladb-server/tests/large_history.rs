@@ -268,7 +268,7 @@ fn the_event(r: &Document) -> Document {
 /// `cs-split-large` (014) on every node: an insert, an update to 8 MiB and one to 14 MB whose
 /// event, with its pre-image of 8 MiB, needs two fragments. Each `getMore` of the battery gives
 /// its event within its `maxTimeMS` (before, the stream on a node that did not lead the range
-/// came back empty); without the stage the third event fails with 10334, as on a `refrouter`.
+/// came back empty); without the stage the first `getMore` fails with 10334, as on a `refrouter`.
 #[test]
 fn every_node_gives_the_events_of_cs_split_large() {
     let nodes = cluster();
@@ -329,12 +329,13 @@ fn every_node_gives_the_events_of_cs_split_large() {
             let Some(Value::Document(s)) = e.get("splitEvent") else { panic!("node {k}: {e:?}") };
             assert_eq!(s.get("fragment"), Some(&Value::Int32(fragment)), "node {k}");
         }
-        let e = the_event(&one_more(c, "split", *whole));
-        assert_eq!(kind(&e), Some(Value::from("insert")), "node {k}");
-        let e = the_event(&one_more(c, "split", *whole));
-        assert!(changed(&e), "node {k}: {:?}", kind(&e));
+        // Without the stage, the three events fall in one shard batch and the large one fails
+        // it: the first `getMore` fails and the cursor is gone (014 FR-011, measured on a
+        // `refrouter` 9.0.4 on 04-11-2026).
         let too_large = one_more(c, "split", *whole);
         assert_eq!(too_large.get("code"), Some(&Value::Int32(10334)), "node {k}: {too_large:?}");
+        let gone = one_more(c, "split", *whole);
+        assert_eq!(gone.get("code"), Some(&Value::Int32(43)), "node {k}: {gone:?}");
     }
     nodes.into_iter().for_each(|n| drop(n.stop()));
 }

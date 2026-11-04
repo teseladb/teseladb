@@ -101,6 +101,9 @@ pub struct ChangeStream {
     position: StreamPosition,
     /// Events read and not returned yet, with their tokens.
     pending: VecDeque<(ResumeToken, Document)>,
+    /// How many events at the front of `pending` make the shard batch being given ([`fill`]):
+    /// the others start the next one.
+    shard_left: usize,
     /// The stages after `$changeStream`, without `$changeStreamSplitLargeEvent`.
     stages: Vec<Document>,
     /// `$changeStreamSplitLargeEvent` ends the pipeline (014 FR-011).
@@ -292,7 +295,9 @@ pub fn open<B: Backend + ?Sized>(
         return Err(CommandError::new(
             error::CHANGE_STREAM_FATAL,
             "To resume from a split event, the $changeStream pipeline must include a $changeStreamSplitLargeEvent stage",
-        ));
+        )
+        // A `refrouter` 9.0.4 marks it so that a driver does not resume (measured on 04-11-2026).
+        .with_label(NON_RESUMABLE_LABEL));
     }
     let resume_event = match &spec.start {
         Start::ResumeAfter(Position::Event(t)) => Some(t.clone()),
@@ -314,6 +319,7 @@ pub fn open<B: Backend + ?Sized>(
         spec,
         position,
         pending: VecDeque::new(),
+        shard_left: 0,
         pushdown: Pushdown::of(&rest),
         stages: rest,
         split,
@@ -362,29 +368,34 @@ pub fn more<B: Backend + ?Sized>(
     // The bytes of the batch, across every read of the ranges this `getMore` makes.
     let mut bytes = 0usize;
     loop {
-        // A read that fails on an event (one too large to serialize) has queued the events
-        // before it: the batch takes them, and fails only if it reaches that event, as a
-        // `refrouter` 9.0.4 fails the `getMore` whose batch comes to it (`cs-split-large`).
         let mut failure = None;
-        if stream.pending.is_empty() && stream.failed.is_some() {
+        if stream.shard_left == 0 && stream.failed.is_some() {
             failure = stream.failed.take();
-        } else if stream.pending.is_empty() {
-            match poll(backend, stream) {
+        } else if stream.shard_left == 0 {
+            match fill(backend, stream, started) {
                 Ok(()) => {}
                 // The wait ran out while the node read the ranges: an empty `getMore` answers
                 // with what it has, it does not fail (a `refrouter` never answers
                 // `MaxTimeMSExpired` to the `getMore` of a stream).
                 Err(e) if e.code.code == error::MAX_TIME_MS_EXPIRED.code => break,
+                // An event too large to serialize fails the shard batch being filled, and
+                // every event of it is lost ([`fill`]).
+                Err(e) if e.code.code == error::BSON_OBJECT_TOO_LARGE.code => {
+                    stream.pending.clear();
+                    stream.shard_left = 0;
+                    failure = Some(from_shard(&super::host_port(backend), e));
+                }
                 Err(e) => failure = Some(e),
             }
         }
-        while batch.is_none_or(|b| out.len() < b) {
+        while batch.is_none_or(|b| out.len() < b) && stream.shard_left > 0 {
             let Some((token, doc)) = stream.pending.pop_front() else { break };
             let n = teseladb_changestream::split_large::size(&doc).unwrap_or(usize::MAX);
             if bytes + n > super::query::MAX_BATCH_BYTES && !out.is_empty() {
                 stream.pending.push_front((token, doc));
                 break;
             }
+            stream.shard_left -= 1;
             bytes += n;
             out.push(doc);
             last = Some(token);
@@ -414,6 +425,67 @@ pub fn more<B: Backend + ?Sized>(
     stream.position.batch_ended(last.as_ref(), stream.pending.is_empty());
     let pbrt = Document::new().with("_data", stream.position.token().encode());
     Ok((out, pbrt, false))
+}
+
+/// The bytes of an event as a batch counts them.
+fn event_bytes(doc: &Document) -> usize {
+    teseladb_changestream::split_large::size(doc).unwrap_or(usize::MAX)
+}
+
+/// Fills the next shard batch as a shard fills one for a `refrouter` 9.0.4 (measured on
+/// 04-11-2026): the events in order, the ones left from the last batch first, until the next one
+/// does not fit in what is left of 16 MiB, which starts the batch after. It reads on while the
+/// queue holds less than 16 MiB, each read moves the stream's mark and the mark is below `until`
+/// (the node's clock when the `getMore` began): a read of a range stops at 4 MiB (014 FR-003),
+/// and one read alone may stop before an event too large to serialize that the shard's batch
+/// meets (`cs-split-large`, battery of 04-11-2026). Such an event fails the read with every
+/// event of the batch, which the queue held under 16 MiB. A read that runs out of time after
+/// some events gives those.
+fn fill<B: Backend + ?Sized>(
+    backend: &mut B,
+    stream: &mut ChangeStream,
+    until: Hlc,
+) -> Result<(), CommandError> {
+    loop {
+        let queued =
+            stream.pending.iter().map(|(_, d)| event_bytes(d)).fold(0, usize::saturating_add);
+        if queued >= super::query::MAX_BATCH_BYTES || stream.invalidated.is_some() {
+            break;
+        }
+        let before = stream.position.from();
+        match poll(backend, stream) {
+            Ok(()) => {}
+            Err(e)
+                if e.code.code == error::MAX_TIME_MS_EXPIRED.code && !stream.pending.is_empty() =>
+            {
+                break;
+            }
+            Err(e) => return Err(e),
+        }
+        let mark = stream.position.from();
+        if mark <= before || mark >= until {
+            break;
+        }
+    }
+    // The batch: the events that fit in 16 MiB, at least one.
+    let mut bytes = 0usize;
+    let mut n = 0;
+    for (_, d) in &stream.pending {
+        let size = event_bytes(d);
+        if n > 0 && bytes.saturating_add(size) > super::query::MAX_BATCH_BYTES {
+            break;
+        }
+        bytes = bytes.saturating_add(size);
+        n += 1;
+    }
+    stream.shard_left = n;
+    Ok(())
+}
+
+/// Error `e` as a `refrouter` 9.0.4 relays it from the shard `host` that met it.
+fn from_shard(host: &str, e: CommandError) -> CommandError {
+    let errmsg = format!("Error on remote shard {host} :: caused by :: {}", e.errmsg);
+    CommandError { errmsg, ..e }
 }
 
 /// The codes after which a driver resumes the stream (`ResumableChangeStreamError`): the node or

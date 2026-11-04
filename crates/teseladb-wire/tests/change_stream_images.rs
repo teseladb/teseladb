@@ -296,7 +296,9 @@ fn a_large_event_fails_whole_and_comes_in_fragments_with_the_split_stage() {
         Some(Value::String(s)) => s.clone(),
         other => panic!("{other:?}"),
     };
-    assert!(msg.starts_with("Executor error during getMore :: caused by :: Serializing Document failed :: caused by :: Size "), "{msg}");
+    // With the shard prefix a `refrouter` 9.0.4 puts before it (`cs-split-large` step 10, 04-11).
+    assert!(msg.starts_with("Error on remote shard "), "{msg}");
+    assert!(msg.contains(" :: caused by :: Executor error during getMore :: caused by :: Serializing Document failed :: caused by :: Size "), "{msg}");
     assert!(msg.ends_with(" exceeds maximum 16793600"), "{msg}");
     let mut seen = Vec::new();
     for _ in 0..3 {
@@ -319,6 +321,8 @@ fn a_large_event_fails_whole_and_comes_in_fragments_with_the_split_stage() {
         .with("cursor", Document::new());
     let r = m.run(DB, cmd);
     assert_eq!(r.get("code"), Some(&Value::Int32(280)), "{r:?}");
+    let labels = Value::Array(vec![Value::from("NonResumableChangeStreamError")]);
+    assert_eq!(r.get("errorLabels"), Some(&labels), "measured on 04-11: {r:?}");
     let want = "To resume from a split event, the $changeStream pipeline must include a $changeStreamSplitLargeEvent stage";
     assert_eq!(r.get("errmsg"), Some(&Value::String(want.into())));
     let resumed = open_with(&mut m, "c", spec().with("resumeAfter", after), vec![splitting]);
@@ -327,39 +331,87 @@ fn a_large_event_fails_whole_and_comes_in_fragments_with_the_split_stage() {
     assert_eq!(field(&rest[0], "splitEvent"), &d(&[("fragment", 2.into()), ("of", 2.into())]));
 }
 
-/// With a batch of one event, the event before one too large to serialize comes first and the
-/// `getMore` whose turn the large one is fails, as on a `refrouter` 9.0.4 (the stream without
-/// `$changeStreamSplitLargeEvent` of the battery's `cs-split-large`). Before, the read that met
-/// it failed at once and the event before it came a `getMore` late.
-#[test]
-fn an_event_too_large_fails_only_when_its_turn_comes() {
-    let mut m = Mem::new();
-    run(
-        &mut m,
-        Document::new().with("create", "c").with("changeStreamPreAndPostImages", images(true)),
-    );
+/// A stream without `$changeStreamSplitLargeEvent` reads its events as a `refrouter` 9.0.4 reads a
+/// shard's batch (measured on 04-11-2026, `cs-split-large`): in order, until the next event does
+/// not fit in what is left of 16 MiB, which starts the next batch. An event too large to
+/// serialize fails the batch it falls in, with the events of that batch, and the cursor is
+/// gone; the batches before it come out. Before, the event before the large one came out and
+/// the `getMore` after it failed.
+fn too_large_stream(m: &mut Mem) -> i64 {
+    // Each read of the range gives one millisecond of its history, so that each event comes in
+    // a read of its own, as the node's reads of 4 MiB cut a history of large versions (014
+    // FR-003): the batch of the shard goes on reading until it holds 16 MiB.
+    m.changes_window_ms = 1;
+    run(m, Document::new().with("create", "c").with("changeStreamPreAndPostImages", images(true)));
     let spec = Document::new()
         .with("fullDocument", "required")
         .with("fullDocumentBeforeChange", "required");
-    let plain = open_with(&mut m, "c", spec, vec![]);
+    open_with(m, "c", spec, vec![])
+}
+
+fn insert_big(m: &mut Mem, id: i32) {
+    m.now += 1;
     let big = "x".repeat(9 * 1024 * 1024);
-    let one = doc(&[("_id", 1.into()), ("a", big.as_str().into())]);
-    run(&mut m, Document::new().with("insert", "c").with("documents", arr(vec![one])));
+    let one = doc(&[("_id", id.into()), ("a", big.as_str().into())]);
+    run(m, Document::new().with("insert", "c").with("documents", arr(vec![one])));
+}
+
+/// An update of document `id` of 9 MiB: its event, with the two images, passes 16 MiB.
+fn update_big(m: &mut Mem, id: i32) {
+    m.now += 1;
     let set = Document::new().with("$set", doc(&[("b", 1.into())]));
-    let u = Document::new().with("q", doc(&[("_id", 1.into())])).with("u", set);
-    run(&mut m, Document::new().with("update", "c").with("updates", arr(vec![u])));
-    let one_more = |m: &mut Mem| {
-        m.now += 1;
-        let cmd = Document::new()
-            .with("getMore", plain)
-            .with("collection", "c")
-            .with("batchSize", 1)
-            .with("maxTimeMS", 1);
-        m.run(DB, cmd)
+    let u = Document::new().with("q", doc(&[("_id", id.into())])).with("u", set);
+    run(m, Document::new().with("update", "c").with("updates", arr(vec![u])));
+}
+
+fn one_more(m: &mut Mem, cursor: i64) -> Document {
+    m.now += 1;
+    let cmd = Document::new()
+        .with("getMore", cursor)
+        .with("collection", "c")
+        .with("batchSize", 1)
+        .with("maxTimeMS", 1);
+    m.run(DB, cmd)
+}
+
+fn fails_too_large(r: &Document) {
+    assert_eq!(r.get("code"), Some(&Value::Int32(10334)), "{r:?}");
+    let msg = match r.get("errmsg") {
+        Some(Value::String(s)) => s.clone(),
+        other => panic!("{other:?}"),
     };
-    let first = batch(&one_more(&mut m));
+    assert!(msg.starts_with("Error on remote shard "), "{msg}");
+    assert!(
+        msg.contains(" :: caused by :: Executor error during getMore :: caused by :: Serializing Document failed :: caused by :: Size "),
+        "{msg}"
+    );
+}
+
+#[test]
+fn an_event_too_large_fails_the_shard_batch_it_falls_in() {
+    let mut m = Mem::new();
+    let plain = too_large_stream(&mut m);
+    insert_big(&mut m, 1);
+    update_big(&mut m, 1);
+    // The insert and the update fall in the same batch: the first `getMore` fails.
+    fails_too_large(&one_more(&mut m, plain));
+    let gone = one_more(&mut m, plain);
+    assert_eq!(gone.get("code"), Some(&Value::Int32(43)), "{gone:?}");
+}
+
+#[test]
+fn the_batches_before_the_one_of_an_event_too_large_come_out() {
+    let mut m = Mem::new();
+    let plain = too_large_stream(&mut m);
+    insert_big(&mut m, 1);
+    // Two events of 9 MiB do not fit in one batch: the second starts the next one, with the
+    // update after it, which is too large.
+    insert_big(&mut m, 2);
+    update_big(&mut m, 2);
+    let first = batch(&one_more(&mut m, plain));
     assert_eq!(first.len(), 1);
-    assert_eq!(field(&first[0], "operationType"), &Value::from("insert"));
-    let e = one_more(&mut m);
-    assert_eq!(e.get("code"), Some(&Value::Int32(10334)), "{e:?}");
+    assert_eq!(field(&first[0], "documentKey"), &Value::Document(doc(&[("_id", 1.into())])));
+    fails_too_large(&one_more(&mut m, plain));
+    let gone = one_more(&mut m, plain);
+    assert_eq!(gone.get("code"), Some(&Value::Int32(43)), "{gone:?}");
 }

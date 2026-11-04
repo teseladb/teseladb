@@ -28,6 +28,8 @@ const WRITE_EVERY: Duration = Duration::from_millis(10);
 const AWAIT_MS: i32 = 1000;
 /// At least this many events are timed, however short the duration.
 const MIN_EVENTS: u64 = 200;
+/// How long the reader waits, after the writer stops, for the events still to come.
+const DELIVERY_WAIT: Duration = Duration::from_secs(30);
 
 /// When each insert answered, by `_id`.
 type Acked = Arc<Mutex<BTreeMap<i64, Instant>>>;
@@ -62,8 +64,15 @@ fn events(reply: &[u8]) -> Result<(Vec<i64>, i64), String> {
     Ok((ids, id))
 }
 
-/// Follows the stream until `stop`, timing each event against its insert.
-fn follow(mut c: Client, acked: &Acked, stop: &AtomicBool) -> Result<Histogram, String> {
+/// When each event came, by `_id`.
+type Arrivals = BTreeMap<i64, Instant>;
+
+/// Follows the stream until `stop` and every insert that answered has come, and gives when each
+/// event came. An event may come before its insert's answer is noted, so the time is taken at
+/// the end ([`lags`]); before, such an event was never timed and the reader waited forever for
+/// the last ones (a test of the gate hung for hours, 04-11-2026). Events that do not come within
+/// [`DELIVERY_WAIT`] after `stop` are an error.
+fn follow(mut c: Client, acked: &Acked, stop: &AtomicBool) -> Result<Arrivals, String> {
     let open = doc(vec![
         ("aggregate", Value::String(COLLECTION.into())),
         (
@@ -76,9 +85,24 @@ fn follow(mut c: Client, acked: &Acked, stop: &AtomicBool) -> Result<Histogram, 
         ("cursor", Value::Document(Document::new())),
     ]);
     let (_, id) = events(&c.command(DB, open)?)?;
-    let mut h = Histogram::new();
-    let mut timed = 0u64;
-    while !stop.load(Ordering::Relaxed) || timed < MIN_EVENTS {
+    let mut arrivals = Arrivals::new();
+    let mut stopped: Option<Instant> = None;
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            let since = *stopped.get_or_insert_with(Instant::now);
+            let acked = acked.lock().map_err(|_| "a writer panicked")?;
+            let missing = acked.keys().filter(|i| !arrivals.contains_key(i)).count();
+            if missing == 0 {
+                return Ok(arrivals);
+            }
+            if since.elapsed() > DELIVERY_WAIT {
+                return Err(format!(
+                    "the stream did not give {missing} of {} events in {} s",
+                    acked.len(),
+                    DELIVERY_WAIT.as_secs()
+                ));
+            }
+        }
         let more = doc(vec![
             ("getMore", Value::Int64(id)),
             ("collection", Value::String(COLLECTION.into())),
@@ -86,13 +110,21 @@ fn follow(mut c: Client, acked: &Acked, stop: &AtomicBool) -> Result<Histogram, 
         ]);
         let (ids, _) = events(&c.command(DB, more)?)?;
         let now = Instant::now();
-        let acked = acked.lock().map_err(|_| "a writer panicked")?;
-        for at in ids.iter().filter_map(|i| acked.get(i)) {
-            h.record(now.saturating_duration_since(*at).as_nanos() as u64);
-            timed += 1;
+        for i in ids {
+            arrivals.entry(i).or_insert(now);
         }
     }
-    Ok(h)
+}
+
+/// The time from each insert's answer to its event, 0 for an event that came first.
+fn lags(acked: &BTreeMap<i64, Instant>, arrivals: &Arrivals) -> Histogram {
+    let mut h = Histogram::new();
+    for (i, at) in acked {
+        if let Some(came) = arrivals.get(i) {
+            h.record(came.saturating_duration_since(*at).as_nanos() as u64);
+        }
+    }
+    h
 }
 
 /// Runs the scenario.
@@ -127,7 +159,8 @@ pub fn run(args: &Args) -> Result<Report, String> {
         thread::sleep(WRITE_EVERY);
     }
     stop.store(true, Ordering::Relaxed);
-    let lag = reader.join().map_err(|_| "the reader panicked")??;
+    let arrivals = reader.join().map_err(|_| "the reader panicked")??;
+    let lag = lags(&*acked.lock().map_err(|_| "the reader panicked")?, &arrivals);
     let mut report = Report::new("changestream-lag");
     report.latency("lag", &lag, None, Some(LAG_P99_NS));
     report.notes.push(format!(
@@ -149,6 +182,19 @@ mod tests {
 
     fn event(id: Value) -> Value {
         Value::Document(doc(vec![("documentKey", Value::Document(doc(vec![("_id", id)])))]))
+    }
+
+    #[test]
+    fn an_event_before_its_insert_answered_counts_as_no_lag() {
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        let acked: BTreeMap<i64, Instant> = [(1, ms(10)), (2, ms(20)), (3, ms(30))].into();
+        // Event 1 came 5 ms after its answer, event 2 before it, event 3 never.
+        let arrivals: Arrivals = [(1, ms(15)), (2, ms(18)), (9, ms(40))].into();
+        let h = lags(&acked, &arrivals);
+        assert_eq!(h.count(), 2);
+        assert_eq!(h.min(), 0);
+        assert!(h.max() >= 5_000_000 && h.max() < 6_000_000, "{}", h.max());
     }
 
     #[test]

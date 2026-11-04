@@ -766,3 +766,22 @@ fn start_at_the_operation_time_of_a_write_includes_it() {
     let keys: Vec<&Value> = events.iter().map(|e| field(e, "documentKey._id")).collect();
     assert_eq!(keys, [&Value::Int32(1), &Value::Int32(2)]);
 }
+
+/// `$changeStreamSplitLargeEvent` outside a change stream fails with 20, as on a `refrouter` 9.0.4
+/// (`cs-split-large` step 18, measured on 04-11-2026). Before, 2 «not supported».
+#[test]
+fn the_split_stage_outside_a_stream_is_an_illegal_operation() {
+    let mut m = Mem::new();
+    create(&mut m, "c");
+    let split = Document::new().with("$changeStreamSplitLargeEvent", Document::new());
+    let cmd = Document::new()
+        .with("aggregate", "c")
+        .with("pipeline", Value::Array(vec![Value::Document(split)]))
+        .with("cursor", Document::new());
+    let r = m.run(DB, cmd);
+    assert_eq!(code(&r), 20, "{r:?}");
+    assert_eq!(
+        errmsg(&r),
+        "$changeStreamSplitLargeEvent can only be used in a $changeStream pipeline"
+    );
+}
