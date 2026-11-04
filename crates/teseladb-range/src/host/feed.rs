@@ -16,7 +16,7 @@ use teseladb_multiraft::{MultiRaftCore, StateMachine};
 use teseladb_types::{GroupId, Nanos, NodeId};
 
 use super::{FUTURE_READ_MS, RangeError, RangeHost, Reply, Req, ReqId};
-use crate::changes::change_rows;
+use crate::changes::ChangeScan;
 use crate::closed_ts::follower_mark;
 use crate::latch::ReadWait;
 use crate::read::{ReadConcern, admit_read};
@@ -71,6 +71,8 @@ pub(crate) struct FeedReq {
     /// The leader to name if the range stops being led here.
     pub(crate) hint: NodeId,
     pub(crate) state: FeedState,
+    /// The time scan once the read started, kept across the blocks it waits for.
+    scan: Option<ChangeScan>,
 }
 
 impl RangeHost {
@@ -120,7 +122,7 @@ impl RangeHost {
         let closed =
             follower_mark(&known, applied, None).filter(|c| *c > from).map(|c| c.min(reach));
         let wanted = at.map(|t| t.min(reach)).filter(|t| *t > from);
-        let f = |to, state| FeedReq { g, start, end, from, to, hint: NodeId(0), state };
+        let f = |to, state| FeedReq { g, start, end, from, to, hint: NodeId(0), state, scan: None };
         match (closed, wanted) {
             (Some(c), w) if w.is_none_or(|w| c >= w) => {
                 self.step_changes(core, id, f(c, FeedState::Read));
@@ -233,7 +235,10 @@ impl RangeHost {
             }
             FeedState::Read => {}
         }
-        match change_rows(&self.lsm, (&f.start, &f.end), (f.from, f.to)) {
+        let lsm = &self.lsm;
+        let scan =
+            f.scan.get_or_insert_with(|| ChangeScan::new(lsm, (&f.start, &f.end), (f.from, f.to)));
+        match scan.step(lsm) {
             None => {
                 self.reqs.insert(id, Req::Changes(f));
                 false

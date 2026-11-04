@@ -7,7 +7,7 @@
 use std::cell::RefCell;
 
 use teseladb_hlc::Hlc;
-use teseladb_lsm::{Kind, Lsm, Step};
+use teseladb_lsm::{Kind, Lsm, Step, TimeScan};
 
 use crate::push::ReadFault;
 use crate::sm::split_value;
@@ -37,30 +37,67 @@ pub struct ChangeRows {
 /// block is being read (the LSM's I/O brings it and the caller asks again).
 pub fn change_rows(
     lsm: &RefCell<Lsm>,
-    (start, end): (&[u8], &[u8]),
-    (from, to): (Hlc, Hlc),
+    interval: (&[u8], &[u8]),
+    marks: (Hlc, Hlc),
 ) -> Option<Result<ChangeRows, ReadFault>> {
-    let mut scan = lsm.borrow().view().scan_time(start, end, from, to);
-    let mut out = ChangeRows { rows: Vec::new(), oldest_intent: None };
-    loop {
-        match scan.next(&mut lsm.borrow_mut()) {
-            Step::Item(i) => match i.kind {
-                Kind::Intent => {
-                    out.oldest_intent = Some(out.oldest_intent.map_or(i.ts, |o| o.min(i.ts)));
+    ChangeScan::new(lsm, interval, marks).step(lsm)
+}
+
+/// A change stream's read of a range in progress: the time scan and what it gave so far. A block
+/// that is not in the cache stops it; the next [`ChangeScan::step`] goes on from there, so a
+/// history larger than the cache is read to the end (scanning again from the first key, each
+/// block read would push an earlier one out of the cache and the read would never end).
+pub struct ChangeScan {
+    cursor: TimeScan,
+    out: ChangeRows,
+}
+
+impl std::fmt::Debug for ChangeScan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChangeScan").field("rows", &self.out.rows.len()).finish()
+    }
+}
+
+impl ChangeScan {
+    /// A read of `[start, end)` in `(from, to]`, on the LSM as it is now.
+    pub fn new(
+        lsm: &RefCell<Lsm>,
+        (start, end): (&[u8], &[u8]),
+        (from, to): (Hlc, Hlc),
+    ) -> ChangeScan {
+        let cursor = lsm.borrow().view().scan_time(start, end, from, to);
+        ChangeScan { cursor, out: ChangeRows { rows: Vec::new(), oldest_intent: None } }
+    }
+
+    /// The versions of the interval and its oldest pending intent; `None` while a block is being
+    /// read (the LSM's I/O brings it and the caller steps again).
+    pub fn step(&mut self, lsm: &RefCell<Lsm>) -> Option<Result<ChangeRows, ReadFault>> {
+        loop {
+            match self.cursor.next(&mut lsm.borrow_mut()) {
+                Step::Item(i) => match i.kind {
+                    Kind::Intent => {
+                        let o = self.out.oldest_intent;
+                        self.out.oldest_intent = Some(o.map_or(i.ts, |o| o.min(i.ts)));
+                    }
+                    Kind::Delete => {
+                        self.out.rows.push(Versioned { key: i.key, ts: i.ts, value: None });
+                    }
+                    Kind::Put => {
+                        let Some((t, v)) = split_value(&i.value) else {
+                            return Some(Err(ReadFault::Unavailable));
+                        };
+                        let value = Some((t, v.to_vec()));
+                        self.out.rows.push(Versioned { key: i.key, ts: i.ts, value });
+                    }
+                    Kind::Retract => {}
+                },
+                Step::Done => {
+                    let empty = ChangeRows { rows: Vec::new(), oldest_intent: None };
+                    return Some(Ok(std::mem::replace(&mut self.out, empty)));
                 }
-                Kind::Delete => out.rows.push(Versioned { key: i.key, ts: i.ts, value: None }),
-                Kind::Put => {
-                    let Some((t, v)) = split_value(&i.value) else {
-                        return Some(Err(ReadFault::Unavailable));
-                    };
-                    let value = Some((t, v.to_vec()));
-                    out.rows.push(Versioned { key: i.key, ts: i.ts, value });
-                }
-                Kind::Retract => {}
-            },
-            Step::Done => return Some(Ok(out)),
-            Step::Miss(_) => return None,
-            Step::Failed(_) => return Some(Err(ReadFault::Unavailable)),
+                Step::Miss(_) => return None,
+                Step::Failed(_) => return Some(Err(ReadFault::Unavailable)),
+            }
         }
     }
 }
