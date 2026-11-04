@@ -157,9 +157,12 @@ variants!(
     // The ranges take the writes of a resharding's critical section (018 T005): a plain write that
     // read `old` lands in the old order after the copy's last read of it.
     ("reshard_without_fence", "reshard", Default, 1000),
-    // Intents resolved before the commit is durable (008 T024): in seed 1 of `txn-append` a
-    // transaction reads a list in an order no other one saw, before `intents` in `splits`.
-    ("resolve_before_durable_commit", "snapshot-isolation", Default, 1000),
+    // Intents resolved before the commit is durable (008 T024): a transfer's intents resolved on
+    // one account while its commit is lost, and `txn-bank`'s read of every account finds a total
+    // other than the starting one (`bank-total`, seed 9). On main f3f92e6 seed 1 of `txn-append`
+    // found it first (`snapshot-isolation`); on main 78568c9, before the changes of 04-11 to the
+    // clock rule and the coordinator, it no longer did (measured 04-11-2026).
+    ("resolve_before_durable_commit", "bank-total", Default, 1000),
     ("resolved_intent_reappears", "lsm", Default, 1000),
     ("rollback_unrecorded", "rollback", Default, 1000),
     // A search that answers before its segments reach its mark (011 T018): the `search` workload
