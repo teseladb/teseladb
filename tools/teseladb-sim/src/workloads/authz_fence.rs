@@ -70,9 +70,8 @@ impl Group0Host for Host<'_> {
         let sm = self.core.state_machine(GROUP0).and_then(NodeSm::group0);
         let mut all: Vec<u64> =
             sm.map(|sm| sm.nodes.keys().map(|n| n.0).collect()).unwrap_or_default();
-        if let Some(c) = self.core.conf(GROUP0) {
-            all.extend(c.voters.iter().chain(&c.learners).map(|n| n.0));
-        }
+        let conf = self.core.conf(GROUP0).into_iter();
+        all.extend(conf.flat_map(|c| c.voters.iter().chain(&c.learners)).map(|n| n.0));
         all.sort_unstable();
         all.dedup();
         all
@@ -153,10 +152,8 @@ impl AuthzFence {
         let Some(n) = leader else { return };
         let now = w.local(n);
         let cmd = Group0Command::SetSetting { key: b"authz".to_vec(), value: vec![] };
-        if let Some(c) = w.cluster_core(n, 0) {
-            // A refusal (the leader just stepped down) is tried again at the next turn.
-            let _ = c.propose(GROUP0, &cmd.encode(), now);
-        }
+        // A refusal (the leader just stepped down) is tried again at the next turn.
+        let _ = w.cluster_core(n, 0).map(|c| c.propose(GROUP0, &cmd.encode(), now));
         w.settle(n, 0);
     }
 
@@ -166,9 +163,11 @@ impl AuthzFence {
             return;
         }
         let now = w.local(n);
-        let Some(core) = w.cluster_core(n, 0) else { return };
         let me = u64::from(n) + 1;
-        let out = self.drivers[n as usize].tick(&mut Host { core }, me, now.0, &|a| a);
+        let driver = &mut self.drivers[n as usize];
+        let out =
+            w.cluster_core(n, 0).map(|core| driver.tick(&mut Host { core }, me, now.0, &|a| a));
+        let out = out.unwrap_or_default();
         w.settle(n, 0);
         for m in out {
             let to = match m {
@@ -191,7 +190,8 @@ impl AuthzFence {
     }
 
     fn deliver(&mut self, w: &mut World, id: u32) {
-        let Some((from, to, life, m)) = self.in_flight.remove(&id) else { return };
+        // Every message turn was scheduled with its message.
+        let (from, to, life, m) = self.in_flight.remove(&id).expect("a message in flight");
         let node = &w.nodes[to as usize];
         if !node.alive || node.life != life || !w.net.reachable(from, to) {
             return;
