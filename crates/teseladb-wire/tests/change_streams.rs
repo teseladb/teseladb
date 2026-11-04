@@ -166,6 +166,36 @@ fn a_small_batch_leaves_events_waiting_and_resuming_goes_on_after_a_token() {
     assert_eq!(two.len(), 2, "the waiting events");
 }
 
+/// A stream resumed after an event its own `$match` leaves out cannot find where to resume: its
+/// first `getMore` fails with 280 and kills the cursor; one that keeps the event resumes (measured
+/// on a `refrouter` 9.0.4 by the battery's `cs-resume-after`, 04-11-2026).
+#[test]
+fn resuming_after_an_event_the_stages_leave_out_is_fatal() {
+    let mut m = Mem::new();
+    create(&mut m, "c");
+    let id = id_of(&open(&mut m, DB, "c".into(), stream(Document::new(), vec![])));
+    insert(&mut m, "c", (1..=3).map(|i| doc(&[("_id", i.into())])).collect());
+    let first = batch(&get_more(&mut m, DB, id, "c", Document::new()));
+    let data = field(&first[0], "_id").clone();
+    let only = |k: i32| vec![Document::new().with("$match", doc(&[("documentKey._id", k.into())]))];
+    let spec = Document::new().with("resumeAfter", data.clone());
+    let lost = open(&mut m, DB, "c".into(), stream(spec.clone(), only(3)));
+    assert_eq!(field(&lost, "ok"), &Value::Double(1.0));
+    let r = get_more(&mut m, DB, id_of(&lost), "c", Document::new());
+    assert_eq!(code(&r), 280, "{r:?}");
+    let Some(Value::String(msg)) = r.get("errmsg") else { panic!("{r:?}") };
+    let Value::Document(t) = &data else { panic!("{data:?}") };
+    let Some(Value::String(hex)) = t.get("_data") else { panic!("{t:?}") };
+    let want =
+        format!("cannot resume stream; the resume token was not found. {{_data: \"{hex}\"}}");
+    assert_eq!(msg, &want);
+    assert_eq!(code(&get_more(&mut m, DB, id_of(&lost), "c", Document::new())), 43);
+    // A `$match` that keeps the event resumes after it.
+    let kept = open(&mut m, DB, "c".into(), stream(spec, only(1)));
+    let r = get_more(&mut m, DB, id_of(&kept), "c", Document::new());
+    assert_eq!(batch(&r), Vec::<Document>::new(), "{r:?}");
+}
+
 #[test]
 fn stages_after_the_stream_filter_and_an_id_they_change_kills_the_cursor() {
     let mut m = Mem::new();

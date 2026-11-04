@@ -111,6 +111,9 @@ pub struct ChangeStream {
     resume_ts: Hlc,
     /// The stream resumes after this fragment of this event.
     resume_fragment: Option<(EventKey, u32)>,
+    /// The token `resumeAfter` names, until the read reaches its event: the stages must keep it,
+    /// or the stream cannot find where to resume (measured on a `refrouter` 9.0.4).
+    resume_check: Option<ResumeToken>,
     /// The token of the `invalidate` that ended the stream: nothing is read after it, and the
     /// cursor closes once the events before it are returned, with it as `postBatchResumeToken`.
     invalidated: Option<ResumeToken>,
@@ -287,6 +290,10 @@ pub fn open<B: Backend + ?Sized>(
             "To resume from a split event, the $changeStream pipeline must include a $changeStreamSplitLargeEvent stage",
         ));
     }
+    let resume_event = match &spec.start {
+        Start::ResumeAfter(Position::Event(t)) => Some(t.clone()),
+        _ => None,
+    };
     let position = StreamPosition::new(&spec.start, ctx.backend.cluster_mark());
     // A resume point the cluster no longer keeps fails at the first `getMore` (measured).
     let resume_ts = match &spec.start {
@@ -307,6 +314,7 @@ pub fn open<B: Backend + ?Sized>(
         stages: rest,
         split,
         resume_fragment,
+        resume_check: resume_event,
         resume_ts,
         invalidated: None,
     };
@@ -668,6 +676,9 @@ fn poll<B: Backend + ?Sized>(
     for (event, ends) in events {
         let resumes_inside =
             stream.resume_fragment.as_ref().is_some_and(|(at, _)| *at == event.token.event);
+        if stream.resume_check.as_ref().is_some_and(|t| t.event == event.token.event) {
+            check_resume_event(stream, &event, backend.random())?;
+        }
         if !stream.position.wants(&event.token.event) && !resumes_inside {
             continue;
         }
@@ -685,6 +696,28 @@ fn poll<B: Backend + ?Sized>(
         }
     }
     stream.position.read_to(resolved);
+    Ok(())
+}
+
+/// The event a stream resumed after with `resumeAfter`: once its stages leave it out, the stream
+/// cannot find where to resume and fails with 280 (measured on a `refrouter` 9.0.4 on 04-11-2026,
+/// a `$match` that drops the event).
+fn check_resume_event(
+    stream: &mut ChangeStream,
+    event: &ChangeEvent,
+    seed: u64,
+) -> Result<(), CommandError> {
+    let Some(token) = stream.resume_check.take() else { return Ok(()) };
+    let doc = event.to_document(stream.spec.expanded);
+    if run_stages(stream, doc, seed)?.is_empty() {
+        return Err(CommandError::new(
+            error::CHANGE_STREAM_FATAL,
+            format!(
+                "cannot resume stream; the resume token was not found. {{_data: \"{}\"}}",
+                token.encode()
+            ),
+        ));
+    }
     Ok(())
 }
 
