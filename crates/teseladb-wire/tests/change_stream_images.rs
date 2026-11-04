@@ -326,3 +326,40 @@ fn a_large_event_fails_whole_and_comes_in_fragments_with_the_split_stage() {
     assert_eq!(rest.len(), 1);
     assert_eq!(field(&rest[0], "splitEvent"), &d(&[("fragment", 2.into()), ("of", 2.into())]));
 }
+
+/// With a batch of one event, the event before one too large to serialize comes first and the
+/// `getMore` whose turn the large one is fails, as on a `refrouter` 9.0.4 (the stream without
+/// `$changeStreamSplitLargeEvent` of the battery's `cs-split-large`). Before, the read that met
+/// it failed at once and the event before it came a `getMore` late.
+#[test]
+fn an_event_too_large_fails_only_when_its_turn_comes() {
+    let mut m = Mem::new();
+    run(
+        &mut m,
+        Document::new().with("create", "c").with("changeStreamPreAndPostImages", images(true)),
+    );
+    let spec = Document::new()
+        .with("fullDocument", "required")
+        .with("fullDocumentBeforeChange", "required");
+    let plain = open_with(&mut m, "c", spec, vec![]);
+    let big = "x".repeat(9 * 1024 * 1024);
+    let one = doc(&[("_id", 1.into()), ("a", big.as_str().into())]);
+    run(&mut m, Document::new().with("insert", "c").with("documents", arr(vec![one])));
+    let set = Document::new().with("$set", doc(&[("b", 1.into())]));
+    let u = Document::new().with("q", doc(&[("_id", 1.into())])).with("u", set);
+    run(&mut m, Document::new().with("update", "c").with("updates", arr(vec![u])));
+    let one_more = |m: &mut Mem| {
+        m.now += 1;
+        let cmd = Document::new()
+            .with("getMore", plain)
+            .with("collection", "c")
+            .with("batchSize", 1)
+            .with("maxTimeMS", 1);
+        m.run(DB, cmd)
+    };
+    let first = batch(&one_more(&mut m));
+    assert_eq!(first.len(), 1);
+    assert_eq!(field(&first[0], "operationType"), &Value::from("insert"));
+    let e = one_more(&mut m);
+    assert_eq!(e.get("code"), Some(&Value::Int32(10334)), "{e:?}");
+}

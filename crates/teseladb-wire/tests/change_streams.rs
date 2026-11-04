@@ -549,6 +549,29 @@ fn a_batch_holds_events_up_to_the_reply_s_bytes() {
     }
 }
 
+/// The same when the two events come from two reads of one `getMore`: a range answers part of
+/// what was asked (its budget of bytes, 014 FR-004), the stream reads again within the same wait,
+/// and the bytes of the first read count against the second (e2e battery of 04-11-2026: the
+/// `getMore` answered 10334 with an insert and a replacement of 9 MiB).
+#[test]
+fn a_batch_counts_the_bytes_of_every_read_of_its_get_more() {
+    let mut m = Mem::new();
+    create(&mut m, "c");
+    m.changes_window_ms = 5;
+    m.pauses_left = 1_000;
+    let id = id_of(&open(&mut m, DB, "c".into(), stream(Document::new(), vec![])));
+    let big = "x".repeat(9 * 1024 * 1024);
+    for n in 1..=2 {
+        insert(&mut m, "c", vec![doc(&[("_id", n.into()), ("a", big.as_str().into())])]);
+        m.now += 10;
+    }
+    for want in [1, 2] {
+        let got = batch(&get_more(&mut m, DB, id, "c", Document::new()));
+        assert_eq!(got.len(), 1);
+        assert_eq!(field(&got[0], "documentKey._id"), &Value::Int32(want));
+    }
+}
+
 #[test]
 fn a_cluster_stream_leaves_out_the_internal_databases() {
     let mut m = Mem::new();
