@@ -27,9 +27,8 @@ cargo test --workspace
 
 ## Licencia
 
-TeselaDB se distribuye con la [Business Source License 1.1](LICENSE). Puedes usarlo gratis para desarrollar y probar,
-y en producción si sus nodos suman 64 GB de RAM o menos y tu uso no es comercial o tu organización facturó menos de
-1.000.000 € en su último ejercicio, siempre que no lo ofrezcas a terceros como servicio alojado o gestionado. Para
-cualquier otro uso en producción hace falta una licencia comercial de VIUZI ESP, explicada en
-[COMMERCIAL.md](COMMERCIAL.md). Cuatro años después de publicarse, cada versión pasa también a Apache 2.0 o GPL 2.0 o
-posterior.
+TeselaDB se distribuye solo como binario e imagen de Docker, con la [TeselaDB License](LICENSE). Puedes usarlo gratis
+para desarrollar y probar, y en producción si sus nodos suman 32 GB de RAM o menos y tu uso no es comercial o tu
+organización facturó menos de 1.000.000 € en su último ejercicio. En ningún caso puedes ofrecerlo a terceros como
+servicio alojado o gestionado, modificarlo ni redistribuirlo sin una licencia comercial de VIUZI ESP, que explica
+[COMMERCIAL.md](COMMERCIAL.md).
