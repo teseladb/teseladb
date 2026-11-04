@@ -1,0 +1,152 @@
+TeselaDB License
+Version 1.0, 4 November 2026
+
+Copyright (c) 2026 VIUZI ESP. All rights reserved.
+
+This license is an agreement between VIUZI ESP ("the Licensor") and you, the person
+or organization that installs, copies or runs the Software ("You"). By doing any of
+those things You accept it. If You do not accept it, do not install, copy or run
+the Software.
+
+1. The Software
+
+"The Software" means TeselaDB in object code: the teseladb binary, the Docker
+images that contain it, the install script, and their documentation, in every
+version the Licensor publishes. The Software is distributed only in object code.
+This license gives no right to its source code.
+
+2. Use without production
+
+You may install and run the Software, at no cost, to develop, test, evaluate,
+study and demonstrate it, and in continuous integration, provided that it holds
+no data of a production system.
+
+"Production" means any use of the Software that stores, processes or serves data
+of a real business, service, organization or person, or that backs a system that
+real users rely on. Development, testing, evaluation, demonstration and continuous
+integration with data made for those purposes are not production.
+
+3. Free production use, including commercial use
+
+You may run the Software in production, at no cost and for any purpose,
+including commercial purposes, when all of these conditions hold:
+
+  (a) the nodes of the Software that Your organization runs in production at the
+      same time, in every cluster, use 32 GB of RAM or less in total; and
+
+  (b) the total revenue of Your organization in its last completed fiscal year was
+      less than EUR 1,000,000 (one million euros) or its equivalent in other
+      currencies; and
+
+  (c) You do not offer the Software to third parties as a hosted or managed
+      service (section 5).
+
+"Your organization" includes every entity that controls, is controlled by, or is
+under common control with You.
+
+The RAM of a node is the memory available to its process: the limit of its
+container or control group (cgroup) when there is one, or the total memory of the
+machine otherwise, rounded up to the whole gigabyte. The total is the sum of the
+RAM of the nodes.
+
+At the written request of the Licensor, at most once a year, You will state in
+writing the total RAM of Your nodes in production and the revenue of Your
+organization that make Your use free under this section.
+
+4. Commercial license
+
+A separate commercial license from the Licensor is required for any production
+use when the nodes of Your organization use more than 32 GB of RAM in total, or
+when the revenue of Your organization was EUR 1,000,000 or more in its last
+completed fiscal year, in every case and whatever the purpose of the use. It is
+also required for the uses of sections 5 and 6(e). See COMMERCIAL.md or
+https://teseladb.com/pricing.
+
+5. Hosted or managed services
+
+Offering the Software as a hosted or managed service means making its
+functionality available to third parties who do not run it themselves, such as
+selling a database service, a database platform or a managed cluster built on the
+Software. It is not allowed under sections 2 and 3, whatever the size of Your
+organization, and needs a commercial license that grants it expressly. Running the
+Software as the database of Your own applications, even when Your customers use
+those applications, is not a hosted or managed service.
+
+6. Restrictions
+
+Except as expressly allowed by this license or by section 7, You may not:
+
+  (a) modify, adapt, translate or create derivative works of the Software;
+
+  (b) reverse engineer, decompile or disassemble the Software, or otherwise try to
+      obtain its source code;
+
+  (c) remove, alter or hide any notice of copyright, trademark or license in the
+      Software, or disable or bypass any limit or check of its license;
+
+  (d) sell, rent, lease, lend, sublicense or otherwise transfer the Software or
+      this license to third parties;
+
+  (e) distribute the Software to third parties, or include it in a product or
+      service that You distribute to third parties, without a commercial license.
+      Copying the unmodified Software inside Your organization, and pulling the
+      official images from their public registry, is allowed.
+
+7. Rights the law grants
+
+Nothing in this license limits the rights that the law grants to a lawful user of
+a computer program and that a contract cannot exclude, including those of
+Articles 5(2), 5(3) and 6 of Directive 2009/24/EC and of Article 100 of the
+Spanish Intellectual Property Law (Real Decreto Legislativo 1/1996): making a
+back-up copy, observing, studying or testing how the Software works while running
+it, and decompiling it when indispensable to achieve the interoperability of an
+independently created program, under the conditions of those provisions.
+
+8. Your data
+
+The data You store in the Software belongs to You. This license gives the
+Licensor no right over it.
+
+9. Ownership
+
+The Software is licensed, not sold. The Licensor keeps every right, title and
+interest in the Software, including all intellectual and industrial property
+rights. TeselaDB and its logo are trademarks of the Licensor; this license grants
+no right to use them except to refer to the Software truthfully.
+
+10. Termination
+
+This license ends automatically if You breach it. If the breach can be cured and
+You cure it within 30 days of becoming aware of it, the license is restored. When
+the license ends You must stop using the Software and delete every copy of it.
+Sections 6 to 13 survive the end of the license.
+
+11. No warranty
+
+The Software is provided "as is", without warranty of any kind, express or
+implied, including the warranties of merchantability, fitness for a particular
+purpose and non-infringement, to the extent the applicable law allows. You are
+responsible for keeping back-ups of Your data.
+
+12. Limitation of liability
+
+To the extent the applicable law allows, the Licensor is not liable for any
+indirect, incidental, special or consequential damages, nor for any loss of data,
+profits, revenue or business, arising from this license or from the use of the
+Software or the inability to use it, even if it was advised of their possibility.
+For use under sections 2 and 3, which is free of charge, the total liability of
+the Licensor is limited to EUR 100. Nothing in this license limits liability that
+cannot be limited by law, such as for fraud or wilful misconduct.
+
+13. Law and jurisdiction
+
+This license is governed by the laws of Spain. The courts of the domicile of the
+Licensor have jurisdiction over any dispute arising from it, unless a mandatory
+rule gives jurisdiction to other courts, such as those of the domicile of a
+consumer.
+
+14. Changes
+
+The Licensor may publish new versions of this license. A new version applies to
+the versions of the Software published with it; the versions already published
+keep the license they came with.

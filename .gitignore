@@ -15,3 +15,7 @@ __pycache__/
 *.pyc
 # MCP SDK battery: the SDKs, their environment and the node data (tests/mcp/run.sh)
 /tests/mcp/out/
+
+# Synth output of the downloads CDK (cdk/)
+/cdk/cdk.out/
+/cdk/cdk.context.json
