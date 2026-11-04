@@ -34,3 +34,14 @@ fn every_entry_a_document_can_have_is_read_by_a_check() {
     assert!(keys.len() > 4 * 5, "{} keys", keys.len());
     assert!(keys.iter().all(|k| k.as_slice() >= &[0x01, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 1][..]));
 }
+
+/// Seed 883 of the `heavy` plan: a node restarted from its own snapshot, 38 entries behind its
+/// LSM, wrote again the intent of a transaction that had deleted a TTL index entry and stopped
+/// before the resolution came again. Once it led the range, the intent hid the deletion and a
+/// check read an entry no document needed.
+#[test]
+fn a_restart_from_an_older_snapshot_leaves_no_orphan_entry() {
+    let cfg = SimConfig { faults: FaultPlan::Heavy, ..cfg() };
+    let r = teseladb_sim::run_seed(&cfg, 883);
+    assert_eq!(r.verdict, Verdict::Pass, "indexes seed 883 with the heavy plan");
+}

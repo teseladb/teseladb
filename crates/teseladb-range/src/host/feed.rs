@@ -190,6 +190,18 @@ impl RangeHost {
         id: ReqId,
         mut f: FeedReq,
     ) -> bool {
+        // A split may have cut the range while the read waited: the part it gave away is another
+        // range's, whose replica here may be waiting for a snapshot with that data cleared. The
+        // reader asks the ranges again rather than take the interval as read up to its mark
+        // (seed 548 of the simulator's `search`).
+        let covered = self.ranges.get(&f.g).is_some_and(|r| {
+            r.start.as_slice() <= f.start.as_slice()
+                && (r.end.is_empty() || f.end.as_slice() <= r.end.as_slice())
+        });
+        if !covered && f.state != FeedState::Core {
+            self.reply(id, Err(RangeError::OutOfRange));
+            return true;
+        }
         match f.state {
             FeedState::Core => {
                 self.reqs.insert(id, Req::Changes(f));

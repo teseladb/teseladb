@@ -52,12 +52,11 @@ variants!(
     // A capped insert that evicts only past `max`: the `special-collections` workload's next read
     // finds the collection over `size` with several documents (015 T010).
     ("capped_exceeds_size", "capped", Default, 1000),
-    // A commit below a push (008 T024): seed 4 of `splits` reads at a mark above the commit and
-    // misses the write (`intents`); seed 6 of `txn-bank` reads every account at a mark the
-    // transfer committed below, and the total is off. The lowest seed decides: `splits` first
-    // (measured 03-11-2026 after d195d1e changed how a range born from a split elects, and again
-    // on main be6ca33).
-    ("commit_below_push", "intents", Default, 1000),
+    // A commit below a push (008 T024): `splits` reads at a mark above the commit and misses the
+    // write (`intents`, seed 7 on main 842d14f). Seed 1 of `txn-append` finds it first: two
+    // transactions close a cycle (`snapshot-isolation`, G-SI; measured 04-11-2026 with the
+    // fixes of seeds 883 of `indexes` and 790 and 548 of `search`).
+    ("commit_below_push", "snapshot-isolation", Default, 1000),
     // A recovery that looks for another transaction's record (008): it finds none, answers that
     // the transaction never began and leaves that record aborted; the transaction itself goes on
     // and commits, and `txn_recovery` finds the recovery that answered «not committed».
@@ -85,11 +84,13 @@ variants!(
     // ranges split, the `search` workload's scores differ from one segment's over every document.
     ("local_only_stats", "search_results", Default, 1000),
     // A range a split shrank answers the part of a stream's interval it still holds (014 T020):
-    // the cursor takes the rest as read and `changestream` misses the changes there (seed 3: a
-    // transaction emitted in part). A search index reads its changes through the same feed, so
-    // the `search` workload finds it first, at seed 1: a search answers documents other than
-    // those one segment over the committed documents gives (measured 03-11-2026 on main be6ca33).
-    ("lose_events_on_split", "search_results", Default, 1000),
+    // the cursor takes the rest as read and `changestream` misses the changes there (seed 1: a
+    // transaction emitted in part). A search index reads its changes through the same feed, and
+    // `search` finds it at seed 2 (a search answers documents other than those one segment over
+    // the committed documents gives). Measured 04-11-2026 with the fixes of seeds 883 (`indexes`),
+    // 790 and 548 (`search`); before them `search` found it first, at seed 1, and `changestream`
+    // at seed 3.
+    ("lose_events_on_split", "changestream_delivery", Default, 1000),
     ("memory_raft_ack", "raft_safety", Default, 1000),
     // A range frozen for a merge goes on writing (007 T017): a write the right range acknowledged
     // after its state went to the left one is missing on the replicas that had not applied it
@@ -129,10 +130,11 @@ variants!(
     ("read_before_term_commit", "raft_safety", Default, 1000),
     ("read_skips_inflight_write", "mvcc", Default, 1000),
     // A reader that ignores an intent (008 T024): the index maintenance of `indexes` reads past
-    // an intent and leaves an entry missing (`index_consistency`, seed 2). Seed 1 of `txn-append`
-    // finds it first: the real-time order of two transactions closes a cycle (`snapshot-isolation`,
-    // G-SI-realtime; measured 03-11-2026 on main f3f92e6).
-    ("reader_ignores_intent", "snapshot-isolation", Default, 1000),
+    // an intent and leaves an entry missing (`index_consistency`, seed 2). Seed 1 of `txn-bank`
+    // finds it first: a committed read of every account adds up to less than the total
+    // (`bank-total`; measured 04-11-2026 with the fixes of seeds 883 of `indexes` and 790 and 548
+    // of `search`; on main 842d14f `indexes` found it first, at seed 1).
+    ("reader_ignores_intent", "bank-total", Default, 1000),
     // A reader that ignores what its push found (008 T029): it reads below the intent of a
     // transaction that committed at or below its mark. Seed 1 fails in two workloads: `indexes`,
     // whose index maintenance reads the old document and leaves entries no document needs, and

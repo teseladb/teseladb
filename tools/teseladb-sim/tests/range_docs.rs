@@ -95,7 +95,10 @@ fn lost_writes_are_retried_with_their_key() {
         let r = run_workload(&cfg(FaultPlan::Heavy), seed, wl);
         assert_eq!(r.verdict, Verdict::Pass, "seed {seed}");
         let s = stats.get();
-        let ordered = s.from_record <= s.definite && s.definite <= s.retried && s.retried <= s.sent;
+        // A retry still waiting for its turn when the run ended was never sent.
+        let ordered = s.from_record <= s.definite
+            && s.definite <= s.retried
+            && s.retried <= s.sent + s.unsent;
         assert!(ordered, "seed {seed}: {s:?}");
         total.retried += s.retried;
         total.sent += s.sent;

@@ -236,6 +236,14 @@ pub struct RangeSm {
     /// key the split gave away would stop the group). A restored snapshot replays from its own
     /// state instead.
     in_lsm: u64,
+    /// The LSM's flushed index when a snapshot older than it was restored (the replica's own,
+    /// after a restart): the log replays from the snapshot's state, but the versions of the
+    /// entries up to this index are in the LSM's files and are not written again. Written again
+    /// they would go above newer ones at the same mark: the intent of a transaction over the
+    /// commit that replaced it hid that commit until the resolution came again, and for good if
+    /// the node stopped in between with the intent flushed (seed 883 of the simulator's
+    /// `indexes`, plan `heavy`).
+    in_files: u64,
     /// The merge the range is frozen for (0: none).
     frozen: u64,
     /// The last range it absorbed and the merge.
@@ -472,6 +480,7 @@ impl RangeSm {
             log_floor: applied,
             expects_snapshot: false,
             in_lsm: applied,
+            in_files: applied,
             frozen: s.merges.frozen,
             merged: s.merges.merged,
             abandoned: s.merges.abandoned,
@@ -620,10 +629,12 @@ impl RangeSm {
     }
 
     fn write(&mut self, index: u64, ts: Hlc, writes: &[EntryWrite<'_>]) -> Result<(), ApplyError> {
-        self.lsm
-            .borrow_mut()
-            .write_entry(self.range, index, ts, writes)
-            .map_err(|e| ApplyError(format!("range {}: entry {index}: {e}", self.range.0)))?;
+        if index > self.in_files {
+            self.lsm
+                .borrow_mut()
+                .write_entry(self.range, index, ts, writes)
+                .map_err(|e| ApplyError(format!("range {}: entry {index}: {e}", self.range.0)))?;
+        }
         self.last_write = index;
         Ok(())
     }
@@ -1076,8 +1087,10 @@ impl StateMachine for RangeSm {
         self.last_split = applied;
         self.log_floor = applied;
         self.expects_snapshot = false;
-        // The entries past the snapshot rebuild the state from it.
+        // The entries past the snapshot rebuild the state from it; those the LSM flushed are
+        // not written to it again.
         self.in_lsm = applied;
+        self.in_files = flushed;
         Ok(())
     }
 
