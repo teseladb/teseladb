@@ -1,5 +1,5 @@
 //! The description of pipeline updates against what a `refnode` 9.0.4 gives for them (014 FR-009,
-//! 018 FR-009; measured on 05-11-2026 on a one-member replica set): each case of
+//! 018 FR-009; measured on 04-11-2026 on a one-member replica set): each case of
 //! `fixtures/pipeline_updates.jsonl` is the document before and after a pipeline `update`, the
 //! type of its change event and, for an `update`, its `updateDescription` and the `diff` of its
 //! oplog entry.

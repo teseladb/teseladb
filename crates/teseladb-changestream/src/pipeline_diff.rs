@@ -1,6 +1,6 @@
 //! The description of a pipeline update (014 FR-009, 018 FR-009): a pipeline has no operators, so
 //! the leader compares the document before and after it as a `refnode` 9.0.4 does (measured on
-//! 05-11-2026, `tests/fixtures/pipeline_updates.jsonl`).
+//! 04-11-2026, `tests/fixtures/pipeline_updates.jsonl`).
 //!
 //! Values compare by their BSON bytes. In a document, the fields at the start of the new one that
 //! are in the old one in the same relative order stay; the ones after them go in as inserted

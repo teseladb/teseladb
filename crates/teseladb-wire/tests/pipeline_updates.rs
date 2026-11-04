@@ -1,5 +1,5 @@
 //! Pipeline updates over the in-memory node of `common` (014 FR-009, 018 FR-009): each case a
-//! `refnode` 9.0.4 measured (`teseladb-changestream/tests/fixtures/pipeline_updates.jsonl`, 05-11-2026)
+//! `refnode` 9.0.4 measured (`teseladb-changestream/tests/fixtures/pipeline_updates.jsonl`, 04-11-2026)
 //! runs here with its pipeline, and its change event and oplog entry are the ones measured: an
 //! `update` with the same `updateDescription` and `{$v: 2, diff}`, or a `replace` with the whole
 //! document.
