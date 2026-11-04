@@ -297,6 +297,31 @@ fn record(conn: &Connection, req: &Request, action: &Action, shared: &Shared, mi
     }
 }
 
+/// The commands a node answers, each by the name `listCommands` gives it (without the aliases
+/// `ismaster` and `findandmodify`); `configureFailPoint` only with `enableTestCommands` (`tests`).
+pub fn command_names(tests: bool) -> Vec<&'static str> {
+    let mut names = vec![crate::hello::HELLO, crate::hello::IS_MASTER, PING, WHATS_MY_URI];
+    names.extend(auth::NAMES);
+    names.extend(crate::commands::data_command_names().map(canonical));
+    if tests {
+        names.push(CONFIGURE_FAIL_POINT);
+    }
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
+/// Whether a node takes command `name`: one that runs commands (`node`), with
+/// `enableTestCommands` or not (`tests`). A connection without a node answers only the handshake,
+/// `ping` and `whatsmyuri`.
+pub fn accepts(name: &str, node: bool, tests: bool) -> bool {
+    is_hello(name)
+        || name == PING
+        || name == WHATS_MY_URI
+        || (node && (is_data_command(name) || auth::is_auth_command(name)))
+        || (tests && name == CONFIGURE_FAIL_POINT)
+}
+
 /// Checks of every `OP_MSG` command, then the command.
 fn command<B: Backend + ?Sized>(
     conn: &mut Connection,
@@ -311,12 +336,7 @@ fn command<B: Backend + ?Sized>(
     let not_found = || not_found_in(node, name);
     let shared = cmds.as_ref().map(|(_, s)| *s);
     let tests = shared.is_some_and(|s| lock(s).failpoint.is_some());
-    let known = is_hello(name)
-        || name == PING
-        || name == WHATS_MY_URI
-        || (shared.is_some() && (is_data_command(name) || auth::is_auth_command(name)))
-        || (tests && name == CONFIGURE_FAIL_POINT);
-    if !known {
+    if !accepts(name, shared.is_some(), tests) {
         return Err(not_found());
     }
     match req.command.get("$db") {

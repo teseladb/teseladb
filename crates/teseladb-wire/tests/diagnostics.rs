@@ -7,11 +7,13 @@ use common::{Mem, doc, field};
 use teseladb_bson::{Document, Value};
 use teseladb_wire::commands::diagnostics::{
     ANNOUNCED_VERSION, ConnectionCounts, HostFacts, LogTail, NetworkCounts, OpCounters,
-    ProcessFacts, ResourceUse, ServerCertificate, listed,
+    ProcessFacts, ResourceUse, ServerCertificate, listed_names,
 };
 use teseladb_wire::commands::{is_data_command, lock};
 use teseladb_wire::connection::{Connection, Request};
-use teseladb_wire::dispatch::{Action, ClusterTime, NodeInfo, Topology, dispatch_with};
+use teseladb_wire::dispatch::{
+    Action, ClusterTime, NodeInfo, Topology, accepts, command_names, dispatch_with,
+};
 use teseladb_wire::msg::OpMsg;
 
 fn s(x: &str) -> Value {
@@ -367,13 +369,10 @@ fn list_commands_names_what_the_node_answers() {
     let mut m = node();
     let r = m.run("db", doc(&[("listCommands", 1.into())]));
     let names = keys(field(&r, "commands"));
-    assert!(!names.contains(&"configureFailPoint".to_owned()));
-    for name in &names {
-        let answered = is_data_command(name)
-            || ["hello", "isMaster", "ping", "whatsmyuri"].contains(&name.as_str());
-        assert!(answered, "{name} is listed but not answered");
-    }
-    assert!(listed("find") && !listed("aggregate"));
+    // Every command the dispatch takes and no other, in byte order as a `refrouter` lists them.
+    let mut want: Vec<String> = command_names(false).into_iter().map(str::to_owned).collect();
+    want.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+    assert_eq!(names, want);
     assert_eq!(
         field(&r, "commands.find"),
         &d(&[
@@ -471,7 +470,7 @@ fn repl_set_get_status_answers_as_a_refrouter() {
     );
     let r = m.run("db", doc(&[("replSetGetStatus", 1.into())]));
     assert_eq!(code(&r), 13);
-    assert!(listed("replSetGetStatus"));
+    assert!(listed_names().any(|n| n == "replSetGetStatus"));
 }
 
 #[test]
@@ -715,4 +714,23 @@ fn server_status_shows_the_server_certificate_and_the_tls_handshakes() {
     assert_eq!(sec.iter().map(|(k, _)| k).collect::<Vec<_>>(), ["authentication"]);
     let Value::Document(net) = field(&r, "metrics.network") else { panic!("{r:?}") };
     assert!(net.get("averageTimeToCompletedTLSHandshakeMicros").is_none(), "{net:?}");
+}
+
+/// The table of `listCommands` and the dispatch name the same commands: each one the dispatch
+/// takes has its entry, and each entry is one the dispatch takes, `configureFailPoint` with
+/// `enableTestCommands`; the table goes in byte order of the names, as a `refrouter` 9.0.4 lists
+/// them.
+#[test]
+fn list_commands_names_what_the_dispatch_takes() {
+    let table: Vec<&str> = listed_names().collect();
+    let mut dispatched = command_names(true);
+    dispatched.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+    assert_eq!(table, dispatched);
+    for name in &table {
+        assert!(accepts(name, true, true), "{name} is listed but not taken");
+    }
+    assert!(!accepts("configureFailPoint", true, false));
+    // The aliases are taken under the name `listCommands` gives.
+    assert!(accepts("findandmodify", true, false) && accepts("ismaster", false, false));
+    assert!(!table.contains(&"findandmodify") && !table.contains(&"ismaster"));
 }
