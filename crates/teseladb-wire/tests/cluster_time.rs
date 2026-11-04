@@ -427,3 +427,36 @@ fn a_restamp_changes_only_the_parts_that_are_there() {
     assert!(restamp_cluster_time(&mut partial, later, Some(&ring())));
     assert_eq!(partial, Document::new().with("$clusterTime", bare).with("operationTime", ts));
 }
+
+/// The `operationTime` of a write is its commit's mark, as a `refrouter` 9.0.4 answers the optime of
+/// a write: a change stream that starts at it includes the write. `$clusterTime` goes on with
+/// the node's clock, which may be ahead (found by the battery's `cs-start-at-operation-time` on
+/// 04-11-2026: the node answered a later mark and the stream missed the write).
+#[test]
+fn the_operation_time_of_a_write_is_its_commit() {
+    let mut m = Mem::new();
+    m.mark_ahead = 5;
+    let mut c = Connection::new(1);
+    let run = |m: &mut Mem, c: &mut Connection, cmd: Document| {
+        let shared = std::mem::take(&mut m.shared);
+        let a = dispatch_with(c, &request(&cmd, opcode::OP_MSG), &info(None), Some((m, &shared)));
+        m.shared = shared;
+        reply(a)
+    };
+    let insert = doc(&[
+        ("insert", Value::from("c")),
+        ("documents", Value::Array(vec![Value::Document(doc(&[("_id", 1.into())]))])),
+        ("$db", Value::from("db")),
+    ]);
+    let r = run(&mut m, &mut c, insert);
+    assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+    let commit = m.committed.expect("a commit");
+    let (time, increment) = teseladb_hlc::to_timestamp(commit);
+    assert_eq!(field(&r, "operationTime"), &Value::Timestamp { time, increment });
+    let node = Value::Timestamp { time: NOW.time, increment: NOW.increment };
+    assert_eq!(field(&r, "$clusterTime.clusterTime"), &node, "the node's, ahead");
+    // A read answers the node's time, as before.
+    let find = doc(&[("find", Value::from("c")), ("$db", Value::from("db"))]);
+    let r = run(&mut m, &mut c, find);
+    assert_eq!(field(&r, "operationTime"), &node);
+}

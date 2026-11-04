@@ -30,6 +30,11 @@ pub struct Mem {
     pub dedup: BTreeMap<StatementKey, Vec<u8>>,
     pub index: u64,
     pub now: u64,
+    /// How far the node's clock (`cluster_mark`) runs ahead of `now`, as a node's clock may run
+    /// ahead of the commit of a write a leader on another node made.
+    pub mark_ahead: u64,
+    /// The mark of the last write committed.
+    pub committed: Option<Hlc>,
     /// The monotonic clock in milliseconds when it differs from the cluster time `now`.
     pub mono: Option<u64>,
     /// The last deadline an operation set.
@@ -543,7 +548,11 @@ impl Backend for Mem {
     }
 
     fn cluster_mark(&self) -> Hlc {
-        Hlc { physical: self.now, logical: 0 }
+        Hlc { physical: self.now + self.mark_ahead, logical: 0 }
+    }
+
+    fn last_commit(&self) -> Option<Hlc> {
+        self.committed
     }
 
     fn txn_memory_budget(&self) -> usize {
@@ -853,6 +862,7 @@ impl Backend for Mem {
         self.concerns.push(op.wc);
         self.now += 1;
         let ts = Hlc { physical: self.now, logical: 0 };
+        self.committed = Some(ts);
         // As the range host does: the keys the mutation asks to read join its keys, and it is
         // evaluated again with their current versions.
         let mut keys = op.keys.clone();

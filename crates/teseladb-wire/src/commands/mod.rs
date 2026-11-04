@@ -527,6 +527,11 @@ pub trait Backend {
     fn audit_event(&mut self, _atype: teseladb_auth::audit::AuditType, _param: Document) {}
     /// The node's clock as a mark: at or above every mark the node issued or received (008).
     fn cluster_mark(&self) -> teseladb_hlc::Hlc;
+    /// The mark of the last write this backend committed, if any: a command that commits writes
+    /// answers it as its `operationTime`, the optime of a write in RefDb.
+    fn last_commit(&self) -> Option<teseladb_hlc::Hlc> {
+        None
+    }
     /// A monotonic clock in microseconds, for the latencies of `serverStatus`.
     fn now_micros(&self) -> u64 {
         self.now_ms().saturating_mul(1000)

@@ -126,6 +126,7 @@ pub fn dispatch_with<B: Backend + ?Sized>(
                 }
                 Err(e) => (req, Err(e)),
             };
+            let committed_before = cmds.as_ref().and_then(|(b, _)| b.last_commit());
             let inner = cmds.as_mut().map(|(b, s)| (&mut **b, *s));
             let action = match resolved.and_then(|()| command(conn, req, node, inner)) {
                 Ok(a) => a,
@@ -135,7 +136,15 @@ pub fn dispatch_with<B: Backend + ?Sized>(
             // FR-013).
             let action = match (action, cmds.as_ref()) {
                 (Action::Reply(d), Some((b, _))) => {
-                    Action::Reply(restamp(d, node, b.cluster_mark()))
+                    let d = restamp(d, node, b.cluster_mark());
+                    // A command that committed writes answers the last one's mark as its
+                    // `operationTime`, the optime of a write (measured on a `refrouter` 9.0.4: a
+                    // change stream that starts at it includes the write).
+                    let wrote = b.last_commit().filter(|c| Some(*c) > committed_before);
+                    Action::Reply(match wrote {
+                        Some(c) => with_operation_time(d, c),
+                        None => d,
+                    })
                 }
                 (a, _) => a,
             };
@@ -155,6 +164,15 @@ pub fn dispatch_with<B: Backend + ?Sized>(
             action
         }
     }
+}
+
+/// `reply` with `operationTime` at `mark`, where it has one.
+fn with_operation_time(mut reply: Document, mark: teseladb_hlc::Hlc) -> Document {
+    if let Some(v) = reply.get_mut("operationTime") {
+        let (time, increment) = teseladb_hlc::to_timestamp(mark);
+        *v = Value::Timestamp { time, increment };
+    }
+    reply
 }
 
 /// `reply` with the cluster time `node` had before its command, or the node's `mark` after it

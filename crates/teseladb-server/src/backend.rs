@@ -1275,6 +1275,10 @@ impl Backend for ServerBackend {
         self.h.clock.0.peek().max(self.committed)
     }
 
+    fn last_commit(&self) -> Option<Hlc> {
+        Some(self.committed).filter(|c| *c > Hlc { physical: 0, logical: 0 })
+    }
+
     fn now_micros(&self) -> u64 {
         u64::try_from(process_start().elapsed().as_micros()).unwrap_or(u64::MAX)
     }

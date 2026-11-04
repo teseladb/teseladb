@@ -721,3 +721,22 @@ fn a_drop_read_one_event_at_a_time_ends_with_the_invalidate() {
     assert!(batch(&last).is_empty());
     assert_eq!(field(&last, "cursor.id"), &Value::Int64(0));
 }
+
+/// `startAtOperationTime` at the `operationTime` of a write, which is its event's `clusterTime`,
+/// includes that write (measured on a `refrouter` 9.0.4 by the battery's `cs-start-at-operation-time`
+/// on 04-11-2026).
+#[test]
+fn start_at_the_operation_time_of_a_write_includes_it() {
+    let mut m = Mem::new();
+    create(&mut m, "c");
+    let all = id_of(&open(&mut m, DB, "c".into(), stream(Document::new(), vec![])));
+    insert(&mut m, "c", vec![doc(&[("_id", 1.into())])]);
+    insert(&mut m, "c", vec![doc(&[("_id", 2.into())])]);
+    let seen = batch(&get_more(&mut m, DB, all, "c", Document::new()));
+    let at = field(&seen[0], "clusterTime").clone();
+    let spec = Document::new().with("startAtOperationTime", at);
+    let id = id_of(&open(&mut m, DB, "c".into(), stream(spec, vec![])));
+    let events = batch(&get_more(&mut m, DB, id, "c", Document::new()));
+    let keys: Vec<&Value> = events.iter().map(|e| field(e, "documentKey._id")).collect();
+    assert_eq!(keys, [&Value::Int32(1), &Value::Int32(2)]);
+}
