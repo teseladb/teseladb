@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Publishes a release from the deploy workflows (.forgejo/workflows/deploy.yml and deploy-production.yml), already inside
 # AWS with the role of the stage: cross-compiles the binary for each platform with cargo-zigbuild, packs it, checks the
-# install script against it, deploys the downloads bucket and its CloudFront with CDK, copies the release there, pushes
-# one image per architecture to Docker Hub joined under the version (and :latest in production), and installs the release
-# from the public host to check it.
+# install script against it, deploys the downloads bucket and its CloudFront with CDK, copies the release there, builds
+# one image per architecture and installs the release from the public host to check it. Only production, a release of
+# main, pushes the images to Docker Hub, joined under the version and :latest; development builds and runs them locally.
 #   scripts/release/publish.sh <version> <stage dev|prd>
-# Reads DOCKERHUB_TOKEN, and ZIGBUILD_IMAGE, IMAGE, DOCKERHUB_USER and AWS_ACCOUNT_ID from the workflow.
+# Reads ZIGBUILD_IMAGE, IMAGE, DOCKERHUB_USER and AWS_ACCOUNT_ID from the workflow, and DOCKERHUB_TOKEN in production.
 set -euo pipefail
 
 if [[ $# -ne 2 ]]; then
@@ -14,7 +14,7 @@ if [[ $# -ne 2 ]]; then
 fi
 VERSION=$1
 STAGE=$2
-: "${DOCKERHUB_TOKEN:?the Docker Hub token is missing}" "${ZIGBUILD_IMAGE:?}" "${IMAGE:?}" "${DOCKERHUB_USER:?}" "${AWS_ACCOUNT_ID:?}"
+: "${ZIGBUILD_IMAGE:?}" "${IMAGE:?}" "${DOCKERHUB_USER:?}" "${AWS_ACCOUNT_ID:?}"
 case "$STAGE" in
   prd) HOST=downloads.teseladb.com ;;
   dev) HOST=downloads.teseladb.dev.atbionapps.com ;;
@@ -62,8 +62,7 @@ for file in LICENSE COMMERCIAL.md; do
   aws s3 cp "dist/downloads/$file" "$BUCKET/$file" --content-type "text/plain; charset=utf-8" --cache-control "public, max-age=300"
 done
 
-step "push the image of each architecture"
-printf '%s' "$DOCKERHUB_TOKEN" | docker login --username "$DOCKERHUB_USER" --password-stdin
+step "build the image of each architecture"
 for pair in amd64=x86_64-unknown-linux-gnu arm64=aarch64-unknown-linux-gnu; do
   arch=${pair%%=*}
   triple=${pair#*=}
@@ -71,24 +70,34 @@ for pair in amd64=x86_64-unknown-linux-gnu arm64=aarch64-unknown-linux-gnu; do
   install -m 0755 "target-release/$triple/dist/teseladb" "dist/image/$arch/teseladb"
   cp LICENSE COMMERCIAL.md "dist/image/$arch/"
   DOCKER_BUILDKIT=0 docker build --platform "linux/$arch" -f docker/release.Dockerfile -t "$IMAGE:$VERSION-$arch" "dist/image/$arch"
-  docker push "$IMAGE:$VERSION-$arch"
 done
-TAGS=("$VERSION")
-[[ $STAGE == prd ]] && TAGS+=(latest)
-for tag in "${TAGS[@]}"; do
-  docker manifest rm "$IMAGE:$tag" 2>/dev/null || true
-  docker manifest create "$IMAGE:$tag" "$IMAGE:$VERSION-amd64" "$IMAGE:$VERSION-arm64"
-  docker manifest push "$IMAGE:$tag"
-done
-docker logout >/dev/null
+
+if [[ $STAGE == prd ]]; then
+  step "push the images to Docker Hub as $IMAGE:$VERSION and :latest"
+  : "${DOCKERHUB_TOKEN:?the Docker Hub token is missing}"
+  printf '%s' "$DOCKERHUB_TOKEN" | docker login --username "$DOCKERHUB_USER" --password-stdin
+  for arch in amd64 arm64; do docker push "$IMAGE:$VERSION-$arch"; done
+  for tag in "$VERSION" latest; do
+    docker manifest rm "$IMAGE:$tag" 2>/dev/null || true
+    docker manifest create "$IMAGE:$tag" "$IMAGE:$VERSION-amd64" "$IMAGE:$VERSION-arm64"
+    docker manifest push "$IMAGE:$tag"
+  done
+  docker logout >/dev/null
+else
+  echo "development: the images stay local, Docker Hub only gets the releases of main"
+fi
 
 step "install the release from https://$HOST and run the image"
 for _ in $(seq 1 30); do curl -fsS -o /dev/null "https://$HOST/latest.txt" && break; sleep 10; done
 [[ $(curl -fsSL "https://$HOST/latest.txt") == "$VERSION" ]] || { echo "https://$HOST/latest.txt does not say $VERSION" >&2; exit 1; }
 curl -fsSL "https://$HOST/install.sh" | TESELADB_INSTALL_DIR="$PWD/installed" sh
 [[ $(./installed/teseladb --version) == "teseladb $VERSION" ]] || { echo "the installed binary is not $VERSION" >&2; exit 1; }
-# The tag carries both architectures; the runner is amd64, so that is the one it runs.
-platforms=$(docker manifest inspect "$IMAGE:$VERSION" | jq -r '[.manifests[].platform.architecture] | sort | join(" ")')
-[[ $platforms == "amd64 arm64" ]] || { echo "$IMAGE:$VERSION has $platforms, not amd64 and arm64" >&2; exit 1; }
-[[ $(docker run --rm --platform linux/amd64 "$IMAGE:$VERSION" --version) == "teseladb $VERSION" ]] || { echo "the image does not run $VERSION" >&2; exit 1; }
-echo "release $VERSION published to $STAGE: https://$HOST and $IMAGE:$VERSION"
+# The runner is amd64, so that is the image it runs: the one of Docker Hub in production, the local one in development.
+RUN_IMAGE="$IMAGE:$VERSION-amd64"
+if [[ $STAGE == prd ]]; then
+  platforms=$(docker manifest inspect "$IMAGE:$VERSION" | jq -r '[.manifests[].platform.architecture] | sort | join(" ")')
+  [[ $platforms == "amd64 arm64" ]] || { echo "$IMAGE:$VERSION has $platforms, not amd64 and arm64" >&2; exit 1; }
+  RUN_IMAGE="$IMAGE:$VERSION"
+fi
+[[ $(docker run --rm --platform linux/amd64 "$RUN_IMAGE" --version) == "teseladb $VERSION" ]] || { echo "$RUN_IMAGE does not run $VERSION" >&2; exit 1; }
+echo "release $VERSION published to $STAGE: https://$HOST$([[ $STAGE == prd ]] && echo " and $IMAGE:$VERSION")"
