@@ -1706,3 +1706,19 @@ fn an_abort_takes_the_write_concern_of_the_transaction() {
     assert!(ok(&r), "{r:?}");
     assert_eq!(found(&run(&mut m, DB, find())), 0, "the transaction was aborted");
 }
+
+/// A higher number on the same session ends the transaction still in progress, as when a failed
+/// commit leaves it and the driver starts it again (PyRef's `commit-transienttransactionerror`
+/// against a `refrouter` 9.0.4): the new one writes the same document without a conflict.
+#[test]
+fn a_higher_number_ends_the_transaction_still_in_progress() {
+    let mut m = node();
+    assert!(ok(&run(&mut m, DB, stmt(insert(1), 9, 1, true))));
+
+    let again = run(&mut m, DB, stmt(insert(1), 9, 2, true));
+    let commit = run(&mut m, "admin", end("commitTransaction", 9, 2));
+
+    assert!(ok(&again), "{again:?}");
+    assert!(ok(&commit), "{commit:?}");
+    assert_eq!(found(&run(&mut m, DB, find())), 1);
+}

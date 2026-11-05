@@ -778,6 +778,13 @@ fn run_command(
                 let shard = super::shard_name(backend.node());
                 return Some(refused_write(&shard, name, e));
             }
+            // A higher number ends the session's transaction still in progress, which a failed
+            // commit leaves (RefDb aborts it: PyRef's `commit-transienttransactionerror`
+            // retries on the same session and its first statement found the old intents).
+            let superseded = lock(shared).txns.get_mut(&f.lsid).and_then(|s| s.running.take());
+            if let Some(run) = superseded {
+                end_abandoned(backend, shared, run);
+            }
             lock(shared).txns.entry(f.lsid).or_default().token = Some((f.txn_number, false));
             // Any node finds its record from the session and the number (`Recovery`).
             let txn = client_txn_id(f.lsid, f.txn_number);
