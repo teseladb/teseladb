@@ -22,9 +22,7 @@ use std::time::{Duration, Instant};
 
 use teseladb_hlc::Hlc;
 use teseladb_hlc::{from_timestamp, to_timestamp};
-use teseladb_meta::catalog::Catalog;
 use teseladb_meta::command::Group0Command;
-use teseladb_meta::indexes::Indexes;
 use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_types::{Decoder, GroupId, NodeId};
 
@@ -269,13 +267,18 @@ fn remote(
     }
 }
 
-/// The `RestoreCatalog` of a backup's catalog and index definitions.
+/// The `RestoreCatalog` of a backup's catalog and index definitions, with its tenants and
+/// security state when it has them (007 FR-037).
 fn restore_catalog(bytes: &[u8]) -> Result<Group0Command, AdminError> {
     let mut d = Decoder::new(bytes);
-    let read = Catalog::decode(&mut d).and_then(|c| Ok((c, Indexes::decode(&mut d)?)));
-    let (catalog, indexes) =
+    let read = teseladb_meta::command::decode_restore(&mut d).and_then(|r| d.finish().map(|()| r));
+    let (catalog, indexes, security) =
         read.map_err(|e| AdminError::bad(format!("the backup's catalog does not read: {e:?}")))?;
-    Ok(Group0Command::RestoreCatalog { catalog: Box::new(catalog), indexes: Box::new(indexes) })
+    Ok(Group0Command::RestoreCatalog {
+        catalog: Box::new(catalog),
+        indexes: Box::new(indexes),
+        security: security.map(Box::new),
+    })
 }
 
 /// The text of an error that has no other.
@@ -765,8 +768,8 @@ mod tests {
     #[test]
     fn a_backups_catalog_reads_or_is_refused() {
         let mut e = teseladb_types::Encoder::new();
-        Catalog::default().encode(&mut e);
-        Indexes::default().encode(&mut e);
+        teseladb_meta::catalog::Catalog::default().encode(&mut e);
+        teseladb_meta::indexes::Indexes::default().encode(&mut e);
         assert!(matches!(restore_catalog(&e.finish()), Ok(Group0Command::RestoreCatalog { .. })));
         assert!(restore_catalog(&[9]).unwrap_err().message.contains("does not read"));
         assert_eq!(debug_text(1), "1");

@@ -356,6 +356,9 @@ pub enum Group0Command {
         catalog: Box<crate::catalog::Catalog>,
         /// The index definitions.
         indexes: Box<crate::indexes::Indexes>,
+        /// The tenants, users, roles and API keys of the backup (FR-037); a backup without them
+        /// leaves the cluster's.
+        security: Option<Box<RestoredSecurity>>,
     },
     /// Settings changed together (007 FR-017, the documents of `config.settings`): each one
     /// expects its value as it was read (`None`: absent), and none changes unless all are so;
@@ -582,9 +585,8 @@ impl Group0Command {
             Group0Command::Meta2Seeded { group } => {
                 e.u64(group.0);
             }
-            Group0Command::RestoreCatalog { catalog, indexes } => {
-                catalog.encode(&mut e);
-                indexes.encode(&mut e);
+            Group0Command::RestoreCatalog { catalog, indexes, security } => {
+                encode_restore(&mut e, catalog, indexes, security.as_deref());
             }
             Group0Command::CreateTenant { name } | Group0Command::DropTenant { name } => {
                 e.str(name);
@@ -715,10 +717,14 @@ impl Group0Command {
                 Group0Command::HandoffMeta2 { ranges }
             }
             kind::META2_SEEDED => Group0Command::Meta2Seeded { group: GroupId(d.u64()?) },
-            kind::RESTORE_CATALOG => Group0Command::RestoreCatalog {
-                catalog: Box::new(crate::catalog::Catalog::decode(&mut d)?),
-                indexes: Box::new(crate::indexes::Indexes::decode(&mut d)?),
-            },
+            kind::RESTORE_CATALOG => {
+                let (catalog, indexes, security) = decode_restore(&mut d)?;
+                Group0Command::RestoreCatalog {
+                    catalog: Box::new(catalog),
+                    indexes: Box::new(indexes),
+                    security: security.map(Box::new),
+                }
+            }
             kind::SET_SETTINGS => {
                 let mut changes = Vec::new();
                 for _ in 0..d.var()? {
@@ -811,4 +817,47 @@ pub(crate) mod snapshot_codec {
     ) -> Result<[u8; N], DecodeError> {
         get_array(d)
     }
+}
+
+/// The tenants and the security state of a backup (007 FR-037): the tenants with their limits,
+/// access lists and service users, and the users, roles and API keys (only the SHA-256 of each).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RestoredSecurity {
+    /// The tenants.
+    pub tenants: crate::tenants::Tenants,
+    /// The users, roles and API keys.
+    pub security: crate::security::Security,
+}
+
+/// Writes a backup's catalog, index definitions and, if given, its tenants and security state,
+/// as `RestoreCatalog` and the backup's manifest carry them.
+pub fn encode_restore(
+    e: &mut Encoder,
+    catalog: &crate::catalog::Catalog,
+    indexes: &crate::indexes::Indexes,
+    security: Option<&RestoredSecurity>,
+) {
+    catalog.encode(e);
+    indexes.encode(e);
+    if let Some(s) = security {
+        s.tenants.encode(e);
+        s.security.encode(e);
+        s.security.encode_keys(e);
+    }
+}
+
+/// Reads what [`encode_restore`] wrote: a backup made before 007 T066 has no tenants or security.
+pub fn decode_restore(
+    d: &mut Decoder<'_>,
+) -> Result<(crate::catalog::Catalog, crate::indexes::Indexes, Option<RestoredSecurity>), DecodeError>
+{
+    let catalog = crate::catalog::Catalog::decode(d)?;
+    let indexes = crate::indexes::Indexes::decode(d)?;
+    if d.remaining() == 0 {
+        return Ok((catalog, indexes, None));
+    }
+    let tenants = crate::tenants::Tenants::decode(d)?;
+    let mut security = crate::security::Security::decode(d)?;
+    security.decode_keys(d)?;
+    Ok((catalog, indexes, Some(RestoredSecurity { tenants, security })))
 }

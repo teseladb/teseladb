@@ -674,14 +674,8 @@ impl Group0Sm {
                 }),
             Group0Command::HandoffMeta2 { ranges } => self.handoff(ranges),
             Group0Command::Meta2Seeded { group } => self.seeded(*group),
-            Group0Command::RestoreCatalog { catalog, indexes } => {
-                if !self.catalog.collections.is_empty() || !self.indexes.indexes.is_empty() {
-                    Err(Group0Error::NotEmpty)
-                } else {
-                    self.catalog = Arc::new((**catalog).clone());
-                    self.indexes = (**indexes).clone();
-                    Ok(Group0Result::Ok)
-                }
+            Group0Command::RestoreCatalog { catalog, indexes, security } => {
+                self.restore(catalog, indexes, security.as_deref())
             }
             Group0Command::Idempotent { req, cmd } => {
                 if let Some(done) = self.requests.get(*req) {
@@ -693,6 +687,35 @@ impl Group0Sm {
             }
         };
         r.unwrap_or_else(Group0Result::Err)
+    }
+
+    /// `RestoreCatalog`: a backup's catalog and index definitions, into a catalog without
+    /// collections or indexes, and with them the backup's tenants and security state in place of
+    /// the cluster's (FR-021, FR-037), once every node reads them. No tenant number is given
+    /// twice, and the security state's version keeps growing, so the nodes see it changed.
+    fn restore(
+        &mut self,
+        catalog: &crate::catalog::Catalog,
+        indexes: &crate::indexes::Indexes,
+        security: Option<&crate::command::RestoredSecurity>,
+    ) -> Result<Group0Result, Group0Error> {
+        if !self.catalog.collections.is_empty() || !self.indexes.indexes.is_empty() {
+            return Err(Group0Error::NotEmpty);
+        }
+        if security.is_some() && !crate::node_versions::all_run(self, SNAPSHOT_VERSION) {
+            return Err(Group0Error::NotEveryNodeRunsIt);
+        }
+        self.catalog = Arc::new(catalog.clone());
+        self.indexes = indexes.clone();
+        if let Some(s) = security {
+            let mut tenants = s.tenants.clone();
+            tenants.keep_numbers_above(self.tenants.last_number());
+            *self.tenants = tenants;
+            let version = self.security.version.max(s.security.version) + 1;
+            self.security = s.security.clone();
+            self.security.version = version;
+        }
+        Ok(Group0Result::Ok)
     }
 
     /// Records `changes` of the entry at `mark` when its command applied (`r`).

@@ -209,6 +209,16 @@ pub struct Tenants {
 }
 
 impl Tenants {
+    /// The highest number ever given to a tenant.
+    pub fn last_number(&self) -> u32 {
+        self.last
+    }
+
+    /// The next tenants take numbers above `last` too: a restore keeps those the cluster gave.
+    pub fn keep_numbers_above(&mut self, last: u32) {
+        self.last = self.last.max(last);
+    }
+
     /// The tenants, by number.
     pub fn list(&self) -> Vec<(u32, &str)> {
         self.names.iter().map(|(id, n)| (*id, n.as_str())).collect()

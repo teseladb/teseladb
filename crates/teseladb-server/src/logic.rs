@@ -1012,8 +1012,18 @@ impl NodeLogic {
                 let a = match self.group0() {
                     Some(sm) if sm.bootstrapped() => {
                         let mut e = teseladb_types::Encoder::new();
-                        sm.catalog.encode(&mut e);
-                        sm.indexes.encode(&mut e);
+                        // The tenants and the security state go with the catalog (007 FR-037).
+                        let security = teseladb_meta::command::RestoredSecurity {
+                            tenants: (*sm.tenants).clone(),
+                            security: sm.security.clone(),
+                        };
+                        let (catalog, indexes) = (&sm.catalog, &sm.indexes);
+                        teseladb_meta::command::encode_restore(
+                            &mut e,
+                            catalog,
+                            indexes,
+                            Some(&security),
+                        );
                         CatalogAnswer::Dump(e.finish())
                     }
                     Some(_) | None => CatalogAnswer::Unavailable,
