@@ -1692,3 +1692,17 @@ fn a_commit_with_too_many_nodes_asked_answers_a_write_concern_error() {
     let r = run(&mut m, "admin", end("commitTransaction", 7, 2).with("writeConcern", fits));
     assert!(r.get("writeConcernError").is_none(), "{r:?}");
 }
+
+/// The drivers send the transaction's write concern with the abort too: it is taken, as with the
+/// commit (PyRef's `retryable-abort-errorLabels` against a `refrouter` 9.0.4).
+#[test]
+fn an_abort_takes_the_write_concern_of_the_transaction() {
+    let mut m = node();
+    assert!(ok(&run(&mut m, DB, stmt(insert(1), 8, 1, true))));
+    let wc = Document::new().with("w", "majority");
+
+    let r = run(&mut m, "admin", end("abortTransaction", 8, 1).with("writeConcern", wc));
+
+    assert!(ok(&r), "{r:?}");
+    assert_eq!(found(&run(&mut m, DB, find())), 0, "the transaction was aborted");
+}

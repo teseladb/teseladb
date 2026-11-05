@@ -583,7 +583,7 @@ pub fn write_concern_error(e: &CommandError, wc: &WriteConcernArgs, relayed: &st
 }
 
 /// The commands that take `writeConcern` (measured).
-const WRITE_CONCERN_COMMANDS: [&str; 31] = [
+const WRITE_CONCERN_COMMANDS: [&str; 32] = [
     "insert",
     "update",
     "delete",
@@ -600,6 +600,9 @@ const WRITE_CONCERN_COMMANDS: [&str; 31] = [
     "setDefaultRWConcern",
     "bulkWrite",
     "commitTransaction",
+    // The drivers send the transaction's concern with the abort too (PyRef's
+    // `retryable-abort-errorLabels` against a `refrouter` 9.0.4).
+    "abortTransaction",
     "createUser",
     "updateUser",
     "dropUser",

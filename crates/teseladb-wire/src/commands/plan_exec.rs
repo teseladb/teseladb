@@ -293,6 +293,10 @@ pub(crate) struct ReadPlan<'a> {
     pub intersect: bool,
     /// Whether the read wants the index key each document was found by (`{$meta: "indexKey"}`).
     pub index_keys: bool,
+    /// Whether it gives out the index key alone (`returnKey`): a plan whose filter its bounds
+    /// answer and whose index has the sort's fields reads no document, and RefDb's score gives
+    /// it the bonus of a plan without `FETCH` (measured on a `refrouter` 9.0.4 on 05-11-2026).
+    pub key_only: bool,
 }
 
 /// A plan and what running it counted.
@@ -466,6 +470,7 @@ fn subplanned<B: Backend + ?Sized>(
         concern: read.concern,
         intersect: false,
         index_keys: false,
+        key_only: false,
     };
     for scans in branches {
         if scans.len() < 2 {
@@ -504,6 +509,16 @@ fn at_round(t: &Ran, stop: u64) -> Trial {
         eof: t.trial.eof && t.trial.works <= stop,
         ..t.trial
     }
+}
+
+/// Whether scans `scans` give a key-only read (`returnKey`) without reading a document: no
+/// filter is left over the bounds, and each index has the fields of the sort.
+fn reads_keys_only(read: &ReadPlan<'_>, scans: &[IndexScan], indexes: &[PlanIndex]) -> bool {
+    read.key_only
+        && scans.iter().all(|s| {
+            s.residual.is_none()
+                && read.sort.iter().all(|(f, _)| indexes[s.index].pattern.get(f).is_some())
+        })
 }
 
 /// Runs `access` for `read`: for a trial (`budget` works at most), until it gives a batch, or
@@ -664,8 +679,14 @@ fn run<B: Backend + ?Sized>(
     } else {
         input
     };
-    ran.trial =
-        Trial { works, advanced, fetches: true, sorts: blocking, intersects: false, eof: ended };
+    ran.trial = Trial {
+        works,
+        advanced,
+        fetches: !reads_keys_only(read, &scans, indexes),
+        sorts: blocking,
+        intersects: false,
+        eof: ended,
+    };
     Ok(ran)
 }
 
@@ -1133,6 +1154,7 @@ pub(crate) fn planned_keys<B: Backend + ?Sized>(
         concern: ReadConcern::Local,
         intersect: false,
         index_keys: false,
+        key_only: false,
     };
     let take = if m.multi { usize::MAX } else { 1 };
     let started = backend.now_micros();

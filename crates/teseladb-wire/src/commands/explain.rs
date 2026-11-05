@@ -748,20 +748,76 @@ fn find<B: Backend + ?Sized>(
             concern: a.concern,
             intersect: super::lock(ctx.shared).params.hash_intersection,
             index_keys: false,
+            key_only: ctx.cmd.get("returnKey") == Some(&Value::Boolean(true)),
         };
         if let Some(super::plan_exec::Chosen { winner, others, .. }) =
             super::plan_exec::choose(ctx.backend, c, &indexes, &read)?
         {
+            let return_key = ctx.cmd.get("returnKey") == Some(&Value::Boolean(true));
             let shape = |r: &super::plan_exec::Ran, run: bool| {
-                let covered = projection.as_ref().filter(|p| covers(p, &indexes, r));
+                // `returnKey` drops the projection, and a plan that reads its keys alone has no
+                // `FETCH` (measured on a `refrouter` 9.0.4 on 05-11-2026).
+                let keys_alone = reads_keys_alone(r, &indexes, sort.as_ref());
+                let covered = projection.as_ref().filter(|p| !return_key && covers(p, &indexes, r));
+                let shown_projection = match covered.is_some() || return_key {
+                    true => None,
+                    false => projection.as_ref(),
+                };
+                let mut access = planned_access(ns, &shown, &indexes, r, run, covered);
+                // A sort the index's keys hold runs over them, below the fetch, when nothing
+                // limits it (measured: `FETCH` over a `SORT` of `type: "default"`).
+                let below_fetch = !return_key
+                    && keys_alone
+                    && covered.is_none()
+                    && sort.is_some()
+                    && !sorted(r)
+                    && a.skip == 0
+                    && a.limit.is_none();
+                if below_fetch
+                    && access.name == "FETCH"
+                    && let Some(scan) = access.input.take()
+                {
+                    let keyed = Tail {
+                        sort: sort.as_ref(),
+                        skip: 0,
+                        limit: None,
+                        projection: None,
+                        keyed: true,
+                    };
+                    access.input = Some(Box::new(keyed.over(*scan, false)));
+                    let rest = Tail {
+                        sort: None,
+                        skip: 0,
+                        limit: None,
+                        projection: shown_projection,
+                        keyed: false,
+                    };
+                    return rest.over(access, true);
+                }
+                if return_key
+                    && keys_alone
+                    && access.name == "FETCH"
+                    && let Some(input) = access.input.take()
+                {
+                    access = *input;
+                }
+                // With `returnKey` the sort orders keys, with a fetch or without.
                 let tail = Tail {
                     sort: sort.as_ref(),
                     skip: a.skip,
                     limit: a.limit,
-                    projection: if covered.is_some() { None } else { projection.as_ref() },
+                    projection: shown_projection,
+                    keyed: return_key,
                 };
-                let access = planned_access(ns, &shown, &indexes, r, run, covered);
-                tail.over(access, sorted(r))
+                let plan = tail.over(access, sorted(r));
+                match return_key {
+                    true => {
+                        let mut s = Stage::new("RETURN_KEY");
+                        s.returned = plan.returned;
+                        s.over(plan)
+                    }
+                    false => plan,
+                }
             };
             let mut plan = shape(&winner, run);
             let no_doc = Document::new();
@@ -823,8 +879,13 @@ fn find<B: Backend + ?Sized>(
     }
     let (examined, matched) =
         if run { scan(ctx, coll.as_ref(), &read, stop, |_| Ok(()))? } else { (0, 0) };
-    let tail =
-        Tail { sort: sort.as_ref(), skip: a.skip, limit: a.limit, projection: projection.as_ref() };
+    let tail = Tail {
+        sort: sort.as_ref(),
+        skip: a.skip,
+        limit: a.limit,
+        projection: projection.as_ref(),
+        keyed: false,
+    };
     let mut scan_stage = collscan(ns, &shown, examined, matched);
     // A `$natural: -1` sort scans backward.
     if a.natural == Some(false) {
@@ -846,6 +907,8 @@ struct Tail<'a> {
     skip: u64,
     limit: Option<u64>,
     projection: Option<&'a Document>,
+    /// The sort orders index keys, not documents (`type: "default"`, measured with `returnKey`).
+    keyed: bool,
 }
 
 impl Tail<'_> {
@@ -875,7 +938,7 @@ impl Tail<'_> {
             if let Some(b) = bound {
                 s.tail.push("limitAmount", long(b));
             }
-            s.tail.push("type", "simple");
+            s.tail.push("type", if self.keyed { "default" } else { "simple" });
             sort_counters(&mut s);
             s.returned = bound.map_or(plan.returned, |b| plan.returned.min(b));
             plan = s.over(plan);
@@ -985,7 +1048,13 @@ pub(crate) fn learned(
         _ => None,
     };
     let (sort, projection) = (doc_of("sort"), doc_of("projection"));
-    let tail = Tail { sort: sort.as_ref(), skip: 0, limit: None, projection: projection.as_ref() };
+    let tail = Tail {
+        sort: sort.as_ref(),
+        skip: 0,
+        limit: None,
+        projection: projection.as_ref(),
+        keyed: false,
+    };
     let shape_of = |r: &super::plan_exec::Ran, run: bool| {
         tail.over(planned_access(ns, shown, indexes, r, run, None), sorted(r))
     };
@@ -1090,6 +1159,18 @@ fn covers(
         && !index.meta.multikey
         && (p.get("_id").is_some_and(off) || holds("_id"))
         && reads.is_some_and(|f| f.iter().all(|k| holds(k)))
+}
+
+/// Whether plan `r` of a `returnKey` read gives its keys without reading a document: one index
+/// scan, no filter left over its bounds, and the sort's fields in the index.
+fn reads_keys_alone(
+    r: &super::plan_exec::Ran,
+    indexes: &[super::plan_exec::PlanIndex],
+    sort: Option<&Document>,
+) -> bool {
+    let teseladb_plan::rules::Access::Index(scan) = &r.access else { return false };
+    let pattern = &indexes[scan.index].pattern;
+    scan.residual.is_none() && sort.is_none_or(|s| s.iter().all(|(f, _)| pattern.get(f).is_some()))
 }
 
 /// The stages that read for plan `r`: an index scan and its fetch (or the projection of the
@@ -1520,6 +1601,7 @@ fn count_plan<B: Backend + ?Sized>(
         concern,
         intersect: super::lock(ctx.shared).params.hash_intersection,
         index_keys: false,
+        key_only: false,
     };
     if let Some((indexes, chosen)) =
         planned_read(ctx, coll.as_ref(), &plan_read, collation.as_ref())?
@@ -1652,6 +1734,7 @@ fn distinct<B: Backend + ?Sized>(
         concern,
         intersect: super::lock(ctx.shared).params.hash_intersection,
         index_keys: false,
+        key_only: false,
     };
     let planned = match query.is_empty() {
         true => None,
@@ -1927,6 +2010,7 @@ fn update_on_node<B: Backend + ?Sized>(
         concern: teseladb_range::read::ReadConcern::Local,
         intersect: super::lock(ctx.shared).params.hash_intersection,
         index_keys: false,
+        key_only: false,
     };
     if let Some((indexes, chosen)) = planned_write(ctx, coll, &plan_read, collation)? {
         let plan = s.over(planned_access(ns, &shown, &indexes, &chosen.winner, run, None));
@@ -2040,6 +2124,7 @@ fn delete_on_node<B: Backend + ?Sized>(
         concern: teseladb_range::read::ReadConcern::Local,
         intersect: super::lock(ctx.shared).params.hash_intersection,
         index_keys: false,
+        key_only: false,
     };
     if let Some((indexes, chosen)) = planned_write(ctx, coll, &plan_read, collation)? {
         let plan = s.over(planned_access(ns, &shown, &indexes, &chosen.winner, run, None));
@@ -2113,6 +2198,7 @@ fn find_and_modify<B: Backend + ?Sized>(
         concern: teseladb_range::read::ReadConcern::Local,
         intersect: super::lock(ctx.shared).params.hash_intersection,
         index_keys: false,
+        key_only: false,
     };
     let planned = match sort.is_some() {
         true => planned_read(ctx, coll.as_ref(), &plan_read, collation.as_ref())?,

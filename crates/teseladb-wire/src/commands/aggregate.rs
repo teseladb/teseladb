@@ -1078,6 +1078,7 @@ pub(crate) fn aggregate_from<B: Backend + ?Sized>(
         stream: None,
         origin: None,
         held: 0,
+        return_key: false,
     };
     let size = Some(a.batch_size.unwrap_or(DEFAULT_FIRST_BATCH));
     let (batch, short) = state.batch(ctx.backend, size)?;
@@ -1265,6 +1266,7 @@ fn planned_read<B: Backend + ?Sized>(
         concern,
         intersect: super::lock(ctx.shared).params.hash_intersection,
         index_keys: index_keys && !super::query::id_point(&filter),
+        key_only: false,
     };
     if indexes.is_empty() || super::explain::matches_nothing(&parsed) {
         return Ok(None);

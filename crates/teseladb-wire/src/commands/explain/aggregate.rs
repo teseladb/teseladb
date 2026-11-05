@@ -211,6 +211,7 @@ pub(super) fn aggregate<B: Backend + ?Sized>(
         concern: teseladb_range::read::ReadConcern::Local,
         intersect: super::super::lock(ctx.shared).params.hash_intersection,
         index_keys: false,
+        key_only: false,
     };
     let chosen = super::planned_read(ctx, coll.as_ref(), &plan_read, None)?;
     let access = chosen.as_ref().map(|(indexes, c)| {

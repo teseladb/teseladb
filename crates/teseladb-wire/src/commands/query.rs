@@ -122,6 +122,20 @@ pub struct QueryCursor {
     /// Bytes of computed results in `buffered`, which count in the node's part for cursors
     /// (012 FR-013); the buffer of a scan is not counted.
     pub held: usize,
+    /// `returnKey` of a `find`: each document goes out as the index key that found it, `{}`
+    /// without one (FR-008).
+    pub return_key: bool,
+}
+
+/// The field of the projection that carries a `returnKey`'s index key to the cursor.
+const RETURN_KEY_FIELD: &str = "\u{1}returnKey";
+
+/// Document `d` of a `returnKey` cursor: the index key it carries, or `{}`.
+fn returned_key(d: Document) -> Document {
+    match d.get(RETURN_KEY_FIELD) {
+        Some(Value::Document(k)) => k.clone(),
+        _ => Document::new(),
+    }
 }
 
 /// The field of a `getMore`'s profile with the command that opened its cursor.
@@ -475,6 +489,7 @@ impl QueryCursor {
             stream: None,
             origin: None,
             held: 0,
+            return_key: false,
         }
     }
 
@@ -506,7 +521,7 @@ impl QueryCursor {
                     }
                     self.held = self.held.saturating_sub(n);
                     bytes += n;
-                    out.push(d);
+                    out.push(if self.return_key { returned_key(d) } else { d });
                     if let Some(t) = &mut self.tail {
                         t.took();
                     }
@@ -657,6 +672,7 @@ fn oplog_find<B: Backend + ?Sized>(
         stream: None,
         origin: None,
         held: 0,
+        return_key: false,
     };
     let size = Some(a.batch_size.unwrap_or(DEFAULT_FIRST_BATCH));
     let (docs, _) = state.batch(ctx.backend, size)?;
@@ -686,6 +702,8 @@ pub(crate) struct FindArgs {
     pub(crate) vars: Option<Document>,
     /// `min` and `max` (FR-008).
     bounds: Option<super::min_max::Bounds>,
+    /// `returnKey` (FR-008).
+    return_key: bool,
 }
 
 /// The `let` of command `name`, checked and resolved (FR-032): the variables of its filter,
@@ -754,6 +772,23 @@ fn natural_sort(sort: Option<&Value>) -> Result<Option<bool>, CommandError> {
             BAD_VALUE,
             "$natural sort cannot be set to a value other than -1 or 1.",
         )),
+    }
+}
+
+/// `returnKey` of `find`: a boolean (measured on a `refrouter` 9.0.4 on 05-11-2026: `returnKey: 1`
+/// is 14 «Field 'returnKey' should be a boolean value, but found: int»).
+fn return_key(cmd: &Document) -> Result<bool, CommandError> {
+    match cmd.get("returnKey") {
+        None => Ok(false),
+        Some(Value::Boolean(b)) => Ok(*b),
+        Some(v) => Err(CommandError::new(
+            crate::error::TYPE_MISMATCH,
+            format!(
+                "Field 'returnKey' should be a boolean value, but found: {}",
+                crate::types::type_name(v)
+            ),
+        )
+        .parsed()),
     }
 }
 
@@ -841,6 +876,7 @@ pub(crate) fn find_args<B: Backend + ?Sized>(
         concern: args::read_concern(cmd, FIND)?,
         vars: command_let(backend, cmd, FIND)?,
         bounds: super::min_max::Bounds::of(find_object(cmd, "min")?, find_object(cmd, "max")?),
+        return_key: return_key(cmd)?,
     })
 }
 
@@ -934,7 +970,19 @@ pub(crate) fn count_scan(shared: &super::Shared, ns: &Namespace) {
 /// `find`.
 pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     let ns = target(ctx)?;
-    let a = find_args(ctx.backend, ctx.cmd)?;
+    let mut a = find_args(ctx.backend, ctx.cmd)?;
+    // `returnKey` gives the index key of each document and drops the projection (measured on a
+    // `refrouter` 9.0.4 on 05-11-2026).
+    if a.return_key {
+        // An `_id` equality reads its document's key alone, through the index of `_id`.
+        if a.collation.is_none() && super::crud::id_equality(&a.filter).is_some() {
+            a.projection = Some(Document::new().with("_id", 1));
+            a.return_key = false;
+        } else {
+            let key = Document::new().with("$meta", "indexKey");
+            a.projection = Some(Document::new().with("_id", 0).with(RETURN_KEY_FIELD, key));
+        }
+    }
     if let Some(u) = super::uuid::expected(ctx.cmd, FIND)? {
         super::uuid::check(ctx.backend, &ns, u)?;
     }
@@ -1052,6 +1100,7 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
             intersect: super::lock(ctx.shared).params.hash_intersection,
             index_keys: min_max.is_some()
                 || (reads_index_key(a.projection.as_ref()) && !id_point(&a.filter)),
+            key_only: a.return_key,
         };
         let sort_doc = match ctx.cmd.get("sort") {
             Some(Value::Document(s)) => s.clone(),
@@ -1103,11 +1152,13 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
             stream: None,
             origin: None,
             held: 0,
+            return_key: false,
         },
         Some(sort) => {
             sorted(ctx.backend, &coll, &a, sort, collation.as_ref(), planned).map_err(executor)?
         }
     };
+    state.return_key = a.return_key;
     state.read_mark = ctx.backend.read_mark();
     let size = Some(a.batch_size.unwrap_or(DEFAULT_FIRST_BATCH));
     let (docs, short) = state.batch(ctx.backend, size).map_err(executor)?;
@@ -2215,6 +2266,7 @@ fn planned<B: Backend + ?Sized>(
         concern,
         intersect: super::lock(ctx.shared).params.hash_intersection,
         index_keys: false,
+        key_only: false,
     };
     let note = super::plan_exec::CacheNote {
         shared: ctx.shared,
