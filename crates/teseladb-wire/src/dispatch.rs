@@ -79,7 +79,7 @@ pub fn dispatch_with<B: Backend + ?Sized>(
     conn: &mut Connection,
     req: &Request,
     node: &NodeInfo,
-    mut cmds: Commands<'_, B>,
+    cmds: Commands<'_, B>,
 ) -> Action {
     match req.kind {
         Kind::LegacyQuery => {
@@ -91,6 +91,14 @@ pub fn dispatch_with<B: Backend + ?Sized>(
                 .with("code", OP_QUERY_REMOVED.code)
                 .with("ok", 0.0);
             Action::Reply(d)
+        }
+        // Besides the handshake, a `refrouter` 9.0.4 runs `buildInfo` and the authentication
+        // commands from an OP_QUERY (measured on 05-11-2026): the .NET driver logs in through
+        // OP_QUERY, as its connection has no description until then.
+        // Its database comes from the namespace, where an OP_MSG names it in `$db`.
+        Kind::Query if OP_QUERY_COMMANDS.contains(&req.name()) => {
+            let command = req.command.clone().with("$db", req.db.as_str());
+            run_message(conn, &Request { command, ..req.clone() }, node, cmds)
         }
         Kind::Query if !is_hello(req.name()) => {
             let msg = format!(
@@ -108,62 +116,74 @@ pub fn dispatch_with<B: Backend + ?Sized>(
             }
             Err(e) => error(&e, node),
         },
-        Kind::Msg => {
-            let started = cmds.as_ref().map(|(b, _)| b.now_micros());
-            // The tenant it runs in, and the command without the `$tenant` that named it, which
-            // no command knows (007 FR-025).
-            let own = conn.auth.user.as_ref().map_or(0, |u| u.tenant);
-            let resolved = match cmds.as_mut() {
-                Some((b, _)) => crate::commands::tenants::of_request(own, &req.command, &mut **b),
-                None => Ok((own, None)),
-            };
-            let stripped;
-            let (req, resolved) = match resolved {
-                Ok((tenant, cmd)) => {
-                    conn.tenant = tenant;
-                    stripped = cmd.map(|command| Request { command, ..req.clone() });
-                    (stripped.as_ref().unwrap_or(req), Ok(()))
-                }
-                Err(e) => (req, Err(e)),
-            };
-            let committed_before = cmds.as_ref().and_then(|(b, _)| b.last_commit());
-            let inner = cmds.as_mut().map(|(b, s)| (&mut **b, *s));
-            let action = match resolved.and_then(|()| command(conn, req, node, inner)) {
-                Ok(a) => a,
-                Err(e) => error(&e, node),
-            };
-            // The cluster time after the command: a write's is at or above its own mark (008
-            // FR-013).
-            let action = match (action, cmds.as_ref()) {
-                (Action::Reply(d), Some((b, _))) => {
-                    let d = restamp(d, node, b.cluster_mark());
-                    // A command that committed writes answers the last one's mark as its
-                    // `operationTime`, the optime of a write (measured on a `refrouter` 9.0.4: a
-                    // change stream that starts at it includes the write).
-                    let wrote = b.last_commit().filter(|c| Some(*c) > committed_before);
-                    Action::Reply(match wrote {
-                        Some(c) => with_operation_time(d, c),
-                        None => d,
-                    })
-                }
-                (a, _) => a,
-            };
-            // A member's write replies carry its election and the write's optime (018).
-            let action = match (action, &node.replica_set) {
-                (Action::Reply(d), Some(view)) => {
-                    Action::Reply(crate::commands::replset::member_write_reply(view, req.name(), d))
-                }
-                (Action::Reply(d), None) => {
-                    Action::Reply(crate::commands::txn::router_reply(req.name(), d))
-                }
-                (a, _) => a,
-            };
-            if let (Some((b, s)), Some(t0)) = (cmds, started) {
-                record(conn, req, &action, s, b.now_micros().saturating_sub(t0));
-            }
-            action
-        }
+        Kind::Msg => run_message(conn, req, node, cmds),
     }
+}
+
+/// The commands besides the handshake's that run from an OP_QUERY, as on a `refrouter` 9.0.4.
+const OP_QUERY_COMMANDS: [&str; 5] =
+    ["buildInfo", "buildinfo", "saslStart", "saslContinue", "authenticate"];
+
+/// Runs the command of `req` as an OP_MSG's.
+fn run_message<B: Backend + ?Sized>(
+    conn: &mut Connection,
+    req: &Request,
+    node: &NodeInfo,
+    mut cmds: Commands<'_, B>,
+) -> Action {
+    let started = cmds.as_ref().map(|(b, _)| b.now_micros());
+    // The tenant it runs in, and the command without the `$tenant` that named it, which
+    // no command knows (007 FR-025).
+    let own = conn.auth.user.as_ref().map_or(0, |u| u.tenant);
+    let resolved = match cmds.as_mut() {
+        Some((b, _)) => crate::commands::tenants::of_request(own, &req.command, &mut **b),
+        None => Ok((own, None)),
+    };
+    let stripped;
+    let (req, resolved) = match resolved {
+        Ok((tenant, cmd)) => {
+            conn.tenant = tenant;
+            stripped = cmd.map(|command| Request { command, ..req.clone() });
+            (stripped.as_ref().unwrap_or(req), Ok(()))
+        }
+        Err(e) => (req, Err(e)),
+    };
+    let committed_before = cmds.as_ref().and_then(|(b, _)| b.last_commit());
+    let inner = cmds.as_mut().map(|(b, s)| (&mut **b, *s));
+    let action = match resolved.and_then(|()| command(conn, req, node, inner)) {
+        Ok(a) => a,
+        Err(e) => error(&e, node),
+    };
+    // The cluster time after the command: a write's is at or above its own mark (008
+    // FR-013).
+    let action = match (action, cmds.as_ref()) {
+        (Action::Reply(d), Some((b, _))) => {
+            let d = restamp(d, node, b.cluster_mark());
+            // A command that committed writes answers the last one's mark as its
+            // `operationTime`, the optime of a write (measured on a `refrouter` 9.0.4: a
+            // change stream that starts at it includes the write).
+            let wrote = b.last_commit().filter(|c| Some(*c) > committed_before);
+            Action::Reply(match wrote {
+                Some(c) => with_operation_time(d, c),
+                None => d,
+            })
+        }
+        (a, _) => a,
+    };
+    // A member's write replies carry its election and the write's optime (018).
+    let action = match (action, &node.replica_set) {
+        (Action::Reply(d), Some(view)) => {
+            Action::Reply(crate::commands::replset::member_write_reply(view, req.name(), d))
+        }
+        (Action::Reply(d), None) => {
+            Action::Reply(crate::commands::txn::router_reply(req.name(), d))
+        }
+        (a, _) => a,
+    };
+    if let (Some((b, s)), Some(t0)) = (cmds, started) {
+        record(conn, req, &action, s, b.now_micros().saturating_sub(t0));
+    }
+    action
 }
 
 /// `reply` with `operationTime` at `mark`, where it has one.
