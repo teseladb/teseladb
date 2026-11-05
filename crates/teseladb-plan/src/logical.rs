@@ -143,7 +143,7 @@ pub fn intervals(op: &str, arg: &Value) -> Option<(Vec<Bound>, bool)> {
             let (low, high) = bracket(arg)?;
             let inclusive = op.ends_with('e');
             // The end past a type's values is out, unless it is a value of the type (`inf`).
-            let high_inclusive = !matches!(high, Value::Document(_));
+            let high_inclusive = !matches!(high, Value::Document(_) | Value::Array(_));
             let b = if op.starts_with("$g") {
                 Bound { low: arg.clone(), low_inclusive: inclusive, high, high_inclusive }
             } else {
@@ -194,6 +194,9 @@ fn bracket(v: &Value) -> Option<(Value, Value)> {
         // Dates from the least to the greatest one (`new Date(-9223372036854775808)` to
         // `new Date(9223372036854775807)` in RefDb's bounds).
         Value::DateTime(_) => Some((Value::DateTime(i64::MIN), Value::DateTime(i64::MAX))),
+        // Documents from the empty one to the arrays that follow them (`[{}, [])` in RefDb's
+        // bounds, measured on 05-11-2026).
+        Value::Document(_) => Some((Value::Document(Document::new()), Value::Array(Vec::new()))),
         _ => None,
     }
 }

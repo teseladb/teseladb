@@ -330,6 +330,11 @@ fn intervals_follow_refdb() {
     assert_eq!(b[0].shown(), r#"["", "m"]"#);
     let (b, _) = intervals("$gte", &Value::String("m".to_owned())).expect("a bound");
     assert_eq!(b[0].shown(), r#"["m", {})"#);
+    // A comparison with a document scans the documents, up to the arrays that follow them
+    // (measured on a `refrouter` 9.0.4 on 05-11-2026, `sharding-key-compound`: `[{}, [])`).
+    let (b, exact) = intervals("$gte", &Value::Document(Document::new())).expect("a bound");
+    assert_eq!(b[0].shown(), "[{}, [])");
+    assert!(exact);
     let regex = Value::Regex { pattern: "a.b".to_owned(), options: String::new() };
     assert_eq!(intervals("$regex", &regex), None);
     let caseless = Value::Regex { pattern: "^a".to_owned(), options: "i".to_owned() };
