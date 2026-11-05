@@ -187,6 +187,14 @@ pub struct ServerParams {
     /// Whether server-side JavaScript runs: `false` with `--noscripting` or
     /// `security.javascriptEnabled: false` (016 FR-009).
     pub javascript_enabled: bool,
+    /// `ocspStaplingRefreshPeriodSecs` as the start gave it; `-1`, the period of the response.
+    pub ocsp_stapling_refresh_secs: i64,
+    /// `ocspValidationRefreshPeriodSecs` as the start gave it; `-1`, the period of the response.
+    pub ocsp_validation_refresh_secs: i64,
+    /// `tlsOCSPStaplingTimeoutSecs` as the start gave it; `-1`, the default of the TLS stack.
+    pub tls_ocsp_stapling_timeout_secs: i64,
+    /// `tlsOCSPVerifyTimeoutSecs` as the start gave it.
+    pub tls_ocsp_verify_timeout_secs: i64,
 }
 
 impl ServerParams {
@@ -219,6 +227,10 @@ impl Default for ServerParams {
             query_stats_rate_limit: 0,
             query_stats_sample_bits: QUERY_STATS_SAMPLE_RATE_DEFAULT.to_bits(),
             javascript_enabled: true,
+            ocsp_stapling_refresh_secs: -1,
+            ocsp_validation_refresh_secs: -1,
+            tls_ocsp_stapling_timeout_secs: -1,
+            tls_ocsp_verify_timeout_secs: i64::from(TLS_OCSP_VERIFY_TIMEOUT_DEFAULT),
         }
     }
 }
@@ -276,9 +288,14 @@ fn value_of(name: &str, s: &NodeSessions) -> Value {
         CURSOR_TIMEOUT_MILLIS => Value::Int64(s.params.cursor_timeout_ms),
         ENABLE_TEST_COMMANDS => Value::Boolean(s.failpoint.is_some()),
         OCSP_ENABLED => Value::Boolean(s.params.ocsp_enabled),
-        OCSP_STAPLING_REFRESH_PERIOD_SECS | OCSP_VALIDATION_REFRESH_PERIOD_SECS => Value::Int64(-1),
-        TLS_OCSP_STAPLING_TIMEOUT_SECS => Value::Int32(-1),
-        TLS_OCSP_VERIFY_TIMEOUT_SECS => Value::Int32(TLS_OCSP_VERIFY_TIMEOUT_DEFAULT),
+        OCSP_STAPLING_REFRESH_PERIOD_SECS => Value::Int64(s.params.ocsp_stapling_refresh_secs),
+        OCSP_VALIDATION_REFRESH_PERIOD_SECS => Value::Int64(s.params.ocsp_validation_refresh_secs),
+        TLS_OCSP_STAPLING_TIMEOUT_SECS => {
+            Value::Int32(clamp_i32(s.params.tls_ocsp_stapling_timeout_secs))
+        }
+        TLS_OCSP_VERIFY_TIMEOUT_SECS => {
+            Value::Int32(clamp_i32(s.params.tls_ocsp_verify_timeout_secs))
+        }
         REDACT_CLIENT_LOG_DATA => Value::Boolean(s.params.redact_client_log_data),
         USE_INTERNAL_AUTHZ_FOR_X509 => Value::Boolean(s.params.use_internal_authz_for_x509),
         HASH_INTERSECTION => Value::Boolean(s.params.hash_intersection),
@@ -447,9 +464,162 @@ fn cluster_auth_mode_step(
 
 /// A new value `setParameter` checked: a number (a boolean as 0 or 1, a rate as its bits, a mode
 /// as its index), or one of the limiter's (006 FR-036).
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Change {
     Number(i64),
     Ingress(ingress::Setting),
+}
+
+/// A parameter given at startup with `--setParameter`, checked as `setParameter` checks it
+/// (006 FR-037).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Startup {
+    name: &'static str,
+    change: Change,
+}
+
+/// The parameter `name` given at startup as `text`, with the messages of a `refnode` 9.0.4's
+/// start (measured on 05-11-2026): one that does not exist, one that is not settable at
+/// startup, and a value that does not read as the parameter's type or that `setParameter`
+/// refuses, after «Bad value for parameter "<name>": ».
+///
+/// # Errors
+///
+/// The message the start fails with.
+pub fn startup(name: &str, text: &str) -> Result<Startup, String> {
+    let Some((known, _, at_start)) = KNOWN.iter().find(|(n, _, _)| *n == name) else {
+        return Err(format!("Illegal --setParameter parameter: \"{name}\""));
+    };
+    if !at_start {
+        return Err(format!("Cannot use --setParameter to set \"{name}\" at startup"));
+    }
+    let bad = |why: &str| format!("Bad value for parameter \"{name}\": {why}");
+    let defaults = NodeSessions::new(super::Timeouts::default());
+    let value = match value_of(known, &defaults) {
+        Value::Boolean(_) => match text {
+            "true" | "1" => Value::Boolean(true),
+            "false" | "0" => Value::Boolean(false),
+            _ => return Err(bad("Value is not a valid boolean")),
+        },
+        Value::Double(_) => Value::Double(text.parse::<f64>().map_err(|_| bad("Invalid number"))?),
+        Value::Int32(_) | Value::Int64(_) => {
+            Value::Int64(text.parse::<i64>().map_err(|_| bad("Did not consume whole string."))?)
+        }
+        _ => {
+            let wrapped = format!("{{\"v\": {text}}}");
+            let doc = teseladb_bson::extjson::parse(&wrapped).map_err(|e| bad(&format!("{e:?}")))?;
+            doc.get("v").cloned().unwrap_or(Value::Null)
+        }
+    };
+    let change = check(known, &value, None).map_err(|e| bad(&e.errmsg))?;
+    Ok(Startup { name: known, change })
+}
+
+/// Gives the node's tables `startup`, before any client comes.
+pub fn apply_startup(s: &mut NodeSessions, startup: &Startup) {
+    apply(s, startup.name, startup.change.clone());
+}
+
+/// The change `v` asks of parameter `name`, checked as `setParameter` checks it; `shared` is the
+/// node's at runtime and `None` at startup, when no audit configuration has been loaded yet.
+fn check(
+    name: &'static str,
+    v: &Value,
+    shared: Option<&super::Shared>,
+) -> Result<Change, CommandError> {
+    if ingress::NAMES.contains(&name) {
+        return Ok(Change::Ingress(ingress::parse(name, v, integral)?));
+    }
+    let n = match name {
+        REDACT_CLIENT_LOG_DATA | USE_INTERNAL_AUTHZ_FOR_X509 | HASH_INTERSECTION => {
+            i64::from(crate::types::bson_true(v))
+        }
+        AUDIT_AUTHORIZATION_SUCCESS => match shared {
+            Some(shared) => audit_authorization_success(shared, v)?,
+            None => i64::from(crate::types::bson_true(v)),
+        },
+        CLUSTER_AUTH_MODE => match shared {
+            Some(shared) => cluster_auth_mode_step(shared, v)?.index(),
+            None => return Err(CommandError::new(ILLEGAL_OPERATION, "not at startup")),
+        },
+        QUERY_STATS_SAMPLE_RATE => i64::from_ne_bytes(sample_rate(v)?.to_bits().to_ne_bytes()),
+        QUERY_STATS_RATE_LIMIT => {
+            let n = integral(name, v)?;
+            if i32::try_from(n).is_err() {
+                let msg =
+                    format!("Failed validating {name}: Out of bounds coercing to integral value");
+                return Err(CommandError::new(BAD_VALUE, msg));
+            }
+            n
+        }
+        _ => integral(name, v)?,
+    };
+    let least = match name {
+        TRANSACTION_LIFETIME_LIMIT_SECONDS => 1,
+        QUERY_STATS_RATE_LIMIT => -1,
+        MAX_CONCURRENT_MULTI_DOCUMENT_TRANSACTIONS => 0,
+        _ => i64::MIN,
+    };
+    if (name == MAX_OPERATION_MEMORY || name == MAX_EXPRESSION_MEMORY) && n <= 0 {
+        let msg = format!("Invalid value for parameter {name}: {n} is not greater than 0");
+        return Err(CommandError::new(BAD_VALUE, msg));
+    }
+    if n < least {
+        let msg = format!(
+            "Invalid value for parameter {name}: {n} is not greater than or equal to {least}"
+        );
+        return Err(CommandError::new(BAD_VALUE, msg));
+    }
+    Ok(Change::Number(n))
+}
+
+/// Sets parameter `name` of the node's tables `g` to `change`.
+fn apply(g: &mut NodeSessions, name: &str, change: Change) {
+    let n = match change {
+        Change::Ingress(s) => {
+            g.ingress.set(s);
+            return;
+        }
+        Change::Number(n) => n,
+    };
+    match name {
+        CURSOR_TIMEOUT_MILLIS => {
+            g.params.cursor_timeout_ms = n;
+            g.cursors.set_timeout_ms(u64::try_from(n).unwrap_or(0));
+        }
+        REDACT_CLIENT_LOG_DATA => g.params.redact_client_log_data = n != 0,
+        USE_INTERNAL_AUTHZ_FOR_X509 => g.params.use_internal_authz_for_x509 = n != 0,
+        HASH_INTERSECTION => g.params.hash_intersection = n != 0,
+        MAX_OPERATION_MEMORY => g.params.operation_memory = n,
+        MAX_EXPRESSION_MEMORY => g.params.expression_memory = n,
+        QUERY_STATS_RATE_LIMIT => g.params.query_stats_rate_limit = n,
+        QUERY_STATS_SAMPLE_RATE => {
+            g.params.query_stats_sample_bits = u64::from_ne_bytes(n.to_ne_bytes());
+        }
+        CLUSTER_AUTH_MODE => g.params.cluster_auth_mode = ClusterAuthMode::from_index(n),
+        AUDIT_AUTHORIZATION_SUCCESS => match g.audit.as_ref() {
+            Some(a) => {
+                let mut w = a.auditor.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+                w.set_authorization_success(n != 0);
+            }
+            None => g.params.audit_authorization_success = n != 0,
+        },
+        TRANSACTION_LIFETIME_LIMIT_SECONDS => g.params.transaction_lifetime_secs = n,
+        MAX_CONCURRENT_MULTI_DOCUMENT_TRANSACTIONS => g.params.max_concurrent_transactions = n,
+        LOCAL_LOGICAL_SESSION_TIMEOUT_MINUTES => {
+            let ms = u64::try_from(n).unwrap_or(0).saturating_mul(60_000);
+            g.sessions = teseladb_session::session::SessionTable::with_timeout(ms);
+        }
+        OCSP_ENABLED => g.params.ocsp_enabled = n != 0,
+        OCSP_STAPLING_REFRESH_PERIOD_SECS => g.params.ocsp_stapling_refresh_secs = n,
+        OCSP_VALIDATION_REFRESH_PERIOD_SECS => g.params.ocsp_validation_refresh_secs = n,
+        TLS_OCSP_STAPLING_TIMEOUT_SECS => g.params.tls_ocsp_stapling_timeout_secs = n,
+        TLS_OCSP_VERIFY_TIMEOUT_SECS => g.params.tls_ocsp_verify_timeout_secs = n,
+        CLIENT_CURSOR_MONITOR_FREQUENCY_SECS => g.params.monitor_ms = n.saturating_mul(1000),
+        // The test commands come with the failpoint table, which the start builds (`--setParameter
+        // enableTestCommands`); nothing else is left.
+        _ => {}
+    }
 }
 
 /// `setParameter`: every parameter is checked before any changes; the answer has the old value
@@ -471,46 +641,7 @@ pub fn set_parameter<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Docume
             let msg = format!("not allowed to change [{name}] at runtime");
             return Err(CommandError::new(ILLEGAL_OPERATION, msg));
         }
-        if ingress::NAMES.contains(name) {
-            changes.push((*name, Change::Ingress(ingress::parse(name, v, integral)?)));
-            continue;
-        }
-        let n = match *name {
-            REDACT_CLIENT_LOG_DATA | USE_INTERNAL_AUTHZ_FOR_X509 | HASH_INTERSECTION => {
-                i64::from(crate::types::bson_true(v))
-            }
-            AUDIT_AUTHORIZATION_SUCCESS => audit_authorization_success(ctx.shared, v)?,
-            CLUSTER_AUTH_MODE => cluster_auth_mode_step(ctx.shared, v)?.index(),
-            QUERY_STATS_SAMPLE_RATE => i64::from_ne_bytes(sample_rate(v)?.to_bits().to_ne_bytes()),
-            QUERY_STATS_RATE_LIMIT => {
-                let n = integral(name, v)?;
-                if i32::try_from(n).is_err() {
-                    let msg = format!(
-                        "Failed validating {name}: Out of bounds coercing to integral value"
-                    );
-                    return Err(CommandError::new(BAD_VALUE, msg));
-                }
-                n
-            }
-            _ => integral(name, v)?,
-        };
-        let least = match *name {
-            TRANSACTION_LIFETIME_LIMIT_SECONDS => 1,
-            QUERY_STATS_RATE_LIMIT => -1,
-            MAX_CONCURRENT_MULTI_DOCUMENT_TRANSACTIONS => 0,
-            _ => i64::MIN,
-        };
-        if (*name == MAX_OPERATION_MEMORY || *name == MAX_EXPRESSION_MEMORY) && n <= 0 {
-            let msg = format!("Invalid value for parameter {name}: {n} is not greater than 0");
-            return Err(CommandError::new(BAD_VALUE, msg));
-        }
-        if n < least {
-            let msg = format!(
-                "Invalid value for parameter {name}: {n} is not greater than or equal to {least}"
-            );
-            return Err(CommandError::new(BAD_VALUE, msg));
-        }
-        changes.push((*name, Change::Number(n)));
+        changes.push((*name, check(name, v, Some(ctx.shared))?));
     }
     let Some((first, _)) = changes.first() else {
         let msg = "no option found to set, use help:true to see options ";
@@ -519,40 +650,7 @@ pub fn set_parameter<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Docume
     let mut g = lock(ctx.shared);
     let was = value_of(first, &g);
     for (name, change) in changes {
-        let n = match change {
-            Change::Ingress(s) => {
-                g.ingress.set(s);
-                continue;
-            }
-            Change::Number(n) => n,
-        };
-        match name {
-            CURSOR_TIMEOUT_MILLIS => {
-                g.params.cursor_timeout_ms = n;
-                g.cursors.set_timeout_ms(u64::try_from(n).unwrap_or(0));
-            }
-            REDACT_CLIENT_LOG_DATA => g.params.redact_client_log_data = n != 0,
-            USE_INTERNAL_AUTHZ_FOR_X509 => g.params.use_internal_authz_for_x509 = n != 0,
-            HASH_INTERSECTION => g.params.hash_intersection = n != 0,
-            MAX_OPERATION_MEMORY => g.params.operation_memory = n,
-            MAX_EXPRESSION_MEMORY => g.params.expression_memory = n,
-            QUERY_STATS_RATE_LIMIT => g.params.query_stats_rate_limit = n,
-            QUERY_STATS_SAMPLE_RATE => {
-                g.params.query_stats_sample_bits = u64::from_ne_bytes(n.to_ne_bytes());
-            }
-            CLUSTER_AUTH_MODE => g.params.cluster_auth_mode = ClusterAuthMode::from_index(n),
-            AUDIT_AUTHORIZATION_SUCCESS => match g.audit.as_ref() {
-                Some(a) => {
-                    let mut w =
-                        a.auditor.write().unwrap_or_else(std::sync::PoisonError::into_inner);
-                    w.set_authorization_success(n != 0);
-                }
-                None => g.params.audit_authorization_success = n != 0,
-            },
-            TRANSACTION_LIFETIME_LIMIT_SECONDS => g.params.transaction_lifetime_secs = n,
-            MAX_CONCURRENT_MULTI_DOCUMENT_TRANSACTIONS => g.params.max_concurrent_transactions = n,
-            _ => g.params.monitor_ms = n.saturating_mul(1000),
-        }
+        apply(&mut g, name, change);
     }
     Ok(Document::new().with("was", was).with("ok", 1.0))
 }

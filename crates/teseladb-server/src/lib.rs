@@ -285,6 +285,7 @@ pub fn client_config(o: &StartOpts) -> ClientConfig {
         tls_outgoing: cluster_auth::outgoing_tls(o),
         transaction_lifetime_secs: o.transaction_lifetime_secs,
         max_concurrent_transactions: o.max_concurrent_transactions,
+        startup: o.startup_parameters.clone(),
         process,
         mechanisms: o.mechanisms.clone(),
         ..ClientConfig::new(addrs)

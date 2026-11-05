@@ -342,3 +342,43 @@ fn set_parameter_ocsp_and_the_mechanisms_in_fips_mode() {
     let fips = "start --tlsFIPSMode --setParameter authenticationMechanisms=SCRAM-SHA-256";
     assert_eq!(start(fips).mechanisms, vec![SaslMechanism::ScramSha256]);
 }
+
+/// Every parameter `getParameter` marks as settable at startup takes `--setParameter`, with the
+/// checks of `setParameter` and the startup messages of a `refnode` 9.0.4 (006 FR-037, T067;
+/// measured on 05-11-2026); the node starts with them.
+#[test]
+fn set_parameter_takes_every_parameter_settable_at_startup() {
+    use teseladb_wire::commands::server_params::{
+        CURSOR_TIMEOUT_MILLIS, HASH_INTERSECTION, MAX_OPERATION_MEMORY, QUERY_STATS_SAMPLE_RATE,
+    };
+    use teseladb_wire::ingress::ENABLED;
+    let o = start(&format!(
+        "start --insecure --setParameter {CURSOR_TIMEOUT_MILLIS}=1000 \
+         --setParameter {HASH_INTERSECTION}=true --setParameter {QUERY_STATS_SAMPLE_RATE}=0.5 \
+         --setParameter {ENABLED}=true"
+    ));
+    let s = teseladb_server::client_config(&o).sessions();
+    assert_eq!(s.params.cursor_timeout_ms, 1000);
+    assert!(s.params.hash_intersection);
+    assert!((s.params.query_stats_sample_rate() - 0.5).abs() < f64::EPSILON);
+    assert_eq!(s.ingress.value(ENABLED), teseladb_bson::Value::Boolean(true));
+    let bad_value = |name: &str, v: &str, why: &str| {
+        assert_eq!(
+            bad(&format!("start --insecure --setParameter {name}={v}")),
+            format!("Bad value for parameter \"{name}\": {why}"),
+            "{name}={v}"
+        );
+    };
+    bad_value(CURSOR_TIMEOUT_MILLIS, "abc", "Did not consume whole string.");
+    bad_value(HASH_INTERSECTION, "yes", "Value is not a valid boolean");
+    bad_value(QUERY_STATS_SAMPLE_RATE, "x", "Invalid number");
+    bad_value(
+        MAX_OPERATION_MEMORY,
+        "0",
+        &format!("Invalid value for parameter {MAX_OPERATION_MEMORY}: 0 is not greater than 0"),
+    );
+    assert_eq!(
+        bad("start --insecure --setParameter clusterAuthMode=x509"),
+        "Cannot use --setParameter to set \"clusterAuthMode\" at startup"
+    );
+}

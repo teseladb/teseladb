@@ -8,6 +8,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+use teseladb_wire::commands::server_params;
 use teseladb_wire::compressed::Compressor;
 
 use crate::client_listener::DEFAULT_MAX_CONNECTIONS;
@@ -123,6 +124,8 @@ pub struct StartOpts {
     pub transaction_lifetime_secs: i64,
     /// `--setParameter maxConcurrentMultiDocumentTransactions=<n>` (008 FR-020).
     pub max_concurrent_transactions: i64,
+    /// The other parameters of `--setParameter`, checked, in order (006 FR-037).
+    pub startup_parameters: Vec<server_params::Startup>,
     /// `--redactClientLogData`: the clients' documents go redacted in the log (013 FR-027).
     pub redact_client_log_data: bool,
     /// `--noscripting`: no server-side JavaScript (016 FR-009).
@@ -743,11 +746,39 @@ fn test_commands(o: &Opts) -> Result<bool, CliError> {
                 );
                 return err(msg);
             }
-            Some((name, _)) => return err(format!("Illegal --setParameter parameter: \"{name}\"")),
+            Some((name, v)) => {
+                server_params::startup(name, v).map_err(CliError)?;
+            }
             None => return err(format!("--setParameter: expected <name>=<value>, got `{item}`")),
         }
     }
     Ok(on)
+}
+
+/// The other parameters of `--setParameter`, checked, in the order they were given (006 FR-037):
+/// those without a handling of their own above.
+fn startup_parameters(o: &Opts) -> Result<Vec<server_params::Startup>, CliError> {
+    const OWN: [&str; 10] = [
+        ENABLE_TEST_COMMANDS,
+        AUTHENTICATION_MECHANISMS,
+        LDAP_CACHE_INTERVAL,
+        AWS_STS_URL,
+        OIDC_IDENTITY_PROVIDERS,
+        AUDIT_AUTHORIZATION_SUCCESS,
+        OCSP_ENABLED,
+        USE_INTERNAL_AUTHZ_FOR_X509,
+        TRANSACTION_LIFETIME,
+        MAX_TRANSACTIONS,
+    ];
+    let mut out = Vec::new();
+    for item in o.get(SET_PARAMETER).into_iter().flat_map(|v| v.split('\n')) {
+        if let Some((name, v)) = item.split_once('=')
+            && !OWN.contains(&name)
+        {
+            out.push(server_params::startup(name, v).map_err(CliError)?);
+        }
+    }
+    Ok(out)
 }
 
 const DEV: &[Spec] = &[("nodes", VALUE), ("cores", VALUE), ("port", VALUE), (SET_PARAMETER, VALUE)];
@@ -1043,6 +1074,7 @@ fn start(o: &Opts) -> Result<StartOpts, CliError> {
             MAX_TRANSACTIONS_DEFAULT,
             0,
         )?,
+        startup_parameters: startup_parameters(o)?,
         redact_client_log_data: o.flag(REDACT_CLIENT_LOG_DATA)?,
         no_scripting: o.flag(NO_SCRIPTING)? || !o.flag_or(JAVASCRIPT_ENABLED, true)?,
         // Passwords never stay in the options as given (they show in `Debug`).

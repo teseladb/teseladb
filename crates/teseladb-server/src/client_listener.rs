@@ -110,6 +110,8 @@ pub struct ClientConfig {
     pub mechanisms: Vec<teseladb_auth::sasl::SaslMechanism>,
     /// The parameters of the limiter of new connections given at start (006 FR-036), in order.
     pub ingress: Vec<teseladb_wire::ingress::Setting>,
+    /// The other parameters of `--setParameter` (006 FR-037), applied in order after the rest.
+    pub startup: Vec<teseladb_wire::commands::server_params::Startup>,
 }
 
 impl ClientConfig {
@@ -129,6 +131,9 @@ impl ClientConfig {
         s.params.max_concurrent_transactions = self.max_concurrent_transactions;
         for setting in &self.ingress {
             s.ingress.set(setting.clone());
+        }
+        for parameter in &self.startup {
+            teseladb_wire::commands::server_params::apply_startup(&mut s, parameter);
         }
         if self.test_commands { s.with_test_commands() } else { s }
     }
@@ -165,6 +170,7 @@ impl ClientConfig {
             kerberos: None,
             mechanisms: Vec::new(),
             ingress: Vec::new(),
+            startup: Vec::new(),
         }
     }
 }
