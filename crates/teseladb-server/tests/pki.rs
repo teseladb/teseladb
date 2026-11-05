@@ -304,3 +304,52 @@ fn the_peer_chain_carries_the_ca_once() {
     assert_eq!(chain(&p).len(), 2);
     let _ = std::fs::remove_dir_all(d);
 }
+
+/// Writes `files` into `d` with mode 0600.
+fn secret_files(d: &Path, files: &[(&str, String)]) {
+    std::fs::create_dir_all(d).unwrap();
+    for (name, text) in files {
+        let f = d.join(name);
+        std::fs::write(&f, text).unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
+
+/// 013 T051 (FR-035): a bootstrap directory gives the CA and `root`'s password of a first start;
+/// each file that does not fit is refused with its name.
+#[test]
+fn a_bootstrap_directory_gives_the_ca_and_roots_password_or_says_what_is_wrong() {
+    use teseladb_x509::pem;
+    let d = dir("bootstrap");
+    let source = pki::load_or_create(&d.join("source"), &params(), &mut random).unwrap();
+    let key_pem = pem::encode(pem::label::PRIVATE_KEY, &source.ca_key.to_pkcs8());
+    let boot = d.join("boot");
+    let good = [
+        (pki::BOOTSTRAP_CA, source.ca.to_pem()),
+        (pki::BOOTSTRAP_CA_KEY, key_pem.clone()),
+        (pki::BOOTSTRAP_ROOT_PASSWORD, "given-pw-31\n".to_owned()),
+    ];
+    secret_files(&boot, &good);
+    let b = pki::read_bootstrap(&boot).unwrap();
+    let made = pki::load_or_create_with(&d.join("data"), &params(), Some(&b), &mut random).unwrap();
+    assert!(made.created);
+    assert_eq!(made.ca.der(), source.ca.der());
+    let creds = std::fs::read_to_string(d.join("data").join(pki::ROOT_CREDENTIALS)).unwrap();
+    assert!(creds.contains("password=given-pw-31\n"), "the given password, not a new one");
+    // What does not fit, each with its file's name.
+    let leaf = source.node_chain[0].to_pem();
+    let cases: [(&str, String, &str); 4] = [
+        (pki::BOOTSTRAP_CA, leaf, "not a CA certificate"),
+        (pki::BOOTSTRAP_CA, "nothing".into(), "not a PEM certificate"),
+        (pki::BOOTSTRAP_CA_KEY, "nothing".into(), "not an unencrypted PKCS #8 key"),
+        (pki::BOOTSTRAP_ROOT_PASSWORD, "\n".into(), "empty"),
+    ];
+    for (file, text, why) in cases {
+        secret_files(&boot, &good);
+        secret_files(&boot, &[(file, text)]);
+        let e = pki::read_bootstrap(&boot).err().expect("refused");
+        assert_eq!(e, PkiError::Bootstrap(format!("{file}: {why}")));
+        assert_eq!(e.to_string(), format!("--bootstrap-dir: {file}: {why}"));
+    }
+    std::fs::remove_dir_all(&d).unwrap();
+}

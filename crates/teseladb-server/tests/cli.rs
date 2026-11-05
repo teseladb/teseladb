@@ -81,6 +81,13 @@ fn every_start_option_in_both_forms() {
         start("start --insecure --insecure-allow-remote --bind_ip 0.0.0.0 --peer-listen 0.0.0.0:1");
     assert!(o.insecure_allow_remote);
     assert_eq!(o.bind_ip, "0.0.0.0");
+    // The bootstrap directory of a first start (013 FR-035), on the command line and in YAML;
+    // it gives the PKI, which --insecure does not create.
+    assert_eq!(start("start --bootstrap-dir /boot").bootstrap_dir, Some(PathBuf::from("/boot")));
+    let yaml = teseladb_server::config::yaml_args(b"teseladb:\n  bootstrapDir: /boot\n").unwrap();
+    assert_eq!(yaml, ["--bootstrap-dir=/boot"]);
+    let both = bad("start --insecure --bootstrap-dir /boot");
+    assert!(both.contains("--bootstrap-dir"), "{both}");
 }
 
 #[test]

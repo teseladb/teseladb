@@ -80,6 +80,8 @@ pub enum PkiError {
     WrongMasterKey,
     /// Reading, writing or the random source failed.
     Io(String),
+    /// A file of the bootstrap directory is missing, does not parse or may be read by others.
+    Bootstrap(String),
 }
 
 impl std::fmt::Display for PkiError {
@@ -91,6 +93,7 @@ impl std::fmt::Display for PkiError {
             PkiError::Invalid(file) => write!(f, "{file} is not valid for this node's PKI"),
             PkiError::WrongMasterKey => write!(f, "{MASTER_KEY} does not decrypt {CA_KEY}"),
             PkiError::Io(e) => write!(f, "PKI: {e}"),
+            PkiError::Bootstrap(e) => write!(f, "--bootstrap-dir: {e}"),
         }
     }
 }
@@ -200,14 +203,82 @@ pub fn root_user(
     u.to_document().to_bytes().map(Some).map_err(|_| PkiError::Invalid(ROOT_CREDENTIALS))
 }
 
+/// The CA's certificate in a bootstrap directory (013 FR-035).
+pub const BOOTSTRAP_CA: &str = "ca.pem";
+/// The CA's key in a bootstrap directory, unencrypted PKCS #8.
+pub const BOOTSTRAP_CA_KEY: &str = "ca-key.pem";
+/// The initial password of `root` in a bootstrap directory, on its first line.
+pub const BOOTSTRAP_ROOT_PASSWORD: &str = "root-password";
+
+/// What a first start takes from `--bootstrap-dir` instead of generating it (013 FR-035): the
+/// cluster's CA and the initial password of `root`, which the deployer knows without reading the
+/// node's disk.
+pub struct Bootstrap {
+    /// The CA.
+    pub ca: Certificate,
+    /// The CA's key.
+    pub ca_key: PrivateKey,
+    /// The initial password of `root`.
+    pub root_password: String,
+}
+
+/// Reads the bootstrap directory `dir`: its three files, each 0600, a CA certificate and its key.
+pub fn read_bootstrap(dir: &Path) -> Result<Bootstrap, PkiError> {
+    use std::os::unix::fs::MetadataExt;
+    let text = |file: &str| -> Result<String, PkiError> {
+        let path = dir.join(file);
+        let meta = std::fs::metadata(&path)
+            .map_err(|e| PkiError::Bootstrap(format!("{}: {e}", path.display())))?;
+        if meta.mode() & 0o777 != SECRET_MODE {
+            return Err(PkiError::Bootstrap(format!(
+                "{} has mode {:o}: it must be 0600",
+                path.display(),
+                meta.mode() & 0o777
+            )));
+        }
+        std::fs::read_to_string(&path)
+            .map_err(|e| PkiError::Bootstrap(format!("{}: {e}", path.display())))
+    };
+    let bad = |file: &str, why: &str| PkiError::Bootstrap(format!("{file}: {why}"));
+    let ca = Certificate::from_pem_all(&text(BOOTSTRAP_CA)?)
+        .ok()
+        .and_then(|mut v| (!v.is_empty()).then(|| v.remove(0)))
+        .ok_or_else(|| bad(BOOTSTRAP_CA, "not a PEM certificate"))?;
+    if !ca.is_ca() {
+        return Err(bad(BOOTSTRAP_CA, "not a CA certificate"));
+    }
+    let ca_key = PrivateKey::from_pem(&text(BOOTSTRAP_CA_KEY)?, None)
+        .map_err(|_| bad(BOOTSTRAP_CA_KEY, "not an unencrypted PKCS #8 key"))?;
+    if ca_key.public_key() != ca.public_key {
+        return Err(bad(BOOTSTRAP_CA_KEY, "not the key of the CA in ca.pem"));
+    }
+    let root_password =
+        text(BOOTSTRAP_ROOT_PASSWORD)?.lines().next().unwrap_or_default().trim().to_owned();
+    if root_password.is_empty() {
+        return Err(bad(BOOTSTRAP_ROOT_PASSWORD, "empty"));
+    }
+    Ok(Bootstrap { ca, ca_key, root_password })
+}
+
 /// Loads the PKI of `dir`, or creates it if none of its files exist yet.
 pub fn load_or_create(
     dir: &Path,
     params: &PkiParams,
     random: &mut dyn FnMut(&mut [u8]) -> std::io::Result<()>,
 ) -> Result<Pki, PkiError> {
+    load_or_create_with(dir, params, None, random)
+}
+
+/// [`load_or_create`], creating it with the CA and the `root` password of `bootstrap` if given
+/// (013 FR-035); a PKI that exists is loaded as it is.
+pub fn load_or_create_with(
+    dir: &Path,
+    params: &PkiParams,
+    bootstrap: Option<&Bootstrap>,
+    random: &mut dyn FnMut(&mut [u8]) -> std::io::Result<()>,
+) -> Result<Pki, PkiError> {
     if absent(dir) {
-        create(dir, params, random)?;
+        create(dir, params, bootstrap, random)?;
         let mut pki = load(dir)?;
         pki.created = true;
         return Ok(pki);
@@ -292,13 +363,40 @@ fn bytes<const N: usize>(
 fn create(
     dir: &Path,
     params: &PkiParams,
+    bootstrap: Option<&Bootstrap>,
     random: &mut dyn FnMut(&mut [u8]) -> std::io::Result<()>,
 ) -> Result<(), PkiError> {
     let master = MasterKey(bytes::<MASTER_KEY_LEN>(random)?);
-    let ca_key = PrivateKey::generate_ec(NamedCurve::P256, &bytes::<KEY_RANDOM_LEN>(random)?)
+    let node_key = PrivateKey::generate_ec(NamedCurve::P256, &bytes::<KEY_RANDOM_LEN>(random)?)
         .ok()
         .ok_or(PkiError::Invalid(CA_KEY))?;
-    let node_key = PrivateKey::generate_ec(NamedCurve::P256, &bytes::<KEY_RANDOM_LEN>(random)?)
+    let (ca, ca_key, password) = match bootstrap {
+        Some(b) => (b.ca.clone(), b.ca_key.clone(), b.root_password.clone()),
+        None => {
+            let (ca, ca_key) = new_ca(params, random)?;
+            let password = base64_encode(&bytes::<PASSWORD_BYTES>(random)?)
+                .replace('+', "-")
+                .replace('/', "_");
+            (ca, ca_key, password)
+        }
+    };
+    let names = params.node_names.clone();
+    let node = issue_node(&ca, &ca_key, &node_key.public_key(), names, params.now, random)?;
+    write_files(dir, &master, &ca, &ca_key, &node_key, &node, random)?;
+    write_new(
+        dir,
+        ROOT_CREDENTIALS,
+        format!("user={ROOT_USER}\npassword={password}\n").as_bytes(),
+        SECRET_MODE,
+    )
+}
+
+/// A new cluster CA: its self-signed certificate and its key.
+fn new_ca(
+    params: &PkiParams,
+    random: &mut dyn FnMut(&mut [u8]) -> std::io::Result<()>,
+) -> Result<(Certificate, PrivateKey), PkiError> {
+    let ca_key = PrivateKey::generate_ec(NamedCurve::P256, &bytes::<KEY_RANDOM_LEN>(random)?)
         .ok()
         .ok_or(PkiError::Invalid(CA_KEY))?;
     let ca_id: [u8; 4] = bytes(random)?;
@@ -314,17 +412,7 @@ fn create(
     cap.ca = Some(Some(0));
     cap.ext_key_usage.clear();
     let ca = generate::self_signed(&cap, &ca_key).ok().ok_or(PkiError::Invalid(CA_KEY))?;
-    let names = params.node_names.clone();
-    let node = issue_node(&ca, &ca_key, &node_key.public_key(), names, params.now, random)?;
-    write_files(dir, &master, &ca, &ca_key, &node_key, &node, random)?;
-    let password =
-        base64_encode(&bytes::<PASSWORD_BYTES>(random)?).replace('+', "-").replace('/', "_");
-    write_new(
-        dir,
-        ROOT_CREDENTIALS,
-        format!("user={ROOT_USER}\npassword={password}\n").as_bytes(),
-        SECRET_MODE,
-    )
+    Ok((ca, ca_key))
 }
 
 /// A node certificate signed by `ca` for `public` with host `names`, valid from a few minutes

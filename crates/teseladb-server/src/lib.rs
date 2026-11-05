@@ -715,7 +715,13 @@ fn secure(
         enroll_node(o, &token.0, &mut random)?;
         log.info("enrolled", &[]);
     }
-    let pki = pki::load_or_create(&o.dbpath, &params, &mut random).map_err(|e| e.to_string())?;
+    // The bootstrap directory counts only on the first start (013 FR-035).
+    let bootstrap = match o.bootstrap_dir.as_deref().filter(|_| pki::absent(&o.dbpath)) {
+        Some(dir) => Some(pki::read_bootstrap(dir).map_err(|e| e.to_string())?),
+        None => None,
+    };
+    let pki = pki::load_or_create_with(&o.dbpath, &params, bootstrap.as_ref(), &mut random)
+        .map_err(|e| e.to_string())?;
     let tls = tls_port::build(&o.tls, &pki)?;
     // A certificate that names an OCSP responder gets its answer stapled (013 FR-031).
     if !o.tls.ocsp_disabled {

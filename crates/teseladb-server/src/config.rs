@@ -42,6 +42,7 @@ const KEYS: &[(&str, Kind)] = &[
     ("teseladb.http.bind", Kind::Option(crate::cli::HTTP_BIND)),
     ("teseladb.join", Kind::List("join")),
     ("teseladb.enrollToken", Kind::Option(crate::cli::ENROLL_TOKEN)),
+    ("teseladb.bootstrapDir", Kind::Option(crate::cli::BOOTSTRAP_DIR)),
     ("teseladb.insecure", Kind::Option("insecure")),
     ("teseladb.insecureAllowRemote", Kind::Option("insecure-allow-remote")),
     ("teseladb.logFormat", Kind::Option("log-format")),

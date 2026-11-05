@@ -94,6 +94,9 @@ pub struct StartOpts {
     pub cpu_list: Option<Vec<usize>>,
     /// The enrollment token of a node that joins without a PKI yet (013 FR-005).
     pub enroll_token: Option<Password>,
+    /// `--bootstrap-dir` (013 FR-035): where a first start takes the cluster's CA and the
+    /// `root` password from.
+    pub bootstrap_dir: Option<PathBuf>,
     /// No TLS and no authentication.
     pub insecure: bool,
     /// `--insecure` on addresses that are not loopback.
@@ -160,6 +163,8 @@ pub const HTTP_BIND: &str = "http-bind";
 pub const TLS_CERTIFICATE_KEY_FILE: &str = "tlsCertificateKeyFile";
 /// `--enroll-token`.
 pub const ENROLL_TOKEN: &str = "enroll-token";
+/// `--bootstrap-dir` (013 FR-035).
+pub const BOOTSTRAP_DIR: &str = "bootstrap-dir";
 /// `--tlsCertificateKeyFilePassword`.
 pub const TLS_CERTIFICATE_KEY_FILE_PASSWORD: &str = "tlsCertificateKeyFilePassword";
 /// `--tlsCAFile`.
@@ -350,6 +355,7 @@ const START: &[Spec] = &[
     ("join", VALUE),
     ("tags", VALUE),
     (ENROLL_TOKEN, VALUE),
+    (BOOTSTRAP_DIR, VALUE),
     ("insecure", FLAG),
     ("insecure-allow-remote", FLAG),
     ("log-format", VALUE),
@@ -990,6 +996,9 @@ fn start(o: &Opts) -> Result<StartOpts, CliError> {
     if insecure && o.get(KEY_FILE).is_some() {
         return err("--keyFile turns authentication on, which --insecure turns off");
     }
+    if insecure && o.get(BOOTSTRAP_DIR).is_some() {
+        return err("--bootstrap-dir gives the PKI, which --insecure does not create");
+    }
     let bind_ip = o.get("bind_ip").unwrap_or("127.0.0.1").to_string();
     let peer_listen = addr(o, "peer-listen", "127.0.0.1:27100")?;
     let admin_listen = addr(o, "admin-listen", "127.0.0.1:27200")?;
@@ -1049,6 +1058,7 @@ fn start(o: &Opts) -> Result<StartOpts, CliError> {
         },
         cpu_list: cpu_list(o.get("cpu-list"), cores)?,
         enroll_token: o.get(ENROLL_TOKEN).map(Password::from),
+        bootstrap_dir: o.path(BOOTSTRAP_DIR),
         insecure,
         insecure_allow_remote,
         log_format: o.parse("log-format", Format::Text)?,
@@ -1147,7 +1157,7 @@ usage:
                  [--io-executor auto|uring|threads] [--direct-io auto|on|off] [--cpu-list <cpus>]
                  [--bind_ip <addr>] [--port <n>]
                  [--peer-listen <ip:port>] [--admin-listen <ip:port>] [--join <ip:port>,...]
-                 [--enroll-token <token>]
+                 [--enroll-token <token>] [--bootstrap-dir <dir>]
                  [--tlsMode <mode>] [--tlsCertificateKeyFile <file>] [--tlsCAFile <file>]
                  [--insecure [--insecure-allow-remote]] [--log-format text|json] [--config <file.yaml>]
                  [--logpath <file>] [--logappend] [--quiet | --verbose] [--maxConns <n>]
