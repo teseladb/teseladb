@@ -513,6 +513,29 @@ fn a_node_without_its_lease_authorizes_nothing() {
     assert!(ok(&run(&mut m, &mut conn("root"), TEST, Document::new().with("find", "c"))));
 }
 
+/// A node whose lease lapsed waits for it, up to one lease, before it refuses: on a loaded
+/// machine the renewal can come late, and the commands answered 13436 although no node was cut
+/// off (the gate of 05-11-2026, with a load of 24 on 18 cores).
+#[test]
+fn a_node_waits_for_its_lease_before_it_refuses() {
+    let mut m = node();
+    m.lease_lost = true;
+    m.lease_back_on_pause = true;
+    m.pauses_left = 10;
+    m.pause_ms = 100;
+    assert!(ok(&run(&mut m, &mut conn("root"), TEST, Document::new().with("find", "c"))));
+    // Without a lease coming back, it refuses once one lease went by.
+    m.lease_lost = true;
+    m.lease_back_on_pause = false;
+    m.pauses_left = 1_000;
+    let start = m.now;
+    let r = run(&mut m, &mut conn("root"), TEST, Document::new().with("find", "c"));
+    assert_eq!(code(&r), Some(13436));
+    let waited = m.now - start;
+    let lease = teseladb_auth::fence::AUTH_LEASE_MS;
+    assert!((lease..lease + 200).contains(&waited), "{waited}");
+}
+
 #[test]
 fn an_operation_sees_the_lease_of_its_node() {
     use teseladb_wire::commands::Backend;

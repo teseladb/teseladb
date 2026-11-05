@@ -41,8 +41,14 @@ pub fn authorize<B: Backend + ?Sized>(
     if !conn.auth.required {
         return Ok(None);
     }
-    if !backend.authorization_lease() {
-        return Err(CommandError::new(NOT_PRIMARY_OR_SECONDARY, LEASE_LOST));
+    // A lease that lapsed may be on its way: on a loaded machine its renewal comes late. The
+    // command waits up to one lease for it, then refuses, as a node cut off from Group 0 does
+    // (DV-098).
+    let give_up = backend.now_ms().saturating_add(teseladb_auth::fence::AUTH_LEASE_MS);
+    while !backend.authorization_lease() {
+        if backend.now_ms() >= give_up || !backend.pause() {
+            return Err(CommandError::new(NOT_PRIMARY_OR_SECONDARY, LEASE_LOST));
+        }
     }
     let Some(auth) = conn.auth.user.clone() else {
         // Only the commands open before authentication get here.

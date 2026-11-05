@@ -174,6 +174,8 @@ pub struct Mem {
     pub uncertain_more: Vec<Hlc>,
     /// Pauses a waiting command takes before its time runs out (none: it runs out at once).
     pub pauses_left: usize,
+    /// The node gets its authorization lease back during the next pause.
+    pub lease_back_on_pause: bool,
     /// How many reads of the changes still give a resolved mark one millisecond behind the
     /// clock, as a range whose oldest intent is not resolved yet (011 FR-010).
     pub changes_lag: usize,
@@ -420,6 +422,9 @@ impl Backend for Mem {
     }
 
     fn pause(&mut self) -> bool {
+        if self.lease_back_on_pause {
+            self.lease_lost = false;
+        }
         // The critical section ends during the pause: the fences go.
         if self.lift_on_pause && !self.fences.is_empty() {
             self.fences.clear();
