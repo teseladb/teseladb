@@ -269,7 +269,9 @@ impl GeoNear {
     /// 2dsphere one; it must answer the kind of `near` (a 2d index takes legacy pairs, a 2dsphere
     /// one a GeoJSON point or a pair with `spherical`).
     fn index<'a>(&self, ns: &str, indexes: &'a [GeoIndex]) -> Result<&'a GeoIndex, MqlError> {
-        if indexes.is_empty() {
+        // With `key`, a collection without geo indexes fails in the planner (measured on a
+        // `refrouter` 9.0.4 on 05-11-2026).
+        if indexes.is_empty() && self.key.is_none() {
             return Err(error(
                 INDEX_NOT_FOUND,
                 "$geoNear requires a 2d or 2dsphere index, but none were found",

@@ -262,6 +262,10 @@ pub fn create<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
     };
     check_validation(&options, CREATE)?;
     check_constraint_action(&options)?;
+    // An empty validator is no validator (measured on a `refrouter` 9.0.4 on 05-11-2026).
+    if matches!(options.get(VALIDATOR), Some(Value::Document(v)) if v.is_empty()) {
+        options.remove(VALIDATOR);
+    }
     let mut shown = options.clone();
     if let Some(c) = &options.get(COLLATION).and_then(|v| match v {
         Value::Document(d) => Some(d.clone()),
@@ -627,6 +631,7 @@ pub fn coll_mod<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, C
     let index_change = changes.remove(COLL_MOD_INDEX);
     let dry_run =
         super::index_mod::dry_run(changes.remove(DRY_RUN).as_ref(), index_change.is_some())?;
+    let capped = super::coll_mod_kinds::capped_limits(&mut changes)?;
     for (k, _) in changes.iter() {
         if !MODIFIABLE.contains(&k) {
             return Err(CommandError::new(
@@ -669,6 +674,9 @@ pub fn coll_mod<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, C
         return Ok(index_reply.with("ok", 1.0));
     }
     let mut options = options_of(&c)?;
+    if let Some(limits) = capped {
+        super::coll_mod_kinds::resize(&c, &mut options, limits)?;
+    }
     let constraint_now = options.get(VALIDATION_LEVEL) == Some(&Value::from(CONSTRAINT));
     if constraint_now && changes.get(VALIDATOR).is_some() {
         return Err(CommandError::new(

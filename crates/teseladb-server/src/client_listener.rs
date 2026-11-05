@@ -876,6 +876,8 @@ struct HelloWait {
     exhaust: bool,
     /// The message the next reply answers (the request, then the previous reply of the stream).
     response_to: i32,
+    /// The error the failpoint holds the next reply of the stream for (`blockConnection`).
+    held: Option<teseladb_bson::Document>,
 }
 
 /// One client connection of a worker. Its socket is non-blocking: reads and writes end with
@@ -1003,7 +1005,10 @@ impl Client {
             self.apply(conn, req, Action::Reply(e.to_document()));
             return false;
         }
-        let pool = cmds.pool.as_deref_mut().filter(|_| !answers_without_waiting(&req));
+        // With `enableTestCommands` every request goes where the failpoint sees it, the
+        // monitors' `hello` too (006 FR-034).
+        let tests = lock(cmds.shared).failpoint.is_some();
+        let pool = cmds.pool.as_deref_mut().filter(|_| tests || !answers_without_waiting(&req));
         match pool {
             Some(pool) => match pool.run(Job { token: self.token, conn, req }) {
                 Ok(()) => true,
@@ -1059,7 +1064,8 @@ impl Client {
                 let response_to = req.header.request_id;
                 let deadline = Instant::now() + every;
                 self.waiting = true;
-                let wait = HelloWait { req, hello, deadline, every, exhaust, response_to };
+                let wait =
+                    HelloWait { req, hello, deadline, every, exhaust, response_to, held: None };
                 self.new_wait = Some(Pending::Hello(wait));
                 true
             }
@@ -1077,10 +1083,48 @@ impl Client {
     }
 
     /// Answers its awaitable `hello` `p`, due at `p.deadline`; with exhaust, the next one of the
-    /// stream.
-    fn fire(&mut self, mut p: HelloWait, info: &NodeInfo) -> Option<Pending> {
+    /// stream, and whether the connection stays open. Each reply of a stream after the first is a
+    /// `hello` the failpoint acts on, as on a `refrouter` 9.0.4 with `enableTestCommands`: it holds
+    /// it, answers its error and ends the stream, or closes the connection.
+    fn fire(
+        &mut self,
+        mut p: HelloWait,
+        info: &NodeInfo,
+        shared: &Shared,
+    ) -> (Option<Pending>, bool) {
         // A connection waiting for a `hello` is never with an executor.
-        let conn = self.conn.as_mut()?;
+        let Some(conn) = self.conn.as_mut() else { return (None, true) };
+        let streamed = p.response_to != p.req.header.request_id;
+        let fault = match (&p.held, streamed) {
+            (None, true) => {
+                let app = conn.hello.app_name.clone();
+                lock(shared).failpoint.as_mut().and_then(|fp| {
+                    fp.check(teseladb_wire::concerns::canonical(p.req.name()), app.as_deref())
+                })
+            }
+            _ => None,
+        };
+        if let Some(f) = fault {
+            if f.close {
+                return (None, false);
+            }
+            match (f.block_ms, f.error) {
+                (0, None) => {}
+                (0, Some(e)) => p.held = Some(e),
+                (ms, error) => {
+                    p.deadline = Instant::now() + Duration::from_millis(ms);
+                    p.held = error;
+                    return (Some(Pending::Hello(p)), true);
+                }
+            }
+        }
+        if let Some(e) = p.held.take() {
+            let doc = teseladb_wire::hello::with_cluster_time(e, info);
+            let (bytes, _) = conn.reply_to(p.response_to, &p.req, &doc, false);
+            let _ = self.transport.outgoing(&bytes, &mut self.out);
+            self.waiting = false;
+            return (None, true);
+        }
         let doc = hello_after_wait(conn, &p.hello, info);
         let (bytes, id) = conn.reply_to(p.response_to, &p.req, &doc, p.exhaust);
         // A TLS failure here shows on the next read, which closes the connection.
@@ -1088,7 +1132,7 @@ impl Client {
         self.waiting = p.exhaust;
         p.response_to = id;
         p.deadline += p.every;
-        p.exhaust.then_some(Pending::Hello(p))
+        (p.exhaust.then_some(Pending::Hello(p)), true)
     }
 
     /// Runs the request the failpoint held, on its connection with what arrived meanwhile;
@@ -1372,8 +1416,9 @@ impl Worker {
             };
             let resumed = match p {
                 Pending::Hello(p) => {
-                    c.new_wait = c.fire(p, info);
-                    true
+                    let (next, open) = c.fire(p, info, &self.shared);
+                    c.new_wait = next;
+                    open
                 }
                 // The held request runs now, with what the failpoint does next.
                 Pending::Held { conn, req, .. } => c.resume(*conn, req, info, &mut cmds),

@@ -1097,7 +1097,8 @@ pub(crate) fn aggregate_from<B: Backend + ?Sized>(
         )
     );
     let forwarded = match pipeline.system_stage() {
-        Some("$listClusterCatalog" | "$querySettings") => true,
+        // `$shardedDataDistribution` too (measured on 05-11-2026).
+        Some("$listClusterCatalog" | "$querySettings" | "$shardedDataDistribution") => true,
         Some("$currentOp") => !local_ops,
         _ => false,
     };

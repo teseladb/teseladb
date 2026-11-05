@@ -31,7 +31,11 @@ pub(crate) const PIPELINE: &str = "pipeline";
 const COLLATION: &str = "collation";
 const CAPPED: &str = "capped";
 const SIZE: &str = "size";
+/// The option of a capped collection's size, for `collMod`.
+pub(crate) const CAPPED_SIZE_OPTION: &str = SIZE;
 const MAX: &str = "max";
+/// The option of a capped collection's most documents, for `collMod`.
+pub(crate) const CAPPED_MAX_OPTION: &str = MAX;
 pub(crate) const TIMESERIES: &str = "timeseries";
 pub(crate) const TIME_FIELD: &str = "timeField";
 pub(crate) const META_FIELD: &str = "metaField";
@@ -178,6 +182,11 @@ fn doc_of<'a>(o: &'a Document, field: &str) -> Result<Option<&'a Document>, Comm
     }
 }
 
+/// The tier option of `create`.
+const STORAGE_TIER: &str = "storageTier";
+/// The option that makes a collection the server's temporary one.
+const TEMP: &str = "temp";
+
 /// Checks the options of `create` of `ns` that make a special kind, in the order a `refrouter`
 /// 9.0.4 checks them.
 pub fn check(ns: &Namespace, o: &Document, now_secs: i64) -> Result<Asked, CommandError> {
@@ -210,6 +219,12 @@ pub fn check(ns: &Namespace, o: &Document, now_secs: i64) -> Result<Asked, Comma
         }
     }
     let timeseries = doc_of(o, TIMESERIES)?;
+    // `storageTier` is an object; `temp` is the server's own (measured on a `refrouter` 9.0.4 on
+    // 05-11-2026).
+    doc_of(o, STORAGE_TIER)?;
+    if o.get(TEMP).is_some() {
+        return Err(CommandError::new(INVALID_OPTIONS, "the 'temp' field is an invalid option"));
+    }
     let clustered = match o.get(CLUSTERED) {
         None => None,
         Some(Value::Boolean(_)) => {

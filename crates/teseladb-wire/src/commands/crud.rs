@@ -1692,16 +1692,17 @@ pub fn bulk_write<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document,
             }
             Err(e) => {
                 n_errors += 1;
+                // The error's code, message and details, then `n`, without `codeName` (measured
+                // on a `refrouter` 9.0.4 on 05-11-2026 with a duplicate key).
                 let mut res = Document::new()
                     .with("ok", 0.0)
                     .with("idx", idx as i32)
                     .with("code", e.code.code)
-                    .with("codeName", e.code.name)
-                    .with("errmsg", e.errmsg.as_str())
-                    .with("n", 0);
+                    .with("errmsg", e.errmsg.as_str());
                 for (k, v) in e.extra.iter() {
                     res.push(k, v.clone());
                 }
+                res.push("n", 0);
                 results.push(Value::Document(res));
                 if ordered {
                     break;

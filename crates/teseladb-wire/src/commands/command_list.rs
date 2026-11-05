@@ -42,6 +42,11 @@ const fn c(name: &'static str, help: &'static str, f: [bool; 6]) -> CommandInfo 
     }
 }
 
+/// Whether command `name` is in API Version 1 (`apiVersions: ["1"]` in `listCommands`).
+pub(crate) fn in_api_v1(name: &str) -> bool {
+    COMMANDS.iter().any(|c| c.name == name && c.api_v1)
+}
+
 const T: bool = true;
 const F: bool = false;
 

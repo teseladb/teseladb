@@ -44,8 +44,8 @@ use crate::error::{
     NO_SUCH_TRANSACTION, NOT_A_RETRYABLE_WRITE_COMMAND, OPERATION_NOT_SUPPORTED_IN_TRANSACTION,
     RECOVERY_TOKEN_REQUIRED, RangeContext, SHARD_NOT_FOUND, TOO_MANY_OPEN_TRANSACTIONS,
     TRANSACTION_COMMITTED, TRANSACTION_TOO_LARGE, TRANSACTION_TOO_OLD, TRANSIENT_TRANSACTION_ERROR,
-    TXN_NUMBER_NOT_ALLOWED, UNAUTHORIZED, UNKNOWN_TRANSACTION_COMMIT_RESULT, WRITE_CONFLICT,
-    WRITE_CONFLICT_MESSAGE, from_range,
+    TXN_NUMBER_NOT_ALLOWED, UNAUTHORIZED, UNKNOWN_TRANSACTION_COMMIT_RESULT,
+    UNSATISFIABLE_WRITE_CONCERN, WRITE_CONFLICT, WRITE_CONFLICT_MESSAGE, from_range,
 };
 use crate::ops::{MAX_TIME_MS, TIME_LIMIT_MESSAGE};
 use teseladb_txn::uncertainty::{OnUncertain, on_uncertain, window_end};
@@ -831,11 +831,35 @@ fn run_command(
             let ended = end(backend, shared, f, commit);
             Some(match (ended, sent) {
                 (Err(e), _) => Err(e),
+                (Ok(()), true) if commit => Ok(commit_reply(backend, cmd)),
                 (Ok(()), true) => Ok(ok()),
                 (Ok(()), false) => nothing_sent(shared, f, commit),
             })
         }
     }
+}
+
+/// The reply of a commit that committed: with a `w` above the voters of the node's ranges, the
+/// transaction stays committed and the reply carries `UnsatisfiableWriteConcern` as a
+/// `writeConcernError` before `ok`, with the concern asked (measured on a `refrouter` 9.0.4 on
+/// 05-11-2026).
+fn commit_reply(backend: &mut dyn Backend, cmd: &Document) -> Document {
+    let ok = Document::new().with("ok", 1.0);
+    let Some(Value::Document(wc)) = cmd.get(WRITE_CONCERN) else { return ok };
+    let Some(w) = wc.get("w").and_then(crate::types::number) else { return ok };
+    let voters = backend.voters(&[], &[u8::MAX; 8]).unwrap_or(usize::MAX);
+    if w <= voters as f64 {
+        return ok;
+    }
+    let mut asked = Document::new().with("w", wc.get("w").cloned().unwrap_or(Value::Int32(0)));
+    asked.push("wtimeout", wc.get("wtimeout").cloned().unwrap_or(Value::Int32(0)));
+    asked.push("provenance", "clientSupplied");
+    let error = Document::new()
+        .with("code", UNSATISFIABLE_WRITE_CONCERN.code)
+        .with("codeName", UNSATISFIABLE_WRITE_CONCERN.name)
+        .with("errmsg", "Not enough data-bearing nodes")
+        .with("errInfo", Document::new().with("writeConcern", asked));
+    Document::new().with("writeConcernError", error).with("ok", 1.0)
 }
 
 /// The start of the router's own `NoSuchTransaction` for a transaction that was aborted.

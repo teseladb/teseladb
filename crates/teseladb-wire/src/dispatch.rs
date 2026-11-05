@@ -9,6 +9,7 @@ use crate::commands::diagnostics::WHATS_MY_URI;
 use crate::commands::query::FIND;
 use teseladb_auth::users::advertised_mechanisms;
 
+use crate::api_version;
 use crate::commands::{
     Backend, Ctx, Shared, audit, auth, authorize, is_data_command, lock, profile, run, txn,
     txn_concern,
@@ -325,6 +326,7 @@ pub fn command_names(tests: bool) -> Vec<&'static str> {
     names.extend(crate::commands::data_command_names().map(canonical));
     if tests {
         names.push(CONFIGURE_FAIL_POINT);
+        names.extend(api_version::TEST_COMMANDS.iter().map(|t| t.name));
     }
     names.sort_unstable();
     names.dedup();
@@ -339,7 +341,7 @@ pub fn accepts(name: &str, node: bool, tests: bool) -> bool {
         || name == PING
         || name == WHATS_MY_URI
         || (node && (is_data_command(name) || auth::is_auth_command(name)))
-        || (tests && name == CONFIGURE_FAIL_POINT)
+        || (tests && (name == CONFIGURE_FAIL_POINT || api_version::is_test_command(name)))
 }
 
 /// Checks of every `OP_MSG` command, then the command.
@@ -380,6 +382,11 @@ fn command<B: Backend + ?Sized>(
         return Err(auth::requires_authentication(name));
     }
     let generic = crate::generic::parse(&req.command, name)?;
+    crate::internal_fields::check(req, canonical(name))?;
+    // The API parameters after the generic arguments (006 FR-035, measured on a `refrouter` 9.0.4).
+    let api = api_version::parse(&req.command, name)?;
+    api_version::check_command(name, &api)?;
+    api_version::check_strict(&req.command, name, &api)?;
     let own_limit = generic.max_time_ms;
     if let Some((backend, _)) = cmds.as_mut() {
         backend.set_read_preference(generic.read_pref);
@@ -438,8 +445,9 @@ fn command<B: Backend + ?Sized>(
     let fault = match conn.fault.take() {
         Some(f) => Some(f),
         None => shared.and_then(|s| {
-            let app = conn.hello.app_name.clone();
-            lock(s).failpoint.as_mut().and_then(|fp| fp.check(name, app.as_deref()))
+            // The handshake names its application in the command itself.
+            let app = conn.hello.app_name.clone().or_else(|| handshake_app(name, &req.command));
+            lock(s).failpoint.as_mut().and_then(|fp| fp.check(canonical(name), app.as_deref()))
         }),
     };
     let mut write_concern_error = None;
@@ -453,9 +461,10 @@ fn command<B: Backend + ?Sized>(
             return Ok(Action::Close);
         }
         if let Some(e) = f.error {
+            let e = crate::failpoint::in_transaction(e, name, &req.command);
             return Ok(Action::Reply(with_cluster_time(e, node)));
         }
-        write_concern_error = f.write_concern_error;
+        write_concern_error = f.write_concern_error.map(|w| (w, f.labels));
     }
     if let (Some(s), true) = (shared, is_hello(name) || name == PING || name == WHATS_MY_URI) {
         // The commands that answer without the node count here; the others in `run_op`.
@@ -463,12 +472,40 @@ fn command<B: Backend + ?Sized>(
     }
     let action = run_command(conn, req, node, cmds, (own_limit, privileges), mark)?;
     Ok(match (action, write_concern_error) {
-        (Action::Reply(mut d), Some(wce)) if d.get("ok") == Some(&Value::Double(1.0)) => {
-            d.insert("writeConcernError", wce);
-            Action::Reply(d)
+        (Action::Reply(d), Some(wce)) if d.get("ok") == Some(&Value::Double(1.0)) => {
+            Action::Reply(with_write_concern_error(d, wce))
         }
         (a, _) => a,
     })
+}
+
+/// Reply `d` with a failpoint's `writeConcernError` and its labels before `ok`, as a `refrouter`
+/// 9.0.4 answers it (measured on 05-11-2026: `n`, `writeConcernError`, `errorLabels`, `ok`).
+fn with_write_concern_error(d: Document, (wce, labels): (Document, Option<Value>)) -> Document {
+    let mut out = Document::new();
+    for (k, v) in d.iter() {
+        if k == "ok" {
+            out.push("writeConcernError", wce.clone());
+            if let Some(l) = &labels {
+                out.push("errorLabels", l.clone());
+            }
+        }
+        out.push(k, v.clone());
+    }
+    out
+}
+
+/// The application a handshake `hello` names in its client metadata (`client.application.name`).
+fn handshake_app(name: &str, cmd: &Document) -> Option<String> {
+    if !is_hello(name) {
+        return None;
+    }
+    let Some(Value::Document(client)) = cmd.get("client") else { return None };
+    let Some(Value::Document(app)) = client.get("application") else { return None };
+    match app.get("name") {
+        Some(Value::String(n)) => Some(n.clone()),
+        _ => None,
+    }
 }
 
 /// Fields of `hello` that read the users of Group 0 (013).
@@ -529,6 +566,12 @@ fn run_command<B: Backend + ?Sized>(
         return Ok(Action::Reply(with_cluster_time(r?, node)));
     }
     if let (Some((backend, shared)), false) = (cmds, name == PING || name == WHATS_MY_URI) {
+        // A test command of the API answers the API parameters it was given (measured on a
+        // `refnode` 9.0.4 with `enableTestCommands`).
+        if api_version::is_test_command(name) {
+            let api = api_version::parse(&req.command, name)?;
+            return Ok(Action::Reply(with_cluster_time(api.echoed().with("ok", 1.0), node)));
+        }
         if name == CONFIGURE_FAIL_POINT {
             let mut g = lock(shared);
             let fp = g.failpoint.as_mut().ok_or_else(not_found)?;

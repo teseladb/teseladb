@@ -684,6 +684,8 @@ pub(crate) struct FindArgs {
     pub(crate) concern: ReadConcern,
     /// `let`, resolved.
     pub(crate) vars: Option<Document>,
+    /// `min` and `max` (FR-008).
+    bounds: Option<super::min_max::Bounds>,
 }
 
 /// The `let` of command `name`, checked and resolved (FR-032): the variables of its filter,
@@ -838,6 +840,7 @@ pub(crate) fn find_args<B: Backend + ?Sized>(
         collation: find_object(cmd, "collation")?,
         concern: args::read_concern(cmd, FIND)?,
         vars: command_let(backend, cmd, FIND)?,
+        bounds: super::min_max::Bounds::of(find_object(cmd, "min")?, find_object(cmd, "max")?),
     })
 }
 
@@ -991,6 +994,14 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
         vars: a.vars.as_ref(),
     };
     super::hints::check_hint(ctx.backend, (&ns, &coll), ctx.cmd, &hinted)?;
+    let min_max = match &a.bounds {
+        Some(b) => {
+            let indexes = super::plan_exec::plan_indexes(ctx.backend, &coll)?;
+            let hint = ctx.cmd.get("hint");
+            Some((b, super::min_max::check(b, (&ns, &hinted), hint, &indexes)?))
+        }
+        None => None,
+    };
     if let Some(near) = super::near_find::split(&a.filter) {
         return near_find(ctx, &ns, &a, &near);
     }
@@ -1030,7 +1041,8 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
             filter: &a.filter,
             parsed: &parsed,
             sort,
-            limit: a.limit.map(|l| a.skip.saturating_add(l)),
+            // `min` and `max` take the plan's keys after it ran: it is not cut before.
+            limit: a.limit.filter(|_| min_max.is_none()).map(|l| a.skip.saturating_add(l)),
             hint: {
                 let indexes = super::plan_exec::plan_indexes(ctx.backend, &coll)?;
                 super::hints::position(ctx.cmd.get("hint"), &indexes)?
@@ -1038,7 +1050,8 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
             vars: a.vars.as_ref(),
             concern: a.concern,
             intersect: super::lock(ctx.shared).params.hash_intersection,
-            index_keys: reads_index_key(a.projection.as_ref()) && !id_point(&a.filter),
+            index_keys: min_max.is_some()
+                || (reads_index_key(a.projection.as_ref()) && !id_point(&a.filter)),
         };
         let sort_doc = match ctx.cmd.get("sort") {
             Some(Value::Document(s)) => s.clone(),
@@ -1054,7 +1067,12 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
                 .with("projection", projection.clone()),
             shape: super::plan_cache::read_shape(&parsed, Some(&sort_doc), Some(&projection), None),
         };
-        super::plan_exec::planned_keyed(ctx.backend, &coll, &read, note).map_err(executor)?
+        let planned =
+            super::plan_exec::planned_keyed(ctx.backend, &coll, &read, note).map_err(executor)?;
+        match (planned, &min_max) {
+            (Some(p), Some((b, pattern))) => Some(bounded(p, b, pattern)?),
+            (p, _) => p,
+        }
     } else {
         None
     };
@@ -1221,6 +1239,27 @@ fn sort_directions(sort: &Document) -> Vec<(String, i32)> {
 }
 
 /// The documents an index plan found, in its order, skipped, limited and projected.
+/// The documents of plan `planned` whose index key is within `bounds` (`min` and `max` of the
+/// index with key pattern `pattern`).
+fn bounded(
+    (rows, keys): super::plan_exec::Planned,
+    bounds: &super::min_max::Bounds,
+    pattern: &Document,
+) -> Result<super::plan_exec::Planned, CommandError> {
+    let mut kept: super::plan_exec::Planned = (Vec::new(), Vec::new());
+    for (row, key) in rows.into_iter().zip(keys) {
+        let inside = match &key {
+            Some(k) => super::min_max::within(bounds, pattern, k)?,
+            None => false,
+        };
+        if inside {
+            kept.0.push(row);
+            kept.1.push(key);
+        }
+    }
+    Ok(kept)
+}
+
 fn planned_cursor(
     (rows, keys): super::plan_exec::Planned,
     a: &FindArgs,
@@ -1622,6 +1661,10 @@ fn next_batch<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
         .map(|n| usize::try_from(n).unwrap_or(usize::MAX))
         .filter(|&n| n > 0);
     let max_time = crate::ops::max_time_ms(ctx.cmd, GET_MORE)?.filter(|ms| *ms > 0);
+    // `term` is a `long`, checked before the cursor (measured on a `refrouter` 9.0.4 on 05-11-2026).
+    if let Some(v) = ctx.cmd.get("term").filter(|v| !matches!(v, Value::Int64(_))) {
+        return Err(crate::types::wrong_type("getMore.term", v, "long"));
+    }
     let lsid = args::lsid(ctx.cmd)?;
     let now = ctx.backend.now_ms();
     let taken = {
@@ -1645,6 +1688,13 @@ fn next_batch<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
             return Err(get_more_refused((id, &ns_text, lsid), e, owner, (member, &uid)));
         }
     };
+    // `failGetMoreAfterCursorCheckout` (FR-034): the cursor was taken, and the error kills it as
+    // on a `refrouter` 9.0.4 (measured).
+    let stream = c.state.stream.is_some();
+    let fault = lock(ctx.shared).failpoint.as_mut().and_then(|fp| fp.get_more_error(stream));
+    if let Some(e) = fault {
+        return Err(e);
+    }
     // At the mark of the command that opened it (008 FR-012).
     ctx.backend.set_read_mark(c.state.read_mark);
     // The profiler writes the command that opened it and that command's plan (010 FR-015).

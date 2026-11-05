@@ -130,6 +130,22 @@ codes! {
     SAMPLE_SIZE = 28_747, "Location28747";
     /// A forwarded request timed out.
     NETWORK_TIMEOUT = 89, "NetworkTimeout";
+    /// The codes `failGetMoreAfterCursorCheckout` may inject that the node has no other use for
+    /// (006 FR-034).
+    HOST_NOT_FOUND = 7, "HostNotFound";
+    /// What a `refrouter` 9.0.4 turns a shard's not-primary and shutdown errors of a `getMore` into
+    /// (measured with `failGetMoreAfterCursorCheckout` on 05-11-2026).
+    HOST_UNREACHABLE = 6, "HostUnreachable";
+    /// See [`HOST_NOT_FOUND`].
+    SOCKET_EXCEPTION = 9001, "SocketException";
+    /// See [`HOST_NOT_FOUND`].
+    NOT_PRIMARY_NO_SECONDARY_OK = 13_435, "NotPrimaryNoSecondaryOk";
+    /// See [`HOST_NOT_FOUND`].
+    STALE_EPOCH = 150, "StaleEpoch";
+    /// See [`HOST_NOT_FOUND`].
+    RETRY_CHANGE_STREAM = 234, "RetryChangeStream";
+    /// See [`HOST_NOT_FOUND`].
+    STALE_SHARD_VERSION = 63, "OBSOLETE_StaleShardVersion";
     /// The node is shutting down.
     SHUTDOWN_IN_PROGRESS = 91, "ShutdownInProgress";
     /// The node's TLS settings could not be loaded (`rotateCertificates`, 013 FR-006).
@@ -349,6 +365,22 @@ codes! {
     QUERY_FEATURE_NOT_ALLOWED = 224, "QueryFeatureNotAllowed";
     /// A `clustered` index specification on a collection that is not clustered.
     CLUSTERED_INDEX_MISMATCH = 6_243_700, "Location6243700";
+    /// `needsSortedMerge` without `needsMerge` in an `aggregate` (006 FR-021).
+    CONTRADICTORY_MERGE = 10_372_401, "Location10372401";
+    /// `isTimeseriesNamespace` sent to a router (006 FR-021).
+    TIMESERIES_NS_ON_ROUTER = 5_916_401, "Location5916401";
+    /// A `min` or `max` of `find` that is not the hinted index's key (006 FR-008).
+    MIN_MAX_INDEX_MISMATCH = 51_174, "Location51174";
+    /// A `min` of `find` that does not come before its `max` in the hinted index (006 FR-008).
+    MIN_NOT_BEFORE_MAX = 51_175, "Location51175";
+    /// An `apiVersion` other than `"1"` (006 FR-035).
+    API_VERSION_ERROR = 322, "APIVersionError";
+    /// What `apiStrict: true` refuses (006 FR-035).
+    API_STRICT_ERROR = 323, "APIStrictError";
+    /// What `apiDeprecationErrors: true` refuses (006 FR-035).
+    API_DEPRECATION_ERROR = 324, "APIDeprecationError";
+    /// `apiStrict` or `apiDeprecationErrors` without `apiVersion` (006 FR-035).
+    API_WITHOUT_VERSION = 4_886_600, "Location4886600";
     /// `dropIndexes` of a clustered collection's index (015 FR-009).
     CLUSTERED_INDEX_DROP = 5_979_800, "Location5979800";
     /// A value that is not the object RefDb reads there: a `readConcern.afterOpTime`, a field of

@@ -187,6 +187,12 @@ pub fn modify_index<B: Backend + ?Sized>(
     how: Modify,
 ) -> Result<Document, CommandError> {
     let r = parse(change)?;
+    // The index of `_id` cannot be hidden (measured on a `refrouter` 9.0.4 on 05-11-2026).
+    let id_key = Value::Document(Document::new().with("_id", 1));
+    let names_id = r.name.as_deref() == Some("_id_") || r.key.as_ref() == Some(&id_key);
+    if names_id && r.hidden.is_some() {
+        return Err(CommandError::new(BAD_VALUE, "can't hide _id index"));
+    }
     let (entry, mut spec) = find(backend, ns, coll, &r)?;
     let (unique, prepared) = (set(&spec, UNIQUE), set(&spec, PREPARE_UNIQUE));
     if r.unique == Some(false) {

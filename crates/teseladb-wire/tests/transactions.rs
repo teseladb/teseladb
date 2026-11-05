@@ -1666,3 +1666,29 @@ fn a_first_write_statement_takes_the_transaction_read_concern() {
     let r = run(&mut m, DB, insert.with("readConcern", rc));
     assert_eq!(r.get("code"), Some(&Value::Int32(72)), "{r:?}");
 }
+
+/// A commit with a `w` above the voters stays committed and answers `UnsatisfiableWriteConcern`
+/// as a `writeConcernError` (measured on a `refrouter` 9.0.4 on 05-11-2026).
+#[test]
+fn a_commit_with_too_many_nodes_asked_answers_a_write_concern_error() {
+    let mut m = node();
+    assert!(ok(&run(&mut m, DB, stmt(insert(1), 7, 1, true))));
+    let wc = Document::new().with("w", 10).with("wtimeout", 10_000);
+
+    let r = run(&mut m, "admin", end("commitTransaction", 7, 1).with("writeConcern", wc));
+
+    assert!(ok(&r), "{r:?}");
+    let error = field(&r, "writeConcernError");
+    let Value::Document(e) = error else { panic!("{r:?}") };
+    assert_eq!(e.get("code"), Some(&Value::Int32(100)));
+    assert_eq!(e.get("errmsg"), Some(&Value::from("Not enough data-bearing nodes")));
+    assert_eq!(
+        field(&r, "writeConcernError.errInfo.writeConcern.provenance"),
+        &Value::from("clientSupplied")
+    );
+    assert_eq!(found(&run(&mut m, DB, find())), 1, "the transaction committed");
+    let fits = Document::new().with("w", 3);
+    assert!(ok(&run(&mut m, DB, stmt(insert(2), 7, 2, true))));
+    let r = run(&mut m, "admin", end("commitTransaction", 7, 2).with("writeConcern", fits));
+    assert!(r.get("writeConcernError").is_none(), "{r:?}");
+}

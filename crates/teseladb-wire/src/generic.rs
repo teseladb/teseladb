@@ -75,7 +75,7 @@ pub fn is_generic(field: &str) -> bool {
 }
 
 /// The fields `insert`, `update` and `delete` share (`WriteCommandRequestBase`).
-const WRITE_BASE: [&str; 11] = [
+const WRITE_BASE: [&str; 10] = [
     "bypassDocumentValidation",
     "ordered",
     "stmtId",
@@ -84,7 +84,6 @@ const WRITE_BASE: [&str; 11] = [
     "collectionUUID",
     "encryptionInformation",
     "bypassEmptyTsReplacement",
-    "includeQueryStatsMetrics",
     "$_originalQuery",
     "$_originalCollation",
 ];
@@ -154,16 +153,11 @@ fn own_fields(name: &str) -> Option<&'static [&'static str]> {
             "collectionUUID",
             "runtimeConstants",
             "encryptionInformation",
-            "passthroughToShard",
             "querySettings",
             "includeQueryStatsMetrics",
             "sampleId",
-            "isClusterQueryWithoutShardKeyCmd",
-            "isHybridSearch",
             "$_requestResumeToken",
             "$_requestReshardingResumeToken",
-            "$_isMapReduceCommand",
-            "$_generateV2ResumeTokens",
             "forcedPlanSolutionHash",
         ],
         "find" => &[
@@ -235,7 +229,9 @@ fn own_fields(name: &str) -> Option<&'static [&'static str]> {
             "includeQueryStatsMetrics",
             "originalQueryShapeHash",
         ],
-        "insert" => &["documents"],
+        // `includeQueryStatsMetrics` is `insert`'s alone of the three (measured on a `refrouter`
+        // 9.0.4 on 05-11-2026).
+        "insert" => &["documents", "includeQueryStatsMetrics"],
         "update" => &["updates", "let", "runtimeConstants"],
         "delete" => &["deletes", "let", "runtimeConstants"],
         "findAndModify" | "findandmodify" => &[

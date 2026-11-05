@@ -17,6 +17,8 @@ const COLLATION: &str = "collation";
 const WEIGHTS: &str = "weights";
 const WILDCARD_PROJECTION: &str = "wildcardProjection";
 const CLUSTERED: &str = "clustered";
+/// The option that passes settings to the storage engine.
+const STORAGE_ENGINE: &str = "storageEngine";
 const UNIQUE: &str = "unique";
 const PARTIAL: &str = "partialFilterExpression";
 const PREPARE_UNIQUE: &str = "prepareUnique";
@@ -252,6 +254,15 @@ fn check_options(spec: &Document, version: i32) -> Result<(), CommandError> {
     if spec.get(NAME) == Some(&Value::from("")) {
         let msg = format!(
             "Error in specification {} :: caused by :: index name cannot be empty",
+            with_version(spec)
+        );
+        return Err(CommandError::new(CANNOT_CREATE_INDEX, msg));
+    }
+    // Measured on a `refrouter` 9.0.4 on 05-11-2026.
+    if matches!(spec.get(STORAGE_ENGINE), Some(Value::Document(d)) if d.is_empty()) {
+        let msg = format!(
+            "Error in specification {} :: caused by :: Empty \"storageEngine\" options are invalid. \
+             Please remove the field or include valid options.",
             with_version(spec)
         );
         return Err(CommandError::new(CANNOT_CREATE_INDEX, msg));

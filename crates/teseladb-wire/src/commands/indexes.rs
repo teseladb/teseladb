@@ -492,6 +492,7 @@ fn create<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Command
         },
         None => specs,
     };
+    crate::api_version::check_text_indexes(ctx.cmd)?;
     let versions = specs
         .iter()
         .map(|s| index_spec::check(s).map_err(|e| in_specification(s, e)))

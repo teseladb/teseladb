@@ -54,16 +54,32 @@ pub(crate) fn check_hint<B: Backend + ?Sized>(
     if found {
         return Ok(());
     }
+    Err(planner_error(
+        ns,
+        read,
+        BAD_VALUE,
+        "hint provided does not correspond to an existing index",
+    )?)
+}
+
+/// An error of RefDb's planner for read `read` of `ns`: the query's tree, its sort and its
+/// projection, then `reason` (measured on a `refrouter` 9.0.4).
+pub(crate) fn planner_error(
+    ns: &Namespace,
+    read: &Hinted<'_>,
+    code: crate::error::Code,
+    reason: &str,
+) -> Result<CommandError, CommandError> {
     let parsed = super::explain::parsed(read.filter, read.vars)?;
     let shown = |d: Option<&Document>| -> Result<String, CommandError> {
         let bytes = d.cloned().unwrap_or_default().to_bytes()?;
         Ok(teseladb_mql::shell(teseladb_bson::RawValue::Document(RawDoc::from_bytes(&bytes)?)))
     };
-    Err(CommandError::new(
-        BAD_VALUE,
+    Ok(CommandError::new(
+        code,
         format!(
             "error enumerating plans for query: ns={}Tree: {}Sort: {}\nProj: {}\n planner returned \
-             error :: caused by :: hint provided does not correspond to an existing index",
+             error :: caused by :: {reason}",
             names::full(ns),
             teseladb_mql::debug_tree(&parsed),
             shown(read.sort)?,

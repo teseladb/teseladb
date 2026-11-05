@@ -8,11 +8,13 @@
 //! - [`dispatch`] and [`hello`]: the commands a node answers by itself, the handshake as a
 //!   `refrouter` among them (FR-003, FR-004).
 //! - [`error`]: RefDb's error codes and the translation of the range's errors (FR-021).
+//! - [`api_version`]: the parameters of the Stable API and what `apiStrict` refuses (FR-035).
 #![cfg_attr(coverage, feature(coverage_attribute))]
 #![forbid(unsafe_code)]
 
 use std::fmt;
 
+pub mod api_version;
 pub mod cluster_time;
 pub mod commands;
 pub mod compressed;
@@ -23,6 +25,7 @@ pub mod error;
 pub mod failpoint;
 pub mod generic;
 pub mod hello;
+pub mod internal_fields;
 pub mod msg;
 pub mod ops;
 pub mod query;

@@ -30,6 +30,8 @@ pub mod chunks;
 pub mod cluster_admin;
 pub mod coll_mod_kinds;
 mod command_list;
+mod min_max;
+pub(crate) use command_list::in_api_v1;
 pub mod config_db;
 pub mod config_settings;
 pub mod cross_range;

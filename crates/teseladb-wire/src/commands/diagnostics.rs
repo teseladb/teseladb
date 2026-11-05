@@ -21,6 +21,7 @@ use super::names::{self, full};
 use super::query::{SCAN_CHUNK, documents_of};
 use super::{Backend, Ctx, lock, new_uuid};
 use crate::MAX_BSON_OBJECT_SIZE;
+use crate::api_version;
 use crate::error::{BAD_VALUE, CommandError, INVALID_NAMESPACE, OPERATION_FAILED};
 use crate::failpoint::CONFIGURE_FAIL_POINT;
 use crate::types::{type_name, wrong_type, wrong_types};
@@ -974,7 +975,7 @@ fn set_parameter_help() -> String {
 /// `configureFailPoint` only on a node with `enableTestCommands`.
 pub fn list_commands<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     let tests = lock(ctx.shared).failpoint.is_some();
-    let mut commands = Document::new();
+    let mut entries: Vec<(&str, Document)> = Vec::new();
     for c in COMMANDS.iter().filter(|c| tests || c.name != CONFIGURE_FAIL_POINT) {
         let help = match c.name {
             "getParameter" => get_parameter_help(),
@@ -993,7 +994,15 @@ pub fn list_commands<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Docume
         let api: Vec<Value> = if c.api_v1 { vec![Value::from("1")] } else { Vec::new() };
         entry.push("apiVersions", api);
         entry.push("deprecatedApiVersions", Vec::<Value>::new());
-        commands.push(c.name, entry);
+        entries.push((c.name, entry));
+    }
+    if tests {
+        entries.extend(api_version::TEST_COMMANDS.iter().map(|t| (t.name, t.entry())));
+    }
+    entries.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+    let mut commands = Document::new();
+    for (name, entry) in entries {
+        commands.push(name, entry);
     }
     Ok(Document::new().with("commands", commands).with("ok", 1.0))
 }
@@ -1001,5 +1010,8 @@ pub fn list_commands<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Docume
 /// The names `listCommands` gives, `configureFailPoint` included, in its order: tests check them
 /// against the commands the dispatch takes.
 pub fn listed_names() -> impl Iterator<Item = &'static str> {
-    COMMANDS.iter().map(|c| c.name)
+    let mut names: Vec<&'static str> = COMMANDS.iter().map(|c| c.name).collect();
+    names.extend(api_version::TEST_COMMANDS.iter().map(|t| t.name));
+    names.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+    names.into_iter()
 }

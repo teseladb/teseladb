@@ -309,3 +309,108 @@ fn times_probability_and_empty_options() {
     assert_eq!(field(&r, "codeName"), &s("BadValue"));
     assert!(r.get("errorLabels").is_none(), "{r:?}");
 }
+
+/// A statement of a transaction (`autocommit: false`) gets `TransientTransactionError` for the
+/// retryable codes, `WriteConflict` and `NoSuchTransaction`; `commitTransaction` and
+/// `abortTransaction` only for the last two; outside a transaction no label (measured on a
+/// `refrouter` 9.0.4 with `failCommand` on 05-11-2026).
+#[test]
+fn a_statement_of_a_transaction_gets_the_transient_label() {
+    let mut m = node(true);
+    let mut c = Connection::new(1);
+    let label = |r: &Document| r.get("errorLabels").cloned();
+    let transient = Some(Value::Array(vec![s("TransientTransactionError")]));
+    let lsid = d(&[("id", Value::Binary { subtype: 4, bytes: vec![2; 16] })]);
+    let in_txn = |cmd: Document| {
+        cmd.with("lsid", lsid.clone()).with("txnNumber", 1i64).with("autocommit", false)
+    };
+    let fail = |cmd: &str, code: i32| {
+        configure(
+            d(&[("times", 1.into())]),
+            d(&[("failCommands", Value::Array(vec![s(cmd)])), ("errorCode", code.into())]),
+        )
+    };
+    for (code, expected) in [(91, transient.clone()), (112, transient.clone()), (2, None)] {
+        run(&mut m, &mut c, "admin", fail("insert", code));
+        assert_eq!(label(&run(&mut m, &mut c, "db", in_txn(insert()))), expected, "{code}");
+    }
+    for (code, expected) in [(251, transient.clone()), (91, None)] {
+        run(&mut m, &mut c, "admin", fail("commitTransaction", code));
+        let commit = in_txn(doc(&[("commitTransaction", 1.into())]));
+        assert_eq!(label(&run(&mut m, &mut c, "admin", commit)), expected, "{code}");
+    }
+    run(&mut m, &mut c, "admin", fail("insert", 91));
+    assert_eq!(label(&run(&mut m, &mut c, "db", insert())), None);
+}
+
+/// The labels the test named go with a `writeConcernError`, before `ok` (measured on a `refrouter`
+/// 9.0.4: `n`, `writeConcernError`, `errorLabels`, `ok`).
+#[test]
+fn a_write_concern_error_carries_the_labels_the_test_named() {
+    let mut m = node(true);
+    let mut c = Connection::new(1);
+    let wce = d(&[("code", 91.into()), ("errmsg", s("Replication is being shut down"))]);
+    let data = d(&[
+        ("failCommands", Value::Array(vec![s("insert")])),
+        ("writeConcernError", wce),
+        ("errorLabels", Value::Array(vec![s("RetryableWriteError")])),
+    ]);
+    run(&mut m, &mut c, "admin", configure(d(&[("times", 1.into())]), data));
+
+    let r = run(&mut m, &mut c, "db", insert());
+
+    let keys: Vec<&str> = r.iter().map(|(k, _)| k).take(4).collect();
+    assert_eq!(keys, ["n", "writeConcernError", "errorLabels", "ok"]);
+    assert_eq!(field(&r, "errorLabels"), &Value::Array(vec![s("RetryableWriteError")]));
+}
+
+/// `failGetMoreAfterCursorCheckout` fails the next `getMore` once its cursor was taken, which
+/// kills it, as a `refrouter` 9.0.4 relays it (measured on 05-11-2026).
+#[test]
+fn a_get_more_fails_after_its_cursor_was_taken() {
+    let mut m = node(true);
+    let mut c = Connection::new(1);
+    let fail = |code: i32| {
+        doc(&[
+            ("configureFailPoint", s("failGetMoreAfterCursorCheckout")),
+            ("mode", d(&[("times", 1.into())])),
+            ("data", d(&[("errorCode", code.into())])),
+        ])
+    };
+    let docs = Value::Array(vec![d(&[("_id", 1.into())]), d(&[("_id", 2.into())])]);
+    run(&mut m, &mut c, "db", doc(&[("insert", s("c")), ("documents", docs)]));
+    let open_find = |m: &mut Mem, c: &mut Connection| {
+        let r = run(m, c, "db", doc(&[("find", s("c")), ("batchSize", 1.into())]));
+        field(&r, "cursor.id").clone()
+    };
+    let more = |id: Value| doc(&[("getMore", id), ("collection", s("c"))]);
+
+    run(&mut m, &mut c, "admin", fail(10107));
+    let id = open_find(&mut m, &mut c);
+    let failed = run(&mut m, &mut c, "db", more(id.clone()));
+    let again = run(&mut m, &mut c, "db", more(id));
+
+    assert_eq!(field(&failed, "code"), &Value::Int32(6));
+    assert_eq!(field(&failed, "codeName"), &s("HostUnreachable"));
+    assert_eq!(field(&failed, "errmsg"), &s("Hit the 'failGetMoreAfterCursorCheckout' failpoint"));
+    assert!(failed.get("errorLabels").is_none());
+    assert_eq!(field(&again, "code"), &Value::Int32(43));
+
+    let open_stream = |m: &mut Mem, c: &mut Connection| {
+        let pipeline = Value::Array(vec![d(&[("$changeStream", d(&[]))])]);
+        let cmd = doc(&[("aggregate", s("c")), ("pipeline", pipeline), ("cursor", d(&[]))]);
+        field(&run(m, c, "db", cmd), "cursor.id").clone()
+    };
+    for (code, label) in
+        [(234, "ResumableChangeStreamError"), (280, "NonResumableChangeStreamError")]
+    {
+        run(&mut m, &mut c, "admin", fail(code));
+        let id = open_stream(&mut m, &mut c);
+        let r = run(&mut m, &mut c, "db", more(id));
+        assert_eq!(field(&r, "code"), &Value::Int32(code));
+        assert_eq!(field(&r, "errorLabels"), &Value::Array(vec![s(label)]), "{code}");
+    }
+    let off =
+        doc(&[("configureFailPoint", s("failGetMoreAfterCursorCheckout")), ("mode", s("off"))]);
+    assert_eq!(count(&run(&mut m, &mut c, "admin", off)), &Value::Int32(3));
+}

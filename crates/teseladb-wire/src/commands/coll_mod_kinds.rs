@@ -12,7 +12,7 @@ use super::kinds::{
     EXPIRE, FIXED_BUCKETING, GRANULARITY, MAX_BUCKET_SPAN, MAX_SPAN, PIPELINE, ROUNDING,
     TIMESERIES, VIEW_ON, bad, bounded, checked_expire, integral, invalid, kind_of,
 };
-use crate::error::{CommandError, IDL_UNKNOWN_FIELD};
+use crate::error::{BAD_VALUE, CommandError, IDL_UNKNOWN_FIELD};
 use crate::types::{wrong_type, wrong_types};
 
 /// The fields of `timeseries` that `collMod` takes.
@@ -47,6 +47,17 @@ pub fn definition<B: Backend + ?Sized>(
 ) -> Result<Option<Document>, CommandError> {
     let kind = kind_of(c)?;
     let time_series = matches!(kind, CollectionKind::TimeSeries(_));
+    // Its type before what the collection is (measured on a `refrouter` 9.0.4 on 05-11-2026).
+    if let Some(v) = changes.get(TIMESERIES).filter(|v| !matches!(v, Value::Document(_))) {
+        return Err(wrong_type("collMod.timeseries", v, "object"));
+    }
+    // With authorization, a view's definition changes whole (measured the same day).
+    let one = changes.get(VIEW_ON).is_some() != changes.get(PIPELINE).is_some();
+    if one && backend.privileges().is_some() {
+        return Err(invalid(
+            "Must specify both 'viewOn' and 'pipeline' when modifying a view and auth is enabled",
+        ));
+    }
     if changes.get(TIMESERIES).is_some() && !time_series {
         return Err(invalid(format!(
             "option only supported on a time-series collection: {TIMESERIES}"
@@ -260,4 +271,82 @@ pub fn expiry(
         out.push(k, v.clone());
     }
     Ok(out)
+}
+
+/// The field of `collMod` that resizes a capped collection.
+pub const CAPPED_SIZE: &str = "cappedSize";
+/// The field of `collMod` that changes a capped collection's most documents.
+pub const CAPPED_MAX: &str = "cappedMax";
+/// The types of `cappedSize` and `cappedMax`, in RefDb's order.
+const CAPPED_LIMIT_TYPES: [&str; 4] = ["double", "decimal", "int", "long"];
+/// The largest `cappedSize`: 1 PiB.
+const MAX_CAPPED_SIZE: i128 = 1 << 50;
+/// The bound `cappedMax` stays under.
+const CAPPED_MAX_BOUND: i128 = 1 << 31;
+/// What a `cappedMax` of zero or less is kept as: no most.
+const NO_CAPPED_MAX: i64 = i32::MAX as i64;
+
+/// The new limits a `collMod` gives a capped collection (015 FR-003).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CappedLimits {
+    size: Option<i64>,
+    max: Option<i64>,
+}
+
+/// Takes `cappedSize` and `cappedMax` out of `changes`, checked as a `refrouter` 9.0.4 checks them
+/// before it looks at the collection (measured on 05-11-2026): numbers, a size from 1 to 1 PiB
+/// (a `double` truncated, a `decimal` rounded half to even) and a most under 2^31, where zero or
+/// less means none.
+pub fn capped_limits(changes: &mut Document) -> Result<Option<CappedLimits>, CommandError> {
+    let mut limits = CappedLimits::default();
+    for field in [CAPPED_SIZE, CAPPED_MAX] {
+        let Some(v) = changes.remove(field) else { continue };
+        let numeric = matches!(
+            v,
+            Value::Int32(_) | Value::Int64(_) | Value::Double(_) | Value::Decimal128(_)
+        );
+        let n = super::kinds::integral(&v)
+            .filter(|_| numeric)
+            .ok_or_else(|| wrong_types(&format!("collMod.{field}"), &v, &CAPPED_LIMIT_TYPES))?;
+        let refused = |rule: &str| {
+            CommandError::new(
+                BAD_VALUE,
+                format!("BSON field '{field}' value must be {rule}, actual value '{n}'"),
+            )
+        };
+        if field == CAPPED_SIZE {
+            if n < 1 {
+                return Err(refused(">= 1"));
+            }
+            if n > MAX_CAPPED_SIZE {
+                return Err(refused(&format!("<= {MAX_CAPPED_SIZE}")));
+            }
+            limits.size = Some(n as i64);
+        } else {
+            if n >= CAPPED_MAX_BOUND {
+                return Err(refused(&format!("< {CAPPED_MAX_BOUND}")));
+            }
+            limits.max = Some(if n <= 0 { NO_CAPPED_MAX } else { n as i64 });
+        }
+    }
+    Ok((limits != CappedLimits::default()).then_some(limits))
+}
+
+/// Options `options` of collection `c` with the new limits of a `collMod`: the collection must be
+/// capped (72 «Collection must be capped.», measured).
+pub fn resize(
+    c: &CollectionEntry,
+    options: &mut Document,
+    limits: CappedLimits,
+) -> Result<(), CommandError> {
+    if !matches!(kind_of(c)?, CollectionKind::Capped { .. }) {
+        return Err(invalid("Collection must be capped."));
+    }
+    if let Some(size) = limits.size {
+        options.insert(super::kinds::CAPPED_SIZE_OPTION, size);
+    }
+    if let Some(max) = limits.max {
+        options.insert(super::kinds::CAPPED_MAX_OPTION, max);
+    }
+    Ok(())
 }
