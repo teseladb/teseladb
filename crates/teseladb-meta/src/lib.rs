@@ -28,6 +28,7 @@ pub mod indexes;
 pub mod liveness;
 pub mod load;
 pub mod meta2;
+pub mod node_versions;
 pub mod request;
 pub mod security;
 pub mod tenants;

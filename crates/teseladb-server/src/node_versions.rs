@@ -8,19 +8,13 @@ use teseladb_meta::command::NodeState;
 use teseladb_meta::group0::Group0Sm;
 use teseladb_wire::commands::fcv::VERSIONS;
 use teseladb_bson::{Document, RawDoc, Value};
-use teseladb_types::NodeId;
 
-/// Prefix of the Group 0 settings with each node's versions.
-pub const PREFIX: &[u8] = b"nodeVersions.";
+use teseladb_meta::node_versions::FORMAT;
+pub use teseladb_meta::node_versions::{PREFIX, key};
+
 const PROTOCOL: &str = "protocol";
 const PROTOCOL_MIN: &str = "protocolMin";
-const FORMAT: &str = "format";
 const FCV: &str = "fcv";
-
-/// The setting of node `node`.
-pub fn key(node: NodeId) -> Vec<u8> {
-    [PREFIX, node.0.to_string().as_bytes()].concat()
-}
 
 /// What this binary runs: the peer protocol, Group 0's snapshot format and the latest feature
 /// compatibility version.
@@ -60,6 +54,7 @@ mod tests {
     use super::*;
     use teseladb_meta::command::NodeAddrs;
     use teseladb_meta::group0::NodeInfo;
+    use teseladb_types::NodeId;
 
     fn with_nodes(states: &[(u64, NodeState, Option<&str>)]) -> Group0Sm {
         let mut sm = Group0Sm::default();

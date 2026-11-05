@@ -81,6 +81,12 @@ pub mod kind {
     pub const CREATE_TENANT: u16 = 52;
     /// [`super::Group0Command::DropTenant`].
     pub const DROP_TENANT: u16 = 53;
+    /// [`super::Group0Command::SetTenantLimits`].
+    pub const SET_TENANT_LIMITS: u16 = 54;
+    /// [`super::Group0Command::SetTenantSuspended`].
+    pub const SET_TENANT_SUSPENDED: u16 = 55;
+    /// [`super::Group0Command::SetTenantAccess`].
+    pub const SET_TENANT_ACCESS: u16 = 56;
 }
 
 /// Addresses, name and cores of a node.
@@ -365,6 +371,30 @@ pub enum Group0Command {
         /// Its name.
         name: String,
     },
+    /// The limits, switches and service user of tenant `tenant` (007 FR-030, FR-036). It names the
+    /// tenant by its number, never given twice, so a tenant dropped and created again with the same
+    /// name is never changed by an entry meant for the one before.
+    SetTenantLimits {
+        /// Its number.
+        tenant: u32,
+        /// Its limits, all of them.
+        limits: crate::tenants::TenantLimits,
+    },
+    /// Suspends or reactivates tenant `tenant` (007 FR-034).
+    SetTenantSuspended {
+        /// Its number.
+        tenant: u32,
+        /// Whether it is suspended.
+        suspended: bool,
+    },
+    /// The sources the users of tenant `tenant` may connect from, as CIDR blocks; empty is from
+    /// anywhere (007 FR-035).
+    SetTenantAccess {
+        /// Its number.
+        tenant: u32,
+        /// The CIDR blocks.
+        sources: Vec<String>,
+    },
 }
 
 /// A setting of [`Group0Command::SetSettings`].
@@ -471,6 +501,9 @@ impl Group0Command {
             Group0Command::SetSettings(_) => kind::SET_SETTINGS,
             Group0Command::CreateTenant { .. } => kind::CREATE_TENANT,
             Group0Command::DropTenant { .. } => kind::DROP_TENANT,
+            Group0Command::SetTenantLimits { .. } => kind::SET_TENANT_LIMITS,
+            Group0Command::SetTenantSuspended { .. } => kind::SET_TENANT_SUSPENDED,
+            Group0Command::SetTenantAccess { .. } => kind::SET_TENANT_ACCESS,
         }
     }
 
@@ -555,6 +588,19 @@ impl Group0Command {
             }
             Group0Command::CreateTenant { name } | Group0Command::DropTenant { name } => {
                 e.str(name);
+            }
+            Group0Command::SetTenantLimits { tenant, limits } => {
+                e.u32(*tenant);
+                limits.encode(&mut e);
+            }
+            Group0Command::SetTenantSuspended { tenant, suspended } => {
+                e.u32(*tenant).bool(*suspended);
+            }
+            Group0Command::SetTenantAccess { tenant, sources } => {
+                e.u32(*tenant).var(sources.len() as u64);
+                for s in sources {
+                    e.str(s);
+                }
             }
             Group0Command::SetSettings(changes) => {
                 e.var(changes.len() as u64);
@@ -687,6 +733,21 @@ impl Group0Command {
             }
             kind::CREATE_TENANT => Group0Command::CreateTenant { name: d.str()?.to_owned() },
             kind::DROP_TENANT => Group0Command::DropTenant { name: d.str()?.to_owned() },
+            kind::SET_TENANT_LIMITS => Group0Command::SetTenantLimits {
+                tenant: d.u32()?,
+                limits: crate::tenants::TenantLimits::decode(&mut d)?,
+            },
+            kind::SET_TENANT_SUSPENDED => {
+                Group0Command::SetTenantSuspended { tenant: d.u32()?, suspended: d.bool()? }
+            }
+            kind::SET_TENANT_ACCESS => {
+                let tenant = d.u32()?;
+                let mut sources = Vec::new();
+                for _ in 0..d.var()? {
+                    sources.push(d.str()?.to_owned());
+                }
+                Group0Command::SetTenantAccess { tenant, sources }
+            }
             kind::CATALOG => Group0Command::Catalog(CatalogCommand::decode(&mut d)?),
             kind::INDEXES => Group0Command::Indexes(IndexCommand::decode(&mut d)?),
             kind::SECURITY => Group0Command::Security(decode_ops(&mut d)?),

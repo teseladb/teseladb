@@ -75,7 +75,7 @@ impl Requests {
     }
 }
 
-const ERRORS: [Group0Error; 36] = [
+const ERRORS: [Group0Error; 38] = [
     Group0Error::AlreadyBootstrapped,
     Group0Error::NotBootstrapped,
     Group0Error::NameOrAddrTaken,
@@ -112,6 +112,8 @@ const ERRORS: [Group0Error; 36] = [
     Group0Error::InvalidTenantName,
     Group0Error::PrincipalExists(Principal::ApiKey),
     Group0Error::PrincipalNotFound(Principal::ApiKey),
+    Group0Error::InvalidOptions,
+    Group0Error::NotEveryNodeRunsIt,
 ];
 
 /// The code of an error in the snapshot: its position in [`ERRORS`].
@@ -153,6 +155,8 @@ fn error_code(e: Group0Error) -> u8 {
         Group0Error::InvalidTenantName => 33,
         Group0Error::PrincipalExists(Principal::ApiKey) => 34,
         Group0Error::PrincipalNotFound(Principal::ApiKey) => 35,
+        Group0Error::InvalidOptions => 36,
+        Group0Error::NotEveryNodeRunsIt => 37,
     }
 }
 

@@ -26,7 +26,10 @@ use crate::security::{Principal, Security, SecurityError};
 use crate::tenants::Tenants;
 
 /// Version of the snapshot format (20: when each range was last split or moved, 018 FR-017).
-pub const SNAPSHOT_VERSION: u8 = 20;
+pub const SNAPSHOT_VERSION: u8 = 21;
+/// The snapshot before the limits, the access list and the suspension of each tenant (05-11-2026),
+/// still read and written while some node runs it: its tenants have none (007 FR-030).
+pub const SNAPSHOT_VERSION_WITHOUT_TENANT_STATE: u8 = 20;
 /// The snapshot before the ranges' marks (03-11-2026), still read: every range as never moved.
 pub const SNAPSHOT_VERSION_WITHOUT_RANGE_MARKS: u8 = 19;
 /// The snapshot before the places of the indexes (02-11-2026), still read: each index at its
@@ -198,6 +201,11 @@ pub enum Group0Error {
     TenantNotFound,
     /// No tenant can have that name: empty, too long or with a zero byte.
     InvalidTenantName,
+    /// The default tenant has no limits, access list or suspension (007 FR-030).
+    InvalidOptions,
+    /// An entry some node that is not removed does not read yet: it waits until every node runs
+    /// the version that brought it (007 FR-027).
+    NotEveryNodeRunsIt,
 }
 
 /// Result of applying a Group 0 command.
@@ -566,6 +574,15 @@ impl Group0Sm {
             Group0Command::SetSettings(changes) => self.set_settings(changes),
             Group0Command::CreateTenant { name } => self.create_tenant(name),
             Group0Command::DropTenant { name } => self.drop_tenant(name),
+            Group0Command::SetTenantLimits { tenant, limits } => {
+                self.change_tenant(*tenant, |s| s.limits = limits.clone())
+            }
+            Group0Command::SetTenantSuspended { tenant, suspended } => {
+                self.change_tenant(*tenant, |s| s.suspended = *suspended)
+            }
+            Group0Command::SetTenantAccess { tenant, sources } => {
+                self.change_tenant(*tenant, |s| s.allowed_sources = sources.clone())
+            }
             Group0Command::CreateRange { start, end, replicas } => {
                 let (mut t, nodes) = self.table();
                 t.create_range(start, end, replicas, nodes).map(Group0Result::Range)
@@ -693,8 +710,9 @@ impl Group0Sm {
         self.ddl.record_applied(mark, changes, created);
     }
 
+    /// The snapshot in the lowest format a node that is not removed runs (007 FR-027).
     fn encode_snapshot(&self) -> Vec<u8> {
-        self.encode_snapshot_as(SNAPSHOT_VERSION)
+        self.encode_snapshot_as(crate::node_versions::snapshot_format(self))
     }
 
     /// The snapshot in format `version`: older ones leave out what they did not have (core changes,
@@ -758,7 +776,7 @@ impl Group0Sm {
             self.ddl.encode(&mut e);
         }
         if version > SNAPSHOT_VERSION_WITHOUT_TENANTS {
-            self.tenants.encode(&mut e);
+            self.tenants.encode_with(&mut e, version > SNAPSHOT_VERSION_WITHOUT_TENANT_STATE);
         }
         if version > SNAPSHOT_VERSION_WITHOUT_API_KEYS {
             self.security.encode_keys(&mut e);
@@ -841,7 +859,8 @@ impl Group0Sm {
             sm.ddl = Box::new(DdlLog::decode(&mut d)?);
         }
         if version > SNAPSHOT_VERSION_WITHOUT_TENANTS {
-            sm.tenants = Box::new(Tenants::decode(&mut d)?);
+            let state = version > SNAPSHOT_VERSION_WITHOUT_TENANT_STATE;
+            sm.tenants = Box::new(Tenants::decode_with(&mut d, state)?);
         }
         if version > SNAPSHOT_VERSION_WITHOUT_API_KEYS {
             sm.security.decode_keys(&mut d)?;
