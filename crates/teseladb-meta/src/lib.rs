@@ -31,5 +31,6 @@ pub mod meta2;
 pub mod node_versions;
 pub mod request;
 pub mod security;
+pub mod tenant_quota;
 pub mod tenants;
 pub mod zones;

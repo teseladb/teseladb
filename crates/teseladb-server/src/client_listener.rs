@@ -1322,7 +1322,7 @@ fn suspended(conn: &Connection, states: &crate::routes::TenantStates) -> bool {
     conn.auth
         .user
         .as_ref()
-        .is_some_and(|u| u.tenant != 0 && states.get(&u.tenant).is_some_and(|s| s.suspended))
+        .is_some_and(|u| u.tenant != 0 && states.get(&u.tenant).is_some_and(|s| !s.admits_users()))
 }
 
 impl Worker {
@@ -1345,10 +1345,16 @@ impl Worker {
         // The cursors and change streams of the tenants suspended since the last look go too;
         // each worker does it, and a second time kills nothing.
         let before = |id: &u32| {
-            self.tenants_seen.as_ref().and_then(|seen| seen.get(id)).is_some_and(|s| s.suspended)
+            self.tenants_seen
+                .as_ref()
+                .and_then(|seen| seen.get(id))
+                .is_some_and(|s| !s.admits_users())
         };
-        let held: Vec<u32> =
-            states.iter().filter(|(id, s)| s.suspended && !before(id)).map(|(id, _)| *id).collect();
+        let held: Vec<u32> = states
+            .iter()
+            .filter(|(id, s)| !s.admits_users() && !before(id))
+            .map(|(id, _)| *id)
+            .collect();
         if !held.is_empty() {
             let tenant_of = |ns: &str| {
                 let db = ns.split_once('.').map_or(ns, |(db, _)| db);

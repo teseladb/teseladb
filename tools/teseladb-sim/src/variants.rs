@@ -129,6 +129,9 @@ variants!(
     // workload's next group differs from the reference evaluator's.
     ("partial_double_count", "queries-oracle", Default, 1000),
     ("plain_write_fails_on_intent", "plain_writes", Default, 1000),
+    // A node that lets every write of a tenant through, whatever its quota (007 T059): the
+    // `tenants` workload fills a tenant past its quota by more than a write per node.
+    ("quota_ignored", "tenant_limits", Default, 200),
     // A batch of ReadIndex reads answered as soon as its round leaves (005 FR-009): a leader cut
     // off from its quorum serves a read at an index below a commit the new leader already made.
     ("read_batch_without_round", "raft_safety", Default, 1000),
@@ -194,6 +197,9 @@ variants!(
     // split again where a merge undid a cut, seed 1 of `changestream` first reads a value committed
     // above its mark (`intents`; measured 04-11-2026 on lane1 89c89a1).
     ("stale_lease_read", "intents", Default, 1000),
+    // A tenant whose suspension is forgotten (007 T059): `tenants` serves it on a node that
+    // applied the suspension.
+    ("suspend_ignored", "tenant_limits", Default, 200),
     // The TTL monitor's cutoff adds the index's seconds instead of taking them away: the `indexes`
     // workload's delete takes a document that has not expired.
     ("ttl_deletes_live", "ttl", Default, 1000),

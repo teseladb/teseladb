@@ -1,6 +1,6 @@
 //! Scenarios (contract `bench-cli.md` of 002): 001 registers `raftlog`, its `raftlog-recover`
 //! variant and the copied `deflate`; 003 adds `bson` and `keys`; 004 adds `lsm` and `lsm-compression`; 005 adds `write`, `read` and
-//! `failover`; 006 adds `wire` and `crud`; 007 adds `follower-read`, `group0-limits`, `split`, `add-node` and `rebalance`; 008 adds `txn`, `txn-readers` and `contention`; 013 adds
+//! `failover`; 006 adds `wire` and `crud`; 007 adds `follower-read`, `group0-limits`, `split`, `add-node`, `rebalance` and `noisy-tenant`; 008 adds `txn`, `txn-readers` and `contention`; 013 adds
 //! `tls-handshake` and `scram`; 010 adds `aggregate`, `sort` and `group-large`; 015 adds
 //! `timeseries`; 014 adds `changestream-lag`; 016 adds `js`; 017 adds `fle-query`; 012 adds
 //! `cores-curve` and `disk-usage`; 019 adds `rest`; every specification adds its own.
@@ -21,6 +21,7 @@ pub mod js;
 pub mod keys;
 pub mod lsm;
 pub mod lsm_compression;
+pub mod noisy_tenant;
 pub mod query;
 pub mod raftlog;
 pub mod read;
@@ -178,6 +179,7 @@ pub fn run(args: &Args) -> Result<Report, String> {
         "failover" => failover::run(args),
         "follower-read" => follower_read::run(args),
         "group0-limits" => group0_limits::run(args),
+        "noisy-tenant" => noisy_tenant::run(args),
         "split" => cluster::split(args),
         "add-node" => cluster::add_node(args),
         "rebalance" => cluster::rebalance(args),
@@ -211,7 +213,7 @@ pub fn run(args: &Args) -> Result<Report, String> {
         }
         other => Err(format!(
             "unknown scenario: {other} (available: raftlog, raftlog-recover, deflate, bson, js, keys, lsm, lsm-sustained, lsm-compression, \
-             write, read, failover, follower-read, group0-limits, split, add-node, rebalance, reference, wire, crud, rest, index-write, index-read, index-build-load, aggregate, sort, group-large, fle-query, txn, txn-readers, contention, tls-handshake, scram, timeseries, changestream-lag, reshard, search-term, search-multi, search-phrase, search-fuzzy, search-visibility, vector-search (vector), cores-curve, disk-usage, ycsb-a … ycsb-f)"
+             write, read, failover, follower-read, group0-limits, noisy-tenant, split, add-node, rebalance, reference, wire, crud, rest, index-write, index-read, index-build-load, aggregate, sort, group-large, fle-query, txn, txn-readers, contention, tls-handshake, scram, timeseries, changestream-lag, reshard, search-term, search-multi, search-phrase, search-fuzzy, search-visibility, vector-search (vector), cores-curve, disk-usage, ycsb-a … ycsb-f)"
         )),
     }
 }

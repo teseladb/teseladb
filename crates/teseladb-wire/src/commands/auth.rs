@@ -199,7 +199,7 @@ fn admit<B: Backend + ?Sized>(
     // A user of a suspended tenant does not sign in (007 FR-034), nor one from outside the
     // tenant's access list (FR-035), which adds to the user's own restrictions.
     if let Some(t) = (tenant != 0).then(|| backend.tenant_state(tenant)).flatten() {
-        if t.suspended {
+        if !t.admits_users() {
             return Err(CommandError::new(AUTHENTICATION_FAILED, TENANT_SUSPENDED));
         }
         if !restrictions::sources_allow(&t.allowed_sources, state.client_addr.as_deref()) {

@@ -3,7 +3,8 @@
 //! document ranges, 005), `multirange`, `splits`, `relocate` and `meta2` (007) and `txn-bank` and `txn-append` (transactions
 //! across two ranges, 008), `indexes` (documents and their index entries in two ranges, 009),
 //! `special-collections` (a capped collection, 015), `search` (search indexes over splitting
-//! ranges, 011) and `authz-fence` (the authorization fence over Group 0, 013).
+//! ranges, 011), `authz-fence` (the authorization fence over Group 0, 013) and `tenants` (the
+//! tenants' quotas and suspension, 007).
 
 pub mod authz_fence;
 pub mod changestream;
@@ -22,6 +23,7 @@ pub mod search;
 pub mod special_collections;
 pub mod splits;
 pub mod storage;
+pub mod tenants;
 pub mod txn;
 pub mod txn_append;
 pub mod txn_bank;

@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use teseladb_meta::tenant_quota::{NodeReading, QuotaRefusal, QuotaWindow, Reading};
 use teseladb_meta::tenants::TenantLimits;
 
 /// The longest a command waits for its token, its slot or its bytes before it fails (FR-032).
@@ -61,11 +62,11 @@ pub struct NodeUsage {
     pub last_auth_ms: Option<u64>,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct Tenant {
     usage: NodeUsage,
     /// The bytes this node let the tenant write since the last read of its data (FR-031).
-    written: u64,
+    window: QuotaWindow,
     running: u32,
     ops: Bucket,
     bytes: Bucket,
@@ -88,6 +89,10 @@ pub struct TenantLimiter {
     tenants: Mutex<BTreeMap<u32, Tenant>>,
     /// The start of the buckets' time on this node.
     epoch: std::sync::OnceLock<std::time::Instant>,
+    /// The node's last readings of the tenants' data (FR-031).
+    readings: Mutex<Vec<NodeReading>>,
+    /// The first window this node counts whole: the one after the window it started in.
+    since: std::sync::OnceLock<u64>,
 }
 
 impl TenantLimiter {
@@ -157,24 +162,39 @@ impl TenantLimiter {
         })
     }
 
-    /// Lets `tenant` write `bytes` more on this node if what it wrote since the last read of its
-    /// data stays within `share`; `false` refuses the write.
-    pub fn write_within(&self, tenant: u32, bytes: u64, share: u64) -> bool {
-        self.with(tenant, |t| {
-            if t.written.saturating_add(bytes) > share {
-                return false;
-            }
-            t.written += bytes;
-            true
-        })
+    /// This node starts counting at wall-clock `now_ms`: what it let through before is unknown,
+    /// so only the windows after this one count whole.
+    pub fn start_counting(&self, now_ms: u64) {
+        let _ = self.since.set(teseladb_meta::tenant_quota::window_of(now_ms) + 1);
     }
 
-    /// The tenants' data was read again: what each wrote starts from zero.
-    pub fn reset_written(&self) {
-        let mut g = self.tenants.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        for t in g.values_mut() {
-            t.written = 0;
-        }
+    /// Keeps `r` among the node's last three readings: a write goes by those of the two epochs
+    /// before its own.
+    pub fn record(&self, r: NodeReading) {
+        let mut g = self.readings.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        g.retain(|x| x.epoch != r.epoch);
+        g.push(r);
+        g.sort_by_key(|x| x.epoch);
+        let extra = g.len().saturating_sub(KEPT_READINGS);
+        g.drain(..extra);
+    }
+
+    /// Lets `tenant` write `bytes` more on this node at wall-clock `now_ms` if they fit in its
+    /// part of quota `limit` among `nodes` nodes, by the node's readings (FR-031).
+    pub fn admit_write(
+        &self,
+        tenant: u32,
+        limit: u64,
+        nodes: usize,
+        now_ms: u64,
+        bytes: u64,
+    ) -> Result<(), QuotaRefusal> {
+        let readings: Vec<Reading> = {
+            let g = self.readings.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            g.iter().map(|r| r.of(tenant)).collect()
+        };
+        let since = self.since.get().copied().unwrap_or(0);
+        self.with(tenant, |t| t.window.admit(limit, nodes, since, now_ms, &readings, bytes))
     }
 
     /// Counts `wait` as time `tenant` was held back.
@@ -228,9 +248,6 @@ pub const SYSTEM_OVERLOADED: &str = "SystemOverloadedError";
 /// See [`SYSTEM_OVERLOADED`].
 pub const RETRYABLE: &str = "RetryableError";
 
-/// How often each node reads again the data each tenant uses (FR-031).
-pub const USAGE_EVERY: Duration = Duration::from_secs(5);
-
 /// The first key of the data of `tenant`: documents and index entries (007 FR-012).
 pub fn tenant_start(tenant: u32) -> Vec<u8> {
     let mut k = vec![teseladb_keys::space::DATA];
@@ -278,35 +295,56 @@ pub fn storage_of<B: teseladb_wire::commands::Backend + ?Sized>(
 
 /// Reads again the data each tenant uses and gives every tenant a new margin on this node. A
 /// tenant whose read fails (no leader for a range) keeps its last value.
-pub fn read_usage(backend: &mut crate::backend::ServerBackend) {
+pub fn read_usage(backend: &mut crate::backend::ServerBackend, epoch: u64) {
     let tenants: Vec<u32> = backend.routes().tenants().keys().copied().collect();
-    if tenants.is_empty() {
-        return;
-    }
     let mut usage = (*backend.routes().usage()).clone();
+    let mut reading = NodeReading { epoch, ..NodeReading::default() };
     for t in tenants {
         if let Ok(bytes) = storage_of(backend, t) {
             usage.insert(t, bytes);
+            reading.used.insert(t, bytes);
         }
         teseladb_wire::commands::Backend::end_operation(backend);
     }
     backend.routes().publish_usage(std::sync::Arc::new(usage));
-    backend.routes().limiter().reset_written();
+    backend.routes().limiter().record(reading);
 }
 
-/// The thread of each node that reads the tenants' data every [`USAGE_EVERY`] until `stop`: on its
-/// own, so that no other periodic task of the node holds it back.
+/// The latest epoch whose reading may start at wall-clock `now_ms`, and how long until the next
+/// one may.
+pub fn reading_due(now_ms: u64) -> (u64, Duration) {
+    use teseladb_meta::tenant_quota::{EPOCH_MS, GUARD_MS, reading_at};
+    let epoch = now_ms.saturating_sub(GUARD_MS) / EPOCH_MS;
+    (epoch, Duration::from_millis(reading_at(epoch + 1).saturating_sub(now_ms)))
+}
+
+/// The thread of each node that reads the tenants' data once in each epoch, as soon as it may
+/// start, until `stop` (FR-031): on its own, so that no other periodic task of the node holds it
+/// back. A reading that starts late still counts for its epoch.
 pub fn spawn_reader(
     mut backend: crate::backend::ServerBackend,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
+    backend.routes().limiter().start_counting(crate::clock::wall_ms());
     std::thread::Builder::new().name("tenant-usage".into()).spawn(move || {
+        let mut done = None;
         while !stop.load(std::sync::atomic::Ordering::Acquire) {
-            read_usage(&mut backend);
-            std::thread::park_timeout(USAGE_EVERY);
+            let (epoch, wait) = reading_due(crate::clock::wall_ms());
+            if done != Some(epoch) {
+                read_usage(&mut backend, epoch);
+                done = Some(epoch);
+                continue;
+            }
+            std::thread::park_timeout(wait.min(STOP_POLL));
         }
     })
 }
+
+/// The readings a node keeps: those of the epoch it is in and the two before.
+const KEPT_READINGS: usize = 3;
+
+/// How often the reader looks at its stop flag while it waits for the next epoch.
+const STOP_POLL: Duration = Duration::from_millis(250);
 
 /// A tenant's name as the value of a Prometheus label: backslash, quote and line break escaped.
 pub fn label(name: &str) -> String {
@@ -396,25 +434,37 @@ pub fn over_quota(name: &str, used: u64, limit: u64) -> teseladb_wire::error::Co
     )
 }
 
-/// Whether a write of `bytes` of `tenant` fits in its storage quota on this node: the data it
-/// uses below the limit, and what this node let it write since the last read within its part of
-/// the margin, `(limit - used) / nodes` (FR-031).
+/// Whether a write of `bytes` of `tenant` fits in its storage quota on this node (FR-031): the
+/// data it uses below the limit, and what this node let it write within its part of the margin
+/// of its last readings ([`teseladb_meta::tenant_quota`]).
 fn check_quota(
     routes: &crate::routes::SharedRoutes,
     tenant: u32,
     limit: u64,
     bytes: u64,
 ) -> Result<(), teseladb_wire::error::CommandError> {
-    let used = routes.usage().get(&tenant).copied().unwrap_or(0);
     let name = || routes.tenant_name(tenant).unwrap_or_else(|| tenant.to_string());
-    if used >= limit {
-        return Err(over_quota(&name(), used, limit));
+    let now = crate::clock::wall_ms();
+    match routes.limiter().admit_write(tenant, limit, routes.nodes(), now, bytes) {
+        Ok(()) => Ok(()),
+        Err(QuotaRefusal::Full(used)) => Err(over_quota(&name(), used, limit)),
+        Err(QuotaRefusal::ShareSpent(_)) => {
+            let used = routes.usage().get(&tenant).copied().unwrap_or(0);
+            Err(over_quota(&name(), used, limit))
+        }
+        Err(QuotaRefusal::Unread) => Err(unread(&name())),
     }
-    let share = (limit - used) / routes.nodes() as u64;
-    if !routes.limiter().write_within(tenant, bytes, share) {
-        return Err(over_quota(&name(), used, limit));
-    }
-    Ok(())
+}
+
+/// The error of a write of a tenant whose data this node has not read since it started: 462
+/// with the labels the drivers retry, since the next reading lets it through.
+pub fn unread(name: &str) -> teseladb_wire::error::CommandError {
+    teseladb_wire::error::CommandError::new(
+        teseladb_wire::error::INGRESS_REQUEST_RATE_LIMIT_EXCEEDED,
+        format!("this node has not read the data of tenant {name} yet: try again"),
+    )
+    .with_label(SYSTEM_OVERLOADED)
+    .with_label(RETRYABLE)
 }
 
 /// Lets a command of `user` of `tenant` that writes `bytes` begin on this node: `None` when no

@@ -8,7 +8,7 @@ use crate::workloads::{
     lsm_ingest::LsmIngest, meta2::Meta2Workload, multirange::MultiRangeWorkload, queries::Queries,
     range_docs::RangeDocsWorkload, relocate::RelocateWorkload, reshard::Reshard,
     special_collections::SpecialCollections, splits::SplitsWorkload, storage::StorageWorkload,
-    txn_append::Append, txn_bank::Bank, zones::ZonesWorkload,
+    tenants::Tenants, txn_append::Append, txn_bank::Bank, zones::ZonesWorkload,
 };
 use crate::world::World;
 
@@ -64,6 +64,7 @@ impl Registry {
         r.register_workload("vector", SplitsWorkload::vectors).expect("a new name");
         r.register_workload("zones", ZonesWorkload::boxed).expect("a new name");
         r.register_workload("authz-fence", AuthzFence::boxed).expect("a new name");
+        r.register_workload("tenants", Tenants::boxed).expect("a new name");
         r
     }
 

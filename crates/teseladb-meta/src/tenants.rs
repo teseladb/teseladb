@@ -174,6 +174,13 @@ pub struct TenantState {
 }
 
 impl TenantState {
+    /// Whether the tenant's users are served: signed in, and their connections kept open. A
+    /// suspended tenant has none of either (FR-034).
+    pub fn admits_users(&self) -> bool {
+        // The faulty variant forgets the suspension (`tenants`, 007 T059).
+        cfg!(teseladb_bug = "suspend_ignored") || !self.suspended
+    }
+
     fn encode(&self, e: &mut Encoder) {
         self.limits.encode(e);
         e.bool(self.suspended).var(self.allowed_sources.len() as u64);
